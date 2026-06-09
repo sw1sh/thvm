@@ -1041,36 +1041,47 @@ atpGnnBcastBias[bias_TTerm, bs_, p_, d_] :=
    self-loops, edge types merged), Mask + NNodes for the masked-mean
    pool, Y (B x 2 one-hot).  Reads the TAtpCpGraph schema (NodeFeatures
    matrix, 0-indexed Edges, NNodes). *)
-atpGnnTensors[dataset_Association] := Module[{
+atpGnnTensors[dataset_Association] := atpGnnTensors[dataset, Infinity]
+
+(* nCap bounds the padded node dim: n = Min[nCap, max NNodes], and any
+   graph with more than n nodes is truncated to its first n (features +
+   self-loops capped, out-of-range edges dropped).  nCap = Infinity (the
+   1-arg form) is byte-identical to the uncapped batch -- every graph has
+   NNodes <= n, so no truncation fires.  Minibatched TAtpTrainGnn passes a
+   finite cap so one large graph can't inflate the whole padded batch and
+   memory stays O(B * nCap^2). *)
+atpGnnTensors[dataset_Association, nCap_] := Module[{
     graphs = dataset["Graphs"], labels = dataset["Labels"],
-    b, n, f = 6, xArr, aArr, maskArr, nNodesArr, yArr
+    b, n, f = 6, eff, xArr, aArr, maskArr, nNodesArr, yArr
 },
     b = Length[graphs];
     If[ b === 0, Return[$Failed]];
-    n = Max[#["NNodes"] & /@ graphs];
+    n   = Min[nCap, Max[#["NNodes"] & /@ graphs]];
+    eff = (Min[#["NNodes"], n] &) /@ graphs;
     xArr = Table[
-        With[{g = graphs[[bi]], feats = graphs[[bi]]["NodeFeatures"]},
+        With[{feats = graphs[[bi]]["NodeFeatures"]},
             Table[
-                If[ ni <= g["NNodes"], feats[[ni]], ConstantArray[0., f]],
+                If[ ni <= eff[[bi]], feats[[ni]], ConstantArray[0., f]],
                 {ni, n}]],
         {bi, b}];
     aArr = Table[
-        Module[{g = graphs[[bi]], adj, rowSums, edge},
+        Module[{adj, rowSums, edge},
             adj = ConstantArray[0., {n, n}];
             Do[ With[{src = edge[[1]] + 1, dst = edge[[2]] + 1},
-                    adj[[src, dst]] = 1.;
-                    adj[[dst, src]] = 1.],
-                {edge, g["Edges"]}];
-            Do[ adj[[i, i]] = 1., {i, g["NNodes"]}];
+                    If[ src <= n && dst <= n,
+                        adj[[src, dst]] = 1.;
+                        adj[[dst, src]] = 1.]],
+                {edge, graphs[[bi]]["Edges"]}];
+            Do[ adj[[i, i]] = 1., {i, eff[[bi]]}];
             rowSums = Total /@ adj;
             Table[
                 If[ rowSums[[i]] > 0., adj[[i]] / rowSums[[i]], adj[[i]]],
                 {i, n}]],
         {bi, b}];
     maskArr = Table[
-        Table[If[ ni <= graphs[[bi]]["NNodes"], 1., 0.], {ni, n}],
+        Table[If[ ni <= eff[[bi]], 1., 0.], {ni, n}],
         {bi, b}];
-    nNodesArr = N[#["NNodes"] & /@ graphs];
+    nNodesArr = N[eff];
     yArr = (If[ # == 1, {0., 1.}, {1., 0.}] &) /@ labels;
     <|
         "X" -> xArr, "A" -> aArr, "Mask" -> maskArr,
@@ -1109,51 +1120,97 @@ atpGnnForwardLogits[xT_, aT_, maskRowT_, nNodesT_,
    under-propagates and the rank AUC stays near chance; H = 32 / R = 3
    reliably lifts the train AUC.  See docs/plans/atp_tier2_gnn.md. *)
 Options[TAtpTrainGnn] = {"Hidden" -> 32, "Rounds" -> 3,
-    MaxTrainingRounds -> 300, "LearningRate" -> 0.01}
+    MaxTrainingRounds -> 300, "LearningRate" -> 0.01,
+    "BatchSize" -> 128, "NodeCap" -> 64}
 
+(* Minibatched trainer (issue #8).  The earlier form padded the WHOLE
+   dataset into one (n_graphs, NMax, NMax) batch and ran every Adam step
+   over it, so peak memory was O(n_graphs * NMax^2) and a single step over
+   thousands of graphs was slow + destabilising.  This version keeps the
+   params + Adam state (m / v / b1pow / b2pow) persistent and runs each
+   Adam step over a minibatch of "BatchSize" graphs (reshuffled each
+   epoch), capping the node dim at "NodeCap" (64, matching the in-engine
+   inference scorer).  Peak memory is O(BatchSize * NodeCap^2): only one
+   minibatch's forward + backward is realized at a time.  Final scores for
+   the train-AUC are read back in the same bounded chunks.  Uses the
+   b1pow/b2pow TAdam form so bias correction tracks the live step. *)
 TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
-    bt, b, n, f, hH, rR, lrVal, rounds,
-    xT, aT, maskRowT, nNodesT, yT,
+    graphs = dataset["Graphs"], labels = dataset["Labels"], f = 6,
+    hH, rR, lrVal, rounds, bs, nCap, nMax, nG,
     w1s, wss, bhs, wout, bout, params, ms, vs,
-    logits, loss, grads, lr, name,
-    lossStart, lossEnd, p, scores, auc, model
+    fwd, lossStart, lossEnd, scores, auc, model
 },
-    bt = atpGnnTensors[dataset];
-    If[ bt === $Failed, Return[$Failed]];
-    b = bt["B"];  n = bt["N"];  f = bt["F"];
+    nG = Length[graphs];
+    If[ nG === 0, Return[$Failed]];
     hH = OptionValue["Hidden"];  rR = OptionValue["Rounds"];
-    lrVal = N @ OptionValue["LearningRate"];
+    lrVal  = N @ OptionValue["LearningRate"];
     rounds = OptionValue[MaxTrainingRounds];
-    xT       = TTensorCreate @ NumericArray[bt["X"], "Real32"];
-    aT       = TTensorCreate @ NumericArray[bt["A"], "Real32"];
-    maskRowT = TTensorCreate @ NumericArray[
-        ArrayReshape[bt["Mask"], {b, 1, n}], "Real32"];
-    nNodesT  = TTensorCreate @ NumericArray[
-        ArrayReshape[bt["NNodes"], {b, 1, 1}], "Real32"];
-    yT       = TTensorCreate @ NumericArray[bt["Y"], "Real32"];
-    (* per-round params: A.H branch (W1), self branch (Ws), bias (b);
-       lastDim is F on round 1, H thereafter. *)
+    bs     = Min[OptionValue["BatchSize"], nG];
+    nCap   = OptionValue["NodeCap"];
+    nMax   = Min[nCap, Max[#["NNodes"] & /@ graphs]];
+    (* persistent params, updated in place by every step *)
     w1s = Table[TGlorot[{If[ r == 1, f, hH], hH}], {r, rR}];
     wss = Table[TGlorot[{If[ r == 1, f, hH], hH}], {r, rR}];
     bhs = Table[TZeros[{hH}], {r, rR}];
     wout = TGlorot[{hH, 2}];
     bout = TZeros[{2}];
     params = Join[w1s, wss, bhs, {wout, bout}];
-    logits = atpGnnForwardLogits[xT, aT, maskRowT, nNodesT,
-        w1s, wss, bhs, wout, bout, b, n, f, hH, rR];
-    loss   = TCategoricalCrossEntropy[logits, yT];
-    lossStart = First[Normal @ TRealize @ loss];
-    grads = TGrad[loss, params];
     ms = (TZeros[TTensorShape[#]] &) /@ params;
     vs = (TZeros[TTensorShape[#]] &) /@ params;
-    lr = TUOpConst[lrVal];
-    name = THVMLink`Private`freshTrainName[];
-    THVMLink`Private`buildLoopAdam[params, grads, ms, vs, lr, name];
-    TWnf @ TApp[TRef[name], TNum[rounds]];
-    lossEnd = First[Normal @ TRealize @ loss];
-    p = Normal @ TRealize @ logits;
-    scores = p[[All, 2]] - p[[All, 1]];
-    auc = atpScorerAuc[scores, dataset["Labels"]];
+    (* {logits, yT} for the graphs at indices `ix`, capped at nCap and
+       padded to that slice's own node count -- a fresh forward per call
+       so only this slice is ever live (bounded O(|ix| * nCap^2)). *)
+    fwd[ix_] := Module[{bt = atpGnnTensors[
+            <|"Graphs" -> graphs[[ix]], "Labels" -> labels[[ix]]|>, nCap]},
+        {atpGnnForwardLogits[
+            TTensorCreate @ NumericArray[bt["X"], "Real32"],
+            TTensorCreate @ NumericArray[bt["A"], "Real32"],
+            TTensorCreate @ NumericArray[ArrayReshape[bt["Mask"], {bt["B"], 1, bt["N"]}], "Real32"],
+            TTensorCreate @ NumericArray[ArrayReshape[bt["NNodes"], {bt["B"], 1, 1}], "Real32"],
+            w1s, wss, bhs, wout, bout, bt["B"], bt["N"], f, hH, rR],
+         TTensorCreate @ NumericArray[bt["Y"], "Real32"]}];
+    If[ nG <= bs,
+        (* Whole dataset fits one batch (memory already bounded): keep the
+           fast path -- build the batch once and run `rounds` Adam steps in
+           a C-side loop (no per-step re-materialize). *)
+        Module[{lg = fwd[Range[nG]], logits, yT, loss, grads, lr, name},
+            logits = lg[[1]];  yT = lg[[2]];
+            loss = TCategoricalCrossEntropy[logits, yT];
+            lossStart = First[Normal @ TRealize @ loss];
+            grads = TGrad[loss, params];
+            lr = TUOpConst[lrVal];
+            name = THVMLink`Private`freshTrainName[];
+            THVMLink`Private`buildLoopAdam[params, grads, ms, vs, lr, name];
+            TWnf @ TApp[TRef[name], TNum[rounds]];
+            lossEnd = First[Normal @ TRealize @ loss];
+            scores = With[{p = Normal @ TRealize @ logits}, p[[All, 2]] - p[[All, 1]]]
+        ]
+        ,
+        (* Bigger than one batch: minibatch with the b1pow/b2pow TAdam form
+           (issue #8).  Persistent params + Adam state; one minibatch's
+           forward+backward realized per step; reshuffle each epoch; scores
+           read back in the same bounded chunks. *)
+        Module[{b1pow = TOnes[{1}], b2pow = TOnes[{1}], firstBatch, idx, done},
+            firstBatch = Take[Range[nG], bs];
+            lossStart = First[Normal @ TRealize @ (TCategoricalCrossEntropy @@ fwd[firstBatch])];
+            done = 0;
+            While[ done < rounds,
+                idx = RandomSample[Range[nG]];
+                Do[
+                    If[ done >= rounds, Break[]];
+                    With[{lg = fwd[idx[[bStart ;; Min[bStart + bs - 1, nG]]]]},
+                        TAdam[TCategoricalCrossEntropy[lg[[1]], lg[[2]]], params,
+                            ms, vs, b1pow, b2pow, "lr" -> lrVal]];
+                    done += 1,
+                    {bStart, 1, nG, bs}]];
+            lossEnd = First[Normal @ TRealize @ (TCategoricalCrossEntropy @@ fwd[firstBatch])];
+            scores = Join @@ Table[
+                With[{p = Normal @ TRealize @ First @ fwd[Range[bStart, Min[bStart + bs - 1, nG]]]},
+                    p[[All, 2]] - p[[All, 1]]],
+                {bStart, 1, nG, bs}]
+        ]
+    ];
+    auc = atpScorerAuc[scores, labels];
     model = <|
         "Kind" -> "GNN",
         "W1" -> (Normal @ TRealize @ # & /@ w1s),
@@ -1161,15 +1218,15 @@ TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
         "Bh" -> (Normal @ TRealize @ # & /@ bhs),
         "Wout" -> (Normal @ TRealize @ wout),
         "Bout" -> (Normal @ TRealize @ bout),
-        "NMax" -> n, "Hidden" -> hH, "Rounds" -> rR
+        "NMax" -> nMax, "Hidden" -> hH, "Rounds" -> rR
     |>;
     <|
         "Model" -> model,
         "TrainAUC" -> auc,
         "LossStart" -> lossStart,
         "LossEnd" -> lossEnd,
-        "NPos" -> Total[dataset["Labels"]],
-        "NNeg" -> (Length[dataset["Labels"]] - Total[dataset["Labels"]])
+        "NPos" -> Total[labels],
+        "NNeg" -> (nG - Total[labels])
     |>
 ]
 
