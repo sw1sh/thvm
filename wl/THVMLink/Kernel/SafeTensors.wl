@@ -26,13 +26,17 @@
 
 BeginPackage["THVMLink`"];
 
-TSafeTensorLoad::usage = "TSafeTensorLoad[path] loads a .safetensors file and returns an Association `name -> TTerm`, where each tensor is a LAZY mmap-backed disk view (TTensorMMap) into the file at its data offset, reshaped to the header's shape.  The bytes page in on demand (tinygrad's DISK device); a CPU op consumes them directly, a realize on a non-CPU backend uploads via UOP_COPY.  Ported from tinygrad/nn/state.py safe_load.";
+GeneralUtilities`SetUsage[TSafeTensorLoad, "TSafeTensorLoad[path$] loads a .safetensors file and returns an Association of name$ to TTerm.
+Each tensor is a lazy mmap-backed disk view (TTensorMMap) into the file at its data offset, reshaped to the header's shape; bytes page in on demand, a CPU op consumes them directly and a realize on another backend uploads them."];
 
-TSafeTensorSave::usage = "TSafeTensorSave[assoc, path] saves an Association `name -> TTerm` to `path` as a valid .safetensors file: an 8-byte little-endian header length, a space-padded JSON header (dtype / shape / data_offsets per tensor), then each tensor's little-endian bytes.  Each TTerm is realized + read once.  TSafeTensorSave[assoc, path, metadata] additionally writes a string-valued `__metadata__` Association into the header (tinygrad safe_save's metadata).  Returns `path`.  Ported from tinygrad/nn/state.py safe_save.";
+GeneralUtilities`SetUsage[TSafeTensorSave, "TSafeTensorSave[assoc$, path$] writes assoc$ (name$ to TTerm) to path$ as a .safetensors file and returns path$.
+TSafeTensorSave[assoc$, path$, metadata$] also writes a string-valued __metadata__ Association into the header.
+The file is an 8-byte little-endian header length, a space-padded JSON header (dtype, shape, data_offsets per tensor), then each tensor's little-endian bytes; each TTerm is realized and read once."];
 
-TSafeTensorLoadMetadata::usage = "TSafeTensorLoadMetadata[path] returns the `__metadata__` Association of a .safetensors file (an empty Association if absent), without loading any tensors.  Ported from tinygrad/nn/state.py safe_load_metadata.";
+GeneralUtilities`SetUsage[TSafeTensorLoadMetadata, "TSafeTensorLoadMetadata[path$] returns the __metadata__ Association of a .safetensors file (an empty Association if absent), without loading any tensors."];
 
-TTensorMMap::usage = "TTensorMMap[path, byteOffset, nbytes, dtype, shape] maps the file region [byteOffset, byteOffset + nbytes) of `path` read-only and wraps it as a CPU TTerm of the given `dtype` (a thvm dtype string like \"f32\") and integer `shape` list.  This is tinygrad's DISK device: a lazy, mmap-backed, zero-copy tensor view; the bytes page in on demand and the mapping is munmap'd when the tensor is released.  Used by TSafeTensorLoad.";
+GeneralUtilities`SetUsage[TTensorMMap, "TTensorMMap[path$, byteOffset$, nbytes$, dtype$, shape$] maps the file region [byteOffset$, byteOffset$ + nbytes$) of path$ read-only and wraps it as a CPU TTerm of the given dtype$ (a thvm dtype string like \"f32\") and integer shape$ list.
+This is a lazy, mmap-backed, zero-copy disk-tensor view: bytes page in on demand and the mapping is released with the tensor."];
 
 Begin["`Private`"];
 

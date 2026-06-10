@@ -25,15 +25,9 @@
 
 BeginPackage["THVMLink`ATP`"]
 
-TTweeProof::usage =
-    "TTweeProof[\"path/to/file.p\", opts] runs the local Twee 2.x " <>
-    "binary on a TPTP problem file (using --tstp --quiet) and returns " <>
-    "a normalized result Association with keys Status, Strategy, " <>
-    "Seconds, ProofLength, Lemmas, Axioms, RawProof.  Two-arg form " <>
-    "TTweeProof[\"Theory\", \"thm\"] resolves the TPTP file via " <>
-    "tools/baselines/vampire_tptp/{Theory}__{thm}.p.  Options: " <>
-    "TimeConstraint (default 30), Binary (default Automatic).  Twee " <>
-    "does NOT emit per-step inference DAG; for that use TVampireProof."
+GeneralUtilities`SetUsage[TTweeProof, "TTweeProof[file$] runs the local Twee 2.x binary on a TPTP problem file$ (with --tstp --quiet) and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Lemmas, Axioms, RawProof.
+TTweeProof[\"Theory\", \"thm\"] resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.
+Options: TimeConstraint, Binary. Twee emits no per-step inference DAG; for that use TVampireProof."]
 
 TTweeProof::notwee =
     "Twee CLI not found.  Install via `cabal install twee`."

@@ -10,20 +10,29 @@
 
 BeginPackage["THVMLink`"];
 
-TNum::usage = "TNum[i] returns a TTerm wrapping a TAG_NUM atom holding the integer `i` as DT_I32.  TNum[i, dtype] picks the dtype (\"i32\" or \"f32\"); for f32 the value is bit-reinterpreted (use TUOpConst for arithmetic floats).";
-TOp2::usage = "TOp2[opcode, x, y] returns a TAG_OP2 term computing `opcode(x, y)` once both operands reduce to TAG_NUM.  Opcodes: \"+\", \"-\", \"*\", \"==\", \"<\".";
-TMatNum::usage = "TMatNum[matchVal, handler, fallback] returns a TAG_MAT atom that dispatches by tag of its applied arg: TAG_NUM with value matchVal -> `handler`; TAG_CTR with ext matchVal -> destructure (handler applied to each CTR child via APP-chain, mirroring HVM4's APP-MAT-CTR-MAT); anything else -> APP[fallback, arg].  TMatCtr is a sugar alias for the CTR-destructuring use case (same primitive).";
+GeneralUtilities`SetUsage[TNum, "TNum[i$] returns a TTerm wrapping a TAG_NUM atom holding the integer i$ as DT_I32.
+TNum[i$, dtype$] picks the dtype (\"i32\" or \"f32\"); for f32 the value is bit-reinterpreted, so use TUOpConst for arithmetic floats."];
+GeneralUtilities`SetUsage[TOp2, "TOp2[opcode$, x$, y$] returns a TAG_OP2 term computing opcode$(x$, y$) once both operands reduce to TAG_NUM.
+Opcodes include \"+\", \"-\", \"*\", \"==\", \"<\"."];
+GeneralUtilities`SetUsage[TMatNum, "TMatNum[matchVal$, handler$, fallback$] returns a TAG_MAT atom that dispatches by the tag of its applied argument: a TAG_NUM equal to matchVal$ runs handler$, a TAG_CTR with ext matchVal$ destructures (handler$ applied positionally to each child), and anything else applies fallback$.
+TMatCtr is a sugar alias for the CTR-destructuring case."];
 
-TMatCtr::usage = "TMatCtr[ctorName, handler, fallback] - sugar for TMatNum[ctorName, handler, fallback] when the intended use is destructuring a CTR (constructor name `ctorName`, anonymous CTR uses 0).  When applied to a matching CTR, applies `handler` positionally to each CTR child.  Used by TGradMany to bind multi-target gradient results into a body lambda without an indexed projection primitive.";
-TIfZero::usage = "TIfZero[counter, thenTerm, elseTerm] is sugar for APP[ TMatNum[0, thenTerm, lam _ . elseTerm], counter ].  The else branch ignores the bound argument so the user-side reads like a plain conditional.";
+GeneralUtilities`SetUsage[TMatCtr, "TMatCtr[ctorName$, handler$, fallback$] is sugar for TMatNum[ctorName$, handler$, fallback$] used to destructure a CTR (anonymous CTR uses 0).
+On a matching CTR it applies handler$ positionally to each child; used by TGradMany to bind multi-target gradient results into a body lambda."];
+GeneralUtilities`SetUsage[TIfZero, "TIfZero[counter$, thenTerm$, elseTerm$] is sugar for a TMatNum on 0 applied to counter$, with elseTerm$ wrapped in a discarding lambda so it reads like a plain conditional."];
 
-TEql::usage = "TEql[a, b] returns a TAG_EQL term that reduces to NUM(1) iff `a` and `b` are structurally equal, NUM(0) otherwise.  Strict on both args; SUP-on-either-side commutes (clones the other side via DUP, distributes); ERA/ANY short-circuit.  CTR-CTR and LAM-LAM rules land with the upcoming HVM4 port (currently fall through to stuck-rebuild).  Use this instead of TOp2[\"==\", ...] for theorem-proving where the args may be SUPs / structures.";
+GeneralUtilities`SetUsage[TEql, "TEql[a$, b$] returns a TAG_EQL term that reduces to NUM(1) when a$ and b$ are structurally equal and NUM(0) otherwise.
+Strict on both arguments; a SUP on either side commutes (clones the other side via DUP), and ERA/ANY short-circuit.
+Prefer this over TOp2[\"==\", $$] for theorem-proving where the arguments may be SUPs or structures."];
 
-TCtr::usage = "TCtr[label, c1, c2, ...] constructs a TAG_CTR with the given integer label and child terms.  Mirrors HVM4's `#K{a, b, ...}`.  Arity capped at 16 (matches HVM4's CTR limit).  An IC-level dup of the result fires DUP-CTR via interact_dup_ctr.";
+GeneralUtilities`SetUsage[TCtr, "TCtr[label$, c$1, c$2, $$] constructs a TAG_CTR with the given integer label$ and child terms (arity capped at 16, matching HVM4's CTR limit).
+An IC-level dup of the result fires DUP-CTR."];
 
-TBookCtr::usage = "TBookCtr[label, c1, c2, ...] constructs a TAG_CTR in BOOK_HEAP rather than the dynamic HEAP.  Use when constructing CTR inputs destined for the Metal AOT path - the kernel's heap MTLBuffer is bound to BOOK_HEAP, so destructure derefs only resolve for vals in that range.";
+GeneralUtilities`SetUsage[TBookCtr, "TBookCtr[label$, c$1, c$2, $$] constructs a TAG_CTR in BOOK_HEAP rather than the dynamic HEAP.
+Use when building CTR inputs destined for the Metal AOT path, whose heap MTLBuffer is bound to BOOK_HEAP, so destructure derefs only resolve for values in that range."];
 
-TMatChain::usage = "TMatChain[<|label1 -> handler1, label2 -> handler2, ...|>, fallback] builds nested TMatNum atoms so a single matcher dispatches multiple constructor labels, mirroring HVM4's `lambda { #L1: h1; #L2: h2; ... }` syntax.  Each handler receives the destructured CTR fields positionally via APP-MAT-CTR-MAT.";
+GeneralUtilities`SetUsage[TMatChain, "TMatChain[arms$, fallback$] takes an association of label to handler and builds nested TMatNum atoms so one matcher dispatches multiple constructor labels.
+Each handler receives the destructured CTR fields positionally; fallback$ handles labels that do not match."];
 
 Begin["`Private`"];
 

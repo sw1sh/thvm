@@ -10,14 +10,10 @@
 
 BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}]
 
-TFindFiniteModels::usage =
-    "TFindFiniteModels[rels] finds models in form of multiplication tables " <>
-    "consistent with the relations rels for each operator in rels, assuming " <>
-    "each variable can have one of two values.  TFindFiniteModels[rels, k] " <>
-    "allows k >= 2 values for each variable.  TFindFiniteModels[rels, k, prop] " <>
-    "returns a specified property prop (\"Association\", \"Indices\", " <>
-    "\"Models\") of found models.  Method -> \"SAT\" computes the models via " <>
-    "the built-in SatisfiabilityInstances SAT solver."
+GeneralUtilities`SetUsage[TFindFiniteModels, "TFindFiniteModels[rels$] finds multiplication-table models consistent with the relations rels$ over each operator, assuming each variable takes one of two values.
+TFindFiniteModels[rels$, k$] allows k$ values (k$ >= 2) per variable.
+TFindFiniteModels[rels$, k$, prop$] returns the property prop$, one of \"Association\", \"Indices\", \"Models\".
+Options: Method, MaxItems, Parallelize, ReverseOrdering. Method accepts Automatic (default \"ExpressionPrune\"), \"BruteForce\", \"SAT\" (built-in SatisfiabilityInstances), \"CongruenceClosure\", \"CongruenceClosureC\", \"ExpressionPruneC\", or \"Z3\"; see the ATP documentation for details."];
 
 Begin["`Private`"]
 

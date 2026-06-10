@@ -25,16 +25,9 @@
 
 BeginPackage["THVMLink`ATP`", {"Wolfram`Parser`"}]
 
-TVampireProof::usage =
-    "TVampireProof[\"path/to/file.p\", opts] runs the local Vampire 5.0.1 " <>
-    "binary on a TPTP problem file and returns a normalized result " <>
-    "Association with keys Status, Strategy, Seconds, ProofLength, " <>
-    "Inferences, RawSZS.  Options: TimeConstraint (seconds, default 30), " <>
-    "Mode (default \"casc\").  See docs/atp/vampire_case_teardown.md " <>
-    "for the per-token strategy decode and the ProofObject mapping.  " <>
-    "TVampireProof[\"Theory\", \"thm\", opts] resolves the TPTP file via " <>
-    "tools/baselines/vampire_tptp/{Theory}__{thm}.p (the cwd-relative " <>
-    "convention used by the bench harness)."
+GeneralUtilities`SetUsage[TVampireProof, "TVampireProof[file$] runs the local Vampire CLI on the TPTP problem file$ and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawSZS.
+TVampireProof[theory$, thm$] resolves the TPTP file under tools/baselines/vampire_tptp from the (theory$, thm$) pair (the bench-harness convention) and proves it.
+Options: TimeConstraint, Mode, Binary; see the ATP documentation for the strategy decode and ProofObject mapping."];
 
 TVampireProof::novamp =
     "Vampire CLI not found on PATH.  Install via `brew install vampire`."

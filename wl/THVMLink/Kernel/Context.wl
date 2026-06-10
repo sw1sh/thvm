@@ -28,13 +28,19 @@
 
 BeginPackage["THVMLink`"];
 
-TContext::usage         = "TContext[id_Integer] is an opaque handle to a runtime context (heap + book + defs + alo state + tensors + kernels + backends).  Slot 0 is the default singleton; slots 1..15 are user-allocated via TContextNew[].";
-$TContext::usage        = "Default context for context-polymorphic API; initial value TContext[0].  Users can rebind via Block[{$TContext = ctx}, ...] or TInContext[ctx, ...].";
-TContextNew::usage      = "TContextNew[] / TContextNew[\"cpu\" | \"metal\"] allocates a fresh context with the given default device and returns TContext[id].  Returns Failure if the context table is full.";
-TContextDestroy::usage  = "TContextDestroy[TContext[id]] frees the C-side state for that context.  Slot 0 (default) is preserved; use TFree[] to tear it down.  Returns the destroyed slot id or 0 on no-op.";
-TContextCurrent::usage  = "TContextCurrent[] returns the C-side current context as TContext[id].";
-TContextList::usage     = "TContextList[] returns all allocated contexts as a list of TContext[id] (slot 0 first).";
-TInContext::usage       = "TInContext[ctx_TContext, body] evaluates body with $TContext rebound to ctx and the C-side current context switched to ctx for the duration.  HoldRest; restores via Internal'WithLocalSettings so a Throw still unwinds cleanly.";
+GeneralUtilities`SetUsage[TContext, "TContext[id$] is an opaque handle to a runtime context (heap, book, defs, alo state, tensors, kernels, backends).
+Slot 0 is the default singleton; slots 1..15 are user-allocated via TContextNew[]."];
+GeneralUtilities`SetUsage[$TContext, "$TContext is the default context for the context-polymorphic API; initial value TContext[0].
+Rebind via Block[{$TContext = ctx$}, $$] or TInContext[ctx$, $$]."];
+GeneralUtilities`SetUsage[TContextNew, "TContextNew[] allocates a fresh context with the default device and returns TContext[id$].
+TContextNew[device$] uses the named default device (\"cpu\", \"metal\", \"cuda\").
+Returns a Failure if the context table is full (CONTEXTS_CAP=16)."];
+GeneralUtilities`SetUsage[TContextDestroy, "TContextDestroy[TContext[id$]] frees the C-side state for that context and returns the destroyed slot id.
+Slot 0 (default) is preserved and returns 0 as a no-op; use TFree[] to tear it down."];
+GeneralUtilities`SetUsage[TContextCurrent, "TContextCurrent[] returns the C-side current context as TContext[id$]."];
+GeneralUtilities`SetUsage[TContextList, "TContextList[] returns all allocated contexts as a list of TContext[id$] (slot 0 first)."];
+GeneralUtilities`SetUsage[TInContext, "TInContext[ctx$, body$] evaluates body$ with $TContext rebound to ctx$ and the C-side current context switched to ctx$ for the duration.
+HoldRest; restores via Internal`WithLocalSettings so a Throw still unwinds cleanly."];
 
 Begin["`Private`"];
 

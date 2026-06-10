@@ -36,15 +36,18 @@ BeginPackage["THVMLink`"];
    THVMLink` not Private`. *)
 {TInit, TReset, TNf, TTerm};
 
-TThreads::usage = "TThreads[] returns the worker count nf will use on the next call.  TThreads[n] sets it (0 to revert to env var $THVM_THREADS; clamped to [1, MAX_THREADS]).";
+GeneralUtilities`SetUsage[TThreads, "TThreads[] returns the worker count nf will use on the next call.
+TThreads[n$] sets the count and returns the resolved value; n$ = 0 reverts to the $THVM_THREADS env var, and the value is clamped to the runtime's thread range."];
 
-TPoolStats::usage = "TPoolStats[] returns the most recent nf-run worker-pool snapshot as an Association: \"Workers\" (count), \"DrainRounds\", \"DrainWallNs\", \"TotalFires\", and \"PerWorker\" (a list of per-worker stat associations: \"Id\", \"Fires\", \"Steals\", \"StealAttempts\", \"Pushes\", \"ActiveNs\", \"IdleNs\", \"Wakeups\", \"ItrsDelta\").";
+GeneralUtilities`SetUsage[TPoolStats, "TPoolStats[] returns the most recent nf-run worker-pool snapshot as an Association.
+Pool-level keys are \"Workers\", \"DrainRounds\", \"DrainWallNs\", \"TotalFires\"; \"PerWorker\" is a list of per-worker associations keyed \"Id\", \"Fires\", \"Steals\", \"StealAttempts\", \"Pushes\", \"ActiveNs\", \"IdleNs\", \"Wakeups\", \"ItrsDelta\"."];
 
-TNfProfiled::usage = "TNfProfiled[term] runs TNf[term] and returns <|\"Result\" -> _TTerm, \"Stats\" -> TPoolStats[]|>.";
+GeneralUtilities`SetUsage[TNfProfiled, "TNfProfiled[term$] runs TNf[term$] and returns an Association with key \"Result\" (the normalized _TTerm) and key \"Stats\" (the TPoolStats[] snapshot for that run)."];
 
-TPoolStatsReport::usage = "TPoolStatsReport[stats] renders a Tabular summary of a TPoolStats[] snapshot: wall time, total fires, per-worker fires, steals, active / idle ratio.";
+GeneralUtilities`SetUsage[TPoolStatsReport, "TPoolStatsReport[stats$] renders a Tabular summary of a TPoolStats[] snapshot stats$: wall time, total fires, and per-worker fires, steals, and active/idle ratio."];
 
-TPoolStatsBench::usage = "TPoolStatsBench[builder, threadCounts_List] runs TNfProfiled[builder[]] under each thread count in `threadCounts`, calling TReset between runs to ensure a clean heap.  `builder` is a HoldFirst term-producing expression (or a no-arg Function); it must be re-evaluated AFTER TReset so the term is rebuilt against the fresh heap.  Returns a Tabular comparing wall time, total fires, and idle ratios.  Example: TPoolStatsBench[treeIter[14, TNum[#]&], {1, 2, 4, 8}] when treeIter is HoldFirst-safe; or pass a Function: TPoolStatsBench[(treeIter[14, TNum[#]&])&, {1, 2, 4, 8}].";
+GeneralUtilities`SetUsage[TPoolStatsBench, "TPoolStatsBench[builder$, threadCounts$] runs TNfProfiled on builder$ under each thread count in the list threadCounts$, calling TReset between runs for a clean heap, and returns a Dataset comparing wall time, total fires, and idle ratios.
+builder$ is held (HoldFirst) and re-evaluated after each TReset so the term is rebuilt against the fresh heap; pass a term-producing expression, e.g. TPoolStatsBench[treeIter[14, TNum[#]&], {1, 2, 4, 8}], or a no-arg Function, e.g. TPoolStatsBench[(treeIter[14, TNum[#]&])&, {1, 2, 4, 8}]."];
 
 Begin["`Private`"];
 

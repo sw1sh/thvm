@@ -36,23 +36,33 @@
 
 BeginPackage["THVMLink`"];
 
-TLazyRange::usage        = "TLazyRange[n] / TLazyRange[a, b] / TLazyRange[a, b, step] returns a TTerm whose head is an APP-REF chain to a recursive `lazyRange` TDef.  Forcing one element via TWnf fires exactly the interactions needed to expose the next Cons; the rest stays unforced.  TLazyRange[10^6] allocates O(1) cells at construction.";
-TLazyPermutations::usage = "TLazyPermutations[xs] returns a TTerm enumerating Permutations[xs] in lex order, lazily.  IC-native: backed by a recursive `permsLex` TDef that consumes one outer Cons per fired interaction.  TLazyTake[TLazyPermutations[Range[20]], 5] allocates O(1) at construction.";
-TLazySplits::usage       = "TLazySplits[xs, n] returns a TTerm enumerating ordered n-way splits of xs (parts may be empty), lazily.  IC-native via TDef.  TLazySplits[xs] defaults to n=2.";
-TLazyTuples::usage       = "TLazyTuples[{xs1, xs2, ...}] returns a TTerm enumerating Tuples[{xs1, ...}] (cross product), lazily.  IC-native via TDef.";
-TLazySubsets::usage      = "TLazySubsets[xs] returns a TTerm enumerating Subsets[xs] (sorted by cardinality, then lex), lazily.  IC-native via TDef.";
+GeneralUtilities`SetUsage[TLazyRange, "TLazyRange[n$] streams 1 to n$ as a lazy TTerm.
+TLazyRange[a$, b$] and TLazyRange[a$, b$, step$] stream a$ to b$, optionally by step$.
+The result is an APP-REF chain to a recursive lazyRange TDef; forcing one element via TWnf exposes the next Cons while the rest stays unforced. TLazyRange[10^6] allocates O(1) cells at construction."];
+GeneralUtilities`SetUsage[TLazyPermutations, "TLazyPermutations[xs$] returns a TTerm lazily enumerating Permutations[xs$] in lex order.
+It is backed by a recursive permsLex TDef that consumes one outer Cons per fired interaction. TLazyTake[TLazyPermutations[Range[20]], 5] allocates O(1) at construction."];
+GeneralUtilities`SetUsage[TLazySplits, "TLazySplits[xs$, n$] returns a TTerm lazily enumerating the ordered n$-way splits of xs$ (parts may be empty).
+TLazySplits[xs$] defaults to n$ = 2."];
+GeneralUtilities`SetUsage[TLazyTuples, "TLazyTuples[{xs$1, xs$2, $$}] returns a TTerm lazily enumerating the cross product Tuples[{xs$1, xs$2, $$}]."];
+GeneralUtilities`SetUsage[TLazySubsets, "TLazySubsets[xs$] returns a TTerm lazily enumerating Subsets[xs$], sorted by cardinality then lex order."];
 
-TLazyFirst::usage   = "TLazyFirst[s] forces the head of a stream via TWnf and returns the decoded WL value.  Returns Missing[\"EmptyStream\"] when the head reduces to Nil / ERA.";
-TLazyRest::usage    = "TLazyRest[s] forces the head and returns the (still unforced) tail TTerm.";
-TLazyTake::usage    = "TLazyTake[s, n] returns a TTerm representing the first n elements of `s` as a lazy Cons chain.  The result is itself lazy: it stays an unforced APP-APP-REF redex until something walks it.  Built on a TDef-based `take` body so the n elements are produced one at a time by IC reduction.  Use TLazyToList[TLazyTake[s, n]] to force into a WL List.";
-TLazyToList::usage  = "TLazyToList[s] forces every element and returns a WL List.  Will hang if the stream is infinite.";
-TLazyMap::usage      = "TLazyMap[f, s] returns a lazy Cons-stream whose i-th element is `f` applied to the i-th element of `s`.  IC-native via a recursive `lazyMap` TDef -- forcing one element of the result fires exactly the interactions for that step.  `f` is a TTerm (typically TLam).";
-TLazySelect::usage   = "TLazySelect[s, p] returns a lazy Cons-stream of those elements `h` of `s` for which `TApp[p, h]` reduces to a NUM with non-zero value.  IC-native.";
-TLazySelectFirst::usage = "TLazySelectFirst[s, p] forces `s` one Cons at a time and returns the first head whose `p[h]` reduces to non-zero NUM, decoded via FromTTerm.  Returns Missing[\"NotFound\"] on stream end.";
-TLazyCatenate::usage = "TLazyCatenate[ss] flattens a lazy Cons-stream of Cons-streams into a single lazy stream.  IC-native, built on TLazyConcat.";
-TLazyCases::usage    = "TLazyCases[s, pattern] forces `s` and returns a WL List of {element-TTerm, bindings} for each Cons head matching the held WL `pattern` (Pattern.wl).  Bindings is an Association of binder name -> TTerm.  Stream input stays lazy; output is eager.";
-TLazyChoice::usage   = "TLazyChoice[xs_List] returns a fresh SUP-stream over the encoded elements of `xs`: ERA on the empty list, the bare element on a singleton, &L{x1, &L{x2, ...}} otherwise.  Shared label so downstream DUP-SUP annihilations are clean.";
-TLazyFold::usage     = "TLazyFold[f, x, s] = Fold[f, x, TLazyToList[s]].  Forces the full stream.";
+GeneralUtilities`SetUsage[TLazyFirst, "TLazyFirst[s$] forces the head of stream s$ and returns the decoded WL value.
+Returns Missing[\"EmptyStream\"] when the head reduces to Nil or ERA."];
+GeneralUtilities`SetUsage[TLazyRest, "TLazyRest[s$] forces the head of stream s$ and returns the still-unforced tail TTerm."];
+GeneralUtilities`SetUsage[TLazyTake, "TLazyTake[s$, n$] returns a TTerm holding the first n$ elements of stream s$ as a lazy Cons chain.
+The result stays an unforced APP-APP-REF redex until something walks it; the elements are produced one at a time by IC reduction. Use TLazyToList[TLazyTake[s$, n$]] to force into a WL List."];
+GeneralUtilities`SetUsage[TLazyToList, "TLazyToList[s$] forces every element of stream s$ and returns a WL List. Hangs if the stream is infinite."];
+GeneralUtilities`SetUsage[TLazyMap, "TLazyMap[f$, s$] returns a lazy Cons-stream whose i-th element is f$ applied to the i-th element of stream s$.
+f$ is a TTerm (typically a TLam); forcing one element of the result fires exactly the interactions for that step. A plain WL function f$ forces s$ and maps host-side instead."];
+GeneralUtilities`SetUsage[TLazySelect, "TLazySelect[s$, p$] returns a Cons-stream of those elements h$ of stream s$ for which TApp[p$, h$] reduces to a non-zero NUM. p$ is a TTerm predicate."];
+GeneralUtilities`SetUsage[TLazySelectFirst, "TLazySelectFirst[s$, p$] forces stream s$ one Cons at a time and returns the first head whose TApp[p$, h$] reduces to a non-zero NUM, decoded via FromTTerm.
+Returns Missing[\"NotFound\"] on stream end."];
+GeneralUtilities`SetUsage[TLazyCatenate, "TLazyCatenate[ss$] flattens a Cons-stream of Cons-streams ss$ into a single stream."];
+GeneralUtilities`SetUsage[TLazyCases, "TLazyCases[s$, pattern$] forces stream s$ and returns a WL List of {element-TTerm, bindings} for each Cons head matching the held WL pattern$.
+bindings is an Association of binder name to TTerm. Input stays lazy; output is eager."];
+GeneralUtilities`SetUsage[TLazyChoice, "TLazyChoice[xs$] returns a fresh SUP-stream over the encoded elements of list xs$: ERA on the empty list, the bare element on a singleton, nested SUPs otherwise.
+All branches share a label so downstream DUP-SUP annihilations are clean."];
+GeneralUtilities`SetUsage[TLazyFold, "TLazyFold[f$, x$, s$] is Fold[f$, x$, TLazyToList[s$]], forcing the full stream s$."];
 
 (* WL <-> TTerm coercion lives in Expr.wl as ToTTerm / FromTTerm.
    The private workhorses tlazyEncode / tlazyDecode stay here so

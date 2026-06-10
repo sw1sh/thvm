@@ -30,76 +30,37 @@
 
 BeginPackage["THVMLink`"];
 
-TAOTEmit::usage =
-  "TAOTEmit[name] returns the C source string that thvm_aot_emit_program \
-produces for the def registered under `name`.  Inspect, save, or wrap \
-manually for further compile.  TAOTCompile + TAOTRun automate those \
-steps; this is the lower-level surface.";
+GeneralUtilities`SetUsage[TAOTEmit, "TAOTEmit[name$] returns the C source string that thvm_aot_emit_program produces for the def registered under name$.
+Inspect, save, or compile manually; TAOTCompile and TAOTRun automate those steps on top of this lower-level surface."];
 
-TAOTCompile::usage =
-  "TAOTCompile[name] emits the def under `name`, wraps it with the thvm \
-runtime + an aot_program_<name>_run entry, invokes clang to produce a \
-dylib, and stashes the resulting path so TAOTRun[name, input] can dlopen \
-it.  Returns the dylib path string.  Cache-by-content: same source -> \
-same path -> skips the clang call on subsequent invocations.";
+GeneralUtilities`SetUsage[TAOTCompile, "TAOTCompile[name$] emits the def under name$, wraps it with the thvm runtime plus an aot_program_<name>_run entry, invokes clang to produce a dylib, stashes the path so TAOTRun can dlopen it, and returns the dylib path string.
+Caching is by content, so an unchanged source reuses the same path and skips the clang call."];
 
-TAOTRun::usage =
-  "TAOTRun[name, input_TTerm] dlopens the AOT'd dylib for `name` (must \
-have been TAOTCompile'd first), invokes its run entry with `input` as the \
-argument Term, and returns the result wrapped as a TTerm.  For programs \
-that reduce to a NUM the result is a self-contained TTerm carrying the \
-scalar value.  CTR-returning programs reference the dylib's heap and \
-can't be decoded host-side without further marshalling -- use TAOTEmit \
-+ a custom harness for those today.";
+GeneralUtilities`SetUsage[TAOTRun, "TAOTRun[name$, input$] dlopens the AOT'd dylib for name$ (TAOTCompile'd first), invokes its run entry with input$ as the argument Term, and returns the result wrapped as a TTerm. input$ may be a TTerm or a raw Integer (wrapped as TNum).
+TAOTRun[name$, {arg$1, arg$2, $$}] runs a multi-argument def (up to 4 args); missing slots default to 0.
+TAOTRun[name$, args$, Method \[Rule] spec$] routes to a backend: spec$ is \"CPU\", \"Metal\", or a list head with options such as {\"CPU\", \"NumThreads\" \[Rule] n$}.
+NUM-reducing programs return a self-contained TTerm carrying the scalar; CTR-returning programs reference the dylib heap and need TAOTEmit plus a custom harness to decode host-side."];
 
-TAOTPath::usage =
-  "TAOTPath[name] returns the dylib path stashed by TAOTCompile[name], \
-or Missing[\"NotCompiled\"] if the def has never been TAOTCompile'd.";
+GeneralUtilities`SetUsage[TAOTPath, "TAOTPath[name$] returns the dylib path stashed by TAOTCompile[name$], or Missing[\"NotCompiled\"] if the def has never been TAOTCompile'd."];
 
-TAOTSpSolve::usage =
-  "TAOTSpSolve[cnf, nVars, opts] runs Survey Propagation + decimation SAT \
-solver via Metal.  Returns {status, assignment} where status is \"SAT\", \
-\"UNSAT\", \"GAVE_UP\", or \"ERROR\", and assignment is a list of {-1, +1} \
-per variable (meaningful only when SAT).  Hands off to bitmask kernel when \
-residual <= 24 unfixed variables.  Options: \"MaxIters\", \"Damping\", \
-\"Threshold\".";
+GeneralUtilities`SetUsage[TAOTSpSolve, "TAOTSpSolve[cnf$, nVars$] runs the Survey Propagation plus decimation SAT solver via Metal and returns {status$, assignment$}.
+status$ is \"SAT\", \"UNSAT\", \"GAVE_UP\", or \"ERROR\"; assignment$ is a per-variable list of {-1, +1} values, meaningful only when status$ is \"SAT\". The solver hands off to the bitmask kernel once 24 or fewer variables remain unfixed.
+Options: \"MaxIters\", \"Damping\", \"Threshold\"."];
 
-TAOTSurveyPropagate::usage =
-  "TAOTSurveyPropagate[cnf, nVars, opts] runs Survey Propagation on the CNF \
-formula via Metal.  cnf is a list of clauses, each a list of signed integers \
-(positive lit = +var_idx, negative = -var_idx, 1-based).  Returns the per-edge \
-final eta vector (length = total literals across clauses) after convergence or \
-max_iters.  Options: \"MaxIters\" (default 100), \"Damping\" (default 0.5), \
-\"Threshold\" (default 0.001).  Targets random k-SAT near the phase \
-transition where CDCL struggles.";
+GeneralUtilities`SetUsage[TAOTSurveyPropagate, "TAOTSurveyPropagate[cnf$, nVars$] runs Survey Propagation on the CNF formula via Metal and returns the per-edge final eta vector (length equals the total literals across clauses) after convergence or the iteration cap.
+cnf$ is a list of clauses, each a list of signed integers (positive = +var index, negative = -var index, 1-based). Targets random k-SAT near the phase transition where CDCL struggles.
+Options: \"MaxIters\", \"Damping\", \"Threshold\"."];
 
-TAOTSatBitmask::usage =
-  "TAOTSatBitmask[cnf, nVars] evaluates the CNF formula at every assignment in \
-[0, 2^nVars) on Metal via the aot_cnf_bitmask kernel.  cnf is a list of clauses, \
-each clause a list of signed integers (positive = positive literal, negative = \
-negated literal, magnitude = 1-based variable index).  Returns a packed Integer \
-list of length 2^nVars where entry i is 1 if assignment i (bit j of i = value of \
-variable j+1) satisfies the formula, 0 otherwise.  Direct bitwise CNF \
-evaluation, bypasses IC reduction; nVars <= 30.";
+GeneralUtilities`SetUsage[TAOTSatBitmask, "TAOTSatBitmask[cnf$, nVars$] evaluates the CNF formula at every assignment in [0, 2^nVars$) on Metal via the aot_cnf_bitmask kernel.
+cnf$ is a list of clauses, each a list of signed integers (positive = positive literal, negative = negated literal, magnitude = 1-based variable index).
+Returns a packed Integer list of length 2^nVars$ where entry i$ is 1 if assignment i$ (bit j$ = value of variable j$+1) satisfies the formula, else 0. Direct bitwise CNF evaluation that bypasses IC reduction; requires nVars$ at most 30."];
 
-TAOTIcCollapse::usage =
-  "TAOTIcCollapse[term_TTerm, depth_Integer] dispatches the static \
-aot_ic_collapse PSO with grid = 2^depth over a BOOK_HEAP-rooted \
-SUP-tree at `term` (e.g., the result of TAOTRun[..., Method -> \"Metal\"] \
-with THVM_AOT_METAL_KEEP_BOOK=1 set).  Each thread decodes its tid \
-into a binary path through the SUP-tree, drives the final leaf to \
-WHNF on-thread via per-thread IC interaction inlines, and writes the \
-resulting Term to result[tid].  Returns a List of TTerm leaves of \
-length 2^depth (filter ERA sentinels via TTermTag).";
+GeneralUtilities`SetUsage[TAOTIcCollapse, "TAOTIcCollapse[term$, depth$] dispatches the static aot_ic_collapse PSO with grid 2^depth$ over a BOOK_HEAP-rooted SUP-tree at term$ (for example the result of TAOTRun[$$, Method \[Rule] \"Metal\"] run with THVM_AOT_METAL_KEEP_BOOK=1 set).
+Each thread decodes its id into a binary path through the SUP-tree, drives the final leaf to WHNF on-thread via per-thread IC interaction inlines, and writes the resulting Term to its slot.
+Returns a list of 2^depth$ TTerm leaves; filter ERA sentinels via TTermTag."];
 
-TAOTBatchOp2Fold::usage =
-  "TAOTBatchOp2Fold[root_locs] dispatches the batch kernel \
-(aot_eval_op2_fold_batch) over a list of book_heap locs, each pointing \
-at an OP2(NUM,NUM) cell.  Returns a list of N folded NUM Terms (as \
-TTerms).  Amortizes Metal kernel-launch overhead across N redexes -- \
-useful when you have many independent OP2 folds queued up.  Pre-built \
-the OP2 cells via TBookAlloc/TBookSet first; the kernel reads from \
-book_heap directly.";
+GeneralUtilities`SetUsage[TAOTBatchOp2Fold, "TAOTBatchOp2Fold[rootLocs$] dispatches the batch kernel aot_eval_op2_fold_batch over a list of book_heap locations, each pointing at an OP2(NUM, NUM) cell, and returns the corresponding list of folded NUM TTerms.
+Amortizes Metal kernel-launch overhead across many independent OP2 folds. Build the OP2 cells via TBookAlloc and TBookSet first; the kernel reads from book_heap directly."];
 
 (* Forward-declare symbols owned by alphabetically-later siblings
    (Ref.wl, Switch.wl) that load AFTER AOT.wl.  Without these stub

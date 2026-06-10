@@ -34,11 +34,12 @@
 
 BeginPackage["THVMLink`"];
 
-TBench::usage = "TBench[spec] runs `NumSteps` of a step function under TInit + the active backend, then snapshots TMemoryPlan and returns an Association with wall_time_ms / ms_per_step / peak_concurrent_kib / total_live_kib / kernel_count / ten_count / slot_reuse_headroom_pct / backend.  spec keys: \"Name\", \"InitFn\", \"StepFn\", \"NumSteps\".";
+GeneralUtilities`SetUsage[TBench, "TBench[spec$] runs spec$[\"NumSteps\"] iterations of the caller's step function under TInit and the active backend, snapshots TMemoryPlan, and returns an Association of stable metrics: name, backend, n_steps, wall_time_ms, ms_per_step, kernel_count, ten_count, total_live_kib, peak_concurrent_kib, slot_reuse_headroom_pct.
+spec$ keys: \"Name\" (label), \"InitFn\" (Function[] returning the initial hosts value), \"StepFn\" (Function[hosts, t] returning updated hosts), \"NumSteps\" (Integer step count)."];
 
-TBenchReport::usage = "TBenchReport[bench] returns a Column rendering of a TBench result Association suitable for stdout.";
+GeneralUtilities`SetUsage[TBenchReport, "TBenchReport[bench$] formats a TBench result Association as a Column of Row entries for stdout or notebook display."];
 
-TBenchExport::usage = "TBenchExport[bench, file] writes TBenchReport[bench] to `file` (plain text), so subsequent runs can diff against the prior snapshot.";
+GeneralUtilities`SetUsage[TBenchExport, "TBenchExport[bench$, file$] writes TBenchReport[bench$] to file$ as plain text, so a later run can diff against the prior snapshot."];
 
 (* Forward-declare bridge symbols owned by THVMLink.wl + MemoryPlan.wl *)
 {TMemoryPlan, TKernelCount, TTensCount, TTotalBufBytes};

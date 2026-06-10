@@ -36,14 +36,8 @@
 
 BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
 
-TSatEUF::usage =
-    "TSatEUF[{lhs == rhs, ...}, {lhs != rhs, ...}] decides the " <>
-    "quantifier-free first-order theory of equality with " <>
-    "uninterpreted functions (QF_UF) via congruence closure.  " <>
-    "Returns an Association with \"Status\" -> \"UNSAT\" | \"SAT\", " <>
-    "and on SAT a \"Classes\" key listing the inferred equivalence " <>
-    "classes of subterms, on UNSAT a \"Witness\" key naming the " <>
-    "disequality whose two sides collapsed.";
+GeneralUtilities`SetUsage[TSatEUF, "TSatEUF[eqs$, diseqs$] decides the quantifier-free first-order theory of equality with uninterpreted functions (QF_UF) via congruence closure, where eqs$ is a list of equalities lhs$ == rhs$ and diseqs$ a list of disequalities lhs$ != rhs$.
+Returns an Association keyed by \"Status\" (\"SAT\" or \"UNSAT\"); on SAT a \"Classes\" key lists the inferred equivalence classes of subterms, on UNSAT a \"Witness\" key names the disequality whose two sides collapsed."];
 
 TFindProof::nonground =
     "TFindProof Method -> \"SMT\" skipping non-ground input: the term `1` " <>
@@ -55,16 +49,9 @@ TFindProof::noconjecture =
     "TFindProof Method -> \"SMT\" requires a conjecture in the input; got " <>
     "axioms only.";
 
-TSmtDecide::usage =
-    "TSmtDecide[formula] decides a quantifier-free Boolean " <>
-    "combination of equality atoms (Equal[_,_] / Unequal[_,_]) " <>
-    "via lazy DPLL(T): Tseitin-free atom-abstraction + a " <>
-    "Wolfram SatisfiabilityInstances propositional kernel + " <>
-    "congruence closure as the theory solver.  Returns an " <>
-    "Association with \"Status\" -> \"SAT\" | \"UNSAT\", and on " <>
-    "SAT a \"Model\" -> {atom -> True | False, ...} satisfying " <>
-    "assignment certified by congruence closure.  Boolean " <>
-    "combinators handled: And, Or, Not, Implies, Equivalent, Xor.";
+GeneralUtilities`SetUsage[TSmtDecide, "TSmtDecide[formula$] decides a quantifier-free Boolean combination of equality atoms (Equal or Unequal) via lazy DPLL(T): atom-abstraction, a SatisfiabilityInstances propositional kernel, and congruence closure as the theory solver.
+Returns an Association keyed by \"Status\" (\"SAT\" or \"UNSAT\"); on SAT a \"Model\" key gives a satisfying atom assignment (each atom to True or False) certified by congruence closure.
+Handles the And, Or, Not, Implies, Equivalent, and Xor combinators."];
 
 TSatEUF::badin =
     "TSatEUF inputs must be lists of equalities (HoldPattern[Equal[_,_]]) " <>

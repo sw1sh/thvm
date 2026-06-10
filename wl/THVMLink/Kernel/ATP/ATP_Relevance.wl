@@ -9,7 +9,10 @@
 
 BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
 
-TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof - making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default - drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (symbol-reachability pruning - a coarse heuristic, may drop a needed axiom); \"SInE\" or {\"SInE\", \"SineTolerance\"->st, \"SineDepth\"->sd, \"SineGenerality\"->sgt} (the Hoder-Voronkov SInE premise-selection algorithm as shipped in Vampire - D-relation + bounded BFS from the conjecture's symbols.  Defaults 3/2/8 mirror Vampire's --sine_tolerance/--sine_depth/--sine_generality_threshold, the winning option block from the parallel Vampire benchmark of thvm's uncrackable theorems).";
+GeneralUtilities`SetUsage[TRelevantAxioms, "TRelevantAxioms[conjecture$, axioms$] reports which axioms the relevance filter keeps versus drops for proving conjecture$, without running a proof.
+TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.
+Returns an association with keys \"Mode\", \"Kept\" (a list of axioms), and \"Dropped\" (a list of associations with keys \"Axiom\", \"Symbols\", \"Reason\").
+The relevance mode is set by the Method \"AxiomRelevance\" suboption: None keeps all; \"Safe\" (default) drops only confined dead-weight axioms (sound and completeness-preserving); \"Connected\" applies symbol-reachability pruning (heuristic); \"SInE\" applies SInE premise selection. \"Connected\" and \"SInE\" accept tuning options ({\"Connected\", \"FrequencyCutoff\", \"MaxGenerations\"}, {\"SInE\", \"SineTolerance\", \"SineDepth\", \"SineGenerality\"}); see the ATP documentation for the full option surface."];
 Begin["`Private`"];
 
 (* === Axiom-relevance filter ======================================

@@ -30,58 +30,31 @@
 
 BeginPackage["THVMLink`ATP`", {"Wolfram`Parser`"}]
 
-TSZSDerivationToProofObject::usage =
-    "TSZSDerivationToProofObject[derivation_List] builds a thvm-shaped " <>
-    "ProofObject[...] from a parsed SZS derivation (the kind returned " <>
-    "by Wolfram`Parser`TPTPImport[..., \"SZS\"]['Derivation']).  Works " <>
-    "for any ATP that emits SZS-framed fof+inference output (Vampire, " <>
-    "E, iProver, Twee --tstp, Otter, ...).  See $SZSRuleToConstruct " <>
-    "for the SZS-rule -> thvm-construct mapping table."
+GeneralUtilities`SetUsage[TSZSDerivationToProofObject, "TSZSDerivationToProofObject[derivation$] builds a thvm-shaped proof Association from a parsed SZS derivation (the list returned by Wolfram`Parser`TPTPImport[$$, \"SZS\"]).
+Works for any ATP that emits SZS-framed fof+inference output (Vampire, E, iProver, Twee --tstp, Otter, ...).
+The SZS-rule to thvm-construct mapping comes from $SZSRuleToConstruct.
+Option ParseFormulas (default False) parses formula bodies into WL expressions instead of keeping raw SZS strings."];
 
-$SZSRuleToConstruct::usage =
-    "$SZSRuleToConstruct is an Association mapping SZS inference-rule " <>
-    "names ('superposition', 'forward_demodulation', etc.) to thvm " <>
-    "ProofObject construct types ('CriticalPairLemma', " <>
-    "'SubstitutionLemma', etc.).  Edit this Association to support a " <>
-    "prover's idiosyncratic inference rule.  Unmapped rules fall " <>
-    "through to 'SubstitutionLemma'."
+GeneralUtilities`SetUsage[$SZSRuleToConstruct, "$SZSRuleToConstruct is an Association mapping SZS inference-rule names (superposition, forward_demodulation, ...) to thvm ProofObject construct types (CriticalPairLemma, SubstitutionLemma, ...).
+Edit this Association to support a prover's idiosyncratic inference rule; unmapped rules fall through to SubstitutionLemma."];
 
-TVampireProofObject::usage =
-    "TVampireProofObject[\"Theory\", \"thm\", opts] runs Vampire CLI " <>
-    "via TVampireProof then converts the result through " <>
-    "TSZSDerivationToProofObject to return a thvm-shaped ProofObject.  " <>
-    "Used as the Method -> \"VampireProcess\" dispatch target in " <>
-    "TFindProof so two ProofObjects from differing Methods (internal " <>
-    "preset vs external CLI) can be compared structurally."
+GeneralUtilities`SetUsage[TVampireProofObject, "TVampireProofObject[theory$, thm$] runs the Vampire CLI via TVampireProof and converts the result through TSZSDerivationToProofObject to a thvm-shaped proof Association.
+Used as the Method \[Rule] \"VampireProcess\" dispatch target in TFindProof, so proofs from differing Methods (internal preset vs external CLI) can be compared structurally.
+Options: TimeConstraint, Mode, Binary, ParseFormulas, LiftToProofObject; see the ATP documentation."];
 
-TWaldmeisterProofObject::usage =
-    "TWaldmeisterProofObject[\"path/to/file.pr\", opts] runs the local " <>
-    "wmcli binary via TWaldmeisterProof and converts the proof " <>
-    "protocol via TSZSDerivationToProofObject to return a thvm-shaped " <>
-    "proof Association.  Used as the Method -> \"WaldmeisterProcess\" " <>
-    "dispatch target in TFindProof.  Path form only; the two-arg " <>
-    "(Theory, thm) form needs a TPTP -> .pr converter (deferred)."
+GeneralUtilities`SetUsage[TWaldmeisterProofObject, "TWaldmeisterProofObject[file$.pr] runs the local Waldmeister binary via TWaldmeisterProof on a .pr problem file and converts the proof protocol through TSZSDerivationToProofObject to a thvm-shaped proof Association.
+TWaldmeisterProofObject[theory$, thm$] resolves to a pre-generated .pr file under tools/baselines/wm_pr/, returning a NoCachedPr Failure (with the converter command line) when it is missing.
+Used as the Method \[Rule] \"WaldmeisterProcess\" dispatch target in TFindProof.
+Options: TimeConstraint, Binary, MathlinkPath, ParseFormulas, LiftToProofObject; see the ATP documentation."];
 
-TTweeProofObject::usage =
-    "TTweeProofObject[\"Theory\", \"thm\", opts] runs Twee CLI via " <>
-    "TTweeProof.  Twee's --tstp output is SZS-FRAMED but the proof " <>
-    "body is Twee's own human-readable equation chain (not TPTP fof " <>
-    "inferences), so we return the lemma-list shape directly rather " <>
-    "than via TSZSDerivationToProofObject; the dataset is keyed by " <>
-    "{\"Axiom\", n} / {\"Lemma\", n} only, with no per-step " <>
-    "construct-class metadata.  Used as Method -> \"TweeProcess\" in " <>
-    "TFindProof."
+GeneralUtilities`SetUsage[TTweeProofObject, "TTweeProofObject[theory$, thm$] runs the Twee CLI via TTweeProof and returns a thvm-shaped proof Association.
+Twee's --tstp output is SZS-framed but its proof body is a human-readable equation chain (not TPTP fof inferences), so the lemma-list shape is built directly rather than via TSZSDerivationToProofObject; the dataset is keyed by {\"Axiom\", n$} and {\"Lemma\", n$} only, with no per-step construct-class metadata.
+Used as the Method \[Rule] \"TweeProcess\" dispatch target in TFindProof.
+Options: TimeConstraint, Binary."];
 
-TEproverProofObject::usage =
-    "TEproverProofObject[\"Theory\", \"thm\", opts] runs the E prover " <>
-    "CLI on the canonical TPTP problem file and lifts the SZS proof " <>
-    "into the shared thvm Association shape via " <>
-    "TSZSDerivationToProofObject.  E's --proof-object --tstp-format " <>
-    "emits the same SZS-framed fof+inference DAG as Vampire's " <>
-    "--proof tptp, so the lift path is shared.  Options: TimeConstraint " <>
-    "(default 30), Binary (default Automatic), ParseFormulas " <>
-    "(default False), LiftToProofObject (default False; when True, " <>
-    "wraps the Association into a literal ProofObject[...] head)."
+GeneralUtilities`SetUsage[TEproverProofObject, "TEproverProofObject[theory$, thm$] runs the E prover CLI on the canonical TPTP problem file and lifts the SZS proof into a thvm-shaped proof Association via TSZSDerivationToProofObject.
+E's --proof-object --tstp-format emits the same SZS-framed fof+inference DAG as Vampire's --proof tptp, so the lift path is shared.
+Options: TimeConstraint, Binary, ParseFormulas, LiftToProofObject; LiftToProofObject wraps the Association into a literal ProofObject head. See the ATP documentation."];
 
 Begin["`Private`"]
 

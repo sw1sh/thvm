@@ -43,39 +43,46 @@
 
 BeginPackage["THVMLink`"];
 
-TEinRearrange::usage = "TEinRearrange[pattern, x, hints___] reshapes / permutes / broadcasts x by the einx pattern.  Composite axes split via Reshape, axis names permute via Permute, `1` slots insert/check unit dims, and any RHS axis missing from the LHS is broadcast via Expand.";
-TEinSum::usage       = "TEinSum[pattern, x, hints___] sums over the bracketed axes in the einx pattern.  Trailing rules resolve composite splits.  Pattern may omit `->` to default to LHS minus bracketed.";
-TEinMean::usage      = "TEinMean[pattern, x, hints___] averages over the bracketed axes.";
-TEinMax::usage       = "TEinMax[pattern, x, hints___] reduces (max) over the bracketed axes.";
-TEinMin::usage       = "TEinMin[pattern, x, hints___] reduces (min, via -max(-x)) over the bracketed axes.";
-TEinProd::usage      = "TEinProd[pattern, x, hints___] reduces (product, via exp(sum(log))) over the bracketed axes.  Inputs must be strictly positive.";
-TEinAny::usage       = "TEinAny[pattern, x, hints___] logical OR (max over {0, 1}) over the bracketed axes.";
-TEinAll::usage       = "TEinAll[pattern, x, hints___] logical AND (min over {0, 1}, via -max(-x)) over the bracketed axes.";
-TEinVar::usage       = "TEinVar[pattern, x, hints___] variance over the bracketed axes.";
-TEinStd::usage       = "TEinStd[pattern, x, hints___] standard deviation over the bracketed axes.";
-TEinLogSumExp::usage = "TEinLogSumExp[pattern, x, hints___] log-sum-exp over the bracketed axes.  Numerically stable (max-subtract).";
+GeneralUtilities`SetUsage[TEinRearrange, "TEinRearrange[pattern$, x$, hints$$] reshapes, permutes, and broadcasts x$ by the einx pattern$ (which must specify \[Rule]).
+Composite axes split via Reshape, axis names permute via Permute, 1 slots insert or check unit dims, and any output axis missing from the input is broadcast via Expand.
+Trailing axis-size hints (e.g. \"h\" \[Rule] 4) resolve composite splits the shapes cannot determine alone."];
+GeneralUtilities`SetUsage[TEinSum, "TEinSum[pattern$, x$, hints$$] sums over the bracketed axes in the einx pattern$.
+If pattern$ omits \[Rule], the output defaults to the input axes minus the bracketed ones; trailing rules resolve composite splits."];
+GeneralUtilities`SetUsage[TEinMean, "TEinMean[pattern$, x$, hints$$] averages over the bracketed axes."];
+GeneralUtilities`SetUsage[TEinMax, "TEinMax[pattern$, x$, hints$$] reduces (max) over the bracketed axes."];
+GeneralUtilities`SetUsage[TEinMin, "TEinMin[pattern$, x$, hints$$] reduces (min) over the bracketed axes."];
+GeneralUtilities`SetUsage[TEinProd, "TEinProd[pattern$, x$, hints$$] reduces (product) over the bracketed axes; inputs must be strictly positive."];
+GeneralUtilities`SetUsage[TEinAny, "TEinAny[pattern$, x$, hints$$] logical OR over the bracketed axes of a 0/1-valued input."];
+GeneralUtilities`SetUsage[TEinAll, "TEinAll[pattern$, x$, hints$$] logical AND over the bracketed axes of a 0/1-valued input."];
+GeneralUtilities`SetUsage[TEinVar, "TEinVar[pattern$, x$, hints$$] variance over the bracketed axes."];
+GeneralUtilities`SetUsage[TEinStd, "TEinStd[pattern$, x$, hints$$] standard deviation over the bracketed axes."];
+GeneralUtilities`SetUsage[TEinLogSumExp, "TEinLogSumExp[pattern$, x$, hints$$] numerically-stable log-sum-exp over the bracketed axes."];
 
-TEinSoftmax::usage   = "TEinSoftmax[pattern, x, hints___] softmax along the bracketed axis (numerically stable, max-subtracted).";
-TEinLayerNorm::usage = "TEinLayerNorm[pattern, x, hints___] / TEinLayerNorm[pattern, x, eps, hints___] normalizes (mean 0, var 1) over the bracketed axes.  Default eps = 1.0e-5.";
-TEinRMSNorm::usage   = "TEinRMSNorm[pattern, x, hints___] / TEinRMSNorm[pattern, x, eps, hints___] divides x by its RMS over the bracketed axes.";
+GeneralUtilities`SetUsage[TEinSoftmax, "TEinSoftmax[pattern$, x$, hints$$] numerically-stable softmax along the bracketed axis, returning the input shape."];
+GeneralUtilities`SetUsage[TEinLayerNorm, "TEinLayerNorm[pattern$, x$, hints$$] normalizes x$ to mean 0, variance 1 over the bracketed axes (default eps 1.0e-5).
+TEinLayerNorm[pattern$, x$, eps$, hints$$] sets the epsilon added under the square root."];
+GeneralUtilities`SetUsage[TEinRMSNorm, "TEinRMSNorm[pattern$, x$, hints$$] divides x$ by its root-mean-square over the bracketed axes (default eps 1.0e-5).
+TEinRMSNorm[pattern$, x$, eps$, hints$$] sets the epsilon added under the square root."];
 
-TEinAdd::usage       = "TEinAdd[pattern, args__, hints___] broadcasting elementwise add.  Pattern: \"b s d, d -> b s d\" style.";
-TEinMul::usage       = "TEinMul[pattern, args__, hints___] broadcasting elementwise multiply.";
-TEinSub::usage       = "TEinSub[pattern, args__, hints___] broadcasting elementwise subtract (folds via Plus / Neg).";
-TEinDiv::usage       = "TEinDiv[pattern, args__, hints___] broadcasting elementwise divide.";
-TEinEq::usage        = "TEinEq[pattern, args__, hints___] broadcasting elementwise CMPEQ.";
-TEinLt::usage        = "TEinLt[pattern, args__, hints___] broadcasting elementwise CMPLT.";
-TEinWhere::usage     = "TEinWhere[pattern, cond, a, b, hints___] broadcasting elementwise where (cond * a + (1 - cond) * b).";
+GeneralUtilities`SetUsage[TEinAdd, "TEinAdd[pattern$, args$$, hints$$] broadcasting elementwise add, e.g. pattern \"b s d, d \[Rule] b s d\"."];
+GeneralUtilities`SetUsage[TEinMul, "TEinMul[pattern$, args$$, hints$$] broadcasting elementwise multiply."];
+GeneralUtilities`SetUsage[TEinSub, "TEinSub[pattern$, args$$, hints$$] broadcasting elementwise subtract."];
+GeneralUtilities`SetUsage[TEinDiv, "TEinDiv[pattern$, args$$, hints$$] broadcasting elementwise divide."];
+GeneralUtilities`SetUsage[TEinEq, "TEinEq[pattern$, args$$, hints$$] broadcasting elementwise equality (1.0 where equal, else 0.0)."];
+GeneralUtilities`SetUsage[TEinLt, "TEinLt[pattern$, args$$, hints$$] broadcasting elementwise less-than (1.0 where less, else 0.0)."];
+GeneralUtilities`SetUsage[TEinWhere, "TEinWhere[pattern$, cond$, a$, b$, hints$$] broadcasting elementwise select: cond$ a$ + (1 - cond$) b$."];
 
-TEinDot::usage       = "TEinDot[pattern, x, y, hints___] contraction.  Axes appearing in both inputs but not in the output are reduced; the rank-2 collapsed form dispatches through TMatMul (cblas_sgemm).";
+GeneralUtilities`SetUsage[TEinDot, "TEinDot[pattern$, x$, y$, hints$$] contracts x$ and y$ by the einx pattern$ (which must specify \[Rule]).
+Axes appearing in the inputs but not the output are summed; a rank-2 collapsed contraction dispatches through TMatMul."];
 
-TEinFlip::usage      = "TEinFlip[pattern, x, hints___] flips the bracketed axes.  E.g. TEinFlip[\"b [s] d\", x].";
-TEinRoll::usage      = "TEinRoll[pattern, x, shift, hints___] circular shift along the bracketed axis by `shift` positions.  One bracketed axis only.  Lowered via Shrink + Pad + sum (no native concat).";
+GeneralUtilities`SetUsage[TEinFlip, "TEinFlip[pattern$, x$, hints$$] flips the bracketed axes, e.g. TEinFlip[\"b [s] d\", x$]."];
+GeneralUtilities`SetUsage[TEinRoll, "TEinRoll[pattern$, x$, shift$, hints$$] circularly shifts x$ along the single bracketed axis by shift$ positions, lowered via Shrink, Pad, and sum."];
 
-TEinGetAt::usage     = "TEinGetAt[pattern, x, idx, hints___] gathers rows of x using a host-side List[Integer] `idx`.  E.g. TEinGetAt[\"[v] d, b -> b d\", table, {1, 7, 3}].  Dynamic-tensor `idx` requires a future UOP_GATHER opcode (see TEmbedding's note in NN.wl).";
-TEinSetAt::usage     = "TEinSetAt[pattern, x, idx, vals, hints___] scatters `vals` into x at host-side List[Integer] `idx` positions; returns a fresh TTerm leaving x unchanged.";
-TEinAddAt::usage     = "TEinAddAt[pattern, x, idx, vals, hints___] scatter-add `vals` into x at host-side List[Integer] `idx` positions.";
-TEinSubAt::usage     = "TEinSubAt[pattern, x, idx, vals, hints___] scatter-sub.";
+GeneralUtilities`SetUsage[TEinGetAt, "TEinGetAt[pattern$, x$, idx$, hints$$] gathers rows of x$ at the host-side integer list idx$, e.g. TEinGetAt[\"[v] d, b \[Rule] b d\", table$, {1, 7, 3}].
+A dynamic-tensor idx$ is not yet supported (needs a UOP_GATHER opcode); see the TEmbedding note in NN.wl."];
+GeneralUtilities`SetUsage[TEinSetAt, "TEinSetAt[pattern$, x$, idx$, vals$, hints$$] scatters rows of vals$ into x$ at the host-side integer positions idx$ (distinct), returning a fresh TTerm and leaving x$ unchanged."];
+GeneralUtilities`SetUsage[TEinAddAt, "TEinAddAt[pattern$, x$, idx$, vals$, hints$$] scatter-adds rows of vals$ into x$ at the host-side integer positions idx$."];
+GeneralUtilities`SetUsage[TEinSubAt, "TEinSubAt[pattern$, x$, idx$, vals$, hints$$] scatter-subtracts rows of vals$ from x$ at the host-side integer positions idx$."];
 
 Begin["`Private`"];
 

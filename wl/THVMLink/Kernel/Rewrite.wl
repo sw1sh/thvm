@@ -22,32 +22,44 @@
 BeginPackage["THVMLink`"];
 
 (* === KAX_* axis types =========================================== *)
-$KaxLoop::usage = $KaxReduce::usage = $KaxUpcast::usage =
-    $KaxUnroll::usage = $KaxLocal::usage = $KaxGlobal::usage =
-    $KaxGroupReduce::usage =
-        "axis_type id; mirrors KAX_* in src/thvm.h.";
+GeneralUtilities`SetUsage[$KaxLoop, "$KaxLoop is the axis_type id mirroring KAX_LOOP in src/thvm.h."];
+GeneralUtilities`SetUsage[$KaxReduce, "$KaxReduce is the axis_type id mirroring KAX_REDUCE in src/thvm.h."];
+GeneralUtilities`SetUsage[$KaxUpcast, "$KaxUpcast is the axis_type id mirroring KAX_UPCAST in src/thvm.h."];
+GeneralUtilities`SetUsage[$KaxUnroll, "$KaxUnroll is the axis_type id mirroring KAX_UNROLL in src/thvm.h."];
+GeneralUtilities`SetUsage[$KaxLocal, "$KaxLocal is the axis_type id mirroring KAX_LOCAL in src/thvm.h."];
+GeneralUtilities`SetUsage[$KaxGlobal, "$KaxGlobal is the axis_type id mirroring KAX_GLOBAL in src/thvm.h."];
+GeneralUtilities`SetUsage[$KaxGroupReduce, "$KaxGroupReduce is the axis_type id mirroring KAX_GROUP_REDUCE in src/thvm.h."];
 
 (* === UOP_OPT_* annotation kinds ================================== *)
-$OptUnroll::usage = $OptUpcast::usage = $OptTC::usage =
-    $OptLocal::usage = $OptGroupReduce::usage = $OptConv::usage =
-    $OptFastMath::usage = $OptSimdReduce::usage = $OptVecLoad::usage =
-        "UOp_OPT.kind value; mirrors UOP_OPT_* in src/thvm.h.";
+GeneralUtilities`SetUsage[$OptUnroll, "$OptUnroll is the UOp OPT.kind value mirroring UOP_OPT_UNROLL in src/thvm.h."];
+GeneralUtilities`SetUsage[$OptUpcast, "$OptUpcast is the UOp OPT.kind value mirroring UOP_OPT_UPCAST in src/thvm.h."];
+GeneralUtilities`SetUsage[$OptTC, "$OptTC is the UOp OPT.kind value mirroring UOP_OPT_TC in src/thvm.h."];
+GeneralUtilities`SetUsage[$OptLocal, "$OptLocal is the UOp OPT.kind value mirroring UOP_OPT_LOCAL in src/thvm.h."];
+GeneralUtilities`SetUsage[$OptGroupReduce, "$OptGroupReduce is the UOp OPT.kind value mirroring UOP_OPT_GROUP_REDUCE in src/thvm.h."];
+GeneralUtilities`SetUsage[$OptConv, "$OptConv is the UOp OPT.kind value mirroring UOP_OPT_CONV in src/thvm.h."];
+GeneralUtilities`SetUsage[$OptFastMath, "$OptFastMath is the UOp OPT.kind value mirroring UOP_OPT_FAST_MATH in src/thvm.h."];
+GeneralUtilities`SetUsage[$OptSimdReduce, "$OptSimdReduce is the UOp OPT.kind value mirroring UOP_OPT_SIMD_REDUCE in src/thvm.h."];
+GeneralUtilities`SetUsage[$OptVecLoad, "$OptVecLoad is the UOp OPT.kind value mirroring UOP_OPT_VEC_LOAD in src/thvm.h."];
 
 (* === KOP_* opcodes ============================================== *)
-$KopNone::usage = $KopUpcast::usage = $KopUnroll::usage =
-    $KopLocal::usage = $KopGroup::usage = $KopGroupTop::usage =
-    $KopSwap::usage = $KopPadTo::usage = $KopNoLocals::usage =
-    $KopTC::usage = $KopGlobal::usage = $KopFastMath::usage =
-    $KopSimdReduce::usage = $KopVecLoad::usage =
-        "KOpt.op value; mirrors KOP_* in src/thvm.h.";
+GeneralUtilities`SetUsage[$KopNone, "$KopNone is the KOpt.op value mirroring KOP_NONE in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopUpcast, "$KopUpcast is the KOpt.op value mirroring KOP_UPCAST in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopUnroll, "$KopUnroll is the KOpt.op value mirroring KOP_UNROLL in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopLocal, "$KopLocal is the KOpt.op value mirroring KOP_LOCAL in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopGroup, "$KopGroup is the KOpt.op value mirroring KOP_GROUP in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopGroupTop, "$KopGroupTop is the KOpt.op value mirroring KOP_GROUP_TOP in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopSwap, "$KopSwap is the KOpt.op value mirroring KOP_SWAP in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopPadTo, "$KopPadTo is the KOpt.op value mirroring KOP_PAD_TO in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopNoLocals, "$KopNoLocals is the KOpt.op value mirroring KOP_NO_LOCALS in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopTC, "$KopTC is the KOpt.op value mirroring KOP_TC in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopGlobal, "$KopGlobal is the KOpt.op value mirroring KOP_GLOBAL in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopFastMath, "$KopFastMath is the KOpt.op value mirroring KOP_FAST_MATH in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopSimdReduce, "$KopSimdReduce is the KOpt.op value mirroring KOP_SIMD_REDUCE in src/thvm.h."];
+GeneralUtilities`SetUsage[$KopVecLoad, "$KopVecLoad is the KOpt.op value mirroring KOP_VEC_LOAD in src/thvm.h."];
 
 (* === C-side bridge ============================================== *)
-TUOpDagApplyKOpt::usage =
-    "TUOpDagApplyKOpt[t_TTerm, op_Integer, axis_Integer, arg_Integer] " <>
-    "applies a KOpt to the kernel's UOp DAG via the C-side " <>
-    "uop_dag_apply_kopt and returns a new TTerm wrapping the rewritten " <>
-    "root.  Returns TTerm[0] on bail / unsupported KOpt.  Mirror of " <>
-    "py_uop_dag_apply_kopt in py/csource/thvm_py.c.";
+GeneralUtilities`SetUsage[TUOpDagApplyKOpt, "TUOpDagApplyKOpt[t$, op$, axis$, arg$] applies the KOpt op$ to t$'s UOp DAG via the C-side uop_dag_apply_kopt, returning a new TTerm wrapping the rewritten root.
+Returns TTerm[0] on bail or unsupported KOpt. Mirrors py_uop_dag_apply_kopt in py/csource/thvm_py.c."];
 
 (* === KOpt rule operator-forms ===================================
  * Each KOptXyz[args...] returns an operator (ReplaceAll[rules] or
@@ -58,39 +70,29 @@ TUOpDagApplyKOpt::usage =
  * directly.  Pair with TUOpDagApplyKOpt + TTermExpr for
  * cross-validation.
  *)
-KOptTC::usage =
-    "KOptTC[factor_Integer] returns an operator that wraps the inner " <>
-    "REDUCE inside STORE.value with OPT(_, TC, factor), or replaces an " <>
-    "existing TC factor.  Idempotent at the same factor.";
+GeneralUtilities`SetUsage[KOptTC, "KOptTC[factor$] returns an operator that wraps the inner REDUCE inside STORE.value with OPT(_, TC, factor$), or replaces an existing TC factor.
+Idempotent at the same factor$."];
 
-KOptGlobal::usage =
-    "KOptGlobal[axis_Integer] returns an operator that swaps every " <>
-    "RANGE leaf at the given axis_id from KAX_LOOP to KAX_GLOBAL.";
+GeneralUtilities`SetUsage[KOptGlobal, "KOptGlobal[axis$] returns an operator that swaps every RANGE leaf at axis$ from KAX_LOOP to KAX_GLOBAL."];
 
-KOptUpcast::usage = KOptUnroll::usage = KOptLocal::usage =
-    KOptGroup::usage = KOptGroupTop::usage =
-        "KOpt<X>[axis_Integer, k_Integer] returns an operator that splits " <>
-        "RANGE(axis, LOOP, N) into outer RANGE(axis, LOOP, N/k) and inner " <>
-        "RANGE(axis+1, KAX_<X>, k), substituting refs with " <>
-        "IADD(IMUL(outer, k), inner).";
+GeneralUtilities`SetUsage[KOptUpcast, "KOptUpcast[axis$, k$] returns an operator that splits RANGE(axis$, LOOP, N) into an outer RANGE(axis$, LOOP, N/k$) and an inner RANGE(axis$+1, KAX_UPCAST, k$), replacing refs with IADD(IMUL(outer, k$), inner)."];
+GeneralUtilities`SetUsage[KOptUnroll, "KOptUnroll[axis$, k$] returns an operator that splits RANGE(axis$, LOOP, N) into an outer RANGE(axis$, LOOP, N/k$) and an inner RANGE(axis$+1, KAX_UNROLL, k$), replacing refs with IADD(IMUL(outer, k$), inner)."];
+GeneralUtilities`SetUsage[KOptLocal, "KOptLocal[axis$, k$] returns an operator that splits RANGE(axis$, LOOP, N) into an outer RANGE(axis$, LOOP, N/k$) and an inner RANGE(axis$+1, KAX_LOCAL, k$), replacing refs with IADD(IMUL(outer, k$), inner)."];
+GeneralUtilities`SetUsage[KOptGroup, "KOptGroup[axis$, k$] returns an operator that splits RANGE(axis$, LOOP, N) into an outer RANGE(axis$, LOOP, N/k$) and an inner RANGE(axis$+1, KAX_LOOP, k$), replacing refs with IADD(IMUL(outer, k$), inner).
+KOP_GROUP is a retired opcode kept for back-compat; it falls through to KAX_LOOP with no OPT wrapper."];
+GeneralUtilities`SetUsage[KOptGroupTop, "KOptGroupTop[axis$, k$] returns an operator that splits RANGE(axis$, LOOP, N) into an outer RANGE(axis$, LOOP, N/k$) and an inner RANGE(axis$+1, KAX_LOOP, k$), replacing refs with IADD(IMUL(outer, k$), inner).
+KOP_GROUP_TOP is a retired opcode kept for back-compat; it falls through to KAX_LOOP with no OPT wrapper."];
 
-KOptSwap::usage =
-    "KOptSwap[a_Integer, b_Integer] returns an operator that swaps the " <>
-    "axis_ids of the two RANGE leaves.  Bidirectional; staged through " <>
-    "a fresh placeholder symbol to avoid the rewrite loop.";
+GeneralUtilities`SetUsage[KOptSwap, "KOptSwap[a$, b$] returns an operator that swaps the axis_ids of the RANGE leaves at a$ and b$.
+Bidirectional, using ReplaceAll's single-pass semantics to stay idempotent."];
 
-KOptFastMath::usage =
-    "KOptFastMath is an operator that wraps every unary FP op " <>
-    "(EXP2/LOG2/SQRT/NEG/RECIP) with OPT(_, FastMath, 0).  Idempotent.";
+GeneralUtilities`SetUsage[KOptFastMath, "KOptFastMath[expr$] wraps every unary FP op (EXP2, LOG2, SQRT) in expr$ with OPT(_, FastMath, 0), via a post-order walk.
+Idempotent."];
 
-KOptSimdReduce::usage =
-    "KOptSimdReduce is an operator that wraps every REDUCE with " <>
-    "OPT(_, SimdReduce, 0).  Idempotent.";
+GeneralUtilities`SetUsage[KOptSimdReduce, "KOptSimdReduce[expr$] wraps every REDUCE in expr$ with OPT(_, SimdReduce, 0), via a post-order walk.
+Idempotent."];
 
-KOptVecLoad::usage =
-    "KOptVecLoad[width_Integer] returns an operator that wraps every " <>
-    "INDEX_E whose addr is contiguous-shaped " <>
-    "(IADD(IMUL(_, _), RANGE)) with OPT(_, VecLoad, width).";
+GeneralUtilities`SetUsage[KOptVecLoad, "KOptVecLoad[width$] returns an operator that wraps every INDEX_E whose addr is contiguous-shaped (IADD(IMUL(_, _), RANGE)) with OPT(_, VecLoad, width$)."];
 
 Begin["`Private`"];
 

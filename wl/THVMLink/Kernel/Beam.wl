@@ -44,11 +44,12 @@
 
 BeginPackage["THVMLink`"];
 
-TBeamPick::usage = "TBeamPick[{fn1, fn2, ...}] returns a closure that runs each candidate once on first call, times them via TJit + AbsoluteTiming, and locks in the fastest.  Subsequent calls dispatch only the winner.  Each `fnN` is a no-arg `Function[{}, body]` that produces the comparison result via in-place TSet (so candidates can write to the same output buffer).";
-TBeamReport::usage = "TBeamReport[closure] returns an Association of per-candidate timings (\"index\" -> microseconds) for the closure.  Empty if calibration hasn't run yet.";
-TBeamWinner::usage = "TBeamWinner[closure] returns the index of the winning candidate (1-indexed); 0 if calibration hasn't run yet.";
-TBeamReset::usage = "TBeamReset[closure] clears the closure's cached winner so the next call re-runs the calibration.";
-TBeamClosure::usage = "TBeamClosure[<|...|>] is the wrapped form returned by TBeamPick; treat as opaque and invoke through the documented surface.";
+GeneralUtilities`SetUsage[TBeamPick, "TBeamPick[{fn$1, fn$2, $$}] returns a closure that, on first call, runs each candidate once, times them via TJit and AbsoluteTiming, and locks in the fastest; subsequent calls dispatch only the winner.
+Each fn$i is a no-arg Function[{}, body] producing the comparison result via in-place TSet, so candidates can write to the same output buffer."];
+GeneralUtilities`SetUsage[TBeamReport, "TBeamReport[closure$] returns an Association of per-candidate timings (index to microseconds) for the closure, or an empty Association if calibration has not run yet."];
+GeneralUtilities`SetUsage[TBeamWinner, "TBeamWinner[closure$] returns the 1-indexed index of the winning candidate, or 0 if calibration has not run yet."];
+GeneralUtilities`SetUsage[TBeamReset, "TBeamReset[closure$] clears the closure's cached winner so the next call re-runs the calibration."];
+GeneralUtilities`SetUsage[TBeamClosure, "TBeamClosure[assoc$] is the wrapped form returned by TBeamPick; treat it as opaque and invoke it through the documented surface."];
 
 (* Forward-decl symbols owned by later-loading siblings (Jit.wl).
    Without this, a bare `TJitClosure` reference inside Begin["`Private`"]

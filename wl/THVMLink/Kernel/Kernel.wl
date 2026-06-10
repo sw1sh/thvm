@@ -29,39 +29,59 @@
 
 BeginPackage["THVMLink`"];
 
-TKernel::usage = "TKernel[t_TTerm] wraps a UOP_KERNEL term as a typed object.  TKernel[kid_Integer] resolves a kernel id back to its pinned heap term and wraps that.  Use Information[k, \"Properties\"] for the queryable property list, k[\"Name\"] to fetch one, and k[] to dispatch.  A TKernel auto-coerces to its underlying TTerm in any UOp constructor.";
+GeneralUtilities`SetUsage[TKernel, "TKernel[t$] wraps a UOP_KERNEL TTerm t$ as a typed kernel object.
+TKernel[kid$] resolves a kernel id back to its pinned heap term and wraps that.
+Query with Information[k$, \"Properties\"] for the property list, k$[\"Name\"] to fetch one, and k$[] to dispatch.
+A TKernel auto-coerces to its underlying TTerm inside any UOp constructor."];
 
-TKernelQ::usage = "TKernelQ[k] returns True if k is a well-formed TKernel object wrapping a UOP_KERNEL term.";
+GeneralUtilities`SetUsage[TKernelQ, "TKernelQ[k$] returns True if k$ is a well-formed TKernel object wrapping a UOP_KERNEL term."];
 
-TKernelProgram::usage = "TKernelProgram[k] returns the kernel's program as a list of associations <|\"Op\", \"Sources\", \"Arg\", \"Numel\", \"Dtype\"|>.  Sources are tagged KIn[slot] for kernel-input references and KOp[idx] for SSA references to earlier program slots.";
+GeneralUtilities`SetUsage[TKernelProgram, "TKernelProgram[k$] returns the kernel's program as a list of associations <|\"Op\", \"Sources\", \"Arg\", \"Numel\", \"Dtype\"|>.
+Sources are tagged KIn[slot$] for kernel-input references and KOp[idx$] for SSA references to earlier program slots."];
 
-KIn::usage = "KIn[slot] tags a kernel-program source operand that reads from input slot `slot` (one of TKernelInputs).  Returned by TKernelProgram in each op's Sources list.";
+GeneralUtilities`SetUsage[KIn, "KIn[slot$] tags a kernel-program source operand that reads from input slot$ (one of TKernelInputs).
+Returned by TKernelProgram in each op's Sources list."];
 
-KOp::usage = "KOp[idx] tags a kernel-program source operand that reads from the output of program op index `idx`.  Returned by TKernelProgram in each op's Sources list.";
+GeneralUtilities`SetUsage[KOp, "KOp[idx$] tags a kernel-program source operand that reads from the output of program op index idx$.
+Returned by TKernelProgram in each op's Sources list."];
 
-TKernelDispatch::usage = "TKernelDispatch[k] dispatches the kernel by TWnf-firing its underlying term.  Same as calling `k[]`.";
+GeneralUtilities`SetUsage[TKernelDispatch, "TKernelDispatch[k$] dispatches the kernel by TWnf-firing its underlying term, the same as calling k$[]."];
 
 (* === kernel-entry introspection (kid-keyed, no TKernel wrap needed) === *)
 
-TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table.";
-TKernelProgramCacheSize::usage = "TKernelProgramCacheSize[] returns 0 (the kernel-program hash-cons cache is gone; the kernel body lives on the lifted UOp DAG, which is hash-consed by the heap itself).  Kept on the surface as a no-op for legacy callers.";
-TKernelProgramKey::usage = "TKernelProgramKey[kid] returns the structural key for the kernel's shared schedule slot, or 0 when the kernel has no shared axes entry.  Kernels with the same nonzero key share one C-side KpSchedule schedule slot, so autotuning one representative applies to the whole program shape.";
-TKernelInfo::usage     = "TKernelInfo[kid] returns an Association with the shape header for KERNELS[kid]: \"n_inputs\", \"n_ops\" (always 0; the per-op program array is gone), \"output_numel\", \"output_dtype\".  \"program\" is always {} - use TKernelSource for the lifted UOp DAG.";
-TKernelTileUops::usage = "TKernelTileUops[kid] returns the tile-UOp plan snapshot stored at KERNELS[kid].tile_uops, as a List of Associations with keys \"id\", \"op\", \"dtype\", \"src\", and \"extra\".  TILE_AXIS entries also expose \"axis_type\" and \"extent\".  Returns Missing[\"NotLowered\"] when no rangeify tile plan exists.  Slot 0 (TILE_NONE sentinel) is included so list indices match C-side TileUop[] indices.";
+GeneralUtilities`SetUsage[TKernelCount, "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table."];
+GeneralUtilities`SetUsage[TKernelProgramCacheSize, "TKernelProgramCacheSize[] returns 0.
+The kernel-program hash-cons cache is gone (the body lives on the lifted UOp DAG, hash-consed by the heap); kept as a no-op for legacy callers."];
+GeneralUtilities`SetUsage[TKernelProgramKey, "TKernelProgramKey[kid$] returns the structural key for the kernel's shared schedule slot, or 0 when the kernel has no shared axes entry.
+Kernels with the same nonzero key share one C-side KpSchedule slot, so autotuning one representative applies to the whole program shape."];
+GeneralUtilities`SetUsage[TKernelInfo, "TKernelInfo[kid$] returns the shape header for KERNELS[kid$] as an Association: \"n_inputs\", \"n_ops\", \"output_numel\", \"output_dtype\".
+\"n_ops\" is always 0 and \"program\" is always {} (the per-op program array is gone); use TKernelSource for the lifted UOp DAG."];
+GeneralUtilities`SetUsage[TKernelTileUops, "TKernelTileUops[kid$] returns the tile-UOp plan snapshot at KERNELS[kid$].tile_uops as a List of Associations with keys \"id\", \"op\", \"dtype\", \"src\", \"extra\".
+TILE_AXIS entries also expose \"axis_type\" and \"extent\". Slot 0 (the TILE_NONE sentinel) is included so list indices match C-side TileUop[] indices.
+Returns Missing[\"NotLowered\"] when no rangeify tile plan exists."];
 
 (* === codegen / profiling surface (delegated to TKernel properties) === *)
 
-TKernelSource::usage      = "TKernelSource[kid] / TKernelSource[kid, backend] returns the source kid's program would render to on the named backend (\"C\" / \"Metal\").  Default backend is the active one (DEV env var; \"C\" otherwise).  Empty string when kernel_lift_to_uop declines (n_inputs > 30, no scalar arena, etc.) - the kernel falls back to the per-op interpreter.  Property surface: TKernel[kid][\"Source\"] / TKernel[kid][\"Source\", backend].";
-TKernelFlops::usage         = "TKernelFlops[kid] = TKernel[kid][\"Flops\"].  Static FLOPS estimate for one execution of kid (sum over the lifted UOp DAG: 1 flop per elementwise op per element, 1 flop per REDUCE source element).  0 for movement / load.";
-TKernelDispatchKind::usage  = "TKernelDispatchKind[kid] = TKernel[kid][\"DispatchKind\"].  The route the last fire of kid took: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", \"interpreter\", \"metal-jit\", \"metal-op\", \"tile\", \"metal-tile\", \"metal-gemm\", \"metal-conv\", or \"metal-alias\".";
-TKernelDispatchCount::usage = "TKernelDispatchCount[kid] = TKernel[kid][\"DispatchCount\"].  Cumulative number of times kid has fired since thvm_init.";
-TKernelTotalUs::usage       = "TKernelTotalUs[kid] = TKernel[kid][\"TotalUs\"].  Cumulative wallclock microseconds across every fire of kid.";
-TKernelJitDylibPath::usage  = "TKernelJitDylibPath[kid] = TKernel[kid][\"JitDylibPath\"].  On-disk path the JIT cache uses for kid's compiled .dylib (deterministic from the program hash).  File may not exist if the JIT bailed at codegen.";
-TKernelProfile::usage       = "TKernelProfile[kid] returns Information[TKernel[kid]] - an Association of every property listed by Information[k, \"Properties\"], including the profiling fields.";
-TProfileAll::usage          = "TProfileAll[] returns TKernelProfile for every live kernel, keyed by kid.";
-TProfileDelta::usage        = "TProfileDelta[before, after] subtracts two TProfileAll[] snapshots and returns only kernels that fired in the window.  DispatchCount, TotalUs, AvgUs, and GFlopsPerSec describe the delta while static fields such as ProgramKey come from the after snapshot.";
-TProfileProgramGroups::usage = "TProfileProgramGroups[profile] groups a TProfileAll[] snapshot or TProfileDelta[] result by nonzero TKernelProgramKey, returning rows sorted by TotalUs.  This is the profile view used for per-program-shape autotune triage.";
-TProfileFusionGaps::usage   = "TProfileFusionGaps[profile] annotates TProfileProgramGroups[profile] with rangeify/tile/proposer status and returns hot groups that are not yet tile-tunable.  Useful with TMetalMemoryProfile[] to find fusion work that matters for both time and retained memory.";
+GeneralUtilities`SetUsage[TKernelSource, "TKernelSource[kid$] returns the source kid$'s program renders to on the active backend (the DEV env var, \"C\" otherwise).
+TKernelSource[kid$, backend$] renders on the named backend \"C\" or \"Metal\".
+Returns an empty string when kernel_lift_to_uop declines (too many inputs, no scalar arena, etc.) and the kernel falls back to the per-op interpreter.
+Equivalent property surface: TKernel[kid$][\"Source\"] and TKernel[kid$][\"Source\", backend$]."];
+GeneralUtilities`SetUsage[TKernelFlops, "TKernelFlops[kid$] gives the static flop estimate for one execution of kid$, equal to TKernel[kid$][\"Flops\"].
+Sums over the lifted UOp DAG (1 flop per elementwise op per element, 1 flop per reduce source element); 0 for movement and load."];
+GeneralUtilities`SetUsage[TKernelDispatchKind, "TKernelDispatchKind[kid$] gives the route the last fire of kid$ took, equal to TKernel[kid$][\"DispatchKind\"].
+Possible routes: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", \"interpreter\", \"metal-jit\", \"metal-op\", \"tile\", \"metal-tile\", \"metal-gemm\", \"metal-conv\", \"metal-alias\"."];
+GeneralUtilities`SetUsage[TKernelDispatchCount, "TKernelDispatchCount[kid$] gives the cumulative number of times kid$ has fired since thvm_init, equal to TKernel[kid$][\"DispatchCount\"]."];
+GeneralUtilities`SetUsage[TKernelTotalUs, "TKernelTotalUs[kid$] gives the cumulative wallclock microseconds across every fire of kid$, equal to TKernel[kid$][\"TotalUs\"]."];
+GeneralUtilities`SetUsage[TKernelJitDylibPath, "TKernelJitDylibPath[kid$] gives the on-disk path the JIT cache uses for kid$'s compiled .dylib, equal to TKernel[kid$][\"JitDylibPath\"].
+The path is deterministic from the program hash; the file may not exist if the JIT bailed at codegen."];
+GeneralUtilities`SetUsage[TKernelProfile, "TKernelProfile[kid$] returns Information[TKernel[kid$]], an Association of every property listed by Information[k$, \"Properties\"] including the profiling fields."];
+GeneralUtilities`SetUsage[TProfileAll, "TProfileAll[] returns TKernelProfile for every live kernel, keyed by kid."];
+GeneralUtilities`SetUsage[TProfileDelta, "TProfileDelta[before$, after$] subtracts two TProfileAll[] snapshots and returns only the kernels that fired in the window.
+DispatchCount, TotalUs, AvgUs, and GFlopsPerSec describe the delta; static fields such as ProgramKey come from the after$ snapshot."];
+GeneralUtilities`SetUsage[TProfileProgramGroups, "TProfileProgramGroups[profile$] groups a TProfileAll[] snapshot or TProfileDelta[] result by nonzero TKernelProgramKey, returning rows sorted by TotalUs.
+This is the profile view used for per-program-shape autotune triage."];
+GeneralUtilities`SetUsage[TProfileFusionGaps, "TProfileFusionGaps[profile$] annotates TProfileProgramGroups[profile$] with rangeify, tile, and proposer status and returns the hot groups not yet tile-tunable.
+Useful with TMetalMemoryProfile[] to find fusion work that matters for both time and retained memory."];
 
 (* === axis-typed scheduling slot (mirrors tinygrad's Kernel.opt) ===
    WL is a thin shell - the axis structure + apply-opt rewrite logic
@@ -69,25 +89,43 @@ TProfileFusionGaps::usage   = "TProfileFusionGaps[profile] annotates TProfilePro
    block just packages the C-side state into typed WL objects with
    summary boxes. *)
 
-TOpt::usage = "TOpt[op_String, axis_Integer, arg_] is a typed kernel-optimization action.  Mirrors tinygrad's `Opt(OptOps.UPCAST, axis=2, arg=4)` (tinygrad/codegen/opt/kernel.py:Opt).  Supported ops: \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GLOBAL\", \"GROUP\", \"GROUPTOP\", \"SWAP\", and \"TC\" for recognized f32 MMA/GEMM kernels.  Reserved ops \"PADTO\" and \"NOLOCALS\" are recognized but rejected until a renderer consumes them.  axis is 0-indexed.  arg meaning is op-specific (for UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP: split factor; for GLOBAL: full current axis size; for SWAP: target axis index; for TC: MMA tile size).  Apply via `TKernelApplyOpt[kid, TOpt[...]]`; introspect via `TKernelOpts[kid]`.";
+GeneralUtilities`SetUsage[TOpt, "TOpt[op$, axis$, arg$] is a typed kernel-optimization action, mirroring tinygrad's Opt(OptOps.UPCAST, axis=2, arg=4).
+op$ is one of \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GLOBAL\", \"GROUP\", \"GROUPTOP\", \"SWAP\", or \"TC\" (recognized f32 MMA/GEMM kernels); \"PADTO\" and \"NOLOCALS\" are reserved and rejected until a renderer consumes them.
+axis$ is 0-indexed; arg$ is op-specific (split factor for UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP, full axis size for GLOBAL, target axis for SWAP, MMA tile size for TC).
+Apply via TKernelApplyOpt[kid$, TOpt[$$]] and introspect via TKernelOpts[kid$]."];
 
-TKernelOpts::usage = "TKernelOpts[kid] returns a wrapped `TKernelOpts[<|\"Kid\", \"AxisTypes\", \"FullShape\", \"Applied\"|>]` summarising the kernel's axis-typed scheduling plan as carried in C.  AxisTypes parallels FullShape: each entry is one of \"LOOP\" / \"REDUCE\" / \"UPCAST\" / \"UNROLL\" / \"LOCAL\" / \"GLOBAL\" / \"GROUP_REDUCE\".  Default (no opts applied) is all LOOP for elementwise output axes plus a trailing REDUCE for reduce kernels.  Applied is the chronological list of TOpt actions.";
+GeneralUtilities`SetUsage[TKernelOpts, "TKernelOpts[kid$] returns a wrapped TKernelOpts[<|\"Kid\", \"AxisTypes\", \"FullShape\", \"Applied\"|>] summarising the kernel's axis-typed scheduling plan as carried in C.
+AxisTypes parallels FullShape; each entry is one of \"LOOP\", \"REDUCE\", \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GLOBAL\", \"GROUP_REDUCE\". The default (no opts applied) is all LOOP for elementwise output axes plus a trailing REDUCE for reduce kernels.
+Applied is the chronological list of TOpt actions."];
 
-TKernelApplyOpt::usage = "TKernelApplyOpt[kid, TOpt[op, axis, arg]] mutates the kernel's C-side scheduling plan: splits the indicated axis (UPCAST/UNROLL/LOCAL/GROUP), marks a full LOOP axis as GLOBAL, swaps two axes (SWAP), or records TC metadata for recognized f32 MMA/GEMM kernels.  Returns the updated TKernelOpts wrapper.  Returns Failure[\"opt-rejected\"] on validation failure (axis out of range, arg doesn't divide axis size, opts table full, unsupported TC size, or reserved opt not implemented).";
+GeneralUtilities`SetUsage[TKernelApplyOpt, "TKernelApplyOpt[kid$, TOpt[op$, axis$, arg$]] mutates the kernel's C-side scheduling plan and returns the updated TKernelOpts wrapper.
+It splits the indicated axis (UPCAST/UNROLL/LOCAL/GROUP), marks a full LOOP axis as GLOBAL, swaps two axes (SWAP), or records TC metadata for recognized f32 MMA/GEMM kernels.
+Returns Failure[\"opt-rejected\"] on validation failure (axis out of range, arg not dividing the axis size, opts table full, unsupported TC size, or reserved opt not implemented)."];
 
-TKernelProposed::usage = "TKernelProposed[kid] returns a list of `TOpt[...]` candidates suggested by the C-side shape-heuristic proposer (`kernel_opts_propose` in `src/codegen/propose.c`).  Today's CPU heuristics propose UNROLL on reduce axes plus UPCAST on elementwise output axes where divisible.  With DEV=metal, recognized f32 GEMM kernels propose TC tile sizes; with DEV=metal and THVM_TILE=1, supported f32 tile kernels propose LOCAL factors for elementwise output axes and GROUP factors for scalar/tile reduce axes.  TKernelAutotune / TKernelVariants consume this list.";
+GeneralUtilities`SetUsage[TKernelProposed, "TKernelProposed[kid$] returns a list of TOpt[$$] candidates suggested by the C-side shape-heuristic proposer.
+CPU heuristics propose UNROLL on reduce axes plus UPCAST on divisible elementwise output axes. With DEV=metal, recognized f32 GEMM kernels propose TC tile sizes; with DEV=metal and THVM_TILE=1, supported f32 tile kernels propose LOCAL factors for elementwise output axes and GROUP factors for reduce axes.
+TKernelAutotune and TKernelVariants consume this list."];
 
-TKernelVariant::usage = "TKernelVariant[<|\"Kid\" -> _, \"Opt\" -> TOpt | None, \"WallUs\" -> _Real|>] is a typed wrapper for one proposed-or-measured kernel variant.  Returned by TKernelVariants[kid].  Carries summary boxes so notebook output renders the (op, axis, arg) triple + measured wallclock per fire next to the kid.";
+GeneralUtilities`SetUsage[TKernelVariant, "TKernelVariant[<|\"Kid\", \"Opt\", \"WallUs\"|>] is a typed wrapper for one proposed-or-measured kernel variant, returned by TKernelVariants[kid$].
+Opt is a TOpt or None and WallUs is the measured wallclock per fire. Carries summary boxes so notebook output renders the (op, axis, arg) triple and timing next to the kid."];
 
-TKernelVariants::usage = "TKernelVariants[kid] returns a list of TKernelVariant: one for the no-opt baseline followed by one per TKernelProposed candidate.  Each has WallUs measured by BEAM_RUNS back-to-back fires (default 5, min wallclock).  Like TKernelAutotune internally but reports every candidate's measurement instead of just applying the winner - useful for inspecting what the proposer found and why a particular winner was picked.  Side effect: leaves the kernel's KpSchedule at the BASELINE (no opts applied) since the measurements imply the user wants to inspect, not commit.";
+GeneralUtilities`SetUsage[TKernelVariants, "TKernelVariants[kid$] returns a list of TKernelVariant: one for the no-opt baseline followed by one per TKernelProposed candidate.
+Each WallUs is measured by BEAM_RUNS back-to-back fires (default 5, min wallclock). Like TKernelAutotune internally but reports every candidate's measurement instead of just applying the winner, useful for inspecting what the proposer found.
+Leaves the kernel's KpSchedule at the baseline (no opts applied), since inspecting implies the user does not want to commit."];
 
-TKernelAutotune::usage = "TKernelAutotune[kid] benchmarks every TKernelProposed candidate against the no-opt baseline (BEAM_RUNS dispatches each, default 5, min wallclock), optionally expands the best candidates into short opt sequences (AUTOTUNE_DEPTH, BEAM), applies the winning sequence to the kernel's C-side KpSchedule, and returns the resulting TKernelOpts.  Winners are cached on disk under $XDG_CACHE_HOME/thvm/autotune or AUTOTUNE_CACHE_DIR unless AUTOTUNE_CACHE=0 or AUTOTUNE_DISABLE=1.  Metal LOCAL winners record both LOCAL and the matching GLOBAL mark; Metal TC winners record the chosen MMA tile size.  Because axes live on a shared schedule slot, the winner auto-applies to other kernels with the same structural key.  Returns the unchanged TKernelOpts (no opts applied) if no candidate sequence beat baseline.";
+GeneralUtilities`SetUsage[TKernelAutotune, "TKernelAutotune[kid$] benchmarks every TKernelProposed candidate against the no-opt baseline, applies the winning sequence to the kernel's C-side KpSchedule, and returns the resulting TKernelOpts.
+Each candidate runs BEAM_RUNS dispatches (default 5, min wallclock); the best candidates optionally expand into short opt sequences (AUTOTUNE_DEPTH, BEAM). Winners are cached on disk under $XDG_CACHE_HOME/thvm/autotune or AUTOTUNE_CACHE_DIR unless AUTOTUNE_CACHE=0 or AUTOTUNE_DISABLE=1.
+Because axes live on a shared schedule slot, the winner auto-applies to other kernels with the same structural key. Returns the unchanged TKernelOpts when no candidate beat baseline."];
 
-TKernelAutotuneAll::usage = "TKernelAutotuneAll[] runs TKernelAutotune on every currently-live kernel (kid 1..TKernelCount[]-1) and returns an Association mapping kid -> TKernelOpts after tuning.  Useful for exhaustive diagnostics; TKernelAutotuneUnique[] is usually cheaper for training-loop pre-warm.";
+GeneralUtilities`SetUsage[TKernelAutotuneAll, "TKernelAutotuneAll[] runs TKernelAutotune on every currently-live kernel and returns an Association mapping each kid to its tuned TKernelOpts.
+Useful for exhaustive diagnostics; TKernelAutotuneUnique[] is usually cheaper for training-loop pre-warm."];
 
-TKernelAutotuneUnique::usage = "TKernelAutotuneUnique[] groups live kernels with proposer candidates by nonzero TKernelProgramKey and runs TKernelAutotune on one representative per shared schedule shape.  Zero-key kernels are tuned individually because they do not share a KpSchedule slot.  Returns an Association mapping representative kid -> TKernelOpts.";
+GeneralUtilities`SetUsage[TKernelAutotuneUnique, "TKernelAutotuneUnique[] groups live kernels with proposer candidates by nonzero TKernelProgramKey and runs TKernelAutotune on one representative per shared schedule shape.
+Zero-key kernels are tuned individually because they do not share a KpSchedule slot. Returns an Association mapping each representative kid to its TKernelOpts."];
 
-TKernelAutotuneTop::usage = "TKernelAutotuneTop[n] tunes at most n representative kernels from the current TProfileAll[] snapshot, ordered by static Flops.  TKernelAutotuneTop[profile, n, metric] uses an explicit TProfileAll[]/TProfileDelta[] snapshot and metric \"Flops\", \"ReduceFlops\", \"TotalUs\", or \"DispatchCount\".  \"ReduceFlops\" ignores non-reduction program groups.  Only groups with TKernelProposed candidates are tuned, so this is the bounded alternative to TKernelAutotuneUnique[] for memory-sensitive training-loop canaries.";
+GeneralUtilities`SetUsage[TKernelAutotuneTop, "TKernelAutotuneTop[n$] tunes at most n$ representative kernels from the current TProfileAll[] snapshot, ordered by static Flops.
+TKernelAutotuneTop[profile$, n$, metric$] uses an explicit TProfileAll[] or TProfileDelta[] snapshot and metric \"Flops\", \"ReduceFlops\", \"TotalUs\", or \"DispatchCount\" (\"ReduceFlops\" ignores non-reduction program groups).
+Only groups with TKernelProposed candidates are tuned, making this the bounded alternative to TKernelAutotuneUnique[] for memory-sensitive training-loop canaries."];
 
 (* === C-side kernel side-table accessors ===
    Live here (rather than MemoryPlan.wl) because they're the core
@@ -95,13 +133,20 @@ TKernelAutotuneTop::usage = "TKernelAutotuneTop[n] tunes at most n representativ
    kid -> kernel info needs them.  Tensor.wl owns the parallel
    TenDesc accessors; MemoryPlan.wl owns the per-backend buf
    accessors. *)
-TKernelTable::usage  = "TKernelTable[] returns a list of {n_inputs, output_tid, fired, spliced, consumer_count, output_numel, output_dtype} per kernel (kid 1 .. KERNELS_NEXT - 1).  Snapshot, not a live view.";
-TKernelInputs::usage = "TKernelInputs[kid] returns the input_tids of kernel `kid` (length n_inputs).";
-TKernelStoreRoot::usage = "TKernelStoreRoot[kid] returns the lifted UOP DAG (cached_lift.store_root) as a TTerm.  Walk with TTermExpr / TTermSubexprs to inspect for residual UOP_BUFFERIZE / TAG_TEN leaves the renderer would lower to a `buf{loc}` undeclared-identifier fallback.  Returns Missing[\"LiftDeclined\"] when the kernel has no lifted DAG (kernel_lift_to_uop returned 0).";
-TKernelHasBufferizeLeak::usage = "TKernelHasBufferizeLeak[kid] returns True if the kernel's lifted DAG carries an unresolved UOP_BUFFERIZE leaf (i.e. one the unified rewriter failed to map to a UOP_BUFFER input slot).  Such leaks emit `buf{loc}` undeclared identifiers in MSL/C99 and fail Metal compile.  Cheap structural check; no dispatch.";
-TKernelHasTenLeak::usage = "TKernelHasTenLeak[kid] returns True if the kernel's lifted DAG carries a bare TAG_TEN leaf (same fallback semantics as BUFFERIZE leak).  Pair with TKernelHasBufferizeLeak.";
-TKernelAuditLeaks::usage = "TKernelAuditLeaks[] returns a List of <|Kid, BufferizeLeak, TenLeak|> rows for every live kernel that has at least one leak.  Use to triage which kernels would fail Metal compile before any GPU dispatch.";
-TKernelLeakReport::usage = "TKernelLeakReport[kid] returns <|Kid, BufferizeLeak, TenLeak, FallbackRefs, BufLines|>: FallbackRefs counts distinct `buf<NNNN>` identifiers in TKernelSource[kid, \"Metal\"]; BufLines lists the (1-based) source-line numbers that reference such fallbacks.  Use to pinpoint which body terms the unified rewriter failed to lower.";
+GeneralUtilities`SetUsage[TKernelTable, "TKernelTable[] returns a list of {n_inputs, output_tid, fired, spliced, consumer_count, output_numel, output_dtype} per live kernel.
+This is a snapshot, not a live view."];
+GeneralUtilities`SetUsage[TKernelInputs, "TKernelInputs[kid$] returns the input_tids of kernel kid$ (length n_inputs)."];
+GeneralUtilities`SetUsage[TKernelStoreRoot, "TKernelStoreRoot[kid$] returns the lifted UOP DAG (cached_lift.store_root) as a TTerm.
+Walk with TTermExpr or TTermSubexprs to inspect for residual UOP_BUFFERIZE or TAG_TEN leaves the renderer would lower to a buf{loc} undeclared-identifier fallback.
+Returns Missing[\"LiftDeclined\"] when the kernel has no lifted DAG."];
+GeneralUtilities`SetUsage[TKernelHasBufferizeLeak, "TKernelHasBufferizeLeak[kid$] returns True if the kernel's lifted DAG carries an unresolved UOP_BUFFERIZE leaf the unified rewriter failed to map to a UOP_BUFFER input slot.
+Such leaks emit buf{loc} undeclared identifiers in MSL/C99 and fail Metal compile. Cheap structural check, no dispatch."];
+GeneralUtilities`SetUsage[TKernelHasTenLeak, "TKernelHasTenLeak[kid$] returns True if the kernel's lifted DAG carries a bare TAG_TEN leaf (same fallback semantics as a BUFFERIZE leak).
+Pair with TKernelHasBufferizeLeak."];
+GeneralUtilities`SetUsage[TKernelAuditLeaks, "TKernelAuditLeaks[] returns a List of <|Kid, BufferizeLeak, TenLeak|> rows for every live kernel that has at least one leak.
+Use to triage which kernels would fail Metal compile before any GPU dispatch."];
+GeneralUtilities`SetUsage[TKernelLeakReport, "TKernelLeakReport[kid$] returns <|Kid, BufferizeLeak, TenLeak, FallbackRefs, BufLines|> for kid$.
+FallbackRefs counts the distinct buf<NNNN> identifiers in TKernelSource[kid$, \"Metal\"] and BufLines lists the 1-based source lines that reference them. Use to pinpoint which body terms the unified rewriter failed to lower."];
 
 (* === explosion-audit helpers ============================
    Characterize a kernel-count / memory blowup (bench-train,
@@ -111,17 +156,23 @@ TKernelLeakReport::usage = "TKernelLeakReport[kid] returns <|Kid, BufferizeLeak,
    bytes.  All pure WL on top of TKernelSource + TMemoryPlan;
    no GPU work. *)
 
-TKernelSourceHashes::usage = "TKernelSourceHashes[] returns <|kid -> hash|> where hash is the MD5 of TKernelSource[kid, \"Metal\"].  Kernels whose Metal source is empty (lift declined) hash an empty string and group together; use TKernelDuplicateGroups[] to surface the structural duplicates downstream.";
+GeneralUtilities`SetUsage[TKernelSourceHashes, "TKernelSourceHashes[] returns an Association mapping each kid to the MD5 hash of TKernelSource[kid$, \"Metal\"].
+Kernels whose Metal source is empty (lift declined) hash an empty string and group together; use TKernelDuplicateGroups[] to surface the structural duplicates downstream."];
 
-TKernelDuplicateGroups::usage = "TKernelDuplicateGroups[] returns <|hash -> {kid1, kid2, ...}|> for every MSL hash that backs >= 2 kernels, sorted by group size descending.  Empty-source kernels (lift declined) are skipped so they don't dominate the report.";
+GeneralUtilities`SetUsage[TKernelDuplicateGroups, "TKernelDuplicateGroups[] returns an Association mapping each MSL hash to its list of kids {kid$1, kid$2, $$}, for every hash backing at least two kernels, sorted by group size descending.
+Empty-source kernels (lift declined) are skipped so they don't dominate the report."];
 
-TKernelOpHistogram::usage = "TKernelOpHistogram[] returns <|opName -> count|> summarising the kinds of work the live kernel fleet does.  Counts are coarse (one tally per kernel that mentions the signature in its MSL, not per dynamic instance): keys cover matmul, conv, reduce_sum, reduce_max, elementwise, exp, log, sqrt, rsqrt, cast, compare.";
+GeneralUtilities`SetUsage[TKernelOpHistogram, "TKernelOpHistogram[] returns an Association mapping each op name to a count, summarising the kinds of work the live kernel fleet does.
+Counts are coarse (one tally per kernel that mentions the signature in its MSL, not per dynamic instance); keys cover matmul, conv, reduce_sum, reduce_max, elementwise, exp, log, sqrt, rsqrt, cast, compare."];
 
-TKernelOutputBytes::usage = "TKernelOutputBytes[] returns <|kid -> bytes|>, the output-buffer size of every live kernel, derived from TMemoryPlan[]'s producer_kid -> nbytes index.  Kernels with no buffer entry (external / unrealized) map to 0.";
+GeneralUtilities`SetUsage[TKernelOutputBytes, "TKernelOutputBytes[] returns an Association mapping each kid to its output-buffer size in bytes, derived from TMemoryPlan[]'s producer_kid index.
+Kernels with no buffer entry (external or unrealized) map to 0."];
 
-TKernelMemoryTopProducers::usage = "TKernelMemoryTopProducers[n_Integer:20] returns the top n kernels by output-buffer bytes, each as <|Kid, OutputBytes, MSLLines, HashGroup|>.  HashGroup is the list of kids that share the kernel's MSL hash (length 1 when unique).  Pair with TKernelDuplicateGroups[] to triage the explosion's hot allocations.";
+GeneralUtilities`SetUsage[TKernelMemoryTopProducers, "TKernelMemoryTopProducers[] returns the top kernels by output-buffer bytes, each as <|Kid, OutputBytes, MSLLines, HashGroup|>.
+TKernelMemoryTopProducers[n$] returns the top n$ (default 20). HashGroup is the list of kids sharing the kernel's MSL hash (length 1 when unique); pair with TKernelDuplicateGroups[] to triage hot allocations."];
 
-TBufferProducerKid::usage = "TBufferProducerKid[bufid] returns the kid that produced buffer `bufid`, or 0 when the buffer is external (no producing kernel).  Pure WL: walks the TMemoryPlan[] Bufs records and returns the recorded producer_kid for the matching buf entry.";
+GeneralUtilities`SetUsage[TBufferProducerKid, "TBufferProducerKid[bufid$] returns the kid that produced buffer bufid$, or 0 when the buffer is external (no producing kernel).
+Pure WL: walks the TMemoryPlan[] Bufs records and returns the recorded producer_kid for the matching buf entry."];
 
 (* Forward-decl TTensTable: defined in Tensor.wl which loads
    alphabetically AFTER Kernel.wl.  Without the public stub here,

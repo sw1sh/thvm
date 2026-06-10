@@ -26,9 +26,12 @@
 
 BeginPackage["THVMLink`"];
 
-TMemoryPlan::usage = "TMemoryPlan[] returns a TMemoryPlan[<|...|>] snapshot of the live thvm schedule, with per-kernel topological depths and per-buf (alloc_depth, last_use_depth, alive_span, status) intervals derived from the producer_kid / input_tids edges.  Aliasing-aware: TenDescs sharing a buf_id collapse into one Bufs entry whose alias_tids lists every contributing tid.";
+GeneralUtilities`SetUsage[TMemoryPlan, "TMemoryPlan[] returns a TMemoryPlan[<|$$|>] snapshot of the live thvm schedule.
+The object holds per-kernel topological depths and per-buf alloc_depth, last_use_depth, alive_span, and status intervals derived from the producer_kid / input_tids edges.
+It is aliasing-aware: TenDescs sharing a buf_id collapse into one Bufs entry whose alias_tids lists every contributing tid."];
 
-TMemoryPlanReport::usage = "TMemoryPlanReport[plan] returns a Column with top-5 largest bufs by nbytes, top-5 longest-lived by alive_span, count by status, and total live bytes for the active backend.  Pass a TMemoryPlan[<|...|>] object (typically TMemoryPlan[]).";
+GeneralUtilities`SetUsage[TMemoryPlanReport, "TMemoryPlanReport[plan$] returns a Column summarizing plan$, a TMemoryPlan[<|$$|>] object (typically TMemoryPlan[]).
+The report lists the top-5 largest bufs by nbytes, the top-5 longest-lived by alive_span, counts by status, and total live bytes for the active backend."];
 
 (* TMemoryPlanGantt -- declared and defined in Visualization.wl
    alongside THeapGraph / TScheduleGraph; this file owns the snapshot
@@ -45,12 +48,20 @@ TMemoryPlanReport::usage = "TMemoryPlanReport[plan] returns a Column with top-5 
    side-table accessors).  TTensTable / TTensCount / TTotalBufBytes
    are declared in Tensor.wl (tensor side-table accessors).
    MemoryPlan.wl owns only the per-backend buf-table accessors. *)
-TCpuBufTable::usage   = "TCpuBufTable[] returns a list of {nbytes, refcount, preserved, freeable, owns_data} per CPU buffer (buf_id 1 .. CPU_BUFS_NEXT - 1).";
-TMetalBufTable::usage = "TMetalBufTable[] returns a list of {nbytes, refcount} per Metal buffer.  Empty when the dylib was built without Metal support.";
-TMetalBufSummary::usage = "TMetalBufSummary[] returns <|\"LiveBytes\", \"RetainedBytes\", \"DeferredBytes\", \"DeferredCount\", \"FreelistCount\", \"PeakLiveBytes\", \"PeakRetainedBytes\", \"PeakDeferredBytes\"|> for the Metal buffer table.  RetainedBytes includes recycle-list buffers that no live tensor references.";
-TMetalMemoryProfile::usage = "TMetalMemoryProfile[] returns a flat Metal memory profile derived from TMetalBufSummary[] and TMetalBufTable[], including buffer counts, freelist bytes, and largest live/retained buffer sizes.";
-TMetalGpuTime::usage = "TMetalGpuTime[] returns <|\"TotalUs\", \"FlushCount\", \"AvgUsPerFlush\"|>: the process-wide Metal GPU execution time so far -- summed [cmd GPUEndTime]-[cmd GPUStartTime] microseconds across every command-buffer flush/submit since metal_init, plus the flush count.  Take a delta around a timed loop for a real per-step GPU-compute number (separate from a WL-side wall=...ms that also includes re-encode / scheduler overhead).  Zero on a non-Metal build.";
-TMetalPerOpProfile::usage = "TMetalPerOpProfile[] returns <|kid -> <|\"GpuUs\", \"GpuSamples\", \"DispatchCount\", \"Flops\", \"GFlopsPerSec\", \"DispatchKind\"|>|> -- a true per-kernel GPU-time breakdown.  Only populated when the dylib ran with THVM_METAL_PROFILE_PEROP=1 on the Metal backend: each kernel then dispatches in its own command buffer, so [cmd GPUEndTime]-[cmd GPUStartTime] is a per-kernel number (vs. TMetalGpuTime[], which is one flush covering many kernels).  GpuUs is cumulative across GpuSamples fires; divide for per-fire.  GFlopsPerSec uses the static cg_kernel_flops estimate.  Empty Association on a non-Metal build or a run without THVM_METAL_PROFILE_PEROP=1.  Pair with TKernelInfo / TKernelOpts / inputShapes for the bottleneck kernel's shape.";
+GeneralUtilities`SetUsage[TCpuBufTable, "TCpuBufTable[] returns a list of {nbytes, refcount, preserved, freeable, owns_data} rows, one per live CPU buffer."];
+GeneralUtilities`SetUsage[TMetalBufTable, "TMetalBufTable[] returns a list of {nbytes, refcount} rows, one per Metal buffer.
+The list is empty when the dylib was built without Metal support."];
+GeneralUtilities`SetUsage[TMetalBufSummary, "TMetalBufSummary[] returns an Association keyed by \"LiveBytes\", \"RetainedBytes\", \"DeferredBytes\", \"DeferredCount\", \"FreelistCount\", \"PeakLiveBytes\", \"PeakRetainedBytes\", and \"PeakDeferredBytes\" for the Metal buffer table.
+RetainedBytes includes recycle-list buffers that no live tensor references."];
+GeneralUtilities`SetUsage[TMetalMemoryProfile, "TMetalMemoryProfile[] returns a flat Metal memory profile derived from TMetalBufSummary[] and TMetalBufTable[].
+It adds buffer counts, freelist bytes, and largest live and retained buffer sizes to the summary fields."];
+GeneralUtilities`SetUsage[TMetalGpuTime, "TMetalGpuTime[] returns <|\"TotalUs\", \"FlushCount\", \"AvgUsPerFlush\"|>, the process-wide Metal GPU execution time so far.
+TotalUs sums GPUEndTime minus GPUStartTime microseconds across every command-buffer flush since metal_init; FlushCount is the flush count.
+Take a delta around a timed loop for a per-step GPU-compute number, separate from WL-side wall time that also includes re-encode and scheduler overhead. Returns zero on a non-Metal build."];
+GeneralUtilities`SetUsage[TMetalPerOpProfile, "TMetalPerOpProfile[] returns a per-kernel GPU-time breakdown as an Association from kid$ to <|\"GpuUs\", \"GpuSamples\", \"DispatchCount\", \"Flops\", \"GFlopsPerSec\", \"DispatchKind\"|>.
+It is populated only when the dylib ran with THVM_METAL_PROFILE_PEROP=1 on the Metal backend, where each kernel dispatches in its own command buffer so GPUEndTime minus GPUStartTime is a per-kernel number, unlike TMetalGpuTime[] which is one flush covering many kernels.
+GpuUs is cumulative across GpuSamples fires, so divide for a per-fire number; GFlopsPerSec uses the static kernel-flops estimate.
+Returns an empty Association on a non-Metal build or a run without THVM_METAL_PROFILE_PEROP=1. Pair with TKernelInfo, TKernelOpts, or inputShapes for the bottleneck kernel's shape."];
 
 Begin["`Private`"];
 

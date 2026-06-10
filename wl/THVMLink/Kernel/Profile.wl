@@ -48,25 +48,33 @@
 
 BeginPackage["THVMLink`"];
 
-TProfile::usage = "TProfile[] returns an Association snapshotting the current runtime state (heap cells by tag, tensors, kernels, ITRS).  TProfile[label] sets the \"Label\" key.";
+GeneralUtilities`SetUsage[TProfile, "TProfile[] returns an Association snapshotting the current runtime state (heap cells by tag, tensors, kernels, ITRS).
+TProfile[label$] sets the \"Label\" key to label$."];
 
-TProfileTable::usage = "TProfileTable[{profile_1, ..., profile_n}] renders a Tabular comparing the headline metrics across snapshots.";
+GeneralUtilities`SetUsage[TProfileTable, "TProfileTable[{profile$1, profile$2, $$}] renders a Tabular comparing the headline metrics across snapshots."];
 
-TProfileGrowth::usage = "TProfileGrowth[{profile_1, ..., profile_n}] returns an Association of round-over-round growth ratios for HeapCells, Tensors, Kernels, MaxKernelInputs, MaxKernelOps, and per-tag cell counts.";
+GeneralUtilities`SetUsage[TProfileGrowth, "TProfileGrowth[{profile$1, profile$2, $$}] returns an Association of round-over-round growth ratios for HeapCells, Tensors, DistinctBufs, Kernels, MaxKernelInputs, and MaxKernelOps."];
 
-TProfilePlot::usage = "TProfilePlot[{profile_1, ..., profile_n}, key] line-plots metric `key` across snapshots.  Common keys: \"HeapCells\", \"Kernels\", \"MaxKernelInputs\".";
+GeneralUtilities`SetUsage[TProfilePlot, "TProfilePlot[{profile$1, profile$2, $$}, key$] line-plots metric key$ across snapshots.
+Common keys: \"HeapCells\", \"Kernels\", \"MaxKernelInputs\"."];
 
-TProfileReport::usage = "TProfileReport[profile] returns a short Column rendering of headline metrics + per-tag cell counts + per-kernel inputs/ops.  TProfileReport[{p_1, ..., p_n}] formats a sequence of snapshots side-by-side, showing growth ratios.  Use for stdout / notebook display.";
+GeneralUtilities`SetUsage[TProfileReport, "TProfileReport[profile$] returns a short string rendering of headline metrics plus per-tag cell counts.
+TProfileReport[{p$1, p$2, $$}] formats a sequence of snapshots, annotating each with round-over-round growth ratios.
+Use for stdout or notebook display."];
 
-THotCounters::usage = "THotCounters[] returns an Association of the per-context hot-path counter snapshot: heap_replace cascade calls/cells, is_redex calls, redex_enumerate calls/cells, wnf calls, realize calls, materialize calls, kernel fires, grad fires, JIT replay calls, and Metal graph replay runs.  Use to confirm whether per-step time is dominated by the substitution cascade (heap_replace_cells), chain-rule expansion (grad_fires), kernel emit/dispatch, or graph replay granularity.";
+GeneralUtilities`SetUsage[THotCounters, "THotCounters[] returns an Association of the per-context hot-path counter snapshot (keys $THotCounterNames): heap_replace calls/cells, is_redex calls, redex_enumerate calls/cells, wnf/realize/materialize calls, kernel and grad fires, JIT replay calls/dispatches/assigns, and graph replay runs/dispatches.
+Use to attribute per-step time to the substitution cascade, chain-rule expansion, kernel emit/dispatch, or graph replay."];
 
-THotCountersReset::usage = "THotCountersReset[] zeros the per-context hot-path counters.";
+GeneralUtilities`SetUsage[THotCountersReset, "THotCountersReset[] zeros the per-context hot-path counters."];
 
-THotCountersDelta::usage = "THotCountersDelta[label_String, body] resets the counters, evaluates `body` (HoldFirst), and returns <|\"Label\" -> label, \"WallMs\" -> _, \"Counters\" -> THotCounters[]|>.  Pair with THotCountersReport[{d_1, ..., d_n}] to compare per-iteration scaling.";
+GeneralUtilities`SetUsage[THotCountersDelta, "THotCountersDelta[label$, body$] resets the counters, evaluates body$ (held), and returns an Association with keys \"Label\", \"WallMs\", and \"Counters\" (a THotCounters[] snapshot).
+Pair with THotCountersReport[{d$1, d$2, $$}] to compare per-iteration scaling."];
 
-THotCountersReport::usage = "THotCountersReport[{delta_1, ..., delta_n}] renders a Tabular comparing the wallclock + counter values across THotCountersDelta snapshots, with per-counter ratios across consecutive entries.  Use to read off cubic / quadratic growth at a glance.";
+GeneralUtilities`SetUsage[THotCountersReport, "THotCountersReport[{delta$1, delta$2, $$}] renders a Tabular comparing the wallclock and counter values across THotCountersDelta snapshots, with per-counter ratios across consecutive entries.
+Use to read off quadratic or cubic growth at a glance."];
 
-$THotCounterNames::usage = "$THotCounterNames is the ordered list of counter names returned by THotCounters[].  Order matches the C-side `hot_counters_snapshot` payload in `src/instrument/hot_counters.c`.";
+GeneralUtilities`SetUsage[$THotCounterNames, "$THotCounterNames is the ordered list of counter names keying the THotCounters[] snapshot.
+Order matches the C-side hot_counters_snapshot payload in src/instrument/hot_counters.c."];
 
 (* Forward-declare bridge symbols owned by THVMLink.wl. *)
 {THeapPos, THeapBase, THeapRead, TItrs, TTagName, TTermTag,

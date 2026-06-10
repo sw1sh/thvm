@@ -18,38 +18,48 @@
 
 BeginPackage["THVMLink`"];
 
-TSet::usage = "TSet[dst, src] writes the bytes of `src` into `dst`'s backing buffer in place; `dst` keeps its TenDesc id so callers still holding it observe the new contents.  Equivalent to `TRealize[TAssign[dst, src]]; dst`.  Also installed as the WL Set UpValue on literal-TTerm LHSes, so `Evaluate[w] = expr` mutates `w` rather than rebinding the symbol.";
+GeneralUtilities`SetUsage[TSet, "TSet[dst$, src$] writes the bytes of src$ into dst$'s backing buffer in place, keeping dst$'s TenDesc id so callers still holding it see the new contents; equivalent to TRealize[TAssign[dst$, src$]]; dst$.
+Also installed as the WL Set UpValue on literal-TTerm left-hand sides, so Evaluate[w$] = expr$ mutates w$ rather than rebinding the symbol.
+Returns dst$."];
 
-TSetData::usage = "TSetData[dst, na] writes the raw bytes of NumericArray (or list/PackedArray) `na` directly into `dst`'s existing backing buffer in place, allocating NO fresh TenDesc.  The fast per-step feed path: build the input tensor once, then re-feed each step via TSetData instead of `TSet[dst, TTensorCreate[na]]`, which churns a new TenDesc + ASSIGN graph every step.  `na`'s dtype and element count must match `dst`.  Returns `dst`.  Mirrors tinygrad's Buffer.copyin (writes into the existing dest buffer, no realloc).";
+GeneralUtilities`SetUsage[TSetData, "TSetData[dst$, na$] writes the raw bytes of NumericArray (or list/PackedArray) na$ directly into dst$'s existing backing buffer in place, allocating no fresh TenDesc.
+This is the fast per-step feed path: build the input tensor once, then re-feed each step via TSetData instead of TSet[dst$, TTensorCreate[na$]], which churns a new TenDesc and ASSIGN graph every step.
+na$'s dtype and element count must match dst$. Returns dst$."];
 
 (* === C-side TenDesc side-table accessors ===
    Live here (rather than MemoryPlan.wl) because they're the core
    tensor-introspection bridge.  Kernel.wl owns the parallel
    KernelEntry accessors; MemoryPlan.wl owns per-backend buf
    accessors. *)
-TTensTable::usage     = "TTensTable[] returns a list of {producer_kid, buf_id, dtype, view_numel, view_contiguous, refcount, backend_id} per TenDesc (tid 1 .. TENS_NEXT - 1).  backend_id is 1 for CPU, 2 for Metal, 0 for unbound.";
-TTensCount::usage     = "TTensCount[] returns the number of allocated TenDescs (excluding the reserved slot 0).";
-TTotalBufBytes::usage = "TTotalBufBytes[] returns the sum of live CPU buffer bytes (refcount > 0).";
+GeneralUtilities`SetUsage[TTensTable, "TTensTable[] returns a list of {producer_kid, buf_id, dtype, view_numel, view_contiguous, refcount, backend_id} per TenDesc.
+backend_id is 1 for CPU, 2 for Metal, 0 for unbound."];
+GeneralUtilities`SetUsage[TTensCount, "TTensCount[] returns the number of allocated TenDescs, excluding the reserved slot 0."];
+GeneralUtilities`SetUsage[TTotalBufBytes, "TTotalBufBytes[] returns the sum of live CPU buffer bytes (refcount greater than 0)."];
 
-TRealToFP16::usage = "TRealToFP16[reals] packs a list of Reals into a NumericArray of UnsignedInteger16 raw fp16 bytes.  Pair with TFP16ToReal to round-trip; see TTensor[shape, na, \"f16\"] for the tensor surface.";
-TRealToBf16::usage = "TRealToBf16[reals] packs a list of Reals into a NumericArray of UnsignedInteger16 raw bfloat16 bytes.";
-TFP16ToReal::usage = "TFP16ToReal[na] unpacks a UnsignedInteger16 NumericArray of raw fp16 bytes into a Real list.";
-TBf16ToReal::usage = "TBf16ToReal[na] unpacks a UnsignedInteger16 NumericArray of raw bfloat16 bytes into a Real list.";
+GeneralUtilities`SetUsage[TRealToFP16, "TRealToFP16[reals$] packs a list of Reals into a NumericArray of UnsignedInteger16 raw fp16 bytes.
+Pair with TFP16ToReal to round-trip; see TTensor[shape$, na$, \"f16\"] for the tensor surface."];
+GeneralUtilities`SetUsage[TRealToBf16, "TRealToBf16[reals$] packs a list of Reals into a NumericArray of UnsignedInteger16 raw bfloat16 bytes."];
+GeneralUtilities`SetUsage[TFP16ToReal, "TFP16ToReal[na$] unpacks a UnsignedInteger16 NumericArray of raw fp16 bytes into a Real list."];
+GeneralUtilities`SetUsage[TBf16ToReal, "TBf16ToReal[na$] unpacks a UnsignedInteger16 NumericArray of raw bfloat16 bytes into a Real list."];
 
-TRealToFP8E4M3::usage = "TRealToFP8E4M3[reals] packs a list of Reals into a NumericArray of UnsignedInteger8 raw fp8e4m3 bytes.  Pair with TFP8E4M3ToReal to round-trip.";
-TRealToFP8E5M2::usage = "TRealToFP8E5M2[reals] packs a list of Reals into a NumericArray of UnsignedInteger8 raw fp8e5m2 bytes.";
-TFP8E4M3ToReal::usage = "TFP8E4M3ToReal[na] unpacks a UnsignedInteger8 NumericArray of raw fp8e4m3 bytes into a Real list.";
-TFP8E5M2ToReal::usage = "TFP8E5M2ToReal[na] unpacks a UnsignedInteger8 NumericArray of raw fp8e5m2 bytes into a Real list.";
+GeneralUtilities`SetUsage[TRealToFP8E4M3, "TRealToFP8E4M3[reals$] packs a list of Reals into a NumericArray of UnsignedInteger8 raw fp8e4m3 bytes.
+Pair with TFP8E4M3ToReal to round-trip."];
+GeneralUtilities`SetUsage[TRealToFP8E5M2, "TRealToFP8E5M2[reals$] packs a list of Reals into a NumericArray of UnsignedInteger8 raw fp8e5m2 bytes."];
+GeneralUtilities`SetUsage[TFP8E4M3ToReal, "TFP8E4M3ToReal[na$] unpacks a UnsignedInteger8 NumericArray of raw fp8e4m3 bytes into a Real list."];
+GeneralUtilities`SetUsage[TFP8E5M2ToReal, "TFP8E5M2ToReal[na$] unpacks a UnsignedInteger8 NumericArray of raw fp8e5m2 bytes into a Real list."];
 
-TTensorViewDebug::usage = "TTensorViewDebug[tid] returns the TenDesc's View internals as {ndim, dims..., strides..., offset, contiguous, nviews, buf_id, producer_kid}.  No-ops (returns {-1}) when THVM_WL_TENSOR_VIEW_DEBUG is unset.  Diagnostic only.";
+GeneralUtilities`SetUsage[TTensorViewDebug, "TTensorViewDebug[tid$] returns the TenDesc's View internals as {ndim, dims$$, strides$$, offset, contiguous, nviews, buf_id, producer_kid}.
+Returns {-1} when THVM_WL_TENSOR_VIEW_DEBUG is unset. Diagnostic only."];
 
-TPackInt4::usage   = "TPackInt4[ints] packs a list of Integers in [-8, 7] into a UnsignedInteger8 NumericArray of packed nibbles (2 elements per byte, low nibble first).";
-TPackUInt4::usage  = "TPackUInt4[ints] packs a list of Integers in [0, 15] into a UnsignedInteger8 NumericArray of packed nibbles.";
-TUnpackInt4::usage = "TUnpackInt4[na, numel] unpacks `numel` signed nibbles from a packed-byte NumericArray into a list of Integers.";
-TUnpackUInt4::usage= "TUnpackUInt4[na, numel] unpacks `numel` unsigned nibbles into a list of Integers.";
+GeneralUtilities`SetUsage[TPackInt4, "TPackInt4[ints$] packs a list of Integers in [-8, 7] into a UnsignedInteger8 NumericArray of packed nibbles (2 elements per byte, low nibble first)."];
+GeneralUtilities`SetUsage[TPackUInt4, "TPackUInt4[ints$] packs a list of Integers in [0, 15] into a UnsignedInteger8 NumericArray of packed nibbles."];
+GeneralUtilities`SetUsage[TUnpackInt4, "TUnpackInt4[na$, numel$] unpacks numel$ signed nibbles from a packed-byte NumericArray into a list of Integers."];
+GeneralUtilities`SetUsage[TUnpackUInt4, "TUnpackUInt4[na$, numel$] unpacks numel$ unsigned nibbles into a list of Integers."];
 
-TUOpCast::usage    = "TUOpCast[src, dtype] returns a UOP node that value-preservingly casts `src` to the named dtype.  Backward gradient (under TGrad) is a CAST back to src.dtype, matching tinygrad's Ops.CAST rule.";
-TUOpBitcast::usage = "TUOpBitcast[src, dtype] returns a UOP node that bit-level reinterprets `src` as the named dtype.  Source and destination must share itemsize.  Backward gradient is zero (BITCAST has no value-preserving gradient).";
+GeneralUtilities`SetUsage[TUOpCast, "TUOpCast[src$, dtype$] returns a UOP node that value-preservingly casts src$ to the named dtype$.
+Backward gradient (under TGrad) casts back to src$'s dtype, matching tinygrad's Ops.CAST rule."];
+GeneralUtilities`SetUsage[TUOpBitcast, "TUOpBitcast[src$, dtype$] returns a UOP node that bit-level reinterprets src$ as the named dtype$; source and destination must share itemsize.
+Backward gradient is zero (BITCAST has no value-preserving gradient)."];
 
 (* Forward-decl: these are defined in NN.wl (loads alphabetically
    after Tensor.wl).  Without this, the UpValues below resolve to

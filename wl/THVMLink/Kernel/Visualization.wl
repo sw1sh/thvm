@@ -30,11 +30,19 @@
 
 BeginPackage["THVMLink`"];
 
-THeapGraph::usage = "THeapGraph[] / THeapGraph[term] / THeapGraph[{t1, t2, ...}] renders the heap as a Graph: every IC agent + UOP cell + TEN handle becomes a vertex, edges follow *data flow* (sources point at consumers).  UOP_KERNEL cells expose their TKernelInputs[] as input edges so a fused-graph view shows the same kernel-DAG topology as TScheduleGraph.  Style comes from $nodeStyle in Style.wl, consistent with every other renderer.  Options: \"ShowEdgeLabels\" -> False (default; labels hidden so dense graphs read clean), plus all standard Graph options.";
+GeneralUtilities`SetUsage[THeapGraph, "THeapGraph[] renders the whole heap as a Graph: every IC agent, UOP cell and TEN handle becomes a vertex, with edges following data flow (sources point at consumers).
+THeapGraph[term$] seeds the walk from term$, including only the agents it reaches.
+THeapGraph[{t$1, t$2, $$}] seeds the walk from several terms.
+UOP_KERNEL cells expose their TKernelInputs as input edges, so a fused view shows the same kernel-DAG topology as TScheduleGraph; styling matches the other renderers.
+Options: \"ShowEdgeLabels\" (default False), plus all standard Graph options."];
 
-TScheduleGraph::usage = "TScheduleGraph[] returns a Graph of the live kernel schedule: one vertex per emitted kernel, directed edges from producer kernel to consumer kernel labeled by the connecting TenDesc id.  External inputs (TenDescs with no producer kernel: weights, host tensors) appear as cyan TEN-shaped vertices when \"ShowExternalInputs\" -> True (default).  Disconnected kernels render as isolated vertices.  Accepts all standard Graph options.";
+GeneralUtilities`SetUsage[TScheduleGraph, "TScheduleGraph[] returns a Graph of the live kernel schedule: one vertex per emitted kernel, with directed edges from producer kernel to consumer kernel labeled by the connecting TenDesc id.
+External inputs (TenDescs with no producer kernel, such as weights and host tensors) appear as TEN-shaped vertices when \"ShowExternalInputs\" is True (default); disconnected kernels render as isolated vertices.
+Options: \"ShowExternalInputs\", plus all standard Graph options."];
 
-TMemoryPlanGantt::usage = "TMemoryPlanGantt[plan] returns a Graphics-headed Gantt-style chart of buffer lifecycles.  X-axis is topological depth on the kernel DAG; Y-axis is one row per buffer (sorted by alloc_depth, then nbytes desc).  Each bar spans [alloc_depth, last_use_depth] and is colored by status: blue=Preserved, green=Freeable, gray=Live, orange=External, red=Dead.  Hover tooltips expose buf id, nbytes, dtype, status, depths, alias_tids.  Options: \"BarHeight\" -> \"Log\" (default; height proportional to Log2[1 + nbytes]) or \"Uniform\" (all bars 1 unit tall).";
+GeneralUtilities`SetUsage[TMemoryPlanGantt, "TMemoryPlanGantt[plan$] returns a Gantt-style Graphics chart of buffer lifecycles for a TMemoryPlan, with topological depth on the kernel DAG along x and one packed row per buffer.
+Each bar spans the buffer's live depth range, colored by status, with hover tooltips exposing buf id, nbytes, dtype, status, depths and alias tids.
+Options: \"TopN\" (largest buffers to show), \"BarHeight\" (\"Linear\" or \"Log\")."];
 
 Begin["`Private`"];
 

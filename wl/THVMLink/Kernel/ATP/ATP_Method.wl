@@ -10,9 +10,15 @@
 
 BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
 
-TAtpSchedule::usage = "TAtpSchedule[Method] returns the schedule (a list of single-config Methods) that TFindProof[..., Method -> spec] would expand to, without running the C engine.  Useful for debugging a Method choice or counting portfolio entries before allocating TimeConstraint.  TAtpSchedule[Method, conjecture, axioms] threads the conjecture + axioms through Automatic's structure-recognized auto-tune, so the returned schedule matches what TFindProof[conjecture, axioms, Method -> spec] would dispatch.  TAtpSchedule[Method, \"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.";
+GeneralUtilities`SetUsage[TAtpSchedule, "TAtpSchedule[method$] returns the schedule (a list of single-config Methods) that TFindProof would expand the Method option method$ to, without running the C engine; useful for debugging a Method choice or counting portfolio entries before allocating TimeConstraint.
+TAtpSchedule[method$, conjecture$, axioms$] threads the conjecture and axioms through Automatic's structure-recognized auto-tune, so the result matches what TFindProof[conjecture$, axioms$] with Method method$ would dispatch.
+TAtpSchedule[method$, \"Theorem\", \"Theory\"] resolves names through AxiomaticTheory."];
 
-TAtpDescribeMethod::usage = "TAtpDescribeMethod[Method] returns an Association describing what a Method spec resolves to.  For a named preset (Waldmeister, VampireUEQ, Twee, EProver), returns the preset's full defaults Association (the suboptions the dispatcher merges with the user's subopts).  For a list spec like {\"Twee\", subopts...}, returns the preset's defaults merged with the user's overrides -- the actual options that will reach the C engine.  For a non-preset config like {\"Completion\", subopts...}, returns Association[subopts].  For Automatic / \"Portfolio\" / \"VampirePortfolio\" / \"VampirePortfolioCompact\", returns <|\"Schedule\" -> ...|> describing the multi-entry rotation rather than a single config.";
+GeneralUtilities`SetUsage[TAtpDescribeMethod, "TAtpDescribeMethod[method$] returns an Association describing what a Method spec resolves to.
+For a named preset (Waldmeister, VampireUEQ, Twee, EProver), returns the preset's full defaults Association.
+For a list spec {\"Twee\", subopts$$}, returns the preset defaults merged with the user's overrides -- the options that reach the C engine.
+For a non-preset config {\"Completion\", subopts$$}, returns Association[subopts$].
+For Automatic, \"Portfolio\", \"VampirePortfolio\", or \"VampirePortfolioCompact\", returns an Association with key \"Schedule\" describing the multi-entry rotation rather than a single config."];
 
 Begin["`Private`"];
 

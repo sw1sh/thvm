@@ -27,9 +27,15 @@
 
 BeginPackage["THVMLink`"];
 
-TNetTrain::usage = "TNetTrain[net, data, \"TrainingNet\", opts] returns an INERT TTerm: the whole optimiser as a recursive interaction-net term whose base case is the forward.  TWnf drives it, firing every training step in place and reducing to the trained forward term.  TNetTrain[net, data, opts] is the convenience form that TWnf's it for you.  `net` is a NetChain (e.g. NetModel[\"LeNet\"]), whose batched forward is lifted directly; `data` is a list of `input -> class` rules or a dataset name (\"MNIST\").  Inputs are reshaped to the net's input shape internally.  A lifted TFromNet[net] term is inference-only (training it would need the batched forward re-lifted, which needs the NetChain), so pass the NetChain instead.  Options: MaxTrainingRounds, \"LearningRate\", \"Momentum\" (0 = plain SGD; > 0 adds a persistent velocity per weight for SGD-with-momentum, use a smaller LearningRate, the effective rate is lr/(1-momentum)), \"Method\" (\"SGD\" default, or \"Adam\" for uncorrected ADAM with persistent m/v moments and standard betas, use a small LearningRate, ~0.001 on MNIST-scale problems; the adaptive step is roughly lr per element), \"WeightDecay\" (0 = none; > 0 adds L2 regularization by folding wd*p into each weight's gradient, for all optimizers), TargetDevice.";
+GeneralUtilities`SetUsage[TNetTrain, "TNetTrain[net$, data$, \"TrainingNet\", opts$] returns an inert TTerm: the whole optimiser as a recursive interaction-net term whose base case is the forward; TWnf drives it, firing every training step in place and reducing to the trained forward term.
+TNetTrain[net$, data$, opts$] is the convenience form that TWnf's it for you and returns the trained forward.
+net$ is a NetChain (e.g. NetModel[\"LeNet\"]), whose batched forward is lifted directly; data$ is a list of input-to-class rules or a dataset name (\"MNIST\"). Inputs are reshaped to the net's input shape internally.
+A lifted TFromNet[net$] term is inference-only (training it would need the batched forward re-lifted, which needs the NetChain), so pass the NetChain instead.
+Options: MaxTrainingRounds, \"LearningRate\", \"Momentum\" (>0 adds per-weight velocity for SGD-with-momentum), \"Method\" (\"SGD\" or \"Adam\"), \"WeightDecay\" (>0 adds L2 regularization), \"Loss\", TargetDevice; see the training documentation for details."];
 
-TNetPredict::usage = "TNetPredict[trainedNet, inputs] runs the trained forward term on `inputs` (a list of the same length as the training batch) and returns the predicted integer classes.";
+GeneralUtilities`SetUsage[TNetPredict, "TNetPredict[trainedNet$, inputs$] runs the trained forward term on inputs$ and returns the predicted integer classes.
+inputs$ is reshaped to the net's input shape and predicted in batch-sized chunks, so any number of inputs works.
+TNetPredict[handle$, x$] consumes the handle association the {x$, y$} TNetTrain overload returns and returns the raw logits rows."];
 
 TNetTrain::needsnet = "Training a lifted TFromNet term needs a batched re-lift, which needs the NetChain; pass the NetChain (NetModel/NetChain) to TNetTrain. The lifted term is for inference.";
 

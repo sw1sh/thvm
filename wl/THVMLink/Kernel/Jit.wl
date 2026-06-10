@@ -31,14 +31,17 @@
 
 BeginPackage["THVMLink`"];
 
-TJit::usage        = "TJit[fn] returns a closure that captures fn's kernel-dispatch sequence on the first call and replays it (returning the same result handle, whose buffer the replay rewrites) on subsequent calls.  Per-call wallclock drops from materialize+dispatch to just dispatch.  The closure's TTerm ARGUMENTS are the per-call inputs: `closure[x]` captures over `x` on the first call and rebinds each later call's input in place on replay (tinygrad's input_replace), so a fixed forward generates by `closure[next]` with no explicit TSet.  HoldFirst.  Recapture by TJitDrop[closure] then re-create.";
-TJitOpCount::usage = "TJitOpCount[closure] returns the number of kernel dispatches captured for the JIT closure (0 before the first call).";
-TJitCaptureOps::usage = "TJitCaptureOps[closure] returns the decoded captured TJit replay sequence as associations.  Dispatch rows include Kid, DispatchKind, ProgramKey, NInputs, OutBuf, Input0, Input1, OutputNumel, OpCount, ScalarUopCount, TileUopCount, ReplaySkip, and ReplayPacked; assign rows include DstTid and SrcTid.";
-TJitCaptureRuns::usage = "TJitCaptureRuns[closure] groups a captured TJit replay sequence into consecutive dispatch runs split by assign records, with per-run dispatch-kind, program-key, output-size, and lowering summaries.";
-TJitCaptureGraphRuns::usage = "TJitCaptureGraphRuns[closure] groups a captured TJit replay sequence into Metal ICB-eligible replay chunks: live metal-tile dispatches, with metal-alias records consumed but not encoded, split by assign and non-tile dispatch records.";
-TJitCaptureSummary::usage = "TJitCaptureSummary[closure] returns compact counts for a captured TJit replay sequence, including dispatch/assign counts, dispatch-kind counts, consecutive dispatch-run lengths, top program-key counts, and the largest dispatch runs.";
-TJitDrop::usage    = "TJitDrop[closure] releases the JIT closure's capture slot.  After this, the closure re-captures on its next call.";
-TJitClosure::usage = "TJitClosure[<|...|>] is the wrapped form returned by TJit -- treat as opaque; invoke through the documented surface.";
+GeneralUtilities`SetUsage[TJit, "TJit[fn$] returns a closure that captures fn$'s kernel-dispatch sequence on the first call and replays it on later calls, returning the same result handle whose buffer each replay rewrites.
+closure$[x$] passes per-call TTerm inputs: the first call captures over x$, and each later call rebinds its input in place (tinygrad's input_replace), so a fixed forward generates by closure$[next$] with no explicit TSet.
+Per-call wallclock drops from materialize+dispatch to dispatch only. HoldFirst; recapture with TJitDrop[closure$] then re-create."];
+GeneralUtilities`SetUsage[TJitOpCount, "TJitOpCount[closure$] returns the number of kernel dispatches captured for the JIT closure (0 before the first call)."];
+GeneralUtilities`SetUsage[TJitCaptureOps, "TJitCaptureOps[closure$] returns the decoded captured TJit replay sequence as a list of associations.
+Dispatch rows carry Kid, DispatchKind, ProgramKey, NInputs, OutBuf, Input0, Input1, OutputNumel, OpCount, ScalarUopCount, TileUopCount, ReplaySkip, and ReplayPacked; assign rows carry DstTid and SrcTid."];
+GeneralUtilities`SetUsage[TJitCaptureRuns, "TJitCaptureRuns[closure$] groups a captured TJit replay sequence into consecutive dispatch runs split by assign records, with per-run dispatch-kind, program-key, output-size, and lowering summaries."];
+GeneralUtilities`SetUsage[TJitCaptureGraphRuns, "TJitCaptureGraphRuns[closure$] groups a captured TJit replay sequence into Metal ICB-eligible replay chunks of live metal-tile dispatches (metal-alias records consumed but not encoded), split by assign and non-tile dispatch records."];
+GeneralUtilities`SetUsage[TJitCaptureSummary, "TJitCaptureSummary[closure$] returns compact counts for a captured TJit replay sequence: dispatch/assign counts, dispatch-kind counts, consecutive dispatch-run lengths, top program-key counts, and the largest dispatch runs."];
+GeneralUtilities`SetUsage[TJitDrop, "TJitDrop[closure$] releases the JIT closure's capture slot so the closure re-captures on its next call."];
+GeneralUtilities`SetUsage[TJitClosure, "TJitClosure[assoc$] is the wrapped form returned by TJit; treat it as opaque and invoke it through the documented surface."];
 
 Begin["`Private`"];
 

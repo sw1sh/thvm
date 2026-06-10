@@ -15,17 +15,9 @@
 
 BeginPackage["THVMLink`ATP`", {"Wolfram`Parser`"}]
 
-TEproverProof::usage =
-    "TEproverProof[\"path/to/file.p\", opts] runs the local E prover " <>
-    "binary on a TPTP problem file (using --auto-schedule " <>
-    "--proof-object --tstp-format) and returns a normalized result " <>
-    "Association with keys Status, Strategy, Seconds, ProofLength, " <>
-    "Inferences, RawSZS.  Two-arg form TEproverProof[\"Theory\", \"thm\"] " <>
-    "resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.  " <>
-    "Options: TimeConstraint (default 30), Binary (default Automatic).  " <>
-    "Uses Wolfram`Parser`TPTPImport[..., \"SZS\"] from the " <>
-    "Wolfram/WolframParser paclet (declared in BeginPackage so Needs " <>
-    "auto-loads it)."
+GeneralUtilities`SetUsage[TEproverProof, "TEproverProof[file$, opts$] runs the local E prover binary on the TPTP problem file$ (path ending in .p) and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawSZS.
+TEproverProof[\"Theory\", \"thm\"] resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.
+Options: TimeConstraint, Binary; see the ATP documentation."];
 
 TEproverProof::noeprover =
     "E prover binary not found.  Install via `brew install eprover`."

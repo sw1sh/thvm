@@ -30,16 +30,20 @@
 
 BeginPackage["THVMLink`"];
 
-TMatch::usage          = "TMatch[m] wraps a Match expression - the canonical outer container returned by TPatternMatch.";
-TMatchSum::usage       = "TMatchSum[m_1, m_2, ...] represents alternative matches (lazy OR).  Empty TMatchSum[] means no match; SequenceHold + Flat so nested unions auto-flatten.";
-TMatchProduct::usage   = "TMatchProduct[m_1, m_2, ...] represents the conjunction of sub-matches (head + each argument).  Empty TMatchProduct[] is a vacuously-true match producing the empty bindings.";
-TMatchPart::usage      = "TMatchPart[part, HoldPattern[p], submatch] tags `submatch` as having matched the held WL pattern `p` at heap position `part` (a List of integer offsets).";
-TMatchValues::usage    = "TMatchValues[v_1, v_2, ...] holds a sequence of leaf TTerms or held values; the leaf-level Match.  SequenceHold + Flat.";
-TMatchObjectQ::usage   = "TMatchObjectQ[expr] returns True if `expr` is one of TMatch / TMatchSum / TMatchProduct / TMatchPart / TMatchValues.";
-TPatternMatch::usage   = "TPatternMatch[expr, pattern] tries to match the TTerm `expr` against the held WL pattern `pattern`.  Returns a TMatch object on success or TMatchSum[] on no match.  See TMatchBindings / TMatchApply / TMatchParts for accessors.";
-TMatchBindings::usage  = "TMatchBindings[match] returns a List of binding-Associations (one per outcome).  Each Association maps binder names to TTerm values; repeat-binder consistency is enforced via TTermEq.";
-TMatchApply::usage     = "TMatchApply[rhs, match] returns a List of TTerms produced by substituting each outcome's bindings into the held WL `rhs` template (encoded via tlazyEncode).";
-TMatchParts::usage     = "TMatchParts[match] returns a List of Associations mapping each path (List of integer offsets) to the TTerm captured at that position.  Useful for path-keyed inspection of where each subterm came from.";
+GeneralUtilities`SetUsage[TMatch, "TMatch[m$] is the canonical outer container wrapping a Match expression, as returned by TPatternMatch."];
+GeneralUtilities`SetUsage[TMatchSum, "TMatchSum[m$1, m$2, $$] represents alternative matches (lazy OR).
+Empty TMatchSum[] means no match; SequenceHold and Flat so nested unions auto-flatten."];
+GeneralUtilities`SetUsage[TMatchProduct, "TMatchProduct[m$1, m$2, $$] represents the conjunction of sub-matches (head plus each argument).
+Empty TMatchProduct[] is a vacuously-true match producing the empty bindings."];
+GeneralUtilities`SetUsage[TMatchPart, "TMatchPart[part$, HoldPattern[p$], submatch$] tags submatch$ as having matched the held WL pattern p$ at heap position part$ (a List of integer offsets)."];
+GeneralUtilities`SetUsage[TMatchValues, "TMatchValues[v$1, v$2, $$] holds a sequence of leaf TTerms or held values; the leaf-level Match.
+SequenceHold and Flat."];
+GeneralUtilities`SetUsage[TMatchObjectQ, "TMatchObjectQ[expr$] returns True if expr$ is one of TMatch, TMatchSum, TMatchProduct, TMatchPart, TMatchValues."];
+GeneralUtilities`SetUsage[TPatternMatch, "TPatternMatch[expr$, pattern$] matches the TTerm expr$ against the held WL pattern pattern$, returning a TMatch object on success or TMatchSum[] on no match.
+See TMatchBindings, TMatchApply, TMatchParts for accessors."];
+GeneralUtilities`SetUsage[TMatchBindings, "TMatchBindings[match$] returns a List of binding-Associations (one per outcome), each mapping binder names to TTerm values; repeat-binder consistency is enforced via TTermEq."];
+GeneralUtilities`SetUsage[TMatchApply, "TMatchApply[rhs$, match$] returns a List of TTerms produced by substituting each outcome's bindings into the held WL rhs$ template."];
+GeneralUtilities`SetUsage[TMatchParts, "TMatchParts[match$] returns a List of Associations mapping each path (List of integer offsets) to the TTerm captured at that position, for path-keyed inspection of where each subterm came from."];
 
 (* Forward refs to private symbols owned by sibling files. *)
 {ToTTerm, TSubexprAt, TTermSubexprs, TTermSame, TTermEq};

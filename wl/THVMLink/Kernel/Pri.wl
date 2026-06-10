@@ -42,15 +42,21 @@
 
 BeginPackage["THVMLink`"];
 
-TPri::usage         = "TPri[fn, val, cont] builds an APP(APP(APP(PRI(PRI), slot_NUM), val), cont) redex.  When wnf reduces it: forces val (firing kernel chains and ASSIGN side effects), enqueues (slot, snapshotted value) for the WL callback `fn` if fn != None, then returns cont.  fn auto-registers under a fresh slot on first use; same fn reuses its slot.  TPri[slot_Integer, val, cont] is the low-level form (use slot=0 for pure-sequencer, no callback).  Callbacks fire when the WL host calls TPriDrain[]; their return values are ignored.";
+GeneralUtilities`SetUsage[TPri, "TPri[fn$, val$, cont$] builds a PRI redex that, when wnf reduces it, forces val$ (firing kernel chains and ASSIGN side effects), enqueues the snapshotted value for the WL callback fn$ unless fn$ is None, then returns cont$.
+fn$ auto-registers under a fresh slot on first use and reuses that slot on later calls.
+TPri[slot$, val$, cont$] is the low-level form with an explicit integer slot; slot 0 is the pure-sequencer mode (no callback).
+Callbacks fire when the host calls TPriDrain[]; their return values are ignored."];
 
-TPriForce::usage    = "TPriForce[val, cont] sugar for TPri[0, val, cont]: pure sequencer with no WL callback.  Forces val via wnf as a side effect, returns cont.";
+GeneralUtilities`SetUsage[TPriForce, "TPriForce[val$, cont$] is sugar for TPri[0, val$, cont$]: a pure sequencer with no WL callback that forces val$ via wnf as a side effect and returns cont$."];
 
-TPriRegister::usage = "TPriRegister[slot_Integer, fn_] associates a WL function with PRI slot `slot`.  Use this when you need explicit control over slot ids (e.g. for cross-session stable slots); TPri[fn, ...] auto-registers transparently in the common case.  fn = None clears the slot.";
+GeneralUtilities`SetUsage[TPriRegister, "TPriRegister[slot$, fn$] associates WL function fn$ with PRI slot slot$, returning slot$.
+Use it for explicit control over slot ids (e.g. cross-session stable slots); TPri[fn$, $$] auto-registers transparently in the common case.
+fn$ = None clears the slot."];
 
-TPriDrain::usage    = "TPriDrain[] dequeues every (slot, value) pair recorded by TPri firings since the last drain and dispatches each to its registered WL callback.  Returns the number of callbacks fired.  Slots with no registered callback are skipped silently.";
+GeneralUtilities`SetUsage[TPriDrain, "TPriDrain[] dequeues every (slot, value) pair recorded by TPri firings since the last drain, dispatches each to its registered WL callback, and returns the number of callbacks fired.
+Slots with no registered callback are skipped silently."];
 
-TPriCallbacks::usage = "TPriCallbacks[] returns the current slot -> fn registration as an Association (read-only).";
+GeneralUtilities`SetUsage[TPriCallbacks, "TPriCallbacks[] returns the current slot-to-fn registration as a read-only Association."];
 
 Begin["`Private`"];
 

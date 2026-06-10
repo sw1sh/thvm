@@ -20,14 +20,9 @@
 
 BeginPackage["THVMLink`ATP`"]
 
-TWaldmeisterProof::usage =
-    "TWaldmeisterProof[\"path/to/file.pr\", opts] runs the local " <>
-    "Waldmeister wmcli binary on a WM .pr problem file (NOT TPTP!), " <>
-    "parses the proof-protocol output, and returns a normalized " <>
-    "result Association with keys Status, Strategy, Seconds, " <>
-    "ProofLength, Inferences, RawProtocol.  WM does NOT use TPTP " <>
-    "input; the .pr format is its own. The (theory, thm) two-arg " <>
-    "form requires a TPTP-to-pr converter and is not yet supported."
+GeneralUtilities`SetUsage[TWaldmeisterProof, "TWaldmeisterProof[file$] runs the local Waldmeister wmcli binary on the WM .pr problem file$, parses its proof-protocol output, and returns a normalized Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawProtocol.
+The input must be Waldmeister's own .pr format, not TPTP; a (theory, theorem) two-argument form would need a TPTP-to-pr converter and is not yet supported.
+Options: TimeConstraint, \"Binary\", \"MathlinkPath\"."];
 
 TWaldmeisterProof::nowm =
     "Waldmeister wmcli binary not found."

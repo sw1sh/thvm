@@ -26,8 +26,9 @@
 
 BeginPackage["THVMLink`"];
 
-ToTTerm::usage = "ToTTerm[expr] packs a WL value into a TTerm.  Integer -> NUM; Symbol -> 0-ary CTR labelled by the symbol's name (interned via symLabelFor); List -> Tuple-CTR (label = $LazyTuple); compound head[args__] -> CTR labelled by Head with encoded args as children.  TTerm arguments pass through.";
-FromTTerm::usage = "FromTTerm[t] decodes a TTerm to a WL value: NUM -> Integer; CTR -> Symbol[name][...] / List / etc.  Auto-forces opaque heads through TCnf so DP-rooted Cons cells fire their DUP-XXX during readback.";
+GeneralUtilities`SetUsage[ToTTerm, "ToTTerm[expr$] packs a WL value into a TTerm.
+An Integer becomes a NUM; a Symbol a 0-ary CTR labelled by the symbol name (interned via symLabelFor); a List a Tuple-CTR (label $LazyTuple); a compound head$[args$] a CTR labelled by Head with the encoded arguments as children. A TTerm argument passes through unchanged."];
+GeneralUtilities`SetUsage[FromTTerm, "FromTTerm[t$] decodes a TTerm t$ to a WL value: a NUM becomes an Integer; a CTR becomes the labelled symbol applied to its decoded children, a List, or similar. Opaque heads are auto-forced through TCnf so DP-rooted Cons cells fire their readback duplication."];
 
 (* Forward refs to the workhorses still owned by Lazy.wl. *)
 {tlazyEncode, tlazyDecode};
