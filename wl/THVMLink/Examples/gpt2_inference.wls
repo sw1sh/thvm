@@ -30,7 +30,8 @@
    Run from the repo root:
        wolframscript -f wl/THVMLink/Examples/gpt2_inference.wls
    Optional env:
-       PROMPT="Once upon a time"  NTOKENS=30  TEMPERATURE=0.8  TOPK=40  SEED=42 *)
+       PROMPT="Once upon a time"  NTOKENS=30  TEMPERATURE=0.8  TOPK=40  SEED=42
+       DEVICE=metal   -- run the whole forward on the GPU (token-identical) *)
 
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
@@ -44,7 +45,18 @@ temperature = ToExpression[Environment["TEMPERATURE"] /. $Failed -> "0.8"];
 topK        = ToExpression[Environment["TOPK"]        /. $Failed -> "40"];
 SeedRandom[ToExpression[Environment["SEED"] /. $Failed -> "42"]];
 
+(* DEVICE="metal" runs the whole forward on the GPU: TToDevice pushes a device
+   COPY to every weight + the one-hot input leaf, so each block COMPUTES on the
+   GPU (token-identical to CPU).  TJit captures the Metal dispatch once and
+   replays it per step.  At batch=1 the GPU wins once the sequence is long
+   enough that the per-token matmuls outweigh the ~1.3k kernel launches (the
+   crossover is ~128 tokens on an M3 Max); shorter windows stay CPU-bound. *)
+device  = Environment["DEVICE"] /. $Failed -> "cpu";
+forward = If[ device === "metal", TToDevice[TFromNet[net, #], "metal"] &,
+                                  TFromNet[net, #] &];
+
 print["Prompt:      ", prompt];
+print["Device:      ", device];
 print["Sampling:    temperature ", ToString[temperature], ", top-K ", ToString[topK]];
 print["Loading GPT-2 117M (NetModel) ..."];
 
@@ -84,7 +96,7 @@ oneHot[seq_] := TTensorCreate @ NumericArray[
    no TSet. *)
 print["Lifting + materializing the fixed-", ToString[maxSeq], " forward (once) ..."];
 t0   = AbsoluteTime[];
-step = TJit[TRealize @ TWnf @ TFromNet[net, #] &];
+step = TJit[TRealize @ TWnf @ forward[#] &];
 out  = step[oneHot[ids]];                         (* capture: lift+materialize+dispatch *)
 print["  lifted + captured ", ToString[TJitOpCount[step]], " kernel dispatches in ",
     ToString[Round[AbsoluteTime[] - t0, 0.1]], "s (one-time)"];
@@ -121,7 +133,7 @@ print["(", ToString[nTokens], " tokens in ",
    forward over the same weights (top-5: {19, 118, 63, 83, 50246}). *)
 chkIds  = encoder["The quick brown fox"];
 chkN    = Length[chkIds];
-chkStep = TJit[TRealize @ TWnf @ TFromNet[net, #] &];
+chkStep = TJit[TRealize @ TWnf @ forward[#] &];
 chkOut  = chkStep[oneHot[chkIds]];
 print[""];
 print["Verification (greedy next-token after 'The quick brown fox' == 19): ",
