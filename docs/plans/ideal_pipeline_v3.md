@@ -757,3 +757,37 @@ file copy. Implement incrementally (start: merge a contiguous inner reshape into
 view), parity-gated by `test_faithful_parity.py` (silent index bugs are the risk -- verify
 EXACT values). On GPU faithful is already competitive (gather is cheaper there), so this is
 primarily a faithful-CPU + index-cleanliness win; medium value, defined port.
+
+### FAITHFUL VALIDATED ON A TRANSFORMER (GPT-2) -- arena-aliasing bug fixed (2026-06-10)
+
+The whole v3 status log above is conv-net (beautiful_mnist). The faithful seed had NEVER
+been run on a transformer. On GPT-2 it (a) broke `gpt2/cached-single-query-attention-vs-
+full-row` (7/8) and (b) regresses Metal ~3.5x at seq=256 (218->755ms); CPU warm + kernel
+count (346->343) are ~unchanged.
+
+(a) ROOT-CAUSED + FIXED (`materialize.c boundary_last_use_pos_descend`).  NOT a rangeify
+or codegen bug -- the UOP-walk interpreter reproduced it bit-identically.  It is a BUFFER
+ARENA aliasing bug surfaced only by the faithful seed's fusion.  The single-query (seqQ=1)
+batched attention has a masked-scores ADD with TWO consumers (the softmax-denom REDUCE and
+the @V kernel).  bufferize_classify flags it `realized` (MULTI), but the faithful rangeify
+walk FUSES it into both consumers, so it never becomes a buffer.  The boundary-lifetime
+walk terminated at any `BUFFERIZE_NODES[idx].realized` flag, so this fused-away node
+SHADOWED the real boundary it reads -- the QK^T scores REDUCE buffer -- leaving the scores
+buffer's last-use unbumped.  The TLSF arena then recycled the scores offset onto the @V
+OUTPUT, so the @V kernel read its own partially-written output back (the tell: for p=1
+softmax is exactly [1,0,..] yet out[0,d>0] came out a constant 0.749x the truth while
+out[0,0] was exact -- self-referential corruption, not a math error).  Fix: terminate the
+lifetime walk only at an ACTUAL materialized boundary (present in BOUNDARY_ORDER via
+`boundary_index_for_loc`), not the classify flag -- mirrors tinygrad/schedule/memory.py,
+which plans lifetimes over the realized BUFFER set (the linearized schedule), not the
+classify set.  gpt2.wlt 7/8->8/8 faithful; default byte-unchanged (8/8, 175 kernels, peak
+43MB); nn.wlt 66/66 both seeds; test_cc 86463 both seeds; test_faithful_parity OK; faithful
+conv unchanged (loss 2.5761, 167 kernels, peak 42.6MB -- no balloon).  Found via a
+read-only audit workflow (4 agents + synthesis; the synthesis correctly overrode 3 of the
+4 agents' headline root causes) + a realize-barrier bisect + a buffer-content discriminator.
+
+(b) OPEN -- faithful Metal regression: the fused reduce-epilogue kernels (LayerNorm/softmax)
+get a pathological Metal dispatch grid (threads = reduced output_numel, e.g. 16, each
+serially looping the full 768-element body) where the heuristic launched wide elementwise
+grids.  Fix lives in `render_metal.c cg_tile_metal_dispatch_shape` (grid over the body
+iteration product, not the reduced output_numel).  Next.
