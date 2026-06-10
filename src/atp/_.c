@@ -4817,6 +4817,19 @@ fn AtpAddedRange thvm_atp_install_oriented_rule(AtpState *s, Term lhs,
     // revision the IR cookie keys on.
     s->r_revision++;
   }
+  // Trace lineage: the select/orient path stamps every rule's r_trace
+  // with a TRACE_ORIENT entry whose parent chains back to the source
+  // axiom.  Mirror that here -- without it r_trace[i] stays
+  // ATP_TRACE_NONE and every CP overlapping this rule records a NONE
+  // parent, which the WL proof lifter indexes as trace[[2^32]] and the
+  // ProofObject collapses to $Failed.
+  u32 ax_t = atp_trace_push(s, TRACE_AXIOM, ATP_TRACE_NONE,
+                            ATP_TRACE_NONE, lhs, rhs);
+  if (ax_t != ATP_TRACE_NONE) {
+    u32 or_t = atp_trace_push(s, TRACE_ORIENT, ax_t, ATP_TRACE_NONE,
+                              s->lhs[i], s->rhs[i]);
+    if (or_t != ATP_TRACE_NONE) s->r_trace[i] = or_t;
+  }
   r.first = idx;
   r.count = 1;
   // Generate CPs between this newly-installed rule and the rules

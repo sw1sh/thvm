@@ -66,7 +66,8 @@ TFindProof[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory; a mu
 TFindProof[conjecture$, \"Theory\"] proves the conjecture (an equation, a list of equations, or an Association whose Values are taken) against the named theory's axioms.
 TFindProof[axioms$] and TFindProof[\"Theory\"] saturate with no goal, returning a ProofObject whose Theorems is None; bound these with TimeConstraint since a non-terminating axiom set never saturates.
 Argument order is conjecture-first (matching FindEquationalProof); TATP is the axioms-first surface. Equations may be written lhs$ == rhs$, a pre-oriented rewrite rule, or a two-way rule (plus their Inactive forms). A List conjecture is a multi-goal conjunction proved off ONE saturation: the result is one ProofObject whose Proof dataset carries one Hypothesis/Conclusion row pair per conjunct, $Failed unless every conjunct is proved; \"Status\" returns a single tag for the whole conjunction.
-An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
+An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
+\"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
 Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"Precedence\", \"SkolemHighest\", \"FifoTiebreak\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
@@ -2762,7 +2763,7 @@ atpScheduleFor[m_] := {m};
    Association of every spec.  The default ("ProofObject") returns the
    bare ProofObject, so existing call shapes are unchanged. *)
 $AtpReturnSpecs = {"ProofObject", "Lemmas", "PreprocessedAxioms",
-    "RelevantAxioms", "RawTrace", "Statistics", "Status",
+    "RelevantAxioms", "RawTrace", "Statistics", "Status", "Path",
     "AppliedMethod", "WallTime", "PortfolioTrace", "Counterexample"};
 
 atpReturnSpecQ[All] := True;
@@ -3124,6 +3125,54 @@ atpReturnValue[bundle_, "RawTrace"] := bundle["cRes"]["Trace"];
 atpReturnValue[bundle_, "Statistics"] := atpStatisticsAssoc[bundle["cRes"]];
 atpReturnValue[bundle_, "Status"] :=
     atpReturnStatus[bundle["cRes"]["Status"]];
+(* "Path" -> the witnessing rewrite path of a proved goal: the list of
+   terms from the conjecture's lhs to its rhs, assembled from the goal
+   chain the C engine recorded (MnfSteps when the bidirectional MNF
+   search closed the goal, MainSteps otherwise).  Side-0 steps rewrite
+   the running lhs and side-1 steps the running rhs (a multi-goal step
+   is tagged 2*g + side), so each conjunct's path is its lhs chain
+   forward, then its rhs chain reversed through the shared normal
+   form.  A multi-goal conjunction returns one path per conjunct.
+   $Failed when the run did not prove, no goal chain was recorded, or
+   the recorded chain does not connect. *)
+atpChainPath[start_, steps_List] := Catch[
+    Block[{cur = start},
+        Prepend[
+            Table[
+                If[ steps[[k]]["Before"] =!= cur,
+                    Throw[$Failed, "atpChainPath"]];
+                cur = steps[[k]]["After"],
+                {k, Length[steps]}],
+            start]],
+    "atpChainPath"]
+atpGoalPaths[bundle_] := Block[{cRes, steps, cjps, paths},
+    cRes = bundle["cRes"];
+    If[ ! AssociationQ[cRes] || cRes["Status"] =!= 1, Return[$Failed]];
+    steps = If[ ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {},
+        cRes["MnfSteps"], cRes["MainSteps"]];
+    If[ ! ListQ[steps], Return[$Failed]];
+    cjps = bundle["enc"]["ConjPairs"] /.
+        Verbatim[Pattern][s_Symbol, _] :> s;
+    If[ cjps === {}, Return[$Failed]];
+    paths = Table[
+        Block[{gSteps, fwd, bwd},
+            gSteps = Select[steps, Quotient[#["Side"], 2] === g - 1 &];
+            fwd = atpChainPath[cjps[[g, 1]],
+                Select[gSteps, EvenQ[#["Side"]] &]];
+            bwd = atpChainPath[cjps[[g, 2]],
+                Select[gSteps, OddQ[#["Side"]] &]];
+            If[ fwd === $Failed || bwd === $Failed ||
+                Last[fwd] =!= Last[bwd],
+                $Failed,
+                Join[fwd, Rest @ Reverse @ bwd]]
+        ],
+        {g, Length[cjps]}];
+    Which[
+        MemberQ[paths, $Failed], $Failed,
+        Length[paths] === 1, First[paths],
+        True, paths]
+]
+atpReturnValue[bundle_, "Path"] := atpGoalPaths[bundle];
 (* "Counterexample" -> a CounterexampleObject disproving the goal, else
    $Failed.  The equational dual of "ProofObject": where "ProofObject" answers
    "is the goal derivable?", "Counterexample" answers "is the goal refutable?"
