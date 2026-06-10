@@ -855,12 +855,12 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   s->cp_packed = nc; s->cp_trace = nt;
   s->cp_pri = np; s->cp_seq = nq; s->cp_goal = ng; s->cp_pri2 = np2;
   s->cp_last_norm_r_revision = nlnr;
-  // Deferred-CP (`implicit_pair`) arc commit 1: lazy-grow the parallel
+  // Deferred-CP (`implicit_pair`) arc: lazy-grow the parallel
   // AtpCpImplicit descriptor array + the per-slot tag bitset only when
-  // already allocated.  Under use_implicit_cp == 0 (default) both stay
+  // already allocated (atp_cp_implicit_push allocates both on the first
+  // deferred push).  Under use_implicit_cp == 0 (default) both stay
   // NULL through the lifetime of the AtpState and this realloc loop is
-  // a no-op -- the engine path is byte-identical.  Future commits 2/3
-  // populate these on the first deferred push.
+  // a no-op -- the engine path is byte-identical.
   if (s->cp_implicit != NULL) {
     AtpCpImplicit *ni = (AtpCpImplicit *)realloc(s->cp_implicit,
                                                  cap * sizeof(AtpCpImplicit));
@@ -922,6 +922,53 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   (void)old_cap;
 #endif
   s->cp_cap = cap;
+}
+
+// === Deferred-CP (`implicit_pair`) per-slot tag-bit bookkeeping =====
+//
+// The invariant is `cp_is_implicit[i] set <=> cp_implicit[i] live AND
+// cp_packed[i] == NULL` (thvm.h AtpCpImplicit header).  Every slot
+// drop / move / swap site below maintains it through these helpers;
+// all are NULL-safe so the flag-OFF engine (both arrays NULL) pays a
+// single predictable branch.
+
+static inline u8 atp_cp_slot_implicit(const AtpState *s, u32 i) {
+  return s->cp_is_implicit != NULL
+      && ((s->cp_is_implicit[i >> 3] >> (i & 7u)) & 1u);
+}
+
+static inline void atp_cp_implicit_set(AtpState *s, u32 i) {
+  s->cp_is_implicit[i >> 3] |= (u8)(1u << (i & 7u));
+}
+
+static inline void atp_cp_implicit_clear(AtpState *s, u32 i) {
+  if (s->cp_is_implicit != NULL) {
+    s->cp_is_implicit[i >> 3] &= (u8)~(1u << (i & 7u));
+  }
+}
+
+// Move the descriptor + tag bit from slot `src` into slot `dst`,
+// vacating `src` (compaction / backfill).  No-op when dst == src.
+static inline void atp_cp_implicit_move(AtpState *s, u32 dst, u32 src) {
+  if (s->cp_is_implicit == NULL || dst == src) return;
+  if (s->cp_implicit != NULL) s->cp_implicit[dst] = s->cp_implicit[src];
+  if (atp_cp_slot_implicit(s, src)) atp_cp_implicit_set(s, dst);
+  else                              atp_cp_implicit_clear(s, dst);
+  atp_cp_implicit_clear(s, src);
+}
+
+// Swap the descriptors + tag bits at slots i, j (heap sift).
+static inline void atp_cp_implicit_swap(AtpState *s, u32 i, u32 j) {
+  if (s->cp_is_implicit == NULL) return;
+  if (s->cp_implicit != NULL) {
+    AtpCpImplicit t = s->cp_implicit[i];
+    s->cp_implicit[i] = s->cp_implicit[j];
+    s->cp_implicit[j] = t;
+  }
+  u8 bi = atp_cp_slot_implicit(s, i);
+  u8 bj = atp_cp_slot_implicit(s, j);
+  if (bj) atp_cp_implicit_set(s, i); else atp_cp_implicit_clear(s, i);
+  if (bi) atp_cp_implicit_set(s, j); else atp_cp_implicit_clear(s, j);
 }
 
 // 7c': push one CP onto the binary min-heap CP queue.  Defined
@@ -1158,6 +1205,9 @@ fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
   if (s == NULL) return;
   atp_ensure_cp_cap(s, i + 1u);
   free(s->cp_packed[i]);                 // free(NULL) is a no-op
+  // The slot now holds packed bytes -- drop any deferred-CP tag so the
+  // `cp_is_implicit[i] <=> cp_packed[i] == NULL` invariant holds.
+  atp_cp_implicit_clear(s, i);
   s->cp_packed[i] = acp_pack(lhs, rhs, NULL, NULL);
 #ifdef THVM_ATPFT_CPQ
   // Stage 7: mirror the slot into the parallel FT queue.  Test
@@ -1624,6 +1674,11 @@ static void atp_fv_index_rebuild(AtpState *s) {
   ix->root    = atp_dt_node_new(ix, ATP_DTREE_NIL);
   for (u32 i = 0; i < ix->seqmap_cap; i++) ix->seqmap[i].seq = ATP_DTREE_NIL;
   for (u32 i = 0; i < s->n_cps; i++) {
+    // Deferred-CP slots are never indexed: there are no packed bytes to
+    // borrow, and queue-subsumption deliberately skips the implicit
+    // passive set (WM has no queue-vs-queue subsumption at all --
+    // SS_TermpaarSubsummiertVonGM matches only the ACTIVE rule set).
+    if (atp_cp_slot_implicit(s, i)) continue;
     Term l = 0, r = 0;
     acp_unpack(s->cp_packed[i], &l, &r);
     atp_fv_index_insert(ix, l, r, s->cp_packed[i], s->cp_seq[i]);
@@ -6777,6 +6832,10 @@ static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
     s->cp_ultimate[i] = s->cp_ultimate[j];
     s->cp_ultimate[j] = tu;
   }
+  // Deferred-CP descriptor + tag bit travel with the slot: a fresh
+  // implicit push sifts up immediately, so missing this swap would
+  // desync the descriptor from its slot on the FIRST sift.
+  atp_cp_implicit_swap(s, i, j);
 #ifdef THVM_ATPFT_CPQ
   // Stage 7: the parallel FT queue indexes identically; swap entries
   // alongside the legacy arrays so heap sift keeps both views in
@@ -6818,6 +6877,10 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
                                       u8 is_ultimate) {
   atp_ensure_cp_cap(s, s->n_cps + 1);
   u32 i = s->n_cps;
+  // Eager packed slot: make sure no stale deferred-CP tag aliases the
+  // packed bytes as a descriptor (every drop/move site clears its bit,
+  // so this is a backstop that keeps the invariant local).
+  atp_cp_implicit_clear(s, i);
   s->cp_packed[i]= packed;
   s->cp_trace[i] = trace;
   // Fresh CP: no IR-side normalize witness yet -- force the IR sweep to
@@ -6992,26 +7055,100 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
                             is_ultimate);
 }
 
-// Deferred-CP (`implicit_pair`) arc commit 1 STUB.  Future commit 2 routes
-// `atp_push_cps_traced` here when `s->use_implicit_cp == 1`: lazily allocate
-// `cp_implicit` / `cp_is_implicit` to current cp_cap, write the descriptor
-// (parent_a / parent_b trace ids + signed overlap position), set the per-
-// slot tag bit, leave `cp_packed[i] == NULL` to mark the slot as deferred,
-// and feed cached weight + priority into the heap so `atp_cp_priority_sized`
-// doesn't need to re-walk a non-materialized CP.  Body for commit 1 is an
-// unconditional abort: the function has no caller in this commit, so reach-
-// ing it indicates a misroute that must be diagnosed before commit 2 lands.
-// Returns the index of the inserted slot, or `s->n_cps` (a one-past-end
-// sentinel that survives static analysis without introducing a new macro).
-static u32 atp_cp_implicit_push(AtpState *s,
-                                u32 parent_a_trace_id, u32 parent_b_trace_id,
-                                i32 overlap_position, u32 cp_trace_id,
-                                u32 weight, u32 priority) {
-  (void)s; (void)parent_a_trace_id; (void)parent_b_trace_id;
-  (void)overlap_position; (void)cp_trace_id; (void)weight; (void)priority;
-  thvm_fatal("atp_cp_implicit_push not yet routed -- "
-             "see commit 2 of deferred-CP arc");
-  return 0u;
+// Lazily allocate the deferred-CP descriptor array + tag bitset to the
+// current cp_cap (the caller has already run atp_ensure_cp_cap, which
+// keeps both in lockstep with cp_packed once they exist).  First-push-
+// only; under use_implicit_cp == 0 neither is ever allocated and every
+// helper above stays a single-branch no-op.
+static void atp_cp_implicit_arrays_ensure(AtpState *s) {
+  if (s->cp_is_implicit != NULL) return;
+  u32 cap = s->cp_cap;
+  s->cp_implicit = (AtpCpImplicit *)malloc((size_t)cap
+                                           * sizeof(AtpCpImplicit));
+  s->cp_is_implicit = (u8 *)calloc((size_t)(cap + 7u) / 8u, 1u);
+  if (s->cp_implicit == NULL || s->cp_is_implicit == NULL) {
+    thvm_fatal("atp_cp_implicit_arrays_ensure: OOM");
+  }
+  for (u32 i = 0; i < cap; i++) {
+    s->cp_implicit[i].parent_a_trace_id = ATP_TRACE_NONE;
+    s->cp_implicit[i].parent_b_trace_id = ATP_TRACE_NONE;
+    s->cp_implicit[i].overlap_position  = 0;
+    s->cp_implicit[i].weight            = 0u;
+    s->cp_implicit[i].priority          = 0u;
+  }
+}
+
+// Deferred-CP (`implicit_pair`) push: record the critical pair as a
+// 20-byte descriptor instead of an `acp_pack`'d byte string -- the WM
+// passive-set discipline (KPVerwaltung.c stores implicit term pairs and
+// materializes only on treatment via TPR_TP2ParIntermed).  The slot is
+// TRACE-BACKED: its raw unified terms already live unconditionally in
+// the TRACE_CP entry at `cp_trace[i]` (children 2/3, pushed by
+// atp_trace_push_cp for every queued CP), so materialization at
+// selection reads them back for the pop-time normalize that already
+// runs unconditionally -- no re-unification, no extra storage.  The
+// parent trace ids are cached in the descriptor for the dead-parent /
+// orphan check without a trace-entry walk.
+//
+// All weight bookkeeping runs HERE, while the unified terms are still
+// live (WM C_Classify-then-discard): cp_pri / cp_goal / cp_pri2 are
+// computed exactly as atp_cp_heap_insert_packed computes them, then the
+// terms are dropped (the trace keeps the raw forms alive).  Implicit
+// slots are NEVER inserted into the FV subsumption index -- WM has no
+// queue-vs-queue subsumption, so the implicit passive set does not
+// participate (see atp_fv_index_rebuild).
+//
+// Returns 1 when the CP was consumed (queued as a descriptor, or
+// dropped by the MaxWeight hard cap -- identical verdict to
+// atp_cp_heap_push's), 0 when the caller must take the eager packed
+// path instead (auto-MaxWeight over-bound CPs go to the packed overflow
+// stash, which has no implicit lane).
+static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
+                               u32 parent_a_trace_id, u32 parent_b_trace_id,
+                               u32 cp_trace_id, u8 is_ultimate) {
+  // Same structural weight acp_pack counts (one tick per preorder node)
+  // -- computed without the pack walk or its malloc.
+  u32 cp_nodes = atp_symbol_count(lhs) + atp_symbol_count(rhs);
+  // Waldmeister MaxWeight hard cap: same lossy drop as atp_cp_heap_push.
+  if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) return 1u;
+  // Auto-MaxWeight: the overflow stash stores packed byte strings, so an
+  // over-bound CP falls back to the eager path (which re-tests the bound
+  // and stashes).  Not in the WM preset; deferred-by-construction.
+  if (s->auto_max_cp_weight_base > 0u) {
+    u32 bound = atp_auto_maxw_bound(s);
+    if (bound > 0u && cp_nodes > bound) return 0u;
+  }
+  atp_ensure_cp_cap(s, s->n_cps + 1);
+  atp_cp_implicit_arrays_ensure(s);
+  u32 i = s->n_cps;
+  s->cp_packed[i] = NULL;          // deferred slot marker
+  s->cp_trace[i]  = cp_trace_id;
+  s->cp_last_norm_r_revision[i] = ATP_CP_NORM_COOKIE_NONE;
+  s->cp_pri[i]    = atp_cp_priority_sized(s, lhs, rhs, cp_nodes);
+  if (s->cp_ultimate != NULL) {
+    s->cp_ultimate[i] = is_ultimate;
+    if (is_ultimate) s->n_cps_ultimate++;
+  }
+  s->cp_goal[i]   = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
+                      ? atp_goal_weight(s, lhs, rhs) : 0u;
+  s->cp_pri2[i]   = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
+                  : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, lhs, rhs,
+                                                              s->w2_mode)
+                  :                        0u;
+  s->cp_seq[i]    = s->cp_seq_next++;
+  // No THVM_ATPFT_CPQ mirror: the FT queue's slot-occupied invariant
+  // tracks cp_packed[i], and a deferred slot is exactly the NULL case
+  // (atp_cp_ft_clear / _move are NULL-idempotent).
+  s->cp_implicit[i].parent_a_trace_id = parent_a_trace_id;
+  s->cp_implicit[i].parent_b_trace_id = parent_b_trace_id;
+  s->cp_implicit[i].overlap_position  = 0;
+  s->cp_implicit[i].weight            = cp_nodes;
+  s->cp_implicit[i].priority          = s->cp_pri[i];
+  atp_cp_implicit_set(s, i);
+  s->n_cps++;
+  s->n_cps_implicit++;
+  atp_cp_sift_up(s, i);
+  return 1u;
 }
 
 // Waldmeister CP-queue interleaving (a port of KPVerwaltung.c's
@@ -7140,10 +7277,12 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
     if (s->cp_pri[i] <= horizon) continue;
     free(s->cp_packed[i]);
     s->cp_packed[i] = NULL;
+    atp_cp_implicit_clear(s, i);
 #ifdef THVM_ATPFT_CPQ
     atp_cp_ft_clear(s, i);
 #endif
 #ifdef ATP_FV_INDEX
+    // No-op for deferred slots: their seq was never inserted.
     atp_fv_index_remove(s->fv_index, s->cp_seq[i]);
 #endif
     u32 last = s->n_cps - 1u;
@@ -7157,6 +7296,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
       s->cp_pri2[i]  = s->cp_pri2[last];
       s->cp_last_norm_r_revision[i] = s->cp_last_norm_r_revision[last];
       if (s->cp_ultimate != NULL) s->cp_ultimate[i] = s->cp_ultimate[last];
+      atp_cp_implicit_move(s, /*dst=*/i, /*src=*/last);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_move(s, /*dst=*/i, /*src=*/last);
 #endif
@@ -7179,33 +7319,31 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
   }
 }
 
-// Deferred-CP (`implicit_pair`) arc commit 1 STUB.  Future commit 3 routes
+// Deferred-CP (`implicit_pair`) STUB.  Future commit 3 routes
 // `thvm_atp_select_cp` here for slots tagged in `cp_is_implicit` before
-// falling through to `acp_unpack`.  WM-faithful re-unification recipe:
+// falling through to `acp_unpack`.  TRACE-BACKED recipe (the push side
+// stores descriptors whose raw terms live in the trace, see
+// atp_cp_implicit_push):
 //
-//   * read the descriptor: parent_a / parent_b trace ids, signed
-//     overlap_position;
-//   * recover parent A's `(lhs, rhs)` from `s->trace[parent_a_trace_id]`
-//     children 2/3 (TRACE_ORIENT records carry the oriented pair), and
-//     parent B's likewise (parent_b == ATP_TRACE_NONE means the CP is a
-//     singleton -- axiom / simplify);
-//   * walk to the subterm at `|overlap_position|` of the sign-selected
-//     parent's lhs via `term_at_preorder_index` -- this mirrors WM's
-//     `TO_TermAnStelle` analog from sources/TPR/TermOrientierung.c;
-//   * unify with the other parent's lhs at that position (the cross-
-//     overlap branch from waldmeister/sources/INF/Unifikation1.c:1731-
-//     1762, `U1_KPRekonstruieren`), splitting self-overlap (parent_a ==
-//     parent_b with the lhs sharing variables) from cross-overlap;
-//   * apply the MGU to the rhs-out of both parents to get the projected
-//     `(out_lhs, out_rhs)` written back via the out-params.
+//   * read the slot's TRACE_CP entry at `s->cp_trace[slot_idx]` --
+//     children 2/3 carry the raw var-normalized unified pair
+//     (atp_trace_push_cp), exactly what the pop path's unconditional
+//     normalize wants (the existing lazy-push flow feeds it the same
+//     raw form);
+//   * the trace array is a GC root set, so both terms are alive; the
+//     push side guarantees `cp_trace[slot_idx] != ATP_TRACE_NONE` for
+//     every implicit slot (trace-capped CPs stay on the eager packed
+//     path).
 //
-// Orphan check (`atp_cp_is_orphan` semantics inverted onto trace ids
-// directly -- both parents must still be live) and the dead-rule short-
-// circuit move here too, but those land in commit 4 alongside the IR /
-// FV-index plumbing.  Returns 1 on success, 0 if the descriptor cannot
-// be materialized (orphan / dead parent).  Body for commit 1 is an
-// unconditional abort: no caller in this commit, so reaching this code
-// indicates a misroute that must be diagnosed before commit 3 lands.
+// No re-unification: WM re-unifies (U1_KPRekonstruieren) because it has
+// no always-on trace; thvm's TRACE_CP entry is already the proof DAG +
+// orphan-murder input, so pointing the descriptor at it adds zero new
+// memory while killing the packed-string malloc.  The descriptor's
+// parent trace ids serve the dead-parent short-circuit (commit 4
+// alongside the IR / FV-index plumbing).  Returns 1 on success, 0 if
+// the slot cannot be materialized (orphan / dead parent).  Until commit
+// 3 lands the body is an unconditional abort: with use_implicit_cp on,
+// selection of an implicit slot is EXPECTED to die here.
 static int atp_cp_implicit_materialize(AtpState *s, u32 slot_idx,
                                        Term *out_lhs, Term *out_rhs) {
   (void)s; (void)slot_idx; (void)out_lhs; (void)out_rhs;
@@ -7313,8 +7451,16 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (!orphan) s->cp_select_count++;
 
   // Unpack the chosen CP from its byte string into two fresh heap
-  // Terms for the caller to normalize.
-  acp_unpack(s->cp_packed[j], lhs_out, rhs_out);
+  // Terms for the caller to normalize.  An implicit slot has no byte
+  // string -- it must materialize from its TRACE_CP entry instead;
+  // until commit 3 of the deferred-CP arc lands this is the aborting
+  // stub, so the flag-ON failure mode is a diagnosable fatal rather
+  // than a NULL deref.
+  if (atp_cp_slot_implicit(s, j)) {
+    atp_cp_implicit_materialize(s, j, lhs_out, rhs_out);
+  } else {
+    acp_unpack(s->cp_packed[j], lhs_out, rhs_out);
+  }
   s->last_popped_trace = s->cp_trace[j];
 
   // Env-gated CP-selection trajectory dump for parity comparison vs
@@ -7344,6 +7490,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
 #endif
   free(s->cp_packed[j]);
   s->cp_packed[j] = NULL;
+  atp_cp_implicit_clear(s, j);
 #ifdef THVM_ATPFT_CPQ
   // Stage 7: the popped slot's FT spans return to Arena A's free list
   // BEFORE backfill -- the slot is about to be overwritten with the
@@ -7364,6 +7511,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_pri2[j]  = s->cp_pri2[last];
     s->cp_last_norm_r_revision[j] = s->cp_last_norm_r_revision[last];
     if (s->cp_ultimate != NULL) s->cp_ultimate[j] = s->cp_ultimate[last];
+    atp_cp_implicit_move(s, /*dst=*/j, /*src=*/last);
 #ifdef THVM_ATPFT_CPQ
     // Move the (still-owned) FT entry from the last slot into j; zero
     // the now-vacated tail so a later destroy / clear does not
@@ -7409,6 +7557,15 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
   if (s == NULL || s->n_cps == 0) return;
   atp_ensure_cp_cap(s, s->n_cps);
   for (u32 i = 0; i < s->n_cps; i++) {
+    if (atp_cp_slot_implicit(s, i)) {
+      // Deferred slot: no packed bytes to unpack.  Reuse the push-time
+      // cached priority (this is what the descriptor caches it for);
+      // cp_goal / cp_pri2 keep their push-time values, which travel
+      // with every slot move.
+      s->cp_pri[i] = s->cp_implicit[i].priority;
+      if (!s->cp_fifo_tiebreak) s->cp_seq[i] = s->cp_seq_next++;
+      continue;
+    }
     Term l = 0, r = 0;
     acp_unpack(s->cp_packed[i], &l, &r);
     s->cp_pri[i] = atp_cp_priority(s, l, r);
@@ -7831,12 +7988,14 @@ fn void thvm_atp_set_use_orphan_murder(AtpState *s, u8 on) {
   s->use_orphan_murder = on ? 1u : 0u;
 }
 
-// Toggle the deferred-CP (`implicit_pair`) path.  Commit 1 wires the flag
-// + storage scaffolding only -- the push and selection paths still go
-// through `acp_pack` / `acp_unpack`, so flipping this on currently has no
-// visible effect.  Lazy allocation of `cp_implicit` / `cp_is_implicit`
-// happens at first push (commit 2), not here, so toggling at runtime
-// stays cheap.  Default OFF -> engine byte-identical.
+// Toggle the deferred-CP (`implicit_pair`) path.  With the flag on,
+// atp_push_cps_traced queues rule-x-rule CPs as 20-byte trace-backed
+// descriptors (atp_cp_implicit_push) instead of packed byte strings.
+// SELECTION of an implicit slot still aborts in the
+// atp_cp_implicit_materialize stub until commit 3 of the arc lands, so
+// the flag is for push-side testing only.  Lazy allocation of
+// `cp_implicit` / `cp_is_implicit` happens at first push, not here, so
+// toggling at runtime stays cheap.  Default OFF -> engine byte-identical.
 fn void thvm_atp_set_use_implicit_cp(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_implicit_cp = on ? 1u : 0u;
@@ -10268,8 +10427,10 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
     }
     if (orphan) {
       // Drop the orphan -- free its byte string (the queue owns it).
+      // free(NULL) no-op for deferred slots; their tag bit drops too.
       free(s->cp_packed[i]);
       s->cp_packed[i] = NULL;
+      atp_cp_implicit_clear(s, i);
       continue;
     }
     if (w != i) {
@@ -10279,9 +10440,13 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
       s->cp_pri[w]    = s->cp_pri[i];
       s->cp_seq[w]    = s->cp_seq[i];
       s->cp_goal[w]   = s->cp_goal[i];
+      // cp_pri2 must travel too: the trailing reheapify recomputes it
+      // for packed slots but keeps the carried value for deferred ones.
+      s->cp_pri2[w]   = s->cp_pri2[i];
       // The NF-witness cookie travels with the CP (per-CP, not per-slot).
       s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
       if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
+      atp_cp_implicit_move(s, /*dst=*/w, /*src=*/i);
     }
     w++;
   }
@@ -10400,9 +10565,35 @@ static void atp_cp_set_interreduce(AtpState *s) {
     if (s->use_orphan_murder && atp_cp_is_orphan(s, s->cp_trace[i])) {
       s->n_cps_dropped_orphan++;
       s->n_cp_set_ir_deleted++;
-      free(s->cp_packed[i]);
+      free(s->cp_packed[i]);   // free(NULL) no-op for deferred slots
       s->cp_packed[i] = NULL;
+      atp_cp_implicit_clear(s, i);
       touched = 1;
+      if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
+      continue;
+    }
+    // Deferred slot: no packed bytes to normalize -- move it wholesale,
+    // carrying the push-time priorities (commit 4 of the implicit-CP arc
+    // materializes via the TRACE_CP raw terms and runs the WM AP_generic
+    // normalize like every packed survivor; WM itself materializes via
+    // TPR_TP2ParIntermed, KPVerwaltung.c:975, before NF_Normalform2).
+    // The orphan test above already covered it (trace-only).
+    if (atp_cp_slot_implicit(s, i)) {
+      if (w != i) {
+        s->cp_packed[w] = s->cp_packed[i];   // NULL deferred-slot marker
+        s->cp_packed[i] = NULL;
+      }
+      s->cp_trace[w] = s->cp_trace[i];
+      s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
+      if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
+      s->cp_pri[w]  = s->cp_pri[i];
+      s->cp_goal[w] = s->cp_goal[i];
+      s->cp_pri2[w] = s->cp_pri2[i];
+      atp_cp_implicit_move(s, /*dst=*/w, /*src=*/i);
+      if (s->cp_fifo_tiebreak) s->cp_seq[w] = s->cp_seq[i];
+      else                     s->cp_seq[w] = s->cp_seq_next++;
+      w++;
+      s->n_cp_set_ir_skipped++;
       if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
       continue;
     }
@@ -11489,6 +11680,11 @@ static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
 #else
 static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
   for (u32 k = 0; k < s->n_cps; k++) {
+    // Deferred-CP slot (cp_packed[k] == NULL): never matched against --
+    // WM has no queue-vs-queue subsumption, so its implicit passive set
+    // never participates; the FV-index variant gets the same verdict by
+    // never indexing implicit slots.
+    if (s->cp_packed[k] == NULL) continue;
     // Match the queued CP straight off its packed byte string.
     // Forward: σqs = lhs AND σqt = rhs (one σ).
     RewriteSubst fwd = {{0}};
@@ -12637,7 +12833,23 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // jump the heap so depth-first chains finish before older axiom CPs
     // -- the trajectory that lets WM crack wolfram in 2.5s.
     u8 cp_ult = s->use_database_ultimate ? 1u : 0u;
-    atp_cp_heap_push(s, cp_lhs, cp_rhs, t, cp_ult);
+    // Deferred-CP routing: with use_implicit_cp on, a rule-x-rule CP
+    // (two real parents -- per WM, axiom/initial CPs stay eager) whose
+    // raw terms made it into the trace is queued as a 20-byte
+    // descriptor instead of packed bytes.  All push gates above
+    // (push-norm cull, perm/rule/queue-subsume, joinability) already
+    // ran on the unified terms -- WM's C_Classify-then-discard.  A CP
+    // past the trace cap (t == ATP_TRACE_NONE) has no raw-term backing
+    // for materialization, so it takes the eager packed path; likewise
+    // an auto-MaxWeight over-bound CP (the overflow stash is packed-
+    // only), which atp_cp_implicit_push signals by returning 0.
+    u8 deferred = 0u;
+    if (s->use_implicit_cp != 0u && t != ATP_TRACE_NONE
+        && parent_a != ATP_TRACE_NONE && parent_b != ATP_TRACE_NONE) {
+      deferred = atp_cp_implicit_push(s, cp_lhs, cp_rhs,
+                                      parent_a, parent_b, t, cp_ult);
+    }
+    if (!deferred) atp_cp_heap_push(s, cp_lhs, cp_rhs, t, cp_ult);
     pushed++;
   }
   return pushed;

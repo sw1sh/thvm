@@ -693,9 +693,11 @@ int main(int argc, char **argv) {
   }
 
   // THVM_ATP_IMPLICIT_CP=1 toggles the deferred-CP (`implicit_pair`)
-  // storage path independently of the WM preset.  Commit 1 of the arc
-  // ships the scaffolding only -- the setter has no on-path consumer,
-  // so enabling here is a no-op until commit 2 routes the push side.
+  // storage path independently of the WM preset.  The push side is
+  // routed (rule-x-rule CPs queue as trace-backed descriptors), but
+  // selection still aborts in the atp_cp_implicit_materialize stub
+  // until commit 3 of the arc lands -- enable for push-side probing
+  // only.
   {
     const char *ic = getenv("THVM_ATP_IMPLICIT_CP");
     if (ic != NULL && ic[0] != '\0' && ic[0] != '0') {

@@ -901,6 +901,96 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/implicit-cp-push-queues-trace-backed-descriptor");
+  {
+    // Deferred-CP (`implicit_pair`) push side: same two-rule setup as
+    // the trace-parents test above (the cross-overlap CP `(e, a)`
+    // survives the filters), but with use_implicit_cp on the CP must
+    // land as a 20-byte descriptor -- cp_packed[i] == NULL, tag bit
+    // set, parents cached, push-time priority cached -- and its raw
+    // terms must be readable off the slot's TRACE_CP entry (the
+    // trace-backed materialization contract for commit 3).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_implicit_cp(s, 1u);
+
+    s->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]);
+    s->n_rules = 1;
+
+    Term lhs1 = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs1 = mk_a();
+    AtpAddedRange added = thvm_atp_orient_and_add(s, lhs1, rhs1);
+    CHECK_EQ(added.count, 1u);
+    s->r_trace[1] = atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
+                                   ATP_TRACE_NONE,
+                                   s->lhs[1], s->rhs[1]);
+
+    u32 pushed = thvm_atp_generate_cps(s, added);
+    CHECK(pushed >= 1u);
+    CHECK(s->n_cps >= 1u);
+    CHECK(s->n_cps_implicit >= 1u);
+    CHECK(s->cp_implicit != NULL);
+    CHECK(s->cp_is_implicit != NULL);
+
+    u32 n_tagged = 0;
+    for (u32 i = 0; i < s->n_cps; i++) {
+      u8 tagged = atp_cp_slot_implicit(s, i);
+      // Tag-bit invariant: implicit <=> no packed bytes.
+      CHECK_EQ(tagged, s->cp_packed[i] == NULL ? 1u : 0u);
+      if (!tagged) continue;
+      n_tagged++;
+      // Descriptor: two real cached parents, push-time priority/weight.
+      CHECK(s->cp_implicit[i].parent_a_trace_id != ATP_TRACE_NONE);
+      CHECK(s->cp_implicit[i].parent_b_trace_id != ATP_TRACE_NONE);
+      CHECK_EQ(s->cp_implicit[i].priority, s->cp_pri[i]);
+      CHECK(s->cp_implicit[i].weight >= 2u);
+      // Trace-backed materialization contract: the slot's TRACE_CP
+      // entry holds the raw unified terms as children 2/3.
+      u32 t = s->cp_trace[i];
+      CHECK(t != ATP_TRACE_NONE);
+      CHECK(t < s->n_trace);
+      Term te = s->trace[t];
+      CHECK_EQ(term_ext(te), TRACE_CP);
+      CHECK(term_ctr_at(te, 2) != 0u);
+      CHECK(term_ctr_at(te, 3) != 0u);
+    }
+    CHECK(n_tagged >= 1u);
+    CHECK_EQ(n_tagged, s->n_cps_implicit);
+
+    // Queue-subsumption deliberately skips the implicit passive set
+    // (WM has no queue-vs-queue subsumption -- SS_TermpaarSubsummiert-
+    // VonGM matches only the ACTIVE set), so the implicit run sees
+    // ZERO queue-subsumed drops, while an eager twin of the same setup
+    // drops the symmetric second overlap against the first queued CP.
+    // This is the designed trajectory delta of the arc: the flag-ON
+    // gate is proof-validity, not byte-parity.
+    CHECK_EQ(s->n_cps_dropped_queue_subsumed, 0u);
+    AtpState *e = thvm_atp_init(&DUMMY_CFG, 100);
+    e->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
+    e->rhs[0] = mk_v(VAR_x);
+    e->r_trace[0] = atp_trace_push(e, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   e->lhs[0], e->rhs[0]);
+    e->n_rules = 1;
+    AtpAddedRange eadded = thvm_atp_orient_and_add(
+        e, mk_f(mk_v(VAR_x), mk_e()), mk_a());
+    e->r_trace[1] = atp_trace_push(e, TRACE_ORIENT, e->r_trace[0],
+                                   ATP_TRACE_NONE,
+                                   e->lhs[1], e->rhs[1]);
+    u32 epushed = thvm_atp_generate_cps(e, eadded);
+    CHECK(epushed >= 1u);
+    CHECK(e->n_cps_dropped_queue_subsumed >= 1u);
+    CHECK_EQ(epushed + e->n_cps_dropped_queue_subsumed, pushed);
+    CHECK_EQ(e->n_cps_implicit, 0u);
+    CHECK(e->cp_is_implicit == NULL);
+
+    thvm_atp_free(e);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/headline-prove-f-a-ia-equals-e-from-group-axioms");
   {
     // Stage 5.5 demo from docs/plans/waldmeister_ic_atp.md sec.5:
