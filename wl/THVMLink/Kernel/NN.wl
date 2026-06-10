@@ -1299,16 +1299,22 @@ fromLayer[ThreadingLayer, layer_, xs_List] := Module[{f, isPlus, isTimes},
    contig TTerm keeps the per-call cost down to the actual sgemm. *)
 $linearTransposedCache = <||>
 
+(* Lookup's default arg is NOT held, so the classic
+   Lookup[cache, key, cache[key] = ...] idiom recomputes (and overwrites)
+   the slot on every call -- defeating the cache.  Guard on KeyExistsQ so
+   the transpose runs only on the first sighting of a layer. *)
 linearTransposedTensor[layer_LinearLayer] := With[{key = layer},
-    Lookup[$linearTransposedCache, key,
+    If[ KeyExistsQ[$linearTransposedCache, key],
+        $linearTransposedCache[key],
         $linearTransposedCache[key] = TTensorCreate @ NumericArray[
             Transpose @ Normal @ NetExtract[layer, "Weights"], "Real32"]
     ]]
 
 linearBiasTensor[layer_LinearLayer] := With[{key = Hold[layer, "b"]},
-    Lookup[$linearTransposedCache, key,
-        $linearTransposedCache[key] =
-            TTensorCreate @ NetExtract[layer, "Biases"]]]
+    If[ KeyExistsQ[$linearTransposedCache, key],
+        $linearTransposedCache[key],
+        $linearTransposedCache[key] = TTensorCreate @ NetExtract[layer, "Biases"]
+    ]]
 
 fromLayer[NetMapOperator, layer_, x_TTerm] := Module[{inner},
     inner = NetExtract[layer, "Net"];

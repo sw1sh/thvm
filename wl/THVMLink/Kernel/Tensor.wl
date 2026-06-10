@@ -642,8 +642,7 @@ TTensorCreate[data_, dtype_String]         := (
     Module[{na, useTyped, normalized, shape, flatNa, t, logicalShape},
         useTyped = MemberQ[{"f16", "bf16", "fp8e4m3", "fp8e5m2",
                             "i4", "u4", "bool"}, dtype];
-        logicalShape = If[ MatchQ[data, _NumericArray],
-            Dimensions[data], Dimensions[data]];
+        logicalShape = Dimensions[data];
         If[ logicalShape === {}, logicalShape = {Length @ Flatten[{data}]}];
         Which[
             (* f16 / bf16: data may already be a packed UnsignedInteger16

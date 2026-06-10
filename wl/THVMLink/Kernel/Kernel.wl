@@ -811,7 +811,7 @@ TKernelProgramCacheSize[] := (ensureInit[]; $kernelProgramCacheSizeFn[])
    body lives on the lifted UOp DAG, accessed via TKernelSource);
    "n_ops" stays in the surface for backward compat but is always 0,
    and "program" is always {}. *)
-TKernelInfo[kid_Integer] := Module[{raw = $kernelInfoFn[kid]},
+TKernelInfo[kid_Integer] := (ensureInit[]; Module[{raw = $kernelInfoFn[kid]},
     <|
         "n_inputs"     -> raw[[1]],
         "n_ops"        -> raw[[2]],
@@ -819,7 +819,7 @@ TKernelInfo[kid_Integer] := Module[{raw = $kernelInfoFn[kid]},
         "output_dtype" -> dtypeName[raw[[4]]],
         "program"      -> {}
     |>
-]
+])
 
 $tileAxisNames = <|
     0 -> "LOOP",   1 -> "REDUCE", 2 -> "UPCAST", 3 -> "UNROLL",

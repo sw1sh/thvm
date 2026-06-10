@@ -79,6 +79,10 @@ TContextNew[device_]           := With[{slot = $contextCreateFn[deviceCode[devic
     ]
 ]
 
+(* Slot 0 (default) is preserved -- tearing it down here would delete the
+   default context's WL-side counters; use TFree[] for that.  Return 0 as
+   the documented no-op value. *)
+TContextDestroy[TContext[0]] := 0
 TContextDestroy[TContext[slot_Integer]] := (
     KeyDropFrom[$labelCounters, slot];
     KeyDropFrom[$initializedContexts, slot];

@@ -40,11 +40,18 @@ Options[TEproverProof] = {
     "Binary" -> Automatic
 }
 
+(* Resolve eprover: the known prefixes first, then any $PATH dir.  No
+   default, so a truly-absent binary yields Missing -> the noeprover
+   message fires instead of RunProcess failing opaquely on bare "eprover". *)
 eproverBinary[Automatic] := SelectFirst[
-    {"/opt/homebrew/bin/eprover",
-     "/usr/local/bin/eprover",
-     "eprover"},
-    FileExistsQ[#] || # === "eprover" &
+    Join[
+        {"/opt/homebrew/bin/eprover", "/usr/local/bin/eprover"},
+        Map[
+            dir |-> FileNameJoin[{dir, "eprover"}],
+            StringSplit[Replace[Environment["PATH"], Except[_String] -> ""], ":"]
+        ]
+    ],
+    FileExistsQ
 ]
 
 eproverBinary[s_String] := s
@@ -65,7 +72,7 @@ TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
         derivation, foldedDerivation
     },
         bin = eproverBinary[OptionValue["Binary"]];
-        If[ MissingQ[bin] || bin === Null,
+        If[ MissingQ[bin],
             Message[TEproverProof::noeprover];
             Return[$Failed]
         ];

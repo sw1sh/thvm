@@ -53,12 +53,19 @@ Options[TVampireProof] = {
     "Binary" -> Automatic
 }
 
-(* Resolve the vampire binary location: search the common Homebrew /
-   /usr/local prefixes, fall back to bare "vampire" so PATH still
-   wins if the binary lives elsewhere. *)
+(* Resolve the vampire binary: the common Homebrew / /usr/local prefixes
+   first, then any $PATH dir.  No default, so a truly-absent binary yields
+   Missing -> the novamp message fires instead of RunProcess failing
+   opaquely on bare "vampire". *)
 vampireBinary[Automatic] := SelectFirst[
-    {"/opt/homebrew/bin/vampire", "/usr/local/bin/vampire", "vampire"},
-    FileExistsQ[#] || # === "vampire" &
+    Join[
+        {"/opt/homebrew/bin/vampire", "/usr/local/bin/vampire"},
+        Map[
+            dir |-> FileNameJoin[{dir, "vampire"}],
+            StringSplit[Replace[Environment["PATH"], Except[_String] -> ""], ":"]
+        ]
+    ],
+    FileExistsQ
 ]
 
 vampireBinary[s_String] := s
@@ -190,6 +197,10 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
             ],
             Missing["NoProof"]
         ];
+        (* A proof that Vampire found but TPTPImport could not parse must
+           not masquerade as a 0-length "Proved" with empty Inferences. *)
+        If[ status === "Proved" && derivation === $Failed,
+            Message[TVampireProof::badtptp, proofText]];
         foldedDerivation = If[
             AssociationQ[derivation] && KeyExistsQ[derivation, "Derivation"],
             foldReorients[derivation["Derivation"]],

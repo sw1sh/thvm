@@ -9,7 +9,7 @@
      uopShapeOf[base]    inferred output shape, mirrors
                          src/schedule/materialize.c
 
-   Shape inference depends on Shape.wl's broadcastShape / dropAxis /
+   Shape inference depends on Shape.wl's broadcastShape / dropAxes /
    tenShapeOf -- both files share THVMLink`Private` so the calls
    resolve directly. *)
 
@@ -118,9 +118,17 @@ uopShapeOfFor[op_, base_] /;
         MemberQ[{$UopNeg, $UopRecip, $UopExp2, $UopLog2, $UopSqrt}, op] :=
     uopSrcShape[base, 0]
 
-uopShapeOfFor[$UopReduce, base_] := dropAxis[
-    uopSrcShape[base, 0],
-    TTermVal[THeapRead[base + 2]]    (* axis NUM in heap layout *)
+(* REDUCE heap layout (src/uop/reduce.c):
+     heap[base + 0]     = src
+     heap[base + 1]     = NUM(kind)
+     heap[base + 2]     = NUM(n_axes)
+     heap[base + 3 + i] = NUM(axis_i)   for i in 0..n_axes-1
+   A multi-axis REDUCE folds n_axes axes in one shot, so drop them all. *)
+uopShapeOfFor[$UopReduce, base_] := With[{nAxes = TTermVal[THeapRead[base + 2]]},
+    dropAxes[
+        uopSrcShape[base, 0],
+        Table[TTermVal[THeapRead[base + 3 + i]], {i, 0, nAxes - 1}]
+    ]
 ]
 
 (* EXPAND heap layout (src/uop/expand.c):

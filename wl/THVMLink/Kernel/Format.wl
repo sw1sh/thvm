@@ -612,8 +612,8 @@ TContext /: MakeBoxes[c_TContext /; tContextQ[Unevaluated[c]], fmt_] := With[{
     Module[{prev = $contextCurrentFn[], heapPos, tens, kernels, isCurrent},
         $contextSelectFn[slot];
         heapPos   = $heapPosFn[];
-        tens      = If[ $tensCountFn   === $tensCountFn,   $tensCountFn[],   "?"];
-        kernels   = If[ $kernelCountFn === $kernelCountFn, $kernelCountFn[], "?"];
+        tens      = If[ MatchQ[$tensCountFn, _LibraryFunction],   $tensCountFn[],   "?"];
+        kernels   = If[ MatchQ[$kernelCountFn, _LibraryFunction], $kernelCountFn[], "?"];
         $contextSelectFn[prev];
         isCurrent = (slot === prev);
         BoxForm`ArrangeSummaryBox[

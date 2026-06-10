@@ -48,14 +48,23 @@ Options[TTweeProof] = {
     "Binary" -> Automatic
 }
 
+(* Resolve twee: the cabal/Homebrew/usr-local prefixes first (cabal
+   installs to ~/.cabal/bin), then any $PATH dir.  No default, so a
+   truly-absent binary yields Missing -> the notwee message fires instead
+   of RunProcess failing opaquely on bare "twee". *)
 tweeBinary[Automatic] := SelectFirst[
-    {
-        "/Users/swish/.cabal/bin/twee",
-        "/opt/homebrew/bin/twee",
-        "/usr/local/bin/twee",
-        "twee"
-    },
-    FileExistsQ[#] || # === "twee" &
+    Join[
+        {
+            FileNameJoin[{$HomeDirectory, ".cabal", "bin", "twee"}],
+            "/opt/homebrew/bin/twee",
+            "/usr/local/bin/twee"
+        },
+        Map[
+            dir |-> FileNameJoin[{dir, "twee"}],
+            StringSplit[Replace[Environment["PATH"], Except[_String] -> ""], ":"]
+        ]
+    ],
+    FileExistsQ
 ]
 
 tweeBinary[s_String] := s
@@ -114,7 +123,7 @@ TTweeProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=
     Block[{bin, tc, cmd, out, secs, status, proofBody, parsed},
         bin = tweeBinary[OptionValue["Binary"]];
-        If[ MissingQ[bin] || bin === Null,
+        If[ MissingQ[bin],
             Message[TTweeProof::notwee];
             Return[$Failed]
         ];

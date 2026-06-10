@@ -43,14 +43,21 @@ Options[TWaldmeisterProof] = {
     "MathlinkPath" -> Automatic
 }
 
-(* Resolve wmcli location: $WMCLI env var > PATH lookup ("wmcli").
-   There is no canonical install location for the wmcli build, so
-   set WMCLI to point at it (or symlink it into /usr/local/bin,
-   ~/.local/bin, etc.). *)
+(* Resolve wmcli location: $WMCLI env var > a $PATH scan for "wmcli".
+   There is no canonical install location for the wmcli build, so set
+   WMCLI to point at it (or symlink it into /usr/local/bin, ~/.local/bin,
+   etc.).  A truly-absent binary yields Missing -> the nowm message fires
+   instead of RunProcess failing opaquely on bare "wmcli". *)
 wmBinary[Automatic] := Block[{env = Environment["WMCLI"]},
     Which[
         StringQ[env] && FileExistsQ[env], env,
-        True, "wmcli"  (* PATH lookup, fails loudly at exec if absent *)
+        True, SelectFirst[
+            Map[
+                dir |-> FileNameJoin[{dir, "wmcli"}],
+                StringSplit[Replace[Environment["PATH"], Except[_String] -> ""], ":"]
+            ],
+            FileExistsQ
+        ]
     ]
 ]
 

@@ -104,15 +104,21 @@ $tptpToWlOp = <|
     "wedge"        -> Wedge,
     "vee"          -> Vee,
     "circ"         -> SmallCircle,
-    "mul"          -> Times,
-    "add"          -> Plus,
-    "equiv"        -> Equivalent,
-    "implies"      -> Implies,
-    "lnot"         -> Not,
-    "land"         -> And,
-    "lor"          -> Or,
-    "nand"         -> Nand,
-    "nor"          -> Nor,
+    (* Active System` heads must be Inactive: Times/Plus/Equivalent are
+       Orderless (they canonically sort operands) and And/Or/Not auto-
+       flatten / collapse double negation, which would silently destroy
+       the prover's literal operand structure on rewrite.  Inactive keeps
+       the head identity while holding the structure, matching the
+       Inactive[Equal] goal representation the lift verifier already uses. *)
+    "mul"          -> Inactive[Times],
+    "add"          -> Inactive[Plus],
+    "equiv"        -> Inactive[Equivalent],
+    "implies"      -> Inactive[Implies],
+    "lnot"         -> Inactive[Not],
+    "land"         -> Inactive[And],
+    "lor"          -> Inactive[Or],
+    "nand"         -> Inactive[Nand],
+    "nor"          -> Inactive[Nor],
     (* Unicode/diacritic operators emitted as op_<name> by
        tools/baselines/tptp_to_pr.wls (and then sanitized through
        TPTPImport's lowercasing path to opovertilde / opoverbar /
@@ -862,7 +868,7 @@ Options[TWaldmeisterProofObject] = {
    tools/baselines/tptp_to_pr.wls; missing .pr returns
    `NoCachedPr` Failure with the converter command line. *)
 TWaldmeisterProofObject[theory_String, thm_String,
-        opts : OptionsPattern[]] /; ! FileExtension[theory] === "pr" :=
+        opts : OptionsPattern[]] /; FileExtension[theory] =!= "pr" :=
     Block[{path = FileNameJoin[{
             Directory[], "tools", "baselines", "wm_pr",
             theory <> "__" <> thm <> ".pr"}]},

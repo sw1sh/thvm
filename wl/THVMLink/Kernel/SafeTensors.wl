@@ -160,17 +160,22 @@ TSafeTensorSave[assoc_Association, path_String, metadata_Association] := Module[
     names = Keys[assoc];
     infos = saveTensorInfo /@ Values[assoc];
     If[MemberQ[infos, $Failed], Return[$Failed]];
-    (* Lay out the data section: each tensor's byte span end-to-end. *)
+    (* Lay out the data section: each tensor's byte span end-to-end.  An
+       empty assoc Sows nothing, so Reap yields {} (not {{...}}); guard the
+       [[2, 1]] Part for the valid degenerate empty-safetensors case. *)
     offset = 0;
-    offsets = Reap[
-        Do[
-            With[{nbytes = infos[[i]]["nbytes"]},
-                Sow[{offset, offset + nbytes}];
-                offset = offset + nbytes
-            ],
-            {i, Length[infos]}
-        ]
-    ][[2, 1]];
+    offsets = If[ infos === {},
+        {},
+        Reap[
+            Do[
+                With[{nbytes = infos[[i]]["nbytes"]},
+                    Sow[{offset, offset + nbytes}];
+                    offset = offset + nbytes
+                ],
+                {i, Length[infos]}
+            ]
+        ][[2, 1]]
+    ];
     (* JSON header: optional __metadata__ first (tinygrad safe_save), then
        one entry per tensor in insertion order.  Metadata values are
        coerced to strings (the safetensors spec requires string values). *)
