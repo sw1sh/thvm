@@ -55,7 +55,7 @@ TMultiTraceQ[] := (ensureInit[]; $multiTraceSupportedFn[] === 1)
    multi_family_name in src/instrument/multi.c) owns the RULE_* /
    MULTI_* -> string tables, so there's no parallel WL list to keep
    in sync. *)
-multiRuleName[c_Integer]   := multiRuleName[c]   = $multiRuleNameFn[c]
+multiRuleName[c_Integer] := multiRuleName[c] = $multiRuleNameFn[c]
 multiFamilyName[c_Integer] := multiFamilyName[c] = $multiFamilyNameFn[c]
 
 (* Plain double-quotes around the build command -- backticks would be
@@ -94,14 +94,13 @@ producedFromWireProv[wireProv_List] :=
         Last -> First]
 
 (* All step-record keys the implementation can populate. *)
-$multiAllKeys = {"Step", "Term", "Events", "ITRS",
-                 "Slice", "CanonicalSlice", "SliceBoxes", "Diagram"};
+$multiAllKeys = {"Step", "Term", "Events", "ITRS", "Slice", "CanonicalSlice", "SliceBoxes", "Diagram"}
 
 (* Keys that require the slice walk + its dependent computations. *)
-$multiSliceKeys = {"Slice", "CanonicalSlice", "SliceBoxes"};
-$multiDiagramKeys = {"Diagram"};
-keysNeedSlice[keys_]   := IntersectingQ[keys, $multiSliceKeys];
-keysNeedDiagram[keys_] := IntersectingQ[keys, $multiDiagramKeys];
+$multiSliceKeys = {"Slice", "CanonicalSlice", "SliceBoxes"}
+$multiDiagramKeys = {"Diagram"}
+keysNeedSlice[keys_] := IntersectingQ[keys, $multiSliceKeys]
+keysNeedDiagram[keys_] := IntersectingQ[keys, $multiDiagramKeys]
 
 (* TMultiSteps -- stepwise replay of a reduction.  Each TStep
    fires exactly one IC interaction; we snapshot the heap (= render
@@ -116,40 +115,34 @@ keysNeedDiagram[keys_] := IntersectingQ[keys, $multiDiagramKeys];
    private "_evBefore" key to thread the event-buffer cursor through
    the iteration; we strip it before returning. *)
 SetAttributes[TMultiTrace, HoldFirst];
-Options[TMultiTrace] = {"DiagramSeeds" -> {}};
+Options[TMultiTrace] = {"DiagramSeeds" -> {}}
 
 (* Default keys: the minimal set that both TCausalGraph and
    TMultiwayGraph consume.  "Events" covers TCausalGraph and the
    edge labels/colours in TMultiwayGraph; "CanonicalSlice" covers
    TMultiwayGraph's vertex identity.  Diagrams / SliceBoxes /
    Term / etc. are opt-in via explicit keys or `All`. *)
-$multiDefaultKeys = {"Events", "CanonicalSlice"};
+$multiDefaultKeys = {"Events", "CanonicalSlice"}
 
-resolveKeys[All]              := $multiAllKeys
-resolveKeys[ks_List]          := ks
-resolveKeys[k_String]         := {k}
+resolveKeys[All] := $multiAllKeys
+resolveKeys[ks_List] := ks
+resolveKeys[k_String] := {k}
 
 (* When `keys` is a single string, return a flat list of that key's
    values (one per step) instead of the list-of-associations form;
    list / All keys keep the list-of-associations shape. *)
 TMultiTrace[expr_, opts : OptionsPattern[]] :=
-    multiTraceImpl[expr, $multiDefaultKeys, Infinity,
-                   OptionValue["DiagramSeeds"], None]
+    multiTraceImpl[expr, $multiDefaultKeys, Infinity, OptionValue["DiagramSeeds"], None]
 TMultiTrace[expr_, max_Integer ? Positive, opts : OptionsPattern[]] :=
-    multiTraceImpl[expr, $multiDefaultKeys, max,
-                   OptionValue["DiagramSeeds"], None]
+    multiTraceImpl[expr, $multiDefaultKeys, max, OptionValue["DiagramSeeds"], None]
 TMultiTrace[expr_, key_String, opts : OptionsPattern[]] :=
     multiTraceImpl[expr, {key}, Infinity, OptionValue["DiagramSeeds"], key]
 TMultiTrace[expr_, keys : (_List | All), opts : OptionsPattern[]] :=
-    multiTraceImpl[expr, resolveKeys[keys], Infinity,
-                   OptionValue["DiagramSeeds"], None]
-TMultiTrace[expr_, key_String,
-            max_Integer ? Positive, opts : OptionsPattern[]] :=
+    multiTraceImpl[expr, resolveKeys[keys], Infinity, OptionValue["DiagramSeeds"], None]
+TMultiTrace[expr_, key_String, max_Integer ? Positive, opts : OptionsPattern[]] :=
     multiTraceImpl[expr, {key}, max, OptionValue["DiagramSeeds"], key]
-TMultiTrace[expr_, keys : (_List | All),
-            max_Integer ? Positive, opts : OptionsPattern[]] :=
-    multiTraceImpl[expr, resolveKeys[keys], max,
-                   OptionValue["DiagramSeeds"], None]
+TMultiTrace[expr_, keys : (_List | All), max_Integer ? Positive, opts : OptionsPattern[]] :=
+    multiTraceImpl[expr, resolveKeys[keys], max, OptionValue["DiagramSeeds"], None]
 
 (* `term0` is held by the HoldFirst on TMultiSteps.  Inside the
    impl we evaluate it AFTER turning the trace flag on, so any
@@ -217,31 +210,30 @@ multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List,
                 Join[unfoldSupHead[THeapRead[loc + 0]],
                      unfoldSupHead[THeapRead[loc + 1]]]],
             anchors]];
-    mkRecord[stepNum_, term_, events_, itrs_, evCursor_, frontier_,
-             anchors_, parentSlot_] := Block[{sl},
+    mkRecord[stepNum_, term_, events_, itrs_, evCursor_, frontier_, anchors_, parentSlot_] := Block[{sl},
         sl = If[ wantSlice, sliceNow[term, anchors], None];
         <|
-            "Step"           -> stepNum,
-            "Term"           -> term,
-            "Diagram"        -> If[ wantDiagram, snapshot[term, anchors], None],
-            "Slice"          -> sl,
+            "Step" -> stepNum,
+            "Term" -> term,
+            "Diagram" -> If[ wantDiagram, snapshot[term, anchors], None],
+            "Slice" -> sl,
             "CanonicalSlice" -> If[ wantSlice && MemberQ[keys, "CanonicalSlice"],
-                                    Map[Term, sl], None],
+                Map[Term, sl], None],
             (* Pre-compute the TraditionalForm rendering NOW, while
                the heap is in this step's state.  We can't defer to
                display time -- subsequent steps mutate the heap, so
                a late TraditionalForm[t] would render the FINAL
                state for every step.  Store as box expressions to
                drop straight into vertex labels via RawBoxes. *)
-            "SliceBoxes"     -> If[ wantSlice && MemberQ[keys, "SliceBoxes"],
-                                    Map[t |-> ToBoxes[t, TraditionalForm], sl],
-                                    None],
-            "Events"         -> events,
-            "ITRS"           -> itrs,
-            "_evBefore"      -> evCursor,
-            "_frontier"      -> frontier,
-            "_anchors"       -> anchors,
-            "_parent"        -> parentSlot
+            "SliceBoxes" -> If[ wantSlice && MemberQ[keys, "SliceBoxes"],
+                Map[t |-> ToBoxes[t, TraditionalForm], sl],
+                None],
+            "Events" -> events,
+            "ITRS" -> itrs,
+            "_evBefore" -> evCursor,
+            "_frontier" -> frontier,
+            "_anchors" -> anchors,
+            "_parent" -> parentSlot
         |>];
     (* Each advance call walks until an IC interaction fires OR
        the frontier drains.  SUP descent / ERA-pop / leaf-pop are
@@ -260,8 +252,8 @@ multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List,
     advance[s_Association] := Block[
         {term = s["Term"],
          frontier = s["_frontier"],
-         anchors  = s["_anchors"],
-         parent   = s["_parent"],
+         anchors = s["_anchors"],
+         parent = s["_parent"],
          evBefore = s["_evBefore"],
          before, after, next, evAfter, rows, events, tag, loc, l, r,
          done = False, result = $Done},
@@ -274,8 +266,8 @@ multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List,
         If[ ! MatchQ[term, _TTerm], Return[$Done, Block]];
         While[ ! done,
             before = TItrs[];
-            next   = TStep[term];
-            after  = TItrs[];
+            next = TStep[term];
+            after = TItrs[];
             If[ after > before,
                 (* Rule fired -- write the reduced head back to the
                    parent SUP-slot (if we descended through one) so
@@ -283,14 +275,12 @@ multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List,
                    emit the step record. *)
                 If[ ! MissingQ[parent], THeapSet[parent, next]];
                 evAfter = $multiTraceCountFn[];
-                rows    = $multiTraceSnapshotFn[];
-                events  = If[ evBefore < evAfter,
-                    Map[eventFromRow,
-                        rows[[evBefore + 1 ;; evAfter]]],
+                rows = $multiTraceSnapshotFn[];
+                events = If[ evBefore < evAfter,
+                    Map[eventFromRow, rows[[evBefore + 1 ;; evAfter]]],
                     {}
                 ];
-                result = mkRecord[s["Step"] + 1, next, events, after,
-                                  evAfter, frontier, anchors, parent];
+                result = mkRecord[s["Step"] + 1, next, events, after, evAfter, frontier, anchors, parent];
                 done = True,
                 (* No firing -- walk silently. *)
                 tag = TTermTag[next];
@@ -299,12 +289,12 @@ multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List,
                         (* Descend into left, stash right on frontier
                            tagged with its own slot, anchor the SUP. *)
                         loc = TTermVal[next];
-                        l   = THeapRead[loc + 0];
-                        r   = THeapRead[loc + 1];
-                        anchors  = Append[anchors, next];
+                        l = THeapRead[loc + 0];
+                        r = THeapRead[loc + 1];
+                        anchors = Append[anchors, next];
                         frontier = Prepend[frontier, {r, loc + 1}];
-                        term     = l;
-                        parent   = loc + 0,
+                        term = l;
+                        parent = loc + 0,
                     True,
                         (* Leaf (NUM/LAM/CTR/...) or ERA: pop the
                            frontier.  If drained, the collapse is
@@ -321,8 +311,7 @@ multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List,
     advance[$Done] := $Done;
     recs = NestWhileList[
         advance,
-        mkRecord[0, seedTerm, preEvents, TItrs[], $multiTraceCountFn[], {},
-                 {}, Missing[]],
+        mkRecord[0, seedTerm, preEvents, TItrs[], $multiTraceCountFn[], {}, {}, Missing[]],
         r |-> r =!= $Done,
         1,
         maxSteps
@@ -373,14 +362,14 @@ $wppBranchialStyle := $wppBranchialStyle =
    well on both light and dark notebook themes (StandardBlue/etc are
    theme-aware via LightDarkSwitched internally). *)
 $familyColors = <|
-    "TERM"  -> StandardBlue,
+    "TERM" -> StandardBlue,
     "SLIDE" -> StandardOrange,
-    "FORK"  -> StandardGreen,
+    "FORK" -> StandardGreen,
     "SPLIT" -> StandardCyan,
     "MERGE" -> StandardRed,
     "PRUNE" -> LightDarkSwitched[GrayLevel[0.5], GrayLevel[0.6]],
     "DIST" -> LightDarkSwitched[GrayLevel[0.75], GrayLevel[0.35]]
-|>;
+|>
 
 (* The legend SwatchLegend; only include families actually present in
    the trace so the legend stays compact. *)
@@ -392,7 +381,7 @@ familyLegend[families_List] := SwatchLegend[
         LightDarkSwitched[GrayLevel[0.15], GrayLevel[0.9]]],
     LabelStyle -> Directive[
         FontFamily -> "Helvetica", FontSize -> 9,
-        LightDarkSwitched[GrayLevel[0.15], GrayLevel[0.9]]]];
+        LightDarkSwitched[GrayLevel[0.15], GrayLevel[0.9]]]]
 
 (* Both TCausalGraph and TMultiwayGraph accept either form of the
    reduction record:
@@ -403,10 +392,10 @@ familyLegend[families_List] := SwatchLegend[
    Distinguished by KeyValuePattern on the first element.  The
    shared lifter `traceFromInput` extracts events; the result is the
    minimal data both functions consume. *)
-$multiTracePat = {} | {KeyValuePattern["id" -> _] ..};
-$multiStepsPat = {KeyValuePattern["Events" -> _] ..};
-multiTraceQ[x_] := MatchQ[x, $multiTracePat];
-multiStepsQ[x_] := MatchQ[x, $multiStepsPat];
+$multiTracePat = {} | {KeyValuePattern["id" -> _] ..}
+$multiStepsPat = {KeyValuePattern["Events" -> _] ..}
+multiTraceQ[x_] := MatchQ[x, $multiTracePat]
+multiStepsQ[x_] := MatchQ[x, $multiStepsPat]
 traceFromInput[x : $multiStepsPat] := Catenate @ Map[#["Events"] &, x]
 traceFromInput[x : $multiTracePat] := x
 
@@ -414,7 +403,7 @@ Options[TCausalGraph] = Join[
     {"Family" -> All,
      "TransitiveReduction" -> True,
      PlotLegends -> None},
-    Options[Graph]];
+    Options[Graph]]
 (* Term-input forms: run TMultiTrace internally with just the
    keys this view needs (Events) and feed the result into the
    list-of-steps dispatch.  `max` defaults to Infinity. *)
@@ -474,7 +463,7 @@ TCausalGraph[trace_List, opts : OptionsPattern[]] := Block[
     With[{g = Graph[
         ids,
         edges,
-        Sequence @@ userGraphOpts,
+        userGraphOpts,
         VertexLabels -> Thread[ids -> events[[All, "rule"]]],
         VertexLabelStyle -> labelStyle,
         VertexStyle -> vstyles,
@@ -506,7 +495,7 @@ unfoldSupHead[term_] := If[ TTermTag[term] === $TagSUP,
     With[{loc = TTermVal[term]},
         Join[unfoldSupHead[THeapRead[loc + 0]],
              unfoldSupHead[THeapRead[loc + 1]]]],
-    {term}];
+    {term}]
 
 (* Canonical form of a term = `Term[t_TTerm]`, defined in Heap.wl.
    Walks the heap recursively, chasing SUB-flagged DP / VAR
@@ -524,7 +513,7 @@ termCaption[t_] := Block[{tag, val, nm},
     Switch[tag,
         $TagNUM, nm <> " " <> ToString[val],
         $TagSUP, nm <> "@" <> ToString[val] <> ".." <> ToString[val + 1],
-        _, nm <> "@" <> ToString[val]]];
+        _, nm <> "@" <> ToString[val]]]
 
 Options[TMultiwayGraph] = Join[
     {"Branchial" -> False, PlotLegends -> None},
@@ -605,14 +594,14 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[{
                     ,
                     {ev[[1, "family"]], ev[[1, "rule"]]}
                 ];
-                prevSet   = DeleteDuplicates[prevKeys];
-                curSet    = DeleteDuplicates[curKeys];
-                shared    = Intersection[prevSet, curSet];
+                prevSet = DeleteDuplicates[prevKeys];
+                curSet = DeleteDuplicates[curKeys];
+                shared = Intersection[prevSet, curSet];
                 (* Select-not-MemberQ preserves first-occurrence
                    order so index-pairing below is meaningful;
                    Complement re-sorts and would scramble it. *)
                 prevResid = Select[prevSet, ! MemberQ[shared, #] &];
-                curResid  = Select[curSet,  ! MemberQ[shared, #] &];
+                curResid = Select[curSet, ! MemberQ[shared, #] &];
                 pairs = Which[
                     prevResid === {} && curResid === {},
                         Map[k |-> {k, k}, shared],

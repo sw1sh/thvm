@@ -5,7 +5,7 @@
    sharing the same shape as TVampireProof + TWaldmeisterProof.
 
    E's `--proof-object --tstp-format` flags emit SZS-framed TPTP fof
-   proof clauses with inference(...) records -- the same shape
+   proof clauses with inference(...) records, the same shape
    Wolfram`Parser`TPTPImport[..., "SZS"] consumes for Vampire.  So
    the derivation flows through TSZSDerivationToProofObject without
    prover-specific parsing.  E uses inference names like
@@ -37,7 +37,7 @@ Begin["`Private`"]
 
 Options[TEproverProof] = {
     TimeConstraint -> 30,
-    "Binary"       -> Automatic
+    "Binary" -> Automatic
 }
 
 eproverBinary[Automatic] := SelectFirst[
@@ -84,36 +84,31 @@ TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
             {"sh", "-c", cmd}, "StandardOutput"
         ];
         status = Which[
-            StringContainsQ[out, "SZS status Theorem"]
-                || StringContainsQ[out, "SZS status Unsatisfiable"],
+            StringContainsQ[out, "SZS status Theorem"] || StringContainsQ[out, "SZS status Unsatisfiable"],
                 "Proved",
-            StringContainsQ[out, "SZS status ResourceOut"]
-                || StringContainsQ[out, "SZS status Timeout"]
-                || StringContainsQ[out, "CPU time limit"],
+            StringContainsQ[out, "SZS status ResourceOut"] || StringContainsQ[out, "SZS status Timeout"] || StringContainsQ[out, "CPU time limit"],
                 "TimedOut",
             True,
                 "Failed"
         ];
-        derivation = If[
-            status === "Proved",
+        derivation = If[ status === "Proved",
             Quiet @ Check[
                 Wolfram`Parser`TPTPImport[out, "SZS"],
                 $Failed
             ],
             Missing["NoProof"]
         ];
-        foldedDerivation = If[
-            AssociationQ[derivation] && KeyExistsQ[derivation, "Derivation"],
+        foldedDerivation = If[ AssociationQ[derivation] && KeyExistsQ[derivation, "Derivation"],
             derivation["Derivation"],
             {}
         ];
         <|
-            "Status"      -> status,
-            "Strategy"    -> "eprover-auto-schedule",
-            "Seconds"     -> N @ Round[secs, 0.01],
+            "Status" -> status,
+            "Strategy" -> "eprover-auto-schedule",
+            "Seconds" -> N @ Round[secs, 0.01],
             "ProofLength" -> If[status === "Proved", Length[foldedDerivation], 0],
-            "Inferences"  -> foldedDerivation,
-            "RawSZS"      -> out
+            "Inferences" -> foldedDerivation,
+            "RawSZS" -> out
         |>
     ]
 

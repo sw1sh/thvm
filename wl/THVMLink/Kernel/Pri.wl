@@ -7,11 +7,11 @@
        APP(APP(APP(PRI(PRI), slot_NUM), val), cont)
 
    Pipeline at fire time:
-       1. wnf(val) -- forces side effects (kernel chains, ASSIGN, ...)
+       1. wnf(val): forces side effects (kernel chains, ASSIGN, ...)
        2. if slot != 0, append (slot, snapshotted-value) to a C-side
           queue.  WL drains via TPriDrain[] and dispatches to the
           per-slot callback.
-       3. return cont -- the surrounding redex rewrites to it.
+       3. return cont: the surrounding redex rewrites to it.
 
    slot=0 is the PURE-SEQUENCER mode: just force val, no callback.
    slot>0 dispatches a registered WL function (logging, metrics,
@@ -21,7 +21,7 @@
    have unfixable constraints in single-threaded mode:
      - callLibraryCallbackFunction works re-entrantly but ONLY accepts
        CompiledFunction (rejects Function, FunctionCompile, anything
-       with Print/$var/patterns -- which rules out every typical
+       with Print/$var/patterns, which rules out every typical
        loss-logging callback).
      - WSTP EvaluatePacket from inside a LibraryFunction call deadlocks
        (kernel is blocked waiting for our return; can't process
@@ -44,7 +44,7 @@ BeginPackage["THVMLink`"];
 
 TPri::usage         = "TPri[fn, val, cont] builds an APP(APP(APP(PRI(PRI), slot_NUM), val), cont) redex.  When wnf reduces it: forces val (firing kernel chains and ASSIGN side effects), enqueues (slot, snapshotted value) for the WL callback `fn` if fn != None, then returns cont.  fn auto-registers under a fresh slot on first use; same fn reuses its slot.  TPri[slot_Integer, val, cont] is the low-level form (use slot=0 for pure-sequencer, no callback).  Callbacks fire when the WL host calls TPriDrain[]; their return values are ignored.";
 
-TPriForce::usage    = "TPriForce[val, cont] sugar for TPri[0, val, cont] -- pure sequencer with no WL callback.  Forces val via wnf as a side effect, returns cont.";
+TPriForce::usage    = "TPriForce[val, cont] sugar for TPri[0, val, cont]: pure sequencer with no WL callback.  Forces val via wnf as a side effect, returns cont.";
 
 TPriRegister::usage = "TPriRegister[slot_Integer, fn_] associates a WL function with PRI slot `slot`.  Use this when you need explicit control over slot ids (e.g. for cross-session stable slots); TPri[fn, ...] auto-registers transparently in the common case.  fn = None clears the slot.";
 
@@ -55,7 +55,7 @@ TPriCallbacks::usage = "TPriCallbacks[] returns the current slot -> fn registrat
 Begin["`Private`"];
 
 (* === C-side prim id (must match THVM_PRIM_PRI in src/thvm.h) === *)
-$ThvmPrimPri = 16;
+$ThvmPrimPri = 16
 
 (* === bridge function bindings === *)
 $termNewPriFn  := $termNewPriFn  = load["thvm_wl_term_new_pri",
@@ -75,7 +75,7 @@ $priLastCbIdFn   := $priLastCbIdFn   = load["thvm_wl_pri_last_cb_id",
          CreateForeignCallback to get a libffi closure; pass the
          closure pointer to thvm_pri_bind_foreign via ForeignFunction-
          Load.  prim_pri calls the closure pointer directly when
-         firing -- libffi handles the kernel re-entry.  Works for
+         firing; libffi handles the kernel re-entry.  Works for
          Function, Symbol, anything.
      (B) COMPILED CALLBACK: if fn is a CompiledFunction, use the
          LibraryLink callback registry (callLibraryCallbackFunction).
@@ -89,11 +89,11 @@ $priLastCbIdFn   := $priLastCbIdFn   = load["thvm_wl_pri_last_cb_id",
    LibraryLink id for path (B).  $priForeignCb holds the closure
    object for path (A).  Registration replaces; TPriRegister[slot,
    None] clears all three. *)
-$priCallbacks = <||>;
-$priFnSlot    = <||>;     (* fn -> slot (deduplicated) *)
-$priCbId      = <||>;     (* slot -> LibraryLink callback id *)
-$priForeignCb = <||>;     (* slot -> ForeignCallback (keep alive) *)
-$priNextSlot  = 1;        (* slot 0 reserved for pure-sequencer *)
+$priCallbacks = <||>
+$priFnSlot    = <||>     (* fn -> slot (deduplicated) *)
+$priCbId      = <||>     (* slot -> LibraryLink callback id *)
+$priForeignCb = <||>     (* slot -> ForeignCallback (keep alive) *)
+$priNextSlot  = 1        (* slot 0 reserved for pure-sequencer *)
 
 (* Bridge function loaders for paths (A) and (B).  Lazy: Needs[]
    the FFI paclet on first use; the load itself is also memoized
@@ -107,11 +107,11 @@ loadForeignBridge[name_String, type_] := Module[{r},
        Also Quiet ForeignFunctionLoad's general Off-message channel. *)
     Quiet @ Needs["ForeignFunctionInterface`"];
     (* Off the post-Needs context-shadow message that fires AFTER Quiet
-       returns -- WL stages it during evaluation but emits later when
+       returns: WL stages it during evaluation but emits later when
        the message channel flushes. *)
     Off[CompileUtilities`Symbols`SystemSymbolQ::shdw];
     r = Quiet @ ForeignFunctionLoad[$lib, name, type];
-    If[ Head[r] =!= ForeignFunction, $Failed, r]
+    If[ !MatchQ[r, _ForeignFunction], $Failed, r]
 ]
 
 $priBindForeignFn   := $priBindForeignFn   = loadForeignBridge[
@@ -124,13 +124,11 @@ $priUnbindForeignFn := $priUnbindForeignFn = loadForeignBridge[
    becomes the new redex result.  Plain Functions that return TTerm
    get unwrapped to their raw value; Null/Nothing return 0.
    Already-wrapped CFs (returning Integer directly) pass through. *)
-wrapForeignFn[fn_] := Function[v,
-    With[{r = fn[TTerm[v]]},
-        Which[
-            IntegerQ[r],          r,           (* explicit override *)
-            Head[r] === TTerm,    ttermRaw[r], (* TTerm wrapper *)
-            True,                 0            (* trace mode *)
-        ]
+wrapForeignFn[fn_] := v |-> With[{r = fn[TTerm[v]]},
+    Which[
+        IntegerQ[r],          r,           (* explicit override *)
+        MatchQ[r, _TTerm],    ttermRaw[r], (* TTerm wrapper *)
+        True,                 0            (* trace mode *)
     ]
 ]
 
@@ -138,7 +136,7 @@ wrapForeignFn[fn_] := Function[v,
    either a plain WL function (auto-wrapped via wrapForeignFn so the
    int64 return path works) or an already-built ForeignCallback object
    (used as-is, signature must be {"Integer64"} -> "Integer64"). *)
-tryConnectForeign[slot_Integer, fcb_ /; Head[fcb] === ManagedObject] := (
+tryConnectForeign[slot_Integer, fcb_ /; MatchQ[fcb, _ManagedObject]] := (
     If[ $priBindForeignFn === $Failed, Return[$Failed]];
     $priBindForeignFn[slot, fcb];
     $priForeignCb[slot] = fcb;

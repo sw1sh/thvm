@@ -7,8 +7,7 @@
    on the built-in `LinearLayer` / `ConvolutionLayer` / `Element-`
    `wiseLayer` / `NetChain`, lift their parameters into TTensors,
    and emit the same TUOp* combinators users write by hand.  Autograd
-   then flows through whatever ops `interact_grad` already supports
-   (currently ADD, MUL, NEG, REDUCE_SUM -- step 14 will widen this).
+   then flows through whatever ops `interact_grad` supports.
 
    Public surface
      TFromNet[net, x]            -- entry point.  Dispatches on
@@ -176,9 +175,8 @@ TCrossEntropyLoss[pred_TTerm, target_TTerm] :=
    which for a 28x28 -> 24x24 conv with kh=kw=5 is 24*24*25 = 14400
    elements per channel; the partial-sum form only allocates a few
    {C_out, C_in, H_out, W_out} intermediates per kernel position,
-   which fits the per-op-allocates-a-buffer materializer better.
-   Phase 9 follow-up: replace with one im2col + sgemm dispatch. *)
-(* M1: route through im2col + sgemm; TConv2DKhKw keeps the kh*kw path. *)
+   which fits the per-op-allocates-a-buffer materializer better. *)
+(* TConv2D routes through im2col + sgemm; TConv2DKhKw keeps the kh*kw path. *)
 TConv2D[input_TTerm, weights_TTerm, bias_TTerm] := With[{
     inShape = tUopShape[input]
 },
@@ -248,18 +246,11 @@ TConv2DKhKw[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
    then `outFlat = wFlat @ xCol` -> cblas_sgemm, reshape + bias.
 
    FORWARD is bit-for-bit correct, and BACKWARD is too (matches
-   TConv2DKhKw / the PAD-and-sum path to f32 tolerance): the grad of
-   the chained SHRINK -> PAD over the strided view used to differentiate
-   to ZERO w.r.t. the conv input, via two lowering bugs now fixed in
-   src/schedule -- (a) a REDUCE over a broadcast (stride-0) axis whose
-   RANGE never appears in the body load returned the reduce identity
-   instead of `extent*body` (kernel_lift); (b) rangeify bailed on any
-   SHRINK/PAD of rank > 4 before the higher-rank-capable paths
-   (via_rngs bake-in / RESHAPE_V fusion) had a chance.  This path is
-   TConv2D's default lowering now; THVM_CONV_POOL=0 reverts to
-   PAD-and-sum.  (`input` is pushed onto a contiguous buffer boundary
-   first -- see the body -- so the strided-view chain composes
-   correctly even when `input` is itself a movement / compute DAG.) *)
+   TConv2DKhKw / the PAD-and-sum path to f32 tolerance).  This path is
+   TConv2D's default lowering; THVM_CONV_POOL=0 reverts to PAD-and-sum.
+   (`input` is pushed onto a contiguous buffer boundary first -- see the
+   body -- so the strided-view chain composes correctly even when `input`
+   is itself a movement / compute DAG.) *)
 TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     input, inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
     rh, rw, x1, x2, x3, x4, xCol6, xCol, wFlat, outFlat, outShaped,
@@ -350,17 +341,14 @@ TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
 ]
 
 (* TConv2DIm2Col / TConv2DIm2ColBatched route to the strided-view
-   `_pool` bodies above by DEFAULT now: forward is bit-for-bit correct
-   and backward is correct too (the reduce-over-broadcast-axis and
-   rank-5+ SHRINK/PAD lowering bugs that used to zero the conv-input
-   gradient are fixed in src/schedule).  The `_pool` lowering keeps the
-   im2col operand a ShapeTracker VIEW chain instead of a materialised
-   matrix -- the dispatch pre-mat gathers it once into the matmul
-   operand; no kh*kw partial-sum kernels and no giant zero-padded
-   `repeat` intermediate.  TConv2DKhKw stays as the explicit
-   partial-sum reference body.
-   THVM_CONV_POOL=0 forces the legacy PAD-and-sum im2col path
-   (escape hatch for bisection). *)
+   `_pool` bodies above by DEFAULT: forward is bit-for-bit correct and
+   backward is correct too.  The `_pool` lowering keeps the im2col
+   operand a ShapeTracker VIEW chain instead of a materialised matrix --
+   the dispatch pre-mat gathers it once into the matmul operand; no kh*kw
+   partial-sum kernels and no giant zero-padded `repeat` intermediate.
+   TConv2DKhKw stays as the explicit partial-sum reference body.
+   THVM_CONV_POOL=0 forces the PAD-and-sum im2col path (escape hatch for
+   bisection). *)
 convPoolEnabled[] := Environment["THVM_CONV_POOL"] =!= "0"
 
 (* TConv2DIm2Col[input, weights, bias] -- im2col + matmul lowering.
@@ -624,7 +612,7 @@ TMaxPool2d[x_TTerm, k_Integer] := With[{shape = tUopShape[x]},
    ends in an EXPAND (which it does -- (x - mean) feeds into a
    square-sum-recip-sqrt-broadcast-mul). *)
 TLayerNorm[x_TTerm] := TLayerNorm[x, 1.0*^-5]
-TLayerNorm[x_TTerm, eps_?NumericQ] := With[{shape = tUopShape[x]},
+TLayerNorm[x_TTerm, eps_ ? NumericQ] := With[{shape = tUopShape[x]},
     Module[{rank, axis, n, sumShape, broadcast, mean, centered, var},
         rank      = Length[shape];
         axis      = rank - 1;
@@ -660,7 +648,7 @@ TLayerNorm[x_TTerm, eps_?NumericQ] := With[{shape = tUopShape[x]},
 TBatchNorm[x_TTerm, gamma_TTerm, beta_TTerm, mean_TTerm, var_TTerm] :=
     TBatchNorm[x, gamma, beta, mean, var, 1.0*^-5]
 TBatchNorm[x_TTerm, gamma_TTerm, beta_TTerm, mean_TTerm, var_TTerm,
-           eps_?NumericQ] := With[{shape = tUopShape[x]},
+           eps_ ? NumericQ] := With[{shape = tUopShape[x]},
     Module[{rank, b, c, h, w, scaleC, shiftC, bcastShape, scaleBcast, shiftBcast},
         rank = Length[shape];
         If[ rank === 3,
@@ -689,7 +677,7 @@ TBatchNorm[x_TTerm, gamma_TTerm, beta_TTerm, mean_TTerm, var_TTerm,
 
 TBatchNormTrain[x_TTerm, gamma_TTerm, beta_TTerm] :=
     TBatchNormTrain[x, gamma, beta, 1.0*^-5]
-TBatchNormTrain[x_TTerm, gamma_TTerm, beta_TTerm, eps_?NumericQ] :=
+TBatchNormTrain[x_TTerm, gamma_TTerm, beta_TTerm, eps_ ? NumericQ] :=
     With[{shape = tUopShape[x]},
     Module[{rank, b, c, h, w, reduceCount, bcastShape, mean, centered, var,
             broadcast},
@@ -852,7 +840,7 @@ TCausalMask[seq_Integer] := TTensorCreate @ NumericArray[
 (* A kvar-PACKED shape dim is 2^31 + vid: the leading axis of a
    symbolic-sequence tensor reads back >= 2^31 from tUopShape.  This is
    the discriminator the symbolic-seq attention branch keys off. *)
-$kvarPackBase = 2^31;
+$kvarPackBase = 2^31
 symDimQ[d_]   := IntegerQ[d] && d >= $kvarPackBase
 symVid[d_]    := d - $kvarPackBase            (* recover vid from a packed dim *)
 
@@ -914,7 +902,7 @@ TAppendAt[cache_TTerm, src_TTerm, posVid_Integer] := Module[
    no per-head realize is needed. *)
 TDecodeAttend[q1_TTerm, kCache_TTerm, vCache_TTerm, kNew_TTerm, vNew_TTerm,
               nHeads_Integer, posVid_Integer, lenVid_Integer,
-              scale_?NumericQ] := (
+              scale_ ? NumericQ] := (
     TAppendAt[kCache, kNew, posVid];
     TAppendAt[vCache, vNew, posVid];
     TMultiHeadAttention[q1, TSymbolicAxis[kCache, 0, lenVid],
@@ -942,7 +930,7 @@ TLayerNormAffine[x_TTerm, gamma_TTerm, beta_TTerm] := With[{
 ]
 
 TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
-                    nHeads_Integer, mask_:None] := With[{
+                    nHeads_Integer, mask_ : None] := With[{
     dHead = tUopShape[q][[2]] / nHeads
 },
     TMultiHeadAttention[q, k, v, nHeads, mask, 1 / Sqrt[N @ dHead]]
@@ -955,12 +943,11 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
 
    The seq axes may be LITERAL or kvar-PACKED (symbolic length S) -- ONE fully
    lazy body either way, no eager realize, no special-casing.  `ArrayReshape` /
-   `Transpose` / `TUOpShrink` / `Dot` / `TSoftmax` / `headStitch` all index a
-   symbolic axis correctly once two engine bugs are fixed: view_apply_shrink
-   sizes numel at the kvar hi bound (the per-head split no longer mis-addresses)
+   `Transpose` / `TUOpShrink` / `Dot` / `TSoftmax` / `headStitch` index a
+   symbolic axis correctly by relying on two engine behaviors: view_apply_shrink
+   sizes numel at the kvar hi bound (so the per-head split addresses correctly)
    and the BLAS GEMM dispatch writes the QK^T scores at the output's hi row
-   stride, not the runtime N.  These were the reasons the symbolic path once
-   needed a separate eager raw-UOp clause; it is gone. *)
+   stride, not the runtime N. *)
 (* {s, dim} -> {s, nHeads, dHead} -> {nHeads, s, dHead}: heads become a leading
    BATCH axis.  Transpose with a 1-indexed perm via the WL UpValue. *)
 mhaHeadView[t_, s_, nHeads_, dHead_] := Transpose[ArrayReshape[t, {s, nHeads, dHead}], {2, 1, 3}]
@@ -991,7 +978,7 @@ mhaBmmM[a_, bm_, bb_, m_, kk_, nn_] := TUOpReduce[
     2, "SUM"]
 
 TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
-                    nHeads_Integer, mask_, scale_?NumericQ] := With[{
+                    nHeads_Integer, mask_, scale_ ? NumericQ] := With[{
     shapeQ = tUopShape[q],
     shapeK = tUopShape[k]
 },
@@ -1036,15 +1023,12 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
     ]
 ]
 
-(* GPT-2 inference is a PURE GRAPH now: TFromNet[gpt2, ids] traverses the
-   real NetModel NetChain / NetGraph (embedding -> 12 pre-norm transformer
-   blocks -> final LayerNorm) via the fromLayer cases above and appends the
-   tied token-embedding LM head, yielding the {seq, vocab} logits TTerm.  The
+(* GPT-2 inference is a PURE GRAPH: TFromNet[gpt2, ids] traverses the real
+   NetModel NetChain / NetGraph (embedding -> 12 pre-norm transformer blocks ->
+   final LayerNorm) via the fromLayer cases above and appends the tied
+   token-embedding LM head, yielding the {seq, vocab} logits TTerm.  The
    per-layer building blocks (TEmbeddingMatrix, TLayerNormAffine, TGELU,
-   TLinear, TMultiHeadAttention, TCausalMask) are validated in gpt2.wlt; the
-   hand-assembled TGPT2FromArrays / TGPT2Block / TGPT2SelfAttention / TGPT2MLP
-   forward (and its raw-array extraction in Examples/gpt2_weights.wl) were
-   deleted -- the graph traversal reproduces them token-for-token. *)
+   TLinear, TMultiHeadAttention, TCausalMask) are validated in gpt2.wlt. *)
 
 (* Stitch a list of nHeads {seq_q, dHead} TTerms into {seq_q, dim=
    nHeads*dHead} via per-head PAD into the corresponding column
@@ -1134,8 +1118,7 @@ $elementwiseDispatch = <|
     (-#1 &)        -> TUOpNeg,
     Ramp           -> TReLU,
     Tanh           -> TTanh
-|>;
-
+|>
 
 (* ReshapeLayer[shape]: target shape via `NetExtract[layer, "Output"]`.
    Note that for a rank-1 target (e.g. ReshapeLayer[{6}]) NetExtract
@@ -1188,7 +1171,7 @@ fromLayer[PoolingLayer, layer_, x_TTerm] := Module[{
             <|"Message" -> "PoolingLayer overlapping (Stride != KernelSize) not yet supported",
               "KernelSize" -> kSize, "Stride" -> stride|>]];
     shape = tUopShape[x];
-    If[ !MemberQ[{3, 4}, Length[shape]],
+    If[ ! MemberQ[{3, 4}, Length[shape]],
         Return @ Failure["NotImplemented",
             <|"Message" -> "PoolingLayer expects rank-3 {C, H, W} or rank-4 {B, C, H, W} input",
               "InputShape" -> shape|>]];
@@ -1217,7 +1200,7 @@ fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op, applied},
     op = Lookup[$elementwiseDispatch, f, None];
     If[ op =!= None, Return @ op[x]];
     applied = f[x];
-    If[ Head[applied] === TTerm, applied,
+    If[ MatchQ[applied, _TTerm], applied,
         Message[TFromNet::eltunsupported, f]; $Failed
     ]
 ]
@@ -1314,7 +1297,7 @@ fromLayer[ThreadingLayer, layer_, xs_List] := Module[{f, isPlus, isTimes},
    of the WHOLE weight buffer on every call (~200ms for a 768x3072
    matmul); pre-transposing once host-side and caching the resulting
    contig TTerm keeps the per-call cost down to the actual sgemm. *)
-$linearTransposedCache = <||>;
+$linearTransposedCache = <||>
 
 linearTransposedTensor[layer_LinearLayer] := With[{key = layer},
     Lookup[$linearTransposedCache, key,
@@ -1329,7 +1312,7 @@ linearBiasTensor[layer_LinearLayer] := With[{key = Hold[layer, "b"]},
 
 fromLayer[NetMapOperator, layer_, x_TTerm] := Module[{inner},
     inner = NetExtract[layer, "Net"];
-    If[ Head[inner] === LinearLayer,
+    If[ MatchQ[inner, _LinearLayer],
         TLinear[x, linearTransposedTensor[inner], linearBiasTensor[inner]],
         (* Fallback: try generic dispatch with the same x. *)
         TFromLayer[inner, x]
@@ -1351,9 +1334,8 @@ fromLayer[CatenateLayer, layer_, xs_List] := Module[
     offsets = Prepend[Accumulate[Most[widths]], 0];
     total   = Total[widths];
     Total @ MapThread[
-        Function[{t, off, w},
-            TUOpPad[t, Table[If[ a === axis, {off, total - off - w}, {0, 0}],
-                {a, rank}]]],
+        {t, off, w} |-> TUOpPad[t,
+            Table[If[ a === axis, {off, total - off - w}, {0, 0}], {a, rank}]],
         {xs, offsets, widths}]
 ]
 
@@ -1383,13 +1365,13 @@ fromLayer[SequenceIndicesLayer, _, _] :=
 mhaGraphNodes[g_] := With[{c = Quiet @ NetExtract[g, All]},
     Which[ AssociationQ[c], Values[c], ListQ[c], c, True, {}]]
 
-mhaHeadQ[h_] := Head[h] === NetGraph &&
+mhaHeadQ[h_] := MatchQ[h, _NetGraph] &&
     MemberQ[Head /@ mhaGraphNodes[h], AttentionLayer]
 
-mhaSelfAttnGraphQ[g_] := Head[g] === NetGraph && Module[{ns = mhaGraphNodes[g]},
+mhaSelfAttnGraphQ[g_] := MatchQ[g, _NetGraph] && Module[{ns = mhaGraphNodes[g]},
     Length[ns] >= 3
-        && Head[Last[ns]] === NetMapOperator
-        && Head[ns[[-2]]] === CatenateLayer
+        && MatchQ[Last[ns], _NetMapOperator]
+        && MatchQ[ns[[-2]], _CatenateLayer]
         && AllTrue[ns[[1 ;; -3]], mhaHeadQ]]
 
 fromLayer[NetGraph, g_, x_TTerm] /; mhaSelfAttnGraphQ[g] := Module[
@@ -1411,7 +1393,7 @@ fromLayer[NetGraph, g_, x_TTerm] /; mhaSelfAttnGraphQ[g] := Module[
     (* the per-head scaling ElementwiseLayer (a #&) carries the 1/Sqrt[dHead]
        externally; apply it as the attention scale.  Default to 1/Sqrt[dHead]. *)
     scaleFn = Quiet @ NetExtract[First[heads], {"scaling", "Function"}];
-    scale   = If[ Head[scaleFn] === Function, N @ scaleFn[1.0], 1 / Sqrt[N @ dH]];
+    scale   = If[ MatchQ[scaleFn, _Function], N @ scaleFn[1.0], 1 / Sqrt[N @ dH]];
     maskSpec = Quiet @ Lookup[
         NetExtract[First[heads], {"attention", "Parameters"}], "Mask", None];
     lin[t_, w_, bb_] := TLinear[t, TTensorCreate[N @ Transpose @ w], TTensorCreate[N @ bb]];
@@ -1531,7 +1513,7 @@ fromLayer[NetGraph, g_, input_] := Module[{
     results[Last[sorted]]
 ]
 
-(* DECODE context (Lever 2 step 3): when set, the AttentionLayer dispatch
+(* DECODE context: when set, the AttentionLayer dispatch
    below routes through TDecodeAttend (the single-query KV-cache fork) instead
    of TMultiHeadAttention -- the ONLY cache-aware op in the block; everything
    else (LayerNorm / GELU MLP / residual) is ordinary {1, dim}.  $decodeAttn is
@@ -1540,7 +1522,7 @@ fromLayer[NetGraph, g_, input_] := Module[{
    attention hit, so the b-th MultiHead AttentionLayer the fold visits picks the
    b-th block's cache.  tokenLmDecodeStep Block-scopes it; outside decode it is
    None and the attention dispatch is the ordinary symbolic/literal MHA. *)
-$decodeAttn = None;
+$decodeAttn = None
 
 (* AttentionLayer: Wolfram's built-in.  For GPT-2 it's a
    single-head dot-product attention with optional masking.  We
@@ -1766,7 +1748,7 @@ shapeFromPort[raw_] := Which[
 
 netInputShape[net_] := Module[{ports, raw, shape},
     ports = Quiet @ Information[net, "InputPorts"];
-    If[!AssociationQ[ports] || Length[ports] =!= 1, Return[$Failed]];
+    If[ ! AssociationQ[ports] || Length[ports] =!= 1, Return[$Failed]];
     raw   = First[Values[ports]];
     shape = shapeFromPort[raw];
     If[ shape =!= $Failed, Return[shape]];
@@ -1794,7 +1776,6 @@ netInputShape[net_] := Module[{ports, raw, shape},
    weights come from the graph via gradFloatLeafTerms (TNetParams), and to
    train over a different batch size pass the NetChain to TNetTrain, which
    lifts the batched forward directly. *)
-(* default fixed sequence length for the token-LM lift below. *)
 (* Token-LM fixed-sequence forward over a {maxSeq, vocab} ONE-HOT input.
    The variable-length id gather is replaced by `onehot . tokenTable` so the
    WHOLE graph -- embedding, blocks, tied head -- has a FIXED shape; lifting
@@ -1855,13 +1836,13 @@ tokenLmForward[net_, onehot_, maxSeq_Integer] :=
     ]
 
 (* tokenLmDecodeStep[net, oneHotRow, kCaches, vCaches, posVid, lenVid] -- the
-   single-token DECODE forward (decode roadmap Lever 2 step 3).  Process ONE new
-   token (a {1, vocab} one-hot) through GPT-2's blocks, each block APPENDING its
-   new K/V into the persistent per-block cache (kCaches[[b]], vCaches[[b]]) and
-   ATTENDING the single query over the cached prefix -> {1, vocab} logits.
+   single-token DECODE forward.  Process ONE new token (a {1, vocab} one-hot)
+   through GPT-2's blocks, each block APPENDING its new K/V into the persistent
+   per-block cache (kCaches[[b]], vCaches[[b]]) and ATTENDING the single query
+   over the cached prefix -> {1, vocab} logits.
    Mirrors tokenLmForward exactly EXCEPT:
      (a) posRow: the SINGLE positional row at the current position, a kvar-BEGIN
-         {1, dim} slice of the position table at TKVarPack[posVid] (the c74f7d1c
+         {1, dim} slice of the position table at TKVarPack[posVid] (the
          shrink-decode path).  x = oneHotRow . tokT + posRow ({1, dim}).
      (b) the 12 blocks fold ordinarily (LayerNorm / GELU MLP / residual are all
          literal {1, dim}), but the attention layer in each block routes through
@@ -1881,10 +1862,10 @@ tokenLmDecodeStep[net_, oneHotRow_TTerm, kCaches_List, vCaches_List,
    kvar-begin SHRINK (posT) of the position table.  Used so the TJit closure can
    REBIND the positional row per replay step (the in-graph shrink bakes the
    capture-time row and never moves under replay -> positionless echo).  When
-   posRow is Automatic the byte-identical c74f7d1c shrink path is used (the
-   non-JIT TDecodeNext stays unchanged + correct).  posRow feeds the
-   `x = embed + posRow` ADD kernel, a raw-input-into-a-dispatch site that
-   input-replace rebinds (unlike a raw-input-into-an-ASSIGN-src). *)
+   posRow is Automatic the in-graph shrink path is used (the non-JIT
+   TDecodeNext).  posRow feeds the `x = embed + posRow` ADD kernel, a
+   raw-input-into-a-dispatch site that input-replace rebinds (unlike a
+   raw-input-into-an-ASSIGN-src). *)
 tokenLmDecodeStep[net_, oneHotRow_TTerm, kCaches_List, vCaches_List,
                   posVid_Integer, lenVid_Integer, posRow_] :=
     Module[{tokTable, posTable, dim, restLayers, outDims, needsHead, tokT, posT,
@@ -1901,7 +1882,7 @@ tokenLmDecodeStep[net_, oneHotRow_TTerm, kCaches_List, vCaches_List,
            explicit posRow input, use it directly; otherwise size the table at
            the kvar's static upper bound, then SHRINK the {pos, pos+1} row at
            TKVarPack[posVid] -> {1, dim}; view_apply_shrink decodes the kvar
-           begin (the c74f7d1c if-branch) to the runtime row. *)
+           begin to the runtime row. *)
         posT    = If[ posRow === Automatic,
             posLeaf = TUOpCopy[TTensorCreateHost[posTable[[1 ;; TKVarHi[posVid]]]]];
             TUOpShrink[posLeaf,
@@ -1938,7 +1919,7 @@ TDecodeStep[net_, oneHotRow_TTerm, posRow_TTerm, state_Association] :=
         state["kCaches"], state["vCaches"], state["posVid"], state["lenVid"],
         posRow]
 
-(* TDecodeInit[net] -- allocate an incremental-decode session (Lever 2 step 4).
+(* TDecodeInit[net] -- allocate an incremental-decode session.
    One zeroed {nCtx, dim} KV cache per block (one per AttentionLayer the decode
    fold visits, since fromLayer[AttentionLayer] advances $decodeAttn["idx"] once
    per attention hit and indexes kCaches[[idx]]), the two position kvars, the
@@ -2018,7 +1999,7 @@ TFromNet[net_NetChain, oneHot_TTerm] /; tokenLmOneHotQ[net, oneHot] :=
    (A non-NetChain token net -- a bare EmbeddingLayer -- has no blocks and
    still guides to the 2-arg id graph form.) *)
 TFromNet[net_NetChain] /; tokenEmbeddingArray[net] =!= None :=
-    Function[oneHot, TFromNet[net, oneHot]]
+    oneHot |-> TFromNet[net, oneHot]
 
 TFromNet[net_] /; tokenEmbeddingArray[net] =!= None := (
     Message[TFromNet::tokennet, net]; $Failed
@@ -2064,9 +2045,9 @@ TNetParams[lam_TTerm] := If[ TTermTag[lam] === $TagLAM,
    -> "Biases") so TNetInitialize still routes Glorot / zeros sensibly, and
    leave Layer as Missing.  Documented best-effort provenance. *)
 paramKindFromShape[shape_List] := If[Length[shape] >= 2, "Weights", "Biases"]
-paramInfoOf[handles_List] := Function[t,
-    <|"Term" -> t, "Layer" -> Missing["NotStored"],
-      "Param" -> paramKindFromShape[TTensorShape[t]]|>] /@ handles
+paramInfoOf[handles_List] := (t |-> <|
+    "Term" -> t, "Layer" -> Missing["NotStored"],
+    "Param" -> paramKindFromShape[TTensorShape[t]]|>) /@ handles
 TNetParamInfo[lam_TTerm] := paramInfoOf[TNetParams[lam]]
 
 (* TNetInitialize[lam]: re-initialise the trainable weights IN PLACE --
@@ -2074,11 +2055,8 @@ TNetParamInfo[lam_TTerm] := paramInfoOf[TNetParams[lam]]
    parameter tensor's buffer, derived from the graph's float leaves.
    Installed as the NetInitialize UpValue on TTerms. *)
 initParams[handles_List] := (
-    Function[t,
-        With[{shape = TTensorShape[t]},
-            TSet[t,
-                If[ Length[shape] >= 2, TGlorot[shape], TZeros[shape]]]]
-    ] /@ handles;
+    (t |-> With[{shape = TTensorShape[t]},
+        TSet[t, If[ Length[shape] >= 2, TGlorot[shape], TZeros[shape]]]]) /@ handles;
 )
 TNetInitialize[lam_TTerm] := (initParams[TNetParams[lam]]; lam)
 TTerm /: NetInitialize[lam_TTerm] := TNetInitialize[lam]
@@ -2134,8 +2112,8 @@ peelLayer[t_] := Module[{red, mul, wMove, bMove, w, bias, wArr, inL, inR, inner}
             (* one operand unwraps to the weight TEN, the other to the input
                (the prior layer's output, movement-unwrapped for the next peel) *)
             Which[
-                uIsTen[inR] && !uIsTen[inL], w = inR; inner = inL,
-                uIsTen[inL] && !uIsTen[inR], w = inL; inner = inR,
+                uIsTen[inR] && ! uIsTen[inL], w = inR; inner = inL,
+                uIsTen[inL] && ! uIsTen[inR], w = inL; inner = inR,
                 True, Return[$Failed]];
             bias = bMove;
             (* unwrapMove strips the PERMUTE too, so `w` is the ORIGINAL
@@ -2161,11 +2139,11 @@ peelLayer[t_] := Module[{red, mul, wMove, bMove, w, bias, wArr, inL, inR, inner}
    EXP2 chain's argument SUB's first operand is the logits x. *)
 softmaxInner[t_] := Module[{num, scaled, sub},
     num = uChild[t, 0];                         (* EXP2[(x-max)*log2e] *)
-    If[ !uIsUop[num, $UopExp2], Return[$Failed]];
+    If[ ! uIsUop[num, $UopExp2], Return[$Failed]];
     scaled = uChild[num, 0];                     (* MUL[(x-max), log2e] *)
-    If[ !uIsUop[scaled, $UopMul], Return[$Failed]];
+    If[ ! uIsUop[scaled, $UopMul], Return[$Failed]];
     sub = uChild[scaled, 0];                      (* SUB = ADD[x, NEG max] *)
-    If[ !uIsUop[sub, $UopAdd], Return[$Failed]];
+    If[ ! uIsUop[sub, $UopAdd], Return[$Failed]];
     uChild[sub, 0]                                (* x = the logits *)
 ]
 

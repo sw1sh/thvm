@@ -54,7 +54,7 @@ TLazyCases::usage    = "TLazyCases[s, pattern] forces `s` and returns a WL List 
 TLazyChoice::usage   = "TLazyChoice[xs_List] returns a fresh SUP-stream over the encoded elements of `xs`: ERA on the empty list, the bare element on a singleton, &L{x1, &L{x2, ...}} otherwise.  Shared label so downstream DUP-SUP annihilations are clean.";
 TLazyFold::usage     = "TLazyFold[f, x, s] = Fold[f, x, TLazyToList[s]].  Forces the full stream.";
 
-(* WL <-> TTerm coercion is now in Expr.wl as ToTTerm / FromTTerm.
+(* WL <-> TTerm coercion lives in Expr.wl as ToTTerm / FromTTerm.
    The private workhorses tlazyEncode / tlazyDecode stay here so
    the lazy combinators below can keep using them directly. *)
 
@@ -116,10 +116,9 @@ tlazyEncode[l_List]    := (ensureInit[];
    don't clash with the special $LazyCons / $LazyNil / $LazyTuple
    slots.  A 0-ary symbol falls through to the `tlazyEncode[s_Symbol]`
    rule above; this clause covers the n>=1 case. *)
-tlazyEncode[expr_] /; Head[expr] =!= TTerm &&
-                     Head[Head[Unevaluated[expr]]] === Symbol :=
+tlazyEncode[expr_] /; ! MatchQ[expr, _TTerm] && Head[Head[Unevaluated[expr]]] === Symbol :=
     (ensureInit[];
-     With[{lab    = symLabelFor[ToString[Head[Unevaluated[expr]]]],
+     With[{lab = symLabelFor[ToString[Head[Unevaluated[expr]]]],
            children = ttermRaw /@ (tlazyEncode /@ List @@ Unevaluated[expr])},
         TTerm[$termNewCtrFn[lab, children]]
      ])
@@ -609,7 +608,7 @@ defPrependHToFirstEach[] := Module[{h, ss, s, rs, ig},
     ]
 ]
 
-(* lazyMap = λf. λs.  match s with
+(* lazyMap = lambda f s.  match s with
                           Cons(h, t) -> Cons(f h, lazyMap f t)
                           Nil        -> Nil                     *)
 defLazyMap[] := Module[{f, s, h, t, ig},
@@ -768,22 +767,19 @@ TLazyMap[f_TTerm, s_TTerm] := (
 )
 
 (* Non-TTerm predicate (a plain WL function/symbol): force the stream
-   then Map on the WL side.  Mirrors the pre-IC TLazyMap semantics so
-   callers like `TLazyMap[Function, ...]` or `TLazyMap[symbol, ...]`
-   keep working; the IC-native path above takes precedence when the
-   predicate is a TTerm (the more general case). *)
+   then Map on the WL side, so callers like `TLazyMap[Function, ...]` or
+   `TLazyMap[symbol, ...]` work.  The IC-native path above takes
+   precedence when the predicate is a TTerm (the more general case). *)
 TLazyMap[f_ /; ! MatchQ[f, _TTerm], s_TTerm] := Map[f, TLazyToList[s]]
 
-(* TLazySelect / TLazyCatenate -- WL-side eager walkers in this slice.
-   The IC-native TDef versions ran into a runaway when cnf had to drive
-   the predicate at every Cons step (the predicate's auto-dup'd binder
-   leaves an APP-headed-by-DP arg under MAT, and broadening the cnf-drive
-   in APP-MAT to handle that triggered exponential allocations on
-   recursive calls).  WL-side walking is correct + fast on small streams;
-   the IC-native lazy versions can replace these once the cnf-drive
-   bookkeeping is sorted.  The result is rebuilt as a fresh Cons-list
-   TTerm so downstream consumers (TLazyTake, FromTTerm, TLazyToList)
-   see a normal lazy stream shape.
+(* TLazySelect / TLazyCatenate are WL-side eager walkers.  An IC-native
+   TDef version runs away when cnf has to drive the predicate at every
+   Cons step: the predicate's auto-dup'd binder leaves an APP-headed-by-DP
+   arg under MAT, and a cnf-drive in APP-MAT broad enough to handle that
+   triggers exponential allocations on recursive calls.  WL-side walking
+   is correct and fast on small streams.  The result is rebuilt as a fresh
+   Cons-list TTerm so downstream consumers (TLazyTake, FromTTerm,
+   TLazyToList) see a normal lazy stream shape.
 
    IMPORTANT: applying the same TLam predicate multiple times from
    WL would consume the LAM after the first APP-LAM (linear use in
@@ -791,11 +787,11 @@ TLazyMap[f_ /; ! MatchQ[f, _TTerm], s_TTerm] := Map[f, TLazyToList[s]]
    APP[TRef[predName], h_i] -- alo_realize unfolds a fresh dyn copy
    per call, so each application sees an intact LAM body. *)
 
-(* Cache a TLam as a uniquely-named TDef and return TRef[name] so
-   we can apply it many times.  Name is keyed on the TLam's raw bits
-   so identical-but-separately-built TLams reuse one slot.  The
-   unique prefix avoids collisions with user-side def names. *)
-$lazyPredCounter = 0;
+(* Register a TLam as a uniquely-named TDef and return TRef[name] so
+   we can apply it many times.  Each call gets a fresh name from a
+   monotonic counter; the unique prefix avoids collisions with
+   user-side def names. *)
+$lazyPredCounter = 0
 registerLazyPred[p_TTerm] := Module[{name},
     name = "$THVMLink__lazyPred_" <> ToString[$lazyPredCounter];
     $lazyPredCounter += 1;
@@ -886,7 +882,7 @@ TLazyCases[s_TTerm, pat_] := Block[{
            pattern literal (not the symbol `pat`). *)
         With[{p = pat},
             m = TPatternMatch[h, p];
-            If[ Head[m] === TMatch,
+            If[ MatchQ[m, _TMatch],
                 With[{bs = TMatchBindings[m]},
                     Do[ AppendTo[out, {h, b}], {b, bs} ]
                 ]

@@ -5,7 +5,7 @@
 
    Twee's --tstp output uses SZS framing (status + Proof start/end
    markers) but the proof BODY is Twee's own
-   "Axiom N / Lemma N / Proof: + equation chain" format -- it does
+   "Axiom N / Lemma N / Proof: + equation chain" format; it does
    NOT carry per-step inference DAG metadata the way Vampire's
    --proof tptp does.  TTweeProof captures what is available:
 
@@ -45,7 +45,7 @@ Begin["`Private`"]
 
 Options[TTweeProof] = {
     TimeConstraint -> 30,
-    "Binary"       -> Automatic
+    "Binary" -> Automatic
 }
 
 tweeBinary[Automatic] := SelectFirst[
@@ -70,7 +70,7 @@ parseAxiomLine[l_String] := Replace[
     ],
     {
         {entry_Association, ___} -> entry,
-        _                        -> Nothing
+        _ -> Nothing
     }
 ]
 
@@ -82,7 +82,7 @@ parseLemmaLine[l_String] := Replace[
     ],
     {
         {entry_Association, ___} -> entry,
-        _                        -> Nothing
+        _ -> Nothing
     }
 ]
 
@@ -91,16 +91,13 @@ parseLemmaLine[l_String] := Replace[
    contribute one step to ProofLength. *)
 parseTweeProof[proofText_String] := Block[{lines, axEntries, lemEntries, goalSeen},
     lines = StringSplit[proofText, "\n"];
-    axEntries  = Map[parseAxiomLine, lines];
-    axEntries  = DeleteCases[axEntries, Nothing];
-    lemEntries = Map[parseLemmaLine, lines];
-    lemEntries = DeleteCases[lemEntries, Nothing];
-    goalSeen   = AnyTrue[lines, StringStartsQ[StringTrim @ #, "Goal "] &];
+    axEntries = DeleteCases[Map[parseAxiomLine, lines], Nothing];
+    lemEntries = DeleteCases[Map[parseLemmaLine, lines], Nothing];
+    goalSeen = AnyTrue[lines, StringStartsQ[StringTrim @ #, "Goal "] &];
     <|
-        "Axioms"      -> axEntries,
-        "Lemmas"      -> lemEntries,
-        "ProofLength" -> Length[axEntries] + Length[lemEntries]
-            + If[goalSeen, 1, 0]
+        "Axioms" -> axEntries,
+        "Lemmas" -> lemEntries,
+        "ProofLength" -> Length[axEntries] + Length[lemEntries] + If[goalSeen, 1, 0]
     |>
 ]
 
@@ -134,17 +131,14 @@ TTweeProof[problemFile_String, opts : OptionsPattern[]] /;
             {"sh", "-c", cmd}, "StandardOutput"
         ];
         status = Which[
-            StringContainsQ[out, "SZS status Unsatisfiable"]
-                || StringContainsQ[out, "SZS status Theorem"],
+            StringContainsQ[out, "SZS status Unsatisfiable"] || StringContainsQ[out, "SZS status Theorem"],
                 "Proved",
-            StringContainsQ[out, "RESULT: Timeout"]
-                || StringContainsQ[out, "Time limit"],
+            StringContainsQ[out, "RESULT: Timeout"] || StringContainsQ[out, "Time limit"],
                 "TimedOut",
             True,
                 "Failed"
         ];
-        proofBody = If[
-            status === "Proved",
+        proofBody = If[ status === "Proved",
             StringCases[
                 out,
                 "SZS output start Proof" ~~ body__ ~~ "SZS output end Proof" :>
@@ -153,19 +147,18 @@ TTweeProof[problemFile_String, opts : OptionsPattern[]] /;
             ],
             {}
         ];
-        parsed = If[
-            Length[proofBody] > 0,
+        parsed = If[ Length[proofBody] > 0,
             parseTweeProof[First @ proofBody],
             <|"Axioms" -> {}, "Lemmas" -> {}, "ProofLength" -> 0|>
         ];
         <|
-            "Status"      -> status,
-            "Strategy"    -> "twee",
-            "Seconds"     -> N @ Round[secs, 0.01],
+            "Status" -> status,
+            "Strategy" -> "twee",
+            "Seconds" -> N @ Round[secs, 0.01],
             "ProofLength" -> parsed["ProofLength"],
-            "Axioms"      -> parsed["Axioms"],
-            "Lemmas"      -> parsed["Lemmas"],
-            "RawProof"    -> If[Length[proofBody] > 0, First @ proofBody, ""]
+            "Axioms" -> parsed["Axioms"],
+            "Lemmas" -> parsed["Lemmas"],
+            "RawProof" -> If[Length[proofBody] > 0, First @ proofBody, ""]
         |>
     ]
 

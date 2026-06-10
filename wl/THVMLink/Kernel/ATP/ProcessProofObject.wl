@@ -1,4 +1,4 @@
-(* thvm/atp -- SZS derivation -> thvm-shaped ProofObject builder.
+(* thvm/atp: SZS derivation -> thvm-shaped ProofObject builder.
 
    Build a thvm `ProofObject["EquationalLogic", goal, axioms, ds]`
    from a parsed SZS derivation (the Association list returned by
@@ -15,13 +15,13 @@
    sees a uniform interface.
 
    Limitations of the produced ProofObject:
-   * Statement fields are the parsed SZS formulas as-given -- they
+   * Statement fields are the parsed SZS formulas as-given: they
      do NOT auto-translate to the WL operator names the original
      theory uses.  For shape comparison this is fine; the
      ProofFunction verifier needs a theory-specific symbol-name
      reverse-translator (a follow-up).
    * Proof-field metadata (Construct/Rule/Orientation/Position) is
-     STUBBED -- only Construct/MatchingConstruct/Input parent links
+     STUBBED: only Construct/MatchingConstruct/Input parent links
      are populated, so the shape comparator sees the right number
      of parents but the verifier path is unsupported.
    * Rule names that aren't in `$SZSRuleToConstruct` fall through
@@ -59,7 +59,7 @@ TWaldmeisterProofObject::usage =
     "wmcli binary via TWaldmeisterProof and converts the proof " <>
     "protocol via TSZSDerivationToProofObject to return a thvm-shaped " <>
     "proof Association.  Used as the Method -> \"WaldmeisterProcess\" " <>
-    "dispatch target in TFindProof.  Path form only -- the two-arg " <>
+    "dispatch target in TFindProof.  Path form only; the two-arg " <>
     "(Theory, thm) form needs a TPTP -> .pr converter (deferred)."
 
 TTweeProofObject::usage =
@@ -67,7 +67,7 @@ TTweeProofObject::usage =
     "TTweeProof.  Twee's --tstp output is SZS-FRAMED but the proof " <>
     "body is Twee's own human-readable equation chain (not TPTP fof " <>
     "inferences), so we return the lemma-list shape directly rather " <>
-    "than via TSZSDerivationToProofObject -- the dataset is keyed by " <>
+    "than via TSZSDerivationToProofObject; the dataset is keyed by " <>
     "{\"Axiom\", n} / {\"Lemma\", n} only, with no per-step " <>
     "construct-class metadata.  Used as Method -> \"TweeProcess\" in " <>
     "TFindProof."
@@ -80,7 +80,7 @@ TEproverProofObject::usage =
     "emits the same SZS-framed fof+inference DAG as Vampire's " <>
     "--proof tptp, so the lift path is shared.  Options: TimeConstraint " <>
     "(default 30), Binary (default Automatic), ParseFormulas " <>
-    "(default False), LiftToProofObject (default False -- when True, " <>
+    "(default False), LiftToProofObject (default False; when True, " <>
     "wraps the Association into a literal ProofObject[...] head)."
 
 Begin["`Private`"]
@@ -158,7 +158,7 @@ parseFormulaBody[body_String] := Block[
         AssociationQ[parsed] && parsed["Conjecture"] =!= Missing[],
             reverseEncodeFormula @ parsed["Conjecture"],
         True,
-            body  (* fall back to raw string -- comparator still works *)
+            body  (* fall back to raw string; comparator still works *)
     ]
 ]
 parseFormulaBody[other_] := other
@@ -191,9 +191,9 @@ $SZSRuleToConstruct = <|
 constructTypeOf[rule_String] :=
     Lookup[$SZSRuleToConstruct, rule, "SubstitutionLemma"]
 
-(* Inference rules that are PURE BOOKKEEPING -- they don't carry a
+(* Inference rules that are PURE BOOKKEEPING: they don't carry a
    semantic step the proof reconstructor should emit.  Examples:
-   `orient` (turning an equation into a directed rule -- the rule
+   `orient` (turning an equation into a directed rule, where the rule
    is implicit in any later cp/red that uses it), `reorient_equations`
    (Vampire's parse-time equation-flip), bare axiom renames.
 
@@ -233,7 +233,7 @@ isNegatedConjectureQ[step_Association] :=
     step["Rule"] === "file" && step["Role"] === "negated_conjecture"
 
 (* Walk derivation in order, assign each step a thvm-shaped key
-   {ConstructType, n} -- sequential per type.  Returns Association
+   {ConstructType, n}, sequential per type.  Returns Association
    from SZS-step-name (f1, f2, ...) to the assigned key. *)
 assignConstructKeys[derivation_List] := Block[
     {nameToKey = <||>, perTypeCount = <||>, key, t},
@@ -278,22 +278,21 @@ proofFieldFor[step_Association, nameToKey_Association] := Block[
 (* ---- Single-rewrite reconstruction ------------------------------
    Given Input.eq, Construct.eq, Step.eq (all `Inactive[Equal][lhs, rhs]`
    shaped, with Construct's vars as Pattern[v, Blank[]]), find which
-   (Side ∈ {1,2}, ConstructSide ∈ {1,2}, Position ∈ Positions(Input[Side]))
+   (Side in {1,2}, ConstructSide in {1,2}, Position in Positions(Input[Side]))
    tuple yields Step.eq when Construct is used as a rewrite rule.
 
    Returns an Association with Side / ConstructSide / Position /
    Orientation / Rule keys, or $Failed if no fit.  Handles only
    SubstitutionLemma + Conclusion (single-rewrite) steps; CriticalPairLemma
    superposition reconstruction is deferred. *)
-equalSides[Inactive[Equal][a_, b_]] := {a, b};
-equalSides[Equal[a_, b_]]           := {a, b};
-equalSides[h_HoldForm]              := equalSides[ReleaseHold[h]];
-equalSides[_]                       := $Failed;
+equalSides[Inactive[Equal][a_, b_]] := {a, b}
+equalSides[Equal[a_, b_]] := {a, b}
+equalSides[h_HoldForm] := equalSides[ReleaseHold[h]]
+equalSides[_] := $Failed
 
 (* Strip Pattern[v, _] -> v so the matched bindings (decorating
    the LHS) substitute correctly into the RHS. *)
-stripPatternHeads[expr_] := expr //.
-    Verbatim[Pattern][v_, _] :> v;
+stripPatternHeads[expr_] := expr //. Verbatim[Pattern][v_, _] :> v
 
 (* Hand-construct a Rule that matches the preset's stored shape:
    LHS is Pattern-wrapped (vars rendered as `name_`); RHS uses
@@ -301,13 +300,15 @@ stripPatternHeads[expr_] := expr //.
 mkRule[lhsBase_, rhsBase_, vars_List : {}] := With[
     {lh = withVariablePatterns[stripPatternHeads[lhsBase], vars],
      rh = stripPatternHeads[rhsBase]},
-    Rule @@ {lh, rh}];
+    Rule @@ {lh, rh}
+]
 
-(* For Replace -- defers RHS evaluation past binding capture. *)
+(* For Replace: defers RHS evaluation past binding capture. *)
 mkRewriteRule[lhsBase_, rhsBase_, vars_List : {}] := With[
     {lh = withVariablePatterns[stripPatternHeads[lhsBase], vars],
      rh = stripPatternHeads[rhsBase]},
-    RuleDelayed @@ {lh, rh}];
+    RuleDelayed @@ {lh, rh}
+]
 
 reconstructSingleRewrite[inputEq_, constructEq_, stepEq_,
         varSet_List : {}] := Block[
@@ -356,30 +357,29 @@ reconstructSingleRewrite[inputEq_, constructEq_, stepEq_,
           "Orientation" -> If[hit[[2]] === 1, 1, -1],
           "Rule" -> mkRule[cSides[[hit[[2]]]],
               cSides[[3 - hit[[2]]]], varSet]|>]
-];
+]
 
 (* ---- Superposition (CriticalPairLemma) reconstruction -----------
    A CPL inference superposes two rules: the Construct rule's LHS
    contains a non-variable subterm at some Position, and that
    subterm unifies with the MatchingConstruct rule's LHS.  The
    resulting critical pair is:
-     σ(Construct.RHS)  ==  σ(Construct.LHS[Position <- MatchingConstruct.RHS])
-   where σ is the most-general unifier.
+     sigma(Construct.RHS)  ==  sigma(Construct.LHS[Position <- MatchingConstruct.RHS])
+   where sigma is the most-general unifier.
 
    Enumerates (Side, Orientation, MatchingSide, MatchingOrientation,
    Position) and runs cplUnify on each candidate.  Returns metadata
    with Side / ConstructSide / Orientation / Subpattern /
    MatchingConstruct (passed through) / MatchingOrientation /
    MatchingSide / Position / Rule / MatchingRule keys, or $Failed. *)
-applySubstitution[expr_, sub_Association] := expr //. Normal[sub];
+applySubstitution[expr_, sub_Association] := expr //. Normal[sub]
 
 (* Strip Pattern[v, Blank[]] -> v from an expression so we can
    walk it as a plain term-tree for subpattern enumeration. *)
-unpatternize[expr_] := expr //.
-    Verbatim[Pattern][v_, _] :> v;
+unpatternize[expr_] := expr //. Verbatim[Pattern][v_, _] :> v
 
 (* A position is "non-variable" if the subterm at that position
-   isn't a Pattern-headed leaf -- superposition rules require the
+   isn't a Pattern-headed leaf: superposition rules require the
    matched subterm to be a non-variable position. *)
 nonVarPositions[expr_, varSet_List] := Block[
     {plain = unpatternize[expr], positions},
@@ -388,7 +388,7 @@ nonVarPositions[expr_, varSet_List] := Block[
     positions = Position[plain, _, Heads -> False];
     Select[positions,
         ! MemberQ[varSet, Extract[plain, #]] &]
-];
+]
 
 reconstructSuperposition[
         constructEq_, matchingEq_, stepEq_, varSet_List] := Block[
@@ -409,7 +409,7 @@ reconstructSuperposition[
     mSides = mSides /. freshen;
     freshVars = Values[freshen];
     allVars = Join[varSet, freshVars];
-    (* Two host/applied orientations -- the SZS labeling might map
+    (* Two host/applied orientations: the SZS labeling might map
        Construct->host + MatchingConstruct->applied OR the swap.
        Try both: hostSides = either cSides or mSides; appliedSides
        = the other.  Record `swap` so the caller knows which role
@@ -450,10 +450,9 @@ reconstructSuperposition[
         {s2, 2}, {o2, {1, -1}}], 5];
     (* Alpha-equivalence check: a single substitution must
        simultaneously map both sides.  Conjoint unification via
-       List[a, b] vs List[c, d] — cplUnify recurses pair-wise
-       with one shared σ, so an inconsistency in one slot fails
-       the whole match (which the prior independent-unify code
-       missed). *)
+       List[a, b] vs List[c, d]: cplUnify recurses pair-wise
+       with one shared sigma, so an inconsistency in one slot fails
+       the whole match. *)
     Block[{checkPair},
         checkPair[{a_, b_}] := Block[
             {sub},
@@ -474,7 +473,7 @@ reconstructSuperposition[
                s1 = hit[[2]], o1 = hit[[3]],
                s2 = hit[[4]], o2 = hit[[5]],
                pos = hit[[6]], subp = hit[[7]]},
-            (* When swap=1, MatchingConstruct played host -- the
+            (* When swap=1, MatchingConstruct played host: the
                Rule comes from mSides + the MatchingRule from cSides. *)
             If[ swapHit === 0,
                 cs = cSides; ms = mSides,
@@ -501,7 +500,7 @@ reconstructSuperposition[
                       freshVars, varSet]},
                   mkRule[lhsBase /. reverseMap,
                       rhsBase /. reverseMap, varSet]]|>]]
-];
+]
 
 (* Take an already-lifted prfList (Association of {Type, n} ->
    <|Statement, Proof|>) and, for each SubstitutionLemma /
@@ -520,7 +519,7 @@ augmentSingleRewriteEntries[prfList_List, varSet_List : {}] := Block[
             "SubstitutionLemma" | "Conclusion",
                 inputKey     = Lookup[proof, "Input",     Missing[]];
                 constructKey = Lookup[proof, "Construct", Missing[]];
-                (* Conclusion can omit Input -- the implicit Input is
+                (* Conclusion can omit Input: the implicit Input is
                    the Hypothesis (the goal being proved). *)
                 If[ type === "Conclusion" && MissingQ[inputKey],
                     inputKey = {"Hypothesis", 1};
@@ -568,22 +567,20 @@ augmentSingleRewriteEntries[prfList_List, varSet_List : {}] := Block[
                     constructEntry["Statement"],
                     matchingEntry["Statement"],
                     stepEq, varSet];
-                (* Bisect (5a14987a) showed: a placeholder rule that
-                   doesn't ACTUALLY derive the Statement causes a
-                   verifier Failure with "Can't unify <axiom> with
-                   <placeholder>".  So writing a fake identity rule
-                   is worse than leaving the entry unaugmented --
-                   leave it skeleton-only and let the verifier
-                   report its own KeyAbsent failure.  Real fix is
-                   making the enumeration find valid superpositions
-                   for CPL 2/3 etc. *)
+                (* A placeholder rule that doesn't ACTUALLY derive the
+                   Statement causes a verifier Failure with "Can't unify
+                   <axiom> with <placeholder>".  So writing a fake identity
+                   rule is worse than leaving the entry unaugmented: leave
+                   it skeleton-only and let the verifier report its own
+                   KeyAbsent failure when the enumeration cannot find a
+                   valid superposition. *)
                 If[ recon === $Failed, Return[entry]];
                 Return[ReplacePart[entry,
                     "Proof" -> Association[proof, recon]]]];
         entry
     ];
     KeyValueMap[#1 -> augment[#1, #2] &, prfAssoc]
-];
+]
 
 (* ---- CLI -> verifiable ProofObject lift -------------------------
    Take the Association that TSZSDerivationToProofObject returns and
@@ -592,7 +589,7 @@ augmentSingleRewriteEntries[prfList_List, varSet_List : {}] := Block[
 
    Three transforms compose:
      1. TPTPImport renders TPTP terms as String tokens wrapped in a
-        zero-arg call -- `"x1"[]` for variables, `"k1"[]` for
+        zero-arg call: `"x1"[]` for variables, `"k1"[]` for
         constants.  liftStringLeaves promotes both to Global` Symbols.
      2. Axiom variables must appear as Pattern[name, Blank[]] (the
         `name_` form the AxiomaticTheory schemas expect).
@@ -603,14 +600,14 @@ augmentSingleRewriteEntries[prfList_List, varSet_List : {}] := Block[
         wrappers around the same canonicalized equation. *)
 liftStringLeaves[expr_] := expr //. {
     h_String[] /; StringLength[h] > 0 :> Symbol["Global`" <> h]
-};
+}
 
 collectVarSymbols[expr_] := DeleteDuplicates @ Cases[
     {expr},
     s_Symbol /; (Context[s] === "Global`" &&
         StringMatchQ[SymbolName[s],
             "x" ~~ DigitCharacter ..]),
-    Infinity];
+    Infinity]
 
 (* `expr /. v -> Pattern[v, Blank[]]` would loop since the RHS
    contains the LHS literally.  Build the substitution map with
@@ -619,13 +616,13 @@ withVariablePatterns[expr_, vars_List] := ReleaseHold @ Block[
     {pairs},
     pairs = Map[# -> Hold[Pattern][#, Blank[]] &, vars];
     Hold[expr] /. pairs /. Hold[Pattern] -> Pattern
-];
+]
 
-inactivateEqual[Equal[a_, b_]] := Inactive[Equal][a, b];
-inactivateEqual[other_]         := other;
+inactivateEqual[Equal[a_, b_]] := Inactive[Equal][a, b]
+inactivateEqual[other_] := other
 
-holdEqual[Equal[a_, b_]] := With[{x = a, y = b}, HoldForm[x == y]];
-holdEqual[other_]         := other;
+holdEqual[Equal[a_, b_]] := With[{x = a, y = b}, HoldForm[x == y]]
+holdEqual[other_] := other
 
 liftToProofObject[assoc_Association] := Block[
     {goalRaw, axiomsRaw, dsRaw, goalLifted, axiomsLifted,
@@ -648,9 +645,10 @@ liftToProofObject[assoc_Association] := Block[
         axiomsLifted];
     (* First pass: lift each Statement / preserve skeleton Proof links.
        NOTE: preset stores arg4-Proof Statements with BARE variables
-       (HoldForm[a ⊗ b == ...]) and arg3 axioms with Pattern[v, _]
-       (Inactive[Equal][(a_) ⊗ (b_), ...]).  So withVariablePatterns
-       is applied to arg3 above but NOT to the Statement here. *)
+       (HoldForm[CircleTimes[a, b] == ...]) and arg3 axioms with
+       Pattern[v, _] (Inactive[Equal][CircleTimes[a_, b_], ...]).  So
+       withVariablePatterns is applied to arg3 above but NOT to the
+       Statement here. *)
     prfList = KeyValueMap[
         #1 -> Association[
             "Statement" -> Block[{
@@ -678,7 +676,7 @@ liftToProofObject[assoc_Association] := Block[
             "Constants" -> constSyms,
             "Proof"     -> prfList
         |>]
-];
+]
 
 buildDatasetFromDerivation[derivation_List, parseFormulasQ_:False] := Block[
     {folded, nameToKey, entries, stmtFn},
@@ -688,7 +686,7 @@ buildDatasetFromDerivation[derivation_List, parseFormulasQ_:False] := Block[
     folded = foldBookkeeping[derivation];
     nameToKey = assignConstructKeys[folded];
     (* Per-formula wrap-and-parse is SLOW (TPTPImport runs the
-       full EBNF parser per call -- 5s/formula on AbelianGroup
+       full EBNF parser per call, 5s/formula on AbelianGroup
        cases, dominating wall on a multi-step proof).  Default to
        raw String statements; opt-in to parsed-WL mode via
        parseFormulasQ when full ProofObject identity / property
@@ -713,7 +711,7 @@ End[]
 Options[TSZSDerivationToProofObject] = {"ParseFormulas" -> False}
 
 (* Public: build a thvm-shaped proof Association from a parsed SZS
-   derivation list.  ATP-agnostic -- works for Vampire's
+   derivation list.  ATP-agnostic, works for Vampire's
    `--proof tptp`, E's `--proof-object`, Twee's `--tstp`, iProver,
    Otter, anyone that emits SZS-framed fof+inference output.
 
@@ -854,8 +852,8 @@ Options[TWaldmeisterProofObject] = {
        so the WL property machinery (ProofFunction, ProofGraph,
        Theorems) dispatches.  pf[Theorems] still fails verification
        because the Proof entries lack the rewrite metadata
-       (Orientation, Rule, Side, Position) the verifier needs --
-       extracting those from the SZS DAG is a deeper iter. *)
+       (Orientation, Rule, Side, Position) the verifier needs;
+       extracting those from the SZS DAG is unsupported. *)
     "LiftToProofObject" -> False
 }
 

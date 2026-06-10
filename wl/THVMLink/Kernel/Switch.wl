@@ -4,7 +4,7 @@
    literals.
 
    These are the termination + counter primitives the recursive
-   training loop needs on top of TDef / TRef -- a `train_step`
+   training loop needs on top of TDef / TRef - a `train_step`
    def can MAT on the iteration counter, decrement it via OP2
    SUB, and recurse via TRef. *)
 
@@ -14,14 +14,14 @@ TNum::usage = "TNum[i] returns a TTerm wrapping a TAG_NUM atom holding the integ
 TOp2::usage = "TOp2[opcode, x, y] returns a TAG_OP2 term computing `opcode(x, y)` once both operands reduce to TAG_NUM.  Opcodes: \"+\", \"-\", \"*\", \"==\", \"<\".";
 TMatNum::usage = "TMatNum[matchVal, handler, fallback] returns a TAG_MAT atom that dispatches by tag of its applied arg: TAG_NUM with value matchVal -> `handler`; TAG_CTR with ext matchVal -> destructure (handler applied to each CTR child via APP-chain, mirroring HVM4's APP-MAT-CTR-MAT); anything else -> APP[fallback, arg].  TMatCtr is a sugar alias for the CTR-destructuring use case (same primitive).";
 
-TMatCtr::usage = "TMatCtr[ctorName, handler, fallback] -- sugar for TMatNum[ctorName, handler, fallback] when the intended use is destructuring a CTR (constructor name `ctorName`, anonymous CTR uses 0).  When applied to a matching CTR, applies `handler` positionally to each CTR child.  Used by TGradMany to bind multi-target gradient results into a body lambda without an indexed projection primitive.";
-TIfZero::usage  = "TIfZero[counter, thenTerm, elseTerm] is sugar for APP[ TMatNum[0, thenTerm, lam _ . elseTerm], counter ].  The else branch ignores the bound argument so the user-side reads like a plain conditional.";
+TMatCtr::usage = "TMatCtr[ctorName, handler, fallback] - sugar for TMatNum[ctorName, handler, fallback] when the intended use is destructuring a CTR (constructor name `ctorName`, anonymous CTR uses 0).  When applied to a matching CTR, applies `handler` positionally to each CTR child.  Used by TGradMany to bind multi-target gradient results into a body lambda without an indexed projection primitive.";
+TIfZero::usage = "TIfZero[counter, thenTerm, elseTerm] is sugar for APP[ TMatNum[0, thenTerm, lam _ . elseTerm], counter ].  The else branch ignores the bound argument so the user-side reads like a plain conditional.";
 
 TEql::usage = "TEql[a, b] returns a TAG_EQL term that reduces to NUM(1) iff `a` and `b` are structurally equal, NUM(0) otherwise.  Strict on both args; SUP-on-either-side commutes (clones the other side via DUP, distributes); ERA/ANY short-circuit.  CTR-CTR and LAM-LAM rules land with the upcoming HVM4 port (currently fall through to stuck-rebuild).  Use this instead of TOp2[\"==\", ...] for theorem-proving where the args may be SUPs / structures.";
 
 TCtr::usage = "TCtr[label, c1, c2, ...] constructs a TAG_CTR with the given integer label and child terms.  Mirrors HVM4's `#K{a, b, ...}`.  Arity capped at 16 (matches HVM4's CTR limit).  An IC-level dup of the result fires DUP-CTR via interact_dup_ctr.";
 
-TBookCtr::usage = "TBookCtr[label, c1, c2, ...] constructs a TAG_CTR in BOOK_HEAP rather than the dynamic HEAP.  Use when constructing CTR inputs destined for the Metal AOT path -- the kernel's heap MTLBuffer is bound to BOOK_HEAP, so destructure derefs only resolve for vals in that range.  Phase 7 iter T.";
+TBookCtr::usage = "TBookCtr[label, c1, c2, ...] constructs a TAG_CTR in BOOK_HEAP rather than the dynamic HEAP.  Use when constructing CTR inputs destined for the Metal AOT path - the kernel's heap MTLBuffer is bound to BOOK_HEAP, so destructure derefs only resolve for vals in that range.";
 
 TMatChain::usage = "TMatChain[<|label1 -> handler1, label2 -> handler2, ...|>, fallback] builds nested TMatNum atoms so a single matcher dispatches multiple constructor labels, mirroring HVM4's `lambda { #L1: h1; #L2: h2; ... }` syntax.  Each handler receives the destructured CTR fields positionally via APP-MAT-CTR-MAT.";
 
@@ -57,33 +57,33 @@ $termNewCtrFn := $termNewCtrFn = load["thvm_wl_term_new_ctr",
 $termNewBookCtrFn := $termNewBookCtrFn = load["thvm_wl_term_new_book_ctr",
     {Integer, {Integer, 1}}, Integer]
 
-(* TAG_NUM is just a packed term -- no library call needed. *)
-TNum[i_Integer]                      := TNum[i, "i32"]
-TNum[i_Integer, dtype_String]        := (
+(* TAG_NUM is just a packed term - no library call needed. *)
+TNum[i_Integer] := TNum[i, "i32"]
+TNum[i_Integer, dtype_String] := (
     ensureInit[];
     TTerm[$termNewFn[0, $TagNUM, dtypeCode[dtype], i]]
 )
 
-(* numCoerce -- term-constructor sugar.  A bare Integer in a value
+(* numCoerce - term-constructor sugar.  A bare Integer in a value
    position means "the i32 NUM with that value", so TSup[1, 2] is
    TSup[TNum[1], TNum[2]], TOp2["+", x, 3] is TOp2["+", x, TNum[3]],
    etc.  Without it, ttermRaw[1] === 1 gets spliced into a heap cell
-   as a raw packed Term word -- which the runtime decodes as
+   as a raw packed Term word - which the runtime decodes as
    APP(loc=1), a malformed term that crashes on reduction.  Applied
    at the heapWith funnel (THVMLink.wl) for every heapTerm-based
    constructor, and explicitly in TOp2 / TEql below (those bypass
-   heapWith -- they call the C term_new_op2 / term_new_eql directly).
+   heapWith - they call the C term_new_op2 / term_new_eql directly).
 
    Integer only, on purpose: a bare Integer maps unambiguously to a
    DT_I32 NUM with that value (literally TNum[i]).  A bare Real would
    need to be bit-reinterpreted to f32 (TNum stores the 32-bit *bits*,
-   not the value -- see TNum::usage), and the surface convention for
+   not the value - see TNum::usage), and the surface convention for
    arithmetic float scalars is TUOpConst.  If you want a float NUM,
    write TNum[bits, "f32"] explicitly.  Everything that isn't a bare
    Integer (already a TTerm, a Real, a List, ...) passes through
    untouched. *)
 numCoerce[i_Integer] := TNum[i]
-numCoerce[x_]        := x
+numCoerce[x_] := x
 
 TOp2[op_String, x_, y_] := (
     ensureInit[];
@@ -114,7 +114,7 @@ TMatNum[matchVal_Integer, handler_, fallback_] := (
 TMatCtr[ctorName_Integer, handler_, fallback_] :=
     TMatNum[ctorName, handler, fallback]
 
-(* Sugar: TIfZero[counter, then, else] -- elseTerm doesn't take the
+(* Sugar: TIfZero[counter, then, else] - elseTerm doesn't take the
    counter; we wrap it in a discarding lambda (the bound name is
    never referenced) so MAT-MIS lands correctly. *)
 TIfZero[counter_, thenTerm_, elseTerm_] :=
@@ -125,11 +125,11 @@ TCtr[label_Integer, children___] := (
     TTerm[$termNewCtrFn[label, ttermRaw /@ {children}]]
 )
 
-(* TBookCtr -- like TCtr but allocates the cell sequence in BOOK_HEAP
+(* TBookCtr - like TCtr but allocates the cell sequence in BOOK_HEAP
    (rather than the dynamic HEAP).  Use when constructing CTR inputs
    destined for the Metal AOT path: the kernel's `device Term *heap`
    buffer is zero-copy bound to BOOK_HEAP, so destructure derefs only
-   work for vals in book_heap range.  Phase 7 iter T. *)
+   work for vals in book_heap range. *)
 TBookCtr[label_Integer, children___] := (
     ensureInit[];
     TTerm[$termNewBookCtrFn[label, ttermRaw /@ {children}]]
@@ -141,7 +141,7 @@ TBookCtr[label_Integer, children___] := (
    against each TMatNum in turn; if none match, fallback gets the
    arg via APP-MAT-MIS.  Mirrors HVM4's `lam { #K1: h1; #K2: h2 }`. *)
 TMatChain[arms_Association, fallback_] := Fold[
-    TMatNum[#2[[1]], #2[[2]], #1] &,
+    {acc, arm} |-> TMatNum[arm[[1]], arm[[2]], acc],
     fallback,
     Reverse @ Normal @ arms
 ]
@@ -155,17 +155,17 @@ TMatChain[arms_Association, fallback_] := Fold[
 
 (* "Could reduce to a NUM in numeric context": NUM literals, bound
    vars, OP2 / MAT trees, plus SUP and DP0/DP1 projections (so
-   `TSup[1,2] + 3` and `dp0 * 2` route through TOp2 -- OP2-SUP
+   `TSup[1,2] + 3` and `dp0 * 2` route through TOp2 - OP2-SUP
    commutes the op into each branch; the OP2 frame drives DP heads
    through cnf before folding).  REF / ALO are deliberately excluded
-   -- a named recursive def isn't necessarily numeric.
+   - a named recursive def isn't necessarily numeric.
 
    DP0/DP1 cells with DupGradFlag set are tensor projections from
-   TGradMany's chain-rule walk -- NOT numeric scalars.  Without this
+   TGradMany's chain-rule walk - NOT numeric scalars.  Without this
    guard, `grad * grad` (e.g. Adam's v-update) would match the
    numeric `Times[a ? numericTermQ, b ? numericTermQ]` UpValue below
    and emit a tensor-shaped TAG_OP2 the IC reducer has no
-   `OP2(DP1_x, DP1_x)`-self rule for -- the OP2 stays symbolic, no
+   `OP2(DP1_x, DP1_x)`-self rule for - the OP2 stays symbolic, no
    weight update fires.  Let those fall through to Tensor.wl's
    tensor-arithmetic Times UpValue, which routes through TUOpMul and
    produces a clean TAG_UOP.
@@ -212,8 +212,8 @@ TTerm /: Times[a_TTerm ? numericTermQ, b_TTerm ? numericTermQ] :=
 (* Equal / Less for control-flow predicates. *)
 TTerm /: Equal[t_TTerm ? numericTermQ, n_Integer] := TOp2["==", t, TNum[n]]
 TTerm /: Equal[n_Integer, t_TTerm ? numericTermQ] := TOp2["==", TNum[n], t]
-TTerm /: Less[t_TTerm ? numericTermQ, n_Integer]  := TOp2["<",  t, TNum[n]]
-TTerm /: Less[n_Integer, t_TTerm ? numericTermQ]  := TOp2["<",  TNum[n], t]
+TTerm /: Less[t_TTerm ? numericTermQ, n_Integer] := TOp2["<", t, TNum[n]]
+TTerm /: Less[n_Integer, t_TTerm ? numericTermQ] := TOp2["<", TNum[n], t]
 
 End[];
 

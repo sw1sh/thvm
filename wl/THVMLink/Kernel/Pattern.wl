@@ -11,30 +11,26 @@
    Match object grammar (heads with Hold attributes):
 
        TMatch[innerMatch]
-       TMatchSum    [m_1, m_2, ...]   -- alternatives (lazy OR)
-       TMatchProduct[m_1, m_2, ...]   -- conjunction  (lazy AND)
+       TMatchSum    [m_1, m_2, ...]   - alternatives (lazy OR)
+       TMatchProduct[m_1, m_2, ...]   - conjunction  (lazy AND)
        TMatchPart   [part, HoldPattern[p], submatch]
-       TMatchValues [v_1, v_2, ...]   -- leaves (held)
+       TMatchValues [v_1, v_2, ...]   - leaves (held)
 
    `part` is a List of integer offsets into the heap layout (root =
    {}), matching the convention used by TTermSubexprs / TSubexprAt.
    `p` is the held WL pattern that matched at that part; `submatch`
    is the recursive Match for that subterm's children.
 
-   This first slice (v0) yields eager Match trees for single-valued
-   patterns: blank, named blank `x_`, head-restricted `x_h`, integer
-   literal, TTerm literal, atomic-symbol CTR, compound CTR
-   `head[args__]`, Tuple-CTR `{args__}`.  Repeat binders (`f[x_, x_]`)
-   are validated by TMatchBindings via TTermEq when the same name
-   appears multiple times -- mismatches drop that branch.
-
-   Lazy / multi-valued extensions (Orderless, BlankSequence,
-   Alternatives, Repeated) and IC-native compilation to
-   SUP-of-Match streams are follow-ups on this shape. *)
+   Yields eager Match trees for single-valued patterns: blank, named
+   blank `x_`, head-restricted `x_h`, integer literal, TTerm literal,
+   atomic-symbol CTR, compound CTR `head[args__]`, Tuple-CTR
+   `{args__}`.  Repeat binders (`f[x_, x_]`) are validated by
+   TMatchBindings via TTermEq when the same name appears multiple
+   times: mismatches drop that branch. *)
 
 BeginPackage["THVMLink`"];
 
-TMatch::usage          = "TMatch[m] wraps a Match expression -- the canonical outer container returned by TPatternMatch.";
+TMatch::usage          = "TMatch[m] wraps a Match expression - the canonical outer container returned by TPatternMatch.";
 TMatchSum::usage       = "TMatchSum[m_1, m_2, ...] represents alternative matches (lazy OR).  Empty TMatchSum[] means no match; SequenceHold + Flat so nested unions auto-flatten.";
 TMatchProduct::usage   = "TMatchProduct[m_1, m_2, ...] represents the conjunction of sub-matches (head + each argument).  Empty TMatchProduct[] is a vacuously-true match producing the empty bindings.";
 TMatchPart::usage      = "TMatchPart[part, HoldPattern[p], submatch] tags `submatch` as having matched the held WL pattern `p` at heap position `part` (a List of integer offsets).";
@@ -61,24 +57,23 @@ SetAttributes[TMatchSum,     {Flat, OneIdentity}]
 SetAttributes[TMatchProduct, {Flat, OneIdentity}]
 SetAttributes[TMatchValues,  {Flat, OneIdentity}]
 
-(* TMatchObjectQ -- shape predicate. *)
+(* TMatchObjectQ - shape predicate. *)
 TMatchObjectQ[expr_] :=
-    MatchQ[expr, _TMatch | _TMatchSum | _TMatchProduct |
-                 _TMatchPart | _TMatchValues]
+    MatchQ[expr, _TMatch | _TMatchSum | _TMatchProduct | _TMatchPart | _TMatchValues]
 
 (* === pattern dispatch ============================================
    buildMatch[t_TTerm, pat] returns a Match object.  The matcher
    wraps every successful sub-match in a TMatchPart so callers can
    later replay paths / patterns / submatches without re-walking. *)
 
-(* Numeric literal pattern -- expr must be NUM with that value. *)
+(* Numeric literal pattern - expr must be NUM with that value. *)
 buildMatch[t_TTerm, n_Integer] :=
     If[ TTermTag[t] === $TagNUM && TTermVal[t] === n,
         TMatchPart[{}, HoldPattern[n], TMatchValues[t]],
         TMatchSum[]
     ]
 
-(* TTerm literal pattern -- exact structural equality. *)
+(* TTerm literal pattern - exact structural equality. *)
 buildMatch[t_TTerm, lit_TTerm] :=
     If[ TTermSame[t, lit],
         TMatchPart[{}, HoldPattern[lit], TMatchValues[t]],
@@ -98,19 +93,18 @@ buildMatch[t_TTerm, p : Verbatim[Blank][headSym_Symbol]] :=
         TMatchSum[]
     ]
 
-(* Named blank: x_ -- TMatchPart with HoldPattern[name_]. *)
+(* Named blank: x_ - TMatchPart with HoldPattern[name_]. *)
 buildMatch[t_TTerm, p : Verbatim[Pattern][name_Symbol, Verbatim[Blank][]]] :=
     TMatchPart[{}, HoldPattern[p], TMatchValues[t]]
 
 (* Named head-restricted: x_h.  Two-step: head-check, then label. *)
-buildMatch[t_TTerm, p : Verbatim[Pattern][name_Symbol,
-                                          Verbatim[Blank][headSym_Symbol]]] :=
+buildMatch[t_TTerm, p : Verbatim[Pattern][name_Symbol, Verbatim[Blank][headSym_Symbol]]] :=
     If[ matchHead[t, headSym],
         TMatchPart[{}, HoldPattern[p], TMatchValues[t]],
         TMatchSum[]
     ]
 
-(* List literal as pattern -- treat as Tuple-CTR (Lazy.wl shape). *)
+(* List literal as pattern - treat as Tuple-CTR (Lazy.wl shape). *)
 buildMatch[t_TTerm, l_List] :=
     matchTupleCtr[t, l]
 
@@ -121,7 +115,7 @@ buildMatch[t_TTerm, sym_Symbol] :=
 (* Compound symbolic pattern: head[arg1, arg2, ...]. *)
 buildMatch[t_TTerm, expr_] :=
     With[{h = Head[Unevaluated[expr]]},
-        If[ Head[h] === Symbol,
+        If[ MatchQ[h, _Symbol],
             matchCompound[t, h, List @@ Unevaluated[expr]],
             TMatchSum[]
         ]
@@ -153,9 +147,7 @@ matchCompound[t_TTerm, head_Symbol, args_List] := Block[{
     label = Lookup[$lazySymLabel, ToString[Unevaluated[head]], None],
     raw, n, childMatches, anyFail
 },
-    If[ label === None ||
-            TTermTag[t] =!= $TagCTR ||
-            TTermExt[t] =!= label,
+    If[ label === None || TTermTag[t] =!= $TagCTR || TTermExt[t] =!= label,
         Return @ TMatchSum[]
     ];
     raw = ttermRaw[t];
@@ -174,7 +166,7 @@ matchCompound[t_TTerm, head_Symbol, args_List] := Block[{
         TMatchProduct @@ childMatches]
 ]
 
-(* List-pattern variant -- expr must be a Tuple-CTR ($LazyTuple)
+(* List-pattern variant - expr must be a Tuple-CTR ($LazyTuple)
    with same arity, then per-arg matching. *)
 matchTupleCtr[t_TTerm, args_List] := Block[{
     raw, n, childMatches, anyFail
@@ -217,7 +209,7 @@ TPatternMatch[t_TTerm, pat_] := With[{m = buildMatch[t, pat]},
 
 (* === Match-object accessors ====================================== *)
 
-(* TMatchBindings -- enumerate every outcome's name -> TTerm
+(* TMatchBindings - enumerate every outcome's name -> TTerm
    bindings.  Single-valued outcomes return a one-element List;
    TMatchSum branches expand into separate entries.  Repeat-binder
    consistency: when the same Pattern[name, ...] appears more than
@@ -281,23 +273,19 @@ leafValueOf[_]                                   := None
    $bindingsConflict on conflict. *)
 mergeBindings[bs_List] := Module[{out = <||>, ok = True},
     Scan[
-        Function[a,
-            KeyValueMap[
-                Function[{k, v},
-                    If[ KeyExistsQ[out, k],
-                        If[ !TTermEq[out[k], v], ok = False];,
-                        AssociateTo[out, k -> v]
-                    ]
-                ],
-                a
-            ]
+        a |-> KeyValueMap[
+            {k, v} |-> If[ KeyExistsQ[out, k],
+                If[ !TTermEq[out[k], v], ok = False];,
+                AssociateTo[out, k -> v]
+            ],
+            a
         ],
         bs
     ];
     If[ok, out, $bindingsConflict]
 ]
 
-(* TMatchApply -- substitute bindings into a held RHS template per
+(* TMatchApply - substitute bindings into a held RHS template per
    outcome, encode result via tlazyEncode.  Returns a List of TTerms.
    When no outcome has consistent bindings, returns {}. *)
 
@@ -313,15 +301,15 @@ applyEnv[env_Association, sym_Symbol] := Lookup[env, sym, sym]
 applyEnv[env_Association, e_] :=
     With[{h = Head[Unevaluated[e]]},
         Which[
-            IntegerQ[e] || NumericQ[e] || Head[e] === TTerm, e,
+            IntegerQ[e] || NumericQ[e] || MatchQ[e, _TTerm], e,
             ListQ[e],          applyEnv[env, #] & /@ e,
-            Head[h] === Symbol,
+            MatchQ[h, _Symbol],
                 Apply[h, applyEnv[env, #] & /@ List @@ Unevaluated[e]],
             True, e
         ]
     ]
 
-(* TMatchParts -- enumerate (path -> TTerm) Associations per
+(* TMatchParts - enumerate (path -> TTerm) Associations per
    outcome.  Useful for path-keyed inspection. *)
 
 TMatchParts[TMatch[m_]] := TMatchParts[m]

@@ -4,14 +4,14 @@
 
    One source of truth: $nodeStyle[type] returns an Association with
    {"Fill", "Edge", "Shape", "TextColor"} so every renderer paints
-   the same logical category the same way -- LAM is always green,
+   the same logical category the same way: LAM is always green,
    KERNEL is always orange, an external TEN reads as a darker cyan
    than a kernel-emitted TEN, etc.
 
    Each renderer composes these primitives into its own VertexShape
    function (drawNode below produces the standard rounded-rect /
    triangle / disk in shared style).  Renderers should NEVER define
-   their own colors -- if a new node category is needed, add an
+   their own colors: if a new node category is needed, add an
    entry here and let every renderer pick it up.
 
    Type keys (strings, NOT $TagFOO ints):
@@ -35,15 +35,11 @@ Begin["`Private`"];
      "TriangleUp"    apex at top    (APP, SUP)
      "Disk"          circle of radius Min[sz]
      "Ring"          unfilled circle (ERA) *)
-$shapeDraw["Rect"]         := Function[{pos, sz},
-    Rectangle[pos - sz, pos + sz, RoundingRadius -> 0.18 Min[sz]]]
-$shapeDraw["TriangleDown"] := Function[{pos, sz},
-    Triangle[{pos + {-sz[[1]], sz[[2]]}, pos + {sz[[1]], sz[[2]]}, pos + {0, -sz[[2]]}}]]
-$shapeDraw["TriangleUp"]   := Function[{pos, sz},
-    Triangle[{pos + {-sz[[1]], -sz[[2]]}, pos + {sz[[1]], -sz[[2]]}, pos + {0, sz[[2]]}}]]
-$shapeDraw["Disk"]         := Function[{pos, sz}, Disk[pos, Min[sz]]]
-$shapeDraw["Ring"]         := Function[{pos, sz},
-    {AbsoluteThickness[1.4], Circle[pos, Min[sz]]}]
+$shapeDraw["Rect"]         := {pos, sz} |-> Rectangle[pos - sz, pos + sz, RoundingRadius -> 0.18 Min[sz]]
+$shapeDraw["TriangleDown"] := {pos, sz} |-> Triangle[{pos + {-sz[[1]], sz[[2]]}, pos + {sz[[1]], sz[[2]]}, pos + {0, -sz[[2]]}}]
+$shapeDraw["TriangleUp"]   := {pos, sz} |-> Triangle[{pos + {-sz[[1]], -sz[[2]]}, pos + {sz[[1]], -sz[[2]]}, pos + {0, sz[[2]]}}]
+$shapeDraw["Disk"]         := {pos, sz} |-> Disk[pos, Min[sz]]
+$shapeDraw["Ring"]         := {pos, sz} |-> {AbsoluteThickness[1.4], Circle[pos, Min[sz]]}
 $shapeDraw[_]              := $shapeDraw["Rect"]
 
 (* Color helpers.  All renderers use LightDarkSwitched so the same
@@ -88,12 +84,12 @@ $nodeStyle = <|
     "CTR"         -> styleEntry["TriangleDown", StandardRed],
     "MAT"         -> styleEntry["TriangleUp",   StandardRed],
     "OP2"         -> styleEntry["Rect",         StandardBlue],
-    (* Dynamic-label SUP / DUP (HVM4 DSU / DDU) -- same shapes as
+    (* Dynamic-label SUP / DUP (HVM4 DSU / DDU): same shapes as
        SUP / DUP, darker shade marks them as the strict-on-label
        variant. *)
     "DSU"         -> styleEntry["TriangleUp",   Darker[StandardOrange, 0.25]],
     "DDU"         -> styleEntry["TriangleDown", Darker[StandardPurple, 0.25]]
-|>;
+|>
 
 (* Lookup with a sensible fallback so a new tag accidentally
    missing an entry renders as a gray rectangle instead of crashing
@@ -134,8 +130,7 @@ drawNode[pos_, sz_, type_String, label_] := Block[{
 (* Convenience: build a VertexShapeFunction closure for a single
    (type, label) pair.  Renderers pass this as the rule body in
    `vid -> nodeShapeFn["KERNEL", "k1\nMUL+REDUCE"]`. *)
-nodeShapeFn[type_String, label_] := Function[{pos, vid, sz},
-    drawNode[pos, sz, type, label]]
+nodeShapeFn[type_String, label_] := {pos, vid, sz} |-> drawNode[pos, sz, type, label]
 
 (* Common edge style (every renderer uses the same arrow look). *)
 edgeStyleDirective := Directive[

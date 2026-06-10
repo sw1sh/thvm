@@ -1,5 +1,5 @@
 (* ::Package:: *)
-(* Context.wl -- multi-heap support for THVMLink.
+(* Context.wl - multi-heap support for THVMLink.
    Reference design: TinyHVM/src/tinyhvm.h:1102-1169 (struct TinyHVM
    + per-tensor backend + ctx_default_backend).
 
@@ -18,9 +18,9 @@
      3. **Auto-switch tag on TTerm.**  Every `TTerm[ctxId, raw]`
         carries the slot id of the context it was allocated in;
         operations on the term auto-switch the C-side current
-        context for the duration of the call.  Step 4 of the
-        TContext arc lands the 2-arg TTerm form; this file just
-        provides the underlying primitives.
+        context for the duration of the call.  This file provides
+        the underlying primitives; the 2-arg TTerm form lives
+        elsewhere.
 
    Loaded from THVMLink.wl inside Begin["`Private`"]; sees the
    private bridge symbols (load, ttermRaw, ...) without
@@ -31,7 +31,7 @@ BeginPackage["THVMLink`"];
 TContext::usage         = "TContext[id_Integer] is an opaque handle to a runtime context (heap + book + defs + alo state + tensors + kernels + backends).  Slot 0 is the default singleton; slots 1..15 are user-allocated via TContextNew[].";
 $TContext::usage        = "Default context for context-polymorphic API; initial value TContext[0].  Users can rebind via Block[{$TContext = ctx}, ...] or TInContext[ctx, ...].";
 TContextNew::usage      = "TContextNew[] / TContextNew[\"cpu\" | \"metal\"] allocates a fresh context with the given default device and returns TContext[id].  Returns Failure if the context table is full.";
-TContextDestroy::usage  = "TContextDestroy[TContext[id]] frees the C-side state for that context.  Slot 0 (default) is preserved -- use TFree[] to tear it down.  Returns the destroyed slot id or 0 on no-op.";
+TContextDestroy::usage  = "TContextDestroy[TContext[id]] frees the C-side state for that context.  Slot 0 (default) is preserved; use TFree[] to tear it down.  Returns the destroyed slot id or 0 on no-op.";
 TContextCurrent::usage  = "TContextCurrent[] returns the C-side current context as TContext[id].";
 TContextList::usage     = "TContextList[] returns all allocated contexts as a list of TContext[id] (slot 0 first).";
 TInContext::usage       = "TInContext[ctx_TContext, body] evaluates body with $TContext rebound to ctx and the C-side current context switched to ctx for the duration.  HoldRest; restores via Internal'WithLocalSettings so a Throw still unwinds cleanly.";
@@ -94,16 +94,17 @@ TContextCurrent[]              := TContext[$contextCurrentFn[]]
    previous slot regardless, but CURRENT_CTX only changes for live
    slots, so a subsequent currentFn[] returning `slot` proves it was
    allocated. *)
-TContextList[] := Module[{prev = $contextCurrentFn[], result = {TContext[0]}},
-    Do[
+TContextList[] := Module[{prev = $contextCurrentFn[], live},
+    live = Table[
         $contextSelectFn[slot];
         If[ $contextCurrentFn[] === slot,
-            AppendTo[result, TContext[slot]]
+            TContext[slot],
+            Nothing
         ],
         {slot, 1, 15}
     ];
     $contextSelectFn[prev];
-    result
+    Prepend[live, TContext[0]]
 ]
 
 (* === withCtx + TInContext === *)
@@ -129,7 +130,7 @@ TInContext[ctx_TContext, expr_] := Block[{$TContext = ctx},
 
 (* Auto-switch helper: run `expr` under the C-side context that owns
    `t`.  Lives here (not in THVMLink.wl) because TContext must be a
-   public `THVMLink`` symbol when the rule is parsed -- otherwise
+   public `THVMLink`` symbol when the rule is parsed; otherwise
    it'd resolve to `THVMLink`Private`TContext` (shadow) and the
    catch-all `withCtx[_, expr_] := expr` would silently absorb every
    call, defeating auto-switch. *)

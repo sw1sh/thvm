@@ -76,12 +76,12 @@ TBench[spec_Association] := Block[{
         {t, 0, nSteps - 1}
     ];
     t1 = AbsoluteTime[];
-    wallMs    = (t1 - t0) * 1000.0;
+    wallMs = (t1 - t0) * 1000.0;
     msPerStep = If[ nSteps > 0, wallMs / nSteps, 0];
-    plan      = First @ TMemoryPlan[];
-    bufs      = plan["Bufs"];
-    peak      = plan["Peak"];
-    totalKib  = formatKib[peak["total_bytes"]];
+    plan = First @ TMemoryPlan[];
+    bufs = plan["Bufs"];
+    peak = plan["Peak"];
+    totalKib = formatKib[peak["total_bytes"]];
     headroomPct = If[ peak["total_bytes"] > 0,
         Round[
             100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"],
@@ -95,22 +95,21 @@ TBench[spec_Association] := Block[{
     ];
     backend = backendNameLabel[backendId];
     <|
-        "name"                    -> name,
-        "backend"                 -> backend,
-        "n_steps"                 -> nSteps,
-        "wall_time_ms"            -> Round[wallMs, 0.1],
-        "ms_per_step"             -> Round[msPerStep, 0.1],
-        "kernel_count"            -> Length[plan["Kernels"]],
-        "ten_count"               -> Length[plan["Tens"]],
-        "total_live_kib"          -> totalKib,
-        "peak_concurrent_kib"     -> formatKib[peak["peak_bytes"]],
+        "name" -> name,
+        "backend" -> backend,
+        "n_steps" -> nSteps,
+        "wall_time_ms" -> Round[wallMs, 0.1],
+        "ms_per_step" -> Round[msPerStep, 0.1],
+        "kernel_count" -> Length[plan["Kernels"]],
+        "ten_count" -> Length[plan["Tens"]],
+        "total_live_kib" -> totalKib,
+        "peak_concurrent_kib" -> formatKib[peak["peak_bytes"]],
         "slot_reuse_headroom_pct" -> headroomPct
     |>
 ]
 
 TBenchReport[bench_Association] := Column[{
-    Row[{"TBench: ", bench["name"], " / ", bench["backend"], " / ",
-         bench["n_steps"], " steps"}],
+    Row[{"TBench: ", bench["name"], " / ", bench["backend"], " / ", bench["n_steps"], " steps"}],
     Row[{"  wall_time_ms       : ", bench["wall_time_ms"]}],
     Row[{"  ms_per_step        : ", bench["ms_per_step"]}],
     Row[{"  kernel_count       : ", bench["kernel_count"]}],

@@ -1,5 +1,5 @@
 (* ::Package:: *)
-(* ATP_Relevance.wl -- axiom-relevance filter: TRelevantAxioms and the Safe / Connected / SInE
+(* ATP_Relevance.wl - axiom-relevance filter: TRelevantAxioms and the Safe / Connected / SInE
    premise-selection modes the Method \"AxiomRelevance\" suboption drives.
 
    Sibling of ATP.wl in the THVMLink`ATP` context; the recursive Kernel
@@ -9,24 +9,24 @@
 
 BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
 
-TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (symbol-reachability pruning -- a coarse heuristic, may drop a needed axiom); \"SInE\" or {\"SInE\", \"SineTolerance\"->st, \"SineDepth\"->sd, \"SineGenerality\"->sgt} (the Hoder-Voronkov SInE premise-selection algorithm as shipped in Vampire -- D-relation + bounded BFS from the conjecture's symbols.  Defaults 3/2/8 mirror Vampire's --sine_tolerance/--sine_depth/--sine_generality_threshold, the winning option block from the parallel Vampire benchmark of thvm's uncrackable theorems).";
+TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof - making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default - drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (symbol-reachability pruning - a coarse heuristic, may drop a needed axiom); \"SInE\" or {\"SInE\", \"SineTolerance\"->st, \"SineDepth\"->sd, \"SineGenerality\"->sgt} (the Hoder-Voronkov SInE premise-selection algorithm as shipped in Vampire - D-relation + bounded BFS from the conjecture's symbols.  Defaults 3/2/8 mirror Vampire's --sine_tolerance/--sine_depth/--sine_generality_threshold, the winning option block from the parallel Vampire benchmark of thvm's uncrackable theorems).";
 Begin["`Private`"];
 
 (* === Axiom-relevance filter ======================================
 
    Prunes axioms that cannot (or, in the heuristic mode, are unlikely
    to) contribute to a proof of the conjecture, so completion does not
-   waste effort -- or diverge -- on them.  Configurable via the Method
+   waste effort - or diverge - on them.  Configurable via the Method
    suboption "AxiomRelevance" (back-compat alias: "DropDivergentAxioms"):
 
-     None | All | False    -- keep every axiom.
-     Automatic | "Safe"     -- DEFAULT.  Drop only axioms that are
+     None | All | False    - keep every axiom.
+     Automatic | "Safe"     - DEFAULT.  Drop only axioms that are
        PROVABLY dead weight for this goal: a "confined" axiom carrying
        a private symbol on BOTH sides (see atpConfinedSymbols).  Sound
        AND completeness-preserving.
      "Connected" | {"Connected", "FrequencyCutoff" -> f,
                     "MaxGenerations" -> n}
-       -- SInE-style symbol-connectivity pruning: keep only axioms
+       - SInE-style symbol-connectivity pruning: keep only axioms
        reachable from the goal's symbols (ignoring ubiquitous symbols
        that occur in >= f of the axioms; f defaults to 1, i.e. ignore
        only symbols common to ALL axioms).  HEURISTIC: may drop a
@@ -40,12 +40,12 @@ Begin["`Private`"];
    structural heads. *)
 atpFnSyms[expr_] := Block[{vars, patternVars, body},
     (* ForAll is HoldAll, so a `ForAll[v_, _] :> v` rule does NOT bind
-       v -- extract the bound-variable spec by Part instead. *)
+       v - extract the bound-variable spec by Part instead. *)
     vars = Flatten @ Map[#[[1]] &, Cases[expr, _ForAll, {0, Infinity}]];
     (* Pattern[x, _] introduces x as a bound variable in equational
        axiom shape (an axiom without an outer ForAll wrapper).  Walk
        the expression for Pattern wrappers and collect their first
-       arg.  Iter 66. *)
+       arg. *)
     patternVars = DeleteDuplicates @
         Cases[expr, Verbatim[Pattern][s_Symbol, _] :> s, {0, Infinity}];
     body = expr /. ForAll[_, e_] :> e;
@@ -57,25 +57,25 @@ atpFnSyms[expr_] := Block[{vars, patternVars, body},
         Alternatives @@ Join[vars, patternVars,
             {Equal, Inactive, ForAll, Exists, List, And, Or, Not,
              Implies, Pattern, Blank, HoldPattern, Verbatim, Rule}]]
-];
+]
 
 (* {lhs, rhs} symbol form of an axiom (raw or unquantified). *)
 atpAxSides[axForm_] := Block[{eq},
     eq = axForm /. ForAll[_, e_] :> e;
     If[ MatchQ[eq, _Equal], List @@ eq, {eq, eq}]
-];
+]
 
 (* private symbols of `ax` (relative to the conjecture + other
    axioms): function symbols of ax that occur nowhere else. *)
 atpConfinedSymbols[ax_, others_, conjRaw_] :=
     Complement[atpFnSyms[ax],
         If[others === {}, {}, Union @@ (atpFnSyms /@ others)],
-        atpFnSyms[conjRaw]];
+        atpFnSyms[conjRaw]]
 
 (* Does ax carry a private symbol on BOTH sides?  Then neither rewrite
    direction can fire without that symbol already present, so ax can
    never enter (or be introduced into) a derivation of a goal free of
-   it -- dropping ax is sound (proof over a subset is valid) AND
+   it - dropping ax is sound (proof over a subset is valid) AND
    completeness-preserving.  The Y combinator Y x == x (Y x) is the
    canonical case: Y is private and on both sides.  Returns the
    witnessing symbols, or {}. *)
@@ -84,7 +84,7 @@ atpSafeDropSymbols[ax_, others_, conjRaw_] := Block[{priv, sides},
     If[ priv === {}, Return[{}]];
     sides = atpAxSides[ax];
     Intersection[priv, atpFnSyms[sides[[1]]], atpFnSyms[sides[[2]]]]
-];
+]
 
 (* normalize a Method spec / option value into a relevance spec:
    None | "Safe" | {"Connected", <|opts|>} | {"SInE", <|opts|>}.  The
@@ -92,8 +92,8 @@ atpSafeDropSymbols[ax_, others_, conjRaw_] := Block[{priv, sides},
    method head, so portfolio entries like {"GoalDirected",
    "AxiomRelevance" -> "SInE"} are honored the same as
    {"Completion", "AxiomRelevance" -> "SInE"}. *)
-atpRelevanceSpec[Automatic | "Portfolio"] := "Safe";
-atpRelevanceSpec["Completion" | "GoalDirected" | "MNF" | "Waldmeister"] := "Safe";
+atpRelevanceSpec[Automatic | "Portfolio"] := "Safe"
+atpRelevanceSpec["Completion" | "GoalDirected" | "MNF" | "Waldmeister"] := "Safe"
 atpRelevanceSpec[{("Completion" | "GoalDirected" | "MNF" | "Waldmeister"),
         subopts___Rule}] := Block[{o, r, dd},
     o = Association[subopts];
@@ -103,7 +103,7 @@ atpRelevanceSpec[{("Completion" | "GoalDirected" | "MNF" | "Waldmeister"),
         r =!= Automatic, atpNormRelevance[r],
         dd === False, None,
         True, "Safe"]
-];
+]
 (* Bare rule list (no leading method head): user passing just relevance
    options, e.g. Method -> {"AxiomRelevance" -> "SInE"} or
    Method -> {"AxiomRelevance" -> {"SInE", "SineTolerance" -> 3}}.
@@ -112,34 +112,33 @@ atpRelevanceSpec[{subopts___Rule}] := Block[{o, r},
     o = Association[subopts];
     r = Lookup[o, "AxiomRelevance", Automatic];
     If[ r === Automatic, "Safe", atpNormRelevance[r]]
-];
-atpRelevanceSpec[_] := "Safe";
+]
+atpRelevanceSpec[_] := "Safe"
 
-atpNormRelevance[None | All | False] := None;
-atpNormRelevance[Automatic | True | "Safe"] := "Safe";
-atpNormRelevance["Connected"] := {"Connected", <||>};
-atpNormRelevance[{"Connected", a_Association}] := {"Connected", a};
-atpNormRelevance[{"Connected", o___Rule}] := {"Connected", Association[o]};
+atpNormRelevance[None | All | False] := None
+atpNormRelevance[Automatic | True | "Safe"] := "Safe"
+atpNormRelevance["Connected"] := {"Connected", <||>}
+atpNormRelevance[{"Connected", a_Association}] := {"Connected", a}
+atpNormRelevance[{"Connected", o___Rule}] := {"Connected", Association[o]}
 (* SInE: the Hoder-Voronkov premise-selection algorithm (IJCAR 2011) as
    shipped in Vampire (Shell/SineUtils.cpp).  Knob names mirror
    Vampire's option flags --sine_tolerance (st), --sine_depth (sd),
    --sine_generality_threshold (sgt).  Defaults 3 / 2 / 8 reproduce
    the winning portfolio strategy lrs+10_1 st=3:sd=2:ss=axioms:sgt=8
-   identified by the Vampire benchmark of thvm's 40 uncrackable
-   theorems (Track B). *)
-atpNormRelevance["SInE"] := {"SInE", <||>};
-atpNormRelevance[{"SInE", a_Association}] := {"SInE", a};
-atpNormRelevance[{"SInE", o___Rule}] := {"SInE", Association[o]};
+   from Vampire. *)
+atpNormRelevance["SInE"] := {"SInE", <||>}
+atpNormRelevance[{"SInE", a_Association}] := {"SInE", a}
+atpNormRelevance[{"SInE", o___Rule}] := {"SInE", Association[o]}
 (* Numeric/symbolic shorthand: {"SInE", st, sd, sgt}. *)
 atpNormRelevance[{"SInE", st_?NumericQ}] :=
-    {"SInE", <|"SineTolerance" -> st|>};
+    {"SInE", <|"SineTolerance" -> st|>}
 atpNormRelevance[{"SInE", st_?NumericQ, sd_Integer}] :=
-    {"SInE", <|"SineTolerance" -> st, "SineDepth" -> sd|>};
+    {"SInE", <|"SineTolerance" -> st, "SineDepth" -> sd|>}
 atpNormRelevance[{"SInE", st_?NumericQ, sd_Integer, sgt_Integer}] :=
     {"SInE", <|"SineTolerance" -> st, "SineDepth" -> sd,
-               "SineGenerality" -> sgt|>};
+               "SineGenerality" -> sgt|>}
 atpNormRelevance[other_] := (
-    Message[TFindProof::badrel, other]; "Safe");
+    Message[TFindProof::badrel, other]; "Safe")
 
 (* Partition `axFormList` into kept / dropped (with reasons) under a
    relevance spec.  Returns <|"Kept" -> {...}, "Dropped" -> {<|"Axiom",
@@ -153,12 +152,12 @@ atpRelevancePartition[axFormList_, conjRaw_, specRaw_] :=
                 <|"Kept" -> axFormList, "Dropped" -> {}, "Mode" -> None|>,
             "Safe",
                 dropAssoc = DeleteMissing @ Map[
-                    Function[ax, Block[{syms},
+                    ax |-> Block[{syms},
                         syms = atpSafeDropSymbols[ax,
                             DeleteCases[axFormList, ax], conjRaw];
                         If[ syms === {}, Missing[],
                             <|"Axiom" -> ax, "Symbols" -> syms,
-                              "Reason" -> "ConfinedBothSides"|>]]],
+                              "Reason" -> "ConfinedBothSides"|>]],
                     axFormList];
                 <|"Kept" -> Select[axFormList,
                         FreeQ[#["Axiom"] & /@ dropAssoc, #] &],
@@ -168,7 +167,7 @@ atpRelevancePartition[axFormList_, conjRaw_, specRaw_] :=
             {"SInE", _},
                 atpSinePartition[axFormList, conjRaw, Last[spec]]
         ]
-    ];
+    ]
 
 (* SInE-style connectivity partition. *)
 atpConnectedPartition[axFormList_, conjRaw_, opts_Association] := Block[{
@@ -202,11 +201,11 @@ atpConnectedPartition[axFormList_, conjRaw_, opts_Association] := Block[{
         {i, nAx}];
     <|"Kept" -> Pick[axFormList, keep],
       "Dropped" -> dropAssoc, "Mode" -> "Connected"|>
-];
+]
 
 (* Vampire-faithful SInE (Sumo-Inspired premise selection, Hoder &
    Voronkov, IJCAR 2011) port.  Reference impl: vprover/vampire,
-   Shell/SineUtils.cpp -- the canonical D-relation + bounded BFS that
+   Shell/SineUtils.cpp - the canonical D-relation + bounded BFS that
    the Vampire option block --sine_selection axioms / --sine_tolerance
    st / --sine_depth sd / --sine_generality_threshold sgt drives.
 
@@ -249,7 +248,7 @@ atpSinePartition[axFormList_, conjRaw_, opts_Association] := Block[{
     sd  =     Lookup[opts, "SineDepth",      2 ];
     sgt =     Lookup[opts, "SineGenerality", 8 ];
     (* Per-axiom minOcc.  An axiom with no function symbols (e.g.
-       a == a -- vacuously true) has no minOcc; we never D-relate
+       a == a - vacuously true) has no minOcc; we never D-relate
        any symbol to it, so it stays dropped unless seeded directly,
        matching Vampire's behavior of skipping empty-signature units. *)
     minOccA = Table[
@@ -260,8 +259,8 @@ atpSinePartition[axFormList_, conjRaw_, opts_Association] := Block[{
        as a trigger.  sgt <= 0 disables the cutoff (mirrors Vampire's
        --sine_generality_threshold 0 = off). *)
     generalQ = If[ IntegerQ[sgt] && sgt > 0,
-        Function[s, Lookup[occ, s, 0] > sgt],
-        Function[s, False]];
+        s |-> Lookup[occ, s, 0] > sgt,
+        s |-> False];
     (* Seed: conjecture's symbols, minus the too-general ones. *)
     conjSyms = atpFnSyms[conjRaw];
     frontier = Select[conjSyms, ! generalQ[#] &];
@@ -269,9 +268,9 @@ atpSinePartition[axFormList_, conjRaw_, opts_Association] := Block[{
     axTaken = ConstantArray[False, nAx];
     Do[ newFrontier = {};
         Do[ If[ ! axTaken[[i]] && symLists[[i]] =!= {} &&
-                AnyTrue[frontier, Function[s,
+                AnyTrue[frontier, s |->
                     MemberQ[symLists[[i]], s] &&
-                    Lookup[occ, s, 0] <= st * minOccA[[i]]]],
+                    Lookup[occ, s, 0] <= st * minOccA[[i]]],
                 axTaken[[i]] = True;
                 newFrontier = Union[newFrontier,
                     Select[symLists[[i]],
@@ -290,7 +289,7 @@ atpSinePartition[axFormList_, conjRaw_, opts_Association] := Block[{
         {i, nAx}];
     <|"Kept" -> Pick[axFormList, keep],
       "Dropped" -> dropAssoc, "Mode" -> "SInE"|>
-];
+]
 
 (* Apply the relevance filter, Message the dropped axioms, return the
    kept list (order-preserving). *)
@@ -300,42 +299,42 @@ atpApplyRelevance[axFormList_, conjRaw_, specRaw_] := Block[{part},
         Message[TFindProof::dropax,
             #["Symbols"] & /@ part["Dropped"], part["Mode"]]];
     part["Kept"]
-];
+]
 
 (* Public: inspect the relevance decision without proving. *)
-Options[TRelevantAxioms] = {Method -> Automatic};
-TRelevantAxioms[thm_String, theory_String, opts:OptionsPattern[]] :=
+Options[TRelevantAxioms] = {Method -> Automatic}
+TRelevantAxioms[thm_String, theory_String, opts : OptionsPattern[]] :=
     Block[{axRaw, cjRaw},
         axRaw = AxiomaticTheory[theory];
         cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
         If[ ! ListQ[axRaw] || MissingQ[cjRaw], Return[$Failed]];
         TRelevantAxioms[cjRaw, axRaw, opts]
-    ];
+    ]
 (* Conjecture-expression against a NAMED theory: resolve the axioms
    through AxiomaticTheory, then run the relevance partition. *)
 TRelevantAxioms[
         conjRaw : (_List | _ForAll | _Equal | _Unequal
             | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
-        theory_String, opts:OptionsPattern[]] :=
+        theory_String, opts : OptionsPattern[]] :=
     Block[{axRaw},
         axRaw = AxiomaticTheory[theory];
         If[ ! ListQ[axRaw], Return[$Failed]];
         TRelevantAxioms[conjRaw, axRaw, opts]
-    ];
+    ]
 (* Single non-list axiom: auto-wrap to a 1-element list, same shape
-   as iter-68/69's TFindProof wrap. *)
+   as TFindProof's wrap. *)
 TRelevantAxioms[conjRaw_, axiom : (_Equal | _Unequal | _ForAll
         | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
-        opts:OptionsPattern[]] :=
-    TRelevantAxioms[conjRaw, {axiom}, opts];
+        opts : OptionsPattern[]] :=
+    TRelevantAxioms[conjRaw, {axiom}, opts]
 
-TRelevantAxioms[conjRaw_, axRaw_List, opts:OptionsPattern[]] :=
-    (* Same normalization pipeline as TFindProof's entry (iters 60-65):
+TRelevantAxioms[conjRaw_, axRaw_List, opts : OptionsPattern[]] :=
+    (* Same normalization pipeline as TFindProof's entry:
        atpNormalizeConj + atpNormalizeAxioms. *)
     atpRelevancePartition[
         atpNormalizeAxioms[axRaw],
         atpNormalizeConj[conjRaw],
-        atpRelevanceSpec[OptionValue[Method]]];
+        atpRelevanceSpec[OptionValue[Method]]]
 
 (* Render a held expression in the form WL's ProofObject expects
    for its top-level Axioms list / ConjectureStatement: keep the

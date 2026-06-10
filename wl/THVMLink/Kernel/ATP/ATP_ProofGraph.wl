@@ -17,10 +17,10 @@ Begin["`Private`"];
 
 (* Use the same keys WL's ProofObject expects so our dataset matches
    the FindEquationalProof shape exactly. *)
-$AxiomSym = "Axiom";
-$HypothesisSym = "Hypothesis";
-$SubstitutionLemmaSym = "SubstitutionLemma";
-$ConclusionSym = "Conclusion";
+$AxiomSym = "Axiom"
+$HypothesisSym = "Hypothesis"
+$SubstitutionLemmaSym = "SubstitutionLemma"
+$ConclusionSym = "Conclusion"
 
 (* Convert an `Inactive[Equal][lhs, rhs]` value to the
    `HoldForm[Equal[lhs, rhs]]` shape WL's verifier expects.
@@ -57,15 +57,14 @@ CanonicalizePatterns[expr_] := Module[{
     patts = DeleteDuplicates[Cases[expr, _Pattern, All, Heads -> True]]
 },
     chars = First @ NestWhile[
-        Apply[Function[{cs, k},
-            {Join[cs, (StringJoin[#, ToString[k]] &) /@ cs], k + 1}]],
+        Apply[{cs, k} |-> {Join[cs, (StringJoin[#, ToString[k]] &) /@ cs], k + 1}],
         {chars, 1}, Length[First[#]] < Length[patts] &];
     expr /. MapIndexed[
         With[{canonical = Pattern @@ {
                 atpFreshGlobalSymbol[Extract[chars, #2]], Last[#1]}},
             Verbatim[#1] :> canonical] &,
         patts]
-];
+]
 
 (* Return the Symbol for `name` if its OwnValues + DownValues are empty;
    otherwise suffix with `$Atp<k>` (k bumped per probe) until a fresh
@@ -272,8 +271,8 @@ $ProofKeyOrder[_] := {6, 0}
 (* ATP terms use two tags: TAG_CTR (20) for labelled constructors
    (a function head or, nullary, a constant symbol) and TAG_FVR (22)
    for first-order variables. *)
-$AtpTagCTR = 20;
-$AtpTagFVR = 22;
+$AtpTagCTR = 20
+$AtpTagFVR = 22
 
 (* Decode a raw packed ATP Term back to a WL expression.  CTR ->
    head[children...] (arity 0 -> bare symbol); FVR -> the bound
@@ -369,10 +368,10 @@ decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
          rank every ground (0-arity) constant the goal skolemized into
          ABOVE every other symbol (the operators).  Among the skolem
          constants, order is by label (stable, matches encode order). *)
-atpSymName[s_String] := s;
-atpSymName[s_Symbol] := SymbolName[Unevaluated[s]];
+atpSymName[s_String] := s
+atpSymName[s_Symbol] := SymbolName[Unevaluated[s]]
 SetAttributes[atpSymName, HoldFirst];
-atpSymName[s_] := ToString[s];
+atpSymName[s_] := ToString[s]
 
 (* The 0-arity (ground constant) symbol names occurring in a held
    conjecture pair -- these are the goal's skolem constants. *)
@@ -383,12 +382,12 @@ atpGroundConstNames[enc_] := Block[{names},
             SymbolName[Unevaluated[s]],
         {0, Infinity}, Heads -> False];
     DeleteDuplicates[names]
-];
+]
 
 (* The result is a plain Int64 List the FFI reads label-indexed
    (element i = precedence rank of label i; element 0 is the unused
    label-0 placeholder).  An empty List leaves the C default in place. *)
-atpPrecedenceArray[None, enc_] := {};
+atpPrecedenceArray[None, enc_] := {}
 atpPrecedenceArray[order_List, enc_] := Block[{
     sym = enc["State"]["sym"], maxLab = enc["MaxLab"], names, ranks, arr
 },
@@ -398,12 +397,11 @@ atpPrecedenceArray[order_List, enc_] := Block[{
     ranks = AssociationThread[names -> Range[Length[names], 1, -1]];
     arr = ConstantArray[0, maxLab + 1];
     KeyValueMap[
-        Function[{nm, lab},
-            If[ KeyExistsQ[ranks, nm] && lab >= 1 && lab <= maxLab,
-                arr[[lab + 1]] = ranks[nm]]],
+        {nm, lab} |-> If[ KeyExistsQ[ranks, nm] && lab >= 1 && lab <= maxLab,
+            arr[[lab + 1]] = ranks[nm]],
         sym];
     arr
-];
+]
 atpPrecedenceArray["SkolemHighest", enc_] := Block[{
     sym = enc["State"]["sym"], maxLab = enc["MaxLab"], skNames, arr,
     nNonSk, skRankOf,
@@ -428,16 +426,15 @@ atpPrecedenceArray["SkolemHighest", enc_] := Block[{
         Range[nNonSk + Length[skNames], nNonSk + 1, -1]];
     Block[{nonSkRank = 0},
         KeyValueMap[
-            Function[{nm, lab},
-                If[ lab >= 1 && lab <= maxLab,
-                    arr[[lab + 1]] = Which[
-                        MemberQ[reservedNames, nm], 0,
-                        MemberQ[skNames, nm], skRankOf[nm],
-                        True, nonSkRank = nonSkRank + 1; nonSkRank]]],
+            {nm, lab} |-> If[ lab >= 1 && lab <= maxLab,
+                arr[[lab + 1]] = Which[
+                    MemberQ[reservedNames, nm], 0,
+                    MemberQ[skNames, nm], skRankOf[nm],
+                    True, nonSkRank = nonSkRank + 1; nonSkRank]],
             sym]];
     arr
-];
-atpPrecedenceArray[_, enc_] := {};
+]
+atpPrecedenceArray[_, enc_] := {}
 
 (* Method "SymbolWeights" -> {sym -> w, ...}: an explicit per-symbol
    KBO weight map.  Returns a label-indexed Int64 list (element i = the
@@ -446,22 +443,21 @@ atpPrecedenceArray[_, enc_] := {};
    short-circuits to the engine default (uniform 1).  Waldmeister
    SymbolGewichte port (CLAS/SymbolGewichte.c::SG_SymbGewichteEintragen,
    -w DEF=2:VAR=5:f=5:g=0). *)
-atpSymbolWeightsArray[None, enc_] := {};
+atpSymbolWeightsArray[None, enc_] := {}
 atpSymbolWeightsArray[map_Association, enc_] := Block[{
     sym = enc["State"]["sym"], maxLab = enc["MaxLab"], arr,
     nameMap = KeyMap[atpSymName, map]
 },
     arr = ConstantArray[0, maxLab + 1];
     KeyValueMap[
-        Function[{nm, lab},
-            If[ KeyExistsQ[nameMap, nm] && lab >= 1 && lab <= maxLab,
-                arr[[lab + 1]] = nameMap[nm]]],
+        {nm, lab} |-> If[ KeyExistsQ[nameMap, nm] && lab >= 1 && lab <= maxLab,
+            arr[[lab + 1]] = nameMap[nm]],
         sym];
     arr
-];
+]
 atpSymbolWeightsArray[rules_List, enc_] :=
-    atpSymbolWeightsArray[Association[rules], enc];
-atpSymbolWeightsArray[_, enc_] := {};
+    atpSymbolWeightsArray[Association[rules], enc]
+atpSymbolWeightsArray[_, enc_] := {}
 
 (* Run the C ATP completion engine + proof extraction.  The C glue
    ships two derivations: the completion-saturated MAIN state's full
@@ -475,11 +471,10 @@ atpSymbolWeightsArray[_, enc_] := {};
    critical-pair lemma path.  ExtSteps / MainSteps are $Failed when
    the corresponding extraction produced nothing. *)
 (* All Method-knob arguments are passed positionally by atpProveBundle
-   via `Sequence @@ atpMethodCfg`, which always supplies the full 21
-   values, so no default-bearing Optional patterns are needed.  Dropping
-   them keeps the pattern under WL's 13-optional threshold and silences
-   the Pattern::patm noise that previously fired on every TFindProof
-   call. *)
+   via `Sequence @@ atpMethodCfg`, which always supplies the full set of
+   values, so the pattern uses no default-bearing Optional patterns: that
+   keeps it under WL's 13-optional threshold and avoids the Pattern::patm
+   message. *)
 cEngineProof[enc_, maxSteps_, wallSeconds_,
     cpWeight_, ordering_, autoPrec_, useMnf_,
     maxCpWeight_, goalInterleave_, groundJoin_,
@@ -673,11 +668,11 @@ buildCEngineChain[steps_, conjPair_, ruleList_] := Catch[
 (* Trace-entry reasons (src/thvm.h): an input / re-queued equation,
    a CP oriented into a rule, a critical pair, an interreduce
    re-queue carrying the dropped rule's lineage. *)
-$TraceAxiom = 1;
-$TraceOrient = 2;
-$TraceCp = 3;
-$TraceSimplify = 4;
-$TraceNormStep = 5;
+$TraceAxiom = 1
+$TraceOrient = 2
+$TraceCp = 3
+$TraceSimplify = 4
+$TraceNormStep = 5
 (* TRACE_FVI: a Waldmeister `RechtsUnfreiErzeugen` (FVI) sibling rule
    pushed alongside an unorientable KBO_UN equation; the rule grounds
    every free variable on one side that does not appear on the other
@@ -685,24 +680,20 @@ $TraceNormStep = 5;
    `atp_emit_fvi_pair` in src/atp/_.c.  Same `(lhs, rhs)` cell layout
    as TRACE_ORIENT; the lifter walks the parent KBO_UN equation's
    chain to recover provenance. *)
-$TraceFvi = 6;
-$AtpTraceNone = 4294967295;
+$TraceFvi = 6
+$AtpTraceNone = 4294967295
 
 (* Assemble a verifier-shaped ProofObject dataset for a
    completion-derived proof, walking the MAIN-state trace DAG the C
    glue ships (cEngineProof's MainSteps / MainRules / RTrace /
    Trace fields).
 
-   The trace DAG is now fully connected: TRACE_SIMPLIFY (added with
-   the C engine's interreduce-lineage fix) keeps every re-queued
-   rule parented on the rule it descended from, so DoubleNegation's
+   The trace DAG is fully connected: TRACE_SIMPLIFY keeps every
+   re-queued rule parented on the rule it descended from, so a
    closing rule traces back through CP / ORIENT / SIMPLIFY nodes to
    the single input axiom.
 
-   The remaining work to emit a verifier-passing dataset, fully
-   de-risked against the kernel (a hand-rebuilt FindEquationalProof
-   dataset verifies; the CriticalPairLemma field semantics are
-   known):
+   Each trace reason maps to one dataset entry:
      - TRACE_AXIOM   -> an "Axiom" entry.
      - TRACE_CP      -> a "CriticalPairLemma" entry: Construct /
                         MatchingConstruct are the two parent rules'
@@ -719,13 +710,7 @@ $AtpTraceNone = 4294967295;
                         "Conclusion" entries.
    Each Construct / MatchingConstruct / Input cites another entry's
    key; thvm rules map to keys via RTrace.  Variable-bearing rules
-   need their FVRs rendered as Pattern[v, Blank[]] on rule lhs's.
-
-   A goal whose lineage needs a TRACE_CP (genuine superposition)
-   throws to $Failed for now -- the CriticalPairLemma branch is the
-   next increment; the TRACE_ORIENT / TRACE_SIMPLIFY normalization
-   path below already covers completion proofs whose derived rules
-   come from rule normalization alone. *)
+   need their FVRs rendered as Pattern[v, Blank[]] on rule lhs's. *)
 
 (* True iff `v` is a completion variable: a named rule variable (member
    of varSyms), an "x<id>" symbol decodeAtpTerm minted for a fresh FVR,
@@ -733,9 +718,7 @@ $AtpTraceNone = 4294967295;
    superposition.  The single variable predicate every cpl-* helper
    shares so canonicalization, unification, and patternization agree on
    what is a variable. *)
-cplVarQ[v_, varSyms_] := MatchQ[v, _Symbol] &&
-    (MemberQ[varSyms, v] || atpXVarQ[v] ||
-        StringMatchQ[SymbolName[v], "cplU" ~~ DigitCharacter ..]);
+cplVarQ[v_, varSyms_] := MatchQ[v, _Symbol] && (MemberQ[varSyms, v] || atpXVarQ[v] || StringMatchQ[SymbolName[v], "cplU" ~~ DigitCharacter ..])
 
 (* Rename the first-order variables (members of varSyms) of `expr`
    to canonical names in first-occurrence order, so two alpha-
@@ -760,8 +743,7 @@ cplCanonVars[expr_, varSyms_] := cplCanonVars[expr, varSyms] =
 cplEqSetQ[a_List, b_List, varSyms_] := With[{
     ca = cplCanonVars[a, varSyms]
 },
-    ca === cplCanonVars[b, varSyms] ||
-    ca === cplCanonVars[Reverse[b], varSyms]
+    ca === cplCanonVars[b, varSyms] || ca === cplCanonVars[Reverse[b], varSyms]
 ]
 
 (* The set of first-order variables (members of varSyms) occurring in
@@ -793,8 +775,7 @@ cplDegenerateOverlapQ[ruleAEq_List, ruleBEq_List, pos_, varSyms_] :=
         sub = Quiet @ Extract[ruleAEq[[1]], pos];
         If[ MatchQ[sub, _Extract] || MissingQ[sub], Return[False]];
         rl = cplAsRule[ruleBEq, varSyms];
-        MatchQ[sub, First[rl]] &&
-            (res = Quiet @ Replace[sub, rl]; res === sub)
+        MatchQ[sub, First[rl]] && (res = Quiet @ Replace[sub, rl]; res === sub)
     ]
 
 (* Rewrite each first-order variable occurrence (members of
@@ -803,8 +784,8 @@ cplDegenerateOverlapQ[ruleAEq_List, ruleBEq_List, pos_, varSyms_] :=
    rhs.  The verifier computes a step's expected result from the
    cited rules' patterned lhs's, so every dataset Statement that
    carries variables must be patternized to match. *)
-atpXVarQ[s_Symbol] := StringMatchQ[SymbolName[s], "x" ~~ DigitCharacter ..];
-atpXVarQ[_] := False;
+atpXVarQ[s_Symbol] := StringMatchQ[SymbolName[s], "x" ~~ DigitCharacter ..]
+atpXVarQ[_] := False
 
 (* Patternize the completion variables in `term`: the named vars in
    varSyms plus any "x<id>" symbol decodeAtpTerm minted for a fresh
@@ -848,7 +829,7 @@ cplFreshen[expr_, varSyms_] := Block[{occ, ren},
     occ = cplVarsIn[expr, varSyms];
     ren = AssociationThread[occ, Table[Unique["cplU"], {Length[occ]}]];
     {expr /. ren, Values[ren]}
-];
+]
 
 (* Robinson syntactic unification over the head/argument tree.  `vars`
    is the set of unifiable variable symbols; every other symbol is a
@@ -856,9 +837,9 @@ cplFreshen[expr_, varSyms_] := Block[{occ, ren},
    two terms do not unify.  Used to reconstruct a CriticalPairLemma's
    superposition the way WL's verifier does: unify the matching rule's
    lhs into the construct rule's lhs at the recorded position. *)
-cplUnify[s_, t_, vars_] := cplUnifyLoop[{{s, t}}, <||>, vars];
-cplUnifyLoop[$Failed, _, _] := $Failed;
-cplUnifyLoop[{}, sub_, _] := sub;
+cplUnify[s_, t_, vars_] := cplUnifyLoop[{{s, t}}, <||>, vars]
+cplUnifyLoop[$Failed, _, _] := $Failed
+cplUnifyLoop[{}, sub_, _] := sub
 cplUnifyLoop[lst_List, sub_, vars_] := Block[{s, t, ss, tt, rest},
     {s, t} = First[lst];
     rest = Rest[lst];
@@ -875,7 +856,7 @@ cplUnifyLoop[lst_List, sub_, vars_] := Block[{s, t, ss, tt, rest},
         True, cplUnifyLoop[
             Join[Thread[{List @@ ss, List @@ tt}], rest], sub, vars]
     ]
-];
+]
 
 (* Reconstruct the equation WL's verifier computes for a CriticalPairLemma
    whose Construct rule is `cEq` ({lhs, rhs}), MatchingConstruct rule is
@@ -987,9 +968,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             Table[
                 {t, {tL[trace[[t + 1]]], tR[trace[[t + 1]]]}},
                 {t, Select[Range[0, ti - 1],
-                    (trace[[# + 1]]["Reason"] === $TraceOrient ||
-                     trace[[# + 1]]["Reason"] === $TraceFvi) &&
-                    ! MemberQ[dropped, #] &]}
+                    (trace[[# + 1]]["Reason"] === $TraceOrient || trace[[# + 1]]["Reason"] === $TraceFvi) && ! MemberQ[dropped, #] &]}
             ]
         ];
 
@@ -1014,9 +993,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            reverse would introduce unbound variables -- never fires
            reversed. *)
         (* Precompute the rule data once per emitNorm call: cplAsRule
-           is O(term-size) and was previously rebuilt for every BFS
-           node, dominating cost on large alive sets.  Returns a list
-           of {traceIdx, fwdRule, revSafe, revRule|Null}. *)
+           is O(term-size), so building it here instead of per BFS node
+           keeps it off the inner loop on large alive sets.  Returns a
+           list of {traceIdx, fwdRule, revSafe, revRule|Null}. *)
         prepareRules[aliveList_] := Block[{},
             Table[
                 Block[{eqA = ar[[2]], rlF, revSafe, rlR},
@@ -1071,8 +1050,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            path to anything cplEqSetQ-equal to `target`.  Returns the
            hist on success, Missing[] on cap / wall exhaustion or
            queue emptiness.  Uses a CreateDataStructure["Queue"] for
-           O(1) push/pop -- the prior AppendTo/Rest was O(n) per step
-           and dominated cost on long BFS runs.  `wallSec` bounds the
+           O(1) push/pop on long BFS runs.  `wallSec` bounds the
            single-BFS wall time (Infinity == no bound). *)
         runBfs[start_, target_, preRules_, tryReverse_, cap_,
                wallSec_:Infinity] :=
@@ -1081,10 +1059,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 queue = CreateDataStructure["Queue"];
                 queue["Push", {start, {}}];
                 seenA = <|start -> True|>;
-                While[ queue["Length"] > 0 && MissingQ[found]
-                       && explored < cap
-                       && (wallSec === Infinity ||
-                           AbsoluteTime[] - t0 < wallSec),
+                While[ queue["Length"] > 0 && MissingQ[found] && explored < cap && (wallSec === Infinity || AbsoluteTime[] - t0 < wallSec),
                     Block[{node = queue["Pop"], eq, hist},
                         explored++;
                         {eq, hist} = node;
@@ -1143,22 +1118,19 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             Block[{aliveList, preRules, found, curKey, curEq, st,
                    cInfo, rEq},
                 aliveList = aliveRulesAt[ti];
-                (* Precompute rule data once, share across both BFS
-                   phases -- cplAsRule was previously the dominant per-
-                   node cost. *)
+                (* Precompute rule data once, shared across both BFS
+                   phases; cplAsRule is the dominant per-node cost. *)
                 preRules = prepareRules[aliveList];
                 (* Two-phase BFS.  Phase 1 is forward-only with a large
-                   cap -- preserves the pre-reverse behavior on every
-                   case the original engine handled (no behavior change
-                   to byte-identical proofs).  Phase 2 only runs when
-                   Phase 1 exhausts: it re-explores with reverse
-                   direction enabled (variable-safe rules only) and a
-                   tight cap, which unlocks ordered-rewriting paths
-                   the forward-only BFS could not reach.  A per-BFS
-                   wall budget (2 seconds) keeps a single pathological
-                   normalization from monopolizing the wrapper's time
-                   budget; we throw $Failed and let the outer two-
-                   phase retry / FindEquationalProof fall through. *)
+                   cap.  Phase 2 only runs when Phase 1 exhausts: it
+                   re-explores with reverse direction enabled (variable-
+                   safe rules only) and a tight cap, which unlocks
+                   ordered-rewriting paths the forward-only BFS could not
+                   reach.  A per-BFS wall budget (2 seconds) keeps a
+                   single pathological normalization from monopolizing the
+                   wrapper's time budget; we throw $Failed and let the
+                   outer two-phase retry / FindEquationalProof fall
+                   through. *)
                 found = runBfs[startEq, targetEq, preRules, False, 50000, 2];
                 If[ MissingQ[found],
                     found = runBfs[startEq, targetEq, preRules, True, 600, 2]];
@@ -1208,8 +1180,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                             "Rule" -> cplAsRule[
                                 If[ step[[5]] === -1,
                                     Reverse[rEq], rEq], varSyms],
-                            "Orientation" -> step[[5]] *
-                                cplOrient[cInfo["Eq"], rEq, varSyms],
+                            "Orientation" -> step[[5]] * cplOrient[cInfo["Eq"], rEq, varSyms],
                             "ConstructSide" -> 1,
                             "InputOrientation" -> 1,
                             "Side" -> step[[3]] + 1,
@@ -1256,10 +1227,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         {mFace, {Identity, Reverse}}],
                     2];
                 hit = SelectFirst[cands,
-                    Function[cand,
-                        With[{r = cplReconCp[cand[[5]][cand[[2]]],
-                                cand[[6]][cand[[4]]], pos, varSyms]},
-                            ListQ[r] && cplEqSetQ[r, cpEq, varSyms]]]];
+                    cand |-> With[{r = cplReconCp[cand[[5]][cand[[2]]],
+                            cand[[6]][cand[[4]]], pos, varSyms]},
+                        ListQ[r] && cplEqSetQ[r, cpEq, varSyms]]];
                 If[ MissingQ[hit], Return[Missing[]]];
                 <|"Construct" -> hit[[1]]["Key"],
                   "ConstructInfo" -> hit[[1]],
@@ -1434,9 +1404,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                not the rule's post-orient sides, so
                                inheriting it flips the mapping when
                                atp_orient_and_add swapped the CP. *)
-                            parentReason === $TraceOrient ||
-                              parentReason === $TraceFvi ||
-                              parentReason === $TraceSimplify,
+                            parentReason === $TraceOrient || parentReason === $TraceFvi || parentReason === $TraceSimplify,
                                 If[ tL[parentTe] === pInfo["Eq"][[1]],
                                     1, 2],
                             (* chained NORM_STEP: parent is itself a
@@ -1477,8 +1445,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                 "Rule" -> cplAsRule[
                                     If[ dir === -1, Reverse[rEq], rEq],
                                     varSyms],
-                                "Orientation" -> dir *
-                                    cplOrient[rInfo["Eq"], rEq, varSyms],
+                                "Orientation" -> dir * cplOrient[rInfo["Eq"], rEq, varSyms],
                                 "ConstructSide" -> 1,
                                 "InputOrientation" -> 1,
                                 "Side" -> wlSide,
@@ -1539,8 +1506,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         <|"Key" -> key, "Eq" -> ruleEq,
                           "Swapped" -> False|>
                     ],
-                te["Reason"] === $TraceOrient ||
-                  te["Reason"] === $TraceSimplify,
+                te["Reason"] === $TraceOrient || te["Reason"] === $TraceSimplify,
                     pInfo = resolveTrace[te["ParentA"]];
                     pEq = pInfo["Eq"];
                     (* When chain extraction is on AND the parent is a
@@ -1550,10 +1516,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                        traces.  Inherit directly.  When chain is off,
                        fall through to cplEqSetQ / emitNorm so the
                        BFS bridges the rule's normalization. *)
-                    If[ (TrueQ[$AtpUseChain] &&
-                          trace[[te["ParentA"] + 1]]["Reason"] ===
-                            $TraceNormStep)
-                          || cplEqSetQ[ruleEq, pEq, varSyms],
+                    If[ (TrueQ[$AtpUseChain] && trace[[te["ParentA"] + 1]]["Reason"] === $TraceNormStep) || cplEqSetQ[ruleEq, pEq, varSyms],
                         Join[
                             <|"Key" -> pInfo["Key"], "Eq" -> pEq,
                               "Swapped" -> TrueQ[pInfo["Swapped"]]|>,
@@ -1677,8 +1640,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            every AbelianGroup/Group/Boolean case). *)
         If[ Length[chainEntries] > 0 &&
             chainEntries[[-1, 1, 1]] === $ConclusionSym &&
-            Extract[chainEntries[[-1, 2, "Statement"]], {1, 1}, HoldForm] ===
-                Extract[chainEntries[[-1, 2, "Statement"]], {1, 2}, HoldForm],
+            Extract[chainEntries[[-1, 2, "Statement"]], {1, 1}, HoldForm] === Extract[chainEntries[[-1, 2, "Statement"]], {1, 2}, HoldForm],
             Module[{lastEntry = chainEntries[[-1]], lastProof, lastStmt,
                     lhsHF, newSlKey, newSubLem, newConclusion},
                 lastStmt = lastEntry[[2, "Statement"]];

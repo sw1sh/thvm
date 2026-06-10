@@ -12,13 +12,12 @@
    sub-packages (ATP.wl, ATP_Method.wl, ATP_Relevance.wl,
    ATP_ProofGraph.wl) use bare short names (`s`, `e`, `i`, `t`) as
    pattern locals (e.g. `Pattern[s_Symbol, _] :> s`) and Do/Module
-   iterators -- a textbook WL idiom.  Each creates the unqualified
+   iterators - a textbook WL idiom.  Each creates the unqualified
    symbol in the THVMLink`ATP` context at parse time, which conflicts
    with the `Global`s/`e/`i/`t` names the TFindProof dispatch's Block
-   localizes for the C decoder leak guard
-   ([[project_atp_tfindproof_iter_leak]]).  The shdw messages are
-   informational only -- the Block fires at runtime under the package
-   context, not at parse -- but they're noisy at every paclet load.
+   localizes for the C decoder leak guard.  The shdw messages are
+   informational only - the Block fires at runtime under the package
+   context, not at parse - but they're noisy at every paclet load.
    Restored at the bottom of this file after all sub-package loads. *)
 Off[General::shdw];
 
@@ -50,7 +49,7 @@ TGCCollect::usage = "TGCCollect[] runs a Cheney semi-space collection of the dyn
 TGCCount::usage   = "TGCCount[] returns the number of GC cycles since thvm_init.";
 (* TKernelSource / TKernelFlops / TKernelDispatchKind / TKernelDispatchCount /
    TKernelTotalUs / TKernelJitDylibPath / TKernelProfile / TProfileAll
-   -- declared and defined in Kernel.wl as TKernel-property accessors. *)
+   are declared and defined in Kernel.wl as TKernel-property accessors. *)
 THeap::usage      = "THeap[] returns an Association snapshot with keys \"nextLoc\", \"cells\", \"Graph\".  See docs/heap_graph.md.";
 THeapGraph::usage = "THeapGraph[] renders the heap state as an IC string-diagram Graph.  THeapGraph[term] also seeds discovery with `term` so heapless compounds held only by the WL caller appear.  THeapGraph[{t1, t2, ...}] seeds with several.  See docs/heap_graph.md.";
 THeapDiagram::usage = "THeapDiagram[term] builds a Wolfram`DiagrammaticComputation`DiagramNetwork from the heap, with one Diagram per compound agent and one ERA Diagram per ERA cell.  Wires share string identifiers keyed off heap loc; VAR cells collapse to their binder loc.";
@@ -87,39 +86,39 @@ TDup::usage       = "TDup[body] constructs a DUP with a fresh label and returns 
 
 (* === tag constants (mirror src/thvm.h) === *)
 $TagAPP::usage = $TagLAM::usage = $TagVAR::usage = $TagERA::usage =
-  $TagDP0::usage = $TagDP1::usage = $TagSUP::usage = $TagDUP::usage =
-  $TagTEN::usage = $TagUOP::usage = $TagNUM::usage = $TagCTR::usage =
-  $TagREF::usage = $TagALO::usage = $TagOP2::usage = $TagMAT::usage =
-  $TagEQL::usage = $TagAND::usage = $TagOR::usage  = $TagANY::usage =
-  $TagINC::usage = $TagWHEN::usage = $TagFVR::usage = $TagBRI::usage =
-  $TagANN::usage = $TagPRI::usage = $TagDSU::usage = $TagDDU::usage =
+    $TagDP0::usage = $TagDP1::usage = $TagSUP::usage = $TagDUP::usage =
+    $TagTEN::usage = $TagUOP::usage = $TagNUM::usage = $TagCTR::usage =
+    $TagREF::usage = $TagALO::usage = $TagOP2::usage = $TagMAT::usage =
+    $TagEQL::usage = $TagAND::usage = $TagOR::usage = $TagANY::usage =
+    $TagINC::usage = $TagWHEN::usage = $TagFVR::usage = $TagBRI::usage =
+    $TagANN::usage = $TagPRI::usage = $TagDSU::usage = $TagDDU::usage =
     "Tag id; mirrors the corresponding TAG_* in src/thvm.h.";
 
 (* === dtype + opcode constants (mirror src/thvm.h) === *)
 $DTBool::usage = $DTInt8::usage = $DTUInt8::usage =
-  $DTInt16::usage = $DTUInt16::usage = $DTInt32::usage =
-  $DTUInt32::usage = $DTInt64::usage = $DTUInt64::usage =
-  $DTFp8E4M3::usage = $DTFp8E5M2::usage =
-  $DTFp16::usage = $DTBf16::usage =
-  $DTFp32::usage = $DTFp64::usage =
-  $DTInt4::usage = $DTUInt4::usage =
+    $DTInt16::usage = $DTUInt16::usage = $DTInt32::usage =
+    $DTUInt32::usage = $DTInt64::usage = $DTUInt64::usage =
+    $DTFp8E4M3::usage = $DTFp8E5M2::usage =
+    $DTFp16::usage = $DTBf16::usage =
+    $DTFp32::usage = $DTFp64::usage =
+    $DTInt4::usage = $DTUInt4::usage =
     "Dtype id; mirrors DT_* in src/thvm.h.";
 
 $UopMaterialize::usage = $UopKernel::usage = $UopConst::usage =
-  $UopReshape::usage    = $UopPermute::usage = $UopExpand::usage =
-  $UopPad::usage        = $UopShrink::usage = $UopFlip::usage =
-  $UopAdd::usage        = $UopMul::usage = $UopNeg::usage =
-  $UopRecip::usage      = $UopExp2::usage = $UopLog2::usage =
-  $UopSqrt::usage       = $UopCmplt::usage = $UopReduce::usage =
-  $UopGrad::usage       = $UopCmpeq::usage =
-  $UopLoad::usage       = $UopAssign::usage =
-  $UopCast::usage       = $UopBitcast::usage =
-  $UopRange::usage      = $UopIndexE::usage =
-  $UopIAdd::usage       = $UopISub::usage = $UopIMul::usage =
-  $UopIDiv::usage       = $UopIMod::usage = $UopILt::usage =
-  $UopIAnd::usage       = $UopIWhere::usage = $UopInvalid::usage =
-  $UopBuffer::usage     = $UopStore::usage = $UopAfter::usage =
-  $UopOpt::usage        =
+    $UopReshape::usage = $UopPermute::usage = $UopExpand::usage =
+    $UopPad::usage = $UopShrink::usage = $UopFlip::usage =
+    $UopAdd::usage = $UopMul::usage = $UopNeg::usage =
+    $UopRecip::usage = $UopExp2::usage = $UopLog2::usage =
+    $UopSqrt::usage = $UopCmplt::usage = $UopReduce::usage =
+    $UopGrad::usage = $UopCmpeq::usage =
+    $UopLoad::usage = $UopAssign::usage =
+    $UopCast::usage = $UopBitcast::usage =
+    $UopRange::usage = $UopIndexE::usage =
+    $UopIAdd::usage = $UopISub::usage = $UopIMul::usage =
+    $UopIDiv::usage = $UopIMod::usage = $UopILt::usage =
+    $UopIAnd::usage = $UopIWhere::usage = $UopInvalid::usage =
+    $UopBuffer::usage = $UopStore::usage = $UopAfter::usage =
+    $UopOpt::usage =
     "UOp opcode id; mirrors UOP_* in src/thvm.h.";
 
 $ReduceSum::usage = $ReduceMax::usage =
@@ -141,11 +140,11 @@ TGradOf::usage         = "TGradOf[t] returns the lazy TenDesc.grad term (the cha
 TClearGrad::usage      = "TClearGrad[t] zeros TenDesc.grad (PyTorch zero_grad analogue).  Returns t.";
 TRealize::usage        = "TRealize[expr] = TWnf[TMaterialize[expr]].  Fires the whole pipeline: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs) then beta-reduce + dispatch kernels.";
 TMaterialize::usage    = "TMaterialize[expr] runs the schedule + kernelize + linearize rewrite directly (no wnf) and returns the scheduled DAG term.  Fires no kernels.  Use to visualize the graph after scheduling but before dispatch.";
-(* TKernelCount / TKernelProgramCacheSize / TKernelInfo  --  declared
+(* TKernelCount / TKernelProgramCacheSize / TKernelInfo are declared
    and defined in Kernel.wl.
 
    TKernelTable / TKernelInputs / TTensTable / TCpuBufTable /
-   TMetalBufTable / TTensCount / TTotalBufBytes  --  declared and
+   TMetalBufTable / TTensCount / TTotalBufBytes are declared and
    defined in MemoryPlan.wl ("mp1 bridge tables"). *)
 
 (* === UOp graph constructors === *)
@@ -182,12 +181,12 @@ TUOpCopy::usage      = "TUOpCopy[src] builds a generic UOP_COPY node: a lazy dev
 TDevice::usage       = "TDevice[t] returns the device a TTerm's data lives on (\"cpu\", \"metal\", ...), or None when it inherits the default device.  Ported from tinygrad's UOp.device: an explicit TUOpCopy names its target, a realized tensor reports its backend, and every other op propagates the device of its first source that has one.";
 TToDevice::usage     = "TToDevice[t, \"metal\"|\"cpu\"] moves t to a device (tinygrad's Tensor.to).  A lazy graph lives on a device iff it is COMPUTED there, so this pushes a device-targeted COPY down to every tensor leaf (weights, host inputs, realized tensors); TRealize routes the whole realize to that device and computes the forward there, uploading each leaf once (no DEV= switch; the context default is untouched).  A single COPY around the root would compute the whole graph on CPU and move only the result, so running an imported forward on the GPU is just TToDevice[net[x], \"metal\"] -- the input need not be wrapped separately.  A bare realized tensor is the degenerate one-leaf upload.  Mirrors tinygrad's model.to(device) moving the parameters.";
 
-(* Phase E UOp constructors. *)
+(* Index-layer UOp constructors. *)
 TUOpRange::usage   = "TUOpRange[axisId, axisType, extent] builds a UOP_RANGE leaf.  axisType is one of $KaxLoop / $KaxReduce / $KaxUpcast / $KaxUnroll / $KaxLocal / $KaxGlobal / $KaxGroupReduce.";
 TUOpBuffer::usage  = "TUOpBuffer[scope, dtype, dims, instance] builds a UOP_BUFFER node.  scope is $UopScopeGlobal/Local/Reg; dtype is the dtype id; dims is a list of integers; instance disambiguates input slots (0 = output, 1.. = inputs).";
 TUOpIndexE::usage  = "TUOpIndexE[buf, addr] builds a UOP_INDEX_E node pairing a buffer with a symbolic address tree.";
 TUOpIAdd::usage = TUOpISub::usage = TUOpIMul::usage = TUOpIDiv::usage =
-  TUOpIMod::usage = TUOpILt::usage = TUOpIAnd::usage =
+    TUOpIMod::usage = TUOpILt::usage = TUOpIAnd::usage =
     "TUOpI<X>[a, b] builds the matching integer-binary UOP node.  Used to construct symbolic address trees over UOP_RANGE leaves and UOP_CONST stride coefficients.";
 TUOpIWhere::usage  = "TUOpIWhere[cond, then, else] builds a UOP_IWHERE ternary select.";
 TUOpInvalid::usage = "TUOpInvalid[] builds a UOP_INVALID sentinel (used for PAD-mask padding).";
@@ -198,9 +197,8 @@ TUOpIConst::usage  = "TUOpIConst[v] builds a UOP_CONST(DT_INT32) for use as a st
 
 TAssign::usage       = "TAssign[dst, src] builds a UOP_ASSIGN node.  Wnf-fired in-place buffer write: once `src` reduces to a TAG_TEN, backend memcpy copies src.buf into dst.buf and the redex rewrites to dst.  Mirrors tinygrad's UOps.ASSIGN.  Use to mutate weight tensors in optimizer loops without allocating fresh tids per step.";
 
-(* TConv2D / TConv2D / TConv2D all live in NN.wl now. *)
+(* TConv2D lives in NN.wl. *)
 
-(* (see above) *)
 TGrad::usage         = "TGrad[y] is loss.backward(): one backward walk seeded with ones-at-y that auto-grads every reachable non-CONST float leaf, accumulating each leaf's gradient into its TenDesc.grad (read back per tensor with TGradOf).  No requires_grad flag -- gradients flow to every float leaf, matching tinygrad; returns y for chaining.\nTGrad[y, target] computes d(y)/d(target) via VJP (target-aware single walk).  Default cotangent seed = ones-at-y.shape; for non-default seeds use TGrad[y, target, gy].\nTGrad[y, {x_1, ..., x_n}] computes d(y)/d(x_i) for every target in ONE shared backward walk and returns a List of n TTerm wrappers in target order.  Realize them together with TRealize[grads] so the shared upstream emits once.";
 TUOpKind::usage      = "TUOpKind[u] returns the opcode name for a UOp term.";
 TUOpSrcs::usage      = "TUOpSrcs[u] returns the source-cell terms for a UOp term, in heap order.";
@@ -260,9 +258,9 @@ $tagNames = <|
 $op2Names = <| 0 -> "+", 1 -> "-", 2 -> "*", 3 -> "==", 4 -> "<" |>;
 
 (* Dtype constants - keep in sync with src/thvm.h.  The enum mirrors
-   tinygrad's full dtype set; Phase A wires only f32/i32 through the
+   tinygrad's full dtype set; only f32/i32 are wired through the
    bridge, but the constants for every slot are reserved up front so
-   later phases land without churning every WL-facing name. *)
+   new dtypes land without churning every WL-facing name. *)
 $DTBool   =  0;  $DTInt8   =  1;  $DTUInt8   =  2;
 $DTInt16  =  3;  $DTUInt16 =  4;  $DTInt32   =  5;
 $DTUInt32 =  6;  $DTInt64  =  7;  $DTUInt64  =  8;
@@ -303,7 +301,7 @@ $UopSqrt = 15;        $UopCmplt = 16;  $UopReduce = 17;
 $UopGrad = 18;        $UopFwd = 19;     $UopCmpeq = 20;
 $UopLoad = 21;        $UopAssign = 22;
 $UopCast = 23;        $UopBitcast = 24;
-(* Phase E additions -- INDEX layer + BUFFER/STORE/AFTER/OPT *)
+(* INDEX layer + BUFFER/STORE/AFTER/OPT *)
 $UopRange = 25;       $UopIndexE = 26;
 $UopIAdd = 27;        $UopISub = 28;    $UopIMul = 29;
 $UopIDiv = 30;        $UopIMod = 31;    $UopILt = 32;
@@ -317,7 +315,7 @@ $UopCopy = 52;
    GLOBAL = device memory (Tensor argument default), LOCAL = threadgroup-
    shared, REG = per-thread fragment. *)
 $UopScopeGlobal = 0; $UopScopeLocal = 1; $UopScopeReg = 2;
-(* UOP_GRAD / UOP_FWD form a dup-like grad combinator -- both share
+(* UOP_GRAD / UOP_FWD form a dup-like grad combinator - both share
    a heap cell holding [y].  UOP_GRAD = backward projection (chain
    rule); UOP_FWD = forward projection (passthrough). *)
 
@@ -331,10 +329,10 @@ $uopNames = <|
     18 -> "GRAD",        19 -> "FWD",   20 -> "CMPEQ",
     21 -> "LOAD",        22 -> "ASSIGN",
     23 -> "CAST",        24 -> "BITCAST",
-    (* Phase E additions: INDEX layer + BUFFER/STORE/AFTER/OPT.  After
-       extending these, TTermExpr emits stable string heads instead of
-       "UOP?<n>" fallbacks for ops 25-39, which the WL rewrite layer
-       (Rewrite.wl) pattern-matches against in KOpt rules. *)
+    (* INDEX layer + BUFFER/STORE/AFTER/OPT.  These give TTermExpr stable
+       string heads instead of "UOP?<n>" fallbacks for ops 25-39, which
+       the WL rewrite layer (Rewrite.wl) pattern-matches against in KOpt
+       rules. *)
     25 -> "RANGE",       26 -> "INDEX_E",
     27 -> "IADD",        28 -> "ISUB",   29 -> "IMUL",
     30 -> "IDIV",        31 -> "IMOD",   32 -> "ILT",
@@ -484,8 +482,8 @@ $uopCopyFn     := $uopCopyFn     = load["thvm_wl_uop_copy",        {Integer, Int
 $uopToDeviceFn := $uopToDeviceFn = load["thvm_wl_uop_to_device",   {Integer, Integer},               Integer];
 $termDeviceFn  := $termDeviceFn  = load["thvm_wl_term_device",     {Integer},                        Integer];
 
-(* Phase E UOp constructors (RANGE / INDEX_E / IADD..IAND / IWHERE /
-   INVALID / BUFFER / STORE / AFTER / OPT) -- mirror the matching
+(* Index-layer UOp constructors (RANGE / INDEX_E / IADD..IAND / IWHERE /
+   INVALID / BUFFER / STORE / AFTER / OPT) mirror the matching
    py_uop_* exports.  Used by Rewrite.wl + rewrite.wlt to build
    canonical DAGs for cross-validation against C apply_opt_dag. *)
 $uopRangeFn      := $uopRangeFn      = load["thvm_wl_uop_range",      {Integer, Integer, Integer},      Integer];
@@ -535,7 +533,7 @@ $uopLeafTidsFn   := $uopLeafTidsFn   = load["thvm_wl_uop_leaf_tids",   {Integer}
 
 (* TKernelTable / TKernelInputs / TTensTable / TCpuBufTable /
    TMetalBufTable / TMetalBufSummary / TMetalMemoryProfile /
-   TTensCount / TTotalBufBytes -- defined in MemoryPlan.wl. *)
+   TTensCount / TTotalBufBytes are defined in MemoryPlan.wl. *)
 
 (* === fresh-label counter (WL-side; per-context, reset by TReset).
        Keyed by ctx slot id from $contextCurrentFn[]. *)
@@ -622,8 +620,8 @@ ttermRaw[id_Integer]                     := id
 ttermCtx[TTerm[c_Integer, _Integer, _]]  := c
 ttermCtx[_Integer]                       := 0
 
-(* numCoerce -- the term-constructor sugar that lifts a bare Integer
-   field to a NUM -- is defined in Switch.wl (next to TNum, which it
+(* numCoerce, the term-constructor sugar that lifts a bare Integer
+   field to a NUM, is defined in Switch.wl (next to TNum, which it
    calls; defining it here would capture a stale private TNum symbol
    since TNum is declared later).  heapWith below references it as a
    forward symbol; Switch.wl's definition lands on the same
@@ -634,7 +632,7 @@ ttermCtx[_Integer]                       := 0
    part of the TTerm value; when WL collects the TTerm (and thus
    the handle), the registered manager calls extern_unpin_term
    for us.  Construct uniquely each time so independent TTerm
-   wrappers don't share lifetime -- duplicate pins on the same
+   wrappers don't share lifetime; duplicate pins on the same
    Term are fine (the table holds duplicates and unpin removes
    one matching entry per call). *)
 makePinHandle[raw_Integer] := With[
@@ -661,7 +659,7 @@ packTerm[sub_Integer, tag_Integer, ext_Integer, val_Integer] :=
    `TContext` is registered in the public `THVMLink`` namespace).
    THVMLink.wl is parsed first, so a forward reference here would
    resolve `TContext` to `THVMLink`Private`TContext` and silently
-   break the auto-switch -- a wrong-shadow that the catch-all
+   break the auto-switch - a wrong-shadow that the catch-all
    `withCtx[_, expr_] := expr` then absorbs. *)
 
 (* Inspectors accept either TTerm or Integer. *)
@@ -731,7 +729,7 @@ TCollapse[t_, cap_Integer]     := (
     TTerm /@ $collapseFn[ttermRaw[t], cap]
 )
 
-(* TStep[t] = TWnf[t, 1] -- fire exactly one interaction, then return
+(* TStep[t] = TWnf[t, 1]: fire exactly one interaction, then return
    the partially reduced term.  The pending eliminator stack at the
    bail point is captured in TStack[]. *)
 TStep[t_] := TWnf[t, 1]
@@ -747,8 +745,8 @@ TStack[] := (ensureInit[];
     ]
 )
 
-(* TRedexes[] -- list every redex in the live heap (no root walk).
-   TRedexes[roots___] -- additionally DFS-walks each root so Terms
+(* TRedexes[] lists every redex in the live heap (no root walk).
+   TRedexes[roots___] additionally DFS-walks each root so Terms
    the caller is holding directly (which may not be stored in any
    heap cell) are included.  Returns a list of TTerm cells deduped
    by packed Term value. *)
@@ -761,10 +759,10 @@ TRedexes[roots___] := (ensureInit[];
     TTerm /@ snapshotRedexes[ttermRaw /@ {roots}]
 )
 
-(* TInteract[redex] / TInteract[redex, root | {roots...}] -- fire
+(* TInteract[redex] / TInteract[redex, root | {roots...}] fires
    ONE interaction at `redex`.  Returns
-       <| "result" -> TTerm,     -- replaces the redex
-          "fresh"  -> {TTerm...} -- redex-status flips caused by this fire
+       <| "result" -> TTerm,     (replaces the redex)
+          "fresh"  -> {TTerm...} (redex-status flips caused by this fire)
        |>
    on success, or Failure["NotARedex", ...] if `redex` isn't
    reducible right now.  Pass `root` (the caller's outer term) so
@@ -800,7 +798,7 @@ TInteract[redex_TTerm, roots___] := withTermCtx[redex, Module[{
     ]
 ]]
 
-(* TStepBegin[roots] / TStepEnd[] -- amortise the attach over many
+(* TStepBegin[roots] / TStepEnd[] amortise the attach over many
    TInteract calls.  Recommended for long stepping sessions where
    HEAP_NEXT is large; without these wrappers, every TInteract pays
    one attach (a single linear heap walk to build the inverse
@@ -908,7 +906,7 @@ TSubexprAt[t_TTerm, path_List] := Block[{
 
 (* How many heap cells does a UOP store?  Mirrors the data-arity
    used in src/book/from_dynamic.c (NOT uop_arity, which counts
-   compute operands -- e.g. CONST has arity 0 but stores 1 cell). *)
+   compute operands; e.g. CONST has arity 0 but stores 1 cell). *)
 uopCellCount[op_] := Switch[op,
     $UopConst,                                                      1,
     $UopAdd | $UopMul | $UopCmplt | $UopCmpeq,                      2,
@@ -926,12 +924,12 @@ uopCellCount[op_] := Switch[op,
       $UopPad | $UopShrink | $UopFlip,                              1,
     $UopMaterialize,                                                1,
     $UopLoad,                                                       1,
-    (* Phase E additions.  Heap layouts mirror src/thvm.h opcode
+    (* Index-layer ops.  Heap layouts mirror src/thvm.h opcode
        comments.  RANGE, INDEX_E, IADD..IAND are pure structural;
        IWHERE has 3 children (cond, then, else).  BUFFER is variable-
        arity (NUM(scope), NUM(dtype), NUM(ndim), NUM(d0)..NUM(d_{ndim-1}));
        we report 0 here and special-case it in tTreeWalkWith below.
-       OPT is (target, NUM(kind), NUM(factor)) -- 3 cells; AFTER and
+       OPT is (target, NUM(kind), NUM(factor)), 3 cells; AFTER and
        STORE are 2/3 cells respectively. *)
     $UopRange,                                                      3,
     $UopIndexE,                                                     2,
@@ -948,7 +946,7 @@ uopCellCount[op_] := Switch[op,
 
 (* tTreeWalkWith[reader, t, seen] is the structural decoder; the
    `reader` function (Integer loc -> raw Term) chooses which cell
-   space to read from -- $heapReadFn for dyn (TTermTree default) or
+   space to read from: $heapReadFn for dyn (TTermTree default) or
    $bookReadFn for book-heap def bodies (TDefTree). *)
 tTreeWalkWith[reader_, t_, seen_] := Block[{
     raw = ttermRaw[t], tag, val, ext, seen2, n
@@ -1089,9 +1087,9 @@ tTreeWalk[t_, seen_] := tTreeWalkWith[$heapReadFn, t, seen]
 
 heapWith[fields__] := With[{loc = THeapAlloc[Length[{fields}]]},
     (* numCoerce (defined in Switch.wl): a bare Integer field means
-       "the NUM with that value".  Applying it here -- at the single
+       "the NUM with that value".  Applying it here, at the single
        funnel every heapTerm-based constructor (TApp / TSup / TLam /
-       TDup / TCtr / TMat / TAnn / TBri / ...) goes through -- gives
+       TDup / TCtr / TMat / TAnn / TBri / ...) goes through, gives
        them all integer-lifting without per-agent boilerplate.  The
        low-level escape hatch THeapSet[loc, rawInt] still writes a raw
        word verbatim; only constructor args get coerced. *)
@@ -1146,7 +1144,7 @@ TTermSame[a_Integer, b_Integer] :=
    body into a UOP_KERNEL, and only then proceeds with the
    standard beta.  The kernel's TVAR input slot resolves through
    SUB to `arg` at fire time.  Bodies that aren't UOP graphs
-   (curried lambdas, TIfZero, etc.) skip materialize -- it'd be
+   (curried lambdas, TIfZero, etc.) skip materialize; it'd be
    a no-op anyway.  See src/interact/app_lam.c. *)
 SetAttributes[TLam, HoldAll]
 TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
@@ -1154,7 +1152,7 @@ TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
     packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 
-(* 1-arg form: `TLam[body]` -- a lambda whose binder is unused.
+(* 1-arg form: `TLam[body]` is a lambda whose binder is unused.
    Equivalent to `TLam[fresh, body]` with a unique-once symbol so
    the binder loc is never referenced from `body`.  Useful for
    MatChain default arms (`TLam[TEra[]]`), MAT-NUM handlers that
@@ -1165,7 +1163,7 @@ TLam[body_] := With[{loc = THeapAlloc[1]},
     packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 
-(* TLamShape[shape_list, x, body] -- explicit shape annotation
+(* TLamShape[shape_list, x, body] is an explicit shape annotation
    for the bound variable.  Useful when the body needs to
    materialize BEFORE any TApp (e.g. inspection / direct
    TMaterialize on the body), or when the argument's shape can't
@@ -1192,11 +1190,11 @@ TDup[label_Integer, body_] := With[{loc = heapWith[body]},   (* heapWith coerces
 TDup[body_, k_]                       := TDup[TFreshLabel[], body, k]
 TDup[label_Integer, body_, k_]        := k @@ TDup[label, body]
 
-(* `TDup[{dp0, dp1}]` -- inverse for the projection pair: given two
+(* `TDup[{dp0, dp1}]` is the inverse for the projection pair: given two
    TTerm projections that share a label and body loc, return the
    DUP wrapper TTerm at that loc.  Native operation: retag the
    projection's tag field (DP0=4 / DP1=5) to DUP (7), keeping ext
-   (label) and val (loc) unchanged.  No heap access -- the body
+   (label) and val (loc) unchanged.  No heap access; the body
    already lives at heap[loc] from the original TDup that produced
    the pair.  Mismatched projections (different DUPs) stay
    unevaluated rather than falling through to the body-constructor. *)
@@ -1236,7 +1234,7 @@ EndPackage[];
    block, so they all land in the shared THVMLink`Private` context and
    can call each other's helpers without qualification.  Definition
    order doesn't matter (every cross-file reference uses SetDelayed),
-   so we Get them in alphabetical order via FileNames -- adding a new
+   so we Get them in alphabetical order via FileNames; adding a new
    sibling means dropping it in this directory; no edits here.
 
    Subdirectories (Kernel/ATP/, ...) are scanned recursively.  Files
@@ -1245,7 +1243,7 @@ EndPackage[];
    loads before Kernel/ATP/*.wl regardless of WL Sort's char-order
    quirks.  Subdirectory files that depend on a parent's BeginPackage
    can rely on this. *)
-(* Quiet the sibling-file loader's Get calls against General::shdw --
+(* Quiet the sibling-file loader's Get calls against General::shdw:
    parse-time shdw messages don't go through Message[] (they're emitted
    directly by the symbol resolver), so plain Off doesn't catch them;
    Quiet, applied at the Scan boundary, does. *)

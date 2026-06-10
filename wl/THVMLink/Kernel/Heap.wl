@@ -1,5 +1,5 @@
 (* ::Package:: *)
-(* Heap.wl -- portable, hand-authorable, roundtrippable snapshots of
+(* Heap.wl - portable, hand-authorable, roundtrippable snapshots of
    the live thvm heap.
 
    Heads:
@@ -24,7 +24,7 @@
    the dyn-only TReset path (no book/defs/alo to restore).
 
    Snapshot strategy: dump the entire [0, THeapPos[]) dyn range and
-   the entire [0, BookPos[]) book range.  No reachability walk -- it
+   the entire [0, BookPos[]) book range.  No reachability walk: it
    sidesteps variable-arity UOp / ALO arity logic and matches THeap[]
    semantics.  Cells at heap[ALO.val] are tagged BookCell because
    their Term's val refers to BOOK_HEAP, not the dyn heap.
@@ -41,14 +41,14 @@
 BeginPackage["THVMLink`"];
 
 TContext::usage     = "TContext[<|\"Root\", \"Cells\", \"BookCells\", \"Tensors\", \"Defs\", \"AloStates\", \"Labels\", \"State\"|>] is a portable snapshot of the live thvm runtime context.  Construct via TContextSnapshot[]; restore via TInitialize.  When BookCells / Defs / AloStates are non-empty, the snapshot is self-contained and survives a fresh kernel (TFree + TInit).";
-Term::usage         = "Term has two forms.\n  1. Term[t_TTerm]: walks the live heap from `t` and returns a fully unrolled nested `Term[head, args...]` expression -- the structural canonical form (LAMs / DUPs carry a binder id so VAR / DP references back).  Substructure is recursive: `Term[\"OP2\", \"+\", Term[\"NUM\", 1], Term[\"NUM\", 2]]`.  Used as vertex identity in TMultiwayGraph and as a readable / serialisable representation of a TTerm.\n  2. Term[tag_String, ext, val] / Term[tag, ext, val, sub]: a single heap-cell descriptor used inside TContext[\"Cells\"] (snapshot form).  `val` is a heap loc; ext is the secondary field (op code, dtype, label, ...).  Hand-authored Term[<|\"tag\", \"ext\", \"val\", \"sub\"|>] is accepted and normalized to the positional form.";
+Term::usage         = "Term has two forms.\n  1. Term[t_TTerm]: walks the live heap from `t` and returns a fully unrolled nested `Term[head, args...]` expression - the structural canonical form (LAMs / DUPs carry a binder id so VAR / DP references back).  Substructure is recursive: `Term[\"OP2\", \"+\", Term[\"NUM\", 1], Term[\"NUM\", 2]]`.  Used as vertex identity in TMultiwayGraph and as a readable / serialisable representation of a TTerm.\n  2. Term[tag_String, ext, val] / Term[tag, ext, val, sub]: a single heap-cell descriptor used inside TContext[\"Cells\"] (snapshot form).  `val` is a heap loc; ext is the secondary field (op code, dtype, label, ...).  Hand-authored Term[<|\"tag\", \"ext\", \"val\", \"sub\"|>] is accepted and normalized to the positional form.";
 BookCell::usage     = "BookCell[tag_String, ext, val] is the same as Term[tag, ext, val] but for a BOOK-domain cell (lives either in TContext[\"BookCells\"] or in the dyn cell at heap[ALO.val]).  `val` is an index into TContext[\"BookCells\"].";
 TContextSnapshot::usage = "TContextSnapshot[] returns a TContext[<|...|>] capturing every cell in [0, THeapPos[]), every book cell in [1, BookPos[]), all referenced tensors with data, the DEFS table (with name strings interned in TDef), and the ALO substitution chain.  TContextSnapshot[root_TTerm] additionally records `root` as the snapshot's entry point.";
 TInitialize::usage = "TInitialize[h_TContext] restores `h` into the live runtime and returns the root as a live TTerm (or Missing[\"NoRoot\"] if the snapshot has no root).  Cross-restart capable: when BookCells / Defs / AloStates are bundled, TInitialize wipes the C-side book / DEFS / ALO_STATES first, then restores them, then the dyn heap.  TInitialize[h, \"ZeroFill\" -> True] also accepts Uninitialized snapshots; tensors are allocated zero-filled.";
 TContextStrip::usage    = "TContextStrip[h_TContext] returns h with all NumericArray tensor buffers replaced by <|\"shape\" -> _, \"dtype\" -> _|>.  Pure WL; does not touch the runtime.";
 TContextToTermTree::usage = "TContextToTermTree[h_TContext] returns a nested string-headed expression mirroring TTermExpr but driven by the snapshot's Cells list (no live runtime needed).  Cycles render as \"Cycle\"[idx].  Read-only projection.";
 
-(* Forward references -- the high-level constructors live in sibling
+(* Forward references: the high-level constructors live in sibling
    files (Switch.wl, etc.) that load AFTER Heap.wl in alphabetical
    FileNames order.  Touching the symbols here interns them in the
    PUBLIC `THVMLink`` context so references inside our Private body
@@ -134,7 +134,7 @@ BookCell[a_Association] /; KeyExistsQ[a, "tag"] && KeyExistsQ[a, "ext"] && KeyEx
    Depth-bounded at 16 to break cycles (e.g. self-referential ALO);
    over-deep subtrees collapse to Term["..."].  LAMs / DUPs carry a
    binder id (the lam_loc / dup_loc) so VAR / DP references can
-   match the binder symbolically -- this id IS the heap loc today
+   match the binder symbolically: this id IS the heap loc today
    but is treated as an opaque binder identifier in the
    structural-equality sense, matching how TLam[x, body]'s `x` is
    alpha-renamable. *)
@@ -157,7 +157,7 @@ termFromTTermDepth[t_TTerm, d_Integer] := Block[
         $TagDP0 | $TagDP1,
             cell = THeapRead[val];
             If[ TTermSub[cell] === 1,
-                (* DUP-X fired: projection resolved -- chase through
+                (* DUP-X fired: projection resolved, chase through
                    to the substituted branch's canonical. *)
                 termFromTTermDepth[
                     packTerm[0, TTermTag[cell], TTermExt[cell],
@@ -217,7 +217,7 @@ termFromTTermDepth[t_TTerm, d_Integer] := Block[
                         termFromTTermDepth[THeapRead[val + i], d - 1],
                         {i, 0, arity - 1}]]],
         _, Term[TTagName[tag], val, ext]]
-];
+]
 
 (* === predicates === *)
 
@@ -308,23 +308,23 @@ snapshotBookCells[remap_Association] := Module[{nb},
 
 (* Snapshot DEFS: iterate slots [0, DEFS_CAP), keep non-zero entries.
    Reverse-lookup name string from $defNames where available. *)
-snapshotDefs[remap_Association] := Module[{slotToName, entries = {}},
+snapshotDefs[remap_Association] := Module[{slotToName},
     slotToName = If[ AssociationQ[$defNames],
         AssociationMap[Reverse, $defNames],
         <||>
     ];
-    Do[
+    Association @ Table[
         With[{rootRaw = $defGetFn[slot]},
             If[ rootRaw =!= 0,
-                AppendTo[entries, slot -> <|
+                slot -> <|
                     "name" -> Lookup[slotToName, slot, None],
                     "root" -> rawToBookCell[rootRaw, remap]
-                |>]
+                |>,
+                Nothing
             ]
         ],
         {slot, 0, 255}
-    ];
-    Association @ entries
+    ]
 ]
 
 (* Snapshot ALO_STATES at ids [1, ALO_STATES_NEXT).  Returned as an
@@ -367,19 +367,17 @@ snapshotImpl[rootRawOrMissing_] := Module[{
     remap   = collectTensorRemap[allRaws];
 
     cells = Association @ MapIndexed[
-        Function[{raw, idx},
-            With[{i = First[idx] - 1, locOff = lo},
-                (i + locOff) -> If[ MemberQ[bookHolders, i],
-                    rawToBookCell[raw, remap],
-                    rawToTerm[raw, remap]
-                ]
+        {raw, idx} |-> With[{i = First[idx] - 1, locOff = lo},
+            (i + locOff) -> If[ MemberQ[bookHolders, i],
+                rawToBookCell[raw, remap],
+                rawToTerm[raw, remap]
             ]
         ],
         cellRaws
     ];
     bookCells = snapshotBookCells[remap];
     tensors   = Association @ KeyValueMap[
-        Function[{rid, slot}, slot -> $tensorReadFn[rid]],
+        {rid, slot} |-> slot -> $tensorReadFn[rid],
         remap
     ];
     defs      = snapshotDefs[remap];
@@ -437,7 +435,7 @@ TContextStrip[TContext[a_Association]] := Module[{stripped},
       and Cells indices line up 1:1 with heap locs).
    8. Iterate writing each cell, remapping TAG_TEN val through the
       slot -> runtime-id map.  Both Term and BookCell cells pack via
-      the same termToRaw -- val passes through directly because
+      the same termToRaw; val passes through directly because
       cell-domain interpretation is the receiver's responsibility. *)
 
 Options[TInitialize] = {"ZeroFill" -> False}
@@ -450,7 +448,7 @@ Options[TInitialize] = {"ZeroFill" -> False}
    result is a freshly-allocated TTerm in the current dyn heap.
 
    Binder ids in LAM / DUP / DP0 / DP1 are alpha-renamed during the
-   walk -- the id in the Term is just a placeholder telling the
+   walk; the id in the Term is just a placeholder telling the
    walker which VAR / DP cells inside the body refer back to which
    binder.  Fresh symbols are minted via Unique[] and substituted
    for the placeholders so the high-level TLam / TDup machinery
@@ -465,7 +463,7 @@ TInitialize[Term["REF", slot_Integer]]   := packTerm[0, $TagREF, slot, 0]
 TInitialize[Term["TEN", id_Integer]]     := packTerm[0, $TagTEN, 5, id]
 TInitialize[Term["VAR", binderId_]]      :=
     (Message[TInitialize::orphanvar, binderId]; $Failed)
-TInitialize::orphanvar = "Term[\"VAR\", ``] outside any enclosing Term[\"LAM\", ``, ...] -- VARs only make sense in a LAM body.";
+TInitialize::orphanvar = "Term[\"VAR\", ``] outside any enclosing Term[\"LAM\", ``, ...] - VARs only make sense in a LAM body.";
 
 (* Identity rule for already-built TTerms: lets nested recursion mix
    freshly-built TTerm leaves into a Term-shaped expression. *)
@@ -478,7 +476,7 @@ TInitialize[Term["LAM", binderId_, body_]] :=
            placeholder before handing the body to TLam.  TLam's
            HoldAll + Function[xSym, body] then alpha-substitutes xSym
            -> TVarFor[loc] inside the held body, so each placeholder
-           becomes Term["@VAR", TVarFor[loc]] -- which TInitialize's
+           becomes Term["@VAR", TVarFor[loc]], which TInitialize's
            leaf rule below unwraps to TVarFor[loc] during the walk. *)
         TLam[xSym,
             TInitialize[body /. Term["VAR", binderId] :> Term["@VAR", xSym]]]
@@ -531,9 +529,7 @@ TInitialize[TContext[a_Association], opts:OptionsPattern[]] := Module[{
     TReset[];
 
     slotToRuntime = Association @ KeyValueMap[
-        Function[{slot, entry},
-            slot -> initTensorEntry[entry, zeroFill]
-        ],
+        {slot, entry} |-> slot -> initTensorEntry[entry, zeroFill],
         tensorsAssoc
     ];
 
@@ -549,7 +545,7 @@ TInitialize[TContext[a_Association], opts:OptionsPattern[]] := Module[{
 
     (* Restore DEFS slots and re-intern names in Ref.wl's $defNames. *)
     KeyValueMap[
-        Function[{slot, entry},
+        {slot, entry} |-> (
             $defSetFn[slot, termToRaw[entry["root"], slotToRuntime]];
             With[{name = Lookup[entry, "name", None]},
                 If[ StringQ[name],
@@ -557,18 +553,16 @@ TInitialize[TContext[a_Association], opts:OptionsPattern[]] := Module[{
                     If[ slot >= $defNext, $defNext = slot + 1]
                 ]
             ]
-        ],
+        ),
         defs
     ];
 
     (* Restore ALO_STATES.  List index i (1-based) -> state id i. *)
     If[ Length[aloStates] > 0,
         MapIndexed[
-            Function[{entry, idx},
-                $aloStateSetFn[
-                    First[idx],
-                    entry["parent"], entry["old_loc"], entry["new_loc"]
-                ]
+            {entry, idx} |-> $aloStateSetFn[
+                First[idx],
+                entry["parent"], entry["old_loc"], entry["new_loc"]
             ],
             aloStates
         ];
@@ -634,7 +628,7 @@ TInitialize::uninit = "TInitialize: snapshot is Uninitialized; pass \"ZeroFill\"
 
 (* Term/BookCell[a_Association] normalize via the global rewrite up
    top, so by the time we get here `t` is positional.  Both heads
-   pack identically -- domain interpretation (dyn vs book loc) is the
+   pack identically; domain interpretation (dyn vs book loc) is the
    C-side runtime's job and only matters for tag-context references
    (TAG_ALO).  We just preserve val. *)
 

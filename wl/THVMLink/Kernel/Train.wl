@@ -5,13 +5,13 @@
 
    Following built-in NetTrain's `prop` argument:
      TNetTrain[net, data, "TrainingNet"]   returns the inert training-loop
-                                            TTerm -- nothing has run yet;
+                                            TTerm (nothing has run yet);
                                             `TWnf` drives it.
      TNetTrain[net, data]                   convenience: TWnf's that term and
                                             returns the trained forward term.
 
-   The step -- forward, categorical cross-entropy, the shared backward, and
-   one in-place SGD ASSIGN per weight -- is materialised ONCE.  It is wrapped
+   The step (forward, categorical cross-entropy, the shared backward, and
+   one in-place SGD ASSIGN per weight) is materialised ONCE.  It is wrapped
    in a recursive lambda whose base case IS the forward term:
        loop(k) = if k == 0 then fwd else <fire every weight's step>; loop(k-1)
    so `TWnf @ loop(MaxTrainingRounds)` fires every step (training the weights
@@ -20,14 +20,14 @@
 
    Data: a list of `input -> class` rules, or a dataset name string
    ("MNIST" -> ResourceData["MNIST", "TrainingData"]).  Inputs (Images /
-   arrays) are reshaped to the net's input shape internally -- no host-side
-   ImageData/Flatten ceremony at the call site.  Flat-input nets only for
+   arrays) are reshaped to the net's input shape internally (no host-side
+   ImageData/Flatten ceremony at the call site).  Flat-input nets only for
    now (the batched forward keeps the batch axis for a rank-2 input;
    FlattenLayer / conv batching is a TFromNet follow-up). *)
 
 BeginPackage["THVMLink`"];
 
-TNetTrain::usage = "TNetTrain[net, data, \"TrainingNet\", opts] returns an INERT TTerm: the whole optimiser as a recursive interaction-net term whose base case is the forward.  TWnf drives it -- firing every training step in place and reducing to the trained forward term.  TNetTrain[net, data, opts] is the convenience form that TWnf's it for you.  `net` is a NetChain (e.g. NetModel[\"LeNet\"]), whose batched forward is lifted directly; `data` is a list of `input -> class` rules or a dataset name (\"MNIST\").  Inputs are reshaped to the net's input shape internally.  A lifted TFromNet[net] term is inference-only -- training it would need the batched forward re-lifted, which needs the NetChain -- so pass the NetChain instead.  Options: MaxTrainingRounds, \"LearningRate\", \"Momentum\" (0 = plain SGD; > 0 adds a persistent velocity per weight for SGD-with-momentum -- use a smaller LearningRate, the effective rate is lr/(1-momentum)), \"Method\" (\"SGD\" default, or \"Adam\" for uncorrected ADAM with persistent m/v moments and standard betas -- use a small LearningRate, ~0.001 on MNIST-scale problems; the adaptive step is roughly lr per element), \"WeightDecay\" (0 = none; > 0 adds L2 regularization by folding wd*p into each weight's gradient, for all optimizers), TargetDevice.";
+TNetTrain::usage = "TNetTrain[net, data, \"TrainingNet\", opts] returns an INERT TTerm: the whole optimiser as a recursive interaction-net term whose base case is the forward.  TWnf drives it, firing every training step in place and reducing to the trained forward term.  TNetTrain[net, data, opts] is the convenience form that TWnf's it for you.  `net` is a NetChain (e.g. NetModel[\"LeNet\"]), whose batched forward is lifted directly; `data` is a list of `input -> class` rules or a dataset name (\"MNIST\").  Inputs are reshaped to the net's input shape internally.  A lifted TFromNet[net] term is inference-only (training it would need the batched forward re-lifted, which needs the NetChain), so pass the NetChain instead.  Options: MaxTrainingRounds, \"LearningRate\", \"Momentum\" (0 = plain SGD; > 0 adds a persistent velocity per weight for SGD-with-momentum, use a smaller LearningRate, the effective rate is lr/(1-momentum)), \"Method\" (\"SGD\" default, or \"Adam\" for uncorrected ADAM with persistent m/v moments and standard betas, use a small LearningRate, ~0.001 on MNIST-scale problems; the adaptive step is roughly lr per element), \"WeightDecay\" (0 = none; > 0 adds L2 regularization by folding wd*p into each weight's gradient, for all optimizers), TargetDevice.";
 
 TNetPredict::usage = "TNetPredict[trainedNet, inputs] runs the trained forward term on `inputs` (a list of the same length as the training batch) and returns the predicted integer classes.";
 
@@ -71,14 +71,13 @@ batchTensors[data_List, inShape_List, nClasses_Integer] := {
    TWnf @ loop(rounds) fires every weight's step (training in place) and
    reduces to the 0 base case; the trained forward is the registered `fwd`
    (its weight buffers are updated in place).  Each weight's step is
-   TMaterialize[TNf[...]] (re-fireable -- the kernel is not baked to its
+   TMaterialize[TNf[...]] (re-fireable: the kernel is not baked to its
    output; see the redex_fire UOP_KERNEL carve-out). *)
 buildLoop[params_List, grads_List, lr_TTerm, name_String] := Module[{stepRefs},
     stepRefs = MapThread[
-        Function[{p, g, i},
-            With[{nm = name <> "_p" <> ToString[i]},
-                TDef[nm, TMaterialize[TNf[TAssign[p, TUOpAdd[p, TUOpNeg[TUOpMul[lr, g]]]]]]];
-                TRef[nm]]],
+        {p, g, i} |-> With[{nm = name <> "_p" <> ToString[i]},
+            TDef[nm, TMaterialize[TNf[TAssign[p, TUOpAdd[p, TUOpNeg[TUOpMul[lr, g]]]]]]];
+            TRef[nm]],
         {params, grads, Range[Length[params]]}];
     TDef[name,
         TLam[k,
@@ -100,11 +99,10 @@ buildLoop[params_List, grads_List, lr_TTerm, name_String] := Module[{stepRefs},
 buildLoopMomentum[params_List, grads_List, vels_List, lr_TTerm, beta_TTerm, name_String] :=
     Module[{stepRefs},
         stepRefs = Flatten @ MapThread[
-            Function[{p, g, v, i},
-                With[{vnm = name <> "_v" <> ToString[i], pnm = name <> "_p" <> ToString[i]},
-                    TDef[vnm, TMaterialize[TNf[TAssign[v, TUOpAdd[TUOpMul[beta, v], g]]]]];
-                    TDef[pnm, TMaterialize[TNf[TAssign[p, TUOpAdd[p, TUOpNeg[TUOpMul[lr, v]]]]]]];
-                    {TRef[vnm], TRef[pnm]}]],
+            {p, g, v, i} |-> With[{vnm = name <> "_v" <> ToString[i], pnm = name <> "_p" <> ToString[i]},
+                TDef[vnm, TMaterialize[TNf[TAssign[v, TUOpAdd[TUOpMul[beta, v], g]]]]];
+                TDef[pnm, TMaterialize[TNf[TAssign[p, TUOpAdd[p, TUOpNeg[TUOpMul[lr, v]]]]]]];
+                {TRef[vnm], TRef[pnm]}],
             {params, grads, vels, Range[Length[params]]}];
         TDef[name,
             TLam[k,
@@ -151,7 +149,7 @@ rebuildLayer[l_] := l
 
 stripSoftmax[net_NetChain] := Module[{n, keep, layers},
     n      = Length[net];
-    keep   = If[ Head[NetExtract[net, n]] === SoftmaxLayer, n - 1, n];
+    keep   = If[ MatchQ[NetExtract[net, n], _SoftmaxLayer], n - 1, n];
     layers = Table[rebuildLayer[NetExtract[net, i]], {i, keep}];
     NetChain[layers, "Input" -> netInputShape[net]]
 ]
@@ -171,17 +169,16 @@ buildLoopAdam[params_List, grads_List, ms_List, vs_List, lr_TTerm, name_String] 
         b1 = TUOpConst[0.9];  b2 = TUOpConst[0.999];
         om1 = TUOpConst[0.1]; om2 = TUOpConst[0.001];  eps = TUOpConst[1.*^-8];
         stepRefs = Flatten @ MapThread[
-            Function[{p, g, m, v, i},
-                With[{mnm = name <> "_m" <> ToString[i], vnm = name <> "_v" <> ToString[i],
-                      pnm = name <> "_p" <> ToString[i]},
-                    TDef[mnm, TMaterialize[TNf[TAssign[m,
-                        TUOpAdd[TUOpMul[b1, m], TUOpMul[om1, g]]]]]];
-                    TDef[vnm, TMaterialize[TNf[TAssign[v,
-                        TUOpAdd[TUOpMul[b2, v], TUOpMul[om2, TUOpMul[g, g]]]]]]];
-                    TDef[pnm, TMaterialize[TNf[TAssign[p,
-                        TUOpAdd[p, TUOpNeg[TUOpMul[lr,
-                            TUOpMul[m, TUOpRecip[TUOpAdd[TUOpSqrt[v], eps]]]]]]]]]];
-                    {TRef[mnm], TRef[vnm], TRef[pnm]}]],
+            {p, g, m, v, i} |-> With[{mnm = name <> "_m" <> ToString[i], vnm = name <> "_v" <> ToString[i],
+                  pnm = name <> "_p" <> ToString[i]},
+                TDef[mnm, TMaterialize[TNf[TAssign[m,
+                    TUOpAdd[TUOpMul[b1, m], TUOpMul[om1, g]]]]]];
+                TDef[vnm, TMaterialize[TNf[TAssign[v,
+                    TUOpAdd[TUOpMul[b2, v], TUOpMul[om2, TUOpMul[g, g]]]]]]];
+                TDef[pnm, TMaterialize[TNf[TAssign[p,
+                    TUOpAdd[p, TUOpNeg[TUOpMul[lr,
+                        TUOpMul[m, TUOpRecip[TUOpAdd[TUOpSqrt[v], eps]]]]]]]]]];
+                {TRef[mnm], TRef[vnm], TRef[pnm]}],
             {params, grads, ms, vs, Range[Length[params]]}];
         TDef[name,
             TLam[k,
@@ -211,7 +208,7 @@ inertTrainFrom[net_NetChain, dataSpec_, rounds_Integer, opt_Association] := Modu
     nClasses = Max[data[[All, 2]]] + 1;
     {xSlot, tgtSlot} = batchTensors[data, inShape, nClasses];
     (* The param terms are the float-leaf TTerms baked into THIS batched
-       forward -- the very tensors the inert SGD loop updates in place.
+       forward: the very tensors the inert SGD loop updates in place.
        Read them straight off the graph (TNetParams), MINUS the input slot
        (itself a float TEN leaf of the forward, but not a weight). *)
     fwd    = TFromNet[logitNet, xSlot];
@@ -221,7 +218,7 @@ inertTrainFrom[net_NetChain, dataSpec_, rounds_Integer, opt_Association] := Modu
 
 (* the trainable weights of a forward built over a concrete input slot: the
    float leaves of `fwd` minus the input slot `xSlot` (a float TEN leaf too,
-   but the data to feed, not a weight).  This is internal -- it KNOWS the
+   but the data to feed, not a weight).  This is internal: it KNOWS the
    input slot, so it excludes it directly; the public TNetParams takes the
    LAM (TFromNet[net]) where the input is a bound variable, not a concrete
    forward. *)
@@ -230,7 +227,7 @@ trainableParams[fwd_, xSlot_TTerm] := With[{xv = TTermVal[xSlot]},
 
 (* A TNetTrain-trained forward IS a known network: the training registry
    recorded its input slot explicitly (for TNetPredict), so TNetParams on it
-   returns the trained weights by excluding that input -- the same result the
+   returns the trained weights by excluding that input, the same result the
    LAM form gives, for a forward that was built over a concrete input slot.
    An UNregistered concrete forward stays an applied evaluation (NN.wl's
    TNetParams messages on it); a LAM falls through to the structural form. *)
@@ -273,7 +270,7 @@ inertTrainCore[fwd_, params_, xSlot_, tgtSlot_, inShape_, nData_,
 (* === lifted LAM is inference-only ===
    A lifted TFromNet[net] LAM bakes its input shape into the forward, so
    training over a (different) batch size needs the forward re-lifted at the
-   batch shape -- and that re-lift needs the NetChain (nothing stores the
+   batch shape, and that re-lift needs the NetChain (nothing stores the
    net).  Guide the caller to pass the NetChain to TNetTrain instead, which
    lifts the batched forward directly (inertTrainFrom). *)
 inertTrainTerm[_TTerm, _, _Integer, _Association] := (
@@ -284,7 +281,7 @@ inertTrainTerm[_TTerm, _, _Integer, _Association] := (
    loop term (nothing has run); the no-prop form TWnf's it and returns the
    trained forward (the in-place-trained registered term, not the reduced
    copy TWnf hands back).  A NetChain (e.g. NetModel["LeNet"]) builds the
-   logits forward directly -- no round trip.  A lifted LAM (_TTerm) is
+   logits forward directly, no round trip.  A lifted LAM (_TTerm) is
    inference-only and routes to a guiding Message (inertTrainTerm).  The
    optimiser config is bundled into one `opt` association. *)
 TNetTrain[net : (_TTerm | _NetChain), dataSpec_, "TrainingNet", opts : OptionsPattern[]] := With[{
@@ -313,13 +310,13 @@ TNetTrain[net : (_TTerm | _NetChain), dataSpec_, opts : OptionsPattern[]] := Wit
 ]
 
 (* === backward-compatible {x, y} overload ===
-   The earlier surface took explicit host arrays of inputs and one-hot
-   targets and returned a handle association <|"Forward", "Input", "Params"|>
-   that TNetPredict[handle, x] consumed.  Kept so existing callers (Tests,
-   docs/Tutorials/Train.md, bench/mnist-train) and the same inert-loop
-   semantics keep working: lift over an input slot, build the inert SGD loop,
-   TWnf-drive it, and hand back the same association.  `net` is a raw
-   NeuralNetworks net (NetChain / layer); `x`, `y` are rank-2 host arrays. *)
+   Takes explicit host arrays of inputs and one-hot targets and returns a
+   handle association <|"Forward", "Input", "Params"|> that
+   TNetPredict[handle, x] consumes.  Kept so existing callers (Tests,
+   docs/Tutorials/Train.md, bench/mnist-train) keep working: lift over an
+   input slot, build the inert SGD loop, TWnf-drive it, and hand back the
+   association.  `net` is a raw NeuralNetworks net (NetChain / layer);
+   `x`, `y` are rank-2 host arrays. *)
 TNetTrain[net_, x_List, y_List, opts : OptionsPattern[]] := Module[{
     xS, yT, lr, rounds, lossFn, fwd, params, loss, grads, name
 },
@@ -353,10 +350,10 @@ TNetPredict[net_TTerm, inputs_List] := Module[{
     nBatch  = entry["Batch"];
     n       = Length[inputs];
     padded  = Join[inputs, ConstantArray[Last[inputs], Mod[-n, nBatch]]];
-    chunkPreds = Function[chunk,
+    chunkPreds = (chunk |-> (
         TSet[xSlot, TTensorCreate @ NumericArray[toInput[#, inShape] & /@ chunk, "Real32"]];
         argmaxRows[Normal @ TTensorData @ TRealize @ fwd]
-    ] /@ Partition[padded, nBatch];
+    )) /@ Partition[padded, nBatch];
     Take[Join @@ chunkPreds, n]
 ]
 

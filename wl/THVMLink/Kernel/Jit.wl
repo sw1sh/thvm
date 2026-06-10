@@ -1,11 +1,11 @@
 (* ::Package:: *)
 (* Jit.wl - capture / replay of a kernel-dispatch sequence.
 
-   Phase 7 of the tinygrad-parity arc.  Per-iteration cost in a tight
-   training loop (wl/Examples/beautiful-mnist/train.wls) is dominated
-   by re-running the scheduler -- realize_classify, topo-sort,
-   materialize -- on a graph whose shape is identical across
-   iterations.  Only the input bytes change.
+   Per-iteration cost in a tight training loop
+   (wl/Examples/beautiful-mnist/train.wls) is dominated by re-running
+   the scheduler -- realize_classify, topo-sort, materialize -- on a
+   graph whose shape is identical across iterations.  Only the input
+   bytes change.
 
    TJit captures the kernel-dispatch sequence on the first call and
    replays it on subsequent calls.  Replay skips the scheduler
@@ -129,8 +129,8 @@ TJitClosure[a_Association][args___] := Module[{
                 (* Mark EVERY returned tensor handle (a bare TTerm, or any
                    in a list / nested structure) as a capture result, so all
                    their output buffers are pinned + replayed.  A list return
-                   (TGrad over several params) previously passed root 0 and
-                   was reclaimed as garbage. *)
+                   (TGrad over several params) needs each root pinned, else
+                   it is reclaimed as garbage. *)
                 With[{roots = Cases[{fnRes}, t_TTerm :> ttermRaw[t], Infinity]},
                     If[ roots === {},
                         $jitCaptureEndResultFn[0],
@@ -195,10 +195,10 @@ captureCounts[rows_, key_] := ReverseSort @ Counts[
     Lookup[rows, key, 0] /. 0 -> Nothing]
 
 jitGraphRunLimit[] := Module[{raw = Environment["THVM_METAL_GRAPH_MAX_DISPATCHES"], n},
-    If[!StringQ[raw] || StringLength[StringTrim[raw]] == 0, Return[256]];
-    If[!StringMatchQ[StringTrim[raw], DigitCharacter ..], Return[256]];
+    If[ ! StringQ[raw] || StringLength[StringTrim[raw]] == 0, Return[256]];
+    If[ ! StringMatchQ[StringTrim[raw], DigitCharacter ..], Return[256]];
     n = ToExpression[StringTrim[raw]];
-    If[2 <= n <= 512, n, 256]
+    If[ 2 <= n <= 512, n, 256]
 ]
 
 TJitCaptureRuns[c_TJitClosure] := Module[{

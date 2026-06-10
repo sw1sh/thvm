@@ -4,7 +4,7 @@
    Loaded from THVMLink.wl inside Begin["`Private`"]; all symbols
    stay in the main THVMLink` context so users see TTensor /
    TUOp* without a subcontext namespace.  Sibling-split purely for
-   size -- THVMLink.wl now handles lifecycle + IC combinators +
+   size: THVMLink.wl handles lifecycle + IC combinators +
    atomic term; Tensor.wl handles anything tensor-shaped.
 
    Three groups of definitions live here:
@@ -65,8 +65,8 @@ TTotalBufBytes[] := (ensureInit[]; $totalBufBytesFn[])
 (* === predicates ===
    tensorTermQ[t]: true iff t is a TTerm whose tag makes it a
    tensor-shaped value (TAG_TEN, TAG_UOP, TAG_DP0/DP1 with the
-   DUP_GRAD_FLAG bit set on its ext -- a chain-rule projection from
-   TUOpGradWithTarget that fires to a tensor -- or a TAG_VAR carrying a
+   DUP_GRAD_FLAG bit set on its ext, a chain-rule projection from
+   TUOpGradWithTarget that fires to a tensor, or a TAG_VAR carrying a
    TLamShape shape annotation, i.e. the bound variable of a tensor
    lambda).  The VAR case is what lets the numeric UpValue sugar
    (Plus / Dot / Transpose / ...) build a UOP graph inside a TLamShape
@@ -106,7 +106,7 @@ liftNumeric[t_TTerm,       _]            := t
 (* Iterative single-path descent (NOT recursion): the dtype always comes from
    src[0] (or the kernel output / DUP body), so we follow that one edge in a
    loop to a TEN / CONST / CAST leaf.  A recursive walk would blow
-   $RecursionLimit on a deep residual chain (e.g. GPT-2's 12 blocks) -- the
+   $RecursionLimit on a deep residual chain (e.g. GPT-2's 12 blocks), the
    same depth issue tUopShape (Shape.wl) avoids the same way.  `result` stays
    Null while descending; any terminal case sets it and ends the loop. *)
 inheritDType[t_TTerm] := Module[{raw, tag, val, ext, result = Null},
@@ -167,7 +167,7 @@ TTensor[shape_List, data_List, dtype_String] := With[{
     t
 ]
 
-(* Reading a tensor -- only valid once `t` is actually a TAG_TEN.
+(* Reading a tensor: only valid once `t` is actually a TAG_TEN.
    If `t` is a UOp or IC term, we return a typed Missing rather
    than read random memory, so test failures surface cleanly
    instead of crashing WL. *)
@@ -177,7 +177,7 @@ tensorIdQ[t_] := TTermTag[t] === $TagTEN
 TTensorShape[t_ ? tensorIdQ]    := $tensorShapeFn[TTermVal[t]]
 TTensorShape[t_TTerm]           := Missing["NotATensor", TTagName[TTermTag[t]]]
 
-(* TTermShape -- runs the C-side `term_shape_in` resolver, which
+(* TTermShape: runs the C-side `term_shape_in` resolver, which
    handles TEN, UOP (shape-inferred from children), and TVAR
    (consults the lam_shape side table).  Returns {} when the
    shape can't be determined; otherwise a list of dim extents.
@@ -282,14 +282,14 @@ TUOpFlip[src_, axes_List] := With[{mask = Total[2^# & /@ axes]},
    [y, gy].  Returns a TAG_DP1 term with DUP_GRAD_FLAG set on its ext.
    The companion FWD projection (TAG_DP0) at the same loc just reads
    y; the BWD fires the gy-threaded chain rule.  gy must match y's
-   shape -- TGrad below builds a default ones-at-y.shape seed. *)
+   shape; TGrad below builds a default ones-at-y.shape seed. *)
 TUOpGrad[y_, gy_] := (ensureInit[]; TTerm[$uopGradFn[ttermRaw[y], ttermRaw[gy]]])
 TUOpGradWithTarget[y_, gy_, target_] := (ensureInit[];
     TTerm[$uopGradWithTargetFn[ttermRaw[y], ttermRaw[gy], ttermRaw[target]]])
 TUOpFwd [y_, gy_] := (ensureInit[]; TTerm[$uopFwdFn [ttermRaw[y], ttermRaw[gy]]])
 
 (* Build {fwd, bwd} pair sharing one cell [y, gy].  The dup-like
-   discipline -- both projections reference the same heap loc, so the
+   discipline: both projections reference the same heap loc, so the
    forward subgraph isn't duplicated. *)
 TGradPair[y_, gy_] := With[{bwd = TUOpGrad[y, gy]},
     With[{loc = TTermVal[bwd]},
@@ -312,25 +312,24 @@ TUOpCopy[src_TTerm, device_String] :=
    for the default.  Ported from tinygrad's UOp.device (uop/ops.py:756). *)
 TDevice[t_TTerm] := (ensureInit[]; deviceName[$termDeviceFn[ttermRaw[t]]])
 
-(* TToDevice[t, "metal"|"cpu"]: move t to a device -- tinygrad's
+(* TToDevice[t, "metal"|"cpu"]: move t to a device, tinygrad's
    Tensor.to(device).  A lazy graph "lives on" a device iff it is COMPUTED
    there, so this pushes a device-targeted UOP_COPY down to every tensor leaf
    (weights, host inputs, realized tensors); TRealize then routes the whole
    realize to that device and computes the forward there, uploading each leaf
    once.  A single COPY around the root would instead compute the whole graph
-   on CPU and move only the result -- so to run an imported forward on the GPU
+   on CPU and move only the result, so to run an imported forward on the GPU
    you just write TToDevice[net[x], "metal"] (no need to wrap the input
    separately).  A bare realized tensor is the degenerate one-leaf upload.
    Mirrors tinygrad's model.to(device) moving the parameters. *)
 TToDevice[t_TTerm, device_String] :=
     (ensureInit[]; TTerm[$uopToDeviceFn[ttermRaw[t], deviceCode[device]]])
 
-(* === Phase E UOp constructors ===
- * INDEX layer + BUFFER/STORE/AFTER/OPT.  Used by Rewrite.wl and the
- * cross-validation .wlt suite to build canonical DAGs (RANGE-based
- * matmul, softmax-shape reduces) directly in WL without going
- * through Python.
- *)
+(* === INDEX-layer UOp constructors ===
+   INDEX layer + BUFFER/STORE/AFTER/OPT.  Used by Rewrite.wl and the
+   cross-validation .wlt suite to build canonical DAGs (RANGE-based
+   matmul, softmax-shape reduces) directly in WL without going
+   through Python. *)
 TUOpRange[axisId_Integer, axisType_Integer, extent_Integer] := (
     ensureInit[]; TTerm[$uopRangeFn[axisId, axisType, extent]])
 
@@ -370,7 +369,7 @@ TUOpAfter[node_, afterNode_] := (
    TAG_NUM atoms won't match. *)
 TUOpIConst[v_Integer] := (ensureInit[]; TTerm[$termIConstFn[v]])
 
-(* TAssign[dst_TEN, src_UOP_or_TEN] -- in-place buffer write.  Wnf
+(* TAssign[dst_TEN, src_UOP_or_TEN]: in-place buffer write.  Wnf
    fires it once `src` reduces to a TAG_TEN: backend memcpy of
    src.buf into dst.buf, returns dst.  Used by optimizer loops to
    mutate weight tensors without allocating fresh tids per step.
@@ -402,18 +401,16 @@ TAssign[dst_, src_] := (ensureInit[];
 (* uop_leaf_tids (src/uop/leaf_tids.c) is a generic UOP-DAG walk
    that returns the distinct TAG_TEN-leaf tids reachable from a
    root term.  Iterative + visited bitmap, sub-ms even for deep
-   graphs.  TGrad / TGradMany are the first callers (this used to
-   be a recursive WL walk that took 1.6 s on LeNet's 8-weight
-   forward). *)
+   graphs.  TGrad / TGradMany are the callers. *)
 uopLeafTids[t_TTerm] := (ensureInit[]; Normal @ $uopLeafTidsFn[ttermRaw[t]])
 uopLeafTids[_]       := {}
 
 (* Default cotangent seed for TGrad: ones at y's shape and dtype.
    CONST is a scalar (shape {1}); EXPAND lifts it to y.shape when
    y is non-scalar.  Dtype matches y's so f64 / f16 / bf16 kernels
-   read the seed buffer with the right itemsize -- defaulting to
-   f32 here used to bit-misinterpret under f64 (giving e-314
-   garbage from the chain rule's gy * src multiply). *)
+   read the seed buffer with the right itemsize; a plain f32 seed
+   would bit-misinterpret under f64 (giving e-314 garbage from the
+   chain rule's gy * src multiply). *)
 gradOnesSeed[y_TTerm] := Module[{shape = tUopShape[y], one},
     one = TUOpConst[1.0, inheritDType[y]];
     If[ ListQ[shape] && Length[shape] > 0 && shape =!= {1},
@@ -464,7 +461,7 @@ TGrad[y_, target_TTerm, gy_TTerm] :=
    that's the dominant per-step cost (13s -> sub-second). *)
 tGradWithLeaves[y_, target_TTerm, gy_TTerm, leafTids_List] := (
     (* Target-aware chain rule: leaf rule emits gy at matching tids
-       and scalar zero elsewhere -- no SUPs, no DUP-nest projection.
+       and scalar zero elsewhere: no SUPs, no DUP-nest projection.
        Avoids the exponential cell blow-up in deep DAGs (LeNet:
        10 leafTids x deep forward DAG would require 10 nested
        DUP-SUP commute fires per leaf and cross-product fires).
@@ -488,11 +485,11 @@ TGrad[y_, {target_}]    := {TGrad[y, target]}
    accumulate each leaf's summed cotangent into TenDesc.grad (uop_grad.c
    grad_leaf_sup target==0 path).  Read the per-target accumulator back
    via TGradOf for exactly the requested `targets` (tinygrad
-   Tensor.gradient[targets] -- .grad is filled for all leaves, the
+   Tensor.gradient[targets]: .grad is filled for all leaves, the
    caller picks which to return).
 
    The single walk computes every shared intermediate cotangent ONCE and
-   threads it to all leaves -- a forward value reached by multiple
+   threads it to all leaves: a forward value reached by multiple
    backward consumers is one node (grad_fwd_of shares it in non-SUP/DUP
    mode), so the backward stops re-deriving the upstream stack per
    consumer.
@@ -516,17 +513,16 @@ TGrad[y_, targets_List] := Module[{leaves, grads},
 
 (* TRealize: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs)
    then TWnf to beta-reduce and fire the kernels.  No UOP_MATERIALIZE
-   wrapper -- thvm_materialize is invoked directly. *)
-(* TRealize: one-shot materialize + wnf wrapped in a per-step
-   buffer-pool boundary (sub-item b of the per-step buffer pool
-   arc).  Equivalent to TWnf[TMaterialize[expr]] except every CPU
-   buffer alloc'd during materialize+wnf that ISN'T reachable from
-   the result tensor's producer chain gets freed at exit. *)
-(* TRealize -- single root: TRealize[expr]      -> one realized TTerm
-                multi-root:  TRealize[{t1, ...}] -> List of realized TTerms
+   wrapper; thvm_materialize is invoked directly.  Equivalent to
+   TWnf[TMaterialize[expr]] except every CPU buffer alloc'd during
+   materialize+wnf that ISN'T reachable from the result tensor's
+   producer chain gets freed at exit (per-step buffer-pool boundary).
+
+   Single root: TRealize[expr]      -> one realized TTerm
+   Multi-root:  TRealize[{t1, ...}] -> List of realized TTerms
    The list form bundles every root into ONE materialize+wnf pass
    (thvm_realize_many walks the whole bundle in a single thvm_materialize),
-   so kernels shared across roots dedup -- bufferize_classify sees a node
+   so kernels shared across roots dedup: bufferize_classify sees a node
    reached by multiple roots as multi-consumer and emits it ONCE.  It
    returns the list of N realized roots (pinned TEN handles, via
    term_ctr_n/at), so callers can thread each into downstream expressions.
@@ -547,10 +543,10 @@ TRealize[expr_] := (ensureInit[]; TTerm[$realizeFn[ttermRaw[expr]]])
    before dispatch).  The return value is a UOP_KERNEL term whose
    first heap cell is the pre-allocated output TAG_TEN (empty) and
    second cell is a TAG_NUM carrying the KernelEntry id.  Subsequent
-   TWnf fires the kernels bottom-up (once commit 4 lands). *)
+   TWnf fires the kernels bottom-up. *)
 TMaterialize[expr_] := (ensureInit[]; TTerm[$materializeFn[ttermRaw[expr]]])
 
-(* TKernelCount / TKernelProgramCacheSize / TKernelInfo  --  defined
+(* TKernelCount / TKernelProgramCacheSize / TKernelInfo are defined
    in Kernel.wl alongside the rest of the kernel-introspection surface. *)
 
 (* === TTensorCreate: implicit shape from data ===
@@ -594,9 +590,9 @@ asSharableNA[data_?Developer`PackedArrayQ] :=
     ]
 
 (* dtype label -> NumericArray storage type.  Default (no dtype
-   given) means "infer from data" -- IntegerQ -> i32, otherwise f32.
-   Phase B wires every byte-aligned integer dtype; the float and FP8
-   families ride on raw-bytes carriers landed in Phases C/D. *)
+   given) means "infer from data": IntegerQ -> i32, otherwise f32.
+   Byte-aligned integer dtypes map directly; the float and FP8
+   families ride on raw-bytes carriers. *)
 naTypeFor["bool"] := "UnsignedInteger8"
 naTypeFor["i8"]   := "Integer8"
 naTypeFor["u8"]   := "UnsignedInteger8"
@@ -735,7 +731,7 @@ pairFold[op_, args_List] := Fold[op, First[args], Rest[args]]
 
    Without it, MUL[t:{N}, scalar:{1}] would fall to the
    elementwise numel-cycle broadcast, which produces a DIFFERENT
-   KProgOp[] than the rank-matched form -- the kernel-program-
+   KProgOp[] than the rank-matched form.  The kernel-program-
    cache hashes on KProgOp[] bytes, so the unbroadcasted form
    misses on every call (~60 ms cold-clang-JIT cost) while the
    pre-broadcasted form caches to ~0.1 ms.
@@ -754,7 +750,7 @@ broadcastScalar[other_, _] := other
 
 (* numpy-style broadcast of a set of shapes: right-align, pad missing
    leading axes with 1, take the per-axis max.  The common shape of an
-   elementwise binop -- using the FIRST operand's shape is wrong when a
+   elementwise binop; using the FIRST operand's shape is wrong when a
    later operand outranks it (e.g. a rank-0 scalar reduce result like
    TDot combined with a shape-{1} target). *)
 broadcastShapes[shapes : {___List}] := Module[{maxr, padded},
@@ -859,12 +855,12 @@ TTerm /: ArrayReduce[Total, t_TTerm ? tensorTermQ, axes_] :=
         Reverse @ Sort @ DeleteDuplicates @ Flatten @ {axes}]
 
 (* Normal[t]: read the realized tensor's data back as an ordinary nested
-   list, i.e. Normal[TTensorData[t]] -- so `Normal @ TRealize @ expr`
+   list, i.e. Normal[TTensorData[t]], so `Normal @ TRealize @ expr`
    stands in for `Normal @ TTensorData @ TRealize @ expr`. *)
 TTerm /: Normal[t_TTerm ? tensorTermQ] := Normal[TTensorData[t]]
 
 (* Layer-call UpValues: `Layer[opts][t_TTerm]` is still a TTerm
-   UpValue -- TagSetDelayed on TTerm, with the layer bound as
+   UpValue, TagSetDelayed on TTerm, with the layer bound as
    `l_SoftmaxLayer` so we can read its options.  WL's "Level"
    parameter is 1-indexed; thvm's TSoftmax is 0-indexed. *)
 TTerm /: l_SoftmaxLayer[t_TTerm ? tensorTermQ] :=
@@ -873,7 +869,7 @@ TTerm /: l_SoftmaxLayer[t_TTerm ? tensorTermQ] :=
 (* Set on a literal-TTerm LHS rewrites in place: realises src into a
    fresh TenDesc, memcpys those bytes into dst's backing buffer.  dst
    keeps its TenDesc id (so any caller still holding it sees the new
-   contents).  Only fires when the LHS is the literal TTerm form --
+   contents).  Only fires when the LHS is the literal TTerm form:
    `Set[m, src]` where m is a Symbol whose VALUE is a TTerm doesn't
    match, because Set holds the LHS unevaluated.  Use one of:
 
@@ -890,7 +886,7 @@ TSet[dst_TTerm, src_] := (TRealize[TAssign[dst, src]]; dst)
 
 (* TSetData[dst, na]: in-place host upload.  Writes the NumericArray's
    bytes straight into dst's existing buffer via tensor_write_na, with
-   NO fresh TenDesc and no ASSIGN graph -- the fast per-step feed path.
+   NO fresh TenDesc and no ASSIGN graph: the fast per-step feed path.
    `asSharableNA` lifts a plain list / PackedArray to a NumericArray
    first (one copy), matching TTensorCreate's input handling so dtype
    inference is consistent.  Returns dst. *)

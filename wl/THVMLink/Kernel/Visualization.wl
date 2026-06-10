@@ -12,7 +12,7 @@
    same way.  Edge direction is *data flow*: a UOP that reads from
    a TEN draws TEN -> UOP (sources point at the consumer).  This is
    the opposite of the heap-pointer direction (UOP cell holds a
-   pointer to its source) but matches what readers want -- the
+   pointer to its source) but matches what readers want: the
    arrow shows where bytes move at fire time.
 
    KERNEL-aware: a UOP_KERNEL cell's compute inputs aren't in heap
@@ -30,9 +30,9 @@
 
 BeginPackage["THVMLink`"];
 
-THeapGraph::usage = "THeapGraph[] / THeapGraph[term] / THeapGraph[{t1, t2, ...}] renders the heap as a Graph: every IC agent + UOP cell + TEN handle becomes a vertex, edges follow *data flow* (sources point at consumers).  UOP_KERNEL cells expose their TKernelInputs[] as input edges so a fused-graph view shows the same kernel-DAG topology as TScheduleGraph.  Style comes from $nodeStyle in Style.wl -- consistent with every other renderer.  Options: \"ShowEdgeLabels\" -> False (default; labels hidden so dense graphs read clean), plus all standard Graph options.";
+THeapGraph::usage = "THeapGraph[] / THeapGraph[term] / THeapGraph[{t1, t2, ...}] renders the heap as a Graph: every IC agent + UOP cell + TEN handle becomes a vertex, edges follow *data flow* (sources point at consumers).  UOP_KERNEL cells expose their TKernelInputs[] as input edges so a fused-graph view shows the same kernel-DAG topology as TScheduleGraph.  Style comes from $nodeStyle in Style.wl, consistent with every other renderer.  Options: \"ShowEdgeLabels\" -> False (default; labels hidden so dense graphs read clean), plus all standard Graph options.";
 
-TScheduleGraph::usage = "TScheduleGraph[] returns a Graph of the live kernel schedule: one vertex per emitted kernel, directed edges from producer kernel to consumer kernel labeled by the connecting TenDesc id.  External inputs (TenDescs with no producer kernel -- weights, host tensors) appear as cyan TEN-shaped vertices when \"ShowExternalInputs\" -> True (default).  Disconnected kernels render as isolated vertices.  Accepts all standard Graph options.";
+TScheduleGraph::usage = "TScheduleGraph[] returns a Graph of the live kernel schedule: one vertex per emitted kernel, directed edges from producer kernel to consumer kernel labeled by the connecting TenDesc id.  External inputs (TenDescs with no producer kernel: weights, host tensors) appear as cyan TEN-shaped vertices when \"ShowExternalInputs\" -> True (default).  Disconnected kernels render as isolated vertices.  Accepts all standard Graph options.";
 
 TMemoryPlanGantt::usage = "TMemoryPlanGantt[plan] returns a Graphics-headed Gantt-style chart of buffer lifecycles.  X-axis is topological depth on the kernel DAG; Y-axis is one row per buffer (sorted by alloc_depth, then nbytes desc).  Each bar spans [alloc_depth, last_use_depth] and is colored by status: blue=Preserved, green=Freeable, gray=Live, orange=External, red=Dead.  Hover tooltips expose buf id, nbytes, dtype, status, depths, alias_tids.  Options: \"BarHeight\" -> \"Log\" (default; height proportional to Log2[1 + nbytes]) or \"Uniform\" (all bars 1 unit tall).";
 
@@ -44,17 +44,17 @@ Begin["`Private`"];
 {drawNode, nodeShapeFn, edgeStyleDirective, styleFor};
 
 (* === vertex id constructors === *)
-icVertexId [base_Integer] := "a" <> ToString[base]
-eraVertexId[loc_Integer]  := "e" <> ToString[loc]
-uopVertexId[loc_Integer]  := "u" <> ToString[loc]
-kerVertexId[loc_Integer]  := "k" <> ToString[loc]
-tenVertexId[id_Integer]   := "t" <> ToString[id]
+icVertexId[base_Integer] := "a" <> ToString[base]
+eraVertexId[loc_Integer] := "e" <> ToString[loc]
+uopVertexId[loc_Integer] := "u" <> ToString[loc]
+kerVertexId[loc_Integer] := "k" <> ToString[loc]
+tenVertexId[id_Integer] := "t" <> ToString[id]
 ctrVertexId[base_Integer] := "c" <> ToString[base]
 matVertexId[base_Integer] := "m" <> ToString[base]
 op2VertexId[base_Integer] := "p" <> ToString[base]
 aloVertexId[base_Integer] := "o" <> ToString[base]
 refVertexId[defId_Integer] := "r" <> ToString[defId]
-numVertexId[loc_Integer]  := "n" <> ToString[loc]
+numVertexId[loc_Integer] := "n" <> ToString[loc]
 dsuVertexId[base_Integer] := "y" <> ToString[base]   (* dyn SUP *)
 dduVertexId[base_Integer] := "z" <> ToString[base]   (* dyn DUP *)
 
@@ -77,7 +77,7 @@ matPorts[] := {{0, "s"}, {1, "k"}}
 op2Ports[] := {{0, "L"}, {1, "R"}}
 
 (* ALO ports: heap[val] = wrapped book-template term;
-   heap[val+1] = NUM(state_id) -- atomic, surfaced in the label. *)
+   heap[val+1] = NUM(state_id), atomic, surfaced in the label. *)
 aloPorts[] := {{0, "body"}}
 
 (* DSU ports: heap[val+0] = label term, heap[val+1] = a, +2 = b. *)
@@ -135,7 +135,7 @@ discoverAgents[seedTerms_List : {}] := Block[{lo = THeapBase[], n = THeapPos[], 
    tag exposes some number of heap children at base+0 .. base+n-1.
    These are the cells the agent points at; their contents are the
    referenced child terms.  Atoms (NUM/ERA/REF/TEN/VAR/DP0/DP1)
-   have no follow-up cells -- their term word is self-contained --
+   have no follow-up cells (their term word is self-contained),
    so they return {}. *)
 agentChildSlots[term_] := With[{tag = TTermTag[term], base = TTermVal[term]},
     Switch[tag,
@@ -169,7 +169,7 @@ agentFromAtomSeed[term_] := With[{tag = TTermTag[term], val = TTermVal[term]},
 (* BFS the heap from the seed terms forward, collecting only the
    agents transitively reachable through their slot cells.  Pre-WNF
    stale cells, heap garbage, and unrelated terms left over from
-   prior constructions are excluded -- the rendered graph then
+   prior constructions are excluded; the rendered graph then
    matches the user's mental model of "what this term references".
    No-arg THeapGraph[] keeps the full-heap walk; only the seeded
    forms route through here.
@@ -177,13 +177,13 @@ agentFromAtomSeed[term_] := With[{tag = TTermTag[term], val = TTermVal[term]},
    Top-level atom seeds (NUM/ERA/REF/TEN) get a synthetic vertex via
    agentFromAtomSeed so a one-atom seed still has something to draw.
    Transitively-reached atoms (e.g. NUM children of an OP2 or APP)
-   stay inlined via the parent's edge to a heap-loc-keyed vertex --
+   stay inlined via the parent's edge to a heap-loc-keyed vertex,
    no double-rendering. *)
 (* Dead LAM: body cell SUB-flagged after APP-LAM beta.  Drop the
    wrapper AND the literal in its body slot.
 
    Dead DUP: drop the wrapper only if the substituted body is a
-   compound agent (SUP / LAM / DUP / ...) -- the compound is
+   compound agent (SUP / LAM / DUP / ...): the compound is
    reachable from the sibling projection's chase, so the wrapper
    adds no information.  If the body is an ATOM (NUM/ERA/TEN/...),
    atoms aren't first-class agents (they render inline on slot
@@ -202,7 +202,7 @@ agentIsDead[term_] := Block[
                 btag =!= $TagTEN && btag =!= $TagANY &&
                 btag =!= $TagREF,
         tag === $TagAPP,
-            (* APP-LAM has fired -- left slot is a LAM whose binder
+            (* APP-LAM has fired: left slot is a LAM whose binder
                is SUB-flagged.  The APP wrapper is logically gone. *)
             lam = THeapRead[TTermVal[term]];
             TTermTag[lam] === $TagLAM &&
@@ -228,7 +228,7 @@ reachableICAgents[seedTerms_List] := Block[
     queue = seedTerms;
     While[ Length[queue] > 0,
         t    = First[queue]; queue = Rest[queue];
-        (* Skip VAR/DP0/DP1 whose binder is SUB-flagged -- the
+        (* Skip VAR/DP0/DP1 whose binder is SUB-flagged: the
            substituted value is surfaced by childVertexId as an edge
            endpoint, no LAM/DUP agent should be registered. *)
         If[ agentIsDeadVar[t], Continue[]];
@@ -242,8 +242,7 @@ reachableICAgents[seedTerms_List] := Block[
                heap[lam_loc] / heap[dup_loc] holds the substituted
                content after the firing, SUB-flagged. *)
             Which[
-                (TTermTag[t] === $TagDUP || TTermTag[t] === $TagLAM)
-                    && TTermSub[THeapRead[TTermVal[t]]] === 1,
+                (TTermTag[t] === $TagDUP || TTermTag[t] === $TagLAM) && TTermSub[THeapRead[TTermVal[t]]] === 1,
                     queue = Append[queue, THeapRead[TTermVal[t]]],
                 agentIsDead[t],
                     Null,
@@ -266,7 +265,7 @@ discoverEras[] := Block[{lo = THeapBase[], n = THeapPos[]},
    pairs.  Edge labels (port names, src offsets) get rendered only
    if the caller asks via "ShowEdgeLabels" -> True. *)
 
-(* True iff a VAR/DP0/DP1 cell has been substituted out -- the
+(* True iff a VAR/DP0/DP1 cell has been substituted out: the
    binder cell at `val` is SUB-flagged, meaning a prior interaction
    (e.g. APP-LAM beta) wrote the substituted value there.  For
    visualisation purposes we treat the substituted value as the
@@ -282,7 +281,7 @@ varIsSubResolved[loc_Integer] := Block[
 ]
 
 (* Resolve any cell at `loc` to its source vertex id (or Nothing if
-   the cell is something we don't render -- which today is just raw
+   the cell is something we don't render, which today is just raw
    TAG_NUM children we'd rather surface via the parent's label).
    When the cell is a VAR/DP0/DP1 pointing at a SUB-flagged binder,
    re-route the wire to a vertex keyed on the binder loc holding the
@@ -291,11 +290,11 @@ varIsSubResolved[loc_Integer] := Block[
 childVertexId[loc_Integer] :=
     Block[{t = THeapRead[loc], tag, val, ext, binder, btag, varTag, subResolved},
         tag = TTermTag[t]; val = TTermVal[t]; ext = TTermExt[t];
-        varTag      = (tag === $TagVAR || tag === $TagDP0 || tag === $TagDP1);
+        varTag = (tag === $TagVAR || tag === $TagDP0 || tag === $TagDP1);
         subResolved = varTag && TTermSub[THeapRead[val]] === 1;
         If[ subResolved,
             binder = THeapRead[val];
-            btag   = TTermTag[binder];
+            btag = TTermTag[binder];
             Switch[btag,
                 $TagNUM, numVertexId[val],
                 $TagERA, eraVertexId[val],
@@ -455,14 +454,10 @@ agentEdgeRecords[vid_String, info_Association] := Switch[info["tag"],
 
 (* === SUB-decoration (dashed outline) === *)
 icSubVertices[base_Integer, tag_Integer] :=
-    Module[{result = {}},
-        Do[
-            With[{loc = base + p[[1]]},
-                If[ TTermSub[THeapRead[loc]] == 1,
-                    AppendTo[result, icVertexId[base]]]],
-            {p, icPorts[tag]}
-        ];
-        result
+    Table[
+        With[{loc = base + p[[1]]},
+            If[ TTermSub[THeapRead[loc]] == 1, icVertexId[base], Nothing]],
+        {p, icPorts[tag]}
     ]
 
 subVerticesForAgent[vid_String, info_Association] := Switch[info["tag"],
@@ -493,7 +488,7 @@ kernelLabel[loc_Integer] := Block[{kid = TTermVal[THeapRead[loc + 1]]},
 
 (* CONST: surface decoded scalar value via scalarTextFromCell from
    Shape.wl, so "CONST" reads as "1.0" / "0" instead of an opaque
-   loc.  Many CONST agents in a post-grad heap aren't redundant --
+   loc.  Many CONST agents in a post-grad heap aren't redundant:
    each is a fresh expand_to_target leaf for chain-rule scalars
    (1.0, 2.0, 0.5 etc.); they're orphaned post-fusion because the
    sink kernel reads the materialized buffers, not the CONST UOPs. *)
@@ -509,7 +504,7 @@ tenLabel[id_Integer, dtype_Integer] := "t" <> ToString[id]
 
 (* === per-vertex (style category, label) ===
    Picks a $nodeStyle key + label.  An "ExternalTEN" is a TEN whose
-   producer_kid in TENS table is 0 -- a host-side input not produced
+   producer_kid in TENS table is 0, a host-side input not produced
    by any kernel; we render it darker so the eye picks weights /
    inputs out of a sea of intermediate TENs. *)
 $externalTids := Block[{tens = TTensTable[]},
@@ -591,7 +586,7 @@ Options[THeapGraph] = Join[
     Options[Graph]
 ];
 
-(* ERA locs that appear in some slot of one of `agents` -- gives the
+(* ERA locs that appear in some slot of one of `agents`; gives the
    reachable-mode entry points the ERA list they need to render ERA
    vertices with the correct shape (the no-arg path uses
    discoverEras[] which walks the full heap). *)
@@ -628,7 +623,7 @@ buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGra
     showLabels  = OptionValue["ShowEdgeLabels"];
     edgeRecords = Flatten[KeyValueMap[agentEdgeRecords, agents], 1];
     (* Tag each edge with its port name so DirectedEdge[a, b, "src0"]
-       and DirectedEdge[a, b, "src1"] are distinct -- a UOP reading
+       and DirectedEdge[a, b, "src1"] are distinct: a UOP reading
        the same TEN through two slots gets two parallel arrows.  The
        caller can hide labels via "ShowEdgeLabels" -> False (default)
        but the tag still keeps Graph from collapsing the edges. *)
@@ -639,7 +634,7 @@ buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGra
         Keys[agents],
         eraVertexId /@ eras,
         (* Surface every vertex referenced as an edge source or
-           target -- a kernel input may name a TenDesc whose
+           target: a kernel input may name a TenDesc whose
            TAG_TEN doesn't appear in any walked heap cell (the
            original referencing UOP got rewritten to a kernel and
            is now orphaned).  Without this, the Graph would
@@ -667,11 +662,9 @@ buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGra
         ];
         vshapes = Join[
             KeyValueMap[
-                Function[{vid, info},
-                    vid -> nodeShapeFn[
-                        vertexCategory[vid, info],
-                        vertexLabel[vid, info]
-                    ]
+                {vid, info} |-> vid -> nodeShapeFn[
+                    vertexCategory[vid, info],
+                    vertexLabel[vid, info]
                 ],
                 augmented
             ],
@@ -682,24 +675,22 @@ buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGra
     layout = Replace[OptionValue[GraphLayout], Automatic -> "LayeredDigraphEmbedding"];
 
     Graph[vertices, edges,
-        Sequence @@ FilterRules[{userOpts},
-            Except[GraphLayout | VertexSize | "ShowEdgeLabels"]],
+        FilterRules[{userOpts}, Except[GraphLayout | VertexSize | "ShowEdgeLabels"]],
         VertexShapeFunction -> vshapes,
-        VertexSize          -> 0.45,
-        EdgeLabels          -> If[ showLabels,
+        VertexSize -> 0.45,
+        EdgeLabels -> If[ showLabels,
             Map[#[[1]] -> Placed[#[[2]], 0.5] &, edgeLabels],
             None
         ],
-        EdgeLabelStyle      -> Directive[FontFamily -> "Helvetica", FontSize -> 9,
-                                         LightDarkSwitched[Black, White]],
-        EdgeStyle           -> edgeStyleDirective,
-        GraphLayout         -> layout,
-        PerformanceGoal     -> "Quality",
-        ImagePadding        -> 25
+        EdgeLabelStyle -> Directive[FontFamily -> "Helvetica", FontSize -> 9, LightDarkSwitched[Black, White]],
+        EdgeStyle -> edgeStyleDirective,
+        GraphLayout -> layout,
+        PerformanceGoal -> "Quality",
+        ImagePadding -> 25
     ]
 ]
 
-(* === TScheduleGraph -- DAG-of-kernels view ===
+(* === TScheduleGraph - DAG-of-kernels view ===
 
    Builds straight from the C-side KERNELS / TENS tables (no heap
    walk).  For each emitted kernel kid in 1..KERNELS_NEXT-1:
@@ -712,7 +703,7 @@ buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGra
      - edge label = tid
 
    Disconnected kernels (no producer or consumer) render as
-   isolated vertices in the layered embedding -- they're still
+   isolated vertices in the layered embedding; they're still
    part of the schedule, they just don't share TenDescs with the
    rest. *)
 
@@ -731,17 +722,14 @@ scheduleKernelLabel[kid_Integer] := Block[{
 },
     shape = With[{tid = row["OutputTid"]},
         If[ tid > 0, TTensorShape[tenTermFromTid[tid]], {}]];
-    "k" <> ToString[kid] <> " (" <> ToString[info[[1]]["OpCount"]] <> "ops)"
-        <> "\n" <> ToString[shape] <> " " <> row["OutputDtype"]
+    "k" <> ToString[kid] <> " (" <> ToString[info[[1]]["OpCount"]] <> "ops)" <> "\n" <> ToString[shape] <> " " <> row["OutputDtype"]
 ]
 
 scheduleExternalLabel[tid_Integer] := Block[{
     shape = TTensorShape[tenTermFromTid[tid]],
     dtype = TTensorDType[tenTermFromTid[tid]]
 },
-    "t" <> ToString[tid] <> "\n"
-        <> ToString[shape] <> " "
-        <> If[StringQ[dtype], dtype, "?"]
+    "t" <> ToString[tid] <> "\n" <> ToString[shape] <> " " <> If[StringQ[dtype], dtype, "?"]
 ]
 
 Options[TScheduleGraph] = Join[
@@ -816,16 +804,15 @@ TScheduleGraph[opts : OptionsPattern[]] := Block[{
         edges,
         FilterRules[{opts}, Options[Graph]],
         VertexShapeFunction -> vshapes,
-        VertexSize          -> 0.45,
-        EdgeLabelStyle      -> Directive[FontFamily -> "Helvetica", FontSize -> 9,
-                                         LightDarkSwitched[Black, White]],
-        EdgeStyle           -> edgeStyleDirective,
-        GraphLayout         -> "LayeredDigraphEmbedding",
-        PerformanceGoal     -> "Quality"
+        VertexSize -> 0.45,
+        EdgeLabelStyle -> Directive[FontFamily -> "Helvetica", FontSize -> 9, LightDarkSwitched[Black, White]],
+        EdgeStyle -> edgeStyleDirective,
+        GraphLayout -> "LayeredDigraphEmbedding",
+        PerformanceGoal -> "Quality"
     ]
 ]
 
-(* === TMemoryPlanGantt -- buffer-lifecycle Gantt chart ===
+(* === TMemoryPlanGantt - buffer-lifecycle Gantt chart ===
 
    Renders a packed-strip view of a TMemoryPlan snapshot.  The
    plan-construction logic + helpers (formatBytes, statusFill /
@@ -876,17 +863,18 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
         legendStatuses = DeleteDuplicates[#["status"] & /@ packed];
         Graphics[
             {
-                Function[b, Block[{
-                    y0     = b["y_range"][[1]],
-                    y1     = b["y_range"][[2]],
+                b |-> Block[{
+                    y0 = b["y_range"][[1]],
+                    y1 = b["y_range"][[2]],
                     h, inset, x0, x1
                 },
-                    h      = y1 - y0;
-                    inset  = 0.05 h;
-                    x0     = b["alloc_depth"];
-                    x1     = If[ b["status"] === "Preserved",
-                                 maxDepth + 1,
-                                 b["last_use_depth"] + 1];
+                    h = y1 - y0;
+                    inset = 0.05 h;
+                    x0 = b["alloc_depth"];
+                    x1 = If[ b["status"] === "Preserved",
+                        maxDepth + 1,
+                        b["last_use_depth"] + 1
+                    ];
                     {
                         FaceForm[statusFill[b["status"]]],
                         EdgeForm[Directive[
@@ -932,16 +920,17 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                             Sequence @@ {}
                         ]
                     }
-                ]] /@ packed
+                ] /@ packed
             },
             Frame -> True,
             FrameTicks -> {
                 Automatic,
                 Block[{step, label, isLinear},
                     isLinear = barHeightMode =!= "Log";
-                    label = If[isLinear,
-                               formatBytes,
-                               Function[y, ToString[Round[y, 0.1]]]];
+                    label = If[ isLinear,
+                        formatBytes,
+                        y |-> ToString[Round[y, 0.1]]
+                    ];
                     step = totalHeight / 6.0;
                     If[ step <= 0, step = 1];
                     Table[{y, label[y]}, {y, 0, totalHeight, step}]
@@ -950,8 +939,8 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
             FrameLabel -> {
                 "topological depth (kernel DAG)",
                 If[ barHeightMode === "Log",
-                    "stacked Log2[1+nbytes] -- linear-scan slot allocator",
-                    "memory (KiB) -- linear-scan slot allocator"]
+                    "stacked Log2[1+nbytes], linear-scan slot allocator",
+                    "memory (KiB), linear-scan slot allocator"]
             },
             Epilog -> {
                 {Dashed, Thick, StandardRed,
@@ -970,7 +959,7 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                 ]
             },
             PlotLabel -> Column[{
-                Row[{"TMemoryPlan / ", backendsActive[allBufs], " -- ",
+                Row[{"TMemoryPlan / ", backendsActive[allBufs], " - ",
                      Length[allBufs], " bufs / ",
                      Length[a["Kernels"]], " kernels / ",
                      formatBytes[totalBytes], " total / depth ",
@@ -984,11 +973,7 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                       shownBytes = Total[#["nbytes"] & /@ bufs],
                       shownPct = Round[100. Total[#["nbytes"] & /@ bufs] / totalBytes, 0.1]
                     },
-                      Row[{Style["showing top " <> ToString[Length[bufs]]
-                                <> " of " <> ToString[Length[allBufs]]
-                                <> " bufs (= "
-                                <> ToString[shownPct] <> "% of bytes)",
-                                Italic, GrayLevel[0.4]]}]
+                      Row[{Style["showing top " <> ToString[Length[bufs]] <> " of " <> ToString[Length[allBufs]] <> " bufs (= " <> ToString[shownPct] <> "% of bytes)", Italic, GrayLevel[0.4]]}]
                     ],
                     Sequence @@ {}
                 ]

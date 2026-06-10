@@ -26,8 +26,8 @@ TWaldmeisterProof::usage =
     "parses the proof-protocol output, and returns a normalized " <>
     "result Association with keys Status, Strategy, Seconds, " <>
     "ProofLength, Inferences, RawProtocol.  WM does NOT use TPTP " <>
-    "input -- the .pr format is its own; future iter ships a " <>
-    "TPTP-to-pr converter so the (theory, thm) two-arg form lands."
+    "input; the .pr format is its own. The (theory, thm) two-arg " <>
+    "form requires a TPTP-to-pr converter and is not yet supported."
 
 TWaldmeisterProof::nowm =
     "Waldmeister wmcli binary not found."
@@ -39,14 +39,14 @@ Begin["`Private`"]
 
 Options[TWaldmeisterProof] = {
     TimeConstraint -> 30,
-    "Binary"       -> Automatic,
+    "Binary" -> Automatic,
     "MathlinkPath" -> Automatic
 }
 
 (* Resolve wmcli location: $WMCLI env var > PATH lookup ("wmcli").
-   The user's Mac build lives at <waldmeister-src>/wmcli but no
-   canonical install location exists -- set WMCLI to point at it
-   (or symlink into /usr/local/bin / ~/.local/bin / etc.). *)
+   There is no canonical install location for the wmcli build, so
+   set WMCLI to point at it (or symlink it into /usr/local/bin,
+   ~/.local/bin, etc.). *)
 wmBinary[Automatic] := Block[{env = Environment["WMCLI"]},
     Which[
         StringQ[env] && FileExistsQ[env], env,
@@ -57,9 +57,9 @@ wmBinary[Automatic] := Block[{env = Environment["WMCLI"]},
 wmBinary[s_String] := s
 
 (* Frameworks dir lives under $InstallationDirectory (the resolved
-   Wolfram install for the current kernel).  No absolute path
-   hardcoding -- the path tracks whichever Wolfram product loaded
-   us. *)
+   Wolfram install for the current kernel), so the path tracks
+   whichever Wolfram product loaded us rather than a hardcoded
+   absolute path. *)
 wmMathlinkPath[Automatic] :=
     FileNameJoin[{$InstallationDirectory, "Frameworks"}]
 
@@ -68,8 +68,8 @@ wmMathlinkPath[s_String] := s
 (* Parse a single proof-protocol line of the form
        N : <kind> : <body> : <source> [###R K|###E K]
    into an Association.  The trailing `###R K` / `###E K` is the
-   rule-or-equation number WM assigns post-orient, NOT a parent --
-   strip before parent-extraction. *)
+   rule-or-equation number WM assigns post-orient, NOT a parent, so
+   strip it before parent-extraction. *)
 parseProofLine[line_String] := Block[
     {parts, name, kind, body, source, sourceClean, sourceRule, parents},
     parts = StringSplit[line, " : ", 4];
@@ -78,18 +78,18 @@ parseProofLine[line_String] := Block[
     sourceClean = StringTrim @ StringReplace[source,
         RegularExpression["\\s*###[RE]\\s*\\d+\\s*$"] -> ""];
     sourceRule = Which[
-        StringStartsQ[sourceClean, "initial"],    "file",
+        StringStartsQ[sourceClean, "initial"], "file",
         StringStartsQ[sourceClean, "hypothesis"], "file",
-        StringStartsQ[sourceClean, "orient"],     "orient",
-        StringStartsQ[sourceClean, "cp"],         "superposition",
-        StringStartsQ[sourceClean, "tes-red"],    "forward_demodulation",
+        StringStartsQ[sourceClean, "orient"], "orient",
+        StringStartsQ[sourceClean, "cp"], "superposition",
+        StringStartsQ[sourceClean, "tes-red"], "forward_demodulation",
         StringMatchQ[sourceClean, DigitCharacter ..],
             (* Bare-digit source is used in TWO distinct WM patterns:
-               (a) `tes-eqn : ... : 2` -- copying equation 2 as a new
+               (a) `tes-eqn : ... : 2` copies equation 2 as a new
                    numbered entry (bookkeeping; the kind disambig is
                    `tes-eqn`).  This is the `equation_copy` rule the
                    $BookkeepingRules table drops on fold.
-               (b) `tes-final : ... : 28` -- the closing step that
+               (b) `tes-final : ... : 28` is the closing step that
                    cites the prior step that derived the empty clause.
                    This maps to trivial_inequality_removal -> Conclusion. *)
             If[ kind === "tes-final",
@@ -109,17 +109,17 @@ parseProofLine[line_String] := Block[
         sourceClean,
         n : DigitCharacter .. :> n
     ];
-    (* cp/tes-red emit (side, side) string args interleaved -- they
+    (* cp/tes-red emit (side, side) string args interleaved; they
        have no digit groups, so the digit-extracted list is already
        {I, J} for these.  orient(K, x) yields {K} since "x" isn't a
        digit. *)
     <|
-        "Head"    -> "wm",
-        "Name"    -> name,
-        "Role"    -> If[ StringStartsQ[sourceClean, "hypothesis"],
+        "Head" -> "wm",
+        "Name" -> name,
+        "Role" -> If[ StringStartsQ[sourceClean, "hypothesis"],
             "negated_conjecture", "axiom"],
         "Formula" -> body,
-        "Rule"    -> sourceRule,
+        "Rule" -> sourceRule,
         "Parents" -> Map[ToString, parents]
     |>
 ]
@@ -129,7 +129,7 @@ parseProtocol[raw_String] := Block[
     (* WM's PROOF PROTOCOL section header is banner-style
        ("P R O O F   P R O T O C O L"), too brittle to scan for
        literally.  Instead scan ALL output lines for the protocol
-       shape `<digits> : tes-* : ... : ...` -- only the proof
+       shape `<digits> : tes-* : ... : ...`; only the proof
        protocol emits those, so it's a sound filter. *)
     lines = StringSplit[raw, "\n"];
     lines = Select[lines,
@@ -165,8 +165,7 @@ TWaldmeisterProof[problemFile_String, opts : OptionsPattern[]] /;
             {"sh", "-c", cmd}, "StandardOutput"
         ];
         status = Which[
-            StringContainsQ[out, "Waldmeister states: Goal proved"]
-                || StringContainsQ[out, "this proves the goal"],
+            StringContainsQ[out, "Waldmeister states: Goal proved"] || StringContainsQ[out, "this proves the goal"],
                 "Proved",
             StringContainsQ[out, "Time limit"],
                 "TimedOut",
@@ -175,11 +174,11 @@ TWaldmeisterProof[problemFile_String, opts : OptionsPattern[]] /;
         ];
         derivation = If[ status === "Proved", parseProtocol[out], {}];
         <|
-            "Status"      -> status,
-            "Strategy"    -> "waldmeister-default",
-            "Seconds"     -> N @ Round[secs, 0.01],
+            "Status" -> status,
+            "Strategy" -> "waldmeister-default",
+            "Seconds" -> N @ Round[secs, 0.01],
             "ProofLength" -> Length[derivation],
-            "Inferences"  -> derivation,
+            "Inferences" -> derivation,
             "RawProtocol" -> out
         |>
     ]

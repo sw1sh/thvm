@@ -24,7 +24,7 @@
          AxiomaticTheory.  Returns $Failed when the conjecture is
          not proved.
 
-         The legacy spelling TFindProof is kept as a
+         The legacy spelling TFindEquationalProof is kept as a
          back-compat alias (deprecated) and forwards every call
          to TFindProof.
 
@@ -532,8 +532,7 @@ TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] := Module[{
     With[{
         mats = Select[pv, MatrixQ],
         vecs = Select[pv, VectorQ],
-        orientW = Function[{w, inDim},
-            If[ Last[Dimensions[w]] === inDim, w, Transpose[w]]]
+        orientW = {w, inDim} |-> If[ Last[Dimensions[w]] === inDim, w, Transpose[w]]
     },
         If[ h > 0,
             w1 = orientW[SelectFirst[mats, MemberQ[Dimensions[#], 14] &], 14];
@@ -1123,17 +1122,14 @@ Options[TAtpTrainGnn] = {"Hidden" -> 32, "Rounds" -> 3,
     MaxTrainingRounds -> 300, "LearningRate" -> 0.01,
     "BatchSize" -> 128, "NodeCap" -> 64}
 
-(* Minibatched trainer (issue #8).  The earlier form padded the WHOLE
-   dataset into one (n_graphs, NMax, NMax) batch and ran every Adam step
-   over it, so peak memory was O(n_graphs * NMax^2) and a single step over
-   thousands of graphs was slow + destabilising.  This version keeps the
-   params + Adam state (m / v / b1pow / b2pow) persistent and runs each
-   Adam step over a minibatch of "BatchSize" graphs (reshuffled each
-   epoch), capping the node dim at "NodeCap" (64, matching the in-engine
-   inference scorer).  Peak memory is O(BatchSize * NodeCap^2): only one
-   minibatch's forward + backward is realized at a time.  Final scores for
-   the train-AUC are read back in the same bounded chunks.  Uses the
-   b1pow/b2pow TAdam form so bias correction tracks the live step. *)
+(* Minibatched trainer.  Keeps the params + Adam state (m / v / b1pow /
+   b2pow) persistent and runs each Adam step over a minibatch of
+   "BatchSize" graphs (reshuffled each epoch), capping the node dim at
+   "NodeCap" (64, matching the in-engine inference scorer).  Peak memory
+   is O(BatchSize * NodeCap^2): only one minibatch's forward + backward is
+   realized at a time.  Final scores for the train-AUC are read back in
+   the same bounded chunks.  Uses the b1pow/b2pow TAdam form so bias
+   correction tracks the live step. *)
 TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
     graphs = dataset["Graphs"], labels = dataset["Labels"], f = 6,
     hH, rR, lrVal, rounds, bs, nCap, nMax, nG,
@@ -1186,10 +1182,10 @@ TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
             scores = With[{p = Normal @ TRealize @ logits}, p[[All, 2]] - p[[All, 1]]]
         ]
         ,
-        (* Bigger than one batch: minibatch with the b1pow/b2pow TAdam form
-           (issue #8).  Persistent params + Adam state; one minibatch's
-           forward+backward realized per step; reshuffle each epoch; scores
-           read back in the same bounded chunks. *)
+        (* Bigger than one batch: minibatch with the b1pow/b2pow TAdam form.
+           Persistent params + Adam state; one minibatch's forward+backward
+           realized per step; reshuffle each epoch; scores read back in the
+           same bounded chunks. *)
         Module[{b1pow = TOnes[{1}], b2pow = TOnes[{1}], firstBatch, idx, done},
             firstBatch = Take[Range[nG], bs];
             lossStart = First[Normal @ TRealize @ (TCategoricalCrossEntropy @@ fwd[firstBatch])];
@@ -1465,8 +1461,8 @@ forAllToPattern[axHC_HoldComplete] := Replace[axHC, {
     (* Inactive[Equal] / Inactive[Unequal] = FindEquationalProof's
        inert ProofObject lemma form.  Strip the Inactive wrapper so
        downstream encodeEquation's strict HoldComplete[Equal[_, _]]
-       check fires.  Iter 64.  Same `HoldComplete @@ Hold[..]` trick
-       to keep a reflexive Equal from collapsing at RHS evaluation. *)
+       check fires.  Same `HoldComplete @@ Hold[..]` trick to keep a
+       reflexive Equal from collapsing at RHS evaluation. *)
     HoldComplete[Inactive[Equal][a_, b_]] :>
         HoldComplete @@ Hold[Equal[a, b]],
     HoldComplete[Inactive[Unequal][a_, b_]] :>
@@ -1596,13 +1592,11 @@ atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
     conjPair = If[ Unevaluated[conjecture] === None, {0, 0},
         {Extract[cjHC, {1, 1}], Extract[cjHC, {1, 2}]}];
     (* Wire layout: [n, lhs_0, rhs_0, ..., lhs_{n-1}, rhs_{n-1},
-       goal_lhs, goal_rhs, flag_0, ..., flag_{n-1}].  Pre-fix layout
-       was the prefix up through goal_rhs; the per-axiom flag tail
-       is APPENDED so every existing reader's lhs/rhs/goal offset
-       (data[1 + 2*i + 0/1], data[1 + 2*n + 0/1]) stays valid -- only
-       the length check bumps from 1 + 2*n + 2 to 3*n + 3, and the
-       axiom-install loops gain a flag read at data[1 + 2*n + 2 + i]
-       to dispatch between thvm_atp_add_equation (flag == 0) and
+       goal_lhs, goal_rhs, flag_0, ..., flag_{n-1}].  The C reader takes
+       each axiom's lhs/rhs at data[1 + 2*i + 0/1], the goal at
+       data[1 + 2*n + 0/1], total length 3*n + 3, and the axiom-install
+       loops read the per-axiom flag at data[1 + 2*n + 2 + i] to dispatch
+       between thvm_atp_add_equation (flag == 0) and
        thvm_atp_install_oriented_rule (flag == 1).  See
        [[project_atp_oriented_rules]]. *)
     <|
@@ -1720,7 +1714,7 @@ tatpAllWitnesses[enc_, maxSteps_, witnessSpec_, maxDepth_, maxWitnesses_] := Blo
 ]
 
 (* Single non-list axiom: auto-wrap to a 1-element list, same shape
-   as iter-68 / 69's TFindProof wrap.  TATP is HoldAll so pattern
+   as the TFindProof single-axiom wrap.  TATP is HoldAll so pattern
    matching doesn't evaluate; the wrap re-dispatches the held form. *)
 TATP[axiom : (_Equal | _Unequal | _ForAll
         | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
@@ -1844,10 +1838,10 @@ anyway; downstream behavior is undefined.";
 
    useMnf = the 4th element flips the runtime MNF goal-directed front
    search (thvm_atp_set_use_mnf).  The paclet dylib always compiles MNF
-   in (WL_ATP_MNF), so "GoalDirected" no longer falls back -- it asks
-   the engine to run the bidirectional collision search alongside
-   completion, the only detector that closes a symmetric goal whose two
-   sides never share a single normal form. *)
+   in (WL_ATP_MNF), so "GoalDirected" asks the engine to run the
+   bidirectional collision search alongside completion, the only detector
+   that closes a symmetric goal whose two sides never share a single
+   normal form. *)
 (* "MaxWeight" -> n (Waldmeister MaxWeight): drop critical pairs whose
    combined term weight exceeds n; 0 / Automatic = unbounded. *)
 atpMaxWeightOpt[o_Association] := With[{w = Lookup[o, "MaxWeight", 0]},
@@ -2344,9 +2338,8 @@ atpParseMethod[{"WaldmeisterFVI", subopts___Rule}] :=
         Lookup[$AtpPresetGoalDirected, "WaldmeisterFVI", False], {subopts}];
 
 (* Method -> "WaldmeisterLazy": Waldmeister DISCOUNT-style preset
-   bundling the spec-safe LazyNormalize combo (see b2acc699 for the
-   empirical justification).  LazyNormalize defers the full CP
-   normalize to selection time; CPSetInterreduce is the WM
+   bundling the spec-safe LazyNormalize combo.  LazyNormalize defers
+   the full CP normalize to selection time; CPSetInterreduce is the WM
    KPV_KPMengeInterreduzieren periodic queue purge that drops
    joinable CPs as new rules land; AutoMaxWeight 30 caps the queue
    growth so the un-normalized stored forms can't blow memory.
@@ -2387,13 +2380,11 @@ atpParseMethod[{"WaldmeisterLazy", subopts___Rule}] :=
        growing-bound weight stash).
      - BackwardSubsume -> True         (direct port of `bs=unit_only`:
        after adding a new rule, soft-delete any existing rule subsumed
-       by it.  Iter 18 c7c42f3d shipped the C-side implementation;
-       earlier iters used ForwardSubsume as an approximation -- now
-       replaced by the real backward variant).
+       by it).
      - BackwardDemod -> True           (direct port of `bd=all` LHS
        half: after a new-rule batch, normalize each older rule's LHS
        with the new rule(s); if it reduces, drop and re-queue the
-       simplified equation.  Iter 20 07205c88).
+       simplified equation).
      - RHSInterreduce -> True          (the bd=all RHS half: the
        Waldmeister IR_InterreduktionRechts equivalent.  Pairs with
        BackwardDemod to give the full bd=all both-sides demodulation). *)
@@ -2418,7 +2409,7 @@ atpParseMethod[{"VampireUEQDefault", subopts___Rule}] :=
        paramodulation always on.
    Best-effort mapping into thvm's existing knobs:
      - CriticalPairWeight -> "Twee"   (the shared-subterm-discounted
-       asymmetric weight ported in iter 11).
+       asymmetric weight).
      - GroundJoin -> True             (Twee's cfg_ground_join: delete
        ground-joinable CPs).
      - Connectedness -> True          (Twee's
@@ -2451,7 +2442,7 @@ atpParseMethod[{"Twee", subopts___Rule}] :=
    UEQ problems:
      - CriticalPairWeight -> "ConjSym"  (E's
        ConjectureSymbolWeight: conjecture-symbol nodes weight 1,
-       off-conjecture nodes weight 4 -- the iter 22 port).
+       off-conjecture nodes weight 4).
      - Ordering -> "KBO"               (E's default term ordering
        for UEQ).  AutoPrecedence intentionally OFF: thvm's Waldmeister-
        flavored precedence layer (inverse > distributor > arity > AC-
@@ -2531,8 +2522,7 @@ atpParseMethod["VampirePortfolio"] :=
     {-2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0};
 
 $VampirePortfolio = {
-    (* 1: VampireUEQ-faithful single config (the iter-21 flag-complete
-       preset). *)
+    (* 1: VampireUEQ-faithful single config (the flag-complete preset). *)
     "VampireUEQ",
     (* 2: Twee weight + GroundJoin + Connectedness + BS + BD + RHSI. *)
     {"Completion", "CriticalPairWeight" -> "Twee",
@@ -2561,11 +2551,11 @@ $VampirePortfolio = {
     (* 10: Add weight, the bare default for combinator / Sheffer-X. *)
     {"Completion", "CriticalPairWeight" -> "Add", "AutoMaxWeight" -> 20},
     (* 11: Mix2 + SelectionRatio 2 (aggressive 1-FIFO-per-2 age bias).
-       Iter 75/76 sweep: this cracks the cross-system Sheffer Implies-X
-       family (ImpliesWolframAxioms + ImpliesWolframAlternate, ~3.7s)
-       that every other rotation entry walls on.  The tight age bias
-       forces the long derivation chain through before the CP queue
-       blows up; SR=1 and SR>=5 both miss it. *)
+       Cracks the cross-system Sheffer Implies-X family
+       (ImpliesWolframAxioms + ImpliesWolframAlternate, ~3.7s) that every
+       other rotation entry walls on.  The tight age bias forces the long
+       derivation chain through before the CP queue blows up; SR=1 and
+       SR>=5 both miss it. *)
     {"Completion", "CriticalPairWeight" -> "Mix2",
         "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
     (* 12: Vampire's McCune-cracking config (LPO + arity + LRS +
@@ -2651,12 +2641,11 @@ $AtpSchedule = {
     {"Completion", "CriticalPairWeight" -> "Gt"},
     "GoalDirected"
 };
-(* "Portfolio" is the FIXED schedule above (prior behavior, kept
-   reachable verbatim).  Automatic is now PROBLEM-AWARE: it front-loads
-   a tailored config for the detected algebraic structure, then APPENDS
-   $AtpSchedule as a fallback tail so it can never prove less than the
-   fixed portfolio (see atpAutoTune).  atpScheduleFor's two-arg form
-   threads the axioms+conjecture so Automatic can analyze them. *)
+(* "Portfolio" is the FIXED schedule above.  Automatic is PROBLEM-AWARE:
+   it front-loads a tailored config for the detected algebraic structure,
+   then APPENDS $AtpSchedule as a fallback tail so it can never prove less
+   than the fixed portfolio (see atpAutoTune).  atpScheduleFor's two-arg
+   form threads the axioms+conjecture so Automatic can analyze them. *)
 atpScheduleFor["Portfolio"] := $AtpSchedule;
 atpScheduleFor["Portfolio", _, _] := $AtpSchedule;
 atpScheduleFor[Automatic, axioms_, conjecture_] :=
@@ -2892,7 +2881,7 @@ CounterexampleObject /: MakeBoxes[
 (* term -> 0-based class index, as an Association for O(1) lookup. *)
 atpClassIndex[classes_List] :=
     Association @ Flatten @ MapIndexed[
-        Function[{cls, pos}, (# -> pos[[1]] - 1) & /@ cls],
+        {cls, pos} |-> ((# -> pos[[1]] - 1) & /@ cls),
         classes];
 
 (* The k^n Cayley table for operator f of arity n: entry [i1, ..., in]
@@ -3075,7 +3064,7 @@ atpReturnValue[bundle_, "PortfolioTrace"] :=
         Missing[___] :> {<|
             "Method" -> atpReturnValue[bundle, "AppliedMethod"],
             "WallTime" -> atpReturnValue[bundle, "WallTime"],
-            "Proved" -> (Head[bundle["ProofObject"]] === ProofObject)|>}];
+            "Proved" -> MatchQ[bundle["ProofObject"], _ProofObject]|>}];
 
 atpProjectReturn[bundle_, spec_String] := atpReturnValue[bundle, spec];
 atpProjectReturn[bundle_, All] :=
@@ -3390,11 +3379,6 @@ TFindProof[goal_ /; atpBooleanGoalQ[goal], axioms_List,
         returnSpec_?atpReturnSpecQ, opts : OptionsPattern[]] :=
     atpSmtProject[atpSmtEntail[goal, atpFlattenAxioms[axioms]], returnSpec];
 
-(* Strip Inactive[Equal] / Inactive[Unequal] from conjecture + axioms
-   so a `TFindProof[..., "Lemmas"]` round-trip works (Lemmas spec
-   returns Inactive-headed equations to keep them from collapsing on
-   display).  Cheap top-level rewrite; the dispatcher + encoder
-   downstream see bare Equal / Unequal heads.  Iter 60. *)
 (* Pass Inactive[Equal] / Inactive[Unequal] THROUGH unchanged --
    stripping them here with `Inactive[Equal][a_, b_] :> a == b`
    evaluates `Equal[a, b]` at match time on the rule RHS, which
@@ -3409,7 +3393,7 @@ atpStripInactive[expr_] := expr;
 (* Flatten one level of nesting in the axiom list.  Users
    concatenating axiom subsets via `{theory_axioms, extra_lemmas}`
    without an explicit Flatten get a List-of-Lists that the encoder
-   silently rejects -- this auto-flattens that case.  Iter 62.
+   silently rejects -- this auto-flattens that case.
    `Flatten[ax, 1]` is a no-op if ax is already a flat list of
    Equal / ForAll / Inactive[Equal] heads. *)
 atpFlattenAxioms[ax_List] := Flatten[ax, 1];
@@ -3417,8 +3401,8 @@ atpFlattenAxioms[ax_List] := Flatten[ax, 1];
 (* If the expression contains a String-headed compound (the shape
    TPTPImport produces -- e.g. "f"[X_] for the TPTP atom f(X)),
    internalize it to Symbol-headed.  No-op if nothing matches.
-   Iter 65: lets users pipe TPTPImport["..."] output directly into
-   TFindProof[conj, ax] without the manual tptpInternalize step.  *)
+   Lets users pipe TPTPImport["..."] output directly into
+   TFindProof[conj, ax] without the manual tptpInternalize step. *)
 atpMaybeInternalizeTPTP[expr_] := If[
     (* Trigger on either: a String-headed compound (`"f"[X]`, the
        TPTPImport shape), OR a bare String atom inside a term tree
@@ -3455,7 +3439,7 @@ atpNormalizeAxioms[ax_List] :=
             atpFlattenAxioms[Inactivate[ax, Equal]]]];
 (* A single Equal / Inactive[Equal] / ForAll axiom (no enclosing
    List) is a common shape -- the user pastes one ax directly.
-   Wrap in a 1-element List and re-dispatch.  Iter 68. *)
+   Wrap in a 1-element List and re-dispatch. *)
 TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _Rule
         | _TwoWayRule
         | Inactive[Equal][_, _] | Inactive[Unequal][_, _]
@@ -3586,9 +3570,9 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
             AppendTo[atpTrace, <|
                 "Method" -> atpSched[[i]],
                 "WallTime" -> Lookup[atpR, "WallTime", Missing["NotAvailable"]],
-                "Proved" -> (Head[atpR["ProofObject"]] === ProofObject)
+                "Proved" -> MatchQ[atpR["ProofObject"], _ProofObject]
             |>];
-            If[ Head[atpR["ProofObject"]] === ProofObject, Break[]],
+            If[ MatchQ[atpR["ProofObject"], _ProofObject], Break[]],
             {i, n}]];
         (* Stamp the cumulative trace on the returned bundle.  When only
            one slice ran (proved immediately), the trace has one entry. *)
@@ -3724,9 +3708,9 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
    runner reads (0, 0) as "no goal" and saturates until the CP queue
    empties (a finite complete system) or the step/wall budget is hit.
    The default return for completion mode is "ProofObject" with
-   Theorems -> None (b25ea718 unified the no-goal path with the
-   goal-directed forms); "Lemmas" is still available as an explicit
-   return spec for the saturated rule set as Inactive[Equal] pairs. *)
+   Theorems -> None (the no-goal path is unified with the goal-directed
+   forms); "Lemmas" is still available as an explicit return spec for the
+   saturated rule set as Inactive[Equal] pairs. *)
 atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
     Module[{enc, cRes, atpWall, atpMethodCfg, atpWallTime,
@@ -3761,9 +3745,9 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
             ProofObject["EquationalLogic", None, axEq,
                 <|"Variables" -> varNames, "Constants" -> {},
                   "Proof" -> MapIndexed[
-                    Function[{eq, idx}, {"Axiom", First[idx]} ->
+                    {eq, idx} |-> ({"Axiom", First[idx]} ->
                         <|"Statement" -> (eq /. Inactive[Equal] -> Equal),
-                          "Proof" -> <||>|>],
+                          "Proof" -> <||>|>),
                     axEq]|>],
             ProofObject["EquationalLogic", None, axEq,
                 <|"Variables" -> Union[varNames,
@@ -3779,7 +3763,7 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
 ];
 
 (* Single non-list axiom: auto-wrap and re-dispatch.  Same shape as
-   the (conj, single_ax) wrap (iter 68), at the completion entry. *)
+   the (conj, single_ax) wrap, at the completion entry. *)
 TFindProof[axiom : (_Equal | _Unequal | _ForAll
         | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
         opts:OptionsPattern[]] :=

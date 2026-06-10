@@ -331,7 +331,7 @@ einxDefaultOut[parsed_, verbClass_] := Block[{
         "named-reduce",
             (* Softmax / LayerNorm / RMSNorm: output keeps the
                bracketed axis (those get reduced internally, then
-               re-broadcast, but the final shape is the input's. *)
+               re-broadcast), but the final shape is the input's. *)
             flatNames @ First @ parsed["in"]
         ,
         "elem",
@@ -434,8 +434,6 @@ einxReduceAlong[term_, axes_, name_String, kind_String] := Block[{
 },
     {TUOpReduce[term, pos - 1, kind], Drop[axes, {pos}]}
 ]
-
-(* Drop a name from an axis order, returning {newOrder}. *)
 
 (* === final permute + composite merge ============================= *)
 
@@ -784,7 +782,7 @@ TEinSoftmax[pattern_String, x_TTerm, rest___] := Catch @ Block[{
 
 TEinLayerNorm[pattern_String, x_TTerm, rest___] :=
     TEinLayerNorm[pattern, x, 1.0*^-5, rest]
-TEinLayerNorm[pattern_String, x_TTerm, eps_?NumericQ, rest___] := Catch @ Block[{
+TEinLayerNorm[pattern_String, x_TTerm, eps_ ? NumericQ, rest___] := Catch @ Block[{
     parsed, finalParsed, split, prep, term, count, meanR, axesM, meanB,
     diff, varR, axesV, varB, normalized
 },
@@ -810,7 +808,7 @@ TEinLayerNorm[pattern_String, x_TTerm, eps_?NumericQ, rest___] := Catch @ Block[
 
 TEinRMSNorm[pattern_String, x_TTerm, rest___] :=
     TEinRMSNorm[pattern, x, 1.0*^-5, rest]
-TEinRMSNorm[pattern_String, x_TTerm, eps_?NumericQ, rest___] := Catch @ Block[{
+TEinRMSNorm[pattern_String, x_TTerm, eps_ ? NumericQ, rest___] := Catch @ Block[{
     parsed, finalParsed, split, prep, term, count, msR, axesV, msB, result
 },
     parsed = parseEinxPattern[pattern];

@@ -1,5 +1,5 @@
 (* ::Package:: *)
-(* Profile.wl -- structured runtime profile snapshot for grad +
+(* Profile.wl: structured runtime profile snapshot for grad +
    materialization debugging, plus the per-context HotCounters surface.
 
    TProfile[]            captures the current heap / tensor / kernel
@@ -23,7 +23,7 @@
                                    delta as <|"Label", "WallMs",
                                    "Counters"|>.
    THotCountersReport[ds]         Tabular over a list of deltas with
-                                   ratios between consecutive rows --
+                                   ratios between consecutive rows;
                                    spots quadratic / cubic growth at
                                    a glance.
 
@@ -129,7 +129,7 @@ TProfile[label_String] := Module[{
 (* Headline metrics shown in TProfileTable, in display order. *)
 $tabularKeys = {"Label", "HeapCells", "Tensors", "DistinctBufs",
                 "NonContigAliases", "Kernels", "MaxKernelInputs",
-                "MaxKernelOps", "ITRS"};
+                "MaxKernelOps", "ITRS"}
 
 TProfileTable[ps_List] := Module[{rows, allTags, tagRows},
     rows = Table[
@@ -151,8 +151,7 @@ TProfileGrowth[ps_List] := Module[{
     If[ Length[ps] < 2, Return[<||>] ];
     pairs = Partition[ps, 2, 1];
     ratios = AssociationMap[
-        Function[k,
-            Map[ Function[pp, ratio[ pp[[1]][k], pp[[2]][k] ]], pairs ]],
+        k |-> Map[ pp |-> ratio[ pp[[1]][k], pp[[2]][k] ], pairs ],
         keys];
     ratios
 ]
@@ -208,7 +207,7 @@ $THotCounterNames = {
     "WnfCalls", "RealizeCalls", "MaterializeCalls",
     "KernelFires", "GradFires",
     "JitReplayCalls", "JitReplayDispatches", "JitReplayAssigns",
-    "JitGraphRuns", "JitGraphDispatches"};
+    "JitGraphRuns", "JitGraphDispatches"}
 
 THotCounters[] := (ensureInit[];
     AssociationThread[$THotCounterNames, $hotCountersFn[]])
@@ -244,7 +243,7 @@ THotCountersReport[ds_List] := Module[{
             Do[
                 cur = rows[[i]];
                 r = AssociationMap[
-                    Function[k, "x" <> ToString[ratio[prev[k], cur[k]]]],
+                    k |-> "x" <> ToString[ratio[prev[k], cur[k]]],
                     Drop[headerKeys, 1]];
                 AppendTo[out, cur];
                 AppendTo[out, Join[<| "Label" -> "  ratio" |>, r]];

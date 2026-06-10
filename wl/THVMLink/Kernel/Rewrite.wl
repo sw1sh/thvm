@@ -23,112 +23,112 @@ BeginPackage["THVMLink`"];
 
 (* === KAX_* axis types =========================================== *)
 $KaxLoop::usage = $KaxReduce::usage = $KaxUpcast::usage =
-  $KaxUnroll::usage = $KaxLocal::usage = $KaxGlobal::usage =
-  $KaxGroupReduce::usage =
-    "axis_type id; mirrors KAX_* in src/thvm.h.";
+    $KaxUnroll::usage = $KaxLocal::usage = $KaxGlobal::usage =
+    $KaxGroupReduce::usage =
+        "axis_type id; mirrors KAX_* in src/thvm.h.";
 
 (* === UOP_OPT_* annotation kinds ================================== *)
 $OptUnroll::usage = $OptUpcast::usage = $OptTC::usage =
-  $OptLocal::usage = $OptGroupReduce::usage = $OptConv::usage =
-  $OptFastMath::usage = $OptSimdReduce::usage = $OptVecLoad::usage =
-    "UOp_OPT.kind value; mirrors UOP_OPT_* in src/thvm.h.";
+    $OptLocal::usage = $OptGroupReduce::usage = $OptConv::usage =
+    $OptFastMath::usage = $OptSimdReduce::usage = $OptVecLoad::usage =
+        "UOp_OPT.kind value; mirrors UOP_OPT_* in src/thvm.h.";
 
 (* === KOP_* opcodes ============================================== *)
 $KopNone::usage = $KopUpcast::usage = $KopUnroll::usage =
-  $KopLocal::usage = $KopGroup::usage = $KopGroupTop::usage =
-  $KopSwap::usage = $KopPadTo::usage = $KopNoLocals::usage =
-  $KopTC::usage = $KopGlobal::usage = $KopFastMath::usage =
-  $KopSimdReduce::usage = $KopVecLoad::usage =
-    "KOpt.op value; mirrors KOP_* in src/thvm.h.";
+    $KopLocal::usage = $KopGroup::usage = $KopGroupTop::usage =
+    $KopSwap::usage = $KopPadTo::usage = $KopNoLocals::usage =
+    $KopTC::usage = $KopGlobal::usage = $KopFastMath::usage =
+    $KopSimdReduce::usage = $KopVecLoad::usage =
+        "KOpt.op value; mirrors KOP_* in src/thvm.h.";
 
 (* === C-side bridge ============================================== *)
 TUOpDagApplyKOpt::usage =
-  "TUOpDagApplyKOpt[t_TTerm, op_Integer, axis_Integer, arg_Integer] " <>
-  "applies a KOpt to the kernel's UOp DAG via the C-side " <>
-  "uop_dag_apply_kopt and returns a new TTerm wrapping the rewritten " <>
-  "root.  Returns TTerm[0] on bail / unsupported KOpt.  Mirror of " <>
-  "py_uop_dag_apply_kopt in py/csource/thvm_py.c.";
+    "TUOpDagApplyKOpt[t_TTerm, op_Integer, axis_Integer, arg_Integer] " <>
+    "applies a KOpt to the kernel's UOp DAG via the C-side " <>
+    "uop_dag_apply_kopt and returns a new TTerm wrapping the rewritten " <>
+    "root.  Returns TTerm[0] on bail / unsupported KOpt.  Mirror of " <>
+    "py_uop_dag_apply_kopt in py/csource/thvm_py.c.";
 
 (* === KOpt rule operator-forms ===================================
  * Each KOptXyz[args...] returns an operator (ReplaceAll[rules] or
  * ReplaceRepeated[rules]) that takes a TTermExpr snapshot and
  * returns the rewritten snapshot.  Composition via RightComposition.
  *
- * These rewrite the snapshot SHAPE -- they do not touch C-side terms
+ * These rewrite the snapshot SHAPE; they do not touch C-side terms
  * directly.  Pair with TUOpDagApplyKOpt + TTermExpr for
  * cross-validation.
  *)
 KOptTC::usage =
-  "KOptTC[factor_Integer] returns an operator that wraps the inner " <>
-  "REDUCE inside STORE.value with OPT(_, TC, factor), or replaces an " <>
-  "existing TC factor.  Idempotent at the same factor.";
+    "KOptTC[factor_Integer] returns an operator that wraps the inner " <>
+    "REDUCE inside STORE.value with OPT(_, TC, factor), or replaces an " <>
+    "existing TC factor.  Idempotent at the same factor.";
 
 KOptGlobal::usage =
-  "KOptGlobal[axis_Integer] returns an operator that swaps every " <>
-  "RANGE leaf at the given axis_id from KAX_LOOP to KAX_GLOBAL.";
+    "KOptGlobal[axis_Integer] returns an operator that swaps every " <>
+    "RANGE leaf at the given axis_id from KAX_LOOP to KAX_GLOBAL.";
 
 KOptUpcast::usage = KOptUnroll::usage = KOptLocal::usage =
-  KOptGroup::usage = KOptGroupTop::usage =
-    "KOpt<X>[axis_Integer, k_Integer] returns an operator that splits " <>
-    "RANGE(axis, LOOP, N) into outer RANGE(axis, LOOP, N/k) and inner " <>
-    "RANGE(axis+1, KAX_<X>, k), substituting refs with " <>
-    "IADD(IMUL(outer, k), inner).";
+    KOptGroup::usage = KOptGroupTop::usage =
+        "KOpt<X>[axis_Integer, k_Integer] returns an operator that splits " <>
+        "RANGE(axis, LOOP, N) into outer RANGE(axis, LOOP, N/k) and inner " <>
+        "RANGE(axis+1, KAX_<X>, k), substituting refs with " <>
+        "IADD(IMUL(outer, k), inner).";
 
 KOptSwap::usage =
-  "KOptSwap[a_Integer, b_Integer] returns an operator that swaps the " <>
-  "axis_ids of the two RANGE leaves.  Bidirectional; staged through " <>
-  "a fresh placeholder symbol to avoid the rewrite loop.";
+    "KOptSwap[a_Integer, b_Integer] returns an operator that swaps the " <>
+    "axis_ids of the two RANGE leaves.  Bidirectional; staged through " <>
+    "a fresh placeholder symbol to avoid the rewrite loop.";
 
 KOptFastMath::usage =
-  "KOptFastMath is an operator that wraps every unary FP op " <>
-  "(EXP2/LOG2/SQRT/NEG/RECIP) with OPT(_, FastMath, 0).  Idempotent.";
+    "KOptFastMath is an operator that wraps every unary FP op " <>
+    "(EXP2/LOG2/SQRT/NEG/RECIP) with OPT(_, FastMath, 0).  Idempotent.";
 
 KOptSimdReduce::usage =
-  "KOptSimdReduce is an operator that wraps every REDUCE with " <>
-  "OPT(_, SimdReduce, 0).  Idempotent.";
+    "KOptSimdReduce is an operator that wraps every REDUCE with " <>
+    "OPT(_, SimdReduce, 0).  Idempotent.";
 
 KOptVecLoad::usage =
-  "KOptVecLoad[width_Integer] returns an operator that wraps every " <>
-  "INDEX_E whose addr is contiguous-shaped " <>
-  "(IADD(IMUL(_, _), RANGE)) with OPT(_, VecLoad, width).";
+    "KOptVecLoad[width_Integer] returns an operator that wraps every " <>
+    "INDEX_E whose addr is contiguous-shaped " <>
+    "(IADD(IMUL(_, _), RANGE)) with OPT(_, VecLoad, width).";
 
 Begin["`Private`"];
 
 (* === KAX_* axis types ============================================ *)
-$KaxLoop        = 0;
-$KaxReduce      = 1;
-$KaxUpcast      = 2;
-$KaxUnroll      = 3;
-$KaxLocal       = 4;
-$KaxGlobal      = 5;
-$KaxGroupReduce = 6;
+$KaxLoop = 0
+$KaxReduce = 1
+$KaxUpcast = 2
+$KaxUnroll = 3
+$KaxLocal = 4
+$KaxGlobal = 5
+$KaxGroupReduce = 6
 
 (* === UOP_OPT_* annotation kinds ================================== *)
-$OptUnroll      = 0;
-$OptUpcast      = 1;
-$OptTC          = 2;
-$OptLocal       = 3;
-$OptGroupReduce = 4;
-$OptConv        = 5;
-$OptFastMath    = 6;
-$OptSimdReduce  = 7;
-$OptVecLoad     = 8;
+$OptUnroll = 0
+$OptUpcast = 1
+$OptTC = 2
+$OptLocal = 3
+$OptGroupReduce = 4
+$OptConv = 5
+$OptFastMath = 6
+$OptSimdReduce = 7
+$OptVecLoad = 8
 
 (* === KOP_* opcodes =============================================== *)
-$KopNone       = 0;
-$KopUpcast     = 1;
-$KopUnroll     = 2;
-$KopLocal      = 3;
-$KopGroup      = 4;
-$KopGroupTop   = 5;
-$KopSwap       = 6;
-$KopPadTo      = 7;
-$KopNoLocals   = 8;
-$KopTC         = 9;
-$KopGlobal     = 10;
-$KopFastMath   = 11;
-$KopSimdReduce = 12;
-$KopVecLoad    = 13;
+$KopNone = 0
+$KopUpcast = 1
+$KopUnroll = 2
+$KopLocal = 3
+$KopGroup = 4
+$KopGroupTop = 5
+$KopSwap = 6
+$KopPadTo = 7
+$KopNoLocals = 8
+$KopTC = 9
+$KopGlobal = 10
+$KopFastMath = 11
+$KopSimdReduce = 12
+$KopVecLoad = 13
 
 (* === C-side bridge =============================================== *)
 $applyKOptFn := $applyKOptFn = LibraryFunctionLoad[
@@ -149,11 +149,11 @@ TUOpDagApplyKOpt[t_TTerm, op_Integer, axis_Integer, arg_Integer] := (
 
 (* ---- TC: wrap inner REDUCE with OPT(_, TC, factor) ---------------- *)
 KOptTC[factor_Integer] := ReplaceAll[{
-    (* bare REDUCE inside STORE.value -- wrap *)
+    (* bare REDUCE inside STORE.value: wrap *)
     "UOP"["STORE", b_, a_, r:"UOP"["REDUCE", __]] :>
         "UOP"["STORE", b, a,
             "UOP"["OPT", r, "NUM"[$OptTC], "NUM"[factor]]],
-    (* already TC-wrapped -- replace factor *)
+    (* already TC-wrapped: replace factor *)
     "UOP"["STORE", b_, a_,
         "UOP"["OPT", r:"UOP"["REDUCE", __], "NUM"[$OptTC], _]] :>
         "UOP"["STORE", b, a,
@@ -179,19 +179,19 @@ splitRule[innerKax_, optKind_, axis_, k_] := With[{
     innerExpr = If[ optKind === None,
         "UOP"["RANGE", "NUM"[axis + 1], "NUM"[innerKax], "NUM"[k]],
         "UOP"["OPT",
-              "UOP"["RANGE", "NUM"[axis + 1], "NUM"[innerKax], "NUM"[k]],
-              "NUM"[optKind], "NUM"[k]]]
+            "UOP"["RANGE", "NUM"[axis + 1], "NUM"[innerKax], "NUM"[k]],
+            "NUM"[optKind], "NUM"[k]]]
 },
     {
-      "UOP"["RANGE", "NUM"[axis], "NUM"[outerType_], "NUM"[n_]] :>
-          "UOP"["IADD",
-              "UOP"["IMUL",
-                  "UOP"["RANGE", "NUM"[axis], "NUM"[outerType],
-                                  "NUM"[Quotient[n, k]]],
-                  "UOP"["CONST", "NUM"[k]]],
-              innerExpr],
-      "UOP"["RANGE", "NUM"[other_Integer /; other > axis], t_, e_] :>
-          "UOP"["RANGE", "NUM"[other + 1], t, e]
+        "UOP"["RANGE", "NUM"[axis], "NUM"[outerType_], "NUM"[n_]] :>
+            "UOP"["IADD",
+                "UOP"["IMUL",
+                    "UOP"["RANGE", "NUM"[axis], "NUM"[outerType],
+                        "NUM"[Quotient[n, k]]],
+                    "UOP"["CONST", "NUM"[k]]],
+                innerExpr],
+        "UOP"["RANGE", "NUM"[other_Integer /; other > axis], t_, e_] :>
+            "UOP"["RANGE", "NUM"[other + 1], t, e]
     }
 ]
 
@@ -210,14 +210,14 @@ reduceAxisShift[axis_] := {
 doSplit[innerKax_, optKind_, axis_, k_][expr_] :=
     (expr /. splitRule[innerKax, optKind, axis, k]) /. reduceAxisShift[axis]
 
-KOptUpcast  [axis_Integer, k_Integer] := doSplit[$KaxUpcast, $OptUpcast,   axis, k]
-KOptUnroll  [axis_Integer, k_Integer] := doSplit[$KaxUnroll, $OptUnroll,   axis, k]
-KOptLocal   [axis_Integer, k_Integer] := doSplit[$KaxLocal,  None,         axis, k]
-(* KOP_GROUP / KOP_GROUPTOP are retired opcodes (Phase 4b/4-5) but their
-   KOpt entry points stay for back-compat.  C-side apply_opt_dag falls
-   through to KAX_LOOP + no-OPT default for these; WL mirrors that. *)
-KOptGroup   [axis_Integer, k_Integer] := doSplit[$KaxLoop,   None,         axis, k]
-KOptGroupTop[axis_Integer, k_Integer] := doSplit[$KaxLoop,   None,         axis, k]
+KOptUpcast[axis_Integer, k_Integer] := doSplit[$KaxUpcast, $OptUpcast, axis, k]
+KOptUnroll[axis_Integer, k_Integer] := doSplit[$KaxUnroll, $OptUnroll, axis, k]
+KOptLocal[axis_Integer, k_Integer] := doSplit[$KaxLocal, None, axis, k]
+(* KOP_GROUP / KOP_GROUPTOP are retired opcodes but their KOpt entry
+   points stay for back-compat.  C-side apply_opt_dag falls through to
+   KAX_LOOP + no-OPT default for these; WL mirrors that. *)
+KOptGroup[axis_Integer, k_Integer] := doSplit[$KaxLoop, None, axis, k]
+KOptGroupTop[axis_Integer, k_Integer] := doSplit[$KaxLoop, None, axis, k]
 
 (* ---- SWAP: bidirectional axis swap.  ReplaceAll's single-pass
    semantics give us idempotent swap for free: rule 1 fires on each
@@ -239,7 +239,7 @@ KOptSwap[a_Integer, b_Integer] := ReplaceAll[{
 fastMathUnaryQ = MemberQ[{"EXP2", "LOG2", "SQRT"}, #] &;
 
 (* already FastMath-wrapped unary: descend into the unary's body,
-   re-wrap in the same shape (idempotent) -- mirrors the OPT/FAST_MATH
+   re-wrap in the same shape (idempotent); mirrors the OPT/FAST_MATH
    idempotency arm in apply_opt_dag_fm_walk_uncached. *)
 fmWalk["UOP"["OPT", "UOP"[in_String /; fastMathUnaryQ[in], inArgs___],
              "NUM"[$OptFastMath], _]] :=
@@ -274,7 +274,7 @@ KOptVecLoad[width_Integer] := ReplaceRepeated[{
 }]
 
 (* Composition: callers use `RightComposition[k1, k2, ...][expr]`
-   directly -- no helper needed. *)
+   directly; no helper needed. *)
 
 End[];   (* `Private` *)
 

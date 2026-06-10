@@ -33,7 +33,7 @@ tHeapQ[THeap[a_Association]] := tHeapPayloadQ[a]
 tHeapQ[___] := False
 
 tTermQ[TTerm[_Integer, _Integer, _]] := True
-tTermQ[___]                       := False
+tTermQ[___] := False
 
 (* More specific tests that match on a TTerm AND its tag.  Used to
    dispatch the MakeBoxes UpValue by tag so the summary box for a
@@ -232,7 +232,7 @@ TTerm /: MakeBoxes[t_TTerm /; tNumQ[t], fmt_] :=
             {disp = ToBoxes[
                 Tooltip[tTermTrad[t], tTermExprResolved[t]], fmt]},
             InterpretationBox[disp, t, SelectWithContents -> True]],
-        tNumSummaryBox[t, fmt]];
+        tNumSummaryBox[t, fmt]]
 tNumSummaryBox[t_, fmt_] := With[{
     id   = ttermRaw[t],
     icon = termSummaryIcon[]
@@ -381,7 +381,7 @@ tKernelOptsSummaryIcon[axisTypes_List] := Graphics[
                 EdgeForm[LightDarkSwitched[Black, White]],
                 FaceForm[LightDarkSwitched[
                     Lighter[Lookup[$kaxColors, t, StandardGray], 0.5],
-                    Darker [Lookup[$kaxColors, t, StandardGray], 0.4]]],
+                    Darker[Lookup[$kaxColors, t, StandardGray], 0.4]]],
                 Rectangle[{x, -0.55}, {x + 1.0/Max[Length[axisTypes], 1], 0.55}]
             }],
         {i, Length[axisTypes]}],
@@ -444,8 +444,8 @@ TKernelOpts /: MakeBoxes[k:TKernelOpts[a_Association] /; tKernelOptsQ[Unevaluate
 (* === TKernelVariant summary box ===
    One row of the bench-the-candidates table: kid + (op, axis,
    arg) (or "baseline" if Opt is None) + measured WallUs.  Tiny
-   bar icon scaled by speedup vs baseline -- Phase-16 inspection
-   surface so notebooks render the bench results compactly. *)
+   bar icon scaled by speedup vs baseline, so notebooks render the
+   bench results compactly. *)
 
 tKernelVariantQ[TKernelVariant[a_Association]] := AllTrue[
     {"Kid", "Opt", "WallUs"}, KeyExistsQ[a, #] &]
@@ -496,8 +496,8 @@ TKernelVariant /: MakeBoxes[v:TKernelVariant[a_Association] /; tKernelVariantQ[U
    The capture/replay closure from Jit.wl.  A play-button icon that
    greens up once the closure has captured a dispatch sequence, plus
    the captured op count and the C-side capture slot.  Capture state
-   lives in $tJitState keyed by Hash of the closure association -- the
-   same key the call path uses -- so the box reflects the live state. *)
+   lives in $tJitState keyed by Hash of the closure association (the
+   same key the call path uses), so the box reflects the live state. *)
 
 tJitClosureQ[TJitClosure[a_Association]] := KeyExistsQ[a, "id"] && KeyExistsQ[a, "fn"]
 tJitClosureQ[___] := False
@@ -603,7 +603,7 @@ TMemoryPlan /: MakeBoxes[p_TMemoryPlan /; memoryPlanQ[Unevaluated[p]], fmt_] :=
 (* === TContext (multi-heap handle from Context.wl) === *)
 
 tContextQ[TContext[_Integer]] := True
-tContextQ[___]                := False
+tContextQ[___] := False
 
 TContext /: MakeBoxes[c_TContext /; tContextQ[Unevaluated[c]], fmt_] := With[{
     slot = First[c]
@@ -658,16 +658,16 @@ $opInactiveHeads = <|
     "-" -> Inactive[Subtract],
     "*" -> Inactive[Times],
     "/" -> Inactive[Divide]
-|>;
+|>
 
 (* SUB-resolving variant of TTermExpr: walks the heap, chasing
    through SUB-flagged DP/VAR projections so a resolved DP shows up
    as the substituted value (no DP wrapper).  Used as the Tooltip
-   content for TraditionalForm rendering -- if the display says
+   content for TraditionalForm rendering: if the display says
    `1 + 3` then the tooltip should not contradict that with
    `OP2[+, NUM[1], DP0[1, NUM[3]]]`. *)
-tTermExprResolved[t_TTerm] := tTermExprResolvedDepth[t, 16];
-tTermExprResolvedDepth[t_TTerm, 0] := "?";
+tTermExprResolved[t_TTerm] := tTermExprResolvedDepth[t, 16]
+tTermExprResolvedDepth[t_TTerm, 0] := "?"
 tTermExprResolvedDepth[t_TTerm, d_Integer] := Block[
     {tag, val, ext, cell},
     tag = TTermTag[t];
@@ -710,10 +710,10 @@ tTermExprResolvedDepth[t_TTerm, d_Integer] := Block[
                   tTermExprResolvedDepth[THeapRead[val + 1], d - 1]],
         $TagLAM,
             "LAM"[val, tTermExprResolvedDepth[THeapRead[val], d - 1]],
-        _, "?" <> ToString[tag]]];
+        _, "?" <> ToString[tag]]]
 
-tTermTrad[t_TTerm] := tTermTradDepth[t, 16];
-tTermTradDepth[t_TTerm, 0] := "..";
+tTermTrad[t_TTerm] := tTermTradDepth[t, 16]
+tTermTradDepth[t_TTerm, 0] := ".."
 tTermTradDepth[t_TTerm, d_Integer] := Block[
     {tag, val, ext, cell, opName, head, a, b, body},
     tag = TTermTag[t];
@@ -740,7 +740,7 @@ tTermTradDepth[t_TTerm, d_Integer] := Block[
                so DP0 and DP1 of the same body are visually distinct
                (matches canonicalForm's wrapping).  Post-fire (cell
                SUB-flagged), the projection has resolved to a specific
-               branch -- chase through, drop the superscript. *)
+               branch: chase through, drop the superscript. *)
             cell = THeapRead[val];
             If[ TTermSub[cell] === 1,
                 tTermTradDepth[
@@ -771,7 +771,7 @@ tTermTradDepth[t_TTerm, d_Integer] := Block[
             (* Plain Row, no Inactive. Inactive-as-head wraps the
                function position in an InactiveHead template which
                attaches its own automatic tooltip showing the raw
-               box expression -- not what we want layered under the
+               box expression, not what we want layered under the
                outer structural tooltip. *)
             With[{aa = a, bb = b}, Row[{"(", aa, ")(", bb, ")"}]],
         $TagLAM,
@@ -783,7 +783,7 @@ tTermTradDepth[t_TTerm, d_Integer] := Block[
                 Row[{"\[Lambda]", "x", ". ", b}]],
         $TagUOP,
             (* Inactive is HoldAll, so we have to build the head Symbol
-               BEFORE Inactive wraps -- otherwise the Symbol[...]
+               BEFORE Inactive wraps; otherwise the Symbol[...]
                expression itself shows up literally as the head, and
                `ext` leaks as `Private\`ext`. *)
             With[
@@ -794,31 +794,30 @@ tTermTradDepth[t_TTerm, d_Integer] := Block[
                      {i, 0, Min[4, uopArity[ext] - 1]}]},
                 Inactive[sym] @@ children],
         $TagALO,
-            (* ALO(body, state) -- lazy thunk.  Render as Defer[body]^s
+            (* ALO(body, state): lazy thunk.  Render as Defer[body]^s
                so users can tell it's been thunked, and at which state. *)
             With[
                 {b = tTermTradDepth[THeapRead[val + 0], d - 1],
                  s = TTermVal[THeapRead[val + 1]]},
                 Subscript[OverHat[b], s]],
         $TagCTR,
-            (* CTR -- constructor.  heap[base] = NUM(arity), rest is
+            (* CTR: constructor.  heap[base] = NUM(arity), rest is
                children.  Render as C[child1, ..., childN]. *)
             With[{n = TTermVal[THeapRead[val]]},
                 "C" @@
                     Table[tTermTradDepth[THeapRead[val + 1 + i], d - 1],
                           {i, 0, n - 1}]],
         $TagMAT,
-            (* MAT(scrut, case-tree) -- match scrut against constructor ext. *)
+            (* MAT(scrut, case-tree): match scrut against constructor ext. *)
             With[
                 {scrut = tTermTradDepth[THeapRead[val + 0], d - 1],
                  cases = tTermTradDepth[THeapRead[val + 1], d - 1]},
                 Row[{"match", Subscript["#", ext], "[", scrut, " | ", cases, "]"}]],
-        _, Row[{TTagName[tag], "@", val}]]];
+        _, Row[{TTagName[tag], "@", val}]]]
 
 (* TraditionalForm of a TTerm dispatches inside the existing
-   MakeBoxes UpValue rules above (search for `fmt === TraditionalForm`).
-   No separate rule needed -- adding one didn't beat the broader
-   UpValues on specificity. *)
+   MakeBoxes UpValue rules above (search for `fmt === TraditionalForm`);
+   no separate rule needed. *)
 
 End[];
 

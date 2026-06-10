@@ -10,7 +10,8 @@
                           for n iterations.  Returns a TTerm; TRealize
                           to evaluate.
      TOptim["Adam", lr, beta1, beta2, eps][gradFn, w0, n]
-                       -- (Phase-1 next item; stub raises Failure.)
+                       -- Adam recursion over n iterations.  Returns a
+                          TTerm; TRealize to evaluate.
 
    gradFn is a Wolfram Function that takes a TTerm w and returns the
    loss gradient w.r.t. w as a TTerm UOp graph.
@@ -32,7 +33,7 @@ TAdam::usage = "TAdam[loss, params, m, v, b1pow, b2pow, opts] applies one Adam s
 
 Begin["`Private`"];
 
-$optimDefCounter = 0;
+$optimDefCounter = 0
 
 freshOptimDefName[algo_String] := (
     $optimDefCounter += 1;
@@ -110,10 +111,10 @@ adamRecursiveTerm[gradFn_, lr_, beta1_, beta2_, eps_, w0_, n_] :=
    Function that the user invokes with (gradFn, w0, n). === *)
 
 TOptim["SGD", lr_TTerm] :=
-    Function[{gradFn, w0, n}, sgdRecursiveTerm[gradFn, lr, w0, n]]
+    {gradFn, w0, n} |-> sgdRecursiveTerm[gradFn, lr, w0, n]
 
 TOptim["Adam", lr_TTerm, beta1_, beta2_, eps_] :=
-    Function[{gradFn, w0, n}, adamRecursiveTerm[gradFn, lr, beta1, beta2, eps, w0, n]]
+    {gradFn, w0, n} |-> adamRecursiveTerm[gradFn, lr, beta1, beta2, eps, w0, n]
 
 (* === TAdam: TAssign-form Adam (graph-resident) ===
 
@@ -141,7 +142,7 @@ Options[TAdam] = {
     "beta1" -> 0.9,
     "beta2" -> 0.999,
     "eps"   -> 1.0*^-8
-};
+}
 
 (* Shared backward + per-param update.  mHatFn / vHatFn map an
    m/v buffer's post-assign term to its bias-corrected hat term;
@@ -154,8 +155,8 @@ adamStep[loss_, params_, mList_, vList_, lr_, beta1_, beta2_, eps_,
            first: scheduling the forward into kernels before the backward
            walk severs the requires_grad provenance for non-trivial graphs,
            so TGrad returns ZERO gradients (the moment buffers then stay at
-           their seed and Adam never converges -- issue #4).  SGD takes
-           TGrad on the live loss directly and works; this matches it. *)
+           their seed and Adam never converges).  SGD takes TGrad on the
+           live loss directly and works; this matches it. *)
         grads        = TGrad[loss, params];
         (* Realize all gradients in ONE bundled materialize pass.
            TGrad[loss, params] does a single requires_grad backward walk, so the
@@ -166,11 +167,9 @@ adamStep[loss_, params_, mList_, vList_, lr_, beta1_, beta2_, eps_,
            each isolated pass sees its upstream as single-consumer and
            inlines it -- so it pays ~N x the kernels (beautiful_mnist BS=8
            backward: 1583 vs ~216 bundled).  The list form of TRealize
-           returns the N realized roots as pinned TEN handles, so the three downstream
-           Adam reads (m, g*g, w) all see the same concrete gradient buffer.
-           (The earlier per-param form predates the single-walk: back then
-           each target was a separate target-aware DP1 walk that recomputed
-           on each read, so per-param realize was the only safe form.) *)
+           returns the N realized roots as pinned TEN handles, so the three
+           downstream Adam reads (m, g*g, w) all see the same concrete
+           gradient buffer. *)
         gradsRealized = TRealize[grads];
         (* Commit the first/second moment buffers in their OWN bundled pass
            BEFORE the param update reads them, mirroring the b1pow / b2pow
@@ -178,9 +177,9 @@ adamStep[loss_, params_, mList_, vList_, lr_, beta1_, beta2_, eps_,
            w-update root (mHat / vHat folded into the w kernel) miscompiles
            the read-after-write under TJit replay -- the committed buffer is
            read stale / the store is dropped, which NaNs the step once real
-           gradients flow (issue #4).  Committing m / v as realize ROOTS
-           makes each write a real dispatched store; the w-update then reads
-           the committed buffers as plain TEN handles. *)
+           gradients flow.  Committing m / v as realize ROOTS makes each
+           write a real dispatched store; the w-update then reads the
+           committed buffers as plain TEN handles. *)
         mvAssigns = Table[
             {TAssign[mList[[i]], beta1 * mList[[i]] + (1.0 - beta1) * gradsRealized[[i]]],
              TAssign[vList[[i]], beta2 * vList[[i]] + (1.0 - beta2) * (gradsRealized[[i]] * gradsRealized[[i]])]},

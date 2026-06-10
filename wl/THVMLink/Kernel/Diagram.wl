@@ -79,12 +79,12 @@ wireFor[loc_Integer] := Block[{t, tag, val, ext, body, btag},
                 "dup" <> ToString[val] <> "_dp1_lab" <> ToString[ext]],
         (* Non-CONST UOPs key on the producer's base instead of the
            cell loc, so multi-reference (a single UOP feeding N
-           consumer slots) collapses to one shared wire -- DC then
+           consumer slots) collapses to one shared wire - DC then
            draws a spider where the producer fans out to all the
            consumers.  CONST stays per-loc because we render a
            CONST leaf per consumer cell. *)
         $TagUOP,
-            If[ext === $UopConst,
+            If[ ext === $UopConst,
                 "w"   <> ToString[loc],
                 "uop" <> ToString[val]
             ],
@@ -92,8 +92,8 @@ wireFor[loc_Integer] := Block[{t, tag, val, ext, body, btag},
            cell loc.  Every cell holding a reference to the same tid
            collapses onto one shared wire, so a kernel reading another
            kernel's output_buf draws a direct edge between the two
-           kernels (their two TAG_TEN cells -- producer's at kloc+0,
-           consumer's anywhere -- share "tenTid<tid>").  External
+           kernels (their two TAG_TEN cells - producer's at kloc+0,
+           consumer's anywhere - share "tenTid<tid>").  External
            tensors used by multiple kernels likewise spider out from
            one TEN leaf. *)
         $TagTEN,           "tenTid" <> ToString[val],
@@ -113,16 +113,14 @@ binderWire[base_Integer] := "var" <> ToString[base]
    principal wire and route the diagram through dead heap. *)
 agentSlotsOf[agents_Association, opcodes_Association] := Catenate[
     KeyValueMap[
-        Function[{base, tag},
-            With[{
-                n = Which[
-                    tag === $TagUOP, walkArity[Lookup[opcodes, base, 0]],
-                    tag === $TagCTR, ctrSpan[base],
-                    True,            agentArity[tag]
-                ]
-            },
-                Range[base, base + n - 1]
+        {base, tag} |-> With[{
+            n = Which[
+                tag === $TagUOP, walkArity[Lookup[opcodes, base, 0]],
+                tag === $TagCTR, ctrSpan[base],
+                True,            agentArity[tag]
             ]
+        },
+            Range[base, base + n - 1]
         ],
         agents
     ]
@@ -140,7 +138,7 @@ principalCellOf[agentBase_Integer, agentTag_Integer,
 
 (* Any non-SUB-flagged heap cell holding this agent's term value.
    Used by principalWireOf only AFTER agent-slot + dead-LAM alias
-   lookups fail -- a cell sitting in the heap but not in any
+   lookups fail - a cell sitting in the heap but not in any
    rendered agent's slot range is usually stale (e.g. the original
    SUP cell at the LAM's binder loc that APP-LAM substituted),
    and we prefer the alias's `var<binder>` wire over wireFor on a
@@ -150,17 +148,16 @@ principalCellInHeap[agentBase_Integer, agentTag_Integer] := Block[
     SelectFirst[
         Range[lo, n - 1],
         With[{t = THeapRead[#]},
-            TTermSub[t] === 0 && TTermVal[t] === agentBase
-              && TTermTag[t] === agentTag] &,
+            TTermSub[t] === 0 && TTermVal[t] === agentBase && TTermTag[t] === agentTag] &,
         None]
 ]
 
 (* Principal output wire for an agent.  Resolution order:
    1. Slot of another rendered agent that holds this agent's term
-      value -- wireFor[cell] gives the parent->child wire.
-   2. Dead-LAM binder whose SUB content is this compound --
+      value - wireFor[cell] gives the parent->child wire.
+   2. Dead-LAM binder whose SUB content is this compound -
       var<binder> spider-joins it with VAR consumers.
-   3. Any non-SUB heap cell holding this term -- typically a
+   3. Any non-SUB heap cell holding this term - typically a
       hand-built term sitting outside the agent graph that we
       still want to anchor; only useful when the cell is later
       consumed by something not in `agents` (rare).
@@ -201,11 +198,11 @@ principalOutputs[agentBase_Integer, agentTag_Integer,
 
 (* IC arities only.  UOP arity, opcode names, output-shape inference,
    bit decoding, and shape arithmetic come from sibling Uop.wl /
-   Shape.wl which share THVMLink`Private` -- no qualification needed.
+   Shape.wl which share THVMLink`Private` - no qualification needed.
 
    ALO holds (body, state); MAT holds (scrut, case-tree); OP2 holds
    (lhs, rhs); CTR has variable arity (heap[val]=NUM(n), heap[val+1..val+n]
-   = children) -- ctrArity[base] reads it from the cell. *)
+   = children) - ctrArity[base] reads it from the cell. *)
 agentArity[$TagLAM] = 1; agentArity[$TagDUP] = 1;
 agentArity[$TagAPP] = 2; agentArity[$TagSUP] = 2;
 agentArity[$TagALO] = 2; agentArity[$TagMAT] = 2;
@@ -262,15 +259,13 @@ slotSide[$TagDDU, _]    := "Top"; slotIsDualed[$TagDDU, _] := False;
    opcodes Association; CTR arity from the leading NUM cell. *)
 locOwner[loc_Integer, agents_Association, opcodes_Association] := Catch[
     KeyValueMap[
-        Function[{base, tag},
-            With[{n = Which[
+        {base, tag} |-> With[{n = Which[
                 tag === $TagUOP, uopArity[Lookup[opcodes, base, 0]],
                 tag === $TagCTR, ctrSpan[base],
                 True,            agentArity[tag]
             ]},
-                If[ NumberQ[n] && base <= loc < base + n,
-                    Throw[{base, tag, loc - base}]
-                ]
+            If[ NumberQ[n] && base <= loc < base + n,
+                Throw[{base, tag, loc - base}]
             ]
         ],
         agents
@@ -285,7 +280,7 @@ agentStyle[$TagAPP] := Directive[EdgeForm[White], FaceForm[Darker[StandardBlue, 
 agentStyle[$TagSUP] := Directive[EdgeForm[White], FaceForm[Darker[StandardOrange, 0.45]]]
 agentStyle[$TagDUP] := Directive[EdgeForm[White], FaceForm[Darker[StandardPurple, 0.45]]]
 agentStyle[$TagTEN] := Directive[EdgeForm[White], FaceForm[Darker[StandardCyan,   0.45]]]
-(* Lazy / book / case nodes -- match Style.wl's THeapGraph palette. *)
+(* Lazy / book / case nodes - match Style.wl's THeapGraph palette. *)
 agentStyle[$TagREF] := Directive[EdgeForm[White], FaceForm[Darker[StandardYellow, 0.4]]]
 agentStyle[$TagALO] := Directive[EdgeForm[White], FaceForm[Darker[StandardYellow, 0.55]]]
 agentStyle[$TagCTR] := Directive[EdgeForm[White], FaceForm[Darker[StandardRed,    0.45]]]
@@ -342,7 +337,7 @@ agentLabelText[base_Integer, tag_Integer] := With[{arity = agentArity[tag]},
 ]
 
 (* Label format: header line "OPCODE@<heap-loc>#<id>" (id only when
-   the opcode carries an extra handle -- KERNEL points at a kernel
+   the opcode carries an extra handle - KERNEL points at a kernel
    id, GRAD at the target tensor id), optional shape on a second
    line, optional scalar value (CONST) on a third.  Single-line
    header keeps the "where in the heap is this" reading at a glance.
@@ -368,7 +363,7 @@ uopHeader[base_Integer, $UopGrad] := With[{
     targetCell = THeapRead[base + 2]
 },
     "GRAD@" <> ToString[base] <>
-        If[TTermTag[targetCell] === $TagTEN,
+        If[ TTermTag[targetCell] === $TagTEN,
             "#" <> ToString[TTermVal[targetCell]],
             ""
         ]
@@ -378,7 +373,7 @@ uopHeader[base_Integer, opcode_Integer] :=
     uopName[opcode] <> "@" <> ToString[base]
 
 (* TEN leaf label: just the tensor handle id + optional shape.
-   No "@<cell-loc>" -- the cell holding the TAG_TEN reference is
+   No "@<cell-loc>" - the cell holding the TAG_TEN reference is
    *owned by the parent UOP* (it's a slot of that UOP's heap
    block), so showing the loc would conflict with the parent's
    "@<base>" label.  The diagram structure already makes the
@@ -482,7 +477,7 @@ plainUopDiagram[base_Integer, principal_, opcode_Integer] := Block[{
     n = uopArity[opcode], pWire
 },
     (* "uop<base>" matches the wire name any consumer cell holding
-       TAG_UOP(base) would resolve via wireFor -- see the TAG_UOP
+       TAG_UOP(base) would resolve via wireFor - see the TAG_UOP
        branch there.  Even for a heapless seed (no consumer) the
        convention keeps producer + consumer naming aligned. *)
     pWire = If[ principal === None, "uop" <> ToString[base], wireFor[principal]];
@@ -498,11 +493,11 @@ plainUopDiagram[base_Integer, principal_, opcode_Integer] := Block[{
 
 (* KERNEL agent: like plainUopDiagram but with N additional input
    ports drawn from the C-side input_tids[] array (the kernel's
-   actual upstream tensors -- not present in any heap cell of the
+   actual upstream tensors - not present in any heap cell of the
    UOP_KERNEL itself, which only carries (output_buf, NUM(kid))).
    Each input wire keys on the input tid via "tenTid<tid>", so
-   another kernel's output_buf TEN cell -- whose wireFor is the
-   same string -- auto-merges into a single edge.  External inputs
+   another kernel's output_buf TEN cell - whose wireFor is the
+   same string - auto-merges into a single edge.  External inputs
    (weights, the SGD targets) get a synthetic TEN leaf rendered
    separately by externalKernelInputLeaves below. *)
 kernelDiagram[base_Integer, principal_] := Block[{
@@ -513,7 +508,7 @@ kernelDiagram[base_Integer, principal_] := Block[{
     inputTids    = TKernelInputs[kid];
     label        = uopHeader[base, $UopKernel];
     outBufWire   = wireFor[base];           (* "tenTid<output_tid>" *)
-    kidLabelWire = wireFor[base + 1];       (* NUM(kid) cell -- label only *)
+    kidLabelWire = wireFor[base + 1];       (* NUM(kid) cell - label only *)
     inputWires   = ("tenTid" <> ToString[#]) & /@ inputTids;
     pWire        = If[ principal === None, "uop" <> ToString[base], wireFor[principal]];
     With[{
@@ -542,7 +537,7 @@ gradDiagram[base_Integer, principal_] := Block[{
 ]
 
 (* The DUP cell carries no label of its own; find one from any
-   DP0/DP1 cell that references it -- either an on-heap slot or
+   DP0/DP1 cell that references it - either an on-heap slot or
    one of the WL-held seed terms ($dupSeedExt, populated by
    iThvmHeapDiagram for the TGrad case where the DP only exists
    as a return value).  Fallback 0 if neither has one. *)
@@ -561,12 +556,12 @@ dupLabelFor[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell},
 
 (* DUP: principal is incoming plain input at the top apex (body to
    duplicate comes IN via cell[base]); dp0, dp1 are outgoing outputs
-   at the flat bottom.  Always render both projection outputs -- a
+   at the flat bottom.  Always render both projection outputs - a
    DUP node visually means "fork", so a one-output node misreads as
    a one-port consumer.  Unused projections dangle but stay visible.
 
    When the DP projections carry the $DupGradFlag bit in `ext`, the
-   pair came from TGrad / TGradPair -- render as GRAD with the
+   pair came from TGrad / TGradPair - render as GRAD with the
    uopStyle[$UopGrad] orange to mirror how the GRAD UOP itself
    appears in the graph. *)
 agentDiagram[base_Integer, $TagDUP, _, agents_Association,
@@ -669,7 +664,7 @@ agentDiagram[base_Integer, $TagMAT, principal_, agents_Association, opcodes_Asso
             "Style" -> agentStyle[$TagMAT]]
     ]
 
-(* OP2(lhs, rhs) -- ext = op code (+ - * == <). *)
+(* OP2(lhs, rhs) - ext = op code (+ - * == <). *)
 op2LabelText[base_Integer, opcode_Integer] :=
     Column[{"OP2 " <> Lookup[$op2Names, opcode, "?" <> ToString[opcode]],
             "@" <> ToString[base]}, Center, Spacings -> 0]
@@ -695,7 +690,7 @@ agentDiagram[base_Integer, $TagOP2, principal_, agents_Association, opcodes_Asso
             "Style" -> agentStyle[$TagOP2]]
     ]
 
-(* DSU(lab, a, b) -- dynamic-label SUP.  Three top inputs (label
+(* DSU(lab, a, b) - dynamic-label SUP.  Three top inputs (label
    strict, a, b); principal output flows to whatever cell holds
    this DSU.  Label as the leftmost slot reads naturally as "the
    thing being computed first". *)
@@ -710,7 +705,7 @@ agentDiagram[base_Integer, $TagDSU, principal_, _Association, _Association] :=
             "Style" -> agentStyle[$TagDSU]]
     ]
 
-(* DDU(lab, val, body) -- dynamic-label DUP.  Same shape as DSU
+(* DDU(lab, val, body) - dynamic-label DUP.  Same shape as DSU
    but on the DUP side; principal incoming at the apex. *)
 agentDiagram[base_Integer, $TagDDU, principal_, _Association, _Association] :=
     With[{
@@ -736,7 +731,7 @@ numLabelText[loc_Integer]   := With[{t = THeapRead[loc]},
 (* Substituted-binder leaf: a LAM cell whose body is SUB-flagged is
    logically dead (its binder has been beta-substituted out).  We
    drop the LAM agent from the diagram and replace its binder wire
-   (`var<binder>`) with a leaf carrying the substituted value -- so
+   (`var<binder>`) with a leaf carrying the substituted value - so
    VAR cells in surviving slots still have something to join to,
    showing the literal that the variable was substituted with. *)
 deadLamBinderLabel[binder_Integer] := Block[
@@ -810,7 +805,7 @@ numLeafDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[{
 (* Standalone NUM atom: a TTerm whose tag is NUM and val carries the
    integer.  No heap cell of its own (the value is packed directly
    into the Term word).  Render as a one-port leaf so reductions that
-   end on a literal -- e.g. (\x.x+1) 5 collapsing to NUM[6] -- still
+   end on a literal - e.g. (\x.x+1) 5 collapsing to NUM[6] - still
    have a picture instead of an empty DiagramNetwork. *)
 numAtomLeafDiagram[val_Integer] := With[
     {label = "NUM\n" <> ToString[val],
@@ -969,7 +964,7 @@ discoverUopOpcodesHere[seedTerms_List] := Block[{lo = THeapBase[], n = THeapPos[
    - LAM / DUP whose body cell at `base` is SUB-flagged (APP-LAM
      beta for LAM, DUP-XXX for DUP).
    - APP whose left slot is a LAM whose binder is SUB-flagged
-     (APP-LAM already fired -- the APP cell isn't itself SUB-flagged
+     (APP-LAM already fired - the APP cell isn't itself SUB-flagged
      but the interaction has resolved).
    Either way the wrapper is dropped from the picture.  For a DUP
    whose body is an atom, the substituted atom is surfaced as a
@@ -1003,11 +998,10 @@ reachableAgentsHere[seedTerms_List] := Block[
                    holds the arg (SUB-flagged); a VAR(lam_loc) in
                    the body queues here, and following heap[base]
                    reaches the arg's compound structure. *)
-                (tag === $TagDUP || tag === $TagLAM)
-                    && agentRuleIsDead[base, tag],
+                (tag === $TagDUP || tag === $TagLAM) && agentRuleIsDead[base, tag],
                     queue = Append[queue, THeapRead[base]],
                 (* Dead APP: APP-LAM already fired.  Skip the APP
-                   and stop descending through it -- the LAM body
+                   and stop descending through it - the LAM body
                    is now the active term (reached via the snapshot
                    pipeline's `t` argument), and walking the dead
                    APP's slots would only drag in the consumed LAM
@@ -1057,9 +1051,9 @@ surfacedAtomLocs[seedTerms_List] := Block[
 ]
 
 (* Slot cells holding a VAR whose binder (heap[val]) is SUB-flagged.
-   Each unique binder loc gets one synthesized leaf (above) -- DC
+   Each unique binder loc gets one synthesized leaf (above) - DC
    spider-joins it with every VAR cell that names the same wire.
-   Atom-substituted binders only -- if the substituted value is a
+   Atom-substituted binders only - if the substituted value is a
    compound (SUP, LAM, OP2, ...) the agent for that compound is
    already in the agent set and its principal port is rewired to
    `var<binder>` by deadLamCompoundAliasMap, so a leaf would
@@ -1079,8 +1073,8 @@ deadLamBinders[agents_Association, opcodes_Association] := DeleteDuplicates @
 
 (* Map (agent_base, agent_tag) -> binder_loc for dead-LAM binders
    whose SUB content is a COMPOUND agent (SUP / LAM / OP2 / ...).
-   The compound's principal wire becomes `var<binder>` -- the same
-   wire VAR consumers use -- so the compound renders at its own
+   The compound's principal wire becomes `var<binder>` - the same
+   wire VAR consumers use - so the compound renders at its own
    slot range and connects through to its consumers without a
    redundant atom-style leaf at the binder. *)
 deadLamCompoundAliasMap[agents_Association, opcodes_Association] :=
@@ -1123,7 +1117,7 @@ discoverErasHere[] := Block[{lo = THeapBase[], n = THeapPos[]},
     Select[Range[lo, n - 1], TTermTag[THeapRead[#]] === $TagERA &]
 ]
 
-(* Reachability for tensor (UOP/TEN) world only -- IC agents stay
+(* Reachability for tensor (UOP/TEN) world only - IC agents stay
    on the full-heap-walk path because they're orthogonal.
 
    The heap is append-only: pre-WNF cells survive a TWnf rewrite,
@@ -1131,12 +1125,12 @@ discoverErasHere[] := Block[{lo = THeapBase[], n = THeapPos[]},
    surface dangling old subgraphs.  Walking forward from the seed
    keeps only what the rendered term actually references.
 
-   Walk arity for GRAD is 1 (only follow the y branch -- gy and
+   Walk arity for GRAD is 1 (only follow the y branch - gy and
    target are intentionally hidden), uopArity[op] for everything
    else. *)
 walkArity[op_] := If[op === $UopGrad, 1, uopArity[op]]
 
-(* CONST UOPs are constants -- 0 compute inputs, just a NUM payload.
+(* CONST UOPs are constants - 0 compute inputs, just a NUM payload.
    We render them as PER-REFERENCE leaves (similar to TEN handles)
    instead of one shared agent, so a CONST referenced from N slots
    draws N triangles without needing DUPs to share the value.  Skip
@@ -1155,7 +1149,7 @@ reachableUopsHere[seedTerms_List] := Block[
                     n = walkArity[op];
                     queue = Join[queue,
                         Table[THeapRead[base + i], {i, 0, n - 1}]]],
-            (* Non-UOP IC term -- descend through its child slots so a
+            (* Non-UOP IC term - descend through its child slots so a
                UOP buried under a DP / VAR / OP2 / ... still surfaces.
                `visited` is keyed by the IC agent base so a cyclic
                structure (e.g. self-referential ALO) doesn't loop. *)
@@ -1174,9 +1168,9 @@ reachableUopsHere[seedTerms_List] := Block[
    cells with opcode CONST -> constLeafDiagram. *)
 reachableSlotCells[reachOps_Association, pred_] := Catenate[
     KeyValueMap[
-        Function[{base, op}, With[{n = walkArity[op]},
+        {base, op} |-> With[{n = walkArity[op]},
             Select[Range[base, base + n - 1], pred[THeapRead[#]] &]
-        ]],
+        ],
         reachOps
     ]
 ]
@@ -1209,10 +1203,8 @@ wireSlots[___] := {}
    REF / NUM leaves embedded in lazy-term slots. *)
 agentWireSlotCells[agents_Association, pred_] := Catenate[
     KeyValueMap[
-        Function[{base, tag},
-            With[{offsets = wireSlots[base, tag]},
-                Select[(base + #) & /@ offsets, pred[THeapRead[#]] &]
-            ]
+        {base, tag} |-> With[{offsets = wireSlots[base, tag]},
+            Select[(base + #) & /@ offsets, pred[THeapRead[#]] &]
         ],
         agents
     ]
@@ -1230,13 +1222,13 @@ externalKernelInputLeaf[tid_Integer] := Diagram[
     "Style" -> agentStyle[$TagTEN]
 ]
 
-(* THeapDiagram[]      -- render every agent on the heap
-   THeapDiagram[t]     -- render only the agents reachable from `t`
-   THeapDiagram[{...}] -- render the union of agents reachable from
+(* THeapDiagram[]      - render every agent on the heap
+   THeapDiagram[t]     - render only the agents reachable from `t`
+   THeapDiagram[{...}] - render the union of agents reachable from
                           each seed term
 
    Reachable-only mode (the seeded forms) is the default for inspecting
-   a specific value -- stale cells from prior reductions never leak
+   a specific value - stale cells from prior reductions never leak
    into the wire-name space.  The no-arg form keeps the legacy
    "everything on the heap" behaviour as an escape hatch. *)
 THeapDiagram[]                       := iThvmHeapDiagram[{},  All]
@@ -1246,7 +1238,7 @@ THeapDiagram[t_]                     := iThvmHeapDiagram[{t}, "Reachable"]
 (* For every DP0/DP1 seed, synthesize its sibling projection
    (same label, same dup_loc, flipped tag).  Pre-ANN this is
    redundant (the BFS reaches both projections through the DUP's
-   shared body).  Post-ANN the DUP wrapper is gone -- the active
+   shared body).  Post-ANN the DUP wrapper is gone - the active
    side returned a concrete term and the inactive side's branch
    sits under heap[loc]'s SUB flag, reachable only through the
    sibling projection.  Surfacing the sibling keeps both branches
@@ -1268,7 +1260,7 @@ iThvmHeapDiagram[seedsRaw_List, mode_] := Block[{
 },
     seeds = expandDupSiblings[seedsRaw];
     (* TGrad's output (DP1 with $DupGradFlag in ext) lives only as a
-       WL-held TTerm -- there's no heap cell for it.  Stash the ext
+       WL-held TTerm - there's no heap cell for it.  Stash the ext
        field of any DP0/DP1 seed so `dupLabelFor` can find the grad
        flag when the on-heap scan returns nothing. *)
     Scan[
@@ -1343,7 +1335,7 @@ iThvmHeapDiagram[seedsRaw_List, mode_] := Block[{
        reducing (\x.x+1) 5) carry no heap loc, so they're invisible
        to the agent BFS.  Surface them as one-port leaves so the
        network isn't empty.  Skip values already rendered via a
-       heap-resident NUM in `nums` -- otherwise the active term shows
+       heap-resident NUM in `nums` - otherwise the active term shows
        up twice (once as the heap leaf, once as a free atom). *)
     atomSeeds = If[ mode === "Reachable",
         Block[{heapVals},
@@ -1356,8 +1348,8 @@ iThvmHeapDiagram[seedsRaw_List, mode_] := Block[{
        then collect the binder locs of surviving VAR slots so the
        leaf-attached-to-wire trick fills the picture. *)
     agents = KeySelect[agents,
-        Function[base, ! agentRuleIsDead[base, agents[base]]]];
-    (* Compute the dead-LAM compound alias map BEFORE rendering --
+        base |-> ! agentRuleIsDead[base, agents[base]]];
+    (* Compute the dead-LAM compound alias map BEFORE rendering -
        agentDiagram (via principalWireOf) looks this up to route a
        compound's principal port to its binder's var<loc> when no
        slot in the agent set directly consumes it. *)

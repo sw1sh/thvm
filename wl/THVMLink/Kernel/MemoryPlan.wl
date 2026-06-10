@@ -11,10 +11,10 @@
                              intervals.
      TMemoryPlanReport[p] -- top-N largest bufs / longest-lived /
                              status counts / total live bytes.
-     TMemoryPlanGantt[p]  -- (mp3, follow-up) Gantt-style Graphics.
+     TMemoryPlanGantt[p]  -- Gantt-style Graphics.
 
    The snapshot is pure-data: no side effects on the runtime, just
-   reads via the mp1 bridge tables (TKernelTable, TKernelInputs,
+   reads via the bridge tables (TKernelTable, TKernelInputs,
    TTensTable, TCpuBufTable, TMetalBufTable).
 
    Topological depth is the static-analysis x-axis (NOT actual
@@ -35,7 +35,7 @@ TMemoryPlanReport::usage = "TMemoryPlanReport[plan] returns a Column with top-5 
    logic, helpers (linearScanPack, statusFill/Edge, formatBytes,
    peakConcurrentLive, backendsActive) it shares with the renderer. *)
 
-(* === mp1 bridge tables ===
+(* === bridge tables ===
    Snapshot accessors over the runtime side tables (KERNELS, TENS,
    CPU/Metal bufs).  Each returns a flat list-of-rows -- consumers
    index by row schema documented in the ::usage.  Used directly
@@ -54,7 +54,7 @@ TMetalPerOpProfile::usage = "TMetalPerOpProfile[] returns <|kid -> <|\"GpuUs\", 
 
 Begin["`Private`"];
 
-(* === mp1 bridge tables: thin wrappers over the LibraryLink loaders ===
+(* === bridge tables: thin wrappers over the LibraryLink loaders ===
    Loader symbols ($kernelTableFn etc.) live in THVMLink.wl alongside
    every other LibraryFunctionLoad call; both files share THVMLink`Private`
    so the references resolve regardless of file load order (alphabetical:
@@ -230,11 +230,11 @@ collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Block[{
        (external/unbound) -- they have no buffer to plot. *)
     byBuf = GroupBy[
         Range[Length[tens]],
-        Function[tid, {tens[[tid, 7]], tens[[tid, 2]]}]
+        tid |-> {tens[[tid, 7]], tens[[tid, 2]]}
     ];
     KeyDropFrom[byBuf, Cases[Keys[byBuf], {_, 0}]];
     Map[
-        Function[tids, Block[{
+        tids |-> Block[{
             firstTid = First[tids],
             backendId,
             bufId,
@@ -296,8 +296,7 @@ collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Block[{
                 "freeable"        -> freeable,
                 (* All aliased tids share the same dtype (tensor_view_of
                    inherits it).  Take the first tid's dtype as
-                   authoritative.  Without this the renderer's
-                   tooltip showed `Missing[KeyAbsent, dtype]`. *)
+                   authoritative; the renderer's tooltip keys on it. *)
                 "dtype"           -> dtypeName[tens[[firstTid, 3]]],
                 "alias_tids"      -> tids,
                 "producer_kid"    -> producerKid,
@@ -310,7 +309,7 @@ collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Block[{
                 "alive_span"      -> lastUseDepth - allocDepth + 1,
                 "status"          -> status
             |>
-        ]],
+        ],
         Values[byBuf]
     ]
 ]
@@ -378,28 +377,28 @@ TMemoryPlan[] := Block[{
    Text summary parallel to memory-probe.wls.  Five sections:
    header (counts + total live bytes), top-5 largest, top-5
    longest-lived, status histogram, backend breakdown. *)
-backendName[1] = "CPU";
-backendName[2] = "Metal";
-backendName[_] = "?";
+backendName[1] = "CPU"
+backendName[2] = "Metal"
+backendName[_] = "?"
 
-(* Significant-digit byte formatter.  "0.0KiB" labels were
+(* Significant-digit byte formatter.  A fixed-unit "0.0KiB" label is
    useless on small intermediates (4-byte counters, 64-byte
-   activations); pick a unit so the mantissa always sits in
+   activations), so pick a unit such that the mantissa always sits in
    [1, 1024) and round to 3 sig figs.  Returns a string like
    "12B" / "5.43KiB" / "1.20MiB". *)
-formatBytes[0 | 0.] := "0B";
-formatBytes[n_?NumericQ] := Block[{x = N[Abs[n]], unit, scale, mantissa, digits},
+formatBytes[0 | 0.] := "0B"
+formatBytes[n_ ? NumericQ] := Block[{x = N[Abs[n]], unit, scale, mantissa, digits},
     {unit, scale} = Which[
         x >= 1024.^3, {"GiB", 1024.^3},
         x >= 1024.^2, {"MiB", 1024.^2},
-        x >= 1024.,   {"KiB", 1024.},
-        True,         {"B",   1.}
+        x >= 1024., {"KiB", 1024.},
+        True, {"B", 1.}
     ];
     mantissa = x / scale;
     (* 3 sig figs: keep 2 decimals < 10, 1 decimal < 100, 0 decimals >= 100. *)
     digits = Which[mantissa < 10, 2, mantissa < 100, 1, True, 0];
     ToString[NumberForm[Sign[n] mantissa, {Infinity, digits}]] <> unit
-];
+]
 
 (* Peak concurrent live bytes: at each topological depth t, sum
    nbytes of every buf whose alive interval covers t.  The max
@@ -416,8 +415,7 @@ peakConcurrentLive[bufs_] := If[
         maxDepth = Max[#["last_use_depth"] & /@ bufs];
         perDepth = Table[
             Total @ Cases[bufs,
-                b_ /; b["alloc_depth"] <= t <= b["last_use_depth"]
-                    :> b["nbytes"]
+                b_ /; b["alloc_depth"] <= t <= b["last_use_depth"] :> b["nbytes"]
             ],
             {t, 0, maxDepth}
         ];
@@ -467,17 +465,17 @@ TMemoryPlanReport[TMemoryPlan[a_Association]] := Block[{
              "  (slot-reuse headroom: ", savingsBytes, " = ",
              savingsPct, "% of total)"}],
         Row[{"  top-5 by bytes:"}],
-        Column[Function[b, Row[{"    buf ", b["id"], " (",
+        Column[(b |-> Row[{"    buf ", b["id"], " (",
             backendName[b["backend"]], "): ",
             formatBytes[b["nbytes"]], ", ",
             "depth [", b["alloc_depth"], "..", b["last_use_depth"], "], ",
-            b["status"]}]] /@ topByBytes],
+            b["status"]}]) /@ topByBytes],
         Row[{"  top-5 by alive span:"}],
-        Column[Function[b, Row[{"    buf ", b["id"], " (",
+        Column[(b |-> Row[{"    buf ", b["id"], " (",
             backendName[b["backend"]], "): span ",
             b["alive_span"], ", ",
             formatBytes[b["nbytes"]], ", ",
-            b["status"]}]] /@ topBySpan]
+            b["status"]}]) /@ topBySpan]
     }]
 ]
 
@@ -538,9 +536,9 @@ backendsActive[bufs_] := DeleteDuplicates[#["backend"] & /@ bufs] /. {
    visible without one disappearing into a sliver (good for graphs
    with mixed-magnitude bufs like LeNet, which has 0.001 KiB
    intermediates next to 120 KiB weights).  Default "Log". *)
-barHeightFor[nbytes_?NumericQ, "Log"]    := Log2[1.0 + nbytes]
-barHeightFor[nbytes_?NumericQ, "Linear"] := nbytes
-barHeightFor[nbytes_?NumericQ, _]        := Log2[1.0 + nbytes]
+barHeightFor[nbytes_ ? NumericQ, "Log"] := Log2[1.0 + nbytes]
+barHeightFor[nbytes_ ? NumericQ, "Linear"] := nbytes
+barHeightFor[nbytes_ ? NumericQ, _] := Log2[1.0 + nbytes]
 
 linearScanPack[bufs_, barHeightMode_:"Log"] := Block[{
     sorted,
@@ -575,10 +573,7 @@ linearScanPack[bufs_, barHeightMode_:"Log"] := Block[{
                           foreverDepth, b["last_use_depth"]];
             fitIdx = SelectFirst[
                 Range[Length[slots]],
-                Function[k,
-                    slots[[k, 3]] < b["alloc_depth"]
-                    && (slots[[k, 2]] - slots[[k, 1]]) >= h
-                ],
+                k |-> slots[[k, 3]] < b["alloc_depth"] && (slots[[k, 2]] - slots[[k, 1]]) >= h,
                 Missing[]
             ];
             If[ MissingQ[fitIdx],

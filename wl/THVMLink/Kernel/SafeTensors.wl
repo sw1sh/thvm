@@ -59,8 +59,9 @@ $safeToThvm = <|
     "U64" -> "u64",
     "F32" -> "f32",
     "F64" -> "f64"
-|>;
-$thvmToSafe = Association[Reverse /@ Normal[$safeToThvm]];
+|>
+
+$thvmToSafe = Association[Reverse /@ Normal[$safeToThvm]]
 
 (* thvm dtype string -> WL NumericArray type.  Drives the little-endian
    byte write in TSafeTensorSave. *)
@@ -76,7 +77,7 @@ $thvmNAType = <|
     "u64" -> "UnsignedInteger64",
     "f32" -> "Real32",
     "f64" -> "Real64"
-|>;
+|>
 
 (* thvm dtype string -> on-disk byte width per element. *)
 $thvmByteWidth = <|
@@ -91,7 +92,7 @@ $thvmByteWidth = <|
     "u64" -> 8,
     "f32" -> 4,
     "f64" -> 8
-|>;
+|>
 
 (* Disk-tensor constructor: dtype string + integer shape. *)
 TTensorMMap[path_String, byteOffset_Integer, nbytes_Integer, dtype_String, shape_List] := (

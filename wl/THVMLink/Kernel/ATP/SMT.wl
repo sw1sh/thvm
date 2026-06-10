@@ -1,7 +1,7 @@
 (* SMT.wl - quantifier-free first-order equality decision procedure.
 
    Decides QF_UF (quantifier-free equality with uninterpreted
-   functions) via congruence closure -- the Downey-Sethi-Tarjan
+   functions) via congruence closure: the Downey-Sethi-Tarjan
    algorithm with a per-class use-list, the same core every
    modern SMT solver (Z3, CVC5, Yices) runs under DPLL(T) for the
    theory of equality.
@@ -28,7 +28,7 @@
      decider that pairs with a propositional CDCL kernel under
      DPLL(T).  Standalone it already decides ground QF_UF goals
      of the form `H1 /\ H2 /\ ... /\ ~G` (assert each Hi as eq,
-     assert ~G as a diseq, ask UNSAT) -- exactly the pattern an
+     assert ~G as a diseq, ask UNSAT), exactly the pattern an
      unfailing-completion saturator handles for ground equational
      conjectures, but in O((n + e) alpha(n)) instead of search.
      A future DPLL(T) shell on top will turn this into a real
@@ -48,7 +48,7 @@ TSatEUF::usage =
 TFindProof::nonground =
     "TFindProof Method -> \"SMT\" skipping non-ground input: the term `1` " <>
     "contains a Pattern[]/Blank[] variable.  Congruence closure is a " <>
-    "quantifier-free decision procedure -- use the default completion engine " <>
+    "quantifier-free decision procedure; use the default completion engine " <>
     "for variable-bearing axioms.";
 
 TFindProof::noconjecture =
@@ -58,7 +58,7 @@ TFindProof::noconjecture =
 TSmtDecide::usage =
     "TSmtDecide[formula] decides a quantifier-free Boolean " <>
     "combination of equality atoms (Equal[_,_] / Unequal[_,_]) " <>
-    "via lazy DPLL(T) -- Tseitin-free atom-abstraction + a " <>
+    "via lazy DPLL(T): Tseitin-free atom-abstraction + a " <>
     "Wolfram SatisfiabilityInstances propositional kernel + " <>
     "congruence closure as the theory solver.  Returns an " <>
     "Association with \"Status\" -> \"SAT\" | \"UNSAT\", and on " <>
@@ -89,14 +89,14 @@ Begin["`Private`"];
 
    Subterms are stored verbatim (no canonicalization at add time)
    keyed against the parent map by HoldPattern when necessary.
-   We keep variables and compound terms in the same forest -- only
+   We keep variables and compound terms in the same forest; only
    compound terms (head =!= Symbol, no atomic numbers) feed
    congruence propagation. *)
 
 ccInit[] := (
-    $parent   = <||>;
-    $rank     = <||>;
-    $use      = <||>;
+    $parent = <||>;
+    $rank = <||>;
+    $use = <||>;
     $subterms = {};
 )
 
@@ -112,7 +112,7 @@ ccAddTerm[t_] := If[ KeyExistsQ[$parent, t],
     t
 ]
 
-compoundQ[t_] := !AtomQ[t]
+compoundQ[t_] := ! AtomQ[t]
 
 args[t_] := List @@ t
 
@@ -174,7 +174,7 @@ congruentQ[u_, v_] :=
 (* Drop literally-True equalities and literally-False disequalities;
    either category is vacuously satisfied (a == a or Unequal[1, 2] just
    doesn't constrain anything).  Conversely, literally-False equalities
-   (Equal[1, 2]) and literally-True disequalities (Unequal[a, a] -- WL
+   (Equal[1, 2]) and literally-True disequalities (Unequal[a, a]; WL
    doesn't auto-evaluate Unequal on bare symbols, but the False form is
    what gets in) are immediate UNSAT contradictions.  Without this
    preprocessing, a user passing a reflexive `a == a` (which WL
@@ -189,7 +189,7 @@ atpSmtPreprocess[eqs_List, diseqs_List] :=
         eqsClean = DeleteCases[eqs, True];
         diseqsClean = DeleteCases[diseqs, True];
         {"Continue", eqsClean, diseqsClean}
-    ];
+    ]
 
 TSatEUF[eqs_List, diseqs_List] :=
     Module[{pre = atpSmtPreprocess[eqs, diseqs], eqsC, diseqsC},
@@ -202,8 +202,7 @@ TSatEUF[eqs_List, diseqs_List] :=
            before the strict-head check + congruence closure. *)
         eqsC = Replace[eqsC, Inactive[Equal][a_, b_] :> Equal[a, b], {1}];
         diseqsC = Replace[diseqsC, Inactive[Unequal][a_, b_] :> Unequal[a, b], {1}];
-        If[ ! (AllTrue[eqsC, MatchQ[#, _Equal] &] &&
-               AllTrue[diseqsC, MatchQ[#, _Unequal] &]),
+        If[ ! (AllTrue[eqsC, MatchQ[#, _Equal] &] && AllTrue[diseqsC, MatchQ[#, _Unequal] &]),
             Message[TSatEUF::badin, eqs, diseqs]; $Failed,
             Block[{$parent, $rank, $use, $subterms, witness, classes},
                 ccInit[];
@@ -236,7 +235,7 @@ TSatEUF[eqs_List, diseqs_List] :=
 
 (* Single non-list hypothesis: auto-wrap. *)
 atpSmtEntail[goal_, hyp : (_Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
-    atpSmtEntail[goal, {hyp}];
+    atpSmtEntail[goal, {hyp}]
 
 atpSmtEntail[goal_, hypotheses_List : {}] :=
     Block[{eqs, diseqs, res},
@@ -249,15 +248,15 @@ atpSmtEntail[goal_, hypotheses_List : {}] :=
             Which[
                 res["Status"] === "UNSAT",
                 <|
-                    "Status"     -> "Proved",
-                    "Method"     -> "CongruenceClosure",
-                    "Goal"       -> goal,
+                    "Status" -> "Proved",
+                    "Method" -> "CongruenceClosure",
+                    "Goal" -> goal,
                     "Hypotheses" -> hypotheses,
-                    "Witness"    -> res["Witness"]
+                    "Witness" -> res["Witness"]
                 |>,
                 (* SAT: hypotheses /\ ~goal is satisfiable, so the goal is NOT
                    entailed.  Build a CounterexampleObject from the congruence-
-                   closure quotient -- a finite refuting model in FindFiniteModels
+                   closure quotient: a finite refuting model in FindFiniteModels
                    structure (the ground analog of the finite algebra
                    FindEquationalCounterexample returns). *)
                 res["Status"] === "SAT",
@@ -267,9 +266,9 @@ atpSmtEntail[goal_, hypotheses_List : {}] :=
         ]
     ]
 
-negate[Equal[a_, b_]]    := Unequal[a, b]
-negate[Unequal[a_, b_]]  := Equal[a, b]
-negate[other_]           := (Message[TSatEUF::badin, other, {}]; $Failed)
+negate[Equal[a_, b_]] := Unequal[a, b]
+negate[Unequal[a_, b_]] := Equal[a, b]
+negate[other_] := (Message[TSatEUF::badin, other, {}]; $Failed)
 
 collectLiterals[lits_List] := Module[{eqAcc = {}, diseqAcc = {}, l},
     Do[ l = lits[[i]];
@@ -278,9 +277,9 @@ collectLiterals[lits_List] := Module[{eqAcc = {}, diseqAcc = {}, l},
                Unequal[1, 2] -> True after WL evaluates) are vacuously
                satisfied and can be skipped without affecting the
                theory query.  Matches the TSatEUF preprocess shape so
-               an `a == a` hypothesis no longer kills the whole call. *)
-            l === True,          Null,
-            MatchQ[l, _Equal],   AppendTo[eqAcc, l],
+               an `a == a` hypothesis does not kill the whole call. *)
+            l === True, Null,
+            MatchQ[l, _Equal], AppendTo[eqAcc, l],
             MatchQ[l, _Unequal], AppendTo[diseqAcc, l],
             True, Return[{$Failed, $Failed}]
         ],
@@ -310,8 +309,7 @@ tptpDispatchSMT[imported_Association] := Block[
     ]
 ]
 
-groundQ[expr_] := FreeQ[expr, _Pattern | _Blank | _BlankSequence |
-    _BlankNullSequence]
+groundQ[expr_] := FreeQ[expr, _Pattern | _Blank | _BlankSequence | _BlankNullSequence]
 
 (* ----- DPLL(T) shell -----
    Lazy SMT: replace each equality/disequality atom with a fresh
@@ -335,7 +333,7 @@ TSmtDecide[formula_] := Block[
        filter never fires, and the formula falls through to the empty-
        atoms TrueQ branch (UNSAT for every non-literally-True input). *)
     normFormula = formula /. {
-        Inactive[Equal][a_, b_]   :> a == b,
+        Inactive[Equal][a_, b_] :> a == b,
         Inactive[Unequal][a_, b_] :> Unequal[a, b]};
     atoms = collectAtoms[normFormula];
     If[ atoms === {},
@@ -371,14 +369,11 @@ collectAtoms[formula_] := Sort @ DeleteDuplicates @ Cases[
 
 modelToLiterals[model_Association] := Module[{eqAcc = {}, diseqAcc = {}},
     KeyValueMap[
-        Function[{atom, val},
-            Which[
-                MatchQ[atom, _Equal] && val,    AppendTo[eqAcc, atom],
-                MatchQ[atom, _Equal] && ! val,  AppendTo[diseqAcc, Unequal @@ atom],
-                MatchQ[atom, _Unequal] && val,  AppendTo[diseqAcc, atom],
-                MatchQ[atom, _Unequal] && ! val,
-                    AppendTo[eqAcc, Equal @@ atom]
-            ]
+        {atom, val} |-> Which[
+            MatchQ[atom, _Equal] && val, AppendTo[eqAcc, atom],
+            MatchQ[atom, _Equal] && ! val, AppendTo[diseqAcc, Unequal @@ atom],
+            MatchQ[atom, _Unequal] && val, AppendTo[diseqAcc, atom],
+            MatchQ[atom, _Unequal] && ! val, AppendTo[eqAcc, Equal @@ atom]
         ],
         model
     ];
@@ -386,7 +381,7 @@ modelToLiterals[model_Association] := Module[{eqAcc = {}, diseqAcc = {}},
 ]
 
 (* Boolean-combination goal.  An entailment hyps |= phi is UNSAT of
-   hyps /\ ~phi -- ask TSmtDecide on that. *)
+   hyps /\ ~phi; ask TSmtDecide on that. *)
 
 atpSmtEntail[goal_ /; ! MatchQ[goal, _Equal | _Unequal | _String | _File],
         hypotheses_List : {}] :=
@@ -394,12 +389,12 @@ atpSmtEntail[goal_ /; ! MatchQ[goal, _Equal | _Unequal | _String | _File],
         Which[
             res["Status"] === "UNSAT",
             <|
-                "Status"     -> "Proved",
-                "Method"     -> "DPLL(T)+CongruenceClosure",
-                "Goal"       -> goal,
+                "Status" -> "Proved",
+                "Method" -> "DPLL(T)+CongruenceClosure",
+                "Goal" -> goal,
                 "Hypotheses" -> hypotheses
             |>,
-            (* SAT: hyps /\ ~goal has a model -- the goal is not entailed.
+            (* SAT: hyps /\ ~goal has a model; the goal is not entailed.
                TSmtDecide certified a satisfying truth assignment over the
                equality atoms; return it as the refuting CounterexampleObject.
                No finite algebra here, so "Setup" carries the assignment. *)

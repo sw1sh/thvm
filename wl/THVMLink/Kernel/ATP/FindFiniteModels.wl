@@ -195,7 +195,7 @@ findFiniteModels[relations_, arities_Association, vars_List, k_Integer, prop_, O
                         Map[Identity, #, {Depth[#]}]& @ ReplaceAll[#,
                             f_[digits[a_]] :> digits @ Association @ KeyValueMap[{key, vs} |-> key -> Association @ KeyValueMap[#1 -> #2 /. key -> #1&, vs], Map[Map[f], a]]
                         ]&,
-                        (* i'th digit equals to itself *)
+                        (* the i'th digit equals itself *)
                         expr /. f_[i_Integer] :> digits[<|f[i] -> AssociationThread[Range[0, k - 1], Range[0, k - 1]]|>]
                     ]
                         (* inner digits must be equal to the outer *)
@@ -395,7 +395,7 @@ ccEncodeTerms[terms_] :=
                     ]},
                     (* Level-1 stuff appends rec's elements individually, so the
                        bag already holds the flat {tag, sym, nargs, args...}
-                       stream -- no Catenate needed. *)
+                       stream, no Catenate needed. *)
                     Internal`StuffBag[recs, rec, 1];
                     ids[t] = count;
                     count = count + 1;
@@ -542,7 +542,7 @@ ccCIndicesIncremental[relationFunction_, arities_Association, vars_List, k_, max
    like the "ExpressionPrune" branch (same digits / toDigitLogic /
    LogicalExpand / split into clause-sets), then encodes the clause DB to
    integers for the C solver, which returns the per-operator model index
-   lists -- so "ExpressionPruneC" is differential-identical to
+   lists, so "ExpressionPruneC" is differential-identical to
    "ExpressionPrune". *)
 
 (* ffmepSolve is the LibraryLink binding to src/ffmep's enumerator.  It
@@ -623,7 +623,7 @@ epcIndices[relationFunction_, arities_Association, vars_List, k_, maxItems_] :=
         offsetOf = AssociationThread[canonOps, Most @ Prepend[Accumulate @ canonSizes, 0]];
         encodeLit[op_[pos_Integer] == value_Integer] := (offsetOf[op] + pos) k + value;
         (* A `True` clause (a tautological clause-set) is the empty literal
-           list -- always selectable, binding nothing.  A `False` disjunct is
+           list, always selectable, binding nothing.  A `False` disjunct is
            dropped (never selected) at the clause-set level below. *)
         encodeClause[True] := {};
         encodeClause[cl_] := encodeLit /@ If[MatchQ[cl, _And], List @@ cl, {cl}];

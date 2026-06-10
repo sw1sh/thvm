@@ -3,9 +3,8 @@
    TVampireProof[problemFile, opts] runs the vampire binary on a
    TPTP problem file and returns a normalized result Association.
    Use it to validate a thvm preset's behavior against the actual
-   Vampire 5.0.1 CLI proof on the same problem (the methodology
-   pivot: match results on easy cases, then progressively scale up;
-   see commit 7457bf39 + docs/atp/vampire_case_teardown.md).
+   Vampire 5.0.1 CLI proof on the same problem
+   (see docs/atp/vampire_case_teardown.md).
 
    Result shape:
        <|
@@ -50,8 +49,8 @@ Begin["`Private`"]
 
 Options[TVampireProof] = {
     TimeConstraint -> 30,
-    "Mode"         -> "casc",
-    "Binary"       -> Automatic
+    "Mode" -> "casc",
+    "Binary" -> Automatic
 }
 
 (* Resolve the vampire binary location: search the common Homebrew /
@@ -72,9 +71,7 @@ vampireBinary[s_String] := s
 foldReorients[derivation_List] := Block[{aliases, fold},
     aliases = Association @ Cases[
         derivation,
-        s_Association /; s["Rule"] === "reorient_equations"
-            && ListQ[s["Parents"]] && Length[s["Parents"]] == 1 :>
-            (s["Name"] -> s["Parents"][[1]])
+        s_Association /; s["Rule"] === "reorient_equations" && ListQ[s["Parents"]] && Length[s["Parents"]] == 1 :> (s["Name"] -> s["Parents"][[1]])
     ];
     fold[n_] := If[ KeyExistsQ[aliases, n], fold[aliases[n]], n];
     DeleteCases[
@@ -106,9 +103,7 @@ extractStrategy[src_String] := Block[{lines, idx, stratLine},
         Missing["NotFound"],
         stratLine = SelectFirst[
             Reverse @ lines[[ ;; idx[[1]] - 1]],
-            StringStartsQ[#, "% "]
-                && (StringContainsQ[#, "lrs"] || StringContainsQ[#, "dis"]
-                    || StringContainsQ[#, "ott"] || StringContainsQ[#, "finite"]) &,
+            StringStartsQ[#, "% "] && (StringContainsQ[#, "lrs"] || StringContainsQ[#, "dis"] || StringContainsQ[#, "ott"] || StringContainsQ[#, "finite"]) &,
             Missing["NotFound"]
         ];
         If[ MissingQ[stratLine],
@@ -116,7 +111,7 @@ extractStrategy[src_String] := Block[{lines, idx, stratLine},
             StringTrim @ StringReplace[
                 stratLine,
                 {
-                    RegularExpression["^% "]    -> "",
+                    RegularExpression["^% "] -> "",
                     RegularExpression[" on .*"] -> ""
                 }
             ]
@@ -152,7 +147,7 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
             Message[TVampireProof::badfile, problemFile];
             Return[$Failed]
         ];
-        tc   = OptionValue[TimeConstraint];
+        tc = OptionValue[TimeConstraint];
         mode = OptionValue["Mode"];
         cmd = StringJoin[
             bin, " --mode ", mode, " --proof tptp -t ",
@@ -162,11 +157,9 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
             {"sh", "-c", cmd}, "StandardOutput"
         ];
         status = Which[
-            StringContainsQ[out, "SZS status Unsatisfiable"]
-                || StringContainsQ[out, "SZS status Theorem"],
+            StringContainsQ[out, "SZS status Unsatisfiable"] || StringContainsQ[out, "SZS status Theorem"],
                 "Proved",
-            StringContainsQ[out, "SZS status Timeout"]
-                || StringContainsQ[out, "Time limit reached"],
+            StringContainsQ[out, "SZS status Timeout"] || StringContainsQ[out, "Time limit reached"],
                 "TimedOut",
             True,
                 "Failed"
@@ -176,10 +169,13 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
            than stdout.  Detect + read that file; fall back to the
            inline proof body present in single-strategy modes. *)
         solutionFile = First[
-            StringCases[out,
-                "Solution written to \"" ~~ p:Except["\""].. ~~ "\"" :> p,
-                1],
-            None];
+            StringCases[
+                out,
+                "Solution written to \"" ~~ p : Except["\""].. ~~ "\"" :> p,
+                1
+            ],
+            None
+        ];
         proofText = Which[
             status =!= "Proved", out,
             StringQ[solutionFile] && FileExistsQ[solutionFile],
@@ -200,16 +196,16 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
             {}
         ];
         <|
-            "Status"      -> status,
-            "Strategy"    -> If[
+            "Status" -> status,
+            "Strategy" -> If[
                 status === "Proved",
                 extractStrategy[out],
                 Missing["NoProof"]
             ],
-            "Seconds"     -> N @ Round[secs, 0.01],
+            "Seconds" -> N @ Round[secs, 0.01],
             "ProofLength" -> If[status === "Proved", Length[foldedDerivation], 0],
-            "Inferences"  -> foldedDerivation,
-            "RawSZS"      -> out
+            "Inferences" -> foldedDerivation,
+            "RawSZS" -> out
         |>
     ]
 

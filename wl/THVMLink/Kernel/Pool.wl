@@ -1,5 +1,5 @@
 (* ::Package:: *)
-(* Pool.wl -- WL harness for the parallel WNF / NF worker pool.
+(* Pool.wl: WL harness for the parallel WNF / NF worker pool.
 
    `nf` runs on a single thread by default; setting THVM_THREADS at
    the env level OR calling TThreads[n] from WL routes nf through
@@ -44,7 +44,7 @@ TNfProfiled::usage = "TNfProfiled[term] runs TNf[term] and returns <|\"Result\" 
 
 TPoolStatsReport::usage = "TPoolStatsReport[stats] renders a Tabular summary of a TPoolStats[] snapshot: wall time, total fires, per-worker fires, steals, active / idle ratio.";
 
-TPoolStatsBench::usage = "TPoolStatsBench[builder, threadCounts_List] runs TNfProfiled[builder[]] under each thread count in `threadCounts`, calling TReset between runs to ensure a clean heap.  `builder` is a HoldFirst term-producing expression (or a no-arg Function) -- it must be re-evaluated AFTER TReset so the term is rebuilt against the fresh heap.  Returns a Tabular comparing wall time, total fires, and idle ratios.  Example: TPoolStatsBench[treeIter[14, TNum[#]&], {1, 2, 4, 8}] when treeIter is HoldFirst-safe; or pass a Function: TPoolStatsBench[(treeIter[14, TNum[#]&])&, {1, 2, 4, 8}].";
+TPoolStatsBench::usage = "TPoolStatsBench[builder, threadCounts_List] runs TNfProfiled[builder[]] under each thread count in `threadCounts`, calling TReset between runs to ensure a clean heap.  `builder` is a HoldFirst term-producing expression (or a no-arg Function); it must be re-evaluated AFTER TReset so the term is rebuilt against the fresh heap.  Returns a Tabular comparing wall time, total fires, and idle ratios.  Example: TPoolStatsBench[treeIter[14, TNum[#]&], {1, 2, 4, 8}] when treeIter is HoldFirst-safe; or pass a Function: TPoolStatsBench[(treeIter[14, TNum[#]&])&, {1, 2, 4, 8}].";
 
 Begin["`Private`"];
 
@@ -61,7 +61,7 @@ $poolStatsWorkerFieldFn := $poolStatsWorkerFieldFn = load[
 
 ensureInit[];   (* Pool helpers all need the runtime up. *)
 
-(* === Field codes -- mirror thvm_wl_pool_stats_*_field switches ===== *)
+(* === Field codes: mirror thvm_wl_pool_stats_*_field switches ===== *)
 
 (* Pool-level scalars. *)
 $poolFieldNWorkers     = 0;
@@ -142,13 +142,13 @@ TPoolStatsReport[s_Association] := Module[{wall, perW, totalActive, totalIdle},
              "   idle: ", formatNs[totalIdle]}],
         Tabular[
             Prepend[
-                Function[w, {
+                (w |-> {
                     w["Id"], w["Fires"],
                     w["Pushes"],
                     w["Steals"], w["StealAttempts"],
                     w["Wakeups"],
                     formatNs[w["ActiveNs"]], formatNs[w["IdleNs"]]
-                }] /@ perW,
+                }) /@ perW,
                 {"id", "fires", "pushes", "steals", "stealAttempts",
                  "wakeups", "active", "idle"}],
             TableHeadings -> Automatic
@@ -161,12 +161,12 @@ TPoolStatsReport[s_Association] := Module[{wall, perW, totalActive, totalIdle},
 SetAttributes[TPoolStatsBench, HoldFirst];
 TPoolStatsBench[builder_, threadCounts_List] := Module[
     {rows, prevThreads = TThreads[]},
-    rows = Function[ n, Module[ {p, t},
+    rows = (n |-> Module[ {p, t},
         TReset[];
         TThreads[n];
-        (* Rebuild the term against the fresh heap on every iteration --
-           the previous run's TReset wiped the heap, so any term built
-           before this Module-iter is now a dangling Term value. *)
+        (* Rebuild the term against the fresh heap on every iteration: the
+           previous run's TReset wiped the heap, so any term built before
+           this Module-iter is now a dangling Term value. *)
         t = builder;
         p = TNfProfiled[t];
         <|
@@ -176,19 +176,19 @@ TPoolStatsBench[builder_, threadCounts_List] := Module[
             "ActiveNs"    -> Total[#["ActiveNs"] & /@ p["Stats", "PerWorker"]],
             "IdleNs"      -> Total[#["IdleNs"]   & /@ p["Stats", "PerWorker"]]
         |>
-    ]] /@ threadCounts;
+    ]) /@ threadCounts;
     TThreads[prevThreads];
     Dataset[
         AssociationThread[
             {"threads", "wall", "fires", "active", "idle", "idle%"},
-            #] & /@ Function[r, {
+            #] & /@ (r |-> {
                 r["Threads"],
                 formatNs[r["DrainWallNs"]],
                 r["TotalFires"],
                 formatNs[r["ActiveNs"]],
                 formatNs[r["IdleNs"]],
                 ratioPercent[r["IdleNs"], r["ActiveNs"] + r["IdleNs"]]
-            }] /@ rows
+            }) /@ rows
     ]
 ]
 

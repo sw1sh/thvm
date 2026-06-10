@@ -1,11 +1,11 @@
 (* ::Package:: *)
 (* AOT.wl -- WL surface for ahead-of-time compilation.
 
-   The Bend2-style fork-emitting AOT lives in src/aot/.  Phase 1 built
-   the runtime (Task / Result / cont / worker), Phase 2 built the
-   emitter that translates a TDef'd body into compilable C source
-   (par_<name>_entry + par_<name>_cont_K + dispatch table).  Phase 4
-   (this file) exposes the emitter to WL.
+   The Bend2-style fork-emitting AOT lives in src/aot/: the runtime
+   (Task / Result / cont / worker) and the emitter that translates a
+   TDef'd body into compilable C source (par_<name>_entry +
+   par_<name>_cont_K + dispatch table).  This file exposes the emitter
+   to WL.
 
    Usage:
 
@@ -70,7 +70,7 @@ formula via Metal.  cnf is a list of clauses, each a list of signed integers \
 (positive lit = +var_idx, negative = -var_idx, 1-based).  Returns the per-edge \
 final eta vector (length = total literals across clauses) after convergence or \
 max_iters.  Options: \"MaxIters\" (default 100), \"Damping\" (default 0.5), \
-\"Threshold\" (default 0.001).  Path B: targets random k-SAT near the phase \
+\"Threshold\" (default 0.001).  Targets random k-SAT near the phase \
 transition where CDCL struggles.";
 
 TAOTSatBitmask::usage =
@@ -79,7 +79,7 @@ TAOTSatBitmask::usage =
 each clause a list of signed integers (positive = positive literal, negative = \
 negated literal, magnitude = 1-based variable index).  Returns a packed Integer \
 list of length 2^nVars where entry i is 1 if assignment i (bit j of i = value of \
-variable j+1) satisfies the formula, 0 otherwise.  Lever 3: direct bitwise CNF \
+variable j+1) satisfies the formula, 0 otherwise.  Direct bitwise CNF \
 evaluation, bypasses IC reduction; nVars <= 30.";
 
 TAOTIcCollapse::usage =
@@ -90,10 +90,10 @@ with THVM_AOT_METAL_KEEP_BOOK=1 set).  Each thread decodes its tid \
 into a binary path through the SUP-tree, drives the final leaf to \
 WHNF on-thread via per-thread IC interaction inlines, and writes the \
 resulting Term to result[tid].  Returns a List of TTerm leaves of \
-length 2^depth (filter ERA sentinels via TTermTag).  Iter Z+1.";
+length 2^depth (filter ERA sentinels via TTermTag).";
 
 TAOTBatchOp2Fold::usage =
-  "TAOTBatchOp2Fold[root_locs] dispatches the iter B-2 batch kernel \
+  "TAOTBatchOp2Fold[root_locs] dispatches the batch kernel \
 (aot_eval_op2_fold_batch) over a list of book_heap locs, each pointing \
 at an OP2(NUM,NUM) cell.  Returns a list of N folded NUM Terms (as \
 TTerms).  Amortizes Metal kernel-launch overhead across N redexes -- \
@@ -130,49 +130,48 @@ $aotRun4PooledFn := $aotRun4PooledFn = load["thvm_wl_aot_run4_pooled",
 
 (* Path map populated by TAOTCompile so TAOTRun knows which dylib to
    dlopen for a given name.  Per-session; not persisted. *)
-$aotPaths = <||>;
+$aotPaths = <||>
 
 TAOTEmit[name_String]  := (ensureInit[]; $aotEmitFn[TDefName[name], name])
 TAOTEmit[name_Integer] := (ensureInit[]; $aotEmitFn[name, "def" <> ToString[name]])
 
 TAOTCompile[name_String] := (
-  ensureInit[];
-  Module[{path = $aotCompileFn[TDefName[name], name]},
-    If[ StringLength[path] == 0,
-      $Failed,
-      $aotPaths[name] = path;
-      path
+    ensureInit[];
+    Module[{path = $aotCompileFn[TDefName[name], name]},
+        If[ StringLength[path] == 0,
+            $Failed,
+            $aotPaths[name] = path;
+            path
+        ]
     ]
-  ]
-);
+)
 TAOTCompile[name_Integer] := (
-  ensureInit[];
-  Module[{nm = "def" <> ToString[name],
-          path},
-    path = $aotCompileFn[name, nm];
-    If[ StringLength[path] == 0,
-      $Failed,
-      $aotPaths[nm] = path;
-      path
+    ensureInit[];
+    Module[{nm = "def" <> ToString[name], path},
+        path = $aotCompileFn[name, nm];
+        If[ StringLength[path] == 0,
+            $Failed,
+            $aotPaths[nm] = path;
+            path
+        ]
     ]
-  ]
-);
+)
 
 TAOTPath[name_String] := Lookup[$aotPaths, name, Missing["NotCompiled"]]
 
 TAOTRun[name_String, input_TTerm] := (
-  ensureInit[];
-  Module[{path = TAOTPath[name], in, raw},
-    If[ MissingQ[path], Return[$Failed]];
-    in  = ttermRaw[input];
-    raw = $aotRunFn[path, name, in];
-    TTerm[raw]
-  ]
-);
+    ensureInit[];
+    Module[{path = TAOTPath[name], in, raw},
+        If[ MissingQ[path], Return[$Failed]];
+        in = ttermRaw[input];
+        raw = $aotRunFn[path, name, in];
+        TTerm[raw]
+    ]
+)
 
 (* Convenience: also accept raw Integer input (skips the TTerm
    wrap).  Useful for NUM-keyed dispatches. *)
-TAOTRun[name_String, input_Integer] := TAOTRun[name, TNum[input]];
+TAOTRun[name_String, input_Integer] := TAOTRun[name, TNum[input]]
 
 (* Multi-arg form: TAOTRun[name, {arg0, arg1, ...}].  Up to 4 args
    (matches AOT_MAX_ARGS).  Each arg can be a TTerm or a raw
@@ -183,34 +182,32 @@ toRawArg[i_Integer] := ttermRaw[TNum[i]]
 toRawArg[_]         := 0
 
 TAOTRun[name_String, inputs_List] := (
-  ensureInit[];
-  Module[{path = TAOTPath[name], raws, raw},
-    If[ MissingQ[path], Return[$Failed]];
-    If[ Length[inputs] > 4,
-      Message[TAOTRun::nargs, Length[inputs]];
-      Return[$Failed]];
-    raws = PadRight[toRawArg /@ inputs, 4, 0];
-    raw  = $aotRun4Fn[path, name, raws[[1]], raws[[2]], raws[[3]], raws[[4]]];
-    TTerm[raw]
-  ]
-);
+    ensureInit[];
+    Module[{path = TAOTPath[name], raws, raw},
+        If[ MissingQ[path], Return[$Failed]];
+        If[ Length[inputs] > 4,
+            Message[TAOTRun::nargs, Length[inputs]];
+            Return[$Failed]];
+        raws = PadRight[toRawArg /@ inputs, 4, 0];
+        raw = $aotRun4Fn[path, name, raws[[1]], raws[[2]], raws[[3]], raws[[4]]];
+        TTerm[raw]
+    ]
+)
 TAOTRun::nargs = "TAOTRun supports up to 4 args (got `1`).";
 TAOTRun::method = "Method `1` not supported in this build.";
 
-(* === Method dispatcher (Phase 7) ====================================
+(* === Method dispatcher ==============================================
    When the call carries an explicit `Method -> spec` rule, route to
    the right backend.  Without the Method rule, falls through to the
    existing TAOTRun[name, input] / [name, inputs_List] overloads
    above (the default CPU/dlopen path).
 
    Method spec shapes:
-     "Metal"                          -- Phase 7 GPU path: emit MSL,
+     "Metal"                          -- GPU path: emit MSL,
                                           xcrun metallib, dispatch.
      "CPU"                            -- single-thread native (current
                                           dlopen'd C path).
-     {"CPU", "NumThreads" -> n}       -- worker-pool parallel CPU
-                                          (Phase 1 wnf_pool integration
-                                          -- not yet wired here).
+     {"CPU", "NumThreads" -> n}       -- worker-pool parallel CPU.
 *)
 
 $aotMetalRun4Fn := $aotMetalRun4Fn = load[
@@ -218,10 +215,9 @@ $aotMetalRun4Fn := $aotMetalRun4Fn = load[
     {Integer, "UTF8String", Integer, Integer, Integer, Integer},
     Integer];
 
-(* iter Y: variable-arity dispatch.  Replaces the 4-slot bridge so
-   defs with >4 args can run via Method -> "Metal".  Args are packed
-   into an Integer rank-1 MTensor and the kernel binds args[0..n-1]
-   directly. *)
+(* Variable-arity dispatch: defs with >4 args run via Method ->
+   "Metal".  Args are packed into an Integer rank-1 MTensor and the
+   kernel binds args[0..n-1] directly. *)
 $aotMetalRunNFn := $aotMetalRunNFn = load[
     "thvm_wl_aot_metal_run_n",
     {Integer, "UTF8String", {Integer, 1}},
@@ -231,8 +227,8 @@ $aotMetalBatchOp2Fn := $aotMetalBatchOp2Fn = load[
     "thvm_wl_aot_metal_op2_fold_batch",
     {{Integer, 1}}, {Integer, 1}];
 
-(* iter Z+1: parallel cnf+collapse on a BOOK_HEAP-rooted SUP-tree,
-   dispatched via the static aot_ic_collapse PSO with grid = 2^depth.
+(* Parallel cnf+collapse on a BOOK_HEAP-rooted SUP-tree, dispatched
+   via the static aot_ic_collapse PSO with grid = 2^depth.
    Caller gives the kernel-1 result Term + an estimated SUP-tree
    depth (max 30); each thread walks one leaf path and drives it to
    WHNF on-thread.  Returns a list of leaf TTerms (length 2^depth);
@@ -246,9 +242,9 @@ TAOTIcCollapse[t_TTerm, depth_Integer] := Module[{raws},
     ensureInit[];
     raws = $aotIcCollapseFn[ttermRaw[t], depth];
     TTerm /@ raws
-];
+]
 
-(* Lever 3: bitmask CNF eval.  cnf = list of clauses, each clause a
+(* Bitmask CNF eval.  cnf = list of clauses, each clause a
    list of signed Integer literals (positive = +var_index, negative
    = -var_index; 1-based var indices).  Encodes to two parallel
    Integer arrays of clause-bitmasks (positive vars / negative vars
@@ -259,17 +255,17 @@ $aotCnfBitmaskFn := $aotCnfBitmaskFn = load[
     {{Integer, 1}, {Integer, 1}, Integer}, {Integer, 1}];
 
 cnfToBitmasks[cnf_List, nVars_Integer] := Module[{posMasks, negMasks},
-  posMasks = Table[
-    BitOr @@ Append[Cases[clause, lit_ /; lit > 0 :> 2^(lit - 1)], 0],
-    {clause, cnf}];
-  negMasks = Table[
-    BitOr @@ Append[Cases[clause, lit_ /; lit < 0 :> 2^(-lit - 1)], 0],
-    {clause, cnf}];
-  {posMasks, negMasks}
+    posMasks = Table[
+        BitOr @@ Append[Cases[clause, lit_ /; lit > 0 :> 2^(lit - 1)], 0],
+        {clause, cnf}];
+    negMasks = Table[
+        BitOr @@ Append[Cases[clause, lit_ /; lit < 0 :> 2^(-lit - 1)], 0],
+        {clause, cnf}];
+    {posMasks, negMasks}
 ]
 
-(* Path B: Survey Propagation.  Encodes CNF as flat literal list
-   + clause-boundary array, dispatches the iteration loop on Metal,
+(* Survey Propagation.  Encodes CNF as flat literal list +
+   clause-boundary array, dispatches the iteration loop on Metal,
    returns per-edge eta values. *)
 $aotSpRunFn := $aotSpRunFn = load[
     "thvm_wl_aot_sp_run",
@@ -278,9 +274,9 @@ $aotSpRunFn := $aotSpRunFn = load[
 
 Options[TAOTSurveyPropagate] = {
     "MaxIters" -> 100,
-    "Damping"  -> 0.5,
+    "Damping" -> 0.5,
     "Threshold" -> 0.001
-};
+}
 $aotSpSolveFn := $aotSpSolveFn = load[
     "thvm_wl_aot_sp_solve",
     {{Integer, 1}, {Integer, 1}, Integer, Integer, Real, Real},
@@ -288,9 +284,9 @@ $aotSpSolveFn := $aotSpSolveFn = load[
 
 Options[TAOTSpSolve] = {
     "MaxIters" -> 100,
-    "Damping"  -> 0.5,
+    "Damping" -> 0.5,
     "Threshold" -> 0.001
-};
+}
 TAOTSpSolve[cnf_List, nVars_Integer,
     opts : OptionsPattern[]] := Module[{flat, bounds, maxIters, damping, threshold, raw, status, assignment, statusStr},
     ensureInit[];
@@ -336,37 +332,37 @@ TAOTSatBitmask[cnf_List, nVars_Integer] := Module[{pos, neg},
         nVars]
 ]
 
-(* Phase 7 iter QQ: WL surface for the batch dispatcher.  Caller
-   supplies a list of book_heap locs (Integers), each pointing at an
-   OP2(NUM,NUM) cell.  Returns a list of folded NUM TTerms. *)
+(* WL surface for the batch dispatcher.  Caller supplies a list of
+   book_heap locs (Integers), each pointing at an OP2(NUM,NUM) cell.
+   Returns a list of folded NUM TTerms. *)
 TAOTBatchOp2Fold[rootLocs_List] := Module[{raws},
-  ensureInit[];
-  raws = $aotMetalBatchOp2Fn[
-    Developer`ToPackedArray[rootLocs, Integer]];
-  TTerm /@ raws
+    ensureInit[];
+    raws = $aotMetalBatchOp2Fn[
+        Developer`ToPackedArray[rootLocs, Integer]];
+    TTerm /@ raws
 ]
 
 aotMetalRunImpl[name_String, args_List] := Module[{raws},
-  raws = toRawArg /@ args;
-  TTerm[$aotMetalRunNFn[TDefName[name], name, raws]]
+    raws = toRawArg /@ args;
+    TTerm[$aotMetalRunNFn[TDefName[name], name, raws]]
 ]
 aotMetalRunImpl[name_String, input_TTerm]   := aotMetalRunImpl[name, {input}]
 aotMetalRunImpl[name_String, input_Integer] := aotMetalRunImpl[name, {TNum[input]}]
 
-(* Iter Z+2 step 4: generic per-def runner via the static aot_ic_def_run
-   PSO.  No per-def MSL emit / xcrun roundtrip -- one PSO across all
-   defs.  Used when Method spec is {"Metal", "Generic" -> True} or as
-   the iter Z fallback when the per-def emit would be too large to
-   compile (the threshold is set at the WL surface for now). *)
+(* Generic per-def runner via the static aot_ic_def_run PSO.  No
+   per-def MSL emit / xcrun roundtrip -- one PSO across all defs.
+   Used when Method spec is {"Metal", "Generic" -> True} or as the
+   fallback when the per-def emit would be too large to compile (the
+   threshold is set at the WL surface for now). *)
 $aotMetalIcDefRunFn := $aotMetalIcDefRunFn = load[
     "thvm_wl_aot_metal_ic_def_run",
     {Integer, {Integer, 1}}, Integer];
 
 aotMetalIcDefRunImpl[name_String, args_List] := Module[{raws},
-  raws = toRawArg /@ args;
-  TTerm[
-    $aotMetalIcDefRunFn[TDefName[name],
-        Developer`ToPackedArray[raws, Integer]]]
+    raws = toRawArg /@ args;
+    TTerm[
+        $aotMetalIcDefRunFn[TDefName[name],
+            Developer`ToPackedArray[raws, Integer]]]
 ]
 aotMetalIcDefRunImpl[name_String, input_TTerm]   := aotMetalIcDefRunImpl[name, {input}]
 aotMetalIcDefRunImpl[name_String, input_Integer] := aotMetalIcDefRunImpl[name, {TNum[input]}]
@@ -383,17 +379,17 @@ methodOpts[spec_] := Replace[spec,
      _                      -> {}}]
 
 TAOTRun[name_String, args_, Method -> spec_] := Module[{head, opts},
-  ensureInit[];
-  head = methodHead[spec];
-  opts = methodOpts[spec];
-  Switch[head,
-    "Metal",
-      If[ TrueQ @ Lookup[opts, "Generic", False],
-          aotMetalIcDefRunImpl[name, args],
-          aotMetalRunImpl[name, args]],
-    "CPU",   aotCpuRunImpl[name, args, spec],
-    _,       Message[TAOTRun::method, spec]; $Failed
-  ]
+    ensureInit[];
+    head = methodHead[spec];
+    opts = methodOpts[spec];
+    Switch[head,
+        "Metal",
+            If[ TrueQ @ Lookup[opts, "Generic", False],
+                aotMetalIcDefRunImpl[name, args],
+                aotMetalRunImpl[name, args]],
+        "CPU", aotCpuRunImpl[name, args, spec],
+        _, Message[TAOTRun::method, spec]; $Failed
+    ]
 ]
 
 (* Method -> "CPU" / {"CPU", "NumThreads" -> n}: auto-compile via
@@ -404,27 +400,25 @@ TAOTRun[name_String, args_, Method -> spec_] := Module[{head, opts},
    {"CPU", "NumThreads" -> n} with n>1: parallel dispatch through
    thvm_wl_aot_run4_pooled, which dlopens the dylib's
    aot_program_<name>_run_pooled entry and calls aot_run_parallel
-   (Phase 1's work-stealing pool).  iter Q wired per-worker
-   CURRENT_WNF_STATE in aot_worker_main so spawned pthreads no
-   longer SEGV on wnf re-entry. *)
+   (the work-stealing pool). *)
 aotCpuRunImpl[name_String, args_, spec_] := Module[
     {path, raws, slots, threads},
-  path = TAOTPath[name];
-  If[ MissingQ[path], path = TAOTCompile[name]];
-  If[ path === $Failed || MissingQ[path],
-    Message[TAOTRun::method, spec]; Return[$Failed]];
-  threads = Replace[spec,
-    { _String                            -> 1,
-      { _String, OrderlessPatternSequence["NumThreads" -> n_Integer, ___] } :> n,
-      _                                  -> 1
-    }];
-  If[ threads <= 1,
-    TAOTRun[name, args],
-    raws  = toRawArg /@ args;
-    slots = PadRight[raws, 4, 0];
-    TTerm[$aotRun4PooledFn[path, name, threads,
-                       slots[[1]], slots[[2]], slots[[3]], slots[[4]]]]
-  ]
+    path = TAOTPath[name];
+    If[ MissingQ[path], path = TAOTCompile[name]];
+    If[ path === $Failed || MissingQ[path],
+        Message[TAOTRun::method, spec]; Return[$Failed]];
+    threads = Replace[spec,
+        { _String                            -> 1,
+          { _String, OrderlessPatternSequence["NumThreads" -> n_Integer, ___] } :> n,
+          _                                  -> 1
+        }];
+    If[ threads <= 1,
+        TAOTRun[name, args],
+        raws = toRawArg /@ args;
+        slots = PadRight[raws, 4, 0];
+        TTerm[$aotRun4PooledFn[path, name, threads,
+            slots[[1]], slots[[2]], slots[[3]], slots[[4]]]]
+    ]
 ]
 
 End[];
