@@ -1404,16 +1404,42 @@ static Term ru_compose_one_view(Term cur, View const *pv) {
   return acc != 0 ? acc : uop_const(DT_INT32, 0);
 }
 
+// A contiguous (row-major, offset-0) view composes as the IDENTITY on
+// the running flat index: ru_compose_one_view rebuilds the mixed-radix
+// digits of `cur` (the top axis is unbounded -- no IMOD -- and every
+// stride == its own suffix), so acc == cur for ALL cur >= 0.  This is
+// the View-merge fast path from tinygrad's `View.__add__`
+// (`if vm2.contiguous: return vm1`): a contiguous inner view absorbs
+// into its outer view, emitting NO IDIV/IMOD/IMUL/IADD for that step.
+// Require all-static dims so the suffix/identity argument doesn't lean
+// on the kvar upper-bound resolution (the worst-case packed extent),
+// keeping the merge byte-exact rather than just bound-exact.
+static int ru_view_composes_as_identity(View const *pv) {
+  if (!pv->contiguous || pv->offset != 0) return 0;
+  for (u32 d = 0; d < pv->shape.ndim; d++) {
+    if (kvar_extent_is_var(pv->shape.dims[d])) return 0;
+  }
+  return 1;
+}
+
 // Walk the chain prior_views[nviews-1] -> prior_views[0], composing
 // each view's decompose-by-shape into the running flat index.  Returns
 // the original addr on bail; sets RU_TID_CHAIN_COMPOSED[tid]=1 on
 // success so input_slot_dedup can flip ke->input_chain_composed[].
+// Mergeable consecutive views (a contiguous inner view absorbing into
+// its outer) are collapsed read-only at compose time -- TENS[tid] is
+// refcount-shared (DUP), so prior_views[] is NEVER mutated; the merge
+// is realized purely by SKIPPING the identity step.
 static Term ru_compose_view_chain(Term addr0, u32 tid) {
   if (addr0 == 0) return addr0;
   if (!ru_chain_foldable(tid)) return addr0;
   TenDesc const *td = &TENS[tid];
   Term cur = addr0;
   for (i32 k = (i32)td->nviews - 1; k >= 0; k--) {
+    // View merge: a contiguous offset-0 inner view is the identity on
+    // `cur`, so its decompose collapses into the neighbouring view.
+    // Skipping it emits exactly the bytes of the merged affine map.
+    if (ru_view_composes_as_identity(&td->prior_views[k])) continue;
     cur = ru_compose_one_view(cur, &td->prior_views[k]);
     if (cur == 0) return addr0;
   }
