@@ -1021,6 +1021,7 @@ int main(int argc, char **argv) {
            "          push-norm=%.2fs (%.0f%%) [%.1fus/cp]"
            " interreduce=%.2fs (%.0f%%)\n"
            "          goal-check=%.2fs (%.0f%%) cp-set-ir=%.2fs (%.0f%%)\n"
+           "          cp-set-ir-detail: unpack=%.2fs norm=%.2fs pack=%.2fs post=%.2fs\n"
            "          sum=%.2fs / wall=%.2fs (%.0f%%)\n",
            g_atp_phase_us_pop_normalize / 1e6,
            100.0 * (g_atp_phase_us_pop_normalize / 1e6) / w,
@@ -1035,6 +1036,10 @@ int main(int argc, char **argv) {
            100.0 * (g_atp_phase_us_goal_check / 1e6) / w,
            g_atp_phase_us_cp_set_ir / 1e6,
            100.0 * (g_atp_phase_us_cp_set_ir / 1e6) / w,
+           g_atp_phase_us_cpir_unpack / 1e6,
+           g_atp_phase_us_cpir_normalize / 1e6,
+           g_atp_phase_us_cpir_pack / 1e6,
+           g_atp_phase_us_cpir_post / 1e6,
            sumus / 1e6, w,
            100.0 * (sumus / 1e6) / w);
     if (g_atp_unorient_step_calls > 0) {

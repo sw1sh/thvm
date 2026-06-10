@@ -2538,6 +2538,27 @@ int uop_dag_classify_matmul_shape(Term root,
                                   struct KernelEntry const *ke,
                                   UopDagGemmShape *out);
 
+// TRUE batched matmul: A{batch,M,K} . B{batch,K,N} -> C{batch,M,N}, the batch
+// axis present in A, B, AND the output (each batch an independent gemm) --
+// distinct from the conv-contraction's A-shared / M-side batch.  Operands may
+// be PERMUTED views (the attention heads), so ld/trans/batch-stride are read
+// straight from the per-axis address coefficients (no canonical-layout check).
+// *_span = per-batch element span (max addressed index + 1) for buffer-size
+// validation.  Routed to a loop of cblas_sgemm by blas_try_batched_gemm.
+typedef struct {
+  u32 dtype;
+  u32 a_input, b_input;
+  u32 M, N, K, batch;
+  u32 ldA, ldB, ldC;
+  u32 transA, transB;
+  u32 batch_stride_a, batch_stride_b, batch_stride_c;
+  u32 a_span, b_span, c_span;
+} UopDagBatchedGemmShape;
+
+int uop_dag_classify_batched_gemm(Term root,
+                                  struct KernelEntry const *ke,
+                                  UopDagBatchedGemmShape *out);
+
 // Extract per-arm coefficients from a 2-D matmul-style INDEX_E
 // address built by lift_scalar_index.  The
 // address pattern for the matmul A operand under a 3-axis [M,K,N] lift
@@ -3838,6 +3859,13 @@ fn u8          fol_is_tseitin_aux(u32 label);
 // but callers pass this explicitly.
 #define ATP_RULE_NONE  0xFFFFFFFFu
 
+// Sentinel for "no successful normalize witness yet" in the per-CP
+// cp_last_norm_r_revision cookie consulted by atp_cp_set_interreduce.
+// Compared with the live r_revision (always < UINT32_MAX in practice),
+// so a fresh / mutated slot's cookie never spuriously enables the
+// fast-path skip.  See AtpState.cp_last_norm_r_revision / r_revision.
+#define ATP_CP_NORM_COOKIE_NONE 0xFFFFFFFFu
+
 // Reason labels for trace entries (used as the CTR label).
 // Each TraceEntry is a TAG_CTR with label = reason and children =
 // [NUM(parent_a), NUM(parent_b), lhs, rhs].  Parent index sentinel
@@ -4127,6 +4155,35 @@ typedef struct {
   u32   n_cps_w2_picks;  // diagnostic counter
   u32   cp_seq_next;
   u32   cp_cap;
+
+  // Per-CP "last successful normalize" cookie for atp_cp_set_interreduce.
+  // Holds the `r_revision` value at which slot i was most recently
+  // observed to be in normal form (a no-op `atp_rewrite_normalize` on
+  // both sides).  On the next IR sweep, if `r_revision ==
+  // cp_last_norm_r_revision[i]` the rule set is byte-for-byte unchanged
+  // since the witness was recorded (r_revision bumps on EVERY rule add
+  // and EVERY rule drop, so a stable counter value uniquely identifies
+  // the live rule set -- a plain `n_rules` check is insufficient because
+  // a drop+add can leave n_rules unchanged while the rule set differs).
+  // The CP is still in NF and we can skip the two `atp_rewrite_normalize`
+  // calls (the dominant per-CP cost).  Fresh slots and slots whose CP
+  // was rewritten / repacked carry `ATP_CP_NORM_COOKIE_NONE`
+  // (UINT32_MAX) -- a value never equal to a real `r_revision`, so the
+  // fast-path stays inert until a fixpoint normalize sets the cookie.
+  // Sized to cp_cap, swapped with the other parallel arrays.  Always
+  // present (zero overhead when the IR sweep is unused).
+  u32  *cp_last_norm_r_revision;
+
+  // Monotone "rule-set revision" counter.  Bumped on every rule add
+  // (orient_and_add) and every rule drop (thvm_atp_interreduce, both
+  // the LHS-rewritten branch and the RHS-rewritten branch).  Two
+  // observations of the same r_revision value witness that the rule
+  // set `(s->lhs[0..n_rules], s->rhs[0..n_rules])` is bytewise
+  // unchanged between the two observations -- the soundness contract
+  // the per-CP IR-normalize cookie depends on.  Never decreases, never
+  // wraps in any realistic completion run (a u32 takes ~4G mutations
+  // to wrap).
+  u32   r_revision;
 
   // Waldmeister history-driven Act_ultimate (NewClassification.c:314):
   // an input axiom is classified with action `ultimate`, forcing its CP

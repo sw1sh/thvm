@@ -330,6 +330,16 @@ u64 g_atp_phase_us_push_normalize = 0;
 u64 g_atp_phase_us_interreduce    = 0;
 u64 g_atp_phase_us_goal_check     = 0;
 u64 g_atp_phase_us_cp_set_ir      = 0;
+// Sub-phase breakdown of `atp_cp_set_interreduce`: unpack covers the
+// pre-normalize per-CP work (acp_unpack + orphan check + rule_subsumed
+// + bitmap probe), norm covers the two atp_rewrite_normalize calls,
+// pack covers kbo_eq + acp_pack + slot-move, post covers the trailing
+// reheapify + watermark advance.  All four sum to g_atp_phase_us_cp_set_ir
+// up to a tiny untimed residual (the for-loop overhead + heap reset).
+u64 g_atp_phase_us_cpir_unpack    = 0;
+u64 g_atp_phase_us_cpir_normalize = 0;
+u64 g_atp_phase_us_cpir_pack      = 0;
+u64 g_atp_phase_us_cpir_post      = 0;
 u64 g_atp_phase_us_total          = 0;
 u64 g_atp_unorient_step_calls     = 0;
 u64 g_atp_unorient_step_fires     = 0;
@@ -835,13 +845,16 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   u32  *nq = (u32  *)realloc(s->cp_seq,   cap * sizeof(u32));
   u32  *ng = (u32  *)realloc(s->cp_goal,  cap * sizeof(u32));
   u32  *np2 = (u32 *)realloc(s->cp_pri2,  cap * sizeof(u32));
+  u32  *nlnr = (u32 *)realloc(s->cp_last_norm_r_revision,
+                              cap * sizeof(u32));
   if (nc == NULL || nt == NULL || np == NULL || nq == NULL || ng == NULL
-      || np2 == NULL) {
+      || np2 == NULL || nlnr == NULL) {
     fprintf(stderr, "atp_ensure_cp_cap: realloc to %u CPs failed\n", cap);
     exit(1);
   }
   s->cp_packed = nc; s->cp_trace = nt;
   s->cp_pri = np; s->cp_seq = nq; s->cp_goal = ng; s->cp_pri2 = np2;
+  s->cp_last_norm_r_revision = nlnr;
   // Lazy-grow cp_ultimate only when the flag is on; engine byte-
   // identical when off (zero overhead).
   if (s->use_initial_ultimate) {
@@ -857,6 +870,10 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   for (u32 i = s->cp_cap; i < cap; i++) {
     s->cp_packed[i] = NULL;
     s->cp_trace[i]  = ATP_TRACE_NONE;
+    // Fresh slot has never been normalized -- the IR sweep's
+    // last-norm cookie fast-path stays inert until a fixpoint
+    // normalize stamps a real n_rules value here.
+    s->cp_last_norm_r_revision[i] = ATP_CP_NORM_COOKIE_NONE;
   }
 #ifdef THVM_ATPFT_CPQ
   // Stage 7: grow the parallel AtpFt queue alongside the legacy one.
@@ -4248,6 +4265,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_seq);
   free(s->cp_pri2);
   free(s->cp_ultimate);
+  free(s->cp_last_norm_r_revision);
   // Auto-MaxWeight overflow stash: each packed byte string is owned
   // here too (free(NULL) is a no-op for slots already drained).
   if (s->cp_stash_packed != NULL) {
@@ -4663,6 +4681,10 @@ fn AtpAddedRange thvm_atp_install_oriented_rule(AtpState *s, Term lhs,
   if (!s->r_orient[i]) {
     s->r_orient[i] = 1u;
     if (s->n_unorient > 0u) s->n_unorient--;
+    // r_orient flip changes the rewrite system: a rule previously
+    // applied two-faces now applies only its lhs face.  Bump the
+    // revision the IR cookie keys on.
+    s->r_revision++;
   }
   r.first = idx;
   r.count = 1;
@@ -6701,6 +6723,11 @@ static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
   u32  tq = s->cp_seq[i];   s->cp_seq[i]   = s->cp_seq[j];   s->cp_seq[j]   = tq;
   u32  tg = s->cp_goal[i];  s->cp_goal[i]  = s->cp_goal[j];  s->cp_goal[j]  = tg;
   u32  t2 = s->cp_pri2[i];  s->cp_pri2[i]  = s->cp_pri2[j];  s->cp_pri2[j]  = t2;
+  // The IR-normalize cookie is per-CP, not per-slot: a sift moves the
+  // CP wholesale, so its NF-witness travels with it.
+  u32  tn = s->cp_last_norm_r_revision[i];
+  s->cp_last_norm_r_revision[i] = s->cp_last_norm_r_revision[j];
+  s->cp_last_norm_r_revision[j] = tn;
   if (s->cp_ultimate != NULL) {
     u8 tu = s->cp_ultimate[i];
     s->cp_ultimate[i] = s->cp_ultimate[j];
@@ -6749,6 +6776,9 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   u32 i = s->n_cps;
   s->cp_packed[i]= packed;
   s->cp_trace[i] = trace;
+  // Fresh CP: no IR-side normalize witness yet -- force the IR sweep to
+  // normalize this CP at least once before the cookie can short-circuit.
+  s->cp_last_norm_r_revision[i] = ATP_CP_NORM_COOKIE_NONE;
   s->cp_pri[i]   = atp_cp_priority_sized(s, lhs, rhs, cp_nodes);
   if (s->cp_ultimate != NULL) {
     s->cp_ultimate[i] = is_ultimate;
@@ -7059,6 +7089,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
       s->cp_seq[i]   = s->cp_seq[last];
       s->cp_goal[i]  = s->cp_goal[last];
       s->cp_pri2[i]  = s->cp_pri2[last];
+      s->cp_last_norm_r_revision[i] = s->cp_last_norm_r_revision[last];
       if (s->cp_ultimate != NULL) s->cp_ultimate[i] = s->cp_ultimate[last];
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_move(s, /*dst=*/i, /*src=*/last);
@@ -7229,6 +7260,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_seq[j]   = s->cp_seq[last];
     s->cp_goal[j]  = s->cp_goal[last];
     s->cp_pri2[j]  = s->cp_pri2[last];
+    s->cp_last_norm_r_revision[j] = s->cp_last_norm_r_revision[last];
     if (s->cp_ultimate != NULL) s->cp_ultimate[j] = s->cp_ultimate[last];
 #ifdef THVM_ATPFT_CPQ
     // Move the (still-owned) FT entry from the last slot into j; zero
@@ -7551,6 +7583,9 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   s->r_orient[s->n_rules] = (u8)(atp_compare(s, lhs, rhs) == KBO_GT);
   if (!s->r_orient[s->n_rules]) s->n_unorient++;
   s->n_rules++;
+  // Rule-set mutated -- bump the monotone revision the IR-normalize
+  // cookie keys on (see AtpState.cp_last_norm_r_revision).
+  s->r_revision++;
   // Env-gated derivation trace.  Prints each rule at orientation time
   // in derivation order, mirroring Waldmeister's `-a 4` "... added as
   // new rule N:" output.
@@ -7583,6 +7618,9 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
         s->lhs[i] = dead_sentinel;
         s->rhs[i] = dead_sentinel;
         s->r_dead[i] = 1;
+        // Soft-deleted rule -- the active R changed, so the IR-normalize
+        // cookie keyed on r_revision must invalidate.
+        s->r_revision++;
         s->n_rules_bwd_subsumed++;
 #ifdef THVM_ATPFT_RULES
         // Stage 4: mirror the slot-save on the AtpFt side.  The dead
@@ -10093,6 +10131,8 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
       s->cp_pri[w]    = s->cp_pri[i];
       s->cp_seq[w]    = s->cp_seq[i];
       s->cp_goal[w]   = s->cp_goal[i];
+      // The NF-witness cookie travels with the CP (per-CP, not per-slot).
+      s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
       if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
     }
     w++;
@@ -10142,6 +10182,35 @@ static void atp_cp_set_interreduce(AtpState *s) {
   const u32 NORM_CAP = 64u;
   u32 w = 0u;
   int touched = 0;
+  // Sub-phase timer accumulators -- flushed to the four
+  // g_atp_phase_us_cpir_* globals at the end of the function.  Cheap when
+  // g_atp_phase_enabled is off (the `atp_phase_now` call is a single
+  // load+branch; the `atp_now_us` syscall sits behind it).
+  u64 acc_unpack = 0, acc_norm = 0, acc_pack = 0, acc_post = 0;
+  // Snapshot the rule-set revision for the per-CP NF-witness cookie
+  // fast-path.  The sweep itself never mutates r_revision (rule
+  // add/drop only happens via orient_and_add / thvm_atp_interreduce,
+  // between sweeps), so the snapshot is constant inside the loop and
+  // uniquely identifies the active rewrite system this pass observes.
+  // n_rules alone is INSUFFICIENT: an interreduce that drops K rules
+  // and adds K back leaves n_rules unchanged but the rule set
+  // different.  r_revision bumps on every rule mutation, so two
+  // matching observations witness a byte-identical rule set.  When a
+  // CP's cp_last_norm_r_revision[i] matches, the CP is still in NF
+  // under R and we skip both atp_rewrite_normalize calls plus the
+  // kbo_eq / acp_pack work behind them -- the dominant cp-set-ir cost.
+  //
+  // Currently dormant in the AndAssoc-class workloads the lever
+  // targeted: the IR sweep is gated on `n_rules % period == 0u`, so
+  // by construction at least one rule has been added between any two
+  // consecutive sweeps, and r_revision has advanced -- the cookie
+  // never matches a fresh entry, and any survivors from prior sweeps
+  // carry stale cookies.  Kept in place as cheap infrastructure for a
+  // future top-symbol-keyed partial invalidation (only flush cookies
+  // whose CP can be reached by newly-added rules' LHS top symbols --
+  // analogous to the existing incremental-IR bitmap skip but
+  // CP-side instead of sweep-side).
+  const u32 r_rev_snap = s->r_revision;
 
   // Incremental IR fast-path: rebuild the "new rule top symbols" bitmap
   // from rules added since the last IR pass.  A CP whose subterm bitmap
@@ -10166,6 +10235,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
     s->ir_new_rule_top_syms = new_top_syms;
   }
   for (u32 i = 0; i < s->n_cps; i++) {
+    u64 _cpir_unpack_t0 = atp_phase_now();
     // Eager Waisenmord (WM AP_generic head): a CP whose parent rule has
     // been retired is redundant under the surviving R, so we can drop it
     // without paying the per-CP normalize.  Mirrors the lazy orphan check
@@ -10178,6 +10248,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       free(s->cp_packed[i]);
       s->cp_packed[i] = NULL;
       touched = 1;
+      if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
       continue;
     }
     // Per-CP heap checkpoint: the normalize allocates scratch cells; the
@@ -10203,6 +10274,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->cp_packed[i] = NULL;
       touched = 1;
       thvm_atp_heap_reset(hcp);
+      if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
       continue;
     }
     // Incremental IR fast-path: skip normalize if no new rule (since
@@ -10222,15 +10294,48 @@ static void atp_cp_set_interreduce(AtpState *s) {
           s->cp_packed[i] = NULL;
         }
         s->cp_trace[w] = s->cp_trace[i];
+        s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
         if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
         w++;
         s->n_cp_set_ir_skipped++;
         thvm_atp_heap_reset(hcp);
+        if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
         continue;
       }
     }
+    // NF-witness cookie fast-path: if this CP was last observed in NF
+    // under EXACTLY the current rule set, both atp_rewrite_normalize
+    // calls would return bitwise-identical ol / orr (`atp_rewrite_
+    // normalize` is a pure function of subject + rule set + step_cap),
+    // so kbo_eq(l, r) would not fire, the slot-move path runs unchanged,
+    // and the cookie is still valid -- skip the normalize entirely.
+    // Conservative: cookie is set only on a no-rewrite witness in the
+    // slow path below, so a step_cap-truncated NF (where the second
+    // pass might rewrite further) NEVER gets cached.  Soundness follows
+    // from `atp_rewrite_normalize`'s purity in (subject, R, step_cap):
+    // identical inputs return bytewise-identical outputs.
+    if (s->cp_last_norm_r_revision[i] == r_rev_snap) {
+      if (w != i) {
+        s->cp_packed[w] = s->cp_packed[i];
+        s->cp_packed[i] = NULL;
+      }
+      s->cp_trace[w] = s->cp_trace[i];
+      s->cp_last_norm_r_revision[w] = r_rev_snap;
+      if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
+      w++;
+      s->n_cp_set_ir_skipped++;
+      thvm_atp_heap_reset(hcp);
+      if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
+      continue;
+    }
+    if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
+
+    u64 _cpir_norm_t0 = atp_phase_now();
     Term l = atp_rewrite_normalize(s, ol,  s->lhs, s->rhs, s->n_rules, NORM_CAP);
     Term r = atp_rewrite_normalize(s, orr, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    if (g_atp_phase_enabled) acc_norm += atp_now_us() - _cpir_norm_t0;
+
+    u64 _cpir_pack_t0 = atp_phase_now();
     if (kbo_eq(l, r)) {
       // Joinable under R -- the CP adds no equational consequence.  Drop
       // it (WM AP_generic returns WTI_Delete).
@@ -10240,8 +10345,16 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->cp_packed[i] = NULL;
       touched = 1;
       thvm_atp_heap_reset(hcp);
+      if (g_atp_phase_enabled) acc_pack += atp_now_us() - _cpir_pack_t0;
       continue;
     }
+    // Capture the NF-witness status BEFORE the slot move overwrites
+    // cp_last_norm_r_revision[w].  A no-rewrite outcome (l == ol && r == orr)
+    // is a sound fixpoint witness for the current rule set: the next IR
+    // sweep can skip this CP if n_rules has not changed.  A rewrite
+    // outcome invalidates the cookie -- the new packed bytes have not
+    // been confirmed in NF.
+    u8 nf_witness = (l == ol && r == orr) ? 1u : 0u;
     if (l != ol || r != orr) {
       free(s->cp_packed[i]);
       s->cp_packed[i] = NULL;
@@ -10253,6 +10366,8 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->cp_packed[i] = NULL;
     }
     s->cp_trace[w] = s->cp_trace[i];
+    s->cp_last_norm_r_revision[w] = nf_witness ? r_rev_snap
+                                            : ATP_CP_NORM_COOKIE_NONE;
     // Preserve Act_ultimate across the WM AP_generic reweight: an
     // axiom whose normalized form is still non-trivial must keep its
     // front-rank (WM's `C_ReClassify` short-circuits on the original
@@ -10262,7 +10377,9 @@ static void atp_cp_set_interreduce(AtpState *s) {
     if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
     w++;
     thvm_atp_heap_reset(hcp);
+    if (g_atp_phase_enabled) acc_pack += atp_now_us() - _cpir_pack_t0;
   }
+  u64 _cpir_post_t0 = atp_phase_now();
   s->n_cps = w;
   if (touched) {
     s->n_cp_set_ir_passes++;
@@ -10271,6 +10388,13 @@ static void atp_cp_set_interreduce(AtpState *s) {
   // Advance the incremental-IR watermark to the current rule count so
   // the next pass only checks rules added since this one.
   if (s->use_incr_ir) s->ir_rule_watermark = s->n_rules;
+  if (g_atp_phase_enabled) {
+    acc_post += atp_now_us() - _cpir_post_t0;
+    g_atp_phase_us_cpir_unpack    += acc_unpack;
+    g_atp_phase_us_cpir_normalize += acc_norm;
+    g_atp_phase_us_cpir_pack      += acc_pack;
+    g_atp_phase_us_cpir_post      += acc_post;
+  }
 }
 
 fn void thvm_atp_set_use_incr_ir(AtpState *s, u8 on) {
@@ -10372,6 +10496,10 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 #endif
       }
       s->n_rules--;
+      // Bump the rule-set revision counter -- a drop+add cycle can
+      // leave n_rules unchanged, so r_revision is what the IR-normalize
+      // cookie keys on (see AtpState.cp_last_norm_r_revision).
+      s->r_revision++;
 #ifdef ATP_RULE_INDEX
       // 7e lever 2: a rule was dropped and the array compacted -- the
       // rule-LHS index's index->LHS mapping is stale even if a later
@@ -10533,6 +10661,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 #endif
         }
         s->n_rules--;
+        s->r_revision++;   // rule-set mutated (see r_revision header)
 #ifdef ATP_RULE_INDEX
         s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
 #endif
@@ -10570,6 +10699,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 #endif
         }
         s->n_rules--;
+        s->r_revision++;   // rule-set mutated (see r_revision header)
 #ifdef ATP_RULE_INDEX
         s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
 #endif
