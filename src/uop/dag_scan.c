@@ -925,6 +925,100 @@ int uop_dag_classify_gemv_shape(Term root,
   return 1;
 }
 
+// === DAG-side VECMAT-shape extractor ==================================
+//
+// out{1,N} = a{1,K} @ B{K,N}.  The single-token-decode projection and
+// the LM-head matvec produce this: the leading M==1 row is elided by
+// the lift, so the A operand's address collapses to a bare RANGE(k)
+// (1 range) while B keeps an IADD(k,n) (2 ranges).  The matmul
+// classifier (which needs 2 ranges per operand) declines, and the gemv
+// emit can't express a {K,N}-matrix orientation -- so this is routed to
+// a cblas_sgemm with M=1, which cblas handles natively.
+//
+// Structurally identical to GEMV (one 2-range matrix operand + one
+// 1-range bare-k vector operand) but with a {1,N} 2-D output instead of
+// a {M} 1-D output, and the matrix's NON-reduce axis is the output N
+// axis (vs GEMV where the matrix's non-reduce axis is the output M).
+int uop_dag_classify_vecmat_shape(Term root,
+                                  struct KernelEntry const *ke,
+                                  UopDagVecmatShape *out) {
+  if (root == 0 || ke == NULL || out == NULL) return 0;
+  if (ke->n_inputs < 2) return 0;
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
+
+  // Output buffer must be rank-2 {1, N} -- the elided unit leading row.
+  Term buf_out = heap_read(term_val(root) + 0);
+  if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) return 0;
+  if (uop_buffer_ndim(buf_out) != 2) return 0;
+  if (uop_buffer_dim(buf_out, 0) != 1) return 0;
+  u32 N = uop_buffer_dim(buf_out, 1);
+  if (N == 0) return 0;
+
+  // Structural shape: matrix (2 ranges m/k... here k/n) * vector (1
+  // bare-k range), single reduce axis.  Reuse the GEMV recogniser; it
+  // picks the 2-range operand as "W" (our matrix B) and the 1-range
+  // bare-k operand as "x" (our vector a).
+  u32 k_extent = 0;
+  int b_first  = 0;
+  if (!uop_classify_gemv(root, &k_extent, &b_first)) return 0;
+  if (k_extent == 0 || k_extent == 1) return 0;
+
+  // Reach into the STORE for the MUL operands.  (b = matrix, a = vector.)
+  Term reduce = heap_read(term_val(root) + 2);
+  Term mul    = heap_read(term_val(reduce) + 0);
+  Term mul_a  = heap_read(term_val(mul) + 0);
+  Term mul_b  = heap_read(term_val(mul) + 1);
+  Term b_idx  = b_first ? mul_a : mul_b;
+  Term a_idx  = b_first ? mul_b : mul_a;
+
+  Term buf_b = heap_read(term_val(b_idx) + 0);
+  Term buf_a = heap_read(term_val(a_idx) + 0);
+  if (term_tag(buf_b) != TAG_UOP || term_ext(buf_b) != UOP_BUFFER) return 0;
+  if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) return 0;
+  u32 inst_b = uop_buffer_inst_get(buf_b);
+  u32 inst_a = uop_buffer_inst_get(buf_a);
+  if (inst_b == 0 || inst_a == 0) return 0;
+  u32 b_input = inst_b - 1;
+  u32 a_input = inst_a - 1;
+  if (b_input >= ke->n_inputs || a_input >= ke->n_inputs) return 0;
+  if (b_input == a_input) return 0;
+
+  // Uniform dtype check.
+  u32 dt = uop_buffer_dtype(buf_out);
+  if (dt != DT_FP32 && dt != DT_FP64) return 0;
+  if (uop_buffer_dtype(buf_b) != dt) return 0;
+  if (uop_buffer_dtype(buf_a) != dt) return 0;
+
+  // a's address is bare RANGE(k) -- the contiguous {1,K} vector, so its
+  // k-stride is 1 (ldA = K, transA = 0 at the cblas_sgemm M=1 call).
+  Term addr_a = heap_read(term_val(a_idx) + 1);
+  Term addr_b = heap_read(term_val(b_idx) + 1);
+  if (term_tag(addr_a) != TAG_UOP || term_ext(addr_a) != UOP_RANGE) return 0;
+  u32 red_axis_id = uop_range_axis_id(addr_a);
+
+  // B's address is IADD(k-arm, n-arm).  Row-major {K,N}: k-stride N
+  // (= ldB), n-stride 1 (transB = 0).  Transposed {N,K}: n-stride K
+  // (= ldB), k-stride 1 (transB = 1).
+  u32 b_red_coeff = 0, b_other_coeff = 0, n_axis = 0;
+  if (!uop_dag_extract_matmul_strides_from_addr(
+          addr_b, red_axis_id, &b_red_coeff, &b_other_coeff, &n_axis)) {
+    return 0;
+  }
+  u32 ldB    = (b_red_coeff > b_other_coeff) ? b_red_coeff : b_other_coeff;
+  u32 transB = (b_other_coeff != 1) ? 1u : 0u;
+  if (transB) { if (ldB != k_extent) return 0; }
+  else        { if (ldB != N)        return 0; }
+
+  out->dtype   = dt;
+  out->N       = N;
+  out->K       = k_extent;
+  out->a_input = a_input;
+  out->b_input = b_input;
+  out->ldB     = ldB;
+  out->flags   = transB;
+  return 1;
+}
+
 // === DAG-side structural gate for conv2d-flat =========================
 //
 // `tile_analyze_conv2d_flat` (src/schedule/tile.c) reads the conv shape

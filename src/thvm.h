@@ -2635,6 +2635,24 @@ typedef struct {
   u32 flags;     // bit 0 = transposed W (storage strides {1, M})
 } UopDagGemvShape;
 
+// Vector-times-matrix: out{1,N} = a{1,K} @ B{K,N}.  The M==1 leading
+// unit row is elided by the lift, so the A operand's address collapses
+// to a bare RANGE(k) (1 range) and the matmul classifier (which needs
+// 2 ranges per operand) declines, while the gemv emit can't express the
+// {K,N}-matrix orientation.  This shape routes to a cblas_sgemm with
+// M=1 (which cblas handles natively) -- the single-token-decode
+// projection / LM-head matvec path.  Recovers (dtype, N, K, a_input,
+// b_input, ldB, transB).
+typedef struct {
+  u32 dtype;
+  u32 N;
+  u32 K;
+  u32 a_input;   // the {1,K} vector (contraction operand)
+  u32 b_input;   // the {K,N} matrix
+  u32 ldB;
+  u32 flags;     // bit 0 = transposed B (storage strides {1, K})
+} UopDagVecmatShape;
+
 int uop_dag_classify_dot_shape (Term root,
                                 struct KernelEntry const *ke,
                                 UopDagDotShape *out);
@@ -2642,6 +2660,10 @@ int uop_dag_classify_dot_shape (Term root,
 int uop_dag_classify_gemv_shape(Term root,
                                 struct KernelEntry const *ke,
                                 UopDagGemvShape *out);
+
+int uop_dag_classify_vecmat_shape(Term root,
+                                  struct KernelEntry const *ke,
+                                  UopDagVecmatShape *out);
 
 // DAG-side structural gate for conv2d_flat kernels.  Checks that
 // cached_lift.store_root's STORE.value is a UOP_REDUCE with

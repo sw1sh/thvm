@@ -239,6 +239,47 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   return 1;
 }
 
+// DAG-side VECMAT dispatcher: out{1,N} = a{1,K} @ B{K,N}, the M==1
+// single-token-decode projection / LM-head matvec.  The matmul
+// classifier declines this (the unit M row elides A's m-arm so A has
+// only 1 range), and the gemv emit can't express the {K,N}-matrix
+// orientation -- so it's emitted as a cblas_sgemm with M=1, which cblas
+// handles natively.  Without this it runs as the slow scalar walk
+// (the LM-head [1,50257] matvec is ~40 ms scalar vs ~ms on cblas).
+static int blas_try_vecmat(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (ke->cached_lift.store_root == 0) return 0;
+  UopDagVecmatShape vm;
+  if (!uop_dag_classify_vecmat_shape(ke->cached_lift.store_root, ke, &vm)) {
+    return 0;
+  }
+  // Resolve symbolic (kvar) dims to their per-dispatch bound (identity
+  // for the literal N/K of the decode matvecs).
+  u32 N   = kvar_extent_runtime(vm.N);
+  u32 K   = kvar_extent_runtime(vm.K);
+  u32 ldB = kvar_extent_runtime(vm.ldB);
+  if (N <= 1 || K == 0) return 0;
+  u32 a_buf = in_buf_ids[vm.a_input];
+  u32 b_buf = in_buf_ids[vm.b_input];
+  if (a_buf == 0 || b_buf == 0) return 0;
+  u32 elem_bytes = (vm.dtype == DT_FP32) ? sizeof(float) : sizeof(double);
+  u32 a_elems = (u32)(CPU_BUFS[a_buf].nbytes / elem_bytes);
+  u32 b_elems = (u32)(CPU_BUFS[b_buf].nbytes / elem_bytes);
+  if (a_elems < K) return 0;
+  if (b_elems < K * N) return 0;
+  // ldC: the output {1,N} row stride (only one row is written, so its
+  // value is moot beyond >= N, but mirror the gemm path for symbolic-N
+  // buffers sized at the kvar upper bound).
+  u32 ldC = (u32) TENS[ke->output_tid].view.strides[0];
+  if (ldC < N) ldC = N;
+  // cblas_sgemm(M=1, N, K): A{1,K} contiguous (ldA=K, transA=0), B per
+  // the recovered ldB / transB, C{1,N} (ldC).
+  blas_emit_gemm(vm.dtype, 1, N, K, K, ldB, ldC,
+                 0u, vm.flags & 1u,
+                 a_buf, b_buf, out_buf_id);
+  BLAS_GEMM_DISPATCH_DAG++;
+  return 1;
+}
+
 // TRUE batched gemm: A{batch,M,K} . B{batch,K,N} -> C{batch,M,N} as a loop of
 // cblas_sgemm (one per batch).  The batched multi-head attention's mhaBmm is
 // the instance -- it would otherwise fall to the slow codegen reduce (the
@@ -507,6 +548,10 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (blas_try_dot (ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_DOT;
   if (blas_try_gemv(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMV;
   if (blas_try_gemm(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMM;
+  // M==1 vector-times-matrix (single-token decode projections + LM
+  // head) -- declined by gemm (unit M row elides A's m-arm), routed to
+  // a cblas_sgemm M=1.  After gemm so the M>=2 path wins first.
+  if (blas_try_vecmat(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMM;
   // True batched gemm (batch axis in A AND B AND output) -- the batched
   // multi-head attention bmm.  Before the contraction try (whose batch is
   // M-side / A-shared and would decline on a batch-in-both axis anyway).
