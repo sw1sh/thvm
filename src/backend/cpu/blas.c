@@ -239,6 +239,41 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   return 1;
 }
 
+// TRUE batched gemm: A{batch,M,K} . B{batch,K,N} -> C{batch,M,N} as a loop of
+// cblas_sgemm (one per batch).  The batched multi-head attention's mhaBmm is
+// the instance -- it would otherwise fall to the slow codegen reduce (the
+// per-head loop it replaced used 12 BLAS sgemms).  Operands are permuted
+// views, so ld/trans/batch-strides come from the address coefficients.
+static int blas_try_batched_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (ke->cached_lift.store_root == 0) return 0;
+  UopDagBatchedGemmShape g;
+  if (!uop_dag_classify_batched_gemm(ke->cached_lift.store_root, ke, &g)) return 0;
+  if (g.dtype != DT_FP32) return 0;
+  if (g.N < 2 && g.M < 2) return 0;
+  u32 a_buf = in_buf_ids[g.a_input], b_buf = in_buf_ids[g.b_input];
+  if (a_buf == 0 || b_buf == 0) return 0;
+  u32 esz = sizeof(float);
+  u64 a_elems = (u64)(CPU_BUFS[a_buf].nbytes / esz);
+  u64 b_elems = (u64)(CPU_BUFS[b_buf].nbytes / esz);
+  u64 o_elems = (u64)(CPU_BUFS[out_buf_id].nbytes / esz);
+  if (a_elems < (u64)(g.batch - 1) * g.batch_stride_a + g.a_span) return 0;
+  if (b_elems < (u64)(g.batch - 1) * g.batch_stride_b + g.b_span) return 0;
+  if (o_elems < (u64)(g.batch - 1) * g.batch_stride_c + g.c_span) return 0;
+  enum CBLAS_TRANSPOSE tA = g.transA ? CblasTrans : CblasNoTrans;
+  enum CBLAS_TRANSPOSE tB = g.transB ? CblasTrans : CblasNoTrans;
+  float const *A = (float const *)CPU_BUFS[a_buf].data;
+  float const *B = (float const *)CPU_BUFS[b_buf].data;
+  float       *C = (float       *)CPU_BUFS[out_buf_id].data;
+  for (u32 bi = 0; bi < g.batch; bi++) {
+    cblas_sgemm(CblasRowMajor, tA, tB, (int)g.M, (int)g.N, (int)g.K,
+                1.0f, A + (u64)bi * g.batch_stride_a, (int)g.ldA,
+                      B + (u64)bi * g.batch_stride_b, (int)g.ldB,
+                0.0f, C + (u64)bi * g.batch_stride_c, (int)g.ldC);
+  }
+  BLAS_GEMM_DISPATCH_DAG++;
+  return 1;
+}
+
 // DAG-side generalized-contraction dispatcher.  Recognises a kernel
 // shape `out[M_axes, N_axes] = sum_{K} A[K, N_axes] * B[M_outer, K,
 // M_inner]` and routes it to a batched cblas_sgemm over M_outer (or
@@ -472,6 +507,11 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (blas_try_dot (ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_DOT;
   if (blas_try_gemv(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMV;
   if (blas_try_gemm(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMM;
+  // True batched gemm (batch axis in A AND B AND output) -- the batched
+  // multi-head attention bmm.  Before the contraction try (whose batch is
+  // M-side / A-shared and would decline on a batch-in-both axis anyway).
+  if (blas_try_batched_gemm(ke, in_buf_ids, out_buf_id))
+    return KDISPATCH_BLAS_GEMM;
   // Generalized contraction (compound M/N axes; conv-backward x-grad
   // is the canonical instance).  Routed as KDISPATCH_BLAS_GEMM so the
   // profiler aggregates it with the simple-matmul route.

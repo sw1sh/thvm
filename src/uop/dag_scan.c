@@ -2414,6 +2414,118 @@ int uop_dag_classify_contraction_shape(Term root,
   return 1;
 }
 
+// === TRUE batched gemm classifier (batch axis in A AND B AND output) =====
+// A{batch,M,K} . B{batch,K,N} -> C{batch,M,N}: each batch an independent gemm.
+// The bmm in TMultiHeadAttention's batched path is the canonical instance
+// (batch = nHeads).  Operands are PERMUTED views, so ld/trans/batch-stride are
+// recovered straight from the address coefficients -- NO canonical-layout
+// validation (which uop_dag_classify_matmul_shape applies and which would
+// reject a permuted operand).  Declines whenever anything is non-affine or
+// non-unit-inner, leaving the kernel to the (correct) codegen path.
+int uop_dag_classify_batched_gemm(Term root, struct KernelEntry const *ke,
+                                  UopDagBatchedGemmShape *out) {
+  if (root == 0 || ke == NULL || out == NULL) return 0;
+  if (ke->n_inputs < 2) return 0;
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
+  // Structural validation done INLINE -- udg_classify_matmul_store enforces
+  // exactly 2 range axes per operand (via uop_classify_matmul), which rejects
+  // the 3-axis {batch,M,K} batched operand.
+  Term reduce = udg_peel_tc_opt(heap_read(term_val(root) + 2));
+  if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
+  if (uop_reduce_kind(reduce) != REDUCE_SUM) return 0;
+  if (uop_reduce_n_axes(reduce) != 1) return 0;
+  u32 red_axis = uop_reduce_axis(reduce, 0);
+  Term mul = uop_reduce_src(reduce);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  Term a_idx = heap_read(term_val(mul) + 0);
+  Term b_idx = heap_read(term_val(mul) + 1);
+  if (term_tag(a_idx) != TAG_UOP || term_ext(a_idx) != UOP_INDEX_E) return 0;
+  if (term_tag(b_idx) != TAG_UOP || term_ext(b_idx) != UOP_INDEX_E) return 0;
+  u32 k_extent = udg_axis_extent(root, red_axis);
+  if (k_extent < 2) return 0;
+  Term buf_a   = heap_read(term_val(a_idx) + 0);
+  Term buf_b   = heap_read(term_val(b_idx) + 0);
+  Term buf_out = heap_read(term_val(root) + 0);
+  if (term_tag(buf_a)   != TAG_UOP || term_ext(buf_a)   != UOP_BUFFER) return 0;
+  if (term_tag(buf_b)   != TAG_UOP || term_ext(buf_b)   != UOP_BUFFER) return 0;
+  if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) return 0;
+  if (term_val(buf_a) == term_val(buf_b)) return 0;
+  u32 inst_a = uop_buffer_inst_get(buf_a), inst_b = uop_buffer_inst_get(buf_b);
+  if (inst_a == 0 || inst_b == 0) return 0;
+  u32 a_input = inst_a - 1, b_input = inst_b - 1;
+  if (a_input >= ke->n_inputs || b_input >= ke->n_inputs || a_input == b_input) return 0;
+
+  UdgAddrCoeffs ca = {0}, cb = {0}, co = {0};
+  udg_decode_addr_coeffs(heap_read(term_val(a_idx) + 1), &ca);
+  udg_decode_addr_coeffs(heap_read(term_val(b_idx) + 1), &cb);
+  udg_decode_addr_coeffs(heap_read(term_val(root)  + 1), &co);
+  if (!ca.ok || !cb.ok || !co.ok) return 0;
+  if (ca.offset != 0 || cb.offset != 0 || co.offset != 0) return 0;
+  // K in A and B, never in the output.
+  if (udg_addr_lookup(&ca, red_axis) == 0) return 0;
+  if (udg_addr_lookup(&cb, red_axis) == 0) return 0;
+  if (udg_addr_lookup(&co, red_axis) != 0) return 0;
+  // Output axes: in A only -> M; in B only -> N; in BOTH -> batch.  Require
+  // exactly one of each (the simple single-batch gemm).
+  u32 m_axis = 0, n_axis = 0, batch_axis = 0, n_M = 0, n_N = 0, n_batch = 0;
+  for (u32 i = 0; i < co.n_axes; i++) {
+    u32 aid = co.axis_ids[i];
+    if (aid == red_axis) return 0;
+    u32 ac = udg_addr_lookup(&ca, aid), bc = udg_addr_lookup(&cb, aid);
+    if      (ac != 0 && bc == 0) { m_axis = aid; n_M++; }
+    else if (bc != 0 && ac == 0) { n_axis = aid; n_N++; }
+    else if (ac != 0 && bc != 0) { batch_axis = aid; n_batch++; }
+    else return 0;
+  }
+  if (n_M != 1 || n_N != 1 || n_batch != 1) return 0;
+  // Every A axis must be K/M/batch; every B axis K/N/batch (full shape).
+  for (u32 i = 0; i < ca.n_axes; i++) {
+    u32 aid = ca.axis_ids[i];
+    if (aid != red_axis && aid != m_axis && aid != batch_axis) return 0;
+  }
+  for (u32 i = 0; i < cb.n_axes; i++) {
+    u32 aid = cb.axis_ids[i];
+    if (aid != red_axis && aid != n_axis && aid != batch_axis) return 0;
+  }
+  u32 a_K = udg_addr_lookup(&ca, red_axis), a_M = udg_addr_lookup(&ca, m_axis);
+  u32 b_K = udg_addr_lookup(&cb, red_axis), b_N = udg_addr_lookup(&cb, n_axis);
+  u32 c_M = udg_addr_lookup(&co, m_axis),   c_N = udg_addr_lookup(&co, n_axis);
+  if (a_K == 0 || a_M == 0 || b_K == 0 || b_N == 0 || c_M == 0 || c_N == 0) return 0;
+  // ld/trans from the unit-stride (contiguous inner) axis -- mirrors
+  // uop_dag_classify_matmul_shape's convention WITHOUT its canonical check.
+  u32 transA, ldA;
+  if      (a_K == 1) { transA = 0; ldA = a_M; }
+  else if (a_M == 1) { transA = 1; ldA = a_K; }
+  else return 0;
+  u32 transB, ldB;
+  if      (b_N == 1) { transB = 0; ldB = b_K; }
+  else if (b_K == 1) { transB = 1; ldB = b_N; }
+  else return 0;
+  if (c_N != 1) return 0;            // output must be row-contiguous {..,M,N}
+  u32 ldC = c_M;
+  u32 M = udg_axis_extent(root, m_axis);
+  u32 N = udg_axis_extent(root, n_axis);
+  u32 batch = udg_axis_extent(root, batch_axis);
+  if (M < 1 || N < 1 || batch < 2) return 0;   // batch<2 -> blas_try_gemm's job
+  u32 dt = uop_buffer_dtype(buf_out);
+  if (dt != DT_FP32) return 0;
+  if (uop_buffer_dtype(buf_a) != dt || uop_buffer_dtype(buf_b) != dt) return 0;
+
+  out->dtype   = dt;
+  out->a_input = a_input; out->b_input = b_input;
+  out->M = M; out->N = N; out->K = k_extent; out->batch = batch;
+  out->ldA = ldA; out->ldB = ldB; out->ldC = ldC;
+  out->transA = transA; out->transB = transB;
+  out->batch_stride_a = udg_addr_lookup(&ca, batch_axis);
+  out->batch_stride_b = udg_addr_lookup(&cb, batch_axis);
+  out->batch_stride_c = udg_addr_lookup(&co, batch_axis);
+  // Per-batch element span (max addressed index + 1) for buffer bounds checks.
+  out->a_span = (M - 1) * a_M + (k_extent - 1) * a_K + 1;
+  out->b_span = (k_extent - 1) * b_K + (N - 1) * b_N + 1;
+  out->c_span = (M - 1) * c_M + (N - 1) * c_N + 1;
+  return 1;
+}
+
 // === C7.2: im2col conv-bwd weight-grad contraction classifier ===========
 //
 // Recognises the conv-backward weight-grad pattern
