@@ -38,6 +38,35 @@ VerificationTest[
     TestID -> "safetensors/roundtrip/i64"
 ]
 
+(* === bf16 LOAD (the FLUX / modern-LLM weight format) ===
+   bf16 has no WL NumericArray carrier, so it is synthesised on disk (the
+   high 2 bytes of each LE f32, exact for bf16-representable values), mmap'd
+   by TSafeTensorLoad as a bf16 tensor, then cast to f32 for readback.  This
+   is the path the FLUX importer uses (bf16 weights -> TUOpCast -> compute). *)
+
+VerificationTest[
+    TInit[]; TReset[];
+    vals = {1.0, 2.0, -0.5, 0.25, 3.0, -4.0, 0.0, 8.0};   (* all exact in bf16 *)
+    bf16 = Flatten[Drop[#, 2] & /@ Partition[Normal @ ExportByteArray[N[vals], "Real32"], 4]];
+    n = Length[vals]; nb = 2 n;
+    json = "{\"t\":{\"dtype\":\"BF16\",\"shape\":[" <> ToString[n] <> "],\"data_offsets\":[0," <> ToString[nb] <> "]}}";
+    json = json <> StringRepeat[" ", Mod[-StringLength[json], 8]];
+    hbytes = ToCharacterCode[json, "UTF8"];
+    path = FileNameJoin[{$TemporaryDirectory,
+        "thvm_st_" <> ToString[$ProcessID] <> "_bf16.safetensors"}];
+    strm = OpenWrite[path, BinaryFormat -> True];
+    BinaryWrite[strm, Length[hbytes], "UnsignedInteger64", ByteOrdering -> -1];
+    BinaryWrite[strm, hbytes, "Byte"];
+    BinaryWrite[strm, bf16, "Byte"];
+    Close[strm];
+    ld = TSafeTensorLoad[path];
+    res = {TTensorDType[ld["t"]], Normal @ TRealize @ TUOpCast[ld["t"], "f32"]};
+    Quiet @ DeleteFile[path];
+    res,
+    {"bf16", {1.0, 2.0, -0.5, 0.25, 3.0, -4.0, 0.0, 8.0}},
+    TestID -> "safetensors/load/bf16-flux-weight-format"
+]
+
 (* === spec byte layout: first 8 bytes = JSON length LE; JSON parses;
        data_offsets correct === *)
 

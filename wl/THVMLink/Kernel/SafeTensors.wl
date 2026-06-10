@@ -48,9 +48,13 @@ Begin["`Private`"];
 $tensorMMapFn := $tensorMMapFn = load["thvm_wl_tensor_mmap", {"UTF8String", Integer, Integer, Integer, {Integer, 1}}, Integer]
 
 (* safetensors dtype name <-> thvm dtype string (tinygrad safe_dtypes /
-   inverse_safe_dtypes).  Only the byte-aligned dtypes the thvm runtime
-   wires through the NumericArray carrier; the nibble + narrow-float
-   dtypes are not part of the round-trip surface. *)
+   inverse_safe_dtypes).  LOAD covers the byte-aligned dtypes PLUS the
+   narrow floats f16/bf16/fp8 (mmap'd as raw bytes + a runtime dtype tag;
+   a downstream TUOpCast lifts them to f32/f16 for compute -- bf16 is the
+   FLUX / modern-LLM weight format).  SAVE stays byte-aligned only: the
+   narrow floats have no WL NumericArray carrier, so $thvmToSafe omits
+   them and TSafeTensorSave declines them ($Failed) rather than
+   malforming the file (a bitcast-to-uint save path is a follow-up). *)
 $safeToThvm = <|
     "BOOL" -> "bool",
     "I8" -> "i8",
@@ -61,11 +65,27 @@ $safeToThvm = <|
     "U32" -> "u32",
     "I64" -> "i64",
     "U64" -> "u64",
+    "F8_E4M3" -> "fp8e4m3",
+    "F8_E5M2" -> "fp8e5m2",
+    "F16" -> "f16",
+    "BF16" -> "bf16",
     "F32" -> "f32",
     "F64" -> "f64"
 |>
 
-$thvmToSafe = Association[Reverse /@ Normal[$safeToThvm]]
+(* SAVE map: the byte-aligned subset only.  The narrow floats (f16/bf16/
+   fp8) load fine via mmap (raw bytes + a runtime dtype tag, dequant/cast
+   downstream), but they have no WL NumericArray carrier, so TSafeTensorSave
+   cannot emit them without a bitcast-to-uint path -- left out so save
+   gracefully declines them ($Failed) rather than malforming the file. *)
+$thvmToSafe = <|
+    "bool" -> "BOOL",
+    "i8" -> "I8", "u8" -> "U8",
+    "i16" -> "I16", "u16" -> "U16",
+    "i32" -> "I32", "u32" -> "U32",
+    "i64" -> "I64", "u64" -> "U64",
+    "f32" -> "F32", "f64" -> "F64"
+|>
 
 (* thvm dtype string -> WL NumericArray type.  Drives the little-endian
    byte write in TSafeTensorSave. *)
