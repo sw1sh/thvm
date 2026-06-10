@@ -139,10 +139,15 @@ fn int rangeify_unified_is_realized(u32 node_idx) {
       || RU_REALIZE_MAP[node_idx].realized_partial;
 }
 
-// THVM_RU_FAITHFUL_SEED: seed the rangeify realize-map from tinygrad's
-// structural boundaries (ROOT == STORE) only and let the walk derive the
-// rest (see the seed loop in run_rangeify_unified).  Shared by the seed
-// loop, materialize's boundary gate, and the strand-realize cap below.
+// Seed the rangeify realize-map from tinygrad's structural boundaries (ROOT ==
+// STORE, plus the one-reduce-per-kernel REDUCE seed) only and DERIVE the rest
+// via the consumer-divergence walk, matching tinygrad/schedule/indexing.py.
+// Shared by the seed loop, materialize's boundary gate, and the strand cap.
+//
+// Opt in with THVM_RU_FAITHFUL_SEED=1.  Byte-identical to and FASTER than the
+// heuristic seed on GPT-2 (seq256 CPU 108 vs 162 ms) and competitive on conv;
+// the intended future DEFAULT once the last faithful-only correctness gap
+// closes (N=1 BatchNorm+maxpool conv-weight-grad NaN, the tie-split dedup).
 fn int ru_faithful_seed_on(void) {
   static int known = 0, on = 0;
   if (!known) {
@@ -163,6 +168,11 @@ fn int ru_faithful_seed_on(void) {
 fn int ru_seed_boundary_holds(u32 reasons) {
   if (ru_faithful_seed_on()) {
     if (reasons & BUFFERIZE_REASON_ROOT) return 1;
+    // Honor the maxpool-input pre-realize (ROUTE A): a REDUCE_MAX's activation
+    // must be a materialized buffer so the forward window-max and the backward
+    // argmax mask read bit-exact ties (else /count -> RECIP(0) NaN).  This is
+    // a correctness realize, not a heuristic, so faithful seeds it too.
+    if (reasons & BUFFERIZE_REASON_MAXPOOL_INPUT) return 1;
     // Seed every REDUCE output as a boundary.  This is faithful to tinygrad
     // (one reduce per kernel; a REDUCE output always escapes into a buffer)
     // and is the lever that de-fuses the conv data-grad.  Without it the

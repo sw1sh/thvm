@@ -870,3 +870,23 @@ masked-scores ADD is neither, so the walk descends past it (forward fixed); cros
 backward buffers ARE xpass-shared, so the walk terminates at them (backward preserved).
 Verified: full py suite 173/0, gpt2.wlt 8/8 FAITHFUL (seqQ=1 fixed) + default, nn 66/66,
 grad 62/62, test_cc 86463 both seeds.  This unblocks the faithful-default flip (next).
+
+### Faithful seed honors maxpool-input pre-realize; flip now 172/173 (2026-06-10)
+
+With the lifetime fix (a323d302) in, the faithful-default flip experiment is full py suite
+171/173 (the 9 cross-seed backward fails are gone).  The 2 remaining are faithful-specific
+maxpool-grad NaNs (the /count tie-split: RECIP(0) when the argmax mask count hits 0 because
+the forward window-max and the backward CMPEQ mask read fp-disagreeing recomputes of the
+activation instead of one buffer).  thvm's "maxpool-input pre-realize (ROUTE A)" realizes
+that activation, but it marked only BUFFERIZE_REASON_MULTI, which the faithful seed ignores.
+Fix: a dedicated BUFFERIZE_REASON_MAXPOOL_INPUT (thvm.h) that ru_seed_boundary_holds honors
+under faithful too (correctness realize, not a heuristic).  Clears the non-BN case
+(relu->maxpool->sum); dormant + byte-unchanged under the heuristic default (MULTI already
+realizes it).  Flip now 172/173.
+
+LAST flip blocker: test_relu_bn_maxpool_sum_bwd_n1 -- N=1 relu->BatchNorm(train)->maxpool->
+sum conv-weight grad, faithful-only NaN.  Even with the maxpool activation (the BN output)
+realized, the forward-max and backward-mask still don't share bit-exact ties -> count 0 ->
+recip(0)=inf -> NaN.  A deeper tie-split DEDUP issue specific to BN+maxpool+N=1 under faithful
+(the BN normalize/detach between relu and maxpool breaks the cross-realize dedup span).  The
+flip is HELD (faithful stays opt-in) until this closes -- will not ship a default that NaNs.

@@ -1255,8 +1255,13 @@ fn void bufferize_classify(Term root) {
               : wloc;
           if (act_loc != 0) {
             u32 aidx = bufferize_info_find(act_loc);
-            if (aidx != 0xFFFFFFFFu)
+            if (aidx != 0xFFFFFFFFu) {
+              // MULTI for the heuristic seed; MAXPOOL_INPUT so the faithful seed
+              // honors this correctness realize too (bit-exact argmax ties).
               bufferize_node_mark(&BUFFERIZE_NODES[aidx], BUFFERIZE_REASON_MULTI);
+              bufferize_node_mark(&BUFFERIZE_NODES[aidx],
+                                  BUFFERIZE_REASON_MAXPOOL_INPUT);
+            }
           }
         }
       }

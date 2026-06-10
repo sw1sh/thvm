@@ -1673,6 +1673,12 @@ fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
 #define BUFFERIZE_REASON_REDUCE      (1u << 2)
 #define BUFFERIZE_REASON_FANIN_CAP   (1u << 3)
 #define BUFFERIZE_REASON_INLINE      (1u << 4)
+// Maxpool-input pre-realize (ROUTE A): the activation a REDUCE_MAX reduces must
+// be a materialized buffer so the forward window-max and the backward argmax
+// mask (CMPEQ) read ONE buffer and ties are bit-exact (else count 0 -> RECIP(0)
+// NaN in the /count tie-split).  This is a CORRECTNESS realize, so the faithful
+// seed honors it too (not just the heuristic MULTI seed).
+#define BUFFERIZE_REASON_MAXPOOL_INPUT (1u << 5)
 #define BUFFERIZE_REASON_MATMUL      (1u << 6)
 typedef struct {
   u64 loc;             // heap loc of the underlying UOp value
