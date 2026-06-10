@@ -856,3 +856,17 @@ backward correctness for both seeds.  The proper fix needs a reliable "is this n
 MATERIALIZED (gets a buffer) vs INLINED" predicate (the materialize gate's actual output,
 incl. legacy allocations -- BOUNDARY_ORDER alone is incomplete) so the walk descends past
 inlined nodes only.  That is the prerequisite to faithful-default; deferred.
+
+### RE-LANDED correctly (2026-06-10): boundary lifetime = materialized-OR-cross-pass-shared
+
+The reverted 44b12e86 had the right INTENT (descend the arena lifetime walk past an inlined
+node to bump the real boundary behind it -- fixes the faithful seqQ=1 attention forward) but
+the wrong PREDICATE: it terminated at `boundary_index_for_loc` ALONE, which drops cross-pass-
+shared buffers (produced in one `thvm_realize` pass, read in another -- the per-pass arena
+can't see their full lifetime), corrupting softmax/layernorm/attention BACKWARD parity (12
+py tests, both seeds).  The fix: terminate at a node iff it is classify-realized AND
+(a this-pass boundary OR `xpass_is_shared`) -- i.e. actually MATERIALIZED.  The inlined
+masked-scores ADD is neither, so the walk descends past it (forward fixed); cross-pass-shared
+backward buffers ARE xpass-shared, so the walk terminates at them (backward preserved).
+Verified: full py suite 173/0, gpt2.wlt 8/8 FAITHFUL (seqQ=1 fixed) + default, nn 66/66,
+grad 62/62, test_cc 86463 both seeds.  This unblocks the faithful-default flip (next).

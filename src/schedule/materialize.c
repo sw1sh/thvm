@@ -1534,6 +1534,7 @@ static void boundary_compute_last_use(void) {
 // boundary B reached, bump BOUNDARY_LAST_USE_POS[B] to `visiting_pos`
 // (the consuming parent's BOUNDARY_ORDER index).  Same descent shape;
 // only the recorded quantity differs (fire-order position, not depth).
+static u32 boundary_index_for_loc(u64 loc);
 static void boundary_last_use_pos_descend(u64 from_loc, u32 visiting_pos,
                                           u8 *visited) {
   if (from_loc >= HEAP_NEXT) return;
@@ -1541,7 +1542,22 @@ static void boundary_last_use_pos_descend(u64 from_loc, u32 visiting_pos,
   visited[from_loc] = 1;
   u32 idx = bufferize_info_find(from_loc);
   if (idx == 0xFFFFFFFFu) return;
-  if (BUFFERIZE_NODES[idx].realized) {
+  // Terminate the lifetime walk only at a node that is ACTUALLY MATERIALIZED
+  // as a buffer -- a this-pass arena boundary (boundary_index_for_loc), OR a
+  // cross-pass-shared buffer (xpass_is_shared: produced in one realize pass,
+  // read in another, so per-pass arena planning can't see its full lifetime).
+  // A classify-realized node the rangeify walk FUSED away (the seqQ=1 masked-
+  // scores ADD, inlined into both the softmax-denom reduce and the @V kernel)
+  // is neither -- so we descend PAST it to bump the real boundary behind it
+  // (the QK^T scores reduce); inlining it would otherwise leave that boundary's
+  // last-use unbumped and the arena would recycle its slot onto the @V output.
+  // (Using the bufferize CLASSIFY flag alone over-terminates -- it stops at the
+  // inlined ADD, the seqQ=1 forward bug; using boundary_index_for_loc alone
+  // UNDER-terminates -- it drops cross-pass-shared buffers, corrupting
+  // softmax/layernorm/attention BACKWARD parity across the multi-pass realize.)
+  if (BUFFERIZE_NODES[idx].realized
+      && (boundary_index_for_loc(from_loc) != 0xFFFFFFFFu
+          || xpass_is_shared(from_loc))) {
     if (visiting_pos > BOUNDARY_LAST_USE_POS[idx]) {
       BOUNDARY_LAST_USE_POS[idx] = visiting_pos;
     }
