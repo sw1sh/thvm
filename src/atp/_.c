@@ -2037,6 +2037,17 @@ struct AtpRuleIndex {
   u32           n_recs, cap_recs;
   u32           root;
   u32           n_rules_built;  // R size the tree currently reflects
+  // s->r_revision at build time.  n_rules alone cannot detect a
+  // drop+add cycle that leaves the count unchanged while interreduce
+  // compaction renumbers the surviving slots -- a leaf rec's `rule`
+  // index then names the WRONG live rule and the retrieval silently
+  // loses critical pairs (the GroupAxioms/InverseOfComposite +1-lemma
+  // divergence vs Waldmeister).  A build is current iff BOTH n_rules
+  // and r_revision match; it is extendable (pure append) iff the
+  // revision delta equals the rule-count delta, since every push bumps
+  // r_revision exactly once and every drop / soft-delete / orient-flip
+  // bumps it without growing n_rules.
+  u32           built_revision;
   // Retrieval instrumentation (cheap counters, always compiled).  The
   // decisive Sheffer measurement: q_candidates / q_queries is the
   // candidates-returned-per-query -- if it tracks n_rules the tree does
@@ -3934,12 +3945,18 @@ static void atp_cp_index_descend(u32 node, u32 pos, u32 qend) {
 // (like rule_index) whenever R mutates.
 static void atp_cp_index_rebuild(AtpState *s) {
   AtpRuleIndex *ix = s->cp_index;
-  // Incremental fast-path: when only new rules were appended (no kill,
-  // no rule_index_dirty), insert only the tail.  Same soundness logic
-  // as atp_ri_extend on rule_index: existing leaves carry correct
-  // indices.  Cuts O(R) rebuild to O(rules-added) per cp-gen call.
+  // Incremental fast-path: when only new rules were appended, insert
+  // only the tail.  Same soundness logic as atp_ri_extend on
+  // rule_index: existing leaves carry correct indices.  Cuts O(R)
+  // rebuild to O(rules-added) per cp-gen call.  Pure-append is
+  // detected by the revision delta matching the count delta (see the
+  // built_revision field comment); the shared rule_index_dirty flag is
+  // NOT a usable signal here -- the rewrite-index rebuild clears it
+  // between interreduce and CP generation.
   if (ix->n_rules_built > 0u && ix->n_rules_built < s->n_rules
-      && ix->root != ATP_DTREE_NIL && !s->rule_index_dirty) {
+      && ix->root != ATP_DTREE_NIL
+      && s->r_revision - ix->built_revision
+             == s->n_rules - ix->n_rules_built) {
     AtpDTreeVarMap vm;
     for (u32 i = ix->n_rules_built; i < s->n_rules; i++) {
       atp_dtree_varmap_reset(&vm);
@@ -3949,7 +3966,8 @@ static void atp_cp_index_rebuild(AtpState *s) {
       ix->recs[rec].next    = ix->nodes[node].rec_head;
       ix->nodes[node].rec_head = rec;
     }
-    ix->n_rules_built = s->n_rules;
+    ix->n_rules_built  = s->n_rules;
+    ix->built_revision = s->r_revision;
     if (g_atp_cp_seencap < s->n_rules) {
       u32 cap = g_atp_cp_seencap ? g_atp_cp_seencap : 1024u;
       while (cap < s->n_rules) cap *= 2u;
@@ -3973,7 +3991,8 @@ static void atp_cp_index_rebuild(AtpState *s) {
     ix->recs[rec].next    = ix->nodes[node].rec_head;
     ix->nodes[node].rec_head = rec;
   }
-  ix->n_rules_built = s->n_rules;
+  ix->n_rules_built  = s->n_rules;
+  ix->built_revision = s->r_revision;
   if (g_atp_cp_seencap < s->n_rules) {
     u32 cap = g_atp_cp_seencap ? g_atp_cp_seencap : 1024u;
     while (cap < s->n_rules) cap *= 2u;
@@ -4045,17 +4064,20 @@ static void atp_cp_subindex_insert(AtpRuleIndex *ix, Term t, u32 rule,
 // Build cp_subindex: every non-var subterm of every rule LHS -> rule.
 static void atp_cp_subindex_rebuild(AtpState *s) {
   AtpRuleIndex *ix = s->cp_subindex;
-  // Incremental fast-path: same shape as atp_cp_index_rebuild.  Inserts
-  // only [n_rules_built, n_rules) when no kill/dirty event has shrunk
-  // the rule set since last build.
+  // Incremental fast-path: same shape as atp_cp_index_rebuild,
+  // including the revision-delta pure-append discriminator (see the
+  // built_revision field comment).
   if (ix->n_rules_built > 0u && ix->n_rules_built < s->n_rules
-      && ix->root != ATP_DTREE_NIL && !s->rule_index_dirty) {
+      && ix->root != ATP_DTREE_NIL
+      && s->r_revision - ix->built_revision
+             == s->n_rules - ix->n_rules_built) {
     AtpDTreeVarMap vm;
     for (u32 i = ix->n_rules_built; i < s->n_rules; i++) {
       atp_dtree_varmap_reset(&vm);
       atp_cp_subindex_insert(ix, s->lhs[i], i, &vm);
     }
-    ix->n_rules_built = s->n_rules;
+    ix->n_rules_built  = s->n_rules;
+    ix->built_revision = s->r_revision;
     return;
   }
   ix->n_nodes = 0;
@@ -4066,7 +4088,8 @@ static void atp_cp_subindex_rebuild(AtpState *s) {
     atp_dtree_varmap_reset(&vm);
     atp_cp_subindex_insert(ix, s->lhs[i], i, &vm);
   }
-  ix->n_rules_built = s->n_rules;
+  ix->n_rules_built  = s->n_rules;
+  ix->built_revision = s->r_revision;
 }
 
 // Collect candidate partner rules for the (old i x new j) direction:
@@ -11258,6 +11281,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             s->rhs[i]     = r_reduced;
             s->r_trace[i] = new_t;
             s->n_right_reduced++;
+            if (atp_rule_trace_on()) {
+              char la[2048], ra[2048];
+              atp_pretty_term(old_lhs, la, sizeof la);
+              atp_pretty_term(r_reduced, ra, sizeof ra);
+              fprintf(stderr, "  COMPOSE rule (slot %u): %s -> %s\n",
+                      i, la, ra);
+            }
 #ifdef THVM_ATPFT_RULES
             // Stage 4: the in-place RHS edit replaces the Term; the
             // AtpFt mirror must re-convert (the old AtpFt RHS cells
@@ -13357,7 +13387,12 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   if (s->use_cp_index) {
     if (s->cp_index == NULL)    s->cp_index    = atp_ri_new();
     if (s->cp_subindex == NULL) s->cp_subindex = atp_ri_new();
-    if (s->cp_index->n_rules_built != n) {
+    // Stale iff EITHER the rule count or the rule-set revision moved:
+    // an interreduce drop+add cycle keeps n_rules constant while the
+    // compaction renumbers slots, so an n_rules-only check leaves leaf
+    // recs naming the wrong live rules and silently loses CPs.
+    if (s->cp_index->n_rules_built != n ||
+        s->cp_index->built_revision != s->r_revision) {
       atp_cp_index_rebuild(s);          // grows g_atp_cp_seen to cover n
       atp_cp_subindex_rebuild(s);
     }

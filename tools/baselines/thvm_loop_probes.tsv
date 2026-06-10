@@ -30,7 +30,7 @@ BooleanAxioms	AbsorptionOrAnd	28	-	43	35	OK.  chain=28 vs WM_rules=43.
 BooleanAxioms	ImpliesHuntingtonAxioms__c1	1	-	4	8	OK.  chain=1 vs WM_rules=4 -- same AndComm-style 1-step proof shape.
 BooleanAxioms	ImpliesHuntingtonAxioms__c2	138	-	136	145	OK.  chain=138 vs WM_rules=136 -- close to parity, slightly longer.
 BooleanAxioms	ImpliesHuntingtonAxioms__c3	103	-	189	110	OK.  chain=103 vs WM_rules=189 -- thvm noticeably shorter (chain compression on a deep goal).
-McCuneAxioms	InverseOfInverse	70	-	33	72	OK.  chain=70 vs WM_rules=33 -- thvm 2x LONGER.  McCune is a single-axiom group; the absence of AC structure removes thvm's chain-compression advantage, and the single complex axiom expands aggressively.
+McCuneAxioms	InverseOfInverse	70	-	33	72	OK.  chain=70 vs WM_rules=33 -- thvm 2x LONGER.  Like-for-like (2026-06-11 live probe): 70 thvm lemma rows vs 43 lifted WM rows (42 CPL + 27 SL vs 33 CPL + 9 SL), thvm wall 0.67s vs wmcli 0.004s.  NOT fixed by the r_revision cp_index fix that closed both GroupAxioms gaps -- the residual is a CP-selection-trajectory + per-CP-throughput gap on the single complex axiom (496 selections vs WM ~45 over the same ~1700 generated CPs), the documented multi-day strategy track, not an indexing bug.
 McCuneAxioms	InverseOfComposite	71	-	41	73	OK.  chain=71 vs WM_rules=41 -- same pattern as InverseOfInverse, thvm ~2x longer.
 RingAxioms	ZeroIsAbsorbing	27	-	48	35	OK.  chain=27 vs WM_rules=48 -- thvm shorter (AC-rich axiom set benefits from chain compression).
 CommutativeRingAxioms	ZeroIsAbsorbing	22	-	54	30	OK.  chain=22 vs WM_rules=54 -- thvm 2.5x shorter (AC + Comm structure aligns with chain compression).
@@ -49,8 +49,8 @@ AbelianTarskiAxioms	Commutativity	6	-	15	8	OK.  chain=6 vs WM_rules=15 -- thvm 6
 AbelianTarskiAxioms	Associativity	12	-	14	14	OK.  chain=12 vs WM_rules=14 -- close parity.
 HigmanNeumannAxioms	Associativity	36	-	21	38	OK.  chain=36 vs WM_rules=21 -- thvm 70% LONGER (same single-axiom non-AC pattern as McCune cases).
 HigmanNeumannAxioms	EqualityOfIdentities	13	-	8	15	OK.  chain=13 vs WM_rules=8 -- thvm 60% longer (same pattern).
-GroupAxioms	ImpliesMcCuneAxioms	26	-	22	30	OK under Waldmeister.  chain=26 vs WM_rules=22 -- close parity (thvm +18%).  Note: parity_wm_wmcli.tsv has preset_constructs=30 from before SkolemHighest=True default; the fix brought it to 26.
-GroupAxioms	InverseOfComposite	17	-	16	21	OK.  chain=17 vs WM_rules=16 -- close parity (+1 chain row).  Note: parity_wm_wmcli.tsv has preset_constructs=21 from before the SkolemHighest fix.
+GroupAxioms	ImpliesMcCuneAxioms	24	-	22	28	OK under Waldmeister.  LEMMA PARITY (2026-06-11): 24 thvm lemma rows == 24 lifted WM rows, row-type histogram identical (11 CPL + 12 SL).  Same root cause and fix as GroupAxioms/InverseOfComposite (stale cp_index under constant-n_rules slot renumbering; r_revision-keyed staleness fix).
+GroupAxioms	InverseOfComposite	16	-	16	20	OK.  LEMMA PARITY (2026-06-11): 16 thvm lemma rows == 16 lifted WM rows, row-type histogram identical (9 CPL + 6 SL).  The prior +1 was a stale cp_index after interreduce drop+add churn kept n_rules constant while compaction renumbered slots -- the composed rule x*(i(x)*y)->y sat at the wrong index slot, so the WM-parity CP off it was never generated and the chain detoured through the left-inverse lemma.  Fixed by keying cp_index/cp_subindex staleness on r_revision.
 AbelianGroupAxioms	InverseOfComposite	15	-	12	20	OK.  chain=15 vs WM_rules=12 -- thvm 25% longer.  Note: parity_wm_wmcli.tsv has preset_constructs=18; the SkolemHighest fix brought it to 15.
 AbelianMcCuneAxioms	InverseOfComposite	21	-	18	23	OK.  chain=21 vs WM_rules=18 -- thvm 17% longer.
 AbelianMcCuneAxioms	ImpliesMcCuneAxioms	41	-	37	43	OK.  chain=41 vs WM_rules=37 -- close parity (+11%).
