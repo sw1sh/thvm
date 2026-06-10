@@ -4079,6 +4079,30 @@ typedef enum {
   ATP_CP_WEIGHT_LAST = 14,
 } AtpCpWeightMode;
 
+// Deferred-CP (`implicit_pair`) arc commit 1: lightweight per-CP descriptor
+// holding the two parent trace ids + signed overlap position instead of the
+// fully unified packed byte string `cp_packed[i]` carries.  Waldmeister's
+// `KP_Erzeugen` / `TPR_Ueberlagerung1` machinery records exactly this triple
+// per CP (KPVerwaltung.c plus the TPR overlap module) and re-unifies on
+// selection -- the parents' (lhs, rhs) survive in the trace already, so the
+// queue need not own a materialized copy until the CP is actually picked.
+// Compared to a typical 30-200B packed byte string (plus malloc-header
+// overhead), this 20-byte flat struct is a 4-10x shrink and zero heap
+// allocations on the push path.  Storage: a parallel array `cp_implicit[]`
+// sized like `cp_packed[]`, gated by the per-slot `cp_is_implicit` bitset
+// (set iff slot i uses `cp_implicit[i]` AND `cp_packed[i] == NULL`).
+// Lazily allocated on first push when `use_implicit_cp` is on; stays NULL
+// when the flag is off so `atp_ensure_cp_cap`'s realloc loop is byte-
+// identical.  Dormant in commit 1: declared, never pushed, never read.
+typedef struct {
+  u32 parent_a_trace_id;   // index into s->trace[] of parent rule A's TRACE_ORIENT entry; ATP_TRACE_NONE if absent
+  u32 parent_b_trace_id;   // index into s->trace[] of parent rule B; ATP_TRACE_NONE for axiom/simplify singletons
+  i32 overlap_position;    // signed WM-style: |pos| = pre-order index, sign picks which parent's lhs holds the overlap site (+ -> parent_a, - -> parent_b)
+  u32 weight;              // structural weight, computed once at push (so atp_cp_priority_sized doesn't re-walk)
+  u32 priority;            // same shape as s->cp_pri[i]
+} AtpCpImplicit;
+_Static_assert(sizeof(AtpCpImplicit) == 20, "AtpCpImplicit must stay 20 bytes");
+
 typedef struct {
   // Rule set R: growable parallel arrays sized for
   // thvm_rewrite_normalize / thvm_critical_pairs to consume
@@ -4155,6 +4179,20 @@ typedef struct {
   u32   n_cps_w2_picks;  // diagnostic counter
   u32   cp_seq_next;
   u32   cp_cap;
+
+  // Deferred-CP (`implicit_pair`) arc commit 1: parallel array of compact
+  // 20-byte descriptors (parent trace ids + signed overlap position +
+  // cached weight/priority).  Populated only for slots tagged in
+  // `cp_is_implicit` (one bit per slot, `(cp_cap + 7) / 8` bytes); the
+  // tag bit invariant is `cp_is_implicit[i] set <=> cp_implicit[i] live
+  // AND cp_packed[i] == NULL`.  Both arrays are lazily allocated on the
+  // first push under `use_implicit_cp == 1`; while the flag is off they
+  // stay NULL and `atp_ensure_cp_cap`'s realloc loop is byte-identical.
+  // Dormant in commit 1: no caller in this commit.  See
+  // `atp_cp_implicit_push` / `atp_cp_implicit_materialize` stubs.
+  AtpCpImplicit *cp_implicit;     // sized cp_cap, only when allocated
+  u8            *cp_is_implicit;  // bitset, (cp_cap + 7) / 8 bytes
+  u32            n_cps_implicit;  // diagnostic counter
 
   // Per-CP "last successful normalize" cookie for atp_cp_set_interreduce.
   // Holds the `r_revision` value at which slot i was most recently
@@ -4662,6 +4700,16 @@ typedef struct {
   u32  r_trace_dead_cap;          // capacity in bits (== trace ids)
   u32  n_cps_dropped_orphan;      // diagnostics: orphan CPs skipped at pop
 
+  // Deferred-CP (`implicit_pair`) arc commit 1: opt-in flag that switches
+  // `atp_push_cps_traced` to record CPs as compact `AtpCpImplicit`
+  // descriptors (parent trace ids + signed overlap position) instead of
+  // packed byte strings.  Materialization is paid at selection time via
+  // `atp_cp_implicit_materialize`.  Default 0 (OFF): commit 1 ships the
+  // storage scaffolding but no caller -- engine byte-identical, 78
+  // regression probes unchanged.  Wired in subsequent commits (push at
+  // 2, materialize at 3, orphan / IR / FV-index plumbing at 4).
+  u8   use_implicit_cp;
+
   // Permutation-subsumption (port of WM `GZ_ACVerzichtbar` in
   // INF/Grundzusammenfuehrung.c:137):  drop a CP whose two sides are
   // equal as multisets at the top.  Catches `nand(x,y) = nand(y,x)`
@@ -5006,6 +5054,11 @@ fn void      thvm_atp_set_use_database_ultimate(AtpState *s, u8 on);
 // only skips CPs proved to have no possible new-rule rewrite.  Off
 // by default; engine byte-identical when the flag is off.
 fn void      thvm_atp_set_use_incr_ir(AtpState *s, u8 on);
+// Deferred-CP (`implicit_pair`) arc commit 1: opt-in toggle for the
+// compact AtpCpImplicit descriptor storage path.  Setter-only in commit 1
+// (no consumer reads s->use_implicit_cp yet); default OFF keeps the
+// engine byte-identical.  Wired in subsequent commits.
+fn void      thvm_atp_set_use_implicit_cp(AtpState *s, u8 on);
 
 // === Phase 0: ground congruence closure (QF_UF), src/cc/_.c ===
 //

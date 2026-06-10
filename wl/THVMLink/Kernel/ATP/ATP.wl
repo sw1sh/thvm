@@ -194,6 +194,8 @@ $atpRunProofFn := $atpRunProofFn = load[
      Integer, Integer, Integer, Integer, Integer, Integer, {Integer, 1},
      Integer, Integer, Integer, Integer, Integer, Integer, Integer,
      (* args[33] = use_fvi: Waldmeister RechtsUnfreiErzeugen (FVI) toggle *)
+     Integer,
+     (* args[34] = use_implicit_cp: deferred-CP arc commit 1 toggle (dormant) *)
      Integer},
     "NumericArray"
 ]
@@ -2007,6 +2009,14 @@ atpFifoTiebreakOpt[o_Association] := Switch[Lookup[o, "FifoTiebreak", Automatic]
 atpFreeVarInstanceOpt[o_Association] := Switch[Lookup[o, "FreeVarInstance", Automatic],
     True, 1, False | Automatic, 0, _, 0];
 
+(* "UseImplicitCp" -> True/False: deferred-CP (implicit_pair) storage
+   path.  Commit 1 of the arc wires the scaffolding only -- True is
+   currently a no-op on the C side (no caller in this commit), but the
+   option is plumbed end-to-end so subsequent commits flip the path
+   without touching the WL surface.  Default Automatic / False -> 0. *)
+atpImplicitCpOpt[o_Association] := Switch[Lookup[o, "UseImplicitCp", Automatic],
+    True, 1, False | Automatic, 0, _, 0];
+
 (* True iff at least one axiom in `axParts` (atpAxiomParts triples
    {vars, lhs, rhs}) has a side whose variables are not a subset of
    the other side -- i.e. a free-on-one-side variable that the
@@ -2120,7 +2130,10 @@ $AtpPresetDefaults = <|
         "AutoPrecedence" -> True, "SkolemHighest" -> True,
         "SelectionRatio" -> 51,
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
-        "CPSetInterreduce" -> True|>,
+        "CPSetInterreduce" -> True,
+        (* Deferred-CP arc commit 1: dormant marker -- flipped to True
+           after the full materialize/orphan/IR plumbing lands. *)
+        "UseImplicitCp" -> False|>,
     (* "WaldmeisterFVI": Waldmeister with FVI emission FORCED on, even
        on axiom sets where the auto-detector says no.  Use this preset
        explicitly on the three FVI-gated theorems (ExcludedMiddle,
@@ -2136,7 +2149,10 @@ $AtpPresetDefaults = <|
         "SelectionRatio" -> 51,
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
         "CPSetInterreduce" -> True,
-        "FreeVarInstance" -> True|>,
+        "FreeVarInstance" -> True,
+        (* Deferred-CP arc commit 1: dormant marker -- flipped to True
+           after the full materialize/orphan/IR plumbing lands. *)
+        "UseImplicitCp" -> False|>,
     "WaldmeisterLazy" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
         "SkolemHighest" -> True,
@@ -2266,7 +2282,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpBwdDemodOpt[o], atpSymbolWeightsOpt[o], atpVarWeightOpt[o],
          atpRandomRatioOpt[o], atpRandomSeedOpt[o], atpKboWeightSchemeOpt[o],
          atpLazyNormalizeOpt[o], atpCoopWeightOpt[o], atpCoopRatioOpt[o],
-         atpFreeVarInstanceOpt[o]}
+         atpFreeVarInstanceOpt[o], atpImplicitCpOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];

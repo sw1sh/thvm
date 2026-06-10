@@ -2984,5 +2984,19 @@ VerificationTest[
 ]
 TAtpSetGnnScorer[Clear];
 
+(* Deferred-CP (`implicit_pair`) arc commit 1: option decoder round-trip.
+   The C-side flag is dormant in commit 1 (storage scaffolding only), so
+   we cannot assert a behavioural change end-to-end -- but the decoder
+   already plumbs through atpParseCompletionOpts, so a direct probe of
+   THVMLink`ATP`Private`atpImplicitCpOpt covers the WL-side wiring. *)
+VerificationTest[
+    {THVMLink`ATP`Private`atpImplicitCpOpt[<|"UseImplicitCp" -> True|>],
+     THVMLink`ATP`Private`atpImplicitCpOpt[<|"UseImplicitCp" -> False|>],
+     THVMLink`ATP`Private`atpImplicitCpOpt[<|"UseImplicitCp" -> Automatic|>],
+     THVMLink`ATP`Private`atpImplicitCpOpt[<||>]},
+    {1, 0, 0, 0},
+    TestID -> "ATP/options/implicit-cp-decoder"
+]
+
 (* Reset so later tests / sessions see the baked-in scorer. *)
 TAtpSetLearnedScorer[Clear];

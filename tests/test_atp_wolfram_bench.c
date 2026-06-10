@@ -692,6 +692,17 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_orphan_murder(s, (om[0] != '0') ? 1u : 0u);
   }
 
+  // THVM_ATP_IMPLICIT_CP=1 toggles the deferred-CP (`implicit_pair`)
+  // storage path independently of the WM preset.  Commit 1 of the arc
+  // ships the scaffolding only -- the setter has no on-path consumer,
+  // so enabling here is a no-op until commit 2 routes the push side.
+  {
+    const char *ic = getenv("THVM_ATP_IMPLICIT_CP");
+    if (ic != NULL && ic[0] != '\0' && ic[0] != '0') {
+      thvm_atp_set_use_implicit_cp(s, 1u);
+    }
+  }
+
   // Independent A/B toggles for WM-standard subsumption / demodulation.
   // BWD_SUB and BWD_DEMOD are now in the WALDMEISTER preset (iter 162)
   // but kept here so they can be turned OFF for differential debugging;

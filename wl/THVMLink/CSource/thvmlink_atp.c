@@ -676,6 +676,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // 0 = off (default, engine byte-identical).
   mint use_fvi = MArgument_getInteger(args[33]);
   thvm_atp_set_use_fvi(atp, (u8)(use_fvi != 0));
+  // args[34]: deferred-CP (`implicit_pair`) arc commit 1 toggle.  Commit
+  // 1 ships the storage scaffolding only -- the setter flips a flag that
+  // currently has no on-path consumer, so this remains a no-op until
+  // commit 2 routes `atp_push_cps_traced` through `atp_cp_implicit_push`.
+  mint use_implicit_cp = MArgument_getInteger(args[34]);
+  thvm_atp_set_use_implicit_cp(atp, (u8)(use_implicit_cp != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[19] gates it: the default (any
