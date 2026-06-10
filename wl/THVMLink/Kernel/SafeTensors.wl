@@ -152,6 +152,20 @@ loadSafeEntry[path_String, dataStart_Integer, spec_Association] := Module[{thvmD
     ]
 ]
 
+(* Sharded load: a HuggingFace `*.safetensors.index.json` (a "weight_map"
+   of tensor-name -> shard-file, e.g. model-00001-of-00002.safetensors,
+   the layout the FLUX Qwen3 text encoder ships in) loads + merges every
+   referenced shard into one name -> TTerm Association.  Mirrors
+   transformers' sharded from_pretrained.  More specific than the bare
+   single-file def below, so it matches index paths first. *)
+TSafeTensorLoad[indexPath_String] /; StringEndsQ[indexPath, ".index.json"] := Module[
+    {idx, dir, shards},
+    idx    = Developer`ReadRawJSONFile[indexPath];
+    dir    = DirectoryName[indexPath];
+    shards = DeleteDuplicates @ Values @ Lookup[idx, "weight_map", <||>];
+    Join @@ (TSafeTensorLoad[FileNameJoin[{dir, #}]] & /@ shards)
+]
+
 TSafeTensorLoad[path_String] := Module[{dataStart, json, entries},
     ensureInit[];
     {dataStart, json} = safeReadHeader[path];

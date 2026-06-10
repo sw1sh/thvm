@@ -67,6 +67,29 @@ VerificationTest[
     TestID -> "safetensors/load/bf16-flux-weight-format"
 ]
 
+(* === sharded load: a HF *.safetensors.index.json + shard files (the
+       layout the FLUX Qwen3 text encoder ships in) merge into one state
+       dict, keyed off the index's weight_map === *)
+
+VerificationTest[
+    TInit[]; TReset[];
+    dir = FileNameJoin[{$TemporaryDirectory, "thvm_shard_" <> ToString[$ProcessID]}];
+    Quiet @ CreateDirectory[dir];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{{4.0, 5.0}, {6.0, 7.0}}, "Real32"];
+    TSafeTensorSave[<|"enc.a" -> a|>, FileNameJoin[{dir, "model-00001-of-00002.safetensors"}]];
+    TSafeTensorSave[<|"enc.b" -> b|>, FileNameJoin[{dir, "model-00002-of-00002.safetensors"}]];
+    Export[FileNameJoin[{dir, "model.safetensors.index.json"}],
+        "{\"weight_map\":{\"enc.a\":\"model-00001-of-00002.safetensors\",\"enc.b\":\"model-00002-of-00002.safetensors\"}}",
+        "Text"];
+    ld = TSafeTensorLoad[FileNameJoin[{dir, "model.safetensors.index.json"}]];
+    res = {Sort @ Keys @ ld, Normal @ TRealize @ ld["enc.a"], Normal @ TRealize @ ld["enc.b"]};
+    Quiet @ DeleteDirectory[dir, DeleteContents -> True];
+    res,
+    {{"enc.a", "enc.b"}, {1.0, 2.0, 3.0}, {{4.0, 5.0}, {6.0, 7.0}}},
+    TestID -> "safetensors/load/sharded-index-json"
+]
+
 (* === spec byte layout: first 8 bytes = JSON length LE; JSON parses;
        data_offsets correct === *)
 
