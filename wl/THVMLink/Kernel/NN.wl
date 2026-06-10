@@ -975,6 +975,21 @@ mhaBmm[a_, bm_, bb_, m_, kk_, nn_] := TUOpReduce[
         TUOpExpand[TUOpReshape[bm, {bb, 1, kk, nn}], {bb, m, kk, nn}]],
     2, "SUM"]
 
+(* M-major batched matmul: A:{B,M,K} . Bm:{B,K,N} -> {M,B,N} (batch axis in the
+   MIDDLE, not leading).  Used for the attention @V so the context lands as
+   {seqQ, nHeads, dHead}: the merge to {seqQ, dim} is then a CONTIGUOUS reshape,
+   not a {nHeads,seqQ,dHead}->transpose->{seqQ,dim} non-mergeable reshape (the
+   latter lowers to an IDIV/IMOD view that the downstream output-projection
+   matmul reads -- a non-affine operand cblas/simdgroup both reject, forcing a
+   scalar reduce: 12x140ms on the GPT-2 CPU forward).  A is read transposed
+   (affine strided), so the bmm itself still routes through the batched-gemm
+   BLAS classifier. *)
+mhaBmmM[a_, bm_, bb_, m_, kk_, nn_] := TUOpReduce[
+    TUOpMul[
+        TUOpExpand[TUOpReshape[Transpose[a, {2, 1, 3}], {m, bb, kk, 1}], {m, bb, kk, nn}],
+        TUOpExpand[TUOpReshape[bm, {1, bb, kk, nn}], {m, bb, kk, nn}]],
+    2, "SUM"]
+
 TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
                     nHeads_Integer, mask_, scale_?NumericQ] := With[{
     shapeQ = tUopShape[q],
@@ -1016,8 +1031,8 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
                 scores = mhaBmm[qh, Transpose[kh, {1, 3, 2}], nHeads, seqQ, dHead, seqK] * scale;
                 scoresM = If[ mask === None, scores,
                     scores + TUOpExpand[TUOpReshape[mask, {1, seqQ, seqK}], {nHeads, seqQ, seqK}]];
-                ctx = mhaBmm[TSoftmax[scoresM, 2], vh, nHeads, seqQ, seqK, dHead];
-                ArrayReshape[Transpose[ctx, {2, 1, 3}], {seqQ, dim}]]]
+                ctx = mhaBmmM[TSoftmax[scoresM, 2], vh, nHeads, seqQ, seqK, dHead]; (* {seqQ, nHeads, dHead} *)
+                ArrayReshape[ctx, {seqQ, dim}]]]
     ]
 ]
 
