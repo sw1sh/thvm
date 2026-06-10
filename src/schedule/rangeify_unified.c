@@ -144,15 +144,18 @@ fn int rangeify_unified_is_realized(u32 node_idx) {
 // via the consumer-divergence walk, matching tinygrad/schedule/indexing.py.
 // Shared by the seed loop, materialize's boundary gate, and the strand cap.
 //
-// Opt in with THVM_RU_FAITHFUL_SEED=1.  Byte-identical to and FASTER than the
-// heuristic seed on GPT-2 (seq256 CPU 108 vs 162 ms) and competitive on conv;
-// the intended future DEFAULT once the last faithful-only correctness gap
-// closes (N=1 BatchNorm+maxpool conv-weight-grad NaN, the tie-split dedup).
+// The DEFAULT seed now that the last faithful-only correctness gap is closed
+// (the N=1 BatchNorm+maxpool conv-weight-grad zero/NaN, fixed by the
+// MAXPOOL_MASK pre-realize).  Byte-identical to and FASTER than the heuristic
+// seed on GPT-2 (seq256 CPU 108 vs 162 ms) and competitive on conv.  Opt out
+// with THVM_HEURISTIC_SEED=1 (or THVM_RU_FAITHFUL_SEED=0).
 fn int ru_faithful_seed_on(void) {
-  static int known = 0, on = 0;
+  static int known = 0, on = 1;
   if (!known) {
     char const *e = getenv("THVM_RU_FAITHFUL_SEED");
-    on = (e != NULL && e[0] != '0' && e[0] != '\0');
+    char const *h = getenv("THVM_HEURISTIC_SEED");
+    if (e != NULL && e[0] != '\0')                     on = (e[0] != '0');
+    else if (h != NULL && h[0] != '0' && h[0] != '\0') on = 0;
     known = 1;
   }
   return on;
@@ -173,6 +176,12 @@ fn int ru_seed_boundary_holds(u32 reasons) {
     // argmax mask read bit-exact ties (else /count -> RECIP(0) NaN).  This is
     // a correctness realize, not a heuristic, so faithful seeds it too.
     if (reasons & BUFFERIZE_REASON_MAXPOOL_INPUT) return 1;
+    // Honor the maxpool backward mask pre-realize (ROUTE A, part 2): the argmax
+    // mask CMPEQ + its mask_norm must materialize so the /count tie-split does
+    // not fuse into the N=1 conv-weight backward reduce (where the nested-
+    // reduce-iter count mis-reads over the size-1 batch axis -> zero grad).
+    // Also a correctness realize, so faithful seeds it too.
+    if (reasons & BUFFERIZE_REASON_MAXPOOL_MASK) return 1;
     // Seed every REDUCE output as a boundary.  This is faithful to tinygrad
     // (one reduce per kernel; a REDUCE output always escapes into a buffer)
     // and is the lever that de-fuses the conv data-grad.  Without it the

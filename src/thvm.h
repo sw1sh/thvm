@@ -1680,6 +1680,17 @@ fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
 // seed honors it too (not just the heuristic MULTI seed).
 #define BUFFERIZE_REASON_MAXPOOL_INPUT (1u << 5)
 #define BUFFERIZE_REASON_MATMUL      (1u << 6)
+// Maxpool backward mask pre-realize (ROUTE A, part 2): the argmax mask
+// CMPEQ(a, lift(MAX(a))) and its mask_norm (= mask * RECIP(count)) must
+// materialize in their OWN kernel so the windowed /count tie-split divide does
+// not fuse into the downstream conv-weight backward SUM-reduce.  Fused into an
+// N=1 weight-grad reduce, the walker's nested-reduce-iter mis-reads the count
+// over the size-1 batch axis -> the mask matches nothing -> zero grad (a
+// BatchNorm between relu and maxpool makes the activation a longer elementwise
+// chain than the bare relu case).  Like MAXPOOL_INPUT this is a CORRECTNESS
+// realize, so the faithful seed honors it too (not just the heuristic MULTI
+// seed, which faithful drops).
+#define BUFFERIZE_REASON_MAXPOOL_MASK (1u << 7)
 typedef struct {
   u64 loc;             // heap loc of the underlying UOp value
   u32 buffer_id;       // 1-based stable id within this graph

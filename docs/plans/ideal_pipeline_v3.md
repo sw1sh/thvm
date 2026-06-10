@@ -890,3 +890,29 @@ realized, the forward-max and backward-mask still don't share bit-exact ties -> 
 recip(0)=inf -> NaN.  A deeper tie-split DEDUP issue specific to BN+maxpool+N=1 under faithful
 (the BN normalize/detach between relu and maxpool breaks the cross-realize dedup span).  The
 flip is HELD (faithful stays opt-in) until this closes -- will not ship a default that NaNs.
+
+### LANDED: faithful is now the DEFAULT seed (2026-06-10)
+
+The last faithful-only blocker -- N=1 BatchNorm+maxpool conv-weight-grad zero/NaN -- was the
+maxpool backward MASK (CMPEQ(a, lift(MAX(a))) + its mask_norm = mask*RECIP(count)) being
+marked only BUFFERIZE_REASON_MULTI, which the faithful seed drops.  Under faithful the mask
+fused into the N=1 conv-weight backward SUM-reduce, where the walker's nested-reduce-iter
+mis-reads the /count tie-split over the size-1 batch axis -> the mask matches nothing -> grad
+collapses (~1e-7 vs tinygrad 1.574).  db747d5c (MAXPOOL_INPUT) realized the ACTIVATION but
+not the MASK; a BatchNorm/detach between relu and maxpool makes the activation chain long
+enough to trigger the fused miscount, so the mask itself must materialize.  Fix:
+BUFFERIZE_REASON_MAXPOOL_MASK (1u<<7), marked on the mask/mask_norm node alongside MULTI, and
+honored by ru_seed_boundary_holds under faithful (a correctness realize).
+
+Then FLIPPED ru_faithful_seed_on to default ON (opt out: THVM_HEURISTIC_SEED=1 or
+THVM_RU_FAITHFUL_SEED=0).  The tinygrad-structural rangeify seed (ROOT/STORE + one-reduce-
+per-kernel + the maxpool correctness realizes, deriving the rest via the consumer-divergence
+walk) is now production.  Validated on main: test_cc 86463 both seeds; full py suite 173/0
+(faithful default AND heuristic opt-out); WL gpt2 8/8 + nn 66/66 + grad 62/62; Metal greedy
+token 19 (CPU == Metal); conv training loss 2.5761, no NaN, 174 kernels, 43MB.  Found via a
+sequential workflow (fix+flip agent + an adversarial re-verify agent that independently
+re-applied the diff to a fresh worktree off main and re-ran every gate).
+
+GPT-2 perf under the new default: seq256 CPU 108 vs the old heuristic 162 ms (faithful is
+FASTER -- the goal was perf-positive).  Remaining "clean" half (the M-major->TRealize barrier,
+attention dual-path collapse, env-knob retirement) is now unblocked and independent.

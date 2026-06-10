@@ -1412,7 +1412,11 @@ fn void bufferize_classify(Term root) {
       // reduce a clean strided operand.  Fires regardless of consumer_count.
       if (bufferize_node_is_maxpool_mask(info->loc, info->op)
           || bufferize_node_is_maxpool_mask_norm(info->loc, info->op)) {
+        // MULTI for the heuristic seed; MAXPOOL_MASK so the faithful seed
+        // honors this correctness realize too (else the /count tie-split fuses
+        // into the N=1 conv-weight backward reduce and the mask zeroes out).
         bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
+        bufferize_node_mark(info, BUFFERIZE_REASON_MAXPOOL_MASK);
       }
     }
     // Softmax-style REDUCE unmark: a REDUCE whose every consumer chain
