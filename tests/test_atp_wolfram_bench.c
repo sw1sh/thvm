@@ -693,11 +693,11 @@ int main(int argc, char **argv) {
   }
 
   // THVM_ATP_IMPLICIT_CP=1 toggles the deferred-CP (`implicit_pair`)
-  // storage path independently of the WM preset.  The push side is
-  // routed (rule-x-rule CPs queue as trace-backed descriptors), but
-  // selection still aborts in the atp_cp_implicit_materialize stub
-  // until commit 3 of the arc lands -- enable for push-side probing
-  // only.
+  // storage path independently of the WM preset: rule-x-rule CPs queue
+  // as trace-backed descriptors and materialize at selection.  The
+  // trajectory can differ from the eager default (no queue-vs-queue
+  // subsumption on the implicit passive set; pop-normalize starts from
+  // the raw overlap), so compare proof validity + steps, not bytes.
   {
     const char *ic = getenv("THVM_ATP_IMPLICIT_CP");
     if (ic != NULL && ic[0] != '\0' && ic[0] != '0') {

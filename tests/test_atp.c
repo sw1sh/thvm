@@ -909,7 +909,7 @@ int main(void) {
     // land as a 20-byte descriptor -- cp_packed[i] == NULL, tag bit
     // set, parents cached, push-time priority cached -- and its raw
     // terms must be readable off the slot's TRACE_CP entry (the
-    // trace-backed materialization contract for commit 3).
+    // trace-backed contract atp_cp_implicit_materialize reads from).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     thvm_atp_set_use_implicit_cp(s, 1u);
 
@@ -988,6 +988,102 @@ int main(void) {
     CHECK(e->cp_is_implicit == NULL);
 
     thvm_atp_free(e);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/implicit-cp-select-materializes-from-trace");
+  {
+    // Deferred-CP (`implicit_pair`) select side: same two-rule setup as
+    // the push test above (every surviving CP queues as a descriptor),
+    // then pop through thvm_atp_select_cp.  The materialized pair must
+    // be the slot's TRACE_CP children 2/3 -- pointer-identical, the
+    // zero-copy contract -- and the pop must keep the queue invariants
+    // (tag bit travels with the backfill, vacated slot cleared).
+    // Finally, with orphan murder on and a parent marked dead, the
+    // remaining implicit CPs must be discarded at pop (WM
+    // selectNonOrphan over the implicit passive set).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_implicit_cp(s, 1u);
+
+    s->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]);
+    s->n_rules = 1;
+
+    AtpAddedRange added = thvm_atp_orient_and_add(
+        s, mk_f(mk_v(VAR_x), mk_e()), mk_a());
+    s->r_trace[1] = atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
+                                   ATP_TRACE_NONE,
+                                   s->lhs[1], s->rhs[1]);
+    u32 pushed = thvm_atp_generate_cps(s, added);
+    CHECK(pushed >= 2u);
+    CHECK_EQ(s->n_cps, pushed);            // no queue-subsume drops
+    CHECK_EQ(s->n_cps_implicit, pushed);   // every CP deferred
+
+    // Pop one.  cp_select_count == 0 takes the heap-min branch (j = 0),
+    // an implicit slot.
+    CHECK(atp_cp_slot_implicit(s, 0) == 1u);
+    u32 n_before = s->n_cps;
+    Term pl = 0, pr = 0;
+    CHECK_EQ(thvm_atp_select_cp(s, &pl, &pr), 1u);
+    CHECK_EQ(s->n_cps, n_before - 1u);
+    CHECK(pl != 0u);
+    CHECK(pr != 0u);
+    // Zero-copy: the popped pair IS the trace entry's raw children.
+    u32 pt = s->last_popped_trace;
+    CHECK(pt != ATP_TRACE_NONE);
+    CHECK(pt < s->n_trace);
+    Term pte = s->trace[pt];
+    CHECK_EQ(term_ext(pte), TRACE_CP);
+    CHECK_EQ(pl, term_ctr_at(pte, 2));
+    CHECK_EQ(pr, term_ctr_at(pte, 3));
+    // Queue invariants after backfill: tag bit <=> NULL packed bytes
+    // for every live slot; the vacated tail slot is fully cleared.
+    for (u32 i = 0; i < s->n_cps; i++) {
+      CHECK_EQ(atp_cp_slot_implicit(s, i),
+               s->cp_packed[i] == NULL ? 1u : 0u);
+    }
+    CHECK(atp_cp_slot_implicit(s, s->n_cps) == 0u);
+    CHECK(s->cp_packed[s->n_cps] == NULL);
+
+    // Orphan discard at pop: kill the orient rule's trace id -- every
+    // queued CP names it as a parent -- and re-select.  The whole
+    // remaining implicit queue must drain as orphans.
+    CHECK(s->n_cps >= 1u);
+    thvm_atp_set_use_orphan_murder(s, 1u);
+    atp_trace_mark_dead(s, s->r_trace[1]);
+    Term ol = 0, orr = 0;
+    CHECK_EQ(thvm_atp_select_cp(s, &ol, &orr), 0u);
+    CHECK_EQ(s->n_cps, 0u);
+    CHECK(s->n_cps_dropped_orphan >= 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/implicit-cp-end-to-end-proves-group-goal");
+  {
+    // Flag-ON end-to-end: prove the LEFT inverse f(i(a), a) == e from
+    // right-id / right-inv / assoc.  Unlike the headline right-inverse
+    // goal (closed by an axiom before any derived CP is selected),
+    // this one needs genuine completion -- derived rules born from
+    // rule-x-rule CPs that queue through the deferred descriptor lane
+    // and materialize at selection.  Trajectory may differ from the
+    // eager run (no queue-vs-queue subsumption on the implicit passive
+    // set; pop-normalize starts from the raw overlap) -- the gate is
+    // proof validity, not byte parity.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 200);
+    thvm_atp_set_use_implicit_cp(s, 1u);
+    thvm_atp_set_goal(s,
+                      mk_f(mk_i(mk_a()), mk_a()),
+                      mk_e());
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()),           mk_v(VAR_x));
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
+    thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    AtpStatus st = thvm_atp_run(s);
+    CHECK_EQ((int)st, (int)ATP_PROVED);
+    CHECK(s->n_cps_implicit >= 1u);   // the deferred lane was exercised
     thvm_atp_free(s);
   }
 

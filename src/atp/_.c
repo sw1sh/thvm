@@ -1219,10 +1219,14 @@ fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
 #endif
 }
 
-// Unpack CP queue slot i back into two fresh transient heap Terms --
-// the read counterpart of thvm_atp_cp_set.
+// Read CP queue slot i back into two Terms -- the read counterpart of
+// thvm_atp_cp_set.  A packed slot unpacks fresh transient heap Terms;
+// a deferred (implicit) slot returns its trace-resident raw pair
+// zero-copy.  Read-only either way.
+static void atp_cp_slot_read(const AtpState *s, u32 i,
+                             Term *lhs, Term *rhs);
 fn void thvm_atp_cp_get(const AtpState *s, u32 i, Term *lhs, Term *rhs) {
-  acp_unpack(s->cp_packed[i], lhs, rhs);
+  atp_cp_slot_read(s, i, lhs, rhs);
 }
 
 
@@ -7324,37 +7328,67 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
   }
 }
 
-// Deferred-CP (`implicit_pair`) STUB.  Future commit 3 routes
-// `thvm_atp_select_cp` here for slots tagged in `cp_is_implicit` before
-// falling through to `acp_unpack`.  TRACE-BACKED recipe (the push side
-// stores descriptors whose raw terms live in the trace, see
-// atp_cp_implicit_push):
+// Deferred-CP (`implicit_pair`) materialization at selection -- the WM
+// TPR_TP2ParIntermed analog (KPVerwaltung.c:975, the read-back before
+// NF_Normalform2).  An implicit slot has no packed byte string; its raw
+// unified pair lives in the TRACE_CP entry at `cp_trace[slot_idx]` as
+// children 2/3 (atp_trace_push_cp), so the pop reads them straight off
+// the trace -- no re-unification (WM re-unifies via U1_KPRekonstruieren
+// only because it has no always-on trace), no copy, no malloc.
 //
-//   * read the slot's TRACE_CP entry at `s->cp_trace[slot_idx]` --
-//     children 2/3 carry the raw var-normalized unified pair
-//     (atp_trace_push_cp), exactly what the pop path's unconditional
-//     normalize wants (the existing lazy-push flow feeds it the same
-//     raw form);
-//   * the trace array is a GC root set, so both terms are alive; the
-//     push side guarantees `cp_trace[slot_idx] != ATP_TRACE_NONE` for
-//     every implicit slot (trace-capped CPs stay on the eager packed
-//     path).
+// Liveness + aliasing: the trace array is a GC root set (thvm_atp_gc_-
+// collect roots every entry and Cheney forwarding preserves sharing),
+// so the returned Terms are alive and current across collections; the
+// per-step heap reset can never pop them (the entry predates the step's
+// checkpoint).  The pop path treats the popped pair as read-only --
+// atp_rewrite_normalize / _record build fresh terms and kbo_eq just
+// walks -- and the record_norm_steps path already feeds these exact
+// trace children into the same chain, so handing out shared trace
+// terms is the established discipline, not a new one.
 //
-// No re-unification: WM re-unifies (U1_KPRekonstruieren) because it has
-// no always-on trace; thvm's TRACE_CP entry is already the proof DAG +
-// orphan-murder input, so pointing the descriptor at it adds zero new
-// memory while killing the packed-string malloc.  The descriptor's
-// parent trace ids serve the dead-parent short-circuit (commit 4
-// alongside the IR / FV-index plumbing).  Returns 1 on success, 0 if
-// the slot cannot be materialized (orphan / dead parent).  Until commit
-// 3 lands the body is an unconditional abort: with use_implicit_cp on,
-// selection of an implicit slot is EXPECTED to die here.
-static int atp_cp_implicit_materialize(AtpState *s, u32 slot_idx,
-                                       Term *out_lhs, Term *out_rhs) {
-  (void)s; (void)slot_idx; (void)out_lhs; (void)out_rhs;
-  thvm_fatal("atp_cp_implicit_materialize not yet routed -- "
-             "see commit 3 of deferred-CP arc");
-  return 0;
+// Form: children 2/3 are the RAW overlap (pre queue-reduction), the
+// same form the lazy-push flow queues; the unconditional pop-time
+// normalize takes it to a normal form just the same.  The descriptor's
+// cached weight/priority were computed on the push-time reduced form,
+// which only ordered the heap -- ordering is consumed by the time the
+// slot is popped.
+//
+// Returns 1 always: the push side guarantees a live TRACE_CP entry for
+// every implicit slot (trace-capped CPs stay eager), so a miss here is
+// a broken invariant, not a recoverable state.  Dead-parent (orphan)
+// slots are still materializable -- the trace entry outlives its
+// parents -- and are discarded by the orphan check in the caller.
+static int atp_cp_implicit_materialize(const AtpState *s, u32 slot_idx,
+                                        Term *out_lhs, Term *out_rhs) {
+  u32 t = s->cp_trace[slot_idx];
+  if (t == ATP_TRACE_NONE || t >= s->n_trace) {
+    thvm_fatal("atp_cp_implicit_materialize: implicit slot has no live "
+               "trace entry (push-side invariant broken)");
+  }
+  Term te = s->trace[t];
+  if (term_tag(te) != TAG_CTR || term_ext(te) != TRACE_CP
+      || term_ctr_n(te) < 4u) {
+    thvm_fatal("atp_cp_implicit_materialize: trace entry is not a "
+               "TRACE_CP (push-side invariant broken)");
+  }
+  *out_lhs = term_ctr_at(te, 2);
+  *out_rhs = term_ctr_at(te, 3);
+  return 1;
+}
+
+// Slot-aware CP read shared by every surface that walks the live queue
+// (selection plus the read-only diagnostics thvm_atp_cp_get /
+// thvm_atp_queued_cps / thvm_atp_cp_size_stats / thvm_atp_peek_top_k):
+// a packed slot unpacks fresh transient heap Terms; an implicit slot
+// returns the trace-resident raw pair zero-copy.  Callers treat the
+// pair as read-only either way.
+static void atp_cp_slot_read(const AtpState *s, u32 i,
+                             Term *lhs, Term *rhs) {
+  if (atp_cp_slot_implicit(s, i)) {
+    atp_cp_implicit_materialize(s, i, lhs, rhs);
+  } else {
+    acp_unpack(s->cp_packed[i], lhs, rhs);
+  }
 }
 
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
@@ -7457,15 +7491,13 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
 
   // Unpack the chosen CP from its byte string into two fresh heap
   // Terms for the caller to normalize.  An implicit slot has no byte
-  // string -- it must materialize from its TRACE_CP entry instead;
-  // until commit 3 of the deferred-CP arc lands this is the aborting
-  // stub, so the flag-ON failure mode is a diagnosable fatal rather
-  // than a NULL deref.
-  if (atp_cp_slot_implicit(s, j)) {
-    atp_cp_implicit_materialize(s, j, lhs_out, rhs_out);
-  } else {
-    acp_unpack(s->cp_packed[j], lhs_out, rhs_out);
-  }
+  // string -- it materializes the raw pair off its TRACE_CP entry
+  // instead (zero-copy; see atp_cp_implicit_materialize for the
+  // liveness/aliasing argument).  The orphan check above already ran
+  // on cp_trace[j], which the push side sets for implicit slots too,
+  // so a dead-parent implicit CP is discarded below exactly like an
+  // eager one (WM selectNonOrphan covers the implicit passive set).
+  atp_cp_slot_read(s, j, lhs_out, rhs_out);
   s->last_popped_trace = s->cp_trace[j];
 
   // Env-gated CP-selection trajectory dump for parity comparison vs
@@ -7637,9 +7669,10 @@ fn u32 thvm_atp_queued_cp_count(const AtpState *s) {
   return s->n_cps;
 }
 
-// Snapshot the live queue: unpack each slot's CP into a fresh pair of
-// transient heap Terms and copy lhs/rhs/seq into the caller's arrays
-// (up to `cap`).  Any out pointer may be NULL to skip that column.
+// Snapshot the live queue: read each slot's CP (packed slots unpack
+// fresh transient heap Terms; implicit slots alias their trace-resident
+// raw pair) and copy lhs/rhs/seq into the caller's arrays (up to
+// `cap`).  Any out pointer may be NULL to skip that column.
 // Pure read -- no engine state is mutated.
 fn u32 thvm_atp_queued_cps(const AtpState *s, Term *lhs_out, Term *rhs_out,
                            u32 *seq_out, u32 cap) {
@@ -7647,7 +7680,7 @@ fn u32 thvm_atp_queued_cps(const AtpState *s, Term *lhs_out, Term *rhs_out,
   u32 n = s->n_cps < cap ? s->n_cps : cap;
   for (u32 i = 0; i < n; i++) {
     Term l = 0, r = 0;
-    acp_unpack(s->cp_packed[i], &l, &r);
+    atp_cp_slot_read(s, i, &l, &r);
     if (lhs_out != NULL) lhs_out[i] = l;
     if (rhs_out != NULL) rhs_out[i] = r;
     if (seq_out != NULL) seq_out[i] = s->cp_seq[i];
@@ -7766,10 +7799,11 @@ fn void thvm_atp_set_cp_pri2_by_seq(AtpState *s, const u32 *seq,
 }
 
 // Measurement-only: walk the live CP queue, reporting min/max/mean
-// node count (the acp_pack symbol count) and a coarse size histogram
-// into the caller's `bins` array (bins[k] counts CPs with node-count
-// in [k*bucket, (k+1)*bucket); the last bin is the overflow tail).
-// `nbins`/`bucket` are caller-chosen.  Pure read of cp_packed; no
+// node count (the acp_pack symbol count; an implicit slot counts its
+// raw trace-resident pair, the form selection will materialize) and a
+// coarse size histogram into the caller's `bins` array (bins[k] counts
+// CPs with node-count in [k*bucket, (k+1)*bucket); the last bin is the
+// overflow tail).  `nbins`/`bucket` are caller-chosen.  Pure read; no
 // engine state mutated.  Returns the queue length.
 fn u32 thvm_atp_cp_size_stats(const AtpState *s, u32 *min_out, u32 *max_out,
                               double *mean_out, u32 *bins, u32 nbins,
@@ -7787,7 +7821,7 @@ fn u32 thvm_atp_cp_size_stats(const AtpState *s, u32 *min_out, u32 *max_out,
   u64 sum = 0u;
   for (u32 i = 0; i < s->n_cps; i++) {
     Term l = 0, r = 0;
-    acp_unpack(s->cp_packed[i], &l, &r);
+    atp_cp_slot_read(s, i, &l, &r);
     u32 nodes = atp_symbol_count(l) + atp_symbol_count(r);
     if (nodes < mn) mn = nodes;
     if (nodes > mx) mx = nodes;
@@ -7995,10 +8029,9 @@ fn void thvm_atp_set_use_orphan_murder(AtpState *s, u8 on) {
 
 // Toggle the deferred-CP (`implicit_pair`) path.  With the flag on,
 // atp_push_cps_traced queues rule-x-rule CPs as 20-byte trace-backed
-// descriptors (atp_cp_implicit_push) instead of packed byte strings.
-// SELECTION of an implicit slot still aborts in the
-// atp_cp_implicit_materialize stub until commit 3 of the arc lands, so
-// the flag is for push-side testing only.  Lazy allocation of
+// descriptors (atp_cp_implicit_push) instead of packed byte strings,
+// and selection materializes the raw pair off the slot's TRACE_CP
+// entry (atp_cp_implicit_materialize).  Lazy allocation of
 // `cp_implicit` / `cp_is_implicit` happens at first push, not here, so
 // toggling at runtime stays cheap.  Default OFF -> engine byte-identical.
 fn void thvm_atp_set_use_implicit_cp(AtpState *s, u8 on) {
@@ -10578,11 +10611,15 @@ static void atp_cp_set_interreduce(AtpState *s) {
       continue;
     }
     // Deferred slot: no packed bytes to normalize -- move it wholesale,
-    // carrying the push-time priorities (commit 4 of the implicit-CP arc
-    // materializes via the TRACE_CP raw terms and runs the WM AP_generic
-    // normalize like every packed survivor; WM itself materializes via
-    // TPR_TP2ParIntermed, KPVerwaltung.c:975, before NF_Normalform2).
-    // The orphan test above already covered it (trace-only).
+    // carrying the push-time priorities.  The IR-sweep normalize is not
+    // yet routed for implicit slots (commit 4 of the implicit-CP arc
+    // materializes via atp_cp_implicit_materialize and runs the WM
+    // AP_generic normalize like every packed survivor; WM itself
+    // materializes via TPR_TP2ParIntermed, KPVerwaltung.c:975, before
+    // NF_Normalform2).  Sound meanwhile: the slot keeps its raw form
+    // and the unconditional pop-time normalize reduces it under the
+    // then-current R.  The orphan test above already covered it
+    // (trace-only).
     if (atp_cp_slot_implicit(s, i)) {
       if (w != i) {
         s->cp_packed[w] = s->cp_packed[i];   // NULL deferred-slot marker
@@ -13467,7 +13504,7 @@ fn u32 thvm_atp_peek_top_k(AtpState *s, u32 k,
   }
   qsort(ent, s->n_cps, sizeof(AtpPeekEnt), atp_peek_cmp);
   for (u32 i = 0; i < k; i++) {
-    acp_unpack(s->cp_packed[ent[i].idx], &out_lhs[i], &out_rhs[i]);
+    atp_cp_slot_read(s, ent[i].idx, &out_lhs[i], &out_rhs[i]);
   }
   free(ent);
   return k;

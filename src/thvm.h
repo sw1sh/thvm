@@ -4189,8 +4189,8 @@ typedef struct {
   // cp_implicit[i] live AND cp_packed[i] == NULL`.  Both arrays are
   // lazily allocated on the first push under `use_implicit_cp == 1`;
   // while the flag is off they stay NULL and `atp_ensure_cp_cap`'s
-  // realloc loop is byte-identical.  Selection-side materialization is
-  // the `atp_cp_implicit_materialize` stub (commit 3 of the arc).
+  // realloc loop is byte-identical.  Selection materializes the raw
+  // pair off the slot's TRACE_CP entry (atp_cp_implicit_materialize).
   AtpCpImplicit *cp_implicit;     // sized cp_cap, only when allocated
   u8            *cp_is_implicit;  // bitset, (cp_cap + 7) / 8 bytes
   u32            n_cps_implicit;  // diagnostics: CPs pushed as descriptors
@@ -4706,10 +4706,12 @@ typedef struct {
   // backed `AtpCpImplicit` descriptors instead of packed byte strings
   // (axiom/initial, trace-capped, and auto-MaxWeight over-bound CPs
   // stay eager).  Materialization is paid at selection time via
-  // `atp_cp_implicit_materialize` -- still a stub, so with the flag ON
-  // the engine aborts the first time an implicit slot is selected
-  // (commit 3 of the arc routes it).  Default 0 (OFF): engine
-  // byte-identical.
+  // `atp_cp_implicit_materialize`, which reads the raw pair off the
+  // slot's TRACE_CP entry (zero-copy).  Trajectory under the flag can
+  // differ from eager (no queue-vs-queue subsumption on the implicit
+  // passive set; pop-normalize starts from the raw overlap), so the
+  // flag-ON gate is proof validity, not byte parity.  Default 0
+  // (OFF): engine byte-identical.
   u8   use_implicit_cp;
 
   // Permutation-subsumption (port of WM `GZ_ACVerzichtbar` in
@@ -5057,10 +5059,9 @@ fn void      thvm_atp_set_use_database_ultimate(AtpState *s, u8 on);
 // by default; engine byte-identical when the flag is off.
 fn void      thvm_atp_set_use_incr_ir(AtpState *s, u8 on);
 // Deferred-CP (`implicit_pair`) arc: opt-in toggle for the compact
-// AtpCpImplicit descriptor storage path.  Push side routed (rule-x-rule
-// CPs queue as trace-backed descriptors); selection still aborts in the
-// materialize stub until commit 3 of the arc.  Default OFF keeps the
-// engine byte-identical.
+// AtpCpImplicit descriptor storage path.  Rule-x-rule CPs queue as
+// trace-backed descriptors; selection materializes the raw pair off
+// the TRACE_CP entry.  Default OFF keeps the engine byte-identical.
 fn void      thvm_atp_set_use_implicit_cp(AtpState *s, u8 on);
 
 // === Phase 0: ground congruence closure (QF_UF), src/cc/_.c ===
