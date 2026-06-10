@@ -3135,16 +3135,14 @@ atpReturnValue[bundle_, "Status"] :=
    form.  A multi-goal conjunction returns one path per conjunct.
    $Failed when the run did not prove, no goal chain was recorded, or
    the recorded chain does not connect. *)
-atpChainPath[start_, steps_List] := Catch[
-    Block[{cur = start},
-        Prepend[
-            Table[
-                If[ steps[[k]]["Before"] =!= cur,
-                    Throw[$Failed, "atpChainPath"]];
-                cur = steps[[k]]["After"],
-                {k, Length[steps]}],
-            start]],
-    "atpChainPath"]
+atpChainPath[start_, steps_List] := Block[{
+    afters = #["After"] & /@ steps
+},
+    If[ (#["Before"] & /@ steps) === Most @ Prepend[afters, start],
+        Prepend[afters, start],
+        $Failed]
+]
+
 atpGoalPaths[bundle_] := Block[{cRes, steps, cjps, paths},
     cRes = bundle["cRes"];
     If[ ! AssociationQ[cRes] || cRes["Status"] =!= 1, Return[$Failed]];
@@ -3157,12 +3155,9 @@ atpGoalPaths[bundle_] := Block[{cRes, steps, cjps, paths},
     paths = Table[
         Block[{gSteps, fwd, bwd},
             gSteps = Select[steps, Quotient[#["Side"], 2] === g - 1 &];
-            fwd = atpChainPath[cjps[[g, 1]],
-                Select[gSteps, EvenQ[#["Side"]] &]];
-            bwd = atpChainPath[cjps[[g, 2]],
-                Select[gSteps, OddQ[#["Side"]] &]];
-            If[ fwd === $Failed || bwd === $Failed ||
-                Last[fwd] =!= Last[bwd],
+            fwd = atpChainPath[cjps[[g, 1]], Select[gSteps, EvenQ[#["Side"]] &]];
+            bwd = atpChainPath[cjps[[g, 2]], Select[gSteps, OddQ[#["Side"]] &]];
+            If[ fwd === $Failed || bwd === $Failed || Last[fwd] =!= Last[bwd],
                 $Failed,
                 Join[fwd, Rest @ Reverse @ bwd]]
         ],
@@ -3172,7 +3167,8 @@ atpGoalPaths[bundle_] := Block[{cRes, steps, cjps, paths},
         Length[paths] === 1, First[paths],
         True, paths]
 ]
-atpReturnValue[bundle_, "Path"] := atpGoalPaths[bundle];
+
+atpReturnValue[bundle_, "Path"] := atpGoalPaths[bundle]
 (* "Counterexample" -> a CounterexampleObject disproving the goal, else
    $Failed.  The equational dual of "ProofObject": where "ProofObject" answers
    "is the goal derivable?", "Counterexample" answers "is the goal refutable?"
