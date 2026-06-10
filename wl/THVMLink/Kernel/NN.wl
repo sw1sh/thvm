@@ -961,36 +961,63 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
    and the BLAS GEMM dispatch writes the QK^T scores at the output's hi row
    stride, not the runtime N.  These were the reasons the symbolic path once
    needed a separate eager raw-UOp clause; it is gone. *)
+(* {s, dim} -> {s, nHeads, dHead} -> {nHeads, s, dHead}: heads become a leading
+   BATCH axis.  Transpose with a 1-indexed perm via the WL UpValue. *)
+mhaHeadView[t_, s_, nHeads_, dHead_] := Transpose[ArrayReshape[t, {s, nHeads, dHead}], {2, 1, 3}]
+
+(* Batched matmul A:{B,M,K} . Bm:{B,K,N} -> {B,M,N} as MUL + REDUCE over K.
+   thvm has no batched-Dot primitive (TMatMul is rank-2), so this is TMatMul's
+   own RESHAPE+EXPAND+MUL+REDUCE pattern with a leading batch axis prepended;
+   ONE reduce kernel for all B batches. *)
+mhaBmm[a_, bm_, bb_, m_, kk_, nn_] := TUOpReduce[
+    TUOpMul[
+        TUOpExpand[TUOpReshape[a,  {bb, m, kk, 1}], {bb, m, kk, nn}],
+        TUOpExpand[TUOpReshape[bm, {bb, 1, kk, nn}], {bb, m, kk, nn}]],
+    2, "SUM"]
+
 TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
                     nHeads_Integer, mask_, scale_?NumericQ] := With[{
     shapeQ = tUopShape[q],
     shapeK = tUopShape[k]
 },
-    Module[{seqQ, seqK, dim, dHead, headView, sliceHead, perHead, headOuts},
+    Module[{seqQ, seqK, dim, dHead},
         seqQ  = shapeQ[[1]];
         seqK  = shapeK[[1]];      (* K / V carry their own length: seqK may
                                      differ from seqQ for cross-attention and
                                      for a single-query step over a KV cache. *)
         dim   = shapeQ[[2]];
         dHead = dim / nHeads;
-        (* {s, dim} -> {s, nHeads, dHead} -> {nHeads, s, dHead}.
-           Transpose with 1-indexed perm via the WL UpValue. *)
-        headView[t_, s_] := Transpose[ArrayReshape[t, {s, nHeads, dHead}],
-                                  {2, 1, 3}];
-        sliceHead[hView_, h_, s_] := ArrayReshape[
-            TUOpShrink[hView, {{h, h + 1}, {0, s}, {0, dHead}}],
-            {s, dHead}];
-        perHead[h_] := With[{
-            qS = sliceHead[headView[q, seqQ], h, seqQ],
-            kS = sliceHead[headView[k, seqK], h, seqK],
-            vS = sliceHead[headView[v, seqK], h, seqK]
-        },
-            Module[{scores, scoresM},
-                scores  = (qS . Transpose[kS]) * scale;   (* {seqQ, seqK} *)
-                scoresM = If[ mask === None, scores, scores + mask];
-                TSoftmax[scoresM, 1] . vS]];          (* {seqQ, dHead} *)
-        headOuts = perHead /@ Range[0, nHeads - 1];
-        headStitch[headOuts, nHeads, dHead]
+        If[ symLeadingQ[q] || symLeadingQ[k],
+            (* SYMBOLIC seq (the KV-cache decode step): per-head loop.  The kvar
+               axis flows through a per-head TUOpShrink; the batched rank-4
+               EXPAND/REDUCE over a symbolic axis is not yet validated, so the
+               literal fast path below is gated off here. *)
+            Module[{sliceHead, perHead},
+                sliceHead[hView_, h_, s_] := ArrayReshape[
+                    TUOpShrink[hView, {{h, h + 1}, {0, s}, {0, dHead}}], {s, dHead}];
+                perHead[h_] := With[{
+                    qS = sliceHead[mhaHeadView[q, seqQ, nHeads, dHead], h, seqQ],
+                    kS = sliceHead[mhaHeadView[k, seqK, nHeads, dHead], h, seqK],
+                    vS = sliceHead[mhaHeadView[v, seqK, nHeads, dHead], h, seqK]
+                },
+                    Module[{scores, scoresM},
+                        scores  = (qS . Transpose[kS]) * scale;
+                        scoresM = If[ mask === None, scores, scores + mask];
+                        TSoftmax[scoresM, 1] . vS]];
+                headStitch[perHead /@ Range[0, nHeads - 1], nHeads, dHead]],
+            (* LITERAL seq: ONE batched scaled-dot over the head axis (~8 kernels)
+               instead of nHeads per-head chains + a PAD/Total stitch (~8*nHeads).
+               Heads are the leading batch axis; token-identical to the per-head
+               path (verified err ~3e-8). *)
+            Module[{qh, kh, vh, scores, scoresM, ctx},
+                qh = mhaHeadView[q, seqQ, nHeads, dHead];   (* {nHeads, seqQ, dHead} *)
+                kh = mhaHeadView[k, seqK, nHeads, dHead];
+                vh = mhaHeadView[v, seqK, nHeads, dHead];
+                scores = mhaBmm[qh, Transpose[kh, {1, 3, 2}], nHeads, seqQ, dHead, seqK] * scale;
+                scoresM = If[ mask === None, scores,
+                    scores + TUOpExpand[TUOpReshape[mask, {1, seqQ, seqK}], {nHeads, seqQ, seqK}]];
+                ctx = mhaBmm[TSoftmax[scoresM, 2], vh, nHeads, seqQ, seqK, dHead];
+                ArrayReshape[Transpose[ctx, {2, 1, 3}], {seqQ, dim}]]]
     ]
 ]
 
