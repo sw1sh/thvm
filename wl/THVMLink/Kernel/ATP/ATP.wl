@@ -2054,10 +2054,13 @@ atpFreeVarInstanceOpt[o_Association] := Switch[Lookup[o, "FreeVarInstance", Auto
     True, 1, False | Automatic, 0, _, 0];
 
 (* "UseImplicitCp" -> True/False: deferred-CP (implicit_pair) storage
-   path.  Commit 1 of the arc wires the scaffolding only -- True is
-   currently a no-op on the C side (no caller in this commit), but the
-   option is plumbed end-to-end so subsequent commits flip the path
-   without touching the WL surface.  Default Automatic / False -> 0. *)
+   path.  Functional end-to-end (push/select/IR routed) but OPT-IN:
+   flipping the WM presets measures 2.8x steps and +55% wall on the
+   mccune probe (PROVED both ways) and RAISES peak RSS (+17% mccune,
+   2.13x AndAssoc) -- the 20B descriptor saving is swamped by implicit
+   slots pinning their raw overlap terms via the trace GC root plus a
+   ~2x larger live queue from losing queue-vs-queue subsumption.
+   Default Automatic / False -> 0. *)
 atpImplicitCpOpt[o_Association] := Switch[Lookup[o, "UseImplicitCp", Automatic],
     True, 1, False | Automatic, 0, _, 0];
 
@@ -2175,8 +2178,9 @@ $AtpPresetDefaults = <|
         "SelectionRatio" -> 51,
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
         "CPSetInterreduce" -> True,
-        (* Deferred-CP arc commit 1: dormant marker -- flipped to True
-           after the full materialize/orphan/IR plumbing lands. *)
+        (* Stays opt-in: the measured flip costs 2.8x steps, +55%
+           wall, +17% peak RSS on mccune and 2.13x peak RSS on
+           AndAssoc -- see atpImplicitCpOpt. *)
         "UseImplicitCp" -> False|>,
     (* "WaldmeisterFVI": Waldmeister with FVI emission FORCED on, even
        on axiom sets where the auto-detector says no.  Use this preset
@@ -2194,8 +2198,9 @@ $AtpPresetDefaults = <|
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
         "CPSetInterreduce" -> True,
         "FreeVarInstance" -> True,
-        (* Deferred-CP arc commit 1: dormant marker -- flipped to True
-           after the full materialize/orphan/IR plumbing lands. *)
+        (* Stays opt-in for the same measured regressions as the
+           "Waldmeister" entry; FVI differs only in FreeVarInstance
+           emission, orthogonal to CP storage. *)
         "UseImplicitCp" -> False|>,
     "WaldmeisterLazy" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
