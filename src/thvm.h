@@ -3248,6 +3248,10 @@ u32   cg_kernel_dispatch_kind(u32 kid);
 // THVM_KERNEL_PROFILE=N: dump top-N kernels by cumulative wall time
 // at thvm_free. N=0 -> default 20. Uses K_PROFILE + KERNELS[kid].output_shape.
 void  cg_profile_dump(FILE *fp, u32 top_n);
+// True when THVM_KERNEL_PROFILE=N (N != 0) is requesting a per-kernel
+// dump.  The Metal backend reads this to route the batched ICB replay
+// through the per-op command-buffer path for TRUE per-kernel GPU time.
+int   cg_profile_kernel_enabled(void);
 
 // === backend/ ===
 // CPU backend -- only backend for step 12.  Installed by thvm_init.

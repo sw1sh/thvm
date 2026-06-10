@@ -156,6 +156,22 @@ static void cg_profile_arm_atexit_once(void) {
   atexit(cg_profile_atexit);
 }
 
+// True when THVM_KERNEL_PROFILE=N (N != 0) requests a per-kernel dump.
+// The Metal backend consults this to switch the batched ICB replay onto
+// the one-command-buffer-per-op path, so a plain THVM_KERNEL_PROFILE run
+// gets TRUE per-kernel GPU timestamps instead of wall/n_ops averages.
+// Cached env read (single-threaded init path mirrors the other toggles).
+int cg_profile_kernel_enabled(void) {
+  static int known = 0;
+  static int enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_KERNEL_PROFILE");
+    enabled = (e != NULL && e[0] != '\0' && !(e[0] == '0' && e[1] == '\0'));
+    known = 1;
+  }
+  return enabled;
+}
+
 void cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us) {
   if (kid == 0 || kid >= KPROFILE_CAP) return;
   cg_profile_arm_atexit_once();

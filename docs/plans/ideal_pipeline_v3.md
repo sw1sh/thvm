@@ -791,3 +791,42 @@ get a pathological Metal dispatch grid (threads = reduced output_numel, e.g. 16,
 serially looping the full 768-element body) where the heuristic launched wide elementwise
 grids.  Fix lives in `render_metal.c cg_tile_metal_dispatch_shape` (grid over the body
 iteration product, not the reduced output_numel).  Next.
+
+### Faithful levers sweep (2026-06-10, sequential worktree workflow) -- 2 land, 2 close as non-issues
+
+Ran the four remaining faithful levers one at a time (brick-safe: no concurrent build/GPU).
+Re-applied + re-verified each on current main (the workflow worktrees branched from a stale
+551f9f8d, 32 commits back, so their in-worktree gates were re-run from scratch on HEAD).
+
+- **L3 view-chain merge LANDED (`a3d407cd`).** ru_compose_view_chain skips a contiguous
+  (row-major, offset-0) inner view -- it composes as the IDENTITY on the running flat index,
+  so skipping it emits the same affine map with fewer IDIV/IMOD (tinygrad View.__add__
+  `if vm2.contiguous: return vm1`).  READ-ONLY (no prior_views mutation -- TENS is
+  refcount-shared/DUP).  Only bites the reshape-of-permute chain the constructor simplifier
+  can't fold (merged=2 vs full=7 idiv/imod, byte-exact).  Low perf value, real index/spec
+  cleanliness.
+
+- **L0 Metal per-kernel profiling LANDED.** thvm_metal_jit_replay_run recorded
+  `wall/n_ops` (uniform smear, gpu_us always 0); the true-per-kernel-GPU branch existed but
+  was gated only on THVM_METAL_PROFILE_PEROP.  Now metal_perop is also enabled when
+  THVM_KERNEL_PROFILE is active (cg_profile_kernel_enabled), so a plain profile run gets real
+  per-kernel gpu_us.  Unblocks Metal diagnosis; greedy-19 unchanged when profiling off.
+
+- **L2 LayerNorm reduce-epilogue fusion -- CLOSED (misdiagnosed).** The x-mean relaxation
+  is unreachable: TLayerNorm lowers mean as REDUCE->MUL(/N)->RESHAPE->EXPAND, the chain-hop
+  predicate ALREADY unmarks both the mean and var reduces (chain terminates at EXPAND), and
+  the `centered = x - mean` SUB is the EXPAND's CONSUMER, never visited.  Enabling the hop =
+  ZERO kernel-count change (4->4).  tinygrad's own rangeify realizes mean+var as separate
+  reduces too (3-kernel LayerNorm vs thvm 4); the 1-kernel gap is the normalize tail, not the
+  mean fusion.  Faithful already fuses what the spec fuses; no lever here.
+
+- **L1 faithful Metal perf -- CLOSED (regression does not reproduce).** Careful brick-safe
+  single-forward measurement at HEAD: Metal faithful seq256 = 307ms vs default 310ms
+  (faithful marginally FASTER); seq64 85.2 vs 85.8; CPU seq256 254 vs 268.  GROUP_REDUCE is
+  ALREADY applied to the LN/softmax reduce kernels (hand_opts GROUPTOP gate fires, tx=16 in
+  BOTH seeds); THVM_GROUP_SZ 16/32/64 all within ~1% (the forward is GEMM-bound -- the
+  vocab=50257 LM-head dominates gpu_us, confirmed via the L0 profiler -- not reduce-bound).
+  The earlier "747ms vs 218ms" was a bad pre-0cf2ea3d/stale seqscale number; it supersedes
+  the "(b) OPEN -- faithful Metal regression" note in the prior entry.  Faithful is now
+  correct AND competitive on BOTH backends; a real future Metal lever targets the GEMMs
+  (TC tiling / JIT dispatch redundancy), not the already-grouped reduces.

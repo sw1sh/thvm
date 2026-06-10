@@ -60,19 +60,25 @@ static u64 METAL_PEAK_DEFERRED_BYTES = 0;
 static u64 METAL_GPU_US_TOTAL = 0;
 static u64 METAL_GPU_FLUSH_COUNT = 0;
 
-// Per-op GPU profiling.  When THVM_METAL_PROFILE_PEROP=1, batching is
-// disabled in metal_dispatch_begin so every kernel dispatch gets its
-// own command buffer; metal_submit_if_standalone then attributes that
-// buffer's [GPUEndTime]-[GPUStartTime] to METAL_PEROP_CUR_KID, the kid
-// set at the top of metal_dispatch_kernel.  The result is a real
-// per-kernel GPU-us breakdown (vs. the batched path, where one flush
-// covers ~25 kernels).  Costs more dispatch overhead -- profile only.
+// Per-op GPU profiling.  When enabled, batching is disabled in
+// metal_dispatch_begin so every kernel dispatch gets its own command
+// buffer; metal_submit_if_standalone then attributes that buffer's
+// [GPUEndTime]-[GPUStartTime] to METAL_PEROP_CUR_KID, the kid set at the
+// top of metal_dispatch_kernel.  The result is a real per-kernel GPU-us
+// breakdown (vs. the batched path, where one flush covers ~25 kernels).
+// Costs more dispatch overhead -- profile only.
+//
+// Triggered by THVM_METAL_PROFILE_PEROP=1 OR by THVM_KERNEL_PROFILE=N:
+// the kernel-profile dump prints a gpu_us column, and without per-op
+// command buffers every batched-replay kernel would get the same
+// wall/n_ops average there -- useless for ranking.  Routing the profile
+// run through this path makes those numbers TRUE per-kernel GPU times.
 static int metal_perop_enabled(void) {
   static int known = 0;
   static int enabled = 0;
   if (!known) {
     char const *e = getenv("THVM_METAL_PROFILE_PEROP");
-    enabled = (e != NULL && e[0] == '1');
+    enabled = (e != NULL && e[0] == '1') || cg_profile_kernel_enabled();
     known = 1;
   }
   return enabled;
@@ -1830,17 +1836,19 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
     resources[resource_count++] = cfgBuf;
   }
 
-  // Per-op GPU-timestamp profiling.  When THVM_METAL_PROFILE_PEROP=1,
-  // replace the single batched ICB execution with N per-op encoder
-  // dispatches; each cmd buffer commits + waits, then we read
-  // cmd.GPUEndTime - cmd.GPUStartTime for true per-kernel GPU time.
-  // Costs ~5-10x more dispatch overhead than the batched path -- only
-  // for explicit profile runs.  Without this, all kernels'
-  // cg_profile_record entries get the same averaged value
-  // (elapsed/n_ops), which is misleading for per-kernel rankings.
-  char const *e_perop = getenv("THVM_METAL_PROFILE_PEROP");
-  if (e_perop != NULL && e_perop[0] == '1') {
+  // Per-op GPU-timestamp profiling.  When metal_perop_enabled() (set by
+  // THVM_METAL_PROFILE_PEROP=1 or THVM_KERNEL_PROFILE=N), replace the
+  // single batched ICB execution with N per-op encoder dispatches; each
+  // cmd buffer commits + waits, then we read cmd.GPUEndTime -
+  // cmd.GPUStartTime for true per-kernel GPU time.  Costs ~5-10x more
+  // dispatch overhead than the batched path -- only for profile runs.
+  // Without this, the batched fallback below records the same averaged
+  // wall value (elapsed/n_ops) for every kernel and leaves gpu_us at
+  // zero -- both misleading for per-kernel rankings.  Here wall time is
+  // the real per-op encode+execute span and gpu_us the true GPU span.
+  if (metal_perop_enabled()) {
     for (u32 i = 0; i < n_ops; i++) {
+      u64 op_t0 = cg_now_us();
       id<MTLCommandBuffer> cmd_i = [METAL_QUEUE commandBuffer];
       if (cmd_i == nil) return -1;
       id<MTLComputeCommandEncoder> enc_i = [cmd_i computeCommandEncoder];
@@ -1854,9 +1862,11 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
       [enc_i endEncoding];
       [cmd_i commit];
       [cmd_i waitUntilCompleted];
+      cg_profile_record(ops[i].kid, KDISPATCH_METAL_TILE, cg_now_us() - op_t0);
       double gpu_seconds = cmd_i.GPUEndTime - cmd_i.GPUStartTime;
-      u64 gpu_us = gpu_seconds > 0.0 ? (u64)(gpu_seconds * 1e6) : 0;
-      cg_profile_record(ops[i].kid, KDISPATCH_METAL_TILE, gpu_us);
+      if (gpu_seconds > 0.0) {
+        cg_profile_record_gpu(ops[i].kid, (u64)(gpu_seconds * 1e6));
+      }
     }
     if (trace) {
       fprintf(stderr, "thvm: metal_graph replay perop n=%u\n", n_ops);
