@@ -10234,6 +10234,13 @@ static void atp_cp_set_interreduce(AtpState *s) {
     }
     s->ir_new_rule_top_syms = new_top_syms;
   }
+  // Populate the FT mirror once across the whole sweep so the per-CP
+  // FT normalize sees every live rule; the cached probe at
+  // atp_ft_mirror_ensure makes repeat calls O(1).  Mirrors the
+  // amortized site at atp_cp_trivially_joinable (_.c:10902).
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  atp_ft_mirror_ensure(s);
+#endif
   for (u32 i = 0; i < s->n_cps; i++) {
     u64 _cpir_unpack_t0 = atp_phase_now();
     // Eager Waisenmord (WM AP_generic head): a CP whose parent rule has
@@ -10331,12 +10338,38 @@ static void atp_cp_set_interreduce(AtpState *s) {
     if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
 
     u64 _cpir_norm_t0 = atp_phase_now();
-    Term l = atp_rewrite_normalize(s, ol,  s->lhs, s->rhs, s->n_rules, NORM_CAP);
-    Term r = atp_rewrite_normalize(s, orr, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    Term l, r;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // FT-path normalize: ft_from_term once on each side, then run the
+    // FT-native normalize (byte-identical to the Term-side path on the
+    // workloads this sweep exercises -- see project_ftnorm_andassoc_
+    // verify_break for the residual McCune-complementarity drift that
+    // the IR sweep does NOT touch).  Lever 5 mirror: pre-norm ft_eq
+    // short-circuits CPs whose sides are already syntactically equal
+    // after acp_unpack (saves two normalize calls + the post-norm eq).
+    AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *fl = ft_from_term(a, ol,  0);
+    AtpFtCell *fr = ft_from_term(a, orr, 0);
+    u8 joined_pre = (u8)ft_eq(fl, fr);
+    if (!joined_pre) {
+      fl = atp_rewrite_normalize_ft(s, fl, NORM_CAP);
+      fr = atp_rewrite_normalize_ft(s, fr, NORM_CAP);
+    }
+    u8 joined_ft = joined_pre ? 1u : (u8)ft_eq(fl, fr);
+    // Decode back to Term: the joined branch only needs ol/orr for the
+    // existing acp_free, but staying Term-side keeps the cookie / NF
+    // witness comparison byte-identical to the legacy path.
+    l = joined_ft ? ol  : ft_to_term(fl);
+    r = joined_ft ? orr : ft_to_term(fr);
+#else
+    l = atp_rewrite_normalize(s, ol,  s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    r = atp_rewrite_normalize(s, orr, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    u8 joined_ft = (u8)kbo_eq(l, r);
+#endif
     if (g_atp_phase_enabled) acc_norm += atp_now_us() - _cpir_norm_t0;
 
     u64 _cpir_pack_t0 = atp_phase_now();
-    if (kbo_eq(l, r)) {
+    if (joined_ft) {
       // Joinable under R -- the CP adds no equational consequence.  Drop
       // it (WM AP_generic returns WTI_Delete).
       s->n_cps_dropped_joinable++;
