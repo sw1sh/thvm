@@ -480,6 +480,9 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_set_gnn_scorer(WolframLibraryData libData,
 //                 / atp_trace_push_cp).
 //     steps    -- variable: per step  side, rule, fwd, pos_len,
 //                 pos[0..pos_len), before, after (packed Terms).
+//                 A multi-goal run tags side as 2*g + side (goal-major
+//                 order, see atp_extract_goal_chains); n_goals <= 1
+//                 keeps the historical 0/1 values.
 //   then the EXT-state blocks:
 //     ext_rules -- 2*ext_n_rules ints
 //     ext_steps -- variable: per step  side, rule, fwd, pos_len,
@@ -488,6 +491,33 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_set_gnn_scorer(WolframLibraryData libData,
 //                  front chains for a goal closed by the MNF search.
 //   WL walks the variable-width blocks with a cursor (pos_len
 //   drives the stride).
+
+// Per-goal proof extraction.  For a multi-goal conjunction, point the
+// state's single-goal alias at each conjunct in turn and extract that
+// conjunct's rewrite chain against the state's R (the saturation is
+// SHARED; only the chain start differs per goal).  Each emitted step's
+// `side` is tagged 2*g + side so the WL decoder can split the flat
+// steps block back into per-goal chains; n_goals <= 1 keeps the
+// historical 0/1 encoding (goal 0's tag is the identity).  A conjunct
+// whose two sides never meet under single-NF rewriting (e.g. one
+// closed by the MNF front search) contributes no steps; the WL side
+// detects the gap (a non-reflexive conjunct with an empty chain) and
+// falls back to the completion-lemma dataset.  Mutating the alias is
+// safe post-run: goals_lhs/goals_rhs are GC roots, and the extraction
+// reads only goal_lhs/goal_rhs.
+static u32 atp_extract_goal_chains(AtpState *s, AtpProofStep *out, u32 cap) {
+  if (s->n_goals <= 1u) return thvm_atp_proof_extract(s, out, cap);
+  u32 n = 0;
+  for (u32 g = 0; g < s->n_goals; g++) {
+    s->goal_lhs = s->goals_lhs[g];
+    s->goal_rhs = s->goals_rhs[g];
+    u32 ng = thvm_atp_proof_extract(s, out + n, cap - n);
+    for (u32 k = 0; k < ng; k++) out[n + k].side = 2u * g + out[n + k].side;
+    n += ng;
+  }
+  return n;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
                                              mint argc, MArgument *args,
                                              MArgument res) {
@@ -1040,9 +1070,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // (1) MAIN-state proof extraction: re-normalize both goal sides
   // under the completion-saturated R, recording every forward
   // rewrite.  A hard goal's chain cites completion-derived rules,
-  // each with an r_trace[] lineage into the trace DAG.
+  // each with an r_trace[] lineage into the trace DAG.  A multi-goal
+  // run extracts one chain per conjunct off the shared R, goal-tagged
+  // in `side` (see atp_extract_goal_chains).
   static AtpProofStep proof[ATP_PROOF_MAX_STEPS];
-  u32 n_steps  = thvm_atp_proof_extract(atp, proof, ATP_PROOF_MAX_STEPS);
+  u32 n_steps  = atp_extract_goal_chains(atp, proof, ATP_PROOF_MAX_STEPS);
   u32 n_rules  = atp->n_rules;
   u32 n_trace  = atp->n_trace;
 
@@ -1067,7 +1099,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   static AtpProofStep mnf_proof[ATP_PROOF_MAX_STEPS];
   u32 mnf_n_steps = 0;
 #ifdef ATP_MNF
-  if (use_mnf && st == ATP_PROVED && n_steps == 0) {
+  // Single-goal only: the MNF front set is seeded from the alias goal
+  // pair, so a multi-goal run has no one front set covering every
+  // conjunct -- an MNF-only conjunct surfaces as a per-goal extraction
+  // gap the WL side degrades on instead.
+  if (use_mnf && st == ATP_PROVED && n_steps == 0 && atp->n_goals <= 1u) {
     mnf_n_steps = thvm_atp_mnf_proof_extract(atp, mnf_proof,
                                              ATP_PROOF_MAX_STEPS);
   }
@@ -1106,11 +1142,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
           thvm_atp_orient_and_add(ext, lhs, rhs);
         }
       }
-      // The same goal set as the main state; proof extraction walks
-      // the alias pair (goals[0] until the multi-goal proof side
-      // lands per-goal extraction).
+      // The same goal set as the main state; a multi-goal run extracts
+      // one axiom-cited chain per conjunct, goal-tagged in `side`.
       atp_wire_install_goals(ext, &wire);
-      ext_n_steps = thvm_atp_proof_extract(ext, ext_proof, ATP_PROOF_MAX_STEPS);
+      ext_n_steps = atp_extract_goal_chains(ext, ext_proof,
+                                            ATP_PROOF_MAX_STEPS);
       ext_n_rules = ext->n_rules;
     }
   }

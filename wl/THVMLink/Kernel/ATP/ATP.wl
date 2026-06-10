@@ -62,10 +62,10 @@ Variables are written as x_ (Pattern[name, Blank[]]); with Witness options the r
 Options: MaxSteps, Witness, AllWitnesses, MaxDepth, MaxWitnesses."];
 
 GeneralUtilities`SetUsage[TFindProof, "TFindProof[conjecture$, axioms$] runs thvm's C equational-completion engine and returns a WL ProofObject (same head FindEquationalProof returns, with the full property interface: p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).
-TFindProof[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory; a multi-equation theorem (an n$-element list) returns one ProofObject per conjunct.
+TFindProof[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory; a multi-equation theorem (an n$-element list) is proved as one conjunction off a single saturation, returning ONE ProofObject with a {\"Hypothesis\", g$} / {\"Conclusion\", g$} row pair per conjunct (FindEquationalProof parity).
 TFindProof[conjecture$, \"Theory\"] proves the conjecture (an equation, a list of equations, or an Association whose Values are taken) against the named theory's axioms.
 TFindProof[axioms$] and TFindProof[\"Theory\"] saturate with no goal, returning a ProofObject whose Theorems is None; bound these with TimeConstraint since a non-terminating axiom set never saturates.
-Argument order is conjecture-first (matching FindEquationalProof); TATP is the axioms-first surface. Equations may be written lhs$ == rhs$, a pre-oriented rewrite rule, or a two-way rule (plus their Inactive forms). A List conjecture proves each element independently, returning the per-conjunct ProofObjects (all-or-$Failed by default).
+Argument order is conjecture-first (matching FindEquationalProof); TATP is the axioms-first surface. Equations may be written lhs$ == rhs$, a pre-oriented rewrite rule, or a two-way rule (plus their Inactive forms). A List conjecture is a multi-goal conjunction proved off ONE saturation: the result is one ProofObject whose Proof dataset carries one Hypothesis/Conclusion row pair per conjunct, $Failed unless every conjunct is proved; \"Status\" returns a single tag for the whole conjunction.
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
 Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"Precedence\", \"SkolemHighest\", \"FifoTiebreak\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
@@ -3186,33 +3186,27 @@ Options[TFindProof] = {
    list.  unquantifyFormula / CanonicalizePatterns normalize the
    quantified formulas (ForAll -> Pattern, Exists -> Skolem, then
    canonical variable names). *)
-(* Shared core for the theory-resolved forms: given the axiom theory
-   name and an already-resolved conjecture (a single equation or a list
-   of conjunct equations), drop irrelevant axioms and prove each
-   conjunct via the expression form.  A one-element list returns one
-   ProofObject; a longer list returns a list of them ($Failed if any
-   conjunct fails). *)
 (* Normalize a conjecture argument to a flat list of equation formulas.
    A NotableTheorem value is a list of conjuncts; an Association (e.g.
    the whole NotableTheorems table) contributes its Values; nesting is
-   flattened down to single ForAll / Equal formulas.  Equational
-   provability distributes over the conjunction, so each is proved
-   independently. *)
+   flattened down to single ForAll / Equal formulas.  A multi-element
+   result is proved as ONE multi-goal conjunction off a single
+   saturation (FindEquationalProof parity). *)
 atpConjList[cj_List] := Catenate[atpConjList /@ cj];
 atpConjList[cj_] := {cj};
 
 (* Shared core for the theory-resolved forms: resolve the named theory's
-   axioms, drop the ones irrelevant to the conjecture, and prove each
-   conjunct via the expression form.  One conjunct returns a single
-   ProofObject; several return a list ($Failed if any fails). *)
+   axioms, drop the ones irrelevant to the conjecture, and prove the
+   conjecture via the expression form.  One conjunct returns a single
+   ProofObject; a multi-conjunct theorem is ONE multi-goal conjunction,
+   returning ONE ProofObject with a {Hypothesis, g} / {Conclusion, g}
+   row pair per conjunct ($Failed unless every conjunct is proved). *)
 atpProveFromTheory[cjArg_, theory_String,
         opts:OptionsPattern[TFindProof]] :=
     atpProveFromTheory[cjArg, theory, "ProofObject", opts];
-(* The returnSpec threads through to each conjunct's expression-form
-   call: a single-conjunct theorem returns that conjunct's projection;
-   a multi-conjunct theorem returns a List of projections (only the
-   default "ProofObject" multi-conjunct case keeps the all-or-$Failed
-   contract). *)
+(* The returnSpec threads through to the expression-form call; a
+   multi-conjunct theorem returns ONE projection for the whole
+   conjunction (e.g. "Status" is a single tag). *)
 atpProveFromTheory[cjArg_, theory_String, returnSpec_,
         opts:OptionsPattern[TFindProof]] := Catch[
     Block[{axRaw, axioms, cjList = atpConjList[cjArg]},
@@ -3231,23 +3225,14 @@ atpProveFromTheory[cjArg_, theory_String, returnSpec_,
             TFindProof[
                 CanonicalizePatterns @ unquantifyFormula @ First[cjList],
                 axioms, returnSpec, opts],
-            (* Iterator var must NOT be a short name like `c` -- WL's
-               Table iter-scoping does not fully shadow a pre-existing
-               global binding (e.g. a user's outer `Do[..., {c, ...}]`),
-               so the iter leaks the caller's value into
-               unquantifyFormula's input and the encoder later sees a
-               raw Symbol where it expected an equation.  Use a private
-               name so the leak window closes. *)
-            Module[{proofs},
-                proofs = Table[
-                    TFindProof[
-                        CanonicalizePatterns @
-                            unquantifyFormula @ atpCjListIter$,
-                        axioms, returnSpec, opts],
-                    {atpCjListIter$, cjList}];
-                If[ returnSpec === "ProofObject"
-                        && ! AllTrue[proofs, MatchQ[#, _ProofObject] &],
-                    $Failed, proofs]]
+            (* Multi-conjunct theorem (e.g. BooleanAxioms DeMorgan):
+               one multi-goal conjunction proved off a single engine
+               saturation, returning ONE ProofObject with a
+               {Hypothesis, g} / {Conclusion, g} row pair per conjunct
+               (FindEquationalProof parity). *)
+            TFindProof[
+                CanonicalizePatterns /@ (unquantifyFormula /@ cjList),
+                axioms, returnSpec, opts]
         ]
     ],
     "TATPError"
@@ -3538,17 +3523,26 @@ atpNormalizeAxioms[ax_List] :=
             atpFlattenAxioms[Inactivate[ax, Equal]]]];
 (* A single Equal / Inactive[Equal] / ForAll axiom (no enclosing
    List) is a common shape -- the user pastes one ax directly.
-   Wrap in a 1-element List and re-dispatch. *)
-TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _Rule
-        | _TwoWayRule
+   Wrap in a 1-element List and re-dispatch.  A pre-oriented Rule
+   axiom's lhs is a TERM (a symbol or compound), never one of
+   TFindProof's option keys -- exclude those (plus String-keyed
+   options) so an options-only call like `TFindProof[axioms,
+   TimeConstraint -> 10]` (the completion form) does not match here
+   with the option read as a Rule axiom. *)
+TFindProof[conjecture_,
+        axiom : (_Equal | _Unequal | _ForAll | _TwoWayRule
         | Inactive[Equal][_, _] | Inactive[Unequal][_, _]
-        | Inactive[Rule][_, _] | Inactive[TwoWayRule][_, _]),
+        | Inactive[Rule][_, _] | Inactive[TwoWayRule][_, _]
+        | Rule[Except[MaxSteps | Method | TimeConstraint
+            | PortfolioFrontLoad | _String], _]),
         opts:OptionsPattern[]] :=
     TFindProof[conjecture, {axiom}, opts];
-TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _Rule
-        | _TwoWayRule
+TFindProof[conjecture_,
+        axiom : (_Equal | _Unequal | _ForAll | _TwoWayRule
         | Inactive[Equal][_, _] | Inactive[Unequal][_, _]
-        | Inactive[Rule][_, _] | Inactive[TwoWayRule][_, _]),
+        | Inactive[Rule][_, _] | Inactive[TwoWayRule][_, _]
+        | Rule[Except[MaxSteps | Method | TimeConstraint
+            | PortfolioFrontLoad | _String], _]),
         returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
     TFindProof[conjecture, {axiom}, returnSpec, opts];
 
@@ -3567,28 +3561,15 @@ TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _Rule
    [[project_atp_tfindproof_iter_leak]]. *)
 
 
-(* A LIST of conjectures against an explicit axiom list: prove each
-   conjunct on its own, mirroring the named-theory multi-conjunct path
-   (atpProveFromTheory's Table).  Default "ProofObject" keeps the
-   all-or-$Failed contract; an explicit returnSpec returns the per-
-   conjunct projections unconditionally.  List-in, list-out -- even a
-   1-element conjecture list returns a 1-element result list.  The
-   iterator name is package-private for the same iter-leak reason as
-   atpProveFromTheory's (a short Global name would not be fully
-   shadowed by Table's scoping). *)
-TFindProof[cjs_List, axioms_List, opts:OptionsPattern[]] :=
-    Module[{atpProofs$},
-        atpProofs$ = Table[
-            TFindProof[atpCjListIter$, axioms, opts],
-            {atpCjListIter$, cjs}];
-        If[ AllTrue[atpProofs$, MatchQ[#, _ProofObject] &],
-            atpProofs$, $Failed]];
-TFindProof[cjs_List, axioms_List,
-        returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
-    Table[
-        TFindProof[atpCjListIter$, axioms, returnSpec, opts],
-        {atpCjListIter$, cjs}];
-
+(* A LIST of conjectures is a multi-goal CONJUNCTION: the generic
+   expression form below threads it whole into atpProveBundle, where
+   the encoder packs every conjunct onto one wire and the C engine
+   proves all of them off ONE saturation (goals_joined_mask latches
+   per-conjunct joins; PROVED only when every bit is set).  The result
+   is ONE ProofObject whose Proof dataset carries a {Hypothesis, g} /
+   {Conclusion, g} row pair per conjunct -- FindEquationalProof's
+   multi-goal shape -- or $Failed unless EVERY conjunct is proved.
+   "Status" likewise returns a single tag for the whole conjunction. *)
 TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     Quiet[Block[{
             Global`a, Global`b, Global`c, Global`d, Global`e,
@@ -3703,11 +3684,12 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
         atpR],
     (* Single config. *)
     Block[{
-        enc, conjPair, axiomKeys, ruleList, cRes, extSteps,
+        enc, conjPair, nGoals, axiomKeys, ruleList, cRes, extSteps,
         chain, dataset, varNames, axEq, conjStmt, po, relAx, atpWallTime
     },
         enc = atpEncodeProblem[axioms, conjecture, True];
         conjPair = enc["ConjPair"];
+        nGoals = Length[enc["ConjPairs"]];
         relAx = TRelevantAxioms[conjecture, axioms, Method -> OptionValue[Method]];
         axiomKeys = Table[{$AxiomSym, k}, {k, Length[enc["AxPairs"]]}];
         ruleList = buildRuleList[enc["AxPairs"], axiomKeys];
@@ -3729,18 +3711,33 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
            SubstitutionLemma / Conclusion entries verify. *)
         dataset = $Failed;
         If[ extSteps =!= $Failed,
-            Which[
-                extSteps === {},
-                    If[ conjPair[[1]] === conjPair[[2]],
-                        dataset = assembleDataset[enc["AxPairs"],
-                            conjPair, {}, ruleList]
-                    ],
-                True,
-                    chain = buildCEngineChain[extSteps, conjPair, ruleList];
-                    If[ chain =!= $Failed,
-                        dataset = assembleDataset[enc["AxPairs"],
-                            conjPair, chain, ruleList]
-                    ]
+            If[ nGoals > 1,
+                (* Multi-goal conjunction: one axiom-cited chain per
+                   conjunct off the shared run (the bridge goal-tags
+                   each step's Side); buildCEngineChains is $Failed
+                   when any conjunct's chain is missing or not
+                   expressible over the axioms, and an all-reflexive
+                   conjunction yields all-empty chains, which
+                   assembleGoalsDataset closes trivially. *)
+                chain = buildCEngineChains[extSteps,
+                    enc["ConjPairs"], ruleList];
+                If[ chain =!= $Failed,
+                    dataset = assembleGoalsDataset[enc["AxPairs"],
+                        enc["ConjPairs"], chain, ruleList]
+                ],
+                Which[
+                    extSteps === {},
+                        If[ conjPair[[1]] === conjPair[[2]],
+                            dataset = assembleDataset[enc["AxPairs"],
+                                conjPair, {}, ruleList]
+                        ],
+                    True,
+                        chain = buildCEngineChain[extSteps, conjPair, ruleList];
+                        If[ chain =!= $Failed,
+                            dataset = assembleDataset[enc["AxPairs"],
+                                conjPair, chain, ruleList]
+                        ]
+                ]
             ]
         ];
         (* Fallback: the EXT chain could not close (or could not be
@@ -3756,7 +3753,12 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
            WL's verifier; only a verifying proof is returned. *)
         varNames = cRes["VarSyms"];
         axEq = holdToInactive /@ enc["AxHCsRaw"];
-        conjStmt = holdToInactive[enc["ConjHCRaw"]];
+        (* Multi-goal "ConjHCRaw" is the LIST of held conjuncts; the
+           ProofObject statement is then the list of goal equations,
+           matching FindEquationalProof's Theorems for a conjunction. *)
+        conjStmt = If[ nGoals > 1,
+            holdToInactive /@ enc["ConjHCRaw"],
+            holdToInactive[enc["ConjHCRaw"]]];
         Module[{tryBuild, poA, poB, poFinal},
             (* Raise $RecursionLimit: a long completion proof (the deep
                Sheffer/Wolfram theorems run to ~300+ steps) walks a deep

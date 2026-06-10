@@ -168,11 +168,11 @@ buildRuleList[axioms_, axiomKeys_] := Flatten[
    a Direction-2 step makes the verifier read the axiom's `lhs ==
    rhs` Statement as the rule `rhs -> lhs` -- exactly the backward
    rewrite the chain applied. *)
-chainEntry[stepRec_, isLast_, lemmaIdx_, prevKey_, ruleEntry_] := Block[{
+chainEntry[stepRec_, isLast_, lemmaIdx_, prevKey_, ruleEntry_, concIdx_] := Block[{
     stepKey, absPos, side, relPos, statement
 },
     stepKey = If[ isLast,
-        {$ConclusionSym, 1},
+        {$ConclusionSym, concIdx},
         {$SubstitutionLemmaSym, lemmaIdx}
     ];
     absPos = stepRec["Position"];
@@ -198,12 +198,14 @@ chainEntry[stepRec_, isLast_, lemmaIdx_, prevKey_, ruleEntry_] := Block[{
 
 (* Degenerate "Conclusion" entry for the trivial-tautology case
    (the conjecture was already x == x).  Points back to the
-   Hypothesis with no rule applied. *)
-trivialConclusionEntry[hypInactive_] := {$ConclusionSym, 1} -> <|
+   Hypothesis with no rule applied.  `concIdx` is the goal index --
+   conjunct g of a multi-goal conjunction closes {Hypothesis, g}
+   into {Conclusion, g}; a single goal is g == 1. *)
+trivialConclusionEntry[hypInactive_, concIdx_] := {$ConclusionSym, concIdx} -> <|
     "Statement" -> toHoldEq[hypInactive],
     "Proof" -> <|
-        "Input" -> {$HypothesisSym, 1},
-        "Construct" -> {$HypothesisSym, 1},
+        "Input" -> {$HypothesisSym, concIdx},
+        "Construct" -> {$HypothesisSym, concIdx},
         "Position" -> {},
         "Rule" -> Rule @@ {hypInactive[[1]], hypInactive[[1]]},
         "Orientation" -> 1,
@@ -215,49 +217,63 @@ trivialConclusionEntry[hypInactive_] := {$ConclusionSym, 1} -> <|
     |>
 |>
 
-(* Assemble the sorted ProofDataset from a finished rewrite chain.
-   `chain` is a list of step records (<|NewExpr, Position, RuleIdx,
-   Rule|>); `ruleList` is the forward+backward rule table the
-   RuleIdx fields index into. *)
-assembleDataset[axioms_, conjecture_, chain_, ruleList_] := Block[{
-    axCount = Length[axioms], axiomKeys, hypInactive,
-    axiomEntries, chainEntries, allEntries
+(* Assemble the sorted ProofDataset from finished rewrite chains, one
+   per goal (FindEquationalProof multi-goal parity: one {Hypothesis, g}
+   and one {Conclusion, g} row per conjunct, SubstitutionLemma rows
+   numbered globally across the goals).  `conjPairs` and `chains` are
+   parallel lists; each chain is a list of step records (<|NewExpr,
+   Position, RuleIdx, Rule|>); `ruleList` is the forward+backward rule
+   table the RuleIdx fields index into.  An empty chain is the
+   trivial-tautology case for that conjunct. *)
+assembleGoalsDataset[axioms_, conjPairs_, chains_, ruleList_] := Block[{
+    axCount = Length[axioms], hypsInactive,
+    axiomEntries, hypEntries, slN = 0, chainEntries, allEntries
 },
-    hypInactive = Inactive[Equal] @@ conjecture;
-    axiomKeys = Table[{$AxiomSym, k}, {k, axCount}];
+    hypsInactive = Inactive[Equal] @@ # & /@ conjPairs;
     axiomEntries = Table[
-        axiomKeys[[k]] -> <|
+        {$AxiomSym, k} -> <|
             "Statement" -> toHoldEq[Inactive[Equal] @@ axioms[[k]]],
             "Proof" -> <||>
         |>,
         {k, axCount}
     ];
-    chainEntries = Table[
-        chainEntry[
-            chain[[s]],
-            s === Length[chain],
-            If[ s === Length[chain], 1, s],
-            If[ s === 1,
-                {$HypothesisSym, 1},
-                {$SubstitutionLemmaSym, s - 1}
-            ],
-            ruleList[[chain[[s, "RuleIdx"]]]]
-        ],
-        {s, Length[chain]}
-    ];
-    allEntries = Join[
-        axiomEntries,
-        {{$HypothesisSym, 1} -> <|
-            "Statement" -> toHoldEq[hypInactive],
+    hypEntries = Table[
+        {$HypothesisSym, g} -> <|
+            "Statement" -> toHoldEq[hypsInactive[[g]]],
             "Proof" -> <||>
-        |>},
-        If[ chain === {},
-            {trivialConclusionEntry[hypInactive]},
-            chainEntries
-        ]
+        |>,
+        {g, Length[conjPairs]}
     ];
+    chainEntries = Join @@ Table[
+        Block[{chain = chains[[g]], base = slN},
+            If[ chain === {},
+                {trivialConclusionEntry[hypsInactive[[g]], g]},
+                slN += Length[chain] - 1;
+                Table[
+                    chainEntry[
+                        chain[[s]],
+                        s === Length[chain],
+                        base + s,
+                        If[ s === 1,
+                            {$HypothesisSym, g},
+                            {$SubstitutionLemmaSym, base + s - 1}
+                        ],
+                        ruleList[[chain[[s, "RuleIdx"]]]],
+                        g
+                    ],
+                    {s, Length[chain]}
+                ]
+            ]
+        ],
+        {g, Length[conjPairs]}
+    ];
+    allEntries = Join[axiomEntries, hypEntries, chainEntries];
     SortBy[allEntries, $ProofKeyOrder[First[#]] &]
 ]
+
+(* Single-goal surface kept for the existing call sites. *)
+assembleDataset[axioms_, conjPair_, chain_, ruleList_] :=
+    assembleGoalsDataset[axioms, {conjPair}, {chain}, ruleList]
 
 $ProofKeyOrder[{"Axiom", k_}] := {1, k}
 $ProofKeyOrder[{"Hypothesis", k_}] := {2, k}
@@ -664,6 +680,32 @@ buildCEngineChain[steps_, conjPair_, ruleList_] := Catch[
     ]
 ]
 
+(* Split a flat multi-goal steps block into one chain per conjunct.
+   The C bridge tags each step's Side as 2*g + side (goal-major
+   order, atp_extract_goal_chains in thvmlink_atp.c), so goal g's
+   steps are the Quotient[Side, 2] == g slice with Side reduced back
+   to the 0/1 lhs/rhs encoding.  An empty slice is legitimate only
+   for a reflexive conjunct -- a non-reflexive conjunct with no steps
+   means its chain was not single-NF extractable (an MNF-only join),
+   so the whole extraction fails and the caller degrades to the
+   completion-lemma dataset.  Returns the list of per-goal chains, or
+   $Failed. *)
+buildCEngineChains[steps_, conjPairs_, ruleList_] := Catch[
+    Table[
+        Block[{gSteps, chain},
+            gSteps = Select[steps, Quotient[#["Side"], 2] === g - 1 &];
+            gSteps = Append[#, "Side" -> Mod[#["Side"], 2]] & /@ gSteps;
+            If[ gSteps === {} && conjPairs[[g, 1]] =!= conjPairs[[g, 2]],
+                atpDbgFail["buildCEngineChains.unjoined-goal"];
+                Throw[$Failed]];
+            chain = buildCEngineChain[gSteps, conjPairs[[g]], ruleList];
+            If[ chain === $Failed, Throw[$Failed]];
+            chain
+        ],
+        {g, Length[conjPairs]}
+    ]
+]
+
 (* === critical-pair lemma DAG ====================================== *)
 
 (* Trace-entry reasons (src/thvm.h): an input / re-queued equation,
@@ -920,7 +962,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         inProgress, aliveRulesAt, slN, cpN, axiomKeyFor, rewriteOnce,
         prepareRules, runBfs, reverseBfsPath, emitNorm, resolveCp,
         resolveTrace, resolveRule, axiomEntries,
-        cjp, hypKey, chainEntries, runEq, prevChainKey, allEntries,
+        cjp, nGoals, cjps, splitTrivial, chainEntries, allEntries,
         stmt, l2n, i2n, dterm, tL, tR
     },
         varSyms = cRes["VarSyms"];
@@ -1550,8 +1592,6 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             |>,
             {n, Length[axPairs]}
         ];
-        hypKey = {$HypothesisSym, 1};
-
         (* No-goal saturation: the conjPair is (0, 0) and mainSteps is
            empty.  Drive resolveTrace over each surviving main-rule
            (resolveRule maps live-rule index -> trace index), so the
@@ -1566,83 +1606,25 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 {k, Length[mainRules]}];
             Throw[Join[axiomEntries, entries]]];
 
-        (* the goal chain: each MainStep rewrites one side of the
-           running equation, citing its (resolved) rule. *)
-        If[ mainSteps === {},
-            atpDbgFail["buildCplDataset.empty-mainSteps"]; Throw[$Failed]];
-        runEq = cjp;
-        prevChainKey = hypKey;
-        chainEntries = Table[
-            Block[{step = mainSteps[[s]], cInfo, cKey, mr, dir, ori,
-                   ruleEq, newEq, st, isLast, key, inKey},
-                (* MNF cites its rule by TRACE index (resolveTrace),
-                   completion cites by live-rule index (resolveRule ->
-                   rTrace -> resolveTrace).  Both land on the same
-                   Axiom / CriticalPairLemma key; mr is the rule's
-                   oriented equation, read off mainRules for a live
-                   rule or the trace node for an MNF citation. *)
-                cInfo = If[ usingMnf, resolveTrace[step["RuleC"]],
-                    resolveRule[step["RuleC"]]];
-                cKey = cInfo["Key"];
-                mr = If[ usingMnf,
-                    With[{te = trace[[step["RuleC"] + 1]]},
-                        {tL[te], tR[te]}],
-                    mainRules[[step["RuleC"] + 1]]];
-                (* Ordered rewriting in the C engine fires whichever
-                   direction strictly decreases the redex.  Fwd = 1
-                   for an lhs->rhs application, 0 for rhs->lhs.  The
-                   verifier reads the Construct's Statement direction
-                   determined by Orientation = step-direction * entry-
-                   vs-rule alignment, so the SubstitutionLemma replays
-                   the same rewrite. *)
-                dir = If[ step["Fwd"] === 1, 1, -1];
-                ori = dir * cplOrient[cInfo["Eq"], mr, varSyms];
-                ruleEq = If[ dir === -1, Reverse[mr], mr];
-                newEq = ReplacePart[runEq,
-                    step["Side"] + 1 -> step["After"]];
-                runEq = newEq;
-                isLast = s === Length[mainSteps];
-                key = If[ isLast, {$ConclusionSym, 1},
-                    {$SubstitutionLemmaSym, ++slN}];
-                inKey = prevChainKey;
-                prevChainKey = key;
-                st = stmt[newEq];
-                key -> <|
-                    "Statement" -> st,
-                    "Proof" -> <|
-                        "Input" -> inKey,
-                        "Construct" -> cKey,
-                        "Position" -> step["PosPath"],
-                        "Rule" -> cplAsRule[ruleEq, varSyms],
-                        "Orientation" -> ori,
-                        "ConstructSide" -> 1,
-                        "InputOrientation" -> 1,
-                        "Side" -> step["Side"] + 1,
-                        "OutputExpression" -> st,
-                        "Source" -> "cpl"
-                    |>
-                |>
-            ],
-            {s, Length[mainSteps]}
-        ];
+        (* The per-conjunct goal pairs: cjp is the single {lhs, rhs}
+           when there is one goal, and already the list of pairs for a
+           multi-goal conjunction (atpEncodeProblem's "ConjPair"
+           shape). *)
+        nGoals = Length[enc["ConjPairs"]];
+        cjps = If[ nGoals > 1, cjp, {cjp}];
 
-        (* Order is axioms, hypothesis, then `entries` in emission
-           order -- resolveTrace is depth-first, so a lemma is
-           always emitted after the entries it cites -- then the
-           goal chain.  The verifier replays entries in order and
-           needs every Construct / Input already defined, so this
-           dependency order must NOT be re-sorted. *)
-        (* WM-CLI parity: if the last chain entry is a Conclusion whose
-           Statement is a trivial `lhs == lhs` (i.e. the last rewrite
-           landed on an identity), WM emits TWO entries -- the normalize
-           step as a SubstitutionLemma, then a trivial Conclusion -- where
-           thvm currently emits ONE Conclusion with Source -> "cpl".  Split
-           to match the CLI sequence (parity_wm_wmcli +1 trajectory gap on
+        (* WM-CLI parity: if a goal chain's Conclusion Statement is a
+           trivial `lhs == lhs` (i.e. the last rewrite landed on an
+           identity), WM emits TWO entries -- the normalize step as a
+           SubstitutionLemma, then a trivial Conclusion -- where thvm
+           would emit ONE Conclusion with Source -> "cpl".  Split to
+           match the CLI sequence (parity_wm_wmcli +1 trajectory gap on
            every AbelianGroup/Group/Boolean case). *)
-        If[ Length[chainEntries] > 0 &&
-            chainEntries[[-1, 1, 1]] === $ConclusionSym &&
-            Extract[chainEntries[[-1, 2, "Statement"]], {1, 1}, HoldForm] === Extract[chainEntries[[-1, 2, "Statement"]], {1, 2}, HoldForm],
-            Module[{lastEntry = chainEntries[[-1]], lastProof, lastStmt,
+        splitTrivial[goalEntries_, g_] := If[
+            Length[goalEntries] > 0 &&
+            goalEntries[[-1, 1, 1]] === $ConclusionSym &&
+            Extract[goalEntries[[-1, 2, "Statement"]], {1, 1}, HoldForm] === Extract[goalEntries[[-1, 2, "Statement"]], {1, 2}, HoldForm],
+            Module[{lastEntry = goalEntries[[-1]], lastProof, lastStmt,
                     lhsHF, newSlKey, newSubLem, newConclusion},
                 lastStmt = lastEntry[[2, "Statement"]];
                 lastProof = lastEntry[[2, "Proof"]];
@@ -1653,7 +1635,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                     "Statement" -> lastStmt,
                     "Proof" -> Append[lastProof, "Source" -> "norm"]
                 |>;
-                newConclusion = {$ConclusionSym, 1} -> <|
+                newConclusion = {$ConclusionSym, g} -> <|
                     "Statement" -> lastStmt,
                     "Proof" -> <|
                         "Input" -> newSlKey,
@@ -1668,19 +1650,116 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         "Source" -> "trivial"
                     |>
                 |>;
-                chainEntries = Join[
-                    Most[chainEntries],
-                    {newSubLem, newConclusion}
-                ];
-            ]
+                Join[Most[goalEntries], {newSubLem, newConclusion}]
+            ],
+            goalEntries
         ];
 
+        (* the goal chains: conjunct g's MainSteps slice rewrites one
+           side of that conjunct's running equation, citing its
+           (resolved) rule, and closes into {Conclusion, g}.  A
+           multi-goal step's Side is tagged 2*g + side by the C bridge
+           (atp_extract_goal_chains); nGoals == 1 keeps the historical
+           0/1 values, where the Quotient/Mod split is the identity.
+           An empty slice is legitimate only for a reflexive conjunct
+           -- a non-reflexive conjunct with no steps (an MNF-only join
+           inside a conjunction) is not single-NF expressible, so the
+           lift fails. *)
+        chainEntries = Join @@ Table[
+            Block[{gSteps, runEq, prevChainKey},
+                gSteps = Select[mainSteps,
+                    Quotient[#["Side"], 2] === g - 1 &];
+                gSteps = Append[#, "Side" -> Mod[#["Side"], 2]] & /@ gSteps;
+                runEq = cjps[[g]];
+                prevChainKey = {$HypothesisSym, g};
+                If[ gSteps === {},
+                    If[ runEq[[1]] === runEq[[2]],
+                        {trivialConclusionEntry[
+                            Inactive[Equal] @@ runEq, g]},
+                        atpDbgFail["buildCplDataset.empty-goal-chain"];
+                        Throw[$Failed]],
+                    splitTrivial[
+                        Table[
+                            Block[{step = gSteps[[s]], cInfo, cKey, mr,
+                                   dir, ori, ruleEq, newEq, st, isLast,
+                                   key, inKey},
+                                (* MNF cites its rule by TRACE index
+                                   (resolveTrace), completion cites by
+                                   live-rule index (resolveRule ->
+                                   rTrace -> resolveTrace).  Both land
+                                   on the same Axiom /
+                                   CriticalPairLemma key; mr is the
+                                   rule's oriented equation, read off
+                                   mainRules for a live rule or the
+                                   trace node for an MNF citation. *)
+                                cInfo = If[ usingMnf,
+                                    resolveTrace[step["RuleC"]],
+                                    resolveRule[step["RuleC"]]];
+                                cKey = cInfo["Key"];
+                                mr = If[ usingMnf,
+                                    With[{te = trace[[step["RuleC"] + 1]]},
+                                        {tL[te], tR[te]}],
+                                    mainRules[[step["RuleC"] + 1]]];
+                                (* Ordered rewriting in the C engine
+                                   fires whichever direction strictly
+                                   decreases the redex.  Fwd = 1 for an
+                                   lhs->rhs application, 0 for
+                                   rhs->lhs.  The verifier reads the
+                                   Construct's Statement direction
+                                   determined by Orientation =
+                                   step-direction * entry-vs-rule
+                                   alignment, so the SubstitutionLemma
+                                   replays the same rewrite. *)
+                                dir = If[ step["Fwd"] === 1, 1, -1];
+                                ori = dir * cplOrient[cInfo["Eq"], mr, varSyms];
+                                ruleEq = If[ dir === -1, Reverse[mr], mr];
+                                newEq = ReplacePart[runEq,
+                                    step["Side"] + 1 -> step["After"]];
+                                runEq = newEq;
+                                isLast = s === Length[gSteps];
+                                key = If[ isLast, {$ConclusionSym, g},
+                                    {$SubstitutionLemmaSym, ++slN}];
+                                inKey = prevChainKey;
+                                prevChainKey = key;
+                                st = stmt[newEq];
+                                key -> <|
+                                    "Statement" -> st,
+                                    "Proof" -> <|
+                                        "Input" -> inKey,
+                                        "Construct" -> cKey,
+                                        "Position" -> step["PosPath"],
+                                        "Rule" -> cplAsRule[ruleEq, varSyms],
+                                        "Orientation" -> ori,
+                                        "ConstructSide" -> 1,
+                                        "InputOrientation" -> 1,
+                                        "Side" -> step["Side"] + 1,
+                                        "OutputExpression" -> st,
+                                        "Source" -> "cpl"
+                                    |>
+                                |>
+                            ],
+                            {s, Length[gSteps]}
+                        ],
+                        g]
+                ]
+            ],
+            {g, Length[cjps]}
+        ];
+
+        (* Order is axioms, hypotheses, then `entries` in emission
+           order -- resolveTrace is depth-first, so a lemma is
+           always emitted after the entries it cites -- then the
+           goal chains.  The verifier replays entries in order and
+           needs every Construct / Input already defined, so this
+           dependency order must NOT be re-sorted. *)
         allEntries = Join[
             axiomEntries,
-            {hypKey -> <|
-                "Statement" -> stmt[cjp],
-                "Proof" -> <||>
-            |>},
+            Table[
+                {$HypothesisSym, g} -> <|
+                    "Statement" -> stmt[cjps[[g]]],
+                    "Proof" -> <||>
+                |>,
+                {g, Length[cjps]}],
             entries,
             chainEntries
         ];

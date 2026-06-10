@@ -10521,10 +10521,17 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     // The MNF front search runs against the CURRENT alias conjunct
     // only (its fronts are seeded from goal_lhs/goal_rhs);
     // atp_goals_alias above dropped a front set seeded from a
-    // previously-aliased goal.
+    // previously-aliased goal.  LOOP across conjuncts: each join
+    // re-aliases to the next unjoined one (dropping the consumed
+    // front set) and gives IT an MNF budget in the same call --
+    // otherwise a conjunction whose every conjunct is MNF-only and
+    // whose CP queue is already empty dies QUEUE_EMPTY after closing
+    // just one conjunct per step.  Terminates: every successful
+    // mnf_step latches one more mask bit; a failed one breaks.
     if (s->use_mnf) {
-      if (s->mnf == NULL) s->mnf = mnf_create(s);
-      if (s->mnf != NULL && mnf_step(s, s->mnf, MNF_BUDGET)) {
+      for (;;) {
+        if (s->mnf == NULL) s->mnf = mnf_create(s);
+        if (s->mnf == NULL || !mnf_step(s, s->mnf, MNF_BUDGET)) break;
         s->goals_joined_mask |= (u64)1 << atp_goals_first_unjoined(s);
         if (s->goals_joined_mask == all_mask) return ATP_PROVED;
         atp_goals_alias(s, atp_goals_first_unjoined(s));

@@ -827,6 +827,33 @@ int main(void) {
     }
   }
 
+#ifdef ATP_MNF
+  TEST_BEGIN("atp/run-multi-goal-mnf-only-conjuncts-prove-on-empty-queue");
+  {
+    // Pre-oriented KBO-INCREASING ground rules (e -> a -> c8): the
+    // single-NF goal check cannot close any conjunct (ordered
+    // rewriting refuses the increasing direction), only the MNF front
+    // search joins them -- and the CP queue is empty from step one.
+    // goal_check must therefore give EVERY unjoined conjunct an MNF
+    // budget within ONE call: with one join per call the run dies
+    // QUEUE_EMPTY right after the first conjunct closes (the
+    // regression the multi-goal MNF loop fixes).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_mnf(s, 1);
+    Term c1 = mk_e();                     // label 1
+    Term c2 = mk_a();                     // label 4
+    Term c3 = term_new_ctr(8u, NULL, 0);  // label 8
+    thvm_atp_install_oriented_rule(s, c1, c2);
+    thvm_atp_install_oriented_rule(s, c2, c3);
+    Term gl[2] = { c1, c1 };
+    Term gr[2] = { c3, c2 };
+    CHECK_EQ((int)thvm_atp_set_goals(s, gl, gr, 2), 1);
+    CHECK_EQ((int)thvm_atp_run(s), (int)ATP_PROVED);
+    CHECK_EQ((unsigned)s->goals_joined_mask, 3u);
+    thvm_atp_free(s);
+  }
+#endif
+
   TEST_BEGIN("atp/set-goals-clear-and-cap");
   {
     // n == 0 clears back to completion mode; n > ATP_MAX_GOALS is

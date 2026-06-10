@@ -742,27 +742,30 @@ VerificationTest[
 
 (* AxiomaticTheory ships some NotableTheorems as a multi-element list
    of equations -- e.g. BooleanAxioms `DeMorgan` is the pair of De
-   Morgan laws.  The string form proves each conjunct separately and
-   returns a List of ProofObjects (equational provability distributes
-   over conjunction). *)
+   Morgan laws.  The string form proves the pair as ONE multi-goal
+   conjunction off a single saturation and returns ONE ProofObject
+   with a {Hypothesis, g} / {Conclusion, g} row pair per conjunct
+   (FindEquationalProof parity).  TimeConstraint bounds the portfolio:
+   the front-loaded VampireUEQ slice does not close the conjunction
+   and its memory grows for its whole wall slice; the budget moves the
+   schedule on to the Mix2 config, which proves it in well under a
+   second. *)
 
 VerificationTest[
-    MatchQ[
-        TFindProof["DeMorgan", "BooleanAxioms"],
-        {_ProofObject, _ProofObject}
-    ],
-    True,
+    Head @ TFindProof["DeMorgan", "BooleanAxioms", TimeConstraint -> 30],
+    ProofObject,
     TestID -> "ATP/TFEP/multi-eq-demorgan-proves"
 ]
 
 VerificationTest[
-    Module[{ps},
-        ps = TFindProof["DeMorgan", "BooleanAxioms"];
-        AllTrue[ps,
-            Head @ Quiet @ Check[
-                #["ProofFunction"][#["Theorems"]], $Failed] === Success &]
+    Module[{po, ks},
+        po = TFindProof["DeMorgan", "BooleanAxioms", TimeConstraint -> 30];
+        ks = Keys @ Normal @ po["Proof"];
+        {SubsetQ[ks, {{"Hypothesis", 1}, {"Hypothesis", 2},
+             {"Conclusion", 1}, {"Conclusion", 2}}],
+         Head @ Quiet @ Check[po["ProofFunction"][], $Failed]}
     ],
-    True,
+    {True, Success},
     TestID -> "ATP/TFEP/multi-eq-demorgan-verifies"
 ]
 
@@ -916,17 +919,28 @@ VerificationTest[
 ];
 
 VerificationTest[
-    (* A LIST of conjectures against an explicit axiom list proves each
-       element independently, mirroring the named-theory multi-conjunct
-       path.  Default return: all-or-$Failed (second case -- `a == q` is
-       not provable, so the whole call is $Failed).  An explicit
-       returnSpec instead returns the per-conjunct projections. *)
-    {Head /@ TFindProof[{a == c, a == b}, {a -> b, b -> c},
-         TimeConstraint -> 10],
-     TFindProof[{a == c, a == q}, {a -> b, b -> c}, TimeConstraint -> 5],
-     TFindProof[{a == c, a == q}, {a -> b, b -> c}, "Status",
-         TimeConstraint -> 5]},
-    {{ProofObject, ProofObject}, $Failed, {"Proved", "Saturated"}},
+    (* A LIST of conjectures against an explicit axiom list is a
+       multi-goal CONJUNCTION proved off ONE saturation
+       (FindEquationalProof parity): ONE ProofObject whose Proof
+       dataset carries a {Hypothesis, g} / {Conclusion, g} row pair
+       per conjunct and whose ProofFunction verifies.  An unprovable
+       conjunct fails the whole conjunction ($Failed), and "Status"
+       is a single tag for the conjunction. *)
+    Module[{po, ks},
+        po = TFindProof[{a == c, a == b}, {a -> b, b -> c},
+            TimeConstraint -> 10];
+        ks = If[ MatchQ[po, _ProofObject],
+            Keys @ Normal @ po["Proof"], {}];
+        {Head[po],
+         SubsetQ[ks, {{"Hypothesis", 1}, {"Hypothesis", 2},
+             {"Conclusion", 1}, {"Conclusion", 2}}],
+         Head @ Quiet @ Check[po["ProofFunction"][], $Failed],
+         TFindProof[{a == c, a == q}, {a -> b, b -> c},
+             TimeConstraint -> 5],
+         TFindProof[{a == c, a == q}, {a -> b, b -> c}, "Status",
+             TimeConstraint -> 5]}
+    ],
+    {ProofObject, True, Success, $Failed, "Saturated"},
     TestID -> "ATP/multi-goal/explicit-axioms-list"
 ];
 
@@ -1572,26 +1586,33 @@ VerificationTest[
    introspectives. *)
 
 (* Completion of an explicit AC axiom set: a finite complete system, so
-   it saturates fast (bound at 10s for safety) and returns a non-empty
-   list of inert Equal lemmas. *)
+   it saturates fast (bound at 10s for safety).  The default return is
+   a no-goal ProofObject (Theorems -> None); the "Lemmas" spec returns
+   the saturated rule set as a non-empty list of inert Equal lemmas.
+   (An options-only second argument must dispatch to the completion
+   form, not match the single-Rule-axiom wrap.) *)
 VerificationTest[
-    Module[{res},
-        res = TFindProof[
+    Module[{po, lem},
+        po = TFindProof[
             {f[f[x, y], z] == f[x, f[y, z]], f[x, y] == f[y, x]},
             TimeConstraint -> 10];
-        {MatchQ[res, {__}],
-         AllTrue[res, MatchQ[#, Inactive[Equal][_, _]] &]}
+        lem = TFindProof[
+            {f[f[x, y], z] == f[x, f[y, z]], f[x, y] == f[y, x]},
+            "Lemmas", TimeConstraint -> 10];
+        {Head[po], po["Theorems"], MatchQ[lem, {__}],
+         AllTrue[lem, MatchQ[#, Inactive[Equal][_, _]] &]}
     ],
-    {True, True},
+    {ProofObject, None, True, True},
     TestID -> "ATP/completion/explicit-ac-axioms-returns-lemmas"
 ]
 
 (* Completion of a theory by name. *)
 VerificationTest[
-    MatchQ[
-        TFindProof["AbelianGroupAxioms", TimeConstraint -> 10],
-        {__}],
-    True,
+    {Head @ TFindProof["AbelianGroupAxioms", TimeConstraint -> 10],
+     MatchQ[
+         TFindProof["AbelianGroupAxioms", "Lemmas", TimeConstraint -> 10],
+         {__}]},
+    {ProofObject, True},
     TestID -> "ATP/completion/theory-by-name-returns-lemmas"
 ]
 
