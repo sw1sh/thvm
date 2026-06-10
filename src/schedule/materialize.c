@@ -3953,6 +3953,27 @@ static int boundary_has_collapsed_unit_axis(u32 node_idx) {
   return 0;
 }
 
+// 1 iff node `i`'s ONLY collapsed unit axis is its LEADING axis (axis 0),
+// and every other axis is a real closed RANGE.  This is the M==1 matmul
+// input shape ({1,K}: the GPT-2 decode LM-head's X-mean, a genuine size-1
+// leading batch/seq dim at offset 0).  It deliberately EXCLUDES a TRAILING
+// keepdim unit axis ({...,1}: a softmax/layer-norm denominator broadcast
+// back over the reduced dim before the consuming matmul) -- those must keep
+// their existing realize treatment; materializing a leading-unit {1,K} is
+// the only collapse shape whose store_root + consumer read is exercised and
+// correct here.
+static int boundary_collapsed_unit_is_leading_only(u32 node_idx) {
+  u32 ond = rangeify_unified_out_ndim_at(node_idx);
+  if (ond < 2) return 0;
+  Term r0 = rangeify_unified_out_rng_at(node_idx, 0);
+  if (term_tag(r0) == TAG_UOP && term_ext(r0) == UOP_RANGE) return 0; // axis0 not collapsed
+  for (u32 a = 1; a < ond; a++) {
+    Term r = rangeify_unified_out_rng_at(node_idx, a);
+    if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return 0;  // a trailing collapse
+  }
+  return 1;
+}
+
 // Forward-walk the consumer chain from `producer_loc` through movement /
 // elementwise UOPs and return 1 iff it reaches a UOP_REDUCE, reporting that
 // reduce's loc via out_reduce_loc.  Such a reduce READS this producer's value
@@ -4089,6 +4110,20 @@ static void topo_sort_boundaries(Term root) {
       u32 ond = rangeify_unified_out_ndim_at(i);
       // effectively-full: all axes closed (nr == ond), OR a realize whose
       // unit axis collapsed the closed-range count below out_ndim (nr < ond):
+      //   0. an elementwise activation with ONLY a collapsed LEADING-unit
+      //      axis ({1,K}: the M==1 GPT-2 decode LM-head's X-mean) feeding a
+      //      2-operand matmul reduce -- realize so the matmul INDEX_Es a
+      //      clean {1,K} buffer and dispatches BLAS instead of fusing the
+      //      activation's whole producer chain and recomputing it per output
+      //      column (a 1.48e12-flop scalar kernel; the mean-reduce is re-run
+      //      for every one of the N output entries).  The leading-only gate
+      //      (boundary_collapsed_unit_is_leading_only) excludes a TRAILING
+      //      keepdim unit axis ({...,1}: a softmax/layer-norm denominator
+      //      that broadcasts back over the reduced dim before the matmul),
+      //      which must stay fused -- realizing it changes attention's fusion
+      //      and breaks backward parity.  Mirrors tinygrad's buffer_in_reduce
+      //      (schedule/rangeify.py:276-285): a bufferize whose value chain
+      //      feeds a reduce reaching a buffer/param is not removed.
       //   1. a full realize read by a consumer SHRINK with a non-zero begin
       //      (the GPT2 head-split view offset) -- realize so the consumer
       //      indexes the buffer at its own offset rather than inlining and
@@ -4102,8 +4137,14 @@ static void topo_sort_boundaries(Term root) {
       //      d/dw2 weight gradient (~2x).  Mirrors tinygrad's buffer_in_reduce
       //      (schedule/rangeify.py:276-285).  The >= 3 unfold-rank + size-1
       //      gates keep dense matmul / attention / statistics reduces inlined.
-      u64 rloc = 0;
+      u64 rloc = 0, mmloc = 0;
+      int unitmm = (nr > 0 && nr < ond
+                    && boundary_collapsed_unit_is_leading_only(i)
+                    && boundary_feeds_reduce_consumer(
+                         BUFFERIZE_NODES[i].loc, 0, &mmloc)
+                    && bufferize_uop_is_matmul(mmloc));
       int effectively_full = (ond > 0 && nr == ond)
+                          || unitmm
                           || (rangeify_unified_realized_full_at(i)
                               && boundary_has_offset_shrink_consumer(
                                    BUFFERIZE_NODES[i].loc))

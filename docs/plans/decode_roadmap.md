@@ -247,16 +247,47 @@ not `kvar_runtime`; fix `ec6bdab4`) and the positional shrink baking at TJit cap
 supplying the positional row as a per-step rebindable input; `c201868c`). Validation:
 `symbolic.wlt` 20/0, `test_cc` 86463/86463.
 
-> **SPEED NOT YET MET (open).** The TJit decode replay is ~30 s/token on the 12-block model --
-> SLOWER than the fixed-window forward (~18 ms/step). The bottleneck is the per-step host-side
-> cache-read GATHER: the eager decode's symbolic cache reads (`TSymbolicAxis` + per-head split)
-> materialize through `materialize_root_alias` as host strided gathers (per-element
-> `tendesc_strided_index` over `{1024, dim}` buffers x 12 blocks), which the JIT replay re-runs
-> every step (`JIT_OP_GATHER`). The fixed-window forward is pure on-device dispatch, hence fast.
-> So the TJit decode's win is constant MEMORY, not speed. To make decode FAST, route the symbolic
-> cache reads through on-device kernel dispatches (so the JIT replays them as fast dispatches, not
-> host gathers) -- the real remaining Lever 2 work. Until then, the fixed-window forward is the
-> faster generation path for short sequences; the KV-cache decode is the constant-memory path.
+> **SPEED -- the "~30 s/token + host-gather bottleneck" claim above is OBSOLETE (re-profiled
+> 2026-06-11).** Two things invalidated it: (1) the faithful-rangeify-default flip (`809c2a66`,
+> 2026-06-10) re-shaped the decode from **6336 dispatches @ ~30 s/token down to 891 dispatches
+> @ ~0.95 s/token** (~31x), purely as a side effect of better fusion -- the old number predates
+> the flip; (2) `THVM_KERNEL_PROFILE` (the per-kid route+time dump) DISPROVED the host-gather
+> story: `JIT_OP_GATHER` is only ~445 ms; the cost is genuine per-kernel COMPUTE in fused
+> `cpu_jit` kernels. PROFILE, DON'T GUESS -- the host-gather narrative was never measured.
+>
+> The real remaining bottleneck is the **leading-unit-axis (M==1) matmul fusion**. Every
+> single-token decode matmul (the LM head `{1,768}.{768,50257}` and the per-block Q/K/V/O +
+> MLP projections) is M==1, and at M==1 two gaps make them run as slow fused scalar kernels
+> instead of fast BLAS:
+>   1. **BLAS-dispatch gap (FIXED, `f80e721a`):** the classifier missed M==1 vector-times-matrix
+>      (the unit leading row elides A's m-arm). `uop_dag_classify_vecmat_shape` + `blas_try_vecmat`
+>      now route a clean `{1,K}.{K,N}` to `cblas_sgemm` (M=1). Isolated LM-head probe 40 ms -> 3.6 ms.
+>   2. **Realize-boundary gap (FIXED, `5b45e5d0`):** at M==1 the faithful rangeify ending-ranges /
+>      consumer-divergence derivation realized the elementwise input feeding a matmul but its
+>      leading unit axis collapses to `CONST(0)` in `ru_new_range` (mirroring
+>      tinygrad/schedule/indexing.py:53), so the bufferize closed-RANGE count under-counted it
+>      and the boundary gate demoted the GLOBAL realize to a fused inline. The matmul then fused
+>      its producer (the final LayerNorm) and recomputed it once per output column -- the GPT-2
+>      decode LM-head's 582 ms / 1.48e12-flop scalar kernel. Fix: `materialize.c` promotes a
+>      realized elementwise node to a boundary when its ONLY collapsed unit axis is the LEADING
+>      axis (`{1,K}`) and it feeds a 2-operand matmul reduce (a trailing keepdim unit axis -- a
+>      softmax/LayerNorm denominator -- is deliberately EXCLUDED; promoting those nans the
+>      backward, a separate latent materialization bug); and `uop_classify_matmul` /
+>      `uop_dag_classify_matmul_shape` accept the `(1,2)/(2,1)` collapsed-unit GEMM shape
+>      (synthesising the collapsed side's stride), while `uop_recognise_tc` stays strict so the
+>      Metal simdgroup TC never fires on it. Pinned GPT-2-free in `tests/test_lnmatmul_fuse.c`
+>      (M=2 fires BLAS, M=1 now does too; both values correct). A WL `TRealize[hidden]` barrier
+>      is NOT a valid fix: it bakes under TJit capture (wrong token) and runs away non-JIT -- the
+>      fix had to be the scheduler-level realize boundary.
+>
+> **Result (measured 2026-06-11, real GPT-2 117M):** with both M==1 fixes, the warm TJit decode
+> step is **~15 ms/token** (down from ~950 ms -- ~63x), now AT PARITY with the fixed-window
+> forward (~18 ms/step), and the LM-head kid no longer appears in the per-kernel profile (it
+> dispatches BLAS). Greedy next-token after "The quick brown fox" = "es" (correct). So decode
+> speed was a per-kernel-compute / leading-unit-axis fusion problem, NOT a host-gather problem.
+> Correctness is unaffected throughout (decode argmax = fixed-window forward = Wolfram reference
+> GPT-2, all "es"). Validated: `test_cc` 86463/86463 (both seeds), py 173/0, WL symbolic 20/0 +
+> nn 66/0 + grad 62/0 + gpt2 8/0.
 
 - Fixed-window forward: DONE + clean (TJit input-rebind, no slot/TSet; `maxSeq` only
   in the host one-hot padding). See [[Gpt2.md]].

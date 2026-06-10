@@ -160,9 +160,14 @@ static u32 rec_tc_find_range_extent(Term t, u32 want_axis_id, int depth) {
 // `*out_k_extent` carries the reduce-axis extent if statically known
 // (looked up from the UOP_RANGE leaf with axis_id == REDUCE.axis);
 // 0 means the reduce axis didn't resolve to a clean RANGE leaf in
-// the address expression. Caller decides what to do with it.
-fn int uop_classify_matmul(Term root, u32 *out_k_extent) {
+// the address expression.  `*out_unit_axis` reports a collapsed
+// leading-/trailing-unit GEMM axis: 0 = both operands carry 2 ranges
+// (dense M,N>1 matmul), 1 = A's M-axis collapsed (M==1), 2 = B's
+// N-axis collapsed (N==1).  Pass NULL when the caller doesn't care.
+// Caller decides what to do with it.
+fn int uop_classify_matmul(Term root, u32 *out_k_extent, u32 *out_unit_axis) {
   if (out_k_extent != NULL) *out_k_extent = 0;
+  if (out_unit_axis != NULL) *out_unit_axis = 0;
   if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
 
   Term bindings[UPAT_NUM_BINDINGS] = {0};
@@ -197,11 +202,35 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent) {
   // 2-range linear layout per operand; matching against conv would
   // produce wrong simdgroup_load reads.  Reject if either address
   // touches more than 2 distinct range axis_ids.
+  //
+  // The collapsed-unit-axis matmul (M==1: A={1,K}@B={K,N}={1,N}, the
+  // GPT-2 decode LM-head) is the exception: ru_new_range collapses the
+  // size-1 leading M-axis to CONST(0) (rangeify_unified.c:54, mirroring
+  // tinygrad/schedule/indexing.py:53), so A's address loses its m-arm
+  // and references only the reduce axis K (n_a == 1).  This is still a
+  // genuine GEMM with M==1 -- accept (1,2) and (2,1) provided the
+  // 1-range operand references PRECISELY the reduce axis (its other
+  // axis is the collapsed unit dim).  *out_unit_axis reports the side
+  // (1 = A's M collapsed, 2 = B's N collapsed, 0 = full 2x2) so the TC
+  // wrapper can stay strict (the simdgroup template needs both 2-range
+  // operands).
   u32 seen_a[8] = {0};
   u32 seen_b[8] = {0};
   u32 n_a = rec_tc_count_distinct_ranges(addr_a, seen_a, 8, 0, 0);
   u32 n_b = rec_tc_count_distinct_ranges(addr_b, seen_b, 8, 0, 0);
-  if (n_a != 2 || n_b != 2) return 0;
+  u32 unit_axis = 0;
+  if (n_a == 2 && n_b == 2) {
+    unit_axis = 0;
+  } else if (n_a == 1 && n_b == 2) {
+    if (seen_a[0] != red_axis) return 0;     // A's lone range must be K
+    unit_axis = 1;                           // A's M-axis collapsed (M==1)
+  } else if (n_a == 2 && n_b == 1) {
+    if (seen_b[0] != red_axis) return 0;     // B's lone range must be K
+    unit_axis = 2;                           // B's N-axis collapsed (N==1)
+  } else {
+    return 0;
+  }
+  if (out_unit_axis != NULL) *out_unit_axis = unit_axis;
 
   // F4: the kernel_lift conv2d_flat shape compresses (co, bi, oh, ow)
   // into a single r_out via IDIV/IMOD, so its W and X addresses also
@@ -223,7 +252,13 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent) {
 // Wrap the STORE root's value with UOP_OPT(_, TC, 0) when the matmul
 // shape matches. Returns the input root unchanged on any non-match.
 fn Term uop_recognise_tc(Term root) {
-  if (!uop_classify_matmul(root, NULL)) return root;
+  // The simdgroup_matrix template needs BOTH operands to carry a clean
+  // 2-range {m,k}/{k,n} layout; a collapsed-unit GEMM axis (M==1 or
+  // N==1, unit_axis != 0) loses one operand's outer arm, so skip the TC
+  // wrapper there and let the generic accumulator / BLAS GEMV-shaped
+  // dispatch handle it.
+  u32 unit_axis = 0;
+  if (!uop_classify_matmul(root, NULL, &unit_axis) || unit_axis != 0) return root;
 
   // Rebuild: STORE(buf_out, addr_out, OPT(reduce, TC, 0)).
   u64 sloc = term_val(root);

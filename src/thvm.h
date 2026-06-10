@@ -2878,7 +2878,7 @@ fn Term uop_recognise_tc(Term root);
 // (zero otherwise). Used by uop_recognise_tc to decide whether to
 // wrap with UOP_OPT(_, TC) so render_uop's simdgroup_matrix template
 // fires (when K%8==0) versus falling back to its generic accumulator.
-fn int uop_classify_matmul(Term root, u32 *out_k_extent);
+fn int uop_classify_matmul(Term root, u32 *out_k_extent, u32 *out_unit_axis);
 
 // Structural classifiers for the DOT and GEMV
 // shapes.  Mirrors uop_classify_matmul but with different range-count

@@ -407,14 +407,15 @@ static Term udg_peel_tc_opt(Term value) {
 // (which expects the STORE.value to be a bare REDUCE) sees the
 // canonical shape.  Returns 1 + K_extent on match.
 static int udg_classify_matmul_store(Term store, u32 *out_k_extent,
-                                     Term *out_a_idx, Term *out_b_idx) {
+                                     Term *out_a_idx, Term *out_b_idx,
+                                     u32 *out_unit_axis) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   Term buf_out  = heap_read(term_val(store) + 0);
   Term addr_out = heap_read(term_val(store) + 1);
   Term value    = heap_read(term_val(store) + 2);
   Term peeled   = udg_peel_tc_opt(value);
   Term canon = (peeled == value) ? store : uop_store(buf_out, addr_out, peeled);
-  if (!uop_classify_matmul(canon, out_k_extent)) return 0;
+  if (!uop_classify_matmul(canon, out_k_extent, out_unit_axis)) return 0;
   // Reach into the canonicalised STORE for the matmul operands.
   // Layout: STORE(buf_out, addr_out, REDUCE(MUL(INDEX_E(A, addrA),
   //                                             INDEX_E(B, addrB)))).
@@ -583,7 +584,9 @@ int uop_dag_classify_matmul_shape(Term root,
 
   Term a_idx = 0, b_idx = 0;
   u32 k_extent = 0;
-  if (!udg_classify_matmul_store(root, &k_extent, &a_idx, &b_idx)) return 0;
+  u32 unit_axis = 0;
+  if (!udg_classify_matmul_store(root, &k_extent, &a_idx, &b_idx, &unit_axis))
+    return 0;
   if (k_extent == 0) return 0;
   // Reject K=1: the address arm collapses to bare RANGE(m) so transA is
   // ambiguous (and BLAS reduces to outer product anyway -- degenerate).
@@ -596,6 +599,13 @@ int uop_dag_classify_matmul_shape(Term root,
   u32 M = uop_buffer_dim(buf_out, 0);
   u32 N = uop_buffer_dim(buf_out, 1);
   if (M == 0 || N == 0) return 0;
+  // A collapsed-unit operand axis (unit_axis != 0) is only consistent with
+  // a unit output dim: M==1 for A's collapsed M (the GPT-2 decode LM-head
+  // {1,K}@{K,N}={1,N}), N==1 for B's collapsed N.  Confirm against the
+  // output buffer so a genuine dense matmul whose addr merely lost an arm
+  // to some other rewrite can't slip through with a bogus stride.
+  if (unit_axis == 1 && M != 1) return 0;
+  if (unit_axis == 2 && N != 1) return 0;
 
   // Recover input slots from BUFFER.instance.  INDEX_E.src[0] is the
   // buffer; instance == slot + 1 for inputs (see lift_input_buffer).
@@ -637,7 +647,39 @@ int uop_dag_classify_matmul_shape(Term root,
   int dag_b_ok = uop_dag_extract_matmul_strides_from_addr(
       addr_b, red_axis_id, &b_red_coeff, &b_other_coeff, &axis_n);
 
-  if (!dag_a_ok || !dag_b_ok) {
+  if (unit_axis != 0) {
+    // Collapsed-unit GEMM: one operand's addr is a bare RANGE(k) (its
+    // unit M/N axis collapsed to CONST(0) at rangeify), so its arm
+    // extractor declined.  The collapsed operand is contiguous row-major
+    // over (1, K) / (K, 1) -- a non-transposed read with ld = K / N.  The
+    // surviving operand still decodes via the DAG arm extractor; require
+    // it and synthesise the collapsed side's stride directly.
+    if (unit_axis == 1) {
+      // A's M-axis collapsed (M==1).  A = {1,K} row-major: ldA=K, transA=0.
+      // B = {K,N} must decode normally and carry the {k,n} arms.
+      if (!dag_b_ok) return 0;
+      if (axis_n == red_axis_id) return 0;     // B's other arm must be N, not K
+      ldB    = (b_red_coeff > b_other_coeff) ? b_red_coeff : b_other_coeff;
+      transB = (b_other_coeff != 1) ? 1 : 0;
+      if (transB) { if (ldB != k_extent) return 0; }
+      else        { if (ldB != N) return 0; }
+      ldA    = k_extent;
+      transA = 0;
+    } else {
+      // B's N-axis collapsed (N==1).  B = {K,1} row-major: ldB=1.  A =
+      // {M,K} decodes normally.  (BLAS GEMM rejects N<=1 downstream, so
+      // this arm exists mainly for completeness/symmetry; the value is
+      // still routed correctly should the N<=1 guard be relaxed.)
+      if (!dag_a_ok) return 0;
+      if (axis_m == red_axis_id) return 0;     // A's other arm must be M, not K
+      ldA    = (a_red_coeff > a_other_coeff) ? a_red_coeff : a_other_coeff;
+      transA = (a_red_coeff != 1) ? 1 : 0;
+      if (transA) { if (ldA != M) return 0; }
+      else        { if (ldA != k_extent) return 0; }
+      ldB    = N;
+      transB = 0;
+    }
+  } else if (!dag_a_ok || !dag_b_ok) {
     // Hybrid fallback: if the DAG path declined (unsupported addr shape)
     // and input_views[] is populated, fall back to the legacy view-stride
     // matcher.  Once every lift_scalar_index output decodes via the DAG,
