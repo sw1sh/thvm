@@ -830,3 +830,29 @@ Re-applied + re-verified each on current main (the workflow worktrees branched f
   the "(b) OPEN -- faithful Metal regression" note in the prior entry.  Faithful is now
   correct AND competitive on BOTH backends; a real future Metal lever targets the GEMMs
   (TC tiling / JIT dispatch redundancy), not the already-grouped reduces.
+
+### CORRECTION (2026-06-10): the 44b12e86 arena-lifetime change was NET-NEGATIVE -- REVERTED
+
+44b12e86 ("plan boundary lifetimes over the realized BUFFER set, not the classify flag")
+changed boundary_last_use_pos_descend to terminate the lifetime walk at an ACTUAL boundary
+(boundary_index_for_loc) instead of the classify `realized` flag, to fix the faithful
+seqQ=1 attention forward (the @V kernel read its own arena-recycled output).  It DID fix
+that 1 faithful-only forward case -- but the full py suite (which the WL tests + test_cc do
+NOT exercise) shows it BROKE backward parity for 12 tests under BOTH seeds: softmax /
+layernorm / attention / rmsnorm / maxpool-sum BACKWARD on rank>=3 shapes (rel ~27; forward
+bit-exact).  Root: the walk must terminate at MATERIALIZED buffers (so it does not descend
+into their already-consumed inputs) but DESCEND PAST inlined nodes (so the real boundary
+behind a fused masked-scores ADD gets its last-use bumped).  The fused ADD and the
+materialized backward buffers are INDISTINGUISHABLE by local flags (both classify-realized,
+both missed by boundary_index_for_loc, both rangeify-fused, both mostly elementwise) -- a
+boundary-OR-realized-REDUCE variant fixes softmax/layernorm but not attention/groupnorm.  So
+the global-termination approach fundamentally cannot separate the two cases.
+
+REVERTED 44b12e86 (this commit): restores the classify-realized termination -> full py suite
+173 passed / 0 failed, default gpt2 8/8 + nn 66/66 + grad 62/62, test_cc 86463 both seeds.
+The faithful seqQ=1 attention FORWARD is re-broken (gpt2.wlt 7/8 under faithful only; default
+is heuristic + unaffected) -- it is a faithful-only, default-OFF issue, the correct trade vs
+backward correctness for both seeds.  The proper fix needs a reliable "is this node
+MATERIALIZED (gets a buffer) vs INLINED" predicate (the materialize gate's actual output,
+incl. legacy allocations -- BOUNDARY_ORDER alone is incomplete) so the walk descends past
+inlined nodes only.  That is the prerequisite to faithful-default; deferred.

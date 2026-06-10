@@ -1534,8 +1534,6 @@ static void boundary_compute_last_use(void) {
 // boundary B reached, bump BOUNDARY_LAST_USE_POS[B] to `visiting_pos`
 // (the consuming parent's BOUNDARY_ORDER index).  Same descent shape;
 // only the recorded quantity differs (fire-order position, not depth).
-static u32 boundary_index_for_loc(u64 loc);   // defined after the hash table
-
 static void boundary_last_use_pos_descend(u64 from_loc, u32 visiting_pos,
                                           u8 *visited) {
   if (from_loc >= HEAP_NEXT) return;
@@ -1543,19 +1541,7 @@ static void boundary_last_use_pos_descend(u64 from_loc, u32 visiting_pos,
   visited[from_loc] = 1;
   u32 idx = bufferize_info_find(from_loc);
   if (idx == 0xFFFFFFFFu) return;
-  // Terminate the lifetime walk only at a node that is an ACTUAL
-  // materialized boundary (present in BOUNDARY_ORDER), not merely one
-  // the bufferize CLASSIFY pass flagged `realized` (MULTI/REDUCE/...).
-  // Under the faithful seed a CLASSIFY-realized node the rangeify walk
-  // FUSED away (e.g. the masked-scores ADD with 2 consumers, inlined
-  // into both the softmax-denom reduce and the @V kernel) never becomes
-  // a buffer, so it must NOT shadow the real boundary it reads (the QK^T
-  // scores reduce nested behind it).  Stopping at the stale flag left
-  // the scores buffer's last-use unbumped -> the arena recycled its
-  // offset onto the @V output -> the kernel read its own output back.
-  // Mirrors tinygrad/schedule/memory.py, which plans lifetimes over the
-  // realized BUFFER set (the linearized schedule), not the classify set.
-  if (boundary_index_for_loc(from_loc) != 0xFFFFFFFFu) {
+  if (BUFFERIZE_NODES[idx].realized) {
     if (visiting_pos > BOUNDARY_LAST_USE_POS[idx]) {
       BOUNDARY_LAST_USE_POS[idx] = visiting_pos;
     }
@@ -4688,6 +4674,7 @@ static u32 const_to_tendesc(u64 const_loc) {
 // materialized to a 1-element TenDesc, or a recursive view chain
 // rooted at one).  Backend must be view-aware -- otherwise returns
 // 0 so caller falls through.
+static u32 boundary_index_for_loc(u64 loc);   // forward decl (Level 54)
 static u8  op_is_view_movement(u8 op);        // forward decl (defined below)
 
 // True iff the movement-op chain rooted at `t` carries the
