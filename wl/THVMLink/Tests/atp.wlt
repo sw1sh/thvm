@@ -885,6 +885,30 @@ VerificationTest[
 ];
 
 VerificationTest[
+    (* A Rule conjecture (`a -> c`) is read as the equation a == c --
+       provability is direction-independent, the Rule head only carries
+       orientation meaning on the AXIOM side.  Ground rewrite chain:
+       a -> b -> c proves a == c. *)
+    Head @ TFindProof[a -> c, {a -> b, b -> c}, TimeConstraint -> 10],
+    ProofObject,
+    TestID -> "ATP/Rule/rule-conjecture-as-equal"
+];
+
+VerificationTest[
+    (* TATP-style axioms-first argument order: TFindProof[{axioms},
+       conjecture] flips to the canonical [conjecture, axioms] form when
+       the second argument is a single equation-shaped expression.  The
+       single-arg completion form TFindProof[{axioms}, "Lemmas"] is
+       unaffected (a return spec is never equation-shaped). *)
+    {Head @ TFindProof[{a -> b, b -> c}, a -> c, TimeConstraint -> 10],
+     TFindProof[{a -> b, b -> c}, a -> c, "Status", TimeConstraint -> 10],
+     Head @ TFindProof[{a -> b, b -> c}, TwoWayRule[a, c],
+         TimeConstraint -> 10]},
+    {ProofObject, "Proved", ProofObject},
+    TestID -> "ATP/Rule/axioms-first-order"
+];
+
+VerificationTest[
     (* Bare String atoms (`f["a"] == f["b"]`) are normalized to private
        Tptp$ symbols by atpMaybeInternalizeTPTP, so the encoder, the
        C engine, and the ProofObject decoder all round-trip uniformly
