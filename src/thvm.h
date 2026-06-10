@@ -4420,6 +4420,27 @@ typedef struct {
   Term goal_lhs_nf;
   Term goal_rhs_nf;
 
+  // Multi-goal conjunction (FindEquationalProof[{g1, g2}, axioms]):
+  // every conjunct proved off ONE saturation.  goals_lhs/goals_rhs are
+  // the n_goals conjunct pairs (heap arrays owned by the state, set by
+  // thvm_atp_set_goals); goals_lhs_nf/goals_rhs_nf the per-goal live
+  // normal forms (0 until that goal's first goal_check).  Bit g of
+  // goals_joined_mask latches once goal g has joined -- R only grows,
+  // so a joined goal stays joined -- and goal_check returns ATP_PROVED
+  // only when all n_goals bits are set.  n_goals is capped at
+  // ATP_MAX_GOALS == 64 (the mask width).  goal_lhs/goal_rhs above
+  // stay the single-goal storage AND, in multi-goal mode, the alias to
+  // the FIRST UNJOINED goal, which every goal-directed heuristic
+  // (CPinGoal, SoS, goal-interleave, MNF) reads -- selection
+  // heuristics never affect soundness, so steering by one goal at a
+  // time is sound.
+  Term *goals_lhs;
+  Term *goals_rhs;
+  Term *goals_lhs_nf;
+  Term *goals_rhs_nf;
+  u32   n_goals;
+  u64   goals_joined_mask;
+
   // Bitset of TAG_CTR labels appearing in the conjecture (goal_lhs +
   // goal_rhs).  Recomputed by thvm_atp_set_goal.  Read by the
   // ATP_CP_WEIGHT_CONJSYM weight mode -- nodes whose symbol bit is set
@@ -4972,6 +4993,15 @@ fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);
 fn void      thvm_atp_free        (AtpState *s);
 fn u8        thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs);
 fn u8        thvm_atp_set_goal    (AtpState *s, Term lhs, Term rhs);
+// Multi-goal conjunction: set n conjecture pairs (lhs[g], rhs[g]) to
+// be proved off one saturation.  n == 0 clears the goal (completion
+// mode).  n == 1 is exactly thvm_atp_set_goal.  Returns 0 on n >
+// ATP_MAX_GOALS or any ill-sorted pair (state unmodified).  The
+// conjecture symbol/relevance masks become the UNION over all goals'
+// symbols.
+#define ATP_MAX_GOALS 64u
+fn u8        thvm_atp_set_goals   (AtpState *s, const Term *lhs,
+                                   const Term *rhs, u32 n);
 
 // 8.4d: attach a WaldSpec for sort-check gating.  When set,
 // `thvm_atp_add_equation` and `thvm_atp_set_goal` reject

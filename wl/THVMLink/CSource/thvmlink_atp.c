@@ -70,16 +70,8 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ctr(WolframLibraryData libData,
 // === 8.7b: ATP runner via LibraryLink ============================
 //
 // Inputs:
-//   args[0] = MNumericArray (Int64) of packed Term values:
-//             [n_axioms, lhs_0, rhs_0, lhs_1, rhs_1, ...,
-//              lhs_{n-1}, rhs_{n-1}, goal_lhs, goal_rhs,
-//              flag_0, flag_1, ..., flag_{n-1}].
-//             Length = 1 + 2*n_axioms + 2 + n_axioms = 3*n_axioms + 3.
-//             flag_i: 0 = equation (engine orients via KBO),
-//                     1 = pre-oriented (use lhs -> rhs directly).
-//             The flag tail is APPENDED so every existing reader's
-//             lhs/rhs/goal offset stays valid; only the length check
-//             and the axiom-add loops change.
+//   args[0] = MNumericArray (Int64) of packed Term values in the
+//             ATP wire layout (see AtpWire below).
 //   args[1] = max_steps  (mint)
 //   args[2] = max_label  (mint; sizes the trivial precedence /
 //             weights tables.  v0 uses a uniform config that
@@ -93,6 +85,100 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ctr(WolframLibraryData libData,
 // (per the 8.7a memo's two-layer plan).  Stage 8.7c-d add the
 // WL-side encoder + TATP[] surface.
 #define ATP_WL_CFG_MAX_LABELS 64
+
+// === ATP wire layout =============================================
+//
+// The packed Int64 problem array every ATP runner takes as args[0]
+// (the WL encoder atpEncodeProblem emits exactly this):
+//
+//   [n_goals, n_axioms,
+//    lhs_0, rhs_0, ..., lhs_{n_axioms-1}, rhs_{n_axioms-1},
+//    goal_lhs_0, goal_rhs_0, ..., goal_lhs_{n_goals-1}, goal_rhs_{n_goals-1},
+//    flag_0, ..., flag_{n_axioms-1}]
+//
+// Length = 2 + 3*n_axioms + 2*n_goals.
+//
+// n_goals == 0 is completion mode (no goal -- the engine saturates
+// until the CP queue empties or the step/wall budget is hit);
+// n_goals == 1 the single-conjecture case; n_goals > 1 a multi-goal
+// conjunction (FindEquationalProof[{g1, g2}, axioms]) closed off one
+// saturation via thvm_atp_set_goals.  n_goals caps at ATP_MAX_GOALS.
+// flag_i: 0 = equation (engine orients via KBO), 1 = pre-oriented
+// (use lhs -> rhs directly).
+typedef struct {
+  u32            n_goals;
+  u32            n_ax;
+  const int64_t *data;
+} AtpWire;
+
+// Validate the packed header + total length.  Returns 1 and fills *w
+// on success, 0 on a malformed array.
+static int atp_wire_parse(const int64_t *data, mint flat_len, AtpWire *w) {
+  if (flat_len < 2) return 0;
+  int64_t n_goals_i = data[0];
+  int64_t n_ax_i    = data[1];
+  if (n_goals_i < 0 || n_goals_i > (int64_t)ATP_MAX_GOALS) return 0;
+  if (n_ax_i < 0) return 0;
+  if ((int64_t)flat_len != 2 + 3 * n_ax_i + 2 * n_goals_i) return 0;
+  w->n_goals = (u32)n_goals_i;
+  w->n_ax    = (u32)n_ax_i;
+  w->data    = data;
+  return 1;
+}
+
+static Term atp_wire_ax_lhs(const AtpWire *w, u32 i) {
+  return (Term)w->data[2 + 2 * i + 0];
+}
+static Term atp_wire_ax_rhs(const AtpWire *w, u32 i) {
+  return (Term)w->data[2 + 2 * i + 1];
+}
+static int64_t atp_wire_ax_flag(const AtpWire *w, u32 i) {
+  return w->data[2 + 2 * w->n_ax + 2 * w->n_goals + i];
+}
+static Term atp_wire_goal_lhs(const AtpWire *w, u32 g) {
+  return (Term)w->data[2 + 2 * w->n_ax + 2 * g + 0];
+}
+static Term atp_wire_goal_rhs(const AtpWire *w, u32 g) {
+  return (Term)w->data[2 + 2 * w->n_ax + 2 * g + 1];
+}
+
+// Install the wire's goals on `atp`.  n_goals == 0 leaves the state in
+// completion mode.  The single-goal case keeps the historical bridge
+// semantics byte-identical: a (0, 0) pair is tolerated as "no goal"
+// and thvm_atp_set_goal's return is not consulted.  Multi-goal routes
+// through thvm_atp_set_goals; returns 0 only on its rejection.
+static int atp_wire_install_goals(AtpState *atp, const AtpWire *w) {
+  if (w->n_goals == 0u) return 1;
+  if (w->n_goals == 1u) {
+    Term gl = atp_wire_goal_lhs(w, 0);
+    Term gr = atp_wire_goal_rhs(w, 0);
+    if (gl != 0u || gr != 0u) thvm_atp_set_goal(atp, gl, gr);
+    return 1;
+  }
+  Term gls[ATP_MAX_GOALS], grs[ATP_MAX_GOALS];
+  for (u32 g = 0; g < w->n_goals; g++) {
+    gls[g] = atp_wire_goal_lhs(w, g);
+    grs[g] = atp_wire_goal_rhs(w, g);
+  }
+  return thvm_atp_set_goals(atp, gls, grs, w->n_goals) ? 1 : 0;
+}
+
+// Push the wire's axioms onto `atp`, dispatching on each flag between
+// thvm_atp_add_equation (0) and thvm_atp_install_oriented_rule (1).
+// Returns 0 when an equation add fails (the historical per-site error
+// path); a duplicate pre-oriented install is benign.
+static int atp_wire_install_axioms(AtpState *atp, const AtpWire *w) {
+  for (u32 i = 0; i < w->n_ax; i++) {
+    Term lhs = atp_wire_ax_lhs(w, i);
+    Term rhs = atp_wire_ax_rhs(w, i);
+    if (atp_wire_ax_flag(w, i) == 1) {
+      (void)thvm_atp_install_oriented_rule(atp, lhs, rhs);
+    } else if (!thvm_atp_add_equation(atp, lhs, rhs)) {
+      return 0;
+    }
+  }
+  return 1;
+}
 // === 8.9e: existential ATP runner ================================
 //
 // Mirrors thvm_wl_atp_run but takes an extra `witness_ids`
@@ -102,7 +188,8 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ctr(WolframLibraryData libData,
 //
 // Inputs:
 //   args[0] = packed_terms NumericArray (Int64), same layout as
-//             thvm_wl_atp_run.
+//             thvm_wl_atp_run.  Existential goals are single-
+//             conjecture only: n_goals must be exactly 1.
 //   args[1] = max_steps     (mint).
 //   args[2] = max_label     (mint).
 //   args[3] = witness_ids   MTensor (Integer rank-1).
@@ -125,14 +212,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_existential(
     return LIBRARY_FUNCTION_ERROR;
   }
   mint flat_len = naf->MNumericArray_getFlattenedLength(na);
-  if (flat_len < 3) return LIBRARY_FUNCTION_ERROR;
   const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
 
-  int64_t n_ax_i = data[0];
-  if (n_ax_i < 0 || (int64_t)flat_len != 3 * n_ax_i + 3) {
+  AtpWire wire;
+  if (!atp_wire_parse(data, flat_len, &wire) || wire.n_goals != 1u) {
     return LIBRARY_FUNCTION_ERROR;
   }
-  u32 n_ax = (u32)n_ax_i;
+  u32 n_ax = wire.n_ax;
 
   mint n_witness         = libData->MTensor_getFlattenedLength(witness_t);
   const mint *witness_ids = libData->MTensor_getIntegerData(witness_t);
@@ -157,8 +243,8 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_existential(
     u32 n_ax_use = n_ax < ATP_WL_CFG_MAX_LABELS ? n_ax
                                                 : ATP_WL_CFG_MAX_LABELS;
     for (u32 i = 0; i < n_ax_use; i++) {
-      ax_lhs[i] = (Term)data[1 + 2 * i + 0];
-      ax_rhs[i] = (Term)data[1 + 2 * i + 1];
+      ax_lhs[i] = atp_wire_ax_lhs(&wire, i);
+      ax_rhs[i] = atp_wire_ax_rhs(&wire, i);
     }
     atp_auto_precedence(ax_lhs, ax_rhs, n_ax_use,
                         (u32)max_label + 1, wl_precedence2);
@@ -173,22 +259,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_existential(
   AtpState *atp = thvm_atp_init(&wl_kbo2, (u32)max_steps);
   if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
 
-  for (u32 i = 0; i < n_ax; i++) {
-    Term lhs  = (Term)data[1 + 2 * i + 0];
-    Term rhs  = (Term)data[1 + 2 * i + 1];
-    int64_t f = data[1 + 2 * n_ax + 2 + i];
-    if (f == 1) {
-      // Pre-oriented: install returns count=0 on duplicate (benign),
-      // count=1 on success.  Either is fine for the FFI -- only a NULL
-      // state would matter, which we already checked.
-      (void)thvm_atp_install_oriented_rule(atp, lhs, rhs);
-    } else if (!thvm_atp_add_equation(atp, lhs, rhs)) {
-      thvm_atp_free(atp);
-      return LIBRARY_FUNCTION_ERROR;
-    }
+  if (!atp_wire_install_axioms(atp, &wire)) {
+    thvm_atp_free(atp);
+    return LIBRARY_FUNCTION_ERROR;
   }
-  Term goal_lhs = (Term)data[1 + 2 * n_ax + 0];
-  Term goal_rhs = (Term)data[1 + 2 * n_ax + 1];
+  Term goal_lhs = atp_wire_goal_lhs(&wire, 0);
+  Term goal_rhs = atp_wire_goal_rhs(&wire, 0);
   if (!thvm_atp_set_goal_existential(atp, goal_lhs, goal_rhs)) {
     thvm_atp_free(atp);
     return LIBRARY_FUNCTION_ERROR;
@@ -228,14 +304,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
     return LIBRARY_FUNCTION_ERROR;
   }
   mint flat_len = naf->MNumericArray_getFlattenedLength(na);
-  if (flat_len < 3) return LIBRARY_FUNCTION_ERROR;
   const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
 
-  int64_t n_ax_i = data[0];
-  if (n_ax_i < 0 || (int64_t)flat_len != 3 * n_ax_i + 3) {
-    return LIBRARY_FUNCTION_ERROR;
-  }
-  u32 n_ax = (u32)n_ax_i;
+  AtpWire wire;
+  if (!atp_wire_parse(data, flat_len, &wire)) return LIBRARY_FUNCTION_ERROR;
 
   // Build a trivial KboConfig: uniform weight=1, precedence=label.
   // Most comparisons return KBO_UN, falling into unfailing fallback;
@@ -261,28 +333,20 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
 
   // Push axioms.  flag_i (tail block) dispatches between equation
   // (engine orients via KBO) and pre-oriented (lhs -> rhs directly).
-  for (u32 i = 0; i < n_ax; i++) {
-    Term lhs  = (Term)data[1 + 2 * i + 0];
-    Term rhs  = (Term)data[1 + 2 * i + 1];
-    int64_t f = data[1 + 2 * n_ax + 2 + i];
-    if (f == 1) {
-      (void)thvm_atp_install_oriented_rule(atp, lhs, rhs);
-    } else if (!thvm_atp_add_equation(atp, lhs, rhs)) {
-      thvm_atp_free(atp);
-      return LIBRARY_FUNCTION_ERROR;
-    }
+  if (!atp_wire_install_axioms(atp, &wire)) {
+    thvm_atp_free(atp);
+    return LIBRARY_FUNCTION_ERROR;
   }
-  // Set goal (allow 0/0 to mean "completion mode").
-  Term goal_lhs = (Term)data[1 + 2 * n_ax + 0];
-  Term goal_rhs = (Term)data[1 + 2 * n_ax + 1];
-  // Completion mode: a (0, 0) conjecture pair means "no goal" -- the
-  // engine then saturates the axioms until the queue empties (a finite
-  // complete system) or the step/wall budget is hit, and the caller
-  // reads the derived rule set (MainRules) as the completion lemmas.
-  // goal_check returns ATP_RUNNING whenever no goal is set, so the run
-  // is bounded only by MaxSteps / TimeConstraint.
-  if (goal_lhs != 0u || goal_rhs != 0u) {
-    thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
+  // Set the goal(s).  Completion mode (n_goals == 0, or a (0, 0)
+  // single-goal pair) means "no goal" -- the engine then saturates the
+  // axioms until the queue empties (a finite complete system) or the
+  // step/wall budget is hit, and the caller reads the derived rule set
+  // (MainRules) as the completion lemmas.  goal_check returns
+  // ATP_RUNNING whenever no goal is set, so the run is bounded only by
+  // MaxSteps / TimeConstraint.
+  if (!atp_wire_install_goals(atp, &wire)) {
+    thvm_atp_free(atp);
+    return LIBRARY_FUNCTION_ERROR;
   }
 
   g_atp_abort_libData = libData;
@@ -483,14 +547,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     return LIBRARY_FUNCTION_ERROR;
   }
   mint flat_len = naf->MNumericArray_getFlattenedLength(na);
-  if (flat_len < 3) return LIBRARY_FUNCTION_ERROR;
   const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
 
-  int64_t n_ax_i = data[0];
-  if (n_ax_i < 0 || (int64_t)flat_len != 3 * n_ax_i + 3) {
-    return LIBRARY_FUNCTION_ERROR;
-  }
-  u32 n_ax = (u32)n_ax_i;
+  AtpWire wire;
+  if (!atp_wire_parse(data, flat_len, &wire)) return LIBRARY_FUNCTION_ERROR;
+  u32 n_ax = wire.n_ax;
 
   if ((u32)max_label >= ATP_WL_CFG_MAX_LABELS) {
     return LIBRARY_FUNCTION_ERROR;
@@ -525,8 +586,8 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     u32 n_ax_use = n_ax < ATP_WL_CFG_MAX_LABELS ? n_ax
                                                 : ATP_WL_CFG_MAX_LABELS;
     for (u32 i = 0; i < n_ax_use; i++) {
-      ax_lhs[i] = (Term)data[1 + 2 * i + 0];
-      ax_rhs[i] = (Term)data[1 + 2 * i + 1];
+      ax_lhs[i] = atp_wire_ax_lhs(&wire, i);
+      ax_rhs[i] = atp_wire_ax_rhs(&wire, i);
     }
     if (auto_prec == 3) {
       atp_reverse_frequency_precedence(ax_lhs, ax_rhs, n_ax_use,
@@ -802,31 +863,26 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     }
   }
 
-  for (u32 i = 0; i < n_ax; i++) {
-    Term lhs  = (Term)data[1 + 2 * i + 0];
-    Term rhs  = (Term)data[1 + 2 * i + 1];
-    int64_t f = data[1 + 2 * n_ax + 2 + i];
-    if (f == 1) {
-      (void)thvm_atp_install_oriented_rule(atp, lhs, rhs);
-    } else if (!thvm_atp_add_equation(atp, lhs, rhs)) {
-      thvm_atp_free(atp);
-      return LIBRARY_FUNCTION_ERROR;
-    }
+  if (!atp_wire_install_axioms(atp, &wire)) {
+    thvm_atp_free(atp);
+    return LIBRARY_FUNCTION_ERROR;
   }
 #ifdef THVM_ATP_AC
   if (getenv("THVM_ATP_AUTO_AC_DEBUG") != NULL) {
     for (u32 i = 0; i < n_ax; i++) {
-      Term lhs = (Term)data[1 + 2 * i + 0];
-      Term rhs = (Term)data[1 + 2 * i + 1];
+      Term lhs = atp_wire_ax_lhs(&wire, i);
+      Term rhs = atp_wire_ax_rhs(&wire, i);
       fprintf(stderr, "[bridge] ax%u: lhs.tag=%u ext=%u  rhs.tag=%u ext=%u\n",
               i, term_tag(lhs), term_ext(lhs),
               term_tag(rhs), term_ext(rhs));
     }
-    Term gl = (Term)data[1 + 2 * n_ax + 0];
-    Term gr = (Term)data[1 + 2 * n_ax + 1];
-    fprintf(stderr, "[bridge] goal: lhs.tag=%u ext=%u  rhs.tag=%u ext=%u\n",
-            term_tag(gl), term_ext(gl),
-            term_tag(gr), term_ext(gr));
+    for (u32 g = 0; g < wire.n_goals; g++) {
+      Term gl = atp_wire_goal_lhs(&wire, g);
+      Term gr = atp_wire_goal_rhs(&wire, g);
+      fprintf(stderr, "[bridge] goal%u: lhs.tag=%u ext=%u  rhs.tag=%u ext=%u\n",
+              g, term_tag(gl), term_ext(gl),
+              term_tag(gr), term_ext(gr));
+    }
   }
 #endif
 #ifdef THVM_ATP_AC
@@ -849,8 +905,8 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       u32 cap = (u32)(sizeof ax_lhs / sizeof ax_lhs[0]);
       u32 m   = n_ax < cap ? n_ax : cap;
       for (u32 i = 0; i < m; i++) {
-        ax_lhs[i] = (Term)data[1 + 2 * i + 0];
-        ax_rhs[i] = (Term)data[1 + 2 * i + 1];
+        ax_lhs[i] = atp_wire_ax_lhs(&wire, i);
+        ax_rhs[i] = atp_wire_ax_rhs(&wire, i);
       }
       thvm_atp_auto_ac(ax_lhs, ax_rhs, m);
     } else {
@@ -858,19 +914,19 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     }
   }
 #endif
-  Term goal_lhs = (Term)data[1 + 2 * n_ax + 0];
-  Term goal_rhs = (Term)data[1 + 2 * n_ax + 1];
-  // Completion mode: a (0, 0) conjecture pair means "no goal" -- the
-  // engine then saturates the axioms until the queue empties (a finite
-  // complete system) or the step/wall budget is hit, and the caller
-  // reads the derived rule set (MainRules) as the completion lemmas.
-  // goal_check returns ATP_RUNNING whenever no goal is set, so the run
-  // is bounded only by MaxSteps / TimeConstraint.
-  if (goal_lhs != 0u || goal_rhs != 0u) {
-    thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
+  // Set the goal(s).  Completion mode (n_goals == 0, or a (0, 0)
+  // single-goal pair) means "no goal" -- the engine then saturates the
+  // axioms until the queue empties (a finite complete system) or the
+  // step/wall budget is hit, and the caller reads the derived rule set
+  // (MainRules) as the completion lemmas.  goal_check returns
+  // ATP_RUNNING whenever no goal is set, so the run is bounded only by
+  // MaxSteps / TimeConstraint.
+  if (!atp_wire_install_goals(atp, &wire)) {
+    thvm_atp_free(atp);
+    return LIBRARY_FUNCTION_ERROR;
   }
   // Apply SoS AFTER the goal is set so the symbol-mask snapshot
-  // includes goal_lhs / goal_rhs labels.
+  // includes the goal-side labels (union over all conjuncts).
   thvm_atp_set_use_sos(atp, (u8)(use_sos != 0));
 
   // Method -> {... "RandomRatio" -> n, "RandomSeed" -> u64}: Vampire-
@@ -1042,16 +1098,18 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     if (ext != NULL) {
       ext->wall_deadline_us = atp->wall_deadline_us;
       for (u32 i = 0; i < n_ax; i++) {
-        Term lhs  = (Term)data[1 + 2 * i + 0];
-        Term rhs  = (Term)data[1 + 2 * i + 1];
-        int64_t f = data[1 + 2 * n_ax + 2 + i];
-        if (f == 1) {
+        Term lhs = atp_wire_ax_lhs(&wire, i);
+        Term rhs = atp_wire_ax_rhs(&wire, i);
+        if (atp_wire_ax_flag(&wire, i) == 1) {
           thvm_atp_install_oriented_rule(ext, lhs, rhs);
         } else {
           thvm_atp_orient_and_add(ext, lhs, rhs);
         }
       }
-      thvm_atp_set_goal(ext, goal_lhs, goal_rhs);
+      // The same goal set as the main state; proof extraction walks
+      // the alias pair (goals[0] until the multi-goal proof side
+      // lands per-goal extraction).
+      atp_wire_install_goals(ext, &wire);
       ext_n_steps = thvm_atp_proof_extract(ext, ext_proof, ATP_PROOF_MAX_STEPS);
       ext_n_rules = ext->n_rules;
     }
@@ -1206,14 +1264,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_all_witnesses(
     return LIBRARY_FUNCTION_ERROR;
   }
   mint flat_len = naf->MNumericArray_getFlattenedLength(na);
-  if (flat_len < 3) return LIBRARY_FUNCTION_ERROR;
   const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
 
-  int64_t n_ax_i = data[0];
-  if (n_ax_i < 0 || (int64_t)flat_len != 3 * n_ax_i + 3) {
+  // Witness enumeration narrows ONE conjecture pair: n_goals must be 1.
+  AtpWire wire;
+  if (!atp_wire_parse(data, flat_len, &wire) || wire.n_goals != 1u) {
     return LIBRARY_FUNCTION_ERROR;
   }
-  u32 n_ax = (u32)n_ax_i;
 
   mint n_witness          = libData->MTensor_getFlattenedLength(witness_t);
   const mint *witness_ids = libData->MTensor_getIntegerData(witness_t);
@@ -1236,19 +1293,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_all_witnesses(
   AtpState *atp = thvm_atp_init(&wl_kbo3, (u32)max_steps);
   if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
 
-  for (u32 i = 0; i < n_ax; i++) {
-    Term lhs  = (Term)data[1 + 2 * i + 0];
-    Term rhs  = (Term)data[1 + 2 * i + 1];
-    int64_t f = data[1 + 2 * n_ax + 2 + i];
-    if (f == 1) {
-      (void)thvm_atp_install_oriented_rule(atp, lhs, rhs);
-    } else if (!thvm_atp_add_equation(atp, lhs, rhs)) {
-      thvm_atp_free(atp);
-      return LIBRARY_FUNCTION_ERROR;
-    }
+  if (!atp_wire_install_axioms(atp, &wire)) {
+    thvm_atp_free(atp);
+    return LIBRARY_FUNCTION_ERROR;
   }
-  Term goal_lhs = (Term)data[1 + 2 * n_ax + 0];
-  Term goal_rhs = (Term)data[1 + 2 * n_ax + 1];
+  Term goal_lhs = atp_wire_goal_lhs(&wire, 0);
+  Term goal_rhs = atp_wire_goal_rhs(&wire, 0);
 
   // Saturate first with no goal set so thvm_atp_run does not
   // early-exit via goal_check; then enumerate witnesses against the
@@ -1806,13 +1856,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_proof_init(WolframLibraryData libData,
     return LIBRARY_FUNCTION_ERROR;
   }
   mint flat_len = naf->MNumericArray_getFlattenedLength(na);
-  if (flat_len < 3) return LIBRARY_FUNCTION_ERROR;
   const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
-  int64_t n_ax_i = data[0];
-  if (n_ax_i < 0 || (int64_t)flat_len != 3 * n_ax_i + 3) {
-    return LIBRARY_FUNCTION_ERROR;
-  }
-  u32 n_ax = (u32)n_ax_i;
+  AtpWire wire;
+  if (!atp_wire_parse(data, flat_len, &wire)) return LIBRARY_FUNCTION_ERROR;
+  u32 n_ax = wire.n_ax;
   if ((u32)max_label >= ATP_WL_CFG_MAX_LABELS) return LIBRARY_FUNCTION_ERROR;
   static u32 rr_weights[ATP_WL_CFG_MAX_LABELS];
   static u32 rr_prec[ATP_WL_CFG_MAX_LABELS];
@@ -1825,8 +1872,8 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_proof_init(WolframLibraryData libData,
     static Term ax_rhs[ATP_WL_CFG_MAX_LABELS];
     u32 m = n_ax < ATP_WL_CFG_MAX_LABELS ? n_ax : ATP_WL_CFG_MAX_LABELS;
     for (u32 i = 0; i < m; i++) {
-      ax_lhs[i] = (Term)data[1 + 2 * i + 0];
-      ax_rhs[i] = (Term)data[1 + 2 * i + 1];
+      ax_lhs[i] = atp_wire_ax_lhs(&wire, i);
+      ax_rhs[i] = atp_wire_ax_rhs(&wire, i);
     }
     atp_auto_precedence(ax_lhs, ax_rhs, m, (u32)max_label + 1, rr_prec);
   }
@@ -1852,19 +1899,18 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_proof_init(WolframLibraryData libData,
   // here -- they exploded the queue on easy orientable goals; add per
   // problem-class once the re-rank latency is addressed.)
   thvm_atp_set_record_norm_steps(atp, 0u);
+  // No error-out on a rejected equation: this measurement path
+  // tolerates skipped adds.
   for (u32 i = 0; i < n_ax; i++) {
-    Term lhs  = (Term)data[1 + 2 * i + 0];
-    Term rhs  = (Term)data[1 + 2 * i + 1];
-    int64_t f = data[1 + 2 * n_ax + 2 + i];
-    if (f == 1) {
+    Term lhs = atp_wire_ax_lhs(&wire, i);
+    Term rhs = atp_wire_ax_rhs(&wire, i);
+    if (atp_wire_ax_flag(&wire, i) == 1) {
       thvm_atp_install_oriented_rule(atp, lhs, rhs);
     } else {
       thvm_atp_add_equation(atp, lhs, rhs);
     }
   }
-  Term gl = (Term)data[1 + 2 * n_ax + 0];
-  Term gr = (Term)data[1 + 2 * n_ax + 1];
-  if (gl != 0u || gr != 0u) thvm_atp_set_goal(atp, gl, gr);
+  atp_wire_install_goals(atp, &wire);
   MArgument_setInteger(res, (mint)(intptr_t)atp);
   return LIBRARY_NO_ERROR;
 }

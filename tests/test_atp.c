@@ -731,6 +731,121 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/goal-check-single-goal-latches-joined-mask");
+  {
+    // The single-conjecture path mirrors its join into the multi-goal
+    // bookkeeping: set_goal is set_goals(n=1), so a PROVED check
+    // latches bit 0.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->n_rules = 1;
+    thvm_atp_set_goal(s, mk_f(mk_a(), mk_e()), mk_a());
+    CHECK_EQ(s->n_goals, 1u);
+    CHECK_EQ((int)thvm_atp_goal_check(s), (int)ATP_PROVED);
+    CHECK_EQ((unsigned)s->goals_joined_mask, 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/goal-check-multi-both-join-proves");
+  {
+    // Two-goal conjunction, both joinable under f(x, e) -> x:
+    //   g0: f(a, e) == a    g1: f(e, e) == e
+    // One goal_check joins both, sets mask 0b11, returns PROVED.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->n_rules = 1;
+    Term gl[2] = { mk_f(mk_a(), mk_e()), mk_f(mk_e(), mk_e()) };
+    Term gr[2] = { mk_a(),               mk_e()               };
+    CHECK_EQ((int)thvm_atp_set_goals(s, gl, gr, 2), 1);
+    CHECK_EQ(s->n_goals, 2u);
+    CHECK_EQ((unsigned)s->goals_joined_mask, 0u);
+    CHECK_EQ((int)thvm_atp_goal_check(s), (int)ATP_PROVED);
+    CHECK_EQ((unsigned)s->goals_joined_mask, 3u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/goal-check-multi-partial-join-still-running");
+  {
+    // g0 joins (f(a, e) -> a), g1 (a == e) cannot: the joined bit
+    // latches for g0 only, the check stays RUNNING, and the
+    // single-goal alias re-points at the unjoined conjunct so the
+    // goal-directed heuristics steer toward it.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->n_rules = 1;
+    Term gl[2] = { mk_f(mk_a(), mk_e()), mk_a() };
+    Term gr[2] = { mk_a(),               mk_e() };
+    CHECK_EQ((int)thvm_atp_set_goals(s, gl, gr, 2), 1);
+    CHECK_EQ((int)thvm_atp_goal_check(s), (int)ATP_RUNNING);
+    CHECK_EQ((unsigned)s->goals_joined_mask, 1u);
+    CHECK(kbo_eq(s->goal_lhs, gl[1]));
+    CHECK(kbo_eq(s->goal_rhs, gr[1]));
+    // Re-checking is idempotent: the latched bit stays, still RUNNING.
+    CHECK_EQ((int)thvm_atp_goal_check(s), (int)ATP_RUNNING);
+    CHECK_EQ((unsigned)s->goals_joined_mask, 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/goal-check-multi-order-independent");
+  {
+    // The same conjunct set in the opposite order: the verdicts are
+    // order-independent (mask bits track positions, the unjoined
+    // conjunct is the one that cannot close either way).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->n_rules = 1;
+    Term gl[2] = { mk_a(), mk_f(mk_a(), mk_e()) };
+    Term gr[2] = { mk_e(), mk_a()               };
+    CHECK_EQ((int)thvm_atp_set_goals(s, gl, gr, 2), 1);
+    CHECK_EQ((int)thvm_atp_goal_check(s), (int)ATP_RUNNING);
+    CHECK_EQ((unsigned)s->goals_joined_mask, 2u);   // bit 1 = the joinable goal
+    // The alias stays on g0 -- the first (and only) unjoined conjunct.
+    CHECK(kbo_eq(s->goal_lhs, gl[0]));
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/run-multi-goal-both-orders-prove");
+  {
+    // End-to-end: axiom f(x, e) = x, conjunction of two joinable
+    // goals, run to PROVED in both conjunct orders.
+    for (int rev = 0; rev < 2; rev++) {
+      AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+      Term g0l = mk_f(mk_a(), mk_e()),               g0r = mk_a();
+      Term g1l = mk_f(mk_f(mk_a(), mk_e()), mk_e()), g1r = mk_a();
+      Term gl[2], gr[2];
+      gl[0] = rev ? g1l : g0l;  gr[0] = rev ? g1r : g0r;
+      gl[1] = rev ? g0l : g1l;  gr[1] = rev ? g0r : g1r;
+      CHECK_EQ((int)thvm_atp_set_goals(s, gl, gr, 2), 1);
+      thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+      CHECK_EQ((int)thvm_atp_run(s), (int)ATP_PROVED);
+      CHECK_EQ((unsigned)s->goals_joined_mask, 3u);
+      thvm_atp_free(s);
+    }
+  }
+
+  TEST_BEGIN("atp/set-goals-clear-and-cap");
+  {
+    // n == 0 clears back to completion mode; n > ATP_MAX_GOALS is
+    // rejected with the state untouched.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term gl[1] = { mk_a() };
+    Term gr[1] = { mk_e() };
+    CHECK_EQ((int)thvm_atp_set_goals(s, gl, gr, 1), 1);
+    CHECK_EQ(s->n_goals, 1u);
+    CHECK(s->goal_lhs != 0u);
+    CHECK_EQ((int)thvm_atp_set_goals(s, NULL, NULL, 0), 1);
+    CHECK_EQ(s->n_goals, 0u);
+    CHECK_EQ((unsigned)s->goal_lhs, 0u);
+    CHECK_EQ((int)thvm_atp_goal_check(s), (int)ATP_RUNNING);
+    CHECK_EQ((int)thvm_atp_set_goals(s, gl, gr, ATP_MAX_GOALS + 1u), 0);
+    CHECK_EQ(s->n_goals, 0u);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/step-empty-queue-no-goal-yields-queue-empty");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);

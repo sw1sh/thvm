@@ -6,9 +6,11 @@
 
 (* === ATP runner roundtrip === *)
 
-(* The ATP runner expects a packed Int64 NumericArray:
-     [n_axioms, lhs_0, rhs_0, ..., lhs_{n-1}, rhs_{n-1},
-      goal_lhs, goal_rhs]
+(* The ATP runner expects a packed Int64 NumericArray in the wire
+   layout (atp_wire_parse in thvmlink_atp.c):
+     [n_goals, n_axioms, lhs_0, rhs_0, ..., lhs_{n-1}, rhs_{n-1},
+      goal_lhs_0, goal_rhs_0, ..., flag_0, ..., flag_{n-1}]
+   of length 2 + 3*n_axioms + 2*n_goals.
    Returns [status, n_rules, n_trace, n_cps] (also Int64 NA).
 *)
 
@@ -26,7 +28,7 @@ VerificationTest[
        immediately on structural equality; saturation is a no-op. *)
     Module[{packed, stats},
       packed = NumericArray[
-        {1, fvr0, fvr0, fvr0, fvr0},
+        {1, 1, fvr0, fvr0, fvr0, fvr0, 0},
         "Integer64"
       ];
       stats = THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
@@ -45,7 +47,7 @@ VerificationTest[
     Module[{fvr1, packed, stats},
       fvr1 = THVMLink`Private`$termNewFn[0, 22, 1, 0];
       packed = NumericArray[
-        {0, fvr0, fvr1},
+        {1, 0, fvr0, fvr1},
         "Integer64"
       ];
       stats = THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
@@ -58,12 +60,31 @@ VerificationTest[
 VerificationTest[
     (* Returned NumericArray has fixed shape [4]. *)
     Module[{packed, stats},
-      packed = NumericArray[{1, fvr0, fvr0, fvr0, fvr0}, "Integer64"];
+      packed = NumericArray[{1, 1, fvr0, fvr0, fvr0, fvr0, 0}, "Integer64"];
       stats = THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
       Dimensions @ Normal @ stats
     ],
     {4},
     TestID -> "ATP/runner/return-shape"
+]
+
+VerificationTest[
+    (* Multi-goal conjunction on the wire: n_goals == 2 packs two
+       goal pairs after the axiom block.  Axiom f(x) = x joins BOTH
+       goals f(x) == x and x == f(x) off one saturation. *)
+    Module[{fvr1, fx, fx1, packed, stats},
+      fvr1 = THVMLink`Private`$termNewFn[0, 22, 1, 0];
+      fx  = THVMLink`ATP`Private`$termNewCtrFn[3, {fvr0}];
+      fx1 = THVMLink`ATP`Private`$termNewCtrFn[3, {fvr1}];
+      packed = NumericArray[
+        {2, 1, fx, fvr0, fx, fvr0, fx1, fvr1, 0},
+        "Integer64"
+      ];
+      stats = THVMLink`ATP`Private`$atpRunFn[packed, 16, 4];
+      First @ Normal @ stats
+    ],
+    1 (* ATP_PROVED -- every conjunct joined *),
+    TestID -> "ATP/runner/multi-goal-both-join-proves"
 ]
 
 (* === 8.7c: WL-expression-to-Term encoder === *)

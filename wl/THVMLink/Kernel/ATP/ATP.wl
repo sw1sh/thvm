@@ -217,9 +217,11 @@ $AtpUseChain = True;
 (* === LibraryLink loaders =========================================== *)
 
 (* ATP runner.  Takes a packed Int64 NumericArray
-     [n_axioms, lhs_0, rhs_0, ..., goal_lhs, goal_rhs]
-   plus max_steps and max_label.  Returns a 4-element Int64
-   NumericArray [status, n_rules, n_trace, n_cps]. *)
+     [n_goals, n_axioms, lhs_0, rhs_0, ...,
+      goal_lhs_0, goal_rhs_0, ..., flag_0, ...]
+   (the atpEncodeProblem wire layout) plus max_steps and max_label.
+   Returns a 4-element Int64 NumericArray
+   [status, n_rules, n_trace, n_cps]. *)
 $atpRunFn := $atpRunFn = load[
     "thvm_wl_atp_run",
     {{"NumericArray", "Shared"}, Integer, Integer},
@@ -1583,8 +1585,8 @@ SetAttributes[atpEncodeProblem, HoldAll];
 atpEncodeProblem[axioms_, conjecture_] :=
     atpEncodeProblem[axioms, conjecture, False];
 atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
-    axHCsRaw, axHCs, cjHC, axTermsAndState, axTerms, st, axFlags,
-    goalRes, goalLhs, goalRhs, axPairs, conjPair, n
+    axHCsRaw, axHCs, cjHCs, axTermsAndState, axTerms, st, axFlags,
+    goalRes, goalTerms, axPairs, conjPairs, conjPair, n, nGoals
 },
     If[ ! ListQ[Unevaluated[axioms]],
         Throw[Failure["TATPParseError",
@@ -1606,28 +1608,42 @@ atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
     axTermsAndState = Fold[encodeAxiomFold, {{}, encodeAtpTermInit[], 1}, axHCs];
     axTerms = axTermsAndState[[1]];
     st = axTermsAndState[[2]];
-    (* Completion mode: conjecture === None means "no goal" -- the
-       packed goal pair is (0, 0), which the C runner reads as "saturate
-       the axioms" instead of running a goal check. *)
-    If[ Unevaluated[conjecture] === None,
-        cjHC = HoldComplete[None];
-        goalLhs = 0; goalRhs = 0,
-    (* else: a real conjecture. *)
-        cjHC = forAllToPattern[HoldComplete[conjecture]];
-        (* Skolemize: a universal conjecture is proved for an arbitrary
-           fixed instance, so strip the bound variables' Pattern wrappers
-           to bare constants.  KBO totally orders constants, so an
-           unorientable equation (commutativity-style) becomes ordered-
-           applicable to the goal -- the single-NF check then closes a
-           symmetric goal the variable-keyed goal could not.  Done inside
-           HoldComplete so a reflexive `f[x] == f[x]` does not collapse to
-           True before encoding. *)
-        If[ skolemize, cjHC = cjHC /. Verbatim[Pattern][v_, _] :> v ];
-        goalRes = encodeEquation[cjHC, st, "conjecture"];
-        goalLhs = goalRes[[1]];
-        goalRhs = goalRes[[2]];
-        st = goalRes[[3]]
+    (* Conjecture forms: None means "no goal" (completion mode, n_goals
+       0 -- the C runner saturates the axioms instead of running a goal
+       check); a List is a multi-goal conjunction (every conjunct proved
+       off ONE saturation, FindEquationalProof[{g1, g2}, axioms]
+       parity); anything else is the single-conjecture case. *)
+    cjHCs = Which[
+        Unevaluated[conjecture] === None,
+            {},
+        MatchQ[Unevaluated[conjecture], _List],
+            forAllToPattern /@ (HoldComplete /@ Unevaluated[conjecture]),
+        True,
+            {forAllToPattern[HoldComplete[conjecture]]}
     ];
+    (* Skolemize: a universal conjecture is proved for an arbitrary
+       fixed instance, so strip the bound variables' Pattern wrappers
+       to bare constants.  KBO totally orders constants, so an
+       unorientable equation (commutativity-style) becomes ordered-
+       applicable to the goal -- the single-NF check then closes a
+       symmetric goal the variable-keyed goal could not.  Done inside
+       HoldComplete so a reflexive `f[x] == f[x]` does not collapse to
+       True before encoding. *)
+    If[ skolemize, cjHCs = cjHCs /. Verbatim[Pattern][v_, _] :> v ];
+    nGoals = Length[cjHCs];
+    (* Encode every conjunct with the SHARED encoder state so symbol
+       labels stay consistent across the axioms and all goals. *)
+    goalRes = Fold[
+        {acc, cjHC} |-> Block[{
+            r = encodeEquation[cjHC, acc[[2]], "conjecture"]
+        },
+            {Join[acc[[1]], {r[[1]], r[[2]]}], r[[3]]}
+        ],
+        {{}, st},
+        cjHCs
+    ];
+    goalTerms = goalRes[[1]];
+    st = goalRes[[2]];
     (* Extract {lhs, rhs} pairs from each (stripped) held axiom
        directly via positions {1,1}/{1,2} of
        HoldComplete[lhs==rhs].  Avoids ReleaseHold which
@@ -1635,19 +1651,31 @@ atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
     axPairs = (
         {Extract[#, {1, 1}], Extract[#, {1, 2}]} & /@ axHCs
     );
-    conjPair = If[ Unevaluated[conjecture] === None, {0, 0},
-        {Extract[cjHC, {1, 1}], Extract[cjHC, {1, 2}]}];
-    (* Wire layout: [n, lhs_0, rhs_0, ..., lhs_{n-1}, rhs_{n-1},
-       goal_lhs, goal_rhs, flag_0, ..., flag_{n-1}].  The C reader takes
-       each axiom's lhs/rhs at data[1 + 2*i + 0/1], the goal at
-       data[1 + 2*n + 0/1], total length 3*n + 3, and the axiom-install
-       loops read the per-axiom flag at data[1 + 2*n + 2 + i] to dispatch
-       between thvm_atp_add_equation (flag == 0) and
-       thvm_atp_install_oriented_rule (flag == 1).  See
+    conjPairs = (
+        {Extract[#, {1, 1}], Extract[#, {1, 2}]} & /@ cjHCs
+    );
+    (* "ConjPair" keeps the single-goal consumers' shape: a flat
+       {lhs, rhs} when there is exactly one conjecture ({0, 0} for
+       None) and the LIST of pairs for a multi-goal conjunction.
+       "ConjPairs" is the uniform list-of-pairs view. *)
+    conjPair = Which[
+        nGoals == 0, {0, 0},
+        nGoals == 1, First[conjPairs],
+        True, conjPairs
+    ];
+    (* Wire layout: [n_goals, n, lhs_0, rhs_0, ..., lhs_{n-1},
+       rhs_{n-1}, goal_lhs_0, goal_rhs_0, ..., goal_lhs_{n_goals-1},
+       goal_rhs_{n_goals-1}, flag_0, ..., flag_{n-1}].  The C reader
+       (atp_wire_parse in thvmlink_atp.c) takes each axiom's lhs/rhs at
+       data[2 + 2*i + 0/1], goal g at data[2 + 2*n + 2*g + 0/1], and
+       the per-axiom orientation flag at data[2 + 2*n + 2*n_goals + i]
+       to dispatch between thvm_atp_add_equation (flag == 0) and
+       thvm_atp_install_oriented_rule (flag == 1); total length
+       2 + 3*n + 2*n_goals.  n_goals == 0 is completion mode.  See
        [[project_atp_oriented_rules]]. *)
     <|
         "Packed" -> NumericArray[
-            Join[{n}, axTerms, {goalLhs, goalRhs}, axFlags],
+            Join[{nGoals, n}, axTerms, goalTerms, axFlags],
             "Integer64"
         ],
         "MaxLab" -> st["next_lab"],
@@ -1655,8 +1683,14 @@ atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
         "AxPairs" -> axPairs,
         "AxFlags" -> axFlags,
         "ConjPair" -> conjPair,
+        "ConjPairs" -> conjPairs,
         "AxHCsRaw" -> axHCsRaw,
-        "ConjHCRaw" -> If[skolemize, cjHC, HoldComplete[conjecture]]
+        "ConjHCRaw" -> Which[
+            nGoals == 0, HoldComplete[None],
+            ! skolemize, HoldComplete[conjecture],
+            nGoals == 1, First[cjHCs],
+            True, cjHCs
+        ]
     |>
 ]
 
@@ -3791,9 +3825,9 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
 
    TFindProof[axioms] (no conjecture) runs a time-constrained
    completion of the axiom equations and returns the derived lemmas (the
-   completed rule set).  Implementation: encode with a dummy conjecture,
-   then overwrite the goal pair in the packed array to (0, 0) -- the C
-   runner reads (0, 0) as "no goal" and saturates until the CP queue
+   completed rule set).  Implementation: encode with a None conjecture,
+   so the packed array carries n_goals == 0 -- the C runner reads that
+   as "no goal" and saturates until the CP queue
    empties (a finite complete system) or the step/wall budget is hit.
    The default return for completion mode is "ProofObject" with
    Theorems -> None (the no-goal path is unified with the goal-directed
@@ -3805,8 +3839,9 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
             axEq, varNames, ds, po},
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
             N[OptionValue[TimeConstraint]], 0.];
-        (* Encode with a None conjecture: the packed goal pair is (0, 0),
-           which the C runner reads as "no goal -> saturate the axioms". *)
+        (* Encode with a None conjecture: the packed array carries
+           n_goals == 0, which the C runner reads as "no goal ->
+           saturate the axioms". *)
         enc = atpEncodeProblem[axioms, None, False];
         atpMethodCfg = atpParseMethod[OptionValue[Method]];
         {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[

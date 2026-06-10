@@ -4324,6 +4324,11 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->trace);
   free(s->lhs);
   free(s->rhs);
+  // Multi-goal conjunct arrays (NULL until thvm_atp_set_goals).
+  free(s->goals_lhs);
+  free(s->goals_rhs);
+  free(s->goals_lhs_nf);
+  free(s->goals_rhs_nf);
   free(s->r_trace);
   free(s->r_orient);
   free(s->r_dead);
@@ -4458,6 +4463,7 @@ fn void thvm_atp_heap_reset(u64 checkpoint) {
 // Live Term fields rooted here:
 //   - lhs[0..n_rules), rhs[0..n_rules)        -- the rule set R
 //   - goal_lhs, goal_rhs                      -- the conjecture
+//   - goals_lhs/rhs[/..._nf][0..n_goals)      -- multi-goal conjuncts
 //   - trace[0..n_trace)                       -- TAG_CTR entries
 //                                                (each holds lhs/rhs)
 //   - witness_subst.bindings[0..REWRITE_MAX_VAR) -- narrowing σ
@@ -4481,6 +4487,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // thvm_atp_init and reused across orient_and_add calls, so a GC
   // mid-completion would otherwise leave a dangling cell).
   u32 n_roots = 4u * s->n_rules + 4u /* goal + goal_nf */
+              + 4u * s->n_goals /* multi-goal conjuncts + NFs */
               + s->n_trace + REWRITE_MAX_VAR
               + 1u /* min_const */;
 #ifdef ATP_MNF
@@ -4508,6 +4515,16 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   roots[w++] = s->goal_rhs;
   roots[w++] = s->goal_lhs_nf;
   roots[w++] = s->goal_rhs_nf;
+  // Multi-goal conjuncts.  goals_lhs[0] usually VALUE-aliases goal_lhs
+  // (same cell); the collector's forwarding pointers relocate both
+  // copies to the same to-space address, so duplicate roots are safe
+  // and cost no extra copying.  0 entries (unset NFs) are null roots.
+  for (u32 g = 0; g < s->n_goals; g++) {
+    roots[w++] = s->goals_lhs[g];
+    roots[w++] = s->goals_rhs[g];
+    roots[w++] = s->goals_lhs_nf[g];
+    roots[w++] = s->goals_rhs_nf[g];
+  }
   for (u32 i = 0; i < s->n_trace; i++) roots[w++] = s->trace[i];
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
     roots[w++] = s->witness_subst.bindings[i];
@@ -4538,6 +4555,12 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   s->goal_rhs = roots[w++];
   s->goal_lhs_nf = roots[w++];
   s->goal_rhs_nf = roots[w++];
+  for (u32 g = 0; g < s->n_goals; g++) {
+    s->goals_lhs[g]    = roots[w++];
+    s->goals_rhs[g]    = roots[w++];
+    s->goals_lhs_nf[g] = roots[w++];
+    s->goals_rhs_nf[g] = roots[w++];
+  }
   for (u32 i = 0; i < s->n_trace; i++) s->trace[i] = roots[w++];
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
     s->witness_subst.bindings[i] = roots[w++];
@@ -4833,14 +4856,38 @@ static void atp_collect_symbols(Term t, u64 *mask) {
   }
 }
 
+// Release the multi-goal arrays (set_goals re-set / clear / free).
+static void atp_goals_release(AtpState *s) {
+  free(s->goals_lhs);    s->goals_lhs    = NULL;
+  free(s->goals_rhs);    s->goals_rhs    = NULL;
+  free(s->goals_lhs_nf); s->goals_lhs_nf = NULL;
+  free(s->goals_rhs_nf); s->goals_rhs_nf = NULL;
+  s->n_goals = 0;
+  s->goals_joined_mask = 0;
+}
+
 // Set the conjecture (single equation goal_lhs == goal_rhs).
 // Calling with goal_lhs == 0 clears the goal (completion mode).
 // Returns 1 on success, 0 if 8.4d's sort-check rejected the goal.
 fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
+  if (s != NULL && lhs == 0) return thvm_atp_set_goals(s, NULL, NULL, 0);
+  return thvm_atp_set_goals(s, &lhs, &rhs, 1);
+}
+
+// Set an n-goal conjunction: every pair (lhs[g], rhs[g]) must join for
+// goal_check to report ATP_PROVED.  n == 0 clears the goal (completion
+// mode); n == 1 is the single-conjecture case and behaves exactly as
+// thvm_atp_set_goal always has.  The conjecture symbol mask and the
+// relevance levels are computed over the UNION of all goals' symbols.
+// Returns 1 on success, 0 on n > ATP_MAX_GOALS or any sort-check
+// rejection (state unmodified on failure).
+fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
+                         u32 n) {
   if (s == NULL) return 0;
-  // Clearing the goal: lhs == 0 means "completion mode", always
+  if (n > ATP_MAX_GOALS) return 0;
+  // Clearing the goal: n == 0 means "completion mode", always
   // accepted regardless of sort-check.
-  if (lhs == 0) {
+  if (n == 0) {
     s->goal_lhs = 0;
     s->goal_rhs = 0;
     s->conj_sym_mask = 0;
@@ -4849,33 +4896,56 @@ fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
     s->goal_lhs_ft = NULL;
     s->goal_rhs_ft = NULL;
 #endif
+    atp_goals_release(s);
     return 1;
   }
   // 8.4d: gate on sort-check when a spec is attached -- both
-  // sides must be well-sorted AND share the same sort.
+  // sides of every conjunct must be well-sorted AND share a sort.
   if (s->spec != NULL) {
-    u32 sl = wald_term_sort(s->spec, lhs);
-    u32 sr = wald_term_sort(s->spec, rhs);
-    if (sl == WALD_MAX_SORTS || sr == WALD_MAX_SORTS || sl != sr) {
-      return 0;
+    for (u32 g = 0; g < n; g++) {
+      u32 sl = wald_term_sort(s->spec, lhs[g]);
+      u32 sr = wald_term_sort(s->spec, rhs[g]);
+      if (sl == WALD_MAX_SORTS || sr == WALD_MAX_SORTS || sl != sr) {
+        return 0;
+      }
     }
   }
-  s->goal_lhs = lhs;
-  s->goal_rhs = rhs;
+  atp_goals_release(s);
+  s->goals_lhs    = (Term *)malloc((size_t)n * sizeof(Term));
+  s->goals_rhs    = (Term *)malloc((size_t)n * sizeof(Term));
+  s->goals_lhs_nf = (Term *)calloc(n, sizeof(Term));
+  s->goals_rhs_nf = (Term *)calloc(n, sizeof(Term));
+  if (s->goals_lhs == NULL || s->goals_rhs == NULL ||
+      s->goals_lhs_nf == NULL || s->goals_rhs_nf == NULL) {
+    atp_goals_release(s);
+    return 0;
+  }
+  for (u32 g = 0; g < n; g++) {
+    s->goals_lhs[g] = lhs[g];
+    s->goals_rhs[g] = rhs[g];
+  }
+  s->n_goals = n;
+  // goal_lhs/goal_rhs alias the first (unjoined) goal -- the storage
+  // every single-goal consumer and goal-directed heuristic reads.
+  s->goal_lhs = lhs[0];
+  s->goal_rhs = rhs[0];
 #ifdef THVM_ATPFT_RULES
-  // Stage 4: mirror the goal pair into the AtpFt arena.  Goals are
-  // persistent (live as long as the conjecture); convert with
+  // Stage 4: mirror the alias goal pair into the AtpFt arena.  Goals
+  // are persistent (live as long as the conjecture); convert with
   // scratch=0.  Set-goal can be called multiple times (test setup,
   // existential mode flip); the previous goal cells become unreachable
   // in the arena but the slab pool never returns memory mid-state,
   // freed wholesale at thvm_atp_free.
-  s->goal_lhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, lhs, 0);
-  s->goal_rhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, rhs, 0);
+  s->goal_lhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, lhs[0], 0);
+  s->goal_rhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, rhs[0], 0);
 #endif
-  // Recompute the conjecture symbol mask for ATP_CP_WEIGHT_CONJSYM.
+  // Recompute the conjecture symbol mask for ATP_CP_WEIGHT_CONJSYM --
+  // the union over every conjunct's symbols.
   s->conj_sym_mask = 0;
-  atp_collect_symbols(lhs, &s->conj_sym_mask);
-  atp_collect_symbols(rhs, &s->conj_sym_mask);
+  for (u32 g = 0; g < n; g++) {
+    atp_collect_symbols(lhs[g], &s->conj_sym_mask);
+    atp_collect_symbols(rhs[g], &s->conj_sym_mask);
+  }
   // Recompute the level-1 relevance mask for back-compat (legacy
   // CONJSYM consumers).  Now also recompute the per-symbol BFS level
   // array sym_level[] for ATP_CP_WEIGHT_RELLEVEL.  Skips dead rules.
@@ -8176,8 +8246,17 @@ fn void thvm_atp_set_use_sos(AtpState *s, u8 on) {
   s->use_sos = on ? 1u : 0u;
   if (on) {
     for (u32 i = 0; i < 8u; i++) s->goal_sym_mask[i] = 0u;
-    if (s->goal_lhs) atp_sym_mask_collect(s->goal_lhs, s->goal_sym_mask);
-    if (s->goal_rhs) atp_sym_mask_collect(s->goal_rhs, s->goal_sym_mask);
+    if (s->n_goals > 1u) {
+      // Multi-goal: the support set is the union over every conjunct's
+      // symbols, so all goals keep their relevance bias run-wide.
+      for (u32 g = 0; g < s->n_goals; g++) {
+        atp_sym_mask_collect(s->goals_lhs[g], s->goal_sym_mask);
+        atp_sym_mask_collect(s->goals_rhs[g], s->goal_sym_mask);
+      }
+    } else {
+      if (s->goal_lhs) atp_sym_mask_collect(s->goal_lhs, s->goal_sym_mask);
+      if (s->goal_rhs) atp_sym_mask_collect(s->goal_rhs, s->goal_sym_mask);
+    }
   }
 }
 
@@ -10286,21 +10365,108 @@ fn u32 thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
 }
 #endif /* ATP_MNF */
 
+// Goal-side normalization cap.  Generous (not the per-step CP cap
+// of 64): a goal can close purely by normalization when the axioms
+// generate no critical pairs -- e.g. combinatory-logic identities
+// (B/C/W <-> S/K), whose rules are non-overlapping, so completion's
+// CP queue is empty and the ONLY way the goal joins is by reducing
+// both sides to a common normal form.  Deep combinator terms like
+// S(S(K(S(KS)K))S)(KK) x y z take many hundreds of rewrites to
+// normalize; a cap of 64 left them un-joined (reported QUEUE_EMPTY
+// with the goal actually provable).  A terminating rewrite system
+// reaches fixpoint and returns early regardless of the bound, so
+// the only risk is a non-terminating R (e.g. the Y axiom in scope),
+// which the wall deadline already bounds.
+#define ATP_GOAL_NORM_CAP (1u << 16)
+
+// Universal-goal join check for ONE conjecture pair (gl, gr):
+// normalize both sides under the current R and compare (flatterm
+// fixpoint equality on the non-AC path, then kbo_eq, then AC-equality
+// when an AC mask is live).  Writes the normal forms to *nf_l/*nf_r in
+// every case; returns 1 iff the pair joins.  Shared by the single-goal
+// path and the multi-goal conjunct loop -- the MNF front search is NOT
+// part of this check (it is per-alias-goal and stateful).
+static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
+                               Term *nf_l, Term *nf_r) {
+  // FT path for AC-mask=0; Term path otherwise.  Earlier commit
+  // 2133702a tried to unify on FT via ft_ac_eq, but ac-bool-idem-embed
+  // still regresses to QUEUE_EMPTY iters=2 because the FT NF reaches
+  // a different fixpoint than the Term NF on the f(x,x)=x reduction
+  // trajectory.  Keep the Term-side path for AC workloads until the
+  // FT normalize semantics match the Term-side leftmost-outermost
+  // descent under AC.
+  Term l, r;
+#ifdef THVM_ATP_AC
+  if (thvm_atp_get_ac_mask() != 0ull) {
+    l = atp_rewrite_normalize(s, gl, s->lhs, s->rhs,
+                              s->n_rules, ATP_GOAL_NORM_CAP);
+    r = atp_rewrite_normalize(s, gr, s->lhs, s->rhs,
+                              s->n_rules, ATP_GOAL_NORM_CAP);
+  } else
+#endif
+  {
+    atp_ft_mirror_ensure(s);
+    AtpFt *gft = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *fl_in = ft_from_term(gft, gl, 0);
+    AtpFtCell *fr_in = ft_from_term(gft, gr, 0);
+    AtpFtCell *fl = atp_rewrite_normalize_ft(s, fl_in, ATP_GOAL_NORM_CAP);
+    AtpFtCell *fr = atp_rewrite_normalize_ft(s, fr_in, ATP_GOAL_NORM_CAP);
+    l = ft_to_term(fl);
+    r = ft_to_term(fr);
+    if (ft_eq(fl, fr)) {
+      *nf_l = l;
+      *nf_r = r;
+      return 1;
+    }
+  }
+  *nf_l = l;
+  *nf_r = r;
+  if (kbo_eq(l, r)) return 1;
+#ifdef THVM_ATP_AC
+  if (thvm_atp_get_ac_mask() != 0ull) {
+    AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
+    if (atp_ac_eq(l, r, &ac)) return 1;
+  }
+#endif
+  return 0;
+}
+
+// Point the single-goal alias (goal_lhs/goal_rhs, their NFs, the FT
+// mirror) at conjunct g.  When the alias actually MOVES to a different
+// conjunct, the MNF front set is dropped: its GREEN/RED fronts were
+// seeded from the previous alias goal and would keep searching for a
+// join of the wrong conjunct.  goal_check recreates it lazily.
+static void atp_goals_alias(AtpState *s, u32 g) {
+  u8 moved = (s->goal_lhs != s->goals_lhs[g] ||
+              s->goal_rhs != s->goals_rhs[g]);
+  s->goal_lhs    = s->goals_lhs[g];
+  s->goal_rhs    = s->goals_rhs[g];
+  s->goal_lhs_nf = s->goals_lhs_nf[g];
+  s->goal_rhs_nf = s->goals_rhs_nf[g];
+  if (!moved) return;
+#ifdef THVM_ATPFT_RULES
+  s->goal_lhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, s->goal_lhs, 0);
+  s->goal_rhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, s->goal_rhs, 0);
+#endif
+#ifdef ATP_MNF
+  if (s->mnf != NULL) {
+    mnf_destroy(s->mnf);
+    s->mnf = NULL;
+  }
+#endif
+}
+
+// First conjunct whose goals_joined_mask bit is still clear.  Callers
+// guarantee at least one unjoined goal (mask != all-set).
+static u32 atp_goals_first_unjoined(const AtpState *s) {
+  for (u32 g = 0; g < s->n_goals; g++) {
+    if (!(s->goals_joined_mask & ((u64)1 << g))) return g;
+  }
+  return 0;
+}
+
 fn AtpStatus thvm_atp_goal_check(AtpState *s) {
   if (s == NULL || s->goal_lhs == 0) return ATP_RUNNING;
-  // Goal-side normalization cap.  Generous (not the per-step CP cap
-  // of 64): a goal can close purely by normalization when the axioms
-  // generate no critical pairs -- e.g. combinatory-logic identities
-  // (B/C/W <-> S/K), whose rules are non-overlapping, so completion's
-  // CP queue is empty and the ONLY way the goal joins is by reducing
-  // both sides to a common normal form.  Deep combinator terms like
-  // S(S(K(S(KS)K))S)(KK) x y z take many hundreds of rewrites to
-  // normalize; a cap of 64 left them un-joined (reported QUEUE_EMPTY
-  // with the goal actually provable).  A terminating rewrite system
-  // reaches fixpoint and returns early regardless of the bound, so
-  // the only risk is a non-terminating R (e.g. the Y axiom in scope),
-  // which the wall deadline already bounds.
-  const u32 NORM_CAP = 1u << 16;
 
   // 8.9c: existential goals use narrowing; universal goals stay
   // on the rewrite-and-compare path.
@@ -10331,46 +10497,54 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     return ATP_RUNNING;
   }
 
-  // FT path for AC-mask=0; Term path otherwise.  Earlier commit
-  // 2133702a tried to unify on FT via ft_ac_eq, but ac-bool-idem-embed
-  // still regresses to QUEUE_EMPTY iters=2 because the FT NF reaches
-  // a different fixpoint than the Term NF on the f(x,x)=x reduction
-  // trajectory.  Keep the Term-side path for AC workloads until the
-  // FT normalize semantics match the Term-side leftmost-outermost
-  // descent under AC.
-  Term l, r;
-#ifdef THVM_ATP_AC
-  if (thvm_atp_get_ac_mask() != 0ull) {
-    l = atp_rewrite_normalize(s, s->goal_lhs, s->lhs, s->rhs,
-                              s->n_rules, NORM_CAP);
-    r = atp_rewrite_normalize(s, s->goal_rhs, s->lhs, s->rhs,
-                              s->n_rules, NORM_CAP);
-  } else
-#endif
-  {
-    atp_ft_mirror_ensure(s);
-    AtpFt *gft = (AtpFt *)s->ft_arena_ptr;
-    AtpFtCell *fl_in = ft_from_term(gft, s->goal_lhs, 0);
-    AtpFtCell *fr_in = ft_from_term(gft, s->goal_rhs, 0);
-    AtpFtCell *fl = atp_rewrite_normalize_ft(s, fl_in, NORM_CAP);
-    AtpFtCell *fr = atp_rewrite_normalize_ft(s, fr_in, NORM_CAP);
-    l = ft_to_term(fl);
-    r = ft_to_term(fr);
-    if (ft_eq(fl, fr)) {
-      s->goal_lhs_nf = l;
-      s->goal_rhs_nf = r;
-      return ATP_PROVED;
+  // Multi-goal conjunction: check every conjunct not yet joined.  A
+  // join is LATCHED in goals_joined_mask -- R only grows under
+  // completion, so a once-joined goal stays joinable; re-checking it
+  // would only burn normalization work.  PROVED only when every bit
+  // is set.
+  if (s->n_goals > 1u) {
+    const u64 all_mask = (s->n_goals >= 64u)
+        ? ~0ull : (((u64)1 << s->n_goals) - 1ull);
+    for (u32 g = 0; g < s->n_goals; g++) {
+      if (s->goals_joined_mask & ((u64)1 << g)) continue;
+      if (atp_goal_pair_joined(s, s->goals_lhs[g], s->goals_rhs[g],
+                               &s->goals_lhs_nf[g], &s->goals_rhs_nf[g])) {
+        s->goals_joined_mask |= (u64)1 << g;
+      }
     }
-  }
-  s->goal_lhs_nf = l;
-  s->goal_rhs_nf = r;
-  if (kbo_eq(l, r)) return ATP_PROVED;
-#ifdef THVM_ATP_AC
-  if (thvm_atp_get_ac_mask() != 0ull) {
-    AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
-    if (atp_ac_eq(l, r, &ac)) return ATP_PROVED;
-  }
+    if (s->goals_joined_mask == all_mask) return ATP_PROVED;
+    // Re-point the alias at the first unjoined conjunct so every
+    // goal-directed heuristic (CPinGoal, goal-interleave, MNF) steers
+    // toward a goal that still needs closing.
+    atp_goals_alias(s, atp_goals_first_unjoined(s));
+#ifdef ATP_MNF
+    // The MNF front search runs against the CURRENT alias conjunct
+    // only (its fronts are seeded from goal_lhs/goal_rhs);
+    // atp_goals_alias above dropped a front set seeded from a
+    // previously-aliased goal.
+    if (s->use_mnf) {
+      if (s->mnf == NULL) s->mnf = mnf_create(s);
+      if (s->mnf != NULL && mnf_step(s, s->mnf, MNF_BUDGET)) {
+        s->goals_joined_mask |= (u64)1 << atp_goals_first_unjoined(s);
+        if (s->goals_joined_mask == all_mask) return ATP_PROVED;
+        atp_goals_alias(s, atp_goals_first_unjoined(s));
+      }
+    }
 #endif
+    return ATP_RUNNING;
+  }
+
+  if (atp_goal_pair_joined(s, s->goal_lhs, s->goal_rhs,
+                           &s->goal_lhs_nf, &s->goal_rhs_nf)) {
+    if (s->n_goals == 1u) {
+      // Keep the (size-1) conjunct mirror coherent for consumers that
+      // read per-goal state uniformly (wire reporting, proof side).
+      s->goals_lhs_nf[0] = s->goal_lhs_nf;
+      s->goals_rhs_nf[0] = s->goal_rhs_nf;
+      s->goals_joined_mask = 1ull;
+    }
+    return ATP_PROVED;
+  }
 #ifdef ATP_MNF
   // Milestone 10: the MNF bidirectional search AUGMENTS the single-NF
   // check -- it does not replace it.  goal_lhs seeds a GREEN front,
@@ -10389,7 +10563,10 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
   // Method -> "GoalDirected".  Off, this block is a single branch test.
   if (s->use_mnf) {
     if (s->mnf == NULL) s->mnf = mnf_create(s);
-    if (s->mnf != NULL && mnf_step(s, s->mnf, MNF_BUDGET)) return ATP_PROVED;
+    if (s->mnf != NULL && mnf_step(s, s->mnf, MNF_BUDGET)) {
+      if (s->n_goals == 1u) s->goals_joined_mask = 1ull;
+      return ATP_PROVED;
+    }
   }
 #endif
   return ATP_RUNNING;
@@ -10404,6 +10581,7 @@ fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
     s->goal_lhs = 0;
     s->goal_rhs = 0;
     s->goal_existential = 0;
+    atp_goals_release(s);
 #ifdef THVM_ATPFT_RULES
     s->goal_lhs_ft = NULL;
     s->goal_rhs_ft = NULL;
@@ -10420,6 +10598,10 @@ fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
   s->goal_lhs = lhs;
   s->goal_rhs = rhs;
   s->goal_existential = 1;
+  // Existential goals are single-conjecture only: drop any multi-goal
+  // state a prior thvm_atp_set_goals left behind so goal_check takes
+  // the narrow path, not the conjunct loop.
+  atp_goals_release(s);
 #ifdef THVM_ATPFT_RULES
   // Stage 4: mirror the goal on the AtpFt side (same persistence /
   // arena story as thvm_atp_set_goal).
