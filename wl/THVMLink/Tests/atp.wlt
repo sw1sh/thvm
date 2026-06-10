@@ -895,18 +895,20 @@ VerificationTest[
 ];
 
 VerificationTest[
-    (* TATP-style axioms-first argument order: TFindProof[{axioms},
-       conjecture] flips to the canonical [conjecture, axioms] form when
-       the second argument is a single equation-shaped expression.  The
-       single-arg completion form TFindProof[{axioms}, "Lemmas"] is
-       unaffected (a return spec is never equation-shaped). *)
-    {Head @ TFindProof[{a -> b, b -> c}, a -> c, TimeConstraint -> 10],
-     TFindProof[{a -> b, b -> c}, a -> c, "Status", TimeConstraint -> 10],
-     Head @ TFindProof[{a -> b, b -> c}, TwoWayRule[a, c],
-         TimeConstraint -> 10]},
-    {ProofObject, "Proved", ProofObject},
-    TestID -> "ATP/Rule/axioms-first-order"
+    (* A LIST of conjectures against an explicit axiom list proves each
+       element independently, mirroring the named-theory multi-conjunct
+       path.  Default return: all-or-$Failed (second case -- `a == q` is
+       not provable, so the whole call is $Failed).  An explicit
+       returnSpec instead returns the per-conjunct projections. *)
+    {Head /@ TFindProof[{a == c, a == b}, {a -> b, b -> c},
+         TimeConstraint -> 10],
+     TFindProof[{a == c, a == q}, {a -> b, b -> c}, TimeConstraint -> 5],
+     TFindProof[{a == c, a == q}, {a -> b, b -> c}, "Status",
+         TimeConstraint -> 5]},
+    {{ProofObject, ProofObject}, $Failed, {"Proved", "Saturated"}},
+    TestID -> "ATP/multi-goal/explicit-axioms-list"
 ];
+
 
 VerificationTest[
     (* Bare String atoms (`f["a"] == f["b"]`) are normalized to private
