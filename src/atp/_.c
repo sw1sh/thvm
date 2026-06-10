@@ -7297,7 +7297,13 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
 // caller (chiefly tests) that populates cp_packed / n_cps directly
 // (via thvm_atp_cp_set) must call this so cp_pri / cp_seq are filled
 // and the array satisfies the heap order before select / peek.
-fn void thvm_atp_cp_reheapify(AtpState *s) {
+//
+// Split into two phases so the IR sweep can fold the per-CP priority
+// recompute into its single survivor walk (it already holds the unpacked
+// sides), and only run the FULL-array work (Floyd + FV-index rebuild)
+// once at the end.  The public entry below stitches both back together
+// for orphan-kill and direct cp_set callers.
+static void atp_cp_rebuild_priorities(AtpState *s) {
   if (s == NULL || s->n_cps == 0) return;
   atp_ensure_cp_cap(s, s->n_cps);
   for (u32 i = 0; i < s->n_cps; i++) {
@@ -7314,6 +7320,10 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
     // Default: reassign a fresh monotone seq (engine byte-identical).
     if (!s->cp_fifo_tiebreak) s->cp_seq[i] = s->cp_seq_next++;
   }
+}
+
+static void atp_cp_floyd_only(AtpState *s) {
+  if (s == NULL || s->n_cps == 0) return;
   // Floyd build-heap: sift down every internal node, last to first.
   for (u32 i = s->n_cps / 2; i > 0; ) {
     i--;
@@ -7326,6 +7336,31 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
   // rebuild the index wholesale from the live CP arrays.
   atp_fv_index_rebuild(s);
 #endif
+}
+
+// Per-survivor priority commit used by atp_cp_set_interreduce: at each
+// w-slot commit site the IR sweep already has (l, r) in scope (either
+// the pre-normalize (ol, orr) on the fast-path skip branches or the
+// post-normalize (l, r) on the reweight branch).  Inlined here so the
+// post-loop reheapify only has to do the FULL-array work (Floyd + FV).
+// Soundness: the three weight functions are pure in (s, l, r) + state
+// fields immutable during the IR sweep (cp_weight_mode, w2_*, gnn_coop,
+// use_*, goal_*, sym_level[], conj_sym_mask, s->lhs/rhs); evaluating at
+// slot w inside the loop yields bit-identical values to evaluating
+// post-loop in atp_cp_rebuild_priorities.
+static inline void atp_cp_commit_priorities(AtpState *s, u32 w,
+                                            Term l, Term r) {
+  s->cp_pri[w]  = atp_cp_priority(s, l, r);
+  s->cp_goal[w] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
+                    ? atp_goal_weight(s, l, r) : 0u;
+  s->cp_pri2[w] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
+                : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, l, r, s->w2_mode)
+                :                        0u;
+}
+
+fn void thvm_atp_cp_reheapify(AtpState *s) {
+  atp_cp_rebuild_priorities(s);
+  atp_cp_floyd_only(s);
 }
 
 // === Live CP-queue re-rank seam (WL-side GNN scorer) ================
@@ -10303,6 +10338,13 @@ static void atp_cp_set_interreduce(AtpState *s) {
         s->cp_trace[w] = s->cp_trace[i];
         s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
         if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
+        // Fold the per-survivor priority recompute into the IR walk so
+        // the post-loop reheapify only has to do Floyd + FV.  Sides are
+        // byte-preserved (no normalize), so (ol, orr) is still the
+        // packed payload; priority is pure in (s, l, r) (see header).
+        atp_cp_commit_priorities(s, w, ol, orr);
+        if (s->cp_fifo_tiebreak) s->cp_seq[w] = s->cp_seq[i];
+        else                     s->cp_seq[w] = s->cp_seq_next++;
         w++;
         s->n_cp_set_ir_skipped++;
         thvm_atp_heap_reset(hcp);
@@ -10329,6 +10371,11 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->cp_trace[w] = s->cp_trace[i];
       s->cp_last_norm_r_revision[w] = r_rev_snap;
       if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
+      // Fold the per-survivor priority recompute (NF-witness cookie path:
+      // sides are bit-preserved, no normalize was needed).
+      atp_cp_commit_priorities(s, w, ol, orr);
+      if (s->cp_fifo_tiebreak) s->cp_seq[w] = s->cp_seq[i];
+      else                     s->cp_seq[w] = s->cp_seq_next++;
       w++;
       s->n_cp_set_ir_skipped++;
       thvm_atp_heap_reset(hcp);
@@ -10408,6 +10455,13 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // CP).  Without this carry-over the next reheapify resorts the
     // axiom by Mix weight and loses the ultimate front.
     if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
+    // Fold the per-survivor priority recompute into the IR walk.  On the
+    // reweight branch (l, r) is the post-normalize pair we just packed;
+    // on the no-rewrite branch (l == ol, r == orr) it's the original
+    // pair -- either way, the right input to the priority functions.
+    atp_cp_commit_priorities(s, w, l, r);
+    if (s->cp_fifo_tiebreak) s->cp_seq[w] = s->cp_seq[i];
+    else                     s->cp_seq[w] = s->cp_seq_next++;
     w++;
     thvm_atp_heap_reset(hcp);
     if (g_atp_phase_enabled) acc_pack += atp_now_us() - _cpir_pack_t0;
@@ -10416,7 +10470,10 @@ static void atp_cp_set_interreduce(AtpState *s) {
   s->n_cps = w;
   if (touched) {
     s->n_cp_set_ir_passes++;
-    thvm_atp_cp_reheapify(s);   // recompute every cp_pri + rebuild index
+    // Per-survivor priorities + cp_seq were folded into the IR walk at
+    // each w-commit site, so the post-loop pass only owes us the FULL-
+    // array work (Floyd build-heap + FV-index rebuild).
+    atp_cp_floyd_only(s);
   }
   // Advance the incremental-IR watermark to the current rule count so
   // the next pass only checks rules added since this one.
