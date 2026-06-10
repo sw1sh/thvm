@@ -1475,6 +1475,22 @@ typedef struct {
     return node;                                                              \
   }
 
+// Shared recursion-depth cap for the three DT-descent functions
+// (atp_dt_descend, atp_ri_descend, atp_ri_descend_unorient) -- lives
+// in the shared block because the latter two compile under
+// ATP_RULE_INDEX alone.  The descent can develop a STAR-edge cycle
+// under Waldmeister + LRS + RandomRatio on andassoc -- empirical
+// bisection on that combo:
+//   cap=1024  -> 1294 bails / 30s, engine exits cleanly       (sweet spot)
+//   cap=4096  -> 591 bails / 30s, still clean
+//   cap=8192  -> wall-cap timeout (deep descents dominate compute)
+//   cap=16384 -> SIGSEGV on the macOS main-thread 8MB stack
+// Past ~4096 depth the search is super-linear: each level branches over
+// multiple STAR alternatives so the cost grows fast.  1024 keeps queries
+// bounded while still surfacing the cycles via q_depth_capped for the
+// upstream fv_index_insert / atp_dt_flatten investigation.
+#define ATP_DT_DESCENT_DEPTH_CAP 1024u
+
 #endif  // ATP_FV_INDEX || ATP_RULE_INDEX
 
 #ifdef ATP_FV_INDEX
@@ -1768,19 +1784,6 @@ static u8 atp_dt_leaf_match(u32 node) {
 // to the path's STAR-edge count, so a deep (ATP_DT_FLAT_CAP-long)
 // subject cannot overflow the stack.
 //
-// Shared recursion-depth cap for the three DT-descent functions
-// (atp_dt_descend, atp_ri_descend, atp_ri_descend_unorient).  The
-// descent can develop a STAR-edge cycle under Waldmeister + LRS +
-// RandomRatio on andassoc -- empirical bisection on that combo:
-//   cap=1024  -> 1294 bails / 30s, engine exits cleanly       (sweet spot)
-//   cap=4096  -> 591 bails / 30s, still clean
-//   cap=8192  -> wall-cap timeout (deep descents dominate compute)
-//   cap=16384 -> SIGSEGV on the macOS main-thread 8MB stack
-// Past ~4096 depth the search is super-linear: each level branches over
-// multiple STAR alternatives so the cost grows fast.  1024 keeps queries
-// bounded while still surfacing the cycles via q_depth_capped for the
-// upstream fv_index_insert / atp_dt_flatten investigation.
-#define ATP_DT_DESCENT_DEPTH_CAP 1024u
 static u8 atp_dt_descend_rec(u32 node, u32 pos, u32 depth);
 static u8 atp_dt_descend(u32 node, u32 pos) {
   return atp_dt_descend_rec(node, pos, 0u);
@@ -4141,9 +4144,11 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // companion ri_ix/cp_ix hygiene pattern.  Harmless when nothing
   // else clobbers them; prevents the same dangling-pointer class
   // of bug as the ri_ix/cp_ix entries above.
+#ifdef ATP_FV_INDEX
   g_atp_dt_ix      = NULL;
   g_atp_dt_subsz   = NULL;
   g_atp_dt_flatsym = NULL;
+#endif
   // Persistent LPO memo: a completion compares the same subterm pairs
   // millions of times.  Opt in, and drop any entries from a prior run
   // (a static LpoConfig pointer may be reused with new precedence).
