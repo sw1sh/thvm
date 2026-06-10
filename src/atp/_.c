@@ -10610,42 +10610,24 @@ static void atp_cp_set_interreduce(AtpState *s) {
       if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
       continue;
     }
-    // Deferred slot: no packed bytes to normalize -- move it wholesale,
-    // carrying the push-time priorities.  The IR-sweep normalize is not
-    // yet routed for implicit slots (commit 4 of the implicit-CP arc
-    // materializes via atp_cp_implicit_materialize and runs the WM
-    // AP_generic normalize like every packed survivor; WM itself
-    // materializes via TPR_TP2ParIntermed, KPVerwaltung.c:975, before
-    // NF_Normalform2).  Sound meanwhile: the slot keeps its raw form
-    // and the unconditional pop-time normalize reduces it under the
-    // then-current R.  The orphan test above already covered it
-    // (trace-only).
-    if (atp_cp_slot_implicit(s, i)) {
-      if (w != i) {
-        s->cp_packed[w] = s->cp_packed[i];   // NULL deferred-slot marker
-        s->cp_packed[i] = NULL;
-      }
-      s->cp_trace[w] = s->cp_trace[i];
-      s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
-      if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
-      s->cp_pri[w]  = s->cp_pri[i];
-      s->cp_goal[w] = s->cp_goal[i];
-      s->cp_pri2[w] = s->cp_pri2[i];
-      atp_cp_implicit_move(s, /*dst=*/w, /*src=*/i);
-      if (s->cp_fifo_tiebreak) s->cp_seq[w] = s->cp_seq[i];
-      else                     s->cp_seq[w] = s->cp_seq_next++;
-      w++;
-      s->n_cp_set_ir_skipped++;
-      if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
-      continue;
-    }
+    // Deferred slot: route it through the same materialize-then-
+    // normalize the packed survivors get (WM materializes via
+    // TPR_TP2ParIntermed, KPVerwaltung.c:975, before NF_Normalform2 --
+    // the implicit passive set is NOT exempt from AP_generic).  The
+    // slot's payload is the RAW trace pair, never normalized, so the
+    // incremental-IR bitmap skip below is gated off for it (old rules
+    // can still fire); the NF-witness cookie stays valid (set only by
+    // a prior full normalize of this exact pair under this exact R).
+    u8 is_impl = atp_cp_slot_implicit(s, i);
     // Per-CP heap checkpoint: the normalize allocates scratch cells; the
     // reduced terms are copied out by acp_pack, so the scratch is dead
     // after the (re)pack.  Reset each iteration so a long queue cannot
-    // exhaust the dyn heap.
+    // exhaust the dyn heap.  (An implicit slot's materialized pair lives
+    // in the trace, which predates the checkpoint -- the reset cannot
+    // pop it.)
     u64 hcp = thvm_atp_heap_checkpoint();
     Term ol = 0, orr = 0;
-    acp_unpack(s->cp_packed[i], &ol, &orr);
+    atp_cp_slot_read(s, i, &ol, &orr);
     // WM `dokgS` (KPV `AP_generic` `SS_TermpaarSubsummiertVonGM` branch):
     // a CP whose two sides are directly subsumed by an existing rule's
     // pattern is one-step-joinable via that rule.  The trivial-join
@@ -10658,8 +10640,9 @@ static void atp_cp_set_interreduce(AtpState *s) {
     if (s->use_rule_subsume_drop && atp_cp_rule_subsumed(s, ol, orr)) {
       s->n_cps_dropped_rule_subsumed++;
       s->n_cp_set_ir_deleted++;
-      free(s->cp_packed[i]);
+      free(s->cp_packed[i]);   // free(NULL) no-op for deferred slots
       s->cp_packed[i] = NULL;
+      atp_cp_implicit_clear(s, i);
       touched = 1;
       thvm_atp_heap_reset(hcp);
       if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
@@ -10671,24 +10654,46 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // would touch but that no new rule rewrites; harmless (just less
     // skipping).  Soundness: if no new top sym is present, no new
     // rule's LHS can match anywhere in the CP, so normalize is a no-op.
+    // A FRESH implicit slot is excluded: its raw trace pair was never
+    // normalized (push-norm ran on a transient reduced copy), so OLD
+    // rules can still fire and the "normalize is a no-op" claim fails.
+    // Once a sweep has NF-confirmed the slot, though, the claim holds
+    // again: a non-NONE cookie on an implicit slot can ONLY come from
+    // a previous sweep's full-R no-rewrite witness (the implicit push
+    // stamps COOKIE_NONE and the pair is never repacked while it stays
+    // deferred), so the raw pair is in NF wrt every rule below the
+    // watermark and the bitmap test covers everything added since.
     if (s->use_incr_ir && new_top_syms != 0u
-        && s->ir_rule_watermark > 0u) {
+        && s->ir_rule_watermark > 0u
+        && (!is_impl
+            || s->cp_last_norm_r_revision[i] != ATP_CP_NORM_COOKIE_NONE)) {
       u64 cp_syms = atp_term_sym_bitmap(ol) | atp_term_sym_bitmap(orr);
       if ((cp_syms & new_top_syms) == 0u) {
         // No new rule can fire on this CP -- skip the normalize.  Repack
         // unchanged (just move the slot, no reweight).
         if (w != i) {
-          s->cp_packed[w] = s->cp_packed[i];
+          s->cp_packed[w] = s->cp_packed[i];   // NULL deferred-slot marker
           s->cp_packed[i] = NULL;
         }
         s->cp_trace[w] = s->cp_trace[i];
         s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
         if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
-        // Fold the per-survivor priority recompute into the IR walk so
-        // the post-loop reheapify only has to do Floyd + FV.  Sides are
-        // byte-preserved (no normalize), so (ol, orr) is still the
-        // packed payload; priority is pure in (s, l, r) (see header).
-        atp_cp_commit_priorities(s, w, ol, orr);
+        if (is_impl) {
+          // Deferred survivor: carry the push-time heap keys (see the
+          // cookie path below for why recomputing on the raw pair
+          // would flip-flop the key against the descriptor cache).
+          s->cp_pri[w]  = s->cp_pri[i];
+          s->cp_goal[w] = s->cp_goal[i];
+          s->cp_pri2[w] = s->cp_pri2[i];
+          atp_cp_implicit_move(s, /*dst=*/w, /*src=*/i);
+        } else {
+          // Fold the per-survivor priority recompute into the IR walk
+          // so the post-loop reheapify only has to do Floyd + FV.
+          // Sides are byte-preserved (no normalize), so (ol, orr) is
+          // still the packed payload; priority is pure in (s, l, r)
+          // (see header).
+          atp_cp_commit_priorities(s, w, ol, orr);
+        }
         if (s->cp_fifo_tiebreak) s->cp_seq[w] = s->cp_seq[i];
         else                     s->cp_seq[w] = s->cp_seq_next++;
         w++;
@@ -10711,15 +10716,27 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // identical inputs return bytewise-identical outputs.
     if (s->cp_last_norm_r_revision[i] == r_rev_snap) {
       if (w != i) {
-        s->cp_packed[w] = s->cp_packed[i];
+        s->cp_packed[w] = s->cp_packed[i];   // NULL deferred-slot marker
         s->cp_packed[i] = NULL;
       }
       s->cp_trace[w] = s->cp_trace[i];
       s->cp_last_norm_r_revision[w] = r_rev_snap;
       if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
-      // Fold the per-survivor priority recompute (NF-witness cookie path:
-      // sides are bit-preserved, no normalize was needed).
-      atp_cp_commit_priorities(s, w, ol, orr);
+      if (is_impl) {
+        // Implicit NF-confirmed survivor: stay deferred, carry the
+        // push-time heap keys (the descriptor design -- the cached
+        // priority was computed on the push-time reduced form and a
+        // reheapify restores it from the descriptor, so recomputing on
+        // the raw pair here would just flip-flop the key).
+        s->cp_pri[w]  = s->cp_pri[i];
+        s->cp_goal[w] = s->cp_goal[i];
+        s->cp_pri2[w] = s->cp_pri2[i];
+        atp_cp_implicit_move(s, /*dst=*/w, /*src=*/i);
+      } else {
+        // Fold the per-survivor priority recompute (NF-witness cookie
+        // path: sides are bit-preserved, no normalize was needed).
+        atp_cp_commit_priorities(s, w, ol, orr);
+      }
       if (s->cp_fifo_tiebreak) s->cp_seq[w] = s->cp_seq[i];
       else                     s->cp_seq[w] = s->cp_seq_next++;
       w++;
@@ -10764,11 +10781,14 @@ static void atp_cp_set_interreduce(AtpState *s) {
     u64 _cpir_pack_t0 = atp_phase_now();
     if (joined_ft) {
       // Joinable under R -- the CP adds no equational consequence.  Drop
-      // it (WM AP_generic returns WTI_Delete).
+      // it (WM AP_generic returns WTI_Delete).  Deferred slot: nothing
+      // packed to free; the tag bit drops and the trace entry stays (it
+      // is a GC root and may back other diagnostics).
       s->n_cps_dropped_joinable++;
       s->n_cp_set_ir_deleted++;
-      free(s->cp_packed[i]);
+      free(s->cp_packed[i]);   // free(NULL) no-op for deferred slots
       s->cp_packed[i] = NULL;
+      atp_cp_implicit_clear(s, i);
       touched = 1;
       thvm_atp_heap_reset(hcp);
       if (g_atp_phase_enabled) acc_pack += atp_now_us() - _cpir_pack_t0;
@@ -10781,14 +10801,29 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // outcome invalidates the cookie -- the new packed bytes have not
     // been confirmed in NF.
     u8 nf_witness = (l == ol && r == orr) ? 1u : 0u;
-    if (l != ol || r != orr) {
-      free(s->cp_packed[i]);
+    // A deferred slot needs a STRUCTURAL unchanged-witness: the FT
+    // decode (ft_to_term) always rebuilds fresh Terms, so pointer
+    // identity against the trace-resident raw pair can never hold
+    // and every raw-NF implicit slot would wrongly eagerify.  Packed
+    // slots keep the pointer test -- byte-identical legacy behavior.
+    if (is_impl && !nf_witness && kbo_eq(l, ol) && kbo_eq(r, orr)) {
+      nf_witness = 1u;
+    }
+    if (!nf_witness) {
+      // Reduced.  A deferred slot must become EAGER here: the reduced
+      // pair no longer matches the TRACE_CP raw form its descriptor
+      // points at, so the trace can no longer back a materialize.  Pack
+      // the reduced pair and drop the tag bit -- from now on the slot
+      // is an ordinary packed CP (FV-indexed again by the trailing
+      // atp_fv_index_rebuild, reweighted below like every survivor).
+      free(s->cp_packed[i]);   // free(NULL) no-op for deferred slots
       s->cp_packed[i] = NULL;
       s->cp_packed[w] = acp_pack(l, r, NULL, NULL);
+      atp_cp_implicit_clear(s, i);
       s->n_cp_set_ir_reweighted++;
       touched = 1;
     } else if (w != i) {
-      s->cp_packed[w] = s->cp_packed[i];
+      s->cp_packed[w] = s->cp_packed[i];   // NULL deferred-slot marker
       s->cp_packed[i] = NULL;
     }
     s->cp_trace[w] = s->cp_trace[i];
@@ -10801,11 +10836,25 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // CP).  Without this carry-over the next reheapify resorts the
     // axiom by Mix weight and loses the ultimate front.
     if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
-    // Fold the per-survivor priority recompute into the IR walk.  On the
-    // reweight branch (l, r) is the post-normalize pair we just packed;
-    // on the no-rewrite branch (l == ol, r == orr) it's the original
-    // pair -- either way, the right input to the priority functions.
-    atp_cp_commit_priorities(s, w, l, r);
+    if (is_impl && nf_witness) {
+      // Implicit survivor confirmed in NF under the full current R:
+      // stay deferred (the raw trace pair is still the slot's exact
+      // payload).  Carry the push-time heap keys -- the descriptor
+      // caches the priority of the push-time reduced form, and
+      // atp_cp_rebuild_priorities restores from that cache, so the
+      // cached value is the one coherent key.
+      s->cp_pri[w]  = s->cp_pri[i];
+      s->cp_goal[w] = s->cp_goal[i];
+      s->cp_pri2[w] = s->cp_pri2[i];
+      atp_cp_implicit_move(s, /*dst=*/w, /*src=*/i);
+    } else {
+      // Fold the per-survivor priority recompute into the IR walk.  On
+      // the reweight branch (l, r) is the post-normalize pair we just
+      // packed (for a freshly-eagerified slot too); on the packed
+      // no-rewrite branch it's the original pair -- either way, the
+      // right input to the priority functions.
+      atp_cp_commit_priorities(s, w, l, r);
+    }
     if (s->cp_fifo_tiebreak) s->cp_seq[w] = s->cp_seq[i];
     else                     s->cp_seq[w] = s->cp_seq_next++;
     w++;

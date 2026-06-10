@@ -1087,6 +1087,228 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/implicit-cp-ir-sweep-materialize-then-normalize");
+  {
+    // Deferred-CP IR-sweep lifecycle (atp_cp_set_interreduce routes
+    // implicit slots through the same WM AP_generic materialize-then-
+    // normalize the packed survivors get).  Three implicit slots, one
+    // rule R = { f(e, x) -> x }:
+    //   A joined:    raw (f(e, a), a)            -> normalizes to (a, a)
+    //                -> dropped (tag bit cleared, nothing freed).
+    //   B reduced:   raw (f(e, i(a)), i(i(a)))   -> (i(a), i(i(a)))
+    //                -> becomes EAGER (packed reduced pair, bit clear).
+    //   C unchanged: raw (i(a), a) already in NF -> stays implicit,
+    //                NF-witness cookie stamped, push-time keys carried.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_implicit_cp(s, 1u);
+
+    s->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]);
+    s->n_rules = 1;
+
+    Term a_l  = mk_f(mk_e(), mk_a());
+    Term a_r  = mk_a();
+    Term b_l  = mk_f(mk_e(), mk_i(mk_a()));
+    Term b_r  = mk_i(mk_i(mk_a()));
+    Term c_l  = mk_i(mk_a());
+    Term c_r  = mk_a();
+    u32 ta = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
+                               a_l, a_r, NULL, 0);
+    u32 tb = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
+                               b_l, b_r, NULL, 0);
+    u32 tc = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
+                               c_l, c_r, NULL, 0);
+    CHECK_EQ(atp_cp_implicit_push(s, a_l, a_r, s->r_trace[0], s->r_trace[0],
+                                  ta, 0u), 1u);
+    CHECK_EQ(atp_cp_implicit_push(s, b_l, b_r, s->r_trace[0], s->r_trace[0],
+                                  tb, 0u), 1u);
+    CHECK_EQ(atp_cp_implicit_push(s, c_l, c_r, s->r_trace[0], s->r_trace[0],
+                                  tc, 0u), 1u);
+    CHECK_EQ(s->n_cps, 3u);
+    CHECK_EQ(s->n_cps_implicit, 3u);
+
+    u32 deleted0    = s->n_cp_set_ir_deleted;
+    u32 reweighted0 = s->n_cp_set_ir_reweighted;
+    atp_cp_set_interreduce(s);
+
+    CHECK_EQ(s->n_cps, 2u);
+    CHECK_EQ(s->n_cp_set_ir_deleted - deleted0, 1u);       // A dropped
+    CHECK_EQ(s->n_cp_set_ir_reweighted - reweighted0, 1u); // B eagerified
+    u32 n_impl = 0, n_eager = 0;
+    for (u32 i = 0; i < s->n_cps; i++) {
+      // Tag-bit invariant survives the sweep compaction.
+      CHECK_EQ(atp_cp_slot_implicit(s, i),
+               s->cp_packed[i] == NULL ? 1u : 0u);
+      if (atp_cp_slot_implicit(s, i)) {
+        n_impl++;
+        // C: still trace-backed -- materializes the SAME raw pair
+        // (pointer-identical trace children), cookie stamped with the
+        // current rule-set revision, push-time keys carried (the
+        // descriptor cache stays the coherent heap key).
+        CHECK_EQ(s->cp_trace[i], tc);
+        Term ml = 0, mr = 0;
+        atp_cp_slot_read(s, i, &ml, &mr);
+        CHECK_EQ(ml, term_ctr_at(s->trace[tc], 2));
+        CHECK_EQ(mr, term_ctr_at(s->trace[tc], 3));
+        CHECK_EQ(s->cp_last_norm_r_revision[i], s->r_revision);
+        CHECK_EQ(s->cp_implicit[i].priority, s->cp_pri[i]);
+      } else {
+        n_eager++;
+        // B: packed reduced pair (i(a), i(i(a))), provenance kept.
+        CHECK_EQ(s->cp_trace[i], tb);
+        Term el = 0, er = 0;
+        atp_cp_slot_read(s, i, &el, &er);
+        CHECK(kbo_eq(el, mk_i(mk_a())));
+        CHECK(kbo_eq(er, mk_i(mk_i(mk_a()))));
+        // Reweighted at the commit site exactly as the packed path
+        // does (atp_cp_commit_priorities is pure in (s, l, r)).
+        CHECK_EQ(s->cp_pri[i], atp_cp_priority(s, el, er));
+      }
+    }
+    CHECK_EQ(n_impl, 1u);
+    CHECK_EQ(n_eager, 1u);
+    // The vacated tail slot is fully cleared.
+    CHECK(atp_cp_slot_implicit(s, s->n_cps) == 0u);
+    CHECK(s->cp_packed[s->n_cps] == NULL);
+
+    // Second sweep: C's cookie matches r_revision (no rule was added
+    // in between) so it skips the normalize and stays implicit; B is
+    // already in NF so nothing is dropped.  (B may still count as
+    // reweighted on the FT build: packed slots witness "unchanged" by
+    // POINTER identity and ft_to_term always rebuilds -- the repack is
+    // structurally a no-op.)
+    u32 deleted1 = s->n_cp_set_ir_deleted;
+    atp_cp_set_interreduce(s);
+    CHECK_EQ(s->n_cps, 2u);
+    CHECK_EQ(s->n_cp_set_ir_deleted, deleted1);
+    u32 n_impl2 = 0;
+    for (u32 i = 0; i < s->n_cps; i++) {
+      if (atp_cp_slot_implicit(s, i)) n_impl2++;
+    }
+    CHECK_EQ(n_impl2, 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/implicit-cp-ir-sweep-drops-orphans");
+  {
+    // Eager Waisenmord inside the IR sweep covers the implicit passive
+    // set: an implicit slot whose TRACE_CP names a dead parent is
+    // dropped by the sweep's orphan branch (descriptor bit cleared, no
+    // free -- packed is NULL), without paying the materialize+normalize.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_implicit_cp(s, 1u);
+    thvm_atp_set_use_orphan_murder(s, 1u);
+
+    s->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]);
+    s->n_rules = 1;
+    // A second trace entry to play the dead parent (no rule attached;
+    // the orphan test only reads trace liveness).
+    u32 dead_parent = atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
+                                     ATP_TRACE_NONE,
+                                     mk_f(mk_v(VAR_x), mk_e()), mk_a());
+
+    // X: orphan (parent_a dead).  Y: live parents.  Both raw-NF, so any
+    // drop is attributable to the orphan branch alone.
+    Term x_l = mk_i(mk_a()),        x_r = mk_a();
+    Term y_l = mk_i(mk_i(mk_a())),  y_r = mk_a();
+    u32 tx = atp_trace_push_cp(s, dead_parent, s->r_trace[0],
+                               x_l, x_r, NULL, 0);
+    u32 ty = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
+                               y_l, y_r, NULL, 0);
+    CHECK_EQ(atp_cp_implicit_push(s, x_l, x_r, dead_parent, s->r_trace[0],
+                                  tx, 0u), 1u);
+    CHECK_EQ(atp_cp_implicit_push(s, y_l, y_r, s->r_trace[0], s->r_trace[0],
+                                  ty, 0u), 1u);
+    CHECK_EQ(s->n_cps, 2u);
+
+    atp_trace_mark_dead(s, dead_parent);
+    u32 orphans0 = s->n_cps_dropped_orphan;
+    u32 deleted0 = s->n_cp_set_ir_deleted;
+    atp_cp_set_interreduce(s);
+
+    CHECK_EQ(s->n_cps, 1u);
+    CHECK_EQ(s->n_cps_dropped_orphan - orphans0, 1u);
+    CHECK_EQ(s->n_cp_set_ir_deleted - deleted0, 1u);
+    // The survivor is Y, still implicit, still trace-backed.
+    CHECK_EQ(atp_cp_slot_implicit(s, 0), 1u);
+    CHECK_EQ(s->cp_trace[0], ty);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/implicit-cp-over-bound-falls-back-to-packed-stash");
+  {
+    // Auto-MaxWeight routing for the deferred lane (the push-site seam
+    // in atp_cp_push_batch): the overflow stash is packed-only, so
+    // atp_cp_implicit_push signals an over-bound CP by returning 0 and
+    // the caller's eager fallback (atp_cp_heap_push) re-tests the bound
+    // and parks the CP on the stash as packed bytes.  The force-drain
+    // then re-admits it as an ordinary EAGER slot -- an over-bound CP
+    // is never implicit at any point of its life, and never lost.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_implicit_cp(s, 1u);
+    thvm_atp_set_auto_max_cp_weight(s, 1u);
+
+    s->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]);
+    s->n_rules = 1;
+    // bound = base + slope * deepest-rule-LHS = 1 + 2 * 3 = 7.
+    atp_auto_maxw_recompute(s);
+    CHECK_EQ(atp_auto_maxw_bound(s), 7u);
+
+    // 8-node CP (over bound): f(f(a, a), f(a, a)) = a.
+    Term big_l = mk_f(mk_f(mk_a(), mk_a()), mk_f(mk_a(), mk_a()));
+    Term big_r = mk_a();
+    u32 tb = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
+                               big_l, big_r, NULL, 0);
+    // The push-site seam: implicit push refuses (returns 0), eager
+    // fallback stashes.
+    CHECK_EQ(atp_cp_implicit_push(s, big_l, big_r, s->r_trace[0],
+                                  s->r_trace[0], tb, 0u), 0u);
+    atp_cp_heap_push(s, big_l, big_r, tb, 0u);
+    CHECK_EQ(s->n_cps, 0u);
+    CHECK_EQ(s->n_cp_stash, 1u);
+    CHECK_EQ(s->n_cps_implicit, 0u);
+
+    // An under-bound CP still defers: (i(a), a) is 3 nodes.
+    Term small_l = mk_i(mk_a());
+    Term small_r = mk_a();
+    u32 ts = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
+                               small_l, small_r, NULL, 0);
+    CHECK_EQ(atp_cp_implicit_push(s, small_l, small_r, s->r_trace[0],
+                                  s->r_trace[0], ts, 0u), 1u);
+    CHECK_EQ(s->n_cps, 1u);
+    CHECK_EQ(s->n_cps_implicit, 1u);
+    CHECK_EQ(atp_cp_slot_implicit(s, 0), 1u);
+
+    // Pop the small implicit CP -- the live queue empties; the next
+    // select force-drains the stash (the auto-MaxWeight completeness
+    // lever) and pops the big CP, which re-entered as an EAGER packed
+    // slot.  An over-bound CP is thus never implicit at any point of
+    // its life, and never lost.
+    Term pl = 0, pr = 0;
+    CHECK_EQ(thvm_atp_select_cp(s, &pl, &pr), 1u);
+    CHECK(kbo_eq(pl, small_l));
+    CHECK_EQ(s->n_cps, 0u);
+    Term bl = 0, br = 0;
+    CHECK_EQ(thvm_atp_select_cp(s, &bl, &br), 1u);
+    CHECK_EQ(s->n_cp_stash, 0u);
+    CHECK_EQ(s->n_cps, 0u);
+    CHECK(kbo_eq(bl, big_l));
+    CHECK(kbo_eq(br, big_r));
+    CHECK_EQ(s->n_cps_implicit, 1u);   // the big CP never deferred
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/headline-prove-f-a-ia-equals-e-from-group-axioms");
   {
     // Stage 5.5 demo from docs/plans/waldmeister_ic_atp.md sec.5:
