@@ -1208,12 +1208,12 @@ TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
     fwd[ix_] := Module[{bt = atpGnnTensors[
             <|"Graphs" -> graphs[[ix]], "Labels" -> labels[[ix]]|>, nCap]},
         {atpGnnForwardLogits[
-            TTensorCreate @ NumericArray[bt["X"], "Real32"],
-            TTensorCreate @ NumericArray[bt["A"], "Real32"],
-            TTensorCreate @ NumericArray[ArrayReshape[bt["Mask"], {bt["B"], 1, bt["N"]}], "Real32"],
-            TTensorCreate @ NumericArray[ArrayReshape[bt["NNodes"], {bt["B"], 1, 1}], "Real32"],
+            TTensorCreate[bt["X"]],
+            TTensorCreate[bt["A"]],
+            TTensorCreate[ArrayReshape[bt["Mask"], {bt["B"], 1, bt["N"]}]],
+            TTensorCreate[ArrayReshape[bt["NNodes"], {bt["B"], 1, 1}]],
             w1s, wss, bhs, wout, bout, bt["B"], bt["N"], f, hH, rR],
-         TTensorCreate @ NumericArray[bt["Y"], "Real32"]}];
+         TTensorCreate[bt["Y"]]}];
     If[ nG <= bs,
         (* Whole dataset fits one batch (memory already bounded): keep the
            fast path -- build the batch once and run `rounds` Adam steps in
@@ -1308,17 +1308,15 @@ TAtpGnnScore[model_Association, dataset_Association] := Module[{
     If[ bt === $Failed, Return[$Failed]];
     b = bt["B"];  n = bt["N"];  f = bt["F"];
     hH = model["Hidden"];  rR = model["Rounds"];
-    xT       = TTensorCreate @ NumericArray[bt["X"], "Real32"];
-    aT       = TTensorCreate @ NumericArray[bt["A"], "Real32"];
-    maskRowT = TTensorCreate @ NumericArray[
-        ArrayReshape[bt["Mask"], {b, 1, n}], "Real32"];
-    nNodesT  = TTensorCreate @ NumericArray[
-        ArrayReshape[bt["NNodes"], {b, 1, 1}], "Real32"];
-    w1s  = TTensorCreate @ NumericArray[#, "Real32"] & /@ model["W1"];
-    wss  = TTensorCreate @ NumericArray[#, "Real32"] & /@ model["Ws"];
-    bhs  = TTensorCreate @ NumericArray[#, "Real32"] & /@ model["Bh"];
-    wout = TTensorCreate @ NumericArray[model["Wout"], "Real32"];
-    bout = TTensorCreate @ NumericArray[model["Bout"], "Real32"];
+    xT       = TTensorCreate[bt["X"]];
+    aT       = TTensorCreate[bt["A"]];
+    maskRowT = TTensorCreate[ArrayReshape[bt["Mask"], {b, 1, n}]];
+    nNodesT  = TTensorCreate[ArrayReshape[bt["NNodes"], {b, 1, 1}]];
+    w1s  = TTensorCreate[#] & /@ model["W1"];
+    wss  = TTensorCreate[#] & /@ model["Ws"];
+    bhs  = TTensorCreate[#] & /@ model["Bh"];
+    wout = TTensorCreate[model["Wout"]];
+    bout = TTensorCreate[model["Bout"]];
     logits = atpGnnForwardLogits[xT, aT, maskRowT, nNodesT,
         w1s, wss, bhs, wout, bout, b, n, f, hH, rR];
     p = Normal @ TRealize @ logits;

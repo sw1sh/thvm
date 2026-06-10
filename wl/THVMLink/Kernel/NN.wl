@@ -79,6 +79,7 @@ GeneralUtilities`SetUsage[TGlorot, "TGlorot[shape$] returns a fresh f32 TTerm te
 GeneralUtilities`SetUsage[TZeros, "TZeros[shape$] returns a fresh f32 TTerm tensor of zeros at the given shape$. Convenience for bias / running-stat init."];
 GeneralUtilities`SetUsage[TOnes, "TOnes[shape$] returns a fresh f32 TTerm tensor of ones at the given shape$. Convenience for layer-norm gamma init / scale-1 placeholders."];
 GeneralUtilities`SetUsage[TZerosLike, "TZerosLike[t$] returns a TTensor handle of zeros matching the shape and dtype of TTerm t$. Suitable for seeding Adam m/v moment buffers."];
+GeneralUtilities`SetUsage[TOnesLike, "TOnesLike[t$] returns a TTensor handle of ones matching the shape and dtype of TTerm t$. The ones counterpart of TZerosLike."];
 GeneralUtilities`SetUsage[TOneHot, "TOneHot[label$, n$] and TOneHot[label$, n$, dtype$] return a length-n$ TTerm with a 1.0 at index label$ (0-indexed) and 0.0 elsewhere.
 TOneHot[labels$, n$] for a list of labels returns the {Length[labels$], n$} one-hot matrix (one row per label), the sequence-one-hot a fixed-window LM forward consumes; a label outside 0..n$-1 yields an all-zero padding row."];
 
@@ -487,6 +488,8 @@ TOnes[shape_List, dtype_String : "f32"] :=
     TTensorCreate[ConstantArray[1., shape], dtype]
 
 TZerosLike[t_TTerm] := TZeros[TTensorShape[t], TTensorDType[t]]
+
+TOnesLike[t_TTerm] := TOnes[TTensorShape[t], TTensorDType[t]]
 
 TOneHot[label_Integer, n_Integer, dtype_String : "f32"] :=
     TTensorCreate[Table[If[i - 1 == label, 1.0, 0.0], {i, n}], dtype]
