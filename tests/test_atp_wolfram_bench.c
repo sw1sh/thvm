@@ -587,6 +587,13 @@ int main(int argc, char **argv) {
       // KPVerwaltung.c:667 SS_TermpaarSubsummiertVonGM).
       // THVM_ATP_POP_SUBSUME env overrides.
       thvm_atp_set_use_pop_subsume(s, 1u);
+      // WM E-set subsumption (GMSubsummierenMitGleichung,
+      // INF/Interreduktion.c:251-274): a new unorientable equation
+      // destroys every existing E-member it subsumes -- no requeue,
+      // no CP made.  Unconditional in WM's IR_InterreduktionLinks
+      // (:371-373) for every non-rule new fact, so part of the
+      // faithful preset.  THVM_ATP_ESET_SUBSUME env overrides.
+      thvm_atp_set_use_eset_subsume(s, 1u);
       // Backward subsumption (WM standard): scan existing rules and
       // soft-delete any subsumed by the newly-added rule.  +30% on
       // AndAssoc post-fix (iter 162) -- the kill churn pays off because
@@ -766,6 +773,14 @@ int main(int argc, char **argv) {
     const char *ps = getenv("THVM_ATP_POP_SUBSUME");
     if (ps != NULL && ps[0] != '\0')
       thvm_atp_set_use_pop_subsume(s, (ps[0] != '0') ? 1u : 0u);
+  }
+  // THVM_ATP_ESET_SUBSUME=0/1: independent toggle for the WM E-set
+  // subsumption destroy on new-equation entry (in the WALDMEISTER
+  // preset by default).
+  {
+    const char *es = getenv("THVM_ATP_ESET_SUBSUME");
+    if (es != NULL && es[0] != '\0')
+      thvm_atp_set_use_eset_subsume(s, (es[0] != '0') ? 1u : 0u);
   }
   // SOS (Set-of-Support) -- a CP-scoring bonus for CPs touching goal
   // symbols.  Not WM standard (Vampire/E heuristic); kept as opt-in.
@@ -1022,9 +1037,11 @@ int main(int argc, char **argv) {
   printf("   trace: n_trace=%u  t_max=%u  record_norm=%u\n",
          s->n_trace, s->t_max, s->record_norm_steps);
   printf("   dropped: joinable=%u queue-subsumed=%u "
-         "rule-subsumed=%u pop-subsumed=%u connected=%u orphan=%u lrs=%u\n",
+         "rule-subsumed=%u pop-subsumed=%u eset-subsumed=%u "
+         "connected=%u orphan=%u lrs=%u\n",
          s->n_cps_dropped_joinable, s->n_cps_dropped_queue_subsumed,
          s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_pop_subsumed,
+         s->n_eqs_dropped_eset_subsumed,
          s->n_cps_dropped_connected,
          s->n_cps_dropped_orphan, s->n_cps_dropped_lrs);
   if (s->use_lrs) {

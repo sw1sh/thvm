@@ -969,6 +969,96 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-eset-subsume-destroys-subsumed-e-on-entry");
+  {
+    // WM E-set subsumption on new-equation entry
+    // (GMSubsummierenMitGleichung, INF/Interreduktion.c:251-274,
+    // reached from IR_InterreduktionLinks :371-373 BEFORE the new
+    // equation enters GM): every existing E-member the new
+    // unorientable equation subsumes (SS_TermpaarSubsummiertTermpaar,
+    // Subsumption.c:104-110 -- one substitution over both sides,
+    // either pattern orientation, context-stripping descent) is
+    // removed AND destroyed (FinaleKillprozSubsumption :236-245),
+    // twin included -- NO requeue, no CP made.  Twin semantics are
+    // N/A in thvm's single-slot storage: WM keeps each equation as
+    // Gleichung + Antigleichung twins and kills both; thvm stores
+    // one slot per equation under ATP_ORDERED_REWRITE, so one
+    // soft-delete covers both directions.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_eset_subsume(s, 1u);
+    CHECK_EQ(s->use_eset_subsume, 1u);
+    // E0 (will die): a proper instance f(i(x), y) = f(y, i(x)) of the
+    // upcoming general equation.  KBO_UN: equal weights, i(x)-vs-y
+    // first children incomparable.
+    atp_push_rule(s, mk_f(mk_i(mk_v(VAR_x)), mk_v(1u)),
+                     mk_f(mk_v(1u), mk_i(mk_v(VAR_x))));
+    CHECK_EQ(s->r_orient[0], 0u);
+    // E1 (will die via descent): the same instance one level down
+    // under i(.) -- subsumed only through SubsumptionBody's
+    // context-stripping.
+    atp_push_rule(s, mk_i(mk_f(mk_i(mk_v(VAR_x)), mk_v(1u))),
+                     mk_i(mk_f(mk_v(1u), mk_i(mk_v(VAR_x)))));
+    CHECK_EQ(s->r_orient[1], 0u);
+    // E2 (survives): f(x, i(y)) = f(y, i(x)) -- not an instance of
+    // commutativity in either orientation, and the descent gate
+    // refuses (TWO differing children).
+    atp_push_rule(s, mk_f(mk_v(VAR_x), mk_i(mk_v(1u))),
+                     mk_f(mk_v(1u), mk_i(mk_v(VAR_x))));
+    CHECK_EQ(s->r_orient[2], 0u);
+    // R3 (survives): rules never participate -- WM's sweep walks
+    // RE_forGleichungenRobust (the Gleichungsmenge) only.  f(x,e) -> x
+    // is itself an "instance shape" the matcher would hit if rules
+    // were scanned.
+    atp_push_rule(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    CHECK_EQ(s->r_orient[3], 1u);
+
+    // The new GENERAL unorientable equation enters: f(x,y) = f(y,x).
+    u32 cps0 = s->n_cps;
+    u32 trace0 = s->n_trace;
+    AtpAddedRange added = thvm_atp_orient_and_add(
+        s, mk_f(mk_v(VAR_x), mk_v(1u)), mk_f(mk_v(1u), mk_v(VAR_x)));
+    CHECK_EQ(added.count, 1u);
+    u32 new_i = added.first;
+    // E0 + E1 soft-deleted: dead bit set, sentinel faces, originals in
+    // the save slots (proof reconstruction reads them).
+    CHECK_EQ(s->n_eqs_dropped_eset_subsumed, 2u);
+    CHECK_EQ((u32)s->r_dead[0], 1u);
+    CHECK_EQ((u32)s->r_dead[1], 1u);
+    CHECK_EQ(term_tag(s->lhs[0]), TAG_FVR);
+    CHECK(kbo_eq(s->r_dead_lhs_save[0],
+                 mk_f(mk_i(mk_v(VAR_x)), mk_v(1u))));
+    // NO requeue, no CP made: the queue and the trace are untouched
+    // (WM's FinaleKillprozSubsumption only destroys).
+    CHECK_EQ(s->n_cps, cps0);
+    CHECK_EQ(s->n_trace, trace0);
+    // E2 and the rule R3 survive; the new equation itself is alive
+    // (WM sweeps before insertion, so it never subsumes itself).
+    CHECK_EQ((u32)s->r_dead[2], 0u);
+    CHECK_EQ((u32)s->r_dead[3], 0u);
+    CHECK_EQ((u32)s->r_dead[new_i], 0u);
+    // Directionality: a MORE SPECIFIC late arrival never kills the
+    // general member.  i(f(x,y)) = i(f(y,x)) enters; the live general
+    // equation at new_i is not its instance.
+    u32 killed0 = s->n_eqs_dropped_eset_subsumed;
+    thvm_atp_orient_and_add(s, mk_i(mk_f(mk_v(VAR_x), mk_v(1u))),
+                               mk_i(mk_f(mk_v(1u), mk_v(VAR_x))));
+    CHECK_EQ(s->n_eqs_dropped_eset_subsumed, killed0);
+    CHECK_EQ((u32)s->r_dead[new_i], 0u);
+    thvm_atp_free(s);
+
+    // Default OFF: same scenario, the instance member survives the
+    // general equation's entry (engine byte-identical).
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ(s->use_eset_subsume, 0u);
+    atp_push_rule(s, mk_f(mk_i(mk_v(VAR_x)), mk_v(1u)),
+                     mk_f(mk_v(1u), mk_i(mk_v(VAR_x))));
+    thvm_atp_orient_and_add(
+        s, mk_f(mk_v(VAR_x), mk_v(1u)), mk_f(mk_v(1u), mk_v(VAR_x)));
+    CHECK_EQ(s->n_eqs_dropped_eset_subsumed, 0u);
+    CHECK_EQ((u32)s->r_dead[0], 0u);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-demote-equation-victim-requeues-original-sides");
   {
     // Waldmeister KPV_IROpferBehandeln (KPVerwaltung.c:517-518): an

@@ -106,22 +106,22 @@ int main(void) {
   // simdgroup_matrix template will fit (K%8==0) or whether to bail
   // and let metal_try_gemm's tile-shared-mem path take over (F3.4).
   u32 mm_k = 0;
-  CHECK(uop_classify_matmul(store, &mm_k));
+  CHECK(uop_classify_matmul(store, &mm_k, NULL));
   CHECK_EQ(mm_k, 32u);
 
   // Non-matmul store: classify returns 0, K extent stays 0.
   u32 nm_k = 99;
-  CHECK(!uop_classify_matmul(store_z, &nm_k));
+  CHECK(!uop_classify_matmul(store_z, &nm_k, NULL));
   CHECK_EQ(nm_k, 0u);
 
   // Same-buffer (square-of-self) store: classify returns 0.
   u32 sq_k = 99;
-  CHECK(!uop_classify_matmul(store_sq, &sq_k));
+  CHECK(!uop_classify_matmul(store_sq, &sq_k, NULL));
   CHECK_EQ(sq_k, 0u);
 
   // MAX-reduce store: classify returns 0 (SUM-only).
   u32 mx_k = 99;
-  CHECK(!uop_classify_matmul(store_max, &mx_k));
+  CHECK(!uop_classify_matmul(store_max, &mx_k, NULL));
   CHECK_EQ(mx_k, 0u);
 
   // K extent NOT a multiple of 8: classify still returns 1 (matmul
@@ -144,7 +144,7 @@ int main(void) {
   Term red7 = uop_reduce(REDUCE_SUM, /*axis=*/7, mul7);
   Term st7  = uop_store(C, addrC, red7);
   u32 k7_out = 0;
-  CHECK(uop_classify_matmul(st7, &k7_out));
+  CHECK(uop_classify_matmul(st7, &k7_out, NULL));
   CHECK_EQ(k7_out, 7u);
 
   TEST_BEGIN("recognise-tc/mn-axes-extract");
@@ -331,7 +331,7 @@ int main(void) {
   Term redC = uop_reduce(REDUCE_SUM, /*axis=*/11, mulC);
   Term stC  = uop_store(C, addrC, redC);
   u32 conv_k = 99;
-  CHECK(!uop_classify_matmul(stC, &conv_k));
+  CHECK(!uop_classify_matmul(stC, &conv_k, NULL));
   // Also: uop_recognise_tc on this conv-shape store returns input
   // unchanged (no OPT wrap installed).
   CHECK_EQ(uop_recognise_tc(stC), stC);
@@ -361,7 +361,7 @@ int main(void) {
     CHECK_EQ(dk, 64u);
     // Matmul classifier rejects this shape (1 range per addr, not 2).
     u32 mk = 99;
-    CHECK(!uop_classify_matmul(stD, &mk));
+    CHECK(!uop_classify_matmul(stD, &mk, NULL));
     CHECK_EQ(mk, 0u);
     // GEMV classifier also rejects (needs 1+2 ranges, has 1+1).
     u32 gk = 99; int wf = 1;
@@ -400,10 +400,15 @@ int main(void) {
     u32 dk = 99;
     CHECK(!uop_classify_dot(stG, &dk));
     CHECK_EQ(dk, 0u);
-    // Matmul classifier rejects (needs 2+2 ranges, here 2+1).
-    u32 mk = 99;
-    CHECK(!uop_classify_matmul(stG, &mk));
-    CHECK_EQ(mk, 0u);
+    // Matmul classifier ALSO accepts the gemv shape as a collapsed-
+    // unit-axis GEMM (B carries only the reduce axis, so N==1) and
+    // reports unit_axis=2; uop_recognise_tc itself stays strict
+    // (unit_axis != 0 skips the TC wrapper).
+    u32 mk = 99, mu = 99;
+    CHECK(uop_classify_matmul(stG, &mk, &mu));
+    CHECK_EQ(mk, (u32)GK);
+    CHECK_EQ(mu, 2u);
+    CHECK_EQ(uop_recognise_tc(stG), stG);
 
     TEST_BEGIN("recognise-tc/gemv-classifier-w-on-src-1");
     // Same shape but MUL operands swapped: W on src[1], x on src[0].

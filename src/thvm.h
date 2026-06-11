@@ -4843,6 +4843,25 @@ typedef struct {
   u8   use_pop_subsume;
   u32  n_cps_dropped_pop_subsumed;
 
+  // WM E-set subsumption on new-equation entry (GMSubsummierenMit-
+  // Gleichung, INF/Interreduktion.c:251-274; reached from
+  // IR_InterreduktionLinks :366-378 for every non-rule new fact,
+  // BEFORE RE_FaktumEinfuegen inserts it -- ArbeitsAufnahme,
+  // INF/Hauptkomponenten.c:311-312).  Every existing live E-member
+  // (distinguished direction only, TP_RichtungAusgezeichnet :261)
+  // that the new unorientable equation subsumes
+  // (SS_TermpaarSubsummiertTermpaar, INF/Subsumption.c:104-110: one
+  // substitution covering both sides, either pattern orientation,
+  // context-stripping descent) is removed AND destroyed, twin
+  // included (FinaleKillprozSubsumption, Interreduktion.c:236-245)
+  // -- NO requeue, no CP made.  thvm stores one slot per equation,
+  // so the kill is the bwd-subsume soft-delete (dead-sentinel faces
+  // + r_dead[i] + save slots).  Default OFF (engine byte-identical);
+  // ON in the "Waldmeister"* presets via Method "ESetSubsume" /
+  // thvm_atp_set_use_eset_subsume.
+  u8   use_eset_subsume;
+  u32  n_eqs_dropped_eset_subsumed;
+
   // Limited Resource Strategy (Riazanov & Voronkov, JSC 36, 2003).  When
   // a wall-clock budget is set, LRS estimates from the observed selection
   // rate how many MORE CPs the saturator will pop before the deadline,
@@ -5319,6 +5338,9 @@ fn u32       atp_ac_unify_emit_cps(Term li, Term ri,
 fn void      thvm_atp_set_use_rule_subsume_drop(AtpState *s, u8 on);
 // WM -ks "s" pop-time E-subsumption drop (see AtpState.use_pop_subsume).
 fn void      thvm_atp_set_use_pop_subsume(AtpState *s, u8 on);
+// WM E-set subsumption destroy on new-equation entry
+// (GMSubsummierenMitGleichung; see AtpState.use_eset_subsume).
+fn void      thvm_atp_set_use_eset_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);

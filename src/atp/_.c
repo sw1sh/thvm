@@ -8453,6 +8453,14 @@ fn void thvm_atp_set_use_pop_subsume(AtpState *s, u8 on) {
   s->use_pop_subsume = on ? 1u : 0u;
 }
 
+// WM E-set subsumption destroy on new-equation entry
+// (GMSubsummierenMitGleichung, INF/Interreduktion.c:251-274; see
+// AtpState.use_eset_subsume in thvm.h).
+fn void thvm_atp_set_use_eset_subsume(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_eset_subsume = on ? 1u : 0u;
+}
+
 // Buffer one interreduction victim's ORIGINAL sides + the TRACE_SIMPLIFY
 // parent captured at drop time -- the analog of WM's IR buffer that
 // `GMInterred` / `RMLinksInterred` fill per victim (Interreduktion.c:
@@ -12345,46 +12353,36 @@ static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs) {
   return 0;
 }
 
-// WM -ks "s" pop-time E-subsumption test (SS_TermpaarSubsummiertVonGM,
-// INF/Subsumption.c:91-104).  Returns 1 if `(lhs, rhs)` is subsumed by
-// a live unorientable equation "at any position": the pair itself, or
-// the subpair reached by repeatedly descending into the UNIQUE
-// differing immediate subterm (the SubsumptionBody context-stripping
-// loop, Subsumption.c:68-90 -- both sides must share the top symbol
-// and agree on every other child, else FAIL), is an instance of an
-// E-member under ONE substitution covering both sides.  Both
-// orientations of each equation are tried, mirroring WM's
-// Gleichung/Antigleichung twin storage in the Gleichungsbaum
-// (RUndEVerwaltung.c:407-470: both directions are separately indexed,
-// so MO_SubsummierendeGleichungGefunden sees each equation twice).
-// Rules (r_orient[k] == 1) never participate -- WM consults
-// RE_Gleichungsbaum only.  Caller guarantees lhs != rhs (the joined
-// drop ran) and compare(lhs, rhs) == KBO_UN (WM gates the stage on
-// Unvergleichbar, KPVerwaltung.c:667).
-static u8 atp_pop_eq_subsumed(AtpState *s, Term lhs, Term rhs) {
-  if (s->n_unorient == 0u) return 0;       // RE_GleichungsmengeLeer
+// WM SubsumptionBody core (INF/Subsumption.c:67-89 wrapping
+// SS_TermpaarSubsummiertTermpaar's test, :104-110): does the equation
+// (p_lhs, p_rhs) subsume the pair (lhs, rhs) "at some position"?  The
+// pair itself, or the subpair reached by repeatedly descending into
+// the UNIQUE differing immediate subterm (both sides must share the
+// top symbol and agree on every other child, else FAIL --
+// TO_TopSymboleGleich / NachfolgendeTeiltermeGleich), is an instance
+// of the pattern pair under ONE substitution covering both sides
+// (MO_TermpaarSubsummiertZweites, MatchOperationen.c:1452-1505:
+// SubstAufIdentitaetSetzen runs once and the binding persists across
+// the left- and right-side loops).  Both orientations of the PATTERN
+// are tried (Subsumption.c:108-109).
+static u8 atp_eq_subsumes_pair(Term p_lhs, Term p_rhs, Term lhs, Term rhs) {
   for (;;) {
-    for (u32 k = 0; k < s->n_rules; k++) {
-      if (s->r_orient[k]) continue;                  // E only, never R
-      if (s->r_dead != NULL && s->r_dead[k]) continue;
-      {
-        RewriteSubst subst = {{0}};
-        if (thvm_match(s->lhs[k], lhs, &subst) &&
-            thvm_match(s->rhs[k], rhs, &subst)) {
-          return 1;
-        }
+    {
+      RewriteSubst subst = {{0}};
+      if (thvm_match(p_lhs, lhs, &subst) &&
+          thvm_match(p_rhs, rhs, &subst)) {
+        return 1;
       }
-      {
-        RewriteSubst subst = {{0}};
-        if (thvm_match(s->lhs[k], rhs, &subst) &&
-            thvm_match(s->rhs[k], lhs, &subst)) {
-          return 1;
-        }
+    }
+    {
+      RewriteSubst subst = {{0}};
+      if (thvm_match(p_lhs, rhs, &subst) &&
+          thvm_match(p_rhs, lhs, &subst)) {
+        return 1;
       }
     }
     // Descend one level: same top symbol + exactly one differing
-    // child, else no position can be subsumed (SubsumptionBody's
-    // TO_TopSymboleGleich / NachfolgendeTeiltermeGleich gates).
+    // child, else no position can be subsumed.
     if (term_tag(lhs) != TAG_CTR || term_tag(rhs) != TAG_CTR) return 0;
     if (term_ext(lhs) != term_ext(rhs)) return 0;
     u32 n = term_ctr_n(lhs);
@@ -12399,6 +12397,80 @@ static u8 atp_pop_eq_subsumed(AtpState *s, Term lhs, Term rhs) {
     if (diff == n) return 0;            // identical pair: unreachable
     lhs = term_ctr_at(lhs, diff);
     rhs = term_ctr_at(rhs, diff);
+  }
+}
+
+// WM -ks "s" pop-time E-subsumption test (SS_TermpaarSubsummiertVonGM,
+// INF/Subsumption.c:91-104).  Returns 1 if `(lhs, rhs)` is subsumed by
+// a live unorientable equation under the SubsumptionBody semantics
+// above.  Both orientations of each equation are tried, mirroring WM's
+// Gleichung/Antigleichung twin storage in the Gleichungsbaum
+// (RUndEVerwaltung.c:407-470: both directions are separately indexed,
+// so MO_SubsummierendeGleichungGefunden sees each equation twice).
+// Rules (r_orient[k] == 1) never participate -- WM consults
+// RE_Gleichungsbaum only.  Caller guarantees lhs != rhs (the joined
+// drop ran) and compare(lhs, rhs) == KBO_UN (WM gates the stage on
+// Unvergleichbar, KPVerwaltung.c:667).
+static u8 atp_pop_eq_subsumed(AtpState *s, Term lhs, Term rhs) {
+  if (s->n_unorient == 0u) return 0;       // RE_GleichungsmengeLeer
+  for (u32 k = 0; k < s->n_rules; k++) {
+    if (s->r_orient[k]) continue;                    // E only, never R
+    if (s->r_dead != NULL && s->r_dead[k]) continue;
+    if (atp_eq_subsumes_pair(s->lhs[k], s->rhs[k], lhs, rhs)) return 1;
+  }
+  return 0;
+}
+
+// WM E-set subsumption destroy on new-equation entry
+// (GMSubsummierenMitGleichung, INF/Interreduktion.c:251-274; reached
+// from IR_InterreduktionLinks :371-373 only when the new fact is an
+// EQUATION, BEFORE RE_FaktumEinfuegen inserts it into GM --
+// ArbeitsAufnahme, INF/Hauptkomponenten.c:311-312, so it can never
+// subsume itself).  Every existing live E-member whose pair the new
+// equation subsumes (SS_TermpaarSubsummiertTermpaar at :262, gated on
+// the distinguished direction TP_RichtungAusgezeichnet at :261 -- one
+// test per stored equation, both pattern orientations inside the
+// matcher) is removed from GM and physically destroyed, twin included
+// (FinaleKillprozSubsumption, :236-245).  NO requeue, no CP made.
+//
+// thvm stores ONE slot per equation (no Gleichung/Antigleichung twin
+// under ATP_ORDERED_REWRITE), so a single soft-delete covers both
+// directions: the bwd-subsume dead-sentinel recipe (sentinel faces
+// make thvm_match / thvm_unify return 0, so every rewrite /
+// CP-generation site skips the slot; originals go to the save slots
+// for proof reconstruction).  n_unorient is NOT decremented --
+// matching the bwd-subsume convention, it stays an upper bound on
+// live unorientables and dead slots are skipped via r_dead/sentinel.
+static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
+  Term new_lhs = s->lhs[new_i];
+  Term new_rhs = s->rhs[new_i];
+  Term dead_sentinel = term_new(0, TAG_FVR, 255u, 0);
+  for (u32 i = 0; i < new_i; i++) {
+    if (s->r_orient[i]) continue;   // E only (RE_forGleichungenRobust)
+    if (s->r_dead[i]) continue;
+    if (!atp_eq_subsumes_pair(new_lhs, new_rhs, s->lhs[i], s->rhs[i]))
+      continue;
+    s->r_dead_lhs_save[i] = s->lhs[i];
+    s->r_dead_rhs_save[i] = s->rhs[i];
+    s->lhs[i] = dead_sentinel;
+    s->rhs[i] = dead_sentinel;
+    s->r_dead[i] = 1;
+    // The active E set changed: invalidate the IR-normalize cookie
+    // and force the rule/unorient index rebuild (a revision delta
+    // that exceeds the rule-count delta is never pure-append).
+    s->r_revision++;
+    s->n_eqs_dropped_eset_subsumed++;
+#ifdef THVM_ATPFT_RULES
+    s->r_dead_lhs_save_ft[i] = s->lhs_ft[i];
+    s->r_dead_rhs_save_ft[i] = s->rhs_ft[i];
+    s->lhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
+                                dead_sentinel, 0);
+    s->rhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
+                                dead_sentinel, 0);
+#endif
+#ifdef ATP_RULE_INDEX
+    s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
+#endif
   }
 }
 
@@ -14135,6 +14207,13 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       u32 idx = s->n_rules;
       u8 pushed = atp_push_rule(s, lhs, rhs);
       if (pushed) { r.first = idx; r.count = 1; }
+      // WM E-set subsumption (GMSubsummierenMitGleichung,
+      // INF/Interreduktion.c:251-274): the new unorientable equation
+      // destroys every existing E-member it subsumes -- no requeue,
+      // no CP made.  Runs before the FVI hook, matching WM's order
+      // (IR_InterreduktionLinks precedes RE_FaktumEinfuegen, whose
+      // insertion path hosts RechtsUnfreiErzeugen).
+      if (pushed && s->use_eset_subsume) atp_eset_subsume_by_new(s, idx);
       // Waldmeister `RechtsUnfreiErzeugen` (RUndEVerwaltung.c:366-397):
       // an unorientable equation whose RHS has variables not on its
       // LHS gates ExcludedMiddle / Noncontradiction / EqualityOfInverses
@@ -14169,6 +14248,13 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       added += atp_push_rule(s, rhs, lhs) ? 1u : 0u;
       r.first = idx;
       r.count = added;
+      // WM E-set subsumption (GMSubsummierenMitGleichung): scan only
+      // slots below the freshly-added pair -- the matcher tries both
+      // pattern orientations, so one sweep off the first slot covers
+      // the looping u->v / v->u twins (and kills BOTH slots of an
+      // older subsumed pair, WM's FinaleKillprozSubsumption twin
+      // destruction).
+      if (added > 0 && s->use_eset_subsume) atp_eset_subsume_by_new(s, idx);
       return r;
 #endif
     }

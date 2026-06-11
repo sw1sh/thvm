@@ -803,6 +803,14 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // (default, engine byte-identical).
   mint pop_subsume = MArgument_getInteger(args[36]);
   thvm_atp_set_use_pop_subsume(atp, (u8)(pop_subsume != 0));
+  // Method -> {... "ESetSubsume" -> True}: WM E-set subsumption
+  // destroy on new-equation entry (GMSubsummierenMitGleichung,
+  // INF/Interreduktion.c:251-274) -- a new unorientable equation
+  // soft-deletes every existing E-member it subsumes, with no requeue
+  // and no CP made.  args[37]; 0 = off (default, engine
+  // byte-identical).
+  mint eset_subsume = MArgument_getInteger(args[37]);
+  thvm_atp_set_use_eset_subsume(atp, (u8)(eset_subsume != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any
