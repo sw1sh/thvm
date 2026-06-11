@@ -88,7 +88,11 @@ static u32 lz_register_buf(LzCtx *ctx, Term buf) {
   } else {
     snprintf(s->name, sizeof(s->name), "in%u", inst - 1);
   }
-  s->dtype = uop_buffer_dtype(buf);
+  // rmu_slot_dtype reads the dtype from either a UOP_BUFFER leaf
+  // (heap[loc+1]) or a bare TAG_TEN leaf (term_ext); uop_buffer_dtype
+  // alone returns 0 for a TAG_TEN and mis-renders non-f32 inputs (e.g.
+  // a bf16 weight) as the default `float`.
+  s->dtype = rmu_slot_dtype(buf);
   return ctx->n_bufs - 1;
 }
 
@@ -662,7 +666,24 @@ static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
             return 0;
           }
           fputs(" = ", fp);
+          // Store-value down-conversion.  The compute pipeline
+          // accumulates / computes in `float` (e.g. a matmul's float
+          // _acc, or any expression promoted to float), but the
+          // destination buffer may be a narrower float type.  Metal's
+          // `bfloat` lvalue assignment rejects an implicit float->bfloat
+          // narrowing (`half` is permissive, `bfloat` is not), so emit an
+          // explicit cast when the destination buffer is bf16/fp16.  f32
+          // / int buffers keep the bare value (no cast -> byte-identical
+          // output for the existing f32 paths).  Mirrors tinygrad's
+          // store path, where the value already carries the buffer dtype
+          // (renderer/cstyle.py render_store) -- thvm casts at the store
+          // site since the linearized value subtree stays float.
+          u32 store_dt = rmu_slot_dtype(heap_read(term_val(addr) + 0));
+          int narrow = (ctx->target == LZ_TGT_METAL
+                        && (store_dt == DT_BF16 || store_dt == DT_FP16));
+          if (narrow) fprintf(fp, "%s(", lz_type_name(ctx, store_dt));
           lz_emit_value(value, ctx, fp);
+          if (narrow) fputc(')', fp);
           fputs(";\n", fp);
         }
         break;

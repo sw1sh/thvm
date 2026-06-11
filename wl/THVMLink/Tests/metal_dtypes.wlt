@@ -411,3 +411,72 @@ VerificationTest[
     True,
     TestID -> "metal/i8-input-roundtrip"
 ]
+
+VerificationTest[
+    (* bf16 renders as the native Metal `bfloat` scalar: the kernel
+       signature reads a 2-byte bf16 buffer directly (no f32 widening
+       copy).  Asserts the generated MSL declares `device const bfloat`
+       inputs rather than the old fall-through to `float`. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], src},
+        If[ ctx === 0, Return[True]];
+        src = TInContext[ctx,
+            a = TTensorCreate[{1., 2., 3., 4.}, "bf16"];
+            b = TTensorCreate[{0.5, 0.5, 0.5, 0.5}, "bf16"];
+            TRealize[a + b];
+            TKernelSource[TKernelCount[] - 1, "Metal"]
+        ];
+        TContextDestroy[ctx];
+        StringContainsQ[src, "device const bfloat"]
+            && StringContainsQ[src, "device bfloat *out"]
+    ],
+    True,
+    TestID -> "metal/bf16-source-native-bfloat"
+]
+
+VerificationTest[
+    (* bf16 elementwise add on Metal: operands read as bfloat, the
+       hardware widens to float for the add, the result down-converts
+       back to bf16 on store.  Values are bf16-exact here (dyadic). *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result},
+        If[ ctx === 0, Return[True]];
+        result = TInContext[ctx,
+            a = TTensorCreate[{1., 2., 3., 4.}, "bf16"];
+            b = TTensorCreate[{0.5, 0.5, 0.25, 0.25}, "bf16"];
+            TBf16ToReal @ TTensorData @ TRealize[a + b]
+        ];
+        TContextDestroy[ctx];
+        result === {1.5, 2.5, 3.25, 4.25}
+    ],
+    True,
+    TestID -> "metal/bf16-add"
+]
+
+VerificationTest[
+    (* bf16 matmul on Metal: inputs read as bfloat, accumulate in float,
+       store down-converted to bf16.  Dyadic inputs keep the reference
+       exact so the comparison is tight.  The simdgroup_matrix TC
+       template is fp32-only, so bf16 takes the scalar-accumulator
+       fallback -- still GPU-resident (metal-tile). *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result, aData, bData, ref},
+        If[ ctx === 0, Return[True]];
+        aData = N @ Round[ArrayReshape[Mod[Range[16 * 24], 5]/4 - 1/2, {16, 24}], 0.25];
+        bData = N @ Round[ArrayReshape[Mod[Range[24 * 16], 3]/2 - 1/2, {24, 16}], 0.25];
+        ref = aData . bData;
+        result = TInContext[ctx,
+            a = TTensorCreate[aData, "bf16"];
+            b = TTensorCreate[bData, "bf16"];
+            out = TRealize @ TMatMul[a, b];
+            kid = TKernelCount[] - 1;
+            actual = ArrayReshape[TBf16ToReal @ TTensorData[out], {16, 16}];
+            {Max[Abs[Flatten[(actual - ref)/(Abs[ref] + 1)]]] < 0.05,
+             TKernelDispatchKind[kid]}
+        ];
+        TContextDestroy[ctx];
+        result === {True, "metal-tile"}
+    ],
+    True,
+    TestID -> "metal/bf16-matmul"
+]

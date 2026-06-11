@@ -1323,8 +1323,16 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
   }
   u64 t0 = cg_now_us();
   NSError *err = nil;
+  // Pin the MSL language version to 3.1 so the native `bfloat` scalar
+  // type (used for DT_BF16 buffers -- see rmu_msl_type_name) resolves.
+  // Metal 3.1 (macOS 14+) is the first version with `bfloat`; tinygrad
+  // selects "metal3.1" for macOS>=14 (tinygrad/runtime/ops_metal.py:88).
+  // 3.1 is a floor, not a ceiling -- the runtime still uses a newer GPU
+  // backend, this only gates the source-language feature set.
+  MTLCompileOptions *copts = [[MTLCompileOptions alloc] init];
+  [copts setLanguageVersion:MTLLanguageVersion3_1];
   id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithSource:srcStr
-                                                  options:nil
+                                                  options:copts
                                                     error:&err];
   if (lib == nil) {
     fprintf(stderr, "thvm: metal_tile_jit -- compile failed: %s\n",

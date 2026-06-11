@@ -262,6 +262,14 @@ static const char *rmu_msl_type_name(u32 dtype) {
   switch (dtype) {
     case DT_FP32:  return "float";
     case DT_FP16:  return "half";
+    // Metal 3.1+ (macOS 14+, Apple GPU family >= 6) has a native
+    // `bfloat` scalar with hardware bfloat<->float conversion, so a
+    // DT_BF16 buffer stays 2 bytes/element on the GPU and ops read it
+    // as bfloat.  Mirrors tinygrad MetalRenderer.type_map =
+    // {dtypes.bfloat16: "bfloat"} (tinygrad/renderer/cstyle.py:339).
+    // The in-process JIT compile pins -std=metal3.1 (see
+    // src/backend/metal/_.m metal_tile_jit_build) so `bfloat` resolves.
+    case DT_BF16:  return "bfloat";
     case DT_INT32: return "int";
     case DT_INT64: return "long";
     case DT_UINT8: return "uchar";
@@ -288,6 +296,48 @@ static const char *rmu_cuda_type_name(u32 dtype) {
 static const char *rmu_gpu_type_name(u32 dtype) {
   return (RMU_TARGET == CG_TARGET_CUDA) ? rmu_cuda_type_name(dtype)
                                         : rmu_msl_type_name(dtype);
+}
+
+// Kernel-signature dtype for a discovered buffer slot.  Slots come in
+// two shapes: a real UOP_BUFFER (dtype in heap[loc+1]) or a bare
+// TAG_TEN leaf the unified pass / kernel_lift left in the DAG (dtype in
+// term_ext -- see thvm.h:127 `TAG_TEN ... ext = dtype`).  uop_buffer_dtype
+// only handles the former and returns 0 for a TAG_TEN, which the type
+// mappers then render as the default `float`.  That silently mis-typed
+// every non-f32 TAG_TEN input (e.g. an FP16/BF16 weight or an i32 index
+// tensor) as `device const float*`, so a 2-byte bf16 buffer was read 4
+// bytes at a stride -> garbage.  Read the dtype from whichever leaf
+// shape `t` actually is.
+static u32 rmu_slot_dtype(Term t) {
+  if (term_tag(t) == TAG_TEN) return term_ext(t);
+  return uop_buffer_dtype(t);
+}
+
+// Store-value down-conversion at a `buf[addr] = <rhs>;` writeback.  The
+// reduce / matmul accumulator (and any promoted compute expression) is
+// `float`, but the destination buffer may be a narrower float type.
+// Metal's `bfloat` lvalue assignment rejects an implicit float->bfloat
+// narrowing (unlike `half`, which is permissive), so wrap the rhs in an
+// explicit conversion when the destination is bf16/fp16.  f32 / int
+// buffers emit nothing -> byte-identical output for the existing paths.
+// Scoped to the Metal target: only MSL has the native `bfloat` lvalue
+// with the strict assignment rule.  The C JIT promotes bf16/fp16 to
+// float (rmu_c_type_name) so a float rhs is already correct, and CUDA
+// bf16 output buffers aren't routed here today -- both fall through with
+// no wrapper, keeping their source byte-identical.
+static void rmu_store_cast_open(Term buf, FILE *fp) {
+  if (RMU_TARGET != CG_TARGET_METAL) return;
+  u32 dt = rmu_slot_dtype(buf);
+  if (dt == DT_BF16 || dt == DT_FP16) {
+    fprintf(fp, "%s(", rmu_msl_type_name(dt));
+  }
+}
+static void rmu_store_cast_close(Term buf, FILE *fp) {
+  if (RMU_TARGET != CG_TARGET_METAL) return;
+  u32 dt = rmu_slot_dtype(buf);
+  if (dt == DT_BF16 || dt == DT_FP16) {
+    fputc(')', fp);
+  }
 }
 
 // F6: C99 lacks `half` and `uchar`; emit equivalents that math.h /
@@ -678,9 +728,11 @@ static void rmu_emit_term(Term t, FILE *fp) {
         u32 width = (u32)term_val(heap_read(loc + 2));
         Term buf  = heap_read(term_val(inner) + 0);
         Term addr = heap_read(term_val(inner) + 1);
-        u32 dt    = uop_buffer_dtype(buf);
+        u32 dt    = rmu_slot_dtype(buf);
         const char *base = rmu_gpu_type_name(dt);
-        if ((dt == DT_FP32 || dt == DT_FP16)
+        // Native-vector load is valid for any scalar with an MSL vecN
+        // type: float/half/bfloat all have float4/half4/bfloat4 etc.
+        if ((dt == DT_FP32 || dt == DT_FP16 || dt == DT_BF16)
             && (width == 2 || width == 4 || width == 8 || width == 16)) {
           if (RMU_TARGET == CG_TARGET_CUDA) {
             fprintf(fp, "((const %s*)&((const %s%u*)(%s))[(",
@@ -2223,6 +2275,25 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     return 1;
   }
 
+  // Metal simdgroup_matrix path (below) hardcodes a
+  // simdgroup_matrix<float,8,8> A/B/C fragment, and Metal's
+  // simdgroup_load requires the device pointer element type to match
+  // the matrix scalar type (no implicit bfloat/half->float widening at
+  // the load).  When A or B is a non-fp32 buffer (e.g. the FLUX bf16
+  // linear weight) fall back to the scalar accumulator path: it loads
+  // each operand at its declared type (`bfloat`/`half`), the hardware
+  // widens to float in the multiply, and the accumulator is float --
+  // an exact bf16-input / float-accumulate matmul.  Mirrors the CUDA
+  // WMMA gate above (fp16-only fragments) and tinygrad's TC support
+  // gating (tinygrad/renderer/cstyle.py MetalRenderer tensor_cores).
+  {
+    u32 dt_a = rmu_slot_dtype(buf_a);
+    u32 dt_b = rmu_slot_dtype(buf_b);
+    if (dt_a != DT_FP32 || dt_b != DT_FP32) {
+      return 0;
+    }
+  }
+
   // Parallel-TC selector.  If the M and N axes carry GLOBAL axis_type
   // (Phase E annotation), the caller's dispatch shape binds each
   // threadgroup to a unique 8x8 output tile, so the multi-SG write
@@ -2509,7 +2580,11 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
   fprintf(fp, "%s[", rmu_buf_name(buf));
   rmu_emit_term(addr, fp);
-  fputs("] = _total;\n", fp);
+  fputs("] = ", fp);
+  rmu_store_cast_open(buf, fp);
+  fputs("_total", fp);
+  rmu_store_cast_close(buf, fp);
+  fputs(";\n", fp);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fputs("}\n", fp);
   // Close any open output-axis loops opened by the caller.
@@ -2929,13 +3004,21 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
         for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
         fprintf(fp, "%s[", rmu_buf_name(buf));
         rmu_emit_term(ak, fp);
-        fprintf(fp, "] = %s_%u;\n", acc_name, k);
+        fputs("] = ", fp);
+        rmu_store_cast_open(buf, fp);
+        fprintf(fp, "%s_%u", acc_name, k);
+        rmu_store_cast_close(buf, fp);
+        fputs(";\n", fp);
       }
     } else {
       for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
       fprintf(fp, "%s[", rmu_buf_name(buf));
       rmu_emit_term(addr, fp);
-      fprintf(fp, "] = %s;\n", acc_name);
+      fputs("] = ", fp);
+      rmu_store_cast_open(buf, fp);
+      fputs(acc_name, fp);
+      rmu_store_cast_close(buf, fp);
+      fputs(";\n", fp);
     }
     for (i32 i = (i32)(vectM ? f_n : n_out) - 1; i >= 0; i--) {
       if (!needs_close[i]) continue;
@@ -3005,7 +3088,11 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "%s[", rmu_buf_name(buf));
   rmu_emit_term(addr, fp);
-  fprintf(fp, "] = %s;\n", acc_name);
+  fputs("] = ", fp);
+  rmu_store_cast_open(buf, fp);
+  fputs(acc_name, fp);
+  rmu_store_cast_close(buf, fp);
+  fputs(";\n", fp);
   // Close output loops.
   for (i32 i = (i32)n_out_true - 1; i >= 0; i--) {
     if (!needs_close[i]) continue;
@@ -3136,7 +3223,11 @@ static int rmu_emit_chain_reduce(Term store, FILE *fp, u32 depth) {
   for (u32 d = 0; d < cur_depth; d++) fputs("  ", fp);
   fprintf(fp, "%s[", rmu_buf_name(buf));
   rmu_emit_term(addr, fp);
-  fprintf(fp, "] = %s;\n", acc_names[0]);
+  fputs("] = ", fp);
+  rmu_store_cast_open(buf, fp);
+  fputs(acc_names[0], fp);
+  rmu_store_cast_close(buf, fp);
+  fputs(";\n", fp);
 
   for (i32 i = (i32)n_out - 1; i >= 0; i--) {
     if (!needs_close[i]) continue;
@@ -3873,7 +3964,11 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
       for (u32 d = 0; d < pa_body_depth; d++) fputs("  ", fp);
       fprintf(fp, "%s[", rmu_buf_name(buf));
       rmu_emit_term(ak, fp);
-      fprintf(fp, "] = %s_%u;\n", pa_acc_name, k);
+      fputs("] = ", fp);
+      rmu_store_cast_open(buf, fp);
+      fprintf(fp, "%s_%u", pa_acc_name, k);
+      rmu_store_cast_close(buf, fp);
+      fputs(";\n", fp);
     }
     // Close runtime output loops in reverse order.
     for (i32 i = (i32)pa_f_n - 1; i >= 0; i--) {
@@ -3964,7 +4059,11 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "%s[", rmu_buf_name(buf));
   rmu_emit_term(addr, fp);
-  fprintf(fp, "] = %s;\n", acc_name);
+  fputs("] = ", fp);
+  rmu_store_cast_open(buf, fp);
+  fputs(acc_name, fp);
+  rmu_store_cast_close(buf, fp);
+  fputs(";\n", fp);
   // Close output loops.
   for (i32 i = (i32)n_out_true - 1; i >= 0; i--) {
     if (!needs_close[i]) continue;
@@ -4811,7 +4910,9 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
       fprintf(fp, "%s[", rmu_buf_name(buf));
       rmu_emit_term(addr_k, fp);
       fputs("] = ", fp);
+      rmu_store_cast_open(buf, fp);
       rmu_emit_term(value_k, fp);
+      rmu_store_cast_close(buf, fp);
       fputs(";\n", fp);
       RMU_ACC_LANE_SUFFIX[0] = '\0';
     }
@@ -4820,7 +4921,9 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     fprintf(fp, "%s[", rmu_buf_name(buf));
     rmu_emit_term(addr, fp);
     fputs("] = ", fp);
+    rmu_store_cast_open(buf, fp);
     rmu_emit_term(value, fp);
+    rmu_store_cast_close(buf, fp);
     fputs(";\n", fp);
   }
   // Close braces (innermost first), only for ranges that opened one.
@@ -5053,11 +5156,11 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
   fputs("using namespace metal;\n\n", fp);
   fprintf(fp, "kernel void %s(\n", kernel_name);
   // Output goes to buffer(0); each input goes to buffer(1+i).
-  u32 out_dtype = uop_buffer_dtype(out_buf);
+  u32 out_dtype = rmu_slot_dtype(out_buf);
   fprintf(fp, "    device %s *out [[ buffer(0) ]]",
           rmu_msl_type_name(out_dtype));
   for (u32 i = 0; i < n_inputs; i++) {
-    u32 dt = uop_buffer_dtype(in_bufs[i]);
+    u32 dt = rmu_slot_dtype(in_bufs[i]);
     fprintf(fp, ",\n    device const %s *in%u [[ buffer(%u) ]]",
             rmu_msl_type_name(dt), i, i + 1);
   }
@@ -5168,12 +5271,12 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   fputs("#include <metal_stdlib>\n", fp);
   fputs("using namespace metal;\n\n", fp);
   fprintf(fp, "kernel void %s(\n", kernel_name);
-  u32 out_dtype = uop_buffer_dtype(out_buf);
+  u32 out_dtype = rmu_slot_dtype(out_buf);
   fprintf(fp, "    device %s *out [[ buffer(0) ]]",
           rmu_msl_type_name(out_dtype));
   for (u32 i = 0; i < n_inputs; i++) {
     Term in_buf = slot_bufs[i + 1];
-    u32 dt = uop_buffer_dtype(in_buf);
+    u32 dt = rmu_slot_dtype(in_buf);
     fprintf(fp, ",\n    device const %s *in%u [[ buffer(%u) ]]",
             rmu_msl_type_name(dt), i, i + 1);
   }
