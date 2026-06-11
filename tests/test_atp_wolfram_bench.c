@@ -566,6 +566,15 @@ int main(int argc, char **argv) {
       // mccune at 9.9s (-7% vs IR=16) with thm at 0.3s (unchanged).
       // env THVM_ATP_CP_SET_IR_PERIOD overrides if user wants IR=1 etc.
       if (s->cp_set_ir_period == 0u) s->cp_set_ir_period = 4u;
+      // WM-faithful IR-victim demotion (KPV_IROpferBehandeln /
+      // IR_PufferAuslesen): a rule demoted by interreduction re-queues
+      // its ORIGINAL sides after CP generation (late FIFO age), with
+      // the KPBehandelt -kg r treatment (size-gated oriented-only
+      // renormalize + joined-discard).  Closes the McCune-II pick-4
+      // fork (the slice-reduced victim re-queued early at weight 461
+      // where WM's original pair re-queues late at 505 and joins away
+      // on re-selection).  THVM_ATP_WM_DEMOTE env overrides.
+      thvm_atp_set_use_wm_demote(s, 1u);
       // Backward subsumption (WM standard): scan existing rules and
       // soft-delete any subsumed by the newly-added rule.  +30% on
       // AndAssoc post-fix (iter 162) -- the kill churn pays off because
@@ -723,6 +732,13 @@ int main(int argc, char **argv) {
     const char *bd = getenv("THVM_ATP_BWD_DEMOD");
     if (bd != NULL && bd[0] != '\0')
       thvm_atp_set_use_bwd_demod(s, (bd[0] != '0') ? 1u : 0u);
+  }
+  // THVM_ATP_WM_DEMOTE=0/1: independent toggle for the WM-faithful
+  // IR-victim demotion (in the WALDMEISTER preset by default).
+  {
+    const char *wd = getenv("THVM_ATP_WM_DEMOTE");
+    if (wd != NULL && wd[0] != '\0')
+      thvm_atp_set_use_wm_demote(s, (wd[0] != '0') ? 1u : 0u);
   }
   // SOS (Set-of-Support) -- a CP-scoring bonus for CPs touching goal
   // symbols.  Not WM standard (Vampire/E heuristic); kept as opt-in.

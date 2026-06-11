@@ -773,6 +773,16 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // commit 2 routes `atp_push_cps_traced` through `atp_cp_implicit_push`.
   mint use_implicit_cp = MArgument_getInteger(args[34]);
   thvm_atp_set_use_implicit_cp(atp, (u8)(use_implicit_cp != 0));
+  // Method -> {... "DemoteOnLhsSimplify" -> True}: Waldmeister-faithful
+  // IR-victim demotion (KPV_IROpferBehandeln / IR_PufferAuslesen).  A
+  // rule that interreduction demotes re-queues its ORIGINAL sides only
+  // after the new fact's CPs are generated (late FIFO age), with the
+  // KPBehandelt `-kg r` treatment: size-gated oriented-rules-only
+  // renormalize + joined-victim discard.  args[35]; 0 = off (default,
+  // engine byte-identical -- victims re-queue immediately with the
+  // slice-reduced pair).
+  mint use_wm_demote = MArgument_getInteger(args[35]);
+  thvm_atp_set_use_wm_demote(atp, (u8)(use_wm_demote != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[19] gates it: the default (any

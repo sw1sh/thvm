@@ -69,7 +69,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"Precedence\", \"SkolemHighest\", \"FifoTiebreak\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"Precedence\", \"SkolemHighest\", \"FifoTiebreak\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 GeneralUtilities`SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -243,6 +243,9 @@ $atpRunProofFn := $atpRunProofFn = load[
      (* args[33] = use_fvi: Waldmeister RechtsUnfreiErzeugen (FVI) toggle *)
      Integer,
      (* args[34] = use_implicit_cp: deferred-CP arc commit 1 toggle (dormant) *)
+     Integer,
+     (* args[35] = use_wm_demote: Waldmeister IR-victim demotion
+        (KPV_IROpferBehandeln; Method "DemoteOnLhsSimplify") *)
      Integer},
     "NumericArray"
 ]
@@ -2097,6 +2100,24 @@ atpFreeVarInstanceOpt[o_Association] := Switch[Lookup[o, "FreeVarInstance", Auto
 atpImplicitCpOpt[o_Association] := Switch[Lookup[o, "UseImplicitCp", Automatic],
     True, 1, False | Automatic, 0, _, 0];
 
+(* "DemoteOnLhsSimplify" -> True | False: Waldmeister-faithful
+   interreduction-victim demotion (KPV_IROpferBehandeln,
+   INF/KPVerwaltung.c:514-528, drained by IR_PufferAuslesen,
+   INF/Interreduktion.c:387-392).  When a newly-added rule OR
+   unorientable equation simplifies an existing rule's side, the rule
+   leaves R immediately (so the new fact's critical pairs never
+   overlap it) but re-enters the passive queue only AFTER the new
+   fact's CPs are generated, with its ORIGINAL sides, a fresh
+   heuristic weight, and a fresh FIFO age -- plus WM's KPBehandelt
+   `-kg r` treatment (combined-size < 50 gate, oriented-rules-only
+   renormalize, joined victims discarded).  False/off keeps the legacy
+   behavior: the slice-reduced pair re-queues during interreduction
+   (engine byte-identical).  On in the "Waldmeister"/"WaldmeisterFVI"
+   presets -- it closes the McCune-II selection-4 trajectory fork
+   against wmcli. *)
+atpWmDemoteOpt[o_Association] := Switch[Lookup[o, "DemoteOnLhsSimplify", Automatic],
+    True, 1, False | Automatic, 0, _, 0];
+
 (* True iff at least one axiom in `axParts` (atpAxiomParts triples
    {vars, lhs, rhs}) has a side whose variables are not a subset of
    the other side -- i.e. a free-on-one-side variable that the
@@ -2211,6 +2232,7 @@ $AtpPresetDefaults = <|
         "SelectionRatio" -> 51,
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
         "CPSetInterreduce" -> True,
+        "DemoteOnLhsSimplify" -> True,
         (* Stays opt-in: the measured flip costs 2.8x steps, +55%
            wall, +17% peak RSS on mccune and 2.13x peak RSS on
            AndAssoc -- see atpImplicitCpOpt. *)
@@ -2230,6 +2252,7 @@ $AtpPresetDefaults = <|
         "SelectionRatio" -> 51,
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
         "CPSetInterreduce" -> True,
+        "DemoteOnLhsSimplify" -> True,
         "FreeVarInstance" -> True,
         (* Stays opt-in for the same measured regressions as the
            "Waldmeister" entry; FVI differs only in FreeVarInstance
@@ -2241,6 +2264,7 @@ $AtpPresetDefaults = <|
         "LazyNormalize" -> True,
         "CPSetInterreduce" -> True,
         "AutoMaxWeight" -> 30,
+        "DemoteOnLhsSimplify" -> True,
         "UnfailingCP" -> True, "RHSInterreduce" -> True|>,
     "VampireUEQ" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
@@ -2364,7 +2388,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpBwdDemodOpt[o], atpSymbolWeightsOpt[o], atpVarWeightOpt[o],
          atpRandomRatioOpt[o], atpRandomSeedOpt[o], atpKboWeightSchemeOpt[o],
          atpLazyNormalizeOpt[o], atpCoopWeightOpt[o], atpCoopRatioOpt[o],
-         atpFreeVarInstanceOpt[o], atpImplicitCpOpt[o]}
+         atpFreeVarInstanceOpt[o], atpImplicitCpOpt[o], atpWmDemoteOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];

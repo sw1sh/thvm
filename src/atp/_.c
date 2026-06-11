@@ -4423,6 +4423,10 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_stash_trace);
   free(s->cp_stash_nodes);
   free(s->cp_stash_ultimate);
+  // IR-victim buffer (use_wm_demote; NULL when the flag never fired).
+  free(s->irv_lhs);
+  free(s->irv_rhs);
+  free(s->irv_parent);
   // ENIGMA training-data arrays (NULL unless recording was enabled).
   free(s->cp_feat_rows);
   free(s->cp_feat_trace);
@@ -4524,7 +4528,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   u32 n_roots = 4u * s->n_rules + 4u /* goal + goal_nf */
               + 4u * s->n_goals /* multi-goal conjuncts + NFs */
               + s->n_trace + REWRITE_MAX_VAR
-              + 1u /* min_const */;
+              + 1u /* min_const */
+              + 2u * s->n_irv /* buffered IR victims (use_wm_demote) */;
 #ifdef ATP_MNF
   // Milestone 10: every MNF coloured node holds a reached Term.  Root
   // them so the collector relocates them; the hash table (structural
@@ -4568,6 +4573,13 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // Must be relocated by every GC so the cached Term stays valid.
   u32 min_const_root = w;
   roots[w++] = s->min_const;
+  // Buffered IR victims (use_wm_demote): live only between interreduce
+  // and the post-CP-gen drain, but the heap-pressure GC can run inside
+  // generate_cps in exactly that window.
+  for (u32 i = 0; i < s->n_irv; i++) {
+    roots[w++] = s->irv_lhs[i];
+    roots[w++] = s->irv_rhs[i];
+  }
 #ifdef ATP_MNF
   u32 mnf_node_root = w;
   mnf_gc_gather(s->mnf, roots, &w);
@@ -4602,6 +4614,10 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   }
   s->min_const = roots[w++];
   (void)min_const_root;
+  for (u32 i = 0; i < s->n_irv; i++) {
+    s->irv_lhs[i] = roots[w++];
+    s->irv_rhs[i] = roots[w++];
+  }
 #ifdef ATP_MNF
   // Write the relocated reached-Terms back into the MNF nodes.  No
   // hash-table fixup: mnf_hash is structural, so a relocated term
@@ -8394,6 +8410,37 @@ fn void thvm_atp_set_use_bwd_demod(AtpState *s, u8 on) {
   s->use_bwd_demod = on ? 1u : 0u;
 }
 
+// Waldmeister-faithful IR-victim demotion (KPV_IROpferBehandeln /
+// IR_PufferAuslesen; see AtpState.use_wm_demote in thvm.h).
+fn void thvm_atp_set_use_wm_demote(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wm_demote = on ? 1u : 0u;
+}
+
+// Buffer one interreduction victim's ORIGINAL sides + the TRACE_SIMPLIFY
+// parent captured at drop time -- the analog of WM's IR buffer that
+// `GMInterred` / `RMLinksInterred` fill per victim (Interreduktion.c:
+// 280-326) for `IR_PufferAuslesen` to drain.  Drained here by
+// atp_wm_demote_drain after CP generation.
+static void atp_irv_push(AtpState *s, Term lhs, Term rhs, u32 parent) {
+  if (s->n_irv == s->irv_cap) {
+    u32 cap = s->irv_cap ? s->irv_cap * 2u : 8u;
+    Term *nl = (Term *)realloc(s->irv_lhs,    cap * sizeof(Term));
+    Term *nr = (Term *)realloc(s->irv_rhs,    cap * sizeof(Term));
+    u32  *np = (u32  *)realloc(s->irv_parent, cap * sizeof(u32));
+    if (nl == NULL || nr == NULL || np == NULL) {
+      fprintf(stderr, "atp_irv_push: realloc to %u victims failed\n", cap);
+      exit(1);
+    }
+    s->irv_lhs = nl; s->irv_rhs = nr; s->irv_parent = np;
+    s->irv_cap = cap;
+  }
+  s->irv_lhs[s->n_irv]    = lhs;
+  s->irv_rhs[s->n_irv]    = rhs;
+  s->irv_parent[s->n_irv] = parent;
+  s->n_irv++;
+}
+
 // Mark a rule's birthing trace id as dead so descendant CPs are skipped
 // at pop time.  Grows the bitset on demand (8 trace ids per byte).
 static void atp_trace_mark_dead(AtpState *s, u32 trace_id) {
@@ -8475,6 +8522,10 @@ fn void thvm_atp_set_wall_deadline(AtpState *s, double seconds_from_now) {
 static Term atp_proof_rewrite_step(AtpState *s, Term t, u8 *pos, u8 depth,
                                    u32 *out_rule, u8 *out_pos_len,
                                    u8 *out_fwd, u8 *fired);
+
+// Forward decl: the Waldmeister IR-victim drain (use_wm_demote), defined
+// next to thvm_atp_interreduce which fills the buffer it drains.
+static void atp_wm_demote_drain(AtpState *s);
 
 // Slice-aware companion: same one-step metadata-recording shape as
 // atp_proof_rewrite_step but the rule set is a passed-in slice
@@ -8873,6 +8924,15 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
       if (g_atp_phase_enabled) g_atp_phase_us_cp_set_ir += atp_now_us() - _ph_cpir_t0;
     }
   }
+
+  // Waldmeister IR_PufferAuslesen (Interreduktion.c:387-392): the
+  // victims thvm_atp_interreduce buffered under use_wm_demote re-enter
+  // the queue only NOW -- after this fact's CPs were generated and the
+  // periodic CP-set sweep ran -- as the step's LAST queue mutation, so
+  // each victim's FIFO age is younger than every CP the new fact
+  // produced (WM's ArbeitsAufnahme work order, Hauptkomponenten.c:
+  // 308-331; McCune-II's `ues 32` carries age 32, after CPs 14-31).
+  if (s->n_irv > 0u) atp_wm_demote_drain(s);
 
   u64 _ph_gc_t0 = atp_phase_now();
   goal = thvm_atp_goal_check(s);
@@ -11238,22 +11298,35 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
     // ORIENT/SIMPLIFY resolveTrace branch passes directly and no
     // emitNorm BFS is needed to bridge the simplification gap.
     u32 simplify_parent = s->r_trace[i];
-    if (s->record_norm_steps) {
+    if (s->record_norm_steps && !s->use_wm_demote) {
       reduced = atp_rewrite_normalize_slice_record(
           s, old_lhs, new_lhs, new_rhs, new_traces, n_new, 16,
           &simplify_parent, 0u, old_rhs);
     } else {
+      // Under use_wm_demote the slice reduction is DETECTION only
+      // (WM NF_ObjektAnwendbar, Interreduktion.c:308: an existence
+      // test; the reduct is discarded and the victim re-enters with
+      // its original sides), so no NORM_STEPs are recorded here --
+      // the drain records its own oriented-only chain.
       reduced = atp_rewrite_normalize(s, old_lhs, new_lhs, new_rhs,
                                       n_new, 16);
     }
     if (!kbo_eq(reduced, old_lhs)) {
-      // The older rule's LHS simplified -- drop it and requeue
-      // (reduced, old_rhs) for re-orientation.  Record the re-queue
-      // as a TRACE_SIMPLIFY entry parented on the dropped rule's
-      // trace index (or the NORM_STEP chain tail when recording is
-      // on) so the proof DAG stays connected through interreduction
-      // (a fresh TRACE_AXIOM would sever it).
-      atp_add_equation_simplified(s, reduced, old_rhs, simplify_parent);
+      // The older rule's LHS simplified -- drop it and requeue for
+      // re-orientation.  Legacy path: (reduced, old_rhs) immediately,
+      // recorded as a TRACE_SIMPLIFY entry parented on the dropped
+      // rule's trace index (or the NORM_STEP chain tail when
+      // recording is on) so the proof DAG stays connected through
+      // interreduction (a fresh TRACE_AXIOM would sever it).
+      // use_wm_demote path: buffer the ORIGINAL sides; the victim
+      // re-enters the queue only after this fact's CPs are generated
+      // (WM KPV_IROpferBehandeln, KPVerwaltung.c:517-518 copies the
+      // untouched pair).
+      if (s->use_wm_demote) {
+        atp_irv_push(s, old_lhs, old_rhs, simplify_parent);
+      } else {
+        atp_add_equation_simplified(s, reduced, old_rhs, simplify_parent);
+      }
       if (atp_rule_trace_on()) {
         char la[2048];
         atp_pretty_term(s->lhs[i], la, sizeof la);
@@ -11444,8 +11517,15 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       if (lhs_changed) {
         // LHS reduced -- drop the rule and re-queue with the rewritten
         // LHS (and possibly-rewritten RHS).  This is the bd=all branch.
+        // Under use_wm_demote the victim's ORIGINAL sides are buffered
+        // instead and drained after CP generation (WM IR buffer).
         u32 simplify_parent = s->r_trace[j];
-        atp_add_equation_simplified(s, reduced_lhs, reduced, simplify_parent);
+        if (s->use_wm_demote) {
+          atp_irv_push(s, old_lhs, old_rhs, simplify_parent);
+        } else {
+          atp_add_equation_simplified(s, reduced_lhs, reduced,
+                                      simplify_parent);
+        }
 #ifdef ATP_ORPHAN_KILL
         if (atp_dead != NULL && s->r_trace[j] != ATP_TRACE_NONE) {
           atp_dead[atp_n_dead++] = s->r_trace[j];
@@ -11482,8 +11562,15 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         u32 simplify_parent = s->r_trace[j];
         // Drop the rule with the stale RHS and re-queue the simplified
         // equation; orient will re-admit it (its RHS now in normal form)
-        // -- or join it away if it became trivial.
-        atp_add_equation_simplified(s, old_lhs, reduced, simplify_parent);
+        // -- or join it away if it became trivial.  Under use_wm_demote
+        // the ORIGINAL sides are buffered instead (WM's -irrp variant,
+        // Interreduktion.c:309/319, routes RHS-reducible rules through
+        // the same victim buffer with their untouched pair).
+        if (s->use_wm_demote) {
+          atp_irv_push(s, old_lhs, old_rhs, simplify_parent);
+        } else {
+          atp_add_equation_simplified(s, old_lhs, reduced, simplify_parent);
+        }
 #ifdef ATP_ORPHAN_KILL
         if (atp_dead != NULL && s->r_trace[j] != ATP_TRACE_NONE) {
           atp_dead[atp_n_dead++] = s->r_trace[j];
@@ -11527,6 +11614,102 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   }
 #endif
   return dropped;
+}
+
+// === Waldmeister IR-victim drain (use_wm_demote) ====================
+
+// WM doR normalize: bring `t` to normal form using ORIENTED rules only
+// (the Regelbaum) over the full current R.  Unorientable equations (the
+// Gleichungsbaum) do not rewrite -- the `-kg r` strength WM applies at
+// generation-time / requeue treatment (RUN/Parameter.c:397).
+static Term atp_rules_only_normalize(AtpState *s, Term t, u32 cap) {
+#ifdef ATP_RULE_INDEX
+  // The discrimination-tree normalizer indexes exactly the oriented
+  // (and non-dead) slots when unorientable equations are present, and
+  // every slot when all of R is oriented -- WM doR either way.
+  return atp_rewrite_normalize_indexed(s, t, cap);
+#else
+  for (u32 it = 0; it < cap; it++) {
+    if (atp_norm_deadline_fired(s)) return t;
+    u8  pos[ATP_PROOF_MAX_DEPTH];
+    u32 rule = 0;
+    u8  pos_len = 0, fwd = 1u, fired = 0;
+    g_atp_proof_oriented_only = 1u;
+    Term t2 = atp_proof_rewrite_step(s, t, pos, 0u, &rule, &pos_len,
+                                     &fwd, &fired);
+    g_atp_proof_oriented_only = 0u;
+    if (!fired) break;
+    t = t2;
+  }
+  return t;
+#endif
+}
+
+// Port of `IR_PufferAuslesen` -> `Anwendungsprozedur` ->
+// `KPV_IROpferBehandeln` (INF/Interreduktion.c:387-392 / 175-207;
+// INF/KPVerwaltung.c:514-528): every victim thvm_atp_interreduce
+// buffered re-enters the queue HERE, after the new fact's CPs were
+// generated, with its ORIGINAL sides and WM's late FIFO age.  Each
+// victim gets the `KPBehandelt` treatment under WM's default `-kg r`
+// flags (KPVerwaltung.c:435-467):
+//   * lohntSichBehandlung gate (combined size < 50, line 437): only a
+//     small victim is treated at all; a big one re-queues RAW.
+//   * NF_Normalform2(doR = TRUE, doE = FALSE): both sides normalized
+//     against the full CURRENT rule set, oriented rules only.  A
+//     victim demoted BY an unorientable equation therefore re-enters
+//     with its sides intact (McCune-II `ues 32`: the original rule 2
+//     pair, re-weighted 505, joined away only when re-selected).
+//   * joined victims are discarded outright (line 443-446).
+// Survivors enqueue through the normal TRACE_SIMPLIFY path: fresh
+// heuristic weight from the live weight mode + fresh cp_seq -- WM's
+// recentCPinsert stamps fresh w1 and w2 = ++CPNr
+// (CLAS/NewClassification.c:300-325); the requeued CP's otherParent is
+// NULL there, so like thvm's TRACE_SIMPLIFY entries it is never
+// orphan-killed.
+static void atp_wm_demote_drain(AtpState *s) {
+  const u32 WM_BEHANDELN_GATE = 50u;   // KPVerwaltung.c:437
+  const u32 NORM_CAP = 64u;            // matches the pop-normalize cap
+  for (u32 v = 0; v < s->n_irv; v++) {
+    Term l      = s->irv_lhs[v];
+    Term r      = s->irv_rhs[v];
+    u32  parent = s->irv_parent[v];
+    u32  trace_mark = s->n_trace;
+    if (atp_symbol_count(l) + atp_symbol_count(r) < WM_BEHANDELN_GATE) {
+      if (s->record_norm_steps) {
+        // Record the oriented-only renormalize as a NORM_STEP chain
+        // off the dropped rule's trace so the TRACE_SIMPLIFY below
+        // stays connected in the proof DAG (same shape as the
+        // pop-normalize recorder; g_atp_proof_oriented_only = doR).
+        g_atp_proof_oriented_only = 1u;
+        Term l2 = atp_rewrite_normalize_record(s, l, r, 0u, &parent,
+                                               NORM_CAP);
+        Term r2 = atp_rewrite_normalize_record(s, r, l2, 1u, &parent,
+                                               NORM_CAP);
+        g_atp_proof_oriented_only = 0u;
+        l = l2;
+        r = r2;
+      } else {
+        l = atp_rules_only_normalize(s, l, NORM_CAP);
+        r = atp_rules_only_normalize(s, r, NORM_CAP);
+      }
+      if (kbo_eq(l, r)) {
+        // Joined: the victim is redundant.  Rewind any NORM_STEPs just
+        // recorded for it (nothing else references them yet).
+        s->n_trace = trace_mark;
+        s->n_wm_demote_joined++;
+        continue;
+      }
+    }
+    atp_add_equation_simplified(s, l, r, parent);
+    s->n_wm_demote_requeued++;
+    if (atp_rule_trace_on()) {
+      char la[2048], ra[2048];
+      atp_pretty_term(l, la, sizeof la);
+      atp_pretty_term(r, ra, sizeof ra);
+      fprintf(stderr, "  REQUEUE victim (WM drain): %s = %s\n", la, ra);
+    }
+  }
+  s->n_irv = 0;
 }
 
 // === DIAGNOSTIC (Step 1) ============================================

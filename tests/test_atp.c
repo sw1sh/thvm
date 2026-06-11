@@ -697,6 +697,123 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-demote-equation-victim-requeues-original-sides");
+  {
+    // Waldmeister KPV_IROpferBehandeln (KPVerwaltung.c:517-518): an
+    // interreduction victim re-enters the queue with its ORIGINAL
+    // sides, not the slice-reduced form.  Trigger the demotion with
+    // an unorientable EQUATION (f(x,a) = f(a,x), KBO_UN under
+    // DUMMY_CFG) firing on the rule's LHS under the ordered
+    // strict-decrease gate -- and since the drain's KPBehandelt
+    // treatment is doR (oriented rules only, `-kg r`), the equation
+    // does NOT renormalize the victim at requeue: the sides re-enter
+    // intact.  This is the McCune-II `ues 32` shape.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_demote(s, 1u);
+
+    // R[0]: i(f(e,a)) -> e.  The redex f(e,a) rewrites by the
+    // equation's l->r direction (sigma x = e; f(e,a) > f(a,e) by the
+    // lex child compare under e > a precedence).
+    Term victim_lhs = mk_i(mk_f(mk_e(), mk_a()));
+    Term victim_rhs = mk_e();
+    s->lhs[0] = victim_lhs;
+    s->rhs[0] = victim_rhs;
+    s->r_orient[0] = 1u;
+    s->n_rules = 1;
+    u32 n_cps_before = s->n_cps;
+
+    AtpAddedRange added = thvm_atp_orient_and_add(
+        s, mk_f(mk_v(VAR_x), mk_a()), mk_f(mk_a(), mk_v(VAR_x)));
+    CHECK_EQ(added.count, 1u);
+    CHECK_EQ(s->r_orient[added.first], 0u);   // stored unorientable
+
+    u32 dropped = thvm_atp_interreduce(s, added);
+    CHECK_EQ(dropped, 1u);
+    // The victim is BUFFERED, not queued: WM's IR buffer drains only
+    // after CP generation (IR_PufferAuslesen is the last queue
+    // mutation of the work order).
+    CHECK_EQ(s->n_cps, n_cps_before);
+    CHECK_EQ(s->n_irv, 1u);
+    CHECK(kbo_eq(s->irv_lhs[0], victim_lhs));
+    CHECK(kbo_eq(s->irv_rhs[0], victim_rhs));
+
+    u32 trace_before = s->n_trace;
+    atp_wm_demote_drain(s);
+    CHECK_EQ(s->n_irv, 0u);
+    CHECK_EQ((u32)s->n_wm_demote_requeued, 1u);
+    CHECK_EQ(s->n_cps, n_cps_before + 1u);
+    // The TRACE_SIMPLIFY records the ORIGINAL pair: doR leaves the
+    // equation-reducible LHS untouched (the legacy path would have
+    // queued the slice-reduced i(f(a,e)) instead).
+    Term simp = s->trace[trace_before];
+    CHECK_EQ(term_ext(simp), TRACE_SIMPLIFY);
+    CHECK(kbo_eq(term_ctr_at(simp, 2),
+                 tt_norm_lhs(victim_lhs, victim_rhs)));
+    CHECK(kbo_eq(term_ctr_at(simp, 3),
+                 tt_norm_rhs(victim_lhs, victim_rhs)));
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-demote-drain-discards-joined-victim");
+  {
+    // WM KPBehandelt (KPVerwaltung.c:443-446): a victim whose sides
+    // join after the rules-only renormalize is discarded outright --
+    // it never re-enters the queue.  R[0] = f(a,e) -> a collapses
+    // under the more-general f(x,e) -> x to the trivial a = a.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_demote(s, 1u);
+
+    s->lhs[0] = mk_f(mk_a(), mk_e());
+    s->rhs[0] = mk_a();
+    s->r_orient[0] = 1u;
+    s->n_rules = 1;
+    u32 n_cps_before = s->n_cps;
+
+    AtpAddedRange added = thvm_atp_orient_and_add(
+        s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    CHECK_EQ(added.count, 1u);
+    u32 dropped = thvm_atp_interreduce(s, added);
+    CHECK_EQ(dropped, 1u);
+    CHECK_EQ(s->n_irv, 1u);
+
+    u32 trace_before = s->n_trace;
+    atp_wm_demote_drain(s);
+    CHECK_EQ(s->n_irv, 0u);
+    CHECK_EQ((u32)s->n_wm_demote_joined, 1u);
+    CHECK_EQ((u32)s->n_wm_demote_requeued, 0u);
+    CHECK_EQ(s->n_cps, n_cps_before);      // nothing re-queued
+    CHECK_EQ(s->n_trace, trace_before);    // no TRACE_SIMPLIFY pushed
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-demote-step-drains-after-cp-gen");
+  {
+    // Step-level work order (WM ArbeitsAufnahme, Hauptkomponenten.c:
+    // 308-331): the victim re-enters the queue AFTER the new fact's
+    // CPs, so its FIFO age (cp_seq) is the youngest in the queue.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_add_equation(s, mk_f(mk_a(), mk_e()), mk_f(mk_a(), mk_a()));
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_rules, 1u);
+
+    thvm_atp_set_use_wm_demote(s, 1u);
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_step(s);
+    // The step demoted R[0], generated the new rule's CPs, then
+    // drained the buffer: the treated victim (a, f(a,a)) is queued.
+    CHECK_EQ((u32)s->n_wm_demote_requeued, 1u);
+    CHECK_EQ(s->n_irv, 0u);
+    CHECK(s->n_cps >= 1u);
+    // The youngest queue entry (max cp_seq) is the drained victim --
+    // its trace entry is the TRACE_SIMPLIFY the drain pushed.
+    u32 young = 0u;
+    for (u32 k = 1; k < s->n_cps; k++) {
+      if (s->cp_seq[k] > s->cp_seq[young]) young = k;
+    }
+    CHECK_EQ(term_ext(s->trace[s->cp_trace[young]]), TRACE_SIMPLIFY);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/interreduce-keeps-irreducible-rules");
   {
     // R[0]: i(a) -> i(a)         (degenerate; just to fill a slot)

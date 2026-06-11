@@ -4940,6 +4940,41 @@ typedef struct {
   u8   use_bwd_demod;
   u64  n_rules_bwd_demodulated;   // diagnostic counter
 
+  // Waldmeister-faithful interreduction-victim demotion
+  // (`KPV_IROpferBehandeln`, INF/KPVerwaltung.c:514-528, drained by
+  // `IR_PufferAuslesen`, INF/Interreduktion.c:387-392).  When set, a
+  // rule/equation that interreduction demotes is NOT re-queued
+  // immediately with its slice-reduced sides; the victim's ORIGINAL
+  // (lhs, rhs) is buffered and drained only after the new fact's
+  // critical pairs are generated -- WM's work order (ArbeitsAufnahme,
+  // INF/Hauptkomponenten.c:308-331) makes the IR buffer the LAST
+  // queue mutation of the step, so the victim's FIFO age lands AFTER
+  // every CP the new fact produced.  At drain time each victim gets
+  // WM's `KPBehandelt` treatment under the default `-kg r` flags
+  // (KPVerwaltung.c:435-467): below the lohntSichBehandlung gate
+  // (combined size < 50 symbols) both sides are normalized against
+  // the full CURRENT rule set with ORIENTED rules only (doR -- WM's
+  // Regelbaum; equations never rewrite at requeue treatment), and a
+  // victim whose sides join is discarded outright.  Survivors enter
+  // the queue with a fresh heuristic weight and a fresh FIFO age.
+  // Default OFF: victims re-queue during interreduce with the
+  // slice-reduced pair (engine byte-identical).  Wired to Method
+  // {"DemoteOnLhsSimplify" -> True} (in the "Waldmeister" presets)
+  // via thvm_atp_set_use_wm_demote.
+  u8    use_wm_demote;
+  // IR-victim buffer (use_wm_demote only): original sides + the
+  // TRACE_SIMPLIFY parent captured at drop time.  Filled by
+  // thvm_atp_interreduce, drained by thvm_atp_step after CP
+  // generation -- but rooted in thvm_atp_gc_collect because the
+  // heap-pressure GC can run inside generate_cps between the two.
+  Term *irv_lhs;
+  Term *irv_rhs;
+  u32  *irv_parent;
+  u32   n_irv;
+  u32   irv_cap;
+  u64   n_wm_demote_requeued;     // victims re-queued at drain
+  u64   n_wm_demote_joined;       // victims discarded at drain (joined)
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode
@@ -5276,6 +5311,14 @@ fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_demod(AtpState *s, u8 on);
+// Waldmeister-faithful interreduction-victim demotion (see the
+// AtpState.use_wm_demote comment): buffer demoted rules' ORIGINAL
+// sides and re-queue them only after the new fact's CPs are
+// generated, with WM's KPBehandelt `-kg r` treatment (size-gated
+// oriented-rules-only renormalize + joined-discard) and fresh
+// weight/FIFO age.  Default OFF (engine byte-identical); the WL
+// "Waldmeister" presets set it via {"DemoteOnLhsSimplify" -> True}.
+fn void      thvm_atp_set_use_wm_demote(AtpState *s, u8 on);
 
 // Proof-trace capacity (entries).  Defaults to ATP_MAX_TRACE; overridable
 // once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset
