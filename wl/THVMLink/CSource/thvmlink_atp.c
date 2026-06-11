@@ -783,6 +783,17 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // slice-reduced pair).
   mint use_wm_demote = MArgument_getInteger(args[35]);
   thvm_atp_set_use_wm_demote(atp, (u8)(use_wm_demote != 0));
+  // Method -> {... "OrphanMurder" -> True}: Waldmeister's orphan layout
+  // (-ocrit, default ON in WM; KPVerwaltung.c:535 selectNonOrphan + the
+  // per-rule lebtNoch bit).  1 selects WM's layout: a CP whose parent
+  // rule was interreduced away is discarded lazily at pop time, and the
+  // eager interreduce-time queue sweep -- a thvm extra WM does not have,
+  // which changes live-queue composition -- is gated OFF.  args[36];
+  // 0 = legacy layout (eager sweep ON, lazy discard OFF), engine
+  // byte-identical.
+  mint orphan_wm = MArgument_getInteger(args[36]);
+  thvm_atp_set_use_orphan_murder(atp, (u8)(orphan_wm != 0));
+  thvm_atp_set_use_eager_orphan_sweep(atp, (u8)(orphan_wm == 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[19] gates it: the default (any

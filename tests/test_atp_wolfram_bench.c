@@ -554,7 +554,13 @@ int main(int argc, char **argv) {
       }
       thvm_atp_set_use_rhs_interreduce(s, 1u);
       thvm_atp_set_use_unfailing_cp(s, 1u);
+      // WM orphan layout (-ocrit default ON): lazy at-pop discard ON,
+      // eager interreduce-time queue sweep OFF -- WM has no such sweep
+      // (its only orphan mechanism is KPVerwaltung.c selectNonOrphan),
+      // and the sweep changes live-queue composition vs WM.
+      // THVM_ATP_ORPHAN / THVM_ATP_EAGER_SWEEP envs override below.
       thvm_atp_set_use_orphan_murder(s, 1u);
+      thvm_atp_set_use_eager_orphan_sweep(s, 0u);
       thvm_atp_set_use_unorient_index(s, 1u);
       thvm_atp_set_use_lazy_normalize(s, 1u);
       // WM's KPV_KPMengeInterreduzieren -- periodic CP-queue
@@ -699,6 +705,15 @@ int main(int argc, char **argv) {
     const char *om = getenv("THVM_ATP_ORPHAN");
     if (om != NULL && om[0] != '\0')
       thvm_atp_set_use_orphan_murder(s, (om[0] != '0') ? 1u : 0u);
+  }
+
+  // THVM_ATP_EAGER_SWEEP=1 re-enables the eager interreduce-time orphan
+  // sweep (compile default outside the WM preset; the preset turns it
+  // OFF to match WM's lazy-only layout) so a run can A/B the layouts.
+  {
+    const char *es = getenv("THVM_ATP_EAGER_SWEEP");
+    if (es != NULL && es[0] != '\0')
+      thvm_atp_set_use_eager_orphan_sweep(s, (es[0] != '0') ? 1u : 0u);
   }
 
   // THVM_ATP_IMPLICIT_CP=1 toggles the deferred-CP (`implicit_pair`)

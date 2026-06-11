@@ -4222,6 +4222,11 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // interreduce keeps surviving rules' RHSs in normal form so the
   // CPs born from them stay small.  calloc zeroed it; set explicitly.
   s->right_reduce = 1u;
+  // Eager interreduce-time orphan sweep is on by default (the historical
+  // ATP_ORPHAN_KILL behavior).  Method->"Waldmeister" gates it OFF and
+  // relies on the lazy at-pop discard alone (use_orphan_murder), matching
+  // WM's -ocrit live-queue composition.
+  s->use_eager_orphan_sweep = 1u;
   // use_lazy_normalize stays OFF by default (calloc zeroed): the deferred-
   // selection CP normalization is an opt-in via thvm_atp_set_use_lazy_normalize
   // (Method suboption "LazyNormalize" on the WL side, wired through the
@@ -8231,6 +8236,17 @@ fn void thvm_atp_set_use_orphan_murder(AtpState *s, u8 on) {
   s->use_orphan_murder = on ? 1u : 0u;
 }
 
+// Toggle the eager interreduce-time orphan sweep (the ATP_ORPHAN_KILL
+// pass at the tail of thvm_atp_interreduce).  Default ON -- the
+// historical thvm behavior.  WM has no such sweep: its only orphan
+// mechanism is the lazy at-pop discard (-ocrit, selectNonOrphan), so
+// Method->"Waldmeister" turns this OFF + use_orphan_murder ON to match
+// WM's live-queue composition.  No-op unless built -DATP_ORPHAN_KILL.
+fn void thvm_atp_set_use_eager_orphan_sweep(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_eager_orphan_sweep = on ? 1u : 0u;
+}
+
 // Toggle the deferred-CP (`implicit_pair`) path.  With the flag on,
 // atp_push_cps_traced queues rule-x-rule CPs as 20-byte trace-backed
 // descriptors (atp_cp_implicit_push) instead of packed byte strings,
@@ -11300,7 +11316,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 #ifdef ATP_ORPHAN_KILL
   // 9b: collect the trace ids of rules dropped below, then kill the
   // queued CPs descended from them once the compaction loop is done.
-  u32 *atp_dead   = (u32 *)malloc(added.first * sizeof(u32));
+  // Runtime-gated on use_eager_orphan_sweep (default ON): a NULL
+  // atp_dead disarms every collection site below and the tail sweep.
+  // The WM layout (Method->"Waldmeister") gates this OFF -- WM never
+  // sweeps the queue on a rule drop; its descendant CPs die lazily at
+  // pop via use_orphan_murder / atp_cp_is_orphan instead.
+  u32 *atp_dead   = s->use_eager_orphan_sweep
+                      ? (u32 *)malloc(added.first * sizeof(u32)) : NULL;
   u32  atp_n_dead = 0;
 #endif
 

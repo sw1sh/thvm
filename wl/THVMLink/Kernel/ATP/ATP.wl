@@ -69,7 +69,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"Precedence\", \"SkolemHighest\", \"FifoTiebreak\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"Precedence\", \"SkolemHighest\", \"FifoTiebreak\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 GeneralUtilities`SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -246,6 +246,9 @@ $atpRunProofFn := $atpRunProofFn = load[
      Integer,
      (* args[35] = use_wm_demote: Waldmeister IR-victim demotion
         (KPV_IROpferBehandeln; Method "DemoteOnLhsSimplify") *)
+     Integer,
+     (* args[36] = orphan layout: Waldmeister -ocrit lazy at-pop orphan
+        murder ON + eager interreduce sweep OFF (Method "OrphanMurder") *)
      Integer},
     "NumericArray"
 ]
@@ -2118,6 +2121,21 @@ atpImplicitCpOpt[o_Association] := Switch[Lookup[o, "UseImplicitCp", Automatic],
 atpWmDemoteOpt[o_Association] := Switch[Lookup[o, "DemoteOnLhsSimplify", Automatic],
     True, 1, False | Automatic, 0, _, 0];
 
+(* "OrphanMurder" -> True | False: Waldmeister's orphan layout (-ocrit,
+   default ON in WM; INF/KPVerwaltung.c:535-556 selectNonOrphan + the
+   per-rule lebtNoch liveness bit).  True selects WM's layout: a queued
+   CP whose parent rule was interreduced away is discarded lazily at
+   selection time (for free, no queue sweep), and the eager
+   interreduce-time queue sweep -- a thvm extra WM does not have, which
+   changes live-queue composition (heap size, FIFO ages) -- is gated
+   OFF.  Requeued interreduction victims (TRACE_SIMPLIFY entries) are
+   never orphaned, matching WM's NULL-parent = alive convention.
+   False/Automatic keeps the legacy layout (eager sweep ON, lazy
+   discard OFF), engine byte-identical.  On in the "Waldmeister"*
+   presets. *)
+atpOrphanMurderOpt[o_Association] := Switch[Lookup[o, "OrphanMurder", Automatic],
+    True, 1, False | Automatic, 0, _, 0];
+
 (* True iff at least one axiom in `axParts` (atpAxiomParts triples
    {vars, lhs, rhs}) has a side whose variables are not a subset of
    the other side -- i.e. a free-on-one-side variable that the
@@ -2233,6 +2251,7 @@ $AtpPresetDefaults = <|
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
         "CPSetInterreduce" -> True,
         "DemoteOnLhsSimplify" -> True,
+        "OrphanMurder" -> True,
         (* Stays opt-in: the measured flip costs 2.8x steps, +55%
            wall, +17% peak RSS on mccune and 2.13x peak RSS on
            AndAssoc -- see atpImplicitCpOpt. *)
@@ -2253,6 +2272,7 @@ $AtpPresetDefaults = <|
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
         "CPSetInterreduce" -> True,
         "DemoteOnLhsSimplify" -> True,
+        "OrphanMurder" -> True,
         "FreeVarInstance" -> True,
         (* Stays opt-in for the same measured regressions as the
            "Waldmeister" entry; FVI differs only in FreeVarInstance
@@ -2265,6 +2285,7 @@ $AtpPresetDefaults = <|
         "CPSetInterreduce" -> True,
         "AutoMaxWeight" -> 30,
         "DemoteOnLhsSimplify" -> True,
+        "OrphanMurder" -> True,
         "UnfailingCP" -> True, "RHSInterreduce" -> True|>,
     "VampireUEQ" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
@@ -2388,7 +2409,8 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpBwdDemodOpt[o], atpSymbolWeightsOpt[o], atpVarWeightOpt[o],
          atpRandomRatioOpt[o], atpRandomSeedOpt[o], atpKboWeightSchemeOpt[o],
          atpLazyNormalizeOpt[o], atpCoopWeightOpt[o], atpCoopRatioOpt[o],
-         atpFreeVarInstanceOpt[o], atpImplicitCpOpt[o], atpWmDemoteOpt[o]}
+         atpFreeVarInstanceOpt[o], atpImplicitCpOpt[o], atpWmDemoteOpt[o],
+         atpOrphanMurderOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];

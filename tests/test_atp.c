@@ -777,6 +777,88 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-orphan-layout-lazy-pop-eager-sweep-gated");
+  {
+    // WM's orphan layout (-ocrit; KPVerwaltung.c:535-556 selectNonOrphan,
+    // NULL parent = alive): the ONLY orphan mechanism is the lazy at-pop
+    // discard -- WM never sweeps the queue when interreduction drops a
+    // rule.  thvm's eager interreduce-time sweep (ATP_ORPHAN_KILL) is an
+    // extra that changes live-queue composition, so it is runtime-gated:
+    // default ON (legacy), Method->"Waldmeister" turns it OFF + lazy ON.
+    // Build the same scenario twice -- a queued CP whose parent rule is
+    // interreduced away -- and check both layouts.
+
+    // --- Legacy layout (defaults: eager sweep ON, lazy discard OFF) ---
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ(s->use_eager_orphan_sweep, 1u);
+    CHECK_EQ(s->use_orphan_murder, 0u);
+
+    // R[0] via the saturation path so it carries a real trace lineage.
+    thvm_atp_add_equation(s, mk_f(mk_a(), mk_e()), mk_f(mk_a(), mk_a()));
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK_EQ(s->n_cps, 0u);
+    u32 doomed = s->r_trace[0];
+    // A queued CP parented on the doomed rule.  Raw-NF sides (no f(_,e)
+    // redex, not joinable) so only the orphan paths can drop it.
+    Term c_l = mk_i(mk_a()), c_r = mk_a();
+    u32 tc = atp_trace_push_cp(s, doomed, doomed, c_l, c_r, NULL, 0);
+    atp_cp_heap_push(s, c_l, c_r, tc, 0u);
+    CHECK_EQ(s->n_cps, 1u);
+
+    AtpAddedRange added = thvm_atp_orient_and_add(
+        s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    CHECK_EQ(thvm_atp_interreduce(s, added), 1u);
+#ifdef ATP_ORPHAN_KILL
+    // The eager sweep ran: the orphan is gone; only the requeued
+    // TRACE_SIMPLIFY equation remains.
+    CHECK_EQ(s->n_cps, 1u);
+    CHECK(s->cp_trace[0] != tc);
+#endif
+    thvm_atp_free(s);
+
+    // --- WM layout (lazy at-pop ON, eager sweep OFF) ---
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_orphan_murder(s, 1u);
+    thvm_atp_set_use_eager_orphan_sweep(s, 0u);
+
+    thvm_atp_add_equation(s, mk_f(mk_a(), mk_e()), mk_f(mk_a(), mk_a()));
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK_EQ(s->n_cps, 0u);
+    doomed = s->r_trace[0];
+    c_l = mk_i(mk_a()); c_r = mk_a();
+    tc = atp_trace_push_cp(s, doomed, doomed, c_l, c_r, NULL, 0);
+    atp_cp_heap_push(s, c_l, c_r, tc, 0u);
+    CHECK_EQ(s->n_cps, 1u);
+
+    added = thvm_atp_orient_and_add(
+        s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    CHECK_EQ(thvm_atp_interreduce(s, added), 1u);
+    // No sweep: the orphan is STILL queued next to the requeued victim;
+    // the dropped rule's birthing trace id is marked dead instead.
+    CHECK_EQ(s->n_cps, 2u);
+    CHECK(atp_trace_is_dead(s, doomed));
+    CHECK(atp_cp_is_orphan(s, tc));
+    // Requeued-victim exemption: the victim's TRACE_SIMPLIFY entry
+    // parents on the DEAD rule's trace, yet it is never orphaned
+    // (atp_cp_is_orphan only tests TRACE_CP entries -- WM's NULL-parent
+    // = alive convention for requeued IR victims).
+    u32 t_victim = (s->cp_trace[0] == tc) ? s->cp_trace[1] : s->cp_trace[0];
+    CHECK_EQ(term_ext(s->trace[t_victim]), TRACE_SIMPLIFY);
+    CHECK_EQ((u32)term_val(term_ctr_at(s->trace[t_victim], 0)), doomed);
+    CHECK(!atp_cp_is_orphan(s, t_victim));
+    // Drain: the victim pops live; the orphan dies FOR FREE at pop.
+    u32 orphans0 = s->n_cps_dropped_orphan;
+    Term pl = 0, pr = 0;
+    CHECK_EQ(thvm_atp_select_cp(s, &pl, &pr), 1u);
+    CHECK_EQ(s->last_popped_trace, t_victim);
+    CHECK_EQ(thvm_atp_select_cp(s, &pl, &pr), 0u);
+    CHECK_EQ(s->n_cps, 0u);
+    CHECK_EQ(s->n_cps_dropped_orphan - orphans0, 1u);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-demote-equation-victim-requeues-original-sides");
   {
     // Waldmeister KPV_IROpferBehandeln (KPVerwaltung.c:517-518): an

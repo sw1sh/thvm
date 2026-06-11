@@ -4772,6 +4772,16 @@ typedef struct {
   // byte-identical.  On for Method->"Waldmeister" via
   // thvm_atp_set_use_orphan_murder.
   u8   use_orphan_murder;
+  // Eager orphan sweep at interreduce time (the ATP_ORPHAN_KILL pass in
+  // thvm_atp_interreduce): when a rule drops, walk the whole CP queue and
+  // delete its descendant CPs immediately, then reheapify.  This is a
+  // thvm EXTRA over WM -- WM only does the lazy at-pop discard above --
+  // and it changes live-queue composition (heap size, FIFO ages, FV-index
+  // contents) versus WM's layout.  Default ON (the historical compiled-in
+  // behavior); Method->"Waldmeister" selects WM's layout (lazy ON, eager
+  // OFF) via thvm_atp_set_use_eager_orphan_sweep.  No-op unless built
+  // with -DATP_ORPHAN_KILL.
+  u8   use_eager_orphan_sweep;
   u8  *r_trace_dead;              // bitset over trace ids (8 ids / byte)
   u32  r_trace_dead_cap;          // capacity in bits (== trace ids)
   u32  n_cps_dropped_orphan;      // diagnostics: orphan CPs skipped at pop
@@ -5161,6 +5171,7 @@ fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
 fn void      thvm_atp_set_right_reduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_eager_orphan_sweep(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_perm_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
 // Waldmeister history-driven Act_ultimate for input axioms.  When on,
