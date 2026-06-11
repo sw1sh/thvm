@@ -480,3 +480,27 @@ VerificationTest[
     True,
     TestID -> "metal/bf16-matmul"
 ]
+
+VerificationTest[
+    (* FLUX-shaped f32 GEMM takes the parallel simdgroup_matrix TC path:
+       M=768, N=3072, K=3072 -- all multiples of 8, so the M/N output
+       axes are stamped KAX_GLOBAL and the emitted MSL drops the
+       single-simdgroup serial guard (`sgi == 0u && tg == 0u`) in favour
+       of one threadgroup per 8x8 tile (989 -> ~13000 GFLOPS on M3 Max). *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], src},
+        If[ ctx === 0, Return[True]];
+        src = TInContext[ctx,
+            a = TTensorCreate[RandomReal[{-1, 1}, {768, 3072}], "f32"];
+            b = TTensorCreate[RandomReal[{-1, 1}, {3072, 3072}], "f32"];
+            TRealize @ TMatMul[a, b];
+            TKernelSource[TKernelCount[] - 1, "Metal"]
+        ];
+        TContextDestroy[ctx];
+        StringContainsQ[src, "simdgroup_matrix<float, 8, 8>"]
+            && StringContainsQ[src, "parallel TC"]
+            && ! StringContainsQ[src, "sgi == 0u && tg == 0u"]
+    ],
+    True,
+    TestID -> "metal/f32-matmul-parallel-tc"
+]

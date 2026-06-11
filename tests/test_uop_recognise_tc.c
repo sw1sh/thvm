@@ -147,6 +147,70 @@ int main(void) {
   CHECK(uop_classify_matmul(st7, &k7_out));
   CHECK_EQ(k7_out, 7u);
 
+  TEST_BEGIN("recognise-tc/mn-axes-extract");
+  // The canonical matmul (M=16 on axis 0, N=16 on axis 1, K=32 on
+  // axis 2) -- uop_matmul_mn_axes returns the two non-reduce output
+  // axes + extents the parallel-TC wrap re-stamps GLOBAL.
+  {
+    u32 m_ax = 99, m_ext = 0, n_ax = 99, n_ext = 0;
+    CHECK(uop_matmul_mn_axes(store, &m_ax, &m_ext, &n_ax, &n_ext));
+    CHECK_EQ(m_ax, 0u);
+    CHECK_EQ(m_ext, 16u);
+    CHECK_EQ(n_ax, 1u);
+    CHECK_EQ(n_ext, 16u);
+    // Non-matmul store: returns 0, out params reset.
+    u32 zm = 7, zn = 7;
+    CHECK(!uop_matmul_mn_axes(store_z, &zm, NULL, &zn, NULL));
+  }
+
+  TEST_BEGIN("recognise-tc/parallel-stamps-m-n-global");
+  // K/M/N all multiples of 8 -> parallel wrap installs OPT(_, TC, 0)
+  // AND re-stamps the M (axis 0) and N (axis 1) ranges KAX_GLOBAL so
+  // render_uop's rmu_emit_matmul_tc takes the parallel_tc branch and
+  // cg_tile_metal_dispatch_shape launches one threadgroup per 8x8 tile.
+  {
+    Term par = uop_recognise_tc_parallel(store);
+    CHECK(par != 0);
+    CHECK(par != store);
+    // STORE.value is OPT(_, TC, 0).
+    Term pval = heap_read(term_val(par) + 2);
+    CHECK_EQ(term_ext(pval), UOP_OPT);
+    CHECK_EQ(uop_opt_kind(pval), UOP_OPT_TC);
+    // addr_c references RANGE(0, GLOBAL, 16) and RANGE(1, GLOBAL, 16).
+    Term paddr = heap_read(term_val(par) + 1);
+    Term pr[16]; u32 pn = 0;
+    rmu_collect_ranges(paddr, pr, &pn);
+    int m_global = 0, n_global = 0;
+    for (u32 i = 0; i < pn; i++) {
+      u32 aid   = (u32)term_val(heap_read(term_val(pr[i]) + 0));
+      u32 atype = (u32)term_val(heap_read(term_val(pr[i]) + 1));
+      if (aid == 0 && atype == KAX_GLOBAL) m_global = 1;
+      if (aid == 1 && atype == KAX_GLOBAL) n_global = 1;
+    }
+    CHECK(m_global);
+    CHECK(n_global);
+  }
+
+  TEST_BEGIN("recognise-tc/parallel-ragged-k-keeps-axes-loop");
+  // K=7 (not a multiple of 8) -> the simdgroup template bails to the
+  // scalar accumulator (output_numel grid), so the parallel wrap must
+  // NOT stamp GLOBAL (it would mis-size the dispatch grid).  Falls back
+  // to the plain (guarded) wrap: OPT installed, axes stay LOOP.
+  {
+    Term par7 = uop_recognise_tc_parallel(st7);
+    CHECK(par7 != 0);
+    Term p7val = heap_read(term_val(par7) + 2);
+    CHECK_EQ(term_ext(p7val), UOP_OPT);
+    CHECK_EQ(uop_opt_kind(p7val), UOP_OPT_TC);
+    Term p7addr = heap_read(term_val(par7) + 1);
+    Term p7r[16]; u32 p7n = 0;
+    rmu_collect_ranges(p7addr, p7r, &p7n);
+    for (u32 i = 0; i < p7n; i++) {
+      u32 atype = (u32)term_val(heap_read(term_val(p7r[i]) + 1));
+      CHECK(atype != KAX_GLOBAL);
+    }
+  }
+
   TEST_BEGIN("recognise-tc/dag-classify-matmul-shape-unwrapped");
   {
     // Build a synthetic 16x32 @ 32x16 matmul kernel + populate the

@@ -269,6 +269,105 @@ fn Term uop_recognise_tc(Term root) {
   return uop_store(buf_out, addr_out, tc);
 }
 
+// Extract the M-axis (the non-reduce range in operand A's address) and
+// the N-axis (the non-reduce range in operand B's address) of a
+// matmul-shaped STORE, along with their extents.  Mirrors the axis
+// discovery rmu_emit_matmul_tc does at render time so the producer side
+// (uop_recognise_tc_parallel) can re-stamp those exact two RANGE leaves
+// KAX_GLOBAL.  Returns 1 and fills *out_m_axis / *out_m_extent /
+// *out_n_axis / *out_n_extent on a matmul match; 0 otherwise.
+//
+// "A's address" is MUL.src[0].addr (slot 1 of the INDEX_E), "B's" is
+// MUL.src[1].addr.  The reduce axis (K) is the one both addresses share;
+// each address also touches exactly one other range -- M for A, N for B.
+fn int uop_matmul_mn_axes(Term root, u32 *out_m_axis, u32 *out_m_extent,
+                          u32 *out_n_axis, u32 *out_n_extent) {
+  if (out_m_axis   != NULL) *out_m_axis   = 0xFFFFFFFFu;
+  if (out_n_axis   != NULL) *out_n_axis   = 0xFFFFFFFFu;
+  if (out_m_extent != NULL) *out_m_extent = 0;
+  if (out_n_extent != NULL) *out_n_extent = 0;
+  if (!uop_classify_matmul(root, NULL, NULL)) return 0;
+
+  u64 sloc = term_val(root);
+  Term reduce  = heap_read(sloc + 2);
+  u32 red_axis = uop_reduce_axis(reduce, 0);
+  Term mul     = uop_reduce_src(reduce);
+  Term addr_a  = heap_read(term_val(heap_read(term_val(mul) + 0)) + 1);
+  Term addr_b  = heap_read(term_val(heap_read(term_val(mul) + 1)) + 1);
+
+  // A's two ranges are {M, K}; B's are {K, N}.  Pull the non-reduce one
+  // from each.  uop_classify_matmul already guaranteed each address
+  // touches exactly 2 distinct ranges.
+  u32 seen_a[8] = {0};
+  u32 seen_b[8] = {0};
+  u32 n_a = rec_tc_count_distinct_ranges(addr_a, seen_a, 8, 0, 0);
+  u32 n_b = rec_tc_count_distinct_ranges(addr_b, seen_b, 8, 0, 0);
+  if (n_a != 2 || n_b != 2) return 0;
+
+  u32 m_axis = (seen_a[0] == red_axis) ? seen_a[1] : seen_a[0];
+  u32 n_axis = (seen_b[0] == red_axis) ? seen_b[1] : seen_b[0];
+  if (m_axis == red_axis || n_axis == red_axis) return 0;
+  if (m_axis == n_axis) return 0;
+
+  u32 m_ext = rec_tc_find_range_extent(addr_a, m_axis, 0);
+  u32 n_ext = rec_tc_find_range_extent(addr_b, n_axis, 0);
+  if (m_ext == 0 || n_ext == 0) return 0;
+
+  if (out_m_axis   != NULL) *out_m_axis   = m_axis;
+  if (out_n_axis   != NULL) *out_n_axis   = n_axis;
+  if (out_m_extent != NULL) *out_m_extent = m_ext;
+  if (out_n_extent != NULL) *out_n_extent = n_ext;
+  return 1;
+}
+
+// Producer-side parallel-TC wrap.  When the matmul shape qualifies for
+// the simdgroup_matrix template (K, M, N all multiples of 8), wrap the
+// REDUCE with OPT(_, TC, 0) AND re-stamp the M and N output RANGE leaves
+// KAX_GLOBAL.  This makes render_uop's rmu_emit_matmul_tc take the
+// `parallel_tc` branch -- one simdgroup per 8x8 output tile, no
+// `if(sgi==0u && tg==0u)` serial guard -- and makes
+// cg_tile_metal_dispatch_shape launch product(extent/8) threadgroups.
+//
+// Without the GLOBAL stamp the renderer falls back to the guarded body
+// that runs the WHOLE matmul on a single 32-thread simdgroup (~14x off
+// peak on M3).  Each threadgroup owns a UNIQUE 8x8 output tile so there
+// is no multi-simdgroup write race -- the guard the legacy path adds is
+// pure waste here, not a correctness requirement.
+//
+// Falls back to the plain (guarded) uop_recognise_tc wrap when M or N is
+// not a multiple of 8 (the simdgroup template can't tile a ragged
+// fragment, so it bails to the scalar accumulator -- which needs the
+// output_numel grid, not the tile grid).  Returns the input root
+// unchanged on any non-matmul.
+fn Term uop_recognise_tc_parallel(Term root) {
+  u32 m_axis, m_extent, n_axis, n_extent;
+  if (!uop_matmul_mn_axes(root, &m_axis, &m_extent, &n_axis, &n_extent)) {
+    // Not a matmul, or M/N axes didn't resolve -- still install the
+    // plain TC marker (no GLOBAL) so non-conforming matmuls render
+    // through the guarded simdgroup/scalar path.
+    return uop_recognise_tc(root);
+  }
+  if ((m_extent % 8u) != 0 || (n_extent % 8u) != 0) {
+    // Ragged M/N: the simdgroup template bails to the scalar
+    // accumulator, whose grid is output_numel.  Keep axes LOOP.
+    return uop_recognise_tc(root);
+  }
+
+  // K is also gated %8 inside the renderer; check it here so we only
+  // stamp GLOBAL when the parallel tile path will actually fire.
+  u32 k_extent = 0;
+  uop_classify_matmul(root, &k_extent, NULL);
+  if (k_extent == 0 || (k_extent % 8u) != 0) {
+    return uop_recognise_tc(root);
+  }
+
+  Term tc = uop_recognise_tc(root);
+  if (tc == root) return root;  // shape didn't actually wrap
+  tc = uop_dag_apply_global(tc, m_axis);
+  tc = uop_dag_apply_global(tc, n_axis);
+  return tc;
+}
+
 // Structural classifier for the DOT shape.
 // STORE(C, addr_out, REDUCE_SUM(MUL(INDEX_E(A, addr_a), INDEX_E(B, addr_b))))
 // where A and B are distinct rank-1 buffers and the addresses reference

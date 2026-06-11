@@ -145,6 +145,23 @@ int main(void) {
   CHECK(strstr(bufr2, "simdgroup_multiply_accumulate") != NULL);
   CHECK_EQ(compile_through_metal(bufr2), 0);
 
+  TEST_BEGIN("render-uop-metal/parallel-tc-drops-serial-guard");
+  // uop_recognise_tc_parallel re-stamps M/N GLOBAL so the renderer takes
+  // the parallel_tc branch: one simdgroup per 8x8 output tile, NO
+  // `if (sgi == 0u && tg == 0u)` serial guard.  Without this the whole
+  // matmul runs on a single 32-thread simdgroup (~14x off peak on M3).
+  Term st_par = uop_recognise_tc_parallel(st_bare);
+  CHECK(st_par != st_bare);
+  char bufp[8192];
+  FILE *mpp = fmemopen(bufp, sizeof(bufp), "w");
+  cg_render_uop_kernel(st_par, "k_gemm_par", out, mm_in_bufs, 2, mpp);
+  fclose(mpp);
+  CHECK(strstr(bufp, "simdgroup_matrix<float, 8, 8>") != NULL);
+  CHECK(strstr(bufp, "parallel TC") != NULL);
+  // The serial single-simdgroup guard must be GONE.
+  CHECK(strstr(bufp, "sgi == 0u && tg == 0u") == NULL);
+  CHECK_EQ(compile_through_metal(bufp), 0);
+
   thvm_free();
   TEST_REPORT();
 }

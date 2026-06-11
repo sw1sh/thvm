@@ -276,7 +276,17 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // F3.1: pre-render pass installs UOP_OPT(_, TC, 0) on matmul-shaped
   // STORE roots so render_uop's simdgroup_matrix template fires.
   // No-op for non-matmul kernels.
-  Term store_root = uop_recognise_tc(cached_root);
+  //
+  // The parallel variant ALSO re-stamps the M and N output axes
+  // KAX_GLOBAL when K/M/N are all multiples of 8, so rmu_emit_matmul_tc
+  // takes the parallel_tc branch (one simdgroup per 8x8 output tile)
+  // and cg_tile_metal_dispatch_shape launches product(extent/8)
+  // threadgroups -- the whole GPU works the matmul instead of a single
+  // 32-thread simdgroup running it serially under the legacy
+  // `if(sgi==0u && tg==0u)` guard.  Each threadgroup owns a unique 8x8
+  // tile, so there is no multi-simdgroup write race.  Ragged shapes
+  // (M%8 or N%8 != 0) fall back to the guarded path automatically.
+  Term store_root = uop_recognise_tc_parallel(cached_root);
   // F4: same for conv2d_flat -- installs UOP_OPT(_, CONV, 0) on
   // STORE roots whose REDUCE body has IDIV/IMOD-decomposed addresses
   // so render_uop's rmu_emit_conv template fires.  No-op when the
@@ -284,9 +294,13 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   store_root = uop_recognise_conv(store_root);
   // Default-parallelise happens inside the renderer (rmu_emit_store /
   // rmu_emit_output_loops): plain-LOOP output axes are decoded from
-  // `tid` instead of looped serially.  We do NOT rewrite the DAG's
-  // axis_type here -- a KAX_GLOBAL rewrite would make the renderer's
-  // legacy single-`tg` branch fire and collide multiple grid axes.
+  // `tid` instead of looped serially.  For non-matmul kernels we do NOT
+  // rewrite the DAG's axis_type here -- a KAX_GLOBAL rewrite would make
+  // the renderer's legacy single-`tg` branch fire and collide multiple
+  // grid axes.  The matmul TC path is the exception: uop_recognise_tc_-
+  // parallel above stamps M/N GLOBAL because rmu_emit_matmul_tc's
+  // parallel_tc branch binds each threadgroup to a unique 8x8 tile (no
+  // collision), and cg_tile_metal_dispatch_shape sizes the grid to match.
   // Render into a temp file (portable across macOS/Linux/Windows) and
   // read it back, rather than a fixed stack buffer -- no length cap.
   FILE *fp = tmpfile();

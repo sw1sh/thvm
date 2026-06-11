@@ -2880,6 +2880,27 @@ fn Term uop_recognise_tc(Term root);
 // fires (when K%8==0) versus falling back to its generic accumulator.
 fn int uop_classify_matmul(Term root, u32 *out_k_extent, u32 *out_unit_axis);
 
+// Extract the M-axis (non-reduce range in operand A's address) and the
+// N-axis (non-reduce range in operand B's address) of a matmul-shape
+// STORE, plus their extents.  Returns 1 + fills the out params on a
+// matmul match; 0 otherwise.  See src/uop/recognise_tc.c.
+fn int uop_matmul_mn_axes(Term root, u32 *out_m_axis, u32 *out_m_extent,
+                          u32 *out_n_axis, u32 *out_n_extent);
+
+// Producer-side parallel-TC wrap: when the matmul shape qualifies for
+// the simdgroup_matrix template (K, M, N all multiples of 8), wraps the
+// REDUCE with OPT(_, TC, 0) AND re-stamps the M and N RANGE leaves
+// KAX_GLOBAL so render_uop emits the parallel (one-simdgroup-per-tile)
+// body and cg_tile_metal_dispatch_shape launches a tile grid.  Falls
+// back to the plain (guarded) uop_recognise_tc wrap for ragged shapes.
+fn Term uop_recognise_tc_parallel(Term root);
+
+// Forward decl: re-stamp every UOP_RANGE leaf with axis_id == `axis_id`
+// from KAX_LOOP to KAX_GLOBAL.  Defined in src/uop/apply_opt_dag.c,
+// which is included after recognise_tc.c in the unity build, so the
+// parallel-TC wrap needs this prototype to call it.
+fn Term uop_dag_apply_global(Term root, u32 axis_id);
+
 // Structural classifiers for the DOT and GEMV
 // shapes.  Mirrors uop_classify_matmul but with different range-count
 // signatures: DOT addresses each touch exactly 1 distinct UOP_RANGE
