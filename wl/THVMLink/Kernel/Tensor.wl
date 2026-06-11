@@ -868,6 +868,12 @@ TTerm /: ArrayReduce[Total, t_TTerm ? tensorTermQ, axes_] :=
    stands in for `Normal @ TTensorData @ TRealize @ expr`. *)
 TTerm /: Normal[t_TTerm ? tensorTermQ] := Normal[TTensorData[t]]
 
+(* Dimensions[t]: the lazy (graph-time) shape -- the same list tUopShape
+   returns, on the standard WL name so callers write `Dimensions[t]` instead
+   of reaching for the internal shape helper.  Works on an unrealized graph
+   (no realize), kvar-dim aware. *)
+TTerm /: Dimensions[t_TTerm ? tensorTermQ] := tUopShape[t]
+
 (* Layer-call UpValues: `Layer[opts][t_TTerm]` is still a TTerm
    UpValue, TagSetDelayed on TTerm, with the layer bound as
    `l_SoftmaxLayer` so we can read its options.  WL's "Level"

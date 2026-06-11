@@ -13,8 +13,15 @@
    lives in THVMLink`Private`. *)
 fxShape = THVMLink`Private`tUopShape;
 
-(* --- linear: a diffusers weight is stored {out, in}, so y = x . W^T --- *)
-fxLinear[x_, w_] := TMatMul[x, Transpose[w]]
+(* --- linear: a diffusers weight is stored {out, in}, so y = x . W^T.
+       Transpose[w] is a permuted VIEW; feeding it straight into TMatMul makes
+       the reshape produce an IDIV/IMOD address that BLAS declines, falling to
+       a scalar EXPAND-MUL-REDUCE with a multi-GB intermediate (the FLUX ff
+       matmuls take minutes this way).  Realize the transposed weight to a
+       contiguous {in, out} buffer once so TMatMul reads a clean operand and
+       dispatches cblas_sgemm.  (Weights are constants -- a full forward should
+       pre-transpose them once; per-call realize is fine for a block.) --- *)
+fxLinear[x_, w_] := TMatMul[x, TRealize[Transpose[w]]]
 
 (* --- RMSNorm over the last axis (FLUX per-head q/k norm, weight {D}):
        y = x * rsqrt(mean(x^2) + eps) * weight --- *)
