@@ -573,7 +573,7 @@ atpAutoTuneForClass["Sheffer"] := {
        cross-axiom Implies-X / *-Associativity cases the lean Mix2/Add
        entries above wall on. *)
     {"GoalDirected", "Ordering" -> "LPO", "SkolemHighest" -> True,
-        "CriticalPairWeight" -> "Add", "FifoTiebreak" -> True,
+        "CriticalPairWeight" -> "Add",
         "UnfailingCP" -> True, "AutoMaxWeight" -> 20}}
 atpAutoTuneForClass["Boolean"] := {
     (* BooleanAxioms has both asymmetric (DeMorgan / Absorption /

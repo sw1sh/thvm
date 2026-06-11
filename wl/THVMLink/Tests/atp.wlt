@@ -1180,11 +1180,10 @@ VerificationTest[
 
 VerificationTest[
     (* Staggered: E StaggeredWeight port -- coarse-grained CP weight
-       bucketing.  Designed to pair with FifoTiebreak; baseline proves
-       in either config. *)
+       bucketing; the unconditional insertion-age tie-break picks
+       oldest-first within a bucket. *)
     Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
-        Method -> {"Completion", "CriticalPairWeight" -> "Staggered",
-            "FifoTiebreak" -> True}],
+        Method -> {"Completion", "CriticalPairWeight" -> "Staggered"}],
     ProofObject,
     TestID -> "ATP/method/cpweight-Staggered-proves"
 ]
@@ -1389,29 +1388,6 @@ VerificationTest[
     TestID -> "ATP/method/selectionratio-100-proves"
 ]
 
-(* --- FifoTiebreak: Waldmeister `-:w1=fifo` secondary CP key -------- *)
-
-VerificationTest[
-    (* Preserving each surviving CP's insertion age across the post-orient
-       normalize sweep (so equal-weight ties resolve oldest-first) is a
-       reordering of the queue, not a soundness change: the proof still
-       lands and verifies. *)
-    Module[{p},
-        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
-            Method -> {"Completion", "FifoTiebreak" -> True}];
-        Head @ p["ProofFunction"][p["Theorems"]]
-    ],
-    Success,
-    TestID -> "ATP/method/fifotiebreak-verifies"
-]
-
-VerificationTest[
-    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
-        Method -> {"Completion", "FifoTiebreak" -> True}],
-    ProofObject,
-    TestID -> "ATP/method/fifotiebreak-proves"
-]
-
 (* --- AutoMaxWeight: completeness-preserving growing CP-weight bound --- *)
 
 VerificationTest[
@@ -1552,15 +1528,15 @@ VerificationTest[
    p > q > nand).  The goal is unorientable, so the bidirectional MNF
    front search ("GoalDirected") closes it where pure orientation cannot;
    under the Waldmeister-faithful ordering it proves + verifies in a few
-   seconds.  FifoTiebreak (the `-:w1=fifo` secondary CP key) is supplied
-   here as part of the faithful config. *)
+   seconds.  The `-:w1=fifo` secondary CP key (oldest-first ties) is
+   unconditional, matching WM. *)
 
 VerificationTest[
     Module[{p},
         p = TFindProof["Commutativity", "WolframAxioms",
             Method -> {"GoalDirected", "Ordering" -> "LPO",
                 "SkolemHighest" -> True, "CriticalPairWeight" -> "Add",
-                "FifoTiebreak" -> True, "UnfailingCP" -> True},
+                "UnfailingCP" -> True},
             MaxSteps -> 5000, TimeConstraint -> 60.];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
@@ -1572,7 +1548,7 @@ VerificationTest[
     Head @ TFindProof["Commutativity", "WolframAxioms",
         Method -> {"GoalDirected", "Ordering" -> "LPO",
             "SkolemHighest" -> True, "CriticalPairWeight" -> "Add",
-            "FifoTiebreak" -> True, "UnfailingCP" -> True},
+            "UnfailingCP" -> True},
         MaxSteps -> 5000, TimeConstraint -> 60.],
     ProofObject,
     TestID -> "ATP/wolfram/nand-commutativity-goaldirected-proves"
@@ -2071,11 +2047,11 @@ VerificationTest[
         Method -> "Waldmeister" preset overrides CriticalPairWeight ->
         "Mix" (ATP.wl atpParseMethod[{"Waldmeister"}]), which does not
         close in budget -- so override it back to "Gt".
-     2. CPSetInterreduce.  The WL "Waldmeister" preset forces
-        CPSetInterreduce -> True (the KPV_KPMengeInterreduzieren full-
-        queue sweep), which the C preset does NOT enable.  At ~500k live
-        CPs that sweep is O(queue x rules) per period and roughly halves
-        the step rate -- override it OFF to match the C trajectory.
+     2. CPSetInterreduce.  Both presets leave the
+        KPV_KPMengeInterreduzieren full-queue sweep OFF (the WM CLI -ki
+        default).  At ~500k live CPs that sweep is O(queue x rules) per
+        period and roughly halves the step rate; the explicit False
+        below just pins the trajectory against preset drift.
    So the proving config is:
      Method -> {"Waldmeister", "CriticalPairWeight" -> "Gt",
                 "CPSetInterreduce" -> False}

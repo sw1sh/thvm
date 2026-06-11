@@ -6,7 +6,8 @@ goal `i(i(a)) = a`.
 ## TFindProof Method -> "Waldmeister"
 
 Internal preset (`Mix` weight + KBO + AutoPrec + SR=51 +
-RHSInterreduce + UnfailingCP + CPSetInterreduce):
+RHSInterreduce + UnfailingCP; CPSetInterreduce off, the WM CLI -ki
+default):
 
 ```
 {Axiom, 1..4}                  -- assoc, comm, identity, inverse

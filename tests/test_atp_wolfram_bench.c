@@ -563,15 +563,15 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_eager_orphan_sweep(s, 0u);
       thvm_atp_set_use_unorient_index(s, 1u);
       thvm_atp_set_use_lazy_normalize(s, 1u);
-      // WM's KPV_KPMengeInterreduzieren -- periodic CP-queue
-      // interreduction against the rule set.  +6% on AndAssoc post-fix
-      // (iter 160); part of standard Waldmeister.
-      thvm_atp_set_cp_set_interreduce(s, 1u);
-      // IR_PERIOD=4 sweet spot under INCR_IR (a6f31247): mccune sweep
-      // shows IR=1 best (8.2s) but hurts thm (0.6s vs 0.3s); IR=4 keeps
-      // mccune at 9.9s (-7% vs IR=16) with thm at 0.3s (unchanged).
-      // env THVM_ATP_CP_SET_IR_PERIOD overrides if user wants IR=1 etc.
-      if (s->cp_set_ir_period == 0u) s->cp_set_ir_period = 4u;
+      // WM's KPV_KPMengeInterreduzieren (CP-set IR) is NOT enabled: the
+      // -ki CLI default carries no period and no checkpoints
+      // (RUN/Parameter.c:378-387 default InfoString = "statistics=..."
+      // only), so SP_IstStichpunkt never fires (WASIC/Stichpunkte.c:
+      // 179-198 with Period=0 + empty list; trigger KPVerwaltung.c:
+      // 1030-1043), and no Sinai strategy -- including the Orkus
+      // fallback StdS the McCune/Group .pr files run (Sinai.h:109,131;
+      // PhilMarlow.c:1315) -- emits -ki.  THVM_ATP_CP_SET_IR=1 is the
+      // -ki opt-in (period via THVM_ATP_CP_SET_IR_PERIOD).
       // WM-faithful IR-victim demotion (KPV_IROpferBehandeln /
       // IR_PufferAuslesen): a rule demoted by interreduction re-queues
       // its ORIGINAL sides after CP generation (late FIFO age), with
@@ -613,9 +613,8 @@ int main(int argc, char **argv) {
       // SHEFFER/Wolfram axiom (andassoc, wolfram, etc.) the bare engine
       // (no preset, just GT weight, larger heap) PROVES AndAssoc in
       // 11.6s -- WM-PARITY -- while THIS preset's MaxWeight + add-ons
-      // (MNF, BWD_SUB, ORPHAN_MURDER, LAZY_NORMALIZE, AUTO_MAXW,
-      // CP_SET_IR) divert the trajectory and the cracker is never
-      // derived.  When chasing a Sheffer/Wolfram cracking-time result,
+      // (MNF, BWD_SUB, ORPHAN_MURDER, LAZY_NORMALIZE, AUTO_MAXW)
+      // divert the trajectory and the cracker is never derived.  When chasing a Sheffer/Wolfram cracking-time result,
       // use the bare engine instead:
       //   THVM_HEAP_CELLS=$((1<<30)) ./bin/test_atp_wolfram_bench \
       //       andassoc 99999999 60
@@ -781,13 +780,6 @@ int main(int argc, char **argv) {
     const char *uf = getenv("THVM_ATP_UNFAILING");
     if (uf != NULL && uf[0] != '\0')
       thvm_atp_set_use_unfailing_cp(s, (uf[0] != '0') ? 1u : 0u);
-  }
-  // THVM_ATP_CP_FIFO=1: enable FIFO tiebreaker for CPs of equal weight
-  // (sequence-order disambiguation instead of arbitrary heap order).
-  {
-    const char *cf = getenv("THVM_ATP_CP_FIFO");
-    if (cf != NULL && cf[0] != '\0')
-      thvm_atp_set_cp_fifo_tiebreak(s, (cf[0] != '0') ? 1u : 0u);
   }
   // THVM_ATP_SEL_RATIO=<N>: override the WM preset's selection_ratio
   // (WM uses 51 = 1 FIFO pick per 51 weight picks).

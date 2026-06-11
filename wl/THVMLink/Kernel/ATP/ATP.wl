@@ -69,7 +69,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"Precedence\", \"SkolemHighest\", \"FifoTiebreak\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 GeneralUtilities`SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -237,20 +237,20 @@ $atpRunProofFn := $atpRunProofFn = load[
     "thvm_wl_atp_run_proof",
     {{"NumericArray", "Shared"}, Integer, Integer, Real,
      Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
-     Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer,
+     Integer, Integer, Integer, Integer, Integer, {Integer, 1},
      Integer, Integer, Integer, Integer, Integer, Integer, {Integer, 1},
      Integer, Integer, Integer, Integer, Integer, Integer, Integer,
-     (* args[33] = use_fvi: Waldmeister RechtsUnfreiErzeugen (FVI) toggle *)
+     (* args[32] = use_fvi: Waldmeister RechtsUnfreiErzeugen (FVI) toggle *)
      Integer,
-     (* args[34] = use_implicit_cp: deferred-CP arc commit 1 toggle (dormant) *)
+     (* args[33] = use_implicit_cp: deferred-CP arc commit 1 toggle (dormant) *)
      Integer,
-     (* args[35] = use_wm_demote: Waldmeister IR-victim demotion
+     (* args[34] = use_wm_demote: Waldmeister IR-victim demotion
         (KPV_IROpferBehandeln; Method "DemoteOnLhsSimplify") *)
      Integer,
-     (* args[36] = orphan layout: Waldmeister -ocrit lazy at-pop orphan
+     (* args[35] = orphan layout: Waldmeister -ocrit lazy at-pop orphan
         murder ON + eager interreduce sweep OFF (Method "OrphanMurder") *)
      Integer,
-     (* args[37] = pop-time E-subsumption drop: Waldmeister -ks "s"
+     (* args[36] = pop-time E-subsumption drop: Waldmeister -ks "s"
         stage (Method "PopSubsume") *)
      Integer},
     "NumericArray"
@@ -1886,10 +1886,9 @@ $AtpCpWeightCodes = <|
     "Staggered" -> 13, (* E StaggeredWeight (HEURISTICS/
                          che_varweights.c::StaggeredWeightCompute).
                          base_weight / max(1, max_axiom_weight / 2).
-                         Buckets CPs by integer stagger group so within
-                         a bucket the age-fairness FifoTiebreak picks
-                         oldest-first.  Pair with FifoTiebreak -> True
-                         for the intended behaviour. *)
+                         Buckets CPs by integer stagger group; within a
+                         bucket the insertion-age tie-break picks
+                         oldest-first. *)
     Automatic -> -1
 |>;
 
@@ -2073,13 +2072,6 @@ atpSymbolWeightsOpt[o_Association] :=
    or set to <= 0 (the bridge clamps to default 1 in that case). *)
 atpVarWeightOpt[o_Association] :=
     Replace[Lookup[o, "VarWeight", 0], Automatic -> 0];
-(* "FifoTiebreak" -> True: Waldmeister `-:w1=fifo` secondary key.  Preserve
-   each surviving CP's insertion age across the post-orient CP-normalize
-   sweep, so equal-weight ties resolve oldest-first run-wide (the heap
-   reheapify otherwise reassigns the age, scrambling the FIFO tie order).
-   True = on; False/Automatic = off (engine byte-identical). *)
-atpFifoTiebreakOpt[o_Association] := Switch[Lookup[o, "FifoTiebreak", Automatic],
-    True, 1, False | Automatic, 0, _, 0];
 (* "FreeVarInstance" -> True | False | Automatic: Waldmeister
    RechtsUnfreiErzeugen (FVI) -- when an unorientable equation is added
    to R, also push a grounded sibling that substitutes the engine-
@@ -2267,7 +2259,13 @@ $AtpPresetDefaults = <|
         "AutoPrecedence" -> True, "SkolemHighest" -> True,
         "SelectionRatio" -> 51,
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
-        "CPSetInterreduce" -> True,
+        (* WM CLI default: -ki ships with no period and no checkpoints
+           (RUN/Parameter.c:378-387), so KPV_KPMengeInterreduzieren
+           never fires (KPVerwaltung.c:1030-1043), and no Sinai
+           strategy -- including the Orkus fallback StdS
+           (Sinai.h:109,131) -- enables it.  The option stays
+           available, mirroring -ki. *)
+        "CPSetInterreduce" -> False,
         "DemoteOnLhsSimplify" -> True,
         "OrphanMurder" -> True,
         "PopSubsume" -> True,
@@ -2289,7 +2287,8 @@ $AtpPresetDefaults = <|
         "AutoPrecedence" -> True, "SkolemHighest" -> True,
         "SelectionRatio" -> 51,
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
-        "CPSetInterreduce" -> True,
+        (* WM -ki default OFF; see the "Waldmeister" entry. *)
+        "CPSetInterreduce" -> False,
         "DemoteOnLhsSimplify" -> True,
         "OrphanMurder" -> True,
         "PopSubsume" -> True,
@@ -2425,7 +2424,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpGroundJoinOpt[o], atpSelectionRatioOpt[o], atpAutoMaxWeightOpt[o],
          atpRHSInterreduceOpt[o], atpUnfailingCPOpt[o],
          atpCPSetInterreduceOpt[o], atpConnectednessOpt[o],
-         atpPrecedenceOpt[o], atpFifoTiebreakOpt[o], atpRecordNormOpt[o],
+         atpPrecedenceOpt[o], atpRecordNormOpt[o],
          atpLRSOpt[o], atpSOSOpt[o], atpFwdSubsumeOpt[o], atpBwdSubsumeOpt[o],
          atpBwdDemodOpt[o], atpSymbolWeightsOpt[o], atpVarWeightOpt[o],
          atpRandomRatioOpt[o], atpRandomSeedOpt[o], atpKboWeightSchemeOpt[o],
@@ -2467,6 +2466,9 @@ atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
      - RHSInterreduce -> True  (IR_InterreduktionRechts -- the
        divergence that made the deep theorems unreachable)
      - UnfailingCP -> True  (faithful unfailing completion)
+     - CPSetInterreduce -> False  (the -ki default carries no period
+       and no checkpoints, RUN/Parameter.c:378-387, so
+       KPV_KPMengeInterreduzieren never fires; StdS emits no -ki)
    List form takes the same suboptions, overriding any default.  Pass
    "GoalDirected" -> True to add the MNF bidirectional front on top of
    the completion path for a symmetric goal that never meets at one

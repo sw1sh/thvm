@@ -130,7 +130,7 @@ TFindProof[
 
 Each named preset bundles the defaults of a real-world prover so a one-name call reproduces (close to) that prover's behaviour on the input:
 
-- `"Waldmeister"` - Mix weight + KBO + AutoPrecedence + SelectionRatio 51 + RHSInterreduce + UnfailingCP + CPSetInterreduce.
+- `"Waldmeister"` - Mix weight + KBO + AutoPrecedence + SelectionRatio 51 + RHSInterreduce + UnfailingCP (CPSetInterreduce stays off, like the CLI's `-ki` default).
 - `"VampireUEQ"` - LPO + AutoPrecedence + SelectionRatio 10 + UnfailingCP + AutoMaxWeight + BackwardSubsume + BackwardDemod + RHSInterreduce + MNF front.
 - `"Twee"` - CPW Twee + GroundJoin + Connectedness + UnfailingCP + BackwardSubsume + BackwardDemod + RHSInterreduce + AutoMaxWeight 20.
 - `"EProver"` - CPW ConjSym + KBO + SelectionRatio 10 + AutoMaxWeight 20 + BackwardSubsume + RHSInterreduce + UnfailingCP.

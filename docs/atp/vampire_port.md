@@ -62,7 +62,7 @@ Conventions:
 | `fde=none` / `fde=unused` | (always ON for proved clauses) | `src/atp/_.c` rewrite path | Vampire's forward demod-equation variants.  thvm doesn't expose `fde` enable/disable separately. |
 | `s2a=on` | GAP | — | "Split to arguments" — clause splitting heuristic.  AVATAR-class, low priority for UEQ. |
 | `bsr=on` (backward subsume resolution) | GAP | — | Beyond plain backward-subsume.  Appears in some Vampire portfolio slots. |
-| (CP-set interreduce) | `"CPSetInterreduce" -> True` | `src/atp/_.c` Waldmeister periodic pass | Waldmeister-style, NOT a Vampire flag — included here because the `Waldmeister` preset uses it. |
+| (CP-set interreduce) | `"CPSetInterreduce" -> True` | `src/atp/_.c` Waldmeister periodic pass | Waldmeister-style, NOT a Vampire flag — opt-in everywhere, mirroring the WM CLI `-ki` default (off). |
 
 ## Axiom-relevance filtering
 

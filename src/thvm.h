@@ -4136,10 +4136,9 @@ typedef enum {
                               // che_varweights.c::StaggeredWeightCompute).
                               // base_weight / max(1, max_axiom_weight/2).
                               // Buckets CPs by integer stagger group so
-                              // FifoTiebreak fairness (oldest-first
+                              // the cp_seq age tie-break (oldest-first
                               // within a bucket) dominates the heap
-                              // selection.  Pair with FifoTiebreak->True
-                              // for the intended behaviour.
+                              // selection.
   ATP_CP_WEIGHT_LAST = 14,
 } AtpCpWeightMode;
 
@@ -4678,15 +4677,6 @@ typedef struct {
   // while the trajectory differs from the strict heap-min path.
   u32  random_modulo;
   u64  rng_state;
-  // Waldmeister `-:w1=fifo` secondary CP key.  The heap already breaks
-  // equal-weight ties by cp_seq (insertion age), but thvm_atp_cp_reheapify
-  // reassigns every cp_seq in heap-array order, scrambling the true
-  // insertion age.  When set, the reheapify PRESERVES each surviving CP's
-  // original cp_seq, so equal-weight ties resolve oldest-first across the
-  // whole run -- the stable FIFO secondary sort key Waldmeister's
-  // selection uses.  Default 0: reheapify reassigns cp_seq as before,
-  // engine byte-identical.
-  u8   cp_fifo_tiebreak;
   // Waldmeister MaxWeight: discard a critical pair whose combined term
   // weight exceeds this (0 = unbounded).  Bounds the search on
   // self-overlapping axioms (the single Wolfram NAND axiom) so the
@@ -5182,11 +5172,6 @@ fn void      thvm_atp_set_selection_ratio(AtpState *s, u32 modulo);
 // uniformly-random queued CP from a deterministic xorshift64 stream.
 fn void      thvm_atp_set_random_modulo(AtpState *s, u32 modulo);
 fn void      thvm_atp_set_random_seed  (AtpState *s, u64 seed);
-// Waldmeister `-:w1=fifo` secondary key: preserve each surviving CP's
-// original insertion age (cp_seq) across the post-orient normalize
-// sweep, so equal-weight ties resolve oldest-first run-wide.  0 = off
-// (reheapify reassigns cp_seq; engine byte-identical).
-fn void      thvm_atp_set_cp_fifo_tiebreak(AtpState *s, u8 on);
 
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
 // `thvm_atp_init` defaults to ATP_CP_WEIGHT_GT; out-of-range

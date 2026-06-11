@@ -1199,8 +1199,8 @@ static void acp_selftest(void) {
 // Pack (lhs, rhs) into CP queue slot i, freeing any byte string
 // already there.  Callers that build the queue directly -- chiefly
 // tests -- use this instead of writing the (now packed) queue slots
-// by hand.  The slot's priority / seq are filled by a subsequent
-// thvm_atp_cp_reheapify, exactly as before the port.
+// by hand.  The insertion age (cp_seq) is stamped here; the slot's
+// priority is filled by a subsequent thvm_atp_cp_reheapify.
 fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
   if (s == NULL) return;
   atp_ensure_cp_cap(s, i + 1u);
@@ -1209,6 +1209,11 @@ fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
   // `cp_is_implicit[i] <=> cp_packed[i] == NULL` invariant holds.
   atp_cp_implicit_clear(s, i);
   s->cp_packed[i] = acp_pack(lhs, rhs, NULL, NULL);
+  // Insertion age, stamped once here (mirroring the heap-push path) and
+  // preserved across every later sweep / reheapify -- WM keeps the w2
+  // FIFO key untouched on reweight (C_ReClassify, CLAS/
+  // NewClassification.c:399-406 "w2 wird nicht geaendert").
+  s->cp_seq[i] = s->cp_seq_next++;
 #ifdef THVM_ATPFT_CPQ
   // Stage 7: mirror the slot into the parallel FT queue.  Test
   // harnesses populate the queue via thvm_atp_cp_set + reheapify;
@@ -5157,11 +5162,6 @@ fn void thvm_atp_set_random_seed(AtpState *s, u64 seed) {
   s->rng_state = seed ? seed : 0x9E3779B97F4A7C15ull;
 }
 
-fn void thvm_atp_set_cp_fifo_tiebreak(AtpState *s, u8 on) {
-  if (s == NULL) return;
-  s->cp_fifo_tiebreak = on ? 1u : 0u;
-}
-
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
 // Out-of-range values clamp to ATP_CP_WEIGHT_ADD (0) so a garbage
 // mode falls back to the bare symbol-count heuristic.
@@ -7794,8 +7794,8 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
 // 7c': re-establish the CP-queue heap invariant over cp_packed[0..n_cps).
 // The normal path keeps the queue a heap via atp_cp_heap_push, but a
 // caller (chiefly tests) that populates cp_packed / n_cps directly
-// (via thvm_atp_cp_set) must call this so cp_pri / cp_seq are filled
-// and the array satisfies the heap order before select / peek.
+// (via thvm_atp_cp_set) must call this so cp_pri is filled and the
+// array satisfies the heap order before select / peek.
 //
 // Split into two phases so the IR sweep can fold the per-CP priority
 // recompute into its single survivor walk (it already holds the unpacked
@@ -7812,7 +7812,6 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
       // cp_goal / cp_pri2 keep their push-time values, which travel
       // with every slot move.
       s->cp_pri[i] = s->cp_implicit[i].priority;
-      if (!s->cp_fifo_tiebreak) s->cp_seq[i] = s->cp_seq_next++;
       continue;
     }
     Term l = 0, r = 0;
@@ -7823,10 +7822,10 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
     s->cp_pri2[i] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
                   : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, l, r, s->w2_mode)
                   :                        0u;
-    // Waldmeister `-:w1=fifo`: keep each surviving CP's original
-    // insertion age so equal-weight ties stay oldest-first run-wide.
-    // Default: reassign a fresh monotone seq (engine byte-identical).
-    if (!s->cp_fifo_tiebreak) s->cp_seq[i] = s->cp_seq_next++;
+    // cp_seq is NOT touched: insertion age is stamped once (heap push /
+    // thvm_atp_cp_set) and survives every reweight, matching WM's
+    // C_ReClassify which only recomputes w1 ("w2 wird nicht geaendert"
+    // / w2 is not changed, CLAS/NewClassification.c:399-406).
   }
 }
 
@@ -7838,10 +7837,10 @@ static void atp_cp_floyd_only(AtpState *s) {
     atp_cp_sift_down(s, i);
   }
 #ifdef ATP_FV_INDEX
-  // 7d: reheapify reassigned every cp_seq[] (the index's stable key)
-  // and a normalize-graph compaction may have dropped CPs.  The
-  // incremental insert/remove path can no longer track the set, so
-  // rebuild the index wholesale from the live CP arrays.
+  // 7d: a sweep / compaction ahead of this reheapify may have dropped
+  // CPs, so the incremental insert/remove path can no longer track the
+  // set; rebuild the index wholesale from the live CP arrays (cp_seq,
+  // the index's stable key, is preserved across the rebuild).
   atp_fv_index_rebuild(s);
 #endif
 }
@@ -11138,8 +11137,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
           // (see header).
           atp_cp_commit_priorities(s, w, ol, orr);
         }
-        if (s->cp_fifo_tiebreak) s->cp_seq[w] = s->cp_seq[i];
-        else                     s->cp_seq[w] = s->cp_seq_next++;
+        s->cp_seq[w] = s->cp_seq[i];
         w++;
         s->n_cp_set_ir_skipped++;
         thvm_atp_heap_reset(hcp);
@@ -11181,8 +11179,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
         // path: sides are bit-preserved, no normalize was needed).
         atp_cp_commit_priorities(s, w, ol, orr);
       }
-      if (s->cp_fifo_tiebreak) s->cp_seq[w] = s->cp_seq[i];
-      else                     s->cp_seq[w] = s->cp_seq_next++;
+      s->cp_seq[w] = s->cp_seq[i];
       w++;
       s->n_cp_set_ir_skipped++;
       thvm_atp_heap_reset(hcp);
@@ -11302,8 +11299,11 @@ static void atp_cp_set_interreduce(AtpState *s) {
       // right input to the priority functions.
       atp_cp_commit_priorities(s, w, l, r);
     }
-    if (s->cp_fifo_tiebreak) s->cp_seq[w] = s->cp_seq[i];
-    else                     s->cp_seq[w] = s->cp_seq_next++;
+    // WM AP_generic reweight preserves the FIFO age: C_ReClassify only
+    // recomputes w1 ("w2 wird nicht geaendert" / w2 is not changed,
+    // CLAS/NewClassification.c:399-406).  cp_seq is the w2 analog, so
+    // every survivor keeps its insertion age across the sweep.
+    s->cp_seq[w] = s->cp_seq[i];
     w++;
     thvm_atp_heap_reset(hcp);
     if (g_atp_phase_enabled) acc_pack += atp_now_us() - _cpir_pack_t0;

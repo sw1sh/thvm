@@ -109,9 +109,10 @@ TFindProof["AndAssociativity", "WolframAxioms",
 strategy on an unrecognized single-operator nand / Sheffer / Wolfram
 problem: KBO + AutoPrecedence + `SelectionRatio -> 51` (Waldmeister's
 `itl(mi)` interleaved CPdimension fairness) + `RHSInterreduce` +
-`UnfailingCP` + `CPSetInterreduce`. The override `Gt` weight + CP-set
-interreduction combination is the one that reaches `AndAssociativity`
-through the Waldmeister structure-precedence rule set.
+`UnfailingCP`. The override `Gt` weight + explicit CP-set
+interreduction (off in the preset, like the Waldmeister CLI's `-ki`
+default) is the combination that reaches `AndAssociativity` through
+the Waldmeister structure-precedence rule set.
 
 ### 3.4 A cross-system many-axiom theorem (SInE premise selection)
 
@@ -225,7 +226,8 @@ knobs:
   Waldmeister CPdimension fairness).
 - `RHSInterreduce -> True`.
 - `UnfailingCP -> True`.
-- `CPSetInterreduce -> True`.
+- `CPSetInterreduce -> False` (the CLI `-ki` default has no period and
+  no checkpoints, so the sweep never fires; §5.13).
 
 List form takes the same suboptions, overriding any default. The
 `"GoalDirected" -> True` switch (inside the list form) adds the MNF
@@ -399,7 +401,7 @@ pending CP to process next).
 | `"ConjSym"` | `ATP_CP_WEIGHT_CONJSYM` | E `ConjectureSymbolWeight` port (`HEURISTICS/che_funweights.c`): walks both sides, conjecture-symbol CTR nodes weight 1, off-symbol CTR nodes weight 4, variable nodes weight 1. A cheap symbol-set biasing toward goal-relevant CPs -- a poor man's `"Goal"` mode that does not need structural matching. |
 | `"Diversity"` | `ATP_CP_WEIGHT_DIVERSITY` | E `DiversityWeight` port (`HEURISTICS/che_diversityweight.c`): `base + #distinct CTR labels + #distinct FVR ids`. Penalizes CPs whose sides drag in many unrelated symbols / variables -- favors structurally compact CPs. Linear shape (E's `fdiff1=1, fdiff2=0, vdiff1=1, vdiff2=0`). |
 | `"RelLevel"` | `ATP_CP_WEIGHT_RELLEVEL` | E `RelevanceLevelWeight` port (`HEURISTICS/che_funweights.c`): N-level scoring. Each symbol gets its BFS distance from the conjecture through the "co-occurs-in-an-axiom" relation (capped at `ATP_REL_LEVEL_MAX = 8`); a CTR node's weight is `1 + sym_level[label]`. Remote symbols (unreachable) collapse to the max penalty. Variable nodes weight 1. Deeper goal-relevance bias than `"ConjSym"` (which is the 1-level analog). |
-| `"Staggered"` | `ATP_CP_WEIGHT_STAGGERED` | E `StaggeredWeight` port (`HEURISTICS/che_varweights.c`): `base_weight / max(1, max_axiom_weight / 2)`. Coarse bucketing -- within a bucket, the heap-min tie breaks by insertion order (pair with `"FifoTiebreak" -> True` for the intended behavior). Useful when many CPs are bunched near the same weight and you want age-fair processing inside each bucket. |
+| `"Staggered"` | `ATP_CP_WEIGHT_STAGGERED` | E `StaggeredWeight` port (`HEURISTICS/che_varweights.c`): `base_weight / max(1, max_axiom_weight / 2)`. Coarse bucketing -- within a bucket, the heap-min tie breaks by insertion order (oldest-first). Useful when many CPs are bunched near the same weight and you want age-fair processing inside each bucket. |
 | `"Learned"` | `ATP_CP_WEIGHT_LEARNED` | ENIGMA-style learned scorer over CP features. Requires a trained model file. |
 | `Automatic` | -1 | Falls back to the engine default (`Gt`). |
 
@@ -539,11 +541,17 @@ any goal whose proof requires reasoning through an unorientable equation
 
 Waldmeister `KPV_KPMengeInterreduzieren`: periodically re-normalize the
 whole CP queue against the full rule set, deleting CPs that became
-joinable and reweighting the rest, so the heap-min selection tracks
-live, irreducible CPs.
+joinable and reweighting the rest (each CP keeps its insertion age, as
+Waldmeister's `C_ReClassify` only recomputes the weight), so the
+heap-min selection tracks live, irreducible CPs.
 
-Default: `False`. The `"Waldmeister"` preset turns it on; the Sheffer
-`"AndAssociativity"` proof needs it.
+Default: `False`, matching the Waldmeister CLI: the `-ki` default
+carries no period and no checkpoints (`RUN/Parameter.c`), so the sweep
+never fires there either, and no auto-mode strategy enables it. The
+`"Waldmeister"` preset therefore leaves it off; `"WaldmeisterLazy"`
+turns it on as the memory-safety pair for `"LazyNormalize"`. Set it
+explicitly for saturating workloads where queue purging pays (it was
+measured to help the Sheffer `"AndAssociativity"` C-bench run).
 
 ### 5.14 `"Precedence" -> {sym1, sym2, ...}`
 
@@ -565,17 +573,7 @@ otherwise.
 Default: `Automatic` (off). When to set: any single-operator Sheffer /
 Wolfram goal where the conjecture's skolem constants should orient.
 
-### 5.16 `"FifoTiebreak" -> True`
-
-Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving
-critical pair's insertion age across the post-orient CP-normalize sweep,
-so equal-weight ties resolve oldest-first run-wide. Off by default,
-engine byte-identical when unset.
-
-Default: `False`. When to set: a run where the weight distribution has
-many ties and the order of FIFO-tied CPs measurably matters.
-
-### 5.17 `"RecordNorm" -> True | False`
+### 5.16 `"RecordNorm" -> True | False`
 
 Per-step normalize-trace recording for the ProofObject builder. Default
 `True` is the historical path -- WL walks `CP -> NORM_STEP* -> ORIENT`
@@ -588,7 +586,7 @@ Default: `True`. When to set `False`: long-running completions where the
 per-step recording overhead dominates and you can pay the BFS
 reconstruction cost.
 
-### 5.18 `"ForwardSubsume" -> True`
+### 5.17 `"ForwardSubsume" -> True`
 
 When adding a new rule `l' = r'` to R, scan existing rules; if some
 existing rule `l = r` subsumes the new one (`\E sigma`, `l*sigma = l'`
@@ -602,7 +600,7 @@ equation is a unit clause).
 Default: `False`. Pair with `"BackwardSubsume" -> True` for the full
 subsumption pruning that classical saturation provers run by default.
 
-### 5.19 `"BackwardSubsume" -> True`
+### 5.18 `"BackwardSubsume" -> True`
 
 After adding a new rule `l = r` to R, scan existing rules; for each
 existing rule that the new one subsumes, soft-delete it. The
@@ -617,7 +615,7 @@ argument as `"ForwardSubsume"`. Vampire's `bs=unit_only` direct port.
 
 Default: `False`. The `"VampireUEQ"` preset turns it on.
 
-### 5.20 `"BackwardDemod" -> True`
+### 5.19 `"BackwardDemod" -> True`
 
 After each newly-added rule batch, normalize each older rule's LHS
 against the new rule(s); if it reduces, drop the rule and re-queue the
@@ -633,7 +631,7 @@ equation. The new rule itself stays in R.
 Default: `False`. The `"VampireUEQ"` preset turns it on alongside
 `"RHSInterreduce" -> True`.
 
-### 5.22 `"VarWeight" -> n`
+### 5.20 `"VarWeight" -> n`
 
 Per-variable KBO weight override. Default is `1` (every TAG_FVR node
 contributes weight `1` to the KBO sum). Mirrors Waldmeister's
@@ -1088,15 +1086,14 @@ Waldmeister's `KombS` heuristic for combinator logic.
 
 ```wolfram
 TFindProof[goal, axioms, Method -> {"Completion",
-    "CriticalPairWeight" -> "Staggered",
-    "FifoTiebreak" -> True}]
+    "CriticalPairWeight" -> "Staggered"}]
 ```
 
 `"Staggered"` coarse-grains CP weights into buckets of size
-`max_axiom_weight / 2`; within each bucket `"FifoTiebreak"` picks the
-oldest CP first. Use when many CPs share near-identical raw weights
-and the implementation's arbitrary heap order is starving the older
-half. The combination mirrors E's `StaggeredWeight` heuristic family.
+`max_axiom_weight / 2`; within each bucket the insertion-age tie-break
+picks the oldest CP first. Use when many CPs share near-identical raw
+weights and a fine-grained weight would starve the older half. The
+heuristic mirrors E's `StaggeredWeight` family.
 
 ### 9.8 Cross-system Sheffer "implies" goals (tight age bias)
 

@@ -651,10 +651,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // Method "SymbolWeights": an explicit per-label KBO weight array
   // overrides the uniform-1 default initialized above.  Waldmeister
   // SymbolGewichte port (CLAS/SymbolGewichte.c::SG_SymbGewichteEintragen).
-  // args[25] is a label-indexed Int64 NumericArray; a 0-length array
+  // args[24] is a label-indexed Int64 NumericArray; a 0-length array
   // leaves all entries at 1 (engine byte-identical default).
   {
-    MTensor sw_t = MArgument_getMTensor(args[25]);
+    MTensor sw_t = MArgument_getMTensor(args[24]);
     if (sw_t != NULL) {
       mint sw_len = libData->MTensor_getFlattenedLength(sw_t);
       if (sw_len > 0) {
@@ -681,10 +681,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // when explicit "SymbolWeights" is supplied (the explicit array
   // wins per Vampire convention) or when no precedence is in play
   // (kws is a tweak on TOP of an ordering; without a precedence
-  // gradient it would be uniform-1 anyway).  args[29].
-  mint kws_mode = MArgument_getInteger(args[29]);
+  // gradient it would be uniform-1 anyway).  args[28].
+  mint kws_mode = MArgument_getInteger(args[28]);
   if (kws_mode == 1) {
-    MTensor sw_t_check = MArgument_getMTensor(args[25]);
+    MTensor sw_t_check = MArgument_getMTensor(args[24]);
     int sw_provided = 0;
     if (sw_t_check != NULL) {
       mint sw_len_c = libData->MTensor_getFlattenedLength(sw_t_check);
@@ -708,12 +708,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // Method "LazyNormalize" -> True: DISCOUNT-style deferred CP
   // normalization (queue UN-normalized CPs, defer normalize to
   // selection time).  Engine lever in src/atp/_.c:7012; gated at the
-  // saturation loop's lazy push site near line 11238.  args[30].
-  mint lazy_norm_mode = MArgument_getInteger(args[30]);
+  // saturation loop's lazy push site near line 11238.  args[29].
+  mint lazy_norm_mode = MArgument_getInteger(args[29]);
   // Method "VarWeight" -> n: per-variable KBO weight override (default
-  // 1).  Mirrors Waldmeister `-w VAR=N`.  args[26].  Pass <= 0 (or
+  // 1).  Mirrors Waldmeister `-w VAR=N`.  args[25].  Pass <= 0 (or
   // omit) to keep the default 1.
-  mint var_weight_in = MArgument_getInteger(args[26]);
+  mint var_weight_in = MArgument_getInteger(args[25]);
   static KboConfig wl_kbo_p;
   wl_kbo_p.weights    = wl_weights_p;
   wl_kbo_p.precedence = wl_precedence_p;
@@ -740,12 +740,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // AtpCpWeightMode int, e.g. 3 = GT) instead of the primary.  Pairing the
   // learned primary scorer (cp_weight = 9 LEARNED) with a hand-tuned GT
   // secondary mirrors real ENIGMA, which selects cooperatively with the
-  // base heuristic rather than by the model alone.  args[31]/[32] are the
+  // base heuristic rather than by the model alone.  args[30]/[31] are the
   // suboptions; when off (modulo <= 0) fall back to the THVM_ATP_W2_*
   // env vars.  Both off -> the positional-arg path is byte-identical.
   {
-    mint coop_mode   = MArgument_getInteger(args[31]);
-    mint coop_modulo = MArgument_getInteger(args[32]);
+    mint coop_mode   = MArgument_getInteger(args[30]);
+    mint coop_modulo = MArgument_getInteger(args[31]);
     if (coop_modulo <= 0) {
       const char *w2m = getenv("THVM_ATP_W2_MODE");
       const char *w2k = getenv("THVM_ATP_W2_MODULO");
@@ -763,35 +763,35 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // added to R, also push a grounded sibling rule substituting
   // ATP_RESERVED_LABEL_MIN_CONST for every free RHS variable absent
   // from the LHS.  Unblocks ExcludedMiddle / Noncontradiction /
-  // EqualityOfInverses under Method->"Waldmeister".  args[33];
+  // EqualityOfInverses under Method->"Waldmeister".  args[32];
   // 0 = off (default, engine byte-identical).
-  mint use_fvi = MArgument_getInteger(args[33]);
+  mint use_fvi = MArgument_getInteger(args[32]);
   thvm_atp_set_use_fvi(atp, (u8)(use_fvi != 0));
-  // args[34]: deferred-CP (`implicit_pair`) arc commit 1 toggle.  Commit
+  // args[33]: deferred-CP (`implicit_pair`) arc commit 1 toggle.  Commit
   // 1 ships the storage scaffolding only -- the setter flips a flag that
   // currently has no on-path consumer, so this remains a no-op until
   // commit 2 routes `atp_push_cps_traced` through `atp_cp_implicit_push`.
-  mint use_implicit_cp = MArgument_getInteger(args[34]);
+  mint use_implicit_cp = MArgument_getInteger(args[33]);
   thvm_atp_set_use_implicit_cp(atp, (u8)(use_implicit_cp != 0));
   // Method -> {... "DemoteOnLhsSimplify" -> True}: Waldmeister-faithful
   // IR-victim demotion (KPV_IROpferBehandeln / IR_PufferAuslesen).  A
   // rule that interreduction demotes re-queues its ORIGINAL sides only
   // after the new fact's CPs are generated (late FIFO age), with the
   // KPBehandelt `-kg r` treatment: size-gated oriented-rules-only
-  // renormalize + joined-victim discard.  args[35]; 0 = off (default,
+  // renormalize + joined-victim discard.  args[34]; 0 = off (default,
   // engine byte-identical -- victims re-queue immediately with the
   // slice-reduced pair).
-  mint use_wm_demote = MArgument_getInteger(args[35]);
+  mint use_wm_demote = MArgument_getInteger(args[34]);
   thvm_atp_set_use_wm_demote(atp, (u8)(use_wm_demote != 0));
   // Method -> {... "OrphanMurder" -> True}: Waldmeister's orphan layout
   // (-ocrit, default ON in WM; KPVerwaltung.c:535 selectNonOrphan + the
   // per-rule lebtNoch bit).  1 selects WM's layout: a CP whose parent
   // rule was interreduced away is discarded lazily at pop time, and the
   // eager interreduce-time queue sweep -- a thvm extra WM does not have,
-  // which changes live-queue composition -- is gated OFF.  args[36];
+  // which changes live-queue composition -- is gated OFF.  args[35];
   // 0 = legacy layout (eager sweep ON, lazy discard OFF), engine
   // byte-identical.
-  mint orphan_wm = MArgument_getInteger(args[36]);
+  mint orphan_wm = MArgument_getInteger(args[35]);
   thvm_atp_set_use_orphan_murder(atp, (u8)(orphan_wm != 0));
   thvm_atp_set_use_eager_orphan_sweep(atp, (u8)(orphan_wm == 0));
   // Method -> {... "PopSubsume" -> True}: Waldmeister's -ks "s" stage
@@ -799,13 +799,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // normalized pair is UNORIENTABLE and subsumed by an existing
   // unorientable equation (SS_TermpaarSubsummiertVonGM, both
   // orientations, one substitution over both sides, context-stripping
-  // descent) is dropped before orientation.  args[37]; 0 = off
+  // descent) is dropped before orientation.  args[36]; 0 = off
   // (default, engine byte-identical).
-  mint pop_subsume = MArgument_getInteger(args[37]);
+  mint pop_subsume = MArgument_getInteger(args[36]);
   thvm_atp_set_use_pop_subsume(atp, (u8)(pop_subsume != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
-  // reconstructing it by search.  args[19] gates it: the default (any
+  // reconstructing it by search.  args[18] gates it: the default (any
   // value but 0, including the historical implicit 1) keeps recording
   // on; 0 routes the search through the fast indexed/flatterm normalize
   // (no per-step TRACE_NORM_STEP push, no skipped heap reset) so a long
@@ -813,7 +813,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // C-bench rate.  With recording off the WL builder reconstructs the
   // chain through the emitNorm BFS ($AtpUseChain -> False) using the
   // CP/ORIENT/SIMPLIFY trace DAG, which is recorded regardless.
-  mint record_norm = MArgument_getInteger(args[19]);
+  mint record_norm = MArgument_getInteger(args[18]);
   thvm_atp_set_record_norm_steps(atp, (u8)(record_norm != 0));
   // ENIGMA dataset capture: when THVM_ATP_CP_DATASET names a file, record
   // per-selected-CP features so a PROVED run can label + append them.
@@ -870,41 +870,34 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // peak.  0 = off (default), engine byte-identical.
   mint conn = MArgument_getInteger(args[16]);
   thvm_atp_set_use_connectedness(atp, (u8)(conn != 0));
-  // Method -> {... "FifoTiebreak" -> True}: Waldmeister `-:w1=fifo`
-  // secondary key.  Preserve each surviving CP's insertion age across the
-  // post-orient normalize sweep so equal-weight ties resolve oldest-first
-  // run-wide.  args[18] (after the args[17] precedence MTensor).  0 = off,
-  // engine byte-identical.
-  mint fifo_tb = MArgument_getInteger(args[18]);
-  thvm_atp_set_cp_fifo_tiebreak(atp, (u8)(fifo_tb != 0));
   // Method -> {... "LRS" -> True}: Vampire Limited Resource Strategy
   // (Riazanov & Voronkov, JSC 36, 2003).  When a wall deadline is set,
   // periodically prune CPs above the predicted-reachable weight horizon
   // so the saturator concentrates effort on the budget-tractable subset.
-  // args[20].  0 = off, engine byte-identical.
-  mint use_lrs = MArgument_getInteger(args[20]);
+  // args[19].  0 = off, engine byte-identical.
+  mint use_lrs = MArgument_getInteger(args[19]);
   thvm_atp_set_use_lrs(atp, (u8)(use_lrs != 0));
   // Method -> {... "SetOfSupport" -> True}: bias the CP-queue heap
-  // toward CPs whose terms share symbols with the goal.  args[21].
+  // toward CPs whose terms share symbols with the goal.  args[20].
   // 0 = off.  Set BEFORE goal so the symbol mask snapshot is taken
   // after thvm_atp_set_goal below.  (Actual mask init happens inside
   // thvm_atp_set_use_sos which reads s->goal_lhs/rhs, so we re-call
   // it after the goal is set.)
-  mint use_sos = MArgument_getInteger(args[21]);
+  mint use_sos = MArgument_getInteger(args[20]);
   // Method -> {... "ForwardSubsume" -> True}: drop the rule add when
   // an already-stored rule subsumes it (Vampire --forward_subsumption
-  // analog, unit-only).  Sound + completeness-preserving.  args[22].
+  // analog, unit-only).  Sound + completeness-preserving.  args[21].
   // 0 = off (engine byte-identical).
-  mint use_fwd_sub = MArgument_getInteger(args[22]);
+  mint use_fwd_sub = MArgument_getInteger(args[21]);
   thvm_atp_set_use_fwd_subsume(atp, (u8)(use_fwd_sub != 0));
   // Method -> {... "BackwardSubsume" -> True}: soft-delete existing
-  // rules subsumed by the newly-added one.  args[23].  0 = off
+  // rules subsumed by the newly-added one.  args[22].  0 = off
   // (engine byte-identical).  Vampire bs=unit_only analog.
-  mint use_bwd_sub = MArgument_getInteger(args[23]);
+  mint use_bwd_sub = MArgument_getInteger(args[22]);
   thvm_atp_set_use_bwd_subsume(atp, (u8)(use_bwd_sub != 0));
   // Method -> {... "BackwardDemod" -> True}: Vampire bd=all analog
-  // (LHS half).  args[24].  0 = off (engine byte-identical).
-  mint use_bwd_demod = MArgument_getInteger(args[24]);
+  // (LHS half).  args[23].  0 = off (engine byte-identical).
+  mint use_bwd_demod = MArgument_getInteger(args[23]);
   thvm_atp_set_use_bwd_demod(atp, (u8)(use_bwd_demod != 0));
   // INCR_IR + CP_INDEX (0a98478e, d86fa599 in the C bench): pure perf
   // wins, byte-identical PROOF output by construction (incremental
@@ -991,10 +984,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
 
   // Method -> {... "RandomRatio" -> n, "RandomSeed" -> u64}: Vampire-
   // style random CP-selection.  Default 0/0 = off, engine byte-identical.
-  // args[27] = ratio, args[28] = seed.  Seed applied before ratio so the
+  // args[26] = ratio, args[27] = seed.  Seed applied before ratio so the
   // first random pick is reproducible.
-  mint random_ratio_in = MArgument_getInteger(args[27]);
-  mint random_seed_in  = MArgument_getInteger(args[28]);
+  mint random_ratio_in = MArgument_getInteger(args[26]);
+  mint random_seed_in  = MArgument_getInteger(args[27]);
   thvm_atp_set_random_seed(atp, (u64)random_seed_in);
   thvm_atp_set_random_modulo(atp, random_ratio_in > 0 ? (u32)random_ratio_in : 0u);
 

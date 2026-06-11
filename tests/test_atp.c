@@ -1818,6 +1818,83 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/cp-set-ir-sweep-preserves-insertion-age");
+  {
+    // WM's AP_generic reweight only recomputes w1; the FIFO age w2 is
+    // never changed (C_ReClassify, CLAS/NewClassification.c:399-406
+    // "w2 wird nicht geaendert" / w2 is not changed).  The sweep must
+    // keep every survivor's cp_seq -- including across the compaction
+    // over a dropped slot and through the repack of a reduced CP.
+    // R = { f(e, x) -> x }; three packed CPs:
+    //   joiner:  (f(e, a), a)            -> (a, a), dropped
+    //   reducer: (f(e, i(a)), i(i(a)))   -> repacked reduced
+    //   nf:      (i(a), a)               -> untouched
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]);
+    s->n_rules = 1;
+
+    thvm_atp_cp_set(s, 0, mk_f(mk_e(), mk_a()), mk_a());
+    thvm_atp_cp_set(s, 1, mk_f(mk_e(), mk_i(mk_a())), mk_i(mk_i(mk_a())));
+    thvm_atp_cp_set(s, 2, mk_i(mk_a()), mk_a());
+    for (u32 i = 0; i < 3; i++) s->cp_trace[i] = ATP_TRACE_NONE;
+    s->n_cps = 3;
+    thvm_atp_cp_reheapify(s);
+
+    // Record each CP's set-time age (the slots may have permuted in the
+    // heapify; ages travel with the CP).
+    u32 seq_reducer = 0, seq_nf = 0, seen = 0;
+    for (u32 i = 0; i < s->n_cps; i++) {
+      Term l = 0, r = 0;
+      atp_cp_slot_read(s, i, &l, &r);
+      if (kbo_eq(l, mk_f(mk_e(), mk_i(mk_a())))) {
+        seq_reducer = s->cp_seq[i]; seen |= 1u;
+      } else if (kbo_eq(l, mk_i(mk_a()))) {
+        seq_nf = s->cp_seq[i]; seen |= 2u;
+      }
+    }
+    CHECK_EQ(seen, 3u);
+    CHECK(seq_reducer != seq_nf);
+
+    atp_cp_set_interreduce(s);
+    CHECK_EQ(s->n_cps, 2u);
+    seen = 0;
+    for (u32 i = 0; i < s->n_cps; i++) {
+      Term l = 0, r = 0;
+      atp_cp_slot_read(s, i, &l, &r);
+      if (kbo_eq(r, mk_i(mk_i(mk_a())))) {
+        // The reduced survivor keeps its set-time age despite the
+        // repack + reweight.
+        CHECK(kbo_eq(l, mk_i(mk_a())));
+        CHECK_EQ(s->cp_seq[i], seq_reducer); seen |= 1u;
+      } else if (kbo_eq(r, mk_a())) {
+        // The NF survivor keeps its age across the compaction shift
+        // over the dropped joiner's slot.
+        CHECK_EQ(s->cp_seq[i], seq_nf); seen |= 2u;
+      }
+    }
+    CHECK_EQ(seen, 3u);
+
+    // A reheapify after the sweep (the orphan-kill path's trailing
+    // call) must also leave the ages untouched.
+    thvm_atp_cp_reheapify(s);
+    seen = 0;
+    for (u32 i = 0; i < s->n_cps; i++) {
+      Term l = 0, r = 0;
+      atp_cp_slot_read(s, i, &l, &r);
+      if (kbo_eq(r, mk_i(mk_i(mk_a())))) {
+        CHECK_EQ(s->cp_seq[i], seq_reducer); seen |= 1u;
+      } else if (kbo_eq(r, mk_a())) {
+        CHECK_EQ(s->cp_seq[i], seq_nf); seen |= 2u;
+      }
+    }
+    CHECK_EQ(seen, 3u);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/implicit-cp-over-bound-falls-back-to-packed-stash");
   {
     // Auto-MaxWeight routing for the deferred lane (the push-site seam

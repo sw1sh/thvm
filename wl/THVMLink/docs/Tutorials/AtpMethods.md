@@ -59,12 +59,11 @@ TFindProof["Commutativity", "WolframAxioms",
         "Ordering"           -> "LPO",
         "SkolemHighest"      -> True,
         "CriticalPairWeight" -> "Add",
-        "FifoTiebreak"       -> True,
         "UnfailingCP"        -> True},
     TimeConstraint -> 15]
 ```
 
-The Sheffer / nand axiomatisations (`WolframAxioms`, `ShefferAxioms`) crack under a non-default config: the goal `nand(p,q) == nand(q,p)` is unorientable, so `"GoalDirected"` adds the bidirectional MNF front (pure completion never collides the two sides); LPO with `"SkolemHighest" -> True` ranks the goal Skolems above `nand`, which is Waldmeister's own cracking ordering on this signature; `"Add"` weight + `"FifoTiebreak"` give a uniform age-biased CP queue that doesn't preferentially explore deep terms.  With this combination `Commutativity` proves in a few seconds.  The harder `AndAssociativity` over the same axioms uses the same recipe but takes ~25s on the paclet (~15s in the C bench, ~14s under real Waldmeister); the bundled `"Waldmeister"` preset is slower on AndAssoc because its Mix-weight CP selection picks a different saturation trajectory.
+The Sheffer / nand axiomatisations (`WolframAxioms`, `ShefferAxioms`) crack under a non-default config: the goal `nand(p,q) == nand(q,p)` is unorientable, so `"GoalDirected"` adds the bidirectional MNF front (pure completion never collides the two sides); LPO with `"SkolemHighest" -> True` ranks the goal Skolems above `nand`, which is Waldmeister's own cracking ordering on this signature; `"Add"` weight plus the oldest-first age tie-break gives a uniform age-biased CP queue that doesn't preferentially explore deep terms.  With this combination `Commutativity` proves in a few seconds.  The harder `AndAssociativity` over the same axioms uses the same recipe but takes ~25s on the paclet (~15s in the C bench, ~14s under real Waldmeister); the bundled `"Waldmeister"` preset is slower on AndAssoc because its Mix-weight CP selection picks a different saturation trajectory.
 
 ### A many-axiom theory (SInE premise selection)
 
@@ -90,7 +89,7 @@ SInE pre-filters the axiom list to those reachable from the conjecture's symbols
 
 Each preset bundles the defaults of a real-world prover so a one-name call reproduces (close to) that prover's behaviour on the input.  List form `{"Preset", subopt -> ...}` lets you override individual defaults.  Inspect the full merged options with [TAtpDescribeMethod]().
 
-- `"Waldmeister"` - `Mix` weight + KBO + `AutoPrecedence` + `SelectionRatio -> 51` + `RHSInterreduce` + `UnfailingCP` + `CPSetInterreduce`.  The faithful Waldmeister default for an unrecognised single-operator Sheffer / nand problem.
+- `"Waldmeister"` - `Mix` weight + KBO + `AutoPrecedence` + `SelectionRatio -> 51` + `RHSInterreduce` + `UnfailingCP`.  The faithful Waldmeister default for an unrecognised single-operator Sheffer / nand problem; `CPSetInterreduce` stays off like the CLI's `-ki` default (no period, no checkpoints).
 - `"VampireUEQ"` - LPO + `AutoPrecedence` + `SelectionRatio -> 10` + `UnfailingCP` + `AutoMaxWeight` + `BackwardSubsume` + `BackwardDemod` + `RHSInterreduce` + MNF front.  Modeled on the Vampire 5.0.1 portfolio entry that cracks `ShefferAxioms/AndAssociativity` in the cross-system baseline.
 - `"Twee"` - `CriticalPairWeight -> "Twee"` + `GroundJoin` + `Connectedness` + `UnfailingCP` + `BackwardSubsume` + `BackwardDemod` + `RHSInterreduce` + `AutoMaxWeight -> 20`.  Twee 2.x defaults (Smallbone, 2021+).
 - `"EProver"` - `CriticalPairWeight -> "ConjSym"` + KBO + `AutoPrecedence -> "Occurrence"` + `SelectionRatio -> 10` + `AutoMaxWeight -> 20` + `BackwardSubsume` + `RHSInterreduce` + `UnfailingCP`.  E's typical CASC config (the `Occurrence` precedence mirrors E's `-G InvFreqRank`).
@@ -169,8 +168,7 @@ The list-form spec accepts any of the following; defaults match the C engine's d
 | `"Connectedness"`               | `True \| False`                                        | Delete a CP whose two sides join through terms strictly below the peak (Bachmair-Dershowitz; Twee section 6.2). |
 | `"UnfailingCP"`                 | `True \| False`                                        | Superpose BOTH faces of an unorientable equation - the completeness requirement of unfailing completion. |
 | `"RHSInterreduce"`              | `True \| False`                                        | Waldmeister `IR_InterreduktionRechts`: normalise the RHS of every rule against each new rule. |
-| `"CPSetInterreduce"`            | `True \| False`                                        | Periodic full-queue re-normalise against R; drops CPs that became joinable, reweights the rest. |
-| `"FifoTiebreak"`                | `True \| False`                                        | Waldmeister `-:w1=fifo`: preserve insertion age across the post-orient sweep so equal-weight ties resolve oldest-first. |
+| `"CPSetInterreduce"`            | `True \| False`                                        | Periodic full-queue re-normalise against R; drops CPs that became joinable, reweights the rest (insertion ages are preserved, as in Waldmeister). |
 | `"BackwardSubsume"` / `"BackwardDemod"` | `True \| False`                                | After adding a new rule, soft-delete older rules subsumed by it / normalise older rules against the new ones. |
 | `"ForwardSubsume"`              | `True \| False`                                        | Skip a new CP that is already subsumed by a queued CP. |
 | `"LRS"`                         | `True \| False`                                        | Vampire's Limited Resource Strategy: predict whether each CP will be reached within the wall budget, prune the unreachable ones. |
