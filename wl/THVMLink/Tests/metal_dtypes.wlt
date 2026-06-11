@@ -482,11 +482,12 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* FLUX-shaped f32 GEMM takes the parallel simdgroup_matrix TC path:
-       M=768, N=3072, K=3072 -- all multiples of 8, so the M/N output
-       axes are stamped KAX_GLOBAL and the emitted MSL drops the
-       single-simdgroup serial guard (`sgi == 0u && tg == 0u`) in favour
-       of one threadgroup per 8x8 tile (989 -> ~13000 GFLOPS on M3 Max). *)
+    (* FLUX-shaped f32 GEMM takes the threadgroup-staged register-blocked
+       tensor-core path: M=768, N=3072, K=3072 -- the emitted MSL stages A/B
+       K-blocks into `threadgroup` memory and accumulates via simdgroup_load
+       + simdgroup_matrix<float,8,8>, dropping the single-simdgroup serial
+       guard (`sgi == 0u && tg == 0u`).  ~1207 -> ~2200 GFLOPS (gpu_us) on
+       M3 Max; numerics covered by the tiled-GEMM bounds test. *)
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], src},
         If[ ctx === 0, Return[True]];
@@ -498,9 +499,10 @@ VerificationTest[
         ];
         TContextDestroy[ctx];
         StringContainsQ[src, "simdgroup_matrix<float, 8, 8>"]
-            && StringContainsQ[src, "parallel TC"]
+            && StringContainsQ[src, "simdgroup_load"]
+            && StringContainsQ[src, "threadgroup"]
             && ! StringContainsQ[src, "sgi == 0u && tg == 0u"]
     ],
     True,
-    TestID -> "metal/f32-matmul-parallel-tc"
+    TestID -> "metal/f32-matmul-tiled-tc"
 ]

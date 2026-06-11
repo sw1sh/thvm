@@ -145,22 +145,45 @@ int main(void) {
   CHECK(strstr(bufr2, "simdgroup_multiply_accumulate") != NULL);
   CHECK_EQ(compile_through_metal(bufr2), 0);
 
-  TEST_BEGIN("render-uop-metal/parallel-tc-drops-serial-guard");
-  // uop_recognise_tc_parallel re-stamps M/N GLOBAL so the renderer takes
-  // the parallel_tc branch: one simdgroup per 8x8 output tile, NO
-  // `if (sgi == 0u && tg == 0u)` serial guard.  Without this the whole
-  // matmul runs on a single 32-thread simdgroup (~14x off peak on M3).
-  Term st_par = uop_recognise_tc_parallel(st_bare);
-  CHECK(st_par != st_bare);
-  char bufp[8192];
-  FILE *mpp = fmemopen(bufp, sizeof(bufp), "w");
-  cg_render_uop_kernel(st_par, "k_gemm_par", out, mm_in_bufs, 2, mpp);
-  fclose(mpp);
-  CHECK(strstr(bufp, "simdgroup_matrix<float, 8, 8>") != NULL);
-  CHECK(strstr(bufp, "parallel TC") != NULL);
-  // The serial single-simdgroup guard must be GONE.
-  CHECK(strstr(bufp, "sgi == 0u && tg == 0u") == NULL);
-  CHECK_EQ(compile_through_metal(bufp), 0);
+  TEST_BEGIN("render-uop-metal/matmul-tc-tiled-threadgroup-staged");
+  // Both M and N stamped KAX_GLOBAL (5) at a size the tiled picker
+  // accepts (M=128, N=64, K=16 -> 128x64 tile, 8 simdgroups, KB=8).
+  // This is the threadgroup-staged, register-blocked path
+  // (rmu_emit_matmul_tc_tiled): assert the threadgroup arrays + barrier
+  // + register accumulator array + multi-MMA body are emitted and the
+  // MSL compiles through xcrun metal.
+  u32 dimsA2[2] = {128, 16};
+  u32 dimsB2[2] = {16, 64};
+  Term tA = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsA2);
+  Term tB = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsB2);
+  Term t_in[2] = { tA, tB };
+  Term tm = uop_range(0, 5 /*GLOBAL*/, 128);
+  Term tn = uop_range(1, 5 /*GLOBAL*/, 64);
+  Term tk = uop_range(2, 1 /*REDUCE*/, 16);
+  Term c16 = uop_const(DT_INT32, 16);
+  Term c64 = uop_const(DT_INT32, 64);
+  Term tAaddr = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, tm, c16), tk);
+  Term tBaddr = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, tk, c64), tn);
+  Term tmul = uop_binary(UOP_MUL, uop_index_e(tA, tAaddr), uop_index_e(tB, tBaddr));
+  Term tred = uop_reduce(REDUCE_SUM, 2, tmul);
+  Term ttc  = uop_opt(tred, UOP_OPT_TC, 0);
+  Term tCaddr = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, tm, c64), tn);
+  Term st_t = uop_store(out, tCaddr, ttc);
+  char buft[16384];
+  FILE *mpt = fmemopen(buft, sizeof(buft), "w");
+  cg_render_uop_kernel(st_t, "k_gemm_tiled", out, t_in, 2, mpt);
+  fclose(mpt);
+  CHECK(strstr(buft, "TC tiled matmul") != NULL);
+  CHECK(strstr(buft, "threadgroup float _Asm[") != NULL);
+  CHECK(strstr(buft, "threadgroup float _Bsm[") != NULL);
+  CHECK(strstr(buft, "threadgroup_barrier(mem_flags::mem_threadgroup);") != NULL);
+  CHECK(strstr(buft, "simdgroup_matrix<float, 8, 8> _acc[") != NULL);
+  CHECK(strstr(buft, "simdgroup_multiply_accumulate(_acc[") != NULL);
+  // A must stage from in0 and B from in1 (the buf-name aliasing bug
+  // would put both on the same source).
+  CHECK(strstr(buft, "_Asm[_i] = in0[") != NULL);
+  CHECK(strstr(buft, "_Bsm[_i] = in1[") != NULL);
+  CHECK_EQ(compile_through_metal(buft), 0);
 
   thvm_free();
   TEST_REPORT();

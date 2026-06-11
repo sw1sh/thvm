@@ -7,6 +7,18 @@ char *cg_emit_metal(KernelEntry const *ke) {
   return cg_emit_tile_metal((KernelEntry *)ke);
 }
 
+// Forward declaration of the threadgroup-staged TC tile picker, defined
+// in render_uop.c (#included after this file in the unity build).  The
+// dispatch-shape code below must size the threadgroup grid to the same
+// tile geometry the renderer emits, so it calls the identical picker.
+typedef struct {
+  u32 local_m, local_n;   // simdgroups along M / N within a threadgroup
+  u32 rm, rn;             // register 8x8 tiles per simdgroup along M / N
+  u32 kb;                 // K-block staged in threadgroup memory
+} RmuTcTile;
+static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
+                            RmuTcTile *out);
+
 
 static int rmt_collect_conv2d_info(KernelEntry const *ke,
                                    TileConv2DInfo *out) {
@@ -181,6 +193,37 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
       if (!simdgroup_fires) tc_template = 0;
     }
     if (tc_template) {
+      // Threadgroup-staged tiled path: when both M and N are GLOBAL and
+      // the tile picker accepts the shape, the renderer emits a
+      // TILE_M x TILE_N tile per threadgroup with LOCAL_M*LOCAL_N
+      // simdgroups.  Size the grid to match: one threadgroup per output
+      // tile, LOCAL_M*LOCAL_N*32 threads each.  Mirrors
+      // rmu_emit_matmul_tc's gate exactly (render_uop.c).
+      {
+        UopDagGemmShape g2 = {0};
+        if (uop_dag_classify_matmul_shape(sroot, ke, &g2)
+            && g2.M != 0 && g2.N != 0 && g2.K != 0
+            && g2.dtype == DT_FP32) {
+          // Both M and N must be GLOBAL-promoted for the tiled emit.
+          u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+          u32 na = uop_dag_collect_axes(sroot, ids, types, exts, MAX_AXES);
+          u32 n_global = 0;
+          for (u32 i = 0; i < na; i++) if (types[i] == KAX_GLOBAL) n_global++;
+          RmuTcTile tile;
+          if (n_global >= 2
+              && rmu_tc_pick_tile(g2.M, g2.N, g2.K, &tile)) {
+            u32 tile_m = tile.local_m * tile.rm * 8u;
+            u32 tile_n = tile.local_n * tile.rn * 8u;
+            u64 ntg = (u64)(g2.M / tile_m) * (u64)(g2.N / tile_n);
+            u32 nthreads = tile.local_m * tile.local_n * 32u;
+            if (ntg > 0 && ntg <= 0xFFFFFFFFu) {
+              if (groups_x  != NULL) *groups_x  = (u32)ntg;
+              if (threads_x != NULL) *threads_x = nthreads;
+              return 1;
+            }
+          }
+        }
+      }
       u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
       u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
                                    exts, MAX_AXES);

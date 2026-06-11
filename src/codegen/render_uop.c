@@ -2032,64 +2032,252 @@ static void rmu_emit_reduce_init(u32 kind, FILE *fp) {
   else                    fputs("0.0f", fp);
 }
 
-// Defined later in this TU; used by rmu_range_coeff below.
-static int rmu_const_int(Term t, i64 *out);
-static int rmu_term_refs_axis(Term t, u32 axis_id);
+// ---- Threadgroup-memory-tiled simdgroup_matrix matmul (Metal) ------
+//
+// Ports tinygrad's apply_tensor_cores + UPCAST(M)/UPCAST(N)/LOCAL(N)
+// opt stack (tinygrad/codegen/opt/heuristic.py:36-44 + tinygrad/codegen/
+// opt/tc.py:140 `metal` TC) into a single hand-emitted MSL kernel.
+//
+// The baseline parallel-TC kernel (one 32-thread simdgroup per 8x8
+// output tile) is MEMORY-BOUND: each MMA reloads an A(8x8) + B(8x8)
+// strip from device memory with zero reuse (~7 GB traffic for a
+// 14.5-GFLOP matmul).  This kernel makes it COMPUTE-BOUND two ways,
+// exactly as tinygrad's opt stack does:
+//
+//   1. Register blocking (UPCAST M & N): each simdgroup holds an
+//      RM x RN grid of simdgroup_matrix<float,8,8> ACCUMULATORS and
+//      reuses each loaded A-fragment across RN columns and each
+//      B-fragment across RM rows -- (RM+RN)/(RM*RN) of the loads.
+//   2. Threadgroup-memory staging (LOCAL N + the K GROUP): the
+//      LOCAL_M x LOCAL_N simdgroups in a threadgroup cooperatively
+//      load one A K-block [TILE_M x KB] + one B K-block [KB x TILE_N]
+//      into `threadgroup` arrays ONCE, barrier, then every simdgroup
+//      reads its fragments from threadgroup memory.  Each device byte
+//      is read once per K-block and reused across LOCAL_M*LOCAL_N
+//      simdgroups.
+//
+// Tile geometry (per threadgroup):
+//   TILE_M = LOCAL_M * RM * 8   output rows
+//   TILE_N = LOCAL_N * RN * 8   output cols
+//   KB                          K-block staged in threadgroup memory
+// Threadgroup memory budget: (TILE_M + TILE_N) * KB * 4 bytes
+//   (default 64x64 tile, KB=32 -> (64+64)*32*4 = 16 KiB < 32 KiB cap).
+//
+// Dispatch (see cg_tile_metal_dispatch_shape):
+//   grid        = (M/TILE_M) * (N/TILE_N) threadgroups
+//   threadgroup = LOCAL_M * LOCAL_N * 32 threads
+//
+// Assumes the canonical row-major matmul address layout (A ld = K,
+// B ld = N, C ld = N) -- the same assumption the legacy 8x8 emit makes
+// when it passes k_extent / n_extent as the simdgroup_load leading
+// dims.  Requires M % TILE_M == 0, N % TILE_N == 0, K % KB == 0; the
+// caller picks divisor-respecting tile factors and falls back to the
+// 8x8 path otherwise.
+//
+// RmuTcTile is declared at the top of render_metal.c (included first in
+// the unity build) so cg_tile_metal_dispatch_shape can size the grid to
+// the same geometry.
 
-// Integer constant from an address-arithmetic leaf: TAG_NUM, or an int
-// UOP_CONST (via rmu_const_int).  Returns 1 + writes *out on success.
-static int rmu_addr_const_int(Term t, i64 *out) {
-  t = term_resolve(t);
-  if (term_tag(t) == TAG_NUM) { *out = (i64)(i32)(u32)term_val(t); return 1; }
-  return rmu_const_int(t, out);
+// Pick tile factors for an (M,N,K) matmul.  Returns 1 with *out filled
+// Affine stride of `axis_id` in an INDEX_E address subtree (1 = unit
+// stride, 0 = absent or non-affine).  Thin wrapper over the affine-coeff
+// walker (defined later in the file) used by the tiled-TC operand-layout
+// probe.
+static int rmu_axis_affine_coeff(Term t, u32 axis_id, i64 *coeff);
+static i64 rmu_range_coeff(Term t, u32 axis_id) {
+  i64 c = 0;
+  (void) rmu_axis_affine_coeff(t, axis_id, &c);
+  return c;
 }
 
-// Linear-stride coefficient of RANGE(axis_id) in an affine address expression
-// (sums of IMUL(RANGE, const) / bare RANGE joined by IADD/ISUB).  This is the
-// buffer stride along that axis -- the simdgroup_matrix template uses it to
-// pick each operand's leading dimension and whether the load is transposed
-// (a Transpose[w] matmul RHS has its N-axis carrying the source row stride and
-// the K-axis carrying stride 1).  Returns -1 when the address cannot be
-// decomposed affinely, so callers fall back to the scalar accumulator rather
-// than emit a wrong simdgroup_load.
-static i64 rmu_range_coeff(Term addr, u32 axis_id) {
-  Term t = term_resolve(addr);
-  if (term_tag(t) != TAG_UOP) return 0;
-  u8  op  = term_ext(t);
-  u64 loc = term_val(t);
-  switch (op) {
-    case UOP_RANGE:
-      return (term_val(heap_read(loc + 0)) == axis_id) ? 1 : 0;
-    case UOP_IADD: {
-      i64 a = rmu_range_coeff(heap_read(loc + 0), axis_id);
-      i64 b = rmu_range_coeff(heap_read(loc + 1), axis_id);
-      if (a < 0 || b < 0) return -1;
-      return a + b;
-    }
-    case UOP_ISUB: {
-      i64 a = rmu_range_coeff(heap_read(loc + 0), axis_id);
-      i64 b = rmu_range_coeff(heap_read(loc + 1), axis_id);
-      if (a < 0 || b < 0) return -1;
-      return a - b;
-    }
-    case UOP_IMUL: {
-      Term x  = heap_read(loc + 0), y = heap_read(loc + 1);
-      Term xr = term_resolve(x),    yr = term_resolve(y);
-      int x_axis = (term_tag(xr) == TAG_UOP && term_ext(xr) == UOP_RANGE
-                    && term_val(heap_read(term_val(xr) + 0)) == axis_id);
-      int y_axis = (term_tag(yr) == TAG_UOP && term_ext(yr) == UOP_RANGE
-                    && term_val(heap_read(term_val(yr) + 0)) == axis_id);
-      i64 c;
-      if (x_axis && rmu_addr_const_int(y, &c)) return c;
-      if (y_axis && rmu_addr_const_int(x, &c)) return c;
-      // axis nested non-linearly under the multiply -> can't represent.
-      if (rmu_term_refs_axis(x, axis_id)
-          || rmu_term_refs_axis(y, axis_id)) return -1;
-      return 0;
-    }
-    default:
-      return rmu_term_refs_axis(t, axis_id) ? -1 : 0;
+// when a tiled kernel is worthwhile and the dims divide cleanly; 0 to
+// tell the caller to emit the legacy 8x8 path.  Preference order
+// targets the common FLUX GEMM shapes (M/N multiples of 64; K multiple
+// of 32) while degrading gracefully for ragged M/N (e.g. M=24).
+static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
+                            RmuTcTile *out) {
+  if ((m_extent % 8) != 0 || (n_extent % 8) != 0 || (k_extent % 8) != 0) {
+    return 0;
   }
+  // THVM_TC_TILE=0 disables the tiled path (legacy 8x8 emit) -- for
+  // A/B benchmarking against the baseline.
+  {
+    char const *e = getenv("THVM_TC_TILE");
+    if (e && e[0] == '0') return 0;
+  }
+  // Small-GEMM guard: when M or N is tiny the matmul is latency-bound,
+  // not bandwidth-bound -- the threadgroup-staging + barrier overhead of
+  // the tiled kernel loses to the simple one-tile-per-simdgroup 8x8 path
+  // (measured: M=24 regressed 1200 -> 557 GFLOPS).  Require both M and N
+  // >= 64 (the smallest tile that fills multiple simdgroups with reuse).
+  if (m_extent < 64 || n_extent < 64) return 0;
+  u32 m8 = m_extent / 8, n8 = n_extent / 8;
+  // Candidate tile geometries, ordered best-first by a gpu_us sweep on
+  // M3 Max (THVM_KERNEL_PROFILE + TMetalGpuTime delta over the FLUX
+  // GEMM shapes {768,3072}x{3072,3072/18432}).  Each row is
+  // {local_m, local_n, rm, rn}: simdgroups along M/N and the register
+  // 8x8 tile per simdgroup.  TILE_M = local_m*rm*8, TILE_N = local_n*rn*8.
+  // Findings the order encodes:
+  //   - 8 simdgroups / 256 threads per threadgroup wins on occupancy.
+  //   - M-major local layout (local_m >= local_n) beats N-major.
+  //   - a fat 4x4 register tile per simdgroup maximises A/B fragment
+  //     reuse without spilling.
+  // The picker takes the first row whose TILE_M divides M and TILE_N
+  // divides N, degrading to smaller tiles (and finally a 16x16 tile)
+  // for ragged shapes.  KB is fixed at 8 (one staged K-subtile): the
+  // sweep showed larger K-blocks lose to threadgroup-memory pressure.
+  struct { u32 lm, ln, rm, rn; } cands[] = {
+    {4, 2, 4, 4},   // 128x64, 8 sg, 32 acc/sg  -- best on 768x3072x*
+    {4, 2, 2, 4},   // 64x64,  8 sg
+    {4, 2, 2, 2},   // 64x32,  8 sg
+    {2, 2, 4, 4},   // 64x64,  4 sg
+    {2, 2, 2, 4},   // 32x64,  4 sg
+    {2, 2, 2, 2},   // 32x32,  4 sg
+    {2, 1, 2, 2},   // 32x16
+    {1, 2, 2, 2},   // 16x32
+    {2, 1, 2, 1},   // 32x8
+    {1, 2, 1, 2},   // 8x32
+    {1, 1, 2, 2},   // 16x16
+  };
+  u32 best_lm = 0, best_ln = 0, best_rm = 0, best_rn = 0;
+  for (u32 i = 0; i < sizeof(cands)/sizeof(cands[0]); i++) {
+    u32 tm8 = cands[i].lm * cands[i].rm;
+    u32 tn8 = cands[i].ln * cands[i].rn;
+    if (m8 % tm8 == 0 && n8 % tn8 == 0) {
+      best_lm = cands[i].lm; best_ln = cands[i].ln;
+      best_rm = cands[i].rm; best_rn = cands[i].rn;
+      break;
+    }
+  }
+  if (best_lm == 0) return 0;
+  // The tiled kernel only pays off when there is reuse: require the
+  // output tile to span more than a single 8x8 fragment.
+  if (best_lm * best_rm * best_ln * best_rn <= 1) return 0;
+  u32 kb = 8;
+  out->local_m = best_lm; out->local_n = best_ln;
+  out->rm = best_rm;      out->rn = best_rn;
+  out->kb = kb;
+  // Tuning overrides (THVM_TC_LM / _LN / _RM / _RN / _KB): force tile
+  // factors for benchmarking.  Only applied when the forced tile still
+  // divides the shape cleanly; ignored otherwise so a stray env var
+  // can't emit an incorrect kernel.
+  {
+    char const *e;
+    u32 lm = out->local_m, ln = out->local_n, rm = out->rm, rn = out->rn, kbo = out->kb;
+    if ((e = getenv("THVM_TC_LM")) && e[0]) lm = (u32)atoi(e);
+    if ((e = getenv("THVM_TC_LN")) && e[0]) ln = (u32)atoi(e);
+    if ((e = getenv("THVM_TC_RM")) && e[0]) rm = (u32)atoi(e);
+    if ((e = getenv("THVM_TC_RN")) && e[0]) rn = (u32)atoi(e);
+    if ((e = getenv("THVM_TC_KB")) && e[0]) kbo = (u32)atoi(e);
+    if (lm >= 1 && ln >= 1 && rm >= 1 && rn >= 1 && kbo >= 8
+        && (kbo % 8) == 0
+        && m8 % (lm * rm) == 0 && n8 % (ln * rn) == 0
+        && k_extent % kbo == 0) {
+      out->local_m = lm; out->local_n = ln;
+      out->rm = rm;      out->rn = rn;
+      out->kb = kbo;
+    }
+  }
+  return 1;
+}
+
+// Emit the threadgroup-staged, register-blocked tiled matmul body for
+// the m_par && n_par (both-GLOBAL) case.  Buffer names + leading dims
+// are passed in; the address layout is the canonical row-major matmul
+// (A[m*K+k], B[k*N+n], C[m*N+n]).  `depth` is the base indent.
+static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
+                                     const char *c_name,
+                                     u32 n_extent, u32 k_extent,
+                                     RmuTcTile t, FILE *fp, u32 depth) {
+  u32 tile_m = t.local_m * t.rm * 8u;     // output rows per threadgroup
+  u32 tile_n = t.local_n * t.rn * 8u;     // output cols per threadgroup
+  u32 n_tiles_n = n_extent / tile_n;      // tg columns in the grid
+  u32 nthreads = t.local_m * t.local_n * 32u;
+  #define IND(D) for (u32 _i = 0; _i < (D); _i++) fputs("  ", fp)
+  IND(depth); fprintf(fp,
+    "/* TC tiled matmul: tile %ux%u, %ux%u simdgroups, %ux%u reg, KB=%u */\n",
+    tile_m, tile_n, t.local_m, t.local_n, t.rm, t.rn, t.kb);
+  // Threadgroup-memory staging buffers.  Asm: [TILE_M x KB] row-major
+  // (ld=KB).  Bsm: [KB x TILE_N] row-major (ld=TILE_N).
+  IND(depth); fprintf(fp,
+    "threadgroup float _Asm[%u];\n", tile_m * t.kb);
+  IND(depth); fprintf(fp,
+    "threadgroup float _Bsm[%u];\n", t.kb * tile_n);
+  // This threadgroup's output-tile origin.
+  IND(depth); fprintf(fp, "uint _tm = (tg / %uu) * %uu;\n", n_tiles_n, tile_m);
+  IND(depth); fprintf(fp, "uint _tn = (tg %% %uu) * %uu;\n", n_tiles_n, tile_n);
+  // This simdgroup's sub-tile origin within the threadgroup tile.
+  IND(depth); fprintf(fp, "uint _sm = (sgi / %uu) * %uu;\n",
+                      t.local_n, t.rm * 8u);
+  IND(depth); fprintf(fp, "uint _sn = (sgi %% %uu) * %uu;\n",
+                      t.local_n, t.rn * 8u);
+  // Flat thread index within the threadgroup, for cooperative staging.
+  IND(depth); fputs("uint _lid = sgi * 32u + thread_index_in_simdgroup;\n", fp);
+  // Register accumulator tile, all zero-initialised.
+  IND(depth); fprintf(fp,
+    "simdgroup_matrix<float, 8, 8> _acc[%u];\n", t.rm * t.rn);
+  IND(depth); fprintf(fp,
+    "for (uint _i = 0u; _i < %uu; _i++) "
+    "_acc[_i] = simdgroup_matrix<float, 8, 8>(0);\n", t.rm * t.rn);
+  // K-block loop.
+  IND(depth); fprintf(fp, "for (uint _k0 = 0u; _k0 < %uu; _k0 += %uu) {\n",
+                      k_extent, t.kb);
+  // Cooperative load of A block [TILE_M x KB] (row-major, src ld = K).
+  IND(depth + 1); fprintf(fp,
+    "for (uint _i = _lid; _i < %uu; _i += %uu) {\n",
+    tile_m * t.kb, nthreads);
+  IND(depth + 2); fprintf(fp,
+    "_Asm[_i] = %s[(_tm + _i / %uu) * %uu + _k0 + _i %% %uu];\n",
+    a_name, t.kb, k_extent, t.kb);
+  IND(depth + 1); fputs("}\n", fp);
+  // Cooperative load of B block [KB x TILE_N] (row-major, src ld = N).
+  IND(depth + 1); fprintf(fp,
+    "for (uint _i = _lid; _i < %uu; _i += %uu) {\n",
+    t.kb * tile_n, nthreads);
+  IND(depth + 2); fprintf(fp,
+    "_Bsm[_i] = %s[(_k0 + _i / %uu) * %uu + _tn + _i %% %uu];\n",
+    b_name, tile_n, n_extent, tile_n);
+  IND(depth + 1); fputs("}\n", fp);
+  IND(depth + 1); fputs("threadgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+  // Inner K-subtile loop over the staged block (steps of 8).
+  IND(depth + 1); fprintf(fp, "for (uint _kk = 0u; _kk < %uu; _kk += 8u) {\n",
+                          t.kb);
+  // Load this simdgroup's A fragments (RM of them) from threadgroup mem.
+  IND(depth + 2); fprintf(fp,
+    "simdgroup_matrix<float, 8, 8> _af[%u];\n", t.rm);
+  for (u32 mi = 0; mi < t.rm; mi++) {
+    IND(depth + 2); fprintf(fp,
+      "simdgroup_load(_af[%u], &_Asm[(_sm + %uu) * %uu + _kk], %uu);\n",
+      mi, mi * 8u, t.kb, t.kb);
+  }
+  // Load this simdgroup's B fragments (RN of them) from threadgroup mem.
+  IND(depth + 2); fprintf(fp,
+    "simdgroup_matrix<float, 8, 8> _bf[%u];\n", t.rn);
+  for (u32 ni = 0; ni < t.rn; ni++) {
+    IND(depth + 2); fprintf(fp,
+      "simdgroup_load(_bf[%u], &_Bsm[_kk * %uu + _sn + %uu], %uu);\n",
+      ni, tile_n, ni * 8u, tile_n);
+  }
+  // Register-blocked MMA: every A fragment x every B fragment.
+  for (u32 mi = 0; mi < t.rm; mi++) {
+    for (u32 ni = 0; ni < t.rn; ni++) {
+      IND(depth + 2); fprintf(fp,
+        "simdgroup_multiply_accumulate(_acc[%u], _af[%u], _bf[%u], _acc[%u]);\n",
+        mi * t.rn + ni, mi, ni, mi * t.rn + ni);
+    }
+  }
+  IND(depth + 1); fputs("}\n", fp);                          // close _kk
+  IND(depth + 1); fputs("threadgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+  IND(depth); fputs("}\n", fp);                              // close _k0
+  // Store the register tile to the output (row-major, ld = N).
+  for (u32 mi = 0; mi < t.rm; mi++) {
+    for (u32 ni = 0; ni < t.rn; ni++) {
+      IND(depth); fprintf(fp,
+        "simdgroup_store(_acc[%u], &%s[(_tm + _sm + %uu) * %uu + _tn + _sn + %uu], %uu);\n",
+        mi * t.rn + ni, c_name, mi * 8u, n_extent, ni * 8u, n_extent);
+    }
+  }
+  #undef IND
 }
 
 // Specialised simdgroup_matrix MSL template for the matmul pattern.
@@ -2313,6 +2501,29 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   int n_par = (n_axis_type == 5 /* KAX_GLOBAL */);
   int parallel_tc = (m_par || n_par);
   u32 n_tiles_n = n_extent / 8;
+
+  // Threadgroup-staged, register-blocked tiled path: only the
+  // both-GLOBAL case (each tg owns a unique output tile, no write race)
+  // is eligible.  When a worthwhile tile divides M/N/K cleanly, emit
+  // the tiled kernel and return -- the dispatch grid in
+  // cg_tile_metal_dispatch_shape sizes threadgroups to the larger tile.
+  if (m_par && n_par && RMU_TARGET == CG_TARGET_METAL
+      && uop_buffer_dtype(buf_a) == DT_FP32
+      && uop_buffer_dtype(buf_b) == DT_FP32) {
+    RmuTcTile tile;
+    if (rmu_tc_pick_tile(m_extent, n_extent, k_extent, &tile)) {
+      // rmu_buf_name returns a pointer to a shared static buffer, so the
+      // three names must be copied to distinct locals before the call
+      // (a single argument list would alias them all to the last name).
+      char a_nm[24], b_nm[24], c_nm[24];
+      snprintf(a_nm, sizeof(a_nm), "%s", rmu_buf_name(buf_a));
+      snprintf(b_nm, sizeof(b_nm), "%s", rmu_buf_name(buf_b));
+      snprintf(c_nm, sizeof(c_nm), "%s", rmu_buf_name(buf_c));
+      rmu_emit_matmul_tc_tiled(a_nm, b_nm, c_nm, n_extent,
+                               k_extent, tile, fp, depth);
+      return 1;
+    }
+  }
 
   if (parallel_tc) {
     // No guard.  Bind axes per axis_type.
