@@ -961,7 +961,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         axPairs = enc["AxPairs"], varSyms, entries, traceInfo,
         inProgress, aliveRulesAt, slN, cpN, axiomKeyFor, rewriteOnce,
         prepareRules, runBfs, reverseBfsPath, emitNorm, resolveCp,
-        resolveTrace, resolveRule, axiomEntries,
+        resolveTrace, resolveRule, axiomEntries, canonInfo, canonKeyOf,
         cjp, nGoals, cjps, splitTrivial, chainEntries, allEntries,
         stmt, l2n, i2n, dterm, tL, tR
     },
@@ -989,12 +989,29 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            so cache lookup stays O(1) on large traces.  A Module-renamed
            symbol's DownValues vanish when the Module exits, so the next
            buildCplDataset call starts with a clean slate. *)
-        Clear[traceInfo, inProgress];
+        Clear[traceInfo, inProgress, canonInfo];
         slN = 0; cpN = 0;
         (* a dataset Statement: the equation in the verifier's
            HoldForm[Equal[...]] shape, variables left bare (only the
            Proof Rule fields are patternized). *)
         stmt[eq_] := toHoldEq[Inactive[Equal] @@ eq];
+
+        (* Canonical statement key: the equation alpha-renamed to
+           canonical variables, side-order-insensitive (the Sort-first
+           of the two orders).  canonInfo memoizes canon key ->
+           <|Key, Eq|> of the FIRST emitted CriticalPairLemma /
+           SubstitutionLemma carrying that statement: completion often
+           re-derives the same equation through a different CP /
+           normalization lineage, and the verifier reads a citation
+           purely off the cited entry's Statement (Orientation absorbs
+           a side swap, its exprSub unification absorbs the renaming),
+           so re-pointing every later citation at the first row is
+           verifier-legal and folds the duplicate rows -- along with
+           any lineage only the duplicates needed, since the dedup
+           check runs BEFORE the parents are resolved. *)
+        canonKeyOf[eq_] := First @ Sort[
+            {cplCanonVars[eq, varSyms],
+             cplCanonVars[Reverse[eq], varSyms]}];
 
         (* The rules alive when the rule at trace index `ti` was
            oriented: every TRACE_ORIENT born before ti, minus the
@@ -1176,7 +1193,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            {key, eq}.  inKey is the dataset key of startEq. *)
         emitNorm[inKey_, startEq_, targetEq_, ti_] :=
             Block[{aliveList, preRules, found, curKey, curEq, st,
-                   cInfo, rEq},
+                   cInfo, rEq, hit},
                 aliveList = aliveRulesAt[ti];
                 (* Precompute rule data once, shared across both BFS
                    phases; cplAsRule is the dominant per-node cost. *)
@@ -1225,6 +1242,18 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 curKey = inKey;
                 curEq = startEq;
                 Do[
+                    (* Same-order canonical dedup: re-point the chain
+                       at an existing row carrying this step's
+                       statement.  Swap hits are NOT taken here: the
+                       step's Side / Position are emitted over the
+                       BFS-native order with InputOrientation fixed at
+                       1, so a side-swapped input would replay on the
+                       wrong side. *)
+                    hit = canonInfo[canonKeyOf[step[[1]]]];
+                    If[ AssociationQ[hit] && cplCanonVars[step[[1]], varSyms] === cplCanonVars[hit["Eq"], varSyms],
+                        curKey = hit["Key"];
+                        curEq = hit["Eq"];
+                        Continue[]];
                     cInfo = resolveTrace[step[[2]]];
                     rEq = {tL[trace[[step[[2]] + 1]]],
                            tR[trace[[step[[2]] + 1]]]};
@@ -1255,6 +1284,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                     |>];
                     curKey = {$SubstitutionLemmaSym, slN};
                     curEq = step[[1]];
+                    canonInfo[canonKeyOf[curEq]] =
+                        <|"Key" -> curKey, "Eq" -> curEq|>;
                     ,
                     {step, found}
                 ];
@@ -1308,7 +1339,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            ti; return its <|Key, Eq|>. *)
         resolveCp[ti_] := Block[{
             cte, cpEq, pos, aTe, bTe, ruleAEq, ruleBEq, aInfo, bInfo,
-            geom, key, st, cEq, mEq
+            geom, key, st, cEq, mEq, hit, c0
         },
             cte = trace[[ti + 1]];
             (* WL's verifier builds the CP as
@@ -1317,6 +1348,16 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                critical pair -- so the CriticalPairLemma Statement
                takes the sides swapped. *)
             cpEq = {tR[cte], tL[cte]};
+            (* Canonical dedup, checked before the parents resolve:
+               a re-derived alpha / side variant cites the first row.
+               CSide0WlPos maps this trace node's C side 0 (= tL, at
+               cpEq position 2) through the hit entry's stored order
+               so descendant NORM_STEPs keep the side mapping. *)
+            hit = canonInfo[canonKeyOf[cpEq]];
+            If[ AssociationQ[hit],
+                c0 = If[ cplCanonVars[cpEq, varSyms] === cplCanonVars[hit["Eq"], varSyms], 2, 1];
+                Return[<|"Key" -> hit["Key"], "Eq" -> hit["Eq"],
+                    "Swapped" -> (c0 === 2), "CSide0WlPos" -> c0|>]];
             pos = cte["Pos"];
             aTe = trace[[cte["ParentA"] + 1]];
             bTe = trace[[cte["ParentB"] + 1]];
@@ -1376,6 +1417,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                     "Position" -> pos
                 |>
             |>];
+            canonInfo[canonKeyOf[cpEq]] = <|"Key" -> key, "Eq" -> cpEq|>;
             <|"Key" -> key, "Eq" -> cpEq, "Swapped" -> True|>
         ];
 
@@ -1428,11 +1470,23 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                        convention by comparing pInfo's Eq to its
                        trace entry's stored Lhs / Rhs, and mirror the
                        swap (or not) on this NORM_STEP so the chain
-                       stays in ONE convention end-to-end. *)
+                       stays in ONE convention end-to-end.
+                       Canonical dedup first, before the parents
+                       resolve: when an earlier row already carries
+                       this step's statement (ruleEq, an alpha / side
+                       variant), cite it instead of emitting a
+                       duplicate; CSide0WlPos maps this node's C side
+                       0 (= tL, ruleEq position 1) through the hit
+                       entry's stored order. *)
+                    Block[{hit = canonInfo[canonKeyOf[ruleEq]], c0},
+                    If[ AssociationQ[hit],
+                        c0 = If[ cplCanonVars[ruleEq, varSyms] === cplCanonVars[hit["Eq"], varSyms], 1, 2];
+                        <|"Key" -> hit["Key"], "Eq" -> hit["Eq"],
+                          "Swapped" -> (c0 === 2), "CSide0WlPos" -> c0|>,
                     Module[{pInfo, rInfo, rTe, rEq, swapped,
                             parentTe, parentReason, cSide0WlPos,
                             wlEq, wlSide, newCSide0WlPos,
-                            sl, st, dir, dirEq, extras, newSide},
+                            sl, st, dir, dirEq, extras},
                         pInfo = resolveTrace[te["ParentA"]];
                         rInfo = resolveTrace[te["ParentB"]];
                         rTe = trace[[te["ParentB"] + 1]];
@@ -1553,10 +1607,12 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                 "Source" -> "norm"
                             |>
                         |>];
+                        canonInfo[canonKeyOf[wlEq]] =
+                            <|"Key" -> sl, "Eq" -> wlEq|>;
                         <|"Key" -> sl, "Eq" -> wlEq,
                           "Swapped" -> swapped,
                           "CSide0WlPos" -> newCSide0WlPos|>
-                    ],
+                    ]]],
                 te["Reason"] === $TraceFvi,
                     (* Waldmeister RechtsUnfreiErzeugen (FVI) sibling.
                        The parent KBO_UN equation is unorientable; the
@@ -1578,6 +1634,13 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                        same way they treat an Axiom entry; the
                        Substitution / Source fields are introspection
                        only and not consumed by the verifier. *)
+                    (* Canonical dedup: an earlier row already carrying
+                       the grounded statement absorbs this leaf. *)
+                    Block[{hit = canonInfo[canonKeyOf[ruleEq]], c0},
+                    If[ AssociationQ[hit],
+                        c0 = If[ cplCanonVars[ruleEq, varSyms] === cplCanonVars[hit["Eq"], varSyms], 1, 2];
+                        <|"Key" -> hit["Key"], "Eq" -> hit["Eq"],
+                          "Swapped" -> (c0 === 2), "CSide0WlPos" -> c0|>,
                     Module[{pInfo, pEq, lhsP, rhsP, lvP, rvP, freeVars,
                             minConstSym, key},
                         pInfo = resolveTrace[te["ParentA"]];
@@ -1603,9 +1666,11 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                             "Source" -> "fvi",
                             "Input" -> pInfo["Key"]
                         |>];
+                        canonInfo[canonKeyOf[ruleEq]] =
+                            <|"Key" -> key, "Eq" -> ruleEq|>;
                         <|"Key" -> key, "Eq" -> ruleEq,
                           "Swapped" -> False|>
-                    ],
+                    ]]],
                 te["Reason"] === $TraceOrient || te["Reason"] === $TraceSimplify,
                     pInfo = resolveTrace[te["ParentA"]];
                     pEq = pInfo["Eq"];
