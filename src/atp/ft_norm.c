@@ -471,7 +471,8 @@ extern Term ft_to_term(const AtpFtCell *x);
 static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
                                                 u32 slice_first,
                                                 u32 slice_count,
-                                                u32 step_cap, int record,
+                                                u32 step_cap, u8 doE,
+                                                int record,
                                                 Term eq_other, u8 side,
                                                 u32 *chain_tail);
 
@@ -480,10 +481,30 @@ AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap) {
   if (t == NULL) return NULL;
   if (s->n_rules == 0u) return t;
   // Full-range delegation -- bench-neutral by construction (same scan
-  // bounds, same RI path, same memset).
+  // bounds, same RI path, same memset).  doE=TRUE: rules AND
+  // unorientable equations rewrite -- WM's NF_NormalformRE flag pair
+  // (selection-time `-ks "r:e:s:p"` / goal normalization).
   return atp_rewrite_normalize_ft_impl(s, t, /*slice_first=*/0u,
                                        /*slice_count=*/s->n_rules,
-                                       step_cap, /*record=*/0,
+                                       step_cap, /*doE=*/1u, /*record=*/0,
+                                       (Term){0}, 0u, NULL);
+}
+
+// WM doR-only variant: oriented rules rewrite, unorientable equations
+// do NOT (the Gleichungsbaum is not consulted) -- NF_Normalform2's
+// doE=FALSE leg, which WM's default proof configuration applies at
+// exactly ONE live site: generation-time CP treatment (`KPBehandelt`,
+// INF/KPVerwaltung.c:442, strength from `-kg` default "r",
+// RUN/Parameter.c:397).  FT sibling of atp_rules_only_normalize.
+AtpFtCell *atp_rules_only_normalize_ft(AtpState *s, AtpFtCell *t,
+                                       u32 step_cap);
+AtpFtCell *atp_rules_only_normalize_ft(AtpState *s, AtpFtCell *t,
+                                       u32 step_cap) {
+  if (t == NULL) return NULL;
+  if (s->n_rules == 0u) return t;
+  return atp_rewrite_normalize_ft_impl(s, t, /*slice_first=*/0u,
+                                       /*slice_count=*/s->n_rules,
+                                       step_cap, /*doE=*/0u, /*record=*/0,
                                        (Term){0}, 0u, NULL);
 }
 
@@ -506,7 +527,7 @@ AtpFtCell *atp_rewrite_normalize_ft_record(AtpState *s, AtpFtCell *t,
   if (s->n_rules == 0u) return t;
   return atp_rewrite_normalize_ft_impl(s, t, /*slice_first=*/0u,
                                        /*slice_count=*/s->n_rules,
-                                       step_cap, /*record=*/1,
+                                       step_cap, /*doE=*/1u, /*record=*/1,
                                        eq_other, side, chain_tail);
 }
 
@@ -539,14 +560,15 @@ AtpFtCell *atp_rewrite_normalize_ft_slice(AtpState *s, AtpFtCell *t,
     slice_count = s->n_rules - slice_first;
   }
   return atp_rewrite_normalize_ft_impl(s, t, slice_first, slice_count,
-                                       step_cap, /*record=*/0,
+                                       step_cap, /*doE=*/1u, /*record=*/0,
                                        (Term){0}, 0u, NULL);
 }
 
 static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
                                                 u32 slice_first,
                                                 u32 slice_count,
-                                                u32 step_cap, int record,
+                                                u32 step_cap, u8 doE,
+                                                int record,
                                                 Term eq_other, u8 side,
                                                 u32 *chain_tail) {
   if (t == NULL) return NULL;
@@ -600,7 +622,10 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   // budget is step_cap * step_cap -- matching the Term-side mixed loop
   // exactly (each outer iteration calls atp_rewrite_normalize_indexed
   // with step_cap).
-  u8 have_unorient = (u8)(s->n_unorient > 0u);
+  // doE gates the unorientable-equation leg per call site (WM
+  // NF_Normalform2's second flag); doR is unconditionally TRUE at every
+  // thvm site, as at every live WM site (NF/NFBildung.c:503-531).
+  u8 have_unorient = (u8)(doE && s->n_unorient > 0u);
   // Batched-orient fast path: when we have a full-range non-record call
   // (i.e. NOT slice-restricted and NOT in trace-recording mode), the
   // orientable fixpoint can be run by the Term-side discrim-tree

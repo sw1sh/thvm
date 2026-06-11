@@ -540,6 +540,42 @@ int main(void) {
     thvm_atp_free(s);
     #undef FVI_F
   }
+
+  TEST_BEGIN("atp/generation-doE-false-no-equation-join-at-push");
+  {
+    // WM per-site NF flags: the generation-time CP treatment
+    // (KPBehandelt, `-kg` default "r" -> doE=FALSE) must NOT rewrite
+    // with unorientable equations or their grounded instances; the
+    // selection-/goal-time flag pair (`-ks` "r:e:s:p" -> doE=TRUE)
+    // must.  Same FVI fixture as above: (f(f(v,v),f(v,v)), f(c,c))
+    // joins ONLY through the grounded f(x,x)==f(y,y) instance, so
+    // push-time joinability says NO and returns the sides
+    // equation-unreduced, while the doE normalize joins the pair.
+    static u32 fviw[2] = {0u, 1u};
+    static u32 fvip[2] = {0u, 1u};
+    static const KboConfig FVI_CFG = {
+      .weights = fviw, .precedence = fvip, .n_labels = 2u, .var_weight = 1u,
+    };
+    #define FVI_F(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(1u, _c, 2); })
+    AtpState *s = thvm_atp_init(&FVI_CFG, 64u);
+    {
+      Term x = mk_v(0u), y = mk_v(1u);
+      atp_push_rule(s, FVI_F(x, x), FVI_F(y, y));   // unorientable
+    }
+    CHECK_EQ(s->n_unorient, 1u);
+    Term v  = mk_v(0u);
+    Term cl = FVI_F(FVI_F(v, v), FVI_F(v, v));
+    Term cr = FVI_F(s->min_const, s->min_const);
+    Term jl = cl, jr = cr;
+    CHECK_EQ((int)atp_cp_trivially_joinable(s, &jl, &jr), 0);
+    CHECK(kbo_eq(jl, cl));
+    CHECK(kbo_eq(jr, cr));
+    Term nl = atp_rewrite_normalize(s, cl, s->lhs, s->rhs, s->n_rules, 64u);
+    Term nr = atp_rewrite_normalize(s, cr, s->lhs, s->rhs, s->n_rules, 64u);
+    CHECK(kbo_eq(nl, nr));
+    thvm_atp_free(s);
+    #undef FVI_F
+  }
 #endif
 
   TEST_BEGIN("atp/generate-cps-empty-added-no-op");

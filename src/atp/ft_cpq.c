@@ -207,10 +207,9 @@ static void atp_cp_ft_transfer_out(AtpState *s, u32 i,
 // Mirrors the Term-path verdict bit-for-bit by construction (// VERIFY mode established equality of the two normalize paths on the
 // differential corpus).  Joining is symmetric in lhs/rhs.
 //
-// Used by the select-time hot path under THVM_ATPFT_CPQ: the
-// caller pulls (entry.lhs, entry.rhs) off the queue and hands them
-// straight here, skipping the ft_from_term step that today's
-// THVM_ATPFT_NORM path pays at every joinability call.
+// Sole caller is atp_cp_trivially_joinable (generation-time CP push),
+// which hands FT cells straight here, skipping the ft_from_term step
+// that the plain THVM_ATPFT_NORM path pays at every joinability call.
 static u8 atp_cp_trivially_joinable_ft(AtpState *s,
                                        AtpFtCell **lhs,
                                        AtpFtCell **rhs) {
@@ -220,8 +219,11 @@ static u8 atp_cp_trivially_joinable_ft(AtpState *s,
   // so the overhead is sub-microsecond when sides differ.
   if (ft_eq(*lhs, *rhs)) return 1u;
   const u32 NORM_CAP = 64u;
-  AtpFtCell *l = atp_rewrite_normalize_ft(s, *lhs, NORM_CAP);
-  AtpFtCell *r = atp_rewrite_normalize_ft(s, *rhs, NORM_CAP);
+  // Generation-time CP treatment = WM KPBehandelt under `-kg "r"`:
+  // doR only -- unorientable equations never rewrite here (see the
+  // Term-cell sibling atp_cp_trivially_joinable in _.c).
+  AtpFtCell *l = atp_rules_only_normalize_ft(s, *lhs, NORM_CAP);
+  AtpFtCell *r = atp_rules_only_normalize_ft(s, *rhs, NORM_CAP);
   *lhs = l;
   *rhs = r;
   return (u8)ft_eq(l, r);

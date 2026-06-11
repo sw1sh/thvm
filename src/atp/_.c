@@ -8523,6 +8523,14 @@ static Term atp_proof_rewrite_step(AtpState *s, Term t, u8 *pos, u8 depth,
                                    u32 *out_rule, u8 *out_pos_len,
                                    u8 *out_fwd, u8 *fired);
 
+// When set, atp_proof_rewrite_step considers ONLY oriented rules
+// (skips unorientable equations) -- the recording analog of WM's
+// doE=FALSE normalize leg.  Set around recorder calls that replay a
+// doR-only engine phase: the pop normalize's generation-treatment
+// replay, the WM-demote drain, and atp_proof_record_side's
+// orientable-fixpoint phase.
+static u8 g_atp_proof_oriented_only;
+
 // Forward decl: the Waldmeister IR-victim drain (use_wm_demote), defined
 // next to thvm_atp_interreduce which fills the buffer it drains.
 static void atp_wm_demote_drain(AtpState *s);
@@ -8817,10 +8825,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     // from the CP -- WL walks the chain linearly when extracting the
     // ProofObject.  Start from the trace entry's RAW (un-reduced)
     // CP form, not select_cp's already-queue-reduced form: queue-
-    // time reduction (atp_cp_trivially_joinable) was previously off-
-    // trace, so the resulting NORM_STEPs reach from the literal CP
-    // the verifier expects all the way to the form orient sees --
-    // no chain gap.
+    // time reduction (atp_cp_trivially_joinable) is off-trace, so the
+    // resulting NORM_STEPs reach from the literal CP the verifier
+    // expects all the way to the form orient sees -- no chain gap.
     Term raw_lhs = cp_lhs;
     Term raw_rhs = cp_rhs;
     if (src_trace != ATP_TRACE_NONE && src_trace < s->n_trace) {
@@ -8831,9 +8838,25 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
         raw_rhs = term_ctr_at(cp_te, 3);
       }
     }
-    l = atp_rewrite_normalize_record(s, raw_lhs, raw_rhs, 0u,
+    // The replay phases the two WM flag sets exactly as the engine
+    // applied them: first the generation-time treatment (KPBehandelt,
+    // `-kg "r"` -> doR only -- atp_cp_trivially_joinable's rules-only
+    // normalize), then the selection-time one (KPV_Select, `-ks
+    // "r:e:s:p"` -> doR+doE).  A single interleaved doR+doE pass from
+    // the raw CP records grounded-template equation steps ahead of the
+    // oriented fixpoint -- steps the engine never fired and WM's
+    // protocol never contains.
+    g_atp_proof_oriented_only = 1u;
+    Term l_r = atp_rewrite_normalize_record(s, raw_lhs, raw_rhs, 0u,
+                                            &chain_tail, NORM_CAP);
+    g_atp_proof_oriented_only = 0u;
+    l = atp_rewrite_normalize_record(s, l_r, raw_rhs, 0u,
                                      &chain_tail, NORM_CAP);
-    r = atp_rewrite_normalize_record(s, raw_rhs, l, 1u,
+    g_atp_proof_oriented_only = 1u;
+    Term r_r = atp_rewrite_normalize_record(s, raw_rhs, l, 1u,
+                                            &chain_tail, NORM_CAP);
+    g_atp_proof_oriented_only = 0u;
+    r = atp_rewrite_normalize_record(s, r_r, l, 1u,
                                      &chain_tail, NORM_CAP);
   } else {
     l = atp_rewrite_normalize(s, cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
@@ -9054,15 +9077,6 @@ fn u32 thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap) {
 // fires whichever direction strictly decreases the redex -- so the
 // recorded chain descends a well-founded order and cannot bounce
 // between the two faces of a symmetric equation.
-
-// When set, atp_proof_rewrite_step considers ONLY oriented rules
-// (skips unorientable equations) -- the recording analog of the
-// orientable indexed fixpoint that atp_rewrite_normalize_ordered runs
-// before each unorientable step.  atp_proof_record_side phases the two
-// passes so the recorded chain reaches the SAME normal form the
-// goal-check normalizer reached on a non-confluent (goal-join-stopped)
-// rule set; a single interleaved pass diverges there.
-static u8 g_atp_proof_oriented_only;
 
 // One leftmost-outermost rewrite of `t`, recording the redex path and
 // the rule index.  `pos` is caller-owned scratch holding the path so
@@ -11125,6 +11139,9 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // the IR sweep does NOT touch).  Lever 5 mirror: pre-norm ft_eq
     // short-circuits CPs whose sides are already syntactically equal
     // after acp_unpack (saves two normalize calls + the post-norm eq).
+    // doR+doE here = WM AP_generic (KPVerwaltung.c:952-1014) run at
+    // `-ki` strength "re"; the sweep itself is opt-in (CpSetInterreduce
+    // / the WM preset), mirroring `-ki`'s default-off trigger.
     AtpFt *a = (AtpFt *)s->ft_arena_ptr;
     AtpFtCell *fl = ft_from_term(a, ol,  0);
     AtpFtCell *fr = ft_from_term(a, orr, 0);
@@ -11862,13 +11879,22 @@ static inline void atp_ft_mirror_ensure(AtpState *s) {
 #endif
 
 // FT-only trivial-joinable check.  Term cells in (*lhs / *rhs), the work
-// happens entirely in FT (ft_from_term / atp_rewrite_normalize_ft / ft_eq),
-// and the NFs are decoded back to Term only when the NOT-joined path's
-// downstream filters (perm_sub, queue_sub, AC-eq) need them.  The Term-side
+// happens entirely in FT (ft_from_term / normalize / ft_eq), and the NFs
+// are decoded back to Term only when the NOT-joined path's downstream
+// filters (perm_sub, queue_sub, AC-eq) need them.  The Term-side
 // `atp_rewrite_normalize` legacy path used to live behind a default-off
 // VERIFY toggle but only ever lagged the FT verdict (and aborted spuriously
 // on AndAssoc post-1d0a8035, where Term-side stops one rewrite step short
 // of the FT-side NF -- see project_ftnorm_andassoc_verify_break); deleted.
+//
+// This is the generation-time CP treatment -- WM's `KPBehandelt`
+// (INF/KPVerwaltung.c:439-467).  WM's default proof configuration runs
+// it with NF_Normalform2(doR=TRUE, doE=FALSE) (`-kg` default "r",
+// RUN/Parameter.c:397): oriented rules only, the unorientable-equation
+// tree (and its grounded free-variable instances) never rewrites here.
+// Hence atp_rules_only_normalize_ft, not atp_rewrite_normalize_ft.  The
+// deferred full doR+doE normalize and join verdict happen at selection
+// (thvm_atp_step's pop normalize = WM `KPV_Select`, `-ks` "r:e:s:p").
 static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   static int dbg_join_cache = -1;
   if (dbg_join_cache < 0) dbg_join_cache = atp_env_on("THVM_ATP_JOIN_CACHE");
@@ -11898,8 +11924,8 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
 #ifdef THVM_ATPFT_CPQ
   joined = atp_cp_trivially_joinable_ft(s, &fl, &fr);
 #else
-  fl = atp_rewrite_normalize_ft(s, fl, 64u);
-  fr = atp_rewrite_normalize_ft(s, fr, 64u);
+  fl = atp_rules_only_normalize_ft(s, fl, 64u);
+  fr = atp_rules_only_normalize_ft(s, fr, 64u);
   joined = (u8)ft_eq(fl, fr);
 #endif
   // Decode NFs back to Term only on the NOT-joined branch -- downstream
@@ -13278,10 +13304,11 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // direct-cell-reference Bus error.
     if (s->use_lazy_normalize && !s->use_mnf) {
       // Lazy push (WM KPVerwaltung.c:435-467 `lohntSichBehandlung` ->
-      // `KPBehandelt`): run the full-R normalize + join verdict ONLY when
-      // the RAW overlap is small (sum of side lengths < WM's gate of 50,
-      // KPVerwaltung.c:437); else queue an oriented-only-shrunk form and
-      // defer the unorientable+joinability verdict to pop-time.  Small
+      // `KPBehandelt`): run the doR-only full-R normalize + join verdict
+      // ONLY when the RAW overlap is small (sum of side lengths < WM's
+      // gate of 50, KPVerwaltung.c:437); else queue an
+      // oriented-only-shrunk form and defer the joinability verdict to
+      // pop-time.  Small
       // CPs are cheap to normalize AND have a high joinable-rate, so
       // joining them at push drops them before the queue/index/
       // subsumption work fires.  Large CPs pay at most one normalize at
@@ -13293,8 +13320,8 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       // ~25k); WM's gate caps that.
       const u32 PUSH_NORM_CAP = 64u;
       // Literal port of WM KPVerwaltung.c:437 lohntSichBehandlung gate
-      // (raw sum-of-sides < 50 -> run the full-R normalize + joinability
-      // check; else queue an oriented-only-shrunk form).
+      // (raw sum-of-sides < 50 -> run the doR-only full-R normalize +
+      // joinability check; else queue an oriented-only-shrunk form).
       const u32 WM_BEHANDELN_GATE = 50u;
       u32 raw_sz = atp_symbol_count(cp_lhs) + atp_symbol_count(cp_rhs);
       if (raw_sz < WM_BEHANDELN_GATE) {
@@ -13302,8 +13329,8 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
         s->n_cps_push_normalized++;
       } else {
         // Cheap oriented-only reduction shrinks the queued form so the
-        // heap / queue stays bounded; the dominant unorientable normalize
-        // and the joinability verdict are deferred to selection.
+        // heap / queue stays bounded; the joinability verdict (and the
+        // doE normalize) is deferred to selection.
         cp_lhs = atp_rewrite_normalize_indexed(s, cp_lhs, PUSH_NORM_CAP);
         cp_rhs = atp_rewrite_normalize_indexed(s, cp_rhs, PUSH_NORM_CAP);
         joinable = 0u;
