@@ -794,6 +794,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   mint orphan_wm = MArgument_getInteger(args[36]);
   thvm_atp_set_use_orphan_murder(atp, (u8)(orphan_wm != 0));
   thvm_atp_set_use_eager_orphan_sweep(atp, (u8)(orphan_wm == 0));
+  // Method -> {... "PopSubsume" -> True}: Waldmeister's -ks "s" stage
+  // (KPV_Select, INF/KPVerwaltung.c:667) -- a popped CP whose
+  // normalized pair is UNORIENTABLE and subsumed by an existing
+  // unorientable equation (SS_TermpaarSubsummiertVonGM, both
+  // orientations, one substitution over both sides, context-stripping
+  // descent) is dropped before orientation.  args[37]; 0 = off
+  // (default, engine byte-identical).
+  mint pop_subsume = MArgument_getInteger(args[37]);
+  thvm_atp_set_use_pop_subsume(atp, (u8)(pop_subsume != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[19] gates it: the default (any

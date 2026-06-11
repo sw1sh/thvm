@@ -4814,6 +4814,24 @@ typedef struct {
   // subsumed CP is joinable in one step via that rule's instance.
   u8   use_rule_subsume_drop;
 
+  // WM `-ks` "s" stage (KPV_Select, INF/KPVerwaltung.c:667): a popped
+  // CP whose normalized pair is UNORIENTABLE (compare == KBO_UN, WM
+  // Unvergleichbar) and subsumed by an existing unorientable equation
+  // (SS_TermpaarSubsummiertVonGM, INF/Subsumption.c:91) is dropped
+  // before orientation.  Subsumption = the pair, or the subpair
+  // reached by descending the unique differing-subterm path (both
+  // sides identical outside one hole per level), is an instance of a
+  // live E-member under ONE substitution covering both sides, either
+  // orientation (WM stores each equation as Gleichung + Antigleichung
+  // twins, RUndEVerwaltung.c:407-470, so both directions sit in the
+  // Gleichungsbaum the matcher walks).  Rules never subsume here --
+  // WM consults RE_Gleichungsbaum only.  Default OFF (engine
+  // byte-identical); ON in the "Waldmeister"* presets (`-ks` default
+  // "r:e:s:p", RUN/Parameter.c:407) via Method "PopSubsume" /
+  // thvm_atp_set_use_pop_subsume.
+  u8   use_pop_subsume;
+  u32  n_cps_dropped_pop_subsumed;
+
   // Limited Resource Strategy (Riazanov & Voronkov, JSC 36, 2003).  When
   // a wall-clock budget is set, LRS estimates from the observed selection
   // rate how many MORE CPs the saturator will pop before the deadline,
@@ -5293,6 +5311,8 @@ fn u32       atp_ac_unify_emit_cps(Term li, Term ri,
 #endif
 
 fn void      thvm_atp_set_use_rule_subsume_drop(AtpState *s, u8 on);
+// WM -ks "s" pop-time E-subsumption drop (see AtpState.use_pop_subsume).
+fn void      thvm_atp_set_use_pop_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);

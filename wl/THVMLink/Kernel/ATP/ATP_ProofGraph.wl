@@ -500,7 +500,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     useFwdSub_, useBwdSub_, useBwdDemod_, symbolWeightsSpec_,
     varWeight_, randomRatio_, randomSeed_, kwsMode_,
     lazyNormalize_, coopWeight_, coopRatio_, useFvi_,
-    useImplicitCp_, useWmDemote_, useOrphanMurder_] := Block[{
+    useImplicitCp_, useWmDemote_, useOrphanMurder_, usePopSubsume_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr
@@ -514,7 +514,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         recordNorm, useLRS, useSOS, useFwdSub, useBwdSub, useBwdDemod,
         symbolWeightsArr, varWeight, randomRatio, randomSeed, kwsMode,
         lazyNormalize, coopWeight, coopRatio, useFvi, useImplicitCp,
-        useWmDemote, useOrphanMurder];
+        useWmDemote, useOrphanMurder, usePopSubsume];
     (* C engine returns LibraryFunctionError on memory-guard abort
        (THVM_ATP_RSS_ABORT_MB / THVM_ATP_HEAP_ABORT_FRAC) or other
        hard-stop conditions.  Bail BEFORE the structural part extraction

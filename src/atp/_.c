@@ -7406,6 +7406,9 @@ static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace);
 // WM `dokgS` test (1-step join via a single existing rule); defined
 // alongside the per-CP-push subsume drop a few thousand lines down.
 static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs);
+// WM -ks "s" pop-time E-subsumption test; defined next to
+// atp_cp_rule_subsumed.
+static u8 atp_pop_eq_subsumed(AtpState *s, Term lhs, Term rhs);
 // On-demand FT-mirror population for any caller of atp_rewrite_normalize_ft
 // (definition with atp_cp_trivially_joinable, far below).
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
@@ -8444,6 +8447,13 @@ fn void thvm_atp_set_use_wm_demote(AtpState *s, u8 on) {
   s->use_wm_demote = on ? 1u : 0u;
 }
 
+// WM -ks "s" pop-time E-subsumption drop (KPV_Select branch,
+// INF/KPVerwaltung.c:667; see AtpState.use_pop_subsume in thvm.h).
+fn void thvm_atp_set_use_pop_subsume(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_pop_subsume = on ? 1u : 0u;
+}
+
 // Buffer one interreduction victim's ORIGINAL sides + the TRACE_SIMPLIFY
 // parent captured at drop time -- the analog of WM's IR buffer that
 // `GMInterred` / `RMLinksInterred` fill per victim (Interreduktion.c:
@@ -8900,6 +8910,24 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     // a joined CP costs nothing -- the lever that keeps record_norm_steps
     // memory-bounded over a deep saturation.  The rules that DO get
     // added (the else-branch below) keep their full chains.
+    if (s->record_norm_steps) {
+      s->n_trace = trace_mark;
+    }
+    thvm_atp_heap_reset(hcp_norm);
+    s->step++;
+    return ATP_RUNNING;
+  }
+
+  // WM -ks "s" stage (KPV_Select, INF/KPVerwaltung.c:667): after the
+  // selection-time normalize and the joined drop, an UNORIENTABLE pair
+  // (Unvergleichbar -- thvm KBO_UN) that an existing unorientable
+  // equation subsumes is dropped before orientation
+  // (KPV_IncAnzKPspaeterSubsummiert).  Same cleanup as the joined
+  // branch: the pair feeds no rule, so its NORM_STEP chain and scratch
+  // Terms are dead.
+  if (s->use_pop_subsume && atp_compare(s, l, r) == KBO_UN &&
+      atp_pop_eq_subsumed(s, l, r)) {
+    s->n_cps_dropped_pop_subsumed++;
     if (s->record_norm_steps) {
       s->n_trace = trace_mark;
     }
@@ -12315,6 +12343,63 @@ static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs) {
     }
   }
   return 0;
+}
+
+// WM -ks "s" pop-time E-subsumption test (SS_TermpaarSubsummiertVonGM,
+// INF/Subsumption.c:91-104).  Returns 1 if `(lhs, rhs)` is subsumed by
+// a live unorientable equation "at any position": the pair itself, or
+// the subpair reached by repeatedly descending into the UNIQUE
+// differing immediate subterm (the SubsumptionBody context-stripping
+// loop, Subsumption.c:68-90 -- both sides must share the top symbol
+// and agree on every other child, else FAIL), is an instance of an
+// E-member under ONE substitution covering both sides.  Both
+// orientations of each equation are tried, mirroring WM's
+// Gleichung/Antigleichung twin storage in the Gleichungsbaum
+// (RUndEVerwaltung.c:407-470: both directions are separately indexed,
+// so MO_SubsummierendeGleichungGefunden sees each equation twice).
+// Rules (r_orient[k] == 1) never participate -- WM consults
+// RE_Gleichungsbaum only.  Caller guarantees lhs != rhs (the joined
+// drop ran) and compare(lhs, rhs) == KBO_UN (WM gates the stage on
+// Unvergleichbar, KPVerwaltung.c:667).
+static u8 atp_pop_eq_subsumed(AtpState *s, Term lhs, Term rhs) {
+  if (s->n_unorient == 0u) return 0;       // RE_GleichungsmengeLeer
+  for (;;) {
+    for (u32 k = 0; k < s->n_rules; k++) {
+      if (s->r_orient[k]) continue;                  // E only, never R
+      if (s->r_dead != NULL && s->r_dead[k]) continue;
+      {
+        RewriteSubst subst = {{0}};
+        if (thvm_match(s->lhs[k], lhs, &subst) &&
+            thvm_match(s->rhs[k], rhs, &subst)) {
+          return 1;
+        }
+      }
+      {
+        RewriteSubst subst = {{0}};
+        if (thvm_match(s->lhs[k], rhs, &subst) &&
+            thvm_match(s->rhs[k], lhs, &subst)) {
+          return 1;
+        }
+      }
+    }
+    // Descend one level: same top symbol + exactly one differing
+    // child, else no position can be subsumed (SubsumptionBody's
+    // TO_TopSymboleGleich / NachfolgendeTeiltermeGleich gates).
+    if (term_tag(lhs) != TAG_CTR || term_tag(rhs) != TAG_CTR) return 0;
+    if (term_ext(lhs) != term_ext(rhs)) return 0;
+    u32 n = term_ctr_n(lhs);
+    if (term_ctr_n(rhs) != n) return 0;
+    u32 diff = n;
+    for (u32 i = 0; i < n; i++) {
+      if (!kbo_eq(term_ctr_at(lhs, i), term_ctr_at(rhs, i))) {
+        if (diff != n) return 0;        // a second differing child
+        diff = i;
+      }
+    }
+    if (diff == n) return 0;            // identical pair: unreachable
+    lhs = term_ctr_at(lhs, diff);
+    rhs = term_ctr_at(rhs, diff);
+  }
 }
 
 // Stage 7.3b: queue subsumption check.  Returns 1 if the candidate

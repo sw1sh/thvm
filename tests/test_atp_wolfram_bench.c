@@ -581,6 +581,12 @@ int main(int argc, char **argv) {
       // where WM's original pair re-queues late at 505 and joins away
       // on re-selection).  THVM_ATP_WM_DEMOTE env overrides.
       thvm_atp_set_use_wm_demote(s, 1u);
+      // WM -ks "s" stage (default "r:e:s:p", RUN/Parameter.c:407): a
+      // popped UNORIENTABLE pair subsumed by an existing unorientable
+      // equation drops before orientation (KPV_Select,
+      // KPVerwaltung.c:667 SS_TermpaarSubsummiertVonGM).
+      // THVM_ATP_POP_SUBSUME env overrides.
+      thvm_atp_set_use_pop_subsume(s, 1u);
       // Backward subsumption (WM standard): scan existing rules and
       // soft-delete any subsumed by the newly-added rule.  +30% on
       // AndAssoc post-fix (iter 162) -- the kill churn pays off because
@@ -754,6 +760,13 @@ int main(int argc, char **argv) {
     const char *wd = getenv("THVM_ATP_WM_DEMOTE");
     if (wd != NULL && wd[0] != '\0')
       thvm_atp_set_use_wm_demote(s, (wd[0] != '0') ? 1u : 0u);
+  }
+  // THVM_ATP_POP_SUBSUME=0/1: independent toggle for the WM -ks "s"
+  // pop-time E-subsumption drop (in the WALDMEISTER preset by default).
+  {
+    const char *ps = getenv("THVM_ATP_POP_SUBSUME");
+    if (ps != NULL && ps[0] != '\0')
+      thvm_atp_set_use_pop_subsume(s, (ps[0] != '0') ? 1u : 0u);
   }
   // SOS (Set-of-Support) -- a CP-scoring bonus for CPs touching goal
   // symbols.  Not WM standard (Vampire/E heuristic); kept as opt-in.
@@ -1017,9 +1030,10 @@ int main(int argc, char **argv) {
   printf("   trace: n_trace=%u  t_max=%u  record_norm=%u\n",
          s->n_trace, s->t_max, s->record_norm_steps);
   printf("   dropped: joinable=%u queue-subsumed=%u "
-         "rule-subsumed=%u connected=%u orphan=%u lrs=%u\n",
+         "rule-subsumed=%u pop-subsumed=%u connected=%u orphan=%u lrs=%u\n",
          s->n_cps_dropped_joinable, s->n_cps_dropped_queue_subsumed,
-         s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_connected,
+         s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_pop_subsumed,
+         s->n_cps_dropped_connected,
          s->n_cps_dropped_orphan, s->n_cps_dropped_lrs);
   if (s->use_lrs) {
     printf("   lrs: recomputes=%u  horizon=%u  warmup=%u  period=%u\n",

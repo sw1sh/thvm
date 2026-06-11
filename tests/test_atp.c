@@ -859,6 +859,116 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-pop-subsume-drops-unorientable-e-instance");
+  {
+    // WM -ks "s" stage (KPV_Select, INF/KPVerwaltung.c:667
+    // SS_TermpaarSubsummiertVonGM): a popped pair that normalizes
+    // UNORIENTABLE and is an instance of an existing unorientable
+    // equation -- at the top or down the unique differing-subterm
+    // path, in either orientation, one substitution over both sides
+    // -- drops before orientation.  E = {f(x,y) = f(y,x)} (KBO_UN:
+    // equal weights, var-vs-var first argument), and the proper
+    // instance sigma = {x -> i(x), y -> z} stays KBO_UN, so it
+    // reaches the stage without joining at the selection normalize.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_pop_subsume(s, 1u);
+    CHECK_EQ(s->use_pop_subsume, 1u);
+    atp_push_rule(s, mk_f(mk_v(VAR_x), mk_v(1u)), mk_f(mk_v(1u), mk_v(VAR_x)));
+    CHECK_EQ(s->n_unorient, 1u);
+    CHECK_EQ(s->r_orient[0], 0u);
+
+    // Direct match semantics.  A proper instance (sigma x -> i(x)).
+    Term inst_l = mk_f(mk_i(mk_v(VAR_x)), mk_v(2u));
+    Term inst_r = mk_f(mk_v(2u), mk_i(mk_v(VAR_x)));
+    CHECK_EQ((int)atp_pop_eq_subsumed(s, inst_l, inst_r), 1);
+    // Reversed pair: the Antigleichung orientation also subsumes.
+    CHECK_EQ((int)atp_pop_eq_subsumed(s, inst_r, inst_l), 1);
+    // Position descent: the instance one level down under i(.).
+    CHECK_EQ((int)atp_pop_eq_subsumed(s, mk_i(inst_l), mk_i(inst_r)), 1);
+    // TWO differing children: SubsumptionBody's context-stripping
+    // refuses (NachfolgendeTeiltermeGleich), and the top match fails
+    // (the one substitution cannot cover both sides) -- not subsumed.
+    CHECK_EQ((int)atp_pop_eq_subsumed(s,
+        mk_f(mk_i(mk_v(VAR_x)), mk_v(1u)),
+        mk_f(mk_i(mk_v(1u)), mk_v(VAR_x))), 0);
+    // Rules never subsume at this stage (WM walks RE_Gleichungsbaum
+    // only): an instance of an ORIENTED rule is not dropped here.
+    atp_push_rule(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    CHECK_EQ(s->r_orient[s->n_rules - 1u], 1u);
+    CHECK_EQ((int)atp_pop_eq_subsumed(s,
+        mk_f(mk_i(mk_v(VAR_x)), mk_e()), mk_i(mk_v(VAR_x))), 0);
+
+    // Through thvm_atp_step: the instance pops, normalizes unchanged
+    // (the ordered-rewrite gate cannot order it), compares
+    // Unvergleichbar, and drops -- no rule added.
+    u32 tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
+                               inst_l, inst_r, NULL, 0);
+    atp_cp_heap_push(s, inst_l, inst_r, tc, 0u);
+    CHECK_EQ(s->n_cps, 1u);
+    u32 rules0 = s->n_rules;
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_cps_dropped_pop_subsumed, 1u);
+    CHECK_EQ(s->n_rules, rules0);
+    // Same drop one level down the differing-subterm path.
+    Term deep_l = mk_i(inst_l);
+    Term deep_r = mk_i(inst_r);
+    tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
+                           deep_l, deep_r, NULL, 0);
+    atp_cp_heap_push(s, deep_l, deep_r, tc, 0u);
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_cps_dropped_pop_subsumed, 2u);
+    CHECK_EQ(s->n_rules, rules0);
+    // An ORIENTABLE pair is NOT tested -- WM gates the stage on
+    // Unvergleichbar -- and orients into a rule as before.  (An
+    // orientable proper instance of the equation cannot reach orient:
+    // the selection normalize's ordered rewriting joins it, in thvm
+    // and WM alike, so a ground non-instance pair is the probe.)
+    rules0 = s->n_rules;
+    Term ori_l = mk_f(mk_a(), mk_a());
+    Term ori_r = mk_a();
+    tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
+                           ori_l, ori_r, NULL, 0);
+    atp_cp_heap_push(s, ori_l, ori_r, tc, 0u);
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_cps_dropped_pop_subsumed, 2u);
+    CHECK_EQ(s->n_rules, rules0 + 1u);
+    CHECK_EQ(s->r_orient[rules0], 1u);
+    thvm_atp_free(s);
+
+    // A NON-subsumed unorientable pair survives to orientation
+    // (fresh state so the pop is deterministic).
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_pop_subsume(s, 1u);
+    atp_push_rule(s, mk_f(mk_v(VAR_x), mk_v(1u)), mk_f(mk_v(1u), mk_v(VAR_x)));
+    Term sur_l = mk_f(mk_v(VAR_x), mk_i(mk_v(1u)));
+    Term sur_r = mk_f(mk_v(1u), mk_i(mk_v(VAR_x)));
+    tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
+                           sur_l, sur_r, NULL, 0);
+    atp_cp_heap_push(s, sur_l, sur_r, tc, 0u);
+    u32 unorient0 = s->n_unorient;
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_cps_dropped_pop_subsumed, 0u);
+    CHECK(s->n_unorient > unorient0);
+    thvm_atp_free(s);
+
+    // Default OFF: the same instance pop is NOT dropped
+    // (byte-identical legacy path) -- it orients into the unfailing
+    // equation slots.
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ(s->use_pop_subsume, 0u);
+    atp_push_rule(s, mk_f(mk_v(VAR_x), mk_v(1u)), mk_f(mk_v(1u), mk_v(VAR_x)));
+    Term off_l = mk_f(mk_i(mk_v(VAR_x)), mk_v(2u));
+    Term off_r = mk_f(mk_v(2u), mk_i(mk_v(VAR_x)));
+    tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
+                           off_l, off_r, NULL, 0);
+    atp_cp_heap_push(s, off_l, off_r, tc, 0u);
+    rules0 = s->n_rules;
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_cps_dropped_pop_subsumed, 0u);
+    CHECK(s->n_rules > rules0);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-demote-equation-victim-requeues-original-sides");
   {
     // Waldmeister KPV_IROpferBehandeln (KPVerwaltung.c:517-518): an
