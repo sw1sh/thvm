@@ -784,6 +784,17 @@ int main(int argc, char **argv) {
     if (es != NULL && es[0] != '\0')
       thvm_atp_set_use_eset_subsume(s, (es[0] != '0') ? 1u : 0u);
   }
+  // THVM_ATP_BWD_GROUND_JOIN=0/1: WM backward ground-joinability
+  // sterilization (-gj, RueckwaertsGrundzusammenfuehrbarkeit).  NOT in
+  // the WALDMEISTER preset: WM's -gj defaults OFF (RUN/Parameter.c:317)
+  // and no strategy table enables it, so the faithful preset leaves it
+  // off too.  thvm_atp_init already parsed the env; this re-set keeps
+  // the toggle override-able after preset blocks like its siblings.
+  {
+    const char *bg = getenv("THVM_ATP_BWD_GROUND_JOIN");
+    if (bg != NULL && bg[0] != '\0')
+      thvm_atp_set_use_bwd_ground_join(s, (bg[0] != '0') ? 1u : 0u);
+  }
   // SOS (Set-of-Support) -- a CP-scoring bonus for CPs touching goal
   // symbols.  Not WM standard (Vampire/E heuristic); kept as opt-in.
   {
@@ -1051,8 +1062,10 @@ int main(int argc, char **argv) {
            s->n_lrs_recomputes, s->lrs_horizon,
            s->lrs_warmup_selections, s->lrs_recompute_period);
   }
-  printf("   dropped: ground-joinable=%u connected-below-peak=%u\n",
-         s->n_cps_ground_joinable, s->n_cps_dropped_connected_below_peak);
+  printf("   dropped: ground-joinable=%u connected-below-peak=%u "
+         "facts-gj-sterilized=%u\n",
+         s->n_cps_ground_joinable, s->n_cps_dropped_connected_below_peak,
+         s->n_facts_bwd_ground_joinable);
   {
     u64 cp_capped = 0, depth_capped = 0;
     thvm_cp_caps_get(&cp_capped, &depth_capped);

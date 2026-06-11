@@ -3930,6 +3930,25 @@ fn u8          fol_is_tseitin_aux(u32 label);
 // fast-path skip.  See AtpState.cp_last_norm_r_revision / r_revision.
 #define ATP_CP_NORM_COOKIE_NONE 0xFFFFFFFFu
 
+// Per-rule-slot ground-joinability status (AtpState.r_gj_status) -- the
+// thvm image of WM's GZ_statusT (general.h:94-95).  STICKY statuses
+// (never retested): JOINABLE (the fact is sterile -- WM
+// Grundzusammenfuehrbar + the `!Faktum->Grundzusammenfuehrbar` guard,
+// Hauptkomponenten.c:268/:288), VALUABLE (A/C/extended-C shape, WM
+// GZ_wertvoll via PROTECT_3_PERMS), HOPELESS (<= 1 distinct variable
+// or both sides ground, WM GZ_aussichtslos -- the backward walk skips
+// `gzfbStatus <= GZ_aussichtslos`, Grundzusammenfuehrung.c:824).
+// FAILED facts are retested on every new fact (WM retests them
+// witness-gated; thvm skips the witness cache -- pure perf).
+#define ATP_GJ_ST_UNKNOWN   0u
+#define ATP_GJ_ST_JOINABLE  1u
+#define ATP_GJ_ST_VALUABLE  2u
+#define ATP_GJ_ST_HOPELESS  3u
+#define ATP_GJ_ST_FAILED    4u
+// Sentinel for "no victim excluded" in the GJ driver
+// (AtpState.gj_exclude): any value >= n_rules works.
+#define ATP_GJ_NO_EXCLUDE   0xFFFFFFFFu
+
 // Reason labels for trace entries (used as the CTR label).
 // Each TraceEntry is a TAG_CTR with label = reason and children =
 // [NUM(parent_a), NUM(parent_b), lhs, rhs].  Parent index sentinel
@@ -4868,6 +4887,66 @@ typedef struct {
   u8   use_eset_subsume;
   u32  n_eqs_dropped_eset_subsumed;
 
+  // WM backward ground-joinability sterilization
+  // (RueckwaertsGrundzusammenfuehrbarkeit, INF/Hauptkomponenten.c:
+  // 260-306, called at the END of ArbeitsAufnahme :329 AFTER CP
+  // generation + the IR-victim drain).  After every new fact, WM
+  // re-tests each EXISTING rule (RE_forRegelnRobust :265) and each
+  // distinguished-direction equation (:286) for ground joinability
+  // against the system extended by the new fact -- the victim itself
+  // excluded from rewriting (DarfNichtReduzieren :267/:287, consumed
+  // MatchOperationen.c:641/742/1660/1697) and its maximal side(s)
+  // root-protected by the strict-encompassment Dreieck gate
+  // (Grundzusammenfuehrung.c:235-240 via NF_geschuetzteNormalformRE,
+  // NFBildung.c:767-779; sSch for rules / allesSch for equations,
+  // :841).  A fact shown ground-joinable is STERILIZED per the
+  // compiled GZ_ZSFB_BEHALTEN=1 (Grundzusammenfuehrung.h:52): it
+  // STAYS in R/E for rewriting, but (a) KPV_KillParent
+  // (KPVerwaltung.c:343-351) sets lebtNoch=FALSE so its queued CPs
+  // are dropped as orphans at pop (selectNonOrphan :540 -- thvm
+  // analog: atp_trace_mark_dead + atp_cp_is_orphan), and (b) it is
+  // excluded from ALL future CP formation as either parent
+  // (Weggefiltert, Unifikation1.c:967-972; new-fact skip :1518/:1588).
+  // The same -gj flag also runs the FORWARD fact test at creation
+  // (RUndEVerwaltung.c:182-183 rules / :457-460 equations), which
+  // additionally tags A/C/extended-C shaped facts GZ_wertvoll
+  // (PROTECT_3_PERMS, Grundzusammenfuehrung.c:808-814) so they are
+  // never sterilized.
+  //
+  // Default OFF, matching WM: the -gj CLI option defaults FALSE
+  // (RUN/Parameter.c:317, applied :635) and NO strategy table emits it
+  // (YFiles.c:125-128 `gj()` has zero call sites), so the unconfigured
+  // .pr run bails at Hauptkomponenten.c:263.  Opt-in via Method
+  // {... "BackwardGroundJoin" -> True} / THVM_ATP_BWD_GROUND_JOIN.
+  // The test reuses the Twee-style groundJoin driver
+  // (atp_cp_ground_joinable) -- the same ground-joinability criterion
+  // as WM's MN90 enumeration, with two WM-conservative envelopes:
+  // root protection is kept for the WHOLE test (WM drops it once a
+  // side reduces / once the instantiated sides become comparable --
+  // a permissive refinement; keeping it only under-sterilizes), and
+  // WM's failure-witness retest gate (USE_WITNESSES,
+  // Grundzusammenfuehrung.c:828-840) is not cached -- FAILED facts
+  // are simply retested per new fact (pure perf, same verdicts).
+  u8   use_bwd_ground_join;
+  // Count of facts sterilized by the backward walk (bench stats line).
+  u32  n_facts_bwd_ground_joinable;
+  // Per-rule-slot WM gzfbStatus cache (general.h:94-95 GZ_statusT,
+  // "Reihenfolge wichtig" -- order matters: backward skips
+  // status <= GZ_aussichtslos = {joinable, valuable, hopeless}).
+  // Grows/compacts in lockstep with lhs[]/rhs[] (atp_ensure_rule_cap /
+  // the interreduce shift loop); reset per slot in atp_push_rule.
+  u8  *r_gj_status;
+  // GJ-driver victim exclusion (WM DarfNichtReduzieren): rule slot the
+  // gj_rewrite_step loop must skip.  ATP_GJ_NO_EXCLUDE when inactive
+  // (the forward CP-drop path -- byte-identical to pre-port).
+  u32  gj_exclude;
+  // Dreieck root-protection anchors: the victim's ORIGINAL sides.  A
+  // root step on a protected side fires only via a rule whose LHS is
+  // STRICTLY more general than the anchor (WM DreieckOK,
+  // Grundzusammenfuehrung.c:235-240).  0 = side unprotected.
+  Term gj_protect_l;
+  Term gj_protect_r;
+
   // Limited Resource Strategy (Riazanov & Voronkov, JSC 36, 2003).  When
   // a wall-clock budget is set, LRS estimates from the observed selection
   // rate how many MORE CPs the saturator will pop before the deadline,
@@ -5347,6 +5426,10 @@ fn void      thvm_atp_set_use_pop_subsume(AtpState *s, u8 on);
 // WM E-set subsumption destroy on new-equation entry
 // (GMSubsummierenMitGleichung; see AtpState.use_eset_subsume).
 fn void      thvm_atp_set_use_eset_subsume(AtpState *s, u8 on);
+// WM backward ground-joinability sterilization (-gj,
+// RueckwaertsGrundzusammenfuehrbarkeit; see
+// AtpState.use_bwd_ground_join).  Default OFF = WM's -gj default.
+fn void      thvm_atp_set_use_bwd_ground_join(AtpState *s, u8 on);
 fn void      thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);

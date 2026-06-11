@@ -811,6 +811,16 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // byte-identical).
   mint eset_subsume = MArgument_getInteger(args[37]);
   thvm_atp_set_use_eset_subsume(atp, (u8)(eset_subsume != 0));
+  // Method -> {... "BackwardGroundJoin" -> True}: WM backward
+  // ground-joinability sterilization (-gj,
+  // RueckwaertsGrundzusammenfuehrbarkeit, INF/Hauptkomponenten.c:
+  // 260-306) -- after each new fact, existing facts that became
+  // ground-joinable are sterilized (kept for rewriting, excluded from
+  // CP formation, queued CPs orphaned).  args[38]; 0 = off (default,
+  // matching WM's -gj CLI default, RUN/Parameter.c:317 -- NOT in the
+  // Waldmeister presets).
+  mint bwd_gj = MArgument_getInteger(args[38]);
+  thvm_atp_set_use_bwd_ground_join(atp, (u8)(bwd_gj != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any

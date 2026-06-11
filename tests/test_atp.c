@@ -3954,6 +3954,261 @@ int main(void) {
     }
     #undef MK_PLUS
   }
+
+  // ==================================================================
+  // WM backward ground-joinability sterilization (inventory row H:
+  // RueckwaertsGrundzusammenfuehrbarkeit, INF/Hauptkomponenten.c:
+  // 260-306; -gj default OFF, RUN/Parameter.c:317).  These call the
+  // static fact-level halves directly (same TU).
+  // ==================================================================
+  {
+    // Signature: f/1 (label 2, w1), h/2 (label 3, w1), g2/2 (label 4,
+    // w1), c/0 (label 5, w1).
+    enum { BG_F = 2u, BG_H = 3u, BG_G2 = 4u, BG_C = 5u };
+    static u32 bgw[6] = {0, 0, 1, 1, 1, 1};
+    static u32 bgp[6] = {0, 0, 4, 3, 2, 1};
+    static const KboConfig BG_CFG = {
+      .weights = bgw, .precedence = bgp, .n_labels = 6, .var_weight = 1,
+    };
+    #define MK_BF(t)    ({ Term _c[1] = {(t)};      term_new_ctr(BG_F,  _c, 1); })
+    #define MK_BH(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(BG_H,  _c, 2); })
+    #define MK_BG2(a, b)({ Term _c[2] = {(a), (b)}; term_new_ctr(BG_G2, _c, 2); })
+
+    // H.1: a queued fact that BECOMES ground-joinable after a new rule
+    // arrives is sterilized by the backward walk -- status JOINABLE,
+    // counter ticked, queued CP orphaned (KPV_KillParent analog), but
+    // the fact STAYS live in R (GZ_ZSFB_BEHALTEN=1 keep-for-rewriting).
+    TEST_BEGIN("atp/bwd-ground-join/became-joinable-sterilized");
+    {
+      AtpState *s = thvm_atp_init(&BG_CFG, 64);
+      CHECK_EQ(s->use_bwd_ground_join, 0u);            // WM -gj default OFF
+      CHECK_EQ(s->gj_exclude, ATP_GJ_NO_EXCLUDE);
+      Term x = mk_v(0u), y = mk_v(1u);
+      // victim (slot 0): h(f(x), y) -> h(x, y); 2 distinct vars.
+      atp_push_rule(s, MK_BH(MK_BF(x), y), MK_BH(x, y));
+      // Self-exclusion guard: in isolation the victim must NOT prove
+      // joinable through itself (WM DarfNichtReduzieren).
+      CHECK_EQ(atp_gj_fact_test(s, 0u), ATP_GJ_ST_FAILED);
+      // New fact (slot 1): f(x) -> x -- now every ground instance of
+      // the victim joins through it (a non-root step, no Dreieck gate).
+      atp_push_rule(s, MK_BF(x), x);
+      // Trace plumbing: victim rule + a queued CP descending from it.
+      u32 t0  = atp_trace_push(s, TRACE_ORIENT, ATP_TRACE_NONE,
+                               ATP_TRACE_NONE, s->lhs[0], s->rhs[0]);
+      u32 t1  = atp_trace_push(s, TRACE_ORIENT, ATP_TRACE_NONE,
+                               ATP_TRACE_NONE, s->lhs[1], s->rhs[1]);
+      s->r_trace[0] = t0;
+      s->r_trace[1] = t1;
+      u32 tcp = atp_trace_push(s, TRACE_CP, t0, t1, MK_BH(x, y), MK_BH(y, x));
+      CHECK_EQ(atp_cp_is_orphan(s, tcp), 0);
+      thvm_atp_set_use_bwd_ground_join(s, 1u);
+      CHECK_EQ(s->use_bwd_ground_join, 1u);
+      // The walk skips the just-added range [1, 2) = the new fact.
+      atp_bwd_ground_join_walk(s, 1u, 2u);
+      CHECK_EQ(s->r_gj_status[0], ATP_GJ_ST_JOINABLE);
+      CHECK_EQ(s->n_facts_bwd_ground_joinable, 1u);
+      CHECK_EQ(atp_cp_is_orphan(s, tcp), 1);           // children orphaned
+      CHECK_EQ(s->r_dead[0], 0u);                      // fact kept in R
+      CHECK_EQ(s->r_gj_status[1], ATP_GJ_ST_UNKNOWN);  // Neues skipped
+      // Walk state restored: the forward CP-drop path stays unscoped.
+      CHECK_EQ(s->gj_exclude, ATP_GJ_NO_EXCLUDE);
+      CHECK_EQ(s->gj_protect_l, (Term)0);
+      CHECK_EQ(s->gj_protect_r, (Term)0);
+      thvm_atp_free(s);
+    }
+
+    // H.2: a non-ground-joinable fact SURVIVES the walk -- status
+    // FAILED (retestable), no sterilize, no orphaning.
+    TEST_BEGIN("atp/bwd-ground-join/non-joinable-survives");
+    {
+      AtpState *s = thvm_atp_init(&BG_CFG, 64);
+      Term x = mk_v(0u), y = mk_v(1u);
+      Term c = term_new_ctr(BG_C, NULL, 0);
+      // victim (slot 0): g2(x, y) -> c; nothing reduces g2(x, y).
+      atp_push_rule(s, MK_BG2(x, y), c);
+      atp_push_rule(s, MK_BF(x), x);                   // the new fact
+      u32 t0 = atp_trace_push(s, TRACE_ORIENT, ATP_TRACE_NONE,
+                              ATP_TRACE_NONE, s->lhs[0], s->rhs[0]);
+      s->r_trace[0] = t0;
+      thvm_atp_set_use_bwd_ground_join(s, 1u);
+      atp_bwd_ground_join_walk(s, 1u, 2u);
+      CHECK_EQ(s->r_gj_status[0], ATP_GJ_ST_FAILED);
+      CHECK_EQ(s->n_facts_bwd_ground_joinable, 0u);
+      CHECK_EQ(atp_trace_is_dead(s, t0), 0);
+      thvm_atp_free(s);
+    }
+
+    // H.3: sticky classifications.  Commutativity is GZ_wertvoll
+    // (PROTECT_3_PERMS) -- never sterilized even though provably
+    // ground-joinable (F.1d).  <= 1 distinct var / ground facts are
+    // GZ_aussichtslos.
+    TEST_BEGIN("atp/bwd-ground-join/valuable-and-hopeless-sticky");
+    {
+      AtpState *s = thvm_atp_init(&BG_CFG, 64);
+      Term x = mk_v(0u), y = mk_v(1u);
+      Term c = term_new_ctr(BG_C, NULL, 0);
+      atp_push_rule(s, MK_BH(x, y), MK_BH(y, x));      // comm (unorientable)
+      atp_push_rule(s, MK_BF(x), x);                   // 1 distinct var
+      atp_push_rule(s, MK_BF(c), c);                   // ground
+      CHECK_EQ(atp_gj_fact_test(s, 0u), ATP_GJ_ST_VALUABLE);
+      CHECK_EQ(atp_gj_fact_test(s, 1u), ATP_GJ_ST_HOPELESS);
+      CHECK_EQ(atp_gj_fact_test(s, 2u), ATP_GJ_ST_HOPELESS);
+      // The walk never sterilizes them: statuses persist, counter 0.
+      thvm_atp_set_use_bwd_ground_join(s, 1u);
+      atp_bwd_ground_join_walk(s, 3u, 3u);             // no skip range
+      CHECK_EQ(s->n_facts_bwd_ground_joinable, 0u);
+      CHECK_EQ(s->r_gj_status[0], ATP_GJ_ST_VALUABLE);
+      CHECK_EQ(s->r_gj_status[1], ATP_GJ_ST_HOPELESS);
+      CHECK_EQ(s->r_gj_status[2], ATP_GJ_ST_HOPELESS);
+      thvm_atp_free(s);
+    }
+
+    // H.4: Weggefiltert (Unifikation1.c:967-972) -- a sterilized fact
+    // forms no CP as either parent.  g2(f(x), y) -> y overlapped with
+    // f(c) -> c yields a genuine CP; after marking the parent sterile
+    // the SAME overlap yields none.
+    TEST_BEGIN("atp/bwd-ground-join/sterile-parent-forms-no-cp");
+    {
+      AtpState *s = thvm_atp_init(&BG_CFG, 64);
+      Term x = mk_v(0u), y = mk_v(1u);
+      Term c = term_new_ctr(BG_C, NULL, 0);
+      atp_push_rule(s, MK_BG2(MK_BF(x), y), y);
+      atp_push_rule(s, MK_BF(MK_BF(c)), c);
+      CriticalPair buf[ATP_CP_BATCH];
+      u32 before = atp_gen_one(s, 0u, 1u, buf);
+      CHECK(before > 0u);
+      s->r_gj_status[0] = ATP_GJ_ST_JOINABLE;
+      CHECK_EQ(atp_gen_one(s, 0u, 1u, buf), 0u);       // sterile as i
+      CHECK_EQ(atp_gen_one(s, 1u, 0u, buf), 0u);       // sterile as j
+      thvm_atp_free(s);
+    }
+
+    // H.5: Dreieck root protection (Grundzusammenfuehrung.c:235-240 /
+    // NFBildung.c:767-779).  A victim whose ONLY join path needs a
+    // ROOT step by an EQUALLY-general rule stays FAILED (the gate
+    // blocks it); a victim joinable through a STRICTLY-more-general
+    // root rule -- the classic instance-redundancy shape -- is
+    // sterilized (the gate admits proper encompassment).
+    TEST_BEGIN("atp/bwd-ground-join/dreieck-root-protection");
+    {
+      // p/1 (label 2, w1), r2/1 (label 3, w2), h2/2 (label 4, w3),
+      // g4/2 (label 5, w3), g5w/2 (label 6, w2), f2/1 (label 7, w1).
+      enum { DK_P = 2u, DK_R2 = 3u, DK_H2 = 4u, DK_G4 = 5u,
+             DK_G5W = 6u, DK_F2 = 7u };
+      static u32 dkw[8] = {0, 0, 1, 2, 3, 3, 2, 1};
+      static u32 dkp[8] = {0, 0, 6, 5, 4, 3, 2, 1};
+      static const KboConfig DK_CFG = {
+        .weights = dkw, .precedence = dkp, .n_labels = 8, .var_weight = 1,
+      };
+      #define MK_P1(t)     ({ Term _c[1] = {(t)};      term_new_ctr(DK_P,   _c, 1); })
+      #define MK_R2(t)     ({ Term _c[1] = {(t)};      term_new_ctr(DK_R2,  _c, 1); })
+      #define MK_H2(a, b)  ({ Term _c[2] = {(a), (b)}; term_new_ctr(DK_H2,  _c, 2); })
+      #define MK_G4(a, b)  ({ Term _c[2] = {(a), (b)}; term_new_ctr(DK_G4,  _c, 2); })
+      #define MK_G5W(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(DK_G5W, _c, 2); })
+      #define MK_F2T(t)    ({ Term _c[1] = {(t)};      term_new_ctr(DK_F2,  _c, 1); })
+      AtpState *s = thvm_atp_init(&DK_CFG, 64);
+      Term x = mk_v(0u), y = mk_v(1u);
+      // BLOCKED case.  victim (slot 0): h2(x, y) -> p(x).  Joins only
+      // via slot 1's EQUALLY-general h2(x, y) -> r2(x) at the ROOT
+      // (then r2(x) -> p(x)); the anchor h2(x, y) is not strictly
+      // encompassed by h2(x, y), so the gate refuses -> FAILED.
+      atp_push_rule(s, MK_H2(x, y), MK_P1(x));
+      atp_push_rule(s, MK_H2(x, y), MK_R2(x));
+      atp_push_rule(s, MK_R2(x), MK_P1(x));
+      CHECK_EQ(atp_gj_fact_test(s, 0u), ATP_GJ_ST_FAILED);
+      // ADMITTED case.  victim (slot 3): g4(f2(x), y) -> g5w(f2(x), y)
+      // is an INSTANCE of slot 4's g4(u, v) -> g5w(u, v); the general
+      // rule properly encompasses the anchor g4(f2(x), y), so the gate
+      // admits the root step and the victim joins -> JOINABLE.
+      atp_push_rule(s, MK_G4(MK_F2T(x), y), MK_G5W(MK_F2T(x), y));
+      atp_push_rule(s, MK_G4(x, y), MK_G5W(x, y));
+      CHECK_EQ(atp_gj_fact_test(s, 3u), ATP_GJ_ST_JOINABLE);
+      thvm_atp_free(s);
+      #undef MK_P1
+      #undef MK_R2
+      #undef MK_H2
+      #undef MK_G4
+      #undef MK_G5W
+      #undef MK_F2T
+    }
+
+    // H.6: end-to-end through thvm_atp_step.  Phase 1 saturates the
+    // victim h(f(x,y)) = h(f(y,x)) alone -- it is IRREDUCIBLE (ordered
+    // rewriting cannot apply commutativity over bare variables, so
+    // interreduction can never drop it: the exact residue class row H
+    // exists for) and not yet ground-joinable.  Phase 2 feeds
+    // commutativity f(x,y) = f(y,x); at ITS step's tail the backward
+    // walk re-tests the victim against the extended system, finds every
+    // ground instance joins through comm under the instance order, and
+    // STERILIZES it: status JOINABLE, parent trace marked dead (queued
+    // CPs orphaned), fact kept live in R/E.  With the flag OFF
+    // (default = WM -gj default) the same sequence marks nothing.
+    TEST_BEGIN("atp/bwd-ground-join/e2e-step-walk-sterilizes");
+    {
+      enum { E2_F = 2u, E2_H = 3u };
+      static u32 e2w[4] = {0, 0, 1, 1};
+      static u32 e2p[4] = {0, 0, 2, 1};
+      static const KboConfig E2_CFG = {
+        .weights = e2w, .precedence = e2p, .n_labels = 4, .var_weight = 1,
+      };
+      #define MK_EF(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(E2_F, _c, 2); })
+      #define MK_EH(t)    ({ Term _c[1] = {(t)};      term_new_ctr(E2_H, _c, 1); })
+      for (u32 flag = 0u; flag <= 1u; flag++) {
+        AtpState *s = thvm_atp_init(&E2_CFG, 200);
+        s->cp_weight_mode = ATP_CP_WEIGHT_ADD;
+        thvm_atp_set_use_bwd_ground_join(s, (u8)flag);
+        Term x = mk_v(0u), y = mk_v(1u);
+        // Phase 1: the victim saturates alone (forward test at birth:
+        // FAILED -- comm is not in the system yet).
+        thvm_atp_add_equation(s, MK_EH(MK_EF(x, y)), MK_EH(MK_EF(y, x)));
+        thvm_atp_run(s);
+        u32 vic = ATP_RULE_NONE;
+        for (u32 i = 0; i < s->n_rules; i++) {
+          if (!s->r_dead[i] && term_tag(s->lhs[i]) == TAG_CTR &&
+              term_ext(s->lhs[i]) == E2_H) {
+            vic = i;
+            break;
+          }
+        }
+        CHECK(vic != ATP_RULE_NONE);
+        CHECK_EQ(s->r_gj_status[vic],
+                 flag ? ATP_GJ_ST_FAILED : ATP_GJ_ST_UNKNOWN);
+        // Phase 2: commutativity arrives; its step's tail walk re-tests
+        // the victim against the extended system.
+        thvm_atp_add_equation(s, MK_EF(x, y), MK_EF(y, x));
+        thvm_atp_run(s);
+        // Re-locate the victim: a phase-2 interreduce drop would have
+        // compacted the slots (status/trace ride along).
+        vic = ATP_RULE_NONE;
+        for (u32 i = 0; i < s->n_rules; i++) {
+          if (!s->r_dead[i] && term_tag(s->lhs[i]) == TAG_CTR &&
+              term_ext(s->lhs[i]) == E2_H) {
+            vic = i;
+            break;
+          }
+        }
+        CHECK(vic != ATP_RULE_NONE);
+        if (flag) {
+          CHECK_EQ(s->r_gj_status[vic], ATP_GJ_ST_JOINABLE);
+          CHECK(s->n_facts_bwd_ground_joinable >= 1u);
+          CHECK_EQ(s->r_dead[vic], 0u);          // kept in R/E for rewriting
+          CHECK_EQ(atp_trace_is_dead(s, s->r_trace[vic]), 1);
+        } else {
+          // Default gating: the walk never ran, nothing is marked.
+          CHECK_EQ(s->r_gj_status[vic], ATP_GJ_ST_UNKNOWN);
+          CHECK_EQ(s->n_facts_bwd_ground_joinable, 0u);
+          CHECK_EQ(atp_trace_is_dead(s, s->r_trace[vic]), 0);
+        }
+        thvm_atp_free(s);
+      }
+      #undef MK_EF
+      #undef MK_EH
+    }
+
+    #undef MK_BF
+    #undef MK_BH
+    #undef MK_BG2
+  }
 #endif  // ATP_CP_GROUND_JOIN
 
 #ifdef ATP_FLATTERM_DIFF

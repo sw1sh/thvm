@@ -683,19 +683,22 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   u8   *nd  = (u8   *)realloc(s->r_dead,           cap * sizeof(u8));
   Term *nls = (Term *)realloc(s->r_dead_lhs_save,  cap * sizeof(Term));
   Term *nrs = (Term *)realloc(s->r_dead_rhs_save,  cap * sizeof(Term));
+  u8   *ngj = (u8   *)realloc(s->r_gj_status,      cap * sizeof(u8));
   if (nl == NULL || nr == NULL || nt == NULL || no == NULL ||
-      nd == NULL || nls == NULL || nrs == NULL) {
+      nd == NULL || nls == NULL || nrs == NULL || ngj == NULL) {
     fprintf(stderr, "atp_ensure_rule_cap: realloc to %u rules failed\n",
             cap);
     exit(1);
   }
   s->lhs = nl; s->rhs = nr; s->r_trace = nt; s->r_orient = no;
   s->r_dead = nd; s->r_dead_lhs_save = nls; s->r_dead_rhs_save = nrs;
+  s->r_gj_status = ngj;
   for (u32 i = s->r_cap; i < cap; i++) {
     s->r_trace[i] = ATP_TRACE_NONE;
     s->r_dead[i] = 0;
     s->r_dead_lhs_save[i] = 0;
     s->r_dead_rhs_save[i] = 0;
+    s->r_gj_status[i] = ATP_GJ_ST_UNKNOWN;
   }
 #ifdef THVM_ATPFT_RULES
   // Stage 4: grow the parallel AtpFt slot arrays in lockstep with the
@@ -4254,6 +4257,15 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // env knob THVM_ATP_FVI=1 turns it on for CLI bench runs.  WL side
   // calls thvm_atp_set_use_fvi when Method "FreeVarInstance" -> True.
   s->use_fvi = (u8)atp_env_on("THVM_ATP_FVI");
+  // WM backward ground-joinability sterilization (-gj, default OFF in
+  // WM's CLI -- RUN/Parameter.c:317 -- and so here): env knob
+  // THVM_ATP_BWD_GROUND_JOIN=1 for CLI runs; WL side calls
+  // thvm_atp_set_use_bwd_ground_join on Method "BackwardGroundJoin".
+  s->use_bwd_ground_join = (u8)atp_env_on("THVM_ATP_BWD_GROUND_JOIN");
+  // GJ-driver victim exclusion + root protection: inactive unless a
+  // fact-level GZ test is in flight (the forward CP-drop path never
+  // sets them, staying byte-identical).
+  s->gj_exclude = ATP_GJ_NO_EXCLUDE;
 #ifdef THVM_ATPFT_RULES
   // Stage 4: stand up the AtpFt slab pool BEFORE atp_ensure_rule_cap
   // grows the parallel slot arrays (those start NULL; cells get
@@ -4379,6 +4391,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->r_dead);
   free(s->r_dead_lhs_save);
   free(s->r_dead_rhs_save);
+  free(s->r_gj_status);
   free(s->r_trace_dead);
 #ifdef THVM_ATPFT_RULES
   // Stage 4: release the parallel pointer arrays + drop the slab pool
@@ -8109,6 +8122,9 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   atp_ensure_rule_cap(s, s->n_rules + 1);
   s->lhs[s->n_rules] = lhs;
   s->rhs[s->n_rules] = rhs;
+  // A compaction may have vacated this slot with a stale GJ status;
+  // every fresh fact starts untested (WM: a fresh termpair object).
+  s->r_gj_status[s->n_rules] = ATP_GJ_ST_UNKNOWN;
 #ifdef THVM_ATPFT_RULES
   // Stage 4: mirror the Term pair into the parallel AtpFt slots
   // immediately so every later observer sees the two paths in lockstep
@@ -8456,6 +8472,15 @@ fn void thvm_atp_set_use_pop_subsume(AtpState *s, u8 on) {
 // WM E-set subsumption destroy on new-equation entry
 // (GMSubsummierenMitGleichung, INF/Interreduktion.c:251-274; see
 // AtpState.use_eset_subsume in thvm.h).
+// WM backward ground-joinability sterilization, -gj
+// (RueckwaertsGrundzusammenfuehrbarkeit, INF/Hauptkomponenten.c:260-306;
+// see AtpState.use_bwd_ground_join in thvm.h).  Default OFF = WM's -gj
+// CLI default (RUN/Parameter.c:317).
+fn void thvm_atp_set_use_bwd_ground_join(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_bwd_ground_join = on ? 1u : 0u;
+}
+
 fn void thvm_atp_set_use_eset_subsume(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_eset_subsume = on ? 1u : 0u;
@@ -8578,6 +8603,13 @@ static u8 g_atp_proof_oriented_only;
 // Forward decl: the Waldmeister IR-victim drain (use_wm_demote), defined
 // next to thvm_atp_interreduce which fills the buffer it drains.
 static void atp_wm_demote_drain(AtpState *s);
+
+#ifdef ATP_CP_GROUND_JOIN
+// Forward decls: the WM -gj fact-level ground-joinability halves
+// (use_bwd_ground_join), defined with the groundJoin driver.
+static void atp_gj_classify_added(AtpState *s, AtpAddedRange added);
+static void atp_bwd_ground_join_walk(AtpState *s, u32 skip_lo, u32 skip_hi);
+#endif
 
 // Slice-aware companion: same one-step metadata-recording shape as
 // atp_proof_rewrite_step but the rule set is a passed-in slice
@@ -8976,6 +9008,14 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     s->r_trace[rid] = t;
   }
 
+#ifdef ATP_CP_GROUND_JOIN
+  // WM -gj forward fact test at creation (RUndEVerwaltung.c:182-183 /
+  // :457-460): runs BEFORE interreduction + CP generation, matching
+  // WM's RE_Erzeugte* -> ArbeitsAufnahme order.  The status rides the
+  // slot through the interreduce compaction below.
+  if (s->use_bwd_ground_join) atp_gj_classify_added(s, added);
+#endif
+
   // Interreduce shifts new-rule indices down by `dropped`.
   u64 _ph_ir_t0 = atp_phase_now();
   u32 dropped = thvm_atp_interreduce(s, added);
@@ -9018,6 +9058,17 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // produced (WM's ArbeitsAufnahme work order, Hauptkomponenten.c:
   // 308-331; McCune-II's `ues 32` carries age 32, after CPs 14-31).
   if (s->n_irv > 0u) atp_wm_demote_drain(s);
+
+#ifdef ATP_CP_GROUND_JOIN
+  // WM RueckwaertsGrundzusammenfuehrbarkeit (ArbeitsAufnahme,
+  // Hauptkomponenten.c:329): AFTER this fact's CPs were generated and
+  // the IR-victim drain ran, re-test every EXISTING fact against the
+  // extended system and sterilize those that became ground-joinable.
+  // Skips the just-added range (Faktum != Neues, :266/:286).
+  if (s->use_bwd_ground_join) {
+    atp_bwd_ground_join_walk(s, post.first, post.first + post.count);
+  }
+#endif
 
   u64 _ph_gc_t0 = atp_phase_now();
   goal = thvm_atp_goal_check(s);
@@ -11453,6 +11504,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         s->r_dead[j - 1]           = s->r_dead[j];
         s->r_dead_lhs_save[j - 1]  = s->r_dead_lhs_save[j];
         s->r_dead_rhs_save[j - 1]  = s->r_dead_rhs_save[j];
+        // Ground-joinability status rides the slot (WM: per-object).
+        s->r_gj_status[j - 1]      = s->r_gj_status[j];
 #ifdef THVM_ATPFT_RULES
         // Stage 4: shift the AtpFt slot pointers in lockstep -- no
         // re-conversion, the cells themselves are address-stable in
@@ -13053,14 +13106,43 @@ static u8 gj_vars_subset(Term sub, Term sup) {
 // distinct.  Oriented rules (l > r unconditionally) also satisfy this,
 // so the single test suffices for both.  Returns the rewritten term;
 // sets *fired on success.
+// WM DreieckOK (Grundzusammenfuehrung.c:235-240): rule LHS `l` is
+// STRICTLY more general than the protection anchor `t0` -- some sigma
+// maps l onto t0, and none maps t0 onto l (proper encompassment at the
+// root).  Root steps on a protected side of a fact-level GZ test are
+// admissible only through such rules, the well-foundedness side
+// condition of the AHL-2003 ground-joinability redundancy proof.
+static u8 atp_gj_strictly_more_general(Term rule_lhs, Term anchor) {
+  RewriteSubst onto = {{0}};
+  if (!thvm_match(rule_lhs, anchor, &onto)) return 0;
+  RewriteSubst back = {{0}};
+  return thvm_match(anchor, rule_lhs, &back) ? 0u : 1u;
+}
+
+// `protect`: nonzero only at the ROOT of a protected side during a
+// fact-level (backward/forward -gj) GZ test -- the victim's ORIGINAL
+// side, anchoring the Dreieck gate (WM MO_schuetzeTerm +
+// NF_geschuetzteNormalformRE, NFBildung.c:767-779: "bei toplevel
+// werden nur Regeln/Gleichungen verwendet, die in der Dreiecksordnung
+// kleiner sind").  Child recursion clears it: only root steps are
+// gated.  The forward CP-drop path always passes 0.
 static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
-                            const u32 *cp_vars, u32 n_cp_vars, u8 *fired) {
+                            const u32 *cp_vars, u32 n_cp_vars, u8 *fired,
+                            Term protect) {
   const KboConfig *cfg = s->kbo;
   for (u32 i = 0; i < s->n_rules; i++) {
     // A well-formed rewrite rule never has a bare-variable LHS (it would
     // match and "rewrite" everything).  Skip such malformed rules so the
     // GJ test is robust even if handed an ill-formed rule set.
     if (term_tag(s->lhs[i]) == TAG_FVR) continue;
+    // Fact-level GZ test: the victim may not reduce itself (WM
+    // DarfNichtReduzieren, Hauptkomponenten.c:267/:287, consumed in
+    // MatchOperationen.c:641/742/1660/1697).
+    if (i == s->gj_exclude) continue;
+    // Dreieck root gate on a protected side.
+    if (protect != 0 && !atp_gj_strictly_more_general(s->lhs[i], protect)) {
+      continue;
+    }
     RewriteSubst subst = {{0}};
     if (thvm_match(s->lhs[i], t, &subst)) {
       Term reduct = thvm_subst_apply(s->rhs[i], &subst);
@@ -13090,7 +13172,7 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
     for (u32 i = 0; i < n; i++) {
       u8 sub_fired = 0;
       Term rc = gj_rewrite_step(s, m, children[i], cp_vars, n_cp_vars,
-                                &sub_fired);
+                                &sub_fired, 0);
       if (sub_fired) {
         children[i] = rc;
         *fired = 1;
@@ -13103,11 +13185,17 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
 }
 
 // Normalise `t` under model C with C-parameterised steps (step_cap).
+// `protect` (0 = none) anchors the Dreieck root gate for the whole
+// pass -- WM's MO_schuetzeTerm spans the entire NF_NormalformRE call.
+// (WM additionally LIFTS protection for deeper instantiation levels
+// once a pass reduced the side -- a permissive refinement; keeping the
+// gate for the whole fact test only under-sterilizes, never over.)
 static Term gj_normalize(AtpState *s, const GjModel *m, Term t,
-                         const u32 *cp_vars, u32 n_cp_vars, u32 step_cap) {
+                         const u32 *cp_vars, u32 n_cp_vars, u32 step_cap,
+                         Term protect) {
   for (u32 k = 0; k < step_cap; k++) {
     u8 fired = 0;
-    Term t2 = gj_rewrite_step(s, m, t, cp_vars, n_cp_vars, &fired);
+    Term t2 = gj_rewrite_step(s, m, t, cp_vars, n_cp_vars, &fired, protect);
     if (!fired) return t;
     t = t2;
   }
@@ -13115,10 +13203,16 @@ static Term gj_normalize(AtpState *s, const GjModel *m, Term t,
 }
 
 // Join the two CP sides under model C: normalise both and compare.
+// The per-side protection anchors live on AtpState (constant for one
+// fact-level GZ test; 0 on the forward CP-drop path): the recursion in
+// gj_cover never swaps side order, so side 0 is always the victim-LHS
+// face and side 1 the victim-RHS face.
 static u8 gj_joins_under(AtpState *s, const GjModel *m, Term lhs, Term rhs,
                          const u32 *cp_vars, u32 n_cp_vars) {
-  Term nl = gj_normalize(s, m, lhs, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP);
-  Term nr = gj_normalize(s, m, rhs, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP);
+  Term nl = gj_normalize(s, m, lhs, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP,
+                         s->gj_protect_l);
+  Term nr = gj_normalize(s, m, rhs, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP,
+                         s->gj_protect_r);
   return kbo_eq(nl, nr);
 }
 
@@ -13460,6 +13554,187 @@ static int atp_cp_ground_joinable(AtpState *s, Term lhs, Term rhs) {
 
   u32 budget = ATP_GJ_BRANCH_CAP;
   return gj_cover(s, lhs, rhs, var_ids, n_vars, &budget) ? 1 : 0;
+}
+
+// ── Fact-level -gj: WM RueckwaertsGrundzusammenfuehrbarkeit ─────────
+// (INF/Hauptkomponenten.c:260-306 + the forward halves
+// RUndEVerwaltung.c:182-183/:457-460.)  Default OFF, matching WM's
+// -gj CLI default (RUN/Parameter.c:317; no strategy table emits the
+// YFiles.c:125 `gj()` primitive).  Opt-in: Method
+// {... "BackwardGroundJoin" -> True} / THVM_ATP_BWD_GROUND_JOIN.
+
+// Binary CTR destructure: t = f(a, b)?
+static u8 atp_gj_bin(Term t, u32 f, Term *a, Term *b) {
+  if (term_tag(t) != TAG_CTR || term_ext(t) != f || term_ctr_n(t) != 2) {
+    return 0;
+  }
+  *a = term_ctr_at(t, 0);
+  *b = term_ctr_at(t, 1);
+  return 1;
+}
+
+static u8 atp_gj_var_id(Term t, u32 *id) {
+  if (term_tag(t) != TAG_FVR) return 0;
+  *id = term_ext(t);
+  return 1;
+}
+
+// t = f(x, f(y, z)) with all-variable leaves (right-nested).
+static u8 atp_gj_shape_rr(Term t, u32 f, u32 *x, u32 *y, u32 *z) {
+  Term a, b, c, d;
+  if (!atp_gj_bin(t, f, &a, &b) || !atp_gj_bin(b, f, &c, &d)) return 0;
+  return atp_gj_var_id(a, x) && atp_gj_var_id(c, y) && atp_gj_var_id(d, z);
+}
+
+// t = f(f(x, y), z) with all-variable leaves (left-nested).
+static u8 atp_gj_shape_ll(Term t, u32 f, u32 *x, u32 *y, u32 *z) {
+  Term a, b, c, d;
+  if (!atp_gj_bin(t, f, &a, &b) || !atp_gj_bin(a, f, &c, &d)) return 0;
+  return atp_gj_var_id(c, x) && atp_gj_var_id(d, y) && atp_gj_var_id(b, z);
+}
+
+// WM PROTECT_3_PERMS (Grundzusammenfuehrung.c:76, consumed :808-814):
+// the -gj fact test refuses to sterilize associativity, commutativity,
+// and extended-commutativity facts -- GZ_wertvoll, valuable for the
+// permutative cleanup even when provably ground-joinable.  Shapes per
+// WASIC/TermOperationen.c:1207-1248 (TO_IstAssoziativitaet /
+// TO_IstKommutativitaet / TO_IstErweiterteKommutativitaet); thvm rules
+// are var-normalized at push, so plain id equality realizes WM's
+// positional -1/-2/-3 placeholders.
+static u8 atp_gj_perm_valuable(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_ctr_n(l) != 2) return 0;
+  u32 f = term_ext(l);
+  Term p, q, p2, q2;
+  u32 a, b, c, d, x, y, z, u, v, w;
+  // C: f(x1, x2) = f(x2, x1)
+  if (atp_gj_bin(l, f, &p, &q) && atp_gj_bin(r, f, &p2, &q2) &&
+      atp_gj_var_id(p, &a) && atp_gj_var_id(q, &b) &&
+      atp_gj_var_id(p2, &c) && atp_gj_var_id(q2, &d) &&
+      a != b && c == b && d == a) {
+    return 1;
+  }
+  // A: f(f(x1,x2),x3) = f(x1,f(x2,x3)), either nesting on either side.
+  if (atp_gj_shape_ll(l, f, &x, &y, &z) && atp_gj_shape_rr(r, f, &u, &v, &w) &&
+      x == u && y == v && z == w && x != y && y != z && x != z) {
+    return 1;
+  }
+  if (atp_gj_shape_rr(l, f, &x, &y, &z) && atp_gj_shape_ll(r, f, &u, &v, &w) &&
+      x == u && y == v && z == w && x != y && y != z && x != z) {
+    return 1;
+  }
+  // C': f(x1,f(x2,x3)) = one of the four rotated right-nested perms.
+  if (atp_gj_shape_rr(l, f, &x, &y, &z) && atp_gj_shape_rr(r, f, &u, &v, &w) &&
+      x != y && y != z && x != z) {
+    if ((u == z && v == x && w == y) ||      // f(x3, f(x1, x2))
+        (u == y && v == x && w == z) ||      // f(x2, f(x1, x3))
+        (u == z && v == y && w == x) ||      // f(x3, f(x2, x1))
+        (u == y && v == z && w == x)) {      // f(x2, f(x3, x1))
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Classify fact slot `i` per WM's fact-level -gj test:
+//   * HOPELESS: <= 1 distinct variable, covering both-sides-ground
+//     (MN90Check noVar gate, Grundzusammenfuehrung.c:729-733, + the
+//     both-ground precheck :767-771).  Sticky.
+//   * VALUABLE: PROTECT_3_PERMS A/C/C' shape.  Sticky.  (WM tags these
+//     in the FORWARD test; under -gj every fact passes that test at
+//     creation, so the backward walk's `gzfbStatus <= GZ_aussichtslos`
+//     skip :824 never re-reaches them -- thvm classifies in the shared
+//     path for the same effect.)
+//   * JOINABLE: the groundJoin driver proves every ground instance of
+//     lhs = rhs joinable under R u E MINUS the victim (gj_exclude =
+//     WM DarfNichtReduzieren), root steps on the protected face(s)
+//     Dreieck-gated.  Sticky -- the fact is sterile.
+//   * FAILED: not shown joinable (also WM's GZ_zuTeuer var-overflow
+//     case); retested on later facts.
+// Protection per WM Grundzusammenfuehrung.c:841: rules protect the
+// LHS face only (sSch -- the RHS face is strictly below in the
+// reduction order); unorientable equations protect BOTH faces
+// (allesSch; the per-branch comparability resolution that would
+// unprotect the smaller instance face is skipped -- conservative,
+// see gj_normalize).
+static u8 atp_gj_fact_test(AtpState *s, u32 i) {
+  Term l = s->lhs[i];
+  Term r = s->rhs[i];
+  u32 var_ids[ATP_GJ_MAX_VARS];
+  u32 n_vars = 0;
+  u8 var_overflow =
+      !atp_gj_collect_vars(l, var_ids, &n_vars, ATP_GJ_MAX_VARS) ||
+      !atp_gj_collect_vars(r, var_ids, &n_vars, ATP_GJ_MAX_VARS);
+  if (!var_overflow && n_vars <= 1u) return ATP_GJ_ST_HOPELESS;
+  if (atp_gj_perm_valuable(l, r)) return ATP_GJ_ST_VALUABLE;
+  if (var_overflow) return ATP_GJ_ST_FAILED;
+  s->gj_exclude   = i;
+  s->gj_protect_l = l;
+  s->gj_protect_r = s->r_orient[i] ? 0 : r;
+  int joinable = atp_cp_ground_joinable(s, l, r);
+  s->gj_exclude   = ATP_GJ_NO_EXCLUDE;
+  s->gj_protect_l = 0;
+  s->gj_protect_r = 0;
+  return joinable ? ATP_GJ_ST_JOINABLE : ATP_GJ_ST_FAILED;
+}
+
+// The driver reasons in KBO sizes only; under LPO/RPO/WPO (or no
+// order) every fact test would return KEEP, so skip the walks.
+static u8 atp_gj_active(const AtpState *s) {
+  return s->kbo != NULL && s->lpo == NULL && s->rpo == NULL &&
+         s->wpo == NULL;
+}
+
+// Forward -gj fact test at creation (WM RUndEVerwaltung.c:182-183 for
+// rules, :457-460 for equations -- Grundzusammenfuehrbar is decided
+// BEFORE ArbeitsAufnahme interreduces and generates CPs, so a fact
+// ground-joinable at birth never forms a CP at all (Weggefiltert,
+// Unifikation1.c:1518/:1588 + :967-972)).  No KillParent here: a
+// newborn has no queued children to orphan.
+static void atp_gj_classify_added(AtpState *s, AtpAddedRange added) {
+  if (!atp_gj_active(s)) return;
+  for (u32 k = 0; k < added.count; k++) {
+    u32 i = added.first + k;
+    if (i >= s->n_rules || s->r_dead[i]) continue;
+    u8 st = atp_gj_fact_test(s, i);
+    s->r_gj_status[i] = st;
+    if (st == ATP_GJ_ST_JOINABLE) s->n_facts_bwd_ground_joinable++;
+  }
+}
+
+// WM RueckwaertsGrundzusammenfuehrbarkeit (Hauptkomponenten.c:260-306),
+// run from the step tail AFTER CP generation + the IR-victim drain
+// (ArbeitsAufnahme :327-329).  Walks every EXISTING live fact -- rules
+// (:265 RE_forRegelnRobust) and equations (:286, the distinguished
+// direction = thvm's single unorientable slot) -- skipping the
+// just-added range (`Faktum != Neues`) and the sticky statuses
+// (`gzfbStatus <= GZ_aussichtslos`, :824), and re-tests ground
+// joinability against the system now extended by the new fact.  A fact
+// shown joinable is STERILIZED per the compiled GZ_ZSFB_BEHALTEN=1
+// (Grundzusammenfuehrung.h:52): the JOINABLE status excludes it from
+// all future CP formation (atp_gen_one's Weggefiltert check) and
+// atp_trace_mark_dead orphans its already-queued CPs (KPV_KillParent
+// lebtNoch=FALSE, KPVerwaltung.c:343-351 -> selectNonOrphan :540;
+// thvm's lazy at-pop discard reads the same bitmap when
+// use_orphan_murder is on, the WM -ocrit layout).  The fact itself
+// STAYS in R/E and keeps rewriting.  Walks NEITHER queued CPs NOR
+// goals -- WM re-tests active facts only.
+static void atp_bwd_ground_join_walk(AtpState *s, u32 skip_lo, u32 skip_hi) {
+  if (!atp_gj_active(s)) return;
+  for (u32 i = 0; i < s->n_rules; i++) {
+    if (i >= skip_lo && i < skip_hi) continue;
+    if (s->r_dead[i]) continue;
+    u8 st = s->r_gj_status[i];
+    if (st == ATP_GJ_ST_JOINABLE || st == ATP_GJ_ST_VALUABLE ||
+        st == ATP_GJ_ST_HOPELESS) {
+      continue;
+    }
+    st = atp_gj_fact_test(s, i);
+    s->r_gj_status[i] = st;
+    if (st == ATP_GJ_ST_JOINABLE) {
+      s->n_facts_bwd_ground_joinable++;
+      atp_trace_mark_dead(s, s->r_trace[i]);
+    }
+  }
 }
 
 #endif  // ATP_CP_GROUND_JOIN
@@ -13899,6 +14174,15 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
 // Run one overlap pair and push its CPs (the body shared by the indexed
 // and unindexed generator loops).
 static u32 atp_gen_one(AtpState *s, u32 i, u32 j, CriticalPair *buf) {
+  // WM Weggefiltert (Unifikation1.c:967-972 + the new-fact skip
+  // :1518/:1588): a sterilized (ground-joinable, GZ_ZSFB_BEHALTEN=1)
+  // fact forms no CP as EITHER parent.  The status only ever becomes
+  // JOINABLE under the opt-in -gj port (use_bwd_ground_join), so the
+  // default path's verdict is always false.
+  if (s->r_gj_status[i] == ATP_GJ_ST_JOINABLE ||
+      s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) {
+    return 0;
+  }
   u32 nbuf   = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH);
   u32 pushed = atp_push_cps_traced(s, buf, nbuf,
                                    s->r_trace[i], s->r_trace[j], i, j);
