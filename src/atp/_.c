@@ -11280,12 +11280,21 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         s->rhs[j - 1]      = s->rhs[j];
         s->r_trace[j - 1]  = s->r_trace[j];
         s->r_orient[j - 1] = s->r_orient[j];
+        // Shift the backward-subsumption sentinel state in lockstep:
+        // without it, dropping a rule below a soft-deleted slot leaves
+        // r_dead[] marking the WRONG slot (the dead bit stays at the
+        // old index while the rule it tagged shifted down one).
+        s->r_dead[j - 1]           = s->r_dead[j];
+        s->r_dead_lhs_save[j - 1]  = s->r_dead_lhs_save[j];
+        s->r_dead_rhs_save[j - 1]  = s->r_dead_rhs_save[j];
 #ifdef THVM_ATPFT_RULES
         // Stage 4: shift the AtpFt slot pointers in lockstep -- no
         // re-conversion, the cells themselves are address-stable in
         // the slab pool, only the slot index changes.
         s->lhs_ft[j - 1] = s->lhs_ft[j];
         s->rhs_ft[j - 1] = s->rhs_ft[j];
+        s->r_dead_lhs_save_ft[j - 1] = s->r_dead_lhs_save_ft[j];
+        s->r_dead_rhs_save_ft[j - 1] = s->r_dead_rhs_save_ft[j];
 #endif
       }
       s->n_rules--;
