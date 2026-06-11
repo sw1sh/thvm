@@ -54,10 +54,18 @@ fxRopeTable[gridH_:16, gridW_:16, nTxt_:512, theta_:2000., axDim_:32] := Module[
     <|"cos" -> cosT, "sin" -> sinT|>]
 
 (* === the sampler loop ===============================================
-   txfmr is a function (zPacked, sigma) -> velocity {256,128} (it closes over
-   the text embeddings, rope, weights).  Returns the final packed latent. *)
-fxSample[txfmr_, z0_, sigmas_] := Module[{z = z0, k, dt},
+   vel is the velocity field (zPacked, temb) -> {256,128}: the TJit-wrapped
+   transformer forward (closes over text embeddings, rope, weights).  tembFn
+   maps a sigma to its {1,dim} timestep embedding (the time_text_embed MLP over
+   fxTimestepSinusoid).  The 4 steps share ONE captured kernel set: TJit
+   captures vel on the first call, then each step REPLAYS it, rebinding the two
+   changing inputs (z + temb) in place -- the dispatch overhead amortizes
+   across the 4 steps (FLUX double block: 213ms non-JIT -> 32ms replay).  dt is
+   applied outside the captured graph so it stays a fixed replay. *)
+fxSample[vel_, z0_, sigmas_, tembFn_] := Module[{z = z0, vfn, k, dt, v},
+    vfn = TJit[vel];
     Do[ dt = sigmas[[k + 1]] - sigmas[[k]];
-        z = TRealize @ TUOpAdd[z, TUOpMul[txfmr[z, sigmas[[k]]], TUOpConst[N[dt]]]],
+        v = vfn[z, tembFn[sigmas[[k]]]];
+        z = TRealize @ TUOpAdd[z, TUOpMul[v, TUOpConst[N[dt]]]],
         {k, 1, Length[sigmas] - 1}];
     z]
