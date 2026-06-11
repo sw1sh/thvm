@@ -63,43 +63,45 @@ extern int  atp_ri_find_redex_ft_pub(AtpState *s, AtpFtCell *root,
 extern void atp_ri_ft_sync(AtpState *s);
 #endif
 
-// --- Variable-containment helper for unorientable equations ---------
+// --- Extension-variable grounding for unorientable equations --------
 //
-// Mirrors `atp_vars_contained` in src/atp/_.c (the Term-side ordered
-// rewriter's extension-variable guard): returns 1 iff every variable
-// id occurring in `target` also occurs somewhere in `source`.  Used to
-// forbid extension variables when an unorientable equation l == r
-// fires backward (r -> l): r must not introduce any free variable not
-// already present on the l side, otherwise the rewrite is unsound (the
-// rule isn't actually a rewrite rule in that direction).
+// Mirrors `atp_unorient_template` in src/atp/_.c (the Term-side WM
+// free-variable-instance port, after WM `TP_RechteSeiteUnfrei` /
+// `RechtsUnfreiErzeugen`, INF/RUndEVerwaltung.c:366-397): once the
+// match side of an unorientable direction has bound its variables,
+// every template variable left unbound is an extension variable of
+// the direction; bind it to the minimal constant (s->min_const) so
+// sigma(template) is the grounded WM instance.  The caller's KBO_GT
+// gate then orders the instance, exactly like a variable-contained
+// direction.
 //
-// Built around a 64-bit bitmask of var ids -- consistent with
-// ATPFT_MAX_VARS=64 (ft_match.c).  Var ids >= 64 disable the fast
-// path (return 0 = "not contained" -> the rewrite is skipped, same
-// effect as the Term path's bail-out via thvm_match cap).
+// Gated like the Term side on a ground-total reduction order: KBO/LPO
+// (total precedence by config contract) qualify, WPO/RPO do not --
+// and this FT path only ever runs the streaming KBO anyway.
 //
-// Walks the AtpFtCell tree via the `next` / `end` chain -- the same
+// Returns 1 when the subst covers every template variable (extras now
+// bound), 0 when the direction must be skipped: out-of-range var id
+// (>= ATPFT_MAX_VARS, the subst address space) or non-ground-total
+// order.  Walks the template via the `next` / `end` chain -- the same
 // stride find_redex_ft uses; no recursion, O(|cells|).
-static u64 ft_vars_mask(const AtpFtCell *c) {
-  if (c == NULL) return 0ull;
-  u64 mask = 0ull;
-  const AtpFtCell *end_after = (c->end != NULL) ? c->end->next : NULL;
-  for (const AtpFtCell *p = c; p != NULL && p != end_after; p = p->next) {
-    if ((p->sym & WF_VAR_BIT) != 0u) {
-      u32 id = p->sym & ~WF_VAR_BIT;
-      if (id < 64u) mask |= (1ull << id);
-      else          return ~0ull;     // poison: contains an out-of-range id
+static int ft_subst_ground_extras(AtpState *s, const AtpFtCell *tmpl,
+                                  AtpFtSubst *subst) {
+  const AtpFtCell *end_after = (tmpl->end != NULL) ? tmpl->end->next : NULL;
+  AtpFtCell *mc = NULL;
+  for (const AtpFtCell *p = tmpl; p != NULL && p != end_after; p = p->next) {
+    if ((p->sym & WF_VAR_BIT) == 0u) continue;
+    u32 id = p->sym & ~WF_VAR_BIT;
+    if (id >= ATPFT_MAX_VARS) return 0;   // outside the subst address space
+    if (subst->bind[id] != NULL) continue;
+    if (s->wpo != NULL || s->rpo != NULL) return 0;  // not ground-total
+    if (mc == NULL) {
+      mc = ft_from_term((AtpFt *)s->ft_arena_ptr, s->min_const, 0);
+      if (mc == NULL) return 0;
     }
+    subst->bind[id] = mc;
+    subst->bound_ids[subst->wm++] = id;
   }
-  return mask;
-}
-
-static int ft_vars_contained(const AtpFtCell *target,
-                             const AtpFtCell *source) {
-  u64 tm = ft_vars_mask(target);
-  u64 sm = ft_vars_mask(source);
-  if (tm == ~0ull || sm == ~0ull) return 0;
-  return (tm & ~sm) == 0ull;
+  return 1;
 }
 
 // `ft_to_term` / `atp_compare` are defined elsewhere in the same TU
@@ -177,19 +179,16 @@ static void ft_clear_subst_fresh(AtpFtCell *root) {
 // with the Term path keeps the verdicts byte-equal.
 //
 // Unorientable equations are gated like atp_ordered_try_top
-// (src/atp/_.c:5436):
+// (src/atp/_.c):
 //   1. Both directions are TRIED via ft_match.
-//   2. Each direction's RHS template must have its variables contained
-//      in its LHS template (no extension vars) -- ft_vars_contained.
-//   3. The instantiated rewrite must strictly decrease the redex in the
-//      reduction order: atp_compare(redex_term, repl_term) == KBO_GT.
-//      Implemented via a per-step ft_to_term round-trip; correct +
-//      simple, refine if profiling shows it as a hot spot.
-// Without these guards, an unorientable rule whose RHS legitimately
-// contains extension variables (e.g. introduced by symmetric goal
-// equations) would feed ft_splice an unbound-var template and bail
-// with NULL, looping until step_cap and producing an under-rewritten
-// normal form -- the headline bug fix.
+//   2. A direction whose replacement template carries extension
+//      variables (vars not bound by the match) grounds them to the
+//      minimal constant -- ft_subst_ground_extras, the WM
+//      free-variable instance.  ft_splice then sees a fully-bound
+//      template, never an unbound var (which would make it bail with
+//      NULL and loop until step_cap).
+//   3. The instantiated rewrite must strictly decrease the redex in
+//      the reduction order (streaming KBO == atp_compare verdict).
 //
 // The full-range entry point (`atp_rewrite_normalize_ft`) passes
 // slice_first=0 / slice_count=s->n_rules; the slice entry point
@@ -294,15 +293,17 @@ static int find_redex_ft(AtpState        *s,
       }
       if (!try_unorient) continue;
       // Unorientable equation: try forward (l -> r) then backward (r -> l).
-      // Forward: lhs matches p, rhs's vars are subset of lhs's vars,
+      // Forward: lhs matches p; rhs vars NOT bound by the lhs match
+      // (extension variables) are grounded to the minimal constant --
+      // ft_subst_ground_extras, the WM free-variable instance;
       // instantiated repl < redex under the reduction order.  Streaming
       // KBO via thvm_kbo_ft_subst_with_prepared; THVM_ATPFT_KBO_DIFF=1
       // runs a side-by-side Term-side atp_compare to surface verdict
       // divergences (a probe across the AC bench found zero -- the
       // streaming KBO matches atp_compare on the unorient gate inputs).
-      if (ft_vars_contained(rhs, lhs)) {
-        ft_subst_reset(subst_buf);
-        if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
+      ft_subst_reset(subst_buf);
+      if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
+        if (ft_subst_ground_extras(s, rhs, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
           static int dbg_diff = -1;
@@ -330,13 +331,13 @@ static int find_redex_ft(AtpState        *s,
             *dir_out    = 0u;
             return 1;
           }
-          ft_subst_reset(subst_buf);
         }
+        ft_subst_reset(subst_buf);
       }
       // Backward: same gates with l/r swapped.
-      if (ft_vars_contained(lhs, rhs)) {
-        ft_subst_reset(subst_buf);
-        if (ft_match_maybe_ac(ft_arena_local, rhs, p, subst_buf)) {
+      ft_subst_reset(subst_buf);
+      if (ft_match_maybe_ac(ft_arena_local, rhs, p, subst_buf)) {
+        if (ft_subst_ground_extras(s, lhs, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
           if (ft_v == KBO_GT) {
@@ -346,8 +347,8 @@ static int find_redex_ft(AtpState        *s,
             *dir_out    = 1u;
             return 1;
           }
-          ft_subst_reset(subst_buf);
         }
+        ft_subst_reset(subst_buf);
       }
     }
     prev = p;

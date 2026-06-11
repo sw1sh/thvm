@@ -1028,57 +1028,74 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         (* one-step rewrites of equation `eq` by the alive rules
            (each {traceIdx, ruleEq}); returns {newEq, traceIdx,
            side, relPos, dir} tuples where dir is +1 for an lhs->rhs
-           application of the rule and -1 for rhs->lhs.  Reverse-
-           direction is tried only when tryReverse is True AND the
-           rule is variable-safe (vars(lhs) subset-of vars(rhs)) --
-           the same atp_vars_contained guard ordered rewriting uses
-           in the C engine, so a completion-oriented rule -- whose
-           reverse would introduce unbound variables -- never fires
-           reversed. *)
+           application of the rule and -1 for rhs->lhs.  Reverse
+           directions are tried only when tryReverse is True (the
+           phase-2/3 BFS).  A direction whose replacement side
+           introduces variables ALSO fires as the engine's grounded
+           WM free-variable instance -- every extension variable goes
+           to cAtp1, the reserved minimal constant -- mirroring
+           `atp_unorient_template` in the C ordered rewriter
+           (Waldmeister `TP_RechteSeiteUnfrei`), so the BFS can bridge
+           normalizations that stepped through a grounded instance. *)
         (* Precompute the rule data once per emitNorm call: cplAsRule
            is O(term-size), so building it here instead of per BFS node
            keeps it off the inner loop on large alive sets.  Returns a
-           list of {traceIdx, fwdRule, revSafe, revRule|Null}. *)
-        prepareRules[aliveList_] := Block[{},
-            Table[
-                Block[{eqA = ar[[2]], rlF, revSafe, rlR},
-                    rlF = cplAsRule[eqA, varSyms];
-                    revSafe = SubsetQ[
-                        cplVarsIn[eqA[[2]], varSyms],
-                        cplVarsIn[eqA[[1]], varSyms]];
-                    rlR = If[ revSafe,
-                        cplAsRule[Reverse[eqA], varSyms], Null];
-                    {ar[[1]], rlF, revSafe, rlR}],
-                {ar, aliveList}
-            ]
+           list of {traceIdx, fwdRules, revRules} where each slot is a
+           (possibly empty) rule list. *)
+        prepareRules[aliveList_] := Table[
+            Block[{eqA = ar[[2]], lv, rv, fwd, rev,
+                   minC = Symbol["cAtp1"]},
+                lv = cplVarsIn[eqA[[1]], varSyms];
+                rv = cplVarsIn[eqA[[2]], varSyms];
+                fwd = {cplAsRule[eqA, varSyms]};
+                rev = If[ SubsetQ[rv, lv],
+                    {cplAsRule[Reverse[eqA], varSyms]}, {}];
+                If[ ! SubsetQ[lv, rv],
+                    AppendTo[fwd, cplAsRule[
+                        {eqA[[1]], eqA[[2]] /.
+                            Thread[Complement[rv, lv] -> minC]},
+                        varSyms]]];
+                If[ ! SubsetQ[rv, lv],
+                    AppendTo[rev, cplAsRule[
+                        {eqA[[2]], eqA[[1]] /.
+                            Thread[Complement[lv, rv] -> minC]},
+                        varSyms]]];
+                {ar[[1]], fwd, rev}],
+            {ar, aliveList}
         ];
 
         rewriteOnce[eq_, preRules_, tryReverse_] := Block[{out = {}},
             Do[
-                Block[{traceIdx = pr[[1]], rlF = pr[[2]],
-                       revSafe = pr[[3]], rlR = pr[[4]], sub, new},
+                Block[{traceIdx = pr[[1]], fwdRules = pr[[2]],
+                       revRules = pr[[3]], sub, new},
                     Do[
                         sub = eq[[side + 1]];
                         Do[
-                            new = Quiet @ ReplaceAt[sub, rlF, pos];
-                            If[ new =!= sub && FreeQ[new, ReplaceAt],
-                                AppendTo[out, {
-                                    ReplacePart[eq, side + 1 -> new],
-                                    traceIdx, side, pos, 1}]
-                            ],
-                            {pos, Position[sub, rlF[[1]],
-                                {0, Infinity}, Heads -> False]}
-                        ];
-                        If[ tryReverse && revSafe,
                             Do[
-                                new = Quiet @ ReplaceAt[sub, rlR, pos];
+                                new = Quiet @ ReplaceAt[sub, rl, pos];
                                 If[ new =!= sub && FreeQ[new, ReplaceAt],
                                     AppendTo[out, {
                                         ReplacePart[eq, side + 1 -> new],
-                                        traceIdx, side, pos, -1}]
+                                        traceIdx, side, pos, 1}]
                                 ],
-                                {pos, Position[sub, rlR[[1]],
+                                {pos, Position[sub, rl[[1]],
                                     {0, Infinity}, Heads -> False]}
+                            ],
+                            {rl, fwdRules}
+                        ];
+                        If[ tryReverse,
+                            Do[
+                                Do[
+                                    new = Quiet @ ReplaceAt[sub, rl, pos];
+                                    If[ new =!= sub && FreeQ[new, ReplaceAt],
+                                        AppendTo[out, {
+                                            ReplacePart[eq, side + 1 -> new],
+                                            traceIdx, side, pos, -1}]
+                                    ],
+                                    {pos, Position[sub, rl[[1]],
+                                        {0, Infinity}, Heads -> False]}
+                                ],
+                                {rl, revRules}
                             ]
                         ],
                         {side, 0, 1}
@@ -1199,7 +1216,12 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         If[ ! MissingQ[rev],
                             found = reverseBfsPath[rev, targetEq]]]];
                 If[ MissingQ[found],
-                    atpDbgFail["emitNorm.no-rewrite-path"]; Throw[$Failed]];
+                    atpDbgFail["emitNorm.no-rewrite-path ti=" <>
+                        ToString[ti] <> " start=" <>
+                        ToString[startEq, InputForm] <> " target=" <>
+                        ToString[targetEq, InputForm] <> " alive=" <>
+                        ToString[Length[aliveList]]];
+                    Throw[$Failed]];
                 curKey = inKey;
                 curEq = startEq;
                 Do[
@@ -1410,7 +1432,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                     Module[{pInfo, rInfo, rTe, rEq, swapped,
                             parentTe, parentReason, cSide0WlPos,
                             wlEq, wlSide, newCSide0WlPos,
-                            sl, st, dir, newSide},
+                            sl, st, dir, dirEq, extras, newSide},
                         pInfo = resolveTrace[te["ParentA"]];
                         rInfo = resolveTrace[te["ParentB"]];
                         rTe = trace[[te["ParentB"] + 1]];
@@ -1464,6 +1486,28 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         ];
                         wlSide = If[ te["Side"] === 0,
                             cSide0WlPos, 3 - cSide0WlPos];
+                        (* Data-driven correction: the C recorder
+                           threads the step's UNCHANGED side through
+                           verbatim (eq_other in atp_rewrite_normalize_
+                           record), so the parent equation must carry an
+                           alpha-variant of it on the corresponding WL
+                           side.  Queue-time renormalization (CP-set
+                           interreduce + VAR_NORM requeue) can rename
+                           and side-swap a CP between its trace entry
+                           and the popped form the chain records; the
+                           inherited Swapped flag does not see that, so
+                           when the convention disagrees with the data
+                           -- and the data matches the OTHER side --
+                           trust the data and flip the mapping. *)
+                        Block[{cUnch = If[ te["Side"] === 0,
+                                tR[te], tL[te]], cu},
+                            cu = cplCanonVars[cUnch, varSyms];
+                            If[ cu =!= cplCanonVars[
+                                    pInfo["Eq"][[3 - wlSide]], varSyms] &&
+                                cu === cplCanonVars[
+                                    pInfo["Eq"][[wlSide]], varSyms],
+                                cSide0WlPos = 3 - cSide0WlPos;
+                                wlSide = 3 - wlSide]];
                         (* te records BOTH post-step sides (te.Lhs =
                            C-lhs, te.Rhs = C-rhs), so build the full
                            Statement directly from them mapped through
@@ -1479,15 +1523,28 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         sl = {$SubstitutionLemmaSym, slN};
                         st = stmt[wlEq];
                         dir = If[ te["Fwd"] === 1, 1, -1];
+                        (* The replay rule for the direction the engine
+                           fired.  When the replacement side introduces
+                           variables, the engine fired the grounded WM
+                           free-variable instance (extras -> cAtp1, the
+                           reserved minimal constant; atp_unorient_
+                           template in src/atp/_.c) -- cite that
+                           instance so the verifier's ReplaceAt replay
+                           reproduces the recorded Statement. *)
+                        dirEq = If[ dir === -1, Reverse[rEq], rEq];
+                        extras = Complement[
+                            cplVarsIn[dirEq[[2]], varSyms],
+                            cplVarsIn[dirEq[[1]], varSyms]];
+                        If[ extras =!= {},
+                            dirEq = {dirEq[[1]], dirEq[[2]] /.
+                                Thread[extras -> Symbol["cAtp1"]]}];
                         AppendTo[entries, sl -> <|
                             "Statement" -> st,
                             "Proof" -> <|
                                 "Input" -> pInfo["Key"],
                                 "Construct" -> rInfo["Key"],
                                 "Position" -> te["Pos"],
-                                "Rule" -> cplAsRule[
-                                    If[ dir === -1, Reverse[rEq], rEq],
-                                    varSyms],
+                                "Rule" -> cplAsRule[dirEq, varSyms],
                                 "Orientation" -> dir * cplOrient[rInfo["Eq"], rEq, varSyms],
                                 "ConstructSide" -> 1,
                                 "InputOrientation" -> 1,

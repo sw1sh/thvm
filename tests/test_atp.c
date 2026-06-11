@@ -497,6 +497,51 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+#ifdef ATP_ORDERED_REWRITE
+  TEST_BEGIN("atp/ordered-rewrite-free-var-instance");
+  {
+    // WM `RechtsUnfrei` ordered rewriting (GleichungsrichtungPasst,
+    // INF/MatchOperationen.c:923): an unorientable equation whose
+    // replacement side carries EXTENSION variables fires with the
+    // grounded instance (extras -> s->min_const) under the strict
+    // KBO_GT gate -- atp_unorient_template.  f(x,x) == f(y,y) is
+    // KBO_UN with extras both ways; the subject f(f(v,v), f(v,v))
+    // hosts a strictly-decreasing grounded root instance f(c,c)
+    // (weight 7 -> 3, ground), which the old vars-contained guard
+    // skipped entirely (NF == subject).  Tree and flatterm paths
+    // must agree, and the grounded NF is a fixpoint (f(c,c) -> f(c,c)
+    // is not a strict decrease).
+    static u32 fviw[2] = {0u, 1u};
+    static u32 fvip[2] = {0u, 1u};
+    static const KboConfig FVI_CFG = {
+      .weights = fviw, .precedence = fvip, .n_labels = 2u, .var_weight = 1u,
+    };
+    #define FVI_F(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(1u, _c, 2); })
+    AtpState *s = thvm_atp_init(&FVI_CFG, 64u);
+    {
+      Term x = mk_v(0u), y = mk_v(1u);
+      atp_push_rule(s, FVI_F(x, x), FVI_F(y, y));   // unorientable
+    }
+    CHECK_EQ(s->n_unorient, 1u);
+    Term v    = mk_v(0u);
+    Term subj = FVI_F(FVI_F(v, v), FVI_F(v, v));
+    Term want = FVI_F(s->min_const, s->min_const);
+    Term nf_tree = atp_rewrite_normalize(s, subj, s->lhs, s->rhs,
+                                         s->n_rules, 64u);
+    CHECK(kbo_eq(nf_tree, want));
+    s->use_flatterm = 1u;
+    Term nf_flat = atp_rewrite_normalize(s, subj, s->lhs, s->rhs,
+                                         s->n_rules, 64u);
+    s->use_flatterm = 0u;
+    CHECK(kbo_eq(nf_flat, want));
+    Term nf2 = atp_rewrite_normalize(s, nf_tree, s->lhs, s->rhs,
+                                     s->n_rules, 64u);
+    CHECK(kbo_eq(nf2, want));
+    thvm_atp_free(s);
+    #undef FVI_F
+  }
+#endif
+
   TEST_BEGIN("atp/generate-cps-empty-added-no-op");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);

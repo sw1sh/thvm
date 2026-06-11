@@ -1986,10 +1986,14 @@ fn void thvm_atp_fv_stats(const AtpState *s, u64 *calls, u64 *node_visits,
 
 #ifdef ATP_RULE_INDEX
 
-// The unorientable-faces index inserts a face only when its replacement
-// side's variables are contained in the matched side (else the face can
-// never fire); declared here, defined with the ordered-rewrite helpers.
-static int atp_vars_contained(Term a, Term b);
+// The unorientable-faces index inserts a face only when the direction
+// can fire at all -- replacement-side variables contained in the
+// matched side, OR the order is ground-total so the WM free-variable
+// instance applies (see atp_unorient_template); declared here, defined
+// with the ordered-rewrite helpers.
+static int  atp_vars_contained(Term a, Term b);
+static int  atp_unorient_dir_usable(AtpState *s, Term from, Term to);
+static Term atp_unorient_template(AtpState *s, Term from, Term to);
 
 // Preorder-flatten capacity for the indexed normalizer.  Sized to
 // hold a raw (un-reduced) critical-pair side -- the deep overlap of
@@ -2125,7 +2129,7 @@ static u8 atp_ri_extend(AtpState *s) {
       for (u32 i = ux->n_rules_built; i < s->n_rules; i++) {
         if (s->r_orient[i]) continue;
         if (s->r_dead != NULL && s->r_dead[i]) continue;
-        if (atp_vars_contained(s->rhs[i], s->lhs[i])) {
+        if (atp_unorient_dir_usable(s, s->lhs[i], s->rhs[i])) {
           AtpDTreeVarMap vm; atp_dtree_varmap_reset(&vm);
           u32 node = atp_ri_insert_term(ux, ux->root, s->lhs[i], &vm);
           if (vm.folded) ux->any_folded = 1u;
@@ -2134,7 +2138,7 @@ static u8 atp_ri_extend(AtpState *s) {
           ux->recs[rec].next = ux->nodes[node].rec_head;
           ux->nodes[node].rec_head = rec;
         }
-        if (atp_vars_contained(s->lhs[i], s->rhs[i])) {
+        if (atp_unorient_dir_usable(s, s->rhs[i], s->lhs[i])) {
           AtpDTreeVarMap vm; atp_dtree_varmap_reset(&vm);
           u32 node = atp_ri_insert_term(ux, ux->root, s->rhs[i], &vm);
           if (vm.folded) ux->any_folded = 1u;
@@ -2190,9 +2194,10 @@ static void atp_ri_rebuild(AtpState *s) {
 
   // Companion index over the UNORIENTABLE equations' faces.  For each
   // unorientable rule i, the matched side may be either face; index a
-  // face only when its replacement side's variables are contained in it
-  // (else the face can never produce a well-formed instance and the
-  // linear scan's atp_vars_contained guard would reject it).  The leaf
+  // face only when its direction can fire at all -- replacement-side
+  // variables contained in the matched side, or the ground-total WM
+  // free-variable instance applies (atp_unorient_dir_usable; the
+  // linear scan's atp_unorient_template guard mirrors it).  The leaf
   // rec's `rule` field carries the direction in ATP_RI_DIR_BIT: clear =
   // l->r (match lhs[i], replace by rhs[i]); set = r->l (match rhs[i],
   // replace by lhs[i]).  Faces are inserted in (rule asc, l->r before
@@ -2209,7 +2214,7 @@ static void atp_ri_rebuild(AtpState *s) {
         if (s->r_orient[i]) continue;                 // oriented: rule_index
         if (s->r_dead != NULL && s->r_dead[i]) continue;  // bwd-subsumed: sentinel face
         // l->r face: match lhs[i], replace by rhs[i].
-        if (atp_vars_contained(s->rhs[i], s->lhs[i])) {
+        if (atp_unorient_dir_usable(s, s->lhs[i], s->rhs[i])) {
           AtpDTreeVarMap vm;
           atp_dtree_varmap_reset(&vm);
           u32 node = atp_ri_insert_term(ux, ux->root, s->lhs[i], &vm);
@@ -2220,7 +2225,7 @@ static void atp_ri_rebuild(AtpState *s) {
           ux->nodes[node].rec_head = rec;
         }
         // r->l face: match rhs[i], replace by lhs[i].
-        if (atp_vars_contained(s->lhs[i], s->rhs[i])) {
+        if (atp_unorient_dir_usable(s, s->rhs[i], s->lhs[i])) {
           AtpDTreeVarMap vm;
           atp_dtree_varmap_reset(&vm);
           u32 node = atp_ri_insert_term(ux, ux->root, s->rhs[i], &vm);
@@ -3424,23 +3429,27 @@ static u8 atp_ft_unorient_at_linear(AtpState *s, Term *flat, u32 *subsz,
     if (s->r_orient[i]) continue;                 // oriented: indexed pass
     {
       RewriteSubst subst = {{0}};
-      if (thvm_match(s->lhs[i], sub, &subst) &&
-          atp_vars_contained(s->rhs[i], s->lhs[i])) {
-        Term repl = thvm_subst_apply(s->rhs[i], &subst);
-        if (atp_compare(s, sub, repl) == KBO_GT) {
-          return atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
-                               p, repl, ATP_RI_FLAT_CAP) ? 2u : 1u;
+      if (thvm_match(s->lhs[i], sub, &subst)) {
+        Term tmpl = atp_unorient_template(s, s->lhs[i], s->rhs[i]);
+        if (tmpl != 0) {
+          Term repl = thvm_subst_apply(tmpl, &subst);
+          if (atp_compare(s, sub, repl) == KBO_GT) {
+            return atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                                 p, repl, ATP_RI_FLAT_CAP) ? 2u : 1u;
+          }
         }
       }
     }
     {
       RewriteSubst subst = {{0}};
-      if (thvm_match(s->rhs[i], sub, &subst) &&
-          atp_vars_contained(s->lhs[i], s->rhs[i])) {
-        Term repl = thvm_subst_apply(s->lhs[i], &subst);
-        if (atp_compare(s, sub, repl) == KBO_GT) {
-          return atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
-                               p, repl, ATP_RI_FLAT_CAP) ? 2u : 1u;
+      if (thvm_match(s->rhs[i], sub, &subst)) {
+        Term tmpl = atp_unorient_template(s, s->rhs[i], s->lhs[i]);
+        if (tmpl != 0) {
+          Term repl = thvm_subst_apply(tmpl, &subst);
+          if (atp_compare(s, sub, repl) == KBO_GT) {
+            return atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                                 p, repl, ATP_RI_FLAT_CAP) ? 2u : 1u;
+          }
         }
       }
     }
@@ -3596,7 +3605,10 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
       Term other = rl ? s->lhs[rule] : s->rhs[rule];
       RewriteSubst subst = {{0}};
       if (!thvm_match(pat, sub, &subst)) continue;  // index over-approx
-      Term repl = thvm_subst_apply(other, &subst);
+      Term tmpl = atp_unorient_template(s, pat, other);
+      if (tmpl == 0) continue;        // unusable direction (defensive --
+                                      // insertion already filters these)
+      Term repl = thvm_subst_apply(tmpl, &subst);
       if (atp_compare(s, sub, repl) == KBO_GT) {
         if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
                           p, repl, ATP_RI_FLAT_CAP)) { *fire_pos = p; return 1u; }
@@ -5327,6 +5339,45 @@ static int atp_vars_contained(Term a, Term b) {
 // and only tries the unorientable equations.
 static u8 g_atp_skip_oriented = 0u;
 
+// Forward decl -- defined with the FVI helpers near
+// thvm_atp_orient_and_add.
+static Term atp_grounded_instance(AtpState *s, Term t, Term lhs,
+                                  Term min_const);
+
+// === WM free-variable-instance ordered rewriting ====================
+//
+// Waldmeister rewrites with an unorientable equation even when the
+// replacement side has EXTRA free variables: `GleichungsrichtungPasst`
+// (INF/MatchOperationen.c:923-940) matches one direction, then fires
+// with `TP_RechteSeiteUnfrei` -- the instance whose extension
+// variables are bound to the minimal constant (`RechtsUnfreiErzeugen`,
+// INF/RUndEVerwaltung.c:366-397) -- under the usual strict-decrease
+// gate.  Soundness: to[extras -> c_min] = from is an instance of the
+// universally quantified equation, so replacing sigma(from) by
+// sigma(to[extras -> c_min]) is plain equational reasoning;
+// termination stays with the per-rewrite KBO_GT gate.  WM gates the
+// mechanism on a ground-total reduction order (`FreieVariablenOK`,
+// INF/MatchOperationen.c:247: ORD_OrdnungTotal = SO_PraezedenzTotal
+// for kbo/lpo, FALSE for every other ordering); mirror that by
+// allowing KBO/LPO -- total precedence by KboConfig/LpoConfig
+// contract -- and refusing WPO/RPO.
+//
+// Can direction from -> to fire at all?  Insertion-time filter for
+// the unorientable-faces index.
+static int atp_unorient_dir_usable(AtpState *s, Term from, Term to) {
+  return atp_vars_contained(to, from)
+      || (s->wpo == NULL && s->rpo == NULL);
+}
+// Replacement template for direction from -> to: `to` itself when the
+// direction introduces no variables, otherwise the grounded WM
+// free-variable instance (extras bound to s->min_const), or 0 when
+// the direction is unusable (non-ground-total order).
+static Term atp_unorient_template(AtpState *s, Term from, Term to) {
+  if (atp_vars_contained(to, from)) return to;
+  if (s->wpo != NULL || s->rpo != NULL) return 0;
+  return atp_grounded_instance(s, to, from, s->min_const);
+}
+
 static Term atp_ordered_try_top(AtpState *s, Term t,
                                 const Term *lhs, const Term *rhs,
                                 u32 n_rules, u8 *fired) {
@@ -5394,13 +5445,13 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
 #endif
       continue;
     }
-    // Unorientable equation -- both directions, variable-safe + order-
-    // gated.  Match FIRST, then check the variable-containment guard:
-    // at most positions the rule has no redex, so the cheap fail-fast
-    // thvm_match avoids the full-term atp_vars_contained walk (a
-    // measured hot leaf).  Behaviour-identical -- both the match and
-    // the guard must hold for the rule to fire, and the guard does not
-    // depend on the redex.
+    // Unorientable equation -- both directions, order-gated.  Match
+    // FIRST, then pick the replacement template: at most positions the
+    // rule has no redex, so the cheap fail-fast thvm_match avoids the
+    // full-term atp_unorient_template walk (vars-containment is a
+    // measured hot leaf), and the template does not depend on the
+    // redex.  A direction whose replacement side carries extension
+    // variables fires with the grounded WM free-variable instance.
     Term li = lhs[i];
     Term ri = rhs[i];
     if (term_tag(li) == TAG_CTR &&
@@ -5410,10 +5461,12 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
       // r->l path may still apply if its top (term_tag(ri)) matches.
     } else {
       RewriteSubst subst = {{0}};
-      if (atp_match_maybe_ac(li, t, &subst) &&             // l -> r
-          atp_vars_contained(ri, li)) {
-        Term repl = thvm_subst_apply(ri, &subst);
-        if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
+      if (atp_match_maybe_ac(li, t, &subst)) {             // l -> r
+        Term tmpl = atp_unorient_template(s, li, ri);
+        if (tmpl != 0) {
+          Term repl = thvm_subst_apply(tmpl, &subst);
+          if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
+        }
       }
     }
     if (term_tag(ri) == TAG_CTR &&
@@ -5423,10 +5476,12 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
     }
     {
       RewriteSubst subst = {{0}};
-      if (atp_match_maybe_ac(ri, t, &subst) &&             // r -> l
-          atp_vars_contained(li, ri)) {
-        Term repl = thvm_subst_apply(li, &subst);
-        if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
+      if (atp_match_maybe_ac(ri, t, &subst)) {             // r -> l
+        Term tmpl = atp_unorient_template(s, ri, li);
+        if (tmpl != 0) {
+          Term repl = thvm_subst_apply(tmpl, &subst);
+          if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
+        }
       }
     }
   }
@@ -8950,23 +9005,29 @@ static Term atp_proof_rewrite_step(AtpState *s, Term t, u8 *pos, u8 depth,
     // atp_ordered_try_top, so the recorded step matches the normalizer.
     if (!s->r_orient[i]) {
       if (g_atp_proof_oriented_only) continue;   // oriented-fixpoint phase
-      if (atp_vars_contained(s->rhs[i], s->lhs[i])) {       // l -> r
+      {                                                     // l -> r
         RewriteSubst sub = {{0}};
         if (thvm_match(s->lhs[i], t, &sub)) {
-          Term repl = thvm_subst_apply(s->rhs[i], &sub);
-          if (atp_compare(s, t, repl) == KBO_GT) {
-            *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 1;
-            return repl;
+          Term tmpl = atp_unorient_template(s, s->lhs[i], s->rhs[i]);
+          if (tmpl != 0) {
+            Term repl = thvm_subst_apply(tmpl, &sub);
+            if (atp_compare(s, t, repl) == KBO_GT) {
+              *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 1;
+              return repl;
+            }
           }
         }
       }
-      if (atp_vars_contained(s->lhs[i], s->rhs[i])) {       // r -> l
+      {                                                     // r -> l
         RewriteSubst sub = {{0}};
         if (thvm_match(s->rhs[i], t, &sub)) {
-          Term repl = thvm_subst_apply(s->lhs[i], &sub);
-          if (atp_compare(s, t, repl) == KBO_GT) {
-            *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 0;
-            return repl;
+          Term tmpl = atp_unorient_template(s, s->rhs[i], s->lhs[i]);
+          if (tmpl != 0) {
+            Term repl = thvm_subst_apply(tmpl, &sub);
+            if (atp_compare(s, t, repl) == KBO_GT) {
+              *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 0;
+              return repl;
+            }
           }
         }
       }
@@ -9024,23 +9085,29 @@ static Term atp_proof_rewrite_step_slice(AtpState *s, Term t,
 #ifdef ATP_ORDERED_REWRITE
     u8 oriented = (u8)(atp_compare(s, lhs_arr[i], rhs_arr[i]) == KBO_GT);
     if (!oriented) {
-      if (atp_vars_contained(rhs_arr[i], lhs_arr[i])) {       // l -> r
+      {                                                       // l -> r
         RewriteSubst sub = {{0}};
         if (thvm_match(lhs_arr[i], t, &sub)) {
-          Term repl = thvm_subst_apply(rhs_arr[i], &sub);
-          if (atp_compare(s, t, repl) == KBO_GT) {
-            *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 1;
-            return repl;
+          Term tmpl = atp_unorient_template(s, lhs_arr[i], rhs_arr[i]);
+          if (tmpl != 0) {
+            Term repl = thvm_subst_apply(tmpl, &sub);
+            if (atp_compare(s, t, repl) == KBO_GT) {
+              *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 1;
+              return repl;
+            }
           }
         }
       }
-      if (atp_vars_contained(lhs_arr[i], rhs_arr[i])) {       // r -> l
+      {                                                       // r -> l
         RewriteSubst sub = {{0}};
         if (thvm_match(rhs_arr[i], t, &sub)) {
-          Term repl = thvm_subst_apply(lhs_arr[i], &sub);
-          if (atp_compare(s, t, repl) == KBO_GT) {
-            *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 0;
-            return repl;
+          Term tmpl = atp_unorient_template(s, rhs_arr[i], lhs_arr[i]);
+          if (tmpl != 0) {
+            Term repl = thvm_subst_apply(tmpl, &sub);
+            if (atp_compare(s, t, repl) == KBO_GT) {
+              *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 0;
+              return repl;
+            }
           }
         }
       }

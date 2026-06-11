@@ -3818,12 +3818,29 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                                 {General::newsym, RuleDelayed::rhs}],
                             $Failed]]];
                 If[ ds === $Failed, $Failed,
+                    (* The engine-reserved grounding constants (cAtp1 /
+                       cAtp2, WM SO_minimaleKonstante) go in "Constants":
+                       the verifier patterns every symbol in Variables
+                       union Constants, and its extension-variable
+                       resolution wraps a solved binding as a pattern --
+                       so a binding solved to cAtp1 only compares equal
+                       to the recorded statement when cAtp1 is patterned
+                       there too.  Sound: cAtp1 is fresh w.r.t. the
+                       signature, so its universal generalization is
+                       equivalent. *)
                     p = ProofObject["EquationalLogic", conjStmt, axEq,
                         <|"Variables" -> Union[varNames,
                             Cases[ds, s_Symbol /; atpXVarQ[s], {0, Infinity}]],
-                          "Constants" -> {}, "Proof" -> ds|>];
+                          "Constants" -> Union @ Cases[ds,
+                            s_Symbol /; MemberQ[{"cAtp1", "cAtp2"},
+                                SymbolName[s]], {0, Infinity}],
+                          "Proof" -> ds|>];
                     v = Quiet @ Check[
                         p["ProofFunction"][p["Theorems"]], $Failed];
+                    If[ TrueQ[$AtpDebugDataset] && ! MatchQ[v, _Success],
+                        WriteString["stderr", "atp-verify-fail chain=",
+                            ToString[chainOn], " v=",
+                            ToString[Short[v, 6], InputForm], "\n"]];
                     (* FVI-gated proofs cite a SubstitutionLemma whose
                        Proof shape (Source -> "fvi") the FindEquational-
                        Proof verifier does not yet teach.  The C engine's
