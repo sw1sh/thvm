@@ -576,6 +576,50 @@ int main(void) {
     thvm_atp_free(s);
     #undef FVI_F
   }
+
+  TEST_BEGIN("atp/redex-priority-rule-before-equation-per-position");
+  {
+    // WM per-position redex priority (BL_RegelOderGleichungAngewendet,
+    // NF/NFBildung.c:503-531): where BOTH an oriented rule and an
+    // unorientable equation match the same position, the rule fires.
+    // Slot 0 is the commutativity equation f(x,y) == f(y,x) (KBO_UN);
+    // slot 1 is the oriented rule f(e,a) -> a.  The subject f(e,a)
+    // hosts both at the root -- the equation's forward face passes the
+    // strict-decrease gate (e > a in DUMMY_CFG precedence, so
+    // f(e,a) > f(a,e)).  Rule-index order would fire the equation
+    // first and stall at the f(a,e) fixpoint; the rule tree
+    // (Regelbaum) goes first and reaches a.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64u);
+    {
+      Term x = mk_v(0u), y = mk_v(1u);
+      atp_push_rule(s, mk_f(x, y), mk_f(y, x));     // unorientable, slot 0
+    }
+    atp_push_rule(s, mk_f(mk_e(), mk_a()), mk_a()); // oriented, slot 1
+    CHECK_EQ(s->n_rules, 2u);
+    CHECK_EQ(s->n_unorient, 1u);
+    CHECK_EQ(s->r_orient[0], 0u);
+    CHECK_EQ(s->r_orient[1], 1u);
+    Term subj = mk_f(mk_e(), mk_a());
+    Term want = mk_a();
+    // Term-side single-position pick: the rule (slot 1) beats the
+    // equation (slot 0).
+    u8 fired = 0;
+    Term top = atp_ordered_try_top(s, subj, s->lhs, s->rhs, s->n_rules,
+                                   &fired);
+    CHECK_EQ(fired, 1u);
+    CHECK(kbo_eq(top, want));
+    // Full Term-side normalize agrees.
+    Term nf = atp_rewrite_normalize(s, subj, s->lhs, s->rhs, s->n_rules, 64u);
+    CHECK(kbo_eq(nf, want));
+#ifdef THVM_ATPFT_NORM
+    // FT normalize (find_redex_ft) applies the same per-position
+    // priority.
+    AtpFtCell *fsubj = ft_from_term((AtpFt *)s->ft_arena_ptr, subj, 0);
+    AtpFtCell *fnf   = atp_rewrite_normalize_ft(s, fsubj, 64u);
+    CHECK(kbo_eq(ft_to_term(fnf), want));
+#endif
+    thvm_atp_free(s);
+  }
 #endif
 
   TEST_BEGIN("atp/generate-cps-empty-added-no-op");

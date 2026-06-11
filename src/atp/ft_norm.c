@@ -168,15 +168,14 @@ static void ft_clear_subst_fresh(AtpFtCell *root) {
 // `try_unorient`: when set, the linear scan considers unorientable
 //   equations (s->r_orient[r] == 0, s->n_unorient > 0).
 //
-// The Term-side mixed loop (atp_rewrite_normalize_ordered) alternates
-// an orientable-only fixpoint with ONE unorientable step; mirror that
-// shape here so the two NFs agree under THVM_ATPFT_NORM_VERIFY.  A
-// single-pass linear scan that tries every rule kind at every position
-// (the original Stage 6 shape) reaches the same NF in a confluent
-// system, but the live ATP saturation pumps non-confluent intermediate
-// rule sets at every CP, and a strategy split there is exactly what
-// the VERIFY-mode mismatch detects.  Staging the two kinds in lock-step
-// with the Term path keeps the verdicts byte-equal.
+// Per-position redex priority is WM's (BL_RegelOderGleichungAngewendet,
+// NF/NFBildung.c:503-531; path-based NFB_ variant :219-238): at each
+// cell the oriented rules (Regelbaum) are tried BEFORE the unorientable
+// equations (Gleichungsbaum), and an equation fires only when no
+// oriented rule matches there.  Across cells the walk stays pre-order,
+// so an equation redex at an earlier cell still beats an oriented redex
+// at a later one -- the WM traversal contract, NOT a global
+// rules-to-fixpoint phase split.
 //
 // Unorientable equations are gated like atp_ordered_try_top
 // (src/atp/_.c):
@@ -261,25 +260,24 @@ static int find_redex_ft(AtpState        *s,
       prev = p;
       continue;
     }
-    // Lazy redex pre-encode: thvm_kbo_ft_subst encodes both sides on
-    // every call; we attempt up to `slice_count` rules at this cell,
-    // each running the unorient gate with the SAME redex `p`.
-    // Pre-encode once, reuse across attempts.  redex_na==0 means
-    // "not yet encoded"; the FIRST gate call lazily fills it.
-    u32 redex_na = 0u;
-    for (u32 r = slice_first; r < slice_end; r++) {
-      // Filter dead (bwd-subsumed) rules first: their lhs_ft/rhs_ft are
-      // overwritten with a sentinel FVR (id 255) at deletion time, which
-      // an unorientable backward-direction match could spuriously bind.
-      // The Term-side indexed paths (atp_ri_rebuild) skip them; mirror
-      // that here so the linear FT scan agrees.
-      if (s->r_dead != NULL && s->r_dead[r]) continue;
-      AtpFtCell *lhs = s->lhs_ft[r];
-      AtpFtCell *rhs = s->rhs_ft[r];
-      if (lhs == NULL || rhs == NULL) continue;
-      u8 oriented = (u8)(!have_unorient || s->r_orient[r]);
-      if (oriented) {
-        if (!try_orient) continue;
+    // WM per-position redex priority (BL_RegelOderGleichungAngewendet,
+    // NF/NFBildung.c:503-531, and the path-based NFB_ variant :219-238
+    // that the CLI default `-nf mixmost` installs): at every position
+    // the rule tree (Regelbaum) is consulted BEFORE the equation tree
+    // (Gleichungsbaum) -- an unorientable equation fires at this cell
+    // only when NO oriented rule matches here.  Pass 1: oriented rules
+    // in slice order.
+    if (try_orient) {
+      for (u32 r = slice_first; r < slice_end; r++) {
+        // Filter dead (bwd-subsumed) rules first: their lhs_ft/rhs_ft are
+        // overwritten with a sentinel FVR (id 255) at deletion time, which
+        // an unorientable backward-direction match could spuriously bind.
+        // The Term-side indexed paths (atp_ri_rebuild) skip them; mirror
+        // that here so the linear FT scan agrees.
+        if (s->r_dead != NULL && s->r_dead[r]) continue;
+        AtpFtCell *lhs = s->lhs_ft[r];
+        if (lhs == NULL || s->rhs_ft[r] == NULL) continue;
+        if (have_unorient && !s->r_orient[r]) continue;
         // Forward rewrite, no order check needed (oriented).
         ft_subst_reset(subst_buf);
         if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
@@ -289,66 +287,81 @@ static int find_redex_ft(AtpState        *s,
           *dir_out    = 0u;
           return 1;
         }
-        continue;
       }
-      if (!try_unorient) continue;
-      // Unorientable equation: try forward (l -> r) then backward (r -> l).
-      // Forward: lhs matches p; rhs vars NOT bound by the lhs match
-      // (extension variables) are grounded to the minimal constant --
-      // ft_subst_ground_extras, the WM free-variable instance;
-      // instantiated repl < redex under the reduction order.  Streaming
-      // KBO via thvm_kbo_ft_subst_with_prepared; THVM_ATPFT_KBO_DIFF=1
-      // runs a side-by-side Term-side atp_compare to surface verdict
-      // divergences (a probe across the AC bench found zero -- the
-      // streaming KBO matches atp_compare on the unorient gate inputs).
-      ft_subst_reset(subst_buf);
-      if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
-        if (ft_subst_ground_extras(s, rhs, subst_buf)) {
-          if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
-          KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
-          static int dbg_diff = -1;
-          if (dbg_diff < 0) dbg_diff = getenv("THVM_ATPFT_KBO_DIFF") != NULL ? 1 : 0;
-          if (dbg_diff) {
-            AtpFt *arena_chk = (AtpFt *)s->ft_arena_ptr;
-            AtpFtCell *repl = ft_subst_apply(arena_chk, rhs, subst_buf, 1);
-            if (repl != NULL) {
-              Term t_p    = ft_to_term(p);
-              Term t_repl = ft_to_term(repl);
-              KboCmp tt_v = atp_compare(s, t_p, t_repl);
-              if (ft_v != tt_v) {
-                fprintf(stderr,
-                        "[KBO DIFF fwd] ft=%d tt=%d  p=0x%016llx  sigma_r=0x%016llx\n",
-                        (int)ft_v, (int)tt_v,
-                        (unsigned long long)t_p,
-                        (unsigned long long)t_repl);
+    }
+    // Pass 2: unorientable equations -- reached only when no oriented
+    // rule matched at this cell.
+    if (try_unorient && have_unorient) {
+      // Lazy redex pre-encode: thvm_kbo_ft_subst encodes both sides on
+      // every call; we attempt up to `slice_count` equations at this
+      // cell, each running the unorient gate with the SAME redex `p`.
+      // Pre-encode once, reuse across attempts.  redex_na==0 means
+      // "not yet encoded"; the FIRST gate call lazily fills it.
+      u32 redex_na = 0u;
+      for (u32 r = slice_first; r < slice_end; r++) {
+        if (s->r_dead != NULL && s->r_dead[r]) continue;
+        AtpFtCell *lhs = s->lhs_ft[r];
+        AtpFtCell *rhs = s->rhs_ft[r];
+        if (lhs == NULL || rhs == NULL) continue;
+        if (s->r_orient[r]) continue;
+        // Unorientable equation: try forward (l -> r) then backward (r -> l).
+        // Forward: lhs matches p; rhs vars NOT bound by the lhs match
+        // (extension variables) are grounded to the minimal constant --
+        // ft_subst_ground_extras, the WM free-variable instance;
+        // instantiated repl < redex under the reduction order.  Streaming
+        // KBO via thvm_kbo_ft_subst_with_prepared; THVM_ATPFT_KBO_DIFF=1
+        // runs a side-by-side Term-side atp_compare to surface verdict
+        // divergences (a probe across the AC bench found zero -- the
+        // streaming KBO matches atp_compare on the unorient gate inputs).
+        ft_subst_reset(subst_buf);
+        if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
+          if (ft_subst_ground_extras(s, rhs, subst_buf)) {
+            if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
+            KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
+            static int dbg_diff = -1;
+            if (dbg_diff < 0) dbg_diff = getenv("THVM_ATPFT_KBO_DIFF") != NULL ? 1 : 0;
+            if (dbg_diff) {
+              AtpFt *arena_chk = (AtpFt *)s->ft_arena_ptr;
+              AtpFtCell *repl = ft_subst_apply(arena_chk, rhs, subst_buf, 1);
+              if (repl != NULL) {
+                Term t_p    = ft_to_term(p);
+                Term t_repl = ft_to_term(repl);
+                KboCmp tt_v = atp_compare(s, t_p, t_repl);
+                if (ft_v != tt_v) {
+                  fprintf(stderr,
+                          "[KBO DIFF fwd] ft=%d tt=%d  p=0x%016llx  sigma_r=0x%016llx\n",
+                          (int)ft_v, (int)tt_v,
+                          (unsigned long long)t_p,
+                          (unsigned long long)t_repl);
+                }
               }
             }
+            if (ft_v == KBO_GT) {
+              *parent_out = (p == root) ? NULL : prev;
+              *redex_out  = p;
+              *rule_out   = r;
+              *dir_out    = 0u;
+              return 1;
+            }
           }
-          if (ft_v == KBO_GT) {
-            *parent_out = (p == root) ? NULL : prev;
-            *redex_out  = p;
-            *rule_out   = r;
-            *dir_out    = 0u;
-            return 1;
-          }
+          ft_subst_reset(subst_buf);
         }
+        // Backward: same gates with l/r swapped.
         ft_subst_reset(subst_buf);
-      }
-      // Backward: same gates with l/r swapped.
-      ft_subst_reset(subst_buf);
-      if (ft_match_maybe_ac(ft_arena_local, rhs, p, subst_buf)) {
-        if (ft_subst_ground_extras(s, lhs, subst_buf)) {
-          if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
-          KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
-          if (ft_v == KBO_GT) {
-            *parent_out = (p == root) ? NULL : prev;
-            *redex_out  = p;
-            *rule_out   = r;
-            *dir_out    = 1u;
-            return 1;
+        if (ft_match_maybe_ac(ft_arena_local, rhs, p, subst_buf)) {
+          if (ft_subst_ground_extras(s, lhs, subst_buf)) {
+            if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
+            KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
+            if (ft_v == KBO_GT) {
+              *parent_out = (p == root) ? NULL : prev;
+              *redex_out  = p;
+              *rule_out   = r;
+              *dir_out    = 1u;
+              return 1;
+            }
           }
+          ft_subst_reset(subst_buf);
         }
-        ft_subst_reset(subst_buf);
       }
     }
     prev = p;
@@ -645,9 +658,10 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   }
   int use_batch_orient = batch_env_cached && use_full_range && !record;
   (void)use_batch_orient;  // legacy batched-orient hint; per-position loop below subsumes it
-  // Single per-position try-all-rules loop (matches WM `BL_Normalform*` and
-  // Term-side `atp_ordered_try_top` -- both try R + E AT EACH POSITION in
-  // one pass instead of running orient to fixpoint before unorient).
+  // Single per-position loop (matches WM `BL_Normalform*` / `NFB_*` and
+  // Term-side `atp_ordered_try_top`): every position tries oriented rules
+  // first, unorientable equations only when no oriented rule matched there
+  // (WM Regelbaum-before-Gleichungsbaum, NF/NFBildung.c:503-531).
   // The prior split-phase (orient-fixpoint, ONE unorient, repeat) produced
   // different NFs from Term/WM on AC-class workloads; blocked migrations
   // of goal_check + CP-set-IR.

@@ -5413,11 +5413,16 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
   u32 t_tag = term_tag(t);
   u32 t_sym = (t_tag == TAG_CTR) ? term_ext(t) : 0u;
   u32 t_n   = (t_tag == TAG_CTR) ? term_ctr_n(t) : 0u;
-  for (u32 i = 0; i < n_rules; i++) {
-    u8 oriented = orient ? orient[i]
-                         : (u8)(atp_compare(s, lhs[i], rhs[i]) == KBO_GT);
-    if (oriented) {
-      if (g_atp_skip_oriented) continue;   // already at indexed fixpoint
+  // WM per-position redex priority (BL_RegelOderGleichungAngewendet,
+  // NF/NFBildung.c:503-531; path-based NFB_ variant :219-238): at this
+  // position the rule tree (Regelbaum) is consulted BEFORE the equation
+  // tree (Gleichungsbaum) -- an unorientable equation fires only when
+  // NO oriented rule matches here.  Pass 1: oriented rules, index order.
+  if (!g_atp_skip_oriented) {   // skip flag: already at indexed fixpoint
+    for (u32 i = 0; i < n_rules; i++) {
+      u8 oriented = orient ? orient[i]
+                           : (u8)(atp_compare(s, lhs[i], rhs[i]) == KBO_GT);
+      if (!oriented) continue;
       // Top-symbol pre-filter: rule lhs must agree on tag, label, arity
       // for thvm_match to succeed.  FVR pattern can match anything --
       // skip the filter then.  Eliminates the recursive entry on the
@@ -5463,8 +5468,14 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
         }
       }
 #endif
-      continue;
     }
+  }
+  // Pass 2: unorientable equations -- reached only when no oriented
+  // rule matched at this position.
+  for (u32 i = 0; i < n_rules; i++) {
+    u8 oriented = orient ? orient[i]
+                         : (u8)(atp_compare(s, lhs[i], rhs[i]) == KBO_GT);
+    if (oriented) continue;
     // Unorientable equation -- both directions, order-gated.  Match
     // FIRST, then pick the replacement template: at most positions the
     // rule has no redex, so the cheap fail-fast thvm_match avoids the
@@ -9171,38 +9182,14 @@ static Term atp_proof_rewrite_step_slice(AtpState *s, Term t,
                                          u32 n,
                                          u32 *out_rule, u8 *out_pos_len,
                                          u8 *out_fwd, u8 *fired) {
+  // WM per-position redex priority (NF/NFBildung.c:503-531): oriented
+  // rules first at this position, unorientable equations only when no
+  // oriented rule matched here -- the same two-pass order as
+  // atp_ordered_try_top / find_redex_ft, so the recorded chain replays
+  // the slice normalizers' redex picks exactly.
   for (u32 i = 0; i < n; i++) {
 #ifdef ATP_ORDERED_REWRITE
-    u8 oriented = (u8)(atp_compare(s, lhs_arr[i], rhs_arr[i]) == KBO_GT);
-    if (!oriented) {
-      {                                                       // l -> r
-        RewriteSubst sub = {{0}};
-        if (thvm_match(lhs_arr[i], t, &sub)) {
-          Term tmpl = atp_unorient_template(s, lhs_arr[i], rhs_arr[i]);
-          if (tmpl != 0) {
-            Term repl = thvm_subst_apply(tmpl, &sub);
-            if (atp_compare(s, t, repl) == KBO_GT) {
-              *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 1;
-              return repl;
-            }
-          }
-        }
-      }
-      {                                                       // r -> l
-        RewriteSubst sub = {{0}};
-        if (thvm_match(rhs_arr[i], t, &sub)) {
-          Term tmpl = atp_unorient_template(s, rhs_arr[i], lhs_arr[i]);
-          if (tmpl != 0) {
-            Term repl = thvm_subst_apply(tmpl, &sub);
-            if (atp_compare(s, t, repl) == KBO_GT) {
-              *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 0;
-              return repl;
-            }
-          }
-        }
-      }
-      continue;
-    }
+    if (atp_compare(s, lhs_arr[i], rhs_arr[i]) != KBO_GT) continue;
 #endif
     RewriteSubst sub = {{0}};
     if (thvm_match(lhs_arr[i], t, &sub)) {
@@ -9210,6 +9197,37 @@ static Term atp_proof_rewrite_step_slice(AtpState *s, Term t,
       return thvm_subst_apply(rhs_arr[i], &sub);
     }
   }
+#ifdef ATP_ORDERED_REWRITE
+  for (u32 i = 0; i < n; i++) {
+    if (atp_compare(s, lhs_arr[i], rhs_arr[i]) == KBO_GT) continue;
+    {                                                         // l -> r
+      RewriteSubst sub = {{0}};
+      if (thvm_match(lhs_arr[i], t, &sub)) {
+        Term tmpl = atp_unorient_template(s, lhs_arr[i], rhs_arr[i]);
+        if (tmpl != 0) {
+          Term repl = thvm_subst_apply(tmpl, &sub);
+          if (atp_compare(s, t, repl) == KBO_GT) {
+            *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 1;
+            return repl;
+          }
+        }
+      }
+    }
+    {                                                         // r -> l
+      RewriteSubst sub = {{0}};
+      if (thvm_match(rhs_arr[i], t, &sub)) {
+        Term tmpl = atp_unorient_template(s, rhs_arr[i], lhs_arr[i]);
+        if (tmpl != 0) {
+          Term repl = thvm_subst_apply(tmpl, &sub);
+          if (atp_compare(s, t, repl) == KBO_GT) {
+            *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 0;
+            return repl;
+          }
+        }
+      }
+    }
+  }
+#endif
   if (term_tag(t) == TAG_CTR && depth < ATP_PROOF_MAX_DEPTH) {
     u32 n_ctr = term_ctr_n(t);
     if (n_ctr > REWRITE_MAX_ARITY) { *fired = 0; return t; }
