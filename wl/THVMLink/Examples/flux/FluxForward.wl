@@ -13,15 +13,16 @@
    lives in THVMLink`Private`. *)
 fxShape = THVMLink`Private`tUopShape;
 
-(* --- linear: a diffusers weight is stored {out, in}, so y = x . W^T.
-       Transpose[w] is a permuted VIEW; feeding it straight into TMatMul makes
-       the reshape produce an IDIV/IMOD address that BLAS declines, falling to
-       a scalar EXPAND-MUL-REDUCE with a multi-GB intermediate (the FLUX ff
-       matmuls take minutes this way).  Realize the transposed weight to a
-       contiguous {in, out} buffer once so TMatMul reads a clean operand and
-       dispatches cblas_sgemm.  (Weights are constants -- a full forward should
-       pre-transpose them once; per-call realize is fine for a block.) --- *)
-fxLinear[x_, w_] := TMatMul[x, TRealize[Transpose[w]]]
+(* --- linear: a diffusers weight is stored {out, in}, so y = x . W^T.  The
+       weight reaches us as a lazy bf16->f32 TUOpCast, which cblas can't read;
+       left un-realized, TMatMul fuses cast+transpose into a scalar
+       EXPAND-MUL-REDUCE with a multi-GB intermediate (the FLUX ff matmuls take
+       minutes that way).  Realize the CAST to a contiguous {out, in} f32
+       buffer; Transpose is then a pure view that cblas_sgemm consumes as transB
+       -- no transpose shuffle (~40% faster than realizing the transposed
+       layout).  (Weights are constants -- a full forward should cache the f32
+       cast once; per-call realize is fine for a single block.) --- *)
+fxLinear[x_, w_] := TMatMul[x, Transpose[TRealize[w]]]
 
 (* --- RMSNorm over the last axis (FLUX per-head q/k norm, weight {D}):
        y = x * rsqrt(mean(x^2) + eps) * weight --- *)
@@ -169,7 +170,11 @@ fxSingleBlock[x0_, mod_, ropeCos_, ropeSin_, W_, cfg_] := Module[
     h = cfg["heads"];  dh = cfg["head_dim"];  eps = cfg["eps"];  scale = 1/Sqrt[N[dh]];
     s = fxShape[x0][[1]];  dim = h*dh;
     xn     = fxModulate[x0, mod["shift"], mod["scale"], eps];
-    qkvmlp = fxLinear[xn, W["to_qkv_mlp_proj"]];                   (* {S, 3*dim + 2*mlp} *)
+    (* realize the fused projection: qkv + mlp are both shrinks of it, so the
+       attention and MLP paths would otherwise each re-lift this big matmul into
+       the final fused concat+to_out matmul -- the deepest DAG in the model,
+       which overflows the recursive lift walk.  A leaf read cuts both paths. *)
+    qkvmlp = TRealize @ fxLinear[xn, W["to_qkv_mlp_proj"]];        (* {S, 3*dim + 2*mlp} *)
     qkvw   = fxShape[qkvmlp][[2]];
     qkv    = TUOpShrink[qkvmlp, {{0, s}, {0, 3 dim}}];            (* {S, 3*dim} *)
     mlp    = TUOpShrink[qkvmlp, {{0, s}, {3 dim, qkvw}}];         (* {S, 2*mlp} *)
@@ -180,4 +185,67 @@ fxSingleBlock[x0_, mod_, ropeCos_, ropeSin_, W_, cfg_] := Module[
     q = fxRoPE[q, rc, rs];  k = fxRoPE[k, rc, rs];
     attn = fxAttention[q, k, v, scale];                          (* {S, dim} *)
     mlpG = fxSwiGLUact[mlp];                                     (* {S, mlp} *)
-    fxGateAdd[x0, mod["gate"], fxLinear[fxConcat[{attn, mlpG}, 2], W["to_out"]]]]
+    (* realize the joined attn|mlp before to_out: it feeds the final matmul's
+       contraction operand, so a leaf read keeps that lift shallow. *)
+    fxGateAdd[x0, mod["gate"], fxLinear[TRealize @ fxConcat[{attn, mlpG}, 2], W["to_out"]]]]
+
+(* ============================================================
+   Full transformer forward (loop 5 double + 20 single blocks).
+   See docs/flux_forward_spec.md + diffusers Flux2Transformer2DModel.
+   ============================================================ *)
+
+(* --- Flux2Modulation: SiLU(temb) -> Linear(modW) -> chunk(3*sets) into a
+       list of {1,dim} vectors, in order (shift,scale,gate) per set.  temb is
+       {1,dim}; modW is {sets*3*dim, dim} (shared across all blocks). --- *)
+fxModChunks[temb_, modW_, sets_] := Module[{d, mod},
+    d   = fxShape[temb][[2]];
+    mod = fxLinear[fxSiLU[temb], modW];                     (* {1, sets*3*d} *)
+    Table[TUOpShrink[mod, {{0, 1}, {(i - 1) d, i d}}], {i, 3 sets}]]
+
+(* --- AdaLayerNormContinuous (norm_out): emb=Linear(SiLU(temb)); the diffusers
+       chunk is (scale, shift); out = (1+scale)*LayerNorm(x) + shift. --- *)
+fxNormOut[x_, temb_, normW_, eps_] := With[{d = fxShape[x][[2]], emb = fxLinear[fxSiLU[temb], normW]},
+    fxModulate[x, TUOpShrink[emb, {{0, 1}, {d, 2 d}}], TUOpShrink[emb, {{0, 1}, {0, d}}], eps]]
+
+(* assemble a double-block mods Association from the 6 shared img/txt chunks *)
+fxDoubleMods[dImg_, dTxt_] := <|
+    "img_shift_msa" -> dImg[[1]], "img_scale_msa" -> dImg[[2]], "img_gate_msa" -> dImg[[3]],
+    "img_shift_mlp" -> dImg[[4]], "img_scale_mlp" -> dImg[[5]], "img_gate_mlp" -> dImg[[6]],
+    "txt_shift_msa" -> dTxt[[1]], "txt_scale_msa" -> dTxt[[2]], "txt_gate_msa" -> dTxt[[3]],
+    "txt_shift_mlp" -> dTxt[[4]], "txt_scale_mlp" -> dTxt[[5]], "txt_gate_mlp" -> dTxt[[6]]|>
+
+(* per-block weight Associations from a name->TTerm loader wf (diffusers names) *)
+fxDblW[wf_, i_] := With[{p = "transformer_blocks." <> ToString[i] <> "."}, <|
+    "to_q" -> wf[p <> "attn.to_q.weight"], "to_k" -> wf[p <> "attn.to_k.weight"], "to_v" -> wf[p <> "attn.to_v.weight"],
+    "add_q_proj" -> wf[p <> "attn.add_q_proj.weight"], "add_k_proj" -> wf[p <> "attn.add_k_proj.weight"], "add_v_proj" -> wf[p <> "attn.add_v_proj.weight"],
+    "norm_q" -> wf[p <> "attn.norm_q.weight"], "norm_k" -> wf[p <> "attn.norm_k.weight"],
+    "norm_added_q" -> wf[p <> "attn.norm_added_q.weight"], "norm_added_k" -> wf[p <> "attn.norm_added_k.weight"],
+    "to_out_0" -> wf[p <> "attn.to_out.0.weight"], "to_add_out" -> wf[p <> "attn.to_add_out.weight"],
+    "ff_linear_in" -> wf[p <> "ff.linear_in.weight"], "ff_linear_out" -> wf[p <> "ff.linear_out.weight"],
+    "ffc_linear_in" -> wf[p <> "ff_context.linear_in.weight"], "ffc_linear_out" -> wf[p <> "ff_context.linear_out.weight"]|>]
+
+fxSglW[wf_, i_] := With[{p = "single_transformer_blocks." <> ToString[i] <> "."}, <|
+    "to_qkv_mlp_proj" -> wf[p <> "attn.to_qkv_mlp_proj.weight"], "to_out" -> wf[p <> "attn.to_out.weight"],
+    "norm_q" -> wf[p <> "attn.norm_q.weight"], "norm_k" -> wf[p <> "attn.norm_k.weight"]|>]
+
+(* --- the full transformer.  hidden0 {S_img, in_ch}; enc0 {S_txt, joint_dim};
+       temb {1, dim}; ropeCos/Sin {S_txt+S_img, head_dim} ([txt;img] order);
+       wf a name->TTerm loader.  Eager block-by-block realize bounds memory
+       (each fxLinear materialises its f32 weight cast).  Returns {S_img, out_ch}. --- *)
+fxTransformer[hidden0_, enc0_, temb_, ropeCos_, ropeSin_, wf_, cfg_] := Module[
+    {eps, nD, nS, stxt, mods, smod, hidden, enc, ss},
+    eps = cfg["eps"];  nD = cfg["num_double"];  nS = cfg["num_single"];
+    stxt = fxShape[enc0][[1]];
+    mods = fxDoubleMods[fxModChunks[temb, wf["double_stream_modulation_img.linear.weight"], 2],
+                        fxModChunks[temb, wf["double_stream_modulation_txt.linear.weight"], 2]];
+    ss   = fxModChunks[temb, wf["single_stream_modulation.linear.weight"], 1];
+    smod = <|"shift" -> ss[[1]], "scale" -> ss[[2]], "gate" -> ss[[3]]|>;
+    hidden = TRealize @ fxLinear[hidden0, wf["x_embedder.weight"]];      (* {S_img, dim} *)
+    enc    = TRealize @ fxLinear[enc0,    wf["context_embedder.weight"]]; (* {S_txt, dim} *)
+    (* fxDoubleBlock returns {img, txt} -> hidden(img) is [[1]], enc(txt) is [[2]] *)
+    Do[ With[{r = fxDoubleBlock[hidden, enc, mods, ropeCos, ropeSin, fxDblW[wf, i], cfg]},
+            hidden = TRealize @ r[[1]];  enc = TRealize @ r[[2]]], {i, 0, nD - 1}];
+    hidden = TRealize @ fxConcat[{enc, hidden}, 1];                       (* {S_txt+S_img, dim} *)
+    Do[ hidden = TRealize @ fxSingleBlock[hidden, smod, ropeCos, ropeSin, fxSglW[wf, i], cfg], {i, 0, nS - 1}];
+    hidden = TUOpShrink[hidden, {{stxt, fxShape[hidden][[1]]}, {0, fxShape[hidden][[2]]}}];  (* drop text *)
+    fxLinear[fxNormOut[hidden, temb, wf["norm_out.linear.weight"], eps], wf["proj_out.weight"]]]
