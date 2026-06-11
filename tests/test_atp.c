@@ -803,7 +803,7 @@ int main(void) {
     // redex, not joinable) so only the orphan paths can drop it.
     Term c_l = mk_i(mk_a()), c_r = mk_a();
     u32 tc = atp_trace_push_cp(s, doomed, doomed, c_l, c_r, NULL, 0);
-    atp_cp_heap_push(s, c_l, c_r, tc, 0u);
+    atp_cp_heap_push(s, c_l, c_r, tc, 0u, 0u);
     CHECK_EQ(s->n_cps, 1u);
 
     AtpAddedRange added = thvm_atp_orient_and_add(
@@ -829,7 +829,7 @@ int main(void) {
     doomed = s->r_trace[0];
     c_l = mk_i(mk_a()); c_r = mk_a();
     tc = atp_trace_push_cp(s, doomed, doomed, c_l, c_r, NULL, 0);
-    atp_cp_heap_push(s, c_l, c_r, tc, 0u);
+    atp_cp_heap_push(s, c_l, c_r, tc, 0u, 0u);
     CHECK_EQ(s->n_cps, 1u);
 
     added = thvm_atp_orient_and_add(
@@ -856,6 +856,93 @@ int main(void) {
     CHECK_EQ(thvm_atp_select_cp(s, &pl, &pr), 0u);
     CHECK_EQ(s->n_cps, 0u);
     CHECK_EQ(s->n_cps_dropped_orphan - orphans0, 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-kpbehandelt-raw50-queued-raw-weighed-raw");
+  {
+    // WM KPBehandelt (INF/KPVerwaltung.c:439-467): a CP at-or-above the
+    // lohntSichBehandlung gate (:435-438, combined RAW size >= 50) gets
+    // NO generation-time treatment -- it queues RAW, weighs on the RAW
+    // pair (recentCPinsert C_Classify :396), and bypasses the
+    // auto-MaxWeight stash (WM buries it IN the heap at raw weight);
+    // the full normalize + joinability verdict run at selection.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_lazy_normalize(s, 1u);
+
+    // R[0]: f(x, e) -> x via the saturation path (real trace lineage).
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK_EQ(s->n_cps, 0u);
+    u32 rt = s->r_trace[0];
+    // Tight auto-MaxWeight: bound = 2 + 2 * |f(x, e)| = 8, far below the
+    // raw CP's 54 nodes -- any treated CP this size would be stashed.
+    thvm_atp_set_auto_max_cp_weight(s, 2u);
+    atp_auto_maxw_recompute(s);
+
+    // Raw pair: l = i^24(f(a, e)) (27 symbols, f-redex under R[0]),
+    // r = i^26(a) (27 symbols).  Combined 54 >= 50; not joinable
+    // (l normalizes to i^24(a) != i^26(a)).
+    Term l = mk_f(mk_a(), mk_e());
+    for (u32 k = 0; k < 24; k++) l = mk_i(l);
+    Term r = mk_a();
+    for (u32 k = 0; k < 26; k++) r = mk_i(r);
+    u64 push_norms0 = s->n_cps_push_normalized;
+    CriticalPair cp = {0};
+    cp.lhs = l;
+    cp.rhs = r;
+    CHECK_EQ(atp_push_cps_traced(s, &cp, 1u, rt, rt, 0u, 0u), 1u);
+
+    // Queued RAW in the HEAP (not the stash), untreated (no push
+    // normalize ran), sides byte-identical to the raw pair, priority
+    // computed on the raw 54-node form.
+    CHECK_EQ(s->n_cps, 1u);
+    CHECK_EQ(s->n_cp_stash, 0u);
+    CHECK_EQ(s->n_cps_push_normalized, push_norms0);
+    Term ql = 0, qr = 0;
+    acp_unpack(s->cp_packed[0], &ql, &qr);
+    CHECK(kbo_eq(ql, l));
+    CHECK(kbo_eq(qr, r));
+    CHECK_EQ(atp_symbol_count(ql) + atp_symbol_count(qr), 54u);
+    CHECK_EQ(s->cp_pri[0], atp_cp_priority_sized(s, l, r, 54u));
+
+    // Pop treatment (KPV_Select -ks): the raw CP is normalized at
+    // selection -- the f(a, e) redex reduces away -- then orients into
+    // i^26(a) -> i^24(a).
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_rules, 2u);
+    CHECK_EQ(term_ext(s->lhs[1]), LAB_i);
+    CHECK_EQ(atp_symbol_count(s->lhs[1]), 27u);
+    CHECK_EQ(atp_symbol_count(s->rhs[1]), 25u);
+    thvm_atp_free(s);
+
+    // --- <50 class: treated exactly as before (doR-only normalize +
+    //     joined-drop at push, queue + weigh on the treated form) ---
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_lazy_normalize(s, 1u);
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_step(s);
+    rt = s->r_trace[0];
+    push_norms0 = s->n_cps_push_normalized;
+    u64 joined0 = s->n_cps_dropped_joinable;
+    // Joinable small pair: f(a, e) = a joins under R[0] -> push-drop.
+    CriticalPair cp_small = {0};
+    cp_small.lhs = mk_f(mk_a(), mk_e());
+    cp_small.rhs = mk_a();
+    atp_push_cps_traced(s, &cp_small, 1u, rt, rt, 0u, 0u);
+    CHECK_EQ(s->n_cps, 0u);
+    CHECK_EQ(s->n_cps_dropped_joinable - joined0, 1u);
+    CHECK_EQ(s->n_cps_push_normalized - push_norms0, 1u);
+    // Surviving small pair queues its TREATED form: f(i(a), e) = e
+    // reduces to (i(a), e) before it lands in the queue.
+    cp_small.lhs = mk_f(mk_i(mk_a()), mk_e());
+    cp_small.rhs = mk_e();
+    atp_push_cps_traced(s, &cp_small, 1u, rt, rt, 0u, 0u);
+    CHECK_EQ(s->n_cps, 1u);
+    acp_unpack(s->cp_packed[0], &ql, &qr);
+    CHECK(kbo_eq(ql, mk_i(mk_a())));
+    CHECK(kbo_eq(qr, mk_e()));
     thvm_atp_free(s);
   }
 
@@ -903,7 +990,7 @@ int main(void) {
     // Unvergleichbar, and drops -- no rule added.
     u32 tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
                                inst_l, inst_r, NULL, 0);
-    atp_cp_heap_push(s, inst_l, inst_r, tc, 0u);
+    atp_cp_heap_push(s, inst_l, inst_r, tc, 0u, 0u);
     CHECK_EQ(s->n_cps, 1u);
     u32 rules0 = s->n_rules;
     thvm_atp_step(s);
@@ -914,7 +1001,7 @@ int main(void) {
     Term deep_r = mk_i(inst_r);
     tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
                            deep_l, deep_r, NULL, 0);
-    atp_cp_heap_push(s, deep_l, deep_r, tc, 0u);
+    atp_cp_heap_push(s, deep_l, deep_r, tc, 0u, 0u);
     thvm_atp_step(s);
     CHECK_EQ(s->n_cps_dropped_pop_subsumed, 2u);
     CHECK_EQ(s->n_rules, rules0);
@@ -928,7 +1015,7 @@ int main(void) {
     Term ori_r = mk_a();
     tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
                            ori_l, ori_r, NULL, 0);
-    atp_cp_heap_push(s, ori_l, ori_r, tc, 0u);
+    atp_cp_heap_push(s, ori_l, ori_r, tc, 0u, 0u);
     thvm_atp_step(s);
     CHECK_EQ(s->n_cps_dropped_pop_subsumed, 2u);
     CHECK_EQ(s->n_rules, rules0 + 1u);
@@ -944,7 +1031,7 @@ int main(void) {
     Term sur_r = mk_f(mk_v(1u), mk_i(mk_v(VAR_x)));
     tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
                            sur_l, sur_r, NULL, 0);
-    atp_cp_heap_push(s, sur_l, sur_r, tc, 0u);
+    atp_cp_heap_push(s, sur_l, sur_r, tc, 0u, 0u);
     u32 unorient0 = s->n_unorient;
     thvm_atp_step(s);
     CHECK_EQ(s->n_cps_dropped_pop_subsumed, 0u);
@@ -961,7 +1048,7 @@ int main(void) {
     Term off_r = mk_f(mk_v(2u), mk_i(mk_v(VAR_x)));
     tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
                            off_l, off_r, NULL, 0);
-    atp_cp_heap_push(s, off_l, off_r, tc, 0u);
+    atp_cp_heap_push(s, off_l, off_r, tc, 0u, 0u);
     rules0 = s->n_rules;
     thvm_atp_step(s);
     CHECK_EQ(s->n_cps_dropped_pop_subsumed, 0u);
@@ -2128,7 +2215,7 @@ int main(void) {
     // fallback stashes.
     CHECK_EQ(atp_cp_implicit_push(s, big_l, big_r, s->r_trace[0],
                                   s->r_trace[0], tb, 0u), 0u);
-    atp_cp_heap_push(s, big_l, big_r, tb, 0u);
+    atp_cp_heap_push(s, big_l, big_r, tb, 0u, 0u);
     CHECK_EQ(s->n_cps, 0u);
     CHECK_EQ(s->n_cp_stash, 1u);
     CHECK_EQ(s->n_cps_implicit, 0u);

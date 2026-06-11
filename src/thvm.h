@@ -4999,23 +4999,24 @@ typedef struct {
   u8   use_unorient_index;
 
   // Deferred-selection / lazy normalization (Waldmeister/DISCOUNT given-
-  // clause flow).  Default completion EAGERLY normalizes every generated
-  // critical pair against the full rule set R at push time
-  // (atp_cp_trivially_joinable in atp_push_cps_traced) to discard the
-  // ~74% trivially-joinable before they enter the queue -- so the
-  // normalize work scales with GENERATIONS (~430k on andassoc).
-  // Waldmeister does NOT (KPVerwaltung.c: KPEinfuegen just inserts the
-  // raw overlap into the K-D heap; Hauptkomponenten.c HK_Vervollstaendigung
-  // = "completion": pop one CP via KPMinimum/selectNonOrphan, THEN reduce
-  // it (ZeileNormalisieren) and orient/discard).  When set, the push path
-  // skips the full-R normalize and queues the var-normalized RAW overlap
-  // with a cheap size weight; the existing select-time normalize in
-  // thvm_atp_step (the `kbo_eq(l, r)` join check that ALREADY runs) does
-  // the work -- so normalize cost scales with SELECTIONS, not generations.
-  // Soundness is unchanged: a CP is discarded ONLY when its sides reduce
-  // equal at selection (genuine join); no non-joinable CP is dropped.
-  // Default OFF (engine byte-identical: eager push-time normalize). On for
-  // Method->"Waldmeister" via thvm_atp_set_use_lazy_normalize.
+  // clause flow): WM `KPBehandelt` (INF/KPVerwaltung.c:439-467) gated by
+  // `lohntSichBehandlung` = combined RAW size < 50 (:435-438).  BELOW the
+  // gate, the CP is treated at generation: doR-only full-R normalize
+  // (-kg "r") + joined-drop; survivors queue and weigh on the TREATED
+  // form.  AT OR ABOVE the gate there is NO treatment at all --
+  // KPBehandelt returns FALSE without touching the pair, the caller
+  // queues the RAW overlap and `recentCPinsert`'s C_Classify (:396)
+  // weighs the RAW sides, so deep-overlap instances stay buried at raw
+  // weight until the heap (weight order or the FIFO dimension) genuinely
+  // reaches them.  Joinability for the raw class is decided at selection
+  // (the `kbo_eq(l, r)` check after the pop normalize that ALREADY
+  // runs), so no non-joinable CP is ever dropped -- completeness is
+  // unchanged.  The raw class also bypasses the auto-MaxWeight stash
+  // (see atp_cp_heap_push): WM has no deferral lane, and the stash has
+  // no FIFO dimension, so parking raw CPs there would swallow the class.
+  // Default OFF (engine byte-identical: eager push-time normalize). On in
+  // the bench WM preset + Method "LazyNormalize" -> True via
+  // thvm_atp_set_use_lazy_normalize.
   u8   use_lazy_normalize;
   u64  n_cps_push_normalized;     // diagnostics: full-R normalizes at push
 

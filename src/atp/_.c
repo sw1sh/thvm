@@ -979,8 +979,10 @@ static inline void atp_cp_implicit_swap(AtpState *s, u32 i, u32 j) {
 // earlier add_equation push site can call it.  `is_ultimate`=1
 // tags the CP for Waldmeister Act_ultimate (initial-axiom front)
 // ranking; effective only when s->use_initial_ultimate is on.
+// `raw_untreated`=1 marks the WM KPBehandelt >=50 raw class, which
+// bypasses the auto-MaxWeight stash (see the definition).
 static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
-                             u8 is_ultimate);
+                             u8 is_ultimate, u8 raw_untreated);
 
 // Periodic full-rule-set CP-queue interreduction (Waldmeister
 // KPV_KPMengeInterreduzieren).  Defined far below (it needs the
@@ -4841,7 +4843,7 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   // only when s->use_initial_ultimate is set; off by default.
   u8 is_ultimate = (reason == TRACE_AXIOM && parent_a == ATP_TRACE_NONE)
                      ? 1u : 0u;
-  atp_cp_heap_push(s, lhs, rhs, trace_idx, is_ultimate);
+  atp_cp_heap_push(s, lhs, rhs, trace_idx, is_ultimate, 0u);
   return 1;
 }
 
@@ -7248,8 +7250,16 @@ static void atp_auto_maxw_drain(AtpState *s, u8 force) {
 // the old select_cp paid n times per step) and sifts up.  O(log n).
 // `is_ultimate`=1 propagates the Waldmeister Act_ultimate front-rank
 // to the CP slot (effective only when s->use_initial_ultimate is on).
+// `raw_untreated`=1 marks the WM KPBehandelt >=50 raw class (lazy push,
+// no generation-time treatment): it bypasses the auto-MaxWeight
+// deferral stash -- WM has no such lane, and the stash has no FIFO
+// dimension, so parking the raw class there would swallow it where WM
+// buries it IN the heap at raw weight (recentCPinsert, reachable by
+// the periodic FIFO pick).  The lossy caps (max_cp_queue and the WM
+// -mw analog max_cp_weight) still apply on the raw weight, exactly as
+// WM's hard cap would.
 static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
-                             u8 is_ultimate) {
+                             u8 is_ultimate, u8 raw_untreated) {
   // Hard queue-size cap (memory leash): drop before packing (saves the
   // acp_pack malloc) once the live queue is full.  Lossy; the periodic
   // FIFO/priority selection still fires over the kept CPs.
@@ -7270,7 +7280,8 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
   }
   // Auto-MaxWeight (completeness-preserving): defer an over-bound CP to
   // the overflow stash rather than dropping it.  Disabled when base==0.
-  if (s->auto_max_cp_weight_base > 0u) {
+  // The WM raw>=50 class never defers (see the header comment).
+  if (s->auto_max_cp_weight_base > 0u && !raw_untreated) {
     u32 bound = atp_auto_maxw_bound(s);
     if (bound > 0u && cp_nodes > bound) {
       atp_cp_stash_push(s, packed, cp_nodes, trace, is_ultimate);
@@ -13800,56 +13811,44 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // CP is dramatically smaller than the raw overlap, so the KBO
     // priority, the subsumption query, the index insert, and every
     // later retrieval against it all stay cheap.
-    //
-    // LAZY path (use_lazy_normalize, the Waldmeister/DISCOUNT given-clause
-    // flow -- KPVerwaltung.c KPEinfuegen inserts the raw overlap; the
-    // reduce+join verdict is deferred to selection in HK_Vervollstaendigung
-    // / thvm_atp_step's `kbo_eq(l, r)` check that ALREADY runs at pop):
-    // skip the full-R normalize here so the ~74% trivially-joinable CPs
-    // that get popped (or subsumed in the queue first) pay at most ONE
-    // normalize -- at selection -- instead of one per generation.  The CP
-    // is queued in its raw (over-deep) form; its size weight is therefore
-    // larger, which the heap orders accordingly.  Joinability is decided
-    // ONLY at selection (genuine kbo_eq join), so no non-joinable CP is
-    // dropped -- completeness is preserved.
     u8 joinable;
+    // WM KPBehandelt >=50 raw class: queued untreated, weighed on the
+    // raw pair, bypasses the auto-MaxWeight stash (see below).
+    u8 raw_untreated = 0u;
     u64 _ph_push_t0 = atp_phase_now();
     // MNF gate (kept even though lazy defaults to off now): when the WL
     // surface enables lazy via Method "LazyNormalize" -> True on a config
     // that also runs MNF, the gate routes around the front search's
     // direct-cell-reference Bus error.
     if (s->use_lazy_normalize && !s->use_mnf) {
-      // Lazy push (WM KPVerwaltung.c:435-467 `lohntSichBehandlung` ->
-      // `KPBehandelt`): run the doR-only full-R normalize + join verdict
-      // ONLY when the RAW overlap is small (sum of side lengths < WM's
-      // gate of 50, KPVerwaltung.c:437); else queue an
-      // oriented-only-shrunk form and defer the joinability verdict to
-      // pop-time.  Small
-      // CPs are cheap to normalize AND have a high joinable-rate, so
-      // joining them at push drops them before the queue/index/
-      // subsumption work fires.  Large CPs pay at most one normalize at
-      // pop (the kbo_eq check at thvm_atp_step's selection already runs
-      // the full normalize); completeness preserved.
-      //
-      // Dropping push-normalize entirely blows the CP queue (no
-      // joinability drops at all -> heap exhaustion on andassoc by step
-      // ~25k); WM's gate caps that.
-      const u32 PUSH_NORM_CAP = 64u;
-      // Literal port of WM KPVerwaltung.c:437 lohntSichBehandlung gate
-      // (raw sum-of-sides < 50 -> run the doR-only full-R normalize +
-      // joinability check; else queue an oriented-only-shrunk form).
-      const u32 WM_BEHANDELN_GATE = 50u;
+      // Lazy push = WM `KPBehandelt` (KPVerwaltung.c:439-467) under the
+      // `lohntSichBehandlung` gate (:435-438, combined RAW size < 50).
+      // BELOW the gate the CP is treated: doR-only full-R normalize
+      // (-kg "r") + joined-drop; a survivor queues and weighs on the
+      // TREATED form.  AT OR ABOVE the gate WM applies NO treatment --
+      // KPBehandelt returns FALSE without touching the pair, the caller
+      // (KPV_GebildetesKPBehandelnMitVater/Mutter :478/:501) queues the
+      // RAW pair, and recentCPinsert's C_Classify (:396) weighs the RAW
+      // sides.  Deep-overlap instances therefore stay buried at raw
+      // weight until the heap -- weight order or the FIFO dimension --
+      // genuinely reaches them.  Shrinking-and-reweighing them instead
+      // pulls mini-CPs thousands of selections early and detonates an
+      // interreduction avalanche (the andassoc picks-313-332 trajectory
+      // fork: rules 128 -> 71 where WM's whole run removes ~5).
+      // Joinability for the raw class is decided at selection (the
+      // kbo_eq check after the pop normalize), so no non-joinable CP is
+      // dropped -- completeness preserved.  The <50 treatment is what
+      // keeps the queue bounded: small CPs are cheap to normalize AND
+      // have a high joinable-rate, so joining them at push drops them
+      // before the queue/index/subsumption work fires.
+      const u32 WM_BEHANDELN_GATE = 50u;   // KPVerwaltung.c:437
       u32 raw_sz = atp_symbol_count(cp_lhs) + atp_symbol_count(cp_rhs);
       if (raw_sz < WM_BEHANDELN_GATE) {
         joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
         s->n_cps_push_normalized++;
       } else {
-        // Cheap oriented-only reduction shrinks the queued form so the
-        // heap / queue stays bounded; the joinability verdict (and the
-        // doE normalize) is deferred to selection.
-        cp_lhs = atp_rewrite_normalize_indexed(s, cp_lhs, PUSH_NORM_CAP);
-        cp_rhs = atp_rewrite_normalize_indexed(s, cp_rhs, PUSH_NORM_CAP);
         joinable = 0u;
+        raw_untreated = 1u;
       }
     } else {
       joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
@@ -13990,7 +13989,8 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       deferred = atp_cp_implicit_push(s, cp_lhs, cp_rhs,
                                       parent_a, parent_b, t, cp_ult);
     }
-    if (!deferred) atp_cp_heap_push(s, cp_lhs, cp_rhs, t, cp_ult);
+    if (!deferred) atp_cp_heap_push(s, cp_lhs, cp_rhs, t, cp_ult,
+                                    raw_untreated);
     pushed++;
   }
   return pushed;
