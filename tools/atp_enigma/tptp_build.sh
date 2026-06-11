@@ -13,7 +13,7 @@ while read -r p; do
   [ -z "$p" ] && continue
   n=$((n+1)); id=$(basename "$p" .p); o="$OUT/$id.wxf"
   [ -f "$o" ] && continue
-  line=$(wl -t 18 -f tools/atp_enigma/prove_one_tptp.wls "$p" "$o" 2>/dev/null | tail -1)
+  line=$(tools/atp_enigma/safe_wl.sh 4096 wl -t 18 -f tools/atp_enigma/prove_one_tptp.wls "$p" "$o" 2>/dev/null | tail -1)
   case "$line" in *"graphs"*) solved=$((solved+1)); echo "[$n] $line";; esac
 done < "$LIST"
 echo "TPTP_DONE: $n attempted, $solved with data, $(ls "$OUT"/*.wxf 2>/dev/null|wc -l) datasets"

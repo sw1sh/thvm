@@ -41,3 +41,19 @@ tools/atp_enigma/tptp_build.sh ueq_problems.txt                     # TPTP datas
 wl -t 450 -f tools/atp_enigma/verify_fix.wls                        # train the corpus scorer
 wl -t 200 -f tools/atp_enigma/loop_timed.wls 200 800                # measure guided vs baseline
 ```
+
+## Memory safety
+
+`wl -t` bounds time but NOT memory; a diverging saturation can balloon the C
+engine's CP queue past the system limit (it has no queue-size cap). So wrap
+every proving/training pass in `safe_wl.sh RSS_CAP_MB -- <wl-cmd>`, which kills
+the run's `WolframKernel` the moment its RSS exceeds the cap (poll 2s), well
+below `tools/kernel_reaper.sh`'s system-wide backstop. `tptp_build.sh` already
+does this per problem (4 GB). For a single train/measure run:
+
+```
+tools/atp_enigma/safe_wl.sh 6144 wl -t 450 -f tools/atp_enigma/verify_fix.wls
+```
+
+Prefer per-problem process isolation (one `wl` per problem, as `tptp_build.sh`
+does) so memory never accumulates across problems in one kernel.
