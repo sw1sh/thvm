@@ -1992,11 +1992,13 @@ atpRandomSeedOpt[o_Association] := With[{s = Lookup[o, "RandomSeed", 0]},
 atpKboWeightSchemeOpt[o_Association] :=
     Switch[Lookup[o, "KboWeightScheme", Automatic],
         "InvPrecedence", 1, False | Automatic, 0, _, 0];
-(* "RHSInterreduce" -> True: Waldmeister IR_InterreduktionRechts -- after
-   a rule is oriented, normalize the RHS of every other rule against it,
-   re-queuing any rule whose RHS shrinks.  Keeps R fully reduced so the
-   CP set stays small.  True/Automatic-when-Waldmeister = on; the engine
-   default (and other methods) leave it off. *)
+(* "RHSInterreduce" -> True: Waldmeister IR_InterreduktionRechts in the
+   -irrp default "modify rule" mode -- when a new fact touches an
+   oriented rule's RHS, that RHS is brought to full R+E normal form IN
+   PLACE (no requeue); an unorientable equation with a reducible RHS
+   face is dropped and re-queued (GMInterred).  Keeps R fully reduced
+   so the CP set stays small.  True/Automatic-when-Waldmeister = on;
+   the engine default (and other methods) leave it off. *)
 atpRHSInterreduceOpt[o_Association] := Switch[Lookup[o, "RHSInterreduce", Automatic],
     True, 1, False | Automatic, 0, _, 0];
 (* "UnfailingCP" -> True: superpose BOTH faces of every unorientable

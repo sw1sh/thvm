@@ -11479,16 +11479,16 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
     } else {
       // === RIGHT-REDUCTION (composition) ============================
       // The older rule i's LHS did NOT collapse, so the rule stays in
-      // R as `l -> old_rhs`.  Now try to reduce its RHS against the
-      // just-added rules: rewrite old_rhs to its normal form r'.  If it
-      // changes (and l > r' still holds for the reduction order), update
-      // s->rhs[i] in place -- l = r' is still an equational consequence
-      // (l = old_rhs ->* r'), r' is no larger than old_rhs, and the CPs
-      // born from rule i now use the smaller RHS.  This is the
-      // DISCOUNT-loop right-reduction / composition step; without it the
-      // RHSs (and every CP overlapping them) bloat across the run.
+      // R as `l -> old_rhs`.  Now try to reduce its RHS: rewrite
+      // old_rhs to a normal form r'.  If it changes (and l > r' still
+      // holds for the reduction order), update s->rhs[i] in place --
+      // l = r' is still an equational consequence (l = old_rhs ->* r')
+      // and the CPs born from rule i now use the normalized RHS.  This
+      // is the DISCOUNT-loop right-reduction / composition step;
+      // without it the RHSs (and every CP overlapping them) bloat
+      // across the run.
       if (s->right_reduce) {
-        Term r_reduced;
+        Term r_reduced = old_rhs;
         // Thread the proof DAG: record each RHS rewrite as a NORM_STEP
         // chained off rule i's own TRACE_ORIENT (parent), side = 1
         // (the RHS), with the LHS as the unchanged other side.  The
@@ -11496,7 +11496,43 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         // new TRACE_ORIENT parented on it inherits directly under chain
         // extraction, and emitNorm bridges it under chain-off.
         u32 rr_parent = s->r_trace[i];
-        if (s->record_norm_steps) {
+        if (s->use_rhs_interreduce) {
+          // WM RMRechtsInterred (INF/Interreduktion.c:329-360) under the
+          // -irrp CLI default FALSE = "modify rule" (RUN/Parameter.c:
+          // 334-343): only LIVE ORIENTED rules are composed (the
+          // Regelbaum walk RE_forRegelnRobust at :338; E-members take
+          // the GMInterred requeue in the loop below), the trigger is
+          // ONE application of the new object anywhere in the RHS
+          // (ObjektAngewendet, NF/NFBildung.c:686-713), and the stepped
+          // term then goes to FULL R+E normal form -- NF_NormalformstRE
+          // (:715-724) calls NF_NormalformRE = NF_Normalform(TRUE, TRUE,
+          // .) (NFBildung.h:78), doR = doE = TRUE over the live system
+          // (which already contains the new rule: RE_FaktumEinfuegen
+          // precedes IR_InterreduktionRechts, Hauptkomponenten.c:
+          // 311-313).  In place: no requeue, no CP, and NO symbol-count
+          // guard -- WM commits the full NF unconditionally.
+          if (s->r_orient[i] && !s->r_dead[i]) {
+            if (s->record_norm_steps) {
+              Term stepped = atp_rewrite_normalize_slice_record(
+                  s, old_rhs, new_lhs, new_rhs, new_traces, n_new, 1u,
+                  &rr_parent, 1u, old_lhs);
+              if (!kbo_eq(stepped, old_rhs)) {
+                r_reduced = atp_rewrite_normalize_record(
+                    s, stepped, old_lhs, 1u, &rr_parent, 64u);
+              }
+            } else {
+              // step_cap 1 = exactly one ordered rewrite against the
+              // new-object slice (the ObjektAngewendet existence-and-
+              // apply); 64 matches the engine's full-NF NORM_CAP.
+              Term stepped = atp_rewrite_normalize(s, old_rhs, new_lhs,
+                                                   new_rhs, n_new, 1u);
+              if (!kbo_eq(stepped, old_rhs)) {
+                r_reduced = atp_rewrite_normalize(s, stepped, s->lhs,
+                                                  s->rhs, s->n_rules, 64u);
+              }
+            }
+          }
+        } else if (s->record_norm_steps) {
           r_reduced = atp_rewrite_normalize_slice_record(
               s, old_rhs, new_lhs, new_rhs, new_traces, n_new, 16,
               &rr_parent, 1u, old_lhs);
@@ -11510,16 +11546,18 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           // old_rhs <= l, so this holds in the standard case; verify it
           // and skip the in-place update if some pathological order
           // makes l NOT > r' (keep the rule as `l -> old_rhs`).
-          // Size guard: a reduction order (KBO/LPO) guarantees r' is
-          // smaller than old_rhs in the ORDER but not necessarily in
-          // raw symbol count -- a rule a -> g(b,c) rewrites a constant
-          // into a deeper term.  Since the point of right-reduction is
-          // to keep RHSs (and the CPs overlapping them) SMALL, skip the
-          // in-place update when r' has more symbols than old_rhs; the
-          // rule keeps its compact RHS and the larger form never feeds
-          // a critical pair.  (Soundness is unaffected either way.)
+          // Size guard (legacy mode only): a reduction order (KBO/LPO)
+          // guarantees r' is smaller than old_rhs in the ORDER but not
+          // necessarily in raw symbol count -- a rule a -> g(b,c)
+          // rewrites a constant into a deeper term.  The slice-only
+          // composition skips the in-place update when r' has more
+          // symbols than old_rhs so the compact RHS keeps feeding CPs.
+          // WM mode has no such guard (RMRechtsInterred commits the
+          // NF_NormalformRE result unconditionally), so
+          // use_rhs_interreduce bypasses it.
           if (atp_compare(s, old_lhs, r_reduced) == KBO_GT &&
-              atp_symbol_count(r_reduced) <= atp_symbol_count(old_rhs)) {
+              (s->use_rhs_interreduce ||
+               atp_symbol_count(r_reduced) <= atp_symbol_count(old_rhs))) {
             // Record the post-reduction rule as a fresh TRACE_ORIENT
             // parented on the NORM_STEP chain tail (or directly on the
             // old ORIENT when norm-step recording is off).  Repointing
@@ -11573,16 +11611,20 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
     }
   }
 
-  // === Waldmeister IR_InterreduktionRechts (RMRechtsInterred,
-  // Interreduktion.c:329): normalize the RIGHT-HAND side of every
-  // surviving older rule against the freshly-added rules.  A rule whose
-  // RHS reduces is dropped and re-queued as the simplified equation
-  // (old_lhs, reduced_rhs) so the same TRACE_SIMPLIFY connected-DAG path
-  // the LHS collapse uses justifies the RHS edit.  This keeps R reduced
-  // -- the prior LHS-only interreduction left stale (non-normal) rule
-  // RHSs in R, so the system never became canonical and the CP set
-  // exploded (the Sheffer/Wolfram divergence).  Runtime-gated: the
-  // default engine (use_rhs_interreduce == 0) skips this entirely.
+  // === Waldmeister GMInterred E-face sweep + Vampire bd=all ==========
+  // Under use_rhs_interreduce the RHS-face check here applies to
+  // UNORIENTABLE slots only: WM's GMInterred (Interreduktion.c:280-293)
+  // walks every E-member's directed twins (RE_forGMReferenzen), so an
+  // equation with EITHER face reducible by the new object leaves E for
+  // the IR buffer and re-enters the queue.  thvm stores one slot per
+  // equation; the LHS face was handled by the first loop above, the RHS
+  // face is handled here.  ORIENTED rules are NOT dropped for a
+  // reducible RHS -- that is WM's -irrp TRUE "delete rule" mode
+  // (Interreduktion.c:309/318), and the CLI default is FALSE = "modify
+  // rule" (Parameter.c:337-343): their RHSs were composed in place
+  // against the full R+E system in the loop above (RMRechtsInterred).
+  // Runtime-gated: the default engine (use_rhs_interreduce == 0 &&
+  // use_bwd_demod == 0) skips this entirely.
   if (s->use_rhs_interreduce || s->use_bwd_demod) {
     u32 j = 0;
     while (j < added.first - dropped) {
@@ -11598,11 +11640,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         reduced_lhs = atp_rewrite_normalize(s, old_lhs, new_lhs, new_rhs,
                                              n_new, 16);
       }
-      // Normalize the RHS against only the new rule(s) -- the rest of R
-      // already had its chance to reduce this RHS when those rules were
-      // added.  (Matches Waldmeister: a new object reduces existing
-      // rules' RHSs; full re-normalization is unnecessary.)
-      Term reduced = (s->use_rhs_interreduce && !s->r_dead[j])
+      // Normalize the RHS face against only the new rule(s) -- WM's
+      // GMInterred trigger is NF_ObjektAnwendbar(Objekt, .) per twin
+      // direction (Interreduktion.c:286), an existence test against the
+      // new object alone.  Unorientable slots only (see the header
+      // comment); oriented rules' RHSs were composed in place above.
+      Term reduced = (s->use_rhs_interreduce && !s->r_dead[j] &&
+                      !s->r_orient[j])
           ? atp_rewrite_normalize(s, old_rhs, new_lhs, new_rhs, n_new, 16)
           : old_rhs;
       u8 lhs_changed = (s->use_bwd_demod && !kbo_eq(reduced_lhs, old_lhs));
@@ -11653,12 +11697,12 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       }
       if (rhs_changed) {
         u32 simplify_parent = s->r_trace[j];
-        // Drop the rule with the stale RHS and re-queue the simplified
-        // equation; orient will re-admit it (its RHS now in normal form)
-        // -- or join it away if it became trivial.  Under use_wm_demote
-        // the ORIGINAL sides are buffered instead (WM's -irrp variant,
-        // Interreduktion.c:309/319, routes RHS-reducible rules through
-        // the same victim buffer with their untouched pair).
+        // Drop the E-member with the reducible RHS face and re-queue
+        // the simplified equation; orient will re-admit it -- or join
+        // it away if it became trivial.  Under use_wm_demote the
+        // ORIGINAL sides are buffered instead (WM GMInterred victims
+        // enter the PU_REPuffer untouched, Interreduktion.c:290, and
+        // drain after CP generation via IR_PufferAuslesen).
         if (s->use_wm_demote) {
           atp_irv_push(s, old_lhs, old_rhs, simplify_parent);
         } else {

@@ -686,8 +686,10 @@ int main(int argc, char **argv) {
   if (env_cp_weight != NULL && *env_cp_weight != 0) {
     thvm_atp_set_cp_weight_mode(s, (u32)strtoul(env_cp_weight, NULL, 10));
   }
-  // THVM_ATP_RHS_IR=0/1: independent override of the secondary RHS-
-  // interreduce sweep (already-redundant with right_reduce inline path).
+  // THVM_ATP_RHS_IR=0/1: independent override of the WM RHS-
+  // interreduction mode (RMRechtsInterred "modify rule": full R+E
+  // in-place RHS normalize for oriented rules + GMInterred RHS-face
+  // drop for unorientable equations).  0 = legacy slice-only compose.
   {
     const char *ri = getenv("THVM_ATP_RHS_IR");
     if (ri != NULL && ri[0] != '\0')

@@ -4354,18 +4354,24 @@ typedef struct {
   u8 use_mnf;
 
   // Waldmeister-faithful RHS interreduction (IR_InterreduktionRechts /
-  // RMRechtsInterred, Interreduktion.c:329).  When set, after a new rule
-  // is oriented thvm_atp_interreduce also normalizes the RIGHT-HAND side
-  // of every other rule against the current rule set; a rule whose RHS
-  // shrinks is dropped and re-queued as the simplified equation
-  // (old_lhs, reduced_rhs) via TRACE_SIMPLIFY (the same connected-DAG
-  // path the LHS-collapse already uses).  Keeps R interreduced (= the
-  // canonical/reduced rewrite system Waldmeister maintains) so the CP
-  // set stays small and the goal's normal form is actually reached.
-  // 0 (default) leaves the engine's prior LHS-only interreduction
-  // untouched, so test_atp / atp.wlt behaviour is unchanged; the WL
-  // surface flips it for Method -> "Waldmeister".  Set via
-  // thvm_atp_set_use_rhs_interreduce.
+  // RMRechtsInterred, INF/Interreduktion.c:329-360) in the -irrp CLI
+  // default mode FALSE = "modify rule" (RUN/Parameter.c:334-343).  When
+  // set, thvm_atp_interreduce treats surviving slots' RHSs like WM:
+  //  - ORIENTED rules: if the new object applies anywhere in the RHS
+  //    (one step, ObjektAngewendet NF/NFBildung.c:686-713), the stepped
+  //    term is brought to FULL R+E normal form (NF_NormalformstRE
+  //    :715-724 -> NF_NormalformRE = doR+doE both TRUE, NFBildung.h:78)
+  //    and committed IN PLACE -- no drop, no requeue, no CP, no
+  //    symbol-count guard.  Keeps R interreduced (the canonical/reduced
+  //    system WM maintains) so the CP set stays small and the goal's
+  //    normal form is reached.
+  //  - UNORIENTABLE equations: a reducible RHS face drops the E-member
+  //    and re-queues it (WM GMInterred, Interreduktion.c:280-293, both
+  //    directed twins; the LHS face is the first interreduce loop).
+  // 0 (default) keeps the legacy slice-only composition (right_reduce)
+  // with its symbol-count guard and no RHS-face E-drop, so test_atp /
+  // atp.wlt default behaviour is unchanged; the WL surface flips it for
+  // Method -> "Waldmeister".  Set via thvm_atp_set_use_rhs_interreduce.
   u8 use_rhs_interreduce;
 
   // Unfailing-completion BOTH-FACES superposition.  The default CP

@@ -1176,6 +1176,117 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-rhs-interreduce-full-system-in-place-modify");
+  {
+    // WM RMRechtsInterred under the -irrp default FALSE = "modify rule"
+    // (Interreduktion.c:329-360; Parameter.c:337-343): when the NEW
+    // object applies anywhere in an oriented rule's RHS, that RHS goes
+    // to FULL R+E normal form IN PLACE -- including reductions by OLDER
+    // rules the new-object slice cannot see -- with no drop, no requeue
+    // and no CP.  R0 = f(a,a) -> a is the full-system-only reducer: the
+    // new rule f(e,e) -> f(a,a) steps the victim's RHS i(f(e,e)) to
+    // i(f(a,a)), and only the full NF (NF_NormalformRE, doR+doE,
+    // NFBildung.h:78) carries it on to i(a).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_rhs_interreduce(s, 1u);
+    s->lhs[0] = mk_f(mk_a(), mk_a());
+    s->rhs[0] = mk_a();
+    s->r_orient[0] = 1u;
+    Term victim_lhs = mk_f(mk_f(mk_e(), mk_a()), mk_a());
+    s->lhs[1] = victim_lhs;
+    s->rhs[1] = mk_i(mk_f(mk_e(), mk_e()));
+    s->r_orient[1] = 1u;
+    s->n_rules = 2;
+
+    AtpAddedRange added = thvm_atp_orient_and_add(
+        s, mk_f(mk_e(), mk_e()), mk_f(mk_a(), mk_a()));
+    CHECK_EQ(added.count, 1u);
+    u32 n_cps_before = s->n_cps;
+    u32 dropped = thvm_atp_interreduce(s, added);
+    CHECK_EQ(dropped, 0u);                  // modify, never delete
+    CHECK_EQ(s->n_rules, 3u);
+    CHECK(kbo_eq(s->lhs[1], victim_lhs));   // rule stays in its slot
+    CHECK(kbo_eq(s->rhs[1], mk_i(mk_a()))); // full-system NF, not the
+                                            // slice reduct i(f(a,a))
+    CHECK_EQ((u32)s->n_right_reduced, 1u);
+    CHECK_EQ(s->n_cps, n_cps_before);       // no requeue, no CP
+    // The repointed trace entry is a TRACE_ORIENT carrying the live
+    // (l, r') pair, so resolveRule(1) reads the composed rule.
+    Term ent = s->trace[s->r_trace[1]];
+    CHECK_EQ(term_ext(ent), TRACE_ORIENT);
+    CHECK(kbo_eq(term_ctr_at(ent, 2), victim_lhs));
+    CHECK(kbo_eq(term_ctr_at(ent, 3), mk_i(mk_a())));
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-rhs-interreduce-no-symbol-count-guard");
+  {
+    // WM commits the NF_NormalformRE result unconditionally -- there is
+    // no symbol-count guard in RMRechtsInterred (Interreduktion.c:
+    // 341/352 just overwrite the RHS).  f(e,e) -> i(i(i(a))) grows the
+    // victim's RHS from 3 to 4 symbols (i has KBO weight 0, so the NF
+    // is order-smaller yet symbol-larger).  The legacy slice compose
+    // (use_rhs_interreduce OFF) blocks exactly this case.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term victim_lhs = mk_f(mk_f(mk_a(), mk_a()), mk_a());
+    Term victim_rhs = mk_f(mk_e(), mk_e());
+    s->lhs[0] = victim_lhs;
+    s->rhs[0] = victim_rhs;
+    s->r_orient[0] = 1u;
+    s->n_rules = 1;
+    Term grown = mk_i(mk_i(mk_i(mk_a())));
+    AtpAddedRange added = thvm_atp_orient_and_add(
+        s, mk_f(mk_e(), mk_e()), grown);
+    CHECK_EQ(added.count, 1u);
+    // Default (legacy) mode: the symbol-count guard keeps the compact
+    // RHS; nothing is dropped or edited.
+    CHECK_EQ(thvm_atp_interreduce(s, added), 0u);
+    CHECK(kbo_eq(s->rhs[0], victim_rhs));
+    CHECK_EQ((u32)s->n_right_reduced, 0u);
+    // WM mode: same interreduction now commits the grown NF in place
+    // and still never drops the rule.
+    thvm_atp_set_use_rhs_interreduce(s, 1u);
+    u32 n_cps_before = s->n_cps;
+    CHECK_EQ(thvm_atp_interreduce(s, added), 0u);
+    CHECK_EQ(s->n_rules, 2u);
+    CHECK(kbo_eq(s->rhs[0], grown));
+    CHECK_EQ((u32)s->n_right_reduced, 1u);
+    CHECK_EQ(s->n_cps, n_cps_before);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-rhs-interreduce-eset-rhs-face-requeues");
+  {
+    // The drop-and-requeue half of the RHS check is GMInterred
+    // (Interreduktion.c:280-293), which walks every E-member's directed
+    // twins: an UNORIENTABLE equation with a reducible RHS face leaves
+    // E and re-enters the queue.  Oriented rules never take this path
+    // (-irrp default FALSE; scenarios above), so the E-member is the
+    // only slot the second interreduce loop may drop.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_rhs_interreduce(s, 1u);
+    // E0: f(x, a) = f(y, f(e,e)) -- crosswise variables make the pair
+    // KBO-incomparable; only the RHS face holds the f(e,e) redex.
+    AtpAddedRange e_added = thvm_atp_orient_and_add(
+        s, mk_f(mk_v(VAR_x), mk_a()),
+        mk_f(mk_v(1u), mk_f(mk_e(), mk_e())));
+    CHECK_EQ(e_added.count, 1u);
+    CHECK_EQ(s->r_orient[0], 0u);
+    CHECK_EQ(s->n_unorient, 1u);
+
+    AtpAddedRange added = thvm_atp_orient_and_add(
+        s, mk_f(mk_e(), mk_e()), mk_a());
+    CHECK_EQ(added.count, 1u);
+    u32 n_cps_before = s->n_cps;
+    u32 dropped = thvm_atp_interreduce(s, added);
+    CHECK_EQ(dropped, 1u);
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK_EQ(s->r_orient[0], 1u);          // the new rule shifted down
+    CHECK_EQ(s->n_unorient, 0u);
+    CHECK_EQ(s->n_cps, n_cps_before + 1u); // requeued for re-treatment
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/interreduce-keeps-irreducible-rules");
   {
     // R[0]: i(a) -> i(a)         (degenerate; just to fill a slot)
