@@ -594,14 +594,21 @@ int main(int argc, char **argv) {
       // (:371-373) for every non-rule new fact, so part of the
       // faithful preset.  THVM_ATP_ESET_SUBSUME env overrides.
       thvm_atp_set_use_eset_subsume(s, 1u);
-      // Backward subsumption (WM standard): scan existing rules and
-      // soft-delete any subsumed by the newly-added rule.  +30% on
-      // AndAssoc post-fix (iter 162) -- the kill churn pays off because
-      // fewer surviving rules => smaller DT => cheaper unorient queries.
-      // (Forward subsumption alone regresses; backward subsumption +
-      // backward demodulation together give +31% on AndAssoc.)
-      thvm_atp_set_use_bwd_subsume(s, 1u);
-      thvm_atp_set_use_bwd_demod(s, 1u);
+      // Backward subsumption / backward demodulation are NOT in this
+      // preset: they are Vampire mechanisms (bs=unit_only / bd=all)
+      // with no WM analog.  WM's only backward treatment of existing
+      // facts on a new-fact arrival is ArbeitsAufnahme's interreduction
+      // (Hauptkomponenten.c:308-331): GMSubsummierenMitGleichung
+      // (equation-vs-equation subsumption only, Interreduktion.c:
+      // 251-274/:371) + GMInterred/RMLinksInterred demote-and-requeue
+      // (:280-326) + RMRechtsInterred RHS compose (:329-360) -- all
+      // already ported (ESET_SUBSUME, WM_DEMOTE, RHS_INTERREDUCE).
+      // Rules are never subsumption victims in WM.  The old "+30% on
+      // AndAssoc (iter 162)" enable predated every faithfulness port
+      // and amplified rule-set collapses (the post-raw-queuing
+      // 549->74 avalanche suspect).  Opt back in via THVM_ATP_BWD_SUB /
+      // THVM_ATP_BWD_DEMOD below; VampireUEQ-style WL presets keep
+      // them.
       // MNF goal-directed front search -- DROPPED from the preset after
       // SKEL_FRESH=0 became the default: under the corrected FT NF, MNF
       // diverts the saturator's trajectory on mccune (49s -> 60s+ with
@@ -620,7 +627,7 @@ int main(int argc, char **argv) {
       // SHEFFER/Wolfram axiom (andassoc, wolfram, etc.) the bare engine
       // (no preset, just GT weight, larger heap) PROVES AndAssoc in
       // 11.6s -- WM-PARITY -- while THIS preset's MaxWeight + add-ons
-      // (MNF, BWD_SUB, ORPHAN_MURDER, LAZY_NORMALIZE, AUTO_MAXW)
+      // (MNF, ORPHAN_MURDER, LAZY_NORMALIZE, AUTO_MAXW)
       // divert the trajectory and the cracker is never derived.  When chasing a Sheffer/Wolfram cracking-time result,
       // use the bare engine instead:
       //   THVM_HEAP_CELLS=$((1<<30)) ./bin/test_atp_wolfram_bench \
@@ -743,10 +750,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  // Independent A/B toggles for WM-standard subsumption / demodulation.
-  // BWD_SUB and BWD_DEMOD are now in the WALDMEISTER preset (iter 162)
-  // but kept here so they can be turned OFF for differential debugging;
-  // FWD_SUB is OFF by default because it regresses AndAssoc.
+  // Independent A/B toggles for Vampire-style subsumption /
+  // demodulation.  All three are OFF by default (no WM analog; the
+  // WALDMEISTER preset does not set them) -- opt in for differential
+  // debugging or Vampire-flavored runs.
   {
     const char *fs = getenv("THVM_ATP_FWD_SUB");
     if (fs != NULL && fs[0] != '\0')

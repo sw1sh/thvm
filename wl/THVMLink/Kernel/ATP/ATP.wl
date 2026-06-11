@@ -2576,10 +2576,7 @@ atpParseMethod[{"WaldmeisterLazy", subopts___Rule}] :=
        dis+10_6_to=lpo:tgt=full:fde=none:sp=arity:nwc=1.2:bs=unit_only:
        bd=all:av=off:gtg=exists_sym
    Decoded to thvm knobs (best-effort mapping; Vampire's
-   gtg=exists_sym / bd=all are not yet ported, and bs=unit_only is
-   approximated by FORWARD subsumption since backward subsumption
-   is not yet ported -- FS catches the same rule shape at add time
-   instead of after the fact):
+   gtg=exists_sym is not ported):
      - GoalDirected -> True            (Vampire's `tgt=full`: prefer
        goal-aimed expansion across the queue).
      - Ordering -> "LPO"               (`to=lpo`).
