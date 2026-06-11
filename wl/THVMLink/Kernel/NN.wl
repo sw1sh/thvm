@@ -59,6 +59,10 @@ GeneralUtilities`SetUsage[TLinear, "TLinear[x$, W$, b$] computes x$ @ W$ + b$ wh
 GeneralUtilities`SetUsage[TL2Loss, "TL2Loss[x$] = TSum[TSquare[x$]]."];
 GeneralUtilities`SetUsage[TMSELoss, "TMSELoss[pred$, target$] = TL2Loss[pred$ - target$]."];
 GeneralUtilities`SetUsage[TReLU, "TReLU[x$] is elementwise max(x$, 0), lowered as x$ times a 0/1 less-than mask of x$ against 0."];
+GeneralUtilities`SetUsage[TWhere, "TWhere[cond$, a$, b$] selects a$ where the 0/1 mask cond$ is 1 and b$ where it is 0, lowered as cond$*a$ + (1 - cond$)*b$ (thvm has no WHERE opcode; cond$ is a comparison mask such as a$ < b$). The mask carries no gradient, so a$ gets cond$ and b$ gets 1 - cond$, matching a true ternary select. Keep both branches finite: the unselected branch is multiplied by 0, so an Inf/NaN there poisons the result."];
+GeneralUtilities`SetUsage[TMaximum, "TMaximum[a$, b$] is the elementwise maximum, lowered as TWhere[a$ < b$, b$, a$] over thvm's CMPLT mask; b$ may be a scalar (it broadcasts). Also installed as the binary Max UpValue on TTerms. Mirrors tinygrad's Tensor.maximum."];
+GeneralUtilities`SetUsage[TMinimum, "TMinimum[a$, b$] is the elementwise minimum, lowered as TWhere[a$ < b$, a$, b$]. Also installed as the binary Min UpValue on TTerms. Mirrors tinygrad's Tensor.minimum."];
+GeneralUtilities`SetUsage[TClip, "TClip[x$, lo$, hi$] clamps x$ into [lo$, hi$] elementwise, lowered as TWhere[x$ < lo$, lo$, x$] then TWhere[hi$ < x$, hi$, x$] (tinygrad's clamp: lower bound then upper). Either bound may be None or +/-Infinity to skip it; lo$/hi$ are scalars. Also installed as Clip[x$, {lo$, hi$}] and Clip[x$] (= TClip[x$, -1, 1])."];
 GeneralUtilities`SetUsage[TTanh, "TTanh[x$] is elementwise tanh, computed as 2*TSigmoid[2*x$] - 1. The negated-exponent sigmoid form stays finite and differentiable for all x$ (saturating to +-1), avoiding the NaN of the (e^(2x)-1)/(e^(2x)+1) form on large arguments. No tanh primitive is needed."];
 GeneralUtilities`SetUsage[TSigmoid, "TSigmoid[x$] = 1 / (1 + e^(-x$)), the numerically stable logistic sigmoid (negated exponent so large |x$| saturates to 0 or 1 instead of overflowing). Matches tinygrad's sigmoid lowering."];
 GeneralUtilities`SetUsage[TSoftmax, "TSoftmax[x$] is exp(x$ - max(x$)) / sum(exp(x$ - max(x$))) over the last axis (the class / key axis).
@@ -88,6 +92,8 @@ GeneralUtilities`SetUsage[TCategoricalCrossEntropy, "TCategoricalCrossEntropy[lo
 
 GeneralUtilities`SetUsage[TEmbedding, "TEmbedding[table$, idx$] returns row idx$ of a {V, D} table$ as a TTerm of shape {D}. idx$ is a host-side integer; it lowers to a shrink + reshape to {D}. Dynamic-idx gather (idx$ as a runtime tensor) needs a future gather opcode."];
 GeneralUtilities`SetUsage[TEmbeddingMatrix, "TEmbeddingMatrix[table$, ids$] gathers rows ids$ from a {V, D} table$ into a {Length[ids$], D} matrix. ids$ is a host-side list of integers. It lowers to one TEmbedding + reshape to {1, D} per id, then stitches along the leading axis via pad + sum (thvm has no stack op). Dynamic-id gather needs a future gather opcode."];
+GeneralUtilities`SetUsage[TGather, "TGather[x$, axis$, index$] selects one element per slice along axis$ (0-indexed): out[$$, 0, $$] = x$[$$, index$, $$], keeping axis$ at size 1. It lowers tinygrad-style to sum((arange == index$) * x$) over axis$ -- the CMPEQ one-hot the cross-entropy uses, multiplied by x$ and sum-reduced. index$ is an integer TTerm or host list giving one index per slice (x$'s shape with axis$ -> 1, or the flat per-slice list). The gradient scatters the cotangent back to the selected positions, so it trains. See TTakeAlongAxis for the numpy (index$, axis$) order."];
+GeneralUtilities`SetUsage[TTakeAlongAxis, "TTakeAlongAxis[x$, index$, axis$] is TGather[x$, axis$, index$] with the numpy take_along_axis argument order: select x$ at integer index$ along axis$, keeping the axis at size 1. This is the per-sample selection a policy gradient uses to pick each action's log-prob from {batch, n_actions} logits$ with a {batch} action list (axis$ = 1)."];
 GeneralUtilities`SetUsage[TGELU, "TGELU[x$] applies the tanh-form GELU approximation 0.5 * x$ * (1 + tanh(sqrt(2/pi) * (x$ + 0.044715 * x$^3))). Composes via TTanh; no new opcode required."];
 GeneralUtilities`SetUsage[TCausalMask, "TCausalMask[seq$] returns a {seq$, seq$} TTerm whose entries are 0 at (i, j) with j <= i and -1e9 at j > i. Add it to attention scores before softmax to zero out future-token attention."];
 GeneralUtilities`SetUsage[TCausalMaskSym, "TCausalMaskSym[vid$, hi$] returns the symbolic-sequence causal mask: a {S, S} TTerm (S the kvar dimension vid$, upper bound hi$) with 0 at (i, j) for j <= i and a large negative bias at j > i. Built eagerly from a symbolic ramp so a symbolic-seq TMultiHeadAttention can add it to scores before softmax. Use in place of TCausalMask[seq] when the sequence axis is a kvar, passing the result as TMultiHeadAttention's mask argument."];
@@ -112,6 +118,36 @@ TDot[a_TTerm, b_TTerm]          := Total[a * b]
 TL2Loss[x_TTerm]                := Total[x * x]
 TMSELoss[pred_TTerm, tgt_TTerm] := TL2Loss[pred - tgt]
 TReLU[x_TTerm]                  := x * (0 < x)
+
+(* === elementwise selection (mask-composed; tinygrad's where/max/min/clamp) ===
+   thvm has no WHERE or MAX opcode, but the same 0/1 comparison masks TReLU
+   uses compose them: TWhere[c, a, b] = c*a + (1 - c)*b picks a where the
+   mask c is 1.  The mask is a comparison (CMPLT/CMPEQ) so it carries no
+   gradient, which is exactly a true WHERE's rule -- a gets c, b gets 1 - c.
+   Caveat: the unselected branch is multiplied by 0, so an Inf/NaN there
+   poisons the result (0*Inf = NaN); keep both branches finite (thvm's
+   attention mask uses a large finite bias, not -Inf, for this reason). *)
+TWhere[cond_TTerm, a_, b_] := cond * a + (1 - cond) * b
+
+(* maximum via the where-from-mask form (tinygrad maximum is the MAX alu;
+   minimum is -maximum(-a,-b) -- the mask form is equivalent and reuses
+   CMPLT).  One operand may be a scalar; it broadcasts through the mask. *)
+TMaximum[a_TTerm, b_] := TWhere[a < b, b, a]
+TMaximum[a_, b_TTerm] := TWhere[a < b, b, a]
+TMinimum[a_TTerm, b_] := TWhere[a < b, a, b]
+TMinimum[a_, b_TTerm] := TWhere[a < b, a, b]
+
+(* clamp(x, lo, hi): lower bound then upper, per tinygrad's clamp.  A None
+   or +-Infinity bound is skipped so a one-sided clamp is TClip[x, lo, Infinity]. *)
+clipLo[x_, lo_] := If[ lo === None || lo === -Infinity, x, TWhere[x < lo, lo, x]]
+clipHi[x_, hi_] := If[ hi === None || hi === Infinity, x, TWhere[hi < x, hi, x]]
+TClip[x_TTerm, lo_, hi_] := clipHi[clipLo[x, lo], hi]
+
+(* Idiomatic UpValues: binary Max / Min and Clip over TTerms. *)
+TTerm /: Max[a_TTerm, b_]        := TMaximum[a, b]
+TTerm /: Min[a_TTerm, b_]        := TMinimum[a, b]
+TTerm /: Clip[x_TTerm]           := TClip[x, -1, 1]
+TTerm /: Clip[x_TTerm, {lo_, hi_}] := TClip[x, lo, hi]
 
 (* tanh(x) = 2 * sigmoid(2x) - 1 = 2 / (1 + e^(-2x)) - 1.
    Tinygrad's lowering (mixin/elementwise.py tanh -> sigmoid): sigmoid is
@@ -508,6 +544,33 @@ TOneHot[labels_List, n_Integer, dtype_String : "f32"] :=
             MapIndexed[If[0 <= #1 < n, {First[#2], #1 + 1} -> 1.0, Nothing] &, labels],
             {Length[labels], n}],
         dtype]
+
+(* === gather / take-along-axis ===
+   tinygrad builds gather from a one-hot select + sum (mixin gather:
+   onehot.where(x, 0).sum), which on thvm is the CMPEQ one-hot the
+   cross-entropy already uses, multiplied by x and sum-reduced along the
+   gathered axis.  Selects one element per slice along `axis` and keeps
+   that axis at size 1; the cotangent scatters back to the selected
+   positions, so it is grad-correct for policy-gradient log-prob selection. *)
+gatherIndexTensor[index_TTerm, keepShape_] := TUOpReshape[TUOpCast[index, "f32"], keepShape]
+gatherIndexTensor[index_List, keepShape_]  := TTensorCreate[ArrayReshape[N @ Flatten[{index}], keepShape]]
+
+TGather[x_TTerm, axis_Integer, index_] := Module[
+    {shape = tUopShape[x], rank, n, keepShape, arange, idx, oh},
+    rank      = Length[shape];
+    n         = shape[[axis + 1]];
+    keepShape = ReplacePart[shape, axis + 1 -> 1];
+    arange    = TUOpExpand[
+        TUOpReshape[
+            TTensorCreate[N @ Range[0, n - 1]],
+            ReplacePart[ConstantArray[1, rank], axis + 1 -> n]],
+        shape];
+    idx       = TUOpExpand[gatherIndexTensor[index, keepShape], shape];
+    oh        = TUOpCmpeq[arange, idx];
+    TUOpReshape[TUOpReduce[x * oh, axis, "SUM"], keepShape]
+]
+
+TTakeAlongAxis[x_TTerm, index_, axis_Integer] := TGather[x, axis, index]
 
 (* tUopShape (the static shape walk) rather than TTensorShape so `w` may
    be an unrealized UOP term -- e.g. a Transpose feeding the vector.matrix

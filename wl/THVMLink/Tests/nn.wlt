@@ -1080,3 +1080,72 @@ VerificationTest[
     {0, 0, 0, 0, 1, 1, 1, 1},
     TestID -> "nn/tnettrain-mlp-classifies"
 ]
+
+(* === elementwise selection: where / maximum / minimum / clip === *)
+(* tinygrad's own maximum/minimum/clip doctest values + the binary
+   Max/Min/Clip UpValues, plus their gradients vs the analytic subgradient. *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{-1., 2., 3.}, "Real32"];
+    b = TTensorCreate @ NumericArray[{-4., -2., 9.}, "Real32"];
+    {Normal @ TTensorData @ TRealize @ TMaximum[a, b],
+     Normal @ TTensorData @ TRealize @ TMinimum[a, b],
+     Normal @ TTensorData @ TRealize @ TMaximum[a, 1.],
+     Normal @ TTensorData @ TRealize @ Max[a, b],
+     Normal @ TTensorData @ TRealize @ Min[a, b]},
+    {{-1., 2., 9.}, {-4., -2., 3.}, {1., 2., 3.}, {-1., 2., 9.}, {-4., -2., 3.}},
+    TestID -> "nn/maximum-minimum"
+]
+
+VerificationTest[
+    TInit[];
+    c = TTensorCreate @ NumericArray[{-3., -2., -1., 0., 1., 2., 3.}, "Real32"];
+    {Normal @ TTensorData @ TRealize @ TClip[c, -1., 1.],
+     Normal @ TTensorData @ TRealize @ Clip[c],
+     Normal @ TTensorData @ TRealize @ TClip[c, -Infinity, 0.]},
+    {{-1., -1., -1., 0., 1., 1., 1.}, {-1., -1., -1., 0., 1., 1., 1.},
+     {-3., -2., -1., 0., 0., 0., 0.}},
+    TestID -> "nn/clip"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{-1., 2., 3.}, "Real32"];
+    b = TTensorCreate @ NumericArray[{-4., -2., 9.}, "Real32"];
+    m = TTensorCreate @ NumericArray[{1., 0., 1.}, "Real32"];
+    Normal @ TTensorData @ TRealize @ TWhere[m, a, b],
+    {-1., -2., 3.},
+    TestID -> "nn/where"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{-1., 2., 3.}, "Real32"];
+    b = TTensorCreate @ NumericArray[{-4., -2., 9.}, "Real32"];
+    c = TTensorCreate @ NumericArray[{-3., -2., -1., 0., 1., 2., 3.}, "Real32"];
+    {Normal @ TTensorData @ TRealize @ First @ TGrad[Total[TMaximum[a, b]], {a}],
+     Normal @ TTensorData @ TRealize @ First @ TGrad[Total[TMinimum[a, b]], {b}],
+     Normal @ TTensorData @ TRealize @ First @ TGrad[Total[TClip[c, -1., 1.]], {c}]},
+    {{1., 1., 0.}, {1., 1., 0.}, {0., 0., 1., 1., 1., 0., 0.}},
+    TestID -> "nn/select-gradients"
+]
+
+(* === gather / take-along-axis: the per-sample policy-gradient selection === *)
+
+VerificationTest[
+    TInit[];
+    logits = TTensorCreate @ NumericArray[{{1., 2., 3.}, {4., 5., 6.}}, "Real32"];
+    {Normal @ TTensorData @ TRealize @ TTakeAlongAxis[logits, {2, 0}, 1],
+     Normal @ TTensorData @ TRealize @ TGather[logits, 1, {2, 0}]},
+    {{{3.}, {4.}}, {{3.}, {4.}}},
+    TestID -> "nn/gather-take-along-axis"
+]
+
+VerificationTest[
+    TInit[];
+    logits = TTensorCreate @ NumericArray[{{1., 2., 3.}, {4., 5., 6.}}, "Real32"];
+    Normal @ TTensorData @ TRealize @ First @ TGrad[Total[TGather[logits, 1, {2, 0}]], {logits}],
+    {{0., 0., 1.}, {1., 0., 0.}},
+    TestID -> "nn/gather-gradient-scatters"
+]
