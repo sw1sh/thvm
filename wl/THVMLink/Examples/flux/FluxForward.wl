@@ -128,7 +128,13 @@ fxSwiGLU[x_, wIn_, wOut_] := fxLinear[fxSwiGLUact[fxLinear[x, wIn]], wOut]
        heads/head_dim/eps.  Op-order per the diffusers Flux2TransformerBlock:
        modulate -> separate img/txt QKV -> per-head RMSNorm(q,k) -> text-first
        joint concat -> RoPE after concat -> attention -> out-proj -> gated
-       residual -> SwiGLU MLP -> gated residual. --- *)
+       residual -> SwiGLU MLP -> gated residual.
+
+       Returns {img, txt}.  The two streams share the joint-attention sub-DAG
+       (concat Q/K/V -> RoPE -> attention -> softmax), so realize them TOGETHER
+       -- TRealize[{img, txt}] -- not per root.  A per-root realize re-lifts the
+       shared chain into a duplicate kernel set (94 vs 58 kernels/block; same
+       output). --- *)
 fxDoubleBlock[img0_, txt0_, mods_, ropeCos_, ropeSin_, W_, cfg_] := Module[
     {h, dh, eps, scale, simg, stxt, dim, imgN, txtN, qi, ki, vi, qt, kt, vt,
      Q, K, V, rc, rs, ctx, ctxT, ctxI, img, txt, imgN2, txtN2},
@@ -242,9 +248,14 @@ fxTransformer[hidden0_, enc0_, temb_, ropeCos_, ropeSin_, wf_, cfg_] := Module[
     smod = <|"shift" -> ss[[1]], "scale" -> ss[[2]], "gate" -> ss[[3]]|>;
     hidden = TRealize @ fxLinear[hidden0, wf["x_embedder.weight"]];      (* {S_img, dim} *)
     enc    = TRealize @ fxLinear[enc0,    wf["context_embedder.weight"]]; (* {S_txt, dim} *)
-    (* fxDoubleBlock returns {img, txt} -> hidden(img) is [[1]], enc(txt) is [[2]] *)
-    Do[ With[{r = fxDoubleBlock[hidden, enc, mods, ropeCos, ropeSin, fxDblW[wf, i], cfg]},
-            hidden = TRealize @ r[[1]];  enc = TRealize @ r[[2]]], {i, 0, nD - 1}];
+    (* fxDoubleBlock returns {img, txt} -> hidden(img) is [[1]], enc(txt) is [[2]].
+       Realize BOTH in one multi-root TRealize: the img/txt outputs share the
+       joint-attention sub-DAG (concat Q/K/V -> RoPE -> attention -> softmax),
+       and a per-root TRealize re-lifts that whole shared chain into a second
+       identical kernel set (94 kernels/block).  One bundled pass dedups it to
+       58 -- byte-identical output, ~38% fewer dispatches. *)
+    Do[ With[{r = TRealize @ fxDoubleBlock[hidden, enc, mods, ropeCos, ropeSin, fxDblW[wf, i], cfg]},
+            hidden = r[[1]];  enc = r[[2]]], {i, 0, nD - 1}];
     hidden = TRealize @ fxConcat[{enc, hidden}, 1];                       (* {S_txt+S_img, dim} *)
     Do[ hidden = TRealize @ fxSingleBlock[hidden, smod, ropeCos, ropeSin, fxSglW[wf, i], cfg], {i, 0, nS - 1}];
     hidden = TUOpShrink[hidden, {{stxt, fxShape[hidden][[1]]}, {0, fxShape[hidden][[2]]}}];  (* drop text *)
