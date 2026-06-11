@@ -1920,6 +1920,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_proof_init(WolframLibraryData libData,
   rr_kbo.var_weight = 1;
   AtpState *atp = thvm_atp_init(&rr_kbo, (u32)max_steps);
   if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
+  // Memory leash: the reranked path sets NO weight bound (see the note
+  // below -- AutoMaxWeight exploded the queue on easy goals), so a runaway
+  // guided saturation could balloon C memory past the host limit.  Hard-cap
+  // the live CP queue: 200k CPs bounds the queue arrays + packed strings to
+  // a few hundred MB; the periodic FIFO/priority selection still fires over
+  // the kept CPs (lossy, but a memory bound is the point).
+  thvm_atp_set_max_cp_queue(atp, 200000u);
   static LpoConfig rr_lpo;
   if (ordering == 1) {
     rr_lpo.precedence = rr_prec;

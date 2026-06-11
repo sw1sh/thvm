@@ -5155,6 +5155,10 @@ fn void thvm_atp_set_max_cp_weight(AtpState *s, u32 w) {
   if (s != NULL) s->max_cp_weight = w;
 }
 
+fn void thvm_atp_set_max_cp_queue(AtpState *s, u32 n) {
+  if (s != NULL) s->max_cp_queue = n;
+}
+
 // Enable the automatic, completeness-preserving growing CP-weight
 // bound.  `base` seeds the bound; slope (default 2) scales it by the
 // deepest current rule LHS so the bound tracks how complex the rule
@@ -7201,6 +7205,13 @@ static void atp_auto_maxw_drain(AtpState *s, u8 force) {
 // to the CP slot (effective only when s->use_initial_ultimate is on).
 static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
                              u8 is_ultimate) {
+  // Hard queue-size cap (memory leash): drop before packing (saves the
+  // acp_pack malloc) once the live queue is full.  Lossy; the periodic
+  // FIFO/priority selection still fires over the kept CPs.
+  if (s->max_cp_queue > 0u && s->n_cps >= s->max_cp_queue) {
+    s->n_cps_dropped_qcap++;
+    return;
+  }
   // Pack the CP into a byte string outside the managed heap.
   u32  cp_nodes  = 0u;
   u8  *packed    = acp_pack(lhs, rhs, NULL, &cp_nodes);
@@ -7279,6 +7290,11 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   // Same structural weight acp_pack counts (one tick per preorder node)
   // -- computed without the pack walk or its malloc.
   u32 cp_nodes = atp_symbol_count(lhs) + atp_symbol_count(rhs);
+  // Hard queue-size cap (memory leash): same lossy drop as atp_cp_heap_push.
+  if (s->max_cp_queue > 0u && s->n_cps >= s->max_cp_queue) {
+    s->n_cps_dropped_qcap++;
+    return 1u;   // consumed (dropped) -- identical verdict to the MaxWeight cap
+  }
   // Waldmeister MaxWeight hard cap: same lossy drop as atp_cp_heap_push.
   if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) return 1u;
   // Auto-MaxWeight: the overflow stash stores packed byte strings, so an

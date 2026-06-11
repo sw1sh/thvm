@@ -220,6 +220,28 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  // === Queue-size cap bounds the live CP count (memory leash) =========
+  // With max_cp_queue set, the live CP count never exceeds the cap no
+  // matter how many overlaps the saturation generates; the over-cap CPs
+  // are dropped (n_cps_dropped_qcap ticks).  This is the C memory bound
+  // for runaway saturations that wl -t (time only) cannot provide.
+  TEST_BEGIN("atp/rerank/queue-size-cap-bounds-memory");
+  {
+    AtpState *s = thvm_atp_init(&GROUP_CFG, 4096);
+    thvm_atp_set_max_cp_queue(s, 6u);
+    load_group_axioms(s);
+    u32 peak = 0u;
+    for (u32 k = 0; k < 50u; k++) {
+      AtpStatus st = thvm_atp_step(s);
+      if (s->n_cps > peak) peak = s->n_cps;
+      CHECK(s->n_cps <= 6u);            // live queue never exceeds the cap
+      if (st != ATP_RUNNING) break;
+    }
+    CHECK(peak >= 1u);                   // the queue did fill
+    CHECK(s->n_cps_dropped_qcap > 0u);   // the cap actually fired
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

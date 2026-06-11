@@ -4672,6 +4672,17 @@ typedef struct {
   // goal-directed selector is not starved by runaway pairs.
   u32  max_cp_weight;
 
+  // Hard CP-queue-SIZE cap (0 = unbounded): when the live CP count reaches
+  // this, new critical pairs are dropped at push (n_cps_dropped_qcap ticks)
+  // so the queue arrays + packed byte strings stay bounded -- a MEMORY leash
+  // for runaway saturations (the weight caps bound per-CP SIZE, not COUNT;
+  // a prolific problem grows the queue in count and balloons C memory past
+  // the host limit).  Lossy like max_cp_weight: the periodic FIFO / priority
+  // selection still fires over the kept CPs, but dropped CPs are gone, so
+  // this trades completeness for a memory bound.  Opt-in.
+  u32  max_cp_queue;
+  u64  n_cps_dropped_qcap;          // CPs dropped by the queue-size cap
+
   // Automatic, COMPLETENESS-PRESERVING growing CP-weight bound
   // (Waldmeister MaxWeight, but never permanently lossy).  When
   // `auto_max_cp_weight_base` > 0, atp_cp_heap_push compares a CP's
@@ -5100,6 +5111,9 @@ fn void      thvm_atp_set_cp_fifo_tiebreak(AtpState *s, u8 on);
 // `ClasHeuristics` module.
 fn void      thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode);
 fn void      thvm_atp_set_max_cp_weight(AtpState *s, u32 w);
+// Hard CP-queue-size cap (memory leash): drop new CPs once the live queue
+// reaches `n` (0 = unbounded).  Lossy; bounds C memory on runaway saturations.
+fn void      thvm_atp_set_max_cp_queue(AtpState *s, u32 n);
 // Enable the automatic, completeness-preserving growing CP-weight
 // bound (Waldmeister MaxWeight, but the deferred CPs are stashed and
 // re-admitted, never dropped).  `base` seeds the bound (bound = base +
