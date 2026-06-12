@@ -1486,6 +1486,67 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-cp-formation-ordering-gate");
+  {
+    // WM KPAction ordering gate (Unifikation1.c KPActionGR :1394-1401,
+    // KPActionRG :1404-1411, KPActionGG :1414-1421): a CP whose
+    // equation parent's step at the peak is strictly UPHILL on the
+    // unified instance is discarded at FORMATION (never numbered,
+    // weighed, or queued).  The canonical victim is the commutativity
+    // MIRROR: overlapping f(a, e) -> a with f(y1, y2) = f(y2, y1) at
+    // the root instantiates the comm step as f(a, e) -> f(e, a),
+    // strictly uphill in KBO (equal weights, precedence e > a), so WM
+    // never forms the mirror CP  f(e, a) # a -- the 16-row
+    // AbelianGroup@7 / Boolean@8 alignment-matrix divergence class
+    // (corpus shape and(x, not(x)) -> F, mirror via not(x) > x).
+
+    // Mutter test (KPActionRG: rule Vater, comm equation Mutter).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_unfailing_cp(s, 1u);
+    AtpAddedRange a = thvm_atp_orient_and_add(s,
+        mk_f(mk_v(VAR_x), mk_v(1u)), mk_f(mk_v(1u), mk_v(VAR_x)));
+    CHECK_EQ(a.count, 1u);
+    CHECK_EQ((u32)atp_eq_is_mono(s, 0), 1u);
+    a = thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_e()), mk_a());
+    CHECK_EQ(a.count, 1u);
+    CHECK_EQ(s->r_orient[1], 1u);
+    CriticalPair buf[ATP_CP_BATCH];
+    u32 cnt = atp_overlap_ij(s, 1, 0, buf, ATP_CP_BATCH, NULL);
+    CHECK_EQ(cnt, 0u);                     // mirror gated (was 1 pre-port)
+    thvm_atp_free(s);
+
+    // Vater test (KPActionGR: comm equation Vater, rule Mutter) -- the
+    // converse intake order, same mirror, gated by the OUTER
+    // (KPLinks vs Ueberlappung) comparison.
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_unfailing_cp(s, 1u);
+    a = thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_e()), mk_a());
+    CHECK_EQ(a.count, 1u);
+    a = thvm_atp_orient_and_add(s,
+        mk_f(mk_v(VAR_x), mk_v(1u)), mk_f(mk_v(1u), mk_v(VAR_x)));
+    CHECK_EQ(a.count, 1u);
+    cnt = atp_overlap_ij(s, 1, 0, buf, ATP_CP_BATCH, NULL);
+    CHECK_EQ(cnt, 0u);                     // mirror gated (was 1 pre-port)
+    thvm_atp_free(s);
+
+    // Incomparable-instance control (WM McCune-II cp 5 analog): comm
+    // over f(x, e) -> x instantiates the comm step as
+    // f(x, e) -> f(e, x), KBO-INCOMPARABLE (const vs var first
+    // argument), so the CP  x # f(e, x)  IS formed -- the gate tests
+    // strict uphill only.
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_unfailing_cp(s, 1u);
+    a = thvm_atp_orient_and_add(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    CHECK_EQ(a.count, 1u);
+    CHECK_EQ(s->r_orient[0], 1u);
+    a = thvm_atp_orient_and_add(s,
+        mk_f(mk_v(VAR_x), mk_v(1u)), mk_f(mk_v(1u), mk_v(VAR_x)));
+    CHECK_EQ(a.count, 1u);
+    cnt = atp_overlap_ij(s, 1, 0, buf, ATP_CP_BATCH, NULL);
+    CHECK_EQ(cnt, 1u);                     // incomparable instance kept
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-queue-subsume-gate-roundtrip");
   {
     // WM has no queue-vs-queue subsumption: recentCPinsert

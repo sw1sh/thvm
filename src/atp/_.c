@@ -14172,6 +14172,79 @@ static u8 atp_eq_is_mono(const AtpState *s, u32 i) {
 #endif
 }
 
+// Subterm of `t` at a CriticalPair-recorded overlap position.
+static Term atp_cp_pos_subterm(Term t, const u8 *pos, u8 len) {
+  for (u8 d = 0; d < len; d++) {
+    if (term_tag(t) != TAG_CTR) return 0;
+    if (pos[d] >= term_ctr_n(t)) return 0;
+    t = term_ctr_at(t, pos[d]);
+  }
+  return t;
+}
+
+// WM CP-formation ordering gate (Unifikation1.c KPActionGR :1394-1401,
+// KPActionRG :1404-1411, KPActionGG :1414-1421): a CP candidate is
+// discarded at FORMATION -- before it is numbered, weighed, or queued
+// -- when an equation parent's rewrite step at the peak is strictly
+// UPHILL on the unified instance, because ordered rewriting can never
+// perform that step, so the overlap is not a peak of the ordered
+// system (the unfailing-completion extended-CP condition).
+//
+//   outer (Vater) test, equation i:  discard if
+//       sigma(rhs_i) > sigma(lhs_i)   ==  cp.rhs > cp.peak
+//     (WM: TermGroesserUnif(KPLinks, Ueberlappung))
+//   inner (Mutter) test, equation j:  discard if
+//       sigma(rj) > sigma(lj)
+//     read back as the subterms of cp.lhs / cp.peak at the overlap
+//     position (WM: TermGroesserUnif(KPRechtsInnen, UeberlappungInnen);
+//     "Vergleich innen ... ausreichend" -- by monotonicity of the
+//     reduction order the inner comparison decides the whole term).
+//
+// Rules are never tested (KPActionRR has no ordering test): an
+// oriented rule is downhill on every instance by stability.  WM's
+// ORD_TermGroesserUnif is the SAME function as the reduction-order
+// test (Ordnungen.c:273-283 sets UnifTestfkt = RedTestfkt), i.e.
+// thvm's atp_compare.  Filters buf[lo, hi) in place; returns new hi.
+//
+// The compared pair is var-NORMALIZED first (one bijective renaming
+// across both sides -- KBO/LPO verdicts are renaming-invariant, so
+// the verdict equals WM's on its own alpha-variant).  The raw overlap
+// terms carry j-side ids >= CP_RENAME_OFFSET, which sit ABOVE the KBO
+// balance caps (kbo/_.c KBO_MAX_VAR oracle range, u8 wmemo var
+// profile): comparing them raw both mis-verdicts the var condition
+// AND seeds the address-keyed weight memo with entries whose ids
+// alias -- the dense renumber keeps every id inside the caps.
+static u32 atp_cp_order_gate(AtpState *s, CriticalPair *buf,
+                             u32 lo, u32 hi, u8 outer_eq, u8 inner_eq) {
+  if (!outer_eq && !inner_eq) return hi;
+  u32 w = lo;
+  for (u32 k = lo; k < hi; k++) {
+    Term peak = buf[k].peak;
+    u8 drop = 0u;
+    if (peak != 0) {
+      if (outer_eq) {
+        Term a = buf[k].rhs, b = peak;
+        thvm_normalize_vars(&a, &b);
+        if (atp_compare(s, a, b) == KBO_GT) drop = 1u;
+      }
+      if (!drop && inner_eq) {
+        Term in_new = atp_cp_pos_subterm(buf[k].lhs,
+                                         buf[k].pos, buf[k].pos_len);
+        Term in_old = atp_cp_pos_subterm(peak, buf[k].pos, buf[k].pos_len);
+        if (in_new != 0 && in_old != 0) {
+          thvm_normalize_vars(&in_new, &in_old);
+          if (atp_compare(s, in_new, in_old) == KBO_GT) drop = 1u;
+        }
+      }
+    }
+    if (!drop) {
+      if (w != k) buf[w] = buf[k];
+      w++;
+    }
+  }
+  return w;
+}
+
 // `combo_end` (optional, 4 slots) receives the buffer count after each
 // of the four base face-combo passes -- the WM emission-order ranker
 // needs to know which (i-face, j-face) combination produced each CP.
@@ -14240,26 +14313,36 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
                                           REWRITE_MAX_VAR / 2, 1);
     AtpFtCell *li_ft = s->lhs_ft[i];
     AtpFtCell *ri_ft = s->rhs_ft[i];
-    u8 need_peak = s->use_connectedness ? 1u : 0u;
+    // The KPAction ordering gate reads cp.peak, so equation-parent
+    // overlaps need it even when connectedness is off.
+    u8 need_peak = (s->use_connectedness || i_eq || j_eq) ? 1u : 0u;
+    u32 seg = cnt;
     cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, lj_r, rj_r,
                                       ft_arena_local, need_peak, skip1,
                                       buf, cap, cnt);
+    cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
     if (combo_end != NULL) combo_end[0] = cnt;
     if (j_un) {
+      seg = cnt;
       cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, rj_r, lj_r,
                                         ft_arena_local, need_peak, skip2,
                                         buf, cap, cnt);
+      cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
     }
     if (combo_end != NULL) combo_end[1] = cnt;
     if (i_un) {
+      seg = cnt;
       cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, lj_r, rj_r,
                                         ft_arena_local, need_peak, skip3,
                                         buf, cap, cnt);
+      cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
       if (combo_end != NULL) combo_end[2] = cnt;
       if (j_un) {
+        seg = cnt;
         cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, rj_r, lj_r,
                                           ft_arena_local, need_peak, skip4,
                                           buf, cap, cnt);
+        cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
       }
     }
     if (combo_end != NULL) {
@@ -14274,21 +14357,29 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   {
     u32 (*const pf[2])(Term, Term, Term, Term, CriticalPair *, u32, u32) =
         { thvm_critical_pairs_pair, thvm_critical_pairs_pair_noroot };
+    u32 seg = cnt;
     // (i-face li) x (j: lj->rj)  -- the standard overlap.
     cnt = pf[skip1](li, ri, lj, rj, buf, cap, cnt);
+    cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
     if (combo_end != NULL) combo_end[0] = cnt;
     if (j_un) {
       // (i-face li) x (j: rj->lj)
+      seg = cnt;
       cnt = pf[skip2](li, ri, rj, lj, buf, cap, cnt);
+      cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
     }
     if (combo_end != NULL) combo_end[1] = cnt;
     if (i_un) {
       // (i-face ri) x (j: lj->rj)
+      seg = cnt;
       cnt = pf[skip3](ri, li, lj, rj, buf, cap, cnt);
+      cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
       if (combo_end != NULL) combo_end[2] = cnt;
       if (j_un) {
         // (i-face ri) x (j: rj->lj)
+        seg = cnt;
         cnt = pf[skip4](ri, li, rj, lj, buf, cap, cnt);
+        cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
       }
     }
     if (combo_end != NULL) {
@@ -14298,7 +14389,12 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   }
 
 #ifdef THVM_ATP_AC
-  // AC-superposition extension (Bachmair-Plaisted).  When both rules
+  // AC-superposition extension (Bachmair-Plaisted).  NOT routed through
+  // atp_cp_order_gate: WM has no AC lane (the gate is a U1 KPAction
+  // mechanism), the AC unifier's overlap position is modulo-AC so the
+  // recorded path does not address the syntactic subterm the inner test
+  // would compare, and the block is inert on every WM path (ac_mask is
+  // 0 there).  When both rules
   // have the SAME AC-top symbol, the standard syntactic overlap above
   // misses the merge-position CPs needed for AC-completeness.  The
   // standard fix: replace one rule's LHS with its extended form
@@ -14691,6 +14787,9 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
                        !(s->use_unfailing_cp && !s->r_orient[i]));
       (void)cp_walk_positions(ctx.li, path, 0, CP_MAX_DEPTH,
                               cp_visit_ic, &ctx, 0);
+      ctx.count = atp_cp_order_gate(s, buf, 0, ctx.count,
+                                    s->use_unfailing_cp && !s->r_orient[i],
+                                    s->use_unfailing_cp && !s->r_orient[j]);
       pushed += atp_push_cps_traced(s, buf, ctx.count,
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);
@@ -14713,6 +14812,9 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
       ctx.skip_root = 1u;   // i < j: roots belong to the (j, i) visit
       (void)cp_walk_positions(ctx.li, path, 0, CP_MAX_DEPTH,
                               cp_visit_ic, &ctx, 0);
+      ctx.count = atp_cp_order_gate(s, buf, 0, ctx.count,
+                                    s->use_unfailing_cp && !s->r_orient[i],
+                                    s->use_unfailing_cp && !s->r_orient[j]);
       pushed += atp_push_cps_traced(s, buf, ctx.count,
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);

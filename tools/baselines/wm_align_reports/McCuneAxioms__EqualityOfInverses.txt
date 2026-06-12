@@ -3,31 +3,31 @@ note: content-delta wm-only=1 thvm-only=0; post-axiom nonax-wm=155 nonax-thvm=15
 
 --- positions 137..149 (1-based) ---
    137 WM   w1=62           not(x1) # and(not(and(x2,x1)),x2)
-   137 thvm pri=62          CPSEL pick=137 j=0 seq=1531 pri=62 rules=17 lhs=(C3 (C4 (C3 V0 V1)) V0) rhs=(C4 V1)
+   137 thvm pri=62          CPSEL pick=137 j=0 seq=1519 pri=62 rules=17 lhs=(C3 (C4 (C3 V0 V1)) V0) rhs=(C4 V1)
    138 WM   w1=62           not(x1) # and(not(and(x2,x1)),x2)
-   138 thvm pri=62          CPSEL pick=138 j=0 seq=1557 pri=62 rules=17 lhs=(C3 (C4 (C3 V0 V1)) V0) rhs=(C4 V1)
+   138 thvm pri=62          CPSEL pick=138 j=0 seq=1545 pri=62 rules=17 lhs=(C3 (C4 (C3 V0 V1)) V0) rhs=(C4 V1)
    139 WM   w1=62           and(not(and(x1,x2)),x1) # not(x2)
-   139 thvm pri=62          CPSEL pick=139 j=0 seq=1576 pri=62 rules=17 lhs=(C4 V0) rhs=(C3 (C4 (C3 V1 V0)) V1)
+   139 thvm pri=62          CPSEL pick=139 j=0 seq=1564 pri=62 rules=17 lhs=(C4 V0) rhs=(C3 (C4 (C3 V1 V0)) V1)
 *  140 WM   w1=62           and(not(and(x1,x2)),x1) # not(x2)
-*  140 thvm pri=71          CPSEL pick=140 j=0 seq=1470 pri=71 rules=17 lhs=(C3 V0 (C4 (C3 (C4 V1) V0))) rhs=V1
+*  140 thvm pri=71          CPSEL pick=140 j=0 seq=1458 pri=71 rules=17 lhs=(C3 V0 (C4 (C3 (C4 V1) V0))) rhs=V1
 *  141 WM   w1=71           and(x1,not(and(not(x2),x1))) # x2
-*  141 thvm pri=71          CPSEL pick=141 j=0 seq=1471 pri=71 rules=17 lhs=(C4 (C3 V0 (C4 (C3 V1 V0)))) rhs=V1
+*  141 thvm pri=71          CPSEL pick=141 j=0 seq=1459 pri=71 rules=17 lhs=(C4 (C3 V0 (C4 (C3 V1 V0)))) rhs=V1
 *  142 WM   w1=71           not(and(x1,not(and(x2,x1)))) # x2
-*  142 thvm pri=71          CPSEL pick=142 j=0 seq=1483 pri=71 rules=17 lhs=V0 rhs=(C3 V0 (C4 (C3 (C4 V1) V1)))
+*  142 thvm pri=71          CPSEL pick=142 j=0 seq=1471 pri=71 rules=17 lhs=V0 rhs=(C3 V0 (C4 (C3 (C4 V1) V1)))
    143 WM   w1=71           and(x1,not(and(not(x2),x2))) # x1
-   143 thvm pri=71          CPSEL pick=143 j=0 seq=1484 pri=71 rules=17 lhs=(C3 V0 (C4 (C3 (C4 V1) V1))) rhs=V0
+   143 thvm pri=71          CPSEL pick=143 j=0 seq=1472 pri=71 rules=17 lhs=(C3 V0 (C4 (C3 (C4 V1) V1))) rhs=V0
 *  144 WM   w1=71           x1 # and(x1,not(and(not(x2),x2)))
-*  144 thvm pri=71          CPSEL pick=144 j=0 seq=1496 pri=71 rules=17 lhs=(C3 (C4 (C3 (C4 V0) V0)) V1) rhs=V1
+*  144 thvm pri=71          CPSEL pick=144 j=0 seq=1484 pri=71 rules=17 lhs=(C3 (C4 (C3 (C4 V0) V0)) V1) rhs=V1
    145 WM   w1=71           x1 # and(not(and(not(x2),x2)),x1)
-   145 thvm pri=71          CPSEL pick=145 j=0 seq=1497 pri=71 rules=17 lhs=(C3 (C4 (C3 (C4 V0) V0)) V1) rhs=V1
+   145 thvm pri=71          CPSEL pick=145 j=0 seq=1485 pri=71 rules=17 lhs=(C3 (C4 (C3 (C4 V0) V0)) V1) rhs=V1
 *  146 WM   w1=71           x1 # and(not(and(not(x2),x2)),x1)
-*  146 thvm pri=71          CPSEL pick=146 j=0 seq=1499 pri=71 rules=17 lhs=(C3 V0 (C4 (C3 (C4 V1) V1))) rhs=V0
+*  146 thvm pri=71          CPSEL pick=146 j=0 seq=1487 pri=71 rules=17 lhs=(C3 V0 (C4 (C3 (C4 V1) V1))) rhs=V0
    147 WM   w1=71           x1 # and(x1,not(and(not(x2),x2)))
-   147 thvm pri=71          CPSEL pick=147 j=0 seq=1505 pri=71 rules=17 lhs=(C3 V0 (C4 (C3 (C4 V1) V1))) rhs=V0
+   147 thvm pri=71          CPSEL pick=147 j=0 seq=1493 pri=71 rules=17 lhs=(C3 V0 (C4 (C3 (C4 V1) V1))) rhs=V0
 *  148 WM   w1=71           x1 # and(x1,not(and(not(x2),x2)))
-*  148 thvm pri=71          CPSEL pick=148 j=0 seq=1532 pri=71 rules=17 lhs=(C3 (C4 (C3 (C4 V0) V0)) V1) rhs=V1
+*  148 thvm pri=71          CPSEL pick=148 j=0 seq=1520 pri=71 rules=17 lhs=(C3 (C4 (C3 (C4 V0) V0)) V1) rhs=V1
 *  149 WM   w1=71           x1 # and(not(and(not(x2),x2)),x1)
-*  149 thvm pri=71          CPSEL pick=149 j=0 seq=1534 pri=71 rules=17 lhs=(C3 (C4 (C3 V0 (C4 V1))) V0) rhs=V1
+*  149 thvm pri=71          CPSEL pick=149 j=0 seq=1522 pri=71 rules=17 lhs=(C3 (C4 (C3 V0 (C4 V1))) V0) rhs=V1
 
 --- multiset deltas (first 50 each side) ---
 WM-only   x1  and(not(and(v1,v2)),v1)#not(v2)
