@@ -5717,8 +5717,29 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // restricting recycling here keeps those cases safe.  Lifting
   // this guard requires explicit ASSIGN + DUP-aware lifetime
   // tracking in the planner.
+  //
+  // Cross-PASS share guard (the freelist analogue of the arena
+  // planner's xpass_is_shared lifetime extension at arena_compute):
+  // a TAG_CTR bundle is materialized child-by-child, each child a
+  // separate sub-pass with its own mem_plan_reset + per-pass
+  // BUFFERIZE_NODES.consumer_count.  A forward activation reached by
+  // two sibling roots (e.g. an attention output sliced by two shrink
+  // views, one per root) looks single-consumer WITHIN the first
+  // child's sub-pass, so without this guard it gets recorded +
+  // mem_plan_push_dead'd onto the backend freelist; a later same-size
+  // alloc in a SIBLING child's sub-pass then recycles its bytes while
+  // that sibling still reads it through the cached tid (the Metal
+  // multi-root corruption -- arena planner is CPU/CUDA-only, so Metal
+  // had no cross-root protection at all).  xpass_is_shared (the
+  // whole-bundle root walk populated by xpass_cc_populate) is the
+  // cross-pass last_appearance the per-pass consumer_count can't see.
+  // Tinygrad mirror: memory_plan_rewrite excludes held_bufs entirely
+  // (schedule/memory.py _can_plan -> False) and computes
+  // last_appearance over the WHOLE linearized schedule (lines 13-30),
+  // so a buf live across sub-schedules is never freed early.
   if (BOUNDARY_LAST_USE[idx] > 0
-      && BUFFERIZE_NODES[idx].consumer_count == 1) {
+      && BUFFERIZE_NODES[idx].consumer_count == 1
+      && !xpass_is_shared(boundary_loc)) {
     mem_plan_record(TENS[out_tid].buf_id,
                     BOUNDARY_LAST_USE[idx],
                     CURRENT_BACKEND);
