@@ -104,6 +104,49 @@ typedef struct {
 static MaterializedLocEntry MATERIALIZED_LOC_TABLE[MATERIALIZED_LOC_CAP];
 static u32                  MATERIALIZED_LOC_LEN = 0;
 
+// === cross-sub-pass shared-buffer recycle ============================
+// A TAG_CTR bundle materializes child-by-child (each child a SEPARATE
+// thvm_materialize sub-pass).  A boundary reached by >= 2 roots (xpass_
+// is_shared) is materialized + cached by the FIRST (producing) sub-pass and
+// recorded with the MEM_PLAN_LAST_USE_NEVER sentinel so it survives that
+// pass intact (the 6cb09420 corruption fix: an early freelist recycle WITHIN
+// the producing pass clobbered the cached bytes a sibling still reads).
+//
+// But pinning it to end-of-realize balloons peak (the FLUX 5-double-block
+// jetsam).  The genuine recycle is the freelist analogue of the arena
+// planner's cross-root lifetime extension: free the shared buffer in the
+// CONSUMING sub-pass, right after its LAST reader kernel there fires
+// (tinygrad last_appearance over the whole linearized schedule,
+// schedule/memory.py:28-32,44 -- close event at last_appearance+1).  The
+// consuming sub-pass reads the shared buffer as a kernel INPUT (the cached
+// tid substituted by materialize_subst_cached_inplace), so its lifetime is
+// the max BOUNDARY_DEPTH over the consuming-pass boundaries whose lifted
+// subtree references it; xpass_shared_input_plan records it into MEM_PLAN at
+// that depth and the existing mem_plan_push_dead frees it mid-emit.
+//
+// This table holds the shared tids the producing pass cached (per realize,
+// wiped by materialized_loc_clear).  last_root = 1 + the highest CTR-child
+// root index that reaches the boundary (xpass_last_root); the consuming pass
+// recycles the tid only when it IS that last root (no later sibling reads
+// it).  loc is the boundary loc, used to locate the consuming pass's
+// references for the last-reader depth.
+#define XPASS_SHARED_TID_CAP  4096
+typedef struct { u32 tid; u32 last_root; u64 loc; } XPassSharedTid;
+static XPassSharedTid XPASS_SHARED_TIDS[XPASS_SHARED_TID_CAP];
+static u32 XPASS_SHARED_TID_LEN = 0;
+
+static void xpass_shared_tid_add(u32 tid, u32 last_root, u64 loc) {
+  if (tid == 0 || XPASS_SHARED_TID_LEN >= XPASS_SHARED_TID_CAP) return;
+  for (u32 i = 0; i < XPASS_SHARED_TID_LEN; i++)
+    if (XPASS_SHARED_TIDS[i].tid == tid) return;   // dedup
+  XPASS_SHARED_TIDS[XPASS_SHARED_TID_LEN].tid       = tid;
+  XPASS_SHARED_TIDS[XPASS_SHARED_TID_LEN].last_root = last_root;
+  XPASS_SHARED_TIDS[XPASS_SHARED_TID_LEN].loc       = loc;
+  XPASS_SHARED_TID_LEN++;
+}
+
+static void xpass_shared_tid_reset(void) { XPASS_SHARED_TID_LEN = 0; }
+
 // Heap-rewrite journal.  materialize_subst_cached_rec replaces a parent
 // UOP cell that points at a cached child subtree with a TAG_TEN leaf
 // (heap_set), so the same pass doesn't re-materialize the shared subtree.
@@ -187,7 +230,13 @@ static void subst_journal_restore(void) {
 // spans the whole linearized schedule, so a buf live across multiple
 // consumers is never freed early.
 #define XPASS_CC_CAP   (1u << 17)        // 128K slots; loc-keyed open-addr
-typedef struct { u64 loc; u32 count; } XPassCCEntry;
+// count     = number of distinct top-level roots that reach loc.  A loc
+//   reached by >= 2 roots is shared across sub-passes (a forward activation
+//   read by two sibling roots through the materialized_loc cache).
+// last_root = 1 + the HIGHEST CTR-child-root index that reaches loc (0 =
+//   unset).  Identifies the LAST consuming sub-pass -- the only one after
+//   which a shared buffer is safe to recycle (no later sibling reads it).
+typedef struct { u64 loc; u32 count; u32 last_root; } XPassCCEntry;
 static XPassCCEntry XPASS_CC[XPASS_CC_CAP];
 static u32          XPASS_CC_LEN    = 0;
 static u8           XPASS_CC_ACTIVE = 0;  // 1 once a realize populated it
@@ -199,33 +248,54 @@ static inline u32 xpass_cc_hash(u64 loc) {
   return (u32)loc & (XPASS_CC_CAP - 1);
 }
 
-// Bump loc's root-reach count by one (called once per root that reaches
-// it -- the per-root visited bitmap dedups within a root).
-static void xpass_cc_bump(u64 loc) {
+// Bump loc's root-reach count by one (called once per root that reaches it
+// -- the per-root visited bitmap dedups within a root) and raise its
+// recorded last_root to root_idx+1.
+static void xpass_cc_bump(u64 loc, u32 root_idx) {
   if (XPASS_CC_LEN * 2 > XPASS_CC_CAP) return;   // table full: leave as-is
   u32 h = xpass_cc_hash(loc);
+  u32 rr = root_idx + 1;
   for (u32 probe = 0; probe < XPASS_CC_CAP; probe++) {
     u32 i = (h + probe) & (XPASS_CC_CAP - 1);
     if (XPASS_CC[i].loc == 0 && XPASS_CC[i].count == 0) {
-      XPASS_CC[i].loc = loc; XPASS_CC[i].count = 1; XPASS_CC_LEN++; return;
+      XPASS_CC[i].loc = loc; XPASS_CC[i].count = 1;
+      XPASS_CC[i].last_root = rr; XPASS_CC_LEN++; return;
     }
-    if (XPASS_CC[i].loc == loc) { XPASS_CC[i].count++; return; }
+    if (XPASS_CC[i].loc == loc) {
+      XPASS_CC[i].count++;
+      if (rr > XPASS_CC[i].last_root) XPASS_CC[i].last_root = rr;
+      return;
+    }
   }
 }
 
-static u32 xpass_root_reach(u64 loc) {
-  if (!XPASS_CC_ACTIVE) return 0;
+static XPassCCEntry *xpass_cc_find(u64 loc) {
+  if (!XPASS_CC_ACTIVE) return NULL;
   u32 h = xpass_cc_hash(loc);
   for (u32 probe = 0; probe < XPASS_CC_CAP; probe++) {
     u32 i = (h + probe) & (XPASS_CC_CAP - 1);
-    if (XPASS_CC[i].loc == 0 && XPASS_CC[i].count == 0) return 0;
-    if (XPASS_CC[i].loc == loc) return XPASS_CC[i].count;
+    if (XPASS_CC[i].loc == 0 && XPASS_CC[i].count == 0) return NULL;
+    if (XPASS_CC[i].loc == loc) return &XPASS_CC[i];
   }
-  return 0;
+  return NULL;
+}
+
+static u32 xpass_root_reach(u64 loc) {
+  XPassCCEntry *e = xpass_cc_find(loc);
+  return e ? e->count : 0;
+}
+
+// 1 + the highest CTR-child-root index that reaches loc (0 = unset).
+static u32 xpass_last_root(u64 loc) {
+  XPassCCEntry *e = xpass_cc_find(loc);
+  return e ? e->last_root : 0;
 }
 
 // True iff `loc` is reached by >= 2 top-level roots -> shared across
-// sub-passes, unsafe for the per-pass arena planner to recycle.
+// sub-passes, unsafe for the per-pass planner to recycle WITHIN the
+// producing sub-pass (a sibling sub-pass reads its materialized_loc cached
+// tid).  The genuine recycle is deferred to the consuming sub-pass via the
+// shared-input free path (see xpass_shared_input_plan).
 static int xpass_is_shared(u64 loc) { return xpass_root_reach(loc) >= 2; }
 
 // Non-mutating resolve of SUB-bit VAR / DP indirection.  Unlike
@@ -286,7 +356,7 @@ static Term xpass_resolve_uop(Term t, int depth) {
 // Walk ONE root's UOp DAG, marking each reached loc as reached-by-this-
 // root (bump once via the per-root visited bitmap).  `visited` is sized
 // to HEAP_NEXT and reset per root by the caller.
-static void xpass_cc_walk_rec(Term t, u8 *visited, u64 cap) {
+static void xpass_cc_walk_rec(Term t, u8 *visited, u64 cap, u32 root_idx) {
   if (term_tag(t) != TAG_UOP) {
     Term u = xpass_resolve_uop(t, 0);
     if (u == 0) return;
@@ -298,7 +368,7 @@ static void xpass_cc_walk_rec(Term t, u8 *visited, u64 cap) {
   if (loc >= cap) return;
   if (visited[loc]) return;
   visited[loc] = 1;
-  xpass_cc_bump(loc);
+  xpass_cc_bump(loc, root_idx);
   u8 ar = uop_arity((u8)op);
   u64 seen[MAX_UOP_SRC] = {0};
   u8  n_seen = 0;
@@ -310,12 +380,14 @@ static void xpass_cc_walk_rec(Term t, u8 *visited, u64 cap) {
     for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
     if (dup) continue;
     seen[n_seen++] = cloc;
-    xpass_cc_walk_rec(child, visited, cap);
+    xpass_cc_walk_rec(child, visited, cap, root_idx);
   }
 }
 
 fn void xpass_cc_reset(void) {
-  for (u32 i = 0; i < XPASS_CC_CAP; i++) { XPASS_CC[i].loc = 0; XPASS_CC[i].count = 0; }
+  for (u32 i = 0; i < XPASS_CC_CAP; i++) {
+    XPASS_CC[i].loc = 0; XPASS_CC[i].count = 0; XPASS_CC[i].last_root = 0;
+  }
   XPASS_CC_LEN = 0;
   XPASS_CC_ACTIVE = 0;
 }
@@ -334,14 +406,21 @@ fn void xpass_cc_populate(Term root) {
     u32 n = term_ctr_n(root);
     for (u32 i = 0; i < n && i < 256; i++) {
       memset(visited, 0, cap);
-      xpass_cc_walk_rec(term_ctr_at(root, i), visited, cap);
+      xpass_cc_walk_rec(term_ctr_at(root, i), visited, cap, i);
     }
   } else {
-    xpass_cc_walk_rec(root, visited, cap);
+    xpass_cc_walk_rec(root, visited, cap, 0);
   }
   free(visited);
   XPASS_CC_ACTIVE = 1;
 }
+
+// Current TAG_CTR child-root index being materialized (0 for a single root /
+// outside a CTR).  Set by thvm_materialize's CTR loop so the shared-input
+// recycle (xpass_shared_input_plan) can tell whether THIS sub-pass is the
+// LAST root that reaches a shared boundary (== xpass_last_root - 1) and may
+// therefore free that boundary's cached buffer.
+static u32 MATERIALIZE_CURRENT_ROOT = 0;
 
 // In-realize scope counter: thvm_realize / thvm_realize_many bracket
 // their bodies with materialized_loc_scope_{enter,leave}.  The cache
@@ -489,6 +568,7 @@ fn void materialized_loc_clear(void) {
     MATERIALIZED_LOC_TABLE[i].tid = 0;
   }
   MATERIALIZED_LOC_LEN = 0;
+  xpass_shared_tid_reset();
 }
 
 fn u32 materialized_loc_lookup(u64 loc) {
@@ -875,11 +955,28 @@ static void visit_memo_store(VisitMemo *m, u64 loc, u32 ref) {
 // TenDesc is still referenced by the chain rule's fresh UOPs.
 
 #define MEM_PLAN_CAP BOUNDARY_ORDER_CAP
+// last_use_depth sentinel for a cross-PASS-shared buffer recorded in its
+// PRODUCING sub-pass: greater than any BOUNDARY_DEPTH a pass reaches, so
+// mem_plan_push_dead (push iff last_use_depth < current_depth) never frees
+// it WITHIN that pass, yet it is distinct from the 0 "sink / no realize
+// consumer" sentinel that mem_plan_push_dead skips outright.  The buffer is
+// genuinely recycled in the LAST consuming sub-pass via xpass_shared_input_
+// plan (records the shared INPUT tid at its consuming-pass last-reader
+// depth).  Mirror of the arena planner's last_at = BOUNDARY_ORDER_LEN - 1
+// extension (arena_compute), but on the freelist the recycle is deferred to
+// the consuming pass since freelist bytes are not arena-shared.
+#define MEM_PLAN_LAST_USE_NEVER 0xFFFFFFFEu
 typedef struct {
   u32      buf_id;
   u32      last_use_depth;
   Backend *backend;
   u8       pushed;
+  // 1 for a cross-pass-shared INPUT freed in its LAST consuming sub-pass
+  // (xpass_shared_input_plan): it is GENUINELY dead after this pass (no
+  // sibling reads it again), so mem_plan_drain_freelist must NOT pull it
+  // back -- unlike a normal in-pass recorded output whose TenDesc the next
+  // fixpoint iteration's chain rule may still reference.
+  u8       shared_free;
 } MemPlanEntry;
 
 static MemPlanEntry MEM_PLAN[MEM_PLAN_CAP];
@@ -961,6 +1058,10 @@ static void mem_plan_drain_freelist(void) {
   for (u32 i = 0; i < MEM_PLAN_LEN; i++) {
     MemPlanEntry *e = &MEM_PLAN[i];
     if (!e->pushed)                       continue;
+    // shared_free buffers are genuinely dead after this (last consuming)
+    // sub-pass -- keep them on the freelist so a later realize recycles
+    // their storage; do NOT pull them back.
+    if (e->shared_free)                   continue;
     Backend *b = e->backend;
     if (b == NULL || b->buf_freelist_remove == NULL) continue;
     if (!mem_plan_backend_enabled(b))     continue;
@@ -978,6 +1079,46 @@ static void mem_plan_record(u32 buf_id, u32 last_use_depth, Backend *b) {
   e->last_use_depth = last_use_depth;
   e->backend        = b;
   e->pushed         = 0;
+  e->shared_free    = 0;
+}
+
+// Record a cross-pass-shared INPUT buffer for recycle in its LAST consuming
+// sub-pass: freed by mem_plan_push_dead once current_depth passes its
+// consuming-pass last-reader depth, and (unlike a normal record) NOT pulled
+// back by mem_plan_drain_freelist -- it has no further reader in any pass.
+static void mem_plan_record_shared_free(u32 buf_id, u32 last_use_depth, Backend *b) {
+  if (b == NULL || buf_id == 0)              return;
+  if (b->buf_freelist_push == NULL)          return;
+  if (!mem_plan_backend_enabled(b))          return;
+  if (MEM_PLAN_LEN >= MEM_PLAN_CAP)          return;
+  MemPlanEntry *e = &MEM_PLAN[MEM_PLAN_LEN++];
+  e->buf_id         = buf_id;
+  e->last_use_depth = last_use_depth;
+  e->backend        = b;
+  e->pushed         = 0;
+  e->shared_free    = 1;
+}
+
+// Push a cross-pass-shared buffer onto the freelist immediately (it is
+// already DEAD entering this sub-pass: read only by earlier sibling sub-
+// passes, not by this one or any later one).  refcount>1 / external-buf
+// guards mirror mem_plan_push_dead.  Marked so a same-size alloc in this
+// pass recycles its storage; the buffer's producer + last consumer fire
+// BEFORE any kernel of this pass (this pass depends on them), so reusing its
+// storage for a this-pass kernel output is fire-order-safe.
+static void mem_plan_push_shared_dead(u32 buf_id, Backend *b) {
+  if (b == NULL || buf_id == 0)              return;
+  if (b->buf_freelist_push == NULL)          return;
+  if (!mem_plan_backend_enabled(b))          return;
+  if (b->buf_refcount != NULL && b->buf_refcount(buf_id) > 1) return;
+  b->buf_freelist_push(buf_id);
+  if (MEM_PLAN_LEN >= MEM_PLAN_CAP)          return;
+  MemPlanEntry *e = &MEM_PLAN[MEM_PLAN_LEN++];
+  e->buf_id         = buf_id;
+  e->last_use_depth = MEM_PLAN_LAST_USE_NEVER;   // already pushed
+  e->backend        = b;
+  e->pushed         = 1;
+  e->shared_free    = 1;                          // drain must not pull back
 }
 
 static void mem_plan_push_dead(u32 current_depth) {
@@ -5357,6 +5498,109 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
   return VISIT_BAIL;
 }
 
+// Does the UOP subtree rooted at `loc` reference TAG_TEN(tid)?  Bounded
+// recursive scan with a per-call visited bitmap (shared-DAG nodes are walked
+// once).  Stops at UOP_KERNEL (a prior boundary) and at TAG_TEN leaves.
+static int boundary_refs_tid_rec(u64 loc, u32 tid, u8 *visited, u64 cap) {
+  if (loc >= cap) return 0;
+  if (visited[loc]) return 0;
+  visited[loc] = 1;
+  // The node's op (and thus arity) comes from the classifier, not a tag at
+  // heap[loc]; walk its slots via that arity.
+  u32 binfo = bufferize_info_find(loc);
+  if (binfo == 0xFFFFFFFFu) return 0;
+  u8 op = BUFFERIZE_NODES[binfo].op;
+  if (op == UOP_KERNEL) return 0;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    Term child = term_resolve(heap_read(loc + i));
+    u8 ct = term_tag(child);
+    if (ct == TAG_TEN) {
+      if (term_val(child) == tid) return 1;
+      continue;
+    }
+    if (ct != TAG_UOP) continue;
+    if (term_ext(child) == UOP_KERNEL) continue;
+    if (boundary_refs_tid_rec(term_val(child), tid, visited, cap)) return 1;
+  }
+  return 0;
+}
+
+// Opt-out (default ON, like THVM_*_REUSE_BUFS).  THVM_SHARED_FREE=0 keeps
+// every cross-pass-shared buffer pinned to end-of-realize (the 6cb09420
+// suppression behavior) -- used to A/B the recycle's peak win.
+static int shared_free_enabled(void) {
+  static int known = 0, enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_SHARED_FREE");
+    enabled = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
+    known = 1;
+  }
+  return enabled;
+}
+
+// Consuming-sub-pass shared-buffer recycle.  Runs after topo_sort (depths +
+// BOUNDARY_ORDER ready) and before the emit loop.  For every shared tid the
+// producing sub-pass cached (XPASS_SHARED_TIDS) where THIS sub-pass is the
+// LAST root reaching it (MATERIALIZE_CURRENT_ROOT + 1 == last_root, so no
+// later sibling reads it):
+//   - if this pass references the buffer, free it after its last reader-
+//     kernel here (the deepest BOUNDARY_DEPTH among boundaries whose lifted
+//     subtree references it -> a NON-drained depth-scheduled push that
+//     mem_plan_push_dead fires mid-emit);
+//   - if this pass does NOT reference it, the buffer was read only by earlier
+//     sibling sub-passes and is already dead -> push it immediately so this
+//     pass's allocations recycle its storage.
+// Either way the recycle lands exactly after the buffer's last cross-root
+// reader -- tinygrad last_appearance over the linearized schedule
+// (schedule/memory.py:32,44).  No-op on the producing pass (its own
+// boundaries are recorded by emit_kernel_for_boundary) and on any pass that
+// is not the last root reaching a given shared boundary.
+static void xpass_shared_input_plan(void) {
+  if (!shared_free_enabled())      return;
+  if (XPASS_SHARED_TID_LEN == 0)   return;
+  if (BOUNDARY_ORDER_LEN == 0)     return;
+  if (CURRENT_BACKEND == NULL)     return;
+  u64 cap = HEAP_NEXT > 0 ? HEAP_NEXT : 1;
+  u8 *visited = (u8 *)calloc(cap, 1);
+  if (visited == NULL)             return;
+  for (u32 s = 0; s < XPASS_SHARED_TID_LEN; s++) {
+    XPassSharedTid *st = &XPASS_SHARED_TIDS[s];
+    // Only the LAST root reaching the boundary may free it.
+    if (st->last_root != MATERIALIZE_CURRENT_ROOT + 1) continue;
+    if (st->tid == 0) continue;
+    u32 best_depth = 0;
+    int referenced = 0;
+    for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
+      u64 bloc = BOUNDARY_ORDER[bi];
+      u32 binfo = bufferize_info_find(bloc);
+      if (binfo == 0xFFFFFFFFu) continue;
+      memset(visited, 0, cap);
+      if (!boundary_refs_tid_rec(bloc, st->tid, visited, cap)) continue;
+      referenced = 1;
+      u32 d = BOUNDARY_DEPTH[binfo];
+      if (d != BOUNDARY_DEPTH_INVALID && d > best_depth) best_depth = d;
+    }
+    // best_depth 0 means the only reader is itself a sink at depth 0 (or no
+    // reader -- the producing pass).  Recording at 0 would never push (the
+    // mem_plan_push_dead `last_use_depth == 0` sink guard), so skip; the buf
+    // falls back to pool_rollback as before -- no regression, no early free.
+    if (referenced) {
+      // This (last consuming) sub-pass reads the buffer: free it after its
+      // last reader-kernel here (depth-scheduled push).  best_depth 0 ==
+      // only a sink reader -> never push (sink guard); falls back to
+      // pool_rollback (no regression).
+      if (best_depth > 0)
+        mem_plan_record_shared_free(TENS[st->tid].buf_id, best_depth, CURRENT_BACKEND);
+    } else {
+      // Not read by this (last) sub-pass and none after -> already dead;
+      // free immediately so this pass's allocations recycle its storage.
+      mem_plan_push_shared_dead(TENS[st->tid].buf_id, CURRENT_BACKEND);
+    }
+  }
+  free(visited);
+}
+
 // Build one kernel rooted at the boundary at index bi.  Returns
 // the emitted UOP_KERNEL term, or 0 on bail.
 static Term emit_kernel_for_boundary(u32 bi) {
@@ -5718,31 +5962,41 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // this guard requires explicit ASSIGN + DUP-aware lifetime
   // tracking in the planner.
   //
-  // Cross-PASS share guard (the freelist analogue of the arena
-  // planner's xpass_is_shared lifetime extension at arena_compute):
-  // a TAG_CTR bundle is materialized child-by-child, each child a
-  // separate sub-pass with its own mem_plan_reset + per-pass
-  // BUFFERIZE_NODES.consumer_count.  A forward activation reached by
-  // two sibling roots (e.g. an attention output sliced by two shrink
-  // views, one per root) looks single-consumer WITHIN the first
-  // child's sub-pass, so without this guard it gets recorded +
-  // mem_plan_push_dead'd onto the backend freelist; a later same-size
-  // alloc in a SIBLING child's sub-pass then recycles its bytes while
-  // that sibling still reads it through the cached tid (the Metal
-  // multi-root corruption -- arena planner is CPU/CUDA-only, so Metal
-  // had no cross-root protection at all).  xpass_is_shared (the
-  // whole-bundle root walk populated by xpass_cc_populate) is the
-  // cross-pass last_appearance the per-pass consumer_count can't see.
-  // Tinygrad mirror: memory_plan_rewrite excludes held_bufs entirely
-  // (schedule/memory.py _can_plan -> False) and computes
-  // last_appearance over the WHOLE linearized schedule (lines 13-30),
-  // so a buf live across sub-schedules is never freed early.
+  // Cross-PASS share handling (the freelist analogue of the arena planner's
+  // xpass_is_shared lifetime extension at arena_compute).  A TAG_CTR bundle
+  // is materialized child-by-child, each child a SEPARATE sub-pass with its
+  // own mem_plan_reset + per-pass BUFFERIZE_NODES.consumer_count.  A boundary
+  // reached by >= 2 roots (xpass_is_shared, e.g. the attention output two
+  // streams slice with shrink views) looks single-consumer WITHIN the
+  // producing (first) sub-pass.  Recording it with that pass's LOCAL last_use
+  // freelist-pushes it once the producing root's consumer depth passes; a
+  // later same-size alloc in the SAME sub-pass then recycles its bytes while
+  // a SIBLING sub-pass still reads it through the materialized_loc cached tid
+  // -> the Metal multi-root corruption (6cb09420; arena planner is
+  // CPU/CUDA-only, so Metal rode the freelist with no cross-root protection).
+  //
+  // Record the shared boundary with the END-OF-PASS sentinel so
+  // mem_plan_push_dead never frees it WITHIN the producing sub-pass
+  // (MEM_PLAN_LAST_USE_NEVER >= every current_depth this pass reaches),
+  // keeping the cached bytes valid for the sibling.  Stash its tid so the
+  // CONSUMING sub-pass can recycle it after its true last cross-root reader
+  // (xpass_shared_input_plan) -- the earlier guard (6cb09420) suppressed the
+  // record outright, pinning the buffer to end-of-realize pool_rollback and
+  // ballooning peak (the FLUX 5-double-block jetsam on a swap-full host).
+  // Tinygrad mirror: last_appearance spans the whole linearized schedule
+  // (schedule/memory.py:28-32,44 -- close event at last_appearance+1), so a
+  // buf live across sub-schedules is freed exactly after its last real
+  // reader, not pinned to the end.
   if (BOUNDARY_LAST_USE[idx] > 0
-      && BUFFERIZE_NODES[idx].consumer_count == 1
-      && !xpass_is_shared(boundary_loc)) {
-    mem_plan_record(TENS[out_tid].buf_id,
-                    BOUNDARY_LAST_USE[idx],
-                    CURRENT_BACKEND);
+      && BUFFERIZE_NODES[idx].consumer_count == 1) {
+    if (xpass_is_shared(boundary_loc)) {
+      mem_plan_record(TENS[out_tid].buf_id, MEM_PLAN_LAST_USE_NEVER,
+                      CURRENT_BACKEND);
+      xpass_shared_tid_add(out_tid, xpass_last_root(boundary_loc), boundary_loc);
+    } else {
+      mem_plan_record(TENS[out_tid].buf_id, BOUNDARY_LAST_USE[idx],
+                      CURRENT_BACKEND);
+    }
   }
 
   if (getenv("THVM_DUMP_KERNEL_SHAPE")) {
@@ -5938,8 +6192,12 @@ fn Term thvm_materialize(Term term) {
     u32 n = term_ctr_n(term);
     if (n > 256) return term;
     Term children[256];
-    for (u32 i = 0; i < n; i++)
+    u32 saved_root = MATERIALIZE_CURRENT_ROOT;
+    for (u32 i = 0; i < n; i++) {
+      MATERIALIZE_CURRENT_ROOT = i;
       children[i] = thvm_materialize(term_ctr_at(term, i));
+    }
+    MATERIALIZE_CURRENT_ROOT = saved_root;
     return term_new_ctr(term_ext(term), children, n);
   }
   // Compound IC nodes (APP/LAM/SUP/DUP/OP2/MAT/ALO): walk children
@@ -6107,6 +6365,12 @@ fn Term thvm_materialize(Term term) {
   // arena buf.  Mirror: tinygrad/schedule/memory.py memory_plan_rewrite
   // (called inside lower_schedule_item before kernel dispatch).
   arena_compute();
+  // Cross-pass shared-buffer recycle: in the LAST consuming sub-pass of a
+  // TAG_CTR bundle, schedule each shared INPUT buffer (cached by the
+  // producing sub-pass, recorded NEVER there) to be freed after its last
+  // reader-kernel in THIS pass.  Restores the recycling the producing-pass
+  // sentinel withholds, without the early-recycle corruption (6cb09420).
+  xpass_shared_input_plan();
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
     BOUNDARY_TID [i] = 0;
     BOUNDARY_TERM[i] = 0;
