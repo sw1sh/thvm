@@ -340,12 +340,291 @@ static void goal_hn_leftid(Term *l, Term *r) {
   *r = p;
 }
 
+// ---------------------------------------------------------------------------
+// Waldmeister .pr problem-file mode.  A goal argument containing ".pr" is
+// parsed as a WM problem file (tools/baselines/wm_pr/*.pr): SIGNATURE
+// symbols get CTR labels 1..n in declaration order, the ORDERING section
+// supplies the KBO weights + total precedence (the `a > b > c` chain,
+// descending), VARIABLES name the TAG_FVR ids, and EQUATIONS / CONCLUSION
+// are prefix-notation first-order terms.  This runs the byte-same problem
+// wmcli runs, so the CP-selection trace (THVM_ATP_CP_PICK_TRACE) can be
+// aligned position-by-position against `wmcli -a 4` -- see
+// tools/wm_align_sweep/.  Header (signature/ordering) parses before
+// thvm_atp_init so the KboConfig is ready; terms parse afterwards at the
+// goal-dispatch site like every built-in goal (no Term may exist before
+// the engine owns the heap roots).
+
+#include <ctype.h>
+
+#define PR_MAX_SYMS 32u
+#define PR_MAX_VARS 16u
+#define PR_MAX_EQNS 16u
+#define PR_NAME_LEN 64u
+
+typedef struct {
+  char name[PR_NAME_LEN];
+  u32  arity;
+} PrSym;
+
+// User symbols get labels PR_LABEL_BASE.. in declaration order; labels 1
+// and 2 are ATP_RESERVED_LABEL_MIN_CONST / _MIN_CONST2 (the engine's FVI
+// grounding constants, see thvm_atp_init) -- same convention as the WL
+// encoder (encodeAtpTermInit pre-seeds cAtp1/cAtp2 and starts users at 3).
+#define PR_LABEL_BASE 3u
+
+typedef struct {
+  char  path[1024];
+  PrSym syms[PR_MAX_SYMS];
+  u32   n_syms;
+  char  vars[PR_MAX_VARS][PR_NAME_LEN];
+  u32   n_vars;
+  u32   weights[PR_MAX_SYMS + PR_LABEL_BASE];     // by label, label 0 unused
+  u32   precedence[PR_MAX_SYMS + PR_LABEL_BASE];  // by label; higher = greater
+  Term  eq_l[PR_MAX_EQNS], eq_r[PR_MAX_EQNS];
+  u32   n_eqns;
+  Term  goal_l, goal_r;
+} PrProblem;
+
+static void pr_die(const PrProblem *pr, const char *msg, const char *at) {
+  fprintf(stderr, "pr parse error (%s): %s%s%.40s\n",
+          pr->path, msg, (at != NULL) ? " at: " : "", (at != NULL) ? at : "");
+  exit(2);
+}
+
+// Label of `name[0..n)`, or 0 when unknown.
+static u32 pr_sym_find(const PrProblem *pr, const char *s, size_t n) {
+  for (u32 i = 0; i < pr->n_syms; i++) {
+    if (strlen(pr->syms[i].name) == n &&
+        memcmp(pr->syms[i].name, s, n) == 0) {
+      return i + PR_LABEL_BASE;
+    }
+  }
+  return 0u;
+}
+
+static int pr_var_find(const PrProblem *pr, const char *s, size_t n) {
+  for (u32 i = 0; i < pr->n_vars; i++) {
+    if (strlen(pr->vars[i]) == n && memcmp(pr->vars[i], s, n) == 0) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+// `name: ANY ANY -> ANY` -- one symbol declaration; arity = #ANY before ->.
+static void pr_sig_line(PrProblem *pr, const char *body) {
+  const char *colon = strchr(body, ':');
+  if (colon == NULL) return;  // blank continuation
+  const char *a = body;
+  while (isspace((unsigned char)*a)) a++;
+  const char *b = colon;
+  while (b > a && isspace((unsigned char)b[-1])) b--;
+  if (b == a) pr_die(pr, "empty symbol name", body);
+  if (pr->n_syms >= PR_MAX_SYMS) pr_die(pr, "too many symbols", body);
+  PrSym *sy = &pr->syms[pr->n_syms++];
+  size_t n = (size_t)(b - a);
+  if (n >= PR_NAME_LEN) pr_die(pr, "symbol name too long", a);
+  memcpy(sy->name, a, n);
+  sy->name[n] = '\0';
+  const char *arrow = strstr(colon, "->");
+  if (arrow == NULL) pr_die(pr, "signature line without ->", body);
+  u32 ar = 0;
+  for (const char *p = colon + 1; p + 2 < arrow; p++) {
+    if (strncmp(p, "ANY", 3) == 0) { ar++; p += 2; }
+  }
+  sy->arity = ar;
+}
+
+// ORDERING content: "KBO", then `a=1, b=1, ...` weight pairs, then the
+// `a > b > c` precedence chain (symbols in DESCENDING precedence).
+static void pr_ord_line(PrProblem *pr, const char *body) {
+  if (strstr(body, "LPO") != NULL) pr_die(pr, "LPO ordering unsupported", body);
+  int is_chain = (strchr(body, '>') != NULL);
+  int is_weights = !is_chain && (strchr(body, '=') != NULL);
+  if (!is_chain && !is_weights) return;  // the "KBO" line
+  u32 rank = 0;
+  if (is_chain) {
+    // count chain symbols first so the head gets the highest rank;
+    // ranks sit above the reserved labels' 1/2 so the FVI minimal
+    // constant stays precedence-minimal (the WL-encoder layout).
+    for (const char *p = body; *p != '\0'; p++) {
+      if (*p == '>') rank++;
+    }
+    rank += PR_LABEL_BASE;  // n separators = n+1 symbols, base offset
+  }
+  const char *p = body;
+  while (*p != '\0') {
+    while (*p != '\0' && !(isalnum((unsigned char)*p) || *p == '_')) p++;
+    if (*p == '\0') break;
+    size_t n = 0;
+    while (isalnum((unsigned char)p[n]) || p[n] == '_') n++;
+    u32 lab = pr_sym_find(pr, p, n);
+    if (lab == 0u) pr_die(pr, "ORDERING names unknown symbol", p);
+    if (is_weights) {
+      const char *q = p + n;
+      while (*q == ' ') q++;
+      if (*q != '=') pr_die(pr, "expected = in weight pair", p);
+      pr->weights[lab] = (u32)strtoul(q + 1, (char **)&q, 10);
+      p = q;
+    } else {
+      pr->precedence[lab] = rank--;
+      p += n;
+    }
+  }
+}
+
+// `X1, X2, X3: ANY` -- variable names, in declaration order = fv ids.
+static void pr_vars_line(PrProblem *pr, const char *body) {
+  const char *colon = strchr(body, ':');
+  const char *end = (colon != NULL) ? colon : body + strlen(body);
+  const char *p = body;
+  while (p < end) {
+    while (p < end && !(isalnum((unsigned char)*p) || *p == '_')) p++;
+    if (p >= end) break;
+    size_t n = 0;
+    while (isalnum((unsigned char)p[n]) || p[n] == '_') n++;
+    if (pr->n_vars >= PR_MAX_VARS) pr_die(pr, "too many variables", p);
+    if (n >= PR_NAME_LEN) pr_die(pr, "variable name too long", p);
+    memcpy(pr->vars[pr->n_vars], p, n);
+    pr->vars[pr->n_vars][n] = '\0';
+    pr->n_vars++;
+    p += n;
+  }
+}
+
+typedef enum {
+  PR_SEC_NONE, PR_SEC_SIG, PR_SEC_ORD, PR_SEC_VARS,
+  PR_SEC_EQNS, PR_SEC_CONCL, PR_SEC_OTHER,
+} PrSec;
+
+// One pass over the file, dispatching content to `on_line(sec, body)`.
+static void pr_walk(PrProblem *pr,
+                    void (*on_line)(PrProblem *, PrSec, const char *)) {
+  FILE *fp = fopen(pr->path, "r");
+  if (fp == NULL) pr_die(pr, "cannot open file", NULL);
+  char line[8192];
+  PrSec sec = PR_SEC_NONE;
+  while (fgets(line, sizeof line, fp) != NULL) {
+    const char *body = line;
+    if (!isspace((unsigned char)line[0]) && line[0] != '\0') {
+      if      (strncmp(line, "SIGNATURE", 9)  == 0) { sec = PR_SEC_SIG;   body = line + 9; }
+      else if (strncmp(line, "ORDERING", 8)   == 0) { sec = PR_SEC_ORD;   body = line + 8; }
+      else if (strncmp(line, "VARIABLES", 9)  == 0) { sec = PR_SEC_VARS;  body = line + 9; }
+      else if (strncmp(line, "EQUATIONS", 9)  == 0) { sec = PR_SEC_EQNS;  body = line + 9; }
+      else if (strncmp(line, "CONCLUSION", 10) == 0) { sec = PR_SEC_CONCL; body = line + 10; }
+      else { sec = PR_SEC_OTHER; continue; }
+    }
+    on_line(pr, sec, body);
+  }
+  fclose(fp);
+}
+
+static void pr_header_line(PrProblem *pr, PrSec sec, const char *body) {
+  switch (sec) {
+    case PR_SEC_SIG:  pr_sig_line(pr, body);  break;
+    case PR_SEC_ORD:  pr_ord_line(pr, body);  break;
+    case PR_SEC_VARS: pr_vars_line(pr, body); break;
+    default: break;
+  }
+}
+
+// Phase 1 (before thvm_atp_init): signature + ordering + variables.
+static void pr_load_header(const char *path, PrProblem *pr) {
+  memset(pr, 0, sizeof *pr);
+  snprintf(pr->path, sizeof pr->path, "%s", path);
+  pr_walk(pr, pr_header_line);
+  if (pr->n_syms == 0u) pr_die(pr, "no SIGNATURE symbols", NULL);
+  for (u32 i = 0; i < pr->n_syms; i++) {
+    if (pr->weights[i + PR_LABEL_BASE] == 0u) {
+      pr->weights[i + PR_LABEL_BASE] = 1u;  // WM default
+    }
+  }
+  // Reserved FVI constants: KBO weight 1, precedence below every user
+  // symbol (1 < 2 < PR_LABEL_BASE <= user chain ranks).
+  pr->weights[1] = 1u;
+  pr->weights[2] = 1u;
+  pr->precedence[1] = 1u;
+  pr->precedence[2] = 2u;
+}
+
+// Recursive-descent prefix-term parser: `name(arg,arg)` / `name` / var.
+static const char *pr_term(PrProblem *pr, const char *s, Term *out) {
+  while (*s == ' ') s++;
+  size_t n = 0;
+  while (isalnum((unsigned char)s[n]) || s[n] == '_') n++;
+  if (n == 0) pr_die(pr, "expected identifier", s);
+  int v = pr_var_find(pr, s, n);
+  if (v >= 0) {
+    *out = term_new_fvr((u32)v);
+    return s + n;
+  }
+  u32 lab = pr_sym_find(pr, s, n);
+  if (lab == 0u) pr_die(pr, "unknown symbol in term", s);
+  const PrSym *sy = &pr->syms[lab - PR_LABEL_BASE];
+  const char *p = s + n;
+  Term kids[8];
+  u32 k = 0;
+  if (*p == '(') {
+    p++;
+    for (;;) {
+      if (k >= 8u) pr_die(pr, "arity > 8", s);
+      p = pr_term(pr, p, &kids[k]);
+      k++;
+      if (*p == ',') { p++; continue; }
+      if (*p == ')') { p++; break; }
+      pr_die(pr, "expected , or ) in term", p);
+    }
+  }
+  if (k != sy->arity) pr_die(pr, "arity mismatch", s);
+  *out = term_new_ctr(lab, (k > 0u) ? kids : NULL, k);
+  return p;
+}
+
+// `lhs = rhs` -- both sides full terms, nothing but whitespace around them.
+static void pr_eq_line(PrProblem *pr, const char *body, Term *l, Term *r) {
+  const char *eq = strchr(body, '=');
+  if (eq == NULL) pr_die(pr, "equation line without =", body);
+  const char *p = pr_term(pr, body, l);
+  while (*p == ' ') p++;
+  if (p != eq) pr_die(pr, "junk before = in equation", p);
+  p = pr_term(pr, eq + 1, r);
+  while (*p == ' ' || *p == '\n' || *p == '\r') p++;
+  if (*p != '\0') pr_die(pr, "junk after equation", p);
+}
+
+static void pr_terms_line(PrProblem *pr, PrSec sec, const char *body) {
+  const char *p = body;
+  while (isspace((unsigned char)*p)) p++;
+  if (*p == '\0') return;
+  if (sec == PR_SEC_EQNS) {
+    if (pr->n_eqns >= PR_MAX_EQNS) pr_die(pr, "too many equations", body);
+    pr_eq_line(pr, body, &pr->eq_l[pr->n_eqns], &pr->eq_r[pr->n_eqns]);
+    pr->n_eqns++;
+  } else if (sec == PR_SEC_CONCL) {
+    if (pr->goal_l != 0) pr_die(pr, "multiple CONCLUSION lines", body);
+    pr_eq_line(pr, body, &pr->goal_l, &pr->goal_r);
+  }
+}
+
+// Phase 2 (after thvm_atp_init, at the goal-dispatch site): the terms.
+static void pr_load_terms(PrProblem *pr) {
+  pr_walk(pr, pr_terms_line);
+  if (pr->n_eqns == 0u) pr_die(pr, "no EQUATIONS", NULL);
+  if (pr->goal_l == 0)  pr_die(pr, "no CONCLUSION", NULL);
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
   const char *goal = (argc > 1) ? argv[1] : "thm";
   u32    step_cap  = (argc > 2) ? (u32)strtoul(argv[2], NULL, 10) : 200000u;
   double wall_cap  = (argc > 3) ? strtod(argv[3], NULL)          : 120.0;
+
+  // .pr file mode (see PrProblem above): parse the header now so the
+  // KboConfig below carries the file's signature + ordering.
+  static PrProblem prp;
+  int pr_mode = (strstr(goal, ".pr") != NULL);
+  if (pr_mode) pr_load_header(goal, &prp);
 
   // Reduction ordering.  Default KBO (one binary symbol `nand`,
   // weight 1, var weight 1 -- KBO weight is plain symbol count, so a
@@ -388,6 +667,18 @@ int main(int argc, char **argv) {
   const char *lpo_wm_env = getenv("ATP_BENCH_LPO_SKOLEMS_HIGH");
   static LpoConfig lpo = { .precedence = lpo_prec, .n_labels = 7u };
   if (lpo_wm_env != NULL && lpo_wm_env[0] == '1') lpo.precedence = lpo_prec_wm;
+
+  // .pr mode: the file's ORDERING section IS the reduction ordering --
+  // KBO with the declared per-symbol weights and the `>` chain as the
+  // total precedence (all wm_pr files are KBO; pr_ord_line rejects LPO).
+  if (pr_mode) {
+    cfg.weights    = prp.weights;
+    cfg.precedence = prp.precedence;
+    cfg.n_labels   = prp.n_syms + PR_LABEL_BASE;
+    cfg.var_weight = 1u;
+    use_lpo  = 0;
+    use_kbo0 = 0;
+  }
 
   // cpgen mode: generate the critical pairs of the axiom with
   // itself -- the distance-1 lemmas -- in ONE CP-generation call,
@@ -919,7 +1210,12 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (strcmp(goal, "mccune") == 0) {
+  if (pr_mode) {
+    pr_load_terms(&prp);
+    for (u32 e = 0; e < prp.n_eqns; e++) {
+      thvm_atp_add_equation(s, prp.eq_l[e], prp.eq_r[e]);
+    }
+  } else if (strcmp(goal, "mccune") == 0) {
     thvm_atp_add_equation(s, mccune_axiom_lhs(), fv(3));
   } else if (strcmp(goal, "robbins") == 0) {
     Term r_l1, r_r1, r_l2, r_r2, r_l3, r_r3;
@@ -964,7 +1260,8 @@ int main(int argc, char **argv) {
   int saturate = (strcmp(goal, "sat") == 0);
 
   Term gl = 0, gr = 0;
-  if      (strcmp(goal, "cpl1")   == 0) goal_cpl1(&gl, &gr);
+  if (pr_mode) { gl = prp.goal_l; gr = prp.goal_r; }
+  else if (strcmp(goal, "cpl1")   == 0) goal_cpl1(&gl, &gr);
   else if (strcmp(goal, "cpl2")   == 0) goal_cpl2(&gl, &gr);
   else if (strcmp(goal, "subl2")  == 0) goal_subl2(&gl, &gr);
   else if (strcmp(goal, "chain3") == 0) goal_chain(&gl, &gr, 3u);
@@ -1011,6 +1308,15 @@ int main(int argc, char **argv) {
   printf("ordering=%s  step_cap=%u  wall_cap=%.0fs  cp_weight_mode=%u\n",
          use_lpo ? "lpo" : (use_kbo0 ? "kbo0" : "kbo"),
          step_cap, wall_cap, (u32)s->cp_weight_mode);
+  if (pr_mode) {
+    // Label table for trace consumers (tools/wm_align_sweep/align.py
+    // maps CPSEL's C<label> back to the .pr symbol names with these).
+    for (u32 i = 0; i < prp.n_syms; i++) {
+      u32 lab = i + PR_LABEL_BASE;
+      printf("PRSYM %u %s %u w=%u prec=%u\n", lab, prp.syms[i].name,
+             prp.syms[i].arity, prp.weights[lab], prp.precedence[lab]);
+    }
+  }
   if (s->random_modulo > 0u) {
     printf("random_ratio=%u  random_seed=%llu\n",
            s->random_modulo, (unsigned long long)s->rng_state);
