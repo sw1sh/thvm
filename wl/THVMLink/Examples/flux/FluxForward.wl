@@ -24,7 +24,7 @@
        This is bf16-native: w may stay bf16 (no bf16->f32 TUOpCast), which
        halves the weight bytes loaded and skips the per-weight cast pass -- the
        f32 cast was only needed for the old cblas transB view path. --- *)
-fxLinear[x_, w_] := TMatMul[x, TRealize[Transpose[w]]]
+fxLinear[x_, w_] := TRealize[TMatMul[TRealize[x], TRealize[Transpose[w]]]]
 
 (* --- affine-free LayerNorm over the last axis (FLUX block norms use
        elementwise_affine=False; the modulation supplies scale/shift).  This is
