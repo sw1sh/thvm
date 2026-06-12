@@ -900,6 +900,16 @@ int main(int argc, char **argv) {
       // McCune-II sels 96-101 equal-weight tie residual.
       // THVM_ATP_WM_EMISSION_ORDER env overrides.
       thvm_atp_set_use_wm_emission_order(s, 1u);
+      // WM loader-level axiom INTAKE: the spec loader canonically
+      // sorts the initial equation set (SpezNormierung, WASIC/
+      // SpezNormierung.c:758-791) and the `-clas` default
+      // initial=ultimate (RUN/Parameter.c:165-167) stamps every axiom
+      // w1 = MIN_INT / w2 = ++CPNr in SORTED order, so axioms pop
+      // FIRST in canonical-sort FIFO order -- thvm popped them by
+      // computed weight, interleaved with early CPs (the firstdiv 1-3
+      // class of the alignment matrix, 35/43 divergent rows).
+      // THVM_ATP_WM_INTAKE_ORDER env overrides.
+      thvm_atp_set_use_wm_intake_order(s, 1u);
       // Backward subsumption / backward demodulation are NOT in this
       // preset: they are Vampire mechanisms (bs=unit_only / bd=all)
       // with no WM analog.  WM's only backward treatment of existing
@@ -1025,6 +1035,15 @@ int main(int argc, char **argv) {
     const char *eo = getenv("THVM_ATP_WM_EMISSION_ORDER");
     if (eo != NULL && eo[0] != '\0')
       thvm_atp_set_use_wm_emission_order(s, (eo[0] != '0') ? 1u : 0u);
+  }
+
+  // THVM_ATP_WM_INTAKE_ORDER=0/1: independent override of the WM
+  // loader-level axiom canonicalization + initial=ultimate intake
+  // (default OFF engine-wide, ON in the WALDMEISTER preset above).
+  {
+    const char *io = getenv("THVM_ATP_WM_INTAKE_ORDER");
+    if (io != NULL && io[0] != '\0')
+      thvm_atp_set_use_wm_intake_order(s, (io[0] != '0') ? 1u : 0u);
   }
 
   // THVM_ATP_LAZY_NORM=0/1: toggle deferred-selection / lazy normalization

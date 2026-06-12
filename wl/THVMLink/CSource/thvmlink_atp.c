@@ -837,6 +837,16 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // args[40]; 0 = off (default, engine byte-identical).
   mint wm_emission = MArgument_getInteger(args[40]);
   thvm_atp_set_use_wm_emission_order(atp, (u8)(wm_emission != 0));
+  // Method -> {... "WMIntakeOrder" -> True}: Waldmeister loader-level
+  // axiom canonicalization + intake semantics (src/atp/wm_intake.c):
+  // the first step permutes the queued axiom set into WM's canonical
+  // sort order (SpezNormierung, WASIC/SpezNormierung.c:758-791) and
+  // stamps it ultimate (initial=ultimate w1 = MIN_INT, w2 FIFO in
+  // sorted order -- CLAS/NewClassification.c:315-330), so axioms pop
+  // before any derived CP, in WM's order.  args[41]; 0 = off
+  // (default, engine byte-identical).
+  mint wm_intake = MArgument_getInteger(args[41]);
+  thvm_atp_set_use_wm_intake_order(atp, (u8)(wm_intake != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any

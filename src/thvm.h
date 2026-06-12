@@ -4929,6 +4929,23 @@ typedef struct {
   void *wmo;
   u32  n_wmo_rank_misses;
 
+  // Waldmeister loader-level axiom canonicalization + intake
+  // semantics (src/atp/wm_intake.c).  WM's spec loader canonically
+  // SORTS the initial equation set (SpezNormierung: symbol order ->
+  // per-equation side order -> variable renumber -> equation sort,
+  // WASIC/SpezNormierung.c:758-791) and the default classification
+  // `initial=ultimate` (RUN/Parameter.c:165-167) stamps every axiom
+  // w1 = minimalWeight() = INT32_MIN with w2 = ++CPNr in SORTED
+  // order (CLAS/NewClassification.c:315-330), so axioms pop FIRST,
+  // in canonical-sort FIFO order.  When on, the first thvm_atp_step
+  // call permutes the queued axiom slots' cp_seq stamps into that
+  // order and tags them ultimate (wm_intake_done latches the
+  // once-only flush).  Default OFF (engine byte-identical); ON in
+  // the "Waldmeister"* presets via Method "WMIntakeOrder" /
+  // thvm_atp_set_use_wm_intake_order / THVM_ATP_WM_INTAKE_ORDER.
+  u8   use_wm_intake_order;
+  u8   wm_intake_done;
+
   // WM backward ground-joinability sterilization
   // (RueckwaertsGrundzusammenfuehrbarkeit, INF/Hauptkomponenten.c:
   // 260-306, called at the END of ArbeitsAufnahme :329 AFTER CP
@@ -5350,6 +5367,7 @@ fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
 // regardless of heuristic weight (mirrors `initial = ultimate` in the
 // default DEF block, NewClassification.c).  Off = engine byte-identical.
 fn void      thvm_atp_set_use_initial_ultimate(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_wm_intake_order(AtpState *s, u8 on);
 // Waldmeister `database=ultimate` (Parameter.c:166).  When on, CPs
 // derived from rule-database overlap also rank ultimate -- creates
 // the depth-first bias on newly-derived chains that lets WM crack

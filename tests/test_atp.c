@@ -1659,6 +1659,78 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-intake-canonical-sort-pops-first");
+  {
+    // WM loader intake (wm_intake.c): the initial axiom set pops in
+    // SpezNormierung canonical-sort order, before any derived CP,
+    // regardless of computed weight.  Theory:
+    //   A1 (input first):  i(x) = x                   (light)
+    //   A2 (input second): f(f(f(x,e),e),e) = x       (heavy)
+    // Stats: occ_eq f=3, e=3, i=1; canonical symbol order = e (arity
+    // 0) < f < i (occ DESC, then arity ASC) -> pos e=0, f=1, i=2.
+    // LRSortieren swaps BOTH (var rhs < non-var lhs), so the equation
+    // sort compares lhs x vs x (Gleich, equal var ranks) then rhs
+    // i(x) vs f(f(f(x,e),e),e): head positions i=2 > f=1 -> A2 is
+    // Kleiner and pops FIRST despite being the heavier pair.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_intake_order(s, 1u);
+    CHECK(thvm_atp_add_equation(s, mk_i(mk_v(VAR_x)), mk_v(VAR_x)));
+    CHECK(thvm_atp_add_equation(
+        s, mk_f(mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e()), mk_e()),
+        mk_v(VAR_x)));
+    thvm_atp_step(s);
+    CHECK_EQ(s->wm_intake_done, 1u);
+    CHECK_EQ(s->use_initial_ultimate, 1u);   // initial=ultimate stamp
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK_EQ(term_ext(s->lhs[0]), LAB_f);    // A2 first (canonical sort)
+    // Step 2: the remaining axiom (ultimate) pops before every CP
+    // derived from A2's self-overlaps -- WM's MIN_INT floor.
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_rules, 2u);
+    CHECK_EQ(term_ext(s->lhs[1]), LAB_i);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-intake-order-off-roundtrip");
+  {
+    // Flag OFF (engine default): the same axiom set pops by computed
+    // weight -- the light i(x) = x first.  Byte-identical legacy
+    // intake; the canonicalization never runs.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ(s->use_wm_intake_order, 0u);
+    CHECK(thvm_atp_add_equation(s, mk_i(mk_v(VAR_x)), mk_v(VAR_x)));
+    CHECK(thvm_atp_add_equation(
+        s, mk_f(mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e()), mk_e()),
+        mk_v(VAR_x)));
+    thvm_atp_step(s);
+    CHECK_EQ(s->wm_intake_done, 0u);
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK_EQ(term_ext(s->lhs[0]), LAB_i);    // weight order, A1 first
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-intake-ultimate-fifo-not-weight");
+  {
+    // Within the ultimate class the heap key is cp_seq alone (WM
+    // stamps every Act_ultimate CP w1 = INT32_MIN, so (w1, w2)
+    // degenerates to FIFO).  Same axioms in canonical order already
+    // (A2 heavy first by intake restamp); a weight-ordered ultimate
+    // class would pop the light one first -- assert it does not.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_intake_order(s, 1u);
+    // Input order = canonical order (heavy first): the restamp is the
+    // identity permutation, so a pri-ordered comparator would still
+    // pop the LIGHT axiom first.  FIFO-within-ultimate keeps input.
+    CHECK(thvm_atp_add_equation(
+        s, mk_f(mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e()), mk_e()),
+        mk_v(VAR_x)));
+    CHECK(thvm_atp_add_equation(s, mk_i(mk_v(VAR_x)), mk_v(VAR_x)));
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK_EQ(term_ext(s->lhs[0]), LAB_f);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/interreduce-keeps-irreducible-rules");
   {
     // R[0]: i(a) -> i(a)         (degenerate; just to fill a slot)

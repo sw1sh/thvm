@@ -455,6 +455,11 @@ static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t);
 static u64  atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
                          const CriticalPair *cp);
 
+// Waldmeister loader-level axiom canonicalization (src/atp/wm_intake.c,
+// included next to wm_order.c).  Forward declaration so the first
+// thvm_atp_step call can flush the intake before any pop.
+static void atp_wm_intake_canonicalize(AtpState *s);
+
 // Match helper: thvm_match by default; switches to atp_match_ac
 // when THVM_ATP_AC is built AND the engine-global AC mask is non-zero.
 // Used by the ATP-internal hot match sites (atp_ordered_try_top,
@@ -7046,6 +7051,13 @@ static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
       && s->cp_ultimate != NULL) {
     u8 ui = s->cp_ultimate[i], uj = s->cp_ultimate[j];
     if (ui != uj) return ui > uj;
+    // Both ultimate: WM stamps EVERY Act_ultimate CP w1 =
+    // minimalWeight() = INT32_MIN (NewClassification.c:330), so the
+    // (w1, w2) heap key degenerates to w2 alone -- pure FIFO within
+    // the ultimate class.  The computed cp_pri is deliberately
+    // ignored here; for axioms the FIFO stamps carry the canonical
+    // loader-sort order (atp_wm_intake_canonicalize).
+    if (ui) return s->cp_seq[i] < s->cp_seq[j];
   }
   if (s->cp_pri[i] != s->cp_pri[j]) return s->cp_pri[i] < s->cp_pri[j];
   return s->cp_seq[i] < s->cp_seq[j];
@@ -8353,6 +8365,17 @@ fn void thvm_atp_set_use_rule_subsume_drop(AtpState *s, u8 on) {
   s->use_rule_subsume_drop = on ? 1u : 0u;
 }
 
+// Waldmeister loader-level axiom canonicalization + intake semantics
+// (src/atp/wm_intake.c: SpezNormierung canonical sort of the initial
+// equation set + the Initial = Act_ultimate MIN_INT/FIFO stamp).  The
+// flush runs once, at the first thvm_atp_step call, so both intake
+// surfaces (bench .pr loader, WL TFindProof encoder) canonicalize
+// identically.  Off by default; engine byte-identical when off.
+fn void thvm_atp_set_use_wm_intake_order(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wm_intake_order = on ? 1u : 0u;
+}
+
 // Waldmeister `database=ultimate` (NewClassification.c:711, Parameter.c
 // default of `initial=ultimate:database=ultimate`).  When on, derived
 // CPs from rule-database overlap (atp_push_cps_traced) ALSO rank
@@ -8800,6 +8823,14 @@ static Term atp_rewrite_normalize_slice_record(AtpState *s, Term t,
 #endif
 fn AtpStatus thvm_atp_step(AtpState *s) {
   if (s == NULL) return ATP_QUEUE_EMPTY;
+
+  // WM loader intake: before the first pop, permute the queued axiom
+  // set into Waldmeister's canonical sort order and stamp it ultimate
+  // (SpezNormierung + initial=ultimate; see wm_intake.c).
+  if (s->use_wm_intake_order && !s->wm_intake_done) {
+    s->wm_intake_done = 1u;
+    atp_wm_intake_canonicalize(s);
+  }
 
   AtpStatus goal = thvm_atp_goal_check(s);
   if (goal != ATP_RUNNING) return goal;
@@ -14120,6 +14151,11 @@ static u8 atp_eq_is_mono(const AtpState *s, u32 i);
 // order, tops-DFS ranking).  See the file header for the decoded model
 // and waldmeister/sources citations.
 #include "wm_order.c"
+
+// Waldmeister loader-level axiom canonicalization + intake semantics
+// (SpezNormierung canonical sort + initial=ultimate FIFO stamp).  See
+// the file header for the decoded pipeline and citations.
+#include "wm_intake.c"
 
 static u8 atp_eq_is_mono(const AtpState *s, u32 i) {
 #ifdef ATP_VAR_NORM
