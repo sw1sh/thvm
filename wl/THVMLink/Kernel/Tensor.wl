@@ -855,6 +855,59 @@ TTerm /: Dot[a_TTerm ? tensorTermQ, b_TTerm ? tensorTermQ] :=
 TTerm /: ArrayReshape[t_TTerm ? tensorTermQ, shape_List] :=
     TUOpReshape[t, shape]
 
+(* Part[t, specs..]: numpy-style slicing of a TTerm, routed to TUOpShrink
+   (0-indexed half-open ranges) plus a reshape that drops the axes indexed by a
+   bare integer.  Each per-axis spec is All (whole axis), an integer k (1-indexed
+   like WL, or negative from the end; the axis is dropped), or a span a;;b /
+   a;; / ;;b / ;; (1-indexed inclusive, negative-from-end, All = end).  Fewer
+   specs than the rank leave trailing axes whole.  Stepped spans (a;;b;;c) are
+   not supported.  This is what lets slicing read as t[[All, 1;;h, ;;d/2]]
+   instead of a raw TUOpShrink. *)
+partAxisRange[spec_, dim_] := Replace[spec, {
+    All :> {{0, dim}, False},
+    k_Integer :> With[{lo = If[ k < 0, dim + k, k - 1]}, {{lo, lo + 1}, True}],
+    Span[a_, b_, 1] | Span[a_, b_] :> {
+        {Replace[a, {All | 1 -> 0, ai_Integer :> If[ ai < 0, dim + ai, ai - 1]}],
+         Replace[b, {All -> dim, bi_Integer :> If[ bi < 0, dim + bi + 1, bi]}]},
+        False
+    },
+    _ :> (Message[Part::partw, spec, dim]; {{0, dim}, False})
+}]
+
+TTerm /: Part[t_TTerm ? tensorTermQ, specs__] := Module[
+    {shape = tUopShape[t], sp = {specs}, padded, perAxis, ranges, keep, shr},
+    padded = Join[sp, ConstantArray[All, Length[shape] - Length[sp]]];
+    perAxis = MapThread[partAxisRange, {padded, shape}];
+    ranges = perAxis[[All, 1]];
+    keep = ! # & /@ perAxis[[All, 2]];                     (* drop integer-indexed axes *)
+    shr = TUOpShrink[t, ranges];
+    If[ And @@ keep,
+        shr,
+        TUOpReshape[shr, Pick[#2 - #1 & @@@ ranges, keep]]]
+]
+
+(* Concatenate equal-rank TTerms along a 1-indexed axis.  thvm has no CAT
+   opcode, so each operand is placed in its slice of the output via TUOpPad and
+   the slices summed (the headStitch idiom).  This is what TUOpPad/fold-add
+   concatenation should read as. *)
+tCatAxis[xs_List, ax_Integer] := Module[{rank, widths, offsets, total},
+    rank = Length @ tUopShape @ First @ xs;
+    widths = tUopShape[#][[ax]] & /@ xs;
+    offsets = Prepend[Accumulate[Most[widths]], 0];
+    total = Total[widths];
+    pairFold[TUOpAdd, MapThread[
+        {t, off, w} |-> TUOpPad[t, Table[If[ a === ax, {off, total - off - w}, {0, 0}], {a, rank}]],
+        {xs, offsets, widths}]]
+]
+
+(* Join[a, b, ..]: concatenate TTerms along axis 1 (WL's Join level), or along a
+   trailing integer level: Join[a, b, 2] joins on axis 2.  Mirrors WL Join over
+   the lazy graph. *)
+TTerm /: Join[a_TTerm ? tensorTermQ, rest___] := With[{args = {a, rest}},
+    If[ IntegerQ[Last[args]],
+        tCatAxis[Most[args], Last[args]],
+        tCatAxis[args, 1]]]
+
 (* ArrayReduce[Total, t, axes]: SUM-reduce the given 1-indexed axes,
    highest first so the remaining axis indices stay valid as each one
    collapses.  Total[t] / Total[t, axis] above cover the all-axis and
