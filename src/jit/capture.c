@@ -1373,14 +1373,14 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
   // written exactly once and the batched ICB path becomes safe.  Pure-DISPATCH
   // captures only (ASSIGN/GATHER thread buffers through TenDescs, not handled).
   {
-    // Default OFF: the rename is verified correct for simple recycling streams
-    // (the batched ICB then matches per-op bit-for-bit), but the FLUX multi-root
-    // double block (shared joint-attention sub-DAG, concat/slice views) still
-    // replays wrong through the ICB after renaming -- the buffer-write model
-    // here does not yet capture region/view writes.  Opt in with =1 for the
-    // simple recycling case; FLUX keeps the correct per-op path until resolved.
+    // Default ON: the rename clears the buffer-recycling hazard so a viewless
+    // recycling stream replays through the batched ICB (verified bit-identical
+    // to per-op).  Captures that still can't use the ICB -- a strided-view
+    // input needing pre-materialisation (the FLUX double block's concat/slice),
+    // or an ASSIGN/GATHER op -- are caught by the metal_graph_unsafe checks
+    // below and fall to the correct per-op path.  THVM_JIT_GRAPH_RENAME=0 off.
     char const *re = getenv("THVM_JIT_GRAPH_RENAME");
-    int rename_on = (re != NULL && re[0] != '0');   // default off; =1 enables
+    int rename_on = (re == NULL || re[0] != '0');   // default on; =0 disables
     int pure_dispatch = 1;
     for (u32 i = 0; i < c->n_ops; i++) {
       if (c->ops[i].replay_skip) continue;
@@ -1474,6 +1474,32 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
     for (u32 j = i + 1; j < c->n_ops; j++) {
       if (c->ops[j].kind != JIT_OP_DISPATCH || c->ops[j].replay_skip) continue;
       if (c->ops[j].out_buf_id == ob) { c->metal_graph_unsafe = 1; break; }
+    }
+  }
+
+  // Also decline the ICB when any live dispatch has a strided-view input that
+  // the per-op path (metal_dispatch_kernel) PRE-MATERIALISES into a contiguous
+  // temp before the kernel reads it.  The ICB encodes the raw input buffer and
+  // skips that gather, so the kernel would read the strided bytes as contiguous
+  // -> garbage (the FLUX double block's concat/slice views).  Mirror the exact
+  // needs_premat predicate (non-contiguous OR offset OR view-chain, unless the
+  // kernel baked the view via input_chain_composed).  Viewless recycling
+  // streams stay ICB-eligible (the rename above handled their only hazard).
+  for (u32 i = 0; i < c->n_ops && !c->metal_graph_unsafe; i++) {
+    JitCaptureOp *op = &c->ops[i];
+    if (op->kind != JIT_OP_DISPATCH || op->replay_skip) continue;
+    if (op->kid == 0 || op->kid >= KERNELS_NEXT) continue;
+    KernelEntry *ke = &KERNELS[op->kid];
+    for (u32 ii = 0; ii < ke->n_inputs; ii++) {
+      int composed = (ke->input_chain_composed != NULL
+                      && ke->input_chain_composed[ii]);
+      u32 tid = ke->input_tids != NULL ? ke->input_tids[ii] : 0;
+      if (composed || tid == 0 || tid >= TENS_NEXT) continue;
+      TenDesc const *td = &TENS[tid];
+      if (!td->view.contiguous || td->view.offset != 0 || td->nviews != 0) {
+        c->metal_graph_unsafe = 1;
+        break;
+      }
     }
   }
 
