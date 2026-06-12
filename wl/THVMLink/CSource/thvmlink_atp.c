@@ -847,6 +847,18 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // (default, engine byte-identical).
   mint wm_intake = MArgument_getInteger(args[41]);
   thvm_atp_set_use_wm_intake_order(atp, (u8)(wm_intake != 0));
+  // Method -> {... "WMMixmostNF" -> True}: Waldmeister normal-form
+  // STRATEGY `-nf mixmost` (the CLI default, RUN/Parameter.c:418-419;
+  // NF/NFBildung.c:349-377) + the Regelbaum within-position retrieval
+  // order (MO_RegelGefunden, INF/MatchOperationen.c:565-651): local
+  // fixpoint at the reduced position + ancestor ascent instead of a
+  // rescan from the root, exact-symbol-first rule choice when several
+  // patterns match one position.  On non-confluent mid-completion R
+  // this decides generation-time CP join verdicts (the duplicate-CP
+  // multiplicity alignment class).  args[42]; 0 = off (default,
+  // engine byte-identical).
+  mint wm_mixmost = MArgument_getInteger(args[42]);
+  thvm_atp_set_use_wm_mixmost_nf(atp, (u8)(wm_mixmost != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any

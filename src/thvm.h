@@ -4946,6 +4946,24 @@ typedef struct {
   u8   use_wm_intake_order;
   u8   wm_intake_done;
 
+  // Waldmeister normal-form STRATEGY (the `-nf` option, default
+  // "mixmost", RUN/Parameter.c:418-419; NF_Normalform =
+  // NormalformMixMost, NF/NFBildung.c:837-840 = the path-stack walk
+  // NormalformZuRegelnOderGleichungenAufNochmal :349-377): preorder
+  // try-reduce-before-descend with a local fixpoint at each reduced
+  // position, then an ancestor ascent, then resume at the last
+  // reduced position -- never a rescan from the root.  thvm's legacy
+  // FT normalize is WM's "outermost" (BL_NormalformOutermost `goto
+  // root`, :591-613), which reaches DIFFERENT normal forms on a
+  // non-confluent mid-completion R and flipped generation-time CP
+  // joinability verdicts vs WM -- the duplicate-CP multiplicity
+  // divergence class of the alignment matrix (McCune
+  // EqualityOfInverses cp 1893, HigmanNeumann Associativity cp 597).
+  // Default OFF (engine byte-identical); ON in the "Waldmeister"*
+  // presets via Method "WMMixmostNF" /
+  // thvm_atp_set_use_wm_mixmost_nf / THVM_ATP_WM_MIXMOST.
+  u8   use_wm_mixmost_nf;
+
   // WM backward ground-joinability sterilization
   // (RueckwaertsGrundzusammenfuehrbarkeit, INF/Hauptkomponenten.c:
   // 260-306, called at the END of ArbeitsAufnahme :329 AFTER CP
@@ -5368,6 +5386,10 @@ fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
 // default DEF block, NewClassification.c).  Off = engine byte-identical.
 fn void      thvm_atp_set_use_initial_ultimate(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_wm_intake_order(AtpState *s, u8 on);
+// WM normal-form strategy `-nf mixmost` (the CLI default; see
+// AtpState.use_wm_mixmost_nf).  Default OFF = the legacy outermost
+// rescan walk; the "Waldmeister"* presets turn it ON.
+fn void      thvm_atp_set_use_wm_mixmost_nf(AtpState *s, u8 on);
 // Waldmeister `database=ultimate` (Parameter.c:166).  When on, CPs
 // derived from rule-database overlap also rank ultimate -- creates
 // the depth-first bias on newly-derived chains that lets WM crack

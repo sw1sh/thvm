@@ -54,6 +54,15 @@ def expand_pow(s):
 
 WM_VAR_RE = re.compile(r'x(\d+)$')
 
+# Free-variable-instance GROUNDING constants: WM's extra constants
+# (SO_Extrakonstante, printed `const<N>` in the verbose trace) and
+# thvm's reserved labels 1/2 (ATP_RESERVED_LABEL_MIN_CONST/_CONST2 =
+# SO_minimaleKonstante/SO_const2, absent from the PRSYM map) play the
+# same role under different names; canonicalize both to one token so
+# grounded instances align.
+WM_GC_RE = re.compile(r'const\d+$')
+GC_TOKEN = '_gc'
+
 
 def parse_wm_term(s):
     """WM prefix syntax: `and(x1,not(x2))`; variables are x<N>."""
@@ -79,6 +88,8 @@ def parse_wm_term(s):
         m = WM_VAR_RE.match(name)
         if m is not None:
             return ('var', int(m.group(1)))
+        if WM_GC_RE.match(name) is not None:
+            return (GC_TOKEN, ())
         return (name, ())
 
     t = p()
@@ -97,6 +108,8 @@ def parse_thvm_sexpr(s, names):
             return ('var', int(tok[1:]))
         if tok.startswith('C'):
             lab = int(tok[1:])
+            if lab in (1, 2):
+                return (GC_TOKEN, ())
             return (names.get(lab, tok), ())
         raise ValueError('bad thvm atom %r in %r' % (tok, s))
 

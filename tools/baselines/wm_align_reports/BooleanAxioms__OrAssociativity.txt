@@ -1,5 +1,5 @@
-wm=1250 thvm=5083 prefix=96 identical=N firstdiv=97
-note: content-delta wm-only=1 thvm-only=3834; post-axiom nonax-wm=1244 nonax-thvm=5077 nonax-prefix=90; weights-exact
+wm=1250 thvm=4727 prefix=96 identical=N firstdiv=97
+note: content-delta wm-only=1 thvm-only=3478; post-axiom nonax-wm=1244 nonax-thvm=4721 nonax-prefix=90; weights-exact
 
 --- positions 94..106 (1-based) ---
     94 WM   w1=95           and(not(x1),and(not(x1),x2)) # and(not(x1),x2)
@@ -31,53 +31,53 @@ note: content-delta wm-only=1 thvm-only=3834; post-axiom nonax-wm=1244 nonax-thv
 
 --- multiset deltas (first 50 each side) ---
 WM-only   x1  or(or(v1,v2),v3)#or(v1,or(v2,v3))
-thvm-only x103  and(v1,v2)#and(v2,v1)
-thvm-only x298  or(v1,v2)#or(v2,v1)
-thvm-only x26  or(v1,not(or(v2,not(v2))))#v1
+thvm-only x113  and(v1,v2)#and(v2,v1)
+thvm-only x210  or(v1,v2)#or(v2,v1)
+thvm-only x28  or(v1,not(or(v2,not(v2))))#v1
 thvm-only x5  or(not(or(v1,not(v1))),v2)#v2
 thvm-only x38  and(v1,not(and(v2,not(v2))))#v1
 thvm-only x5  and(not(and(v1,not(v1))),v2)#v2
 thvm-only x11  and(v1,or(not(v2),v2))#v1
 thvm-only x1  and(or(not(v1),v1),v2)#v2
 thvm-only x4  or(v1,and(not(v2),v2))#v1
-thvm-only x2  or(or(v1,v2),v1)#or(v1,v2)
-thvm-only x2  and(and(v1,v2),v1)#and(v1,v2)
-thvm-only x86  or(v1,not(v1))#or(v2,not(v2))
-thvm-only x119  and(v1,not(v1))#and(v2,not(v2))
-thvm-only x9  or(not(v1),v1)#or(v2,not(v2))
+thvm-only x60  or(v1,not(v1))#or(v2,not(v2))
+thvm-only x105  and(v1,not(v1))#and(v2,not(v2))
+thvm-only x8  or(not(v1),v1)#or(v2,not(v2))
 thvm-only x1  and(not(v1),v1)#and(v2,not(v2))
 thvm-only x9  and(v1,not(v1))#not(or(v2,not(v2)))
 thvm-only x4  not(v1)#or(not(v1),not(or(v2,not(v2))))
 thvm-only x2  not(and(v1,not(v1)))#or(v2,not(v2))
 thvm-only x5  and(not(v1),not(and(v2,not(v2))))#not(v1)
 thvm-only x1  and(v1,or(or(v2,not(v2)),v3))#or(v1,and(v1,v3))
-thvm-only x93  and(not(v1),v1)#and(v1,not(v1))
-thvm-only x273  or(not(v1),v1)#or(v1,not(v1))
+thvm-only x56  and(not(v1),v1)#and(v1,not(v1))
+thvm-only x240  or(not(v1),v1)#or(v1,not(v1))
 thvm-only x1  and(not(v1),and(v1,v2))#and(v1,not(v1))
 thvm-only x8  or(not(v1),v1)#or(v2,or(not(v1),v1))
-thvm-only x2  or(or(v1,v2),v2)#or(v1,v2)
-thvm-only x26  or(and(v1,v2),v2)#v2
-thvm-only x10  or(and(v1,and(v2,v3)),v3)#v3
-thvm-only x8  or(and(v1,and(v2,v3)),v2)#v2
-thvm-only x2  and(and(v1,v2),v2)#and(v1,v2)
-thvm-only x29  or(and(v1,v2),v1)#v1
+thvm-only x24  or(and(v1,v2),v2)#v2
+thvm-only x8  or(and(v1,and(v2,v3)),v3)#v3
+thvm-only x7  or(and(v1,and(v2,v3)),v2)#v2
+thvm-only x28  or(and(v1,v2),v1)#v1
 thvm-only x1  and(v1,or(v2,or(v3,not(v3))))#or(and(v1,v2),v1)
 thvm-only x2  and(or(v1,v2),and(v3,v2))#and(v3,v2)
-thvm-only x16  and(or(v1,v2),v2)#v2
-thvm-only x2  and(or(v1,or(v2,v3)),v3)#v3
-thvm-only x1  and(or(v1,or(v2,v3)),v2)#v2
+thvm-only x15  and(or(v1,v2),v2)#v2
+thvm-only x1  and(or(v1,or(v2,v3)),v3)#v3
 thvm-only x2  and(or(v1,v2),and(v3,v1))#and(v3,v1)
-thvm-only x21  and(or(v1,v2),v1)#v1
+thvm-only x20  and(or(v1,v2),v1)#v1
 thvm-only x1  and(or(v1,v2),and(v2,v3))#and(v2,v3)
 thvm-only x1  and(or(v1,v2),and(v1,v3))#and(v1,v3)
-thvm-only x17  and(not(or(v1,v2)),v2)#and(v2,not(v2))
-thvm-only x17  and(not(or(v1,v2)),v1)#and(v1,not(v1))
-thvm-only x33  or(not(and(v1,v2)),v2)#or(v2,not(v2))
-thvm-only x33  or(not(and(v1,v2)),v1)#or(v1,not(v1))
+thvm-only x21  and(not(or(v1,v2)),v2)#and(v2,not(v2))
+thvm-only x38  and(not(or(v1,v2)),v1)#and(v1,not(v1))
+thvm-only x35  or(not(and(v1,v2)),v2)#or(v2,not(v2))
+thvm-only x44  or(not(and(v1,v2)),v1)#or(v1,not(v1))
 thvm-only x10  not(v1)#or(and(not(v1),v2),not(v1))
 thvm-only x8  not(v1)#or(and(v2,not(v1)),not(v1))
-thvm-only x10  and(or(not(v1),v2),not(v1))#not(v1)
-thvm-only x7  and(or(v1,not(v2)),not(v2))#not(v2)
-thvm-only x32  and(not(v1),v2)#and(v2,not(v1))
-thvm-only x208  or(not(v1),v2)#or(v2,not(v1))
-thvm-only x7  not(and(v1,not(v1)))#or(not(v1),v1)
+thvm-only x9  and(or(not(v1),v2),not(v1))#not(v1)
+thvm-only x6  and(or(v1,not(v2)),not(v2))#not(v2)
+thvm-only x50  and(not(v1),v2)#and(v2,not(v1))
+thvm-only x183  or(not(v1),v2)#or(v2,not(v1))
+thvm-only x2  not(and(v1,not(v1)))#or(not(v1),v1)
+thvm-only x82  not(and(v1,v2))#not(and(v2,v1))
+thvm-only x12  or(v1,and(v2,v3))#or(v1,and(v3,v2))
+thvm-only x41  not(or(v1,v2))#not(or(v2,v1))
+thvm-only x11  or(not(or(v1,not(v2))),v2)#v2
+thvm-only x11  or(not(or(not(v1),v2)),v1)#v1

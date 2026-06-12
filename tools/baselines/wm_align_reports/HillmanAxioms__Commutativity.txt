@@ -1,5 +1,5 @@
-wm=182 thvm=180 prefix=81 identical=N firstdiv=82
-note: content-delta wm-only=3 thvm-only=1; post-axiom nonax-wm=179 nonax-thvm=177 nonax-prefix=78; weights-exact
+wm=182 thvm=181 prefix=81 identical=N firstdiv=82
+note: content-delta wm-only=2 thvm-only=1; post-axiom nonax-wm=179 nonax-thvm=178 nonax-prefix=78; weights-exact
 
 --- positions 79..91 (1-based) ---
     79 WM   w1=120          opCenterdot(x1,x1) # opCenterdot(opCenterdot(x2,opCenterdot(x2,x2)),x1)
@@ -31,5 +31,4 @@ note: content-delta wm-only=3 thvm-only=1; post-axiom nonax-wm=179 nonax-thvm=17
 
 --- multiset deltas (first 50 each side) ---
 WM-only   x2  opCenterdot(v1,opCenterdot(v2,opCenterdot(v1,v2)))#opCenterdot(v1,v1)
-WM-only   x1  opCenterdot(opCenterdot(v1,opCenterdot(v2,v1)),opCenterdot(v2,v1))#v1
 thvm-only x1  opCenterdot(opCenterdot(v1,opCenterdot(v2,v1)),v2)#opCenterdot(v2,v2)

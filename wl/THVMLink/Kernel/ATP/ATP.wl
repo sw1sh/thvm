@@ -69,7 +69,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"WMEmissionOrder\", \"WMIntakeOrder\", \"BackwardGroundJoin\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"WMEmissionOrder\", \"WMIntakeOrder\", \"WMMixmostNF\", \"BackwardGroundJoin\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 GeneralUtilities`SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -273,6 +273,12 @@ $atpRunProofFn := $atpRunProofFn = load[
         "WMIntakeOrder"; SpezNormierung canonical sort of the initial
         axiom set + the initial=ultimate MIN_INT/FIFO stamp so axioms
         pop first in sorted order -- OFF by default, ON in the
+        "Waldmeister"* presets) *)
+     Integer,
+     (* args[42] = Waldmeister normal-form STRATEGY (Method
+        "WMMixmostNF"; the -nf mixmost default = local fixpoint at the
+        reduced position + ancestor ascent, plus the Regelbaum
+        within-position retrieval order -- OFF by default, ON in the
         "Waldmeister"* presets) *)
      Integer},
     "NumericArray"
@@ -2233,6 +2239,24 @@ atpWmIntakeOrderOpt[o_Association] :=
     Switch[Lookup[o, "WMIntakeOrder", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
+(* "WMMixmostNF" -> True | False: Waldmeister normal-form STRATEGY
+   (src/atp/ft_norm.c).  WM's `-nf` default "mixmost"
+   (RUN/Parameter.c:418-419; NF/NFBildung.c:349-377) re-reduces a
+   reduced position to a LOCAL fixpoint and then re-tries only the
+   ancestors along the path -- never a rescan from the root (thvm's
+   legacy walk = WM's "outermost") -- and the Regelbaum retrieval
+   order (MO_RegelGefunden, INF/MatchOperationen.c:565-651) fires the
+   most-specific pattern when several rules match one position.  On a
+   non-confluent mid-completion R the strategies reach different
+   normal forms, deciding generation-time CP join verdicts -- the
+   duplicate-CP multiplicity alignment class (WM queues a copy thvm
+   joined away: McCune EqualityOfInverses, HigmanNeumann
+   Associativity).  False/Automatic = off (engine byte-identical);
+   True set in the "Waldmeister"* presets. *)
+atpWmMixmostNfOpt[o_Association] :=
+    Switch[Lookup[o, "WMMixmostNF", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+
 (* "BackwardGroundJoin" -> True | False: Waldmeister's -gj backward
    ground-joinability sterilization
    (RueckwaertsGrundzusammenfuehrbarkeit, INF/Hauptkomponenten.c:
@@ -2390,6 +2414,10 @@ $AtpPresetDefaults = <|
            axiom set + the initial=ultimate MIN_INT/FIFO stamp (see
            atpWmIntakeOrderOpt) -- axioms pop first in WM's order. *)
         "WMIntakeOrder" -> True,
+        (* WM normal-form STRATEGY: -nf mixmost local-fixpoint walk +
+           Regelbaum retrieval order (see atpWmMixmostNfOpt) --
+           generation-time join-verdict identity. *)
+        "WMMixmostNF" -> True,
         (* Stays opt-in: the measured flip costs 2.8x steps, +55%
            wall, +17% peak RSS on mccune and 2.13x peak RSS on
            AndAssoc -- see atpImplicitCpOpt. *)
@@ -2423,6 +2451,10 @@ $AtpPresetDefaults = <|
            axiom set + the initial=ultimate MIN_INT/FIFO stamp (see
            atpWmIntakeOrderOpt) -- axioms pop first in WM's order. *)
         "WMIntakeOrder" -> True,
+        (* WM normal-form STRATEGY: -nf mixmost local-fixpoint walk +
+           Regelbaum retrieval order (see atpWmMixmostNfOpt) --
+           generation-time join-verdict identity. *)
+        "WMMixmostNF" -> True,
         "FreeVarInstance" -> True,
         (* Stays opt-in for the same measured regressions as the
            "Waldmeister" entry; FVI differs only in FreeVarInstance
@@ -2447,6 +2479,10 @@ $AtpPresetDefaults = <|
            axiom set + the initial=ultimate MIN_INT/FIFO stamp (see
            atpWmIntakeOrderOpt) -- axioms pop first in WM's order. *)
         "WMIntakeOrder" -> True,
+        (* WM normal-form STRATEGY: -nf mixmost local-fixpoint walk +
+           Regelbaum retrieval order (see atpWmMixmostNfOpt) --
+           generation-time join-verdict identity. *)
+        "WMMixmostNF" -> True,
         "UnfailingCP" -> True, "RHSInterreduce" -> True|>,
     "VampireUEQ" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
@@ -2573,7 +2609,8 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpFreeVarInstanceOpt[o], atpImplicitCpOpt[o], atpWmDemoteOpt[o],
          atpOrphanMurderOpt[o], atpPopSubsumeOpt[o], atpESetSubsumeOpt[o],
          atpBwdGroundJoinOpt[o], atpQueueSubsumeOpt[o],
-         atpWmEmissionOrderOpt[o], atpWmIntakeOrderOpt[o]}
+         atpWmEmissionOrderOpt[o], atpWmIntakeOrderOpt[o],
+         atpWmMixmostNfOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];

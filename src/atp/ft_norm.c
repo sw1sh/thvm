@@ -229,6 +229,257 @@ static inline int ft_match_maybe_ac(AtpFt *a,
   return ft_match(pat, subj, subst);
 }
 
+// WM Regelbaum/Gleichungsbaum retrieval order (MO_RegelGefunden,
+// INF/MatchOperationen.c:565-651): the DFS over the shared
+// discrimination tree tries, at every node, the EXACT function-symbol
+// edge first (tryFct :600-606), then the NEW-variable edge (tryNVar
+// :607-612), then the already-bound variable edges in ascending
+// symbol code = DESCENDING variable index (tryOVar1 :614-625), with
+// full backtracking (:626-632).  The first leaf reached is therefore
+// the lexicographic minimum over the canonically var-renumbered flat
+// pattern strings under the per-entry rank
+//     exact symbol (0) < first variable occurrence (1)
+//                      < repeated variable (2; newer variable first),
+// restricted to the patterns that match the subject.  Among matching
+// candidates the aligned common prefix is entry-identical, so a
+// pairwise first-divergence comparator computes exactly the DFS
+// winner.  Returns 1 iff pattern `a` strictly precedes pattern `b`.
+// Alpha-identical patterns return 0 both ways; the caller's tie-break
+// (newest slot wins) mirrors the leaf chain order (DSBaumOperationen
+// insert-at-head, newest first).
+static int ft_wm_pattern_before(const AtpFtCell *a, const AtpFtCell *b) {
+  u16 map_a[ATPFT_MAX_VARS], map_b[ATPFT_MAX_VARS];
+  memset(map_a, 0xff, sizeof(map_a));
+  memset(map_b, 0xff, sizeof(map_b));
+  u16 na = 0u, nb = 0u;
+  const AtpFtCell *ea = (a->end != NULL) ? a->end->next : NULL;
+  const AtpFtCell *eb = (b->end != NULL) ? b->end->next : NULL;
+  const AtpFtCell *pa = a;
+  const AtpFtCell *pb = b;
+  while (pa != NULL && pa != ea && pb != NULL && pb != eb) {
+    u8  va = (u8)((pa->sym & WF_VAR_BIT) != 0u);
+    u8  vb = (u8)((pb->sym & WF_VAR_BIT) != 0u);
+    u32 ra = 0u, rb = 0u;   // entry rank
+    u16 ia = 0u, ib = 0u;   // canonical var index (rank 2 only)
+    if (va) {
+      u32 id = pa->sym & ~WF_VAR_BIT;
+      if (id >= ATPFT_MAX_VARS) return 0;   // defensive: incomparable
+      if (map_a[id] == 0xffffu) { map_a[id] = na++; ra = 1u; }
+      else                      { ia = map_a[id]; ra = 2u; }
+    }
+    if (vb) {
+      u32 id = pb->sym & ~WF_VAR_BIT;
+      if (id >= ATPFT_MAX_VARS) return 0;
+      if (map_b[id] == 0xffffu) { map_b[id] = nb++; rb = 1u; }
+      else                      { ib = map_b[id]; rb = 2u; }
+    }
+    if (ra != rb) return ra < rb;
+    if (ra == 0u && pa->sym != pb->sym) {
+      // Two distinct exact symbols on an identical aligned prefix
+      // cannot both match one subject; order by code for totality.
+      return pa->sym < pb->sym;
+    }
+    if (ra == 2u && ia != ib) return ia > ib;   // newer variable first
+    pa = pa->next;
+    pb = pb->next;
+  }
+  return 0;
+}
+
+// Per-cell redex attempt -- the body shared by the legacy pre-order
+// scan (find_redex_ft) and the WM mixmost walk
+// (atp_normalize_mixmost_ft).  Tries every live oriented rule in the
+// slice AT cell `p`, then (try_unorient) every unorientable equation
+// under the ordered grounded-instance gate.  Fills subst/rule/dir on
+// hit; never inspects other cells.  Variable cells never match.
+//
+// Rule choice when SEVERAL patterns match at the cell: the default
+// engine keeps first-match-wins in slice order (the historic
+// behaviour).  Under use_wm_mixmost_nf the winner is WM's -- the
+// Regelbaum DFS minimum per ft_wm_pattern_before, newest slot on
+// alpha-identical ties -- because on a non-confluent mid-completion R
+// different matching rules at the SAME position reach different
+// normal forms (HigmanNeumann Associativity cp 597: fop(x1,fop(x2,x2))
+// ->x1 keeps the shared variable and joins the CP, WM's more-specific
+// fop(fop(x1,x1),fop(x2,x3))->fop(x3,x2) keeps it distinct and queues
+// it).
+static int ft_cell_try_rules(AtpState   *s,
+                             AtpFtCell  *p,
+                             u32         slice_first,
+                             u32         slice_end,
+                             u8          try_orient,
+                             u8          try_unorient,
+                             AtpFtSubst *subst_buf,
+                             u32        *rule_out,
+                             u8         *dir_out) {
+  // A free var is never a redex on the subject side.
+  if ((p->sym & WF_VAR_BIT) != 0u) return 0;
+  u8 have_unorient = (u8)(s->n_unorient > 0u);
+  // Arena handle for the AC-match dispatch (AC-chain bindings allocate
+  // into the scratch arena).  NULL-safe: the dispatch only deref's it
+  // when the AC path actually fires.
+  AtpFt *ft_arena_local = (AtpFt *)s->ft_arena_ptr;
+  // WM per-position redex priority (BL_RegelOderGleichungAngewendet,
+  // NF/NFBildung.c:503-531, and the path-based NFB_ variant :219-238
+  // that the CLI default `-nf mixmost` installs): at every position
+  // the rule tree (Regelbaum) is consulted BEFORE the equation tree
+  // (Gleichungsbaum) -- an unorientable equation fires at this cell
+  // only when NO oriented rule matches here.  Pass 1: oriented rules
+  // in slice order (first match wins), or in Regelbaum DFS order
+  // under use_wm_mixmost_nf (see ft_wm_pattern_before).
+  if (try_orient) {
+    u32 best_rule = (u32)-1;
+    for (u32 r = slice_first; r < slice_end; r++) {
+      // Filter dead (bwd-subsumed) rules first: their lhs_ft/rhs_ft are
+      // overwritten with a sentinel FVR (id 255) at deletion time, which
+      // an unorientable backward-direction match could spuriously bind.
+      // The Term-side indexed paths (atp_ri_rebuild) skip them; mirror
+      // that here so the linear FT scan agrees.
+      if (s->r_dead != NULL && s->r_dead[r]) continue;
+      AtpFtCell *lhs = s->lhs_ft[r];
+      if (lhs == NULL || s->rhs_ft[r] == NULL) continue;
+      if (have_unorient && !s->r_orient[r]) continue;
+      // Forward rewrite, no order check needed (oriented).
+      ft_subst_reset(subst_buf);
+      if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
+        if (!s->use_wm_mixmost_nf) {
+          *rule_out = r;
+          *dir_out  = 0u;
+          return 1;
+        }
+        // Ascending slot scan + "cand wins unless best strictly
+        // precedes it" = DFS minimum with newest-slot tie-break.
+        if (best_rule == (u32)-1 ||
+            !ft_wm_pattern_before(s->lhs_ft[best_rule], lhs)) {
+          best_rule = r;
+        }
+      }
+    }
+    if (best_rule != (u32)-1) {
+      // Re-match the winner: subst_buf was overwritten by later
+      // attempts during the scan.
+      ft_subst_reset(subst_buf);
+      if (ft_match_maybe_ac(ft_arena_local, s->lhs_ft[best_rule], p,
+                            subst_buf)) {
+        *rule_out = best_rule;
+        *dir_out  = 0u;
+        return 1;
+      }
+    }
+  }
+  // Pass 2: unorientable equations -- reached only when no oriented
+  // rule matched at this cell.  Same retrieval-order convention as
+  // pass 1 (Gleichungsbaum = the same DSBaum machinery,
+  // MO_GleichungGefunden): first passing candidate in slice order by
+  // default, DFS minimum over the MATCHED face's pattern under
+  // use_wm_mixmost_nf.
+  if (try_unorient && have_unorient) {
+    u32 best_rule = (u32)-1;
+    u8  best_dir  = 0u;
+    // Lazy redex pre-encode: thvm_kbo_ft_subst encodes both sides on
+    // every call; we attempt up to `slice_count` equations at this
+    // cell, each running the unorient gate with the SAME redex `p`.
+    // Pre-encode once, reuse across attempts.  redex_na==0 means
+    // "not yet encoded"; the FIRST gate call lazily fills it.
+    u32 redex_na = 0u;
+    for (u32 r = slice_first; r < slice_end; r++) {
+      if (s->r_dead != NULL && s->r_dead[r]) continue;
+      AtpFtCell *lhs = s->lhs_ft[r];
+      AtpFtCell *rhs = s->rhs_ft[r];
+      if (lhs == NULL || rhs == NULL) continue;
+      if (s->r_orient[r]) continue;
+      // Unorientable equation: try forward (l -> r) then backward (r -> l).
+      // Forward: lhs matches p; rhs vars NOT bound by the lhs match
+      // (extension variables) are grounded to the minimal constant --
+      // ft_subst_ground_extras, the WM free-variable instance;
+      // instantiated repl < redex under the reduction order.  Streaming
+      // KBO via thvm_kbo_ft_subst_with_prepared; THVM_ATPFT_KBO_DIFF=1
+      // runs a side-by-side Term-side atp_compare to surface verdict
+      // divergences (a probe across the AC bench found zero -- the
+      // streaming KBO matches atp_compare on the unorient gate inputs).
+      ft_subst_reset(subst_buf);
+      if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
+        if (ft_subst_ground_extras(s, rhs, subst_buf)) {
+          if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
+          KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
+          static int dbg_diff = -1;
+          if (dbg_diff < 0) dbg_diff = getenv("THVM_ATPFT_KBO_DIFF") != NULL ? 1 : 0;
+          if (dbg_diff) {
+            AtpFt *arena_chk = (AtpFt *)s->ft_arena_ptr;
+            AtpFtCell *repl = ft_subst_apply(arena_chk, rhs, subst_buf, 1);
+            if (repl != NULL) {
+              Term t_p    = ft_to_term(p);
+              Term t_repl = ft_to_term(repl);
+              KboCmp tt_v = atp_compare(s, t_p, t_repl);
+              if (ft_v != tt_v) {
+                fprintf(stderr,
+                        "[KBO DIFF fwd] ft=%d tt=%d  p=0x%016llx  sigma_r=0x%016llx\n",
+                        (int)ft_v, (int)tt_v,
+                        (unsigned long long)t_p,
+                        (unsigned long long)t_repl);
+              }
+            }
+          }
+          if (ft_v == KBO_GT) {
+            if (!s->use_wm_mixmost_nf) {
+              *rule_out = r;
+              *dir_out  = 0u;
+              return 1;
+            }
+            if (best_rule == (u32)-1 ||
+                !ft_wm_pattern_before(
+                    (best_dir == 0u) ? s->lhs_ft[best_rule]
+                                     : s->rhs_ft[best_rule], lhs)) {
+              best_rule = r;
+              best_dir  = 0u;
+            }
+          }
+        }
+        ft_subst_reset(subst_buf);
+      }
+      // Backward: same gates with l/r swapped.
+      ft_subst_reset(subst_buf);
+      if (ft_match_maybe_ac(ft_arena_local, rhs, p, subst_buf)) {
+        if (ft_subst_ground_extras(s, lhs, subst_buf)) {
+          if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
+          KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
+          if (ft_v == KBO_GT) {
+            if (!s->use_wm_mixmost_nf) {
+              *rule_out = r;
+              *dir_out  = 1u;
+              return 1;
+            }
+            if (best_rule == (u32)-1 ||
+                !ft_wm_pattern_before(
+                    (best_dir == 0u) ? s->lhs_ft[best_rule]
+                                     : s->rhs_ft[best_rule], rhs)) {
+              best_rule = r;
+              best_dir  = 1u;
+            }
+          }
+        }
+        ft_subst_reset(subst_buf);
+      }
+    }
+    if (best_rule != (u32)-1) {
+      // Re-derive the winner's substitution (match + grounded extras);
+      // the gate verdict already passed during the scan.
+      AtpFtCell *pat = (best_dir == 0u) ? s->lhs_ft[best_rule]
+                                        : s->rhs_ft[best_rule];
+      AtpFtCell *tpl = (best_dir == 0u) ? s->rhs_ft[best_rule]
+                                        : s->lhs_ft[best_rule];
+      ft_subst_reset(subst_buf);
+      if (ft_match_maybe_ac(ft_arena_local, pat, p, subst_buf) &&
+          ft_subst_ground_extras(s, tpl, subst_buf)) {
+        *rule_out = best_rule;
+        *dir_out  = best_dir;
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
 static int find_redex_ft(AtpState        *s,
                          AtpFtCell       *root,
                          u32              slice_first,
@@ -242,131 +493,227 @@ static int find_redex_ft(AtpState        *s,
                          u8               try_unorient) {
   AtpFtCell *end_after = (root->end != NULL) ? root->end->next : NULL;
   AtpFtCell *prev = NULL;
-  u8 have_unorient = (u8)(s->n_unorient > 0u);
   u32 slice_end = slice_first + slice_count;
   if (slice_end > s->n_rules) slice_end = s->n_rules;
-  // Arena handle for the AC-match dispatch (AC-chain bindings allocate
-  // into the scratch arena).  NULL-safe: the dispatch only deref's it
-  // when the AC path actually fires.
-  AtpFt *ft_arena_local = (AtpFt *)s->ft_arena_ptr;
   for (AtpFtCell *p = root; p != NULL && p != end_after; p = p->next) {
     if ((p->flags & ATPFT_FLAG_SUBST_FRESH) != 0u) {
       prev = p;
       continue;
     }
-    // Skip variable cells -- a free var is never a redex on the
-    // subject side.
-    if ((p->sym & WF_VAR_BIT) != 0u) {
-      prev = p;
-      continue;
-    }
-    // WM per-position redex priority (BL_RegelOderGleichungAngewendet,
-    // NF/NFBildung.c:503-531, and the path-based NFB_ variant :219-238
-    // that the CLI default `-nf mixmost` installs): at every position
-    // the rule tree (Regelbaum) is consulted BEFORE the equation tree
-    // (Gleichungsbaum) -- an unorientable equation fires at this cell
-    // only when NO oriented rule matches here.  Pass 1: oriented rules
-    // in slice order.
-    if (try_orient) {
-      for (u32 r = slice_first; r < slice_end; r++) {
-        // Filter dead (bwd-subsumed) rules first: their lhs_ft/rhs_ft are
-        // overwritten with a sentinel FVR (id 255) at deletion time, which
-        // an unorientable backward-direction match could spuriously bind.
-        // The Term-side indexed paths (atp_ri_rebuild) skip them; mirror
-        // that here so the linear FT scan agrees.
-        if (s->r_dead != NULL && s->r_dead[r]) continue;
-        AtpFtCell *lhs = s->lhs_ft[r];
-        if (lhs == NULL || s->rhs_ft[r] == NULL) continue;
-        if (have_unorient && !s->r_orient[r]) continue;
-        // Forward rewrite, no order check needed (oriented).
-        ft_subst_reset(subst_buf);
-        if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
-          *parent_out = (p == root) ? NULL : prev;
-          *redex_out  = p;
-          *rule_out   = r;
-          *dir_out    = 0u;
-          return 1;
-        }
-      }
-    }
-    // Pass 2: unorientable equations -- reached only when no oriented
-    // rule matched at this cell.
-    if (try_unorient && have_unorient) {
-      // Lazy redex pre-encode: thvm_kbo_ft_subst encodes both sides on
-      // every call; we attempt up to `slice_count` equations at this
-      // cell, each running the unorient gate with the SAME redex `p`.
-      // Pre-encode once, reuse across attempts.  redex_na==0 means
-      // "not yet encoded"; the FIRST gate call lazily fills it.
-      u32 redex_na = 0u;
-      for (u32 r = slice_first; r < slice_end; r++) {
-        if (s->r_dead != NULL && s->r_dead[r]) continue;
-        AtpFtCell *lhs = s->lhs_ft[r];
-        AtpFtCell *rhs = s->rhs_ft[r];
-        if (lhs == NULL || rhs == NULL) continue;
-        if (s->r_orient[r]) continue;
-        // Unorientable equation: try forward (l -> r) then backward (r -> l).
-        // Forward: lhs matches p; rhs vars NOT bound by the lhs match
-        // (extension variables) are grounded to the minimal constant --
-        // ft_subst_ground_extras, the WM free-variable instance;
-        // instantiated repl < redex under the reduction order.  Streaming
-        // KBO via thvm_kbo_ft_subst_with_prepared; THVM_ATPFT_KBO_DIFF=1
-        // runs a side-by-side Term-side atp_compare to surface verdict
-        // divergences (a probe across the AC bench found zero -- the
-        // streaming KBO matches atp_compare on the unorient gate inputs).
-        ft_subst_reset(subst_buf);
-        if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
-          if (ft_subst_ground_extras(s, rhs, subst_buf)) {
-            if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
-            KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
-            static int dbg_diff = -1;
-            if (dbg_diff < 0) dbg_diff = getenv("THVM_ATPFT_KBO_DIFF") != NULL ? 1 : 0;
-            if (dbg_diff) {
-              AtpFt *arena_chk = (AtpFt *)s->ft_arena_ptr;
-              AtpFtCell *repl = ft_subst_apply(arena_chk, rhs, subst_buf, 1);
-              if (repl != NULL) {
-                Term t_p    = ft_to_term(p);
-                Term t_repl = ft_to_term(repl);
-                KboCmp tt_v = atp_compare(s, t_p, t_repl);
-                if (ft_v != tt_v) {
-                  fprintf(stderr,
-                          "[KBO DIFF fwd] ft=%d tt=%d  p=0x%016llx  sigma_r=0x%016llx\n",
-                          (int)ft_v, (int)tt_v,
-                          (unsigned long long)t_p,
-                          (unsigned long long)t_repl);
-                }
-              }
-            }
-            if (ft_v == KBO_GT) {
-              *parent_out = (p == root) ? NULL : prev;
-              *redex_out  = p;
-              *rule_out   = r;
-              *dir_out    = 0u;
-              return 1;
-            }
-          }
-          ft_subst_reset(subst_buf);
-        }
-        // Backward: same gates with l/r swapped.
-        ft_subst_reset(subst_buf);
-        if (ft_match_maybe_ac(ft_arena_local, rhs, p, subst_buf)) {
-          if (ft_subst_ground_extras(s, lhs, subst_buf)) {
-            if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
-            KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
-            if (ft_v == KBO_GT) {
-              *parent_out = (p == root) ? NULL : prev;
-              *redex_out  = p;
-              *rule_out   = r;
-              *dir_out    = 1u;
-              return 1;
-            }
-          }
-          ft_subst_reset(subst_buf);
-        }
-      }
+    if (ft_cell_try_rules(s, p, slice_first, slice_end,
+                          try_orient, try_unorient,
+                          subst_buf, rule_out, dir_out)) {
+      *parent_out = (p == root) ? NULL : prev;
+      *redex_out  = p;
+      return 1;
     }
     prev = p;
   }
   return 0;
+}
+
+// --- WM mixmost normalization strategy --------------------------------
+//
+// Port of Waldmeister's DEFAULT normal-form strategy `-nf mixmost`
+// (RUN/Parameter.c:418-419 DefaultInfoString "mixmost"; NF_Normalform =
+// NormalformMixMost, NF/NFBildung.c:837-840 -> :637-643, which is
+// NormalformZuRegelnOderGleichungenAufNochmal :349-377 verbatim).  The
+// discipline, decoded from the Pfad (path-stack) machinery
+// (NFB_PfadEinsWeiterSetzen :141-211, WeiterInVO :289-300,
+// AlleAufsteigenBisReduziertOderStop :334-347,
+// NFB_RegelOderGleichungAngewendet :219-238):
+//
+//   1. Reduce the ROOT to a local fixpoint.
+//   2. Walk the term in PREORDER (try-reduce at a node BEFORE
+//      descending into it).  On a successful reduction at the current
+//      position:
+//        a. re-reduce the SAME position to a local fixpoint (the new
+//           subterm's root only -- not its insides),
+//        b. ASCEND: try each ancestor along the path, deepest first up
+//           to the root; if one reduces, fixpoint it and restart the
+//           ascent from there,
+//        c. resume the preorder walk at the LAST reduced position
+//           (its children count was reset by the reduction, so the
+//           changed area is re-walked; already-visited siblings of
+//           ancestors are NOT revisited).
+//
+// The legacy thvm loop (find_redex_ft re-scan from the root after
+// every splice) is WM's `-nf outermost` (BL_NormalformOutermost
+// :591-613, `goto root`).  On a NON-CONFLUENT mid-completion R the two
+// strategies reach DIFFERENT normal forms: outermost sees a root redex
+// that a local reduction at the deeper position would have destroyed,
+// mixmost performs the local reduction first.  That flipped
+// generation-time joinability verdicts vs WM (KPBehandelt treats with
+// NF_Normalform2 = the same strategy pointer) -- WM queued a CP copy
+// thvm joined away (McCune EqualityOfInverses cp 1893, HigmanNeumann
+// Associativity cp 597), the duplicate-CP multiplicity divergence
+// class of the alignment matrix.
+//
+// WM's NFPfad entries map 1:1 onto AtpFtCell chains (WM terms ARE
+// flatterms): Stelle = the subterm's head cell, EinfuegePunkt = the
+// cell physically BEFORE the current child in the preorder chain
+// (TO_Schwanz = ->next, TO_TermEnde = ->end),
+// AnzNochZuBehandelnderTeilterme = children not yet visited.
+//
+// Gated by AtpState.use_wm_mixmost_nf (Method "WMMixmostNF" /
+// THVM_ATP_WM_MIXMOST): default OFF keeps the legacy walk
+// byte-identical; ON in the Waldmeister* presets + the bench WM
+// preset.
+typedef struct {
+  AtpFtCell *cell;   // WM Stelle: head cell of this path position
+  AtpFtCell *ins;    // WM EinfuegePunkt: cell before the current child
+  u32        left;   // WM AnzNochZuBehandelnderTeilterme
+} FtNfPathEnt;
+
+static int ft_find_position(AtpFtCell *root, AtpFtCell *target,
+                            u8 *pos, u8 *pos_len);
+
+static inline u32 ft_cell_arity(const AtpFtCell *c) {
+  return ((c->sym & WF_VAR_BIT) != 0u) ? 0u : (u32)c->arity;
+}
+
+typedef struct {
+  AtpState    *s;
+  AtpFt       *arena;
+  AtpFtCell   *root;
+  FtNfPathEnt *st;
+  u32          cap;        // allocated stack entries
+  u32          depth;      // current path position (index into st)
+  u32          slice_first, slice_end;
+  u8           doE;
+  u32          budget;     // remaining rewrites (caller step_cap)
+  int          record;
+  Term         eq_other;
+  u8           side;
+  u32         *chain_tail;
+  AtpFtSubst  *subst;
+} FtMixmost;
+
+// WM NFB_RegelOderGleichungAngewendet: one reduction attempt at the
+// CURRENT path position.  On success the position's entry is re-seated
+// on the new subterm (Stelle = TO_Schwanz(EinfuegePunkt) for depth>0,
+// the patched-in-place root otherwise) with a fresh child count --
+// exactly :226-231.  Budget-exhausted calls report "no redex" so every
+// enclosing loop unwinds and the caller returns the partial form (the
+// legacy path's cap semantics).
+static int ft_mixmost_reduce_here(FtMixmost *m) {
+  if (m->budget == 0u) return 0;
+  FtNfPathEnt *e = &m->st[m->depth];
+  u32 rule = 0u;
+  u8  dir  = 0u;
+  if (!ft_cell_try_rules(m->s, e->cell, m->slice_first, m->slice_end,
+                         /*try_orient=*/1u,
+                         (u8)(m->doE && m->s->n_unorient > 0u),
+                         m->subst, &rule, &dir)) {
+    return 0;
+  }
+  u8  pos[ATP_PROOF_MAX_DEPTH];
+  u8  pos_len  = 0u;
+  int have_pos = 0;
+  if (m->record) {
+    have_pos = ft_find_position(m->root, e->cell, pos, &pos_len);
+  }
+  AtpFtCell *parent   = (m->depth == 0u) ? NULL : m->st[m->depth - 1u].ins;
+  AtpFtCell *rhs_tmpl = (dir == 0u) ? m->s->rhs_ft[rule]
+                                    : m->s->lhs_ft[rule];
+  AtpFtCell *new_root = ft_splice(m->arena, m->root, parent, e->cell,
+                                  rhs_tmpl, m->subst);
+  if (new_root == NULL) return 0;   // defensive: ft_splice returns the root
+  m->budget--;
+  m->root = new_root;
+  m->st[0].cell = m->root;
+  e->cell = (m->depth == 0u) ? m->root : parent->next;
+  e->left = ft_cell_arity(e->cell);
+  e->ins  = NULL;
+  if (m->record) {
+    Term step_term = ft_to_term(m->root);
+    u8  fwd        = (dir == 0u) ? 1u : 0u;
+    u32 rule_trace = (rule < m->s->n_rules) ? m->s->r_trace[rule]
+                                            : ATP_TRACE_NONE;
+    Term step_lhs = (m->side == 0u) ? step_term : m->eq_other;
+    Term step_rhs = (m->side == 0u) ? m->eq_other : step_term;
+    if (!have_pos) pos_len = 0u;
+    u32 ti = atp_trace_push_norm_step(m->s, *m->chain_tail, rule_trace,
+                                      step_lhs, step_rhs, m->side, fwd,
+                                      pos, pos_len);
+    if (ti != ATP_TRACE_NONE) *m->chain_tail = ti;
+  }
+  return 1;
+}
+
+static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
+                                           u32 slice_first, u32 slice_end,
+                                           u32 step_cap, u8 doE,
+                                           int record, Term eq_other,
+                                           u8 side, u32 *chain_tail,
+                                           AtpFtSubst *subst) {
+  FtNfPathEnt st_fixed[64];
+  FtMixmost m = {
+    .s = s, .arena = (AtpFt *)s->ft_arena_ptr, .root = t,
+    .st = st_fixed, .cap = 64u, .depth = 0u,
+    .slice_first = slice_first, .slice_end = slice_end,
+    .doE = doE, .budget = step_cap, .record = record,
+    .eq_other = eq_other, .side = side, .chain_tail = chain_tail,
+    .subst = subst,
+  };
+  FtNfPathEnt *heap_st = NULL;
+  m.st[0].cell = t;
+  m.st[0].ins  = NULL;
+  m.st[0].left = ft_cell_arity(t);
+  // Root fixpoint (the loop before WeiterInVO, NFBildung.c:355).
+  while (ft_mixmost_reduce_here(&m)) {}
+  for (;;) {
+    if (m.budget == 0u) break;
+    // WeiterInVO (:289-300): ascend past exhausted positions, then
+    // step to the next unvisited child (PfadEinsWeiterSetzen).
+    while (m.st[m.depth].left == 0u) {
+      if (m.depth == 0u) goto done;
+      m.depth--;
+    }
+    if (m.depth + 1u >= m.cap) {
+      // Grow the path stack (WM reallocs in NF_PfadArrayGroesse hops).
+      u32 ncap = m.cap * 2u;
+      FtNfPathEnt *ns = (FtNfPathEnt *)malloc(ncap * sizeof(FtNfPathEnt));
+      if (ns == NULL) thvm_fatal("mixmost path stack OOM");
+      memcpy(ns, m.st, m.cap * sizeof(FtNfPathEnt));
+      free(heap_st);
+      heap_st = ns;
+      m.st  = ns;
+      m.cap = ncap;
+    }
+    FtNfPathEnt *e = &m.st[m.depth];
+    e->left--;
+    // First child starts right after the head cell; each later child
+    // right after the previous child's end (:141-211).
+    e->ins = (e->ins == NULL) ? e->cell : e->ins->next->end;
+    m.depth++;
+    m.st[m.depth].cell = e->ins->next;
+    m.st[m.depth].ins  = NULL;
+    m.st[m.depth].left = ft_cell_arity(m.st[m.depth].cell);
+    if (ft_mixmost_reduce_here(&m)) {
+      // Local fixpoint at the reduced position (:367).
+      while (ft_mixmost_reduce_here(&m)) {}
+      u32 last_red = m.depth;   // WM letzteRed
+      // Ascent (:370-373): try ancestors deepest-first up to the root;
+      // a firing ancestor is fixpointed and the ascent restarts there.
+      for (;;) {
+        int fired = 0;
+        m.depth = last_red;
+        while (m.depth > 0u) {
+          m.depth--;
+          if (ft_mixmost_reduce_here(&m)) { fired = 1; break; }
+        }
+        if (!fired) break;
+        while (ft_mixmost_reduce_here(&m)) {}
+        last_red = m.depth;
+      }
+      // Resume the preorder walk at the last reduced position (:375).
+      m.depth = last_red;
+    }
+  }
+done:
+  free(heap_st);
+  return m.root;
 }
 
 // --- Fixpoint --------------------------------------------------------
@@ -597,6 +944,19 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   // ft_match.c; we zero before first use per the Stage 5 contract.
   AtpFtSubst subst;
   memset(&subst, 0, sizeof(subst));
+
+  // WM mixmost strategy (the CLI `-nf` default): path-stack walk with
+  // local fixpoint + ancestor ascent instead of the legacy
+  // rescan-from-root step loop.  Same slice/doE/record contracts; the
+  // RI redex retrieval is leftmost-outermost by construction and does
+  // not apply here.
+  if (s->use_wm_mixmost_nf) {
+    u32 mslice_end = slice_first + slice_count;
+    if (mslice_end > s->n_rules) mslice_end = s->n_rules;
+    return atp_normalize_mixmost_ft(s, t, slice_first, mslice_end,
+                                    step_cap, doE, record, eq_other,
+                                    side, chain_tail, &subst);
+  }
 
   int use_full_range = (slice_first == 0u && slice_count == s->n_rules);
 #ifdef THVM_ATPFT_RI

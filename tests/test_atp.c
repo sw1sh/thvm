@@ -26,6 +26,17 @@ static const KboConfig DUMMY_CFG = {
   .var_weight  = 1,
 };
 
+// All-unit-weight variant (the McCune/HigmanNeumann .pr orderings:
+// every symbol weight 1, i > f in precedence).  DUMMY_CFG's weight-0
+// `i` flips the orientation of rules like f(i(x),i(y)) = i(f(y,x)).
+static u32 unit_weights[5] = {0, 1, 1, 1, 1};
+static const KboConfig UNIT_CFG = {
+  .weights     = unit_weights,
+  .precedence  = dummy_precedence,
+  .n_labels    = 5,
+  .var_weight  = 1,
+};
+
 // Test wrapper for atp_cp_queue_subsumed.  These tests populate
 // the queue (thvm_atp_cp_set) / s->n_cps directly, so 7d's
 // -DATP_FV_INDEX must be resynced before the check: the FV index is
@@ -1585,6 +1596,109 @@ int main(void) {
                                  ATP_TRACE_NONE, 0u, 0u), 1u);
     CHECK_EQ(s->n_cps_dropped_queue_subsumed, 0u);
     CHECK_EQ(s->n_cps, 2u);                 // both queued, WM ages intact
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-mixmost-nf-strategy");
+  {
+    // WM's DEFAULT normal-form strategy `-nf mixmost` (RUN/Parameter.c
+    // :418-419; NF_Normalform = NormalformMixMost, NF/NFBildung.c
+    // :837-840 = NormalformZuRegelnOderGleichungenAufNochmal :349-377):
+    // after a reduction the SAME position is re-reduced to a local
+    // fixpoint and only the ANCESTORS along the path are re-tried --
+    // never a rescan from the root.  thvm's legacy walk is WM's
+    // "outermost" (BL_NormalformOutermost `goto root`).  On a
+    // non-confluent mid-completion R the two reach different NFs and
+    // flip the generation-time join verdict -- the McCune
+    // EqualityOfInverses cp 1893 exemplar (parents 43, 40), mapped
+    // and -> f, not -> i:
+    //   r33  i(i(x))           -> x
+    //   r34  f(f(x1,i(x2)),x2) -> x1
+    //   r41  f(i(x1),i(x2))    -> i(f(x2,x1))
+    //   r43  i(f(i(x1),x2))    -> f(i(x2),x1)
+    // CP raw  (i(v0), f(i(f(i(i(v1)),v0)),v1)):
+    //   outermost: inner r43, then r34 fires AT THE ROOT -> i(v0).
+    //              JOINED -- the copy WM queues at w1=62 is dropped.
+    //   mixmost:   inner r43, then r41 at the SAME position (local
+    //              fixpoint) -> f(i(f(v1,v0)),v1), root irreducible.
+    //              NOT joined -- WM's exact queued form.
+    AtpState *s = thvm_atp_init(&UNIT_CFG, 100);
+    AtpAddedRange a;
+    a = thvm_atp_orient_and_add(s, mk_i(mk_i(mk_v(VAR_x))), mk_v(VAR_x));
+    CHECK_EQ(a.count, 1u);
+    a = thvm_atp_orient_and_add(s,
+        mk_f(mk_f(mk_v(VAR_x), mk_i(mk_v(1u))), mk_v(1u)), mk_v(VAR_x));
+    CHECK_EQ(a.count, 1u);
+    a = thvm_atp_orient_and_add(s,
+        mk_f(mk_i(mk_v(VAR_x)), mk_i(mk_v(1u))),
+        mk_i(mk_f(mk_v(1u), mk_v(VAR_x))));
+    CHECK_EQ(a.count, 1u);
+    a = thvm_atp_orient_and_add(s,
+        mk_i(mk_f(mk_i(mk_v(VAR_x)), mk_v(1u))),
+        mk_f(mk_i(mk_v(1u)), mk_v(VAR_x)));
+    CHECK_EQ(a.count, 1u);
+    CHECK_EQ(s->n_rules, 4u);
+    CHECK_EQ(s->n_unorient, 0u);
+
+    Term cp_a = mk_i(mk_v(VAR_x));
+    Term cp_b = mk_f(mk_i(mk_f(mk_i(mk_i(mk_v(1u))), mk_v(VAR_x))),
+                     mk_v(1u));
+    Term jl = cp_a, jr = cp_b;
+    CHECK_EQ((u32)atp_cp_trivially_joinable(s, &jl, &jr), 1u);
+
+    thvm_atp_set_use_wm_mixmost_nf(s, 1u);
+    jl = cp_a; jr = cp_b;
+    CHECK_EQ((u32)atp_cp_trivially_joinable(s, &jl, &jr), 0u);
+    CHECK(kbo_eq(jl, mk_i(mk_v(VAR_x))));
+    CHECK(kbo_eq(jr, mk_f(mk_i(mk_f(mk_v(1u), mk_v(VAR_x))), mk_v(1u))));
+
+    thvm_atp_set_use_wm_mixmost_nf(s, 0u);  // roundtrip
+    jl = cp_a; jr = cp_b;
+    CHECK_EQ((u32)atp_cp_trivially_joinable(s, &jl, &jr), 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-regelbaum-match-order");
+  {
+    // WM's within-position rule choice (MO_RegelGefunden,
+    // INF/MatchOperationen.c:565-651): the Regelbaum DFS tries the
+    // exact-symbol edge before the variable edges, so when SEVERAL
+    // rules match at one position the most-specific pattern fires --
+    // thvm's legacy scan takes the lowest slot.  The HigmanNeumann
+    // Associativity cp 597 exemplar (parents 14, 12), fop -> f:
+    //   r6   f(x1,f(x2,x2))        -> x1          (slot 0)
+    //   r14  f(f(x1,x1),f(x2,x3))  -> f(x3,x2)    (slot 1)
+    // CP raw  (f(v0,f(v0,f(v0,v0))), f(f(v0,v0),f(v1,v1))):
+    //   slot order: r6 at the right side's root keeps the SHARED
+    //               variable (-> f(v0,v0)), the left side also
+    //               reduces to f(v0,v0) -- JOINED.
+    //   Regelbaum:  r14 wins the root (exact f edge beats r6's var
+    //               edge), keeping the sides on DISTINCT variables
+    //               (f(v1,v1) vs f(v0,v0)) -- NOT joined, WM's
+    //               queued  fop(x1,x1) # fop(x2,x2)  at w1=48.
+    AtpState *s = thvm_atp_init(&UNIT_CFG, 100);
+    AtpAddedRange a;
+    a = thvm_atp_orient_and_add(s,
+        mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(1u))), mk_v(VAR_x));
+    CHECK_EQ(a.count, 1u);
+    a = thvm_atp_orient_and_add(s,
+        mk_f(mk_f(mk_v(VAR_x), mk_v(VAR_x)), mk_f(mk_v(1u), mk_v(2u))),
+        mk_f(mk_v(2u), mk_v(1u)));
+    CHECK_EQ(a.count, 1u);
+    CHECK_EQ(s->n_rules, 2u);
+
+    Term cp_a = mk_f(mk_v(VAR_x),
+                     mk_f(mk_v(VAR_x), mk_f(mk_v(VAR_x), mk_v(VAR_x))));
+    Term cp_b = mk_f(mk_f(mk_v(VAR_x), mk_v(VAR_x)),
+                     mk_f(mk_v(1u), mk_v(1u)));
+    Term jl = cp_a, jr = cp_b;
+    CHECK_EQ((u32)atp_cp_trivially_joinable(s, &jl, &jr), 1u);
+
+    thvm_atp_set_use_wm_mixmost_nf(s, 1u);
+    jl = cp_a; jr = cp_b;
+    CHECK_EQ((u32)atp_cp_trivially_joinable(s, &jl, &jr), 0u);
+    CHECK(kbo_eq(jl, mk_f(mk_v(VAR_x), mk_v(VAR_x))));
+    CHECK(kbo_eq(jr, mk_f(mk_v(1u), mk_v(1u))));
     thvm_atp_free(s);
   }
 

@@ -8560,6 +8560,11 @@ fn void thvm_atp_set_use_queue_subsume(AtpState *s, u8 on) {
   s->use_queue_subsume = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_use_wm_mixmost_nf(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wm_mixmost_nf = on ? 1u : 0u;
+}
+
 fn void thvm_atp_set_use_wm_emission_order(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_wm_emission_order = on ? 1u : 0u;
@@ -13896,7 +13901,13 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
   (void)rule_a;
   (void)rule_b;
 #endif
-  if (getenv("THVM_ATP_CPRAW_DEBUG") != NULL && ncps > 0) {
+  // Env-gated CP-formation fate trace: one [cpraw] line per FORMED CP
+  // (pre-gates) and one [cpfate] line per treatment verdict / drop --
+  // the per-birth diagnostic that pinned the duplicate-CP multiplicity
+  // class to the NF-strategy join-verdict flips.
+  static int cpraw_debug = -1;
+  if (cpraw_debug < 0) cpraw_debug = atp_env_on("THVM_ATP_CPRAW_DEBUG");
+  if (cpraw_debug && ncps > 0) {
     fprintf(stderr, "[cpraw] atp_push_cps_traced(parent_a=%u parent_b=%u rule_a=%u rule_b=%u): %u raw CPs\n",
             parent_a, parent_b, rule_a, rule_b, ncps);
     for (u32 i = 0; i < ncps; i++) {
@@ -13987,8 +13998,17 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // and explodes the unorient fraction (the AndAssoc trajectory
     // divergence pinned in iter 183).  Gated by use_perm_subsume so
     // the default trajectory is byte-identical.
+    if (cpraw_debug) {
+      char la[256], ra[256];
+      atp_pretty_term(cp_lhs, la, sizeof la);
+      atp_pretty_term(cp_rhs, ra, sizeof ra);
+      fprintf(stderr, "[cpfate] %u: treated %s = %s joinable=%u raw_untreated=%u\n",
+              i, la, ra, joinable, raw_untreated);
+    }
     if (s->use_perm_subsume && atp_cp_perm_subsumed(cp_lhs, cp_rhs)) {
       s->n_cps_dropped_perm_subsumed++;
+      if (cpraw_debug)
+        fprintf(stderr, "[cpfate] %u: DROP perm-subsumed\n", i);
       continue;
     }
     // WM dokgS port: push-time rule-subsumption drop (KPVerwaltung.c:451
@@ -13998,6 +14018,8 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // joinability normalize.  Gated by use_rule_subsume_drop.
     if (s->use_rule_subsume_drop && atp_cp_rule_subsumed(s, cp_lhs, cp_rhs)) {
       s->n_cps_dropped_rule_subsumed++;
+      if (cpraw_debug)
+        fprintf(stderr, "[cpfate] %u: DROP rule-subsumed\n", i);
       continue;
     }
     // thvm-native filter, no WM counterpart (see AtpState.use_queue_
@@ -14040,10 +14062,14 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     }
     if (joinable) {
       s->n_cps_dropped_joinable++;
+      if (cpraw_debug)
+        fprintf(stderr, "[cpfate] %u: DROP joinable\n", i);
       continue;
     }
     if (q_subsmd) {
       s->n_cps_dropped_queue_subsumed++;
+      if (cpraw_debug)
+        fprintf(stderr, "[cpfate] %u: DROP queue-subsumed\n", i);
       continue;
     }
 #ifdef THVM_ATP_AC

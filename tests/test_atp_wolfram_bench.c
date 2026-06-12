@@ -910,6 +910,16 @@ int main(int argc, char **argv) {
       // class of the alignment matrix, 35/43 divergent rows).
       // THVM_ATP_WM_INTAKE_ORDER env overrides.
       thvm_atp_set_use_wm_intake_order(s, 1u);
+      // WM normal-form STRATEGY: `-nf mixmost` (the CLI default,
+      // RUN/Parameter.c:418-419; NormalformZuRegelnOderGleichungen-
+      // AufNochmal, NF/NFBildung.c:349-377) -- local fixpoint at the
+      // reduced position + ancestor ascent, never a rescan from the
+      // root.  The legacy walk is WM's "outermost"; on non-confluent
+      // mid-completion R the strategies reach different NFs, flipping
+      // generation-time CP join verdicts (the duplicate-CP
+      // multiplicity divergence class: McCune Assoc/EqInv @140,
+      // HigmanNeumann Assoc @48).  THVM_ATP_WM_MIXMOST env overrides.
+      thvm_atp_set_use_wm_mixmost_nf(s, 1u);
       // Backward subsumption / backward demodulation are NOT in this
       // preset: they are Vampire mechanisms (bs=unit_only / bd=all)
       // with no WM analog.  WM's only backward treatment of existing
@@ -1044,6 +1054,15 @@ int main(int argc, char **argv) {
     const char *io = getenv("THVM_ATP_WM_INTAKE_ORDER");
     if (io != NULL && io[0] != '\0')
       thvm_atp_set_use_wm_intake_order(s, (io[0] != '0') ? 1u : 0u);
+  }
+
+  // THVM_ATP_WM_MIXMOST=0/1: independent override of the WM mixmost
+  // normal-form strategy (default OFF engine-wide, ON in the
+  // WALDMEISTER preset above).
+  {
+    const char *mx = getenv("THVM_ATP_WM_MIXMOST");
+    if (mx != NULL && mx[0] != '\0')
+      thvm_atp_set_use_wm_mixmost_nf(s, (mx[0] != '0') ? 1u : 0u);
   }
 
   // THVM_ATP_LAZY_NORM=0/1: toggle deferred-selection / lazy normalization

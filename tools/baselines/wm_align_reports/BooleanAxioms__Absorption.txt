@@ -1,5 +1,5 @@
-wm=186 thvm=184 prefix=96 identical=N firstdiv=97
-note: content-delta wm-only=2 thvm-only=0; post-axiom nonax-wm=180 nonax-thvm=178 nonax-prefix=90; weights-exact
+wm=186 thvm=186 prefix=96 identical=N firstdiv=97
+note: content-delta wm-only=0 thvm-only=0; post-axiom nonax-wm=180 nonax-thvm=180 nonax-prefix=90; weights-exact
 
 --- positions 94..106 (1-based) ---
     94 WM   w1=95           and(not(x1),and(not(x1),x2)) # and(not(x1),x2)
@@ -30,4 +30,3 @@ note: content-delta wm-only=2 thvm-only=0; post-axiom nonax-wm=180 nonax-thvm=17
    106 thvm pri=80          CPSEL pick=106 j=0 seq=261 pri=80 rules=32 lhs=(C3 V0 (C4 V0)) rhs=(C3 V1 (C4 V1))
 
 --- multiset deltas (first 50 each side) ---
-WM-only   x2  and(v1,not(v1))#and(v2,not(v2))
