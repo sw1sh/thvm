@@ -7432,6 +7432,7 @@ static void atp_cp_feat_record(AtpState *s, Term lhs, Term rhs,
                                u32 trace_id);
 // Lazy orphan murder: defined with the orphan-murder setters below.
 static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace);
+static int atp_trace_is_dead(const AtpState *s, u32 trace_id);
 // WM `dokgS` test (1-step join via a single existing rule); defined
 // alongside the per-CP-push subsume drop a few thousand lines down.
 static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs);
@@ -7755,6 +7756,14 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       atp_dbg_print_term(stderr, *lhs_out);
       fputs(" rhs=", stderr);
       atp_dbg_print_term(stderr, *rhs_out);
+      if (orphan) {
+        Term te = s->trace[s->cp_trace[j]];
+        u32 pa = (u32)term_val(term_ctr_at(te, 0));
+        u32 pb = (u32)term_val(term_ctr_at(te, 1));
+        fprintf(stderr, " ORPHAN pa=%u(%s) pb=%u(%s)",
+                pa, atp_trace_is_dead(s, pa) ? "dead" : "live",
+                pb, atp_trace_is_dead(s, pb) ? "dead" : "live");
+      }
       fputc('\n', stderr);
     }
   }
@@ -8169,7 +8178,8 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
     char la[2048], ra[2048];
     atp_pretty_term(lhs, la, sizeof la);
     atp_pretty_term(rhs, ra, sizeof ra);
-    fprintf(stderr, "RULE %u: %s -> %s%s\n", s->n_rules - 1u, la, ra,
+    fprintf(stderr, "RULE %u (trace %u): %s -> %s%s\n", s->n_rules - 1u,
+            s->r_trace[s->n_rules - 1u], la, ra,
             s->r_orient[s->n_rules - 1u] ? "" : "  (unorientable)");
   }
   // Backward subsumption (Vampire bs=unit_only analog).  When
@@ -11498,8 +11508,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       if (atp_rule_trace_on()) {
         char la[2048];
         atp_pretty_term(s->lhs[i], la, sizeof la);
-        fprintf(stderr, "  RETIRE rule (slot %u): LHS %s collapsed; "
-                "re-queued for re-orientation\n", i, la);
+        fprintf(stderr, "  RETIRE rule (slot %u, trace %u): LHS %s collapsed; "
+                "re-queued for re-orientation\n", i, s->r_trace[i], la);
       }
 #ifdef ATP_ORPHAN_KILL
       // Capture the dropped rule's trace id before the shift below
@@ -11784,6 +11794,12 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           atp_irv_push(s, old_lhs, old_rhs, simplify_parent);
         } else {
           atp_add_equation_simplified(s, old_lhs, reduced, simplify_parent);
+        }
+        if (atp_rule_trace_on()) {
+          char la[2048];
+          atp_pretty_term(old_lhs, la, sizeof la);
+          fprintf(stderr, "  RETIRE eq-rhs (slot %u, trace %u): %s\n",
+                  j, s->r_trace[j], la);
         }
 #ifdef ATP_ORPHAN_KILL
         if (atp_dead != NULL && s->r_trace[j] != ATP_TRACE_NONE) {
@@ -12576,6 +12592,16 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
     s->lhs[i] = dead_sentinel;
     s->rhs[i] = dead_sentinel;
     s->r_dead[i] = 1;
+    // WM destroys the subsumed equation outright, and the removal
+    // (RE_GleichungEntfernen, RUndEVerwaltung.c:503) runs
+    // KPV_KillParent on the distinguished direction -- the victim's
+    // queued CPs die as orphans at pop (selectNonOrphan), consuming
+    // no selection.  Mirror via the lazy trace-dead mark.
+    if (atp_rule_trace_on()) {
+      fprintf(stderr, "  ESET-SUBSUME kill (slot %u, trace %u)\n",
+              i, s->r_trace[i]);
+    }
+    if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[i]);
     // The active E set changed: invalidate the IR-normalize cookie
     // and force the rule/unorient index rebuild (a revision delta
     // that exceeds the rule-count delta is never pure-append).
@@ -14453,7 +14479,13 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
       ctx.out   = buf;
       ctx.cap   = ATP_CP_BATCH;
       ctx.count = 0;
-      ctx.skip_root = 1u;   // i < j: roots belong to the (j, i) visit
+      // Root-overlap ownership: same discipline as atp_overlap_ij
+      // (the i > j call owns the pair's root; a rule never forms a
+      // root self-overlap).  The IC lane has no unfailing face
+      // combos, so the i == j equation case is combo 1 (phase F).
+      ctx.skip_root = (i < j) ||
+                      (i == j &&
+                       !(s->use_unfailing_cp && !s->r_orient[i]));
       (void)cp_walk_positions(ctx.li, path, 0, CP_MAX_DEPTH,
                               cp_visit_ic, &ctx, 0);
       pushed += atp_push_cps_traced(s, buf, ctx.count,
@@ -14475,13 +14507,7 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
       ctx.out   = buf;
       ctx.cap   = ATP_CP_BATCH;
       ctx.count = 0;
-      // Root-overlap ownership: same discipline as atp_overlap_ij
-      // (the i > j call owns the pair's root; a rule never forms a
-      // root self-overlap).  The IC lane has no unfailing face
-      // combos, so the i == j equation case is combo 1 (phase F).
-      ctx.skip_root = (i < j) ||
-                      (i == j &&
-                       !(s->use_unfailing_cp && !s->r_orient[i]));
+      ctx.skip_root = 1u;   // i < j: roots belong to the (j, i) visit
       (void)cp_walk_positions(ctx.li, path, 0, CP_MAX_DEPTH,
                               cp_visit_ic, &ctx, 0);
       pushed += atp_push_cps_traced(s, buf, ctx.count,
