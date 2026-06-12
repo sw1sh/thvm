@@ -29,7 +29,7 @@ note: content-delta wm-only=10 thvm-only=2; post-axiom nonax-wm=212 nonax-thvm=2
 *  149 WM   w1=71           x1 # and(not(and(not(x2),x2)),x1)
 *  149 thvm pri=71          CPSEL pick=149 j=0 seq=1534 pri=71 rules=17 lhs=(C3 (C4 (C3 V0 (C4 V1))) V0) rhs=V1
 
---- multiset deltas ---
+--- multiset deltas (first 50 each side) ---
 WM-only   x1  and(not(and(v1,v2)),v1)#not(v2)
 WM-only   x3  and(not(v1),and(not(v2),v2))#not(v1)
 WM-only   x1  and(and(not(v1),v2),not(v3))#not(and(v3,and(not(v2),v1)))

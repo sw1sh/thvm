@@ -29,5 +29,5 @@ note: content-delta wm-only=1 thvm-only=0; post-axiom nonax-wm=155 nonax-thvm=15
 *  149 WM   w1=71           x1 # and(not(and(not(x2),x2)),x1)
 *  149 thvm pri=71          CPSEL pick=149 j=0 seq=1534 pri=71 rules=17 lhs=(C3 (C4 (C3 V0 (C4 V1))) V0) rhs=V1
 
---- multiset deltas ---
+--- multiset deltas (first 50 each side) ---
 WM-only   x1  and(not(and(v1,v2)),v1)#not(v2)

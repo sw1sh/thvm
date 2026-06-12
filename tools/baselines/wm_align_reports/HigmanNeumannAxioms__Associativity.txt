@@ -29,7 +29,7 @@ note: content-delta wm-only=26 thvm-only=20; post-axiom nonax-wm=104 nonax-thvm=
 *   57 WM   w1=48           fop(x1,x1) # fop(x2,x2)
 *   57 thvm pri=120         CPSEL pick=57 j=0 seq=501 pri=120 rules=10 lhs=(C3 (C3 V0 V0) V0) rhs=(C3 (C3 V1 V1) V0)
 
---- multiset deltas ---
+--- multiset deltas (first 50 each side) ---
 WM-only   x6  fop(v1,v1)#fop(v2,v2)
 WM-only   x1  fop(fop(v1,v1),v2)#fop(fop(v3,v3),v2)
 WM-only   x1  fop(fop(v1,v2),fop(v1,v2))#fop(v3,v3)

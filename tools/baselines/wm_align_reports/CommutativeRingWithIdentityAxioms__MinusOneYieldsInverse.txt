@@ -1,36 +1,35 @@
-wm=576 thvm=534 prefix=2 identical=N firstdiv=3
-note: content-delta wm-only=110 thvm-only=68; post-axiom nonax-wm=568 nonax-thvm=526 nonax-prefix=2; weights-exact
+wm=576 thvm=426 prefix=11 identical=N firstdiv=12
+note: content-delta wm-only=205 thvm-only=55; post-axiom nonax-wm=568 nonax-thvm=418 nonax-prefix=3; weights-exact
 
---- positions 1..12 (1-based) ---
-     1 WM   w1=-2147483648  x1 # or(x1,opOvertilde(k1))
-     1 thvm pri=29          CPSEL pick=1 j=0 seq=2 pri=29 rules=0 lhs=(C8 V0 (C7 C4)) rhs=V0
-     2 WM   w1=-2147483648  x1 # and(x1,opOvertilde(k2))
-     2 thvm pri=29          CPSEL pick=2 j=0 seq=7 pri=29 rules=1 lhs=(C3 V0 (C7 C5)) rhs=V0
-*    3 WM   w1=-2147483648  or(x1,x2) # or(x2,x1)
-*    3 thvm pri=34          CPSEL pick=3 j=0 seq=3 pri=34 rules=2 lhs=(C8 V0 (C6 V0)) rhs=(C7 C4)
-*    4 WM   w1=-2147483648  or(x1,or(x2,x3)) # or(or(x1,x2),x3)
-*    4 thvm pri=48          CPSEL pick=4 j=0 seq=1 pri=48 rules=3 lhs=(C8 V0 V1) rhs=(C8 V1 V0)
-*    5 WM   w1=-2147483648  or(x1,not(x1)) # opOvertilde(k1)
-*    5 thvm pri=29          CPSEL pick=5 j=0 seq=8 pri=29 rules=4 lhs=V0 rhs=(C8 (C7 C4) V0)
-*    6 WM   w1=-2147483648  or(and(x1,x2),and(x1,x3)) # and(x1,or(x2,x3))
-*    6 thvm pri=23          CPSEL pick=6 j=0 seq=10 pri=23 rules=5 lhs=(C7 C4) rhs=(C6 (C7 C4))
-*    7 WM   w1=-2147483648  and(x1,x2) # and(x2,x1)
-*    7 thvm pri=34          CPSEL pick=7 j=0 seq=9 pri=34 rules=6 lhs=(C7 C4) rhs=(C8 (C6 V0) V0)
-*    8 WM   w1=-2147483648  and(x1,and(x2,x3)) # and(and(x1,x2),x3)
-*    8 thvm pri=48          CPSEL pick=8 j=0 seq=6 pri=48 rules=6 lhs=(C3 V0 V1) rhs=(C3 V1 V0)
-*    9 WM   w1=29           or(opOvertilde(k1),x1) # x1
-*    9 thvm pri=29          CPSEL pick=9 j=0 seq=11 pri=29 rules=7 lhs=V0 rhs=(C3 (C7 C5) V0)
-*   10 WM   w1=23           not(opOvertilde(k1)) # opOvertilde(k1)
-*   10 thvm pri=65          CPSEL pick=10 j=0 seq=0 pri=65 rules=8 lhs=(C8 V0 (C8 V1 V2)) rhs=(C8 (C8 V0 V1) V2)
-*   11 WM   w1=29           and(opOvertilde(k2),x1) # x1
-*   11 thvm pri=55          CPSEL pick=11 j=0 seq=14 pri=55 rules=9 lhs=V0 rhs=(C8 V1 (C8 (C6 V1) V0))
+--- positions 9..21 (1-based) ---
+     9 WM   w1=29           or(opOvertilde(k1),x1) # x1
+     9 thvm pri=29          CPSEL pick=9 j=0 seq=8 pri=29 rules=8 lhs=V0 rhs=(C8 (C7 C4) V0)
+    10 WM   w1=23           not(opOvertilde(k1)) # opOvertilde(k1)
+    10 thvm pri=23          CPSEL pick=10 j=0 seq=25 pri=23 rules=9 lhs=(C7 C4) rhs=(C6 (C7 C4))
+    11 WM   w1=29           and(opOvertilde(k2),x1) # x1
+    11 thvm pri=29          CPSEL pick=11 j=0 seq=19 pri=29 rules=10 lhs=V0 rhs=(C3 (C7 C5) V0)
 *   12 WM   w1=69           or(x1,or(opOvertilde(k1),x2)) # or(x1,x2)
-*   12 thvm pri=19          CPSEL pick=12 j=0 seq=18 pri=19 rules=10 lhs=V0 rhs=(C6 (C6 V0))
+*   12 thvm pri=34          CPSEL pick=12 j=0 seq=13 pri=34 rules=11 lhs=(C8 (C6 V0) V0) rhs=(C7 C4)
+*   13 WM   w1=69           and(x1,and(opOvertilde(k2),x2)) # and(x1,x2)
+*   13 thvm pri=69          CPSEL pick=13 j=0 seq=10 pri=69 rules=11 lhs=(C8 V0 V1) rhs=(C8 V0 (C8 (C7 C4) V1))
+*   14 WM   w1=76           or(x1,or(not(x1),x2)) # or(opOvertilde(k1),x2)
+*   14 thvm pri=69          CPSEL pick=14 j=0 seq=23 pri=69 rules=11 lhs=(C3 V0 V1) rhs=(C3 V0 (C3 (C7 C5) V1))
+*   15 WM   w1=19           not(not(x1)) # x1
+*   15 thvm pri=76          CPSEL pick=15 j=0 seq=14 pri=76 rules=11 lhs=(C8 (C7 C4) V0) rhs=(C8 V1 (C8 (C6 V1) V0))
+*   16 WM   w1=34           opOvertilde(k1) # or(not(x1),x1)
+*   16 thvm pri=19          CPSEL pick=16 j=0 seq=28 pri=19 rules=12 lhs=V0 rhs=(C6 (C6 V0))
+*   17 WM   w1=53           or(not(not(x1)),x2) # or(x1,x2)
+*   17 thvm pri=34          CPSEL pick=17 j=0 seq=31 pri=34 rules=13 lhs=(C8 (C6 V0) V0) rhs=(C7 C4)
+*   18 WM   w1=55           x1 # or(x2,or(x1,not(x2)))
+*   18 thvm pri=53          CPSEL pick=18 j=0 seq=30 pri=53 rules=13 lhs=(C8 V0 V1) rhs=(C8 (C6 (C6 V0)) V1)
+*   19 WM   w1=48           or(x1,x2) # or(x2,x1)
+*   19 thvm pri=55          CPSEL pick=19 j=0 seq=27 pri=55 rules=13 lhs=(C8 (C6 V0) (C8 V1 V0)) rhs=V1
+*   20 WM   w1=55           x1 # or(not(x2),or(x2,x1))
+*   20 thvm pri=34          CPSEL pick=20 j=0 seq=35 pri=34 rules=14 lhs=(C8 (C6 V0) V0) rhs=(C7 C4)
+*   21 WM   w1=34           opOvertilde(k1) # or(not(x1),x1)
+*   21 thvm pri=48          CPSEL pick=21 j=0 seq=41 pri=48 rules=14 lhs=(C8 V0 V1) rhs=(C8 V1 V0)
 
---- multiset deltas ---
-WM-only   x1  or(v1,or(opOvertilde(k1),v2))#or(v1,v2)
-WM-only   x1  and(v1,and(opOvertilde(k2),v2))#and(v1,v2)
-WM-only   x1  or(opOvertilde(k1),v1)#or(v2,or(not(v2),v1))
+--- multiset deltas (first 50 each side) ---
 WM-only   x4  opOvertilde(k1)#or(not(v1),v1)
 WM-only   x10  not(v1)#or(not(or(v1,v2)),v2)
 WM-only   x1  not(or(not(v1),v1))#opOvertilde(k1)
@@ -63,13 +62,25 @@ WM-only   x1  not(or(v1,v2))#or(not(or(v2,or(v1,v3))),v3)
 WM-only   x3  not(or(v1,v2))#or(not(or(v2,or(v3,v1))),v3)
 WM-only   x1  not(or(v1,v2))#or(not(or(v3,or(v2,v1))),v3)
 WM-only   x3  not(or(v1,or(not(v2),v3)))#or(not(v3),or(v2,not(v1)))
-WM-only   x1  or(v1,or(v2,v3))#or(v2,or(v3,v1))
-WM-only   x1  not(v1)#or(not(or(v2,or(v3,v1))),or(v2,v3))
-WM-only   x1  not(v1)#or(not(or(v2,or(v1,v3))),or(v2,v3))
-WM-only   x2  not(v1)#or(not(and(v1,or(opOvertilde(k2),opOvertilde(k2)))),v1)
-WM-only   x2  not(v1)#or(not(and(or(opOvertilde(k2),opOvertilde(k2)),v1)),v1)
+WM-only   x6  or(v1,or(v2,v3))#or(v2,or(v3,v1))
+WM-only   x2  or(v1,or(v2,v3))#or(v2,or(v1,v3))
+WM-only   x2  and(v1,and(v2,v3))#and(v2,and(v3,v1))
+WM-only   x2  and(v1,and(v2,v3))#and(v2,and(v1,v3))
+WM-only   x1  and(v1,or(v2,v2))#and(v2,or(v1,v1))
+WM-only   x2  and(opOvertilde(k1),v1)#and(v1,opOvertilde(k1))
+WM-only   x1  and(v1,and(v2,v3))#and(v1,and(v3,v2))
+WM-only   x7  and(v1,or(opOvertilde(k2),opOvertilde(k2)))#or(v1,v1)
+WM-only   x3  and(or(v1,v1),v2)#and(v1,or(v2,v2))
+WM-only   x8  and(or(opOvertilde(k2),opOvertilde(k2)),v1)#or(v1,v1)
+WM-only   x2  and(or(v1,v1),v2)#and(v2,or(v1,v1))
+WM-only   x2  and(or(v1,v1),v2)#and(or(v2,v2),v1)
+WM-only   x2  and(opOvertilde(k1),v1)#and(or(v1,v1),opOvertilde(k1))
+WM-only   x3  or(v1,or(v2,or(not(or(v1,v2)),v3)))#v3
+WM-only   x5  or(v1,or(v2,or(v3,not(or(v1,v2)))))#v3
+WM-only   x2  and(opOvertilde(k1),and(v1,or(v1,v1)))#and(v1,and(v1,opOvertilde(k1)))
+WM-only   x2  and(opOvertilde(k1),and(v1,or(v2,v2)))#and(v2,and(v1,opOvertilde(k1)))
+WM-only   x1  and(opOvertilde(k1),and(v1,or(v2,v2)))#and(v1,and(v2,opOvertilde(k1)))
 thvm-only x4  or(v1,v2)#or(v2,v1)
-thvm-only x1  or(v1,or(not(v1),v2))#v2
 thvm-only x1  or(not(v1),or(v2,v1))#v2
 thvm-only x1  or(v1,or(v2,not(v1)))#v2
 thvm-only x3  or(not(v1),or(v1,v2))#v2
@@ -97,16 +108,10 @@ thvm-only x1  not(or(v1,or(v2,not(v3))))#or(v3,or(not(v2),not(v1)))
 thvm-only x1  not(or(v1,or(not(v2),v3)))#or(v2,or(not(v1),not(v3)))
 thvm-only x1  and(or(v1,v1),opOvertilde(k1))#and(v1,opOvertilde(k1))
 thvm-only x1  and(not(or(v1,v1)),opOvertilde(k1))#and(opOvertilde(k1),not(v1))
-thvm-only x1  or(v1,or(v2,v3))#or(v1,or(v3,v2))
 thvm-only x1  or(v1,or(v2,v3))#or(v3,or(v2,v1))
-thvm-only x2  and(v1,or(opOvertilde(k2),opOvertilde(k2)))#or(v1,v1)
-thvm-only x2  and(or(opOvertilde(k2),opOvertilde(k2)),v1)#or(v1,v1)
-thvm-only x2  and(or(opOvertilde(k2),opOvertilde(k2)),opOvertilde(k1))#opOvertilde(k1)
-thvm-only x1  and(not(v1),opOvertilde(k1))#and(opOvertilde(k1),opOvertilde(k1))
-thvm-only x1  and(opOvertilde(k1),v1)#and(or(v2,v1),opOvertilde(k1))
-thvm-only x2  not(v1)#or(v2,or(v3,not(or(v2,or(v3,v1)))))
-thvm-only x1  not(v1)#or(v2,or(v3,not(or(v2,or(v1,v3)))))
-thvm-only x1  or(and(v1,or(opOvertilde(k2),opOvertilde(k2))),not(v1))#v1
-thvm-only x1  or(and(or(opOvertilde(k2),opOvertilde(k2)),v1),not(v1))#v1
-thvm-only x2  not(v1)#or(v1,not(and(v1,or(opOvertilde(k2),opOvertilde(k2)))))
-thvm-only x2  not(v1)#or(v1,not(and(or(opOvertilde(k2),opOvertilde(k2)),v1)))
+thvm-only x1  or(v1,and(v1,opOvertilde(k1)))#v1
+thvm-only x1  and(opOvertilde(k1),opOvertilde(k1))#opOvertilde(k1)
+thvm-only x1  and(not(v1),opOvertilde(k1))#opOvertilde(k1)
+thvm-only x1  and(v1,opOvertilde(k1))#opOvertilde(k1)
+thvm-only x1  and(opOvertilde(k1),or(opOvertilde(k2),v1))#and(opOvertilde(k1),v1)
+thvm-only x1  and(v1,opOvertilde(k1))#or(v1,and(v1,not(opOvertilde(k2))))
