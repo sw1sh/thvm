@@ -12,16 +12,19 @@
    block LayerNorm, AdaLN modulation, gated residual, and the double /
    single block + transformer assembly. *)
 
-(* --- linear: a diffusers weight is stored {out, in}, so y = x . W^T.  The
-       weight reaches us as a lazy bf16->f32 TUOpCast, which cblas can't read;
-       left un-realized, TMatMul fuses cast+transpose into a scalar
-       EXPAND-MUL-REDUCE with a multi-GB intermediate (the FLUX ff matmuls take
-       minutes that way).  Realize the CAST to a contiguous {out, in} f32
-       buffer; Transpose is then a pure view that cblas_sgemm consumes as transB
-       -- no transpose shuffle (~40% faster than realizing the transposed
-       layout).  (Weights are constants -- a full forward should cache the f32
-       cast once; per-call realize is fine for a single block.) --- *)
-fxLinear[x_, w_] := TMatMul[x, Transpose[TRealize[w]]]
+(* --- linear: a diffusers weight is stored {out, in}, so y = x . W^T.
+       Materialise W^T as a CONTIGUOUS {in, out} buffer (TRealize[Transpose[w]])
+       and matmul against that.  Two reasons:
+       (1) the weight is a constant, so the transpose-copy is a one-time cost
+           amortised across every step (in a JIT'd sampler it is captured once);
+       (2) on Metal a matmul whose B operand is a transposed VIEW reads the
+           strided bytes as if row-major and returns garbage (see
+           Tests/metal_transposed_matmul.wlt); realizing the transpose to a
+           contiguous buffer feeds the matmul a row-major B and is exact.
+       This is bf16-native: w may stay bf16 (no bf16->f32 TUOpCast), which
+       halves the weight bytes loaded and skips the per-weight cast pass -- the
+       f32 cast was only needed for the old cblas transB view path. --- *)
+fxLinear[x_, w_] := TMatMul[x, TRealize[Transpose[w]]]
 
 (* --- affine-free LayerNorm over the last axis (FLUX block norms use
        elementwise_affine=False; the modulation supplies scale/shift).  This is
