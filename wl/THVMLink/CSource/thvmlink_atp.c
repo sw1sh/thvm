@@ -829,6 +829,14 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // (the historical thvm engine default).
   mint queue_subsume = MArgument_getInteger(args[39]);
   thvm_atp_set_use_queue_subsume(atp, (u8)(queue_subsume != 0));
+  // Method -> {... "WMEmissionOrder" -> True}: Waldmeister CP-emission
+  // ORDER (src/atp/wm_order.c): each new fact's CP batch is sorted
+  // into WM's emission order before pushing, so equal-weight CPs
+  // receive their FIFO ages (w2) in WM's order
+  // (U1_KPsBildenZuFaktum phase walk + DSBaum leaf-list order).
+  // args[40]; 0 = off (default, engine byte-identical).
+  mint wm_emission = MArgument_getInteger(args[40]);
+  thvm_atp_set_use_wm_emission_order(atp, (u8)(wm_emission != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any

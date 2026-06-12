@@ -602,6 +602,13 @@ int main(int argc, char **argv) {
       // shifts every later CP's age vs WM.  THVM_ATP_QUEUE_SUBSUME
       // env overrides.
       thvm_atp_set_use_queue_subsume(s, 0u);
+      // WM CP-emission ORDER: sort each new fact's CP batch into
+      // Waldmeister's emission order (U1_KPsBildenZuFaktum phase walk
+      // + DSBaum leaf-list order) before pushing, so equal-weight CPs
+      // receive their FIFO ages (w2) in WM's order.  Closes the
+      // McCune-II sels 96-101 equal-weight tie residual.
+      // THVM_ATP_WM_EMISSION_ORDER env overrides.
+      thvm_atp_set_use_wm_emission_order(s, 1u);
       // Backward subsumption / backward demodulation are NOT in this
       // preset: they are Vampire mechanisms (bs=unit_only / bd=all)
       // with no WM analog.  WM's only backward treatment of existing
@@ -718,6 +725,15 @@ int main(int argc, char **argv) {
     const char *qs = getenv("THVM_ATP_QUEUE_SUBSUME");
     if (qs != NULL && qs[0] != '\0')
       thvm_atp_set_use_queue_subsume(s, (qs[0] != '0') ? 1u : 0u);
+  }
+
+  // THVM_ATP_WM_EMISSION_ORDER=0/1: independent override of the WM
+  // CP-emission-order mirror (default OFF engine-wide, ON in the
+  // WALDMEISTER preset above).
+  {
+    const char *eo = getenv("THVM_ATP_WM_EMISSION_ORDER");
+    if (eo != NULL && eo[0] != '\0')
+      thvm_atp_set_use_wm_emission_order(s, (eo[0] != '0') ? 1u : 0u);
   }
 
   // THVM_ATP_LAZY_NORM=0/1: toggle deferred-selection / lazy normalization
@@ -1081,6 +1097,9 @@ int main(int argc, char **argv) {
          s->n_eqs_dropped_eset_subsumed,
          s->n_cps_dropped_connected,
          s->n_cps_dropped_orphan, s->n_cps_dropped_lrs);
+  if (s->use_wm_emission_order) {
+    printf("   wm-emission-order: rank-misses=%u\n", s->n_wmo_rank_misses);
+  }
   if (s->use_lrs) {
     printf("   lrs: recomputes=%u  horizon=%u  warmup=%u  period=%u\n",
            s->n_lrs_recomputes, s->lrs_horizon,

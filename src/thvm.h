@@ -4909,6 +4909,26 @@ typedef struct {
   u8   use_eset_subsume;
   u32  n_eqs_dropped_eset_subsumed;
 
+  // WM CP-emission ORDER (FIFO age assignment): when set, each new
+  // fact's CP batch is sorted into Waldmeister's emission order before
+  // pushing, so equal-weight CPs receive their w2/FIFO ages in WM's
+  // order.  WM emits per new fact in phase order (Unifikation1.c
+  // U1_KPsBildenZuRegel :1481 / U1_KPsBildenZuGleichung :1556): tops
+  // phases walk the new face's subterms in flatterm preorder against
+  // rule-tree then equation-tree tops (trie-DFS arrival order within a
+  // position); eTT phases scan the discrimination tree's LEAF LIST
+  // (depth-sorted, insert-after-class-head -- DSBaumOperationen.c
+  // BlattEinzeigern :365-442) x per-leaf chains (newest first) x
+  // per-fact proper subterms in preorder.  `wmo` holds the
+  // order-mirror state (src/atp/wm_order.c); facts register on
+  // creation and deregister at every removal site, keyed by birth
+  // trace id (compaction-proof).  Default OFF (engine byte-identical);
+  // ON in the "Waldmeister"* presets via Method "WMEmissionOrder" /
+  // thvm_atp_set_use_wm_emission_order / THVM_ATP_WM_EMISSION_ORDER.
+  u8   use_wm_emission_order;
+  void *wmo;
+  u32  n_wmo_rank_misses;
+
   // WM backward ground-joinability sterilization
   // (RueckwaertsGrundzusammenfuehrbarkeit, INF/Hauptkomponenten.c:
   // 260-306, called at the END of ArbeitsAufnahme :329 AFTER CP
@@ -5453,6 +5473,12 @@ fn void      thvm_atp_set_use_eset_subsume(AtpState *s, u8 on);
 // counterpart; see AtpState.use_queue_subsume).  Default ON; the
 // "Waldmeister"* presets turn it OFF.
 fn void      thvm_atp_set_use_queue_subsume(AtpState *s, u8 on);
+// WM CP-emission-order mirror (FIFO age parity; see
+// AtpState.use_wm_emission_order).  Default OFF; the "Waldmeister"*
+// presets turn it ON.  Turning it on registers the already-live facts
+// in slot order (an approximation of their insertion history when
+// enabled mid-run; presets enable it before the axioms load).
+fn void      thvm_atp_set_use_wm_emission_order(AtpState *s, u8 on);
 // WM backward ground-joinability sterilization (-gj,
 // RueckwaertsGrundzusammenfuehrbarkeit; see
 // AtpState.use_bwd_ground_join).  Default OFF = WM's -gj default.

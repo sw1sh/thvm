@@ -1463,7 +1463,7 @@ int main(void) {
     CHECK_EQ(s->r_orient[0], 0u);
     CHECK_EQ((u32)atp_eq_is_mono(s, 0), 1u);
     CriticalPair buf[ATP_CP_BATCH];
-    u32 cnt = atp_overlap_ij(s, 0, 0, buf, ATP_CP_BATCH);
+    u32 cnt = atp_overlap_ij(s, 0, 0, buf, ATP_CP_BATCH, NULL);
     CHECK_EQ(cnt, 1u);
     thvm_atp_free(s);
 
@@ -1481,7 +1481,7 @@ int main(void) {
     CHECK_EQ(a.count, 1u);
     CHECK_EQ(s->r_orient[0], 0u);
     CHECK_EQ((u32)atp_eq_is_mono(s, 0), 0u);
-    cnt = atp_overlap_ij(s, 0, 0, buf, ATP_CP_BATCH);
+    cnt = atp_overlap_ij(s, 0, 0, buf, ATP_CP_BATCH, NULL);
     CHECK_EQ(cnt, 3u);
     thvm_atp_free(s);
   }
@@ -1524,6 +1524,138 @@ int main(void) {
                                  ATP_TRACE_NONE, 0u, 0u), 1u);
     CHECK_EQ(s->n_cps_dropped_queue_subsumed, 0u);
     CHECK_EQ(s->n_cps, 2u);                 // both queued, WM ages intact
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-emission-order-leaf-list");
+  {
+    // WM leaf-list discipline (DSBaumOperationen.c BlattEinzeigern
+    // :365-442): ascending stored-LHS depth; within a depth class the
+    // FIRST leaf stays head and later leaves insert immediately after
+    // it (head + LIFO); removal promotes the next same-depth leaf
+    // (:949-981).  Insert depths [4, 2, 3, 3, 3] as traces 100..104:
+    // expected list [101(d2), 102(d3 head), 104, 103, 100(d4)]; after
+    // removing the d3 head: [101, 104, 103, 100].
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    Term lhss[5] = {
+      mk_i(mk_i(mk_i(mk_a()))),          // d4
+      mk_i(mk_a()),                      // d2
+      mk_i(mk_i(mk_a())),                // d3
+      mk_f(mk_i(mk_a()), mk_a()),        // d3
+      mk_f(mk_a(), mk_i(mk_a())),        // d3
+    };
+    for (u32 k = 0; k < 5u; k++) {
+      s->lhs[k] = lhss[k];
+      s->rhs[k] = mk_a();
+      s->r_orient[k] = 1u;
+      s->r_trace[k] = 100u + k;
+      s->n_rules++;
+      atp_wmo_insert_fact(s, k);
+    }
+    {
+      AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+      u32 want[5] = {101u, 102u, 104u, 103u, 100u};
+      u32 got = 0;
+      for (WmoLeaf *l = w->tree[0].ll_head; l != NULL; l = l->ll_next) {
+        CHECK(got < 5u);
+        CHECK_EQ(l->n_chain, 1u);
+        CHECK_EQ(l->chain[0].trace, want[got]);
+        got++;
+      }
+      CHECK_EQ(got, 5u);
+      atp_wmo_remove_trace(s, 102u);     // d3 class head dies
+      u32 want2[4] = {101u, 104u, 103u, 100u};
+      got = 0;
+      for (WmoLeaf *l = w->tree[0].ll_head; l != NULL; l = l->ll_next) {
+        CHECK(got < 4u);
+        CHECK_EQ(l->chain[0].trace, want2[got]);
+        got++;
+      }
+      CHECK_EQ(got, 4u);
+    }
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-emission-order-ett-leaf-list-rank");
+  {
+    // Phase-B (eTT) emission order: the new fact's CP batch visits
+    // existing partners in LEAF-LIST order (depth ascending), not slot
+    // order.  old0 (slot 0) has the DEEPER lhs, old1 (slot 1) the
+    // shallower; both contain an i(.)-subterm the new rule's top
+    // unifies with.  Legacy slot-major emission would queue old0's CP
+    // first; WM order queues old1's first (smaller cp_seq).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    // old0: f(f(i(x), e), e) -> x      (lhs depth 4)
+    s->lhs[0] = mk_f(mk_f(mk_i(mk_v(VAR_x)), mk_e()), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_orient[0] = 1u; s->r_trace[0] = 200u; s->n_rules++;
+    atp_wmo_insert_fact(s, 0u);
+    // old1: f(i(y), e) -> y            (lhs depth 3)
+    s->lhs[1] = mk_f(mk_i(mk_v(1u)), mk_e());
+    s->rhs[1] = mk_v(1u);
+    s->r_orient[1] = 1u; s->r_trace[1] = 201u; s->n_rules++;
+    atp_wmo_insert_fact(s, 1u);
+    // new:  i(f(a, a)) -> a            (top unifies with both i(.)s;
+    // no tops overlaps: f(a,a) clashes with both old tops)
+    s->lhs[2] = mk_i(mk_f(mk_a(), mk_a()));
+    s->rhs[2] = mk_a();
+    s->r_orient[2] = 1u; s->r_trace[2] = 202u; s->n_rules++;
+    atp_wmo_insert_fact(s, 2u);
+    AtpAddedRange added = {2u, 1u, 0u};
+    u32 pushed = thvm_atp_generate_cps(s, added);
+    CHECK_EQ(pushed, 2u);
+    u32 seq_old0 = 0xffffffffu, seq_old1 = 0xffffffffu;
+    for (u32 k = 0; k < s->n_cps; k++) {
+      Term tr = s->trace[s->cp_trace[k]];
+      u32 pa = (u32)term_val(term_ctr_at(tr, 0));
+      Term pae = s->trace[pa];
+      // parent_a = the OUTER rule's trace entry; resolve to 200/201 by
+      // matching the stored trace index against r_trace.
+      (void)pae;
+      if (pa == s->r_trace[0]) seq_old0 = s->cp_seq[k];
+      if (pa == s->r_trace[1]) seq_old1 = s->cp_seq[k];
+    }
+    CHECK(seq_old0 != 0xffffffffu);
+    CHECK(seq_old1 != 0xffffffffu);
+    CHECK(seq_old1 < seq_old0);   // shallow leaf first (WM leaf list)
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-emission-order-tops-before-ett");
+  {
+    // Phase segmentation (U1_KPsBildenZuRegel: toplevel phase 2 before
+    // the eTT phase 3): a CP from the new fact's own positions (tops)
+    // must receive a smaller FIFO age than a CP planted into an OLD
+    // fact's proper position (eTT), regardless of slot order.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    // old: f(i(x), e) -> x   (top f(i(x),e); proper subterm i(x))
+    s->lhs[0] = mk_f(mk_i(mk_v(VAR_x)), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_orient[0] = 1u; s->r_trace[0] = 300u; s->n_rules++;
+    atp_wmo_insert_fact(s, 0u);
+    // new: i(f(i(a), e)) -> a:
+    //   tops: subterm f(i(a),e) unifies the old TOP   -> phase A
+    //   eTT:  new top i(...) unifies old's i(x)        -> phase B
+    s->lhs[1] = mk_i(mk_f(mk_i(mk_a()), mk_e()));
+    s->rhs[1] = mk_a();
+    s->r_orient[1] = 1u; s->r_trace[1] = 301u; s->n_rules++;
+    atp_wmo_insert_fact(s, 1u);
+    AtpAddedRange added = {1u, 1u, 0u};
+    u32 pushed = thvm_atp_generate_cps(s, added);
+    CHECK_EQ(pushed, 2u);
+    u32 seq_tops = 0xffffffffu, seq_ett = 0xffffffffu;
+    for (u32 k = 0; k < s->n_cps; k++) {
+      Term tr = s->trace[s->cp_trace[k]];
+      u32 pa = (u32)term_val(term_ctr_at(tr, 0));
+      if (pa == s->r_trace[1]) seq_tops = s->cp_seq[k];  // outer = new
+      if (pa == s->r_trace[0]) seq_ett  = s->cp_seq[k];  // outer = old
+    }
+    CHECK(seq_tops != 0xffffffffu);
+    CHECK(seq_ett != 0xffffffffu);
+    CHECK(seq_tops < seq_ett);
     thvm_atp_free(s);
   }
 

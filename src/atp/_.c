@@ -442,6 +442,19 @@ static u64 atp_term_struct_hash(Term t) {
 // wiring below.
 #include "ac.c"
 
+// Waldmeister CP-emission-order mirror (src/atp/wm_order.c, included
+// after atp_eq_is_mono's declaration block).  Forward declarations so
+// the lifecycle hooks (atp_push_rule, interreduce, eset-subsume) and
+// the setter can call in before the include point.
+struct AtpWmOrder;
+static struct AtpWmOrder *atp_wmo_new(void);
+static void atp_wmo_free(struct AtpWmOrder *w);
+static void atp_wmo_insert_fact(AtpState *s, u32 slot);
+static void atp_wmo_remove_trace(AtpState *s, u32 trace);
+static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t);
+static u64  atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
+                         const CriticalPair *cp);
+
 // Match helper: thvm_match by default; switches to atp_match_ac
 // when THVM_ATP_AC is built AND the engine-global AC mask is non-zero.
 // Used by the ATP-internal hot match sites (atp_ordered_try_top,
@@ -4385,6 +4398,7 @@ static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base);
 
 fn void thvm_atp_free(AtpState *s) {
   if (s == NULL) return;
+  atp_wmo_free((struct AtpWmOrder *)s->wmo);
   free(s->trace);
   free(s->lhs);
   free(s->rhs);
@@ -4911,6 +4925,7 @@ fn AtpAddedRange thvm_atp_install_oriented_rule(AtpState *s, Term lhs,
                               s->lhs[i], s->rhs[i]);
     if (or_t != ATP_TRACE_NONE) s->r_trace[i] = or_t;
   }
+  if (s->use_wm_emission_order) atp_wmo_insert_fact(s, i);
   r.first = idx;
   r.count = 1;
   // Generate CPs between this newly-installed rule and the rules
@@ -8208,6 +8223,8 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
         // cookie keyed on r_revision must invalidate.
         s->r_revision++;
         s->n_rules_bwd_subsumed++;
+        // WM order mirror: the subsumed fact leaves the tree.
+        if (s->use_wm_emission_order) atp_wmo_remove_trace(s, s->r_trace[i]);
 #ifdef THVM_ATPFT_RULES
         // Stage 4: mirror the slot-save on the AtpFt side.  The dead
         // sentinel is a TAG_FVR with var id 255 (out of range); convert
@@ -8518,6 +8535,20 @@ fn void thvm_atp_set_use_eset_subsume(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_queue_subsume(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_queue_subsume = on ? 1u : 0u;
+}
+
+fn void thvm_atp_set_use_wm_emission_order(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wm_emission_order = on ? 1u : 0u;
+  if (on && s->wmo == NULL) {
+    s->wmo = (void *)atp_wmo_new();
+    // Register already-live facts in slot order (creation order on the
+    // preset path, where the flag is set before the axioms install).
+    for (u32 i = 0; i < s->n_rules; i++) {
+      if (s->r_dead != NULL && s->r_dead[i]) continue;
+      atp_wmo_insert_fact(s, i);
+    }
+  }
 }
 
 // Buffer one interreduction victim's ORIGINAL sides + the TRACE_SIMPLIFY
@@ -9040,6 +9071,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     u32  t  = atp_trace_push(s, reason, chain_tail,
                              ATP_TRACE_NONE, rl, rr);
     s->r_trace[rid] = t;
+    // WM order mirror: the fact is now in R/E with its identity --
+    // register its tree faces (RE_RegelEinfuegen / GleichungEinfuegen).
+    if (s->use_wm_emission_order) atp_wmo_insert_fact(s, rid);
   }
 
 #ifdef ATP_CP_GROUND_JOIN
@@ -11522,6 +11556,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // dead so its descendant CPs are skipped at pop time (WM
       // selectNonOrphan).  No queue sweep here.
       if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[i]);
+      // WM order mirror: the fact left R/E (RE_RegelEntfernen).
+      if (s->use_wm_emission_order) atp_wmo_remove_trace(s, s->r_trace[i]);
       // Keep the unorientable-rule count live: the dropped rule leaves
       // R here (it re-enters as a queued equation, re-counted only if
       // re-oriented unorientable at its next atp_push_rule).
@@ -11662,6 +11698,11 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             atp_trace_push(s, TRACE_SIMPLIFY, s->r_trace[i],
                            ATP_TRACE_NONE, old_lhs, r_reduced);
             s->rhs[i]     = r_reduced;
+            // WM order mirror: the rule keeps its tree position; only
+            // its identity tag moves (RMRechtsInterred in-place modify).
+            if (s->use_wm_emission_order) {
+              atp_wmo_rename_trace(s, s->r_trace[i], new_t);
+            }
             s->r_trace[i] = new_t;
             s->n_right_reduced++;
             if (atp_rule_trace_on()) {
@@ -11756,6 +11797,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         }
 #endif
         if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[j]);
+        if (s->use_wm_emission_order) atp_wmo_remove_trace(s, s->r_trace[j]);
         if (!s->r_orient[j]) s->n_unorient--;
         for (u32 k = j + 1; k < s->n_rules; k++) {
           s->lhs[k - 1]              = s->lhs[k];
@@ -11807,6 +11849,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         }
 #endif
         if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[j]);
+        if (s->use_wm_emission_order) atp_wmo_remove_trace(s, s->r_trace[j]);
         if (!s->r_orient[j]) s->n_unorient--;
         for (u32 k = j + 1; k < s->n_rules; k++) {
           s->lhs[k - 1]              = s->lhs[k];
@@ -12602,6 +12645,9 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
               i, s->r_trace[i]);
     }
     if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[i]);
+    // WM order mirror: the subsumed equation's faces leave the tree
+    // (RE_GleichungEntfernen via FinaleKillprozSubsumption).
+    if (s->use_wm_emission_order) atp_wmo_remove_trace(s, s->r_trace[i]);
     // The active E set changed: invalidate the IR-normalize cookie
     // and force the rule/unorient index rebuild (a revision delta
     // that exceeds the rule-count delta is never pure-append).
@@ -14068,6 +14114,13 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
 // participates in CP formation through its distinguished face only.
 // The suppressed combos would emit exact variants of the
 // forward-face CPs -- pairs WM never forms.
+static u8 atp_eq_is_mono(const AtpState *s, u32 i);
+
+// Waldmeister CP-emission-order mirror (leaf lists, discrimination-tree
+// order, tops-DFS ranking).  See the file header for the decoded model
+// and waldmeister/sources citations.
+#include "wm_order.c"
+
 static u8 atp_eq_is_mono(const AtpState *s, u32 i) {
 #ifdef ATP_VAR_NORM
   Term rl = s->rhs[i];
@@ -14083,8 +14136,13 @@ static u8 atp_eq_is_mono(const AtpState *s, u32 i) {
 #endif
 }
 
+// `combo_end` (optional, 4 slots) receives the buffer count after each
+// of the four base face-combo passes -- the WM emission-order ranker
+// needs to know which (i-face, j-face) combination produced each CP.
+// AC-extension CPs (when compiled in) land after combo_end[3]; the
+// WM-order path treats them as combo 0.
 static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
-                          CriticalPair *buf, u32 cap) {
+                          CriticalPair *buf, u32 cap, u32 *combo_end) {
   u32 cnt = 0;
   // Variables of j must be renamed apart from i's -- the SAME offset
   // thvm_critical_pairs_range uses internally (REWRITE_MAX_VAR / 2).
@@ -14150,20 +14208,27 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
     cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, lj_r, rj_r,
                                       ft_arena_local, need_peak, skip1,
                                       buf, cap, cnt);
+    if (combo_end != NULL) combo_end[0] = cnt;
     if (j_un) {
       cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, rj_r, lj_r,
                                         ft_arena_local, need_peak, skip2,
                                         buf, cap, cnt);
     }
+    if (combo_end != NULL) combo_end[1] = cnt;
     if (i_un) {
       cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, lj_r, rj_r,
                                         ft_arena_local, need_peak, skip3,
                                         buf, cap, cnt);
+      if (combo_end != NULL) combo_end[2] = cnt;
       if (j_un) {
         cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, rj_r, lj_r,
                                           ft_arena_local, need_peak, skip4,
                                           buf, cap, cnt);
       }
+    }
+    if (combo_end != NULL) {
+      if (!i_un) combo_end[2] = cnt;
+      combo_end[3] = cnt;
     }
     // Scratch is reset by the caller between overlap pairs (saturation
     // step).  Each scratch-allocated rename + working tree dies on that
@@ -14175,17 +14240,24 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
         { thvm_critical_pairs_pair, thvm_critical_pairs_pair_noroot };
     // (i-face li) x (j: lj->rj)  -- the standard overlap.
     cnt = pf[skip1](li, ri, lj, rj, buf, cap, cnt);
+    if (combo_end != NULL) combo_end[0] = cnt;
     if (j_un) {
       // (i-face li) x (j: rj->lj)
       cnt = pf[skip2](li, ri, rj, lj, buf, cap, cnt);
     }
+    if (combo_end != NULL) combo_end[1] = cnt;
     if (i_un) {
       // (i-face ri) x (j: lj->rj)
       cnt = pf[skip3](ri, li, lj, rj, buf, cap, cnt);
+      if (combo_end != NULL) combo_end[2] = cnt;
       if (j_un) {
         // (i-face ri) x (j: rj->lj)
         cnt = pf[skip4](ri, li, rj, lj, buf, cap, cnt);
       }
+    }
+    if (combo_end != NULL) {
+      if (!i_un) combo_end[2] = cnt;
+      combo_end[3] = cnt;
     }
   }
 
@@ -14287,7 +14359,7 @@ static u32 atp_gen_one(AtpState *s, u32 i, u32 j, CriticalPair *buf) {
       s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) {
     return 0;
   }
-  u32 nbuf   = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH);
+  u32 nbuf   = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH, NULL);
   u32 pushed = atp_push_cps_traced(s, buf, nbuf,
                                    s->r_trace[i], s->r_trace[j], i, j);
   // A single saturation step can out-allocate a whole GC semi-space in
@@ -14298,12 +14370,107 @@ static u32 atp_gen_one(AtpState *s, u32 i, u32 j, CriticalPair *buf) {
   return pushed;
 }
 
+// WM emission-order generation: collect the whole new-fact batch with
+// (i, j, combo) tags, rank each CP per the order mirror, stable-sort,
+// then push -- so equal-weight CPs receive their FIFO ages (w2) in
+// Waldmeister's emission order (U1_KPsBildenZuFaktum phase walk).
+// Heap-pressure GC is deferred to the end of the batch: the tagged
+// buffer holds unrooted Terms a collection could invalidate.
+typedef struct {
+  CriticalPair cp;
+  u32 i, j;
+  u8  combo;
+  u64 key;
+  u32 seq;        // original index: stable tiebreak
+} AtpWmoCpEnt;
+
+static int atp_wmo_ent_cmp(const void *pa, const void *pb) {
+  const AtpWmoCpEnt *a = (const AtpWmoCpEnt *)pa;
+  const AtpWmoCpEnt *b = (const AtpWmoCpEnt *)pb;
+  if (a->key != b->key) return a->key < b->key ? -1 : 1;
+  return a->seq < b->seq ? -1 : (a->seq > b->seq ? 1 : 0);
+}
+
+static u32 atp_wmo_collect_pair(AtpState *s, u32 i, u32 j,
+                                AtpWmoCpEnt **big, u32 *n_big, u32 *cap_big,
+                                CriticalPair *buf) {
+  if (s->r_gj_status[i] == ATP_GJ_ST_JOINABLE ||
+      s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) {
+    return 0;
+  }
+  u32 combo_end[4] = {0, 0, 0, 0};
+  u32 nbuf = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH, combo_end);
+  if (nbuf == 0u) return 0;
+  if (*n_big + nbuf > *cap_big) {
+    u32 cap = *cap_big ? *cap_big : 256u;
+    while (cap < *n_big + nbuf) cap *= 2u;
+    AtpWmoCpEnt *grown =
+        (AtpWmoCpEnt *)realloc(*big, cap * sizeof(AtpWmoCpEnt));
+    if (grown == NULL) return 0;   // degrade: drop this pair's CPs
+    *big = grown;
+    *cap_big = cap;
+  }
+  for (u32 k = 0; k < nbuf; k++) {
+    AtpWmoCpEnt *e = &(*big)[(*n_big)++];
+    e->cp = buf[k];
+    e->i = i;
+    e->j = j;
+    e->combo = (k < combo_end[0]) ? 0u
+             : (k < combo_end[1]) ? 1u
+             : (k < combo_end[2]) ? 2u : 3u;
+    e->seq = *n_big - 1u;
+  }
+  return nbuf;
+}
+
+static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
+  u32 first = added.first;
+  u32 last  = added.first + added.count;
+  u32 n     = s->n_rules;
+  if (last > n) last = n;
+  if (first > last) return 0;
+
+  CriticalPair buf[ATP_CP_BATCH];
+  u32 pushed = 0;
+  for (u32 f = first; f < last; f++) {
+    AtpWmoCpEnt *big = NULL;
+    u32 n_big = 0, cap_big = 0;
+    // tops + self: f as the outer (positions in f's faces)
+    for (u32 j = 0; j < n; j++) {
+      atp_wmo_collect_pair(s, f, j, &big, &n_big, &cap_big, buf);
+    }
+    // eTT: f as the inner, planted into the OLD facts' positions
+    for (u32 i = 0; i < first; i++) {
+      atp_wmo_collect_pair(s, i, f, &big, &n_big, &cap_big, buf);
+    }
+    for (u32 k = 0; k < n_big; k++) {
+      big[k].key = atp_wmo_rank(s, f, big[k].i, big[k].j, big[k].combo,
+                                &big[k].cp);
+    }
+    qsort(big, n_big, sizeof(AtpWmoCpEnt), atp_wmo_ent_cmp);
+    for (u32 k = 0; k < n_big; k++) {
+      pushed += atp_push_cps_traced(s, &big[k].cp, 1u,
+                                    s->r_trace[big[k].i],
+                                    s->r_trace[big[k].j],
+                                    big[k].i, big[k].j);
+    }
+    free(big);
+    s->n_wmo_rank_misses = ((AtpWmOrder *)s->wmo)->rank_misses;
+    if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
+  }
+  return pushed;
+}
+
 static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   u32 first = added.first;
   u32 last  = added.first + added.count;
   u32 n     = s->n_rules;
   if (last > n) last = n;
   if (first > last) return 0;
+
+  if (s->use_wm_emission_order && s->wmo != NULL) {
+    return thvm_atp_generate_cps_wm(s, added);
+  }
 
   CriticalPair buf[ATP_CP_BATCH];
   u32 pushed = 0;
