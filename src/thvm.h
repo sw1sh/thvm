@@ -2130,6 +2130,8 @@ u32  thvm_metal_buf_pool_begin(void);
 void thvm_metal_buf_pool_rollback_with_preserve(u32 wm);
 void thvm_metal_buf_mark_preserved(u32 buf_id);
 void thvm_metal_buf_clear_preserved(u32 wm);
+u32  thvm_metal_buf_count(void);
+void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out);
 
 // === uop/ ===
 // Constructors for raw UOp graph nodes.  Each helper allocates the

@@ -1363,10 +1363,109 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
     }
   }
 
+#ifdef THVM_HAS_METAL
+  // SSA-rename recycled Metal dispatch outputs so the ICB graph replay has no
+  // within-batch write-after-write on a shared physical buffer (the only thing
+  // forcing the slow per-op fallback for multi-root streams like the FLUX
+  // transformer).  The scheduler reuses a buffer across the captured stream;
+  // here the SECOND+ writer of a buffer gets a fresh same-size buffer and every
+  // later read of that buffer is redirected to it, so each physical buffer is
+  // written exactly once and the batched ICB path becomes safe.  Pure-DISPATCH
+  // captures only (ASSIGN/GATHER thread buffers through TenDescs, not handled).
+  {
+    // Default OFF: the rename is verified correct for simple recycling streams
+    // (the batched ICB then matches per-op bit-for-bit), but the FLUX multi-root
+    // double block (shared joint-attention sub-DAG, concat/slice views) still
+    // replays wrong through the ICB after renaming -- the buffer-write model
+    // here does not yet capture region/view writes.  Opt in with =1 for the
+    // simple recycling case; FLUX keeps the correct per-op path until resolved.
+    char const *re = getenv("THVM_JIT_GRAPH_RENAME");
+    int rename_on = (re != NULL && re[0] != '0');   // default off; =1 enables
+    int pure_dispatch = 1;
+    for (u32 i = 0; i < c->n_ops; i++) {
+      if (c->ops[i].replay_skip) continue;
+      if (c->ops[i].kind != JIT_OP_DISPATCH) { pure_dispatch = 0; break; }
+    }
+    if (rename_on && pure_dispatch) {
+      u32 nbufs = thvm_metal_buf_count();
+      // The actual result roots (just the returned tensors' buf_ids, NOT the
+      // transitive `needed` closure the liveness pass built above).  These name
+      // the live results and must never be renamed; every other recycled buffer
+      // is fair game.
+      JitCaptureBufRef *root_bufs = (JitCaptureBufRef *)calloc(
+          JIT_CAPTURE_RETAIN_CAP, sizeof(JitCaptureBufRef));
+      u32 n_root_bufs = 0;
+      if (root_bufs != NULL) {
+        for (u32 ri = 0; ri < n_roots; ri++) {
+          jit_capture_root_needed(roots[ri], root_bufs, &n_root_bufs);
+        }
+      }
+      // last_op[ob] = index of the LAST live dispatch writing ob.  The last
+      // write keeps the original buffer; only EARLIER writes get renamed.
+      // cur[ob] = the buffer the latest write to ob landed in.
+      u32 *last_op = (u32 *)calloc((size_t)nbufs + 1u, sizeof(u32));
+      u32 *cur     = (u32 *)calloc((size_t)nbufs + 1u, sizeof(u32));
+      if (last_op != NULL && cur != NULL) {
+        for (u32 i = 0; i < c->n_ops; i++) {
+          JitCaptureOp *op = &c->ops[i];
+          if (op->kind != JIT_OP_DISPATCH || op->replay_skip) continue;
+          u32 ob = op->out_buf_id;
+          if (ob != 0 && ob <= nbufs) last_op[ob] = i + 1u;  // 1-based
+        }
+        for (u32 i = 0; i < c->n_ops; i++) {
+          JitCaptureOp *op = &c->ops[i];
+          if (op->kind != JIT_OP_DISPATCH || op->replay_skip) continue;
+          Backend *be = jit_dispatch_output_backend(op);
+          if (be == NULL || be->id != 2 /* Metal */) continue;
+          // Redirect inputs to the current version of any recycled buffer.
+          u32 *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids
+                                                 : op->in_buf_ids;
+          for (u32 k = 0; k < op->n_inputs; k++) {
+            u32 ib = ids[k];
+            if (ib != 0 && ib <= nbufs && cur[ib] != 0 && cur[ib] != ib) {
+              ids[k] = cur[ib];
+            }
+          }
+          u32 ob = op->out_buf_id;
+          if (ob == 0 || ob > nbufs) continue;
+          // Rename every write that is NOT the last write of ob, so each
+          // physical buffer is written exactly once (the last write keeps the
+          // original buffer -- it is the live result the tensor handle names).
+          // A buffer written only once has last_op == this index -> not renamed.
+          // NEVER rename a write into a result buffer (a root): the returned
+          // tensor names that buf_id.  If a root's slot is later reused the
+          // metal_graph_unsafe check below keeps the ICB declined (per-op,
+          // correct) rather than risk corrupting the result.
+          if (last_op[ob] != i + 1u
+              && !jit_bufref_contains(root_bufs, n_root_bufs, be, ob)) {
+            u64 nbytes = 0;
+            thvm_metal_buf_get(ob, &nbytes, NULL);
+            u32 ob_new = (nbytes > 0 && be->buf_alloc != NULL)
+                       ? be->buf_alloc(nbytes) : 0;
+            if (ob_new != 0) {
+              jit_capture_retain_buf(c, be, ob_new);  // incref + pin + unfreelist
+              op->out_buf_id = ob_new;
+              cur[ob] = ob_new;
+            } else {
+              cur[ob] = ob;
+            }
+          } else {
+            cur[ob] = ob;  // first or last writer keeps its buffer
+          }
+        }
+      }
+      free(root_bufs);
+      free(last_op);
+      free(cur);
+    }
+  }
+#endif
+
   // Mark the Metal ICB replay path unsafe if any output buf_id is written by
   // two live dispatches (the scheduler recycled it across the captured stream).
-  // O(n^2) over live dispatches, but n is the per-step kernel count (~hundreds)
-  // and this runs once at capture.
+  // After the rename pass above this should no longer trip for pure-DISPATCH
+  // Metal captures.  O(n^2) over live dispatches, but n is the per-step kernel
+  // count (~hundreds) and this runs once at capture.
   c->metal_graph_unsafe = 0;
   for (u32 i = 0; i < c->n_ops && !c->metal_graph_unsafe; i++) {
     if (c->ops[i].kind != JIT_OP_DISPATCH || c->ops[i].replay_skip) continue;
