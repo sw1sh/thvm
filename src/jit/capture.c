@@ -129,6 +129,17 @@ typedef struct {
   u32               sites_built;
   u32               n_sites;
   JitInputSite     *sites;          // [n_sites]
+  // Set by jit_capture_finalize when two live captured dispatches write the
+  // SAME output buf_id (the scheduler recycled a buffer across the stream).
+  // Such a stream is UNSAFE for the Metal indirect-command-buffer replay path
+  // (see jit_replay_try_metal_graph_run): two ICB commands writing one physical
+  // MTLBuffer have undefined ordering on Apple GPUs even with setBarrier, and
+  // no encoder/command-buffer barrier recovers it (verified empirically).
+  // tinygrad's MetalGraph never reuses a buffer across a graph's kernels
+  // (runtime/graph/metal.py), so it never hits this; thvm's freelist/arena
+  // recycling does.  When set, replay walks the per-op path (correct, still
+  // scheduler-free) instead of batching into an ICB.
+  u32               metal_graph_unsafe;
 } JitCapture;
 
 static JitCapture JIT_CAPTURES[JIT_CAPTURE_NSLOTS];
@@ -1351,12 +1362,36 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
         break;
     }
   }
+
+  // Mark the Metal ICB replay path unsafe if any output buf_id is written by
+  // two live dispatches (the scheduler recycled it across the captured stream).
+  // O(n^2) over live dispatches, but n is the per-step kernel count (~hundreds)
+  // and this runs once at capture.
+  c->metal_graph_unsafe = 0;
+  for (u32 i = 0; i < c->n_ops && !c->metal_graph_unsafe; i++) {
+    if (c->ops[i].kind != JIT_OP_DISPATCH || c->ops[i].replay_skip) continue;
+    u32 ob = c->ops[i].out_buf_id;
+    if (ob == 0) continue;
+    for (u32 j = i + 1; j < c->n_ops; j++) {
+      if (c->ops[j].kind != JIT_OP_DISPATCH || c->ops[j].replay_skip) continue;
+      if (c->ops[j].out_buf_id == ob) { c->metal_graph_unsafe = 1; break; }
+    }
+  }
+
   free(needed);
 }
 
 #ifdef THVM_HAS_METAL
 static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   if (!jit_metal_graph_replay_enabled()) {
+    return 0;
+  }
+  // Streams that recycle an output buffer can't be batched into an ICB safely
+  // (Apple GPUs do not order two ICB commands writing one physical buffer, and
+  // no barrier recovers it).  Replay these per-op instead -- still scheduler-
+  // free, just one dispatch per encoder where Metal's automatic hazard tracking
+  // is correct.
+  if (c->metal_graph_unsafe) {
     return 0;
   }
   if (start >= c->n_ops || c->ops[start].kind != JIT_OP_DISPATCH) {
