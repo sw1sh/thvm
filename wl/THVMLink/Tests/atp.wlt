@@ -3054,3 +3054,17 @@ VerificationTest[
     {1, 0, 0},
     TestID -> "ATP/options/wm-mixmost-nf-decoder"
 ]
+
+(* KNOWN FAILING (pre-existing at daaeb018, NOT from the WMMixmostNF
+   port -- reproduced byte-identically from a clean daaeb018 worktree):
+   Method -> "WaldmeisterLazy" on McCune-II dies in proof extraction
+   with Part::partw on index 4294967296 = ATP_TRACE_NONE + 1 -- an
+   unguarded sentinel parent id in a trace record (Reason -> 3 =
+   NORM_STEP) on the lazy path.  TFindProof returns $Failed.  Fix the
+   sentinel guard in the lift, then this test goes green. *)
+VerificationTest[
+    Head @ Quiet @ TFindProof["InverseOfInverse", "McCuneAxioms",
+        Method -> "WaldmeisterLazy"],
+    ProofObject,
+    TestID -> "ATP/waldmeister-lazy/mccune-ii-proof-extraction"
+]
