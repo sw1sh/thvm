@@ -14077,6 +14077,30 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   u8 i_un = i_eq && !i_mono;
   u8 j_un = j_eq && !j_mono;
 
+  // Root-overlap ownership (WM Unifikation1.c U1_KPsBildenZuRegel /
+  // U1_KPsBildenZuGleichung).  WM forms each root-x-root overlap of a
+  // fact pair exactly ONCE: the new fact's toplevel phase walks TT(l)
+  // (root included) against OLD tops, while the converse phase walks
+  // the top against eTT (PROPER subterms) only.  The saturator visits
+  // a pair as both (i, j) and (j, i); the i > j call owns the roots,
+  // the i < j call enumerates proper positions only.  Self pair
+  // (i == j): WM's dedicated phases give an equation the roots
+  // F (l =? l), C (l =? r, stereo only, ONCE -- combo 3's root is C's
+  // mirror and is skipped) and G (r =? r); a RULE never forms a root
+  // self-overlap (U1_KPsBildenZuRegel passes the rule itself as the
+  // toplevel-pass Ausschluss = exclusion object).
+  u8 skip1, skip2, skip3, skip4;
+  if (i < j) {
+    skip1 = skip2 = skip3 = skip4 = 1u;
+  } else if (i > j) {
+    skip1 = skip2 = skip3 = skip4 = 0u;
+  } else {
+    skip1 = i_eq ? 0u : 1u;
+    skip2 = 0u;
+    skip3 = 1u;
+    skip4 = 0u;
+  }
+
 #ifdef THVM_ATPFT_UNIFY
   // FT-native overlap path: when both rules' FT mirrors are populated,
   // the rename + cp_visit work happens on AtpFt cells directly, only
@@ -14098,20 +14122,20 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
     AtpFtCell *ri_ft = s->rhs_ft[i];
     u8 need_peak = s->use_connectedness ? 1u : 0u;
     cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, lj_r, rj_r,
-                                      ft_arena_local, need_peak,
+                                      ft_arena_local, need_peak, skip1,
                                       buf, cap, cnt);
     if (j_un) {
       cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, rj_r, lj_r,
-                                        ft_arena_local, need_peak,
+                                        ft_arena_local, need_peak, skip2,
                                         buf, cap, cnt);
     }
     if (i_un) {
       cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, lj_r, rj_r,
-                                        ft_arena_local, need_peak,
+                                        ft_arena_local, need_peak, skip3,
                                         buf, cap, cnt);
       if (j_un) {
         cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, rj_r, lj_r,
-                                          ft_arena_local, need_peak,
+                                          ft_arena_local, need_peak, skip4,
                                           buf, cap, cnt);
       }
     }
@@ -14121,18 +14145,20 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   } else
 #endif
   {
+    u32 (*const pf[2])(Term, Term, Term, Term, CriticalPair *, u32, u32) =
+        { thvm_critical_pairs_pair, thvm_critical_pairs_pair_noroot };
     // (i-face li) x (j: lj->rj)  -- the standard overlap.
-    cnt = thvm_critical_pairs_pair(li, ri, lj, rj, buf, cap, cnt);
+    cnt = pf[skip1](li, ri, lj, rj, buf, cap, cnt);
     if (j_un) {
       // (i-face li) x (j: rj->lj)
-      cnt = thvm_critical_pairs_pair(li, ri, rj, lj, buf, cap, cnt);
+      cnt = pf[skip2](li, ri, rj, lj, buf, cap, cnt);
     }
     if (i_un) {
       // (i-face ri) x (j: lj->rj)
-      cnt = thvm_critical_pairs_pair(ri, li, lj, rj, buf, cap, cnt);
+      cnt = pf[skip3](ri, li, lj, rj, buf, cap, cnt);
       if (j_un) {
         // (i-face ri) x (j: rj->lj)
-        cnt = thvm_critical_pairs_pair(ri, li, rj, lj, buf, cap, cnt);
+        cnt = pf[skip4](ri, li, rj, lj, buf, cap, cnt);
       }
     }
   }
@@ -14360,10 +14386,12 @@ typedef struct {
   CriticalPair *out;
   u32           cap;
   u32           count;
+  u8            skip_root;   // 1 = PROPER positions only (WM eTT)
 } CpCtxIc;
 
 static u32 cp_visit_ic(const u32 *p, u32 p_len, void *raw) {
   CpCtxIc *ctx = (CpCtxIc *)raw;
+  if (ctx->skip_root && p_len == 0u) return ctx->count;
   if (ctx->count >= ctx->cap) {
     g_cp_dropped_capped++;
     return ctx->count;
@@ -14425,6 +14453,7 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
       ctx.out   = buf;
       ctx.cap   = ATP_CP_BATCH;
       ctx.count = 0;
+      ctx.skip_root = 1u;   // i < j: roots belong to the (j, i) visit
       (void)cp_walk_positions(ctx.li, path, 0, CP_MAX_DEPTH,
                               cp_visit_ic, &ctx, 0);
       pushed += atp_push_cps_traced(s, buf, ctx.count,
@@ -14446,6 +14475,13 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
       ctx.out   = buf;
       ctx.cap   = ATP_CP_BATCH;
       ctx.count = 0;
+      // Root-overlap ownership: same discipline as atp_overlap_ij
+      // (the i > j call owns the pair's root; a rule never forms a
+      // root self-overlap).  The IC lane has no unfailing face
+      // combos, so the i == j equation case is combo 1 (phase F).
+      ctx.skip_root = (i < j) ||
+                      (i == j &&
+                       !(s->use_unfailing_cp && !s->r_orient[i]));
       (void)cp_walk_positions(ctx.li, path, 0, CP_MAX_DEPTH,
                               cp_visit_ic, &ctx, 0);
       pushed += atp_push_cps_traced(s, buf, ctx.count,

@@ -3728,6 +3728,13 @@ fn u32 thvm_critical_pairs_range(const Term *lhs, const Term *rhs, u32 n_rules,
 fn u32 thvm_critical_pairs_pair(Term li, Term ri, Term lj, Term rj,
                                 CriticalPair *out, u32 cap, u32 count);
 
+// Proper-position variant of the above: the root of `li` is not a
+// superposition site (WM eTT enumeration; see the definition for the
+// root-overlap ownership discipline between the saturator's (i, j)
+// and (j, i) visits of one fact pair).
+fn u32 thvm_critical_pairs_pair_noroot(Term li, Term ri, Term lj, Term rj,
+                                       CriticalPair *out, u32 cap, u32 count);
+
 // Diagnostic counters for the CP enumeration caps:
 //   *out_dropped       -- per-pair buffer cap-hits (ctx->count >= ctx->cap)
 //   *out_depth_capped  -- positions stranded under a CTR at CP_MAX_DEPTH

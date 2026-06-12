@@ -112,10 +112,12 @@ typedef struct {
   CriticalPair *out;
   u32           cap;
   u32           count;
+  u8            skip_root;    // 1 = enumerate PROPER positions only (WM eTT)
 } CpCtx;
 
 static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {
   CpCtx *ctx = (CpCtx *)raw;
+  if (ctx->skip_root && p_len == 0u) return ctx->count;
   if (ctx->count >= ctx->cap) {
     // Position would have been tried; we cannot know whether unify
     // would have produced a CP without doing the work, so attribute
@@ -185,6 +187,7 @@ fn u32 thvm_critical_pairs_range(const Term *lhs, const Term *rhs, u32 n_rules,
   ctx.out   = out;
   ctx.cap   = cap;
   ctx.count = 0;
+  ctx.skip_root = 0u;
   u32 path[CP_MAX_DEPTH];
   for (u32 i = start_i; i < end_i; i++) {
     for (u32 j = start_j; j < end_j; j++) {
@@ -232,6 +235,30 @@ fn u32 thvm_critical_pairs_pair(Term li, Term ri, Term lj, Term rj,
   ctx.out   = out;
   ctx.cap   = cap;
   ctx.count = count;
+  ctx.skip_root = 0u;
+  u32 path[CP_MAX_DEPTH];
+  return cp_walk_positions(li, path, 0, CP_MAX_DEPTH, cp_visit, &ctx, count);
+}
+
+// Proper-position variant: identical to thvm_critical_pairs_pair but
+// the root position of `li` is NOT a superposition site -- WM's eTT
+// (echte Teilterme = proper subterms) enumeration.  The saturator
+// visits each unordered fact pair twice, as (i, j) and (j, i); WM's
+// phase discipline (Unifikation1.c U1_KPsBildenZuRegel spec: phase
+// "TT(l) =? R" carries the root, phase "l =? eTT(R')" does not) puts
+// every root-x-root overlap in exactly ONE of the two visits, so the
+// other visit enumerates proper positions only.
+fn u32 thvm_critical_pairs_pair_noroot(Term li, Term ri, Term lj, Term rj,
+                                       CriticalPair *out, u32 cap, u32 count) {
+  CpCtx ctx;
+  ctx.li    = li;
+  ctx.ri    = ri;
+  ctx.lj    = lj;
+  ctx.rj    = rj;
+  ctx.out   = out;
+  ctx.cap   = cap;
+  ctx.count = count;
+  ctx.skip_root = 1u;
   u32 path[CP_MAX_DEPTH];
   return cp_walk_positions(li, path, 0, CP_MAX_DEPTH, cp_visit, &ctx, count);
 }

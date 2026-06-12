@@ -636,12 +636,12 @@ int main(void) {
   {
     // Add one rule via orient_and_add, then generate_cps.  Since R
     // contains only the new rule, the only enumeration is the 1x1
-    // self-overlap (always produced at the top position via the
-    // fresh rename of j).
-    //
-    // Stage 7.1: that self-overlap CP is always trivially joinable
-    // (both sides reduce to the same renamed RHS), so the filter
-    // drops it -- pushed must be 0 and the dropped-counter ticks.
+    // self-overlap.  WM never forms a rule's root self-overlap
+    // (U1_KPsBildenZuRegel passes the rule itself as the toplevel
+    // Ausschluss = exclusion object, Unifikation1.c:1480-1530), and
+    // f(x, e)'s only proper non-var position is the constant e,
+    // which cannot unify with the f-rooted LHS -- so NOTHING is
+    // built: no push, no joinability drop.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     Term lhs = mk_f(mk_v(VAR_x), mk_e());
     Term rhs = mk_v(VAR_x);
@@ -650,7 +650,7 @@ int main(void) {
     u32 pushed = thvm_atp_generate_cps(s, added);
     CHECK_EQ(pushed, 0u);
     CHECK_EQ(s->n_cps, 0u);
-    CHECK(s->n_cps_dropped_joinable >= 1u);
+    CHECK_EQ(s->n_cps_dropped_joinable, 0u);
     thvm_atp_free(s);
   }
 
@@ -1469,7 +1469,10 @@ int main(void) {
 
     // Stereo control: f(i(x), y) = f(y, i(x)) is NOT a mono equation
     // (the reversed pair renumbers differently), so all four face
-    // combos run -- the unfailing both-faces coverage stays intact.
+    // combos run.  WM's self roots are phases F (l =? l), C (l =? r,
+    // ONCE) and G (r =? r); face combo 3's root is C's mirror and is
+    // not built, so the self pair yields exactly THREE CPs (no proper
+    // position of either side unifies an f-rooted face here).
     s = thvm_atp_init(&DUMMY_CFG, 100);
     thvm_atp_set_use_unfailing_cp(s, 1u);
     a = thvm_atp_orient_and_add(s,
@@ -1479,7 +1482,7 @@ int main(void) {
     CHECK_EQ(s->r_orient[0], 0u);
     CHECK_EQ((u32)atp_eq_is_mono(s, 0), 0u);
     cnt = atp_overlap_ij(s, 0, 0, buf, ATP_CP_BATCH);
-    CHECK_EQ(cnt, 4u);
+    CHECK_EQ(cnt, 3u);
     thvm_atp_free(s);
   }
 
@@ -1977,10 +1980,11 @@ int main(void) {
     // Queue-subsumption deliberately skips the implicit passive set
     // (WM has no queue-vs-queue subsumption -- SS_TermpaarSubsummiert-
     // VonGM matches only the ACTIVE set), so the implicit run sees
-    // ZERO queue-subsumed drops, while an eager twin of the same setup
-    // drops the symmetric second overlap against the first queued CP.
-    // This is the designed trajectory delta of the arc: the flag-ON
-    // gate is proof-validity, not byte-parity.
+    // ZERO queue-subsumed drops.  An eager twin of the same setup
+    // builds the identical CP set: the cross pair's single root
+    // overlap is owned by the (new, old) visit (WM TT/eTT root
+    // discipline), so neither run has a symmetric second copy for the
+    // filter to drop and the two paths agree exactly.
     CHECK_EQ(s->n_cps_dropped_queue_subsumed, 0u);
     AtpState *e = thvm_atp_init(&DUMMY_CFG, 100);
     e->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
@@ -1996,8 +2000,8 @@ int main(void) {
                                    e->lhs[1], e->rhs[1]);
     u32 epushed = thvm_atp_generate_cps(e, eadded);
     CHECK(epushed >= 1u);
-    CHECK(e->n_cps_dropped_queue_subsumed >= 1u);
-    CHECK_EQ(epushed + e->n_cps_dropped_queue_subsumed, pushed);
+    CHECK_EQ(e->n_cps_dropped_queue_subsumed, 0u);
+    CHECK_EQ(epushed, pushed);
     CHECK_EQ(e->n_cps_implicit, 0u);
     CHECK(e->cp_is_implicit == NULL);
 
@@ -2016,6 +2020,11 @@ int main(void) {
     // Finally, with orphan murder on and a parent marked dead, the
     // remaining implicit CPs must be discarded at pop (WM
     // selectNonOrphan over the implicit passive set).
+    // TWO old rules whose LHS roots both unify with the new rule's
+    // f(x, e) -- each cross pair contributes its one root CP (owned
+    // by the (new, old) visit per the WM TT/eTT root discipline), so
+    // two descriptors queue and one survives the first pop for the
+    // orphan-drain check below.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     thvm_atp_set_use_implicit_cp(s, 1u);
 
@@ -2024,13 +2033,18 @@ int main(void) {
     s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
                                    ATP_TRACE_NONE, ATP_TRACE_NONE,
                                    s->lhs[0], s->rhs[0]);
-    s->n_rules = 1;
+    s->lhs[1] = mk_f(mk_i(mk_v(VAR_x)), mk_e());
+    s->rhs[1] = mk_i(mk_a());
+    s->r_trace[1] = atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[1], s->rhs[1]);
+    s->n_rules = 2;
 
     AtpAddedRange added = thvm_atp_orient_and_add(
         s, mk_f(mk_v(VAR_x), mk_e()), mk_a());
-    s->r_trace[1] = atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
+    s->r_trace[2] = atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
                                    ATP_TRACE_NONE,
-                                   s->lhs[1], s->rhs[1]);
+                                   s->lhs[2], s->rhs[2]);
     u32 pushed = thvm_atp_generate_cps(s, added);
     CHECK(pushed >= 2u);
     CHECK_EQ(s->n_cps, pushed);            // no queue-subsume drops
@@ -2067,7 +2081,7 @@ int main(void) {
     // remaining implicit queue must drain as orphans.
     CHECK(s->n_cps >= 1u);
     thvm_atp_set_use_orphan_murder(s, 1u);
-    atp_trace_mark_dead(s, s->r_trace[1]);
+    atp_trace_mark_dead(s, s->r_trace[2]);
     Term ol = 0, orr = 0;
     CHECK_EQ(thvm_atp_select_cp(s, &ol, &orr), 0u);
     CHECK_EQ(s->n_cps, 0u);
@@ -2656,15 +2670,23 @@ int main(void) {
 
   TEST_BEGIN("atp/cp-joinability-filter-self-overlap-counter");
   {
-    // A single rule's self-overlap is always trivially joinable;
-    // generate_cps should drop it and bump n_cps_dropped_joinable.
+    // A rule's root self-overlap is never built (WM Ausschluss; see
+    // atp/generate-cps-single-rule-self-overlap), so the trivially-
+    // joinable drop is exercised on the next-simplest shape: two
+    // VARIANT rules.  The cross pair's root overlap -- owned by the
+    // (new, old) visit -- unifies the two LHS copies and yields a CP
+    // whose sides are the same variable; the filter drops it and
+    // bumps n_cps_dropped_joinable.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
     s->rhs[0] = mk_v(VAR_x);
     s->r_trace[0] = ATP_TRACE_NONE;
-    s->n_rules = 1;
+    s->lhs[1] = mk_f(mk_e(), mk_v(VAR_x));
+    s->rhs[1] = mk_v(VAR_x);
+    s->r_trace[1] = ATP_TRACE_NONE;
+    s->n_rules = 2;
 
-    AtpAddedRange added = {0, 1, 0};
+    AtpAddedRange added = {1, 1, 0};
     CHECK_EQ(s->n_cps_dropped_joinable, 0u);
     u32 pushed = thvm_atp_generate_cps(s, added);
     CHECK_EQ(pushed, 0u);
@@ -2696,11 +2718,12 @@ int main(void) {
 
   TEST_BEGIN("atp/cp-joinability-filter-counter-on-saturation");
   {
-    // Full group-axiom saturation: many self-overlaps and
-    // assoc-driven CPs are trivially joinable.  After running to
-    // completion or timeout, the dropped counter must be > 0.
+    // Full group-axiom saturation: many assoc-driven cross-overlap
+    // CPs are trivially joinable.  The goal is a NON-theorem so the
+    // run exhausts its step budget instead of closing before the
+    // deeper interactions fire; the dropped counter must be > 0.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
-    thvm_atp_set_goal(s, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_set_goal(s, mk_f(mk_a(), mk_a()), mk_e());
     thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
     thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
     thvm_atp_add_equation(s,

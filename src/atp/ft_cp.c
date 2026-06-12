@@ -279,6 +279,7 @@ typedef struct {
   u32              cap;
   u32              count;
   u8               need_peak;      // 1 = compute cp_peak; 0 = leave slot->peak = 0
+  u8               skip_root;      // 1 = PROPER positions only (WM eTT)
   u32              scratch_mark_base; // scratch bump-pointer SNAPSHOT to reset
                                       // between positions (TBD: ft_alloc
                                       // does not currently expose mark/reset,
@@ -288,6 +289,7 @@ typedef struct {
 
 static u32 ft_cp_visit(const u32 *p, u32 p_len, void *raw) {
   FtCpCtx *ctx = (FtCpCtx *)raw;
+  if (ctx->skip_root && p_len == 0u) return ctx->count;
   if (ctx->count >= ctx->cap) return ctx->count;
 
   const AtpFtCell *sub = ft_subterm_at(ctx->li_ft, p, p_len);
@@ -366,12 +368,17 @@ static u32 ft_cp_walk_positions(const AtpFtCell *t,
 // replaced tree, and the renamed copies all live there.  Caller
 // owns the lifecycle (call ft_scratch_reset between overlap pairs
 // to bound growth).
+//
+// `skip_root` = 1 enumerates PROPER positions of li only (WM eTT;
+// see thvm_critical_pairs_pair_noroot for the root-overlap
+// ownership discipline).
 u32 thvm_critical_pairs_pair_ft(const AtpFtCell *li_ft,
                                 const AtpFtCell *ri_ft,
                                 const AtpFtCell *lj_ft_r,
                                 const AtpFtCell *rj_ft_r,
                                 AtpFt           *arena,
                                 u8               need_peak,
+                                u8               skip_root,
                                 CriticalPair    *out,
                                 u32              cap,
                                 u32              count) {
@@ -385,6 +392,7 @@ u32 thvm_critical_pairs_pair_ft(const AtpFtCell *li_ft,
   ctx.cap            = cap;
   ctx.count          = count;
   ctx.need_peak      = need_peak;
+  ctx.skip_root      = skip_root;
   ctx.scratch_mark_base = 0u;
   u32 path[CP_MAX_DEPTH];
   return ft_cp_walk_positions(li_ft, path, 0, CP_MAX_DEPTH,
