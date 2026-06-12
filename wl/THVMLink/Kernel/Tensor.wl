@@ -931,9 +931,22 @@ TTerm /: ArrayReduce[Total, t_TTerm ? tensorTermQ, axes_] :=
         Reverse @ Sort @ DeleteDuplicates @ Flatten @ {axes}]
 
 (* Normal[t]: read the realized tensor's data back as an ordinary nested
-   list, i.e. Normal[TTensorData[t]], so `Normal @ TRealize @ expr`
-   stands in for `Normal @ TTensorData @ TRealize @ expr`. *)
-TTerm /: Normal[t_TTerm ? tensorTermQ] := Normal[TTensorData[t]]
+   list of VALUES, so `Normal @ TRealize @ expr` stands in for
+   `Normal @ TTensorData @ TRealize @ expr`.  TTensorData returns the raw
+   storage NumericArray (Real32 for f32, but raw UBit16 words for bf16/f16
+   and raw bytes for fp8, which WL has no native type for); Normal decodes
+   those narrow float dtypes to Reals via the TBf16ToReal / TFP16ToReal /
+   TFP8*ToReal unpackers so the readback yields the actual values, not the
+   storage words.  f32/f64/int dtypes pass through Normal[TTensorData[t]]
+   unchanged.  Callers that genuinely want the raw words (the safetensors
+   round-trip, a host-side embedding gather) call TTensorData explicitly. *)
+TTerm /: Normal[t_TTerm ? tensorTermQ] := decodeReadback[TTensorDType[t], TTensorData[t]]
+
+decodeReadback["bf16",    na_NumericArray] := ArrayReshape[TBf16ToReal[na],    Dimensions[na]]
+decodeReadback["f16",     na_NumericArray] := ArrayReshape[TFP16ToReal[na],    Dimensions[na]]
+decodeReadback["fp8e4m3", na_NumericArray] := ArrayReshape[TFP8E4M3ToReal[na], Dimensions[na]]
+decodeReadback["fp8e5m2", na_NumericArray] := ArrayReshape[TFP8E5M2ToReal[na], Dimensions[na]]
+decodeReadback[_,         na_]             := Normal[na]
 
 (* Dimensions[t]: the lazy (graph-time) shape -- the same list tUopShape
    returns, on the standard WL name so callers write `Dimensions[t]` instead

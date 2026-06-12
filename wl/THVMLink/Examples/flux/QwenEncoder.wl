@@ -27,8 +27,12 @@
    bf16 word is the high half of the f32, low half zero, exactly the device
    cast).  One-time input prep on a frozen table, not a per-step roundtrip;
    peak stays at the {S, dim} output. *)
+(* Normal[TTensorData[table]] (raw UBit16 words, NOT the decoding Normal[t_TTerm]
+   sugar) so we materialise the frozen table once as words, slice the id rows,
+   and decode only those to f32 -- decoding the whole 151936-row table would
+   cost 1.5GB for ~512 rows. *)
 qwEmbed[table_, ids_List] :=
-    TTensorCreate @ qwBf16ToF32 @ Normal[table][[ids + 1]]
+    TTensorCreate @ qwBf16ToF32 @ Normal[TTensorData[table]][[ids + 1]]
 
 qwBf16ToF32[u16_] := With[{shape = Dimensions[u16], flat = Flatten[u16]},
     ArrayReshape[
