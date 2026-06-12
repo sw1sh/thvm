@@ -770,16 +770,30 @@ broadcastShapes[shapes : {___List}] := Module[{maxr, padded},
         MapThread[Max, padded]]
 ]
 
+(* dtype precision rank for the Plus/Times operand ordering below. *)
+dtypePrecRank[dt_String] := Replace[dt, {"f64" -> 4, "f32" -> 3, "f16" -> 2, "bf16" -> 2, _ -> 1}]
+
+(* Order the operands of a commutative binop so the highest-precision operand is
+   folded first.  Plus/Times are Orderless, so WL canonicalises the TTerm
+   operands before this UpValue fires; the per-op output dtype inherits from
+   src[0] (term_dtype_in), so without a reorder a mixed f32 * bf16 would take the
+   dtype of whichever TTerm happened to sort first and could come out bf16,
+   silently bit-misinterpreting the bf16-native path.  Folding the highest
+   precision first promotes the result to that dtype (numpy / tinygrad type
+   promotion): f32 * bf16 -> f32, with the bf16 operand read and up-promoted in
+   the kernel.  Reordering is safe because the op is commutative. *)
+precOrder[terms_List] := SortBy[terms, -dtypePrecRank[inheritDType[#]] &]
+
 TTerm /: Plus[t_TTerm ? tensorTermQ, rest__] := Module[{lifted, allTerms, targetShape},
     lifted = (r |-> liftNumeric[r, broadcastDType[t, r]]) /@ {rest};
-    allTerms = Prepend[lifted, t];
+    allTerms = precOrder[Prepend[lifted, t]];
     targetShape = broadcastShapes[tUopShape /@ allTerms];
     pairFold[TUOpAdd, (x |-> broadcastScalar[x, targetShape]) /@ allTerms]
 ]
 
 TTerm /: Times[t_TTerm ? tensorTermQ, rest__] := Module[{lifted, allTerms, targetShape},
     lifted = (r |-> liftNumeric[r, broadcastDType[t, r]]) /@ {rest};
-    allTerms = Prepend[lifted, t];
+    allTerms = precOrder[Prepend[lifted, t]];
     targetShape = broadcastShapes[tUopShape /@ allTerms];
     pairFold[TUOpMul, (x |-> broadcastScalar[x, targetShape]) /@ allTerms]
 ]
