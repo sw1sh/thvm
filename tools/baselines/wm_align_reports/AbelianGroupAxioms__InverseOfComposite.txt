@@ -1,0 +1,41 @@
+wm=22 thvm=28 prefix=1 identical=N firstdiv=2
+note: content-delta wm-only=4 thvm-only=10; post-axiom nonax-wm=18 nonax-thvm=24 nonax-prefix=2; weights-exact
+
+--- positions 1..11 (1-based) ---
+     1 WM   w1=-2147483648  x1 # and(x1,opOvertilde(k1))
+     1 thvm pri=29          CPSEL pick=1 j=0 seq=2 pri=29 rules=0 lhs=(C3 V0 (C6 C4)) rhs=V0
+*    2 WM   w1=-2147483648  and(x1,x2) # and(x2,x1)
+*    2 thvm pri=34          CPSEL pick=2 j=0 seq=3 pri=34 rules=1 lhs=(C3 V0 (C5 V0)) rhs=(C6 C4)
+*    3 WM   w1=-2147483648  and(x1,and(x2,x3)) # and(and(x1,x2),x3)
+*    3 thvm pri=48          CPSEL pick=3 j=0 seq=1 pri=48 rules=2 lhs=(C3 V0 V1) rhs=(C3 V1 V0)
+*    4 WM   w1=-2147483648  and(x1,not(x1)) # opOvertilde(k1)
+*    4 thvm pri=29          CPSEL pick=4 j=0 seq=4 pri=29 rules=3 lhs=V0 rhs=(C3 (C6 C4) V0)
+*    5 WM   w1=29           and(opOvertilde(k1),x1) # x1
+*    5 thvm pri=23          CPSEL pick=5 j=0 seq=6 pri=23 rules=4 lhs=(C6 C4) rhs=(C5 (C6 C4))
+*    6 WM   w1=23           not(opOvertilde(k1)) # opOvertilde(k1)
+*    6 thvm pri=34          CPSEL pick=6 j=0 seq=5 pri=34 rules=5 lhs=(C6 C4) rhs=(C3 (C5 V0) V0)
+*    7 WM   w1=69           and(x1,and(opOvertilde(k1),x2)) # and(x1,x2)
+*    7 thvm pri=65          CPSEL pick=7 j=0 seq=0 pri=65 rules=5 lhs=(C3 V0 (C3 V1 V2)) rhs=(C3 (C3 V0 V1) V2)
+*    8 WM   w1=76           and(x1,and(not(x1),x2)) # and(opOvertilde(k1),x2)
+*    8 thvm pri=55          CPSEL pick=8 j=0 seq=9 pri=55 rules=6 lhs=V0 rhs=(C3 V1 (C3 (C5 V1) V0))
+     9 WM   w1=19           not(not(x1)) # x1
+     9 thvm pri=19          CPSEL pick=9 j=0 seq=13 pri=19 rules=7 lhs=V0 rhs=(C5 (C5 V0))
+    10 WM   w1=34           opOvertilde(k1) # and(not(x1),x1)
+    10 thvm pri=34          CPSEL pick=10 j=0 seq=16 pri=34 rules=8 lhs=(C3 (C5 V0) V0) rhs=(C6 C4)
+    11 WM   w1=53           and(not(not(x1)),x2) # and(x1,x2)
+    11 thvm pri=53          CPSEL pick=11 j=0 seq=15 pri=53 rules=8 lhs=(C3 V0 V1) rhs=(C3 (C5 (C5 V0)) V1)
+
+--- multiset deltas ---
+WM-only   x1  and(v1,and(opOvertilde(k1),v2))#and(v1,v2)
+WM-only   x1  and(opOvertilde(k1),v1)#and(v2,and(not(v2),v1))
+WM-only   x1  and(not(v1),and(v2,v1))#v2
+WM-only   x1  and(not(and(v1,v2)),v2)#not(v1)
+thvm-only x1  and(v1,v2)#and(v2,v1)
+thvm-only x2  and(not(v1),v1)#opOvertilde(k1)
+thvm-only x1  and(v1,and(not(v1),v2))#v2
+thvm-only x1  and(v1,and(v2,not(v1)))#v2
+thvm-only x1  and(not(v1),and(v1,v2))#v2
+thvm-only x1  and(v1,and(not(v2),v2))#v1
+thvm-only x1  and(not(and(v1,v2)),v1)#not(v2)
+thvm-only x1  and(v1,not(v2))#not(and(not(v1),v2))
+thvm-only x1  and(v1,not(v2))#not(and(v2,not(v1)))

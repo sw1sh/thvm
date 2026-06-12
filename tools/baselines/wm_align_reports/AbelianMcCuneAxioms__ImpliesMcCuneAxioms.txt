@@ -1,0 +1,49 @@
+wm=192 thvm=203 prefix=16 identical=N firstdiv=17
+note: content-delta wm-only=5 thvm-only=16; post-axiom nonax-wm=191 nonax-thvm=202 nonax-prefix=15; weights-exact
+
+--- positions 14..26 (1-based) ---
+    14 WM   w1=55           and(not(x1),and(x1,x2)) # x2
+    14 thvm pri=55          CPSEL pick=14 j=0 seq=155 pri=55 rules=6 lhs=(C3 (C4 V0) (C3 V0 V1)) rhs=V1
+    15 WM   w1=48           and(x1,x2) # and(x2,x1)
+    15 thvm pri=48          CPSEL pick=15 j=0 seq=162 pri=48 rules=7 lhs=(C3 V0 V1) rhs=(C3 V1 V0)
+    16 WM   w1=55           x1 # and(x2,and(not(x2),x1))
+    16 thvm pri=55          CPSEL pick=16 j=0 seq=157 pri=55 rules=5 lhs=(C3 V0 (C3 (C4 V0) V1)) rhs=V1
+*   17 WM   w1=55           x1 # and(not(x2),and(x1,x2))
+*   17 thvm pri=55          CPSEL pick=17 j=0 seq=168 pri=55 rules=6 lhs=V0 rhs=(C3 (C3 V1 V0) (C4 V1))
+*   18 WM   w1=48           and(x1,x2) # and(x2,x1)
+*   18 thvm pri=55          CPSEL pick=18 j=0 seq=170 pri=55 rules=6 lhs=(C3 (C4 V0) (C3 V1 V0)) rhs=V1
+    19 WM   w1=48           and(x1,x2) # and(x2,x1)
+    19 thvm pri=48          CPSEL pick=19 j=0 seq=193 pri=48 rules=7 lhs=(C3 V0 V1) rhs=(C3 V1 V0)
+*   20 WM   w1=55           and(and(x1,x2),not(x1)) # x2
+*   20 thvm pri=48          CPSEL pick=20 j=0 seq=194 pri=48 rules=7 lhs=(C3 V0 V1) rhs=(C3 V1 V0)
+*   21 WM   w1=55           and(and(not(x1),x2),x1) # x2
+*   21 thvm pri=55          CPSEL pick=21 j=0 seq=177 pri=55 rules=7 lhs=(C3 (C3 V0 V1) (C4 V0)) rhs=V1
+*   22 WM   w1=55           x1 # and(x2,and(x1,not(x2)))
+*   22 thvm pri=55          CPSEL pick=22 j=0 seq=178 pri=55 rules=7 lhs=(C3 (C3 (C4 V0) V1) V0) rhs=V1
+*   23 WM   w1=48           and(x1,x2) # and(x2,x1)
+*   23 thvm pri=55          CPSEL pick=23 j=0 seq=179 pri=55 rules=7 lhs=(C3 (C3 (C4 V0) V1) V0) rhs=V1
+    24 WM   w1=55           x1 # and(x2,and(x1,not(x2)))
+    24 thvm pri=55          CPSEL pick=24 j=0 seq=180 pri=55 rules=7 lhs=(C3 V0 (C3 V1 (C4 V0))) rhs=V1
+*   25 WM   w1=55           x1 # and(and(not(x2),x1),x2)
+*   25 thvm pri=48          CPSEL pick=25 j=0 seq=202 pri=48 rules=8 lhs=(C3 V0 V1) rhs=(C3 V1 V0)
+*   26 WM   w1=59           and(not(x1),not(x2)) # not(and(x1,x2))
+*   26 thvm pri=55          CPSEL pick=26 j=0 seq=186 pri=55 rules=8 lhs=(C3 (C3 V0 V1) (C4 V1)) rhs=V0
+
+--- multiset deltas ---
+WM-only   x1  and(not(and(v1,v2)),v2)#not(v1)
+WM-only   x1  and(v1,not(and(v2,v1)))#not(v2)
+WM-only   x1  and(v1,not(and(v1,v2)))#not(v2)
+WM-only   x2  and(not(v1),v2)#and(v2,not(v1))
+thvm-only x1  and(and(v1,v2),not(v1))#v2
+thvm-only x1  and(and(not(v1),v2),v1)#v2
+thvm-only x3  and(v1,v2)#and(v2,v1)
+thvm-only x1  and(and(v1,v2),not(v2))#v1
+thvm-only x1  and(and(v1,not(v2)),v2)#v1
+thvm-only x2  and(not(and(v1,v2)),v1)#not(v2)
+thvm-only x1  and(v1,and(not(v2),v2))#v1
+thvm-only x1  and(and(not(v1),v1),v2)#v2
+thvm-only x1  not(and(v1,v2))#not(and(v2,v1))
+thvm-only x1  and(not(v1),v1)#and(v2,not(v2))
+thvm-only x1  and(v1,not(v1))#and(v2,not(v2))
+thvm-only x1  and(v1,and(v2,and(v3,not(v1))))#and(v2,v3)
+thvm-only x1  and(not(v1),and(v2,not(v3)))#not(and(v1,and(not(v2),v3)))
