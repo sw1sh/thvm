@@ -7,13 +7,14 @@
    per token along the feature axis to {512, 7680} in [layer9 | layer18 |
    layer27] order.
 
-   Get-loaded after THVMLink` AND FluxForward.wl: it reuses the verified
-   FluxForward primitives (fxLinear, fxRMSNorm, fxConcat, fxSiLU, fxBmm).
-   Qwen3 differs from the FLUX DiT in two ways that matter: the rotary
-   convention is the half-split (NEOX) one, not FluxForward's interleaved
-   fxRoPE, and attention is grouped-query (GQA 4:1) with per-head q/k RMSNorm
-   applied before the rotary.  Weights stay bf16; fxLinear runs the bf16-direct
-   matmul, so there is no Real32 weight intermediate.
+   Get-loaded after THVMLink` AND FluxForward.wl: it reuses fxLinear (the
+   BLAS-friendly diffusers linear).  All the model-agnostic attention pieces
+   come from THVMLink`s NN library.  Qwen3 differs from the FLUX DiT in two
+   ways that matter: the rotary convention is the half-split (NEOX) one
+   (TRoPEHalfSplit, not the FLUX TRoPEInterleaved), and attention is
+   grouped-query (GQA 4:1, TRepeatKV) with per-head q/k RMSNorm applied before
+   the rotary.  Weights stay bf16; fxLinear runs the bf16-direct matmul, so
+   there is no Real32 weight intermediate.
 
    Qwen3-4B config: hidden 2560, head_dim 128, 32 query heads, 8 kv heads
    (GQA 4:1), intermediate 9728, rms_norm_eps 1e-6, rope_theta 1e6, SiLU MLP,
@@ -42,41 +43,6 @@ qwBf16ToF32[u16_] := With[{shape = Dimensions[u16], flat = Flatten[u16]},
     ]
 ]
 
-(* Half-split rotary (Qwen3 / NEOX rotate_half): t {S, H, D}; cos, sin {S, 1, D}
-   broadcast over the head axis.  rotate_half(t) = concat[-t[D/2:], t[:D/2]];
-   t_rot = t cos + rotate_half(t) sin.  Distinct from FluxForward's interleaved
-   fxRoPE. *)
-qwRoPE[x_, cos_, sin_] := Block[{s, h, d, half, lo, hi, rot, shape},
-    {s, h, d} = Dimensions[x];  half = d/2;  shape = {s, h, d};
-    lo = TUOpShrink[x, {{0, s}, {0, h}, {0, half}}];
-    hi = TUOpShrink[x, {{0, s}, {0, h}, {half, d}}];
-    rot = fxConcat[{-hi, lo}, 3];
-    x*TUOpExpand[cos, shape] + rot*TUOpExpand[sin, shape]
-]
-
-(* GQA head expansion: a {S, Hkv, D} tensor whose Hkv kv heads each serve `rep`
-   query heads, broadcast to {S, Hkv*rep, D} in HF repeat_interleave order (kv
-   head j serves query heads rep*j .. rep*j+rep-1).  Insert a unit axis, expand
-   it to rep, fold back: the repeats land contiguously per kv head. *)
-qwExpandKV[x_, rep_] := Block[{s, hkv, d},
-    {s, hkv, d} = Dimensions[x];
-    ArrayReshape[TUOpExpand[ArrayReshape[x, {s, hkv, 1, d}], {s, hkv, rep, d}], {s, hkv*rep, d}]
-]
-
-(* Masked scaled-dot attention over head-split, rotated, GQA-expanded q/k/v
-   {S, H, D}.  addMask {S, S} is the additive causal+padding bias added to the
-   scores before softmax.  Heads ride the leading batch axis (one batched reduce
-   per matmul). *)
-qwAttention[q_, k_, v_, scale_, addMask_] := Block[
-    {s, h, d, sk, qh, kh, vh, scores, attn, out},
-    {s, h, d} = Dimensions[q];  sk = Dimensions[k][[1]];
-    qh = Transpose[q, {2, 1, 3}];  kh = Transpose[k, {2, 1, 3}];  vh = Transpose[v, {2, 1, 3}];
-    scores = fxBmm[qh, Transpose[kh, {1, 3, 2}], h, s, d, sk]*scale + TUOpExpand[ArrayReshape[addMask, {1, s, sk}], {h, s, sk}];
-    attn = TSoftmax[scores, 2];
-    out = fxBmm[attn, vh, h, s, sk, d];
-    ArrayReshape[Transpose[out, {2, 1, 3}], {s, h*d}]
-]
-
 (* Per-layer weight Association from a name -> TTerm loader wf (HF names).
    Weights stay bf16; fxLinear's bf16-direct matmul reads them as-is. *)
 qwLayerW[wf_, i_] := With[{p = "model.layers." <> ToString[i] <> "."}, <|
@@ -95,39 +61,21 @@ qwLayerW[wf_, i_] := With[{p = "model.layers." <> ToString[i] <> "."}, <|
 
 (* One HF Qwen3 decoder layer.  x {S, dim}; cos/sin {S, 1, head_dim}; addMask
    {S, S}; W the layer weights; cfg has heads/kv_heads/head_dim/eps.  qk-norm
-   before rotary; GQA-expand k/v; masked attention; SwiGLU MLP. *)
+   before rotary (TRMSNorm); GQA-expand k/v (TRepeatKV); masked attention
+   (THeadAttention); SwiGLU MLP. *)
 qwLayer[x_, cos_, sin_, addMask_, W_, cfg_] := Block[
     {h, hkv, dh, eps, scale, rep, s, xn, q, k, v, attnOut, hh, hn},
     h = cfg["heads"];  hkv = cfg["kv_heads"];  dh = cfg["head_dim"];
     eps = cfg["eps"];  scale = 1/Sqrt[N[dh]];  rep = h/hkv;  s = Dimensions[x][[1]];
-    xn = fxRMSNorm[x, W["input_ln"], eps];
-    q = fxRMSNorm[ArrayReshape[fxLinear[xn, W["q_proj"]], {s, h, dh}], W["q_norm"], eps];
-    k = fxRMSNorm[ArrayReshape[fxLinear[xn, W["k_proj"]], {s, hkv, dh}], W["k_norm"], eps];
+    xn = TRMSNorm[x, W["input_ln"], eps];
+    q = TRMSNorm[ArrayReshape[fxLinear[xn, W["q_proj"]], {s, h, dh}], W["q_norm"], eps];
+    k = TRMSNorm[ArrayReshape[fxLinear[xn, W["k_proj"]], {s, hkv, dh}], W["k_norm"], eps];
     v = ArrayReshape[fxLinear[xn, W["v_proj"]], {s, hkv, dh}];
-    q = qwRoPE[q, cos, sin];  k = qwRoPE[k, cos, sin];
-    attnOut = fxLinear[qwAttention[q, qwExpandKV[k, rep], qwExpandKV[v, rep], scale, addMask], W["o_proj"]];
+    q = TRoPEHalfSplit[q, cos, sin];  k = TRoPEHalfSplit[k, cos, sin];
+    attnOut = fxLinear[THeadAttention[q, TRepeatKV[k, rep], TRepeatKV[v, rep], scale, addMask], W["o_proj"]];
     hh = x + attnOut;
-    hn = fxRMSNorm[hh, W["post_ln"], eps];
-    hh + fxLinear[fxSiLU[fxLinear[hn, W["gate_proj"]]]*fxLinear[hn, W["up_proj"]], W["down_proj"]]
-]
-
-(* Host-side rotary cos/sin for the half-split convention: inv_freq[i] =
-   theta^(-2i/D); freqs = outer(pos, inv_freq); emb = concat[freqs, freqs].
-   Returns {cos, sin} as {S, 1, D} so they broadcast over the head axis. *)
-qwRopeCosSin[seq_Integer, headDim_Integer, theta_] := Block[{half, invFreq, emb},
-    half = headDim/2;
-    invFreq = Table[N[theta]^(-2 i/headDim), {i, 0, half - 1}];
-    emb = Table[Join[#, #] &[p invFreq], {p, 0, seq - 1}];
-    {
-        ArrayReshape[TTensorCreate[N[Cos[emb]]], {seq, 1, headDim}],
-        ArrayReshape[TTensorCreate[N[Sin[emb]]], {seq, 1, headDim}]
-    }
-]
-
-(* Host-side additive attention mask {S, S}: 0 where token i may attend to j
-   (j <= i causal AND attMask[j] real), a large negative elsewhere. *)
-qwAddMask[attMask_List, neg_: -1.*^9] := With[{s = Length[attMask]},
-    TTensorCreate[N @ Table[If[ j <= i && attMask[[j]] == 1, 0., neg], {i, s}, {j, s}]]
+    hn = TRMSNorm[hh, W["post_ln"], eps];
+    hh + fxLinear[TSiLU[fxLinear[hn, W["gate_proj"]]]*fxLinear[hn, W["up_proj"]], W["down_proj"]]
 ]
 
 (* Full encoder.  inputIds {S} host int list (0-indexed); attMask {S} host list
@@ -139,13 +87,13 @@ qwenEncode[inputIds_List, attMask_List, wf_, cfg_] := Block[
     dh = cfg["head_dim"];  eps = cfg["eps"];  theta = cfg["theta"];
     nL = cfg["layers"];  caps = cfg["captureLayers"];  s = Length[inputIds];
     lcfg = <|"heads" -> cfg["heads"], "kv_heads" -> cfg["kv_heads"], "head_dim" -> dh, "eps" -> eps|>;
-    {cos, sin} = qwRopeCosSin[s, dh, theta];
-    addMask = qwAddMask[attMask];
+    {cos, sin} = TRoPEHalfSplitTable[s, dh, theta];
+    addMask = TPaddingCausalMask[attMask];
     x = qwEmbed[wf["model.embed_tokens.weight"], inputIds];
     captured = <||>;
     Do[ x = TRealize @ qwLayer[x, cos, sin, addMask, qwLayerW[wf, i], lcfg];
         If[ MemberQ[caps, i], captured[i] = x],
         {i, 0, nL - 1}
     ];
-    TRealize @ fxConcat[captured[#] & /@ caps, 2]
+    TRealize @ Join[Sequence @@ (captured[#] & /@ caps), 2]
 ]

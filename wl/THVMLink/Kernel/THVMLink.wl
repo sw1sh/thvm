@@ -320,6 +320,27 @@ GeneralUtilities`SetUsage[TUOpSrcs, "TUOpSrcs[u$] returns the source-cell terms 
    `BeginPackage["THVMLink`"]` reuses the same symbol. *)
 {TPriDrain};
 
+(* Forward-declare the public symbols owned by Kernel/NN/*.wl.  Those files
+   live one directory deeper, so the sibling loader (sorted {depth, path})
+   Gets them AFTER the depth-1 siblings - including Tensor.wl, whose Dot
+   UpValue routes to TMatVec / TMatMul / TDot, and Train.wl, which calls
+   TFromNet / TNetParams.  Without this, those references bind to phantom
+   THVMLink`Private` symbols and the real NN definitions never fire.  Declaring
+   the names here at BeginPackage scope creates the public symbols up front;
+   NN/*.wl's SetUsage + definitions reuse them. *)
+{
+    TAttention, TBatchNorm, TBatchNormTrain, TCategoricalCrossEntropy, TCausalMask,
+    TCausalMaskSym, TClip, TConv2D, TConv2DIm2Col, TConv2DIm2ColBatched, TConv2DKhKw,
+    TCrossEntropyLoss, TDecodeAttend, TDot, TEmbedding, TEmbeddingMatrix, TFromLayer,
+    TFromNet, TGELU, TGather, TGlorot, TGroupNorm, THeadAttention, TL2Loss, TLayerNorm,
+    TLayerNormAffine, TLayerToTensors, TLayerWeights, TLinear, TLog, TMSELoss, TMatMul,
+    TMatVec, TMaxPool2d, TMaximum, TMinimum, TMultiHeadAttention, TNetInitialize,
+    TNetParamInfo, TNetParams, TOneHot, TOnes, TOnesLike, TPaddingCausalMask, TRMSNorm,
+    TReLU, TRepeatKV, TRoPEHalfSplit, TRoPEHalfSplitTable, TRoPEInterleaved, TSiLU,
+    TSigmoid, TSinusoidalEmbedding, TSoftmax, TSparseCategoricalCrossEntropy, TSquare,
+    TSum, TSwiGLU, TTakeAlongAxis, TTanh, TToNet, TUpsample2x, TWhere, TZeros, TZerosLike
+};
+
 Begin["`Private`"];
 
 $libDir = FileNameJoin[{

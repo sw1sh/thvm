@@ -34,8 +34,8 @@ qwt = Join[TSafeTensorLoad[Environment["QWEN_SHARD1"]], TSafeTensorLoad[Environm
 wf[n_] := wf[n] = If[ n === "model.embed_tokens.weight", qwt[n], TToDevice[TRealize@qwt[n], dev]];
 
 cfg = <|"heads" -> 32, "kv_heads" -> 8, "head_dim" -> 128, "eps" -> 1.*^-6, "theta" -> 1000000|>;
-{cos, sin} = qwRopeCosSin[Length@ids, cfg["head_dim"], cfg["theta"]];
-addMask = qwAddMask[am];
+{cos, sin} = TRoPEHalfSplitTable[Length@ids, cfg["head_dim"], cfg["theta"]];
+addMask = TPaddingCausalMask[am];
 
 x = qwEmbed[wf["model.embed_tokens.weight"], ids];
 report["hs_0", x, ref["hs_0"]];
@@ -50,5 +50,5 @@ Do[ x = TRealize @ qwLayer[x, cos, sin, addMask, qwLayerW[wf, i], cfg];
     ],
     {i, 0, 26}
 ];
-report["text_emb", TRealize @ fxConcat[{cap[9], cap[18], cap[27]}, 2], e2e["text_emb"]];
+report["text_emb", TRealize @ Join[cap[9], cap[18], cap[27], 2], e2e["text_emb"]];
 pr["DONE"];

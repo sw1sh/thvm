@@ -28,12 +28,12 @@ fxSigmas[seq_:256, nSteps_:4] := Module[
     Append[sig, 0.0]]                                      (* sigmasFull, len nSteps+1 *)
 
 (* === sinusoidal timestep basis (weight-free part of the time embedder) ==
-   diffusers get_timestep_embedding: dim 256, cos-first, t = sigma*1000. *)
-fxTimestepSinusoid[sigma_, dim_:256] := Module[{half, freqs, args},
-    half = dim/2;
-    freqs = Exp[-Log[10000.] Range[0, half - 1]/half];
-    args = (sigma*1000.) freqs;
-    Join[Cos[args], Sin[args]]]                            (* {256} cos-first *)
+   diffusers get_timestep_embedding: dim 256, cos-first.  The general cos-first
+   sinusoidal embedding is the library TSinusoidalEmbedding; the FLUX-specific
+   piece is the t = sigma*1000 timestep scaling and the host-list return (the
+   sampler drivers wrap it in their own TTensorCreate). *)
+fxTimestepSinusoid[sigma_, dim_:256] :=
+    Normal @ TSinusoidalEmbedding[sigma*1000., dim]        (* {256} cos-first host list *)
 
 (* === 4-axis interleaved RoPE table ==================================
    FLUX.2 FluxPosEmbed: axes_dims {32,32,32,32}, theta 2000.  Token positions

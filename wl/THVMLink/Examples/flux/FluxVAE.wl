@@ -14,9 +14,13 @@
        -> GroupNorm(32) -> SiLU -> conv_out (3x3 pad1, 128->3)
        -> clip((x+1)/2, 0, 1) -> {3,256,256}
 
-   Built on the FluxForward primitives (fxShape, fxSiLU).  All convs are
-   stride-1; TConv2D is no-padding so 3x3 convs pad H,W by 1 first.
-   Weights are bf16 in the diffusers vae safetensors; cast to f32. *)
+   The model-agnostic GroupNorm / SiLU / 2x-upsample / clip come from
+   THVMLink`s NN library (TGroupNorm / TSiLU / TUpsample2x / TClip); this file
+   keeps the FLUX-specific glue: the VAE-resolution conv (im2col with realized
+   operands so the big gemm hits BLAS), the spatial self-attention, and the
+   decoder block assembly.  All convs are stride-1; TConv2D is no-padding so
+   3x3 convs pad H,W by 1 first.  Weights are bf16 in the diffusers vae
+   safetensors; cast to f32. *)
 
 Get[FileNameJoin[{DirectoryName[$InputFileName], "FluxForward.wl"}]];
 
@@ -29,11 +33,12 @@ Get[FileNameJoin[{DirectoryName[$InputFileName], "FluxForward.wl"}]];
    runs as a scalar cpu_jit loop -- 43s/conv at VAE resolution.  Realizing both
    operands routes it to blas_gemm (~0.05s).  [thvm follow-up: TConv2DIm2Col
    should protect its matmul operands at high resolution.]  The input is also
-   realized so chained convs' 9x im2col SHRINKs hit a leaf, not a 9^depth nest. *)
+   realized so chained convs' 9x im2col SHRINKs hit a leaf, not a 9^depth nest.
+   FLUX-local (not the library TConv2D) precisely for these realize barriers. *)
 vaeConv[x_, w_, b_, pad_] := Module[
     {xp, cIn, hp, wp, cOut, kh, kw, hOut, wOut, kSpat, patches, summed, xCol, wFlat, out},
     xp = TRealize @ If[ pad === 0, x, TUOpPad[x, {{0, 0}, {pad, pad}, {pad, pad}}]];
-    {cIn, hp, wp} = fxShape[xp];  {cOut, cIn, kh, kw} = fxShape[w];
+    {cIn, hp, wp} = Dimensions[xp];  {cOut, cIn, kh, kw} = Dimensions[w];
     hOut = hp - kh + 1;  wOut = wp - kw + 1;  kSpat = kh kw;
     patches = Flatten @ Table[ With[{slot = ki kw + kj},
         TUOpPad[TUOpReshape[TUOpShrink[xp, {{0, cIn}, {ki, ki + hOut}, {kj, kj + wOut}}],
@@ -46,39 +51,15 @@ vaeConv[x_, w_, b_, pad_] := Module[
     TRealize @ TUOpAdd[TUOpReshape[out, {cOut, hOut, wOut}],
                        TUOpExpand[TUOpReshape[b, {cOut, 1, 1}], {cOut, hOut, wOut}]]]
 
-(* GroupNorm over {C,H,W}: split C into `groups`, normalize each group over
-   its (C/groups, H, W) elements, then per-channel affine.  eps 1e-6. *)
-vaeGroupNorm[x_, weight_, bias_, groups_, eps_] := Module[
-    {s, c, hh, ww, gsz, xg, mu, muB, xc, var, inv, invB, normed, wB, bB},
-    s = fxShape[x];  {c, hh, ww} = s;  gsz = c hh ww / groups;
-    xg  = TUOpReshape[x, {groups, gsz}];
-    mu  = TUOpMul[TUOpReduce[xg, 1, "SUM"], TUOpConst[N[1./gsz]]];        (* {groups} *)
-    muB = TUOpExpand[TUOpReshape[mu, {groups, 1}], {groups, gsz}];
-    xc  = TUOpAdd[xg, TUOpNeg[muB]];
-    var = TUOpMul[TUOpReduce[TUOpMul[xc, xc], 1, "SUM"], TUOpConst[N[1./gsz]]];
-    inv = TUOpRecip[TUOpSqrt[TUOpAdd[var, TUOpConst[N[eps]]]]];
-    invB   = TUOpExpand[TUOpReshape[inv, {groups, 1}], {groups, gsz}];
-    normed = TUOpReshape[TUOpMul[xc, invB], s];                          (* {C,H,W} *)
-    wB = TUOpExpand[TUOpReshape[weight, {c, 1, 1}], s];
-    bB = TUOpExpand[TUOpReshape[bias,   {c, 1, 1}], s];
-    TUOpAdd[TUOpMul[normed, wB], bB]]
-
-(* nearest 2x upsample: {C,H,W} -> {C,2H,2W} via repeat-interleave. *)
-vaeUpsample[x_] := Module[{c, hh, ww},
-    {c, hh, ww} = fxShape[x];
-    TUOpReshape[
-        TUOpExpand[TUOpReshape[x, {c, hh, 1, ww, 1}], {c, hh, 2, ww, 2}],
-        {c, 2 hh, 2 ww}]]
-
 (* === resnet block ==================================================== *)
 
 (* ResBlock: GN -> SiLU -> conv3x3 -> GN -> SiLU -> conv3x3, plus shortcut
    (1x1 conv_shortcut when C_in != C_out, else identity).  W is an
    Association of this block's weights (norm1/conv1/norm2/conv2[/conv_shortcut]). *)
 vaeResBlock[x_, W_, eps_] := Module[{h, sc},
-    h = vaeConv[fxSiLU[vaeGroupNorm[x, W["norm1.weight"], W["norm1.bias"], 32, eps]],
+    h = vaeConv[TSiLU[TGroupNorm[x, W["norm1.weight"], W["norm1.bias"], 32, eps]],
                 W["conv1.weight"], W["conv1.bias"], 1];
-    h = vaeConv[fxSiLU[vaeGroupNorm[h, W["norm2.weight"], W["norm2.bias"], 32, eps]],
+    h = vaeConv[TSiLU[TGroupNorm[h, W["norm2.weight"], W["norm2.bias"], 32, eps]],
                 W["conv2.weight"], W["conv2.bias"], 1];
     sc = If[ KeyExistsQ[W, "conv_shortcut.weight"],
             vaeConv[x, W["conv_shortcut.weight"], W["conv_shortcut.bias"], 0], x];
@@ -89,16 +70,16 @@ vaeResBlock[x_, W_, eps_] := Module[{h, sc},
 (* spatial self-attention: GN -> q,k,v (1x1 conv) -> flatten {C, H*W} ->
    softmax(q^T k / sqrt(C)) over keys -> v @ attn -> 1x1 proj_out -> +x. *)
 vaeAttn[x_, W_, eps_] := Module[{c, hh, ww, n, hn, lin, q, k, v, scores, attn, o, proj},
-    {c, hh, ww} = fxShape[x];  n = hh ww;
+    {c, hh, ww} = Dimensions[x];  n = hh ww;
     (* q/k/v/to_out are diffusers Linear {C,C}; a 1x1 conv with the weight
        reshaped to {C,C,1,1} is the same channel-mixing projection. *)
     lin[name_, src_] := TUOpReshape[
         vaeConv[src, TUOpReshape[W[name <> ".weight"], {c, c, 1, 1}], W[name <> ".bias"], 0], {c, n}];
-    hn = vaeGroupNorm[x, W["group_norm.weight"], W["group_norm.bias"], 32, eps];
+    hn = TGroupNorm[x, W["group_norm.weight"], W["group_norm.bias"], 32, eps];
     q = lin["to_q", hn];  k = lin["to_k", hn];  v = lin["to_v", hn];            (* {C,N} *)
     (* scores[i,j] = sum_c q[c,i] k[c,j] / sqrt(C) ; softmax over j (keys).
        BLAS matmuls (q/k/v are realized leaves) -- no expand-reduce. *)
-    scores = TUOpMul[TMatMul[Transpose[q], k], TUOpConst[N[1./Sqrt[c]]]];        (* {N,N} *)
+    scores = TMatMul[Transpose[q], k] * (1./Sqrt[c]);                            (* {N,N} *)
     attn = TSoftmax[scores, 1];                                                  (* over keys *)
     o = TMatMul[v, Transpose[attn]];                                            (* {C,N} *)
     proj = vaeConv[TUOpReshape[o, {c, hh, ww}],
@@ -118,7 +99,7 @@ vaeMidBlock[x_, Wr0_, Wa_, Wr1_, eps_] :=
 vaeUpBlock[x_, Ws_List, Wup_, eps_] := Module[{h},
     h = Fold[vaeResBlock[#1, #2, eps] &, x, Ws];
     If[ Wup === None, h,
-        vaeConv[vaeUpsample[h], Wup["conv.weight"], Wup["conv.bias"], 1]]]
+        vaeConv[TUpsample2x[h], Wup["conv.weight"], Wup["conv.bias"], 1]]]
 
 (* === unpatchify ===================================================== *)
 
@@ -157,7 +138,7 @@ vaeDecoder[zPacked_, W_, wsub_, cfg_] := Module[{eps, epsBn, z, h},
                 Table[wsub[up <> "resnets." <> ToString[m] <> "."], {m, 0, 2}],
                 If[ i < 3, wsub[up <> "upsamplers.0."], None], eps]],
         {i, 0, 3}];
-    h = fxSiLU @ vaeGroupNorm[h, W["decoder.conv_norm_out.weight"], W["decoder.conv_norm_out.bias"], 32, eps];
+    h = TSiLU @ TGroupNorm[h, W["decoder.conv_norm_out.weight"], W["decoder.conv_norm_out.bias"], 32, eps];
     h = vaeConv[h, W["decoder.conv_out.weight"], W["decoder.conv_out.bias"], 1]; (* 3x3 128->3 *)
     (* image = clip((x+1)/2, 0, 1) *)
-    TClip[TUOpMul[TUOpAdd[h, TUOpConst[1.]], TUOpConst[0.5]], 0., 1.]]
+    TClip[(h + 1) * 0.5, 0., 1.]]
