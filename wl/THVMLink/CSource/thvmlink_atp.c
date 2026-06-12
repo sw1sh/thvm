@@ -821,6 +821,14 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // Waldmeister presets).
   mint bwd_gj = MArgument_getInteger(args[38]);
   thvm_atp_set_use_bwd_ground_join(atp, (u8)(bwd_gj != 0));
+  // Method -> {... "QueueSubsume" -> False}: push-time queue-vs-queue
+  // subsumption gate.  thvm-native filter with NO WM counterpart
+  // (recentCPinsert queues every treated survivor; each insert
+  // consumes a w2 = ++CPNr FIFO age), so the "Waldmeister"* presets
+  // pass 0 for WM-exact queue composition.  args[39]; nonzero = on
+  // (the historical thvm engine default).
+  mint queue_subsume = MArgument_getInteger(args[39]);
+  thvm_atp_set_use_queue_subsume(atp, (u8)(queue_subsume != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any

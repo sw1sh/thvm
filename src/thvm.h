@@ -4868,6 +4868,21 @@ typedef struct {
   u8   use_pop_subsume;
   u32  n_cps_dropped_pop_subsumed;
 
+  // Push-time queue-vs-queue subsumption (atp_cp_queue_subsumed): a
+  // freshly-generated CP that is a substitution instance of some
+  // already-QUEUED CP (either side order) is dropped before it reaches
+  // the heap.  thvm-native filter with NO Waldmeister counterpart: WM
+  // queues every generated CP that survives KPBehandelt
+  // (recentCPinsert, INF/KPVerwaltung.c:383-417, straight KDH_insert;
+  // SS_TermpaarSubsummiertTermpaar's only set-level caller is the
+  // E-set sweep, Interreduktion.c:262, never the passive queue), and
+  // every insert consumes a w2 = ++CPNr FIFO age, so dropping here
+  // shifts every later CP's age relative to WM.  Default ON (the
+  // historical thvm engine); the "Waldmeister"* presets turn it OFF
+  // for WM-exact queue composition via Method "QueueSubsume" /
+  // thvm_atp_set_use_queue_subsume.
+  u8   use_queue_subsume;
+
   // WM E-set subsumption on new-equation entry (GMSubsummierenMit-
   // Gleichung, INF/Interreduktion.c:251-274; reached from
   // IR_InterreduktionLinks :366-378 for every non-rule new fact,
@@ -5427,6 +5442,10 @@ fn void      thvm_atp_set_use_pop_subsume(AtpState *s, u8 on);
 // WM E-set subsumption destroy on new-equation entry
 // (GMSubsummierenMitGleichung; see AtpState.use_eset_subsume).
 fn void      thvm_atp_set_use_eset_subsume(AtpState *s, u8 on);
+// Push-time queue-vs-queue subsumption gate (thvm-native, no WM
+// counterpart; see AtpState.use_queue_subsume).  Default ON; the
+// "Waldmeister"* presets turn it OFF.
+fn void      thvm_atp_set_use_queue_subsume(AtpState *s, u8 on);
 // WM backward ground-joinability sterilization (-gj,
 // RueckwaertsGrundzusammenfuehrbarkeit; see
 // AtpState.use_bwd_ground_join).  Default OFF = WM's -gj default.

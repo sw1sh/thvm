@@ -1374,6 +1374,156 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-twin-demote-either-face-original-sides");
+  {
+    // WM Antigleichung demotion lifecycle (GMInterred, Interreduktion.c:
+    // 280-293 + Anwendungsprozedur :175-207): when EITHER face of an
+    // unorientable equation becomes reducible by the new object, BOTH
+    // twins leave E together (KPV_KillParent marks both, KPVerwaltung.c:
+    // 343-351) and exactly ONE pair re-enters the queue -- the
+    // DISTINGUISHED face's ORIGINAL sides (KPV_IROpferBehandeln copies
+    // the untouched pair, KPVerwaltung.c:517-518; the reverse-face
+    // buffer branch :192-199 requeues via the Gegenrichtung, i.e. the
+    // same distinguished orientation).  thvm's single unorientable slot
+    // covers both twins; under the WM preset gates the victim's ORIGINAL
+    // sides land in the IR buffer and drain post-CP-gen.
+    //
+    // Case 1: stored-RHS face reducible (the GMInterred face thvm's
+    // second interreduce loop owns).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_rhs_interreduce(s, 1u);
+    thvm_atp_set_use_wm_demote(s, 1u);
+    AtpAddedRange e_added = thvm_atp_orient_and_add(
+        s, mk_f(mk_v(VAR_x), mk_a()),
+        mk_f(mk_v(1u), mk_f(mk_e(), mk_e())));
+    CHECK_EQ(e_added.count, 1u);
+    CHECK_EQ(s->r_orient[0], 0u);
+    Term orig_l = s->lhs[0];   // var-normalized stored = distinguished
+    Term orig_r = s->rhs[0];
+    AtpAddedRange added = thvm_atp_orient_and_add(
+        s, mk_f(mk_e(), mk_e()), mk_a());
+    CHECK_EQ(added.count, 1u);
+    u32 n_cps_before = s->n_cps;
+    CHECK_EQ(thvm_atp_interreduce(s, added), 1u);
+    CHECK_EQ(s->n_rules, 1u);              // both twins gone = slot gone
+    CHECK_EQ(s->n_unorient, 0u);
+    CHECK_EQ(s->n_cps, n_cps_before);      // buffered, NOT yet requeued
+    CHECK_EQ(s->n_irv, 1u);                // exactly ONE victim
+    CHECK(kbo_eq(s->irv_lhs[0], orig_l));  // ORIGINAL sides, not the
+    CHECK(kbo_eq(s->irv_rhs[0], orig_r));  // slice reduct
+    atp_wm_demote_drain(s);
+    CHECK_EQ(s->n_irv, 0u);
+    CHECK_EQ(s->n_cps, n_cps_before + 1u); // exactly ONE requeue
+    thvm_atp_free(s);
+
+    // Case 2: stored-LHS face reducible (RMLinksInterred's
+    // NF_ObjektAnwendbar on the equation's other GM reference) -- same
+    // lifecycle through thvm's first interreduce loop.
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_rhs_interreduce(s, 1u);
+    thvm_atp_set_use_wm_demote(s, 1u);
+    e_added = thvm_atp_orient_and_add(
+        s, mk_f(mk_f(mk_e(), mk_e()), mk_v(VAR_x)),
+        mk_f(mk_v(1u), mk_v(VAR_x)));
+    CHECK_EQ(e_added.count, 1u);
+    CHECK_EQ(s->r_orient[0], 0u);
+    orig_l = s->lhs[0];
+    orig_r = s->rhs[0];
+    added = thvm_atp_orient_and_add(s, mk_f(mk_e(), mk_e()), mk_a());
+    CHECK_EQ(added.count, 1u);
+    n_cps_before = s->n_cps;
+    CHECK_EQ(thvm_atp_interreduce(s, added), 1u);
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK_EQ(s->n_unorient, 0u);
+    CHECK_EQ(s->n_irv, 1u);
+    CHECK(kbo_eq(s->irv_lhs[0], orig_l));
+    CHECK(kbo_eq(s->irv_rhs[0], orig_r));
+    atp_wm_demote_drain(s);
+    CHECK_EQ(s->n_cps, n_cps_before + 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-mono-equation-single-face-cp-generation");
+  {
+    // WM Monogleichung (RE_ErzeugteGleichung, RUndEVerwaltung.c:435-438):
+    // an unorientable equation whose reversed pair var-renumbers to the
+    // pair itself indexes ONLY its distinguished face (GleichungEinfuegen
+    // :484-491) and skips the reverse-face CP-generation phases C/D/E/G
+    // (U1_KPsBildenZuGleichung, Unifikation1.c:1563-1579/:1625).  The
+    // self-overlap of f(i(x),i(y)) = f(i(y),i(x)) must therefore yield
+    // exactly ONE CP -- the top-level l =? l' of the distinguished face
+    // (phase F).  Pre-port thvm emitted 4 (one per face combo), 3 of
+    // them exact variants WM never forms.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_unfailing_cp(s, 1u);
+    AtpAddedRange a = thvm_atp_orient_and_add(s,
+        mk_f(mk_i(mk_v(VAR_x)), mk_i(mk_v(1u))),
+        mk_f(mk_i(mk_v(1u)), mk_i(mk_v(VAR_x))));
+    CHECK_EQ(a.count, 1u);
+    CHECK_EQ(s->r_orient[0], 0u);
+    CHECK_EQ((u32)atp_eq_is_mono(s, 0), 1u);
+    CriticalPair buf[ATP_CP_BATCH];
+    u32 cnt = atp_overlap_ij(s, 0, 0, buf, ATP_CP_BATCH);
+    CHECK_EQ(cnt, 1u);
+    thvm_atp_free(s);
+
+    // Stereo control: f(i(x), y) = f(y, i(x)) is NOT a mono equation
+    // (the reversed pair renumbers differently), so all four face
+    // combos run -- the unfailing both-faces coverage stays intact.
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_unfailing_cp(s, 1u);
+    a = thvm_atp_orient_and_add(s,
+        mk_f(mk_i(mk_v(VAR_x)), mk_v(1u)),
+        mk_f(mk_v(1u), mk_i(mk_v(VAR_x))));
+    CHECK_EQ(a.count, 1u);
+    CHECK_EQ(s->r_orient[0], 0u);
+    CHECK_EQ((u32)atp_eq_is_mono(s, 0), 0u);
+    cnt = atp_overlap_ij(s, 0, 0, buf, ATP_CP_BATCH);
+    CHECK_EQ(cnt, 4u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-queue-subsume-gate-roundtrip");
+  {
+    // WM has no queue-vs-queue subsumption: recentCPinsert
+    // (KPVerwaltung.c:383-417) queues every treated survivor and stamps
+    // a fresh w2 = ++CPNr age; SS_TermpaarSubsummiertTermpaar's only
+    // set-level caller is the E-set sweep (Interreduktion.c:262).  With
+    // use_queue_subsume OFF (the "Waldmeister"* presets), an instance
+    // of an already-queued CP must therefore QUEUE; the engine default
+    // (ON) drops it -- the historical thvm filter, round-tripped here.
+    Term gen_l = mk_f(mk_v(VAR_x), mk_e());
+    Term gen_r = mk_i(mk_v(VAR_x));
+    Term ins_l = mk_f(mk_a(), mk_e());      // instance x -> a
+    Term ins_r = mk_i(mk_a());
+    CriticalPair cp;
+    cp.peak = 0; cp.pos_len = 0;
+
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ(s->use_queue_subsume, 1u);     // engine default ON
+    cp.lhs = gen_l; cp.rhs = gen_r;
+    CHECK_EQ(atp_push_cps_traced(s, &cp, 1u, ATP_TRACE_NONE,
+                                 ATP_TRACE_NONE, 0u, 0u), 1u);
+    cp.lhs = ins_l; cp.rhs = ins_r;
+    CHECK_EQ(atp_push_cps_traced(s, &cp, 1u, ATP_TRACE_NONE,
+                                 ATP_TRACE_NONE, 0u, 0u), 0u);
+    CHECK_EQ(s->n_cps_dropped_queue_subsumed, 1u);
+    CHECK_EQ(s->n_cps, 1u);
+    thvm_atp_free(s);
+
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_queue_subsume(s, 0u);  // WM-exact: filter off
+    cp.lhs = gen_l; cp.rhs = gen_r;
+    CHECK_EQ(atp_push_cps_traced(s, &cp, 1u, ATP_TRACE_NONE,
+                                 ATP_TRACE_NONE, 0u, 0u), 1u);
+    cp.lhs = ins_l; cp.rhs = ins_r;
+    CHECK_EQ(atp_push_cps_traced(s, &cp, 1u, ATP_TRACE_NONE,
+                                 ATP_TRACE_NONE, 0u, 0u), 1u);
+    CHECK_EQ(s->n_cps_dropped_queue_subsumed, 0u);
+    CHECK_EQ(s->n_cps, 2u);                 // both queued, WM ages intact
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/interreduce-keeps-irreducible-rules");
   {
     // R[0]: i(a) -> i(a)         (degenerate; just to fill a slot)

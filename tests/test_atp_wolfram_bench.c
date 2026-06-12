@@ -594,6 +594,14 @@ int main(int argc, char **argv) {
       // (:371-373) for every non-rule new fact, so part of the
       // faithful preset.  THVM_ATP_ESET_SUBSUME env overrides.
       thvm_atp_set_use_eset_subsume(s, 1u);
+      // Push-time queue-vs-queue subsumption OFF: thvm-native filter
+      // with no WM counterpart (recentCPinsert queues every treated
+      // survivor; SS_TermpaarSubsummiertTermpaar's only set-level
+      // caller is the E-set sweep, never the passive queue).  Each
+      // WM insert consumes a w2 = ++CPNr FIFO age, so the filter
+      // shifts every later CP's age vs WM.  THVM_ATP_QUEUE_SUBSUME
+      // env overrides.
+      thvm_atp_set_use_queue_subsume(s, 0u);
       // Backward subsumption / backward demodulation are NOT in this
       // preset: they are Vampire mechanisms (bs=unit_only / bd=all)
       // with no WM analog.  WM's only backward treatment of existing
@@ -701,6 +709,15 @@ int main(int argc, char **argv) {
     const char *ri = getenv("THVM_ATP_RHS_IR");
     if (ri != NULL && ri[0] != '\0')
       thvm_atp_set_use_rhs_interreduce(s, (ri[0] != '0') ? 1u : 0u);
+  }
+
+  // THVM_ATP_QUEUE_SUBSUME=0/1: independent override of the push-time
+  // queue-vs-queue subsumption filter (default ON engine-wide, OFF in
+  // the WALDMEISTER preset above -- no WM counterpart).
+  {
+    const char *qs = getenv("THVM_ATP_QUEUE_SUBSUME");
+    if (qs != NULL && qs[0] != '\0')
+      thvm_atp_set_use_queue_subsume(s, (qs[0] != '0') ? 1u : 0u);
   }
 
   // THVM_ATP_LAZY_NORM=0/1: toggle deferred-selection / lazy normalization

@@ -4237,6 +4237,11 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // relies on the lazy at-pop discard alone (use_orphan_murder), matching
   // WM's -ocrit live-queue composition.
   s->use_eager_orphan_sweep = 1u;
+  // Push-time queue-vs-queue subsumption is on by default (the
+  // historical thvm engine).  No WM counterpart -- the "Waldmeister"*
+  // presets gate it OFF so the passive queue and its FIFO ages match
+  // WM's recentCPinsert exactly (see AtpState.use_queue_subsume).
+  s->use_queue_subsume = 1u;
   // use_lazy_normalize stays OFF by default (calloc zeroed): the deferred-
   // selection CP normalization is an opt-in via thvm_atp_set_use_lazy_normalize
   // (Method suboption "LazyNormalize" on the WL side, wired through the
@@ -8495,6 +8500,14 @@ fn void thvm_atp_set_use_bwd_ground_join(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_eset_subsume(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_eset_subsume = on ? 1u : 0u;
+}
+
+// Push-time queue-vs-queue subsumption gate (no WM counterpart; see
+// AtpState.use_queue_subsume in thvm.h).  Default ON = the historical
+// thvm engine; the "Waldmeister"* presets turn it OFF.
+fn void thvm_atp_set_use_queue_subsume(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_queue_subsume = on ? 1u : 0u;
 }
 
 // Buffer one interreduction victim's ORIGINAL sides + the TRACE_SIMPLIFY
@@ -13884,7 +13897,12 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       s->n_cps_dropped_rule_subsumed++;
       continue;
     }
-    u8 q_subsmd    = atp_cp_queue_subsumed(s, cp_lhs, cp_rhs);
+    // thvm-native filter, no WM counterpart (see AtpState.use_queue_
+    // subsume): WM's recentCPinsert queues every treated survivor and
+    // stamps it a fresh w2 = ++CPNr FIFO age; the WM presets run with
+    // the gate OFF so queue composition and ages match WM exactly.
+    u8 q_subsmd    = s->use_queue_subsume
+                   ? atp_cp_queue_subsumed(s, cp_lhs, cp_rhs) : 0u;
 #ifdef ATP_CP_DIAG
     if (atp_cp_source_disjoint_connected(s, cp_lhs, cp_rhs,
                                          rule_a, rule_b)) {
@@ -14011,6 +14029,34 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
 // the CP's other component then being li).  Both-faces superposition is
 // what unfailing completion needs to be COMPLETE on incomparable
 // equations (Bachmair-Dershowitz-Plaisted; Waldmeister's default mode).
+// WM Monogleichung test (RE_ErzeugteGleichung, RUndEVerwaltung.c:
+// 435-438): an unorientable equation is a mono equation when its
+// reversed pair, variable-renumbered (BO_TermpaarNormieren), equals
+// the stored pair -- the Antigleichung twin is a variant of the
+// equation itself (e.g. commutativity f(x,y) = f(y,x)).  WM then
+// indexes ONLY the distinguished face (GleichungEinfuegen :484-491
+// skips the Herrichtung insert) and skips the reverse-face overlap
+// phases C/D/E/G of its own CP-generation pass
+// (U1_KPsBildenZuGleichung, Unifikation1.c:1563-1579 table + the
+// :1625 TP_IstKeineMonogleichung gate), so a mono equation
+// participates in CP formation through its distinguished face only.
+// The suppressed combos would emit exact variants of the
+// forward-face CPs -- pairs WM never forms.
+static u8 atp_eq_is_mono(const AtpState *s, u32 i) {
+#ifdef ATP_VAR_NORM
+  Term rl = s->rhs[i];
+  Term rr = s->lhs[i];
+  thvm_normalize_vars(&rl, &rr);
+  return kbo_eq(rl, s->lhs[i]) && kbo_eq(rr, s->rhs[i]);
+#else
+  // Without canonical variable renumbering the stored pair is not in
+  // BO_TermpaarNormieren form, so the variant test cannot be decided
+  // syntactically; keep both faces (the pre-port behavior).
+  (void)s; (void)i;
+  return 0u;
+#endif
+}
+
 static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
                           CriticalPair *buf, u32 cap) {
   u32 cnt = 0;
@@ -14022,8 +14068,14 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
 
   // Face combinations.  i_face in {li (always), ri (if i unorientable)};
   // j as the from->to pair {(lj,rj) always, (rj,lj) if j unorientable}.
-  u8 i_un = s->use_unfailing_cp && !s->r_orient[i];
-  u8 j_un = s->use_unfailing_cp && !s->r_orient[j];
+  // Mono equations contribute their distinguished face only (WM
+  // Monogleichung; see atp_eq_is_mono).
+  u8 i_eq = s->use_unfailing_cp && !s->r_orient[i];
+  u8 j_eq = s->use_unfailing_cp && !s->r_orient[j];
+  u8 i_mono = i_eq ? atp_eq_is_mono(s, i) : 0u;
+  u8 j_mono = (i == j) ? i_mono : (j_eq ? atp_eq_is_mono(s, j) : 0u);
+  u8 i_un = i_eq && !i_mono;
+  u8 j_un = j_eq && !j_mono;
 
 #ifdef THVM_ATPFT_UNIFY
   // FT-native overlap path: when both rules' FT mirrors are populated,

@@ -69,7 +69,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"BackwardGroundJoin\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"BackwardGroundJoin\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 GeneralUtilities`SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -259,6 +259,10 @@ $atpRunProofFn := $atpRunProofFn = load[
      (* args[38] = backward ground-joinability sterilization: Waldmeister
         -gj RueckwaertsGrundzusammenfuehrbarkeit (Method
         "BackwardGroundJoin"; OFF by default = the WM -gj default) *)
+     Integer,
+     (* args[39] = push-time queue-vs-queue subsumption gate (Method
+        "QueueSubsume"; thvm-native, no WM counterpart -- ON by
+        default, OFF in the "Waldmeister"* presets) *)
      Integer},
     "NumericArray"
 ]
@@ -2171,6 +2175,23 @@ atpPopSubsumeOpt[o_Association] := Switch[Lookup[o, "PopSubsume", Automatic],
 atpESetSubsumeOpt[o_Association] := Switch[Lookup[o, "ESetSubsume", Automatic],
     True, 1, False | Automatic, 0, _, 0];
 
+(* "QueueSubsume" -> True | False: push-time queue-vs-queue
+   subsumption (atp_cp_queue_subsumed) -- a freshly-generated CP that
+   is a substitution instance of an already-QUEUED CP (either side
+   order) is dropped before reaching the heap.  thvm-native filter
+   with NO Waldmeister counterpart: WM's recentCPinsert
+   (INF/KPVerwaltung.c:383-417) queues every treated survivor straight
+   into the heap (SS_TermpaarSubsummiertTermpaar's only set-level
+   caller is the E-set sweep, Interreduktion.c:262, never the passive
+   queue), and every insert consumes a w2 = ++CPNr FIFO age, so the
+   filter shifts every later CP's age relative to WM.
+   True/Automatic keeps the historical thvm engine (filter on);
+   False = WM-exact queue composition, set in the "Waldmeister"*
+   presets. *)
+atpQueueSubsumeOpt[o_Association] :=
+    Switch[Lookup[o, "QueueSubsume", Automatic],
+        False, 0, True | Automatic, 1, _, 1];
+
 (* "BackwardGroundJoin" -> True | False: Waldmeister's -gj backward
    ground-joinability sterilization
    (RueckwaertsGrundzusammenfuehrbarkeit, INF/Hauptkomponenten.c:
@@ -2316,6 +2337,10 @@ $AtpPresetDefaults = <|
         "OrphanMurder" -> True,
         "PopSubsume" -> True,
         "ESetSubsume" -> True,
+        (* thvm-native push-time queue-vs-queue subsumption has no WM
+           counterpart (recentCPinsert queues every treated survivor;
+           see atpQueueSubsumeOpt) -- OFF for WM-exact queue ages. *)
+        "QueueSubsume" -> False,
         (* Stays opt-in: the measured flip costs 2.8x steps, +55%
            wall, +17% peak RSS on mccune and 2.13x peak RSS on
            AndAssoc -- see atpImplicitCpOpt. *)
@@ -2340,6 +2365,7 @@ $AtpPresetDefaults = <|
         "OrphanMurder" -> True,
         "PopSubsume" -> True,
         "ESetSubsume" -> True,
+        "QueueSubsume" -> False,
         "FreeVarInstance" -> True,
         (* Stays opt-in for the same measured regressions as the
            "Waldmeister" entry; FVI differs only in FreeVarInstance
@@ -2355,6 +2381,7 @@ $AtpPresetDefaults = <|
         "OrphanMurder" -> True,
         "PopSubsume" -> True,
         "ESetSubsume" -> True,
+        "QueueSubsume" -> False,
         "UnfailingCP" -> True, "RHSInterreduce" -> True|>,
     "VampireUEQ" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
@@ -2480,7 +2507,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpLazyNormalizeOpt[o], atpCoopWeightOpt[o], atpCoopRatioOpt[o],
          atpFreeVarInstanceOpt[o], atpImplicitCpOpt[o], atpWmDemoteOpt[o],
          atpOrphanMurderOpt[o], atpPopSubsumeOpt[o], atpESetSubsumeOpt[o],
-         atpBwdGroundJoinOpt[o]}
+         atpBwdGroundJoinOpt[o], atpQueueSubsumeOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
