@@ -244,7 +244,8 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   // strict tightening that matches what the body actually needs.
   if (propose_metal_backend_enabled() && ke->cached_lift.store_root != 0) {
     u32 dtype = 0;
-    if (propose_tc_classify(ke, &dtype) && dtype == DT_FP32) {
+    if (propose_tc_classify(ke, &dtype)
+        && (dtype == DT_FP32 || dtype == DT_BF16)) {
       static const u32 tc_tiles[] = {32, 16, 8};
       u32 n_tc_tiles = sizeof(tc_tiles)/sizeof(*tc_tiles);
       for (u32 i = 0; i < n_tc_tiles && n < cap; i++) {

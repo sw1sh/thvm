@@ -201,12 +201,12 @@ static int hand_opt_is_reduce_heavy(HandOptAxes const *ax) {
 // --- matmul classification (for TC kept as-is from prior commit) ----
 static int hand_opt_classify_matmul(KernelEntry const *ke, u32 *out_K) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
-  if (ke->output_dtype != DT_FP32) return 0;
+  if (ke->output_dtype != DT_FP32 && ke->output_dtype != DT_BF16) return 0;
   UopDagGemmShape gemm;
   if (!uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke, &gemm)) {
     return 0;
   }
-  if (gemm.dtype != DT_FP32) return 0;
+  if (gemm.dtype != DT_FP32 && gemm.dtype != DT_BF16) return 0;
   if (out_K != NULL) *out_K = gemm.K;
   return 1;
 }

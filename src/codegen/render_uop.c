@@ -2477,7 +2477,13 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   {
     u32 dt_a = rmu_slot_dtype(buf_a);
     u32 dt_b = rmu_slot_dtype(buf_b);
-    if (dt_a != DT_FP32 || dt_b != DT_FP32) {
+    // f32 and bf16 operands are both handled below: the register-blocked
+    // tiled path stages through `float` threadgroup memory (bfloat->float on
+    // the cooperative load), and the parallel_tc path declares each fragment
+    // as simdgroup_matrix<bfloat> matching its buffer, accumulating in f32.
+    // Anything else (fp16, fp8, int) still falls back to the scalar path.
+    if ((dt_a != DT_FP32 && dt_a != DT_BF16)
+        || (dt_b != DT_FP32 && dt_b != DT_BF16)) {
       return 0;
     }
   }
@@ -2502,14 +2508,26 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   int parallel_tc = (m_par || n_par);
   u32 n_tiles_n = n_extent / 8;
 
+  // A bf16 OUTPUT needs the threadgroup-staged f32->bf16 store, which assumes
+  // one simdgroup owns the threadgroup (no scratch sharing) and a flat body
+  // (threadgroup decls can't sit inside the per-axis for-loops).  Only the
+  // both-GLOBAL parallel dispatch guarantees both; decline other bf16 cases to
+  // the generic accumulator (correct, just not TC).  f32 output is unaffected.
+  if (uop_buffer_dtype(buf_c) == DT_BF16 && !(m_par && n_par)) return 0;
+
   // Threadgroup-staged, register-blocked tiled path: only the
   // both-GLOBAL case (each tg owns a unique output tile, no write race)
   // is eligible.  When a worthwhile tile divides M/N/K cleanly, emit
   // the tiled kernel and return -- the dispatch grid in
   // cg_tile_metal_dispatch_shape sizes threadgroups to the larger tile.
-  if (m_par && n_par && RMU_TARGET == CG_TARGET_METAL
-      && uop_buffer_dtype(buf_a) == DT_FP32
-      && uop_buffer_dtype(buf_b) == DT_FP32) {
+  // The register-blocked tiled path stays f32-only: it has many simdgroups
+  // per threadgroup each storing several 8x8 register tiles, so the
+  // threadgroup-staged f32->bf16 store the parallel_tc path uses doesn't apply
+  // cleanly.  A bf16 matmul takes the parallel_tc simdgroup path below instead
+  // (still TC; one 8x8 tile per simdgroup -> a single staged store).
+  u32 _dta = uop_buffer_dtype(buf_a), _dtb = uop_buffer_dtype(buf_b);
+  int _tc_dtype_ok = (_dta == DT_FP32) && (_dtb == DT_FP32);
+  if (m_par && n_par && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok) {
     RmuTcTile tile;
     if (rmu_tc_pick_tile(m_extent, n_extent, k_extent, &tile)) {
       // rmu_buf_name returns a pointer to a shared static buffer, so the
@@ -2578,11 +2596,19 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   }
 
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  // Input fragment element type follows each operand's buffer dtype: a bfloat
+  // buffer loads into a simdgroup_matrix<bfloat> (Metal 3.1; loading it into a
+  // <float> fragment is a type error).  The accumulator stays f32 for full
+  // precision across the K loop (a bfloat accumulator rounds every 8-K block
+  // and drifts ~10x); a bf16 OUTPUT is converted f32->bf16 at the store.
+  const char *a_el = (uop_buffer_dtype(buf_a) == DT_BF16) ? "bfloat" : "float";
+  const char *b_el = (uop_buffer_dtype(buf_b) == DT_BF16) ? "bfloat" : "float";
+  int c_is_bf = (uop_buffer_dtype(buf_c) == DT_BF16);
   fputs("/* TC simdgroup_matrix matmul */\n", fp);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fputs("simdgroup_matrix<float, 8, 8> _a_mat;\n", fp);
+  fprintf(fp, "simdgroup_matrix<%s, 8, 8> _a_mat;\n", a_el);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fputs("simdgroup_matrix<float, 8, 8> _b_mat;\n", fp);
+  fprintf(fp, "simdgroup_matrix<%s, 8, 8> _b_mat;\n", b_el);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fputs("simdgroup_matrix<float, 8, 8> _c_mat = simdgroup_matrix<float, 8, 8>(0);\n", fp);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
@@ -2602,10 +2628,36 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   fputs("simdgroup_multiply_accumulate(_c_mat, _a_mat, _b_mat, _c_mat);\n", fp);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fputs("}\n", fp);
-  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fprintf(fp, "simdgroup_store(_c_mat, &%s[", rmu_buf_name(buf_c));
-  rmu_emit_term(addr_c, fp);
-  fprintf(fp, "], %u);\n", n_extent);
+  // Store the f32 accumulator.  f32 output: direct simdgroup_store.  bf16
+  // output (`device bfloat*`): simdgroup_store has no f32->bf16 widening and
+  // there is no <float>-><bfloat> matrix cast, so stage the 8x8 tile through
+  // threadgroup f32 memory then cooperatively convert+write to bfloat.  Gated
+  // upstream to the both-GLOBAL dispatch (one simdgroup per threadgroup), so
+  // the per-threadgroup scratch is owned by exactly this simdgroup.
+  if (c_is_bf) {
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("threadgroup float _ctile[64];\n", fp);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("simdgroup_store(_c_mat, _ctile, 8);\n", fp);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("simdgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("uint _cbase = ", fp);
+    rmu_emit_term(addr_c, fp);
+    fputs(";\n", fp);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("for (uint _e = thread_index_in_simdgroup; _e < 64u; _e += 32u) {\n", fp);
+    for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+    fprintf(fp, "%s[_cbase + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)_ctile[_e];\n",
+            rmu_buf_name(buf_c), n_extent);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  } else {
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fprintf(fp, "simdgroup_store(_c_mat, &%s[", rmu_buf_name(buf_c));
+    rmu_emit_term(addr_c, fp);
+    fprintf(fp, "], %u);\n", n_extent);
+  }
 
   // Close any blocks opened above based on which path we took.
   if (parallel_tc) {

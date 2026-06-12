@@ -203,6 +203,9 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (!uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke, &gemm)) {
     return 0;
   }
+  // cblas has no bf16 GEMM (the classifier now admits bf16 for the Metal
+  // tensor-core path); decline so a bf16 matmul falls to the interpreter.
+  if (gemm.dtype != DT_FP32 && gemm.dtype != DT_FP64) return 0;
   // Resolve symbolic (kvar) shape dims to their per-dispatch bound value.
   // classify returns the output leading dim M kvar-packed for a symbolic-M
   // matmul ({S, dim} = onehot . tokT, S the seq kvar); the bind is set before

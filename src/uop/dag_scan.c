@@ -747,9 +747,11 @@ int uop_dag_classify_matmul_shape(Term root,
   }
 
   // Uniform dtype: every BUFFER reachable from the store_root must
-  // share dtype; mirrors tile_gemm_uniform_dtype's per-op gate.
+  // share dtype; mirrors tile_gemm_uniform_dtype's per-op gate.  bf16 is
+  // admitted for the Metal simdgroup tensor-core path (the threadgroup
+  // staging load upconverts bfloat->float); CPU BLAS re-rejects it (blas.c).
   u32 dt = uop_buffer_dtype(buf_out);
-  if (dt != DT_FP32 && dt != DT_FP64) return 0;
+  if (dt != DT_FP32 && dt != DT_FP64 && dt != DT_BF16) return 0;
   if (uop_buffer_dtype(buf_a) != dt) return 0;
   if (uop_buffer_dtype(buf_b) != dt) return 0;
 
