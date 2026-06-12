@@ -50,10 +50,9 @@ lcfg = <|"heads" -> cfg["heads"], "kv_heads" -> cfg["kv_heads"],
          "head_dim" -> cfg["head_dim"], "eps" -> cfg["eps"]|>;
 
 (* one layer: realize, then re-enter as a fresh host leaf so the prior layer's
-   f32 weight casts free and the next layer recycles them (memory-bounded).
-   qwLayerWHost streams the bf16 weights per layer (host f32, transient) so the
-   8 GB of mmap weights never accumulate resident across 27 layers. *)
-step[xx_, i_] := TTensorCreate[Normal @ TRealize @ qwLayer[xx, cos, sin, addMask, qwLayerWHost[wf, i], lcfg]];
+   f32 weight casts free and the next layer recycles them off the free-list
+   (bounds the dirty-buffer working set across the 27 layers). *)
+step[xx_, i_] := TTensorCreate[Normal @ TRealize @ qwLayer[xx, cos, sin, addMask, qwLayerW[wf, i], lcfg]];
 
 (* === stage 1: embedding (hs_0) === *)
 x = qwEmbed[wf["model.embed_tokens.weight"], ids];

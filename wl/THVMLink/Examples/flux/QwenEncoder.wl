@@ -47,28 +47,6 @@ qwBf16ToF32[u16arr_] := With[{shape = Dimensions[u16arr], u16 = Flatten[u16arr]}
             {"Binary", "Real32"}],
         shape]]
 
-(* --- per-layer weights as host f32 leaves, decoded transiently from the bf16
-       shards (Normal reads just that tensor's bytes; qwBf16ToF32 converts; the
-       host array is wrapped as a leaf and the bf16 read is GC'd).  Use this
-       instead of qwLayerW on a memory-pressured host: it never lets the 8 GB of
-       mmap'd bf16 weights accumulate resident across 27 layers, since each
-       layer's bytes are read on demand and freed -- peak stays at one layer's
-       f32 weights (~400 MB) plus the activations.  Faithful (same bf16->f32
-       values as the device cast). --- *)
-qwLayerWHost[wf_, i_] := With[{p = "model.layers." <> ToString[i] <> ".",
-    f32 = (TTensorCreate @ qwBf16ToF32 @ Normal @ wf[#] &)}, <|
-    "input_ln"  -> f32[p <> "input_layernorm.weight"],
-    "q_proj"    -> f32[p <> "self_attn.q_proj.weight"],
-    "k_proj"    -> f32[p <> "self_attn.k_proj.weight"],
-    "v_proj"    -> f32[p <> "self_attn.v_proj.weight"],
-    "o_proj"    -> f32[p <> "self_attn.o_proj.weight"],
-    "q_norm"    -> f32[p <> "self_attn.q_norm.weight"],
-    "k_norm"    -> f32[p <> "self_attn.k_norm.weight"],
-    "post_ln"   -> f32[p <> "post_attention_layernorm.weight"],
-    "gate_proj" -> f32[p <> "mlp.gate_proj.weight"],
-    "up_proj"   -> f32[p <> "mlp.up_proj.weight"],
-    "down_proj" -> f32[p <> "mlp.down_proj.weight"]|>]
-
 (* --- half-split rotary embedding (Qwen3 / NEOX use_real_unbind_dim, the
        HF rotate_half convention): t {S, H, D}; cos,sin {S, 1, D}.
        rotate_half(t) = concat[ -t[..., D/2:D], t[..., 0:D/2] ];
