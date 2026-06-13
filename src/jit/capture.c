@@ -1432,12 +1432,17 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
           // physical buffer is written exactly once (the last write keeps the
           // original buffer -- it is the live result the tensor handle names).
           // A buffer written only once has last_op == this index -> not renamed.
-          // NEVER rename a write into a result buffer (a root): the returned
-          // tensor names that buf_id.  If a root's slot is later reused the
-          // metal_graph_unsafe check below keeps the ICB declined (per-op,
-          // correct) rather than risk corrupting the result.
-          if (last_op[ob] != i + 1u
-              && !jit_bufref_contains(root_bufs, n_root_bufs, be, ob)) {
+          // This holds for ROOT buffers too: only the LAST write to a root is
+          // the result WL reads; earlier writes are intermediates whose reads
+          // are redirected to the fresh buffer via cur[] below, while the last
+          // write keeps the root's buf_id (last_op[ob]==i+1 -> not renamed).
+          // Renaming a root's non-last writes is what lets the FLUX multi-root
+          // double block (img/txt sharing the joint-attention sub-DAG, each
+          // gated-residual-written more than once) replay through the ICB
+          // instead of tripping the recycle hazard below.
+          (void)root_bufs;
+          (void)n_root_bufs;
+          if (last_op[ob] != i + 1u) {
             u64 nbytes = 0;
             thvm_metal_buf_get(ob, &nbytes, NULL);
             u32 ob_new = (nbytes > 0 && be->buf_alloc != NULL)
