@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# ProoVer checker on a modern base (glibc 2.35) -- the deployable artifact.
+# Native CentOS-7 can't run Wolfram 14+ (libWolframEngine.so needs logf/powf
+# @GLIBC_2.27; CentOS 7 has glibc 2.17, unupgradeable). A container with a
+# modern userspace runs on the competition box's own kernel (3.10, fine for
+# glibc 2.35) via Docker/Singularity/Apptainer, sidestepping the host glibc.
+# Adapted from PrimeIntellect/scripts/docker/Dockerfile, minus CUDA/GPU/sshd.
+#
+#   docker build --platform linux/amd64 -t proover -f Dockerfile.ubuntu .
+#   docker run --rm -e WOLFRAMSCRIPT_ENTITLEMENTID=O-XXXX proover corpus
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive LANG=en_US.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates locales \
+      libfontconfig1 libgl1 libasound2 libx11-6 libxext6 libxrender1 \
+    && rm -rf /var/lib/apt/lists/* && locale-gen en_US.UTF-8
+
+RUN --mount=type=bind,source=W-LINUX-Standard-15.0.0.sh,target=/tmp/wl.sh \
+    bash /tmp/wl.sh -- -auto > /tmp/wl.log 2>&1 || (tail -20 /tmp/wl.log; false) \
+    && rm -rf /usr/local/Wolfram/*/*/Documentation* \
+    && du -sh /usr/local/Wolfram
+
+# Offline paclet install (== PacletInstall: PacletManager scans Repository).
+COPY wolframparser/ /root/.Wolfram/Paclets/Repository/Wolfram__WolframParser-0.2.0/
+COPY proover/ /opt/proover/
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+WORKDIR /opt/proover
+ENTRYPOINT ["/entrypoint.sh"]

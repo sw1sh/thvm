@@ -1,0 +1,19 @@
+# CentOS 7 base mirroring the ProoVer competition box (CentOS 7.4, glibc 2.17,
+# x86_64) with the system libraries the Wolfram Engine dlopen's even headless.
+# CentOS 7 is EOL, so its yum mirrors moved to vault.centos.org.
+FROM --platform=linux/amd64 centos:7
+
+# Repoint yum at the vault (mirror.centos.org is dead post-EOL 2024-06-30).
+RUN sed -i -e 's|^mirrorlist=|#mirrorlist=|g' \
+           -e 's|^#\?baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' \
+           /etc/yum.repos.d/CentOS-*.repo && \
+    yum -y --disablerepo=updates install \
+        which tar gzip bzip2 procps-ng file \
+        fontconfig freetype libpng zlib \
+        mesa-libGL libX11 libXext libXrender libXtst libXi libXmu libSM libICE \
+        alsa-lib gmp && \
+    yum clean all && rm -rf /var/cache/yum
+
+RUN echo "centos: $(cat /etc/centos-release)" && \
+    echo "glibc: $(ldd --version | head -1)" && \
+    echo "arch:  $(uname -m)"

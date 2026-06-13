@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+# CentOS-7 + Wolfram 14.0 -- reproduces the competition box to establish the
+# native-compatibility finding (see README). It builds and the kernel launches,
+# but `entrypoint.sh glibc-probe` shows libWolframEngine.so needs GLIBC_2.27
+# (logf/powf), which CentOS 7's glibc 2.17 cannot provide. Kept as the evidence
+# trail; the deployable image is Dockerfile.ubuntu.
+#
+#   ./stage.sh 14.0.0
+#   docker build --platform linux/amd64 -t proover-centos7 -f Dockerfile.centos7 .
+#   docker run --rm proover-centos7 glibc-probe       # shows the GLIBC_2.27 gap
+FROM proover-centos7-base
+
+# Wolfram 14.0 (Standard), silent install; strip Documentation to slim. The
+# installer is bind-mounted (BuildKit) so the 2 GB blob never lands in a layer.
+RUN --mount=type=bind,source=W-LINUX-Standard-14.0.0.sh,target=/tmp/wl.sh \
+    bash /tmp/wl.sh -- -auto -verbose > /tmp/wl-install.log 2>&1 || (tail -40 /tmp/wl-install.log; false) \
+    && tail -3 /tmp/wl-install.log \
+    && rm -rf /usr/local/Wolfram/*/*/Documentation* \
+    && du -sh /usr/local/Wolfram
+
+# Offline paclet install (== PacletInstall: PacletManager scans Repository).
+COPY wolframparser/ /root/.Wolfram/Paclets/Repository/Wolfram__WolframParser-0.2.0/
+COPY proover/ /opt/proover/
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+WORKDIR /opt/proover
+ENTRYPOINT ["/entrypoint.sh"]

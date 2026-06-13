@@ -1,0 +1,6 @@
+# staged build artifacts (large / fetched) -- never commit
+W-LINUX-*.sh
+wolframparser/
+proover/
+*.log
+.entitlement
