@@ -1938,6 +1938,16 @@ static id<MTLIndirectCommandBuffer> metal_graph_build(
     TileConv2DInfo conv;
     int needs_cfg = 0;
     if (!cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x)) return nil;
+    // The ICB indirect-command API has no setBytes: equivalent, so a kernel
+    // that needs per-dispatch kvar (symbolic-dim) scalars -- which the per-op
+    // tile path binds via setBytes (metal_tile_jit_encode) -- cannot be encoded
+    // here.  Decline the whole graph; the per-op replay binds them correctly.
+    {
+      u32 kv_used[KVAR_USED_CAP];
+      if (kvar_collect_from_dag(ke->cached_lift.store_root, kv_used, KVAR_USED_CAP) > 0) {
+        return nil;
+      }
+    }
     needs_cfg = metal_tile_jit_uses_conv_cfg(ke, &conv);
     if (needs_cfg && ke->n_inputs >= 30) return nil;
     pso = metal_tile_jit_pipeline(ke);
