@@ -42,13 +42,17 @@ simg = 256; stxt = 512; dh = 128; inCh = 128; txtCh = 7680; tdim = 3072;
 ctx = TContextNew["metal"];
 res = TInContext[ctx,
   wt = TSafeTensorLoad[wpath];
-  (* rank-aware loader: upload bf16 (or cast f32) to Metal, pre-transpose the
-     2-D matmul weights to a contiguous {in,out} W^T, leave 1-D gains as-is. *)
+  (* rank-aware loader: pre-transpose the 2-D matmul weights to a contiguous
+     {in,out} W^T on Metal, leave 1-D gains as-is.  Transpose the CPU-resident
+     weight FIRST, then upload only the W^T -- not upload-then-transpose, which
+     would keep BOTH the uploaded original AND the realised W^T resident on
+     Metal (~2x the weight bytes), because TToDevice pins its upload buffer. *)
   wcache = <||>;
-  wf = (n |-> Lookup[wcache, n, wcache[n] = Module[{w0 = TToDevice[wt[n], "metal"], w, dims},
-           w = If[ dt === "f32", TUOpCast[w0, "f32"], w0];
+  wf = (n |-> Lookup[wcache, n, wcache[n] = Module[{w = wt[n], dims},
+           w = If[ dt === "f32", TUOpCast[w, "f32"], w];
            dims = Dimensions[w];
-           If[ Length[dims] == 2, TRealize[Transpose[w]], TRealize[w]]]]);
+           If[ Length[dims] == 2, TRealize@TToDevice[Transpose[w], "metal"],
+                                  TRealize@TToDevice[w, "metal"]]]]);
   (* activations in the working dtype (bf16 -> tensor-core matmuls) *)
   ca[x_] := If[ dt === "f32", TRealize[x], TRealize@TUOpCast[x, dt]];
   syn[s_, d__] := (SeedRandom[s]; TTensorCreate@NumericArray[RandomReal[{-0.05, 0.05}, {d}], "Real32"]);
