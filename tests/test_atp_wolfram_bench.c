@@ -1273,6 +1273,36 @@ int main(int argc, char **argv) {
     for (u32 e = 0; e < prp.n_eqns; e++) {
       thvm_atp_add_equation(s, prp.eq_l[e], prp.eq_r[e]);
     }
+    // WM ACSymboleSuchen (ANA/PhilMarlow.c:111): a symbol is AC iff the
+    // axiom set contains BOTH an associativity and a commutativity
+    // axiom for it.  WM marks those symbols (SO_SymbolInfo.IstAC) and
+    // its dokgP/Permsub CP filter (default-ON) discards every AC-equal
+    // CP via GZ_ACVerzichtbar.  thvm's auto-AC derives the same mask;
+    // feeding it the parsed axioms (the engine's s->lhs[] hold
+    // post-orientation rules) sets g_atp_ac_info + the perm_subsume
+    // mask so atp_cp_perm_subsumed runs the flattened AC test.  Gated
+    // on the WALDMEISTER preset (WM's default behavior); env-overridable.
+    {
+      const char *wm_ac = getenv("THVM_ATP_WALDMEISTER");
+      const char *no_ac = getenv("THVM_ATP_PERM_SUB");   // "0" opts out
+      u8 wm_on = (wm_ac != NULL && wm_ac[0] != '\0' && wm_ac[0] != '0');
+      u8 ps_off = (no_ac != NULL && no_ac[0] == '0');
+      if (wm_on && !ps_off) {
+        // auto_ac populates the engine AC mask; capture it for the
+        // perm-subsume filter, then RESET the engine mask to 0.  WM
+        // runs plain KB completion (no AC-unification/AC-matching) and
+        // only uses the AC operators to filter CPs via GZ_ACVerzichtbar
+        // -- leaving the engine ac_mask set would activate thvm's full
+        // AC-saturation path and diverge (explode) the trajectory.
+        thvm_atp_auto_ac(prp.eq_l, prp.eq_r, prp.n_eqns);
+        u64 acm = thvm_atp_get_ac_mask();
+        thvm_atp_set_ac_mask(0ull);
+        if (acm != 0ull) {
+          thvm_atp_set_perm_subsume_mask(acm);
+          thvm_atp_set_use_perm_subsume(s, 1u);
+        }
+      }
+    }
   } else if (strcmp(goal, "mccune") == 0) {
     thvm_atp_add_equation(s, mccune_axiom_lhs(), fv(3));
   } else if (strcmp(goal, "robbins") == 0) {
@@ -1454,10 +1484,11 @@ int main(int argc, char **argv) {
   printf("   trace: n_trace=%u  t_max=%u  record_norm=%u\n",
          s->n_trace, s->t_max, s->record_norm_steps);
   printf("   dropped: joinable=%u queue-subsumed=%u "
-         "rule-subsumed=%u pop-subsumed=%u eset-subsumed=%u "
+         "rule-subsumed=%u pop-subsumed=%u perm-subsumed=%u eset-subsumed=%u "
          "connected=%u orphan=%u lrs=%u\n",
          s->n_cps_dropped_joinable, s->n_cps_dropped_queue_subsumed,
          s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_pop_subsumed,
+         s->n_cps_dropped_perm_subsumed,
          s->n_eqs_dropped_eset_subsumed,
          s->n_cps_dropped_connected,
          s->n_cps_dropped_orphan, s->n_cps_dropped_lrs);

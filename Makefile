@@ -380,7 +380,7 @@ TESTS := \
 # Metal frameworks; src/thvm.c then skips the C-side stub.
 ifeq ($(shell uname -s),Darwin)
   METAL_OBJ      := $(BUILD)/backend_metal.o
-  METAL_LDFLAGS  := -framework Metal -framework Foundation
+  METAL_LDFLAGS  := -framework Metal -framework Foundation -framework MetalPerformanceShaders
   METAL_LIBPATH  := $(BUILD)/default.metallib
   METAL_SHADERS  := $(wildcard src/backend/metal/shaders/*.metal)
   METAL_AIRS     := $(METAL_SHADERS:src/backend/metal/shaders/%.metal=$(BUILD)/%.air)
@@ -585,7 +585,7 @@ wl-mac: $(WL_SRC) $(SRC) $(METAL_LIBPATH) build/thvm_runtime_blob.c
 	  -I"$(WL_INCLUDE)" \
 	  -o $(WL_RES)/MacOSX-ARM64/THVMLink.dylib \
 	  $(WL_SRC) build/thvm_runtime_blob.c build/backend_metal_univ.o \
-	  -framework Metal -framework Foundation -framework Accelerate
+	  -framework Metal -framework Foundation -framework MetalPerformanceShaders -framework Accelerate
 	codesign --force --sign - $(WL_RES)/MacOSX-ARM64/THVMLink.dylib
 	cp $(WL_RES)/MacOSX-ARM64/THVMLink.dylib $(WL_RES)/MacOSX-x86-64/THVMLink.dylib
 	cp $(METAL_LIBPATH) $(WL_RES)/MacOSX-ARM64/default.metallib
@@ -910,6 +910,16 @@ $(BIN)/test_atp_ac_abelian_repro: tests/test_atp_ac_abelian_repro.c $(SRC) | $(B
 	  -DTHVM_ATP_AC \
 	  -o $@ $< $(TEST_LDFLAGS)
 
+# The wolfram bench drives the WM-alignment sweep (tools/wm_align_sweep).
+# Its WALDMEISTER preset runs WM's default-ON dokgP/Permsub CP filter
+# (GZ_ACVerzichtbar) which needs the AC machinery (src/atp/ac.c).  The
+# mask is 0 unless thvm_atp_auto_ac detects an AC operator, so the
+# non-AC trajectory stays byte-identical.
+$(BIN)/test_atp_wolfram_bench: tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC \
+	  -o $@ $< $(TEST_LDFLAGS)
+
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
 
@@ -993,6 +1003,7 @@ $(PY_METAL_OBJ): py/csource/thvm_py_metal.m | $(BUILD)
 # dispatch harness) coexists; distinct symbol prefixes, no conflict.
 $(PY_DYLIB): $(PY_THVM_OBJ) $(PY_METAL_OBJ) $(METAL_OBJ) $(METAL_LIBPATH)
 	clang -shared -framework Accelerate -framework Metal -framework Foundation \
+	    -framework MetalPerformanceShaders \
 	    -o $@ $(PY_THVM_OBJ) $(PY_METAL_OBJ) $(METAL_OBJ)
 .PHONY: py
 py: $(PY_DYLIB)

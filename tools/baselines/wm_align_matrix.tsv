@@ -11,9 +11,9 @@ AbelianMcCuneAxioms__InverseOfInverse	10	10	10	Y	-	thvm=PROVED weights-exact
 AbelianTarskiAxioms__Associativity	48	48	48	Y	-	thvm=PROVED weights-exact
 AbelianTarskiAxioms__Commutativity	52	52	52	Y	-	thvm=PROVED weights-exact
 AbelianTarskiAxioms__ImpliesHigmanNeumannAxioms	5	5	5	Y	-	thvm=PROVED weights-exact
-BooleanAxioms__Absorption	186	186	119	N	120	thvm=PROVED content-delta_wm-only=0_thvm-only=0;post-axiom_nonax-wm=180_nonax-thvm=180_nonax-prefix=113;weights-exact
-BooleanAxioms__AbsorptionOrAnd	189	189	117	N	118	thvm=PROVED content-delta_wm-only=0_thvm-only=0;post-axiom_nonax-wm=183_nonax-thvm=183_nonax-prefix=111;weights-exact
-BooleanAxioms__AndAssociativity	1260	1267	117	N	118	thvm=PROVED content-delta_wm-only=0_thvm-only=7;post-axiom_nonax-wm=1254_nonax-thvm=1261_nonax-prefix=111;weights-exact
+BooleanAxioms__Absorption	186	186	186	Y	-	thvm=PROVED weights-exact
+BooleanAxioms__AbsorptionOrAnd	189	189	189	Y	-	thvm=PROVED weights-exact
+BooleanAxioms__AndAssociativity	1260	1267	200	N	201	thvm=PROVED content-delta_wm-only=0_thvm-only=7;post-axiom_nonax-wm=1254_nonax-thvm=1261_nonax-prefix=194;weights-exact
 BooleanAxioms__AndCommutativity	6	6	6	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__AndDistributivity	5	5	5	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__AndIdempotence	16	16	16	Y	-	thvm=PROVED weights-exact
@@ -24,14 +24,14 @@ BooleanAxioms__DroppingAlwaysTrue	1	1	1	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__ExcludedMiddle	63	63	63	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__NegationRedundancy	9	9	9	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__Noncontradiction	65	65	65	Y	-	thvm=PROVED weights-exact
-BooleanAxioms__OrAssociativity	1250	1256	119	N	120	thvm=PROVED content-delta_wm-only=1_thvm-only=7;post-axiom_nonax-wm=1244_nonax-thvm=1250_nonax-prefix=113;weights-exact
+BooleanAxioms__OrAssociativity	1250	1256	200	N	201	thvm=PROVED content-delta_wm-only=1_thvm-only=7;post-axiom_nonax-wm=1244_nonax-thvm=1250_nonax-prefix=194;weights-exact
 BooleanAxioms__OrCommutativity	6	6	6	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__OrDistributivity	5	5	5	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__OrIdempotence	15	15	15	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__Transposition	36	36	36	Y	-	thvm=PROVED weights-exact
-CommutativeRingAxioms__ZeroIsAbsorbing	547	516	116	N	117	thvm=PROVED content-delta_wm-only=50_thvm-only=19;post-axiom_nonax-wm=540_nonax-thvm=509_nonax-prefix=109;weights-exact
-CommutativeRingWithIdentityAxioms__MinusOneYieldsInverse	576	425	119	N	120	thvm=PROVED content-delta_wm-only=164_thvm-only=13;post-axiom_nonax-wm=568_nonax-thvm=417_nonax-prefix=111;weights-exact
-CommutativeRingWithIdentityAxioms__ZeroIsAbsorbing	503	407	119	N	120	thvm=PROVED content-delta_wm-only=108_thvm-only=12;post-axiom_nonax-wm=495_nonax-thvm=399_nonax-prefix=111;weights-exact
+CommutativeRingAxioms__ZeroIsAbsorbing	547	503	200	N	201	thvm=PROVED content-delta_wm-only=48_thvm-only=4;post-axiom_nonax-wm=540_nonax-thvm=496_nonax-prefix=193;weights-exact
+CommutativeRingWithIdentityAxioms__MinusOneYieldsInverse	576	425	200	N	201	thvm=PROVED content-delta_wm-only=156_thvm-only=5;post-axiom_nonax-wm=568_nonax-thvm=417_nonax-prefix=192;weights-exact
+CommutativeRingWithIdentityAxioms__ZeroIsAbsorbing	503	407	200	N	201	thvm=PROVED content-delta_wm-only=100_thvm-only=4;post-axiom_nonax-wm=495_nonax-thvm=399_nonax-prefix=192;weights-exact
 GroupAxioms__ImpliesMcCuneAxioms	33	33	33	Y	-	thvm=PROVED weights-exact
 GroupAxioms__InverseOfComposite	18	18	18	Y	-	thvm=PROVED weights-exact
 GroupAxioms__InverseOfInverse	10	10	10	Y	-	thvm=PROVED weights-exact
@@ -41,16 +41,16 @@ HigmanNeumannAxioms__Associativity	105	105	105	Y	-	thvm=PROVED weights-exact
 HigmanNeumannAxioms__EqualityOfIdentities	13	13	13	Y	-	thvm=PROVED weights-exact
 HigmanNeumannAxioms__LeftIdentity	13	13	13	Y	-	thvm=PROVED weights-exact
 HigmanNeumannAxioms__RightIdentity	11	11	11	Y	-	thvm=PROVED weights-exact
-HillmanAxioms__Commutativity	182	181	174	N	175	thvm=PROVED content-delta_wm-only=2_thvm-only=1;post-axiom_nonax-wm=179_nonax-thvm=178_nonax-prefix=171;weights-exact
-HuntingtonAxioms__DoubleNegation	215	608	50	N	51	thvm=PROVED content-delta_wm-only=11_thvm-only=404;post-axiom_nonax-wm=212_nonax-thvm=605_nonax-prefix=47;weights-exact
-McCuneAxioms__Associativity	213	206	162	N	163	thvm=PROVED content-delta_wm-only=9_thvm-only=2;post-axiom_nonax-wm=212_nonax-thvm=205_nonax-prefix=161;weights-exact
+HillmanAxioms__Commutativity	182	182	182	Y	-	thvm=PROVED weights-exact
+HuntingtonAxioms__DoubleNegation	215	219	57	N	58	thvm=PROVED content-delta_wm-only=11_thvm-only=15;post-axiom_nonax-wm=212_nonax-thvm=216_nonax-prefix=54;weights-exact
+McCuneAxioms__Associativity	213	206	200	N	201	thvm=PROVED content-delta_wm-only=9_thvm-only=2;post-axiom_nonax-wm=212_nonax-thvm=205_nonax-prefix=199;weights-exact
 McCuneAxioms__EqualityOfInverses	156	156	156	Y	-	thvm=PROVED weights-exact
 McCuneAxioms__InverseOfComposite	130	130	130	Y	-	thvm=PROVED weights-exact
 McCuneAxioms__InverseOfInverse	118	118	118	Y	-	thvm=PROVED weights-exact
-MeredithAxioms__AndAssociativity	64800	31638	24	N	25	thvm=RUNNING content-delta_wm-only=37080_thvm-only=3918;post-axiom_nonax-wm=64798_nonax-thvm=31636_nonax-prefix=22;weights-exact
+MeredithAxioms__AndAssociativity	64800	22419	24	N	25	thvm=RUNNING content-delta_wm-only=43965_thvm-only=1584;post-axiom_nonax-wm=64798_nonax-thvm=22417_nonax-prefix=22;weights-exact
 MeredithAxioms__Commutativity	6	6	6	Y	-	thvm=PROVED weights-exact
-MeredithAxioms__OrAssociativity	64800	32491	24	N	25	thvm=RUNNING content-delta_wm-only=36426_thvm-only=4117;post-axiom_nonax-wm=64798_nonax-thvm=32489_nonax-prefix=22;weights-exact
-RingAxioms__ZeroIsAbsorbing	447	419	111	N	112	thvm=PROVED content-delta_wm-only=45_thvm-only=17;post-axiom_nonax-wm=440_nonax-thvm=412_nonax-prefix=104;weights-exact
-RingWithIdentityAxioms__ZeroIsAbsorbing	462	432	113	N	114	thvm=PROVED content-delta_wm-only=47_thvm-only=17;post-axiom_nonax-wm=454_nonax-thvm=424_nonax-prefix=105;weights-exact
+MeredithAxioms__OrAssociativity	64800	32361	24	N	25	thvm=RUNNING content-delta_wm-only=36500_thvm-only=4061;post-axiom_nonax-wm=64798_nonax-thvm=32359_nonax-prefix=22;weights-exact
+RingAxioms__ZeroIsAbsorbing	447	403	200	N	201	thvm=PROVED content-delta_wm-only=45_thvm-only=1;post-axiom_nonax-wm=440_nonax-thvm=396_nonax-prefix=193;weights-exact
+RingWithIdentityAxioms__ZeroIsAbsorbing	462	418	200	N	201	thvm=PROVED content-delta_wm-only=45_thvm-only=1;post-axiom_nonax-wm=454_nonax-thvm=410_nonax-prefix=192;weights-exact
 WolframAxioms__Commutativity	-	-	-	-	-	SKIPPED_WM_TRACE
 WolframAxioms__DoubleNegation	-	-	-	-	-	SKIPPED_WM_TRACE

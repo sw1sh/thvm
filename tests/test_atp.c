@@ -5559,6 +5559,85 @@ int main(void) {
     #undef LAB_g
   }
 
+#ifdef THVM_ATP_AC
+  TEST_BEGIN("atp/perm-subsume/wm-ac-dispensable-flattens-n-ary");
+  {
+    // Port of WM GZ_ACVerzichtbar (INF/Grundzusammenfuehrung.c:137): the
+    // AC-permutation-redundancy filter that closes the Huntington/Boolean/
+    // Ring/Meredith over-formation.  With the perm-subsume mask carrying
+    // an AC operator (or = label 4), atp_cp_perm_subsumed must:
+    //   * DROP n-ary associativity permutations the binary swap misses
+    //     (or(a,or(b,or(c,d))) = or(b,or(c,or(d,a))) -- same multiset),
+    //   * DROP a permutation under a non-AC head (not(or(a,b))=not(or(b,a))),
+    //   * KEEP the generating commutativity axiom (or(a,b)=or(b,a)),
+    //   * KEEP the generating associativity axiom,
+    //   * KEEP a genuinely different equation (or(a,b)=a),
+    //   * be INERT (return 0) on a non-AC top when the mask is the
+    //     dedicated perm-subsume mask, not the engine AC mask.
+    #define LAB_or  4u
+    #define LAB_not 3u
+    #define MK_OR(x, y) ({ Term _c[2] = {(x), (y)}; term_new_ctr(LAB_or, _c, 2); })
+    #define MK_NOT(x)   ({ Term _c1[1] = {(x)}; term_new_ctr(LAB_not, _c1, 1); })
+
+    u64 prev_mask = g_atp_perm_subsume_mask;
+    thvm_atp_set_perm_subsume_mask(1ull << LAB_or);   // mark `or` AC
+
+    // 4-ary AC perm: or(v0,or(v1,or(v2,v3))) = or(v1,or(v2,or(v3,v0)))
+    Term l4 = MK_OR(mk_v(0u), MK_OR(mk_v(1u), MK_OR(mk_v(2u), mk_v(3u))));
+    Term r4 = MK_OR(mk_v(1u), MK_OR(mk_v(2u), MK_OR(mk_v(3u), mk_v(0u))));
+    CHECK_EQ(atp_cp_perm_subsumed(l4, r4), 1u);       // DROP (the prior gap)
+
+    // 3-ary AC perm that is NOT a generating form: or(v0,or(v1,v2)) =
+    // or(v0,or(v2,v1)) -- v0 stays leading, only the inner pair swaps.
+    // Same multiset {v0,v1,v2}, but none of WM's extended-commutativity
+    // C' shapes (which all rotate v0 out of the lead), so it is dropped.
+    Term l3 = MK_OR(mk_v(0u), MK_OR(mk_v(1u), mk_v(2u)));
+    Term r3 = MK_OR(mk_v(0u), MK_OR(mk_v(2u), mk_v(1u)));
+    CHECK_EQ(atp_cp_perm_subsumed(l3, r3), 1u);       // DROP
+
+    // The extended-commutativity C' generating form IS kept (WM keeps
+    // it in E): or(v0,or(v1,v2)) = or(v1,or(v0,v2)) is one of the four
+    // TO_IstErweiterteKommutativitaet rotations.
+    Term lec = MK_OR(mk_v(0u), MK_OR(mk_v(1u), mk_v(2u)));
+    Term rec = MK_OR(mk_v(1u), MK_OR(mk_v(0u), mk_v(2u)));
+    CHECK_EQ(atp_cp_perm_subsumed(lec, rec), 0u);     // KEEP (ext-comm C')
+
+    // permutation under a NON-AC head: not(or(v0,v1)) = not(or(v1,v0))
+    Term ln = MK_NOT(MK_OR(mk_v(0u), mk_v(1u)));
+    Term rn = MK_NOT(MK_OR(mk_v(1u), mk_v(0u)));
+    CHECK_EQ(atp_cp_perm_subsumed(ln, rn), 1u);       // DROP (non-AC top)
+
+    // KEEP the generating commutativity axiom: or(v0,v1) = or(v1,v0)
+    Term lc = MK_OR(mk_v(0u), mk_v(1u));
+    Term rc = MK_OR(mk_v(1u), mk_v(0u));
+    CHECK_EQ(atp_cp_perm_subsumed(lc, rc), 0u);       // KEEP (it IS comm)
+
+    // KEEP the generating associativity axiom:
+    //   or(or(v0,v1),v2) = or(v0,or(v1,v2))
+    Term la = MK_OR(MK_OR(mk_v(0u), mk_v(1u)), mk_v(2u));
+    Term ra = MK_OR(mk_v(0u), MK_OR(mk_v(1u), mk_v(2u)));
+    CHECK_EQ(atp_cp_perm_subsumed(la, ra), 0u);       // KEEP (it IS assoc)
+
+    // KEEP a genuinely distinct equation (NOT AC-equal): or(v0,v1) = v0
+    Term ld = MK_OR(mk_v(0u), mk_v(1u));
+    Term rd = mk_v(0u);
+    CHECK_EQ(atp_cp_perm_subsumed(ld, rd), 0u);       // KEEP (not AC-equal)
+
+    // INERT when the mask does NOT include the operator: clearing the
+    // mask routes to the binary-swap fallback, which cannot flatten the
+    // 4-ary perm -> keeps it (the pre-port behaviour).
+    thvm_atp_set_perm_subsume_mask(0ull);
+    CHECK_EQ(atp_cp_perm_subsumed(l4, r4), 0u);       // binary fallback misses it
+
+    thvm_atp_set_perm_subsume_mask(prev_mask);        // restore engine state
+
+    #undef MK_OR
+    #undef MK_NOT
+    #undef LAB_or
+    #undef LAB_not
+  }
+#endif
+
   TEST_BEGIN("atp/auto-precedence/mccune-arity-fallback");
   {
     // McCune's single-axiom group/Sheffer-style equation uses {and:arity2,

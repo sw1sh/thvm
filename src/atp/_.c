@@ -346,6 +346,13 @@ u64 g_atp_unorient_step_fires     = 0;
 u64 g_atp_unorient_step_empty     = 0;
 u64 g_atp_unorient_step_us        = 0;
 u8  g_atp_phase_enabled           = 0;
+// Perm-subsume AC-operator mask (WM GZ_ACVerzichtbar / dokgP).  Set by
+// thvm_atp_set_perm_subsume_mask (from thvm_atp_auto_ac's detected AC
+// symbols); a non-zero mask routes atp_cp_perm_subsumed through the
+// flattened AC-equality test and confines the drop to the KPV_Select
+// pop site.  Defined up here because the enqueue / pop-normalize gates
+// read it before its setter's definition point.
+static u64 g_atp_perm_subsume_mask = 0ull;
 // Forward decl: atp_now_us is defined further down (with the wall-clock
 // deadline helpers); needed up here for the profile timers in functions
 // defined ahead of it (e.g. atp_unorient_step_indexed).
@@ -4840,7 +4847,10 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   // by interreduce / RHS-composition (atp_add_equation_simplified)
   // before they enter the queue.  Skip for axioms (parent_a ==
   // ATP_TRACE_NONE) -- those are user-supplied and we must not drop.
-  if (s->use_perm_subsume && parent_a != ATP_TRACE_NONE
+  // AC-mask path perm-subsumes only at SELECTION (see KPV_Select port);
+  // the legacy binary env path (no mask) keeps the enqueue-time drop.
+  if (s->use_perm_subsume && g_atp_perm_subsume_mask == 0ull
+      && parent_a != ATP_TRACE_NONE
       && atp_cp_perm_subsumed(lhs, rhs)) {
     s->n_cps_dropped_perm_subsumed++;
     return 0;
@@ -9141,6 +9151,29 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     return ATP_RUNNING;
   }
 
+  // WM -ks "p" stage (KPV_Select, INF/KPVerwaltung.c:663): after the
+  // selection-time R+E normalize and the joined drop, a popped CP that
+  // is AC-redundant (its two sides AC-equal, excluding the generating
+  // assoc/comm/ext-comm axioms) is perm-subsumed
+  // (KPV_IncAnzKPspaeterPermSubsummiert -- GZ_ACVerzichtbar).  This is
+  // the SELECTION-time half of WM's default-ON dokgP/Permsub filter;
+  // all 65 perm-subsumptions on Huntington DoubleNegation happen here
+  // (none at formation), so the queue still receives every AC-perm and
+  // WM still SELECTS the ones it keeps in E -- only the residual-AC-
+  // equal duplicates drop at pop after R+E normalization canonicalizes
+  // them.  Gated by use_perm_subsume; the perm-subsume mask carries the
+  // detected AC operators (thvm_atp_auto_ac).  Same dead-CP cleanup as
+  // the joined / pop-subsume branches.
+  if (s->use_perm_subsume && g_atp_perm_subsume_mask != 0ull &&
+      atp_cp_perm_subsumed(l, r)) {
+    s->n_cps_dropped_perm_subsumed++;
+    if (s->record_norm_steps) {
+      s->n_trace = trace_mark;
+    }
+    thvm_atp_heap_reset(hcp_norm);
+    s->step++;
+    return ATP_RUNNING;
+  }
   // WM -ks "s" stage (KPV_Select, INF/KPVerwaltung.c:667): after the
   // selection-time normalize and the joined drop, an UNORIENTABLE pair
   // (Unvergleichbar -- thvm KBO_UN) that an existing unorientable
@@ -12395,14 +12428,80 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
 // symbol is in the mask" -- lets the WL paclet enable perm_sub for
 // problems like AndAssoc (set bit 1 = nand) without breaking mccune
 // (whose `and` symbol is intentionally outside the mask so its
-// commutativity-shaped goal CP survives).
-static u64 g_atp_perm_subsume_mask = 0ull;
+// commutativity-shaped goal CP survives).  The global itself is
+// defined up with the early ATP state (the enqueue / pop gates read
+// it before this point); only the setter lives here.
 fn void thvm_atp_set_perm_subsume_mask(u64 mask) {
   g_atp_perm_subsume_mask = mask;
 }
 
+// WM GZ_ACVerzichtbar's `!IstAssoz && !IstKommut && !IstErwKommut`
+// exclusion lives below (atp_gj_perm_valuable: the A/C/C' shapes the
+// ground-join fact test also protects).  Forward-declared so the
+// AC-dispensability path can keep the generating axioms.
+static u8 atp_gj_perm_valuable(Term l, Term r);
+
+// Port of WM GZ_ACVerzichtbar (INF/Grundzusammenfuehrung.c:137), the
+// AC-permutation-redundancy filter `dokgP`/`Permsub` runs at CP
+// formation (KPVerwaltung.c:447) and at selection (:663), default-ON
+// in the unconfigured Orkus run.  A CP whose two sides are AC-equal
+// (equal as flattened+sorted multisets under the AC operator) says
+// nothing the AC equations have not already said, so WM discards it.
+// The two generating shapes -- commutativity and associativity (and
+// extended commutativity) -- are kept (they ARE the AC theory).
+//
+//   if TO_ACGleich(l,r):                  // atp_ac_eq, flatten+sort
+//     if !IstACSymbol(top):               // AC-equal but non-AC top
+//       return TRUE                       // (e.g. not(or(..))=not(or(..)))
+//     else: return !IstAssoz && !IstKommut && !IstErwKommut
+//   else: return FALSE
+//
+// thvm's binary-only swap recursion (used when no AC mask is set, the
+// legacy env-driven THVM_ATP_PERM_SUB_MASK path) cannot see that
+// `or(a,or(b,c))` and `or(b,or(c,a))` are AC-equal: it never flattens
+// the associative spine.  That gap is exactly the Huntington/Boolean/
+// Ring/Meredith over-formation -- thvm kept thousands of 4-ary
+// `or(a,or(b,or(c,d)))#<perm>` CPs WM perm-subsumes.
+//
+// Built only under THVM_ATP_AC (atp_ac_eq + the AcInfo live in ac.c).
+// The default `bin/test_atp` build omits the flag; there the perm-
+// subsume mask can never be set (the AC detector is unavailable), so
+// the dispatch below is dead and the function need not exist.
+#ifdef THVM_ATP_AC
+static u8 atp_cp_ac_dispensable(Term lhs, Term rhs, const AtpAcInfo *ac) {
+  if (kbo_eq(lhs, rhs)) return 0;               // t = t handled upstream
+  // TO_ACGleich: AC-equal under the perm-subsume AC operators
+  // (atp_ac_eq flattens + hash-sorts + structurally compares).  This
+  // `ac` is the perm-subsume mask, kept SEPARATE from the engine-wide
+  // g_atp_ac_info that gates AC-unification/AC-matching: WM does plain
+  // KB completion (no AC-unification) and only filters CPs with this
+  // test, so activating thvm's AC-saturation here would diverge.
+  if (!atp_ac_eq(lhs, rhs, ac)) return 0;
+  // !SO_IstACSymbol(top): AC-equal but the top symbol is not itself
+  // an AC operator (the inner AC structure permuted under a non-AC
+  // head, e.g. not(or(a,b)) = not(or(b,a))).  Drop unconditionally.
+  if (!atp_ac_is_ac_top(ac, lhs)) return 1;
+  // Top is an AC operator: keep the generating assoc/comm/ext-comm
+  // axioms, drop every other AC-equal pair.
+  return !atp_gj_perm_valuable(lhs, rhs);
+}
+#endif
+
 static u8 atp_cp_perm_subsumed(Term lhs, Term rhs) {
   if (lhs == rhs) return 0;                      // identical handled elsewhere
+#ifdef THVM_ATP_AC
+  // WM-faithful path: when the AC operators have been detected and
+  // registered in the perm-subsume mask (thvm_atp_set_perm_subsume_mask
+  // from thvm_atp_auto_ac), use the full flattened AC-dispensability
+  // test (GZ_ACVerzichtbar).  This catches the n-ary associativity
+  // permutations the binary swap below misses.  The mask is a LOCAL
+  // AtpAcInfo, NOT the engine-global g_atp_ac_info -- so the engine
+  // stays in standard (non-AC) completion exactly like Waldmeister.
+  if (g_atp_perm_subsume_mask != 0ull) {
+    AtpAcInfo ac = { .ac_mask = g_atp_perm_subsume_mask };
+    return atp_cp_ac_dispensable(lhs, rhs, &ac);
+  }
+#endif
   if (term_tag(lhs) != TAG_CTR || term_tag(rhs) != TAG_CTR) return 0;
   if (term_ext(lhs) != term_ext(rhs)) return 0;
   // Per-symbol mask gate: when set, only fire perm_sub for symbols in
@@ -14122,7 +14221,15 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       fprintf(stderr, "[cpfate] %u: treated %s = %s joinable=%u raw_untreated=%u\n",
               i, la, ra, joinable, raw_untreated);
     }
-    if (s->use_perm_subsume && atp_cp_perm_subsumed(cp_lhs, cp_rhs)) {
+    // The AC-mask WM-faithful path perm-subsumes ONLY at SELECTION
+    // (KPV_Select :663), never at formation: WM keeps every AC-perm in
+    // SUE and selects the ones it adds to E, dropping only the residual
+    // duplicates after R+E normalization at pop.  So when the perm-
+    // subsume mask carries detected AC operators, the push-time filter
+    // stays off (g_atp_perm_subsume_mask != 0 -> skip here).  The legacy
+    // binary-only env path (no AC mask) keeps the push-time drop.
+    if (s->use_perm_subsume && g_atp_perm_subsume_mask == 0ull &&
+        atp_cp_perm_subsumed(cp_lhs, cp_rhs)) {
       s->n_cps_dropped_perm_subsumed++;
       if (cpraw_debug)
         fprintf(stderr, "[cpfate] %u: DROP perm-subsumed\n", i);
@@ -15152,8 +15259,11 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
   // commutativity form (e.g. nand(x_0, x_1) = nand(x_1, x_0)) that the
   // push-time filter missed because the CP entered the queue in a
   // larger, non-canonical shape and reduced to commutativity only at
-  // pop-time normalize.
-  if (s->use_perm_subsume && atp_cp_perm_subsumed(lhs, rhs)) {
+  // pop-time normalize.  AC-mask WM-faithful path handles this at the
+  // KPV_Select pop site (the orient call comes AFTER that drop), so it
+  // stays off here; the legacy binary env path keeps the orient drop.
+  if (s->use_perm_subsume && g_atp_perm_subsume_mask == 0ull
+      && atp_cp_perm_subsumed(lhs, rhs)) {
     s->n_cps_dropped_perm_subsumed++;
     return r;
   }
