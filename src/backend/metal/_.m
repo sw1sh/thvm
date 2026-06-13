@@ -38,6 +38,7 @@ static u32                  METAL_ENCODING_DEPTH = 0;
 
 static void metal_buf_decref(u32 buf_id);
 static void metal_buf_free(u32 buf_id);
+static void metal_mps_wcache_reset(void);
 static int metal_kernel_has_applied_opt(struct KernelEntry const *ke, u8 op);
 
 #define METAL_DEFER_DECREF_CAP (1u << 20)
@@ -278,6 +279,7 @@ static int metal_init(void) {
     METAL_PEAK_DEFERRED_BYTES = 0;
     METAL_GPU_US_TOTAL = 0;
     METAL_GPU_FLUSH_COUNT = 0;
+    metal_mps_wcache_reset();
     thvm_metal_jit_counters_reset();
     metal_pso_cache_init();
     return 0;
@@ -859,6 +861,10 @@ static void metal_shutdown(void) {
       METAL_PIPELINES_CACHE[op][dt] = nil;
   metal_jit_cache_reset_impl();
   metal_graph_cache_reset_impl();
+  // Drop the MPS converted-weight cache: it keys on source MTLBuffer
+  // identity, which becomes stale once the pool frees + recycles those
+  // addresses, so a reset prevents a false cache hit on a re-used slot.
+  metal_mps_wcache_reset();
   // Phase 7 iter BB: drop the cached AOT book_heap MTLBuffer wrapper
   // before the host frees the underlying book_heap pages on
   // thvm_free.  The cached buffer's MTLBuffer object outlives the
@@ -2674,6 +2680,373 @@ static int dag_metal_encode_kernel(KernelEntry *ke,
   return ok;
 }
 
+// === MPS matmul: route large 2-D GEMMs to MPSMatrixMultiplication =====
+//
+// Mirrors the CPU backend's cblas dispatch (backend/cpu/blas.c): the same
+// uop_dag_classify_matmul_shape classifier recovers (M, N, K, a/b slot,
+// ldA/ldB, transA/transB), then we hand the operands to Apple's vendor
+// GEMM -- here MPSMatrixMultiplication instead of cblas_sgemm.  The custom
+// simdgroup_matrix tiled kernel tops out ~6 TFLOP/s on the FLUX projection
+// shapes; MPS hits ~11-13 TFLOP/s (~2x), which is what drops the single-
+// block projections enough for the 4-step FLUX sampler to clear 3 s warm.
+//
+// dtype: FLUX activations + weights are bf16, but MPSMatrixMultiplication
+// on this OS (Tahoe 26 / M3) ASSERTS on MPSDataTypeBFloat16 -- it accepts
+// only Float32 / Float16 / Int8 / Int16.  So we convert the bf16 operands
+// to a working dtype (f16 by default, f32 selectable) via tiny runtime-
+// compiled conversion kernels, run MPS, then convert the result back to
+// bf16.  The B (weight) operand is JIT-pinned + constant across the 4
+// replay steps, so its converted copy is cached by source MTLBuffer
+// identity -- only A (small activation) + C (output) reconvert per step.
+//
+// JIT integration: an MPS op cannot be encoded into an MTLIndirectCommand
+// (the ICB API has no MPS equivalent), so the batched metal-graph replay
+// path (jit_replay_try_metal_graph_run) BREAKS on a kernel whose dispatch
+// kind is KDISPATCH_METAL_MPS -- it falls to the per-op replay loop, which
+// calls metal_dispatch_kernel here, encoding conversions + MPS into the
+// current (batched) command buffer.  Eager (non-JIT) realize hits the same
+// path.
+
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+
+// Working dtype for the MPS GEMM: 0 = f16 (default; same 2-byte width as
+// bf16, ~13 TFLOP/s), 1 = f32 (~12 TFLOP/s, wider range).  Read once.
+static int metal_mps_dtype_f32(void) {
+  static int slot = -1;
+  if (slot == -1) {
+    char const *e = getenv("THVM_METAL_MPS_DTYPE");
+    slot = (e != NULL && (e[0] == 'f') && (e[1] == '3')) ? 1 : 0;  // "f32"
+  }
+  return slot;
+}
+
+// Master gate: THVM_METAL_MPS=0 forces the custom tiled kernel (A/B
+// bisection knob, mirrors THVM_CPU_BLAS_DISABLE).  Default on.
+static int metal_mps_enabled(void) {
+  static int slot = -1;
+  if (slot == -1) {
+    char const *e = getenv("THVM_METAL_MPS");
+    slot = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
+  return slot;
+}
+
+// Minimum MAC count (M*N*K) to route to MPS.  Below this the MPS setup +
+// conversion overhead outweighs the per-kernel speedup, so the custom
+// tiled / per-op kernel wins.  Default 64M MACs (e.g. 256x256x1024) --
+// well below the FLUX projections (768*3072*27648 = 65 GMAC) but above
+// attention-tile-sized matmuls.
+static u64 metal_mps_min_macs(void) {
+  static u64 slot = (u64)-1;
+  if (slot == (u64)-1) {
+    char const *e = getenv("THVM_METAL_MPS_MIN_MACS");
+    slot = (e != NULL && e[0] != '\0') ? strtoull(e, NULL, 10) : (64ULL << 20);
+  }
+  return slot;
+}
+
+static u64 METAL_MPS_DISPATCH_COUNT = 0;
+fn u64 thvm_metal_mps_dispatch_count(void) { return METAL_MPS_DISPATCH_COUNT; }
+
+// Runtime-compiled conversion-kernel PSOs (bf16<->{f16,f32}).  Compiled
+// lazily on first MPS dispatch; one MTLLibrary, four functions.
+static id<MTLComputePipelineState> METAL_MPS_CVT_BF16_TO_F16 = nil;
+static id<MTLComputePipelineState> METAL_MPS_CVT_F16_TO_BF16 = nil;
+static id<MTLComputePipelineState> METAL_MPS_CVT_BF16_TO_F32 = nil;
+static id<MTLComputePipelineState> METAL_MPS_CVT_F32_TO_BF16 = nil;
+static int METAL_MPS_CVT_READY = -1;   // -1 unattempted, 0 failed, 1 ok
+
+static int metal_mps_build_cvt_kernels(void) {
+  if (METAL_MPS_CVT_READY != -1) return METAL_MPS_CVT_READY;
+  METAL_MPS_CVT_READY = 0;
+  if (METAL_DEVICE == nil) return 0;
+  // Width-preserving element conversions.  bfloat<->half<->float are all
+  // native MSL scalar casts; one thread per element, contiguous.
+  NSString *src = @"#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "kernel void cvt_bf16_f16(device const bfloat *in [[buffer(0)]],\n"
+    "                         device half *out [[buffer(1)]],\n"
+    "                         constant uint &n [[buffer(2)]],\n"
+    "                         uint gid [[thread_position_in_grid]]) {\n"
+    "  if (gid < n) out[gid] = (half)(float)in[gid];\n"
+    "}\n"
+    "kernel void cvt_f16_bf16(device const half *in [[buffer(0)]],\n"
+    "                         device bfloat *out [[buffer(1)]],\n"
+    "                         constant uint &n [[buffer(2)]],\n"
+    "                         uint gid [[thread_position_in_grid]]) {\n"
+    "  if (gid < n) out[gid] = (bfloat)(float)in[gid];\n"
+    "}\n"
+    "kernel void cvt_bf16_f32(device const bfloat *in [[buffer(0)]],\n"
+    "                         device float *out [[buffer(1)]],\n"
+    "                         constant uint &n [[buffer(2)]],\n"
+    "                         uint gid [[thread_position_in_grid]]) {\n"
+    "  if (gid < n) out[gid] = (float)in[gid];\n"
+    "}\n"
+    "kernel void cvt_f32_bf16(device const float *in [[buffer(0)]],\n"
+    "                         device bfloat *out [[buffer(1)]],\n"
+    "                         constant uint &n [[buffer(2)]],\n"
+    "                         uint gid [[thread_position_in_grid]]) {\n"
+    "  if (gid < n) out[gid] = (bfloat)in[gid];\n"
+    "}\n";
+  NSError *err = nil;
+  id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithSource:src
+                                                  options:nil
+                                                    error:&err];
+  if (lib == nil) {
+    fprintf(stderr, "thvm: metal_mps -- cvt-kernel compile failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return 0;
+  }
+  struct { __strong id<MTLComputePipelineState> *dst; const char *nm; } map[4] = {
+    { &METAL_MPS_CVT_BF16_TO_F16, "cvt_bf16_f16" },
+    { &METAL_MPS_CVT_F16_TO_BF16, "cvt_f16_bf16" },
+    { &METAL_MPS_CVT_BF16_TO_F32, "cvt_bf16_f32" },
+    { &METAL_MPS_CVT_F32_TO_BF16, "cvt_f32_bf16" },
+  };
+  for (int i = 0; i < 4; i++) {
+    id<MTLFunction> mtlf = [lib newFunctionWithName:
+                            [NSString stringWithUTF8String:map[i].nm]];
+    if (mtlf == nil) return 0;
+    err = nil;
+    id<MTLComputePipelineState> pso =
+        [METAL_DEVICE newComputePipelineStateWithFunction:mtlf error:&err];
+    if (pso == nil) {
+      fprintf(stderr, "thvm: metal_mps -- cvt PSO %s failed: %s\n", map[i].nm,
+              err ? [[err localizedDescription] UTF8String] : "(no error)");
+      return 0;
+    }
+    *map[i].dst = pso;
+  }
+  METAL_MPS_CVT_READY = 1;
+  return 1;
+}
+
+// Encode an element-wise width conversion of `n` contiguous elements.
+static void metal_mps_encode_cvt(id<MTLCommandBuffer> cmd,
+                                 id<MTLComputePipelineState> pso,
+                                 id<MTLBuffer> in, id<MTLBuffer> out, u32 n) {
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:in offset:0 atIndex:0];
+  [enc setBuffer:out offset:0 atIndex:1];
+  [enc setBytes:&n length:sizeof(n) atIndex:2];
+  NSUInteger tpt = [pso maxTotalThreadsPerThreadgroup];
+  if (tpt > 256) tpt = 256;
+  [enc dispatchThreads:MTLSizeMake((NSUInteger)n, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tpt, 1, 1)];
+  [enc endEncoding];
+}
+
+// Cache of converted weight buffers, keyed by source MTLBuffer identity.
+// FLUX has a bounded weight set; a small direct-mapped cache suffices.
+// Entries hold a STRONG MTLBuffer ref (the converted copy) so it survives
+// across replay steps without going through the METAL_BUFS pool.
+#define METAL_MPS_WCACHE_CAP 512
+typedef struct {
+  void           *src_ptr;   // (__bridge) source MTLBuffer identity
+  u32             n;          // element count (validates the slot)
+  int             work_f32;  // which working dtype this copy is in
+  id<MTLBuffer>   conv;       // converted copy (strong ref)
+} MpsWCacheEntry;
+static MpsWCacheEntry METAL_MPS_WCACHE[METAL_MPS_WCACHE_CAP];
+
+static void metal_mps_wcache_reset(void) {
+  for (u32 i = 0; i < METAL_MPS_WCACHE_CAP; i++) {
+    METAL_MPS_WCACHE[i].src_ptr = NULL;
+    METAL_MPS_WCACHE[i].conv = nil;
+  }
+}
+
+// Return a working-dtype copy of the bf16 weight buffer `src` (n elems),
+// converting + caching on miss.  Returns nil on failure (caller declines
+// MPS).  `cmd` carries the conversion dispatch on a cold miss.
+static id<MTLBuffer> metal_mps_weight_copy(id<MTLBuffer> src, u32 n,
+                                           int work_f32,
+                                           id<MTLCommandBuffer> cmd) {
+  void *key = (__bridge void *)src;
+  u32 h = (u32)(((uintptr_t)key >> 6) ^ ((uintptr_t)key >> 20));
+  for (u32 probe = 0; probe < METAL_MPS_WCACHE_CAP; probe++) {
+    u32 i = (h + probe) & (METAL_MPS_WCACHE_CAP - 1);
+    MpsWCacheEntry *e = &METAL_MPS_WCACHE[i];
+    if (e->src_ptr == key && e->n == n && e->work_f32 == work_f32
+        && e->conv != nil) {
+      return e->conv;          // hit
+    }
+    if (e->src_ptr == NULL) {  // empty slot -> build here
+      u32 esz = work_f32 ? 4u : 2u;
+      id<MTLBuffer> conv = [METAL_DEVICE newBufferWithLength:(NSUInteger)n * esz
+                                                     options:MTLResourceStorageModeShared];
+      if (conv == nil) return nil;
+      metal_mps_encode_cvt(cmd,
+          work_f32 ? METAL_MPS_CVT_BF16_TO_F32 : METAL_MPS_CVT_BF16_TO_F16,
+          src, conv, n);
+      e->src_ptr  = key;
+      e->n        = n;
+      e->work_f32 = work_f32;
+      e->conv     = conv;
+      return conv;
+    }
+  }
+  return nil;  // cache full
+}
+
+// Build an MPSMatrix view over a device buffer.  rows/cols are the matrix
+// dims; the BLAS-row-major ld (leading dimension = elements per row in the
+// physical layout) sets rowBytes.  For a transposed operand the physical
+// layout is the un-transposed [cols, rows] tile so rowBytes keys off ld.
+static MPSMatrix *metal_mps_matrix(id<MTLBuffer> buf, NSUInteger rows,
+                                   NSUInteger cols, NSUInteger ld,
+                                   MPSDataType dt, NSUInteger esz) {
+  MPSMatrixDescriptor *d =
+      [MPSMatrixDescriptor matrixDescriptorWithRows:rows
+                                            columns:cols
+                                           rowBytes:ld * esz
+                                           dataType:dt];
+  return [[MPSMatrix alloc] initWithBuffer:buf descriptor:d];
+}
+
+// Try to route this kernel to MPS.  Returns 1 on dispatch (work encoded
+// into `cmd`), 0 on no-match (caller falls through to tile / per-op).
+// src_bufs[i] are the ORIGINAL (possibly bf16) input MTLBuffers; outBuf is
+// the output buffer (bf16 or f32).  All conversions + the MPS GEMM are
+// encoded into `cmd`.
+static int metal_try_mps_gemm(KernelEntry *ke, u32 *in_buf_ids,
+                              u32 out_buf_id, id<MTLCommandBuffer> cmd) {
+  if (!metal_mps_enabled() || METAL_DEVICE == nil) return 0;
+  if (ke->cached_lift.store_root == 0) return 0;
+  UopDagGemmShape g;
+  if (!uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke, &g)) {
+    return 0;
+  }
+  if (g.dtype != DT_BF16 && g.dtype != DT_FP32) return 0;
+  // Resolve symbolic dims (identity for the literal FLUX projections).
+  g.M = kvar_extent_runtime(g.M); g.N = kvar_extent_runtime(g.N);
+  g.K = kvar_extent_runtime(g.K);
+  g.ldA = kvar_extent_runtime(g.ldA); g.ldB = kvar_extent_runtime(g.ldB);
+  if (g.M == 0 || g.N <= 1 || g.K <= 1) return 0;
+  if ((u64)g.M * g.N * g.K < metal_mps_min_macs()) return 0;
+  if (g.a_input >= ke->n_inputs || g.b_input >= ke->n_inputs) return 0;
+  {
+    static int trace_slot = -1;
+    if (trace_slot == -1) {
+      char const *e = getenv("THVM_METAL_MPS_TRACE");
+      trace_slot = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    if (trace_slot) {
+      fprintf(stderr, "[mps] kid=%u M=%u N=%u K=%u transA=%u transB=%u "
+              "macs=%.1fM dt=%s\n", (u32)(ke - KERNELS), g.M, g.N, g.K,
+              g.flags & 1u, (g.flags >> 1) & 1u,
+              (double)((u64)g.M * g.N * g.K) / 1e6,
+              g.dtype == DT_BF16 ? "bf16" : "f32");
+    }
+  }
+
+  u32 a_buf = in_buf_ids[g.a_input];
+  u32 b_buf = in_buf_ids[g.b_input];
+  if (a_buf == 0 || a_buf >= METAL_BUFS_NEXT) return 0;
+  if (b_buf == 0 || b_buf >= METAL_BUFS_NEXT) return 0;
+  id<MTLBuffer> A_src = METAL_BUFS[a_buf].buf;
+  id<MTLBuffer> B_src = METAL_BUFS[b_buf].buf;
+  id<MTLBuffer> C_dst = METAL_BUFS[out_buf_id].buf;
+  if (A_src == nil || B_src == nil || C_dst == nil) return 0;
+  // ldC: output row stride (>= N; matches the buffer's allocated leading
+  // stride for a symbolic-seq output, identity for literal matmuls).
+  u32 ldC = (u32)TENS[ke->output_tid].view.strides[0];
+  if (ldC < g.N) ldC = g.N;
+
+  int work_f32 = metal_mps_dtype_f32();
+  // f32 working dtype with an f32 output avoids the output reconvert.
+  int out_is_f32 = (g.dtype == DT_FP32);
+
+  if (!metal_mps_build_cvt_kernels()) return 0;
+
+  MPSDataType mdt = work_f32 ? MPSDataTypeFloat32 : MPSDataTypeFloat16;
+  NSUInteger esz = work_f32 ? 4u : 2u;
+
+  // --- Operand A (activation): convert bf16 -> working dtype if needed. ---
+  id<MTLBuffer> A_work = A_src;
+  id<MTLBuffer> A_tmp  = nil;
+  if (g.dtype == DT_BF16) {
+    A_tmp = [METAL_DEVICE newBufferWithLength:(NSUInteger)g.M * g.K * esz
+                                      options:MTLResourceStorageModeShared];
+    if (A_tmp == nil) return 0;
+    metal_mps_encode_cvt(cmd,
+        work_f32 ? METAL_MPS_CVT_BF16_TO_F32 : METAL_MPS_CVT_BF16_TO_F16,
+        A_src, A_tmp, g.M * g.K);
+    A_work = A_tmp;
+  } else if (!work_f32) {
+    // f32 input but f16 working dtype -- convert down.  (Uncommon; FLUX is
+    // bf16.  Decline rather than add an f32->f16 kernel for a non-path.)
+    return 0;
+  }
+
+  // --- Operand B (weight): cached working-dtype copy. ---
+  id<MTLBuffer> B_work = B_src;
+  id<MTLBuffer> B_tmp  = nil;
+  if (g.dtype == DT_BF16) {
+    B_work = metal_mps_weight_copy(B_src, g.K * g.N, work_f32, cmd);
+    if (B_work == nil) return 0;
+  } else if (!work_f32) {
+    return 0;
+  }
+
+  // --- Output C: MPS writes working dtype; reconvert to bf16 after. ---
+  id<MTLBuffer> C_work = C_dst;
+  id<MTLBuffer> C_tmp  = nil;
+  if (!out_is_f32) {
+    // bf16 output (or f16 working over an f32 output -- but we declined
+    // that above) -> MPS writes a working-dtype temp, then we convert it
+    // to the bf16 output buffer.
+    C_tmp = [METAL_DEVICE newBufferWithLength:(NSUInteger)g.M * g.N * esz
+                                      options:MTLResourceStorageModeShared];
+    if (C_tmp == nil) return 0;
+    C_work = C_tmp;
+  } else if (work_f32) {
+    // f32 in, f32 out, f32 working -- MPS writes straight to C_dst.
+    C_work = C_dst;
+  } else {
+    return 0;
+  }
+
+  // MPS matrix views.  BLAS row-major convention from the classifier:
+  //   A: transA=(red!=1); physical [M,K] (ld=K) untransposed, or the
+  //      stored [K,M] (ld=M) when transA.
+  //   B: transB=(other!=1); physical [K,N] (ld=N) untransposed, or the
+  //      stored [N,K] (ld=K) when transB.
+  // MPSMatrix rows/cols describe the PHYSICAL (stored) matrix; the
+  // transposeLeft/Right flags tell MPS to read it transposed.  So for a
+  // transposed operand pass the stored [other, this] dims with ld.
+  NSUInteger aRows, aCols, bRows, bCols;
+  if (g.flags & 1u) { aRows = g.K; aCols = g.M; }   // stored [K,M]
+  else              { aRows = g.M; aCols = g.K; }    // stored [M,K]
+  if (g.flags & 2u) { bRows = g.N; bCols = g.K; }    // stored [N,K]
+  else              { bRows = g.K; bCols = g.N; }    // stored [K,N]
+
+  MPSMatrix *mA = metal_mps_matrix(A_work, aRows, aCols, g.ldA, mdt, esz);
+  MPSMatrix *mB = metal_mps_matrix(B_work, bRows, bCols, g.ldB, mdt, esz);
+  MPSMatrix *mC = metal_mps_matrix(C_work, g.M, g.N, ldC, mdt, esz);
+
+  MPSMatrixMultiplication *mm =
+      [[MPSMatrixMultiplication alloc] initWithDevice:METAL_DEVICE
+                                        transposeLeft:(g.flags & 1u) ? YES : NO
+                                       transposeRight:(g.flags & 2u) ? YES : NO
+                                           resultRows:g.M
+                                        resultColumns:g.N
+                                      interiorColumns:g.K
+                                                alpha:1.0
+                                                 beta:0.0];
+  [mm encodeToCommandBuffer:cmd leftMatrix:mA rightMatrix:mB resultMatrix:mC];
+
+  if (C_tmp != nil) {
+    metal_mps_encode_cvt(cmd,
+        work_f32 ? METAL_MPS_CVT_F32_TO_BF16 : METAL_MPS_CVT_F16_TO_BF16,
+        C_tmp, C_dst, g.M * g.N);
+  }
+  (void)A_tmp; (void)B_tmp;   // ARC retains them through the encode
+  METAL_MPS_DISPATCH_COUNT++;
+  return 1;
+}
+
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
   // Per-op GPU profiling: clear the current-kid attribution before any
@@ -2766,6 +3139,26 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   __unsafe_unretained id<MTLBuffer> jit_src_bufs[ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) {
     jit_src_bufs[i] = METAL_BUFS[effective_buf_ids[i]].buf;
+  }
+
+  // MPS route: large 2-D GEMM -> MPSMatrixMultiplication (~2x the custom
+  // tiled kernel on FLUX projection shapes).  Tried before the tile path
+  // so big matmuls take the vendor GEMM; small ones (below the MAC
+  // threshold) and non-matmul kernels fall through to the tile/per-op
+  // paths.  Encodes conversions + MPS into a standalone command buffer.
+  {
+    id<MTLCommandBuffer> mps_cmd = metal_command_buffer();
+    if (metal_try_mps_gemm(ke, in_buf_ids, out_buf_id, mps_cmd)) {
+      metal_submit_if_standalone(mps_cmd);
+      for (u32 i = 0; i < ke->n_inputs; i++) {
+        if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
+      }
+      cg_profile_record(kid, KDISPATCH_METAL_MPS, cg_now_us() - t0);
+      if (_disp_trace)
+        fprintf(stderr, "[disp-done kid=%u path=mps us=%llu]\n", kid,
+                (unsigned long long)(cg_now_us() - t0));
+      return 0;
+    }
   }
 
   if (tile_supported) {
