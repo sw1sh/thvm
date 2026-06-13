@@ -2188,8 +2188,16 @@ static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
 static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                                      const char *c_name,
                                      u32 n_extent, u32 k_extent,
-                                     RmuTcTile t, int c_is_bf,
+                                     RmuTcTile t, int c_is_bf, int stage_bf,
                                      FILE *fp, u32 depth) {
+  // Staging + fragment element type.  When BOTH inputs are bf16 the tiles are
+  // staged as bfloat and the simdgroup_matrix fragments are <bfloat>, so the
+  // MMA runs at the native bf16 tensor-core rate (2x float) accumulating into
+  // an f32 register tile (Metal allows bfloat-operand / float-accumulate, as
+  // the parallel_tc path does).  Otherwise stage as float (a lone bf16 operand
+  // widens on the cooperative load).  Halving the threadgroup-staging bytes
+  // also eases shared-memory pressure.
+  const char *sel = stage_bf ? "bfloat" : "float";
   u32 tile_m = t.local_m * t.rm * 8u;     // output rows per threadgroup
   u32 tile_n = t.local_n * t.rn * 8u;     // output cols per threadgroup
   u32 n_tiles_n = n_extent / tile_n;      // tg columns in the grid
@@ -2202,9 +2210,9 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   // Threadgroup-memory staging buffers.  Asm: [TILE_M x KB] row-major
   // (ld=KB).  Bsm: [KB x TILE_N] row-major (ld=TILE_N).
   IND(depth); fprintf(fp,
-    "threadgroup float _Asm[%u];\n", tile_m * t.kb);
+    "threadgroup %s _Asm[%u];\n", sel, tile_m * t.kb);
   IND(depth); fprintf(fp,
-    "threadgroup float _Bsm[%u];\n", t.kb * tile_n);
+    "threadgroup %s _Bsm[%u];\n", sel, t.kb * tile_n);
   // bf16 output: a per-simdgroup f32 scratch slot for the f32->bf16 staged
   // store (simdgroup_store has no f32->bf16 widening).  Each of the NSG
   // simdgroups owns a private 64-float slot, reused across its register tiles.
@@ -2253,7 +2261,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                           t.kb);
   // Load this simdgroup's A fragments (RM of them) from threadgroup mem.
   IND(depth + 2); fprintf(fp,
-    "simdgroup_matrix<float, 8, 8> _af[%u];\n", t.rm);
+    "simdgroup_matrix<%s, 8, 8> _af[%u];\n", sel, t.rm);
   for (u32 mi = 0; mi < t.rm; mi++) {
     IND(depth + 2); fprintf(fp,
       "simdgroup_load(_af[%u], &_Asm[(_sm + %uu) * %uu + _kk], %uu);\n",
@@ -2261,7 +2269,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   }
   // Load this simdgroup's B fragments (RN of them) from threadgroup mem.
   IND(depth + 2); fprintf(fp,
-    "simdgroup_matrix<float, 8, 8> _bf[%u];\n", t.rn);
+    "simdgroup_matrix<%s, 8, 8> _bf[%u];\n", sel, t.rn);
   for (u32 ni = 0; ni < t.rn; ni++) {
     IND(depth + 2); fprintf(fp,
       "simdgroup_load(_bf[%u], &_Bsm[_kk * %uu + _sn + %uu], %uu);\n",
@@ -2566,8 +2574,9 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       snprintf(b_nm, sizeof(b_nm), "%s", rmu_buf_name(buf_b));
       snprintf(c_nm, sizeof(c_nm), "%s", rmu_buf_name(buf_c));
       int c_is_bf = (uop_buffer_dtype(buf_c) == DT_BF16);
+      int stage_bf = (_dta == DT_BF16) && (_dtb == DT_BF16);
       rmu_emit_matmul_tc_tiled(a_nm, b_nm, c_nm, n_extent,
-                               k_extent, tile, c_is_bf, fp, depth);
+                               k_extent, tile, c_is_bf, stage_bf, fp, depth);
       return 1;
     }
   }
