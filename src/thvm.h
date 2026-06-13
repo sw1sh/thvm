@@ -5341,6 +5341,13 @@ typedef struct {
   Term *irv_lhs;
   Term *irv_rhs;
   u32  *irv_parent;
+  // WM drain-order key per victim (use_wm_emission_order only), captured
+  // at push time BEFORE the victim leaves the wmo tree: WM's
+  // IR_PufferAuslesen drains GMInterred (equation victims) before
+  // RMLinksInterred (rule victims), each in its discrimination-tree
+  // leaf-list order (BK_forRegelnRobust over Baum.ErstesBlatt).  Key =
+  // (tree << 31) | leaf_list_rank so a stable sort reproduces that order.
+  u32  *irv_wmo_key;
   u32   n_irv;
   u32   irv_cap;
   u64   n_wm_demote_requeued;     // victims re-queued at drain
