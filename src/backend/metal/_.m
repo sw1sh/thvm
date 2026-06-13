@@ -249,6 +249,15 @@ static u64 METAL_JIT_BUILD_DISK_HITS;
 static u64 METAL_JIT_BUILD_DISK_MISSES;
 static u64 METAL_JIT_BUILD_DISK_BYTES_R;
 static u64 METAL_JIT_BUILD_DISK_BYTES_W;
+// Persistent on-disk .metallib (MSL->AIR) cache counters.  This cache is
+// upstream of the PSO cache: a hit loads precompiled library bytes via
+// newLibraryWithData: and skips the ~1.5s-per-kernel MSL->AIR frontend that
+// newLibraryWithSource: re-runs on every cold start (the dominant FLUX cold
+// cost).  See metal_lib_for_src / metal_cgs_compile below.
+static u64 METAL_LIB_CACHE_HITS;
+static u64 METAL_LIB_CACHE_MISSES;
+static u64 METAL_LIB_CACHE_BYTES_R;
+static u64 METAL_LIB_CACHE_BYTES_W;
 fn void thvm_metal_jit_counters_reset(void);
 static void metal_pso_cache_init(void);
 
@@ -819,6 +828,12 @@ static void metal_shutdown(void) {
             (unsigned long long)METAL_JIT_BUILD_DISK_MISSES,
             (unsigned long long)METAL_JIT_BUILD_DISK_BYTES_R,
             (unsigned long long)METAL_JIT_BUILD_DISK_BYTES_W);
+    fprintf(stderr,
+            "thvm: metal_lib_cache stats -- hits=%llu misses=%llu bytes_r=%llu bytes_w=%llu\n",
+            (unsigned long long)METAL_LIB_CACHE_HITS,
+            (unsigned long long)METAL_LIB_CACHE_MISSES,
+            (unsigned long long)METAL_LIB_CACHE_BYTES_R,
+            (unsigned long long)METAL_LIB_CACHE_BYTES_W);
   }
   METAL_BATCH_DEPTH = 0;
   METAL_FREELIST_LEN = 0;
@@ -900,6 +915,10 @@ fn void thvm_metal_jit_counters_reset(void) {
   METAL_JIT_BUILD_DISK_MISSES = 0;
   METAL_JIT_BUILD_DISK_BYTES_R = 0;
   METAL_JIT_BUILD_DISK_BYTES_W = 0;
+  METAL_LIB_CACHE_HITS        = 0;
+  METAL_LIB_CACHE_MISSES      = 0;
+  METAL_LIB_CACHE_BYTES_R     = 0;
+  METAL_LIB_CACHE_BYTES_W     = 0;
 }
 
 // Forward-declared as metal_jit_cache_reset_impl above; called from
@@ -1303,12 +1322,185 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   return h | (1ULL << 62);
 }
 
+// === MTLCodeGenService: compile MSL source directly to a .metallib blob ===
+//
+// Ports tinygrad's MetalCompiler (tinygrad/runtime/ops_metal.py:61): the
+// private MTLCodeGenService compiles MSL -> a .metallib byte blob in-process,
+// which we disk-cache and reload via [MTLDevice newLibraryWithData:].  That
+// skips the MSL->AIR frontend that [MTLDevice newLibraryWithSource:] re-runs
+// on every cold start -- ~1.5s per tile kernel, ~100s total for FLUX's 70
+// distinct matmul/attention shaders.  newLibraryWithSource: stays as the
+// fallback when the service or cache dir is unavailable.
+//
+// The callback is a real Objective-C block (cleaner than tinygrad's ctypes
+// fake-block-at--0x10 hack): MTLCodeGenServiceBuildRequest reads block->invoke
+// at the standard offset and calls it synchronously before returning, so a
+// stack block is safe.
+typedef void (^MtlCodeGenBlock)(int32_t error, const void *dataPtr,
+                                size_t dataLen, const char *errorMessage);
+typedef void *(*MtlCgsCreateFn)(const char *);
+typedef void  (*MtlCgsBuildFn)(void *cgs, void *unused, int requestType,
+                               const char *request, size_t requestLen,
+                               MtlCodeGenBlock block);
+
+#define MTL_REQUEST_TYPE_COMPILE 13
+
+static void         *METAL_CGS       = NULL;   // MTLCodeGenService handle
+static MtlCgsBuildFn  METAL_CGS_BUILD = NULL;
+static int            METAL_CGS_READY = -1;    // -1 unprobed, 0 unavailable, 1 ready
+
+// Resolve MTLCodeGenServiceCreate/BuildRequest once.  Metal already loads
+// MTLCompiler, so the symbols are usually reachable via RTLD_DEFAULT; fall
+// back to an explicit dlopen of the private framework.
+static void metal_cgs_init(void) {
+  if (METAL_CGS_READY != -1) return;
+  METAL_CGS_READY = 0;
+  if (getenv("THVM_METAL_LIB_CACHE") != NULL
+      && getenv("THVM_METAL_LIB_CACHE")[0] == '0') return;
+  MtlCgsCreateFn create = (MtlCgsCreateFn)dlsym(RTLD_DEFAULT, "MTLCodeGenServiceCreate");
+  MtlCgsBuildFn  build  = (MtlCgsBuildFn)dlsym(RTLD_DEFAULT, "MTLCodeGenServiceBuildRequest");
+  if (create == NULL || build == NULL) {
+    void *h = dlopen("/System/Library/PrivateFrameworks/MTLCompiler.framework/MTLCompiler",
+                     RTLD_NOW | RTLD_GLOBAL);
+    if (h != NULL) {
+      create = (MtlCgsCreateFn)dlsym(h, "MTLCodeGenServiceCreate");
+      build  = (MtlCgsBuildFn)dlsym(h, "MTLCodeGenServiceBuildRequest");
+    }
+  }
+  if (create == NULL || build == NULL) return;
+  METAL_CGS = create("thvm");
+  if (METAL_CGS == NULL) return;
+  METAL_CGS_BUILD = build;
+  METAL_CGS_READY = 1;
+}
+
+// Compile MSL `src` to a .metallib blob (NSData of MTLB...ENDT), or nil on
+// failure.  Mirrors tinygrad's request layout: <u64 src_pad_len><u64
+// params_pad_len><src padded to 4, >=1 NUL><params NUL-terminated>, and the
+// reply's library starts at header_size+warning_size (two u32 at byte 8/12).
+static NSData *metal_cgs_compile(const char *src) {
+  metal_cgs_init();
+  if (METAL_CGS_READY != 1 || src == NULL) return nil;
+  char const *cdir = (METAL_PSO_CACHE_DIR[0] != '\0') ? METAL_PSO_CACHE_DIR : ".";
+  char params[METAL_PSO_CACHE_PATH_MAX + 192];
+  int pn = snprintf(params, sizeof(params),
+      "-fno-fast-math -std=metal3.1 --driver-mode=metal -x metal "
+      "-fmodules-cache-path=\"%s\" -fno-caret-diagnostics", cdir);
+  if (pn <= 0 || (size_t)pn >= sizeof(params)) return nil;
+  size_t src_len = strlen(src);
+  size_t src_pad = (src_len + 1 + 3u) & ~((size_t)3u);   // >=1 NUL, multiple of 4
+  size_t par_pad = (size_t)pn + 1;                         // NUL-terminated
+  size_t req_len = 16 + src_pad + par_pad;
+  char *request = (char *)calloc(1, req_len);
+  if (request == NULL) return nil;
+  u64 a = (u64)src_pad, b = (u64)par_pad;
+  memcpy(request + 0, &a, 8);
+  memcpy(request + 8, &b, 8);
+  memcpy(request + 16, src, src_len);
+  memcpy(request + 16 + src_pad, params, (size_t)pn);
+  __block NSData *result = nil;
+  char cb_msg[512];
+  cb_msg[0] = '\0';
+  char *cb_msg_p = cb_msg;   // a pointer is block-capturable; the C array is not
+  MtlCodeGenBlock cb = ^(int32_t error, const void *dataPtr,
+                         size_t dataLen, const char *errorMessage) {
+    if (error == 0 && dataPtr != NULL && dataLen >= 16) {
+      const uint8_t *r = (const uint8_t *)dataPtr;
+      u32 hdr = 0, warn = 0;
+      memcpy(&hdr, r + 8, 4);
+      memcpy(&warn, r + 12, 4);
+      size_t off = (size_t)hdr + (size_t)warn;
+      if (off <= dataLen)
+        result = [NSData dataWithBytes:(r + off) length:(dataLen - off)];
+    } else if (errorMessage != NULL) {
+      strncpy(cb_msg_p, errorMessage, 511);
+      cb_msg_p[511] = '\0';
+    }
+  };
+  METAL_CGS_BUILD(METAL_CGS, NULL, MTL_REQUEST_TYPE_COMPILE, request, req_len, cb);
+  free(request);
+  if (result == nil) {
+    if (cb_msg[0] != '\0')
+      fprintf(stderr, "thvm: metal_cgs_compile -- %s\n", cb_msg);
+    return nil;
+  }
+  if ([result length] < 8
+      || memcmp([result bytes], "MTLB", 4) != 0) return nil;
+  return result;
+}
+
+// FNV-1a over the MSL source plus a toolchain/version tag, so a renderer or
+// compile-flag change invalidates stale .metallib entries.
+static u64 metal_src_hash(const char *src) {
+  u64 h = 0xcbf29ce484222325ULL;
+  for (unsigned char const *p = (unsigned char const *)src; *p; p++) {
+    h ^= *p; h *= 0x100000001b3ULL;
+  }
+  for (unsigned char const *p = (unsigned char const *)"metal3.1;libv1"; *p; p++) {
+    h ^= *p; h *= 0x100000001b3ULL;
+  }
+  return h;
+}
+
+static int metal_lib_cache_path(u64 key, char *out, size_t cap) {
+  int n = snprintf(out, cap, "%s/lib-%016llx.metallib",
+                   METAL_PSO_CACHE_DIR, (unsigned long long)key);
+  if (n <= 0 || (size_t)n >= cap) return -1;
+  return 0;
+}
+
+// Build an MTLLibrary for `src`, using the on-disk .metallib cache to skip the
+// MSL->AIR frontend.  Disk hit -> read bytes + newLibraryWithData:.  Miss ->
+// MTLCodeGenService compile + persist + newLibraryWithData:.  Falls back to
+// newLibraryWithSource: when the cache dir or service is unavailable, or when
+// loading the cached bytes fails.  *via_data (optional) is set to 1 when the
+// library came from newLibraryWithData (cached bytes OR a fresh service
+// compile): such libraries' functions don't match the source-built PSO
+// BinaryArchive, so the caller skips that archive (the archive lookup misses
+// anyway and just churns disk).
+static id<MTLLibrary> metal_lib_for_src(char const *src, NSError **err,
+                                        int *via_data) {
+  if (via_data) *via_data = 0;
+  metal_cgs_init();
+  if (METAL_PSO_CACHE_ENABLED && METAL_CGS_READY == 1) {
+    u64 key = metal_src_hash(src);
+    char path[METAL_PSO_CACHE_PATH_MAX];
+    if (metal_lib_cache_path(key, path, sizeof(path)) == 0) {
+      NSString *nspath = [NSString stringWithUTF8String:path];
+      NSData *libdata = [NSData dataWithContentsOfFile:nspath];
+      if (libdata != nil) {
+        METAL_LIB_CACHE_HITS++;
+        METAL_LIB_CACHE_BYTES_R += (u64)[libdata length];
+      } else {
+        libdata = metal_cgs_compile(src);
+        if (libdata != nil) {
+          METAL_LIB_CACHE_MISSES++;
+          if ([libdata writeToFile:nspath atomically:YES])
+            METAL_LIB_CACHE_BYTES_W += (u64)[libdata length];
+        }
+      }
+      if (libdata != nil) {
+        dispatch_data_t dd =
+            dispatch_data_create([libdata bytes], [libdata length],
+                                 dispatch_get_main_queue(),
+                                 DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithData:dd error:err];
+        if (lib != nil) { if (via_data) *via_data = 1; return lib; }
+        // newLibraryWithData failed (corrupt/ABI drift): fall through to a
+        // fresh source compile, which also rewrites the bad entry next time.
+      }
+    }
+  }
+  MTLCompileOptions *copts = [[MTLCompileOptions alloc] init];
+  [copts setLanguageVersion:MTLLanguageVersion3_1];
+  return [METAL_DEVICE newLibraryWithSource:[NSString stringWithUTF8String:src]
+                                    options:copts error:err];
+}
+
 static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
                                                         u64 key) {
   char *src = cg_emit_tile_metal(ke);
   if (src == NULL) return nil;
-  NSString *srcStr = [NSString stringWithUTF8String:src];
-  free(src);
   // THVM_DUMP_TILE_JIT_SRC=2 (or "all"): dump the generated MSL for
   // every tile-jit'd kernel up front, tagged with kid -- lets you see
   // whether conv matmuls picked the simdgroup_matrix template or fell
@@ -1318,31 +1510,27 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
     char const *d = getenv("THVM_DUMP_TILE_JIT_SRC");
     if (d != NULL && (d[0] == '2' || d[0] == 'a')) {
       fprintf(stderr, "---- tile-jit src kid=%u ----\n%s\n----\n",
-              (unsigned)(ke - KERNELS), [srcStr UTF8String]);
+              (unsigned)(ke - KERNELS), src);
     }
   }
   u64 t0 = cg_now_us();
   NSError *err = nil;
-  // Pin the MSL language version to 3.1 so the native `bfloat` scalar
-  // type (used for DT_BF16 buffers -- see rmu_msl_type_name) resolves.
-  // Metal 3.1 (macOS 14+) is the first version with `bfloat`; tinygrad
-  // selects "metal3.1" for macOS>=14 (tinygrad/runtime/ops_metal.py:88).
-  // 3.1 is a floor, not a ceiling -- the runtime still uses a newer GPU
-  // backend, this only gates the source-language feature set.
-  MTLCompileOptions *copts = [[MTLCompileOptions alloc] init];
-  [copts setLanguageVersion:MTLLanguageVersion3_1];
-  id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithSource:srcStr
-                                                  options:copts
-                                                    error:&err];
+  // The library comes from the on-disk .metallib cache (newLibraryWithData:)
+  // when warm, else a fresh MTLCodeGenService / newLibraryWithSource: compile.
+  // metal_lib_for_src pins MSL 3.1 (the `bfloat` floor -- macOS 14+; tinygrad
+  // ops_metal.py:88) for both the service params and the source fallback.
+  int lib_via_data = 0;
+  id<MTLLibrary> lib = metal_lib_for_src(src, &err, &lib_via_data);
   if (lib == nil) {
     fprintf(stderr, "thvm: metal_tile_jit -- compile failed: %s\n",
             err ? [[err localizedDescription] UTF8String] : "(no error)");
     if (getenv("THVM_DUMP_TILE_JIT_SRC")) {
-      fprintf(stderr, "---- failing source ----\n%s\n----\n",
-              [srcStr UTF8String]);
+      fprintf(stderr, "---- failing source ----\n%s\n----\n", src);
     }
+    free(src);
     return nil;
   }
+  free(src);
   id<MTLFunction> mtlFn = [lib newFunctionWithName:@"k"];
   if (mtlFn == nil) {
     fprintf(stderr, "thvm: metal_tile_jit -- function 'k' missing in compiled lib\n");
@@ -1356,15 +1544,20 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
   // computeFunction must already be set; metal_pso_cache_try_load
   // attaches the archive + sets FailOnBinaryArchiveMiss so a hit
   // skips the AIR->GPU backend compile.  Returns nil on miss; in
-  // that case fall through to the fresh-build path below.
+  // that case fall through to the fresh-build path below.  Skip the
+  // archive entirely when the library came from newLibraryWithData
+  // (the .metallib cache): those functions don't key-match a
+  // source-built archive, so the lookup just misses + churns disk --
+  // a fresh newComputePipelineState is the same cost (measured).
+  int try_archive = !lib_via_data;
   id<MTLComputePipelineState> pso =
-      metal_pso_cache_try_load(key, mtlFn, desc);
+      try_archive ? metal_pso_cache_try_load(key, mtlFn, desc) : nil;
   int from_disk = 0;
   if (pso != nil) {
     from_disk = 1;
     METAL_JIT_BUILD_DISK_HITS++;
   } else {
-    if (METAL_PSO_CACHE_ENABLED) {
+    if (METAL_PSO_CACHE_ENABLED && try_archive) {
       METAL_JIT_BUILD_DISK_MISSES++;
     }
     err = nil;
@@ -1379,8 +1572,9 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
     }
     // Capture the freshly-built PSO into the on-disk archive for
     // future warm restarts.  Non-fatal on failure -- the in-memory
-    // PSO above is still usable for this process.
-    metal_pso_cache_store(key, desc);
+    // PSO above is still usable for this process.  Only meaningful for
+    // source-compiled libs (see try_archive above).
+    if (try_archive) metal_pso_cache_store(key, desc);
   }
   (void)from_disk;
   METAL_JIT_BUILD_COMPILE_US += cg_now_us() - t0;
