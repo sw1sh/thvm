@@ -7450,12 +7450,39 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
 // A pure smallest-weight heap can starve -- it keeps picking light
 // CPs while a heavier CP sits unselected -- so the periodic FIFO pick
 // is the fairness lever.  Waldmeister places the FIFO pick at the
-// START of each modulo window; placing it at the END instead is the
-// same ratio (the phase is immaterial over a completion run) and
-// keeps a queue selected fewer than MODULO-THRESHOLD times on a pure
-// weight order, which the weight-order unit tests rely on.
+// START of each modulo window; the legacy thvm path places it at the
+// END (`% modulo == modulo-1`) keyed on the raw selection count, which
+// the weight-order unit tests rely on.
+//
+// CRUCIAL difference from WM (and the source of the AC-theory deep
+// forks): WM's `CPdimension()` keys the FIFO-vs-weight switch on
+// `AnzAktivierterRE` -- the count of selected CPs that BECAME a rule
+// or equation (KPVerwaltung.c:584) -- NOT the raw selection count.  A
+// pop that joins / perm-subsumes / pop-subsumes away never advances
+// the schedule.  On AC-monoid theories WM keeps ~30-45 rules over
+// hundreds of selections, so with the analysis-chosen 1:200 interleave
+// the FIFO dimension (n_activated_re % 201 < 1) fires only at
+// activation 0 and never perturbs the mid-run weight order: WM does a
+// pure weight selection there.  thvm's select-count keying instead
+// fired a spurious FIFO pick at selection 201/402 that landed on a
+// stale low-cp_seq CP, forking the trajectory (AbelianMcCune Assoc,
+// Ring ZeroIsAbsorbing, Huntington DN, and the rest of the 12 AC rows).
 #define ATP_CP_FIFO_MODULO     11u
 #define ATP_CP_FIFO_THRESHOLD   1u
+
+// WM `CPdimension()` (INF/KPVerwaltung.c:582-606): returns 1 (FIFO
+// dimension) when `AnzAktivierterRE % moduloCP < thresholdCP`.  Under
+// the faithful WM preset (use_wm_intake_order) thvm keys the switch on
+// `n_activated_re` with WM's start-of-window phase; otherwise it keeps
+// the legacy raw-selection-count end-of-window behaviour the weight-
+// order unit tests pin.
+static inline u8 atp_cp_fifo_dimension(const AtpState *s) {
+  u32 modulo = s->fifo_modulo ? s->fifo_modulo : ATP_CP_FIFO_MODULO;
+  if (s->use_wm_intake_order) {
+    return (s->n_activated_re % modulo) < ATP_CP_FIFO_THRESHOLD;
+  }
+  return (modulo - ATP_CP_FIFO_THRESHOLD) <= (s->cp_select_count % modulo);
+}
 
 // Select and remove one CP from the queue.  Most calls take the heap
 // min (lowest (cp_pri, cp_seq) -- the weight heuristic); ATP_CP_FIFO_-
@@ -7752,10 +7779,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     x ^= x << 13; x ^= x >> 7; x ^= x << 17;
     s->rng_state = x;
     j = (u32)(x % (u64)s->n_cps);
-  } else if (((s->fifo_modulo ? s->fifo_modulo : ATP_CP_FIFO_MODULO)
-              - ATP_CP_FIFO_THRESHOLD)
-             <= s->cp_select_count
-                  % (s->fifo_modulo ? s->fifo_modulo : ATP_CP_FIFO_MODULO)) {
+  } else if (atp_cp_fifo_dimension(s)) {
     // FIFO dimension: the oldest queued CP is the lowest cp_seq.
     // O(n_cps) scan, but only 1 call in `fifo_modulo` takes this branch.
     u32 best = 0;
@@ -9198,6 +9222,12 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     s->step++;
     return ATP_RUNNING;
   }
+  // WM `KPV_IncAktivierterRE` (SUE_selectedCPRE, KPVerwaltung.c:640): the
+  // popped CP survived joined/perm/pop-subsume and became a rule or
+  // equation.  This is the counter WM's CPdimension() reads to decide
+  // the FIFO-vs-heuristic dimension; advancing it only on activation
+  // (not on every pop) keeps thvm's FIFO-dimension pick on WM's cadence.
+  s->n_activated_re++;
 
   // Trace each newly-added rule with its source CP as parent_a (or
   // the chain tail when norm-step recording is on: the chain ends at

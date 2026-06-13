@@ -1,5 +1,5 @@
-wm=215 thvm=219 prefix=57 identical=N firstdiv=58
-note: content-delta wm-only=11 thvm-only=15; post-axiom nonax-wm=212 nonax-thvm=216 nonax-prefix=54; weights-exact
+wm=215 thvm=218 prefix=57 identical=N firstdiv=58
+note: content-delta wm-only=11 thvm-only=14; post-axiom nonax-wm=212 nonax-thvm=215 nonax-prefix=54; weights-exact
 
 --- positions 55..67 (1-based) ---
     55 WM   w1=169          or(x1,not(or(not(not(x2)),not(x1)))) # or(not(or(not(x1),x2)),x1)
@@ -51,4 +51,3 @@ thvm-only x2  or(v1,or(not(v2),v2))#or(v1,or(v2,not(v2)))
 thvm-only x1  or(v1,not(not(or(not(v1),v2))))#or(v2,or(v1,not(v1)))
 thvm-only x1  or(v1,or(not(v1),v2))#or(v2,or(v1,not(v1)))
 thvm-only x2  or(not(v1),or(v2,v1))#or(v2,or(v1,not(v1)))
-thvm-only x1  or(not(v1),not(or(not(or(not(v1),v2)),not(not(or(not(v1),not(v2)))))))#or(not(v1),v2)

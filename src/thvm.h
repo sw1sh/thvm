@@ -4368,6 +4368,14 @@ typedef struct {
   // cp_select_count is the running selection counter that drives the
   // ratio -- see thvm_atp_select_cp / ATP_CP_FIFO_MODULO.
   u32   cp_select_count;
+  // n_activated_re mirrors WM `AnzAktivierterRE`: the count of selected
+  // CPs that actually became a rule or equation (passed the joined /
+  // perm-subsume / pop-subsume filters and oriented in).  WM's
+  // CPdimension() (INF/KPVerwaltung.c:584) keys the FIFO-vs-heuristic
+  // dimension switch on THIS counter, not the raw selection count --
+  // joined/subsumed pops never advance the schedule.  Drives the FIFO
+  // dimension pick so thvm fires it on WM's exact cadence.
+  u32   n_activated_re;
 
   // 7d: feature-vector subsumption index over the CP queue.  Behind
   // -DATP_FV_INDEX, `atp_cp_queue_subsumed` consults this instead of
