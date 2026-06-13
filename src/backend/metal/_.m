@@ -2720,13 +2720,21 @@ static int metal_mps_dtype_f32(void) {
   return slot;
 }
 
-// Master gate: THVM_METAL_MPS=0 forces the custom tiled kernel (A/B
-// bisection knob, mirrors THVM_CPU_BLAS_DISABLE).  Default on.
+// Master gate: THVM_METAL_MPS=1 opts into MPS (A/B bisection knob, mirrors
+// THVM_CPU_BLAS_DISABLE).  DEFAULT OFF: MPS is faster per-matmul on a single
+// eager GEMM ({768,3072}x{3072,27648}: 20ms custom -> 12ms MPS), but it
+// shatters the JIT replay's single-command-buffer batching -- MPSMatrix-
+// Multiplication encodeToCommandBuffer needs its own command buffer, so each
+// matmul becomes a standalone commit+wait round-trip.  On the FLUX 4-step
+// replay (40 big matmuls/forward) that regressed warm 857ms -> 3002ms/step
+// (3.5x SLOWER).  The custom simdgroup_matrix tiled kernel batches into the
+// one replay command buffer and wins.  To make MPS a net win it must encode
+// into METAL_BATCH_CMD (no per-dispatch submit) -- until then, opt-in only.
 static int metal_mps_enabled(void) {
   static int slot = -1;
   if (slot == -1) {
     char const *e = getenv("THVM_METAL_MPS");
-    slot = (e != NULL && e[0] == '0') ? 0 : 1;
+    slot = (e != NULL && e[0] == '1') ? 1 : 0;
   }
   return slot;
 }
