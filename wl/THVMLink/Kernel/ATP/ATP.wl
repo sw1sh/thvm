@@ -69,7 +69,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"WMEmissionOrder\", \"WMIntakeOrder\", \"WMMixmostNF\", \"BackwardGroundJoin\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"WMEmissionOrder\", \"WMIntakeOrder\", \"WMMixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 GeneralUtilities`SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -280,6 +280,45 @@ $atpRunProofFn := $atpRunProofFn = load[
         reduced position + ancestor ascent, plus the Regelbaum
         within-position retrieval order -- OFF by default, ON in the
         "Waldmeister"* presets) *)
+     Integer,
+     (* args[43] = Waldmeister -einsstern CP filter (Method "Einsstern";
+        EinsSternUeberlappung, INF/Unifikation1.c:1039-1055 -- keep only
+        CPs whose overlap position is on the "1*" leftmost-argument
+        spine.  OFF by default = WM's -einsstern default; live CP-gen
+        gate, NOT in the "Waldmeister"* presets) *)
+     Integer,
+     (* args[44] = Waldmeister -nusfu CP filter (Method
+        "NoOverlapBelowSkolem"; NusfUeberlappung, Unifikation1.c:
+        1082-1090 -- skip overlap positions inside a skolem-function
+        subterm.  OFF by default; inert on ground goals, no skolem
+        symbols) *)
+     Integer,
+     (* args[45] = Waldmeister -reclas CP reweight during the CP-set IR
+        sweep (Method "Reclassify"; C_ReClassify,
+        CLAS/NewClassification.c:398-430).  OFF by default; inert unless
+        CPSetInterreduce is enabled, distinct from DemoteOnLhsSimplify) *)
+     Integer,
+     (* args[46] = Waldmeister -kern head-stand / reversed completion
+        (Method "ReversedCompletion"; KernUeberlappung,
+        Unifikation1.c:1243-1268).  OFF by default; vacuous on the
+        ground-goal surface, the combinator/existential lane) *)
+     Integer,
+     (* args[47] = Waldmeister -sue SUE-management statistics module
+        selector (Method "SUEManagement"; RUN/Parameter.c:138-145).  OFF
+        by default; pure statistics selector, no trajectory effect) *)
+     Integer,
+     (* args[48] = Waldmeister -cg CG-set interreduction (Method
+        "CriticalGoalInterreduce"; KPV_CGMengeInterreduzieren,
+        KPVerwaltung.c:835-849).  OFF by default; inert on ground goals,
+        CG heap empty) *)
+     Integer,
+     (* args[49] = Waldmeister -cgclas CG classification (Method
+        "CriticalGoalWeight").  OFF by default; inert on ground goals) *)
+     Integer,
+     (* args[50] = Waldmeister -back backward-argue critical goals
+        (Method "BackwardGoalArgue"; RueckwartigeUeberlappung,
+        Unifikation1.c:1313).  OFF by default; existential / CG-
+        paramodulation lane, inert on universal/ground goals) *)
      Integer},
     "NumericArray"
 ]
@@ -2278,6 +2317,106 @@ atpBwdGroundJoinOpt[o_Association] :=
     Switch[Lookup[o, "BackwardGroundJoin", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
+(* === Waldmeister CP-generation filter knobs (KPFilterErgaenzen,
+   INF/Unifikation1.c:1947-2014).  Each is a default-OFF WM CLI flag
+   (the unconfigured .pr Orkus run leaves them inactive), so the engine
+   default + the "Waldmeister"* presets stay byte-identical with all of
+   these off.  Exposed for full WM-knob coverage. === *)
+
+(* "Einsstern" -> True | False: WM -einsstern CP filter
+   (EinsSternUeberlappung, INF/Unifikation1.c:1039-1055 via
+   AnEinsSternIn :1028-1036).  Keep a CP only if its overlap position
+   lies on the "1*" leftmost-argument spine of the overlapped LHS (the
+   filter descends from the root taking the first subterm repeatedly
+   until it reaches the overlap position).  Live CP-gen gate: True
+   restricts critical-pair generation.  False/Automatic = off (WM's
+   -einsstern default, RUN/Parameter.c:250); NOT in the "Waldmeister"*
+   presets. *)
+atpEinssternOpt[o_Association] :=
+    Switch[Lookup[o, "Einsstern", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+
+(* "NoOverlapBelowSkolem" -> True | False: WM -nusfu CP filter
+   (NusfUeberlappung, Unifikation1.c:1082-1090 via Nusfu :1063-1079).
+   Skip overlap positions that lie physically below a skolem-function
+   symbol on the overlapped LHS.  Skolem functions only arise from
+   existential-conjecture skolemization, so on the ground-goal corpus no
+   symbol is a skolem and the filter is inert (a no-op even when on).
+   False/Automatic = off (the thvm Method default keeps the engine
+   byte-identical; WM's own -nusfu CLI default is TRUE but inert without
+   skolems). *)
+atpNoOverlapBelowSkolemOpt[o_Association] :=
+    Switch[Lookup[o, "NoOverlapBelowSkolem", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+
+(* "Reclassify" -> True | False: WM -reclas reclassification of
+   unselected equations during the CP-set IR sweep (C_ReClassify,
+   CLAS/NewClassification.c:398-430, reached from
+   KPV_KPMengeInterreduzieren, INF/KPVerwaltung.c:996-1008).  Re-derives
+   a touched CP's weight (keeping its FIFO age) when the CP-set sweep
+   reweights it.  Inert unless CPSetInterreduce is also enabled (the
+   sweep is default OFF) and the -reclas criteria list is non-empty
+   (default ""); DISTINCT from DemoteOnLhsSimplify, which is the rule-
+   DEMOTE victim requeue (KPV_IROpferBehandeln), a different mechanism.
+   False/Automatic = off. *)
+atpReclassifyOpt[o_Association] :=
+    Switch[Lookup[o, "Reclassify", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+
+(* "ReversedCompletion" -> True | False: WM -kern head-stand / reversed
+   completion (KernUeberlappung, Unifikation1.c:1243-1268), a CP filter
+   gated on the combinator-consultation stage KO_Stufe (Konsulat.c) and
+   the existential backward-reasoning apparatus -- VACUOUS on the
+   ground-goal comparison surface (thvm routes existential conjectures
+   through a separate narrowing lane).  Exposed for coverage;
+   False/Automatic = off. *)
+atpReversedCompletionOpt[o_Association] :=
+    Switch[Lookup[o, "ReversedCompletion", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+
+(* "SUEManagement" -> True | False: WM -sue SUE (Selected-Unselected-
+   Equation) management (RUN/Parameter.c:138-145).  The -sue InfoString
+   (default "") only selects which SUE statistics module is reported
+   (SUE_ParamInfo); it carries no trajectory-affecting parameter -- the
+   queue economics are the -clas/-pq/-ki knobs, already covered by
+   CriticalPairWeight / SelectionRatio / CPSetInterreduce.  Exposed for
+   coverage; False/Automatic = off, a pure statistics selector. *)
+atpSueManagementOpt[o_Association] :=
+    Switch[Lookup[o, "SUEManagement", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+
+(* "CriticalGoalInterreduce" -> True | False: WM -cg interreduction of
+   critical goals (KPV_CGMengeInterreduzieren, INF/KPVerwaltung.c:
+   835-849).  Acts only on the critical-goal heap, which is gated on
+   PM_Existenzziele (a conclusion containing a variable, WASIC/
+   SymbolOperationen.c:315-326): every conclusion in the ground-goal
+   corpus is skC*-ground, so the CG heap is empty and the lane is
+   provably INERT (inventory row B/G, double vacuity -- -cg default ""
+   never schedules, and the heap it would walk is empty).  Exposed for
+   coverage; False/Automatic = off. *)
+atpCriticalGoalInterreduceOpt[o_Association] :=
+    Switch[Lookup[o, "CriticalGoalInterreduce", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+
+(* "CriticalGoalWeight" -> True | False: WM -cgclas classification of
+   critical goals (the CG analog of -clas).  Inert on ground goals (CG
+   heap empty, as for CriticalGoalInterreduce).  Exposed for coverage;
+   False/Automatic = off. *)
+atpCriticalGoalWeightOpt[o_Association] :=
+    Switch[Lookup[o, "CriticalGoalWeight", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+
+(* "BackwardGoalArgue" -> True | False: WM -back backward-argue critical
+   goals (RueckwartigeUeberlappung, Unifikation1.c:1313, registered with
+   the combinator apparatus :2005-2008).  Drives WM's backward critical-
+   goal reasoning -- the existential / CG-paramodulation lane, against
+   which thvm has no comparable baseline (existential conjectures take
+   thvm's narrowing budget).  Exposed for coverage; False/Automatic =
+   off, inert on the universal/ground-goal surface. *)
+atpBackwardGoalArgueOpt[o_Association] :=
+    Switch[Lookup[o, "BackwardGoalArgue", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+
 (* True iff at least one axiom in `axParts` (atpAxiomParts triples
    {vars, lhs, rhs}) has a side whose variables are not a subset of
    the other side -- i.e. a free-on-one-side variable that the
@@ -2418,6 +2557,19 @@ $AtpPresetDefaults = <|
            Regelbaum retrieval order (see atpWmMixmostNfOpt) --
            generation-time join-verdict identity. *)
         "WMMixmostNF" -> True,
+        (* WM CP-generation filter knobs (KPFilterErgaenzen,
+           INF/Unifikation1.c:1947-2014).  Every one defaults OFF in the
+           unconfigured .pr Orkus run, so the faithful preset leaves them
+           off -- byte-identical to the engine default.  Listed for full
+           WM-knob coverage / TAtpDescribeMethod visibility. *)
+        "Einsstern" -> False,
+        "NoOverlapBelowSkolem" -> False,
+        "Reclassify" -> False,
+        "ReversedCompletion" -> False,
+        "SUEManagement" -> False,
+        "CriticalGoalInterreduce" -> False,
+        "CriticalGoalWeight" -> False,
+        "BackwardGoalArgue" -> False,
         (* Stays opt-in: the measured flip costs 2.8x steps, +55%
            wall, +17% peak RSS on mccune and 2.13x peak RSS on
            AndAssoc -- see atpImplicitCpOpt. *)
@@ -2456,6 +2608,16 @@ $AtpPresetDefaults = <|
            generation-time join-verdict identity. *)
         "WMMixmostNF" -> True,
         "FreeVarInstance" -> True,
+        (* WM CP-generation filter knobs -- all default OFF (see the
+           "Waldmeister" entry). *)
+        "Einsstern" -> False,
+        "NoOverlapBelowSkolem" -> False,
+        "Reclassify" -> False,
+        "ReversedCompletion" -> False,
+        "SUEManagement" -> False,
+        "CriticalGoalInterreduce" -> False,
+        "CriticalGoalWeight" -> False,
+        "BackwardGoalArgue" -> False,
         (* Stays opt-in for the same measured regressions as the
            "Waldmeister" entry; FVI differs only in FreeVarInstance
            emission, orthogonal to CP storage. *)
@@ -2483,6 +2645,16 @@ $AtpPresetDefaults = <|
            Regelbaum retrieval order (see atpWmMixmostNfOpt) --
            generation-time join-verdict identity. *)
         "WMMixmostNF" -> True,
+        (* WM CP-generation filter knobs -- all default OFF (see the
+           "Waldmeister" entry). *)
+        "Einsstern" -> False,
+        "NoOverlapBelowSkolem" -> False,
+        "Reclassify" -> False,
+        "ReversedCompletion" -> False,
+        "SUEManagement" -> False,
+        "CriticalGoalInterreduce" -> False,
+        "CriticalGoalWeight" -> False,
+        "BackwardGoalArgue" -> False,
         "UnfailingCP" -> True, "RHSInterreduce" -> True|>,
     "VampireUEQ" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
@@ -2610,7 +2782,11 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpOrphanMurderOpt[o], atpPopSubsumeOpt[o], atpESetSubsumeOpt[o],
          atpBwdGroundJoinOpt[o], atpQueueSubsumeOpt[o],
          atpWmEmissionOrderOpt[o], atpWmIntakeOrderOpt[o],
-         atpWmMixmostNfOpt[o]}
+         atpWmMixmostNfOpt[o], atpEinssternOpt[o],
+         atpNoOverlapBelowSkolemOpt[o], atpReclassifyOpt[o],
+         atpReversedCompletionOpt[o], atpSueManagementOpt[o],
+         atpCriticalGoalInterreduceOpt[o], atpCriticalGoalWeightOpt[o],
+         atpBackwardGoalArgueOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];

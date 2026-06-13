@@ -859,6 +859,54 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // engine byte-identical).
   mint wm_mixmost = MArgument_getInteger(args[42]);
   thvm_atp_set_use_wm_mixmost_nf(atp, (u8)(wm_mixmost != 0));
+  // === Waldmeister CP-generation filter knobs (KPFilterErgaenzen,
+  // INF/Unifikation1.c:1947-2014).  All default OFF (the unconfigured .pr
+  // Orkus run), so the engine + the "Waldmeister"* presets stay byte-
+  // identical with these off. ===
+  // Method -> {... "Einsstern" -> True}: WM -einsstern CP filter
+  // (EinsSternUeberlappung, Unifikation1.c:1039-1055) -- keep only CPs
+  // whose overlap position is on the "1*" leftmost-argument spine.
+  // args[43]; 0 = off (default).  Live CP-gen gate.
+  mint einsstern = MArgument_getInteger(args[43]);
+  thvm_atp_set_use_einsstern(atp, (u8)(einsstern != 0));
+  // Method -> {... "NoOverlapBelowSkolem" -> True}: WM -nusfu CP filter
+  // (NusfUeberlappung, Unifikation1.c:1082-1090) -- skip overlap
+  // positions inside a skolem-function subterm.  args[44]; 0 = off
+  // (default).  Inert on ground goals (no skolem symbols registered).
+  mint nusfu = MArgument_getInteger(args[44]);
+  thvm_atp_set_use_no_overlap_below_skolem(atp, (u8)(nusfu != 0));
+  // Method -> {... "Reclassify" -> True}: WM -reclas CP reweight during
+  // the CP-set IR sweep (C_ReClassify, CLAS/NewClassification.c:398-430).
+  // args[45]; 0 = off (default).  Inert unless CPSetInterreduce is also
+  // enabled; distinct from DemoteOnLhsSimplify.
+  mint reclassify = MArgument_getInteger(args[45]);
+  thvm_atp_set_use_reclassify(atp, (u8)(reclassify != 0));
+  // Method -> {... "ReversedCompletion" -> True}: WM -kern head-stand
+  // completion (KernUeberlappung, Unifikation1.c:1243-1268).  args[46];
+  // 0 = off (default).  Vacuous on the ground-goal surface (combinator/
+  // existential lane).
+  mint reversed = MArgument_getInteger(args[46]);
+  thvm_atp_set_use_reversed_completion(atp, (u8)(reversed != 0));
+  // Method -> {... "SUEManagement" -> True}: WM -sue SUE-management
+  // statistics module selector (RUN/Parameter.c:138-145).  args[47];
+  // 0 = off (default).  Pure statistics selector, no trajectory effect.
+  mint sue = MArgument_getInteger(args[47]);
+  thvm_atp_set_use_sue_management(atp, (u8)(sue != 0));
+  // Method -> {... "CriticalGoalInterreduce" -> True}: WM -cg CG-set
+  // interreduction (KPV_CGMengeInterreduzieren, KPVerwaltung.c:835-849).
+  // args[48]; 0 = off (default).  Inert on ground goals (CG heap empty).
+  mint cg_ir = MArgument_getInteger(args[48]);
+  thvm_atp_set_use_critical_goal_interreduce(atp, (u8)(cg_ir != 0));
+  // Method -> {... "CriticalGoalWeight" -> True}: WM -cgclas CG
+  // classification.  args[49]; 0 = off (default).  Inert on ground goals.
+  mint cg_w = MArgument_getInteger(args[49]);
+  thvm_atp_set_use_critical_goal_weight(atp, (u8)(cg_w != 0));
+  // Method -> {... "BackwardGoalArgue" -> True}: WM -back backward-argue
+  // critical goals (RueckwartigeUeberlappung, Unifikation1.c:1313).
+  // args[50]; 0 = off (default).  Existential / CG-paramodulation lane,
+  // inert on the universal/ground-goal surface.
+  mint back = MArgument_getInteger(args[50]);
+  thvm_atp_set_use_backward_goal_argue(atp, (u8)(back != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any

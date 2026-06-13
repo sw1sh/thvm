@@ -1599,6 +1599,139 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-einsstern-cp-filter");
+  {
+    // WM -einsstern (EinsSternUeberlappung, Unifikation1.c:1039-1055 via
+    // AnEinsSternIn :1028-1036): keep a CP only if its overlap position
+    // lies on the "1*" leftmost-argument spine of the overlapped LHS --
+    // the path that descends from the root taking the FIRST subterm
+    // repeatedly.  In thvm geometry that is pos[d] == 0 for all d.
+    //
+    // Construct an overlapped LHS with overlap positions both ON and OFF
+    // the spine.  rule A: f(a, f(x, e)) -> a.  rule B: f(y, z) -> e.
+    // atp_overlap_ij(i, j) walks rule i's LHS positions; the i > j call
+    // owns the roots (the converse i < j visit enumerates proper
+    // positions only).  So we add B at slot 0, A at slot 1, and call
+    // atp_overlap_ij(1, 0) -- A as i walks its own LHS WITH root
+    // ownership, yielding:
+    //   pos []   -- the root f(a, f(x,e))   (empty path -> ON the spine)
+    //   pos [1]  -- the inner f(x, e)       (child index 1 -> OFF spine)
+    // (position [0] is the nullary `a`, no f-rooted overlap.)  With the
+    // filter OFF both CPs form; with -einsstern ON the [1] CP is dropped
+    // and only the root (1*) CP survives.
+    AtpState *s = thvm_atp_init(&UNIT_CFG, 100);
+    thvm_atp_set_use_unfailing_cp(s, 1u);
+    AtpAddedRange a = thvm_atp_orient_and_add(s,
+        mk_f(mk_v(VAR_x), mk_v(1u)), mk_e());          // B at slot 0
+    CHECK_EQ(a.count, 1u);
+    a = thvm_atp_orient_and_add(s,
+        mk_f(mk_a(), mk_f(mk_v(VAR_x), mk_e())), mk_a());  // A at slot 1
+    CHECK_EQ(a.count, 1u);
+    CriticalPair buf[ATP_CP_BATCH];
+    // Filter OFF (engine default): both spine + off-spine overlaps form.
+    CHECK_EQ(s->use_einsstern, 0u);
+    u32 cnt_off = atp_overlap_ij(s, 1, 0, buf, ATP_CP_BATCH, NULL);
+    CHECK_EQ(cnt_off, 2u);                  // root [] + inner [1]
+    u8 saw_offspine = 0u;
+    for (u32 k = 0; k < cnt_off; k++)
+        for (u8 d = 0; d < buf[k].pos_len; d++)
+            if (buf[k].pos[d] != 0u) saw_offspine = 1u;
+    CHECK_EQ((u32)saw_offspine, 1u);        // the [1] CP is present
+    // Filter ON: the off-spine inner overlap is gated; only the 1* root.
+    thvm_atp_set_use_einsstern(s, 1u);
+    u32 cnt_on = atp_overlap_ij(s, 1, 0, buf, ATP_CP_BATCH, NULL);
+    CHECK_EQ(cnt_on, 1u);                   // the [1] CP was dropped
+    CHECK_EQ(s->n_cps_dropped_einsstern, 1u);
+    // Every surviving CP sits on the 1* spine (all-zero position path).
+    for (u32 k = 0; k < cnt_on; k++)
+        for (u8 d = 0; d < buf[k].pos_len; d++)
+            CHECK_EQ((u32)buf[k].pos[d], 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-nusfu-no-overlap-below-skolem");
+  {
+    // WM -nusfu (NusfUeberlappung, Unifikation1.c:1082-1090 via Nusfu
+    // :1063-1079): drop a CP whose overlap position lies physically BELOW
+    // a skolem-function symbol on the overlapped LHS.  thvm marks skolem
+    // labels explicitly (empty on every ground-goal path, so the filter
+    // is inert there); registering one lets the gate fire on a
+    // constructed case.
+    //
+    // rule A: i(f(x, e)) -> a, treating LAB_i as the skolem function.
+    // rule B: f(y, z) -> e.  B's LHS unifies with A's LHS at:
+    //   pos []   -- the root i(...)        (i is unary, not f-rooted: no
+    //                                       overlap; the root symbol is i)
+    //   pos [0]  -- the inner f(x, e)      (BELOW the skolem i)
+    // With -nusfu OFF the [0] CP forms; with it ON (and LAB_i registered
+    // as skolem) the [0] CP is gated.
+    AtpState *s = thvm_atp_init(&UNIT_CFG, 100);
+    thvm_atp_set_use_unfailing_cp(s, 1u);
+    AtpAddedRange a = thvm_atp_orient_and_add(s,
+        mk_i(mk_f(mk_v(VAR_x), mk_e())), mk_a());
+    CHECK_EQ(a.count, 1u);
+    a = thvm_atp_orient_and_add(s, mk_f(mk_v(VAR_x), mk_v(1u)), mk_e());
+    CHECK_EQ(a.count, 1u);
+    CriticalPair buf[ATP_CP_BATCH];
+    // OFF: the below-skolem overlap forms.
+    CHECK_EQ(s->use_no_overlap_below_skolem, 0u);
+    u32 cnt_off = atp_overlap_ij(s, 0, 1, buf, ATP_CP_BATCH, NULL);
+    CHECK(cnt_off >= 1u);
+    // ON but registry EMPTY: no-op (inert on the ground-goal corpus).
+    thvm_atp_set_use_no_overlap_below_skolem(s, 1u);
+    u32 cnt_empty = atp_overlap_ij(s, 0, 1, buf, ATP_CP_BATCH, NULL);
+    CHECK_EQ(cnt_empty, cnt_off);           // empty skolem set -> identity
+    CHECK_EQ(s->n_cps_dropped_nusfu, 0u);
+    // ON + LAB_i registered: the below-skolem overlap is gated.
+    thvm_atp_add_skolem_label(s, LAB_i);
+    u32 cnt_on = atp_overlap_ij(s, 0, 1, buf, ATP_CP_BATCH, NULL);
+    CHECK(cnt_on < cnt_off);                // [0] CP dropped
+    CHECK(s->n_cps_dropped_nusfu >= 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-cp-filters-default-off-byte-identity");
+  {
+    // All eight WM CP-generation filter knobs default OFF, so a CP batch
+    // generated under the engine default is byte-identical whether or not
+    // the inert flags are set: einsstern OFF keeps every position,
+    // nusfu OFF (or ON with an empty skolem registry) keeps every
+    // position, and Reclassify / ReversedCompletion / SUEManagement /
+    // CriticalGoalInterreduce / CriticalGoalWeight / BackwardGoalArgue
+    // are pure storage (no CP-gen effect on the ground-goal surface).
+    AtpState *base = thvm_atp_init(&UNIT_CFG, 100);
+    thvm_atp_set_use_unfailing_cp(base, 1u);
+    (void)thvm_atp_orient_and_add(base,
+        mk_f(mk_a(), mk_f(mk_v(VAR_x), mk_e())), mk_a());
+    (void)thvm_atp_orient_and_add(base, mk_f(mk_v(VAR_x), mk_v(1u)), mk_e());
+    CriticalPair bufA[ATP_CP_BATCH];
+    u32 cntA = atp_overlap_ij(base, 0, 1, bufA, ATP_CP_BATCH, NULL);
+    thvm_atp_free(base);
+
+    AtpState *t = thvm_atp_init(&UNIT_CFG, 100);
+    thvm_atp_set_use_unfailing_cp(t, 1u);
+    // Flip every default-OFF knob ON EXCEPT einsstern (and leave nusfu's
+    // registry empty) -- none may perturb CP generation on ground goals.
+    thvm_atp_set_use_no_overlap_below_skolem(t, 1u);  // empty registry -> no-op
+    thvm_atp_set_use_reclassify(t, 1u);
+    thvm_atp_set_use_reversed_completion(t, 1u);
+    thvm_atp_set_use_sue_management(t, 1u);
+    thvm_atp_set_use_critical_goal_interreduce(t, 1u);
+    thvm_atp_set_use_critical_goal_weight(t, 1u);
+    thvm_atp_set_use_backward_goal_argue(t, 1u);
+    (void)thvm_atp_orient_and_add(t,
+        mk_f(mk_a(), mk_f(mk_v(VAR_x), mk_e())), mk_a());
+    (void)thvm_atp_orient_and_add(t, mk_f(mk_v(VAR_x), mk_v(1u)), mk_e());
+    CriticalPair bufB[ATP_CP_BATCH];
+    u32 cntB = atp_overlap_ij(t, 0, 1, bufB, ATP_CP_BATCH, NULL);
+    CHECK_EQ(cntB, cntA);                    // count unchanged
+    for (u32 k = 0; k < cntA && k < cntB; k++) {
+        CHECK(kbo_eq(bufB[k].lhs, bufA[k].lhs));
+        CHECK(kbo_eq(bufB[k].rhs, bufA[k].rhs));
+    }
+    thvm_atp_free(t);
+  }
+
   TEST_BEGIN("atp/wm-mixmost-nf-strategy");
   {
     // WM's DEFAULT normal-form strategy `-nf mixmost` (RUN/Parameter.c

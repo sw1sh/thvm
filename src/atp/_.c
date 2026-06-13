@@ -8548,6 +8548,82 @@ fn void thvm_atp_set_use_bwd_ground_join(AtpState *s, u8 on) {
   s->use_bwd_ground_join = on ? 1u : 0u;
 }
 
+// WM -einsstern (EinsSternUeberlappung, Unifikation1.c:1039-1055): keep
+// only CPs whose overlap position lies on the "1*" leftmost-argument
+// spine of the overlapped LHS.  Default OFF = WM's -einsstern default
+// (RUN/Parameter.c:250); NOT in the "Waldmeister"* presets.  See
+// AtpState.use_einsstern.
+fn void thvm_atp_set_use_einsstern(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_einsstern = on ? 1u : 0u;
+}
+
+// WM -nusfu (NusfUeberlappung, Unifikation1.c:1082-1090): skip overlap
+// positions inside a skolem-function subterm.  Default OFF on the thvm
+// Method (so the engine stays byte-identical); with the skolem-label
+// registry empty it is a no-op even when ON.  See
+// AtpState.use_no_overlap_below_skolem.
+fn void thvm_atp_set_use_no_overlap_below_skolem(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_no_overlap_below_skolem = on ? 1u : 0u;
+}
+
+fn void thvm_atp_add_skolem_label(AtpState *s, u32 label) {
+  if (s == NULL) return;
+  for (u32 k = 0; k < s->n_skolem_labels; k++)
+    if (s->skolem_labels[k] == label) return;   // already registered
+  if (s->n_skolem_labels >= ATP_MAX_SKOLEM_LABELS) return;   // cap
+  s->skolem_labels[s->n_skolem_labels++] = label;
+}
+
+// WM -reclas (C_ReClassify, CLAS/NewClassification.c:398-430): reweight
+// CPs touched by the CP-set IR sweep.  Inert unless CPSetInterreduce is
+// also enabled (the sweep is default OFF) and the criteria list is
+// non-empty (-reclas default "").  Exposed for coverage; OFF by default.
+fn void thvm_atp_set_use_reclassify(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_reclassify = on ? 1u : 0u;
+}
+
+// WM -kern (KernUeberlappung, Unifikation1.c:1243-1268): reversed /
+// head-stand completion on the combinator-consultation lane.  Vacuous on
+// the ground-goal surface.  Exposed for coverage; OFF by default.
+fn void thvm_atp_set_use_reversed_completion(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_reversed_completion = on ? 1u : 0u;
+}
+
+// WM -sue (SUEM): selects the SUE statistics module only; carries no
+// trajectory-affecting parameter.  Exposed for coverage; OFF by default.
+fn void thvm_atp_set_use_sue_management(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_sue_management = on ? 1u : 0u;
+}
+
+// WM -cg (KPV_CGMengeInterreduzieren, KPVerwaltung.c:835-849): CG-set
+// interreduction.  Inert on ground goals (CG heap empty,
+// PM_Existenzziele-gated).  Exposed for coverage; OFF by default.
+fn void thvm_atp_set_use_critical_goal_interreduce(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_critical_goal_interreduce = on ? 1u : 0u;
+}
+
+// WM -cgclas: classification of critical goals.  Inert on ground goals
+// (CG heap empty).  Exposed for coverage; OFF by default.
+fn void thvm_atp_set_use_critical_goal_weight(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_critical_goal_weight = on ? 1u : 0u;
+}
+
+// WM -back (RueckwartigeUeberlappung, Unifikation1.c:1313): backward-
+// argue critical goals.  Existential / CG-paramodulation lane, inert on
+// the universal/ground-goal surface.  Exposed for coverage; OFF by
+// default.
+fn void thvm_atp_set_use_backward_goal_argue(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_backward_goal_argue = on ? 1u : 0u;
+}
+
 fn void thvm_atp_set_use_eset_subsume(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_eset_subsume = on ? 1u : 0u;
@@ -14275,6 +14351,89 @@ static u32 atp_cp_order_gate(AtpState *s, CriticalPair *buf,
   return w;
 }
 
+// WM -einsstern CP filter (EinsSternUeberlappung, Unifikation1.c:
+// 1039-1055 via AnEinsSternIn :1028-1036): keep a CP iff its overlap
+// position lies on the "1*" leftmost-argument spine of the overlapped
+// LHS.  AnEinsSternIn descends from the root taking the FIRST subterm
+// (TO_ErsterTeilterm) until it reaches the overlap position si; success
+// means every descent step was into argument 0.  In thvm's CriticalPair
+// geometry that is exactly pos[d] == 0 for all d (pos_len == 0 = root,
+// trivially on the spine).  WM's existential-goal branch (:1043-1047) is
+// inert on the ground-goal corpus.  Filters buf[lo, hi) in place;
+// returns the new hi.  No-op (returns hi) when the flag is off.
+static u32 atp_einsstern_gate(AtpState *s, CriticalPair *buf,
+                              u32 lo, u32 hi) {
+  if (!s->use_einsstern) return hi;
+  u32 w = lo;
+  for (u32 k = lo; k < hi; k++) {
+    u8 on_spine = 1u;
+    for (u8 d = 0; d < buf[k].pos_len; d++)
+      if (buf[k].pos[d] != 0u) { on_spine = 0u; break; }
+    if (on_spine) {
+      if (w != k) buf[w] = buf[k];
+      w++;
+    } else {
+      s->n_cps_dropped_einsstern++;
+    }
+  }
+  return w;
+}
+
+// WM -nusfu CP filter (NusfUeberlappung, Unifikation1.c:1082-1090 via
+// Nusfu :1063-1079): drop a CP whose overlap position lies physically
+// BELOW a skolem-function symbol.  Nusfu walks the overlapped LHS and
+// for every skolem symbol checks whether the overlap position is in its
+// argument subterm; here we walk the recorded overlap path on the
+// instantiated peak (the substituted overlapped term) and drop the CP if
+// any symbol strictly ABOVE the position (depth 0..pos_len-1) carries a
+// registered skolem label.  The skolem registry is empty on every
+// ground-goal path, so the gate is a no-op there even when on.  Filters
+// buf[lo, hi) in place; returns the new hi.
+static u8 atp_label_is_skolem(const AtpState *s, u32 label) {
+  for (u32 k = 0; k < s->n_skolem_labels; k++)
+    if (s->skolem_labels[k] == label) return 1u;
+  return 0u;
+}
+
+static u32 atp_nusfu_gate(AtpState *s, CriticalPair *buf, u32 lo, u32 hi) {
+  if (!s->use_no_overlap_below_skolem || s->n_skolem_labels == 0u)
+    return hi;
+  u32 w = lo;
+  for (u32 k = lo; k < hi; k++) {
+    Term t = buf[k].peak;
+    u8 below_skolem = 0u;
+    for (u8 d = 0; d < buf[k].pos_len; d++) {
+      if (t == 0 || term_tag(t) != TAG_CTR) break;
+      if (atp_label_is_skolem(s, term_ext(t))) { below_skolem = 1u; break; }
+      if (buf[k].pos[d] >= term_ctr_n(t)) { t = 0; break; }
+      t = term_ctr_at(t, buf[k].pos[d]);
+    }
+    if (!below_skolem) {
+      if (w != k) buf[w] = buf[k];
+      w++;
+    } else {
+      s->n_cps_dropped_nusfu++;
+    }
+  }
+  return w;
+}
+
+// Apply the per-segment CP-generation gates to a freshly produced
+// buffer segment [lo, hi): the KPAction ordering gate (always, intrinsic
+// to unfailing CP-gen) then the WM CP filters (einsstern + nusfu, both
+// default OFF).  Since the WM filters default OFF and are not in the
+// "Waldmeister"* presets, this is byte-identical to the bare order gate
+// on every current path; threading them here keeps `combo_end` (the
+// emission-order ranker's per-combo boundaries) consistent with the
+// post-filter buffer.
+static u32 atp_cp_gen_gates(AtpState *s, CriticalPair *buf,
+                            u32 lo, u32 hi, u8 outer_eq, u8 inner_eq) {
+  hi = atp_cp_order_gate(s, buf, lo, hi, outer_eq, inner_eq);
+  hi = atp_einsstern_gate(s, buf, lo, hi);
+  hi = atp_nusfu_gate(s, buf, lo, hi);
+  return hi;
+}
+
 // `combo_end` (optional, 4 slots) receives the buffer count after each
 // of the four base face-combo passes -- the WM emission-order ranker
 // needs to know which (i-face, j-face) combination produced each CP.
@@ -14350,14 +14509,14 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
     cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, lj_r, rj_r,
                                       ft_arena_local, need_peak, skip1,
                                       buf, cap, cnt);
-    cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
+    cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
     if (combo_end != NULL) combo_end[0] = cnt;
     if (j_un) {
       seg = cnt;
       cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, rj_r, lj_r,
                                         ft_arena_local, need_peak, skip2,
                                         buf, cap, cnt);
-      cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
+      cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
     }
     if (combo_end != NULL) combo_end[1] = cnt;
     if (i_un) {
@@ -14365,14 +14524,14 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
       cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, lj_r, rj_r,
                                         ft_arena_local, need_peak, skip3,
                                         buf, cap, cnt);
-      cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
+      cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
       if (combo_end != NULL) combo_end[2] = cnt;
       if (j_un) {
         seg = cnt;
         cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, rj_r, lj_r,
                                           ft_arena_local, need_peak, skip4,
                                           buf, cap, cnt);
-        cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
+        cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
       }
     }
     if (combo_end != NULL) {
@@ -14390,26 +14549,26 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
     u32 seg = cnt;
     // (i-face li) x (j: lj->rj)  -- the standard overlap.
     cnt = pf[skip1](li, ri, lj, rj, buf, cap, cnt);
-    cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
+    cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
     if (combo_end != NULL) combo_end[0] = cnt;
     if (j_un) {
       // (i-face li) x (j: rj->lj)
       seg = cnt;
       cnt = pf[skip2](li, ri, rj, lj, buf, cap, cnt);
-      cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
+      cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
     }
     if (combo_end != NULL) combo_end[1] = cnt;
     if (i_un) {
       // (i-face ri) x (j: lj->rj)
       seg = cnt;
       cnt = pf[skip3](ri, li, lj, rj, buf, cap, cnt);
-      cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
+      cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
       if (combo_end != NULL) combo_end[2] = cnt;
       if (j_un) {
         // (i-face ri) x (j: rj->lj)
         seg = cnt;
         cnt = pf[skip4](ri, li, rj, lj, buf, cap, cnt);
-        cnt = atp_cp_order_gate(s, buf, seg, cnt, i_eq, j_eq);
+        cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
       }
     }
     if (combo_end != NULL) {
@@ -14817,9 +14976,9 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
                        !(s->use_unfailing_cp && !s->r_orient[i]));
       (void)cp_walk_positions(ctx.li, path, 0, CP_MAX_DEPTH,
                               cp_visit_ic, &ctx, 0);
-      ctx.count = atp_cp_order_gate(s, buf, 0, ctx.count,
-                                    s->use_unfailing_cp && !s->r_orient[i],
-                                    s->use_unfailing_cp && !s->r_orient[j]);
+      ctx.count = atp_cp_gen_gates(s, buf, 0, ctx.count,
+                                   s->use_unfailing_cp && !s->r_orient[i],
+                                   s->use_unfailing_cp && !s->r_orient[j]);
       pushed += atp_push_cps_traced(s, buf, ctx.count,
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);
@@ -14842,9 +15001,9 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
       ctx.skip_root = 1u;   // i < j: roots belong to the (j, i) visit
       (void)cp_walk_positions(ctx.li, path, 0, CP_MAX_DEPTH,
                               cp_visit_ic, &ctx, 0);
-      ctx.count = atp_cp_order_gate(s, buf, 0, ctx.count,
-                                    s->use_unfailing_cp && !s->r_orient[i],
-                                    s->use_unfailing_cp && !s->r_orient[j]);
+      ctx.count = atp_cp_gen_gates(s, buf, 0, ctx.count,
+                                   s->use_unfailing_cp && !s->r_orient[i],
+                                   s->use_unfailing_cp && !s->r_orient[j]);
       pushed += atp_push_cps_traced(s, buf, ctx.count,
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);

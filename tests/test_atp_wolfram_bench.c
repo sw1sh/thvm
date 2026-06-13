@@ -1164,6 +1164,26 @@ int main(int argc, char **argv) {
     if (bg != NULL && bg[0] != '\0')
       thvm_atp_set_use_bwd_ground_join(s, (bg[0] != '0') ? 1u : 0u);
   }
+  // THVM_ATP_EINSSTERN=0/1: WM -einsstern CP filter (EinsSternUeber-
+  // lappung, Unifikation1.c:1039-1055) -- keep only CPs whose overlap
+  // position lies on the "1*" leftmost-argument spine.  NOT in the
+  // WALDMEISTER preset: WM's -einsstern defaults OFF (RUN/Parameter.c:
+  // 250).  Live CP-gen gate; ON changes the trajectory.
+  {
+    const char *es = getenv("THVM_ATP_EINSSTERN");
+    if (es != NULL && es[0] != '\0')
+      thvm_atp_set_use_einsstern(s, (es[0] != '0') ? 1u : 0u);
+  }
+  // THVM_ATP_NO_OVERLAP_BELOW_SKOLEM=0/1: WM -nusfu CP filter
+  // (NusfUeberlappung, Unifikation1.c:1082-1090) -- skip overlap
+  // positions inside a skolem-function subterm.  Inert on the ground-
+  // goal corpus (no skolem symbols), so a no-op even when on; NOT in
+  // the WALDMEISTER preset.
+  {
+    const char *nu = getenv("THVM_ATP_NO_OVERLAP_BELOW_SKOLEM");
+    if (nu != NULL && nu[0] != '\0')
+      thvm_atp_set_use_no_overlap_below_skolem(s, (nu[0] != '0') ? 1u : 0u);
+  }
   // SOS (Set-of-Support) -- a CP-scoring bonus for CPs touching goal
   // symbols.  Not WM standard (Vampire/E heuristic); kept as opt-in.
   {

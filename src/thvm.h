@@ -5036,6 +5036,130 @@ typedef struct {
   Term gj_protect_l;
   Term gj_protect_r;
 
+  // === Waldmeister CP-generation filter knobs (KPFilterErgaenzen,
+  // INF/Unifikation1.c:1947-2014).  WM registers a chain of per-overlap
+  // filters; Weggefiltert (Unifikation1.c:967-980) drops a candidate CP
+  // when any filter rejects (Vater, VaterStelle, Mutter), Vater being
+  // the fact whose LHS is overlapped, VaterStelle the overlap position.
+  // Each is a default-OFF CLI flag (the unconfigured .pr Orkus run leaves
+  // them inactive), so the engine default + the "Waldmeister"* presets
+  // stay byte-identical with all of these off. ===
+
+  // -einsstern "nur kritische Paare an 1* betrachten" (only consider
+  // critical pairs at 1*, the leftmost-argument spine).  EinsSternUeber-
+  // lappung (Unifikation1.c:1039-1055) keeps a CP iff its overlap
+  // position si lies on the "1*" spine of Vater's LHS s: AnEinsSternIn
+  // (:1028-1036) descends from the root taking the FIRST subterm
+  // (TO_ErsterTeilterm) repeatedly and returns TRUE iff it reaches si.
+  // In thvm's CriticalPair geometry that is exactly: every recorded
+  // child index is 0 (pos[d] == 0 for all d; pos_len == 0 = root is
+  // trivially on the spine).  WM's existential-goal branch (the s/Mutter
+  // top == SO_EQ cases at :1043-1047) is inert on the ground-goal
+  // corpus.  Default OFF (-einsstern defaultWert FALSE,
+  // RUN/Parameter.c:250); ON gates CP generation -- NOT in the
+  // "Waldmeister"* presets (faithful default is off on both sides).
+  // Method "Einsstern" / thvm_atp_set_use_einsstern /
+  // THVM_ATP_EINSSTERN.
+  u8   use_einsstern;
+  u32  n_cps_dropped_einsstern;
+
+  // -nusfu "nicht unterhalb von Skolemfunktionen ueberlappen" (no overlap
+  // below skolem functions).  NusfUeberlappung (Unifikation1.c:1082-1090)
+  // calls Nusfu(si, s) (:1063-1079), which walks Vater's LHS flatterm and
+  // for every skolem function symbol checks whether the overlap position
+  // si lies physically inside its argument subterm -- returning FALSE
+  // (drop) when it does.  WM's SO_IstSkolemSymbol (SymbolOperationen.h:
+  // 150-151) = a function symbol that is neither an extra-constant nor
+  // the equality symbol; skolem functions only arise from existential-
+  // conjecture skolemization (the FOL layer), so on the ground-goal
+  // corpus no symbol is a skolem and the filter is inert.  thvm marks
+  // skolem labels explicitly via thvm_atp_add_skolem_label
+  // (skolem_labels[] below, empty by default), and the gate drops a CP
+  // when a skolem label appears on the i-face LHS path ABOVE the overlap
+  // position.  WM's -nusfu CLI default is TRUE (Parameter.c:264), but it
+  // is registered only when the flag is read at U1_InitAposteriori and is
+  // inert without skolem symbols; the thvm Method default is OFF so the
+  // engine stays byte-identical, with the registry empty it is a no-op
+  // even when ON.  Method "NoOverlapBelowSkolem" /
+  // thvm_atp_set_use_no_overlap_below_skolem /
+  // THVM_ATP_NO_OVERLAP_BELOW_SKOLEM.
+  u8   use_no_overlap_below_skolem;
+  u32  n_cps_dropped_nusfu;
+  // Skolem-function label registry consulted by the nusfu gate.  Empty
+  // on every ground-goal path (no symbol is a skolem there); a caller /
+  // test registers labels via thvm_atp_add_skolem_label.
+#define ATP_MAX_SKOLEM_LABELS 64u
+  u32  skolem_labels[ATP_MAX_SKOLEM_LABELS];
+  u32  n_skolem_labels;
+
+  // -reclas "reclassification of unselected equations during SUE-"
+  // (the CP-set interreduction sweep).  ReClassifyProc / C_ReClassify
+  // (CLAS/NewClassification.c:226/398-430) re-derive w1 (keeping w2 ==
+  // the FIFO age) for a CP TOUCHED by the CP-set IR sweep,
+  // KPV_KPMengeInterreduzieren (INF/KPVerwaltung.c:996-1008), using the
+  // -reclas criteria list.  The default InfoString is "" so
+  // ReClasCriteria is empty and the reweight reduces to the base
+  // C_Classify (no extra reclassification) -- AND the sweep that calls
+  // it (-ki/-cpi) is itself default OFF (CPSetInterreduce -> False in
+  // the thvm presets).  Distinct from DemoteOnLhsSimplify, which is the
+  // rule-DEMOTE victim requeue (KPV_IROpferBehandeln) -- a different
+  // mechanism.  Exposed for coverage; OFF by default and inert unless
+  // CPSetInterreduce is also enabled.  Method "Reclassify" /
+  // thvm_atp_set_use_reclassify / THVM_ATP_RECLASSIFY.
+  u8   use_reclassify;
+
+  // -kern "auf den Kopf gestellte Vervollstaendigung" (head-stand /
+  // reversed completion).  KernUeberlappung (Unifikation1.c:1243-1268)
+  // is a CP filter gated on the consultation stage KO_Stufe (Konsulat.c
+  // combinator escalation) and the existential backward-reasoning
+  // apparatus (IstVerdrehterKombinator / IstRechtsInZiel) -- it only
+  // fires on the combinator/existential-goal lane (PM_Existenzziele),
+  // VACUOUS on the ground-goal comparison surface (thvm routes
+  // existential conjectures through its narrowing lane, a separate
+  // architecture).  Exposed for coverage; OFF by default and inert on
+  // ground goals.  Method "ReversedCompletion" /
+  // thvm_atp_set_use_reversed_completion / THVM_ATP_REVERSED_COMPLETION.
+  u8   use_reversed_completion;
+
+  // -sue "SUEM" (Selected-Unselected-Equation Management).  The -sue
+  // InfoString (default "", RUN/Parameter.c:145) only configures which
+  // SUE statistics module is reported (SUE_ParamInfo, the sueModule
+  // fall-through in RUN/Parameter.c:786-833); it carries no trajectory-
+  // affecting parameter of its own (the actual queue economics are the
+  // -clas/-pq/-ki knobs, already covered by CriticalPairWeight /
+  // SelectionRatio / CPSetInterreduce).  Exposed for coverage; OFF by
+  // default and a pure statistics selector.  Method "SUEManagement" /
+  // thvm_atp_set_use_sue_management / THVM_ATP_SUE_MANAGEMENT.
+  u8   use_sue_management;
+
+  // -cg "interreduction of critical goals" (KPV_CGMengeInterreduzieren,
+  // INF/KPVerwaltung.c:835-849) and -cgclas "classification of critical
+  // goals" (the CG analog of -clas).  Both act ONLY on the critical-goal
+  // heap, which is gated on PM_Existenzziele (a conclusion containing a
+  // variable, WASIC/SymbolOperationen.c:315-326): every conclusion in
+  // the ground-goal corpus is skC*-ground, so the CG heap is empty and
+  // the lane is provably INERT (inventory row B/G, double vacuity:
+  // -cg default "" never schedules SP_IstStichpunkt, and the heap it
+  // would walk is empty).  Exposed for coverage; both OFF/inert by
+  // default.  Methods "CriticalGoalInterreduce" / "CriticalGoalWeight" /
+  // thvm_atp_set_use_critical_goal_interreduce /
+  // thvm_atp_set_use_critical_goal_weight / THVM_ATP_CG_INTERREDUCE /
+  // THVM_ATP_CG_WEIGHT.
+  u8   use_critical_goal_interreduce;
+  u8   use_critical_goal_weight;
+
+  // -back "Rueckwaertsargumentieren bei kritischen Zielen" (backward-
+  // argue critical goals).  RueckwartigeUeberlappung
+  // (Unifikation1.c:1313-...) is registered alongside the combinator
+  // apparatus (TO_KombinatorapparatAktivieren + RichtigeZielseiteSuchen,
+  // :2005-2008) and drives WM's backward critical-goal reasoning -- the
+  // existential / CG-paramodulation lane, against which thvm has no
+  // comparable baseline (existential conjectures take thvm's narrowing
+  // budget).  Exposed for coverage; OFF by default and inert on the
+  // universal/ground-goal surface.  Method "BackwardGoalArgue" /
+  // thvm_atp_set_use_backward_goal_argue / THVM_ATP_BACKWARD_GOAL_ARGUE.
+  u8   use_backward_goal_argue;
+
   // Limited Resource Strategy (Riazanov & Voronkov, JSC 36, 2003).  When
   // a wall-clock budget is set, LRS estimates from the observed selection
   // rate how many MORE CPs the saturator will pop before the deadline,
@@ -5535,6 +5659,24 @@ fn void      thvm_atp_set_use_wm_emission_order(AtpState *s, u8 on);
 // RueckwaertsGrundzusammenfuehrbarkeit; see
 // AtpState.use_bwd_ground_join).  Default OFF = WM's -gj default.
 fn void      thvm_atp_set_use_bwd_ground_join(AtpState *s, u8 on);
+// WM CP-generation filter knobs (KPFilterErgaenzen,
+// Unifikation1.c:1947-2014).  All default OFF = the unconfigured .pr
+// Orkus run, so the engine + the "Waldmeister"* presets are byte-
+// identical with these off.  Einsstern / NoOverlapBelowSkolem are live
+// CP-gen gates; the rest are inert on the ground-goal surface (see the
+// AtpState field comments).
+fn void      thvm_atp_set_use_einsstern(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_no_overlap_below_skolem(AtpState *s, u8 on);
+// Register a skolem-function label for the nusfu gate.  Empty on every
+// ground-goal path; a caller / test adds labels here so
+// use_no_overlap_below_skolem has something to act on.
+fn void      thvm_atp_add_skolem_label(AtpState *s, u32 label);
+fn void      thvm_atp_set_use_reclassify(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_reversed_completion(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_sue_management(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_critical_goal_interreduce(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_critical_goal_weight(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_backward_goal_argue(AtpState *s, u8 on);
 fn void      thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);

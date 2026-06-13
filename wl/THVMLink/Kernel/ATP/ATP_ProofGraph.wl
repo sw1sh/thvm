@@ -502,7 +502,11 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     lazyNormalize_, coopWeight_, coopRatio_, useFvi_,
     useImplicitCp_, useWmDemote_, useOrphanMurder_, usePopSubsume_,
     useESetSubsume_, useBwdGroundJoin_, useQueueSubsume_,
-    useWmEmissionOrder_, useWmIntakeOrder_, useWmMixmostNf_] := Block[{
+    useWmEmissionOrder_, useWmIntakeOrder_, useWmMixmostNf_,
+    useEinsstern_, useNoOverlapBelowSkolem_, useReclassify_,
+    useReversedCompletion_, useSueManagement_,
+    useCriticalGoalInterreduce_, useCriticalGoalWeight_,
+    useBackwardGoalArgue_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr
@@ -518,7 +522,10 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         lazyNormalize, coopWeight, coopRatio, useFvi, useImplicitCp,
         useWmDemote, useOrphanMurder, usePopSubsume, useESetSubsume,
         useBwdGroundJoin, useQueueSubsume, useWmEmissionOrder,
-        useWmIntakeOrder, useWmMixmostNf];
+        useWmIntakeOrder, useWmMixmostNf, useEinsstern,
+        useNoOverlapBelowSkolem, useReclassify, useReversedCompletion,
+        useSueManagement, useCriticalGoalInterreduce,
+        useCriticalGoalWeight, useBackwardGoalArgue];
     (* C engine returns LibraryFunctionError on memory-guard abort
        (THVM_ATP_RSS_ABORT_MB / THVM_ATP_HEAP_ABORT_FRAC) or other
        hard-stop conditions.  Bail BEFORE the structural part extraction
