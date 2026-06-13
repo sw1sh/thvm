@@ -203,7 +203,7 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
         UopDagGemmShape g2 = {0};
         if (uop_dag_classify_matmul_shape(sroot, ke, &g2)
             && g2.M != 0 && g2.N != 0 && g2.K != 0
-            && g2.dtype == DT_FP32) {
+            && (g2.dtype == DT_FP32 || g2.dtype == DT_BF16)) {
           // Both M and N must be GLOBAL-promoted for the tiled emit.
           u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
           u32 na = uop_dag_collect_axes(sroot, ids, types, exts, MAX_AXES);

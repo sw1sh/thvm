@@ -2188,11 +2188,13 @@ static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
 static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                                      const char *c_name,
                                      u32 n_extent, u32 k_extent,
-                                     RmuTcTile t, FILE *fp, u32 depth) {
+                                     RmuTcTile t, int c_is_bf,
+                                     FILE *fp, u32 depth) {
   u32 tile_m = t.local_m * t.rm * 8u;     // output rows per threadgroup
   u32 tile_n = t.local_n * t.rn * 8u;     // output cols per threadgroup
   u32 n_tiles_n = n_extent / tile_n;      // tg columns in the grid
   u32 nthreads = t.local_m * t.local_n * 32u;
+  u32 nsg = t.local_m * t.local_n;        // simdgroups per threadgroup
   #define IND(D) for (u32 _i = 0; _i < (D); _i++) fputs("  ", fp)
   IND(depth); fprintf(fp,
     "/* TC tiled matmul: tile %ux%u, %ux%u simdgroups, %ux%u reg, KB=%u */\n",
@@ -2203,6 +2205,13 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
     "threadgroup float _Asm[%u];\n", tile_m * t.kb);
   IND(depth); fprintf(fp,
     "threadgroup float _Bsm[%u];\n", t.kb * tile_n);
+  // bf16 output: a per-simdgroup f32 scratch slot for the f32->bf16 staged
+  // store (simdgroup_store has no f32->bf16 widening).  Each of the NSG
+  // simdgroups owns a private 64-float slot, reused across its register tiles.
+  if (c_is_bf) {
+    IND(depth); fprintf(fp, "threadgroup float _cstage[%u];\n", nsg * 64u);
+    IND(depth); fputs("uint _sgi64 = sgi * 64u;\n", fp);
+  }
   // This threadgroup's output-tile origin.
   IND(depth); fprintf(fp, "uint _tm = (tg / %uu) * %uu;\n", n_tiles_n, tile_m);
   IND(depth); fprintf(fp, "uint _tn = (tg %% %uu) * %uu;\n", n_tiles_n, tile_n);
@@ -2269,12 +2278,30 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   IND(depth + 1); fputs("}\n", fp);                          // close _kk
   IND(depth + 1); fputs("threadgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
   IND(depth); fputs("}\n", fp);                              // close _k0
-  // Store the register tile to the output (row-major, ld = N).
+  // Store the register tile to the output (row-major, ld = N).  f32 output:
+  // simdgroup_store directly.  bf16 output: simdgroup_store has no f32->bf16
+  // widening, so stage each 8x8 tile through this simdgroup's private f32 slot
+  // (_cstage[sgi*64]) then cooperatively convert+write to bfloat; barriers
+  // bracket the store/read and guard slot reuse across the rm*rn tiles.
   for (u32 mi = 0; mi < t.rm; mi++) {
     for (u32 ni = 0; ni < t.rn; ni++) {
-      IND(depth); fprintf(fp,
-        "simdgroup_store(_acc[%u], &%s[(_tm + _sm + %uu) * %uu + _tn + _sn + %uu], %uu);\n",
-        mi * t.rn + ni, c_name, mi * 8u, n_extent, ni * 8u, n_extent);
+      if (c_is_bf) {
+        IND(depth); fprintf(fp,
+          "simdgroup_store(_acc[%u], &_cstage[_sgi64], 8);\n", mi * t.rn + ni);
+        IND(depth); fputs("simdgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+        IND(depth); fprintf(fp,
+          "{ uint _cb = (_tm + _sm + %uu) * %uu + _tn + _sn + %uu;\n",
+          mi * 8u, n_extent, ni * 8u);
+        IND(depth); fprintf(fp,
+          "  for (uint _e = thread_index_in_simdgroup; _e < 64u; _e += 32u) "
+          "%s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)_cstage[_sgi64 + _e]; }\n",
+          c_name, n_extent);
+        IND(depth); fputs("simdgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+      } else {
+        IND(depth); fprintf(fp,
+          "simdgroup_store(_acc[%u], &%s[(_tm + _sm + %uu) * %uu + _tn + _sn + %uu], %uu);\n",
+          mi * t.rn + ni, c_name, mi * 8u, n_extent, ni * 8u, n_extent);
+      }
     }
   }
   #undef IND
@@ -2520,13 +2547,14 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // is eligible.  When a worthwhile tile divides M/N/K cleanly, emit
   // the tiled kernel and return -- the dispatch grid in
   // cg_tile_metal_dispatch_shape sizes threadgroups to the larger tile.
-  // The register-blocked tiled path stays f32-only: it has many simdgroups
-  // per threadgroup each storing several 8x8 register tiles, so the
-  // threadgroup-staged f32->bf16 store the parallel_tc path uses doesn't apply
-  // cleanly.  A bf16 matmul takes the parallel_tc simdgroup path below instead
-  // (still TC; one 8x8 tile per simdgroup -> a single staged store).
+  // bf16 inputs are accepted too: the global A/B reads are staged into
+  // `threadgroup float` (an implicit bfloat->float widening), the MMA stays
+  // float, and a bf16 output goes through a per-simdgroup f32->bf16 staged
+  // store (see rmu_emit_matmul_tc_tiled).  The win is the tiled data-reuse
+  // structure, not bf16 MMA rate.
   u32 _dta = uop_buffer_dtype(buf_a), _dtb = uop_buffer_dtype(buf_b);
-  int _tc_dtype_ok = (_dta == DT_FP32) && (_dtb == DT_FP32);
+  int _tc_dtype_ok = (_dta == DT_FP32 || _dta == DT_BF16)
+                  && (_dtb == DT_FP32 || _dtb == DT_BF16);
   if (m_par && n_par && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok) {
     RmuTcTile tile;
     if (rmu_tc_pick_tile(m_extent, n_extent, k_extent, &tile)) {
@@ -2537,8 +2565,9 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       snprintf(a_nm, sizeof(a_nm), "%s", rmu_buf_name(buf_a));
       snprintf(b_nm, sizeof(b_nm), "%s", rmu_buf_name(buf_b));
       snprintf(c_nm, sizeof(c_nm), "%s", rmu_buf_name(buf_c));
+      int c_is_bf = (uop_buffer_dtype(buf_c) == DT_BF16);
       rmu_emit_matmul_tc_tiled(a_nm, b_nm, c_nm, n_extent,
-                               k_extent, tile, fp, depth);
+                               k_extent, tile, c_is_bf, fp, depth);
       return 1;
     }
   }
