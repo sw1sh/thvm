@@ -5083,6 +5083,19 @@ static Term materialize_root_alias_rec(Term t, int record_replay) {
   u32 dst_tid = tensor_alloc(d->backend, d->view.shape, d->dtype);
   if (dst_tid == 0) return t;
 
+  // On-device strided gather: when the backend implements gather_strided
+  // (Metal), do dst[k] = src[strided(k)] on the GPU and skip the host
+  // read+gather+write below -- which would force a per-realize GPU->host
+  // sync.  Declines (-1) for chained views / non-4-byte dtypes; those
+  // still flow through the correct host loop.  The replay tail runs in
+  // both paths.
+  int did_device_gather = 0;
+  if (d->backend->gather_strided != NULL
+      && d->backend->gather_strided(TENS[dst_tid].buf_id, d->buf_id, d) == 0) {
+    did_device_gather = 1;
+  }
+
+  if (!did_device_gather) {
   // Bytes to read = max element index reachable + 1.  When there's
   // no chain we can compute it from strides analytically (cheap).
   // With a chain we'd need the full per-element walk -- defer that
@@ -5131,6 +5144,7 @@ static Term materialize_root_alias_rec(Term t, int record_replay) {
   d->backend->buf_write(TENS[dst_tid].buf_id, dst_host, dst_bytes);
   free(raw);
   free(dst_host);
+  }
   // Under TJit capture, this gather is a one-shot host memcpy that never
   // enters the recorded dispatch stream -- so a per-step replay keeps the
   // capture-step bytes even when the source is recomputed (a re-firing

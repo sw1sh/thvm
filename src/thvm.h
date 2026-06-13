@@ -803,6 +803,16 @@ struct Backend {
   void  (*dispatch_flush)(void);
   void  (*dispatch_end)(void);
   int   (*dispatch_kernel)(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
+  // Optional: on-device strided gather.  Compute dst[k] = src[strided(k)]
+  // entirely on the backend, where the strided index is derived from
+  // `view` (ndim, offset, dims[], strides[]).  Lets materialize_root_alias
+  // flatten a non-contig realize-root view WITHOUT a GPU->host buf_read +
+  // CPU gather + host->GPU buf_write (which forces a per-realize device
+  // sync on Metal).  Returns 0 on success, -1 if the backend declines
+  // (unsupported dtype / chained views / no impl) so the caller falls back
+  // to the host read+gather+write path.  NULL on backends without it.
+  int   (*gather_strided)(u32 dst_buf_id, u32 src_buf_id,
+                          TenDesc const *view);
 };
 
 // Hard ceiling on a single backend buffer allocation, in bytes.  A

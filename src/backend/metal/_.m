@@ -1269,6 +1269,133 @@ static u32 metal_tendesc_strided_index(TenDesc const *t, u32 flat_idx) {
   return idx;
 }
 
+// === On-device strided gather (Backend.gather_strided for Metal) =========
+//
+// Encodes a compute kernel dst[gid] = src[strided_index(gid)] so that
+// materialize_root_alias_rec can flatten a non-contig realize-root view
+// WITHOUT a GPU->host buf_read + CPU gather + host->GPU buf_write (which
+// forces a per-realize device sync).  The strided index is recomputed in
+// MSL EXACTLY as metal_view_strided_index does it: decompose gid
+// last-axis-first, modulus every axis, accumulate coord*stride + offset.
+//
+// Scope (mirrors the prior reverted attempt): single-view (nviews == 0)
+// + a 4-byte element dtype (f32 / i32) only.  bf16/fp16/chained-view
+// gathers decline (return -1) so the correct host loop still handles
+// them.
+static const char *METAL_GATHER_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "kernel void thvm_gather_strided(\n"
+    "    device float *dst [[buffer(0)]],\n"
+    "    device const float *src [[buffer(1)]],\n"
+    "    constant int *p [[buffer(2)]],\n"
+    "    uint gid [[thread_position_in_grid]]) {\n"
+    "  int ndim = p[0];\n"
+    "  int idx  = p[1];\n"
+    "  int rem  = int(gid);\n"
+    "  for (int a = ndim - 1; a >= 0; a--) {\n"
+    "    int dim = p[2 + a * 2];\n"
+    "    int str = p[2 + a * 2 + 1];\n"
+    "    int c = rem % dim;\n"
+    "    rem /= dim;\n"
+    "    idx += c * str;\n"
+    "  }\n"
+    "  dst[gid] = src[idx];\n"
+    "}\n";
+
+static id<MTLComputePipelineState> METAL_GATHER_PSO = nil;
+
+// Defined below (alongside the tile-jit compile path); forward-declared
+// here so the gather PSO builder can reuse the disk-cached MSL->metallib
+// compile.
+static id<MTLLibrary> metal_lib_for_src(char const *src, NSError **err,
+                                        int *via_data);
+
+static id<MTLComputePipelineState> metal_gather_pso(void) {
+  if (METAL_GATHER_PSO != nil) return METAL_GATHER_PSO;
+  if (METAL_DEVICE == nil) return nil;
+  NSError *err = nil;
+  int via_data = 0;
+  id<MTLLibrary> lib = metal_lib_for_src(METAL_GATHER_SRC, &err, &via_data);
+  if (lib == nil) {
+    fprintf(stderr, "thvm: metal -- gather library compile failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  id<MTLFunction> mtlFn = [lib newFunctionWithName:@"thvm_gather_strided"];
+  if (mtlFn == nil) {
+    fprintf(stderr, "thvm: metal -- gather function not in library\n");
+    return nil;
+  }
+  id<MTLComputePipelineState> pso =
+      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+  if (pso == nil) {
+    fprintf(stderr, "thvm: metal -- gather pipeline-state failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  METAL_GATHER_PSO = pso;
+  return pso;
+}
+
+// p layout: [ndim, offset, d0, s0, d1, s1, ...]; numel = view.numel.
+static int metal_gather_strided(u32 dst_buf_id, u32 src_buf_id,
+                                TenDesc const *d) {
+  // Decline anything the host loop must keep handling correctly:
+  //  - chained views (nviews > 0): the MSL kernel only decodes one view.
+  //  - non-4-byte element dtypes (bf16/fp16/i8/u8/i64): the kernel reads
+  //    `float`/`int` (4-byte) slots; a different itemsize would gather
+  //    wrong bytes.
+  if (d == NULL || d->nviews != 0) return -1;
+  if (dtype_storage_bytes(d->dtype, 1) != 4) return -1;
+  if (dst_buf_id == 0 || dst_buf_id >= METAL_BUFS_NEXT) return -1;
+  if (src_buf_id == 0 || src_buf_id >= METAL_BUFS_NEXT) return -1;
+  if (METAL_BUFS[dst_buf_id].buf == nil) return -1;
+  if (METAL_BUFS[src_buf_id].buf == nil) return -1;
+  if (METAL_BUFS[dst_buf_id].refcount == 0) return -1;
+  if (METAL_BUFS[src_buf_id].refcount == 0) return -1;
+
+  View const *v = &d->view;
+  u32 ndim = v->shape.ndim;
+  if (ndim > (u32)MAX_DIM) return -1;
+  u32 numel = v->numel;
+  if (numel == 0) return -1;
+
+  id<MTLComputePipelineState> pso = metal_gather_pso();
+  if (pso == nil) return -1;
+
+  // params: ndim, offset, then per-axis (kvar-resolved extent, stride).
+  // 2 header + 2 per axis.  Use the static (hi-bound) extent for kvar
+  // dims, matching metal_view_strided_index's kvar_extent_static.
+  int params[2 + 2 * MAX_DIM];
+  params[0] = (int)ndim;
+  params[1] = (int)v->offset;
+  for (u32 a = 0; a < ndim; a++) {
+    params[2 + (int)a * 2]     = (int)kvar_extent_static(v->shape.dims[a]);
+    params[2 + (int)a * 2 + 1] = (int)v->strides[a];
+  }
+  size_t params_len = (size_t)(2 + 2 * (int)ndim) * sizeof(int);
+
+  id<MTLCommandBuffer> cmd = metal_command_buffer();
+  if (cmd == nil) return -1;
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:METAL_BUFS[dst_buf_id].buf offset:0 atIndex:0];
+  [enc setBuffer:METAL_BUFS[src_buf_id].buf offset:0 atIndex:1];
+  [enc setBytes:params length:params_len atIndex:2];
+  NSUInteger tg = MIN((NSUInteger)numel,
+                      [pso maxTotalThreadsPerThreadgroup]);
+  [enc dispatchThreads:MTLSizeMake(numel, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  [enc endEncoding];
+  // Batched: the gather encodes into the same command buffer AFTER its
+  // producer dispatch (Metal preserves submission order within a buffer),
+  // so the source bytes are live by the time this kernel runs.  When
+  // standalone (no active batch), submit+wait here.
+  metal_submit_if_standalone(cmd);
+  return 0;
+}
+
 static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   u64 h = 0xcbf29ce484222325ULL ^ 0x4D54494C45554F50ULL;
   // kvar wedge: if any UOP_RANGE in the kernel is variable-bound, the
@@ -3980,8 +4107,6 @@ int thvm_aot_metal_sp_solve(
 
 Backend METAL_BACKEND = {
   .id              = 2,
-  .view_aware      = 1,
-  .id              = 2,
   .view_aware      = 1,   // metal_dispatch_kernel pre-materializes
                           // non-contig inputs into temp Metal bufs
                           // (host-side strided copy via inlined
@@ -4005,4 +4130,5 @@ Backend METAL_BACKEND = {
   .dispatch_flush  = metal_dispatch_flush,
   .dispatch_end    = metal_dispatch_end,
   .dispatch_kernel = metal_dispatch_kernel,
+  .gather_strided  = metal_gather_strided,
 };
