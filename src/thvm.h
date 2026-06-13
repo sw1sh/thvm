@@ -2907,6 +2907,20 @@ fn int uop_matmul_mn_axes(Term root, u32 *out_m_axis, u32 *out_m_extent,
 // back to the plain (guarded) uop_recognise_tc wrap for ragged shapes.
 fn Term uop_recognise_tc_parallel(Term root);
 
+// TRUE batched-matmul (batch axis in A, B AND output) structural
+// classifier + producer-side parallel-TC wrap.  uop_classify_batched_matmul
+// fills the batch/M/N axis ids + extents and K extent on a 3-range-per-operand
+// match (the 2-D recogniser above rejects this shape); 0 otherwise.
+// uop_recognise_batched_tc_parallel wraps the REDUCE with OPT(_, TC, 0) and
+// stamps batch/M/N GLOBAL when M,N,K are all %8, so rmu_emit_matmul_tc takes
+// the batched parallel branch.  See src/uop/recognise_tc.c.
+fn int uop_classify_batched_matmul(Term root,
+                                   u32 *out_batch_axis, u32 *out_batch_extent,
+                                   u32 *out_m_axis, u32 *out_m_extent,
+                                   u32 *out_n_axis, u32 *out_n_extent,
+                                   u32 *out_k_extent);
+fn Term uop_recognise_batched_tc_parallel(Term root);
+
 // Forward decl: re-stamp every UOP_RANGE leaf with axis_id == `axis_id`
 // from KAX_LOOP to KAX_GLOBAL.  Defined in src/uop/apply_opt_dag.c,
 // which is included after recognise_tc.c in the unity build, so the

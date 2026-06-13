@@ -520,6 +520,38 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
       }
       return n_applied;
     }
+    // TRUE batched matmul (attention's mhaBmm): the 2-D classifier above
+    // rejects the 3-range-per-operand shape, so handle it here -- mark the
+    // REDUCE TC and GLOBAL-promote the batch, M and N axes by id.  The batch
+    // axis is promoted regardless of an %8 extent (it is the gemm-index dim,
+    // not a tile dim); rmu_emit_matmul_tc binds it to one simdgroup per
+    // (batch, 8x8 tile).  This must run on the un-split DAG (M/N/K still a
+    // single RANGE leaf each), so it lives in Section 1 before the generic
+    // UPCAST/LOCAL split, exactly like the 2-D TC branch.
+    {
+      u32 b_ax, b_ext, m_ax, m_ext, n_ax, n_ext, k_ext;
+      if (uop_classify_batched_matmul(ke->cached_lift.store_root, &b_ax, &b_ext,
+                                      &m_ax, &m_ext, &n_ax, &n_ext, &k_ext)
+          && (m_ext % 8u) == 0 && (n_ext % 8u) == 0 && (k_ext % 8u) == 0) {
+        static const u32 tc_tiles[] = {8, 16, 32};
+        u32 applied_tc = 0;
+        for (u32 i = 0; i < 3; i++) {
+          u32 tile = tc_tiles[i];
+          if (k_ext % tile != 0) continue;
+          KOpt opt = { KOP_TC, 0, tile };
+          if (kernel_apply_opt(ke, opt)) { applied_tc = 1; n_applied++; break; }
+        }
+        if (applied_tc) {
+          KOpt gb = { KOP_GLOBAL, b_ax, b_ext };
+          KOpt gm = { KOP_GLOBAL, m_ax, m_ext };
+          KOpt gn = { KOP_GLOBAL, n_ax, n_ext };
+          if (kernel_apply_opt(ke, gb)) n_applied++;
+          if (kernel_apply_opt(ke, gm)) n_applied++;
+          if (kernel_apply_opt(ke, gn)) n_applied++;
+          return n_applied;
+        }
+      }
+    }
   }
 
   // ---- Section 2: IMAGE float4 -- SKIPPED (no ImageDType in thvm) ----

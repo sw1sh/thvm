@@ -1787,6 +1787,25 @@ static u32 rmu_emit_output_loops(Term addr, Term const *out_ranges,
 // back to F1e's accumulator path while wrapping with TC markers.
 // (F2b: emit a real simdgroup_matrix template instead of falling
 // back.)
+
+// Peel a single UOP_CAST/BITCAST wrapper off a MUL operand to reach the
+// underlying INDEX_E.  A bf16-input matmul accumulating in f32 lifts each
+// operand as CAST(INDEX_E(bf16_buf)) (the bf16->f32 widening feeding the
+// f32 REDUCE).  The simdgroup template loads each operand as a
+// simdgroup_matrix<bfloat> straight from the bf16 buffer (the MMA widens
+// to the f32 accumulator), so the cast is redundant at TC-emit time --
+// peel it to recover the INDEX_E + its buffer/address.  Returns the term
+// unchanged when it is already an INDEX_E (or not a cast).
+static Term rmu_peel_cast(Term t) {
+  if (term_tag(t) != TAG_UOP) return t;
+  u32 op = term_ext(t);
+  if (op == UOP_CAST || op == UOP_BITCAST) {
+    Term src = heap_read(term_val(t) + 0);
+    if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_INDEX_E) return src;
+  }
+  return t;
+}
+
 static int rmu_detect_matmul_tc(Term store, Term *out_red_value) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   Term value = heap_read(term_val(store) + 2);
@@ -1799,9 +1818,10 @@ static int rmu_detect_matmul_tc(Term store, Term *out_red_value) {
   if (kind != REDUCE_SUM) return 0;
   Term mul = heap_read(rloc + 0);
   if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
-  Term lhs = heap_read(term_val(mul) + 0);
-  Term rhs = heap_read(term_val(mul) + 1);
-  // LHS / RHS must be INDEX_E reads (or wrapped in identity / load).
+  // LHS / RHS must be INDEX_E reads, possibly wrapped in a bf16->f32 CAST
+  // (the widening feeding an f32 accumulator on a bf16-input matmul).
+  Term lhs = rmu_peel_cast(heap_read(term_val(mul) + 0));
+  Term rhs = rmu_peel_cast(heap_read(term_val(mul) + 1));
   if (term_tag(lhs) != TAG_UOP || term_ext(lhs) != UOP_INDEX_E) return 0;
   if (term_tag(rhs) != TAG_UOP || term_ext(rhs) != UOP_INDEX_E) return 0;
   if (out_red_value != NULL) *out_red_value = inner;
@@ -2332,8 +2352,10 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   if (uop_reduce_n_axes(tc_red) != 1) return 0;
   u32 red_axis  = uop_reduce_axis(tc_red, 0);
   Term mul      = uop_reduce_src(tc_red);
-  Term lhs      = heap_read(term_val(mul) + 0);
-  Term rhs      = heap_read(term_val(mul) + 1);
+  // Peel a bf16->f32 CAST off each operand (see rmu_peel_cast): the
+  // simdgroup template loads bf16 buffers into bfloat fragments directly.
+  Term lhs      = rmu_peel_cast(heap_read(term_val(mul) + 0));
+  Term rhs      = rmu_peel_cast(heap_read(term_val(mul) + 1));
   Term buf_a    = heap_read(term_val(lhs) + 0);
   Term addr_a   = heap_read(term_val(lhs) + 1);
   Term buf_b    = heap_read(term_val(rhs) + 0);
@@ -2357,9 +2379,35 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     return 0;
   }
 
-  // Identify M-axis (in addr_a, not red) and N-axis (in addr_b, not
-  // red).  We need each extent + axis_id + axis_type so the outer
-  // emission can either open for-loops (LOOP / default) or bind to
+  // Batched-gemm detection: a TRUE batched matmul (attention's mhaBmm) has a
+  // batch axis present in addr_a AND addr_b (besides K), with M/N each unique
+  // to one operand.  Recover it FIRST so the M/N discovery below skips it.
+  // The address terms already encode the per-batch base offset
+  // (a{batch}*batch_stride), so rmu_emit_term handles the data layout; the
+  // only extra work is decoding the batch axis from `tg` and (for dispatch)
+  // sizing the grid to batch * m_tiles * n_tiles.  Falls through to the
+  // plain 2-D path (batch_axis_id == 0xFFFFFFFF) for non-batched matmuls.
+  u32 batch_axis_id = 0xFFFFFFFFu;
+  {
+    Term ra[MAX_DIM]; u32 ra_n = 0;
+    rmu_collect_ranges(addr_a, ra, &ra_n);
+    Term rb[MAX_DIM]; u32 rb_n = 0;
+    rmu_collect_ranges(addr_b, rb, &rb_n);
+    for (u32 i = 0; i < ra_n && batch_axis_id == 0xFFFFFFFFu; i++) {
+      u32 aid = term_val(heap_read(term_val(ra[i]) + 0));
+      if (aid == red_axis) continue;
+      for (u32 j = 0; j < rb_n; j++) {
+        if (term_val(heap_read(term_val(rb[j]) + 0)) == aid) {
+          batch_axis_id = aid;
+          break;
+        }
+      }
+    }
+  }
+
+  // Identify M-axis (in addr_a, not red, not batch) and N-axis (in addr_b,
+  // not red, not batch).  We need each extent + axis_id + axis_type so the
+  // outer emission can either open for-loops (LOOP / default) or bind to
   // thread-position (LOCAL / GLOBAL) for parallel multi-SG dispatch.
   u32 m_axis_id = 0xFFFFFFFFu, m_extent = 0, m_axis_type = 0;
   u32 n_axis_id_v = 0xFFFFFFFFu, n_extent = 0, n_axis_type = 0;
@@ -2368,7 +2416,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     rmu_collect_ranges(addr_a, ra, &ra_n);
     for (u32 i = 0; i < ra_n; i++) {
       u32 aid = term_val(heap_read(term_val(ra[i]) + 0));
-      if (aid != red_axis) {
+      if (aid != red_axis && aid != batch_axis_id) {
         m_axis_id = aid;
         m_axis_type = (u32)term_val(heap_read(term_val(ra[i]) + 1));
         m_extent = (u32)term_val(heap_read(term_val(ra[i]) + 2));
@@ -2379,7 +2427,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     rmu_collect_ranges(addr_b, rb, &rb_n);
     for (u32 i = 0; i < rb_n; i++) {
       u32 aid = term_val(heap_read(term_val(rb[i]) + 0));
-      if (aid != red_axis) {
+      if (aid != red_axis && aid != batch_axis_id) {
         n_axis_id_v = aid;
         n_axis_type = (u32)term_val(heap_read(term_val(rb[i]) + 1));
         n_extent = (u32)term_val(heap_read(term_val(rb[i]) + 2));
@@ -2563,7 +2611,15 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   u32 _dta = uop_buffer_dtype(buf_a), _dtb = uop_buffer_dtype(buf_b);
   int _tc_dtype_ok = (_dta == DT_FP32 || _dta == DT_BF16)
                   && (_dtb == DT_FP32 || _dtb == DT_BF16);
-  if (m_par && n_par && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok) {
+  // The register-blocked tiled emitter assumes a single contiguous
+  // row-major A[m*K+k] / B[k*N+n] per gemm -- it honours neither a batch
+  // base-pointer offset nor transposed/permuted operand views.  The
+  // batched gemm (attention's mhaBmm) has BOTH, so route it to the
+  // per-8x8-tile parallel_tc body below instead (which emits the full
+  // affine address via rmu_emit_term, batch offset included).
+  int is_batched = (batch_axis_id != 0xFFFFFFFFu);
+  if (!is_batched && m_par && n_par && RMU_TARGET == CG_TARGET_METAL
+      && _tc_dtype_ok) {
     RmuTcTile tile;
     if (rmu_tc_pick_tile(m_extent, n_extent, k_extent, &tile)) {
       // rmu_buf_name returns a pointer to a shared static buffer, so the
@@ -2585,7 +2641,22 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     // No guard.  Bind axes per axis_type.
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fputs("/* parallel TC: m/n bound to tg; one SG per output tile */\n", fp);
-    if (m_par && n_par) {
+    if (m_par && n_par && is_batched) {
+      // Batched: linearise tg as (batch, m_tile, n_tile).  The batch axis
+      // is bound directly (each value is one independent gemm); m/n decode
+      // within the per-batch tile block.  The A/B/C addresses already carry
+      // a%u(batch)*batch_stride, so rmu_emit_term offsets each operand.
+      u32 m_tiles_m = m_extent / 8u;
+      u32 tiles_per_batch = m_tiles_m * n_tiles_n;
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = tg / %uu;\n", batch_axis_id, tiles_per_batch);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint _t2 = tg %% %uu;\n", tiles_per_batch);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = (_t2 / %uu) * 8u;\n", m_axis_id, n_tiles_n);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = (_t2 %% %uu) * 8u;\n", n_axis_id_v, n_tiles_n);
+    } else if (m_par && n_par) {
       for (u32 d = 0; d < depth; d++) fputs("  ", fp);
       fprintf(fp, "uint a%u = (tg / %uu) * 8u;\n", m_axis_id, n_tiles_n);
       for (u32 d = 0; d < depth; d++) fputs("  ", fp);
@@ -2633,7 +2704,6 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     body_depth = depth + 3;
   }
 
-  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   // Input fragment element type follows each operand's buffer dtype: a bfloat
   // buffer loads into a simdgroup_matrix<bfloat> (Metal 3.1; loading it into a
   // <float> fragment is a type error).  The accumulator stays f32 for full
@@ -2642,7 +2712,71 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   const char *a_el = (uop_buffer_dtype(buf_a) == DT_BF16) ? "bfloat" : "float";
   const char *b_el = (uop_buffer_dtype(buf_b) == DT_BF16) ? "bfloat" : "float";
   int c_is_bf = (uop_buffer_dtype(buf_c) == DT_BF16);
+  // simdgroup_multiply_accumulate requires A and B fragments to share a scalar
+  // type; mixed bf16/f32 operands (the attention matmuls: f32 RoPE'd q/k, bf16
+  // softmax attn x f32 V) can't be MMA'd directly.  The batched gemm also needs
+  // per-batch base offsets that simdgroup_load's ld/transpose flag can't carry.
+  // For both, stage each 8x8 sub-tile through threadgroup float (a cooperative
+  // scalar load widens bf16->float and reads any strided/permuted view via the
+  // operand stride coeffs), then MMA uniform <float> fragments.  The plain 2-D
+  // same-dtype matmul keeps the direct simdgroup_load (byte-identical).  Only
+  // the both-GLOBAL parallel dispatch (one simdgroup / threadgroup) is eligible
+  // for staging -- its threadgroup scratch is owned by exactly this simdgroup.
+  int need_stage = (is_batched || strcmp(a_el, b_el) != 0)
+                   && parallel_tc && m_par && n_par;
   fputs("/* TC simdgroup_matrix matmul */\n", fp);
+  if (need_stage) {
+    // Per-element source strides for the 8x8 stage: A[m+i, k0+j] =
+    // base_A + i*a_m + j*a_k; B[k0+i, n+j] = base_B + i*b_k + j*b_n.  The
+    // base address (rmu_emit_term) carries the batch offset + current m/n/k0.
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("threadgroup float _As[64];\n", fp);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("threadgroup float _Bs[64];\n", fp);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("simdgroup_matrix<float, 8, 8> _a_mat;\n", fp);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("simdgroup_matrix<float, 8, 8> _b_mat;\n", fp);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("simdgroup_matrix<float, 8, 8> _c_mat = simdgroup_matrix<float, 8, 8>(0);\n", fp);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
+            red_axis, red_axis, k_extent, red_axis);
+    // base addresses for the current (m, n, k0, batch).
+    for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+    fprintf(fp, "uint _ab = ");
+    rmu_emit_term(addr_a, fp);
+    fputs(";\n", fp);
+    for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+    fprintf(fp, "uint _bb = ");
+    rmu_emit_term(addr_b, fp);
+    fputs(";\n", fp);
+    // Cooperative stage: 32 threads fill 64 elements (2 each), row-major.
+    for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+    fputs("for (uint _e = thread_index_in_simdgroup; _e < 64u; _e += 32u) {\n", fp);
+    for (u32 d = 0; d < body_depth + 2; d++) fputs("  ", fp);
+    fputs("uint _i = _e / 8u, _j = _e % 8u;\n", fp);
+    for (u32 d = 0; d < body_depth + 2; d++) fputs("  ", fp);
+    fprintf(fp, "_As[_e] = (float)%s[_ab + _i*%lldu + _j*%lldu];\n",
+            rmu_buf_name(buf_a), (long long)a_m, (long long)a_k);
+    for (u32 d = 0; d < body_depth + 2; d++) fputs("  ", fp);
+    fprintf(fp, "_Bs[_e] = (float)%s[_bb + _i*%lldu + _j*%lldu];\n",
+            rmu_buf_name(buf_b), (long long)b_k, (long long)b_n);
+    for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+    for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+    fputs("simdgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+    for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+    fputs("simdgroup_load(_a_mat, _As, 8);\n", fp);
+    for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+    fputs("simdgroup_load(_b_mat, _Bs, 8);\n", fp);
+    for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+    fputs("simdgroup_multiply_accumulate(_c_mat, _a_mat, _b_mat, _c_mat);\n", fp);
+    for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+    fputs("simdgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  } else {
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "simdgroup_matrix<%s, 8, 8> _a_mat;\n", a_el);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
@@ -2666,6 +2800,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   fputs("simdgroup_multiply_accumulate(_c_mat, _a_mat, _b_mat, _c_mat);\n", fp);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fputs("}\n", fp);
+  }
   // Store the f32 accumulator.  f32 output: direct simdgroup_store.  bf16
   // output (`device bfloat*`): simdgroup_store has no f32->bf16 widening and
   // there is no <float>-><bfloat> matrix cast, so stage the 8x8 tile through

@@ -165,6 +165,26 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
       if (term_tag(v) == TAG_UOP && term_ext(v) == UOP_OPT
           && uop_opt_kind(v) == UOP_OPT_TC) tc_template = 1;
     }
+    // TRUE batched gemm (attention's mhaBmm): the value is OPT(_, TC, 0)
+    // wrapped and the batch/M/N axes are GLOBAL, but uop_dag_classify_matmul_-
+    // shape rejects the 3-range-per-operand shape, so the 2-D branches below
+    // bail.  Size the grid directly: batch * (M/8) * (N/8) threadgroups, 32
+    // threads each (one simdgroup per (batch, 8x8 tile)) -- mirrors the
+    // renderer's is_batched parallel_tc layout exactly.  The batch axis is
+    // NOT divided by 8 (it is the gemm-index dim, not a tile dim).
+    if (tc_template) {
+      u32 b_ax, b_ext, m_ax, m_ext, n_ax, n_ext, k_ext;
+      if (uop_classify_batched_matmul(sroot, &b_ax, &b_ext, &m_ax, &m_ext,
+                                      &n_ax, &n_ext, &k_ext)
+          && (m_ext % 8u) == 0 && (n_ext % 8u) == 0 && b_ext >= 1) {
+        u64 ntg = (u64)b_ext * (u64)(m_ext / 8u) * (u64)(n_ext / 8u);
+        if (ntg > 0 && ntg <= 0xFFFFFFFFu) {
+          if (groups_x  != NULL) *groups_x  = (u32)ntg;
+          if (threads_x != NULL) *threads_x = 32u;
+          return 1;
+        }
+      }
+    }
     // Parallel TC: the simdgroup_matrix template binds each GLOBAL output
     // axis to the threadgroup grid, one simdgroup (32 threads) per 8x8
     // output tile (render_uop.c rmu_emit_matmul_tc parallel_tc branch).
@@ -330,6 +350,15 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // tile, so there is no multi-simdgroup write race.  Ragged shapes
   // (M%8 or N%8 != 0) fall back to the guarded path automatically.
   Term store_root = uop_recognise_tc_parallel(cached_root);
+  // TRUE batched matmul (attention's mhaBmm): the 2-D recogniser above
+  // rejects the 3-range-per-operand shape and returns the root unchanged,
+  // so try the batched recogniser next.  It wraps OPT(_, TC, 0) + stamps
+  // batch/M/N GLOBAL, and rmu_emit_matmul_tc emits one simdgroup per
+  // (batch, 8x8 output tile).  No-op (returns input) for every non-batched
+  // kernel, so the 2-D path stays byte-identical.
+  if (store_root == cached_root) {
+    store_root = uop_recognise_batched_tc_parallel(store_root);
+  }
   // F4: same for conv2d_flat -- installs UOP_OPT(_, CONV, 0) on
   // STORE roots whose REDUCE body has IDIV/IMOD-decomposed addresses
   // so render_uop's rmu_emit_conv template fires.  No-op when the

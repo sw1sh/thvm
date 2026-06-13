@@ -51,6 +51,20 @@ static UPat const rec_tc_store_kids[3] = {
 };
 static UPat const rec_tc_store = { UOP_STORE,   3,    0, -1, rec_tc_store_kids, NULL };
 
+// Peel a single UOP_CAST/BITCAST wrapper to reach an underlying INDEX_E.
+// A bf16-input gemm accumulating in f32 wraps each operand as
+// CAST(INDEX_E(bf16_buf)); the matmul recognisers want the INDEX_E so the
+// 3-range / 2-range structural classification can read the addresses.
+static Term rec_tc_peel_cast(Term t) {
+  if (term_tag(t) != TAG_UOP) return t;
+  u32 op = term_ext(t);
+  if (op == UOP_CAST || op == UOP_BITCAST) {
+    Term src = heap_read(term_val(t) + 0);
+    if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_INDEX_E) return src;
+  }
+  return t;
+}
+
 // Count distinct UOP_RANGE axis_ids reachable from `t` through the
 // integer-binary / iwhere index expressions.  Used by the matmul
 // classifier to reject shapes whose addresses reference more than 2
@@ -366,6 +380,161 @@ fn Term uop_recognise_tc_parallel(Term root) {
   tc = uop_dag_apply_global(tc, m_axis);
   tc = uop_dag_apply_global(tc, n_axis);
   return tc;
+}
+
+// === TRUE batched-matmul recogniser (batch axis in A, B AND output) ======
+//
+// The 2-D matmul recogniser above rejects the batched gemm: each operand
+// touches THREE distinct ranges ({batch,M,K} for A, {batch,K,N} for B), so
+// the n_a==2/n_b==2 gate fails.  This classifier accepts that shape.  The
+// canonical instance is THeadAttention's mhaBmm -- a single SUM reduce over
+// K, with the batch (head) axis shared by both operands and the output.
+// Operands may be PERMUTED views (the attention heads are {2,1,3}/{1,3,2}
+// transposes), so M/N/K/batch are identified purely by which addresses each
+// range appears in -- never by a canonical contiguous-layout assumption.
+//
+// Returns 1 + fills the four axis ids/extents on a match; 0 otherwise.  K is
+// the (single) reduce axis; batch is the non-reduce range shared by A and B;
+// M is the non-reduce range unique to A; N the one unique to B.  IDIV/IMOD
+// in either address (a conv/view-decomposed lift) rejects.
+fn int uop_classify_batched_matmul(Term root,
+                                   u32 *out_batch_axis, u32 *out_batch_extent,
+                                   u32 *out_m_axis, u32 *out_m_extent,
+                                   u32 *out_n_axis, u32 *out_n_extent,
+                                   u32 *out_k_extent) {
+  if (out_batch_axis  != NULL) *out_batch_axis  = 0xFFFFFFFFu;
+  if (out_m_axis      != NULL) *out_m_axis      = 0xFFFFFFFFu;
+  if (out_n_axis      != NULL) *out_n_axis      = 0xFFFFFFFFu;
+  if (out_batch_extent!= NULL) *out_batch_extent= 0;
+  if (out_m_extent    != NULL) *out_m_extent    = 0;
+  if (out_n_extent    != NULL) *out_n_extent    = 0;
+  if (out_k_extent    != NULL) *out_k_extent    = 0;
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
+
+  // Structural walk (not upat): the batched-gemm operands may be CAST(INDEX_E)
+  // (a bf16->f32 widening into the f32 accumulator), which the bare-INDEX_E
+  // UPat would reject.  Read STORE->REDUCE->MUL->[INDEX_E|CAST(INDEX_E)] x2.
+  u64 sloc = term_val(root);
+  Term reduce = heap_read(sloc + 2);
+  // Peel a leading OPT(_, TC, _) wrapper: hand_opts (and the producer-side
+  // recogniser) wrap the REDUCE with the TC marker, but the dispatch-shape
+  // path re-classifies the already-wrapped root.  Mirror udg_peel_tc_opt.
+  while (term_tag(reduce) == TAG_UOP && term_ext(reduce) == UOP_OPT
+         && uop_opt_kind(reduce) == UOP_OPT_TC) {
+    reduce = uop_opt_target(reduce);
+  }
+  if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
+  if (uop_reduce_kind(reduce) != REDUCE_SUM) return 0;
+  if (uop_reduce_n_axes(reduce) != 1) return 0;     // single K reduce
+  u32 red_axis = uop_reduce_axis(reduce, 0);
+
+  Term mul = uop_reduce_src(reduce);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  Term idx_a = rec_tc_peel_cast(heap_read(term_val(mul) + 0));
+  Term idx_b = rec_tc_peel_cast(heap_read(term_val(mul) + 1));
+  if (term_tag(idx_a) != TAG_UOP || term_ext(idx_a) != UOP_INDEX_E) return 0;
+  if (term_tag(idx_b) != TAG_UOP || term_ext(idx_b) != UOP_INDEX_E) return 0;
+  Term buf_a   = heap_read(term_val(idx_a) + 0);
+  Term buf_b   = heap_read(term_val(idx_b) + 0);
+  if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) return 0;
+  if (term_tag(buf_b) != TAG_UOP || term_ext(buf_b) != UOP_BUFFER) return 0;
+  if (term_val(buf_a) == term_val(buf_b)) return 0;
+
+  Term addr_a  = heap_read(term_val(idx_a) + 1);
+  Term addr_b  = heap_read(term_val(idx_b) + 1);
+  Term addr_o  = heap_read(sloc + 1);
+  if (rec_tc_addr_has_divmod(addr_a, 0)) return 0;
+  if (rec_tc_addr_has_divmod(addr_b, 0)) return 0;
+  if (rec_tc_addr_has_divmod(addr_o, 0)) return 0;
+
+  // A's ranges are {batch, M, K}; B's are {batch, K, N}; output's
+  // {batch, M, N}.  Each operand touches exactly 3 distinct ranges.
+  u32 seen_a[8] = {0}, seen_b[8] = {0}, seen_o[8] = {0};
+  u32 n_a = rec_tc_count_distinct_ranges(addr_a, seen_a, 8, 0, 0);
+  u32 n_b = rec_tc_count_distinct_ranges(addr_b, seen_b, 8, 0, 0);
+  u32 n_o = rec_tc_count_distinct_ranges(addr_o, seen_o, 8, 0, 0);
+  if (n_a != 3 || n_b != 3 || n_o != 3) return 0;
+
+  // Classify each output range by membership: in A only -> M, in B only
+  // -> N, in BOTH -> batch.  K must be absent from the output.
+  u32 m_axis = 0xFFFFFFFFu, n_axis = 0xFFFFFFFFu, batch_axis = 0xFFFFFFFFu;
+  for (u32 i = 0; i < n_o; i++) {
+    u32 aid = seen_o[i];
+    if (aid == red_axis) return 0;        // K never appears in the output
+    int in_a = 0, in_b = 0;
+    for (u32 j = 0; j < n_a; j++) if (seen_a[j] == aid) in_a = 1;
+    for (u32 j = 0; j < n_b; j++) if (seen_b[j] == aid) in_b = 1;
+    if      (in_a && !in_b) { if (m_axis != 0xFFFFFFFFu) return 0; m_axis = aid; }
+    else if (in_b && !in_a) { if (n_axis != 0xFFFFFFFFu) return 0; n_axis = aid; }
+    else if (in_a &&  in_b) { if (batch_axis != 0xFFFFFFFFu) return 0; batch_axis = aid; }
+    else return 0;
+  }
+  if (m_axis == 0xFFFFFFFFu || n_axis == 0xFFFFFFFFu
+      || batch_axis == 0xFFFFFFFFu) return 0;
+  // A's three ranges must be exactly {batch, M, K}; B's {batch, N, K}.
+  for (u32 j = 0; j < n_a; j++) {
+    u32 aid = seen_a[j];
+    if (aid != batch_axis && aid != m_axis && aid != red_axis) return 0;
+  }
+  for (u32 j = 0; j < n_b; j++) {
+    u32 aid = seen_b[j];
+    if (aid != batch_axis && aid != n_axis && aid != red_axis) return 0;
+  }
+
+  u32 k_ext = rec_tc_find_range_extent(addr_a, red_axis, 0);
+  if (k_ext == 0) k_ext = rec_tc_find_range_extent(addr_b, red_axis, 0);
+  u32 m_ext = rec_tc_find_range_extent(addr_a, m_axis, 0);
+  u32 n_ext = rec_tc_find_range_extent(addr_b, n_axis, 0);
+  u32 b_ext = rec_tc_find_range_extent(addr_o, batch_axis, 0);
+  if (k_ext == 0 || m_ext == 0 || n_ext == 0 || b_ext < 2) return 0;
+
+  if (out_batch_axis   != NULL) *out_batch_axis   = batch_axis;
+  if (out_batch_extent != NULL) *out_batch_extent = b_ext;
+  if (out_m_axis       != NULL) *out_m_axis       = m_axis;
+  if (out_m_extent     != NULL) *out_m_extent     = m_ext;
+  if (out_n_axis       != NULL) *out_n_axis       = n_axis;
+  if (out_n_extent     != NULL) *out_n_extent     = n_ext;
+  if (out_k_extent     != NULL) *out_k_extent     = k_ext;
+  return 1;
+}
+
+// Producer-side parallel-TC wrap for the TRUE batched matmul.  When M,N,K
+// are all multiples of 8, wraps the REDUCE with OPT(_, TC, 0) and re-stamps
+// the batch, M and N output RANGE leaves KAX_GLOBAL.  render_uop's
+// rmu_emit_matmul_tc then takes the batched parallel branch (one simdgroup
+// per (batch, 8x8-tile)) and cg_tile_metal_dispatch_shape launches
+// batch * (M/8) * (N/8) threadgroups.  Returns the input root unchanged on
+// any non-batched-matmul / ragged shape (the scalar reduce stays correct).
+fn Term uop_recognise_batched_tc_parallel(Term root) {
+  u32 batch_axis, batch_extent, m_axis, m_extent, n_axis, n_extent, k_extent;
+  if (!uop_classify_batched_matmul(root, &batch_axis, &batch_extent,
+                                   &m_axis, &m_extent, &n_axis, &n_extent,
+                                   &k_extent)) {
+    return root;
+  }
+  if ((m_extent % 8u) != 0 || (n_extent % 8u) != 0
+      || (k_extent % 8u) != 0) {
+    return root;   // ragged: the scalar reduce path stays.
+  }
+  // If hand_opts already wrapped this REDUCE in OPT(_, TC, _) and stamped the
+  // batch/M/N axes GLOBAL, do NOT re-wrap (a second OPT layer would break
+  // rmu_detect_matmul_tc's OPT->REDUCE check).  This producer is the backup
+  // for synthetic KernelEntries that skip hand_opts (e.g. the py bridge).
+  u64 sloc = term_val(root);
+  Term value = heap_read(sloc + 2);
+  if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
+      && uop_opt_kind(value) == UOP_OPT_TC) {
+    return root;
+  }
+  // Wrap the REDUCE with the TC marker, then stamp batch/M/N GLOBAL.
+  Term buf_out  = heap_read(sloc + 0);
+  Term addr_out = heap_read(sloc + 1);
+  Term tc       = uop_opt(value, UOP_OPT_TC, 0);
+  Term out      = uop_store(buf_out, addr_out, tc);
+  out = uop_dag_apply_global(out, batch_axis);
+  out = uop_dag_apply_global(out, m_axis);
+  out = uop_dag_apply_global(out, n_axis);
+  return out;
 }
 
 // Structural classifier for the DOT shape.
