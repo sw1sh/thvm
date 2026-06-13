@@ -1034,6 +1034,51 @@ static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t) {
   }
 }
 
+// WM IR-victim drain-order key for the fact with birth trace id `trace`,
+// captured BEFORE the victim is removed from the wmo tree.
+//
+// WM's IR_PufferAuslesen (Interreduktion.c:391) drains the FIFO REPuffer
+// that IR_InterreduktionLinks filled by running GMInterred (equation
+// victims) THEN RMLinksInterred (rule victims), each via
+// RE_forRegelnRobust = BK_forRegelnRobust over Baum.ErstesBlatt ->
+// BK_NachfBlatt -- the discrimination-tree LEAF LIST in order, the rule
+// chain newest-first within a leaf.  So a stable sort of the buffered
+// victims by (equation-before-rule, leaf-list rank) reproduces WM's
+// re-queue order, hence the late FIFO ages (w2 = ++CPNr) of the
+// re-entered equations.
+//
+// Key layout: bit 31 = 1 for rule victims (tree 0), 0 for equation
+// victims (tree 1) -- equations sort first; low bits = the victim's
+// distinguished-face (face 0) leaf-list rank in its tree.  Removals of
+// EARLIER-captured victims only delete leaves (never reorder), so ranks
+// captured at successive push moments preserve the pass-start relative
+// order between any two surviving victims.
+static u32 atp_wmo_victim_drain_key(AtpState *s, u32 trace) {
+  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+  if (w == NULL) return 0x7fffffffu;
+  // Find which tree holds this trace's distinguished (face 0) entry.
+  u8 tree = 0u;
+  u8 found_tree = 0u;
+  for (u32 r = 0; r < w->n_reg; r++) {
+    if (w->reg[r].trace == trace && w->reg[r].face == 0u) {
+      tree = w->reg[r].tree;
+      found_tree = 1u;
+      break;
+    }
+  }
+  if (!found_tree) return 0x7fffffffu;
+  u32 rank = 0;
+  for (WmoLeaf *l = w->tree[tree].ll_head; l != NULL; l = l->ll_next) {
+    for (u32 c = 0; c < l->n_chain; c++) {
+      if (l->chain[c].trace == trace && l->chain[c].face == 0u) {
+        return ((tree == 0u ? 1u : 0u) << 31) | (rank & 0x7fffffffu);
+      }
+    }
+    rank++;
+  }
+  return 0x7fffffffu;
+}
+
 // Remove every registered face of the fact with birth trace id `trace`.
 static void atp_wmo_remove_trace(AtpState *s, u32 trace) {
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;

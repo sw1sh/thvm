@@ -2071,6 +2071,80 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-ir-victim-drain-leaf-order");
+  {
+    // IR-victim re-queue order (WM IR_PufferAuslesen,
+    // Interreduktion.c:391): RMLinksInterred buffers each demoted rule via
+    // RE_forRegelnRobust = BK_forRegelnRobust over Baum.ErstesBlatt (the
+    // rule-tree LEAF LIST in order), the FIFO REPuffer drains in that same
+    // order -- so two victims re-enter the queue (and get their late FIFO
+    // ages w2 = ++CPNr) in discrimination-tree leaf order, NOT thvm's
+    // slot-scan order.  This is the AbsorptionOrAnd @118 commutative-mirror
+    // argument-order tie: WM demotes the two commutative-mirror rules in
+    // leaf order; thvm's interreduce loop visited slots ascending, which
+    // can reverse them.  Set up a d2-LHS rule (trace 500, leaf-list HEAD of
+    // its class) and a d4-LHS rule (trace 501, later in the list).  Push
+    // them as IR victims in REVERSE leaf order (501 then 500); the drain
+    // sort must restore leaf order (500 before 501).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    s->use_wm_demote = 1u;
+    s->lhs[0] = mk_i(mk_a());                       // d2
+    s->rhs[0] = mk_a();
+    s->r_orient[0] = 1u; s->r_trace[0] = 500u; s->n_rules++;
+    atp_wmo_insert_fact(s, 0u);
+    s->lhs[1] = mk_i(mk_i(mk_i(mk_a())));           // d4
+    s->rhs[1] = mk_a();
+    s->r_orient[1] = 1u; s->r_trace[1] = 501u; s->n_rules++;
+    atp_wmo_insert_fact(s, 1u);
+    // Leaf list: the d2 leaf (500) precedes the d4 leaf (501).
+    u32 key500 = atp_wmo_victim_drain_key(s, 500u);
+    u32 key501 = atp_wmo_victim_drain_key(s, 501u);
+    CHECK(key500 < key501);
+    // Both are rules (tree 0) -> bit 31 set on each.
+    CHECK_EQ(key500 >> 31, 1u);
+    CHECK_EQ(key501 >> 31, 1u);
+    // Buffer the victims in REVERSE leaf order (501 first), then sort.
+    atp_irv_push(s, s->lhs[1], s->rhs[1], s->r_trace[1], key501);
+    atp_irv_push(s, s->lhs[0], s->rhs[0], s->r_trace[0], key500);
+    CHECK_EQ(s->n_irv, 2u);
+    atp_irv_sort_wm_order(s);
+    // After the sort the lower-keyed (leaf-earlier, trace 500) victim
+    // drains first -> smaller cp_seq / FIFO age, matching WM.
+    CHECK_EQ(s->irv_wmo_key[0], key500);
+    CHECK_EQ(s->irv_wmo_key[1], key501);
+    s->n_irv = 0u;
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-emission-order-ir-victim-equation-before-rule");
+  {
+    // WM IR_InterreduktionLinks runs GMInterred (equation victims) BEFORE
+    // RMLinksInterred (rule victims), both into one FIFO puffer -- so an
+    // equation victim drains before a rule victim regardless of slot.  The
+    // drain key sets bit 31 for rules (tree 0) and clears it for equations
+    // (tree 1), so equation keys sort first.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    // slot 0: an orientable rule (lives in the rule tree, tree 0).
+    s->lhs[0] = mk_i(mk_a());
+    s->rhs[0] = mk_a();
+    s->r_orient[0] = 1u; s->r_trace[0] = 600u; s->n_rules++;
+    atp_wmo_insert_fact(s, 0u);
+    // slot 1: an unorientable equation (lives in the equation tree, tree
+    // 1).  Asymmetric so it is non-mono (distinguished face = stored lhs).
+    s->lhs[1] = mk_f(mk_i(mk_a()), mk_a());
+    s->rhs[1] = mk_f(mk_a(), mk_i(mk_a()));
+    s->r_orient[1] = 0u; s->r_trace[1] = 601u; s->n_rules++; s->n_unorient++;
+    atp_wmo_insert_fact(s, 1u);
+    u32 key_rule = atp_wmo_victim_drain_key(s, 600u);
+    u32 key_eq   = atp_wmo_victim_drain_key(s, 601u);
+    CHECK_EQ(key_rule >> 31, 1u);   // rule tree -> bit 31 set
+    CHECK_EQ(key_eq   >> 31, 0u);   // equation tree -> bit 31 clear
+    CHECK(key_eq < key_rule);       // equation victim drains first
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-removal-collapse-exit-head");
   {
     // Removal-avalanche exit-order corner (BO_ObjektEntfernen Schrumpfen,

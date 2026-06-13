@@ -452,6 +452,7 @@ static void atp_wmo_free(struct AtpWmOrder *w);
 static void atp_wmo_insert_fact(AtpState *s, u32 slot);
 static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived);
 static void atp_wmo_remove_trace(AtpState *s, u32 trace);
+static u32  atp_wmo_victim_drain_key(AtpState *s, u32 trace);
 static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t);
 static u64  atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
                          const CriticalPair *cp);
@@ -4477,6 +4478,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->irv_lhs);
   free(s->irv_rhs);
   free(s->irv_parent);
+  free(s->irv_wmo_key);
   // ENIGMA training-data arrays (NULL unless recording was enabled).
   free(s->cp_feat_rows);
   free(s->cp_feat_trace);
@@ -8661,22 +8663,26 @@ fn void thvm_atp_set_use_wm_emission_order(AtpState *s, u8 on) {
 // `GMInterred` / `RMLinksInterred` fill per victim (Interreduktion.c:
 // 280-326) for `IR_PufferAuslesen` to drain.  Drained here by
 // atp_wm_demote_drain after CP generation.
-static void atp_irv_push(AtpState *s, Term lhs, Term rhs, u32 parent) {
+static void atp_irv_push(AtpState *s, Term lhs, Term rhs, u32 parent,
+                         u32 wmo_key) {
   if (s->n_irv == s->irv_cap) {
     u32 cap = s->irv_cap ? s->irv_cap * 2u : 8u;
     Term *nl = (Term *)realloc(s->irv_lhs,    cap * sizeof(Term));
     Term *nr = (Term *)realloc(s->irv_rhs,    cap * sizeof(Term));
     u32  *np = (u32  *)realloc(s->irv_parent, cap * sizeof(u32));
-    if (nl == NULL || nr == NULL || np == NULL) {
+    u32  *nk = (u32  *)realloc(s->irv_wmo_key, cap * sizeof(u32));
+    if (nl == NULL || nr == NULL || np == NULL || nk == NULL) {
       fprintf(stderr, "atp_irv_push: realloc to %u victims failed\n", cap);
       exit(1);
     }
     s->irv_lhs = nl; s->irv_rhs = nr; s->irv_parent = np;
+    s->irv_wmo_key = nk;
     s->irv_cap = cap;
   }
-  s->irv_lhs[s->n_irv]    = lhs;
-  s->irv_rhs[s->n_irv]    = rhs;
-  s->irv_parent[s->n_irv] = parent;
+  s->irv_lhs[s->n_irv]     = lhs;
+  s->irv_rhs[s->n_irv]     = rhs;
+  s->irv_parent[s->n_irv]  = parent;
+  s->irv_wmo_key[s->n_irv] = wmo_key;
   s->n_irv++;
 }
 
@@ -11651,7 +11657,11 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // (WM KPV_IROpferBehandeln, KPVerwaltung.c:517-518 copies the
       // untouched pair).
       if (s->use_wm_demote) {
-        atp_irv_push(s, old_lhs, old_rhs, simplify_parent);
+        // Capture the WM drain-order key while the victim is still in the
+        // wmo tree (the atp_wmo_remove_trace below evicts it).
+        u32 wmo_key = s->use_wm_emission_order
+            ? atp_wmo_victim_drain_key(s, s->r_trace[i]) : 0u;
+        atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
       } else {
         atp_add_equation_simplified(s, reduced, old_rhs, simplify_parent);
       }
@@ -11902,7 +11912,9 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         // instead and drained after CP generation (WM IR buffer).
         u32 simplify_parent = s->r_trace[j];
         if (s->use_wm_demote) {
-          atp_irv_push(s, old_lhs, old_rhs, simplify_parent);
+          u32 wmo_key = s->use_wm_emission_order
+              ? atp_wmo_victim_drain_key(s, s->r_trace[j]) : 0u;
+          atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
         } else {
           atp_add_equation_simplified(s, reduced_lhs, reduced,
                                       simplify_parent);
@@ -11949,7 +11961,9 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         // enter the PU_REPuffer untouched, Interreduktion.c:290, and
         // drain after CP generation via IR_PufferAuslesen).
         if (s->use_wm_demote) {
-          atp_irv_push(s, old_lhs, old_rhs, simplify_parent);
+          u32 wmo_key = s->use_wm_emission_order
+              ? atp_wmo_victim_drain_key(s, s->r_trace[j]) : 0u;
+          atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
         } else {
           atp_add_equation_simplified(s, old_lhs, reduced, simplify_parent);
         }
@@ -12055,9 +12069,32 @@ static Term atp_rules_only_normalize(AtpState *s, Term t, u32 cap) {
 // (CLAS/NewClassification.c:300-325); the requeued CP's otherParent is
 // NULL there, so like thvm's TRACE_SIMPLIFY entries it is never
 // orphan-killed.
+// Stable insertion sort of the IR-victim buffer by WM drain-order key.
+// (n_irv is tiny -- at most a handful of victims per interreduction pass.)
+static void atp_irv_sort_wm_order(AtpState *s) {
+  for (u32 a = 1; a < s->n_irv; a++) {
+    Term l = s->irv_lhs[a], r = s->irv_rhs[a];
+    u32  p = s->irv_parent[a], k = s->irv_wmo_key[a];
+    u32  b = a;
+    while (b > 0u && s->irv_wmo_key[b - 1u] > k) {
+      s->irv_lhs[b]     = s->irv_lhs[b - 1u];
+      s->irv_rhs[b]     = s->irv_rhs[b - 1u];
+      s->irv_parent[b]  = s->irv_parent[b - 1u];
+      s->irv_wmo_key[b] = s->irv_wmo_key[b - 1u];
+      b--;
+    }
+    s->irv_lhs[b] = l; s->irv_rhs[b] = r;
+    s->irv_parent[b] = p; s->irv_wmo_key[b] = k;
+  }
+}
+
 static void atp_wm_demote_drain(AtpState *s) {
   const u32 WM_BEHANDELN_GATE = 50u;   // KPVerwaltung.c:437
   const u32 NORM_CAP = 64u;            // matches the pop-normalize cap
+  // WM drains the IR buffer in discrimination-tree leaf-list order
+  // (equation victims before rule victims), not thvm's slot-scan order;
+  // reorder to match before stamping fresh FIFO ages.
+  if (s->use_wm_emission_order) atp_irv_sort_wm_order(s);
   for (u32 v = 0; v < s->n_irv; v++) {
     Term l      = s->irv_lhs[v];
     Term r      = s->irv_rhs[v];
