@@ -1834,6 +1834,93 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-removal-collapse-exit-head");
+  {
+    // Removal-avalanche exit-order corner (BO_ObjektEntfernen Schrumpfen,
+    // DSBaumOperationen.c :991-1101).  When a one-way branch collapses to
+    // a single surviving leaf, that leaf re-hangs at the collapse-target
+    // node `up` (:1083) and the short jump reaching it is RE-ISSUED, so it
+    // PREPENDS to up's outgoing exit list (RumpfSprungeintragSetzen
+    // head-insert :293-295); at every other node the freed-node jump
+    // rewires in place (AlleEingehendenSpruengeUmsetzen :814).  This was
+    // the residual corner that left mc_ioi CP-emission at 38/41 batches.
+    //
+    // Build the f-node's exit list [R7, R9, S-subtree-jump] (the S jump is
+    // OLD: inserted first, pushed down as R7/R9 prepend ahead of it):
+    //   S1 = f(f(a,a), i(a))   S2 = f(f(a,a), i(e))   (collapse to S1)
+    //   R7 = f(i(f(a,a)), a)   R9 = f(i(i(a)), a)     (older f-node exits)
+    // Removing S2 collapses the f(a,a) jump-target subtree to S1; the
+    // f-node is `up`, so S1's rewired jump must move to the exit-list HEAD:
+    //   [R7, R9, ->S1] -> [S1, R7, R9].
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    Term faa = mk_f(mk_a(), mk_a());
+    Term lhss[4] = {
+      mk_f(mk_f(mk_a(), mk_a()), mk_i(mk_a())),   // S1
+      mk_f(mk_f(mk_a(), mk_a()), mk_i(mk_e())),   // S2
+      mk_f(mk_i(mk_f(mk_a(), mk_a())), mk_a()),   // R7
+      mk_f(mk_i(mk_i(mk_a())), mk_a()),           // R9
+    };
+    (void)faa;
+    for (u32 k = 0; k < 4u; k++) {
+      s->lhs[k] = lhss[k];
+      s->rhs[k] = mk_a();
+      s->r_orient[k] = 1u;
+      s->r_trace[k] = 700u + k;   // S1=700 S2=701 R7=702 R9=703
+      s->n_rules++;
+      atp_wmo_insert_fact(s, k);
+    }
+    {
+      AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+      // navigate to the f-node: root kid keyed by the lhs cell 0 (f).
+      WmoCell cells[WMO_MAX_CELLS];
+      u32 n = wmo_face_cells(lhss[0], cells, WMO_MAX_CELLS);
+      CHECK(n > 0u);
+      u8 is_leaf = 0;
+      WmoNode *fnode =
+        (WmoNode *)wmo_kid_get(w->tree[0].root, &cells[0], &is_leaf);
+      CHECK(fnode != NULL);
+      CHECK_EQ(is_leaf, 0u);
+      // before removal the S-subtree jump is the LAST exit (head = R9, R7
+      // newest-first; the OLD S jump sits at the tail).
+      u32 n_exits = 0;
+      for (WmoEntry *e = fnode->exits; e != NULL; e = e->next) n_exits++;
+      CHECK(n_exits >= 3u);
+      // remove S2 -> collapse; S1's rewired jump must head the list.
+      atp_wmo_remove_trace(s, 701u);
+      WmoNode *fnode2 =
+        (WmoNode *)wmo_kid_get(w->tree[0].root, &cells[0], &is_leaf);
+      CHECK(fnode2 != NULL);
+      // the head exit must now target S1's leaf (trace 700).
+      WmoEntry *head = fnode2->exits;
+      CHECK(head != NULL);
+      CHECK_EQ(head->ziel_leaf, 1u);
+      WmoLeaf *hl = (WmoLeaf *)head->ziel;
+      u8 found_s1 = 0;
+      for (u32 c = 0; c < hl->n_chain; c++) {
+        if (hl->chain[c].trace == 700u) found_s1 = 1u;
+      }
+      CHECK_EQ(found_s1, 1u);
+      // R7 (702) and R9 (703) follow, in their original relative order.
+      u32 seen_r7 = 0xffffffffu, seen_r9 = 0xffffffffu, idx = 0;
+      for (WmoEntry *e = fnode2->exits; e != NULL; e = e->next, idx++) {
+        if (e->ziel_leaf) {
+          WmoLeaf *l = (WmoLeaf *)e->ziel;
+          for (u32 c = 0; c < l->n_chain; c++) {
+            if (l->chain[c].trace == 702u) seen_r7 = idx;
+            if (l->chain[c].trace == 703u) seen_r9 = idx;
+          }
+        }
+      }
+      CHECK(seen_r7 != 0xffffffffu);
+      CHECK(seen_r9 != 0xffffffffu);
+      CHECK(seen_r7 < seen_r9);   // R7 before R9 (head-prepend kept it)
+      CHECK_EQ(idx >= 3u ? 1u : 0u, 1u);
+      CHECK(seen_r7 > 0u);        // S1 is strictly ahead of R7
+    }
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-intake-canonical-sort-pops-first");
   {
     // WM loader intake (wm_intake.c): the initial axiom set pops in

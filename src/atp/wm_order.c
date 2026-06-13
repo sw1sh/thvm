@@ -74,11 +74,16 @@
 //    exit-list position preserved (AlleEingehendenSpruengeUmsetzen
 //    :808-822).
 //
-// Residual (documented, bounded by the trace validation): after a
-// multi-rule removal avalanche, the relative exit-list order of an
-// ancient collapse-surviving entry vs later parallels can differ from
-// WM (5 of ~1690 CPs across 3 of 41 batches on the validation trace;
-// none affected the selection sequence).
+// Removal-exit order (BO_ObjektEntfernen Schrumpfen): when a multi-rule
+// removal avalanche collapses a one-way branch to a single surviving
+// leaf, that leaf re-hangs at the collapse-target node `up` (:1083) and
+// the short jump reaching it is RE-ISSUED, so it heads up's outgoing
+// exit list (RumpfSprungeintragSetzen :293-295); every other freed-node
+// jump rewires in place (:814).  A later split that parallels an entry
+// then lands its parallel AFTER that re-headed jump, matching WM's
+// arrival order.  Validated 41/41 insertion batches byte-exact on the
+// full wmcli -a 4 McCune-II trace (was 38/41; the 3 residual batches
+// were exactly this corner).
 //
 // Identity: facts are tracked by their birth trace id (stable across
 // slot compaction).  A side registry records every face inserted per
@@ -371,12 +376,33 @@ static void wmo_kill_entries_to(WmoTree *t, void *target) {
   wmo_walk_entries(t->root, wmo_kill_entries_to_cb, &c);
 }
 
-typedef struct { void *from; void *to; u8 to_leaf; } WmoRewireCtx;
+typedef struct { void *from; void *to; u8 to_leaf; WmoNode *up; } WmoRewireCtx;
 
+// Rewire every exit that targeted a freed node onto the surviving sibling.
+// At the collapse-target node `up` (where the sibling re-hangs,
+// BO_ObjektEntfernen :1083) the short jump reaching the sibling is re-issued
+// for the re-hung leaf and PREPENDS to up's outgoing exit list per the
+// standard RumpfSprungeintragSetzen head-insert (DSBaumOperationen.c
+// :293-295); at every other node the freed-node-targeting jump is rewired in
+// place (AlleEingehendenSpruengeUmsetzen :814 preserves the outgoing-list
+// position).
 static void wmo_rewire_cb(WmoNode *n, void *raw) {
   WmoRewireCtx *c = (WmoRewireCtx *)raw;
-  for (WmoEntry *e = n->exits; e != NULL; e = e->next) {
-    if (e->ziel == c->from) { e->ziel = c->to; e->ziel_leaf = c->to_leaf; }
+  WmoEntry **slot = &n->exits;
+  while (*slot != NULL) {
+    WmoEntry *e = *slot;
+    if (e->ziel == c->from) {
+      e->ziel = c->to;
+      e->ziel_leaf = c->to_leaf;
+      if (n == c->up && e != n->exits) {
+        // move e to the head of n's exit list
+        *slot = e->next;
+        e->next = n->exits;
+        n->exits = e;
+        continue;   // *slot now points at the entry after the moved one
+      }
+    }
+    slot = &(*slot)->next;
   }
 }
 
@@ -692,9 +718,11 @@ static void wmo_tree_remove(WmoTree *t, const WmoCell *key, u32 key_len,
     sib->parent = up;
     wmo_kid_set(up, &sib->key[new_hang], sib, 1u);
     // exits of freed nodes die with the nodes; entries targeting freed
-    // nodes rewire to the sibling (position preserved)
+    // nodes rewire to the sibling -- position preserved everywhere except
+    // at `up`, where the re-issued short jump heads the exit list
+    // (see wmo_rewire_cb).
     for (u32 f = 0; f < n_freed; f++) {
-      WmoRewireCtx rc = { freed[f], sib, 1u };
+      WmoRewireCtx rc = { freed[f], sib, 1u, up };
       wmo_walk_entries(t->root, wmo_rewire_cb, &rc);
     }
     for (u32 f = 0; f < n_freed; f++) wmo_node_free_one(freed[f]);

@@ -267,9 +267,23 @@ class WmTrie:
                 for n in self._all_nodes():
                     n.exits = [e for e in n.exits
                                if id(e.start) not in freed_ids]
+                    rewired = []
                     for e in n.exits:
                         if id(e.ziel) in freed_ids:
                             e.ziel = sib
+                            rewired.append(e)
+                    # At the collapse-target node `up` (where the surviving
+                    # sibling re-hangs, BO_ObjektEntfernen :1083), the short
+                    # jump reaching `sib` is re-issued for the re-hung leaf
+                    # and prepends to up's outgoing exit list per the standard
+                    # RumpfSprungeintragSetzen head-insert (:293-295); at every
+                    # other node the freed-node-targeting jump is rewired in
+                    # place (AlleEingehendenSpruengeUmsetzen :814 keeps the
+                    # outgoing-list position).
+                    if n is up:
+                        for e in rewired:
+                            n.exits.remove(e)
+                            n.exits.insert(0, e)
         return True
 
     def _find_leaf(self, key, fact):
