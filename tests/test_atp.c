@@ -1856,6 +1856,52 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-self-root-face-flip");
+  {
+    // WM's self-root phases are classified by FACE, not by thvm's raw
+    // combo bits: F = l =? l (both WM-DISTINGUISHED faces), C = r =? l
+    // (mixed, stereo only), G = r =? r (both WM-REVERSE faces), where l/r
+    // are WM's distinguished/reverse sides (U1_KPsBildenZuGleichung
+    // F/C/G).  For a CP-derived unorientable equation whose WM-
+    // distinguished face is thvm's STORED RHS (dist_rhs=1), thvm's combo-0
+    // self-overlap (stored lhs x stored lhs) is WM's reverse self = G, and
+    // its combo-3 self-overlap (stored rhs x stored rhs) is WM's
+    // distinguished self = F -- the two SWAP.  Keying the self-root phase
+    // on raw combo (F=combo0, G=combo3) gives the reverse order and pushes
+    // the distinguished-face self-CP to a LATER FIFO age than the reverse
+    // one; on Boolean Absorption that mis-aged the and/or partner pair at
+    // selection (firstdiv 107).  The rank must instead key on the WM face
+    // (combo XOR dist_rhs).
+    //
+    // eq (asymmetric unorientable): lhs = i(f(a,a)) [reverse], rhs =
+    // f(a,i(a)) [WM-distinguished].
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    s->lhs[0] = mk_i(mk_f(mk_a(), mk_a()));
+    s->rhs[0] = mk_f(mk_a(), mk_i(mk_a()));
+    s->r_orient[0] = 0u; s->r_trace[0] = 500u; s->n_rules++; s->n_unorient++;
+    CHECK_EQ((u32)atp_eq_is_mono(s, 0u), 0u);
+    atp_wmo_insert_fact_ex(s, 0u, /*cp_derived=*/1u);
+    AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+    CHECK_EQ((u32)wmo_trace_dist_rhs(w, 500u), 1u);
+    // Synthetic self-root CPs (pos_len = 0).  The face-flip means:
+    //   combo 0 (thvm lhs x lhs)  -> WM G (reverse self)
+    //   combo 3 (thvm rhs x rhs)  -> WM F (distinguished self)
+    // so combo-3's key must be SMALLER (F = phase 2 < G = phase 6).
+    CriticalPair cp_self;
+    cp_self.lhs = s->lhs[0];
+    cp_self.rhs = s->rhs[0];
+    cp_self.peak = s->lhs[0];
+    cp_self.pos_len = 0u;
+    u64 key_combo0 = atp_wmo_rank(s, 0u, 0u, 0u, /*combo=*/0u, &cp_self);
+    u64 key_combo3 = atp_wmo_rank(s, 0u, 0u, 0u, /*combo=*/3u, &cp_self);
+    // phase lives in the top nibble (bits 58..61); F = 2, G = 6.
+    CHECK_EQ((u32)((key_combo3 >> 58) & 0xfu), 2u);   // combo 3 -> F
+    CHECK_EQ((u32)((key_combo0 >> 58) & 0xfu), 6u);   // combo 0 -> G
+    CHECK(key_combo3 < key_combo0);                    // F before G
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-tops-before-ett");
   {
     // Phase segmentation (U1_KPsBildenZuRegel: toplevel phase 2 before

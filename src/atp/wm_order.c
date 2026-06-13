@@ -1183,8 +1183,17 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
   u8 j_face_wm = j_face ^ j_dr;
   Term i_outer = i_face ? s->rhs[i] : s->lhs[i];
   if (i == f && j == f && cp->pos_len == 0u) {
-    // self roots: F (combo 0), C (combo 1), G (combo 3)
-    u32 phase = (combo == 0u) ? 2u : (combo == 1u ? 3u : 6u);
+    // self roots, classified by WM face (NOT raw thvm combo): F = l =? l
+    // (both WM-distinguished), C = r =? l (mixed, stereo only), G = r =? r
+    // (both WM-reverse).  When dist_rhs flips thvm's stored lhs onto WM's
+    // reverse face, thvm's combo-0 (stored lhs x stored lhs) is WM's G,
+    // and combo-3 (stored rhs x stored rhs) is WM's F -- the two swap.
+    // Keying on i_face_wm/j_face_wm (= thvm face XOR dist_rhs) gives the
+    // WM phase regardless of which thvm face carries the distinguished
+    // side.
+    u32 phase = (!i_face_wm && !j_face_wm) ? 2u           // F: l =? l
+              : (i_face_wm && j_face_wm)   ? 6u           // G: r =? r
+                                          : 3u;           // C: r =? l
     return wmo_pack_key(phase, 0, 0, 0, 0, 0);
   }
   if (i == f && j != f) {
