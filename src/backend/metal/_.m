@@ -1282,41 +1282,57 @@ static u32 metal_tendesc_strided_index(TenDesc const *t, u32 flat_idx) {
 // + a 4-byte element dtype (f32 / i32) only.  bf16/fp16/chained-view
 // gathers decline (return -1) so the correct host loop still handles
 // them.
-static const char *METAL_GATHER_SRC =
-    "#include <metal_stdlib>\n"
-    "using namespace metal;\n"
-    "kernel void thvm_gather_strided(\n"
-    "    device float *dst [[buffer(0)]],\n"
-    "    device const float *src [[buffer(1)]],\n"
-    "    constant int *p [[buffer(2)]],\n"
-    "    uint gid [[thread_position_in_grid]]) {\n"
-    "  int ndim = p[0];\n"
-    "  int idx  = p[1];\n"
-    "  int rem  = int(gid);\n"
-    "  for (int a = ndim - 1; a >= 0; a--) {\n"
-    "    int dim = p[2 + a * 2];\n"
-    "    int str = p[2 + a * 2 + 1];\n"
-    "    int c = rem % dim;\n"
-    "    rem /= dim;\n"
-    "    idx += c * str;\n"
-    "  }\n"
-    "  dst[gid] = src[idx];\n"
-    "}\n";
-
-static id<MTLComputePipelineState> METAL_GATHER_PSO = nil;
-
 // Defined below (alongside the tile-jit compile path); forward-declared
 // here so the gather PSO builder can reuse the disk-cached MSL->metallib
 // compile.
 static id<MTLLibrary> metal_lib_for_src(char const *src, NSError **err,
                                         int *via_data);
 
-static id<MTLComputePipelineState> metal_gather_pso(void) {
-  if (METAL_GATHER_PSO != nil) return METAL_GATHER_PSO;
+// The gather copies element BYTES (no value interpretation), so one kernel
+// per element WIDTH covers every dtype of that width: uchar (1B: fp8/i8/u8),
+// ushort (2B: bf16/fp16/i16), uint (4B: f32/i32).  8-byte (f64/i64) is not
+// supported here -> the caller's host loop handles it.  PSOs cached per slot.
+static id<MTLComputePipelineState> METAL_GATHER_PSO[3];  // [0]=1B [1]=2B [2]=4B
+
+static id<MTLComputePipelineState> metal_gather_pso(u32 elem_bytes) {
+  u32 slot;
+  const char *mtype;
+  switch (elem_bytes) {
+    case 1: slot = 0; mtype = "uchar";  break;
+    case 2: slot = 1; mtype = "ushort"; break;
+    case 4: slot = 2; mtype = "uint";   break;
+    default: return nil;
+  }
+  if (METAL_GATHER_PSO[slot] != nil) return METAL_GATHER_PSO[slot];
   if (METAL_DEVICE == nil) return nil;
+  // Composes the FULL ShapeTracker chain (public view + prior_views,
+  // innermost-applied-last) exactly like metal_tendesc_strided_index: each
+  // view decodes the running index by its own shape (modulus per axis) and
+  // re-accumulates coord*stride + offset.  params = [n_views, then per view:
+  // ndim, offset, d0,s0, d1,s1, ...].
+  char src[768];
+  int n = snprintf(src, sizeof(src),
+    "#include <metal_stdlib>\nusing namespace metal;\n"
+    "kernel void thvm_gather_strided(\n"
+    "    device %s *dst [[buffer(0)]],\n"
+    "    device const %s *src [[buffer(1)]],\n"
+    "    constant int *p [[buffer(2)]],\n"
+    "    uint gid [[thread_position_in_grid]]) {\n"
+    "  int nv = p[0]; int o = 1; int idx = int(gid);\n"
+    "  for (int vi = 0; vi < nv; vi++) {\n"
+    "    int ndim = p[o]; int ni = p[o + 1]; o += 2;\n"
+    "    int rem = idx;\n"
+    "    for (int a = ndim - 1; a >= 0; a--) {\n"
+    "      int dim = p[o + a * 2]; int str = p[o + a * 2 + 1];\n"
+    "      int c = rem %% dim; rem /= dim; ni += c * str;\n"
+    "    }\n"
+    "    o += ndim * 2; idx = ni;\n"
+    "  }\n"
+    "  dst[gid] = src[idx];\n}\n", mtype, mtype);
+  if (n <= 0 || (size_t)n >= sizeof(src)) return nil;
   NSError *err = nil;
   int via_data = 0;
-  id<MTLLibrary> lib = metal_lib_for_src(METAL_GATHER_SRC, &err, &via_data);
+  id<MTLLibrary> lib = metal_lib_for_src(src, &err, &via_data);
   if (lib == nil) {
     fprintf(stderr, "thvm: metal -- gather library compile failed: %s\n",
             err ? [[err localizedDescription] UTF8String] : "(no error)");
@@ -1334,20 +1350,27 @@ static id<MTLComputePipelineState> metal_gather_pso(void) {
             err ? [[err localizedDescription] UTF8String] : "(no error)");
     return nil;
   }
-  METAL_GATHER_PSO = pso;
+  METAL_GATHER_PSO[slot] = pso;
   return pso;
 }
 
 // p layout: [ndim, offset, d0, s0, d1, s1, ...]; numel = view.numel.
 static int metal_gather_strided(u32 dst_buf_id, u32 src_buf_id,
                                 TenDesc const *d) {
-  // Decline anything the host loop must keep handling correctly:
-  //  - chained views (nviews > 0): the MSL kernel only decodes one view.
-  //  - non-4-byte element dtypes (bf16/fp16/i8/u8/i64): the kernel reads
-  //    `float`/`int` (4-byte) slots; a different itemsize would gather
-  //    wrong bytes.
-  if (d == NULL || d->nviews != 0) return -1;
-  if (dtype_storage_bytes(d->dtype, 1) != 4) return -1;
+  // Decline what the host loop must keep handling:
+  //  - 8-byte element dtypes (f64/i64): metal_gather_pso has no kernel.
+  //  - flips (negative offset/stride): metal_tendesc_strided_index handles
+  //    them on the host, but the GPU kernel would compute a negative index
+  //    and read out of bounds.
+  //  - very long view chains (> GATHER_MAX_VIEWS): bound the params buffer.
+  // The gather copies raw element bytes, so 1/2/4-byte widths (fp8, bf16/fp16,
+  // f32/i32) all work via the per-width kernel, and the FULL view chain
+  // (public + prior_views) is composed in the kernel.
+  #define GATHER_MAX_VIEWS 8
+  if (d == NULL) return -1;
+  u32 elem_bytes = dtype_storage_bytes(d->dtype, 1);
+  if (elem_bytes != 1 && elem_bytes != 2 && elem_bytes != 4) return -1;
+  if (d->nviews > (u32)GATHER_MAX_VIEWS) return -1;
   if (dst_buf_id == 0 || dst_buf_id >= METAL_BUFS_NEXT) return -1;
   if (src_buf_id == 0 || src_buf_id >= METAL_BUFS_NEXT) return -1;
   if (METAL_BUFS[dst_buf_id].buf == nil) return -1;
@@ -1355,26 +1378,41 @@ static int metal_gather_strided(u32 dst_buf_id, u32 src_buf_id,
   if (METAL_BUFS[dst_buf_id].refcount == 0) return -1;
   if (METAL_BUFS[src_buf_id].refcount == 0) return -1;
 
-  View const *v = &d->view;
-  u32 ndim = v->shape.ndim;
-  if (ndim > (u32)MAX_DIM) return -1;
-  u32 numel = v->numel;
+  u32 numel = d->view.numel;
   if (numel == 0) return -1;
 
-  id<MTLComputePipelineState> pso = metal_gather_pso();
+  // Collect the chain in apply order: public view, then prior_views[nviews-1..0]
+  // -- exactly metal_tendesc_strided_index's composition order.
+  View const *chain[GATHER_MAX_VIEWS + 1];
+  u32 nchain = 0;
+  chain[nchain++] = &d->view;
+  for (i32 i = (i32)d->nviews - 1; i >= 0; i--) chain[nchain++] = &d->prior_views[i];
+  for (u32 ci = 0; ci < nchain; ci++) {
+    View const *cv = chain[ci];
+    if (cv->shape.ndim < 1 || cv->shape.ndim > (u32)MAX_DIM) return -1;
+    if (cv->offset < 0) return -1;
+    for (u32 a = 0; a < cv->shape.ndim; a++)
+      if (cv->strides[a] < 0) return -1;
+  }
+
+  id<MTLComputePipelineState> pso = metal_gather_pso(elem_bytes);
   if (pso == nil) return -1;
 
-  // params: ndim, offset, then per-axis (kvar-resolved extent, stride).
-  // 2 header + 2 per axis.  Use the static (hi-bound) extent for kvar
-  // dims, matching metal_view_strided_index's kvar_extent_static.
-  int params[2 + 2 * MAX_DIM];
-  params[0] = (int)ndim;
-  params[1] = (int)v->offset;
-  for (u32 a = 0; a < ndim; a++) {
-    params[2 + (int)a * 2]     = (int)kvar_extent_static(v->shape.dims[a]);
-    params[2 + (int)a * 2 + 1] = (int)v->strides[a];
+  // params: [n_views, then per view: ndim, offset, d0,s0, ...].  Static
+  // (hi-bound) extent for kvar dims, matching metal_view_strided_index.
+  int params[1 + (GATHER_MAX_VIEWS + 1) * (2 + 2 * MAX_DIM)];
+  int pn = 0;
+  params[pn++] = (int)nchain;
+  for (u32 ci = 0; ci < nchain; ci++) {
+    View const *cv = chain[ci];
+    params[pn++] = (int)cv->shape.ndim;
+    params[pn++] = (int)cv->offset;
+    for (u32 a = 0; a < cv->shape.ndim; a++) {
+      params[pn++] = (int)kvar_extent_static(cv->shape.dims[a]);
+      params[pn++] = (int)cv->strides[a];
+    }
   }
-  size_t params_len = (size_t)(2 + 2 * (int)ndim) * sizeof(int);
+  size_t params_len = (size_t)pn * sizeof(int);
 
   id<MTLCommandBuffer> cmd = metal_command_buffer();
   if (cmd == nil) return -1;
