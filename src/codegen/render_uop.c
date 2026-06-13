@@ -2227,12 +2227,16 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   IND(depth); fprintf(fp,
     "/* TC tiled matmul: tile %ux%u, %ux%u simdgroups, %ux%u reg, KB=%u */\n",
     tile_m, tile_n, t.local_m, t.local_n, t.rm, t.rn, t.kb);
-  // Threadgroup-memory staging buffers.  Asm: [TILE_M x KB] row-major
-  // (ld=KB).  Bsm: [KB x TILE_N] row-major (ld=TILE_N).
+  // Double-buffered (software-pipelined) staging.  Two threadgroup A/B
+  // buffers ping-pong: while the MMA consumes K-block N from one buffer the
+  // cooperative global->threadgroup load of block N+1 streams into the other,
+  // hiding the global-load latency behind compute instead of stalling at a
+  // barrier between every load and MMA.  Asm: [2][TILE_M x KB] row-major
+  // (ld=KB).  Bsm: [2][KB x TILE_N] row-major (ld=TILE_N).
   IND(depth); fprintf(fp,
-    "threadgroup %s _Asm[%u];\n", sel, tile_m * t.kb);
+    "threadgroup %s _Asm[%u];\n", sel, 2u * tile_m * t.kb);
   IND(depth); fprintf(fp,
-    "threadgroup %s _Bsm[%u];\n", sel, t.kb * tile_n);
+    "threadgroup %s _Bsm[%u];\n", sel, 2u * t.kb * tile_n);
   // bf16 output: a per-simdgroup f32 scratch slot for the f32->bf16 staged
   // store (simdgroup_store has no f32->bf16 widening).  Each of the NSG
   // simdgroups owns a private 64-float slot, reused across its register tiles.
@@ -2256,27 +2260,96 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   IND(depth); fprintf(fp,
     "for (uint _i = 0u; _i < %uu; _i++) "
     "_acc[_i] = simdgroup_matrix<float, 8, 8>(0);\n", t.rm * t.rn);
-  // K-block loop.
-  IND(depth); fprintf(fp, "for (uint _k0 = 0u; _k0 < %uu; _k0 += %uu) {\n",
-                      k_extent, t.kb);
-  // Cooperative load of A block [TILE_M x KB] (row-major, src ld = K).
+  // Vectorized cooperative loads (float4/bfloat4) along the contiguous inner
+  // axis: A's KB run (unit-stride K) and B's TILE_N run (unit-stride N).  Each
+  // valid when the inner extent and source leading dim are multiples of 4 (the
+  // canonical packed FLUX shapes always are; scalar fallback otherwise).  Cuts
+  // the staging-loop instruction count ~4x and saturates memory bandwidth.
+  int a_vec = (t.kb % 4u == 0) && (k_extent % 4u == 0);
+  int b_vec = (tile_n % 4u == 0) && (n_extent % 4u == 0);
+  u32 a_elems = tile_m * t.kb, b_elems = t.kb * tile_n;
+  // Emit-helper macros for the cooperative load of one K-block.  BUFOFF is the
+  // MSL expression selecting the destination buffer half (an element offset
+  // into _Asm / _Bsm); KK0 is the MSL expression for the source K-origin.  Each
+  // emits a vectorized (bfloat4/float4) loop when the inner axis is 4-aligned,
+  // else a scalar loop.
+  #define EMIT_LOAD_A(BUFOFF, KK0)                                            \
+    do {                                                                      \
+      if (a_vec) {                                                            \
+        IND(depth + 1); fprintf(fp,                                           \
+          "for (uint _i = _lid; _i < %uu; _i += %uu) {\n",                    \
+          a_elems / 4u, nthreads);                                           \
+        IND(depth + 2); fprintf(fp,                                           \
+          "uint _r = _i / %uu, _c = (_i %% %uu) * 4u;\n",                     \
+          t.kb / 4u, t.kb / 4u);                                            \
+        IND(depth + 2); fprintf(fp,                                           \
+          "((threadgroup %s4*)(_Asm + %s))[_i] = "                            \
+          "*(device const %s4*)(%s + (_tm + _r) * %uu + (%s) + _c);\n",       \
+          sel, BUFOFF, sel, a_name, k_extent, KK0);                          \
+        IND(depth + 1); fputs("}\n", fp);                                     \
+      } else {                                                                \
+        IND(depth + 1); fprintf(fp,                                           \
+          "for (uint _i = _lid; _i < %uu; _i += %uu) {\n", a_elems, nthreads);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Asm + %s)[_i] = %s[(_tm + _i / %uu) * %uu + (%s) + _i %% %uu];\n",\
+          BUFOFF, a_name, t.kb, k_extent, KK0, t.kb);                        \
+        IND(depth + 1); fputs("}\n", fp);                                     \
+      }                                                                       \
+    } while (0)
+  #define EMIT_LOAD_B(BUFOFF, KK0)                                            \
+    do {                                                                      \
+      if (b_vec) {                                                            \
+        IND(depth + 1); fprintf(fp,                                           \
+          "for (uint _i = _lid; _i < %uu; _i += %uu) {\n",                    \
+          b_elems / 4u, nthreads);                                           \
+        IND(depth + 2); fprintf(fp,                                           \
+          "uint _r = _i / %uu, _c = (_i %% %uu) * 4u;\n",                     \
+          tile_n / 4u, tile_n / 4u);                                         \
+        IND(depth + 2); fprintf(fp,                                           \
+          "((threadgroup %s4*)(_Bsm + %s))[_i] = "                            \
+          "*(device const %s4*)(%s + ((%s) + _r) * %uu + _tn + _c);\n",       \
+          sel, BUFOFF, sel, b_name, KK0, n_extent);                          \
+        IND(depth + 1); fputs("}\n", fp);                                     \
+      } else {                                                                \
+        IND(depth + 1); fprintf(fp,                                           \
+          "for (uint _i = _lid; _i < %uu; _i += %uu) {\n", b_elems, nthreads);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[_i] = %s[((%s) + _i / %uu) * %uu + _tn + _i %% %uu];\n",\
+          BUFOFF, b_name, KK0, tile_n, n_extent, tile_n);                    \
+        IND(depth + 1); fputs("}\n", fp);                                     \
+      }                                                                       \
+    } while (0)
+  // Prologue: stage K-block 0 into buffer half 0.
+  EMIT_LOAD_A("0u", "0u");
+  EMIT_LOAD_B("0u", "0u");
+  IND(depth); fputs("threadgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+  // Software-pipelined K-block loop.  _kit = block index; the current buffer
+  // half is (_kit&1), the next is the complement.  Each iteration first issues
+  // the global load of block _kit+1 into the OTHER buffer half (independent of
+  // the current MMA, so the load latency overlaps compute), then runs the MMA
+  // on the current half, then a single barrier guards both the next-half loads
+  // (consumed next iteration) and the current-half compute (before that half is
+  // overwritten two iterations later).
+  IND(depth); fprintf(fp, "for (uint _kit = 0u; _kit < %uu; _kit++) {\n",
+                      k_extent / t.kb);
+  IND(depth + 1); fputs("uint _cur = (_kit & 1u);\n", fp);
+  IND(depth + 1); fprintf(fp, "uint _aco = _cur * %uu, _bco = _cur * %uu;\n",
+                          tile_m * t.kb, t.kb * tile_n);
   IND(depth + 1); fprintf(fp,
-    "for (uint _i = _lid; _i < %uu; _i += %uu) {\n",
-    tile_m * t.kb, nthreads);
-  IND(depth + 2); fprintf(fp,
-    "_Asm[_i] = %s[(_tm + _i / %uu) * %uu + _k0 + _i %% %uu];\n",
-    a_name, t.kb, k_extent, t.kb);
+    "if (_kit + 1u < %uu) {\n", k_extent / t.kb);
+  {
+    // Next buffer half + next K-origin.
+    char nbo_a[64], nbo_b[64], nk0[64];
+    snprintf(nbo_a, sizeof(nbo_a), "((_cur ^ 1u) * %uu)", tile_m * t.kb);
+    snprintf(nbo_b, sizeof(nbo_b), "((_cur ^ 1u) * %uu)", t.kb * tile_n);
+    snprintf(nk0, sizeof(nk0), "((_kit + 1u) * %uu)", t.kb);
+    EMIT_LOAD_A(nbo_a, nk0);
+    EMIT_LOAD_B(nbo_b, nk0);
+  }
   IND(depth + 1); fputs("}\n", fp);
-  // Cooperative load of B block [KB x TILE_N] (row-major, src ld = N).
-  IND(depth + 1); fprintf(fp,
-    "for (uint _i = _lid; _i < %uu; _i += %uu) {\n",
-    t.kb * tile_n, nthreads);
-  IND(depth + 2); fprintf(fp,
-    "_Bsm[_i] = %s[(_k0 + _i / %uu) * %uu + _tn + _i %% %uu];\n",
-    b_name, tile_n, n_extent, tile_n);
-  IND(depth + 1); fputs("}\n", fp);
-  IND(depth + 1); fputs("threadgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
-  // Inner K-subtile loop over the staged block (steps of 8).
+  #undef EMIT_LOAD_A
+  #undef EMIT_LOAD_B
+  // Inner K-subtile loop over the staged current block (steps of 8).
   IND(depth + 1); fprintf(fp, "for (uint _kk = 0u; _kk < %uu; _kk += 8u) {\n",
                           t.kb);
   // Load this simdgroup's A fragments (RM of them) from threadgroup mem.
@@ -2284,7 +2357,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
     "simdgroup_matrix<%s, 8, 8> _af[%u];\n", sel, t.rm);
   for (u32 mi = 0; mi < t.rm; mi++) {
     IND(depth + 2); fprintf(fp,
-      "simdgroup_load(_af[%u], &_Asm[(_sm + %uu) * %uu + _kk], %uu);\n",
+      "simdgroup_load(_af[%u], &_Asm[_aco + (_sm + %uu) * %uu + _kk], %uu);\n",
       mi, mi * 8u, t.kb, t.kb);
   }
   // Load this simdgroup's B fragments (RN of them) from threadgroup mem.
@@ -2292,7 +2365,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
     "simdgroup_matrix<%s, 8, 8> _bf[%u];\n", sel, t.rn);
   for (u32 ni = 0; ni < t.rn; ni++) {
     IND(depth + 2); fprintf(fp,
-      "simdgroup_load(_bf[%u], &_Bsm[_kk * %uu + _sn + %uu], %uu);\n",
+      "simdgroup_load(_bf[%u], &_Bsm[_bco + _kk * %uu + _sn + %uu], %uu);\n",
       ni, tile_n, ni * 8u, tile_n);
   }
   // Register-blocked MMA: every A fragment x every B fragment.
@@ -2305,7 +2378,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   }
   IND(depth + 1); fputs("}\n", fp);                          // close _kk
   IND(depth + 1); fputs("threadgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
-  IND(depth); fputs("}\n", fp);                              // close _k0
+  IND(depth); fputs("}\n", fp);                              // close _kit
   // Store the register tile to the output (row-major, ld = N).  f32 output:
   // simdgroup_store directly.  bf16 output: simdgroup_store has no f32->bf16
   // widening, so stage each 8x8 tile through this simdgroup's private f32 slot
