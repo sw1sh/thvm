@@ -148,6 +148,7 @@ typedef struct {
   u32 trace;
   u8  tree;                   // 0 = rule tree, 1 = equation tree
   u8  face;
+  u8  dist_rhs;               // 1 iff WM's distinguished face = thvm's stored RHS
   WmoCell *cells;             // owned copy (for removal lookup)
   u32 n_cells;
 } WmoReg;
@@ -926,7 +927,8 @@ static void atp_wmo_free(AtpWmOrder *w) {
 }
 
 static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
-                         const WmoCell *cells, u32 n_cells, u32 depth) {
+                         const WmoCell *cells, u32 n_cells, u32 depth,
+                         u8 dist_rhs) {
   wmo_tree_insert(&w->tree[tree], cells, n_cells, depth, trace, face);
   if (w->n_reg == w->cap_reg) {
     w->cap_reg = w->cap_reg ? w->cap_reg * 2u : 64u;
@@ -936,33 +938,80 @@ static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
   r->trace = trace;
   r->tree = tree;
   r->face = face;
+  r->dist_rhs = dist_rhs;
   r->cells = (WmoCell *)malloc(n_cells * sizeof(WmoCell));
   memcpy(r->cells, cells, n_cells * sizeof(WmoCell));
   r->n_cells = n_cells;
 }
 
+// Whether WM's distinguished (indexed) face for the fact with birth
+// trace id `trace` is thvm's STORED RHS (vs the default LHS).  Recorded
+// at registration; queried by atp_wmo_rank to remap a CP's thvm-face
+// bit (0 = lhs, 1 = rhs) onto WM's face (0 = distinguished, 1 = reverse)
+// before classifying its emission phase and looking up the partner's
+// indexed face.  Returns 0 for an unregistered trace (orientable rules
+// and intake equations keep distinguished = lhs).
+static u8 wmo_trace_dist_rhs(const AtpWmOrder *w, u32 trace) {
+  for (u32 r = 0; r < w->n_reg; r++) {
+    if (w->reg[r].trace == trace) return w->reg[r].dist_rhs;
+  }
+  return 0u;
+}
+
 // Register the faces of the fact at `slot` (call right after
 // atp_push_rule commits the slot; the fact must already be oriented).
-static void atp_wmo_insert_fact(AtpState *s, u32 slot) {
+//
+// WM indexes its DISTINGUISHED face (the side it keeps as `links`) in
+// the eTT B-phase; the reverse face runs the late E-phase.  WM's
+// distinguished face is `selRec->lhs`:
+//   - INTAKE axioms: the loader's LRSortieren (WASIC/SpezNormierung.c
+//     :517-612), which atp_wm_intake_* already lands on thvm's stored
+//     s->lhs -- distinguished = thvm LHS.
+//   - CP-DERIVED unorientable equations: the selected CP's left side =
+//     `KPLinks = MGU(TP_RechteSeite(Vater))` = sigma(outer-rule RHS)
+//     (Unifikation1.c:916).  thvm's CP constructor puts sigma(r_i) on
+//     cp.rhs (cp/_.c cp_visit: cp.lhs = sigma(l_i[p<-r_j]) = KPRechts,
+//     cp.rhs = sigma(r_i) = KPLinks) and the pop-time normalize keeps
+//     that lhs/rhs assignment -- so WM's distinguished face is thvm's
+//     STORED RHS, not its LHS.
+// The stored orientation is NOT changed (that would perturb CP
+// generation via the formation-time KPAction order gate, which keys on
+// cp.peak = sigma(l_i)); instead the WM-vs-thvm face flip is recorded
+// per-trace as `dist_rhs` and the rank function remaps the face bits.
+// `cp_derived` selects the source surface; for mono / symmetric-face
+// equations the two faces alpha-renumber to each other, so the choice
+// is moot (dist_rhs forced 0).
+static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   if (w == NULL) return;
   u32 trace = s->r_trace[slot];
   WmoCell cells[WMO_MAX_CELLS];
-  u32 n = wmo_face_cells(s->lhs[slot], cells, WMO_MAX_CELLS);
-  if (n == 0u) return;
-  u32 d = wmo_term_depth(s->lhs[slot]);
   if (s->r_orient[slot]) {
-    wmo_register(w, trace, 0u, 0u, cells, n, d);
+    u32 n = wmo_face_cells(s->lhs[slot], cells, WMO_MAX_CELLS);
+    if (n == 0u) return;
+    wmo_register(w, trace, 0u, 0u, cells, n, wmo_term_depth(s->lhs[slot]),
+                 0u);
     return;
   }
-  wmo_register(w, trace, 1u, 0u, cells, n, d);
-  if (!atp_eq_is_mono(s, slot)) {
-    u32 n2 = wmo_face_cells(s->rhs[slot], cells, WMO_MAX_CELLS);
+  u8 mono = atp_eq_is_mono(s, slot);
+  u8 dist_rhs = (cp_derived && !mono) ? 1u : 0u;
+  Term dist = dist_rhs ? s->rhs[slot] : s->lhs[slot];
+  Term rev  = dist_rhs ? s->lhs[slot] : s->rhs[slot];
+  u32 n = wmo_face_cells(dist, cells, WMO_MAX_CELLS);
+  if (n == 0u) return;
+  wmo_register(w, trace, 1u, 0u, cells, n, wmo_term_depth(dist), dist_rhs);
+  if (!mono) {
+    u32 n2 = wmo_face_cells(rev, cells, WMO_MAX_CELLS);
     if (n2 != 0u) {
-      wmo_register(w, trace, 1u, 1u, cells, n2,
-                   wmo_term_depth(s->rhs[slot]));
+      wmo_register(w, trace, 1u, 1u, cells, n2, wmo_term_depth(rev),
+                   dist_rhs);
     }
   }
+}
+
+// Intake / rebuild default: distinguished face = stored lhs (LRSortieren).
+static void atp_wmo_insert_fact(AtpState *s, u32 slot) {
+  atp_wmo_insert_fact_ex(s, slot, 0u);
 }
 
 // In-place identity rename (RHS compose repoints r_trace to a fresh
@@ -1121,6 +1170,17 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   u8 i_face = (combo >> 1) & 1u;
   u8 j_face = combo & 1u;
+  // The CP's combo bits name the thvm face (0 = stored lhs, 1 = stored
+  // rhs) each parent used.  WM classifies the emission phase (A/B vs D/E)
+  // and indexes leaves by its OWN distinguished(0)/reverse(1) face; when
+  // a fact's WM-distinguished face is thvm's rhs (CP-derived unorientable
+  // equation, dist_rhs), the two numberings are flipped.  Remap each
+  // parent's face onto WM's before phase/lookup; the OVERLAP TERM stays
+  // the thvm face (that is the term the CP was actually built from).
+  u8 i_dr = wmo_trace_dist_rhs(w, s->r_trace[i]);
+  u8 j_dr = wmo_trace_dist_rhs(w, s->r_trace[j]);
+  u8 i_face_wm = i_face ^ i_dr;
+  u8 j_face_wm = j_face ^ j_dr;
   Term i_outer = i_face ? s->rhs[i] : s->lhs[i];
   if (i == f && j == f && cp->pos_len == 0u) {
     // self roots: F (combo 0), C (combo 1), G (combo 3)
@@ -1128,32 +1188,33 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
     return wmo_pack_key(phase, 0, 0, 0, 0, 0);
   }
   if (i == f && j != f) {
-    // tops phase: A (i-face L) or D (i-face R)
-    u32 phase = i_face ? 4u : 0u;
+    // tops phase: A (i WM-distinguished face) or D (i WM-reverse face)
+    u32 phase = i_face_wm ? 4u : 0u;
     u32 k1 = wmo_preorder_rank(i_outer, cp->pos, cp->pos_len);
     u8 j_is_rule = s->r_orient[j] ? 1u : 0u;
     u8 tree = j_is_rule ? 0u : 1u;
-    u32 k2 = i_face ? (tree == 1u ? 0u : 1u) : (u32)tree;
+    u32 k2 = i_face_wm ? (tree == 1u ? 0u : 1u) : (u32)tree;
     Term qsub = i_outer;
     for (u32 d = 0; d < cp->pos_len; d++) {
       if (term_tag(qsub) != TAG_CTR) break;
       qsub = term_ctr_at(qsub, cp->pos[d]);
     }
     u32 arr = 0, ch = 0;
-    if (!wmo_tops_rank(w, tree, qsub, s->r_trace[j], j_face, &arr, &ch)) {
+    if (!wmo_tops_rank(w, tree, qsub, s->r_trace[j], j_face_wm, &arr, &ch)) {
       w->rank_misses++;
       arr = 0x3fffu;
     }
     return wmo_pack_key(phase, k1, k2, arr, ch, 0);
   }
-  // eTT phase: B (j-face L) or E (j-face R); includes self-proper
-  // overlaps (i == j == f, pos_len > 0) at the new fact's own leaves.
-  u32 phase = j_face ? 5u : 1u;
+  // eTT phase: B (j WM-distinguished face) or E (j WM-reverse face);
+  // includes self-proper overlaps (i == j == f, pos_len > 0) at the new
+  // fact's own leaves.
+  u32 phase = j_face_wm ? 5u : 1u;
   u8 i_is_rule = s->r_orient[i] ? 1u : 0u;
   u8 tree = i_is_rule ? 0u : 1u;
-  u32 k2 = j_face ? (tree == 1u ? 0u : 1u) : (u32)tree;
+  u32 k2 = j_face_wm ? (tree == 1u ? 0u : 1u) : (u32)tree;
   u32 ll = 0, ch = 0;
-  if (!wmo_leaflist_rank(w, tree, s->r_trace[i], i_face, &ll, &ch)) {
+  if (!wmo_leaflist_rank(w, tree, s->r_trace[i], i_face_wm, &ll, &ch)) {
     w->rank_misses++;
     ll = 0x3fffu;
   }

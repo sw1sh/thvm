@@ -1798,6 +1798,64 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-cp-derived-distinguished-face");
+  {
+    // WM stores a derived unorientable equation's `selRec->lhs` =
+    // `KPLinks = MGU(TP_RechteSeite(Vater))` = sigma(outer-rule RHS) as
+    // its DISTINGUISHED (indexed) face (Unifikation1.c:916,
+    // RUndEVerwaltung.c:407-425); the reverse face runs the late eTT
+    // E-phase.  thvm's CP constructor puts sigma(r_i) on cp.rhs and the
+    // pop-time normalize keeps that lhs/rhs assignment, so a CP-DERIVED
+    // unorientable equation's WM-distinguished face is thvm's stored
+    // RHS, not its LHS.  The stored orientation is NOT changed (that
+    // would move the CP set via the formation-time KPAction order gate);
+    // the wmo mirror records the flip per-trace (dist_rhs) and indexes
+    // the WM-distinguished face as face 0 of the equation tree.
+    //
+    // eq (asymmetric unorientable): lhs = i(f(a,a)), rhs = f(a, i(a)).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    Term eq_lhs = mk_i(mk_f(mk_a(), mk_a()));        // KPRechts
+    Term eq_rhs = mk_f(mk_a(), mk_i(mk_a()));        // KPLinks = WM-dist
+    s->lhs[0] = eq_lhs;
+    s->rhs[0] = eq_rhs;
+    s->r_orient[0] = 0u; s->r_trace[0] = 402u; s->n_rules++; s->n_unorient++;
+    CHECK_EQ((u32)atp_eq_is_mono(s, 0u), 0u);
+    atp_wmo_insert_fact_ex(s, 0u, /*cp_derived=*/1u);
+    AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+    // The mirror records WM-distinguished = stored RHS for this trace.
+    CHECK_EQ((u32)wmo_trace_dist_rhs(w, 402u), 1u);
+    // The equation tree indexes the WM-distinguished face (= stored RHS,
+    // f(a,i(a))) under WM-face 0, and the reverse face (= stored LHS,
+    // i(f(a,a))) under WM-face 1.  Find each leaf's chain face.
+    {
+      WmoCell rc[WMO_MAX_CELLS], lc[WMO_MAX_CELLS];
+      u32 rn = wmo_face_cells(eq_rhs, rc, WMO_MAX_CELLS);
+      u32 ln = wmo_face_cells(eq_lhs, lc, WMO_MAX_CELLS);
+      u8 dist_face = 0xffu, rev_face = 0xffu;
+      for (WmoLeaf *l = w->tree[1].ll_head; l != NULL; l = l->ll_next) {
+        u8 is_rhs = (l->key_len == rn);
+        u8 is_lhs = (l->key_len == ln);
+        for (u32 c = 0; c < l->key_len && (is_rhs || is_lhs); c++) {
+          if (is_rhs && !wmo_cell_eq(&l->key[c], &rc[c])) is_rhs = 0u;
+          if (is_lhs && !wmo_cell_eq(&l->key[c], &lc[c])) is_lhs = 0u;
+        }
+        if (is_rhs && l->n_chain > 0u) dist_face = l->chain[0].face;
+        if (is_lhs && l->n_chain > 0u) rev_face  = l->chain[0].face;
+      }
+      CHECK_EQ((u32)dist_face, 0u);   // RHS = distinguished, WM-face 0
+      CHECK_EQ((u32)rev_face, 1u);    // LHS = reverse, WM-face 1
+    }
+    // Intake registration of the SAME asymmetric equation keeps
+    // distinguished = stored LHS (LRSortieren surface, no flip).
+    s->lhs[1] = mk_i(mk_f(mk_a(), mk_a()));
+    s->rhs[1] = mk_f(mk_a(), mk_i(mk_a()));
+    s->r_orient[1] = 0u; s->r_trace[1] = 403u; s->n_rules++; s->n_unorient++;
+    atp_wmo_insert_fact_ex(s, 1u, /*cp_derived=*/0u);
+    CHECK_EQ((u32)wmo_trace_dist_rhs(w, 403u), 0u);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-tops-before-ett");
   {
     // Phase segmentation (U1_KPsBildenZuRegel: toplevel phase 2 before

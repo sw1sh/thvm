@@ -1,83 +1,39 @@
-wm=1260 thvm=4844 prefix=93 identical=N firstdiv=94
-note: content-delta wm-only=1 thvm-only=3585; post-axiom nonax-wm=1254 nonax-thvm=4838 nonax-prefix=87; weights-exact
+wm=1260 thvm=1267 prefix=104 identical=N firstdiv=105
+note: content-delta wm-only=0 thvm-only=7; post-axiom nonax-wm=1254 nonax-thvm=1261 nonax-prefix=98; weights-exact
 
---- positions 91..103 (1-based) ---
-    91 WM   w1=95           or(not(x1),or(not(x1),x2)) # or(not(x1),x2)
-    91 thvm pri=95          CPSEL pick=91 j=0 seq=158 pri=95 rules=31 lhs=(C5 (C4 V0) V1) rhs=(C5 (C4 V0) (C5 (C4 V0) V1))
-    92 WM   w1=95           or(not(x1),or(x2,not(x1))) # or(not(x1),x2)
-    92 thvm pri=95          CPSEL pick=92 j=0 seq=160 pri=95 rules=31 lhs=(C5 (C4 V0) V1) rhs=(C5 (C4 V0) (C5 V1 (C4 V0)))
-    93 WM   w1=99           or(x1,not(x1)) # not(and(x2,not(x2)))
-    93 thvm pri=99          CPSEL pick=93 j=0 seq=97 pri=99 rules=31 lhs=(C4 (C3 V0 (C4 V0))) rhs=(C5 V1 (C4 V1))
-*   94 WM   w1=71           x1 # and(x1,not(and(x2,not(x2))))
-*   94 thvm pri=71          CPSEL pick=94 j=0 seq=252 pri=71 rules=30 lhs=V0 rhs=(C3 (C4 (C3 V1 (C4 V1))) V0)
-*   95 WM   w1=71           x1 # and(x1,not(and(x2,not(x2))))
-*   95 thvm pri=71          CPSEL pick=95 j=0 seq=253 pri=71 rules=30 lhs=V0 rhs=(C3 (C4 (C3 V1 (C4 V1))) V0)
-    96 WM   w1=71           x1 # and(x1,not(and(x2,not(x2))))
-    96 thvm pri=71          CPSEL pick=96 j=0 seq=270 pri=71 rules=30 lhs=(C3 V0 (C4 (C3 V1 (C4 V1)))) rhs=V0
-    97 WM   w1=71           x1 # and(x1,not(and(x2,not(x2))))
-    97 thvm pri=71          CPSEL pick=97 j=0 seq=275 pri=71 rules=30 lhs=(C3 V0 (C4 (C3 V1 (C4 V1)))) rhs=V0
-*   98 WM   w1=71           x1 # and(not(and(x2,not(x2))),x1)
-*   98 thvm pri=71          CPSEL pick=98 j=0 seq=276 pri=71 rules=30 lhs=(C3 V0 (C4 (C3 V1 (C4 V1)))) rhs=V0
-    99 WM   w1=71           x1 # and(x1,not(and(x2,not(x2))))
-    99 thvm pri=71          CPSEL pick=99 j=0 seq=277 pri=71 rules=30 lhs=(C3 V0 (C4 (C3 V1 (C4 V1)))) rhs=V0
-   100 WM   w1=71           and(not(and(x1,not(x1))),x2) # x2
-   100 thvm pri=71          CPSEL pick=100 j=0 seq=278 pri=71 rules=30 lhs=(C3 (C4 (C3 V0 (C4 V0))) V1) rhs=V1
-*  101 WM   w1=71           and(not(and(x1,not(x1))),x2) # x2
-*  101 thvm pri=71          CPSEL pick=101 j=0 seq=279 pri=71 rules=30 lhs=(C3 V0 (C4 (C3 V1 (C4 V1)))) rhs=V0
+--- positions 102..114 (1-based) ---
    102 WM   w1=71           and(x1,not(and(x2,not(x2)))) # x1
    102 thvm pri=71          CPSEL pick=102 j=0 seq=281 pri=71 rules=30 lhs=(C3 V0 (C4 (C3 V1 (C4 V1)))) rhs=V0
    103 WM   w1=71           and(not(and(x1,not(x1))),x2) # x2
    103 thvm pri=71          CPSEL pick=103 j=0 seq=282 pri=71 rules=30 lhs=(C3 (C4 (C3 V0 (C4 V0))) V1) rhs=V1
+   104 WM   w1=80           or(x1,not(x1)) # or(x2,not(x2))
+   104 thvm pri=80          CPSEL pick=104 j=0 seq=265 pri=80 rules=30 lhs=(C5 V0 (C4 V0)) rhs=(C5 V1 (C4 V1))
+*  105 WM   w1=80           and(x1,not(x1)) # and(x2,not(x2))
+*  105 thvm pri=80          CPSEL pick=105 j=0 seq=267 pri=80 rules=30 lhs=(C5 V0 (C4 V0)) rhs=(C5 V1 (C4 V1))
+*  106 WM   w1=80           or(x1,not(x1)) # or(x2,not(x2))
+*  106 thvm pri=80          CPSEL pick=106 j=0 seq=269 pri=80 rules=30 lhs=(C3 V0 (C4 V0)) rhs=(C3 V1 (C4 V1))
+   107 WM   w1=80           or(x1,not(x1)) # or(x2,not(x2))
+   107 thvm pri=80          CPSEL pick=107 j=0 seq=271 pri=80 rules=30 lhs=(C5 V0 (C4 V0)) rhs=(C5 V1 (C4 V1))
+   108 WM   w1=98           not(x1) # and(not(x1),not(and(x2,not(x2))))
+   108 thvm pri=98          CPSEL pick=108 j=0 seq=258 pri=98 rules=30 lhs=(C3 (C4 V0) (C4 (C3 V1 (C4 V1)))) rhs=(C4 V0)
+   109 WM   w1=98           not(x1) # and(not(x1),not(and(x2,not(x2))))
+   109 thvm pri=98          CPSEL pick=109 j=0 seq=259 pri=98 rules=30 lhs=(C3 (C4 V0) (C4 (C3 V1 (C4 V1)))) rhs=(C4 V0)
+   110 WM   w1=99           and(x1,not(x1)) # not(or(x2,not(x2)))
+   110 thvm pri=99          CPSEL pick=110 j=0 seq=115 pri=99 rules=30 lhs=(C4 (C5 V0 (C4 V0))) rhs=(C3 V1 (C4 V1))
+   111 WM   w1=71           x1 # or(x1,not(or(x2,not(x2))))
+   111 thvm pri=71          CPSEL pick=111 j=0 seq=287 pri=71 rules=29 lhs=(C5 V0 (C4 (C5 V1 (C4 V1)))) rhs=V0
+   112 WM   w1=71           x1 # or(x1,not(or(x2,not(x2))))
+   112 thvm pri=71          CPSEL pick=112 j=0 seq=293 pri=71 rules=29 lhs=(C5 V0 (C4 (C5 V1 (C4 V1)))) rhs=V0
+   113 WM   w1=71           x1 # or(x1,not(or(x2,not(x2))))
+   113 thvm pri=71          CPSEL pick=113 j=0 seq=294 pri=71 rules=29 lhs=(C5 V0 (C4 (C5 V1 (C4 V1)))) rhs=V0
+   114 WM   w1=71           x1 # or(x1,not(or(x2,not(x2))))
+   114 thvm pri=71          CPSEL pick=114 j=0 seq=295 pri=71 rules=29 lhs=(C5 V0 (C4 (C5 V1 (C4 V1)))) rhs=V0
 
 --- multiset deltas (first 50 each side) ---
-WM-only   x1  and(and(v1,v2),v3)#and(v1,and(v2,v3))
-thvm-only x114  or(v1,v2)#or(v2,v1)
-thvm-only x211  and(v1,v2)#and(v2,v1)
-thvm-only x38  and(v1,not(and(v2,not(v2))))#v1
-thvm-only x3  and(not(and(v1,not(v1))),v2)#v2
-thvm-only x33  or(v1,not(or(v2,not(v2))))#v1
-thvm-only x5  or(not(or(v1,not(v1))),v2)#v2
-thvm-only x5  or(v1,and(not(v2),v2))#v1
-thvm-only x1  and(or(not(v1),v1),v2)#v2
-thvm-only x8  and(v1,or(not(v2),v2))#v1
-thvm-only x1  or(or(v1,v2),v1)#or(v1,v2)
-thvm-only x111  and(v1,not(v1))#and(v2,not(v2))
-thvm-only x61  or(v1,not(v1))#or(v2,not(v2))
-thvm-only x2  and(not(v1),v1)#and(v2,not(v2))
-thvm-only x8  or(not(v1),v1)#or(v2,not(v2))
-thvm-only x2  not(and(v1,not(v1)))#or(v2,not(v2))
-thvm-only x5  and(not(v1),not(and(v2,not(v2))))#not(v1)
-thvm-only x9  and(v1,not(v1))#not(or(v2,not(v2)))
-thvm-only x4  not(v1)#or(not(v1),not(or(v2,not(v2))))
+thvm-only x1  or(v1,not(or(v2,not(v2))))#v1
 thvm-only x1  and(v1,or(v1,v2))#or(v1,and(and(v3,not(v3)),v2))
-thvm-only x60  and(not(v1),v1)#and(v1,not(v1))
-thvm-only x243  or(not(v1),v1)#or(v1,not(v1))
-thvm-only x2  and(not(v1),v1)#and(v2,and(not(v1),v1))
-thvm-only x5  or(not(v1),v1)#or(v2,or(not(v1),v1))
-thvm-only x23  or(and(v1,v2),v1)#v1
-thvm-only x18  or(and(v1,v2),v2)#v2
-thvm-only x2  or(and(v1,and(v2,v3)),v3)#v3
-thvm-only x2  or(and(v1,and(v2,v3)),v2)#v2
 thvm-only x1  and(or(v1,v2),v1)#or(v1,and(v2,and(v3,not(v3))))
-thvm-only x21  and(or(v1,v2),v2)#v2
-thvm-only x26  and(or(v1,v2),v1)#v1
-thvm-only x7  and(or(v1,or(v2,v3)),v3)#v3
-thvm-only x5  and(or(v1,or(v2,v3)),v2)#v2
-thvm-only x2  not(and(v1,not(v1)))#or(not(v1),v1)
-thvm-only x39  or(not(and(v1,v2)),v1)#or(v1,not(v1))
-thvm-only x34  or(not(and(v1,v2)),v2)#or(v2,not(v2))
-thvm-only x11  and(or(not(v1),v2),not(v1))#not(v1)
-thvm-only x8  and(or(v1,not(v2)),not(v2))#not(v2)
-thvm-only x115  or(not(v1),v2)#or(v2,not(v1))
-thvm-only x8  not(v1)#or(and(not(v1),v2),not(v1))
-thvm-only x6  not(v1)#or(and(v2,not(v1)),not(v1))
-thvm-only x33  and(not(or(v1,v2)),v2)#and(v2,not(v2))
-thvm-only x54  and(not(or(v1,v2)),v1)#and(v1,not(v1))
-thvm-only x57  not(and(v1,v2))#not(and(v2,v1))
-thvm-only x171  and(not(v1),v2)#and(v2,not(v1))
-thvm-only x12  and(v1,or(v2,v3))#and(v1,or(v3,v2))
-thvm-only x2  and(not(and(v1,v2)),not(v2))#not(v2)
-thvm-only x4  and(not(and(v1,v2)),not(v1))#not(v1)
-thvm-only x62  not(or(v1,v2))#not(or(v2,v1))
-thvm-only x8  and(not(and(not(v1),v2)),v1)#v1
-thvm-only x8  and(not(and(v1,not(v2))),v2)#v2
+thvm-only x1  and(v1,or(v2,v3))#and(v1,or(v3,v2))
+thvm-only x1  and(v1,or(or(v2,not(v2)),v3))#or(v1,and(v1,v3))
+thvm-only x1  and(or(v1,v2),or(or(v1,v3),v4))#or(or(v1,and(v2,v3)),and(or(v1,v2),v4))
+thvm-only x1  and(v1,or(v2,or(v3,not(v3))))#or(and(v1,v2),v1)

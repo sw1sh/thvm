@@ -3,19 +3,19 @@ note: content-delta wm-only=9 thvm-only=2; post-axiom nonax-wm=212 nonax-thvm=20
 
 --- positions 160..172 (1-based) ---
    160 WM   w1=55           x1 # and(x1,and(not(x2),x2))
-   160 thvm pri=55          CPSEL pick=160 j=0 seq=1611 pri=55 rules=16 lhs=(C3 V0 (C3 (C4 V1) V1)) rhs=V0
+   160 thvm pri=55          CPSEL pick=160 j=0 seq=1600 pri=55 rules=16 lhs=(C3 V0 (C3 (C4 V1) V1)) rhs=V0
    161 WM   w1=55           x1 # and(and(not(x2),x2),x1)
-   161 thvm pri=55          CPSEL pick=161 j=0 seq=1613 pri=55 rules=16 lhs=(C3 (C3 (C4 V0) V0) V1) rhs=V1
+   161 thvm pri=55          CPSEL pick=161 j=0 seq=1602 pri=55 rules=16 lhs=(C3 (C3 (C4 V0) V0) V1) rhs=V1
    162 WM   w1=55           x1 # and(x1,and(not(x2),x2))
-   162 thvm pri=55          CPSEL pick=162 j=0 seq=1614 pri=55 rules=16 lhs=(C3 V0 (C3 (C4 V1) V1)) rhs=V0
+   162 thvm pri=55          CPSEL pick=162 j=0 seq=1603 pri=55 rules=16 lhs=(C3 V0 (C3 (C4 V1) V1)) rhs=V0
 *  163 WM   w1=55           and(and(not(x1),x1),x2) # x2
 *  163 thvm pri=55          CPSEL pick=163 j=0 seq=1616 pri=55 rules=16 lhs=(C3 V0 (C3 (C4 V1) V1)) rhs=V0
 *  164 WM   w1=55           and(x1,and(not(x2),x2)) # x1
 *  164 thvm pri=55          CPSEL pick=164 j=0 seq=1617 pri=55 rules=16 lhs=(C3 (C3 (C4 V0) V0) V1) rhs=V1
    165 WM   w1=79           not(x1) # and(not(x1),and(not(x2),x2))
-   165 thvm pri=79          CPSEL pick=165 j=0 seq=1605 pri=79 rules=16 lhs=(C3 (C4 V0) (C3 (C4 V1) V1)) rhs=(C4 V0)
+   165 thvm pri=79          CPSEL pick=165 j=0 seq=1594 pri=79 rules=16 lhs=(C3 (C4 V0) (C3 (C4 V1) V1)) rhs=(C4 V0)
    166 WM   w1=79           not(x1) # not(and(and(not(x2),x2),x1))
-   166 thvm pri=79          CPSEL pick=166 j=0 seq=1612 pri=79 rules=16 lhs=(C4 (C3 (C3 (C4 V0) V0) V1)) rhs=(C4 V1)
+   166 thvm pri=79          CPSEL pick=166 j=0 seq=1601 pri=79 rules=16 lhs=(C4 (C3 (C3 (C4 V0) V0) V1)) rhs=(C4 V1)
    167 WM   w1=80           and(x1,not(x1)) # and(not(x2),x2)
    167 thvm pri=80          CPSEL pick=167 j=0 seq=1460 pri=80 rules=16 lhs=(C3 (C4 V0) V0) rhs=(C3 V1 (C4 V1))
    168 WM   w1=80           and(x1,not(x1)) # and(x2,not(x2))

@@ -450,6 +450,7 @@ struct AtpWmOrder;
 static struct AtpWmOrder *atp_wmo_new(void);
 static void atp_wmo_free(struct AtpWmOrder *w);
 static void atp_wmo_insert_fact(AtpState *s, u32 slot);
+static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived);
 static void atp_wmo_remove_trace(AtpState *s, u32 trace);
 static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t);
 static u64  atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
@@ -9109,7 +9110,10 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     s->r_trace[rid] = t;
     // WM order mirror: the fact is now in R/E with its identity --
     // register its tree faces (RE_RegelEinfuegen / GleichungEinfuegen).
-    if (s->use_wm_emission_order) atp_wmo_insert_fact(s, rid);
+    // CP-derived (saturation main loop): an unorientable equation's
+    // WM-distinguished face is its stored RHS (KPLinks = sigma(outer
+    // rule RHS)); see atp_wmo_insert_fact_ex.
+    if (s->use_wm_emission_order) atp_wmo_insert_fact_ex(s, rid, 1u);
   }
 
 #ifdef ATP_CP_GROUND_JOIN
@@ -14976,7 +14980,11 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
 #ifdef ATP_ORDERED_REWRITE
       // 9c-foundation: ordered rewriting drives an unorientable
       // equation in whichever direction decreases, so store it ONCE
-      // (no looping u->v / v->u pair, no doubled CP generation).
+      // (no looping u->v / v->u pair, no doubled CP generation).  The
+      // stored lhs/rhs orientation is left as the popped CP produced it
+      // -- the WM emission mirror records the WM-distinguished-face flip
+      // per-trace instead (atp_wmo_insert_fact_ex), keeping the CP set
+      // and the formation-time KPAction order gate untouched.
       u32 idx = s->n_rules;
       u8 pushed = atp_push_rule(s, lhs, rhs);
       if (pushed) { r.first = idx; r.count = 1; }
