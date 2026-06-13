@@ -5623,6 +5623,16 @@ int main(void) {
     Term rd = mk_v(0u);
     CHECK_EQ(atp_cp_perm_subsumed(ld, rd), 0u);       // KEEP (not AC-equal)
 
+    // DROP a REPEATED-VARIABLE AC perm: or(v0,or(v0,v1)) = or(v0,or(v1,v0)).
+    // Both sides flatten to the multiset {v0,v0,v1}; the top is AC; and it
+    // is NOT a generating axiom (the C' rotations require three DISTINCT
+    // vars, so atp_gj_perm_valuable rejects the repeated-var shape).  This
+    // is the Huntington DoubleNegation @58 thvm-only fork that WM's
+    // GZ_ACVerzichtbar drops at selection.
+    Term lrv = MK_OR(mk_v(0u), MK_OR(mk_v(0u), mk_v(1u)));
+    Term rrv = MK_OR(mk_v(0u), MK_OR(mk_v(1u), mk_v(0u)));
+    CHECK_EQ(atp_cp_perm_subsumed(lrv, rrv), 1u);     // DROP (repeated-var AC perm)
+
     // INERT when the mask does NOT include the operator: clearing the
     // mask routes to the binary-swap fallback, which cannot flatten the
     // 4-ary perm -> keeps it (the pre-port behaviour).
