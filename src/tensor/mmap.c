@@ -105,6 +105,15 @@ fn Term thvm_tensor_mmap(const char *path, u64 byte_offset, u64 nbytes,
     fprintf(stderr, "tensor_mmap: mmap(%s) failed\n", path);
     return 0;
   }
+  // Prefetch: a disk tensor is mapped only to be read once (upload to a
+  // device, or a CPU op).  Without a hint the first read faults pages in
+  // one-by-one off the SSD in access order -- for a multi-GB weight file
+  // mapped as ~hundreds of scattered tensors that is ~0.8 GB/s of random
+  // faults.  MADV_WILLNEED kicks off async sequential readahead per region
+  // so the bytes are resident (near SSD sequential bandwidth) by the time
+  // the upload reads them.  Best-effort: ignore the return (an unsupported
+  // hint just leaves the lazy-fault behaviour unchanged).
+  madvise(base, (size_t)map_len, MADV_WILLNEED);
 
   void *buf = (void *)((char *)base + minor);
 
