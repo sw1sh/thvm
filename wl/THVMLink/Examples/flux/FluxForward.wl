@@ -12,19 +12,26 @@
    block LayerNorm, AdaLN modulation, gated residual, and the double /
    single block + transformer assembly. *)
 
-(* --- linear: a diffusers weight is stored {out, in}, so y = x . W^T.
-       Materialise W^T as a CONTIGUOUS {in, out} buffer (TRealize[Transpose[w]])
-       and matmul against that.  Two reasons:
-       (1) the weight is a constant, so the transpose-copy is a one-time cost
-           amortised across every step (in a JIT'd sampler it is captured once);
+(* --- linear: a diffusers weight is stored {out, in}, so y = x . W^T.  The
+       weight arg `wT` here is ALREADY the contiguous {in, out} W^T -- the
+       caller/loader does the Transpose+realise ONCE (per weight), so this
+       forward contains NO per-call transpose.  Why pre-transpose outside the
+       forward:
+       (1) the weight is a constant; transposing it once (out of the JIT
+           capture) keeps the captured/replayed velocity stream free of a
+           transpose dispatch -- in a JIT'd sampler a transpose left in the
+           forward would otherwise re-run every step over the huge bf16 weight;
        (2) on Metal a matmul whose B operand is a transposed VIEW reads the
            strided bytes as if row-major and returns garbage (see
-           Tests/metal_transposed_matmul.wlt); realizing the transpose to a
-           contiguous buffer feeds the matmul a row-major B and is exact.
-       This is bf16-native: w may stay bf16 (no bf16->f32 TUOpCast), which
+           Tests/metal_transposed_matmul.wlt); a pre-realised contiguous {in,out}
+           W^T feeds the matmul a row-major B and is exact.
+       This is bf16-native: wT may stay bf16 (no bf16->f32 TUOpCast), which
        halves the weight bytes loaded and skips the per-weight cast pass -- the
-       f32 cast was only needed for the old cblas transB view path. --- *)
-fxLinear[x_, w_] := TRealize[TMatMul[TRealize[x], TRealize[Transpose[w]]]]
+       f32 cast was only needed for the old cblas transB view path.
+       NOTE: only 2-D matmul weights are pre-transposed.  The RMSNorm/LayerNorm
+       gain weights (W["norm_q"] etc.) are 1-D and never pass through fxLinear,
+       so the loader leaves them un-transposed. --- *)
+fxLinear[x_, wT_] := TRealize[TMatMul[TRealize[x], wT]]
 
 (* --- affine-free LayerNorm over the last axis (FLUX block norms use
        elementwise_affine=False; the modulation supplies scale/shift).  This is
