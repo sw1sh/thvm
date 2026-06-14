@@ -2209,6 +2209,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                                      const char *c_name,
                                      u32 n_extent, u32 k_extent,
                                      RmuTcTile t, int c_is_bf, int stage_bf,
+                                     int b_trans, i64 b_nstride,
                                      FILE *fp, u32 depth) {
   // Staging + fragment element type.  When BOTH inputs are bf16 the tiles are
   // staged as bfloat and the simdgroup_matrix fragments are <bfloat>, so the
@@ -2266,7 +2267,10 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   // canonical packed FLUX shapes always are; scalar fallback otherwise).  Cuts
   // the staging-loop instruction count ~4x and saturates memory bandwidth.
   int a_vec = (t.kb % 4u == 0) && (k_extent % 4u == 0);
-  int b_vec = (tile_n % 4u == 0) && (n_extent % 4u == 0);
+  // A transposed B (B = Transpose[W], W {N,K} contiguous: B[k][n] = W[n][k])
+  // has its N-run strided by b_nstride, so the contiguous-inner vectorized
+  // load can't apply -- stage it with a scalar transposed gather.
+  int b_vec = !b_trans && (tile_n % 4u == 0) && (n_extent % 4u == 0);
   u32 a_elems = tile_m * t.kb, b_elems = t.kb * tile_n;
   // Emit-helper macros for the cooperative load of one K-block.  BUFOFF is the
   // MSL expression selecting the destination buffer half (an element offset
@@ -2298,7 +2302,20 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
     } while (0)
   #define EMIT_LOAD_B(BUFOFF, KK0)                                            \
     do {                                                                      \
-      if (b_vec) {                                                            \
+      if (b_trans) {                                                          \
+        /* B[k][n] = W[n][k] = b[(_tn + n)*b_nstride + (k0 + k)].  Iterate so  \
+           consecutive threads read consecutive K (W's contiguous axis) ->     \
+           COALESCED global reads; the strided threadgroup write is cheap.     \
+           _j -> (_n = _j/kb, _k = _j%%kb); stage _Bsm[_k*tile_n + _n]. */     \
+        IND(depth + 1); fprintf(fp,                                           \
+          "for (uint _j = _lid; _j < %uu; _j += %uu) {\n", b_elems, nthreads);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "uint _n = _j / %uu, _k = _j %% %uu;\n", t.kb, t.kb);               \
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[_k * %uu + _n] = %s[(_tn + _n) * %lluu + (%s) + _k];\n",\
+          BUFOFF, tile_n, b_name, (unsigned long long)b_nstride, KK0);        \
+        IND(depth + 1); fputs("}\n", fp);                                     \
+      } else if (b_vec) {                                                     \
         IND(depth + 1); fprintf(fp,                                           \
           "for (uint _i = _lid; _i < %uu; _i += %uu) {\n",                    \
           b_elems / 4u, nthreads);                                           \
@@ -2684,14 +2701,16 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   u32 _dta = uop_buffer_dtype(buf_a), _dtb = uop_buffer_dtype(buf_b);
   int _tc_dtype_ok = (_dta == DT_FP32 || _dta == DT_BF16)
                   && (_dtb == DT_FP32 || _dtb == DT_BF16);
-  // The register-blocked tiled emitter assumes a single contiguous
-  // row-major A[m*K+k] / B[k*N+n] per gemm -- it honours neither a batch
-  // base-pointer offset nor transposed/permuted operand views.  The
-  // batched gemm (attention's mhaBmm) has BOTH, so route it to the
-  // per-8x8-tile parallel_tc body below instead (which emits the full
-  // affine address via rmu_emit_term, batch offset included).
+  // The register-blocked tiled emitter assumes a row-major A[m*K+k] and
+  // either a row-major B[k*N+n] OR a transposed B = Transpose[W] (W {N,K}
+  // contiguous: B[k][n] = W[n][k], staged via b_nstride -- the contiguous
+  // FLUX path that loads {out,in} weights and matmuls Transpose[W]).  It
+  // honours neither a batch base-pointer offset nor a transposed A: the
+  // batched gemm (attention's mhaBmm) has a batch offset and an A-transpose
+  // falls through to the per-8x8-tile parallel_tc body below (which emits
+  // the full affine address via rmu_emit_term, any stride/offset included).
   int is_batched = (batch_axis_id != 0xFFFFFFFFu);
-  if (!is_batched && m_par && n_par && RMU_TARGET == CG_TARGET_METAL
+  if (!is_batched && !a_trans && m_par && n_par && RMU_TARGET == CG_TARGET_METAL
       && _tc_dtype_ok) {
     RmuTcTile tile;
     if (rmu_tc_pick_tile(m_extent, n_extent, k_extent, &tile)) {
@@ -2705,7 +2724,8 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       int c_is_bf = (uop_buffer_dtype(buf_c) == DT_BF16);
       int stage_bf = (_dta == DT_BF16) && (_dtb == DT_BF16);
       rmu_emit_matmul_tc_tiled(a_nm, b_nm, c_nm, n_extent,
-                               k_extent, tile, c_is_bf, stage_bf, fp, depth);
+                               k_extent, tile, c_is_bf, stage_bf,
+                               b_trans, ldb, fp, depth);
       return 1;
     }
   }
