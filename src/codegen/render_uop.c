@@ -2267,10 +2267,13 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   // canonical packed FLUX shapes always are; scalar fallback otherwise).  Cuts
   // the staging-loop instruction count ~4x and saturates memory bandwidth.
   int a_vec = (t.kb % 4u == 0) && (k_extent % 4u == 0);
-  // A transposed B (B = Transpose[W], W {N,K} contiguous: B[k][n] = W[n][k])
-  // has its N-run strided by b_nstride, so the contiguous-inner vectorized
-  // load can't apply -- stage it with a scalar transposed gather.
   int b_vec = !b_trans && (tile_n % 4u == 0) && (n_extent % 4u == 0);
+  // A transposed B (B = Transpose[W], W {N,K} contiguous: B[k][n] = W[n][k])
+  // can't vectorize its N-run (strided by b_nstride), but ITS K-run is W's
+  // contiguous axis -- so read 4 consecutive K as a vector (coalesced) and
+  // scatter to the strided threadgroup slots.  Needs kb and the W row stride
+  // 4-aligned; else a scalar coalesced gather.
+  int b_tvec = b_trans && (t.kb % 4u == 0) && (b_nstride % 4 == 0);
   u32 a_elems = tile_m * t.kb, b_elems = t.kb * tile_n;
   // Emit-helper macros for the cooperative load of one K-block.  BUFOFF is the
   // MSL expression selecting the destination buffer half (an element offset
@@ -2302,11 +2305,28 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
     } while (0)
   #define EMIT_LOAD_B(BUFOFF, KK0)                                            \
     do {                                                                      \
-      if (b_trans) {                                                          \
-        /* B[k][n] = W[n][k] = b[(_tn + n)*b_nstride + (k0 + k)].  Iterate so  \
-           consecutive threads read consecutive K (W's contiguous axis) ->     \
-           COALESCED global reads; the strided threadgroup write is cheap.     \
-           _j -> (_n = _j/kb, _k = _j%%kb); stage _Bsm[_k*tile_n + _n]. */     \
+      if (b_tvec) {                                                           \
+        /* B[k][n] = W[n][k]: read 4 consecutive K (W's contiguous axis) as a  \
+           vector (coalesced global load), scatter to the strided _Bsm slots.  \
+           _j -> (_n, _k4); stage _Bsm[(_k4+t)*tile_n + _n]. */                \
+        IND(depth + 1); fprintf(fp,                                           \
+          "for (uint _j = _lid; _j < %uu; _j += %uu) {\n", b_elems / 4u, nthreads);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "uint _n = _j / %uu, _k4 = (_j %% %uu) * 4u;\n", t.kb / 4u, t.kb / 4u);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "%s4 _bv = *(device const %s4*)(%s + (_tn + _n) * %lluu + (%s) + _k4);\n",\
+          sel, sel, b_name, (unsigned long long)b_nstride, KK0);              \
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[_k4 * %uu + _n] = _bv.x;\n", BUFOFF, tile_n);          \
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[(_k4 + 1u) * %uu + _n] = _bv.y;\n", BUFOFF, tile_n);   \
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[(_k4 + 2u) * %uu + _n] = _bv.z;\n", BUFOFF, tile_n);   \
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[(_k4 + 3u) * %uu + _n] = _bv.w;\n", BUFOFF, tile_n);   \
+        IND(depth + 1); fputs("}\n", fp);                                     \
+      } else if (b_trans) {                                                   \
+        /* scalar coalesced fallback (kb or W stride not 4-aligned). */        \
         IND(depth + 1); fprintf(fp,                                           \
           "for (uint _j = _lid; _j < %uu; _j += %uu) {\n", b_elems, nthreads);\
         IND(depth + 2); fprintf(fp,                                           \
