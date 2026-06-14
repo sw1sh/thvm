@@ -958,6 +958,19 @@ static u8 wmo_trace_dist_rhs(const AtpWmOrder *w, u32 trace) {
   return 0u;
 }
 
+// Whether `t` contains no free variables (is a ground term).
+static u8 wmo_term_is_ground(Term t) {
+  if (t == 0) return 1u;
+  if (term_tag(t) == TAG_FVR) return 0u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      if (!wmo_term_is_ground(term_ctr_at(t, i))) return 0u;
+    }
+  }
+  return 1u;
+}
+
 // Register the faces of the fact at `slot` (call right after
 // atp_push_rule commits the slot; the fact must already be oriented).
 //
@@ -972,8 +985,23 @@ static u8 wmo_trace_dist_rhs(const AtpWmOrder *w, u32 trace) {
 //     (Unifikation1.c:916).  thvm's CP constructor puts sigma(r_i) on
 //     cp.rhs (cp/_.c cp_visit: cp.lhs = sigma(l_i[p<-r_j]) = KPRechts,
 //     cp.rhs = sigma(r_i) = KPLinks) and the pop-time normalize keeps
-//     that lhs/rhs assignment -- so WM's distinguished face is thvm's
-//     STORED RHS, not its LHS.
+//     that lhs/rhs assignment -- so by DEFAULT WM's distinguished face is
+//     thvm's STORED RHS.
+//   - GROUND-vs-NON-GROUND CP-derived equations: thvm and WM can orient
+//     the same equation from DIFFERENT representative CPs (a given
+//     unorientable equation is formed by many overlaps, each with its
+//     own KPLinks/KPRechts roles; the one selected FIRST fixes WM's
+//     distinguished face).  When one side normalizes to a GROUND term and
+//     the other carries a variable, WM's selected representative lands
+//     KPLinks on the ground side: the ground side is produced by the
+//     Vater whose RHS the absorbing / grounding rule rewrote to a
+//     variable-free term, so WM keeps it as `links`.  thvm's stored
+//     orientation already matches WM's display (the pop-time normalize
+//     lands the ground side as thvm's LHS), but thvm's REPRESENTATIVE has
+//     KPLinks on the variable side, so the cp.rhs=KPLinks default would
+//     mislabel the distinguished face.  Pin dist_rhs to the ground side
+//     here (CommRing ZeroIsAbsorbing eq `and(const2,~k1)=and(x,~k1)`:
+//     dist_rhs=0, distinguished = the ground `and(const2,~k1)` LHS).
 // The stored orientation is NOT changed (that would perturb CP
 // generation via the formation-time KPAction order gate, which keys on
 // cp.peak = sigma(l_i)); instead the WM-vs-thvm face flip is recorded
@@ -995,6 +1023,15 @@ static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
   }
   u8 mono = atp_eq_is_mono(s, slot);
   u8 dist_rhs = (cp_derived && !mono) ? 1u : 0u;
+  if (cp_derived && !mono) {
+    // Ground-side override (see header): exactly one side ground -> WM's
+    // distinguished face is the ground side.
+    u8 lhs_ground = wmo_term_is_ground(s->lhs[slot]);
+    u8 rhs_ground = wmo_term_is_ground(s->rhs[slot]);
+    if (lhs_ground != rhs_ground) {
+      dist_rhs = rhs_ground ? 1u : 0u;
+    }
+  }
   Term dist = dist_rhs ? s->rhs[slot] : s->lhs[slot];
   Term rev  = dist_rhs ? s->lhs[slot] : s->rhs[slot];
   u32 n = wmo_face_cells(dist, cells, WMO_MAX_CELLS);

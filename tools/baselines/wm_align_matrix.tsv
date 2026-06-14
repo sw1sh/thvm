@@ -29,7 +29,7 @@ BooleanAxioms__OrCommutativity	6	6	6	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__OrDistributivity	5	5	5	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__OrIdempotence	15	15	15	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__Transposition	36	36	36	Y	-	thvm=PROVED weights-exact
-CommutativeRingAxioms__ZeroIsAbsorbing	547	549	492	N	493	thvm=PROVED content-delta_wm-only=0_thvm-only=2;post-axiom_nonax-wm=540_nonax-thvm=542_nonax-prefix=485;weights-exact
+CommutativeRingAxioms__ZeroIsAbsorbing	547	547	547	Y	-	thvm=PROVED weights-exact
 CommutativeRingWithIdentityAxioms__MinusOneYieldsInverse	576	576	576	Y	-	thvm=PROVED weights-exact
 CommutativeRingWithIdentityAxioms__ZeroIsAbsorbing	503	503	503	Y	-	thvm=PROVED weights-exact
 GroupAxioms__ImpliesMcCuneAxioms	33	33	33	Y	-	thvm=PROVED weights-exact

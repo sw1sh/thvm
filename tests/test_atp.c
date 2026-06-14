@@ -1986,6 +1986,29 @@ int main(void) {
     s->r_orient[1] = 0u; s->r_trace[1] = 403u; s->n_rules++; s->n_unorient++;
     atp_wmo_insert_fact_ex(s, 1u, /*cp_derived=*/0u);
     CHECK_EQ((u32)wmo_trace_dist_rhs(w, 403u), 0u);
+    // Ground-side override: a CP-derived unorientable equation with a
+    // GROUND lhs and a variable-bearing rhs gets dist_rhs = 0 -- thvm and
+    // WM can orient the same equation from different representative CPs,
+    // but WM's first-selected representative lands KPLinks on the ground
+    // side (the grounding/absorbing rule's output), so the WM-
+    // distinguished face is the ground stored LHS, not the cp.rhs default.
+    // (CommRing ZeroIsAbsorbing eq `and(const2,~k1) = and(x,~k1)`:
+    // ground `and(const2,~k1)` is distinguished -> full-identity sequence.)
+    // Cited: waldmeister INF/RUndEVerwaltung.c:407-425 (links = selRec.lhs
+    // = KPLinks), INF/Unifikation1.c:916.
+    s->lhs[2] = mk_f(mk_a(), mk_i(mk_a()));          // ground
+    s->rhs[2] = mk_f(mk_a(), mk_v(VAR_x));           // variable-bearing
+    s->r_orient[2] = 0u; s->r_trace[2] = 404u; s->n_rules++; s->n_unorient++;
+    CHECK_EQ((u32)atp_eq_is_mono(s, 2u), 0u);
+    atp_wmo_insert_fact_ex(s, 2u, /*cp_derived=*/1u);
+    CHECK_EQ((u32)wmo_trace_dist_rhs(w, 404u), 0u);
+    // The mirror flip on the OTHER orientation (ground rhs, variable lhs)
+    // pins dist_rhs = 1 -- the ground side is the stored RHS.
+    s->lhs[3] = mk_f(mk_a(), mk_v(VAR_x));           // variable-bearing
+    s->rhs[3] = mk_f(mk_a(), mk_i(mk_a()));          // ground
+    s->r_orient[3] = 0u; s->r_trace[3] = 405u; s->n_rules++; s->n_unorient++;
+    atp_wmo_insert_fact_ex(s, 3u, /*cp_derived=*/1u);
+    CHECK_EQ((u32)wmo_trace_dist_rhs(w, 405u), 1u);
     thvm_atp_free(s);
   }
 
