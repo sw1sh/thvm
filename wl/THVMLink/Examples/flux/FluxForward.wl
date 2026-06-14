@@ -13,25 +13,22 @@
    single block + transformer assembly. *)
 
 (* --- linear: a diffusers weight is stored {out, in}, so y = x . W^T.  The
-       weight arg `wT` here is ALREADY the contiguous {in, out} W^T -- the
-       caller/loader does the Transpose+realise ONCE (per weight), so this
-       forward contains NO per-call transpose.  Why pre-transpose outside the
-       forward:
-       (1) the weight is a constant; transposing it once (out of the JIT
-           capture) keeps the captured/replayed velocity stream free of a
-           transpose dispatch -- in a JIT'd sampler a transpose left in the
-           forward would otherwise re-run every step over the huge bf16 weight;
-       (2) on Metal a matmul whose B operand is a transposed VIEW reads the
-           strided bytes as if row-major and returns garbage (see
-           Tests/metal_transposed_matmul.wlt); a pre-realised contiguous {in,out}
-           W^T feeds the matmul a row-major B and is exact.
-       This is bf16-native: wT may stay bf16 (no bf16->f32 TUOpCast), which
-       halves the weight bytes loaded and skips the per-weight cast pass -- the
-       f32 cast was only needed for the old cblas transB view path.
-       NOTE: only 2-D matmul weights are pre-transposed.  The RMSNorm/LayerNorm
-       gain weights (W["norm_q"] etc.) are 1-D and never pass through fxLinear,
-       so the loader leaves them un-transposed. --- *)
-fxLinear[x_, wT_] := TRealize[TMatMul[TRealize[x], wT]]
+       weight arg `w` is the weight AS STORED ({out, in}, loaded contiguous on
+       the device) and fxLinear matmuls against the Transpose[w] VIEW.  The
+       Metal tiled tensor-core matmul stages a transposed B operand directly
+       from the weight's strides (render_uop.c rmu_emit_matmul_tc_tiled b_trans
+       path; Tests/metal_transposed_matmul.wlt), so the transpose is a FREE view
+       folded into the matmul's address computation:
+       (1) no separate transpose dispatch in the JIT-captured/replayed velocity
+           stream (a view carries no compute), and
+       (2) no second resident W^T buffer -- the weight is held ONCE on the
+           device (~weights-on-disk).  The earlier pre-transpose kept BOTH the
+           {out,in} upload AND the realised {in,out} W^T (~2x the weight bytes:
+           the flux-generate buffer OOM).
+       bf16-native: w stays bf16, so the matmul is bf16(act) x bf16(W) on the
+       simdgroup tensor cores (no bf16->f32 cast).  RMSNorm/LayerNorm gains are
+       1-D and never reach fxLinear, so the loader leaves them as-is. --- *)
+fxLinear[x_, w_] := TRealize[TMatMul[TRealize[x], Transpose[w]]]
 
 (* --- affine-free LayerNorm over the last axis (FLUX block norms use
        elementwise_affine=False; the modulation supplies scale/shift).  This is

@@ -138,29 +138,26 @@ qwTokenize[prompt_String, td_, seqLen_:512] := Module[{ids, pad, n, mask},
    real symbol -- not a passed-in <||> literal -- so `cache[n] = ...` is a valid
    part-assignment. *)
 
-(* transformer: rank-aware pre-transpose bf16 loader.  Realize the transposed
-   {in,out} W^T as a CONTIGUOUS host buffer FIRST, then upload only that -- a
-   bare TToDevice[Transpose[w]] uploads the original AND pins the realized W^T on
-   Metal (~2x the weight bytes: measured 15GB for an 8GB model, which alone
-   crowds the forward against the live-buffer ceiling).  The 1-D RMSNorm gains
-   upload as-is. *)
+(* transformer: bf16 contiguous loader.  Upload each weight AS STORED ({out,in})
+   straight to the device -- ONE buffer per weight, ~weights-on-disk resident.
+   fxLinear matmuls against the Transpose[w] VIEW (folded into the tiled
+   tensor-core matmul's address, no separate dispatch or buffer; see fxLinear in
+   FluxForward.wl), so there is NO pre-transpose.  The earlier pre-transpose
+   loader (realize Transpose[w] on the host, then upload) held the weight TWICE
+   -- the host {out,in} W^T plus the device upload (~2x: the flux-generate OOM).
+   1-D RMSNorm gains upload as-is (never reach fxLinear / a matmul). *)
 fxTransformerLoader[wt_, dev_] := Module[{cache = <||>},
-    n |-> Lookup[cache, n, cache[n] =
-        Module[{w = wt[n]},
-            If[ Length[Dimensions[w]] === 2, TToDevice[TRealize @ Transpose[w], dev],
-                                             TToDevice[TRealize @ w, dev]]]]]
+    n |-> Lookup[cache, n, cache[n] = TToDevice[wt[n], dev]]]
 
-(* Qwen text encoder: bf16, pre-transposed exactly like the transformer.  The
-   diffusers q/k/v/o/gate/up/down weights are stored {out,in}; qwLayer's fxLinear
-   is TMatMul[x {S,in}, W], which needs W as the contiguous {in,out} W^T.  The 1-D
-   RMSNorm gains pass straight through (un-transposed); the embed table stays
-   HOST-resident and un-transposed (qwEmbed host-gathers its rows). *)
+(* Qwen text encoder: bf16, contiguous exactly like the transformer.  The
+   diffusers q/k/v/o/gate/up/down weights are stored {out,in}; qwLayer reuses
+   fxLinear = TMatMul[x {S,in}, Transpose[w]], reading the weight transposed via
+   the tiled-transpose matmul -- so they upload AS STORED, no pre-transpose.  The
+   embed table stays HOST-resident and un-transposed (qwEmbed host-gathers its
+   rows). *)
 fxQwenLoader[qwt_, dev_] := Module[{cache = <||>},
     n |-> Lookup[cache, n, cache[n] =
-        If[ n === "model.embed_tokens.weight", qwt[n],
-            Module[{w = qwt[n]},
-                If[ Length[Dimensions[w]] === 2, TToDevice[TRealize @ Transpose[w], dev],
-                                                 TToDevice[TRealize @ w, dev]]]]]]
+        If[ n === "model.embed_tokens.weight", qwt[n], TToDevice[qwt[n], dev]]]]
 
 (* VAE: bf16 -> f32 (the VAE conv path wants f32), uploaded to the device.
    vaeDecoder asks for the latent-denorm stats as `bn_running_mean`/`bn_running_var`;
