@@ -103,31 +103,36 @@ vaeUpBlock[x_, Ws_List, Wup_, eps_] := Module[{h},
 
 (* === unpatchify ===================================================== *)
 
-(* BatchNorm denorm: z {256,128} *= sqrt(var + epsBn), += mean, per channel. *)
+(* BatchNorm denorm: z {S,128} *= sqrt(var + epsBn), += mean, per channel.
+   S = gridH*gridW image tokens (256 at 16x16); the per-feature mean/var
+   broadcast over the token axis. *)
 vaeDenorm[z_, mean_, var_, epsBn_] := With[{
-        m = TUOpReshape[mean, {1, 128}], v = TUOpReshape[var, {1, 128}]},
-    TUOpAdd[TUOpMul[z, TUOpExpand[TUOpSqrt[TUOpAdd[v, TUOpConst[N[epsBn]]]], {256, 128}]],
-            TUOpExpand[m, {256, 128}]]]
+        s = Dimensions[z], m = TUOpReshape[mean, {1, 128}], v = TUOpReshape[var, {1, 128}]},
+    TUOpAdd[TUOpMul[z, TUOpExpand[TUOpSqrt[TUOpAdd[v, TUOpConst[N[epsBn]]]], s]],
+            TUOpExpand[m, s]]]
 
-(* unpatchify: z {256,128} -> {32,32,32}.  Diffusers pipeline:
-     view {16,16,128} -> permute(2,0,1) {128,16,16}
-     -> reshape {32,2,2,16,16} -> permute(0,3,1,4,2) {32,16,2,16,2}
-     -> reshape {32,32,32}.  TUOpPermute is numpy-style (0-indexed axes);
-     validated to 2.4e-7 against the reference latent_unpatch. *)
-vaeUnpatchify[z_] := TUOpReshape[
+(* unpatchify: z {gridH*gridW,128} -> {32, 2*gridH, 2*gridW}.  Diffusers pipeline:
+     view {gridH,gridW,128} -> permute(2,0,1) {128,gridH,gridW}
+     -> reshape {32,2,2,gridH,gridW} -> permute(0,3,1,4,2) {32,gridH,2,gridW,2}
+     -> reshape {32,2*gridH,2*gridW}.  TUOpPermute is numpy-style (0-indexed
+     axes); at gridH=gridW=16 this is {16,16,128}->{32,32,32}, validated to
+     2.4e-7 against the reference latent_unpatch. *)
+vaeUnpatchify[z_, gridH_:16, gridW_:16] := TUOpReshape[
     TUOpPermute[
-        TUOpReshape[TUOpPermute[TUOpReshape[z, {16, 16, 128}], {2, 0, 1}], {32, 2, 2, 16, 16}],
+        TUOpReshape[TUOpPermute[TUOpReshape[z, {gridH, gridW, 128}], {2, 0, 1}], {32, 2, 2, gridH, gridW}],
         {0, 3, 1, 4, 2}],
-    {32, 32, 32}]
+    {32, 2 gridH, 2 gridW}]
 
 (* === full decoder =================================================== *)
 
 (* W is the flattened name->TTerm VAE loader (diffusers `decoder.*` etc.);
    helper wsub[prefix] slices an Association of the keys under a prefix.
    cfg has eps (GroupNorm 1e-6) + epsBn (1e-4). *)
-vaeDecoder[zPacked_, W_, wsub_, cfg_] := Module[{eps, epsBn, z, h},
+vaeDecoder[zPacked_, W_, wsub_, cfg_] := Module[
+    {eps, epsBn, gridH, gridW, z, h},
     eps = cfg["eps"];  epsBn = cfg["epsBn"];
-    z = vaeUnpatchify[vaeDenorm[zPacked, W["bn_running_mean"], W["bn_running_var"], epsBn]];
+    gridH = Lookup[cfg, "gridH", 16];  gridW = Lookup[cfg, "gridW", 16];
+    z = vaeUnpatchify[vaeDenorm[zPacked, W["bn_running_mean"], W["bn_running_var"], epsBn], gridH, gridW];
     h = vaeConv[z, W["post_quant_conv.weight"], W["post_quant_conv.bias"], 0];   (* 1x1 32->32 *)
     h = vaeConv[h, W["decoder.conv_in.weight"], W["decoder.conv_in.bias"], 1];   (* 3x3 32->512 *)
     h = vaeMidBlock[h,

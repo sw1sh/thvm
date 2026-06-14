@@ -87,13 +87,20 @@ qwLayer[x_, cos_, sin_, addMask_, W_, cfg_] := Block[
    cfg has heads/kv_heads/head_dim/eps/theta/layers/captureLayers.  Returns the
    {S, 3*hidden} per-token concat of the captured hidden states. *)
 qwenEncode[inputIds_List, attMask_List, wf_, cfg_] := Block[
-    {dh, eps, theta, nL, caps, s, cos, sin, addMask, x, captured, lcfg},
+    {dh, eps, theta, nL, caps, s, dev, toDev, cos, sin, addMask, x, captured, lcfg},
     dh = cfg["head_dim"];  eps = cfg["eps"];  theta = cfg["theta"];
     nL = cfg["layers"];  caps = cfg["captureLayers"];  s = Length[inputIds];
     lcfg = <|"heads" -> cfg["heads"], "kv_heads" -> cfg["kv_heads"], "head_dim" -> dh, "eps" -> eps|>;
+    (* place the host-built x/cos/sin/mask on the device the layer weights live
+       on: otherwise the additive mask (host) drags the attention-scores reduce
+       onto the CPU, where bf16 has no gemm and the {H,S,D,S} expand materialises
+       (2GB at S=512) instead of routing through the device batched gemm. *)
+    dev = TDevice[wf["model.layers.0.self_attn.q_proj.weight"]];
+    toDev = If[ dev === None || dev === "cpu", # &, TToDevice[#, dev] &];
     {cos, sin} = TRoPEHalfSplitTable[s, dh, theta];
-    addMask = TPaddingCausalMask[attMask];
-    x = qwEmbed[wf["model.embed_tokens.weight"], inputIds];
+    cos = toDev[cos];  sin = toDev[sin];
+    addMask = toDev @ TPaddingCausalMask[attMask];
+    x = toDev @ qwEmbed[wf["model.embed_tokens.weight"], inputIds];
     captured = <||>;
     Do[ x = TRealize @ qwLayer[x, cos, sin, addMask, qwLayerW[wf, i], lcfg];
         If[ MemberQ[caps, i], captured[i] = x],
