@@ -1989,6 +1989,53 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-unorient-equation-leaflist-rank");
+  {
+    // The NORMALIZE-redex selection (atp_unorient_step_indexed ->
+    // atp_ft_unorient_step) chooses among the unorientable equations that
+    // match one position.  Legacy thvm fired the lowest-SLOT equation,
+    // l->r before r->l; WM consults the Gleichungsbaum
+    // (MO_GleichungGefunden, MatchOperationen.c:658-763), reaching the
+    // matching leaf in discrimination-tree order then walking that leaf's
+    // GleichungsT chain and firing the FIRST order-decreasing member.  On
+    // an AC theory several rotation equations share one leaf, so slot
+    // order picks a different rotation than WM and bakes a swapped
+    // commutative argument order into the resulting rule (Huntington
+    // DoubleNegation rule 12 inner-or args vs WM rule 9).  The
+    // atp_wmo_eq_leaflist_rank accessor exposes the WM leaf-list rank +
+    // within-leaf chain index that the candidate sort re-keys on.
+    //
+    // Two unorientable equations whose distinguished (lhs) faces are
+    // alpha-DISTINCT i(.) patterns of EQUAL depth share the same depth
+    // class: the first inserted heads the leaf list, the second inserts
+    // immediately after it -- so their leaf-list ranks are 0 and 1.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    // eq0: i(f(x,a)) = f(a,x)   (distinguished lhs = i(f(x,a)), depth 3)
+    s->lhs[0] = mk_i(mk_f(mk_v(VAR_x), mk_a()));
+    s->rhs[0] = mk_f(mk_a(), mk_v(VAR_x));
+    s->r_orient[0] = 0u; s->r_trace[0] = 500u; s->n_rules++; s->n_unorient++;
+    atp_wmo_insert_fact_ex(s, 0u, /*cp_derived=*/0u);
+    // eq1: i(f(a,y)) = f(y,a)   (distinguished lhs = i(f(a,y)), depth 3)
+    s->lhs[1] = mk_i(mk_f(mk_a(), mk_v(1u)));
+    s->rhs[1] = mk_f(mk_v(1u), mk_a());
+    s->r_orient[1] = 0u; s->r_trace[1] = 501u; s->n_rules++; s->n_unorient++;
+    atp_wmo_insert_fact_ex(s, 1u, /*cp_derived=*/0u);
+    // Both faces are mono-distinct so dist_rhs = 0; thvm dir 0 (match lhs)
+    // = WM-distinguished face 0.  eq0's distinguished face was inserted
+    // first (leaf-list head, rank 0); eq1's second (rank 1).
+    u32 ll0 = 0xffffu, ch0 = 0xffffu, ll1 = 0xffffu, ch1 = 0xffffu;
+    CHECK_EQ((u32)atp_wmo_eq_leaflist_rank(s, 500u, /*thvm_dir=*/0u, &ll0, &ch0), 1u);
+    CHECK_EQ((u32)atp_wmo_eq_leaflist_rank(s, 501u, /*thvm_dir=*/0u, &ll1, &ch1), 1u);
+    // Distinct leaves (different patterns) -> distinct leaf-list ranks,
+    // eq0 (inserted first, same depth class) ahead of eq1.
+    CHECK(ll0 < ll1);
+    // An unregistered trace yields no rank (caller falls back to slot).
+    u32 llx = 0xffffu, chx = 0xffffu;
+    CHECK_EQ((u32)atp_wmo_eq_leaflist_rank(s, 999u, 0u, &llx, &chx), 0u);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-self-root-face-flip");
   {
     // WM's self-root phases are classified by FACE, not by thvm's raw

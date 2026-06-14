@@ -42,7 +42,7 @@ HigmanNeumannAxioms__EqualityOfIdentities	13	13	13	Y	-	thvm=PROVED weights-exact
 HigmanNeumannAxioms__LeftIdentity	13	13	13	Y	-	thvm=PROVED weights-exact
 HigmanNeumannAxioms__RightIdentity	11	11	11	Y	-	thvm=PROVED weights-exact
 HillmanAxioms__Commutativity	182	182	182	Y	-	thvm=PROVED weights-exact
-HuntingtonAxioms__DoubleNegation	215	218	57	N	58	thvm=PROVED content-delta_wm-only=11_thvm-only=14;post-axiom_nonax-wm=212_nonax-thvm=215_nonax-prefix=54;weights-exact
+HuntingtonAxioms__DoubleNegation	215	215	78	N	79	thvm=PROVED content-delta_wm-only=3_thvm-only=3;post-axiom_nonax-wm=212_nonax-thvm=212_nonax-prefix=75;weights-exact
 McCuneAxioms__Associativity	213	213	213	Y	-	thvm=PROVED weights-exact
 McCuneAxioms__EqualityOfInverses	156	156	156	Y	-	thvm=PROVED weights-exact
 McCuneAxioms__InverseOfComposite	130	130	130	Y	-	thvm=PROVED weights-exact

@@ -1173,6 +1173,23 @@ static u8 wmo_leaflist_rank(AtpWmOrder *w, u8 tree, u32 trace, u8 face,
   return 0u;
 }
 
+// Public wrapper: Gleichungsbaum (tree 1) leaf-list rank for one
+// unorientable equation face, used by the normalize-redex selection to
+// rank competing equation candidates in WM's MO_GleichungGefunden
+// retrieval order.  `thvm_dir` is the candidate's rewrite direction
+// (0 = match stored LHS, 1 = match stored RHS); the WM face it queries
+// is `thvm_dir XOR dist_rhs` (CP-derived non-mono equations store the
+// WM-distinguished face as thvm's RHS).  Returns 0 when the mirror is
+// absent or the face is not registered (caller falls back to slot
+// order).
+static u8 atp_wmo_eq_leaflist_rank(AtpState *s, u32 trace, u8 thvm_dir,
+                                   u32 *out_ll, u32 *out_chain) {
+  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+  if (w == NULL) return 0u;
+  u8 wm_face = (u8)(thvm_dir ^ wmo_trace_dist_rhs(w, trace));
+  return wmo_leaflist_rank(w, 1u, trace, wm_face, out_ll, out_chain);
+}
+
 // Tops arrival rank: DFS over `tree` with the query = subterm of
 // `face_term` at CP position path; rank of the first arrival whose
 // chain contains (trace, face).  Rule tree consults the chain HEAD

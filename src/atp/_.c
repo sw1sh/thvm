@@ -463,6 +463,17 @@ static u32  atp_wmo_victim_drain_key(AtpState *s, u32 trace);
 static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t);
 static u64  atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
                          const CriticalPair *cp);
+// Gleichungsbaum (equation-tree) leaf-list rank for the unorientable
+// equation with trace id `trace`, queried on the rewrite direction
+// `thvm_dir` (0 = match stored LHS, 1 = match stored RHS; the WM face is
+// thvm_dir XOR dist_rhs).  Returns 1 + fills (*out_ll, *out_chain) with
+// the leaf-list position and within-leaf chain index that WM's
+// MO_GleichungGefunden DFS reaches the face in; 0 when the face is not
+// registered.  Lets the normalize-redex selection (atp_ft_unorient_step)
+// rank competing equation candidates in WM's retrieval order instead of
+// thvm slot order.  Defined in wm_order.c.
+static u8   atp_wmo_eq_leaflist_rank(AtpState *s, u32 trace, u8 thvm_dir,
+                                     u32 *out_ll, u32 *out_chain);
 
 // Waldmeister loader-level axiom canonicalization (src/atp/wm_intake.c,
 // included next to wm_order.c).  Forward declaration so the first
@@ -3611,22 +3622,55 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
       if (r == 1u) return 0u;
       continue;
     }
-    // Sort the candidates into the linear scan's priority order.  The
-    // linear scan tries each rule ascending, l->r before r->l, and fires
-    // the first order-decreasing instance, so the priority key is
-    // (rule << 1) | dir (dir: l->r = 0, r->l = 1) -- ascending in this
-    // key reproduces (rule asc, l->r first) EXACTLY.  (The leaf rec packs
-    // dir in the high bit, which is a fine encoding but the WRONG sort
-    // order across rules -- r->l of rule i must precede l->r of rule i+1,
-    // which the high-bit packing inverts -- so re-key here.)  N is tiny
-    // (faces matching one subterm); insertion sort, stable on equal keys
-    // (duplicates cannot occur -- one rec per (rule, dir)).
+    // Sort the candidates into the redex-selection priority order.
+    //
+    // Default engine: the linear scan tries each rule ascending, l->r
+    // before r->l, and fires the first order-decreasing instance, so the
+    // priority key is (rule << 1) | dir (dir: l->r = 0, r->l = 1) --
+    // ascending in this key reproduces (rule asc, l->r first) EXACTLY.
+    // (The leaf rec packs dir in the high bit, which is a fine encoding
+    // but the WRONG sort order across rules -- r->l of rule i must
+    // precede l->r of rule i+1, which the high-bit packing inverts -- so
+    // re-key here.)
+    //
+    // WM-emission-order mode (use_wm_emission_order, the Waldmeister
+    // presets): WM's NormalformMixMost consults the Gleichungsbaum via
+    // MO_GleichungGefunden (MatchOperationen.c:658-763), a DFS that
+    // reaches the equation leaf in WM's discrimination-tree order, then
+    // walks that leaf's GleichungsT chain and fires the FIRST chain
+    // member whose grounded RHS is order-decreasing.  thvm slot order is
+    // NOT that order: two AC-permutation equations sharing the leaf
+    // `or(x,or(y,z))` differ only by which rotation fires, so slot order
+    // picks a different rotation than WM and bakes a swapped commutative
+    // argument order into the resulting rule (Huntington DN rule12 vs WM
+    // rule9 inner-or args).  Re-key by the equation's leaf-list rank +
+    // within-leaf chain index (atp_wmo_eq_leaflist_rank, the same wm_order
+    // mirror that orders CP emission); unranked faces (mirror miss) sort
+    // AFTER the ranked ones, by slot, so the fallback is the legacy order.
+    //
+    // N is tiny (faces matching one subterm); insertion sort, stable on
+    // equal keys (duplicates cannot occur -- one rec per (rule, dir)).
     static u32 cand[ATP_RI_MAXCAND];
     for (u32 k = 0; k < ncand; k++) {
       u32 packed = g_atp_ri_cand[k];
       u32 rule   = packed & ~ATP_RI_DIR_BIT;
       u32 rl     = (packed & ATP_RI_DIR_BIT) ? 1u : 0u;
-      cand[k]    = (rule << 1) | rl;
+      u32 slot_key = (rule << 1) | rl;
+      if (s->use_wm_emission_order) {
+        u32 ll = 0u, ch = 0u;
+        // Bit layout (high -> low): [unranked flag:1][ll:13][ch:8]
+        // [slot_key:10].  Ranked faces (flag 0) sort before unranked
+        // (flag 1); ties on (ll, ch) fall back to slot order.
+        if (atp_wmo_eq_leaflist_rank(s, s->r_trace[rule], rl, &ll, &ch)) {
+          if (ll > 0x1fffu) ll = 0x1fffu;
+          if (ch > 0xffu)   ch = 0xffu;
+          cand[k] = (ll << 18) | (ch << 10) | (slot_key & 0x3ffu);
+        } else {
+          cand[k] = (1u << 31) | (slot_key & 0x3ffu);
+        }
+      } else {
+        cand[k] = slot_key;
+      }
     }
     for (u32 a = 1u; a < ncand; a++) {
       u32 v = cand[a];
@@ -3636,8 +3680,9 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
     }
     for (u32 k = 0; k < ncand; k++) {
       u32 key    = cand[k];
-      u32 rule   = key >> 1;
-      u8  rl     = (u8)(key & 1u);
+      u32 slot_key = s->use_wm_emission_order ? (key & 0x3ffu) : key;
+      u32 rule   = slot_key >> 1;
+      u8  rl     = (u8)(slot_key & 1u);
       Term pat   = rl ? s->rhs[rule] : s->lhs[rule];
       Term other = rl ? s->lhs[rule] : s->rhs[rule];
       RewriteSubst subst = {{0}};
