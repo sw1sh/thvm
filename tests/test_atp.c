@@ -2338,6 +2338,71 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-split-ancestor-jump-no-fresh-duplicate");
+  {
+    // HuntingtonAxioms DoubleNegation @79.  A strict-ancestor jump (the
+    // enclosing function subterm opened ABOVE the leaf-found split point)
+    // is shared structurally by the old and new leaf: WM keeps ONE outgoing
+    // exit at that ancestor node and AltesBlattPolieren's else-branch
+    // (DSBaumOperationen.c :534-560) merely RE-TARGETS it from the old leaf
+    // onto the inner chain node, preserving its outgoing-list position
+    // (only Sprungeingaenge and Zielknoten change, not Sprungausgaenge).
+    // No fresh parallel is built.  thvm must not head-insert a duplicate
+    // `anc` jump there; doing so reordered the ancestor node's exit list
+    // (prepending the later split's branch ahead of the earlier one) and
+    // flipped the tops-DFS arrival order of the partner rules.
+    //
+    // Build the four order-13 faces in WM insertion order (or = binary
+    // label 3, not = unary label 2), all depth 5, splitting pairwise at the
+    // same strict-ancestor depth-1 `not(or(...))` subterm:
+    //   t3   = or(not(or(not(v0),v1)), not(or(not(v0),not(v1))))  branch B
+    //   t65  = or(not(or(v0,not(v1))), not(or(not(v1),not(v0))))  branch A
+    //   t79  = or(not(or(not(v0),v1)), not(or(not(v1),not(v0))))  branch B
+    //   t100 = or(not(or(v0,not(v1))), not(or(not(v0),not(v1))))  branch A
+    // Inserting t79 splits t3 and t100 splits t65, each closing the
+    // depth-1 ancestor jump within the new chain.  The WM tops-DFS query
+    // or(v0, not(or(not(v1),not(v2)))) (the order-13 LHS first-arg subterm)
+    // must arrive partners in WM CPNr order: t79, t3, t65, t100 (branch B
+    // before branch A).  A spurious fresh `anc` jump head-inserts branch A
+    // ahead of branch B and yields the wrong [t65, t100, t79, t3].
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    Term v0 = mk_v(0u), v1 = mk_v(1u);
+    // or = mk_f, not = mk_i
+    Term lhss[4] = {
+      mk_f(mk_i(mk_f(mk_i(v0), v1)), mk_i(mk_f(mk_i(v0), mk_i(v1)))),  // t3
+      mk_f(mk_i(mk_f(v0, mk_i(v1))), mk_i(mk_f(mk_i(v1), mk_i(v0)))),  // t65
+      mk_f(mk_i(mk_f(mk_i(v0), v1)), mk_i(mk_f(mk_i(v1), mk_i(v0)))),  // t79
+      mk_f(mk_i(mk_f(v0, mk_i(v1))), mk_i(mk_f(mk_i(v0), mk_i(v1)))),  // t100
+    };
+    u32 traces[4] = { 3u, 65u, 79u, 100u };
+    for (u32 k = 0; k < 4u; k++) {
+      s->lhs[k] = lhss[k];
+      s->rhs[k] = mk_v(0u);
+      s->r_orient[k] = 1u;
+      s->r_trace[k] = traces[k];
+      s->n_rules++;
+      atp_wmo_insert_fact(s, k);
+    }
+    {
+      AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+      // tops query = or(v0, not(or(not(v1), not(v2)))) with a fresh free
+      // variable at the first arg (the order-13 face's enclosing position).
+      Term q = mk_f(mk_v(2u),
+                    mk_i(mk_f(mk_i(mk_v(0u)), mk_i(mk_v(1u)))));
+      u32 a3 = 0, a65 = 0, a79 = 0, a100 = 0, ch = 0;
+      CHECK_EQ((u32)wmo_tops_rank(w, 0u, q, 3u, 0u, &a3, &ch), 1u);
+      CHECK_EQ((u32)wmo_tops_rank(w, 0u, q, 65u, 0u, &a65, &ch), 1u);
+      CHECK_EQ((u32)wmo_tops_rank(w, 0u, q, 79u, 0u, &a79, &ch), 1u);
+      CHECK_EQ((u32)wmo_tops_rank(w, 0u, q, 100u, 0u, &a100, &ch), 1u);
+      // WM CPNr order: 336(t79) < 337(t3) < 338(t65) < 339(t100).
+      CHECK(a79 < a3);
+      CHECK(a3 < a65);
+      CHECK(a65 < a100);
+    }
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-removal-collapse-exit-head");
   {
     // Removal-avalanche exit-order corner (BO_ObjektEntfernen Schrumpfen,

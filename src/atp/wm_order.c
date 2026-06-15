@@ -575,10 +575,36 @@ static void wmo_tree_insert(WmoTree *t, const WmoCell *key, u32 key_len,
       }
       // 2b) ancestor pendings closing within the chain (the C chain
       //     loop pops these with Ziel = the chain node, prepended at
-      //     their ancestor start nodes)
+      //     their ancestor start nodes).
+      //
+      // A strict-ancestor jump (start above the leaf-found position i) is
+      // shared structurally by the old and new leaf: WM keeps ONE outgoing
+      // exit at that start node and AltesBlattPolieren's else-branch
+      // (DSBaumOperationen.c :534-560) merely re-targets it from the old
+      // leaf onto the inner chain node (the outgoing-list position is
+      // preserved; it touches only Sprungeingaenge and Zielknoten, not
+      // Sprungausgaenge).  No fresh parallel is built, because the new leaf
+      // is reached THROUGH that same inner node.  When the old leaf already
+      // carries the in-entry that pass 3 will rewire to this very chain
+      // node, a fresh prepended `anc` entry would be a spurious duplicate
+      // that reorders the start node's exit list (head-inserting it ahead
+      // of older sibling jumps).  Skip it; pass 3's in-place rewire keeps
+      // WM's order (HuntingtonAxioms DoubleNegation @79).  The fresh entry
+      // is still created when the old leaf has no such in-entry (the new
+      // leaf's ancestor subterm is structurally absent in the old leaf).
       for (u32 k = n_anc; k-- > 0;) {
         u32 e = wmo_sub_end(key, anc[k].pos);
-        wmo_entry_add(anc[k].node, key + anc[k].pos, e - anc[k].pos,
+        u32 span = e - anc[k].pos;
+        u8 old_has = 0u;
+        for (WmoEntry *oe = anc[k].node->exits; oe != NULL; oe = oe->next) {
+          if (oe->ziel == (void *)old && oe->sub_len == span) {
+            u32 c = 0;
+            while (c < span && wmo_cell_eq(&oe->sub[c], &key[anc[k].pos + c])) c++;
+            if (c == span) { old_has = 1u; break; }
+          }
+        }
+        if (old_has) continue;
+        wmo_entry_add(anc[k].node, key + anc[k].pos, span,
                       node_at[e - (i + 1u)], 0u, NULL);
       }
       // 3) AltesBlattPolieren on the old leaf's pre-existing in-entries
