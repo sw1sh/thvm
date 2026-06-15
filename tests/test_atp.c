@@ -2187,6 +2187,64 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-tops-rank-wide-tree");
+  {
+    // Regression guard for the tops-DFS arrival buffer cap.  WM's CP
+    // emission order ranks a new fact's tops overlaps by the discrim-tree
+    // ARRIVAL position of the partner leaf (wmo_tops_rank).  The
+    // combinator signatures (CombinatorAxioms / Meredith opCenterdot)
+    // build very wide trees where one query subterm unifies with several
+    // THOUSAND stored leaves; the old fixed 512-leaf arrival buffer
+    // silently truncated those scans (SKIToBCKW c2: 2069 truncated
+    // ranks), scrambling the equal-weight FIFO age order the selection
+    // heap breaks ties on.  Here `N_WIDE` rules f(i^k(a), e) -> a all
+    // share the top f(.,.), so a new fact whose subterm is f(i(a), e)
+    // unifies every one of them at the top: the partner that arrives past
+    // index 512 must still be found (no rank-miss).  With the old cap the
+    // late-arriving partner's overlap fell into the 0x3fff fallback
+    // bucket and the rank-miss counter spiked.
+    const u32 N_WIDE = 700u;
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    atp_ensure_rule_cap(s, N_WIDE + 1u);
+    for (u32 k = 0; k < N_WIDE; k++) {
+      // Distinct LHS per rule (i-chain depth k): the discrim tree gets
+      // N_WIDE separate leaves, all sharing the top f(.,.) so a query
+      // f(x, e) arrives at every one of them.
+      Term inner = mk_a();
+      for (u32 d = 0; d < k; d++) inner = mk_i(inner);
+      s->lhs[k] = mk_f(inner, mk_e());
+      s->rhs[k] = mk_a();
+      s->r_orient[k] = 1u;
+      s->r_trace[k] = 1000u + k;
+      s->n_rules++;
+      atp_wmo_insert_fact(s, k);
+    }
+    AtpWmOrder *w0 = (AtpWmOrder *)s->wmo;
+    u32 misses_before = w0->rank_misses;
+    // New fact i(f(x, e)) -> x: its proper subterm f(x, e) (VARIABLE first
+    // arg) unifies the shared top of EVERY stored rule f(i^k(a), e), so
+    // the tops DFS arrives at all N_WIDE leaves.  Each generates one tops
+    // CP; every partner leaf must rank (none fall to the 0x3fff miss
+    // fallback) now that the arrival buffer holds all N_WIDE arrivals --
+    // with the old 512 cap the leaves past index 512 were dropped and
+    // their overlaps spiked the rank-miss counter.
+    u32 nf = N_WIDE;
+    s->lhs[nf] = mk_i(mk_f(mk_v(VAR_x), mk_e()));
+    s->rhs[nf] = mk_v(VAR_x);
+    s->r_orient[nf] = 1u;
+    s->r_trace[nf] = 1000u + nf;
+    s->n_rules++;
+    atp_wmo_insert_fact(s, nf);
+    AtpAddedRange added = {nf, 1u, 0u};
+    (void)thvm_atp_generate_cps(s, added);
+    AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+    // The wide tree must not produce any new tops rank-miss: every
+    // partner (including those arriving past the old 512 cap) was found.
+    CHECK_EQ(w->rank_misses, misses_before);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-ir-victim-equation-before-rule");
   {
     // WM IR_InterreduktionLinks runs GMInterred (equation victims) BEFORE

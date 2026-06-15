@@ -1287,15 +1287,30 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
   WmoCell q[WMO_MAX_CELLS];
   u32 qn = wmo_face_cells(query_sub, q, WMO_MAX_CELLS);
   if (qn == 0u) return 0u;
-  WmoLeaf *arr[512];
-  WmoDfs d = { q, qn, arr, 0u, 512u };
+  // Arrival buffer for the tops DFS.  The combinator signatures
+  // (CombinatorAxioms / Meredith opCenterdot) build very wide
+  // discrimination trees: a single query subterm can unify with several
+  // thousand stored leaves, far past the old 512 cap (SKIToBCKW c2:
+  // 2069 of these scans truncated, scrambling the equal-weight FIFO
+  // age order WM's selection heap breaks ties on).  Heap-allocated so
+  // a large cap does not blow the stack frame; sized to comfortably
+  // hold every live leaf (the rule/equation trees never exceed a few
+  // thousand faces in the WM presets).  The depth_guard bounds the trie
+  // descent by query-cell count; a query face can hold up to
+  // WMO_MAX_CELLS (768) cells, so 4000 covers the deepest query without
+  // cutting a descent short of its target leaf.
+  enum { WMO_TOPS_ARR_CAP = 16384u };
+  WmoLeaf **arr = (WmoLeaf **)malloc(WMO_TOPS_ARR_CAP * sizeof(WmoLeaf *));
+  if (arr == NULL) return 0u;
+  WmoDfs d = { q, qn, arr, 0u, WMO_TOPS_ARR_CAP };
   WmoUnif u;
   memset(&u, 0, sizeof u);
   if (w->tree[tree].root != NULL) {
     // dispatch from the root: kids keyed by cell 0
-    wmo_dfs(&d, w->tree[tree].root, 0u, 0u, 0xffffffffu, &u, 200u);
+    wmo_dfs(&d, w->tree[tree].root, 0u, 0u, 0xffffffffu, &u, 4000u);
   }
-  for (u32 a = 0; a < d.n_out; a++) {
+  u8 hit = 0u;
+  for (u32 a = 0; a < d.n_out && !hit; a++) {
     WmoLeaf *l = d.out[a];
     u32 c_limit = (tree == 0u) ? 1u : l->n_chain;
     for (u32 c = 0; c < c_limit && c < l->n_chain; c++) {
@@ -1303,11 +1318,13 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
           l->chain[c].face == partner_face) {
         *out_arrival = a;
         *out_chain = c;
-        return 1u;
+        hit = 1u;
+        break;
       }
     }
   }
-  return 0u;
+  free(arr);
+  return hit;
 }
 
 // Compute the WM emission rank key for one tagged CP of the new fact
