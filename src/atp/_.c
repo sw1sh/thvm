@@ -6537,10 +6537,10 @@ fn void thvm_atp_clear_gnn_scorer(void) {
   g_atp_gnn.hidden = 0u;
   g_atp_gnn_active = 0;
   // The captured forward bakes the model weights as constants; a reload
-  // with different weights must re-capture, so invalidate the cache.  The
-  // sandbox context is not selected here, so the drop only frees the jit
-  // slots (the buffers are reclaimed by the next reset); that is fine --
-  // the cache entries are zeroed, forcing a fresh capture next use.
+  // with different weights must re-capture, so invalidate the cache.  This
+  // runs in the engine context, but atp_gnn_capture_cache_clear selects the
+  // GNN sandbox context for the drop so the retained-buffer unpin/decref hit
+  // the correct context's CPU_BUFS.
   atp_gnn_capture_cache_clear();
 }
 
@@ -6722,16 +6722,35 @@ typedef struct {
 static AtpGnnCapture g_atp_gnn_captures[ATP_GNN_CAP_SLOTS];
 
 // Drop every cached GCN capture.  Called wherever thvm_reset is issued in
-// the sandbox context: the reset frees the captured buffers + slots, so the
-// cached (B, slot, tid, buf_id) tuples are stale and the next re-rank at any
-// bucket must re-capture from scratch.
+// the sandbox context, AND from thvm_atp_clear_gnn_scorer (which runs in the
+// engine context).  jit_capture_drop releases each capture's retained
+// buffers via buf_jit_unpin / buf_decref, and those hooks index the CURRENT
+// context's CPU_BUFS (CPU_BUFS == CURRENT_CTX->cpu_bufs).  The retained
+// buf_ids name buffers in the GNN sandbox context (g_atp_gnn_ctx), so the
+// drop MUST run with that context selected -- otherwise the unpin/decref
+// lands on whatever buffer happens to share that id in the engine context,
+// dropping a live engine buffer's refcount to 0 and freeing it under a kernel
+// that still reads it (the train-then-rerank SIGSEGV).  Select the sandbox
+// context for the drop and restore the caller's context after.
 static void atp_gnn_capture_cache_clear(void) {
+  int have_slots = 0;
+  for (u32 i = 0u; i < ATP_GNN_CAP_SLOTS; i++) {
+    if (g_atp_gnn_captures[i].slot != 0u) { have_slots = 1; break; }
+  }
+  u32 prev = 0u;
+  int switched = 0;
+  if (have_slots && g_atp_gnn_ctx != 0u
+      && thvm_context_current() != g_atp_gnn_ctx) {
+    prev = thvm_context_select(g_atp_gnn_ctx);
+    switched = 1;
+  }
   for (u32 i = 0u; i < ATP_GNN_CAP_SLOTS; i++) {
     if (g_atp_gnn_captures[i].slot != 0u) {
       jit_capture_drop(g_atp_gnn_captures[i].slot);
     }
     g_atp_gnn_captures[i] = (AtpGnnCapture){0};
   }
+  if (switched) thvm_context_select(prev);
 }
 
 // Find the cache entry for bucket B, or the first empty slot to fill.

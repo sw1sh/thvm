@@ -605,6 +605,7 @@ static void init_ctx_arrays(TContext *ctx) {
     ctx->book_heap        = (Term *)       arena_map(thvm_book_cells() * sizeof(Term));
     ctx->alo_states       = (AloState *)   arena_map(ALO_STATE_CAP * sizeof(AloState));
     ctx->cpu_bufs         = (CpuBuf *)     arena_map(CPU_BUFS_CAP  * sizeof(CpuBuf));
+    ctx->kid_jit_fn       = (void **)      arena_map(KERNELS_CAP   * sizeof(void *));
     init_default_ctx_scalars(ctx);
     memset(ctx->defs,             0, sizeof(ctx->defs));
     memset(ctx->book_ref_visited, 0, sizeof(ctx->book_ref_visited));
@@ -789,6 +790,7 @@ void thvm_free(void) {
   }
   arena_unmap(TENS,    TENS_CAP    * sizeof(TenDesc));            TENS = NULL;
   arena_unmap(KERNELS, KERNELS_CAP * sizeof(KernelEntry));        KERNELS = NULL;
+  arena_unmap(KID_JIT_FN, KERNELS_CAP * sizeof(void *));          KID_JIT_FN = NULL;
   arena_unmap(BOOK_HEAP, thvm_book_cells() * sizeof(Term));       BOOK_HEAP = NULL;
   arena_unmap(ALO_STATES, ALO_STATE_CAP * sizeof(AloState));      ALO_STATES = NULL;
   arena_unmap(CPU_BUFS,   CPU_BUFS_CAP  * sizeof(CpuBuf));        CPU_BUFS = NULL;
@@ -937,6 +939,7 @@ void thvm_context_destroy(u32 slot) {
     free(ctx->wnf_last_stack);
     arena_unmap(ctx->tens,       TENS_CAP    * sizeof(TenDesc));
     arena_unmap(ctx->kernels,    KERNELS_CAP * sizeof(KernelEntry));
+    arena_unmap(ctx->kid_jit_fn, KERNELS_CAP * sizeof(void *));
     arena_unmap(ctx->book_heap,  thvm_book_cells() * sizeof(Term));
     arena_unmap(ctx->alo_states, ALO_STATE_CAP * sizeof(AloState));
     arena_unmap(ctx->cpu_bufs,   CPU_BUFS_CAP  * sizeof(CpuBuf));

@@ -1305,6 +1305,12 @@ typedef struct TContext {
     Term       *book_heap;
     AloState   *alo_states;
     CpuBuf     *cpu_bufs;                // CPU backend buf table
+    void      **kid_jit_fn;             // [KERNELS_CAP] CpuJitFn per-kid cache
+                                        // (cpu/jit.c).  Per-context because it
+                                        // indexes this context's `kernels`; a
+                                        // shared global aliased kids across
+                                        // contexts and dispatched the wrong
+                                        // compiled fn (train-then-rerank crash).
 
     /* Inline small arrays (per-context, zero-init in BSS). */
     Term        defs[DEFS_CAP];
@@ -1396,6 +1402,7 @@ extern _Thread_local WnfThreadState *CURRENT_WNF_STATE;
 #define CPU_BUFS_NEXT       (CURRENT_CTX->cpu_bufs_next)
 #define CPU_FREELIST        (CURRENT_CTX->cpu_freelist)
 #define CPU_FREELIST_LEN    (CURRENT_CTX->cpu_freelist_len)
+#define KID_JIT_FN          (CURRENT_CTX->kid_jit_fn)
 
 // Hot-path counters (see HotCounters / instrument/hot_counters.c).
 #define HOT_HEAP_REPLACE_CALLS  (CURRENT_CTX->hot.heap_replace_calls)
@@ -3341,7 +3348,8 @@ typedef enum {
   KDISPATCH_METAL_OP    = 7,   // Metal: per-op shader fallback (DAG-side encoder over cached_lift)
   KDISPATCH_CPU_TILE    = 8,   // [retired -- cpu_dispatch_tile deleted; slot reserved]
   KDISPATCH_METAL_TILE  = 9,   // Metal: render_uop UOp-DAG -> MSL -> single-encoder dispatch
-  KDISPATCH_METAL_GEMM  = 10,  // [retired in 4e30432b -- metal_try_gemm deleted]
+  KDISPATCH_METAL_MPS   = 10,  // Metal: MPSMatrixMultiplication GEMM (per-op replay only, not ICB-batchable)
+                               // reuses the slot vacated by the retired metal_try_gemm (4e30432b)
   // 11 was KDISPATCH_METAL_CONV (retired; metal_try_conv2d_flat was a
   // diagnostic-only branch gated on THVM_METAL_SPECIALIZED, deleted in
   // 97d58c32 -- conv shapes now route through render_uop's generic
@@ -3351,7 +3359,6 @@ typedef enum {
   // consumer of dispatch kinds.
   KDISPATCH_METAL_ALIAS = 13,  // Metal: metadata-only alias, no command encoding
   KDISPATCH_CUDA_JIT    = 14,  // CUDA: nvrtc-compiled kernel via cuLaunchKernel
-  KDISPATCH_METAL_MPS   = 15,  // Metal: large 2-D matmul -> MPSMatrixMultiplication
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);

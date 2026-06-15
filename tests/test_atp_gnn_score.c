@@ -490,6 +490,50 @@ int main(void) {
     thvm_atp_clear_gnn_scorer();
   }
 
+  // Regression (train-then-rerank in one kernel): the GNN scorer runs its
+  // forward in a dedicated sandbox context (g_atp_gnn_ctx), whose `kernels`
+  // table starts at kid 1 -- the SAME indices the default/engine context
+  // uses.  cpu/jit.c's per-kid resolved-fn cache used to be a process-global
+  // KID_JIT_FN[kid], so the sandbox's compiled GCN fns aliased kids 1..N and
+  // a later default-context CPU-JIT dispatch (a training realize) at those
+  // kids ran the GCN fn against the wrong buffers / input arity -> SIGSEGV.
+  // With KID_JIT_FN per-context the indices no longer collide.  This case
+  // scores (populating the sandbox's per-kid cache) then fires unrelated
+  // default-context JIT kernels at the same kid indices; it must not crash.
+  TEST_BEGIN("atp/gnn_score/realize-then-score-no-crash");
+  {
+    CHECK_EQ(thvm_atp_set_gnn_scorer(blob, blob_len), 1);
+    // A first score compiles + caches the GCN kernels in the sandbox context
+    // at kids 1..N (populating that context's per-kid fn cache).
+    float pre[3];
+    CHECK_EQ(thvm_atp_gnn_score_batch(lhs, rhs, 3u, pre), 1);
+    // Then fire unrelated default-context CPU-JIT kernels at the same kid
+    // indices (this is what a TAtpTrainGnn step does between re-ranks).  A
+    // shared global per-kid cache would dispatch the GCN fn here and crash.
+    for (int step = 0; step < 8; step++) {
+      u32 dims[2] = {16u, 16u};
+      u32 t1 = atp_gnn_input_tensor(2u, dims);
+      u32 t2 = atp_gnn_input_tensor(2u, dims);
+      float fb[256];
+      for (u32 i = 0u; i < 256u; i++) fb[i] = 0.001f * (float)i;
+      atp_gnn_buf_fill(t1, fb, 256u);
+      atp_gnn_buf_fill(t2, fb, 256u);
+      Term ta = term_new(0, TAG_TEN, DT_FP32, t1);
+      Term tb = term_new(0, TAG_TEN, DT_FP32, t2);
+      Term tc = uop_binary(UOP_ADD, ta, tb);
+      Term td = uop_binary(UOP_MUL, tc, ta);
+      (void)term_resolve(thvm_realize(td));
+    }
+    // Score again (warm replay through the sandbox capture) after the
+    // intervening default-context fires: must still produce finite scores
+    // identical to the pre-fire score.
+    float rs[3];
+    CHECK_EQ(thvm_atp_gnn_score_batch(lhs, rhs, 3u, rs), 1);
+    CHECK(isfinite(rs[0]) && isfinite(rs[1]) && isfinite(rs[2]));
+    for (u32 i = 0u; i < 3u; i++) CHECK(fabsf(rs[i] - pre[i]) < 1.0e-5f);
+    thvm_atp_clear_gnn_scorer();
+  }
+
   // A model-free call is a no-op (returns 0), and clear unloads.
   TEST_BEGIN("atp/gnn_score/clear-and-noop");
   thvm_atp_clear_gnn_scorer();

@@ -146,9 +146,12 @@ fn u64 cpu_jit_hash(KernelEntry const *ke) {
 // for a small kernel, several hundred for a 7-deep nested loop), and
 // at 360 conv-backward dispatches/step that overhead is real.
 //
-// Cleared on cpu_jit_cache_reset (thvm_init / thvm_free).
-static CpuJitFn KID_JIT_FN[KERNELS_CAP];
-
+// Per-kid resolved-fn cache.  Lives on TContext (KID_JIT_FN macro ->
+// CURRENT_CTX->kid_jit_fn) because it indexes this context's `kernels`
+// table: a process-global array aliased kid N across contexts and would
+// dispatch one context's compiled fn against another's buffers (the GNN
+// sandbox context vs the training/engine context -- the train-then-rerank
+// SIGSEGV).  Allocated by init_ctx_arrays; cleared on cpu_jit_cache_reset.
 fn void cpu_jit_cache_reset(void) {
   for (u32 i = 0; i < CPU_JIT_CACHE_CAP; i++) {
     if (CPU_JIT_CACHE[i].dl_handle) dlclose(CPU_JIT_CACHE[i].dl_handle);
@@ -161,7 +164,9 @@ fn void cpu_jit_cache_reset(void) {
   // Per-kid resolved-fn pointers reset too: the KERNELS table is
   // re-bumped from 0 by ctx init so stale pointers would otherwise
   // alias fresh kids that happen to land on the same slot.
-  memset(KID_JIT_FN, 0, sizeof(KID_JIT_FN));
+  if (KID_JIT_FN != NULL) {
+    memset(KID_JIT_FN, 0, (size_t)KERNELS_CAP * sizeof(*KID_JIT_FN));
+  }
 }
 
 static CpuJitSlot *cpu_jit_lookup_slot(u64 key) {
@@ -313,8 +318,8 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // through to the full source-hash path which has its own warmup
   // gate + on-disk dylib reuse.
   u32 _kid = (u32)(ke - KERNELS);
-  if (_kid < KERNELS_CAP && KID_JIT_FN[_kid] != NULL) {
-    CpuJitFn _jfn = KID_JIT_FN[_kid];
+  if (_kid < KERNELS_CAP && KID_JIT_FN != NULL && KID_JIT_FN[_kid] != NULL) {
+    CpuJitFn _jfn = (CpuJitFn)KID_JIT_FN[_kid];
     u32 ni = ke->n_inputs;
     const void *ins_buf [ni ? ni : 1];
     unsigned    nums_buf[ni ? ni : 1];
@@ -437,7 +442,7 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // function).  Only cached when jfn is non-NULL AND the per-input
   // strided-jit gate above didn't reject -- this means a future call
   // with identical inputs is safe to short-circuit.
-  if (_kid < KERNELS_CAP) KID_JIT_FN[_kid] = jfn;
+  if (_kid < KERNELS_CAP && KID_JIT_FN != NULL) KID_JIT_FN[_kid] = (void *)jfn;
   // Pack input pointers + numels into local arrays and call the
   // generated function.  Stack-sized to ke->n_inputs (covered by
   // VLA below); no fixed cap beyond what the codegen supports.
