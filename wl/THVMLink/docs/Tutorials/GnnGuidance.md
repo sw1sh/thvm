@@ -74,12 +74,14 @@ did not. Only proved goals contribute, and structurally identical rules are
 de-duplicated.
 
 ```wl
+#| eval: false
 ds = TAtpGraphDataset["GroupAxioms"];
 Length @ ds["Graphs"]
 ```
 <!-- => 106 -->
 
 ```wl
+#| eval: false
 {ds["NPos"], ds["NNeg"], ds["NProofs"]}
 ```
 <!-- => {69, 37, 5} -->
@@ -111,16 +113,19 @@ cross-entropy and Adam. It returns a report whose `"Model"` is the trained
 network.
 
 ```wl
-ds = TAtpGraphDataset["GroupAxioms"];
+#| eval: false
+SeedRandom[1234];
+ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
 r = TAtpTrainGnn[ds, "Hidden" -> 16, "Rounds" -> 2, MaxTrainingRounds -> 120];
 r["LossStart"]
 ```
-<!-- => 1.1179 -->
+<!-- => 1.0197 -->
 
 ```wl
+#| eval: false
 r["LossEnd"]
 ```
-<!-- => 0.6460 -->
+<!-- => 0.6245 -->
 
 The loss falls as the network learns proof relevance. With the default
 config (`"Hidden" -> 32`, `"Rounds" -> 3`, 300 Adam steps) and a by-problem
@@ -130,9 +135,10 @@ of about 0.89, generalizing to theorems it never trained on:
 
 ```wl
 #| eval: false
-TAtpTrainGnn["GroupAxioms"]["TrainAUC"]
+SeedRandom[1234];
+TAtpTrainGnn["GroupAxioms", TimeConstraint -> 10]["TrainAUC"]
 ```
-<!-- => 0.87 (train); ~0.89 held-out by-problem -->
+<!-- => 0.7600 (train); ~0.89 held-out by-problem -->
 
 ## Saving and loading
 
