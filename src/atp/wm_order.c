@@ -592,6 +592,20 @@ static void wmo_tree_insert(WmoTree *t, const WmoCell *key, u32 key_len,
       // WM's order (HuntingtonAxioms DoubleNegation @79).  The fresh entry
       // is still created when the old leaf has no such in-entry (the new
       // leaf's ancestor subterm is structurally absent in the old leaf).
+      //
+      // The skip applies only when the shared subterm closes at least two
+      // cells into the chain (e > i + 1, i.e. the re-target lands strictly
+      // below the chain's first inner node).  When it closes at the very
+      // first chain node (e == i + 1) the subterm's last cell is key[i] --
+      // the split branch cell itself.  WM's AltesBlattPolieren keys its
+      // re-target-vs-parallel choice on PositionNachTeilterm vs the new
+      // suffix position (:499): a jump whose subterm runs up to the branch
+      // cell "still lands in a leaf" past the split, so WM takes the
+      // if-branch (a fresh parallel exit head-inserted at the start node,
+      // :503-530) rather than the position-preserving else-branch.  Pass
+      // 3's in-place rewire reproduces only the else-branch; for e == i + 1
+      // the head-inserted fresh exit is what matches WM (WolframAxioms
+      // Commutativity / DoubleNegation prefix @91 -> full).
       for (u32 k = n_anc; k-- > 0;) {
         u32 e = wmo_sub_end(key, anc[k].pos);
         u32 span = e - anc[k].pos;
@@ -603,7 +617,7 @@ static void wmo_tree_insert(WmoTree *t, const WmoCell *key, u32 key_len,
             if (c == span) { old_has = 1u; break; }
           }
         }
-        if (old_has) continue;
+        if (old_has && e > i + 1u) continue;
         wmo_entry_add(anc[k].node, key + anc[k].pos, span,
                       node_at[e - (i + 1u)], 0u, NULL);
       }

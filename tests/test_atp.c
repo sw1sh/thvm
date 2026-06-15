@@ -2461,6 +2461,72 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-split-ancestor-first-chain-node-parallel");
+  {
+    // WolframAxioms Commutativity / DoubleNegation @91.  The complement of
+    // the previous case: a strict-ancestor jump whose shared subterm closes
+    // at the VERY FIRST chain node (its last cell is key[i], the split
+    // branch cell, so e == i + 1).  WM's AltesBlattPolieren keys its choice
+    // on PositionNachTeilterm vs the new suffix position (:499): a jump
+    // running up to the branch cell "still lands in a leaf" past the split,
+    // so WM takes the if-branch (a fresh parallel exit head-inserted into
+    // the start node's outgoing list, :503-530), NOT the position-preserving
+    // else-branch.  thvm must therefore create the fresh `anc` jump in this
+    // case -- the e>i+1 skip does not apply.  Skipping it here (as the
+    // earlier broad condition did) drops the parallel and reorders the
+    // tops-DFS arrival of the partner rules (firstdiv 91 instead of the full
+    // 497-selection prefix on both Wolfram theorems).
+    //
+    // Minimal trie that reaches an e == i+1 split with a surviving older
+    // sibling exit at the depth-1 node (f = binary label 3, a/e = consts):
+    //   F0 = f(f(a,a), a)        old leaf; its f(a,a) ancestor jump hangs
+    //                            at the depth-1 node
+    //   F1 = f(f(a,e), a)        branches F0 at the inner second arg
+    //   F2 = f(f(a,a), e)        a sibling exit at the depth-1 node
+    //   F3 = f(f(a,a), f(a,a))   SPLITS F0; the f(a,a) ancestor closes at
+    //                            the first chain node (e == i+1)
+    // With the parallel kept, the depth-1 node carries TWO chain-node
+    // (non-leaf) exits; dropping it leaves only one.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    Term a = mk_a(), e = mk_e();
+    Term faces[4] = {
+      mk_f(mk_f(a, a), a),
+      mk_f(mk_f(a, e), a),
+      mk_f(mk_f(a, a), e),
+      mk_f(mk_f(a, a), mk_f(a, a)),
+    };
+    for (u32 k = 0; k < 4u; k++) {
+      s->lhs[k] = faces[k];
+      s->rhs[k] = mk_a();
+      s->r_orient[k] = 1u;
+      s->r_trace[k] = 800u + k;
+      s->n_rules++;
+      atp_wmo_insert_fact(s, k);
+    }
+    {
+      AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+      WmoCell cells[WMO_MAX_CELLS];
+      u32 n = wmo_face_cells(faces[0], cells, WMO_MAX_CELLS);
+      CHECK(n > 0u);
+      u8 is_leaf = 0;
+      WmoNode *d1 =
+        (WmoNode *)wmo_kid_get(w->tree[0].root, &cells[0], &is_leaf);
+      CHECK(d1 != NULL);
+      CHECK_EQ(is_leaf, 0u);
+      // count the depth-1 node's non-leaf (chain-node) exits.  The e==i+1
+      // parallel makes it two; the broad skip would leave one.
+      u32 n_nonleaf = 0, n_total = 0;
+      for (WmoEntry *en = d1->exits; en != NULL; en = en->next) {
+        n_total++;
+        if (!en->ziel_leaf) n_nonleaf++;
+      }
+      CHECK_EQ(n_nonleaf, 2u);
+      CHECK_EQ(n_total, 3u);
+    }
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-removal-collapse-exit-head");
   {
     // Removal-avalanche exit-order corner (BO_ObjektEntfernen Schrumpfen,
