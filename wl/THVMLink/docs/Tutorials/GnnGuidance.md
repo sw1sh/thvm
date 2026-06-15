@@ -111,7 +111,6 @@ cross-entropy and Adam. It returns a report whose `"Model"` is the trained
 network.
 
 ```wl
-#| eval: false
 SeedRandom[1234];
 ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
 r = TAtpTrainGnn[ds, "Hidden" -> 16, "Rounds" -> 2, MaxTrainingRounds -> 120];
@@ -120,7 +119,6 @@ r["LossStart"]
 <!-- => 1.0197 -->
 
 ```wl
-#| eval: false
 r["LossEnd"]
 ```
 <!-- => 0.6245 -->
@@ -132,7 +130,6 @@ held-out split on this theory, the proof-relevance score reaches a test
 of about 0.89, generalizing to theorems it never trained on:
 
 ```wl
-#| eval: false
 SeedRandom[1234];
 TAtpTrainGnn["GroupAxioms", TimeConstraint -> 10]["TrainAUC"]
 ```
