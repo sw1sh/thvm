@@ -2140,8 +2140,35 @@ u32  thvm_metal_buf_pool_begin(void);
 void thvm_metal_buf_pool_rollback_with_preserve(u32 wm);
 void thvm_metal_buf_mark_preserved(u32 buf_id);
 void thvm_metal_buf_clear_preserved(u32 wm);
+u64  thvm_metal_buf_free_unpreserved_all(void);
 u32  thvm_metal_buf_count(void);
 void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out);
+// Zero-copy wrap of a page-aligned host region (a disk-mmap weight's DiskMap
+// base) as a borrowed MTLBuffer, registered in METAL_BUFS.  `minor` is the
+// within-region byte offset of the wrapped tensor's element 0 (the weight
+// starts `minor` bytes past the page-aligned base); it is stored as the
+// slot's byte_offset and applied at every kernel input bind so the kernel's
+// contiguous index 0 lands on the weight.  Returns the buf_id, or 0 on
+// failure (caller falls back to the staged-upload copy path).  The slot is
+// borrowed: teardown drops only the MTLBuffer ARC ref, never the host mmap
+// pages, and the recycle freelist never reclaims it.
+u32  thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor);
+// The within-buffer byte offset at which a Metal buf's element 0 lives
+// (nonzero only for a borrowed disk-mmap wrap).  Applied at kernel input
+// binds via [enc setBuffer:buf offset:thvm_metal_buf_byte_offset(bid) ..].
+u64  thvm_metal_buf_byte_offset(u32 buf_id);
+// True iff buf_id is a borrowed (newBufferWithBytesNoCopy) disk-mmap wrap.
+int  thvm_metal_buf_is_borrowed(u32 buf_id);
+// Explicitly free a borrowed disk-mmap wrap (flushes dispatch, drops the
+// MTLBuffer ARC ref; the mmap pages stay owned by the CPU-side DiskMap).
+// No-op on a non-borrowed slot.  The streaming per-block loader calls this
+// (via thvm_kernel_input_drop_wrap) to release a block's weight wraps after
+// the block's matmuls retire so wraps don't accumulate across blocks.
+void thvm_metal_buf_free_borrowed(u32 buf_id);
+// Drop the Metal zero-copy disk-mmap wrap cached for a disk-mmap weight tid
+// (frees the borrowed MTLBuffer + clears the KIN_UP cache slot so the next
+// use re-wraps fresh).  No-op when the weight has no Metal wrap cached.
+fn void thvm_kernel_input_drop_wrap(u32 src_tid);
 
 // === uop/ ===
 // Constructors for raw UOp graph nodes.  Each helper allocates the
@@ -3024,6 +3051,11 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
                                   FILE *fp);
 fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
                                     FILE *fp);
+// Highest input slot the renderer emits a buffer param for, via the
+// same UOP_BUFFER.instance discovery the signature emitters use.  Used
+// by materialize.c to truncate ke->n_inputs to the rendered signature
+// (drops trailing input slots the unified-rewrite collapsed away).
+fn u32 cg_render_input_inst_count(Term root);
 // CUDA counterpart: emits an `extern "C" __global__` kernel with the
 // thread-builtin prologue (blockIdx/blockDim/threadIdx) in place of
 // Metal `[[ ... ]]` attributes.  The CUDA backend runtime (Stage 2)
@@ -3319,6 +3351,7 @@ typedef enum {
   // consumer of dispatch kinds.
   KDISPATCH_METAL_ALIAS = 13,  // Metal: metadata-only alias, no command encoding
   KDISPATCH_CUDA_JIT    = 14,  // CUDA: nvrtc-compiled kernel via cuLaunchKernel
+  KDISPATCH_METAL_MPS   = 15,  // Metal: large 2-D matmul -> MPSMatrixMultiplication
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);

@@ -854,6 +854,14 @@ void thvm_reset(void) {
   jit_capture_reset_all();
   cpu_jit_cache_reset();
   cg_profile_reset();
+  // Symbolic-axis (kvar) registry + per-realize runtime bindings.  Every
+  // dynamic term -- and thus every tensor whose packed extent encodes a kvar
+  // id -- dies on the heap rewind below, so a surviving KVARS / KVAR_RUNTIME
+  // entry is a dangling cross-frame side table exactly like the uop/lam
+  // caches above.  thvm_init/thvm_free already clear it; the per-frame reset
+  // (TReset[]) must too, or a later frame's symbolic dim reuses a stale id
+  // whose KVAR_RUNTIME_SET / hi were stamped by the previous frame.
+  kvar_reset();
   // Rewind the Cheney semi-spaces (from-space = lower half,
   // HEAP_NEXT = 0).  No heap zeroing: gc_collect already hands out
   // non-zeroed cells after a space swap (see heap/collect.c step 7), so

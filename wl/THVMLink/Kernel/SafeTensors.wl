@@ -38,14 +38,25 @@ GeneralUtilities`SetUsage[TSafeTensorLoadMetadata, "TSafeTensorLoadMetadata[path
 GeneralUtilities`SetUsage[TTensorMMap, "TTensorMMap[path$, byteOffset$, nbytes$, dtype$, shape$] maps the file region [byteOffset$, byteOffset$ + nbytes$) of path$ read-only and wraps it as a CPU TTerm of the given dtype$ (a thvm dtype string like \"f32\") and integer shape$ list.
 This is a lazy, mmap-backed, zero-copy disk-tensor view: bytes page in on demand and the mapping is released with the tensor."];
 
+GeneralUtilities`SetUsage[TDiskDropWeight, "TDiskDropWeight[w$] streams a disk-mmap weight w$ (a lazy mmap-backed disk TTerm, e.g. from TSafeTensorLoad) out of resident memory after it has been used: it releases any Metal zero-copy wrap of the weight (the borrowed MTLBuffer aliasing its mmap pages) and MADV_DONTNEEDs the underlying disk mapping so the faulted-in pages leave RSS.
+The mmap stays valid (file-backed, read-only), so a later use re-faults and re-wraps the weight fresh.  Used by a per-block streaming forward to keep only the active block's weights resident.  TDiskDropWeight[{w$1, w$2, ...}] drops a list.  A no-op (returns the weight unchanged) for a non-disk / non-wrapped tensor."];
+
 Begin["`Private`"];
 
 (* Forward-declare sibling-owned symbols so bare references resolve to the
    real THVMLink` symbols rather than phantom Private ones (alphabetical
    load order means Tensor.wl loads AFTER this file). *)
-{TTensorData, TTensorShape, TTensorDType, TRealize, dtypeCode, dtypeName, ensureInit};
+{TTensorData, TTensorShape, TTensorDType, TRealize, dtypeCode, dtypeName, ensureInit, ttermRaw};
 
 $tensorMMapFn := $tensorMMapFn = load["thvm_wl_tensor_mmap", {"UTF8String", Integer, Integer, Integer, {Integer, 1}}, Integer]
+
+$diskDropWeightFn := $diskDropWeightFn = load["thvm_wl_disk_drop_weight", {Integer}, Integer]
+
+(* Drop a disk-mmap weight's resident pages + Metal wrap (the streaming
+   per-block reclaim).  Accepts a single TTerm or a list; returns the input. *)
+TDiskDropWeight[ws_List] := (TDiskDropWeight /@ ws; ws)
+TDiskDropWeight[w_TTerm] := (ensureInit[]; $diskDropWeightFn[ttermRaw[w]]; w)
+TDiskDropWeight[w_]      := w
 
 (* safetensors dtype name <-> thvm dtype string (tinygrad safe_dtypes /
    inverse_safe_dtypes).  LOAD covers the byte-aligned dtypes PLUS the

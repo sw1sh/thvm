@@ -369,6 +369,31 @@ typedef struct {
   // overwritten contents.  Mirror of CpuBuf.jit_pinned / CudaBuf.jit_pinned;
   // cleared only on jit_capture_drop.
   u8            jit_pinned;
+  // borrowed: this MTLBuffer wraps host pages we do NOT own (a disk-mmap
+  // safetensors weight wrapped via newBufferWithBytesNoCopy + deallocator:nil
+  // -- see thvm_metal_buf_wrap_external).  The underlying bytes belong to the
+  // CPU-side DiskMap mmap; freeing this slot must only drop the MTLBuffer's
+  // ARC ref (which, with deallocator:nil, leaves the mmap pages untouched) and
+  // must NEVER park the buffer on the recycle freelist (freelist_try_pop would
+  // memset + hand the borrowed pages out as a fresh tensor).  Mirror of
+  // CpuBuf.owns_data == 0 for the external/disk case.
+  u8            borrowed;
+  // byte_offset: the within-buffer byte offset at which this tensor's element
+  // 0 lives.  Nonzero ONLY for a borrowed wrap of a disk-mmap weight: the
+  // MTLBuffer is wrapped over the page-aligned DiskMap base, so the weight's
+  // first byte sits `minor` bytes in (minor = file byte_offset % PAGESIZE).
+  // Every kernel input bind applies this via [enc setBuffer:buf offset:..],
+  // so the kernel's contiguous index 0 lands on the weight -- the codegen
+  // never sees the page-alignment padding.  0 for ordinary device buffers.
+  u64           byte_offset;
+  // host_base: the page-aligned host pointer a borrowed wrap covers (the
+  // DiskMap base passed to newBufferWithBytesNoCopy).  Lets wrap_external
+  // DEDUP: a repeat wrap of the same mmap region returns the existing slot
+  // (incref) instead of creating a second MTLBuffer over the same pages.
+  // Without this, re-realizing a weight (eager forward, per-block replay)
+  // wires the same 7.75GB into the GPU page table again and again -- the
+  // 100GB+ accumulation blowup.  NULL for ordinary device buffers.
+  void         *host_base;
 } MetalBuf;
 
 static MetalBuf METAL_BUFS[METAL_BUFS_CAP];
@@ -391,6 +416,11 @@ static void metal_record_memory_peak(void) {
   u64 retained = 0;
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
     if (METAL_BUFS[i].buf == nil) continue;
+    // A borrowed wrapper holds NO device-owned bytes -- it aliases host mmap
+    // pages already resident (and accounted) on the CPU side.  Counting it
+    // toward the device live/retained footprint would double-count the
+    // weight and falsely trip the THVM_MAX_LIVE_BYTES ceiling.
+    if (METAL_BUFS[i].borrowed) continue;
     retained += METAL_BUFS[i].nbytes;
     if (METAL_BUFS[i].refcount > 0) {
       live += METAL_BUFS[i].nbytes;
@@ -469,6 +499,7 @@ static void metal_freelist_trim(void) {
 static int metal_buf_freelist_push_impl(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return 0;
   if (METAL_BUFS[buf_id].jit_pinned) return 0;   // held by an active JIT capture
+  if (METAL_BUFS[buf_id].borrowed)   return 0;   // wraps mmap pages we don't own
   if (METAL_FREELIST_LEN >= METAL_FREELIST_CAP) return 0;
   if (METAL_BUFS[buf_id].buf == nil) return 0;
   METAL_FREELIST[METAL_FREELIST_LEN++] = buf_id;
@@ -549,6 +580,9 @@ static u32 metal_buf_alloc(u64 nbytes) {
   METAL_BUFS[id].nbytes   = nbytes;
   METAL_BUFS[id].refcount = 1;
   METAL_BUFS[id].preserved = 0;
+  METAL_BUFS[id].borrowed  = 0;
+  METAL_BUFS[id].byte_offset = 0;
+  METAL_BUFS[id].host_base = NULL;
   if (METAL_BUFS[id].buf == nil) {
     fprintf(stderr, "thvm: metal_buf_alloc -- failed to allocate %llu bytes\n",
             (unsigned long long)nbytes);
@@ -557,6 +591,115 @@ static u32 metal_buf_alloc(u64 nbytes) {
   }
   metal_record_memory_peak();
   return id;
+}
+
+// Zero-copy wrap of a host pointer into the METAL_BUFS table.  `page_base`
+// must be page-aligned (mmap bases are) and `maplen` a page multiple, so
+// newBufferWithBytesNoCopy can wrap the bytes in place: on Apple unified
+// memory the GPU reads the SAME physical pages (no upload, no extra RSS).
+// `minor` is the within-map byte offset of the wrapped tensor's element 0
+// (the weight starts `minor` bytes past the page-aligned base); it is stored
+// as the slot's byte_offset and applied at every kernel input bind so the
+// kernel's contiguous index 0 lands on the weight.  The returned slot is
+// flagged `borrowed` -- metal_buf_free only drops the MTLBuffer's ARC ref
+// (deallocator:nil leaves the bytes alone) and the freelist never recycles it.
+//
+// Returns 0 on failure (no device, mis-aligned ptr, minor >= maplen, table
+// full, or the no-copy wrap returned nil): the caller falls back to the
+// staged-upload copy path, so this never silently corrupts.
+u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
+  if (METAL_DEVICE == nil) return 0;
+  if (page_base == NULL || maplen == 0 || minor >= maplen) return 0;
+  // Dedup: a borrowed wrap of this exact mmap region already exists -> reuse it
+  // (incref).  Each distinct safetensors weight is then wrapped EXACTLY once for
+  // the context's lifetime, no matter how many times materialize_copy re-runs
+  // (prewarm, capture, every per-block replay).  This is what makes the
+  // zero-copy path safe: without it, each re-wrap newBufferWithBytesNoCopy's the
+  // same pages into a fresh GPU mapping and they accumulate (the 100GB blowup).
+  for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    if (METAL_BUFS[i].borrowed && METAL_BUFS[i].buf != nil
+        && METAL_BUFS[i].host_base == page_base
+        && METAL_BUFS[i].byte_offset == minor) {
+      METAL_BUFS[i].refcount++;
+      return i;
+    }
+  }
+  long pgl = sysconf(_SC_PAGESIZE);
+  u64  page = (pgl > 0) ? (u64)pgl : 4096u;
+  if (((uintptr_t)page_base % page) != 0) {
+    fprintf(stderr,
+      "thvm_metal_buf_wrap_external: ptr %p not page-aligned (page=%llu)\n",
+      page_base, (unsigned long long)page);
+    return 0;
+  }
+  // newBufferWithBytesNoCopy requires a page-multiple length.  A DiskMap's
+  // maplen = nbytes + minor is mmap'd page-by-page, but the trailing partial
+  // page is not guaranteed page-multiple; round UP to the next page (the
+  // extra bytes past the file region are valid mapped-but-zero pages of the
+  // mmap, never read because view bounds stop at the weight's numel).
+  u64 wrap_len = (maplen + page - 1) & ~(page - 1);
+
+  // Fault the wrapped pages RESIDENT synchronously.  newBufferWithBytesNoCopy
+  // wraps the VIRTUAL pages, but the GPU's access does NOT trigger the CPU
+  // page-fault handler that reads a lazy file-backed mmap from the SSD: a
+  // never-touched (e.g. THVM_MMAP_NO_WILLNEED) page reads as ZERO on the GPU.
+  // MADV_WILLNEED is only an async hint, so touch one byte per page to force
+  // them in before the GPU reads.  This costs ~1x the weight's bytes of host
+  // residency -- unavoidable, since the GPU reads these very pages in unified
+  // memory -- but stays zero-copy: NO separate device buffer + NO host staging
+  // copy (a staged upload pays ~2-3x: mmap fault + host stage + device buffer).
+  // The pages can be dropped (MADV_DONTNEED) after the weight's last use.
+  {
+    volatile char sink = 0;
+    char const *p = (char const *)page_base;
+    for (u64 off = 0; off < maplen; off += page) sink ^= p[off];
+    if (maplen > 0) sink ^= p[maplen - 1];
+    (void)sink;
+  }
+
+  // Wrap the host pages in place FIRST (id<MTLBuffer> -- `id` here is the
+  // Objective-C generic-object keyword, so the slot index below is named
+  // `slot`, not `id`, to avoid shadowing it).  deallocator:nil keeps these
+  // mmap pages owned by the CPU-side DiskMap; ARC only owns the wrapper.
+  id<MTLBuffer> wrapped =
+      [METAL_DEVICE newBufferWithBytesNoCopy:page_base
+                                      length:wrap_len
+                                     options:MTLResourceStorageModeShared
+                                 deallocator:nil];
+  if (wrapped == nil) {
+    fprintf(stderr,
+      "thvm_metal_buf_wrap_external: no-copy wrap of %llu bytes failed\n",
+      (unsigned long long)wrap_len);
+    return 0;
+  }
+
+  // Reuse a vacated slot (buf == nil, refcount 0) before bumping NEXT, like
+  // metal_buf_alloc -- but NEVER the recycle freelist (those carry live
+  // device bytes; a borrowed wrapper must start from a clean slot).
+  u32 slot = 0;
+  for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    if (METAL_BUFS[i].buf == nil && METAL_BUFS[i].refcount == 0) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot == 0) {
+    if (METAL_BUFS_NEXT >= METAL_BUFS_CAP) {
+      fprintf(stderr, "thvm_metal_buf_wrap_external: buffer table full\n");
+      return 0;
+    }
+    slot = METAL_BUFS_NEXT++;
+  }
+  METAL_BUFS[slot].buf        = wrapped;
+  METAL_BUFS[slot].nbytes     = wrap_len;
+  METAL_BUFS[slot].refcount   = 1;
+  METAL_BUFS[slot].preserved  = 0;
+  METAL_BUFS[slot].jit_pinned = 0;
+  METAL_BUFS[slot].borrowed   = 1;
+  METAL_BUFS[slot].byte_offset = minor;
+  METAL_BUFS[slot].host_base   = page_base;
+  metal_record_memory_peak();
+  return slot;
 }
 
 // Non-static accessor for cross-TU push (used by thvmlink.c +
@@ -587,13 +730,56 @@ u32 thvm_metal_buf_refcount(u32 buf_id) {
   return METAL_BUFS[buf_id].refcount;
 }
 
+u64 thvm_metal_buf_byte_offset(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return 0;
+  return METAL_BUFS[buf_id].byte_offset;
+}
+
+// True iff buf_id is a borrowed (newBufferWithBytesNoCopy) disk-mmap wrap.
+int thvm_metal_buf_is_borrowed(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return 0;
+  return METAL_BUFS[buf_id].borrowed ? 1 : 0;
+}
+
+// Explicitly drop a borrowed disk-mmap wrap.  The per-realize pool rollback
+// + thvm_metal_buf_free_unpreserved_all SKIP borrowed slots (they hold no
+// device-owned bytes and a heap TAG_TEN may still reference the slot across
+// later realizes), so a streaming per-block forward that wraps each block's
+// weights zero-copy would otherwise accumulate one MTLBuffer wrapper per
+// block for the whole model.  After a block's matmuls retire, the streaming
+// loader calls this to release that block's wrappers; the underlying mmap
+// pages stay owned by the CPU-side DiskMap (deallocator:nil) and are dropped
+// separately via thvm_disk_buf_dontneed.  Flush any pending dispatch first so
+// no in-flight command still reads the wrapper, then nil it.  No-op on a
+// non-borrowed slot (refuses to free a device-owned buffer here).
+void thvm_metal_buf_free_borrowed(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  if (!METAL_BUFS[buf_id].borrowed) return;
+  // Dedup made wraps shareable (refcount > 1 when several weight TenDescs name
+  // the same mmap region): decref and only drop the MTLBuffer at the last ref,
+  // else an explicit free here dangles every other holder.
+  if (METAL_BUFS[buf_id].refcount > 1) {
+    METAL_BUFS[buf_id].refcount--;
+    return;
+  }
+  metal_dispatch_flush();
+  metal_buf_free(buf_id);
+}
+
 static void metal_buf_free(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  // Nilling .buf drops ARC's strong ref to the MTLBuffer.  For a borrowed
+  // wrapper (newBufferWithBytesNoCopy + deallocator:nil) that releases ONLY
+  // the wrapper object; the host mmap pages it pointed at stay owned by the
+  // CPU-side DiskMap, which munmaps them on its own CpuBuf release.
   METAL_BUFS[buf_id].buf      = nil;
   METAL_BUFS[buf_id].nbytes   = 0;
   METAL_BUFS[buf_id].refcount = 0;
   METAL_BUFS[buf_id].preserved = 0;
   METAL_BUFS[buf_id].jit_pinned = 0;
+  METAL_BUFS[buf_id].borrowed = 0;
+  METAL_BUFS[buf_id].byte_offset = 0;
+  METAL_BUFS[buf_id].host_base = NULL;
   metal_record_memory_peak();
 }
 
@@ -644,9 +830,14 @@ static int metal_buf_read(u32 buf_id, void *dst, u64 nbytes) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
   if (METAL_BUFS[buf_id].buf == nil)            return -1;
   if (METAL_BUFS[buf_id].refcount == 0)         return -1;
-  u64 cap = METAL_BUFS[buf_id].nbytes;
+  // Apply byte_offset: a borrowed disk-mmap wrap's element 0 sits `minor` bytes
+  // into the page-aligned MTLBuffer (the same offset the kernel input bind
+  // applies).  Without this a host readback of a wrapped weight reads the
+  // page-alignment padding, not the weight.  0 for ordinary device buffers.
+  u64 off = METAL_BUFS[buf_id].byte_offset;
+  u64 cap = METAL_BUFS[buf_id].nbytes - off;
   if (nbytes > cap) nbytes = cap;
-  memcpy(dst, [METAL_BUFS[buf_id].buf contents], (size_t)nbytes);
+  memcpy(dst, (char *)[METAL_BUFS[buf_id].buf contents] + off, (size_t)nbytes);
   return 0;
 }
 
@@ -655,9 +846,10 @@ static int metal_buf_write(u32 buf_id, const void *src, u64 nbytes) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
   if (METAL_BUFS[buf_id].buf == nil)            return -1;
   if (METAL_BUFS[buf_id].refcount == 0)         return -1;
-  u64 cap = METAL_BUFS[buf_id].nbytes;
+  u64 off = METAL_BUFS[buf_id].byte_offset;
+  u64 cap = METAL_BUFS[buf_id].nbytes - off;
   if (nbytes > cap) nbytes = cap;
-  memcpy([METAL_BUFS[buf_id].buf contents], src, (size_t)nbytes);
+  memcpy((char *)[METAL_BUFS[buf_id].buf contents] + off, src, (size_t)nbytes);
   return 0;
 }
 
@@ -716,7 +908,21 @@ void thvm_metal_buf_mark_preserved(u32 buf_id) {
 // jit_capture_drop via metal_buf_jit_unpin.
 void metal_buf_jit_pin(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
-  if (METAL_BUFS[buf_id].buf == nil) return;
+  // A pin request for an already-freed (nil) slot means a buffer a live
+  // capture still references was hard-freed out from under it -- the silent
+  // no-op here is exactly how the FLUX weight ended up bound as a nil
+  // MTLBuffer at replay.  The JIT finalize now keeps such a buffer's incref
+  // through the recording->finalize boundary (jit_capture_release_retained_
+  // except), so this must never fire; surface it loudly if it ever does
+  // instead of silently re-pinning a dead slot.
+  if (METAL_BUFS[buf_id].buf == nil) {
+    fprintf(stderr,
+        "thvm: metal_buf_jit_pin -- buf %u already freed (nil); a live JIT "
+        "capture's buffer was reclaimed before re-pin.  Replay would bind a "
+        "nil MTLBuffer.  This is a buffer-lifetime bug -- not re-pinning a "
+        "dead slot.\n", buf_id);
+    return;
+  }
   METAL_BUFS[buf_id].jit_pinned = 1;
 }
 
@@ -732,6 +938,15 @@ void thvm_metal_buf_pool_rollback_with_preserve(u32 wm) {
   for (u32 i = wm; i < METAL_BUFS_NEXT; i++) {
     if (METAL_BUFS[i].preserved) continue;
     if (METAL_BUFS[i].jit_pinned) continue;   // sticky JIT retain
+    // A borrowed disk-mmap wrap holds NO device bytes (just an MTLBuffer
+    // object aliasing the CPU-side mmap pages), and a TAG_TEN tid that
+    // materialize_copy / kernel_input_on_backend installed in the heap may
+    // still reference it across later realizes.  Freeing it here would nil
+    // the slot, so a fresh metal_buf_alloc reuses buf_id and the stale tid
+    // then reads a DIFFERENT buffer (the WRAP-AFTER-READ corruption).  Skip
+    // it: the wrapper costs ~nothing, the actual pages are dropped by the
+    // caller's MADV_DONTNEED, and teardown / explicit free reclaims the slot.
+    if (METAL_BUFS[i].borrowed) continue;
     if (METAL_BUFS[i].buf == nil) continue;
     if (METAL_BUFS[i].refcount == 0) continue;
     if (!metal_buf_freelist_push_impl(i)) {
@@ -748,9 +963,44 @@ void thvm_metal_buf_clear_preserved(u32 wm) {
   }
 }
 
+// Free EVERY live Metal buffer not marked `preserved` and not jit-pinned,
+// across the WHOLE table (NOT bounded by a per-realize watermark).  Used by
+// the forward-only reclaim in thvm_realize: after mark_gc_preserve marks the
+// buffers reachable from the live root set (the realize result + WL's
+// EXTERN_PINNED_TERMS + DEFS), this reclaims buffers that survived an EARLIER
+// realize's watermark rollback but are now unreachable -- e.g. a per-layer
+// eager weight upload that was momentarily WL-reachable (so preserved) during
+// its layer's realize, then dropped, leaving it stranded below every later
+// realize's watermark.  Returns the byte count freed.  The caller is
+// responsible for having run a correct mark pass first; an unmarked-but-live
+// buffer here WILL be freed.
+u64 thvm_metal_buf_free_unpreserved_all(void) {
+  u64 freed = 0;
+  metal_dispatch_flush();
+  for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    if (METAL_BUFS[i].buf == nil) continue;
+    if (METAL_BUFS[i].refcount == 0) continue;
+    if (METAL_BUFS[i].preserved) continue;
+    if (METAL_BUFS[i].jit_pinned) continue;
+    // Borrowed disk-mmap wraps hold no device bytes and a live heap tid may
+    // still reference the slot; freeing it would alias on reuse (see
+    // thvm_metal_buf_pool_rollback_with_preserve).  The mark pass also can't
+    // see the wrap's CPU-side mmap as a device root, so a borrowed buf is
+    // ALWAYS unpreserved here -- skip it explicitly.
+    if (METAL_BUFS[i].borrowed) continue;
+    freed += METAL_BUFS[i].nbytes;
+    if (!metal_buf_freelist_push_impl(i)) {
+      metal_buf_free(i);
+    }
+  }
+  metal_record_memory_peak();
+  return freed;
+}
+
 u64 thvm_metal_live_bytes(void) {
   u64 total = 0;
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    if (METAL_BUFS[i].borrowed) continue;   // aliases host mmap, not device bytes
     if (METAL_BUFS[i].buf != nil && METAL_BUFS[i].refcount > 0) {
       total += METAL_BUFS[i].nbytes;
     }
@@ -761,6 +1011,7 @@ u64 thvm_metal_live_bytes(void) {
 u64 thvm_metal_retained_bytes(void) {
   u64 total = 0;
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    if (METAL_BUFS[i].borrowed) continue;   // aliases host mmap, not device bytes
     if (METAL_BUFS[i].buf != nil) {
       total += METAL_BUFS[i].nbytes;
     }
@@ -1801,6 +2052,7 @@ static void metal_conv_cfg_fill(TileConv2DInfo const *conv,
 
 static int metal_tile_jit_encode(KernelEntry *ke,
                                  __unsafe_unretained id<MTLBuffer> *src_bufs,
+                                 u64 const *src_offsets,
                                  id<MTLBuffer> outBuf,
                                  id<MTLCommandBuffer> cmd,
                                  u32 groups_x,
@@ -1816,7 +2068,12 @@ static int metal_tile_jit_encode(KernelEntry *ke,
   [enc setComputePipelineState:pso];
   [enc setBuffer:outBuf offset:0 atIndex:0];
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    [enc setBuffer:src_bufs[i] offset:0 atIndex:(1 + i)];
+    // A borrowed disk-mmap wrap binds at its within-buffer byte_offset so the
+    // kernel's contiguous index 0 lands on the weight (the wrapped MTLBuffer
+    // starts at the page-aligned DiskMap base, `minor` bytes before it).
+    [enc setBuffer:src_bufs[i]
+            offset:(NSUInteger)(src_offsets ? src_offsets[i] : 0)
+           atIndex:(1 + i)];
   }
   TileConv2DInfo conv;
   int is_conv = metal_tile_jit_uses_conv_cfg(ke, &conv);
@@ -2145,7 +2402,11 @@ static id<MTLIndirectCommandBuffer> metal_graph_build(
       if (trace > 1) {
         fprintf(stderr, "thvm: metal_graph command %u set in %u\n", i, j);
       }
-      [cmd setKernelBuffer:inBuf offset:0 atIndex:(1 + j)];
+      // Borrowed disk-mmap wrap: bind at its within-buffer byte_offset so the
+      // ICB-replayed kernel's contiguous index 0 lands on the weight.
+      [cmd setKernelBuffer:inBuf
+                    offset:(NSUInteger)METAL_BUFS[bid].byte_offset
+                   atIndex:(1 + j)];
     }
     if (needs_cfg) {
       if (cfgs == NULL || conv_cfg_i >= conv_cfg_count) return nil;
@@ -2484,7 +2745,12 @@ static u32 dag_enc_arith(DagEncCtx *c, Term v, u32 dst_buf_id, u32 op,
   u32 zero_arg = 0;
   [enc setBytes:&zero_arg length:sizeof(zero_arg) atIndex:1];
   for (u32 i = 0; i < n_src; i++) {
-    [enc setBuffer:METAL_BUFS[src_bids[i]].buf offset:0 atIndex:(2 + i)];
+    // Borrowed disk-mmap wrap: bind at its within-buffer byte_offset so the
+    // shader's contiguous index 0 lands on the weight (see
+    // thvm_metal_buf_wrap_external).  0 for ordinary buffers.
+    [enc setBuffer:METAL_BUFS[src_bids[i]].buf
+            offset:(NSUInteger)METAL_BUFS[src_bids[i]].byte_offset
+           atIndex:(2 + i)];
   }
   // src_numels mirror the per-op encoder's contract: numel is `c->numel`
   // for non-broadcast srcs (multi-output lift produces numel-uniform
@@ -2953,6 +3219,14 @@ static int metal_try_mps_gemm(KernelEntry *ke, u32 *in_buf_ids,
   u32 b_buf = in_buf_ids[g.b_input];
   if (a_buf == 0 || a_buf >= METAL_BUFS_NEXT) return 0;
   if (b_buf == 0 || b_buf >= METAL_BUFS_NEXT) return 0;
+  // A borrowed disk-mmap wrap carries a within-buffer byte_offset (the weight
+  // sits past the page-aligned base).  The MPS bf16->f32 conversion kernels +
+  // MPSMatrix views below read each operand from buffer offset 0, so a wrapped
+  // input would feed the page-alignment padding into the GEMM.  Decline so the
+  // dispatch falls through to the tile path, which applies byte_offset at the
+  // input bind.  (MPS is a perf route, default-off; correctness over speed.)
+  if (METAL_BUFS[a_buf].byte_offset != 0 || METAL_BUFS[b_buf].byte_offset != 0)
+    return 0;
   id<MTLBuffer> A_src = METAL_BUFS[a_buf].buf;
   id<MTLBuffer> B_src = METAL_BUFS[b_buf].buf;
   id<MTLBuffer> C_dst = METAL_BUFS[out_buf_id].buf;
@@ -3145,8 +3419,10 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   }
 
   __unsafe_unretained id<MTLBuffer> jit_src_bufs[ke->n_inputs ? ke->n_inputs : 1];
+  u64 jit_src_offsets[ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    jit_src_bufs[i] = METAL_BUFS[effective_buf_ids[i]].buf;
+    jit_src_bufs[i]    = METAL_BUFS[effective_buf_ids[i]].buf;
+    jit_src_offsets[i] = METAL_BUFS[effective_buf_ids[i]].byte_offset;
   }
 
   // MPS route: large 2-D GEMM -> MPSMatrixMultiplication (~2x the custom
@@ -3171,7 +3447,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
 
   if (tile_supported) {
     id<MTLCommandBuffer> tile_cmd = metal_command_buffer();
-    if (metal_tile_jit_encode(ke, jit_src_bufs, outBuf, tile_cmd,
+    if (metal_tile_jit_encode(ke, jit_src_bufs, jit_src_offsets, outBuf, tile_cmd,
                               tile_groups_x, tile_threads_x)) {
       metal_submit_if_standalone(tile_cmd);
       for (u32 i = 0; i < ke->n_inputs; i++) {
@@ -3222,7 +3498,11 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
         if (temp_buf_ids[k]) metal_buf_decref_after_batch(temp_buf_ids[k]);
       return -1;
     }
-    f32 *src = (f32 *)[METAL_BUFS[ib].buf contents];
+    // A borrowed disk-mmap wrap starts at the page-aligned base; the weight's
+    // element 0 is byte_offset bytes in.  Offset the CPU-side gather pointer so
+    // strided reads land on the weight (the bind paths apply the same offset).
+    char *base = (char *)[METAL_BUFS[ib].buf contents] + METAL_BUFS[ib].byte_offset;
+    f32 *src = (f32 *)base;
     f32 *dst = (f32 *)[METAL_BUFS[tmp_id].buf contents];
     for (u32 k = 0; k < numel; k++) {
       dst[k] = src[metal_tendesc_strided_index(td, k)];

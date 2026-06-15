@@ -131,17 +131,40 @@ fxSingleBlock[x0_, mod_, ropeCos_, ropeSin_, W_, cfg_] := Module[
    See docs/flux_forward_spec.md + diffusers Flux2Transformer2DModel.
    ============================================================ *)
 
+(* --- temb-modulation matmul.  temb is {1,dim} (one timestep), so SiLU(temb).W^T
+       is an M=1 matmul.  As a JIT-captured sampler input, an M=1 matmul makes the
+       leading axis SYMBOLIC (kvar), which declines the Metal ICB for the WHOLE
+       captured velocity stream -> per-op dispatch (~5x slower replay, profiled).
+       Pad to a CONCRETE M=8 (row 0 = the real timestep, rows 1-7 zero), matmul,
+       take row 0 -- the matmul carries no kvar, so the ICB batches the big
+       projections.  The 8x M is a tiny matmul (modW is small vs the projections),
+       and rows 1-7 (zeros) cost nothing downstream. --- *)
+(* M=1 temb modulation: pad {1,dim} to a CONCRETE M=8 (Join 7 zero rows) so the
+   symbolic-M kvar never declines the Metal ICB, matmul a transposed weight, slice
+   row 0.  The pad's column count (dim) and dtype come from the WEIGHT w
+   ({out,dim}, a realized contiguous tensor with a fixed concrete shape), NOT from
+   v: v is the captured temb whose LEADING axis is a symbolic-M kvar, so
+   Dimensions[v]/TTensorDType[v] return $Failed/Missing in a JIT capture (the kvar
+   is unresolved at graph-build time) -- which poisons the whole modulation.  w is
+   kvar-free, so TLastDim[w]/TDType[w] are always concrete. *)
+fxModLinear[v_, w_] := TMatMul[
+    Join[v, TZeros[{7, Last[Dimensions[w]]}], 1], Transpose[w]][[1 ;; 1]]
+
 (* --- Flux2Modulation: SiLU(temb) -> Linear(modW) -> chunk(3*sets) into a
        list of {1,dim} vectors, in order (shift,scale,gate) per set.  temb is
        {1,dim}; modW is {sets*3*dim, dim} (shared across all blocks). --- *)
 fxModChunks[temb_, modW_, sets_] := Module[{d, mod},
-    d   = Dimensions[temb][[2]];
-    mod = fxLinear[TSiLU[temb], modW];                      (* {1, sets*3*d} *)
+    d   = Last[Dimensions[modW]] ;                          (* dim: from the kvar-free
+        weight, NOT Dimensions[temb] (the captured temb has a symbolic-M kvar, so
+        its shape query returns $Failed at graph-build time). *)
+    mod = fxModLinear[TSiLU[temb], modW];                   (* {1, sets*3*d} *)
     Table[mod[[All, (i - 1) d + 1 ;; i d]], {i, 3 sets}]]
 
 (* --- AdaLayerNormContinuous (norm_out): emb=Linear(SiLU(temb)); the diffusers
        chunk is (scale, shift); out = (1+scale)*LayerNorm(x) + shift. --- *)
-fxNormOut[x_, temb_, normW_, eps_] := With[{d = Dimensions[x][[2]], emb = fxLinear[TSiLU[temb], normW]},
+fxNormOut[x_, temb_, normW_, eps_] := With[{d = Last[Dimensions[normW]], emb = fxModLinear[TSiLU[temb], normW]},
+    (* d (dim) from the kvar-free normW {2*dim,dim}, NOT Dimensions[x] (x can carry a
+       symbolic-seq kvar in a JIT capture -> $Failed shape query). *)
     fxModulate[x, emb[[All, d + 1 ;; 2 d]], emb[[All, 1 ;; d]], eps]]
 
 (* assemble a double-block mods Association from the 6 shared img/txt chunks *)
@@ -164,6 +187,160 @@ fxDblW[wf_, i_] := With[{p = "transformer_blocks." <> ToString[i] <> "."}, <|
 fxSglW[wf_, i_] := With[{p = "single_transformer_blocks." <> ToString[i] <> "."}, <|
     "to_qkv_mlp_proj" -> wf[p <> "attn.to_qkv_mlp_proj.weight"], "to_out" -> wf[p <> "attn.to_out.weight"],
     "norm_q" -> wf[p <> "attn.norm_q.weight"], "norm_k" -> wf[p <> "attn.norm_k.weight"]|>]
+
+(* ============================================================
+   Per-block JIT capture/replay (the <10GB resident-set lever).
+   A single full-forward TJit capture pins EVERY block's activations
+   (~8GB) at once, on top of the 7.75GB weights -- the ~16GB peak.
+   Instead capture ONE double + ONE single block kernel set, then
+   REPLAY each block by rebinding its 16 (double) / 2 (single) weights
+   plus the running {img,txt}/x.  The replayed activations are reused
+   across all 25 block-replays, so the resident transient is ~weights +
+   ONE block's working set (~0.5GB) instead of all 25 blocks at once.
+
+   Per-block weight feeding is by TSet (in-place buffer write), NOT TJit
+   input_replace: the bf16 transposed-B tiled matmul materialises a block
+   weight into a staging buffer whose id is NOT the declared input buffer,
+   so input_replace (keyed on the declared weight's capture-time buf_id)
+   records ZERO rebind sites for the weights -- every replay then keeps the
+   captured block-0 weights (confirmed: declared weight buf_ids 40-55 appear
+   in NO captured op input).  Instead the closures CLOSE OVER one fixed set
+   of weight/mod buffers; before each block-i replay TSet writes block-i's
+   bytes into those fixed buffers, and only the running img/txt is rebound
+   via input_replace (single-tensor activation rebinds correctly).  The mod
+   chunks (shared across blocks) are TSet once per step.
+   ============================================================ *)
+
+(* fixed positional order of the 16 double-block weights + 12 mod chunks. *)
+$fxDblWOrder = {"to_q", "to_k", "to_v", "norm_q", "norm_k", "to_out_0",
+    "add_q_proj", "add_k_proj", "add_v_proj", "norm_added_q", "norm_added_k", "to_add_out",
+    "ff_linear_in", "ff_linear_out", "ffc_linear_in", "ffc_linear_out"};
+$fxDblModOrder = {"img_shift_msa", "img_scale_msa", "img_gate_msa",
+    "img_shift_mlp", "img_scale_mlp", "img_gate_mlp",
+    "txt_shift_msa", "txt_scale_msa", "txt_gate_msa",
+    "txt_shift_mlp", "txt_scale_mlp", "txt_gate_mlp"};
+$fxSglWOrder = {"to_qkv_mlp_proj", "to_out", "norm_q", "norm_k"};
+$fxSglModOrder = {"shift", "scale", "gate"};
+
+(* ordered weight TTerm list for block i, each CONTIGUOUSLY realized.  The
+   per-block JIT sampler passes these as TJit inputs that each block-replay
+   rebinds; a lazy safetensor-view weight is staged by the tiled tensor-core
+   matmul into an internal tensor whose tid is NOT the declared input, so
+   input_replace records ZERO rebind sites and every replay silently keeps
+   block-0's weights (a ~1.0 relative-error divergence; THVM_JIT_SITES_TRACE
+   shows the 0-site weights).  TRealize forces a contiguous device buffer the
+   matmul reads directly, so the weight's tid IS the declared input and rebind
+   works.  TRealize is idempotent + the loader memoises each weight TTerm, so
+   the contiguous copy is made once and reused across all 4 sampler steps. *)
+fxDblWList[wf_, i_] := With[{W = fxDblW[wf, i]}, TRealize[W[#]] & /@ $fxDblWOrder];
+fxSglWList[wf_, i_] := With[{W = fxSglW[wf, i]}, TRealize[W[#]] & /@ $fxSglWOrder];
+
+(* realize each mod chunk into its OWN device buffer (fxModChunks returns Part
+   views sharing one buffer); TSet feeds each fixed mod slot from a distinct
+   source. *)
+fxRealizeChunks[chunks_] := TRealize /@ chunks
+
+(* snapshot a block-replay output into a FRESH leaf the closure will not
+   rewrite on its next replay: a TJit closure reuses ONE physical output buffer
+   across replays, so the next block-replay (which rebinds img/txt as inputs)
+   must not read that same buffer it is about to rewrite.  Reading to the host
+   and re-uploading as a brand-new leaf severs the alias; TRealize first so a
+   lazy arg (the double->single Join, the x_embedder matmul) materialises. *)
+fxSnap[t_, ca_] := ca @ TTensorCreate @ NumericArray[Normal[TRealize[t]], "Real32"]
+
+(* the captured double-block body: ALL of img/txt + the 12 mod chunks + rc/rs +
+   the 16 block weights are passed as EXPLICIT TJit ARGUMENTS (TTerms), not TSet
+   into closed-over slots.  TJit collects every TTerm arg as an input_replace
+   site (jitArgTids = Cases[args, _TTerm]), so each replay rebinds this block's
+   weights + this step's mods in place by POSITION -- the only thing the closure
+   closes over is cfg (a constant Association, same every block).  The captured
+   call shape is fxDblBlockBody[cfg][img, txt, mod1..mod12, rc, rs, w1..w16];
+   the body slices the flat 32-arg list and rewires the named Associations.
+
+   The earlier TSet-to-fixed-slot design was incompatible with TJit: TJit treats
+   closed-over slot TTerms as rebindable inputs too, so it reconstructed the call
+   with ~31 slots as positional inputs and the 2-arg dblFn[img,txt] underflowed
+   (MapThread::mptd, body never ran, garbage out).  Explicit args make the input
+   set EXACTLY the args -- no hidden slot rebinds.
+
+   Returns TRealize[{img, txt}] (one multi-root realize) so each replay rewrites
+   the two output buffers in place and the caller's r[[1]]/r[[2]] read the
+   replayed bytes (a bare {img,txt} list would hand back the unrealized graph,
+   re-run on the host). *)
+fxDblBlockBody[cfg_] := Function[fxDblBlockApply[cfg, {##}]]
+fxDblBlockApply[cfg_, {img_, txt_, mod : Repeated[_, {12}], rc_, rs_, w : Repeated[_, {16}]}] :=
+    TRealize @ fxDoubleBlock[img, txt,
+        AssociationThread[$fxDblModOrder -> {mod}], rc, rs,
+        AssociationThread[$fxDblWOrder -> {w}], cfg]
+
+(* the captured single-block body: x + the 3 mod chunks + rc/rs + the 4 block
+   weights as explicit TJit args (same rationale as the double body).  Captured
+   call shape fxSglBlockBody[cfg][x, mod1..mod3, rc, rs, w1..w4]; returns
+   TRealize[x]. *)
+fxSglBlockBody[cfg_] := Function[fxSglBlockApply[cfg, {##}]]
+fxSglBlockApply[cfg_, {x_, mod : Repeated[_, {3}], rc_, rs_, w : Repeated[_, {4}]}] :=
+    TRealize @ fxSingleBlock[x,
+        AssociationThread[$fxSglModOrder -> {mod}], rc, rs,
+        AssociationThread[$fxSglWOrder -> {w}], cfg]
+
+(* the per-block-replay transformer.  Same control flow as fxTransformer, but
+   the 5 double + 20 single blocks REPLAY two captured closures (dblFn/sglFn),
+   rebinding each block's weights + this step's mods + rc/rs as POSITIONAL TJit
+   inputs (no TSet, no fixed slots).  mods/smod are this step's mod chunk lists;
+   enc0 is the pre-embedded text stream.  fxSnap severs the output-buffer alias
+   between consecutive replays (the captured closure reuses one output buffer).
+   Returns {S_img, out_ch}.  dblFn/sglFn captured once by the caller. *)
+fxTransformerBlocked[hidden0_, enc0_, mods_, smod_, ropeCos_, ropeSin_, wf_, cfg_, dblFn_, sglFn_, temb_, ca_] := Module[
+    {eps, nD, nS, stxt, hidden, enc, r, dmod, smodL},
+    eps = cfg["eps"];  nD = cfg["num_double"];  nS = cfg["num_single"];
+    stxt = Dimensions[enc0][[1]];
+    dmod  = mods[#] & /@ $fxDblModOrder;   (* 12 chunk TTerms, fixed order *)
+    smodL = smod[#] & /@ $fxSglModOrder;   (*  3 chunk TTerms, fixed order *)
+    hidden = TRealize @ fxLinear[hidden0, wf["x_embedder.weight"]];    (* {S_img, dim} leaf *)
+    enc    = enc0;                                                     (* pre-embedded {S_txt, dim} *)
+    Do[ r = dblFn @@ Join[{hidden, enc}, dmod, {ropeCos, ropeSin}, fxDblWList[wf, i]];
+        hidden = fxSnap[r[[1]], ca];  enc = fxSnap[r[[2]], ca], {i, 0, nD - 1}];
+    hidden = fxSnap[Join[enc, hidden, 1], ca];                         (* {S_txt+S_img, dim} *)
+    Do[ hidden = fxSnap[sglFn @@ Join[{hidden}, smodL, {ropeCos, ropeSin}, fxSglWList[wf, i]], ca], {i, 0, nS - 1}];
+    hidden = hidden[[stxt + 1 ;; Dimensions[hidden][[1]]]];            (* drop text *)
+    fxLinear[fxNormOut[hidden, temb, wf["norm_out.linear.weight"], eps], wf["proj_out.weight"]]]
+
+(* the disk-mmap weight TTerms feeding block i (the values of fxDblW / fxSglW),
+   handed to TDiskDropWeight after the block's matmuls retire to stream the
+   block out of resident memory.  Bare wf[name] (NOT TRealize'd / TToDevice'd):
+   a streamed weight must stay a lazy disk-mmap leaf so the Metal matmul wraps
+   its pages zero-copy and TDiskDropWeight can drop+unwrap them. *)
+fxDblWeights[wf_, i_] := Values @ fxDblW[wf, i];
+fxSglWeights[wf_, i_] := Values @ fxSglW[wf, i];
+
+(* --- the STREAMING transformer.  Same op-by-op forward as fxTransformer, but
+       after each block's realize completes its weights are evicted via
+       TDiskDropWeight: the borrowed Metal wrap is freed and the disk pages are
+       MADV_DONTNEED'd, so only the ACTIVE block's weights stay resident (~one
+       block, not all 25).  Pair with wf = fxTransformerStreamLoader (no device
+       cache).  THVM_FWD_RECLAIM=1 + the per-realize rollback drop the block's
+       ACTIVATION buffers at each TRealize boundary; TDiskDropWeight drops the
+       block's WEIGHT pages.  The shared weights (embedders, modulation,
+       norm_out/proj_out) are touched every block/step and never dropped.
+       Returns {S_img, out_ch}. --- *)
+fxTransformerStreamed[hidden0_, enc0_, temb_, ropeCos_, ropeSin_, wf_, cfg_] := Module[
+    {eps, nD, nS, stxt, mods, smod, hidden, enc, ss},
+    eps = cfg["eps"];  nD = cfg["num_double"];  nS = cfg["num_single"];
+    stxt = Dimensions[enc0][[1]];
+    mods = fxDoubleMods[fxModChunks[temb, wf["double_stream_modulation_img.linear.weight"], 2],
+                        fxModChunks[temb, wf["double_stream_modulation_txt.linear.weight"], 2]];
+    ss   = fxModChunks[temb, wf["single_stream_modulation.linear.weight"], 1];
+    smod = <|"shift" -> ss[[1]], "scale" -> ss[[2]], "gate" -> ss[[3]]|>;
+    hidden = TRealize @ fxLinear[hidden0, wf["x_embedder.weight"]];      (* {S_img, dim} *)
+    enc    = TRealize @ fxLinear[enc0,    wf["context_embedder.weight"]]; (* {S_txt, dim} *)
+    Do[ With[{r = TRealize @ fxDoubleBlock[hidden, enc, mods, ropeCos, ropeSin, fxDblW[wf, i], cfg]},
+            hidden = r[[1]];  enc = r[[2]]];
+        TDiskDropWeight[fxDblWeights[wf, i]], {i, 0, nD - 1}];   (* evict block i's weights *)
+    hidden = TRealize @ Join[enc, hidden, 1];                             (* {S_txt+S_img, dim} *)
+    Do[ hidden = TRealize @ fxSingleBlock[hidden, smod, ropeCos, ropeSin, fxSglW[wf, i], cfg];
+        TDiskDropWeight[fxSglWeights[wf, i]], {i, 0, nS - 1}];   (* evict block i's weights *)
+    hidden = hidden[[stxt + 1 ;; Dimensions[hidden][[1]]]];               (* drop text *)
+    fxLinear[fxNormOut[hidden, temb, wf["norm_out.linear.weight"], eps], wf["proj_out.weight"]]]
 
 (* --- the full transformer.  hidden0 {S_img, in_ch}; enc0 {S_txt, joint_dim};
        temb {1, dim}; ropeCos/Sin {S_txt+S_img, head_dim} ([txt;img] order);

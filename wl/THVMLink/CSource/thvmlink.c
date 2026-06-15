@@ -1582,6 +1582,35 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_clear_grad(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// Stream a disk-mmap weight OUT of resident memory after a block retires.
+// args[0] = a weight Term (TAG_TEN over a disk-mmap CPU buffer).  Two drops:
+//   1. release its Metal zero-copy wrap (the borrowed MTLBuffer that aliased
+//      the weight's mmap pages -- thvm_kernel_input_drop_wrap), so the wrapped
+//      pages stop being held resident by the GPU and the wrapper object is
+//      freed (the per-realize rollback skips borrowed slots, so without this
+//      one wrap per block would accumulate for the whole model);
+//   2. MADV_DONTNEED the underlying disk mapping (thvm_disk_buf_dontneed), so
+//      the faulted-in weight pages leave RSS.  The mmap stays valid (file-
+//      backed PROT_READ), so a later use re-faults + re-wraps fresh.
+// Together this is the per-block streaming reclaim: only the ACTIVE block's
+// weights stay resident.  No-op for a non-disk / non-wrapped weight.  Returns
+// 1.
+EXTERN_C DLLEXPORT int thvm_wl_disk_drop_weight(WolframLibraryData libData,
+                                                mint argc, MArgument *args,
+                                                MArgument res) {
+  (void)libData; (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  if (term_tag(t) == TAG_TEN) {
+    u32 tid = (u32)term_val(t);
+    if (tid != 0 && tid < TENS_NEXT) {
+      thvm_kernel_input_drop_wrap(tid);       // free the Metal borrowed wrap
+      thvm_disk_buf_dontneed(TENS[tid].buf_id);  // drop the disk pages from RSS
+    }
+  }
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
 // Debug-only: dump View internals for a TenDesc as a flat integer
 // MTensor: {ndim, dims..., strides..., offset, contiguous, nviews,
 // buf_id, producer_kid}.  Gated on THVM_WL_TENSOR_VIEW_DEBUG so it

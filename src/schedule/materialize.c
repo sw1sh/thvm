@@ -766,6 +766,79 @@ static Term materialize_copy(Term term) {
       && TENS[cached].backend == target) {
     return term_new(0, TAG_TEN, TENS[cached].dtype, cached);
   }
+  // === Zero-copy wrap: disk-mmap weight -> Metal =====================
+  // On Apple unified memory, a CPU disk-mmap source (a safetensors weight,
+  // on_release == disk_map_release) uploaded to Metal needs no staging copy:
+  // newBufferWithBytesNoCopy wraps the mmap pages in place so the GPU reads
+  // the SAME physical bytes.  We wrap the page-aligned DiskMap base and pass
+  // the within-map minor byte offset to the wrap, which stores it as the
+  // buffer's byte_offset and applies it at every kernel input bind so the
+  // kernel's contiguous index 0 lands on the weight's first byte.  Falls
+  // through to the staged-upload copy path on any mismatch (non-Metal target,
+  // non-disk src, wrap failure, or a minor offset that isn't an element
+  // multiple).
+  {
+    TenDesc *sd = &TENS[src_tid];
+    void *map_base = NULL;
+    u64   maplen = 0, minor = 0;
+    u32   isz = dtype_itemsize(sd->dtype);
+    // Default ON (THVM_ZEROCOPY=0 disables).  On Apple unified memory a disk-mmap
+    // weight uploaded to Metal needs NO staging copy: newBufferWithBytesNoCopy
+    // wraps the mmap pages in place (RSS == footprint, instant cold load, no 2x
+    // device copy).  The 100GB blowup that once kept this opt-in was unbounded
+    // RE-wrapping; thvm_metal_buf_wrap_external now dedups by host_base (each
+    // region wrapped ONCE) + refcounts the borrowed slot, and output is
+    // byte-identical to the staged path -- so it is the correct default.  Re-read
+    // getenv until DISABLED so a WL SetEnvironment["THVM_ZEROCOPY"->"0"] before
+    // the first weight upload is honored (matches thvm_realize_fwd_reclaim).
+    static int zc_enabled = -1;
+    if (zc_enabled != 0) {
+      const char *e = getenv("THVM_ZEROCOPY");
+      zc_enabled = (e == NULL || e[0] != '0') ? 1 : 0;
+    }
+    if (zc_enabled && target == &METAL_BACKEND && srcb == &CPU_BACKEND && isz != 0
+        && thvm_disk_buf_map_info(sd->buf_id, &map_base, &maplen, &minor)
+        && (minor % isz) == 0) {
+      u32 wbid = thvm_metal_buf_wrap_external(map_base, maplen, minor);
+      if (wbid != 0) {
+        // Build a Metal TenDesc that views the wrapped buffer.  Copy the
+        // src's (contiguous, offset-0) leaf view UNCHANGED: the weight's
+        // within-map byte offset is carried by the wrapped buffer's
+        // byte_offset and applied at the kernel input bind, so the kernel's
+        // contiguous index 0 already lands on the weight.  (Baking the offset
+        // into the view instead would be dropped by the matmul codegen, which
+        // rebuilds a fresh offset-0 leaf view over the raw buffer.)
+        if (TENS_NEXT >= TENS_CAP) {
+          fprintf(stderr, "materialize_copy: out of TenDesc slots for wrap\n");
+        } else {
+          u32 dwid = TENS_NEXT++;
+          TenDesc *dw = &TENS[dwid];
+          dw->dtype         = sd->dtype;
+          dw->refcount      = 1;
+          dw->view          = sd->view;
+          dw->prior_views   = NULL;
+          dw->nviews        = 0;
+          dw->requires_grad = 0;
+          dw->grad          = 0;
+          dw->assign_kvar_id = 0;
+          dw->backend       = target;
+          dw->producer_kid  = 0;
+          dw->buf_id        = wbid;
+          // Pin + cache the wrap under a JIT capture, mirroring the staged
+          // upload below: per-block replay rebinds the same wrapped weight
+          // across steps, so it must survive pool rollback and stay deduped
+          // by copy-loc.  (The borrowed buffer holds no device bytes, so an
+          // eager forward that leaves it unpinned simply re-wraps next pass.)
+          if (jit_is_capturing()) {
+            if (target->buf_jit_pin != NULL) target->buf_jit_pin(wbid);
+            copy_upload_insert(loc, target->id, dwid);
+          }
+          return term_new(0, TAG_TEN, dw->dtype, dwid);
+        }
+      }
+      // wrap declined: fall through to the staged-upload copy path.
+    }
+  }
   // Host-stage + upload.  Allocate the dest on the target backend, read
   // the src bytes into a temp host buffer, write them across.
   TenDesc *sd     = &TENS[src_tid];
@@ -781,10 +854,37 @@ static Term materialize_copy(Term term) {
   u32 dst_tid = tensor_alloc(target, sd->view.shape, dtype);
   target->buf_write(TENS[dst_tid].buf_id, stage, nbytes);
   free(stage);
+  // The device now owns these bytes.  If the src is a disk-mapped weight
+  // (a safetensors mmap), drop its host pages (MADV_DONTNEED): keeping them
+  // resident doubles a multi-GB weight set's residency (host mmap + device
+  // upload) for no benefit -- the mapping stays valid and re-faults from the
+  // SSD on the (rare) chance a later CPU op reads the same weight.  Only the
+  // CPU backend host-stages a disk mapping; thvm_disk_buf_dontneed is a no-op
+  // on any non-disk buffer.
+  if (srcb == &CPU_BACKEND) thvm_disk_buf_dontneed(sd->buf_id);
   // Sticky retain so the per-realize pool rollback does not reclaim the
   // uploaded weight buffer; cache for re-realize / JIT-replay reuse.
-  if (target->buf_jit_pin != NULL) target->buf_jit_pin(TENS[dst_tid].buf_id);
-  copy_upload_insert(loc, target->id, dst_tid);
+  //
+  // Only pin+cache while a JIT capture is active.  A JIT-captured graph
+  // replays the SAME upload-cached weight buffer across every replay step,
+  // so the upload must survive pool rollback (and stay deduped by copy-loc).
+  // An EAGER forward, by contrast, uploads each weight, consumes it in one
+  // kernel, and never reads that copy-loc again within the realize -- a
+  // sticky pin would then leak every uploaded weight for the lifetime of the
+  // context (a single 27-layer Qwen forward pinned all ~8GB of weights at
+  // once, growing live ~0.37GB/layer with nothing freed).  Leaving the eager
+  // upload UNPINNED lets the per-realize rollback reclaim it once the kernel
+  // that consumes it has fired, bounding a forward's resident set to its
+  // genuinely-live working set.  We also skip the cache insert when not
+  // pinning: a non-pinned tid would be freed by rollback and could later
+  // alias a different tensor, so the (copy_loc -> tid) entry must not outlive
+  // the buffer.  Mirror: tinygrad pins a COPY's dest only when the lazy graph
+  // that owns it stays alive (a JIT'd schedule); an eager copy's dest dies
+  // with its schedule.
+  if (jit_is_capturing()) {
+    if (target->buf_jit_pin != NULL) target->buf_jit_pin(TENS[dst_tid].buf_id);
+    copy_upload_insert(loc, target->id, dst_tid);
+  }
   return term_new(0, TAG_TEN, TENS[dst_tid].dtype, dst_tid);
 }
 
@@ -5914,6 +6014,39 @@ static Term emit_kernel_for_boundary(u32 bi) {
   if (ke->cached_lift.store_root != 0) {
     ke->cached_lift.store_root =
         uop_dag_renumber_axes(ke->cached_lift.store_root);
+  }
+
+  // Reconcile the dispatch-time input count with the rendered kernel
+  // signature.  visit()/input_slot_dedup record one ke->input_tids[]
+  // slot per (tid, term) reached during the kernel-build walk, but the
+  // unified rewrite that produces the final store_root can COLLAPSE
+  // slots: two view-clones of one buffer fold to a single UOP_BUFFER
+  // inst (unified_rewrite_buffer_for_tid's buf_id fallback), and a
+  // fused-away producer leaves a recorded-but-unread slot.  The
+  // renderer emits buffer params only for the UOP_BUFFER insts present
+  // in store_root, so when ke->n_inputs exceeds the highest rendered
+  // inst the per-op encoder (and the ICB replay) bind extra buffers at
+  // indices the compiled function never reads -- wasted binds and a
+  // latent stale read of whatever buffer last occupied that index (e.g.
+  // the FX_MOD_BF16 SiLU-gating kernel records 4 input tids -- two
+  // view-clones of the modulation buffer + two fused-away producers --
+  // but the rewritten DAG reads ONE).  Truncate to the rendered count so
+  // dispatch binds exactly {1..rendered} -- the set the function reads.
+  // Mirrors tinygrad's bufs_from_ast (codegen/opt/postrange.py:330): the
+  // kernel buffer list is derived FROM the final AST PARAMs, not a side
+  // list that can drift.
+  //
+  // Only TRUNCATE trailing slots (rendered <= n_inputs); never extend.
+  // The renderer indexes inputs as inst=slot+1 from the SAME store_root,
+  // so the highest rendered inst is always <= ke->n_inputs and the kept
+  // prefix [0..rendered) stays index-aligned with the DAG's UOP_BUFFER
+  // insts -- no renumbering needed.
+  if (ke->cached_lift.store_root != 0 && ke->n_inputs > 0) {
+    u32 rendered = cg_render_input_inst_count(ke->cached_lift.store_root);
+    if (rendered < ke->n_inputs) {
+      ke->n_inputs = rendered;
+      ke->cached_lift.n_inputs = rendered;
+    }
   }
 
   // Schedule-time explosion guard (debug-only): walk the finalized

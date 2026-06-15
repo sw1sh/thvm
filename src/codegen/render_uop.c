@@ -5673,6 +5673,26 @@ static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
   }
 }
 
+// Public: return the highest input slot (UOP_BUFFER instance) the
+// renderer will emit a buffer parameter for, given a finalized kernel
+// store_root.  This is the SAME discovery walk the metal/CPU signature
+// emitters use (rmu_discover_bufs_rec), so the count returned here is
+// exactly the number of `in0..in{N-1}` params the compiled function
+// declares.  materialize.c calls this to reconcile ke->n_inputs (the
+// dispatch-time bind count) with the rendered signature, dropping any
+// trailing input slots the unified-rewrite collapsed away (e.g. two
+// view-clones of one buffer fold to a single UOP_BUFFER inst, or a
+// fused-away producer leaves a recorded-but-unread slot).  Mirrors
+// tinygrad's bufs_from_ast (codegen/opt/postrange.py:330): the kernel's
+// buffer list is derived FROM the final AST's PARAM nodes, never a
+// separately-maintained list that can drift.
+fn u32 cg_render_input_inst_count(Term root) {
+  Term slot_bufs[RMU_DISCOVER_MAX] = {0};
+  u32 n_inputs = 0;
+  rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
+  return n_inputs;
+}
+
 // Render a kernel rooted at `root`.  The root is typically a
 // UOP_STORE (single-store kernel) or UOP_AFTER chain (multi-store
 // kernel).  `kernel_name` and a list of input buffers + the output

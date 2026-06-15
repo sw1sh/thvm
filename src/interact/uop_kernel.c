@@ -164,6 +164,59 @@ fn int assign_fire_claim(u64 loc) {
 #define KIN_UP_CAP (1u << 15)
 static struct { u32 src_tid; u32 backend_id; u32 dst_tid; } KIN_UP[KIN_UP_CAP];
 fn void kernel_input_upload_reset(void) { memset(KIN_UP, 0, sizeof(KIN_UP)); }
+
+// Drop the Metal zero-copy disk-mmap WRAP cached for src_tid (a disk-mmap CPU
+// weight that fed a Metal matmul).  A streaming per-block forward wraps each
+// block's weights zero-copy (kernel_input_on_backend's borrowed-wrap branch),
+// caches the wrap tid in KIN_UP, and never sees the per-realize pool rollback
+// reclaim the borrowed MTLBuffer (those rollbacks skip borrowed slots).  After
+// a block's matmuls retire, the WL streaming loader calls this per weight to
+// release that block's wrap so wraps don't accumulate (one per block) for the
+// whole model.  Frees the borrowed MTLBuffer wrapper (the underlying mmap
+// pages stay owned by the CPU-side DiskMap, dropped separately via
+// thvm_disk_buf_dontneed) and clears the KIN_UP slot so the NEXT use of this
+// weight re-wraps its (possibly re-faulted) pages fresh.  No-op when src_tid
+// has no Metal wrap cached.
+fn void thvm_kernel_input_drop_wrap(u32 src_tid) {
+  if (src_tid == 0 || src_tid >= TENS_NEXT) return;
+  u32 backend_id = METAL_BACKEND.id;
+  u32 h = (src_tid * 0x9e3779b1u + backend_id) & (KIN_UP_CAP - 1);
+  for (u32 p = 0; p < KIN_UP_CAP; p++) {
+    u32 i = (h + p) & (KIN_UP_CAP - 1);
+    if (KIN_UP[i].src_tid == 0) return;                    // not cached
+    if (KIN_UP[i].src_tid == src_tid && KIN_UP[i].backend_id == backend_id) {
+      u32 dt = KIN_UP[i].dst_tid;
+      if (dt != 0 && dt < TENS_NEXT) {
+        u32 wbid = TENS[dt].buf_id;
+        if (wbid != 0 && thvm_metal_buf_is_borrowed(wbid)) {
+          thvm_metal_buf_free_borrowed(wbid);
+          TENS[dt].buf_id = 0;                             // wrap tid now dead
+        }
+      }
+      // Clear the slot.  A linear-probe hash with tombstones would break the
+      // run-of-set chain, so re-pack the run after i: lift any later entry whose
+      // home bucket lies at or before i (the standard backward-shift delete).
+      KIN_UP[i].src_tid = 0; KIN_UP[i].backend_id = 0; KIN_UP[i].dst_tid = 0;
+      u32 j = i;
+      for (u32 q = 1; q < KIN_UP_CAP; q++) {
+        u32 k = (i + q) & (KIN_UP_CAP - 1);
+        if (KIN_UP[k].src_tid == 0) break;
+        u32 home = (KIN_UP[k].src_tid * 0x9e3779b1u + KIN_UP[k].backend_id)
+                   & (KIN_UP_CAP - 1);
+        // k can fill slot j iff its home bucket is not strictly between j+1..k
+        // (cyclically) -- i.e. moving it back to j keeps it findable.
+        u32 dist_kj = (k - j) & (KIN_UP_CAP - 1);
+        u32 dist_kh = (k - home) & (KIN_UP_CAP - 1);
+        if (dist_kh >= dist_kj) {
+          KIN_UP[j] = KIN_UP[k];
+          KIN_UP[k].src_tid = 0; KIN_UP[k].backend_id = 0; KIN_UP[k].dst_tid = 0;
+          j = k;
+        }
+      }
+      return;
+    }
+  }
+}
 // Return a tid whose buffer holds src_tid's bytes on dst_b (src_tid itself if it
 // is already on dst_b, or on any failure -- the dispatch then proceeds as before
 // rather than aborting).  Leaves are contiguous, so the kernel's input view
@@ -188,12 +241,59 @@ static u32 kernel_input_on_backend(u32 src_tid, Backend *dst_b) {
   }
   u64 numel  = TENS[src_tid].view.numel;
   u64 nbytes = dtype_storage_bytes(TENS[src_tid].dtype, numel);
-  void *stage = malloc((size_t)nbytes);
-  if (stage == NULL) return src_tid;
-  if (sb->buf_read(TENS[src_tid].buf_id, stage, nbytes) != 0) { free(stage); return src_tid; }
-  u32 dst_tid = tensor_alloc(dst_b, TENS[src_tid].view.shape, TENS[src_tid].dtype);
-  dst_b->buf_write(TENS[dst_tid].buf_id, stage, nbytes);
-  free(stage);
+  u32 dst_tid = 0;
+  // === Zero-copy wrap: disk-mmap weight -> Metal =======================
+  // On Apple unified memory, a CPU disk-mmap source (a safetensors weight,
+  // on_release == disk_map_release) staged to Metal needs no copy:
+  // newBufferWithBytesNoCopy wraps the mmap pages in place so the GPU reads
+  // the SAME physical bytes (no upload, no extra RSS).  We wrap the page-
+  // aligned DiskMap base; the weight's first byte sits `minor` bytes in, which
+  // the wrapped buffer's byte_offset carries (applied at every kernel input
+  // bind, so the kernel's contiguous index 0 lands on the weight).  The dst
+  // TenDesc keeps the src's contiguous offset-0 leaf view unchanged.  Declines
+  // (dst_tid stays 0) on non-Metal target, non-disk src, a non-element-multiple
+  // minor, or a wrap failure -> falls through to the staged host upload below.
+  if (dst_b == &METAL_BACKEND) {
+    void *map_base = NULL;
+    u64   maplen = 0, minor = 0;
+    u32   isz = dtype_itemsize(TENS[src_tid].dtype);
+    if (isz != 0
+        && thvm_disk_buf_map_info(TENS[src_tid].buf_id, &map_base, &maplen, &minor)
+        && (minor % isz) == 0) {
+      if (TENS_NEXT < TENS_CAP) {
+        u32 wbid = thvm_metal_buf_wrap_external(map_base, maplen, minor);
+        if (wbid != 0) {
+          u32 dwid = TENS_NEXT++;
+          TenDesc *dw = &TENS[dwid];
+          dw->dtype          = TENS[src_tid].dtype;
+          dw->refcount       = 1;
+          dw->view           = TENS[src_tid].view;     // contiguous offset-0 leaf
+          // The weight's within-map byte offset is carried by the wrapped
+          // buffer's byte_offset (applied at the kernel input bind), so the
+          // view stays offset-0 -- a nonzero view offset would be dropped by
+          // the matmul codegen's fresh offset-0 leaf rebuild.
+          dw->prior_views    = NULL;
+          dw->nviews         = 0;
+          dw->requires_grad  = 0;
+          dw->grad           = 0;
+          dw->assign_kvar_id = 0;
+          dw->backend        = dst_b;
+          dw->producer_kid   = 0;
+          dw->buf_id         = wbid;
+          dst_tid = dwid;
+        }
+      }
+    }
+  }
+  if (dst_tid == 0) {
+    // Host-stage + upload: read src bytes into a temp, write across.
+    void *stage = malloc((size_t)nbytes);
+    if (stage == NULL) return src_tid;
+    if (sb->buf_read(TENS[src_tid].buf_id, stage, nbytes) != 0) { free(stage); return src_tid; }
+    dst_tid = tensor_alloc(dst_b, TENS[src_tid].view.shape, TENS[src_tid].dtype);
+    dst_b->buf_write(TENS[dst_tid].buf_id, stage, nbytes);
+    free(stage);
+  }
   for (u32 p = 0; p < KIN_UP_CAP; p++) {
     u32 i = (h + p) & (KIN_UP_CAP - 1);
     if (KIN_UP[i].src_tid == 0
@@ -289,7 +389,23 @@ fn void kernel_fire_by_id(u32 kid) {
   Backend *out_b = TENS[ke->output_tid].backend;
   u32 in_buf_ids[ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    in_buf_ids[i] = TENS[kernel_input_on_backend(resolved_tids[i], out_b)].buf_id;
+    u32 on_b = kernel_input_on_backend(resolved_tids[i], out_b);
+    in_buf_ids[i] = TENS[on_b].buf_id;
+    // kernel_input_on_backend moved a cross-backend leaf (a CPU weight feeding
+    // a Metal-routed net) onto out_b -- either a staged upload or a zero-copy
+    // disk-mmap wrap.  The kernel reads each input's strides/offset from
+    // ke->input_tids[slot], not from in_buf_ids; keep them consistent by
+    // rebinding the recorded tid to the moved one (both the staged copy and
+    // the wrap carry a contiguous offset-0 same-shape view, so this is
+    // semantically a no-op, but it keeps the recorded view's buffer identity
+    // matching the bound buffer).  Only rebind the plain-leaf case the move
+    // applied to; leave composed/strided slots the codegen already lowered
+    // into the kernel INDEX untouched.
+    if (on_b != resolved_tids[i] && ke->input_tids != NULL
+        && i < ke->n_inputs && ke->input_tids[i] == resolved_tids[i]
+        && (ke->input_chain_composed == NULL || !ke->input_chain_composed[i])) {
+      ke->input_tids[i] = on_b;
+    }
   }
   u32 out_buf_id = TENS[ke->output_tid].buf_id;
 

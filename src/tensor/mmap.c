@@ -39,6 +39,59 @@ static void disk_map_release(void *handle) {
   free(m);
 }
 
+// After a disk-mapped weight has been uploaded to a device, its host
+// pages are pure duplication of the device copy -- and they were paged
+// fully resident by the MADV_WILLNEED prefetch at map time.  Drop them
+// with MADV_DONTNEED so they no longer count against RSS; the mapping
+// stays valid (file-backed, PROT_READ), so a later CPU read just
+// re-faults the bytes from the SSD.  `cpu_buf_id` must be a CPU buf
+// whose on_release is disk_map_release (a disk tensor); for any other
+// buf this is a no-op.  Without this, a multi-GB safetensors weight set
+// is held TWICE during a forward -- the host mmap (~8GB for Qwen3-4B)
+// PLUS the device upload (~8GB) -- and the host half is the difference
+// between a ~9GB and a ~14GB resident set.
+fn void thvm_disk_buf_dontneed(u32 cpu_buf_id) {
+  if (CPU_BUFS == NULL || cpu_buf_id == 0 || cpu_buf_id >= CPU_BUFS_NEXT)
+    return;
+  CpuBuf *b = &CPU_BUFS[cpu_buf_id];
+  if (b->on_release != disk_map_release) return;   // not a disk mapping
+  DiskMap *m = (DiskMap *)b->handle;
+  if (m == NULL || m->base == NULL || m->base == MAP_FAILED || m->maplen == 0)
+    return;
+  madvise(m->base, (size_t)m->maplen, MADV_DONTNEED);
+}
+
+// True iff `cpu_buf_id` is a disk-mmap CpuBuf (its on_release is
+// disk_map_release).  Used by materialize_copy to decide whether a
+// CPU->Metal COPY can be served by a zero-copy newBufferWithBytesNoCopy
+// wrap of the underlying mmap instead of a staged upload.
+fn int thvm_disk_buf_is_mapped(u32 cpu_buf_id) {
+  if (CPU_BUFS == NULL || cpu_buf_id == 0 || cpu_buf_id >= CPU_BUFS_NEXT)
+    return 0;
+  return CPU_BUFS[cpu_buf_id].on_release == disk_map_release;
+}
+
+// For a disk-mmap CpuBuf, return its page-aligned mmap base + length and the
+// within-map byte offset (minor) at which the buffer's bytes start (data -
+// base).  Returns 0 (not a disk mapping / bad handle) without touching the
+// out params, 1 on success.  materialize_copy wraps [base, base+maplen) as a
+// borrowed MTLBuffer and threads `minor` into the dst view.offset so the GPU
+// reads land on the weight's first byte.
+fn int thvm_disk_buf_map_info(u32 cpu_buf_id, void **base_out, u64 *maplen_out,
+                              u64 *minor_out) {
+  if (!thvm_disk_buf_is_mapped(cpu_buf_id)) return 0;
+  CpuBuf  *b = &CPU_BUFS[cpu_buf_id];
+  DiskMap *m = (DiskMap *)b->handle;
+  if (m == NULL || m->base == NULL || m->base == MAP_FAILED || m->maplen == 0)
+    return 0;
+  u64 minor = (u64)((char *)b->data - (char *)m->base);
+  if (minor >= m->maplen) return 0;                // malformed: data outside map
+  if (base_out)   *base_out   = m->base;
+  if (maplen_out) *maplen_out = m->maplen;
+  if (minor_out)  *minor_out  = minor;
+  return 1;
+}
+
 // Map [byte_offset, byte_offset + nbytes) of `path` read-only and wrap it
 // as a CPU TAG_TEN of the given dtype + shape.  Returns 0 (an invalid
 // Term, all-zero) on any failure; callers must check.  The mapping is
@@ -113,7 +166,21 @@ fn Term thvm_tensor_mmap(const char *path, u64 byte_offset, u64 nbytes,
   // so the bytes are resident (near SSD sequential bandwidth) by the time
   // the upload reads them.  Best-effort: ignore the return (an unsupported
   // hint just leaves the lazy-fault behaviour unchanged).
-  madvise(base, (size_t)map_len, MADV_WILLNEED);
+  //
+  // THVM_MMAP_NO_WILLNEED disables it: TSafeTensorLoad maps EVERY tensor in
+  // a file up front, so WILLNEED faults the WHOLE multi-GB file resident at
+  // load time (the Qwen3-4B encoder pages ~8GB before a single weight is
+  // uploaded).  Paired with the upload-time MADV_DONTNEED (materialize_copy),
+  // leaving WILLNEED off keeps the host working set to roughly one weight at
+  // a time -- each weight faults in only when the upload reads it, then its
+  // pages are dropped -- trading a little cold-start readahead for a much
+  // smaller peak RSS on a memory-bound, upload-everything-once forward.
+  static int no_willneed = -1;
+  if (no_willneed < 0) {
+    const char *e = getenv("THVM_MMAP_NO_WILLNEED");
+    no_willneed = (e != NULL && e[0] != '0') ? 1 : 0;
+  }
+  if (!no_willneed) madvise(base, (size_t)map_len, MADV_WILLNEED);
 
   void *buf = (void *)((char *)base + minor);
 

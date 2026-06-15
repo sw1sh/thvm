@@ -240,6 +240,7 @@ static char const *kdispatch_tag(KDispatchKind k) {
     case KDISPATCH_INTERPRETER:return "uop_walk";
     case KDISPATCH_METAL_TILE: return "metal";
     case KDISPATCH_METAL_OP:   return "metal_op";
+    case KDISPATCH_METAL_MPS:  return "metal_mps";
     case KDISPATCH_CUDA_JIT:   return "cuda_jit";
     default:                   return "none";
   }
