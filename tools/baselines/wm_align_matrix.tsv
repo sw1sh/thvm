@@ -18,10 +18,18 @@ BooleanAxioms__AndCommutativity	6	6	6	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__AndDistributivity	5	5	5	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__AndIdempotence	16	16	16	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__AndPreAssociativity	47	47	47	Y	-	thvm=PROVED weights-exact
+BooleanAxioms__DeMorgan__c1	2105	2105	2105	Y	-	thvm=PROVED weights-exact
+BooleanAxioms__DeMorgan__c2	2208	2208	2208	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__DoubleNegation	36	36	36	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__DroppingAlwaysFalse	1	1	1	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__DroppingAlwaysTrue	1	1	1	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__ExcludedMiddle	63	63	63	Y	-	thvm=PROVED weights-exact
+BooleanAxioms__ImpliesHuntingtonAxioms__c1	6	6	6	Y	-	thvm=PROVED weights-exact
+BooleanAxioms__ImpliesHuntingtonAxioms__c2	1250	1250	1250	Y	-	thvm=PROVED weights-exact
+BooleanAxioms__ImpliesHuntingtonAxioms__c3	2082	2082	2082	Y	-	thvm=PROVED weights-exact
+BooleanAxioms__ImpliesRobbinsAxioms__c1	6	6	6	Y	-	thvm=PROVED weights-exact
+BooleanAxioms__ImpliesRobbinsAxioms__c2	1250	1250	1250	Y	-	thvm=PROVED weights-exact
+BooleanAxioms__ImpliesRobbinsAxioms__c3	2082	2082	2082	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__NegationRedundancy	9	9	9	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__Noncontradiction	65	65	65	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__OrAssociativity	1250	1250	1250	Y	-	thvm=PROVED weights-exact
@@ -29,6 +37,12 @@ BooleanAxioms__OrCommutativity	6	6	6	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__OrDistributivity	5	5	5	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__OrIdempotence	15	15	15	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__Transposition	36	36	36	Y	-	thvm=PROVED weights-exact
+CombinatorAxioms__BCKWToSKI__c1	7	7	7	Y	-	thvm=PROVED weights-exact
+CombinatorAxioms__BCKWToSKI__c2	109	109	109	Y	-	thvm=PROVED weights-exact
+CombinatorAxioms__BCKWToSKI__c3	7	7	7	Y	-	thvm=PROVED weights-exact
+CombinatorAxioms__SKIToBCKW__c1	44823	2251	302	N	303	thvm=PROVED content-delta_wm-only=42626_thvm-only=54;post-axiom_nonax-wm=44816_nonax-thvm=2244_nonax-prefix=295;weights-exact
+CombinatorAxioms__SKIToBCKW__c2	32700	1818	302	N	303	thvm=PROVED content-delta_wm-only=30916_thvm-only=34;post-axiom_nonax-wm=32693_nonax-thvm=1811_nonax-prefix=295;weights-exact
+CombinatorAxioms__SKIToBCKW__c3	9	9	9	Y	-	thvm=PROVED weights-exact
 CommutativeRingAxioms__ZeroIsAbsorbing	547	547	547	Y	-	thvm=PROVED weights-exact
 CommutativeRingWithIdentityAxioms__MinusOneYieldsInverse	576	576	576	Y	-	thvm=PROVED weights-exact
 CommutativeRingWithIdentityAxioms__ZeroIsAbsorbing	503	503	503	Y	-	thvm=PROVED weights-exact
@@ -43,6 +57,9 @@ HigmanNeumannAxioms__LeftIdentity	13	13	13	Y	-	thvm=PROVED weights-exact
 HigmanNeumannAxioms__RightIdentity	11	11	11	Y	-	thvm=PROVED weights-exact
 HillmanAxioms__Commutativity	182	182	182	Y	-	thvm=PROVED weights-exact
 HuntingtonAxioms__DoubleNegation	215	215	215	Y	-	thvm=PROVED weights-exact
+HuntingtonAxioms__ImpliesRobbinsAxioms__c1	2	2	2	Y	-	thvm=PROVED weights-exact
+HuntingtonAxioms__ImpliesRobbinsAxioms__c2	3	3	3	Y	-	thvm=PROVED weights-exact
+HuntingtonAxioms__ImpliesRobbinsAxioms__c3	220	220	220	Y	-	thvm=PROVED weights-exact
 McCuneAxioms__Associativity	213	213	213	Y	-	thvm=PROVED weights-exact
 McCuneAxioms__EqualityOfInverses	156	156	156	Y	-	thvm=PROVED weights-exact
 McCuneAxioms__InverseOfComposite	130	130	130	Y	-	thvm=PROVED weights-exact
@@ -52,5 +69,8 @@ MeredithAxioms__Commutativity	6	6	6	Y	-	thvm=PROVED weights-exact
 MeredithAxioms__OrAssociativity	64800	34224	24	N	25	thvm=RUNNING content-delta_wm-only=32284_thvm-only=1708;post-axiom_nonax-wm=64798_nonax-thvm=34222_nonax-prefix=22;weights-exact
 RingAxioms__ZeroIsAbsorbing	447	447	447	Y	-	thvm=PROVED weights-exact
 RingWithIdentityAxioms__ZeroIsAbsorbing	462	462	462	Y	-	thvm=PROVED weights-exact
+RobbinsAxioms__DoubleNegation	-	-	-	-	-	SKIPPED_SLOW
+WolframAxioms__AndAssociativity	-	-	-	-	-	SKIPPED_WM_TRACE
 WolframAxioms__Commutativity	-	-	-	-	-	SKIPPED_WM_TRACE
 WolframAxioms__DoubleNegation	-	-	-	-	-	SKIPPED_WM_TRACE
+WolframAxioms__OrAssociativity	-	-	-	-	-	SKIPPED_WM_TRACE
