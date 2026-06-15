@@ -2215,6 +2215,129 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-split-enclosing-exit-newer-first");
+  {
+    // BooleanAxioms OrAssociativity @300 polarity.  When a SHORTER new
+    // leaf splits a LONGER existing leaf at a position whose enclosing
+    // function subterm opened at a STRICT ANCESTOR of the split, the new
+    // leaf's parallel jump must HEAD that ancestor node's outgoing exit
+    // list (the more-general / shorter jump is consulted first) -- not be
+    // chained after the old leaf's surviving entry as plain
+    // AltesBlattPolieren (DSBaumOperationen.c :523-526) would place it.
+    //
+    // Build the f(v1, f(v1, ...)) family with f=binary(label 3),
+    // i=unary(label 2):
+    //   t740 = f(v1, f(v2, v1))            (sibling -> forces a node at the
+    //                                       inner-f first arg so the split
+    //                                       lands at a strict descendant)
+    //   t274 = f(v1, f(v1, f(v2, i(v2))))  (LONG victim, 8 cells)
+    //   t768 = f(v1, f(v1, v2))            (SHORT new leaf, 5 cells)
+    // Inserting t768 splits t274; the enclosing f(v1, ...) opened two
+    // levels up.  The d2 node (root -> f -> v1) must list t768's parallel
+    // FIRST.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    Term lhss[3] = {
+      mk_f(mk_v(0u), mk_f(mk_v(1u), mk_v(0u))),                       // t740
+      mk_f(mk_v(0u), mk_f(mk_v(0u), mk_f(mk_v(1u), mk_i(mk_v(1u))))), // t274
+      mk_f(mk_v(0u), mk_f(mk_v(0u), mk_v(1u))),                       // t768
+    };
+    u32 traces[3] = { 740u, 274u, 768u };
+    for (u32 k = 0; k < 3u; k++) {
+      s->lhs[k] = lhss[k];
+      s->rhs[k] = mk_v(0u);
+      s->r_orient[k] = 1u;
+      s->r_trace[k] = traces[k];
+      s->n_rules++;
+      atp_wmo_insert_fact(s, k);
+    }
+    {
+      AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+      // navigate root -> f -> v1
+      WmoCell cf; cf.sym = 3u; cf.is_var = 0u; cf.arity = 2u;   // f
+      WmoCell cv; cv.sym = 1u; cv.is_var = 1u; cv.arity = 0u;   // v1
+      u8 il = 0;
+      WmoNode *d1 = (WmoNode *)wmo_kid_get(w->tree[0].root, &cf, &il);
+      CHECK(d1 != NULL && il == 0u);
+      WmoNode *d2 = (WmoNode *)wmo_kid_get(d1, &cv, &il);
+      CHECK(d2 != NULL && il == 0u);
+      // the HEAD exit of d2 must target the NEW shorter leaf (t768).
+      WmoEntry *head = d2->exits;
+      CHECK(head != NULL);
+      CHECK_EQ(head->ziel_leaf, 1u);
+      WmoLeaf *hl = (WmoLeaf *)head->ziel;
+      u8 head_is_t768 = 0;
+      for (u32 c = 0; c < hl->n_chain; c++) {
+        if (hl->chain[c].trace == 768u) head_is_t768 = 1u;
+      }
+      CHECK_EQ(head_is_t768, 1u);
+      // t768's parallel must be strictly ahead of t274's enclosing jump.
+      u32 idx = 0, at_768 = 0xffffffffu, at_274 = 0xffffffffu;
+      for (WmoEntry *e = d2->exits; e != NULL; e = e->next, idx++) {
+        if (!e->ziel_leaf) continue;
+        WmoLeaf *l = (WmoLeaf *)e->ziel;
+        for (u32 c = 0; c < l->n_chain; c++) {
+          if (l->chain[c].trace == 768u) at_768 = idx;
+          if (l->chain[c].trace == 274u) at_274 = idx;
+        }
+      }
+      CHECK(at_768 != 0xffffffffu);
+      CHECK(at_274 != 0xffffffffu);
+      CHECK(at_768 < at_274);   // newer/shorter consulted first
+    }
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-emission-order-split-enclosing-exit-older-first");
+  {
+    // Opposite polarity (HigmanNeumann @61 family): a LONGER new leaf that
+    // splits a SHORTER existing leaf keeps the plain AltesBlattPolieren
+    // after-old placement (DSBaumOperationen.c :523-526) -- the older /
+    // shorter generic jump is consulted FIRST.  Same three faces as the
+    // newer-first test but with t768 (short) inserted as the victim and
+    // t274 (long) the splitter, so the discriminator's `old_e2 > e2`
+    // clause is false and no head-insert fires.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    Term lhss[3] = {
+      mk_f(mk_v(0u), mk_f(mk_v(1u), mk_v(0u))),                       // t740
+      mk_f(mk_v(0u), mk_f(mk_v(0u), mk_v(1u))),                       // t768 (short victim)
+      mk_f(mk_v(0u), mk_f(mk_v(0u), mk_f(mk_v(1u), mk_i(mk_v(1u))))), // t274 (long splitter)
+    };
+    u32 traces[3] = { 740u, 768u, 274u };
+    for (u32 k = 0; k < 3u; k++) {
+      s->lhs[k] = lhss[k];
+      s->rhs[k] = mk_v(0u);
+      s->r_orient[k] = 1u;
+      s->r_trace[k] = traces[k];
+      s->n_rules++;
+      atp_wmo_insert_fact(s, k);
+    }
+    {
+      AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+      WmoCell cf; cf.sym = 3u; cf.is_var = 0u; cf.arity = 2u;
+      WmoCell cv; cv.sym = 1u; cv.is_var = 1u; cv.arity = 0u;
+      u8 il = 0;
+      WmoNode *d1 = (WmoNode *)wmo_kid_get(w->tree[0].root, &cf, &il);
+      CHECK(d1 != NULL && il == 0u);
+      WmoNode *d2 = (WmoNode *)wmo_kid_get(d1, &cv, &il);
+      CHECK(d2 != NULL && il == 0u);
+      u32 idx = 0, at_768 = 0xffffffffu, at_274 = 0xffffffffu;
+      for (WmoEntry *e = d2->exits; e != NULL; e = e->next, idx++) {
+        if (!e->ziel_leaf) continue;
+        WmoLeaf *l = (WmoLeaf *)e->ziel;
+        for (u32 c = 0; c < l->n_chain; c++) {
+          if (l->chain[c].trace == 768u) at_768 = idx;
+          if (l->chain[c].trace == 274u) at_274 = idx;
+        }
+      }
+      CHECK(at_768 != 0xffffffffu);
+      CHECK(at_274 != 0xffffffffu);
+      CHECK(at_768 < at_274);   // older/shorter victim consulted first
+    }
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-removal-collapse-exit-head");
   {
     // Removal-avalanche exit-order corner (BO_ObjektEntfernen Schrumpfen,

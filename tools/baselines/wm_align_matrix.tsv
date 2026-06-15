@@ -24,7 +24,7 @@ BooleanAxioms__DroppingAlwaysTrue	1	1	1	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__ExcludedMiddle	63	63	63	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__NegationRedundancy	9	9	9	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__Noncontradiction	65	65	65	Y	-	thvm=PROVED weights-exact
-BooleanAxioms__OrAssociativity	1250	1249	299	N	300	thvm=PROVED content-delta_wm-only=1_thvm-only=0;post-axiom_nonax-wm=1244_nonax-thvm=1243_nonax-prefix=293;weights-exact
+BooleanAxioms__OrAssociativity	1250	1250	1250	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__OrCommutativity	6	6	6	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__OrDistributivity	5	5	5	Y	-	thvm=PROVED weights-exact
 BooleanAxioms__OrIdempotence	15	15	15	Y	-	thvm=PROVED weights-exact

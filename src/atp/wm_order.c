@@ -65,8 +65,14 @@
 //    leaf's surviving in-entries get PARALLEL new-leaf entries placed
 //    immediately AFTER them (AltesBlattPolieren :523-526) when the
 //    jump still lands in the old suffix, or are REWIRED in place to
-//    the chain node (:534-560) otherwise.  Plain hangs
-//    (NeuesBlattEinhaengen from the main walk, Untergrenze =
+//    the chain node (:534-560) otherwise.  The one exception to
+//    after-old placement: a strict-ancestor enclosing jump (start above
+//    the leaf-found position) whose new-leaf subterm is SHORTER than the
+//    old leaf's at that start heads the start node's exit list instead
+//    (the more-general jump is consulted first), reproducing the
+//    head-insert NeuesBlattEinhaengen would have made for the fully
+//    closed shorter subterm -- BooleanAxioms OrAssociativity @300.
+//    Plain hangs (NeuesBlattEinhaengen from the main walk, Untergrenze =
 //    EintragEins) pop every pending jump start except the bottom-most
 //    into prepended new-leaf entries.  Removal collapse
 //    (BO_ObjektEntfernen :991-1101): freed nodes' exits die; entries
@@ -611,8 +617,26 @@ static void wmo_tree_insert(WmoTree *t, const WmoCell *key, u32 key_len,
         for (u32 h = 0; h < n_hits; h++) {
           u32 start_pos = wmo_node_depth(hits[h].n);
           u32 e2 = wmo_sub_end(key, start_pos);
+          u32 old_e2 = wmo_sub_end(old->key, start_pos);
+          // Outgoing-list placement of the new leaf's parallel jump.
+          // AltesBlattPolieren chains the parallel immediately AFTER the
+          // old leaf's surviving entry (DSBaumOperationen.c :523-526) -- the
+          // default.  The exception is a STRICT-ANCESTOR jump start
+          // (start_pos < i, i.e. the enclosing function subterm opened above
+          // the leaf-found position) whose new-leaf subterm is SHORTER than
+          // the old leaf's at that start (old_e2 > e2): the new leaf is more
+          // general at that position, and its jump heads the start node's
+          // exit list (the RumpfSprungeintragSetzen head-insert :293-295
+          // that NeuesBlattEinhaengen :461-481 would have produced for the
+          // shorter, fully-closed enclosing subterm).  This is the
+          // BooleanAxioms OrAssociativity @300 corner: the shorter
+          // or(v,and(v,w)) parallel must precede the longer enclosing
+          // or-jump that prepended ahead of it at leaf-insert time.  Equal /
+          // longer new subterms keep AltesBlattPolieren's after-old order.
+          WmoEntry *after =
+            (start_pos < i && old_e2 > e2) ? NULL : hits[h].e;
           wmo_entry_add(hits[h].n, key + start_pos, e2 - start_pos,
-                        leaf, 1u, hits[h].e);
+                        leaf, 1u, after);
         }
       }
       return;
