@@ -56,22 +56,28 @@
 //
 // 6. The trie is leaf-compressed (leaves hold the string Rest,
 //    unified wholesale at arrival -- MGUMitBlattGefunden :610-613).
-//    Jump exits prepend at creation (RumpfSprungeintragSetzen
-//    :283-299).  On a leaf split (BlattAufgeteilt :589-678) the main
-//    descent stack is WIPED (StapelParallelInitialisieren :623 resets
-//    StapelIndex), the GleichPfad chain is built, the new-leaf pass
-//    runs first (:658) and the old-leaf pass second (:666) -- so a
-//    fresh chain node's exit list bottoms out as [old, new]; the old
-//    leaf's surviving in-entries get PARALLEL new-leaf entries placed
-//    immediately AFTER them (AltesBlattPolieren :523-526) when the
-//    jump still lands in the old suffix, or are REWIRED in place to
-//    the chain node (:534-560) otherwise.  The one exception to
-//    after-old placement: a strict-ancestor enclosing jump (start above
-//    the leaf-found position) whose new-leaf subterm is SHORTER than the
-//    old leaf's at that start heads the start node's exit list instead
-//    (the more-general jump is consulted first), reproducing the
-//    head-insert NeuesBlattEinhaengen would have made for the fully
-//    closed shorter subterm -- BooleanAxioms OrAssociativity @300.
+//    Every jump exit prepends at creation (RumpfSprungeintragSetzen
+//    :283-299), so a node's outgoing list reads back as the reverse of
+//    its jumps' creation order.  wmo_tree_insert is a faithful port of
+//    BO_ObjektEinfuegen + BlattAufgeteilt: a real jump stack (Sprung-
+//    stapel, WmoStapel here) carries the open parent-subterm pendings
+//    through the descent, and a split runs the GleichPfad chain loop
+//    (:628-654, popping chain pendings into the new inner nodes), the
+//    new-leaf hang (NeuesBlattEinhaengen :444-484), AltesBlattPolieren
+//    (:492-562) and NeueSpruengeInsAlteBlatt (:565-586) in WM's order
+//    over the SAME stack (Stapel2Sichern mirrors the surviving counters
+//    into a second index so the chain pendings serve both the new-leaf
+//    drain and the old-leaf drain).  AltesBlattPolieren reworks the old
+//    leaf's surviving in-jumps: a subterm reaching past the split
+//    (PositionNachTeilterm > j) gets a fresh PARALLEL into the new leaf
+//    placed immediately after the survivor (:523-526), except a strict-
+//    ancestor enclosing jump whose new-leaf subterm is SHORTER heads the
+//    start node's outgoing list (BooleanAxioms OrAssociativity @300); a
+//    subterm closing inside the chain (PositionNachTeilterm <= j) is
+//    RE-TARGETED in place onto the chain node (:534-560), and when it
+//    closes at the very first chain node with an interior chain still
+//    below it (PositionNachTeilterm == i+1, j > i+1) a fresh chain-node
+//    jump is additionally head-inserted (WolframAxioms prefix @91).
 //    Plain hangs (NeuesBlattEinhaengen from the main walk, Untergrenze =
 //    EintragEins) pop every pending jump start except the bottom-most
 //    into prepended new-leaf entries.  Removal collapse
@@ -284,36 +290,6 @@ static u32 wmo_node_depth(const WmoNode *n) {
   return d;
 }
 
-// Entry creation; dedupe on identical (start, sub, ziel) -- the C
-// chain-loop pop and an AltesBlattPolieren rewire can otherwise race
-// to create the same logical entry twice.
-static WmoEntry *wmo_entry_add(WmoNode *start, const WmoCell *sub,
-                               u32 sub_len, void *ziel, u8 ziel_leaf,
-                               WmoEntry *after) {
-  for (WmoEntry *e = start->exits; e != NULL; e = e->next) {
-    if (e->ziel == ziel && e->sub_len == sub_len) {
-      u32 k = 0;
-      while (k < sub_len && wmo_cell_eq(&e->sub[k], &sub[k])) k++;
-      if (k == sub_len) return e;
-    }
-  }
-  WmoEntry *e = (WmoEntry *)calloc(1, sizeof(WmoEntry));
-  e->start = start;
-  e->sub = (WmoCell *)malloc(sub_len * sizeof(WmoCell));
-  memcpy(e->sub, sub, sub_len * sizeof(WmoCell));
-  e->sub_len = sub_len;
-  e->ziel = ziel;
-  e->ziel_leaf = ziel_leaf;
-  if (after != NULL) {
-    e->next = after->next;
-    after->next = e;
-  } else {
-    e->next = start->exits;
-    start->exits = e;
-  }
-  return e;
-}
-
 // ---------- leaf list (BlattEinzeigern / Auszeigern) ----------
 
 static WmoLeaf *wmo_class_head(WmoTree *t, u32 depth) {
@@ -415,8 +391,6 @@ static void wmo_rewire_cb(WmoNode *n, void *raw) {
 
 // ---------- insertion ----------
 
-typedef struct { WmoNode *node; u32 pos; } WmoPend;
-
 static WmoLeaf *wmo_leaf_new(WmoTree *t, const WmoCell *key, u32 key_len,
                              u32 hang, u32 depth, WmoNode *parent,
                              u32 trace, u8 face) {
@@ -448,21 +422,239 @@ static void wmo_chain_prepend(WmoLeaf *leaf, u32 trace, u8 face) {
   leaf->n_chain++;
 }
 
-// Pop pendings (innermost first); subterms closing at position p with
-// lo < p <= hi land at the chain node node_at[p - (lo+1)], later
-// closings land in `leaf`.  Skips pendings whose pop the caller
-// already excluded.
-static void wmo_pop_pendings(const WmoCell *key, WmoPend *pend, u32 n_pend,
-                             u32 lo, u32 hi, WmoNode **node_at,
-                             WmoLeaf *leaf) {
-  for (u32 k = n_pend; k-- > 0;) {
-    u32 e = wmo_sub_end(key, pend[k].pos);
-    if (node_at != NULL && e > lo && e <= hi) {
-      wmo_entry_add(pend[k].node, key + pend[k].pos, e - pend[k].pos,
-                    node_at[e - (lo + 1u)], 0u, NULL);
+// Create a jump exit and PREPEND it at its start node's outgoing list,
+// the faithful RumpfSprungeintragSetzen "Ausgangsseitige Verkettung"
+// (DSBaumOperationen.c :293-295) -- every WM jump is head-inserted at
+// creation, so a node's exit list reads back as the reverse of its
+// jumps' creation order.  No dedupe: WM creates each jump exactly once
+// per construction event and never merges (AltesBlattPolieren issues a
+// fresh parallel even when a structurally equal jump to a different leaf
+// is present).
+static WmoEntry *wmo_jump_prepend(WmoNode *start, const WmoCell *sub,
+                                  u32 sub_len, void *ziel, u8 ziel_leaf) {
+  WmoEntry *e = (WmoEntry *)calloc(1, sizeof(WmoEntry));
+  e->start = start;
+  e->sub = (WmoCell *)malloc(sub_len * sizeof(WmoCell));
+  memcpy(e->sub, sub, sub_len * sizeof(WmoCell));
+  e->sub_len = sub_len;
+  e->ziel = ziel;
+  e->ziel_leaf = ziel_leaf;
+  e->next = start->exits;
+  start->exits = e;
+  return e;
+}
+
+// The WM jump stack (Sprungstapel, DSBaumOperationen.c :200-260): the
+// pending parent subterm jumps still open during a descent.  Each entry
+// records its start node, the subterm's start position in the key, and a
+// remaining-cell counter (Zaehler) driving the close-on-zero pops that
+// emit RumpfSprungeintragSetzen jumps in WM's exact left-to-right order.
+// Index 0 is a dummy with Zaehler 0 (so `!(--TopZaehler)` short-circuits
+// safely at the root); Push raises the index, Pop lowers it.  A parallel
+// counter (zaehler2) mirrors the Stapel2 used by NeueSpruengeInsAlteBlatt.
+typedef struct {
+  WmoNode *start;     // Startknoten
+  u32      pos;       // start position of the subterm in the key
+  u32      zaehler;   // remaining subterms to close (TopZaehler)
+  u32      zaehler2;  // Stapel2 mirror (TopZaehler2)
+} WmoStapelEnt;
+
+typedef struct {
+  WmoStapelEnt e[WMO_MAX_CELLS + 1u];
+  u32          idx;    // StapelIndex (main, drives zaehler)
+  u32          idx2;   // StapelIndex2 (Stapel2, drives zaehler2)
+} WmoStapel;
+
+// NeuesBlattEinhaengen (DSBaumOperationen.c :444-484): hang a fresh leaf
+// `leaf` at `node` keyed by its intro cell key[i], then drain the jump
+// stack for every pending subterm closing inside the new leaf's suffix,
+// emitting a RumpfSprungeintragSetzen jump into the leaf.  `untergrenze`
+// is the Stapeluntergrenze: EintragEins(1) leaves the root pending on the
+// stack (the main-walk hang), EintragUngueltig(0) drains all the way to
+// the dummy (the BlattAufgeteilt new-leaf hang, where the chain owns the
+// pendings).  Cells: the new leaf hangs at the node covering cell i,
+// keyed by key[i]; its suffix is key[i+1 ..].  A pending subterm starting
+// at position p closes at cell wmo_sub_end(key,p).
+static void wmo_blatt_einhaengen(WmoStapel *stk, WmoNode *node,
+                                 const WmoCell *key, u32 i,
+                                 WmoLeaf *leaf, u32 untergrenze) {
+  const WmoCell *sym = &key[i];
+  if (!sym->is_var && sym->arity > 0u) {                       // Push intro
+    u32 ix = ++stk->idx;
+    stk->e[ix].start = node; stk->e[ix].pos = i;
+    stk->e[ix].zaehler = sym->arity;
+  } else {
+    // Constant intro: may itself be a short jump (function symbol, not at
+    // the root) reaching this leaf (:466-467).
+    if (!sym->is_var && i > 0u)
+      wmo_jump_prepend(node, sym, 1u, leaf, 1u);
+    // Then continue draining the stack as the constant closes its parents
+    // (:468-469).  TopZaehler -= 1 per the consumed leaf cell.
+    while (stk->idx > 0u && --stk->e[stk->idx].zaehler == 0u &&
+           stk->idx > untergrenze) {
+      WmoStapelEnt *top = &stk->e[stk->idx];
+      wmo_jump_prepend(top->start, key + top->pos,
+                       wmo_sub_end(key, top->pos) - top->pos, leaf, 1u);
+      stk->idx--;
+    }
+  }
+  // Suffix cells key[i+1 ..]: each closes parents, popping into the leaf
+  // (:475-481).
+  for (u32 p = i + 1u; p < leaf->key_len; p++) {
+    if (stk->idx == 0u) break;
+    stk->e[stk->idx].zaehler += key[p].arity;
+    while (stk->idx > 0u && --stk->e[stk->idx].zaehler == 0u &&
+           stk->idx > untergrenze) {
+      WmoStapelEnt *top = &stk->e[stk->idx];
+      wmo_jump_prepend(top->start, key + top->pos,
+                       wmo_sub_end(key, top->pos) - top->pos, leaf, 1u);
+      stk->idx--;
+    }
+  }
+}
+
+// NeueSpruengeInsAlteBlatt (DSBaumOperationen.c :565-586): the chain's
+// jumps that lead into the OLD leaf, driven by the saved Stapel2 counters
+// (Stapel2Sichern copied the live main-stack counters into zaehler2 before
+// the new-leaf hang consumed the main stack).  Walks the OLD leaf's cells
+// (old->key) from the branch cell old->key[j] onward.  `vorg` is the chain
+// node directly above the old leaf (covers cell j); `last` is that node;
+// stk->e[*].start are the chain nodes already recorded by the GleichPfad
+// double-pushes.
+static void wmo_neue_spruenge(WmoStapel *stk, WmoLeaf *old, WmoNode *last,
+                              u32 j, u32 anc_base) {
+  const WmoCell *bk = old->key;
+  const WmoCell *intro = &bk[j];
+  if (!intro->is_var && intro->arity > 0u) {            // Push2 intro (:571)
+    u32 ix = ++stk->idx2;
+    stk->e[ix].start = last; stk->e[ix].pos = j;
+    stk->e[ix].zaehler2 = intro->arity;
+  } else {
+    if (!intro->is_var)
+      wmo_jump_prepend(last, intro, 1u, old, 1u);
+    while (stk->idx2 > anc_base && --stk->e[stk->idx2].zaehler2 == 0u) {
+      WmoStapelEnt *top = &stk->e[stk->idx2];
+      wmo_jump_prepend(top->start, bk + top->pos,
+                       wmo_sub_end(bk, top->pos) - top->pos, old, 1u);
+      stk->idx2--;
+    }
+  }
+  for (u32 p = j + 1u; p < old->key_len; p++) {
+    if (stk->idx2 <= anc_base) break;
+    stk->e[stk->idx2].zaehler2 += bk[p].arity;
+    while (stk->idx2 > anc_base && --stk->e[stk->idx2].zaehler2 == 0u) {
+      WmoStapelEnt *top = &stk->e[stk->idx2];
+      wmo_jump_prepend(top->start, bk + top->pos,
+                       wmo_sub_end(bk, top->pos) - top->pos, old, 1u);
+      stk->idx2--;
+    }
+  }
+}
+
+// AltesBlattPolieren (DSBaumOperationen.c :492-562): rework the old leaf's
+// surviving in-jumps after the split.  For each in-jump whose subterm
+// reaches past the split into the old suffix (closes at cell > j, so it
+// "still lands in a leaf"), build a PARALLEL jump to the new leaf inserted
+// immediately AFTER the surviving jump in the start node's outgoing list
+// (the if-branch :503-530).  Otherwise the subterm closes inside the new
+// chain (cell e with i < e <= j): re-target the existing in-jump in place
+// onto the chain node covering cell e, preserving its outgoing-list
+// position (the else-branch :534-560 touches only Zielknoten and the
+// Sprungeingaenge lists, never Sprungausgaenge).  node_at[m] covers cell
+// i+1+m.
+static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
+                                     WmoNode **node_at, u32 i, u32 j) {
+  // Snapshot the in-jumps to `old` before mutation (a tree walk; the trie
+  // keeps no incoming list, so gather by target).  Outgoing-list order at
+  // each node is preserved because the parallel is spliced right after its
+  // model and the re-target touches no Sprungausgaenge.
+  typedef struct { WmoNode *n; WmoEntry *e; } Hit;
+  Hit hits[1024];
+  u32 n_hits = 0;
+  WmoNode *stack[2048];
+  u32 sp = 0;
+  if (t->root) stack[sp++] = t->root;
+  while (sp > 0u) {
+    WmoNode *n = stack[--sp];
+    for (WmoEntry *e = n->exits; e != NULL; e = e->next) {
+      if (e->ziel == (void *)old && n_hits < 1024u) {
+        hits[n_hits].n = n; hits[n_hits].e = e; n_hits++;
+      }
+    }
+    for (u32 kk = 0; kk < n->n_kids; kk++) {
+      if (!n->kids[kk].is_leaf && sp < 2048u)
+        stack[sp++] = (WmoNode *)n->kids[kk].child;
+    }
+  }
+  for (u32 h = 0; h < n_hits; h++) {
+    WmoNode *sn = hits[h].n;
+    WmoEntry *surv = hits[h].e;
+    u32 start_pos = wmo_node_depth(sn);
+    // PositionNachTeilterm of the surviving in-jump = the old subterm's
+    // close cell (e_old).  WM's if/else split (:499) is PositionNachTeilterm
+    // vs the new suffix position j+1: a subterm closing past the split
+    // (e_old > j) "still lands in a leaf" -> parallel into the new leaf; one
+    // closing inside the chain (e_old <= j) is re-targeted onto the chain
+    // node.
+    u32 e_old = wmo_sub_end(old->key, start_pos);
+    if (e_old > j) {
+      // if-branch (:503-530): a fresh parallel jump to the NEW leaf,
+      // carrying the NEW leaf's subterm at this start (its own length,
+      // walking TermIndexNeu to its end :517-520).
+      u32 e_new = wmo_sub_end(leaf->key, start_pos);
+      WmoEntry *par = (WmoEntry *)calloc(1, sizeof(WmoEntry));
+      par->start = sn;
+      par->sub = (WmoCell *)malloc((e_new - start_pos) * sizeof(WmoCell));
+      memcpy(par->sub, leaf->key + start_pos,
+             (e_new - start_pos) * sizeof(WmoCell));
+      par->sub_len = e_new - start_pos;
+      par->ziel = leaf;
+      par->ziel_leaf = 1u;
+      // Outgoing-list placement.  Default: immediately AFTER the survivor
+      // (:523-526).  Head-insert exception for a STRICT-ANCESTOR start
+      // (start_pos < i, the enclosing function subterm opened above the
+      // leaf-found split point) whose NEW subterm is SHORTER than the old's
+      // (e_new < e_old): the more-general / shorter jump heads the start
+      // node's outgoing list, the prepend NeuesBlattEinhaengen would have
+      // produced for the fully closed shorter enclosing subterm
+      // (BooleanAxioms OrAssociativity @300).
+      if (start_pos < i && e_new < e_old) {
+        par->next = sn->exits;
+        sn->exits = par;
+      } else {
+        par->next = surv->next;
+        surv->next = par;
+      }
     } else {
-      wmo_entry_add(pend[k].node, key + pend[k].pos, e - pend[k].pos,
-                    leaf, 1u, NULL);
+      // else-branch (:534-560): re-target the survivor in place onto the
+      // chain node covering cell e_old, preserving its outgoing-list
+      // position (only Zielknoten / Sprungeingaenge change).
+      WmoNode *chain_node = node_at[e_old - (i + 1u)];
+      surv->ziel = chain_node;
+      surv->ziel_leaf = 0u;
+      // A STRICT-ANCESTOR subterm closing at the FIRST chain node (e_old ==
+      // i+1; its last cell is the leaf-found branch key[i], shared by both
+      // leaves) additionally gets a FRESH jump to that chain node, head-
+      // inserted at the start node -- the prepend NeuesBlattEinhaengen makes
+      // for the fully closed shorter enclosing subterm so the more-general
+      // jump is consulted first.  This applies only when the GleichPfad chain
+      // has interior nodes beyond the first (j > i+1): a minimal split
+      // (j == i+1) builds no enclosing chain and keeps the re-target alone.
+      // WolframAxioms Commutativity / DoubleNegation prefix @91 needs the
+      // fresh head jump; CombinatorAxioms SKIToBCKW @303 needs the minimal
+      // split to keep its re-target order.
+      if (start_pos < i && e_old == i + 1u && j > i + 1u) {
+        WmoEntry *fresh = (WmoEntry *)calloc(1, sizeof(WmoEntry));
+        fresh->start = sn;
+        fresh->sub = (WmoCell *)malloc((e_old - start_pos) * sizeof(WmoCell));
+        memcpy(fresh->sub, leaf->key + start_pos,
+               (e_old - start_pos) * sizeof(WmoCell));
+        fresh->sub_len = e_old - start_pos;
+        fresh->ziel = chain_node;
+        fresh->ziel_leaf = 0u;
+        fresh->next = sn->exits;
+        sn->exits = fresh;
+      }
     }
   }
 }
@@ -473,222 +665,128 @@ static void wmo_tree_insert(WmoTree *t, const WmoCell *key, u32 key_len,
   if (t->root == NULL) t->root = wmo_node_new(NULL);
   WmoNode *node = t->root;
   u32 i = 0;
-  WmoPend pend[WMO_MAX_CELLS];
-  u32 n_pend = 0;
+  WmoStapel stk;
+  stk.idx = 0u;
+  stk.idx2 = 0u;
+  stk.e[0].start = NULL; stk.e[0].pos = 0u;
+  stk.e[0].zaehler = 0u; stk.e[0].zaehler2 = 0u;
   while (1) {
     const WmoCell *sym = &key[i];
     u8 child_is_leaf = 0;
     void *child = wmo_kid_get(node, sym, &child_is_leaf);
     if (child == NULL) {
-      // ----- plain hang (NeuesBlattEinhaengen, Untergrenze=EintragEins)
+      // NeuesBlattEinhaengen from the main walk (Untergrenze = EintragEins:
+      // the root pending stays on the stack, BO_ObjektEinfuegen :724).
       WmoLeaf *leaf = wmo_leaf_new(t, key, key_len, i, depth, node,
                                    trace, face);
       wmo_kid_set(node, sym, leaf, 1u);
-      if (!sym->is_var && sym->arity > 0u) {
-        if (n_pend < WMO_MAX_CELLS) { pend[n_pend].node = node; pend[n_pend].pos = i; n_pend++; }
-      } else if (!sym->is_var && i > 0u) {
-        wmo_entry_add(node, sym, 1u, leaf, 1u, NULL);   // constant special case
-      }
-      // bottom-most pending (the root-position one) is NOT popped
-      u32 from = (n_pend > 0u && pend[0].pos == 0u) ? 1u : 0u;
-      wmo_pop_pendings(key, pend + from, n_pend - from, 0u, 0u, NULL, leaf);
+      wmo_blatt_einhaengen(&stk, node, key, i, leaf, /*untergrenze=*/1u);
       return;
     }
     if (child_is_leaf) {
       WmoLeaf *old = (WmoLeaf *)child;
-      // identical string -> chain prepend (RegelHinzufuegen)
+      // identical string -> chain prepend (RegelHinzufuegen :343-347)
       if (old->key_len == key_len) {
         u32 k = i;
         while (k < key_len && wmo_cell_eq(&old->key[k], &key[k])) k++;
         if (k == key_len) { wmo_chain_prepend(old, trace, face); return; }
       }
-      // ----- split (BlattAufgeteilt); main-descent pendings are wiped
-      // (StapelParallelInitialisieren :623)
+      // ----- BlattAufgeteilt (DSBaumOperationen.c :589-678) -----
       u32 j = i + 1u;
       while (j < key_len && j < old->key_len &&
              wmo_cell_eq(&key[j], &old->key[j])) j++;
-      // chain-internal closures of main-descent pendings (the
-      // chain loop's unbounded pop, :644-647) -- collect BEFORE wiping.
-      WmoPend anc[WMO_MAX_CELLS];
-      u32 n_anc = 0;
-      for (u32 k = 0; k < n_pend; k++) {
-        u32 e = wmo_sub_end(key, pend[k].pos);
-        if (e > i && e <= j && n_anc < WMO_MAX_CELLS) anc[n_anc++] = pend[k];
-      }
-      // GleichPfad: nodes covering positions i+1 .. j
-      WmoNode *node_at[WMO_MAX_CELLS];   // node_at[m] covers position i+1+m
-      WmoNode *cur = node;
-      const WmoCell *edge = sym;
-      for (u32 p = i + 1u; p <= j; p++) {
+      // StapelParallelInitialisieren (:623): reset only the dummy's parallel
+      // counter; the main-stack counters survive from the descent.
+      stk.e[0].zaehler2 = 0u;
+      // Ancestor boundary: pendings that opened ABOVE the leaf-found position
+      // (strict ancestors, start cell < i) are already on the stack from the
+      // descent.  The chain loop and the new-leaf hang only emit jumps for
+      // pendings that close inside the chain or the new leaf; an ancestor
+      // whose subterm reaches past the split is reworked instead by
+      // AltesBlattPolieren (its pre-existing jump to the old leaf is
+      // paralleled / re-targeted), so the new-leaf hang must not also pop it.
+      u32 anc_base = stk.idx;
+      // GleichPfad: build the chain nodes covering cells i+1 .. j, walking
+      // the new key's cells i+1 .. j-1 left to right (the :628-654 loop;
+      // GleichPfadEnde = node covering cell j).  PushDoppelt records both
+      // the new- and old-side subterm starts at the chain node so the same
+      // pending serves the new-leaf hang (main stack) and the later
+      // NeueSpruengeInsAlteBlatt (Stapel2) drains.
+      WmoNode *node_at[WMO_MAX_CELLS];   // node_at[m] covers cell i+1+m
+      // The initial GleichPfad node covers cell i+1, reached from `node`
+      // (cell i) via the leaf-found edge key[i].  The caller's
+      // BK_NachfolgenLassen sets that edge; key[i] is NOT (re)processed in
+      // the chain loop -- if it is a non-nullary function it was already
+      // pushed onto the main stack during the descent.
+      WmoNode *first = wmo_node_new(node);
+      wmo_kid_set(node, sym, first, 0u);
+      node_at[0] = first;
+      WmoNode *cur = first;            // GleichPfadEnde, covers cell p
+      // Chain loop (:628-654): process cells key[i+1] .. key[j-1].  Each
+      // iteration creates NeuerKnoten (cell p+1) under cur (cell p) keyed by
+      // key[p], then handles the closure of key[p].
+      for (u32 p = i + 1u; p < j; p++) {
+        const WmoCell *c = &key[p];
         WmoNode *nxt = wmo_node_new(cur);
-        wmo_kid_set(cur, edge, nxt, 0u);
-        node_at[p - (i + 1u)] = nxt;
+        wmo_kid_set(cur, c, nxt, 0u);
+        node_at[p - i] = nxt;          // covers cell p+1
+        if (!c->is_var && c->arity > 0u) {
+          // PushDoppelt (:637): pending starts at cur (the node covering cell
+          // p), counter over the new key.  Stapel2Sichern (:657) snapshots
+          // the surviving counters into zaehler2 after this loop.
+          u32 ix = ++stk.idx;
+          stk.e[ix].start = cur; stk.e[ix].pos = p;
+          stk.e[ix].zaehler = c->arity;
+        } else {
+          // nullary chain cell.  Constant short jump cur -> nxt (:640-643).
+          if (!c->is_var)
+            wmo_jump_prepend(cur, c, 1u, nxt, 0u);
+          // pop chain pendings that close here (:644-647); Ziel = nxt.  Stop
+          // at the ancestor boundary: an ancestor closing inside the chain is
+          // re-targeted by AltesBlattPolieren, not duplicated here.
+          while (stk.idx > anc_base && --stk.e[stk.idx].zaehler == 0u) {
+            WmoStapelEnt *top = &stk.e[stk.idx];
+            wmo_jump_prepend(top->start, key + top->pos,
+                             wmo_sub_end(key, top->pos) - top->pos, nxt, 0u);
+            stk.idx--;
+          }
+        }
         cur = nxt;
-        if (p < j) edge = &key[p];
       }
-      WmoNode *last = node_at[j - (i + 1u)];
-      // hang the two leaves
+      WmoNode *last = node_at[j - i - 1u];   // GleichPfadEnde, covers cell j
+      // Stapel2Sichern (:262-270, :657): set StapelIndex2 = StapelIndex and
+      // copy the surviving main counters into zaehler2.  The main hang then
+      // pops via idx; NeueSpruengeInsAlteBlatt walks via the independent idx2
+      // so the chain pendings survive for it (Pop and Pop2 move different
+      // indices over the same shared array).
+      stk.idx2 = stk.idx;
+      for (u32 ix = 1u; ix <= stk.idx; ix++)
+        stk.e[ix].zaehler2 = stk.e[ix].zaehler;
+      // Hang the new leaf: drain the chain pendings (down to anc_base) via
+      // the new key's suffix (:658, EintragUngueltig but bounded by the
+      // ancestor frontier; the strict ancestors are AltesBlattPolieren's).
       WmoLeaf *leaf = wmo_leaf_new(t, key, key_len, j, depth, last,
                                    trace, face);
       if (j < key_len) wmo_kid_set(last, &key[j], leaf, 1u);
       old->hang = j;
       old->parent = last;
       if (j < old->key_len) wmo_kid_set(last, &old->key[j], old, 1u);
-      // snapshot the old leaf's in-entries BEFORE new entries appear
-      // (AltesBlattPolieren input set)
-      // 1) new-leaf pass: chain pendings + leading push (new cells)
-      {
-        WmoPend cp2[WMO_MAX_CELLS];
-        u32 n2 = 0;
-        for (u32 p = i + 1u; p < j; p++) {
-          if (!key[p].is_var && key[p].arity > 0u && n2 < WMO_MAX_CELLS) {
-            cp2[n2].node = node_at[p - (i + 1u)]; cp2[n2].pos = p; n2++;
-          }
-        }
-        if (j < key_len) {
-          if (!key[j].is_var && key[j].arity > 0u && n2 < WMO_MAX_CELLS) {
-            cp2[n2].node = last; cp2[n2].pos = j; n2++;
-          } else if (!key[j].is_var) {
-            wmo_entry_add(last, &key[j], 1u, leaf, 1u, NULL);
-          }
-        }
-        wmo_pop_pendings(key, cp2, n2, i, j, node_at, leaf);
-      }
-      // 2) old-leaf pass (NeueSpruengeInsAlteBlatt; old cells), prepends
-      //    land in FRONT of the new pass's -> [old, new] per node
-      {
-        WmoPend cp2[WMO_MAX_CELLS];
-        u32 n2 = 0;
-        for (u32 p = i + 1u; p < j; p++) {
-          if (!old->key[p].is_var && old->key[p].arity > 0u && n2 < WMO_MAX_CELLS) {
-            cp2[n2].node = node_at[p - (i + 1u)]; cp2[n2].pos = p; n2++;
-          }
-        }
-        if (j < old->key_len) {
-          if (!old->key[j].is_var && old->key[j].arity > 0u && n2 < WMO_MAX_CELLS) {
-            cp2[n2].node = last; cp2[n2].pos = j; n2++;
-          } else if (!old->key[j].is_var) {
-            wmo_entry_add(last, &old->key[j], 1u, old, 1u, NULL);
-          }
-        }
-        wmo_pop_pendings(old->key, cp2, n2, i, j, node_at, old);
-      }
-      // 2b) ancestor pendings closing within the chain (the C chain
-      //     loop pops these with Ziel = the chain node, prepended at
-      //     their ancestor start nodes).
-      //
-      // A strict-ancestor jump (start above the leaf-found position i) is
-      // shared structurally by the old and new leaf: WM keeps ONE outgoing
-      // exit at that start node and AltesBlattPolieren's else-branch
-      // (DSBaumOperationen.c :534-560) merely re-targets it from the old
-      // leaf onto the inner chain node (the outgoing-list position is
-      // preserved; it touches only Sprungeingaenge and Zielknoten, not
-      // Sprungausgaenge).  No fresh parallel is built, because the new leaf
-      // is reached THROUGH that same inner node.  When the old leaf already
-      // carries the in-entry that pass 3 will rewire to this very chain
-      // node, a fresh prepended `anc` entry would be a spurious duplicate
-      // that reorders the start node's exit list (head-inserting it ahead
-      // of older sibling jumps).  Skip it; pass 3's in-place rewire keeps
-      // WM's order (HuntingtonAxioms DoubleNegation @79).  The fresh entry
-      // is still created when the old leaf has no such in-entry (the new
-      // leaf's ancestor subterm is structurally absent in the old leaf).
-      //
-      // The skip applies only when the shared subterm closes at least two
-      // cells into the chain (e > i + 1, i.e. the re-target lands strictly
-      // below the chain's first inner node).  When it closes at the very
-      // first chain node (e == i + 1) the subterm's last cell is key[i] --
-      // the split branch cell itself.  WM's AltesBlattPolieren keys its
-      // re-target-vs-parallel choice on PositionNachTeilterm vs the new
-      // suffix position (:499): a jump whose subterm runs up to the branch
-      // cell "still lands in a leaf" past the split, so WM takes the
-      // if-branch (a fresh parallel exit head-inserted at the start node,
-      // :503-530) rather than the position-preserving else-branch.  Pass
-      // 3's in-place rewire reproduces only the else-branch; for e == i + 1
-      // the head-inserted fresh exit is what matches WM (WolframAxioms
-      // Commutativity / DoubleNegation prefix @91 -> full).
-      for (u32 k = n_anc; k-- > 0;) {
-        u32 e = wmo_sub_end(key, anc[k].pos);
-        u32 span = e - anc[k].pos;
-        u8 old_has = 0u;
-        for (WmoEntry *oe = anc[k].node->exits; oe != NULL; oe = oe->next) {
-          if (oe->ziel == (void *)old && oe->sub_len == span) {
-            u32 c = 0;
-            while (c < span && wmo_cell_eq(&oe->sub[c], &key[anc[k].pos + c])) c++;
-            if (c == span) { old_has = 1u; break; }
-          }
-        }
-        if (old_has && e > i + 1u) continue;
-        wmo_entry_add(anc[k].node, key + anc[k].pos, span,
-                      node_at[e - (i + 1u)], 0u, NULL);
-      }
-      // 3) AltesBlattPolieren on the old leaf's pre-existing in-entries
-      {
-        // gather entries targeting `old` that are NOT the ones just made
-        // in pass 2 (those have start inside the fresh chain; ancestor
-        // entries have start at depth <= i)
-        typedef struct { WmoNode *n; WmoEntry *e; } Hit;
-        Hit hits[256];
-        u32 n_hits = 0;
-        // walk all nodes
-        // (recursive closure via explicit stack)
-        WmoNode *stack[1024];
-        u32 sp = 0;
-        if (t->root) stack[sp++] = t->root;
-        while (sp > 0u) {
-          WmoNode *n = stack[--sp];
-          u32 nd = wmo_node_depth(n);
-          for (WmoEntry *e = n->exits; e != NULL; e = e->next) {
-            if (e->ziel == (void *)old && nd <= i &&
-                nd + e->sub_len > j && n_hits < 256u) {
-              hits[n_hits].n = n; hits[n_hits].e = e; n_hits++;
-            } else if (e->ziel == (void *)old && nd <= i &&
-                       nd + e->sub_len > i && nd + e->sub_len <= j) {
-              // lands within the chain -> rewire in place
-              e->ziel = node_at[(nd + e->sub_len) - (i + 1u)];
-              e->ziel_leaf = 0u;
-            }
-          }
-          for (u32 kk = 0; kk < n->n_kids; kk++) {
-            if (!n->kids[kk].is_leaf && sp < 1024u) {
-              stack[sp++] = (WmoNode *)n->kids[kk].child;
-            }
-          }
-        }
-        for (u32 h = 0; h < n_hits; h++) {
-          u32 start_pos = wmo_node_depth(hits[h].n);
-          u32 e2 = wmo_sub_end(key, start_pos);
-          u32 old_e2 = wmo_sub_end(old->key, start_pos);
-          // Outgoing-list placement of the new leaf's parallel jump.
-          // AltesBlattPolieren chains the parallel immediately AFTER the
-          // old leaf's surviving entry (DSBaumOperationen.c :523-526) -- the
-          // default.  The exception is a STRICT-ANCESTOR jump start
-          // (start_pos < i, i.e. the enclosing function subterm opened above
-          // the leaf-found position) whose new-leaf subterm is SHORTER than
-          // the old leaf's at that start (old_e2 > e2): the new leaf is more
-          // general at that position, and its jump heads the start node's
-          // exit list (the RumpfSprungeintragSetzen head-insert :293-295
-          // that NeuesBlattEinhaengen :461-481 would have produced for the
-          // shorter, fully-closed enclosing subterm).  This is the
-          // BooleanAxioms OrAssociativity @300 corner: the shorter
-          // or(v,and(v,w)) parallel must precede the longer enclosing
-          // or-jump that prepended ahead of it at leaf-insert time.  Equal /
-          // longer new subterms keep AltesBlattPolieren's after-old order.
-          WmoEntry *after =
-            (start_pos < i && old_e2 > e2) ? NULL : hits[h].e;
-          wmo_entry_add(hits[h].n, key + start_pos, e2 - start_pos,
-                        leaf, 1u, after);
-        }
-      }
+      wmo_blatt_einhaengen(&stk, last, key, j, leaf, /*untergrenze=*/anc_base);
+      // AltesBlattPolieren (:665) then NeueSpruengeInsAlteBlatt (:666).
+      wmo_altes_blatt_polieren(t, old, leaf, node_at, i, j);
+      wmo_neue_spruenge(&stk, old, last, j, anc_base);
       return;
     }
     // descend into inner node (BO_ObjektEinfuegen :707-719)
     if (!sym->is_var && sym->arity > 0u) {
-      if (n_pend < WMO_MAX_CELLS) { pend[n_pend].node = node; pend[n_pend].pos = i; n_pend++; }
+      u32 ix = ++stk.idx;
+      stk.e[ix].start = node; stk.e[ix].pos = i;
+      stk.e[ix].zaehler = sym->arity;
     } else {
-      u32 e = i + 1u;
-      while (n_pend > 0u && wmo_sub_end(key, pend[n_pend - 1u].pos) == e) {
-        n_pend--;   // closes at an existing inner node: entry exists
-      }
+      // nullary: close parents whose subterm ends here.  The jumps go into
+      // the already-existing inner node, so WM emits none (:711-713) -- just
+      // pop.  The root pending is never popped (a further symbol follows).
+      while (stk.idx > 0u && --stk.e[stk.idx].zaehler == 0u) stk.idx--;
     }
     node = (WmoNode *)child;
     i++;

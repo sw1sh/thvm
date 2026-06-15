@@ -2463,40 +2463,39 @@ int main(void) {
 
   TEST_BEGIN("atp/wm-emission-order-split-ancestor-first-chain-node-parallel");
   {
-    // WolframAxioms Commutativity / DoubleNegation @91.  The complement of
-    // the previous case: a strict-ancestor jump whose shared subterm closes
-    // at the VERY FIRST chain node (its last cell is key[i], the split
-    // branch cell, so e == i + 1).  WM's AltesBlattPolieren keys its choice
-    // on PositionNachTeilterm vs the new suffix position (:499): a jump
-    // running up to the branch cell "still lands in a leaf" past the split,
-    // so WM takes the if-branch (a fresh parallel exit head-inserted into
-    // the start node's outgoing list, :503-530), NOT the position-preserving
-    // else-branch.  thvm must therefore create the fresh `anc` jump in this
-    // case -- the e>i+1 skip does not apply.  Skipping it here (as the
-    // earlier broad condition did) drops the parallel and reorders the
-    // tops-DFS arrival of the partner rules (firstdiv 91 instead of the full
-    // 497-selection prefix on both Wolfram theorems).
+    // WolframAxioms Commutativity / DoubleNegation @91.  A strict-ancestor
+    // in-jump to the split victim whose subterm closes at the FIRST chain
+    // node (its PositionNachTeilterm == i+1, the last cell being the
+    // leaf-found branch key[i], shared by both leaves) and the GleichPfad
+    // chain has interior nodes beyond the first (j > i+1).  WM's
+    // AltesBlattPolieren re-targets that survivor onto the chain node
+    // (else-branch DSBaumOperationen.c :534-560) AND a FRESH jump to that
+    // same chain node is head-inserted at the ancestor (the prepend
+    // NeuesBlattEinhaengen makes for the fully closed shorter enclosing
+    // subterm), so the more-general jump is consulted first.  Dropping the
+    // fresh head jump reorders the tops-DFS arrival of the partner rules
+    // (firstdiv 91 instead of the full 497-selection prefix on the Wolfram
+    // theorems); firing it on a MINIMAL split (j == i+1) instead regresses
+    // CombinatorAxioms SKIToBCKW back to @175.
     //
-    // Minimal trie that reaches an e == i+1 split with a surviving older
-    // sibling exit at the depth-1 node (f = binary label 3, a/e = consts):
-    //   F0 = f(f(a,a), a)        old leaf; its f(a,a) ancestor jump hangs
-    //                            at the depth-1 node
-    //   F1 = f(f(a,e), a)        branches F0 at the inner second arg
-    //   F2 = f(f(a,a), e)        a sibling exit at the depth-1 node
-    //   F3 = f(f(a,a), f(a,a))   SPLITS F0; the f(a,a) ancestor closes at
-    //                            the first chain node (e == i+1)
-    // With the parallel kept, the depth-1 node carries TWO chain-node
-    // (non-leaf) exits; dropping it leaves only one.
+    // Faces reproducing the @91 pattern (sn@1, i=3, j=6, f = binary label 3,
+    // a/e = consts):
+    //   branch = f(f(v0,a), v0)        forces the victim to be leaf-found at
+    //                                  depth 3 (a sibling at the depth-3 node)
+    //   victim = f(f(v0,v1), f(v0,v0)) the f(v0,v1) first arg jumps at depth 1
+    //   split  = f(f(v0,v1), f(v0,e))  splits victim; f(v0,v1) closes at the
+    //                                  first chain node (e_old == i+1)
+    // The depth-1 node's HEAD outgoing exit must be the fresh non-leaf
+    // (chain-node) jump for f(v0,v1).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     thvm_atp_set_use_wm_emission_order(s, 1u);
-    Term a = mk_a(), e = mk_e();
-    Term faces[4] = {
-      mk_f(mk_f(a, a), a),
-      mk_f(mk_f(a, e), a),
-      mk_f(mk_f(a, a), e),
-      mk_f(mk_f(a, a), mk_f(a, a)),
+    Term v0 = mk_v(0u), v1 = mk_v(1u);
+    Term faces[3] = {
+      mk_f(mk_f(v0, mk_a()), v0),                  // branch
+      mk_f(mk_f(v0, v1), mk_f(v0, v0)),            // victim
+      mk_f(mk_f(v0, v1), mk_f(v0, mk_e())),        // splitter
     };
-    for (u32 k = 0; k < 4u; k++) {
+    for (u32 k = 0; k < 3u; k++) {
       s->lhs[k] = faces[k];
       s->rhs[k] = mk_a();
       s->r_orient[k] = 1u;
@@ -2506,23 +2505,29 @@ int main(void) {
     }
     {
       AtpWmOrder *w = (AtpWmOrder *)s->wmo;
-      WmoCell cells[WMO_MAX_CELLS];
-      u32 n = wmo_face_cells(faces[0], cells, WMO_MAX_CELLS);
-      CHECK(n > 0u);
-      u8 is_leaf = 0;
-      WmoNode *d1 =
-        (WmoNode *)wmo_kid_get(w->tree[0].root, &cells[0], &is_leaf);
-      CHECK(d1 != NULL);
-      CHECK_EQ(is_leaf, 0u);
-      // count the depth-1 node's non-leaf (chain-node) exits.  The e==i+1
-      // parallel makes it two; the broad skip would leave one.
-      u32 n_nonleaf = 0, n_total = 0;
-      for (WmoEntry *en = d1->exits; en != NULL; en = en->next) {
-        n_total++;
-        if (!en->ziel_leaf) n_nonleaf++;
-      }
-      CHECK_EQ(n_nonleaf, 2u);
-      CHECK_EQ(n_total, 3u);
+      // navigate root -> f (the depth-1 node).
+      WmoCell cf; cf.sym = 3u; cf.is_var = 0u; cf.arity = 2u;
+      u8 il = 0;
+      WmoNode *d1 = (WmoNode *)wmo_kid_get(w->tree[0].root, &cf, &il);
+      CHECK(d1 != NULL && il == 0u);
+      // The HEAD exit is the FRESH non-leaf jump for the f(v0,v1) first arg
+      // (sub cells f,v0,v1 -> a chain node).  Without the fresh head jump the
+      // head would be the branch leaf or the re-targeted survivor lower down.
+      WmoEntry *head = d1->exits;
+      CHECK(head != NULL);
+      CHECK_EQ(head->ziel_leaf, 0u);          // chain node, not a leaf
+      CHECK_EQ(head->sub_len, 3u);            // f(v0,v1) = 3 cells
+      CHECK_EQ(head->sub[0].is_var, 0u);      // f
+      CHECK_EQ(head->sub[0].sym, 3u);
+      CHECK_EQ(head->sub[1].is_var, 1u);      // v0
+      CHECK_EQ(head->sub[2].is_var, 1u);      // v1
+      // The same chain node is reached by TWO entries (fresh head + the
+      // re-targeted survivor): the more-general jump is consulted first.
+      u32 to_chain = 0;
+      for (WmoEntry *en = d1->exits; en != NULL; en = en->next)
+        if (!en->ziel_leaf && en->sub_len == 3u && en->ziel == head->ziel)
+          to_chain++;
+      CHECK_EQ(to_chain, 2u);
     }
     thvm_atp_free(s);
   }
