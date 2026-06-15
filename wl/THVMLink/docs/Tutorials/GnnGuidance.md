@@ -74,17 +74,15 @@ did not. Only proved goals contribute, and structurally identical rules are
 de-duplicated.
 
 ```wl
-#| eval: false
-ds = TAtpGraphDataset["GroupAxioms"];
+ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
 Length @ ds["Graphs"]
 ```
-<!-- => 106 -->
+<!-- => 103 -->
 
 ```wl
-#| eval: false
 {ds["NPos"], ds["NNeg"], ds["NProofs"]}
 ```
-<!-- => {69, 37, 5} -->
+<!-- => {66, 37, 5} -->
 
 The same builder takes an explicit conjecture set against shared axioms, or
 a list of `ProofObject`s straight from [TFindProof]() (positives only; pass
