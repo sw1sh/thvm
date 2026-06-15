@@ -226,129 +226,199 @@ fxTembFn[wf_, dev_][sigma_] := With[{
 
 (* ============================================================
    FluxGenerate[prompts, opts] -- the public entry point.
+
+   PERSISTENT SESSION.  The first call builds a session ($fxSession,
+   keyed by {modelDir,dev,imgSize,nSteps}): ONE long-lived context holds
+   the Qwen + transformer + VAE weights (zero-copy mmap wraps, ~0 phys
+   footprint, so all three co-reside under the 30GB ceiling), the RoPE
+   table, the timestep MLP, and the ONCE-captured velocity JIT.  The
+   context is KEPT ALIVE -- never TContextDestroy'd -- so later calls
+   skip the ~20s transformer capture and the weight reloads, replaying
+   the captured kernels.  The three stages (Qwen encode, transformer
+   sample, VAE decode) all run inside the session context.
+
+   No TReset between stages: TReset (thvm_reset) clears the JIT capture
+   slots (jit_capture_reset_all) and the kvar registry, which would void
+   the persistent velJit.  The old design's TReset-between-stages was
+   there to drop Qwen's symbolic-dim/fresh-label state before the
+   transformer's tile-JIT codegen; the session avoids that hazard a
+   different way -- the transformer velJit is captured FIRST (before any
+   Qwen forward runs in the session), so its codegen never sees Qwen's
+   kvar state.  Qwen + VAE derive every shape/dtype from kvar-free
+   realized weights, so their (later, eager-or-captured) forwards add no
+   kvar that could leak into the already-captured transformer.
    ============================================================ *)
 
 Options[FluxGenerate] = {
     "ImageSize" -> {256, 256}, "Seed" -> 0, "Device" -> "metal",
     "NumSteps" -> 4, "ModelDir" -> Automatic, "ReturnImages" -> True};
 
+(* module-level session cache: key -> <|ctx, wfq, qwCfg, td, stxt,
+   wfT, ca, rc, rs, tembFn, velJit, sigmas, simg, fxCfg,
+   wfV, wsubV, vaeCfg, dev|>.  One entry per {modelDir,dev,imgSize,nSteps}. *)
+$fxSession = <||>;
+
 FluxGenerate[prompt_String, opts : OptionsPattern[]] := First @ FluxGenerate[{prompt}, opts];
 
+(* build (or fetch) the persistent session for these settings. *)
+fxSessionGet[dev_, imgSize_, nSteps_, modelDir_] := Module[
+    {key = {modelDir, dev, imgSize, nSteps}},
+    Lookup[$fxSession, Key[key], $fxSession[key] = fxSessionBuild[dev, imgSize, nSteps, modelDir]]]
+
+fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
+    {w, h, gridH, gridW, simg, stxt, tokDir, td, tfPath, qwPaths, vaePath,
+     fxCfg, qwCfg, vaeCfg, sigmas, ctxQ, ctxT, ctxV, qwJit, wfq, velJit, ca,
+     rc, rs, tembFn, vaeJit},
+    {w, h} = imgSize;
+    gridH = Round[h/16];  gridW = Round[w/16];  simg = gridH gridW;  stxt = 512;
+    tokDir = FileNameJoin[{modelDir, "tokenizer"}];
+    tfPath = FileNameJoin[{modelDir, "transformer", "diffusion_pytorch_model.safetensors"}];
+    qwPaths = FileNameJoin[{modelDir, "text_encoder", #}] & /@
+        {"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"};
+    vaePath = FileNameJoin[{modelDir, "vae", "diffusion_pytorch_model.safetensors"}];
+    fxCfg = <|"eps" -> 1.*^-6, "num_double" -> 5, "num_single" -> 20, "heads" -> 24, "head_dim" -> 128|>;
+    qwCfg = <|"heads" -> 32, "kv_heads" -> 8, "head_dim" -> 128, "eps" -> 1.*^-6,
+              "theta" -> 1000000, "layers" -> 27, "captureLayers" -> {8, 17, 26}|>;
+    vaeCfg = <|"eps" -> 1.*^-6, "epsBn" -> 1.*^-4, "gridH" -> gridH, "gridW" -> gridW|>;
+    td = qwTokenizerData[tokDir];
+    sigmas = fxSigmas[simg, nSteps];
+
+    (* THREE persistent contexts, one per model.  A JIT capture's buffer table +
+       kvar registry + capture slots are per-context, so the three captures
+       (Qwen velocity, transformer velocity, VAE decode) CANNOT alias each other's
+       buffers -- the cross-capture corruption that breaks a single shared context
+       (a velJit replay rewriting a slot a qwJit replay reads, AND Qwen's
+       symbolic-dim/fresh-label kvar leaking into the transformer tile-JIT codegen)
+       is structurally impossible.  Weights are zero-copy disk-mmap wraps (~0 phys
+       footprint on Apple unified memory), so all three models co-reside well under
+       the 30GB ceiling.  Each stage crosses to the next as a HOST array. *)
+
+    (* --- transformer context: load + RoPE + temb + capture velJit. --- *)
+    ctxT = TContextNew[dev];
+    {velJit, ca, rc, rs, tembFn} = TInContext[ctxT,
+        Module[{wt, wfT, rope, rcL, rsL, caL, tembFnL, vj},
+            caL = If[ dev === "cpu", TRealize[#] &, (TRealize @ TToDevice[TUOpCast[#, "bf16"], dev]) &];
+            wt = TSafeTensorLoad[tfPath];
+            wfT = fxTransformerLoader[wt, dev];
+            rope = fxRopeTable[gridH, gridW, stxt];
+            rcL = caL @ TTensorCreate[rope["cos"]];  rsL = caL @ TTensorCreate[rope["sin"]];
+            tembFnL = fxTembFn[wfT, dev];
+            vj = fxVelocityJit[rcL, rsL, wfT, fxCfg];
+            {vj, caL, rcL, rsL, tembFnL}]];
+
+    (* --- Qwen context: load weights + capture the 27-layer device forward.
+       cos/sin (length stxt) are closed over (constant across prompts); the
+       per-prompt {stxt,2560} x + {stxt,stxt} addMask are the rebound JIT inputs.
+       Every shape is concrete (kvar-free). --- *)
+    ctxQ = TContextNew[dev];
+    {qwJit, wfq} = TInContext[ctxQ,
+        Module[{qw, wfqL, qct, qcos, qsin, qj},
+            qw = Join[TSafeTensorLoad[qwPaths[[1]]], TSafeTensorLoad[qwPaths[[2]]]];
+            wfqL = fxQwenLoader[qw, dev];
+            qct = TRoPEHalfSplitTable[stxt, qwCfg["head_dim"], qwCfg["theta"]];
+            qcos = TToDevice[qct[[1]], dev];  qsin = TToDevice[qct[[2]], dev];
+            qj = TJit[Function[{x, addMask}, qwenForward[x, addMask, qcos, qsin, wfqL, qwCfg]]];
+            {qj, wfqL}]];
+
+    (* --- VAE context: load weights (f32) + capture the conv decode.  The packed
+       latent {simg,128} is the only rebound JIT input.  TRealize the body:
+       vaeDecoder ends with a lazy TClip, so a bare capture would hand the replay
+       an unrealized UOP (Normal -> Missing). --- *)
+    ctxV = TContextNew[dev];
+    vaeJit = TInContext[ctxV,
+        Module[{vt, vKeys, wfV, wsubV},
+            vt = TSafeTensorLoad[vaePath];  vKeys = Keys[vt];
+            wfV = fxVaeLoader[vt, dev];  wsubV = fxVaeSub[wfV, vKeys];
+            TJit[Function[lat, TRealize @ vaeDecoder[lat, wfV, wsubV, vaeCfg]]]]];
+
+    <|"ctxQ" -> ctxQ, "ctxT" -> ctxT, "ctxV" -> ctxV, "dev" -> dev, "ca" -> ca,
+      "wfq" -> wfq, "qwCfg" -> qwCfg, "td" -> td, "stxt" -> stxt,
+      "rc" -> rc, "rs" -> rs, "tembFn" -> tembFn,
+      "velJit" -> velJit, "sigmas" -> sigmas, "simg" -> simg, "fxCfg" -> fxCfg,
+      "vaeCfg" -> vaeCfg, "qwJit" -> qwJit, "vaeJit" -> vaeJit|>]
+
 FluxGenerate[prompts_List, opts : OptionsPattern[]] := Module[
-    {imgSize, seed, dev, nSteps, modelDir, returnImages, w, h, gridH, gridW, simg, stxt,
-     tokDir, td, tfPath, qwPaths, vaePath, fxCfg, qwCfg, vaeCfg,
-     ctxEnc, encHost, ctxT, ctxV, latents, sigmas, results},
+    {imgSize, seed, dev, nSteps, modelDir, returnImages, sess, key,
+     encHost, latents, results},
 
     imgSize = OptionValue["ImageSize"];
     seed = OptionValue["Seed"];  dev = OptionValue["Device"];
     nSteps = OptionValue["NumSteps"];  returnImages = OptionValue["ReturnImages"];
     modelDir = OptionValue["ModelDir"] /. Automatic ->
         Environment["HOME"] <> "/.cache/thvm/flux2-klein-4b";
-    {w, h} = imgSize;
-    (* patched-latent grid: image/16 (VAE /8 * patch /2).  S_img = gridH*gridW. *)
-    gridH = Round[h/16];  gridW = Round[w/16];  simg = gridH gridW;  stxt = 512;
 
-    tokDir = FileNameJoin[{modelDir, "tokenizer"}];
-    tfPath = FileNameJoin[{modelDir, "transformer", "diffusion_pytorch_model.safetensors"}];
-    qwPaths = FileNameJoin[{modelDir, "text_encoder", #}] & /@
-        {"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"};
-    vaePath = FileNameJoin[{modelDir, "vae", "diffusion_pytorch_model.safetensors"}];
+    key = {modelDir, dev, imgSize, nSteps};
+    sess = fxSessionGet[dev, imgSize, nSteps, modelDir];
 
-    fxCfg = <|"eps" -> 1.*^-6, "num_double" -> 5, "num_single" -> 20, "heads" -> 24, "head_dim" -> 128|>;
-    (* only run through the last captured layer (26): layers 27..35 unused. *)
-    qwCfg = <|"heads" -> 32, "kv_heads" -> 8, "head_dim" -> 128, "eps" -> 1.*^-6,
-              "theta" -> 1000000, "layers" -> 27, "captureLayers" -> {8, 17, 26}|>;
-    vaeCfg = <|"eps" -> 1.*^-6, "epsBn" -> 1.*^-4, "gridH" -> gridH, "gridW" -> gridW|>;
+    Module[{ca = sess["ca"], stxt = sess["stxt"], simg = sess["simg"],
+            sigmas = sess["sigmas"], n = Length[prompts], t1, t2, t3},
+        (* --- STAGE 1: Qwen text-encode the whole batch (in the Qwen context). --- *)
+        {t1, encHost} = AbsoluteTiming @ TInContext[sess["ctxQ"],
+            fxQwenEncodeBatch[sess, prompts]];                         (* {n,stxt,7680} host *)
 
-    td = qwTokenizerData[tokDir];
-    sigmas = fxSigmas[simg, nSteps];
-
-    (* --- STAGE 1: text-encode every prompt in an ISOLATED context, read each
-       embedding back to the HOST, then DESTROY the context.  The two big models
-       (Qwen 4B + the DiT) together exceed the 30GB live-buffer ceiling on this
-       box, and there is no targeted device free -- only TContextDestroy frees a
-       runtime's buffers wholesale.  Carrying the encodings across the boundary as
-       host arrays ({stxt,7680} f32, ~15MB each) lets the Qwen weights be fully
-       released before the transformer loads, so the two models are NEVER
-       co-resident. --- *)
-    encHost = TInContext[ctxEnc = TContextNew[dev],
-        Module[{qw, wfq, e},
-            qw = Join[TSafeTensorLoad[qwPaths[[1]]], TSafeTensorLoad[qwPaths[[2]]]];
-            wfq = fxQwenLoader[qw, dev];
-            e = (Normal @ qwenEncode[Sequence @@ qwTokenize[#, td, stxt], wfq, qwCfg]) & /@ prompts;
-            e
-        ]
-    ];
-    TContextDestroy[ctxEnc];                             (* frees the Qwen buffers *)
-    (* clear slot-0's heap: the Qwen encode registered symbolic-dim / fresh-label
-       state that otherwise leaks into the transformer's tile-JIT codegen as an
-       unresolved kvar (`/*?*/` index -> Metal compile failure).  encHost is pure
-       host data, so the reset only drops device/heap state. *)
-    TReset[];
-
-    (* --- STAGE 2: load transformer + VAE in a FRESH context, build RoPE, then
-       re-upload each host embedding and sample + decode. --- *)
-    (* --- STAGE 2: transformer sampling in its OWN context.  The transformer
-       weights + the (large) JIT velocity capture are freed by TContextDestroy
-       before the VAE runs, so the e2e peak is max(stage), NOT transformer+VAE
-       co-resident.  Each prompt's latent crosses the boundary as a HOST array
-       ({S_img,128} f32, a few hundred KB). --- *)
-    latents = TInContext[ctxT = TContextNew[dev],
-        Module[{wt, wfT, ca, rope, rc, rs, tembFn, velJit},
-            wt = TSafeTensorLoad[tfPath];
-            (* STREAMING loader (no cache): each weight uploads fresh on access and
-               is freed once its block's matmuls retire (the realize-boundary
-               reclaim, THVM_FWD_RECLAIM), so only the ACTIVE block's weights stay
-               resident -- the per-block sampler holds ~one block (~600MB) instead
-               of all 7.75GB.  Paired with THVM_MMAP_NO_WILLNEED so the safetensors
-               file isn't paged fully resident.  Validated: 5 double blocks at
-               3.8GB RSS (cached loader was 8.8GB). *)
-            wfT = fxTransformerLoader[wt, dev];
-            (* bf16 working dtype: every matmul is bf16(act) x bf16(weight) on the
-               Metal simdgroup-matrix gemm (a mixed f32xbf16 matmul falls to a CPU
-               scalar expand).  fxLinear is dtype-agnostic, so this is a driver choice. *)
-            ca = If[ dev === "cpu", TRealize[#] &, (TRealize @ TToDevice[TUOpCast[#, "bf16"], dev]) &];
-            rope = fxRopeTable[gridH, gridW, stxt];
-            rc = ca @ TTensorCreate[rope["cos"]];  rs = ca @ TTensorCreate[rope["sin"]];
-            tembFn = fxTembFn[wfT, dev];
-            (* capture the velocity net ONCE, shared across the whole batch (enc is a
-               rebound input, not closed over) -- image 1 pays the cold capture, every
-               later image is a warm replay. *)
-            velJit = fxVelocityJit[rc, rs, wfT, fxCfg];
+        (* --- STAGE 2: transformer sample each prompt's latent (transformer
+           context).  velJit is the persistent capture: call 1 paid the cold
+           capture at session-build, every replay (incl. later calls) is warm. --- *)
+        {t2, latents} = AbsoluteTiming @ TInContext[sess["ctxT"],
             MapIndexed[
                 Function[{encArr, idx},
-                    Module[{e, zz, zp, dt},
-                        {dt, zp} = AbsoluteTiming @ Module[{ee, z},
-                            ee = ca @ TTensorCreate @ NumericArray[encArr, "Real32"];   (* {stxt,7680} *)
-                            SeedRandom[seed + First[idx]];
-                            z = ca @ TTensorCreate @ NumericArray[
-                                RandomVariate[NormalDistribution[], {simg, 128}], "Real32"];
-                            Normal @ fxSampleJit[velJit, z, ee, sigmas, tembFn, ca]];  (* HOST latent *)
-                        WriteString["stdout", "  [FluxGenerate] sample ", First[idx], "/", Length[encHost],
-                            "  ", Round[dt, 1], " s", If[ First[idx] === 1, "  (cold: incl. capture)", "  (warm)"], "\n"];
-                        $Output // Flush;
-                        zp]],
-                encHost]
-        ]
-    ];
-    TContextDestroy[ctxT];  TReset[];
+                    Module[{ee, z, i = First[idx], lat},
+                        ee = ca @ TTensorCreate @ NumericArray[encArr, "Real32"];   (* {stxt,7680} *)
+                        SeedRandom[seed + i];
+                        z = ca @ TTensorCreate @ NumericArray[
+                            RandomVariate[NormalDistribution[], {simg, 128}], "Real32"];
+                        lat = Normal @ fxSampleJit[sess["velJit"], z, ee, sigmas, sess["tembFn"], ca];
+                        fxDbg["  enc[", i, "] mean=", Round[Mean[Flatten[encArr]], 0.0001],
+                            "  lat mean=", Round[Mean[Flatten[lat]], 0.0001]];
+                        lat]],
+                encHost]];
+        fxTiming[t1, t2];
 
-    (* --- STAGE 3: VAE decode in a FRESH context (transformer freed). --- *)
-    results = TInContext[ctxV = TContextNew[dev],
-        Module[{vt, vKeys, wfV, wsubV},
-            vt = TSafeTensorLoad[vaePath];  vKeys = Keys[vt];
-            wfV = fxVaeLoader[vt, dev];  wsubV = fxVaeSub[wfV, vKeys];
+        (* --- STAGE 3: VAE decode each latent (VAE context). --- *)
+        {t3, results} = AbsoluteTiming @ TInContext[sess["ctxV"],
             Map[
                 Function[lat,
-                    Module[{img},
-                        img = TRealize @ vaeDecoder[
-                            TRealize @ TToDevice[TTensorCreate @ NumericArray[lat, "Real32"], dev],
-                            wfV, wsubV, vaeCfg];
+                    Module[{img = fxVaeDecodeCached[sess, lat]},
                         If[ returnImages, fxToImage[img], Normal[img]]]],
-                latents]]];
-    TContextDestroy[ctxV];
-    results
-]
+                latents]];
+        fxTiming[t3];
+        results]]
+
+(* per-stage timing print, gated by THVM_FLUX_TIMING (off by default). *)
+fxTiming[ts__] := If[ Environment["THVM_FLUX_TIMING"] =!= $Failed,
+    WriteString["stdout", "    [stage] ", Round[{ts}, 0.01], " s\n"]; $Output // Flush]
+
+fxDbg[a___] := If[ Environment["THVM_FLUX_TIMING"] =!= $Failed,
+    WriteString["stdout", a, "\n"]; $Output // Flush]
+
+(* ============================================================
+   STAGE-1 (Qwen) and STAGE-3 (VAE) batch helpers for the session.
+   ============================================================ *)
+
+(* Qwen encode the whole prompt batch -> list of {stxt, 7680} host arrays.
+
+   The 27-layer device forward is TJit-captured ONCE (cached in the session's
+   "qwJit" slot, keyed by seq length stxt): the first prompt pays the cold
+   capture, every later prompt (this call AND subsequent calls) replays it,
+   rebinding only its host-prepped {stxt,2560} x + {stxt,stxt} addMask.  cos/sin
+   are constant for a fixed stxt, so they are closed over by the capture (taken
+   from the first prompt's inputs).  This both cuts the eager ~4s/prompt dispatch
+   overhead to a batched ICB replay AND bounds the live bytes (a replay reuses
+   the captured buffers instead of allocating a fresh forward each call).  Each
+   Normal read crosses to the host as a {stxt,7680} f32 array (~15MB). *)
+fxQwenEncodeBatch[sess_, prompts_List] := With[
+    {wfq = sess["wfq"], qwCfg = sess["qwCfg"], td = sess["td"], stxt = sess["stxt"],
+     jit = sess["qwJit"]},
+    Function[p,
+        Module[{in = qwenInputs[Sequence @@ qwTokenize[p, td, stxt], wfq, qwCfg]},
+            Normal @ jit[in["x"], in["addMask"]]]] /@ prompts]
+
+(* VAE decode one host latent {simg,128} -> {3,H,W} device pixels.  The conv
+   decode is TJit-captured ONCE (session "vaeJit"); each call replays it,
+   rebinding only the uploaded packed latent.  Bounds live bytes + cuts the
+   eager ~2s dispatch overhead to a batched ICB replay. *)
+fxVaeDecodeCached[sess_, lat_] := With[{dev = sess["dev"]},
+    sess["vaeJit"][TRealize @ TToDevice[TTensorCreate @ NumericArray[lat, "Real32"], dev]]]
 
 (* Eager 4-step Euler flow-match: z <- z + (sigma[k+1]-sigma[k]) * v, with the
    velocity v recomputed each step from a fresh, concrete temb.  This does NOT
