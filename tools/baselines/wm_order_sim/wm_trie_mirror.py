@@ -284,6 +284,50 @@ class WmTrie:
                         for e in rewired:
                             n.exits.remove(e)
                             n.exits.insert(0, e)
+                # Sprung-compressed-leaf re-issue.  The surviving leaf `sib`
+                # re-hangs as a compressed leaf at `up`, sharing `up` with a
+                # model leaf (the OTHER child) whose left side begins with the
+                # same function and arg1 cells.  A leaf that was deep-hung
+                # while the now-freed chain still existed got its ancestor
+                # jumps prepended (RumpfSprungeintragSetzen head-insert
+                # :293-295).  In WM that deep leaf instead arose as a
+                # BlattAufgeteilt split of the model's Sprung-compressed leaf
+                # (they share the arg1 prefix), so its ancestor jumps were
+                # AltesBlattPolieren parallels spliced AFTER the model's own
+                # jump (:521-525, "hinter den Eintrag setzen"), never at the
+                # head.  When the chain later collapses to that shared node,
+                # restore the parallel order: a head-prepended ancestor jump to
+                # `sib` whose model counterpart at the same start node is NOT at
+                # the head moves to just after that model jump.
+                others = [c for c in up.children.values()
+                          if isinstance(c, TLeaf) and c is not sib]
+                if len(others) == 1:
+                    model = others[0]
+                    up_d = self._node_depth(up)
+
+                    def _shared_prefix(a, b):
+                        k = 0
+                        while k < len(a) and k < len(b) and a[k] == b[k]:
+                            k += 1
+                        return k
+
+                    for nn in self._all_nodes():
+                        if self._node_depth(nn) >= up_d:
+                            continue
+                        sib_js = [e for e in nn.exits if e.ziel is sib]
+                        mod_js = [e for e in nn.exits if e.ziel is model]
+                        if len(sib_js) != 1 or not mod_js:
+                            continue
+                        sj = sib_js[0]
+                        if nn.exits.index(sj) != 0:
+                            continue               # only a head-prepended jump
+                        best = max(mod_js, key=lambda m: _shared_prefix(sj.sub, m.sub))
+                        if _shared_prefix(sj.sub, best.sub) < 2:
+                            continue               # need the shared f + arg1
+                        if nn.exits.index(best) == 0:
+                            continue               # model also at head -> no move
+                        nn.exits.remove(sj)
+                        nn.exits.insert(nn.exits.index(best) + 1, sj)
         return True
 
     def _find_leaf(self, key, fact):

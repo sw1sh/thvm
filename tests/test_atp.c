@@ -2871,6 +2871,110 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-sprung-compressed-leaf-reissue");
+  {
+    // Sprung-compressed-leaf re-issue on collapse (the MeredithAxioms
+    // And/OrAssociativity @1937 corner).  A new rule whose inner-right
+    // subterm shares an arg1 prefix with an existing compressed leaf is
+    // forced to hang DEEP (intermediate siblings expand the chain), so
+    // its ancestor jump prepends to the start node's exit list HEAD
+    // (RumpfSprungeintragSetzen, DSBaumOperationen.c :293-295).  When the
+    // intermediate siblings are removed the chain collapses and the new
+    // leaf re-hangs sharing the branch node with the model leaf.  In WM
+    // that deep leaf arose as a BlattAufgeteilt split of the model's
+    // Sprung-compressed leaf, so its ancestor jumps were AltesBlattPolieren
+    // parallels spliced AFTER the model's own jump (:521-525), never at the
+    // head.  On collapse the re-issue restores that order: the head jump
+    // moves to just after the model jump.
+    //
+    // Shapes (M is the model R7-analog; I1/I2 force the depth chain; S is
+    // the R66-analog deep sibling):
+    //   B  = f(a, a)               (an unrelated f-node exit so M is NOT at head)
+    //   M  = f(f(a,e), f(a, a))            arg1 of inner-right = a
+    //   I1 = f(f(a,e), f(a, f(a,a)))       inner-right `f(a, f(a, a))`
+    //   I2 = f(f(a,e), f(a, f(a,e)))       sibling of I1 / S at cell 8
+    //   S  = f(f(a,e), f(a, f(e,a)))       hangs deep, jump prepends to head
+    // M and S share the inner-right prefix `f(a, ...)` so their depth-of-
+    // arg1 jumps share >= 2 cells (the f + its arg1).
+    AtpState *s = thvm_atp_init(&UNIT_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    Term lhss[5] = {
+      mk_f(mk_a(), mk_a()),                                            // B  700
+      mk_f(mk_f(mk_a(), mk_e()), mk_f(mk_a(), mk_a())),                // M  701
+      mk_f(mk_f(mk_a(), mk_e()), mk_f(mk_a(), mk_f(mk_a(), mk_a()))),  // I1 702
+      mk_f(mk_f(mk_a(), mk_e()), mk_f(mk_a(), mk_f(mk_a(), mk_e()))),  // I2 703
+      mk_f(mk_f(mk_a(), mk_e()), mk_f(mk_a(), mk_f(mk_e(), mk_a()))),  // S  704
+    };
+    for (u32 k = 0; k < 5u; k++) {
+      s->lhs[k] = lhss[k];
+      s->rhs[k] = mk_a();
+      s->r_orient[k] = 1u;
+      s->r_trace[k] = 700u + k;
+      s->n_rules++;
+      atp_wmo_insert_fact(s, k);
+    }
+    {
+      AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+      // The inner-right branch node sits at depth 4 (cells f f a e f), the
+      // start of every depth-4 jump.  Locate it via the leaf M's parent
+      // chain (M re-hangs at depth 4's grandchild; instead find the node
+      // by walking M's flat key to depth 4).
+      WmoCell cells[WMO_MAX_CELLS];
+      u32 n = wmo_face_cells(lhss[1], cells, WMO_MAX_CELLS);
+      CHECK(n > 0u);
+      WmoNode *node = w->tree[0].root;
+      u8 is_leaf = 0;
+      for (u32 d = 0; d < 4u && node != NULL && !is_leaf; d++) {
+        node = (WmoNode *)wmo_kid_get(node, &cells[d], &is_leaf);
+      }
+      CHECK(node != NULL && !is_leaf);   // the depth-4 inner-right branch node
+
+      // Collect the depth-4 jump positions of S (704) and M (701) before
+      // the collapse: S's jump must be at the HEAD (newest prepend).
+      u32 pos_s = 0xffffffffu, pos_m = 0xffffffffu, idx = 0;
+      for (WmoEntry *e = node->exits; e != NULL; e = e->next, idx++) {
+        if (!e->ziel_leaf) continue;
+        WmoLeaf *l = (WmoLeaf *)e->ziel;
+        for (u32 c = 0; c < l->n_chain; c++) {
+          if (l->chain[c].trace == 704u && pos_s == 0xffffffffu) pos_s = idx;
+          if (l->chain[c].trace == 701u && pos_m == 0xffffffffu) pos_m = idx;
+        }
+      }
+      CHECK(pos_s != 0xffffffffu);
+      CHECK(pos_m != 0xffffffffu);
+      CHECK_EQ(pos_s, 0u);        // S deep-hung -> jump prepended to head
+      CHECK(pos_m > pos_s);       // M was inserted earlier, sits behind
+
+      // Remove I1, I2 -> S collapses to share the branch node with M.
+      atp_wmo_remove_trace(s, 702u);
+      atp_wmo_remove_trace(s, 703u);
+
+      // Re-locate the depth-4 node (structure above S is unchanged).
+      node = w->tree[0].root;
+      is_leaf = 0;
+      for (u32 d = 0; d < 4u && node != NULL && !is_leaf; d++) {
+        node = (WmoNode *)wmo_kid_get(node, &cells[d], &is_leaf);
+      }
+      CHECK(node != NULL && !is_leaf);
+      u32 pos_s2 = 0xffffffffu, pos_m2 = 0xffffffffu;
+      idx = 0;
+      for (WmoEntry *e = node->exits; e != NULL; e = e->next, idx++) {
+        if (!e->ziel_leaf) continue;
+        WmoLeaf *l = (WmoLeaf *)e->ziel;
+        for (u32 c = 0; c < l->n_chain; c++) {
+          if (l->chain[c].trace == 704u && pos_s2 == 0xffffffffu) pos_s2 = idx;
+          if (l->chain[c].trace == 701u && pos_m2 == 0xffffffffu) pos_m2 = idx;
+        }
+      }
+      CHECK(pos_s2 != 0xffffffffu);
+      CHECK(pos_m2 != 0xffffffffu);
+      // The re-issue demoted S's jump to immediately AFTER M's jump.
+      CHECK(pos_s2 > pos_m2);
+      CHECK_EQ(pos_s2, pos_m2 + 1u);
+    }
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-intake-canonical-sort-pops-first");
   {
     // WM loader intake (wm_intake.c): the initial axiom set pops in

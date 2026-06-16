@@ -389,6 +389,57 @@ static void wmo_rewire_cb(WmoNode *n, void *raw) {
   }
 }
 
+// Sprung-compressed-leaf re-issue after a collapse.  The surviving leaf `sib`
+// re-hangs as a compressed leaf at `up`, sharing `up` with a model leaf (the
+// OTHER child of up) whose left side begins with the same function and arg1
+// cells.  While the now-freed chain still existed `sib` was deep-hung and its
+// ancestor jumps were prepended (RumpfSprungeintragSetzen head-insert,
+// DSBaumOperationen.c :293-295).  In WM that deep leaf instead arose as a
+// BlattAufgeteilt split of the model's Sprung-compressed leaf (they share the
+// arg1 prefix), so each ancestor jump was an AltesBlattPolieren parallel
+// spliced AFTER the model's own jump (:521-525, "hinter den Eintrag setzen"),
+// never at the head.  On collapse to the shared node, restore that parallel
+// order: a head-prepended ancestor jump to `sib` whose model counterpart at
+// the same start node is NOT at the head moves to just after that model jump.
+typedef struct {
+  WmoLeaf *sib;
+  WmoLeaf *model;
+  u32      up_depth;
+} WmoReissueCtx;
+
+static u32 wmo_shared_prefix(const WmoCell *a, u32 alen,
+                             const WmoCell *b, u32 blen) {
+  u32 k = 0;
+  while (k < alen && k < blen && wmo_cell_eq(&a[k], &b[k])) k++;
+  return k;
+}
+
+static void wmo_sprung_reissue_cb(WmoNode *n, void *raw) {
+  WmoReissueCtx *c = (WmoReissueCtx *)raw;
+  if (wmo_node_depth(n) >= c->up_depth) return;
+  // Locate the single head-prepended jump to `sib` and the best-matching
+  // model jump (the one sharing the longest prefix) at this start node.
+  WmoEntry *sib_e = NULL;
+  u32 n_sib = 0;
+  WmoEntry *best = NULL;
+  u32 best_shared = 0, best_pos = 0, pos = 0;
+  for (WmoEntry *e = n->exits; e != NULL; e = e->next) {
+    if (e->ziel == (void *)c->sib) { sib_e = e; n_sib++; }
+  }
+  if (n_sib != 1u || n->exits != sib_e) return;   // need exactly one, at head
+  for (WmoEntry *e = n->exits; e != NULL; e = e->next, pos++) {
+    if (e->ziel != (void *)c->model) continue;
+    u32 sh = wmo_shared_prefix(sib_e->sub, sib_e->sub_len, e->sub, e->sub_len);
+    if (best == NULL || sh > best_shared) { best = e; best_shared = sh; best_pos = pos; }
+  }
+  if (best == NULL || best_shared < 2u) return;    // need the shared f + arg1
+  if (best_pos == 0u) return;                      // model also at head -> no move
+  // Unlink sib_e (currently the head) and splice it right after `best`.
+  n->exits = sib_e->next;
+  sib_e->next = best->next;
+  best->next = sib_e;
+}
+
 // ---------- insertion ----------
 
 static WmoLeaf *wmo_leaf_new(WmoTree *t, const WmoCell *key, u32 key_len,
@@ -914,6 +965,24 @@ static void wmo_tree_remove(WmoTree *t, const WmoCell *key, u32 key_len,
     for (u32 f = 0; f < n_freed; f++) {
       WmoRewireCtx rc = { freed[f], sib, 1u, up };
       wmo_walk_entries(t->root, wmo_rewire_cb, &rc);
+    }
+    // Sprung-compressed-leaf re-issue (see wmo_sprung_reissue_cb): if `sib`
+    // re-hangs at `up` sharing it with exactly one model leaf, restore the
+    // AltesBlattPolieren parallel order of `sib`'s head-prepended ancestor
+    // jumps relative to the model's.
+    {
+      WmoLeaf *model = NULL;
+      u32 n_leaf_kids = 0;
+      for (u32 k = 0; k < up->n_kids; k++) {
+        if (up->kids[k].is_leaf && up->kids[k].child != (void *)sib) {
+          model = (WmoLeaf *)up->kids[k].child;
+          n_leaf_kids++;
+        }
+      }
+      if (n_leaf_kids == 1u) {
+        WmoReissueCtx ric = { sib, model, wmo_node_depth(up) };
+        wmo_walk_entries(t->root, wmo_sprung_reissue_cb, &ric);
+      }
     }
     for (u32 f = 0; f < n_freed; f++) wmo_node_free_one(freed[f]);
   }
