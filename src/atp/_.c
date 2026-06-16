@@ -4875,6 +4875,54 @@ static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
   return idx;
 }
 
+// WM-distinguished-face flag (dist_rhs) for a newly-added unorientable
+// equation selected from the CP queue at trace `src_trace`.
+//
+// WM's distinguished face is `selRec.lhs = KPLinks` (RUndEVerwaltung.c:
+// 413, RE_ErzeugteGleichung, kept through BO_TermpaarNormieren with no
+// side swap).  For a genuine two-parent superposition KPLinks =
+// sigma(TP_RechteSeite(Vater)) (Unifikation1.c:916) -- the OUTER rule's
+// RHS -- which thvm's CP constructor lands on cp.rhs, so WM's
+// distinguished face = thvm's stored RHS: the dist_rhs=1 default.
+//
+// The exception is a CP that re-derives an EXISTING fact through a
+// SINGLE parent (WM `ue (-X, 0)`: actualParent = -X real, otherParent
+// absent).  There is no outer-rule-RHS role, so KPLinks keeps the pair's
+// natural left side, which thvm also stores as cp.lhs: WM's distinguished
+// face = thvm's stored LHS, dist_rhs=0.  This returns 0 ONLY for that
+// single-real-parent CP; an initial axiom (WM `ue (0, 0)`, both parents
+// absent, src = TRACE_AXIOM) and a genuine two-parent superposition both
+// keep the dist_rhs=1 default.  The MeredithAnd/OrAssociativity pick-72
+// divergence was exactly the single-parent case: WM's E-number-3 (the
+// re-derived axiom 2, parents (-1, 0)) emits its CP batch from the
+// natural LHS face (phase A first), but the dist_rhs=1 default flipped
+// phases A<->D, sorting the partner-6 phase-A CP ahead of the partner-9
+// phase-D CP and inverting their FIFO ages.
+static u8 atp_wmo_eq_dist_rhs(const AtpState *s, u32 src_trace) {
+  if (s == NULL || src_trace == ATP_TRACE_NONE || src_trace >= s->n_trace) {
+    return 1u;
+  }
+  Term e = s->trace[src_trace];
+  if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 2u) return 1u;
+  u32 reason = term_ext(e);
+  u32 p_a = (u32)term_val(term_ctr_at(e, 0));
+  u32 p_b = (u32)term_val(term_ctr_at(e, 1));
+  // A TRACE_SIMPLIFY victim (an interreduced fact re-queued as its
+  // reduced equation) is WM's `ue (-X, 0)` re-derivation with a single
+  // real parent (the dropped fact); a TRACE_CP with the otherParent
+  // absent is the same shape from the superposition lane.  Both keep
+  // the natural left side as the distinguished face -> dist_rhs=0.  A
+  // genuine two-parent superposition and an initial axiom (TRACE_AXIOM,
+  // both parents absent) take the dist_rhs=1 default.
+  if (reason == TRACE_SIMPLIFY) {
+    return (p_a != ATP_TRACE_NONE) ? 0u : 1u;
+  }
+  if (reason == TRACE_CP) {
+    return (p_a != ATP_TRACE_NONE && p_b == ATP_TRACE_NONE) ? 0u : 1u;
+  }
+  return 1u;
+}
+
 // Push an axiom / pending equation onto the CP queue.  The
 // saturation loop's orient + generate machinery processes it
 // uniformly with later-derived CPs.  Also records a TRACE_AXIOM
@@ -9361,10 +9409,17 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     s->r_trace[rid] = t;
     // WM order mirror: the fact is now in R/E with its identity --
     // register its tree faces (RE_RegelEinfuegen / GleichungEinfuegen).
-    // CP-derived (saturation main loop): an unorientable equation's
-    // WM-distinguished face is its stored RHS (KPLinks = sigma(outer
-    // rule RHS)); see atp_wmo_insert_fact_ex.
-    if (s->use_wm_emission_order) atp_wmo_insert_fact_ex(s, rid, 1u);
+    // The WM-distinguished face is `selRec.lhs = KPLinks`: a genuine
+    // two-parent superposition lands KPLinks on thvm's stored RHS
+    // (dist_rhs=1, the default); a CP that re-derives an existing fact
+    // through a single parent keeps the natural left side on thvm's
+    // stored LHS (dist_rhs=0).  atp_wmo_eq_dist_rhs returns that flag
+    // from the selected CP's parents; insert_fact_ex's cp_derived arg
+    // carries dist_rhs directly (1 -> use stored RHS as distinguished).
+    if (s->use_wm_emission_order) {
+      u8 dist_rhs = atp_wmo_eq_dist_rhs(s, src_trace);
+      atp_wmo_insert_fact_ex(s, rid, dist_rhs);
+    }
   }
 
 #ifdef ATP_CP_GROUND_JOIN
