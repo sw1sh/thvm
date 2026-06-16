@@ -635,15 +635,30 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
       // A STRICT-ANCESTOR subterm closing at the FIRST chain node (e_old ==
       // i+1; its last cell is the leaf-found branch key[i], shared by both
       // leaves) additionally gets a FRESH jump to that chain node, head-
-      // inserted at the start node -- the prepend NeuesBlattEinhaengen makes
-      // for the fully closed shorter enclosing subterm so the more-general
-      // jump is consulted first.  This applies only when the GleichPfad chain
-      // has interior nodes beyond the first (j > i+1): a minimal split
-      // (j == i+1) builds no enclosing chain and keeps the re-target alone.
-      // WolframAxioms Commutativity / DoubleNegation prefix @91 needs the
-      // fresh head jump; CombinatorAxioms SKIToBCKW @303 needs the minimal
-      // split to keep its re-target order.
-      if (start_pos < i && e_old == i + 1u && j > i + 1u) {
+      // inserted at the start node -- the SprungeintragSetzenVonPopOhne-
+      // PraefixverweisNULL the unbounded BlattAufgeteilt chain pop emits for
+      // the fully closed enclosing subterm (DSBaumOperationen.c :644-647) so
+      // the more-general jump is consulted first.  This applies only when the
+      // GleichPfad chain has interior nodes beyond the first (j > i+1): a
+      // minimal split (j == i+1) builds no enclosing chain and keeps the
+      // re-target alone.  WolframAxioms Commutativity / DoubleNegation prefix
+      // @91 needs the fresh head jump; CombinatorAxioms SKIToBCKW @303 needs
+      // the minimal split to keep its re-target order.
+      //
+      // The split branch (key[j], old->key[j]) must reach the two leaves via
+      // distinct EDGES, not a shared jump.  When both branch cells are
+      // FUNCTION symbols the leaves sit on direct exact-symbol children
+      // (MitSelbemSymbolAb), so the ancestor's chain-node jump never gates
+      // their relative DFS order -- the fresh head insert would only mis-rank
+      // the equal-weight CPs born from those leaves (CombinatorAxioms
+      // SKIToBCKW @1113: the S(SW)* vs S(SY)* sibling batch, where rule 564's
+      // overlaps against the W-branch must precede the Y-branch, matching WM's
+      // CPNr/FIFO order).  Suppress the fresh jump for the function/function
+      // branch; keep it when a variable branch makes the jump load-bearing.
+      u8 new_fun = (j < leaf->key_len) && !leaf->key[j].is_var;
+      u8 old_fun = (j < old->key_len) && !old->key[j].is_var;
+      if (start_pos < i && e_old == i + 1u && j > i + 1u
+          && !(new_fun && old_fun)) {
         WmoEntry *fresh = (WmoEntry *)calloc(1, sizeof(WmoEntry));
         fresh->start = sn;
         fresh->sub = (WmoCell *)malloc((e_old - start_pos) * sizeof(WmoCell));
