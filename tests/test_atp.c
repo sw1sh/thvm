@@ -589,6 +589,63 @@ int main(void) {
     #undef FVI_F
   }
 
+  TEST_BEGIN("atp/unorient-index-and-nofire-memo-invalidate-on-revision");
+  {
+    // The unorientable-faces index (unorient_index) and the per-position
+    // no-fire memo (g_atp_unf_step_epoch) must invalidate on EVERY rule-
+    // set revision, not only when n_rules or n_unorient changes.  A
+    // backward-subsumption soft-delete drops a rule's face while leaving
+    // both counts unchanged (it bumps r_revision only), so keying the
+    // rebuild trigger / memo bump on n_rules or n_unorient leaves a stale
+    // face indexed and a stale no-fire verdict cached -- thvm then skips a
+    // rewrite Waldmeister applies (the MeredithAxioms And/OrAssociativity
+    // @25 divergence).  This guards the r_revision keying on both sites.
+    static u32 fviw[2] = {0u, 1u};
+    static u32 fvip[2] = {0u, 1u};
+    static const KboConfig FVI_CFG = {
+      .weights = fviw, .precedence = fvip, .n_labels = 2u, .var_weight = 1u,
+    };
+    #define FVI_F(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(1u, _c, 2); })
+    AtpState *s = thvm_atp_init(&FVI_CFG, 64u);
+    {
+      Term x = mk_v(0u), y = mk_v(1u);
+      atp_push_rule(s, FVI_F(x, x), FVI_F(y, y));   // unorientable, slot 0
+    }
+    CHECK_EQ(s->n_unorient, 1u);
+    s->use_flatterm = 1u;
+    Term v    = mk_v(0u);
+    Term subj = FVI_F(FVI_F(v, v), FVI_F(v, v));
+    Term want = FVI_F(s->min_const, s->min_const);
+    // First normalize: builds the unorient_index and populates the no-fire
+    // memo at the current revision.
+    Term nf0 = atp_rewrite_normalize(s, subj, s->lhs, s->rhs, s->n_rules, 64u);
+    CHECK(kbo_eq(nf0, want));
+    // The index now reflects the live revision.
+    CHECK(s->unorient_index != NULL);
+    CHECK_EQ(s->unorient_index->built_revision, s->r_revision);
+    CHECK_EQ(s->unorient_index->n_rules_built, s->n_rules);
+    u32 epoch0    = g_atp_unf_step_epoch;
+    u32 rev0      = s->r_revision;
+    u32 n_rules0  = s->n_rules;
+    u32 n_unori0  = s->n_unorient;
+    // Revision-only mutation: bump r_revision WITHOUT changing n_rules or
+    // n_unorient -- exactly the backward-subsumption soft-delete shape.
+    s->r_revision++;
+    CHECK_EQ(s->n_rules, n_rules0);
+    CHECK_EQ(s->n_unorient, n_unori0);
+    // Next normalize must detect the stale index (built_revision !=
+    // r_revision) and bump the no-fire step epoch -- otherwise a stale
+    // no-fire verdict could survive the rule-set change.
+    Term nf1 = atp_rewrite_normalize(s, subj, s->lhs, s->rhs, s->n_rules, 64u);
+    CHECK(kbo_eq(nf1, want));
+    CHECK(s->unorient_index->built_revision == s->r_revision);
+    CHECK(s->unorient_index->built_revision != rev0);
+    CHECK(g_atp_unf_step_epoch != epoch0);   // memo verdicts invalidated
+    s->use_flatterm = 0u;
+    thvm_atp_free(s);
+    #undef FVI_F
+  }
+
   TEST_BEGIN("atp/generation-doE-false-no-equation-join-at-push");
   {
     // WM per-site NF flags: the generation-time CP treatment
