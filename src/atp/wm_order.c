@@ -1439,6 +1439,33 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
   return hit;
 }
 
+// Public wrapper: WM MO_GleichungGefunden retrieval rank for one
+// unorientable equation face against a concrete redex subterm.  WM's
+// NormalformMixMost reduces a position by walking the Gleichungsbaum in
+// a DFS that visits the matching function-symbol branch BEFORE the
+// variable branch (MatchOperationen.c:660-661, 678-704: tryFct then
+// tryNVar then tryOVar), so when two unorientable faces both match one
+// redex the one reached earlier in that descent fires.  The depth-
+// ordered leaf list (atp_wmo_eq_leaflist_rank) is NOT that order -- it
+// ranks the more-general (variable-prefix) pattern before the specific
+// function-prefix pattern, picking the wrong redex at competing
+// positions (SKIToBCKW `S x K K`: leaf-list fires the W r->l face
+// `(z y)y -> W z y` over the S l->r face, yielding `W (S x) K` where WM
+// reduces to `(x K)(K K)`).  Ranking by the DFS arrival of the redex
+// subterm reproduces WM's choice.  `thvm_dir` is the candidate's rewrite
+// direction (0 = match stored lhs, 1 = match stored rhs); the WM face is
+// `thvm_dir XOR dist_rhs`.  Returns 0 when the mirror is absent or the
+// face is not reached (caller falls back to slot order).
+static u8 atp_wmo_eq_tops_rank(AtpState *s, u32 trace, u8 thvm_dir,
+                               Term redex_sub, u32 *out_arrival,
+                               u32 *out_chain) {
+  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+  if (w == NULL) return 0u;
+  u8 wm_face = (u8)(thvm_dir ^ wmo_trace_dist_rhs(w, trace));
+  return wmo_tops_rank(w, 1u, redex_sub, trace, wm_face, out_arrival,
+                       out_chain);
+}
+
 // Compute the WM emission rank key for one tagged CP of the new fact
 // `f`'s batch.  `i`/`j` are the overlap slots (i = outer, positions in
 // i's face), `combo` = atp_overlap_ij face combo (bit0: j used its

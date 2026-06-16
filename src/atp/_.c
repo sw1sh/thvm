@@ -474,6 +474,13 @@ static u64  atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
 // thvm slot order.  Defined in wm_order.c.
 static u8   atp_wmo_eq_leaflist_rank(AtpState *s, u32 trace, u8 thvm_dir,
                                      u32 *out_ll, u32 *out_chain);
+// DFS arrival rank of an equation face against a concrete redex subterm,
+// the faithful WM MO_GleichungGefunden retrieval order (function-symbol
+// branch before variable branch) used to break competing-redex ties in
+// the unorientable normalize step.  Defined in wm_order.c.
+static u8   atp_wmo_eq_tops_rank(AtpState *s, u32 trace, u8 thvm_dir,
+                                 Term redex_sub, u32 *out_arrival,
+                                 u32 *out_chain);
 
 // Waldmeister loader-level axiom canonicalization (src/atp/wm_intake.c,
 // included next to wm_order.c).  Forward declaration so the first
@@ -3658,10 +3665,19 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
       u32 slot_key = (rule << 1) | rl;
       if (s->use_wm_emission_order) {
         u32 ll = 0u, ch = 0u;
-        // Bit layout (high -> low): [unranked flag:1][ll:13][ch:8]
+        // Bit layout (high -> low): [unranked flag:1][arrival:13][ch:8]
         // [slot_key:10].  Ranked faces (flag 0) sort before unranked
-        // (flag 1); ties on (ll, ch) fall back to slot order.
-        if (atp_wmo_eq_leaflist_rank(s, s->r_trace[rule], rl, &ll, &ch)) {
+        // (flag 1); ties on (arrival, ch) fall back to slot order.
+        //
+        // The rank is the DFS ARRIVAL of this equation face against the
+        // concrete redex `sub` (atp_wmo_eq_tops_rank), the faithful WM
+        // MO_GleichungGefunden retrieval order: the Gleichungsbaum descent
+        // visits the matching function-symbol branch before the variable
+        // branch (MatchOperationen.c:678-704), so a specific
+        // function-prefix pattern fires before a more-general
+        // variable-prefix pattern that also matches the redex.  The
+        // depth-ordered leaf list inverts that for competing positions.
+        if (atp_wmo_eq_tops_rank(s, s->r_trace[rule], rl, sub, &ll, &ch)) {
           if (ll > 0x1fffu) ll = 0x1fffu;
           if (ch > 0xffu)   ch = 0xffu;
           cand[k] = (ll << 18) | (ch << 10) | (slot_key & 0x3ffu);
