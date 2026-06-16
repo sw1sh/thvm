@@ -1,0 +1,20 @@
+/* Injected at the top of every re-hosted statichtml page.
+   The cloud's statichtml render wraps the notebook in fixed-size, absolutely
+   positioned "native" scroll containers sized to the notebook window; in a plain
+   document that leaves a huge blank gap and pushes the Examples / Scope /
+   Properties sections far down. Forcing the containers to natural flow collapses
+   the gap so the whole page (examples included) reads top to bottom. */
+.notebook-html { display: block !important; }
+.native-fixed,
+.native-scroll,
+.native-scroll-with-background,
+.native-container {
+  position: static !important;
+  height: auto !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+  transform: none !important;
+}
+.cached-data { height: auto !important; }
+html, body { height: auto !important; overflow: visible !important; }
