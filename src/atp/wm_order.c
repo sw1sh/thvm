@@ -610,15 +610,19 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
       par->sub_len = e_new - start_pos;
       par->ziel = leaf;
       par->ziel_leaf = 1u;
-      // Outgoing-list placement.  Default: immediately AFTER the survivor
-      // (:523-526).  Head-insert exception for a STRICT-ANCESTOR start
-      // (start_pos < i, the enclosing function subterm opened above the
-      // leaf-found split point) whose NEW subterm is SHORTER than the old's
-      // (e_new < e_old): the more-general / shorter jump heads the start
-      // node's outgoing list, the prepend NeuesBlattEinhaengen would have
-      // produced for the fully closed shorter enclosing subterm
-      // (BooleanAxioms OrAssociativity @300).
-      if (start_pos < i && e_new < e_old) {
+      // Outgoing-list placement.  WM's BlattAufgeteilt parallel goes
+      // immediately AFTER the model survivor (DSBaumOperationen.c :521-525,
+      // the NaechsterZieleintrag splice -- "hinter den Eintrag setzen, zu
+      // dem eine Parallele aufgebaut wird"); it never head-inserts.  The
+      // head-insert BooleanAxioms OrAssociativity @300 needs is the
+      // NeuesBlattEinhaengen RumpfSprungeintragSetzen jump (:466-467,
+      // head-inserted), emitted for the enclosing subterm whose first cell
+      // is the leaf-found branch key[i] -- an IMMEDIATE strict ancestor
+      // (i - start_pos == 1).  Keep the head-insert only there; an enclosing
+      // subterm opened FURTHER above (i - start_pos > 1, the MeredithAxioms
+      // And/OrAssoc @340 R27 jump start_pos=2 i=4 j=5) is a genuine parallel
+      // and goes after the survivor, matching WM's CPNr/FIFO arrival.
+      if (start_pos < i && e_new < e_old && i - start_pos == 1u) {
         par->next = sn->exits;
         sn->exits = par;
       } else {
