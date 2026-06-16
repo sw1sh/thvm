@@ -440,6 +440,58 @@ static void wmo_sprung_reissue_cb(WmoNode *n, void *raw) {
   best->next = sib_e;
 }
 
+// Middle-leaf removal re-issue.  When a branch node loses a child leaf that
+// is neither its smallest nor its largest symbol (BO_ObjektEntfernen
+// :1043-1046, SprunglistenBereinigenEinfach with NachbarBlatt = the node's
+// smallest-symbol child), no path shrinks, but the surviving smallest-symbol
+// leaf `minc` (the most-recently-introduced variable child = a fresh hang
+// whose ancestor jumps were head-prepended) must restore the
+// AltesBlattPolieren parallel order against the OTHER surviving leaf siblings:
+// in WM that fresh leaf arose as a split of a sibling's Sprung-compressed
+// leaf, so each ancestor jump was spliced AFTER the sibling's own jump
+// (DSBaumOperationen.c :521-525, "hinter den Eintrag setzen").  At every node
+// a single jump to `minc` that precedes a later sibling-leaf jump from the
+// same enclosing subterm (sharing the leading function cell) moves to just
+// after the last such later sibling jump.
+typedef struct {
+  WmoLeaf  *minc;
+  WmoLeaf **sibs;
+  u32       n_sibs;
+} WmoMiddleCtx;
+
+static void wmo_middle_reissue_cb(WmoNode *n, void *raw) {
+  WmoMiddleCtx *c = (WmoMiddleCtx *)raw;
+  // Locate the single jump to `minc` and its list position.
+  WmoEntry *mj = NULL;
+  u32 n_minc = 0;
+  for (WmoEntry *e = n->exits; e != NULL; e = e->next) {
+    if (e->ziel == (void *)c->minc) { mj = e; n_minc++; }
+  }
+  if (n_minc != 1u) return;
+  // Find the last sibling-leaf jump that sits AFTER mj and shares the leading
+  // function cell with mj's subterm.
+  WmoEntry *best = NULL;
+  u8 seen_mj = 0;
+  for (WmoEntry *e = n->exits; e != NULL; e = e->next) {
+    if (e == mj) { seen_mj = 1u; continue; }
+    if (!seen_mj) continue;
+    u8 is_sib = 0;
+    for (u32 k = 0; k < c->n_sibs; k++)
+      if (e->ziel == (void *)c->sibs[k]) { is_sib = 1u; break; }
+    if (!is_sib) continue;
+    if (wmo_shared_prefix(mj->sub, mj->sub_len, e->sub, e->sub_len) < 1u)
+      continue;
+    best = e;   // last qualifying sibling jump after mj
+  }
+  if (best == NULL) return;
+  // Unlink mj from its current position and splice it right after `best`.
+  WmoEntry **slot = &n->exits;
+  while (*slot != mj) slot = &(*slot)->next;
+  *slot = mj->next;
+  mj->next = best->next;
+  best->next = mj;
+}
+
 // ---------- insertion ----------
 
 static WmoLeaf *wmo_leaf_new(WmoTree *t, const WmoCell *key, u32 key_len,
@@ -923,6 +975,8 @@ static void wmo_tree_remove(WmoTree *t, const WmoCell *key, u32 key_len,
   wmo_ll_remove(t, leaf);
   wmo_kill_entries_to(t, leaf);
   WmoNode *parent = leaf->parent;
+  u8  removed_isvar = leaf->key[leaf->hang].is_var;
+  u32 removed_sym   = leaf->key[leaf->hang].sym;
   wmo_kid_del(parent, &leaf->key[leaf->hang]);
   if (parent == t->root) {
     wmo_leaf_free(leaf);
@@ -985,6 +1039,50 @@ static void wmo_tree_remove(WmoTree *t, const WmoCell *key, u32 key_len,
       }
     }
     for (u32 f = 0; f < n_freed; f++) wmo_node_free_one(freed[f]);
+  } else if (parent->n_kids >= 2u && removed_isvar) {
+    // No path-shrink (the removed leaf was not the only child).  WM's
+    // SprunglistenBereinigenEinfach middle-branch (BO_ObjektEntfernen
+    // :1043-1046) re-cleans against the parent's smallest-symbol child.
+    // Restrict to the genuine MIDDLE-variable case the AltesBlattPolieren
+    // parallel order depends on: every surviving leaf child is a variable
+    // edge (a pure-variable branch, as a single-operator theory produces),
+    // and the removed variable id sits strictly between the smallest and
+    // largest surviving ids (neither min nor max symbol).  The surviving
+    // smallest-symbol leaf `minc` (largest first-occurrence id = most
+    // negative WM code) is the fresh-hang child whose head-prepended
+    // ancestor jumps must move AFTER its variable siblings' jumps.
+    WmoLeaf *minc = NULL;
+    u32      minc_sym = 0;      // largest surviving id (smallest WM symbol)
+    u32      lo_sym   = 0;      // smallest surviving id (largest WM symbol)
+    WmoLeaf *sibs[WMO_MAX_VARS + 2u];
+    u32      n_sibs = 0;
+    u32      n_leaf_kids = 0;
+    u8       all_var = 1u;
+    for (u32 k = 0; k < parent->n_kids; k++) {
+      // A pure-variable branch: every edge (to leaf or inner node) is a
+      // variable edge.  Any function edge disqualifies the reorder.
+      if (!parent->kids[k].sym.is_var) { all_var = 0u; break; }
+      if (!parent->kids[k].is_leaf) continue;
+      u32 sym = parent->kids[k].sym.sym;
+      if (n_leaf_kids == 0u || sym > minc_sym) {
+        minc = (WmoLeaf *)parent->kids[k].child;
+        minc_sym = sym;
+      }
+      if (n_leaf_kids == 0u || sym < lo_sym) lo_sym = sym;
+      n_leaf_kids++;
+    }
+    if (all_var && n_leaf_kids >= 2u && minc != NULL &&
+        removed_sym > lo_sym && removed_sym < minc_sym) {
+      for (u32 k = 0; k < parent->n_kids; k++) {
+        if (parent->kids[k].is_leaf &&
+            parent->kids[k].child != (void *)minc &&
+            n_sibs < WMO_MAX_VARS + 2u) {
+          sibs[n_sibs++] = (WmoLeaf *)parent->kids[k].child;
+        }
+      }
+      WmoMiddleCtx mc = { minc, sibs, n_sibs };
+      wmo_walk_entries(t->root, wmo_middle_reissue_cb, &mc);
+    }
   }
   wmo_leaf_free(leaf);
 }

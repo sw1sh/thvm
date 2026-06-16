@@ -1,61 +1,61 @@
-wm=64800 thvm=35310 prefix=2009 identical=N firstdiv=2010
-note: content-delta wm-only=29496 thvm-only=6; post-axiom nonax-wm=64798 nonax-thvm=35308 nonax-prefix=2007; weights-exact
+wm=64800 thvm=35891 prefix=6077 identical=N firstdiv=6078
+note: content-delta wm-only=28915 thvm-only=6; post-axiom nonax-wm=64798 nonax-thvm=35889 nonax-prefix=6075; weights-exact
 
---- positions 2007..2019 (1-based) ---
-  2007 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x2),x1),opCenterdot(x2,x1))
-  2007 thvm pri=109         CPSEL pick=2007 j=0 seq=9630 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V0) V1) (C3 V0 V1)) rhs=V1
-  2008 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x2),x1),opCenterdot(x2,x1))
-  2008 thvm pri=109         CPSEL pick=2008 j=0 seq=9631 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V0) V1) (C3 V0 V1)) rhs=V1
-  2009 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x2),x1),opCenterdot(x2,x1))
-  2009 thvm pri=109         CPSEL pick=2009 j=0 seq=9632 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V0) V1) (C3 V0 V1)) rhs=V1
-* 2010 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x3),x1),opCenterdot(x2,x1))
-* 2010 thvm pri=109         CPSEL pick=2010 j=0 seq=9633 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V1) V2) (C3 V1 V2)) rhs=V2
-  2011 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x3),x1),opCenterdot(x2,x1))
-  2011 thvm pri=109         CPSEL pick=2011 j=0 seq=9634 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V1) V2) (C3 V0 V2)) rhs=V2
-* 2012 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x3),x1),opCenterdot(x3,x1))
-* 2012 thvm pri=109         CPSEL pick=2012 j=0 seq=9635 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V1) V2) (C3 V0 V2)) rhs=V2
-  2013 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x3),x1),opCenterdot(x3,x1))
-  2013 thvm pri=109         CPSEL pick=2013 j=0 seq=9636 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V1) V2) (C3 V1 V2)) rhs=V2
-  2014 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x3),x1),opCenterdot(x3,x1))
-  2014 thvm pri=109         CPSEL pick=2014 j=0 seq=9637 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V1) V2) (C3 V1 V2)) rhs=V2
-  2015 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x3),x1),opCenterdot(x3,x1))
-  2015 thvm pri=109         CPSEL pick=2015 j=0 seq=9638 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V1) V2) (C3 V1 V2)) rhs=V2
-  2016 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x3),x1),opCenterdot(x2,x1))
-  2016 thvm pri=109         CPSEL pick=2016 j=0 seq=9639 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V1) V2) (C3 V0 V2)) rhs=V2
-  2017 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x3),x1),opCenterdot(x2,x1))
-  2017 thvm pri=109         CPSEL pick=2017 j=0 seq=9640 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V1) V2) (C3 V0 V2)) rhs=V2
-  2018 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x3),x1),opCenterdot(x2,x1))
-  2018 thvm pri=109         CPSEL pick=2018 j=0 seq=9641 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V1) V2) (C3 V0 V2)) rhs=V2
-  2019 WM   w1=109          x1 # opCenterdot(opCenterdot(opCenterdot(x2,x3),x1),opCenterdot(x3,x1))
-  2019 thvm pri=109         CPSEL pick=2019 j=0 seq=9651 pri=109 rules=67 lhs=(C3 (C3 (C3 V0 V1) V2) (C3 V1 V2)) rhs=V2
+--- positions 6075..6087 (1-based) ---
+  6075 WM   w1=120          opCenterdot(opCenterdot(x1,x1),x2) # opCenterdot(x2,opCenterdot(x1,x1))
+  6075 thvm pri=120         CPSEL pick=6075 j=0 seq=23170 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V1)) rhs=(C3 (C3 V1 V1) V0)
+  6076 WM   w1=120          opCenterdot(opCenterdot(x1,x1),x2) # opCenterdot(x2,opCenterdot(x1,x1))
+  6076 thvm pri=120         CPSEL pick=6076 j=0 seq=23172 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V1)) rhs=(C3 (C3 V1 V1) V0)
+  6077 WM   w1=120          opCenterdot(opCenterdot(x1,x1),x2) # opCenterdot(x2,opCenterdot(x1,x1))
+  6077 thvm pri=120         CPSEL pick=6077 j=0 seq=23177 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V1)) rhs=(C3 (C3 V1 V1) V0)
+* 6078 WM   w1=120          opCenterdot(opCenterdot(x1,x1),x2) # opCenterdot(x2,opCenterdot(x2,x1))
+* 6078 thvm pri=120         CPSEL pick=6078 j=0 seq=23220 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V2)) rhs=(C3 (C3 V2 V1) V0)
+* 6079 WM   w1=120          opCenterdot(opCenterdot(x1,x1),x2) # opCenterdot(x2,opCenterdot(x1,x2))
+* 6079 thvm pri=120         CPSEL pick=6079 j=0 seq=23236 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V2)) rhs=(C3 (C3 V1 V2) V0)
+* 6080 WM   w1=120          opCenterdot(opCenterdot(x1,x2),x3) # opCenterdot(x3,opCenterdot(x2,x1))
+* 6080 thvm pri=120         CPSEL pick=6080 j=0 seq=23241 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V2)) rhs=(C3 (C3 V1 V2) V0)
+* 6081 WM   w1=120          opCenterdot(opCenterdot(x1,x2),x3) # opCenterdot(x3,opCenterdot(x2,x1))
+* 6081 thvm pri=120         CPSEL pick=6081 j=0 seq=23243 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V2)) rhs=(C3 (C3 V1 V2) V0)
+  6082 WM   w1=120          opCenterdot(opCenterdot(x1,x2),x3) # opCenterdot(x3,opCenterdot(x1,x2))
+  6082 thvm pri=120         CPSEL pick=6082 j=0 seq=23244 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V2)) rhs=(C3 (C3 V1 V2) V0)
+  6083 WM   w1=120          opCenterdot(opCenterdot(x1,x2),x3) # opCenterdot(x3,opCenterdot(x1,x2))
+  6083 thvm pri=120         CPSEL pick=6083 j=0 seq=23264 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V2)) rhs=(C3 (C3 V1 V2) V0)
+  6084 WM   w1=120          opCenterdot(opCenterdot(x1,x2),x3) # opCenterdot(x3,opCenterdot(x1,x2))
+  6084 thvm pri=120         CPSEL pick=6084 j=0 seq=23268 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V2)) rhs=(C3 (C3 V1 V2) V0)
+  6085 WM   w1=120          opCenterdot(opCenterdot(x1,x2),x3) # opCenterdot(x3,opCenterdot(x1,x2))
+  6085 thvm pri=120         CPSEL pick=6085 j=0 seq=23278 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V2)) rhs=(C3 (C3 V1 V2) V0)
+  6086 WM   w1=120          opCenterdot(opCenterdot(x1,x2),x3) # opCenterdot(x3,opCenterdot(x1,x2))
+  6086 thvm pri=120         CPSEL pick=6086 j=0 seq=23517 pri=120 rules=119 lhs=(C3 V0 (C3 V1 V2)) rhs=(C3 (C3 V1 V2) V0)
+* 6087 WM   w1=120          opCenterdot(opCenterdot(x1,x2),x3) # opCenterdot(x3,opCenterdot(x1,x2))
+* 6087 thvm pri=120         CPSEL pick=6087 j=0 seq=23615 pri=120 rules=119 lhs=(C3 V0 (C3 V0 V1)) rhs=(C3 V0 (C3 V1 V0))
 
 --- multiset deltas (first 50 each side) ---
 WM-only   x31  opCenterdot(opCenterdot(opCenterdot(v1,v2),v2),v1)#opCenterdot(v1,v1)
-WM-only   x1208  opCenterdot(v1,v2)#opCenterdot(v2,v1)
-WM-only   x152  opCenterdot(opCenterdot(v1,opCenterdot(v2,v2)),v2)#opCenterdot(v2,v2)
-WM-only   x183  opCenterdot(opCenterdot(opCenterdot(v1,v1),v2),v1)#opCenterdot(v1,v1)
+WM-only   x1204  opCenterdot(v1,v2)#opCenterdot(v2,v1)
+WM-only   x151  opCenterdot(opCenterdot(v1,opCenterdot(v2,v2)),v2)#opCenterdot(v2,v2)
+WM-only   x182  opCenterdot(opCenterdot(opCenterdot(v1,v1),v2),v1)#opCenterdot(v1,v1)
 WM-only   x1  opCenterdot(opCenterdot(opCenterdot(v1,v2),opCenterdot(v1,v2)),v2)#opCenterdot(v1,v2)
-WM-only   x79  opCenterdot(opCenterdot(v1,opCenterdot(v1,v2)),v2)#opCenterdot(v2,v2)
+WM-only   x62  opCenterdot(opCenterdot(v1,opCenterdot(v1,v2)),v2)#opCenterdot(v2,v2)
 WM-only   x69  opCenterdot(opCenterdot(v1,opCenterdot(v2,v1)),v2)#opCenterdot(v2,v2)
 WM-only   x1  opCenterdot(opCenterdot(opCenterdot(v1,v2),opCenterdot(v1,v2)),v1)#opCenterdot(v1,v2)
-WM-only   x1040  opCenterdot(opCenterdot(v1,opCenterdot(v1,v1)),v2)#opCenterdot(v2,v2)
+WM-only   x1035  opCenterdot(opCenterdot(v1,opCenterdot(v1,v1)),v2)#opCenterdot(v2,v2)
 WM-only   x6  opCenterdot(opCenterdot(opCenterdot(v1,v1),v1),opCenterdot(v2,v2))#v2
 WM-only   x18  opCenterdot(opCenterdot(v1,v1),opCenterdot(opCenterdot(v2,v2),v2))#v1
 WM-only   x82  opCenterdot(opCenterdot(v1,v1),v2)#opCenterdot(v2,opCenterdot(v1,v1))
-WM-only   x539  opCenterdot(v1,opCenterdot(v2,opCenterdot(v2,v2)))#opCenterdot(v1,v1)
+WM-only   x535  opCenterdot(v1,opCenterdot(v2,opCenterdot(v2,v2)))#opCenterdot(v1,v1)
 WM-only   x98  opCenterdot(opCenterdot(opCenterdot(v1,v1),v1),v2)#opCenterdot(v2,v2)
 WM-only   x33  opCenterdot(v1,opCenterdot(opCenterdot(v2,v2),v2))#opCenterdot(v1,v1)
 WM-only   x236  opCenterdot(v1,opCenterdot(opCenterdot(v2,v1),v1))#opCenterdot(v2,v1)
-WM-only   x243  opCenterdot(opCenterdot(v1,v1),v1)#opCenterdot(v1,opCenterdot(v1,v1))
-WM-only   x253  opCenterdot(v1,opCenterdot(opCenterdot(v1,v2),v1))#opCenterdot(v1,v2)
+WM-only   x242  opCenterdot(opCenterdot(v1,v1),v1)#opCenterdot(v1,opCenterdot(v1,v1))
+WM-only   x252  opCenterdot(v1,opCenterdot(opCenterdot(v1,v2),v1))#opCenterdot(v1,v2)
 WM-only   x134  opCenterdot(opCenterdot(v1,v2),v2)#opCenterdot(v2,opCenterdot(v1,v2))
 WM-only   x140  opCenterdot(opCenterdot(v1,opCenterdot(v1,v1)),v1)#opCenterdot(v1,v1)
 WM-only   x43  opCenterdot(opCenterdot(v1,opCenterdot(v2,v1)),v1)#opCenterdot(v2,v1)
-WM-only   x141  opCenterdot(opCenterdot(v1,v2),v1)#opCenterdot(v1,opCenterdot(v1,v2))
+WM-only   x132  opCenterdot(opCenterdot(v1,v2),v1)#opCenterdot(v1,opCenterdot(v1,v2))
 WM-only   x74  opCenterdot(opCenterdot(opCenterdot(v1,v1),v1),v1)#opCenterdot(v1,v1)
 WM-only   x51  opCenterdot(opCenterdot(v1,opCenterdot(v1,v2)),v1)#opCenterdot(v1,v2)
-WM-only   x51  opCenterdot(opCenterdot(opCenterdot(v1,v2),v2),v2)#opCenterdot(v1,v2)
-WM-only   x51  opCenterdot(opCenterdot(opCenterdot(v1,v2),v1),v1)#opCenterdot(v1,v2)
+WM-only   x50  opCenterdot(opCenterdot(opCenterdot(v1,v2),v2),v2)#opCenterdot(v1,v2)
+WM-only   x50  opCenterdot(opCenterdot(opCenterdot(v1,v2),v1),v1)#opCenterdot(v1,v2)
 WM-only   x181  opCenterdot(opCenterdot(v1,opCenterdot(v2,v1)),opCenterdot(v2,v1))#v1
 WM-only   x169  opCenterdot(opCenterdot(v1,opCenterdot(v1,v2)),opCenterdot(v1,v2))#v1
 WM-only   x27  opCenterdot(opCenterdot(opCenterdot(v1,v2),v2),opCenterdot(v1,v2))#v2
@@ -63,7 +63,7 @@ WM-only   x44  opCenterdot(opCenterdot(opCenterdot(v1,v2),v1),opCenterdot(v1,v2)
 WM-only   x125  opCenterdot(v1,opCenterdot(v1,v2))#opCenterdot(v1,opCenterdot(v2,v2))
 WM-only   x23  opCenterdot(opCenterdot(v1,opCenterdot(v2,v2)),v1)#opCenterdot(v1,v2)
 WM-only   x35  opCenterdot(opCenterdot(v1,opCenterdot(v2,v2)),opCenterdot(v1,v2))#v1
-WM-only   x66  opCenterdot(opCenterdot(opCenterdot(v1,v1),v2),opCenterdot(v2,v1))#v2
+WM-only   x56  opCenterdot(opCenterdot(opCenterdot(v1,v1),v2),opCenterdot(v2,v1))#v2
 WM-only   x84  opCenterdot(opCenterdot(v1,opCenterdot(v1,v2)),opCenterdot(v2,v1))#v1
 WM-only   x56  opCenterdot(opCenterdot(v1,opCenterdot(v2,v2)),opCenterdot(v2,v1))#v1
 WM-only   x85  opCenterdot(opCenterdot(opCenterdot(v1,v1),v2),opCenterdot(v1,v2))#v2
@@ -75,7 +75,7 @@ WM-only   x116  opCenterdot(opCenterdot(v1,v1),v2)#opCenterdot(v2,opCenterdot(v2
 WM-only   x18  opCenterdot(opCenterdot(opCenterdot(v1,v1),v2),v2)#opCenterdot(v2,v1)
 WM-only   x29  opCenterdot(opCenterdot(v1,v2),v1)#opCenterdot(v1,opCenterdot(v2,v2))
 WM-only   x23  opCenterdot(opCenterdot(v1,v1),v2)#opCenterdot(opCenterdot(v2,v1),v2)
-WM-only   x393  opCenterdot(v1,opCenterdot(v1,v1))#opCenterdot(v2,opCenterdot(v2,v2))
+WM-only   x392  opCenterdot(v1,opCenterdot(v1,v1))#opCenterdot(v2,opCenterdot(v2,v2))
 WM-only   x86  opCenterdot(opCenterdot(v1,v1),v1)#opCenterdot(v2,opCenterdot(v2,v2))
 WM-only   x117  opCenterdot(v1,opCenterdot(v1,v2))#opCenterdot(v1,opCenterdot(v2,v1))
 WM-only   x97  opCenterdot(opCenterdot(v1,v1),v2)#opCenterdot(v2,opCenterdot(v1,v2))

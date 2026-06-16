@@ -64,9 +64,9 @@ McCuneAxioms__Associativity	213	213	213	Y	-	thvm=PROVED weights-exact
 McCuneAxioms__EqualityOfInverses	156	156	156	Y	-	thvm=PROVED weights-exact
 McCuneAxioms__InverseOfComposite	130	130	130	Y	-	thvm=PROVED weights-exact
 McCuneAxioms__InverseOfInverse	118	118	118	Y	-	thvm=PROVED weights-exact
-MeredithAxioms__AndAssociativity	64800	35310	2009	N	2010	thvm=RUNNING content-delta_wm-only=29496_thvm-only=6;post-axiom_nonax-wm=64798_nonax-thvm=35308_nonax-prefix=2007;weights-exact
+MeredithAxioms__AndAssociativity	64800	35891	6077	N	6078	thvm=RUNNING content-delta_wm-only=28915_thvm-only=6;post-axiom_nonax-wm=64798_nonax-thvm=35889_nonax-prefix=6075;weights-exact
 MeredithAxioms__Commutativity	6	6	6	Y	-	thvm=PROVED weights-exact
-MeredithAxioms__OrAssociativity	64800	36291	2009	N	2010	thvm=RUNNING content-delta_wm-only=28515_thvm-only=6;post-axiom_nonax-wm=64798_nonax-thvm=36289_nonax-prefix=2007;weights-exact
+MeredithAxioms__OrAssociativity	64800	36886	6077	N	6078	thvm=RUNNING content-delta_wm-only=27920_thvm-only=6;post-axiom_nonax-wm=64798_nonax-thvm=36884_nonax-prefix=6075;weights-exact
 RingAxioms__ZeroIsAbsorbing	447	447	447	Y	-	thvm=PROVED weights-exact
 RingWithIdentityAxioms__ZeroIsAbsorbing	462	462	462	Y	-	thvm=PROVED weights-exact
 RobbinsAxioms__DoubleNegation	-	-	-	-	-	SKIPPED_SLOW

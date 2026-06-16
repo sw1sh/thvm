@@ -247,6 +247,51 @@ class WmTrie:
             if not parent.children:
                 self.root = None
             return True
+        if len(parent.children) >= 2 and not isinstance(leaf, TNode):
+            # Middle-leaf removal (BO_ObjektEntfernen :1043-1046,
+            # SprunglistenBereinigenEinfach against the parent's smallest-symbol
+            # child).  No path-shrink, but the surviving smallest-symbol leaf
+            # `minc` (the most-recently-introduced variable child = a fresh hang
+            # whose ancestor jumps were head-prepended) must restore the
+            # AltesBlattPolieren parallel order against the OTHER surviving leaf
+            # siblings: in WM that fresh leaf arose as a split of a sibling's
+            # Sprung-compressed leaf, so each ancestor jump was spliced AFTER the
+            # sibling's own jump (:521-525, "hinter den Eintrag setzen").
+            leaves = [(s, c) for s, c in parent.children.items()
+                      if isinstance(c, TLeaf)]
+            removed_sym = leaf.pedge
+            # Restrict to a pure-variable branch (every surviving leaf child
+            # reached by a variable edge, as a single-operator theory makes)
+            # whose removed edge is a variable strictly between the smallest
+            # and largest surviving ids -- the genuine middle case.
+            ids = [s[1] for s, _ in leaves if s[0] == VAR]
+            pure_var = all(s[0] == VAR for s in parent.children)
+            if (len(leaves) >= 2 and removed_sym[0] == VAR and pure_var
+                    and ids and min(ids) < removed_sym[1] < max(ids)):
+                # NachbarBlatt = smallest WM symbol = largest mirror var id.
+                minc = max(leaves, key=lambda sc: sc[0][1])[1]
+                sib_leaves = [c for _, c in leaves if c is not minc]
+
+                def _sp(a, b):
+                    k = 0
+                    while k < len(a) and k < len(b) and a[k] == b[k]:
+                        k += 1
+                    return k
+                for nn in self._all_nodes():
+                    minc_js = [e for e in nn.exits if e.ziel is minc]
+                    if len(minc_js) != 1:
+                        continue
+                    mj = minc_js[0]
+                    mj_i = nn.exits.index(mj)
+                    later = [e for e in nn.exits
+                             if e.ziel in sib_leaves
+                             and nn.exits.index(e) > mj_i
+                             and _sp(mj.sub, e.sub) >= 1]
+                    if not later:
+                        continue
+                    best = max(later, key=lambda e: nn.exits.index(e))
+                    nn.exits.remove(mj)
+                    nn.exits.insert(nn.exits.index(best) + 1, mj)
         if len(parent.children) == 1:
             (sib,) = parent.children.values()
             if isinstance(sib, TLeaf):
