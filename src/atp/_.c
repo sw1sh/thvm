@@ -3657,16 +3657,22 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
     //
     // N is tiny (faces matching one subterm); insertion sort, stable on
     // equal keys (duplicates cannot occur -- one rec per (rule, dir)).
-    static u32 cand[ATP_RI_MAXCAND];
+    // `cand_key[k]` is the 64-bit sort key; `cand_face[k]` carries the
+    // FULL packed (rule | dir-bit) face so a rule index past the sort
+    // key's slot field is never truncated (rule ids run to several
+    // thousand, far past a 10-bit field).
+    static u64 cand_key[ATP_RI_MAXCAND];
+    static u32 cand_face[ATP_RI_MAXCAND];
     for (u32 k = 0; k < ncand; k++) {
       u32 packed = g_atp_ri_cand[k];
       u32 rule   = packed & ~ATP_RI_DIR_BIT;
       u32 rl     = (packed & ATP_RI_DIR_BIT) ? 1u : 0u;
       u32 slot_key = (rule << 1) | rl;
+      cand_face[k] = packed;
       if (s->use_wm_emission_order) {
         u32 ll = 0u, ch = 0u;
-        // Bit layout (high -> low): [unranked flag:1][arrival:13][ch:8]
-        // [slot_key:10].  Ranked faces (flag 0) sort before unranked
+        // Key layout (high -> low): [unranked flag:1][arrival:13][ch:8]
+        // [slot_key:full].  Ranked faces (flag 0) sort before unranked
         // (flag 1); ties on (arrival, ch) fall back to slot order.
         //
         // The rank is the DFS ARRIVAL of this equation face against the
@@ -3680,25 +3686,30 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
         if (atp_wmo_eq_tops_rank(s, s->r_trace[rule], rl, sub, &ll, &ch)) {
           if (ll > 0x1fffu) ll = 0x1fffu;
           if (ch > 0xffu)   ch = 0xffu;
-          cand[k] = (ll << 18) | (ch << 10) | (slot_key & 0x3ffu);
+          cand_key[k] = ((u64)ll << 32) | ((u64)ch << 24) | (u64)slot_key;
         } else {
-          cand[k] = (1u << 31) | (slot_key & 0x3ffu);
+          cand_key[k] = (1ull << 63) | (u64)slot_key;
         }
       } else {
-        cand[k] = slot_key;
+        cand_key[k] = (u64)slot_key;
       }
     }
     for (u32 a = 1u; a < ncand; a++) {
-      u32 v = cand[a];
+      u64 vk = cand_key[a];
+      u32 vf = cand_face[a];
       u32 b = a;
-      while (b > 0u && cand[b - 1u] > v) { cand[b] = cand[b - 1u]; b--; }
-      cand[b] = v;
+      while (b > 0u && cand_key[b - 1u] > vk) {
+        cand_key[b] = cand_key[b - 1u];
+        cand_face[b] = cand_face[b - 1u];
+        b--;
+      }
+      cand_key[b]  = vk;
+      cand_face[b] = vf;
     }
     for (u32 k = 0; k < ncand; k++) {
-      u32 key    = cand[k];
-      u32 slot_key = s->use_wm_emission_order ? (key & 0x3ffu) : key;
-      u32 rule   = slot_key >> 1;
-      u8  rl     = (u8)(slot_key & 1u);
+      u32 packed = cand_face[k];
+      u32 rule   = packed & ~ATP_RI_DIR_BIT;
+      u8  rl     = (packed & ATP_RI_DIR_BIT) ? 1u : 0u;
       Term pat   = rl ? s->rhs[rule] : s->lhs[rule];
       Term other = rl ? s->lhs[rule] : s->rhs[rule];
       RewriteSubst subst = {{0}};
