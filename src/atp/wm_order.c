@@ -653,12 +653,20 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
       // the equal-weight CPs born from those leaves (CombinatorAxioms
       // SKIToBCKW @1113: the S(SW)* vs S(SY)* sibling batch, where rule 564's
       // overlaps against the W-branch must precede the Y-branch, matching WM's
-      // CPNr/FIFO order).  Suppress the fresh jump for the function/function
-      // branch; keep it when a variable branch makes the jump load-bearing.
+      // CPNr/FIFO order).  The same mis-rank arises when both branch cells are
+      // VARIABLES: the two leaves sit on var children consulted (newest var
+      // first) before any jump exit, so the ancestor chain-node jump again
+      // does not gate their DFS order, and a head-inserted fresh jump only
+      // pulls the wider-prefix (distinct-var) subtree ahead of the
+      // narrower-prefix (repeated-var) one -- the MeredithAxioms And/Or
+      // Associativity @166 (rule)x((x.y) vs (x.x)) tops batch, where WM's
+      // CPNr/FIFO forms the repeated-var partner first.  Keep the fresh jump
+      // only for a MIXED function/variable branch, where it is load-bearing
+      // (WolframAxioms Commutativity / DoubleNegation prefix @91).
       u8 new_fun = (j < leaf->key_len) && !leaf->key[j].is_var;
       u8 old_fun = (j < old->key_len) && !old->key[j].is_var;
       if (start_pos < i && e_old == i + 1u && j > i + 1u
-          && !(new_fun && old_fun)) {
+          && (new_fun != old_fun)) {
         WmoEntry *fresh = (WmoEntry *)calloc(1, sizeof(WmoEntry));
         fresh->start = sn;
         fresh->sub = (WmoCell *)malloc((e_old - start_pos) * sizeof(WmoCell));

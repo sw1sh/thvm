@@ -2680,6 +2680,63 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-split-variable-variable-branch-no-fresh-jump");
+  {
+    // The strict-ancestor-first-chain-node fresh jump must ALSO be suppressed
+    // when the split branch cells (key[j], old->key[j]) are BOTH VARIABLES.
+    // A repeated tree variable (the old leaf's branch, e.g. f(v0,v0)) and a
+    // fresh one (the new leaf's, f(v0,v1)) reach their leaves via var children,
+    // consulted newest-var-first BEFORE any jump exit, so the ancestor
+    // chain-node jump never gates their DFS arrival order; head-inserting a
+    // fresh jump only pulls the wider-prefix (distinct-var) subtree ahead of
+    // the narrower-prefix (repeated-var) one.  That is the MeredithAxioms
+    // And/OrAssociativity @166 tops batch, where WM's CPNr/FIFO forms the
+    // repeated-var (x.x) partner before the distinct-var (x.y) one.  Same
+    // geometry as the function/function test above but the inner branch closes
+    // on v0 (repeated, old) vs v1 (fresh, new) instead of two constants:
+    //   branch = f(f(v0,a), v0)         leaf-found at depth 3
+    //   victim = f(f(v0,v1), f(v0,v0))  f(v0,v1) jumps at depth 1; branch = v0
+    //   split  = f(f(v0,v1), f(v0,v1))  splits victim; branch v0 (old) vs v1
+    // Only ONE entry reaches the chain node: the re-targeted survivor.  No
+    // fresh head jump.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    Term v0 = mk_v(0u), v1 = mk_v(1u);
+    Term faces[3] = {
+      mk_f(mk_f(v0, mk_a()), v0),                  // branch
+      mk_f(mk_f(v0, v1), mk_f(v0, v0)),            // victim
+      mk_f(mk_f(v0, v1), mk_f(v0, v1)),            // splitter
+    };
+    for (u32 k = 0; k < 3u; k++) {
+      s->lhs[k] = faces[k];
+      s->rhs[k] = mk_a();
+      s->r_orient[k] = 1u;
+      s->r_trace[k] = 820u + k;
+      s->n_rules++;
+      atp_wmo_insert_fact(s, k);
+    }
+    {
+      AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+      WmoCell cf; cf.sym = 3u; cf.is_var = 0u; cf.arity = 2u;
+      u8 il = 0;
+      WmoNode *d1 = (WmoNode *)wmo_kid_get(w->tree[0].root, &cf, &il);
+      CHECK(d1 != NULL && il == 0u);
+      // Find the chain node the f(v0,v1) survivor re-targets onto, then count
+      // entries reaching it: exactly ONE (the survivor), no fresh head jump.
+      u32 to_chain = 0;
+      WmoNode *chain = NULL;
+      for (WmoEntry *en = d1->exits; en != NULL; en = en->next)
+        if (!en->ziel_leaf && en->sub_len == 3u && en->sub[0].sym == 3u
+            && en->sub[1].is_var && en->sub[2].is_var) {
+          chain = (WmoNode *)en->ziel;
+          to_chain++;
+        }
+      CHECK(chain != NULL);
+      CHECK_EQ(to_chain, 1u);
+    }
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-removal-collapse-exit-head");
   {
     // Removal-avalanche exit-order corner (BO_ObjektEntfernen Schrumpfen,
