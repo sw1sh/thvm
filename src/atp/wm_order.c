@@ -924,9 +924,10 @@ static void wmo_tree_remove(WmoTree *t, const WmoCell *key, u32 key_len,
 
 // Cell-level unification state: tree vars (stored side, shared along a
 // path) and query vars in two binding tables.  Bindings map a var to a
-// (cells, len) subterm of the OTHER side -- enough for an occurs-free
-// small-scale unifier.  To keep this simple and allocation-free we
-// bind to opaque subterm slices and compare structurally on demand.
+// (cells, len) subterm of the OTHER side.  The tables form a union-find:
+// a var slot may point to another var, so a representative is reached by
+// following the chain (wmo_deref, modelling the spec's walk_b deref in
+// tools/baselines/wm_order_sim/wm_order_sim2.py:121-123).
 
 typedef struct {
   const WmoCell *cells;
@@ -939,35 +940,47 @@ typedef struct {
   WmoBind qvar[WMO_MAX_VARS + 1u];   // query vars by canonical id
 } WmoUnif;
 
+// Follow a variable's binding chain to its representative.  Updates
+// *cells/*len/*side in place to the deref'd term: either an unbound
+// variable (single var cell) or a non-var subterm.  A var whose slot is
+// bound to a multi-cell (function) subterm stops there; one bound to
+// another single var follows the chain.  WMO_MAX_VARS*2 + 1 iterations
+// bound the walk (the union-find has finitely many distinct var slots).
+static void wmo_deref(WmoUnif *u, const WmoCell **cells, u32 *len, u8 *side) {
+  u32 guard = 2u * (WMO_MAX_VARS + 1u) + 1u;
+  while (guard-- != 0u && (*cells)->is_var && *len == 1u) {
+    WmoBind *slot = (*side == 0u) ? &u->qvar[(*cells)->sym]
+                                  : &u->tvar[(*cells)->sym];
+    if (slot->cells == NULL) return;            // unbound representative
+    *cells = slot->cells + slot->off;
+    *len = slot->len;
+    *side = slot->side;
+  }
+}
+
 // Structural unification of two cell slices under the binding tables.
 // Depth-bounded; returns 1 on success (tables updated), 0 on failure
 // (tables may be partially updated -- callers copy-on-descend).
 static u8 wmo_unify_cells(const WmoCell *a, u32 alen, u8 aside,
                           const WmoCell *b, u32 blen, u8 bside,
-                          WmoUnif *u, u32 fuel);
-
-static u8 wmo_unify_var(WmoBind *slot, const WmoCell *t, u32 tlen, u8 tside,
-                        WmoUnif *u, u32 fuel) {
-  if (slot->cells != NULL) {
-    return wmo_unify_cells(slot->cells + slot->off, slot->len, slot->side,
-                           t, tlen, tside, u, fuel);
-  }
-  slot->cells = t; slot->off = 0; slot->len = tlen; slot->side = tside;
-  return 1u;
-}
-
-static u8 wmo_unify_cells(const WmoCell *a, u32 alen, u8 aside,
-                          const WmoCell *b, u32 blen, u8 bside,
                           WmoUnif *u, u32 fuel) {
   if (fuel == 0u) return 0u;
-  if (a->is_var) {
+  // Deref both sides to their union-find representatives before deciding
+  // (the spec's walk_b on each operand, wm_order_sim2.py:131).
+  wmo_deref(u, &a, &alen, &aside);
+  wmo_deref(u, &b, &blen, &bside);
+  u8 a_is_var = a->is_var && alen == 1u;
+  u8 b_is_var = b->is_var && blen == 1u;
+  if (a_is_var && b_is_var && aside == bside && a->sym == b->sym) return 1u;
+  if (a_is_var) {
     WmoBind *slot = (aside == 0u) ? &u->qvar[a->sym] : &u->tvar[a->sym];
-    if (b->is_var && aside == bside && a->sym == b->sym) return 1u;
-    return wmo_unify_var(slot, b, blen, bside, u, fuel - 1u);
+    slot->cells = b; slot->off = 0u; slot->len = blen; slot->side = bside;
+    return 1u;
   }
-  if (b->is_var) {
+  if (b_is_var) {
     WmoBind *slot = (bside == 0u) ? &u->qvar[b->sym] : &u->tvar[b->sym];
-    return wmo_unify_var(slot, a, alen, aside, u, fuel - 1u);
+    slot->cells = a; slot->off = 0u; slot->len = alen; slot->side = aside;
+    return 1u;
   }
   if (a->sym != b->sym || a->arity != b->arity) return 0u;
   u32 ai = 1u, bi = 1u;
@@ -977,6 +990,16 @@ static u8 wmo_unify_cells(const WmoCell *a, u32 alen, u8 aside,
                          u, fuel - 1u)) return 0u;
     ai = ae; bi = be;
   }
+  return 1u;
+}
+
+static u8 wmo_unify_var(WmoBind *slot, const WmoCell *t, u32 tlen, u8 tside,
+                        WmoUnif *u, u32 fuel) {
+  if (slot->cells != NULL) {
+    return wmo_unify_cells(slot->cells + slot->off, slot->len, slot->side,
+                           t, tlen, tside, u, fuel);
+  }
+  slot->cells = t; slot->off = 0; slot->len = tlen; slot->side = tside;
   return 1u;
 }
 

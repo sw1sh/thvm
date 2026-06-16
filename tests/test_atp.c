@@ -2339,6 +2339,53 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-emission-order-tops-rank-repeated-var-unify-no-miss");
+  {
+    // MeredithAxioms And/OrAssociativity @826.  The tops-rank DFS
+    // (wmo_tops_rank) ranks a new fact's tops overlaps by the discrim-tree
+    // ARRIVAL of the partner leaf, and the equal-weight CP heap breaks ties
+    // on that arrival.  When the partner leaf's LHS unifies with the query
+    // subterm only by COLLAPSING several variables (a leaf that repeats one
+    // variable against a query whose corresponding positions hold distinct
+    // variables), the union-find binds query vars to each other and a leaf
+    // var to a query var, then re-encounters them.  The old flat-slot
+    // unifier compared a slot's bound term WITHOUT following the binding
+    // chain to its representative, so a repeated-variable overlap drove the
+    // qvar<->tvar chain in a circle and exhausted its recursion fuel --
+    // returning a SPURIOUS unify failure.  The leaf was then dropped from
+    // the arrival list (rank-miss, 0x3fff fallback) and the repeated-var CP
+    // mis-sorted behind a distinct-var partner.  wmo_deref follows the chain
+    // to a representative before each decision (the spec's walk_b,
+    // tools/baselines/wm_order_sim/wm_order_sim2.py:121-123), so the
+    // genuinely-unifiable repeated-var partner is found with a real arrival
+    // rank.  Here the stored rule f(f(x,x),x) repeats x three times; the new
+    // fact's subterm f(f(y,z),w) holds distinct vars at those positions and
+    // unifies by collapsing y=z=w, exercising exactly that chain.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_emission_order(s, 1u);
+    // Stored rule: f(f(x,x), x) -> a  (the repeated-variable partner leaf).
+    s->lhs[0] = mk_f(mk_f(mk_v(VAR_x), mk_v(VAR_x)), mk_v(VAR_x));
+    s->rhs[0] = mk_a();
+    s->r_orient[0] = 1u; s->r_trace[0] = 700u; s->n_rules++;
+    atp_wmo_insert_fact(s, 0u);
+    AtpWmOrder *w0 = (AtpWmOrder *)s->wmo;
+    u32 misses_before = w0->rank_misses;
+    // New fact: f(f(y,z), w) -> a.  Its LHS at the root unifies with the
+    // stored rule's LHS only by collapsing y=z=w onto the leaf's repeated x.
+    s->lhs[1] = mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u));
+    s->rhs[1] = mk_a();
+    s->r_orient[1] = 1u; s->r_trace[1] = 701u; s->n_rules++;
+    atp_wmo_insert_fact(s, 1u);
+    AtpAddedRange added = {1u, 1u, 0u};
+    (void)thvm_atp_generate_cps(s, added);
+    AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+    // The repeated-variable partner unifies, so the tops DFS must find it
+    // (no rank-miss); the old non-dereferencing unifier spuriously failed
+    // and spiked the miss counter.
+    CHECK_EQ(w->rank_misses, misses_before);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-ir-victim-equation-before-rule");
   {
     // WM IR_InterreduktionLinks runs GMInterred (equation victims) BEFORE
