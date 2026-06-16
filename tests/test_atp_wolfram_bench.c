@@ -833,10 +833,13 @@ int main(int argc, char **argv) {
   {
     const char *wm = getenv("THVM_ATP_WALDMEISTER");
     if (wm != NULL && wm[0] != '\0' && wm[0] != '0') {
-      // selection_ratio=201 (one FIFO pick per 201 weight picks).
-      // Sweep with AMW=20 (ddf6206b): SR=181 -> 15.5s, SR=201 -> 14.5s,
-      // SR=211 -> 15.3s.  thm/wolfram/andassoc unchanged.
-      // THVM_ATP_SELECTION_RATIO env overrides.
+      // FIFO interleave OFF (WM's default `-pq` carries no
+      // `interleave=` token -> thresholdCP 0 -> CPdimension never fires;
+      // see atp_cp_fifo_dimension).  selection_ratio sets fifo_modulo for
+      // the THVM_ATP_FIFO_THRESHOLD env-restore path only (a caller that
+      // wants a `-pq interleave=f.h` ratio supplies both knobs); with the
+      // faithful default threshold 0 it is inert.  THVM_ATP_SELECTION_RATIO
+      // env overrides the modulo.
       {
         const char *sr = getenv("THVM_ATP_SELECTION_RATIO");
         u32 ratio = (sr != NULL && sr[0] != '\0')

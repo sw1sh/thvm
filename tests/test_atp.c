@@ -405,6 +405,43 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-preset-fifo-dimension-off");
+  {
+    // WM's default proof config (the one wmcli runs) carries no
+    // `-pq interleave=` token, so PI_ParseInterleave fails and the
+    // CP-queue uses moduloCP=1, thresholdCP=0 (KPVerwaltung.c:1216-1219):
+    // CPdimension() == AnzAktivierterRE % 1 < 0 is FALSE always -- WM
+    // NEVER takes a FIFO pick.  Under use_wm_intake_order thvm mirrors
+    // this: the queue is a pure smallest-weight heap, so the heavy
+    // oldest CP is deferred to LAST, never surfaced at a modulo window
+    // (contrast atp/select-cp-fifo-interleave, the legacy non-WM path,
+    // which DOES surface it at selection 11).  Same fixture as that
+    // test; here the FIFO dimension stays off for all 12 selections.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_intake_order(s, 1u);
+    Term heavy = mk_f(mk_f(mk_a(), mk_a()), mk_f(mk_a(), mk_a()));
+    thvm_atp_cp_set(s, 0, heavy, mk_a());          // oldest + heaviest
+    for (u32 i = 1; i <= 11; i++) {
+      thvm_atp_cp_set(s, i, mk_a(), mk_a());       // light
+      s->cp_trace[i] = ATP_TRACE_NONE;
+    }
+    s->cp_trace[0] = ATP_TRACE_NONE;
+    s->n_cps = 12;
+    thvm_atp_cp_reheapify(s);
+
+    Term lo = 0, ro = 0;
+    // All 11 light CPs pop first (pure weight); the heavy oldest CP is
+    // last -- the FIFO dimension never fires at selection 11.
+    for (u32 i = 0; i < 11; i++) {
+      CHECK(thvm_atp_select_cp(s, &lo, &ro));
+      CHECK_EQ(term_ext(lo), LAB_a);
+    }
+    CHECK(thvm_atp_select_cp(s, &lo, &ro));
+    CHECK_EQ(term_tag(lo), TAG_CTR);
+    CHECK_EQ(term_ext(lo), LAB_f);                 // heavy CP only now
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/select-cp-shifts-tail-densely");
   {
     // After one pop, the remaining items should occupy slots [0..n-1).

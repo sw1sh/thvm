@@ -7488,43 +7488,56 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
 // in a K-D heap with TWO keys -- a weight key and a FIFO insertion
 // key -- and `CPdimension` returns the FIFO dimension for `thresholdCP`
 // of every `moduloCP` selections, the weight dimension otherwise.
-// Waldmeister's problem analysis picks the ratio from {1:10, 1:50,
-// 1:100, 1:200} (YFiles.c `Schrittweiten`); this is the most-fair
-// setting, 1 FIFO pick per 11 selections.
 //
-// A pure smallest-weight heap can starve -- it keeps picking light
-// CPs while a heavier CP sits unselected -- so the periodic FIFO pick
-// is the fairness lever.  Waldmeister places the FIFO pick at the
-// START of each modulo window; the legacy thvm path places it at the
-// END (`% modulo == modulo-1`) keyed on the raw selection count, which
-// the weight-order unit tests rely on.
+// CRUCIAL WM fact: the FIFO interleave is OFF in WM's default proof
+// configuration -- the one wmcli runs and the alignment matrix compares
+// against.  WM's `CPdimension()` (INF/KPVerwaltung.c:582-606) returns
+// the FIFO dimension when `AnzAktivierterRE % moduloCP < thresholdCP`,
+// and (moduloCP, thresholdCP) are derived from the `-pq interleave=f.h`
+// token: `moduloCP = f + h`, `thresholdCP = f` (KPVerwaltung.c:1210).
+// WM's default `-pq` is "heap:e1:domain=30:statistics=on"
+// (RUN/Parameter.c:210-211) -- it carries NO `interleave=` token, so
+// `PI_ParseInterleave` returns FALSE (WASIC/ParseInterleave.c:58-86) and
+// the else-branch sets `moduloCP = 1, thresholdCP = 0`
+// (KPVerwaltung.c:1216-1219).  With thresholdCP == 0 the test
+// `AnzAktivierterRE % 1 < 0` is FALSE at every selection: WM NEVER takes
+// a FIFO pick -- the queue is a pure smallest-weight heap.  The analysis
+// ratios {1:10,1:50,1:100,1:200} (YFiles.c `Schrittweiten`) only apply
+// when the spec or a `-pq interleave=` override requests them, which the
+// NotableTheorems corpus does not.
 //
-// CRUCIAL difference from WM (and the source of the AC-theory deep
-// forks): WM's `CPdimension()` keys the FIFO-vs-weight switch on
-// `AnzAktivierterRE` -- the count of selected CPs that BECAME a rule
-// or equation (KPVerwaltung.c:584) -- NOT the raw selection count.  A
-// pop that joins / perm-subsumes / pop-subsumes away never advances
-// the schedule.  On AC-monoid theories WM keeps ~30-45 rules over
-// hundreds of selections, so with the analysis-chosen 1:200 interleave
-// the FIFO dimension (n_activated_re % 201 < 1) fires only at
-// activation 0 and never perturbs the mid-run weight order: WM does a
-// pure weight selection there.  thvm's select-count keying instead
-// fired a spurious FIFO pick at selection 201/402 that landed on a
-// stale low-cp_seq CP, forking the trajectory (AbelianMcCune Assoc,
-// Ring ZeroIsAbsorbing, Huntington DN, and the rest of the 12 AC rows).
+// So the faithful WM preset takes NO FIFO pick (thresholdCP 0).  thvm's
+// hardcoded threshold 1 fired a spurious FIFO pick at `n_activated_re ==
+// 0` (every run) and again at each `n_activated_re == modulo`; on a
+// large-rule-set saturation (CombinatorAxioms SKIToBCKW, ~201 activations
+// by selection 303) that mid-run FIFO grabbed the oldest stale CP and
+// forked the trajectory at selection 303.  On the small-rule-set AC and
+// Wolfram rows the only FIFO pick was at activation 0, which happened to
+// coincide with the weight root, so they stayed identical either way --
+// dropping the pick keeps them identical and advances SKIToBCKW.
+//
+// The legacy (non-WM) path keeps the raw-selection-count end-of-window
+// behaviour the weight-order unit tests pin.
 #define ATP_CP_FIFO_MODULO     11u
 #define ATP_CP_FIFO_THRESHOLD   1u
 
-// WM `CPdimension()` (INF/KPVerwaltung.c:582-606): returns 1 (FIFO
-// dimension) when `AnzAktivierterRE % moduloCP < thresholdCP`.  Under
-// the faithful WM preset (use_wm_intake_order) thvm keys the switch on
-// `n_activated_re` with WM's start-of-window phase; otherwise it keeps
-// the legacy raw-selection-count end-of-window behaviour the weight-
-// order unit tests pin.
+// WM `CPdimension()` under the faithful WM preset (use_wm_intake_order):
+// thresholdCP is 0 (no `-pq interleave=` in the default config), so the
+// FIFO dimension never fires.  Outside the preset thvm keeps the legacy
+// raw-selection-count interleave the weight-order unit tests rely on.
 static inline u8 atp_cp_fifo_dimension(const AtpState *s) {
   u32 modulo = s->fifo_modulo ? s->fifo_modulo : ATP_CP_FIFO_MODULO;
   if (s->use_wm_intake_order) {
-    return (s->n_activated_re % modulo) < ATP_CP_FIFO_THRESHOLD;
+    // thresholdCP == 0 in WM's default `-pq`: FIFO dimension off.  The
+    // THVM_ATP_FIFO_THRESHOLD env knob restores a non-zero thresholdCP
+    // for callers that request a `-pq interleave=` ratio.
+    static int thr = -2;
+    if (thr == -2) {
+      const char *e = getenv("THVM_ATP_FIFO_THRESHOLD");
+      thr = (e != NULL && e[0] != '\0') ? (int)strtol(e, NULL, 10) : 0;
+    }
+    if (thr <= 0) return 0u;
+    return (s->n_activated_re % modulo) < (u32)thr;
   }
   return (modulo - ATP_CP_FIFO_THRESHOLD) <= (s->cp_select_count % modulo);
 }
