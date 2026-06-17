@@ -17,6 +17,18 @@ static Term mk_a(void) { return term_new_ctr(LAB_a, NULL, 0); }
 static Term mk_f(Term x, Term y) { Term cs[2] = {x, y}; return term_new_ctr(LAB_f, cs, 2); }
 static Term mk_i(Term x)         { Term cs[1] = {x};    return term_new_ctr(LAB_i, cs, 1); }
 
+// Minimal recursive term printer for the Meredith @6078 isolation test.
+static void mer_pt(FILE *fp, Term t) {
+  if (t == 0) { fputs("()", fp); return; }
+  u32 tag = term_tag(t);
+  if (tag == TAG_FVR) { fprintf(fp, "v%u", term_ext(t)); return; }
+  u32 n = term_ctr_n(t);
+  if (n == 0u) { fprintf(fp, "c%u", term_ext(t)); return; }
+  fprintf(fp, "f(");
+  for (u32 i = 0; i < n; i++) { if (i) fputc(',', fp); mer_pt(fp, term_ctr_at(t, i)); }
+  fputc(')', fp);
+}
+
 static u32 dummy_weights   [5] = {0, 1, 0, 1, 1};
 static u32 dummy_precedence[5] = {0, 2, 4, 3, 1};
 static const KboConfig DUMMY_CFG = {
@@ -177,6 +189,39 @@ static int gjt_differential(AtpState *s, Term l, Term r,
 
 int main(void) {
   thvm_init();
+
+  // Meredith @6078 isolation: does thvm's CP-gen produce the 2-var CP
+  // dot(dot(a,a),b) # dot(b,dot(b,a)) from rule126 x rule36?  (Term-anchored,
+  // confound-free: no slots/counters/full-run.)  WM forms it (cp 37130); the
+  // matrix shows thvm's heap lacks it at pick 6078.
+  TEST_BEGIN("atp/meredith-6078-126x36-superposition");
+  {
+    #define V(id) term_new(0, TAG_FVR, (id), 0)
+    // rule 126: f(v0, f(f(v1,v2), f(f(v2,v1), v0))) -> f(v0,v0)
+    Term l126 = mk_f(V(0), mk_f(mk_f(V(1),V(2)), mk_f(mk_f(V(2),V(1)), V(0))));
+    Term r126 = mk_f(V(0), V(0));
+    // rule 36: f(v0, f(f(v0,v1), f(v1,v2))) -> f(v1,v0)
+    Term l36  = mk_f(V(0), mk_f(mk_f(V(0),V(1)), mk_f(V(1),V(2))));
+    Term r36  = mk_f(V(1), V(0));
+    Term lhs[2] = { l126, l36 };
+    Term rhs[2] = { r126, r36 };
+    CriticalPair out[256] = {{0, 0}};
+    u32 n = thvm_critical_pairs(lhs, rhs, 2, out, 256);
+    // Confound-free isolation of Meredith @6078: WM forms the 2-var CP
+    // f(f(a,a),b) # f(b,f(b,a)) from these two rules (cp 37130), but thvm's
+    // full CP enumeration here produces NONE.  Open fork: thvm cp_visit
+    // incomplete (bug) vs the 2-var not a standard 126x36 superposition (WM
+    // mechanism).  Verbose dump gated behind THVM_MER6078 to keep the suite quiet.
+    if (getenv("THVM_MER6078")) {
+      fprintf(stderr, "MER6078: thvm_critical_pairs(126,36) = %u CPs:\n", n);
+      for (u32 k = 0; k < n; k++) {
+        fprintf(stderr, "  CP%u: ", k);
+        mer_pt(stderr, out[k].lhs); fputs(" # ", stderr); mer_pt(stderr, out[k].rhs);
+        fprintf(stderr, "  (pos_len=%u)\n", out[k].pos_len);
+      }
+    }
+    #undef V
+  }
 
   TEST_BEGIN("atp/init-and-free");
   {

@@ -249,3 +249,32 @@ solid: thvm misses forming the 2-var CP TERM in the 6078 epoch (CPFORM gap
 15233->44563) while WM forms it.  NEXT: gate the cp_visit trace by the rule
 TERMS (not slots), or add parent-TERMS to the cpgen/CPFORM log, to reliably pin
 the missed overlap; then fix cp_visit/thvm_unify; verify vs matrix.
+
+## MAJOR REFRAME (2026-06-17, confound-free unit test): likely NOT a thvm bug
+
+Added a confound-free isolation test (tests/test_atp.c
+"atp/meredith-6078-126x36-superposition"): construct rule126 + rule36 by their
+TERMS, call thvm_critical_pairs (FULL enumeration -- both directions, all
+positions, no slots/counters/run/slot-reuse).  Result: **14 CPs, NONE is the
+2-var CP** f(f(a,a),b) # f(b,f(b,a)).  Hand-verified the standard superpositions
+(36[1] x 126 -> thvm CP8; 126[1,1] x 36 -> another) -- none yields the 2-var.
+
+=> The 2-var CP is NOT a standard LHS x LHS critical pair of rules 126 and 36 as
+extracted.  thvm's CP-gen (cp_visit/thvm_unify) is CORRECT here (consistent with
+the 66 byte-identical theorems that exercise this exact path).  So Meredith @6078
+is most likely NOT a thvm CP-generation bug.
+
+WM's cp 37130 ("parents 126 and 36", RAW = 2-var) therefore arises from a
+mechanism that differs from the standard 126x36 superposition: candidates --
+(i) WM's parents 126/36 are INTERREDUCED VARIANTS (different terms than at
+"added as new rule 126/36"); (ii) a non-standard overlap (WM superposes where
+thvm correctly does not, e.g. an equation/unfailing face if 126 or 36 is treated
+as an E-equation); (iii) re-overlap after rule modification.  This re-opens
+whether byte-parity here is even the right target (WM may form a CP standard
+completion does not).
+
+NEXT: find WM's ACTUAL formation of cp 37130 -- dump rules 126/36's terms AT
+cp-37130-time (not add-time) from the instrumented ELProver, and check whether
+the 2-var is a standard CP of THOSE terms; if still not, WM uses a non-standard
+overlap and the divergence is WM-side (document, likely unfixable faithfully
+without reproducing WM's exact mechanism).
