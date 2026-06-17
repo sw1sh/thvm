@@ -533,8 +533,26 @@ static void wmo_chain_prepend(WmoLeaf *leaf, u32 trace, u8 face) {
 // per construction event and never merges (AltesBlattPolieren issues a
 // fresh parallel even when a structurally equal jump to a different leaf
 // is present).
+// Gated jump-construction trace (env THVM_WMO_CT): logs each jump's start
+// node depth, target leaf rule-trace, and emission mechanism so the
+// head-prepend vs AltesBlattPolieren-splice routing for a specific rule
+// pair (e.g. SKIToBCKW @1868 W/Y) can be inspected.  Off by default.
+static void wmo_ct(const char *mech, WmoNode *start, void *ziel, u8 ziel_leaf) {
+  static int on = -1;
+  if (on < 0) on = (getenv("THVM_WMO_CT") != NULL) ? 1 : 0;
+  if (!on) return;
+  u32 tr = 0xffffffffu;
+  if (ziel_leaf && ziel != NULL) {
+    WmoLeaf *l = (WmoLeaf *)ziel;
+    if (l->n_chain > 0u) tr = l->chain[0].trace;
+  }
+  fprintf(stderr, "WMOCT %s depth=%u leaf=%u trace=%u\n", mech,
+          wmo_node_depth(start), ziel_leaf, tr);
+}
+
 static WmoEntry *wmo_jump_prepend(WmoNode *start, const WmoCell *sub,
                                   u32 sub_len, void *ziel, u8 ziel_leaf) {
+  wmo_ct("PREPEND", start, ziel, ziel_leaf);
   WmoEntry *e = (WmoEntry *)calloc(1, sizeof(WmoEntry));
   e->start = start;
   e->sub = (WmoCell *)malloc(sub_len * sizeof(WmoCell));
@@ -726,9 +744,11 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
       // And/OrAssoc @340 R27 jump start_pos=2 i=4 j=5) is a genuine parallel
       // and goes after the survivor, matching WM's CPNr/FIFO arrival.
       if (start_pos < i && e_new < e_old && i - start_pos == 1u) {
+        wmo_ct("POLIER-PAR-HEAD", sn, leaf, 1u);
         par->next = sn->exits;
         sn->exits = par;
       } else {
+        wmo_ct("POLIER-PAR-AFTER", sn, leaf, 1u);
         par->next = surv->next;
         surv->next = par;
       }
@@ -772,6 +792,8 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
       // (WolframAxioms Commutativity / DoubleNegation prefix @91).
       u8 new_fun = (j < leaf->key_len) && !leaf->key[j].is_var;
       u8 old_fun = (j < old->key_len) && !old->key[j].is_var;
+      wmo_ct((start_pos < i && e_old == i + 1u && j > i + 1u && (new_fun != old_fun))
+             ? "POLIER-FRESH-HEAD" : "POLIER-ELSE-RETARGET", sn, leaf, 1u);
       if (start_pos < i && e_old == i + 1u && j > i + 1u
           && (new_fun != old_fun)) {
         WmoEntry *fresh = (WmoEntry *)calloc(1, sizeof(WmoEntry));

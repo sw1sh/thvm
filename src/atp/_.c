@@ -15174,8 +15174,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     if (batch_trace < 0) batch_trace = (getenv("THVM_ATP_BATCH_TRACE") != NULL) ? 1 : 0;
     for (u32 k = 0; k < n_big; k++) {
       if (batch_trace)
-        fprintf(stderr, "BATCH f=%u i=%u j=%u i_or=%u j_or=%u combo=%u key=%llu\n",
-                f, big[k].i, big[k].j, s->r_orient[big[k].i], s->r_orient[big[k].j],
+        fprintf(stderr, "BATCH f=%u i=%u j=%u itr=%u jtr=%u i_or=%u j_or=%u combo=%u key=%llu\n",
+                f, big[k].i, big[k].j, s->r_trace[big[k].i], s->r_trace[big[k].j],
+                s->r_orient[big[k].i], s->r_orient[big[k].j],
                 big[k].combo, (unsigned long long)big[k].key);
       pushed += atp_push_cps_traced(s, &big[k].cp, 1u,
                                     s->r_trace[big[k].i],

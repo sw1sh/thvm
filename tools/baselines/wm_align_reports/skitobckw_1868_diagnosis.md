@@ -62,7 +62,82 @@ so thvm ranks the Y-rule (141) before the W-rule (143).  WM's DSBaum retrieval
 order has W's rule (140) before Y's rule (138).  => `wmo_tops_rank` walks the
 discrimination tree in a different order than WM for this configuration.
 
-## BLOCKER for the fix
+## Deeper: it is a jump-exit (Sprungausgaenge) ordering anomaly
+
+`wmo_tops_rank` -> `wmo_dfs` (wm_order.c:1219): the arrival order is the DFS
+order.  The W-rule and Y-rule differ by a concrete symbol (W=C8, Y=C9) at a
+branch position where eq-17's query has a VARIABLE.  At a var-query node, wmo_dfs
+follows var children (descending index) THEN **jump exits `n->exits` in list
+order** (1271).  So the W/Y order is the jump-exit list order at that node.
+
+`n->exits` is **head-insert** (newest first; RumpfSprungeintragSetzen head-insert,
+wm_order.c:368-384, "head = consulted first").  thvm slots: W-rule=143, Y-rule=141.
+143 was added AFTER 141, so head-insert SHOULD prepend W's jump last => W at head
+=> W before Y (matching WM).  But thvm emits **Y before W** -- an anomaly: either
+the W jump was not head-inserted at that node, or a removal-collapse reissue
+(wmo_sprung_reissue_cb / wmo_middle_reissue_cb) reordered the list.  This is the
+exact Sprungausgaenge family the 12 fixes addressed; a residual is latent here.
+
+## Drilled to the exact function: wmo_altes_blatt_polieren
+
+The W/Y jump order is set in `wmo_altes_blatt_polieren` (wm_order.c:668) /
+`wmo_jump_prepend` (:536).  This function ALREADY handles a W/Y sibling batch
+(its else-branch comment cites SKIToBCKW @1113: "rule 564's overlaps against the
+W-branch must precede the Y-branch, matching WM's CPNr/FIFO order") -- but that
+path assumes both-function leaves sit on **exact-symbol children**
+(MitSelbemSymbolAb), so "the ancestor's chain-node jump never gates their
+relative DFS order" and it deliberately adds NO fresh jump (keeps `new_fun !=
+old_fun` mixed-only).
+
+**@1868 is the uncovered case**: here W/Y are reached via var-query JUMP EXITS
+(wmo_dfs :1271), so the jump-list order DOES gate them -- the @1113 assumption
+fails.  thvm emits Y-before-W; WM needs W-before-Y.  So either the W jump was
+routed through the polieren splice-after-model (landing after Y) when it should
+head-prepend, or a reissue reordered it.
+
+## CONSTRUCTION TRACE RESULT (THVM_WMO_CT): W-rule has NO jumps
+
+Ran SKIToBCKW c1 with THVM_WMO_CT + (trace-augmented) BATCH.  eq-17=fact f=155
+(trace 2373); W-rule=slot 143 (trace 2087), Y-rule=slot 141 (trace 2072).
+
+* Y-rule (2072): 5 jump constructions -- `WMOCT PREPEND depth={1,3,5,6,7}`.
+* W-rule (2087): **ZERO** jump constructions (no PREPEND, no POLIER-PAR, no
+  POLIER-FRESH, no else-retarget).
+
+So the W-rule's leaf has no jump exits at all -> it is never placed in any
+node's `n->exits`, so the var-query DFS reaches it only after Y's jumps fire ->
+Y-before-W.  WM gives the W jump (W-before-Y), thvm skips it.
+
+The likely culprit is the else-branch fresh-jump guard (wm_order.c:795-796):
+
+    if (start_pos < i && e_old == i + 1u && j > i + 1u && (new_fun != old_fun))
+
+`(new_fun != old_fun)` SKIPS the fresh jump when both branch cells are functions
+(W=C8, Y=C9 are both concrete) -- correct for @1113 (leaves on exact-symbol
+children, jump doesn't gate order) but WRONG for @1868 where W/Y are gated by
+the jump list.  The guard needs to distinguish @1868 (needs the jump) from
+@1113/Meredith@166 (must not have it).
+
+## NEXT STEP: refine the fresh-jump guard
+Find what distinguishes the @1868 tree config (W/Y gated by jumps) from @1113
+(W/Y on exact-symbol children) at this `wmo_altes_blatt_polieren` call -- likely
+whether the leaves actually become exact-symbol children vs jump-reachable at sn.
+Refine the `(new_fun != old_fun)` condition (or add the missing jump for the
+gated case), then VERIFY against the full matrix.  Keep @1113/@303/Meredith@166
+byte-identical.
+
+## (obsolete) earlier next step
+Add a construction trace at wmo_jump_prepend + the polieren splice sites
+(:702-734 if-branch, :766-786 else-branch) logging (start node, target leaf's
+rule trace, mechanism, resulting head/after-model position) for the W (slot 143)
+and Y (slot 141) jumps at the gating node.  Determine which mechanism each took
+and why W lands after Y.  Write a targeted condition (analogous to the @1113
+handling but for the var-query-jump case) and VERIFY against the full matrix
+(66 byte-identical + SKIToBCKW/Meredith firstdivs via align.py) -- that matrix IS
+the regression net, so WM's runtime tree is NOT strictly required for a
+test-driven fix.  Guard against regressing @1113 / @303 / Meredith @166.
+
+## BLOCKER for the fix (superseded by the NEXT STEP above for the jump-order path)
 
 The fix needs WM's discrimination-tree traversal order as ground truth, but the
 source-built ELProver goal-reduces SKIToBCKW (cannot reach the eq-17 batch to
