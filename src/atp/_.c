@@ -833,6 +833,22 @@ static void atp_dbg_print_term(FILE *fp, Term t) {
   fprintf(fp, "?%u/%u", tag, term_ext(t));
 }
 
+// Gated classification-order trace (env THVM_ATP_CP_FORM_TRACE).  Emits
+// one CPFORM line per CP at the moment cp_seq is stamped, so thvm's
+// CP-classification order can be aligned against Waldmeister's verbose
+// `... added to SUE: w, age` sequence and the first cross-batch
+// age-order divergence localized.  Off by default; one cached env probe.
+static void atp_cp_form_trace(u32 seq, u32 w, Term lhs, Term rhs) {
+  static int on = -1;
+  if (on < 0) on = (getenv("THVM_ATP_CP_FORM_TRACE") != NULL) ? 1 : 0;
+  if (!on) return;
+  fprintf(stderr, "CPFORM seq=%u w=%u lhs=", seq, w);
+  atp_dbg_print_term(stderr, lhs);
+  fprintf(stderr, " rhs=");
+  atp_dbg_print_term(stderr, rhs);
+  fputc('\n', stderr);
+}
+
 #ifdef THVM_ATPFT_RULES
 // Stage 4 verification probe (env THVM_ATPFT_VERIFY=1).  After every
 // rule slot k is written, re-convert the live Term pair through the
@@ -7334,6 +7350,7 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
                  :                        0u;
   u32 seq        = s->cp_seq_next++;
   s->cp_seq[i]   = seq;
+  atp_cp_form_trace(seq, cp_nodes, lhs, rhs);
   s->n_cps++;
   atp_cp_sift_up(s, i);
 #ifdef ATP_FV_INDEX
@@ -7583,6 +7600,7 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
                                                               s->w2_mode)
                   :                        0u;
   s->cp_seq[i]    = s->cp_seq_next++;
+  atp_cp_form_trace(s->cp_seq[i], cp_nodes, lhs, rhs);
   // No THVM_ATPFT_CPQ mirror: the FT queue's slot-occupied invariant
   // tracks cp_packed[i], and a deferred slot is exactly the NULL case
   // (atp_cp_ft_clear / _move are NULL-idempotent).
