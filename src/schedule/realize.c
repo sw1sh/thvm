@@ -54,9 +54,9 @@ static void mark_preserved_chain(u32 tid, u8 *visited_kids) {
 // per-param ASSIGNs of one Adam step).  Defined below.
 fn Term thvm_realize_many(Term ctr_term);
 
-// Forward-only reclaim (THVM_FWD_RECLAIM, off by default).  The per-realize
-// watermark rollback only reclaims buffers allocated DURING the current
-// realize; a buffer an EARLIER realize allocated, that was `preserved`
+// Forward-only reclaim (default ON; THVM_FWD_RECLAIM=0 disables).  The
+// per-realize watermark rollback only reclaims buffers allocated DURING the
+// current realize; a buffer an EARLIER realize allocated, that was `preserved`
 // (WL-reachable) during that realize then dropped, is stranded below every
 // later watermark and never freed.  The Qwen3-4B encoder hits this hard:
 // each of 27 layers uploads ~0.37GB of fresh weights inside its own realize,
@@ -73,15 +73,16 @@ fn Term thvm_realize_many(Term ctr_term);
 // run and thvm_metal_buf_clear_preserved has NOT yet.
 fn void thvm_realize_fwd_reclaim(void) {
   if (jit_is_capturing()) return;
-  // Re-read getenv until ENABLED, then latch: the runtime caches getenv on the
-  // first realize (during paclet load), but a WL caller enables the flag via
-  // SetEnvironment AFTER load (flux_generate.wls) -- a -1/once cache would miss
-  // that and silently leave the reclaim off.  getenv-until-enabled is cheap and
-  // picks up the late SetEnvironment on the first flux realize.
-  static int fwd_reclaim = 0;
-  if (!fwd_reclaim) {
+  // Default ON: this is the faithful realize-boundary GC (free a buffer when its
+  // last WL refcount drops), correct since the heap-rooted preserve scan below
+  // fixed the cross-realize free bug, free on the hot loop (the table-wide free
+  // rides the GPU flush the realize already pays), and a no-op on CPU/CUDA (the
+  // thvm_metal_buf_* calls stub to 0 off Metal).  THVM_FWD_RECLAIM=0 disables it
+  // for A/B debugging.  Cached once on the first realize.
+  static int fwd_reclaim = -1;
+  if (fwd_reclaim < 0) {
     const char *e = getenv("THVM_FWD_RECLAIM");
-    fwd_reclaim = (e != NULL && e[0] != '0') ? 1 : 0;
+    fwd_reclaim = (e != NULL && e[0] == '0') ? 0 : 1;
   }
   if (!fwd_reclaim) return;
   // Overlay the heap-rooted preserve walk (the call the comment at the
