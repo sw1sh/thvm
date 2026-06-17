@@ -278,3 +278,29 @@ cp-37130-time (not add-time) from the instrumented ELProver, and check whether
 the 2-var is a standard CP of THOSE terms; if still not, WM uses a non-standard
 overlap and the divergence is WM-side (document, likely unfixable faithfully
 without reproducing WM's exact mechanism).
+
+## UNRESOLVED CONTRADICTION (2026-06-17) -- prior (b) reframe was PREMATURE
+
+Per-position trace on the clean unit test (g_cp_visit_trace=1 in
+thvm_critical_pairs(126,36)): thvm VISITS ALL 5 non-var positions of rule 126
+([], [1], [10], [11], [110]) and all of rule 36 -- complete position coverage,
+14 CPs, none the 2-var.  Verified rules 126/36 are added ONCE (no
+re-orientation/interreduction before cp 37130), so cp-time terms == add-time
+terms == the unit-test terms.
+
+CONTRADICTION: (i) thvm's COMPLETE standard enumeration of 126x36 lacks the
+2-var; (ii) WM forms the 2-var as a 126x36 CP (cp 37130); (iii) WM's overlap
+"filters" (EinsStern/Nusf/Kern/Back via KPFilterErgaenzen) only RESTRICT
+generated overlaps, so WM's CPs MUST be a subset of the standard overlaps.
+(i)+(iii) => the 2-var is NOT standard; (ii)+(iii) => it IS standard.  Both
+can't hold.  My previous "(b) thvm is correct, not a bug" reframe was therefore
+PREMATURE -- the conclusion is currently UNRESOLVED (I have flip-flopped a<->b).
+
+The resolution requires WM-side overlap instrumentation: instrument WM's
+CP-formation (Unifikation1.c U1_KPsBildenZuRegel / the KPAction path) to print,
+for cp 37130, the exact Vater, Mutter, VaterStelle (position), face, and
+unifier.  That reveals whether WM used (1) a standard 126x36 position thvm's
+thvm_unify handles differently [=> thvm_unify bug], (2) a non-standard face/
+generation [=> port it], or (3) a parents attribution that is not a direct
+126x36 superposition [=> the gap is elsewhere].  Until then, @6078's root cause
+is genuinely UNDETERMINED.
