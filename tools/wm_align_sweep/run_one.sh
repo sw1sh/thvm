@@ -44,8 +44,19 @@ if ! DYLD_FRAMEWORK_PATH="${WMCLI_DYLD:-}" timeout 10 \
     exit 0
 fi
 
-# 2. Full verbose reference trace.
-if ! DYLD_FRAMEWORK_PATH="${WMCLI_DYLD:-}" timeout 30 \
+# 2. Full verbose reference trace.  WM_TRACE_LINES=<n> caps the captured
+#    trace to the first n lines: `head` closing the pipe SIGPIPEs wmcli, so
+#    a heavy theorem (the associativity tier proves but emits a 3M-CP, far-
+#    >30s verbose trace -- the "logs explode" class above) is bounded to a
+#    PREFIX.  wm= is then a truncated count, but the identical-prefix +
+#    first_divergence are valid as long as the cap exceeds firstdiv (the
+#    -a 4 trace is ~95 lines per selection; 50000 lines ~= 520 selections).
+WM_TRACE_LINES="${WM_TRACE_LINES:-0}"
+if [ "$WM_TRACE_LINES" -gt 0 ]; then
+    DYLD_FRAMEWORK_PATH="${WMCLI_DYLD:-}" timeout 90 \
+        "$WMCLI" -a 4 "$PR" 2>&1 | head -n "$WM_TRACE_LINES" > "$WORK/wm.txt"
+    [ -s "$WORK/wm.txt" ] || { row - - - - - SKIPPED_WM_TRACE; exit 0; }
+elif ! DYLD_FRAMEWORK_PATH="${WMCLI_DYLD:-}" timeout 30 \
         "$WMCLI" -a 4 "$PR" > "$WORK/wm.txt" 2>&1; then
     row - - - - - SKIPPED_WM_TRACE
     exit 0
