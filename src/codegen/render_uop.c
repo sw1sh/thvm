@@ -2274,6 +2274,338 @@ static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
   return 1;
 }
 
+// CUDA WMMA tile picker: pick (local_m, local_n, rm, rn, kb) for an
+// (M,N,K) matmul where the unit fragment is 16x16x16 (nvcuda::wmma)
+// rather than Metal's 8x8 simdgroup_matrix.  TILE_M = local_m*rm*16,
+// TILE_N = local_n*rn*16; the block has local_m*local_n warps (=32
+// threads each) and KB K-staged per block.  Returns 1 with *out filled
+// when a tile divides the shape; 0 to fall back to the naive WMMA path.
+//
+// A100 targets: a 128x128 tile with 8 warps (256 threads) and a 2x4 /
+// 4x2 register block of 16x16 accumulator fragments maximises A/B
+// fragment reuse without spilling the 64KiB register file; KB=32 stages
+// two K-subtiles so the inner mma loop amortises the cooperative load
+// + barrier.  The picker degrades to smaller tiles for ragged M/N so a
+// {256,3072} QKV projection (only 2*24=48 tiles at 128x64) still fills
+// the SMs, then to a 16x16 single-fragment tile as a last resort.
+static int rmu_tc_pick_tile_cuda(u32 m_extent, u32 n_extent, u32 k_extent,
+                                 RmuTcTile *out) {
+  if ((m_extent % 16) != 0 || (n_extent % 16) != 0 || (k_extent % 16) != 0) {
+    return 0;
+  }
+  // THVM_TC_TILE=0 forces the naive one-warp-per-16x16 WMMA path (A/B).
+  { char const *e = getenv("THVM_TC_TILE"); if (e && e[0] == '0') return 0; }
+  u32 m16 = m_extent / 16, n16 = n_extent / 16;
+  // {local_m, local_n, rm, rn}: warps along M/N and the 16x16 register
+  // tile per warp.  TILE_M = local_m*rm*16, TILE_N = local_n*rn*16.
+  // Ordered largest-tile-first (best reuse); the occupancy floor below
+  // steps down to a smaller tile when the largest under-fills the GPU.
+  struct { u32 lm, ln, rm, rn; } cands[] = {
+    {2, 4, 4, 2},   // 128x128, 8 warps, 8 acc/warp
+    {2, 2, 4, 2},   // 128x64,  4 warps
+    {2, 4, 2, 2},   // 64x128,  8 warps
+    {2, 2, 2, 2},   // 64x64,   4 warps
+    {2, 2, 2, 1},   // 64x32,   4 warps
+    {2, 1, 2, 2},   // 64x32,   2 warps
+    {1, 2, 2, 2},   // 32x64,   2 warps
+    {2, 2, 1, 1},   // 32x32,   4 warps
+    {1, 1, 2, 2},   // 32x32,   1 warp
+    {1, 1, 1, 1},   // 16x16,   1 warp (last resort)
+  };
+  // Occupancy floor: prefer the largest tile producing >= MIN_TG output
+  // blocks (an A100 has 108 SMs; a few blocks per SM hides the tail
+  // wave).  Fall back to the most-blocks tile when nothing clears it.
+  u32 min_tg = 216;
+  { char const *e = getenv("THVM_TC_MIN_TG"); if (e && e[0]) min_tg = (u32)atoi(e); }
+  u32 best_lm = 0, best_ln = 0, best_rm = 0, best_rn = 0;
+  u32 fb_lm = 0, fb_ln = 0, fb_rm = 0, fb_rn = 0, fb_tg = 0;
+  for (u32 i = 0; i < sizeof(cands)/sizeof(cands[0]); i++) {
+    u32 tm16 = cands[i].lm * cands[i].rm;
+    u32 tn16 = cands[i].ln * cands[i].rn;
+    if (m16 % tm16 != 0 || n16 % tn16 != 0) continue;
+    u32 tg = (m16 / tm16) * (n16 / tn16);
+    if (best_lm == 0 && tg >= min_tg) {
+      best_lm = cands[i].lm; best_ln = cands[i].ln;
+      best_rm = cands[i].rm; best_rn = cands[i].rn;
+    }
+    if (tg > fb_tg) {
+      fb_tg = tg; fb_lm = cands[i].lm; fb_ln = cands[i].ln;
+      fb_rm = cands[i].rm; fb_rn = cands[i].rn;
+    }
+  }
+  if (best_lm == 0) {
+    best_lm = fb_lm; best_ln = fb_ln; best_rm = fb_rm; best_rn = fb_rn;
+  }
+  if (best_lm == 0) return 0;
+  // KB: stage two 16-K subtiles when K divides by 32, else one.
+  u32 kb = (k_extent % 32 == 0) ? 32u : 16u;
+  out->local_m = best_lm; out->local_n = best_ln;
+  out->rm = best_rm;      out->rn = best_rn;
+  out->kb = kb;
+  // Tuning overrides (THVM_TC_LM / _LN / _RM / _RN / _KB) for A/B; only
+  // applied when the forced tile still divides the shape cleanly.
+  {
+    char const *e;
+    u32 lm = out->local_m, ln = out->local_n, rm = out->rm, rn = out->rn, kbo = out->kb;
+    if ((e = getenv("THVM_TC_LM")) && e[0]) lm = (u32)atoi(e);
+    if ((e = getenv("THVM_TC_LN")) && e[0]) ln = (u32)atoi(e);
+    if ((e = getenv("THVM_TC_RM")) && e[0]) rm = (u32)atoi(e);
+    if ((e = getenv("THVM_TC_RN")) && e[0]) rn = (u32)atoi(e);
+    if ((e = getenv("THVM_TC_KB")) && e[0]) kbo = (u32)atoi(e);
+    if (lm >= 1 && ln >= 1 && rm >= 1 && rn >= 1 && kbo >= 16
+        && (kbo % 16) == 0
+        && m16 % (lm * rm) == 0 && n16 % (ln * rn) == 0
+        && k_extent % kbo == 0
+        && (lm * ln * 32u) <= 1024u) {
+      out->local_m = lm; out->local_n = ln;
+      out->rm = rm;      out->rn = rn;
+      out->kb = kbo;
+    }
+  }
+  if (getenv("THVM_TC_DBG"))
+    fprintf(stderr, "[tc-pick-cuda] M=%u N=%u K=%u -> tile %ux%u "
+            "(lm=%u ln=%u rm=%u rn=%u kb=%u) tg=%u\n",
+            m_extent, n_extent, k_extent,
+            out->local_m*out->rm*16u, out->local_n*out->rn*16u,
+            out->local_m, out->local_n, out->rm, out->rn, out->kb,
+            (m16/(out->local_m*out->rm))*(n16/(out->local_n*out->rn)));
+  return 1;
+}
+
+// Emit the shared-memory-staged, register-blocked tiled WMMA matmul body
+// for CUDA (the m_par && n_par both-GLOBAL case), mirroring the Metal
+// rmu_emit_matmul_tc_tiled but with nvcuda::wmma 16x16x16 fragments,
+// __shared__ staging, and __syncthreads barriers.
+//
+// Data path (correctness-first single-buffered staging):
+//   - The block owns output tile (_tm, _tn) decoded from tg=blockIdx.x.
+//   - Each warp (sgi = threadIdx.x/32) owns an rm x rn grid of 16x16
+//     accumulator fragments at sub-tile origin (_sm, _sn).
+//   - Per K-block: all warps cooperatively stage A[_tm.. , k0..] into
+//     row-major __shared__ _Asm[tile_m][KB] and B's K-block into
+//     row-major __shared__ _Bsm[KB][tile_n], barrier, then each warp
+//     loads its rm A-frags + rn B-frags FROM SHARED (row_major) and does
+//     rm*rn mma_sync, barrier.
+//   - Transposed B (B = Transpose[W], W{N,K} contiguous, b_nstride=K):
+//     staged into the SAME row-major _Bsm[k*tile_n + n] by reading
+//     W[(_tn+n)*b_nstride + (k0+k)] -- so the in-shared layout is always
+//     row_major and the WMMA B load is uniform regardless of global
+//     layout.
+//   - bf16/fp16 output: each accumulator fragment is stored to a per-warp
+//     __shared__ float scratch[256], then the 32 lanes convert+write into
+//     C; f32 output stores directly with store_matrix_sync.
+static void rmu_emit_matmul_tc_tiled_cuda(const char *a_name, const char *b_name,
+                                          const char *c_name, u32 n_extent,
+                                          u32 k_extent, RmuTcTile t,
+                                          const char *a_elem, const char *b_elem,
+                                          u32 dt_c, int b_trans, i64 b_nstride,
+                                          FILE *fp, u32 depth) {
+  u32 WM = 16u, WN = 16u, WK = 16u;
+  (void)WK;
+  u32 tile_m = t.local_m * t.rm * WM;     // output rows per block
+  u32 tile_n = t.local_n * t.rn * WN;     // output cols per block
+  u32 n_tiles_n = n_extent / tile_n;      // tile columns in the grid
+  u32 nwarps = t.local_m * t.local_n;
+  u32 nthreads = nwarps * 32u;
+  int c_direct = (dt_c == DT_FP32);
+  // Shared leading-dim padding: a 16x16 WMMA fragment loads 16 rows of the
+  // staged tile, all reading the SAME column lane -> a row stride that is a
+  // multiple of 32 banks (KB=32 bf16 = 64 B = 16 banks; tile_n=128 bf16 =
+  // 256 B = 64 banks) collides all 16 reads onto the same banks.  Pad the
+  // leading dim by 8 elements (16 B, one bank-group) so consecutive rows
+  // land in distinct banks -- the standard skew that removes the conflict.
+  u32 PAD = 8u;
+  u32 a_ld = t.kb + PAD;                   // _Asm row stride (M-major, ld_k)
+  // B staging layout depends on the global layout:
+  //  - transposed B (B=Transpose[W], W{N,K} contiguous): stage n-MAJOR
+  //    _Bsm[n*(KB+PAD) + k] = W[_tn+n][_k0+k] (a pure vectorized contiguous
+  //    copy of W's K-run) and load the WMMA B fragment COL_MAJOR with
+  //    ld = KB+PAD (frag[k][n] = _Bsm[k + n*ld] = W[n][k] = B[k][n]).  No
+  //    scatter, no bank conflict on the store.
+  //  - row-major B[k][n]: stage k-MAJOR _Bsm[k*(tile_n+PAD) + n] and load
+  //    ROW_MAJOR with ld = tile_n+PAD (frag[k][n] = _Bsm[k*ld + n]).
+  u32 b_ld   = b_trans ? (t.kb + PAD) : (tile_n + PAD);
+  u32 b_rows = b_trans ? tile_n : t.kb;    // n-major: tile_n rows; else KB
+  #define IND(D) for (u32 _i = 0; _i < (D); _i++) fputs("  ", fp)
+  IND(depth); fprintf(fp,
+    "/* TC WMMA tiled matmul: tile %ux%u, %ux%u warps, %ux%u frag/warp, KB=%u%s */\n",
+    tile_m, tile_n, t.local_m, t.local_n, t.rm, t.rn, t.kb,
+    b_trans ? ", B col-major staged" : "");
+  // Shared staging tiles (padded leading dim).  _Asm: tile_m x (KB+PAD).
+  IND(depth); fprintf(fp, "__shared__ %s _Asm[%u];\n", a_elem, tile_m * a_ld);
+  IND(depth); fprintf(fp, "__shared__ %s _Bsm[%u];\n", b_elem, b_rows * b_ld);
+  // This block's output-tile origin.
+  IND(depth); fprintf(fp, "uint _tm = (tg / %uu) * %uu;\n", n_tiles_n, tile_m);
+  IND(depth); fprintf(fp, "uint _tn = (tg %% %uu) * %uu;\n", n_tiles_n, tile_n);
+  // This warp's sub-tile origin within the block tile.
+  IND(depth); fprintf(fp, "uint _sm = (sgi / %uu) * %uu;\n",
+                      t.local_n, t.rm * WM);
+  IND(depth); fprintf(fp, "uint _sn = (sgi %% %uu) * %uu;\n",
+                      t.local_n, t.rn * WN);
+  // Flat thread index in the block (for cooperative staging) + lane.
+  IND(depth); fputs("uint _lid = threadIdx.x;\n", fp);
+  // Register accumulator fragments, all zeroed.
+  IND(depth); fprintf(fp,
+    "wmma::fragment<wmma::accumulator, 16, 16, 16, float> _acc[%u];\n",
+    t.rm * t.rn);
+  IND(depth); fprintf(fp,
+    "for (uint _i = 0u; _i < %uu; _i++) wmma::fill_fragment(_acc[_i], 0.0f);\n",
+    t.rm * t.rn);
+  // Vectorized cooperative loads.  A's K-run (unit stride) packs 8 bf16
+  // as a uint4 (16 bytes).  A transposed B reads W's contiguous K-axis,
+  // also vectorizable as uint4; a plain row-major B reads its unit-stride
+  // N-run.  Scalar fallback when not 8-aligned.  bf16/fp16 are 2 bytes
+  // so uint4 = 8 elements; gate on 8-divisibility of the inner extent.
+  int a_vec = (t.kb % 8u == 0) && (k_extent % 8u == 0);
+  int b_tvec = b_trans && (t.kb % 8u == 0) && (b_nstride % 8 == 0);
+  int b_vec = !b_trans && (tile_n % 8u == 0) && (n_extent % 8u == 0);
+  u32 a_elems = tile_m * t.kb, b_elems = t.kb * tile_n;
+  // K-block loop.  k0 = block K-origin; stage A + B, barrier, mma, barrier.
+  IND(depth); fprintf(fp, "for (uint _k0 = 0u; _k0 < %uu; _k0 += %uu) {\n",
+                      k_extent, t.kb);
+  // --- Cooperative stage A: _Asm[r*a_ld + c] = A[(_tm+r)*K + _k0 + c] ---
+  if (a_vec) {
+    IND(depth + 1); fprintf(fp,
+      "for (uint _i = _lid; _i < %uu; _i += %uu) {\n", a_elems / 8u, nthreads);
+    IND(depth + 2); fprintf(fp,
+      "uint _r = _i / %uu, _c = (_i %% %uu) * 8u;\n", t.kb / 8u, t.kb / 8u);
+    IND(depth + 2); fprintf(fp,
+      "*(uint4*)(&_Asm[_r * %uu + _c]) = "
+      "*(const uint4*)(&%s[(_tm + _r) * %uu + _k0 + _c]);\n",
+      a_ld, a_name, k_extent);
+    IND(depth + 1); fputs("}\n", fp);
+  } else {
+    IND(depth + 1); fprintf(fp,
+      "for (uint _i = _lid; _i < %uu; _i += %uu) {\n", a_elems, nthreads);
+    IND(depth + 2); fprintf(fp,
+      "_Asm[(_i / %uu) * %uu + _i %% %uu] = "
+      "%s[(_tm + _i / %uu) * %uu + _k0 + _i %% %uu];\n",
+      t.kb, a_ld, t.kb, a_name, t.kb, k_extent, t.kb);
+    IND(depth + 1); fputs("}\n", fp);
+  }
+  // --- Cooperative stage B ---
+  if (b_trans) {
+    // n-MAJOR: _Bsm[n*b_ld + k] = W[_tn+n][_k0+k] (contiguous K-run copy).
+    if (b_tvec) {
+      IND(depth + 1); fprintf(fp,
+        "for (uint _j = _lid; _j < %uu; _j += %uu) {\n", b_elems / 8u, nthreads);
+      IND(depth + 2); fprintf(fp,
+        "uint _n = _j / %uu, _k8 = (_j %% %uu) * 8u;\n", t.kb / 8u, t.kb / 8u);
+      IND(depth + 2); fprintf(fp,
+        "*(uint4*)(&_Bsm[_n * %uu + _k8]) = "
+        "*(const uint4*)(&%s[(_tn + _n) * %lluu + _k0 + _k8]);\n",
+        b_ld, b_name, (unsigned long long)b_nstride);
+      IND(depth + 1); fputs("}\n", fp);
+    } else {
+      IND(depth + 1); fprintf(fp,
+        "for (uint _j = _lid; _j < %uu; _j += %uu) {\n", b_elems, nthreads);
+      IND(depth + 2); fprintf(fp,
+        "uint _n = _j / %uu, _k = _j %% %uu;\n", t.kb, t.kb);
+      IND(depth + 2); fprintf(fp,
+        "_Bsm[_n * %uu + _k] = %s[(_tn + _n) * %lluu + _k0 + _k];\n",
+        b_ld, b_name, (unsigned long long)b_nstride);
+      IND(depth + 1); fputs("}\n", fp);
+    }
+  } else if (b_vec) {
+    // k-MAJOR row-major B[k][n], n unit-stride: _Bsm[r*b_ld + c] = B[(_k0+r)*N + _tn+c]
+    IND(depth + 1); fprintf(fp,
+      "for (uint _i = _lid; _i < %uu; _i += %uu) {\n", b_elems / 8u, nthreads);
+    IND(depth + 2); fprintf(fp,
+      "uint _r = _i / %uu, _c = (_i %% %uu) * 8u;\n", tile_n / 8u, tile_n / 8u);
+    IND(depth + 2); fprintf(fp,
+      "*(uint4*)(&_Bsm[_r * %uu + _c]) = "
+      "*(const uint4*)(&%s[(_k0 + _r) * %uu + _tn + _c]);\n",
+      b_ld, b_name, n_extent);
+    IND(depth + 1); fputs("}\n", fp);
+  } else {
+    IND(depth + 1); fprintf(fp,
+      "for (uint _i = _lid; _i < %uu; _i += %uu) {\n", b_elems, nthreads);
+    IND(depth + 2); fprintf(fp,
+      "_Bsm[(_i / %uu) * %uu + _i %% %uu] = "
+      "%s[(_k0 + _i / %uu) * %uu + _tn + _i %% %uu];\n",
+      tile_n, b_ld, tile_n, b_name, tile_n, n_extent, tile_n);
+    IND(depth + 1); fputs("}\n", fp);
+  }
+  IND(depth + 1); fputs("__syncthreads();\n", fp);
+  // Inner K-subtile loop over the staged block (steps of 16).
+  IND(depth + 1); fprintf(fp, "for (uint _kk = 0u; _kk < %uu; _kk += 16u) {\n",
+                          t.kb);
+  // Load this warp's A fragments (rm) from shared (row_major, ld=a_ld).
+  IND(depth + 2); fprintf(fp,
+    "wmma::fragment<wmma::matrix_a, 16, 16, 16, %s, wmma::row_major> _af[%u];\n",
+    a_elem, t.rm);
+  for (u32 mi = 0; mi < t.rm; mi++) {
+    IND(depth + 2); fprintf(fp,
+      "wmma::load_matrix_sync(_af[%u], &_Asm[(_sm + %uu) * %uu + _kk], %uu);\n",
+      mi, mi * WM, a_ld, a_ld);
+  }
+  // Load this warp's B fragments (rn) from shared.  Transposed B is staged
+  // n-major -> COL_MAJOR fragment (frag[k][n] = _Bsm[k + (n)*b_ld]); a
+  // row-major B is staged k-major -> ROW_MAJOR fragment.
+  IND(depth + 2); fprintf(fp,
+    "wmma::fragment<wmma::matrix_b, 16, 16, 16, %s, %s> _bf[%u];\n",
+    b_elem, b_trans ? "wmma::col_major" : "wmma::row_major", t.rn);
+  for (u32 ni = 0; ni < t.rn; ni++) {
+    if (b_trans) {
+      // col_major base = &_Bsm[(_sn+ni*16)*b_ld + _kk]; ld = b_ld.
+      IND(depth + 2); fprintf(fp,
+        "wmma::load_matrix_sync(_bf[%u], &_Bsm[(_sn + %uu) * %uu + _kk], %uu);\n",
+        ni, ni * WN, b_ld, b_ld);
+    } else {
+      // row_major base = &_Bsm[_kk*b_ld + _sn+ni*16]; ld = b_ld.
+      IND(depth + 2); fprintf(fp,
+        "wmma::load_matrix_sync(_bf[%u], &_Bsm[_kk * %uu + _sn + %uu], %uu);\n",
+        ni, b_ld, ni * WN, b_ld);
+    }
+  }
+  // Register-blocked MMA: every A fragment x every B fragment.
+  for (u32 mi = 0; mi < t.rm; mi++) {
+    for (u32 ni = 0; ni < t.rn; ni++) {
+      IND(depth + 2); fprintf(fp,
+        "wmma::mma_sync(_acc[%u], _af[%u], _bf[%u], _acc[%u]);\n",
+        mi * t.rn + ni, mi, ni, mi * t.rn + ni);
+    }
+  }
+  IND(depth + 1); fputs("}\n", fp);                  // close _kk
+  IND(depth + 1); fputs("__syncthreads();\n", fp);   // guard _Asm/_Bsm reuse
+  IND(depth); fputs("}\n", fp);                       // close _k0
+  // Store the register tile to C (row-major, ld = N).
+  if (c_direct) {
+    for (u32 mi = 0; mi < t.rm; mi++) {
+      for (u32 ni = 0; ni < t.rn; ni++) {
+        IND(depth); fprintf(fp,
+          "wmma::store_matrix_sync(&%s[(_tm + _sm + %uu) * %uu + _tn + _sn + %uu], "
+          "_acc[%u], %uu, wmma::mem_row_major);\n",
+          c_name, mi * WM, n_extent, ni * WN, mi * t.rn + ni, n_extent);
+      }
+    }
+  } else {
+    // bf16/fp16 output: per-warp f32 scratch, then convert+write.  Sized
+    // to this kernel's exact warp count (nwarps*256 floats) so the static
+    // shared footprint stays small -- a 32-warp upper bound would blow the
+    // 48KiB/block static cap alongside the A/B staging tiles.
+    IND(depth); fprintf(fp, "__shared__ float _cscratch[%u][256];\n", nwarps);
+    for (u32 mi = 0; mi < t.rm; mi++) {
+      for (u32 ni = 0; ni < t.rn; ni++) {
+        IND(depth); fprintf(fp,
+          "wmma::store_matrix_sync(_cscratch[sgi], _acc[%u], 16u, "
+          "wmma::mem_row_major);\n", mi * t.rn + ni);
+        IND(depth); fputs("__syncwarp();\n", fp);
+        IND(depth); fprintf(fp,
+          "{ uint _cb = (_tm + _sm + %uu) * %uu + _tn + _sn + %uu;\n",
+          mi * WM, n_extent, ni * WN);
+        IND(depth); fprintf(fp,
+          "  for (uint _e = threadIdx.x %% 32u; _e < 256u; _e += 32u) "
+          "%s[_cb + (_e / 16u) * %uu + (_e %% 16u)] = "
+          "(%s)_cscratch[sgi][_e]; }\n",
+          c_name, n_extent, rmu_cuda_type_name(dt_c));
+        IND(depth); fputs("__syncwarp();\n", fp);
+      }
+    }
+  }
+  #undef IND
+}
+
 // Emit the threadgroup-staged, register-blocked tiled matmul body for
 // the m_par && n_par (both-GLOBAL) case.  Buffer names + leading dims
 // are passed in; the address layout is the canonical row-major matmul
@@ -2731,6 +3063,35 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       else if (dt_b == DT_BF16 && RMU_CUDA_SM >= 80) b_elem = "__nv_bfloat16";
       else return 0;
     }
+    u32 dt_c = uop_buffer_dtype(buf_c);
+    // Shared-staged, register-blocked tiled WMMA path.  Eligible when:
+    //   - A is NOT transposed (the emitter stages A as {m,K} row-major;
+    //     a transposed A falls to the naive per-warp path below),
+    //   - M and N are BOTH GLOBAL (uop_recognise_tc_parallel stamped them,
+    //     so cuda_tc_tile_dispatch_shape launches (M/tile_m)*(N/tile_n)
+    //     blocks of nwarps*32 threads -- each block owns a unique output
+    //     tile, no write race), and
+    //   - the CUDA tile picker accepts the (M,N,K) shape.
+    // The naive one-warp-per-16x16 path below stays as the fallback for
+    // ragged / non-parallel / transposed-A shapes.
+    {
+      int m_par_c = (m_axis_type == 5 /* KAX_GLOBAL */);
+      int n_par_c = (n_axis_type == 5 /* KAX_GLOBAL */);
+      RmuTcTile tile;
+      if (!a_trans && m_par_c && n_par_c
+          && rmu_tc_pick_tile_cuda(m_extent, n_extent, k_extent, &tile)) {
+        char a_nm[24], b_nm[24], c_nm[24];
+        snprintf(a_nm, sizeof(a_nm), "%s", rmu_buf_name(buf_a));
+        snprintf(b_nm, sizeof(b_nm), "%s", rmu_buf_name(buf_b));
+        snprintf(c_nm, sizeof(c_nm), "%s", rmu_buf_name(buf_c));
+        for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+        fputs("/* TC WMMA matmul (nvcuda::wmma 16x16x16) -- tiled */\n", fp);
+        rmu_emit_matmul_tc_tiled_cuda(a_nm, b_nm, c_nm, n_extent, k_extent,
+                                      tile, a_elem, b_elem, dt_c, b_trans,
+                                      ldb, fp, depth);
+        return 1;
+      }
+    }
     // A WMMA fragment's transpose is fixed by its row_major / col_major
     // layout at declaration, not a load-time flag.  A non-transposed
     // operand (the contiguous reduce axis is unit-stride) is row_major and
@@ -2746,7 +3107,6 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     // a bf16/fp16 output stores the float fragment to a per-warp shared
     // f32 scratch tile, then the 32 lanes cooperatively convert+write the
     // 256 elements into C at C[addr_c + (e/16)*ld_c + (e%16)].
-    u32 dt_c = uop_buffer_dtype(buf_c);
     int c_direct = (dt_c == DT_FP32);
     u32 n_tiles_n_w = n_extent / 16;
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
@@ -6597,6 +6957,15 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
     }
   }
   if (route_trace) fprintf(stderr, "[route] %s: legacy rmu_emit\n", kernel_name);
+  // Matmul TC parallelisation: stamp the M and N output RANGE leaves
+  // KAX_GLOBAL (when K/M/N are all multiples of 8) so rmu_emit_matmul_tc's
+  // tiled / parallel branch fires -- one block per output tile, decoded
+  // from tg=blockIdx.x.  cuda_tc_tile_dispatch_shape re-applies the same
+  // (idempotent) transform to size the launch grid/block to match.
+  // Mirrors render_metal.c's uop_recognise_tc_parallel wrap.  No-op for
+  // non-matmul kernels; the batched-gemm + conv2d recognisers run too so
+  // those templates fire identically to the Metal path.
+  root = uop_recognise_tc_parallel(root);
   Term slot_bufs[RMU_DISCOVER_MAX] = {0};
   u32 n_inputs = 0;
   rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
@@ -6655,6 +7024,39 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
       if (lb_exts[i] == 0) continue;
       if (lb_types[i] == KAX_LOCAL) block_size *= lb_exts[i];
       else if (lb_types[i] == KAX_GROUP_REDUCE) has_group_reduce = 1;
+    }
+    // Tiled WMMA matmul: M/N are GLOBAL (not LOCAL), so the loop above
+    // leaves block_size=1.  The block is local_m*local_n*32 threads; size
+    // __launch_bounds__ from the picked tile so nvcc allocates the per-
+    // thread register file for the actual occupancy (the 8-acc-fragment
+    // 128x128 kernel needs the hint to avoid spills).  Only when the tiled
+    // CUDA emit will actually fire (mirrors rmu_emit_matmul_tc_tiled_cuda's
+    // gate: both M/N GLOBAL, !transA, bf16/fp16, picker accepts).
+    if (RMU_TARGET == CG_TARGET_CUDA && block_size == 1) {
+      u32 n_glob = 0;
+      for (u32 i = 0; i < lb_n; i++) if (lb_types[i] == KAX_GLOBAL) n_glob++;
+      if (n_glob >= 2 && term_tag(root) == TAG_UOP
+          && term_ext(root) == UOP_STORE) {
+        Term v = heap_read(term_val(root) + 2);
+        if (term_tag(v) == TAG_UOP && term_ext(v) == UOP_OPT
+            && uop_opt_kind(v) == UOP_OPT_TC) {
+          // uop_matmul_mn_axes / uop_classify_matmul read a BARE matmul
+          // (they decline an already-TC value), so peel the OPT into a
+          // temporary unwrapped STORE just for the shape probe.
+          Term bare = uop_store(heap_read(term_val(root) + 0),
+                                heap_read(term_val(root) + 1),
+                                uop_opt_target(v));
+          u32 mE = 0, nE = 0, kE = 0, ua = 0;
+          if (uop_matmul_mn_axes(bare, NULL, &mE, NULL, &nE)
+              && uop_classify_matmul(bare, &kE, &ua) && ua == 0
+              && mE && nE && kE) {
+            RmuTcTile tl;
+            if (rmu_tc_pick_tile_cuda(mE, nE, kE, &tl)) {
+              block_size = tl.local_m * tl.local_n * 32u;
+            }
+          }
+        }
+      }
     }
     if (block_size > 1 && block_size <= 1024 && !has_group_reduce) {
       fprintf(fp, "extern \"C\" __global__ void __launch_bounds__(%u) %s(\n",

@@ -304,29 +304,43 @@ int main(void) {
     Term ldB   = uop_index_e(B, addrB);
     Term mul   = uop_binary(UOP_MUL, ldA, ldB);
     Term red   = uop_reduce(REDUCE_SUM, /*axis=*/2, mul);
-    Term tc    = uop_opt(red, UOP_OPT_TC, 0);
+    // BARE matmul (no pre-installed OPT(_, TC, 0)): mirrors the real
+    // lifted store_root.  cg_render_uop_kernel_cuda_root applies
+    // uop_recognise_tc_parallel itself (stamping M/N GLOBAL + wrapping
+    // the REDUCE), which a pre-wrapped root would suppress (the
+    // already-TC value is not re-classified as a bare matmul).
     Term addrC = uop_int_binary(UOP_IADD,
                                 uop_int_binary(UOP_IMUL, r_m, k16), r_n);
-    Term st    = uop_store(C, addrC, tc);
+    Term st    = uop_store(C, addrC, red);
     char *cu = render_cuda(st, "k_gemm");
     CHECK(cu != NULL);
     // WMMA headers emitted because the DAG carries a TC annotation.
     CHECK(contains(cu, "#include <mma.h>"));
     CHECK(contains(cu, "#include <cuda_fp16.h>"));
     CHECK(contains(cu, "using namespace nvcuda;"));
-    // WMMA fragment template + the four nvcuda::wmma intrinsics.
-    CHECK(contains(cu, "/* TC WMMA matmul"));
-    CHECK(contains(cu, "wmma::fragment<wmma::matrix_a, 16, 16, 16, half"));
-    CHECK(contains(cu, "wmma::fragment<wmma::matrix_b, 16, 16, 16, half"));
-    CHECK(contains(cu, "wmma::fragment<wmma::accumulator, 16, 16, 16, float"));
-    CHECK(contains(cu, "wmma::fill_fragment(_c_frag, 0.0f)"));
-    CHECK(contains(cu, "wmma::load_matrix_sync(_a_frag"));
-    CHECK(contains(cu, "wmma::load_matrix_sync(_b_frag"));
-    CHECK(contains(cu, "wmma::mma_sync(_c_frag, _a_frag, _b_frag, _c_frag)"));
+    // The CUDA renderer applies uop_recognise_tc_parallel, stamping M/N
+    // GLOBAL, so the shared-staged register-blocked tiled WMMA emit fires
+    // (the 16x16x16 minimum tile here: lm=ln=rm=rn=1, KB=32).
+    CHECK(contains(cu, "/* TC WMMA matmul (nvcuda::wmma 16x16x16) -- tiled */"));
+    CHECK(contains(cu, "/* TC WMMA tiled matmul"));
+    CHECK(contains(cu, "wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major>"));
+    CHECK(contains(cu, "wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major>"));
+    CHECK(contains(cu, "wmma::fragment<wmma::accumulator, 16, 16, 16, float> _acc"));
+    CHECK(contains(cu, "wmma::fill_fragment(_acc"));
+    CHECK(contains(cu, "wmma::load_matrix_sync(_af[0]"));
+    CHECK(contains(cu, "wmma::load_matrix_sync(_bf[0]"));
+    CHECK(contains(cu, "wmma::mma_sync(_acc[0], _af[0], _bf[0], _acc[0])"));
+    // f32 output -> store_matrix_sync directly to C.
     CHECK(contains(cu, "wmma::store_matrix_sync(&out"));
-    // K-loop steps by 16 (the WMMA K-tile), one warp per output tile.
-    CHECK(contains(cu, "for (uint a2 = 0; a2 < 32; a2 += 16)"));
-    CHECK(contains(cu, "uint _warp = tid / 32u;"));
+    // Shared staging tiles + barriers; tile decoded from the block index.
+    CHECK(contains(cu, "__shared__ half _Asm"));
+    CHECK(contains(cu, "__shared__ half _Bsm"));
+    CHECK(contains(cu, "__syncthreads();"));
+    CHECK(contains(cu, "uint _tm = (tg / "));
+    // K-block loop steps by KB=32 (the staged K-block).
+    CHECK(contains(cu, "_k0 += 32u"));
+    // Inner K-subtile loop steps by 16 (the WMMA K-tile).
+    CHECK(contains(cu, "_kk += 16u"));
     // Not the Metal simdgroup_matrix template.
     CHECK(!contains(cu, "simdgroup_matrix"));
     free(cu);
@@ -356,10 +370,9 @@ int main(void) {
     Term ldB   = uop_index_e(B, addrB);
     Term mul   = uop_binary(UOP_MUL, ldA, ldB);
     Term red   = uop_reduce(REDUCE_SUM, /*axis=*/2, mul);
-    Term tc    = uop_opt(red, UOP_OPT_TC, 0);
     Term addrC = uop_int_binary(UOP_IADD,
                                 uop_int_binary(UOP_IMUL, r_m, k16), r_n);
-    Term st    = uop_store(C, addrC, tc);
+    Term st    = uop_store(C, addrC, red);  /* bare matmul */
     char *cu = render_cuda(st, "k_gemm_fb");
     CHECK(cu != NULL);
     // WMMA declined -> the TC-tile-mismatch fallback marker + scalar
@@ -397,10 +410,9 @@ int main(void) {
     Term ldB   = uop_index_e(B, addrB);
     Term mul   = uop_binary(UOP_MUL, ldA, ldB);
     Term red   = uop_reduce(REDUCE_SUM, /*axis=*/2, mul);
-    Term tc    = uop_opt(red, UOP_OPT_TC, 0);
     Term addrC = uop_int_binary(UOP_IADD,
                                 uop_int_binary(UOP_IMUL, r_m, k16), r_n);
-    Term st    = uop_store(C, addrC, tc);
+    Term st    = uop_store(C, addrC, red);  /* bare matmul */
     char *cu = render_cuda(st, "k_gemm_fp32");
     CHECK(cu != NULL);
     CHECK(contains(cu, "/* TC tile mismatch"));

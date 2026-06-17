@@ -813,6 +813,58 @@ fn int cuda_dag_has_opt_axes(struct KernelEntry const *ke) {
   return 0;
 }
 
+// Tiled-WMMA matmul launch geometry.  CUDA counterpart of Metal's
+// cg_tile_metal_dispatch_shape: when the lifted DAG is a TC matmul whose
+// M and N axes are GLOBAL and the CUDA tile picker accepts the (M,N,K)
+// shape (the shared-staged register-blocked path in
+// rmu_emit_matmul_tc_tiled_cuda), launch one block per output tile,
+// local_m*local_n*32 threads each -- grid = (M/tile_m)*(N/tile_n),
+// block = nwarps*32.  Must agree byte-for-byte with the renderer's gate:
+// only the !transA + both-GLOBAL + picker-accepts case is tiled; every
+// other matmul shape (transposed-A, ragged, non-parallel) takes the
+// naive one-warp-per-16x16 flat launch (this returns 0 -> flat path).
+//
+// Returns 1 with (grid_x, block_x) when the tiled kernel will fire; 0
+// otherwise (caller falls through to cuda_dag_dispatch_shape / flat).
+fn int cuda_tc_tile_dispatch_shape(struct KernelEntry *ke, u32 *grid_x,
+                                   u32 *block_x) {
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  // Re-apply the (idempotent) parallel TC recogniser to the STORED
+  // (unwrapped) root -- exactly what cg_render_uop_kernel_cuda_root does
+  // before emitting -- so M/N carry KAX_GLOBAL here too.
+  Term sroot = uop_recognise_tc_parallel(ke->cached_lift.store_root);
+  // Must be a TC template (matmul recognised).
+  if (term_tag(sroot) != TAG_UOP || term_ext(sroot) != UOP_STORE) return 0;
+  Term value = heap_read(term_val(sroot) + 2);
+  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_OPT
+      || uop_opt_kind(value) != UOP_OPT_TC) return 0;
+  // Both M and N must be GLOBAL (>= 2 GLOBAL axes) for the tiled emit.
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 na = uop_dag_collect_axes(sroot, ids, types, exts, MAX_AXES);
+  u32 n_global = 0;
+  for (u32 i = 0; i < na; i++) if (types[i] == KAX_GLOBAL) n_global++;
+  if (n_global < 2) return 0;
+  // Classify M/N/K + dtype + transA.  The tiled CUDA emit only fires for
+  // a bf16/fp16 operand matmul with M/N/K all multiples of 16, transA==0.
+  UopDagGemmShape gemm = {0};
+  if (!uop_dag_classify_matmul_shape(sroot, ke, &gemm)) return 0;
+  if (gemm.M == 0 || gemm.N == 0 || gemm.K == 0) return 0;
+  if ((gemm.flags & 1u) != 0) return 0;                 // transposed A: naive path
+  if (gemm.dtype != DT_BF16 && gemm.dtype != DT_FP16) return 0;
+  if ((gemm.M % 16u) || (gemm.N % 16u) || (gemm.K % 16u)) return 0;
+  RmuTcTile tile;
+  if (!rmu_tc_pick_tile_cuda(gemm.M, gemm.N, gemm.K, &tile)) return 0;
+  u32 tile_m = tile.local_m * tile.rm * 16u;
+  u32 tile_n = tile.local_n * tile.rn * 16u;
+  u64 ntg = (u64)(gemm.M / tile_m) * (u64)(gemm.N / tile_n);
+  u32 nthreads = tile.local_m * tile.local_n * 32u;
+  if (ntg == 0 || ntg > 0xFFFFFFFFu || nthreads == 0 || nthreads > 1024u)
+    return 0;
+  if (grid_x  != NULL) *grid_x  = (u32)ntg;
+  if (block_x != NULL) *block_x = nthreads;
+  return 1;
+}
+
 // Backend-vtable dispatch_kernel.  Mirrors cpu_jit_dispatch's
 // structural-lift path for the CUDA target:
 //
@@ -1055,7 +1107,9 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   // types instead (cuda_dag_dispatch_shape).  Otherwise fall back to
   // the flat one-thread-per-output shape.
   u32 grid_x = 0, block_x = 0;
-  if (!(cuda_dag_has_opt_axes(ke)
+  if (cuda_tc_tile_dispatch_shape(ke, &grid_x, &block_x)) {
+    // Tiled WMMA matmul: one block per output tile (see the function).
+  } else if (!(cuda_dag_has_opt_axes(ke)
         && cuda_dag_dispatch_shape(ke, &grid_x, &block_x))) {
     // Flat: total threads = output_numel (one promoted output element
     // per thread; the renderer's `tid >= total` guard makes a
