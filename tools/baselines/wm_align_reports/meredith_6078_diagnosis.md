@@ -92,6 +92,95 @@ direct confirmation that thvm's heap genuinely lacks it, not a representation
 artifact.  thvm's last formation of it was cp_seq 15233; the next is 44563, and
 pick 6078 sits in that hole.
 
+## Equation-overlap under-formation (2026-06-17, faithful ground truth)
+
+WM forms the 2-var CP from 80 distinct parent-pairs; **36 have an equation
+(negative) parent** (WM E-set eqs -2,-6,-8,-10,-11,-12,-13).  thvm (BATCH+CPFORM
+orientation tally over its 2-var CP formations): **53 rule×rule, but only 8
+equation-involved** (5 rule×eq, 1 eq×rule, 2 eq×eq).  So thvm's rule×rule
+formations roughly match WM, but it under-forms the EQUATION-overlap 2-var CPs
+(8 vs 36).  That is the @6078 gap: thvm's unorientable-equation set/overlapping
+is less thorough than WM's.  Candidate roots: (a) thvm keeps FEWER unoriented
+equations (orients some WM keeps bidirectional), (b) thvm misses some
+equation-overlap positions, (c) thvm subsumes/normalizes equations WM retains.
+NEXT: compare thvm's unoriented-fact count + the specific equations to WM's
+E-set at @6078 (distinguish (a) from (b)/(c)).  Faithful ELProver gives WM
+ground truth here (unlike SKIToBCKW).
+
+## ROOT CAUSE (2026-06-17, consistent numbering): thvm misses a 126x36 superposition
+
+Using ONE binary (my ELProver) for both the heap dump and the -a4 trace (so
+ElternNr is internally consistent -- the reference wmcli and ELProver number
+differently, which earlier mixed two numbering schemes):
+
+* @6078 CP = `CP(126,36)` w2=23993 = 2-var CP, formed at **cp 37130, parents
+  126x36, RAW = the 2-var CP directly** (no normalization step -- which is why a
+  `normalized to:`-gated search missed it).
+* rule 126 = `dot(x1,dot(dot(x2,x3),dot(dot(x3,x2),x1)))->dot(x1,x1)` = thvm slot 120.
+* rule 36  = `dot(x1,dot(dot(x1,x2),dot(x2,x3)))->dot(x2,x1)`           = thvm slot 33.
+* thvm computes the slot-120 x slot-33 overlap **5 times (cpgen), NONE yielding
+  the 2-var CP**; WM forms the 2-var CP from 126x36 (cp 37130).
+
+=> thvm's overlap enumeration MISSES the specific superposition position WM uses
+to build the 2-var CP from this rule pair.  cpgen logs the RAW overlap pre-filter,
+so it is genuinely NOT computed (not filtered).  FAITHFUL-FIXABLE in
+`atp_overlap_ij` (missing position/unifier) or the re-overlap path; full ground
+truth available (ELProver faithful through pick 6078).
+
+NEXT: enumerate thvm's 5 slot-120x33 overlap positions vs WM's 126x36 set; find
+the missing position; inspect why atp_overlap_ij skips that superposition (or
+whether WM forms it via rule re-processing thvm lacks).  Verify against matrix.
+
+## (CONFOUNDED, superseded by the ROOT CAUSE above) equation-retention finding
+
+The "thvm 15 vs WM 39 equations" and "8 vs 36 equation-overlap formations" below
+are **full-run counts** -- thvm's run is 35891 picks vs WM's 64800, so thvm
+naturally has fewer of everything; the comparison is confounded by run-length,
+NOT established as the @6078 cause.  Verified: the @6078-selected 2-var CP in
+WM's heap is `CP(126, 36)` w2=23993 -- **both RULES (rule x rule), not an
+equation overlap**.  rule 126 = `dot(x1,dot(dot(x2,x3),dot(dot(x3,x2),x1)))
+-> dot(x1,x1)`; rule 36 = `dot(x1,dot(dot(x1,x2),dot(x2,x3))) -> dot(x2,x1)`.
+And thvm forms MORE rule x rule 2-var CPs than WM (53 vs 44), so it is NOT
+under-forming rule x rule.  => @6078 is most likely a formation-TIMING gap (thvm
+forms the 126x36-analog 2-var CP at a different cp_seq, so it is absent/consumed
+at exactly pick 6078), not a missing-equation gap.
+
+## OBSTACLE: WM multi-counter numbering blocks clean correlation
+WM uses several independent counters -- ElternNr (KP identity, shown in heap
+`CP(a,b)`), heap w2 (++CPNr classification age, the selection tie-break),
+SUE-add age (a different counter in `added to SUE: w,age`), and rule-orient order
+(`added as new rule N`).  These do NOT coincide (verified: the 3-var CP's
+SUE-age 24441 != any weight-120 heap-w2), and parent numbering may even differ
+between the instrumented ELProver and the reference wmcli.  This has blocked
+cleanly mapping WM's @6078 formation event to thvm's facts across ~16 iterations.
+UNBLOCK CANDIDATE: add a WM-side per-classification dump (ElternNr, w1, w2,
+parent ElternNrs + parent TERMS, CP term) at NewClassification, giving one
+consistent map; then correlate the w2=23993 CP to its parents' terms and check
+thvm's enumeration of that exact rule x rule overlap.
+
+## (CONFOUNDED -- see correction above) thvm keeps fewer unoriented equations
+
+Decisive counts (faithful WM trace + thvm BATCH orientation tally):
+* WM keeps **39 equations** total; **19 distinct** of them produce the 2-var CP.
+* thvm uses only **~15 distinct unoriented facts** as CP producers total, and only
+  **6 distinct** produce the 2-var CP.
+
+So thvm's orientation/equation-retention criterion KEEPS ~2.6x fewer unoriented
+equations than WM -- thvm orients (or subsumes away) equations WM retains as
+bidirectional E-set members.  Those missing equations never emit their
+equation-overlap CPs in thvm, including the 2-var-CP instances WM forms in the
+6078 epoch -> the @6078 heap lacks the 2-var CP.  (Consistent with prefix
+matching to 6077: the extra equation CPs are higher-weight and not selected
+until 6078.)
+
+This is FAITHFUL-FIXABLE with ground truth (ELProver is faithful for Meredith):
+the divergence is in the KBO orientation criterion (when is an equation
+orientable?) and/or equation subsumption.  WM keeps a KBO-incomparable equation
+unoriented (bidirectional); thvm likely orients some of these (or its eq-subsume
+drops them).  NEXT: pick one WM-kept equation (e.g. a -11/-12/-13 term), find
+the analogous thvm fact, and confirm thvm orients/drops it where WM keeps it;
+then port WM's orientation/retention criterion.  Verify against the matrix.
+
 ## Open question (next step)
 
 Identify the rule newly added around WM age ~23993 whose overlap produces

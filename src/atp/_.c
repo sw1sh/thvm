@@ -8427,6 +8427,20 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   atp_ensure_rule_cap(s, s->n_rules + 1);
   s->lhs[s->n_rules] = lhs;
   s->rhs[s->n_rules] = rhs;
+  // Gated rule-add trace (THVM_ATP_RULE_TRACE): slot + S-expr LHS/RHS, so a
+  // rule can be matched by term to Waldmeister's rule set (sidesteps WM's
+  // ElternNr/w2 counter confusion -- correlate by term, not number).
+  {
+    static int rt = -1;
+    if (rt < 0) rt = (getenv("THVM_ATP_RULE_TRACE") != NULL) ? 1 : 0;
+    if (rt) {
+      fprintf(stderr, "RULEADD slot=%u lhs=", s->n_rules);
+      atp_dbg_print_term(stderr, lhs);
+      fprintf(stderr, " rhs=");
+      atp_dbg_print_term(stderr, rhs);
+      fputc('\n', stderr);
+    }
+  }
   // A compaction may have vacated this slot with a stale GJ status;
   // every fresh fact starts untested (WM: a fresh termpair object).
   s->r_gj_status[s->n_rules] = ATP_GJ_ST_UNKNOWN;
