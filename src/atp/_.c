@@ -15166,7 +15166,17 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
                                 &big[k].cp);
     }
     qsort(big, n_big, sizeof(AtpWmoCpEnt), atp_wmo_ent_cmp);
+    // Gated batch-order trace (THVM_ATP_BATCH_TRACE): emit the sorted
+    // (outer f, i, j, combo, packed key) in push order so thvm's
+    // per-fact CP enumeration order can be diffed against Waldmeister's
+    // `critical pair N built with parents X and Y` formation sequence.
+    static int batch_trace = -1;
+    if (batch_trace < 0) batch_trace = (getenv("THVM_ATP_BATCH_TRACE") != NULL) ? 1 : 0;
     for (u32 k = 0; k < n_big; k++) {
+      if (batch_trace)
+        fprintf(stderr, "BATCH f=%u i=%u j=%u i_or=%u j_or=%u combo=%u key=%llu\n",
+                f, big[k].i, big[k].j, s->r_orient[big[k].i], s->r_orient[big[k].j],
+                big[k].combo, (unsigned long long)big[k].key);
       pushed += atp_push_cps_traced(s, &big[k].cp, 1u,
                                     s->r_trace[big[k].i],
                                     s->r_trace[big[k].j],

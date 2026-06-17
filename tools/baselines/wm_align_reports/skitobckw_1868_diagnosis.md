@@ -45,10 +45,31 @@ For (eq-17,rule140) vs (eq-17,rule138) the tie is broken by k1 (the overlap
 position in eq-17) then `arr` (the rule's tops-DFS rank).  One of those two
 components is mis-ordered vs WM's DSBaum order.
 
-## Next step
+## Pinned: it is the tops-DFS rank (`wmo_tops_rank` arr), not the position
 
-Decode thvm's full eq-17 batch order (CPFORM + parent rules) and diff against
-WM's `4 145 140 138 ...`; find the first inversion; determine whether it is the
-preorder position (k1) or the tops-DFS rank (`wmo_tops_rank`, arr) that diverges,
-then port WM's DSBaum order for the equation-superposition (tops) phase -- a
-wm_order.c rank fix in the established 12-fix methodology.
+A gated batch-order trace (THVM_ATP_BATCH_TRACE) over `thvm_atp_generate_cps_wm`
+shows eq-17 is thvm fact **f=155** (unoriented).  The W/Y-variant CPs are
+`combo=0` overlaps (i=155, j=rule, j_or=1), and their `atp_wmo_rank` keys differ
+by EXACTLY 2^28 per CP -- i.e. only the `arr` field (the rule's tops-DFS rank)
+varies; phase/k1(position)/k2(tree) are identical.  So all batch rules overlap
+eq-17 at the SAME position and the order is purely `wmo_tops_rank`.
+
+thvm's rule order (thvm slot indices, arr = 0,1,2,...):
+
+    148 141 140 143 138 139 133 ...   (j=141 is the Y-rule, j=143 the W-rule)
+
+so thvm ranks the Y-rule (141) before the W-rule (143).  WM's DSBaum retrieval
+order has W's rule (140) before Y's rule (138).  => `wmo_tops_rank` walks the
+discrimination tree in a different order than WM for this configuration.
+
+## BLOCKER for the fix
+
+The fix needs WM's discrimination-tree traversal order as ground truth, but the
+source-built ELProver goal-reduces SKIToBCKW (cannot reach the eq-17 batch to
+BA_DumpBaum).  The reference `wmcli` (deterministic 44823, blind-saturate) was
+built with a DIFFERENT config than this source tree's ELProver (478KB vs 419KB;
+identical source, all my edits inert/stats-only; CMake builds ELProver with
+WALD_LIB=1=MathLink, not the standalone wmcli) -- that build config is not yet
+identified.  Options: (a) crack the reference build config to get a saturating
+instrumented ELProver; (b) reason about `wmo_tops_rank` from the batch rules'
+LHS structures + WM's known order without the tree.
