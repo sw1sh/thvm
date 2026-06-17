@@ -337,7 +337,8 @@ int main(void) {
     CHECK(contains(cu, "__shared__ half _Bsm"));
     CHECK(contains(cu, "__syncthreads();"));
     CHECK(contains(cu, "uint _tm = (tg / "));
-    // K-block loop steps by KB=32 (the staged K-block).
+    // Single-buffered by default (THVM_TC_DB=1 enables the double-buffered
+    // _kit pipeline): K-block loop over _k0 stepping by KB=32.
     CHECK(contains(cu, "_k0 += 32u"));
     // Inner K-subtile loop steps by 16 (the WMMA K-tile).
     CHECK(contains(cu, "_kk += 16u"));

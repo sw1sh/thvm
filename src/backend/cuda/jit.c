@@ -850,10 +850,23 @@ fn int cuda_tc_tile_dispatch_shape(struct KernelEntry *ke, u32 *grid_x,
   if (!uop_dag_classify_matmul_shape(sroot, ke, &gemm)) return 0;
   if (gemm.M == 0 || gemm.N == 0 || gemm.K == 0) return 0;
   if ((gemm.flags & 1u) != 0) return 0;                 // transposed A: naive path
-  if (gemm.dtype != DT_BF16 && gemm.dtype != DT_FP16) return 0;
+  // bf16 WMMA fragments need Ampere (sm>=80); fp16 works on any WMMA arch.
+  // Mirror the renderer's gate so the launch geometry never disagrees with
+  // the emitted kernel on a pre-Ampere device (there the bf16 matmul takes
+  // the naive flat path, NOT the tiled grid).
+  if (gemm.dtype == DT_BF16) {
+    if (cuda_device_sm() < 80) return 0;
+  } else if (gemm.dtype != DT_FP16) {
+    return 0;
+  }
   if ((gemm.M % 16u) || (gemm.N % 16u) || (gemm.K % 16u)) return 0;
   RmuTcTile tile;
-  if (!rmu_tc_pick_tile_cuda(gemm.M, gemm.N, gemm.K, &tile)) return 0;
+  // The bf16-scratch budget depends on the OUTPUT (C) dtype, not the operand
+  // dtype (gemm.dtype is A/B): a bf16/fp16 C needs the nwarps*256 convert
+  // scratch (store_matrix_sync can't widen f32->bf16), an f32 C stores direct.
+  u32 dt_c = uop_buffer_dtype(heap_read(term_val(sroot) + 0));
+  int c_is_bf = (dt_c == DT_BF16 || dt_c == DT_FP16);
+  if (!rmu_tc_pick_tile_cuda(gemm.M, gemm.N, gemm.K, c_is_bf, &tile)) return 0;
   u32 tile_m = tile.local_m * tile.rm * 16u;
   u32 tile_n = tile.local_n * tile.rn * 16u;
   u64 ntg = (u64)(gemm.M / tile_m) * (u64)(gemm.N / tile_n);
