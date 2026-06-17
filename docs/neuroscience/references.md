@@ -45,6 +45,19 @@ have no peer-reviewed paper.
   *Nature Neuroscience* (2023). <https://doi.org/10.1038/s41593-023-01535-w>
 - Deepak Pathak et al., "Curiosity-driven exploration by
   self-supervised prediction", ICML 2017. <https://arxiv.org/abs/1705.05363>
+- John E. Lisman & Anthony A. Grace, "The Hippocampal-VTA Loop:
+  Controlling the Entry of Information into Long-Term Memory",
+  *Neuron* 46(5):703-713 (2005).
+  <https://doi.org/10.1016/j.neuron.2005.05.002> (novelty signalled to
+  the dopamine system; the novelty-bonus substrate).
+- Kent C. Berridge & Terry E. Robinson, "Parsing reward" (incentive
+  salience -- "wanting" vs "liking"), *Trends in Neurosciences*
+  26(9):507-513 (2003). <https://doi.org/10.1016/S0166-2236(03)00233-9>
+- Brad E. Pfeiffer & David J. Foster, "Hippocampal place-cell sequences
+  depict future paths to remembered goals", *Nature* 497:74-79 (2013).
+  <https://doi.org/10.1038/nature12112> (goal-directed forward
+  simulation -- vicarious trial-and-error; cf. A. David Redish's work
+  on deliberation).
 - Kimberly L. Stachenfeld, Matthew M. Botvinick & Samuel J. Gershman,
   "The hippocampus as a predictive map", *Nature Neuroscience*
   20:1643-1653 (2017). <https://doi.org/10.1038/nn.4650>
@@ -91,6 +104,15 @@ have no peer-reviewed paper.
   <https://arxiv.org/abs/2506.09985> · blog
   <https://ai.meta.com/blog/v-jepa-2-world-model-benchmarks/> ·
   code <https://github.com/facebookresearch/vjepa2>
+- Adrien Bardes, Jean Ponce & Yann LeCun, "VICReg: Variance-Invariance-
+  Covariance Regularization for Self-Supervised Learning", ICLR 2022;
+  arXiv:2105.04906. <https://arxiv.org/abs/2105.04906> (the classic
+  joint-embedding anti-collapse regulariser).
+- Randall Balestriero & Yann LeCun, "LeJEPA: Provable and Scalable
+  Self-Supervised Learning Without the Heuristics" (introduces SIGReg,
+  the sketched isotropic-Gaussian regulariser), 2025 (search arXiv by
+  title; ID to confirm). Used in the page-9 follow-up on non-collapsing
+  latent-prediction-error curiosity.
 - Randall Balestriero & Yann LeCun, "LeJEPA: Provable and Scalable
   Self-Supervised Learning Without the Heuristics", arXiv:2511.08544
   (Nov 2025). <https://arxiv.org/abs/2511.08544> ·
@@ -921,6 +943,36 @@ are mostly mature pre-2022 work the thvm arc would port.
 - Adria Puigdomenech Badia et al., "Agent57: Outperforming the Atari
   Human Benchmark", arXiv:2003.13350 (2020).
   <https://arxiv.org/abs/2003.13350> (also cited for page 8.)
+
+### Learning progress, automatic curriculum, and proposer collapse
+
+- Celeste Kidd, Steven T. Piantadosi & Richard N. Aslin, "The
+  Goldilocks Effect: Human Infants Allocate Attention to Visual
+  Sequences That Are Neither Too Simple Nor Too Complex", *PLoS ONE*
+  7(5):e36399 (2012). <https://doi.org/10.1371/journal.pone.0036399>
+- Pierre-Yves Oudeyer & Frederic Kaplan, "What is Intrinsic
+  Motivation? A Typology of Computational Approaches", *Frontiers in
+  Neurorobotics* 1:6 (2007).
+  <https://doi.org/10.3389/neuro.12.006.2007>
+- Jurgen Schmidhuber, "Formal Theory of Creativity, Fun, and
+  Intrinsic Motivation (1990-2010)", *IEEE Trans. Autonomous Mental
+  Development* 2(3):230-247 (2010).
+  <https://doi.org/10.1109/TAMD.2010.2056368>
+- Marcelo G. Mattar & Nathaniel D. Daw, "Prioritized memory access
+  explains planning and hippocampal replay", *Nature Neuroscience*
+  21:1609-1617 (2018). <https://doi.org/10.1038/s41593-018-0232-z>
+- Amitai Shenhav, Matthew M. Botvinick & Jonathan D. Cohen, "The
+  Expected Value of Control: An Integrative Theory of Anterior
+  Cingulate Cortex Function", *Neuron* 79(2):217-240 (2013).
+  <https://doi.org/10.1016/j.neuron.2013.07.007>
+- Luke Bailey, Kaiyue Wen, Kefan Dong, Tatsunori Hashimoto & Tengyu
+  Ma, "Scaling Self-Play with Self-Guidance" (Self-Guided Self-Play,
+  SGS), arXiv:2604.20209 (2026). <https://arxiv.org/abs/2604.20209>
+- Naftali Tishby, Fernando C. Pereira & William Bialek, "The
+  Information Bottleneck Method", 1999; arXiv:physics/0004057.
+  <https://arxiv.org/abs/physics/0004057> (rate-distortion backbone of
+  the compression / MDL goal-prior -- maximise structure subject to
+  preserving conserved content, avoiding the blank-state collapse).
 
 ### Goal inference, skill discovery, empowerment
 
