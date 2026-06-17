@@ -2,11 +2,49 @@
 
 Date: 2026-06-17. Branch: main (worktree wm-parity).
 
-## Headline
+## RESOLUTION (2026-06-17, supersedes everything below)
+
+**thvm's CP-generation is CORRECT.  It is NOT a CP-gen completeness gap.**
+
+Every section below that pins @6078 on thvm "missing a 126x36 superposition"
+or "under-forming the 2-var CP" was built on a **wrong-parent-terms artifact**:
+the parents "rule 126" / "rule 36" were extracted by *rule-orientation-number*
+(`added as new rule N`), which is a DIFFERENT counter from the `ElternNr` the
+heap records in `CP(126,36)`.  The unit test therefore overlapped the wrong two
+terms and (correctly, for those wrong inputs) failed to produce the 2-var CP.
+
+Anchoring by an invariant fixed it.  The 2-var CP carries a stable FIFO
+classification counter `w2 = ++CPNr = 23993` (NewClassification.c `C_Classify`),
+immune to WM's rule slot/ElternNr reuse.  A new gated dump
+`WM_CLASSDUMP_W2=23993` prints the TRUE formation parents at classification:
+
+    actualParent (ElternNr 126): f(x1, f(x2, f(f(x3,x1), f(x4,x3)))) -> f(f(x2,x3), x1)   [4 vars]
+    otherParent  (ElternNr 36):  f(x1, f(f(x1,x2), f(x2,x3)))        -> f(x2,x1)
+    formedCP:                    f(f(x1,x1),x2) # f(x2,f(x2,x1))
+
+Feeding *these* terms to `thvm_critical_pairs` (test `atp/meredith-6078-126x36-
+superposition`) yields **16 CPs including the 2-var** (CP5, verified by a
+bijective-variant check).  thvm forms the same 126x36 CP Waldmeister does.
+
+**Consequence:** @6078 is NOT a CP-gen bug.  If a divergence remains, it is
+UPSTREAM in rule derivation -- whether thvm derives the same ElternNr-126/36
+parent rules (esp. the 4-variable parent 126) at the same point.  That is a
+different investigation; the CP-generation path is exonerated.
+
+The instrumented-WM recipe (vendored waldmeister repo, env-gated, all in
+`KPVerwaltung.c` + `NewClassification.c`): `WM_HEAPDUMP_AT=<sel>` dumps the CP
+heap before a selection; `WM_CLASSDUMP_W2=<n>` dumps a CP's true formation
+parents by FIFO counter; `WM_CPP_A`/`WM_CPP_B` dump by ElternNr pair (unreliable
+-- ElternNr is reused, so it can miss the formation event).  Build:
+`make -f Makefile.MacOSX-ARM64 MLINKDIR=/tmp/wmlink ELProver`; run with
+`DYLD_FRAMEWORK_PATH=/tmp/wmlink/CompilerAdditions ./ELProver -a 4 <file.pr>`.
+
+## Headline (SUPERSEDED -- see RESOLUTION above; kept for the trail)
 
 The @6078 divergence is **NOT an emission-order bug** (the class all 12 prior
-fixes addressed).  It is a **CP-generation completeness gap**: at pick 6078
-thvm's CP heap is *missing* a weight-120 critical pair that Waldmeister has.
+fixes addressed).  ~~It is a **CP-generation completeness gap**: at pick 6078
+thvm's CP heap is *missing* a weight-120 critical pair that Waldmeister has.~~
+**Refuted** -- the "missing CP" was a measurement artifact (wrong parent terms).
 
 ## Method (the user's "modify wmcli and debug it properly" steer)
 

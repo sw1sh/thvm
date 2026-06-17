@@ -18,6 +18,32 @@ static Term mk_f(Term x, Term y) { Term cs[2] = {x, y}; return term_new_ctr(LAB_
 static Term mk_i(Term x)         { Term cs[1] = {x};    return term_new_ctr(LAB_i, cs, 1); }
 
 // Minimal recursive term printer for the Meredith @6078 isolation test.
+// Variant (alpha-equivalence) check for the single-binary-op Meredith algebra:
+// FVRs match under a bijective renaming; constants match by ext; constructors
+// by arity + children.  Sufficient here (only one function symbol f).
+static int mer_variant(Term a, Term b, int *fwd, int *bwd) {
+  if (a == 0 || b == 0) return a == b;
+  u32 ta = term_tag(a), tb = term_tag(b);
+  if ((ta == TAG_FVR) != (tb == TAG_FVR)) return 0;
+  if (ta == TAG_FVR) {
+    int va = (int) term_ext(a), vb = (int) term_ext(b);
+    if (va >= 64 || vb >= 64) return 0;
+    if (fwd[va] == -1 && bwd[vb] == -1) { fwd[va] = vb; bwd[vb] = va; return 1; }
+    return fwd[va] == vb && bwd[vb] == va;
+  }
+  u32 na = term_ctr_n(a), nb = term_ctr_n(b);
+  if (na != nb) return 0;
+  if (na == 0) return term_ext(a) == term_ext(b);
+  for (u32 i = 0; i < na; i++)
+    if (!mer_variant(term_ctr_at(a, i), term_ctr_at(b, i), fwd, bwd)) return 0;
+  return 1;
+}
+static int mer_variant_eq(Term a, Term b) {
+  int fwd[64], bwd[64];
+  for (int i = 0; i < 64; i++) { fwd[i] = -1; bwd[i] = -1; }
+  return mer_variant(a, b, fwd, bwd);
+}
+
 static void mer_pt(FILE *fp, Term t) {
   if (t == 0) { fputs("()", fp); return; }
   u32 tag = term_tag(t);
@@ -191,35 +217,48 @@ int main(void) {
   thvm_init();
 
   // Meredith @6078 isolation: does thvm's CP-gen produce the 2-var CP
-  // dot(dot(a,a),b) # dot(b,dot(b,a)) from rule126 x rule36?  (Term-anchored,
-  // confound-free: no slots/counters/full-run.)  WM forms it (cp 37130); the
-  // matrix shows thvm's heap lacks it at pick 6078.
+  // f(f(a,a),b) # f(b,f(b,a)) from WM's ElternNr-126 x ElternNr-36 parents?
+  // The parent TERMS below were extracted from WM via WM_CLASSDUMP_W2=23993
+  // (the 2-var CP's stable FIFO classification counter), so they are anchored
+  // by an invariant immune to WM's rule slot/ElternNr reuse.  This SUPERSEDES
+  // an earlier version that used rule-orientation-number-126/36 terms (wrong
+  // objects) and falsely concluded thvm omitted a standard 126x36 CP.
   TEST_BEGIN("atp/meredith-6078-126x36-superposition");
   {
     #define V(id) term_new(0, TAG_FVR, (id), 0)
-    // rule 126: f(v0, f(f(v1,v2), f(f(v2,v1), v0))) -> f(v0,v0)
-    Term l126 = mk_f(V(0), mk_f(mk_f(V(1),V(2)), mk_f(mk_f(V(2),V(1)), V(0))));
-    Term r126 = mk_f(V(0), V(0));
-    // rule 36: f(v0, f(f(v0,v1), f(v1,v2))) -> f(v1,v0)
+    // ElternNr 126: f(x1, f(x2, f(f(x3,x1), f(x4,x3)))) -> f(f(x2,x3), x1)
+    Term l126 = mk_f(V(0), mk_f(V(1), mk_f(mk_f(V(2),V(0)), mk_f(V(3),V(2)))));
+    Term r126 = mk_f(mk_f(V(1),V(2)), V(0));
+    // ElternNr 36: f(x1, f(f(x1,x2), f(x2,x3))) -> f(x2,x1)
     Term l36  = mk_f(V(0), mk_f(mk_f(V(0),V(1)), mk_f(V(1),V(2))));
     Term r36  = mk_f(V(1), V(0));
     Term lhs[2] = { l126, l36 };
     Term rhs[2] = { r126, r36 };
     CriticalPair out[256] = {{0, 0}};
+    extern int g_cp_visit_trace;
+    if (getenv("THVM_MER6078")) g_cp_visit_trace = 1;  // per-position unify trace
     u32 n = thvm_critical_pairs(lhs, rhs, 2, out, 256);
-    // Confound-free isolation of Meredith @6078: WM forms the 2-var CP
-    // f(f(a,a),b) # f(b,f(b,a)) from these two rules (cp 37130), but thvm's
-    // full CP enumeration here produces NONE.  Open fork: thvm cp_visit
-    // incomplete (bug) vs the 2-var not a standard 126x36 superposition (WM
-    // mechanism).  Verbose dump gated behind THVM_MER6078 to keep the suite quiet.
+    g_cp_visit_trace = 0;
+    // WM forms the 2-var CP  f(f(a,a),b) # f(b,f(b,a))  from these parents.
+    // Check whether thvm's complete enumeration produces it (in either
+    // orientation, modulo variable renaming the printed form is canonical).
+    Term wl = mk_f(mk_f(V(0),V(0)), V(1));        // f(f(a,a),b)
+    Term wr = mk_f(V(1), mk_f(V(1),V(0)));        // f(b,f(b,a))
+    int found_2var = 0;
+    for (u32 k = 0; k < n; k++) {
+      if ((mer_variant_eq(out[k].lhs, wl) && mer_variant_eq(out[k].rhs, wr)) ||
+          (mer_variant_eq(out[k].lhs, wr) && mer_variant_eq(out[k].rhs, wl)))
+        found_2var = 1;
+    }
     if (getenv("THVM_MER6078")) {
-      fprintf(stderr, "MER6078: thvm_critical_pairs(126,36) = %u CPs:\n", n);
+      fprintf(stderr, "MER6078: thvm_critical_pairs(ElternNr 126,36) = %u CPs (2-var found=%d):\n", n, found_2var);
       for (u32 k = 0; k < n; k++) {
         fprintf(stderr, "  CP%u: ", k);
         mer_pt(stderr, out[k].lhs); fputs(" # ", stderr); mer_pt(stderr, out[k].rhs);
         fprintf(stderr, "  (pos_len=%u)\n", out[k].pos_len);
       }
     }
+    CHECK(found_2var);  // thvm must form the same 126x36 CP WM does
     #undef V
   }
 
