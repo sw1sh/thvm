@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TSubexprAt
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TSubexprAt
 Keywords: [subexpression, path, locator, navigate]

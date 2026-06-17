@@ -8,7 +8,7 @@
    [_, _]] == 2 -- the source of every "2" in the TSV. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 tsvPath   = "tools/baselines/wl_notable_theorems.tsv";
 proofsDir = "tools/baselines/proofs";

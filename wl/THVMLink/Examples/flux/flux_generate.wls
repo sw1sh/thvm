@@ -20,7 +20,20 @@
      THVM_MAX_LIVE_BYTES=30000000000 wl -f flux_generate.wls
    Needs the FLUX.2-klein-4B weights under ~/.cache/thvm/flux2-klein-4b/. *)
 
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"];
+(* enable the forward-only realize reclaim by default (unless the caller
+   already set it): the Qwen eager encode + the per-block sampler + the VAE
+   each need the realize-boundary mark-sweep to free stranded buffers, so a
+   plain `wl -f flux_generate.wls` runs under the 10GB peak without the caller
+   exporting THVM_FWD_RECLAIM.  Read once here, before the runtime caches it. *)
+If[ Environment["THVM_FWD_RECLAIM"] === $Failed, SetEnvironment["THVM_FWD_RECLAIM" -> "1"]];
+If[ Environment["THVM_MMAP_NO_WILLNEED"] === $Failed, SetEnvironment["THVM_MMAP_NO_WILLNEED" -> "1"]];
+(* Raise the live-buffer ceiling: the zero-copy wrap excludes the 7.75GB of
+   weights from the live-byte count, but a full-forward JIT capture still pins
+   ~8.5GB of block activations -- over the 8GiB default backstop.  Actual peak
+   RSS stays ~7-8GB (the wrap's mmap weights are clean file-cache, ~0 footprint).
+   Set before the runtime caches getenv; the caller can override for a tighter cap. *)
+If[ Environment["THVM_MAX_LIVE_BYTES"] === $Failed, SetEnvironment["THVM_MAX_LIVE_BYTES" -> "30000000000"]];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "FluxGenerate.wl"}]];
 TInit[]; TReset[];
 pr[a___] := (WriteString["stdout", a, "\n"]; $Output // Flush);

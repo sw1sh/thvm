@@ -6,7 +6,7 @@
    thvm has no WHERE or MAX opcode; the same 0/1 comparison masks
    TReLU uses compose them. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TReLU, "TReLU[x$] is elementwise max(x$, 0), lowered as x$ times a 0/1 less-than mask of x$ against 0."];
 GeneralUtilities`SetUsage[TWhere, "TWhere[cond$, a$, b$] selects a$ where the 0/1 mask cond$ is 1 and b$ where it is 0, lowered as cond$*a$ + (1 - cond$)*b$ (thvm has no WHERE opcode; cond$ is a comparison mask such as a$ < b$). The mask carries no gradient, so a$ gets cond$ and b$ gets 1 - cond$, matching a true ternary select. Keep both branches finite: the unselected branch is multiplied by 0, so an Inf/NaN there poisons the result."];

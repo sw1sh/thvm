@@ -41,7 +41,7 @@
        TEinRearrange["b (h c) -> b h c", x, "h" -> 4]
 *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TEinRearrange, "TEinRearrange[pattern$, x$, hints$$] reshapes, permutes, and broadcasts x$ by the einx pattern$ (which must specify \[Rule]).
 Composite axes split via Reshape, axis names permute via Permute, 1 slots insert or check unit dims, and any output axis missing from the input is broadcast via Expand.

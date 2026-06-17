@@ -75,7 +75,7 @@ override with `make WOLFRAM_APP="/Applications/Wolfram 14.0.app" wl`.
 
 ```wolfram
 PacletDirectoryLoad["wl/THVMLink"];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 
 TInit[];
 a = TTensorCreate @ NumericArray[{{1., 2.}, {3., 4.}}, "Real32"];

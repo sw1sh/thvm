@@ -9,7 +9,7 @@
    metadata, not from how arg1/2/3/4 are assembled. *)
 SetDirectory["/Users/swish/src/thvm"];
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 $RecursionLimit = 16384;
 Quiet @ TFindProof["InverseOfInverse", "GroupAxioms",
     Method -> "Completion", TimeConstraint -> 2.0];

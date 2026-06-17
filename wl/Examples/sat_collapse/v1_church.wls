@@ -8,7 +8,7 @@
    enumerates the leaves; sat-check = "any leaf reduces to NUM(1)?". *)
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInitContext[];
 (* ---- Church-bool primitives, registered as TDefs so each use
    alo-realizes a fresh dyn copy.  The TLam binders use Module-fresh

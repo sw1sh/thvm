@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTensorDType
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTensorDType
 Keywords: [tensor, dtype, f32, i32, type]

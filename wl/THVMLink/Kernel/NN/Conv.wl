@@ -3,7 +3,7 @@
    im2col, plus the kh*kw partial-sum reference), max-pool, and nearest 2x
    upsample. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TConv2D, "TConv2D[input$, weights$, bias$] builds a stride-1, no-padding 2-D convolution. input$ is {C_in, H, W} or batched {B, C_in, H, W}; weights$ is {C_out, C_in, kh, kw}; bias$ is {C_out}. Rank-3 routes through TConv2DIm2Col, rank-4 through TConv2DIm2ColBatched."];
 GeneralUtilities`SetUsage[TConv2DIm2Col, "TConv2DIm2Col[input$, weights$, bias$] is the im2col + matmul lowering of a stride-1, no-padding 2-D convolution, with the same signature and output shape as TConv2D. It builds the im2col operand xCol : {C_in*kh*kw, H_out*W_out}, then out = w_flat @ xCol via TMatMul (cblas_sgemm). TConv2D's default path."];

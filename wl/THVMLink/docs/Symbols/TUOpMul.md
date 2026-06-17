@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TUOpMul
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TUOpMul
 Keywords: [UOp, multiply, elementwise, tensor]

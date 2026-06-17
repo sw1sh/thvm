@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TReset
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TReset
 Keywords: [reset, heap, init, scratch]

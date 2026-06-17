@@ -31,7 +31,7 @@
 
 PacletDirectoryLoad["wl/THVMLink"];
 Needs["MUnit`"];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 
 VerificationTest[
     TInit[];

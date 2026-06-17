@@ -2,7 +2,7 @@
 (* Level 3 -- softmax (N=512) on thvm. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

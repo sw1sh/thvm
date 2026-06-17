@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: THeapBase
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/THeapBase
 Keywords: [heap, lower bound, base, Cheney]

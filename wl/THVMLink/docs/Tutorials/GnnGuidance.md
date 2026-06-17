@@ -2,7 +2,7 @@
 Template: TechNote
 Name: GnnGuidance
 Title: "Learned Guidance: a GNN for Critical-Pair Selection"
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/GnnGuidance
 Keywords: [ENIGMA, GNN, graph neural network, machine learning, critical pair, clause selection, learned guidance, GCN, safetensors, proof relevance, theorem proving]
@@ -74,15 +74,15 @@ did not. Only proved goals contribute, and structurally identical rules are
 de-duplicated.
 
 ```wl
-ds = TAtpGraphDataset["GroupAxioms"];
+ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
 Length @ ds["Graphs"]
 ```
-<!-- => 106 -->
+<!-- => 103 -->
 
 ```wl
 {ds["NPos"], ds["NNeg"], ds["NProofs"]}
 ```
-<!-- => {69, 37, 5} -->
+<!-- => {66, 37, 5} -->
 
 The same builder takes an explicit conjecture set against shared axioms, or
 a list of `ProofObject`s straight from [TFindProof]() (positives only; pass
@@ -111,16 +111,17 @@ cross-entropy and Adam. It returns a report whose `"Model"` is the trained
 network.
 
 ```wl
-ds = TAtpGraphDataset["GroupAxioms"];
+SeedRandom[1234];
+ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
 r = TAtpTrainGnn[ds, "Hidden" -> 16, "Rounds" -> 2, MaxTrainingRounds -> 120];
 r["LossStart"]
 ```
-<!-- => 1.1179 -->
+<!-- => 1.0197 -->
 
 ```wl
 r["LossEnd"]
 ```
-<!-- => 0.6460 -->
+<!-- => 0.6245 -->
 
 The loss falls as the network learns proof relevance. With the default
 config (`"Hidden" -> 32`, `"Rounds" -> 3`, 300 Adam steps) and a by-problem
@@ -129,10 +130,10 @@ held-out split on this theory, the proof-relevance score reaches a test
 of about 0.89, generalizing to theorems it never trained on:
 
 ```wl
-#| eval: false
-TAtpTrainGnn["GroupAxioms"]["TrainAUC"]
+SeedRandom[1234];
+TAtpTrainGnn["GroupAxioms", TimeConstraint -> 10]["TrainAUC"]
 ```
-<!-- => 0.87 (train); ~0.89 held-out by-problem -->
+<!-- => 0.7600 (train); ~0.89 held-out by-problem -->
 
 ## Saving and loading
 

@@ -13,7 +13,7 @@
    "fof_nnf"; these map through $SZSRuleToConstruct's table (any
    unmapped name defaults to SubstitutionLemma). *)
 
-BeginPackage["THVMLink`ATP`", {"Wolfram`Parser`"}]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"Wolfram`Parser`"}]
 
 GeneralUtilities`SetUsage[TEproverProof, "TEproverProof[file$, opts$] runs the local E prover binary on the TPTP problem file$ (path ending in .p) and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawSZS.
 TEproverProof[\"Theory\", \"thm\"] resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.

@@ -15,7 +15,7 @@
    Run: DEV=metal wolframscript -f bench/sat_collapse/profile_breakdown.wls *)
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInitContext[];
 ctx = TContextNew["metal"];
 If[ ctx === 0, Print["SKIP: Metal context unavailable"]; Exit[0]];

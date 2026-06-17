@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TKernelProposed
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TKernelProposed
 Keywords: [kernel, opt, propose, autotune, UPCAST, UNROLL]

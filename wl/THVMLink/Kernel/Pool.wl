@@ -30,10 +30,10 @@
                       runtime between trials with TReset.  Returns a
                       Tabular comparing wall, fires, idle/active. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 (* Forward-declare sibling-owned symbols so resolution lands in
-   THVMLink` not Private`. *)
+   WolframInstitute`THVMLink` not Private`. *)
 {TInit, TReset, TNf, TTerm};
 
 GeneralUtilities`SetUsage[TThreads, "TThreads[] returns the worker count nf will use on the next call.

@@ -17,7 +17,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 Get["wl/Examples/_lib/Mnist.wl"];
 
 envValue[name_String, default_String] := Module[{v = Environment[name]},

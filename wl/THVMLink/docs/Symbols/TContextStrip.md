@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TContextStrip
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TContextStrip
 Keywords: [context, snapshot, strip, tensors, shape-only]

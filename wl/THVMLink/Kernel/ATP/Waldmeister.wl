@@ -18,7 +18,7 @@
    Result Association uses the same keys as TVampireProof + the
    same downstream TSZSDerivationToProofObject path. *)
 
-BeginPackage["THVMLink`ATP`"]
+BeginPackage["WolframInstitute`THVMLink`ATP`"]
 
 GeneralUtilities`SetUsage[TWaldmeisterProof, "TWaldmeisterProof[file$] runs the local Waldmeister wmcli binary on the WM .pr problem file$, parses its proof-protocol output, and returns a normalized Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawProtocol.
 The input must be Waldmeister's own .pr format, not TPTP; a (theory, theorem) two-argument form would need a TPTP-to-pr converter and is not yet supported.

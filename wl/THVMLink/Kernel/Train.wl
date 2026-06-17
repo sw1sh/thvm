@@ -25,7 +25,7 @@
    now (the batched forward keeps the batch axis for a rank-2 input;
    FlattenLayer / conv batching is a TFromNet follow-up). *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TNetTrain, "TNetTrain[net$, data$, \"TrainingNet\", opts$] returns an inert TTerm: the whole optimiser as a recursive interaction-net term whose base case is the forward; TWnf drives it, firing every training step in place and reducing to the trained forward term.
 TNetTrain[net$, data$, opts$] is the convenience form that TWnf's it for you and returns the trained forward.

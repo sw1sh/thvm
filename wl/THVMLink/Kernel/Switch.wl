@@ -8,7 +8,7 @@
    def can MAT on the iteration counter, decrement it via OP2
    SUB, and recurse via TRef. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TNum, "TNum[i$] returns a TTerm wrapping a TAG_NUM atom holding the integer i$ as DT_I32.
 TNum[i$, dtype$] picks the dtype (\"i32\" or \"f32\"); for f32 the value is bit-reinterpreted, so use TUOpConst for arithmetic floats."];

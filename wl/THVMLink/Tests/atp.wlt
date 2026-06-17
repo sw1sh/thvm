@@ -21,7 +21,7 @@ VerificationTest[
 ]
 
 (* Build an FVR(0) Term via the raw thvm_wl_term_new entry. *)
-fvr0 = THVMLink`Private`$termNewFn[0, 22 (* TAG_FVR *), 0, 0];
+fvr0 = WolframInstitute`THVMLink`Private`$termNewFn[0, 22 (* TAG_FVR *), 0, 0];
 
 VerificationTest[
     (* Self-equation x = x with goal x = x.  goal_check fires
@@ -31,7 +31,7 @@ VerificationTest[
         {1, 1, fvr0, fvr0, fvr0, fvr0, 0},
         "Integer64"
       ];
-      stats = THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
+      stats = WolframInstitute`THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
       Normal @ stats
     ],
     (* Adding the axiom pushes a TRACE_AXIOM entry; goal_check fires
@@ -45,12 +45,12 @@ VerificationTest[
        RUNNING (not equal); saturation has no CPs to pop and returns
        QUEUE_EMPTY (status code 4). *)
     Module[{fvr1, packed, stats},
-      fvr1 = THVMLink`Private`$termNewFn[0, 22, 1, 0];
+      fvr1 = WolframInstitute`THVMLink`Private`$termNewFn[0, 22, 1, 0];
       packed = NumericArray[
         {1, 0, fvr0, fvr1},
         "Integer64"
       ];
-      stats = THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
+      stats = WolframInstitute`THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
       Normal @ stats
     ],
     {4 (* ATP_QUEUE_EMPTY *), 0, 0, 0},
@@ -61,7 +61,7 @@ VerificationTest[
     (* Returned NumericArray has fixed shape [4]. *)
     Module[{packed, stats},
       packed = NumericArray[{1, 1, fvr0, fvr0, fvr0, fvr0, 0}, "Integer64"];
-      stats = THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
+      stats = WolframInstitute`THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
       Dimensions @ Normal @ stats
     ],
     {4},
@@ -73,14 +73,14 @@ VerificationTest[
        goal pairs after the axiom block.  Axiom f(x) = x joins BOTH
        goals f(x) == x and x == f(x) off one saturation. *)
     Module[{fvr1, fx, fx1, packed, stats},
-      fvr1 = THVMLink`Private`$termNewFn[0, 22, 1, 0];
-      fx  = THVMLink`ATP`Private`$termNewCtrFn[3, {fvr0}];
-      fx1 = THVMLink`ATP`Private`$termNewCtrFn[3, {fvr1}];
+      fvr1 = WolframInstitute`THVMLink`Private`$termNewFn[0, 22, 1, 0];
+      fx  = WolframInstitute`THVMLink`ATP`Private`$termNewCtrFn[3, {fvr0}];
+      fx1 = WolframInstitute`THVMLink`ATP`Private`$termNewCtrFn[3, {fvr1}];
       packed = NumericArray[
         {2, 1, fx, fvr0, fx, fvr0, fx1, fvr1, 0},
         "Integer64"
       ];
-      stats = THVMLink`ATP`Private`$atpRunFn[packed, 16, 4];
+      stats = WolframInstitute`THVMLink`ATP`Private`$atpRunFn[packed, 16, 4];
       First @ Normal @ stats
     ],
     1 (* ATP_PROVED -- every conjunct joined *),
@@ -93,10 +93,10 @@ VerificationTest[
     (* A bare symbol becomes a nullary CTR.  Verify the resulting
        Term has TAG_CTR (20). *)
     Module[{result, t, state},
-      state = THVMLink`ATP`Private`encodeAtpTermInit[];
-      result = THVMLink`ATP`Private`encodeAtpTerm[zero, state];
+      state = WolframInstitute`THVMLink`ATP`Private`encodeAtpTermInit[];
+      result = WolframInstitute`THVMLink`ATP`Private`encodeAtpTerm[zero, state];
       t = result[[1]];
-      THVMLink`Private`$termTagFn[t]
+      WolframInstitute`THVMLink`Private`$termTagFn[t]
     ],
     20 (* TAG_CTR *),
     TestID -> "ATP/encoder/symbol-becomes-nullary-ctr"
@@ -106,9 +106,9 @@ VerificationTest[
     (* Distinct symbols get distinct labels.  After encoding zero
        and nil, the symbol map should have 2 entries. *)
     Module[{state, r1, r2},
-      state = THVMLink`ATP`Private`encodeAtpTermInit[];
-      r1 = THVMLink`ATP`Private`encodeAtpTerm[zero, state];
-      r2 = THVMLink`ATP`Private`encodeAtpTerm[nil, r1[[2]]];
+      state = WolframInstitute`THVMLink`ATP`Private`encodeAtpTermInit[];
+      r1 = WolframInstitute`THVMLink`ATP`Private`encodeAtpTerm[zero, state];
+      r2 = WolframInstitute`THVMLink`ATP`Private`encodeAtpTerm[nil, r1[[2]]];
       Length[r2[[2]]["sym"]]
     ],
     2,
@@ -120,12 +120,12 @@ VerificationTest[
        children.  Verify the resulting Term's tag and the symbol
        map size. *)
     Module[{state, result, t},
-      state = THVMLink`ATP`Private`encodeAtpTermInit[];
-      result = THVMLink`ATP`Private`encodeAtpTerm[
+      state = WolframInstitute`THVMLink`ATP`Private`encodeAtpTermInit[];
+      result = WolframInstitute`THVMLink`ATP`Private`encodeAtpTerm[
         f[zero, succ[zero]], state
       ];
       t = result[[1]];
-      {THVMLink`Private`$termTagFn[t], Length[result[[2]]["sym"]]}
+      {WolframInstitute`THVMLink`Private`$termTagFn[t], Length[result[[2]]["sym"]]}
     ],
     {20 (* TAG_CTR *), 3 (* f, zero, succ *)},
     TestID -> "ATP/encoder/compound-head-becomes-ctr-with-children"
@@ -134,10 +134,10 @@ VerificationTest[
 VerificationTest[
     (* Pattern[x, Blank[]] becomes a TAG_FVR. *)
     Module[{state, result, t},
-      state = THVMLink`ATP`Private`encodeAtpTermInit[];
-      result = THVMLink`ATP`Private`encodeAtpTerm[Pattern[x, Blank[]], state];
+      state = WolframInstitute`THVMLink`ATP`Private`encodeAtpTermInit[];
+      result = WolframInstitute`THVMLink`ATP`Private`encodeAtpTerm[Pattern[x, Blank[]], state];
       t = result[[1]];
-      {THVMLink`Private`$termTagFn[t], Length[result[[2]]["var"]]}
+      {WolframInstitute`THVMLink`Private`$termTagFn[t], Length[result[[2]]["var"]]}
     ],
     {22 (* TAG_FVR *), 1},
     TestID -> "ATP/encoder/pattern-becomes-fvr"
@@ -146,9 +146,9 @@ VerificationTest[
 VerificationTest[
     (* Same pattern variable name reused gets the same FVR id. *)
     Module[{state, r1, r2},
-      state = THVMLink`ATP`Private`encodeAtpTermInit[];
-      r1 = THVMLink`ATP`Private`encodeAtpTerm[Pattern[x, Blank[]], state];
-      r2 = THVMLink`ATP`Private`encodeAtpTerm[Pattern[x, Blank[]], r1[[2]]];
+      state = WolframInstitute`THVMLink`ATP`Private`encodeAtpTermInit[];
+      r1 = WolframInstitute`THVMLink`ATP`Private`encodeAtpTerm[Pattern[x, Blank[]], state];
+      r2 = WolframInstitute`THVMLink`ATP`Private`encodeAtpTerm[Pattern[x, Blank[]], r1[[2]]];
       (* Var map should still have 1 entry; both encodes return the
          same Term value. *)
       {Length[r2[[2]]["var"]], r1[[1]] == r2[[1]]}
@@ -1658,7 +1658,7 @@ VerificationTest[
         r = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             All];
         {AssociationQ[r],
-         Sort[Keys[r]] === Sort[THVMLink`ATP`Private`$AtpReturnSpecs]}
+         Sort[Keys[r]] === Sort[WolframInstitute`THVMLink`ATP`Private`$AtpReturnSpecs]}
     ],
     {True, True},
     TestID -> "ATP/returnspec/all-projects-every-spec"
@@ -1709,9 +1709,9 @@ VerificationTest[
 (* The size-reducing soundness predicate itself: orientable rules pass,
    the commutativity variant is rejected. *)
 VerificationTest[
-    {THVMLink`ATP`Private`atpRuleSizeReducingQ[{g[g[x]], x}, {x}],
-     THVMLink`ATP`Private`atpRuleSizeReducingQ[{CenterDot[x, x], x}, {x}],
-     THVMLink`ATP`Private`atpRuleSizeReducingQ[
+    {WolframInstitute`THVMLink`ATP`Private`atpRuleSizeReducingQ[{g[g[x]], x}, {x}],
+     WolframInstitute`THVMLink`ATP`Private`atpRuleSizeReducingQ[{CenterDot[x, x], x}, {x}],
+     WolframInstitute`THVMLink`ATP`Private`atpRuleSizeReducingQ[
         {CircleTimes[x, y], CircleTimes[y, x]}, {x, y}]},
     {True, True, False},
     TestID -> "ATP/returnspec/counterexample-size-reducing-predicate"
@@ -1787,7 +1787,7 @@ VerificationTest[
 VerificationTest[
     Module[{f, prof},
         f = CircleDot;
-        prof = THVMLink`ATP`Private`atpAnalyzeStructure[{
+        prof = WolframInstitute`THVMLink`ATP`Private`atpAnalyzeStructure[{
             ForAll[{x, y}, f[x, y] == f[y, x]],
             ForAll[{x, y, z}, f[f[x, y], z] == f[x, f[y, z]]]}];
         {prof["Operators"][f]["Commutative"],
@@ -1803,7 +1803,7 @@ VerificationTest[
    -> AbelianGroup, has-inverse + has-unit set on the product op. *)
 VerificationTest[
     Module[{prof, op},
-        prof = THVMLink`ATP`Private`atpAnalyzeStructure["AbelianGroupAxioms"];
+        prof = WolframInstitute`THVMLink`ATP`Private`atpAnalyzeStructure["AbelianGroupAxioms"];
         op = CircleTimes;
         {prof["Class"],
          prof["Operators"][op]["HasInverse"],
@@ -1818,7 +1818,7 @@ VerificationTest[
 (* GroupAxioms (no commutativity axiom) -> Group, has-inverse+has-unit. *)
 VerificationTest[
     Module[{prof, op},
-        prof = THVMLink`ATP`Private`atpAnalyzeStructure["GroupAxioms"];
+        prof = WolframInstitute`THVMLink`ATP`Private`atpAnalyzeStructure["GroupAxioms"];
         op = CircleTimes;
         {prof["Class"],
          prof["Operators"][op]["HasInverse"],
@@ -1831,14 +1831,14 @@ VerificationTest[
 (* WolframAxioms: a single binary Sheffer/Nand operator, no other
    structure -> "Sheffer". *)
 VerificationTest[
-    THVMLink`ATP`Private`atpAnalyzeStructure["WolframAxioms"]["Class"],
+    WolframInstitute`THVMLink`ATP`Private`atpAnalyzeStructure["WolframAxioms"]["Class"],
     "Sheffer",
     TestID -> "ATP/autotune/analyze-Sheffer-WolframAxioms"
 ]
 
 (* CommutativeRingAxioms: + and *, distributivity, inverse -> Ring. *)
 VerificationTest[
-    THVMLink`ATP`Private`atpAnalyzeStructure["CommutativeRingAxioms"]["Class"],
+    WolframInstitute`THVMLink`ATP`Private`atpAnalyzeStructure["CommutativeRingAxioms"]["Class"],
     "Ring",
     TestID -> "ATP/autotune/analyze-Ring"
 ]
@@ -1851,18 +1851,18 @@ VerificationTest[
    Mix2-bare first entry, which fails to crack the CAG saturation
    in reasonable time.  Post-fix the GT-bare front cracks it. *)
 VerificationTest[
-    THVMLink`ATP`Private`atpAnalyzeStructure["AbelianMcCuneAxioms"]["Class"],
+    WolframInstitute`THVMLink`ATP`Private`atpAnalyzeStructure["AbelianMcCuneAxioms"]["Class"],
     "CancellativeAbelianGroup",
     TestID -> "ATP/autotune/analyze-AbelianMcCune-CAG"
 ]
 VerificationTest[
-    THVMLink`ATP`Private`atpAnalyzeStructure["McCuneAxioms"]["Class"],
+    WolframInstitute`THVMLink`ATP`Private`atpAnalyzeStructure["McCuneAxioms"]["Class"],
     "CancellativeAbelianGroup",
     TestID -> "ATP/autotune/analyze-McCune-CAG"
 ]
 (* atpAutoTune for CAG returns the GT-front schedule. *)
 VerificationTest[
-    Module[{sched = THVMLink`ATP`Private`atpAutoTune["AbelianMcCuneAxioms"]},
+    Module[{sched = WolframInstitute`THVMLink`ATP`Private`atpAutoTune["AbelianMcCuneAxioms"]},
         And[Length[sched] >= 1,
             First[sched] === {"Completion", "CriticalPairWeight" -> "Gt"}]
     ],
@@ -1873,7 +1873,7 @@ VerificationTest[
 (* atpAutoTune returns a non-empty list of valid Method configs. *)
 VerificationTest[
     Module[{sched},
-        sched = THVMLink`ATP`Private`atpAutoTune["AbelianGroupAxioms"];
+        sched = WolframInstitute`THVMLink`ATP`Private`atpAutoTune["AbelianGroupAxioms"];
         And[Length[sched] > 0,
             AllTrue[sched, MatchQ[#,
                 (_String | {_String, ___Rule})] &]]
@@ -1887,11 +1887,11 @@ VerificationTest[
    can never prove less than "Portfolio". *)
 VerificationTest[
     Module[{tuned, fixed},
-        tuned = THVMLink`ATP`Private`atpScheduleFor[Automatic,
+        tuned = WolframInstitute`THVMLink`ATP`Private`atpScheduleFor[Automatic,
             AxiomaticTheory["AbelianGroupAxioms"],
             AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"][
                 "InverseOfInverse"]];
-        fixed = THVMLink`ATP`Private`$AtpSchedule;
+        fixed = WolframInstitute`THVMLink`ATP`Private`$AtpSchedule;
         (* every fixed config is present in the tuned schedule *)
         And @@ (MemberQ[tuned, #] & /@ fixed)
     ],
@@ -1903,7 +1903,7 @@ VerificationTest[
    the fixed tail (a Group config with AutoPrecedence comes first). *)
 VerificationTest[
     Module[{tuned},
-        tuned = THVMLink`ATP`Private`atpScheduleFor[Automatic,
+        tuned = WolframInstitute`THVMLink`ATP`Private`atpScheduleFor[Automatic,
             AxiomaticTheory["AbelianGroupAxioms"],
             AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"][
                 "InverseOfInverse"]];
@@ -1916,9 +1916,9 @@ VerificationTest[
 
 (* "Portfolio" stays the FIXED schedule (prior behavior reachable). *)
 VerificationTest[
-    THVMLink`ATP`Private`atpScheduleFor["Portfolio",
+    WolframInstitute`THVMLink`ATP`Private`atpScheduleFor["Portfolio",
         AxiomaticTheory["AbelianGroupAxioms"], Null] ===
-        THVMLink`ATP`Private`$AtpSchedule,
+        WolframInstitute`THVMLink`ATP`Private`$AtpSchedule,
     True,
     TestID -> "ATP/autotune/portfolio-stays-fixed"
 ]
@@ -2196,7 +2196,7 @@ VerificationTest[
 VerificationTest[
     With[{r = TFindProof["InverseOfInverse", "AbelianGroupAxioms", All]},
         {AssociationQ[r],
-         Sort[Keys[r]] === Sort[THVMLink`ATP`Private`$AtpReturnSpecs],
+         Sort[Keys[r]] === Sort[WolframInstitute`THVMLink`ATP`Private`$AtpReturnSpecs],
          Head[r["ProofObject"]]}
     ],
     {True, True, ProofObject},
@@ -2385,7 +2385,7 @@ VerificationTest[
 (* Automatic with no problem in hand returns the fixed $AtpSchedule
    (no structure-recognition tailoring possible without conj+ax). *)
 VerificationTest[
-    TAtpSchedule[Automatic] === THVMLink`ATP`Private`$AtpSchedule,
+    TAtpSchedule[Automatic] === WolframInstitute`THVMLink`ATP`Private`$AtpSchedule,
     True,
     TestID -> "ATP/schedule/Automatic-no-problem-falls-back-to-AtpSchedule"
 ]
@@ -2415,7 +2415,7 @@ VerificationTest[
    A future preset addition has to extend the registry, which keeps
    the doc and dispatcher in sync. *)
 VerificationTest[
-    With[{p = THVMLink`ATP`Private`$AtpMethodPresets},
+    With[{p = WolframInstitute`THVMLink`ATP`Private`$AtpMethodPresets},
         {ListQ[p], AllTrue[p, StringQ],
          SubsetQ[p, {"Waldmeister", "VampireUEQ", "Twee", "EProver",
                      "Portfolio", "VampirePortfolio",
@@ -2919,7 +2919,7 @@ VerificationTest[
             TAtpCpGraph[Inactive[Equal][CircleTimes[a, b], b]],
             TAtpCpGraph[Inactive[Equal][a, a]]}, "Labels" -> {1, 0}|>;
         nMax = Max[#["NNodes"] & /@ ds["Graphs"]];
-        bt = THVMLink`ATP`Private`atpGnnTensors[ds];
+        bt = WolframInstitute`THVMLink`ATP`Private`atpGnnTensors[ds];
         {Dimensions[bt["X"]] === {2, nMax, 6},
          Dimensions[bt["A"]] === {2, nMax, nMax},
          Dimensions[bt["Y"]] === {2, 2}, bt["B"] === 2, bt["F"] === 6}],
@@ -3032,12 +3032,12 @@ TAtpSetGnnScorer[Clear];
    The C-side flag is dormant in commit 1 (storage scaffolding only), so
    we cannot assert a behavioural change end-to-end -- but the decoder
    already plumbs through atpParseCompletionOpts, so a direct probe of
-   THVMLink`ATP`Private`atpImplicitCpOpt covers the WL-side wiring. *)
+   WolframInstitute`THVMLink`ATP`Private`atpImplicitCpOpt covers the WL-side wiring. *)
 VerificationTest[
-    {THVMLink`ATP`Private`atpImplicitCpOpt[<|"UseImplicitCp" -> True|>],
-     THVMLink`ATP`Private`atpImplicitCpOpt[<|"UseImplicitCp" -> False|>],
-     THVMLink`ATP`Private`atpImplicitCpOpt[<|"UseImplicitCp" -> Automatic|>],
-     THVMLink`ATP`Private`atpImplicitCpOpt[<||>]},
+    {WolframInstitute`THVMLink`ATP`Private`atpImplicitCpOpt[<|"UseImplicitCp" -> True|>],
+     WolframInstitute`THVMLink`ATP`Private`atpImplicitCpOpt[<|"UseImplicitCp" -> False|>],
+     WolframInstitute`THVMLink`ATP`Private`atpImplicitCpOpt[<|"UseImplicitCp" -> Automatic|>],
+     WolframInstitute`THVMLink`ATP`Private`atpImplicitCpOpt[<||>]},
     {1, 0, 0, 0},
     TestID -> "ATP/options/implicit-cp-decoder"
 ]
@@ -3048,9 +3048,9 @@ TAtpSetLearnedScorer[Clear];
 (* WMMixmostNF option decoder round-trip (the WM `-nf mixmost` default
    strategy + Regelbaum retrieval order; args[42]). *)
 VerificationTest[
-    {THVMLink`ATP`Private`atpWmMixmostNfOpt[<|"WMMixmostNF" -> True|>],
-     THVMLink`ATP`Private`atpWmMixmostNfOpt[<|"WMMixmostNF" -> False|>],
-     THVMLink`ATP`Private`atpWmMixmostNfOpt[<||>]},
+    {WolframInstitute`THVMLink`ATP`Private`atpWmMixmostNfOpt[<|"WMMixmostNF" -> True|>],
+     WolframInstitute`THVMLink`ATP`Private`atpWmMixmostNfOpt[<|"WMMixmostNF" -> False|>],
+     WolframInstitute`THVMLink`ATP`Private`atpWmMixmostNfOpt[<||>]},
     {1, 0, 0},
     TestID -> "ATP/options/wm-mixmost-nf-decoder"
 ]

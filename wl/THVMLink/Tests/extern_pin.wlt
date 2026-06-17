@@ -4,7 +4,7 @@
                     and the TTerm wrappers are no longer reachable. *)
 
 BeginPackage["THVMLinkTests`Extern`Pin`",
-    {"THVMLink`", "MUnit`"}];
+    {"WolframInstitute`THVMLink`", "MUnit`"}];
 
 Begin["`Private`"];
 

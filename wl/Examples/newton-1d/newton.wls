@@ -19,7 +19,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"]
-Get["THVMLink`"]
+Get["WolframInstitute`THVMLink`"]
 
 (* Build f(x) symbolically as a UOp graph rooted at TEN handle x.
    x is mutated in place across iterations via TAssign so we can

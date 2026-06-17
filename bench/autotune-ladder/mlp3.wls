@@ -6,7 +6,7 @@
    LinearLayer-boundary or is a fixed overhead. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

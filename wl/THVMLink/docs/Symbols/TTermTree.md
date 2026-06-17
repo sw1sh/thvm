@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTermTree
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTermTree
 Keywords: [tree, term, visual, ExpressionTree]

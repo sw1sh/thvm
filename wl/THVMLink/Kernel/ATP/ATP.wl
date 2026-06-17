@@ -38,10 +38,10 @@
 
    See docs/plans/waldmeister_ic_atp.md for the algorithmic intent. *)
 
-(* THVMLink`ATP` is the single ATP entry context.  All public ATP /
-   SMT symbols live here so user code can do `Get["THVMLink`ATP`"]`
-   (or equivalently `<< THVMLink`ATP``) and call them by bare name.
-   THVMLink` is on the context path so bare IC primitives (TDef /
+(* WolframInstitute`THVMLink`ATP` is the single ATP entry context.  All public ATP /
+   SMT symbols live here so user code can do `Get["WolframInstitute`THVMLink`ATP`"]`
+   (or equivalently `<< WolframInstitute`THVMLink`ATP``) and call them by bare name.
+   WolframInstitute`THVMLink` is on the context path so bare IC primitives (TDef /
    TRef / TLam / ...) owned by sibling Kernel files still resolve
    transparently.  Wolfram`Parser` is on the path so `TPTPImport`
    (the EBNFParse-driven TPTP parser, now a sibling in the
@@ -50,11 +50,11 @@ Needs["Wolfram`Parser`"];
 
 (* Implementation split across sibling files in this directory (Gotten
    after this one by the recursive Kernel loader, all sharing the
-   THVMLink`ATP`Private` context):
+   WolframInstitute`THVMLink`ATP`Private` context):
      ATP_ProofGraph.wl   proof decoder + ProofDataset + critical-pair-lemma DAG
      ATP_Method.wl       TAtpSchedule / TAtpDescribeMethod + structure auto-tune
      ATP_Relevance.wl    TRelevantAxioms premise-selection filter *)
-BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
 
 GeneralUtilities`SetUsage[TATP, "TATP[{lhs$1 == rhs$1, $$}, conjecture$] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.
 TATP[File[path$]] parses a Waldmeister .pr file and runs the saturator directly.
@@ -139,8 +139,8 @@ Options: \"RerankPeriod\", MaxSteps, \"CriticalPairWeight\", \"Ordering\", \"Aut
 
 (* Forward-declare sibling-file public symbols (SMT.wl owns
    TSatEUF / TSmtDecide) so bare references inside this file's
-   Begin[`Private`] resolve to the shared THVMLink`ATP`X symbol
-   rather than creating a phantom THVMLink`ATP`Private`X.  The
+   Begin[`Private`] resolve to the shared WolframInstitute`THVMLink`ATP`X symbol
+   rather than creating a phantom WolframInstitute`THVMLink`ATP`Private`X.  The
    alphabetical autoload order means those symbols don't exist yet
    when this file is parsed; the bare mention here pre-creates them
    in the public context.  TPTPImport now lives in Wolfram`Parser`
@@ -155,7 +155,7 @@ Options: \"RerankPeriod\", MaxSteps, \"CriticalPairWeight\", \"Ordering\", \"Aut
 (* (The IC primitives TDef / TRef / TLam / TCollapse / ... are owned by
    the depth-4 sibling Switch.wl, which already loaded before this
    depth-5 file -- bare references resolve via the context path
-   THVMLink` pushed by the BeginPackage second arg.) *)
+   WolframInstitute`THVMLink` pushed by the BeginPackage second arg.) *)
 
 Begin["`Private`"];
 
@@ -192,10 +192,10 @@ Scan[
      "THVM_ATP_WMFPA",    "THVM_ATP_CP_INDEX"}];
 
 (* `load` is the LibraryFunctionLoad helper defined in
-   THVMLink`Private` by THVMLink.wl; alias it here so bare `load[...]`
+   WolframInstitute`THVMLink`Private` by THVMLink.wl; alias it here so bare `load[...]`
    in $atpRunProofFn / $atpRunExistFn / ... resolves to the same
-   helper (THVMLink`ATP`Private is a separate context). *)
-load = THVMLink`Private`load;
+   helper (WolframInstitute`THVMLink`ATP`Private is a separate context). *)
+load = WolframInstitute`THVMLink`Private`load;
 
 (* Diagnostic: when True, every Throw[$Failed] inside the ProofObject
    dataset assembly (buildCplDataset / buildCEngineChain / cplOrient)
@@ -724,6 +724,16 @@ $termNewCtrFn := $termNewCtrFn = load[
     Integer
 ]
 
+(* The remaining term / heap LibraryLink primitives the encoder and the
+   proof decoder need live in the base package's private context; bind
+   them to bare names here so the encode / decode bodies read without the
+   long context prefix. *)
+$termNewFn := $termNewFn = WolframInstitute`THVMLink`Private`$termNewFn
+$termTagFn := $termTagFn = WolframInstitute`THVMLink`Private`$termTagFn
+$termExtFn := $termExtFn = WolframInstitute`THVMLink`Private`$termExtFn
+$termValFn := $termValFn = WolframInstitute`THVMLink`Private`$termValFn
+$heapReadFn := $heapReadFn = WolframInstitute`THVMLink`Private`$heapReadFn
+
 (* === WL-expression to Term encoder ================================ *)
 
 (* Map:
@@ -775,7 +785,8 @@ encodeAtpTerm[Verbatim[Pattern][name_Symbol, Blank[]], state_Association] := Blo
     varId, st
 },
     {varId, st} = ensureVar[varName, state];
-    {THVMLink`Private`$termNewFn[0, 22 (* TAG_FVR *), varId, 0], st}
+    {$termNewFn[0, 22 (* TAG_FVR *), varId, 0],
+     atpKeepVarObj[st, varId, Hold[name]]}
 ]
 
 encodeAtpTerm[s_Symbol, state_Association] := Block[{
@@ -783,7 +794,8 @@ encodeAtpTerm[s_Symbol, state_Association] := Block[{
     lab, st
 },
     {lab, st} = ensureSym[sym, state];
-    {THVMLink`Private`$termNewCtrFn[lab, {}], st}
+    {$termNewCtrFn[lab, {}],
+     atpKeepSymObj[st, lab, Hold[s]]}
 ]
 
 (* A numeric literal (e.g. the `1` in OverTilde[1], the identity-
@@ -796,7 +808,7 @@ encodeAtpTerm[n:(_Integer | _Real | _Rational), state_Association] := Block[{
     lab, st
 },
     {lab, st} = ensureSym[sym, state];
-    {THVMLink`Private`$termNewCtrFn[lab, {}], st}
+    {$termNewCtrFn[lab, {}], st}
 ]
 
 (* A String literal -- the user spelling an atom as `"a"` instead of
@@ -812,7 +824,7 @@ encodeAtpTerm[s_String, state_Association] := Block[{
     lab, st
 },
     {lab, st} = ensureSym[s, state];
-    {THVMLink`Private`$termNewCtrFn[lab, {}], st}
+    {$termNewCtrFn[lab, {}], st}
 ]
 
 (* Fold step that threads the encoder state through a list of
@@ -828,9 +840,10 @@ encodeAtpTerm[expr_, state_Association] := Block[{
     lab, st, childEncs
 },
     {lab, st} = ensureSym[sym, state];
+    st = atpKeepSymObj[st, lab, Extract[expr, 0, Hold]];
     {childEncs, st} =
         Fold[encodeChildStep, {{}, st}, List @@ expr];
-    {THVMLink`Private`$termNewCtrFn[lab, childEncs], st}
+    {$termNewCtrFn[lab, childEncs], st}
 ]
 
 (* Waldmeister `SO_const1` / `SO_const2` (SymbolOperationen.c:386-389):
@@ -844,8 +857,28 @@ encodeAtpTerm[expr_, state_Association] := Block[{
 encodeAtpTermInit[] := <|
     "sym" -> <|"cAtp1" -> 1, "cAtp2" -> 2|>,
     "var" -> <||>,
+    (* Original-symbol tables: label -> Hold[symbol] and varId ->
+       Hold[symbol] for every USER symbol the encoder sees.  The proof
+       decoder (decodeAtpTerm) restores these held originals instead of
+       re-interning Symbol[name] in the ambient $Context, so a decoded
+       term carries the caller's actual symbols -- identity-preserving and
+       context-free (a Global`-forced string-rewriting symbol round-trips
+       the same whatever context the lift runs in).  Engine-introduced
+       labels (cAtp1/cAtp2, FVI extension vars) have no entry and fall back
+       to the name table. *)
+    "symObj" -> <||>,
+    "varObj" -> <||>,
     "next_lab" -> 3
 |>
+
+(* Remember the held original for a label / var id, first writer wins (a
+   repeated symbol keeps its initial capture). *)
+atpKeepSymObj[st_Association, lab_, held_] := If[
+    KeyExistsQ[Lookup[st, "symObj", <||>], lab], st,
+    Append[st, "symObj" -> Append[Lookup[st, "symObj", <||>], lab -> held]]]
+atpKeepVarObj[st_Association, id_, held_] := If[
+    KeyExistsQ[Lookup[st, "varObj", <||>], id], st,
+    Append[st, "varObj" -> Append[Lookup[st, "varObj", <||>], id -> held]]]
 
 (* === ENIGMA Tier 2: anonymised CP hypergraph export ================ *)
 
@@ -1300,8 +1333,8 @@ TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
             lossStart = First[Normal @ TRealize @ loss];
             grads = TGrad[loss, params];
             lr = TUOpConst[lrVal];
-            name = THVMLink`Private`freshTrainName[];
-            THVMLink`Private`buildLoopAdam[params, grads, ms, vs, lr, name];
+            name = WolframInstitute`THVMLink`Private`freshTrainName[];
+            WolframInstitute`THVMLink`Private`buildLoopAdam[params, grads, ms, vs, lr, name];
             TWnf @ TApp[TRef[name], TNum[rounds]];
             lossEnd = First[Normal @ TRealize @ loss];
             scores = With[{p = Normal @ TRealize @ logits}, p[[All, 2]] - p[[All, 1]]]
@@ -3536,7 +3569,17 @@ atpSaturationCountermodel[bundle_] := Block[
    computed "RelevantAxioms" thunk.  A single String returns its value
    bare; a list returns an Association of just those keys; All returns
    every spec. *)
-atpReturnValue[bundle_, "ProofObject"] := bundle["ProofObject"];
+(* Emit the requested proof form: the built-in ProofObject (default) or
+   the native TProofObject (TProofObject.wl).  A non-ProofObject value
+   ($Failed, a CounterexampleObject) passes through unchanged.  The form
+   is dynamically scoped from the TFindProof entry ($atpEmitForm, set in
+   the entry Block) rather than threaded through the bundle, so it survives
+   the portfolio's recursive atpProveBundle calls. *)
+$atpEmitForm = "ProofObject";
+atpEmitProof[po_ProofObject, "TProofObject"] := atpProofObjectToTProofObject[po];
+atpEmitProof[po_, _] := po;
+
+atpReturnValue[bundle_, "ProofObject"] := atpEmitProof[bundle["ProofObject"], $atpEmitForm];
 atpReturnValue[bundle_, "Lemmas"] := atpMainRulesLemmas[bundle["cRes"]];
 atpReturnValue[bundle_, "PreprocessedAxioms"] :=
     holdToInactive /@ bundle["enc"]["AxHCsRaw"];
@@ -3643,7 +3686,10 @@ Options[TFindProof] = {
        Waldmeister,Eprover}ProofObject) when Method is one of the
        *Process names; ignored by the internal-engine path. *)
     "Binary" -> Automatic, "ParseFormulas" -> False,
-    "LiftToProofObject" -> False};
+    "LiftToProofObject" -> False,
+    (* "ProofObject" (default) returns the built-in ProofObject; "TProofObject"
+       returns the native, extensible thvm proof object (see TProofObject.wl). *)
+    "ProofForm" -> "ProofObject"};
 
 (* String form: resolve theorem + theory names through
    AxiomaticTheory, then run the expression form.  The conjecture
@@ -3726,31 +3772,31 @@ TFindProof[thm_String, theory_String,
                ProcessProofObject.wl in the alphabetical autoloader
                order, so the symbol is unresolved when this RHS is
                first parsed.  Without qualification it would land in
-               THVMLink`ATP`Private`.  Filter against the BUILDER's
+               WolframInstitute`THVMLink`ATP`Private`.  Filter against the BUILDER's
                option list (TVampireProofObject etc.), which
                includes the CLI wrapper's options PLUS the
                builder-only ParseFormulas. *)
-            Throw[THVMLink`ATP`TVampireProofObject[theory, thm,
+            Throw[WolframInstitute`THVMLink`ATP`TVampireProofObject[theory, thm,
                 FilterRules[{opts},
-                    Options[THVMLink`ATP`TVampireProofObject]]],
+                    Options[WolframInstitute`THVMLink`ATP`TVampireProofObject]]],
                 "TATPError"]
         ];
         If[ methodOpt === "TweeProcess",
-            Throw[THVMLink`ATP`TTweeProofObject[theory, thm,
+            Throw[WolframInstitute`THVMLink`ATP`TTweeProofObject[theory, thm,
                 FilterRules[{opts},
-                    Options[THVMLink`ATP`TTweeProofObject]]],
+                    Options[WolframInstitute`THVMLink`ATP`TTweeProofObject]]],
                 "TATPError"]
         ];
         If[ methodOpt === "WaldmeisterProcess",
-            Throw[THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
+            Throw[WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
                 FilterRules[{opts},
-                    Options[THVMLink`ATP`TWaldmeisterProofObject]]],
+                    Options[WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject]]],
                 "TATPError"]
         ];
         If[ methodOpt === "EproverProcess",
-            Throw[THVMLink`ATP`TEproverProofObject[theory, thm,
+            Throw[WolframInstitute`THVMLink`ATP`TEproverProofObject[theory, thm,
                 FilterRules[{opts},
-                    Options[THVMLink`ATP`TEproverProofObject]]],
+                    Options[WolframInstitute`THVMLink`ATP`TEproverProofObject]]],
                 "TATPError"]
         ];
         cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
@@ -3838,13 +3884,13 @@ TFindProof[s_String, opts:OptionsPattern[]] /;
    the WL ProofObject verifier (which expect Symbol heads) work as
    usual.  The conversion is one-way at dispatch time: TPTPImport's
    user-visible output stays String-headed for clean InputForm display
-   ("and"[X, Y] instead of THVMLink`...`Tptp`and[X, Y]). *)
+   ("and"[X, Y] instead of WolframInstitute`THVMLink`...`Tptp`and[X, Y]). *)
 (* CamelCase-fold underscored names so Symbol[] accepts them.
    sk_c1 -> skC1, op_overtilde -> opOvertilde, $true -> Dollar$true.
    Symbol[] rejects identifier strings with `_` (parsed as Blank) or
    leading `$` (parsed as $-prefix); this fold side-steps both. *)
 tptpStringToSymbol[s_String] :=
-    Symbol["THVMLink`ATP`Private`Tptp$" <> Which[
+    Symbol["WolframInstitute`THVMLink`ATP`Private`Tptp$" <> Which[
         StringStartsQ[s, "$"], "Dollar" <> StringDrop[s, 1],
         StringContainsQ[s, "_"], With[{parts = StringSplit[s, "_"]},
             First[parts] <> StringJoin[Capitalize /@ Rest[parts]]],
@@ -4046,7 +4092,8 @@ TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
             Global`x6, Global`x7, Global`x8, Global`x9, Global`x10,
             Global`x11, Global`x12,
             Global`y1, Global`y2, Global`y3,
-            Global`z1, Global`z2, Global`z3},
+            Global`z1, Global`z2, Global`z3,
+            $atpEmitForm = OptionValue["ProofForm"]},
         atpProjectReturn[
             atpProveBundle[
                 atpNormalizeConj[conjecture],
@@ -4067,7 +4114,8 @@ TFindProof[conjecture_, axioms_List,
             Global`x6, Global`x7, Global`x8, Global`x9, Global`x10,
             Global`x11, Global`x12,
             Global`y1, Global`y2, Global`y3,
-            Global`z1, Global`z2, Global`z3},
+            Global`z1, Global`z2, Global`z3,
+            $atpEmitForm = OptionValue["ProofForm"]},
         atpProjectReturn[
             atpProveBundle[
                 atpNormalizeConj[conjecture],
@@ -4385,20 +4433,22 @@ TFindProof[axiom : (_Equal | _Unequal | _ForAll
    Theorems slot is None to signal no goal.  Use TFindProof[axioms,
    "Lemmas"] for the saturated rule set. *)
 TFindProof[axioms_List, OptionsPattern[]] :=
-    atpProjectReturn[
-        atpCompletionBundle[atpNormalizeAxioms[axioms],
-            MaxSteps -> OptionValue[MaxSteps],
-            Method -> OptionValue[Method],
-            TimeConstraint -> OptionValue[TimeConstraint]],
-        "ProofObject"];
+    Block[{$atpEmitForm = OptionValue["ProofForm"]},
+        atpProjectReturn[
+            atpCompletionBundle[atpNormalizeAxioms[axioms],
+                MaxSteps -> OptionValue[MaxSteps],
+                Method -> OptionValue[Method],
+                TimeConstraint -> OptionValue[TimeConstraint]],
+            "ProofObject"]];
 TFindProof[axioms_List, returnSpec_?atpReturnSpecQ,
         OptionsPattern[]] :=
-    atpProjectReturn[
-        atpCompletionBundle[atpNormalizeAxioms[axioms],
-            MaxSteps -> OptionValue[MaxSteps],
-            Method -> OptionValue[Method],
-            TimeConstraint -> OptionValue[TimeConstraint]],
-        returnSpec];
+    Block[{$atpEmitForm = OptionValue["ProofForm"]},
+        atpProjectReturn[
+            atpCompletionBundle[atpNormalizeAxioms[axioms],
+                MaxSteps -> OptionValue[MaxSteps],
+                Method -> OptionValue[Method],
+                TimeConstraint -> OptionValue[TimeConstraint]],
+            returnSpec]];
 
 (* Completion of a named theory: resolve its axioms the same way the
    theory-prove forms do (unquantify + canonicalize), then complete. *)
@@ -4413,12 +4463,13 @@ atpTheoryCompletion[theory_String, returnSpec_,
                 "TATPError"]
         ];
         axioms = CanonicalizePatterns /@ (unquantifyFormula /@ axRaw);
-        atpProjectReturn[
-            atpCompletionBundle[axioms,
-                MaxSteps -> OptionValue[MaxSteps],
-                Method -> OptionValue[Method],
-                TimeConstraint -> OptionValue[TimeConstraint]],
-            returnSpec]
+        Block[{$atpEmitForm = OptionValue["ProofForm"]},
+            atpProjectReturn[
+                atpCompletionBundle[axioms,
+                    MaxSteps -> OptionValue[MaxSteps],
+                    Method -> OptionValue[Method],
+                    TimeConstraint -> OptionValue[TimeConstraint]],
+                returnSpec]]
     ],
     "TATPError"
 ];

@@ -1,0 +1,68 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  font-family: 'Source Sans Pro', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  color: #333;
+  background: #fff;
+}
+a { text-decoration: none; color: inherit; }
+
+/* header */
+#hdr {
+  position: fixed; top: 0; left: 0; right: 0; height: 56px;
+  background: #232629; color: #fff;
+  display: flex; align-items: center; padding: 0 20px;
+  z-index: 20; border-bottom: 3px solid #dd1100;
+}
+#hdr .brand { font-size: 20px; font-weight: 600; letter-spacing: .2px; color: #fff; cursor: pointer; }
+#hdr .brand .sub { font-size: 12px; font-weight: 400; color: #b9bdc1; margin-left: 10px; }
+#hdr .home {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; color: #cfd2d5; border: 1px solid #44484c;
+  padding: 5px 12px; border-radius: 4px;
+}
+#hdr .home:hover { background: #2e3236; color: #fff; }
+#hdr .home svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 2; }
+
+/* layout: guide + tutorials (left) | content | symbols (right) */
+#main { position: fixed; top: 56px; left: 0; right: 0; bottom: 0; display: flex; }
+#side, #side-right {
+  height: 100%; overflow-y: auto; overflow-x: hidden;
+  background: #fafafa; padding: 14px 0 40px;
+}
+#side { width: 320px; min-width: 220px; max-width: 42%; border-right: 1px solid #e3e3e3; resize: horizontal; }
+#side-right { width: 240px; min-width: 170px; max-width: 30%; border-left: 1px solid #e3e3e3; }
+#content { flex: 1; min-width: 0; height: 100%; position: relative; background: #fff; }
+#frame { width: 100%; height: 100%; border: 0; display: block; }
+#loading {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: #999; font-size: 14px; background: #fff; pointer-events: none;
+  opacity: 0; transition: opacity .15s;
+}
+#loading.on { opacity: 1; }
+
+/* shared list / link styling */
+#side ul, #side-right ul { list-style: none; margin: 0; padding: 0; }
+#side li, #side-right li { position: relative; }
+#side a, #side-right a {
+  display: block; padding: 6px 30px 6px 18px; line-height: 1.35;
+  color: #333; font-size: 14px; border-left: 3px solid transparent; white-space: normal;
+}
+#side a:hover, #side-right a:hover { background: #f0f1f2; }
+#side a.active, #side-right a.active { background: #fdeee9; color: #c4280b; border-left-color: #dd1100; }
+
+/* left: the guide */
+#side .nav-root > li { border-bottom: 1px solid #eee; }
+#side ul ul { padding-left: 14px; }
+#side a.gd { font-weight: 600; color: #2a2a2a; font-size: 15px; }
+
+/* left: thick delimiter, then tutorials (no heading) */
+.nav-sep { border-top: 4px solid #cfd2d6; margin: 18px 0 6px; }
+.rail-label {
+  display: block; padding: 4px 18px; font-size: 12px; font-weight: 600;
+  letter-spacing: .05em; text-transform: uppercase; color: #888;
+}
+#side a.tut { color: #1a6ba5; }
+
+/* right: symbols */
+#side-right a.sym { color: #1a6ba5; }

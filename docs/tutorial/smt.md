@@ -47,7 +47,7 @@ brings `TFindProof`, `TSatEUF`, `TSmtDecide`,
 `TPTPImport`, and the rest into scope by bare name:
 
 ```mathematica
-<< THVMLink`ATP`
+<< WolframInstitute`THVMLink`ATP`
 ```
 
 (Equivalently `Get["THVMLink\`ATP\`"]` or `Needs["THVMLink\`ATP\`"]`.)

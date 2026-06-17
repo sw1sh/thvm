@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: THeapPos
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/THeapPos
 Keywords: [heap, upper bound, position, bump pointer]

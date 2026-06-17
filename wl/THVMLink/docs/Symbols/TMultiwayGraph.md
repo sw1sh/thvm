@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMultiwayGraph
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMultiwayGraph
 Keywords: [multiway, multicomputation, slice, branchial, hvm4, WPP]

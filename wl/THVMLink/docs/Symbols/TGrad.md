@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TGrad
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TGrad
 Keywords: [autodiff, gradient, backward, VJP, auto-grad leaves]

@@ -55,7 +55,7 @@ All ATP-related public symbols (`TFindProof`, `TATP`,
 brings everything into scope by bare name:
 
 ```wolfram
-<< THVMLink`ATP`
+<< WolframInstitute`THVMLink`ATP`
 ```
 
 (Equivalent to `Get["THVMLink\`ATP\`"]` / `Needs["THVMLink\`ATP\`"]`.)
@@ -972,7 +972,7 @@ TAtpDescribeMethod["VampirePortfolioCompact"]
 recognizes:
 
 ```wolfram
-THVMLink`ATP`Private`$AtpMethodPresets
+WolframInstitute`THVMLink`ATP`Private`$AtpMethodPresets
 (* -> {"Waldmeister", "VampireUEQ", "Twee", "EProver",
        "Portfolio", "VampirePortfolio", "VampirePortfolioCompact",
        "AllPresets"} *)

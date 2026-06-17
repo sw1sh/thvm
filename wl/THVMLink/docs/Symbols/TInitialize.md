@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TInitialize
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TInitialize
 Keywords: [snapshot, restore, context, init, persist, cross-restart]

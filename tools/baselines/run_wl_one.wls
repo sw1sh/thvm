@@ -14,7 +14,7 @@
    tools/baselines/proofs/<theory>__<thm>.m -- a single Put[] file
    readable with Get[] for later inspection / comparison. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];   (* not strictly needed for the WL built-in path *)
+Get["WolframInstitute`THVMLink`"];   (* not strictly needed for the WL built-in path *)
 args = $ScriptCommandLine;
 theory = args[[2]];
 thm = args[[3]];

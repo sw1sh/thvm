@@ -11,7 +11,7 @@
    contribution of `PoolingLayer[{2,2}, "Stride" -> 2]`. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

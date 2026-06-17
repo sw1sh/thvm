@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: THeapGraph
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/THeapGraph
 Keywords: [interaction net, IC, heap, visualization, string diagram]

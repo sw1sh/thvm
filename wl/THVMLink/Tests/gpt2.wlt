@@ -15,7 +15,7 @@
    implement (Q.K^T scaled by 1/Sqrt[d_head], causal additive mask,
    row-softmax, .V, concat heads). *)
 
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 Needs["NeuralNetworks`"];
 
 rd[s_]    := Normal @ TTensorData @ TRealize[s];

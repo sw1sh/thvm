@@ -18,7 +18,7 @@ scriptDir = DirectoryName[$InputFileName];
 repoRoot = FileNameDrop[scriptDir, -3];   (* wl/Examples/proover -> repo root *)
 
 PacletDirectoryLoad[FileNameJoin[{repoRoot, "wl", "THVMLink"}]];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 haveLean = ! FailureQ @ Quiet @ Check[Needs["Wolfram`LeanLink`"], $Failed];
 

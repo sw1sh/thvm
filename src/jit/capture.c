@@ -129,17 +129,22 @@ typedef struct {
   u32               sites_built;
   u32               n_sites;
   JitInputSite     *sites;          // [n_sites]
-  // Set by jit_capture_finalize when two live captured dispatches write the
-  // SAME output buf_id (the scheduler recycled a buffer across the stream).
-  // Such a stream is UNSAFE for the Metal indirect-command-buffer replay path
-  // (see jit_replay_try_metal_graph_run): two ICB commands writing one physical
-  // MTLBuffer have undefined ordering on Apple GPUs even with setBarrier, and
-  // no encoder/command-buffer barrier recovers it (verified empirically).
-  // tinygrad's MetalGraph never reuses a buffer across a graph's kernels
-  // (runtime/graph/metal.py), so it never hits this; thvm's freelist/arena
-  // recycling does.  When set, replay walks the per-op path (correct, still
-  // scheduler-free) instead of batching into an ICB.
+  // Set by jit_capture_finalize when a captured dispatch reads a strided-view
+  // input the per-op path pre-materialises into a contiguous temp: the ICB
+  // encodes the raw input buffer and skips that gather, so the kernel would
+  // read strided bytes as contiguous.  Genuinely unsafe -- always decline the
+  // ICB for these (the FLUX double block's concat/slice views).
   u32               metal_graph_unsafe;
+  // Set by jit_capture_finalize when two live captured dispatches write the
+  // SAME output buf_id (the scheduler/arena recycled a buffer across the
+  // stream -- the natural memory-bounding reuse).  tinygrad's MetalGraph
+  // (runtime/graph/metal.py) emits exactly this kind of reuse and relies on
+  // a per-command [cmd setBarrier] to order the write-after-write within the
+  // ICB; thvm's metal_graph_build emits the same setBarrier.  Default: keep
+  // the ICB (the barrier orders the recycle) so the replay stays batched AND
+  // memory-bounded.  THVM_JIT_GRAPH_FORCE_ICB=0 reverts to the old per-op
+  // decline for a recycling stream (still correct, scheduler-free, slower).
+  u32               metal_graph_recycle;
 } JitCapture;
 
 static JitCapture JIT_CAPTURES[JIT_CAPTURE_NSLOTS];
@@ -150,6 +155,8 @@ static u32 JIT_PAUSE_DEPTH = 0;     // nested suppression for internal
                                     // benchmark fires (autotune, variants)
 
 static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots);
+static int jit_bufref_contains(JitCaptureBufRef const *refs, u32 n,
+                               Backend *b, u32 buf_id);
 
 static void jit_capture_mark_buf(Backend *b, u32 buf_id) {
   if (b == NULL || buf_id == 0) {
@@ -184,6 +191,45 @@ static void jit_capture_release_retained(JitCapture *c) {
     if (b->buf_decref != NULL)    b->buf_decref(buf_id);
   }
   c->n_retained = 0;
+}
+
+// Release every currently-retained buffer EXCEPT those named in `keep`
+// (a bufref set the live, non-skipped ops still need).  The kept entries
+// stay in c->retained with their original incref + jit_pin untouched, so a
+// buffer needed across the recording->finalize boundary is NEVER momentarily
+// decref'd to refcount 0 and hard-freed.  This is the fix for the FLUX
+// re-finalize free: recording incref+pins every dispatch's weight buffer;
+// the old unconditional release dropped a ~100MB bf16 weight to refcount 0
+// (a transient realize tensor + the per-realize rollback already released
+// its other ref), metal_buf_decref hard-freed the slot, and the subsequent
+// re-retain's metal_buf_jit_pin no-op'd on the now-nil buffer -- so replay
+// bound a nil MTLBuffer at the kernel's weight input.  Unpinning then
+// re-pinning a still-live buffer (the naive reorder) is wrong: jit_pinned is
+// a flag, not a count, so the trailing unpin would clear a pin the re-retain
+// just set.  Diff-based release keeps the flag stable.
+static void jit_capture_release_retained_except(JitCapture *c,
+                                                JitCaptureBufRef const *keep,
+                                                u32 n_keep) {
+  if (c == NULL || c->retained == NULL) {
+    return;
+  }
+  u32 kept = 0;
+  for (u32 i = 0; i < c->n_retained; i++) {
+    Backend *b = c->retained[i].backend;
+    u32 buf_id = c->retained[i].buf_id;
+    if (b == NULL || buf_id == 0) continue;
+    if (jit_bufref_contains(keep, n_keep, b, buf_id)) {
+      // Still needed by a live op: leave its incref + jit_pin in place and
+      // compact it down so c->retained holds exactly the surviving set.
+      c->retained[kept].backend = b;
+      c->retained[kept].buf_id  = buf_id;
+      kept++;
+      continue;
+    }
+    if (b->buf_jit_unpin != NULL) b->buf_jit_unpin(buf_id);
+    if (b->buf_decref != NULL)    b->buf_decref(buf_id);
+  }
+  c->n_retained = kept;
 }
 
 static void jit_capture_retain_buf(JitCapture *c, Backend *b, u32 buf_id) {
@@ -449,6 +495,23 @@ static u32 jit_metal_graph_max_dispatches(void) {
 static int jit_replay_pack_enabled(void) {
   char const *e = getenv("THVM_JIT_REPLAY_PACK");
   return e == NULL || e[0] != '0';
+}
+
+// THVM_JIT_GRAPH_FORCE_ICB (default ON) -- batch a buffer-recycling capture
+// (two live dispatches writing one physical buffer) into the ICB anyway,
+// relying on the per-command [cmd setBarrier] in metal_graph_build to order
+// the write-after-write.  This is tinygrad's MetalGraph invariant
+// (runtime/graph/metal.py calls setBarrier on every indirect command).  =0
+// reverts to the old per-op decline for recycling streams.  Memoised.
+static int jit_metal_graph_force_icb(void) {
+  static int known = 0;
+  static int v = 1;
+  if (!known) {
+    char const *e = getenv("THVM_JIT_GRAPH_FORCE_ICB");
+    v = (e == NULL || e[0] != '0');
+    known = 1;
+  }
+  return v;
 }
 
 // Count distinct UOP nodes reachable from a lifted-DAG root.  Used by
@@ -1065,7 +1128,22 @@ static int jit_capture_replay_lifetime(JitCapture *c, u32 idx,
 }
 
 static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
-  if (!jit_replay_pack_enabled() || c == NULL || root != 0
+  // The replay memory planner (tinygrad's _internal_memory_planner): reuse a
+  // dead-lifetime temporary buffer for a later op of the same size+backend so
+  // the capture's resident set is bounded to its live working set, not the sum
+  // of every intermediate.  For the FLUX velocity net this collapses ~6.75GB
+  // of 25-block activations to ~one block's worth -- the lever for a <10GB
+  // full-forward.  The reuse makes two ops write one physical buffer; the
+  // per-command [cmd setBarrier] in metal_graph_build orders that WAW so the
+  // batched ICB stays correct (confirmed on M3 by flux_jit_replay.wlt).  The
+  // result buffer is excluded by jit_capture_replay_packable_output.  Runs for
+  // with-result captures too by default; THVM_JIT_PACK_RESULT=0 disables.
+  static int pack_result = -1;
+  if (pack_result < 0) {
+    char const *e = getenv("THVM_JIT_PACK_RESULT");
+    pack_result = (e == NULL || e[0] != '0') ? 1 : 0;
+  }
+  if (!jit_replay_pack_enabled() || c == NULL || (root != 0 && !pack_result)
       || c->n_ops == 0) {
     return;
   }
@@ -1340,7 +1418,58 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
     }
   }
 
-  jit_capture_release_retained(c);
+  // Build the set of buffers the live (non-skipped) ops still need, then
+  // release only the recording-time retained buffers that DROPPED OUT of that
+  // set (skipped/dead).  A buffer still needed keeps its original incref +
+  // jit_pin across the boundary -- it is never decref'd to refcount 0, so a
+  // ~100MB FLUX weight held only by the capture (its transient realize tensor
+  // already rolled back) cannot be hard-freed here and re-pinned as nil.  See
+  // jit_capture_release_retained_except.
+  JitCaptureBufRef *live = (JitCaptureBufRef *)calloc(
+      JIT_CAPTURE_RETAIN_CAP, sizeof(JitCaptureBufRef));
+  u32 n_live = 0;
+  if (live != NULL) {
+    for (u32 i = 0; i < c->n_ops; i++) {
+      JitCaptureOp *op = &c->ops[i];
+      if (op->replay_skip) continue;
+      switch (op->kind) {
+        case JIT_OP_DISPATCH: {
+          Backend *out_b = jit_dispatch_output_backend(op);
+          jit_bufref_add(live, &n_live, out_b, op->out_buf_id);
+          u32 const *ids = op->heap_in_buf_ids != NULL
+                         ? op->heap_in_buf_ids
+                         : op->in_buf_ids;
+          for (u32 k = 0; k < op->n_inputs; k++) {
+            jit_bufref_add(live, &n_live, jit_dispatch_input_backend(op, k),
+                           ids[k]);
+          }
+          break;
+        }
+        case JIT_OP_ASSIGN: {
+          if (op->assign_dst_tid != 0 && op->assign_dst_tid < TENS_NEXT) {
+            TenDesc *td = &TENS[op->assign_dst_tid];
+            jit_bufref_add(live, &n_live, td->backend, td->buf_id);
+          }
+          if (op->assign_src_tid != 0 && op->assign_src_tid < TENS_NEXT) {
+            TenDesc *td = &TENS[op->assign_src_tid];
+            jit_bufref_add(live, &n_live, td->backend, td->buf_id);
+          }
+          break;
+        }
+        case JIT_OP_GATHER: {
+          Backend *gb = (Backend *)op->gather_backend;
+          jit_bufref_add(live, &n_live, gb, op->gather_src_buf);
+          jit_bufref_add(live, &n_live, gb, op->gather_dst_buf);
+          break;
+        }
+      }
+    }
+  }
+  if (live != NULL) {
+    jit_capture_release_retained_except(c, live, n_live);
+  } else {
+    jit_capture_release_retained(c);   // OOM: fall back to the unconditional
+  }
   for (u32 i = 0; i < c->n_ops; i++) {
     JitCaptureOp *op = &c->ops[i];
     if (op->kind == JIT_OP_DISPATCH && op->replay_skip) {
@@ -1362,25 +1491,25 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
         break;
     }
   }
+  free(live);
 
 #ifdef THVM_HAS_METAL
-  // SSA-rename recycled Metal dispatch outputs so the ICB graph replay has no
-  // within-batch write-after-write on a shared physical buffer (the only thing
-  // forcing the slow per-op fallback for multi-root streams like the FLUX
-  // transformer).  The scheduler reuses a buffer across the captured stream;
-  // here the SECOND+ writer of a buffer gets a fresh same-size buffer and every
-  // later read of that buffer is redirected to it, so each physical buffer is
-  // written exactly once and the batched ICB path becomes safe.  Pure-DISPATCH
-  // captures only (ASSIGN/GATHER thread buffers through TenDescs, not handled).
+  // SSA-rename recycled Metal dispatch outputs: the SECOND+ writer of a buffer
+  // gets a fresh same-size buffer so each physical buffer is written exactly
+  // once, eliminating within-batch write-after-write on a shared buffer.
+  //
+  // OBSOLETE by default (THVM_JIT_GRAPH_RENAME=1 to re-enable for debugging).
+  // Its sole purpose was avoiding double-writes the ICB couldn't order -- but
+  // the per-command [cmd setBarrier] in metal_graph_build DOES order them
+  // (tinygrad's MetalGraph invariant, confirmed on this M3 by
+  // flux_jit_replay.wlt with rename off).  Renaming also FIGHTS the packer
+  // (jit_capture_pack_replay_temporaries above): it fresh-allocates the very
+  // buffers the packer just reused, undoing the memory bound.  With the
+  // packer as the memory planner + setBarrier ordering the recycle, the
+  // rename is pure overhead.  Pure-DISPATCH captures only.
   {
-    // Default ON: the rename clears the buffer-recycling hazard so a viewless
-    // recycling stream replays through the batched ICB (verified bit-identical
-    // to per-op).  Captures that still can't use the ICB -- a strided-view
-    // input needing pre-materialisation (the FLUX double block's concat/slice),
-    // or an ASSIGN/GATHER op -- are caught by the metal_graph_unsafe checks
-    // below and fall to the correct per-op path.  THVM_JIT_GRAPH_RENAME=0 off.
     char const *re = getenv("THVM_JIT_GRAPH_RENAME");
-    int rename_on = (re == NULL || re[0] != '0');   // default on; =0 disables
+    int rename_on = (re != NULL && re[0] == '1');   // default off; =1 re-enables
     int pure_dispatch = 1;
     for (u32 i = 0; i < c->n_ops; i++) {
       if (c->ops[i].replay_skip) continue;
@@ -1472,13 +1601,14 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
   // Metal captures.  O(n^2) over live dispatches, but n is the per-step kernel
   // count (~hundreds) and this runs once at capture.
   c->metal_graph_unsafe = 0;
-  for (u32 i = 0; i < c->n_ops && !c->metal_graph_unsafe; i++) {
+  c->metal_graph_recycle = 0;
+  for (u32 i = 0; i < c->n_ops && !c->metal_graph_recycle; i++) {
     if (c->ops[i].kind != JIT_OP_DISPATCH || c->ops[i].replay_skip) continue;
     u32 ob = c->ops[i].out_buf_id;
     if (ob == 0) continue;
     for (u32 j = i + 1; j < c->n_ops; j++) {
       if (c->ops[j].kind != JIT_OP_DISPATCH || c->ops[j].replay_skip) continue;
-      if (c->ops[j].out_buf_id == ob) { c->metal_graph_unsafe = 1; break; }
+      if (c->ops[j].out_buf_id == ob) { c->metal_graph_recycle = 1; break; }
     }
   }
 
@@ -1516,12 +1646,16 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   if (!jit_metal_graph_replay_enabled()) {
     return 0;
   }
-  // Streams that recycle an output buffer can't be batched into an ICB safely
-  // (Apple GPUs do not order two ICB commands writing one physical buffer, and
-  // no barrier recovers it).  Replay these per-op instead -- still scheduler-
-  // free, just one dispatch per encoder where Metal's automatic hazard tracking
-  // is correct.
+  // Strided-view captures are genuinely ICB-unsafe (the per-op path
+  // pre-materialises the view; the ICB can't) -- always per-op.
   if (c->metal_graph_unsafe) {
+    return 0;
+  }
+  // A buffer-recycling stream (two ICB commands writing one physical buffer)
+  // is ordered by the per-command [cmd setBarrier] in metal_graph_build --
+  // tinygrad's MetalGraph invariant.  Keep the batched ICB by default; only
+  // fall to per-op when THVM_JIT_GRAPH_FORCE_ICB=0.
+  if (c->metal_graph_recycle && !jit_metal_graph_force_icb()) {
     return 0;
   }
   if (start >= c->n_ops || c->ops[start].kind != JIT_OP_DISPATCH) {
@@ -1711,6 +1845,21 @@ static void jit_capture_build_input_sites(JitCapture *c) {
       if (c->sites == NULL) { c->n_sites = 0; return; }
     } else {
       c->n_sites = count;
+    }
+  }
+  // THVM_JIT_SITES_TRACE=1: per declared JIT input, how many rebind sites
+  // were found.  A declared input with 0 sites is NOT rebound on replay --
+  // it silently keeps its capture-time bytes.  The usual cause: the input
+  // is a lazy / non-contiguous tensor that a kernel stages into an internal
+  // copy whose tid differs from the declared input, so input_replace finds
+  // no matching buf_id (realize the input contiguous to fix).
+  if (getenv("THVM_JIT_SITES_TRACE") != NULL) {
+    fprintf(stderr, "[jit-sites] n_inputs_decl=%u n_sites=%u n_ops=%u\n",
+            c->n_inputs_decl, c->n_sites, c->n_ops);
+    for (u32 k = 0; k < c->n_inputs_decl; k++) {
+      u32 sc = 0;
+      for (u32 s = 0; s < c->n_sites; s++) if (c->sites[s].slot_index == k) sc++;
+      fprintf(stderr, "  decl[%u] buf=%u -> %u site(s)\n", k, c->input_buf_ids[k], sc);
     }
   }
 }

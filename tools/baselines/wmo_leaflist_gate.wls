@@ -8,7 +8,7 @@
      plain-WM ExcludedMiddle 14, Noncontradiction 14, EqualityOfInverses 45 Success *)
 SetDirectory["/Users/swish/src/thvm"];
 PacletDirectoryLoad["wl/THVMLink"];      (* repo paclet FIRST *)
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 $RecursionLimit = 16384;
 
 rowCount[po_, key_] := Block[{ds = po["ProofDataset"]},

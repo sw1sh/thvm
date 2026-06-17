@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TFindFiniteModels
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TFindFiniteModels
 Keywords: [finite model, model finding, congruence closure, Cayley table, axiom, operator, Wolfram axiom, NKS, counterexample]

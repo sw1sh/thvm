@@ -14,7 +14,7 @@
    is unclear -- we may see -1 vs full-block cost. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

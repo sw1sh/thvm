@@ -12,7 +12,7 @@
    Phase 13.  Probe-level only. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

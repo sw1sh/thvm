@@ -7,7 +7,7 @@
    memory against tinygrad" table.  Run:  wolframscript -file thvm_step.wls *)
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], "..", "..", "wl", "THVMLink"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 
 (* The compute runs in this kernel process; ps on $ProcessID gives its
    own RSS (the wolframscript wrapper is a separate, idle process). *)

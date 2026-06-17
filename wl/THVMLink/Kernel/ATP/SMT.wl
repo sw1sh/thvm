@@ -34,7 +34,7 @@
      A future DPLL(T) shell on top will turn this into a real
      SMT solver. *)
 
-BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
 
 GeneralUtilities`SetUsage[TSatEUF, "TSatEUF[eqs$, diseqs$] decides the quantifier-free first-order theory of equality with uninterpreted functions (QF_UF) via congruence closure, where eqs$ is a list of equalities lhs$ == rhs$ and diseqs$ a list of disequalities lhs$ != rhs$.
 Returns an Association keyed by \"Status\" (\"SAT\" or \"UNSAT\"); on SAT a \"Classes\" key lists the inferred equivalence classes of subterms, on UNSAT a \"Witness\" key names the disequality whose two sides collapsed."];

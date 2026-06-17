@@ -4,7 +4,7 @@
    causal / padding additive masks, rotary embeddings (interleaved and
    half-split conventions), and GQA head expansion. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TAttention, "TAttention[Q$, K$, V$] computes scaled dot-product attention softmax(Q$ @ Transpose[K$] / sqrt(d_k)) @ V$. Q$ is {seq_q, d_k}, K$ is {seq_k, d_k}, V$ is {seq_k, d_v}, giving {seq_q, d_v}. Pure assembly of TMatMul + TSoftmax + TMatMul, the two matmuls dispatching through cblas_sgemm."];
 GeneralUtilities`SetUsage[THeadAttention, "THeadAttention[q$, k$, v$, scale$] computes scaled dot-product attention over ALREADY head-split tensors q$, k$, v$ of shape {S, H, D} (heads ride a batched matmul over the leading H axis), returning {S, H*D}. The model applies per-head RMSNorm / RoPE / GQA-expansion before calling this (so TMultiHeadAttention's own head split cannot be reused). scores are q$ @ Transpose[k$] * scale$ softmaxed over keys.

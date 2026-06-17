@@ -36,6 +36,9 @@ u32  thvm_metal_buf_pool_begin(void)                         { return 1; }
 void thvm_metal_buf_pool_rollback_with_preserve(u32 wm)      { (void)wm; }
 void thvm_metal_buf_mark_preserved(u32 buf_id)               { (void)buf_id; }
 void thvm_metal_buf_clear_preserved(u32 wm)                  { (void)wm; }
+u64  thvm_metal_buf_free_unpreserved_all(void)               { return 0; }
+u32  thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) { (void)page_base; (void)maplen; (void)minor; return 0; }
+u64  thvm_metal_buf_byte_offset(u32 buf_id)                   { (void)buf_id; return 0; }
 
 // AOT-on-Metal entry points: real definitions live in backend/metal/_.m
 // (Apple only).  The WL bridge (thvmlink.c) calls these unconditionally,

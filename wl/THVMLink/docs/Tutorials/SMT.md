@@ -2,7 +2,7 @@
 Template: TechNote
 Name: SMT
 Title: Congruence Closure and Lazy DPLL(T)
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/SMT
 Keywords: [SMT, congruence closure, QF_UF, DPLL(T), Downey-Sethi-Tarjan, TPTP, equational, decision procedure]
@@ -27,7 +27,7 @@ TPTP problem files drop in directly: `File["...p"]` or a `cnf/fof` string at [TF
 The SMT entries live alongside the equational engine. One `Needs` brings them all in:
 
 ```wl
-Needs["THVMLink`ATP`"];
+Needs["WolframInstitute`THVMLink`ATP`"];
 ```
 
 All examples below assume this entry has run. Equality atoms are written with `==`, disequalities with `!=`. The engines accept any combination of undefined symbols (`a`, `b`, ...) and compound function applications (`f[a, b]`) - everything in sight is treated as an uninterpreted term.

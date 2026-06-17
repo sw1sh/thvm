@@ -68,7 +68,7 @@ because eprover hasn't been brew-installed.
 
 ```
 PacletDirectoryLoad["wl/THVMLink"]
-Get["THVMLink`ATP`"]
+Get["WolframInstitute`THVMLink`ATP`"]
 
 (* Internal preset -- thvm C engine *)
 p1 = TFindProof["InverseOfInverse", "AbelianGroupAxioms",

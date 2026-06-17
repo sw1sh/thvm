@@ -17,7 +17,7 @@
    loss gradient w.r.t. w as a TTerm UOp graph.
 *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TOptim, "TOptim[\"SGD\", lr$] returns a function {gradFn$, w0$, n$} that builds a TTerm performing n$ SGD steps from w0$ with learning rate lr$, realised via TRealize.
 TOptim[\"Adam\", lr$, beta1$, beta2$, eps$] likewise builds an n$-step Adam recursion.
@@ -31,7 +31,7 @@ Options are the hyperparameters \"lr\", \"beta1\", \"beta2\", \"eps\"."];
 (* Forward-declare symbols owned by later-loading siblings (Ref.wl,
    Switch.wl, Tensor.wl).  Without this, bare references to TDef /
    TIfZero / TRef / TOp2 / TNum / TSet below would resolve to phantom
-   symbols in THVMLink`Private` (since those symbols don't yet exist
+   symbols in WolframInstitute`THVMLink`Private` (since those symbols don't yet exist
    on the $ContextPath when this file is Get'd in alphabetical order),
    leading to silently broken term construction at call time. *)
 {TDef, TRef, TIfZero, TOp2, TNum, TMatNum, TSet};

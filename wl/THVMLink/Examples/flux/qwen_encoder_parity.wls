@@ -11,7 +11,7 @@
    Run:  DEV=metal QWEN_SHARD1=... QWEN_SHARD2=... wolframscript -file <this>
    (cwd = repo root) *)
 
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
 Get["wl/THVMLink/Examples/flux/FluxForward.wl"];
 Get["wl/THVMLink/Examples/flux/QwenEncoder.wl"];
 

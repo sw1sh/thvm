@@ -2,7 +2,7 @@
    minibatched, memory-bounded config (issue sw1sh/thvm#8).  Run:
      wl -t 450 -f verify_fix.wls
    Saves <ATP_DATA>/corpus_big.safetensors. *)
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"]; SeedRandom[7];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"]; SeedRandom[7];
 dataDir = Replace[Environment["ATP_DATA"], Except[_?StringQ] -> "/tmp/enigma"];
 files = Join[FileNames["*.wxf", FileNameJoin[{dataDir, "ds"}]],
              FileNames["*.wxf", FileNameJoin[{dataDir, "tptp_ds"}]]];

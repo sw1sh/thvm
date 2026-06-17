@@ -39,7 +39,7 @@
    e.g.  {dp0, dp1} = TDup[TOp2["+", TSup[1, 2], 3]];
          TMultiTrace[TCollapse[dp0]]. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TMultiTrace, "TMultiTrace[expr$] evaluates expr$ (HoldFirst) with the multicomputation reduction trace recording on, runs the collapse walk one TStep at a time, and returns a list of per-step Associations.
 TMultiTrace[expr$, keys$] selects which step fields to keep: a list of keys or All returns per-step Associations; a single key string returns a flat list of that field's values (one per step).

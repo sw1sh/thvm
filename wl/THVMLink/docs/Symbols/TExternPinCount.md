@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TExternPinCount
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TExternPinCount
 Keywords: [pin, gc, extern, term, handle]

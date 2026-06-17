@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TKernelCount
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TKernelCount
 Keywords: [kernel, count, side table, codegen]

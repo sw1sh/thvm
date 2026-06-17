@@ -28,7 +28,7 @@
        k<loc>     UOP_KERNEL cell at heap loc <loc>
        t<id>      TAG_TEN tensor handle for tid <id>           *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[THeapGraph, "THeapGraph[] renders the whole heap as a Graph: every IC agent, UOP cell and TEN handle becomes a vertex, with edges following data flow (sources point at consumers).
 THeapGraph[term$] seeds the walk from term$, including only the agents it reaches.
@@ -47,7 +47,7 @@ Options: \"TopN\" (largest buffers to show), \"BarHeight\" (\"Linear\" or \"Log\
 Begin["`Private`"];
 
 (* Forward refs to private symbols owned by Style.wl + Kernel.wl;
-   they share the THVMLink`Private` context but the alphabetical
+   they share the WolframInstitute`THVMLink`Private` context but the alphabetical
    load order means they may not exist yet at first parse. *)
 {drawNode, nodeShapeFn, edgeStyleDirective, styleFor};
 
@@ -716,7 +716,7 @@ buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGra
    rest. *)
 
 (* Forward refs to private symbols owned by Kernel.wl + Style.wl;
-   they share THVMLink`Private` with this file so resolution is
+   they share WolframInstitute`THVMLink`Private` with this file so resolution is
    load-order-agnostic via SetDelayed. *)
 {decodeKernelInfo, kernelRowAsoc, tenTermFromTid};
 
@@ -830,7 +830,7 @@ TScheduleGraph[opts : OptionsPattern[]] := Block[{
    numerical work that backs each card is shared with
    TMemoryPlanReport. *)
 
-(* Forward refs to MemoryPlan.wl + Style.wl helpers (THVMLink`Private`
+(* Forward refs to MemoryPlan.wl + Style.wl helpers (WolframInstitute`THVMLink`Private`
    is shared across all sibling files). *)
 {linearScanPack, peakConcurrentLive, statusFill, statusEdge,
  formatBytes, backendsActive};

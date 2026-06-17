@@ -28,7 +28,7 @@
    TMatchBindings via TTermEq when the same name appears multiple
    times: mismatches drop that branch. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TMatch, "TMatch[m$] is the canonical outer container wrapping a Match expression, as returned by TPatternMatch."];
 GeneralUtilities`SetUsage[TMatchSum, "TMatchSum[m$1, m$2, $$] represents alternative matches (lazy OR).

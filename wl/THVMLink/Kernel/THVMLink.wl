@@ -13,7 +13,7 @@
    ATP_ProofGraph.wl) use bare short names (`s`, `e`, `i`, `t`) as
    pattern locals (e.g. `Pattern[s_Symbol, _] :> s`) and Do/Module
    iterators - a textbook WL idiom.  Each creates the unqualified
-   symbol in the THVMLink`ATP` context at parse time, which conflicts
+   symbol in the WolframInstitute`THVMLink`ATP` context at parse time, which conflicts
    with the `Global`s/`e/`i/`t` names the TFindProof dispatch's Block
    localizes for the C decoder leak guard.  The shdw messages are
    informational only - the Block fires at runtime under the package
@@ -21,7 +21,7 @@
    Restored at the bottom of this file after all sub-package loads. *)
 Off[General::shdw];
 
-BeginPackage["THVMLink`", {"GeneralUtilities`"}];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
 (* === lifecycle === *)
 GeneralUtilities`SetUsage[TInit, "TInit[] initializes the runtime, returning True."];
@@ -316,8 +316,8 @@ GeneralUtilities`SetUsage[TUOpSrcs, "TUOpSrcs[u$] returns the source-cell terms 
 (* Forward-declare symbols owned by sibling files (Pri.wl, ...) so
    references from TWnf below don't get bound to phantom Private
    symbols.  Bare-evaluating the symbol name at BeginPackage scope
-   creates the public THVMLink`X symbol; Pri.wl's later
-   `BeginPackage["THVMLink`"]` reuses the same symbol. *)
+   creates the public WolframInstitute`THVMLink`X symbol; Pri.wl's later
+   `BeginPackage["WolframInstitute`THVMLink`"]` reuses the same symbol. *)
 {TPriDrain};
 
 (* Forward-declare the public symbols owned by Kernel/NN/*.wl.  Those files
@@ -325,7 +325,7 @@ GeneralUtilities`SetUsage[TUOpSrcs, "TUOpSrcs[u$] returns the source-cell terms 
    Gets them AFTER the depth-1 siblings - including Tensor.wl, whose Dot
    UpValue routes to TMatVec / TMatMul / TDot, and Train.wl, which calls
    TFromNet / TNetParams.  Without this, those references bind to phantom
-   THVMLink`Private` symbols and the real NN definitions never fire.  Declaring
+   WolframInstitute`THVMLink`Private` symbols and the real NN definitions never fire.  Declaring
    the names here at BeginPackage scope creates the public symbols up front;
    NN/*.wl's SetUsage + definitions reuse them. *)
 {
@@ -348,8 +348,19 @@ $libDir = FileNameJoin[{
     "..", "LibraryResources", $SystemID
 }];
 
-$lib = FileNameJoin[{$libDir, "THVMLink" <> Switch[$OperatingSystem,
+$libCpu = FileNameJoin[{$libDir, "THVMLink" <> Switch[$OperatingSystem,
     "MacOSX", ".dylib", "Windows", ".dll", _, ".so"]}];
+
+(* On a Linux x86-64 box with an NVIDIA driver present, prefer the CUDA-enabled
+   library (THVMLink-cuda.so, built by `make wl-linux-cuda`).  It links
+   libcuda/libnvrtc, so LibraryLoad fails to dlopen it on a CPU-only box --
+   detect that and fall back to the CPU THVMLink.so.  One published paclet thus
+   serves both GPU pods (CUDA backend, DEV=cuda) and CPU-only Linux. *)
+$libCuda = FileNameJoin[{$libDir, "THVMLink-cuda.so"}];
+$lib = If[
+    $SystemID === "Linux-x86-64" && FileExistsQ[$libCuda]
+      && StringQ[Quiet @ LibraryLoad[$libCuda]],
+    $libCuda, $libCpu];
 
 debugPrint[args___] := WriteString[$Output, StringJoin @@ Map[ToString, {args}], "\n"]
 
@@ -754,7 +765,7 @@ ttermCtx[_Integer]                       := 0
    calls; defining it here would capture a stale private TNum symbol
    since TNum is declared later).  heapWith below references it as a
    forward symbol; Switch.wl's definition lands on the same
-   THVMLink`Private`numCoerce. *)
+   WolframInstitute`THVMLink`Private`numCoerce. *)
 
 (* Build a fresh ManagedLibraryExpression["ExternPin"] handle and
    wire it to `raw` on the C side.  The returned handle becomes
@@ -785,9 +796,9 @@ packTerm[sub_Integer, tag_Integer, ext_Integer, val_Integer] :=
     TTerm[$termNewFn[sub, tag, ext, val]]
 
 (* Auto-switch helper `withTermCtx` is defined in Context.wl (after
-   `TContext` is registered in the public `THVMLink`` namespace).
+   `TContext` is registered in the public `WolframInstitute`THVMLink`` namespace).
    THVMLink.wl is parsed first, so a forward reference here would
-   resolve `TContext` to `THVMLink`Private`TContext` and silently
+   resolve `TContext` to `WolframInstitute`THVMLink`Private`TContext` and silently
    break the auto-switch - a wrong-shadow that the catch-all
    `withCtx[_, expr_] := expr` then absorbs. *)
 
@@ -1301,7 +1312,7 @@ TLam[body_] := With[{loc = THeapAlloc[1]},
    first applied argument. *)
 SetAttributes[TLamShape, HoldAll]
 TLamShape[shape_List, x_Symbol, body_] := With[{loc = THeapAlloc[1]},
-    THVMLink`Private`$lamShapeSetFn[loc, shape];
+    WolframInstitute`THVMLink`Private`$lamShapeSetFn[loc, shape];
     THeapSet[loc, Function[x, body][TVarFor[loc]]];
     packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
@@ -1359,8 +1370,8 @@ End[];
 EndPackage[];
 
 (* === sibling files ===
-   Each sibling has its own BeginPackage["THVMLink`"] + Begin[`Private`]
-   block, so they all land in the shared THVMLink`Private` context and
+   Each sibling has its own BeginPackage["WolframInstitute`THVMLink`"] + Begin[`Private`]
+   block, so they all land in the shared WolframInstitute`THVMLink`Private` context and
    can call each other's helpers without qualification.  Definition
    order doesn't matter (every cross-file reference uses SetDelayed),
    so we Get them in alphabetical order via FileNames; adding a new

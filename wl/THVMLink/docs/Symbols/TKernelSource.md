@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TKernelSource
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TKernelSource
 Keywords: [kernel, source, codegen, C, Metal]

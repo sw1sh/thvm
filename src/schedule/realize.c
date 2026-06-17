@@ -54,6 +54,59 @@ static void mark_preserved_chain(u32 tid, u8 *visited_kids) {
 // per-param ASSIGNs of one Adam step).  Defined below.
 fn Term thvm_realize_many(Term ctr_term);
 
+// Forward-only reclaim (THVM_FWD_RECLAIM, off by default).  The per-realize
+// watermark rollback only reclaims buffers allocated DURING the current
+// realize; a buffer an EARLIER realize allocated, that was `preserved`
+// (WL-reachable) during that realize then dropped, is stranded below every
+// later watermark and never freed.  The Qwen3-4B encoder hits this hard:
+// each of 27 layers uploads ~0.37GB of fresh weights inside its own realize,
+// so the device-resident set grows monotonically to ~8GB even though a
+// single forward needs only the running activation + a few captured states.
+// mark_gc_preserve(res) has just marked every buffer reachable from the live
+// root set (result + EXTERN_PINNED_TERMS = all WL-held TTerms + DEFS), so any
+// live buffer still UN-preserved is genuinely unreachable -- free them
+// table-wide.  Skipped during JIT capture (recorded buffers are jit_pinned,
+// already excluded, and the per-realize rollback suffices on hot training
+// steps).  Mirror: tinygrad frees a Buffer when its last LazyBuffer refcount
+// drops; thvm approximates that with a mark-sweep at the realize boundary
+// that owns the WL root set.  Call site invariant: mark_gc_preserve(res) has
+// run and thvm_metal_buf_clear_preserved has NOT yet.
+fn void thvm_realize_fwd_reclaim(void) {
+  if (jit_is_capturing()) return;
+  // Re-read getenv until ENABLED, then latch: the runtime caches getenv on the
+  // first realize (during paclet load), but a WL caller enables the flag via
+  // SetEnvironment AFTER load (flux_generate.wls) -- a -1/once cache would miss
+  // that and silently leave the reclaim off.  getenv-until-enabled is cheap and
+  // picks up the late SetEnvironment on the first flux realize.
+  static int fwd_reclaim = 0;
+  if (!fwd_reclaim) {
+    const char *e = getenv("THVM_FWD_RECLAIM");
+    fwd_reclaim = (e != NULL && e[0] != '0') ? 1 : 0;
+  }
+  if (!fwd_reclaim) return;
+  // Overlay the heap-rooted preserve walk (the call the comment at the
+  // thvm_realize preserve block promised but never wired up).  mark_gc_preserve
+  // roots only at THIS realize's result + DEFS + EXTERN_PINNED, so a buffer
+  // owned by a TenDesc that is referenced ONLY through a persistent,
+  // hash-consed TAG_TEN heap leaf (a cross-realize materialized intermediate a
+  // LATER realize will re-walk via view_resolve_inner's TAG_TEN base case) is
+  // unreachable from those roots.  Without this scan the table-wide free below
+  // reclaims that still-live buffer; the next realize's view_resolve_inner then
+  // shares its dead buf_id (tensor_view_of re-increfs the freed slot) and binds
+  // a nil MTLBuffer at a kernel input -- the FLUX Stage-3 VAE flat-image bug.
+  // The scan walks [0, HEAP_NEXT) and preserves every TAG_TEN-reachable buffer,
+  // a strict superset of the producer chain (see heap_rooted_preserve.c).  Runs
+  // only on the (off-by-default) fwd-reclaim path, after the GPU flush the free
+  // already pays, so it adds no cost to the hot training/replay loop.
+  mark_heap_rooted_preserve();
+  thvm_metal_buf_free_unpreserved_all();
+  // Drop the preserve bits the scan set table-wide.  thvm_realize's
+  // thvm_metal_buf_clear_preserved(metal_wm) only clears [metal_wm, NEXT); a
+  // cross-realize buffer below the watermark would otherwise carry a stale
+  // preserved=1 into the next realize's rollback and never be reclaimed.
+  thvm_metal_buf_clear_preserved(1);
+}
+
 fn Term thvm_realize(Term expr) {
   HOT_REALIZE_CALLS++;
   // TEN short-circuit: a Term that's already a TAG_TEN (typical when
@@ -199,6 +252,7 @@ fn Term thvm_realize(Term expr) {
   cpu_buf_clear_preserved_arena_views(cpu_wm);
   cpu_buf_pool_rollback_with_preserve(cpu_wm);
   thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
+  thvm_realize_fwd_reclaim();
   cpu_buf_clear_preserved(cpu_wm);
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);
@@ -353,6 +407,7 @@ fn Term thvm_realize_many(Term ctr_term) {
   cpu_buf_clear_preserved_arena_views(cpu_wm);
   cpu_buf_pool_rollback_with_preserve(cpu_wm);
   thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
+  thvm_realize_fwd_reclaim();
   cpu_buf_clear_preserved(cpu_wm);
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);

@@ -1,11 +1,11 @@
 ---
 Template: Symbol
 Name: TFindProof
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TFindProof
 Keywords: [theorem proving, ATP, equational, completion, Knuth-Bendix, Waldmeister, Vampire]
-SeeAlso: [TRelevantAxioms, TAtpSchedule, TAtpDescribeMethod, TATP, FindEquationalProof]
+SeeAlso: [TRelevantAxioms, TAtpSchedule, TAtpDescribeMethod, TATP, TFindEquationalPath, TFindStringProof, FindEquationalProof]
 RelatedGuides: [THVMLink]
 ---
 
@@ -22,7 +22,8 @@ RelatedGuides: [THVMLink]
 ## Details & Options
 
 - The C engine saturates the axioms via unfailing Knuth-Bendix completion; the resulting equational rewrite chain is decoded into a verifier-shaped `ProofObject`. Returns `$Failed` when the conjecture is not proved.
-- An optional trailing positional argument selects what is returned, drawn from `{"ProofObject", "Lemmas", "PreprocessedAxioms", "RelevantAxioms", "RawTrace", "Statistics", "Status", "Counterexample"}` (a single String returns that bare, a list returns an Association, `All` returns every spec).
+- An optional trailing positional argument selects what is returned, drawn from `{"ProofObject", "Lemmas", "PreprocessedAxioms", "RelevantAxioms", "RawTrace", "Statistics", "Status", "Path", "Counterexample"}` (a single String returns that bare, a list returns an Association, `All` returns every spec).
+- Axioms may be written as equations (`a == b`, a two-element list, or [TwoWayRule]() `a <-> b`) or as one-sided [Rule]()s (`a -> b`). A `Rule` axiom is installed *pre-oriented* - the engine rewrites with it left-to-right only, so the rule set stays a directed term-rewriting system. The `"Path"` spec returns the witnessing rewrite chain; with one-sided axioms it is a forward replacement path. See [TFindEquationalPath]() and the [Finding Replacement Paths](paclet:WolframInstitute/THVMLink/tutorial/FindReplacePath) tech note; [TFindStringProof]() specializes the whole surface to string rewriting.
 - `"Counterexample"` is the equational dual of `"ProofObject"` - a disproof rather than a proof, returned as a [CounterexampleObject]() (the summary-boxed object that mirrors the Wolfram Function Repository's `FindEquationalCounterexample`), or `$Failed` when there is no extractable countermodel. The engine is chosen by the problem shape:
   - A fully **ground** problem is decided by congruence closure (a complete decision procedure); the quotient is returned as a finite model in [FindFiniteModels]() structure - `co["Model"]` is an Association `op -> Cayley table` (0-indexed nested list) for each operator and `const -> element` for each constant, over the domain `{0, ..., k-1}`.
   - A **quantified** problem is refuted by the saturated completion: when the completion saturates into a convergent term-rewriting system (Status `"Saturated"`, no unorientable equations) whose normal forms separate the goal's two sides, `co["NormalForms"]` are those normal forms and `co["Model"]` is a finite model in FindFiniteModels structure when the initial term algebra closes (else the convergent rules). It declines (`$Failed`) on a commutative/AC-saturated theory whose unorientable equations would need ordered rewriting.
@@ -39,7 +40,7 @@ RelatedGuides: [THVMLink]
 Prove commutativity from the abelian-group axioms:
 
 ```wl
-Needs["THVMLink`ATP`"];
+Needs["WolframInstitute`THVMLink`ATP`"];
 TFindProof[
     Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x],
     "AbelianGroupAxioms",

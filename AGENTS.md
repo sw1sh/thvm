@@ -135,7 +135,7 @@ WL paclet (`wl/THVMLink/`):
 - `wl/THVMLink/CSource/thvmlink.c`: 14 scalar `EXTERN_C DLLEXPORT`
   functions (lifecycle, term packing, heap, wnf, itrs). Single-TU
   build that `#include`s `../../../src/thvm.c`.
-- `wl/THVMLink/Kernel/THVMLink.wl`: `THVMLink`` package wrapping the
+- `wl/THVMLink/Kernel/THVMLink.wl`: `WolframInstitute`THVMLink`` package wrapping the
   scalar primitives and synthesizing `TLam` / `TApp` / `TSup` / `TDup`
   via shared `heapWith` / `heapTerm` helpers.
 - `wl/THVMLink/Tests/core.wlt`: `VerificationTest` specs.

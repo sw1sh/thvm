@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TEql
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TEql
 Keywords: [equality, eql, structural, theorem-proving]

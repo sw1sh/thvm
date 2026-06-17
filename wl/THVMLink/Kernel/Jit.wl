@@ -29,7 +29,7 @@
    depends on inputs (e.g. branching on a Variable), the user
    should TJitDrop and re-capture when the shape changes. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TJit, "TJit[fn$] returns a closure that captures fn$'s kernel-dispatch sequence on the first call and replays it on later calls, returning the same result handle whose buffer each replay rewrites.
 closure$[x$] passes per-call TTerm inputs: the first call captures over x$, and each later call rebinds its input in place (tinygrad's input_replace), so a fixed forward generates by closure$[next$] with no explicit TSet.

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMemoryPlanReport
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMemoryPlanReport
 Keywords: [memory, report, buffer, summary, status]

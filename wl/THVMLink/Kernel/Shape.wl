@@ -1,12 +1,12 @@
 (* ::Package:: *)
 (* Shape.wl - shape arithmetic + scalar bit decoding.
 
-   Lives in `THVMLink`Private` (shared with the rest of the package
-   via BeginPackage["THVMLink`"] + Begin["`Private`"]).  Other files
+   Lives in `WolframInstitute`THVMLink`Private` (shared with the rest of the package
+   via BeginPackage["WolframInstitute`THVMLink`"] + Begin["`Private`"]).  Other files
    reach these helpers without qualification because they share the
    same private context. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 Begin["`Private`"];
 

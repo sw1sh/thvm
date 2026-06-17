@@ -1,7 +1,7 @@
 #!/usr/bin/env wolframscript
 SetDirectory["/Users/swish/src/thvm"];
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 $RecursionLimit = 16384;
 (* Per-step structural-identity diff of two ProofObjects.
 
@@ -136,7 +136,7 @@ appendPartialRow[r_Association] := Block[
    (TWaldmeisterProofObject, TVampireProofObject, etc.). *)
 diffOne[theory_String, thm_String,
         presetMethod_ : "Waldmeister",
-        cliBuilder_Symbol : THVMLink`ATP`TWaldmeisterProofObject] :=
+        cliBuilder_Symbol : WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject] :=
     Block[
     {pP, pC, dsP, dsC, kvP, kvC, matchedP, matchedC,
      unmatchedP, unmatchedC},
@@ -257,19 +257,19 @@ Scan[
     Apply[Function[{theory, thm},
         diffOne[theory, thm,
             "Waldmeister",
-            THVMLink`ATP`TWaldmeisterProofObject]]],
+            WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject]]],
     cases];
 Scan[
     Apply[Function[{theory, thm},
         diffOne[theory, thm,
             Automatic,
-            THVMLink`ATP`TWaldmeisterProofObject]]],
+            WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject]]],
     cases];
 Scan[
     Apply[Function[{theory, thm},
         diffOne[theory, thm,
             "VampireUEQ",
-            THVMLink`ATP`TVampireProofObject]]],
+            WolframInstitute`THVMLink`ATP`TVampireProofObject]]],
     cases];
 
 Print["===================================================="];

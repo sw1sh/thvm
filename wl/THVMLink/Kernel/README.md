@@ -1,10 +1,10 @@
 # wl/THVMLink/Kernel — file map
 
 Each `.wl` here is a sibling package: every file does
-`BeginPackage["THVMLink`"]` + `Begin["`Private`"]` and is auto-loaded
+`BeginPackage["WolframInstitute`THVMLink`"]` + `Begin["`Private`"]` and is auto-loaded
 in alphabetical order by `THVMLink.wl` (which Get's every sibling
 through a `Sort @ FileNames` scan). They all share the
-`THVMLink`Private` context, so cross-file references resolve via
+`WolframInstitute`THVMLink`Private` context, so cross-file references resolve via
 `SetDelayed` regardless of load order.
 
 When adding a new symbol, **place its `::usage` and definition in
@@ -38,9 +38,9 @@ loader hub there is for LibraryFunctionLoad bindings only.
 
 ## Inter-file conventions
 
-- Every `Begin["`Private`"]` block lives in the same `THVMLink`Private`
+- Every `Begin["`Private`"]` block lives in the same `WolframInstitute`THVMLink`Private`
   namespace. Helper symbols are visible across files; just call them.
-  No `THVMLink`Private`$xxxFn` qualification needed (and adding one
+  No `WolframInstitute`THVMLink`Private`$xxxFn` qualification needed (and adding one
   is a sign the symbol is being misused).
 - LibraryLink loaders (`$kernelTableFn`, `$kernelInfoFn`, ...) live in
   `THVMLink.wl` only. Other files reference them by name; the

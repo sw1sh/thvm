@@ -5,7 +5,7 @@
    These read like ordinary math over a TTerm because they sit on the
    Plus / Times / Total / Dot UpValues installed in Tensor.wl. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TSum, "TSum[x$] = TUOpReduce[x$, 0, \"SUM\"]."];
 GeneralUtilities`SetUsage[TSquare, "TSquare[x$] = TUOpMul[x$, x$]."];

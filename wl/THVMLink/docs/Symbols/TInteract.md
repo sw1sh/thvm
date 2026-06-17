@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TInteract
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TInteract
 Keywords: [interact, redex, fire, step, debug]

@@ -32,7 +32,7 @@
                                 a CI run can drop a snapshot to disk
                                 and the next commit can diff it. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TBench, "TBench[spec$] runs spec$[\"NumSteps\"] iterations of the caller's step function under TInit and the active backend, snapshots TMemoryPlan, and returns an Association of stable metrics: name, backend, n_steps, wall_time_ms, ms_per_step, kernel_count, ten_count, total_live_kib, peak_concurrent_kib, slot_reuse_headroom_pct.
 spec$ keys: \"Name\" (label), \"InitFn\" (Function[] returning the initial hosts value), \"StepFn\" (Function[hosts, t] returning updated hosts), \"NumSteps\" (Integer step count)."];

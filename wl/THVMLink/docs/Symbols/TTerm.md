@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTerm
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTerm
 Keywords: [TTerm, packed term, handle, wrapper, indexing]

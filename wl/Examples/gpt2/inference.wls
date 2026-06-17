@@ -51,7 +51,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 SeedRandom[42];
 

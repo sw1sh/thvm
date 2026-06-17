@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTensorShape
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTensorShape
 Keywords: [tensor, shape, dimensions, rank]

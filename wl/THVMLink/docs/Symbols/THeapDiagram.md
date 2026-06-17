@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: THeapDiagram
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/THeapDiagram
 Keywords: [diagram, heap, string diagram, interaction net, DiagramNetwork, port]

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TAtpDescribeMethod
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TAtpDescribeMethod
 Keywords: [ATP, Method, preset, introspection]

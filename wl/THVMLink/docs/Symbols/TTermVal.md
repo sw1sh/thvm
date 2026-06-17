@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTermVal
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTermVal
 Keywords: [val, term, inspector, packed, heap loc]

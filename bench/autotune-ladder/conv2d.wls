@@ -3,7 +3,7 @@
    on thvm.  Matches LeNet's first conv shape. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

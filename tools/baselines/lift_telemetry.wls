@@ -10,7 +10,7 @@
    Emits tools/baselines/lift_telemetry.tsv -- one row per case. *)
 SetDirectory["/Users/swish/src/thvm"];
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 $RecursionLimit = 16384;
 Quiet @ TFindProof["InverseOfInverse", "GroupAxioms",
     Method -> "Completion", TimeConstraint -> 2.0];
@@ -28,7 +28,7 @@ cases = {
 
 probe[{theory_, thm_}] := Block[
     {po, head, pfHead, pgHead, plen, verifyOK, verifyHead, n},
-    po = Quiet @ THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
+    po = Quiet @ WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
         TimeConstraint -> 12,
         "LiftToProofObject" -> True];
     head = Head[po];

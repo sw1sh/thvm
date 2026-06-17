@@ -13,7 +13,7 @@
    table makes the API ergonomic.  Users can pass either an integer
    slot (raw) or a string (looked up / minted on first use). *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TDef, "TDef[name$, body$] registers body$ as a named definition reachable via TRef[name$], and returns name$.
 name$ may be an integer slot (0..255) or a string (auto-mapped to a stable slot); body$ is a TTerm built by the usual constructors. The body is snapshot into a static template heap, so later dynamic-heap mutations do not affect the def."];

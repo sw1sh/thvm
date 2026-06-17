@@ -3,7 +3,7 @@
    Output matches run_thvm_one_conjunct.wls for the merge_best.sh
    join: theory \t thm \t k/n \t status \t seconds \t proofLength. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 $RecursionLimit = 16384;
 
 args = $ScriptCommandLine;

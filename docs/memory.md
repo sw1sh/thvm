@@ -401,7 +401,7 @@ Use small correctness and lifetime tests first:
 make bin/test_metal_real
 bin/test_metal_real
 make wl
-wolframscript -code 'PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"]; r=TestReport[{"wl/THVMLink/Tests/memory_plan_bridge.wlt","wl/THVMLink/Tests/metal_dtypes.wlt","wl/THVMLink/Tests/kernel_profile.wlt"}]; Print[r["TestsSucceededCount"], " passed, ", r["TestsFailedCount"], " failed"]; Exit[If[r["TestsFailedCount"] > 0, 1, 0]]'
+wolframscript -code 'PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"]; r=TestReport[{"wl/THVMLink/Tests/memory_plan_bridge.wlt","wl/THVMLink/Tests/metal_dtypes.wlt","wl/THVMLink/Tests/kernel_profile.wlt"}]; Print[r["TestsSucceededCount"], " passed, ", r["TestsFailedCount"], " failed"]; Exit[If[r["TestsFailedCount"] > 0, 1, 0]]'
 ```
 
 Then use a small repeated-step probe.  Keep batch size and step count

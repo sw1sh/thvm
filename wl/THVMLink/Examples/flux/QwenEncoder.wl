@@ -7,9 +7,9 @@
    per token along the feature axis to {512, 7680} in [layer9 | layer18 |
    layer27] order.
 
-   Get-loaded after THVMLink` AND FluxForward.wl: it reuses fxLinear (the
+   Get-loaded after WolframInstitute`THVMLink` AND FluxForward.wl: it reuses fxLinear (the
    BLAS-friendly diffusers linear).  All the model-agnostic attention pieces
-   come from THVMLink`s NN library.  Qwen3 differs from the FLUX DiT in two
+   come from WolframInstitute`THVMLink`s NN library.  Qwen3 differs from the FLUX DiT in two
    ways that matter: the rotary convention is the half-split (NEOX) one
    (TRoPEHalfSplit, not the FLUX TRoPEInterleaved), and attention is
    grouped-query (GQA 4:1, TRepeatKV) with per-head q/k RMSNorm applied before
@@ -31,8 +31,15 @@
    sugar) so we materialise the frozen table once as words, slice the id rows,
    and decode only those to f32 -- decoding the whole 151936-row table would
    cost 1.5GB for ~512 rows. *)
+(* Materialise the frozen bf16 embedding-table words ONCE per table (the whole
+   151936x2560 table is ~778MB of UBit16 words).  Memoised: qwEmbed is called per
+   prompt, and re-reading TTensorData[table] each time dominated the host input
+   prep (~1.2s/call).  The table is a frozen weight, so the cached words are
+   reused for every prompt in the session; only the per-id row slice + decode
+   (~512 rows) runs per call. *)
+qwEmbedWords[table_] := qwEmbedWords[table] = Normal[TTensorData[table]]
 qwEmbed[table_, ids_List] :=
-    TTensorCreate @ qwBf16ToF32 @ Normal[TTensorData[table]][[ids + 1]]
+    TTensorCreate @ qwBf16ToF32 @ qwEmbedWords[table][[ids + 1]]
 
 qwBf16ToF32[u16_] := With[{shape = Dimensions[u16], flat = Flatten[u16]},
     ArrayReshape[
@@ -82,29 +89,50 @@ qwLayer[x_, cos_, sin_, addMask_, W_, cfg_] := Block[
     hh + fxLinear[TSiLU[fxLinear[hn, W["gate_proj"]]]*fxLinear[hn, W["up_proj"]], W["down_proj"]]
 ]
 
-(* Full encoder.  inputIds {S} host int list (0-indexed); attMask {S} host list
-   (1 real / 0 pad); wf a name -> TTerm loader (HF names, both shards merged);
-   cfg has heads/kv_heads/head_dim/eps/theta/layers/captureLayers.  Returns the
-   {S, 3*hidden} per-token concat of the captured hidden states. *)
-qwenEncode[inputIds_List, attMask_List, wf_, cfg_] := Block[
-    {dh, eps, theta, nL, caps, s, dev, toDev, cos, sin, addMask, x, captured, lcfg},
-    dh = cfg["head_dim"];  eps = cfg["eps"];  theta = cfg["theta"];
-    nL = cfg["layers"];  caps = cfg["captureLayers"];  s = Length[inputIds];
-    lcfg = <|"heads" -> cfg["heads"], "kv_heads" -> cfg["kv_heads"], "head_dim" -> dh, "eps" -> eps|>;
-    (* place the host-built x/cos/sin/mask on the device the layer weights live
-       on: otherwise the additive mask (host) drags the attention-scores reduce
-       onto the CPU, where bf16 has no gemm and the {H,S,D,S} expand materialises
-       (2GB at S=512) instead of routing through the device batched gemm. *)
-    dev = TDevice[wf["model.layers.0.self_attn.q_proj.weight"]];
-    toDev = If[ dev === None || dev === "cpu", # &, TToDevice[#, dev] &];
-    {cos, sin} = TRoPEHalfSplitTable[s, dh, theta];
-    cos = toDev[cos];  sin = toDev[sin];
-    addMask = toDev @ TPaddingCausalMask[attMask];
-    x = toDev @ qwEmbed[wf["model.embed_tokens.weight"], inputIds];
-    captured = <||>;
+(* DEVICE forward over the 27 decoder layers.  x {S,dim} embedded token rows;
+   addMask {S,S} additive causal+padding mask; cos/sin {S,1,head_dim} the rotary
+   table; wf the weight loader; cfg as below.  Captures the hidden states after
+   layers in cfg["captureLayers"] and returns their per-token concat
+   {S, 3*hidden}.  Split out from qwenEncode so it can be TJit-captured with x +
+   addMask as the only per-prompt rebound inputs (cos/sin + weights are closed
+   over, constant across prompts of the same length).  Every shape is concrete
+   (kvar-free): S comes from the host-prepped x, dim/head_dim from cfg. *)
+qwenForward[x0_, addMask_, cos_, sin_, wf_, cfg_] := Block[
+    {nL, caps, lcfg, x, captured},
+    nL = cfg["layers"];  caps = cfg["captureLayers"];
+    lcfg = <|"heads" -> cfg["heads"], "kv_heads" -> cfg["kv_heads"],
+             "head_dim" -> cfg["head_dim"], "eps" -> cfg["eps"]|>;
+    x = x0;  captured = <||>;
     Do[ x = TRealize @ qwLayer[x, cos, sin, addMask, qwLayerW[wf, i], lcfg];
         If[ MemberQ[caps, i], captured[i] = x],
         {i, 0, nL - 1}
     ];
     TRealize @ Join[Sequence @@ (captured[#] & /@ caps), 2]
+]
+
+(* host-prep of the device inputs (cos/sin/mask/x) for qwenForward.  Returns
+   <|"cos","sin","addMask","x"|> as device TTerms.  cos/sin depend only on S
+   (cacheable per length); addMask + x are per-prompt. *)
+qwenInputs[inputIds_List, attMask_List, wf_, cfg_] := Block[
+    {dh, theta, s, dev, toDev, cos, sin},
+    dh = cfg["head_dim"];  theta = cfg["theta"];  s = Length[inputIds];
+    (* place x/cos/sin/mask on the device the layer weights live on: otherwise the
+       additive mask (host) drags the attention-scores reduce onto the CPU, where
+       bf16 has no gemm and the {H,S,D,S} expand materialises (2GB at S=512)
+       instead of routing through the device batched gemm. *)
+    dev = TDevice[wf["model.layers.0.self_attn.q_proj.weight"]];
+    toDev = If[ dev === None || dev === "cpu", # &, TToDevice[#, dev] &];
+    {cos, sin} = TRoPEHalfSplitTable[s, dh, theta];
+    <|"cos" -> toDev[cos], "sin" -> toDev[sin],
+      "addMask" -> toDev @ TPaddingCausalMask[attMask],
+      "x" -> toDev @ qwEmbed[wf["model.embed_tokens.weight"], inputIds]|>
+]
+
+(* Full encoder.  inputIds {S} host int list (0-indexed); attMask {S} host list
+   (1 real / 0 pad); wf a name -> TTerm loader (HF names, both shards merged);
+   cfg has heads/kv_heads/head_dim/eps/theta/layers/captureLayers.  Returns the
+   {S, 3*hidden} per-token concat of the captured hidden states. *)
+qwenEncode[inputIds_List, attMask_List, wf_, cfg_] := With[
+    {in = qwenInputs[inputIds, attMask, wf, cfg]},
+    qwenForward[in["x"], in["addMask"], in["cos"], in["sin"], wf, cfg]
 ]

@@ -15,7 +15,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 (* {theory, theorem, Method, TimeConstraint}
 

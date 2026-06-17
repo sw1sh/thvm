@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMatCtr
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMatCtr
 Keywords: [match, ctr, constructor, destructure, pattern]

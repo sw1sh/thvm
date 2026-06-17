@@ -3,7 +3,7 @@
    wall-clock cap.  Mirrors run_wl_one.wls's TSV output line for
    line so the same downstream comparator parses both. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 (* $RecursionLimit bump: defensive against WL stack overflow during
    proof-property access (ProofDataset / ProofGraph walk).  Doesn't

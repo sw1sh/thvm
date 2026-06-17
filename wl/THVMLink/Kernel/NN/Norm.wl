@@ -2,7 +2,7 @@
 (* NN/Norm.wl - normalization layers: LayerNorm (+ affine), RMSNorm,
    GroupNorm, and BatchNorm (inference + training form). *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TLayerNorm, "TLayerNorm[x$] and TLayerNorm[x$, eps$] normalise along the last axis: y = (x$ - mean) / sqrt(var + eps$). Default eps$ = 1e-5. mean and var are per-row reductions broadcast back via the softmax-style reduce-broadcast pattern."];
 GeneralUtilities`SetUsage[TLayerNormAffine, "TLayerNormAffine[x$, gamma$, beta$] applies TLayerNorm[x$] then multiplies by gamma$ and adds beta$ along the last axis. GPT-2's layer-norm carries learned gamma/beta; bare TLayerNorm normalises only."];

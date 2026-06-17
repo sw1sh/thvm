@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TReduce
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TReduce
 Keywords: [reduce, wnf, in-place, chaining]

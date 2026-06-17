@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TGradOf
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TGradOf
 Keywords: [autodiff, gradient, accumulator, backward, read]

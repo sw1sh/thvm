@@ -2,7 +2,7 @@
 (* Tensor.wl - tensor + UOp WL surface for THVMLink.
 
    Loaded from THVMLink.wl inside Begin["`Private`"]; all symbols
-   stay in the main THVMLink` context so users see TTensor /
+   stay in the main WolframInstitute`THVMLink` context so users see TTensor /
    TUOp* without a subcontext namespace.  Sibling-split purely for
    size: THVMLink.wl handles lifecycle + IC combinators +
    atomic term; Tensor.wl handles anything tensor-shaped.
@@ -16,7 +16,7 @@
         tensor terms build UOp graphs automatically.
 *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TSet, "TSet[dst$, src$] writes the bytes of src$ into dst$'s backing buffer in place, keeping dst$'s TenDesc id so callers still holding it see the new contents; equivalent to TRealize[TAssign[dst$, src$]]; dst$.
 Also installed as the WL Set UpValue on literal-TTerm left-hand sides, so Evaluate[w$] = expr$ mutates w$ rather than rebinding the symbol.
@@ -63,7 +63,7 @@ Backward gradient is zero (BITCAST has no value-preserving gradient)."];
 
 (* Forward-decl: these are defined in NN.wl (loads alphabetically
    after Tensor.wl).  Without this, the UpValues below resolve to
-   phantoms in `THVMLink`Private`* with no DownValue. *)
+   phantoms in `WolframInstitute`THVMLink`Private`* with no DownValue. *)
 {TTanh, TMatMul, TDot, TSoftmax};
 
 Begin["`Private`"];
@@ -193,8 +193,8 @@ TTensorShape[t_TTerm]           := Missing["NotATensor", TTagName[TTermTag[t]]]
    shape can't be determined; otherwise a list of dim extents.
    Use this when you want shape inference, not just "is this a
    concrete TEN". *)
-TTermShape[t_TTerm] := Normal @ THVMLink`Private`$termShapeInFn[ttermRaw[t]]
-TTermShape[i_Integer] := Normal @ THVMLink`Private`$termShapeInFn[i]
+TTermShape[t_TTerm] := Normal @ WolframInstitute`THVMLink`Private`$termShapeInFn[ttermRaw[t]]
+TTermShape[i_Integer] := Normal @ WolframInstitute`THVMLink`Private`$termShapeInFn[i]
 
 TTensorDType[t_ ? tensorIdQ]    := dtypeName[TTermExt[t]]
 TTensorDType[t_TTerm]           := Missing["NotATensor", TTagName[TTermTag[t]]]

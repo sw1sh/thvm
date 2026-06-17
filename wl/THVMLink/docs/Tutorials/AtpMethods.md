@@ -2,7 +2,7 @@
 Template: TechNote
 Name: AtpMethods
 Title: Methods and Presets for TFindProof
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/AtpMethods
 Keywords: [theorem proving, ATP, Method, preset, portfolio, Waldmeister, Vampire, Twee, EProver, SInE, AutoPrecedence, GoalDirected, MNF]
@@ -25,7 +25,7 @@ Three shapes:
 ## Setting up
 
 ```wl
-Needs["THVMLink`ATP`"];
+Needs["WolframInstitute`THVMLink`ATP`"];
 ```
 
 Equational axioms can be supplied directly as a list, or as a theory name resolved through [AxiomaticTheory]().  All examples below assume the load entry has run.

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TEra
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TEra
 Keywords: [eraser, era, prune, multicomputation]

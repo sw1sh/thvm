@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TNum
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TNum
 Keywords: [number, num, integer, atom]

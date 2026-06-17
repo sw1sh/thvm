@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TLam
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TLam
 Keywords: [lambda, binder, function, JIT, kernel]

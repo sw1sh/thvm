@@ -33,7 +33,7 @@ Every symbol - **built-in (`Total`, `Normal`, `Plus`, `Dot`) and paclet
   processes markdown inside an inline `<code>` element, so the link renders
   inside the code style.
 - Backticks are only for things that are *not* symbols: a type or tag (`TTerm`,
-  `TAG_TEN`, `UOP_KERNEL`), a context (`THVMLink``), an option value (`"SUM"`,
+  `TAG_TEN`, `UOP_KERNEL`), a context (`WolframInstitute`THVMLink``), an option value (`"SUM"`,
   `"f32"`), or a path (`wl/Examples/`).
 - If you link a paclet symbol that has no `docs/Symbols/<Name>.md` page, **create
   the page** (same pass), so the link resolves.
@@ -47,8 +47,8 @@ it renders as ugly inline LaTeX. (This overrides the skill, which uses `$x_i$`.)
 ## Cells: no ceremony, one output each
 
 - **No `Needs`.** MTN loads the package from the frontmatter `Context:` (e.g.
-  `Context: THVMLink``) before it evaluates the cells, so an example never needs
-  `Needs["THVMLink`"]`.
+  `Context: WolframInstitute`THVMLink``) before it evaluates the cells, so an example never needs
+  `Needs["WolframInstitute`THVMLink`"]`.
 - **No `TInit`.** The runtime initializes itself on first use, so init calls are
   noise. (A purposeful `TReset[]` / `TInit[]` to show something *in isolation* is
   rare and must earn its place; the kernel table survives `TReset`, only `TInit`

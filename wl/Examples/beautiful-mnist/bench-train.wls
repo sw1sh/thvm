@@ -23,7 +23,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 envValue[name_String, default_String] := Module[{v = Environment[name]},
     If[StringQ[v] && StringLength[StringTrim[v]] > 0, v, default]]
@@ -55,7 +55,7 @@ dispatchKindCounts[] := Counts @ Table[
     {kid, kernelIds[]}]
 
 inputShapes[kid_Integer] := Quiet[
-    TTensorShape /@ (THVMLink`Private`tenTermFromTid /@ TKernelInputs[kid])]
+    TTensorShape /@ (WolframInstitute`THVMLink`Private`tenTermFromTid /@ TKernelInputs[kid])]
 
 formatMaybeAssoc[a_Association] := If[Length[a] == 0, "{}", formatCounts[a]]
 

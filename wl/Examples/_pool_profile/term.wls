@@ -20,7 +20,7 @@
    here -- the runtime tests cover that. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 println[]      := WriteString["stdout", "\n"];
 

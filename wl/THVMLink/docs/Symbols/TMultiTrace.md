@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMultiTrace
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMultiTrace
 Keywords: [multicomputation, trace, steps, events, slice, hvm4]

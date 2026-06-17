@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TSet
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TSet
 Keywords: [tensor, assign, in place, mutate, buffer]

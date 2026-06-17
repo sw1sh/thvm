@@ -6,11 +6,11 @@
    goal's witnessing rewrite path, from the engine's goal chain or
    re-walked off a ProofObject's dataset).
 
-   Sibling of ATP.wl in the THVMLink`ATP` context, sharing the
-   THVMLink`ATP`Private` context, so it references ATP.wl's
+   Sibling of ATP.wl in the WolframInstitute`THVMLink`ATP` context, sharing the
+   WolframInstitute`THVMLink`ATP`Private` context, so it references ATP.wl's
    dispatches and helpers by bare name. *)
 
-BeginPackage["THVMLink`ATP`", {"THVMLink`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`"}];
 
 GeneralUtilities`SetUsage[TFindStringProof, "TFindStringProof[thm$, axioms$] proves a string-rewriting theorem over the multiway/semi-Thue axioms and returns the ProofObject.
 Words are encoded as right-nested CenterDot terms over one symbol per character ('ABC' encodes to A\[CenterDot](B\[CenterDot]C)), with the associativity bridge axiom appended so a rewrite applies at any position of a word; the encoding follows the Wolfram Function Repository FindStringProof.
@@ -18,9 +18,11 @@ An axiom written 'BA' -> 'AB' is installed as a PRE-ORIENTED rewrite rule (one-d
 A theorem is a pair in any of the same shapes (direction is meaningless for a goal); a list of theorems is a multi-goal conjunction returning ONE ProofObject with a Hypothesis/Conclusion row pair per conjunct.
 An optional last argument picks the TFindProof return spec ('Status', 'Path', $$); options are TFindProof's (MaxSteps, TimeConstraint, Method, PortfolioFrontLoad)."];
 
-GeneralUtilities`SetUsage[TFindEquationalPath, "TFindEquationalPath[thm$, axioms$] proves thm$ over axioms$ and returns the witnessing rewrite path: the list of terms from the theorem's lhs to its rhs, where consecutive entries differ by one rewrite.
-TFindEquationalPath[proof$] re-walks a precomputed ProofObject's dataset into the same path (one path per Hypothesis for a multi-goal proof).
-Returns $Failed when the goal is not proved or no chain is recorded.  The path is assembled lhs-chain-forward then rhs-chain-reversed through the shared normal form, matching the Wolfram Function Repository FindEquationalPath's default 'Path' property."];
+(* TFindEquationalPath (the full replacement-path surface ported from the
+   Wolfram Function Repository) lives in ATP_EquationalPath.wl.  Forward-
+   declare it so TStringPath's fallback and the shared Private re-walk
+   below resolve to the same public symbol regardless of load order. *)
+TFindEquationalPath;
 
 GeneralUtilities`SetUsage[TStringPath, "TStringPath[thm$, axioms$] proves a string-rewriting theorem (TFindStringProof shapes) and returns the rewrite path decoded back to plain strings: the list of words from the theorem's source word to its target word.
 Returns $Failed when the goal is not proved.  Intermediate CenterDot re-bracketings introduced by the associativity bridge decode to the same word; adjacent duplicates are deleted."];
@@ -29,10 +31,10 @@ Returns $Failed when the goal is not proved.  Intermediate CenterDot re-bracketi
    places this file BEFORE ATP.wl ("atp_strings" sorts ahead of
    "atp." once punctuation is canonically ranked), so the sibling's
    public symbols may not exist yet at parse time.  A bare mention
-   here creates them in THVMLink`ATP` (the current context), and
+   here creates them in WolframInstitute`THVMLink`ATP` (the current context), and
    ATP.wl later attaches its definitions to the SAME symbols.
    Without this, the Private bodies below would mint shadow
-   THVMLink`ATP`Private` copies and call an undefined function. *)
+   WolframInstitute`THVMLink`ATP`Private` copies and call an undefined function. *)
 TFindProof;
 
 Begin["`Private`"];
@@ -122,7 +124,16 @@ TFindStringProof[thms_, axioms_,
         returnSpec_?atpReturnSpecQ, opts:OptionsPattern[TFindProof]] := Catch[
     Block[{
         goals = Replace[atpStringGoals[thms], {g_} :> g],
-        axs = Append[atpStringAxioms[axioms], $atpStringAssoc]
+        axs = Append[atpStringAxioms[axioms], $atpStringAssoc],
+        (* Word letters and the bridge variables are forced into Global`
+           (atpStringToWord / $atpStringAssoc).  decodeAtpTerm now restores
+           the held originals, so the decoded statements / path are correct
+           in any caller context -- but the built-in ProofObject verifier
+           ([ProofFunction]) the goal-directed lift gates on is still
+           context-fragile on a non-Global ambient context, so pin the proof
+           to Global` until the native TProofObject verifier replaces it. *)
+        $Context = "Global`",
+        $ContextPath = Prepend[DeleteCases[$ContextPath, "Global`"], "Global`"]
     },
         TFindProof[goals, axs, returnSpec, opts] /.
             EquationalLogic -> StringLogic
@@ -130,12 +141,7 @@ TFindStringProof[thms_, axioms_,
     "TATPError"
 ]
 
-(* === TFindEquationalPath =========================================== *)
-
-(* Prove-time form: the engine's goal chain IS the path (the "Path"
-   return spec, assembled by atpGoalPaths in ATP.wl). *)
-TFindEquationalPath[thm_, axioms_, opts:OptionsPattern[TFindProof]] :=
-    TFindProof[thm, axioms, "Path", opts]
+(* === Dataset path re-walk (shared with ATP_EquationalPath.wl) ====== *)
 
 (* Strip the HoldForm / Inactive wrappers of a dataset row's
    Statement down to the bare {lhs, rhs}. *)
@@ -146,13 +152,16 @@ atpRowEq[row_] := Replace[row["Statement"], {
     (l_ == r_) :> {l, r},
     _ :> $Failed}]
 
-(* ProofObject form: re-walk the dataset's per-goal linear chain
+(* Re-walk the dataset's per-goal linear chain
    {Hypothesis, g} -> SubstitutionLemma* -> {Conclusion, g}.  Each
    row's Statement is the running equation after its step; collapsing
    adjacent duplicates in the lhs column gives the lhs-side rewrite
    sequence (ditto rhs), and the two sequences meet at the shared
    normal form: the same join shape atpGoalPaths assembles from the
-   live chain. *)
+   live chain.  This is the robust fallback the ported FindEquationalPath
+   walker (ATP_EquationalPath.wl) leans on for proofs whose steps its
+   upstream unifier cannot reconstruct -- notably string-rewriting
+   CriticalPairLemmas. *)
 atpDatasetGoalPath[rows_Association, g_Integer] := Block[{
     hypKey = {"Hypothesis", g}, concKey = {"Conclusion", g},
     walk, eqs, lSeq, rSeq
@@ -174,7 +183,9 @@ atpDatasetGoalPath[rows_Association, g_Integer] := Block[{
         $Failed]
 ]
 
-TFindEquationalPath[po_ProofObject, opts:OptionsPattern[]] := Block[{
+(* The bare path off a ProofObject: one path per Hypothesis, the single
+   path when there is one goal.  $Failed when no chain reconstructs. *)
+atpDatasetEqPath[po_ProofObject] := Block[{
     rows = Association @ Normal @ po["ProofDataset"], goals
 },
     If[ ! AssociationQ[rows], Return[$Failed]];
@@ -192,6 +203,15 @@ atpSquashDups[l_List] := First /@ Split[l]
 TStringPath[thms_, axioms_, opts:OptionsPattern[TFindProof]] := Block[{
     path = TFindStringProof[thms, axioms, "Path", opts]
 },
+    (* The prove-time "Path" reads the engine's live goal chain, which is
+       not always recorded for a multi-goal conjunction.  Fall back to
+       re-walking a ProofObject's proof dataset, which reconstructs the
+       same per-goal chains -- the complete route at the cost of building
+       the ProofObject. *)
+    If[ path === $Failed,
+        With[{po = TFindStringProof[thms, axioms, "ProofObject", opts]},
+            If[ MatchQ[po, _ProofObject], path = atpDatasetEqPath[po]]]
+    ];
     Which[
         path === $Failed, $Failed,
         ListQ[path] && path =!= {} && ListQ[First[path]],

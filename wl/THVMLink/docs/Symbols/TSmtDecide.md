@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TSmtDecide
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TSmtDecide
 Keywords: [SMT, DPLL(T), congruence closure, QF_UF, Boolean combination, decision procedure]

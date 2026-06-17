@@ -1,4 +1,4 @@
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
 Get["wl/THVMLink/Examples/flux/FluxForward.wl"]; TInit[];
 pr[a___] := (WriteString["stdout", a, "\n"]; $Output // Flush);
 ref = TSafeTensorLoad["/tmp/flux_parity/ref_io.safetensors"];

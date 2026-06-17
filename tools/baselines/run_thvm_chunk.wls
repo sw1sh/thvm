@@ -4,7 +4,7 @@
    THVM_CHUNK_TC (default 30).  Appends to the shared TSV per case so
    a mid-chunk crash leaves earlier results on disk. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 OUT = "tools/baselines/thvm_notable_theorems.tsv";
 TC = ToExpression[Environment["THVM_CHUNK_TC"]];
 If[ ! IntegerQ[TC], TC = 30];

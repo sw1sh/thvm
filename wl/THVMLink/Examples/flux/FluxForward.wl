@@ -3,11 +3,11 @@
    The tinygrad `examples/stable_diffusion.py` shape: read the named bf16
    tensors out of the diffusers safetensors and wire ops, looped over the
    block config -- NOT a hand-exported per-block NetGraph.  Get-loaded
-   after THVMLink` (uses the public TUOp* surface + the NN library).
+   after WolframInstitute`THVMLink` (uses the public TUOp* surface + the NN library).
    Architecture + tensor names: docs/flux_forward_spec.md.
 
    The reusable NN primitives (RMSNorm, SiLU, SwiGLU, interleaved RoPE,
-   head-split attention) now live in THVMLink`s NN library; this file keeps
+   head-split attention) now live in WolframInstitute`THVMLink`s NN library; this file keeps
    only the FLUX-specific glue: the BLAS-friendly linear, the affine-free
    block LayerNorm, AdaLN modulation, gated residual, and the double /
    single block + transformer assembly. *)
@@ -28,7 +28,68 @@
        bf16-native: w stays bf16, so the matmul is bf16(act) x bf16(W) on the
        simdgroup tensor cores (no bf16->f32 cast).  RMSNorm/LayerNorm gains are
        1-D and never reach fxLinear, so the loader leaves them as-is. --- *)
-fxLinear[x_, w_] := TRealize[TMatMul[TRealize[x], Transpose[w]]]
+fxLinear[x_, w_TTerm] := TRealize[TMatMul[TRealize[x], Transpose[w]]]
+
+(* --- q8 weight-only quantization.  A diffusers linear weight {out, in} is
+       stored int8 with a per-output-channel (per-row) fp scale:
+         scale[o] = max_i |w[o,i]| / 127        (1-D {out})
+         wI8[o,i] = round(w[o,i] / scale[o])     (int8, in [-127, 127])
+       max|w| per row is recovered without an abs/min op as
+       sqrt(reduce_max(w^2)) (REDUCE_MAX is the only max kind; squaring makes
+       the reduce sign-blind), mirroring the TRMSNorm reduce-then-broadcast
+       idiom.  Quantising on-device keeps host residency to ~0 (the int8 result
+       is half the bytes; the bf16 source frees after the realize).  fxLinear
+       dispatches on the Association: the matmul reads int8 (Cast->bf16 folded
+       in-kernel, render_uop.c rmu_emit_matmul_tc_tiled b_is_int8), staying on
+       the simdgroup tensor-core tiled path, then a separate per-output-channel
+       scale multiply dequantises.  Metal has no int8 MMA, so this is a
+       cold-load / memory optimisation (~half the weight bytes), not a warm
+       compute win -- the cast->bf16 runs the same bf16 MMA rate. --- *)
+(* A weight is q8-quantisable iff it is a 2-D matrix both of whose dims are
+   >= 2048 (the per-block QKV/out/MLP projections -- the warm-hot bulk + ~all the
+   resident bytes) AND it is consumed by fxLinear.  The temb-fed linears
+   (modulation, norm_out, timestep_embedder) go through fxModLinear, which uses
+   the weight directly (Transpose / Dimensions) -- an int8 Association would break
+   it -- and their input temb carries a symbolic-M kvar (no resolvable dequant row
+   count); they are tiny M=1 matmuls with no q8 payoff, so leave them bf16. *)
+fxQuantizableQ[name_String, dims_List] :=
+    Length[dims] === 2 && Min[dims] >= 2048 &&
+    ! StringContainsQ[name, "modulation" | "norm_out" | "timestep_embedder"];
+
+fxQuantizeWeight[w_TTerm] := With[{shape = Dimensions[w]},
+    Module[{sumShape, maxsq, rms, scale, inv, wq},
+        sumShape = ReplacePart[shape, Length[shape] -> 1];       (* {out, 1} *)
+        maxsq = TUOpReshape[TUOpReduce[w * w, Length[shape] - 1, "MAX"], sumShape];
+        rms   = Sqrt[maxsq + 1.*^-12];                           (* max|w| per row *)
+        scale = rms * (1./127.);                                 (* {out, 1} *)
+        inv   = TUOpRecip[scale];                                (* exact 1/scale *)
+        wq    = TUOpCast[w * TUOpExpand[inv, shape], "i8"];      (* truncate to int8 *)
+        <|"q" -> TRealize[wq],
+          "s" -> TRealize[TUOpCast[TUOpReshape[scale, {First[shape]}], "bf16"]]|>]]
+
+(* q8 linear: int8 matmul on the TC tiled path (the Cast->bf16 is folded into
+   the kernel B-staging), realised, then dequantised by the per-output-channel
+   scale.  The matmul MUST be its own realised STORE(REDUCE) for the TC
+   recogniser to fire (a fused trailing scale-multiply would make the store
+   value a MUL, declining the tensor-core path); the scale is therefore a
+   separate broadcast multiply.  Scale is EXPAND'd to the output shape (not a
+   bare {1,out} numel-cycle) per the fxModulate/fxGateAdd caveat. *)
+fxLinear[x_, q_Association] := Module[{xr, mm, outShape},
+    (* Realise x FIRST: x may be an unreduced symbolic Plus (a gated residual / a
+       modulation `ln*(sc+1)+sh`), whose Dimensions is {2} (arg count), not its
+       tensor shape.  TRealize collapses it to a concrete TTerm -- the bf16 path
+       does this implicitly inside the matmul; q8 needs the realised handle for the
+       output-shape query too. *)
+    xr = TRealize[x];
+    mm = TRealize @ TMatMul[xr, Transpose[TUOpCast[q["q"], "bf16"]]];
+    (* Output {S, outd}: seq rows from the realised INPUT (a concrete-M block
+       activation -- the Dimensions[xr] fxModulate relies on), out-dim from the
+       kvar-free realised int8 weight.  Dimensions[mm] is $Failed under capture
+       (the realised-matmul term carries no shape).  q8 is gated to linears fed a
+       concrete-M activation; the temb-fed ones (symbolic-M) are excluded upstream. *)
+    outShape = ReplacePart[Dimensions[xr], -1 -> First[Dimensions[q["q"]]]];
+    (* scale-multiply left UNREALIZED so it fuses into the consumer kernel. *)
+    TUOpMul[mm, TUOpExpand[TUOpReshape[q["s"], {1, Last[outShape]}], outShape]]]
 
 (* --- affine-free LayerNorm over the last axis (FLUX block norms use
        elementwise_affine=False; the modulation supplies scale/shift).  This is
@@ -131,17 +192,40 @@ fxSingleBlock[x0_, mod_, ropeCos_, ropeSin_, W_, cfg_] := Module[
    See docs/flux_forward_spec.md + diffusers Flux2Transformer2DModel.
    ============================================================ *)
 
+(* --- temb-modulation matmul.  temb is {1,dim} (one timestep), so SiLU(temb).W^T
+       is an M=1 matmul.  As a JIT-captured sampler input, an M=1 matmul makes the
+       leading axis SYMBOLIC (kvar), which declines the Metal ICB for the WHOLE
+       captured velocity stream -> per-op dispatch (~5x slower replay, profiled).
+       Pad to a CONCRETE M=8 (row 0 = the real timestep, rows 1-7 zero), matmul,
+       take row 0 -- the matmul carries no kvar, so the ICB batches the big
+       projections.  The 8x M is a tiny matmul (modW is small vs the projections),
+       and rows 1-7 (zeros) cost nothing downstream. --- *)
+(* M=1 temb modulation: pad {1,dim} to a CONCRETE M=8 (Join 7 zero rows) so the
+   symbolic-M kvar never declines the Metal ICB, matmul a transposed weight, slice
+   row 0.  The pad's column count (dim) and dtype come from the WEIGHT w
+   ({out,dim}, a realized contiguous tensor with a fixed concrete shape), NOT from
+   v: v is the captured temb whose LEADING axis is a symbolic-M kvar, so
+   Dimensions[v]/TTensorDType[v] return $Failed/Missing in a JIT capture (the kvar
+   is unresolved at graph-build time) -- which poisons the whole modulation.  w is
+   kvar-free, so TLastDim[w]/TDType[w] are always concrete. *)
+fxModLinear[v_, w_] := TMatMul[
+    Join[v, TZeros[{7, Last[Dimensions[w]]}], 1], Transpose[w]][[1 ;; 1]]
+
 (* --- Flux2Modulation: SiLU(temb) -> Linear(modW) -> chunk(3*sets) into a
        list of {1,dim} vectors, in order (shift,scale,gate) per set.  temb is
        {1,dim}; modW is {sets*3*dim, dim} (shared across all blocks). --- *)
 fxModChunks[temb_, modW_, sets_] := Module[{d, mod},
-    d   = Dimensions[temb][[2]];
-    mod = fxLinear[TSiLU[temb], modW];                      (* {1, sets*3*d} *)
+    d   = Last[Dimensions[modW]] ;                          (* dim: from the kvar-free
+        weight, NOT Dimensions[temb] (the captured temb has a symbolic-M kvar, so
+        its shape query returns $Failed at graph-build time). *)
+    mod = fxModLinear[TSiLU[temb], modW];                   (* {1, sets*3*d} *)
     Table[mod[[All, (i - 1) d + 1 ;; i d]], {i, 3 sets}]]
 
 (* --- AdaLayerNormContinuous (norm_out): emb=Linear(SiLU(temb)); the diffusers
        chunk is (scale, shift); out = (1+scale)*LayerNorm(x) + shift. --- *)
-fxNormOut[x_, temb_, normW_, eps_] := With[{d = Dimensions[x][[2]], emb = fxLinear[TSiLU[temb], normW]},
+fxNormOut[x_, temb_, normW_, eps_] := With[{d = Last[Dimensions[normW]], emb = fxModLinear[TSiLU[temb], normW]},
+    (* d (dim) from the kvar-free normW {2*dim,dim}, NOT Dimensions[x] (x can carry a
+       symbolic-seq kvar in a JIT capture -> $Failed shape query). *)
     fxModulate[x, emb[[All, d + 1 ;; 2 d]], emb[[All, 1 ;; d]], eps]]
 
 (* assemble a double-block mods Association from the 6 shared img/txt chunks *)

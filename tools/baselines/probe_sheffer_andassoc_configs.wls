@@ -4,7 +4,7 @@
    Try aggressive CP-cap + ordering tweaks that constrain breadth
    instead of search-deeper-with-bigger-budget. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TC = 60;
 configs = {

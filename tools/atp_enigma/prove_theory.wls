@@ -1,7 +1,7 @@
 (* Build the GNN graph dataset for one AxiomaticTheory's proved NotableTheorems.
    Run: wl -t 240 -f prove_theory.wls <Theory> <scorer|NONE> <coopRatio> <out.wxf>
    ATP_DATA env names the scratch dir holding proved.wl (default /tmp/enigma). *)
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
 dataDir = Replace[Environment["ATP_DATA"], Except[_?StringQ] -> "/tmp/enigma"];
 {th, scorer, ratio, out} = $ScriptCommandLine[[-4 ;; -1]];
 If[ scorer =!= "NONE",

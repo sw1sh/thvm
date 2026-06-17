@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TDup
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TDup
 Keywords: [duplicator, dup, projections, sharing, multicomputation]

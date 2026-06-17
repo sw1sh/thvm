@@ -7,7 +7,7 @@
    -- could fragment as 1, 3, or more kernels. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

@@ -22,7 +22,7 @@ engine that should live next to thvm:
 
 Both are research prototypes.  thvm does **not** depend on them and we
 do **not** vendor them.  They are design references; we reimplement
-what we need inside `THVMLink``, specialised to the IC backing.
+what we need inside `WolframInstitute`THVMLink``, specialised to the IC backing.
 
 ## Insight
 
@@ -213,7 +213,7 @@ THVMPatternReplace[expr_, lhs_ :> rhs_]   := ...
 THVMPatternReplaceAll[expr_, rules_]      := ...
 ```
 
-Match algebra heads (under `THVMLink``):
+Match algebra heads (under `WolframInstitute`THVMLink``):
 
 - `TMatch[m]`             - opaque match wrapper around a SUP term.
 - `TMatchSum[a, b, ...]`  - decoded view of a labelled SUP.

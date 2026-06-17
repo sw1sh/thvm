@@ -2,7 +2,7 @@
 (* NN/Embedding.wl - gather / take-along-axis, table embedding lookup, and
    the sinusoidal timestep / position embedding. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TGather, "TGather[x$, axis$, index$] selects one element per slice along axis$ (0-indexed): out[$$, 0, $$] = x$[$$, index$, $$], keeping axis$ at size 1. It lowers tinygrad-style to sum((arange == index$) * x$) over axis$ -- the CMPEQ one-hot the cross-entropy uses, multiplied by x$ and sum-reduced. index$ is an integer TTerm or host list giving one index per slice (x$'s shape with axis$ -> 1, or the flat per-slice list). The gradient scatters the cotangent back to the selected positions, so it trains. See TTakeAlongAxis for the numpy (index$, axis$) order."];
 GeneralUtilities`SetUsage[TTakeAlongAxis, "TTakeAlongAxis[x$, index$, axis$] is TGather[x$, axis$, index$] with the numpy take_along_axis argument order: select x$ at integer index$ along axis$, keeping the axis at size 1. This is the per-sample selection a policy gradient uses to pick each action's log-prob from {batch, n_actions} logits$ with a {batch} action list (axis$ = 1)."];

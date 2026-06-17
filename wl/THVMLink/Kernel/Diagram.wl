@@ -1,7 +1,7 @@
 (* ::Package:: *)
 (* Diagram.wl - Wolfram`DiagrammaticComputation`-backed renderer.
 
-   Sits in its own subcontext (`THVMLink`Diagram`) so it can put the
+   Sits in its own subcontext (`WolframInstitute`THVMLink`Diagram`) so it can put the
    DC package on its $ContextPath via BeginPackage's import list and
    call `Diagram` / `DiagramNetwork` directly without ambiguity.
 
@@ -32,7 +32,7 @@
    non-dual port and arrows never flip.  ERA's single port is
    dynamic for the same reason. *)
 
-BeginPackage["THVMLink`", {
+BeginPackage["WolframInstitute`THVMLink`", {
     "Wolfram`DiagrammaticComputation`",
     "Wolfram`DiagrammaticComputation`Diagram`"
 }];
@@ -198,7 +198,7 @@ principalOutputs[agentBase_Integer, agentTag_Integer,
 
 (* IC arities only.  UOP arity, opcode names, output-shape inference,
    bit decoding, and shape arithmetic come from sibling Uop.wl /
-   Shape.wl which share THVMLink`Private` - no qualification needed.
+   Shape.wl which share WolframInstitute`THVMLink`Private` - no qualification needed.
 
    ALO holds (body, state); MAT holds (scrut, case-tree); OP2 holds
    (lhs, rhs); CTR has variable arity (heap[val]=NUM(n), heap[val+1..val+n]
@@ -956,7 +956,7 @@ discoverUopOpcodesHere[seedTerms_List] := Block[{lo = THeapBase[], n = THeapPos[
    `reachableICAgents` in Visualization.wl but using the
    diagram's agentRule shape (base -> tag) and reusing the
    `agentChildSlots` walker (defined in Visualization.wl; shared
-   THVMLink`Private context).  Restricting THeapDiagram[term] to
+   WolframInstitute`THVMLink`Private context).  Restricting THeapDiagram[term] to
    the reachable closure of `term` keeps stale pre-WNF cells, prior
    constructions, and unrelated heap garbage out of the diagram, so
    the wire names of independent agents never get mixed up. *)

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TOp2
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TOp2
 Keywords: [op2, arithmetic, integer, num, operator]

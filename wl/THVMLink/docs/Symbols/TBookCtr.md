@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TBookCtr
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TBookCtr
 Keywords: [ctr, book_heap, AOT, Metal, constructor]

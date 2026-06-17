@@ -13,7 +13,7 @@
    Run:  wolframscript -file lenet_train.wls *)
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], "..", "..", "wl", "THVMLink"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 SeedRandom[42]; Btr = 256;
 tr = RandomSample[ResourceData["MNIST", "TrainingData"], Btr];
 te = RandomSample[ResourceData["MNIST", "TestData"], 512];

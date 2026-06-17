@@ -44,7 +44,7 @@
    This file is run as INFORMATIONAL by the WL test runner. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 
 (* === TBatchNormTrain backward parity: d/dx through the TRAIN form

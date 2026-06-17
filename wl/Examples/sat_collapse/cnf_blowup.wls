@@ -13,7 +13,7 @@
    Run this with `wolframscript -f cnf_blowup.wls`. *)
 
 PacletDirectoryAdd[FileNameJoin[{ParentDirectory[ParentDirectory[ParentDirectory[$InputFileName]]], "wl"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInitContext[];
 (* ---- Single SUP arg -- works. ---- *)
 TReset[];

@@ -21,7 +21,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 envValue[name_String, default_String] := Module[{v = Environment[name]},
     If[StringQ[v] && StringLength[StringTrim[v]] > 0, v, default]]

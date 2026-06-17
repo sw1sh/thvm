@@ -17,7 +17,7 @@
 *)
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInitContext[];
 ctx = TContextNew["metal"];
 If[ ctx === 0,

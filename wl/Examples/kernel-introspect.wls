@@ -32,7 +32,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 indent[s_String, prefix_String] := StringJoin @@ Riffle[
     Map[prefix <> # &, StringSplit[s, "\n", All]], "\n"]

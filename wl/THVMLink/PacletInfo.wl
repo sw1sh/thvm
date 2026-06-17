@@ -8,12 +8,12 @@ PacletObject[<|
     "License"        -> "MIT",
     "Version"        -> "0.1.0",
     "WolframVersion" -> "13.0+",
-    "PrimaryContext" -> "THVMLink`",
+    "PrimaryContext" -> "WolframInstitute`THVMLink`",
     "Extensions"     -> {
         {
             "Kernel",
             "Root"    -> "Kernel",
-            "Context" -> {"THVMLink`", "THVMLink`ATP`"}
+            "Context" -> {"WolframInstitute`THVMLink`", "WolframInstitute`THVMLink`ATP`"}
         },
         {"LibraryLink"},
         {

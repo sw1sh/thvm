@@ -2,7 +2,7 @@
 Template: TechNote
 Name: TPTPImport
 Title: Importing TPTP Benchmarks
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/TPTPImport
 Keywords: [TPTP, CNF, FOF, benchmark, import, theorem proving, Sheffer, AbelianGroupAxioms]
@@ -27,7 +27,7 @@ Function-symbol names come back as String heads (<code>"and"[x_, y_]</code> rath
 The TPTP parser itself - [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) - lives in the <code>[Wolfram\`Parser\`](paclet:Wolfram/WolframParser/guide/WolframParser)</code> paclet. The dispatch overloads on [TFindProof]() that accept a `File` or string call it through transparently, so loading just <code>THVMLink\`ATP\`</code> is enough for the file / string entry points to work:
 
 ```wl
-Needs["THVMLink`ATP`"];
+Needs["WolframInstitute`THVMLink`ATP`"];
 Needs["Wolfram`Parser`"];
 ```
 

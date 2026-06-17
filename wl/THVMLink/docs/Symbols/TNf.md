@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TNf
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TNf
 Keywords: [nf, normal form, redex, full reduction]

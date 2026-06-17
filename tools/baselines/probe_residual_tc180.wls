@@ -6,7 +6,7 @@
    that doesn't include the goal -- needs heuristic/strategy work,
    not more wall. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TC = 180;
 config = {"Completion", "Ordering" -> "KBO",

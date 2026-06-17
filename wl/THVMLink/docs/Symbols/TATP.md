@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TATP
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TATP
 Keywords: [ATP, raw saturator, Waldmeister, .pr file, statistics]

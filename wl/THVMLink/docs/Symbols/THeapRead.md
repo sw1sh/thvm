@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: THeapRead
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/THeapRead
 Keywords: [heap, read, cell, loc, low-level]

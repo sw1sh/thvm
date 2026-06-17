@@ -24,7 +24,7 @@
    consequence that does not exist for kernels at the same
    depth (they can fire in any order). *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TMemoryPlan, "TMemoryPlan[] returns a TMemoryPlan[<|$$|>] snapshot of the live thvm schedule.
 The object holds per-kernel topological depths and per-buf alloc_depth, last_use_depth, alive_span, and status intervals derived from the producer_kid / input_tids edges.
@@ -67,7 +67,7 @@ Begin["`Private`"];
 
 (* === bridge tables: thin wrappers over the LibraryLink loaders ===
    Loader symbols ($kernelTableFn etc.) live in THVMLink.wl alongside
-   every other LibraryFunctionLoad call; both files share THVMLink`Private`
+   every other LibraryFunctionLoad call; both files share WolframInstitute`THVMLink`Private`
    so the references resolve regardless of file load order (alphabetical:
    Kernel.wl < MemoryPlan.wl < THVMLink.wl).
 

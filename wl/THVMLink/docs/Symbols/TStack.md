@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TStack
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TStack
 Keywords: [stack, eliminator, frames, wnf, debug]

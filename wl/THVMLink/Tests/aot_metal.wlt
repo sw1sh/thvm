@@ -330,12 +330,12 @@ VerificationTest[
     TInit[];
     Module[{bookAlloc, bookSet, termNewRaw, ttermRawFn, opCodes,
             locs, results},
-      bookAlloc  = Symbol["THVMLink`Private`$bookAllocFn"];
-      bookSet    = Symbol["THVMLink`Private`$bookSetFn"];
-      termNewRaw = Symbol["THVMLink`Private`$termNewFn"];
-      (* ttermRaw lives in THVMLink`Private`; the wlt runs at global
+      bookAlloc  = Symbol["WolframInstitute`THVMLink`Private`$bookAllocFn"];
+      bookSet    = Symbol["WolframInstitute`THVMLink`Private`$bookSetFn"];
+      termNewRaw = Symbol["WolframInstitute`THVMLink`Private`$termNewFn"];
+      (* ttermRaw lives in WolframInstitute`THVMLink`Private`; the wlt runs at global
          scope so we have to fetch it by qualified name. *)
-      ttermRawFn = Symbol["THVMLink`Private`ttermRaw"];
+      ttermRawFn = Symbol["WolframInstitute`THVMLink`Private`ttermRaw"];
       opCodes    = {0, 1, 2, 3, 4};   (* ADD, SUB, MUL, EQ, LT *)
       locs = Table[
         Module[{argLoc, rootLoc, opTerm},

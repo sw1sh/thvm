@@ -16,7 +16,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-<< THVMLink`ATP`;
+<< WolframInstitute`THVMLink`ATP`;
 $theorems = {
     {"AbelianGroupAxioms", "InverseOfInverse"},
     {"BooleanAxioms", "AndCommutativity"},

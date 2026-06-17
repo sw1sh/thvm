@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TUOpReshape
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TUOpReshape
 Keywords: [UOp, reshape, movement, shape]

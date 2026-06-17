@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: THeapAlloc
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/THeapAlloc
 Keywords: [heap, allocate, cell, loc, low-level]

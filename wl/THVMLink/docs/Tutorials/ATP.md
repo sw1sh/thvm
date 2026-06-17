@@ -2,7 +2,7 @@
 Template: TechNote
 Name: ATP
 Title: Theorem Proving with THVMLink
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/ATP
 Keywords: [theorem proving, ATP, equational, completion, Knuth-Bendix, Waldmeister, Vampire, congruence closure, SMT, TPTP]
@@ -26,7 +26,7 @@ This note walks both engines end to end through a single problem family - abelia
 The ATP context is its own load. The thvm context only carries the IC primitives; ATP / SMT symbols arrive on the path through a sibling `Get`:
 
 ```wl
-Needs["THVMLink`ATP`"];
+Needs["WolframInstitute`THVMLink`ATP`"];
 ```
 
 Equational axioms can be supplied directly, or as a name resolved through the built-in [AxiomaticTheory](). Each axiom and conjecture is universally quantified through a ForAll wrapper (the standard Wolfram surface, identical to [FindEquationalProof](paclet:ref/FindEquationalProof)). Use a non-`Orderless` operator (`CircleTimes` / `CenterDot` / a function head like `f[x, y]`) when both sides of an equation must differ - Wolfram's `Times` sorts its operands at parse time, so `x*y == y*x` reads as `x*y == x*y` and never reaches the engine as a non-trivial goal.

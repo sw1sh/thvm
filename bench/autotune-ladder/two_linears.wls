@@ -6,7 +6,7 @@
    demonstrated, or if they fuse and lose the gemm path. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

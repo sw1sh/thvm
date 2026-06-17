@@ -28,7 +28,7 @@
    proven in tests/test_aot_e2e.c.
 *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TAOTEmit, "TAOTEmit[name$] returns the C source string that thvm_aot_emit_program produces for the def registered under name$.
 Inspect, save, or compile manually; TAOTCompile and TAOTRun automate those steps on top of this lower-level surface."];
@@ -65,7 +65,7 @@ Amortizes Metal kernel-launch overhead across many independent OP2 folds. Build 
 (* Forward-declare symbols owned by alphabetically-later siblings
    (Ref.wl, Switch.wl) that load AFTER AOT.wl.  Without these stub
    declarations, bare references in the `Private` block would resolve
-   to fresh THVMLink`Private` symbols rather than the public ones the
+   to fresh WolframInstitute`THVMLink`Private` symbols rather than the public ones the
    sibling files later attach downvalues to.  Same pattern Format.wl
    uses for late-loading TOpt / TKernelOpts / TKernelVariant. *)
 {TDefName, TNum};
@@ -74,7 +74,7 @@ Begin["`Private`"];
 
 (* Lazy-loaded library functions (matches the pattern used by every
    other Kernel/*.wl file -- `load` is shared from THVMLink.wl via
-   the THVMLink`Private namespace). *)
+   the WolframInstitute`THVMLink`Private namespace). *)
 $aotEmitFn    := $aotEmitFn    = load["thvm_wl_aot_emit_program",
     {Integer, "UTF8String"}, "UTF8String"]
 $aotCompileFn := $aotCompileFn = load["thvm_wl_aot_compile",

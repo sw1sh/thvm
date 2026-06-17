@@ -6,7 +6,7 @@
    path doesn't accumulate over-deep terms, AutoMaxWeight caps the
    queue.  Output: theory \t thm \t k/n \t status \t seconds \t pl. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 $RecursionLimit = 16384;
 
 args = $ScriptCommandLine;

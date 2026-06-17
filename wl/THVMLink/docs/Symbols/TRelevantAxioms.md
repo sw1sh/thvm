@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TRelevantAxioms
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TRelevantAxioms
 Keywords: [ATP, axiom relevance, premise selection, SInE, filter]

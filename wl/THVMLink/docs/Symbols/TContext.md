@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TContext
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TContext
 Keywords: [context, snapshot, persist, container]

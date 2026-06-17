@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TKernelApplyOpt
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TKernelApplyOpt
 Keywords: [kernel, opt, apply, schedule, UPCAST, UNROLL]

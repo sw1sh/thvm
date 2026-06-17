@@ -2,12 +2,12 @@
 (* ATP_Relevance.wl - axiom-relevance filter: TRelevantAxioms and the Safe / Connected / SInE
    premise-selection modes the Method \"AxiomRelevance\" suboption drives.
 
-   Sibling of ATP.wl in the THVMLink`ATP` context; the recursive Kernel
+   Sibling of ATP.wl in the WolframInstitute`THVMLink`ATP` context; the recursive Kernel
    loader Gets it after ATP.wl (files sorted by {depth, lowercased path}),
-   and it shares the THVMLink`ATP`Private` context, so it references
+   and it shares the WolframInstitute`THVMLink`ATP`Private` context, so it references
    ATP.wl's loaders, encoder, and helpers by bare name. *)
 
-BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
 
 GeneralUtilities`SetUsage[TRelevantAxioms, "TRelevantAxioms[conjecture$, axioms$] reports which axioms the relevance filter keeps versus drops for proving conjecture$, without running a proof.
 TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.

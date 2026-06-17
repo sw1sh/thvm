@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TGCCollect
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TGCCollect
 Keywords: [gc, garbage collection, Cheney, heap, compact]

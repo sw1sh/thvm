@@ -19,8 +19,8 @@ VerificationTest[
        single-character word is the bare letter symbol.  Letter symbols
        are constructed in Global` so System single-letter symbols
        (C, D, E, I, N, O) stay inert word letters. *)
-    {THVMLink`ATP`Private`atpStringToWord["ABC"],
-     THVMLink`ATP`Private`atpStringToWord["A"]},
+    {WolframInstitute`THVMLink`ATP`Private`atpStringToWord["ABC"],
+     WolframInstitute`THVMLink`ATP`Private`atpStringToWord["A"]},
     {CenterDot[Global`A, CenterDot[Global`B, Symbol["Global`C"]]],
      Global`A},
     TestID -> "ATPStrings/encode/right-nested-word"
@@ -30,7 +30,7 @@ VerificationTest[
     (* The decode flattens ANY bracketing back to the plain string;
        path intermediates re-bracket through the associativity
        bridge. *)
-    THVMLink`ATP`Private`atpWordToString[
+    WolframInstitute`THVMLink`ATP`Private`atpWordToString[
         CenterDot[CenterDot[Global`A, Global`B], Symbol["Global`C"]]],
     "ABC",
     TestID -> "ATPStrings/encode/decode-any-bracketing"
@@ -114,7 +114,7 @@ VerificationTest[
        the completed system. *)
     Block[{po, words},
         po = TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}, TimeConstraint -> 30];
-        words = THVMLink`ATP`Private`atpWordToString /@ TFindEquationalPath[po];
+        words = WolframInstitute`THVMLink`ATP`Private`atpWordToString /@ TFindEquationalPath[po];
         {ListQ[words], First[words], Last[words],
          AllTrue[Partition[words, 2, 1], fwdReach[#[[1]], #[[2]], 5] &]}
     ],

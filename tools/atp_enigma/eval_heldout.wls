@@ -1,8 +1,8 @@
 (* Held-out AUC: split the corpus by FILE (= by problem, no leakage), train,
    score the unseen test graphs with the trained model, report train + TEST AUC.
    Run: wl -t 500 -f eval_heldout.wls <hidden> <rounds> [maxTrainRounds] [seed] *)
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"];
-P = "THVMLink`ATP`Private`";
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
+P = "WolframInstitute`THVMLink`ATP`Private`";
 fwd = Symbol[P <> "atpGnnForwardLogits"]; tens = Symbol[P <> "atpGnnTensors"]; auc = Symbol[P <> "atpScorerAuc"];
 dataDir = Replace[Environment["ATP_DATA"], Except[_?StringQ] -> "/tmp/enigma"];
 argv = $ScriptCommandLine;

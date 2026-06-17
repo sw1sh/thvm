@@ -46,7 +46,7 @@
    input/op explosions, alias bloat, and round-over-round bench
    growth without scrolling raw heap dumps. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TProfile, "TProfile[] returns an Association snapshotting the current runtime state (heap cells by tag, tensors, kernels, ITRS).
 TProfile[label$] sets the \"Label\" key to label$."];
@@ -96,7 +96,7 @@ profileCellsByTag[] := Module[{base, n, byTag = <||>, t, tag},
 profilePerKernel[] := Module[{kt, info},
     kt = TKernelTable[];
     Table[
-        info = THVMLink`Private`decodeKernelInfo[k][[1]];
+        info = WolframInstitute`THVMLink`Private`decodeKernelInfo[k][[1]];
         <| "Kid"    -> k,
            "Inputs" -> info["InputCount"],
            "Ops"    -> info["OpCount"],

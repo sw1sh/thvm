@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TRedexes
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TRedexes
 Keywords: [redex, list, heap, multiway, debug]

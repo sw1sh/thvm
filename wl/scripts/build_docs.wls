@@ -17,8 +17,8 @@ Needs["Wolfram`Parser`"]
 
 PacletDirectoryLoad[pacletDir]
 Check[
-    Needs["THVMLink`"],
-    Print["[warn] could not load THVMLink`; example cells will report load errors."];
+    Needs["WolframInstitute`THVMLink`"],
+    Print["[warn] could not load WolframInstitute`THVMLink`; example cells will report load errors."];
     Print["[warn] build the dylib first: cd ", FileNameJoin[{pacletDir, "..", ".."}], " && make wl"]
 ]
 
@@ -61,13 +61,13 @@ Build`perFileBudgetSec = 60
    bare scratch name like `a` from one cell leaks into another file's cell
    that also references `a`.  MTN sets `$Context` to the file's frontmatter
    Context for the duration of the eval, so a bare `a` is parsed as
-   `THVMLink``ATP``a` for an ATP-context file or `THVMLink``a` for a base-
+   `WolframInstitute`THVMLink``ATP``a` for an ATP-context file or `WolframInstitute`THVMLink``a` for a base-
    context file - NOT `Global``a`.  We snapshot every relevant scratch
    context once the build's setup is done, then between files ClearAll any
    new symbol in any of them - i.e. only doc-cell scratch, never the build
    harness, MTN, or the paclet's own exports. *)
 Build`scratchContexts =
-    {"Global`", "THVMLink`", "THVMLink`ATP`"}
+    {"Global`", "WolframInstitute`THVMLink`", "WolframInstitute`THVMLink`ATP`"}
 
 ClearGlobalScratch[] := Module[{ scratch },
     scratch = Complement[
@@ -111,7 +111,33 @@ buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ, res, t0, dt
         baseName, ".nb",
         If[ evalQ && !fallbackQ, "", " (no-eval)"],
         "  (", dt, "s)"
-    ]
+    ];
+    If[ Build`showQ, showBuiltDoc[out] ]
+]
+
+(* `--show` reads the freshly built .nb back and echoes its Input /
+   Output / Message / Print cells to the console, so a single-doc build
+   doubles as an example-output test harness: you see each evaluated
+   result next to the `<!-- => ... -->` hint in the source without
+   opening the notebook in a front end.  DisplayForm renders the cell's
+   boxes to plain 2-D text; long renderings are clipped. *)
+showBuiltDoc[out_String] := Module[{ nb, cells, render },
+    If[ ! FileExistsQ[out], Return[Null]];
+    nb = Quiet @ Get[out];
+    If[ Head[nb] =!= Notebook, Return[Null]];
+    cells = Cases[nb,
+        Cell[BoxData[b_], sty : ("Input" | "Output" | "Message" | "Print"), ___] :>
+            {sty, b},
+        Infinity];
+    If[ cells === {},
+        Print["    (no example cells)"];
+        Return[Null]
+    ];
+    render[b_] := StringReplace[
+        StringTake[Quiet @ ToString[DisplayForm[b]], UpTo[1200]],
+        "\n" -> "\n          "];
+    Print["    --- evaluated cells ---"];
+    Scan[Function[c, Print["    [", c[[1]], "] ", render[c[[2]]]]], cells]
 ]
 
 (* Snapshot every scratch-context's name set right before the loop;
@@ -119,10 +145,10 @@ buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ, res, t0, dt
 Build`globalBoot =
     Join @@ (Names[{# <> "*", # <> "**`*"}] & /@ Build`scratchContexts)
 
-(* `wolframscript -file build.wls --clean` wipes MTN's persistent example-
+(* `wolframscript -file build_docs.wls --clean` wipes MTN's persistent example-
    output cache for this paclet before building, forcing every example cell
    to re-evaluate.  The cache is keyed by the doc's frontmatter `Name:`
-   (here `WolframInstitute/THVMLink`), NOT by the source filename, so each
+   (here `WolframInstitute/WolframInstitute`THVMLink`), NOT by the source filename, so each
    .md file's cache lives under that single dir.  Pre-existing built .nb
    files also wiped so a stale render can't survive the rebuild. *)
 If[ MemberQ[Rest @ $ScriptCommandLine, "--clean"],
@@ -142,9 +168,12 @@ If[ MemberQ[Rest @ $ScriptCommandLine, "--clean"],
    every doc is built.  Building one file in isolation also sidesteps a
    sibling page poisoning the shared build kernel -- e.g. an ATP-context
    tutorial whose Wolfram`Parser` dependency is unavailable aborts mid-load
-   and the later base-context tutorials then fail to render.
-     wolframscript -file build.wls Tensors          (* just Tensors.md *)
-     wolframscript -file build.wls --clean Tensors   (* wipe cache, then it *) *)
+   and the later base-context tutorials then fail to render.  Pair a single-doc
+   build with --show to echo the evaluated example cells for output checking.
+     wolframscript -file build_docs.wls Tensors                 (* just Tensors.md *)
+     wolframscript -file build_docs.wls --clean Tensors          (* wipe cache, then it *)
+     wolframscript -file build_docs.wls --show FindReplacePath   (* build it + print cell outputs *) *)
+Build`showQ = MemberQ[Rest @ $ScriptCommandLine, "--show"]
 allDocs = Sort @ FileNames["*.md", FileNameJoin[{pacletDir, "docs"}], Infinity]
 fileSel = Select[Rest @ $ScriptCommandLine, sel |-> ! StringStartsQ[sel, "--"]]
 toBuild = If[ fileSel === {},

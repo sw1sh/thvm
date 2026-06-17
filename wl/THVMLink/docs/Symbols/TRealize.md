@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TRealize
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TRealize
 Keywords: [realize, materialize, dispatch, kernel, fire]

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TApp
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TApp
 Keywords: [apply, application, lambda, beta, kernel]

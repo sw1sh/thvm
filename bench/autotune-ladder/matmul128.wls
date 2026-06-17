@@ -2,7 +2,7 @@
 (* Level 2 -- matmul (M=N=K=128) on thvm. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

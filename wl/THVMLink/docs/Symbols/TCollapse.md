@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TCollapse
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TCollapse
 Keywords: [collapse, sup, enumerate, leaves, multicomputation, cnf]

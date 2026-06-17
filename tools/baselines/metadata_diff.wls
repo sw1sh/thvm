@@ -6,7 +6,7 @@
    the CLI-lifted side. *)
 SetDirectory["/Users/swish/src/thvm"];
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 $RecursionLimit = 16384;
 If[ Length[$ScriptCommandLine] < 3,
     Print["usage: metadata_diff.wls THEORY THM"];
@@ -19,7 +19,7 @@ Quiet @ TFindProof["InverseOfInverse", "GroupAxioms",
 
 pP = TFindProof[thm, theory,
     Method -> "Waldmeister", TimeConstraint -> 8];
-pC = THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
+pC = WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
     TimeConstraint -> 12,
     "LiftToProofObject" -> True];
 

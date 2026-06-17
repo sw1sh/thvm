@@ -13,7 +13,7 @@
    Run:  wolframscript -file wl/THVMLink/Examples/nettrain_tutorial.wls *)
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], ".."}]];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 SeedRandom[7];
 nTrain = 512; nTest = 512;
