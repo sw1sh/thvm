@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMaximum
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMaximum
 Keywords: [maximum, max, elementwise, ReLU, clamp, RL]

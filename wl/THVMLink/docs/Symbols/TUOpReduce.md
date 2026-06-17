@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TUOpReduce
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TUOpReduce
 Keywords: [UOp, reduce, sum, max, axis]

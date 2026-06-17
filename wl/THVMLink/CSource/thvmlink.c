@@ -2837,7 +2837,7 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ref(WolframLibraryData libData, mint arg
 //
 // Phase 1+2 built the runtime + emitter in src/aot/.  This is the
 // minimum WL bridge so users can drive the emitter from
-// THVMLink`AOT and inspect what gets generated.  TAOTCompile (the
+// WolframInstitute`THVMLink`AOT and inspect what gets generated.  TAOTCompile (the
 // dlopen path) lands as the OPS-indirection ABI matures; for now
 // TAOTEmit returns the source string and tests / docs can run it
 // through the standalone-binary path proven by tests/test_aot_e2e.c.

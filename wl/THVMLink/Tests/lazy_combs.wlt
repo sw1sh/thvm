@@ -24,7 +24,7 @@ VerificationTest[
 VerificationTest[
     Block[{dbl = With[{x = Module[{xs}, xs]},
                        TLam[x, TOp2["*", x, TNum[2]]]],
-           xs = THVMLink`Private`encodeAsConsList[{1, 2, 3}]},
+           xs = WolframInstitute`THVMLink`Private`encodeAsConsList[{1, 2, 3}]},
         FromTTerm @ TLazyMap[dbl, xs]],
     {2, 4, 6},
     TestID -> "LazyCombs/Map/double-on-3-element-Cons"
@@ -35,7 +35,7 @@ VerificationTest[
 VerificationTest[
     Block[{gt3 = With[{x = Module[{xs}, xs]},
                        TLam[x, TOp2["<", TNum[3], x]]],
-           xs  = THVMLink`Private`encodeAsConsList[{1, 2, 3, 4, 5, 6, 7, 8}]},
+           xs  = WolframInstitute`THVMLink`Private`encodeAsConsList[{1, 2, 3, 4, 5, 6, 7, 8}]},
         FromTTerm @ TLazySelect[xs, gt3]],
     {4, 5, 6, 7, 8},
     TestID -> "LazyCombs/Select/gt3-of-1-to-8"
@@ -43,7 +43,7 @@ VerificationTest[
 
 VerificationTest[
     Block[{alwaysFalse = With[{x = Module[{xs}, xs]}, TLam[x, TNum[0]]],
-           xs = THVMLink`Private`encodeAsConsList[{1, 2, 3}]},
+           xs = WolframInstitute`THVMLink`Private`encodeAsConsList[{1, 2, 3}]},
         FromTTerm @ TLazySelect[xs, alwaysFalse]],
     {},
     TestID -> "LazyCombs/Select/alwaysFalse-yields-empty"
@@ -51,7 +51,7 @@ VerificationTest[
 
 VerificationTest[
     Block[{alwaysTrue = With[{x = Module[{xs}, xs]}, TLam[x, TNum[1]]],
-           xs = THVMLink`Private`encodeAsConsList[{1, 2, 3}]},
+           xs = WolframInstitute`THVMLink`Private`encodeAsConsList[{1, 2, 3}]},
         FromTTerm @ TLazySelect[xs, alwaysTrue]],
     {1, 2, 3},
     TestID -> "LazyCombs/Select/alwaysTrue-keeps-all"
@@ -62,7 +62,7 @@ VerificationTest[
 VerificationTest[
     Block[{gt5 = With[{x = Module[{xs}, xs]},
                        TLam[x, TOp2["<", TNum[5], x]]],
-           xs  = THVMLink`Private`encodeAsConsList[{1, 2, 3, 4, 5, 6, 7, 8}]},
+           xs  = WolframInstitute`THVMLink`Private`encodeAsConsList[{1, 2, 3, 4, 5, 6, 7, 8}]},
         TLazySelectFirst[xs, gt5]],
     6,
     TestID -> "LazyCombs/SelectFirst/gt5-finds-6"
@@ -71,7 +71,7 @@ VerificationTest[
 VerificationTest[
     Block[{gt100 = With[{x = Module[{xs}, xs]},
                          TLam[x, TOp2["<", TNum[100], x]]],
-           xs    = THVMLink`Private`encodeAsConsList[{1, 2, 3}]},
+           xs    = WolframInstitute`THVMLink`Private`encodeAsConsList[{1, 2, 3}]},
         TLazySelectFirst[xs, gt100]],
     Missing["NotFound"],
     TestID -> "LazyCombs/SelectFirst/no-match"
@@ -88,20 +88,20 @@ VerificationTest[
 (* === TLazyCatenate =============================================== *)
 
 VerificationTest[
-    Block[{ss = THVMLink`Private`encodeAsConsList[{
-                THVMLink`Private`encodeAsConsList[{1, 2}],
-                THVMLink`Private`encodeAsConsList[{3, 4}]}]},
+    Block[{ss = WolframInstitute`THVMLink`Private`encodeAsConsList[{
+                WolframInstitute`THVMLink`Private`encodeAsConsList[{1, 2}],
+                WolframInstitute`THVMLink`Private`encodeAsConsList[{3, 4}]}]},
         FromTTerm @ TLazyCatenate[ss]],
     {1, 2, 3, 4},
     TestID -> "LazyCombs/Catenate/two-2-streams"
 ]
 
 VerificationTest[
-    Block[{ss = THVMLink`Private`encodeAsConsList[{
-                THVMLink`Private`encodeAsConsList[{}],
-                THVMLink`Private`encodeAsConsList[{1}],
-                THVMLink`Private`encodeAsConsList[{}],
-                THVMLink`Private`encodeAsConsList[{2, 3}]}]},
+    Block[{ss = WolframInstitute`THVMLink`Private`encodeAsConsList[{
+                WolframInstitute`THVMLink`Private`encodeAsConsList[{}],
+                WolframInstitute`THVMLink`Private`encodeAsConsList[{1}],
+                WolframInstitute`THVMLink`Private`encodeAsConsList[{}],
+                WolframInstitute`THVMLink`Private`encodeAsConsList[{2, 3}]}]},
         FromTTerm @ TLazyCatenate[ss]],
     {1, 2, 3},
     TestID -> "LazyCombs/Catenate/with-empty-streams"
@@ -110,7 +110,7 @@ VerificationTest[
 (* === TLazyCases (Pattern.wl-driven) ============================== *)
 
 VerificationTest[
-    Block[{xs = THVMLink`Private`encodeAsConsList[{
+    Block[{xs = WolframInstitute`THVMLink`Private`encodeAsConsList[{
                 ToTTerm[g[1]],
                 ToTTerm[h[2]],
                 ToTTerm[g[3]],
@@ -121,7 +121,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Block[{xs = THVMLink`Private`encodeAsConsList[{
+    Block[{xs = WolframInstitute`THVMLink`Private`encodeAsConsList[{
                 ToTTerm[g[1]],
                 ToTTerm[h[2]],
                 ToTTerm[g[3]],

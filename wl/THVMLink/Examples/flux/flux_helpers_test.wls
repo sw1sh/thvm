@@ -1,4 +1,4 @@
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "FluxForward.wl"}]];
 TInit[];
 chk[lbl_, got_, oracle_] := WriteString["stdout", lbl, ": ",

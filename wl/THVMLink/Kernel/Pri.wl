@@ -40,7 +40,7 @@
      TPriDrain[]                fire all queued callbacks; clear
      TPriCallbacks[]            inspect the slot -> fn registration *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TPri, "TPri[fn$, val$, cont$] builds a PRI redex that, when wnf reduces it, forces val$ (firing kernel chains and ASSIGN side effects), enqueues the snapshotted value for the WL callback fn$ unless fn$ is None, then returns cont$.
 fn$ auto-registers under a fresh slot on first use and reuses that slot on later calls.

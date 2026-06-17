@@ -34,7 +34,7 @@
        DEVICE=metal   -- run the whole forward on the GPU (token-identical) *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 Needs["NeuralNetworks`"];
 
 print[args___] := WriteString["stdout", args, "\n"];

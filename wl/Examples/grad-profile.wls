@@ -5,7 +5,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"]
-Get["THVMLink`"]
+Get["WolframInstitute`THVMLink`"]
 
 (* a^4 nested TGrad, vector input, depths 1-5. *)
 Module[{a, y, seed, profiles},

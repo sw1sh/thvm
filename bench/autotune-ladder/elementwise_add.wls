@@ -4,7 +4,7 @@
    baseline + winner wall_us + JIT cache stats. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

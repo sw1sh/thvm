@@ -3,7 +3,7 @@
    4th positional arg (a WL-expression string).  Outputs the same
    TSV-format line. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 args = $ScriptCommandLine;
 theory = args[[2]];
 thm = args[[3]];

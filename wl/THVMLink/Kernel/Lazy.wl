@@ -34,7 +34,7 @@
    force one layer at a time.  TLazyMap / TLazyFold force the full
    stream; use carefully on TLazyRange[bigN]. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TLazyRange, "TLazyRange[n$] streams 1 to n$ as a lazy TTerm.
 TLazyRange[a$, b$] and TLazyRange[a$, b$, step$] stream a$ to b$, optionally by step$.
@@ -69,8 +69,8 @@ GeneralUtilities`SetUsage[TLazyFold, "TLazyFold[f$, x$, s$] is Fold[f$, x$, TLaz
    the lazy combinators below can keep using them directly. *)
 
 (* Forward-declare symbols owned by sibling files (Ref.wl, Switch.wl)
-   so bare references inside Begin[`Private`] resolve to THVMLink`X
-   instead of phantom THVMLink`Private`X.  Lazy.wl is parsed before
+   so bare references inside Begin[`Private`] resolve to WolframInstitute`THVMLink`X
+   instead of phantom WolframInstitute`THVMLink`Private`X.  Lazy.wl is parsed before
    Ref.wl and Switch.wl in alphabetical order, so the public names
    don't yet exist when this file's body runs. *)
 {TDef, TRef, TIfZero, TOp2, TNum, TMatCtr, TPatternMatch, TMatchBindings,

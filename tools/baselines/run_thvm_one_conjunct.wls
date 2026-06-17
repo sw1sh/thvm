@@ -5,7 +5,7 @@
    conjunct-2 segfault doesn't lose conjunct-1's proof.  Output:
    theory \t thm \t i_of_n \t status \t seconds \t proofLen \t verifies. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 (* See run_thvm_one.wls for the $RecursionLimit rationale -- proof
    property accessors walk a recursive DAG that overflows WL's

@@ -2,7 +2,7 @@
 Template: TechNote
 Name: Train
 Title: Training Neural Networks with THVMLink
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/Train
 Keywords: [training, gradient descent, optimizer, Adam, MLP, convolution, conv2d, ReLU, higher-order gradient, backpropagation, LeNet, NetModel, NetTrain, NetPredict, Metal, GPU, MNIST]

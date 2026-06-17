@@ -5,7 +5,7 @@
    appends to the same TSV.  Use this when the previous run died
    mid-sweep (the kernel can ooM on heavy theorems). *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 TC = 30;
 OUT = "tools/baselines/thvm_notable_theorems.tsv";
 PROOFDIR = "tools/baselines/proofs_thvm";

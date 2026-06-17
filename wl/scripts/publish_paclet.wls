@@ -13,7 +13,7 @@
    on the platforms it does ship.
 
    The published CloudObject is read by the round-trip check in
-   wl/scripts/verify_install.wls:  PacletInstall[url]; Needs["THVMLink`"]. *)
+   wl/scripts/verify_install.wls:  PacletInstall[url]; Needs["WolframInstitute`THVMLink`"]. *)
 
 (* Repo-relative paths only; resolve against this script's location so
    the script works regardless of the caller's working directory. *)
@@ -87,4 +87,4 @@ Print[""];
 Print["[publish] published: ", url];
 Print["[publish] install with:"];
 Print["    PacletInstall[\"", url, "\"]"];
-Print["    Needs[\"THVMLink`\"]"];
+Print["    Needs[\"WolframInstitute`THVMLink`\"]"];

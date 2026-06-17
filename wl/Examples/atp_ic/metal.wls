@@ -7,7 +7,7 @@
    sanity check; results must match. *)
 
 PacletDirectoryLoad[FileNameJoin[{Directory[], "wl", "THVMLink"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInitContext[];
 
 (* Reuse the encoders from substitutivity.wls (it covers atomic +

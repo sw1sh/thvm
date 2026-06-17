@@ -12,7 +12,7 @@
    projections: 8 (if fuses) or 12 (per-LinearLayer +2 cost). *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

@@ -38,7 +38,7 @@
    uopCellCount, $tagNames, $op2Names, $uopNames, dtypeCode,
    $labelCounter, $defNames, $defNext) without qualification. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TContext, "TContext[<|\"Root\", \"Cells\", \"BookCells\", \"Tensors\", \"Defs\", \"AloStates\", \"Labels\", \"State\"|>] is a portable snapshot of the live thvm runtime context.
 Construct via TContextSnapshot[]; restore via TInitialize. When BookCells, Defs, or AloStates are non-empty the snapshot is self-contained and survives a fresh kernel (TFree then TInit)."];
@@ -58,7 +58,7 @@ TContextToTermTree[h$, root$] walks from the given Term root$ instead of the sna
 (* Forward references: the high-level constructors live in sibling
    files (Switch.wl, etc.) that load AFTER Heap.wl in alphabetical
    FileNames order.  Touching the symbols here interns them in the
-   PUBLIC `THVMLink`` context so references inside our Private body
+   PUBLIC `WolframInstitute`THVMLink`` context so references inside our Private body
    resolve correctly when used. *)
 TOp2; TLam; TApp; TSup; TDup; TNum; TEra; TAny;
 

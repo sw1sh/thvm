@@ -35,7 +35,7 @@ extractLen[_] := "-";
 (* Must load THVMLink first so the ProofObject formatter resolves
    (otherwise Get[] returns the raw symbol with no properties). *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 readProofLen[theory_, thm_, status_] := Module[{file, expr},
     If[ status =!= "PROVED", Return["-"]];

@@ -2,7 +2,7 @@
 Template: TechNote
 Name: Gpt2
 Title: GPT-2 Inference with THVMLink
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/Gpt2
 Keywords: [GPT-2, GPT2, transformer, attention, self-attention, causal mask, multi-head, layer normalization, LayerNorm, GELU, embedding, language model, text generation, autoregressive, NetModel, TFromNet, inference]

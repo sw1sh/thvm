@@ -12,7 +12,7 @@
    kernels silently; AttentionLayer may face the same gap. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

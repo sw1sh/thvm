@@ -24,7 +24,7 @@
      TMnistLoad[n_:All]       -- whole-dataset Association of TTensors.
      TMnistBatch[n, split]    -- random minibatch as TTerm pair. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 TMnistLoad::usage = "TMnistLoad[n] returns an Association with keys \"trainImages\", \"trainLabels\", \"testImages\", \"testLabels\" -- each a TTensor.  Images are f32 of shape {n, 1, 28, 28} (channels-first); labels are i32 of shape {n}.  TMnistLoad[] = TMnistLoad[All] loads the full 60K/10K splits.";
 

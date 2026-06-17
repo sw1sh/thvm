@@ -19,7 +19,7 @@
    Run: DEV=metal wolframscript -f bench/sat_collapse/profile_aot_metal.wls *)
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInitContext[];
 ctx = TContextNew["metal"];
 If[ ctx === 0, Print["SKIP: Metal context unavailable"]; Exit[0]];
@@ -60,7 +60,7 @@ runC[cnf_, nv_] := (
        prior iter's collapse arena is no longer needed once we read
        its result Terms here).  Must be inside TInContext[ctx, ...]
        because each ctx owns its own BOOK_NEXT. *)
-    $bookNextSnap = TInContext[ctx, THVMLink`Private`$bookPosFn[]];
+    $bookNextSnap = TInContext[ctx, WolframInstitute`THVMLink`Private`$bookPosFn[]];
     $defLast = freshDefName[];
     $tBuild = First @ AbsoluteTiming[
         TInContext[ctx, Module[{vars, litTerm, clauseTerm, formula, body},
@@ -94,7 +94,7 @@ runC[cnf_, nv_] := (
     $nStuck = $nLeaves - $nNum - $nIterCap - $nStackCap - $nEra;
     $stuckTags = Counts[TTermTag /@ Select[$col, TTermTag[#] =!= $TagNUM &]];
     (* Restore book_next so the next iter starts with a clean headroom. *)
-    TInContext[ctx, THVMLink`Private`$bookSetNextFn[$bookNextSnap]];
+    TInContext[ctx, WolframInstitute`THVMLink`Private`$bookSetNextFn[$bookNextSnap]];
 );
 
 (* Path D: WL SatisfiableQ (CDCL ground truth). *)

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TUOpAdd
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TUOpAdd
 Keywords: [UOp, add, elementwise, tensor]
@@ -25,7 +25,7 @@ RelatedGuides: [THVMLink]
 Add two small tensors:
 
 ```wl
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInit[];
 a = TTensorCreate[{1., 2., 3., 4.}];
 b = TTensorCreate[{10., 20., 30., 40.}];

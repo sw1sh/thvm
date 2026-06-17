@@ -2,7 +2,7 @@
 Template: TechNote
 Name: Disproof
 Title: Disproving Conjectures with Countermodels
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/Disproof
 Keywords: [counterexample, countermodel, disproof, refutation, congruence closure, saturation, term rewriting, finite model, equational]
@@ -29,7 +29,7 @@ ground (variable-free) goal, the saturating completion engine for a quantified
 one - so a single call covers both.
 
 ```wl
-Needs["THVMLink`ATP`"];
+Needs["WolframInstitute`THVMLink`ATP`"];
 ```
 
 ## The duality, already in the kernel

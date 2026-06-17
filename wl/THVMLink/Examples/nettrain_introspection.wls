@@ -10,7 +10,7 @@
    Run:  wolframscript -file wl/THVMLink/Examples/nettrain_introspection.wls *)
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], ".."}]];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 banner[s_] := (Print[""]; Print["################ ", s, " ################"]);
 dims[t_] := Dimensions[Normal @ TTensorData @ TRealize @ t];
 
@@ -87,7 +87,7 @@ Print["   gate and clang -O3 compiles the rendered C to a native dylib)"];
 
 (* ===================================================================== *)
 banner["4. TRAINING LOSS-TRACE CALLBACK FIRING ON TWnf"];
-Begin["THVMLink`Private`"];
+Begin["WolframInstitute`THVMLink`Private`"];
 SeedRandom[7];
 net2 = stripSoftmax @ NetInitialize @ NetChain[arch];
 {xS, tgt} = batchTensors[tr, netInputShape[net2], 10];

@@ -22,7 +22,7 @@ PacletDirectoryLoad[ParentDirectory[NotebookDirectory[]]];
 ```
 
 ```wolfram
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 ```
 
 ```wolfram

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TSatEUF
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TSatEUF
 Keywords: [SMT, congruence closure, QF_UF, decision procedure, Downey-Sethi-Tarjan, equality]

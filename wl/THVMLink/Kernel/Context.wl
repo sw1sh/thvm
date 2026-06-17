@@ -26,7 +26,7 @@
    private bridge symbols (load, ttermRaw, ...) without
    qualification. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TContext, "TContext[id$] is an opaque handle to a runtime context (heap, book, defs, alo state, tensors, kernels, backends).
 Slot 0 is the default singleton; slots 1..15 are user-allocated via TContextNew[]."];
@@ -140,8 +140,8 @@ TInContext[ctx_TContext, expr_] := Block[{$TContext = ctx},
 
 (* Auto-switch helper: run `expr` under the C-side context that owns
    `t`.  Lives here (not in THVMLink.wl) because TContext must be a
-   public `THVMLink`` symbol when the rule is parsed; otherwise
-   it'd resolve to `THVMLink`Private`TContext` (shadow) and the
+   public `WolframInstitute`THVMLink`` symbol when the rule is parsed; otherwise
+   it'd resolve to `WolframInstitute`THVMLink`Private`TContext` (shadow) and the
    catch-all `withCtx[_, expr_] := expr` would silently absorb every
    call, defeating auto-switch. *)
 SetAttributes[withTermCtx, HoldRest]

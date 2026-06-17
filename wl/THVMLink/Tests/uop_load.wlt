@@ -30,7 +30,7 @@ VerificationTest[
 (* Round-trips through the $uopNames pretty-printer table.  The
    table itself is private; reach in by full context. *)
 VerificationTest[
-    Lookup[THVMLink`Private`$uopNames, $UopLoad, Missing["NotFound"]],
+    Lookup[WolframInstitute`THVMLink`Private`$uopNames, $UopLoad, Missing["NotFound"]],
     "LOAD",
     TestID -> "uop-load/named-load"
 ]

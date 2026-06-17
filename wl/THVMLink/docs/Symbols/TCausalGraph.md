@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TCausalGraph
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TCausalGraph
 Keywords: [causal, multicomputation, trace, dag, wire provenance, hvm4]

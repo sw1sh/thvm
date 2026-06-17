@@ -23,7 +23,7 @@
    come in milestone 2+ per docs/plans/atp_ic_native.md. *)
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInitContext[];
 
 (* ---------------------------------------------------------------- *)

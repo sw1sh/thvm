@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TCnf
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TCnf
 Keywords: [cnf, collapsed normal form, SUP lift, readback, dp]

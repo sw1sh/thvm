@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTagName
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTagName
 Keywords: [tag, name, string, term, inspector]

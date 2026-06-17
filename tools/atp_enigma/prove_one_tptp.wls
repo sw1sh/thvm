@@ -2,7 +2,7 @@
    GNN graph dataset (positives only).  Run: wl -t 32 -f prove_one_tptp.wls <problem.p> <out.wxf>
    TPTP_ROOT env points at the TPTP install root so include('Axioms/..') resolves. *)
 If[ StringQ[Environment["TPTP_ROOT"]], SetEnvironment["TPTP" -> Environment["TPTP_ROOT"]]];
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
 {p, out} = $ScriptCommandLine[[-2 ;; -1]];
 id = FileBaseName[p];
 dom = StringCases[p, "Problems/" ~~ d : (LetterCharacter ..) ~~ "/" :> d] /. {x_} :> x /. {} -> "?";

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTermExt
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTermExt
 Keywords: [ext, term, inspector, packed, label, opcode]

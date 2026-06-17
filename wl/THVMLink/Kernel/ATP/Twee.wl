@@ -23,7 +23,7 @@
    instead (Vampire's --proof tptp emits TPTP fof clauses with
    inference(rule, [], parents) records). *)
 
-BeginPackage["THVMLink`ATP`"]
+BeginPackage["WolframInstitute`THVMLink`ATP`"]
 
 GeneralUtilities`SetUsage[TTweeProof, "TTweeProof[file$] runs the local Twee 2.x binary on a TPTP problem file$ (with --tstp --quiet) and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Lemmas, Axioms, RawProof.
 TTweeProof[\"Theory\", \"thm\"] resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.

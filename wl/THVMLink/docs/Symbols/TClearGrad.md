@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TClearGrad
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TClearGrad
 Keywords: [autodiff, gradient, zero grad, reset, optimizer]

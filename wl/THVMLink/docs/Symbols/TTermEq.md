@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTermEq
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTermEq
 Keywords: [equality, term, cnf, alpha]

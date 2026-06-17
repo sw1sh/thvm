@@ -1,7 +1,7 @@
 (* ::Package:: *)
 (* Uop.wl - per-opcode metadata for UOPs.
 
-   Lives in THVMLink`Private` (shared via BeginPackage["THVMLink`"]).
+   Lives in WolframInstitute`THVMLink`Private` (shared via BeginPackage["WolframInstitute`THVMLink`"]).
    Three things in one place so other files don't duplicate the
    per-opcode tables:
      uopArity[op]        compute-input arity (NUM args excluded)
@@ -10,10 +10,10 @@
                          src/schedule/materialize.c
 
    Shape inference depends on Shape.wl's broadcastShape / dropAxes /
-   tenShapeOf -- both files share THVMLink`Private` so the calls
+   tenShapeOf -- both files share WolframInstitute`THVMLink`Private` so the calls
    resolve directly. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 Begin["`Private`"];
 

@@ -24,7 +24,7 @@
    remain in Lazy.wl so the TLazyXxx generators can still reach
    them. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[ToTTerm, "ToTTerm[expr$] packs a WL value into a TTerm.
 An Integer becomes a NUM; a Symbol a 0-ary CTR labelled by the symbol name (interned via symLabelFor); a List a Tuple-CTR (label $LazyTuple); a compound head$[args$] a CTR labelled by Head with the encoded arguments as children. A TTerm argument passes through unchanged."];

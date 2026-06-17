@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TGlorot
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TGlorot
 Keywords: [init, Glorot, Xavier, He, weight, random]

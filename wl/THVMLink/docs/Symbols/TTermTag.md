@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTermTag
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTermTag
 Keywords: [tag, term, inspector, packed]

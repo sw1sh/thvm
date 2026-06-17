@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTensorCreate
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTensorCreate
 Keywords: [tensor, numeric array, dtype, zero copy]
@@ -27,7 +27,7 @@ RelatedGuides: [THVMLink]
 Wrap a nested list as a 2x3 float tensor:
 
 ```wl
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInit[];
 x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}];
 {TTensorShape[x], TTensorDType[x]}

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMatNum
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMatNum
 Keywords: [match, mat, pattern, num, case, dispatch]

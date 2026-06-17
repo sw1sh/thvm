@@ -42,7 +42,7 @@
    the captured kernel sequence, which is what BEAM needs to
    compare cleanly (no scheduler overhead in the timed path). *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TBeamPick, "TBeamPick[{fn$1, fn$2, $$}] returns a closure that, on first call, runs each candidate once, times them via TJit and AbsoluteTiming, and locks in the fastest; subsequent calls dispatch only the winner.
 Each fn$i is a no-arg Function[{}, body] producing the comparison result via in-place TSet, so candidates can write to the same output buffer."];
@@ -53,7 +53,7 @@ GeneralUtilities`SetUsage[TBeamClosure, "TBeamClosure[assoc$] is the wrapped for
 
 (* Forward-decl symbols owned by later-loading siblings (Jit.wl).
    Without this, a bare `TJitClosure` reference inside Begin["`Private`"]
-   below resolves to THVMLink`Private`TJitClosure (a fresh phantom)
+   below resolves to WolframInstitute`THVMLink`Private`TJitClosure (a fresh phantom)
    instead of the public symbol Jit.wl declares. *)
 {TJit, TJitClosure, TJitDrop};
 

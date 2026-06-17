@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TGather
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TGather
 Keywords: [gather, index, select, one-hot, RL, policy gradient]

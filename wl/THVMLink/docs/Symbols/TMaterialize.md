@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMaterialize
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMaterialize
 Keywords: [materialize, schedule, kernelize, linearize, DAG]

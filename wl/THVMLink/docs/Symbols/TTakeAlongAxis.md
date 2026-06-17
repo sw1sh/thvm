@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTakeAlongAxis
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTakeAlongAxis
 Keywords: [take, along, axis, gather, index, RL, policy gradient]

@@ -3,12 +3,12 @@
    introspection, the atpAnalyzeStructure problem classifier, and atpAutoTune
    (the Waldmeister-style structure-driven schedule front-loader).
 
-   Sibling of ATP.wl in the THVMLink`ATP` context; the recursive Kernel
+   Sibling of ATP.wl in the WolframInstitute`THVMLink`ATP` context; the recursive Kernel
    loader Gets it after ATP.wl (files sorted by {depth, lowercased path}),
-   and it shares the THVMLink`ATP`Private` context, so it references
+   and it shares the WolframInstitute`THVMLink`ATP`Private` context, so it references
    ATP.wl's loaders, encoder, and helpers by bare name. *)
 
-BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
 
 GeneralUtilities`SetUsage[TAtpSchedule, "TAtpSchedule[method$] returns the schedule (a list of single-config Methods) that TFindProof would expand the Method option method$ to, without running the C engine; useful for debugging a Method choice or counting portfolio entries before allocating TimeConstraint.
 TAtpSchedule[method$, conjecture$, axioms$] threads the conjecture and axioms through Automatic's structure-recognized auto-tune, so the result matches what TFindProof[conjecture$, axioms$] with Method method$ would dispatch.

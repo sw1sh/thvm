@@ -346,7 +346,7 @@ notes; neither is needed yet.
 
 ```wolfram
 PacletDirectoryLoad["wl/THVMLink"];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 
 out = TWnf[TApp[TLam[var, var], TEra[]]];
 THeapGraph[]

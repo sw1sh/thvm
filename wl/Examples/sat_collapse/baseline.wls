@@ -1,5 +1,5 @@
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInitContext[];
 (* Simple SAT solver: brute-force enumerate assignments, evaluate
    formula per assignment using TWnf reduction.  Demonstrates IC

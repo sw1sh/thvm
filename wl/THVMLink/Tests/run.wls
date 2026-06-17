@@ -12,7 +12,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];   (* Get not Needs: avoids Global`TInit shadow *)
+Get["WolframInstitute`THVMLink`"];   (* Get not Needs: avoids Global`TInit shadow *)
 
 (* Library tests live under wl/THVMLink/Tests; example-helper
    tests (wl/Examples/_lib/Tests) ride along the same runner so

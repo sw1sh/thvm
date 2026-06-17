@@ -2,7 +2,7 @@
 Template: TechNote
 Name: Tensors
 Title: Tensors, Autodiff, and Kernels with THVMLink
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/Tensors
 Keywords: [tensor, UOp, automatic differentiation, gradient, kernel, codegen, fusion, JIT, TJit, Metal, memory plan, schedule graph, visualization, upvalues]
@@ -12,7 +12,7 @@ RelatedTutorials: [Overview]
 
 ## What the tensor surface covers
 
-The `` THVMLink` `` base context wraps `thvm`'s tensor-aware interaction-combinator runtime. Where the [ATP](paclet:WolframInstitute/THVMLink/tutorial/ATP) tutorials drive the C-side proof engines, this note walks the *other* half of the same heap: tensors, the lazy UOp compute graph, the kernels that graph compiles to, and the autodiff that runs over it. The [Overview](paclet:WolframInstitute/THVMLink/tutorial/Overview) tours the whole surface with one example each; here every section goes deep, carrying a single small computation from a raw buffer through to a compiled kernel and its gradient.
+The `` WolframInstitute`THVMLink` `` base context wraps `thvm`'s tensor-aware interaction-combinator runtime. Where the [ATP](paclet:WolframInstitute/THVMLink/tutorial/ATP) tutorials drive the C-side proof engines, this note walks the *other* half of the same heap: tensors, the lazy UOp compute graph, the kernels that graph compiles to, and the autodiff that runs over it. The [Overview](paclet:WolframInstitute/THVMLink/tutorial/Overview) tours the whole surface with one example each; here every section goes deep, carrying a single small computation from a raw buffer through to a compiled kernel and its gradient.
 
 Three ideas carry the surface:
 
@@ -20,7 +20,7 @@ Three ideas carry the surface:
 - **Nothing runs until you ask.** The graph stays symbolic until [TRealize]() schedules it, fuses what it can, JIT-compiles each kernel, and dispatches. [TMaterialize]() runs the planner *without* dispatching, so you can inspect the schedule before any compute happens. [Normal]() reads a realized tensor back as an ordinary list.
 - **The whole graph is differentiable.** Build a scalar and [TGrad]() fires one backward walk over the heap, auto-grading every float leaf and accumulating each one's gradient into its grad slot.
 
-The notebook loads the `THVMLink`` context from its metadata and the runtime initializes on first use, so the examples below start straight in - there is no load or init step.
+The notebook loads the `WolframInstitute`THVMLink`` context from its metadata and the runtime initializes on first use, so the examples below start straight in - there is no load or init step.
 
 ## Tensors and the UOp graph
 

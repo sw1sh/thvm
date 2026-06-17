@@ -9,7 +9,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 debugPrint[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"]
 

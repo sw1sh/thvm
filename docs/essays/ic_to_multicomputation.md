@@ -17,7 +17,7 @@ PacletDirectoryLoad[ParentDirectory[NotebookDirectory[]]]
 Load it.
 
 ```wolfram
-Get["THVMLink`"]
+Get["WolframInstitute`THVMLink`"]
 ```
 
 Initialise the runtime.

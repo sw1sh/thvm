@@ -2,7 +2,7 @@
 (* NN/Init.wl - host-side parameter init helpers for example scripts:
    Glorot / zeros / ones / zeros-like / ones-like and the one-hot encoders. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TGlorot, "TGlorot[shape$] returns a fresh f32 TTerm tensor of the given shape$, filled with samples from N(0, sqrt(2 / fan_in)) (He init for ReLU). fan_in is the inputs per output unit: the first dim for a 2-D linear weight {in, out} (TLinear is input-first), or C_in * kh * kw (product of the dims after the first) for a conv weight {C_out, C_in, kh, kw}. Suitable for ReLU / linear / conv weight init."];
 GeneralUtilities`SetUsage[TZeros, "TZeros[shape$] returns a fresh f32 TTerm tensor of zeros at the given shape$. Convenience for bias / running-stat init."];

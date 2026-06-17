@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMultiTraceQ
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMultiTraceQ
 Keywords: [multicomputation, trace, dylib, build]
@@ -11,7 +11,7 @@ RelatedGuides: [THVMLink]
 
 ## Usage
 
-<code>[TMultiTraceQ]()[]</code> returns [True]() iff the loaded `THVMLink` dylib was built with `-DTHVM_TRACE` (the default for `make wl`).
+<code>[TMultiTraceQ]()[]</code> returns [True]() iff the loaded `WolframInstitute`THVMLink` dylib was built with `-DTHVM_TRACE` (the default for `make wl`).
 
 ## Details & Options
 

@@ -28,8 +28,8 @@ If[ Head[pac] =!= PacletObject,
 ];
 Print["[verify] installed: ", pac["Name"], " ", pac["Version"], " at ", pac["Location"]];
 
-Needs["THVMLink`"];
-Print["[verify] Needs[\"THVMLink`\"] ok"];
+Needs["WolframInstitute`THVMLink`"];
+Print["[verify] Needs[\"WolframInstitute`THVMLink`\"] ok"];
 
 (* Smoke test: drive the native library through one reduction so we
    know the platform dylib actually loaded and runs. *)

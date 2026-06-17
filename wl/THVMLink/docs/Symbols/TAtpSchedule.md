@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TAtpSchedule
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TAtpSchedule
 Keywords: [ATP, Method, portfolio, schedule, introspection]

@@ -1,6 +1,6 @@
 #!/usr/bin/env wolframscript
 (* build.wls -- build the current-platform THVMLink native library, pack
-   the paclet, and install it locally so `Needs["THVMLink`"]` loads THIS
+   the paclet, and install it locally so `Needs["WolframInstitute`THVMLink`"]` loads THIS
    build (no PacletDirectoryLoad, and no stale repository copy shadowing
    it).  Run from anywhere:
 
@@ -77,4 +77,4 @@ If[ Head[pac] =!= PacletObject,
 ];
 Print["[build] installed: ", pac["Name"], " ", pac["Version"]];
 Print["[build] location:  ", pac["Location"]];
-Print["[build] use it:    Needs[\"THVMLink`\"]"];
+Print["[build] use it:    Needs[\"WolframInstitute`THVMLink`\"]"];

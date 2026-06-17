@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTermSub
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTermSub
 Keywords: [sub, term, inspector, substitution, fired]

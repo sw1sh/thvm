@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TInit
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TInit
 Keywords: [init, runtime, backend, setup]

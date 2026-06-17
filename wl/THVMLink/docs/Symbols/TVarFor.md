@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TVarFor
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TVarFor
 Keywords: [var, binder, lambda, heap]

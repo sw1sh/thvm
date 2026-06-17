@@ -12,7 +12,7 @@
    then add a MakeBoxes UpValue here.
 *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 (* Forward-declare symbols owned by later-loading siblings whose
    summary boxes are rendered here.  Without this, references in
@@ -550,7 +550,7 @@ TJitClosure /: MakeBoxes[c:TJitClosure[a_Association] /; tJitClosureQ[Unevaluate
 (* === TMemoryPlan summary box ===
    Mini stack-of-rectangles icon + counts + total bytes + active
    backend(s).  formatBytes / backendsActive are MemoryPlan.wl
-   helpers in the shared THVMLink`Private` namespace. *)
+   helpers in the shared WolframInstitute`THVMLink`Private` namespace. *)
 {formatBytes, backendsActive};
 
 memoryPlanSummaryIcon[] := Graphics[

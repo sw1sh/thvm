@@ -6,7 +6,7 @@
    sp=reverse_frequency` minus the FOL-clause-only nwc flag (UEQ has
    no non-unit clauses).  TC=60s. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TC = 60;
 config = {"Completion", "Ordering" -> "KBO",

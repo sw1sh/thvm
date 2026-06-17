@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TIfZero
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TIfZero
 Keywords: [if, zero, conditional, control-flow, mat]

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMatMul
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMatMul
 Keywords: [matmul, GEMM, BLAS, linear algebra, reduce]

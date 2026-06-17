@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TContextSnapshot
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TContextSnapshot
 Keywords: [snapshot, serialization, context, restart, heap]
@@ -29,7 +29,7 @@ Snapshot a small lambda and restore it after a fresh init:
 
 ```wl
 #| eval: False
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInit[];
 snap = TContextSnapshot @ TLam[x, TUOpAdd[x, x]];
 TFree[]; TInit[];

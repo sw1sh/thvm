@@ -34,7 +34,7 @@
 *)
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 If[ Environment["DEV"] === $Failed || Environment["DEV"] === "",
     SetEnvironment["DEV" -> "metal"]];
 

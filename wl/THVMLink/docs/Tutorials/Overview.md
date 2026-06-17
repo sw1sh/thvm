@@ -2,7 +2,7 @@
 Template: TechNote
 Name: Overview
 Title: A Tour of THVMLink
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/Overview
 Keywords: [interaction net, tensor, autodiff, kernel, visualization, ATP, tour]
@@ -27,7 +27,7 @@ tutorial walks the surface end to end with a single running example.
 Initialize the runtime once per kernel:
 
 ```wl
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInit[]
 ```
 <!-- => True -->
@@ -178,12 +178,12 @@ machine or to a Wolfram Cloud session.
 
 ## Theorem proving
 
-The `THVMLink`ATP`` context wraps `thvm`'s equational saturation engine. The
+The `WolframInstitute`THVMLink`ATP`` context wraps `thvm`'s equational saturation engine. The
 returned object is a real `ProofObject` and supports the full Wolfram property
 surface:
 
 ```wl
-Needs["THVMLink`ATP`"];
+Needs["WolframInstitute`THVMLink`ATP`"];
 TFindProof[
     Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x],
     "AbelianGroupAxioms",

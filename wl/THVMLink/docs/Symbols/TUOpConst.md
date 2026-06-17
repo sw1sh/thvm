@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TUOpConst
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TUOpConst
 Keywords: [UOp, const, scalar, literal, dtype]

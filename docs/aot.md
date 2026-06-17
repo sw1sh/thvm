@@ -3,7 +3,7 @@
 thvm's AOT compiles a `TDef`'d body to fork-friendly C source. The
 output has the same shape as Bend2's compiler at
 [TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c](../TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c).
-The runtime is in `src/aot/`; the WL surface is `THVMLink`TAOTEmit`,
+The runtime is in `src/aot/`; the WL surface is `WolframInstitute`THVMLink`TAOTEmit`,
 `TAOTCompile`, `TAOTRun`, `TAOTPath`.
 
 ---
@@ -96,7 +96,7 @@ Open coverage gaps:
 
 ```mathematica
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 

@@ -16,7 +16,7 @@
    Run:  wolframscript -file beautiful_mnist_train.wls *)
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], "..", "..", "wl", "THVMLink"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 SeedRandom[42]; Ntr = 1024; B = 64;
 tr = RandomSample[ResourceData["MNIST", "TrainingData"], Ntr];
 te = RandomSample[ResourceData["MNIST", "TestData"], 512];

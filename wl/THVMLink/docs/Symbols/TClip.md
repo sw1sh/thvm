@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TClip
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TClip
 Keywords: [clip, clamp, bound, range, RL, PPO]

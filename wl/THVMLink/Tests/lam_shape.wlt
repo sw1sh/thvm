@@ -34,9 +34,9 @@ VerificationTest[
 VerificationTest[
     TInit[];
     Module[{n0, lams, n1},
-        n0 = THVMLink`Private`$lamShapeCountFn[];
+        n0 = WolframInstitute`THVMLink`Private`$lamShapeCountFn[];
         lams = Table[TLamShape[{k}, x, x], {k, 1, 5}];
-        n1 = THVMLink`Private`$lamShapeCountFn[];
+        n1 = WolframInstitute`THVMLink`Private`$lamShapeCountFn[];
         n1 - n0
     ],
     5,
@@ -59,7 +59,7 @@ VerificationTest[
            We can verify by registering a fresh shaped lambda
            after this, both should be present (count >= 2). *)
         TLamShape[{1, 2, 3}, x, x];
-        THVMLink`Private`$lamShapeCountFn[] >= 2
+        WolframInstitute`THVMLink`Private`$lamShapeCountFn[] >= 2
     ),
     True,
     TestID -> "lam-shape/survives-book-and-alo-round-trip"
@@ -120,13 +120,13 @@ VerificationTest[
     TInit[];
     Module[{lamLoc, varTerm, matBody, lam, ten, result},
         lamLoc = THeapAlloc[1];
-        THVMLink`Private`$lamShapeSetFn[lamLoc, {3}];
+        WolframInstitute`THVMLink`Private`$lamShapeSetFn[lamLoc, {3}];
         varTerm = TVarFor[lamLoc];
         (* Body uses the TVAR; pre-substitution materialize
            emits a kernel with KSRC_AS_INPUT(0) for the var. *)
         matBody = TMaterialize[TUOpAdd[varTerm, varTerm]];
         THeapSet[lamLoc, matBody];
-        lam = THVMLink`Private`packTerm[0, $TagLAM, 0, lamLoc];
+        lam = WolframInstitute`THVMLink`Private`packTerm[0, $TagLAM, 0, lamLoc];
         ten = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
         result = TWnf[TApp[lam, ten]];
         Normal @ TTensorData[result]
@@ -202,11 +202,11 @@ VerificationTest[
     TInit[];
     Module[{lamLoc, varTerm, matBody, lam, t1, r1, kernels},
         lamLoc = THeapAlloc[1];
-        THVMLink`Private`$lamShapeSetFn[lamLoc, {3}];
+        WolframInstitute`THVMLink`Private`$lamShapeSetFn[lamLoc, {3}];
         varTerm = TVarFor[lamLoc];
         matBody = TMaterialize[TUOpAdd[varTerm, varTerm]];
         THeapSet[lamLoc, matBody];
-        lam = THVMLink`Private`packTerm[0, $TagLAM, 0, lamLoc];
+        lam = WolframInstitute`THVMLink`Private`packTerm[0, $TagLAM, 0, lamLoc];
         t1 = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
         (* APP-LAM beta is destructive: it SUB-marks heap[lamLoc].
            This asserts the APP works and only one kernel emerges.

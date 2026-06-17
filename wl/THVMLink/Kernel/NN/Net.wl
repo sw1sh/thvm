@@ -4,7 +4,7 @@
    LAM (TToNet), and the param-handle / init accessors.  Includes the GPT-2 /
    token-LM forward + KV-cache decode assembly that the bridge drives. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TFromNet, "TFromNet[net$, x$] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm x$; net$ must be initialised so its weights are concrete arrays.
 TFromNet[net$, ids$] for a token-encoder net traverses the NetChain / NetGraph over a 1-indexed token-id list and returns the {seq, vocab} logits TTerm (e.g. GPT-2 inference, with the tied token-embedding LM head appended).

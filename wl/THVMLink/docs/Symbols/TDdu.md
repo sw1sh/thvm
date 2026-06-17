@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TDdu
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TDdu
 Keywords: [dynamic label, ddu, dup, hvm4, lazy label]

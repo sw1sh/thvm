@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMatChain
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMatChain
 Keywords: [match, dispatch, chain, multi-label, ADT]

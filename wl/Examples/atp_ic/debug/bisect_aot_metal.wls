@@ -14,7 +14,7 @@
    regress. *)
 
 PacletDirectoryLoad[FileNameJoin[{Directory[], "wl", "THVMLink"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInitContext[];
 
 probe[name_, term_] := Module[{cpu, metal},

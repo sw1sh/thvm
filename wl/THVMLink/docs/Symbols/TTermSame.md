@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTermSame
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTermSame
 Keywords: [equality, term, structural, no reduction]

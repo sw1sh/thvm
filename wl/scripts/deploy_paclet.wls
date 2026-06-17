@@ -42,7 +42,7 @@ If[ ! FileExistsQ[defNb],
 ]
 
 (* 3. Register the paclet so the scrape resolves `Paclet:
-   WolframInstitute/THVMLink` by name and bundles its archive (it is not
+   WolframInstitute/WolframInstitute`THVMLink` by name and bundles its archive (it is not
    otherwise installed in a clean / CI kernel). *)
 PacletDirectoryLoad[pacletDir]
 

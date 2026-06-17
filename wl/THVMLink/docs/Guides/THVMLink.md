@@ -2,7 +2,7 @@
 Template: Guide
 Name: THVMLink
 Title: THVMLink
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/guide/THVMLink
 Description: Wolfram Language bridge to thvm - observe and drive the interaction-net runtime.
@@ -171,7 +171,7 @@ the active <code>[TContext]()</code> selects.
 - `TPattern`, `TMatchQ`, and the `Rewrite.wl` surface drive WL-side pattern-rewriting against `TTerm`
 - `TLazy` exposes lazy WL expressions to the runtime
 
-### Theorem proving (`THVMLink`ATP``)
+### Theorem proving (`WolframInstitute`THVMLink`ATP``)
 
 - `TFindProof` runs the C-engine equational saturator and returns a Wolfram `ProofObject`
 - `TFindEquationalProof` is a deprecated alias for `TFindProof`

@@ -1,4 +1,4 @@
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
 Get["wl/THVMLink/Examples/flux/FluxForward.wl"]; TInit[];
 chk[lbl_,got_,orc_] := WriteString["stdout",lbl,": ",With[{md=Max@Abs@Flatten[got-orc]},ToString[md,InputForm]<>If[md<2.*^-4,"  OK","  FAIL"]],"\n"];
 T[a_]:=TTensorCreate[NumericArray[N[a],"Real32"]];

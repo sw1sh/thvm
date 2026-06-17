@@ -31,7 +31,7 @@
    (PacletInstall["Wolfram/DiagrammaticComputation"]).  THVMLink's
    Diagram subpackage Needs it on load. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];   (* Get not Needs: avoids Global`TInit shadow *)
+Get["WolframInstitute`THVMLink`"];   (* Get not Needs: avoids Global`TInit shadow *)
 
 debugPrint[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"]
 

@@ -28,7 +28,7 @@
    OP2[*, ...] -- works now that OP2-NUM-SUP is in the runtime. *)
 
 PacletDirectoryLoad[FileNameJoin[{Directory[], "wl", "THVMLink"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInitContext[];
 
 (* ---------------------------------------------------------------- *)

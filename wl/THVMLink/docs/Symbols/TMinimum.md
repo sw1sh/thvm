@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMinimum
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMinimum
 Keywords: [minimum, min, elementwise, clamp, RL]

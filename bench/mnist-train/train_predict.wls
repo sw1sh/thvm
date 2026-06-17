@@ -11,7 +11,7 @@
    Out:  prints train time + test accuracy; writes prediction.png *)
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], "..", "..", "wl", "THVMLink"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 SeedRandom[42];
 B = 512;
 tr = RandomSample[ResourceData["MNIST", "TrainingData"], B];

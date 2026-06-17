@@ -4,12 +4,12 @@
    C-engine proof decoder, and the critical-pair-lemma DAG that TFindProof
    decodes a completion trace into a verifier-shaped ProofObject through.
 
-   Sibling of ATP.wl in the THVMLink`ATP` context; the recursive Kernel
+   Sibling of ATP.wl in the WolframInstitute`THVMLink`ATP` context; the recursive Kernel
    loader Gets it after ATP.wl (files sorted by {depth, lowercased path}),
-   and it shares the THVMLink`ATP`Private` context, so it references
+   and it shares the WolframInstitute`THVMLink`ATP`Private` context, so it references
    ATP.wl's loaders, encoder, and helpers by bare name. *)
 
-BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
 
 Begin["`Private`"];
 
@@ -295,20 +295,20 @@ $AtpTagFVR = 22
    variable's bare symbol.  labelToName / idToName invert the
    encoder state's `sym` / `var` maps. *)
 decodeAtpTerm[raw_Integer, labelToName_, idToName_] := Block[{
-    tag = THVMLink`Private`$termTagFn[raw]
+    tag = WolframInstitute`THVMLink`Private`$termTagFn[raw]
 },
     Which[
         tag === $AtpTagFVR,
-            Symbol @ Lookup[idToName, THVMLink`Private`$termExtFn[raw],
-                "x" <> ToString[THVMLink`Private`$termExtFn[raw]]],
+            Symbol @ Lookup[idToName, WolframInstitute`THVMLink`Private`$termExtFn[raw],
+                "x" <> ToString[WolframInstitute`THVMLink`Private`$termExtFn[raw]]],
         tag === $AtpTagCTR,
             Block[{
-                label = THVMLink`Private`$termExtFn[raw],
-                loc = THVMLink`Private`$termValFn[raw],
+                label = WolframInstitute`THVMLink`Private`$termExtFn[raw],
+                loc = WolframInstitute`THVMLink`Private`$termValFn[raw],
                 arity, name
             },
-                arity = THVMLink`Private`$termValFn[
-                    THVMLink`Private`$heapReadFn[loc]];
+                arity = WolframInstitute`THVMLink`Private`$termValFn[
+                    WolframInstitute`THVMLink`Private`$heapReadFn[loc]];
                 name = Lookup[labelToName, label, "C" <> ToString[label]];
                 If[ arity === 0,
                     (* a numeric-literal constant round-trips back to
@@ -318,7 +318,7 @@ decodeAtpTerm[raw_Integer, labelToName_, idToName_] := Block[{
                         ToExpression[name], Symbol[name]],
                     Symbol[name] @@ Table[
                         decodeAtpTerm[
-                            THVMLink`Private`$heapReadFn[loc + k],
+                            WolframInstitute`THVMLink`Private`$heapReadFn[loc + k],
                             labelToName, idToName],
                         {k, arity}]
                 ]

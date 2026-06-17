@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TWnf
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TWnf
 Keywords: [wnf, reduce, head, weak normal form, hvm4]

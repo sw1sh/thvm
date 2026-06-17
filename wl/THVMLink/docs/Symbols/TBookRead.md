@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TBookRead
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TBookRead
 Keywords: [book heap, read, AOT, Metal, ctr]

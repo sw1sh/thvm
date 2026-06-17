@@ -36,7 +36,7 @@ the single load entry brings every ATP / SMT public symbol into scope
 by bare name:
 
 ```mathematica
-<< THVMLink`ATP`
+<< WolframInstitute`THVMLink`ATP`
 ```
 
 (Equivalent to `Get["THVMLink\`ATP\`"]` / `Needs["THVMLink\`ATP\`"]`.)
@@ -538,7 +538,7 @@ same `Axioms / Conjecture` pair.
   for cnf (`|`-split disjunction of literals) and pre-pass
   sort-stripping for tff/tcf/thf.
 - `wl/THVMLink/Kernel/ATP/TPTPImport.wl` -- the in-tree wrapper.
-  `BeginPackage`s `THVMLink`ATP``, pre-declares `TPTPImport` in the
+  `BeginPackage`s `WolframInstitute`THVMLink`ATP``, pre-declares `TPTPImport` in the
   public context, and `Get`s the resource from inside `Private` so
   helpers land in the private context while `TPTPImport` resolves
   to the public symbol. One source of truth shared between thvm

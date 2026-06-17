@@ -2,7 +2,7 @@
 (* Level 16 -- 2-layer MLP no softmax forward (784 -> 128 -> 10) on thvm. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TInit[];
 SeedRandom[7];

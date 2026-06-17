@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TBench
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TBench
 Keywords: [benchmark, timing, training, memory, peak]
@@ -27,7 +27,7 @@ RelatedGuides: [THVMLink]
 Bench a one-line elementwise step.  `InitFn` runs once before timing starts and seeds the host-side `$x` / `$y` tensors; `StepFn` is the body whose wallclock + memory footprint are recorded:
 
 ```wl
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TBench[<|
     "Name"     -> "elementwise-add",
     "InitFn"   -> Function[Null,

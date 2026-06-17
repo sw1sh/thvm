@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TWhere
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TWhere
 Keywords: [where, select, mask, ternary, CMPLT, RL]

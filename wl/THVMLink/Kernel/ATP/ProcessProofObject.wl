@@ -28,7 +28,7 @@
      to "SubstitutionLemma" (a benign default; tweak the table to
      add a prover's idiosyncratic inference). *)
 
-BeginPackage["THVMLink`ATP`", {"Wolfram`Parser`"}]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"Wolfram`Parser`"}]
 
 GeneralUtilities`SetUsage[TSZSDerivationToProofObject, "TSZSDerivationToProofObject[derivation$] builds a thvm-shaped proof Association from a parsed SZS derivation (the list returned by Wolfram`Parser`TPTPImport[$$, \"SZS\"]).
 Works for any ATP that emits SZS-framed fof+inference output (Vampire, E, iProver, Twee --tstp, Otter, ...).
@@ -413,7 +413,7 @@ reconstructSuperposition[
                 Block[{subterm, ruleLhs1New},
                     subterm = If[ pos === {}, ruleLhs1,
                         Extract[ruleLhs1, pos]];
-                    sub = Quiet @ THVMLink`ATP`Private`cplUnify[
+                    sub = Quiet @ WolframInstitute`THVMLink`ATP`Private`cplUnify[
                         subterm, ruleLhs2, allVars];
                     If[ ! AssociationQ[sub], Nothing,
                         cpLhs = applySubstitution[ruleRhs1, sub];
@@ -435,11 +435,11 @@ reconstructSuperposition[
     Block[{checkPair},
         checkPair[{a_, b_}] := Block[
             {sub},
-            sub = Quiet @ THVMLink`ATP`Private`cplUnify[
+            sub = Quiet @ WolframInstitute`THVMLink`ATP`Private`cplUnify[
                 List[a, b], List[sSides[[1]], sSides[[2]]],
                 allVars];
             If[ AssociationQ[sub], True,
-                sub = Quiet @ THVMLink`ATP`Private`cplUnify[
+                sub = Quiet @ WolframInstitute`THVMLink`ATP`Private`cplUnify[
                     List[a, b], List[sSides[[2]], sSides[[1]]],
                     allVars];
                 AssociationQ[sub]]];
@@ -720,7 +720,7 @@ Options[TSZSDerivationToProofObject] = {"ParseFormulas" -> False}
 TSZSDerivationToProofObject[derivation_List, opts : OptionsPattern[]] := Block[
     {ds, axiomEntries, hypothesisEntries, axioms, goal, hist,
         parseFlag = TrueQ @ OptionValue["ParseFormulas"]},
-    ds = THVMLink`ATP`Private`buildDatasetFromDerivation[derivation, parseFlag];
+    ds = WolframInstitute`THVMLink`ATP`Private`buildDatasetFromDerivation[derivation, parseFlag];
     axiomEntries      = KeySelect[ds, MatchQ[#, {"Axiom", _}] &];
     hypothesisEntries = KeySelect[ds, MatchQ[#, {"Hypothesis", _}] &];
     axioms = Values @ axiomEntries /. e_Association :> e["Statement"];
@@ -784,7 +784,7 @@ TEproverProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
         assoc = TSZSDerivationToProofObject[
             epR["Inferences"], parseOpt];
         If[ liftQ,
-            THVMLink`ATP`Private`liftToProofObject[assoc],
+            WolframInstitute`THVMLink`ATP`Private`liftToProofObject[assoc],
             assoc
         ]
     ]
@@ -809,7 +809,7 @@ TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
         assoc = TSZSDerivationToProofObject[
             vampR["Inferences"], parseOpt];
         If[ liftQ,
-            THVMLink`ATP`Private`liftToProofObject[assoc],
+            WolframInstitute`THVMLink`ATP`Private`liftToProofObject[assoc],
             assoc
         ]
     ]
@@ -880,7 +880,7 @@ TWaldmeisterProofObject[problemFile_String, opts : OptionsPattern[]] /;
             assoc = TSZSDerivationToProofObject[
                 wmR["Inferences"], parseOpt];
             If[ liftQ,
-                THVMLink`ATP`Private`liftToProofObject[assoc],
+                WolframInstitute`THVMLink`ATP`Private`liftToProofObject[assoc],
                 assoc
             ]
         ]

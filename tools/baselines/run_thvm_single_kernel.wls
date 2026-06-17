@@ -9,7 +9,7 @@
    the whole sweep.  Streams TSV to stdout AND tools/baselines/
    thvm_notable_theorems.tsv as it goes -- ^C-resumable. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 TC = 30;
 OUT = "tools/baselines/thvm_notable_theorems.tsv";
 

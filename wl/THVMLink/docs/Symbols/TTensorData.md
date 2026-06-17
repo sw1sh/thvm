@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTensorData
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTensorData
 Keywords: [tensor, buffer, NumericArray, read back, dtype]

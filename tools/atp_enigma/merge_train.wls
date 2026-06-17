@@ -1,7 +1,7 @@
 (* Merge the AxiomaticTheory (ds/) + TPTP (tptp_ds/) graph datasets, balance,
    and train a small GNN scorer.  Run: wl -t 300 -f merge_train.wls <out.safetensors>
    ATP_DATA env names the scratch dir (default /tmp/enigma). *)
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"]; SeedRandom[7];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"]; SeedRandom[7];
 dataDir = Replace[Environment["ATP_DATA"], Except[_?StringQ] -> "/tmp/enigma"];
 out = Last[$ScriptCommandLine];
 files = Join[FileNames["*.wxf", FileNameJoin[{dataDir, "ds"}]],

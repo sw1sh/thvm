@@ -57,7 +57,7 @@ Side2, Orientation2, Position)` cross-products. For each:
 * Take a fresh copy of MatchingConstruct (`cplR<n>` Unique vars) so
   its names don't collide with Construct's identical-name vars
 * Unify Construct's chosen side at Position with MatchingConstruct's
-  rule LHS via `THVMLink`ATP`Private`cplUnify` (thvm's Robinson
+  rule LHS via `WolframInstitute`THVMLink`ATP`Private`cplUnify` (thvm's Robinson
   unifier)
 * On match, compute the candidate critical pair and check via
   **conjoint** `cplUnify[List[a,b], List[c,d], allVars]` (single

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTermSubexprs
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTermSubexprs
 Keywords: [subexpression, path, walk, enumerate, locator]

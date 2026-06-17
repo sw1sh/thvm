@@ -16,7 +16,7 @@
    exits cleanly instead of killing a multi-case sweep. *)
 SetDirectory["/Users/swish/src/thvm"];
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 $RecursionLimit = 16384;
 
 (* Pull the canon stack from the main harness as a library. *)
@@ -35,9 +35,9 @@ cliKind    = If[ Length[$ScriptCommandLine] >= 5,
 presetMethod = If[ presetArg === "Automatic",
     Automatic, presetArg];
 cliBuilder = Switch[cliKind,
-    "wm",      THVMLink`ATP`TWaldmeisterProofObject,
-    "vampire", THVMLink`ATP`TVampireProofObject,
-    _,         THVMLink`ATP`TWaldmeisterProofObject];
+    "wm",      WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject,
+    "vampire", WolframInstitute`THVMLink`ATP`TVampireProofObject,
+    _,         WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject];
 
 (* Tiny warmup so the C ATP DLL loads. *)
 Quiet @ TFindProof["InverseOfInverse", "GroupAxioms",

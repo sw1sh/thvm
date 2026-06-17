@@ -27,7 +27,7 @@
    TRef recursion, OP2 arithmetic -- must work end-to-end. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 $args = Drop[$ScriptCommandLine, 1];
 $N    = If[ Length[$args] >= 1 && ! StringStartsQ[First @ $args, "--"],

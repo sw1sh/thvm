@@ -14,7 +14,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 println[]      := WriteString["stdout", "\n"];
 formatUs[t_]   := ToString[N[t*1000000, 4]] <> "us";
@@ -103,10 +103,10 @@ Print["=== Batch dispatch: N OP2 ADDs in one Metal launch ==="];
 
 (* Build N=256 OP2(NUM(i), NUM(i+1)) cells in book_heap. *)
 N0 = 256;
-bookAlloc  = Symbol["THVMLink`Private`$bookAllocFn"];
-bookSet    = Symbol["THVMLink`Private`$bookSetFn"];
-termNewRaw = Symbol["THVMLink`Private`$termNewFn"];
-ttermRawFn = Symbol["THVMLink`Private`ttermRaw"];
+bookAlloc  = Symbol["WolframInstitute`THVMLink`Private`$bookAllocFn"];
+bookSet    = Symbol["WolframInstitute`THVMLink`Private`$bookSetFn"];
+termNewRaw = Symbol["WolframInstitute`THVMLink`Private`$termNewFn"];
+ttermRawFn = Symbol["WolframInstitute`THVMLink`Private`ttermRaw"];
 
 batchLocs = Table[
   Module[{argLoc, rootLoc},

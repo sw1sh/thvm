@@ -6,7 +6,7 @@
 (* === parser sanity =============================================== *)
 
 VerificationTest[
-    THVMLink`Private`parseEinxPattern["b (h c) d -> b h c d"],
+    WolframInstitute`THVMLink`Private`parseEinxPattern["b (h c) d -> b h c d"],
     <|
         "in"           -> {{"b", {"h", "c"}, "d"}},
         "out"          -> {"b", "h", "c", "d"},
@@ -19,7 +19,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    THVMLink`Private`parseEinxPattern["b [s] d -> b d"],
+    WolframInstitute`THVMLink`Private`parseEinxPattern["b [s] d -> b d"],
     <|
         "in"           -> {{"b", "s", "d"}},
         "out"          -> {"b", "d"},
@@ -32,7 +32,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    THVMLink`Private`parseEinxPattern["a b, b c -> a c"],
+    WolframInstitute`THVMLink`Private`parseEinxPattern["a b, b c -> a c"],
     <|
         "in"           -> {{"a", "b"}, {"b", "c"}},
         "out"          -> {"a", "c"},
@@ -45,7 +45,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    THVMLink`Private`parseEinxPattern["b [s] d"],
+    WolframInstitute`THVMLink`Private`parseEinxPattern["b [s] d"],
     <|
         "in"           -> {{"b", "s", "d"}},
         "out"          -> {},

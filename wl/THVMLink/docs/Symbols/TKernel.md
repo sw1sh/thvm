@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TKernel
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TKernel
 Keywords: [kernel, JIT, codegen, autotune, Metal, CPU, dispatch]

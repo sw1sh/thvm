@@ -1,5 +1,5 @@
 PacletDirectoryLoad[FileNameJoin[{Directory[], "wl"}]];
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInitContext[];
 satEval[cnf_List, vec_List] := Block[{litVal, clauseVal, formula},
     litVal[lit_] := If[ lit > 0, TNum[ vec[[lit]] ], TNum[ 1 - vec[[-lit]] ] ];

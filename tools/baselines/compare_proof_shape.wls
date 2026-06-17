@@ -23,7 +23,7 @@
 SetDirectory["/Users/swish/src/thvm"];
 PacletDirectoryLoad["wl/THVMLink"];
 PacletDirectoryLoad["/Users/swish/src/wolfram/AISkills/examples/WolframParser"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 Needs["Wolfram`Parser`"];
 $RecursionLimit = 16384;
 

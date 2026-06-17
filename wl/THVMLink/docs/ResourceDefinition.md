@@ -32,7 +32,7 @@ THVMLink exposes <code>[TLam]()</code>, <code>[TApp]()</code>, <code>[TTensorCre
 Build and reduce a tiny term:
 
 ```wl
-Needs["THVMLink`"];
+Needs["WolframInstitute`THVMLink`"];
 TInit[];
 TWnf[TApp[TLam[x, x], TLam[y, y]]]
 ```
@@ -100,7 +100,7 @@ Prove a small equational theorem with the C-engine ATP and reconstruct it as a W
 
 ```wl
 #| eval: False
-Needs["THVMLink`ATP`"];
+Needs["WolframInstitute`THVMLink`ATP`"];
 TFindProof[
     Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x],
     "AbelianGroupAxioms",

@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TJit
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TJit
 Keywords: [JIT, closure, capture, replay, dispatch]

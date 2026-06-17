@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TKernelFlops
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TKernelFlops
 Keywords: [kernel, flops, estimate, cost, profile]

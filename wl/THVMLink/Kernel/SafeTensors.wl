@@ -24,7 +24,7 @@
                             -> the low-level disk-tensor constructor.
 *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TSafeTensorLoad, "TSafeTensorLoad[path$] loads a .safetensors file and returns an Association of name$ to TTerm.
 Each tensor is a lazy mmap-backed disk view (TTensorMMap) into the file at its data offset, reshaped to the header's shape; bytes page in on demand, a CPU op consumes them directly and a realize on another backend uploads them."];
@@ -44,7 +44,7 @@ The mmap stays valid (file-backed, read-only), so a later use re-faults and re-w
 Begin["`Private`"];
 
 (* Forward-declare sibling-owned symbols so bare references resolve to the
-   real THVMLink` symbols rather than phantom Private ones (alphabetical
+   real WolframInstitute`THVMLink` symbols rather than phantom Private ones (alphabetical
    load order means Tensor.wl loads AFTER this file). *)
 {TTensorData, TTensorShape, TTensorDType, TRealize, dtypeCode, dtypeName, ensureInit, ttermRaw};
 

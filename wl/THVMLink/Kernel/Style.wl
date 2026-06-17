@@ -22,7 +22,7 @@
      Tensors      : "TEN" (kernel-emitted output), "ExternalTEN"
                     (host-side TenDesc with no kernel producer) *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 Begin["`Private`"];
 

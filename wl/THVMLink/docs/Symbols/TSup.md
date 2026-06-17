@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TSup
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TSup
 Keywords: [superposition, sup, label, multicomputation, parallelism]

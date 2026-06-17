@@ -7,7 +7,7 @@
    No host loop, no per-step re-materialize, no Compile dependency. *)
 
 PacletDirectoryLoad["wl/THVMLink"]
-Get["THVMLink`"]
+Get["WolframInstitute`THVMLink`"]
 SeedRandom[7]
 
 (* === setup ============================================================ *)
@@ -45,7 +45,7 @@ TWnf @ TRef["loop"][TNum[20]]
 (* === kernel info dump =============================================== *)
 WriteString["stdout", "\nfused kernels: ", TKernelCount[] - 1, "\n"]
 Do[
-    With[{info = THVMLink`Private`decodeKernelInfo[k][[1]]},
+    With[{info = WolframInstitute`THVMLink`Private`decodeKernelInfo[k][[1]]},
         WriteString["stdout",
             "  k", k,
             " inputs=",   ToString @ TKernelInputs[k],

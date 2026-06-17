@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TUOpPermute
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TUOpPermute
 Keywords: [UOp, permute, transpose, movement, axes]

@@ -472,7 +472,7 @@ VerificationTest[
 VerificationTest[
     Module[{script, res},
         script = "
-PacletDirectoryLoad[\"wl/THVMLink\"]; Get[\"THVMLink`\"];
+PacletDirectoryLoad[\"wl/THVMLink\"]; Get[\"WolframInstitute`THVMLink`\"];
 Do[ Module[{vid, m},
         vid = TKVarAlloc[1, 8]; TKVarSet[vid, 4];
         m   = TCausalMaskSym[vid, 8];

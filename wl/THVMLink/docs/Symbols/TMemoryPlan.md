@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMemoryPlan
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMemoryPlan
 Keywords: [memory, scheduler, buffer, alive span, alias, Gantt]

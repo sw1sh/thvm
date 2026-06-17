@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TItrs
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TItrs
 Keywords: [interactions, counter, ITRS, hvm4]

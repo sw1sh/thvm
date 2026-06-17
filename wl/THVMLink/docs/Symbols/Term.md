@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: Term
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/Term
 Keywords: [canonical, term, walk, snapshot, multiway, vertex identity]

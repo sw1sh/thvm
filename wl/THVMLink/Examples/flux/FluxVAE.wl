@@ -15,7 +15,7 @@
        -> clip((x+1)/2, 0, 1) -> {3,256,256}
 
    The model-agnostic GroupNorm / SiLU / 2x-upsample / clip come from
-   THVMLink`s NN library (TGroupNorm / TSiLU / TUpsample2x / TClip); this file
+   WolframInstitute`THVMLink`s NN library (TGroupNorm / TSiLU / TUpsample2x / TClip); this file
    keeps the FLUX-specific glue: the VAE-resolution conv (im2col with realized
    operands so the big gemm hits BLAS), the spatial self-attention, and the
    decoder block assembly.  All convs are stride-1; TConv2D is no-padding so
@@ -27,29 +27,16 @@ Get[FileNameJoin[{DirectoryName[$InputFileName], "FluxForward.wl"}]];
 (* === primitives ===================================================== *)
 
 (* conv: x {C_in,H,W}, w {C_out,C_in,kh,kw}, b {C_out}; pad is the symmetric
-   H/W zero-pad (1 for 3x3 same-conv, 0 for 1x1).  im2col + matmul, but with
-   xCol AND wFlat realized before TMatMul: left lazy (as builtin TConv2D does
-   them) the gemm classifier declines and the {512,4608}.{4608,16384} matmul
-   runs as a scalar cpu_jit loop -- 43s/conv at VAE resolution.  Realizing both
-   operands routes it to blas_gemm (~0.05s).  [thvm follow-up: TConv2DIm2Col
-   should protect its matmul operands at high resolution.]  The input is also
-   realized so chained convs' 9x im2col SHRINKs hit a leaf, not a 9^depth nest.
-   FLUX-local (not the library TConv2D) precisely for these realize barriers. *)
-vaeConv[x_, w_, b_, pad_] := Module[
-    {xp, cIn, hp, wp, cOut, kh, kw, hOut, wOut, kSpat, patches, summed, xCol, wFlat, out},
-    xp = TRealize @ If[ pad === 0, x, TUOpPad[x, {{0, 0}, {pad, pad}, {pad, pad}}]];
-    {cIn, hp, wp} = Dimensions[xp];  {cOut, cIn, kh, kw} = Dimensions[w];
-    hOut = hp - kh + 1;  wOut = wp - kw + 1;  kSpat = kh kw;
-    patches = Flatten @ Table[ With[{slot = ki kw + kj},
-        TUOpPad[TUOpReshape[TUOpShrink[xp, {{0, cIn}, {ki, ki + hOut}, {kj, kj + wOut}}],
-                            {cIn, 1, hOut wOut}], {{0, 0}, {slot, kSpat - 1 - slot}, {0, 0}}]],
-        {ki, 0, kh - 1}, {kj, 0, kw - 1}];
-    summed = Fold[TUOpAdd, First @ patches, Rest @ patches];
-    xCol  = TRealize @ TUOpReshape[summed, {cIn kSpat, hOut wOut}];
-    wFlat = TRealize @ TUOpReshape[w, {cOut, cIn kSpat}];
-    out = TMatMul[wFlat, xCol];                                     (* blas_gemm *)
-    TRealize @ TUOpAdd[TUOpReshape[out, {cOut, hOut, wOut}],
-                       TUOpExpand[TUOpReshape[b, {cOut, 1, 1}], {cOut, hOut, wOut}]]]
+   H/W zero-pad (1 for 3x3 same-conv, 0 for 1x1).  Faithful path: the library
+   TConv2D (rank-3 -> TConv2DIm2Col -> TConv2DIm2ColPool), which lowers to a
+   single fused (x*w).sum reduce that the bufferize classifier now compiles as
+   one strided-JIT kernel without realizing the im2col operand
+   (bufferize_classify.c).  TConv2D is no-padding, so 3x3 convs pad H,W first;
+   bias is folded in by the library op.  (The earlier hand-rolled im2col with
+   realized operands was a workaround for the gemm classifier declining the
+   lazy matmul at VAE resolution -- now obsolete.) *)
+vaeConv[x_, w_, b_, pad_] :=
+    TConv2D[If[ pad === 0, x, TUOpPad[x, {{0, 0}, {pad, pad}, {pad, pad}}]], w, b]
 
 (* === resnet block ==================================================== *)
 

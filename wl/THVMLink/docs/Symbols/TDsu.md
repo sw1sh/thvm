@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TDsu
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TDsu
 Keywords: [dynamic label, dsu, sup, hvm4, lazy label]

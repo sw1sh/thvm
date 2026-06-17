@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: THeapSet
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/THeapSet
 Keywords: [heap, write, cell, loc, low-level]

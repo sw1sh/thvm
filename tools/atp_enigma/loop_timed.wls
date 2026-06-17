@@ -1,7 +1,7 @@
 (* Timed A/B (wall + solved) of GNN rerank on a fixed equation-theorem set.
    Run: wl -t 200 -f loop_timed.wls <rerankPeriod> <maxSteps>
    Reads <ATP_DATA>/corpus_big.safetensors. period 1e9 = rerank off. *)
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
 dataDir = Replace[Environment["ATP_DATA"], Except[_?StringQ] -> "/tmp/enigma"];
 {period, ms} = $ScriptCommandLine[[-2 ;; -1]];
 m = TAtpLoadGnnScorer[FileNameJoin[{dataDir, "corpus_big.safetensors"}]]; per = ToExpression[period];

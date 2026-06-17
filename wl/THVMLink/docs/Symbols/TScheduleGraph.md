@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TScheduleGraph
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TScheduleGraph
 Keywords: [schedule, graph, kernel, visualization, DAG]

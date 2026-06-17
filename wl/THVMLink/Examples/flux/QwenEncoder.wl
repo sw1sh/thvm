@@ -7,9 +7,9 @@
    per token along the feature axis to {512, 7680} in [layer9 | layer18 |
    layer27] order.
 
-   Get-loaded after THVMLink` AND FluxForward.wl: it reuses fxLinear (the
+   Get-loaded after WolframInstitute`THVMLink` AND FluxForward.wl: it reuses fxLinear (the
    BLAS-friendly diffusers linear).  All the model-agnostic attention pieces
-   come from THVMLink`s NN library.  Qwen3 differs from the FLUX DiT in two
+   come from WolframInstitute`THVMLink`s NN library.  Qwen3 differs from the FLUX DiT in two
    ways that matter: the rotary convention is the half-split (NEOX) one
    (TRoPEHalfSplit, not the FLUX TRoPEInterleaved), and attention is
    grouped-query (GQA 4:1, TRepeatKV) with per-head q/k RMSNorm applied before
@@ -31,8 +31,15 @@
    sugar) so we materialise the frozen table once as words, slice the id rows,
    and decode only those to f32 -- decoding the whole 151936-row table would
    cost 1.5GB for ~512 rows. *)
+(* Materialise the frozen bf16 embedding-table words ONCE per table (the whole
+   151936x2560 table is ~778MB of UBit16 words).  Memoised: qwEmbed is called per
+   prompt, and re-reading TTensorData[table] each time dominated the host input
+   prep (~1.2s/call).  The table is a frozen weight, so the cached words are
+   reused for every prompt in the session; only the per-id row slice + decode
+   (~512 rows) runs per call. *)
+qwEmbedWords[table_] := qwEmbedWords[table] = Normal[TTensorData[table]]
 qwEmbed[table_, ids_List] :=
-    TTensorCreate @ qwBf16ToF32 @ Normal[TTensorData[table]][[ids + 1]]
+    TTensorCreate @ qwBf16ToF32 @ qwEmbedWords[table][[ids + 1]]
 
 qwBf16ToF32[u16_] := With[{shape = Dimensions[u16], flat = Flatten[u16]},
     ArrayReshape[

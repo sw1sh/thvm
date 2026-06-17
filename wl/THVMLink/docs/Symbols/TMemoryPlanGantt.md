@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TMemoryPlanGantt
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMemoryPlanGantt
 Keywords: [memory, Gantt, buffer, lifecycle, visualization]

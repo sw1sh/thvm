@@ -33,7 +33,7 @@ If[ Environment["THVM_MMAP_NO_WILLNEED"] === $Failed, SetEnvironment["THVM_MMAP_
    RSS stays ~7-8GB (the wrap's mmap weights are clean file-cache, ~0 footprint).
    Set before the runtime caches getenv; the caller can override for a tighter cap. *)
 If[ Environment["THVM_MAX_LIVE_BYTES"] === $Failed, SetEnvironment["THVM_MAX_LIVE_BYTES" -> "30000000000"]];
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "FluxGenerate.wl"}]];
 TInit[]; TReset[];
 pr[a___] := (WriteString["stdout", a, "\n"]; $Output // Flush);

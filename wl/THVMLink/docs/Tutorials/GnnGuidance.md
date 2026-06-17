@@ -2,7 +2,7 @@
 Template: TechNote
 Name: GnnGuidance
 Title: "Learned Guidance: a GNN for Critical-Pair Selection"
-Context: THVMLink`ATP`
+Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/GnnGuidance
 Keywords: [ENIGMA, GNN, graph neural network, machine learning, critical pair, clause selection, learned guidance, GCN, safetensors, proof relevance, theorem proving]

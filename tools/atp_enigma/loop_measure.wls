@@ -1,7 +1,7 @@
 (* A/B the GNN-guided reranker on the proved AxiomaticTheory equation theorems:
    solved-within-MaxSteps.  Run: wl -t 700 -f loop_measure.wls <scorer> <rerankPeriod> <maxSteps> <out.wxf>
    period 1e9 = rerank effectively off (baseline). ATP_DATA names the scratch dir. *)
-PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
 dataDir = Replace[Environment["ATP_DATA"], Except[_?StringQ] -> "/tmp/enigma"];
 {modelFile, period, budgetS, out} = $ScriptCommandLine[[-4 ;; -1]];
 m = TAtpLoadGnnScorer[modelFile];

@@ -27,7 +27,7 @@
      - TScheduleGraph (kernel DAG) ... Visualization.wl
      - heap-graph KERNEL rendering ... Visualization.wl (via kerVertexId) *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TKernel, "TKernel[t$] wraps a UOP_KERNEL TTerm t$ as a typed kernel object.
 TKernel[kid$] resolves a kernel id back to its pinned heap term and wraps that.
@@ -201,7 +201,7 @@ TKernelQ = tKernelInternalQ
 (* === C-side kernel side-table accessors ===
    Loader symbols ($kernelTableFn etc.) live in THVMLink.wl alongside
    every other LibraryFunctionLoad call; both files share
-   THVMLink`Private` so the references resolve. *)
+   WolframInstitute`THVMLink`Private` so the references resolve. *)
 TKernelTable[]           := (ensureInit[]; Partition[Normal @ $kernelTableFn[], 7])
 TKernelInputs[k_Integer] := (ensureInit[]; Normal @ $kernelInputsFn[k])
 
@@ -382,7 +382,7 @@ tKernelProp[k:TKernel[a_Association], "OutputShape"]  := With[{
 
 (* === codegen / profile properties ===
    Each routes through the loader fn declared in THVMLink.wl.  Both
-   files share THVMLink`Private` so the $...Fn symbols resolve. *)
+   files share WolframInstitute`THVMLink`Private` so the $...Fn symbols resolve. *)
 tKernelProp[k:TKernel[a_Association], "Source"]              := TKernelSource[a["Kid"]]
 tKernelProp[k:TKernel[a_Association], "Source", backend_String] := TKernelSource[a["Kid"], backend]
 tKernelProp[k:TKernel[a_Association], "JitDylibPath"] := (ensureInit[]; $kernelJitDylibPathFn[a["Kid"]])
@@ -479,16 +479,16 @@ TKernelStoreRoot[kid_Integer] := With[{
 (* Structural search: walk a TTermExpr snapshot and return True iff any
    subexpression matches one of `pats`.  Used by the leak audits below.
    Cheap pattern walk; no dispatch. *)
-THVMLink`Private`tKernelTermContainsPatterns[term_TTerm, pats_List] :=
+WolframInstitute`THVMLink`Private`tKernelTermContainsPatterns[term_TTerm, pats_List] :=
     Module[{snap = TTermExpr[term]},
         AnyTrue[pats, !FreeQ[snap, #] &]
     ]
-THVMLink`Private`tKernelTermContainsPatterns[_, _] := False
+WolframInstitute`THVMLink`Private`tKernelTermContainsPatterns[_, _] := False
 
 TKernelHasBufferizeLeak[kid_Integer] := Module[{root},
     root = TKernelStoreRoot[kid];
     If[ !MatchQ[root, _TTerm], Return[False]];
-    THVMLink`Private`tKernelTermContainsPatterns[root,
+    WolframInstitute`THVMLink`Private`tKernelTermContainsPatterns[root,
         {"UOP"["BUFFERIZE", ___]}]
 ]
 TKernelHasTenLeak[kid_Integer] := Module[{root, snap},

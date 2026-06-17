@@ -5,7 +5,7 @@
    theorem in run_thvm_one.wls's format.  Use single-kernel (this
    script is short -- if a heavy case OOMs, only the probe dies). *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TC = 60;
 config = {"Completion", "Ordering" -> "LPO",

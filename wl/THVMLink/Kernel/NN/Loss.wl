@@ -2,7 +2,7 @@
 (* NN/Loss.wl - cross-entropy losses: probability-form, categorical (one-hot),
    and sparse (integer-label) categorical. *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 GeneralUtilities`SetUsage[TCrossEntropyLoss, "TCrossEntropyLoss[pred$, target$] = -sum(target$ * log(pred$)), probability-form categorical cross-entropy. Both inputs are same-shape TTerms; target$ is typically a one-hot vector. A small eps is added before the log to keep it finite."];
 GeneralUtilities`SetUsage[TSparseCategoricalCrossEntropy, "TSparseCategoricalCrossEntropy[logits$, intLabels$] is the categorical cross-entropy loss from pre-softmax logits$ and integer class labels$ (one int per sample, not one-hot; the tinygrad / Keras convention). intLabels$ has logits$' shape with the last (class) axis dropped. It builds a one-hot mask inline and defers to TCategoricalCrossEntropy, inheriting the stable max-subtract logsumexp. For one-hot targets use TCategoricalCrossEntropy."];

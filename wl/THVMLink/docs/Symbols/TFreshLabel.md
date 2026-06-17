@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TFreshLabel
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TFreshLabel
 Keywords: [label, sup, dup, fresh, counter]

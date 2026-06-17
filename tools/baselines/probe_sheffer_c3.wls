@@ -8,7 +8,7 @@
 
    Run each c3 variant at TC=120s. *)
 PacletDirectoryLoad["wl/THVMLink"];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 TC = 120;
 config = {"Completion", "Ordering" -> "LPO",

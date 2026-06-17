@@ -19,7 +19,7 @@
  * the rewrite.wlt suite catches drift via xvalid against the C side.
  *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`"];
 
 (* === KAX_* axis types =========================================== *)
 GeneralUtilities`SetUsage[$KaxLoop, "$KaxLoop is the axis_type id mirroring KAX_LOOP in src/thvm.h."];

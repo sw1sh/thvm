@@ -1,7 +1,7 @@
 ---
 Template: Symbol
 Name: TTermExpr
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTermExpr
 Keywords: [tree, expr, walk, tags, diff, snapshot]

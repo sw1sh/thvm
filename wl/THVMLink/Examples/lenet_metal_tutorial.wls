@@ -28,7 +28,7 @@
          DEV=METAL python3 bench/netmodel-mnist/lenet_tinygrad.py *)
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], ".."}]];
-Get["THVMLink`"];
+Get["WolframInstitute`THVMLink`"];
 
 print[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"];
 dev = With[{e = Environment["DEV"]}, If[ StringQ[e] && ToLowerCase[e] === "metal", "Metal", "CPU"]];
