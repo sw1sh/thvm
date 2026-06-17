@@ -1,14 +1,15 @@
 (function () {
   var frame = document.getElementById('frame'),
       loading = document.getElementById('loading'),
-      side = document.getElementById('side');
-  // BASE  = the deployed resource (used for the home / resource page)
-  // BASE2 = our re-hosted, chrome-free documentation pages
-  var BASE = '`BASE`', BASE2 = '`BASE2`', HOME = BASE + '/', cur = null;
+      side = document.getElementById('side'),
+      sideRight = document.getElementById('side-right');
+  // BASE  = the deployed resource (used for the header "Resource page" link)
+  // BASE2 = our re-hosted, chrome-free documentation pages (the home view too)
+  var BASE = '`BASE`', BASE2 = '`BASE2`', HOME = '`HOME`', cur = null;
 
-  // The home view is the resource page (hero + examples), which carries its own
-  // header and nav sidebar. Hide those (same-origin) so only the content shows;
-  // our re-hosted doc pages have no chrome, so this is a no-op for them.
+  // A re-hosted page may carry the resource's own header / nav sidebar. Hide
+  // those (same-origin) so only the content shows; our chrome-free pages are a
+  // no-op for this.
   var HIDE = [
     '#pg-header,#pac-nav-sidebar,#pac-nav-sidebar-frame,.page-sidebar-frame,.page-sidebar,',
     '.page-sidebar-toggle,#pageSidebar,#pageSidebarFrame{display:none!important}',
@@ -36,13 +37,13 @@
     if (a) { a.classList.add('active'); openAnc(a); a.scrollIntoView({ block: 'nearest' }); }
   }
   function findLink(id) {
-    var e = side.querySelectorAll('a[data-id]');
+    var e = document.querySelectorAll('#side a[data-id], #side-right a[data-id]');
     for (var i = 0; i < e.length; i++) { if (e[i].getAttribute('data-id') === id) return e[i]; }
     return null;
   }
   function show() { loading.classList.add('on'); }
 
-  // id is 'guide/X', 'ref/Y', or 'tutorial/Z' -> our re-hosted, chrome-free page
+  // id is 'guide/X' | 'ref/Y' | 'tutorial/Z' -> our re-hosted, chrome-free page
   function pageURL(id) { return BASE2 + '/' + id + '.html'; }
   function load(id, push) {
     if (!/^(guide|ref|tutorial)\/[A-Za-z0-9]+$/.test(id)) return false;
@@ -55,7 +56,7 @@
   function goHome(push) {
     show();
     frame.src = HOME;
-    setActive(null);
+    setActive(findLink('guide/' + HOME.replace(/.*\/guide\//, '').replace(/\.html.*/, '')));
     if (push && location.hash !== '') history.pushState(null, '', '#');
   }
 
@@ -87,12 +88,14 @@
     var n = 0, t = setInterval(function () { injectHide(); hookFrame(); if (++n > 10) clearInterval(t); }, 400);
   });
 
-  side.addEventListener('click', function (e) {
+  function navClick(e) {
     var a = e.target.closest && e.target.closest('a[data-id]');
     if (!a) return;
     e.preventDefault();
     load(a.getAttribute('data-id'), true);
-  });
+  }
+  side.addEventListener('click', navClick);
+  if (sideRight) sideRight.addEventListener('click', navClick);
   var brand = document.getElementById('homelink');
   if (brand) brand.addEventListener('click', function (e) { e.preventDefault(); goHome(true); });
   window.addEventListener('popstate', function () {

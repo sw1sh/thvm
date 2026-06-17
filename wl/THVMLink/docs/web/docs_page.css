@@ -18,3 +18,15 @@
 }
 .cached-data { height: auto !important; }
 html, body { height: auto !important; overflow: visible !important; }
+
+/* click-to-copy on input cells (wired by docs_page.js) */
+.cell-wrapper.thvm-input { cursor: pointer; border-radius: 4px; }
+.cell-wrapper.thvm-input:hover { background: #f1f6fb !important; box-shadow: inset 3px 0 0 #9cc3e6; }
+.thvm-copied {
+  position: absolute; right: 18px; margin-top: -2px;
+  background: #2a7d2a; color: #fff;
+  font: 600 11px/1 'Source Sans Pro', sans-serif;
+  padding: 3px 7px; border-radius: 3px; z-index: 6;
+  opacity: 0; transition: opacity .12s; pointer-events: none;
+}
+.thvm-copied.on { opacity: 1; }

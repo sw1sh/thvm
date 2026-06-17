@@ -24,15 +24,15 @@ a { text-decoration: none; color: inherit; }
 #hdr .home:hover { background: #2e3236; color: #fff; }
 #hdr .home svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 2; }
 
-/* layout */
+/* layout: guide + tutorials (left) | content | symbols (right) */
 #main { position: fixed; top: 56px; left: 0; right: 0; bottom: 0; display: flex; }
-#side {
-  width: 340px; min-width: 240px; max-width: 46%; height: 100%;
-  overflow-y: auto; overflow-x: hidden;
-  background: #fafafa; border-right: 1px solid #e3e3e3;
-  resize: horizontal; padding: 14px 0 40px;
+#side, #side-right {
+  height: 100%; overflow-y: auto; overflow-x: hidden;
+  background: #fafafa; padding: 14px 0 40px;
 }
-#content { flex: 1; height: 100%; position: relative; background: #fff; }
+#side { width: 320px; min-width: 220px; max-width: 42%; border-right: 1px solid #e3e3e3; resize: horizontal; }
+#side-right { width: 240px; min-width: 170px; max-width: 30%; border-left: 1px solid #e3e3e3; }
+#content { flex: 1; min-width: 0; height: 100%; position: relative; background: #fff; }
 #frame { width: 100%; height: 100%; border: 0; display: block; }
 #loading {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -41,37 +41,28 @@ a { text-decoration: none; color: inherit; }
 }
 #loading.on { opacity: 1; }
 
-/* tree */
-#side ul { list-style: none; margin: 0; padding: 0; }
-#side .nav-root > li { border-bottom: 1px solid #eee; }
-#side ul ul { padding-left: 14px; }
-#side li { position: relative; }
-#side a {
+/* shared list / link styling */
+#side ul, #side-right ul { list-style: none; margin: 0; padding: 0; }
+#side li, #side-right li { position: relative; }
+#side a, #side-right a {
   display: block; padding: 6px 30px 6px 18px; line-height: 1.35;
   color: #333; font-size: 14px; border-left: 3px solid transparent; white-space: normal;
 }
-#side a:hover { background: #f0f1f2; }
-#side a.gd { font-weight: 600; color: #2a2a2a; }
-#side .nav-root > li > details > summary > a.gd,
-#side .nav-root > li > a.gd { font-size: 15px; }
-#side a.sym { font-weight: 400; color: #1a6ba5; }
-#side a.active { background: #fdeee9; color: #c4280b; border-left-color: #dd1100; }
-#side a.sym.active { color: #c4280b; }
+#side a:hover, #side-right a:hover { background: #f0f1f2; }
+#side a.active, #side-right a.active { background: #fdeee9; color: #c4280b; border-left-color: #dd1100; }
 
-/* group header (a synthetic, non-page label: Tutorials / Reference) */
-#side .grp {
-  display: block; padding: 6px 30px 6px 18px; line-height: 1.35;
-  font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
-  color: #777;
-}
+/* left: the guide */
+#side .nav-root > li { border-bottom: 1px solid #eee; }
+#side ul ul { padding-left: 14px; }
+#side a.gd { font-weight: 600; color: #2a2a2a; font-size: 15px; }
 
-/* collapsible */
-#side details { margin: 0; }
-#side summary { list-style: none; cursor: pointer; position: relative; }
-#side summary::-webkit-details-marker { display: none; }
-#side summary::after {
-  content: '\25B8'; position: absolute; right: 12px; top: 11px;
-  color: #aaa; font-size: 11px;
+/* left: thick delimiter, then tutorials (no heading) */
+.nav-sep { border-top: 4px solid #cfd2d6; margin: 18px 0 6px; }
+.rail-label {
+  display: block; padding: 4px 18px; font-size: 12px; font-weight: 600;
+  letter-spacing: .05em; text-transform: uppercase; color: #888;
 }
-#side details[open] > summary::after { content: '\25BE'; }
-#side summary:hover::after { color: #666; }
+#side a.tut { color: #1a6ba5; }
+
+/* right: symbols */
+#side-right a.sym { color: #1a6ba5; }

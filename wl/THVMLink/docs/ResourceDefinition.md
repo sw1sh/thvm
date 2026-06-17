@@ -19,9 +19,9 @@ SourceControlURL: https://github.com/sw1sh/thvm
 - THVMLink is the Wolfram-language driver for `thvm`, a tensor-aware interaction-net runtime that compiles to CPU, CUDA, and Metal back ends from one symbolic graph.
 - Construction is purely symbolic. <code>[TLam]()</code>, <code>[TApp]()</code>, <code>[TSup]()</code>, and <code>[TDup]()</code> build interaction-combinator terms; <code>[TUOpAdd]()</code> and the rest of the `TUOp*` family build the tensor UOp graph; <code>[TTensorCreate]()</code> ingests a [NumericArray]() zero-copy on CPU.
 - Reduction is staged. <code>[TWnf]()</code> drives a term to weak normal form, <code>[TMaterialize]()</code> schedules the UOp DAG into kernels, and <code>[TRealize]()</code> fires the whole pipeline (schedule + dispatch).
-- Differentiation lives in the runtime. <code>[TGrad]()</code> seeds a single backward walk that auto-grads every reachable float leaf; per-leaf adjoints land in `TenDesc.grad`, readable via <code>[TGradOf]()</code>.
+- Differentiation lives in the runtime. <code>[TGrad]()</code> seeds a single backward walk that auto-grads every reachable float leaf; per-leaf adjoints are readable via <code>[TGradOf]()</code>.
 - Introspection is first class. <code>[THeapGraph]()</code> renders the live heap as an IC string diagram, <code>[TMemoryPlan]()</code> projects per-buffer alive spans, and <code>[TKernel]()</code> exposes per-kernel timing, source, and autotune candidates.
-- The ATP context (`` THVMLink`ATP` ``) wraps `thvm`'s equational saturation engine via <code>[TFindProof]()</code> (a drop-in [FindEquationalProof]() replacement that returns a full `ProofObject`) and the lower-level <code>[TATP]()</code>.
+- The ATP submodule wraps `thvm`'s equational saturation engine via <code>[TFindProof]()</code> (a drop-in [FindEquationalProof]() replacement that returns a full `ProofObject`) and the lower-level <code>[TATP]()</code>.
 
 ## Usage
 
