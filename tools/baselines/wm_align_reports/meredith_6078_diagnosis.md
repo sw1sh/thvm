@@ -62,6 +62,21 @@ run):
   shows `joinable=0` (never dropped as joinable).
 * **orphan-murder / pop-subsume disposal** -- 0 of the formed 2-var instances
   are orphaned or pop-subsumed; formed count == selected count exactly.
+* **periodic CP-set interreduction** (WM `KPV_KPMengeInterreduzieren`/`do_KPIR`,
+  thvm `THVM_ATP_CP_SET_IR`) -- enabling it (default period) makes Meredith
+  firstdiv *worse*: 6078 -> 74.  So thvm's CP-set-IR does not match WM's
+  checkpoint schedule and is NOT the missing knob.  WM keeps the unorientable
+  axiom 1 as an E-equation (parent `-1`) and forms CPs from it bidirectionally;
+  the 2-var CP is partly formed from such equation overlaps (~20 of WM's 80
+  distinct producing parent-pairs have a negative/equation parent).
+
+The remaining locus is a subtle unfailing-equation CP-formation timing
+divergence: thvm and WM form ~the same set of 2-var CPs (~80 overlaps each) but
+thvm's last formation before pick 6078 is cp_seq 15233 (all consumed), while WM
+forms a fresh one (heap w2=23993) from an equation/rule overlap in the 6078
+epoch.  A formation-order aligner does not cleanly apply (WM forms ~600k CP
+events vs thvm ~125k -- joinability filtering differs), so the next step is a
+targeted parent-rule correlation of WM's age-23993 overlap to thvm's rule set.
 
 The `WM-only x116` multiset delta is mostly a *downstream* effect: WM's run is
 64800 picks vs thvm's 35891, so WM simply forms+selects this CP ~114 more times
