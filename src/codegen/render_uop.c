@@ -69,6 +69,16 @@ static int RMU_HAS_GROUP_REDUCE = 0;
 static int RMU_GROUP_EXTENT      = 0;   // group factor, 0 if no GROUP_REDUCE
 static u32 RMU_GROUP_LOCAL_TOTAL = 1;   // product of LOCAL extents in the kernel
 
+// Compute capability of the active CUDA device as a 2-digit int (V100 ->
+// 70, A100 -> 80, H100 -> 90), set by cg_render_uop_kernel_cuda_root from
+// cuda_device_sm().  The WMMA matmul template reads it to gate bf16
+// fragments (need sm>=80) -- on a pre-Ampere device it stays at the
+// fp16-only path.  0 when CUDA is not the target (the probe never ran).
+static int RMU_CUDA_SM = 0;
+#ifdef THVM_HAS_CUDA
+fn int cuda_device_sm(void);
+#endif
+
 // Forward decl: defined alongside rmu_dag_has_simd_reduce below.
 static int rmu_dag_has_group_reduce(Term t);
 // The OPT_GROUP_REDUCE FACTOR (e.g. 8 -- the cooperative thread count, NOT the
@@ -272,19 +282,28 @@ static const char *rmu_msl_type_name(u32 dtype) {
     case DT_BF16:  return "bfloat";
     case DT_INT32: return "int";
     case DT_INT64: return "long";
+    case DT_INT8:  return "char";   // MSL char is signed 8-bit (tinygrad type_map)
     case DT_UINT8: return "uchar";
     default:       return "float";  // safe fallback for the renderer
   }
 }
 
-// CUDA scalar type names.  Differs from MSL on the fp16 / byte types:
-// CUDA spells half `__half` (cuda_fp16.h) and bytes `unsigned char`.
+// CUDA scalar type names.  Differs from MSL on the fp16 / bf16 / byte
+// types: CUDA spells half `__half` (cuda_fp16.h) and bfloat16
+// `__nv_bfloat16` (cuda_bf16.h), bytes `unsigned char`.  Without the
+// DT_BF16 case a bf16 buffer fell through to `float`, so kernels indexed
+// a 2-byte-per-element buffer as 4-byte float -> writes overran (illegal
+// address) and readback reinterpreted f32 bytes as bf16 pairs (garbage).
+// __nv_bfloat16 has float<->bf16 conversion operators + arithmetic on
+// sm_80+, mirroring the MSL native `bfloat`.
 static const char *rmu_cuda_type_name(u32 dtype) {
   switch (dtype) {
     case DT_FP32:  return "float";
     case DT_FP16:  return "__half";
+    case DT_BF16:  return "__nv_bfloat16";
     case DT_INT32: return "int";
     case DT_INT64: return "long long";
+    case DT_INT8:  return "signed char";
     case DT_UINT8: return "unsigned char";
     default:       return "float";
   }
@@ -296,6 +315,21 @@ static const char *rmu_cuda_type_name(u32 dtype) {
 static const char *rmu_gpu_type_name(u32 dtype) {
   return (RMU_TARGET == CG_TARGET_CUDA) ? rmu_cuda_type_name(dtype)
                                         : rmu_msl_type_name(dtype);
+}
+
+// Cast / ALU type name (a kernel BODY value, not a buffer pointer).  On
+// CUDA, bf16/fp16 are storage-only: their cuda_bf16.h / cuda_fp16.h
+// arithmetic operators collide with a float accumulator -- e.g. a matmul
+// MAC `float_acc + (__nv_bfloat16)a * (__nv_bfloat16)b` fails nvrtc with
+// "more than one operator + matches: float + __nv_bfloat16".  So an
+// intermediate cast to bf16/fp16 upcasts to float; the buffer POINTER
+// keeps __nv_bfloat16*/__half* (rmu_cuda_type_name) and the store converts
+// implicitly.  Metal's native bfloat/half auto-promote in arithmetic, so
+// they stay as-is there (the simdgroup bf16-fragment path relies on it).
+static const char *rmu_gpu_alu_type_name(u32 dtype) {
+  if (RMU_TARGET == CG_TARGET_CUDA && (dtype == DT_BF16 || dtype == DT_FP16))
+    return "float";
+  return rmu_gpu_type_name(dtype);
 }
 
 // Kernel-signature dtype for a discovered buffer slot.  Slots come in
@@ -563,7 +597,7 @@ static void rmu_emit_term(Term t, FILE *fp) {
       u32  dst_dt   = term_val(heap_read(loc + 1));
       const char *type_name = (RMU_TARGET == CG_TARGET_C)
                                  ? rmu_c_type_name(dst_dt)
-                                 : rmu_gpu_type_name(dst_dt);
+                                 : rmu_gpu_alu_type_name(dst_dt);
       if (op == UOP_BITCAST) {
         if (RMU_TARGET == CG_TARGET_C) {
           // C99 bitcast via the THVM_BITCAST statement-expression
@@ -658,9 +692,21 @@ static void rmu_emit_term(Term t, FILE *fp) {
         fputs("0.0f", fp);
         return;
       }
+      // On CUDA, upcast a bf16/fp16 buffer load to float at the load site:
+      // __nv_bfloat16/__half arithmetic operators (cuda_bf16.h/fp16.h) clash
+      // with a float accumulator -- a raw matmul MAC `float_acc + in0[i]*in1[i]`
+      // over bf16 buffers is "more than one operator + matches: float +
+      // __nv_bfloat16".  Computing every bf16/fp16 value as float (storage
+      // stays 2-byte; the store converts back implicitly) mirrors the C
+      // target (bf16 -> "float") and Metal's native bfloat auto-promotion.
+      u32 ldt = rmu_slot_dtype(buf);
+      int cuda_half_load = (RMU_TARGET == CG_TARGET_CUDA
+                            && (ldt == DT_BF16 || ldt == DT_FP16));
+      if (cuda_half_load) fputs("((float)", fp);
       fprintf(fp, "%s[", bn);
       rmu_emit_term(addr, fp);
       fputs("]", fp);
+      if (cuda_half_load) fputs(")", fp);
       return;
     }
     case UOP_BUFFER:
@@ -2159,17 +2205,44 @@ static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
     {1, 2, 1, 2},   // 8x32
     {1, 1, 2, 2},   // 16x16
   };
+  // Occupancy-aware selection.  Candidates are ordered largest-tile-first (best
+  // A/B fragment reuse).  But a large tile on a small output under-fills the GPU:
+  // FLUX's QKV {M=256,N=3072} with the 128x64 tile makes only (256/128)*(3072/64)
+  // = 96 output tiles -- on a 10-40 core Apple GPU that is ~2-3 waves, so the last
+  // (partial) wave runs a fraction of the cores (wave-quantization tail waste).
+  // Measured: 128x64 ~4.7 vs the 64x64 step-down ~7.6 TFLOPS on that shape.  So
+  // pick the LARGEST tile whose output-tile count is >= MIN_TG (enough waves that
+  // the tail is a small fraction); only when no candidate clears MIN_TG (a
+  // genuinely tiny GEMM) fall back to the smallest dividing tile (the most tiles).
+  // Large GEMMs already clear MIN_TG at the biggest tile, so they are unchanged.
+  // MIN_TG ~ a few x the core count; env THVM_TC_MIN_TG tunes it.
+  u32 min_tg = 160;
+  { char const *e = getenv("THVM_TC_MIN_TG"); if (e && e[0]) min_tg = (u32)atoi(e); }
   u32 best_lm = 0, best_ln = 0, best_rm = 0, best_rn = 0;
+  u32 fb_lm = 0, fb_ln = 0, fb_rm = 0, fb_rn = 0, fb_tg = 0;
   for (u32 i = 0; i < sizeof(cands)/sizeof(cands[0]); i++) {
     u32 tm8 = cands[i].lm * cands[i].rm;
     u32 tn8 = cands[i].ln * cands[i].rn;
-    if (m8 % tm8 == 0 && n8 % tn8 == 0) {
+    if (m8 % tm8 != 0 || n8 % tn8 != 0) continue;
+    u32 tg = (m8 / tm8) * (n8 / tn8);                 // output-tile (threadgroup) count
+    if (best_lm == 0 && tg >= min_tg) {               // first (largest) meeting the floor
       best_lm = cands[i].lm; best_ln = cands[i].ln;
       best_rm = cands[i].rm; best_rn = cands[i].rn;
-      break;
+    }
+    if (tg > fb_tg) {                                 // track the most-tiles dividing tile
+      fb_tg = tg; fb_lm = cands[i].lm; fb_ln = cands[i].ln;
+      fb_rm = cands[i].rm; fb_rn = cands[i].rn;
     }
   }
+  if (best_lm == 0) {                                 // nothing cleared the floor: max tiles
+    best_lm = fb_lm; best_ln = fb_ln; best_rm = fb_rm; best_rn = fb_rn;
+  }
   if (best_lm == 0) return 0;
+  if (getenv("THVM_TC_DBG"))
+    fprintf(stderr, "[tc-pick] M=%u N=%u K=%u -> tile %ux%u (lm=%u ln=%u rm=%u rn=%u) tg=%u\n",
+            m_extent, n_extent, k_extent, best_lm*best_rm*8u, best_ln*best_rn*8u,
+            best_lm, best_ln, best_rm, best_rn,
+            (m8/(best_lm*best_rm))*(n8/(best_ln*best_rn)));
   // The tiled kernel only pays off when there is reuse: require the
   // output tile to span more than a single 8x8 fragment.
   if (best_lm * best_rm * best_ln * best_rn <= 1) return 0;
@@ -2210,7 +2283,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                                      u32 n_extent, u32 k_extent,
                                      RmuTcTile t, int c_is_bf, int stage_bf,
                                      int b_trans, i64 b_nstride,
-                                     FILE *fp, u32 depth) {
+                                     FILE *fp, u32 depth, int b_is_int8) {
   // Staging + fragment element type.  When BOTH inputs are bf16 the tiles are
   // staged as bfloat and the simdgroup_matrix fragments are <bfloat>, so the
   // MMA runs at the native bf16 tensor-core rate (2x float) accumulating into
@@ -2239,8 +2312,10 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   IND(depth); fprintf(fp,
     "threadgroup %s _Bsm[%u];\n", sel, 2u * t.kb * tile_n);
   // bf16 output: a per-simdgroup f32 scratch slot for the f32->bf16 staged
-  // store (simdgroup_store has no f32->bf16 widening).  Each of the NSG
-  // simdgroups owns a private 64-float slot, reused across its register tiles.
+  // store (simdgroup_store has no f32->bf16 widening, and Metal's
+  // simdgroup_matrix has no f32->bf16 element-conversion constructor either).
+  // Each of the NSG simdgroups owns a private 64-float slot, reused across its
+  // register tiles.
   if (c_is_bf) {
     IND(depth); fprintf(fp, "threadgroup float _cstage[%u];\n", nsg * 64u);
     IND(depth); fputs("uint _sgi64 = sgi * 64u;\n", fp);
@@ -2305,7 +2380,46 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
     } while (0)
   #define EMIT_LOAD_B(BUFOFF, KK0)                                            \
     do {                                                                      \
-      if (b_tvec) {                                                           \
+      if (b_is_int8 && b_tvec) {                                              \
+        /* q8: B = Transpose[Cast[W_int8, bf16]].  Read 4 consecutive K of    \
+           the INT8 weight (W's contiguous axis) as a char4 (coalesced load,  \
+           half the bytes of bfloat4), cast char -> sel, scatter to the       \
+           strided _Bsm slots.  b_nstride is in ELEMENTS (= int8 bytes, same  \
+           logical count as the bf16 view), so the stride is unchanged. */     \
+        IND(depth + 1); fprintf(fp,                                           \
+          "for (uint _j = _lid; _j < %uu; _j += %uu) {\n", b_elems / 4u, nthreads);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "uint _n = _j / %uu, _k4 = (_j %% %uu) * 4u;\n", t.kb / 4u, t.kb / 4u);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "char4 _bv = *(device const char4*)(%s + (_tn + _n) * %lluu + (%s) + _k4);\n",\
+          b_name, (unsigned long long)b_nstride, KK0);                        \
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[_k4 * %uu + _n] = (%s)_bv.x;\n", BUFOFF, tile_n, sel); \
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[(_k4 + 1u) * %uu + _n] = (%s)_bv.y;\n", BUFOFF, tile_n, sel);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[(_k4 + 2u) * %uu + _n] = (%s)_bv.z;\n", BUFOFF, tile_n, sel);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[(_k4 + 3u) * %uu + _n] = (%s)_bv.w;\n", BUFOFF, tile_n, sel);\
+        IND(depth + 1); fputs("}\n", fp);                                     \
+      } else if (b_is_int8) {                                                 \
+        /* q8 scalar coalesced fallback (kb or W stride not 4-aligned, OR a   \
+           row-major B): read each INT8 weight element, cast char -> sel. */   \
+        IND(depth + 1); fprintf(fp,                                           \
+          "for (uint _j = _lid; _j < %uu; _j += %uu) {\n", b_elems, nthreads);\
+        if (b_trans) {                                                        \
+          IND(depth + 2); fprintf(fp,                                         \
+            "uint _n = _j / %uu, _k = _j %% %uu;\n", t.kb, t.kb);             \
+          IND(depth + 2); fprintf(fp,                                         \
+            "(_Bsm + %s)[_k * %uu + _n] = (%s)%s[(_tn + _n) * %lluu + (%s) + _k];\n",\
+            BUFOFF, tile_n, sel, b_name, (unsigned long long)b_nstride, KK0); \
+        } else {                                                             \
+          IND(depth + 2); fprintf(fp,                                         \
+            "(_Bsm + %s)[_j] = (%s)%s[((%s) + _j / %uu) * %uu + _tn + _j %% %uu];\n",\
+            BUFOFF, sel, b_name, KK0, tile_n, n_extent, tile_n);             \
+        }                                                                     \
+        IND(depth + 1); fputs("}\n", fp);                                     \
+      } else if (b_tvec) {                                                    \
         /* B[k][n] = W[n][k]: read 4 consecutive K (W's contiguous axis) as a  \
            vector (coalesced global load), scatter to the strided _Bsm slots.  \
            _j -> (_n, _k4); stage _Bsm[(_k4+t)*tile_n + _n]. */                \
@@ -2470,6 +2584,13 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   Term addr_a   = heap_read(term_val(lhs) + 1);
   Term buf_b    = heap_read(term_val(rhs) + 0);
   Term addr_b   = heap_read(term_val(rhs) + 1);
+  // q8 weight-only-quantized matmul: the B operand is a CAST(int8 -> bf16)
+  // over the INT8 weight buffer (TMatMul[x, Transpose[Cast[w_int8, bf16]]]).
+  // rmu_peel_cast stripped the cast, so buf_b is the raw INT8 buffer.  The
+  // tiled emitter reads it as `char` and casts char -> bfloat in the
+  // cooperative B-staging (half the weight bandwidth, full TC rate); the
+  // per-output-channel scale is applied OUTSIDE the matmul by the caller.
+  int b_is_int8 = (rmu_slot_dtype(buf_b) == DT_INT8);
 
   // Find the K-axis extent by scanning addr_a and addr_b for the
   // RANGE leaf with axis_id == red_axis.
@@ -2586,26 +2707,47 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       // Non-conforming shape: scalar-accumulator fallback.
       return 0;
     }
-    // A WMMA fragment's transpose is fixed by its row_major/col_major layout
-    // at declaration, not a load-time flag.  This template declares both as
-    // row_major, so a transposed operand (e.g. a Transpose[w] RHS) must take
-    // the scalar fallback rather than load with the wrong stride.
-    if (a_trans || b_trans) return 0;
-    // WMMA matrix_a / matrix_b fragments need a `half` source.  The
-    // pod is a Volta V100 (SM70) -- pre-Ampere, so wmma::precision::tf32
-    // is unavailable and WMMA is fp16-only.  Gate the tensor-core
-    // template to fp16-typed A/B buffers; an fp32 matmul takes the
-    // scalar tiled-accumulator fallback (return 0) -- the
-    // load_matrix_sync(half-frag, const float*) the old emit produced
-    // is a hard nvrtc type error.  C is left fp32 (the accumulator
-    // fragment is always fp32, which is correct on Volta).
+    // The 2-D warp->tile decode below ignores any batch axis, so a
+    // batched gemm (attention's mhaBmm) would alias every batch onto the
+    // same {M,N} tiles.  Decline it to the scalar path (which emits the
+    // full affine address with the batch offset).
+    if (batch_axis_id != 0xFFFFFFFFu) return 0;
+    // WMMA matrix_a / matrix_b fragments need a 16-bit floating source.
+    // fp16 fragments work on every WMMA-capable arch (>= sm_70);
+    // __nv_bfloat16 fragments need Ampere (sm>=80).  Pick the fragment
+    // element type by dtype and gate bf16 on RMU_CUDA_SM>=80 -- on a
+    // pre-Ampere device a bf16 matmul falls back to the scalar tiled
+    // accumulator (return 0).  An fp32 A/B matmul also bails: the
+    // load_matrix_sync(16-bit-frag, const float*) would be a hard nvrtc
+    // type error.  The accumulator fragment is always fp32.
+    const char *a_elem, *b_elem;
     {
       u32 dt_a = uop_buffer_dtype(buf_a);
       u32 dt_b = uop_buffer_dtype(buf_b);
-      if (dt_a != DT_FP16 || dt_b != DT_FP16) {
-        return 0;
-      }
+      if (dt_a == DT_FP16)      a_elem = "half";
+      else if (dt_a == DT_BF16 && RMU_CUDA_SM >= 80) a_elem = "__nv_bfloat16";
+      else return 0;
+      if (dt_b == DT_FP16)      b_elem = "half";
+      else if (dt_b == DT_BF16 && RMU_CUDA_SM >= 80) b_elem = "__nv_bfloat16";
+      else return 0;
     }
+    // A WMMA fragment's transpose is fixed by its row_major / col_major
+    // layout at declaration, not a load-time flag.  A non-transposed
+    // operand (the contiguous reduce axis is unit-stride) is row_major and
+    // loads with leading dim = the OTHER axis's stride (lda/ldb computed
+    // above).  A transposed operand (e.g. a Transpose[w] RHS: w {N,K}
+    // row-major, b_trans=1, ldb=b_n=K) is col_major and reads w^T correctly
+    // from &Bbuf[addr_b] with the SAME lda/ldb leading dim.
+    const char *a_layout = a_trans ? "wmma::col_major" : "wmma::row_major";
+    const char *b_layout = b_trans ? "wmma::col_major" : "wmma::row_major";
+    // The C OUTPUT store is the snag: the accumulator fragment is float,
+    // but FLUX matmul outputs are bf16, so store_matrix_sync(&C_bf16[..],
+    // float_frag, ..) is a type mismatch.  f32 output stores directly;
+    // a bf16/fp16 output stores the float fragment to a per-warp shared
+    // f32 scratch tile, then the 32 lanes cooperatively convert+write the
+    // 256 elements into C at C[addr_c + (e/16)*ld_c + (e%16)].
+    u32 dt_c = uop_buffer_dtype(buf_c);
+    int c_direct = (dt_c == DT_FP32);
     u32 n_tiles_n_w = n_extent / 16;
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fputs("/* TC WMMA matmul (nvcuda::wmma 16x16x16) */\n", fp);
@@ -2614,6 +2756,15 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     // (m_tile, n_tile).
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fputs("uint _warp = tid / 32u;\n", fp);
+    // The flat launch sizes the grid to output_numel = M*N threads (one
+    // per output element), i.e. (M/16)*(N/16)*256 -- 8x the warps a
+    // 16x16-tile-per-warp kernel needs.  Bail the over-launched warps
+    // BEFORE any load/store so they neither read A/B out of bounds nor
+    // corrupt C (and never reach the per-warp __syncwarp in the bf16
+    // store path -- the whole warp returns together).
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fprintf(fp, "if (_warp >= %uu) return;\n",
+            (m_extent / 16u) * (n_extent / 16u));
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fprintf(fp, "uint a%u = (_warp / %uu) * 16u;\n",
             m_axis_id, n_tiles_n_w);
@@ -2621,11 +2772,11 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     fprintf(fp, "uint a%u = (_warp %% %uu) * 16u;\n",
             n_axis_id_v, n_tiles_n_w);
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-    fputs("wmma::fragment<wmma::matrix_a, 16, 16, 16, half, "
-          "wmma::row_major> _a_frag;\n", fp);
+    fprintf(fp, "wmma::fragment<wmma::matrix_a, 16, 16, 16, %s, %s> "
+          "_a_frag;\n", a_elem, a_layout);
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-    fputs("wmma::fragment<wmma::matrix_b, 16, 16, 16, half, "
-          "wmma::row_major> _b_frag;\n", fp);
+    fprintf(fp, "wmma::fragment<wmma::matrix_b, 16, 16, 16, %s, %s> "
+          "_b_frag;\n", b_elem, b_layout);
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fputs("wmma::fragment<wmma::accumulator, 16, 16, 16, float> "
           "_c_frag;\n", fp);
@@ -2634,25 +2785,59 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 16) {\n",
             red_axis, red_axis, k_extent, red_axis);
-    // A fragment loads from &A[addr_a] with leading dimension K; B
-    // from &B[addr_b] with leading dimension N -- the same base+ldm
-    // shape simdgroup_load uses for the Metal path.
+    // A fragment loads from &A[addr_a] with leading dim = lda; B from
+    // &B[addr_b] with leading dim = ldb.  For a row_major operand that ld
+    // is the M/K stride; for a col_major (transposed) operand it is the
+    // K/N stride -- exactly the lda/ldb decoded from the address coeffs.
     for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
     fprintf(fp, "wmma::load_matrix_sync(_a_frag, &%s[", rmu_buf_name(buf_a));
     rmu_emit_term(addr_a, fp);
-    fprintf(fp, "], %u);\n", k_extent);
+    fprintf(fp, "], %uu);\n", (u32)lda);
     for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
     fprintf(fp, "wmma::load_matrix_sync(_b_frag, &%s[", rmu_buf_name(buf_b));
     rmu_emit_term(addr_b, fp);
-    fprintf(fp, "], %u);\n", n_extent);
+    fprintf(fp, "], %uu);\n", (u32)ldb);
     for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
     fputs("wmma::mma_sync(_c_frag, _a_frag, _b_frag, _c_frag);\n", fp);
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fputs("}\n", fp);
-    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-    fprintf(fp, "wmma::store_matrix_sync(&%s[", rmu_buf_name(buf_c));
-    rmu_emit_term(addr_c, fp);
-    fprintf(fp, "], _c_frag, %u, wmma::mem_row_major);\n", n_extent);
+    if (c_direct) {
+      // f32 output: store the float accumulator directly.  ld = C
+      // row-stride = n_extent (the output is row-major {M,N}).
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "wmma::store_matrix_sync(&%s[", rmu_buf_name(buf_c));
+      rmu_emit_term(addr_c, fp);
+      fprintf(fp, "], _c_frag, %u, wmma::mem_row_major);\n", n_extent);
+    } else {
+      // bf16/fp16 output: store the float fragment to a per-warp f32
+      // scratch tile, then convert+write to C.  The scratch is sized to a
+      // fixed upper bound of 32 warps/block (block <= 1024 threads => <=32
+      // warps), so it does not couple to the dispatch.  `sgi` is the
+      // block-local warp index (threadIdx.x / 32) and the lane is
+      // threadIdx.x % 32 -- the CUDA `tid` is the GLOBAL grid index, so it
+      // must NOT index the per-block scratch.  store_matrix_sync writes
+      // frag[i][j] -> scratch[i*16 + j]; the cooperative loop reads element
+      // e (e=lane, lane+32, ...) as row e/16, col e%16, and writes to
+      // C[addr_c + (e/16)*n_extent + (e%16)] (C row-major, row stride
+      // n_extent).
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fputs("__shared__ float _cscratch[32][256];\n", fp);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fputs("wmma::store_matrix_sync(_cscratch[sgi], _c_frag, 16u, "
+            "wmma::mem_row_major);\n", fp);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fputs("__syncwarp();\n", fp);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fputs("for (uint _e = threadIdx.x % 32u; _e < 256u; _e += 32u) {\n", fp);
+      for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
+      fprintf(fp, "%s[(", rmu_buf_name(buf_c));
+      rmu_emit_term(addr_c, fp);
+      fprintf(fp, ") + (_e / 16u) * %uu + (_e %% 16u)] = "
+              "(%s)_cscratch[sgi][_e];\n",
+              n_extent, rmu_cuda_type_name(dt_c));
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fputs("}\n", fp);
+    }
     return 1;
   }
 
@@ -2674,11 +2859,12 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     // tiled path stages through `float` threadgroup memory (bfloat->float on
     // the cooperative load), and the parallel_tc path declares each fragment
     // as simdgroup_matrix<bfloat> matching its buffer, accumulating in f32.
-    // Anything else (fp16, fp8, int) still falls back to the scalar path.
-    if ((dt_a != DT_FP32 && dt_a != DT_BF16)
-        || (dt_b != DT_FP32 && dt_b != DT_BF16)) {
-      return 0;
-    }
+    // An INT8 B operand (the q8 weight) is also handled, but ONLY by the
+    // register-blocked tiled path, which reads it as `char` and casts
+    // char -> bfloat in the cooperative B-staging.  Anything else (fp16,
+    // fp8, int8 on A) still falls back to the scalar path.
+    if (dt_a != DT_FP32 && dt_a != DT_BF16) return 0;
+    if (dt_b != DT_FP32 && dt_b != DT_BF16 && !b_is_int8) return 0;
   }
 
   // Parallel-TC selector.  If the M and N axes carry GLOBAL axis_type
@@ -2719,8 +2905,11 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // store (see rmu_emit_matmul_tc_tiled).  The win is the tiled data-reuse
   // structure, not bf16 MMA rate.
   u32 _dta = uop_buffer_dtype(buf_a), _dtb = uop_buffer_dtype(buf_b);
+  // INT8 B (the q8 weight) is eligible for the tiled path only: it stages
+  // char -> bfloat in the cooperative B-load (see rmu_emit_matmul_tc_tiled's
+  // b_is_int8 branch).  A is never int8 here (gated above).
   int _tc_dtype_ok = (_dta == DT_FP32 || _dta == DT_BF16)
-                  && (_dtb == DT_FP32 || _dtb == DT_BF16);
+                  && (_dtb == DT_FP32 || _dtb == DT_BF16 || b_is_int8);
   // The register-blocked tiled emitter assumes a row-major A[m*K+k] and
   // either a row-major B[k*N+n] OR a transposed B = Transpose[W] (W {N,K}
   // contiguous: B[k][n] = W[n][k], staged via b_nstride -- the contiguous
@@ -2742,10 +2931,15 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       snprintf(b_nm, sizeof(b_nm), "%s", rmu_buf_name(buf_b));
       snprintf(c_nm, sizeof(c_nm), "%s", rmu_buf_name(buf_c));
       int c_is_bf = (uop_buffer_dtype(buf_c) == DT_BF16);
-      int stage_bf = (_dta == DT_BF16) && (_dtb == DT_BF16);
+      // Stage as bfloat when A is bf16 and B is bf16 OR an int8 weight (the
+      // q8 path casts char -> bfloat into the bfloat staging buffer, so the
+      // MMA runs at the native bf16 tensor-core rate).  A bf16-A / int8-B
+      // matmul (the FLUX q8 case) therefore stages bfloat; an f32-A / int8-B
+      // matmul stages float (B casts char -> float).
+      int stage_bf = (_dta == DT_BF16) && (_dtb == DT_BF16 || b_is_int8);
       rmu_emit_matmul_tc_tiled(a_nm, b_nm, c_nm, n_extent,
                                k_extent, tile, c_is_bf, stage_bf,
-                               b_trans, ldb, fp, depth);
+                               b_trans, ldb, fp, depth, b_is_int8);
       return 1;
     }
   }
@@ -6410,6 +6604,13 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   rmu_buf_names_reset();
   if (out_buf != 0) rmu_buf_names_set(out_buf, "out");
   RMU_TARGET = CG_TARGET_CUDA;
+  // Device compute capability for the WMMA matmul template (bf16
+  // fragments need sm>=80).  0 if CUDA is not ready (no GPU probe).
+#ifdef THVM_HAS_CUDA
+  RMU_CUDA_SM = cuda_device_sm();
+#else
+  RMU_CUDA_SM = 0;
+#endif
   // Warp-collective reduce: when SIMD_REDUCE wraps a reduce, the
   // promoted output axis must decode from `tg` (one block = one warp =
   // one output row) so all 32 lanes of a __shfl_down_sync butterfly
@@ -6421,9 +6622,13 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   // group_extent, grid = output product).
   RMU_HAS_GROUP_REDUCE = rmu_dag_has_group_reduce(root);
   rmu_group_local_dims(root, &RMU_GROUP_EXTENT, &RMU_GROUP_LOCAL_TOTAL);
+  // bf16/fp16 scalar types are used by elementwise kernels (casts,
+  // copies) as well as tensor-core kernels, so the headers must be
+  // present unconditionally -- not only on the TC path.
+  fputs("#include <cuda_fp16.h>\n", fp);
+  fputs("#include <cuda_bf16.h>\n", fp);
   if (rmu_dag_has_tc(root)) {
     fputs("#include <mma.h>\n", fp);
-    fputs("#include <cuda_fp16.h>\n", fp);
     fputs("using namespace nvcuda;\n", fp);
   }
   fputs("typedef unsigned int uint;\n", fp);
