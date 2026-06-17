@@ -35,6 +35,10 @@
 // saturation end to attribute lost CPs to a specific cap.
 static u64 g_cp_dropped_capped         = 0;
 static u64 g_cp_positions_depth_capped = 0;
+// Gated per-position overlap trace (set by atp_overlap_ij for a target rule
+// pair); logs each outer-rule position + thvm_unify pass/fail to pin a missed
+// superposition (Meredith @6078).  Off by default.
+int g_cp_visit_trace = 0;
 
 fn void thvm_cp_caps_reset(void) {
   g_cp_dropped_capped         = 0;
@@ -148,7 +152,13 @@ static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {
 #endif
 
   RewriteSubst subst = {{0}};
-  if (!thvm_unify(sub, ctx->lj, &subst)) return ctx->count;
+  u8 g_uok = thvm_unify(sub, ctx->lj, &subst) ? 1u : 0u;
+  if (g_cp_visit_trace) {
+    fprintf(stderr, "CPVIS pos[");
+    for (u32 d = 0; d < p_len; d++) fprintf(stderr, "%u", p[d]);
+    fprintf(stderr, "] unify=%u count=%u\n", g_uok, ctx->count);
+  }
+  if (!g_uok) return ctx->count;
 
   // CP = (σ(l_i[p ← r_j]), σ(r_i)); the peak is σ(l_i) -- both CP
   // sides are one-step reducts of it (rule j rewrites the lhs, rule i

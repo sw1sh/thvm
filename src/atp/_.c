@@ -14850,9 +14850,27 @@ static u32 atp_cp_gen_gates(AtpState *s, CriticalPair *buf,
 // needs to know which (i-face, j-face) combination produced each CP.
 // AC-extension CPs (when compiled in) land after combo_end[3]; the
 // WM-order path treats them as combo 0.
+extern int g_cp_visit_trace;
+
 static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
                           CriticalPair *buf, u32 cap, u32 *combo_end) {
   u32 cnt = 0;
+  // Gated CP-overlap trace for a target rule pair (THVM_CP_TRACE_I/J): pins a
+  // missed superposition by logging per-position thvm_unify pass/fail.
+  {
+    static int ti = -2, tj = -2;
+    if (ti == -2) {
+      const char *a = getenv("THVM_CP_TRACE_I");
+      const char *b = getenv("THVM_CP_TRACE_J");
+      ti = a ? atoi(a) : -1; tj = b ? atoi(b) : -1;
+    }
+    g_cp_visit_trace = (ti >= 0 &&
+                        ((i == (u32)ti && j == (u32)tj) ||
+                         (i == (u32)tj && j == (u32)ti))) ? 1 : 0;
+    if (g_cp_visit_trace)
+      fprintf(stderr, "CPVIS === overlap i=%u j=%u (i_or=%u j_or=%u) ===\n",
+              i, j, s->r_orient[i], s->r_orient[j]);
+  }
   // Variables of j must be renamed apart from i's -- the SAME offset
   // thvm_critical_pairs_range uses internally (REWRITE_MAX_VAR / 2).
   Term lj = thvm_rename_vars(s->lhs[j], REWRITE_MAX_VAR / 2);

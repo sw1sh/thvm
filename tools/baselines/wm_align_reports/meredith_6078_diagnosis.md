@@ -127,9 +127,43 @@ so it is genuinely NOT computed (not filtered).  FAITHFUL-FIXABLE in
 `atp_overlap_ij` (missing position/unifier) or the re-overlap path; full ground
 truth available (ELProver faithful through pick 6078).
 
-NEXT: enumerate thvm's 5 slot-120x33 overlap positions vs WM's 126x36 set; find
-the missing position; inspect why atp_overlap_ij skips that superposition (or
-whether WM forms it via rule re-processing thvm lacks).  Verify against matrix.
+Read atp_overlap_ij (_.c:14853): thvm splits a rule pair's overlaps across the
+saturator's TWO visits -- the `i>j` call OWNS root x root overlaps (skip flags 0;
+toplevel phase walks TT(l) incl. root vs old tops), the `i<j` call enumerates
+PROPER subterm positions only (skip flags 1) -- mirroring WM U1_KPsBildenZuRegel
+(toplevel-pass with the rule itself as Ausschluss vs eTT proper-subterm pass).
+The 2-var CP comes from superposing rule 36's LHS into a PROPER SUBTERM of rule
+126's LHS (rule 36's LHS does not unify with 126's whole LHS -- occurs-check
+fails -- so it must match a deeper subterm).  Hypothesis: thvm's `i>j` / `i<j`
+skip-flag split (or the FT position walk thvm_critical_pairs_pair_ft) mis-assigns
+or skips this proper-subterm superposition for the 120x33 pair.
+
+CONFIRMED count: thvm computes 5 superpositions for the pair (4 from (120,33)
+[120 outer, all positions incl root x 33 root] + 1 from (33,120) [33 outer,
+proper subterms x 120 root]); WM forms 8 (cp 37094,37130,37265,37343,37471,
+37579,37580,37581, all in rule-126's ADD batch -- NOT re-overlaps).  The 2-var
+CP (cp 37130) is a **126-OUTER** superposition (rule 36's root into a PROPER
+SUBTERM of rule 126's LHS), so it belongs to thvm's (120,33) call (4 of WM's
+~N 126-outer).  thvm misses it there.
+
+FIX LOCUS: the FT position walk `cp_visit` in `thvm_critical_pairs_pair_ft`
+(_.c overlap path) under-enumerates the OUTER rule's proper-subterm positions,
+OR the FT unifier fails on the NON-LINEAR case (x1 occurs twice in rule 126's
+LHS -- root arg AND deep subterm; the 2-var superposition unifies 36's LHS with
+the deep `dot(dot(x3,x2),x1)` and must bind the repeated x1 consistently).
+REFINED (read src/atp/ft_cp.c): `ft_cp_walk_positions` (ft_cp.c:340) visits ALL
+non-var positions of the outer rule recursively to CP_MAX_DEPTH (>> the depth-3
+positions here), calling `ft_unify(sub, lj_renamed)` at each via `ft_cp_visit`
+(ft_cp.c:290).  The 66 byte-identical theorems all pass through this exact path,
+so the walk+unify are generically correct => the miss is a NARROW edge case in
+`ft_unify` / `ft_cp_replace_subst` / `ft_unify_apply` for this specific 126x36
+superposition, NOT a depth/coverage miss.
+NEXT (decisive): EITHER instrument ft_cp_visit (gate a flag in atp_overlap_ij
+when {i,j}=={120,33}; log per-position p + ft_unify pass/fail + produced
+cp_lhs/cp_rhs) to find the failing/wrong-result position, OR write a minimal
+unit test (add rule 126 + rule 36; call thvm_critical_pairs; assert the 2-var CP
+appears) for a fast isolated repro.  Fix in ft_cp.c; verify vs matrix (66
+byte-identical hold, Meredith firstdiv past 6078).
 
 ## (CONFOUNDED, superseded by the ROOT CAUSE above) equation-retention finding
 
@@ -192,3 +226,26 @@ in WM (same removal family as SKIToBCKW @1868), so thvm stops forming the CP
 while WM keeps replenishing it.  Trace: `THVM_ATP_CPGEN_DEBUG=1` -> grep the
 `[cpgen] from rules X x Y` lines whose normalized cp is the 2-var CP, watch the
 producing (X,Y) pairs stop appearing around cp_seq 15233.
+
+## CORRECTION (2026-06-17, path): the matrix uses the NON-FT cp_visit, not ft_cp.c
+
+The default `bin/test_atp_wolfram_bench` (what the matrix/align uses) is built
+WITHOUT THVM_ATPFT_UNIFY, so `ft_cp.c` is not even compiled -- atp_overlap_ij
+routes through the NON-FT path `pf[skip1] = {thvm_critical_pairs_pair,
+thvm_critical_pairs_pair_noroot}` -> cp_visit in **src/cp/_.c**.  So the earlier
+"fix locus = ft_cp.c" was the wrong path; the bug is in the non-FT cp_visit.
+
+Added a gated non-FT trace: THVM_CP_TRACE_I/J + g_cp_visit_trace (src/cp/_.c
+cp_visit logs per-position thvm_unify pass/fail).  For the slot-120 x slot-33
+pair it showed (120,33)[outer, incl root] = 5 positions all unify=1, and
+(33,120)[proper] = pos[1] unify=1 but pos[1,1]/[1,1,1] unify=0.
+
+CAVEAT (new confound): slot numbers are REUSED after rule removal+backfill, so
+gating the trace by slot {120,33} may catch DIFFERENT rules than the 126/36-
+analogs at trace time (the (33,120) unify=0 at a position that should unify for
+the 36-analog hints at this).  Slot-based parent attribution (incl the cpgen
+"from rules X x Y") is therefore unreliable; only TERM-anchored findings are
+solid: thvm misses forming the 2-var CP TERM in the 6078 epoch (CPFORM gap
+15233->44563) while WM forms it.  NEXT: gate the cp_visit trace by the rule
+TERMS (not slots), or add parent-TERMS to the cpgen/CPFORM log, to reliably pin
+the missed overlap; then fix cp_visit/thvm_unify; verify vs matrix.
