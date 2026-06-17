@@ -7492,22 +7492,32 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
   // Pack the CP into a byte string outside the managed heap.
   u32  cp_nodes  = 0u;
   u8  *packed    = acp_pack(lhs, rhs, NULL, &cp_nodes);
-  // Waldmeister MaxWeight (hard cap): drop an over-weight critical pair
-  // before it enters the queue.  0 = unbounded.  This is the LOSSY
-  // bound (flag-gated by the caller setting max_cp_weight); the default
-  // engine leaves it 0.
-  if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) {
-    free(packed);
-    return;
-  }
-  // Auto-MaxWeight (completeness-preserving): defer an over-bound CP to
-  // the overflow stash rather than dropping it.  Disabled when base==0.
-  // The WM raw>=50 class never defers (see the header comment).
-  if (s->auto_max_cp_weight_base > 0u && !raw_untreated) {
-    u32 bound = atp_auto_maxw_bound(s);
-    if (bound > 0u && cp_nodes > bound) {
-      atp_cp_stash_push(s, packed, cp_nodes, trace, is_ultimate);
+  // Waldmeister NEVER weight-caps an ultimate CP -- an initial axiom is
+  // the spec (Act_ultimate, w1=INT32_MIN) and must always enter the
+  // queue.  Deferring a heavy axiom to the auto-MaxWeight stash (or
+  // dropping it under the hard cap) delays/loses it and, since the
+  // intake canonicalize only tags CPs already in the queue, leaves the
+  // heavy axiom un-ultimate -- it then pops hundreds of picks late at
+  // its computed weight (the ShefferAxioms__Commutativity firstdiv-3
+  // divergence: a 3rd axiom of >20 nodes stashed past the base-20 bound).
+  if (!is_ultimate) {
+    // Waldmeister MaxWeight (hard cap): drop an over-weight critical pair
+    // before it enters the queue.  0 = unbounded.  This is the LOSSY
+    // bound (flag-gated by the caller setting max_cp_weight); the default
+    // engine leaves it 0.
+    if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) {
+      free(packed);
       return;
+    }
+    // Auto-MaxWeight (completeness-preserving): defer an over-bound CP to
+    // the overflow stash rather than dropping it.  Disabled when base==0.
+    // The WM raw>=50 class never defers (see the header comment).
+    if (s->auto_max_cp_weight_base > 0u && !raw_untreated) {
+      u32 bound = atp_auto_maxw_bound(s);
+      if (bound > 0u && cp_nodes > bound) {
+        atp_cp_stash_push(s, packed, cp_nodes, trace, is_ultimate);
+        return;
+      }
     }
   }
   atp_cp_heap_insert_packed(s, packed, cp_nodes, lhs, rhs, trace,

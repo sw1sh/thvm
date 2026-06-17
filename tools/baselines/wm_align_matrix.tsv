@@ -74,3 +74,4 @@ WolframAxioms__AndAssociativity	-	-	-	-	-	SKIPPED_WM_TRACE
 WolframAxioms__Commutativity	-	-	-	-	-	SKIPPED_WM_TRACE
 WolframAxioms__DoubleNegation	-	-	-	-	-	SKIPPED_WM_TRACE
 WolframAxioms__OrAssociativity	-	-	-	-	-	SKIPPED_WM_TRACE
+ShefferAxioms__Commutativity	9	9	9	Y	-	thvm=PROVED weights-exact

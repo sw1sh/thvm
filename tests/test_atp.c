@@ -3131,6 +3131,38 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-intake-heavy-axiom-bypasses-weight-cap");
+  {
+    // Regression (ShefferAxioms__Commutativity firstdiv-3): an INPUT
+    // AXIOM must bypass the auto-MaxWeight cap so a heavy axiom (more
+    // nodes than the bound) still ENQUEUES and gets tagged ultimate.
+    // WM never weight-caps the spec (initial=ultimate, w1=INT32_MIN).
+    // Before the fix the 22-node 3rd axiom was deferred to the
+    // auto-MaxWeight stash (base 20), so the intake canonicalize -- which
+    // only tags CPs already in the queue -- never saw it; it then popped
+    // ~560 picks late at its computed weight, diverging from wmcli at
+    // selection 3.  With the cap set (as the WM preset does), all three
+    // axioms must still be queued + ultimate.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_wm_intake_order(s, 1u);
+    thvm_atp_set_auto_max_cp_weight(s, 20u);   // the WM-preset bound that stashed it
+    Term x = mk_v(VAR_x), y = mk_v(1u), z = mk_v(2u);
+    // A1 light: ((x|x)|(x|x)) = x
+    CHECK(thvm_atp_add_equation(s, mk_f(mk_f(x, x), mk_f(x, x)), x));
+    // A2 medium: x|(y|(y|y)) = x|x
+    CHECK(thvm_atp_add_equation(s, mk_f(x, mk_f(y, mk_f(y, y))), mk_f(x, x)));
+    // A3 heavy (22 nodes > bound): (x|(y|z))|(x|(y|z)) = ((y|y)|x)|((z|z)|x)
+    CHECK(thvm_atp_add_equation(
+        s, mk_f(mk_f(x, mk_f(y, z)), mk_f(x, mk_f(y, z))),
+           mk_f(mk_f(mk_f(y, y), x), mk_f(mk_f(z, z), x))));
+    // All three axioms queued -- the heavy one NOT stashed away.
+    CHECK_EQ(s->n_cps, 3u);
+    thvm_atp_step(s);                  // triggers the intake canonicalize
+    CHECK_EQ(s->wm_intake_done, 1u);
+    CHECK_EQ(s->n_cps_ultimate, 3u);   // ALL three tagged ultimate
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/interreduce-keeps-irreducible-rules");
   {
     // R[0]: i(a) -> i(a)         (degenerate; just to fill a slot)
