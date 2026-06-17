@@ -180,10 +180,58 @@ int main(void) {
   CHECK(strstr(buft, "simdgroup_matrix<float, 8, 8> _acc[") != NULL);
   CHECK(strstr(buft, "simdgroup_multiply_accumulate(_acc[") != NULL);
   // A must stage from in0 and B from in1 (the buf-name aliasing bug
-  // would put both on the same source).
-  CHECK(strstr(buft, "_Asm[_i] = in0[") != NULL);
-  CHECK(strstr(buft, "_Bsm[_i] = in1[") != NULL);
+  // would put both on the same source).  K=16 is 4-aligned, so both
+  // operands take the vectorised float4 cooperative-load path.
+  CHECK(strstr(buft, "(device const float4*)(in0 + (_tm") != NULL);
+  CHECK(strstr(buft, "(device const float4*)(in1 + ") != NULL);
   CHECK_EQ(compile_through_metal(buft), 0);
+
+  TEST_BEGIN("render-uop-metal/matmul-tc-tiled-q8-int8-weight");
+  // q8 weight-only-quantized FLUX path: A {M,K} bf16, B = Transpose[Cast[
+  // W_int8, bf16]] (W {N,K} contiguous int8, so B's K-axis has stride 1 and
+  // N-axis stride K = the b_trans coalesced-K-vector path).  Output bf16.
+  // The tiled emitter must read W as `char4` (half the bf16 bytes) and cast
+  // char -> bfloat into the bfloat-staged _Bsm; the MMA runs at the native
+  // bf16 tensor-core rate.  M=128, N=64, K=16 -> 128x64 tile.
+  u32 qdimsO[2] = {128, 64};
+  u32 qdimsA[2] = {128, 16};
+  u32 qdimsW[2] = {64, 16};        // W {N,K} contiguous int8
+  Term qOut = uop_buffer(UOP_SCOPE_GLOBAL, DT_BF16, 2, qdimsO);   // bf16 output
+  Term qA  = uop_buffer(UOP_SCOPE_GLOBAL, DT_BF16, 2, qdimsA);
+  Term qWi = uop_buffer(UOP_SCOPE_GLOBAL, DT_INT8, 2, qdimsW);
+  Term q_in[2] = { qA, qWi };
+  Term qm = uop_range(0, 5 /*GLOBAL*/, 128);
+  Term qn = uop_range(1, 5 /*GLOBAL*/, 64);
+  Term qk = uop_range(2, 1 /*REDUCE*/, 16);
+  Term qc16 = uop_const(DT_INT32, 16);
+  Term qc64 = uop_const(DT_INT32, 64);
+  // A[m*K + k]
+  Term qAaddr = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, qm, qc16), qk);
+  // B = Transpose[W]: W[n*K + k] (n stride K, k stride 1)
+  Term qBaddr = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, qn, qc16), qk);
+  // The int8 weight read is cast int8 -> bf16 (the TUOpCast in the WL test).
+  Term qbCast = uop_cast(uop_index_e(qWi, qBaddr), DT_BF16);
+  Term qmul = uop_binary(UOP_MUL, uop_index_e(qA, qAaddr), qbCast);
+  Term qred = uop_reduce(REDUCE_SUM, 2, qmul);
+  Term qCaddr = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, qm, qc64), qn);
+  // Let the producer-side recogniser install OPT(_, TC, 0) + stamp M/N GLOBAL,
+  // exactly as the Metal render path does (render_metal.c).
+  Term qst  = uop_recognise_tc_parallel(uop_store(qOut, qCaddr, qred));
+  CHECK(qst != uop_store(qOut, qCaddr, qred));   // recogniser must fire on int8 B
+  char bufq[16384];
+  FILE *mpq = fmemopen(bufq, sizeof(bufq), "w");
+  cg_render_uop_kernel(qst, "k_gemm_q8", qOut, q_in, 2, mpq);
+  fclose(mpq);
+  // Tiled TC path with bfloat staging (A bf16, B int8->bfloat).
+  CHECK(strstr(bufq, "TC tiled matmul") != NULL);
+  CHECK(strstr(bufq, "threadgroup bfloat _Bsm[") != NULL);
+  CHECK(strstr(bufq, "simdgroup_matrix<bfloat, 8, 8>") != NULL);
+  CHECK(strstr(bufq, "simdgroup_multiply_accumulate(_acc[") != NULL);
+  // B must read the int8 weight as char4 and dequant char -> bfloat in
+  // the cooperative staging (the half-bandwidth fused dequant).
+  CHECK(strstr(bufq, "char4 _bv = *(device const char4*)(in1 +") != NULL);
+  CHECK(strstr(bufq, "(bfloat)_bv.x") != NULL);
+  CHECK_EQ(compile_through_metal(bufq), 0);
 
   thvm_free();
   TEST_REPORT();

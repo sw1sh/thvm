@@ -145,6 +145,47 @@ static int rmt_dag_has_opt_axes(KernelEntry const *ke) {
   return 0;
 }
 
+// q8 weight-only-quantized matmul detection for dispatch-grid sizing.
+// The B operand is a CAST(int8 -> bf16) over the INT8 weight buffer
+// (TMatMul[x, Transpose[Cast[w_int8, bf16]]]); uop_dag_classify_matmul_shape
+// declines it (its uniform-dtype gate rejects the int8 vs bf16 mismatch, so
+// BLAS / MPS never run it) -- but the renderer's rmu_emit_matmul_tc DOES emit
+// the tiled simdgroup kernel for it (b_is_int8 char->bfloat staging), so the
+// grid must still be sized to the tile.  Reads M/N/K off the (OPT-wrapped)
+// matmul shape via the same recognisers the renderer uses.  Returns 1 +
+// M/N/K when the store_root is an int8-B matmul; 0 otherwise.
+static int rmt_q8_matmul_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K) {
+  if (sroot == 0 || term_tag(sroot) != TAG_UOP
+      || term_ext(sroot) != UOP_STORE) return 0;
+  // Peel an OPT(_, TC, _) wrapper to reach the REDUCE, then the MUL's B.
+  Term value = heap_read(term_val(sroot) + 2);
+  while (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
+         && uop_opt_kind(value) == UOP_OPT_TC) {
+    value = uop_opt_target(value);
+  }
+  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
+  Term mul = heap_read(term_val(value) + 0);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  Term rhs = heap_read(term_val(mul) + 1);
+  // B must be a CAST whose source INDEX_Es an INT8 buffer.
+  if (term_tag(rhs) != TAG_UOP
+      || (term_ext(rhs) != UOP_CAST && term_ext(rhs) != UOP_BITCAST)) return 0;
+  Term idx = heap_read(term_val(rhs) + 0);
+  if (term_tag(idx) != TAG_UOP || term_ext(idx) != UOP_INDEX_E) return 0;
+  Term buf = heap_read(term_val(idx) + 0);
+  if (term_tag(buf) != TAG_UOP || term_ext(buf) != UOP_BUFFER) return 0;
+  if (uop_buffer_dtype(buf) != DT_INT8) return 0;
+  // Recover M/N (+ extents) and K from the recognisers (cast-aware).
+  u32 m_axis, m_ext, n_axis, n_ext, k_ext = 0;
+  if (!uop_matmul_mn_axes(sroot, &m_axis, &m_ext, &n_axis, &n_ext)) return 0;
+  if (!uop_classify_matmul(sroot, &k_ext, NULL)) return 0;
+  if (m_ext == 0 || n_ext == 0 || k_ext == 0) return 0;
+  if (out_M != NULL) *out_M = m_ext;
+  if (out_N != NULL) *out_N = n_ext;
+  if (out_K != NULL) *out_K = k_ext;
+  return 1;
+}
+
 int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
                                  u32 *threads_x) {
   if (ke == NULL) return 0;
@@ -204,6 +245,32 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
     // product(M_tiles) * 32 threads and leave most output cells unwritten
     // (e.g. a {8,K}x{K,500} matmul: M=8 -> 1 tile -> 32 threads, but the
     // scalar kernel needs 8*500=4000 threads).
+    // q8 int8-weight matmul: uop_dag_classify_matmul_shape declines it (the
+    // int8 vs bf16 uniform-dtype gate), so size the tiled grid off the
+    // cast-aware recognisers instead -- one threadgroup per output tile,
+    // LOCAL_M*LOCAL_N*32 threads each (mirrors rmu_emit_matmul_tc_tiled).
+    if (tc_template) {
+      u32 qM = 0, qN = 0, qK = 0;
+      if (rmt_q8_matmul_shape(sroot, &qM, &qN, &qK)
+          && (qM % 8u) == 0 && (qN % 8u) == 0 && (qK % 8u) == 0) {
+        u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+        u32 na = uop_dag_collect_axes(sroot, ids, types, exts, MAX_AXES);
+        u32 n_global = 0;
+        for (u32 i = 0; i < na; i++) if (types[i] == KAX_GLOBAL) n_global++;
+        RmuTcTile tile;
+        if (n_global >= 2 && rmu_tc_pick_tile(qM, qN, qK, &tile)) {
+          u32 tile_m = tile.local_m * tile.rm * 8u;
+          u32 tile_n = tile.local_n * tile.rn * 8u;
+          u64 ntg = (u64)(qM / tile_m) * (u64)(qN / tile_n);
+          u32 nthreads = tile.local_m * tile.local_n * 32u;
+          if (ntg > 0 && ntg <= 0xFFFFFFFFu) {
+            if (groups_x  != NULL) *groups_x  = (u32)ntg;
+            if (threads_x != NULL) *threads_x = nthreads;
+            return 1;
+          }
+        }
+      }
+    }
     if (tc_template) {
       UopDagGemmShape gemm = {0};
       int simdgroup_fires =

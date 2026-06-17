@@ -184,15 +184,22 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent, u32 *out_unit_axis) {
   if (out_unit_axis != NULL) *out_unit_axis = 0;
   if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
 
-  Term bindings[UPAT_NUM_BINDINGS] = {0};
-  if (!upat_match(&rec_tc_store, root, bindings)) return 0;
-
-  Term buf_a = bindings[0];
-  Term buf_b = bindings[2];
-  if (buf_a == 0 || buf_b == 0 || buf_a == buf_b) return 0;
-
+  // Structural walk (mirrors the batched recogniser): STORE -> REDUCE ->
+  // MUL -> [INDEX_E | CAST(INDEX_E)] x2.  An operand may carry a CAST over
+  // its INDEX_E -- a bf16->f32 widening into the f32 accumulator, OR the
+  // q8 weight-only-quantized path's int8->bf16 dequant cast
+  // (TMatMul[x, Transpose[Cast[w_int8, bf16]]]).  rec_tc_peel_cast strips
+  // that wrapper so the 2-range / divmod structural classification reads
+  // the underlying INDEX_E addresses; rmu_emit_matmul_tc peels the same
+  // cast at render time (and reads char -> bfloat for int8 B).  A bare
+  // INDEX_E (the f32 / bf16 matmul) peels to itself -> byte-identical.
   u64 sloc = term_val(root);
   Term reduce = heap_read(sloc + 2);
+  // Stay idempotent: an already OPT(_, TC, _)-wrapped value is NOT a bare
+  // matmul shape (it was already recognised), so do not peel/re-wrap it --
+  // callers that re-classify a wrapped root (the dispatch-shape derivation)
+  // peel the OPT themselves (udg_peel_tc_opt) before calling in.
+  if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
   u32 kind = uop_reduce_kind(reduce);
   if (kind != REDUCE_SUM) return 0;
   // TC matmul classifier expects a single reduce axis (K) -- multi-axis
@@ -200,13 +207,24 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent, u32 *out_unit_axis) {
   if (uop_reduce_n_axes(reduce) != 1) return 0;
   u32 red_axis = uop_reduce_axis(reduce, 0);
 
+  Term mul = uop_reduce_src(reduce);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  Term idx_a = rec_tc_peel_cast(heap_read(term_val(mul) + 0));
+  Term idx_b = rec_tc_peel_cast(heap_read(term_val(mul) + 1));
+  if (term_tag(idx_a) != TAG_UOP || term_ext(idx_a) != UOP_INDEX_E) return 0;
+  if (term_tag(idx_b) != TAG_UOP || term_ext(idx_b) != UOP_INDEX_E) return 0;
+  Term buf_a = heap_read(term_val(idx_a) + 0);
+  Term buf_b = heap_read(term_val(idx_b) + 0);
+  if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) return 0;
+  if (term_tag(buf_b) != TAG_UOP || term_ext(buf_b) != UOP_BUFFER) return 0;
+  if (term_val(buf_a) == term_val(buf_b)) return 0;
+
   // Walk the MUL's INDEX_E address expressions for a UOP_RANGE leaf
   // whose axis_id matches red_axis; its extent is K.  Mirrors
   // rmu_emit_matmul_tc's K-extent lookup so callers see the same
   // value the renderer will see.
-  Term mul    = uop_reduce_src(reduce);
-  Term addr_a = heap_read(term_val(heap_read(term_val(mul) + 0)) + 1);
-  Term addr_b = heap_read(term_val(heap_read(term_val(mul) + 1)) + 1);
+  Term addr_a = heap_read(term_val(idx_a) + 1);
+  Term addr_b = heap_read(term_val(idx_b) + 1);
 
   // Conv2d single-input shape also matches REDUCE(MUL(INDEX_E(W),
   // INDEX_E(X))) but its X address references ranges {bi, ci, oh+kh,
@@ -306,8 +324,12 @@ fn int uop_matmul_mn_axes(Term root, u32 *out_m_axis, u32 *out_m_extent,
   Term reduce  = heap_read(sloc + 2);
   u32 red_axis = uop_reduce_axis(reduce, 0);
   Term mul     = uop_reduce_src(reduce);
-  Term addr_a  = heap_read(term_val(heap_read(term_val(mul) + 0)) + 1);
-  Term addr_b  = heap_read(term_val(heap_read(term_val(mul) + 1)) + 1);
+  // Peel a CAST(INDEX_E) operand (bf16->f32 widen / int8->bf16 dequant)
+  // to read its underlying address -- mirrors uop_classify_matmul.
+  Term idx_a   = rec_tc_peel_cast(heap_read(term_val(mul) + 0));
+  Term idx_b   = rec_tc_peel_cast(heap_read(term_val(mul) + 1));
+  Term addr_a  = heap_read(term_val(idx_a) + 1);
+  Term addr_b  = heap_read(term_val(idx_b) + 1);
 
   // A's two ranges are {M, K}; B's are {K, N}.  Pull the non-reduce one
   // from each.  uop_classify_matmul already guaranteed each address
