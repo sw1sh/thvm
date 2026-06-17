@@ -128,6 +128,12 @@ res = TInContext[ctx,
     With[{t = AbsoluteTiming[vfn = TJit[velFn]; vfn[z0];][[1]]}, {t, TJitOpCount[vfn]}]];
   pr["  [", If[ nojit, "eager fwd", "capture"], " done: ", Round[tcap, 2], " s]"];
   trep = Min @ Table[AbsoluteTiming[If[ nojit, TRealize@velFn[z0], vfn[z0]]][[1]], {nrep}];     (* warm per-step *)
+  (* THVM_FLUX_CHECK=1: print a deterministic output statistic for A/B
+     correctness comparisons across kernel-path changes (same seed -> same
+     stat within dtype tolerance). *)
+  If[ Environment["THVM_FLUX_CHECK"] === "1",
+      With[{o = Flatten@Normal@TRealize@velFn[z0]},
+           pr["  OUTSTAT  sum|x|=", N@Total@Abs@o, "  rms=", N@Sqrt@Mean[o^2], "  finite=", AllTrue[o, NumberQ]]]];
   prof = If[ Environment["THVM_METAL_PROFILE_PEROP"] === "1", TMetalPerOpProfile[], <||>];
   {tprewarm, tcap, trep, opsN, prof}];
 TContextDestroy[ctx];

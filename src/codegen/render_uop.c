@@ -3129,7 +3129,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // only extra work is decoding the batch axis from `tg` and (for dispatch)
   // sizing the grid to batch * m_tiles * n_tiles.  Falls through to the
   // plain 2-D path (batch_axis_id == 0xFFFFFFFF) for non-batched matmuls.
-  u32 batch_axis_id = 0xFFFFFFFFu;
+  u32 batch_axis_id = 0xFFFFFFFFu, batch_extent = 0;
   {
     Term ra[MAX_DIM]; u32 ra_n = 0;
     rmu_collect_ranges(addr_a, ra, &ra_n);
@@ -3141,6 +3141,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       for (u32 j = 0; j < rb_n; j++) {
         if (term_val(heap_read(term_val(rb[j]) + 0)) == aid) {
           batch_axis_id = aid;
+          batch_extent = (u32)term_val(heap_read(term_val(ra[i]) + 2));
           break;
         }
       }
@@ -3218,11 +3219,20 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       // Non-conforming shape: scalar-accumulator fallback.
       return 0;
     }
-    // The 2-D warp->tile decode below ignores any batch axis, so a
-    // batched gemm (attention's mhaBmm) would alias every batch onto the
-    // same {M,N} tiles.  Decline it to the scalar path (which emits the
-    // full affine address with the batch offset).
-    if (batch_axis_id != 0xFFFFFFFFu) return 0;
+    // A batched gemm (attention's mhaBmm: batch axis in A, B AND C) goes to
+    // the NAIVE one-warp-per-16x16 WMMA path below, which decodes the batch
+    // index from the flat grid (`output_numel` = batch*M*N threads, set by the
+    // dispatch -- uop_dag_classify_matmul_shape bails on the 3-range operands
+    // so cuda_tc_tile_dispatch_shape returns 0 and the flat launch fires) and
+    // offsets A/B/C by the per-batch stride already encoded in the addresses.
+    // The shared-staged TILED path below stays 2-D only (its tg->tile decode
+    // has no batch dimension), so it is gated on batch_axis_id == none.
+    // THVM_TC_BATCHED=0 forces batched matmuls back to the scalar accumulator
+    // (the pre-batched-WMMA behaviour) -- a diagnostic A/B knob.
+    if (batch_axis_id != 0xFFFFFFFFu) {
+      char const *e = getenv("THVM_TC_BATCHED");
+      if (e && e[0] == '0') return 0;
+    }
     // WMMA matrix_a / matrix_b fragments need a 16-bit floating source.
     // fp16 fragments work on every WMMA-capable arch (>= sm_70);
     // __nv_bfloat16 fragments need Ampere (sm>=80).  Pick the fragment
@@ -3258,7 +3268,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       int n_par_c = (n_axis_type == 5 /* KAX_GLOBAL */);
       int c_is_bf = (dt_c == DT_BF16 || dt_c == DT_FP16);
       RmuTcTile tile;
-      if (!a_trans && m_par_c && n_par_c
+      if (batch_axis_id == 0xFFFFFFFFu && !a_trans && m_par_c && n_par_c
           && rmu_tc_pick_tile_cuda(m_extent, n_extent, k_extent, c_is_bf, &tile)) {
         char a_nm[24], b_nm[24], c_nm[24];
         snprintf(a_nm, sizeof(a_nm), "%s", rmu_buf_name(buf_a));
@@ -3296,21 +3306,35 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     // (m_tile, n_tile).
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fputs("uint _warp = tid / 32u;\n", fp);
-    // The flat launch sizes the grid to output_numel = M*N threads (one
-    // per output element), i.e. (M/16)*(N/16)*256 -- 8x the warps a
-    // 16x16-tile-per-warp kernel needs.  Bail the over-launched warps
-    // BEFORE any load/store so they neither read A/B out of bounds nor
-    // corrupt C (and never reach the per-warp __syncwarp in the bf16
-    // store path -- the whole warp returns together).
-    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-    fprintf(fp, "if (_warp >= %uu) return;\n",
-            (m_extent / 16u) * (n_extent / 16u));
-    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-    fprintf(fp, "uint a%u = (_warp / %uu) * 16u;\n",
-            m_axis_id, n_tiles_n_w);
-    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-    fprintf(fp, "uint a%u = (_warp %% %uu) * 16u;\n",
-            n_axis_id_v, n_tiles_n_w);
+    // The flat launch sizes the grid to output_numel threads (one per output
+    // element): non-batched (M/16)*(N/16)*256, batched batch*(M/16)*(N/16)*256
+    // -- 8x the warps a 16x16-tile-per-warp kernel needs.  Bail the
+    // over-launched warps BEFORE any load/store so they neither read A/B out of
+    // bounds nor corrupt C (and never reach the per-warp __syncwarp in the bf16
+    // store path -- the whole warp returns together).  A batched matmul decodes
+    // the batch index from the warp (warp = batch*mn_tiles + m_tile*n_tiles +
+    // n_tile); the per-batch base offset is already in addr_a/addr_b/addr_c via
+    // a{batch_axis}, so binding a{batch_axis} here is all the data layout needs.
+    u32 mn_tiles_w = (m_extent / 16u) * (n_extent / 16u);
+    if (batch_axis_id != 0xFFFFFFFFu) {
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "if (_warp >= %uu) return;\n", batch_extent * mn_tiles_w);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = _warp / %uu;\n", batch_axis_id, mn_tiles_w);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint _mn = _warp %% %uu;\n", mn_tiles_w);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = (_mn / %uu) * 16u;\n", m_axis_id, n_tiles_n_w);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = (_mn %% %uu) * 16u;\n", n_axis_id_v, n_tiles_n_w);
+    } else {
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "if (_warp >= %uu) return;\n", mn_tiles_w);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = (_warp / %uu) * 16u;\n", m_axis_id, n_tiles_n_w);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = (_warp %% %uu) * 16u;\n", n_axis_id_v, n_tiles_n_w);
+    }
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fprintf(fp, "wmma::fragment<wmma::matrix_a, 16, 16, 16, %s, %s> "
           "_a_frag;\n", a_elem, a_layout);
