@@ -290,35 +290,51 @@ $ProofKeyOrder[_] := {6, 0}
 $AtpTagCTR = 20
 $AtpTagFVR = 22
 
+(* Original-symbol tables, dynamically scoped by the decode drivers from
+   the encoder state (label -> Hold[symbol], varId -> Hold[symbol]).  When
+   a label / id is present, decodeAtpTerm restores the caller's actual
+   held symbol rather than re-interning Symbol[name] in the ambient
+   $Context: identity-preserving and context-free.  Default <||> keeps
+   the name-based fallback (and any caller that does not set them)
+   byte-identical to the prior behaviour. *)
+$atpSymObj = <||>;
+$atpVarObj = <||>;
+
+(* Resolve one bare constant: the held original if the encoder captured
+   it, else a numeric literal back to its value, else a fresh symbol of
+   that name. *)
+atpHeadFor[label_, name_] := If[ KeyExistsQ[$atpSymObj, label],
+    ReleaseHold @ $atpSymObj[label],
+    If[ StringMatchQ[name, NumberString], ToExpression[name], Symbol[name]]]
+
 (* Decode a raw packed ATP Term back to a WL expression.  CTR ->
    head[children...] (arity 0 -> bare symbol); FVR -> the bound
    variable's bare symbol.  labelToName / idToName invert the
-   encoder state's `sym` / `var` maps. *)
+   encoder state's `sym` / `var` maps; $atpSymObj / $atpVarObj carry the
+   held originals when available. *)
 decodeAtpTerm[raw_Integer, labelToName_, idToName_] := Block[{
-    tag = WolframInstitute`THVMLink`Private`$termTagFn[raw]
+    tag = $termTagFn[raw]
 },
     Which[
         tag === $AtpTagFVR,
-            Symbol @ Lookup[idToName, WolframInstitute`THVMLink`Private`$termExtFn[raw],
-                "x" <> ToString[WolframInstitute`THVMLink`Private`$termExtFn[raw]]],
+            With[{id = $termExtFn[raw]},
+                If[ KeyExistsQ[$atpVarObj, id],
+                    ReleaseHold @ $atpVarObj[id],
+                    Symbol @ Lookup[idToName, id, "x" <> ToString[id]]]],
         tag === $AtpTagCTR,
             Block[{
-                label = WolframInstitute`THVMLink`Private`$termExtFn[raw],
-                loc = WolframInstitute`THVMLink`Private`$termValFn[raw],
-                arity, name
+                label = $termExtFn[raw],
+                loc = $termValFn[raw],
+                arity, head
             },
-                arity = WolframInstitute`THVMLink`Private`$termValFn[
-                    WolframInstitute`THVMLink`Private`$heapReadFn[loc]];
-                name = Lookup[labelToName, label, "C" <> ToString[label]];
+                arity = $termValFn[
+                    $heapReadFn[loc]];
+                head = atpHeadFor[label, Lookup[labelToName, label, "C" <> ToString[label]]];
                 If[ arity === 0,
-                    (* a numeric-literal constant round-trips back to
-                       its value; every other 0-arity label is a
-                       symbol. *)
-                    If[ StringMatchQ[name, NumberString],
-                        ToExpression[name], Symbol[name]],
-                    Symbol[name] @@ Table[
+                    head,
+                    head @@ Table[
                         decodeAtpTerm[
-                            WolframInstitute`THVMLink`Private`$heapReadFn[loc + k],
+                            $heapReadFn[loc + k],
                             labelToName, idToName],
                         {k, arity}]
                 ]
@@ -509,7 +525,10 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     useBackwardGoalArgue_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
-    mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr
+    mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr,
+    (* restore the caller's held originals during this build's decoding *)
+    $atpSymObj = Lookup[enc["State"], "symObj", <||>],
+    $atpVarObj = Lookup[enc["State"], "varObj", <||>]
 },
     precArray = atpPrecedenceArray[precedenceSpec, enc];
     symbolWeightsArr = atpSymbolWeightsArray[symbolWeightsSpec, enc];
@@ -636,7 +655,13 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
                 Global`y1, Global`y2, Global`y3,
                 Global`z1, Global`z2, Global`z3},
             Union[
-                Symbol /@ Values[idToName],
+                (* Held originals (decodeAtpTerm's $atpVarObj) so the
+                   verifier patterns the SAME symbols the decoded statements
+                   carry; only engine-introduced ids without a capture fall
+                   back to Symbol[name] in this Global` block. *)
+                (If[ KeyExistsQ[$atpVarObj, #],
+                    ReleaseHold @ $atpVarObj[#],
+                    Symbol @ idToName[#]] &) /@ Keys[idToName],
                 Cases[{mainRules, mainSteps, extSteps, mnfSteps},
                     s_Symbol /; StringMatchQ[SymbolName[s],
                         "x" ~~ DigitCharacter ..],
@@ -975,7 +1000,10 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         prepareRules, runBfs, reverseBfsPath, emitNorm, resolveCp,
         resolveTrace, resolveRule, axiomEntries, canonInfo, canonKeyOf,
         cjp, nGoals, cjps, splitTrivial, chainEntries, allEntries,
-        stmt, l2n, i2n, dterm, tL, tR
+        stmt, l2n, i2n, dterm, tL, tR,
+        (* restore the caller's held originals during this build's decoding *)
+        $atpSymObj = Lookup[enc["State"], "symObj", <||>],
+        $atpVarObj = Lookup[enc["State"], "varObj", <||>]
     },
         varSyms = cRes["VarSyms"];
         (* Lazy, memoized trace-term decode: trace entries ship raw Term

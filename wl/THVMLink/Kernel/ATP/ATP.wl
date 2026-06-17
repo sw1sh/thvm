@@ -724,6 +724,16 @@ $termNewCtrFn := $termNewCtrFn = load[
     Integer
 ]
 
+(* The remaining term / heap LibraryLink primitives the encoder and the
+   proof decoder need live in the base package's private context; bind
+   them to bare names here so the encode / decode bodies read without the
+   long context prefix. *)
+$termNewFn := $termNewFn = WolframInstitute`THVMLink`Private`$termNewFn
+$termTagFn := $termTagFn = WolframInstitute`THVMLink`Private`$termTagFn
+$termExtFn := $termExtFn = WolframInstitute`THVMLink`Private`$termExtFn
+$termValFn := $termValFn = WolframInstitute`THVMLink`Private`$termValFn
+$heapReadFn := $heapReadFn = WolframInstitute`THVMLink`Private`$heapReadFn
+
 (* === WL-expression to Term encoder ================================ *)
 
 (* Map:
@@ -775,7 +785,8 @@ encodeAtpTerm[Verbatim[Pattern][name_Symbol, Blank[]], state_Association] := Blo
     varId, st
 },
     {varId, st} = ensureVar[varName, state];
-    {WolframInstitute`THVMLink`Private`$termNewFn[0, 22 (* TAG_FVR *), varId, 0], st}
+    {$termNewFn[0, 22 (* TAG_FVR *), varId, 0],
+     atpKeepVarObj[st, varId, Hold[name]]}
 ]
 
 encodeAtpTerm[s_Symbol, state_Association] := Block[{
@@ -783,7 +794,8 @@ encodeAtpTerm[s_Symbol, state_Association] := Block[{
     lab, st
 },
     {lab, st} = ensureSym[sym, state];
-    {WolframInstitute`THVMLink`Private`$termNewCtrFn[lab, {}], st}
+    {$termNewCtrFn[lab, {}],
+     atpKeepSymObj[st, lab, Hold[s]]}
 ]
 
 (* A numeric literal (e.g. the `1` in OverTilde[1], the identity-
@@ -796,7 +808,7 @@ encodeAtpTerm[n:(_Integer | _Real | _Rational), state_Association] := Block[{
     lab, st
 },
     {lab, st} = ensureSym[sym, state];
-    {WolframInstitute`THVMLink`Private`$termNewCtrFn[lab, {}], st}
+    {$termNewCtrFn[lab, {}], st}
 ]
 
 (* A String literal -- the user spelling an atom as `"a"` instead of
@@ -812,7 +824,7 @@ encodeAtpTerm[s_String, state_Association] := Block[{
     lab, st
 },
     {lab, st} = ensureSym[s, state];
-    {WolframInstitute`THVMLink`Private`$termNewCtrFn[lab, {}], st}
+    {$termNewCtrFn[lab, {}], st}
 ]
 
 (* Fold step that threads the encoder state through a list of
@@ -828,9 +840,10 @@ encodeAtpTerm[expr_, state_Association] := Block[{
     lab, st, childEncs
 },
     {lab, st} = ensureSym[sym, state];
+    st = atpKeepSymObj[st, lab, Extract[expr, 0, Hold]];
     {childEncs, st} =
         Fold[encodeChildStep, {{}, st}, List @@ expr];
-    {WolframInstitute`THVMLink`Private`$termNewCtrFn[lab, childEncs], st}
+    {$termNewCtrFn[lab, childEncs], st}
 ]
 
 (* Waldmeister `SO_const1` / `SO_const2` (SymbolOperationen.c:386-389):
@@ -844,8 +857,28 @@ encodeAtpTerm[expr_, state_Association] := Block[{
 encodeAtpTermInit[] := <|
     "sym" -> <|"cAtp1" -> 1, "cAtp2" -> 2|>,
     "var" -> <||>,
+    (* Original-symbol tables: label -> Hold[symbol] and varId ->
+       Hold[symbol] for every USER symbol the encoder sees.  The proof
+       decoder (decodeAtpTerm) restores these held originals instead of
+       re-interning Symbol[name] in the ambient $Context, so a decoded
+       term carries the caller's actual symbols -- identity-preserving and
+       context-free (a Global`-forced string-rewriting symbol round-trips
+       the same whatever context the lift runs in).  Engine-introduced
+       labels (cAtp1/cAtp2, FVI extension vars) have no entry and fall back
+       to the name table. *)
+    "symObj" -> <||>,
+    "varObj" -> <||>,
     "next_lab" -> 3
 |>
+
+(* Remember the held original for a label / var id, first writer wins (a
+   repeated symbol keeps its initial capture). *)
+atpKeepSymObj[st_Association, lab_, held_] := If[
+    KeyExistsQ[Lookup[st, "symObj", <||>], lab], st,
+    Append[st, "symObj" -> Append[Lookup[st, "symObj", <||>], lab -> held]]]
+atpKeepVarObj[st_Association, id_, held_] := If[
+    KeyExistsQ[Lookup[st, "varObj", <||>], id], st,
+    Append[st, "varObj" -> Append[Lookup[st, "varObj", <||>], id -> held]]]
 
 (* === ENIGMA Tier 2: anonymised CP hypergraph export ================ *)
 

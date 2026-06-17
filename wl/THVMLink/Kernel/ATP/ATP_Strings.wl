@@ -126,15 +126,12 @@ TFindStringProof[thms_, axioms_,
         goals = Replace[atpStringGoals[thms], {g_} :> g],
         axs = Append[atpStringAxioms[axioms], $atpStringAssoc],
         (* Word letters and the bridge variables are forced into Global`
-           (atpStringToWord / $atpStringAssoc).  The ProofObject lifter
-           reconstructs every term symbol by its short name in the ambient
-           $Context (decodeAtpTerm's Symbol[name]); under a non-Global eval
-           context - e.g. MarkdownToNotebook's per-cell MTNB`* context - the
-           reconstructed Global`A and the caller's Global`A would land in
-           different contexts and the "ProofObject" lift collapses to $Failed
-           ("Status"/"Path" survive, since they never round-trip a symbol).
-           Pin the whole proof + lift to Global` so the forced symbols and
-           their reconstructions always agree, regardless of caller context. *)
+           (atpStringToWord / $atpStringAssoc).  decodeAtpTerm now restores
+           the held originals, so the decoded statements / path are correct
+           in any caller context -- but the built-in ProofObject verifier
+           ([ProofFunction]) the goal-directed lift gates on is still
+           context-fragile on a non-Global ambient context, so pin the proof
+           to Global` until the native TProofObject verifier replaces it. *)
         $Context = "Global`",
         $ContextPath = Prepend[DeleteCases[$ContextPath, "Global`"], "Global`"]
     },

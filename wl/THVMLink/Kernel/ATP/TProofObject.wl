@@ -17,8 +17,7 @@
 
    Phase 1 keeps the graph / verification accessors delegating to a
    built-in ProofObject built on the fly; later phases make them native so
-   the object no longer leans on ProofObject at all, and drop the
-   symbol-reinterning roundtrip in the shared decoder.
+   the object no longer leans on ProofObject at all.
 
    Sibling of ATP.wl in the WolframInstitute`THVMLink`ATP` context, sharing
    WolframInstitute`THVMLink`ATP`Private`. *)
@@ -38,9 +37,11 @@ Begin["`Private`"];
 
 (* Adapt a built-in ProofObject (the shape ATP.wl currently emits:
    ProofObject[logic, theorem, axioms, <|Variables, Constants, Proof|>])
-   into a TProofObject.  Pure structural lift -- no proof rebuilding -- so
-   it shares the underlying dataset and stays cheap.  $Failed passes
-   through so the emitter can stay branch-free. *)
+   into a TProofObject.  Pure structural lift (no proof rebuilding), so it
+   shares the underlying dataset and stays cheap.  ProofObject's "Proof" is
+   an ordered list of {Type, n} -> row rules; it is held as an Association
+   for keyed access (order is recoverable via Keys / Normal).  $Failed
+   passes through so the emitter can stay branch-free. *)
 atpProofObjectToTProofObject[po_ProofObject] := Block[{data = po[[4]]},
     TProofObject[<|
         "ProofType" -> "Equational",
@@ -49,9 +50,6 @@ atpProofObjectToTProofObject[po_ProofObject] := Block[{data = po[[4]]},
         "Axioms" -> po[[3]],
         "Variables" -> Lookup[data, "Variables", {}],
         "Constants" -> Lookup[data, "Constants", {}],
-        (* ProofObject's "Proof" is an ordered list of {Type, n} -> row
-           rules; hold it as an Association for keyed access (order is
-           recoverable via Keys / Normal). *)
         "Steps" -> Association @ Lookup[data, "Proof", <||>],
         "Status" -> "Proved"
     |>]
@@ -62,10 +60,13 @@ atpProofObjectToTProofObject[other_] := other
 
 tproofToProofObject[a_Association] := ProofObject[
     Lookup[a, "Logic", "EquationalLogic"],
-    a["Theorem"], a["Axioms"],
-    <|"Variables" -> Lookup[a, "Variables", {}],
-      "Constants" -> Lookup[a, "Constants", {}],
-      "Proof" -> Normal @ Lookup[a, "Steps", <||>]|>
+    a["Theorem"],
+    a["Axioms"],
+    <|
+        "Variables" -> Lookup[a, "Variables", {}],
+        "Constants" -> Lookup[a, "Constants", {}],
+        "Proof" -> Normal @ Lookup[a, "Steps", <||>]
+    |>
 ]
 
 TToProofObject[TProofObject[a_Association]] := tproofToProofObject[a]
@@ -75,12 +76,15 @@ TToProofObject[TProofObject[a_Association]] := tproofToProofObject[a]
 $tproofProps = {
     "ProofType", "Theorem", "Theorems", "Axioms", "Variables", "Constants",
     "Status", "Statistics", "ProofAssociation", "ProofDataset", "ProofLength",
-    "ProofGraph", "ProofFunction", "ProofObject", "Properties"};
+    "ProofGraph", "ProofFunction", "ProofObject", "Properties"
+};
 
 (* Count the genuine derivation steps: a keyed row with a non-empty Proof
    (Axiom / Hypothesis rows carry an empty Proof and are premises). *)
-tproofLength[steps_Association] :=
-    Count[Values[steps], r_ /; AssociationQ[Lookup[r, "Proof", <||>]] && Lookup[r, "Proof", <||>] =!= <||>]
+tproofLength[steps_Association] := Count[
+    Values[steps],
+    r_ /; AssociationQ[Lookup[r, "Proof", <||>]] && Lookup[r, "Proof", <||>] =!= <||>
+]
 
 tproofProp[a_, "ProofType"] := Lookup[a, "ProofType", "Equational"]
 tproofProp[a_, "Theorem" | "Theorems"] := a["Theorem"]
@@ -94,6 +98,7 @@ tproofProp[a_, "ProofDataset"] := Dataset[Lookup[a, "Steps", <||>]]
 tproofProp[a_, "ProofLength"] := tproofLength[Lookup[a, "Steps", <||>]]
 tproofProp[a_, "Properties"] := $tproofProps
 tproofProp[a_, "ProofObject"] := tproofToProofObject[a]
+
 (* Phase 1: the graph / verifier / notebook lean on a built-in ProofObject
    built from the same data.  Phases 4+ make these native. *)
 tproofProp[a_, p : ("ProofGraph" | "ProofFunction" | "ProofNotebook")] :=

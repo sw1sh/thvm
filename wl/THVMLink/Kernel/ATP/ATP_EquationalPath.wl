@@ -42,14 +42,12 @@ Begin["`Private`"];
 
 canonicalizePatterns[expr_, OptionsPattern[]] := Block[{
     chars = Replace[
-        OptionValue["SymbolNames"]
-        ,
+        OptionValue["SymbolNames"],
         {
             Automatic -> Join[CharacterRange["", ""], CharacterRange["", ""]],
             "Alphabet" | Alphabet -> Alphabet[]
         }
-    ]
-    ,
+    ],
     patts = DeleteDuplicates[Cases[expr, _Pattern, All, Heads -> True]]
 },
     chars = First[
@@ -58,18 +56,15 @@ canonicalizePatterns[expr_, OptionsPattern[]] := Block[{
                 Function[{cs, n},
                     {Join[cs, (StringJoin[#1, ToString[n]]&) /@ cs], n + 1}
                 ]
-            ]
-            ,
-            {chars, 1}
-            ,
+            ],
+            {chars, 1},
             Length[#1[[1]]] < Length[patts]&
         ]
     ];
     MapIndexed[
         With[{canonical = Pattern @@ {Symbol[Extract[chars, #2]], Last[#1]}},
             Verbatim[#1] :> canonical
-        ]&
-        ,
+        ]&,
         patts
     ]
 ]
@@ -77,8 +72,7 @@ canonicalizePatterns[expr_, OptionsPattern[]] := Block[{
 Options[canonicalizePatterns] = {"SymbolNames" -> "Alphabet"}
 
 extract[expr_, pos : {_Integer...}, f_] := If[ pos === {},
-    f[expr]
-    ,
+    f[expr],
     Enclose[
         ConfirmQuiet[Extract[Unevaluated[expr], pos, f], {Extract::partd, Extract::partw}],
         Missing[ReleaseHold[#1["HeldMessageName"]]]&
@@ -86,8 +80,7 @@ extract[expr_, pos : {_Integer...}, f_] := If[ pos === {},
 ]
 
 extract[expr_, pos : {_Integer...}] := If[ pos === {},
-    expr
-    ,
+    expr,
     Enclose[
         ConfirmQuiet[Extract[Unevaluated[expr], pos], {Extract::partd, Extract::partw}],
         Missing[ReleaseHold[#1["HeldMessageName"]]]&
@@ -131,8 +124,7 @@ findEquationalPath[
             lemma = {"EquationalizedHypothesis", lemma[[2]]}
         ];
         If[ MatchQ[lemma, {"Hypothesis" | "EquationalizedHypothesis", _}],
-            justification = Confirm[Quiet[justifyLemma[pa, vars, terminal, conclusion, simplify]]]
-            ,
+            justification = Confirm[Quiet[justifyLemma[pa, vars, terminal, conclusion, simplify]]],
             justification = Confirm[Quiet[justifyLemma[pa, vars, terminal, lemma, simplify]]]
         ];
         If[ MatchQ[lemma, {"Hypothesis" | "EquationalizedHypothesis", _}]
@@ -143,8 +135,7 @@ findEquationalPath[
                 lemma = conclusion = justification[[n, 1]];
                 justification = Most[
                     If[ justification[[n, 2]] === Right,
-                        RotateRight[reverseJustification[justification], n - 1]
-                        ,
+                        RotateRight[reverseJustification[justification], n - 1],
                         RotateLeft[justification, n]
                     ]
                 ];
@@ -179,24 +170,19 @@ findEquationalPath[
                             newExpr
                         }
                     ]
-                ]
-                ,
-                justification[[1]]
-                ,
+                ],
+                justification[[1]],
                 Partition[justification[[2 ;; All]], 2]
             ]
         ];
         path = Prepend[path, justification[[1]]];
         With[{
             rewriteTest = With[
-                {falsePositions = PositionIndex[MapThread[SameQ, {justification[[1 ;; All ;; 2]], path}]][False]}
-                ,
+                {falsePositions = PositionIndex[MapThread[SameQ, {justification[[1 ;; All ;; 2]], path}]][False]},
                 If[ MissingQ[falsePositions],
-                    Success["Rewrite", Association["MessageTemplate" -> "Running rewrite sequence reproduced the path."]]
-                    ,
+                    Success["Rewrite", Association["MessageTemplate" -> "Running rewrite sequence reproduced the path."]],
                     Failure[
-                        "Rewrite"
-                        ,
+                        "Rewrite",
                         Association[
                             "MessageTemplate" -> "Running rewrite sequence failed at positions `` of the path.",
                             "MessageParameters" -> falsePositions
@@ -286,8 +272,7 @@ justifyLemma[pa_Association, vars_, terminal_List, key : {Except["CriticalPairLe
         input = inputJustification[[side]];
         subInput = Extract[inputJustification, position];
         constructJustification = Riffle[
-            MapAt[Join[subPosition, #1]&, constructJustification[[2 ;; All ;; 2]], {All, 3}]
-            ,
+            MapAt[Join[subPosition, #1]&, constructJustification[[2 ;; All ;; 2]], {All, 3}],
             (replacePart[input, subPosition -> #1]&) /@
                 Rest[
                     FoldList[
@@ -298,8 +283,7 @@ justifyLemma[pa_Association, vars_, terminal_List, key : {Except["CriticalPairLe
                 ]
         ];
         justification = If[ side === 1,
-            Join[reverseJustification[constructJustification], inputJustification]
-            ,
+            Join[reverseJustification[constructJustification], inputJustification],
             Join[inputJustification, constructJustification]
         ];
         justification = justification /.
@@ -349,8 +333,7 @@ justifyLemma[pa_Association, vars_, terminal_, key : {"CriticalPairLemma", _}, s
         matchJustification = matchJustification /. uniq /. unification;
         input = constructJustification[[-1]];
         matchJustification = Riffle[
-            MapAt[Join[subPosition, #1]&, {All, 3}][matchJustification[[2 ;; All ;; 2]]]
-            ,
+            MapAt[Join[subPosition, #1]&, {All, 3}][matchJustification[[2 ;; All ;; 2]]],
             (replacePart[input, subPosition -> #1]&) /@
                 Rest[
                     FoldList[
@@ -393,8 +376,7 @@ reverseJustification[justification_List] := MapAt[Replace[{Left -> Right, Right 
 simplifyJustification[justification_List] := Block[{duplicates = Keys[Select[Counts[justification[[1 ;; All ;; 2]]], #1 > 1&]], positions},
     positions = (Position[justification, Verbatim[#1], {1}]&) /@ duplicates;
     Delete[
-        justification
-        ,
+        justification,
         List
         /@
         Union
@@ -468,11 +450,9 @@ TFindEquationalPath[po_ProofObject, prop_ ? atpEqPathPropQ, opts : OptionsPatter
 },
     Which[ 
         ! FailureQ[res],
-            res
-        ,
+            res,
         prop === "Path",
-            atpDatasetEqPath[po]
-        ,
+            atpDatasetEqPath[po],
         True,
             res
     ]
@@ -484,11 +464,9 @@ TFindEquationalPath[po_ProofObject, prop_ ? atpEqPathPropQ, opts : OptionsPatter
 TFindEquationalPath[thm_, axioms_, opts : OptionsPattern[]] := TFindEquationalPath[thm, axioms, "Path", opts]
 
 TFindEquationalPath[thm_, axioms_, prop_ ? atpEqPathPropQ, opts : OptionsPattern[]] := Block[
-    {po = TFindProof[thm, axioms, "ProofObject", Sequence @@ FilterRules[{opts}, Options[TFindProof]]]}
-    ,
+    {po = TFindProof[thm, axioms, "ProofObject", Sequence @@ FilterRules[{opts}, Options[TFindProof]]]},
     If[ MatchQ[po, _ProofObject],
-        TFindEquationalPath[po, prop, Sequence @@ FilterRules[{opts}, $atpEqPathOptions]]
-        ,
+        TFindEquationalPath[po, prop, Sequence @@ FilterRules[{opts}, $atpEqPathOptions]],
         $Failed
     ]
 ]
