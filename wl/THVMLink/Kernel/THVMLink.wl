@@ -1382,7 +1382,13 @@ EndPackage[];
    by sorting on a {depth, lowercased path} key, so Kernel/ATP.wl
    loads before Kernel/ATP/*.wl regardless of WL Sort's char-order
    quirks.  Subdirectory files that depend on a parent's BeginPackage
-   can rely on this. *)
+   can rely on this.
+
+   Anything under a Kernel/.../Examples/ directory is SKIPPED here: the
+   example models (Kernel/NN/Examples/, context WolframInstitute`THVMLink`Examples`)
+   are opt-in via Get["WolframInstitute`THVMLink`Examples`"], which runs their
+   own loader (Examples.wl) -- so the heavy example code and its FLUX-specific
+   memory env tuning never load with the base paclet. *)
 (* Quiet the sibling-file loader's Get calls against General::shdw:
    parse-time shdw messages don't go through Message[] (they're emitted
    directly by the symbol resolver), so plain Off doesn't catch them;
@@ -1394,7 +1400,7 @@ With[{base = DirectoryName[$InputFileName]},
             SortBy[
                 Select[
                     FileNames["*.wl", base, Infinity],
-                    FileBaseName[#] =!= "THVMLink" &
+                    (FileBaseName[#] =!= "THVMLink" && FreeQ[FileNameSplit[#], "Examples"]) &
                 ],
                 f |-> {Length @ FileNameSplit[f], ToLowerCase[f]}
             ]

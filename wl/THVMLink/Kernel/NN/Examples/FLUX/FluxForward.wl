@@ -12,6 +12,10 @@
    block LayerNorm, AdaLN modulation, gated residual, and the double /
    single block + transformer assembly. *)
 
+BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
+
+Begin["`Private`"];
+
 (* --- linear: a diffusers weight is stored {out, in}, so y = x . W^T.  The
        weight arg `w` is the weight AS STORED ({out, in}, loaded contiguous on
        the device) and fxLinear matmuls against the Transpose[w] VIEW.  The
@@ -275,3 +279,7 @@ fxTransformer[hidden0_, enc0_, temb_, ropeCos_, ropeSin_, wf_, cfg_] := Module[
     Do[ hidden = TRealize @ fxSingleBlock[hidden, smod, ropeCos, ropeSin, fxSglW[wf, i], cfg], {i, 0, nS - 1}];
     hidden = hidden[[stxt + 1 ;; Dimensions[hidden][[1]]]];               (* drop text *)
     fxLinear[fxNormOut[hidden, temb, wf["norm_out.linear.weight"], eps], wf["proj_out.weight"]]]
+
+End[];
+
+EndPackage[];

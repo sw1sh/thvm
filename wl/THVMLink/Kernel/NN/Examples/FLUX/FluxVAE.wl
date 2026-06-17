@@ -22,7 +22,10 @@
    3x3 convs pad H,W by 1 first.  Weights are bf16 in the diffusers vae
    safetensors; cast to f32. *)
 
-Get[FileNameJoin[{DirectoryName[$InputFileName], "FluxForward.wl"}]];
+BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
+
+Begin["`Private`"];
+
 
 (* === primitives ===================================================== *)
 
@@ -134,3 +137,7 @@ vaeDecoder[zPacked_, W_, wsub_, cfg_] := Module[
     h = vaeConv[h, W["decoder.conv_out.weight"], W["decoder.conv_out.bias"], 1]; (* 3x3 128->3 *)
     (* image = clip((x+1)/2, 0, 1) *)
     TClip[(h + 1) * 0.5, 0., 1.]]
+
+End[];
+
+EndPackage[];

@@ -30,13 +30,16 @@
    is built for that grid, fxSigmas uses S_img, and vaeDecoder unpatchifies back
    to {3, 16*gridH, 16*gridW} = {3, H, W}.
 
-   Get-loaded after WolframInstitute`THVMLink` AND the four flux pieces (this file Gets them).
-   Follows wl/GUIDE.md style. *)
+   Part of the WolframInstitute`THVMLink`Examples` package (the four flux pieces -
+   FluxForward / FluxSampler / FluxVAE / QwenEncoder - load alongside it into the
+   shared Examples`Private` context).  Follows wl/GUIDE.md style. *)
 
-Get[FileNameJoin[{DirectoryName[$InputFileName], "FluxForward.wl"}]];
-Get[FileNameJoin[{DirectoryName[$InputFileName], "FluxSampler.wl"}]];
-Get[FileNameJoin[{DirectoryName[$InputFileName], "FluxVAE.wl"}]];
-Get[FileNameJoin[{DirectoryName[$InputFileName], "QwenEncoder.wl"}]];
+BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
+
+FluxGenerate::usage = "FluxGenerate[prompt$] generates an image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder), returning an Image.\nFluxGenerate[{prompt$1, prompt$2, $$}] generates one image per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (the second image is warm, not a second cold start).\nOptions: \"ImageSize\" (default {256, 256}), \"Seed\" (0), \"Device\" (\"metal\" | \"cpu\" | \"cuda\"), \"NumSteps\" (4), \"ModelDir\" (Automatic -> ~/.cache/thvm/flux2-klein-4b), \"ReturnImages\" (True; False returns raw {3, H, W} arrays).";
+
+Begin["`Private`"];
+
 
 (* ============================================================
    Host-side byte-level BPE tokenizer (Qwen2/GPT-4 style).
@@ -490,3 +493,7 @@ fxSampleJit[vfn_, z0_, enc0_, sigmas_, tembFn_, ca_] := Module[
 
 (* {3,H,W} pixels in [0,1] -> an Image (clip for any tiny fp overshoot). *)
 fxToImage[t_] := Image[Clip[Normal[t], {0., 1.}], Interleaving -> False, ColorSpace -> "RGB"]
+
+End[];
+
+EndPackage[];

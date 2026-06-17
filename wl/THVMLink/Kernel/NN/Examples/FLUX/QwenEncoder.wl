@@ -20,6 +20,10 @@
    (GQA 4:1), intermediate 9728, rms_norm_eps 1e-6, rope_theta 1e6, SiLU MLP,
    no attention bias. *)
 
+BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
+
+Begin["`Private`"];
+
 (* Embedding lookup.  thvm has no true gather (TEmbedding/TGather lower to a
    one-hot matmul, infeasible over the 151936-long vocabulary), so select the
    token rows of the frozen bf16 table on the host: Normal returns the raw
@@ -136,3 +140,7 @@ qwenEncode[inputIds_List, attMask_List, wf_, cfg_] := With[
     {in = qwenInputs[inputIds, attMask, wf, cfg]},
     qwenForward[in["x"], in["addMask"], in["cos"], in["sin"], wf, cfg]
 ]
+
+End[];
+
+EndPackage[];

@@ -13,7 +13,15 @@ PacletObject[<|
         {
             "Kernel",
             "Root"    -> "Kernel",
-            "Context" -> {"WolframInstitute`THVMLink`", "WolframInstitute`THVMLink`ATP`"}
+            (* Examples` is opt-in: its loader (NN/Examples/Examples.wl) is mapped
+               explicitly so Get["WolframInstitute`THVMLink`Examples`"] pulls in the
+               main runtime + the example models, while the base paclet load skips
+               everything under Kernel/.../Examples/ (see THVMLink.wl scanner). *)
+            "Context" -> {
+                "WolframInstitute`THVMLink`",
+                "WolframInstitute`THVMLink`ATP`",
+                {"WolframInstitute`THVMLink`Examples`", "NN/Examples/Examples.wl"}
+            }
         },
         {"LibraryLink"},
         {

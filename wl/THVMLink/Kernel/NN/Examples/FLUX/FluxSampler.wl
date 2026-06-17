@@ -13,6 +13,10 @@
    transformer as TTerms.  The timestep MLP, x/context embedders, and blocks
    live in FluxForward.wl and need the transformer weights. *)
 
+BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
+
+Begin["`Private`"];
+
 (* === resolution-shifted sigma schedule ==============================
    diffusers FlowMatchEuler `mu`-shift for klein.  Constants from the FLUX.2
    generate pipeline; `seq` is the image token count (256 for 256x256). *)
@@ -69,3 +73,7 @@ fxSample[vel_, z0_, sigmas_, tembFn_] := Module[{z = z0, vfn, k, dt, v},
         z = TRealize @ TUOpAdd[z, TUOpMul[v, TUOpConst[N[dt]]]],
         {k, 1, Length[sigmas] - 1}];
     z]
+
+End[];
+
+EndPackage[];
