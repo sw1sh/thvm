@@ -758,6 +758,31 @@ Few-shot transfer, meta-RL, in-context RL:
 - Open-Ended Learning Team (DeepMind), "Open-Ended Learning Leads to
   Generally Capable Agents" (XLand), arXiv:2107.12808 (2021).
 
+## Follow-up (2026-06-17): differentiable logic / neuromorphic-memory for symbolic ARC rules?
+
+A verified literature survey (prompted by the question "did anyone try differentiable logic, or
+neuromorphic / memory-augmented architectures, to learn symbolic rules for ARC-AGI?") returns a clear
+picture. Differentiable-logic methods (∂ILP; Deep Differentiable Logic Gate Networks) and
+memory-augmented "neuromorphic computers" (Neural Turing Machine, Differentiable Neural Computer) have
+been applied only to ARC-*adjacent* tasks and are not competitive: the lone DNC tested on ARC-derived
+geometric grids scored ~0, and no genuine spiking/neuromorphic-hardware ARC result exists. The closest
+differentiable hit is LatFormer (ICML 2023), which bakes lattice-symmetry *priors* into attention for
+~2 orders of magnitude better sample efficiency, but only on the geometric subset. What works is
+*discrete program search*: hand-crafted DSL brute force (Icecuber 2020, still the best single solver),
+object-graph + constraint search over a small relational DSL (ARGA, AAAI 2023), library learning
+(DreamCoder + PeARL), and LLM induction+transduction ensembles (BARC, ICLR 2025, ~human). The
+mechanism: discrete-primitive credit assignment plus few-shot under-determination make end-to-end
+differentiable optimisation ill-posed for ARC's combinatorial rule space; the only differentiable
+*wins* are injected priors, not learned rules.
+
+This independently corroborates the brain-arc experiments: the differentiable VICReg/JEPA latent
+(experiments 352/353) gave no edge over a random encoder at the match relation -- a micro-instance of
+the same wall -- while CodeIt's hindsight-relabeling + prioritized replay for reward sparsity is exactly
+the goal-oversampling tried in experiment 348. The non-LLM route the literature endorses is ARGA-style
+object-graph + compositional DSL search with hindsight relabeling. Full citations in the
+"Neuro-symbolic, differentiable-logic, and program-synthesis ARC solvers" block of
+[references.md](references.md).
+
 ## Pointers
 
 - The north star and the fixed curriculum:

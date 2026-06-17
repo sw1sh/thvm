@@ -1037,6 +1037,65 @@ are mostly mature pre-2022 work the thvm arc would port.
   <https://arxiv.org/abs/2107.12808> (also cited in the
   auto-curriculum block above.)
 
+## Neuro-symbolic, differentiable-logic, and program-synthesis ARC solvers (page 9 follow-up, 2026-06-17)
+
+Gathered from a verified literature survey prompted by the question "did anyone try
+differentiable logic / memory-augmented (neuromorphic) architectures to learn symbolic
+rules for ARC-AGI?". Short answer: differentiable-logic and memory-augmented models have
+been tried only on ARC-adjacent tasks and are not competitive; the working approaches are
+discrete program search (DSL/constraint/library) optionally guided by neural models.
+
+- Richard Evans & Edward Grefenstette, "Learning Explanatory Rules from Noisy Data"
+  (Differentiable Inductive Logic, ∂ILP), JAIR 61, 2018; arXiv:1711.04574. Foundational
+  dILP; memory-bound (arity-2 predicates), never run on ARC.
+  <https://arxiv.org/abs/1711.04574>
+- Felix Petersen, Christian Borgelt, Hilde Kuehne & Oliver Deussen, "Deep Differentiable
+  Logic Gate Networks", NeurIPS 2022; arXiv:2210.08277. Image/tabular classification only;
+  no ARC. <https://arxiv.org/abs/2210.08277>
+- Hikaru Shindo et al., "Learning Differentiable Logic Programs for Abstract Visual
+  Reasoning" (NEUMANN, differentiable forward-chaining FOL reasoner), Machine Learning
+  journal, 2023; arXiv:2307.00928. Kandinsky / CLEVR-Hans, not ARC.
+  <https://arxiv.org/abs/2307.00928>
+- Mattia Atzeni, Mrinmaya Sachan & Andreas Loukas, "Infusing Lattice Symmetry Priors in
+  Attention Mechanisms for Sample-Efficient Abstract Geometric Reasoning" (LatFormer),
+  ICML 2023. The most ARC-relevant differentiable result: lattice-symmetry priors in
+  attention, ~2 orders of magnitude better sample efficiency on geometric grid transforms
+  from ARC (beats a DNC baseline that scored ~0); scoped to the geometric subset, no
+  full-ARC score. <https://proceedings.mlr.press/v202/atzeni23a/atzeni23a.pdf>
+- Yudong Xu, Elias B. Khalil & Scott Sanner, "Graphs, Constraints, and Search for the
+  Abstraction and Reasoning Corpus" (ARGA), AAAI 2023. Object-graph abstraction +
+  constraint-guided search over a small relational DSL (4 filters + 11 transforms);
+  57/160 with ~1000x fewer search nodes than the Kaggle winner. The strongest non-LLM
+  neuro-symbolic route. <https://ssanner.github.io/papers/aaai23_arga.pdf>
+- Mikel Bober-Irizar & Soumya Banerjee, "Neural networks for abstraction and reasoning"
+  (DreamCoder + the PeARL DSL), Scientific Reports 14, 2024. 70/400 (easy), 18/400 (hard);
+  neuro-symbolic and LLM solvers are complementary (37% overlap).
+  <https://www.nature.com/articles/s41598-024-73582-7>
+- Natasha Butt, Blazej Manczak, Auke Wiggers et al. (Qualcomm AI Research), "CodeIt:
+  Self-Improving Language Models with Prioritized Hindsight Replay", ICML 2024;
+  arXiv:2402.04858. LM + expert iteration + hindsight relabeling + prioritized replay for
+  reward sparsity; 59/400 (15%). Mirrors the goal-oversampling used in brain experiment
+  348. <https://arxiv.org/abs/2402.04858>
+- Wen-Ding Li, Kevin Ellis et al., "Combining Induction and Transduction for Abstract
+  Reasoning" (BARC), ICLR 2025; arXiv:2411.02272. Induction (program synthesis) +
+  transduction (neural prediction) ensemble, 56.75% on the 400-task public validation
+  (~average human 60.2%). <https://arxiv.org/abs/2411.02272>
+- Ekin Akyürek et al., "The Surprising Effectiveness of Test-Time Training for Abstract
+  Reasoning", arXiv:2411.07279 (2024). TTT lifts BARC's transduction model to 61.9%
+  ensembled; TTT complements but does not substitute for program synthesis.
+  <https://arxiv.org/abs/2411.07279>
+- Yuval Shamshoum et al., "Differentiable Neural Computers Require More Planning Steps",
+  ICML 2024; arXiv:2406.02187. Adaptive planning budget for DNCs -- on algorithmic tasks,
+  not ARC. <https://arxiv.org/abs/2406.02187>
+- Alex Graves et al., "Hybrid computing using a neural network with dynamic external
+  memory" (Differentiable Neural Computer), Nature 538, 2016. The memory-augmented
+  archetype; the LatFormer DNC baseline scored ~0 on the ARC geometric subset.
+  <https://www.nature.com/articles/nature20101>
+- Johan Sokrates Wind ("Icecuber"), 1st-place Kaggle ARC 2020 solution: hand-crafted DSL
+  (~42 image-transformation functions) + DAG brute-force stacker. Still the strongest
+  single solver (~209/400 easy, 160/400 hard in the Nature re-evaluation).
+  <https://www.kaggle.com/c/abstraction-and-reasoning-challenge/discussion/154597>
+
 ## Modern robotics research (page 12)
 
 The 2022-present robotics surge, surveyed for brain-arc importable
