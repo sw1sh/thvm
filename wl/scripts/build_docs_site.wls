@@ -115,9 +115,9 @@ symbolsHTML = StringJoin[
     "</ul>"
 ];
 
-(* the landing view is the resource's live GUIDE embed page (full notebook
-   viewer + working cross-links, like every other framed page) *)
-homeURL   = $base <> "/Documentation/guide/" <> $rootGuide <> ".html";
+(* the landing view is the resource's own main page (the ResourceDefinition
+   shingle: hero + abstract + examples), framed like every other live page *)
+homeURL   = $base <> "/";
 homeTitle = $rootGuide;
 
 (* ---- assemble index.html from the separate .css / .js / .html templates ---- *)
