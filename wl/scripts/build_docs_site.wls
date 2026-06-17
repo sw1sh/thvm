@@ -43,9 +43,6 @@ webDir       = FileNameJoin[{docsDir, "web"}];
 $target      = "THVMLinkDocs";   (* cloud dir for our shell + re-hosted pages, under the account root *)
 $resourceRel = "DeployedResources/Paclet/WolframInstitute/THVMLink";  (* where deploy_paclet.wls deploys the paclet *)
 $rootGuide   = "THVMLink";
-$nbWidth     = 900;
-$waitMs      = 25000;
-$fetchPar    = 16;
 
 If[ ! DirectoryQ[guidesDir], Print["Guides dir not found: ", guidesDir]; Exit[1] ];
 
@@ -62,14 +59,8 @@ guideFile  = FileNameJoin[{guidesDir, $rootGuide <> ".md"}];
 tutorials  = SortBy[({FileBaseName[#], mdTitle[#]} &) /@ FileNames["*.md", tutorialsDir], First];
 symbolsAll = Sort @ DeleteDuplicates[FileBaseName /@ FileNames["*.md", symbolsDir]];
 
-(* every page to re-host: {type ("guide"|"tutorial"|"ref"), name} *)
-entries = Join[
-    {{"guide", $rootGuide}},
-    ({"tutorial", #[[1]]} &) /@ tutorials,
-    ({"ref", #} &) /@ symbolsAll
-];
 Print["build_docs_site: 1 guide, ", Length[tutorials], " tutorials, ",
-    Length[symbolsAll], " symbols -> ", Length[entries], " pages"];
+    Length[symbolsAll], " symbols"];
 
 (* ---- DRYRUN: print the structure and stop (no cloud needed) ---- *)
 If[ Environment["DRYRUN"] === "1",
@@ -91,14 +82,7 @@ If[ ! $CloudConnected,
 If[ ! $CloudConnected, Print["build_docs_site: cloud connection failed"]; Exit[1] ];
 accountBase = First[$CloudRootDirectory];
 $base  = accountBase <> "/" <> $resourceRel;
-$base2 = accountBase <> "/" <> $target;
 Print["build_docs_site: account root ", accountBase];
-
-(* ---- URLs ---- *)
-srcStatic[type_, name_] :=
-    StringReplace[$base, "/obj/" -> "/statichtml/"] <> "/Documentation/" <> type <>
-        "/" <> name <> ".nb?width=" <> ToString[$nbWidth] <>
-        "&maxwaitmillis=" <> ToString[$waitMs];
 
 esc[s_] := StringReplace[ToString[s],
     {"&" -> "&amp;", "<" -> "&lt;", ">" -> "&gt;", "\"" -> "&quot;"}];
@@ -131,14 +115,15 @@ symbolsHTML = StringJoin[
     "</ul>"
 ];
 
-(* the landing view is the re-hosted, public GUIDE page (self-contained) *)
-homeURL   = $base2 <> "/guide/" <> $rootGuide <> ".html";
+(* the landing view is the resource's live GUIDE embed page (full notebook
+   viewer + working cross-links, like every other framed page) *)
+homeURL   = $base <> "/Documentation/guide/" <> $rootGuide <> ".html";
 homeTitle = $rootGuide;
 
 (* ---- assemble index.html from the separate .css / .js / .html templates ---- *)
 jsContent = TemplateApply[
     StringTemplate[readAsset["docs_site.js"]],
-    <|"BASE" -> $base, "BASE2" -> $base2, "HOME" -> homeURL|>
+    <|"BASE" -> $base, "HOME" -> homeURL|>
 ];
 indexHTML = TemplateApply[
     StringTemplate[readAsset["docs_site.html"]],
@@ -156,56 +141,17 @@ indexHTML = TemplateApply[
 If[ ! StringQ[indexHTML], Print["build_docs_site: index assembly failed"]; Exit[1] ];
 Print["build_docs_site: index.html assembled, ", StringLength[indexHTML], " chars"];
 
-(* ---- fetch every page's statichtml in parallel (curl) ---- *)
-rawDir = FileNameJoin[{$TemporaryDirectory, "thvmdocs_raw"}];
-Quiet @ DeleteDirectory[rawDir, DeleteContents -> True];
-CreateDirectory[rawDir];
-rawPath[i_] := FileNameJoin[{rawDir, ToString[i] <> ".html"}];
-manifest = StringRiffle[
-    MapIndexed[(rawPath[First[#2]] <> " " <> srcStatic[#1[[1]], #1[[2]]]) &, entries], "\n"];
-manifestFile = FileNameJoin[{rawDir, "_manifest.txt"}];
-Export[manifestFile, manifest, "Text"];
-
-Print["build_docs_site: fetching ", Length[entries], " pages (", $fetchPar, "-way parallel)..."];
-fetch = RunProcess[{"/bin/bash", "-c",
-    "xargs -P " <> ToString[$fetchPar] <> " -L 1 curl -fsS -o < " <> manifestFile}];
-Print["build_docs_site: fetch exit ", fetch["ExitCode"]];
-
-(* prepended to every page: page-fix CSS (collapse the blank gap) + click-to-copy JS *)
-pageFix = "<style>" <> readAsset["docs_page.css"] <> "</style>\n<script>" <>
-    readAsset["docs_page.js"] <> "</script>\n";
-(* rewrite the resource's in-content links to our re-hosted, chrome-free pages *)
-rewrite[s_] := StringReplace[s, {
-    $base <> "/Documentation/guide/"    ~~ n : (WordCharacter ..) ~~ ".html" :> $base2 <> "/guide/" <> n <> ".html",
-    $base <> "/Documentation/tutorial/" ~~ n : (WordCharacter ..) ~~ ".html" :> $base2 <> "/tutorial/" <> n <> ".html",
-    $base <> "/Documentation/ref/"      ~~ n : (WordCharacter ..) ~~ ".html" :> $base2 <> "/ref/" <> n <> ".html"
-}];
-
-pages = {}; bad = {};
-MapIndexed[
-    Module[{type = #1[[1]], name = #1[[2]], rp = rawPath[First[#2]]},
-        If[ FileExistsQ[rp] && FileByteCount[rp] > 400,
-            AppendTo[pages, {type <> "/" <> name <> ".html", pageFix <> rewrite[Import[rp, "Text"]]}],
-            AppendTo[bad, type <> "/" <> name]
-        ]
-    ] &, entries];
-AppendTo[pages, {"index.html", indexHTML}];
-Print["build_docs_site: ", Length[pages], " pages ready",
-    If[bad === {}, "", " (missing: " <> StringRiffle[Take[bad, UpTo[10]], ", "] <> If[Length[bad] > 10, " ...", ""] <> ")"]];
-
-(* ---- deploy: one public CloudObject per file (path-based, overwrites cleanly) ---- *)
+(* ---- deploy: just our shell page.  The center iframe loads the resource's
+   live Documentation/{guide,ref,tutorial}/<Name>.html embed pages, which carry
+   the full notebook viewer (collapse, copy, working cross-links, every section).
+   Nothing to re-host -- so the cloud's minimized statichtml render (which
+   stripped cross-links) is no longer in the path. ---- *)
 cleanCloud[co_] := (Module[{ch = Quiet @ CloudObjects[co]}, If[ListQ[ch], cleanCloud /@ ch]]; Quiet @ DeleteObject[co]);
-cleanCloud[CloudObject[$target]];
+cleanCloud[CloudObject[$target]];   (* clear a stale re-host directory if present *)
 
-Print["build_docs_site: deploying ", Length[pages], " files..."];
-n = 0; failed = {};
-Do[
-    Module[{r = CloudExport[p[[2]], {"String", "text/html"},
-                CloudObject[$target <> "/" <> p[[1]]], Permissions -> "Public"]},
-        If[MatchQ[r, _CloudObject], n++, AppendTo[failed, p[[1]]]]],
-    {p, pages}
+result = CloudExport[indexHTML, {"String", "text/html"}, CloudObject[$target], Permissions -> "Public"];
+If[ MatchQ[result, _CloudObject],
+    Print["published: ", First[result]],
+    Print["build_docs_site: deploy failed: ", result]; Exit[1]
 ];
-Print["build_docs_site: deployed ", n, "/", Length[pages], " files",
-    If[failed === {}, "", " (FAILED: " <> StringRiffle[Take[failed, UpTo[8]], ", "] <> ")"]];
-Print["published: ", $base2, "/index.html"];
 Exit[0]
