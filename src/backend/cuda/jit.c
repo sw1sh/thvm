@@ -514,24 +514,29 @@ fn u64 cuda_jit_graph_captures(void) { return CUDA_JIT_GRAPH_CAPS; }
 
 fn int cuda_jit_graph_replay(u32 slot) {
   if (!cuda_jit_graph_enabled()) return -1;
+  // Bisect knob: force every replay to re-capture (never reuse a cached
+  // graph).  If cold==warm under NOHIT but diverges without it, the bug
+  // is a stale cached-graph HIT, not the capture-then-launch path.
+  static int nohit = -1;
+  if (nohit < 0) nohit = getenv("THVM_CUDA_JIT_GRAPH_NOHIT") != NULL;
+  if (nohit) return -1;
   if (!CUDA_READY) return -1;
   if (slot >= CUDA_JIT_GRAPH_CACHE_NSLOTS) return -1;
   if (!CUDA_JIT_GRAPH_CACHE[slot].valid) return -1;
   CUDA_JIT_GRAPH_HITS++;
-  // Drain any pending default-stream work before launching the captured
-  // graph on the capture stream.  TSet / cuMemcpyHtoD on default stream
-  // is host-synchronous (blocks until the copy is queued) but does NOT
-  // synchronize with other streams.  Without this drain, a fresh input
-  // upload could race the graph's read of that input.
-  cuStreamSynchronize(NULL);
+  // Launch on the DEFAULT stream (NULL), NOT the capture stream -- see the
+  // long note in cuda_jit_graph_capture_end_and_launch.  The graph's reads
+  // (fresh inputs) and writes (consumed by later per-op kernels and the
+  // sampler's z-update) must serialize with all the other default-stream
+  // work; a separate capture-stream launch leaves device-side consumers
+  // unordered and they read stale bytes (flux cuGraph cold!=warm).
   u64 t_pre = 0, t_launch = 0;
   int graph_trace = getenv("THVM_CUDA_JIT_GRAPH_TIME") != NULL;
   if (graph_trace) t_pre = cg_now_us();
-  CUresult r = cuGraphLaunch(CUDA_JIT_GRAPH_CACHE[slot].exec,
-                             CUDA_CAPTURE_STREAM);
+  CUresult r = cuGraphLaunch(CUDA_JIT_GRAPH_CACHE[slot].exec, NULL);
   if (graph_trace) {
     t_launch = cg_now_us() - t_pre;
-    cuStreamSynchronize(CUDA_CAPTURE_STREAM);
+    cuStreamSynchronize(NULL);
     u64 t_sync = cg_now_us() - t_pre - t_launch;
     fprintf(stderr, "[graph] launch=%llu us, sync=%llu us\n",
             (unsigned long long)t_launch, (unsigned long long)t_sync);
@@ -634,10 +639,21 @@ fn int cuda_jit_graph_capture_end_and_launch(u32 slot) {
             slot, n_nodes);
   }
   // Launch the cached graph now so the captured work actually runs.
-  // No host-side sync -- the next cuda_buf_read on the result tensor
-  // syncs the capture stream as needed (matches the per-launch async
-  // pipeline that cuGraphLaunch is meant to amortise).
-  r = cuGraphLaunch(exec, CUDA_CAPTURE_STREAM);
+  // Launch on the DEFAULT stream (NULL), NOT the capture stream: the
+  // captured graph is stream-agnostic once instantiated, and the rest of
+  // the pipeline -- input uploads (cuMemcpyHtoD), result readbacks, AND
+  // per-op kernels that aren't part of this graph (e.g. the sampler's
+  // z += dt*v update that consumes this graph's velocity output) -- all
+  // run on the default stream.  Launching the graph on a SEPARATE capture
+  // stream leaves those default-stream consumers unordered against the
+  // graph's writes (and the graph's reads unordered against fresh default
+  // -stream inputs); the device-side consumer then reads stale bytes.
+  // cuda_buf_read syncs CPU readbacks, but device->device consumers have
+  // no such sync -- which is why a warm replay diverged from the cold
+  // capture (flux cuGraph cold!=warm).  Default-stream launch serializes
+  // the graph with all of it while preserving the single-cuGraphLaunch
+  // overhead amortisation that is the actual win.  No host-side sync after.
+  r = cuGraphLaunch(exec, NULL);
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuGraphLaunch(first)", r);
     return -1;

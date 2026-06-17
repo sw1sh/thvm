@@ -564,7 +564,7 @@ build/thvm_runtime_blob_elf.c: build/thvm_inline.c tools/embed_blob.py
 build/thvm_runtime_blob_coff.c: build/thvm_inline.c tools/embed_blob.py
 	python3 tools/embed_blob.py build/thvm_inline.c thvm_runtime_src coff > $@
 
-.PHONY: wl-cross wl-mac wl-linux-x64 wl-linux-arm64 wl-win-x64
+.PHONY: wl-cross wl-mac wl-linux-x64 wl-linux-arm64 wl-win-x64 wl-linux-cuda
 
 wl-cross: wl-mac wl-linux-x64 wl-linux-arm64 wl-win-x64
 	@echo "[wl-cross] all five platform libraries are under $(WL_RES)/"
@@ -608,6 +608,27 @@ wl-win-x64: build/thvm_runtime_blob_coff.c $(WL_SRC) $(SRC)
 	$(ZIG) cc -target x86_64-windows-gnu $(WL_XCC_FLAGS) -shared \
 	  -o $(WL_RES)/Windows-x86-64/THVMLink.dll \
 	  $(WL_SRC) build/thvm_runtime_blob_coff.c
+
+# Native Linux + CUDA build of the WL paclet library -- run ON a CUDA box (a GPU
+# pod) where cuda.h + the Wolfram LibraryLink headers are present.  wl-linux-x64
+# (zig) is CPU-only; this compiles the CUDA driver backend in (THVM_HAS_CUDA,
+# links libcuda/libnvrtc) into THVMLink-cuda.so, shipped ALONGSIDE the CPU
+# THVMLink.so.  The WL loader (Kernel/THVMLink.wl) prefers -cuda.so when libcuda
+# loads (a GPU box) and falls back to the CPU .so otherwise, so ONE published
+# paclet serves both GPU pods and CPU-only Linux.  thvmlink.c #includes thvm.c
+# (which pulls in backend/cuda/ under THVM_HAS_CUDA) and thvmlink_atp.c, so the
+# whole library is one TU -- no separate backend object (unlike Metal's ObjC).
+#   Build:  make wl-linux-cuda WOLFRAM_APP=/usr/local/Wolfram/WolframEngine/15.0
+wl-linux-cuda: build/thvm_runtime_blob_elf.c $(WL_SRC)
+	@if [ -z "$(HAVE_CUDA)" ]; then echo "ERROR: CUDA toolkit not found under $(CUDA_HOME) (set CUDA_HOME)"; exit 1; fi
+	@if [ ! -d "$(WL_INCLUDE)" ]; then echo "ERROR: Wolfram LibraryLink headers not found at $(WL_INCLUDE) (set WOLFRAM_APP)"; exit 1; fi
+	@mkdir -p $(WL_RES)/Linux-x86-64
+	$(CC) -std=c11 -O2 -w -fPIC -shared -D_GNU_SOURCE $(CUDA_DEFINES) \
+	  $(ATP_DEFINES) $(WL_ATP_DEFINES) \
+	  -I"$(WL_INCLUDE)" \
+	  -o $(WL_RES)/Linux-x86-64/THVMLink-cuda.so \
+	  $(WL_SRC) build/thvm_runtime_blob_elf.c $(CUDA_LDFLAGS) -lm -ldl
+	@echo "[wl-linux-cuda] built $(WL_RES)/Linux-x86-64/THVMLink-cuda.so (CUDA-enabled)"
 
 
 $(BIN):

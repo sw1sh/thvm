@@ -422,8 +422,11 @@ static int udg_classify_matmul_store(Term store, u32 *out_k_extent,
   u64 sloc = term_val(canon);
   Term reduce = heap_read(sloc + 2);
   Term mul    = heap_read(term_val(reduce) + 0);
-  if (out_a_idx != NULL) *out_a_idx = heap_read(term_val(mul) + 0);
-  if (out_b_idx != NULL) *out_b_idx = heap_read(term_val(mul) + 1);
+  // Peel a CAST(INDEX_E) operand wrapper (bf16->f32 widen / int8->bf16
+  // dequant) so callers receive the bare INDEX_E -- matching the
+  // peel uop_classify_matmul does for the structural classification.
+  if (out_a_idx != NULL) *out_a_idx = rec_tc_peel_cast(heap_read(term_val(mul) + 0));
+  if (out_b_idx != NULL) *out_b_idx = rec_tc_peel_cast(heap_read(term_val(mul) + 1));
   return 1;
 }
 
@@ -750,10 +753,23 @@ int uop_dag_classify_matmul_shape(Term root,
   // share dtype; mirrors tile_gemm_uniform_dtype's per-op gate.  bf16 is
   // admitted for the Metal simdgroup tensor-core path (the threadgroup
   // staging load upconverts bfloat->float); CPU BLAS re-rejects it (blas.c).
+  //
+  // q8 weight-only quant is the ONE non-uniform case: B (the weight) may be
+  // INT8 while A and the output share the compute dtype (bf16/f32).
+  // rec_tc_peel_cast (in udg_classify_matmul_store) already stripped the
+  // int8->compute dequant CAST so buf_b is the raw int8 buffer.  Accepting
+  // it here keeps the kernel on the matmul fast path: hand_opts Section 1
+  // applies KOP_TC + KOP_GLOBAL on the WHOLE M/N/K axes (no generic
+  // UPCAST/LOCAL split), so recognise_tc later stamps OPT(TC) and
+  // rmu_emit_matmul_tc takes the tiled simdgroup path (its b_is_int8 branch
+  // stages char->bfloat in-kernel -- half the weight bandwidth at TC rate).
+  // out->dtype stays the COMPUTE dtype, so the CPU BLAS dispatch still
+  // re-rejects (blas.c gates FP32/FP64 only) -- no int8 GEMM hits Accelerate.
   u32 dt = uop_buffer_dtype(buf_out);
   if (dt != DT_FP32 && dt != DT_FP64 && dt != DT_BF16) return 0;
   if (uop_buffer_dtype(buf_a) != dt) return 0;
-  if (uop_buffer_dtype(buf_b) != dt) return 0;
+  u32 dt_b = uop_buffer_dtype(buf_b);
+  if (dt_b != dt && dt_b != DT_INT8) return 0;
 
   out->dtype   = dt;
   out->M       = M;

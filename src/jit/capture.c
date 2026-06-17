@@ -145,6 +145,26 @@ typedef struct {
   // memory-bounded.  THVM_JIT_GRAPH_FORCE_ICB=0 reverts to the old per-op
   // decline for a recycling stream (still correct, scheduler-free, slower).
   u32               metal_graph_recycle;
+  // CUDA cuGraph rebind guard: the cached CUgraphExec bakes input buffer
+  // DEVICE ADDRESSES at capture, and the cuGraph cache-HIT path (jit_replay)
+  // ignores the per-op input substitution.  So an input arriving at a FRESH
+  // device address would replay stale bytes -- the batched-Qwen/VAE collapse:
+  // warm items all reuse the last-baked prompt's encoding.  graph_input_addrs
+  // records the dptrs the cached graph was baked with; jit_replay_with_inputs
+  // invalidates the graph when this call's fresh dptrs differ (re-capture with
+  // the fresh buffers).  An input whose buffer is REUSED + content-updated
+  // in place (the velocity-net z within one sampler loop) keeps the same dptr
+  // -> no invalidate -> stays a fast cuGraph hit.
+  //
+  // The comparison is on dptr, NOT buf_id: across a session's call boundary a
+  // freed buf_id is recycled by the freelist, so a fresh input can reuse the
+  // baked buf_id while sitting at a different dptr (or realloc to a new dptr
+  // under the same id).  A buf_id match then wrongly skips invalidation and
+  // the warm replay reads the OLD baked address (velocity-net cold!=warm).
+  // graph_input_ids is kept only for the THVM_JIT_GRAPH_DIAG trace.
+  u32              *graph_input_ids;    // [graph_input_n]; buf_ids (diag only)
+  u64              *graph_input_addrs;  // [graph_input_n]; dptrs the cuGraph baked
+  u32               graph_input_n;
 } JitCapture;
 
 static JitCapture JIT_CAPTURES[JIT_CAPTURE_NSLOTS];
@@ -320,6 +340,11 @@ static void jit_capture_clear_input_sites(JitCapture *c) {
   c->sites = NULL;
   c->n_sites = 0;
   c->sites_built = 0;
+  free(c->graph_input_ids);
+  c->graph_input_ids = NULL;
+  free(c->graph_input_addrs);
+  c->graph_input_addrs = NULL;
+  c->graph_input_n = 0;
 }
 
 static void jit_capture_clear_ops(JitCapture *c) {
@@ -1897,6 +1922,51 @@ fn u32 jit_replay_with_inputs(u32 slot, u32 const *new_ids, u32 n) {
       }
     }
   }
+#ifdef THVM_HAS_CUDA
+  // Invalidate the cached cuGraph when this call's input DEVICE ADDRESSES
+  // differ from the ones it was baked with -- the cuGraph cache-hit ignores
+  // the per-op substitution above and would replay stale baked buffers
+  // (batched Qwen/VAE warm collapse; velocity-net cold!=warm).  Compare dptr,
+  // NOT buf_id: across a call boundary the freelist recycles a freed input's
+  // buf_id, so a fresh input can carry the baked id while sitting at a new
+  // dptr -- a buf_id match then wrongly keeps the stale graph.  An input whose
+  // buffer is reused + content-updated in place (velocity-net z within one
+  // sampler loop) keeps the same dptr -> no invalidate -> fast cuGraph hit.
+  if (new_ids != NULL && n > 0) {
+    int diag = getenv("THVM_JIT_GRAPH_DIAG") != NULL;
+    if (c->graph_input_addrs != NULL) {
+      int diff = (c->graph_input_n != n);
+      for (u32 i = 0; i < n; i++) {
+        u64 a = cuda_buf_addr(new_ids[i]);
+        if (i < c->graph_input_n) {
+          int moved = (a != c->graph_input_addrs[i]);
+          if (moved) diff = 1;
+          // Only trace the rare MOVED case -- a per-input "same" line on every
+          // jit_replay_with_inputs call floods stderr across a diffusion loop.
+          if (diag && moved)
+            fprintf(stderr, "[graph-diag] slot=%u in%u id=%u->%u addr=%#llx->%#llx MOVED\n",
+                    slot, i, c->graph_input_ids ? c->graph_input_ids[i] : 0, new_ids[i],
+                    (unsigned long long)c->graph_input_addrs[i], (unsigned long long)a);
+        }
+      }
+      if (diff) {
+        cuda_jit_graph_invalidate(slot);
+        if (diag) fprintf(stderr, "[graph-diag] slot=%u INVALIDATE (input dptr moved)\n", slot);
+      }
+    }
+    if (c->graph_input_n != n) {
+      free(c->graph_input_ids);
+      free(c->graph_input_addrs);
+      c->graph_input_ids   = (u32 *)malloc((size_t)n * sizeof(u32));
+      c->graph_input_addrs = (u64 *)malloc((size_t)n * sizeof(u64));
+      c->graph_input_n = (c->graph_input_ids != NULL && c->graph_input_addrs != NULL) ? n : 0;
+    }
+    if (c->graph_input_ids != NULL && c->graph_input_addrs != NULL) {
+      memcpy(c->graph_input_ids, new_ids, (size_t)n * sizeof(u32));
+      for (u32 i = 0; i < n; i++) c->graph_input_addrs[i] = cuda_buf_addr(new_ids[i]);
+    }
+  }
+#endif
   return jit_replay(slot);
 }
 

@@ -18,11 +18,17 @@
 If[ Environment["THVM_FWD_RECLAIM"] === $Failed, SetEnvironment["THVM_FWD_RECLAIM" -> "1"]];
 If[ Environment["THVM_MMAP_NO_WILLNEED"] === $Failed, SetEnvironment["THVM_MMAP_NO_WILLNEED" -> "1"]];
 If[ Environment["THVM_MAX_LIVE_BYTES"] === $Failed, SetEnvironment["THVM_MAX_LIVE_BYTES" -> "60000000000"]];
-(* CUDA: run the sampler per-op (no cuGraph) so cold==warm -- the velocity-net
-   cuGraph replay isn't bit-exact with its eager capture, so a cached-session
-   warm run would drift from the cold image.  Per-op is correct + fast enough
-   (the batch fix = realizing the Qwen JIT inputs contiguous lives in
-   FluxGenerate.wl).  Override with THVM_CUDA_JIT_GRAPH=1 to opt back in. *)
+(* CUDA: run the sampler per-op (no cuGraph) -- a PERF choice, not a
+   correctness one.  The velocity-net cuGraph replay is now bit-exact (cold ==
+   warm, maxAbsDiff 0; the cross-stream hazard where the captured graph ran on
+   a separate stream from its default-stream consumers was fixed by launching
+   the graph on the default stream, src/backend/cuda/jit.c).  But cuGraph buys
+   nothing here: the sampler allocates a fresh z/temb buffer each step, so the
+   inputs' device pointers move every call and the cached graph is invalidated
+   + re-captured every step instead of replayed -- no launch-overhead saving,
+   plus the capture cost (512px BS=2: warm 16.4s both ways, cold 29.9s off vs
+   34.0s on).  cuGraph would only pay off once the sampler reuses z/temb in
+   place (stable dptr -> graph HITs).  Override with THVM_CUDA_JIT_GRAPH=1. *)
 If[ Environment["THVM_CUDA_JIT_GRAPH"] === $Failed, SetEnvironment["THVM_CUDA_JIT_GRAPH" -> "0"]];
 
 Get["WolframInstitute`THVMLink`"];

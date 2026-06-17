@@ -23,10 +23,16 @@ If[ !TrueQ[$CloudConnected], Quiet@CloudConnect[]];
 If[ !TrueQ[$CloudConnected],
     Print["ERROR: not cloud-connected. Run CloudConnect[] first (the entitlement + LaunchWolframPod need it)."]; Exit[1]];
 
-pacletRepo = "/Users/swish/src/wolfram/PrimeIntellect";
-PacletDirectoryLoad[pacletRepo];
+(* The PrimeIntellect serviceconnection paclet is not on the public server.
+   Point PRIMEINTELLECT_PACLET_DIR at a local checkout, or have it installed so
+   ServiceConnect resolves without the load -- no absolute path baked in here. *)
+With[{dir = Environment["PRIMEINTELLECT_PACLET_DIR"]},
+    If[ StringQ[dir] && DirectoryQ[dir], PacletDirectoryLoad[dir]]];
 so = ServiceConnect["PrimeIntellect"];
-If[ !MatchQ[so, _ServiceObject], Print["ERROR: ServiceConnect[\"PrimeIntellect\"] failed: ", so]; Exit[1]];
+If[ !MatchQ[so, _ServiceObject],
+    Print["ERROR: ServiceConnect[\"PrimeIntellect\"] failed: ", so];
+    Print["  Set PRIMEINTELLECT_PACLET_DIR to a local PrimeIntellect paclet checkout."];
+    Exit[1]];
 
 env[k_, d_] := With[{v = Environment[k]}, If[ v === $Failed || v === None, d, v]];
 batch  = ToExpression @ env["BATCH", "2"];
@@ -52,33 +58,29 @@ pr["  provisioned ", pid, " in ", Round[tProv, 0.1], " s"];
 terminate[] := Quiet @ ServiceExecute[so, "TerminatePod", {"PodID" -> pid}];
 
 result = Catch[
-  ent = CreateLicenseEntitlement[<|"StandardKernelLimit" -> 4,
-     "LicenseExpiration" -> Quantity[12, "Hours"],
-     "EntitlementExpiration" -> Quantity[7, "Days"]|>][[1]];
-  conf = ServiceExecute[so, "PodKernelConfiguration", {"PodID" -> pid, "Entitlement" -> ent}];
+  (* PodKernelConfiguration auto-creates the on-demand license entitlement
+     (resolveEntitlement) from this cloud-connected controller -- no manual
+     CreateLicenseEntitlement needed. *)
+  conf = ServiceExecute[so, "PodKernelConfiguration", {"PodID" -> pid}];
   If[ !MatchQ[conf, _KernelConfiguration], Throw["PodKernelConfiguration -> " <> ToString[conf]]];
 
-  (* ---- one-time pod setup (weights + nvrtc libs + paclet), all RemoteEvaluate --- *)
-  pr["setup on pod: weights (", hfRepo, ") + nvrtc + paclet ..."];
+  (* ---- one-time pod setup (weights + paclet), all RemoteEvaluate --- *)
+  (* CUDA_PATH + the nvrtc loader path are baked into the wolfram-cuda image
+     (scripts/docker/Dockerfile), so no per-run nvrtc staging is needed. *)
+  pr["setup on pod: weights (", hfRepo, ") + paclet ..."];
   With[{repo = hfRepo, url = pacletUrl},
-    RemoteEvaluate[conf, Module[{gs, mk = "/root/.cache/thvm/flux2-klein-4b"},
-       gs = First @ FileNames["targets/x86_64-linux",
-              "/root/.Wolfram/Paclets/Repository/WolframGPUSDK-LINUX-*/CUDAResources/Linux-x86-64", Infinity];
+    RemoteEvaluate[conf, Module[{mk = "/root/.cache/thvm/flux2-klein-4b"},
        If[ !FileExistsQ[mk <> "/transformer/diffusion_pytorch_model.safetensors"],
            RunProcess[{"bash", "-c", "pip install -q -U 'huggingface_hub[hf_transfer]' >/dev/null 2>&1; "<>
              "HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download "<>repo<>" --local-dir "<>mk<>" 2>&1 | tail -2"}]];
-       (* nvrtc dlopens libnvrtc-builtins from the system path -> stage it into the ld cache *)
-       RunProcess[{"bash", "-c", "cp "<>gs<>"/lib/libnvrtc* /usr/local/lib/ 2>/dev/null; ldconfig"}];
        PacletInstall[url, ForceVersionInstall -> True];
        "setup-done"]]];
 
   (* ---- cold + warm in ONE eval so $fxSession persists; pixels come back via WSTP --- *)
   pr["generating: batch=", Length[prompts], "  ", side, "x", side, "  cold then warm ..."];
   res = With[{ps = prompts, sz = imgSize, sd = seed},
-    RemoteEvaluate[conf, Module[{gs, loc, gen},
-       gs = First @ FileNames["targets/x86_64-linux",
-              "/root/.Wolfram/Paclets/Repository/WolframGPUSDK-LINUX-*/CUDAResources/Linux-x86-64", Infinity];
-       SetEnvironment["CUDA_PATH" -> gs];
+    RemoteEvaluate[conf, Module[{loc, gen},
+       (* CUDA_PATH comes from the wolfram-cuda image ENV (nvrtc include path). *)
        SetEnvironment["THVM_FWD_RECLAIM" -> "1"];
        SetEnvironment["THVM_MMAP_NO_WILLNEED" -> "1"];
        SetEnvironment["THVM_MAX_LIVE_BYTES" -> "70000000000"];

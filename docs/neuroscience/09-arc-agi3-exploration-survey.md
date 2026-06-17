@@ -204,6 +204,32 @@ method to beat the human average on Montezuma's Revenge. It is simple
 to implement and has no forward-model instability -- the default
 novelty signal to reach for.
 
+*Follow-up (2026-06-15): "RND is just prediction-error novelty -- why not use
+JEPA's latent prediction error instead, since it already has an anti-collapse
+regulariser (VICReg / SIGReg)?"* Good instinct, with one important boundary.
+RND's target is a FROZEN RANDOM net (already spread out), so its failure mode is
+the PREDICTOR over-generalising on low-variety observations -- it learns to match
+the target even on unseen states, novelty -> 0 everywhere, signal dies (observed
+directly when a naive small-MLP RND was bolted onto DreamerV3 over downsampled
+Atari frames: novelty collapsed within ~30k steps on Montezuma's plain first
+room). JEPA's target is instead a LEARNED embedding, which can collapse to a
+near-constant -> the predictor matches it trivially -> novelty dies by a different
+route; this is exactly the collapse VICReg and SIGReg (LeJEPA's sketched
+isotropic-Gaussian regulariser, one statistical test replacing VICReg's three
+terms) prevent by forcing the embedding to stay high-variance / isotropic, keeping
+the prediction-error signal informative. So a latent-world-model prediction-error
+curiosity with a SIGReg-kept-rich embedding is the robust, non-collapsing form --
+and `brain/experiments/319`'s LatentWM (a JEPA with VICReg) plus Plan2Explore-style
+latent disagreement is most of that scaffolding already. TWO caveats keep it from
+being a silver bullet: (1) it fixes FRAGILITY, not ALIGNMENT -- a non-collapsing
+latent curiosity (Plan2Explore) still recovered ~0% of Pong's hidden reward
+(`brain/experiments/335`), because novelty, however robust, is not a skill-task's
+reward; (2) latent novelty has its own non-collapse failure -- in 319 the
+VICReg-regularised latent novelty FLATLINED (washed out once the world model
+trained), and 320 had to fix that STRUCTURALLY (Go-Explore frontier-return +
+count-based latent-cell novelty), not with a better regulariser. SIGReg is the
+right tool to keep the signal alive; it does not make novelty task-aligned.
+
 **Count-based and pseudo-count exploration.** The classical
 tabular-RL exploration bonus is `1/sqrt(N(s))` -- favour rarely
 visited states. **Pseudo-counts** (Bellemare et al., "Unifying
@@ -251,11 +277,84 @@ explicit archive with return-then-explore (Go-Explore). The
 through-line: an intrinsic drive plus *memory of where you have
 been*.
 
+**Learning progress, not raw surprise (the missing named lever).**
+Every novelty bonus above rewards *surprise* (prediction error, low
+count). The known failure of that family is the **noisy-TV problem**:
+an agent paid for surprise is captured by an unlearnable
+high-entropy source forever. The biological fix is to reward
+*reducible* uncertainty -- **learning progress** -- rather than
+surprise itself: engage what is at the edge of, but inside, current
+competence. This is the **Goldilocks effect** (Kidd, Piantadosi &
+Aslin 2012: infants disengage from both too-predictable and
+too-complex stimuli), formalised as intrinsic motivation by learning
+progress (Oudeyer & Kaplan) and compression progress (Schmidhuber),
+and it is Vygotsky's *zone of proximal development* in
+reinforcement-learning dress. RND's error-decays-on-revisit is a
+crude proxy for it; ICM's inverse-model feature space is another (it
+strips the agent-irrelevant noise that would otherwise be the noisy
+TV). The same anti-collapse logic drives the **automatic-curriculum**
+literature: a task *proposer* that maximises solver-difficulty
+collapses onto degenerate, artificially-hard tasks (asymmetric
+self-play's adversarial-proposer instability; the Conjecturer
+collapse that **Self-Guided Self-Play**, Bailey, Wen, Dong,
+Hashimoto & Ma, arXiv:2604.20209, fixes with a third "Guide" role
+scoring proposals for frontier-relevance and naturalness). The neuro
+analogy is direct: the Guide is functionally a learning-progress
+regulator, and its "relevance to unsolved targets" is the
+expected-value-of-the-backup that gates **hippocampal replay**
+(Mattar & Daw 2018) and the expected-value-of-control that
+prefrontal cortex computes when allocating effort (Shenhav, Botvinick
+& Cohen 2013). Where the analogy breaks: SGS's Guide judges
+*linguistic* naturalness with a language model, which has no neural
+correlate beyond "a prior over natural tasks", and the brain has no
+single explicit Guide -- the regulation is distributed across novelty
+habituation, learning-progress reward, and value-gated replay. The
+transferable, LLM-free lever for this arc: gate any intrinsic bonus
+(or any self-proposed goal/curriculum) by an estimate of *learnable*
+progress, not by surprise -- the regulator the brain-arc affordance
+explorers (`brain/experiments/326`-`328`) lacked when they collapsed
+onto a proxy signal, which Go-Explore's frontier-return only
+partially rescued.
+
+*Follow-up (2026-06-11): "is there a neuro analogy of Self-Guided
+Self-Play (arXiv:2604.20209)?" -- yes; this paragraph is the answer.
+The Guide that prevents proposer collapse is the engineering of
+learning-progress curiosity (reward learnable difficulty, not raw
+difficulty), with replay-prioritisation and expected-value-of-control
+as the closest neural mechanisms.*
+
 ## 4. Goal and objective inference: acting when nothing states the goal
 
 Exploration gets the agent to act; it does not tell it what *winning*
 is. ARC-AGI-3 gives no goal, so the agent must infer one. Three
 literatures bear on this.
+
+*Follow-up (2026-06-15): "what makes novelty task-aligned in the brain --
+is the solution better task inference?"* In the brain, novelty does not
+*become* aligned; it is SUBORDINATED to value and goals. Novelty is the
+fallback run when there is no goal/value signal yet; once there is one,
+goal-directed value reweights exploration. Three layers (Bennett's
+breakthrough order): (2) dopamine codes reward-prediction error for both
+extrinsic reward AND novelty (the novelty bonus of the SN/VTA-hippocampal
+loop, Lisman & Grace 2005), but the novelty bonus HABITUATES and incentive
+salience (Berridge) makes reward-predictive cues attractive -- so exploration
+is pulled toward reward-predictive structure (the Pong-curiosity 0% recovery,
+`brain/experiments/335`, is an agent stuck with novelty and no value system to
+correct it); (3) a goal is SET (homeostatic drive, or inferred) and exploration
+is CONDITIONED on it -- the same state is interesting or not depending on the
+active goal, the variable pure novelty lacks; and model-based simulation toward
+the goal (hippocampal vicarious trial-and-error; Redish; Pfeiffer & Foster) makes
+exploration goal-DIRECTED, with curiosity/learning-progress relegated to building
+the model on the learnable frontier so simulation-toward-goal is possible at all.
+So "better task inference" is NECESSARY (ARC-AGI-3 states no goal, unlike an
+animal with innate drives) but NOT SUFFICIENT: the inferred goal must then
+CONDITION exploration (goal-conditioned value/policy + simulation). Task
+inference without goal-conditioning is a label never used. Concrete arc lever:
+robust curiosity builds the latent WM; the instant a success appears (the rare
+331 level-up), infer a goal from it (hindsight relabelling, below) and condition
+exploration on it (320 frontier-return, but goal-DIRECTED not novelty-directed).
+The open part (as in RL): how the brain weights curiosity against value -- the
+explore-for-the-model vs exploit-toward-goal balance -- is unsettled.
 
 **Inverse reinforcement learning (IRL)** infers a reward function
 from observed expert behaviour: Ng and Russell ("Algorithms for
@@ -299,6 +398,76 @@ looked like progress", detected by novelty, by a frame-change cascade,
 or, once a win happens, by hindsight. This is the bridge from the
 goal-inference literature back into the thvm controller arc, and it is
 developed in the final section.
+
+**Compression / MDL as the goal prior (the structure intuition).**
+*Follow-up (2026-06-15): "infer sub-tasks not from novelty but from achieving
+COMPRESSIBLE state representations -- fill a pattern, make things match, achieve
+symmetry -- which correlates with the goal for most games."* This is sharper than
+novelty for pattern/puzzle games (which ARC-AGI-1/2 are, and many ARC-AGI-3): the
+goal state is the LOW-DESCRIPTION-LENGTH state (symmetric/tiled/sorted/matched), so
+"make the state more compressible" CORRELATES with progress where novelty is
+orthogonal to it. This is Gestalt **Pragnanz** (perception organises toward the
+simplest interpretation) and **predictive coding** (cortex minimises
+prediction error = compresses its input); note the distinction from Schmidhuber's
+compression-PROGRESS (the MODEL getting better at compressing = the learning-
+progress thread) -- here it is the STATE itself becoming compressible, the more
+task-aligned of the two. Techniques, cheapest first: direct compression length
+(gzip/PNG/RLE of the grid, run-length of the object array); a battery of structure
+metrics as intrinsic rewards (reflective/rotational/translational symmetry,
+periodicity/autocorrelation, object alignment, count regularity -- the ARC priors
+made measurable); generative-prior likelihood (a small AR/VAE trained on observed
+states, reward typical/structured configs); and active inference / expected free
+energy (Friston) -- act to make observations match a prior preference for
+low-complexity states. THE CRUCIAL GOTCHA: naive compression collapses to the
+degenerate optimum -- a blank/uniform grid is maximally compressible, so
+minimise-description-length alone teaches the agent to ERASE structure (the same
+collapse family as novelty/RND). The fix is the rate-distortion / information-
+bottleneck framing: maximise compressibility SUBJECT TO preserving the conserved
+content (the objects/quantities the game keeps), i.e. reward compressible
+ARRANGEMENTS of conserved pieces, not erasure. From scalar to SUB-TASKS: decompose
+the structure signal into axes (symmetry-type, object-relation, region); use
+empowerment-over-structure to find which axes are CONTROLLABLE (`brain/experiments/330`
+object-factoring gives the handles); and HINDSIGHT-ground them -- when the rare win
+fires, the structure axis that jumped most is the inferred sub-goal, pursued by a
+goal-conditioned controller (320 frontier-return aimed at the structure target).
+Honest caveats: it is a PRIOR not a law (navigation/collection/avoidance games have
+no more-compressible goal state), so it must be a LEARNED-and-VALIDATED prior (does
+rising structure actually track the sparse reward in THIS game?), not hard-coded
+(else it overfits puzzle games and breaks the rest -- the simulator-exploitation
+trap this arc forbids); and "compressible" (order) vs "controllable"
+(options/empowerment) pull opposite ways, so which intrinsic
+objective a game wants is itself something to infer per-game. This is the MDL/
+rate-distortion objective the arc has favoured, turned into a goal signal -- the
+most promising task-grounded self-guidance lever surfaced so far.
+
+*Follow-up (2026-06-15): "do this in LATENT space with SIGReg-family techniques."*
+The cleaner form: measure/drive low complexity in the JEPA LATENT, where SIGReg has
+shaped the embedding into a clean isotropic Gaussian -- which dissolves the
+blank-grid collapse. Formalisation: the rate-distortion / beta-VAE
+`KL(q(z|x) || prior)` term IS the latent description length (the "rate" = bits to
+encode the state); minimise rate while the encoder preserves content
+(reconstruction / JEPA prediction) = a low-complexity latent that keeps the objects.
+And under a SIGReg-enforced isotropic Gaussian, surprise = -log p(z) ~ ||z||^2, so
+the state's complexity ~ its LATENT NORM and the intrinsic signal is just "reduce
+||E(s)||^2" = move toward the latent mode = active inference (reach the prior's
+high-density region); SIGReg is what makes ||z||^2 a calibrated complexity rather
+than junk. Why no blank-collapse: the encoder PRESERVES content (a blank board and a
+structured board have different latents) and SIGReg keeps the latent full-rank, so
+there is no information-destroying attractor -- "low complexity in latent" = conserved
+content arranged typically, the rate-distortion constraint enforced by the
+representation instead of a hand-built rule. THE SUBTLETY: SIGReg gives TYPICALITY,
+not task-structure -- the mode is the centroid of VISITED states, so low ||z|| = a
+common state, which equals a structured/goal state only if structured configs embed
+near the mode. Make that true either by baking structure into the encoder
+(object-factored / symmetry-aware, exp 330) or by NOT assuming it and HINDSIGHT-
+grounding (let the rare win certify that "latent got simpler" tracks "closer to goal"
+this game). Coupling to watch: a policy seeking low-complexity states concentrates the
+data near the mode, which SIGReg re-spreads -- train the encoder on a diverse,
+exploration-inclusive buffer or the metric drifts. Full coherent stack: JEPA latent
+(space) + SIGReg/VICReg (clean, non-collapsing) + rate-distortion/beta-VAE (complexity
+= rate) + active-inference move-to-the-mode (signal) + 330 object-factoring
+(typicality = structure) + 320 goal-conditioning + hindsight (validate mode ~ goal).
+Pure-RL, CPU-runnable.
 
 ## 5. Controllability and empowerment: an intrinsic objective with no reward
 
@@ -387,6 +556,27 @@ emerges. The auto-curriculum literature page 5 already inventories
 (POET, PLR, ACCEL) is therefore not a separate concern from
 ARC-AGI-3 -- it is the *supply side* of the transfer the benchmark
 grades.
+
+**Why Montezuma-solvers are not enough (a follow-up worth stating plainly).**
+*Follow-up (2026-06-14): "why aren't the methods that solve Montezuma's Revenge enough for ARC-AGI-3?"*
+Montezuma-class methods (RND, Go-Explore, NGU/Agent57) are exploration engines for ONE fixed world
+with an effectively UNLIMITED budget; ARC-AGI-3 is many NOVEL worlds with a TINY per-game budget where
+the mechanics and the goal must be INFERRED. Four mismatches: (1) **memorization vs few-shot** --
+Go-Explore save-states the emulator and deterministically returns to archived positions, brute-forcing
+a resettable map over billions of frames; ARC-AGI-3 gives a few thousand steps then a different game,
+so there is nothing durable to memorize. (2) **known vs inferred task** -- in Montezuma the physics and
+the goal (score) are fixed and given, so the ONLY hard part is reaching a far-away but well-defined
+reward; ARC-AGI-3 makes the controls, objects, and win-condition unknown -- a rule-induction problem
+exploration methods do not address. (3) **novelty != task** -- Montezuma is the game where exploration
+shines BECAUSE exploration is the task (new room = progress = reward); the Atari reward-hiding probe
+(`brain/experiments/335`) measured curiosity recovering ~0% of Pong's reward, because Pong's reward is
+a low-novelty skill, and most ARC-AGI-3 games are skill/structure-shaped, not coverage-shaped. (4)
+**generalization is the target** -- ARC grades skill-ACQUISITION efficiency on held-out games; a
+Montezuma-solver is a Montezuma expert and Agent57 is 57 separate experts, the opposite of what the
+benchmark rewards. The brain-arc evidence matches: the one Montezuma idea that transferred --
+Go-Explore's return-then-explore (experiment 320) -- was also the only mechanism that unlocked a
+residual seed, yet it hit a hard ceiling (experiment 331's ~8%/path lottery, the credit-assignment
+wall) precisely because the other three gaps are not exploration problems.
 
 ## What the thvm arc should harvest
 
