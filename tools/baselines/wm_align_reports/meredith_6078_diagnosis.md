@@ -68,10 +68,23 @@ The `WM-only x116` multiset delta is mostly a *downstream* effect: WM's run is
 over its longer trajectory.  The *causal* gap is the single missing fresh
 formation at the 6078 epoch.
 
+## Confirmed by direct thvm heap dump (THVM_ATP_HEAPDUMP_AT=6078)
+
+thvm's CP queue at pick 6078: 18250 CPs, 46 in the chosen pri=120 band.
+The chosen 3-var CP is the lowest-seq (23220) in the band.  The 2-var CP
+`(C3 (C3 V0 V0) V1)#(C3 V1 (C3 V1 V0))` is **absent from the band (count 0)** --
+direct confirmation that thvm's heap genuinely lacks it, not a representation
+artifact.  thvm's last formation of it was cp_seq 15233; the next is 44563, and
+pick 6078 sits in that hole.
+
 ## Open question (next step)
 
 Identify the rule newly added around WM age ~23993 whose overlap produces
 `dot(dot(a,a),b) # dot(b,dot(b,a))`, and check whether thvm (1) adds the
 analogous rule at the analogous point and (2) enumerates that specific
-rule x rule overlap.  This is either a rule-add-timing divergence or a
-missing overlap position in the FT unifier -- the last two live candidates.
+rule x rule overlap.  Most likely a producing-rule LIFECYCLE divergence: the
+rule whose overlap yields this CP is interreduced/deleted earlier in thvm than
+in WM (same removal family as SKIToBCKW @1868), so thvm stops forming the CP
+while WM keeps replenishing it.  Trace: `THVM_ATP_CPGEN_DEBUG=1` -> grep the
+`[cpgen] from rules X x Y` lines whose normalized cp is the 2-var CP, watch the
+producing (X,Y) pairs stop appearing around cp_seq 15233.

@@ -8002,6 +8002,31 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // one line per selected CP: pick number, queue index, sequence id,
   // priority, current rule count, then S-expr LHS/RHS.  Diff against
   // `wmcli -:l0 -P verbose` finds the algorithmic divergence point.
+  // Env-gated CP-queue snapshot at a target pick (THVM_ATP_HEAPDUMP_AT):
+  // dump every queued CP in the chosen CP's priority band with its seq +
+  // terms, the thvm counterpart of Waldmeister WM_HEAPDUMP_AT.  Fires only
+  // for the matching non-orphan pick; off (one cached probe) otherwise.
+  if (!orphan) {
+    static int hd_at = -2;
+    if (hd_at == -2) { const char *e = getenv("THVM_ATP_HEAPDUMP_AT"); hd_at = e ? atoi(e) : -1; }
+    if (hd_at >= 0 && (u32)hd_at == s->cp_select_count) {
+      u32 band = s->cp_pri[j], n_band = 0;
+      fprintf(stderr, "==THVMHEAP pick=%u band_pri=%u n_cps=%u==\n", s->cp_select_count, band, s->n_cps);
+      for (u32 q = 0; q < s->n_cps; q++) {
+        if (s->cp_pri[q] != band) continue;
+        Term ql = 0, qr = 0;
+        atp_cp_slot_read(s, q, &ql, &qr);
+        fprintf(stderr, "  HCP seq=%u pri=%u lhs=", s->cp_seq[q], s->cp_pri[q]);
+        atp_dbg_print_term(stderr, ql);
+        fprintf(stderr, " rhs=");
+        atp_dbg_print_term(stderr, qr);
+        fputc('\n', stderr);
+        n_band++;
+      }
+      fprintf(stderr, "==THVMHEAPEND pick=%u n_band=%u==\n", s->cp_select_count, n_band);
+    }
+  }
+
   {
     static int cp_pick_trace = -1;
     if (cp_pick_trace < 0) cp_pick_trace = atp_env_on("THVM_ATP_CP_PICK_TRACE");
