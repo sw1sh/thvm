@@ -442,11 +442,31 @@ module_load:
 // grid = tiles*32, see render caveat 3).
 fn int cuda_jit_launch(CUfunction func,
                        u32 grid_x, u32 block_x,
+                       u32 shared_bytes,
                        void **args) {
+  // shared_bytes > 0 means the kernel uses DYNAMIC shared memory exceeding the
+  // 48 KiB static cap (the tiled-WMMA bf16-output big tile -- see
+  // rmu_emit_matmul_tc_tiled_cuda's `extern __shared__` path).  CUDA requires
+  // an explicit per-function opt-in for >48 KiB; set it before launch (cheap +
+  // idempotent on the cached CUfunction, and capture-safe since it is a
+  // host-side function config, not a stream op).  A static-shared kernel
+  // passes 0 here -> no attribute change, sharedMemBytes=0 (decls are baked in).
+  if (shared_bytes > 0) {
+    CUresult ra = cuFuncSetAttribute(
+      func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, (int)shared_bytes);
+    if (ra != CUDA_SUCCESS) {
+      cuda_set_error("cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES)", ra);
+      if (getenv("THVM_CUDA_LAUNCH_TRACE")) {
+        fprintf(stderr, "thvm: cuFuncSetAttribute(maxDynShared=%u) FAIL err=%d\n",
+                shared_bytes, (int)ra);
+      }
+      return -1;
+    }
+  }
   CUresult r = cuLaunchKernel(func,
                               grid_x, 1, 1,      // grid dim
                               block_x, 1, 1,     // block dim
-                              0,                 // shared mem bytes
+                              shared_bytes,      // dynamic shared mem bytes
                               CUDA_CUR_STREAM,   // 0/NULL = default sync
                               args, NULL);
   if (r != CUDA_SUCCESS) {
@@ -827,7 +847,7 @@ fn int cuda_dag_has_opt_axes(struct KernelEntry const *ke) {
 // Returns 1 with (grid_x, block_x) when the tiled kernel will fire; 0
 // otherwise (caller falls through to cuda_dag_dispatch_shape / flat).
 fn int cuda_tc_tile_dispatch_shape(struct KernelEntry *ke, u32 *grid_x,
-                                   u32 *block_x) {
+                                   u32 *block_x, u32 *shared_bytes) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
   // Re-apply the (idempotent) parallel TC recogniser to the STORED
   // (unwrapped) root -- exactly what cg_render_uop_kernel_cuda_root does
@@ -866,6 +886,12 @@ fn int cuda_tc_tile_dispatch_shape(struct KernelEntry *ke, u32 *grid_x,
   // scratch (store_matrix_sync can't widen f32->bf16), an f32 C stores direct.
   u32 dt_c = uop_buffer_dtype(heap_read(term_val(sroot) + 0));
   int c_is_bf = (dt_c == DT_BF16 || dt_c == DT_FP16);
+  // The picker's bf16 dynamic-shared cap depends on RMU_CUDA_SM (>=80 ->
+  // 160 KiB).  The renderer sets it from cuda_device_sm() on every render, and
+  // render always precedes dispatch, so it already holds the device SM here --
+  // set it explicitly anyway so this re-pick can NEVER disagree with the
+  // renderer's tile (a divergent tile would mis-size the launch grid/block).
+  RMU_CUDA_SM = cuda_device_sm();
   if (!rmu_tc_pick_tile_cuda(gemm.M, gemm.N, gemm.K, c_is_bf, &tile)) return 0;
   u32 tile_m = tile.local_m * tile.rm * 16u;
   u32 tile_n = tile.local_n * tile.rn * 16u;
@@ -875,6 +901,16 @@ fn int cuda_tc_tile_dispatch_shape(struct KernelEntry *ke, u32 *grid_x,
     return 0;
   if (grid_x  != NULL) *grid_x  = (u32)ntg;
   if (block_x != NULL) *block_x = nthreads;
+  // Dynamic-shared opt-in: the emitter switches to `extern __shared__` exactly
+  // when this kernel's total shared footprint exceeds the 48 KiB static cap.
+  // Report it ONLY in that case (0 otherwise) so cuda_jit_launch sets the
+  // function attribute + passes sharedMemBytes only for the dynamic path; a
+  // static-shared tile keeps the baked-in decls and launches with 0.  The
+  // byte count mirrors the emitter's decls (b_trans-independent upper bound).
+  if (shared_bytes != NULL) {
+    u32 sh = rmu_tc_tiled_cuda_shared_bytes(tile, c_is_bf);
+    *shared_bytes = (sh > 48u * 1024u) ? sh : 0u;
+  }
   return 1;
 }
 
@@ -923,6 +959,7 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     CUfunction func;
     u32      grid_x;
     u32      block_x;
+    u32      shared_bytes;   // dynamic shared (>48 KiB tiled-WMMA tile); 0 = static
     u32      n_kvar;
     u32      kvar_ids[KVAR_USED_CAP];
   } CUDA_KE_CACHE[1 << 14];   // KERNELS_CAP order of magnitude
@@ -1001,7 +1038,8 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     if (gpu_time_on) cuEventRecord(gpu_ev_a, NULL);
     int rc = cuda_jit_launch(CUDA_KE_CACHE[cache_idx].func,
                              CUDA_KE_CACHE[cache_idx].grid_x,
-                             CUDA_KE_CACHE[cache_idx].block_x, args);
+                             CUDA_KE_CACHE[cache_idx].block_x,
+                             CUDA_KE_CACHE[cache_idx].shared_bytes, args);
     if (rc != 0 && getenv("THVM_CUDA_LAUNCH_TRACE")) {
       fprintf(stderr, "thvm: dispatch FAIL kid=%u (cache hit)\n", (u32)(ke - KERNELS));
     }
@@ -1119,8 +1157,8 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   // renderer decodes -- derive (grid, block) from the DAG's axis
   // types instead (cuda_dag_dispatch_shape).  Otherwise fall back to
   // the flat one-thread-per-output shape.
-  u32 grid_x = 0, block_x = 0;
-  if (cuda_tc_tile_dispatch_shape(ke, &grid_x, &block_x)) {
+  u32 grid_x = 0, block_x = 0, shared_bytes = 0;
+  if (cuda_tc_tile_dispatch_shape(ke, &grid_x, &block_x, &shared_bytes)) {
     // Tiled WMMA matmul: one block per output tile (see the function).
   } else if (!(cuda_dag_has_opt_axes(ke)
         && cuda_dag_dispatch_shape(ke, &grid_x, &block_x))) {
@@ -1140,7 +1178,7 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     grid_x = (u32)((total + block_x - 1) / block_x);
   }
 
-  int rc = cuda_jit_launch(func, grid_x, block_x, args);
+  int rc = cuda_jit_launch(func, grid_x, block_x, shared_bytes, args);
   if (rc != 0 && getenv("THVM_CUDA_LAUNCH_TRACE")) {
     fprintf(stderr, "thvm: dispatch FAIL kid=%u (cache miss)\n", (u32)(ke - KERNELS));
   }
@@ -1149,11 +1187,12 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   // slot just gets overwritten -- correctness is preserved (we always
   // re-check store_root == key before reuse); only the cache hit rate
   // suffers under collisions.
-  CUDA_KE_CACHE[cache_idx].store_root = store_root;
-  CUDA_KE_CACHE[cache_idx].func       = func;
-  CUDA_KE_CACHE[cache_idx].grid_x     = grid_x;
-  CUDA_KE_CACHE[cache_idx].block_x    = block_x;
-  CUDA_KE_CACHE[cache_idx].n_kvar     = n_kvar;
+  CUDA_KE_CACHE[cache_idx].store_root   = store_root;
+  CUDA_KE_CACHE[cache_idx].func         = func;
+  CUDA_KE_CACHE[cache_idx].grid_x       = grid_x;
+  CUDA_KE_CACHE[cache_idx].block_x      = block_x;
+  CUDA_KE_CACHE[cache_idx].shared_bytes = shared_bytes;
+  CUDA_KE_CACHE[cache_idx].n_kvar       = n_kvar;
   for (u32 i = 0; i < n_kvar && i < KVAR_USED_CAP; i++) {
     CUDA_KE_CACHE[cache_idx].kvar_ids[i] = kvar_ids[i];
   }

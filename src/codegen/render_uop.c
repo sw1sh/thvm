@@ -2304,10 +2304,23 @@ static int rmu_tc_pick_tile_cuda(u32 m_extent, u32 n_extent, u32 k_extent,
   // THVM_TC_TILE=0 forces the naive one-warp-per-16x16 WMMA path (A/B).
   { char const *e = getenv("THVM_TC_TILE"); if (e && e[0] == '0') return 0; }
   u32 m16 = m_extent / 16, n16 = n_extent / 16;
-  // {local_m, local_n, rm, rn}: warps along M/N and the 16x16 register
-  // tile per warp.  TILE_M = local_m*rm*16, TILE_N = local_n*rn*16.
-  struct { u32 lm, ln, rm, rn; } cands[] = {
-    {4, 8, 2, 2},   // 128x256, 32 warps  -- A100 sweep winner
+  // {local_m, local_n, rm, rn}: warps along M/N and the 16x16 register tile per
+  // warp.  TILE_M = local_m*rm*16, TILE_N = local_n*rn*16; warps = local_m*local_n.
+  // The f32 and bf16/fp16 OUTPUT paths want DIFFERENT tiles (2026-06-17 A100
+  // sweep):
+  //  - f32 out stores the accumulator fragment DIRECTLY (no convert scratch), so
+  //    a big 32-warp 128x256 tile maximises reuse and hits ~110 TFLOPS / 35% peak.
+  //  - bf16/fp16 out needs a per-warp 256-float convert scratch (store_matrix_sync
+  //    can't widen f32->bf16): a 32-warp tile's 32 KiB scratch craters occupancy
+  //    (128x256/32w only reached ~49 TFLOPS).  The bf16 sweet spot is the
+  //    OPPOSITE -- few warps, fat register block: a 4-warp 128x128 tile with a
+  //    4x4 (16-fragment) per-warp accumulator (tiny 4 KiB scratch, high
+  //    arithmetic intensity, many resident blocks) hit ~81 TFLOPS, +30% over the
+  //    old 16-warp 128x128 and beating every >48 KiB tile.  KB=32 was optimal
+  //    (KB=16 halved throughput; KB=64 was slightly worse).
+  static const struct rmu_tc_cand { u32 lm, ln, rm, rn; }
+  cands_f32[] = {
+    {4, 8, 2, 2},   // 128x256, 32 warps  -- f32 sweep winner
     {8, 4, 2, 2},   // 256x128, 32 warps  (M-major fallback)
     {4, 4, 2, 2},   // 128x128, 16 warps
     {2, 4, 4, 2},   // 128x128, 8 warps, 8 acc/warp
@@ -2321,7 +2334,25 @@ static int rmu_tc_pick_tile_cuda(u32 m_extent, u32 n_extent, u32 k_extent,
     {2, 2, 1, 1},   // 32x32,   4 warps
     {1, 1, 2, 2},   // 32x32,   1 warp
     {1, 1, 1, 1},   // 16x16,   1 warp (last resort)
+  },
+  cands_bf16[] = {
+    {2, 2, 4, 4},   // 128x128, 4 warps, 16 acc/warp -- bf16 sweep winner ~81 TFLOPS
+    {2, 2, 4, 2},   // 128x64,  4 warps, 8 acc/warp
+    {2, 2, 2, 4},   // 64x128,  4 warps, 8 acc/warp
+    {2, 1, 4, 4},   // 128x64,  2 warps, 16 acc/warp
+    {1, 2, 4, 4},   // 64x128,  2 warps, 16 acc/warp
+    {2, 2, 2, 2},   // 64x64,   4 warps
+    {1, 1, 4, 4},   // 64x64,   1 warp,  16 acc/warp
+    {2, 2, 2, 1},   // 64x32,   4 warps
+    {2, 1, 2, 2},   // 64x32,   2 warps
+    {1, 2, 2, 2},   // 32x64,   2 warps
+    {2, 2, 1, 1},   // 32x32,   4 warps
+    {1, 1, 2, 2},   // 32x32,   1 warp
+    {1, 1, 1, 1},   // 16x16,   1 warp (last resort)
   };
+  const struct rmu_tc_cand *cands = c_is_bf ? cands_bf16 : cands_f32;
+  u32 ncands = c_is_bf ? (u32)(sizeof(cands_bf16) / sizeof(cands_bf16[0]))
+                       : (u32)(sizeof(cands_f32) / sizeof(cands_f32[0]));
   // Per-candidate KB + static shared-memory budget.  The emitter stages
   // A {tile_m x KB} + B {KB x tile_n}, each padded by 8 along the leading
   // dim, in 2-byte (bf16/fp16) elements; worst case (transposed B, staged
@@ -2333,13 +2364,29 @@ static int rmu_tc_pick_tile_cuda(u32 m_extent, u32 n_extent, u32 k_extent,
   // bf16 scratch is 32 KiB).  Pick the largest dividing tile whose budget
   // FITS at KB=32 (or KB=16) AND clears the occupancy floor; fall back to
   // the most-blocks fitting tile when none clears the floor.
-  u32 min_tg = 216;
+  // Block-count floor (tg >= min_tg) so the chosen tile launches enough blocks
+  // to fill the GPU.  f32's big 128x256 tile wants ~2 blocks/SM (216 on a
+  // 108-SM A100); the bf16 winner is a small 128x128/4-warp tile whose high
+  // register-blocked arithmetic intensity stays efficient at very low block
+  // counts (it ties or beats every alternative down to ~48 blocks -- the
+  // 2026-06-17 small-M sweep), so bf16 uses a much lower floor to keep that
+  // tile selected for the small attention-projection shapes too.
+  u32 min_tg = c_is_bf ? 48u : 216u;
   { char const *e = getenv("THVM_TC_MIN_TG"); if (e && e[0]) min_tg = (u32)atoi(e); }
+  // Static __shared__ per-block cap (48 KiB on sm_70..sm_86).  A tile whose
+  // footprint exceeds it is skipped.  THVM_TC_SMEM_CAP opts into DYNAMIC shared
+  // (the emitter emits one `extern __shared__` block + pointer aliases and the
+  // launch sets CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES + passes
+  // sharedMemBytes) for tiles above 48 KiB -- but the 2026-06-17 sweep showed
+  // every >48 KiB tile is SLOWER here (a 32-warp tile's 32 KiB f32 convert
+  // scratch craters occupancy), so the default cap stays 48 KiB and all
+  // default-selected tiles fit statically.  The dynamic path is kept as a
+  // verified, opt-in capability for future arch/shape exploration.
   u32 cap = 48u * 1024u;
   { char const *e = getenv("THVM_TC_SMEM_CAP"); if (e && e[0]) cap = (u32)atoi(e); }
   u32 best_lm = 0, best_ln = 0, best_rm = 0, best_rn = 0, best_kb = 0;
   u32 fb_lm = 0, fb_ln = 0, fb_rm = 0, fb_rn = 0, fb_kb = 0, fb_tg = 0;
-  for (u32 i = 0; i < sizeof(cands)/sizeof(cands[0]); i++) {
+  for (u32 i = 0; i < ncands; i++) {
     u32 tm16 = cands[i].lm * cands[i].rm;
     u32 tn16 = cands[i].ln * cands[i].rn;
     if (m16 % tm16 != 0 || n16 % tn16 != 0) continue;
@@ -2402,6 +2449,36 @@ static int rmu_tc_pick_tile_cuda(u32 m_extent, u32 n_extent, u32 k_extent,
             out->local_m, out->local_n, out->rm, out->rn, out->kb,
             (m16/(out->local_m*out->rm))*(n16/(out->local_n*out->rn)));
   return 1;
+}
+
+// Upper bound on the shared-memory bytes a tiled-WMMA CUDA matmul kernel uses:
+// A staging (nbuf * tile_m * (KB+PAD)) + B staging + the bf16/fp16 convert
+// scratch (nwarps*256 floats, only when C is bf16/fp16), all in the kernel's
+// element types (WMMA inputs are 2-byte half/__nv_bfloat16; the scratch is
+// float).  The B-staging footprint differs by layout (transposed B stages
+// tile_n rows of KB+PAD; row-major B stages KB rows of tile_n+PAD), so take the
+// MAX over both -- this stays b_trans-INDEPENDENT, so the launch
+// (cuda_tc_tile_dispatch_shape -> cuda_jit_launch) and the emitter agree on the
+// use_dyn decision and the launch always requests >= what the kernel declares,
+// even if their independently-derived transpose flags ever diverged.  For
+// FLUX's transposed-B matmuls (tile_n > KB) the max IS the transposed case, so
+// it equals the emitter's real footprint exactly.  A return > 48 KiB means the
+// emitter switched to `extern __shared__` and the launch must opt into dynamic.
+static u32 rmu_tc_tiled_cuda_shared_bytes(RmuTcTile t, int c_is_bf) {
+  u32 PAD = 8u;
+  u32 tile_m = t.local_m * t.rm * 16u;
+  u32 tile_n = t.local_n * t.rn * 16u;
+  u32 nwarps = t.local_m * t.local_n;
+  int dbuf = 0;
+  { char const *e = getenv("THVM_TC_DB"); if (e && e[0] == '1') dbuf = 1; }
+  u32 nbuf = dbuf ? 2u : 1u;
+  u32 a_bytes = nbuf * tile_m * (t.kb + PAD) * 2u;
+  u32 b_bytes_t = nbuf * tile_n * (t.kb + PAD) * 2u;   // transposed B (col-major staged)
+  u32 b_bytes_n = nbuf * t.kb * (tile_n + PAD) * 2u;   // row-major B
+  u32 b_bytes = b_bytes_t > b_bytes_n ? b_bytes_t : b_bytes_n;
+  u32 ab_bytes = (a_bytes + b_bytes + 15u) & ~15u;     // 16-align the float scratch
+  u32 c_bytes = c_is_bf ? nwarps * 256u * 4u : 0u;
+  return ab_bytes + c_bytes;
 }
 
 // Emit the shared-memory-staged, register-blocked tiled WMMA matmul body
@@ -2476,8 +2553,29 @@ static void rmu_emit_matmul_tc_tiled_cuda(const char *a_name, const char *b_name
   u32 nbuf = dbuf ? 2u : 1u;
   u32 a_half = tile_m * a_ld;            // elements per A buffer half
   u32 b_half = b_rows * b_ld;            // elements per B buffer half
-  IND(depth); fprintf(fp, "__shared__ %s _Asm[%u];\n", a_elem, nbuf * a_half);
-  IND(depth); fprintf(fp, "__shared__ %s _Bsm[%u];\n", b_elem, nbuf * b_half);
+  // Total shared footprint (A+B staging + the bf16/fp16 convert scratch).
+  // > 48 KiB exceeds nvcc's STATIC __shared__ per-block cap, so emit ONE
+  // `extern __shared__` block and ALIAS _Asm / _Bsm / _cscratch as pointers
+  // into it (CUDA allows a single dynamic shared array per kernel); the launch
+  // sets CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES + passes
+  // sharedMemBytes (rmu_tc_tiled_cuda_shared_bytes / cuda_jit_launch).  Pointer
+  // indexing _Asm[i] is identical to array indexing, so the body is unchanged.
+  u32 a_bytes = nbuf * a_half * 2u;      // 2-byte WMMA-input elements
+  u32 b_bytes = nbuf * b_half * 2u;
+  u32 ab_bytes = (a_bytes + b_bytes + 15u) & ~15u;   // 16-align the float scratch
+  u32 total_shared = rmu_tc_tiled_cuda_shared_bytes(t, !c_direct);
+  int use_dyn = (total_shared > 48u * 1024u);
+  if (use_dyn) {
+    IND(depth); fprintf(fp,
+      "/* dynamic shared: %u B > 48 KiB static cap -> extern block + aliases */\n",
+      total_shared);
+    IND(depth); fputs("extern __shared__ __align__(16) unsigned char _dynsm[];\n", fp);
+    IND(depth); fprintf(fp, "%s* _Asm = (%s*)_dynsm;\n", a_elem, a_elem);
+    IND(depth); fprintf(fp, "%s* _Bsm = (%s*)(_dynsm + %uu);\n", b_elem, b_elem, a_bytes);
+  } else {
+    IND(depth); fprintf(fp, "__shared__ %s _Asm[%u];\n", a_elem, nbuf * a_half);
+    IND(depth); fprintf(fp, "__shared__ %s _Bsm[%u];\n", b_elem, nbuf * b_half);
+  }
   // This block's output-tile origin.
   IND(depth); fprintf(fp, "uint _tm = (tg / %uu) * %uu;\n", n_tiles_n, tile_m);
   IND(depth); fprintf(fp, "uint _tn = (tg %% %uu) * %uu;\n", n_tiles_n, tile_n);
@@ -2658,8 +2756,14 @@ static void rmu_emit_matmul_tc_tiled_cuda(const char *a_name, const char *b_name
     // scratch, then its 32 lanes convert+write into C.  Dedicated scratch
     // sized to this kernel's exact warp count (nwarps * 256 floats); the tile
     // picker's SMEM budget (rmu_tc_pick_tile_cuda) reserves it when the output
-    // is bf16/fp16 so staging + scratch stay under the 48 KiB/block cap.
-    IND(depth); fprintf(fp, "__shared__ float _cscratch[%u];\n", nwarps * 256u);
+    // is bf16/fp16 so staging + scratch stay under the cap.  When the kernel
+    // uses dynamic shared (use_dyn), the scratch aliases the tail of the one
+    // extern block, just past the A+B staging (16-byte-aligned base).
+    if (use_dyn) {
+      IND(depth); fprintf(fp, "float* _cscratch = (float*)(_dynsm + %uu);\n", ab_bytes);
+    } else {
+      IND(depth); fprintf(fp, "__shared__ float _cscratch[%u];\n", nwarps * 256u);
+    }
     for (u32 mi = 0; mi < t.rm; mi++) {
       for (u32 ni = 0; ni < t.rn; ni++) {
         IND(depth); fprintf(fp,
