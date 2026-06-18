@@ -14,7 +14,13 @@
 
 #ifdef __APPLE__
 #define ACCELERATE_NEW_LAPACK
-#include <Accelerate/Accelerate.h>
+// Include only the cblas sub-header, NOT the <Accelerate/Accelerate.h>
+// umbrella: recent Command Line Tools SDKs (Xcode 26.x) ship a broken
+// Sparse/SolveImplementationTyped.h that fails to compile even from C TUs
+// ("too many arguments to function call").  This file uses only cblas_*
+// (sdot/ddot/sgemm/dgemm/sgemv/dgemv), so the narrow header is sufficient
+// and sidesteps the SDK breakage.
+#include <vecLib/cblas_new.h>
 #define HAVE_BLAS 1
 #else
 #define HAVE_BLAS 0
