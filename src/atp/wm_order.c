@@ -1705,6 +1705,36 @@ static u8 atp_wmo_eq_tops_rank(AtpState *s, u32 trace, u8 thvm_dir,
                        out_chain);
 }
 
+// Whether the unorientable equation `f` is a DUPLICATE re-derivation of
+// an equation an OLDER fact already carries: its WM-distinguished face
+// shares an equation-tree leaf (same stored term, same face) with a chain
+// entry born before `f`.  When so, every superposition that plants `f`'s
+// reverse face into an older fact's subterm was, in Waldmeister, ALSO
+// formed by that older original when IT was activated
+// (U1_KPsBildenZuGleichung, Unifikation1.c:1561), in an earlier CP batch
+// carrying a lower FIFO age -- so the CP predates `f`'s own batch.  thvm
+// fuses `f`'s and the original's lanes into `f`'s single batch; this flags
+// the duplicate so the ranker can restore the older batch's age.  (The
+// commutativity x exhausted-equation analog of the use_overlap_exhaust
+// gate, atp_wmo_collect_pair.)
+static u8 wmo_face_dup_older(const AtpWmOrder *w, u32 f_trace,
+                             const WmoCell *cells, u32 n_cells) {
+  for (WmoLeaf *l = w->tree[1].ll_head; l != NULL; l = l->ll_next) {
+    if (l->key_len != n_cells) continue;
+    u32 k = 0;
+    while (k < n_cells && wmo_cell_eq(&l->key[k], &cells[k])) k++;
+    if (k != n_cells) continue;
+    u8 has_f = 0u, has_older = 0u;
+    for (u32 c = 0; c < l->n_chain; c++) {
+      if (l->chain[c].face != 0u) continue;
+      if (l->chain[c].trace == f_trace) has_f = 1u;
+      else if (l->chain[c].trace < f_trace) has_older = 1u;
+    }
+    return (u8)(has_f && has_older);
+  }
+  return 0u;
+}
+
 // Compute the WM emission rank key for one tagged CP of the new fact
 // `f`'s batch.  `i`/`j` are the overlap slots (i = outer, positions in
 // i's face), `combo` = atp_overlap_ij face combo (bit0: j used its
@@ -1772,5 +1802,32 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
     ll = 0x3fffu;
   }
   u32 k5 = wmo_preorder_rank(i_outer, cp->pos, cp->pos_len);
+  // A phase-E eTT (j = f, WM-reverse face) plants `f`'s reverse face into
+  // an OLDER inner fact `i`.  In Waldmeister this CP is formed in `i`'s
+  // CP batch (U1_KPsBildenZuGleichung, Unifikation1.c:1561) and carries
+  // that batch's FIFO age (w2), so it wins the equal-weight tiebreak ahead
+  // of `f`'s own phase-D tops (KPV_Select, KPVerwaltung.c:756) -- but ONLY
+  // when `f` did not contribute new content, i.e. `f` is a DUPLICATE
+  // re-derivation of an equation an older fact already carries (f_dup): WM
+  // formed the same CP from that older twin, not from `f`, so it predates
+  // `f`'s batch.  When `f` IS one of WM's two superposition parents the CP
+  // genuinely belongs to `f`'s batch and keeps phase E.  Two further
+  // guards keep this to the genuine cross-batch case: `i` must be the
+  // OLDER unorientable equation WM enumerates in its own earlier batch
+  // (i_dr == 1, the CP-derived axiom-mirror face; oriented rules and
+  // intake equations are never deferred this way), and `i` must not ITSELF
+  // be a duplicate (i_dup) -- a duplicate `i` was likewise enumerated in
+  // its own older twin's batch, so the CP stays in `f`'s lane.
+  if (phase == 5u && j == f && i_dr == 1u && s->r_trace[i] < s->r_trace[f]) {
+    u8 f_dr = wmo_trace_dist_rhs(w, s->r_trace[f]);
+    Term f_dist = f_dr ? s->rhs[f] : s->lhs[f];
+    Term i_dist = s->rhs[i];                       // i_dr == 1: distinguished
+    WmoCell fc[WMO_MAX_CELLS], ic[WMO_MAX_CELLS];
+    u32 nfc = wmo_face_cells(f_dist, fc, WMO_MAX_CELLS);
+    u32 nic = wmo_face_cells(i_dist, ic, WMO_MAX_CELLS);
+    u8 f_dup = (u8)(nfc != 0u && wmo_face_dup_older(w, s->r_trace[f], fc, nfc));
+    u8 i_dup = (u8)(nic != 0u && wmo_face_dup_older(w, s->r_trace[i], ic, nic));
+    if (f_dup && !i_dup) phase = 3u;
+  }
   return wmo_pack_key(phase, 0, k2, ll, ch, k5);
 }
