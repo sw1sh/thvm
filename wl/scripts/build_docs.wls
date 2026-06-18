@@ -12,6 +12,12 @@
 
 pacletDir = FileNameJoin[{DirectoryName[$InputFileName], "..", "THVMLink"}]
 
+(* mtn is a cloud resource function, so a connection is needed to resolve it. *)
+If[ ! $CloudConnected,
+    With[{u = Environment["WOLFRAM_CLOUD_USER"], p = Environment["WOLFRAM_CLOUD_PASSWORD"]},
+        If[StringQ[u] && StringQ[p], CloudConnect[u, p], CloudConnect[]]]]
+If[ ! $CloudConnected, Print["build_docs: cloud connection failed (mtn is a cloud resource)"]; Exit[1]]
+
 mtn = ResourceFunction[ResourceObject["https://www.wolframcloud.com/obj/nikm/DeployedResources/Function/MarkdownToNotebook"]]
 Needs["Wolfram`Parser`"]
 
@@ -31,6 +37,27 @@ subdirs = <|
     "Paclet"   -> {}
 |>
 
+(* Two-stage build (matching PureMath/scripts/build_notebooks.wls):
+   stage 1 (mtn) writes AUTHORING notebooks into a staging tree; stage 2
+   (DocumentationBuild) turns those into the BUILT pages -- resolved paclet:
+   cross-links, ObjectName banner, section collapse, search index -- under the
+   paclet's Documentation/ tree (what deploy_paclet.wls scrapes).  Doc pages
+   stage to stageRoot; the Paclet (ResourceDefinition) builds straight into the
+   paclet root since DocumentationBuild never touches it. *)
+(* Stage under the repo (gitignored build/), NOT $TemporaryDirectory: macOS
+   /var/folders is a symlink, and DocumentationBuild's input->output path
+   mapping mis-strips the staging prefix when the notebook's stored path and
+   the passed dir disagree on the symlink, dumping the whole absolute path
+   under finalDocs.  A stable repo path strips cleanly (as PureMath's does). *)
+stageRoot = FileNameJoin[{pacletDir, "..", "..", "build"}]
+stageDocs = FileNameJoin[{stageRoot, "Documentation"}]
+finalDocs = FileNameJoin[{pacletDir, "Documentation"}]
+docRoot[tmpl_] := If[tmpl === "Paclet", pacletDir, stageRoot]
+freshDir[d_String] := (
+    If[ DirectoryQ[d], DeleteDirectory[d, DeleteContents -> True]];
+    CreateDirectory[d, CreateIntermediateDirectories -> True]
+)
+
 (* Read just the YAML frontmatter so we don't run example cells just to learn
    what template a file uses. *)
 frontmatterTemplate[srcFile_String] := Module[{ text, head, m },
@@ -43,10 +70,12 @@ frontmatterTemplate[srcFile_String] := Module[{ text, head, m },
     If[ m === {}, Missing["NoTemplate"], First[m] ]
 ]
 
-(* All docs evaluate.  Individually-heavy cells in ATP.md / AtpMethods.md
-   carry a per-cell `#| eval: false` so the code stays visible but its
-   saturation cost stays out of the shared build kernel. *)
-noEvaluate = {}
+(* The ATP tutorials drive TFindProof saturations whose TimeConstrained abort
+   does NOT stop the underlying C engine (it keeps running past the budget),
+   which corrupts the shared build kernel / Front End and crashes a LATER doc
+   mid-build -- so they render no-eval (code visible, the `<!-- => -->` hints
+   document the expected output).  Other docs evaluate. *)
+noEvaluate = {"ATP.md", "AtpMethods.md"}
 
 (* Hard per-file time budget for example evaluation.  A cell that takes
    longer than this almost certainly indicates a hung saturator / kernel,
@@ -86,7 +115,7 @@ buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ, res, t0, dt
         Return[Null]
     ];
     baseName = FileBaseName[srcFile];
-    dir      = FileNameJoin @ Prepend[subdirs[tmpl], pacletDir];
+    dir      = FileNameJoin @ Prepend[subdirs[tmpl], docRoot[tmpl]];
     Quiet @ CreateDirectory[dir, CreateIntermediateDirectories -> True];
     out      = FileNameJoin[{dir, baseName <> ".nb"}];
     evalQ    = ! MemberQ[noEvaluate, FileNameTake[srcFile]];
@@ -159,6 +188,7 @@ If[ MemberQ[Rest @ $ScriptCommandLine, "--clean"],
             "WolframInstitute"}],
         DeleteContents -> True
     ];
+    Quiet @ DeleteDirectory[stageRoot, DeleteContents -> True];
     Quiet @ DeleteDirectory[FileNameJoin[{pacletDir, "Documentation"}], DeleteContents -> True];
     Quiet @ DeleteFile[FileNameJoin[{pacletDir, "ResourceDefinition.nb"}]]
 ]
@@ -187,8 +217,66 @@ If[ fileSel =!= {} && toBuild === {},
     Exit[1]
 ]
 
-Print["building THVMLink documentation",
+stage1Q = MemberQ[Rest @ $ScriptCommandLine, "--stage1"]
+stage2Q = MemberQ[Rest @ $ScriptCommandLine, "--stage2"]
+
+(* ==== Stage 2 worker: authoring notebooks -> built pages (DocumentationBuild).
+   DocumentationBuild needs the WHOLE staged Documentation tree at once to
+   resolve the paclet: cross-links (mtn emits typed PackageLink/RefLink
+   TemplateBoxes; only this stage, with a LinkBase, wires them to their target
+   pages + produces the search index).  Runs in its OWN kernel (see the
+   orchestrator below).  It builds notebooks, so it needs a Front End. ==== *)
+If[ stage2Q,
+    Needs["DocumentationBuild`"];
+    Print["build_docs[stage 2]: DocumentationBuild ", stageDocs, " -> ", finalDocs];
+    Quiet @ DeleteDirectory[FileNameJoin[{finalDocs, "English"}], DeleteContents -> True];
+    With[{
+        docBuild = UsingFrontEnd @ DocumentationBuild`DocumentationBuildNotebooks[
+            stageDocs, finalDocs, "LinkBase" -> "WolframInstitute/THVMLink"]
+    },
+        With[{built = Length[FileNames["*.nb",
+            FileNameJoin[{finalDocs, "English", "ReferencePages", "Symbols"}]]]},
+            Print[If[ docBuild =!= $Failed && built > 0, "PASS", "FAIL"],
+                "  DocumentationBuild produced ", built, " built reference pages"];
+            If[ ! (docBuild =!= $Failed && built > 0),
+                Print["  result: ", Short[docBuild, 5]]; Exit[1]]
+        ]
+    ];
+    Print["done"];
+    Exit[0]
+]
+
+(* ==== Orchestrator: a bare full build runs stage 1 (mtn) then stage 2
+   (DocumentationBuild) as SEPARATE wolframscript processes.  mtn's example
+   evaluation can leave the build kernel unusable -- a TimeConstrained ATP
+   saturation does not stop the underlying C engine, which crashes a later
+   doc / the Front End -- so running stage 2 in the same kernel is unreliable.
+   This orchestrator kernel does no example eval, so it survives; the stage-1
+   subprocess persists every authoring notebook before any crash. ==== *)
+If[ fileSel === {} && ! stage1Q,
+    Module[{self = $InputFileName, q, clean, s1, s2},
+        q[s_] := "\"" <> s <> "\"";
+        clean = If[ MemberQ[Rest @ $ScriptCommandLine, "--clean"], " --clean", ""];
+        Print["===== build_docs stage 1: mtn authoring notebooks ====="];
+        s1 = Run["wolframscript -f " <> q[self] <> " --stage1" <> clean];
+        Print["===== build_docs stage 2: DocumentationBuild ====="];
+        s2 = Run["wolframscript -f " <> q[self] <> " --stage2"];
+        Exit[s2]
+    ]
+]
+
+(* ==== Stage 1 worker (also the path for a file selection).  A full stage 1
+   (--stage1) wipes the staging doc-page roots first so a moved/deleted source
+   leaves no stale authoring notebook; a file selection appends into staging
+   for quick mtn iteration. ==== *)
+If[ stage1Q,
+    freshDir /@ {
+        FileNameJoin[{stageDocs, "English", "Guides"}],
+        FileNameJoin[{stageDocs, "English", "Tutorials"}],
+        FileNameJoin[{stageDocs, "English", "ReferencePages", "Symbols"}]
+    }
+]
+Print["building THVMLink documentation (stage 1: mtn authoring notebooks)",
     If[ fileSel === {}, "", " (selected: " <> StringRiffle[FileBaseName /@ toBuild, ", "] <> ")"]]
 Scan[buildDoc, toBuild]
-
-Print["done"]
+Print[If[ fileSel === {}, "stage 1 done", "done (stage-1 authoring notebooks only)"]]
