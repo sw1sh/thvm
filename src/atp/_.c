@@ -8809,6 +8809,15 @@ fn void thvm_atp_set_use_wm_demote(AtpState *s, u8 on) {
   s->use_wm_demote = on ? 1u : 0u;
 }
 
+// Overlap-exhausted-equation gate (see AtpState.use_overlap_exhaust): a
+// newly-derived commutativity overlaps an equation's fresh re-derivation,
+// not the stale exhausted original.  WM-faithful; ON in the WL Waldmeister
+// preset (option "OverlapExhaust").
+fn void thvm_atp_set_use_overlap_exhaust(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_overlap_exhaust = on ? 1u : 0u;
+}
+
 // WM -ks "s" pop-time E-subsumption drop (KPV_Select branch,
 // INF/KPVerwaltung.c:667; see AtpState.use_pop_subsume in thvm.h).
 fn void thvm_atp_set_use_pop_subsume(AtpState *s, u8 on) {

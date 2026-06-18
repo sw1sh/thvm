@@ -5795,6 +5795,7 @@ fn void      thvm_atp_set_use_bwd_demod(AtpState *s, u8 on);
 // weight/FIFO age.  Default OFF (engine byte-identical); the WL
 // "Waldmeister" presets set it via {"DemoteOnLhsSimplify" -> True}.
 fn void      thvm_atp_set_use_wm_demote(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_overlap_exhaust(AtpState *s, u8 on);
 
 // Proof-trace capacity (entries).  Defaults to ATP_MAX_TRACE; overridable
 // once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset
