@@ -1145,9 +1145,10 @@ regressions:
 - Backend.buf_storage_root + buf_addr hooks (aa1f57d2, 26fea217)
 - JIT replay diagnostic knobs: ASSIGN trace, dedup_window,
   parent/root dispatch dump, graph-launch timing
-- 5 opt-in perf knobs (FUSE_REDUCE_INTO_REDUCE,
-  BUFFERIZE_SKIP_SMALL_EXPAND, JIT_REPLAY_DEDUP, CUDA_FAST_MATH,
-  LOOP_UNROLL_MAX) available for per-workload A/B
+- opt-in perf knobs (BUFFERIZE_SKIP_SMALL_EXPAND, JIT_REPLAY_DEDUP,
+  CUDA_FAST_MATH, LOOP_UNROLL_MAX) available for per-workload A/B
+  (FUSE_REDUCE_INTO_REDUCE is now default-on -- faithful reduce-into-
+  reduce fusion -- after the multi-axis REDUCE renderer landed)
 
 **Reverted (after cross-BS validation)**:
 - GROUP_SZ default 16->128 (commit 90434003 -> 1ac4c304):

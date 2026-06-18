@@ -161,6 +161,30 @@ fn int ru_faithful_seed_on(void) {
   return on;
 }
 
+// tinygrad's remove_bufferize (rangeify.py:242-309): recompute a realized
+// elementwise boundary into its consumers instead of storing it, when all
+// gates pass (removable / accessed_buffers>3 / buffer_in_reduce / the thvm
+// movement-free recompute-region guard).  Removes the softmax exp (attention
+// 7->6 kernels), bit-exact on CPU + Metal.  Default-ON; opt out with
+// THVM_REMOVE_BUFFERIZE=0 for A/B.
+//
+// thvm's per-consumer re-index (ru_build_axis_subst, pm_apply_rangeify) is
+// POSITIONAL, not tinygrad's exact src.substitute (rangeify.py:308).  That is
+// exact only for a MOVEMENT-FREE recompute region (pure elementwise into a
+// same-rank reduce); rb_unsafe_recompute_region keeps everything else.  So the
+// port is correct but narrower than tinygrad until the exact substitute is
+// ported -- it captures the softmax/attention win (the hot path) and is a
+// no-op everywhere the recompute would broadcast or swizzle.
+fn int ru_remove_bufferize_on(void) {
+  static int known = 0, on = 1;
+  if (!known) {
+    char const *e = getenv("THVM_REMOVE_BUFFERIZE");
+    if (e != NULL && e[0] != '\0') on = (e[0] != '0');
+    known = 1;
+  }
+  return on;
+}
+
 // Whether a bufferize-classify realized node is seeded as a structural
 // boundary up front (vs left for the walk to derive).  Default: every
 // realized node (the heuristic seed).  Faithful: ROOT only (== tinygrad
@@ -406,6 +430,7 @@ static int ru_node_src_shape(u64 loc, Shape *out) {
 // This wrapper resolves consumer locs -> node indices and trims invalid
 // entries (consumer never made it into BUFFERIZE_NODES).
 #define RU_MAX_CONSUMERS 256
+#define RU_CONSRED_BFS_CAP 256
 static u32 ru_consumers_for_node(u32 node_idx,
                                  u32 *out_consumer_idxs, u32 cap) {
   u64 buf[RU_MAX_CONSUMERS];
@@ -705,6 +730,216 @@ fn u32 rangeify_unified_topo_order_at(u32 i) {
 // Side effects: populates RU_RANGE_MAP + RU_REALIZE_MAP + RU_ENDING_RANGES.
 // The realize decision is kept in RU_REALIZE_MAP separate from
 // BUFFERIZE_NODES.realized.
+
+// A node is a realized boundary (a buffer) iff seed- OR walk-realized.
+static int rb_node_realized(u32 idx) {
+  if (idx == 0xFFFFFFFFu) return 0;
+  return BUFFERIZE_NODES[idx].realized
+      || RU_REALIZE_MAP[idx].realized_full
+      || RU_REALIZE_MAP[idx].realized_partial;
+}
+
+// 1 iff the SUBTREE rooted at `t` contains a live (non-realized) REDUCE
+// reachable without crossing a realized boundary.  Walks the RAW UOP heap
+// graph -- NOT only tracked BUFFERIZE_NODES -- because an inlined broadcast
+// (EXPAND of recip(sum)) and other non-boundary value nodes are absent from
+// that table yet must be traversed to reach the reduce inside them.  STOP at
+// any realized boundary (tinygrad red_gate's AFTER/STAGE buffers,
+// rangeify.py:256-271): a realized node is a buffer here, so its subtree is
+// not re-run.  Only descend through value-carrying ops (elementwise /
+// movement / cast); structural leaves (BUFFER/BUFFERIZE/KERNEL/RANGE/CONST)
+// hold no reduce to recompute.
+static int rb_subtree_has_live_reduce(Term t, u32 depth) {
+  if (depth > 48) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  u8 op = term_ext(r);
+  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
+  if (rb_node_realized(bufferize_info_find(term_val(r)))) return 0;  // buffer: stop
+  if (op == UOP_REDUCE) return 1;                                    // live reduce
+  int ew = uop_is_unary_elementwise(op)
+        || uop_is_binary_elementwise(op)
+        || uop_is_ternary_elementwise(op);
+  if (!(ew || uop_is_movement(op) || op == UOP_CAST || op == UOP_BITCAST))
+    return 0;
+  u64 loc = term_val(r);
+  u8 ar = uop_arity(op);
+  for (u8 s = 0; s < ar; s++) {
+    if (rb_subtree_has_live_reduce(heap_read(loc + s), depth + 1)) return 1;
+  }
+  return 0;
+}
+
+// Collect the DISTINCT realized buffers / leaf inputs the subtree at `t`
+// reads (tinygrad red_gate's accessed_buffers, rangeify.py:256-274): record
+// a loc and STOP at every realized boundary, leaf tensor (PARAM), or
+// UOP_BUFFER; descend through value + (live) reduce ops otherwise.  Dedups
+// into `locs` (capacity `cap`); returns the running distinct count.
+static u32 rb_collect_accessed_buffers(Term t, u64 *locs, u32 n, u32 cap,
+                                       u32 depth) {
+  if (depth > 48 || n >= cap) return n;
+  Term r = term_resolve(t);
+  u8 tag = term_tag(r);
+  if (tag == TAG_TEN || tag == TAG_VAR) {            // leaf input (PARAM)
+    u64 l = term_val(r);
+    for (u32 i = 0; i < n; i++) if (locs[i] == l) return n;
+    locs[n++] = l;
+    return n;
+  }
+  if (tag != TAG_UOP) return n;
+  u8 op = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_BUFFER || op == UOP_KERNEL || op == UOP_BUFFERIZE
+      || rb_node_realized(bufferize_info_find(loc))) {
+    for (u32 i = 0; i < n; i++) if (locs[i] == loc) return n;  // realized: count, stop
+    if (n < cap) locs[n++] = loc;
+    return n;
+  }
+  if (op == UOP_CONST || op == UOP_RANGE) return n;
+  u8 ar = uop_arity(op);
+  for (u8 s = 0; s < ar; s++)
+    n = rb_collect_accessed_buffers(heap_read(loc + s), locs, n, cap, depth + 1);
+  return n;
+}
+
+// tinygrad rangeify.py:277: a node generated from more than 3 distinct
+// buffers is NOT removed (recomputing it would re-read many buffers in every
+// consumer kernel -- the cost model keeps it stored).  Counts the candidate's
+// child subtrees' accessed buffers.
+static int rb_too_many_buffers(u64 loc) {
+  u32 idx = bufferize_info_find(loc);
+  if (idx == 0xFFFFFFFFu) return 0;
+  u64 locs[8];
+  u32 n = 0;
+  u8 ar = uop_arity(BUFFERIZE_NODES[idx].op);
+  for (u8 s = 0; s < ar; s++)
+    n = rb_collect_accessed_buffers(heap_read(loc + s), locs, n, 8, 0);
+  return n > 3;
+}
+
+// tinygrad's buffer_in_reduce gate (rangeify.py:256-285): collect the
+// reduces in the candidate node's value (stopping at realized buffers); if
+// any is reachable, recomputing the node would re-run a live reduce reading
+// buffers, so it is KEPT.  Here the candidate at `loc` is the elementwise op
+// being considered for removal: walk each of its child subtrees.  A realized
+// reduce (the qk `scores`, the softmax `max`/`sum`) is a buffer, not a live
+// reduce, so a pure-elementwise-over-realized-buffers node returns 0 and is
+// removable; a node that fuses an UN-realized reduce (the softmax normalize,
+// whose `sum` reduce lives inside it) returns 1 and is kept.
+static int rb_src_has_live_reduce(u64 loc, u32 depth) {
+  (void)depth;
+  if (loc >= HEAP_NEXT) return 0;
+  u32 idx = bufferize_info_find(loc);
+  if (idx == 0xFFFFFFFFu) return 0;
+  u8 ar = uop_arity(BUFFERIZE_NODES[idx].op);
+  for (u8 s = 0; s < ar; s++) {
+    if (rb_subtree_has_live_reduce(heap_read(loc + s), 0)) return 1;
+  }
+  return 0;
+}
+
+// Count the UOP_RANGE leaves (iterated, non-CONST axes) in a range list.
+static u8 rb_count_range_axes(Term const *rngs, u8 ndim) {
+  u8 n = 0;
+  for (u8 a = 0; a < ndim; a++) {
+    Term r = rngs[a];
+    if (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE) n++;
+  }
+  return n;
+}
+
+// (b) thvm's recompute re-index (ru_build_axis_subst, pm_apply_rangeify) maps
+// producer out_rngs[a] -> consumer in_rngs[a] POSITIONALLY.  That is exact only
+// when the value is recomputed into consumers that iterate at the producer's
+// rank WITHOUT any movement op rewriting the index -- the softmax exp feeding
+// the same-rank `sum` reduce (bit-exact).  It is NOT exact once a MOVEMENT op
+// (EXPAND / RESHAPE / PERMUTE / PAD / SHRINK / FLIP) sits in the recompute
+// region: a broadcast EXPAND reads the value over axes it does not depend on
+// (the bn-backward gamma grad: a per-channel [C] coeff expanded to [C,H,W]
+// then reduced -- wrong index), and a RESHAPE/PERMUTE swizzle re-indexes the
+// strided view in a way the positional map cannot follow (the conv contraction
+// product -> reshape -- the lifter walks a stranded range and BUS-ERRORS).
+// tinygrad handles both with its exact src.substitute (rangeify.py:308); until
+// that is ported, restrict removal to MOVEMENT-FREE recompute regions.  BFS the
+// region (non-realized movement/elementwise consumers, stopping at realized
+// boundaries and reduces); keep the producer if any movement op -- or any
+// residual rank increase -- appears.
+static int rb_unsafe_recompute_region(u32 node_idx) {
+  u8 prod_rank = rb_count_range_axes(RU_RANGE_MAP[node_idx].out_rngs,
+                                     RU_RANGE_MAP[node_idx].out_ndim);
+  u32 queue[RU_CONSRED_BFS_CAP];
+  u32 qhead = 0, qtail = 0;
+  u32 visited[RU_CONSRED_BFS_CAP];
+  u32 n_visited = 0;
+  queue[qtail++] = node_idx;
+  u32 budget = RU_CONSRED_BFS_CAP * 4;
+  while (qhead < qtail && budget-- > 0) {
+    u32 cur = queue[qhead++];
+    u32 cidxs[RU_MAX_CONSUMERS];
+    u32 nc = ru_consumers_for_node(cur, cidxs, RU_MAX_CONSUMERS);
+    for (u32 c = 0; c < nc; c++) {
+      u32 ci = cidxs[c];
+      u8 seen = 0;
+      for (u32 v = 0; v < n_visited; v++) if (visited[v] == ci) { seen = 1; break; }
+      if (seen) continue;
+      if (n_visited < RU_CONSRED_BFS_CAP) visited[n_visited++] = ci;
+      u8 cop = BUFFERIZE_NODES[ci].op;
+      if (uop_is_movement(cop)) return 1;  // movement re-index: substitution unsafe
+      if (rb_count_range_axes(RU_RANGE_MAP[ci].out_rngs,
+                              RU_RANGE_MAP[ci].out_ndim) > prod_rank)
+        return 1;                          // residual broadcast in the region
+      if (cop == UOP_REDUCE) continue;     // reduce: lowers rank, hard boundary
+      if (rb_node_realized(ci)) continue;  // realized: its own kernel, stop
+      int is_ew = uop_is_unary_elementwise(cop)
+               || uop_is_binary_elementwise(cop)
+               || uop_is_ternary_elementwise(cop);
+      if (is_ew && qtail < RU_CONSRED_BFS_CAP) queue[qtail++] = ci;
+    }
+  }
+  return 0;
+}
+
+// (a) tinygrad's `removable` exclusion (rangeify.py:248): a node consumed
+// contiguous (COPY / ALWAYS_CONTIGUOUS) is never removed.  thvm's BLAS matmul
+// path (cpu/blas.c dgemm, metal/cuda tile-GEMM) needs MATERIALIZED operands --
+// a matmul reduce cannot recompute its inputs in-kernel the way tinygrad's
+// fused reduce does -- so a matmul-feeding node is thvm's ALWAYS_CONTIGUOUS
+// equivalent: removing it forces a re-realize for the GEMM (no kernel saved).
+// BFS the consumer DAG through non-realized movement/ew hops; stop at realized
+// boundaries (they materialize on their own) and at non-matmul reduces.
+static int rb_feeds_matmul_reduce(u32 node_idx) {
+  u32 queue[RU_CONSRED_BFS_CAP];
+  u32 qhead = 0, qtail = 0;
+  u32 visited[RU_CONSRED_BFS_CAP];
+  u32 n_visited = 0;
+  queue[qtail++] = node_idx;
+  u32 budget = RU_CONSRED_BFS_CAP * 4;
+  while (qhead < qtail && budget-- > 0) {
+    u32 cur = queue[qhead++];
+    u32 cidxs[RU_MAX_CONSUMERS];
+    u32 nc = ru_consumers_for_node(cur, cidxs, RU_MAX_CONSUMERS);
+    for (u32 c = 0; c < nc; c++) {
+      u32 ci = cidxs[c];
+      u8 seen = 0;
+      for (u32 v = 0; v < n_visited; v++) if (visited[v] == ci) { seen = 1; break; }
+      if (seen) continue;
+      if (n_visited < RU_CONSRED_BFS_CAP) visited[n_visited++] = ci;
+      u8 cop = BUFFERIZE_NODES[ci].op;
+      if (cop == UOP_REDUCE) {
+        if (BUFFERIZE_NODES[ci].reasons & BUFFERIZE_REASON_MATMUL) return 1;
+        continue;                          // non-matmul reduce: hard boundary
+      }
+      if (rb_node_realized(ci)) continue;  // realized consumer: materializes, stop
+      int is_movement = uop_is_movement(cop);
+      int is_ew = uop_is_unary_elementwise(cop)
+               || uop_is_binary_elementwise(cop)
+               || uop_is_ternary_elementwise(cop);
+      if ((is_movement || is_ew) && qtail < RU_CONSRED_BFS_CAP)
+        queue[qtail++] = ci;
+    }
+  }
+  return 0;
+}
 
 fn void run_rangeify_unified(Term root) {
   // Clear per-node state.
@@ -1081,6 +1316,39 @@ fn void run_rangeify_unified(Term root) {
     RU_RANGE_MAP[node_idx].has_ranges = 1;
     for (u8 a = 0; a < my_ndim; a++) RU_RANGE_MAP[node_idx].out_rngs[a] = out_rngs[a];
     for (u8 a = 0; a < in_ndim; a++) RU_RANGE_MAP[node_idx].in_rngs [a] = in_rngs [a];
+  }
+
+  // *** remove_bufferize (tinygrad schedule/rangeify.py:242-309) ***
+  // Un-realize a WALK-realized ELEMENTWISE boundary so it is RECOMPUTED into
+  // each consumer kernel instead of stored to a shared buffer (the softmax
+  // `*scale`/`exp` fuse into the score/max/sum reduces: 7 kernels -> fewer).
+  // pm_apply_rangeify then re-indexes the recomputed value per consumer via
+  // ru_build_axis_subst + ru_subtree_rewrite_ranges (mirror rangeify.py:308
+  // `src.substitute({buf.src[1:] -> idx.src[1:]})`).  Gates, in tinygrad order:
+  //   * removable (rangeify.py:248): a node feeding a BLAS-matmul reduce stays
+  //     materialized -- thvm's GEMM dispatch needs buffer operands (thvm's
+  //     ALWAYS_CONTIGUOUS equivalent).  See rb_feeds_matmul_reduce.
+  //   * buffer_in_reduce (rangeify.py:280-303): keep a node whose value fuses a
+  //     LIVE (non-realized) reduce -- recomputing it would re-run that reduce
+  //     reading buffers.  See rb_src_has_live_reduce.
+  if (ru_remove_bufferize_on()) {
+    for (u32 oi = 0; oi < RU_TOPO_ORDER_LEN; oi++) {
+      u32 i = RU_TOPO_ORDER[oi];
+      if (!(RU_REALIZE_MAP[i].realized_full || RU_REALIZE_MAP[i].realized_partial))
+        continue;
+      if (BUFFERIZE_NODES[i].realized) continue;          // seed boundary: keep
+      u8 op = BUFFERIZE_NODES[i].op;
+      int ew = uop_is_unary_elementwise(op)
+            || uop_is_binary_elementwise(op)
+            || uop_is_ternary_elementwise(op);
+      if (!ew) continue;                                  // only removable elementwise
+      if (rb_feeds_matmul_reduce(i)) continue;            // removable=False (GEMM operand)
+      if (rb_unsafe_recompute_region(i)) continue;        // movement/broadcast re-index unsafe
+      if (rb_too_many_buffers(BUFFERIZE_NODES[i].loc)) continue;       // accessed_buffers > 3
+      if (rb_src_has_live_reduce(BUFFERIZE_NODES[i].loc, 0)) continue; // buffer_in_reduce
+      RU_REALIZE_MAP[i].realized_full    = 0;
+      RU_REALIZE_MAP[i].realized_partial = 0;
+    }
   }
 
   // *** Mirror indexing.py:268: graph_rewrite(pm_apply_rangeify) ***
@@ -1653,7 +1921,6 @@ static void ru_collect_reduce_aids_into(u32 ci, u32 *out_aids, u8 *n_out, u8 cap
   }
 }
 
-#define RU_CONSRED_BFS_CAP 256
 #define RU_CONSRED_AIDS_CAP 64
 // BFS the consumer DAG from `node_idx` through movement + elementwise
 // consumers, collecting the reduce-range aids of every REDUCE reached.
@@ -1851,6 +2118,23 @@ static RuAxisSubst ru_build_axis_subst(u32 pidx,
       // the old "skip compound axis" behavior bit-identical.
       ru_axis_subst_match_pair(&m, pr, cr, 0);
     }
+  }
+  if (getenv("THVM_RB_LOG2") != NULL) {
+    fprintf(stderr, "[rb-subst] pidx=%u p_out_ndim=%u c_in_ndim=%u :",
+            pidx, (unsigned)prm->out_ndim, (unsigned)consumer_rm->in_ndim);
+    for (u8 a = 0; a < prm->out_ndim; a++) {
+      Term pr = prm->out_rngs[a];
+      int paid = (term_tag(pr) == TAG_UOP && term_ext(pr) == UOP_RANGE)
+               ? (int)uop_range_axis_id(pr) : -1;
+      fprintf(stderr, " out[%u]aid=%d", a, paid);
+    }
+    for (u8 a = 0; a < consumer_rm->in_ndim; a++) {
+      Term cr = consumer_rm->in_rngs[a];
+      int caid = (term_tag(cr) == TAG_UOP && term_ext(cr) == UOP_RANGE)
+               ? (int)uop_range_axis_id(cr) : -1;
+      fprintf(stderr, " in[%u]aid=%d", a, caid);
+    }
+    fprintf(stderr, "\n");
   }
   return m;
 }

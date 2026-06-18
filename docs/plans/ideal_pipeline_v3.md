@@ -306,6 +306,62 @@ Re-scope. Audited the faithful beautiful_mnist (CPU, BS=8) boundary structure:
   ending-ranges PCONTIG path (864-888) is NOT the gap: tinygrad's PCONTIG defaults to 0
   (helpers.py:254), so its default also realizes-all there -- thvm is already faithful.
 
+**M2 status (landed):** `THVM_FUSE_REDUCE_INTO_REDUCE` is now **default-on** (the multi-axis
+REDUCE renderer landed). It is faithful + bit-exact (CPU; Metal ~1e-7 float-reorder) and a
+small win (attn 8->7, qwen 26->25/layer, FLUX double-block 72->70) -- confirming the audit:
+reduce-into-reduce was NOT the main gap.
+
+**M3 status (range-side OR-of-valids is a DEAD END):** prototyped the boolean-OR-of-valids
+merge faithfully (port of indexing.py:206 `get_idx` + :217-218 `usum(valids).where`): compare
+consumer ranges by `get_idx` (strip the IWHERE guard) and OR the validity conds in
+`ru_merge_axis`. Result: no-valid chains stay byte-identical (attn/qwen unchanged) and
+conv+maxpool backward stays correct, BUT the merge **fires 0 times** -- because thvm's
+PAD/SHRINK validity is **value-side** (a WHERE on the node VALUE, line 921), not carried on
+the consumer RANGE Term. So the range-side OR-of-valids has nothing to merge. The real M3 must
+handle the value-side valid union, OR the 74 walk-realized diverge on the INDEX (which both
+engines realize). Reverted the dormant range-side prototype; INDEX-vs-valid attribution of the
+74 walk-realized is the prerequisite before re-attempting.
+
+**M3 re-diagnosed (the gap is CODEGEN grouping, not the rangeify realize decision):**
+instrumented tinygrad's `realize_map` (schedule/indexing.py:225,235) on the {1,4,16,8} attention.
+tinygrad REALIZES the softmax EXP2, the normalize MUL, the RECIPROCAL, and the reduces -- it does
+NOT recompute them (correcting both the doc's "boolean-OR-of-valids" hypothesis and the
+recompute hypothesis). Yet it emits only 4 kernels because its linearizer packs each realized
+elementwise boundary together with its adjacent REDUCE into ONE kernel (reduce-prologue/epilogue
+in-kernel). thvm realizes the same nodes (7 kernels post-INTO_REDUCE: qk, scale, max, exp, sum
+into av, normalize, head-merge reshape) but its one-reduce-per-kernel codegen splits them.
+The EXACT missing pass is tinygrad's **`remove_bufferize`** (schedule/rangeify.py:242-309), run
+AFTER the realize_map marks boundaries.  Its cost model: a bufferize is REMOVED (its source
+substituted back into each consumer = recompute) UNLESS its computation contains a REDUCE that
+reads a buffer (`buffer_in_reduce`, rangeify.py:280-303) -- then it is KEPT.  On the attention:
+`scores` (qk-matmul) contains a reduce reading q/k buffers -> KEPT; the softmax `exp`/`*scale`/
+`normalize` are elementwise over already-realized buffers with NO reduce inside -> REMOVED ->
+recomputed inline into each consuming kernel.  thvm's rangeify WALK marks the same realizes
+(via consumer-divergence) but has NO remove_bufferize, so it keeps them all (7 kernels vs 4).
+thvm already computes the predicate (`bufferize_elementwise_src_has_reduce`,
+bufferize_classify.c:994 -- false for the exp) but only consults it in the dropped MULTI seed,
+never to un-realize a WALK-realized node.  THE PORT: a post-walk remove_bufferize pass that
+un-marks RU_REALIZE_MAP for a removable elementwise node whose source has no buffer-reading
+REDUCE, letting materialize inline (recompute) it per-consumer.  This is a new substitution
+pass touching every multi-consumer node -- the substantial remaining rangeify piece.
+
+**remove_bufferize PROTOTYPE landed (rangeify side done; materialize side is the blocker):**
+implemented the pass in `run_rangeify_unified` (after the walk, before `pm_apply_rangeify`),
+gated `THVM_REMOVE_BUFFERIZE` (DEFAULT-OFF).  The selection predicate `rb_src_has_live_reduce`
+is the faithful `buffer_in_reduce` (rangeify.py:256-285): walk the node's source, STOP at any
+realized boundary (a realized reduce = a buffer, like tinygrad's red_gate stopping at
+AFTER/STAGE), keep only if a NON-realized REDUCE is reached.  It fires on EXACTLY the right
+nodes -- the softmax `*scale`/`exp`/`normalize` (realized scores/max, no live reduce) -> removed;
+the qk/av matmul (live reduce) -> kept.  Attention 7 -> 6 kernels.  BUT the output is ~5e-3 off
+the oracle: clearing the realize flag makes the materializer INLINE the node with the wrong
+index (the recomputed `exp` loses its per-row `max` reference).  tinygrad's pass does an
+EXPLICIT per-consumer index substitution (rangeify.py:308-309
+`src.substitute({buf.src[1:] -> idx.src[1:]})`); thvm's materializer does not re-index an
+inlined un-realized node automatically.  THE REMAINING BLOCKER is materialize-side: either
+substitute the bufferize's source into each consumer with that consumer's INDEX ranges at
+removal time, or teach materialize to re-derive an inlined node's index from its consumer.
+That is the next concrete step -- the rangeify selection is done and correct.
+
 REVISED milestone ordering for the kernel-count/memory gap (the goal is memory parity;
 thvm already wins wall-time on both backends):
 - The real lever is the **boolean-OR validity union** (was M3) + the **optimizer
