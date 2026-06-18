@@ -26,18 +26,20 @@ fxSigmas[seq_:256, nSteps_:4] := Module[
     a2 = 0.00016927;      b2 = 0.45666666;
     m200 = a2*seq + b2;   m10 = a1*seq + b1;
     a = (m200 - m10)/190;  b = m200 - 200 a;
-    mu = a*4 + b;
+    mu = a*nSteps + b;     (* diffusers compute_empirical_mu: a*num_steps+b (was hardcoded 4) *)
     lin = Subdivide[1.0, 1.0/nSteps, nSteps - 1];          (* [1, .75, .5, .25] *)
     sig = (Exp[mu]/(Exp[mu] + (1.0/# - 1.0))) & /@ lin;
     Append[sig, 0.0]]                                      (* sigmasFull, len nSteps+1 *)
 
 (* === sinusoidal timestep basis (weight-free part of the time embedder) ==
-   diffusers get_timestep_embedding: dim 256, cos-first.  The general cos-first
-   sinusoidal embedding is the library TSinusoidalEmbedding; the FLUX-specific
-   piece is the t = sigma*1000 timestep scaling and the host-list return (the
-   sampler drivers wrap it in their own TTensorCreate). *)
+   diffusers get_timestep_embedding: dim 256, cos-first.  The pipeline feeds the
+   transformer `timestep = t/1000 = sigma` (pipeline_flux2_klein.py:845), and the
+   transformer then rescales `timestep = timestep*1000` (transformer_flux2.py:831)
+   BEFORE time_proj -- so the sinusoid argument is sigma*1000.  (Verified: thvm
+   TSinusoidalEmbedding[sigma*1000] -> temb MLP std 0.3398 matches the reference
+   step-0 temb, and the per-step velocity matches the reference to corr 0.9999.) *)
 fxTimestepSinusoid[sigma_, dim_:256] :=
-    Normal @ TSinusoidalEmbedding[sigma*1000., dim]        (* {256} cos-first host list *)
+    Normal @ TSinusoidalEmbedding[N[sigma*1000.], dim]     (* {256} cos-first host list *)
 
 (* === 4-axis interleaved RoPE table ==================================
    FLUX.2 FluxPosEmbed: axes_dims {32,32,32,32}, theta 2000.  Token positions
