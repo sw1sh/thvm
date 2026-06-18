@@ -522,18 +522,27 @@ static int jit_replay_pack_enabled(void) {
   return e == NULL || e[0] != '0';
 }
 
-// THVM_JIT_GRAPH_FORCE_ICB (default ON) -- batch a buffer-recycling capture
+// THVM_JIT_GRAPH_FORCE_ICB (default OFF) -- batch a buffer-recycling capture
 // (two live dispatches writing one physical buffer) into the ICB anyway,
-// relying on the per-command [cmd setBarrier] in metal_graph_build to order
-// the write-after-write.  This is tinygrad's MetalGraph invariant
-// (runtime/graph/metal.py calls setBarrier on every indirect command).  =0
-// reverts to the old per-op decline for recycling streams.  Memoised.
+// relying on the per-command [cmd setBarrier] in metal_graph_build to order the
+// write-after-write.  tinygrad's MetalGraph (runtime/graph/metal.py:39) emits
+// the same setBarrier, but tinygrad runs memory_plan_rewrite first so its
+// recycled buffers are SLICEs into one arena whose accesses Apple's dependency
+// tracker serializes; thvm recycles whole buf_ids and on Apple9 (M3) the ICB's
+// setBarrier does NOT reliably order those write-after-write recycles across
+// concurrent indirect commands -- the FLUX VAE collapse (two distinct latents
+// decode to a byte-identical image: input rel-L2 1.22 -> output 0.0).  Per-op
+// replay hazard-tracks each dispatch correctly AND keeps the packer's recycle
+// (memory stays bounded), so a recycling stream declines the ICB by default.
+// jit_capture_finalize sets metal_graph_recycle; the flux_jit_replay.wlt
+// regression covers this.  THVM_JIT_GRAPH_FORCE_ICB=1 re-enables the batched
+// ICB for measuring the (unsafe-on-M3) batched path.  Memoised.
 static int jit_metal_graph_force_icb(void) {
   static int known = 0;
-  static int v = 1;
+  static int v = 0;
   if (!known) {
     char const *e = getenv("THVM_JIT_GRAPH_FORCE_ICB");
-    v = (e == NULL || e[0] != '0');
+    v = (e != NULL && e[0] == '1');
     known = 1;
   }
   return v;
