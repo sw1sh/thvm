@@ -266,10 +266,22 @@ fxSessionGet[dev_, imgSize_, nSteps_, modelDir_] := Module[
     {key = {modelDir, dev, imgSize, nSteps}},
     Lookup[$fxSession, Key[key], $fxSession[key] = fxSessionBuild[dev, imgSize, nSteps, modelDir]]]
 
+(* The three models' weights (~16 GB across Qwen + transformer + VAE
+   safetensors) are zero-copy disk-mmap wraps.  The default MADV_WILLNEED
+   readahead faults the WHOLE of each file resident at load time, so a session
+   peaks at ~19 GB of resident weight pages even though each weight is read once
+   to upload.  THVM_MMAP_NO_WILLNEED defers the fault to the per-weight upload
+   (which then MADV_DONTNEEDs the pages), keeping the host weight working set to
+   roughly one weight at a time -- session peak drops to ~5 GB.  Set here (not
+   globally) so the session is memory-bounded by default; a user export wins. *)
+fxBoundMemory[] := If[ Environment["THVM_MMAP_NO_WILLNEED"] === $Failed,
+    SetEnvironment["THVM_MMAP_NO_WILLNEED" -> "1"]];
+
 fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
     {w, h, gridH, gridW, simg, stxt, tokDir, td, tfPath, qwPaths, vaePath,
      fxCfg, qwCfg, vaeCfg, sigmas, ctxQ, ctxT, ctxV, qwJit, wfq, velJit, ca,
      rc, rs, tembFn, vaeJit},
+    fxBoundMemory[];
     {w, h} = imgSize;
     gridH = Round[h/16];  gridW = Round[w/16];  simg = gridH gridW;  stxt = 512;
     tokDir = FileNameJoin[{modelDir, "tokenizer"}];
