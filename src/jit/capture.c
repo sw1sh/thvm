@@ -1685,18 +1685,29 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
     }
   }
 
-  // Also decline the ICB when any live dispatch has a strided-view input that
-  // the per-op path (metal_dispatch_kernel) PRE-MATERIALISES into a contiguous
-  // temp before the kernel reads it.  The ICB encodes the raw input buffer and
-  // skips that gather, so the kernel would read the strided bytes as contiguous
-  // -> garbage (the FLUX double block's concat/slice views).  Mirror the exact
-  // needs_premat predicate (non-contiguous OR offset OR view-chain, unless the
-  // kernel baked the view via input_chain_composed).  Viewless recycling
-  // streams stay ICB-eligible (the rename above handled their only hazard).
+  // Decline the ICB when a live DAG-path (non-tile) dispatch has a strided-view
+  // input.  The per-op DAG encoder (metal_dispatch_kernel) PRE-MATERIALISES such
+  // an input into a contiguous temp via a CPU gather before the kernel reads it;
+  // the ICB encodes the raw input buffer and skips that gather, so a DAG kernel
+  // would read the strided bytes as contiguous -> garbage.
+  //
+  // Generated-tile kernels are EXEMPT: the tile path (metal_tile_jit_encode and
+  // the ICB's own metal_graph_build) binds the ORIGINAL strided buffer and BAKES
+  // the view strides into the kernel's address expressions, so a strided input is
+  // resolved in-kernel -- identical whether dispatched per-op or via the ICB.  The
+  // ICB run loop (jit_replay_try_metal_graph_run) only ever batches
+  // KDISPATCH_METAL_TILE kernels and breaks on any other kind, so a strided input
+  // on a DAG-path op already declines the ICB run for that op.  Scoping this flag
+  // to non-tile dispatches keeps every captured FLUX block (whose attention /
+  // concat / RoPE views all feed tile-path matmuls) ICB-eligible instead of
+  // declining the whole capture to per-op dispatch (the warm-replay lever:
+  // ~7x on the 4-step velocity net).  Viewless recycling streams stay ICB-eligible
+  // via the [cmd setBarrier] WAW ordering (the metal_graph_recycle path above).
   for (u32 i = 0; i < c->n_ops && !c->metal_graph_unsafe; i++) {
     JitCaptureOp *op = &c->ops[i];
     if (op->kind != JIT_OP_DISPATCH || op->replay_skip) continue;
     if (op->kid == 0 || op->kid >= KERNELS_NEXT) continue;
+    if (cg_kernel_dispatch_kind(op->kid) == KDISPATCH_METAL_TILE) continue;
     KernelEntry *ke = &KERNELS[op->kid];
     for (u32 ii = 0; ii < ke->n_inputs; ii++) {
       int composed = (ke->input_chain_composed != NULL
