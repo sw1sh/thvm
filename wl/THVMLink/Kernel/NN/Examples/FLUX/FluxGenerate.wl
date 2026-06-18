@@ -36,7 +36,7 @@
 
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
-FluxGenerate::usage = "FluxGenerate[prompt$] generates an image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder), returning an Image.\nFluxGenerate[{prompt$1, prompt$2, $$}] generates one image per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (the second image is warm, not a second cold start).\nOptions: \"ImageSize\" (default {256, 256}), \"Seed\" (0), \"Device\" (\"metal\" | \"cpu\" | \"cuda\"), \"NumSteps\" (4), \"ModelDir\" (Automatic -> ~/.cache/thvm/flux2-klein-4b), \"ReturnImages\" (True; False returns raw {3, H, W} arrays).";
+FluxGenerate::usage = "FluxGenerate[prompt$] generates an image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder), returning an Image.\nFluxGenerate[{prompt$1, prompt$2, $$}] generates one image per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (the second image is warm, not a second cold start).\nOptions: \"ImageSize\" (default {256, 256}), RandomSeeding (Automatic -> a fresh random image each call; give an integer for a reproducible seed), \"Device\" (\"metal\" | \"cpu\" | \"cuda\"), \"NumSteps\" (4), \"ModelDir\" (Automatic -> ~/.cache/thvm/flux2-klein-4b), \"ReturnImages\" (True; False returns raw {3, H, W} arrays).";
 
 Begin["`Private`"];
 
@@ -251,7 +251,7 @@ fxTembFn[wf_, dev_][sigma_] := With[{
    ============================================================ *)
 
 Options[FluxGenerate] = {
-    "ImageSize" -> {256, 256}, "Seed" -> 0, "Device" -> "metal",
+    "ImageSize" -> {256, 256}, RandomSeeding -> Automatic, "Device" -> "metal",
     "NumSteps" -> 4, "ModelDir" -> Automatic, "ReturnImages" -> True};
 
 (* module-level session cache: key -> <|ctx, wfq, qwCfg, td, stxt,
@@ -363,7 +363,7 @@ FluxGenerate[prompts_List, opts : OptionsPattern[]] := Module[
      encHost, latents, results},
 
     imgSize = OptionValue["ImageSize"];
-    seed = OptionValue["Seed"];  dev = OptionValue["Device"];
+    seed = OptionValue[RandomSeeding];  dev = OptionValue["Device"];
     nSteps = OptionValue["NumSteps"];  returnImages = OptionValue["ReturnImages"];
     modelDir = OptionValue["ModelDir"] /. Automatic ->
         Environment["HOME"] <> "/.cache/thvm/flux2-klein-4b";
@@ -386,7 +386,7 @@ FluxGenerate[prompts_List, opts : OptionsPattern[]] := Module[
                 Function[{encArr, idx},
                     Module[{ee, z, i = First[idx], lat},
                         ee = ca @ TTensorCreate @ NumericArray[encArr, "Real32"];   (* {stxt,7680} *)
-                        SeedRandom[seed + i];
+                        If[ seed === Automatic, SeedRandom[], SeedRandom[seed + i]];
                         z = ca @ TTensorCreate @ NumericArray[
                             RandomVariate[NormalDistribution[], {simg, 128}], "Real32"];
                         lat = Normal @ fxSampleJit[sess["velJit"], z, ee, sigmas, sess["tembFn"], ca];
