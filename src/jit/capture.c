@@ -995,6 +995,40 @@ typedef struct {
   u32      last_use;
 } JitReplaySlot;
 
+// Drop ONE buffer from this slot's retained set: unpin it, decref it, and
+// compact it out of c->retained.  Used by the replay memory planner when it
+// recycles a packed-away output buffer (jit_capture_pack_replay_temporaries):
+// the recording pinned every dispatch output, but a buffer the packer redirects
+// every reference off is no longer needed by the capture, so its pin must be
+// released.  Crucially the UNPIN must precede the decref: a still-pinned buffer
+// decref'd to refcount 0 is refused by the freelist and HARD-FREED (the slot is
+// vacated, then immediately reused by the next alloc WITHOUT the freelist's
+// memset-on-pop) -- across two sibling captures in one context that recycles a
+// buf_id under a buffer a later replay reads (the FLUX qwJit->velJit velocity
+// collapse).  Unpinning first lets the decref park the buffer on the freelist,
+// where the slot stays reserved until a same-size alloc pops it with a clean
+// memset -- per-capture buffer ownership preserved, memory bound intact.
+static void jit_capture_release_one_retained(JitCapture *c, Backend *b,
+                                             u32 buf_id) {
+  if (c == NULL || b == NULL || buf_id == 0) {
+    return;
+  }
+  for (u32 i = 0; i < c->n_retained; i++) {
+    if (c->retained[i].backend == b && c->retained[i].buf_id == buf_id) {
+      if (b->buf_jit_unpin != NULL) b->buf_jit_unpin(buf_id);
+      if (b->buf_decref != NULL)    b->buf_decref(buf_id);
+      c->retained[i] = c->retained[c->n_retained - 1];
+      c->n_retained--;
+      return;
+    }
+  }
+  // Not in the retained set (e.g. the buffer was the capture result root, or a
+  // duplicate already removed): still drop the pin + ref the packer no longer
+  // needs, so it can be freelisted cleanly rather than hard-freed.
+  if (b->buf_jit_unpin != NULL) b->buf_jit_unpin(buf_id);
+  if (b->buf_decref != NULL)    b->buf_decref(buf_id);
+}
+
 static u64 jit_dispatch_output_nbytes(JitCaptureOp const *op) {
   if (op == NULL || op->kind != JIT_OP_DISPATCH
       || op->kid == 0 || op->kid >= KERNELS_NEXT) {
@@ -1218,7 +1252,21 @@ static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
     op->replay_packed = 1;
     jit_capture_replace_future_dispatch_inputs(c, i, backend,
                                                old_out, new_out);
-    backend->buf_decref(old_out);
+    // Release old_out's recording-time JIT pin BEFORE the decref.  The packer
+    // redirected every live reference off old_out, so the capture no longer
+    // needs it -- but it was jit_pinned by jit_capture_retain_dispatch_bufs at
+    // record time.  A jit_pinned buffer decref'd to refcount 0 is REFUSED by
+    // the freelist (metal_buf_freelist_push_impl skips pinned) and HARD-FREED
+    // instead: metal_buf_free nils the MTLBuffer and vacates the slot, so the
+    // very next metal_buf_alloc / wrap_external reuses that buf_id for a fresh
+    // (different) buffer WITHOUT the freelist's memset-on-pop.  Across two
+    // sibling captures in one context (FLUX qwJit then velJit) that recycled
+    // buf_id lands under a buffer a later replay reads, so the replay diverges
+    // from the capture (the velocity-net collapse).  Unpinning first lets the
+    // decref land old_out on the freelist, where it stays parked (slot NOT
+    // reused) until a same-size alloc pops it with a clean memset -- safe
+    // reuse, per-capture buffer ownership preserved, memory bound intact.
+    jit_capture_release_one_retained(c, backend, old_out);
     slots[slot_idx].last_use = last_use;
   }
   free(slots);
