@@ -733,21 +733,24 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   Term *nls = (Term *)realloc(s->r_dead_lhs_save,  cap * sizeof(Term));
   Term *nrs = (Term *)realloc(s->r_dead_rhs_save,  cap * sizeof(Term));
   u8   *ngj = (u8   *)realloc(s->r_gj_status,      cap * sizeof(u8));
+  u8   *nod = (u8   *)realloc(s->r_overlap_done,   cap * sizeof(u8));
   if (nl == NULL || nr == NULL || nt == NULL || no == NULL ||
-      nd == NULL || nls == NULL || nrs == NULL || ngj == NULL) {
+      nd == NULL || nls == NULL || nrs == NULL || ngj == NULL ||
+      nod == NULL) {
     fprintf(stderr, "atp_ensure_rule_cap: realloc to %u rules failed\n",
             cap);
     exit(1);
   }
   s->lhs = nl; s->rhs = nr; s->r_trace = nt; s->r_orient = no;
   s->r_dead = nd; s->r_dead_lhs_save = nls; s->r_dead_rhs_save = nrs;
-  s->r_gj_status = ngj;
+  s->r_gj_status = ngj; s->r_overlap_done = nod;
   for (u32 i = s->r_cap; i < cap; i++) {
     s->r_trace[i] = ATP_TRACE_NONE;
     s->r_dead[i] = 0;
     s->r_dead_lhs_save[i] = 0;
     s->r_dead_rhs_save[i] = 0;
     s->r_gj_status[i] = ATP_GJ_ST_UNKNOWN;
+    s->r_overlap_done[i] = 0;
   }
 #ifdef THVM_ATPFT_RULES
   // Stage 4: grow the parallel AtpFt slot arrays in lockstep with the
@@ -8454,6 +8457,7 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   // A compaction may have vacated this slot with a stale GJ status;
   // every fresh fact starts untested (WM: a fresh termpair object).
   s->r_gj_status[s->n_rules] = ATP_GJ_ST_UNKNOWN;
+  s->r_overlap_done[s->n_rules] = 0u;
 #ifdef THVM_ATPFT_RULES
   // Stage 4: mirror the Term pair into the parallel AtpFt slots
   // immediately so every later observer sees the two paths in lockstep
@@ -15151,12 +15155,42 @@ static int atp_wmo_ent_cmp(const void *pa, const void *pb) {
   return a->seq < b->seq ? -1 : (a->seq > b->seq ? 1 : 0);
 }
 
+// A flat transposition equation `f(x,y) = f(y,x)` (commutativity): same
+// binary label over two distinct vars, args swapped.
+static u8 atp_is_flat_transposition(Term lhs, Term rhs) {
+  if (term_tag(lhs) != TAG_CTR || term_tag(rhs) != TAG_CTR) return 0u;
+  if (term_ext(lhs) != term_ext(rhs)) return 0u;
+  if (term_ctr_n(lhs) != 2u || term_ctr_n(rhs) != 2u) return 0u;
+  Term a = term_ctr_at(lhs, 0), b = term_ctr_at(lhs, 1);
+  Term c = term_ctr_at(rhs, 0), d = term_ctr_at(rhs, 1);
+  if (term_tag(a) != TAG_FVR || term_tag(b) != TAG_FVR) return 0u;
+  if (term_tag(c) != TAG_FVR || term_tag(d) != TAG_FVR) return 0u;
+  if (term_ext(a) == term_ext(b)) return 0u;
+  return (u8)(term_ext(a) == term_ext(d) && term_ext(b) == term_ext(c));
+}
+
 static u32 atp_wmo_collect_pair(AtpState *s, u32 i, u32 j,
                                 AtpWmoCpEnt **big, u32 *n_big, u32 *cap_big,
                                 CriticalPair *buf) {
   if (s->r_gj_status[i] == ATP_GJ_ST_JOINABLE ||
       s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) {
     return 0;
+  }
+  // Overlap-exhausted-equation gate (default OFF): when a NEWLY-added
+  // commutativity (flat transposition `x|y=y|x`) would re-superpose against
+  // an OLD unorientable equation whose birth-batch is already enumerated
+  // (r_overlap_done), skip it -- WM overlaps commutativity with the equation's
+  // fresh re-derivation (late age), not the stale original (early age).  The
+  // exhausted+transposition pairing keeps comm x freshly-derived equations.
+  if (s->use_overlap_exhaust) {
+    u8 i_exh = s->r_overlap_done[i] && !s->r_orient[i];
+    u8 j_exh = s->r_overlap_done[j] && !s->r_orient[j];
+    if ((i_exh && !s->r_overlap_done[j]
+         && atp_is_flat_transposition(s->lhs[j], s->rhs[j]))
+        || (j_exh && !s->r_overlap_done[i]
+            && atp_is_flat_transposition(s->lhs[i], s->rhs[i]))) {
+      return 0;
+    }
   }
   u32 combo_end[4] = {0, 0, 0, 0};
   u32 nbuf = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH, combo_end);
@@ -15226,6 +15260,10 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
                                     big[k].i, big[k].j);
     }
     free(big);
+    // Mark f overlap-exhausted: its full superposition lane is now
+    // enumerated, so a later-added fact will not re-superpose against it
+    // (WM forms a fact's lane once; default-OFF gate).
+    if (s->use_overlap_exhaust && !s->r_orient[f]) s->r_overlap_done[f] = 1u;
     s->n_wmo_rank_misses = ((AtpWmOrder *)s->wmo)->rank_misses;
     if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
   }

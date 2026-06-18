@@ -5087,6 +5087,13 @@ typedef struct {
   // Grows/compacts in lockstep with lhs[]/rhs[] (atp_ensure_rule_cap /
   // the interreduce shift loop); reset per slot in atp_push_rule.
   u8  *r_gj_status;
+  // Overlap-exhausted bit (use_overlap_exhaust only): set once an
+  // UNORIENTABLE equation slot has enumerated its full CP batch at birth.
+  // A WM fact forms its superposition lane exactly once; thereafter a
+  // newly-added fact does NOT re-superpose against it (WM keeps the
+  // re-derived fresh copy in the overlap set, not the stale original).
+  // Grows in lockstep with lhs[]/rhs[]; reset per slot in atp_push_rule.
+  u8  *r_overlap_done;
   // GJ-driver victim exclusion (WM DarfNichtReduzieren): rule slot the
   // gj_rewrite_step loop must skip.  ATP_GJ_NO_EXCLUDE when inactive
   // (the forward CP-drop path -- byte-identical to pre-port).
@@ -5381,6 +5388,11 @@ typedef struct {
   // {"DemoteOnLhsSimplify" -> True} (in the "Waldmeister" presets)
   // via thvm_atp_set_use_wm_demote.
   u8    use_wm_demote;
+  // Overlap-exhausted-equation gate (env THVM_ATP_OVERLAP_EXHAUST, default
+  // OFF): a newly-added fact does not re-superpose against an old
+  // unorientable equation whose birth-batch already enumerated its CP set
+  // (WM forms a fact's superposition lane once).  See r_overlap_done.
+  u8    use_overlap_exhaust;
   // IR-victim buffer (use_wm_demote only): original sides + the
   // TRACE_SIMPLIFY parent captured at drop time.  Filled by
   // thvm_atp_interreduce, drained by thvm_atp_step after CP

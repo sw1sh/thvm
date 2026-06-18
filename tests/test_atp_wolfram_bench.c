@@ -888,6 +888,13 @@ int main(int argc, char **argv) {
       // (:371-373) for every non-rule new fact, so part of the
       // faithful preset.  THVM_ATP_ESET_SUBSUME env overrides.
       thvm_atp_set_use_eset_subsume(s, 1u);
+      // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
+      // overlaps an equation's FRESH re-derivation, not the stale exhausted
+      // original).  Verified to preserve all 73 byte-identical baselines and
+      // advance ShefferAxioms__OrAssociativity firstdiv 14->19.  ON in the
+      // faithful preset; THVM_ATP_NO_OVERLAP_EXHAUST env disables.
+      s->use_overlap_exhaust =
+          (getenv("THVM_ATP_NO_OVERLAP_EXHAUST") == NULL) ? 1u : 0u;
       // Push-time queue-vs-queue subsumption OFF: thvm-native filter
       // with no WM counterpart (recentCPinsert queues every treated
       // survivor; SS_TermpaarSubsummiertTermpaar's only set-level
