@@ -1772,5 +1772,15 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
     ll = 0x3fffu;
   }
   u32 k5 = wmo_preorder_rank(i_outer, cp->pos, cp->pos_len);
+  // A phase-E eTT (j WM-reverse face) whose inner parent `i` is an OLDER
+  // fact is, in Waldmeister, formed when that older fact is activated
+  // (U1_KPsBildenZuGleichung, Unifikation1.c:1561), not when the new fact
+  // `f` is.  WM enumerates the older fact's batch first, so the CP carries
+  // a lower FIFO age (w2) and wins the equal-weight tiebreak over the new
+  // fact's own phase-D tops (KPV_Select, KPVerwaltung.c:756).  thvm fuses
+  // both into `f`'s single batch, where phase E (5) sorts after phase D
+  // (4); rank such an eTT just ahead of phase D to restore WM's age order.
+  if (phase == 5u && j == f && s->r_trace[i] < s->r_trace[f])
+    phase = 3u;
   return wmo_pack_key(phase, 0, k2, ll, ch, k5);
 }
