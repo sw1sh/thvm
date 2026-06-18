@@ -888,6 +888,18 @@ int main(int argc, char **argv) {
       // (:371-373) for every non-rule new fact, so part of the
       // faithful preset.  THVM_ATP_ESET_SUBSUME env overrides.
       thvm_atp_set_use_eset_subsume(s, 1u);
+      // WM flatterm-faithful (over-eager counter-cross) eset-subsume matcher
+      // (MO_TermpaarSubsummiertZweites): WM removes axiom2 `x*x = x*(y*(y*y))`
+      // on commutativity-add via a binding-slot vs variable-symbol cross that
+      // over-matches the Gegenrichtung of commutativity (firstdiv-19).  The
+      // matcher is faithful and removes axiom2 correctly, BUT removing it then
+      // orphan-murders its queued CPs more broadly than WM's KPV_KillParent --
+      // WM re-derives axiom2 and reselects it at pick 16, thvm kills that CP --
+      // so the standalone matcher regresses soa firstdiv 19->16.  OFF by
+      // default until the orphan-handling matches WM; THVM_ATP_WM_FLAT_SUBSUME
+      // opts in for experimentation.
+      thvm_atp_set_use_wm_flat_subsume(
+          s, (getenv("THVM_ATP_WM_FLAT_SUBSUME") != NULL) ? 1u : 0u);
       // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
       // overlaps an equation's FRESH re-derivation, not the stale exhausted
       // original).  Verified to preserve all 73 byte-identical baselines and

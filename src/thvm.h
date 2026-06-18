@@ -4982,6 +4982,12 @@ typedef struct {
   // thvm_atp_set_use_eset_subsume.
   u8   use_eset_subsume;
   u32  n_eqs_dropped_eset_subsumed;
+  // When set, atp_eset_subsume_by_new uses the WM flatterm-faithful
+  // (counter-cross, over-eager) matcher atp_wm_flat_subsumes_pair instead
+  // of the correct tree matcher -- needed to reproduce WM removing axiom2
+  // on commutativity-add (firstdiv-19, ShefferAxioms OrAssociativity).
+  // Default OFF; ON in the "Waldmeister"* presets alongside use_eset_subsume.
+  u8   use_wm_flat_subsume;
 
   // WM CP-emission ORDER (FIFO age assignment): when set, each new
   // fact's CP batch is sorted into Waldmeister's emission order before
@@ -5726,6 +5732,9 @@ fn void      thvm_atp_set_use_pop_subsume(AtpState *s, u8 on);
 // WM E-set subsumption destroy on new-equation entry
 // (GMSubsummierenMitGleichung; see AtpState.use_eset_subsume).
 fn void      thvm_atp_set_use_eset_subsume(AtpState *s, u8 on);
+// WM flatterm-faithful (over-eager counter-cross) eset-subsume matcher
+// (see AtpState.use_wm_flat_subsume).
+fn void      thvm_atp_set_use_wm_flat_subsume(AtpState *s, u8 on);
 // Push-time queue-vs-queue subsumption gate (thvm-native, no WM
 // counterpart; see AtpState.use_queue_subsume).  Default ON; the
 // "Waldmeister"* presets turn it OFF.

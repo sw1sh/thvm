@@ -8918,6 +8918,11 @@ fn void thvm_atp_set_use_eset_subsume(AtpState *s, u8 on) {
   s->use_eset_subsume = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_use_wm_flat_subsume(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wm_flat_subsume = on ? 1u : 0u;
+}
+
 // Push-time queue-vs-queue subsumption gate (no WM counterpart; see
 // AtpState.use_queue_subsume in thvm.h).  Default ON = the historical
 // thvm engine; the "Waldmeister"* presets turn it OFF.
@@ -9411,7 +9416,20 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   }
   if (g_atp_phase_enabled) g_atp_phase_us_pop_normalize += atp_now_us() - _ph_pop_t0;
 
+  // Per-pick pop-treatment verdict trace (THVM_ATP_POP_TRACE), mirroring
+  // WM's WM_POPDUMP (KPV_Select) so the two engines' keep/drop sequences
+  // can be aligned programmatically.  Default-off, behaviour-neutral.
+  static int pop_trace = -1;
+  if (pop_trace < 0) pop_trace = atp_env_on("THVM_ATP_POP_TRACE");
+#define ATP_POPV(verdict) do { \
+    if (pop_trace) { \
+      fprintf(stderr, "POPV pick=%u verdict=%s lhs=", s->cp_select_count, (verdict)); \
+      atp_dbg_print_term(stderr, l); fputs(" rhs=", stderr); \
+      atp_dbg_print_term(stderr, r); fputc('\n', stderr); \
+    } } while (0)
+
   if (kbo_eq(l, r)) {
+    ATP_POPV("JOINED");
     // Trivially joined: this CP adds no rule.  Drop the NORM_STEP
     // entries just recorded for it (rewind the trace to trace_mark) so
     // no surviving trace entry references a Term past hcp_norm, then
@@ -9443,6 +9461,7 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // the joined / pop-subsume branches.
   if (s->use_perm_subsume && g_atp_perm_subsume_mask != 0ull &&
       atp_cp_perm_subsumed(l, r)) {
+    ATP_POPV("PERMSUB");
     s->n_cps_dropped_perm_subsumed++;
     if (s->record_norm_steps) {
       s->n_trace = trace_mark;
@@ -9460,6 +9479,7 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // Terms are dead.
   if (s->use_pop_subsume && atp_compare(s, l, r) == KBO_UN &&
       atp_pop_eq_subsumed(s, l, r)) {
+    ATP_POPV("SUBSUMED");
     s->n_cps_dropped_pop_subsumed++;
     if (s->record_norm_steps) {
       s->n_trace = trace_mark;
@@ -9471,10 +9491,12 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
 
   AtpAddedRange added = thvm_atp_orient_and_add(s, l, r);
   if (added.count == 0) {
-    // R full, or some other refusal.  Count the work and continue.
+    ATP_POPV("REFUSED");
     s->step++;
     return ATP_RUNNING;
   }
+  ATP_POPV("KEPT");
+#undef ATP_POPV
   // WM `KPV_IncAktivierterRE` (SUE_selectedCPRE, KPVerwaltung.c:640): the
   // popped CP survived joined/perm/pop-subsume and became a rule or
   // equation.  This is the counter WM's CPdimension() reads to decide
@@ -13122,6 +13144,126 @@ static u8 atp_eq_subsumes_pair(Term p_lhs, Term p_rhs, Term lhs, Term rhs) {
   }
 }
 
+// --- WM flatterm-faithful subsumption (firstdiv-19) -----------------------
+// thvm's atp_eq_subsumes_pair above uses tree matching (thvm_match), which is
+// the CORRECT subsumption.  WM's MO_TermpaarSubsummiertZweites
+// (MatchOperationen.c:1452) is NOT correct: it binds a pattern variable to the
+// xM slot named by an APPEARANCE COUNTER (SubstErgaenzenSubsumption :1445,
+// xMletztes++) but unbound-checks / reads it back by the variable's OWN symbol
+// (VarUngebunden / SubstitutVon).  For a pattern whose variables are not
+// numbered in first-appearance order (the Gegenrichtung of commutativity,
+// `x2*x1`), those two index spaces CROSS: the pattern's later variable stays
+// "unbound" into the second side and binds to a whole compound with no
+// consistency recheck -- an OVER-EAGER match.  That quirk is exactly why WM
+// removes axiom2 `x*x = x*(y*(y*y))` the moment commutativity enters, then
+// re-derives it later; reproducing WM's CP-selection sequence byte-for-byte
+// requires reproducing the quirk.  EsFolgtSubstitutVon's flatterm-prefix test
+// (:169) reduces to structural equality for complete-subterm bindings (a
+// complete preorder subterm is self-delimiting), so kbo_eq stands in for it.
+#define ATP_WMFLAT_MAX 1024u
+typedef struct {
+  Term node[ATP_WMFLAT_MAX];
+  u32  end[ATP_WMFLAT_MAX];        // exclusive preorder end of subtree at i
+  u32  n;
+  u8   overflow;
+} AtpWmFlat;
+
+static void atp_wmflat_preorder(Term t, AtpWmFlat *f) {
+  if (f->n >= ATP_WMFLAT_MAX) { f->overflow = 1u; return; }
+  u32 self = f->n++;
+  f->node[self] = t;
+  if (term_tag(t) == TAG_CTR) {
+    u32 k = term_ctr_n(t);
+    for (u32 c = 0; c < k; c++) atp_wmflat_preorder(term_ctr_at(t, c), f);
+  }
+  f->end[self] = f->n;
+}
+
+// One side of MO_TermpaarSubsummiertZweites: walk pattern preorder against the
+// subject preorder.  `subst`/`setf` (indexed 0..maxslot) and `*counter` PERSIST
+// across the left and right calls (WM resets only once, at MO entry).
+static u8 atp_wmflat_phase(const AtpWmFlat *pat, const AtpWmFlat *sub,
+                           Term *subst, u8 *setf, u32 *counter, u32 maxslot) {
+  u32 i = 0, j = 0;
+  while (i < pat->n) {
+    if (j >= sub->n) return 0;           // subject exhausted, pattern not
+    Term pn = pat->node[i];
+    if (term_tag(pn) == TAG_FVR) {
+      u32 v = (u32)term_ext(pn);         // READ slot = variable's own symbol
+      if (v >= maxslot) return 0;
+      if (!setf[v]) {                    // VarUngebunden(v)
+        u32 slot = *counter;             // WRITE slot = appearance counter
+        if (slot >= maxslot) return 0;
+        (*counter)++;
+        subst[slot] = sub->node[j];
+        setf[slot] = 1u;                 // the counter-vs-symbol CROSS
+      } else if (!kbo_eq(subst[v], sub->node[j])) {
+        return 0;                        // EsFolgt == structural equality
+      }
+      i = pat->end[i];                   // pattern var leaf -> next symbol
+      j = sub->end[j];                   // subject -> skip whole subterm
+    } else {                             // function symbol: must agree
+      Term sn = sub->node[j];
+      if (term_tag(sn) != TAG_CTR ||
+          term_ext(sn) != term_ext(pn) ||
+          term_ctr_n(sn) != term_ctr_n(pn)) return 0;
+      i++;                               // descend (advance one symbol each)
+      j++;
+    }
+  }
+  return 1;
+}
+
+static u8 atp_wmflat_mo(Term pl, Term pr, Term sl, Term sr) {
+  AtpWmFlat fpl, fpr, fsl, fsr;
+  fpl.n = fpr.n = fsl.n = fsr.n = 0u;
+  fpl.overflow = fpr.overflow = fsl.overflow = fsr.overflow = 0u;
+  atp_wmflat_preorder(pl, &fpl);
+  atp_wmflat_preorder(pr, &fpr);
+  atp_wmflat_preorder(sl, &fsl);
+  atp_wmflat_preorder(sr, &fsr);
+  if (fpl.overflow || fpr.overflow || fsl.overflow || fsr.overflow) return 0;
+  enum { WMFLAT_SLOTS = 64u };
+  Term subst[WMFLAT_SLOTS];
+  u8   setf[WMFLAT_SLOTS];
+  for (u32 t = 0; t < WMFLAT_SLOTS; t++) setf[t] = 0u;
+  u32 counter = 0u;
+  if (!atp_wmflat_phase(&fpl, &fsl, subst, setf, &counter, WMFLAT_SLOTS))
+    return 0;
+  if (!atp_wmflat_phase(&fpr, &fsr, subst, setf, &counter, WMFLAT_SLOTS))
+    return 0;
+  return 1;
+}
+
+// WM SubsumptionBody (Subsumption.c:67) over the counter-cross matcher.  Tries
+// both PATTERN orientations (Subsumption.c:108-109); thvm orients unorientable
+// equations arbitrarily, so both SUBJECT orientations are covered too (WM picks
+// the one distinguished direction -- TP_RichtungAusgezeichnet -- which thvm's
+// storage may not match).  Peels the subject pair into its unique differing
+// subterm, like atp_eq_subsumes_pair.
+static u8 atp_wm_flat_subsumes_pair(Term p_lhs, Term p_rhs, Term lhs, Term rhs) {
+  for (;;) {
+    if (atp_wmflat_mo(p_lhs, p_rhs, lhs, rhs)) return 1;
+    if (atp_wmflat_mo(p_rhs, p_lhs, lhs, rhs)) return 1;
+    if (atp_wmflat_mo(p_lhs, p_rhs, rhs, lhs)) return 1;
+    if (atp_wmflat_mo(p_rhs, p_lhs, rhs, lhs)) return 1;
+    if (term_tag(lhs) != TAG_CTR || term_tag(rhs) != TAG_CTR) return 0;
+    if (term_ext(lhs) != term_ext(rhs)) return 0;
+    u32 n = term_ctr_n(lhs);
+    if (term_ctr_n(rhs) != n) return 0;
+    u32 diff = n;
+    for (u32 i = 0; i < n; i++) {
+      if (!kbo_eq(term_ctr_at(lhs, i), term_ctr_at(rhs, i))) {
+        if (diff != n) return 0;
+        diff = i;
+      }
+    }
+    if (diff == n) return 0;
+    lhs = term_ctr_at(lhs, diff);
+    rhs = term_ctr_at(rhs, diff);
+  }
+}
+
 // WM -ks "s" pop-time E-subsumption test (SS_TermpaarSubsummiertVonGM,
 // INF/Subsumption.c:91-104).  Returns 1 if `(lhs, rhs)` is subsumed by
 // a live unorientable equation under the SubsumptionBody semantics
@@ -13138,7 +13280,20 @@ static u8 atp_pop_eq_subsumed(AtpState *s, Term lhs, Term rhs) {
   for (u32 k = 0; k < s->n_rules; k++) {
     if (s->r_orient[k]) continue;                    // E only, never R
     if (s->r_dead != NULL && s->r_dead[k]) continue;
-    if (atp_eq_subsumes_pair(s->lhs[k], s->rhs[k], lhs, rhs)) return 1;
+    if (atp_eq_subsumes_pair(s->lhs[k], s->rhs[k], lhs, rhs)) {
+      static int sub_trace = -1;
+      if (sub_trace < 0) sub_trace = atp_env_on("THVM_ATP_POP_TRACE");
+      if (sub_trace) {
+        fprintf(stderr, "POPSUBR pick=%u subsumer_slot=%u orient=%u lhs=",
+                s->cp_select_count, k, s->r_orient[k]);
+        atp_dbg_print_term(stderr, s->lhs[k]); fputs(" rhs=", stderr);
+        atp_dbg_print_term(stderr, s->rhs[k]);
+        fputs(" query_lhs=", stderr); atp_dbg_print_term(stderr, lhs);
+        fputs(" query_rhs=", stderr); atp_dbg_print_term(stderr, rhs);
+        fputc('\n', stderr);
+      }
+      return 1;
+    }
   }
   return 0;
 }
@@ -13170,7 +13325,10 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
   for (u32 i = 0; i < new_i; i++) {
     if (s->r_orient[i]) continue;   // E only (RE_forGleichungenRobust)
     if (s->r_dead[i]) continue;
-    if (!atp_eq_subsumes_pair(new_lhs, new_rhs, s->lhs[i], s->rhs[i]))
+    u8 subsumed = s->use_wm_flat_subsume
+        ? atp_wm_flat_subsumes_pair(new_lhs, new_rhs, s->lhs[i], s->rhs[i])
+        : atp_eq_subsumes_pair(new_lhs, new_rhs, s->lhs[i], s->rhs[i]);
+    if (!subsumed)
       continue;
     s->r_dead_lhs_save[i] = s->lhs[i];
     s->r_dead_rhs_save[i] = s->rhs[i];
@@ -13183,8 +13341,12 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
     // queued CPs die as orphans at pop (selectNonOrphan), consuming
     // no selection.  Mirror via the lazy trace-dead mark.
     if (atp_rule_trace_on()) {
-      fprintf(stderr, "  ESET-SUBSUME kill (slot %u, trace %u)\n",
+      fprintf(stderr, "  ESET-SUBSUME kill (slot %u, trace %u) lhs=",
               i, s->r_trace[i]);
+      atp_dbg_print_term(stderr, s->r_dead_lhs_save[i]);
+      fputs(" rhs=", stderr);
+      atp_dbg_print_term(stderr, s->r_dead_rhs_save[i]);
+      fputc('\n', stderr);
     }
     if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[i]);
     // WM order mirror: the subsumed equation's faces leave the tree
