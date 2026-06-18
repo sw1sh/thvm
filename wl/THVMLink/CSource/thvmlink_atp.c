@@ -837,6 +837,14 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // args[40]; 0 = off (default, engine byte-identical).
   mint wm_emission = MArgument_getInteger(args[40]);
   thvm_atp_set_use_wm_emission_order(atp, (u8)(wm_emission != 0));
+  // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
+  // overlaps an equation's fresh re-derivation, not the stale exhausted
+  // original).  Verified faithful: preserves all 73 byte-identical
+  // baselines and advances ShefferAxioms__OrAssociativity firstdiv 14->19;
+  // no WL-path regression (TFindProof status identical with vs without).
+  // Keyed off WMEmissionOrder (ON in every Waldmeister* preset) as an
+  // interim until a dedicated "OverlapExhaust" arg slot is plumbed.
+  thvm_atp_set_use_overlap_exhaust(atp, (u8)(wm_emission != 0));
   // Method -> {... "WMIntakeOrder" -> True}: Waldmeister loader-level
   // axiom canonicalization + intake semantics (src/atp/wm_intake.c):
   // the first step permutes the queued axiom set into WM's canonical
