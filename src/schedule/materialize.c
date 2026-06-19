@@ -1427,12 +1427,13 @@ static void arena_compute(void) {
   if (!arena_plan_enabled())     return;
   if (BOUNDARY_ORDER_LEN == 0)   return;
   if (CURRENT_BACKEND == NULL)   return;
-  int is_cpu  = (CURRENT_BACKEND == &CPU_BACKEND);
-  int is_cuda = 0;
+  int is_cpu   = (CURRENT_BACKEND == &CPU_BACKEND);
+  int is_metal = (CURRENT_BACKEND == &METAL_BACKEND);
+  int is_cuda  = 0;
 #ifdef THVM_HAS_CUDA
   is_cuda = (CURRENT_BACKEND == &CUDA_BACKEND);
 #endif
-  if (!is_cpu && !is_cuda)       return;
+  if (!is_cpu && !is_cuda && !is_metal) return;
 
   ARENA_SLOTS_LEN = BOUNDARY_ORDER_LEN;
   static u32 first_pos[ARENA_SLOTS_CAP];
@@ -1595,6 +1596,19 @@ static int arena_ensure(void) {
     return 1;
   }
 #endif
+  if (CURRENT_BACKEND == &METAL_BACKEND) {
+    // One shared device buffer for the whole pass's working set; the
+    // per-boundary views below slice it at offsets.  thvm_metal_buf_arena_alloc
+    // marks skip_freelist so end-of-realize frees it wholesale (a one-pass-
+    // sized slot must not be parked for a later best-fit to snag).  Apple's
+    // unified-memory MTLBuffer is host-visible (MTLResourceStorageModeShared),
+    // so the view zeroing below memsets through [buf contents].  Mirror of the
+    // CUDA branch above (cuda_buf_alloc + skip_freelist) and tinygrad
+    // schedule/memory.py:56 (UOp.new_buffer for the shared arena).
+    ARENA_BUF_ID = thvm_metal_buf_arena_alloc(ARENA_SIZE);
+    if (ARENA_BUF_ID == 0)      return 0;
+    return 1;
+  }
   return 0;
 }
 
@@ -1603,12 +1617,13 @@ static int arena_ensure(void) {
 static u32 arena_tensor_alloc(u32 ord_idx, Shape shape, u32 dtype) {
   if (ord_idx >= ARENA_SLOTS_LEN)        return 0;
   if (!ARENA_SLOTS[ord_idx].in_arena)    return 0;
-  int is_cpu  = (CURRENT_BACKEND == &CPU_BACKEND);
-  int is_cuda = 0;
+  int is_cpu   = (CURRENT_BACKEND == &CPU_BACKEND);
+  int is_metal = (CURRENT_BACKEND == &METAL_BACKEND);
+  int is_cuda  = 0;
 #ifdef THVM_HAS_CUDA
   is_cuda = (CURRENT_BACKEND == &CUDA_BACKEND);
 #endif
-  if (!is_cpu && !is_cuda)               return 0;
+  if (!is_cpu && !is_cuda && !is_metal)  return 0;
   if (!arena_ensure())                   return 0;
   if (TENS_NEXT >= TENS_CAP) {
     fprintf(stderr, "arena_tensor_alloc: out of descriptor slots\n");
@@ -1650,6 +1665,23 @@ static u32 arena_tensor_alloc(u32 ord_idx, Shape shape, u32 dtype) {
                                           ARENA_BUF_ID);
   }
 #endif
+  else if (is_metal) {
+    // The view shares ARENA_BUF_ID's MTLBuffer at byte_offset `off`; the
+    // helper zeroes the [off, off+nbytes) window through [buf contents]
+    // (unified host-visible memory) before handing it out -- the Metal
+    // analog of the memset / cuMemsetD8 above.  Every kernel bind (input
+    // AND output) applies the view's byte_offset, so the slice reads/writes
+    // exactly its window; Apple hazard-tracks accesses that alias within one
+    // MTLBuffer, making ICB-replayed recycles correct.  Mirror of the CUDA
+    // branch and tinygrad ops_metal.py:192 (_offset) + memory.py:59 (SLICE).
+    d->buf_id = thvm_metal_buf_arena_view(ARENA_BUF_ID, off, nbytes);
+    if (d->buf_id == 0) {
+      // View alloc failed (table full): roll back the descriptor and miss so
+      // the caller falls through to a plain tensor_alloc.
+      TENS_NEXT--;
+      return 0;
+    }
+  }
   ARENA_ALLOCS_ARENA++;
   return tid;
 }
@@ -5794,6 +5826,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
   if (out_tid == 0) {
     out_tid = tensor_alloc(op_backend, out_shape, out_dtype);
     if (out_tid != 0 && op_backend == &CPU_BACKEND) ARENA_ALLOCS_LEGACY++;
+    if (out_tid != 0 && op_backend == &METAL_BACKEND) ARENA_ALLOCS_LEGACY++;
 #ifdef THVM_HAS_CUDA
     if (out_tid != 0 && op_backend == &CUDA_BACKEND) ARENA_ALLOCS_LEGACY++;
 #endif
@@ -6570,6 +6603,9 @@ fn Term thvm_materialize(Term term) {
           cuda_buf_decref(ARENA_BUF_ID);
         }
 #endif
+        else if (CURRENT_BACKEND == &METAL_BACKEND) {
+          thvm_metal_buf_arena_release(ARENA_BUF_ID);
+        }
       }
       arena_reset();
       return term;
@@ -6599,6 +6635,13 @@ fn Term thvm_materialize(Term term) {
       cuda_buf_decref(ARENA_BUF_ID);
     }
 #endif
+    else if (CURRENT_BACKEND == &METAL_BACKEND) {
+      // Drop the producer ref thvm_metal_buf_arena_alloc gave the arena buf;
+      // its skip_freelist flag keeps it off the recycle list, so once its last
+      // view decrefs it is freed wholesale (thvm_metal_buf_arena_view increfs
+      // the parent per view, mirroring the CPU/CUDA arena lifetime above).
+      thvm_metal_buf_arena_release(ARENA_BUF_ID);
+    }
   }
   if (getenv("THVM_ARENA_DUMP")) {
     fprintf(stderr,

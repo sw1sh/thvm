@@ -2164,6 +2164,27 @@ u32  thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor);
 // (nonzero only for a borrowed disk-mmap wrap).  Applied at kernel input
 // binds via [enc setBuffer:buf offset:thvm_metal_buf_byte_offset(bid) ..].
 u64  thvm_metal_buf_byte_offset(u32 buf_id);
+// Per-realize ARENA planner (schedule/materialize.c) Metal handles.  The
+// planner allocates ONE device buffer for a pass's working set, then hands
+// out per-boundary SLICES (views) of it; non-overlapping lifetimes share
+// bytes.  Recycling a slice is correct under the ICB because Apple hazard-
+// tracks accesses that alias within one MTLBuffer (a separate-MTLBuffer
+// recycle is not ordered by the per-command [cmd setBarrier] on Apple9).
+// Mirror of the CUDA arena helpers (backend/cuda/buf_alloc.c) and tinygrad
+// ops_metal.py:192 (_offset) + schedule/memory.py:56-59.
+//
+// thvm_metal_buf_arena_alloc: allocate the shared arena buffer of `nbytes`,
+// marked skip_freelist (freed wholesale at end-of-realize).  Returns 0 on
+// failure.
+u32  thvm_metal_buf_arena_alloc(u64 nbytes);
+// thvm_metal_buf_arena_view: a new buf_id whose .buf is arena_buf_id's
+// MTLBuffer at byte_offset `offset`, length `nbytes`, lifetime tied to the
+// arena (owns_data == 0; increfs the parent).  Zeroes the [offset,
+// offset+nbytes) window before returning.  Returns 0 on failure.
+u32  thvm_metal_buf_arena_view(u32 arena_buf_id, u64 offset, u64 nbytes);
+// thvm_metal_buf_arena_release: drop the arena allocation's producer ref at
+// end-of-realize; the buffer frees once its last view releases.
+void thvm_metal_buf_arena_release(u32 arena_buf_id);
 // True iff buf_id is a borrowed (newBufferWithBytesNoCopy) disk-mmap wrap.
 int  thvm_metal_buf_is_borrowed(u32 buf_id);
 // Explicitly free a borrowed disk-mmap wrap (flushes dispatch, drops the

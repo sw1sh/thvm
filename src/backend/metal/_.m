@@ -394,6 +394,29 @@ typedef struct {
   // wires the same 7.75GB into the GPU page table again and again -- the
   // 100GB+ accumulation blowup.  NULL for ordinary device buffers.
   void         *host_base;
+  // owns_data: 1 for a buffer this slot allocated (newBufferWithLength) and
+  // must release; 0 for an arena VIEW (shares another slot's MTLBuffer at a
+  // byte_offset -- the arena slot owns it, the view must NOT nil .buf or it
+  // drops the shared MTLBuffer out from under every sibling view).  Borrowed
+  // wraps own their wrapper object (deallocator:nil leaves the mmap pages),
+  // so they keep owns_data == 1.  Mirror of CudaBuf.owns_data
+  // (backend/cuda/buf_alloc.c:65,98) and CpuBuf.owns_data.
+  u8            owns_data;
+  // parent_buf_id: for an arena VIEW, the slot that owns the shared
+  // MTLBuffer.  Each view increfs its parent at creation and the parent is
+  // decref'd when the view is freed, so the arena allocation outlives every
+  // slice and is released only when its own refcount hits zero.  Mirror:
+  // CudaBuf.parent_buf_id (backend/cuda/buf_alloc.c:116-124,
+  // buf_free.c:15,28-31) and tinygrad schedule/memory.py:59 (each buffer
+  // becomes a SLICE into the shared arena).  0 for non-views.
+  u32           parent_buf_id;
+  // skip_freelist: never park this slot on the recycle freelist on decref-
+  // to-zero.  Set on the arena allocation itself: a per-realize arena is
+  // sized to ONE pass's working set and freed wholesale at end-of-realize;
+  // parking it would let a later pass's best-fit pop a huge slot for a tiny
+  // request (or leak it while every realize allocs a fresh arena).  Mirror
+  // of CudaBuf.skip_freelist (materialize.c arena_ensure) and CpuBuf.
+  u8            skip_freelist;
 } MetalBuf;
 
 static MetalBuf METAL_BUFS[METAL_BUFS_CAP];
@@ -500,6 +523,15 @@ static int metal_buf_freelist_push_impl(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return 0;
   if (METAL_BUFS[buf_id].jit_pinned) return 0;   // held by an active JIT capture
   if (METAL_BUFS[buf_id].borrowed)   return 0;   // wraps mmap pages we don't own
+  // Never recycle an arena VIEW (it owns no storage -- its .buf is the parent
+  // arena's MTLBuffer at a byte_offset; a freelist pop would memset+rehand the
+  // shared bytes as a fresh tensor) nor the arena allocation itself (sized to
+  // one realize's working set, freed wholesale at end-of-realize; parking it
+  // would let a later pass's best-fit snag a huge slot for a tiny request, or
+  // leak it).  Mirror of CudaBuf.skip_freelist (materialize.c arena_ensure)
+  // and the owns_data == 0 view guard.
+  if (METAL_BUFS[buf_id].skip_freelist) return 0;
+  if (!METAL_BUFS[buf_id].owns_data)    return 0;
   if (METAL_FREELIST_LEN >= METAL_FREELIST_CAP) return 0;
   if (METAL_BUFS[buf_id].buf == nil) return 0;
   METAL_FREELIST[METAL_FREELIST_LEN++] = buf_id;
@@ -583,6 +615,9 @@ static u32 metal_buf_alloc(u64 nbytes) {
   METAL_BUFS[id].borrowed  = 0;
   METAL_BUFS[id].byte_offset = 0;
   METAL_BUFS[id].host_base = NULL;
+  METAL_BUFS[id].owns_data = 1;
+  METAL_BUFS[id].parent_buf_id = 0;
+  METAL_BUFS[id].skip_freelist = 0;
   if (METAL_BUFS[id].buf == nil) {
     fprintf(stderr, "thvm: metal_buf_alloc -- failed to allocate %llu bytes\n",
             (unsigned long long)nbytes);
@@ -591,6 +626,89 @@ static u32 metal_buf_alloc(u64 nbytes) {
   }
   metal_record_memory_peak();
   return id;
+}
+
+// Find (or grow into) a free METAL_BUFS slot.  Mirrors the slot-reuse scan
+// in metal_buf_alloc / thvm_metal_buf_wrap_external.  Returns 0 if the table
+// is full.
+static u32 metal_buf_grab_slot(void) {
+  for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    if (METAL_BUFS[i].buf == nil && METAL_BUFS[i].refcount == 0) return i;
+  }
+  if (METAL_BUFS_NEXT >= METAL_BUFS_CAP) {
+    fprintf(stderr, "thvm: metal_buf_grab_slot -- buffer table full\n");
+    return 0;
+  }
+  return METAL_BUFS_NEXT++;
+}
+
+// Non-static handle for the per-realize arena planner (materialize.c, a
+// separate TU): allocate a plain device buffer of `nbytes` and mark it as
+// the arena ALLOCATION -- skip_freelist so end-of-realize frees it wholesale
+// rather than parking a one-pass-sized slot for a later best-fit to snag.
+// Returns the buf_id (0 on failure).  Mirror of materialize.c's CUDA arena
+// branch (cuda_buf_alloc + CUDA_BUFS[id].skip_freelist = 1) and
+// tinygrad schedule/memory.py:56 (UOp.new_buffer for the shared arena).
+u32 thvm_metal_buf_arena_alloc(u64 nbytes) {
+  u32 id = metal_buf_alloc(nbytes);
+  if (id == 0) return 0;
+  METAL_BUFS[id].skip_freelist = 1;
+  return id;
+}
+
+// Arena VIEW: a NEW METAL_BUFS slot whose .buf is the SAME id<MTLBuffer> as
+// METAL_BUFS[arena_buf_id].buf (shared, ARC-retained by the strong store), at
+// .byte_offset = offset.  owns_data = 0 so metal_buf_free never frees the
+// shared allocation through the view; parent_buf_id ties the view's lifetime
+// to the arena, increfing the parent so the allocation outlives every slice
+// and is released only when its own refcount reaches zero.  Every kernel bind
+// (input AND output) applies byte_offset, so the slice reads/writes exactly
+// its window of the shared buffer; Apple's hazard tracking serialises two
+// accesses that alias WITHIN one MTLBuffer, which is what makes ICB-replayed
+// buffer RECYCLES correct (a separate-MTLBuffer recycle is not ordered by the
+// per-command [cmd setBarrier] on Apple9 -- the whole reason for the arena).
+// Mirror: backend/cuda/buf_alloc.c:116-124 (cuda_buf_alloc_arena_view) and
+// tinygrad ops_metal.py:192 (_offset returns MetalBuffer(buf.buf, size,
+// offset)) + schedule/memory.py:59 (SLICE into the shared arena).
+u32 thvm_metal_buf_arena_view(u32 arena_buf_id, u64 offset, u64 nbytes) {
+  if (arena_buf_id == 0 || arena_buf_id >= METAL_BUFS_NEXT) return 0;
+  id<MTLBuffer> arena = METAL_BUFS[arena_buf_id].buf;
+  if (arena == nil) return 0;
+  // Zero the slot's window before handing it out: a previous lifetime's bytes
+  // still occupy it (the arena planner only tracks block ownership, not
+  // zeroing), and kernels that accumulate (REDUCE_ADD) depend on a zero
+  // start.  Mirror of materialize.c's memset (CPU) / cuMemsetD8 (CUDA) before
+  // the view alloc.  Shared storage is host-visible (MTLResourceStorageMode-
+  // Shared), so a plain memset through [arena contents] is correct and cheap.
+  memset((char *)[arena contents] + offset, 0, (size_t)nbytes);
+  u32 id = metal_buf_grab_slot();
+  if (id == 0) return 0;
+  METAL_BUFS[id].buf           = arena;   // shared; ARC retains via this store
+  METAL_BUFS[id].nbytes        = nbytes;
+  METAL_BUFS[id].refcount      = 1;
+  METAL_BUFS[id].preserved     = 0;
+  METAL_BUFS[id].jit_pinned    = 0;
+  METAL_BUFS[id].borrowed      = 0;
+  METAL_BUFS[id].byte_offset   = offset;
+  METAL_BUFS[id].host_base     = NULL;
+  METAL_BUFS[id].owns_data     = 0;       // view: never frees the shared buf
+  METAL_BUFS[id].parent_buf_id = arena_buf_id;
+  METAL_BUFS[id].skip_freelist = 0;
+  METAL_BUFS[arena_buf_id].refcount++;    // keep the arena alive for the view
+  metal_record_memory_peak();
+  return id;
+}
+
+// Drop the producer reference the arena allocation holds (the +1 from
+// thvm_metal_buf_arena_alloc).  Called by the per-realize planner at
+// end-of-pass: each live view still holds a ref (incref'd in
+// thvm_metal_buf_arena_view), so the allocation survives until the last view
+// releases, then frees wholesale (skip_freelist keeps it off the recycle
+// list).  Mirror of materialize.c's cpu_buf_decref / cuda_buf_decref of
+// ARENA_BUF_ID at end-of-pass.
+void thvm_metal_buf_arena_release(u32 arena_buf_id) {
+  if (arena_buf_id == 0 || arena_buf_id >= METAL_BUFS_NEXT) return;
+  metal_buf_decref(arena_buf_id);
 }
 
 // Zero-copy wrap of a host pointer into the METAL_BUFS table.  `page_base`
@@ -698,6 +816,11 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
   METAL_BUFS[slot].borrowed   = 1;
   METAL_BUFS[slot].byte_offset = minor;
   METAL_BUFS[slot].host_base   = page_base;
+  // The wrapper object is owned here (deallocator:nil leaves the mmap pages);
+  // metal_buf_free nils only the wrapper, never the bytes.  Not an arena view.
+  METAL_BUFS[slot].owns_data     = 1;
+  METAL_BUFS[slot].parent_buf_id = 0;
+  METAL_BUFS[slot].skip_freelist = 0;
   metal_record_memory_peak();
   return slot;
 }
@@ -768,10 +891,24 @@ void thvm_metal_buf_free_borrowed(u32 buf_id) {
 
 static void metal_buf_free(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
-  // Nilling .buf drops ARC's strong ref to the MTLBuffer.  For a borrowed
-  // wrapper (newBufferWithBytesNoCopy + deallocator:nil) that releases ONLY
-  // the wrapper object; the host mmap pages it pointed at stay owned by the
-  // CPU-side DiskMap, which munmaps them on its own CpuBuf release.
+  // Snapshot the arena parent BEFORE zeroing the slot.  An arena VIEW
+  // (owns_data == 0, parent_buf_id != 0) shares its parent's MTLBuffer at a
+  // byte_offset; freeing the view must drop the view's contribution to the
+  // parent's refcount no matter which path frees it (a direct
+  // metal_buf_free, e.g. pool rollback, as well as the decref route).
+  // Without this the arena allocation stays inflated by every freed view and
+  // leaks until session end.  Mirror: backend/cuda/buf_free.c:15,28-31.
+  u32 parent = METAL_BUFS[buf_id].parent_buf_id;
+  // Nilling .buf drops THIS slot's ARC strong ref to the MTLBuffer.  For an
+  // owning slot (owns_data == 1) that is the last ref and ARC frees the
+  // MTLBuffer object -- for a borrowed wrapper (deallocator:nil) only the
+  // wrapper, never the mmap pages; for a plain device buffer the bytes.  For
+  // an arena VIEW (owns_data == 0) the parent slot still strongly references
+  // the SAME shared MTLBuffer, so niling the view's copy of the pointer
+  // releases only the view's retain -- the allocation survives until the
+  // parent's own refcount hits zero (the chained decref below).  Mirror of
+  // CudaBuf.owns_data (backend/cuda/buf_free.c:16) and tinygrad's
+  // MetalBuffer(buf.buf, ...) sharing in ops_metal.py:192.
   METAL_BUFS[buf_id].buf      = nil;
   METAL_BUFS[buf_id].nbytes   = 0;
   METAL_BUFS[buf_id].refcount = 0;
@@ -780,6 +917,15 @@ static void metal_buf_free(u32 buf_id) {
   METAL_BUFS[buf_id].borrowed = 0;
   METAL_BUFS[buf_id].byte_offset = 0;
   METAL_BUFS[buf_id].host_base = NULL;
+  METAL_BUFS[buf_id].owns_data = 0;
+  METAL_BUFS[buf_id].parent_buf_id = 0;
+  METAL_BUFS[buf_id].skip_freelist = 0;
+  // Drop the view's reference to its arena parent; free the parent only when
+  // its last view (and its own producer ref) has gone.
+  if (parent != 0 && parent < METAL_BUFS_NEXT
+      && METAL_BUFS[parent].refcount > 0) {
+    if (--METAL_BUFS[parent].refcount == 0) metal_buf_free(parent);
+  }
   metal_record_memory_peak();
 }
 
@@ -2054,6 +2200,7 @@ static int metal_tile_jit_encode(KernelEntry *ke,
                                  __unsafe_unretained id<MTLBuffer> *src_bufs,
                                  u64 const *src_offsets,
                                  id<MTLBuffer> outBuf,
+                                 u64 out_offset,
                                  id<MTLCommandBuffer> cmd,
                                  u32 groups_x,
                                  u32 threads_x) {
@@ -2066,7 +2213,9 @@ static int metal_tile_jit_encode(KernelEntry *ke,
 
   id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
   [enc setComputePipelineState:pso];
-  [enc setBuffer:outBuf offset:0 atIndex:0];
+  // Bind the output at its byte_offset (arena VIEW -> a window of the shared
+  // arena MTLBuffer; 0 for an ordinary output).  tinygrad ops_metal.py:140.
+  [enc setBuffer:outBuf offset:(NSUInteger)out_offset atIndex:0];
   for (u32 i = 0; i < ke->n_inputs; i++) {
     // A borrowed disk-mmap wrap binds at its within-buffer byte_offset so the
     // kernel's contiguous index 0 lands on the weight (the wrapped MTLBuffer
@@ -2393,7 +2542,13 @@ static id<MTLIndirectCommandBuffer> metal_graph_build(
     if (trace > 1) {
       fprintf(stderr, "thvm: metal_graph command %u set out\n", i);
     }
-    [cmd setKernelBuffer:outBuf offset:0 atIndex:0];
+    // Bind the output at its byte_offset (an arena VIEW writes a window of the
+    // shared arena MTLBuffer; 0 for an ordinary output).  Without this the
+    // recycled kernel would write at the arena base instead of its slice.
+    // tinygrad binds every buffer at its offset uniformly (ops_metal.py:140).
+    [cmd setKernelBuffer:outBuf
+                  offset:(NSUInteger)METAL_BUFS[r->out_buf_id].byte_offset
+                 atIndex:0];
     for (u32 j = 0; j < r->n_inputs; j++) {
       u32 bid = r->in_buf_ids[j];
       if (bid == 0 || bid >= METAL_BUFS_NEXT) return nil;
@@ -2720,7 +2875,12 @@ static u32 dag_enc_const(DagEncCtx *c, Term v, u32 dst_buf_id) {
   if (pso == nil) return 0;
   id<MTLComputeCommandEncoder> enc = [c->cmd computeCommandEncoder];
   [enc setComputePipelineState:pso];
-  [enc setBuffer:METAL_BUFS[bid].buf offset:0 atIndex:0];
+  // Bind the destination at its byte_offset (arena VIEW -> a window of the
+  // shared arena MTLBuffer; 0 for an intermediate or ordinary output).
+  // tinygrad ops_metal.py:140.
+  [enc setBuffer:METAL_BUFS[bid].buf
+          offset:(NSUInteger)METAL_BUFS[bid].byte_offset
+         atIndex:0];
   [enc setBytes:&bits length:sizeof(bits) atIndex:1];
   NSUInteger n = c->numel ? c->numel : 1;
   NSUInteger tg = MIN(n, [pso maxTotalThreadsPerThreadgroup]);
@@ -2741,7 +2901,12 @@ static u32 dag_enc_arith(DagEncCtx *c, Term v, u32 dst_buf_id, u32 op,
   if (pso == nil) return 0;
   id<MTLComputeCommandEncoder> enc = [c->cmd computeCommandEncoder];
   [enc setComputePipelineState:pso];
-  [enc setBuffer:METAL_BUFS[bid].buf offset:0 atIndex:0];
+  // Bind the destination at its byte_offset (arena VIEW -> a window of the
+  // shared arena MTLBuffer; 0 for an intermediate or ordinary output).
+  // tinygrad ops_metal.py:140.
+  [enc setBuffer:METAL_BUFS[bid].buf
+          offset:(NSUInteger)METAL_BUFS[bid].byte_offset
+         atIndex:0];
   u32 zero_arg = 0;
   [enc setBytes:&zero_arg length:sizeof(zero_arg) atIndex:1];
   for (u32 i = 0; i < n_src; i++) {
@@ -3227,6 +3392,12 @@ static int metal_try_mps_gemm(KernelEntry *ke, u32 *in_buf_ids,
   // input bind.  (MPS is a perf route, default-off; correctness over speed.)
   if (METAL_BUFS[a_buf].byte_offset != 0 || METAL_BUFS[b_buf].byte_offset != 0)
     return 0;
+  // Same for the output: the MPSMatrix view over C_dst reads from buffer
+  // offset 0, so an arena-VIEW output (a window of the shared arena MTLBuffer
+  // at a nonzero byte_offset) would have MPS write at the arena base instead
+  // of the slice.  Decline -> the tile/per-op path applies the output offset.
+  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return 0;
+  if (METAL_BUFS[out_buf_id].byte_offset != 0) return 0;
   id<MTLBuffer> A_src = METAL_BUFS[a_buf].buf;
   id<MTLBuffer> B_src = METAL_BUFS[b_buf].buf;
   id<MTLBuffer> C_dst = METAL_BUFS[out_buf_id].buf;
@@ -3447,7 +3618,8 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
 
   if (tile_supported) {
     id<MTLCommandBuffer> tile_cmd = metal_command_buffer();
-    if (metal_tile_jit_encode(ke, jit_src_bufs, jit_src_offsets, outBuf, tile_cmd,
+    if (metal_tile_jit_encode(ke, jit_src_bufs, jit_src_offsets, outBuf,
+                              METAL_BUFS[out_buf_id].byte_offset, tile_cmd,
                               tile_groups_x, tile_threads_x)) {
       metal_submit_if_standalone(tile_cmd);
       for (u32 i = 0; i < ke->n_inputs; i++) {
