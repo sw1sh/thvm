@@ -1,0 +1,48 @@
+soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv=125
+
+CONFIG (opt-in):
+  THVM_ATP_CP_WM_SIDE=1 THVM_ATP_WM_FLAT_SUBSUME=1 THVM_ATP_WALDMEISTER=1
+  bin/test_atp_wolfram_bench /tmp/soa.pr 200000 20
+RESULT: wm=5607 thvm~=33595 prefix=124 identical=N firstdiv=125
+        content-delta wm-only=0 thvm-only~=27988 (thvm pop-set is a strict
+        superset of WM's); weights-exact through the aligned prefix.
+
+ROOT CAUSE OF pick-125 (decisively re-diagnosed; NOT a wmo_dfs leaf-arrival
+order divergence):
+
+  Picks 123, 124, AND WM's 125 are the SAME canonical equation
+    opCenterdot(opCenterdot(v1,opCenterdot(v1,v1)),v2) # opCenterdot(v2,v2).
+  WM selects it THREE times consecutively (its queue holds copies at SUE
+  ages 222, 511, 577, ...; 227 queued copies total); thvm selects it only
+  twice before pick-125 and at pick-125 pops a DIFFERENT weight-120 CP
+    opCenterdot(opCenterdot(v1,v1),v2) # opCenterdot(opCenterdot(v1,v2),v1)
+  (thvm seq=564) -- a CP that appears NOWHERE in WM's trace.
+
+  The divergence is a GLOBAL CP-formation order-and-MULTIPLICITY mismatch,
+  not a within-batch scan-order tie.  thvm forms ~6x more CPs than WM
+  (33595 vs 5607 selections) and queues duplicate copies of each canonical
+  equation at DIFFERENT relative ages (thvm's first copies of the pick-125
+  equation land at ages 167/192/235/236; WM's at 222/511/577).  The first
+  124 weight-ordered selections happen to coincide; at the 125th the
+  per-copy age drift finally swaps a weight-120 selection.
+
+WHY THE FAITHFUL wmo_dfs PORT CANNOT BREAK 125:
+  WM's tops phase (Unifikation1.c RumpfTermMitDSBaumUnifizieren / Delta*
+  re-entrant DFS) fires its CP-forming Action once per leaf ARRIVAL.
+  thvm's wmo_dfs is a faithful port of that descent (exact-symbol child,
+  then variable children by descending index, then jump exits in list
+  order).  wm_order.c only RANKS thvm's own CPs into WM's emission order;
+  it does not control WHICH or HOW-MANY CPs thvm forms.  An experiment
+  removing the per-leaf dedupe in wmo_dfs_emit (faithful per-arrival
+  emission) left prefix=124 unchanged and grew thvm-only from 25806 to
+  28692 -- confirming the lever is the CP-FORMATION multiplicity in
+  atp_overlap_ij / the pop-time normalize-and-join filter, OUTSIDE
+  wm_order.c's scan-order responsibility.  Re-ordering a batch cannot
+  synthesize a third duplicate copy thvm never formed, nor remove the
+  thvm-only extras flooding the weight-120 pool.
+
+VERDICT: INTRACTABLE via the wmo_dfs scan-order port.  Closing soa past
+124 requires matching WM's CP-formation order and duplicate multiplicity
+(atp_overlap_ij enumeration order + a stronger pop-time join/subsume that
+discards the same redundant overlaps WM's Verwerfen/normalize does), a
+different subsystem than the discrimination-tree scan order.
