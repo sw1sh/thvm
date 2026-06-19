@@ -991,7 +991,7 @@ int main(void) {
     // A queued CP parented on the doomed rule.  Raw-NF sides (no f(_,e)
     // redex, not joinable) so only the orphan paths can drop it.
     Term c_l = mk_i(mk_a()), c_r = mk_a();
-    u32 tc = atp_trace_push_cp(s, doomed, doomed, c_l, c_r, NULL, 0);
+    u32 tc = atp_trace_push_cp(s, doomed, doomed, c_l, c_r, NULL, 0, 0xffu);
     atp_cp_heap_push(s, c_l, c_r, tc, 0u, 0u);
     CHECK_EQ(s->n_cps, 1u);
 
@@ -1017,7 +1017,7 @@ int main(void) {
     CHECK_EQ(s->n_cps, 0u);
     doomed = s->r_trace[0];
     c_l = mk_i(mk_a()); c_r = mk_a();
-    tc = atp_trace_push_cp(s, doomed, doomed, c_l, c_r, NULL, 0);
+    tc = atp_trace_push_cp(s, doomed, doomed, c_l, c_r, NULL, 0, 0xffu);
     atp_cp_heap_push(s, c_l, c_r, tc, 0u, 0u);
     CHECK_EQ(s->n_cps, 1u);
 
@@ -1178,7 +1178,7 @@ int main(void) {
     // (the ordered-rewrite gate cannot order it), compares
     // Unvergleichbar, and drops -- no rule added.
     u32 tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
-                               inst_l, inst_r, NULL, 0);
+                               inst_l, inst_r, NULL, 0, 0xffu);
     atp_cp_heap_push(s, inst_l, inst_r, tc, 0u, 0u);
     CHECK_EQ(s->n_cps, 1u);
     u32 rules0 = s->n_rules;
@@ -1189,7 +1189,7 @@ int main(void) {
     Term deep_l = mk_i(inst_l);
     Term deep_r = mk_i(inst_r);
     tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
-                           deep_l, deep_r, NULL, 0);
+                           deep_l, deep_r, NULL, 0, 0xffu);
     atp_cp_heap_push(s, deep_l, deep_r, tc, 0u, 0u);
     thvm_atp_step(s);
     CHECK_EQ(s->n_cps_dropped_pop_subsumed, 2u);
@@ -1203,7 +1203,7 @@ int main(void) {
     Term ori_l = mk_f(mk_a(), mk_a());
     Term ori_r = mk_a();
     tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
-                           ori_l, ori_r, NULL, 0);
+                           ori_l, ori_r, NULL, 0, 0xffu);
     atp_cp_heap_push(s, ori_l, ori_r, tc, 0u, 0u);
     thvm_atp_step(s);
     CHECK_EQ(s->n_cps_dropped_pop_subsumed, 2u);
@@ -1219,7 +1219,7 @@ int main(void) {
     Term sur_l = mk_f(mk_v(VAR_x), mk_i(mk_v(1u)));
     Term sur_r = mk_f(mk_v(1u), mk_i(mk_v(VAR_x)));
     tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
-                           sur_l, sur_r, NULL, 0);
+                           sur_l, sur_r, NULL, 0, 0xffu);
     atp_cp_heap_push(s, sur_l, sur_r, tc, 0u, 0u);
     u32 unorient0 = s->n_unorient;
     thvm_atp_step(s);
@@ -1236,7 +1236,7 @@ int main(void) {
     Term off_l = mk_f(mk_i(mk_v(VAR_x)), mk_v(2u));
     Term off_r = mk_f(mk_v(2u), mk_i(mk_v(VAR_x)));
     tc = atp_trace_push_cp(s, ATP_TRACE_NONE, ATP_TRACE_NONE,
-                           off_l, off_r, NULL, 0);
+                           off_l, off_r, NULL, 0, 0xffu);
     atp_cp_heap_push(s, off_l, off_r, tc, 0u, 0u);
     rules0 = s->n_rules;
     thvm_atp_step(s);
@@ -3780,11 +3780,11 @@ int main(void) {
     Term c_l  = mk_i(mk_a());
     Term c_r  = mk_a();
     u32 ta = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
-                               a_l, a_r, NULL, 0);
+                               a_l, a_r, NULL, 0, 0xffu);
     u32 tb = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
-                               b_l, b_r, NULL, 0);
+                               b_l, b_r, NULL, 0, 0xffu);
     u32 tc = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
-                               c_l, c_r, NULL, 0);
+                               c_l, c_r, NULL, 0, 0xffu);
     CHECK_EQ(atp_cp_implicit_push(s, a_l, a_r, s->r_trace[0], s->r_trace[0],
                                   ta, 0u), 1u);
     CHECK_EQ(atp_cp_implicit_push(s, b_l, b_r, s->r_trace[0], s->r_trace[0],
@@ -3883,9 +3883,9 @@ int main(void) {
     Term x_l = mk_i(mk_a()),        x_r = mk_a();
     Term y_l = mk_i(mk_i(mk_a())),  y_r = mk_a();
     u32 tx = atp_trace_push_cp(s, dead_parent, s->r_trace[0],
-                               x_l, x_r, NULL, 0);
+                               x_l, x_r, NULL, 0, 0xffu);
     u32 ty = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
-                               y_l, y_r, NULL, 0);
+                               y_l, y_r, NULL, 0, 0xffu);
     CHECK_EQ(atp_cp_implicit_push(s, x_l, x_r, dead_parent, s->r_trace[0],
                                   tx, 0u), 1u);
     CHECK_EQ(atp_cp_implicit_push(s, y_l, y_r, s->r_trace[0], s->r_trace[0],
@@ -4010,7 +4010,7 @@ int main(void) {
     Term big_l = mk_f(mk_f(mk_a(), mk_a()), mk_f(mk_a(), mk_a()));
     Term big_r = mk_a();
     u32 tb = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
-                               big_l, big_r, NULL, 0);
+                               big_l, big_r, NULL, 0, 0xffu);
     // The push-site seam: implicit push refuses (returns 0), eager
     // fallback stashes.
     CHECK_EQ(atp_cp_implicit_push(s, big_l, big_r, s->r_trace[0],
@@ -4024,7 +4024,7 @@ int main(void) {
     Term small_l = mk_i(mk_a());
     Term small_r = mk_a();
     u32 ts = atp_trace_push_cp(s, s->r_trace[0], s->r_trace[0],
-                               small_l, small_r, NULL, 0);
+                               small_l, small_r, NULL, 0, 0xffu);
     CHECK_EQ(atp_cp_implicit_push(s, small_l, small_r, s->r_trace[0],
                                   s->r_trace[0], ts, 0u), 1u);
     CHECK_EQ(s->n_cps, 1u);
@@ -4216,8 +4216,10 @@ int main(void) {
   {
     // A TRACE_CP entry is a wider CTR: children 0..3 are the base
     // [NUM(pa), NUM(pb), lhs, rhs], child 4 is NUM(pos_len),
-    // children 5.. are the superposition path.  Push a surviving CP
-    // carrying pos {0} and verify atp_push_cps_traced records it.
+    // children 5..5+pos_len-1 are the superposition path, and the final
+    // child (5+pos_len) is NUM(combo) -- the overlap face index.  Push a
+    // surviving CP carrying pos {0} + combo 2 and verify
+    // atp_push_cps_traced records both.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
     s->n_rules = 0;   // empty R -> the CP is not trivially joinable
     CriticalPair batch[1] = {{0}};
@@ -4225,6 +4227,7 @@ int main(void) {
     batch[0].rhs     = mk_a();
     batch[0].pos[0]  = 0u;
     batch[0].pos_len = 1u;
+    batch[0].combo   = 2u;
     u32 before = s->n_trace;
     u32 pushed = atp_push_cps_traced(s, batch, 1,
                                      ATP_TRACE_NONE, ATP_TRACE_NONE,
@@ -4233,11 +4236,12 @@ int main(void) {
     CHECK_EQ(s->n_trace, before + 1u);
     Term e = s->trace[s->n_trace - 1u];
     CHECK_EQ((int)term_ext(e), (int)TRACE_CP);
-    CHECK_EQ(term_ctr_n(e), 6u);                       // 4 base + len + 1
+    CHECK_EQ(term_ctr_n(e), 7u);                       // 4 base + len + pos + combo
     Term plen = term_ctr_at(e, 4);
     CHECK_EQ((int)term_tag(plen), (int)TAG_NUM);
     CHECK_EQ((u32)term_val(plen), 1u);                 // pos_len
     CHECK_EQ((u32)term_val(term_ctr_at(e, 5)), 0u);    // pos[0]
+    CHECK_EQ((u32)term_val(term_ctr_at(e, 6)), 2u);    // combo
     thvm_atp_free(s);
   }
 

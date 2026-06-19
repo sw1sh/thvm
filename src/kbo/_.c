@@ -305,6 +305,35 @@ static inline u32 kbo_wmemo_slot(u64 sh) {
   return (u32)(sh ^ (sh >> 29)) & KBO_WMEMO_MASK;
 }
 
+// splitmix64 finalizer -- full-avalanche scramble of a 64-bit word.  The
+// structural hash must NOT lose variable-id information: a weak
+// xor+multiply mix let alpha-variant siblings like (and Vi (not Vi)) and
+// (and Vj (not Vj)) collide (the doubled id contribution cancelled),
+// which silently reused the WRONG variable profile in the KBO memo and
+// produced a soundness-breaking orientation.  Avalanching each leaf and
+// each positioned child contribution removes that cancellation.
+static inline u64 kbo_mix64(u64 x) {
+  x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ull;
+  x ^= x >> 27; x *= 0x94d049bb133111ebull;
+  x ^= x >> 31;
+  return x;
+}
+
+// A CTR node's structural hash from its already-computed child hashes.
+// Position-sensitive (each child folds in with its index) and avalanched
+// per child so distinct variable ids never cancel.  Used identically by
+// kbo_leaf_hash's CTR fallback and kbo_memo_combine so the two paths
+// agree byte-for-byte.
+static inline u64 kbo_node_hash(u32 lab, const u64 *child_hashes, u32 n) {
+  u64 h = 0xcbf29ce484222325ull ^ ((u64)lab * 0x100000001b3ull);
+  for (u32 i = 0; i < n; i++) {
+    h ^= kbo_mix64(child_hashes[i] + 0x9e3779b97f4a7c15ull * (u64)(i + 1u));
+    h *= 0x100000001b3ull;
+  }
+  h ^= (u64)n * 0x9e3779b97f4a7c15ull;
+  return h;
+}
+
 // Compute a leaf's contribution to the structural hash.  Inlined so
 // the iterative combine pass can mix child hashes without an O(|t|)
 // recursive walk per child -- children's hashes come from their
@@ -313,7 +342,7 @@ static inline u32 kbo_wmemo_slot(u64 sh) {
 static inline u64 kbo_leaf_hash(Term t) {
   u32 tg = term_tag(t);
   if (tg == TAG_FVR) {
-    return 0xfacefacefaceull ^ ((u64)term_ext(t) * 0x100000001b3ull);
+    return kbo_mix64(0xfacefacefaceull ^ ((u64)term_ext(t) * 0x100000001b3ull));
   }
   if (tg == TAG_CTR) {
     // A CTR child's hash MUST come from g_kbo_thash (filled by an
@@ -325,15 +354,12 @@ static inline u64 kbo_leaf_hash(Term t) {
     // (Rare -- only on a same-walk thash collision.)
     u32 lab = term_ext(t);
     u64 base; u32 n = kbo_ctr_children(t, &base);
-    u64 h = 0xcbf29ce484222325ull ^ ((u64)lab * 0x100000001b3ull);
-    for (u32 i = 0; i < n; i++) {
-      h ^= kbo_leaf_hash(heap_read(base + i));
-      h *= 0x100000001b3ull;
-    }
-    h ^= (u64)n * 0x9e3779b97f4a7c15ull;
-    return h;
+    u64 ch[REWRITE_MAX_ARITY];
+    if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
+    for (u32 i = 0; i < n; i++) ch[i] = kbo_leaf_hash(heap_read(base + i));
+    return kbo_node_hash(lab, ch, n);
   }
-  return 0xdeadbeefcafebabeull ^ ((u64)tg * 0x100000001b3ull);
+  return kbo_mix64(0xdeadbeefcafebabeull ^ ((u64)tg * 0x100000001b3ull));
 }
 
 // Invalidate the whole per-term memo in O(1) by bumping the epoch.
@@ -380,14 +406,14 @@ static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t);
 static KboWMemoEnt *kbo_memo_combine(const KboConfig *cfg, Term t) {
   // Compute this node's structural hash from children (children's
   // hashes are in g_kbo_thash since post-order put them there first).
+  // Position-sensitive + per-child avalanche (kbo_node_hash) so distinct
+  // variable ids in symmetric positions can never cancel into a collision.
   u32 lab = term_ext(t);
-  u64 sh = 0xcbf29ce484222325ull ^ ((u64)lab * 0x100000001b3ull);
   u64 base; u32 n = kbo_ctr_children(t, &base);
-  for (u32 i = 0; i < n; i++) {
-    sh ^= kbo_leaf_hash(heap_read(base + i));
-    sh *= 0x100000001b3ull;
-  }
-  sh ^= (u64)n * 0x9e3779b97f4a7c15ull;
+  u64 chh[REWRITE_MAX_ARITY];
+  u32 nh = (n > REWRITE_MAX_ARITY) ? REWRITE_MAX_ARITY : n;
+  for (u32 i = 0; i < nh; i++) chh[i] = kbo_leaf_hash(heap_read(base + i));
+  u64 sh = kbo_node_hash(lab, chh, nh);
 
   // Register this Term ID in the per-Term-ID cache.
   u32 thidx = kbo_thash_slot(t);

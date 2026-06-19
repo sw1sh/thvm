@@ -490,6 +490,12 @@ static u8   atp_wmo_eq_tops_rank(AtpState *s, u32 trace, u8 thvm_dir,
 // thvm_atp_step call can flush the intake before any pop.
 static void atp_wm_intake_canonicalize(AtpState *s);
 
+// Flat-transposition (commutativity `f(x,y)=f(y,x)`) predicate, defined
+// after the wm_order.c include; forward-declared so the emission-rank
+// mirror (atp_wmo_rank) can exclude commutativity partners from the
+// re-derived proper-overlap phase deferral.
+static u8 atp_is_flat_transposition(Term lhs, Term rhs);
+
 // Match helper: thvm_match by default; switches to atp_match_ac
 // when THVM_ATP_AC is built AND the engine-global AC mask is non-zero.
 // Used by the ATP-internal hot match sites (atp_ordered_try_top,
@@ -734,9 +740,12 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   Term *nrs = (Term *)realloc(s->r_dead_rhs_save,  cap * sizeof(Term));
   u8   *ngj = (u8   *)realloc(s->r_gj_status,      cap * sizeof(u8));
   u8   *nod = (u8   *)realloc(s->r_overlap_done,   cap * sizeof(u8));
+  Term *nsl = (Term *)realloc(s->r_dead_subsumer_lhs, cap * sizeof(Term));
+  Term *nsr = (Term *)realloc(s->r_dead_subsumer_rhs, cap * sizeof(Term));
+  u32  *nrc = (u32  *)realloc(s->r_rederive_cut,       cap * sizeof(u32));
   if (nl == NULL || nr == NULL || nt == NULL || no == NULL ||
       nd == NULL || nls == NULL || nrs == NULL || ngj == NULL ||
-      nod == NULL) {
+      nod == NULL || nsl == NULL || nsr == NULL || nrc == NULL) {
     fprintf(stderr, "atp_ensure_rule_cap: realloc to %u rules failed\n",
             cap);
     exit(1);
@@ -744,6 +753,8 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   s->lhs = nl; s->rhs = nr; s->r_trace = nt; s->r_orient = no;
   s->r_dead = nd; s->r_dead_lhs_save = nls; s->r_dead_rhs_save = nrs;
   s->r_gj_status = ngj; s->r_overlap_done = nod;
+  s->r_dead_subsumer_lhs = nsl; s->r_dead_subsumer_rhs = nsr;
+  s->r_rederive_cut = nrc;
   for (u32 i = s->r_cap; i < cap; i++) {
     s->r_trace[i] = ATP_TRACE_NONE;
     s->r_dead[i] = 0;
@@ -751,6 +762,9 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
     s->r_dead_rhs_save[i] = 0;
     s->r_gj_status[i] = ATP_GJ_ST_UNKNOWN;
     s->r_overlap_done[i] = 0;
+    s->r_dead_subsumer_lhs[i] = 0;
+    s->r_dead_subsumer_rhs[i] = 0;
+    s->r_rederive_cut[i] = ATP_TRACE_NONE;
   }
 #ifdef THVM_ATPFT_RULES
   // Stage 4: grow the parallel AtpFt slot arrays in lockstep with the
@@ -4538,6 +4552,9 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->r_dead);
   free(s->r_dead_lhs_save);
   free(s->r_dead_rhs_save);
+  free(s->r_dead_subsumer_lhs);
+  free(s->r_dead_subsumer_rhs);
+  free(s->r_rederive_cut);
   free(s->r_gj_status);
   free(s->r_trace_dead);
 #ifdef THVM_ATPFT_RULES
@@ -4696,7 +4713,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // s->min_const (the FVI reserved constant; allocated once in
   // thvm_atp_init and reused across orient_and_add calls, so a GC
   // mid-completion would otherwise leave a dangling cell).
-  u32 n_roots = 4u * s->n_rules + 4u /* goal + goal_nf */
+  u32 n_roots = 6u * s->n_rules /* lhs,rhs,dead l/r save,subsumer l/r */
+              + 4u /* goal + goal_nf */
               + 4u * s->n_goals /* multi-goal conjuncts + NFs */
               + s->n_trace + REWRITE_MAX_VAR
               + 1u /* min_const */
@@ -4721,6 +4739,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   for (u32 i = 0; i < s->n_rules; i++) {
     roots[w++] = s->r_dead_lhs_save[i];
     roots[w++] = s->r_dead_rhs_save[i];
+    roots[w++] = s->r_dead_subsumer_lhs[i];
+    roots[w++] = s->r_dead_subsumer_rhs[i];
   }
   roots[w++] = s->goal_lhs;
   roots[w++] = s->goal_rhs;
@@ -4768,6 +4788,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   for (u32 i = 0; i < s->n_rules; i++) {
     s->r_dead_lhs_save[i] = roots[w++];
     s->r_dead_rhs_save[i] = roots[w++];
+    s->r_dead_subsumer_lhs[i] = roots[w++];
+    s->r_dead_subsumer_rhs[i] = roots[w++];
   }
   s->goal_lhs = roots[w++];
   s->goal_rhs = roots[w++];
@@ -4870,16 +4892,20 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
 // -- pos[0..pos_len) is the path into parent_a's rule lhs where
 // parent_b's rule lhs overlapped (CriticalPair.pos).  The entry is a
 // TAG_CTR(TRACE_CP) with children
-//   [NUM(p_a), NUM(p_b), lhs, rhs, NUM(pos_len), NUM(pos_0), ...].
+//   [NUM(p_a), NUM(p_b), lhs, rhs, NUM(pos_len), NUM(pos_0), ...,
+//    NUM(combo)].
 // Children 0..3 match a plain atp_trace_push entry, so the trace
 // serializer, GC root walk, and orphan-kill scan -- all of which
 // touch only the first four children -- are unaffected; the proof
-// DAG reads the overlap geometry off children 4+.
+// DAG reads the overlap geometry off children 4..4+pos_len.  The final
+// child (index 5+pos_len) is the overlap face-combo index (0..3, or
+// 0xff = unknown) -- the only consumer is atp_wmo_cp_combo, which the
+// CP-formation side geometry (use_cp_wm_side) reads at the orient site.
 static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
                              Term lhs, Term rhs,
-                             const u8 *pos, u8 pos_len) {
+                             const u8 *pos, u8 pos_len, u8 combo) {
   if (s == NULL || !atp_trace_ensure(s)) return ATP_TRACE_NONE;
-  Term children[5 + CP_MAX_DEPTH];
+  Term children[6 + CP_MAX_DEPTH];
   children[0] = term_new(0, TAG_NUM, 0, p_a);
   children[1] = term_new(0, TAG_NUM, 0, p_b);
   children[2] = lhs;
@@ -4888,7 +4914,8 @@ static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
   for (u8 k = 0; k < pos_len; k++) {
     children[5 + k] = term_new(0, TAG_NUM, 0, pos[k]);
   }
-  s->trace[s->n_trace] = term_new_ctr(TRACE_CP, children, 5u + pos_len);
+  children[5u + pos_len] = term_new(0, TAG_NUM, 0, combo);
+  s->trace[s->n_trace] = term_new_ctr(TRACE_CP, children, 6u + pos_len);
   u32 idx = s->n_trace;
   s->n_trace++;
   return idx;
@@ -4917,7 +4944,11 @@ static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
 // natural LHS face (phase A first), but the dist_rhs=1 default flipped
 // phases A<->D, sorting the partner-6 phase-A CP ahead of the partner-9
 // phase-D CP and inverting their FIFO ages.
-static u8 atp_wmo_eq_dist_rhs(const AtpState *s, u32 src_trace) {
+// Base relationship (no use_cp_wm_side swap applied): is WM's
+// distinguished face (KPLinks) thvm's natural stored RHS?  1 = KPLinks
+// = sigma(r_i) on thvm's cp.rhs (two-parent superposition / axiom);
+// 0 = KPLinks on thvm's cp.lhs (single-parent re-derivation).
+static u8 atp_wmo_eq_dist_rhs_base(const AtpState *s, u32 src_trace) {
   if (s == NULL || src_trace == ATP_TRACE_NONE || src_trace >= s->n_trace) {
     return 1u;
   }
@@ -4940,6 +4971,85 @@ static u8 atp_wmo_eq_dist_rhs(const AtpState *s, u32 src_trace) {
     return (p_a != ATP_TRACE_NONE && p_b == ATP_TRACE_NONE) ? 0u : 1u;
   }
   return 1u;
+}
+
+// Overlap face-combo index (0..3) of the CP at `src_trace`, or 0xff if
+// the trace entry is not a combo-tagged TRACE_CP (an axiom, a simplify,
+// or a CP from a non-WM-order path).  Decoded from the last child of the
+// TRACE_CP record (atp_trace_push_cp stores it at index 5 + pos_len).
+static u8 atp_wmo_cp_combo(const AtpState *s, u32 src_trace) {
+  if (s == NULL || src_trace == ATP_TRACE_NONE || src_trace >= s->n_trace) {
+    return 0xffu;
+  }
+  Term e = s->trace[src_trace];
+  if (term_tag(e) != TAG_CTR || term_ext(e) != TRACE_CP) return 0xffu;
+  u32 n = term_ctr_n(e);
+  if (n < 6u) return 0xffu;                 // no pos_len/combo tail
+  u32 pos_len = (u32)term_val(term_ctr_at(e, 4));
+  u32 combo_idx = 5u + pos_len;
+  if (combo_idx >= n) return 0xffu;         // malformed; stay neutral
+  return (u8)term_val(term_ctr_at(e, combo_idx));
+}
+
+// Does the CP-formation side geometry swap (use_cp_wm_side) physically
+// fire for the unorientable equation popped at `src_trace`?  PARENT-
+// OVERLAP-AWARE, mirroring WM's reduct assignment (Unifikation1.c:916,
+// KPLinks = sigma(TP_RechteSeite(Vater))): which face WM stores
+// sigma(r_Vater)-left depends on the overlap geometry, so the swap is
+// gated on the CP's face-combo index (tagged at formation, carried on the
+// TRACE_CP record) rather than applied to every KBO_UN equation.  Only the
+// reversed-i-face combos (2/3 in atp_overlap_ij -- where the overlap
+// produced thvm's reduct-on-lhs vs WM's sigma(r)-on-lhs) need the swap;
+// combos 0/1 already match WM's stored geometry, so swapping them
+// mis-times the equation's own batch (the FIFO-age fork behind the
+// blanket-swap CombinatorAxioms__BCKWToSKI__c2 regression).  This was
+// established empirically against the WM `-a 4` reference: the combo>=2
+// gate keeps the soa Sheffer OrAssociativity prefix at 124 AND, when on,
+// keeps McCune/Hillman/Huntington/CommRing/AbelianTarski byte-identical
+// (the old blanket reorder forked McCune).
+static int atp_lr_sortieren_rec(Term lhs, Term rhs);
+
+static u8 atp_cp_wm_side_swaps(const AtpState *s, u32 src_trace,
+                               Term lhs, Term rhs) {
+  if (s == NULL || !s->use_cp_wm_side) return 0u;
+  u8 combo = atp_wmo_cp_combo(s, src_trace);
+  if (combo != 0xffu) return (combo >= 2u) ? 1u : 0u;  // reversed-i face only
+  // Untagged (combo == 0xff): an INITIAL AXIOM has no superposition Vater,
+  // so WM's KPLinks = sigma(r_Vater) CP-side geometry never applies -- WM
+  // canonicalises an initial equation by LRSortieren (SpezNormierung.c:
+  // 517-534), not the CP-formation swap.  The default bench leaves
+  // use_lr_sortieren OFF, so mirror WM here by side-canonicalising an
+  // axiom with LRSortieren.  NOTE: this reproduces the axiom swap soa's
+  // Sheffer C-shape needs (soa prefix 124), but does NOT reconcile the
+  // BCKWToSKI__c2 axiom -- that theorem needs the SAME unorientable axiom
+  // NOT swapped (a downstream FIFO-age cascade forks selection at pick 55
+  // whichever stored order WM and thvm agree on), an irreducible tension
+  // that is why use_cp_wm_side defaults OFF in the bench (see the bench
+  // gate).  A TRACE_SIMPLIFY re-derivation or a non-WM-order superposition
+  // CP keeps the legacy blanket swap.
+  u32 reason = 99u;
+  if (src_trace != ATP_TRACE_NONE && src_trace < s->n_trace) {
+    Term e = s->trace[src_trace];
+    if (term_tag(e) == TAG_CTR) reason = term_ext(e);
+  }
+  if (reason == TRACE_AXIOM) {
+    return (atp_lr_sortieren_rec(lhs, rhs) > 0) ? 1u : 0u;
+  }
+  return 1u;
+}
+
+static u8 atp_wmo_eq_dist_rhs(const AtpState *s, u32 src_trace) {
+  // The flag answers: is WM's distinguished face (KPLinks) thvm's stored
+  // RHS?  The physical CP_WM_SIDE swap reorders an unorientable equation
+  // to (cp_rhs, cp_lhs) when it fires -- that moves KPLinks from thvm's
+  // natural rhs (base == 1) onto the stored lhs, so the flag flips.  The
+  // orient site records whether the swap actually fired in
+  // last_cp_wm_side_swapped (the single source of truth -- the axiom
+  // case's decision depends on the pre-swap term order, not recoverable
+  // here from the stored sides), so read it back rather than recompute.
+  u8 base = atp_wmo_eq_dist_rhs_base(s, src_trace);
+  if (s != NULL && s->last_cp_wm_side_swapped) return (u8)(1u - base);
+  return base;
 }
 
 // Push an axiom / pending equation onto the CP queue.  The
@@ -8009,6 +8119,10 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // eager one (WM selectNonOrphan covers the implicit passive set).
   atp_cp_slot_read(s, j, lhs_out, rhs_out);
   s->last_popped_trace = s->cp_trace[j];
+  // Cleared per pop; the KBO_UN orient branch sets it iff the CP-formation
+  // side swap physically fires, so the emission mirror never reads a stale
+  // verdict from an earlier (e.g. orientable) selection.
+  s->last_cp_wm_side_swapped = 0u;
 
   // Env-gated CP-selection trajectory dump for parity comparison vs
   // external provers (WaldmeisterProcess / VampireProcess).  Emits
@@ -8471,6 +8585,44 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   s->rhs_ft[s->n_rules] = ft_from_term((AtpFt *)s->ft_arena_ptr, rhs, 0);
   atp_ft_rules_verify_push(s, s->n_rules);
 #endif
+  // Remove-and-re-derive detection (flat-subsume only).  If this fresh
+  // fact has the exact shape of an equation that E-set subsumption
+  // removed, it is a RE-DERIVATION: resolve the subsumer's current birth
+  // trace as the cutoff so atp_overlap_ij can suppress the root overlaps
+  // WM already owned in the subsumer's original batch.  Default NONE =
+  // not a re-derivation (ordinary fresh fact).  Scoped to
+  // use_wm_flat_subsume so non-flat-subsume runs never pay the scan.
+  s->r_rederive_cut[s->n_rules] = ATP_TRACE_NONE;
+  if (s->use_wm_flat_subsume) {
+    for (u32 k = 0; k < s->n_rules; k++) {
+      if (!s->r_dead[k]) continue;
+      if (s->r_dead_subsumer_lhs[k] == 0) continue;
+      if (!kbo_eq(s->r_dead_lhs_save[k], lhs) ||
+          !kbo_eq(s->r_dead_rhs_save[k], rhs))
+        continue;
+      // Resolve the cutoff: the live rule whose shape equals the saved
+      // subsumer, read its now-final r_trace.  Match either orientation
+      // (the subsumer is unorientable, stored in one face).
+      Term sub_l = s->r_dead_subsumer_lhs[k];
+      Term sub_r = s->r_dead_subsumer_rhs[k];
+      u32 cutoff = ATP_TRACE_NONE;
+      for (u32 m = 0; m < s->n_rules; m++) {
+        if (s->r_dead[m]) continue;
+        if ((kbo_eq(s->lhs[m], sub_l) && kbo_eq(s->rhs[m], sub_r)) ||
+            (kbo_eq(s->lhs[m], sub_r) && kbo_eq(s->rhs[m], sub_l))) {
+          cutoff = s->r_trace[m];
+          break;
+        }
+      }
+      s->r_rederive_cut[s->n_rules] = cutoff;
+      if (atp_rule_trace_on()) {
+        fprintf(stderr,
+                "  REDERIVE slot %u from dead slot %u cutoff=%u\n",
+                s->n_rules, k, cutoff);
+      }
+      break;
+    }
+  }
   // Cache the rule's orientation once -- atp_ordered_try_top reads this
   // instead of recomputing a full KBO compare per rewrite position.
   s->r_orient[s->n_rules] = (u8)(atp_compare(s, lhs, rhs) == KBO_GT);
@@ -12045,6 +12197,14 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         s->r_dead[j - 1]           = s->r_dead[j];
         s->r_dead_lhs_save[j - 1]  = s->r_dead_lhs_save[j];
         s->r_dead_rhs_save[j - 1]  = s->r_dead_rhs_save[j];
+        // Remove-and-re-derive subsumer shapes + re-derive flag ride the
+        // slot in lockstep with the dead-shape saves -- all are keyed by
+        // slot, so a drop below them must shift them too (else a dead
+        // slot's saved subsumer or a re-derived rule's suppression flag
+        // lands on the wrong rule).
+        s->r_dead_subsumer_lhs[j - 1] = s->r_dead_subsumer_lhs[j];
+        s->r_dead_subsumer_rhs[j - 1] = s->r_dead_subsumer_rhs[j];
+        s->r_rederive_cut[j - 1]      = s->r_rederive_cut[j];
         // Ground-joinability status rides the slot (WM: per-object).
         s->r_gj_status[j - 1]      = s->r_gj_status[j];
 #ifdef THVM_ATPFT_RULES
@@ -12280,6 +12440,11 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
           s->r_dead_rhs_save[k - 1]  = s->r_dead_rhs_save[k];
+          // Remove-and-re-derive subsumer shapes + flag ride the slot
+          // (see the LHS-drop loop above for why all must shift).
+          s->r_dead_subsumer_lhs[k - 1] = s->r_dead_subsumer_lhs[k];
+          s->r_dead_subsumer_rhs[k - 1] = s->r_dead_subsumer_rhs[k];
+          s->r_rederive_cut[k - 1]      = s->r_rederive_cut[k];
 #ifdef THVM_ATPFT_RULES
           // Stage 4: shift the parallel AtpFt slot pointers.
           s->lhs_ft[k - 1]              = s->lhs_ft[k];
@@ -12334,6 +12499,11 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
           s->r_dead_rhs_save[k - 1]  = s->r_dead_rhs_save[k];
+          // Remove-and-re-derive subsumer shapes + flag ride the slot
+          // (see the LHS-drop loop above for why all must shift).
+          s->r_dead_subsumer_lhs[k - 1] = s->r_dead_subsumer_lhs[k];
+          s->r_dead_subsumer_rhs[k - 1] = s->r_dead_subsumer_rhs[k];
+          s->r_rederive_cut[k - 1]      = s->r_rederive_cut[k];
 #ifdef THVM_ATPFT_RULES
           // Stage 4: shift the parallel AtpFt slot pointers.
           s->lhs_ft[k - 1]              = s->lhs_ft[k];
@@ -13332,6 +13502,17 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
       continue;
     s->r_dead_lhs_save[i] = s->lhs[i];
     s->r_dead_rhs_save[i] = s->rhs[i];
+    // Remove-and-re-derive root-overlap ownership: save the subsuming
+    // equation's SHAPE on this slot.  Its final birth trace is not yet
+    // stamped here (the step loop stamps r_trace after orient_and_add
+    // returns), so the cutoff is resolved lazily at re-derivation time
+    // by locating the live rule of this shape.  When an equation of the
+    // removed slot's shape is later re-derived (atp_push_rule), it then
+    // suppresses root overlaps against any rule born at or before the
+    // subsumer -- WM already enumerated those roots in the subsumer's
+    // original batch against this (now-removed) equation.
+    s->r_dead_subsumer_lhs[i] = new_lhs;
+    s->r_dead_subsumer_rhs[i] = new_rhs;
     s->lhs[i] = dead_sentinel;
     s->rhs[i] = dead_sentinel;
     s->r_dead[i] = 1;
@@ -14789,7 +14970,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
               rule_a, rule_b, la_raw, ra_raw, la, ra);
     }
     u32 t = atp_trace_push_cp(s, parent_a, parent_b, raw_lhs, raw_rhs,
-                              cps[i].pos, cps[i].pos_len);
+                              cps[i].pos, cps[i].pos_len, cps[i].combo);
     // Derived overlap CP: ultimate iff WM's `database=ultimate` flag is
     // on (NewClassification.c:711; Parameter.c default).  Off-by-default
     // = byte-identical to the pre-port behaviour.  When on, derived CPs
@@ -15097,6 +15278,45 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
     skip4 = 0u;
   }
 
+  // Remove-and-re-derive root-overlap ownership (flat-subsume only).
+  // A rule re-derived after E-set subsumption removed an equation of the
+  // same shape must NOT re-enumerate the root-x-root overlaps the
+  // subsuming rule already formed against the removed original in its
+  // ORIGINAL batch -- WM forms each such root overlap exactly once and
+  // that ownership stays with the original batch across the remove/
+  // re-derive boundary.  When i is re-derived (r_rederive_cut[i] set) and
+  // it would own the roots here (i > j) against a rule j born at or before
+  // the cutoff, force the noroot variant: proper-position overlaps remain,
+  // only the root overlap is suppressed.  This is the sole consumer of
+  // r_rederive_cut, which is NONE outside flat-subsume, so no other path
+  // is affected.
+  //
+  // Exception -- partner IS the subsumer (s->r_trace[j] == r_rederive_cut[i],
+  // the commutativity rule that caused the cut): its overlap onto the
+  // re-derived equation is genuinely new content WM emits in the re-derived
+  // fact's own batch, not ownership the original batch resolved.  Keep skip1's
+  // forward face so its ROOT plants the subsumer onto the re-derived
+  // equation's distinguished side -- the C-shape (x*x = (y*(y*y))*x) WM selects
+  // there.  atp_wmo_rank re-ranks that root overlap to follow the leading
+  // proper-position A-shape (see the subsumer_root clause), so the C-shape gets
+  // WM's batch FIFO age.  skip2/skip3/skip4 stay noroot.  Identify the subsumer
+  // by trace equality, not by a partner-slot scan or a flat-transposition shape
+  // match.
+  if (i > j && i < s->n_rules && s->r_rederive_cut != NULL &&
+      s->r_rederive_cut[i] != ATP_TRACE_NONE &&
+      j < s->n_rules && s->r_trace[j] != ATP_TRACE_NONE &&
+      s->r_trace[j] <= s->r_rederive_cut[i]) {
+    u8 j_is_subsumer = (s->r_trace[j] == s->r_rederive_cut[i]);
+    skip2 = skip3 = skip4 = 1u;
+    skip1 = j_is_subsumer ? skip1 : 1u;
+    if (atp_rule_trace_on()) {
+      fprintf(stderr,
+              "  REDERIVE-SKIPROOT i=%u (cut=%u) x j=%u (trace=%u)%s\n",
+              i, s->r_rederive_cut[i], j, s->r_trace[j],
+              j_is_subsumer ? " [subsumer: skip1 kept]" : "");
+    }
+  }
+
 #ifdef THVM_ATPFT_UNIFY
   // FT-native overlap path: when both rules' FT mirrors are populated,
   // the rename + cp_visit work happens on AtpFt cells directly, only
@@ -15383,6 +15603,7 @@ static u32 atp_wmo_collect_pair(AtpState *s, u32 i, u32 j,
     e->combo = (k < combo_end[0]) ? 0u
              : (k < combo_end[1]) ? 1u
              : (k < combo_end[2]) ? 2u : 3u;
+    e->cp.combo = e->combo;  // tag the CP so the combo survives to the trace
     e->seq = *n_big - 1u;
   }
   return nbuf;
@@ -15420,11 +15641,18 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     static int batch_trace = -1;
     if (batch_trace < 0) batch_trace = (getenv("THVM_ATP_BATCH_TRACE") != NULL) ? 1 : 0;
     for (u32 k = 0; k < n_big; k++) {
-      if (batch_trace)
-        fprintf(stderr, "BATCH f=%u i=%u j=%u itr=%u jtr=%u i_or=%u j_or=%u combo=%u key=%llu\n",
+      if (batch_trace) {
+        char bla[1024], bra[1024];
+        atp_pretty_term(big[k].cp.lhs, bla, sizeof bla);
+        atp_pretty_term(big[k].cp.rhs, bra, sizeof bra);
+        fprintf(stderr,
+                "BATCH f=%u i=%u j=%u itr=%u jtr=%u i_or=%u j_or=%u combo=%u "
+                "poslen=%u key=%llu cp=%s # %s\n",
                 f, big[k].i, big[k].j, s->r_trace[big[k].i], s->r_trace[big[k].j],
                 s->r_orient[big[k].i], s->r_orient[big[k].j],
-                big[k].combo, (unsigned long long)big[k].key);
+                big[k].combo, big[k].cp.pos_len,
+                (unsigned long long)big[k].key, bla, bra);
+      }
       pushed += atp_push_cps_traced(s, &big[k].cp, 1u,
                                     s->r_trace[big[k].i],
                                     s->r_trace[big[k].j],
@@ -15595,6 +15823,7 @@ static u32 cp_visit_ic(const u32 *p, u32 p_len, void *raw) {
   slot->peak = cp_peak;
   slot->pos_len = (u8)p_len;
   for (u32 d = 0; d < p_len; d++) slot->pos[d] = (u8)p[d];
+  slot->combo = 0xffu;  // unknown until the WM-order batch tags it
   ctx->count++;
   return ctx->count;
 }
@@ -15762,6 +15991,43 @@ static void atp_emit_fvi_pair(AtpState *s, Term lhs, Term rhs,
 }
 #endif /* ATP_ORDERED_REWRITE */
 
+// Waldmeister LRSortieren side-canonicalisation (SpezNormierung.c
+// :517-534 LRSortierenRek).  WM stores every E-set equation (oriented OR
+// unorientable) with a canonical left/right side order: treat variables
+// as jokers (variable < non-variable), compare functors by the intake
+// SymbolVergleich precedence (degenerate = Gleich on a single-operator
+// signature), recurse argument-wise left-to-right; on Groesser (lhs >
+// rhs structurally) the sides are swapped so the structurally-smaller
+// side becomes the LHS.  A derived unorientable CP enters with whichever
+// face the superposition geometry produced as its lhs; without this
+// canonicalisation thvm and WM can store the SAME equation under opposite
+// side orders (e.g. the Sheffer C-shape `(x*(x*x))*y=y*y` vs WM's
+// `x*x=(y*(y*y))*x`), and the differing stored term STRUCTURE makes the
+// equation's own CP batch overlap a different set of redexes -> a
+// selection-order fork downstream.  Returns 1 if the sides should swap.
+//   <0 (Kleiner): lhs structurally smaller -> keep
+//    0 (Gleich):  indistinguishable -> keep
+//   >0 (Groesser): lhs structurally larger -> swap
+static int atp_lr_sortieren_rec(Term lhs, Term rhs) {
+  u8 lv = (term_tag(lhs) == TAG_FVR);
+  u8 rv = (term_tag(rhs) == TAG_FVR);
+  if (lv && rv) return 0;          // both variables -> Gleich
+  if (lv) return -1;               // variable < non-variable -> Kleiner
+  if (rv) return 1;                // non-variable > variable -> Groesser
+  // Both constructors.  Single-operator Sheffer signature: SymbolVergleich
+  // is Gleich for equal functors; differing functors fall back to the
+  // label code (a stable total order mirroring the precedence index).
+  u32 lf = term_ext(lhs), rf = term_ext(rhs);
+  if (lf != rf) return (lf < rf) ? -1 : 1;
+  u32 ln = term_ctr_n(lhs), rn = term_ctr_n(rhs);
+  if (ln != rn) return (ln < rn) ? -1 : 1;
+  for (u32 i = 0; i < ln; i++) {
+    int c = atp_lr_sortieren_rec(term_ctr_at(lhs, i), term_ctr_at(rhs, i));
+    if (c != 0) return c;
+  }
+  return 0;
+}
+
 // Orient via KBO and push the rule(s).  See header comment for the
 // dispatch table.  Atomic: if the unfailing fallback can't fit both
 // orientations, neither is added.
@@ -15806,6 +16072,57 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       // -- the WM emission mirror records the WM-distinguished-face flip
       // per-trace instead (atp_wmo_insert_fact_ex), keeping the CP set
       // and the formation-time KPAction order gate untouched.
+      //
+      // Waldmeister LRSortieren (SpezNormierung.c:517-534): WM stores the
+      // equation with the structurally-smaller side as LHS (variable <
+      // non-variable, preorder).  thvm's popped CP can carry the opposite
+      // side order; that differing stored structure makes the equation's
+      // OWN CP batch overlap a different set of redexes, forking the
+      // selection sequence.  Canonicalise to WM's side order so the
+      // stored E-member -- and its batch -- match.
+      if (s->use_lr_sortieren && atp_lr_sortieren_rec(lhs, rhs) > 0) {
+        Term tmp = lhs; lhs = rhs; rhs = tmp;
+      }
+      // Waldmeister CP-formation side geometry (Unifikation1.c:916-917):
+      // WM stores the unorientable equation with KPLinks =
+      // sigma(TP_RechteSeite(Vater)) = sigma(r_i) as its LEFT side and
+      // KPRechts = sigma(l_i[p<-r_j]) (the reduct) as its RIGHT.  When
+      // thvm's popped CP carries the OPPOSITE order (cp_visit lands the
+      // reduct on lhs, sigma(r_i) on rhs) its own batch overlaps a
+      // different redex set -- the Sheffer OrAssociativity C-shape forks
+      // here (thvm long-side-left vs WM short-side-left).  Reorder to WM's
+      // geometry so the stored LHS becomes thvm's cp_rhs.
+      //
+      // PARENT-OVERLAP-AWARE (atp_cp_wm_side_swaps): NOT a blanket reorder
+      // of every KBO_UN equation.  Which face WM stores sigma(r_Vater)-left
+      // depends on the overlap geometry; the CP's face-combo index (tagged
+      // at formation, carried on the TRACE_CP record) selects it.  Only the
+      // reversed-i-face combos (2/3 in atp_overlap_ij, where the overlap
+      // produced thvm's reduct-on-lhs vs WM's sigma(r)-on-lhs) need the
+      // swap; combos 0/1 already match WM's stored geometry, so swapping
+      // them mis-times the equation's OWN batch -- that mistiming was the
+      // CombinatorAxioms__BCKWToSKI__c2 regression (a blanket reorder
+      // mis-timed one downstream w1=41 cCombinatorI CP by one selection:
+      // picks 55-57 transiently 119,119,41 vs 119,41,119, content-
+      // identical, re-converging at pick 58).  An INITIAL AXIOM (untagged)
+      // has no superposition Vater -- WM stores it by LRSortieren, so
+      // atp_cp_wm_side_swaps canonicalises an axiom with LRSortieren rather
+      // than the CP-formation swap (reproducing the soa Sheffer axiom
+      // order).  The combo gate keeps the soa OrAssociativity prefix at 124
+      // AND, when on, keeps the other broad theorems byte-identical (it no
+      // longer forks McCune as the old blanket reorder did).  BCKWToSKI__c2
+      // has an irreducible axiom-orientation tension (it needs the same
+      // unorientable axiom NOT swapped, see atp_cp_wm_side_swaps), so the
+      // bench DEFAULTS the swap OFF to keep that baseline clean; soa is
+      // measured opt-in.  The emission mirror (atp_wmo_eq_dist_rhs) reads
+      // last_cp_wm_side_swapped so the WM distinguished-face flag matches
+      // the physical orientation even for the axiom case.  DEFAULT OFF
+      // (THVM_ATP_CP_WM_SIDE opts in).
+      s->last_cp_wm_side_swapped =
+          atp_cp_wm_side_swaps(s, s->last_popped_trace, lhs, rhs);
+      if (s->last_cp_wm_side_swapped) {
+        Term tmp = lhs; lhs = rhs; rhs = tmp;
+      }
       u32 idx = s->n_rules;
       u8 pushed = atp_push_rule(s, lhs, rhs);
       if (pushed) { r.first = idx; r.count = 1; }

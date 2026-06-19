@@ -1705,6 +1705,52 @@ static u8 atp_wmo_eq_tops_rank(AtpState *s, u32 trace, u8 thvm_dir,
                        out_chain);
 }
 
+// Accumulate the per-variable occurrence counts of `t` into `cnt`
+// (indexed by variable id, capped at WMO_VAR_CNT_CAP).
+enum { WMO_VAR_CNT_CAP = 64u };
+static void wmo_var_counts(Term t, u16 *cnt) {
+  if (term_tag(t) == TAG_FVR) {
+    u32 v = term_ext(t);
+    if (v < WMO_VAR_CNT_CAP && cnt[v] < 0xffffu) cnt[v]++;
+    return;
+  }
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) wmo_var_counts(term_ctr_at(t, i), cnt);
+  }
+}
+
+static int wmo_u16_cmp(const void *a, const void *b) {
+  u16 x = *(const u16 *)a, y = *(const u16 *)b;
+  return (x > y) - (x < y);
+}
+
+// Whether the two sides of an equation are NOT variable permutations of
+// each other -- i.e. their per-variable occurrence-count PROFILES (each
+// side's multiset of counts, sorted) differ.  A variable permutation
+// (commutativity `f(x,y)=f(y,x)`, associativity rotation, or a
+// role-swap like `f(x,g(y,y))=f(y,g(x,x))`) has the SAME sorted count
+// profile on both sides and returns 0; an asymmetric equation whose one
+// side introduces or drops occurrences (e.g. soa's `x*x = (y*(y*y))*x`:
+// profile {2} vs {1,3}) returns 1.  Comparing SORTED profiles (not
+// per-id counts) is renaming-invariant, so a pure role swap is correctly
+// classified as a permutation.  Used to gate the two-face co-ranking in
+// atp_wmo_rank to the equations WM stores oriented (whose single scan
+// yields both unifiers) rather than the genuinely two-faced permutation
+// equations WM keeps as distinct indexed leaves.
+static u8 wmo_eq_sides_var_differ(Term lhs, Term rhs) {
+  u16 cl[WMO_VAR_CNT_CAP] = {0};
+  u16 cr[WMO_VAR_CNT_CAP] = {0};
+  wmo_var_counts(lhs, cl);
+  wmo_var_counts(rhs, cr);
+  qsort(cl, WMO_VAR_CNT_CAP, sizeof(u16), wmo_u16_cmp);
+  qsort(cr, WMO_VAR_CNT_CAP, sizeof(u16), wmo_u16_cmp);
+  for (u32 v = 0; v < WMO_VAR_CNT_CAP; v++) {
+    if (cl[v] != cr[v]) return 1u;
+  }
+  return 0u;
+}
+
 // Compute the WM emission rank key for one tagged CP of the new fact
 // `f`'s batch.  `i`/`j` are the overlap slots (i = outer, positions in
 // i's face), `combo` = atp_overlap_ij face combo (bit0: j used its
@@ -1743,7 +1789,50 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
   if (i == f && j != f) {
     // tops phase: A (i WM-distinguished face) or D (i WM-reverse face)
     u32 phase = i_face_wm ? 4u : 0u;
+    // Re-derived-fact proper-position tops ownership (flat-subsume only).
+    // A fact re-derived after E-set subsumption removed an equation of its
+    // shape must not re-emit, at the early tops age, the PROPER-position
+    // overlaps the subsuming rule's original batch already enumerated
+    // against the removed equation.  The root case is handled in
+    // atp_overlap_ij (r_rederive_cut forces the noroot variant); the
+    // surviving proper overlaps against a pre-cutoff partner reproduce the
+    // subsumed shape, and WM emits the resulting CP at the LATE batch age
+    // (after the new fact's self-overlaps), not in the leading tops phase.
+    // Defer those to a trailing phase so their w2/FIFO age matches WM's late
+    // emission.  A flat-transposition (commutativity) partner is excluded:
+    // it IS the subsumer whose late-derived overlaps WM emits in the new
+    // fact's leading phase (the re-derived equation x commutativity CP is
+    // genuinely new content, not a re-enumeration of the removed original's
+    // batch).  Gated on the cutoff being set (NONE outside flat-subsume).
+    if (cp->pos_len > 0u && s->r_rederive_cut != NULL &&
+        f < s->n_rules && s->r_rederive_cut[f] != ATP_TRACE_NONE &&
+        j < s->n_rules && s->r_trace[j] != ATP_TRACE_NONE &&
+        s->r_trace[j] <= s->r_rederive_cut[f] &&
+        !atp_is_flat_transposition(s->lhs[j], s->rhs[j])) {
+      phase = 7u;
+    }
+    // Re-derived-fact forward-face ROOT overlap with the subsumer.  WM forms
+    // the root overlap of the re-derived equation's distinguished side with the
+    // subsumer (commutativity) -- the C-shape -- right AFTER the leading
+    // proper-position overlap in the same tops phase, not at the head (where
+    // the preorder root rank k1=0 would otherwise place it).  The dist_rhs
+    // label for the re-derived fact stays at its single-parent default, so the
+    // face bits alone classify this in the leading phase; bump k1 to the
+    // preorder rank of the recursive child (position [1] -- the side WM's
+    // commutativity overlap walks into) so the leading proper-position A-shape
+    // (which carries the smaller k2 tiebreak) sorts ahead and the C-shape
+    // follows it, matching WM's batch FIFO age.  Scoped to poslen==0 and the
+    // subsumer trace (the rule that caused the cut); a no-op outside
+    // flat-subsume re-derivations.
+    u8 subsumer_root =
+        (cp->pos_len == 0u && i_face == 0u && s->r_rederive_cut != NULL &&
+         f < s->n_rules && s->r_rederive_cut[f] != ATP_TRACE_NONE &&
+         j < s->n_rules && s->r_trace[j] == s->r_rederive_cut[f]) ? 1u : 0u;
     u32 k1 = wmo_preorder_rank(i_outer, cp->pos, cp->pos_len);
+    if (subsumer_root) {
+      u8 recursive_child[1] = {1u};
+      k1 = wmo_preorder_rank(i_outer, recursive_child, 1u);
+    }
     u8 j_is_rule = s->r_orient[j] ? 1u : 0u;
     u8 tree = j_is_rule ? 0u : 1u;
     u32 k2 = i_face_wm ? (tree == 1u ? 0u : 1u) : (u32)tree;
@@ -1756,6 +1845,63 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
     if (!wmo_tops_rank(w, tree, qsub, s->r_trace[j], j_face_wm, &arr, &ch)) {
       w->rank_misses++;
       arr = 0x3fffu;
+    }
+    // Co-rank the two faces of a CP-derived unorientable equation partner
+    // at the SAME overlap position.  WM stores such an equation as an
+    // ORIENTED rule whose single distinguished face, scanned once against
+    // the new fact's subterms (Unifikation1.c U1_KPsBildenZuRegel section
+    // 2: one TermMitDSBaumUnifizieren walk), surfaces EVERY unifier --
+    // including the two most-general unifiers a repeated-variable LHS
+    // admits -- so the resulting CPs land at consecutive FIFO ages.  thvm
+    // cannot orient the same equation; it stores BOTH faces, which index
+    // at DIFFERENT discrimination-tree leaves, so their independent DFS
+    // arrivals scatter the two CPs across the batch.  When both faces reach
+    // this query subterm, key BOTH on the EARLIER face's arrival (the leaf
+    // WM's single scan would reach first) and order the later face right
+    // after it via the chain index -- reproducing WM's adjacent ages.
+    //
+    // Restricted to equations whose two sides carry DIFFERENT variable
+    // multisets.  A variable-permutation equation (commutativity
+    // `f(x,y)=f(y,x)`, associativity-rotation `f(x,f(y,z))=f(z,f(x,y))`)
+    // is genuinely two-faced in WM too -- WM keeps both faces as distinct
+    // indexed leaves and emits their CPs at independent ages -- so
+    // co-ranking those would mis-order them (CommutativeRingAxioms
+    // ZeroIsAbsorbing's `and`/`or` permutation batch).  The asymmetric
+    // equations WM oriented (one side a strict variable-set subset, e.g.
+    // soa's `x*x = (y*(y*y))*x`) are the only ones whose two faces are WM's
+    // single-scan unifier variants.
+    if (tree == 1u && wmo_eq_sides_var_differ(s->lhs[j], s->rhs[j])) {
+      u32 arr_o = 0, ch_o = 0;
+      u8 hit_o = wmo_tops_rank(w, tree, qsub, s->r_trace[j],
+                               (u8)(j_face_wm ^ 1u), &arr_o, &ch_o);
+      // Suppress the forward anchor (arr_o < arr, this face's leaf pulled
+      // up to the earlier sibling face) when the CP merely REPRODUCES a
+      // live equation.  That overlap of the new fact onto the partner's
+      // reverse face plants the reverse side at the root, so the joined CP
+      // reduces back to an already-stored equation (it is popped `...
+      // subsumed`); WM derives that same equation from a DIFFERENT, later
+      // overlap and ages it at the genuine late FIFO slot, NOT co-ranked
+      // beside the partner's distinguished-face CP (soa pick 113: the
+      // jtr-221-reverse root overlap reproduces `x*x = (y*(y*y))*x` and WM
+      // emits it after the new fact's `(x*x)*y = y*(x*y)` CP, not before).
+      // The genuine repeated-variable double-MGU co-rank (arr_o == arr, two
+      // unifiers from one leaf) and a NEW reverse-face CP keep the anchor.
+      if (hit_o && arr_o < arr) {
+        Term nl = atp_rewrite_normalize_indexed(s, cp->lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, cp->rhs, 4096u);
+        if (!kbo_eq(nl, nr) && atp_pop_eq_subsumed(s, nl, nr)) hit_o = 0u;
+      }
+      if (hit_o && arr_o < arr) {
+        // The other face arrives earlier: anchor on it, this face follows.
+        // Slot the follower at 2*ch_o+1 so it sorts right after the anchor's
+        // 2*ch_o and never collides with another face at the same leaf.
+        arr = arr_o;
+        ch = ch_o * 2u + 1u;
+      } else if (hit_o && arr_o > arr) {
+        // This face is the earlier anchor; keep its arrival, slot at 2*ch so
+        // the later face (queried symmetrically as 2*ch+1) sorts just after.
+        ch = ch * 2u;
+      }
     }
     return wmo_pack_key(phase, k1, k2, arr, ch, 0);
   }

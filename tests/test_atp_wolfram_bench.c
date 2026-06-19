@@ -907,6 +907,51 @@ int main(int argc, char **argv) {
       // faithful preset; THVM_ATP_NO_OVERLAP_EXHAUST env disables.
       s->use_overlap_exhaust =
           (getenv("THVM_ATP_NO_OVERLAP_EXHAUST") == NULL) ? 1u : 0u;
+      // WM LRSortieren side-canonicalisation (SpezNormierung.c:517-534):
+      // store each derived unorientable equation with WM's canonical side
+      // order (variable < non-variable, preorder).  DEFAULT OFF: a
+      // UNIVERSAL canonicalisation regresses the Sheffer OrAssociativity
+      // selection prefix 20->16 -- WM does NOT re-sort every derived
+      // equation; it keeps the CP-formation side order for most E-members
+      // and only the intake axioms run LRSortieren.  Matching WM's exact
+      // per-equation side order needs the CP-FORMATION reduct-assignment
+      // geometry (which parent is overlapped), not a blanket re-sort.
+      // Opt-in via THVM_ATP_LR_SORTIEREN for experimentation.
+      s->use_lr_sortieren =
+          (getenv("THVM_ATP_LR_SORTIEREN") != NULL) ? 1u : 0u;
+      // WM CP-formation side geometry (Unifikation1.c:916-917): store
+      // each derived UNORIENTABLE equation with WM's KPLinks=sigma(r_i)
+      // (the overlapped rule's RHS, WM's distinguished face) as the stored
+      // LHS and the reduct on the RHS -- the geometry swap of thvm's
+      // natural popped CP order, so the equation's own CP batch overlaps
+      // WM's redex set instead of forking on the stored term structure.
+      // ADVANCES Sheffer OrAssociativity 20->52 (the C-shape now stored
+      // short-side-left like WM, consumed at the eq-7 batch instead of
+      // deferred to a late commutativity overlap).
+      //
+      // The swap itself is now PARENT-OVERLAP-AWARE (atp_cp_wm_side_swaps):
+      // a derived superposition CP is swapped per its overlap face-combo
+      // (tagged at formation, carried on the TRACE_CP record), not by a
+      // blanket reorder, and an initial axiom is canonicalised by
+      // LRSortieren -- so when on, the swap fires only where WM's
+      // KPLinks=sigma(r_Vater) geometry actually applies.  That faithful
+      // gate advances the Sheffer OrAssociativity prefix to 124.
+      //
+      // DEFAULT OFF: the residual axiom-orientation case is irreducible --
+      // soa needs the unorientable-axiom swap (its Sheffer C-shape stored
+      // short-side-left), while CombinatorAxioms__BCKWToSKI__c2 needs the
+      // SAME axiom NOT swapped (a downstream FIFO-age cascade re-times one
+      // w1=41 cCombinatorI CP and forks selection at pick 55).  No single
+      // axiom rule satisfies both, so the bench DEFAULT keeps the swap OFF
+      // (matching the /goal clean baselines, incl. BCKWToSKI__c2 -> Y/109);
+      // the soa Sheffer prefix is measured opt-in via THVM_ATP_CP_WM_SIDE.
+      // (THVM_ATP_NO_CP_WM_SIDE remains an explicit force-off override.)
+      // FOLLOW-UP (2026-06-20): the faithful axiom-intake geometry that
+      // would reconcile the two -- so the swap can default ON again -- is a
+      // deeper WM intake-ordering port, left open.
+      s->use_cp_wm_side =
+          (getenv("THVM_ATP_CP_WM_SIDE") != NULL
+           && getenv("THVM_ATP_NO_CP_WM_SIDE") == NULL) ? 1u : 0u;
       // Push-time queue-vs-queue subsumption OFF: thvm-native filter
       // with no WM counterpart (recentCPinsert queues every treated
       // survivor; SS_TermpaarSubsummiertTermpaar's only set-level

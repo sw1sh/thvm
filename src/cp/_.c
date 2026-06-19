@@ -40,6 +40,21 @@ static u64 g_cp_positions_depth_capped = 0;
 // superposition (Meredith @6078).  Off by default.
 int g_cp_visit_trace = 0;
 
+static void cp_dbg_print_term(FILE *fp, Term t) {
+  if (term_tag(t) == TAG_FVR) {
+    fprintf(fp, "V%u", (unsigned)term_ext(t));
+    return;
+  }
+  if (term_tag(t) != TAG_CTR) { fprintf(fp, "?"); return; }
+  u32 n = term_ctr_n(t);
+  fprintf(fp, "(C%u", (unsigned)term_ext(t));
+  for (u32 i = 0; i < n; i++) {
+    fputc(' ', fp);
+    cp_dbg_print_term(fp, term_ctr_at(t, i));
+  }
+  fputc(')', fp);
+}
+
 fn void thvm_cp_caps_reset(void) {
   g_cp_dropped_capped         = 0;
   g_cp_positions_depth_capped = 0;
@@ -173,11 +188,24 @@ static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {
   slot->lhs = cp_lhs;
   slot->rhs = cp_rhs;
   slot->peak = cp_peak;
+  if (g_cp_visit_trace) {
+    // Complements the per-position `CPVIS pos[..] unify=` line above with
+    // the formed CP, so a missed/mis-ordered superposition can be aligned
+    // against Waldmeister's `critical pair N built ...` term by term.
+    fprintf(stderr, "CPVIS    formed pos[");
+    for (u32 d = 0; d < p_len; d++) fprintf(stderr, "%u", p[d]);
+    fprintf(stderr, "] cp_lhs=");
+    cp_dbg_print_term(stderr, cp_lhs);
+    fprintf(stderr, " cp_rhs=");
+    cp_dbg_print_term(stderr, cp_rhs);
+    fputc('\n', stderr);
+  }
   // Record the superposition position -- the path into rule i's lhs
   // where rule j overlapped.  cp_walk_positions caps depth at
   // CP_MAX_DEPTH, so p_len never exceeds the pos[] array.
   slot->pos_len = (u8)p_len;
   for (u32 d = 0; d < p_len; d++) slot->pos[d] = (u8)p[d];
+  slot->combo = 0xffu;  // unknown until the WM-order batch tags it
   ctx->count++;
   return ctx->count;
 }

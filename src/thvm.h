@@ -3799,6 +3799,16 @@ typedef struct {
   Term peak;            // sigma(li): the overlapped term both CP sides descend from
   u8   pos[CP_MAX_DEPTH];
   u8   pos_len;
+  // Face-combo index of the overlap that produced this CP (0..3 per
+  // atp_overlap_ij: 0/1 = outer rule i is the Vater [overlapped] face,
+  // 2/3 = i's reversed face is the Vater).  0xff = unknown (a CP from a
+  // path that does not tag combos).  The CP-formation side geometry
+  // (use_cp_wm_side) reads this to decide whether thvm's stored
+  // orientation already matches WM's KPLinks = sigma(r_Vater) face or
+  // needs the physical swap -- a per-combo distinction, not a blanket
+  // reorder.  Threaded onto the TRACE_CP record so it survives to the
+  // orient site (atp_wmo_cp_combo reads it back at pop time).
+  u8   combo;
 } CriticalPair;
 
 fn u32 thvm_critical_pairs(const Term *lhs, const Term *rhs, u32 n_rules,
@@ -4600,6 +4610,15 @@ typedef struct {
   // source CP as its parent.
   u32  last_popped_trace;
 
+  // Transient: set by thvm_atp_orient_and_add's KBO_UN branch to 1 when
+  // the CP-formation side geometry swap (use_cp_wm_side) physically fired
+  // for the just-stored unorientable equation, 0 otherwise.  The WM
+  // emission-order mirror (atp_wmo_eq_dist_rhs) reads it back so the
+  // distinguished-face flag matches the physical orientation even for the
+  // axiom case, whose swap decision depends on the PRE-swap term order
+  // (not recoverable from the stored, post-swap sides).
+  u8   last_cp_wm_side_swapped;
+
   // Goal: a single conjecture goal_lhs == goal_rhs.  goal_lhs == 0
   // means "no goal set; run as completion".
   Term goal_lhs;
@@ -5387,6 +5406,32 @@ typedef struct {
   Term *r_dead_rhs_save;          // original rhs at time of death
   u64  n_rules_bwd_subsumed;      // diagnostic counter
 
+  // Waldmeister remove-and-re-derive root-overlap ownership.  When an
+  // E-member is removed by E-set subsumption (atp_eset_subsume_by_new)
+  // and an equation of the SAME shape is later re-derived, WM does NOT
+  // re-enumerate the root-x-root overlaps that the subsuming rule's
+  // ORIGINAL batch already formed against the removed equation -- that
+  // root overlap is "owned" by the original batch.  thvm's flat-subsume
+  // path reproduces the remove/re-derive lifecycle, so it must reproduce
+  // the ownership too.
+  //
+  // The cutoff is the SUBSUMING rule's FINAL birth trace.  That trace is
+  // NOT yet stamped at subsumption time (atp_eset_subsume_by_new runs
+  // inside orient_and_add, before the step loop stamps r_trace), so the
+  // subsumer's lhs/rhs SHAPE is saved per dead slot instead; the cutoff
+  // is resolved lazily at re-derivation time by locating the live rule
+  // of that shape and reading its (now final) r_trace.  When a fresh rule
+  // kbo_eq-matches dead slot k's saved shape, that rule's r_rederive_cut[]
+  // is set to the resolved cutoff; in atp_overlap_ij the re-derived rule
+  // suppresses root overlaps against any older rule whose birth trace is
+  // <= the cutoff.  ATP_TRACE_NONE in r_rederive_cut means "not
+  // re-derived"; a 0 r_dead_subsumer_lhs slot means "not subsumption-
+  // removed".  Only populated under use_wm_flat_subsume, so non-flat-
+  // subsume runs are untouched.
+  Term *r_dead_subsumer_lhs;      // per dead slot: subsuming eq lhs (GC-rooted)
+  Term *r_dead_subsumer_rhs;      // per dead slot: subsuming eq rhs (GC-rooted)
+  u32 *r_rederive_cut;            // per rule: cutoff (NONE = not re-derived)
+
   // Backward demodulation (Vampire `bd=all` analog, LHS half -- the RHS
   // half is the existing use_rhs_interreduce option).  After each newly-
   // added rule batch, also try to normalize each older rule's LHS with
@@ -5425,6 +5470,26 @@ typedef struct {
   // unorientable equation whose birth-batch already enumerated its CP set
   // (WM forms a fact's superposition lane once).  See r_overlap_done.
   u8    use_overlap_exhaust;
+  // Waldmeister LRSortieren side-canonicalisation (SpezNormierung.c
+  // :517-534, env THVM_ATP_LR_SORTIEREN, default OFF): a derived
+  // unorientable equation is stored with WM's canonical left/right side
+  // order (variable < non-variable, preorder).  DEFAULT OFF -- a blanket
+  // re-sort regresses the Sheffer OrAssociativity prefix (WM keeps the
+  // CP-formation side order for most derived E-members; only intake
+  // axioms run LRSortieren).  Opt-in only.  See atp_lr_sortieren_rec.
+  u8    use_lr_sortieren;
+  // Waldmeister CP-formation side geometry (Unifikation1.c:916-917, env
+  // THVM_ATP_CP_WM_SIDE, default OFF): store each derived UNORIENTABLE
+  // equation with WM's geometric side order -- KPLinks = sigma(r_i) (the
+  // overlapped rule's RHS, WM's distinguished face) as the stored LHS,
+  // KPRechts = sigma(l_i[p<-r_j]) (the reduct) as the stored RHS.  thvm's
+  // popped CP carries the OPPOSITE order; swapping it matches WM's stored
+  // term structure so the equation's own CP batch overlaps the same redex
+  // set (Sheffer OrAssociativity C-shape).  When set, atp_wmo_eq_dist_rhs
+  // returns the FLIPPED flag (distinguished = stored LHS) so the emission
+  // mirror stays consistent.  Unlike use_lr_sortieren this is a geometry
+  // swap, not a structural size sort.
+  u8    use_cp_wm_side;
   // IR-victim buffer (use_wm_demote only): original sides + the
   // TRACE_SIMPLIFY parent captured at drop time.  Filled by
   // thvm_atp_interreduce, drained by thvm_atp_step after CP
