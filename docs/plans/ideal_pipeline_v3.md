@@ -972,3 +972,52 @@ re-applied the diff to a fresh worktree off main and re-ran every gate).
 GPT-2 perf under the new default: seq256 CPU 108 vs the old heuristic 162 ms (faithful is
 FASTER -- the goal was perf-positive).  Remaining "clean" half (the M-major->TRealize barrier,
 attention dual-path collapse, env-knob retirement) is now unblocked and independent.
+
+### FLUX fusion audit + matmul-input-fuse made backend-safe (2026-06-19)
+
+Audited the three "clean" FLUX/transformer levers against the actual lowering on a
+transformer-shaped probe (AdaLN modulation -> Q/K/V projection matmul, M=256 K=N=512,
+CPU `kernel_count()` delta).  Two were NON-issues, one was a latent miscompile:
+
+- **The "M-major -> TRealize barrier" is REDUNDANT, not a kernel-count splitter.** FLUX runs
+  under the faithful seed by DEFAULT (FluxGenerate sets no `THVM_HEURISTIC_SEED`/seed
+  override on the Examples path -- the velocity is plain TJit-captured), so it already gets the
+  faithful structural fusion.  The WL `fxLinear` (`FluxForward.wl:35`)
+  `TRealize[TMatMul[TRealize[x], Transpose[w]]]` wraps BOTH the matmul input and output in
+  `TRealize`, but the C scheduler ALREADY realizes the matmul reduce unconditionally
+  (`BUFFERIZE_REASON_MATMUL`, bufferize_classify.c:137/1282 -- a buffer operand for BLAS/TC,
+  tinygrad's ALWAYS_CONTIGUOUS) and the input is kept realized as a GEMM operand by
+  `rb_feeds_matmul_reduce`.  Measured: realize-input vs scheduler-input give the SAME 3 kernels.
+  So the WL `TRealize`s are not blocking a fusion the scheduler would otherwise do; removing
+  them is byte-neutral and they carry real reasons (collapse a symbolic-Plus for the shape
+  query; the q8 output handle).  Left as-is.
+
+- **Attention dual-path is the symbolic-vs-literal-seq split, not a hand-fused-vs-faithful
+  hack** (Attention.wl:265-295: per-head loop for a symbolic KV-cache-decode seq vs ONE batched
+  scaled-dot for a literal seq -- token-identical).  `remove_bufferize` is default-ON and fires
+  on the softmax exp/scale/normalize (no rank/transformer/backend gate excludes FLUX attention);
+  the materialize-side index-substitution blocker the prior prototype hit is resolved
+  (`ru_remove_bufferize_on` default-on, 4 gates).  No lever here.
+
+- **`THVM_FUSE_MATMUL_INPUT` MISCOMPILED off Metal (the real bug, now FIXED).** The opt-in
+  matmul-input fuse (0bb8dc87) un-realizes a single-consumer elementwise producer so it inlines
+  into the matmul.  Only the Metal register-blocked tiled emitter
+  (`render_uop.c rmu_emit_matmul_tc_tiled`) can emit that inline -- it reconstructs the
+  producer's (m,k) from the threadgroup tile origin.  On CPU/CUDA the producer feeds the matmul
+  through the matmul-lowering reshape(+unit)+expand(N), a rank-changing movement the POSITIONAL
+  per-consumer re-index (`ru_build_axis_subst`) cannot bind, so the producer's own M/K ranges
+  LEAKED as extra output loops -> a `|M||N||M||K||K|` ~8.8e12-iter runaway kernel (a clang `-O3`
+  hang on the FLUX AdaLN modulation pattern; root-caused via `THVM_DUMP_KERNEL_SRC` of the
+  5-nested-loop kernel).  `rmu_emit_matmul_tc` already bails fused-A on non-Metal
+  (`a_val != 0 && RMU_TARGET != CG_TARGET_METAL`), but the rangeify un-realize was target-blind
+  and still un-realized the producer, leaving the generic accumulator to leak the ranges.
+  FIX (this commit): `ru_fuse_matmul_input_target_ok` gates the un-realize on
+  `default_device == THVM_DEV_METAL` (set by realize.c's device routing before rangeify runs),
+  matching the codegen capability boundary -- Metal fuses correctly, CPU/CUDA keep the producer
+  a realized BLAS operand.  So `THVM_FUSE_MATMUL_INPUT` is now SAFE on every backend; FLUX (Metal
+  warm) can opt in for the tinygrad-style modulation-into-matmul fusion without breaking the CPU
+  parity gates.  Verified: the runaway-loop repro terminates; `test_metal_fuse_matmul_input`
+  correct (maxAbsDiff 0) in both modes on M3 Max; `test_lnmatmul_fuse` strengthened to assert
+  BLAS fires in both modes; new `test_fuse_matmul_input_cpu` regression (CPU AdaLN-into-matmul
+  terminates + matches the realized-input reference); `test_faithful_parity` OK default AND
+  `THVM_FUSE_MATMUL_INPUT=1`; gpt2 8/8, nn 72/72, grad 62/62; default codegen byte-unchanged.

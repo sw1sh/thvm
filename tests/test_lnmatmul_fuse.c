@@ -38,21 +38,18 @@ static int check(u32 M, u32 K, u32 N, u64 *gemm) {
 int main(void){ thvm_init(); int f=0;
   TEST_BEGIN("blas/ln-matmul-reduce-boundary-m1");
   u64 g2=0,g1=0;
-  int b2 = check(2,64,300,&g2);   // control: M=2 fires BLAS today
-  int b1 = check(1,64,300,&g1);   // M=1: currently FUSED (no BLAS) -- the bug
+  int b2 = check(2,64,300,&g2);   // control: M=2 fires BLAS
+  int b1 = check(1,64,300,&g1);   // M=1 leading-unit axis: must also fire BLAS
   printf("  M=2: bad=%d gemm=%llu  | M=1: bad=%d gemm=%llu\n",
          b2,(unsigned long long)g2,b1,(unsigned long long)g1);
   if (b2||b1) f++;                          // numerics must stay correct
-  // THVM_FUSE_MATMUL_INPUT intentionally un-realizes the matmul's elementwise
-  // input (fuse-into-matmul), so the matmul is NOT a BLAS operand and gemm==0 is
-  // the CORRECT outcome under the flag -- only the default (flag-off) path is
-  // expected to fire BLAS.  Numerics stay correct in both cases (checked above).
-  const char *fe = getenv("THVM_FUSE_MATMUL_INPUT");
-  int fused_on = (fe != NULL && fe[0] != '\0' && fe[0] != '0');
-  if (!fused_on) {
-    if (g2==0) { printf("  control M=2 lost BLAS -- regression\n"); f++; }
-    if (g1==0) { printf("  M=1 matmul-after-reduce did NOT fire BLAS (the bug)\n"); f++; }
-  } else {
-    printf("  (THVM_FUSE_MATMUL_INPUT on: matmul input fused -> gemm==0 expected)\n");
-  }
+  // BLAS must fire regardless of THVM_FUSE_MATMUL_INPUT: the matmul-input fuse
+  // un-realizes the producer ONLY on Metal (rangeify ru_fuse_matmul_input_target_ok),
+  // where the tiled emitter inlines it at the A-staging load.  This test runs on
+  // the CPU backend, where the producer stays a realized buffer operand and the
+  // matmul dispatches through cBLAS -- so gemm>=1 in both modes (the off-Metal
+  // path can't inline a fused A; un-realizing it there leaks the producer's
+  // ranges).  Numerics stay correct in both cases (checked above).
+  if (g2==0) { printf("  control M=2 lost BLAS -- regression\n"); f++; }
+  if (g1==0) { printf("  M=1 matmul-after-reduce did NOT fire BLAS (the bug)\n"); f++; }
   printf("  %s (%d failures)\n", f==0?"ok":"FAIL", f); return f==0?0:1; }

@@ -247,6 +247,7 @@ TESTS := \
   $(BIN)/test_sym_matmul \
   $(BIN)/test_matvec_blas \
   $(BIN)/test_lnmatmul_fuse \
+  $(BIN)/test_fuse_matmul_input_cpu \
   $(BIN)/test_sym_inner \
   $(BIN)/test_sym_inner_realize \
   $(BIN)/test_sym_attn \

@@ -208,6 +208,24 @@ fn int ru_fuse_matmul_input_on(void) {
   return on;
 }
 
+// The fused-A inline is emittable ONLY by the Metal register-blocked tiled
+// matmul (render_uop.c rmu_emit_matmul_tc_tiled), which reconstructs the
+// producer's (m, k) directly from the threadgroup tile origin at its A-staging
+// load -- so it never relies on the producer's spliced RANGE leaves.  Every
+// other path (the CPU/CUDA generic accumulator) recomputes the producer subtree
+// per element, where the producer feeds the matmul through the matmul-lowering
+// reshape(+unit)+expand(broadcast N): a rank-changing movement the POSITIONAL
+// per-consumer re-index (ru_build_axis_subst) cannot bind, so the producer's
+// own M/K ranges leak as extra output loops (a catastrophic |M|*|N|*|M|*|K|*|K|
+// nest).  rmu_emit_matmul_tc already bails the fused-A on non-Metal
+// (render_uop.c, `a_val != 0 && RMU_TARGET != CG_TARGET_METAL`), so keep the
+// rangeify un-realize decision consistent with what codegen can emit: only
+// un-realize the producer when the realize routes to Metal.  On CPU/CUDA the
+// producer stays a realized buffer operand (correct, BLAS-eligible).
+fn int ru_fuse_matmul_input_target_ok(void) {
+  return CURRENT_CTX != NULL && CURRENT_CTX->default_device == THVM_DEV_METAL;
+}
+
 // Whether a bufferize-classify realized node is seeded as a structural
 // boundary up front (vs left for the walk to derive).  Default: every
 // realized node (the heuristic seed).  Faithful: ROOT only (== tinygrad
@@ -1407,7 +1425,8 @@ fn void run_rangeify_unified(Term root) {
       // THVM_FUSE_MATMUL_INPUT: a single-consumer elementwise feeding ONE matmul
       // reduce is fused INTO that matmul (the TC A-staging computes it inline),
       // so we DON'T keep it realized.  Otherwise the GEMM-operand rule holds.
-      int fuse_mm = (ru_fuse_matmul_input_on() && rb_feeds_matmul_reduce(i)
+      int fuse_mm = (ru_fuse_matmul_input_on() && ru_fuse_matmul_input_target_ok()
+                     && rb_feeds_matmul_reduce(i)
                      && rb_matmul_input_fusable(i));
       if (rb_feeds_matmul_reduce(i) && !fuse_mm)
         continue;                                         // removable=False (GEMM operand)
