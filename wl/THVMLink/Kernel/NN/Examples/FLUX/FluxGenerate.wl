@@ -373,7 +373,7 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
 
 FluxGenerate[prompts_List, opts : OptionsPattern[]] := Module[
     {imgSize, seed, dev, nSteps, modelDir, returnImages, sess, key,
-     encHost, latents, results},
+     encDev, latents, results},
 
     imgSize = OptionValue["ImageSize"];
     seed = OptionValue[RandomSeeding];  dev = OptionValue["Device"];
@@ -387,8 +387,8 @@ FluxGenerate[prompts_List, opts : OptionsPattern[]] := Module[
     Module[{ca = sess["ca"], stxt = sess["stxt"], simg = sess["simg"],
             sigmas = sess["sigmas"], n = Length[prompts], t1, t2, t3},
         (* --- STAGE 1: Qwen text-encode the whole batch (in the Qwen context). --- *)
-        {t1, encHost} = AbsoluteTiming @ TInContext[sess["ctxQ"],
-            fxQwenEncodeBatch[sess, prompts]];                         (* {n,stxt,7680} host *)
+        {t1, encDev} = AbsoluteTiming @ TInContext[sess["ctxQ"],
+            fxQwenEncodeBatch[sess, prompts]];                         (* {n,stxt,7680} device *)
 
         (* --- STAGE 2: transformer sample each prompt's latent (transformer
            context).  velJit is the persistent per-step capture; fxSampleJit keeps
@@ -398,15 +398,15 @@ FluxGenerate[prompts_List, opts : OptionsPattern[]] := Module[
             MapIndexed[
                 Function[{encArr, idx},
                     Module[{ee, z, i = First[idx], lat},
-                        ee = ca @ TTensorCreate @ NumericArray[encArr, "Real32"];   (* {stxt,7680} *)
+                        ee = ca @ encArr;   (* {stxt,7680} device, straight from STAGE 1 *)
                         If[ seed === Automatic, SeedRandom[], SeedRandom[seed + i]];
                         z = ca @ TTensorCreate @ NumericArray[
                             RandomVariate[NormalDistribution[], {simg, 128}], "Real32"];
                         lat = Normal @ fxSampleJit[sess["velJit"], z, ee, sigmas, sess["tembFn"], ca];
-                        fxDbg["  enc[", i, "] mean=", Round[Mean[Flatten[encArr]], 0.0001],
+                        fxDbg["  enc[", i, "] mean=", Round[Mean[Flatten[Normal[encArr]]], 0.0001],
                             "  lat mean=", Round[Mean[Flatten[lat]], 0.0001]];
                         lat]],
-                encHost]];
+                encDev]];
         fxTiming[t1, t2];
 
         (* --- STAGE 3: VAE decode each latent (VAE context). --- *)
@@ -423,6 +423,11 @@ FluxGenerate[prompts_List, opts : OptionsPattern[]] := Module[
 fxTiming[ts__] := If[ Environment["THVM_FLUX_TIMING"] =!= $Failed,
     WriteString["stdout", "    [stage] ", Round[{ts}, 0.01], " s\n"]; $Output // Flush]
 
+(* HoldAll so debug arguments (e.g. Mean[Flatten[Normal[enc]]]) are NOT
+   evaluated unless THVM_FLUX_TIMING is set -- otherwise a device->host Normal
+   readout would fire on every prompt just to compute a debug mean, defeating
+   the keep-tensors-on-device path below. *)
+SetAttributes[fxDbg, HoldAll];
 fxDbg[a___] := If[ Environment["THVM_FLUX_TIMING"] =!= $Failed,
     WriteString["stdout", a, "\n"]; $Output // Flush]
 
@@ -452,9 +457,13 @@ fxQwenEncodeBatch[sess_, prompts_List] := With[
                on replay -- a lazy/non-contiguous input gets 0 sites and silently
                keeps the capture-time (first prompt's) bytes (see capture.c). *)
             xr = TRealize[in["x"]];  mr = TRealize[in["addMask"]];
-            {tRep, out} = AbsoluteTiming[Normal @ jit[xr, mr]];
+            (* Keep the Qwen encoding ON DEVICE (TRealize, not Normal): STAGE 2
+               (shared context) feeds it straight into the velocity JIT, so a
+               ~512x7680 device->host->device roundtrip + NumericArray rebuild is
+               avoided per prompt. *)
+            {tRep, out} = AbsoluteTiming[TRealize @ jit[xr, mr]];
             fxDbg["    qwen x mean=", Round[Mean[Flatten[Normal[xr]]], 0.0001],
-                "  tokenize=", Round[tTok, 0.001], " replay+read=", Round[tRep, 0.001]];
+                "  tokenize=", Round[tTok, 0.001], " replay=", Round[tRep, 0.001]];
             out]] /@ prompts]
 
 (* VAE decode one host latent {simg,128} -> {3,H,W} device pixels.  The conv
