@@ -1610,6 +1610,7 @@ u64 thvm_metal_pso_cache_bytes_r(void)      { return METAL_JIT_BUILD_DISK_BYTES_
 u64 thvm_metal_pso_cache_bytes_w(void)      { return METAL_JIT_BUILD_DISK_BYTES_W; }
 u64 thvm_metal_jit_hits(void)               { return METAL_JIT_BUILD_HITS; }
 u64 thvm_metal_jit_misses(void)             { return METAL_JIT_BUILD_MISSES; }
+u64 thvm_metal_jit_compile_us(void)         { return METAL_JIT_BUILD_COMPILE_US; }
 int thvm_metal_pso_cache_enabled(void)      { return METAL_PSO_CACHE_ENABLED; }
 char const *thvm_metal_pso_cache_dir(void)  { return METAL_PSO_CACHE_DIR; }
 
