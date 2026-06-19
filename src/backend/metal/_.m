@@ -2287,6 +2287,16 @@ static u64 METAL_GRAPH_KEYS[METAL_GRAPH_CACHE_CAP];
 static id<MTLIndirectCommandBuffer> METAL_GRAPH_ICBS[METAL_GRAPH_CACHE_CAP];
 static id<MTLBuffer> METAL_GRAPH_CFG_BUFS[METAL_GRAPH_CACHE_CAP];
 
+// ICB cache hit/miss tally (THVM_ICB_STATS=1) -- a cache MISS rebuilds the
+// whole indirect command buffer (the slow warm path); a HIT replays the
+// pre-baked one.  Profiling whether the FLUX warm replays hit or rebuild.
+static u64 G_ICB_HITS = 0, G_ICB_MISSES = 0;
+static int metal_icb_stats_on(void) {
+  static int known = 0, on = 0;
+  if (!known) { on = (getenv("THVM_ICB_STATS") != NULL); known = 1; }
+  return on;
+}
+
 static void metal_graph_cache_reset_impl(void) {
   for (u32 i = 0; i < METAL_GRAPH_CACHE_CAP; i++) {
     METAL_GRAPH_KEYS[i] = 0;
@@ -2594,6 +2604,13 @@ static id<MTLIndirectCommandBuffer> metal_graph_build(
 int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
                               JitReplayDispatch const *ops, u32 n_ops) {
   if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
+  if (metal_icb_stats_on()) {
+    static u64 calls = 0; calls++;
+    if (calls <= 30 || calls % 16 == 0)
+      fprintf(stderr, "[icb-entry] call=%llu n_ops=%u %s\n",
+              (unsigned long long)calls, n_ops,
+              (ops == NULL || n_ops < 2 || n_ops > 256) ? "BAIL(n_ops>256)" : "ok");
+  }
   if (ops == NULL || n_ops < 2 || n_ops > 256) return -1;
   int trace = metal_graph_trace_level();
   if (trace) {
@@ -2615,11 +2632,13 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
   if (METAL_GRAPH_KEYS[idx] == key && METAL_GRAPH_ICBS[idx] != nil) {
     icb = METAL_GRAPH_ICBS[idx];
     cfgBuf = METAL_GRAPH_CFG_BUFS[idx];
+    G_ICB_HITS++;
     if (trace) {
       fprintf(stderr, "thvm: metal_graph cache hit idx=%u resources=%u\n",
               idx, resource_count);
     }
   } else {
+    G_ICB_MISSES++;
     if (trace) {
       fprintf(stderr, "thvm: metal_graph build idx=%u resources=%u\n",
               idx, resource_count);
@@ -2629,6 +2648,12 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
     METAL_GRAPH_KEYS[idx] = key;
     METAL_GRAPH_ICBS[idx] = icb;
     METAL_GRAPH_CFG_BUFS[idx] = cfgBuf;
+  }
+  if (metal_icb_stats_on() && ((G_ICB_HITS + G_ICB_MISSES) % 64 == 0)) {
+    u64 tot = G_ICB_HITS + G_ICB_MISSES;
+    fprintf(stderr, "[icb] hits=%llu misses=%llu (%.0f%% hit)\n",
+            (unsigned long long)G_ICB_HITS, (unsigned long long)G_ICB_MISSES,
+            tot ? 100.0 * (double)G_ICB_HITS / (double)tot : 0.0);
   }
   if (cfgBuf != nil) {
     if (resource_count >= METAL_GRAPH_MAX_RESOURCES) return -1;
