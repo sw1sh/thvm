@@ -1322,6 +1322,26 @@ static int arena_plan_enabled(void) {
   return enabled;
 }
 
+// The Metal arena (offset-slices of one shared MTLBuffer) is OPT-IN, default
+// OFF, unlike CPU/CUDA where the arena is the memory win and default ON.  On
+// Metal the arena's payoff is a different one -- it makes a recycling JIT
+// capture ICB-safe so the batched indirect-command-buffer can be cached and
+// replayed for the same prompt structure -- but that cached-replay fast path
+// also needs the JIT INPUT uploads to land in stable buffers (else the ICB key
+// changes every replay and the arena is pure per-replay plan+zero overhead: it
+// regressed FLUX warm 6.7s -> 9s with no offsetting cache hit).  Until that
+// input-stabilisation lands, default the Metal arena off so it never regresses
+// a Metal workload; THVM_METAL_ARENA=1 opts in for the fast-path work.
+static int metal_arena_opt_in(void) {
+  static int known = 0, enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_METAL_ARENA");
+    enabled = (e != NULL && e[0] == '1');
+    known = 1;
+  }
+  return enabled;
+}
+
 static void arena_reset(void) {
   for (u32 i = 0; i < ARENA_SLOTS_LEN; i++) {
     ARENA_SLOTS[i].offset    = 0;
@@ -1428,7 +1448,7 @@ static void arena_compute(void) {
   if (BOUNDARY_ORDER_LEN == 0)   return;
   if (CURRENT_BACKEND == NULL)   return;
   int is_cpu   = (CURRENT_BACKEND == &CPU_BACKEND);
-  int is_metal = (CURRENT_BACKEND == &METAL_BACKEND);
+  int is_metal = (CURRENT_BACKEND == &METAL_BACKEND) && metal_arena_opt_in();
   int is_cuda  = 0;
 #ifdef THVM_HAS_CUDA
   is_cuda = (CURRENT_BACKEND == &CUDA_BACKEND);
@@ -1618,7 +1638,7 @@ static u32 arena_tensor_alloc(u32 ord_idx, Shape shape, u32 dtype) {
   if (ord_idx >= ARENA_SLOTS_LEN)        return 0;
   if (!ARENA_SLOTS[ord_idx].in_arena)    return 0;
   int is_cpu   = (CURRENT_BACKEND == &CPU_BACKEND);
-  int is_metal = (CURRENT_BACKEND == &METAL_BACKEND);
+  int is_metal = (CURRENT_BACKEND == &METAL_BACKEND) && metal_arena_opt_in();
   int is_cuda  = 0;
 #ifdef THVM_HAS_CUDA
   is_cuda = (CURRENT_BACKEND == &CUDA_BACKEND);
