@@ -466,6 +466,27 @@ static char const *rmu_hoist_lookup(Term key) {
   return NULL;
 }
 
+// True if `t` renders as an already-signed-`int` integer-binary expression.
+// The int-binary renderer (below) casts each OPERAND to `int` so the whole
+// integer subtree is signed -- but that cast is only needed on uint LEAVES
+// (RANGE loop vars, declared uint).  A nested int binary is already int, so
+// re-wrapping it in `(int)(...)` is pure bloat: thvm's index expressions nest
+// deeply (strided/reshaped addressing), and the per-binary cast multiplied the
+// rendered index MSL ~3-5x -- which dominated Metal compile time and made the
+// fused-matmul A-staging (producer inlined x simdgroup unroll) explode to
+// minutes-long compiles.  Dropping the redundant nested-binary cast keeps the
+// subtree signed (leaves still cast) while shrinking the index MSL.
+static int rmu_is_int_binary(Term t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  switch (term_ext(t)) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
+    case UOP_IDIV: case UOP_IMOD: case UOP_ILT:
+    case UOP_IAND: case UOP_IOR:  case UOP_IXOR: case UOP_ISHR:
+      return 1;
+    default: return 0;
+  }
+}
+
 // Emit a symbolic int expression (UOP_RANGE / UOP_I* / UOP_IWHERE /
 // UOP_INVALID / UOP_CONST).  Recursive; parenthesises binary ops to
 // keep precedence unambiguous.
@@ -543,13 +564,25 @@ static void rmu_emit_term(Term t, FILE *fp) {
       // binaries already yield `int`; the extra `(int)` cast on them is
       // harmless.  Float ops are untouched -- this case only covers the
       // UOP_I* family.
+      // Cast each operand to signed `int`, EXCEPT operands that are already
+      // int binaries (re-casting them just bloats the index MSL -- see
+      // rmu_is_int_binary).  Leaves (RANGE uint / CONST) keep the cast so the
+      // whole subtree stays signed-correct (ISUB / ILT / IDIV / IMOD).
       Term a = heap_read(loc + 0);
       Term b = heap_read(loc + 1);
-      fputs("((int)(", fp);
-      rmu_emit_term(a, fp);
-      fprintf(fp, ") %s (int)(", rmu_int_op_name(op));
-      rmu_emit_term(b, fp);
-      fputs("))", fp);
+      fputc('(', fp);
+      if (rmu_is_int_binary(a)) {
+        rmu_emit_term(a, fp);
+      } else {
+        fputs("(int)(", fp);  rmu_emit_term(a, fp);  fputc(')', fp);
+      }
+      fprintf(fp, " %s ", rmu_int_op_name(op));
+      if (rmu_is_int_binary(b)) {
+        rmu_emit_term(b, fp);
+      } else {
+        fputs("(int)(", fp);  rmu_emit_term(b, fp);  fputc(')', fp);
+      }
+      fputc(')', fp);
       return;
     }
     // Float elementwise binary ops.  Same parenthesised shape as
