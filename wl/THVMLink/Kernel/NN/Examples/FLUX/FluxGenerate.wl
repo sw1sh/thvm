@@ -274,8 +274,21 @@ fxSessionGet[dev_, imgSize_, nSteps_, modelDir_] := Module[
    (which then MADV_DONTNEEDs the pages), keeping the host weight working set to
    roughly one weight at a time -- session peak drops to ~5 GB.  Set here (not
    globally) so the session is memory-bounded by default; a user export wins. *)
-fxBoundMemory[] := If[ Environment["THVM_MMAP_NO_WILLNEED"] === $Failed,
-    SetEnvironment["THVM_MMAP_NO_WILLNEED" -> "1"]];
+fxBoundMemory[] := (
+    If[ Environment["THVM_MMAP_NO_WILLNEED"] === $Failed,
+        SetEnvironment["THVM_MMAP_NO_WILLNEED" -> "1"]];
+    (* Buffer-reuse OFF for the FLUX session: the velocity/Qwen/VAE captures
+       recycle output buffers, and on Apple9 (M3) the batched ICB's [cmd
+       setBarrier] does NOT reliably order those write-after-write recycles, so
+       a recycling capture replayed through the ICB reads stale bytes and every
+       prompt collapsed to one image.  With reuse off there is no recycle, so the
+       ICB is correct -- and the ICB (no longer declined as a recycling stream)
+       replaces the per-op decline, cutting warm ~9s -> ~7s.  A user export of
+       THVM_METAL_REUSE_BUFS wins.  (The fully-fast path -- recycle + ICB via an
+       arena-slice memory plan so the recycle is Apple-hazard-trackable -- is the
+       open follow-up.) *)
+    If[ Environment["THVM_METAL_REUSE_BUFS"] === $Failed,
+        SetEnvironment["THVM_METAL_REUSE_BUFS" -> "0"]]);
 
 fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
     {w, h, gridH, gridW, simg, stxt, tokDir, td, tfPath, qwPaths, vaePath,

@@ -1107,14 +1107,15 @@ static int mem_plan_cpu_enabled(void) {
 // BS>=32, and the within-pass single-consumer recycling is exactly
 // what shrinks peak retained from ~7x the working set toward
 // tinygrad's ~flat profile.  THVM_METAL_REUSE_BUFS=0 opts out.
+// Read the env on EVERY call (not memoised) so a caller that sets
+// THVM_METAL_REUSE_BUFS late -- e.g. FluxGenerate's fxBoundMemory, which runs
+// at session build, after the dylib has already serviced earlier plans -- still
+// takes effect.  (Memoising read the env once at the first plan and ignored a
+// later SetEnvironment.)  The per-call getenv is a handful of cycles, off the
+// hot path.
 static int mem_plan_metal_enabled(void) {
-  static int known = 0, enabled = 0;
-  if (!known) {
-    char const *e = getenv("THVM_METAL_REUSE_BUFS");
-    enabled       = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
-    known         = 1;
-  }
-  return enabled;
+  char const *e = getenv("THVM_METAL_REUSE_BUFS");
+  return (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
 }
 
 // CUDA per-realize buffer reuse: default ON (mirrors Metal).  Without it
