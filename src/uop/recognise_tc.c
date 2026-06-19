@@ -65,6 +65,24 @@ static Term rec_tc_peel_cast(Term t) {
   return t;
 }
 
+// THVM_FUSE_MATMUL_INPUT: when the A operand is a fused elementwise producer
+// (not a bare INDEX_E -- see render_uop.c rmu_fused_producer_ok), recover a
+// REPRESENTATIVE INDEX_E leaf so the 2-range / K-extent classification reads a
+// real {m,k} address.  Every leaf in the producer indexes A's input buffers at
+// the matmul's (m, k) iteration, so any one carries the canonical layout.
+// Bounded recursion; returns 0 if no INDEX_E leaf.
+static Term rec_tc_fused_first_index(Term t, int depth) {
+  if (depth > 40 || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_INDEX_E) return t;
+  u8 ar = uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    Term r = rec_tc_fused_first_index(heap_read(term_val(t) + i), depth + 1);
+    if (r != 0) return r;
+  }
+  return 0;
+}
+
 // Count distinct UOP_RANGE axis_ids reachable from `t` through the
 // integer-binary / iwhere index expressions.  Used by the matmul
 // classifier to reject shapes whose addresses reference more than 2
@@ -211,13 +229,24 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent, u32 *out_unit_axis) {
   if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
   Term idx_a = rec_tc_peel_cast(heap_read(term_val(mul) + 0));
   Term idx_b = rec_tc_peel_cast(heap_read(term_val(mul) + 1));
+  // THVM_FUSE_MATMUL_INPUT: A may be a fused elementwise producer (not a bare
+  // INDEX_E).  Recover a representative INDEX_E leaf for the A-side layout
+  // classification; B must still be a clean buffer read (FLUX's weight).
+  int a_fused = 0;
+  if (!(term_tag(idx_a) == TAG_UOP && term_ext(idx_a) == UOP_INDEX_E)
+      && ru_fuse_matmul_input_on()) {
+    Term rep = rec_tc_fused_first_index(idx_a, 0);
+    if (rep != 0) { idx_a = rep; a_fused = 1; }
+  }
   if (term_tag(idx_a) != TAG_UOP || term_ext(idx_a) != UOP_INDEX_E) return 0;
   if (term_tag(idx_b) != TAG_UOP || term_ext(idx_b) != UOP_INDEX_E) return 0;
   Term buf_a = heap_read(term_val(idx_a) + 0);
   Term buf_b = heap_read(term_val(idx_b) + 0);
   if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) return 0;
   if (term_tag(buf_b) != TAG_UOP || term_ext(buf_b) != UOP_BUFFER) return 0;
-  if (term_val(buf_a) == term_val(buf_b)) return 0;
+  // Fused A is structurally distinct (an ALU tree, not B's buffer), so the
+  // square-of-self guard only applies to the bare-INDEX_E A case.
+  if (!a_fused && term_val(buf_a) == term_val(buf_b)) return 0;
 
   // Walk the MUL's INDEX_E address expressions for a UOP_RANGE leaf
   // whose axis_id matches red_axis; its extent is K.  Mirrors
@@ -328,6 +357,14 @@ fn int uop_matmul_mn_axes(Term root, u32 *out_m_axis, u32 *out_m_extent,
   // to read its underlying address -- mirrors uop_classify_matmul.
   Term idx_a   = rec_tc_peel_cast(heap_read(term_val(mul) + 0));
   Term idx_b   = rec_tc_peel_cast(heap_read(term_val(mul) + 1));
+  // THVM_FUSE_MATMUL_INPUT: recover a representative INDEX_E from a fused A
+  // producer (same {m,k} layout as a plain A operand) so the M-axis discovery
+  // reads a real address.
+  if (!(term_tag(idx_a) == TAG_UOP && term_ext(idx_a) == UOP_INDEX_E)
+      && ru_fuse_matmul_input_on()) {
+    Term rep = rec_tc_fused_first_index(idx_a, 0);
+    if (rep != 0) idx_a = rep;
+  }
   Term addr_a  = heap_read(term_val(idx_a) + 1);
   Term addr_b  = heap_read(term_val(idx_b) + 1);
 

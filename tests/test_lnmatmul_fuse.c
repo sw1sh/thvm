@@ -43,6 +43,16 @@ int main(void){ thvm_init(); int f=0;
   printf("  M=2: bad=%d gemm=%llu  | M=1: bad=%d gemm=%llu\n",
          b2,(unsigned long long)g2,b1,(unsigned long long)g1);
   if (b2||b1) f++;                          // numerics must stay correct
-  if (g2==0) { printf("  control M=2 lost BLAS -- regression\n"); f++; }
-  if (g1==0) { printf("  M=1 matmul-after-reduce did NOT fire BLAS (the bug)\n"); f++; }
+  // THVM_FUSE_MATMUL_INPUT intentionally un-realizes the matmul's elementwise
+  // input (fuse-into-matmul), so the matmul is NOT a BLAS operand and gemm==0 is
+  // the CORRECT outcome under the flag -- only the default (flag-off) path is
+  // expected to fire BLAS.  Numerics stay correct in both cases (checked above).
+  const char *fe = getenv("THVM_FUSE_MATMUL_INPUT");
+  int fused_on = (fe != NULL && fe[0] != '\0' && fe[0] != '0');
+  if (!fused_on) {
+    if (g2==0) { printf("  control M=2 lost BLAS -- regression\n"); f++; }
+    if (g1==0) { printf("  M=1 matmul-after-reduce did NOT fire BLAS (the bug)\n"); f++; }
+  } else {
+    printf("  (THVM_FUSE_MATMUL_INPUT on: matmul input fused -> gemm==0 expected)\n");
+  }
   printf("  %s (%d failures)\n", f==0?"ok":"FAIL", f); return f==0?0:1; }

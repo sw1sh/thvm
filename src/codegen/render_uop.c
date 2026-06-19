@@ -1852,6 +1852,85 @@ static Term rmu_peel_cast(Term t) {
   return t;
 }
 
+// === THVM_FUSE_MATMUL_INPUT: elementwise-producer-into-matmul-A-load ===
+//
+// With the scheduler flag on, a single-consumer elementwise chain feeding a
+// matmul (e.g. the FLUX modulation ln*(sc+1)+sh, a SiLU, a cast) is un-realized
+// (rangeify_unified.c rb_matmul_input_fusable), so the matmul's MUL operand A
+// is no longer a bare INDEX_E over a realized buffer -- it is an inlined ALU
+// tree whose leaves are INDEX_E reads over the original buffers, indexed at the
+// matmul's (m, k) iteration.  These helpers let rmu_emit_matmul_tc recognise
+// such an A operand and compute it inline in the TC A-staging load (keeping the
+// simdgroup_matrix tensor cores) instead of falling to the scalar accumulator.
+// Mirrors tinygrad: the elementwise stays in the matmul's reduce kernel and its
+// compute is emitted in the load (schedule/rangeify.py:40-46 pm_syntactic_sugar
+// pushes INDEX through elementwise; codegen lowers it at the operand load).
+
+// Find the first INDEX_E leaf in an elementwise subtree (the representative for
+// M/K axis + stride extraction).  Bounded recursion.  Returns 0 if none.
+static Term rmu_fused_first_index(Term t, u32 depth) {
+  if (depth > 40 || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_INDEX_E) return t;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    Term r = rmu_fused_first_index(heap_read(term_val(t) + i), depth + 1);
+    if (r != 0) return r;
+  }
+  return 0;
+}
+
+// 1 iff an INDEX_E address subtree contains an IDIV/IMOD (a movement-op
+// swizzler the simple m/k staging decode cannot follow).  Bounded recursion.
+static int rmu_addr_has_divmod(Term t, u32 depth) {
+  if (depth > 64 || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_IDIV || op == UOP_IMOD) return 1;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (rmu_addr_has_divmod(heap_read(term_val(t) + i), depth + 1)) return 1;
+  }
+  return 0;
+}
+
+// Verify `t` is a TC-fusable A producer: a pure ELEMENTWISE/CAST/CONST tree
+// over INDEX_E leaves, where NO INDEX_E address depends on the matmul's N axis
+// (n_axis) -- A is read independently of N -- and no address uses IDIV/IMOD
+// (those need the m/k decode the simple staging loop can't follow).  The reduce
+// (K) axis and the M axis are allowed; broadcast (CONST-0) axes are fine.
+// Returns 1 if the whole tree is safe to emit inline at the A-staging load.
+static int rmu_fused_producer_ok(Term t, u32 n_axis, u32 depth) {
+  if (depth > 40) return 0;
+  if (term_tag(t) == TAG_NUM) return 1;
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_CONST) return 1;
+  if (op == UOP_INDEX_E) {
+    // Scan the address: bail on N-axis dependence or div/mod swizzlers.
+    Term addr = heap_read(term_val(t) + 1);
+    Term rngs[MAX_DIM]; u32 nr = 0;
+    rmu_collect_ranges(addr, rngs, &nr);
+    for (u32 i = 0; i < nr; i++) {
+      if (term_val(heap_read(term_val(rngs[i]) + 0)) == n_axis) return 0;
+    }
+    if (rmu_addr_has_divmod(addr, 0)) return 0;
+    return 1;
+  }
+  // Pure-value elementwise ops the A-staging can recompute per element.
+  if (op == UOP_CAST || op == UOP_BITCAST
+      || uop_is_unary_elementwise((u8)op)
+      || uop_is_binary_elementwise((u8)op)
+      || uop_is_ternary_elementwise((u8)op)) {
+    u8 ar = uop_arity(op);
+    for (u8 i = 0; i < ar; i++) {
+      if (!rmu_fused_producer_ok(heap_read(term_val(t) + i), n_axis, depth + 1))
+        return 0;
+    }
+    return 1;
+  }
+  return 0;  // reduce / unknown / movement: not inline-safe
+}
+
 static int rmu_detect_matmul_tc(Term store, Term *out_red_value) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   Term value = heap_read(term_val(store) + 2);
@@ -1868,7 +1947,14 @@ static int rmu_detect_matmul_tc(Term store, Term *out_red_value) {
   // (the widening feeding an f32 accumulator on a bf16-input matmul).
   Term lhs = rmu_peel_cast(heap_read(term_val(mul) + 0));
   Term rhs = rmu_peel_cast(heap_read(term_val(mul) + 1));
-  if (term_tag(lhs) != TAG_UOP || term_ext(lhs) != UOP_INDEX_E) return 0;
+  // THVM_FUSE_MATMUL_INPUT: A may be a fused elementwise producer.  Accept it
+  // iff it is a pure-elementwise/cast tree over INDEX_E leaves with no N-axis
+  // dependence (rmu_fused_producer_ok); rmu_emit_matmul_tc computes it inline at
+  // the A-staging load.  B must stay a bare INDEX_E (the clean weight read).
+  if (!(term_tag(lhs) == TAG_UOP && term_ext(lhs) == UOP_INDEX_E)) {
+    if (!ru_fuse_matmul_input_on()) return 0;
+    if (rmu_fused_first_index(lhs, 0) == 0) return 0;  // needs at least one leaf
+  }
   if (term_tag(rhs) != TAG_UOP || term_ext(rhs) != UOP_INDEX_E) return 0;
   if (out_red_value != NULL) *out_red_value = inner;
   return 1;
@@ -2794,7 +2880,14 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                                      u32 n_extent, u32 k_extent,
                                      RmuTcTile t, int c_is_bf, int stage_bf,
                                      int b_trans, i64 b_nstride,
-                                     FILE *fp, u32 depth, int b_is_int8) {
+                                     FILE *fp, u32 depth, int b_is_int8,
+                                     Term a_val, u32 a_m_axis, u32 a_k_axis) {
+  // THVM_FUSE_MATMUL_INPUT: a_val != 0 means A is a fused elementwise producer.
+  // The A-staging then computes a_val inline at (m = _tm + row, k = KK0 + col)
+  // -- declaring `uint a<m>` / `uint a<k>` in scope so rmu_emit_term renders the
+  // producer's RANGE leaves (aM/aK) + INDEX_E reads at that element.  a_val == 0
+  // is the default flat-buffer A-load (byte-identical codegen).
+  int a_fused = (a_val != 0);
   // Staging + fragment element type.  When BOTH inputs are bf16 the tiles are
   // staged as bfloat and the simdgroup_matrix fragments are <bfloat>, so the
   // MMA runs at the native bf16 tensor-core rate (2x float) accumulating into
@@ -2868,7 +2961,22 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   // else a scalar loop.
   #define EMIT_LOAD_A(BUFOFF, KK0)                                            \
     do {                                                                      \
-      if (a_vec) {                                                            \
+      if (a_fused) {                                                          \
+        /* THVM_FUSE_MATMUL_INPUT: compute the elementwise producer inline at \
+           (m = _tm + _r, k = KK0 + _c).  Scalar coalesced loop -- the         \
+           producer compute (not the load) dominates, so dropping the float4   \
+           A-vectorization is a non-issue; B stays vectorized + the MMA is      \
+           unchanged. */                                                       \
+        IND(depth + 1); fprintf(fp,                                           \
+          "for (uint _i = _lid; _i < %uu; _i += %uu) {\n", a_elems, nthreads);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "uint a%u = _tm + _i / %uu; uint a%u = (%s) + _i %% %uu;\n",        \
+          a_m_axis, t.kb, a_k_axis, KK0, t.kb);                              \
+        IND(depth + 2); fprintf(fp, "(_Asm + %s)[_i] = (%s)(", BUFOFF, sel); \
+        rmu_emit_term(a_val, fp);                                             \
+        fputs(");\n", fp);                                                    \
+        IND(depth + 1); fputs("}\n", fp);                                     \
+      } else if (a_vec) {                                                     \
         IND(depth + 1); fprintf(fp,                                           \
           "for (uint _i = _lid; _i < %uu; _i += %uu) {\n",                    \
           a_elems / 4u, nthreads);                                           \
@@ -3091,6 +3199,26 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // simdgroup template loads bf16 buffers into bfloat fragments directly.
   Term lhs      = rmu_peel_cast(heap_read(term_val(mul) + 0));
   Term rhs      = rmu_peel_cast(heap_read(term_val(mul) + 1));
+  // THVM_FUSE_MATMUL_INPUT: when A is a fused elementwise producer, `a_val` is
+  // the value tree the A-staging load computes inline; `lhs` becomes a
+  // REPRESENTATIVE INDEX_E leaf (one of the producer's reads) so the M/K/lda
+  // layout discovery below sees a real {m,k} address.  a_val == 0 means A is a
+  // plain buffer read (the default; byte-identical codegen).
+  Term a_val    = 0;
+  if (!(term_tag(lhs) == TAG_UOP && term_ext(lhs) == UOP_INDEX_E)
+      && ru_fuse_matmul_input_on()) {
+    Term rep = rmu_fused_first_index(lhs, 0);
+    if (rep == 0) return 0;
+    // Validate the whole producer is inline-safe; n_axis is discovered below,
+    // but the producer must not read the matmul's N axis.  We re-check after
+    // n_axis is known; here ensure it is at least a pure elementwise tree.
+    a_val = lhs;
+    lhs   = rep;
+  }
+  // Fused-A inline is implemented only for the Metal register-blocked tiled
+  // emitter (the FLUX target).  On any other target a fused A bails to the
+  // generic accumulator (correct, recomputes the producer per element).
+  if (a_val != 0 && RMU_TARGET != CG_TARGET_METAL) return 0;
   Term buf_a    = heap_read(term_val(lhs) + 0);
   Term addr_a   = heap_read(term_val(lhs) + 1);
   Term buf_b    = heap_read(term_val(rhs) + 0);
@@ -3184,6 +3312,12 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     // M/N also need to be 8-tiled for simdgroup_matrix<8,8>; bail.
     return 0;
   }
+
+  // THVM_FUSE_MATMUL_INPUT: now that the N axis is known, validate the fused A
+  // producer is inline-safe (pure elementwise/cast over INDEX_E leaves, no
+  // N-axis dependence, no div/mod swizzle).  If not, bail to the generic
+  // accumulator (still correct) rather than emit a wrong A-staging load.
+  if (a_val != 0 && !rmu_fused_producer_ok(a_val, n_axis_id_v, 0)) return 0;
 
   // Operand layout from the address strides.  simdgroup_load(dst, ptr, ld)
   // reads dst[i][j] = ptr[i*ld + j], so each matrix needs ONE axis with unit
@@ -3468,7 +3602,14 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // float, and a bf16 output goes through a per-simdgroup f32->bf16 staged
   // store (see rmu_emit_matmul_tc_tiled).  The win is the tiled data-reuse
   // structure, not bf16 MMA rate.
-  u32 _dta = uop_buffer_dtype(buf_a), _dtb = uop_buffer_dtype(buf_b);
+  // For a fused A producer the staging element type is chosen to MATCH B (the
+  // MMA needs A/B fragments to share a scalar type, and the producer is cast to
+  // the staging type `sel` at the A-staging load regardless of its own dtypes).
+  // A bf16 B -> stage bfloat (native TC rate); an f32 B -> stage float.  For a
+  // plain buffer A, the staging follows A's buffer dtype as before.
+  u32 _dtb = uop_buffer_dtype(buf_b);
+  u32 _dta = (a_val != 0) ? ((_dtb == DT_BF16 || b_is_int8) ? DT_BF16 : DT_FP32)
+                          : uop_buffer_dtype(buf_a);
   // INT8 B (the q8 weight) is eligible for the tiled path only: it stages
   // char -> bfloat in the cooperative B-load (see rmu_emit_matmul_tc_tiled's
   // b_is_int8 branch).  A is never int8 here (gated above).
@@ -3503,10 +3644,19 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       int stage_bf = (_dta == DT_BF16) && (_dtb == DT_BF16 || b_is_int8);
       rmu_emit_matmul_tc_tiled(a_nm, b_nm, c_nm, n_extent,
                                k_extent, tile, c_is_bf, stage_bf,
-                               b_trans, ldb, fp, depth, b_is_int8);
+                               b_trans, ldb, fp, depth, b_is_int8,
+                               a_val, m_axis_id, red_axis);
       return 1;
     }
   }
+
+  // A fused producer that did not fit the Metal tiled emitter (shape too small
+  // for a worthwhile tile, A transposed, batched, or non-TC dtype) cannot use
+  // the non-tiled / guarded simdgroup paths below -- those read A as a flat
+  // a_name[addr_a] buffer, which would load the representative leaf, not the
+  // producer.  Bail to the generic accumulator (rmu_emit_term recomputes the
+  // whole producer subtree per element -- correct, just not TC).
+  if (a_val != 0) return 0;
 
   if (parallel_tc) {
     // No guard.  Bind axes per axis_type.

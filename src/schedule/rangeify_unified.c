@@ -185,6 +185,29 @@ fn int ru_remove_bufferize_on(void) {
   return on;
 }
 
+// THVM_FUSE_MATMUL_INPUT (default OFF): elementwise-producer-into-matmul-load
+// fusion.  tinygrad fuses a single-consumer elementwise chain (e.g. the FLUX
+// modulation ln*(sc+1)+sh, a SiLU, a cast) INTO the consuming matmul's reduce
+// rather than realizing it to its own buffer (schedule/indexing.py:198-200 --
+// "if this op only has one consumer it inherits the consumer's ranges", and
+// schedule/rangeify.py:40-46 pm_syntactic_sugar pushes the INDEX through the
+// elementwise so its compute is inlined into the reduce loop).  thvm's GEMM
+// dispatch needs buffer operands, so rb_feeds_matmul_reduce normally KEEPS such
+// a producer realized (thvm's ALWAYS_CONTIGUOUS equivalent).  With this flag,
+// a SINGLE-CONSUMER elementwise feeding a SINGLE matmul reduce is un-realized;
+// its value subtree splices into the matmul MUL operand, and the TC tiled
+// emitter computes it inline at the A-staging load (render_uop.c).  Gated OFF
+// so the default codegen is byte-identical -- FLUX opts in.
+fn int ru_fuse_matmul_input_on(void) {
+  static int known = 0, on = 0;
+  if (!known) {
+    char const *e = getenv("THVM_FUSE_MATMUL_INPUT");
+    if (e != NULL && e[0] != '\0') on = (e[0] != '0');
+    known = 1;
+  }
+  return on;
+}
+
 // Whether a bufferize-classify realized node is seeded as a structural
 // boundary up front (vs left for the walk to derive).  Default: every
 // realized node (the heuristic seed).  Faithful: ROOT only (== tinygrad
@@ -941,6 +964,45 @@ static int rb_feeds_matmul_reduce(u32 node_idx) {
   return 0;
 }
 
+// THVM_FUSE_MATMUL_INPUT gate: is this elementwise node SAFELY fusable into a
+// consuming matmul reduce?  Mirrors tinygrad's single-consumer fuse rule
+// (schedule/indexing.py:198-200): an op with exactly one consumer inherits that
+// consumer's ranges and stays inlined.  We require a strict linear chain --
+// every hop from the producer up to (and excluding) the matmul reduce has
+// EXACTLY ONE consumer, and that one consumer is a movement/elementwise op or
+// the matmul REDUCE itself.  This guarantees un-realizing the producer inlines
+// its value into precisely ONE matmul kernel (so the buffer is genuinely saved,
+// no recompute fan-out) and that the matmul's MUL operand becomes the inlined
+// value subtree the TC tiled emitter computes at its A-staging load.  Returns 0
+// if any hop branches (>1 consumer), if a non-matmul reduce / realized boundary
+// is reached, or if no matmul reduce terminates the chain.
+static int rb_matmul_input_fusable(u32 node_idx) {
+  u32 cur = node_idx;
+  u32 budget = RU_CONSRED_BFS_CAP;
+  while (budget-- > 0) {
+    u32 cidxs[RU_MAX_CONSUMERS];
+    u32 nc = ru_consumers_for_node(cur, cidxs, RU_MAX_CONSUMERS);
+    if (nc != 1) return 0;                  // branch (or sink): not a clean chain
+    u32 ci = cidxs[0];
+    u8 cop = BUFFERIZE_NODES[ci].op;
+    if (cop == UOP_REDUCE) {
+      // Terminal: fusable iff it is the matmul reduce (the only reduce thvm's
+      // codegen can inline an elementwise A operand into via the TC A-staging).
+      return (BUFFERIZE_NODES[ci].reasons & BUFFERIZE_REASON_MATMUL) ? 1 : 0;
+    }
+    // Only chain through non-realized movement/elementwise hops.  A realized
+    // intermediate would itself materialize -> stop (no clean inline).
+    if (rb_node_realized(ci)) return 0;
+    int is_movement = uop_is_movement(cop);
+    int is_ew = uop_is_unary_elementwise(cop)
+             || uop_is_binary_elementwise(cop)
+             || uop_is_ternary_elementwise(cop);
+    if (!(is_movement || is_ew)) return 0;  // CAST is elementwise; STORE/etc stop
+    cur = ci;
+  }
+  return 0;
+}
+
 fn void run_rangeify_unified(Term root) {
   // Clear per-node state.
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
@@ -1342,9 +1404,26 @@ fn void run_rangeify_unified(Term root) {
             || uop_is_binary_elementwise(op)
             || uop_is_ternary_elementwise(op);
       if (!ew) continue;                                  // only removable elementwise
-      if (rb_feeds_matmul_reduce(i)) continue;            // removable=False (GEMM operand)
-      if (rb_unsafe_recompute_region(i)) continue;        // movement/broadcast re-index unsafe
-      if (rb_too_many_buffers(BUFFERIZE_NODES[i].loc)) continue;       // accessed_buffers > 3
+      // THVM_FUSE_MATMUL_INPUT: a single-consumer elementwise feeding ONE matmul
+      // reduce is fused INTO that matmul (the TC A-staging computes it inline),
+      // so we DON'T keep it realized.  Otherwise the GEMM-operand rule holds.
+      int fuse_mm = (ru_fuse_matmul_input_on() && rb_feeds_matmul_reduce(i)
+                     && rb_matmul_input_fusable(i));
+      if (rb_feeds_matmul_reduce(i) && !fuse_mm)
+        continue;                                         // removable=False (GEMM operand)
+      // The matmul-input fuse threads the producer through the matmul-lowering
+      // reshape(+unit axis)+expand(broadcast over the contracted N axis) -- a
+      // benign rank-grow that rb_unsafe_recompute_region conservatively rejects
+      // and a multi-buffer modulation that rb_too_many_buffers would reject.
+      // For this targeted path the inline IS exact (the broadcast N axis is not
+      // read in the matmul's A load), so we skip those two general gates; the
+      // codegen-side detector (rmu_detect_matmul_tc) independently re-validates
+      // the operand shape before it inlines, falling back to the generic
+      // accumulator (still correct) if anything is off.
+      if (!fuse_mm) {
+        if (rb_unsafe_recompute_region(i)) continue;      // movement/broadcast re-index unsafe
+        if (rb_too_many_buffers(BUFFERIZE_NODES[i].loc)) continue;     // accessed_buffers > 3
+      }
       if (rb_src_has_live_reduce(BUFFERIZE_NODES[i].loc, 0)) continue; // buffer_in_reduce
       RU_REALIZE_MAP[i].realized_full    = 0;
       RU_REALIZE_MAP[i].realized_partial = 0;

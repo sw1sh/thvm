@@ -1922,6 +1922,7 @@ fn int  kernel_entry_input_edge_at(u32 kid, u32 slot, u32 edge_idx,
 fn u8   uop_arity(u8 op);
 fn u8   uop_is_unary_elementwise(u8 op);
 fn u8   uop_is_binary_elementwise(u8 op);
+fn u8   uop_is_ternary_elementwise(u8 op);
 fn int  term_shape_in(Term t, u32 env_id, Shape *out);
 fn int  term_dtype_in(Term t, u32 env_id, u32 *out);
 // Device of a term (THVM_DEV_*), -1 = unknown/default.  See uop_meta.c.
@@ -2290,6 +2291,10 @@ fn int  apply_movement_op_reshape(u32 out_ndim, u32 const *out_shape,
 // onto the main heap at realize boundaries.  See
 // src/schedule/rangeify_unified.c for design notes.
 fn void run_rangeify_unified                   (Term root);
+// THVM_FUSE_MATMUL_INPUT gate (default OFF): fuse a single-consumer elementwise
+// producer into its consuming matmul's reduce/A-staging load.  Read by both the
+// scheduler (rangeify_unified.c) and the codegen (render_uop.c).
+fn int  ru_fuse_matmul_input_on                (void);
 fn void pm_apply_rangeify                      (Term root);
 fn u32  rangeify_unified_last_nodes_walked     (void);
 fn u32  rangeify_unified_range_idx_counter     (void);

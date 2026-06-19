@@ -186,6 +186,53 @@ static int rmt_q8_matmul_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K) {
   return 1;
 }
 
+// THVM_FUSE_MATMUL_INPUT: recover M/N/K for a fused-A matmul (A is an inlined
+// elementwise producer, B a clean buffer read) so the dispatch sizes the TILE
+// grid -- one threadgroup per output tile -- not the GLOBAL-axis-count grid
+// (which would launch tile_m/8 x tile_n/8 too many threadgroups and corrupt
+// every tile past the first).  uop_classify_matmul / uop_matmul_mn_axes already
+// accept the fused A (recognise_tc.c).  Returns 0 unless A is genuinely fused.
+static int rmt_fused_a_matmul_shape(Term sroot, u32 *out_M, u32 *out_N,
+                                    u32 *out_K) {
+  if (!ru_fuse_matmul_input_on()) return 0;
+  if (sroot == 0 || term_tag(sroot) != TAG_UOP
+      || term_ext(sroot) != UOP_STORE) return 0;
+  Term value = heap_read(term_val(sroot) + 2);
+  while (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
+         && uop_opt_kind(value) == UOP_OPT_TC) {
+    value = uop_opt_target(value);
+  }
+  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
+  Term mul = heap_read(term_val(value) + 0);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  // A (after one cast peel) must NOT be a bare INDEX_E -- that is the fused
+  // producer signature (a plain matmul goes through the BLAS-slot classifier).
+  Term lhs = heap_read(term_val(mul) + 0);
+  if (term_tag(lhs) == TAG_UOP
+      && (term_ext(lhs) == UOP_CAST || term_ext(lhs) == UOP_BITCAST)) {
+    Term src = heap_read(term_val(lhs) + 0);
+    if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_INDEX_E) return 0;
+  } else if (term_tag(lhs) == TAG_UOP && term_ext(lhs) == UOP_INDEX_E) {
+    return 0;
+  }
+  // uop_classify_matmul / uop_matmul_mn_axes expect an UNWRAPPED store root
+  // (they bail on a leading OPT_TC), so rebuild the store around the peeled
+  // REDUCE value (mirrors udg_classify_matmul_store).
+  Term cstore = sroot;
+  if (value != heap_read(term_val(sroot) + 2)) {
+    cstore = uop_store(heap_read(term_val(sroot) + 0),
+                       heap_read(term_val(sroot) + 1), value);
+  }
+  u32 m_axis, m_ext, n_axis, n_ext, k_ext = 0;
+  if (!uop_matmul_mn_axes(cstore, &m_axis, &m_ext, &n_axis, &n_ext)) return 0;
+  if (!uop_classify_matmul(cstore, &k_ext, NULL)) return 0;
+  if (m_ext == 0 || n_ext == 0 || k_ext == 0) return 0;
+  if (out_M != NULL) *out_M = m_ext;
+  if (out_N != NULL) *out_N = n_ext;
+  if (out_K != NULL) *out_K = k_ext;
+  return 1;
+}
+
 int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
                                  u32 *threads_x) {
   if (ke == NULL) return 0;
@@ -271,13 +318,44 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
         }
       }
     }
+    // THVM_FUSE_MATMUL_INPUT: fused-A matmul.  uop_dag_classify_matmul_shape
+    // declines (A is an inlined producer, not a single input slot), so size the
+    // TILE grid off the cast-aware recognisers -- one threadgroup per output
+    // tile, LOCAL_M*LOCAL_N*32 threads each (mirrors rmu_emit_matmul_tc_tiled).
+    if (tc_template) {
+      u32 fM = 0, fN = 0, fK = 0;
+      if (rmt_fused_a_matmul_shape(sroot, &fM, &fN, &fK)
+          && (fM % 8u) == 0 && (fN % 8u) == 0 && (fK % 8u) == 0) {
+        u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+        u32 na = uop_dag_collect_axes(sroot, ids, types, exts, MAX_AXES);
+        u32 n_global = 0;
+        for (u32 i = 0; i < na; i++) if (types[i] == KAX_GLOBAL) n_global++;
+        RmuTcTile tile;
+        if (n_global >= 2 && rmu_tc_pick_tile(fM, fN, fK, &tile)) {
+          u32 tile_m = tile.local_m * tile.rm * 8u;
+          u32 tile_n = tile.local_n * tile.rn * 8u;
+          u64 ntg = (u64)(fM / tile_m) * (u64)(fN / tile_n);
+          u32 nthreads = tile.local_m * tile.local_n * 32u;
+          if (ntg > 0 && ntg <= 0xFFFFFFFFu) {
+            if (groups_x  != NULL) *groups_x  = (u32)ntg;
+            if (threads_x != NULL) *threads_x = nthreads;
+            return 1;
+          }
+        }
+      }
+    }
     if (tc_template) {
       UopDagGemmShape gemm = {0};
       int simdgroup_fires =
           uop_dag_classify_matmul_shape(sroot, ke, &gemm)
           && gemm.M != 0 && gemm.N != 0
           && (gemm.M % 8u) == 0 && (gemm.N % 8u) == 0;
-      if (!simdgroup_fires) tc_template = 0;
+      // A fused-A matmul intentionally fails the BLAS-slot classifier; don't
+      // clear tc_template for it (the fused grid above already returned, but if
+      // its tile picker declined we still want the simdgroup/scalar path, not a
+      // mis-sized grid).
+      if (!simdgroup_fires && !rmt_fused_a_matmul_shape(sroot, NULL, NULL, NULL))
+        tc_template = 0;
     }
     if (tc_template) {
       // Threadgroup-staged tiled path: when both M and N are GLOBAL and

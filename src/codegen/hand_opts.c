@@ -203,12 +203,25 @@ static int hand_opt_classify_matmul(KernelEntry const *ke, u32 *out_K) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
   if (ke->output_dtype != DT_FP32 && ke->output_dtype != DT_BF16) return 0;
   UopDagGemmShape gemm;
-  if (!uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke, &gemm)) {
-    return 0;
+  if (uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke, &gemm)) {
+    if (gemm.dtype != DT_FP32 && gemm.dtype != DT_BF16) return 0;
+    if (out_K != NULL) *out_K = gemm.K;
+    return 1;
   }
-  if (gemm.dtype != DT_FP32 && gemm.dtype != DT_BF16) return 0;
-  if (out_K != NULL) *out_K = gemm.K;
-  return 1;
+  // THVM_FUSE_MATMUL_INPUT: a fused-A matmul has no single A input slot, so
+  // uop_dag_classify_matmul_shape (BLAS-oriented) declines.  Recognise it via
+  // the structural classifier (which accepts a fused A) so the KOP_TC + M/N
+  // GLOBAL opt still applies and rmu_emit_matmul_tc takes the inline-A tiled
+  // path.  K comes from uop_classify_matmul.
+  if (ru_fuse_matmul_input_on()) {
+    u32 k_extent = 0, unit_axis = 0;
+    if (uop_classify_matmul(ke->cached_lift.store_root, &k_extent, &unit_axis)
+        && unit_axis == 0 && k_extent != 0) {
+      if (out_K != NULL) *out_K = k_extent;
+      return 1;
+    }
+  }
+  return 0;
 }
 
 // --- GPU gate -------------------------------------------------------
