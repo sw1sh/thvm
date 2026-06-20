@@ -34,6 +34,16 @@ Begin["`Private`"];
        1-D and never reach fxLinear, so the loader leaves them as-is. --- *)
 fxLinear[x_, w_TTerm] := TRealize[TMatMul[TRealize[x], Transpose[w]]]
 
+(* --- fxLinearFused: a matmul whose output is NOT separately realized, so its
+       SINGLE-consumer elementwise epilogue (a gated residual `x + gate*mm`)
+       fuses onto the matmul's tiled tensor-core store (THVM_FUSE_MATMUL_EPILOGUE
+       + the split-M/N TC collapse keep it on the TILED simdgroup path).  Use
+       ONLY where the matmul has exactly one consumer that is the gate AND the
+       gate output is the realized block boundary (the MLP down-projection ->
+       gated residual); the multi-consumer qkv projections must keep fxLinear's
+       outer TRealize or the shared joint-attention chain re-lifts. --- *)
+fxLinearFused[x_, w_TTerm] := TMatMul[TRealize[x], Transpose[w]]
+
 (* --- q8 weight-only quantization.  A diffusers linear weight {out, in} is
        stored int8 with a per-output-channel (per-row) fp scale:
          scale[o] = max_i |w[o,i]| / 127        (1-D {out})
@@ -155,10 +165,10 @@ fxDoubleBlock[img0_, txt0_, mods_, ropeCos_, ropeSin_, W_, cfg_] := Module[
     (* SwiGLU MLP per stream *)
     imgN2 = fxModulate[img, mods["img_shift_mlp"], mods["img_scale_mlp"], eps];
     img = fxGateAdd[img, mods["img_gate_mlp"],
-        fxLinear[TSwiGLU[fxLinear[imgN2, W["ff_linear_in"]]], W["ff_linear_out"]]];
+        fxLinearFused[TSwiGLU[fxLinear[imgN2, W["ff_linear_in"]]], W["ff_linear_out"]]];
     txtN2 = fxModulate[txt, mods["txt_shift_mlp"], mods["txt_scale_mlp"], eps];
     txt = fxGateAdd[txt, mods["txt_gate_mlp"],
-        fxLinear[TSwiGLU[fxLinear[txtN2, W["ffc_linear_in"]]], W["ffc_linear_out"]]];
+        fxLinearFused[TSwiGLU[fxLinear[txtN2, W["ffc_linear_in"]]], W["ffc_linear_out"]]];
     {img, txt}]
 
 (* --- SINGLE-stream block (parallel ViT-22B): the QKV projections are fused
@@ -189,7 +199,7 @@ fxSingleBlock[x0_, mod_, ropeCos_, ropeSin_, W_, cfg_] := Module[
     mlpG = TSwiGLU[mlp];                                         (* {S, mlp} *)
     (* realize the joined attn|mlp before to_out: it feeds the final matmul's
        contraction operand, so a leaf read keeps that lift shallow. *)
-    fxGateAdd[x0, mod["gate"], fxLinear[TRealize @ Join[attn, mlpG, 2], W["to_out"]]]]
+    fxGateAdd[x0, mod["gate"], fxLinearFused[TRealize @ Join[attn, mlpG, 2], W["to_out"]]]]
 
 (* ============================================================
    Full transformer forward (loop 5 double + 20 single blocks).
