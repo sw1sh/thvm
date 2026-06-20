@@ -844,7 +844,24 @@ static void rmu_emit_term(Term t, FILE *fp) {
       // accumulator is shared across all axes of one REDUCE node).
       Term tred = term_new(0, TAG_UOP, op, loc);
       u32 axis0 = uop_reduce_axis(tred, 0);
-      fprintf(fp, "_acc%u%s", axis0, RMU_ACC_LANE_SUFFIX);
+      // The accumulator is wider than the REDUCE's output dtype (it sums in
+      // float -- rmu_emit_reduce_init/combine).  A REDUCE value feeding an
+      // elementwise expression carries the REDUCE's dtype, so a narrow-float
+      // (bf16/fp16) reduce must round to that dtype HERE -- exactly as a
+      // realized buffer of that dtype would.  This makes a matmul-epilogue
+      // fused store (THVM_FUSE_MATMUL_EPILOGUE: ELEMENTWISE(...REDUCE...))
+      // bit-identical to the un-fused path (matmul -> bf16 buffer -> ew):
+      // the bf16 round of the matmul output happens before the elementwise
+      // in both.  f32/f64 reduces are unchanged (the accumulator already
+      // matches), so softmax/LayerNorm/etc. are byte-identical.
+      u32 red_dt = DT_FP32;
+      char const *cast_open = "", *cast_close = "";
+      if (term_dtype_in(tred, 0, &red_dt)) {
+        if (red_dt == DT_BF16) { cast_open = "((bfloat)("; cast_close = "))"; }
+        else if (red_dt == DT_FP16) { cast_open = "((half)("; cast_close = "))"; }
+      }
+      fprintf(fp, "%s_acc%u%s%s", cast_open, axis0, RMU_ACC_LANE_SUFFIX,
+              cast_close);
       return;
     }
     default:
@@ -3294,11 +3311,22 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
           "{ uint _cb = (_tm + _sm + %uu) * %uu + _tn + _sn + %uu;\n",
           mi * 8u, n_extent, ni * 8u);
         if (epilogue_value != 0) {
-          // Apply the elementwise epilogue per output element.  The matmul
-          // accumulator is rounded to bf16 FIRST (matching the separate-kernel
-          // path that reads the bf16-realized matmul output) so the fused result
-          // is bit-identical to the unfused path; _m/_n substitute the M/N range
-          // vars in the epilogue's gate[n]/X[m,n]/activation index reads.
+          // Apply the elementwise epilogue per output element.  The matmul value
+          // is substituted at the SAME dtype its un-fused realized output buffer
+          // would carry, so the fused result is bit-identical to the separate-
+          // kernel path: an f32-accumulating matmul (bf16 inputs -> f32 reduce)
+          // realizes an f32 buffer, so the epilogue reads the full-precision f32
+          // accumulator (_cstage is `threadgroup float`); a bf16-output matmul
+          // rounds to bf16 at its store, so the epilogue rounds `(bfloat)` first.
+          // _m/_n substitute the M/N range vars in the epilogue's gate[n] /
+          // X[m,n] / activation index reads.
+          u32 mm_dt = DT_FP32;
+          (void)term_dtype_in(opt_tc_term, 0, &mm_dt);
+          char const *mm_read = (mm_dt == DT_BF16)
+                              ? "((bfloat)_cstage[_sgi64 + _e])"
+                              : (mm_dt == DT_FP16)
+                              ? "((half)_cstage[_sgi64 + _e])"
+                              : "(_cstage[_sgi64 + _e])";
           IND(depth); fputs(
             "  for (uint _e = thread_index_in_simdgroup; _e < 64u; _e += 32u) {\n", fp);
           IND(depth); fprintf(fp,
@@ -3307,7 +3335,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
           IND(depth); fprintf(fp,
             "    %s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)(", c_name, n_extent);
           rmu_hoist_clear();
-          rmu_hoist_add(opt_tc_term,  "((bfloat)_cstage[_sgi64 + _e])");
+          rmu_hoist_add(opt_tc_term,  mm_read);
           rmu_hoist_add(m_range_term, "_m");
           rmu_hoist_add(n_range_term, "_n");
           rmu_emit_term(epilogue_value, fp);

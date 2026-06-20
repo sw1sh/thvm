@@ -310,9 +310,131 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent, u32 *out_unit_axis) {
   return 1;
 }
 
+// THVM_FUSE_MATMUL_EPILOGUE: the scheduler (rangeify_unified.c remove_bufferize)
+// un-realizes a single-consumer matmul reduce so its REDUCE inlines into the
+// consuming elementwise chain -- the store value is then ELEMENTWISE(...REDUCE
+// ...), not a bare REDUCE.  uop_recognise_tc / uop_recognise_tc_parallel only
+// classify a bare-REDUCE store value, so without help they would never install
+// the OPT_TC marker the codegen epilogue (render_uop.c rmu_detect_matmul_tc)
+// walks for.  These helpers find that nested REDUCE and wrap it in OPT_TC in
+// place, leaving the surrounding elementwise chain intact.
+
+// Walk a pure elementwise/cast store value for EXACTLY ONE UOP_REDUCE leaf (the
+// inlined matmul).  Mirrors render_uop.c rmu_epilogue_walk: any movement /
+// second reduce / unknown op makes it non-epilogue, so we reject and the bare
+// path leaves the root unchanged.  Returns the single REDUCE term, or 0.
+static Term rec_tc_epilogue_walk(Term t, Term *out_red, int *n_red, int depth) {
+  if (depth > 48) return (Term)1;            // sentinel: still OK, keep walking
+  if (term_tag(t) != TAG_UOP) return (Term)1;
+  u32 op = term_ext(t);
+  if (op == UOP_REDUCE) { *out_red = t; (*n_red)++; return (Term)1; }
+  if (op == UOP_CONST || op == UOP_INDEX_E || op == UOP_BUFFER
+      || op == UOP_RANGE) return (Term)1;
+  if (op == UOP_OPT) return 0;               // already wrapped: not a bare chain
+  if (op == UOP_CAST || op == UOP_BITCAST
+      || uop_is_unary_elementwise((u8)op)
+      || uop_is_binary_elementwise((u8)op)
+      || uop_is_ternary_elementwise((u8)op)) {
+    u8 ar = uop_arity((u8)op);
+    for (u8 i = 0; i < ar; i++) {
+      if (rec_tc_epilogue_walk(heap_read(term_val(t) + i), out_red, n_red,
+                               depth + 1) == 0)
+        return 0;
+    }
+    return (Term)1;
+  }
+  return 0;                                  // movement/unknown: not epilogue-safe
+}
+static Term rec_tc_find_epilogue_reduce(Term value) {
+  Term red = 0; int n = 0;
+  if (rec_tc_epilogue_walk(value, &red, &n, 0) == 0) return 0;
+  if (n != 1 || red == 0) return 0;
+  return red;
+}
+
+// Single-pass memoized substitution: replace the target term with `repl`
+// throughout the value tree.  Each pre-existing term is rebuilt at most once;
+// `repl` is returned as-is (never recursed into) so the wrapped OPT(REDUCE,...)
+// can't re-trigger the walk.  Mirror of apply_opt_dag_substitute, scoped to one
+// target term.  Bounded depth so a misshapen DAG can't run away.
+#define REC_TC_SUB_MEMO_CAP 1024
+typedef struct {
+  Term target, repl;
+  Term key[REC_TC_SUB_MEMO_CAP], val[REC_TC_SUB_MEMO_CAP];
+  u32 n;
+} RecTcSubState;
+static Term rec_tc_sub(RecTcSubState *st, Term t, int depth) {
+  if (depth > 64) return t;
+  Term r = term_resolve(t);
+  if (r == st->target) return st->repl;
+  if (term_tag(r) != TAG_UOP) return r;
+  for (u32 i = 0; i < st->n; i++) if (st->key[i] == r) return st->val[i];
+  u8 op = term_ext(r);
+  if (op == UOP_KERNEL || op == UOP_BUFFER) return r;
+  u8 ar = uop_arity(op);
+  Term srcs[MAX_UOP_SRC] = {0};
+  int changed = 0;
+  u64 loc = term_val(r);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term old_c = heap_read(loc + i);
+    Term new_c = rec_tc_sub(st, old_c, depth + 1);
+    srcs[i] = new_c;
+    if (new_c != old_c) changed = 1;
+  }
+  Term out = changed ? uop_graph_rebuild_with_srcs(r, srcs) : r;
+  if (st->n < REC_TC_SUB_MEMO_CAP) { st->key[st->n] = r; st->val[st->n] = out; st->n++; }
+  return out;
+}
+
+// Build a synthetic STORE(buf_out, addr_out, reduce) so the bare-REDUCE matmul
+// classifiers (uop_classify_matmul / uop_matmul_mn_axes) -- which expect the
+// REDUCE at the store's slot+2 -- can run against an epilogue-fused store whose
+// real slot+2 is the elementwise chain.  The reduce inherits the consumer's
+// output (M, N) ranges, so the synthetic store carries the genuine output
+// address.  Returns 0 if `value` is not an epilogue chain over one REDUCE.
+static Term rec_tc_synth_matmul_store(Term root, Term *out_reduce) {
+  if (out_reduce != NULL) *out_reduce = 0;
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
+  u64 sloc = term_val(root);
+  Term value = heap_read(sloc + 2);
+  Term red = rec_tc_find_epilogue_reduce(value);
+  if (red == 0) return 0;
+  if (out_reduce != NULL) *out_reduce = red;
+  Term buf_out  = heap_read(sloc + 0);
+  Term addr_out = heap_read(sloc + 1);
+  return uop_store(buf_out, addr_out, red);
+}
+
+// Rebuild `root`'s store with the nested `reduce` replaced by OPT(reduce,TC,0),
+// keeping the surrounding elementwise epilogue chain intact.
+static Term rec_tc_wrap_epilogue_reduce(Term root, Term reduce) {
+  u64 sloc = term_val(root);
+  Term buf_out  = heap_read(sloc + 0);
+  Term addr_out = heap_read(sloc + 1);
+  Term value    = heap_read(sloc + 2);
+  Term tc       = uop_opt(reduce, UOP_OPT_TC, 0);
+  RecTcSubState st = { reduce, tc, {0}, {0}, 0 };
+  Term new_value = rec_tc_sub(&st, value, 0);
+  if (new_value == value) return root;
+  return uop_store(buf_out, addr_out, new_value);
+}
+
 // Wrap the STORE root's value with UOP_OPT(_, TC, 0) when the matmul
 // shape matches. Returns the input root unchanged on any non-match.
 fn Term uop_recognise_tc(Term root) {
+  // THVM_FUSE_MATMUL_EPILOGUE: the store value may be an elementwise chain over
+  // a single matmul REDUCE (epilogue fusion).  Classify the synthetic
+  // bare-REDUCE store; on a match, wrap the nested REDUCE in OPT_TC in place.
+  if (ru_fuse_epilogue_on()) {
+    Term reduce = 0;
+    Term synth = rec_tc_synth_matmul_store(root, &reduce);
+    if (synth != 0) {
+      u32 unit_axis = 0;
+      if (uop_classify_matmul(synth, NULL, &unit_axis) && unit_axis == 0)
+        return rec_tc_wrap_epilogue_reduce(root, reduce);
+      return root;       // epilogue chain but not a clean 2x2 matmul: leave bare
+    }
+  }
   // The simdgroup_matrix template needs BOTH operands to carry a clean
   // 2-range {m,k}/{k,n} layout; a collapsed-unit GEMM axis (M==1 or
   // N==1, unit_axis != 0) loses one operand's outer arm, so skip the TC
@@ -413,6 +535,29 @@ fn int uop_matmul_mn_axes(Term root, u32 *out_m_axis, u32 *out_m_extent,
 // output_numel grid, not the tile grid).  Returns the input root
 // unchanged on any non-matmul.
 fn Term uop_recognise_tc_parallel(Term root) {
+  // THVM_FUSE_MATMUL_EPILOGUE: an epilogue-fused store has the matmul REDUCE
+  // nested inside an elementwise chain, so uop_matmul_mn_axes (which reads the
+  // bare-REDUCE store slot+2) won't classify it.  Classify the synthetic
+  // bare-REDUCE store for the M/N/K axes, wrap the nested reduce via
+  // uop_recognise_tc, then stamp M/N GLOBAL on the (chain-preserving) result.
+  if (ru_fuse_epilogue_on()) {
+    Term reduce = 0;
+    Term synth = rec_tc_synth_matmul_store(root, &reduce);
+    if (synth != 0) {
+      u32 em_axis, em_ext, en_axis, en_ext, ek_ext = 0;
+      if (!uop_matmul_mn_axes(synth, &em_axis, &em_ext, &en_axis, &en_ext))
+        return uop_recognise_tc(root);       // not a clean 2x2 matmul: leave bare
+      uop_classify_matmul(synth, &ek_ext, NULL);
+      if ((em_ext % 8u) != 0 || (en_ext % 8u) != 0
+          || ek_ext == 0 || (ek_ext % 8u) != 0)
+        return uop_recognise_tc(root);        // ragged: scalar epilogue path
+      Term tc = uop_recognise_tc(root);
+      if (tc == root) return root;            // shape didn't actually wrap
+      tc = uop_dag_apply_global(tc, em_axis);
+      tc = uop_dag_apply_global(tc, en_axis);
+      return tc;
+    }
+  }
   u32 m_axis, m_extent, n_axis, n_extent;
   if (!uop_matmul_mn_axes(root, &m_axis, &m_extent, &n_axis, &n_extent)) {
     // Not a matmul, or M/N axes didn't resolve -- still install the

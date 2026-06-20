@@ -2295,6 +2295,12 @@ fn void run_rangeify_unified                   (Term root);
 // producer into its consuming matmul's reduce/A-staging load.  Read by both the
 // scheduler (rangeify_unified.c) and the codegen (render_uop.c).
 fn int  ru_fuse_matmul_input_on                (void);
+// THVM_FUSE_MATMUL_EPILOGUE gate (default OFF): un-realize a single-consumer
+// OPT_TC matmul reduce so its consuming elementwise chain fuses into the matmul
+// kernel's STORE (the epilogue).  Read by both the scheduler (rangeify_unified.c,
+// remove_bufferize) and the recogniser (recognise_tc.c, which must wrap the
+// nested REDUCE in OPT_TC even though it is no longer the bare store value).
+fn int  ru_fuse_epilogue_on                    (void);
 fn void pm_apply_rangeify                      (Term root);
 fn u32  rangeify_unified_last_nodes_walked     (void);
 fn u32  rangeify_unified_range_idx_counter     (void);

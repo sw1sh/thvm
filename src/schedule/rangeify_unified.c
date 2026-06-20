@@ -208,6 +208,37 @@ fn int ru_fuse_matmul_input_on(void) {
   return on;
 }
 
+// THVM_FUSE_MATMUL_EPILOGUE (default OFF): matmul-output-into-elementwise
+// fusion -- the SIBLING of THVM_FUSE_MATMUL_INPUT (above), on the consumer
+// side.  tinygrad inlines a single-consumer reduce into its consumer (a reduce
+// with one consumer inherits that consumer's ranges -- schedule/indexing.py:198-
+// 200 -- so the reduce/matmul's store IS the consumer elementwise group's
+// store).  thvm normally KEEPS a matmul reduce realized (its REDUCE seed +
+// rb_feeds_matmul_reduce treat it as a GEMM-operand boundary).  With this flag,
+// an OPT_TC matmul reduce whose ONLY consumer is an elementwise chain is
+// un-realized; its REDUCE subtree splices into that consumer's store value, so
+// the store value becomes ELEMENTWISE(...REDUCE...) instead of reading a matmul
+// buffer.  The codegen-side epilogue (render_uop.c rmu_detect_matmul_tc /
+// rmu_emit_matmul_tc) then walks through the elementwise wrapper and applies the
+// elementwise per output element at the matmul's C store -- collapsing the two
+// kernels into one.  When the inlined matmul still classifies as a clean 2-range
+// GEMM (recognise_tc.c uop_recognise_tc[_parallel] epilogue path) it stays on
+// the simdgroup-matrix TC path with a bf16 C-staging epilogue; when the consumer
+// broadcast structure splits its M/N output across multiple range axes the TC
+// 2-range classifier declines and the fused kernel runs the matmul via the
+// generic parallel accumulator (still one kernel, GPU-parallel over the output,
+// bit-exact -- but no tensor cores).  Gated OFF so the default codegen is
+// byte-identical; FLUX opts in.
+fn int ru_fuse_epilogue_on(void) {
+  static int known = 0, on = 0;
+  if (!known) {
+    char const *e = getenv("THVM_FUSE_MATMUL_EPILOGUE");
+    if (e != NULL && e[0] != '\0') on = (e[0] != '0');
+    known = 1;
+  }
+  return on;
+}
+
 // The fused-A inline is emittable ONLY by the Metal register-blocked tiled
 // matmul (render_uop.c rmu_emit_matmul_tc_tiled), which reconstructs the
 // producer's (m, k) directly from the threadgroup tile origin at its A-staging
@@ -1021,6 +1052,57 @@ static int rb_matmul_input_fusable(u32 node_idx) {
   return 0;
 }
 
+// THVM_FUSE_MATMUL_EPILOGUE: is this REALIZED node an OPT_TC matmul reduce whose
+// SINGLE consumer is an elementwise/cast chain (the epilogue) terminating at a
+// realized boundary -- not another reduce/matmul and not a movement op?  Mirror
+// of rb_matmul_input_fusable on the CONSUMER side (schedule/indexing.py:198-200,
+// "an op with one consumer inherits the consumer's ranges").  When true,
+// un-realizing the matmul reduce inlines its REDUCE subtree into that one
+// elementwise chain's store; the codegen-side epilogue (rmu_emit_matmul_tc)
+// keeps the matmul on the TC path and applies the elementwise per output
+// element.  We require a strict LINEAR elementwise chain so the matmul is
+// genuinely consumed once (no recompute fan-out into multiple kernels) and so
+// the consumer's store value is exactly ELEMENTWISE(...REDUCE...) the codegen
+// walks.  The fused store and the matmul share output ranges (M, N), so the
+// epilogue's index reads bind to the same tiled (m, n) the matmul emits --
+// rmu_epilogue_walk rejects anything (movement / second reduce) that would
+// break that positional bind.  Returns 0 unless:
+//   * the node is a matmul reduce (BUFFERIZE_REASON_MATMUL),
+//   * every hop up to (and including) the realized sink has exactly ONE
+//     consumer that is an elementwise/cast op (no branch, no movement),
+//   * the chain reaches a realized boundary WITHOUT crossing another reduce.
+static int rb_matmul_epilogue_fusable(u32 node_idx) {
+  if (!(BUFFERIZE_NODES[node_idx].reasons & BUFFERIZE_REASON_MATMUL)) return 0;
+  if (BUFFERIZE_NODES[node_idx].op != UOP_REDUCE) return 0;
+  u32 cur = node_idx;
+  u32 budget = RU_CONSRED_BFS_CAP;
+  while (budget-- > 0) {
+    u32 cidxs[RU_MAX_CONSUMERS];
+    u32 nc = ru_consumers_for_node(cur, cidxs, RU_MAX_CONSUMERS);
+    if (nc != 1) return 0;                  // branch (or sink): not a clean chain
+    u32 ci = cidxs[0];
+    u8 cop = BUFFERIZE_NODES[ci].op;
+    // A second reduce / matmul terminates the chain WITHOUT an elementwise
+    // epilogue -- nothing to fuse (and the codegen epilogue rejects a nested
+    // REDUCE).  Bail so the matmul stays its own realized boundary.
+    if (cop == UOP_REDUCE) return 0;
+    // A movement op (RESHAPE / EXPAND / PERMUTE / ...) re-indexes the value: the
+    // codegen epilogue (rmu_epilogue_walk) only walks pure elementwise/cast, so
+    // the fused store value would not match.  Keep the matmul realized.
+    if (uop_is_movement(cop)) return 0;
+    int is_ew = uop_is_unary_elementwise(cop)
+             || uop_is_binary_elementwise(cop)
+             || uop_is_ternary_elementwise(cop)
+             || cop == UOP_CAST || cop == UOP_BITCAST;
+    if (!is_ew) return 0;                    // STORE/etc: not an elementwise epilogue
+    // An elementwise hop that is itself a realized boundary IS the fused store
+    // target (its store value will hold the inlined ...REDUCE...).  Fusable.
+    if (rb_node_realized(ci)) return 1;
+    cur = ci;                                // non-realized ew hop: keep walking
+  }
+  return 0;
+}
+
 fn void run_rangeify_unified(Term root) {
   // Clear per-node state.
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
@@ -1416,6 +1498,22 @@ fn void run_rangeify_unified(Term root) {
       u32 i = RU_TOPO_ORDER[oi];
       if (!(RU_REALIZE_MAP[i].realized_full || RU_REALIZE_MAP[i].realized_partial))
         continue;
+      // THVM_FUSE_MATMUL_EPILOGUE: un-realize an OPT_TC matmul REDUCE whose only
+      // consumer is an elementwise epilogue chain (rb_matmul_epilogue_fusable),
+      // so its REDUCE subtree inlines into that consumer's store -- the codegen
+      // epilogue then emits one fused TC kernel.  A matmul reduce is a SEED
+      // boundary (bufferize_classify sets BUFFERIZE_NODES[].realized for it), so
+      // this clause runs BEFORE the seed-boundary keep below; the elementwise
+      // recompute path only un-realizes WALK-derived boundaries.  Metal-only:
+      // the epilogue is emittable solely by the bf16 tiled emitter (render_uop.c
+      // gates `c_is_bf`); on CPU/CUDA keep the matmul a realized BLAS operand.
+      if (ru_fuse_epilogue_on() && ru_fuse_matmul_input_target_ok()
+          && rb_matmul_epilogue_fusable(i)
+          && !rb_src_has_live_reduce(BUFFERIZE_NODES[i].loc, 0)) {
+        RU_REALIZE_MAP[i].realized_full    = 0;
+        RU_REALIZE_MAP[i].realized_partial = 0;
+        continue;
+      }
       if (BUFFERIZE_NODES[i].realized) continue;          // seed boundary: keep
       u8 op = BUFFERIZE_NODES[i].op;
       int ew = uop_is_unary_elementwise(op)
