@@ -7,6 +7,9 @@
 #include "test.h"
 
 int main(void) {
+  // ru_fuse_epilogue_on() caches the env on first read, so set it before any
+  // recognise call (the split-M/N collapse rides the epilogue gate).
+  setenv("THVM_FUSE_MATMUL_EPILOGUE", "1", 1);
   thvm_init();
 
   // Build a 16x16 = 16x32 @ 32x16 matmul shape mirroring the
@@ -57,6 +60,72 @@ int main(void) {
   CHECK_EQ(uop_opt_target(wval), red);
   CHECK_EQ(uop_opt_kind  (wval), UOP_OPT_TC);
   CHECK_EQ(uop_opt_factor(wval), 0u);
+
+  // === split-M/N TC collapse (THVM_FUSE_MATMUL_EPILOGUE): a fused matmul
+  //     whose M output axis is split into two CONTIGUOUS LOOP ranges (the
+  //     broadcast-epilogue case) collapses to a flat GEMM and recognises as TC.
+  setenv("THVM_FUSE_MATMUL_EPILOGUE", "1", 1);
+  TEST_BEGIN("recognise-tc/split-M-collapses-to-tc");
+  {
+    Term sm0 = uop_range(0, 0, 2);            // M outer (ext 2)
+    Term sm1 = uop_range(3, 0, 8);            // M inner (ext 8) -> flat M = 16
+    Term sn  = uop_range(1, 0, 16);
+    Term sk  = uop_range(2, 1, 32);
+    Term c256 = uop_const(DT_INT32, 256);     // 8*32 (contiguous: stride m0)
+    Term c128 = uop_const(DT_INT32, 128);     // 8*16
+    // A[m,k] with M split: m0*256 + m1*32 + k
+    Term aA = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IADD,
+                  uop_int_binary(UOP_IMUL, sm0, c256),
+                  uop_int_binary(UOP_IMUL, sm1, k32)),
+                sk);
+    Term lA = uop_index_e(A, aA);
+    Term bB = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, sk, k16), sn);
+    Term lB = uop_index_e(B, bB);
+    Term rd = uop_reduce(REDUCE_SUM, 2, uop_binary(UOP_MUL, lA, lB));
+    // C[m,n] with M split: m0*128 + m1*16 + n
+    Term aC = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IADD,
+                  uop_int_binary(UOP_IMUL, sm0, c128),
+                  uop_int_binary(UOP_IMUL, sm1, k16)),
+                sn);
+    Term st = uop_store(C, aC, rd);
+    CHECK(!uop_classify_matmul(st, NULL, NULL));   // bare: A touches 3 ranges
+    Term w = uop_recognise_tc_parallel(st);        // collapse + wrap OPT_TC
+    CHECK(w != st);
+    Term wv = heap_read(term_val(w) + 2);
+    CHECK_EQ(term_ext(wv), UOP_OPT);
+    CHECK_EQ(uop_opt_kind(wv), UOP_OPT_TC);
+  }
+
+  // DECLINE: a NON-contiguous M split must NOT collapse (correctness > speed).
+  TEST_BEGIN("recognise-tc/split-M-noncontiguous-declines");
+  {
+    Term sm0 = uop_range(0, 0, 2);
+    Term sm1 = uop_range(3, 0, 8);
+    Term sn  = uop_range(1, 0, 16);
+    Term sk  = uop_range(2, 1, 32);
+    Term c999 = uop_const(DT_INT32, 999);     // != 8*32 -> non-contiguous
+    Term aA = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IADD,
+                  uop_int_binary(UOP_IMUL, sm0, c999),
+                  uop_int_binary(UOP_IMUL, sm1, k32)),
+                sk);
+    Term lA = uop_index_e(A, aA);
+    Term bB = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, sk, k16), sn);
+    Term lB = uop_index_e(B, bB);
+    Term rd = uop_reduce(REDUCE_SUM, 2, uop_binary(UOP_MUL, lA, lB));
+    Term aC = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IADD,
+                  uop_int_binary(UOP_IMUL, sm0, c999),
+                  uop_int_binary(UOP_IMUL, sm1, k16)),
+                sn);
+    Term st = uop_store(C, aC, rd);
+    Term w = uop_recognise_tc_parallel(st);
+    Term wv = heap_read(term_val(w) + 2);
+    CHECK(term_ext(wv) != UOP_OPT);            // not collapsed -> not TC-wrapped
+  }
+  unsetenv("THVM_FUSE_MATMUL_EPILOGUE");
 
   TEST_BEGIN("recognise-tc/idempotent-on-already-wrapped");
   Term wrapped2 = uop_recognise_tc(wrapped);

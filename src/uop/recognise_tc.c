@@ -529,12 +529,183 @@ fn int uop_matmul_mn_axes(Term root, u32 *out_m_axis, u32 *out_m_extent,
 // is no multi-simdgroup write race -- the guard the legacy path adds is
 // pure waste here, not a correctness requirement.
 //
+// === split-M/N TC collapse (gated on THVM_FUSE_MATMUL_EPILOGUE) ===========
+// A FUSED matmul (epilogue / PCONTIG) whose output rides an elementwise chain
+// with a broadcast (FLUX's gated residual `x + gate*matmul`, gate {dim} over
+// {S,dim}) can have its M (or N) output axis SPLIT across several contiguous
+// LOOP range axes by the consumer's reshape -- so the operand address touches
+// >2 distinct ranges and uop_classify_matmul declines (the matmul falls to the
+// generic accumulator instead of the simdgroup TILED path).  When the split
+// axes are contiguous (stride(outer) == extent(inner)*stride(inner)) and all
+// KAX_LOOP, collapse them into ONE flat range: the outer split axes become
+// CONST(0) and the innermost a fresh RANGE of the product extent.  Since
+// flat*stride_inner == sum_i axis_i*stride_i exactly (contiguity), every
+// address is byte-preserved and the matmul recognises as a clean 2-range GEMM
+// on the TILED tensor-core path.  Declines (returns the store unchanged) on any
+// non-contiguous / non-LOOP split, so a mis-shaped fusion falls back to the
+// (correct) generic accumulator rather than miscompiling.
+static int rec_tc_const_i64(Term t, i64 *out) {
+  t = term_resolve(t);
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_CONST) return 0;
+  Term num = heap_read(term_val(t));
+  if (term_tag(num) != TAG_NUM) return 0;
+  *out = (i64)(i32)(u32)term_val(num);
+  return 1;
+}
+// Coefficient (stride) of RANGE(axis_id) in a linear index tree.  *ok=0 when
+// the axis appears under a non-linear op (IDIV/IMOD/...) -> caller declines.
+static i64 rec_tc_addr_coeff(Term t, u32 axis_id, int *ok, int depth) {
+  if (depth > 40) { *ok = 0; return 0; }
+  t = term_resolve(t);
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_RANGE)
+    return ((u32)term_val(heap_read(loc + 0)) == axis_id) ? 1 : 0;
+  if (op == UOP_IADD || op == UOP_ISUB) {
+    i64 l = rec_tc_addr_coeff(heap_read(loc + 0), axis_id, ok, depth + 1);
+    i64 r = rec_tc_addr_coeff(heap_read(loc + 1), axis_id, ok, depth + 1);
+    return (op == UOP_ISUB) ? (l - r) : (l + r);
+  }
+  if (op == UOP_IMUL) {
+    Term a = heap_read(loc + 0), b = heap_read(loc + 1);
+    int oka = 1, okb = 1;
+    i64 ca = rec_tc_addr_coeff(a, axis_id, &oka, depth + 1);
+    i64 cb = rec_tc_addr_coeff(b, axis_id, &okb, depth + 1);
+    if (!oka || !okb) { *ok = 0; return 0; }
+    i64 k;
+    if (ca != 0 && cb == 0 && rec_tc_const_i64(b, &k)) return ca * k;
+    if (cb != 0 && ca == 0 && rec_tc_const_i64(a, &k)) return cb * k;
+    if (ca == 0 && cb == 0) return 0;       // axis absent from this product
+    *ok = 0; return 0;                       // axis * non-const -> non-linear
+  }
+  // Unsupported op: bail iff our axis appears beneath it.
+  if (rec_tc_find_range_extent(t, axis_id, 0) != 0) *ok = 0;
+  return 0;
+}
+static Term rec_tc_find_range_node(Term t, u32 axis_id, int depth) {
+  if (depth > 40) return 0;
+  t = term_resolve(t);
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_RANGE)
+    return ((u32)term_val(heap_read(loc + 0)) == axis_id) ? t : 0;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term r = rec_tc_find_range_node(heap_read(loc + i), axis_id, depth + 1);
+    if (r != 0) return r;
+  }
+  return 0;
+}
+// Verify the split axes `ax[0..n)` are a contiguous nest in `addr` (each
+// present axis's stride == product of inner extents * inner stride), reusing
+// the order/extents already computed for the operand.  Absent axes (coeff 0)
+// are fine (the output may not index every operand axis).  Returns 0 to decline.
+static int rec_tc_split_contiguous(Term addr, u32 *ax_ord, u32 *ex_ord, u32 n) {
+  i64 prev = 0; int have_prev = 0;
+  for (u32 i = 0; i < n; i++) {           // ax_ord/ex_ord sorted outer->inner
+    int ok = 1;
+    i64 c = rec_tc_addr_coeff(addr, ax_ord[i], &ok, 0);
+    if (!ok) return 0;
+    if (c == 0) { have_prev = 0; continue; }   // axis absent here
+    // contiguous nest: stride(outer) == stride(inner) * extent(inner)
+    if (have_prev && prev != c * (i64)ex_ord[i]) return 0;
+    prev = c; have_prev = 1;
+  }
+  return 1;
+}
+static Term rec_tc_collapse_split(Term root) {
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return root;
+  u64 sloc = term_val(root);
+  Term reduce = heap_read(sloc + 2);
+  if (!(term_tag(reduce) == TAG_UOP && term_ext(reduce) == UOP_REDUCE))
+    reduce = rec_tc_find_epilogue_reduce(heap_read(sloc + 2));
+  if (reduce == 0 || term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE)
+    return root;
+  if (uop_reduce_kind(reduce) != REDUCE_SUM) return root;
+  if (uop_reduce_n_axes(reduce) != 1) return root;
+  u32 red_axis = uop_reduce_axis(reduce, 0);
+  Term mul = uop_reduce_src(reduce);
+  if (!(term_tag(mul) == TAG_UOP && term_ext(mul) == UOP_MUL)) return root;
+  Term idx_a = rec_tc_peel_cast(heap_read(term_val(mul) + 0));
+  Term idx_b = rec_tc_peel_cast(heap_read(term_val(mul) + 1));
+  if (!(term_tag(idx_a) == TAG_UOP && term_ext(idx_a) == UOP_INDEX_E)) return root;
+  if (!(term_tag(idx_b) == TAG_UOP && term_ext(idx_b) == UOP_INDEX_E)) return root;
+  Term addr_a = heap_read(term_val(idx_a) + 1);
+  Term addr_b = heap_read(term_val(idx_b) + 1);
+  Term addr_out = heap_read(sloc + 1);
+  // Precompute each operand's range set: a non-K axis shared by BOTH operands
+  // is a BATCH axis (it indexes A, B and the output) -- excluded, because it is
+  // contiguous-with-M by construction and collapsing it would merge the batch
+  // into M/N and miscompile a batched matmul.  Only an axis UNIQUE to one
+  // operand (M for A, N for B) is a genuine split.
+  u32 sa[8], sb[8];
+  u32 na = rec_tc_count_distinct_ranges(addr_a, sa, 8, 0, 0);
+  u32 nb = rec_tc_count_distinct_ranges(addr_b, sb, 8, 0, 0);
+  Term result = root;
+  Term opers[2]; opers[0] = addr_a; opers[1] = addr_b;
+  u32 *oth[2];   oth[0]  = sb; oth[1]  = sa;
+  u32  oth_n[2]; oth_n[0] = nb; oth_n[1] = na;
+  for (int side = 0; side < 2; side++) {
+    Term addr = opers[side];
+    u32 seen[8];
+    u32 n = rec_tc_count_distinct_ranges(addr, seen, 8, 0, 0);
+    u32 nk[8], n_nk = 0;
+    for (u32 i = 0; i < n; i++) {
+      if (seen[i] == red_axis) continue;
+      int shared = 0;
+      for (u32 j = 0; j < oth_n[side]; j++) if (oth[side][j] == seen[i]) { shared = 1; break; }
+      if (shared) continue;                  // batch axis: never collapse
+      if (n_nk < 8) nk[n_nk++] = seen[i];
+    }
+    if (n_nk <= 1) continue;                 // already a clean (or M==1) axis
+    i64 cf[8]; u32 ex[8]; int decline = 0;
+    for (u32 i = 0; i < n_nk; i++) {
+      int ok = 1;
+      cf[i] = rec_tc_addr_coeff(addr, nk[i], &ok, 0);
+      if (!ok || cf[i] <= 0) return root;    // non-linear: decline outright
+      ex[i] = rec_tc_find_range_extent(addr, nk[i], 0);
+      Term rn = rec_tc_find_range_node(addr, nk[i], 0);
+      if (ex[i] == 0 || rn == 0) return root;
+      u32 kax = (u32)term_val(heap_read(term_val(rn) + 1));
+      if (kax != KAX_LOOP) { decline = 1; break; }  // already-tiled: leave alone
+    }
+    if (decline) continue;
+    u32 ord[8]; for (u32 i = 0; i < n_nk; i++) ord[i] = i;
+    for (u32 i = 0; i < n_nk; i++)
+      for (u32 j = i + 1; j < n_nk; j++)
+        if (cf[ord[j]] > cf[ord[i]]) { u32 t = ord[i]; ord[i] = ord[j]; ord[j] = t; }
+    u32 ax_ord[8], ex_ord[8];
+    for (u32 i = 0; i < n_nk; i++) { ax_ord[i] = nk[ord[i]]; ex_ord[i] = ex[ord[i]]; }
+    if (!rec_tc_split_contiguous(addr, ax_ord, ex_ord, n_nk)) return root;
+    if (!rec_tc_split_contiguous(addr_out, ax_ord, ex_ord, n_nk)) return root;
+    u32 flat = 1; for (u32 i = 0; i < n_nk; i++) flat *= ex_ord[i];
+    u32 inner = ax_ord[n_nk - 1];            // smallest stride survives
+    for (u32 i = 0; i < n_nk; i++) {
+      Term rn = rec_tc_find_range_node(result, ax_ord[i], 0);
+      if (rn == 0) continue;
+      Term repl = (ax_ord[i] == inner) ? uop_range(inner, KAX_LOOP, flat)
+                                       : uop_const(DT_INT32, 0);
+      RecTcSubState st = { rn, repl, {0}, {0}, 0 };
+      result = rec_tc_sub(&st, result, 0);
+    }
+  }
+  return result;
+}
+
 // Falls back to the plain (guarded) uop_recognise_tc wrap when M or N is
 // not a multiple of 8 (the simdgroup template can't tile a ragged
 // fragment, so it bails to the scalar accumulator -- which needs the
 // output_numel grid, not the tile grid).  Returns the input root
 // unchanged on any non-matmul.
 fn Term uop_recognise_tc_parallel(Term root) {
+  // THVM_FUSE_MATMUL_EPILOGUE: an epilogue/PCONTIG-fused matmul can have its
+  // M/N output axis split by the consumer's broadcast reshape; collapse the
+  // contiguous split so the clean 2-range classifier keeps it on the TILED
+  // tensor-core path instead of the generic accumulator.  No-op (returns root)
+  // without a split, so the default path stays byte-identical.
+  if (ru_fuse_epilogue_on()) root = rec_tc_collapse_split(root);
   // THVM_FUSE_MATMUL_EPILOGUE: an epilogue-fused store has the matmul REDUCE
   // nested inside an elementwise chain, so uop_matmul_mn_axes (which reads the
   // bare-REDUCE store slot+2) won't classify it.  Classify the synthetic
