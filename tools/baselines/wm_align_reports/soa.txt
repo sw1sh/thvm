@@ -1,5 +1,25 @@
 soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv=125
 
+## DEFINITIVE 2026-06-20: needs the global CP-formation reorder (local fix PROVEN impossible)
+
+thvm's backward subsumption is ALREADY WM-faithful: atp_eset_subsume_by_new
+(src/atp/_.c, ON in the WALDMEISTER preset, KBO_UN-gated, orphans victims, skips
+oriented rules) == WM RueckwaertsSubsumierung (Interreduktion.c:251, syntactic
+one-sided MO_TermpaarSubsummiertZweites under !TP_TermpaarIstRegel).  The
+THVM_ATP_BWD_SUB knob (atp_push_rule:8675) is a DIFFERENT Vampire-style
+over-firing mechanism -- the WRONG one, correctly OFF (it diverges soa @10).
+pick-125 cannot be flipped locally: slot15 (C3 V0 (C3 V1 V0))=(C3 (C3 V1 V1) V0)
+and eqn-10 (C3 V0 (C3 V1 V0))=(C3 V0 (C3 V1 V1)) share an LHS, differ by ONE
+top-commutativity RHS swap; the plain subsumption predicate (correctly) bails.
+Three WM-faithful comm-aware widenings that DO subsume slot15 all forked the soa
+prefix at pick-99: removing slot15 suppresses formation of the commutativity CP
+(C3 V0 V1)=(C3 V1 V0) that pick-99 selects, because thvm's slot15 is the UNIQUE
+parent of that CP copy while WM produces an equivalent copy from a DIFFERENT live
+parent at the right FIFO age.  => CP-formation-GRAPH divergence (which parent
+pair yields the surviving duplicate-CP copy) + the cross-rule weight-120 FIFO-age
+interleave = the global reorder.  No local subsumption/orientation predicate
+fixes it.  (Verified workflow wf_5e7ce207.)
+
 CONFIG (opt-in):
   THVM_ATP_CP_WM_SIDE=1 THVM_ATP_WM_FLAT_SUBSUME=1 THVM_ATP_WALDMEISTER=1
   bin/test_atp_wolfram_bench /tmp/soa.pr <budget> <maxw>
