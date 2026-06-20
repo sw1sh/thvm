@@ -3772,6 +3772,14 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // falls through to the per-8x8-tile parallel_tc body below (which emits
   // the full affine address via rmu_emit_term, any stride/offset included).
   int is_batched = (batch_axis_id != 0xFFFFFFFFu);
+  if (getenv("THVM_MATMUL_TRACE") != NULL) {
+    RmuTcTile _dt; int _tiled = (!is_batched && !a_trans && m_par && n_par
+        && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok
+        && rmu_tc_pick_tile(m_extent, n_extent, k_extent, &_dt));
+    fprintf(stderr, "[mm] M=%u N=%u K=%u batch=%u%s path=%s\n",
+            m_extent, n_extent, k_extent, batch_extent,
+            a_trans ? " Atrans" : "", _tiled ? "TILED" : "parallel_tc/other");
+  }
   if (!is_batched && !a_trans && m_par && n_par && RMU_TARGET == CG_TARGET_METAL
       && _tc_dtype_ok) {
     RmuTcTile tile;
