@@ -346,16 +346,16 @@ class WmTrie:
                 # the head moves to just after that model jump.
                 others = [c for c in up.children.values()
                           if isinstance(c, TLeaf) and c is not sib]
+                up_d = self._node_depth(up)
+
+                def _shared_prefix(a, b):
+                    k = 0
+                    while k < len(a) and k < len(b) and a[k] == b[k]:
+                        k += 1
+                    return k
+
                 if len(others) == 1:
                     model = others[0]
-                    up_d = self._node_depth(up)
-
-                    def _shared_prefix(a, b):
-                        k = 0
-                        while k < len(a) and k < len(b) and a[k] == b[k]:
-                            k += 1
-                        return k
-
                     for nn in self._all_nodes():
                         if self._node_depth(nn) >= up_d:
                             continue
@@ -373,6 +373,38 @@ class WmTrie:
                             continue               # model also at head -> no move
                         nn.exits.remove(sj)
                         nn.exits.insert(nn.exits.index(best) + 1, sj)
+                elif len(others) >= 2:
+                    # Multi-model fan: if `sib` is the newest leaf, its ancestor
+                    # long jumps are the most-recent head-inserts and head each
+                    # start node's exit list ahead of the older model group --
+                    # but only where reaching the head crosses no same-parallel
+                    # -group jump (a sib behind a group member is not the
+                    # group's head-most construction; WM keeps it after-model).
+                    # `fact[0]` ((R,rid)/(E,eid,face)) is the birth-order proxy
+                    # (the C mirror compares chain[0].trace, the birth counter).
+                    sib_age = sib.chain[0][0]
+                    if all(m.chain[0][0] < sib_age for m in others):
+                        for nn in self._all_nodes():
+                            if self._node_depth(nn) >= up_d:
+                                continue
+                            sib_js = [e for e in nn.exits if e.ziel is sib]
+                            if len(sib_js) != 1:
+                                continue
+                            sj = sib_js[0]
+                            si = nn.exits.index(sj)
+                            if si == 0:
+                                continue
+                            in_group = any(
+                                e.ziel in others
+                                and _shared_prefix(sj.sub, e.sub) >= 2
+                                for e in nn.exits)
+                            if not in_group:
+                                continue           # need the shared f + arg1
+                            if any(_shared_prefix(sj.sub, e.sub) >= 2
+                                   for e in nn.exits[:si]):
+                                continue           # a group member precedes sib
+                            nn.exits.remove(sj)
+                            nn.exits.insert(0, sj)
         return True
 
     def _find_leaf(self, key, fact):
