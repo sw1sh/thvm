@@ -342,3 +342,99 @@ thvm_unify handles differently [=> thvm_unify bug], (2) a non-standard face/
 generation [=> port it], or (3) a parents attribution that is not a direct
 126x36 superposition [=> the gap is elsewhere].  Until then, @6078's root cause
 is genuinely UNDETERMINED.
+
+## RESOLVED-AS-WM-SIDE (2026-06-20): drought is a CP-formation MULTIPLICITY divergence, not a thvm bug
+
+A confound-free, WM-trace-free investigation of the three thvm-determinable
+levers (KBO self-consistency, equation subsumption, producing-overlap lifecycle)
+finds **no thvm-side defect**.  The drought is a genuine CP-formation
+order/multiplicity divergence that needs WM's formation sequence to close; it is
+NOT thvm-determinable.  Detail below; instrumentation is in-tree (gated).
+
+Ground truth re-confirmed on current HEAD (cf8aa3bb): thvm forms the target T
+`(C3 (C3 V0 V0) V1) # (C3 V1 (C3 V1 V0))` (w=10) EXACTLY 16 times at cp_seq
+{741, 1274, 1287, 5594, 5660, 5661, 6401, 6568, 6782, 6942, 7222, 10739, 14707,
+14711, 15228, 15233}, last at 15233, then a gap to 44567.  Pick 6078 (seq ~23171)
+sits in [15233, 44567], so the pri=120 band genuinely lacks T at 6078.  AndAssoc
+and OrAssoc are byte-identical here.
+
+### Lever 1 -- KBO orientation is SELF-CONSISTENT (no orient-despite-incomparable)
+
+Added a gated probe `THVM_ATP_ORIENT_KBO_CHECK=1` (src/atp/_.c orient site): when
+thvm orients a fact (r_orient==1), it re-runs the memo-free Baader-Nipkow oracle
+`thvm_kbo_naive` on (lhs, rhs) and prints `ORIENT_KBO_INCONSISTENT` if the oracle
+does not agree it is strictly GT.  Across MeredithAxioms__And/OrAssociativity
+(6200 picks each) and BooleanAxioms__Noncontradiction / McCuneAxioms__Associativity
+/ HillmanAxioms__Commutativity: **0 inconsistencies**.  thvm never orients a
+KBO-incomparable fact, so the unfailing-completion "keep incomparable facts as
+bidirectional E-equations" rule is satisfied.  (Note: orientation IS the KBO call
+-- atp_compare == KBO_GT -- so this also confirms the production comparator agrees
+with the naive oracle on every oriented Meredith fact, i.e. no memo/cache hazard.)
+
+### Lever 3 -- no T-producer is RETIRED or SUBSUMED
+
+Every producing rule of the 16 T-formations stays LIVE through the drought.
+RULE_TRACE (`RULEADD` + `RETIRE` events) over the whole run: 23 RETIREs, NONE of
+them a T-producer term.  thvm even keeps T ITSELF as an unoriented bidirectional
+equation (RULE 28, trace 1203: `C3(C3(x_0,x_0),x_1) -> C3(x_1,C3(x_1,x_0))`,
+unorientable) and re-derives T from its overlap (seq 1287:
+outer=T-equation x inner=commutativity).  The 16 T-CPs are all `joinable=0`
+(none dropped as joinable; queue-subsume is OFF in the preset).  So neither
+orientation nor subsumption nor joinability removes a T producer.
+
+### overlap_exhaust is INNOCENT
+
+The atp-wm-overlap-exhaust feature (`use_overlap_exhaust`, ON in the preset) only
+blocks `flat-transposition x exhausted-equation` re-overlap; T's producers are
+not flat transpositions.  `THVM_ATP_NO_OVERLAP_EXHAUST=1` leaves the T count at
+16 and @6078 unchanged.
+
+### Producing overlaps of the 16 T-formations (provenance, slot-alias-safe)
+
+Captured via the extended `THVM_ATP_CPGEN_DEBUG=1` trace (now appends parent
+rule TERMS + overlap position per CP).  The 16 fall into producer cohorts, each a
+DIFFERENT freshly-added fact's add-batch overlapping the existing set:
+
+* seq 741/1274/1287  -- early rules (slot2 commutativity, slot17, slot28=T-eq)
+* seq 5594..7222     -- slot56/57 outer x {slot18,26,47,59,60,61,62,63} inner
+* seq 10739          -- slot50 x slot70
+* seq 14707..15233   -- slot64/65/66 x slot87/89 (the w=8 rules
+  `C3(C3 V0 V0)(C3 V1 (C3 V1 V0))->...` and `C3(C3 V0 (C3 V0 V1))(C3 V1 V1)->...`)
+
+After slot89's batch (~seq 15233) the rules thvm adds (slots 90..148) are
+progressively deeper; NONE of their add-batch overlaps produces the small w=10 T.
+The next T producer is slot149 (`C3(C3 V0 (C3 V0 V1)) (C3 V0 (C3 (C3 V1 V1) V2))
+-> V0`), whose batch fires at seq 44567.  thvm's architecture forms each fact's
+superposition lane ONCE (thvm_atp_generate_cps_wm: overlap f vs all current rules
++ f-as-inner into old facts, then done -- WM-faithful), so a producing fact is
+not re-overlapped; T reappears only when a NEW fact whose lane yields T is added.
+
+### The precise drought-cause EVENT
+
+There is no single removal/orient/subsume event.  The drought is the GAP between
+two T-producing add-batches: the slot64/65/66 x slot87/89 batch (last T at seq
+15233) and the slot149-family batch (next T at seq 44567).  In that window thvm
+adds ~60 rules (slots 90..148) none of whose lanes produce T.  WM, over the same
+trajectory, forms T ~80 times (the prior section's faithful WM tally: ~36 with an
+equation parent) and keeps replenishing the pri=120 band, so it still has a T-CP
+to select at pick 6078.
+
+### Why this is WM-side (not thvm-determinable) and STOP
+
+The producing facts are identical-and-alive in thvm; thvm's orientation is
+KBO-self-consistent; nothing thvm subsumes/retires/exhausts removes a T producer.
+The only remaining difference is WM's CP-formation MULTIPLICITY/ORDER -- how many
+distinct (parent x partner x position) overlaps WM forms for T and in what age
+order.  Pinning thvm's missing equation-overlap instances to WM's would require
+WM's exact per-classification formation sequence in the 6078 epoch (a
+NewClassification.c dump), i.e. a WM trace.  Per the directive, NO wmcli/ELProver
+was run.  thvm-side: NO defect found; no faithful single-criterion fix advances
+@6078 without breaking a byte-identical baseline (orientation/retention changes
+are global).  CONCLUSION: @6078 is a CP-formation multiplicity divergence,
+WM-side, deferred -- same family as the residual 12 deep-AC-completion-multiplicity
+rows in the WM selection-sequence matrix.
+
+In-tree scaffolding (both env-gated, default-OFF, baselines byte-identical):
+* `THVM_ATP_ORIENT_KBO_CHECK=1` -- orient-despite-incomparable self-check.
+* `THVM_ATP_CPGEN_DEBUG=1` -- now also prints each CP's producing parent rule
+  TERMS + overlap position (slot-alias-safe provenance).

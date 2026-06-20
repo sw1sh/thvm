@@ -8627,6 +8627,27 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   // instead of recomputing a full KBO compare per rewrite position.
   s->r_orient[s->n_rules] = (u8)(atp_compare(s, lhs, rhs) == KBO_GT);
   if (!s->r_orient[s->n_rules]) s->n_unorient++;
+  // KBO self-consistency probe (THVM_ATP_ORIENT_KBO_CHECK=1): if we
+  // oriented this fact (r_orient==1) yet the memo-free Baader-Nipkow
+  // oracle thvm_kbo_naive does NOT agree it is strictly GT, that is an
+  // orient-despite-incomparable bug (the fact must stay an unoriented
+  // bidirectional E-equation for unfailing completion).  Pure thvm-
+  // internal; needs no WM data.
+  {
+    static int okc = -1;
+    if (okc < 0) okc = (getenv("THVM_ATP_ORIENT_KBO_CHECK") != NULL) ? 1 : 0;
+    if (okc && s->r_orient[s->n_rules]) {
+      KboCmp ref = thvm_kbo_naive(lhs, rhs, s->kbo);
+      if (ref != KBO_GT) {
+        char la[2048], ra[2048];
+        atp_pretty_term(lhs, la, sizeof la);
+        atp_pretty_term(rhs, ra, sizeof ra);
+        fprintf(stderr,
+                "ORIENT_KBO_INCONSISTENT slot=%u naive=%d (lhs > rhs?)\n"
+                "  lhs=%s\n  rhs=%s\n", s->n_rules, (int)ref, la, ra);
+      }
+    }
+  }
   s->n_rules++;
   // Rule-set mutated -- bump the monotone revision the IR-normalize
   // cookie keys on (see AtpState.cp_last_norm_r_revision).
@@ -14968,6 +14989,29 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       atp_pretty_term(raw_rhs, ra_raw, sizeof ra_raw);
       fprintf(stderr, "[cpgen] from rules %u x %u: cp(raw) = %s = %s; cp(norm) = %s = %s\n",
               rule_a, rule_b, la_raw, ra_raw, la, ra);
+      // Producing-overlap provenance: the parent rule TERMS as stored
+      // and the overlap position, so a specific CP's producing (outer x
+      // inner) overlaps can be pinned without slot-number aliasing (slots
+      // are reused across rule removal/backfill).  Same env as the
+      // [cpgen] line above; appended so existing diffs keep their prefix.
+      {
+        char pa_l[256], pa_r[256], pb_l[256], pb_r[256], posb[160];
+        atp_pretty_term(s->lhs[rule_a], pa_l, sizeof pa_l);
+        atp_pretty_term(s->rhs[rule_a], pa_r, sizeof pa_r);
+        atp_pretty_term(s->lhs[rule_b], pb_l, sizeof pb_l);
+        atp_pretty_term(s->rhs[rule_b], pb_r, sizeof pb_r);
+        posb[0] = '\0';
+        for (u32 pp = 0; pp < cps[i].pos_len && pp < 60; pp++) {
+          char tmp[8];
+          snprintf(tmp, sizeof tmp, "%u.", (unsigned)cps[i].pos[pp]);
+          strncat(posb, tmp, sizeof posb - strlen(posb) - 1);
+        }
+        fprintf(stderr,
+                "[cpgen]   outer=slot%u[%s->%s] inner=slot%u[%s->%s] "
+                "pos=%s combo=%u\n",
+                rule_a, pa_l, pa_r, rule_b, pb_l, pb_r,
+                posb[0] ? posb : "(root)", (unsigned)cps[i].combo);
+      }
     }
     u32 t = atp_trace_push_cp(s, parent_a, parent_b, raw_lhs, raw_rhs,
                               cps[i].pos, cps[i].pos_len, cps[i].combo);
