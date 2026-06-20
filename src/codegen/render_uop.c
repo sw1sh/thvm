@@ -1981,6 +1981,22 @@ static int rmu_fuse_epilogue_on(void) {
   return on;
 }
 
+// THVM_TC_BATCHED (default OFF): route a TRUE batched matmul (attention's
+// Q@K^T and @V, batch=heads) through the register-blocked tiled emitter
+// (rmu_emit_matmul_tc_tiled) instead of the ~2-TFLOPS parallel_tc per-8x8-tile
+// body -- ~5x on the attention GEMM.  The emitter adds a per-batch base offset
+// (_batch * M*K / K*N / M*N) to the A/B/C addresses; the dispatch grid becomes
+// batch * m_tiles * n_tiles.  Flag-off keeps the byte-identical parallel_tc path.
+static int rmu_tc_batched_on(void) {
+  static int known = 0, on = 0;
+  if (!known) {
+    char const *e = getenv("THVM_TC_BATCHED");
+    on = (e != NULL && e[0] == '1');
+    known = 1;
+  }
+  return on;
+}
+
 // Walk a store-value tree: it must be a pure ELEMENTWISE/CAST tree over
 // INDEX_E/CONST leaves plus EXACTLY ONE UOP_OPT(TC) leaf (the matmul).  A bare
 // UOP_REDUCE, a non-TC UOP_OPT, or any unknown/movement op makes it non-fusable.
@@ -2977,7 +2993,9 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                                      FILE *fp, u32 depth, int b_is_int8,
                                      Term a_val, u32 a_m_axis, u32 a_k_axis,
                                      Term epilogue_value, Term opt_tc_term,
-                                     Term m_range_term, Term n_range_term) {
+                                     Term m_range_term, Term n_range_term,
+                                     u32 batch_axis_id, u32 batch_extent,
+                                     u32 m_extent) {
   // THVM_FUSE_MATMUL_INPUT: a_val != 0 means A is a fused elementwise producer.
   // The A-staging then computes a_val inline at (m = _tm + row, k = KK0 + col)
   // -- declaring `uint a<m>` / `uint a<k>` in scope so rmu_emit_term renders the
@@ -3021,8 +3039,23 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
     IND(depth); fputs("uint _sgi64 = sgi * 64u;\n", fp);
   }
   // This threadgroup's output-tile origin.
-  IND(depth); fprintf(fp, "uint _tm = (tg / %uu) * %uu;\n", n_tiles_n, tile_m);
-  IND(depth); fprintf(fp, "uint _tn = (tg %% %uu) * %uu;\n", n_tiles_n, tile_n);
+  // THVM_TC_BATCHED: a batched matmul folds the batch axis into the grid as
+  // batch * m_tiles * n_tiles threadgroups.  Decode _batch + the per-batch tg
+  // and offset A/B/C to this batch's contiguous slice (strides M*K / K*N / M*N);
+  // `auto` gives the base pointers each buffer's own element type.  Then the rest
+  // of the emitter is byte-unchanged -- it just reads from _abb/_bbb/_cbb.
+  const char *_tgv = "tg";
+  if (batch_extent > 0u) {
+    u32 _mn = (m_extent / tile_m) * n_tiles_n;
+    IND(depth); fprintf(fp, "uint _batch = tg / %uu; uint _tg = tg %% %uu;\n", _mn, _mn);
+    IND(depth); fprintf(fp, "auto _abb = %s + _batch * %uu;\n", a_name, m_extent * k_extent);
+    IND(depth); fprintf(fp, "auto _bbb = %s + _batch * %uu;\n", b_name, k_extent * n_extent);
+    IND(depth); fprintf(fp, "auto _cbb = %s + _batch * %uu;\n", c_name, m_extent * n_extent);
+    a_name = "_abb"; b_name = "_bbb"; c_name = "_cbb";
+    _tgv = "_tg";
+  }
+  IND(depth); fprintf(fp, "uint _tm = (%s / %uu) * %uu;\n", _tgv, n_tiles_n, tile_m);
+  IND(depth); fprintf(fp, "uint _tn = (%s %% %uu) * %uu;\n", _tgv, n_tiles_n, tile_n);
   // This simdgroup's sub-tile origin within the threadgroup tile.
   IND(depth); fprintf(fp, "uint _sm = (sgi / %uu) * %uu;\n",
                       t.local_n, t.rm * 8u);
@@ -3773,15 +3806,19 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // the full affine address via rmu_emit_term, any stride/offset included).
   int is_batched = (batch_axis_id != 0xFFFFFFFFu);
   if (getenv("THVM_MATMUL_TRACE") != NULL) {
-    RmuTcTile _dt; int _tiled = (!is_batched && !a_trans && m_par && n_par
-        && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok
+    RmuTcTile _dt; int _tiled = ((!is_batched || rmu_tc_batched_on()) && !a_trans
+        && m_par && n_par && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok
+        && !(is_batched && (a_val != 0 || b_is_int8))
         && rmu_tc_pick_tile(m_extent, n_extent, k_extent, &_dt));
     fprintf(stderr, "[mm] M=%u N=%u K=%u batch=%u%s path=%s\n",
             m_extent, n_extent, k_extent, batch_extent,
             a_trans ? " Atrans" : "", _tiled ? "TILED" : "parallel_tc/other");
   }
-  if (!is_batched && !a_trans && m_par && n_par && RMU_TARGET == CG_TARGET_METAL
-      && _tc_dtype_ok) {
+  if ((!is_batched || rmu_tc_batched_on()) && !a_trans && m_par && n_par
+      && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok
+      // batched-tiled handles only the plain bf16 attention GEMM for now:
+      // no fused-A producer, no int8 weight, no epilogue (all 0 for attention).
+      && !(is_batched && (a_val != 0 || b_is_int8 || epilogue_value != 0))) {
     RmuTcTile tile;
     if (rmu_tc_pick_tile(m_extent, n_extent, k_extent, &tile)) {
       // rmu_buf_name returns a pointer to a shared static buffer, so the
@@ -3808,7 +3845,9 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
                                b_trans, ldb, fp, depth, b_is_int8,
                                a_val, m_axis_id, red_axis,
                                epilogue_value, opt_tc_term,
-                               m_range_term, n_range_term);
+                               m_range_term, n_range_term,
+                               is_batched ? batch_axis_id : 0xFFFFFFFFu,
+                               is_batched ? batch_extent : 0u, m_extent);
       return 1;
     }
   }

@@ -265,6 +265,24 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
       if (uop_classify_batched_matmul(sroot, &b_ax, &b_ext, &m_ax, &m_ext,
                                       &n_ax, &n_ext, &k_ext)
           && (m_ext % 8u) == 0 && (n_ext % 8u) == 0 && b_ext >= 1) {
+        // THVM_TC_BATCHED: route through the register-blocked tiled emitter --
+        // grid = batch * m_tiles * n_tiles threadgroups, local_m*local_n*32
+        // threads, MUST match rmu_emit_matmul_tc_tiled's _batch/_tg decode.
+        static int _tcb_k = 0, _tcb = 0;
+        if (!_tcb_k) { char const *e = getenv("THVM_TC_BATCHED");
+                       _tcb = (e != NULL && e[0] == '1'); _tcb_k = 1; }
+        RmuTcTile btile;
+        if (_tcb && (k_ext % 8u) == 0 && rmu_tc_pick_tile(m_ext, n_ext, k_ext, &btile)) {
+          u32 tm = btile.local_m * btile.rm * 8u, tn = btile.local_n * btile.rn * 8u;
+          if ((m_ext % tm) == 0 && (n_ext % tn) == 0) {
+            u64 ntg = (u64)b_ext * (u64)(m_ext / tm) * (u64)(n_ext / tn);
+            if (ntg > 0 && ntg <= 0xFFFFFFFFu) {
+              if (groups_x  != NULL) *groups_x  = (u32)ntg;
+              if (threads_x != NULL) *threads_x = btile.local_m * btile.local_n * 32u;
+              return 1;
+            }
+          }
+        }
         u64 ntg = (u64)b_ext * (u64)(m_ext / 8u) * (u64)(n_ext / 8u);
         if (ntg > 0 && ntg <= 0xFFFFFFFFu) {
           if (groups_x  != NULL) *groups_x  = (u32)ntg;
