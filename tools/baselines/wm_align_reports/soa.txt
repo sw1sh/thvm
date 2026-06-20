@@ -2,47 +2,82 @@ soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv=125
 
 CONFIG (opt-in):
   THVM_ATP_CP_WM_SIDE=1 THVM_ATP_WM_FLAT_SUBSUME=1 THVM_ATP_WALDMEISTER=1
-  bin/test_atp_wolfram_bench /tmp/soa.pr 200000 20
-RESULT: wm=5607 thvm~=33595 prefix=124 identical=N firstdiv=125
-        content-delta wm-only=0 thvm-only~=27988 (thvm pop-set is a strict
-        superset of WM's); weights-exact through the aligned prefix.
+  bin/test_atp_wolfram_bench /tmp/soa.pr <budget> <maxw>
+RESULT: prefix=124 identical=N firstdiv=125; thvm pop-set superset of WM's;
+        weights-exact through the aligned prefix.
 
-ROOT CAUSE OF pick-125 (decisively re-diagnosed; NOT a wmo_dfs leaf-arrival
-order divergence):
+THE pick-125 FACT (thvm side):
+  thvm selects at weight 120 in pure formation-age (cp_seq) FIFO order.
+  Picks 123,124 = the equation copies cp_seq 562,563
+    opCenterdot(opCenterdot(v1,opCenterdot(v1,v1)),v2) # opCenterdot(v2,v2)
+    == (C3 (C3 V0 (C3 V0 V0)) V1) # (C3 V1 V1).
+  Pick 125 = cp_seq 564
+    (C3 (C3 V0 V0) V1) # (C3 (C3 V0 V1) V1)
+    == opCenterdot(opCenterdot(v1,v1),v2) # opCenterdot(opCenterdot(v1,v2),v2).
+  thvm's NEXT equation copy after 563 is cp_seq 593 (then 613); the seqs
+  between (564 seq564-form, 565 a distinct w=120 CP) are NOT the equation.
 
-  Picks 123, 124, AND WM's 125 are the SAME canonical equation
-    opCenterdot(opCenterdot(v1,opCenterdot(v1,v1)),v2) # opCenterdot(v2,v2).
-  WM selects it THREE times consecutively (its queue holds copies at SUE
-  ages 222, 511, 577, ...; 227 queued copies total); thvm selects it only
-  twice before pick-125 and at pick-125 pops a DIFFERENT weight-120 CP
-    opCenterdot(opCenterdot(v1,v1),v2) # opCenterdot(opCenterdot(v1,v2),v1)
-  (thvm seq=564) -- a CP that appears NOWHERE in WM's trace.
+DOES WM FORM seq=564?  YES -- the prior "appears NOWHERE in WM's trace"
+claim is WRONG (it was a grep miss: WM splits lhs/rhs across the `#`
+multiline form and renames vars).  GREP EVIDENCE (banked /tmp/soa_align):
+  wm.txt:5602  critical pair 991 (parents -10 and 13):
+       opCenterdot(opCenterdot(x1,x1),x2) # opCenterdot(x2,opCenterdot(x2,opCenterdot(x2,opCenterdot(x1,x2))))
+    ... normalized to:
+       opCenterdot(opCenterdot(x1,x1),x2) # opCenterdot(opCenterdot(x1,x2),x2)
+    ... added to SUE: 120, 659.
+  This normalized form == thvm seq=564 (alpha-equal).  WM forms it 12x
+  (wm.txt:5604,6772,41084,41567,42364,42750,43244,43879,44475,45001,...),
+  ALWAYS weight 120, first SUE age 659, later 5046/5206/5304/5454/9047.
+  WM NEVER selects it (no "added as new rule" with this form): it sits
+  in SUE forever, buried behind lower-age weight-120 copies.
 
-  The divergence is a GLOBAL CP-formation order-and-MULTIPLICITY mismatch,
-  not a within-batch scan-order tie.  thvm forms ~6x more CPs than WM
-  (33595 vs 5607 selections) and queues duplicate copies of each canonical
-  equation at DIFFERENT relative ages (thvm's first copies of the pick-125
-  equation land at ages 167/192/235/236; WM's at 222/511/577).  The first
-  124 weight-ordered selections happen to coincide; at the 125th the
+ROOT CAUSE (decisively re-diagnosed; pure AGE-INTERLEAVE at weight 120):
+  Both engines queue (a) the equation and (b) seq=564 at weight 120.
+  The divergence is the RELATIVE FORMATION AGE of seq=564's first copy
+  vs the equation's 3rd copy:
+    WM : eqn ages 222, 511, 577 ; seq564 first age 659
+         -> 3 eqn copies precede seq564 -> WM picks 123,124,125 = eqn,
+            seq564 waits.
+    thvm: eqn cp_seq 562, 563     ; seq564 cp_seq 564  ; next eqn 593
+         -> only 2 eqn copies precede seq564 -> thvm picks 123,124 = eqn,
+            125 = seq564.
+  thvm is MISSING one equation copy in the (563, 593) age window that WM
+  has at age 577.  WM forms ~33912 CPs and queues the equation 227x at
+  spread-out ages (222/511/577/1213/...); thvm forms fewer, with the
+  equation's copies landing at cp_seq 167/192/235/.../562/563/593/613.
+  The first 124 weight-ordered selections coincide; at the 125th the
   per-copy age drift finally swaps a weight-120 selection.
 
-WHY THE FAITHFUL wmo_dfs PORT CANNOT BREAK 125:
-  WM's tops phase (Unifikation1.c RumpfTermMitDSBaumUnifizieren / Delta*
-  re-entrant DFS) fires its CP-forming Action once per leaf ARRIVAL.
-  thvm's wmo_dfs is a faithful port of that descent (exact-symbol child,
-  then variable children by descending index, then jump exits in list
-  order).  wm_order.c only RANKS thvm's own CPs into WM's emission order;
-  it does not control WHICH or HOW-MANY CPs thvm forms.  An experiment
-  removing the per-leaf dedupe in wmo_dfs_emit (faithful per-arrival
-  emission) left prefix=124 unchanged and grew thvm-only from 25806 to
-  28692 -- confirming the lever is the CP-FORMATION multiplicity in
-  atp_overlap_ij / the pop-time normalize-and-join filter, OUTSIDE
-  wm_order.c's scan-order responsibility.  Re-ordering a batch cannot
-  synthesize a third duplicate copy thvm never formed, nor remove the
-  thvm-only extras flooding the weight-120 pool.
+THE TASK'S HYPOTHESIZED LEVER (pop-time AC-perm-subsume) IS A DEAD END --
+three independent disproofs:
+  1. seq=564 is NOT AC-redundant.  lhs (C3 (C3 V0 V0) V1) and rhs
+     (C3 (C3 V0 V1) V1) are genuinely distinct terms (inner V0,V0 vs
+     V0,V1); they are NOT a commutativity/AC permutation of each other.
+     atp_cp_perm_subsumed correctly returns 0 on it.
+  2. opCenterdot (Sheffer NAND) is NOT an AC operator.  auto_ac on the
+     soa axioms reports label 3: C=0 A=0 (THVM_ATP_AUTO_AC_DEBUG ->
+     mask=0x0).  The perm-subsume mask is empty; the WM-faithful filter
+     is structurally inert here (run stats: perm-subsumed=0).
+  3. Even if seq=564 were dropped, pick-125 would become cp_seq 565
+     ((C3 V0 V0) # (C3 (C3 V1 (C3 V1 V1)) V0)) -- ANOTHER non-equation
+     w=120 CP -- NOT the equation.  The equation's 3rd thvm copy is
+     cp_seq 593, ~29 ages later.  No pop-time drop of seq=564 can
+     promote the equation; only forming a 3rd equation copy in (563,593)
+     would, which is the CP-FORMATION-ORDER subsystem, not a filter.
+  Empirical confirmation: forcing the mask on (THVM_ATP_PERM_SUB=1
+  THVM_ATP_PERM_SUB_MASK=3) drops just 1 unrelated commutativity CP
+  (perm-subsumed=1) AND shatters the whole alignment (pick-123 jumps to a
+  pri=224 CP, prefix 1..124 broken) -- the AC-saturation-on-a-non-AC-top
+  blow-up MEMORY warns about.
 
-VERDICT: INTRACTABLE via the wmo_dfs scan-order port.  Closing soa past
-124 requires matching WM's CP-formation order and duplicate multiplicity
-(atp_overlap_ij enumeration order + a stronger pop-time join/subsume that
-discards the same redundant overlaps WM's Verwerfen/normalize does), a
-different subsystem than the discrimination-tree scan order.
+VERDICT: DEFERRED -- CP-formation age/multiplicity class, NOT a filter
+class.  WM's seq=564 (== thvm's) is a real shared CP both engines queue
+at weight 120; the only difference is WM forms a 3rd equation copy (age
+577) in the window where thvm forms none, so WM's seq=564 (age 659) loses
+the pick-125 race that thvm's seq=564 (cp_seq 564) wins.  Closing soa past
+124 requires matching WM's CP-FORMATION ORDER + duplicate MULTIPLICITY
+(the atp_overlap_ij enumeration order producing one more equation copy in
+the critical age window), exactly the subsystem the prior wmo_dfs verdict
+isolated.  A pop-time perm-subsume is the WRONG TOOL: there is no
+AC-redundant CP to drop here, and dropping seq=564 promotes seq=565, not
+the equation.
