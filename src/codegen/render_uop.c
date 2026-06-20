@@ -1964,12 +1964,73 @@ static int rmu_fused_producer_ok(Term t, u32 n_axis, u32 depth) {
   return 0;  // reduce / unknown / movement: not inline-safe
 }
 
+// THVM_FUSE_MATMUL_EPILOGUE (default OFF): a single-consumer elementwise/cast
+// chain that CONSUMES one TC matmul output is fused into the matmul kernel's
+// STORE (the epilogue) instead of realizing a separate elementwise kernel.
+// Mirrors tinygrad schedule/indexing.py:198-200 (a single-consumer op inherits
+// its consumer's ranges -> the reduce/matmul's store IS the elementwise group's
+// store).  The matmul stays on the TC path; the epilogue is applied per output
+// element at the bf16 staging copy in rmu_emit_matmul_tc_tiled.
+static int rmu_fuse_epilogue_on(void) {
+  static int known = 0, on = 0;
+  if (!known) {
+    char const *e = getenv("THVM_FUSE_MATMUL_EPILOGUE");
+    on = (e != NULL && e[0] == '1');
+    known = 1;
+  }
+  return on;
+}
+
+// Walk a store-value tree: it must be a pure ELEMENTWISE/CAST tree over
+// INDEX_E/CONST leaves plus EXACTLY ONE UOP_OPT(TC) leaf (the matmul).  A bare
+// UOP_REDUCE, a non-TC UOP_OPT, or any unknown/movement op makes it non-fusable.
+// Does not recurse into the OPT_TC (that is the matmul, emitted by the template).
+static int rmu_epilogue_walk(Term t, Term *out_tc, int *n_tc, u32 depth) {
+  if (depth > 48) return 0;
+  if (term_tag(t) == TAG_NUM) return 1;
+  if (term_tag(t) != TAG_UOP) return 1;       // RANGE / leaf var -- fine
+  u32 op = term_ext(t);
+  if (op == UOP_OPT) {
+    if (uop_opt_kind(t) != UOP_OPT_TC) return 0;
+    *out_tc = t; (*n_tc)++;
+    return 1;
+  }
+  if (op == UOP_CONST || op == UOP_INDEX_E) return 1;
+  if (op == UOP_REDUCE) return 0;
+  if (op == UOP_CAST || op == UOP_BITCAST
+      || uop_is_unary_elementwise((u8)op)
+      || uop_is_binary_elementwise((u8)op)
+      || uop_is_ternary_elementwise((u8)op)) {
+    u8 ar = uop_arity(op);
+    for (u8 i = 0; i < ar; i++) {
+      if (!rmu_epilogue_walk(heap_read(term_val(t) + i), out_tc, n_tc, depth + 1))
+        return 0;
+    }
+    return 1;
+  }
+  return 0;   // unknown/movement op: not epilogue-safe
+}
+static int rmu_epilogue_find_single_tc(Term value, Term *out_tc) {
+  int n_tc = 0; Term tc = 0;
+  if (!rmu_epilogue_walk(value, &tc, &n_tc, 0)) return 0;
+  if (n_tc != 1 || tc == 0) return 0;
+  *out_tc = tc;
+  return 1;
+}
+
 static int rmu_detect_matmul_tc(Term store, Term *out_red_value) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   Term value = heap_read(term_val(store) + 2);
-  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_OPT) return 0;
-  if (uop_opt_kind(value) != UOP_OPT_TC) return 0;
-  Term inner = uop_opt_target(value);
+  Term tc = value;
+  // Epilogue: the store value may be an elementwise CHAIN over a single OPT_TC.
+  if (!(term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
+        && uop_opt_kind(value) == UOP_OPT_TC)) {
+    if (!rmu_fuse_epilogue_on()) return 0;
+    if (!rmu_epilogue_find_single_tc(value, &tc)) return 0;
+  }
+  if (term_tag(tc) != TAG_UOP || term_ext(tc) != UOP_OPT
+      || uop_opt_kind(tc) != UOP_OPT_TC) return 0;
+  Term inner = uop_opt_target(tc);
   if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_REDUCE) return 0;
   u64 rloc = term_val(inner);
   u32 kind = term_val(heap_read(rloc + 1));
@@ -2914,7 +2975,9 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                                      RmuTcTile t, int c_is_bf, int stage_bf,
                                      int b_trans, i64 b_nstride,
                                      FILE *fp, u32 depth, int b_is_int8,
-                                     Term a_val, u32 a_m_axis, u32 a_k_axis) {
+                                     Term a_val, u32 a_m_axis, u32 a_k_axis,
+                                     Term epilogue_value, Term opt_tc_term,
+                                     Term m_range_term, Term n_range_term) {
   // THVM_FUSE_MATMUL_INPUT: a_val != 0 means A is a fused elementwise producer.
   // The A-staging then computes a_val inline at (m = _tm + row, k = KK0 + col)
   // -- declaring `uint a<m>` / `uint a<k>` in scope so rmu_emit_term renders the
@@ -3196,10 +3259,33 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
         IND(depth); fprintf(fp,
           "{ uint _cb = (_tm + _sm + %uu) * %uu + _tn + _sn + %uu;\n",
           mi * 8u, n_extent, ni * 8u);
-        IND(depth); fprintf(fp,
-          "  for (uint _e = thread_index_in_simdgroup; _e < 64u; _e += 32u) "
-          "%s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)_cstage[_sgi64 + _e]; }\n",
-          c_name, n_extent);
+        if (epilogue_value != 0) {
+          // Apply the elementwise epilogue per output element.  The matmul
+          // accumulator is rounded to bf16 FIRST (matching the separate-kernel
+          // path that reads the bf16-realized matmul output) so the fused result
+          // is bit-identical to the unfused path; _m/_n substitute the M/N range
+          // vars in the epilogue's gate[n]/X[m,n]/activation index reads.
+          IND(depth); fputs(
+            "  for (uint _e = thread_index_in_simdgroup; _e < 64u; _e += 32u) {\n", fp);
+          IND(depth); fprintf(fp,
+            "    uint _m = _tm + _sm + %uu + _e / 8u; uint _n = _tn + _sn + %uu + _e %% 8u;"
+            " (void)_m; (void)_n;\n", mi * 8u, ni * 8u);
+          IND(depth); fprintf(fp,
+            "    %s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)(", c_name, n_extent);
+          rmu_hoist_clear();
+          rmu_hoist_add(opt_tc_term,  "((bfloat)_cstage[_sgi64 + _e])");
+          rmu_hoist_add(m_range_term, "_m");
+          rmu_hoist_add(n_range_term, "_n");
+          rmu_emit_term(epilogue_value, fp);
+          rmu_hoist_clear();
+          fputs("); }\n", fp);
+          IND(depth); fputs("}\n", fp);
+        } else {
+          IND(depth); fprintf(fp,
+            "  for (uint _e = thread_index_in_simdgroup; _e < 64u; _e += 32u) "
+            "%s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)_cstage[_sgi64 + _e]; }\n",
+            c_name, n_extent);
+        }
         IND(depth); fputs("simdgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
       } else {
         IND(depth); fprintf(fp,
@@ -3223,6 +3309,18 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   u64 sloc = term_val(store);
   Term addr_c = heap_read(sloc + 1);
   Term buf_c  = heap_read(sloc + 0);
+  // THVM_FUSE_MATMUL_EPILOGUE: if the store value is an elementwise CHAIN over
+  // the OPT_TC (not the bare matmul), `epilogue_value` is that chain and
+  // `opt_tc_term` the matmul node inside it.  The epilogue is applied per output
+  // element at the bf16 staging store; the matmul stays on the TC path.  0 = no
+  // epilogue (the default / flag-off path; byte-identical codegen).
+  Term store_value   = heap_read(sloc + 2);
+  Term epilogue_value = 0, opt_tc_term = 0;
+  if (!(term_tag(store_value) == TAG_UOP && term_ext(store_value) == UOP_OPT
+        && uop_opt_kind(store_value) == UOP_OPT_TC)) {
+    if (!rmu_epilogue_find_single_tc(store_value, &opt_tc_term)) return 0;
+    epilogue_value = store_value;
+  }
   // TC matmul shape assumes a single reduce axis (K).  Multi-axis
   // REDUCE inputs would need a separate dispatch path.
   if (uop_reduce_n_axes(tc_red) != 1) return 0;
@@ -3344,6 +3442,23 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       || m_axis_id == 0xFFFFFFFFu || n_axis_id_v == 0xFFFFFFFFu) {
     // M/N also need to be 8-tiled for simdgroup_matrix<8,8>; bail.
     return 0;
+  }
+  // Epilogue: locate the M and N RANGE terms (from the output address) so the
+  // store can substitute the per-element tiled m/n for them in the epilogue's
+  // gate[n] / X[m,n] / activation index reads (rmu_emit_matmul_tc_tiled hoist).
+  Term m_range_term = 0, n_range_term = 0;
+  if (epilogue_value != 0) {
+    Term rcr[MAX_DIM]; u32 rcr_n = 0;
+    rmu_collect_ranges(addr_c, rcr, &rcr_n);
+    for (u32 i = 0; i < rcr_n; i++) {
+      u32 aid = term_val(heap_read(term_val(rcr[i]) + 0));
+      if (aid == m_axis_id) m_range_term = rcr[i];
+      else if (aid == n_axis_id_v) n_range_term = rcr[i];
+    }
+    // Need both range handles to remap the epilogue reads; bail if either is
+    // missing (falls to the generic accumulator path, which handles the
+    // epilogue correctly via the store-value-over-reduce machinery).
+    if (m_range_term == 0 || n_range_term == 0) return 0;
   }
 
   // THVM_FUSE_MATMUL_INPUT: now that the N axis is known, validate the fused A
@@ -3675,13 +3790,25 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       // matmul (the FLUX q8 case) therefore stages bfloat; an f32-A / int8-B
       // matmul stages float (B casts char -> float).
       int stage_bf = (_dta == DT_BF16) && (_dtb == DT_BF16 || b_is_int8);
+      // Epilogue fusion is implemented only for the bf16 staging store (the FLUX
+      // target).  An f32-output matmul with an epilogue bails to the generic
+      // accumulator path, which applies the epilogue via the store-value-over-
+      // reduce machinery (correct, scalar -- f32 matmuls are rare in FLUX).
+      if (epilogue_value != 0 && !c_is_bf) return 0;
       rmu_emit_matmul_tc_tiled(a_nm, b_nm, c_nm, n_extent,
                                k_extent, tile, c_is_bf, stage_bf,
                                b_trans, ldb, fp, depth, b_is_int8,
-                               a_val, m_axis_id, red_axis);
+                               a_val, m_axis_id, red_axis,
+                               epilogue_value, opt_tc_term,
+                               m_range_term, n_range_term);
       return 1;
     }
   }
+
+  // An epilogue that did not take the Metal tiled bf16 path above (tile too
+  // small, A transposed, batched, non-TC dtype) bails to the generic
+  // accumulator path, which applies the epilogue correctly (scalar).
+  if (epilogue_value != 0) return 0;
 
   // A fused producer that did not fit the Metal tiled emitter (shape too small
   // for a worthwhile tile, A transposed, batched, or non-TC dtype) cannot use
