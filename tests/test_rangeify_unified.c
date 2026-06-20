@@ -233,5 +233,130 @@ int main(void) {
   }
   thvm_free();
 
+  // === THVM_PCONTIG: tinygrad's partial-contiguous flash-fusion ===
+  // (rangeify.py:277,288-303, helpers.py:264).  Default 0 == off; > 2 enables
+  // the LOCAL-staging else-branch in the buffer_in_reduce arm.
+
+  // (g) ru_pcontig() reads THVM_PCONTIG (helpers.py:264, default 0).
+  TEST_BEGIN("unified-rangeify/pcontig-env-reader");
+  unsetenv("THVM_PCONTIG");
+  CHECK_EQ(ru_pcontig(), 0);
+  setenv("THVM_PCONTIG", "3", 1);
+  CHECK_EQ(ru_pcontig(), 3);
+  setenv("THVM_PCONTIG", "0", 1);
+  CHECK_EQ(ru_pcontig(), 0);
+
+  // (h) rb_pcontig_mark_local partitions the boundary's per-axis ranges into
+  // is_pcontig (REDUCE / already-LOCAL axes, kept in the LOCAL buffer) vs
+  // is_subs (the rest, recomputed) -- tinygrad rangeify.py:295-296.  Synthesize
+  // a node whose out_rngs is [LOOP, REDUCE]: the REDUCE axis is is_pcontig
+  // (axes_mask bit 1), the LOOP axis is is_subs.  Assert it marks a PARTIAL
+  // (LOCAL) realize with the reduce axis closed and the loop axis recomputed.
+  TEST_BEGIN("unified-rangeify/pcontig-partition-marks-local");
+  thvm_init();
+  {
+    // Drive a real attention-shaped graph through the pass to populate the
+    // node tables, then synthesize the partition on a fresh node slot.
+    Term pa = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(8, 8));
+    Term psum = uop_reduce(REDUCE_SUM, /*axis*/1, pa);
+    bufferize_classify(psum);
+    run_rangeify_unified(psum);
+    // Use the REDUCE node's own slot: overwrite its range-map with a synthetic
+    // [LOOP, REDUCE] out_rngs and clear its realize state, then run the
+    // partition helper directly (the unit under test).
+    u32 idx = bufferize_info_find(term_val(psum));
+    CHECK(idx != 0xFFFFFFFFu);
+    RU_RANGE_MAP[idx].has_ranges = 1;
+    RU_RANGE_MAP[idx].out_ndim   = 2;
+    RU_RANGE_MAP[idx].out_rngs[0] = ru_new_range(8, KAX_LOOP);
+    RU_RANGE_MAP[idx].out_rngs[1] = ru_new_range(8, KAX_REDUCE);
+    RU_REALIZE_MAP[idx].realized_full    = 0;
+    RU_REALIZE_MAP[idx].realized_partial = 0;
+    RU_REALIZE_MAP[idx].axes_mask        = 0;
+    int marked = rb_pcontig_mark_local(idx);
+    CHECK_EQ(marked, 1);                               // is_pcontig + is_subs nonempty
+    CHECK_EQ(RU_REALIZE_MAP[idx].realized_partial, 1); // partial -> LOCAL addrspace
+    CHECK_EQ(RU_REALIZE_MAP[idx].realized_full, 0);
+    CHECK_EQ(RU_REALIZE_MAP[idx].axes_mask, 0x2);      // only the REDUCE axis closed
+    CHECK_EQ(RU_REALIZE_MAP[idx].n_realized_axes, 1);
+  }
+  thvm_free();
+
+  // (i) No is_subs (every axis is a REDUCE axis) -> keep, like tinygrad's
+  // `if not len(is_subs): return None` (rangeify.py:298).  And no is_pcontig
+  // (every axis is LOOP) -> keep (rangeify.py:300 `if len(is_pcontig):`).
+  TEST_BEGIN("unified-rangeify/pcontig-partition-keeps-when-degenerate");
+  thvm_init();
+  {
+    Term pa = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(8, 8));
+    Term psum = uop_reduce(REDUCE_SUM, /*axis*/1, pa);
+    bufferize_classify(psum);
+    run_rangeify_unified(psum);
+    u32 idx = bufferize_info_find(term_val(psum));
+    CHECK(idx != 0xFFFFFFFFu);
+    // All-REDUCE: no is_subs -> keep.
+    RU_RANGE_MAP[idx].has_ranges = 1;
+    RU_RANGE_MAP[idx].out_ndim   = 2;
+    RU_RANGE_MAP[idx].out_rngs[0] = ru_new_range(8, KAX_REDUCE);
+    RU_RANGE_MAP[idx].out_rngs[1] = ru_new_range(8, KAX_REDUCE);
+    RU_REALIZE_MAP[idx].realized_partial = 0;
+    RU_REALIZE_MAP[idx].realized_full    = 0;
+    CHECK_EQ(rb_pcontig_mark_local(idx), 0);
+    CHECK_EQ(RU_REALIZE_MAP[idx].realized_partial, 0);
+    // All-LOOP: no is_pcontig -> keep.
+    RU_RANGE_MAP[idx].out_rngs[0] = ru_new_range(8, KAX_LOOP);
+    RU_RANGE_MAP[idx].out_rngs[1] = ru_new_range(8, KAX_LOOP);
+    CHECK_EQ(rb_pcontig_mark_local(idx), 0);
+    CHECK_EQ(RU_REALIZE_MAP[idx].realized_partial, 0);
+  }
+  thvm_free();
+
+  // (j) Default-off inertness: a softmax-shaped graph (the flash-attention
+  // building block: max-reduce -> sub -> exp -> sum-reduce -> recip -> mul)
+  // produces a BYTE-IDENTICAL realize-map with THVM_PCONTIG unset vs set.  The
+  // gate must never alter the default schedule, and on thvm's decomposed graph
+  // (matmul/reduce seed boundaries pre-realized) the PCONTIG ratio gate keeps
+  // every candidate, so PCONTIG=3 is a no-op here too -- this documents that
+  // the partial-contig staging only diverges once the seed-boundary
+  // realization is relaxed (out of scope for the faithful cost-model port).
+  TEST_BEGIN("unified-rangeify/pcontig-default-off-inert");
+  {
+    u8 mask_off[64]; u8 real_off[64]; u32 n_off = 0;
+    u8 mask_on[64];  u8 real_on[64];  u32 n_on = 0;
+    for (int pass = 0; pass < 2; pass++) {
+      if (pass == 0) unsetenv("THVM_PCONTIG"); else setenv("THVM_PCONTIG", "3", 1);
+      thvm_init();
+      Term sx  = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(8, 8));
+      Term mx  = uop_reduce(REDUCE_MAX, /*axis*/1, sx);
+      Term sub = uop_binary(UOP_ADD, sx, uop_unary(UOP_NEG, mx));
+      Term e   = uop_unary(UOP_EXP2, sub);
+      Term sm  = uop_reduce(REDUCE_SUM, /*axis*/1, e);
+      Term rc  = uop_unary(UOP_RECIP, sm);
+      Term out = uop_binary(UOP_MUL, e, rc);
+      bufferize_classify(out);
+      run_rangeify_unified(out);
+      u32 nn = rangeify_unified_last_nodes_walked();
+      if (nn > 64) nn = 64;
+      for (u32 k = 0; k < nn; k++) {
+        if (pass == 0) {
+          mask_off[k] = rangeify_unified_axes_mask_at(k);
+          real_off[k] = (u8)rangeify_unified_is_realized(k);
+        } else {
+          mask_on[k] = rangeify_unified_axes_mask_at(k);
+          real_on[k] = (u8)rangeify_unified_is_realized(k);
+        }
+      }
+      if (pass == 0) n_off = nn; else n_on = nn;
+      thvm_free();
+    }
+    unsetenv("THVM_PCONTIG");
+    CHECK_EQ(n_off, n_on);
+    int identical = 1;
+    for (u32 k = 0; k < n_off && k < n_on; k++) {
+      if (mask_off[k] != mask_on[k] || real_off[k] != real_on[k]) { identical = 0; break; }
+    }
+    CHECK_EQ(identical, 1);
+  }
+
   TEST_REPORT();
 }
