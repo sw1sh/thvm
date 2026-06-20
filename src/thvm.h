@@ -1708,6 +1708,17 @@ fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
 // realize, so the faithful seed honors it too (not just the heuristic MULTI
 // seed, which faithful drops).
 #define BUFFERIZE_REASON_MAXPOOL_MASK (1u << 7)
+// THVM_PCONTIG > 2 flash-fusion: this node is a FORWARD scaled-dot-product-
+// attention chain member -- a Q@K matmul / softmax MAX / softmax SUM reduce
+// whose seed was SKIPPED, OR an elementwise/movement softmax-body node BETWEEN
+// them -- so the rangeify PCONTIG cost-model can collapse the chain (the softmax
+// MAX/SUM reduces absorb into the Q@K scores kernel).  The @V matmul is NOT
+// tagged: it stays a realized BLAS/TC operand reading the fused probs (the
+// inline @V reduce mis-shapes the rank-2 output -- see bufferize_classify).
+// rangeify_unified's ending_ranges keep-fused branch loosens ONLY nodes carrying
+// this reason, so backward / non-attention reduces keep their conservative
+// always-realize boundary (default PCONTIG off never sets it -> no effect).
+#define BUFFERIZE_REASON_PCONTIG_ATTN (1u << 8)
 typedef struct {
   u64 loc;             // heap loc of the underlying UOp value
   u32 buffer_id;       // 1-based stable id within this graph

@@ -981,6 +981,204 @@ static int bufferize_uop_is_matmul(u64 reduce_loc) {
   return is_mul && distinct;
 }
 
+// THVM_PCONTIG > 2 (tinygrad's PCONTIG flash-fusion mode, helpers.py:264).
+// When > 2 we keep the WHOLE scaled-dot-product-attention reduce chain
+// un-realized so the rangeify PCONTIG cost-model (rangeify_unified.c
+// rb_pcontig_*) can stage the seq*seq scores in LOCAL and collapse the 4
+// attention reduces into one kernel.  tinygrad does this by never seeding the
+// chain as realized (tensor.py:1217-1226 keeps Q@K -> softmax -> @V as ONE
+// reduce expression; only run_rangeify's consumer-divergence + PCONTIG decide
+// the boundaries).  Default 0 == byte-identical to the pre-PCONTIG path.
+static int bufferize_pcontig_level(void) {
+  char const *e = getenv("THVM_PCONTIG");
+  return e ? atoi(e) : 0;
+}
+
+// Descend a SUM-reduce's reduced source toward EXP2 crossing
+// ONLY movement + UNARY-elementwise ops.  The FORWARD softmax denominator is
+// `sum(exp(x - max))` -- its reduced source is the EXP2 directly (through pure
+// movement / casts).  A softmax-BACKWARD gradient sum is `sum(dY * probs)` --
+// a binary MUL with a non-softmax (gradient) operand between the SUM and the
+// EXP2 -- so refusing to descend through binary ALU excludes the backward
+// reduces (which must KEEP their boundary; un-seeding them corrupts the
+// gradient, nn/attention-grad-dv-finite-diff).
+static int bufferize_src_reaches_exp2_direct(u64 loc, u32 hops) {
+  if (hops == 0 || loc >= HEAP_NEXT) return 0;
+  u32 idx = bufferize_info_find(loc);
+  if (idx == 0xFFFFFFFFu) return 0;
+  u8 op = BUFFERIZE_NODES[idx].op;
+  if (op == UOP_EXP2) return 1;
+  if (op == UOP_REDUCE || op == UOP_KERNEL) return 0;
+  // ONLY movement + unary elementwise (CAST/NEG/RECIP/EXP2/...); a binary or
+  // ternary ALU node means a second compute operand joined here -- not the
+  // forward softmax body.
+  int ok = uop_is_unary_elementwise(op) || uop_is_movement(op);
+  if (!ok) return 0;
+  Term ch = term_resolve(heap_read(loc + 0));
+  if (term_tag(ch) != TAG_UOP || term_ext(ch) == UOP_KERNEL) return 0;
+  return bufferize_src_reaches_exp2_direct(term_val(ch), hops - 1);
+}
+
+// True iff the REDUCE at `loc` is the FORWARD softmax normalize-sum: a
+// REDUCE_SUM whose reduced source reaches a UOP_EXP2 through ONLY movement /
+// unary ops (`sum(exp(x - max))`).  Excludes backward gradient sums.
+static int bufferize_reduce_is_softmax_sum(u64 loc) {
+  u32 idx = bufferize_info_find(loc);
+  if (idx == 0xFFFFFFFFu || BUFFERIZE_NODES[idx].op != UOP_REDUCE) return 0;
+  if ((u32)term_val(heap_read(loc + 1)) != REDUCE_SUM) return 0;
+  return bufferize_src_reaches_exp2_direct(term_val(term_resolve(heap_read(loc + 0))), 6);
+}
+
+// Walk a node's CONSUMER chain through elementwise/movement ops looking for a
+// softmax-sum REDUCE (bufferize_reduce_is_softmax_sum) within `hops` hops.  The
+// Q@K scores feed `*scale (+mask) -> max -> sub -> exp2 -> sum`, so the Q@K
+// matmul reduce and the softmax-MAX reduce both reach the softmax-sum
+// downstream.  Uses the cmap edges populated during the walk.
+static int bufferize_consumer_reaches_softmax_sum(u64 loc, u32 hops) {
+  if (hops == 0) return 0;
+  u64 cons[4];
+  u32 nc = bufferize_consumers_for_loc(loc, cons, 4);
+  for (u32 i = 0; i < nc; i++) {
+    u32 cidx = bufferize_info_find(cons[i]);
+    if (cidx == 0xFFFFFFFFu) continue;
+    u8 cop = BUFFERIZE_NODES[cidx].op;
+    if (cop == UOP_REDUCE) {
+      if (bufferize_reduce_is_softmax_sum(cons[i])) return 1;
+      // A MAX reduce on the softmax path is itself part of the chain; keep
+      // walking through it (its broadcast feeds the sub -> exp2 -> sum).
+      if ((u32)term_val(heap_read(cons[i] + 1)) == REDUCE_MAX
+          && bufferize_consumer_reaches_softmax_sum(cons[i], hops - 1))
+        return 1;
+      continue;
+    }
+    int ew = uop_is_unary_elementwise(cop) || uop_is_binary_elementwise(cop)
+          || uop_is_ternary_elementwise(cop) || uop_is_movement(cop);
+    if (!ew) continue;
+    if (bufferize_consumer_reaches_softmax_sum(cons[i], hops - 1)) return 1;
+  }
+  return 0;
+}
+
+// True iff the source subtree of `t` reaches a FORWARD softmax-sum reduce,
+// descending through elementwise/movement/reduce ops (crossing reduces, since
+// the gradient dOut = 2*out flows back THROUGH the forward @V reduce).  Bounded
+// by `budget`.  Used to discriminate the forward @V from backward dV.
+static int bufferize_operand_reaches_softmax(Term t, u32 *budget, u32 depth) {
+  if (depth > 40 || *budget == 0) return 0;
+  (*budget)--;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  u8 op = term_ext(r);
+  if (op == UOP_KERNEL) return 0;
+  u64 loc = term_val(r);
+  if (loc >= HEAP_NEXT) return 0;
+  if (op == UOP_REDUCE && bufferize_reduce_is_softmax_sum(loc)) return 1;
+  u8 ar = uop_arity(op);
+  for (u8 s = 0; s < ar; s++)
+    if (bufferize_operand_reaches_softmax(heap_read(loc + s), budget, depth + 1))
+      return 1;
+  return 0;
+}
+
+// True iff the matmul REDUCE at `loc` is a BACKWARD gradient matmul (dV/dQ/dK):
+// a matmul (SUM-MUL distinct) BOTH of whose operands reach a softmax-sum (the
+// cotangent dOut flows back through the forward @V, so both operands carry the
+// softmax).  The forward @V has only ONE softmax-reaching operand.
+static int bufferize_matmul_is_backward(u64 loc) {
+  if (!bufferize_uop_is_matmul(loc)) return 0;
+  Term mul = term_resolve(heap_read(loc + 0));
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  u64 mloc = term_val(mul);
+  u32 n = 0;
+  for (u8 s = 0; s < 2; s++) {
+    u32 budget = 8192;
+    if (bufferize_operand_reaches_softmax(heap_read(mloc + s), &budget, 0)) n++;
+  }
+  return n == 2;
+}
+
+// True iff the forward attention reduce at `loc` (scores / probs) is ALSO read
+// by a BACKWARD gradient matmul -- i.e. an autograd graph shares this forward
+// intermediate.  Walk the consumer chain (through elementwise / movement /
+// crossing reduces) for a backward matmul.  When found, the forward reduce must
+// stay REALIZED so the backward pass can read the materialized buffer; fusing
+// the forward chain would leave the backward with no buffer (wrong gradient).
+static int bufferize_reduce_feeds_backward_matmul(u64 loc) {
+  u64 stack[64];
+  u32 sp = 0;
+  stack[sp++] = loc;
+  u32 budget = 4096;
+  u8  seen_depth = 0;
+  (void)seen_depth;
+  while (sp > 0 && budget-- > 0) {
+    u64 cur = stack[--sp];
+    u64 cons[8];
+    u32 nc = bufferize_consumers_for_loc(cur, cons, 8);
+    for (u32 i = 0; i < nc; i++) {
+      u32 ci = bufferize_info_find(cons[i]);
+      if (ci == 0xFFFFFFFFu) continue;
+      u8 cop = BUFFERIZE_NODES[ci].op;
+      if (cop == UOP_REDUCE) {
+        if (bufferize_matmul_is_backward(cons[i])) return 1;
+        // keep walking through reduces (the backward reuse can be several
+        // reduces deep) but bound by budget.
+      }
+      if (sp < 64) stack[sp++] = cons[i];
+    }
+  }
+  return 0;
+}
+
+// True iff the REDUCE at `reduce_loc` is one of the four reduces of a
+// scaled-dot-product-attention chain (Q@K matmul, softmax MAX, softmax SUM,
+// @V matmul).  Used ONLY under THVM_PCONTIG > 2 to KEEP these reduces
+// un-realized so the rangeify PCONTIG cost-model can collapse them.  Faithful
+// to tinygrad: the chain is one reduce expression (tensor.py:1217-1226), never
+// pre-seeded; run_rangeify + PCONTIG decide the boundaries.
+static int bufferize_reduce_in_attention_chain(u64 reduce_loc) {
+  u32 idx = bufferize_info_find(reduce_loc);
+  if (idx == 0xFFFFFFFFu || BUFFERIZE_NODES[idx].op != UOP_REDUCE) return 0;
+  u32 kind = (u32)term_val(heap_read(reduce_loc + 1));
+  int hit = 0;
+  char const *which = "none";
+  // softmax SUM (the normalize denominator)
+  if (kind == REDUCE_SUM && bufferize_reduce_is_softmax_sum(reduce_loc)) {
+    hit = 1; which = "softmax-sum";
+  // softmax MAX (its broadcast feeds the sub -> exp2 -> softmax SUM)
+  } else if (kind == REDUCE_MAX
+             && bufferize_consumer_reaches_softmax_sum(reduce_loc, 8)) {
+    hit = 1; which = "softmax-max";
+  // Q@K matmul: a matmul reduce whose scores flow into the softmax.
+  } else if (bufferize_uop_is_matmul(reduce_loc)
+             && bufferize_consumer_reaches_softmax_sum(reduce_loc, 8)) {
+    hit = 1; which = "qk-matmul";
+  }
+  // NOTE on the @V matmul (`probs @ V`): un-seeding it too (so the @V reduce
+  // inlines over the LOCAL-staged probs) does collapse 2 more kernels, BUT the
+  // inline @V reduce emits a WRONG-shape / non-tensor result for the rank-2
+  // whole-tensor TAttention path (the codegen cannot stage the @V reduce
+  // operands from LOCAL -- it collapses BOTH @V output axes).  See the wall
+  // report.  So the @V matmul stays a REALIZED BLAS/TC operand reading the
+  // (now-fused) Q@K->softmax probs buffer; only Q@K + softmax MAX/SUM un-seed.
+  //
+  // A forward attention reduce whose intermediate (scores / probs) is ALSO read
+  // by a BACKWARD gradient matmul (the autograd reuse) must stay REALIZED -- the
+  // backward pass reads that materialized buffer; un-seeding it (fusing the
+  // forward chain) leaves the backward with no buffer (wrong gradient,
+  // nn/attention-grad-dv-finite-diff).  tinygrad's flash fusion is a forward-
+  // inference path; when an autograd consumer is present we keep the boundary.
+  // Detected via a consumer that is a backward matmul (TWO softmax operands).
+  if (hit && bufferize_reduce_feeds_backward_matmul(reduce_loc)) {
+    hit = 0; which = "fwd-shared-with-bwd";
+  }
+  char const *dbg = getenv("THVM_PCONTIG_DEBUG");
+  if (dbg != NULL && dbg[0] == '1') {
+    fprintf(stderr, "[pcontig] reduce loc=%llu kind=%u -> attn_chain=%d (%s)\n",
+            (unsigned long long)reduce_loc, kind, hit, which);
+  }
+  return hit;
+}
+
 // True when the recompute subtree feeding elementwise node at `loc` reaches
 // a UOP_REDUCE without first crossing a realized boundary.  Such a node is
 // a reduce EPILOGUE: tinygrad fuses it into the reduce's consumer kernel
@@ -1265,7 +1463,26 @@ fn void bufferize_classify(Term root) {
           }
         }
       }
-      if (info->op == UOP_REDUCE) {
+      // THVM_PCONTIG > 2: keep the WHOLE attention reduce chain un-realized
+      // (Q@K matmul, softmax MAX/SUM, @V matmul) so the rangeify PCONTIG
+      // cost-model (rangeify_unified.c rb_pcontig_*) can stage the seq*seq
+      // scores in LOCAL and collapse the 4 reduces into one kernel.  tinygrad
+      // never seeds this chain (tensor.py:1217-1226 is one reduce expression;
+      // run_rangeify + PCONTIG decide the boundaries).  Skipping the seed marks
+      // here lets remove_bufferize's PCONTIG partial-contig branch own the
+      // chain.  Default (0/unset) leaves attn_chain == 0 -> unchanged.
+      int attn_chain = (info->op == UOP_REDUCE
+                        && bufferize_pcontig_level() > 2
+                        && bufferize_reduce_in_attention_chain(info->loc));
+      if (attn_chain) {
+        // Mark so rangeify_unified's ending_ranges keep-fused branch loosens
+        // ONLY this forward-attention chain (not backward / unrelated reduces).
+        bufferize_node_mark(info, BUFFERIZE_REASON_PCONTIG_ATTN);
+        // bufferize_node_mark sets realized=1; the chain must stay UN-realized
+        // for the PCONTIG cost-model, so clear it -- we only want the REASON tag.
+        info->realized = 0;
+      }
+      if (info->op == UOP_REDUCE && !attn_chain) {
         // Only MATMUL REDUCEs stay as boundaries (mirrors tinygrad's
         // matmul-protect).  Other REDUCEs fuse inline via the unified
         // pass's REDUCE-via-RANGE expansion + render_uop's _accN
@@ -1592,6 +1809,66 @@ fn void bufferize_classify(Term root) {
           if (rsh.dims[d] != csh.dims[d]) { same = 0; break; }
         if (!same) continue;
         bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
+      }
+    }
+    // THVM_PCONTIG > 2: propagate the PCONTIG_ATTN tag from the forward
+    // attention REDUCEs onto the elementwise / movement softmax-body nodes
+    // BETWEEN them (the `*scale`, `-max`, `exp`, `/sum` chain).  rangeify's
+    // ending_ranges keep-fused loosens only tagged nodes; tagging just the 4
+    // reduces leaves the softmax body conservatively realized (weak collapse),
+    // so tag any elementwise/movement node that BOTH consumes a tagged node AND
+    // whose own consumer chain reaches a tagged node -- i.e. it sits inside the
+    // forward attention chain.  A backward / unrelated node is never bracketed
+    // by two tagged nodes, so it stays untagged and keeps its boundary.
+    if (bufferize_pcontig_level() > 2) {
+      // Iterate to a fixpoint over the (small) node set so a multi-hop softmax
+      // body (scale -> sub -> exp -> recip -> mul) is fully covered.
+      int changed = 1, rounds = 0;
+      while (changed && rounds++ < 8) {
+        changed = 0;
+        for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+          UOpInfo *info = &BUFFERIZE_NODES[i];
+          if (info->reasons & BUFFERIZE_REASON_PCONTIG_ATTN) continue;
+          u8 op = info->op;
+          int ew = uop_is_unary_elementwise(op) || uop_is_binary_elementwise(op)
+                || uop_is_ternary_elementwise(op) || uop_is_movement(op);
+          if (!ew) continue;
+          // consumes a tagged node?
+          int consumes_tagged = 0;
+          u8 ar = uop_arity(op);
+          for (u8 s = 0; s < ar && !consumes_tagged; s++) {
+            Term ch = term_resolve(heap_read(info->loc + s));
+            if (term_tag(ch) != TAG_UOP || term_ext(ch) == UOP_KERNEL) continue;
+            u32 ci = bufferize_info_find(term_val(ch));
+            if (ci != 0xFFFFFFFFu
+                && (BUFFERIZE_NODES[ci].reasons & BUFFERIZE_REASON_PCONTIG_ATTN))
+              consumes_tagged = 1;
+          }
+          if (!consumes_tagged) continue;
+          // consumer chain reaches a tagged node? (bounded BFS over cmap)
+          int reaches_tagged = 0;
+          u64 stack[64];
+          u32 sp = 0;
+          stack[sp++] = info->loc;
+          u32 budget = 256;
+          while (sp > 0 && budget-- > 0 && !reaches_tagged) {
+            u64 cur = stack[--sp];
+            u64 cons[8];
+            u32 nc = bufferize_consumers_for_loc(cur, cons, 8);
+            for (u32 c = 0; c < nc; c++) {
+              u32 cci = bufferize_info_find(cons[c]);
+              if (cci == 0xFFFFFFFFu) continue;
+              if (BUFFERIZE_NODES[cci].reasons & BUFFERIZE_REASON_PCONTIG_ATTN) {
+                reaches_tagged = 1; break;
+              }
+              if (sp < 64) stack[sp++] = cons[c];
+            }
+          }
+          if (reaches_tagged) {
+            info->reasons |= BUFFERIZE_REASON_PCONTIG_ATTN;
+            changed = 1;
+          }
+        }
       }
     }
     // Fanin-cap split: mark wide-fanin elementwise/movement children

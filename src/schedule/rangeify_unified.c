@@ -1482,12 +1482,50 @@ fn void run_rangeify_unified(Term root) {
                       || uop_is_ternary_elementwise(info->op);
     if (RU_ENDING_RANGES[node_idx].n
         && (is_elementwise || info->op == UOP_REDUCE)) {
-      // Mark every non-realized axis as realized (without PCONTIG > 1
-      // we always realize -- the conservative branch in tinygrad).
+      // indexing.py:230-233:
+      //   for i,r in enumerate(out_rngs):
+      //     if i in _realize_axis: continue
+      //     if not (PCONTIG > 1) or any(any(rr.arg > e.arg for e in
+      //         ending_ranges[x]) for rr in r.ranges):
+      //       _realize_axis.append(i)
+      // Without PCONTIG we realize EVERY non-realized axis (the conservative
+      // branch).  Under PCONTIG > 2 an axis is realized ONLY if one of its
+      // ranges was CREATED AFTER one of the ended ranges (axis_id `rr.arg`
+      // greater than an ending-range `e.arg`); an axis whose ranges all
+      // predate the ending ranges stays FUSED -- this is what keeps the
+      // attention seq*seq scores threaded into the @V reduce instead of
+      // materialized.  thvm's RU_RANGE_IDX_COUNTER == tinygrad's range.arg.
+      //
+      // tinygrad gates on `PCONTIG > 1` graph-wide (indexing.py:232); thvm uses
+      // `> 2` AND scopes to nodes bufferize_classify tagged
+      // BUFFERIZE_REASON_PCONTIG_ATTN (the FORWARD attention chain whose seed it
+      // skipped: Q@K + softmax MAX/SUM).  A backward / autograd / unrelated
+      // reduce keeps the conservative always-realize so its materialized buffer
+      // survives for the autograd reader (the loosened keep-fused otherwise
+      // corrupts the gradient, nn/attention-grad-dv-finite-diff).  thvm scopes
+      // (tinygrad doesn't) because thvm's autograd reads forward intermediates
+      // through realized buffers, whereas tinygrad re-derives them.
+      int pcontig_keep = (ru_pcontig() > 2
+                          && (info->reasons & BUFFERIZE_REASON_PCONTIG_ATTN));
       u8 mask = RU_REALIZE_MAP[node_idx].axes_mask;
       u8 added = 0;
       for (u8 a = 0; a < my_ndim; a++) {
         if (mask & (u8)(1u << a)) continue;
+        if (pcontig_keep) {
+          // realize iff any range axis_id on this output axis exceeds an
+          // ending-range axis_id (rr.arg > e.arg, indexing.py:232).
+          u32 ax_ids[RU_MAX_AXES];
+          u32 n_ax = ru_collect_range_axes(out_rngs[a], ax_ids, RU_MAX_AXES, 0);
+          int after_ending = 0;
+          for (u32 j = 0; j < n_ax && !after_ending; j++) {
+            for (u8 k = 0; k < RU_ENDING_RANGES[node_idx].n; k++) {
+              if (ax_ids[j] > RU_ENDING_RANGES[node_idx].axis_ids[k]) {
+                after_ending = 1; break;
+              }
+            }
+          }
+          if (!after_ending) continue;     // predates ending ranges: keep fused
+        }
         mask |= (u8)(1u << a);
         out_rngs[a] = ru_new_range(shape.dims[a], KAX_LOOP);
         added++;
