@@ -147,3 +147,70 @@ it is an overlap-emission-ORDER question, not a missing CP and not a filter.
 REGRESSION (this re-diagnosis is documentary; no source change):
   git diff empty; bin/test_atp green 136232/136232; pick-seq for soa
   prefix 1..124 unchanged (no code touched).
+
+================================================================================
+SLOT15-vs-EQN10 FORK RESOLVED (2026-06-20): CASE (ii) OVER-ENUMERATION, and
+the only mechanism that flips pick-125 to E is GLOBAL (trades the prefix).
+--------------------------------------------------------------------------------
+THE FORK (was: is thvm's seq564 partner slot15 == WM's seq564 partner eqn-10?).
+  thvm seq564 producer (cp_seq 564, FIRST copy; pinned by [cpgen] norm-match,
+  thvm_both.txt:1687): outer=slot19[=WM rule13] x inner=slot15, combo=0.
+  thvm slot15 = (C3 V0 (C3 V1 V0)) -> (C3 (C3 V1 V1) V0)        [unorientable]
+  WM eqn-10   = (C3 V0 (C3 V1 V0))  = (C3 V0 (C3 V1 V1))        [wm.txt:5129]
+  SAME LHS, DIFFERENT RHS.  They are NOT the same equation.  thvm's slot20
+  (= (C3 V0 (C3 V1 V0)) -> (C3 V0 (C3 V1 V1)), thvm_rt slot20) IS eqn-10.
+  => CASE (ii): thvm forms seq564 from rule13 x slot15, a (parent-pair) WM
+     never performs -- WM has NO slot15-as-rule.
+
+WHY thvm has slot15 as a rule and WM does not (the over-enum source):
+  WM NEVER orients slot15's term into a rule and NEVER numbers it in E:
+  at wm.txt:5684 WM TOUCHES the slot15-term CP
+  `opCenterdot(x1,opCenterdot(x2,x1)) # opCenterdot(opCenterdot(x2,x2),x1)`
+  and reports "... subsumed." -- WM joins/subsumes it (via eqn-10 added at
+  5129 + commutativity) so it never enters R or E.  thvm instead SELECTS it
+  (pick-121) and installs slot15 as an active oriented rule, then overlaps it.
+  ORDER DEPENDENCE: thvm derives slot15 (thvm_rt slot15) BEFORE slot20/eqn-10
+  (thvm_rt slot20); at slot15's birth eqn-10 does not exist so thvm cannot
+  subsume it.  WM derives eqn-10 first and uses it to kill the slot15-term.
+
+NO LOCAL FILTER (pop-time drop of seq564 promotes seq565, not E -- already
+established).  And the 17-E-copies recount: thvm forms E at cp_seq 167/192/
+235/236/238/246/270/293/316/340/396/436/475/493/540/562/563/[564=seq564]/593...
+(17 E copies BEFORE 564, not 2) and SELECTS E at picks 14/17/24/25/26/28/31/
+34/37/40/.../123/124.  pick-125 is therefore a PURE weight-120 FIFO interleave
+over the WHOLE run's formation-age stream, not a 2-vs-3 local count.
+
+THE ONLY KNOB THAT YIELDS E@125 IS GLOBAL (decisive empirical trade proof,
+WALDMEISTER preset, /tmp/soa.pr 300 40, real-selection stream excl. ORPHAN):
+  baseline                 pick125 = seq564   prefix1..124 baseline
+  THVM_ATP_BWD_SUB=1       pick125 = E (!)    but FIRST DIVERGES AT pick-10
+                                              (pri 48 vs 109) -- whole stream
+                                              reshuffled; picks 118..124 all
+                                              differ.  This IS WM's backward
+                                              subsumption (the mechanism that
+                                              removes slot15-term + collapses
+                                              E-dups); it reproduces WM's
+                                              pick-125 ONLY by reproducing WM's
+                                              entire weight-120 formation order.
+  THVM_ATP_BWD_DEMOD=1     pick125 = seq564   prefix SAME  (no effect on 125)
+  THVM_ATP_BWD_GROUND_JOIN=1 pick125 = seq564 prefix SAME  (no effect)
+  THVM_ATP_FWD_SUB=1       pick125 = seq564   prefix SAME  (no effect)
+  THVM_ATP_ESET_SUBSUME=0  diverges @10       THVM_ATP_WM_DEMOTE=0 diverges @10
+  THVM_ATP_WM_EMISSION_ORDER=0 diverges @16   THVM_ATP_POP_SUBSUME=0 diverges @16
+  THVM_ATP_IMPLICIT_CP=1   pick125 != E, prefix DIFF (other trajectory)
+
+CONCLUSION (DEFERRED, with the global trade now PROVEN): every prefix-
+preserving toggle leaves pick-125 = seq564; the single toggle that lands E at
+125 (BWD_SUB = WM's RueckwaertsSubsumierung) reorders the selection stream from
+pick-10 onward.  Flipping soa-125 = forming WM's seq564 from eqn-10 x rule13 at
+WM's late age = adopting WM's backward-subsumption-driven formation order
+WHOLESALE, which trades the 1..124 match for the 125 match.  No baseline-
+preserving local fix exists; the residual genuinely requires the global CP-
+formation-ORDER rewrite (matching WM's per-rule emission order AND its
+backward-subsumption-driven cross-rule weight-120 age interleave).  Same shape
+would help Meredith only via that same global reorder, not a local gate.
+
+REGRESSION (this resolution is documentary; no source change):
+  git diff empty; bin/test_atp green 136232/136232; SKIToBCKW c1 @1868 intact
+  (pick-1868 = (C10 C8 (C10 C7 C5))->..., C8/W head); all baseline pick-seq
+  md5 unchanged by construction (no code touched).
