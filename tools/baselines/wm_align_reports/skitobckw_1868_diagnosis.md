@@ -2,6 +2,23 @@
 
 Date: 2026-06-17. Branch: main (worktree wm-parity).
 
+## RESOLVED 2026-06-20 (commit cf8aa3bb)
+
+@1868 is FIXED.  Root cause: the discrimination-tree removal-collapse re-issue
+`wmo_sprung_reissue_cb` (src/atp/wm_order.c) only fired when the re-hung leaf's
+node `up` had exactly ONE model sibling (`n_leaf_kids==1`).  At @1868 W's (trace
+2087) inner node collapses and re-hangs at a node with THREE model siblings, so
+the re-issue was skipped and W's depth-1 jump stayed mid-list behind Y's,
+flipping the var-query CP-arrival tie -> thvm picked Y(C9) where WM picks W(C8).
+Fix: `wmo_sprung_reissue_multi_cb` handles the `n_models>=2` fan (head-placement
+for the newest leaf, group-aware guard isolating the case).  SKIToBCKW c1 AND c2
+pick 1868 now = W(C8), 1869 = Y, matching WM through pick 1877+; prefix content
+byte-identical; all 10 wm_order baselines unchanged; test_atp 136232.  Every
+earlier dive below (collapse-interleaving, split-time placement,
+insertion-decision) correctly proved its layer byte-faithful and narrowed to
+this gate -- kept as the trail.  The exact NEW firstdiv (whether c1/c2 are now
+fully identical) needs a wmcli re-alignment.
+
 ## Headline
 
 @1868 is an **emission-order flip in the equation-tops CP ranking** -- the same
@@ -148,3 +165,95 @@ WALD_LIB=1=MathLink, not the standalone wmcli) -- that build config is not yet
 identified.  Options: (a) crack the reference build config to get a saturating
 instrumented ELProver; (b) reason about `wmo_tops_rank` from the batch rules'
 LHS structures + WM's known order without the tree.
+
+## RESOLVED root cause (2026-06-20 deep dive -- supersedes the fresh-jump-guard hypothesis)
+
+The earlier "W-rule has NO jumps" finding was an INCOMPLETE trace: THVM_WMO_CT
+only logged `wmo_jump_prepend` (PREPEND) and the polieren splices; it did NOT
+log the removal-collapse REWIRE path (`wmo_rewire_cb`).  Instrumenting the rewire
+(WMOCT REWIRE) shows the W-leaf (trace 2087) DOES get its depth-1 / depth-3 /
+depth-5 jumps -- via the collapse that re-hangs it as the surviving sibling.  So
+the W-leaf IS in the depth-1 `n->exits`; the divergence is the LIST ORDER, not a
+missing jump.  The fresh-jump-guard avenue is a dead end: @1868's split (2062 vs
+2027, i=5 j=6) is MINIMAL (j == i+1), so neither thvm's `POLIER-FRESH-HEAD`
+(requires j > i+1) nor WM's BlattAufgeteilt chain-pop emits any chain-node jump
+there -- both correctly re-target in place.
+
+The competing depth-1 jumps, in CREATION order, at the f=155 query
+`App(v1, App(K, v1))` (decode f5=I f6=K f7=S f8=W f9=Y f10=App):
+  1. PREPEND sub `App(W, App(S,I))` -> rule-2027's leaf, emitted during 2027's
+     PLAIN insertion suffix-drain (2027 = `App(App(W,App(S,I)), Y)`, hung i=5).
+  2. PREPEND sub `App(Y, App(S,I))` -> Y-leaf (2072), emitted during 2072's hang.
+  3. (2062 splits 2027: re-targets jump 1 onto the new depth-6 node, IN PLACE.)
+  4. W-leaf (2087) hangs PLAIN at i=6 (intro = a VARIABLE at the LAST cell); its
+     only enclosing pending is the ROOT (depth-0), suppressed by Untergrenze =
+     EintragEins -- so W gets NO own depth-1 jump (FAITHFUL: WM's
+     NeuesBlattEinhaengen `StapelUeber(Stapeluntergrenze)` suppresses it too).
+  5. COLLAPSE (sib = W-leaf, up_depth=5, n_freed=1) REWIRES jump 1 onto W,
+     PRESERVING its outgoing-list position (the OLD, pre-Y position).
+
+So the W-path jump sits at jump-1's OLD position (created BEFORE Y); Y's jump is
+NEWER (nearer the head-first list head) -> Y consulted first -> Y-before-W.
+
+EVERY step is byte-faithful to the WM source (verified against
+waldmeister/sources/WDT/DSBaumOperationen.c + INF/Unifikation1.c):
+  - Schrumpfen (collapse, :1057-1095): `AlleEingehendenSpruengeUmsetzen` (:808)
+    redirects INCOMING jumps onto the neighbor leaf but NEVER touches the
+    outgoing `NaechsterZieleintrag` order; `BK_NachfolgenLassen` (:1083) issues
+    NO jump on the collapse-target re-hang.  thvm's `up`-only head-move in
+    `wmo_rewire_cb` is ALREADY a thvm divergence (added for the McCune avalanche
+    corner); it does not fire at depth-1 here (up_depth=5) and is irrelevant.
+  - AltesBlattPolieren else-branch (:534-561): re-targets in place, NO fresh jump.
+  - DeltaFreieVar0 (:784-789): the var-query DFS walks jump exits in pure
+    `Sprungausgaenge` list order -- exactly thvm's `wmo_dfs` jump loop.
+By the spec, jump 1 is created BEFORE Y's in BOTH thvm and WM (identical rule-
+insertion order; align prefix = 1867 byte-identical, thvm-only=0), and the
+redirect preserves position in BOTH -> the spec PREDICTS Y-before-W for both,
+yet WM's banked order is W-before-Y.
+
+WHY (the residual divergence): thvm's depth-1 arrival order at the f=155 query is
+  2131, 2072(Y), 2046, 2087(W), 2011, 2032, 1810, ...
+WM's banked formation order is `4 145 140(W) 138(Y) 136 133 ...`, i.e.
+  2131, 2087(W), 2072(Y), 2046, ...
+-- so it is NOT a clean 2-element W/Y swap: thvm ALSO floats 2046 ahead of W and
+re-orders 2072/2046 relative to WM.  The depth-1 list (88 exits) is a complex
+mix of head-prepended fresh jumps and position-preserved redirected jumps, with
+MANY older-jump-nearer-head inversions, all set by the construction+removal
+HISTORY.  Reproducing WM's exact list order needs WM's exact jump genealogy --
+which diverges from thvm's only in a removal/redirect-ordering corner (the
+documented McCune avalanche family, wm_order.c header :89-98), invisible in the
+rule-insertion order.
+
+EXPERIMENTS RUN (all gated, all reverted -- none lands W EXACTLY before Y):
+  - sort var-query jump exits by sub cells (THVM_WMO_JSORT): global reshuffle,
+    W moves to 1866; un-faithful (DeltaFreieVar0 is pure list order).
+  - head-move ALL rewired jumps (THVM_WMO_REWIRE_ALLHEAD): over-corrects, 1868
+    becomes seq 2218.
+  - head-move rewired jumps only at var-gated nodes (THVM_WMO_REWIRE_VARGATE):
+    same over-correction -- a head-move lands W at the ABSOLUTE head, not the one
+    slot before Y.
+  - disable the `up` head-move (THVM_WMO_REWIRE_NOUPHEAD): 1868 unchanged
+    (confirms the existing `up` hack is not the lever here).
+The head-move overshoots (W -> head); position-preservation undershoots (W stays
+at jump-1's old slot).  No single local rule lands W at exactly Y-1 without WM's
+actual genealogy.
+
+## CONCRETE NEXT MECHANISM
+Get WM's actual depth-1 `Sprungausgaenge` order for the f=155 query (the only
+remaining ground truth gap).  The instrumentation is now in hand: re-add the
+reverted WMOCT-D1 / WMOINS COLLAPSE / WMODFS jump-sub traces (this dive's gated
+scaffolding) and, on the WM side, dump `BK_Sprungausgaenge` at the depth-1 node
+right before the eq-17 batch.  Then diff the two 88-entry lists to find the
+SINGLE redirect/prepend event whose relative order differs -- it will be a
+collapse or interreduce earlier in the saturation where thvm's
+`wmo_rewire_cb`/`wmo_kill_entries_to` ordering diverges from WM's
+`AlleEingehendenSpruengeUmsetzen` + `NullifizierteEingehendeSpruengeLoeschen`
+sequence (DSBaumOperationen.c :1076-1093).  Port that exact sequence (thvm
+currently kills-then-rewires in two passes; WM nullifies-rewires-then-deletes in
+a specific interleaving that can leave a redirected jump at a different list
+slot).  That is the faithful fix; the JSORT/head-move shortcuts are not.
+
+To reach the WM batch for the dump: the source-built ELProver goal-reduces, so
+build the standalone saturating `wmcli` config (the 478KB binary) WITH the
+WMOCT-equivalent BK_Sprungausgaenge dump, OR add a one-shot
+`BA_DumpSprungliste(depth1_node)` call gated on CPNr == the eq-17 batch start.
