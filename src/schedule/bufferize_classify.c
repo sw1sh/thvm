@@ -1097,6 +1097,30 @@ static int bufferize_matmul_is_backward(u64 loc) {
   return n == 2;
 }
 
+// True iff the matmul REDUCE at `loc` is the FORWARD attention @V matmul
+// (`softmax(scores) @ V`): a matmul (SUM-MUL distinct) EXACTLY ONE of whose two
+// operands reaches a FORWARD softmax-sum (the normalized probs), the other being
+// the V activation (no softmax).  This is the LAST reduce of the SDPA chain
+// (tensor.py:1226 `... .softmax(-1) ... @ value`) -- its output axes are the
+// query-seq S and the head_dim d; only the KEY axis is reduced.  Discriminated
+// from the BACKWARD matmuls (dV/dQ/dK, BOTH operands reach softmax,
+// bufferize_matmul_is_backward) and from Q@K (whose CONSUMER, not operand,
+// reaches the softmax -- it produces the scores rather than consuming the
+// probs).  Un-seeding it lets the @V reduce inline over the (PCONTIG-staged)
+// probs, collapsing the chain toward one kernel.
+static int bufferize_matmul_consumes_softmax(u64 loc) {
+  if (!bufferize_uop_is_matmul(loc)) return 0;
+  Term mul = term_resolve(heap_read(loc + 0));
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  u64 mloc = term_val(mul);
+  u32 n = 0;
+  for (u8 s = 0; s < 2; s++) {
+    u32 budget = 8192;
+    if (bufferize_operand_reaches_softmax(heap_read(mloc + s), &budget, 0)) n++;
+  }
+  return n == 1;
+}
+
 // True iff the forward attention reduce at `loc` (scores / probs) is ALSO read
 // by a BACKWARD gradient matmul -- i.e. an autograd graph shares this forward
 // intermediate.  Walk the consumer chain (through elementwise / movement /
@@ -1152,14 +1176,17 @@ static int bufferize_reduce_in_attention_chain(u64 reduce_loc) {
   } else if (bufferize_uop_is_matmul(reduce_loc)
              && bufferize_consumer_reaches_softmax_sum(reduce_loc, 8)) {
     hit = 1; which = "qk-matmul";
+  // @V matmul (`softmax(scores) @ V`): a matmul reduce that CONSUMES the
+  // normalized probs (exactly one operand reaches the softmax-sum).  The LAST
+  // reduce of the SDPA chain; un-seeding it lets it inline over the
+  // PCONTIG-staged probs.  Its OUTPUT axes are {S, d} (only the key axis is
+  // reduced); the rangeify _realize_axis loop (rangeify_unified.c) keeps the
+  // {S,d} ranges fused (they PREDATE the softmax ending-ranges) while the key
+  // axis becomes the KAX_REDUCE range -- the same is_pcontig/is_subs partition
+  // as the softmax-normalize node.
+  } else if (bufferize_matmul_consumes_softmax(reduce_loc)) {
+    hit = 1; which = "v-matmul";
   }
-  // NOTE on the @V matmul (`probs @ V`): un-seeding it too (so the @V reduce
-  // inlines over the LOCAL-staged probs) does collapse 2 more kernels, BUT the
-  // inline @V reduce emits a WRONG-shape / non-tensor result for the rank-2
-  // whole-tensor TAttention path (the codegen cannot stage the @V reduce
-  // operands from LOCAL -- it collapses BOTH @V output axes).  See the wall
-  // report.  So the @V matmul stays a REALIZED BLAS/TC operand reading the
-  // (now-fused) Q@K->softmax probs buffer; only Q@K + softmax MAX/SUM un-seed.
   //
   // A forward attention reduce whose intermediate (scores / probs) is ALSO read
   // by a BACKWARD gradient matmul (the autograd reuse) must stay REALIZED -- the
@@ -1474,13 +1501,35 @@ fn void bufferize_classify(Term root) {
       int attn_chain = (info->op == UOP_REDUCE
                         && bufferize_pcontig_level() > 2
                         && bufferize_reduce_in_attention_chain(info->loc));
+      // The @V matmul (`softmax(scores) @ V`) is the SINK of the SDPA chain: it
+      // produces the {S, d} output.  Unlike the intermediate reduces (Q@K /
+      // softmax MAX/SUM, whose buffers are pure intermediates), the @V reduce is
+      // the kernel that STORES the attention output, so it must stay REALIZED
+      // (its {S,d} output axes are the realized GLOBAL ranges -- un-seeding the
+      // sink drops them, collapsing the result to a non-tensor).  We still tag
+      // it PCONTIG_ATTN and strip its BLAS matmul-protect so the softmax probs
+      // LOCAL-stage INTO it (the softmax-normalize stops being a forced GEMM
+      // operand, rb_feeds_matmul_reduce), collapsing softmax+@V into one fused
+      // generic reduce.  tinygrad has no BLAS: its @V is just the chain's last
+      // reduce that rangeify+PCONTIG fuse (tensor.py:1226).
+      int attn_v_sink = (attn_chain
+                         && bufferize_matmul_consumes_softmax(info->loc));
       if (attn_chain) {
         // Mark so rangeify_unified's ending_ranges keep-fused branch loosens
         // ONLY this forward-attention chain (not backward / unrelated reduces).
         bufferize_node_mark(info, BUFFERIZE_REASON_PCONTIG_ATTN);
-        // bufferize_node_mark sets realized=1; the chain must stay UN-realized
-        // for the PCONTIG cost-model, so clear it -- we only want the REASON tag.
-        info->realized = 0;
+        if (!attn_v_sink) {
+          // Intermediate reduce (Q@K / softmax MAX/SUM): bufferize_node_mark set
+          // realized=1, but the chain must stay UN-realized for the PCONTIG
+          // cost-model -- clear it, keeping only the REASON tag.
+          info->realized = 0;
+        } else {
+          // @V sink: keep realized (it is the output store) but DROP the BLAS
+          // matmul-protect so its probs operand fuses in.  Seed it as a plain
+          // REDUCE boundary (the generic accumulator), NOT a MATMUL boundary.
+          info->reasons &= ~(u32)BUFFERIZE_REASON_MATMUL;
+          bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
+        }
       }
       if (info->op == UOP_REDUCE && !attn_chain) {
         // Only MATMUL REDUCEs stay as boundaries (mirrors tinygrad's
