@@ -81,3 +81,69 @@ the critical age window), exactly the subsystem the prior wmo_dfs verdict
 isolated.  A pop-time perm-subsume is the WRONG TOOL: there is no
 AC-redundant CP to drop here, and dropping seq=564 promotes seq=565, not
 the equation.
+
+================================================================================
+A-vs-B RE-DIAGNOSIS (2026-06-20): NOT (A) missing-enumeration; NOT a
+re-overlap either.  Pure intra-rule overlap-ORDER at weight 120.  The
+"thvm forms only 2 E copies / MISSES the age-577 copy" premise above is
+WRONG (it counted only the (563,593) window, ignoring 15 earlier E copies).
+--------------------------------------------------------------------------------
+THE THREE WM E-COPIES' PARENTS (CONFIRMED, /tmp/soa_align/wm.txt):
+  age 222  CP287  parents (-7, -5)  -- E-eqn-7 [x.x = (z.(z.z)).x]
+                                       x E-eqn-5 [commutativity]
+  age 511  CP774  parents (11, -7)  -- rule 11 [x.(x.(z.x)) -> z.x]
+                                       x E-eqn-7
+  age 577  CP876  parents (13, -6)  -- rule 13 [x.(x.(x.z)) -> z.x]
+                                       x E-eqn-6 [x.x = x.(z.(z.z))]
+  All THREE are DISTINCT (parents,pos) superpositions, each fired ONCE in
+  WM; the age-577 copy is a fresh superposition, NOT a re-overlap of
+  222/511.  (WM's seq564-equiv = CP991 parents (-10, 13) age 659.)
+
+THVM ENUMERATES ALL THREE -- including the exact age-577 (rule13 x eqn6):
+  thvm slot map by TERM (THVM_ATP_RULE_TRACE): slot19 == WM rule13
+  [(C3 V0 (C3 V0 (C3 V0 V1)))->(C3 V1 V0)]; slot7 == WM eqn6-reversed
+  [(C3 V0 (C3 V1 (C3 V1 V1)))->(C3 V0 V0)]; slot5 == commutativity;
+  slot8 == E-as-rule [(C3 (C3 V0 (C3 V0 V0)) V1)->(C3 V1 V1)].
+  THVM_ATP_CPGEN_DEBUG (parent-TERM provenance) + THVM_ATP_CP_FORM_TRACE
+  interleaved (/tmp/soa_align/thvm_both.txt) pin the heap copies:
+    cp_seq 562 = slot19 x slot8  (rule13 x E-rule)         -> E
+    cp_seq 563 = slot19 x slot7  (rule13 x eqn6)           -> E  <== the
+                  EXACT analog of WM age-577 (rule13 x eqn6); thvm forms
+                  it at 563, NOT in (563,593), NOT zero.
+    cp_seq 564 = slot19 x slot15/20 (rule13 x other)       -> seq564
+    cp_seq 593 = slot20 x slot3                            -> E
+  thvm produces E from ~95 distinct (parent-pair) overlaps in the budget-700
+  cpgen; it OVER-produces E vs WM (18 heap copies by cp_seq 593 vs WM's 3
+  by age 659).  There is NO superposition WM enumerates that thvm forms
+  zero times.  => the task's case (A) is FALSE.
+
+THE REAL DIVERGENCE (rule-13 / slot-19 internal overlap ORDER):
+  WM fires rule13's overlaps spread out: rule13 x eqn6 -> E at age 577;
+  rule13 x (-10) -> seq564 at age 659.  So WM's seq564 lands 82 ages AFTER
+  its 3rd E copy -> WM picks E at 125.
+  thvm fires slot19's overlaps consecutively at slot19's birth (rules=22):
+  slot19 x slot8 -> E (562), slot19 x slot7 -> E (563), slot19 x slot15 ->
+  seq564 (564).  So thvm's seq564 lands 1 age AFTER its (locally) 2nd E copy
+  -> thvm picks seq564 at 125.
+  Both engines enumerate the identical overlap SET; they differ only in the
+  RELATIVE EMISSION ORDER of one rule's (rule13/slot19) E-overlaps vs its
+  seq564-overlap, and in WM interleaving the seq564 copy from a DIFFERENT
+  parent (-10,13) at a much later age (659) than thvm's same-rule slot19
+  emission (564).
+
+VERDICT (FINAL): NOT (A) missing-enumeration (thvm forms the age-577
+rule13xeqn6 overlap at cp_seq 563), NOT (B) re-overlap-multiplicity (WM's
+three E copies are three distinct one-shot superpositions, none repeated).
+The residual is the atp_overlap_ij / cp_visit EMISSION-ORDER within a
+single rule's overlap batch: thvm emits rule13's two E-overlaps (x slot8,
+x slot7) before its seq564-overlap (x slot15), so seq564 immediately
+follows the E pair at the same rule-birth tick; WM's heap-age assignment
+interleaves a non-rule13 seq564 producer (-10,13) far later.  Matching
+pick-125 requires reproducing WM's per-rule CP emission order + WM's
+cross-rule age interleave at weight 120 -- the CP-FORMATION-ORDER subsystem,
+unchanged conclusion (DEFERRED) but with the precise mechanism now pinned:
+it is an overlap-emission-ORDER question, not a missing CP and not a filter.
+
+REGRESSION (this re-diagnosis is documentary; no source change):
+  git diff empty; bin/test_atp green 136232/136232; pick-seq for soa
+  prefix 1..124 unchanged (no code touched).
