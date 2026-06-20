@@ -234,3 +234,58 @@ REGRESSION (this resolution is documentary; no source change):
   git diff empty; bin/test_atp green 136232/136232; SKIToBCKW c1 @1868 intact
   (pick-1868 = (C10 C8 (C10 C7 C5))->..., C8/W head); all baseline pick-seq
   md5 unchanged by construction (no code touched).
+
+================================================================================
+EQN-4 ANGLE RE-OPENED (2026-06-20): thvm forms+selects eqn-4 EARLY and FAITHFULLY;
+the prior "thvm orients eqn-2 / forms eqn-4 late / COMM from slot-pairs" claim is
+FALSE on every point.  eqn-4 is NOT the firstdiv=125 cause -- a brief-level conflation.
+--------------------------------------------------------------------------------
+WM eqn-4 = (C3 (C3 V0 V0) V1) = (C3 V1 (C3 V0 V0))  [commute-the-squared-subterm]
+  WM: CP77 parents (2, -2) = rule2 x eqn-2, weight 120 age 65 (wm.txt:484); kept
+      as UNORIENTED EQ (wmfacts ElternNr=4294967292 mono=0); selected as equation 4;
+      ue(-4, 1) [eqn-4 x rule1] -> COMM, added to E as mono equation 5 (wm.txt:1228);
+      COMM then BACK-SUBSUMES eqn-4 (wm.txt:1238 "subsumes equation no. -4; removed").
+
+THVM (THVM_ATP_CPGEN_DEBUG / RULE_TRACE+ORIENT_KBO_CHECK / CP_PICK_TRACE on
+/tmp/soa.pr; banked /tmp/soa_align/cpgen_eqn4.txt + pick_trace.txt):
+  FORMS eqn-4 EARLY (cp_seq ~61): cpgen norm `C3(x0,C3(x1,x1)) = C3(C3(x1,x1),x0)`
+    (alpha-equal to WM eqn-4, side-swapped) at lines 121/149/333, from parent pairs
+    slot3 x slot1, slot4 x slot2, slot6 x slot2.  slot2 = the soa 3rd axiom (eqn-2);
+    slot4 x slot2 IS the rule x eqn-2 analog of WM's (2,-2).  thvm OVER-produces eqn-4
+    copies vs WM's single CP77 (same over-production as the weight-120 equation).
+  KEEPS eqn-4 UNORIENTED (faithful): RULE_TRACE shows
+    `RULE 6 ... C3(x_0,C3(x_1,x_1)) -> C3(C3(x_1,x_1),x_0)  (unorientable)`,
+    r_orient=0, n_unorient++; ORIENT_KBO_CHECK does NOT fire (thvm_kbo_naive agrees
+    UN).  KBO reason: lex tiebreak hits V0 (var) vs C3(V1,V1) (non-containing term)
+    = incomparable.  Matches WM mono=0.  (eqn-2 ALSO unoriented -- prior fact holds.)
+  SELECTS eqn-4 at pick-8 (pri=120): `lhs=(C3 V0 (C3 V1 V1)) rhs=(C3 (C3 V1 V1) V0)`.
+  DERIVES COMM at pick-9 (pri=48): cpgen line 255 `outer=slot4[eqn-4] x inner=slot1`
+    (+ lines 265/267/299/301/303 from slot4 x slot2/slot4/slot0) -> `C3(x0,x1)=C3(x1,x0)`.
+    => COMM is sourced FROM eqn-4 (slot4/slot6), NOT "from slot-pairs not eqn-4".
+  BACK-SUBSUMES eqn-4 after COMM (faithful): after COMM (RULE 5 trace 132) thvm runs
+    `ESET-SUBSUME kill (slot 4, trace 132) lhs=(C3 V0 (C3 V1 V1)) rhs=(C3 (C3 V1 V1) V0)`
+    = COMM removing eqn-4, == WM's "subsumes equation no. -4".
+
+LIFECYCLE PARITY (thvm <-> WM), byte-faithful:
+  form early (cp_seq 61 / CP77) -> keep unoriented (r_orient=0 / mono=0) -> select
+  (pick-8 / eqn-4) -> overlap x ax1 -> form COMM -> select COMM (pick-9 / eqn-5) ->
+  COMM back-subsumes eqn-4 (ESET-SUBSUME kill / "equation -4 removed").
+
+WHY THE BRIEF'S WORRY IS A NON-ISSUE (the conflation):
+  pick-99 = COMM (the recurring weight-48 commutativity copy); pick-125 = seq564
+  `(C3 (C3 V0 V0) V1) = (C3 (C3 V0 V1) V1)` -- inner V0,V1 -- which is NOT eqn-4
+  (eqn-4 RHS = (C3 V1 (C3 V0 V0))).  thvm's canonical eqn-4 copy lands at pick-127
+  (seq=582 `(C3 (C3 V0 V0) V1)=(C3 V1 (C3 V0 V0))`).  The eqn-4 -> COMM path is the
+  pick-8/9 EARLY event and is faithful; firstdiv=125 is the SEPARATE weight-120
+  equation/seq564 FIFO-age interleave already pinned above.  No new local lever from
+  the eqn-4 angle -- the early eqn-4 -> COMM is already what WM does.
+
+VERDICT (eqn-4 angle): CLOSED.  thvm forms+selects+unorients+back-subsumes eqn-4
+faithfully and EARLY; the prior agent's eqn-2-orientation / late-eqn-4 / slot-pair-COMM
+explanation is refuted on all three counts.  firstdiv=125 remains the global weight-120
+CP-formation-ORDER residual (seq564 vs the weight-120 equation), unchanged DEFERRED.
+
+REGRESSION (documentary; no source change):
+  git diff empty; bin/test_atp green 136232/136232; SKIToBCKW c1 @1868 intact
+  (pick-1868 = (C10 C8 (C10 C7 C5))->..., C8/W head); pick-99 = COMM, pick-125 =
+  seq564 unchanged; all baseline pick-seq md5 unchanged by construction (no code).
