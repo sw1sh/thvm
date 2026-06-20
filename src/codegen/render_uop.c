@@ -2994,8 +2994,9 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                                      Term a_val, u32 a_m_axis, u32 a_k_axis,
                                      Term epilogue_value, Term opt_tc_term,
                                      Term m_range_term, Term n_range_term,
-                                     u32 batch_axis_id, u32 batch_extent,
-                                     u32 m_extent) {
+                                     u32 batch_extent, u32 m_extent, u32 a_lead,
+                                     u32 batch_stride_a, u32 batch_stride_b,
+                                     u32 batch_stride_c) {
   // THVM_FUSE_MATMUL_INPUT: a_val != 0 means A is a fused elementwise producer.
   // The A-staging then computes a_val inline at (m = _tm + row, k = KK0 + col)
   // -- declaring `uint a<m>` / `uint a<k>` in scope so rmu_emit_term renders the
@@ -3048,9 +3049,9 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   if (batch_extent > 0u) {
     u32 _mn = (m_extent / tile_m) * n_tiles_n;
     IND(depth); fprintf(fp, "uint _batch = tg / %uu; uint _tg = tg %% %uu;\n", _mn, _mn);
-    IND(depth); fprintf(fp, "auto _abb = %s + _batch * %uu;\n", a_name, m_extent * k_extent);
-    IND(depth); fprintf(fp, "auto _bbb = %s + _batch * %uu;\n", b_name, k_extent * n_extent);
-    IND(depth); fprintf(fp, "auto _cbb = %s + _batch * %uu;\n", c_name, m_extent * n_extent);
+    IND(depth); fprintf(fp, "auto _abb = %s + _batch * %uu;\n", a_name, batch_stride_a);
+    IND(depth); fprintf(fp, "auto _bbb = %s + _batch * %uu;\n", b_name, batch_stride_b);
+    IND(depth); fprintf(fp, "auto _cbb = %s + _batch * %uu;\n", c_name, batch_stride_c);
     a_name = "_abb"; b_name = "_bbb"; c_name = "_cbb";
     _tgv = "_tg";
   }
@@ -3115,14 +3116,14 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
         IND(depth + 2); fprintf(fp,                                           \
           "((threadgroup %s4*)(_Asm + %s))[_i] = "                            \
           "*(device const %s4*)(%s + (_tm + _r) * %uu + (%s) + _c);\n",       \
-          sel, BUFOFF, sel, a_name, k_extent, KK0);                          \
+          sel, BUFOFF, sel, a_name, a_lead, KK0);                            \
         IND(depth + 1); fputs("}\n", fp);                                     \
       } else {                                                                \
         IND(depth + 1); fprintf(fp,                                           \
           "for (uint _i = _lid; _i < %uu; _i += %uu) {\n", a_elems, nthreads);\
         IND(depth + 2); fprintf(fp,                                           \
           "(_Asm + %s)[_i] = %s[(_tm + _i / %uu) * %uu + (%s) + _i %% %uu];\n",\
-          BUFOFF, a_name, t.kb, k_extent, KK0, t.kb);                        \
+          BUFOFF, a_name, t.kb, a_lead, KK0, t.kb);                          \
         IND(depth + 1); fputs("}\n", fp);                                     \
       }                                                                       \
     } while (0)
@@ -3207,14 +3208,14 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
         IND(depth + 2); fprintf(fp,                                           \
           "((threadgroup %s4*)(_Bsm + %s))[_i] = "                            \
           "*(device const %s4*)(%s + ((%s) + _r) * %uu + _tn + _c);\n",       \
-          sel, BUFOFF, sel, b_name, KK0, n_extent);                          \
+          sel, BUFOFF, sel, b_name, KK0, (u32)b_nstride);                    \
         IND(depth + 1); fputs("}\n", fp);                                     \
       } else {                                                                \
         IND(depth + 1); fprintf(fp,                                           \
           "for (uint _i = _lid; _i < %uu; _i += %uu) {\n", b_elems, nthreads);\
         IND(depth + 2); fprintf(fp,                                           \
           "(_Bsm + %s)[_i] = %s[((%s) + _i / %uu) * %uu + _tn + _i %% %uu];\n",\
-          BUFOFF, b_name, KK0, tile_n, n_extent, tile_n);                    \
+          BUFOFF, b_name, KK0, tile_n, (u32)b_nstride, tile_n);              \
         IND(depth + 1); fputs("}\n", fp);                                     \
       }                                                                       \
     } while (0)
@@ -3840,14 +3841,24 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       // accumulator path, which applies the epilogue via the store-value-over-
       // reduce machinery (correct, scalar -- f32 matmuls are rare in FLUX).
       if (epilogue_value != 0 && !c_is_bf) return 0;
+      // Real per-axis strides (rmu_range_coeff) so the batched-tiled path is
+      // correct for the STRIDED attention Q/K (transposed {heads,seq,head_dim}
+      // views): A's leading dim = lda (a_m), and the per-batch slice strides are
+      // the batch-axis coefficient in each address (NOT the contiguous M*K/K*N/
+      // M*N).  Non-batched packed operands have lda==k_extent + unused strides,
+      // so the emitted code is byte-identical to before.
+      u32 a_lead = is_batched ? (u32)lda : k_extent;
+      i64 bsa = is_batched ? rmu_range_coeff(addr_a, batch_axis_id) : 0;
+      i64 bsb = is_batched ? rmu_range_coeff(addr_b, batch_axis_id) : 0;
+      i64 bsc = is_batched ? rmu_range_coeff(addr_c, batch_axis_id) : 0;
       rmu_emit_matmul_tc_tiled(a_nm, b_nm, c_nm, n_extent,
                                k_extent, tile, c_is_bf, stage_bf,
                                b_trans, ldb, fp, depth, b_is_int8,
                                a_val, m_axis_id, red_axis,
                                epilogue_value, opt_tc_term,
                                m_range_term, n_range_term,
-                               is_batched ? batch_axis_id : 0xFFFFFFFFu,
-                               is_batched ? batch_extent : 0u, m_extent);
+                               is_batched ? batch_extent : 0u, m_extent,
+                               a_lead, (u32)bsa, (u32)bsb, (u32)bsc);
       return 1;
     }
   }
