@@ -112,6 +112,50 @@ int main(void) {
     CHECK_EQ((int)thvm_kbo(s, t, &GROUP_CFG), KBO_GT);
   }
 
+  // === soa eqn-2: unorientable single-binary-op equation ===============
+  // ShefferAxiomsOrAssociativity's 3rd axiom (tools/baselines/wm_align_
+  // reports/soa.txt).  Under the Sheffer KBO (one binary symbol
+  // opCenterdot weight 1, var_weight 1):
+  //   LHS = oc(oc(V0, oc(V1,V2)), oc(V0, oc(V1,V2)))
+  //   RHS = oc(oc(oc(V1,V1), V0), oc(oc(V2,V2), V0))
+  // weight(LHS) = weight(RHS) (7 oc + 6 var leaves each) and the variable
+  // multisets match {V0:2,V1:2,V2:2}, so it is a KBO weight+var tie.  The
+  // standard lex tiebreak recurses to arg1: oc(V0, oc(V1,V2)) vs
+  // oc(oc(V1,V1), V0); their arg1 is V0 (a variable) vs oc(V1,V1) (a term
+  // NOT containing V0) -- a variable-vs-non-containing-term pair is
+  // INCOMPARABLE, so the whole comparison is KBO_UN.  Waldmeister keeps
+  // this fact unoriented (mono=0); thvm must too (r_orient stays 0).  The
+  // production linear comparator must agree with the naive oracle here.
+  TEST_BEGIN("kbo/soa-eqn2-unorientable");
+  {
+    // Sheffer signature: single binary symbol opCenterdot = LAB_f (weight
+    // 1), var_weight 1.  Reuse the group cfg's LAB_f as opCenterdot; the
+    // weight (1) and var_weight (1) match the soa .pr ordering, and no
+    // other symbol appears in these terms, so the precedence chain is
+    // never consulted (top symbols always equal).
+    u32 V0 = 0u, V1 = 1u, V2 = 2u;
+    // inner = oc(V1, V2); two fresh copies avoid pointer-sharing.
+    Term lhs = mk_f(mk_f(term_new_fvr(V0), mk_f(term_new_fvr(V1), term_new_fvr(V2))),
+                    mk_f(term_new_fvr(V0), mk_f(term_new_fvr(V1), term_new_fvr(V2))));
+    Term rhs = mk_f(mk_f(mk_f(term_new_fvr(V1), term_new_fvr(V1)), term_new_fvr(V0)),
+                    mk_f(mk_f(term_new_fvr(V2), term_new_fvr(V2)), term_new_fvr(V0)));
+    // Standard KBO: incomparable in both directions.
+    CHECK_EQ((int)thvm_kbo(lhs, rhs, &GROUP_CFG), KBO_UN);
+    CHECK_EQ((int)thvm_kbo(rhs, lhs, &GROUP_CFG), KBO_UN);
+    // The production linear comparator must match the naive oracle.
+    CHECK_EQ((int)thvm_kbo(lhs, rhs, &GROUP_CFG),
+             (int)thvm_kbo_naive(lhs, rhs, &GROUP_CFG));
+    CHECK_EQ((int)thvm_kbo(rhs, lhs, &GROUP_CFG),
+             (int)thvm_kbo_naive(rhs, lhs, &GROUP_CFG));
+    // arg1 subpair: oc(V0, oc(V1,V2)) vs oc(oc(V1,V1), V0) -- also UN
+    // (recurses to V0 vs oc(V1,V1): variable vs non-containing term).
+    Term la1 = mk_f(term_new_fvr(V0), mk_f(term_new_fvr(V1), term_new_fvr(V2)));
+    Term ra1 = mk_f(mk_f(term_new_fvr(V1), term_new_fvr(V1)), term_new_fvr(V0));
+    CHECK_EQ((int)thvm_kbo(la1, ra1, &GROUP_CFG), KBO_UN);
+    CHECK_EQ((int)thvm_kbo(la1, ra1, &GROUP_CFG),
+             (int)thvm_kbo_naive(la1, ra1, &GROUP_CFG));
+  }
+
   // === LPO pretest fast-path agreement =================================
   // `thvm_lpo` runs the Waldmeister `LPOVortests` variable-set pretest
   // before the full recursion (`lpo_rec`).  The pretest must be a pure
