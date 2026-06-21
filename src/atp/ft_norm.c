@@ -466,9 +466,22 @@ typedef struct {
   // chooses the faster of two correct paths.
   u32         max_bucket;     // largest bucket size at last rebuild
   u32         n_indexed;      // total live indexed rules at last rebuild
+  // --- Full-depth perfect discrimination tree (Regelbaum), built in
+  // lockstep with the buckets above (see ftdt_* below).  Node 0 is the
+  // root (created on first build).  Each node owns its edge arrays + an
+  // ascending leaf-slot list (see FtDtNode below).
+  struct FtDtNode_s *dt_nodes;   // typed FtDtNode; fwd-named to keep order
+  u32         dt_n_nodes;        // live nodes this build (<= dt_hi_nodes)
+  u32         dt_hi_nodes;       // high-water: nodes ever allocated (buffers kept)
+  u32         dt_cap_nodes;      // node array capacity
 } FtPiIndex;
 
 static FtPiIndex g_ftpi = {0};
+
+// Discrimination-tree builder hooks (defined below ftpi_candidates, but
+// called by ftpi_insert_rule / ftpi_rebuild above their definition).
+static void ftdt_insert_pattern(FtPiIndex *ix, const AtpFtCell *pat, u32 rule);
+static void ftdt_reset(FtPiIndex *ix);
 
 // THVM_ATPFT_PRUNE_STATS=1 prints the prune ratio at process exit:
 // candidates-per-query vs the n_rules a linear scan would have visited.
@@ -584,6 +597,10 @@ static void ftpi_insert_rule(FtPiIndex *ix, AtpState *s, u32 i) {
     FtPiBucket *b = ftpi_bucket_get(ix, fp.fp[0]);
     ftpi_bucket_push(b, i, &fp);
   }
+  // Discrimination tree (full-depth) -- same faces as the buckets, so the
+  // two indexes return the identical candidate SET; the tree just prunes
+  // deeper.  A var-rooted LHS becomes a STAR-root path (matches any cell).
+  ftdt_insert_pattern(ix, lhs, i);
   // RHS face (unorientable rules also try backward: subject matched
   // against the RHS).  Bucket the RHS root too; the query dedups by slot
   // so the rule is offered once even when both faces match.
@@ -599,6 +616,10 @@ static void ftpi_insert_rule(FtPiIndex *ix, AtpState *s, u32 i) {
       FtPiBucket *b = ftpi_bucket_get(ix, rp.fp[0]);
       ftpi_bucket_push(b, i, &rp);
     }
+    // Tree RHS face: insert the RHS preorder under the same slot.  When
+    // both faces lead to the same leaf the rule lands twice on that leaf;
+    // the query's post-sort dedup removes the duplicate.
+    ftdt_insert_pattern(ix, rhs, i);
   }
 }
 
@@ -627,6 +648,7 @@ static void ftpi_rebuild(AtpState *s) {
   // candidates) and cheap.
   for (u32 b = 0; b < ix->n_buckets; b++) ix->buckets[b].n = 0u;
   ix->n_var = 0u;
+  ftdt_reset(ix);             // tree rebuilt in lockstep with the buckets
   ix->rebuild_work += s->n_rules;
   for (u32 i = 0; i < s->n_rules; i++) ftpi_insert_rule(ix, s, i);
   ftpi_finalize(ix, s);
@@ -761,6 +783,307 @@ static u32 ftpi_candidates(AtpState *s, const AtpFtCell *p) {
   return out;
 }
 
+// --- True full-depth perfect discrimination tree (Regelbaum) ---------
+//
+// The depth-2 arg fingerprint above prunes the COMBINATOR case well
+// (one root, but the `app(app(...),...)` left spine differs by depth 2),
+// yet prunes NOTHING on the Sheffer / NAND class: every rule is
+// nand-rooted with VARIABLES at the four sampled depth-2 grandchild
+// positions, so ftpi_pos_compatible never fires and cand/query == n_rules
+// (prune-ratio ~1.0).  Sheffer rules only diverge DEEPER -- e.g.
+// nand(nand(x,nand(x,x)),y) vs nand(x,nand(nand(y,y),z)) agree to depth 2
+// and split at depth 3+.  A fixed-depth fingerprint can never reach that.
+//
+// This is a TRUE perfect discrimination tree (WM Regelbaum,
+// DSBaumOperationen): an edge-labelled trie over the rule-LHS flatterm
+// PREORDER symbol string.  Each cell of a pattern contributes ONE edge:
+//   * a concrete function symbol f  -> an edge labelled f (the subject
+//     must carry f at this position to descend);
+//   * a variable                    -> the single STAR edge `*` (the
+//     pattern variable matches ANY subterm, so the subject SKIPS its
+//     whole subterm under this edge).
+// The path from the root to a leaf spells one pattern's full preorder;
+// the leaf carries the ascending list of rule slots whose LHS (or, for
+// unorientable rules, RHS) has exactly that preorder shape.
+//
+// A QUERY descends by the SUBJECT's own preorder, so it touches only the
+// leaves of STRUCTURALLY-COMPATIBLE patterns and fails early on a
+// non-matching cell -- O(subject preorder length) instead of O(n_rules).
+//
+// SOUNDNESS (superset of ft_match's matches).  At a subject cell sc:
+//   * sc concrete (sym=f, arity a): a pattern matches here iff the
+//     pattern has either f (then ft_match recurses into f's a children --
+//     follow the f edge and descend into sc's children) OR a variable
+//     (ft_match binds the whole sc subterm -- follow the STAR edge and
+//     skip sc's subterm to sc->end->next).  Both edges are explored; no
+//     match is dropped.  A concrete pattern symbol g != f at this
+//     position would make ft_match fail (sym mismatch), and indeed no
+//     g edge is followed -- the ONLY pruning, exactly ft_match's per-
+//     position symbol/arity reject.
+//   * sc a variable (rare on this path -- the redex root is ground, but
+//     deeper CP/RHS cells can be vars): ft_match with a CONCRETE pattern
+//     symbol vs a variable subject FAILS (pat CTR, subj var -> 0); only
+//     a pattern variable matches.  So we follow ONLY the STAR edge,
+//     skipping sc's subterm.  This is both sound and tighter.
+// Arity is implied by the symbol (a constructor's arity is fixed per
+// symbol id), so a same-symbol edge always has matching arity -- no
+// separate arity check is needed in the tree.
+//
+// ORDER-PRESERVATION.  The tree returns a SET of candidate slots; the
+// caller's selection (ascending slot scan + WM-DFS first-match) needs
+// them in ASCENDING slot order, identical to the linear scan's visit
+// order.  We collect leaf rule-lists during the descent (each leaf list
+// is itself ascending) and SORT the merged candidate buffer ascending
+// before returning.  The candidate SET is identical to the fingerprint's
+// (both are sound supersets of ft_match's matches restricted by the
+// structural reject), so the downstream winner is byte-identical.
+//
+// INCREMENTAL MAINTENANCE.  Built/extended in lockstep with the
+// fingerprint (ftpi_ensure): a pure-append tail inserts only new rules'
+// preorders; any revision-without-count change forces a full rebuild
+// (same pure-append witness).  Add inserts a path + appends the slot to
+// the leaf list (ascending, since rules are inserted in slot order);
+// kill/orient-flip bump r_revision -> rebuild.  Node pool + leaf-list
+// arena are reused across rebuilds (reset counts, keep allocations).
+//
+// AC mask / slice path: the tree, like the fingerprint, is consulted
+// only on the full-range AC-off path (ftpi_applicable); AC matches
+// modulo AC (a syntactic trie cannot capture that) and the slice path
+// iterates a caller sub-range -- both fall back to the dense scan.
+
+// A STAR (variable) edge is labelled with this reserved symbol; concrete
+// edges carry the cell's real `sym` (always < WF_VAR_BIT, so distinct).
+#define FTDT_STAR  0xFFFFFFFFu
+
+// Sentinel for "no such child edge".
+#define FTDT_NO_NODE 0xFFFFFFFFu
+
+// One trie node.  Children are an unsorted small array of (label, child)
+// edges -- arity here is tiny (<=2 for the indexed operators) and the
+// branching factor is the live signature size, so a linear edge scan is
+// cheaper than a hash.  `leaf` holds the ascending rule slots whose
+// preorder ENDS at this node (a per-node growable run; rules are inserted
+// in ascending slot order so a plain append keeps it sorted).
+typedef struct FtDtNode_s {
+  u32 *labels;     // edge labels (concrete sym or FTDT_STAR)
+  u32 *kids;       // child node indices, parallel to labels
+  u32  n_edge, cap_edge;
+  u32 *leaf;       // ascending rule slots whose preorder ENDS at this node
+  u32  leaf_n, leaf_cap;
+} FtDtNode;
+
+// Allocate a fresh empty node, returning its index.  Node 0 is the root.
+// Slots below the high-water mark (dt_hi_nodes) are REUSED with their
+// existing labels/kids/leaf allocations -- just zero the live counts --
+// so a rebuild does not leak the previous build's per-node buffers; only
+// genuinely new slots get fresh (NULL) buffers.
+static u32 ftdt_node_new(FtPiIndex *ix) {
+  u32 i = ix->dt_n_nodes;
+  if (i < ix->dt_hi_nodes) {              // reuse an already-allocated slot
+    FtDtNode *nd = &ix->dt_nodes[i];
+    nd->n_edge = 0u;
+    nd->leaf_n = 0u;
+    ix->dt_n_nodes++;
+    return i;
+  }
+  if (ix->dt_n_nodes == ix->dt_cap_nodes) {
+    u32 nc = ix->dt_cap_nodes ? ix->dt_cap_nodes * 2u : 64u;
+    FtDtNode *nn = (FtDtNode *)realloc(ix->dt_nodes, nc * sizeof(FtDtNode));
+    if (nn == NULL) thvm_fatal("ftdt: node pool OOM");
+    ix->dt_nodes = nn;
+    ix->dt_cap_nodes = nc;
+  }
+  FtDtNode *nd = &ix->dt_nodes[i];
+  nd->labels = NULL; nd->kids = NULL; nd->n_edge = 0u; nd->cap_edge = 0u;
+  nd->leaf = NULL; nd->leaf_n = 0u; nd->leaf_cap = 0u;
+  ix->dt_n_nodes++;
+  ix->dt_hi_nodes = ix->dt_n_nodes;
+  return i;
+}
+
+// Find the child of `node` reached by `label`, or FTDT_NO_NODE.
+static u32 ftdt_edge_find(const FtPiIndex *ix, u32 node, u32 label) {
+  const FtDtNode *nd = &ix->dt_nodes[node];
+  for (u32 e = 0; e < nd->n_edge; e++) {
+    if (nd->labels[e] == label) return nd->kids[e];
+  }
+  return FTDT_NO_NODE;
+}
+
+// Find-or-create the child of `node` reached by `label`; returns its
+// index.  Realloc may move ix->dt_nodes, so re-fetch the node pointer
+// after any node allocation.
+static u32 ftdt_edge_get(FtPiIndex *ix, u32 node, u32 label) {
+  u32 hit = ftdt_edge_find(ix, node, label);
+  if (hit != FTDT_NO_NODE) return hit;
+  u32 child = ftdt_node_new(ix);   // may realloc dt_nodes
+  FtDtNode *nd = &ix->dt_nodes[node];
+  if (nd->n_edge == nd->cap_edge) {
+    u32 nc = nd->cap_edge ? nd->cap_edge * 2u : 4u;
+    u32 *nl = (u32 *)realloc(nd->labels, nc * sizeof(u32));
+    u32 *nk = (u32 *)realloc(nd->kids,   nc * sizeof(u32));
+    if (nl == NULL || nk == NULL) thvm_fatal("ftdt: edge array OOM");
+    nd->labels = nl;
+    nd->kids   = nk;
+    nd->cap_edge = nc;
+  }
+  nd->labels[nd->n_edge] = label;
+  nd->kids[nd->n_edge]   = child;
+  nd->n_edge++;
+  return child;
+}
+
+// Append rule slot `rule` to node `node`'s ascending leaf list.
+static void ftdt_leaf_push(FtPiIndex *ix, u32 node, u32 rule) {
+  FtDtNode *nd = &ix->dt_nodes[node];
+  if (nd->leaf_n == nd->leaf_cap) {
+    u32 nc = nd->leaf_cap ? nd->leaf_cap * 2u : 4u;
+    u32 *nv = (u32 *)realloc(nd->leaf, nc * sizeof(u32));
+    if (nv == NULL) thvm_fatal("ftdt: leaf list OOM");
+    nd->leaf = nv;
+    nd->leaf_cap = nc;
+  }
+  nd->leaf[nd->leaf_n++] = rule;
+}
+
+// Insert one PATTERN (lhs/rhs flatterm) into the tree under rule slot
+// `rule`.  Walks the pattern preorder via `next`; each cell emits one
+// edge (concrete sym, or FTDT_STAR for a variable).  The terminal node
+// gets `rule` appended to its leaf list.
+static void ftdt_insert_pattern(FtPiIndex *ix, const AtpFtCell *pat, u32 rule) {
+  const AtpFtCell *end_after = (pat->end != NULL) ? pat->end->next : NULL;
+  u32 node = 0u;   // root
+  for (const AtpFtCell *p = pat; p != NULL && p != end_after; p = p->next) {
+    u32 label = (p->sym & WF_VAR_BIT) ? FTDT_STAR : p->sym;
+    node = ftdt_edge_get(ix, node, label);   // may realloc; node index stable
+  }
+  ftdt_leaf_push(ix, node, rule);
+}
+
+// Reset the tree to a single empty root, reusing the node pool +
+// per-node allocations.  Called at the start of a full rebuild.
+static void ftdt_reset(FtPiIndex *ix) {
+  ix->dt_n_nodes = 0u;
+  (void)ftdt_node_new(ix);   // node 0 = root (reuses slot 0 if present)
+}
+
+// Collect the leaf rule slots of node `node` into the candidate buffer.
+static void ftdt_emit_leaf(FtPiIndex *ix, u32 node, u32 *out) {
+  const FtDtNode *nd = &ix->dt_nodes[node];
+  for (u32 i = 0; i < nd->leaf_n; i++) {
+    if (*out == ix->cand_cap) {
+      u32 nc = ix->cand_cap ? ix->cand_cap * 2u : 64u;
+      u32 *nb = (u32 *)realloc(ix->cand, nc * sizeof(u32));
+      if (nb == NULL) thvm_fatal("ftdt: candidate buffer OOM");
+      ix->cand = nb;
+      ix->cand_cap = nc;
+    }
+    ix->cand[(*out)++] = nd->leaf[i];
+  }
+}
+
+// Recursive descent: match the subject preorder [sc, sc_end) against the
+// tree rooted at `node`, appending every reachable leaf's rule slots to
+// ix->cand[0..*out).  `sc` is the current subject cell, `sc_end` is the
+// one-past cell of the WHOLE redex subterm (descent succeeds only when a
+// pattern consumes EXACTLY up to sc_end -- mirroring ft_match matching
+// the ENTIRE lhs against the ENTIRE redex).
+//
+//   * sc == sc_end  -> the subject is fully consumed; this node's leaf
+//     list is a candidate set (those patterns whose preorder ended here).
+//   * sc concrete f -> follow the f edge (descend into sc's children, the
+//     preorder continues at sc->next) AND the STAR edge (the pattern var
+//     binds sc's whole subterm; skip to sc->end->next).
+//   * sc a variable -> only the STAR edge (a concrete pattern symbol
+//     cannot match a variable subject; ft_match returns 0 there).
+static void ftdt_descend(FtPiIndex *ix, u32 node,
+                         const AtpFtCell *sc, const AtpFtCell *sc_end,
+                         u32 *out) {
+  if (sc == sc_end) {                 // subject consumed: emit this node's leaves
+    ftdt_emit_leaf(ix, node, out);
+    return;
+  }
+  // STAR edge: pattern variable binds sc's whole subterm (skip it).
+  u32 star = ftdt_edge_find(ix, node, FTDT_STAR);
+  if (star != FTDT_NO_NODE) {
+    const AtpFtCell *skip = (sc->end != NULL) ? sc->end->next : sc_end;
+    ftdt_descend(ix, star, skip, sc_end, out);
+  }
+  // Concrete edge: only when the subject cell is itself concrete (a
+  // pattern's concrete symbol cannot match a variable subject).  The
+  // preorder continues at sc->next (sc's first child), so the same
+  // sc_end bound carries through -- sc's children sit inside [sc, sc_end).
+  if ((sc->sym & WF_VAR_BIT) == 0u) {
+    u32 child = ftdt_edge_find(ix, node, sc->sym);
+    if (child != FTDT_NO_NODE) {
+      ftdt_descend(ix, child, sc->next, sc_end, out);
+    }
+  }
+}
+
+// ascending-u32 comparator for qsort (candidate ordering).
+static int ftdt_u32_cmp(const void *a, const void *b) {
+  u32 x = *(const u32 *)a, y = *(const u32 *)b;
+  return (x > y) - (x < y);
+}
+
+// Fill ix->cand[0..count) with the rule slots whose LHS/RHS preorder is
+// STRUCTURALLY COMPATIBLE with subject cell `p`, in ASCENDING slot order
+// with duplicates removed (a rule appears in two leaves only via the
+// unorientable LHS+RHS double-insert; the dedup offers it once).  This is
+// a SOUND SUPERSET of ft_match's matches at `p`, in the same ascending
+// order the linear scan visits -- so the caller's first-match / WM-DFS
+// selection picks the byte-identical winner.
+static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p) {
+  FtPiIndex *ix = &g_ftpi;
+  const AtpFtCell *p_end = (p->end != NULL) ? p->end->next : NULL;
+  u32 out = 0u;
+  ftdt_descend(ix, 0u, p, p_end, &out);
+  if (out > 1u) {
+    qsort(ix->cand, out, sizeof(u32), ftdt_u32_cmp);
+    u32 w = 1u;
+    for (u32 r = 1u; r < out; r++) {
+      if (ix->cand[r] != ix->cand[w - 1u]) ix->cand[w++] = ix->cand[r];
+    }
+    out = w;
+  }
+  ix->q_queries++;
+  ix->q_candidates += out;
+  ix->q_rules_seen += s->n_rules;
+  // THVM_ATPFT_DT_CHECK=1: airtight superset proof.  For EVERY live rule,
+  // if ft_match accepts its LHS (or, for an unorientable rule, its RHS)
+  // against `p`, that slot MUST appear in the tree candidate set -- else
+  // the tree dropped a real match (unsound).  O(n_rules) per query, so
+  // gated off by default; run it on a saturation to certify soundness.
+  static int dt_check = -1;
+  if (dt_check < 0) {
+    const char *e = getenv("THVM_ATPFT_DT_CHECK");
+    dt_check = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  }
+  if (dt_check) {
+    AtpFtSubst chk = {0};
+    for (u32 r = 0; r < s->n_rules; r++) {
+      if (s->r_dead != NULL && s->r_dead[r]) continue;
+      AtpFtCell *lhs = s->lhs_ft[r];
+      AtpFtCell *rhs = s->rhs_ft[r];
+      if (lhs == NULL || rhs == NULL) continue;
+      u8 unor = (u8)(s->n_unorient > 0u && !s->r_orient[r]);
+      ft_subst_reset(&chk);
+      int m = ft_match(lhs, p, &chk);
+      if (!m && unor) { ft_subst_reset(&chk); m = ft_match(rhs, p, &chk); }
+      if (!m) continue;
+      int found = 0;
+      for (u32 k = 0; k < out; k++) if (ix->cand[k] == r) { found = 1; break; }
+      if (!found) {
+        fprintf(stderr, "[ftdt SOUNDNESS VIOLATION] rule %u ft_matches p but "
+                "is NOT in the tree candidate set (out=%u)\n", r, out);
+        thvm_fatal("ftdt: unsound (dropped a real match)");
+      }
+    }
+  }
+  return out;
+}
+
 // Per-cell redex attempt -- the body shared by the legacy pre-order
 // scan (find_redex_ft) and the WM mixmost walk
 // (atp_normalize_mixmost_ft).  Tries every live oriented rule in the
@@ -817,13 +1140,25 @@ static int ft_cell_try_rules(AtpState   *s,
     ftpi_stats_arm();
     ftpi_ensure(s);
     // Engage pruning only when one root symbol dominates the rule set
-    // (top-symbol fast-fail is then useless and the arg-fingerprint
-    // index is the real lever).  See FtPiIndex.max_bucket.  A
-    // multi-operator signature keeps the dense scan (ft_match's first
-    // per-position compare already fast-fails on the root).
+    // (top-symbol fast-fail is then useless and a structural index is
+    // the real lever).  See FtPiIndex.max_bucket.  A multi-operator
+    // signature keeps the dense scan (ft_match's first per-position
+    // compare already fast-fails on the root).
     if (ftpi_pruning_worthwhile()) {
+      // Default: the full-depth perfect discrimination tree (ftdt_*),
+      // which discriminates Sheffer rules at their deeper concrete
+      // positions where the depth-2 fingerprint (ftpi_candidates) prunes
+      // nothing.  THVM_NO_DISCTREE=1 reverts to the fingerprint path for
+      // ON-vs-OFF byte-identity measurement.  Both return the identical
+      // candidate SET in ascending slot order (the tree just prunes
+      // deeper), so the winner below is byte-identical either way.
+      static int no_disctree = -1;
+      if (no_disctree < 0) {
+        const char *e = getenv("THVM_NO_DISCTREE");
+        no_disctree = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+      }
       use_pi   = 1;
-      pi_ncand = ftpi_candidates(s, p);
+      pi_ncand = no_disctree ? ftpi_candidates(s, p) : ftdt_candidates(s, p);
       pi_cand  = g_ftpi.cand;
     }
   }
