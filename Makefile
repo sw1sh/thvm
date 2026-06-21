@@ -275,6 +275,7 @@ TESTS := \
   $(BIN)/test_buf_pool \
   $(BIN)/test_consumer_count \
   $(BIN)/test_kernel_fire_gen \
+  $(BIN)/test_autotune_correctness_gate \
   $(BIN)/test_view_shrink \
   $(BIN)/test_view_permute \
   $(BIN)/test_view_pad \

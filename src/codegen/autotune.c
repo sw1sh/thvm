@@ -21,11 +21,17 @@
 // real wallclock; 5 is enough to separate small kernels from each
 // other against a ~10us-resolution clock.
 #define KAUTOTUNE_N_RUNS 5
-#define KAUTOTUNE_CACHE_VERSION 2
+#define KAUTOTUNE_CACHE_VERSION 3
 #define KAUTOTUNE_CACHE_PATH_CAP 1024
 #define KAUTOTUNE_MAX_CANDIDATES 16
 #define KAUTOTUNE_SEQ_MAX 4
 #define KAUTOTUNE_MAX_SEQS 64
+
+// Cap on the number of output elements scanned by the correctness gate.
+// The gate runs once per autotune search (never on warm replay), so a
+// bounded scan keeps it cheap even on multi-million-element outputs while
+// still catching gross NaN/Inf/numeric divergence.
+#define KAUTOTUNE_STAT_MAX_ELEMS (1u << 20)
 
 typedef struct {
   u8   n;
@@ -559,14 +565,149 @@ static void kautotune_insert_top(KOptSeqBench *top, u32 *n_top, u32 cap,
   *n_top = n;
 }
 
+// Correctness gate (tinygrad parity): the BEAM search picks variants by
+// SPEED, so a fast-but-wrong tile (NaN/Inf, or a numerically divergent
+// reduction) would otherwise win and get cached.  We compute a cheap,
+// dtype-aware scalar stat over the kernel's output buffer for the no-opt
+// baseline, then reject any candidate whose output is non-finite or
+// drifts from the baseline sum-of-magnitudes beyond a per-dtype tolerance.
+typedef struct {
+  int    valid;       // 0 = stat could not be read (gate disabled for this kid)
+  int    all_finite;  // 0 if any scanned element is NaN/Inf
+  double sum_abs;     // sum of |x| over the scanned prefix
+} KautotuneOutStat;
+
+// Per-dtype divergence tolerance, relative to |baseline.sum_abs|.  bf16/f16
+// accumulate visible rounding under legitimate loop reorders, so allow a
+// looser band there; f32 reorders stay tight.  Anything coarser than this
+// is a real miscompile.
+static double kautotune_stat_tol(u32 dt) {
+  switch (dt) {
+    case DT_BF16:
+    case DT_FP16:
+    case DT_FP8E4M3:
+    case DT_FP8E5M2: return 3e-2;
+    case DT_FP32:    return 1e-4;
+    case DT_FP64:    return 1e-9;
+    default:         return 1e-4;  // integer/other: exact-ish
+  }
+}
+
+// Decode one element at `idx` of a host byte buffer of dtype `dt` to f64.
+static double kautotune_decode_elem(void const *base, u32 dt, u64 idx) {
+  switch (dt) {
+    case DT_FP32:  return (double)((f32 const *)base)[idx];
+    case DT_FP64:  return ((f64 const *)base)[idx];
+    case DT_BF16:  return (double)bf16_to_f32(((u16 const *)base)[idx]);
+    case DT_FP16:  return (double)fp16_to_f32(((u16 const *)base)[idx]);
+    case DT_FP8E4M3: return (double)fp8e4m3_to_f32(((u8 const *)base)[idx]);
+    case DT_FP8E5M2: return (double)fp8e5m2_to_f32(((u8 const *)base)[idx]);
+    case DT_INT32: return (double)((i32 const *)base)[idx];
+    default:       return 0.0;  // unhandled dtype -> contributes nothing
+  }
+}
+
+// Read the kernel's output buffer to host and reduce a {all_finite, sum_abs}
+// stat over the first min(numel, KAUTOTUNE_STAT_MAX_ELEMS) elements.  Returns
+// a stat with valid=0 (gate skipped) when the buffer can't be read or the
+// dtype isn't one we decode -- the gate never blocks a kid it can't measure.
+static KautotuneOutStat kautotune_output_stat(KernelEntry const *ke) {
+  KautotuneOutStat st = {0, 1, 0.0};
+  if (ke == NULL || ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
+    return st;
+  }
+  TenDesc const *td = &TENS[ke->output_tid];
+  Backend *b = td->backend;
+  if (b == NULL || b->buf_read == NULL || td->buf_id == 0) {
+    return st;
+  }
+  u32 dt    = ke->output_dtype;
+  u64 numel = ke->output_numel;
+  if (numel == 0) {
+    return st;
+  }
+  // Only decode the dtypes we understand; otherwise leave the gate off
+  // for this kid rather than guess at the byte layout.
+  switch (dt) {
+    case DT_FP32: case DT_FP64: case DT_BF16: case DT_FP16:
+    case DT_FP8E4M3: case DT_FP8E5M2: case DT_INT32: break;
+    default: return st;
+  }
+  u64 scan = numel < KAUTOTUNE_STAT_MAX_ELEMS ? numel
+                                              : (u64)KAUTOTUNE_STAT_MAX_ELEMS;
+  u64 nbytes = dtype_storage_bytes(dt, scan);
+  if (nbytes == 0) {
+    return st;
+  }
+  void *host = malloc((size_t)nbytes);
+  if (host == NULL) {
+    return st;
+  }
+  if (b->buf_read(td->buf_id, host, nbytes) != 0) {
+    free(host);
+    return st;
+  }
+  int all_finite = 1;
+  double sum_abs = 0.0;
+  for (u64 i = 0; i < scan; i++) {
+    double v = kautotune_decode_elem(host, dt, i);
+    if (!isfinite(v)) {
+      all_finite = 0;
+      continue;
+    }
+    sum_abs += v < 0.0 ? -v : v;
+  }
+  free(host);
+  st.valid      = 1;
+  st.all_finite = all_finite;
+  st.sum_abs    = sum_abs;
+  return st;
+}
+
+// Accept iff the candidate output is finite and (when the baseline was
+// measurable) its sum-of-magnitudes matches the baseline within `tol`.
+// A non-finite candidate is always rejected.  When the baseline stat
+// couldn't be read (valid=0), the gate degrades to a finiteness-only
+// check so it never spuriously rejects on an unmeasured backend.
+static int kautotune_stat_accept(KautotuneOutStat const *baseline,
+                                 KautotuneOutStat const *cand, double tol) {
+  if (cand == NULL || !cand->valid) {
+    return 1;  // unmeasured candidate: don't block (gate off for this kid)
+  }
+  if (!cand->all_finite) {
+    return 0;  // NaN/Inf in the output -- never let it win
+  }
+  if (baseline == NULL || !baseline->valid || !baseline->all_finite) {
+    return 1;  // no trustworthy reference -> finiteness was enough
+  }
+  double diff = cand->sum_abs - baseline->sum_abs;
+  if (diff < 0.0) {
+    diff = -diff;
+  }
+  double bound = tol * ((baseline->sum_abs < 0.0 ? -baseline->sum_abs
+                                                 : baseline->sum_abs)
+                        + 1e-9);
+  return diff <= bound;
+}
+
 static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
-                               u32 n_runs, u64 *out_us) {
+                               u32 n_runs, KautotuneOutStat const *baseline,
+                               u64 *out_us) {
   axes_reset_to_default(ke);
   if (!kautotune_apply_seq(ke, seq)) {
     axes_reset_to_default(ke);
     return 0;
   }
   kernel_bench_fire(kid);
+  // Correctness gate: read this variant's output and reject it if it
+  // diverged from the baseline (or went non-finite).  A rejected variant
+  // returns 0 so the caller's `if (!kautotune_bench_seq(...)) continue;`
+  // skips it -- it can never win the search or be cached.
+  KautotuneOutStat cand = kautotune_output_stat(ke);
+  if (!kautotune_stat_accept(baseline, &cand, kautotune_stat_tol(ke->output_dtype))) {
+    axes_reset_to_default(ke);
+    return 0;
+  }
   if (out_us != NULL) {
     *out_us = kernel_bench_us(kid, n_runs);
   }
@@ -737,6 +878,10 @@ fn int kernel_autotune(u32 kid) {
   // bench loop, so the measurements compare hot kernels.
   axes_reset_to_default(ke);
   kernel_bench_fire(kid);
+  // Baseline output stat: the reference the correctness gate compares
+  // every candidate against.  Read AFTER the no-opt fire so it reflects
+  // the default (assumed-correct) kernel's result.
+  KautotuneOutStat baseline_stat = kautotune_output_stat(ke);
   u64 best_us = kernel_bench_us(kid, n_runs);
   KOptSeq best_seq = {0};
 
@@ -762,7 +907,7 @@ fn int kernel_autotune(u32 kid) {
     seq.opts[0] = candidates[i];
     seen[n_seen++] = seq;
     u64 us = 0;
-    if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &us)) {
+    if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &baseline_stat, &us)) {
       continue;
     }
     if (us < best_us) {
@@ -788,7 +933,7 @@ fn int kernel_autotune(u32 kid) {
           seen[n_seen++] = seq;
         }
         u64 us = 0;
-        if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &us)) {
+        if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &baseline_stat, &us)) {
           continue;
         }
         if (us < best_us) {
