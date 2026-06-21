@@ -319,10 +319,24 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent, u32 *out_unit_axis) {
 // walks for.  These helpers find that nested REDUCE and wrap it in OPT_TC in
 // place, leaving the surrounding elementwise chain intact.
 
+// An index-layer integer op (the addr/valid-mask arithmetic the production
+// lifter spells over UOP_RANGE leaves).  Positionally bound to the output
+// (m, n) ranges, so epilogue-safe (mirrors render_uop.c
+// rmu_epilogue_is_index_int_op).  A broadcast EXPAND of a {1,dim} gate over the
+// sequence axis surfaces in the value tree as IWHERE(ILT(range, extent), v, 0)
+// / IMOD index -- exactly this arithmetic, NOT data movement.
+static int rec_tc_is_index_int_op(u32 op) {
+  return op == UOP_IADD || op == UOP_ISUB || op == UOP_IMUL || op == UOP_IDIV
+      || op == UOP_IMOD || op == UOP_ILT  || op == UOP_IAND || op == UOP_IOR
+      || op == UOP_IXOR || op == UOP_ISHR || op == UOP_IWHERE;
+}
+
 // Walk a pure elementwise/cast store value for EXACTLY ONE UOP_REDUCE leaf (the
 // inlined matmul).  Mirrors render_uop.c rmu_epilogue_walk: any movement /
 // second reduce / unknown op makes it non-epilogue, so we reject and the bare
-// path leaves the root unchanged.  Returns the single REDUCE term, or 0.
+// path leaves the root unchanged.  Index-layer integer ALU (RANGE / I*) is
+// accepted -- the address/valid-mask arithmetic the epilogue renders per output
+// element.  Returns the single REDUCE term, or 0.
 static Term rec_tc_epilogue_walk(Term t, Term *out_red, int *n_red, int depth) {
   if (depth > 48) return (Term)1;            // sentinel: still OK, keep walking
   if (term_tag(t) != TAG_UOP) return (Term)1;
@@ -334,7 +348,8 @@ static Term rec_tc_epilogue_walk(Term t, Term *out_red, int *n_red, int depth) {
   if (op == UOP_CAST || op == UOP_BITCAST
       || uop_is_unary_elementwise((u8)op)
       || uop_is_binary_elementwise((u8)op)
-      || uop_is_ternary_elementwise((u8)op)) {
+      || uop_is_ternary_elementwise((u8)op)
+      || rec_tc_is_index_int_op(op)) {
     u8 ar = uop_arity((u8)op);
     for (u8 i = 0; i < ar; i++) {
       if (rec_tc_epilogue_walk(heap_read(term_val(t) + i), out_red, n_red,
@@ -417,6 +432,44 @@ static Term rec_tc_wrap_epilogue_reduce(Term root, Term reduce) {
   Term new_value = rec_tc_sub(&st, value, 0);
   if (new_value == value) return root;
   return uop_store(buf_out, addr_out, new_value);
+}
+
+// THVM_FUSE_MATMUL_EPILOGUE: classify a STORE whose value is an elementwise
+// epilogue chain over a SINGLE matmul REDUCE (the FLUX gated-residual / modulate
+// fused onto a projection).  Reports the matmul's K extent (and, optionally, the
+// clean M/N axis ids + extents) so the hand-opts pass can apply KOP_TC + the M/N
+// GLOBAL promote on the still-un-split DAG -- keeping the inlined matmul's
+// iteration space clean (2-range {m,k}/{k,n} operands) instead of letting the
+// generic elementwise UPCAST tile-split M/N (which decomposes the operands into
+// 3-range sub-tiles the simdgroup_matrix recogniser / TILED emitter can't match).
+// Returns 1 on a clean 2x2 epilogue matmul; 0 otherwise.
+fn int uop_classify_epilogue_matmul(Term root, u32 *out_K,
+                                    u32 *out_m_axis, u32 *out_m_extent,
+                                    u32 *out_n_axis, u32 *out_n_extent) {
+  if (out_K        != NULL) *out_K        = 0;
+  if (out_m_axis   != NULL) *out_m_axis   = 0xFFFFFFFFu;
+  if (out_n_axis   != NULL) *out_n_axis   = 0xFFFFFFFFu;
+  if (out_m_extent != NULL) *out_m_extent = 0;
+  if (out_n_extent != NULL) *out_n_extent = 0;
+  if (!ru_fuse_epilogue_on()) return 0;
+  Term reduce = 0;
+  Term synth = rec_tc_synth_matmul_store(root, &reduce);
+  if (synth == 0) return 0;
+  if (getenv("THVM_EPICLS3") && reduce != 0) {
+    Term mul = uop_reduce_src(reduce);
+    Term a = (term_tag(mul) == TAG_UOP && term_ext(mul) == UOP_MUL) ? rec_tc_peel_cast(heap_read(term_val(mul) + 0)) : 0;
+    fprintf(stderr, "[epicls3] a_op=%u\n", a ? (term_tag(a) == TAG_UOP ? term_ext(a) : 998u) : 997u);
+  }
+  u32 em_axis, em_ext, en_axis, en_ext, ek_ext = 0, unit_axis = 0;
+  if (!uop_classify_matmul(synth, &ek_ext, &unit_axis) || unit_axis != 0) return 0;
+  if (!uop_matmul_mn_axes(synth, &em_axis, &em_ext, &en_axis, &en_ext)) return 0;
+  if (ek_ext == 0) return 0;
+  if (out_K        != NULL) *out_K        = ek_ext;
+  if (out_m_axis   != NULL) *out_m_axis   = em_axis;
+  if (out_m_extent != NULL) *out_m_extent = em_ext;
+  if (out_n_axis   != NULL) *out_n_axis   = en_axis;
+  if (out_n_extent != NULL) *out_n_extent = en_ext;
+  return 1;
 }
 
 // Wrap the STORE root's value with UOP_OPT(_, TC, 0) when the matmul

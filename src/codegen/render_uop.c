@@ -2014,10 +2014,26 @@ static int rmu_tc_batched_on(void) {
   return on;
 }
 
+// An index-layer integer op (the addr/predicate arithmetic the production
+// lifter spells over UOP_RANGE leaves).  These are positionally bound to the
+// output (m, n) ranges -- the epilogue renderer substitutes _m/_n for the M/N
+// RANGE terms and rmu_emit_term spells the rest per output element -- so they
+// are epilogue-safe (not data movement).  A broadcast EXPAND of a {1,dim} gate
+// over the sequence axis surfaces here as an IWHERE(ILT(range, extent), val, 0)
+// valid-mask / IMOD index, which is exactly this index arithmetic.
+static int rmu_epilogue_is_index_int_op(u32 op) {
+  return op == UOP_RANGE || op == UOP_IADD || op == UOP_ISUB || op == UOP_IMUL
+      || op == UOP_IDIV  || op == UOP_IMOD || op == UOP_ILT  || op == UOP_IAND
+      || op == UOP_IOR   || op == UOP_IXOR || op == UOP_ISHR || op == UOP_IWHERE;
+}
+
 // Walk a store-value tree: it must be a pure ELEMENTWISE/CAST tree over
 // INDEX_E/CONST leaves plus EXACTLY ONE UOP_OPT(TC) leaf (the matmul).  A bare
 // UOP_REDUCE, a non-TC UOP_OPT, or any unknown/movement op makes it non-fusable.
-// Does not recurse into the OPT_TC (that is the matmul, emitted by the template).
+// Index-layer integer ALU (RANGE / I*) is accepted -- it is the address/valid-
+// mask arithmetic the epilogue renders per output element (see
+// rmu_epilogue_is_index_int_op).  Does not recurse into the OPT_TC (that is the
+// matmul, emitted by the template).
 static int rmu_epilogue_walk(Term t, Term *out_tc, int *n_tc, u32 depth) {
   if (depth > 48) return 0;
   if (term_tag(t) == TAG_NUM) return 1;
@@ -2033,7 +2049,8 @@ static int rmu_epilogue_walk(Term t, Term *out_tc, int *n_tc, u32 depth) {
   if (op == UOP_CAST || op == UOP_BITCAST
       || uop_is_unary_elementwise((u8)op)
       || uop_is_binary_elementwise((u8)op)
-      || uop_is_ternary_elementwise((u8)op)) {
+      || uop_is_ternary_elementwise((u8)op)
+      || rmu_epilogue_is_index_int_op(op)) {
     u8 ar = uop_arity(op);
     for (u8 i = 0; i < ar; i++) {
       if (!rmu_epilogue_walk(heap_read(term_val(t) + i), out_tc, n_tc, depth + 1))
@@ -3839,9 +3856,10 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
         && m_par && n_par && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok
         && !(is_batched && (a_val != 0 || b_is_int8))
         && rmu_tc_pick_tile(m_extent, n_extent, k_extent, &_dt));
-    fprintf(stderr, "[mm] M=%u N=%u K=%u batch=%u%s path=%s\n",
+    fprintf(stderr, "[mm] M=%u N=%u K=%u batch=%u%s path=%s%s\n",
             m_extent, n_extent, k_extent, batch_extent,
-            a_trans ? " Atrans" : "", _tiled ? "TILED" : "parallel_tc/other");
+            a_trans ? " Atrans" : "", _tiled ? "TILED" : "parallel_tc/other",
+            epilogue_value != 0 ? " +epi" : "");
   }
   if ((!is_batched || rmu_tc_batched_on()) && !a_trans && m_par && n_par
       && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok

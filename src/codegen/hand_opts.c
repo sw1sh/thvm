@@ -221,6 +221,20 @@ static int hand_opt_classify_matmul(KernelEntry const *ke, u32 *out_K) {
       return 1;
     }
   }
+  // THVM_FUSE_MATMUL_EPILOGUE: an epilogue-fused gate/modulate kernel has the
+  // matmul REDUCE nested inside an elementwise chain (not a bare-REDUCE store
+  // value), so the two classifiers above decline.  Recognise it so Section 1
+  // applies KOP_TC + M/N GLOBAL on the still-un-split DAG -- WITHOUT this the
+  // kernel falls into the generic elementwise UPCAST below, which tile-splits
+  // M/N and 3-range-decomposes the matmul operands (losing the TILED path).
+  {
+    u32 k_extent = 0;
+    if (uop_classify_epilogue_matmul(ke->cached_lift.store_root, &k_extent,
+                                     NULL, NULL, NULL, NULL) && k_extent != 0) {
+      if (out_K != NULL) *out_K = k_extent;
+      return 1;
+    }
+  }
   return 0;
 }
 

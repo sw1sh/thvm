@@ -1202,9 +1202,68 @@ static int rb_matmul_input_fusable(u32 node_idx) {
 //   * every hop up to (and including) the realized sink has exactly ONE
 //     consumer that is an elementwise/cast op (no branch, no movement),
 //   * the chain reaches a realized boundary WITHOUT crossing another reduce.
+// Will the codegen keep this matmul on the TILED (simdgroup_matrix) path when
+// it is inlined as an epilogue?  The TILED emitter (render_uop.c
+// rmu_emit_matmul_tc_tiled) requires BOTH MUL operands to be clean buffer reads
+// (a bare INDEX_E over a BUFFER / BUFFERIZE boundary, possibly bf16->f32 CAST-
+// wrapped) and a 2-D (non-batched) shape.  A fused-producer A (the un-realized
+// attention / SwiGLU output -- an ALU tree, not a buffer) or a batched matmul
+// (the attention Q@K^T / @V, a shared 3rd range) is NOT epilogue-TILED-able:
+// inlining it would drop the matmul to a SCALAR accumulator inside the gate
+// kernel (strictly worse than its own TILED kernel).  Returns 1 only when the
+// epilogue fuse will stay TILED; mirrors rmu_detect_matmul_tc's operand gate so
+// the scheduler does not un-realize a matmul the codegen cannot fuse cleanly.
+// Peel CAST / movement views off a matmul operand down to its data leaf, so the
+// "clean buffer operand" test sees through the Transpose[W] view, the bf16->f32
+// widening cast, and the {seq,heads,head_dim} reshape that wrap a buffer read.
+// Stops at the first non-cast / non-movement op (the leaf or an ALU producer).
+static Term rb_peel_operand_views(Term t, u32 depth) {
+  if (depth > 32 || term_tag(t) != TAG_UOP) return t;
+  u8 op = term_ext(t);
+  if (op == UOP_CAST || op == UOP_BITCAST || uop_is_movement(op))
+    return rb_peel_operand_views(heap_read(term_val(t) + 0), depth + 1);
+  return t;
+}
+
+// Is this matmul operand a STABLE buffer read whose realize the codegen will see
+// as a clean INDEX_E -- a true input/weight BUFFER (or leaf var) behind cast +
+// movement views?  A FUSED ALU producer (the un-realized attention / SwiGLU
+// output) is rejected outright; a BUFFERIZE intermediate is ALSO rejected,
+// because a downstream pass (the attention flash-fusion un-realize) may strip
+// its realize so the operand arrives at codegen as a recomputed ALU tree (the
+// to_out projection's ctxI) -- which the TILED epilogue emitter cannot stage,
+// dropping the matmul off path=TILED.  Epilogue-only fusion provides no
+// input-fuse path, so only a genuinely stable buffer operand is safe.
+static int rb_operand_is_clean_buffer(Term t) {
+  Term leaf = rb_peel_operand_views(t, 0);
+  if (term_tag(leaf) != TAG_UOP) return 1;        // TEN / leaf var: a stable buffer
+  return term_ext(leaf) == UOP_BUFFER;
+}
+
+static int rb_matmul_epilogue_tc_emittable(u32 node_idx) {
+  if (BUFFERIZE_NODES[node_idx].op != UOP_REDUCE) return 0;
+  Term reduce = term_new(0, TAG_UOP, UOP_REDUCE, BUFFERIZE_NODES[node_idx].loc);
+  if (uop_reduce_n_axes(reduce) != 1) return 0;     // single K axis
+  Term mul = uop_reduce_src(reduce);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  // BOTH operands must be clean buffer reads.  A fused-producer A (the
+  // un-realized attention / SwiGLU output, an ALU tree) is NOT epilogue-TILED-
+  // able: inlining it would drop the matmul to a scalar accumulator inside the
+  // gate kernel, dropping it off path=TILED -- strictly worse than its own TILED
+  // kernel.  Keep such a matmul its own realized boundary (return 0 -> no
+  // un-realize).  Mirrors render_uop.c rmu_detect_matmul_tc's operand gate.
+  if (!rb_operand_is_clean_buffer(heap_read(term_val(mul) + 0))) return 0;
+  if (!rb_operand_is_clean_buffer(heap_read(term_val(mul) + 1))) return 0;
+  return 1;
+}
+
 static int rb_matmul_epilogue_fusable(u32 node_idx) {
   if (!(BUFFERIZE_NODES[node_idx].reasons & BUFFERIZE_REASON_MATMUL)) return 0;
   if (BUFFERIZE_NODES[node_idx].op != UOP_REDUCE) return 0;
+  // Only un-realize when the codegen will keep the inlined matmul TILED.  An
+  // un-TILED-emittable matmul (fused-producer A, batched) would fall to a scalar
+  // accumulator inside the consumer -- worse than its own TILED kernel.
+  if (!rb_matmul_epilogue_tc_emittable(node_idx)) return 0;
   u32 cur = node_idx;
   u32 budget = RU_CONSRED_BFS_CAP;
   while (budget-- > 0) {

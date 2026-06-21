@@ -44,6 +44,22 @@ fn Term uop_dag_apply_tc(Term root, u32 factor) {
     Term inner = uop_opt_target(value);
     if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_REDUCE) return 0;
     new_value = uop_opt(inner, UOP_OPT_TC, factor);
+  } else if (ru_fuse_epilogue_on()) {
+    // Layout (c): THVM_FUSE_MATMUL_EPILOGUE -- the store value is an elementwise
+    // epilogue chain over a SINGLE matmul REDUCE (the scheduler un-realized the
+    // matmul into the consuming gate/modulate).  Wrap that nested REDUCE in
+    // OPT_TC in place, keeping the chain, so hand-opts (Section 1) treats the
+    // gate kernel as a matmul -- KOP_TC + M/N GLOBAL on the un-split DAG, no
+    // elementwise UPCAST tile-split (which would 3-range-decompose the operands
+    // and lose the TILED path).  rec_tc_find_epilogue_reduce rejects any
+    // movement/second-reduce, so the wrapped form is exactly what the codegen
+    // epilogue (render_uop.c rmu_detect_matmul_tc) walks.  rec_tc_wrap_epilogue_-
+    // reduce returns the rebuilt STORE (or `root` if nothing changed); honour the
+    // factor by re-wrapping with the chosen tile size.
+    Term red = rec_tc_find_epilogue_reduce(value);
+    if (red == 0) return 0;
+    RecTcSubState st = { red, uop_opt(red, UOP_OPT_TC, factor), {0}, {0}, 0 };
+    new_value = rec_tc_sub(&st, value, 0);
   } else {
     return 0;
   }
