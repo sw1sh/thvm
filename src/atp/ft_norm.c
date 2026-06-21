@@ -286,6 +286,481 @@ static int ft_wm_pattern_before(const AtpFtCell *a, const AtpFtCell *b) {
   return 0;
 }
 
+// --- Candidate-pruning fingerprint index over rule LHS flatterms -----
+//
+// The per-cell scan in ft_cell_try_rules is O(n_rules): for a cell that
+// is already in normal form -- the overwhelming majority on a large
+// saturation -- it calls ft_match against EVERY rule LHS and all fail.
+// Waldmeister's Regelbaum (a perfect discrimination tree) descends by
+// term structure and rejects a non-matching cell in O(term depth); that
+// is the ~2x throughput gap.  The existing top-symbol pre-filter only
+// discriminates the ROOT symbol -- useless on a single-operator
+// signature (combinators / Sheffer) where every rule shares it.
+//
+// We index the rule LHS flatterms by a fixed-position FINGERPRINT
+// (Schulz-style): the concrete symbol (or VAR/ABSENT marker) at seven
+// sampled path positions to depth 2 -- the root, the two depth-1
+// arguments (arg0, arg1), and the four depth-2 grandchildren (arg0.arg0,
+// arg0.arg1, arg1.arg0, arg1.arg1).  A rule is a CANDIDATE for a subject
+// cell iff at every sampled position EITHER the rule's LHS has a
+// variable there (a variable matches any subterm), OR the subject has a
+// variable there (defensive -- the redex cell is CTR by construction),
+// OR the position is ABSENT on either side (low arity, caught by
+// ft_match's arity check), OR the two concrete symbols AGREE.  A
+// position prunes ONLY when both sides are concrete and DIFFER -- a
+// subset of the cases ft_match rejects on a per-position compare.  So
+// the candidate set is a SOUND SUPERSET of the rules ft_match would
+// match (INVARIANT 1): no actual match is ever missed, and adding deeper
+// positions only ever TIGHTENS (drops guaranteed non-matches).
+//
+// Buckets are keyed by ROOT symbol so a CTR-rooted subject visits only
+// same-root rules + the (rare) var-rooted rules; within a bucket the
+// arg / grandchild fingerprint prunes further -- this is what cracks the
+// single-operator combinator case (one root bucket = all rules, where
+// the depth-1 arg signature alone still leaves ~150 candidates sharing
+// the `app(app(...),...)` left-nested prefix, and the depth-2
+// grandchildren split them apart).  Each bucket's rule slots are kept in
+// ASCENDING order, and a query MERGES the var-rooted list with the
+// matched bucket so candidates emerge in ascending global slot order --
+// the exact order the linear scan visits them, so the existing
+// first-match / WM-DFS selection picks the IDENTICAL winner (INVARIANT
+// 2: result is byte-identical).
+//
+// The index reflects s->lhs_ft[] for the FULL rule range and is rebuilt
+// whenever s->r_revision moves (the monotone counter bumped on every
+// rule add / drop / orient-flip / soft-delete), so add/kill maintenance
+// is automatic (INVARIANT 4).  The slice path (interreduce) and the AC
+// path (ft_ac_match matches modulo AC, which a syntactic fingerprint
+// cannot capture) fall back to the unpruned linear scan (INVARIANTS 3
+// and 5): the index narrows ONLY the full-range, AC-off hot path.
+//
+// Gated on THVM_ATPFT_NORM (always compiled) but only consulted when
+// useful -- a tiny rule set takes the linear scan (the index would only
+// add overhead).  THVM_ATPFT_NO_PRUNE=1 forces the linear scan for
+// before/after measurement.
+
+#define FTPI_FP_VAR    0xFFFFFFFEu   // a variable at this position (wildcard)
+#define FTPI_FP_ABSENT 0xFFFFFFFDu   // the position does not exist (low arity)
+
+// Number of sampled path positions in the fingerprint.  fp[0]=root (the
+// bucket key); fp[1..2]=arg0,arg1 (depth 1); fp[3..6]=arg0.arg0,
+// arg0.arg1, arg1.arg0, arg1.arg1 (depth 2).  The 4 depth-2 positions
+// split the depth-1-degenerate combinator / Sheffer buckets (a single
+// root + an `app(app(...),...)` left-nested prefix shared by most rules)
+// into far finer classes -- the depth-1 arg signature alone leaves ~150
+// candidates/query that differ only DEEPER in the spine; depth 2 cuts
+// that to ~24 and is the wall-time optimum.  Depth 3 (sampling the
+// arg0-spine great-grandchildren) cuts candidates further to ~13, but
+// the wider per-entry key + longer per-query compatibility loop cost
+// more wall than the extra ft_match calls they save -- past the
+// diminishing-returns crossover -- so we stop at depth 2.  Soundness is
+// unchanged at any depth: every position prunes ONLY when both rule and
+// subject are concrete-and-differ; a VAR or ABSENT on either side never
+// prunes (ftpi_pos_compatible), so deepening can only DROP guaranteed
+// non-matches, never miss a real one.
+#define FTPI_FP_N   7u    // sampled positions: 1 root + 2 depth-1 + 4 depth-2
+#define FTPI_FP_ARG (FTPI_FP_N - 1u)   // per-entry stored positions (all but root)
+
+// Sampled-position fingerprint of a flatterm cell, fp[0..FTPI_FP_N).
+typedef struct {
+  u32 fp[FTPI_FP_N];
+} FtPiFp;
+
+static inline u32 ftpi_cell_sym(const AtpFtCell *c) {
+  return (c->sym & WF_VAR_BIT) ? FTPI_FP_VAR : c->sym;
+}
+
+// The i-th child of `c` (0-based), walked via the AtpFt sibling stride
+// (first child = c->next; next sibling = child->end->next).  Returns
+// NULL for a variable / nullary cell, an out-of-arity index, or a torn
+// chain.  Stride is O(arity) but arity here is tiny (<=2 for the
+// combinator/Sheffer operators we index).
+static const AtpFtCell *ftpi_child(const AtpFtCell *c, u32 i) {
+  if (c == NULL || (c->sym & WF_VAR_BIT) != 0u || i >= c->arity) return NULL;
+  const AtpFtCell *ch = c->next;
+  while (i-- > 0u && ch != NULL) ch = (ch->end != NULL) ? ch->end->next : NULL;
+  return ch;
+}
+
+// Sample fp[slot] = symbol of `c` (ABSENT-on-NULL is the caller's
+// pre-init), returning `c` for further descent.
+static inline const AtpFtCell *ftpi_sample(const AtpFtCell *c, FtPiFp *out, u32 slot) {
+  if (c != NULL) out->fp[slot] = ftpi_cell_sym(c);
+  return c;
+}
+
+// Compute the FTPI_FP_N-position path fingerprint of `c`.  Each absent
+// subterm (low arity, variable, nullary) is FTPI_FP_ABSENT; a variable
+// subterm is FTPI_FP_VAR.  Depth-2 positions hang off both depth-1
+// children (arg0.arg0, arg0.arg1, arg1.arg0, arg1.arg1).
+static void ftpi_fingerprint(const AtpFtCell *c, FtPiFp *out) {
+  for (u32 i = 0; i < FTPI_FP_N; i++) out->fp[i] = FTPI_FP_ABSENT;
+  out->fp[0] = ftpi_cell_sym(c);
+  const AtpFtCell *a0 = ftpi_sample(ftpi_child(c, 0u), out, 1u);
+  const AtpFtCell *a1 = ftpi_sample(ftpi_child(c, 1u), out, 2u);
+  ftpi_sample(ftpi_child(a0, 0u), out, 3u);
+  ftpi_sample(ftpi_child(a0, 1u), out, 4u);
+  ftpi_sample(ftpi_child(a1, 0u), out, 5u);
+  ftpi_sample(ftpi_child(a1, 1u), out, 6u);
+}
+
+// Position-compatibility: a rule-LHS sampled symbol `r` against a
+// subject sampled symbol `subj`.  Prune ONLY when both are concrete and
+// differ.  VAR on either side, or ABSENT alignment, never prunes (the
+// rule's ABSENT arity-mismatch is caught by ft_match's arity check, and
+// keeping it is sound -- we only ever DROP guaranteed non-matches).
+static inline int ftpi_pos_compatible(u32 r, u32 subj) {
+  if (r == FTPI_FP_VAR || subj == FTPI_FP_VAR) return 1;
+  if (r == FTPI_FP_ABSENT || subj == FTPI_FP_ABSENT) return 1;
+  return r == subj;
+}
+
+// One indexed rule entry: its slot + the non-root fingerprint positions
+// (arg0, arg1, arg0.arg0, arg0.arg1, arg1.arg0, arg1.arg1).  The root
+// symbol is the bucket key, so it is not stored per entry.  arg[k] holds
+// fingerprint position k+1 (fp[1..FTPI_FP_N)).
+typedef struct {
+  u32 rule;             // rule slot index (s->lhs_ft[rule])
+  u32 arg[FTPI_FP_ARG]; // fingerprint positions fp[1..FTPI_FP_N)
+} FtPiEnt;
+
+// A bucket: ascending-slot list of rules whose LHS roots at this symbol.
+typedef struct {
+  u32      sym;      // root symbol (concrete CTR/NUM sym)
+  FtPiEnt *ents;
+  u32      n, cap;
+} FtPiBucket;
+
+// The index.  Hangs off file-static storage keyed by AtpState pointer +
+// revision (a single index is enough -- ATP runs one saturation at a
+// time on this path; a different AtpState forces a rebuild, which is the
+// same cost as a revision bump).
+typedef struct {
+  const AtpState *owner;
+  u32         built_revision;
+  u32         built_n_rules;
+  FtPiBucket *buckets;
+  u32         n_buckets, cap_buckets;
+  // Var-rooted rules (LHS root is a variable -- matches any cell), kept
+  // ascending.  These are merged into every query.
+  u32        *var_rules;
+  u32         n_var, cap_var;
+  // Scratch candidate buffer (ascending slot order), reused per query.
+  u32        *cand;
+  u32         cand_cap;
+  // Instrumentation (THVM_ATPFT_PRUNE_STATS=1 prints on teardown).
+  u64         q_queries;
+  u64         q_candidates;   // candidates returned (summed over queries)
+  u64         q_rules_seen;   // n_rules summed over queries (the no-index cost)
+  u64         n_rebuilds;     // full index rebuilds (revision/count changes)
+  u64         rebuild_work;   // rules processed across all rebuilds
+  // Root-symbol CONCENTRATION at the last rebuild: largest bucket size /
+  // indexed rule count.  When it's high the rule set is dominated by one
+  // root symbol -- the cheap top-symbol fast-fail in ft_match prunes
+  // NOTHING, so the arg-fingerprint index is the only lever and the
+  // pruning pays off (combinators / Sheffer).  When it's low (a
+  // multi-operator signature) ft_match's first per-position compare
+  // fast-fails on the root and the linear scan is already cheap, so the
+  // index would be pure per-query overhead -- ftpi_applicable then keeps
+  // the dense scan.  Result is byte-identical either way; this gate only
+  // chooses the faster of two correct paths.
+  u32         max_bucket;     // largest bucket size at last rebuild
+  u32         n_indexed;      // total live indexed rules at last rebuild
+} FtPiIndex;
+
+static FtPiIndex g_ftpi = {0};
+
+// THVM_ATPFT_PRUNE_STATS=1 prints the prune ratio at process exit:
+// candidates-per-query vs the n_rules a linear scan would have visited.
+static void ftpi_stats_atexit(void) {
+  FtPiIndex *ix = &g_ftpi;
+  if (ix->q_queries == 0u) return;
+  fprintf(stderr,
+          "[ftpi] queries=%llu  cand/query=%.2f  no-index n_rules/query=%.2f  "
+          "prune-ratio=%.4f  ft_match-calls-saved~%.1fx\n",
+          (unsigned long long)ix->q_queries,
+          (double)ix->q_candidates / (double)ix->q_queries,
+          (double)ix->q_rules_seen / (double)ix->q_queries,
+          ix->q_rules_seen ? (double)ix->q_candidates / (double)ix->q_rules_seen
+                           : 0.0,
+          ix->q_candidates ? (double)ix->q_rules_seen / (double)ix->q_candidates
+                           : 0.0);
+  fprintf(stderr, "[ftpi] rebuilds=%llu  rebuild_work=%llu rules\n",
+          (unsigned long long)ix->n_rebuilds,
+          (unsigned long long)ix->rebuild_work);
+}
+
+static void ftpi_stats_arm(void) {
+  static int armed = -1;
+  if (armed >= 0) return;
+  const char *e = getenv("THVM_ATPFT_PRUNE_STATS");
+  armed = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  if (armed) atexit(ftpi_stats_atexit);
+}
+
+static FtPiBucket *ftpi_bucket_find(FtPiIndex *ix, u32 sym) {
+  for (u32 b = 0; b < ix->n_buckets; b++) {
+    if (ix->buckets[b].sym == sym) return &ix->buckets[b];
+  }
+  return NULL;
+}
+
+static FtPiBucket *ftpi_bucket_get(FtPiIndex *ix, u32 sym) {
+  FtPiBucket *b = ftpi_bucket_find(ix, sym);
+  if (b != NULL) return b;
+  if (ix->n_buckets == ix->cap_buckets) {
+    u32 nc = ix->cap_buckets ? ix->cap_buckets * 2u : 16u;
+    FtPiBucket *nb = (FtPiBucket *)realloc(ix->buckets, nc * sizeof(FtPiBucket));
+    if (nb == NULL) thvm_fatal("ftpi: bucket array OOM");
+    ix->buckets = nb;
+    ix->cap_buckets = nc;
+  }
+  b = &ix->buckets[ix->n_buckets++];
+  b->sym = sym;
+  b->ents = NULL;
+  b->n = 0u;
+  b->cap = 0u;
+  return b;
+}
+
+// Push rule `rule` into bucket `b` with the non-root fingerprint
+// positions `fp->fp[1..FTPI_FP_N)` (the root fp[0] is the bucket key).
+static void ftpi_bucket_push(FtPiBucket *b, u32 rule, const FtPiFp *fp) {
+  if (b->n == b->cap) {
+    u32 nc = b->cap ? b->cap * 2u : 8u;
+    FtPiEnt *ne = (FtPiEnt *)realloc(b->ents, nc * sizeof(FtPiEnt));
+    if (ne == NULL) thvm_fatal("ftpi: bucket ents OOM");
+    b->ents = ne;
+    b->cap = nc;
+  }
+  b->ents[b->n].rule = rule;
+  for (u32 k = 0; k < FTPI_FP_ARG; k++) b->ents[b->n].arg[k] = fp->fp[k + 1u];
+  b->n++;
+}
+
+static void ftpi_var_push(FtPiIndex *ix, u32 rule) {
+  if (ix->n_var == ix->cap_var) {
+    u32 nc = ix->cap_var ? ix->cap_var * 2u : 16u;
+    u32 *nv = (u32 *)realloc(ix->var_rules, nc * sizeof(u32));
+    if (nv == NULL) thvm_fatal("ftpi: var list OOM");
+    ix->var_rules = nv;
+    ix->cap_var = nc;
+  }
+  ix->var_rules[ix->n_var++] = rule;
+}
+
+// Rebuild the index from s->lhs_ft[0..n_rules) for every CURRENTLY-LIVE
+// rule.  We index a rule under both pass-1 (orient) and pass-2
+// (unorient) gates by indexing EVERY live rule by its LHS root -- the
+// per-query loops still apply their own orient / r_dead / face gates, so
+// the index is a pure SUPERSET filter (the scan logic is unchanged).
+//
+// The unorientable BACKWARD face matches the subject against the RHS, so
+// pass 2's backward leg needs an RHS-keyed lookup too.  Rather than a
+// second tree we add each unorientable rule's RHS fingerprint into a
+// per-entry "alt" position by ALSO bucketing it under its RHS root.  To
+// keep the merge order identical to the linear scan (which visits each
+// rule slot once, trying forward THEN backward), we instead keep ONE
+// list per query and let the caller test both faces -- so the index
+// only needs to ANSWER "could rule r match cell p on EITHER face".  We
+// therefore bucket an unorientable rule under BOTH its LHS root and its
+// RHS root (a rule can appear in two buckets); the query dedups by slot.
+// Insert a single live rule slot `i` into the index (both faces).  Adds
+// rules in ASCENDING slot order to keep every bucket sorted -- callers
+// iterate i = 0..n_rules (rebuild) or the appended tail (extend), both
+// monotone.  A dead / sentinel slot is skipped here.
+static void ftpi_insert_rule(FtPiIndex *ix, AtpState *s, u32 i) {
+  if (s->r_dead != NULL && s->r_dead[i]) return;
+  AtpFtCell *lhs = s->lhs_ft[i];
+  AtpFtCell *rhs = s->rhs_ft[i];
+  if (lhs == NULL || rhs == NULL) return;
+  u8 unor = (u8)(s->n_unorient > 0u && !s->r_orient[i]);
+  // LHS face (forward; oriented rules only ever use this face).
+  FtPiFp fp;
+  ftpi_fingerprint(lhs, &fp);
+  if (fp.fp[0] == FTPI_FP_VAR) {
+    ftpi_var_push(ix, i);
+  } else {
+    FtPiBucket *b = ftpi_bucket_get(ix, fp.fp[0]);
+    ftpi_bucket_push(b, i, &fp);
+  }
+  // RHS face (unorientable rules also try backward: subject matched
+  // against the RHS).  Bucket the RHS root too; the query dedups by slot
+  // so the rule is offered once even when both faces match.
+  if (unor) {
+    FtPiFp rp;
+    ftpi_fingerprint(rhs, &rp);
+    if (rp.fp[0] == FTPI_FP_VAR) {
+      ftpi_var_push(ix, i);   // dedup handles a double var-push
+    } else {
+      // Same root as LHS or distinct: in either case bucket the RHS arg
+      // fingerprint so backward-only matches are not pruned.  A duplicate
+      // slot in one bucket is deduped by the query.
+      FtPiBucket *b = ftpi_bucket_get(ix, rp.fp[0]);
+      ftpi_bucket_push(b, i, &rp);
+    }
+  }
+}
+
+// Refresh the concentration metric + build stamps after a (re)build.
+static void ftpi_finalize(FtPiIndex *ix, AtpState *s) {
+  u32 maxb = 0u, nidx = ix->n_var;
+  for (u32 b = 0; b < ix->n_buckets; b++) {
+    nidx += ix->buckets[b].n;
+    if (ix->buckets[b].n > maxb) maxb = ix->buckets[b].n;
+  }
+  ix->max_bucket     = maxb;
+  ix->n_indexed      = nidx;
+  ix->owner          = s;
+  ix->built_revision = s->r_revision;
+  ix->built_n_rules  = s->n_rules;
+}
+
+static void ftpi_rebuild(AtpState *s) {
+  FtPiIndex *ix = &g_ftpi;
+  // Reset every bucket's entry count to 0 but KEEP the bucket structs
+  // (their sym key + ents allocation) so the array and per-bucket
+  // capacity are reused across rebuilds -- ftpi_bucket_get find-or-
+  // appends, so a stale empty bucket simply gets refilled.  We do NOT
+  // reset n_buckets (that would orphan the ents allocations); an empty
+  // bucket left over from a now-absent symbol is harmless (it returns 0
+  // candidates) and cheap.
+  for (u32 b = 0; b < ix->n_buckets; b++) ix->buckets[b].n = 0u;
+  ix->n_var = 0u;
+  ix->rebuild_work += s->n_rules;
+  for (u32 i = 0; i < s->n_rules; i++) ftpi_insert_rule(ix, s, i);
+  ftpi_finalize(ix, s);
+  ix->n_rebuilds++;
+}
+
+// Incremental append: insert only the newly-added tail [built_n_rules,
+// n_rules).  Sound ONLY when the existing index is a clean prefix of the
+// current rule set -- the same pure-append witness atp_ri_extend uses:
+// every push bumps r_revision once, every drop / orient-flip / soft-
+// delete bumps it WITHOUT growing n_rules, so the tail is a pure append
+// iff the revision delta equals the count delta.  Otherwise an existing
+// rule changed (e.g. a face was soft-deleted) and the index must be
+// fully rebuilt.  Returns 1 if appended, 0 if a full rebuild is needed.
+static int ftpi_try_extend(AtpState *s) {
+  FtPiIndex *ix = &g_ftpi;
+  if (ix->owner != s) return 0;
+  if (ix->built_n_rules > s->n_rules) return 0;            // shrunk
+  if (ix->built_n_rules == s->n_rules) {                   // count unchanged
+    return ix->built_revision == s->r_revision;            // append iff nothing changed
+  }
+  if (s->r_revision - ix->built_revision != s->n_rules - ix->built_n_rules) {
+    return 0;   // an existing rule was revised -> not a clean append
+  }
+  ix->rebuild_work += (s->n_rules - ix->built_n_rules);
+  for (u32 i = ix->built_n_rules; i < s->n_rules; i++) ftpi_insert_rule(ix, s, i);
+  ftpi_finalize(ix, s);
+  return 1;
+}
+
+// True iff the pruning index is applicable for THIS call: full rule
+// range, AC matching not engaged, and a non-trivial rule set (the
+// linear scan wins on a handful of rules).  Cached env disable knob for
+// before/after measurement.
+static int ftpi_applicable(const AtpState *s, u32 slice_first, u32 slice_end) {
+  static int disabled = -1;
+  if (disabled < 0) {
+    const char *e = getenv("THVM_ATPFT_NO_PRUNE");
+    disabled = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  }
+  if (disabled) return 0;
+  if (slice_first != 0u || slice_end != s->n_rules) return 0;  // slice path
+  if (s->n_rules < 16u) return 0;                              // tiny: scan wins
+#if defined(THVM_ATP_AC) && defined(THVM_ATPFT_MATCH)
+  if (thvm_atp_get_ac_mask() != 0ull) return 0;                // AC: matches modulo AC
+#endif
+  return 1;
+}
+
+// Ensure the index reflects the current rule set (rebuild on revision /
+// count / owner change).  O(n_rules) amortised; far cheaper than the
+// per-cell O(n_rules) scan it replaces.
+static void ftpi_ensure(AtpState *s) {
+  FtPiIndex *ix = &g_ftpi;
+  if (ix->owner == s && ix->built_revision == s->r_revision &&
+      ix->built_n_rules == s->n_rules) {
+    return;
+  }
+  // Try the O(rules-added) append fast-path; fall back to a full rebuild
+  // when an existing rule changed (the pure-append witness fails).
+  if (ftpi_try_extend(s)) return;
+  ftpi_rebuild(s);
+}
+
+// Engage the arg-fingerprint pruning only when a single root symbol
+// dominates the rule set: the largest bucket holds at least half of all
+// indexed rules AND is large in absolute terms (so the dominant-symbol
+// linear scan would itself issue many ft_match calls).  This is exactly
+// the single-operator regime (combinators / Sheffer) where ft_match's
+// top-symbol fast-fail prunes nothing.  On a multi-operator signature
+// max_bucket is a small fraction, so we keep the dense scan and pay zero
+// index overhead.  The threshold is a PERFORMANCE heuristic only --
+// soundness + order are guaranteed independently of which path runs.
+static int ftpi_pruning_worthwhile(void) {
+  FtPiIndex *ix = &g_ftpi;
+  return ix->max_bucket >= 48u && ix->max_bucket * 2u >= ix->n_indexed;
+}
+
+// Fill the scratch candidate buffer with the rule slots compatible with
+// `p` (a CTR subject cell), in ASCENDING slot order.  Returns the count;
+// the candidates are in g_ftpi.cand[0..count).  Merges the var-rooted
+// list with the matched root bucket (filtered by the arg0/arg1
+// fingerprint), deduping the bucket's possible double RHS entry.
+static u32 ftpi_candidates(AtpState *s, const AtpFtCell *p) {
+  FtPiIndex *ix = &g_ftpi;
+  FtPiFp sp;
+  ftpi_fingerprint(p, &sp);
+  FtPiBucket *b = (sp.fp[0] == FTPI_FP_VAR) ? NULL
+                                            : ftpi_bucket_find(ix, sp.fp[0]);
+  u32 bn = (b != NULL) ? b->n : 0u;
+  u32 need = ix->n_var + bn;
+  if (need > ix->cand_cap) {
+    u32 nc = ix->cand_cap ? ix->cand_cap : 64u;
+    while (nc < need) nc *= 2u;
+    u32 *nb = (u32 *)realloc(ix->cand, nc * sizeof(u32));
+    if (nb == NULL) thvm_fatal("ftpi: candidate buffer OOM");
+    ix->cand = nb;
+    ix->cand_cap = nc;
+  }
+  // Merge the two ascending lists (var_rules and the bucket's compatible
+  // entries) into ascending order, deduping equal slots.
+  u32 vi = 0u, bi = 0u, out = 0u;
+  u32 last = 0xFFFFFFFFu;
+  for (;;) {
+    // Advance bucket index past arg-fingerprint-incompatible entries.
+    // A rule survives only when EVERY sampled position is compatible
+    // (rule-VAR / subject-VAR / ABSENT never prune; both-concrete-and-
+    // differ prunes).
+    while (bi < bn) {
+      const FtPiEnt *e = &b->ents[bi];
+      int ok = 1;
+      for (u32 k = 0; k < FTPI_FP_ARG; k++) {
+        if (!ftpi_pos_compatible(e->arg[k], sp.fp[k + 1u])) { ok = 0; break; }
+      }
+      if (ok) break;
+      bi++;
+    }
+    u32 vr = (vi < ix->n_var) ? ix->var_rules[vi] : 0xFFFFFFFFu;
+    u32 br = (bi < bn)        ? b->ents[bi].rule   : 0xFFFFFFFFu;
+    if (vr == 0xFFFFFFFFu && br == 0xFFFFFFFFu) break;
+    u32 pick;
+    if (vr <= br) { pick = vr; vi++; }
+    else          { pick = br; bi++; }
+    if (pick != last) {   // dedup (var double-push or bucket double-entry)
+      ix->cand[out++] = pick;
+      last = pick;
+    }
+  }
+  ix->q_queries++;
+  ix->q_candidates += out;
+  ix->q_rules_seen += s->n_rules;
+  return out;
+}
+
 // Per-cell redex attempt -- the body shared by the legacy pre-order
 // scan (find_redex_ft) and the WM mixmost walk
 // (atp_normalize_mixmost_ft).  Tries every live oriented rule in the
@@ -319,6 +794,35 @@ static int ft_cell_try_rules(AtpState   *s,
   // into the scratch arena).  NULL-safe: the dispatch only deref's it
   // when the AC path actually fires.
   AtpFt *ft_arena_local = (AtpFt *)s->ft_arena_ptr;
+  // Candidate-pruning index (ftpi_*): on the full-range / AC-off hot
+  // path, replace the [slice_first, slice_end) iteration with only the
+  // rules structurally compatible with `p`, in ascending slot order.
+  // The candidate list is a SOUND SUPERSET in the SAME order the linear
+  // scan visits, so the per-rule gates + selection below pick the
+  // byte-identical winner; only guaranteed non-matches are skipped.
+  // When the index is not applicable (slice / AC / tiny R), use_pi is 0
+  // and the loops fall back to the dense [slice_first, slice_end) range.
+  const u32 *pi_cand = NULL;
+  u32        pi_ncand = 0u;
+  int        use_pi   = 0;
+  if (ftpi_applicable(s, slice_first, slice_end)) {
+    ftpi_stats_arm();
+    ftpi_ensure(s);
+    // Engage pruning only when one root symbol dominates the rule set
+    // (top-symbol fast-fail is then useless and the arg-fingerprint
+    // index is the real lever).  See FtPiIndex.max_bucket.  A
+    // multi-operator signature keeps the dense scan (ft_match's first
+    // per-position compare already fast-fails on the root).
+    if (ftpi_pruning_worthwhile()) {
+      use_pi   = 1;
+      pi_ncand = ftpi_candidates(s, p);
+      pi_cand  = g_ftpi.cand;
+    }
+  }
+  // Iteration bound: candidate count when indexed, else the dense slice
+  // width.  FTPI_RULE(k) maps the loop counter to the rule slot.
+#define FTPI_NITER (use_pi ? pi_ncand : (slice_end - slice_first))
+#define FTPI_RULE(k) (use_pi ? pi_cand[(k)] : (slice_first + (k)))
   // WM per-position redex priority (BL_RegelOderGleichungAngewendet,
   // NF/NFBildung.c:503-531, and the path-based NFB_ variant :219-238
   // that the CLI default `-nf mixmost` installs): at every position
@@ -329,7 +833,9 @@ static int ft_cell_try_rules(AtpState   *s,
   // under use_wm_mixmost_nf (see ft_wm_pattern_before).
   if (try_orient) {
     u32 best_rule = (u32)-1;
-    for (u32 r = slice_first; r < slice_end; r++) {
+    u32 niter = FTPI_NITER;
+    for (u32 k = 0; k < niter; k++) {
+      u32 r = FTPI_RULE(k);
       // Filter dead (bwd-subsumed) rules first: their lhs_ft/rhs_ft are
       // overwritten with a sentinel FVR (id 255) at deletion time, which
       // an unorientable backward-direction match could spuriously bind.
@@ -382,7 +888,9 @@ static int ft_cell_try_rules(AtpState   *s,
     // Pre-encode once, reuse across attempts.  redex_na==0 means
     // "not yet encoded"; the FIRST gate call lazily fills it.
     u32 redex_na = 0u;
-    for (u32 r = slice_first; r < slice_end; r++) {
+    u32 niter = FTPI_NITER;
+    for (u32 k = 0; k < niter; k++) {
+      u32 r = FTPI_RULE(k);
       if (s->r_dead != NULL && s->r_dead[r]) continue;
       AtpFtCell *lhs = s->lhs_ft[r];
       AtpFtCell *rhs = s->rhs_ft[r];
@@ -477,6 +985,8 @@ static int ft_cell_try_rules(AtpState   *s,
       }
     }
   }
+#undef FTPI_NITER
+#undef FTPI_RULE
   return 0;
 }
 
