@@ -2,7 +2,7 @@
 
 (* Rewrite.wl - WL spec layer for KOpt rewriting over TTermExpr.
  *
- * The 11 KOpts the C-side autotuner (apply_opt_dag.c) emits become 11
+ * The KOpts the C-side autotuner (apply_opt_dag.c) emits become
  * one-line WL rules over the TTermExpr `"UOP"[name, ...]` form produced
  * by the existing heap walker (THVMLink.wl:710).  Each rule is
  * declared in operator form via ReplaceAll[rules] / ReplaceRepeated[rules],
@@ -36,10 +36,6 @@ GeneralUtilities`SetUsage[$OptUpcast, "$OptUpcast is the UOp OPT.kind value mirr
 GeneralUtilities`SetUsage[$OptTC, "$OptTC is the UOp OPT.kind value mirroring UOP_OPT_TC in src/thvm.h."];
 GeneralUtilities`SetUsage[$OptLocal, "$OptLocal is the UOp OPT.kind value mirroring UOP_OPT_LOCAL in src/thvm.h."];
 GeneralUtilities`SetUsage[$OptGroupReduce, "$OptGroupReduce is the UOp OPT.kind value mirroring UOP_OPT_GROUP_REDUCE in src/thvm.h."];
-GeneralUtilities`SetUsage[$OptConv, "$OptConv is the UOp OPT.kind value mirroring UOP_OPT_CONV in src/thvm.h."];
-GeneralUtilities`SetUsage[$OptFastMath, "$OptFastMath is the UOp OPT.kind value mirroring UOP_OPT_FAST_MATH in src/thvm.h."];
-GeneralUtilities`SetUsage[$OptSimdReduce, "$OptSimdReduce is the UOp OPT.kind value mirroring UOP_OPT_SIMD_REDUCE in src/thvm.h."];
-GeneralUtilities`SetUsage[$OptVecLoad, "$OptVecLoad is the UOp OPT.kind value mirroring UOP_OPT_VEC_LOAD in src/thvm.h."];
 
 (* === KOP_* opcodes ============================================== *)
 GeneralUtilities`SetUsage[$KopNone, "$KopNone is the KOpt.op value mirroring KOP_NONE in src/thvm.h."];
@@ -53,9 +49,6 @@ GeneralUtilities`SetUsage[$KopPadTo, "$KopPadTo is the KOpt.op value mirroring K
 GeneralUtilities`SetUsage[$KopNoLocals, "$KopNoLocals is the KOpt.op value mirroring KOP_NO_LOCALS in src/thvm.h."];
 GeneralUtilities`SetUsage[$KopTC, "$KopTC is the KOpt.op value mirroring KOP_TC in src/thvm.h."];
 GeneralUtilities`SetUsage[$KopGlobal, "$KopGlobal is the KOpt.op value mirroring KOP_GLOBAL in src/thvm.h."];
-GeneralUtilities`SetUsage[$KopFastMath, "$KopFastMath is the KOpt.op value mirroring KOP_FAST_MATH in src/thvm.h."];
-GeneralUtilities`SetUsage[$KopSimdReduce, "$KopSimdReduce is the KOpt.op value mirroring KOP_SIMD_REDUCE in src/thvm.h."];
-GeneralUtilities`SetUsage[$KopVecLoad, "$KopVecLoad is the KOpt.op value mirroring KOP_VEC_LOAD in src/thvm.h."];
 
 (* === C-side bridge ============================================== *)
 GeneralUtilities`SetUsage[TUOpDagApplyKOpt, "TUOpDagApplyKOpt[t$, op$, axis$, arg$] applies the KOpt op$ to t$'s UOp DAG via the C-side uop_dag_apply_kopt, returning a new TTerm wrapping the rewritten root.
@@ -86,14 +79,6 @@ KOP_GROUP_TOP is a retired opcode kept for back-compat; it falls through to KAX_
 GeneralUtilities`SetUsage[KOptSwap, "KOptSwap[a$, b$] returns an operator that swaps the axis_ids of the RANGE leaves at a$ and b$.
 Bidirectional, using ReplaceAll's single-pass semantics to stay idempotent."];
 
-GeneralUtilities`SetUsage[KOptFastMath, "KOptFastMath[expr$] wraps every unary FP op (EXP2, LOG2, SQRT) in expr$ with OPT(_, FastMath, 0), via a post-order walk.
-Idempotent."];
-
-GeneralUtilities`SetUsage[KOptSimdReduce, "KOptSimdReduce[expr$] wraps every REDUCE in expr$ with OPT(_, SimdReduce, 0), via a post-order walk.
-Idempotent."];
-
-GeneralUtilities`SetUsage[KOptVecLoad, "KOptVecLoad[width$] returns an operator that wraps every INDEX_E whose addr is contiguous-shaped (IADD(IMUL(_, _), RANGE)) with OPT(_, VecLoad, width$)."];
-
 Begin["`Private`"];
 
 (* === KAX_* axis types ============================================ *)
@@ -111,10 +96,6 @@ $OptUpcast = 1
 $OptTC = 2
 $OptLocal = 3
 $OptGroupReduce = 4
-$OptConv = 5
-$OptFastMath = 6
-$OptSimdReduce = 7
-$OptVecLoad = 8
 
 (* === KOP_* opcodes =============================================== *)
 $KopNone = 0
@@ -128,9 +109,6 @@ $KopPadTo = 7
 $KopNoLocals = 8
 $KopTC = 9
 $KopGlobal = 10
-$KopFastMath = 11
-$KopSimdReduce = 12
-$KopVecLoad = 13
 
 (* === C-side bridge =============================================== *)
 $applyKOptFn := $applyKOptFn = LibraryFunctionLoad[
@@ -228,51 +206,6 @@ KOptGroupTop[axis_Integer, k_Integer] := doSplit[$KaxLoop, None, axis, k]
 KOptSwap[a_Integer, b_Integer] := ReplaceAll[{
     "UOP"["RANGE", "NUM"[a], t_, e_] :> "UOP"["RANGE", "NUM"[b], t, e],
     "UOP"["RANGE", "NUM"[b], t_, e_] :> "UOP"["RANGE", "NUM"[a], t, e]
-}]
-
-(* ---- FastMath / SimdReduce: bottom-up walkers ===================
- * ReplaceAll is outside-in: a rule matching the outer node skips the
- * subtree, so a nested REDUCE inside a REDUCE body (softmax: the row
- * max-reduce lives inside the sum-of-exp body) would never get
- * wrapped.  Both C walkers (apply_opt_dag_{fm,sr}_walk) recurse into
- * children first, then wrap on the way back up.  Mirror that with an
- * explicit post-order traversal of the "UOP"[name, args...] tree. *)
-
-fastMathUnaryQ = MemberQ[{"EXP2", "LOG2", "SQRT"}, #] &;
-
-(* already FastMath-wrapped unary: descend into the unary's body,
-   re-wrap in the same shape (idempotent); mirrors the OPT/FAST_MATH
-   idempotency arm in apply_opt_dag_fm_walk_uncached. *)
-fmWalk["UOP"["OPT", "UOP"[in_String /; fastMathUnaryQ[in], inArgs___],
-             "NUM"[$OptFastMath], _]] :=
-    "UOP"["OPT", "UOP"[in, Sequence @@ (fmWalk /@ {inArgs})],
-          "NUM"[$OptFastMath], "NUM"[0]]
-fmWalk[u : "UOP"[name_String /; fastMathUnaryQ[name], args___]] :=
-    "UOP"["OPT", "UOP"[name, Sequence @@ (fmWalk /@ {args})],
-          "NUM"[$OptFastMath], "NUM"[0]]
-fmWalk["UOP"[name_, args___]] := "UOP"[name, Sequence @@ (fmWalk /@ {args})]
-fmWalk[x_] := x
-
-KOptFastMath[expr_] := fmWalk[expr]
-
-srWalk["UOP"["OPT", "UOP"["REDUCE", inArgs___], "NUM"[$OptSimdReduce], _]] :=
-    "UOP"["OPT", "UOP"["REDUCE", Sequence @@ (srWalk /@ {inArgs})],
-          "NUM"[$OptSimdReduce], "NUM"[0]]
-srWalk[r : "UOP"["REDUCE", args___]] :=
-    "UOP"["OPT", "UOP"["REDUCE", Sequence @@ (srWalk /@ {args})],
-          "NUM"[$OptSimdReduce], "NUM"[0]]
-srWalk["UOP"[name_, args___]] := "UOP"[name, Sequence @@ (srWalk /@ {args})]
-srWalk[x_] := x
-
-KOptSimdReduce[expr_] := srWalk[expr]
-
-(* ---- VecLoad: wrap contiguous INDEX_E with OPT(_, VecLoad, w) --- *)
-KOptVecLoad[width_Integer] := ReplaceRepeated[{
-    "UOP"["OPT", e:"UOP"["INDEX_E", __], "NUM"[$OptVecLoad], _] :>
-        "UOP"["OPT", e, "NUM"[$OptVecLoad], "NUM"[width]],
-    e:"UOP"["INDEX_E", _,
-        "UOP"["IADD", "UOP"["IMUL", _, _], "UOP"["RANGE", __]]] :>
-        "UOP"["OPT", e, "NUM"[$OptVecLoad], "NUM"[width]]
 }]
 
 (* Composition: callers use `RightComposition[k1, k2, ...][expr]`

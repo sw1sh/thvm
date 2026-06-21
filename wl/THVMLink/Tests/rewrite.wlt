@@ -41,28 +41,6 @@ buildMatmul16[] := Module[{a, b, c, m, n, k, kc, addrA, addrB, addrC,
     TUOpStore[c, addrC, red]
 ]
 
-(* Softmax-style: row-wise REDUCE_MAX + REDUCE_SUM(exp(x-max)),
-   built as a single STORE node so the corpus exercises the
-   FAST_MATH wrap on EXP2 too. *)
-buildSoftmaxRow[] := Module[{x, o, r, c, kc, addr, ld, mx, sub, e2,
-                              sumExp, divisor, valExpr},
-    TInit[];
-    o = TUOpBuffer[$UopScopeGlobal, $DTFp32, {4, 8}, 0];
-    x = TUOpBuffer[$UopScopeGlobal, $DTFp32, {4, 8}, 1];
-    r = TUOpRange[0, $KaxLoop,   4];
-    c = TUOpRange[1, $KaxReduce, 8];
-    kc = TUOpIConst[8];
-    addr = TUOpIAdd[TUOpIMul[r, kc], c];
-    ld = TUOpIndexE[x, addr];
-    mx = TUOpReduce[ld, 1, "MAX"];
-    sub = TUOpAdd[ld, TUOpNeg[mx]];
-    e2 = TUOpExp2[sub];
-    sumExp = TUOpReduce[e2, 1, "SUM"];
-    divisor = TUOpRecip[sumExp];
-    valExpr = TUOpMul[e2, divisor];
-    TUOpStore[o, addr, valExpr]
-]
-
 (* === xvalid driver =============================================== *)
 (* The C-side spec is passed as `op[axis, arg]` (a head-keyed triple,
    e.g. `$KopTC[0, 8]` -- the 9[0,8] form Integer-headed but pattern-
@@ -105,44 +83,6 @@ VerificationTest[
     xvalid[KOptGlobal[1], $KopGlobal[1, 0], buildMatmul16],
     True,
     TestID -> "xvalid-global-matmul-axis-n"]
-
-(* --- FAST_MATH ----------------------------------------------------
-   Matmul has no unary FP ops -- KOptFastMath is a no-op there.
-   Softmax has EXP2 -- it gets wrapped. *)
-
-VerificationTest[
-    xvalid[KOptFastMath, $KopFastMath[0, 0], buildMatmul16],
-    True,
-    TestID -> "xvalid-fast-math-matmul-noop"]
-
-VerificationTest[
-    xvalid[KOptFastMath, $KopFastMath[0, 0], buildSoftmaxRow],
-    True,
-    TestID -> "xvalid-fast-math-softmax"]
-
-(* --- SIMD_REDUCE -------------------------------------------------- *)
-
-VerificationTest[
-    xvalid[KOptSimdReduce, $KopSimdReduce[0, 0], buildMatmul16],
-    True,
-    TestID -> "xvalid-simd-reduce-matmul"]
-
-VerificationTest[
-    xvalid[KOptSimdReduce, $KopSimdReduce[0, 0], buildSoftmaxRow],
-    True,
-    TestID -> "xvalid-simd-reduce-softmax"]
-
-(* --- VEC_LOAD ----------------------------------------------------- *)
-
-VerificationTest[
-    xvalid[KOptVecLoad[4], $KopVecLoad[0, 4], buildMatmul16],
-    True,
-    TestID -> "xvalid-vec-load-matmul-4"]
-
-VerificationTest[
-    xvalid[KOptVecLoad[8], $KopVecLoad[0, 8], buildSoftmaxRow],
-    True,
-    TestID -> "xvalid-vec-load-softmax-8"]
 
 (* --- SWAP --------------------------------------------------------- *)
 
@@ -203,11 +143,3 @@ VerificationTest[
         buildMatmul16],
     True,
     TestID -> "xvalid-compose-tc-global-global"]
-
-VerificationTest[
-    xvalidSeq[
-        {KOptFastMath, KOptSimdReduce},
-        {$KopFastMath[0, 0], $KopSimdReduce[0, 0]},
-        buildSoftmaxRow],
-    True,
-    TestID -> "xvalid-compose-fastmath-simdreduce-softmax"]

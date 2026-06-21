@@ -201,7 +201,7 @@ static Term sym_pm_stack_singleton(Term t, void *user) {
 }
 
 // OPT(target, kind, factor) -> target.  The OPT wrapper is an
-// optimization marker (KOP_TC / FAST_MATH / SIMD_REDUCE / UPCAST etc.)
+// optimization marker (TC / UPCAST / UNROLL / LOCAL / GROUP_REDUCE)
 // the LEGACY rmu_emit renderer honors structurally.  The linearized
 // pipeline does NOT implement these markers -- they are dead weight for
 // it, and they cause 100% of real beautiful_mnist kernels to bail the

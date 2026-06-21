@@ -5,7 +5,7 @@
 // cg_render_uop_kernel_cuda_root, and string-checks the output
 // structure: the `extern "C" __global__` signature, the blockIdx/
 // blockDim/threadIdx thread-builtin prologue, and the CUDA-specific
-// OPT lowerings (WMMA fragments, __shfl_down_sync, __exp2f, float4).
+// OPT lowerings (WMMA fragments).
 //
 // This is render-only.  There is no CUDA toolchain on the dev Mac, so
 // the emitted `.cu` is never compiled or run -- the rendered string is
@@ -34,13 +34,6 @@ static char *render_cuda(Term root, const char *name) {
 
 int main(void) {
   thvm_init();
-  // CONV-BWD REDUCE TILING knob ON for the whole binary.  The renderer
-  // memoises it on first read; set it up front.  The multi-axis
-  // warp-stripe it enables is narrowly gated (SIMD_REDUCE-wrapped AND
-  // >= 2 reduce axes AND outer extent % 32 == 0), so no other test's
-  // reduce shape is perturbed -- the single-axis SIMD test and the
-  // non-SIMD nested-reduce test both fall outside the gate.
-  setenv("THVM_CONV_BWD_REDUCE_TILING", "1", 1);
 
   // === Signature + prologue ==========================================
   TEST_BEGIN("render-uop-cuda/elementwise-signature-and-prologue");
@@ -180,98 +173,6 @@ int main(void) {
     char *p_inner_body = strstr(cu, "_acc2 = _acc2 + in1[");
     CHECK(p_inner_body != NULL && strstr(p_inner_body, "a1") != NULL
           && strstr(p_inner_body, "a1") < strstr(p_inner_body, ";"));
-    free(cu);
-  }
-
-  // === SIMD_REDUCE -> __shfl_xor_sync warp all-reduce ================
-  TEST_BEGIN("render-uop-cuda/simd-reduce-emits-shfl-xor-sync");
-  {
-    // Same vector-sum DAG, wrapped in OPT(_, SIMD_REDUCE, _).
-    u32 dimsIn[1]  = { 64 };
-    u32 dimsOut[1] = { 1 };
-    Term in0 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsIn,  1);
-    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsOut, 0);
-    Term r_k = uop_range(0, KAX_REDUCE, 64);
-    Term ld  = uop_index_e(in0, r_k);
-    Term red = uop_reduce(REDUCE_SUM, /*axis=*/0, ld);
-    Term zero = uop_const(DT_INT32, 0);
-    Term st  = uop_store(out, zero, red);
-    Term st_simd = uop_dag_apply_simd_reduce(st);
-    CHECK(st_simd != 0);
-    CHECK(st_simd != st);
-    char *cu = render_cuda(st_simd, "k_simd");
-    CHECK(cu != NULL);
-    // Per-lane strided loop: lane index = threadIdx.x % 32, stride 32.
-    CHECK(contains(cu, "(threadIdx.x % 32u)"));
-    CHECK(contains(cu, "+= 32u"));
-    // 5-step warp butterfly: __shfl_xor_sync at offsets 16..1.  xor
-    // (not down) is an all-reduce -- every lane ends with the full
-    // result, matching Metal simd_sum's broadcast, so the unguarded
-    // per-lane store of the reduced value is race-free.
-    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 16u)"));
-    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 8u)"));
-    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 4u)"));
-    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 2u)"));
-    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 1u)"));
-    // A down-shuffle would leave the result in lane 0 only.
-    CHECK(!contains(cu, "__shfl_down_sync"));
-    // No Metal simd_sum on the CUDA path.
-    CHECK(!contains(cu, "simd_sum"));
-    CHECK(!contains(cu, "thread_index_in_simdgroup"));
-    free(cu);
-  }
-
-  // === FAST_MATH -> __exp2f intrinsic ================================
-  TEST_BEGIN("render-uop-cuda/fast-math-emits-exp2f");
-  {
-    // STORE(out[r], OPT(EXP2(in[r]), FAST_MATH, 0)) -- the softmax tell.
-    u32 dims[1] = { 16 };
-    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 0);
-    Term in0 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 1);
-    Term r0  = uop_range(0, KAX_LOOP, 16);
-    Term ld  = uop_index_e(in0, r0);
-    Term ex  = uop_unary(UOP_EXP2, ld);
-    Term st  = uop_store(out, r0, ex);
-    // Pre-rewrite: bare exp2(, no fast intrinsic.
-    char *cu0 = render_cuda(st, "k_pre");
-    CHECK(cu0 != NULL);
-    CHECK(contains(cu0, "exp2("));
-    CHECK(!contains(cu0, "__exp2f("));
-    free(cu0);
-    KOpt opt = { KOP_FAST_MATH, 0, 0 };
-    Term st_fm = uop_dag_apply_kopt(st, opt);
-    CHECK(st_fm != 0);
-    CHECK(st_fm != st);
-    char *cu = render_cuda(st_fm, "k_fm");
-    CHECK(cu != NULL);
-    // CUDA fast-math intrinsic spelling, not Metal's fast::exp2.
-    CHECK(contains(cu, "__exp2f("));
-    CHECK(!contains(cu, "fast::exp2"));
-    free(cu);
-  }
-
-  // === VEC_LOAD -> float4 reinterpret ================================
-  TEST_BEGIN("render-uop-cuda/vec-load-emits-float4-cast");
-  {
-    // STORE(out[m*16+n], OPT(in0[m*16+n], VEC_LOAD, 4)).
-    u32 dims[2] = { 16, 16 };
-    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims, 0);
-    Term in0 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims, 1);
-    Term r_m = uop_range(0, KAX_LOOP, 16);
-    Term r_n = uop_range(1, KAX_LOOP, 16);
-    Term k16 = uop_const(DT_INT32, 16);
-    Term addr = uop_int_binary(UOP_IADD,
-                               uop_int_binary(UOP_IMUL, r_m, k16), r_n);
-    Term ld  = uop_index_e(in0, addr);
-    Term st  = uop_store(out, addr, ld);
-    Term st_vl = uop_dag_apply_vec_load(st, 4);
-    CHECK(st_vl != 0);
-    CHECK(st_vl != st);
-    char *cu = render_cuda(st_vl, "k_vl");
-    CHECK(cu != NULL);
-    // float4 reinterpret cast WITHOUT the Metal `device ` qualifier.
-    CHECK(contains(cu, "(const float4*)"));
-    CHECK(!contains(cu, "(device const float4*)"));
     free(cu);
   }
 
@@ -440,50 +341,6 @@ int main(void) {
     CHECK(cu != NULL);
     CHECK(contains(cu, "__uint_as_float(0x3f800000u)"));
     CHECK(!contains(cu, "as_type<float>"));
-    free(cu);
-  }
-
-  // === CONV-BWD REDUCE TILING: multi-axis SIMD reduce warp-stripe =====
-  TEST_BEGIN("render-uop-cuda/conv-bwd-reduce-tiling-warp-stripes-outer-axis");
-  {
-    // out[c] = sum_{b,k}(in[b,k] indexed by (b*64+k)) -- a 2-axis reduce
-    // over (b=64, k=4): the conv-weight-grad shape in miniature (reduce
-    // over batch + spatial).  Wrapped in OPT(_, SIMD_REDUCE, _).  With
-    // THVM_CONV_BWD_REDUCE_TILING=1 the OUTER reduce axis (b, extent 64,
-    // %32==0) is striped across the 32 warp lanes; the inner axis (k)
-    // stays a serial loop; the per-lane partials fold via __shfl_xor_sync.
-    u32 dimsOut[1] = { 1 };
-    u32 dimsIn[2]  = { 64, 4 };
-    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsOut, 0);
-    Term in0 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsIn,  1);
-    Term r_b = uop_range(0, KAX_REDUCE, 64);
-    Term r_k = uop_range(1, KAX_REDUCE, 4);
-    Term bk  = uop_int_binary(UOP_IADD,
-                              uop_int_binary(UOP_IMUL, r_b, uop_const(DT_INT32, 4)),
-                              r_k);
-    Term ld  = uop_index_e(in0, bk);
-    u32 axes[2] = { 0, 1 };
-    Term red = uop_reduce_multi(REDUCE_SUM, 2, axes, ld);
-    Term zero = uop_const(DT_INT32, 0);
-    Term st   = uop_store(out, zero, red);
-    Term st_simd = uop_dag_apply_simd_reduce(st);
-    CHECK(st_simd != 0);
-    CHECK(st_simd != st);
-    char *cu = render_cuda(st_simd, "k_cbt");
-    CHECK(cu != NULL);
-    // Outer axis (a0) is the warp stripe: lane index + stride 32, extent 64.
-    CHECK(contains(cu, "for (uint a0 = (threadIdx.x % 32u); a0 < 64; a0 += 32u)"));
-    // Inner axis (a1) is a plain serial loop, extent 4, nested inside.
-    CHECK(contains(cu, "for (uint a1 = 0; a1 < 4"));
-    char *p_a0 = strstr(cu, "for (uint a0 = (threadIdx.x % 32u)");
-    char *p_a1 = strstr(cu, "for (uint a1 = 0; a1 < 4");
-    CHECK(p_a0 != NULL && p_a1 != NULL && p_a0 < p_a1);   // a1 nests in a0
-    // 5-step warp butterfly folds the lane partials (same as single-axis).
-    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 16u)"));
-    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 1u)"));
-    // Not the Metal collective; not a down-shuffle.
-    CHECK(!contains(cu, "simd_sum"));
-    CHECK(!contains(cu, "__shfl_down_sync"));
     free(cu);
   }
 

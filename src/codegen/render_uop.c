@@ -30,9 +30,9 @@ static void rmu_emit_term(Term t, FILE *fp);
 // LOCAL/GLOBAL as plain for-loops (no thread-position bind) and uses
 // a plain function signature.  CG_TARGET_METAL and CG_TARGET_CUDA are
 // both GPU targets: they share the thread/block-position binding and
-// the FAST_MATH / VEC_LOAD / SIMD_REDUCE / reduce-unroll lowerings,
-// and differ only in target-specific syntax (preamble, builtins,
-// intrinsic spellings, the simdgroup_matrix vs WMMA matmul template).
+// the reduce-unroll lowerings, and differ only in target-specific
+// syntax (preamble, builtins, intrinsic spellings, the
+// simdgroup_matrix vs WMMA matmul template).
 typedef enum {
   CG_TARGET_METAL = 0,
   CG_TARGET_C     = 1,
@@ -40,18 +40,10 @@ typedef enum {
 } cg_target;
 static cg_target RMU_TARGET = CG_TARGET_METAL;
 
-// 1 when the kernel currently being rendered carries an
-// OPT(_, SIMD_REDUCE, _) wrapper: the 32 warp lanes cooperate on one
-// output element, so the promoted output axis decodes from the warp
-// (block) index `tg` rather than the per-thread `tid`.  Set per render
-// by cg_render_uop_kernel_cuda_root; the MSL / C99 entries leave it 0.
-static int RMU_SIMD_WARP = 0;
-
 // 1 when the kernel carries a KAX_GROUP_REDUCE axis (the cooperative
 // shared-memory reduce template): block size = group_extent, grid =
 // product(LOOP outputs), so the promoted output axis must decode from
-// `tg` (the block index) instead of the flat `tid` -- same as
-// RMU_SIMD_WARP but for the LOCAL-style launch shape, not the warp.
+// `tg` (the block index) instead of the flat `tid`.
 // Without this the renderer emits `a0 = (tid/.) % .` over a 1280-block
 // launch with block=16 and each block computes 16 different outputs
 // into one shared accumulator: data-race / OOB.
@@ -79,7 +71,7 @@ static int RMU_CUDA_SM = 0;
 fn int cuda_device_sm(void);
 #endif
 
-// Forward decl: defined alongside rmu_dag_has_simd_reduce below.
+// Forward decl: defined below.
 static int rmu_dag_has_group_reduce(Term t);
 // The OPT_GROUP_REDUCE FACTOR (e.g. 8 -- the cooperative thread count, NOT the
 // reduce axis's full extent), found by walking the OPT tree.
@@ -108,27 +100,6 @@ static void rmu_group_local_dims(Term root, int *group_ext, u32 *local_total) {
   u32 n = uop_dag_collect_axes(root, ids, types, exts, MAX_AXES);
   for (u32 i = 0; i < n; i++)
     if (exts[i] != 0 && types[i] == KAX_LOCAL) *local_total *= exts[i];
-}
-
-// CONV-BWD REDUCE TILING knob.  Default OFF (-1 uninit, 0 off, 1 on).
-// When ON, a SIMD_REDUCE-wrapped *multi-axis* reduce (e.g. the conv
-// weight-grad sum over B,oh,ow) stripes its OUTERMOST reduce axis
-// across the 32 warp lanes (lane = threadIdx.x % 32 takes a 1/32 slice
-// with `+= 32u` stride), keeps the inner reduce axes as serial nested
-// loops, then folds the 32 per-lane partials with the same
-// __shfl_xor_sync butterfly (CUDA) / simd_sum (Metal) the single-axis
-// SIMD path uses.  Mathematically identical to the serial multi-axis
-// reduce; it just parallelises the outer stripe over a warp, mirroring
-// tinygrad's GROUP-on-one-reduce-axis lowering (codegen/late/expander.py
-// fix_group_for_reduce).  OFF -> the multi-axis branch falls through to
-// the plain nested-loop emit, bit-identical to the prior renderer.
-static int RMU_CONV_BWD_REDUCE_TILING = -1;
-static int rmu_conv_bwd_reduce_tiling_on(void) {
-  if (RMU_CONV_BWD_REDUCE_TILING < 0) {
-    char const *e = getenv("THVM_CONV_BWD_REDUCE_TILING");
-    RMU_CONV_BWD_REDUCE_TILING = (e != NULL && e[0] == '1') ? 1 : 0;
-  }
-  return RMU_CONV_BWD_REDUCE_TILING;
 }
 
 // Emit an unroll pragma matching the current target's syntax.  C99 /
@@ -747,90 +718,9 @@ static void rmu_emit_term(Term t, FILE *fp) {
       return;
     case UOP_OPT: {
       // Annotation: render the target, ignore the directive in F0
-      // (F1+ pattern-matches for specialised templates).
-      // FAST_MATH peels: when wrapping a unary EXP2/LOG2/SQRT, emit
-      // a fast-intrinsic spelling instead of the precise variant.
-      // Apple's `fast::` namespace and CUDA's `__exp2f`/`__log2f`
-      // family both skip edge-case handling (denorms / NaNs / OOB
-      // inputs) for ~5-15% throughput on softmax / layernorm /
-      // attention where the result is renormalised anyway.  See
-      // mlx/backend/metal/kernels/softmax.h for the reference pattern.
+      // (F1+ pattern-matches for specialised templates such as TC /
+      // UPCAST / UNROLL / LOCAL / GROUP_REDUCE).
       Term inner = heap_read(loc + 0);
-      u32 opt_kind = (u32)term_val(heap_read(loc + 1));
-      // GPU-generic: FAST_MATH applies on Metal AND CUDA (CUDA has the
-      // `__exp2f`/`__log2f`/`sqrtf` device intrinsics); only the C
-      // target lacks a fast-math peel.  Intrinsic spelling branches on
-      // the GPU target below.
-      if (opt_kind == UOP_OPT_FAST_MATH && RMU_TARGET != CG_TARGET_C
-          && term_tag(inner) == TAG_UOP) {
-        u32 inner_op = term_ext(inner);
-        if (inner_op == UOP_EXP2 || inner_op == UOP_LOG2
-            || inner_op == UOP_SQRT) {
-          const char *fn_name;
-          if (RMU_TARGET == CG_TARGET_CUDA) {
-            fn_name = (inner_op == UOP_EXP2) ? "__exp2f"
-                    : (inner_op == UOP_LOG2) ? "__log2f"
-                    :                          "sqrtf";
-          } else {
-            fn_name = (inner_op == UOP_EXP2) ? "fast::exp2"
-                    : (inner_op == UOP_LOG2) ? "fast::log2"
-                    :                          "fast::sqrt";
-          }
-          fprintf(fp, "%s(", fn_name);
-          rmu_emit_term(heap_read(term_val(inner) + 0), fp);
-          fputs(")", fp);
-          return;
-        }
-      }
-      // VEC_LOAD peel: wrap UOP_INDEX_E with a floatN reinterpret_cast
-      // at the load site.  Semantically identical to buf[addr]; lets
-      // the GPU coalesce N consecutive scalar loads into one vector
-      // load when the address is contiguous.  See
-      // docs/plans/mlx_features_to_port.md (4) +
-      // mlx/backend/metal/kernels/softmax.h.  factor = 2/4/8/16.
-      //
-      // Metal's `floatN` supports a runtime `operator[]`, so the lane
-      // is picked with a second subscript:
-      //   ((device const floatN*)(buf))[(addr)/N][(addr)%N]
-      // CUDA's `float4` etc. have NO `operator[]` -- only .x/.y/.z/.w
-      // members, and the lane index `(addr)%N` is generally a runtime
-      // value so a member cannot be named statically.  The
-      // correctness-preserving CUDA form reinterprets the floatN slot
-      // back to a scalar pointer for the lane subscript:
-      //   ((const float*)&((const floatN*)(buf))[(addr)/N])[(addr)%N]
-      // This keeps the floatN-aligned access (the coalescing hint)
-      // while staying valid CUDA.
-      // GPU-generic: both Metal and CUDA have floatN vector types; the
-      // C target keeps the plain scalar load.
-      if (opt_kind == UOP_OPT_VEC_LOAD && RMU_TARGET != CG_TARGET_C
-          && term_tag(inner) == TAG_UOP && term_ext(inner) == UOP_INDEX_E) {
-        u32 width = (u32)term_val(heap_read(loc + 2));
-        Term buf  = heap_read(term_val(inner) + 0);
-        Term addr = heap_read(term_val(inner) + 1);
-        u32 dt    = rmu_slot_dtype(buf);
-        const char *base = rmu_gpu_type_name(dt);
-        // Native-vector load is valid for any scalar with an MSL vecN
-        // type: float/half/bfloat all have float4/half4/bfloat4 etc.
-        if ((dt == DT_FP32 || dt == DT_FP16 || dt == DT_BF16)
-            && (width == 2 || width == 4 || width == 8 || width == 16)) {
-          if (RMU_TARGET == CG_TARGET_CUDA) {
-            fprintf(fp, "((const %s*)&((const %s%u*)(%s))[(",
-                    base, base, width, rmu_buf_name(buf));
-            rmu_emit_term(addr, fp);
-            fprintf(fp, ") / %u])[(", width);
-            rmu_emit_term(addr, fp);
-            fprintf(fp, ") %% %u]", width);
-          } else {
-            fprintf(fp, "((device const %s%u*)(%s))[(",
-                    base, width, rmu_buf_name(buf));
-            rmu_emit_term(addr, fp);
-            fprintf(fp, ") / %u][(", width);
-            rmu_emit_term(addr, fp);
-            fprintf(fp, ") %% %u]", width);
-          }
-          return;
-        }
-      }
       rmu_emit_term(inner, fp);
       return;
     }
@@ -1176,82 +1066,6 @@ static void rmu_collect_reduces(Term t, Term *reduces, u32 *n_out) {
       rmu_collect_reduces(heap_read(loc + 0), reduces, n_out);
       rmu_collect_reduces(heap_read(loc + 1), reduces, n_out);
       rmu_collect_reduces(heap_read(loc + 2), reduces, n_out);
-      return;
-    default:
-      return;
-  }
-}
-
-// Variant of rmu_collect_reduces that ALSO tags each collected REDUCE
-// with whether its immediate parent is OPT(_, SIMD_REDUCE, _).  Used by
-// rmu_emit_store to fire the simd_sum/simd_max collective-reduce
-// emission instead of a scalar for-loop accumulator.  `simd_flags[i]`
-// is set when reduces[i] was reached through an OPT_SIMD_REDUCE wrap.
-static void rmu_collect_reduces_with_simd(Term t, int parent_is_simd,
-                                          Term *reduces, u8 *simd_flags,
-                                          u32 *n_out) {
-  if (term_tag(t) != TAG_UOP) return;
-  if (*n_out >= MAX_DIM) return;
-  u32 op = term_ext(t);
-  u64 loc = term_val(t);
-  if (op == UOP_REDUCE) {
-    for (u32 i = 0; i < *n_out; i++) {
-      if (reduces[i] == t) {
-        if (parent_is_simd) simd_flags[i] = 1;
-        return;
-      }
-    }
-    // Post-order add: recurse into the body FIRST.  See the long
-    // comment in rmu_collect_reduces; same nested-REDUCE invariant
-    // applies (inner `_acc<N>` must be declared before outer body
-    // emits the reference).  Pass parent_is_simd=0 through the body
-    // -- SIMD_REDUCE only applies to the immediately-wrapped reduce,
-    // not to siblings nested deeper.
-    rmu_collect_reduces_with_simd(heap_read(loc + 0), 0, reduces,
-                                  simd_flags, n_out);
-    if (*n_out >= MAX_DIM) return;
-    for (u32 i = 0; i < *n_out; i++) {
-      if (reduces[i] == t) {
-        if (parent_is_simd) simd_flags[i] = 1;
-        return;
-      }
-    }
-    reduces[*n_out]    = t;
-    simd_flags[*n_out] = parent_is_simd ? 1 : 0;
-    (*n_out)++;
-    return;
-  }
-  switch (op) {
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E:
-      rmu_collect_reduces_with_simd(heap_read(loc + 0), 0, reduces,
-                                    simd_flags, n_out);
-      rmu_collect_reduces_with_simd(heap_read(loc + 1), 0, reduces,
-                                    simd_flags, n_out);
-      return;
-    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
-    case UOP_CAST:  case UOP_BITCAST:
-      rmu_collect_reduces_with_simd(heap_read(loc + 0), 0, reduces,
-                                    simd_flags, n_out);
-      return;
-    case UOP_OPT: {
-      u32 kind = term_val(heap_read(loc + 1));
-      int is_simd = (kind == UOP_OPT_SIMD_REDUCE) ? 1 : parent_is_simd;
-      rmu_collect_reduces_with_simd(heap_read(loc + 0), is_simd, reduces,
-                                    simd_flags, n_out);
-      return;
-    }
-    case UOP_IWHERE:
-      rmu_collect_reduces_with_simd(heap_read(loc + 0), 0, reduces,
-                                    simd_flags, n_out);
-      rmu_collect_reduces_with_simd(heap_read(loc + 1), 0, reduces,
-                                    simd_flags, n_out);
-      rmu_collect_reduces_with_simd(heap_read(loc + 2), 0, reduces,
-                                    simd_flags, n_out);
       return;
     default:
       return;
@@ -1623,11 +1437,7 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
   if (gctx != NULL && rmu_gd_g_mod(gctx, axis_id) != 0) {
     u32 stride = rmu_gd_g_stride(gctx, axis_id);
     u32 mod    = rmu_gd_g_mod(gctx, axis_id);
-    // SIMD_REDUCE: one threadblock = one warp = one output row, so the
-    // promoted output axis decodes from the block index `tg` (the same
-    // form a LOCAL split uses) -- never the per-thread `tid`, which
-    // would split a warp across 32 distinct rows.
-    char const *idx = (gctx->has_local || RMU_SIMD_WARP || RMU_HAS_GROUP_REDUCE) ? "tg" : "tid";
+    char const *idx = (gctx->has_local || RMU_HAS_GROUP_REDUCE) ? "tg" : "tid";
     if (gctx->n_globals == 1) {
       fprintf(fp, "uint a%u = %s; /* global ext=%u */\n", axis_id, idx, extent);
     } else if (stride <= 1) {
@@ -1645,19 +1455,6 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
   }
   if (axis_type == 1 /*REDUCE*/) {
     fprintf(fp, "for (uint a%u = 0; a%u < %s; a%u++) /*reduce*/ {\n",
-            axis_id, axis_id, bound, axis_id);
-  } else if (RMU_SIMD_WARP && axis_type == 0 /* KAX_LOOP */
-             && gctx != NULL
-             && rmu_gd_g_mod(gctx, axis_id) == 0) {
-    // SIMD_REDUCE warp-per-row kernel: a reduce-independent broadcast
-    // output axis (the unpromoted column) is distributed across the 32
-    // warp lanes -- each lane writes a 1/32 stripe of the columns.
-    // After the warp butterfly all lanes hold the full reduce result,
-    // so the per-lane stripes are independent and race-free; without
-    // the stride every lane would redundantly recompute (and re-store)
-    // the whole row.
-    fprintf(fp, "for (uint a%u = (threadIdx.x %% 32u); "
-            "a%u < %s; a%u += 32u) {\n",
             axis_id, axis_id, bound, axis_id);
   } else {
     // Small LOOP-typed output axes (non-reduce, non-promoted): emit
@@ -1849,7 +1646,7 @@ static u32 rmu_emit_output_loops(Term addr, Term const *out_ranges,
   if (gd.n_globals > 0 && gd.total > 0) {
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fprintf(fp, "if (%s >= %lluu) return;\n",
-            (gd.has_local || RMU_SIMD_WARP || RMU_HAS_GROUP_REDUCE) ? "tg" : "tid",
+            (gd.has_local || RMU_HAS_GROUP_REDUCE) ? "tg" : "tid",
             (unsigned long long)gd.total);
   }
   u32 body_depth = depth;
@@ -5798,9 +5595,8 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
 // Emit one REDUCE accumulator at `emit_depth`:
 //   float _accN = init;
 //   for (reduce-axis) { <nested reduces using this axis>; _accN = combine; }
-// `is_simd` selects the SIMD-collective shape (simd_sum / __shfl_xor_sync)
-// over the scalar accumulator.  `reduces` / `simd_flags` / `n_reduces` are
-// the full collected-reduce table; `parent_idx[i]` says which reduce (by
+// `reduces` / `n_reduces` are the full collected-reduce table;
+// `parent_idx[i]` says which reduce (by
 // index, or RMU_REDUCE_NO_PARENT for a root) should emit reduces[i].  When
 // `parent_idx[k]` points at THIS reduce, reduces[k] is a child whose body
 // references this reduce's reduce-axis -- it is emitted recursively INSIDE
@@ -5848,8 +5644,8 @@ static Term rmu_lane_subst(Term t, const RmuLaneBlock *lb, u32 k,
   return uop_graph_rewrite(t, rules, 1, cx);
 }
 
-static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth, int is_simd,
-                                const Term *reduces, const u8 *simd_flags,
+static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth,
+                                const Term *reduces,
                                 const u32 *parent_idx, u32 self_idx,
                                 u32 n_reduces, FILE *fp, Term store_addr,
                                 const RmuLaneBlock *lb) {
@@ -5862,13 +5658,12 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth, int is_simd,
   // (uop/ops.py + codegen/late/devectorizer.py:311 reduce_to_acc).
   u32  r_n_axes = uop_reduce_n_axes(red);
   if (r_n_axes == 0) return;
-  u32  r_axis = uop_reduce_axis(red, 0);     // accumulator name + SIMD slice axis
+  u32  r_axis = uop_reduce_axis(red, 0);     // accumulator name axis
   Term r_src  = uop_reduce_src(red);
   u32  n_lanes = (lb != NULL && lb->n_lanes > 1) ? lb->n_lanes : 1;
-  // SIMD-collective reduce can't lane-block (it owns the warp); fall back
-  // to scalar for those.  Lane-blocking only on the C target (Lever B);
-  // GPU keeps its existing register-block path in rmu_emit_store_reduce.
-  if (n_lanes > 1 && (is_simd || RMU_TARGET != CG_TARGET_C)) n_lanes = 1;
+  // Lane-blocking only on the C target (Lever B); GPU keeps its existing
+  // register-block path in rmu_emit_store_reduce.
+  if (n_lanes > 1 && RMU_TARGET != CG_TARGET_C) n_lanes = 1;
   char acc_name[32];
   snprintf(acc_name, sizeof(acc_name), "_acc%u", r_axis);
   if (n_lanes > 1) {
@@ -5926,126 +5721,7 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth, int is_simd,
     // bail-and-return-identity behaviour.
     if (axis_ranges[ai] == 0) return;
   }
-  Term reduce_range_term = axis_ranges[0];
   u32  reduce_extent     = axis_extents[0];
-  // GPU-generic gate: the SIMD-collective reduce shape applies to Metal
-  // AND CUDA -- both have a 32-lane warp/simdgroup with a collective
-  // reduce (Metal simd_sum, CUDA __shfl_xor_sync).  The C target keeps
-  // the scalar accumulator.  SIMD-collective only handles single-axis
-  // today; multi-axis falls through to the generic nested-loop path.
-  if (is_simd && RMU_TARGET != CG_TARGET_C && r_n_axes == 1) {
-    // SIMD-collective shape: each lane processes a 1/32 slice of extent,
-    // then a collective op combines the 32 lane partials.  CUDA: lane
-    // index = threadIdx.x % 32; the cross-lane combine is a 5-step
-    // __shfl_xor_sync butterfly.  Metal: lane index =
-    // thread_index_in_simdgroup; the combine is one simd_<op>.
-    const char *lane = (RMU_TARGET == CG_TARGET_CUDA)
-                         ? "(threadIdx.x % 32u)"
-                         : "thread_index_in_simdgroup";
-    for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
-    fprintf(fp, "for (uint a%u = %s; a%u < %u; a%u += 32u) {\n",
-            r_axis, lane, r_axis, reduce_extent, r_axis);
-    for (u32 d = 0; d < emit_depth + 1; d++) fputs("  ", fp);
-    rmu_emit_reduce_combine(acc_name, r_kind, r_src, fp);
-    for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
-    fputs("}\n", fp);
-    if (RMU_TARGET == CG_TARGET_CUDA) {
-      // Warp butterfly: 5 __shfl_xor_sync steps fold 32 lanes.  xor (not
-      // down) makes this an ALL-reduce -- every lane ends with the full
-      // result, matching Metal simd_sum/simd_max broadcast semantics.
-      const char *op = (r_kind == REDUCE_MAX) ? "fmaxf" : "+";
-      for (u32 s = 16; s >= 1; s >>= 1) {
-        for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
-        if (r_kind == REDUCE_MAX) {
-          fprintf(fp, "%s = %s(%s, __shfl_xor_sync(0xffffffffu, %s, %uu));\n",
-                  acc_name, op, acc_name, acc_name, s);
-        } else {
-          fprintf(fp, "%s = %s %s __shfl_xor_sync(0xffffffffu, %s, %uu);\n",
-                  acc_name, acc_name, op, acc_name, s);
-        }
-      }
-    } else {
-      for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
-      if (r_kind == REDUCE_MAX) {
-        fprintf(fp, "%s = simd_max(%s);\n", acc_name, acc_name);
-      } else {
-        fprintf(fp, "%s = simd_sum(%s);\n", acc_name, acc_name);
-      }
-    }
-    return;
-  }
-  // CONV-BWD REDUCE TILING (env-gated): a SIMD_REDUCE-wrapped MULTI-axis
-  // reduce stripes its OUTERMOST reduce axis across the 32 warp lanes,
-  // keeps the inner reduce axes as serial nested loops, and folds the
-  // per-lane partials with the same butterfly the single-axis SIMD path
-  // uses.  The `a0 = lane; a0 < ext; a0 += 32u` stride handles a ragged
-  // outer extent (extent not a multiple of 32): a lane that does zero
-  // iterations keeps the reduce-init value (0 for SUM, -INFINITY for
-  // MAX -- the identity), so the butterfly fold stays correct.  Gated
-  // on outer extent >= 32 so a tiny outer axis (which would idle most
-  // lanes) stays on the serial accumulator.  Like the single-axis SIMD
-  // path, the warp re-orders the float adds, so the result differs from
-  // a serial reduce in the last ULPs -- the accepted tinygrad-GROUP
-  // parity tradeoff, NOT a bit-identical transform.  The warp index is
-  // already bound to one output row (RMU_SIMD_WARP -> tg decode), so
-  // every lane in the block agrees on the output-axis tuple.
-  if (is_simd && RMU_TARGET != CG_TARGET_C && r_n_axes >= 2
-      && rmu_conv_bwd_reduce_tiling_on()
-      && reduce_extent >= 32) {
-    const char *lane = (RMU_TARGET == CG_TARGET_CUDA)
-                         ? "(threadIdx.x % 32u)"
-                         : "thread_index_in_simdgroup";
-    // Outer axis: strided over the 32 lanes.
-    for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
-    fprintf(fp, "for (uint a%u = %s; a%u < %u; a%u += 32u) {\n",
-            r_axis, lane, r_axis, reduce_extent, r_axis);
-    // Inner axes (1..n-1): plain serial loops nested inside.
-    for (u32 ai = 1; ai < r_n_axes; ai++) {
-      rmu_emit_range_open(axis_ranges[ai], fp, emit_depth + ai, 0);
-    }
-    u32 inner_depth = emit_depth + r_n_axes;
-    // Child reduces nested inside the innermost loop (same as the plain
-    // path below).  This warp-stripe path is SIMD-collective, so it cannot
-    // lane-block (the warp is already owned): pass lb=NULL, matching the
-    // single-axis SIMD branch.
-    for (u32 k = 0; k < n_reduces; k++) {
-      if (parent_idx[k] != self_idx) continue;
-      rmu_emit_one_reduce_lb(reduces[k], inner_depth, simd_flags[k],
-                          reduces, simd_flags, parent_idx, k, n_reduces, fp,
-                          store_addr, NULL);
-    }
-    for (u32 d = 0; d < inner_depth; d++) fputs("  ", fp);
-    rmu_emit_reduce_combine(acc_name, r_kind, r_src, fp);
-    // Close inner axes + the outer stripe loop.
-    for (u32 ai = 0; ai < r_n_axes; ai++) {
-      u32 close_depth = inner_depth - 1 - ai;
-      for (u32 d = 0; d < close_depth; d++) fputs("  ", fp);
-      fputs("}\n", fp);
-    }
-    // Cross-lane butterfly: fold the 32 per-lane partials into every
-    // lane (all-reduce), identical to the single-axis SIMD combine.
-    if (RMU_TARGET == CG_TARGET_CUDA) {
-      const char *op = (r_kind == REDUCE_MAX) ? "fmaxf" : "+";
-      for (u32 s = 16; s >= 1; s >>= 1) {
-        for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
-        if (r_kind == REDUCE_MAX) {
-          fprintf(fp, "%s = %s(%s, __shfl_xor_sync(0xffffffffu, %s, %uu));\n",
-                  acc_name, op, acc_name, acc_name, s);
-        } else {
-          fprintf(fp, "%s = %s %s __shfl_xor_sync(0xffffffffu, %s, %uu);\n",
-                  acc_name, acc_name, op, acc_name, s);
-        }
-      }
-    } else {
-      for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
-      if (r_kind == REDUCE_MAX) {
-        fprintf(fp, "%s = simd_max(%s);\n", acc_name, acc_name);
-      } else {
-        fprintf(fp, "%s = simd_sum(%s);\n", acc_name, acc_name);
-      }
-    }
-    return;
-  }
   // Multi-axis nested for-loops: outer = axis_0, innermost = axis_{n-1}.
   // GPU-generic: small-extent reduce unroll on the outermost.
   if (RMU_TARGET != CG_TARGET_C && reduce_extent > 0
@@ -6095,8 +5771,8 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth, int is_simd,
   // always precedes its parent.
   for (u32 k = 0; k < n_reduces; k++) {
     if (parent_idx[k] != self_idx) continue;
-    rmu_emit_one_reduce_lb(reduces[k], inner_depth, simd_flags[k],
-                        reduces, simd_flags, parent_idx, k, n_reduces, fp,
+    rmu_emit_one_reduce_lb(reduces[k], inner_depth,
+                        reduces, parent_idx, k, n_reduces, fp,
                         store_addr, (n_lanes > 1) ? lb : NULL);
   }
   if (n_lanes > 1) {
@@ -6291,10 +5967,8 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   int any_reduce_dep = 0;
   {
     Term hoist_reduces[RMU_MAX_RANGES];
-    u8   hoist_simd[RMU_MAX_RANGES] = {0};
     u32  n_hoist = 0;
-    rmu_collect_reduces_with_simd(value, 0, hoist_reduces, hoist_simd,
-                                  &n_hoist);
+    rmu_collect_reduces(value, hoist_reduces, &n_hoist);
     for (u32 i = 0; i < n_hoist; i++) {
       Term r_src = heap_read(term_val(hoist_reduces[i]) + 0);
       Term r_ranges[RMU_MAX_RANGES];
@@ -6390,10 +6064,8 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // axis) emits BETWEEN output loops, avoiding redundant recompute
   // per inner-axis iteration.
   Term reduces[RMU_MAX_RANGES];
-  u8   reduce_simd_flag[RMU_MAX_RANGES] = {0};
   u32  n_reduces = 0;
-  rmu_collect_reduces_with_simd(value, 0, reduces, reduce_simd_flag,
-                                &n_reduces);
+  rmu_collect_reduces(value, reduces, &n_reduces);
   u32 required_pos[RMU_MAX_RANGES] = {0};
   for (u32 i = 0; i < n_reduces; i++) {
     Term r_src = heap_read(term_val(reduces[i]) + 0);
@@ -6436,7 +6108,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // achieve this by pushing the outer's required_pos to at least the
   // inner's required_pos for every reduce nested inside it.
   // Reduces are in post-order (inner before outer; see
-  // rmu_collect_reduces_with_simd's post-order add), so a single
+  // rmu_collect_reduces's post-order add), so a single
   // forward pass suffices: by the time we visit `i`, every reduce
   // appearing in reduces[i]'s body subtree has been fully updated.
   for (u32 i = 0; i < n_reduces; i++) {
@@ -6506,7 +6178,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   if (g_decode.n_globals > 0 && g_decode.total > 0) {
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fprintf(fp, "if (%s >= %lluu) return;\n",
-            (g_decode.has_local || RMU_SIMD_WARP || RMU_HAS_GROUP_REDUCE) ? "tg" : "tid",
+            (g_decode.has_local || RMU_HAS_GROUP_REDUCE) ? "tg" : "tid",
             (unsigned long long)g_decode.total);
   }
 
@@ -6524,8 +6196,8 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   for (u32 i = 0; i < n_reduces; i++) {
     if (required_pos[i] != 0) continue;
     if (parent_idx[i] != RMU_REDUCE_NO_PARENT) continue;
-    rmu_emit_one_reduce_lb(reduces[i], depth, reduce_simd_flag[i],
-                        reduces, reduce_simd_flag, parent_idx, i,
+    rmu_emit_one_reduce_lb(reduces[i], depth,
+                        reduces, parent_idx, i,
                         n_reduces, fp, addr, lbp);
   }
 
@@ -6571,8 +6243,8 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     for (u32 r_i = 0; r_i < n_reduces; r_i++) {
       if (required_pos[r_i] != i + 1) continue;
       if (parent_idx[r_i] != RMU_REDUCE_NO_PARENT) continue;
-      rmu_emit_one_reduce_lb(reduces[r_i], body_depth, reduce_simd_flag[r_i],
-                          reduces, reduce_simd_flag, parent_idx, r_i,
+      rmu_emit_one_reduce_lb(reduces[r_i], body_depth,
+                          reduces, parent_idx, r_i,
                           n_reduces, fp, addr, lbp);
     }
   }
@@ -7293,44 +6965,6 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   fputs("}\n", fp);
 }
 
-// Walk the DAG for a UOP_OPT(_, SIMD_REDUCE, _) annotation.  When the
-// reduce was wrapped for the warp-collective lowering, the 32 lanes of
-// a warp cooperate on ONE output element: the cross-lane butterfly
-// (__shfl_down_sync) only combines lanes within the same warp, so
-// every lane must decode the SAME output-axis tuple.  The CUDA entry
-// uses this to switch the promoted output axis from a per-thread `tid`
-// decode (32 lanes -> 32 distinct rows -- a correctness bug) to a
-// per-warp `tg` decode (one threadblock = one warp = one output row).
-static int rmu_dag_has_simd_reduce(Term t) {
-  if (term_tag(t) != TAG_UOP) return 0;
-  u32 op  = term_ext(t);
-  u64 loc = term_val(t);
-  switch (op) {
-    case UOP_OPT:
-      if ((u32)term_val(heap_read(loc + 1)) == UOP_OPT_SIMD_REDUCE) return 1;
-      return rmu_dag_has_simd_reduce(heap_read(loc + 0));
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E: case UOP_AFTER:
-      return rmu_dag_has_simd_reduce(heap_read(loc + 0))
-          || rmu_dag_has_simd_reduce(heap_read(loc + 1));
-    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
-    case UOP_CAST:  case UOP_BITCAST:
-    case UOP_REDUCE:
-      return rmu_dag_has_simd_reduce(heap_read(loc + 0));
-    case UOP_IWHERE:
-    case UOP_STORE:
-      return rmu_dag_has_simd_reduce(heap_read(loc + 0))
-          || rmu_dag_has_simd_reduce(heap_read(loc + 1))
-          || rmu_dag_has_simd_reduce(heap_read(loc + 2));
-    default:
-      return 0;
-  }
-}
-
 // True iff `t`'s subtree contains a UOP_RANGE whose axis_type ==
 // KAX_GROUP_REDUCE -- the structural marker that hand_opts applied
 // KOP_GROUP/GROUPTOP to one of the reduce axes.  Used by the CUDA
@@ -7372,57 +7006,6 @@ static int rmu_dag_has_group_reduce(Term t) {
     default:
       return 0;
   }
-}
-
-// Grid size (warp count) for a SIMD_REDUCE warp-per-row CUDA kernel:
-// the product of the extents of output axes that some reduce in the
-// store value depends on.  That is exactly the set rmu_emit_store
-// promotes onto `tg` -- one threadblock (= one warp) per reduce-axis
-// tuple.  A pure-broadcast output axis (softmax's column) is NOT in
-// the product: rmu_emit_range_open_ctx distributes it across the 32
-// warp lanes, so it must not also multiply the warp count.  Returns 0
-// if `root` is not a STORE / has no reduce-dependent output axis (the
-// caller then falls back to the plain LOOP-product geometry).
-static u64 rmu_dag_simd_warp_grid(Term root) {
-  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
-  Term addr  = heap_read(term_val(root) + 1);
-  Term value = heap_read(term_val(root) + 2);
-  // Output axes: the RANGE leaves that index the store position.
-  Term addr_ranges[MAX_DIM];
-  u32  addr_n = 0;
-  rmu_collect_ranges(addr, addr_ranges, &addr_n);
-  // Reduce-dependent axes: every RANGE leaf reachable from any reduce
-  // body in the store value.
-  Term reduces[RMU_MAX_RANGES];
-  u8   simd_flags[RMU_MAX_RANGES] = {0};
-  u32  n_reduces = 0;
-  rmu_collect_reduces_with_simd(value, 0, reduces, simd_flags, &n_reduces);
-  u64 grid = 1;
-  int found = 0;
-  for (u32 i = 0; i < addr_n; i++) {
-    if (term_tag(addr_ranges[i]) != TAG_UOP
-        || term_ext(addr_ranges[i]) != UOP_RANGE) continue;
-    u32 oax = (u32)term_val(heap_read(term_val(addr_ranges[i]) + 0));
-    u32 oext = (u32)term_val(heap_read(term_val(addr_ranges[i]) + 2));
-    if (oext == 0) continue;
-    int dep = 0;
-    for (u32 r = 0; r < n_reduces && !dep; r++) {
-      Term r_src = heap_read(term_val(reduces[r]) + 0);
-      Term r_ranges[MAX_DIM];
-      u32  r_n = 0;
-      rmu_collect_ranges_through_reduce(r_src, r_ranges, &r_n);
-      for (u32 j = 0; j < r_n; j++) {
-        if (term_tag(r_ranges[j]) != TAG_UOP
-            || term_ext(r_ranges[j]) != UOP_RANGE) continue;
-        if ((u32)term_val(heap_read(term_val(r_ranges[j]) + 0)) == oax) {
-          dep = 1;
-          break;
-        }
-      }
-    }
-    if (dep) { grid *= (u64)oext; found = 1; }
-  }
-  return found ? grid : 0;
 }
 
 // Walk the DAG for a UOP_OPT(_, TC, _) annotation -- the tell that the
@@ -7475,9 +7058,8 @@ static int rmu_dag_has_tc(Term t) {
 //       tg  = blockIdx.x                            (block index)
 //       tt  = threadIdx.x                           (block-local idx)
 //       sgi = threadIdx.x / 32                      (warp in block)
-//     thread_index_in_simdgroup has no separate `uint` here -- the
-//     SIMD-reduce lowering spells the lane index `threadIdx.x % 32`
-//     inline (see RMU_EMIT_ONE_REDUCE).
+//     thread_index_in_simdgroup has no separate `uint` here; CUDA
+//     templates that need a lane index spell `threadIdx.x % 32` inline.
 fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
                                        FILE *fp) {
   if (fp == NULL) fp = stderr;
@@ -7598,15 +7180,9 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
 #else
   RMU_CUDA_SM = 0;
 #endif
-  // Warp-collective reduce: when SIMD_REDUCE wraps a reduce, the
-  // promoted output axis must decode from `tg` (one block = one warp =
-  // one output row) so all 32 lanes of a __shfl_down_sync butterfly
-  // agree on the row.  The launch geometry (cuda_dag_dispatch_shape)
-  // matches: grid = output-LOOP product, block = 32.
-  RMU_SIMD_WARP = rmu_dag_has_simd_reduce(root);
-  // Cooperative shared-mem reduce: same launch-shape -> output decode
-  // logic as SIMD_REDUCE but for the GROUP_REDUCE template (block =
-  // group_extent, grid = output product).
+  // Cooperative shared-mem reduce: the promoted output axis must decode
+  // from `tg` for the GROUP_REDUCE template (block = group_extent, grid =
+  // output product).
   RMU_HAS_GROUP_REDUCE = rmu_dag_has_group_reduce(root);
   rmu_group_local_dims(root, &RMU_GROUP_EXTENT, &RMU_GROUP_LOCAL_TOTAL);
   // bf16/fp16 scalar types are used by elementwise kernels (casts,
@@ -7723,7 +7299,6 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
     fputs("  /* empty kernel */\n", fp);
   }
   RMU_TARGET = CG_TARGET_METAL;
-  RMU_SIMD_WARP = 0;
   RMU_HAS_GROUP_REDUCE = 0;
   RMU_GROUP_EXTENT = 0; RMU_GROUP_LOCAL_TOTAL = 1;
   fputs("}\n", fp);

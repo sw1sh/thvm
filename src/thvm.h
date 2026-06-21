@@ -443,12 +443,6 @@ int             dtype_is_packed   (u32 dt);
 #define UOP_OPT_LOCAL         3   // bind to thread position
 #define UOP_OPT_GROUP_REDUCE  4
 #define UOP_OPT_CONV          5   // conv2d_flat output kernel template
-#define UOP_OPT_FAST_MATH     6   // fast::* intrinsic for unary ops under target
-#define UOP_OPT_SIMD_REDUCE   7   // simd_sum/simd_max simdgroup-collective reduce
-#define UOP_OPT_VEC_LOAD      8   // vectorized cooperative load:
-                                  // wraps UOP_INDEX_E with floatN reinterpret_cast.
-                                  // factor = lane width (2/4/8/16; typical 4 fp32).
-                                  // See docs/plans/mlx_features_to_port.md feature 4.
 #define UOP_OPT          39  // heap = [target, NUM(kind), NUM(factor)];
                              //   Annotation node attaching an optimisation
                              //   directive to `target`.  factor=0 when the
@@ -690,9 +684,6 @@ struct KernelEntry;
 #define KOP_NOLOCALS 8
 #define KOP_TC       9
 #define KOP_GLOBAL  10
-#define KOP_FAST_MATH 11
-#define KOP_SIMD_REDUCE 12
-#define KOP_VEC_LOAD  13
 
 typedef struct {
   u8  op;        // KOP_*
@@ -2521,14 +2512,6 @@ int uop_dag_dtype_uniform(Term root, u32 dt);
 // reachable from `root` and return its extent; 0 if none.
 u32 uop_dag_reduce_axis_extent(Term root);
 
-// Largest product of reduce-axis extents across every UOP_REDUCE node
-// in the DAG rooted at `root`.  Writes the product to *out_product and
-// the axis count of that reduce to *out_n_axes; returns 1 if found.
-// Used by the CONV-BWD REDUCE TILING trigger to recognise a
-// reduce-heavy kernel by reduce magnitude alone.
-int uop_dag_max_reduce_extent_product(Term root, u64 *out_product,
-                                      u32 *out_n_axes);
-
 // 1 iff at least one UOP_REDUCE is reachable from `root` AND every
 // reachable op is in the metal reduce-unroll accepted set (mirrors
 // propose_metal_reduce_unroll_kernel's UOp-DAG gate).
@@ -2591,14 +2574,6 @@ u32  uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap);
 // fire?  True iff the env opt-in is on (default ON; HAND_CODED_OPTS=0
 // or NOOPT=1 disables) AND the per-shape autotuned flag is still 0.
 fn int kernel_should_hand_code_opts(struct KernelEntry const *ke);
-
-// CONV-BWD REDUCE TILING (env knob THVM_CONV_BWD_REDUCE_TILING, default
-// OFF).  When ON, stamps KOP_SIMD_REDUCE on a reduce-heavy CUDA kernel
-// so the long conv-backward reduce is tiled across a warp.  No-op (and
-// the default path is bit-identical) when the knob is off / the kernel
-// doesn't qualify.  Returns the number of opts applied (0 or 1).
-fn int kernel_should_conv_bwd_reduce_tile(struct KernelEntry const *ke);
-fn u32 kernel_conv_bwd_reduce_tiling(struct KernelEntry *ke);
 
 // === Slice 5 decode shims (Metal-TU-callable) =========================
 // Thin external-linkage wrappers over heap_read / term_* / UOp

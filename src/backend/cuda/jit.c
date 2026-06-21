@@ -322,8 +322,9 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     // div -> approx, etc.).  Default ON; THVM_CUDA_NO_FAST_MATH=1
     // restores precise math.  For beautiful_mnist / similar training
     // workloads the small numeric difference doesn't change loss
-    // convergence; tinygrad's CUDA renderer enables similar
-    // intrinsics via UOP_OPT(_, FAST_MATH, _) wraps.
+    // convergence.  This compiler-flag fast-math is the spec-faithful
+    // mechanism (tinygrad does the same via the renderer / compiler
+    // flag, not an IR OptOp).
     const char *opts[16];
     u32 n_opts = 0;
     opts[n_opts++] = arch_opt;
@@ -764,24 +765,6 @@ fn int cuda_dag_dispatch_shape(struct KernelEntry const *ke, u32 *grid_x,
       ? cuda_dag_group_reduce_factor(ke->cached_lift.store_root) : 0;
   if (total == 0 || total > 0xFFFFFFFFu) return 0;
   u32 grid, block;
-  // SIMD_REDUCE: a warp-collective reduce gives each reduce-axis tuple
-  // one full warp (the __shfl_xor_sync butterfly only folds within a
-  // warp), so one threadblock = one warp = 32 threads.  The grid is
-  // the product of the output axes a reduce DEPENDS on
-  // (rmu_dag_simd_warp_grid) -- a pure-broadcast output axis is
-  // distributed across the 32 lanes by the renderer, so it must not
-  // multiply the warp count.  Falls back to the full LOOP product
-  // when no reduce-dependent output axis exists (a scalar-output
-  // reduce -- grid 1).
-  if (rmu_dag_has_simd_reduce(ke->cached_lift.store_root)
-      && local_total <= 1 && group_reduce_extent == 0) {
-    u64 sg = rmu_dag_simd_warp_grid(ke->cached_lift.store_root);
-    if (sg == 0) sg = total;
-    if (sg > 0xFFFFFFFFu) return 0;
-    if (grid_x  != NULL) *grid_x  = (u32)sg;
-    if (block_x != NULL) *block_x = 32;
-    return 1;
-  }
   if (group_reduce_extent != 0) {
     // A GROUP_REDUCE that COEXISTS with LOCAL axes (tinygrad matvec: GROUP
     // the reduce + LOCAL the output row) puts BOTH in the block -- local_total
@@ -814,13 +797,11 @@ fn int cuda_dag_dispatch_shape(struct KernelEntry const *ke, u32 *grid_x,
 }
 
 // True iff the lifted DAG needs the DAG-derived launch geometry
-// rather than the flat output_numel shape: either a per-axis OPT-class
-// axis (UPCAST / UNROLL / LOCAL / GROUP_REDUCE -- from kernel_apply_opt
-// DAG mode) is present, or a SIMD_REDUCE wrapper is (warp-per-row, so
-// the launch is grid = output rows, block = 32).
+// rather than the flat output_numel shape: a per-axis OPT-class axis
+// (UPCAST / UNROLL / LOCAL / GROUP_REDUCE -- from kernel_apply_opt DAG
+// mode) is present.
 fn int cuda_dag_has_opt_axes(struct KernelEntry const *ke) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
-  if (rmu_dag_has_simd_reduce(ke->cached_lift.store_root)) return 1;
   u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
   u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
                                exts, MAX_AXES);

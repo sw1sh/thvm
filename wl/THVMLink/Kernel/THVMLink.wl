@@ -294,7 +294,7 @@ GeneralUtilities`SetUsage[TUOpILt, "TUOpILt[a$, b$] builds the integer-less-than
 GeneralUtilities`SetUsage[TUOpIAnd, "TUOpIAnd[a$, b$] builds the integer-and UOP node, used to construct symbolic address trees over UOP_RANGE leaves and UOP_CONST stride coefficients."];
 GeneralUtilities`SetUsage[TUOpIWhere, "TUOpIWhere[cond$, then$, else$] builds a UOP_IWHERE ternary select."];
 GeneralUtilities`SetUsage[TUOpInvalid, "TUOpInvalid[] builds a UOP_INVALID sentinel (used for PAD-mask padding)."];
-GeneralUtilities`SetUsage[TUOpOpt, "TUOpOpt[target$, kind$, factor$] wraps target$ with a UOP_OPT annotation, where kind$ is one of $OptUnroll, $OptUpcast, $OptTC, $OptLocal, $OptGroupReduce, $OptConv, $OptFastMath, $OptSimdReduce, $OptVecLoad."];
+GeneralUtilities`SetUsage[TUOpOpt, "TUOpOpt[target$, kind$, factor$] wraps target$ with a UOP_OPT annotation, where kind$ is one of $OptUnroll, $OptUpcast, $OptTC, $OptLocal, $OptGroupReduce."];
 GeneralUtilities`SetUsage[TUOpStore, "TUOpStore[buf$, addr$, value$] builds a UOP_STORE root, the typical kernel root STORE(out_buf, out_addr, value-expression)."];
 GeneralUtilities`SetUsage[TUOpAfter, "TUOpAfter[node$, afterNode$] builds a UOP_AFTER ordering edge: node$ happens after afterNode$."];
 GeneralUtilities`SetUsage[TUOpIConst, "TUOpIConst[v$] builds a UOP_CONST(DT_INT32) for use as a stride coefficient (the DAG-side classifiers pattern-match on UOP_CONST, not on bare NUM atoms)."];
