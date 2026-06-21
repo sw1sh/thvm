@@ -97,6 +97,12 @@ static u32 kautotune_depth(KernelEntry const *ke) {
 }
 
 static u32 kautotune_beam_width(void) {
+  // tinygrad jit.py:73 -- compile_linear(beam=getenv("JITBEAM", BEAM)).  A
+  // JITBEAM run (autotune scoped to JIT capture) reads its width from JITBEAM;
+  // otherwise the global BEAM width.
+  if (getenv("JITBEAM") != NULL && atoi(getenv("JITBEAM")) > 0) {
+    return kautotune_env_u32("JITBEAM", 2, 16);
+  }
   return kautotune_env_u32("BEAM", 2, 16);
 }
 
@@ -974,6 +980,8 @@ fn int kernel_autotune(u32 kid) {
 // (otherwise autotune is a guaranteed no-op).  Cheap: env check
 // memoizes; the propose call returns quickly when the kernel
 // shape doesn't trigger any rules.
+fn int jit_is_capturing(void);
+
 static int autotune_env_enabled(void) {
   char const *e = getenv("AUTOTUNE");
   if (e != NULL && e[0] == '1') {
@@ -985,10 +993,23 @@ static int autotune_env_enabled(void) {
   return beam != NULL && atoi(beam) > 0;
 }
 
+// JITBEAM (tinygrad jit.py:73): beam-search ONLY the JIT-captured kernels (the
+// warm-replay set), NOT every dispatch.  Where BEAM>0 autotunes everything,
+// JITBEAM>0 autotunes only while jit_is_capturing() -- so the prewarm, the
+// un-captured forward (e.g. an OUTSTAT/correctness pass), and the replays don't
+// each re-autotune, which unbounded the search + cache on the full FLUX forward.
+static int autotune_jitbeam_enabled(void) {
+  char const *e = getenv("JITBEAM");
+  return e != NULL && atoi(e) > 0;
+}
+
 fn int kernel_should_autotune(KernelEntry const *ke) {
   static int tr = -1;
   if (tr < 0) tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
-  if (!autotune_env_enabled()) {
+  // BEAM/AUTOTUNE fire on every kernel; JITBEAM fires ONLY on the JIT-captured
+  // kernels (scoped to jit_is_capturing()).
+  if (!autotune_env_enabled()
+      && !(autotune_jitbeam_enabled() && jit_is_capturing())) {
     return 0;
   }
   if (ke == NULL || ke->schedule == NULL) {
