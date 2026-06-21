@@ -578,6 +578,26 @@ static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t) {
   return e;
 }
 
+// Inlined fast path for kbo_subtree_memo: the SAME Term-ID seen this epoch
+// returns its cached weight+profile slot in a handful of loads, with NONE of
+// the slow path's frame (kbo_subtree_memo saves 12 callee-saved registers and
+// reserves a 160 B stack frame for the iterative worklist before it even
+// reaches the hit check).  kbo_lin_addto applies a memoized CTR subtree on
+// EVERY divergent node of EVERY Vortest -- the dominant comparator self-time on
+// the SKIToBCKW completion -- and the same subterm cells recur across millions
+// of compares, so this is almost always a hit.  On a miss (cold cell or a
+// wmemo slot evicted under collision) it tail-calls the full kbo_subtree_memo,
+// which re-fills exactly as before.  Byte-identical result: the hit branch is
+// the same epoch+t+hash test the slow path opens with.
+static inline KboWMemoEnt *kbo_subtree_memo_fast(const KboConfig *cfg, Term t) {
+  KboTHashEnt *th = &g_kbo_thash[kbo_thash_slot(t)];
+  if (th->epoch == g_kbo_epoch && th->t == t) {
+    KboWMemoEnt *e = &g_kbo_wmemo[th->wmemo_idx];
+    if (e->epoch == g_kbo_epoch && e->hash == th->hash) return e;
+  }
+  return kbo_subtree_memo(cfg, t);
+}
+
 // Total KBO weight of a single term (Σ symbol-weight), served from the
 // per-term memo.  The ATP CP-weight heuristics (CH_Ord/Gt/Mix) weigh both
 // faces of EVERY critical pair, a full-term re-traversal each; routing
@@ -587,7 +607,7 @@ static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t) {
 fn long long thvm_kbo_term_weight(const KboConfig *cfg, Term t) {
   switch (term_tag(t)) {
     case TAG_FVR: return (long long)cfg->var_weight;
-    case TAG_CTR: return kbo_subtree_memo(cfg, t)->w;
+    case TAG_CTR: return kbo_subtree_memo_fast(cfg, t)->w;
     default:      return (long long)cfg->var_weight;
   }
 }
@@ -637,6 +657,19 @@ static void kbo_addvars_walk(KboLin *st, Term t, int sign) {
 // off so the engine stays byte-identical to the memo path.
 static Term g_kbo_walk_stack[KBO_MEMO_STACK_CAP];
 static int g_kbo_vortest_linear_gate = -1;
+// Read (once) the memo-free gate: THVM_KBO_VORTEST_LINEAR=1 forces the WM-style
+// single-pass walk; THVM_KBO_NO_WCACHE=1 is the differential A/B switch that
+// disables the per-subtree weight cache (takes the same memo-free walk path) so
+// an ON-vs-OFF sweep isolates the cache's effect on speed, never the verdict.
+static inline int kbo_memo_free_gate(void) {
+  if (g_kbo_vortest_linear_gate < 0) {
+    const char *e = getenv("THVM_KBO_VORTEST_LINEAR");
+    const char *nc = getenv("THVM_KBO_NO_WCACHE");
+    g_kbo_vortest_linear_gate =
+        ((e != NULL && e[0] == '1') || (nc != NULL && nc[0] == '1')) ? 1 : 0;
+  }
+  return g_kbo_vortest_linear_gate;
+}
 static void kbo_lin_addto_walk(KboLin *st, Term t, int sign,
                                long long *phidiff) {
   Term *stack = g_kbo_walk_stack;
@@ -676,11 +709,7 @@ static void kbo_lin_addto_walk(KboLin *st, Term t, int sign,
 // O(#distinct vars); only an overflowed profile falls back to a full walk.
 static void kbo_lin_addto(KboLin *st, Term t, int sign,
                           long long *phidiff) {
-  if (g_kbo_vortest_linear_gate < 0) {
-    const char *e = getenv("THVM_KBO_VORTEST_LINEAR");
-    g_kbo_vortest_linear_gate = (e != NULL && e[0] == '1') ? 1 : 0;
-  }
-  if (g_kbo_vortest_linear_gate) {
+  if (kbo_memo_free_gate()) {
     kbo_lin_addto_walk(st, t, sign, phidiff);
     return;
   }
@@ -690,7 +719,7 @@ static void kbo_lin_addto(KboLin *st, Term t, int sign,
       *phidiff += (long long)sign * (long long)st->cfg->var_weight;
       return;
     case TAG_CTR: {
-      KboWMemoEnt *e = kbo_subtree_memo(st->cfg, t);
+      KboWMemoEnt *e = kbo_subtree_memo_fast(st->cfg, t);
       *phidiff += (long long)sign * e->w;
       if (e->vc == KBO_VPROF_OVF) {
         kbo_addvars_walk(st, t, sign);
