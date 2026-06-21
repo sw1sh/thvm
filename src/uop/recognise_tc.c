@@ -128,9 +128,9 @@ static u32 rec_tc_count_distinct_ranges(Term t, u32 *seen, u32 cap,
 // shape from a clean matmul: conv compresses (co, bi, oh, ow) into
 // a single r_out via IDIV/IMOD decomposition, so its W and X
 // addresses contain those nodes.  A clean matmul `m*K+k` / `k*N+n`
-// never produces them.  Used by both the matmul classifier (to
-// reject conv shapes) and the conv classifier (in recognise_conv.c)
-// to distinguish.  Bounded depth so a misshapen DAG can't run away.
+// never produces them.  Used by the matmul classifier to reject conv
+// shapes (so the TC wrapper doesn't fire on a conv reduce).  Bounded
+// depth so a misshapen DAG can't run away.
 static int rec_tc_addr_has_divmod(Term t, int depth) {
   if (depth > 32) return 0;
   if (term_tag(t) != TAG_UOP) return 0;
@@ -298,9 +298,9 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent, u32 *out_unit_axis) {
   // reference exactly 2 distinct ranges (r_out, r_q) and would slip
   // past the n_a==2/n_b==2 gate above.  Distinguish by checking for
   // IDIV/IMOD presence in either address tree -- a clean matmul
-  // `m*K+k` / `k*N+n` never produces those.  uop_recognise_conv
-  // installs the CONV opt wrapper for this shape; here we just
-  // reject so the TC wrapper doesn't also fire.
+  // `m*K+k` / `k*N+n` never produces those.  A conv reduce of this
+  // shape is rejected here so the TC wrapper doesn't fire on it; it
+  // lowers through the generic rmu_emit_store_reduce accumulator path.
   if (rec_tc_addr_has_divmod(addr_a, 0)) return 0;
   if (rec_tc_addr_has_divmod(addr_b, 0)) return 0;
 

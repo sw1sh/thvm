@@ -204,7 +204,7 @@ int main(void) {
     Term st = uop_store(cbuf, uop_index_e(cbuf, ca), red);
 
     // Full opt-rich late-pass pipeline (mirrors cg_render_uop_kernel_cuda_root).
-    Term r2 = uop_recognise_conv(st);
+    Term r2 = st;
     r2 = uop_expand_graph(r2);          r2 = uop_symbolic_rewrite(r2);
     r2 = uop_devectorize_graph(r2);     r2 = uop_symbolic_rewrite(r2);
     r2 = uop_load_store_fold_graph(r2); r2 = uop_symbolic_rewrite(r2);

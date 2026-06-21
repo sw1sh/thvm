@@ -600,8 +600,9 @@ int main(void) {
   // out4d = REDUCE_SUM_K(wExp * xExp).  Shape is sized so the deep conv
   // tiling fires (K = cIn*kh*kw = 16*5*5 = 400 >= 256, wOut = 20 >= 16):
   // hand_opts UPCASTs cOut by 8 and LOCALs wOut by 20, and render_uop's
-  // rmu_emit_conv emits the 8-way register-blocked accumulator.  GPU
-  // output must equal the CPU reference bit-tight (f32 tolerance).
+  // generic rmu_emit_store_reduce emits the 8-way register-blocked
+  // accumulator.  GPU output must equal the CPU reference bit-tight
+  // (f32 tolerance).
   TEST_BEGIN("metal-real/conv2-4d-output-parity");
   {
     enum { CB = 4, CCIN = 16, CCOUT = 8, CH = 24, CW = 24, CKH = 5, CKW = 5 };
@@ -654,9 +655,10 @@ int main(void) {
   // === Dual-UPCAST 4D-output conv parity (cOut + wOut both UPCAST'd) ===
   // Sized so hand_opts fires BOTH UPCASTs (tileable gate K>=256, wOut>=16
   // both met): cOut=16 -> UPCAST=8 (outer=2), wOut=20 -> UPCAST=2 then
-  // LOCAL=10 on the outer half.  Drives rmu_emit_conv's multi-axis UPCAST
-  // emit (8*2 = 16 straight-line accumulators inside the reduce nest).
-  // MSL must compile and GPU output must equal CPU reference bit-tight.
+  // LOCAL=10 on the outer half.  Drives the generic rmu_emit_store_reduce
+  // multi-axis UPCAST emit (8*2 = 16 straight-line accumulators inside
+  // the reduce nest).  MSL must compile and GPU output must equal CPU
+  // reference bit-tight.
   TEST_BEGIN("metal-real/conv-dual-upcast-parity");
   {
     enum { DB = 2, DCIN = 16, DCOUT = 16, DH = 24, DW = 24, DKH = 5, DKW = 5 };

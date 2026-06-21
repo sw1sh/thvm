@@ -840,63 +840,6 @@ int main(void) {
   CHECK(contains(buftc2, "#pragma unroll(7)"));
   CHECK(contains(buftc2, "_acc3 = _acc3 + ("));
 
-  TEST_BEGIN("render-uop/conv-pattern-match-emits-template");
-  // Build a conv2d-shaped STORE wrapped in OPT(_, CONV, 0) and
-  // verify rmu_emit_conv fires (marker comment + #pragma unroll on
-  // the small KRED loop).  Mirrors the kernel_lift_from_conv2d
-  // emit shape: r_out compressed via IDIV, r_q the reduce axis.
-  u32 dims_wc[2] = { 16, 9 };
-  u32 dims_xc[1] = { 1024 };
-  Term Wc = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims_wc);
-  Term Xc = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_xc);
-  Term in_wx[2] = { Wc, Xc };
-  Term r_out_c = uop_range(10, 0 /*LOOP*/, 1024);
-  Term r_q_c   = uop_range(11, 1 /*REDUCE*/, 9);
-  Term k_pat_c = uop_const(DT_INT32, 64);
-  Term k_w_s0_c= uop_const(DT_INT32, 9);
-  Term co_c    = uop_int_binary(UOP_IDIV, r_out_c, k_pat_c);
-  Term wi_co_c = uop_int_binary(UOP_IMUL, co_c, k_w_s0_c);
-  Term wi_c    = uop_int_binary(UOP_IADD, wi_co_c, r_q_c);
-  Term ldWc    = uop_index_e(Wc, wi_c);
-  Term xi_c    = uop_int_binary(UOP_IADD, co_c, r_q_c);
-  Term ldXc    = uop_index_e(Xc, xi_c);
-  Term mul_c   = uop_binary(UOP_MUL, ldWc, ldXc);
-  Term red_c   = uop_reduce(REDUCE_SUM, /*axis=*/11, mul_c);
-  Term conv_v  = uop_opt(red_c, UOP_OPT_CONV, 0);
-  Term st_conv = uop_store(out, r_out_c, conv_v);
-  char bufconv[2048];
-  fp = fmemopen(bufconv, sizeof(bufconv), "w");
-  cg_render_uop_kernel(st_conv, "k_conv", out, in_wx, 2, fp);
-  fclose(fp);
-  CHECK(contains(bufconv, "/* CONV2D template (KRED=9)"));
-  CHECK(contains(bufconv, "#pragma unroll(9)"));
-  CHECK(contains(bufconv, "for (uint a11 = 0; a11 < 9"));
-  CHECK(contains(bufconv, "_acc11 = _acc11 +"));
-  // The output axis a10 is a parallel grid axis (`uint a10 = tid;`)
-  // with the `if (tid >= 1024u) return;` bounds guard, not a loop.
-  CHECK(contains(bufconv, "if (tid >= 1024u) return;"));
-  CHECK(contains(bufconv, "uint a10 = tid;"));
-  CHECK(!contains(bufconv, "for (uint a10 ="));
-
-  TEST_BEGIN("render-uop/conv-large-kred-skips-pragma-unroll");
-  // Build a conv with KRED > RMU_CONV_UNROLL_MAX (64); the template
-  // should still emit the marker but skip #pragma unroll.
-  Term r_q_big = uop_range(12, 1, 128);
-  Term wi_big  = uop_int_binary(UOP_IADD, wi_co_c, r_q_big);
-  Term ldW_big = uop_index_e(Wc, wi_big);
-  Term xi_big  = uop_int_binary(UOP_IADD, co_c, r_q_big);
-  Term ldX_big = uop_index_e(Xc, xi_big);
-  Term mul_big = uop_binary(UOP_MUL, ldW_big, ldX_big);
-  Term red_big = uop_reduce(REDUCE_SUM, /*axis=*/12, mul_big);
-  Term cv_big  = uop_opt(red_big, UOP_OPT_CONV, 0);
-  Term st_big  = uop_store(out, r_out_c, cv_big);
-  char bufbig[2048];
-  fp = fmemopen(bufbig, sizeof(bufbig), "w");
-  cg_render_uop_kernel(st_big, "k_conv_big", out, in_wx, 2, fp);
-  fclose(fp);
-  CHECK(contains(bufbig, "/* CONV2D template (KRED=128)"));
-  CHECK(!contains(bufbig, "#pragma unroll(128)"));
-
   TEST_BEGIN("render-uop/reduce-max-uses-fmax");
   Term ld_max_in = uop_index_e(in0, r_red_ax);
   Term red_max = uop_reduce(REDUCE_MAX, /*axis=*/1, ld_max_in);

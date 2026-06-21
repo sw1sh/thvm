@@ -1022,13 +1022,6 @@ int uop_dag_classify_conv2d_flat_shape(Term root) {
   if (root == 0) return 0;
   if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
   Term value = heap_read(term_val(root) + 2);
-  // Peel an optional UOP_OPT(_, CONV, 0) wrapper.  uop_recognise_conv
-  // installs this when the conv2d shape is detected; the bare-REDUCE
-  // case fires when the recogniser hasn't run yet on this root.
-  if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT) {
-    if (uop_opt_kind(value) != UOP_OPT_CONV) return 0;
-    value = uop_opt_target(value);
-  }
   if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
   // REDUCE kind is at heap_read(loc + 1).
   Term kind = heap_read(term_val(value) + 1);

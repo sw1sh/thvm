@@ -120,8 +120,7 @@ static void rmu_emit_unroll_pragma(FILE *fp, u32 factor) {
 // renderer emits `#pragma unroll(<extent>)` immediately above the
 // `for`-loop so the MSL compiler can straight-line the K MAD ops --
 // matmul's K=25 contraction, conv's K=9/27, etc.  Larger reduces stay
-// on the rolled loop to keep the generated body size sane.  (Formerly
-// RMU_CONV_UNROLL_MAX -- the conv2d-flat template uses the same gate.)
+// on the rolled loop to keep the generated body size sane.
 //
 // Lowered from 64 -> 16 (2026-05-27) after V100 measurement showed
 // nvrtc spending 350-390 s cold-compiling conv kid=3 with all three
@@ -1586,8 +1585,8 @@ static void rmu_compute_global_decode(Term const *ranges, u32 n_ranges,
   rmu_compute_global_decode_ctx(ranges, n_ranges, promote, NULL, out);
 }
 
-// Shared prelude for the reduce-shaped emit paths (rmu_emit_conv and
-// the generic accumulator path in rmu_emit_store_reduce).  Given the
+// Shared prelude for the reduce-shaped emit paths (the generic
+// accumulator path in rmu_emit_store_reduce).  Given the
 // output-axis ranges (the reduce axis already split off) and the
 // store position `addr`, this:
 //   1. promotes every plain-LOOP output axis that actually indexes
@@ -1926,182 +1925,6 @@ static u32 rmu_split_reduce(Term *ranges, u32 *opt_kinds,
     (*n_out)++;
   }
   return reduce_idx;
-}
-
-// === Flattened-conv-reduce splitter ====================================
-//
-// The im2col `_pool` conv lowering compresses (cIn, kh, kw) into a single
-// flattened reduce axis a5 with extent cIn*kh*kw, then the consumer's
-// xCol address (and the wFlat address) decompose it back via IDIV/IMOD:
-//   a5/25, (a5/5)%5, a5%5  for (cIn=32, kh=5, kw=5)
-// Those div/mod ops cost 2 idiv + 2 imod per inner-loop iteration and
-// keep the address non-affine in the reduce var, blocking the TC matmul
-// template (recognise_tc rejects div/mod addresses).
-//
-// Recovery: collect the constant divisors {c : IDIV(a5,c) or IMOD(a5,c)
-// appears in the body}.  Sorted ascending [d1 < d2 < ... < d_{n-1}],
-// the radix structure is:
-//   stride[0]=1, stride[i]=d_i                    (for i in 1..n-1)
-//   ext[0]=d1, ext[i]=d_{i+1}/d_i, ext[n-1]=E/d_{n-1}
-//   a5 = sum_i axis_i * stride[i]
-// Then substitute a5 -> that composite everywhere in the body; the
-// constructor-time int simplifier collapses (cin*25+kh*5+kw)/25 -> cin
-// etc.  Caller emits `for cin { for kh { for kw { acc += body } } }`.
-#define RMU_CONV_SPLIT_MAX 6
-typedef struct {
-  u32 n;                          // number of recovered axes (>=2)
-  u32 axis_id[RMU_CONV_SPLIT_MAX];// fresh axis ids, innermost..outermost
-  u32 extent[RMU_CONV_SPLIT_MAX]; // per-axis extent, innermost..outermost
-  u32 stride[RMU_CONV_SPLIT_MAX]; // per-axis stride into the flat index
-} RmuConvSplit;
-
-// Walk `t` collecting constants `c` from IDIV(x,c) / IMOD(x,c) where x
-// is a UOP_RANGE leaf with axis_id == want_axis.  Bounded recursion.
-static void rmu_collect_divmod_consts(Term t, u32 want_axis,
-                                      u32 *consts, u32 *n_consts,
-                                      u32 cap, u32 depth) {
-  if (depth > 64) return;
-  if (term_tag(t) != TAG_UOP) return;
-  u32 op = term_ext(t);
-  u64 loc = term_val(t);
-  if (op == UOP_IDIV || op == UOP_IMOD) {
-    Term a = heap_read(loc + 0);
-    Term b = heap_read(loc + 1);
-    if (term_tag(a) == TAG_UOP && term_ext(a) == UOP_RANGE
-        && (u32)term_val(heap_read(term_val(a) + 0)) == want_axis
-        && term_tag(b) == TAG_UOP && term_ext(b) == UOP_CONST) {
-      Term num = heap_read(term_val(b));
-      if (term_tag(num) == TAG_NUM) {
-        u32 c = (u32)term_val(num);
-        if (c > 1) {
-          int seen = 0;
-          for (u32 i = 0; i < *n_consts; i++) if (consts[i] == c) seen = 1;
-          if (!seen && *n_consts < cap) consts[(*n_consts)++] = c;
-        }
-      }
-    }
-    // also descend (a div/mod operand could itself contain more).
-    rmu_collect_divmod_consts(a, want_axis, consts, n_consts, cap, depth + 1);
-    rmu_collect_divmod_consts(b, want_axis, consts, n_consts, cap, depth + 1);
-    return;
-  }
-  switch (op) {
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_ILT: case UOP_IAND:
-    case UOP_IOR:  case UOP_IXOR: case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E:
-      rmu_collect_divmod_consts(heap_read(loc + 0), want_axis, consts, n_consts, cap, depth + 1);
-      rmu_collect_divmod_consts(heap_read(loc + 1), want_axis, consts, n_consts, cap, depth + 1);
-      return;
-    case UOP_NEG: case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT:
-    case UOP_CAST: case UOP_BITCAST: case UOP_OPT: case UOP_LOAD:
-      rmu_collect_divmod_consts(heap_read(loc + 0), want_axis, consts, n_consts, cap, depth + 1);
-      return;
-    case UOP_IWHERE:
-      rmu_collect_divmod_consts(heap_read(loc + 0), want_axis, consts, n_consts, cap, depth + 1);
-      rmu_collect_divmod_consts(heap_read(loc + 1), want_axis, consts, n_consts, cap, depth + 1);
-      rmu_collect_divmod_consts(heap_read(loc + 2), want_axis, consts, n_consts, cap, depth + 1);
-      return;
-    default:
-      return;
-  }
-}
-
-// Find the largest UOP_RANGE axis_id reachable from `t`.  Used to
-// allocate fresh axis ids for the split's new RANGE leaves.  Bounded.
-static u32 rmu_max_axis_id(Term t, u32 cur, u32 depth) {
-  if (depth > 256) return cur;
-  if (term_tag(t) != TAG_UOP) return cur;
-  u32 op = term_ext(t);
-  u64 loc = term_val(t);
-  if (op == UOP_RANGE) {
-    u32 a = (u32)term_val(heap_read(loc + 0));
-    return a > cur ? a : cur;
-  }
-  u8 ar = uop_arity(op);
-  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
-    cur = rmu_max_axis_id(heap_read(loc + i), cur, depth + 1);
-  }
-  return cur;
-}
-
-// Try to recover the radix structure of a flattened reduce axis.
-// Returns 1 on success (filling *out), 0 if the body doesn't decompose
-// the axis via div/mod, the divisor set isn't a valid divisor chain,
-// or the structure exceeds RMU_CONV_SPLIT_MAX axes.
-static int rmu_recover_conv_split(Term red_src, u32 red_axis, u32 red_extent,
-                                  Term store_addr, RmuConvSplit *out) {
-  if (red_extent < 2) return 0;
-  u32 consts[RMU_CONV_SPLIT_MAX];
-  u32 n_consts = 0;
-  rmu_collect_divmod_consts(red_src, red_axis, consts, &n_consts,
-                            RMU_CONV_SPLIT_MAX, 0);
-  if (n_consts == 0) return 0;
-  // Insertion sort ascending (n is tiny).
-  for (u32 i = 1; i < n_consts; i++) {
-    u32 v = consts[i]; i32 j = (i32)i - 1;
-    while (j >= 0 && consts[j] > v) { consts[j + 1] = consts[j]; j--; }
-    consts[j + 1] = v;
-  }
-  // Validate divisor chain: d_{i+1} % d_i == 0, d_i | red_extent.
-  for (u32 i = 0; i + 1 < n_consts; i++) {
-    if (consts[i] == 0 || consts[i + 1] % consts[i] != 0) return 0;
-  }
-  if (red_extent % consts[n_consts - 1] != 0) return 0;
-  u32 n = n_consts + 1;            // axes: kw .. cin  (one more than divisors)
-  if (n > RMU_CONV_SPLIT_MAX || n < 2) return 0;
-  // strides: [1, d1, d2, ..., d_{n-1}]
-  // extents: [d1, d2/d1, ..., d_{n-1}/d_{n-2}, E/d_{n-1}]
-  u32 strides[RMU_CONV_SPLIT_MAX];
-  u32 extents[RMU_CONV_SPLIT_MAX];
-  strides[0] = 1;
-  for (u32 i = 1; i < n; i++) strides[i] = consts[i - 1];
-  extents[0] = consts[0];
-  for (u32 i = 1; i + 1 < n; i++) extents[i] = consts[i] / consts[i - 1];
-  extents[n - 1] = red_extent / consts[n_consts - 1];
-  u64 prod = 1;
-  for (u32 i = 0; i < n; i++) {
-    if (extents[i] == 0) return 0;
-    prod *= extents[i];
-  }
-  if (prod != (u64)red_extent) return 0;   // not a clean factorization
-  // Allocate fresh axis ids (max+1 .. max+n) so they never collide with
-  // any existing axis or with red_axis (red_axis is consumed by the
-  // composite substitution and disappears).
-  u32 maxid = rmu_max_axis_id(red_src, red_axis, 0);
-  maxid = rmu_max_axis_id(store_addr, maxid, 0);
-  out->n = n;
-  for (u32 i = 0; i < n; i++) {
-    out->axis_id[i] = maxid + 1 + i;
-    out->extent[i]  = extents[i];
-    out->stride[i]  = strides[i];
-  }
-  return 1;
-}
-
-// Build the composite linear-index Term  sum_i a_i * stride_i  from the
-// split's fresh RANGE leaves.  These leaves carry axis_type KAX_REDUCE.
-static Term rmu_build_conv_split_composite(RmuConvSplit const *sp) {
-  Term acc = 0;
-  for (u32 i = 0; i < sp->n; i++) {
-    Term r = uop_range(sp->axis_id[i], KAX_REDUCE, sp->extent[i]);
-    Term term_i = (sp->stride[i] == 1)
-                ? r
-                : uop_int_binary(UOP_IMUL, r, uop_const(DT_INT32, sp->stride[i]));
-    acc = (acc == 0) ? term_i : uop_int_binary(UOP_IADD, acc, term_i);
-  }
-  return acc;
-}
-
-// uop_graph_rewrite rule: replace every UOP_RANGE leaf whose axis_id ==
-// red_axis with `composite`.  The constructor-time int simplifier folds
-// the re-substituted div/mod in the consumer addresses.
-typedef struct { u32 red_axis; Term composite; } RmuConvSubstCtx;
-static Term rmu_conv_subst_range_rule(Term t, void *user) {
-  RmuConvSubstCtx *cx = (RmuConvSubstCtx *)user;
-  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) return 0;
-  if ((u32)term_val(heap_read(term_val(t) + 0)) != cx->red_axis) return 0;
-  return cx->composite;
 }
 
 // Emit `<acc> = <combine(kind, acc, src)>;` per the REDUCE kind.
@@ -4115,52 +3938,9 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
   return 1;
 }
 
-// Recognise the canonical conv2d-flat shape:
-//   STORE(C, addr_C, OPT(REDUCE(MUL(INDEX_E(W, _), X_VAL), SUM,
-//                              k_axis), CONV, _))
-// where X_VAL is INDEX_E(X, _) (single-input conv) or a UOP_IWHERE
-// chain (multi-input im2col).  The OPT wrapper is installed by
-// uop_recognise_conv when it spots IDIV/IMOD in either INDEX_E
-// address tree (the structural marker for decomposed conv axes).
-// Detection is structural; if it matches, returns 1 and fills
-// `*out_red_value` with the inner REDUCE term so the caller can
-// emit through the conv template.
-static int rmu_detect_conv(Term store, Term *out_red_value) {
-  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
-  Term value = heap_read(term_val(store) + 2);
-  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_OPT) return 0;
-  if (uop_opt_kind(value) != UOP_OPT_CONV) return 0;
-  Term inner = uop_opt_target(value);
-  if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_REDUCE) return 0;
-  u64 rloc = term_val(inner);
-  u32 kind = term_val(heap_read(rloc + 1));
-  if (kind != REDUCE_SUM) return 0;
-  Term mul = heap_read(rloc + 0);
-  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
-  if (out_red_value != NULL) *out_red_value = inner;
-  return 1;
-}
-
-// Conv2d-flat template.  Emits the same loop nest as the generic
-// rmu_emit_store_reduce path -- output for-loop over r_out, scalar
-// accumulator over r_q -- with two perf-oriented additions:
-//
-//   1. `#pragma unroll` on the inner reduce loop so the compiler can
-//      unroll the (typically small: 9 for 3x3x1, 27 for 3x3x3) KRED
-//      iterations into straight-line MUL+ADDs.  Tinygrad's CONV
-//      template does the same.
-//   2. A `/* CONV2D template */` marker comment so dispatch traces
-//      can confirm which path fired.
-//
-// The decision to emit `#pragma unroll` versus stay on the generic
-// path is gated on KRED <= RMU_REDUCE_UNROLL_MAX so we don't blow up
-// the generated body size on huge KREDs (very deep convs).
-//
-// Returns 1 on success; 0 if the shape can't be emitted through this
-// template and the caller should fall back to the generic accumulator.
 // Conv vectorized-M substitution: replace each UOP_RANGE leaf at axis_id
-// `up_axes[i]` with the integer constant `up_vals[i]`.  Used by
-// rmu_emit_conv to register-block the conv-matmul output axes -- N
+// `up_axes[i]` with the integer constant `up_vals[i]`.  Used by the
+// register-blocked reduce emit paths to vectorize the matmul output axes -- N
 // separate accumulators sharing one conv-input load per reduce iteration
 // (or, for multi-axis UPCAST, two register-blocking dimensions).
 //
@@ -4240,8 +4020,8 @@ static int rmu_range_is_inner_reduce_decomp(Term range_term, u32 opt_kind,
 // ranges to the end of the array and report the split point.  Returns
 // the count of TRUE output ranges (axes that index the store
 // position).  The tail (n_out - returned_count) entries are the
-// reduce-decomp inner axes; rmu_emit_conv / rmu_emit_store_reduce
-// open them inside the reduce-axis loop with #pragma unroll.
+// reduce-decomp inner axes; rmu_emit_store_reduce opens them
+// inside the reduce-axis loop with #pragma unroll.
 static u32 rmu_partition_out_ranges(Term *out_ranges, u32 *out_kinds,
                                     u32 *out_factors, u32 n_out, Term addr) {
   u32 head = 0;  // count of true outputs at the front
@@ -4288,337 +4068,6 @@ static u32 rmu_emit_inner_reduce_decomp_loops(Term const *ranges,
     depth++;
   }
   return depth;
-}
-
-static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
-  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
-  if (term_tag(conv_red) != TAG_UOP || term_ext(conv_red) != UOP_REDUCE) return 0;
-  u64 sloc = term_val(store);
-  Term buf  = heap_read(sloc + 0);
-  Term addr = heap_read(sloc + 1);
-  // Conv specialisation expects single-axis K -- multi-axis REDUCE
-  // inputs fall through to the generic emit path.
-  if (uop_reduce_n_axes(conv_red) != 1) return 0;
-  Term red_src  = uop_reduce_src(conv_red);
-  u32  red_kind = uop_reduce_kind(conv_red);
-  u32  red_axis = uop_reduce_axis(conv_red, 0);
-
-  // Collect ranges from addr + red_src; split into output vs reduce.
-  // Use RMU_MAX_RANGES (32) not MAX_DIM (8): hand_opts can apply
-  // UPCAST/LOCAL splits to BOTH the K reduce axis (outer + inner
-  // OPT-UPCAST leaf) AND several output axes, producing 2*rank
-  // worth of leaves -- a 4-D conv with one K-split and three output
-  // splits already exceeds 8.  Silent truncation at MAX_DIM = 8
-  // dropped the inner K leaf and emitted MSL that referenced an
-  // undeclared `a8`, miscompiling silently to a zeroed output buffer.
-  Term ranges[RMU_MAX_RANGES];
-  u32  opt_kinds  [RMU_MAX_RANGES] = {0};
-  u32  opt_factors[RMU_MAX_RANGES] = {0};
-  u32  n_ranges = 0;
-  rmu_collect_ranges_rec_cap(addr,    ranges, opt_kinds, opt_factors,
-                             &n_ranges, RMU_MAX_RANGES, RMU_NO_OPT, 0);
-  rmu_collect_ranges_rec_cap(red_src, ranges, opt_kinds, opt_factors,
-                             &n_ranges, RMU_MAX_RANGES, RMU_NO_OPT, 0);
-
-  Term out_ranges[RMU_MAX_RANGES];
-  u32  out_kinds  [RMU_MAX_RANGES] = {0};
-  u32  out_factors[RMU_MAX_RANGES] = {0};
-  u32  n_out = 0;
-  u32 reduce_idx = rmu_split_reduce(ranges, opt_kinds, opt_factors,
-                                    n_ranges, red_axis,
-                                    out_ranges, out_kinds, out_factors, &n_out);
-  if (reduce_idx == n_ranges) {
-    // No reduce range in the body -- conv with degenerate K=0; bail.
-    return 0;
-  }
-  Term red_range = ranges[reduce_idx];
-  u32 red_extent = (term_tag(red_range) == TAG_UOP
-                    && term_ext(red_range) == UOP_RANGE)
-                 ? (u32)term_val(heap_read(term_val(red_range) + 2)) : 0;
-  if (red_extent == 0) return 0;
-
-  // Flattened multi-axis reduce: if the body decomposes the reduce var
-  // via IDIV/IMOD (the im2col `_pool` conv tell), split it into its
-  // component axes, substitute the composite linear index, and emit
-  // nested reduce loops with a single accumulator -- removing the
-  // 2 idiv + 2 imod per inner iteration and making every address
-  // affine in each component axis (so the TC matmul template can fire).
-  // GPU-generic: the conv-split template (parallel grid + register
-  // blocking) targets Metal AND CUDA -- both run one output element
-  // per thread.  The C target stays on the rolled serial conv loop.
-  RmuConvSplit sp = {0};
-  if (RMU_TARGET != CG_TARGET_C
-      && rmu_recover_conv_split(red_src, red_axis, red_extent, addr, &sp)) {
-    Term composite = rmu_build_conv_split_composite(&sp);
-    RmuConvSubstCtx cx = { red_axis, composite };
-    UOpGraphRewriteRule rules[1] = { { "conv_split_subst", rmu_conv_subst_range_rule } };
-    Term red_src2 = uop_graph_rewrite(red_src, rules, 1, &cx);
-    // Marker for dispatch tracing.
-    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-    fprintf(fp, "/* CONV2D template (KRED=%u split=", red_extent);
-    for (u32 i = 0; i < sp.n; i++) fprintf(fp, "%s%u", i ? "x" : "", sp.extent[i]);
-    fputs(") */\n", fp);
-    // Register-block the conv-matmul output axes: every output axis that
-    // arrives as a KAX_UPCAST of modest extent becomes a register-blocked
-    // dimension.  For each combination of UPCAST'd-axis indices we emit a
-    // separate accumulator and, inside the reduce nest, one straight-line
-    // MAD statement per combination -- the MSL compiler CSEs the conv-input
-    // load (cOut-independent) and the weight load (wOut-independent) across
-    // the rectangle.
-    //
-    // Single UPCAST (cOut, factor Um): Um accumulators, Um MADs per inner
-    // iter; the cOut-independent conv-input load is loaded once and reused
-    // Um times.
-    // Two UPCAST'd axes (cOut x wOut, factors Um x Uw): Um*Uw accumulators
-    // and MADs; the weight (cOut only) is loaded Um times, the conv-input
-    // (wOut only) Uw times -- Um+Uw loads sustaining Um*Uw MADs.  This is
-    // the classic 2D register-blocked matmul inner.
-    // GPU-generic: register-blocking the UPCAST'd conv output axes
-    // (straight-line accumulators) helps Metal AND CUDA equally; the
-    // C target leaves them as serial loops.
-    RmuConvMSubstCtx up = {0};
-    u32 up_total = 1;
-    if (RMU_TARGET != CG_TARGET_C) {
-      for (u32 i = 0; i < n_out && up.n < RMU_CONV_UPCAST_MAX; i++) {
-        Term r = out_ranges[i];
-        if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
-        u32 at = (u32)term_val(heap_read(term_val(r) + 1));
-        if (at != KAX_UPCAST) continue;
-        u32 e = (u32)term_val(heap_read(term_val(r) + 2));
-        if (e < 2 || e > 16) continue;
-        // Cap straight-line accumulator count at 32 (matches tinygrad's
-        // upcast_size budget).  Don't pick up a 4th axis if it'd push us
-        // past the cap.
-        if ((u64)up_total * e > 32) continue;
-        up.up_axes[up.n] = (u32)term_val(heap_read(term_val(r) + 0));
-        up.up_vals[up.n] = 0;  // filled in per accumulator below
-        up.n++;
-        up_total *= e;
-      }
-    }
-    // Re-collect extents in a parallel array (up.up_vals starts cleared).
-    u32 up_exts[RMU_CONV_UPCAST_MAX] = {0};
-    for (u32 i = 0; i < up.n; i++) {
-      for (u32 j = 0; j < n_out; j++) {
-        Term r = out_ranges[j];
-        if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
-        if ((u32)term_val(heap_read(term_val(r) + 0)) != up.up_axes[i]) continue;
-        up_exts[i] = (u32)term_val(heap_read(term_val(r) + 2));
-        break;
-      }
-    }
-    // Filtered output ranges (every UPCAST'd axis removed) for the
-    // parallel-grid emit.  The UPCAST'd axes become straight-line
-    // accumulator indices, NOT for-loops.
-    Term f_ranges[RMU_MAX_RANGES];
-    u32  f_kinds  [RMU_MAX_RANGES] = {0};
-    u32  f_factors[RMU_MAX_RANGES] = {0};
-    u32 f_n = 0;
-    for (u32 i = 0; i < n_out; i++) {
-      Term r = out_ranges[i];
-      int skip = 0;
-      if (up.n > 0 && term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE) {
-        u32 ax = (u32)term_val(heap_read(term_val(r) + 0));
-        for (u32 j = 0; j < up.n; j++) {
-          if (up.up_axes[j] == ax) { skip = 1; break; }
-        }
-      }
-      if (skip) continue;
-      f_ranges[f_n] = out_ranges[i];
-      f_kinds[f_n]  = out_kinds[i];
-      f_factors[f_n]= out_factors[i];
-      f_n++;
-    }
-    int vectM = (up.n > 0);
-    int needs_close[RMU_MAX_RANGES] = {0};
-    u32 body_depth = rmu_emit_output_loops(addr,
-                                           vectM ? f_ranges   : out_ranges,
-                                           vectM ? f_kinds    : out_kinds,
-                                           vectM ? f_factors  : out_factors,
-                                           vectM ? f_n : n_out, depth, fp,
-                                           needs_close);
-    char acc_name[32];
-    snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
-    if (vectM) {
-      for (u32 k = 0; k < up_total; k++) {
-        for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-        fprintf(fp, "float %s_%u = ", acc_name, k);
-        rmu_emit_reduce_init(red_kind, fp);
-        fputs(";\n", fp);
-      }
-    } else {
-      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-      fprintf(fp, "float %s = ", acc_name);
-      rmu_emit_reduce_init(red_kind, fp);
-      fputs(";\n", fp);
-    }
-    // Decide which reduce axes to #pragma-unroll: walk innermost (stride 1)
-    // -> outermost, unrolling while the cumulative unrolled iteration count
-    // stays within RMU_REDUCE_UNROLL_MAX.
-    int do_unroll[RMU_CONV_SPLIT_MAX] = {0};
-    {
-      u64 prod = vectM ? (u64)up_total : 1;
-      for (u32 i = 0; i < sp.n; i++) {
-        if ((u64)sp.extent[i] * prod <= RMU_REDUCE_UNROLL_MAX) {
-          do_unroll[i] = 1; prod *= sp.extent[i];
-        } else break;
-      }
-    }
-    // Emit the reduce loops outermost (largest stride) -> innermost.
-    u32 loop_depth = body_depth;
-    for (i32 i = (i32)sp.n - 1; i >= 0; i--) {
-      Term r = uop_range(sp.axis_id[i], KAX_REDUCE, sp.extent[i]);
-      if (do_unroll[i]) {
-        for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
-        fprintf(fp, "#pragma unroll(%u)\n", sp.extent[i]);
-      }
-      rmu_emit_range_open(r, fp, loop_depth, RMU_NO_OPT);
-      loop_depth++;
-    }
-    if (vectM) {
-      // Helper: linear k in [0..up_total) -> per-axis index k_i.
-      // Innermost-axis index (i = up.n - 1) varies fastest; this matches
-      // the natural register-blocked-matmul layout and gives the MSL
-      // compiler the easiest CSE shape (consecutive k's share the same
-      // outer-axis index so the cOut-only weight load is reused).
-      for (u32 k = 0; k < up_total; k++) {
-        u32 rem = k;
-        for (i32 i = (i32)up.n - 1; i >= 0; i--) {
-          up.up_vals[i] = rem % up_exts[i];
-          rem /= up_exts[i];
-        }
-        UOpGraphRewriteRule mr[1] = { { "conv_m_subst", rmu_conv_m_subst_rule } };
-        Term rk = uop_graph_rewrite(red_src2, mr, 1, &up);
-        for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
-        if (red_kind == REDUCE_MAX) {
-          fprintf(fp, "%s_%u = fmax(%s_%u, ", acc_name, k, acc_name, k);
-          rmu_emit_term(rk, fp);
-          fputs(");\n", fp);
-        } else {
-          fprintf(fp, "%s_%u = %s_%u + ", acc_name, k, acc_name, k);
-          rmu_emit_term(rk, fp);
-          fputs(";\n", fp);
-        }
-      }
-    } else {
-      for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
-      rmu_emit_reduce_combine(acc_name, red_kind, red_src2, fp);
-    }
-    for (i32 i = (i32)sp.n - 1; i >= 0; i--) {
-      loop_depth--;
-      for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
-      fputs("}\n", fp);
-    }
-    // Final store(s).
-    if (vectM) {
-      for (u32 k = 0; k < up_total; k++) {
-        u32 rem = k;
-        for (i32 i = (i32)up.n - 1; i >= 0; i--) {
-          up.up_vals[i] = rem % up_exts[i];
-          rem /= up_exts[i];
-        }
-        UOpGraphRewriteRule mr[1] = { { "conv_m_subst", rmu_conv_m_subst_rule } };
-        Term ak = uop_graph_rewrite(addr, mr, 1, &up);
-        for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-        fprintf(fp, "%s[", rmu_buf_name(buf));
-        rmu_emit_term(ak, fp);
-        fputs("] = ", fp);
-        rmu_store_cast_open(buf, fp);
-        fprintf(fp, "%s_%u", acc_name, k);
-        rmu_store_cast_close(buf, fp);
-        fputs(";\n", fp);
-      }
-    } else {
-      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-      fprintf(fp, "%s[", rmu_buf_name(buf));
-      rmu_emit_term(addr, fp);
-      fputs("] = ", fp);
-      rmu_store_cast_open(buf, fp);
-      fputs(acc_name, fp);
-      rmu_store_cast_close(buf, fp);
-      fputs(";\n", fp);
-    }
-    for (i32 i = (i32)(vectM ? f_n : n_out) - 1; i >= 0; i--) {
-      if (!needs_close[i]) continue;
-      body_depth--;
-      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-      fputs("}\n", fp);
-    }
-    return 1;
-  }
-
-  // Marker for dispatch tracing.
-  for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-  fprintf(fp, "/* CONV2D template (KRED=%u) */\n", red_extent);
-
-  // Partition out_ranges: true output axes vs inner-reduce-decomp
-  // axes (the UPCAST'd inner half of a K split -- belongs INSIDE the
-  // reduce loop as a nested unrolled fold over a single accumulator).
-  // See rmu_range_is_inner_reduce_decomp banner for the tinygrad
-  // do_expand correspondence.
-  u32 n_out_true = rmu_partition_out_ranges(out_ranges, out_kinds,
-                                            out_factors, n_out, addr);
-  u32 n_inner    = n_out - n_out_true;
-
-  // Emit output ranges: promoted-GLOBAL (tid decode) for plain-LOOP
-  // output axes, threadbinds for LOCAL/explicit-GLOBAL, serial loops
-  // otherwise.  Emits the `if (tid >= total) return;` bounds guard.
-  int needs_close[RMU_MAX_RANGES] = {0};
-  u32 body_depth = rmu_emit_output_loops(addr, out_ranges, out_kinds,
-                                         out_factors, n_out_true, depth, fp,
-                                         needs_close);
-  // Accumulator decl; reduce-axis loop with #pragma unroll when KRED
-  // is small.  Skip the pragma on the C target -- C99 has no
-  // #pragma unroll; clang accepts `#pragma clang loop unroll(full)`
-  // but we prefer not to gate per-target inside this helper.
-  char acc_name[32];
-  snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
-  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fprintf(fp, "float %s = ", acc_name);
-  rmu_emit_reduce_init(red_kind, fp);
-  fputs(";\n", fp);
-  // GPU-generic: `#pragma unroll(N)` is accepted by both the Metal
-  // and CUDA (nvcc/nvrtc) compilers; the C target omits it (C99 has
-  // no standard unroll pragma).
-  if (RMU_TARGET != CG_TARGET_C && red_extent <= RMU_REDUCE_UNROLL_MAX) {
-    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-    fprintf(fp, "#pragma unroll(%u)\n", red_extent);
-  }
-  rmu_emit_range_open(red_range, fp, body_depth, RMU_NO_OPT);
-  // Inner-K decomposition: nested unrolled loops INSIDE the reduce
-  // loop, BEFORE the combine, so all inner-axis iterations fold into
-  // the single accumulator.  Mirrors tinygrad expander.py:do_expand
-  // (UNROLL'd RANGE inside a REDUCE expands the body into a CONTRACT
-  // vector that the REDUCE horizontally sums).
-  u32 reduce_body_depth = rmu_emit_inner_reduce_decomp_loops(
-      out_ranges + n_out_true, out_kinds + n_out_true,
-      out_factors + n_out_true, n_inner, fp, body_depth + 1);
-  for (u32 d = 0; d < reduce_body_depth; d++) fputs("  ", fp);
-  rmu_emit_reduce_combine(acc_name, red_kind, red_src, fp);
-  for (u32 i = 0; i < n_inner; i++) {
-    reduce_body_depth--;
-    for (u32 d = 0; d < reduce_body_depth; d++) fputs("  ", fp);
-    fputs("}\n", fp);
-  }
-  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fputs("}\n", fp);
-  // Final store.
-  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fprintf(fp, "%s[", rmu_buf_name(buf));
-  rmu_emit_term(addr, fp);
-  fputs("] = ", fp);
-  rmu_store_cast_open(buf, fp);
-  fputs(acc_name, fp);
-  rmu_store_cast_close(buf, fp);
-  fputs(";\n", fp);
-  // Close output loops.
-  for (i32 i = (i32)n_out_true - 1; i >= 0; i--) {
-    if (!needs_close[i]) continue;
-    body_depth--;
-    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-    fputs("}\n", fp);
-  }
-  return 1;
 }
 
 // Chain-reduce emission: STORE(buf, addr, REDUCE(REDUCE(...REDUCE(leaf,
@@ -5138,12 +4587,13 @@ static int rmu_axis_index_stride(Term addr, u32 axis_id, i64 *stride) {
 // in the store statement.  Returns 1 if the shape matched and was
 // emitted; 0 if the caller should fall back to the generic path.
 //
-// Dispatches to specialised templates when the recogniser pre-pass
-// (uop_recognise_tc / uop_recognise_conv) wrapped the value:
-//   OPT(_, TC,   _) -> rmu_emit_matmul_tc  (simdgroup_matrix MMA)
-//   OPT(_, CONV, _) -> rmu_emit_conv       (conv2d-flat #pragma unroll)
+// Dispatches to the simdgroup_matrix template when the recogniser
+// pre-pass (uop_recognise_tc) wrapped the value:
+//   OPT(_, TC, _) -> rmu_emit_matmul_tc  (simdgroup_matrix MMA)
 // TC falls through to the scalar accumulator on tile-size mismatch
-// (K%8 != 0); CONV always succeeds for shapes the recogniser installs.
+// (K%8 != 0).  Conv2d flows through the generic accumulator path
+// below -- the flattened STORE(REDUCE(MUL(INDEX_E(W),X))) shape is
+// handled correctly there with no conv-specialised template.
 static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   u64 sloc = term_val(store);
@@ -5157,14 +4607,6 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fputs("/* TC tile mismatch: falling back to scalar accumulator */\n", fp);
     value = tc_red;
-  }
-  // F4: dispatch to conv2d template when CONV-annotated.  rmu_emit_conv
-  // only fails on degenerate KRED=0 shapes that uop_recognise_conv never
-  // installs, so any CONV-wrapped root that arrives here emits through
-  // the template; no fallback path is exercised in production or tests.
-  Term conv_red = 0;
-  if (rmu_detect_conv(store, &conv_red) && rmu_emit_conv(store, conv_red, fp, depth)) {
-    return 1;
   }
   if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
   Term buf  = heap_read(sloc + 0);
@@ -5739,8 +5181,8 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth,
   // (uop_dag_apply_split edits the leaf, not REDUCE.axes).  It is NOT an
   // output axis (absent from store_addr) and NOT a named reduce axis.
   // It must fold INTO this accumulator -- a nested loop INSIDE the K
-  // loop, before the combine -- exactly as rmu_emit_store_reduce /
-  // rmu_emit_conv do via rmu_emit_inner_reduce_decomp_loops.  Without
+  // loop, before the combine -- exactly as rmu_emit_store_reduce does
+  // via rmu_emit_inner_reduce_decomp_loops.  Without
   // this the generic rmu_emit_store path (which handles STORE(ADD(REDUCE,
   // bias)) matmul+bias kernels) opened it as an OUTER loop, resetting
   // _acc each iteration + storing inside -> a partial sum, wrong value.
@@ -5904,8 +5346,8 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // accumulator (rmu_emit_one_reduce_lb opens it inside the K loop), NOT
   // wrap the accumulator as an outer loop.  So exclude it here from both
   // the required_pos depth computation and the outer range-loop emit.
-  // Mirrors rmu_range_is_inner_reduce_decomp (the rmu_emit_store_reduce /
-  // rmu_emit_conv partition).  See its banner for the tinygrad do_expand
+  // Mirrors rmu_range_is_inner_reduce_decomp (the rmu_emit_store_reduce
+  // partition).  See its banner for the tinygrad do_expand
   // correspondence.
   int range_is_inner_decomp[RMU_MAX_RANGES] = {0};
   for (u32 i = 0; i < n_ranges; i++) {
@@ -6620,7 +6062,7 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   // we fall through to the legacy emit below.  The route reads from a
   // scratch buffer so a bail leaves `fp` untouched.
   if (uop_has_upcast_or_unroll(root)) {
-    Term r2 = uop_recognise_conv(root);
+    Term r2 = root;
     r2 = uop_expand_graph(r2);
     // sym pass between expander + devectorize: re-fires constructor-
     // time identities (ADD-zero, MUL-one, CONST*CONST fold, NEG-NEG,
@@ -6859,7 +6301,7 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   if (kernel_name == NULL) kernel_name = "uop_kernel";
   // Piece #4 route gate -- see comments on cg_render_uop_kernel_root.
   if (uop_has_upcast_or_unroll(root)) {
-    Term r2 = uop_recognise_conv(root);
+    Term r2 = root;
     r2 = uop_expand_graph(r2);
     // sym pass between expander + devectorize: re-fires constructor-
     // time identities (ADD-zero, MUL-one, CONST*CONST fold, NEG-NEG,
@@ -7075,7 +6517,7 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   // Piece #4 route gate -- see comments on cg_render_uop_kernel_root.
   if (uop_has_upcast_or_unroll(root)) {
     if (route_trace) fprintf(stderr, "[route] %s: linearized-path entry\n", kernel_name);
-    Term r2 = uop_recognise_conv(root);
+    Term r2 = root;
     r2 = uop_expand_graph(r2);
     // sym pass between expander + devectorize: re-fires constructor-
     // time identities (ADD-zero, MUL-one, CONST*CONST fold, NEG-NEG,

@@ -522,11 +522,6 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   if (store_root == cached_root) {
     store_root = uop_recognise_batched_tc_parallel(store_root);
   }
-  // F4: same for conv2d_flat -- installs UOP_OPT(_, CONV, 0) on
-  // STORE roots whose REDUCE body has IDIV/IMOD-decomposed addresses
-  // so render_uop's rmu_emit_conv template fires.  No-op when the
-  // matmul recogniser already wrapped the root (TC takes precedence).
-  store_root = uop_recognise_conv(store_root);
   // Default-parallelise happens inside the renderer (rmu_emit_store /
   // rmu_emit_output_loops): plain-LOOP output axes are decoded from
   // `tid` instead of looped serially.  For non-matmul kernels we do NOT

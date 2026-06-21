@@ -442,7 +442,6 @@ int             dtype_is_packed   (u32 dt);
 #define UOP_OPT_TC            2   // tensor core (T.gemm / T.wgmma_gemm)
 #define UOP_OPT_LOCAL         3   // bind to thread position
 #define UOP_OPT_GROUP_REDUCE  4
-#define UOP_OPT_CONV          5   // conv2d_flat output kernel template
 #define UOP_OPT          39  // heap = [target, NUM(kind), NUM(factor)];
                              //   Annotation node attaching an optimisation
                              //   directive to `target`.  factor=0 when the
@@ -2988,32 +2987,6 @@ fn Term uop_dag_apply_global(Term root, u32 axis_id);
 // Both return 1 + reduce-axis extent on match; 0 otherwise.
 fn int uop_classify_dot (Term root, u32 *out_k_extent);
 fn int uop_classify_gemv(Term root, u32 *out_k_extent, int *out_w_first);
-
-// Recognise the conv2d_flat shape on a UOP_STORE root and wrap the
-// inner REDUCE with UOP_OPT(_, CONV, 0) so render_uop's conv template
-// fires. Returns the input root unchanged on any non-match.
-// See src/uop/recognise_conv.c for the exact pattern.
-fn Term uop_recognise_conv(Term root);
-
-// Detection-only: returns 1 if `root` is a conv2d_flat-shape STORE
-// (REDUCE-of-MUL with W*X structure where at least one INDEX_E address
-// contains UOP_IDIV / UOP_IMOD, signalling decomposed conv axes).
-// Fills *out_kred with the reduce-axis extent if statically known
-// (zero otherwise). The CONV template currently always emits the
-// generic accumulator path so kred isn't load-bearing yet -- present
-// for symmetry with uop_classify_matmul + future tile-size gates.
-fn int uop_classify_conv2d(Term root, u32 *out_kred);
-
-// Direct-multi-axis conv classifier: detects the conv2d shape the
-// multi-axis-REDUCE port (commit 598055ee) emits when shapes stay
-// un-flattened (reduce has separate Cin/kH/kW axes, no IDIV/IMOD).
-// Fills *out_kred with the product of all reduce-axis extents.
-fn int uop_classify_conv2d_direct(Term root, u32 *out_kred);
-
-// "Either form" wrapper.  Used by callers that just need to know if
-// this is a conv kernel (flat OR direct multi-axis), without caring
-// which form -- e.g. hand_opt_is_conv_kernel for LOCAL/UPCAST gating.
-fn int uop_classify_conv2d_any(Term root, u32 *out_kred);
 
 // === Kernel lift to UOp DAG ===
 // Package the unified-rangeify pass's store_root for a kernel entry
