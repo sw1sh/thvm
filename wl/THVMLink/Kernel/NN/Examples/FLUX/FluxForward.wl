@@ -14,6 +14,14 @@
 
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
+(* Public building blocks of the FLUX forward, so a benchmark or test can load
+   the example by context (Get["WolframInstitute`THVMLink`Examples`"]) and drive
+   the transformer directly; the remaining block/modulation glue stays private. *)
+fxTransformer::usage = "fxTransformer[z, enc, temb, ropeCos, ropeSin, wf, cfg] runs the FLUX.2-klein-4B MMDiT forward (double + single stream blocks) and returns the velocity prediction; wf is a weight lookup function and cfg the {num_double, num_single, heads, head_dim, eps} config.";
+fxLinear::usage = "fxLinear[x, w] is the FLUX linear y = x . Transpose[w] for a diffusers weight stored {out, in}, run on the bf16 tensor-core matmul path against the weight view (no resident transpose).";
+fxQuantizableQ::usage = "fxQuantizableQ[name, dims] is True for a weight worth q8 weight-only quantization (2-D, both dims >= 2048, excluding modulation/norm_out/timestep_embedder).";
+fxQuantizeWeight::usage = "fxQuantizeWeight[w] quantizes a weight to weight-only q8, returning <|\"q\" -> int8 weight, \"s\" -> per-output-channel bf16 scale|>.";
+
 Begin["`Private`"];
 
 (* --- linear: a diffusers weight is stored {out, in}, so y = x . W^T.  The

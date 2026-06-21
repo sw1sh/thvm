@@ -39,14 +39,12 @@
    is the path for a fresh GPU pod: provision, install the paclet, run with
    SYNTH=1 DEV=cuda. *)
 
-PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
-Get[FileNameJoin[{DirectoryName[$InputFileName], "FluxForward.wl"}]]; TInit[]; TReset[];
-pr[a___] := (WriteString["stdout", a, "\n"]; $Output // Flush);
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`Examples`"]; TInit[]; TReset[];
 
 synth = Environment["SYNTH"] === "1";
 wpath = Environment["HOME"] <> "/.cache/thvm/flux2-klein-4b/transformer/diffusion_pytorch_model.safetensors";
 If[ !synth && !FileExistsQ[wpath],
-    pr["SKIP: transformer weights not found at ", wpath]; Exit[0]];
+    Print["SKIP: transformer weights not found at ", wpath]; Exit[0]];
 
 dt = Environment["DT"] /. x_ /; (x === $Failed || x === None) -> "bf16";
 dev = Environment["DEV"] /. x_ /; (x === $Failed || x === None) -> "metal";   (* metal | cuda | cpu *)
@@ -71,7 +69,7 @@ synShape[n_String] := Which[
     StringMatchQ[n, ___ ~~ ".ff" ~~ ("." | "_context.") ~~ "linear_in.weight"], {18432, 3072},
     StringMatchQ[n, ___ ~~ ".ff" ~~ ("." | "_context.") ~~ "linear_out.weight"], {3072, 9216},
     StringMatchQ[n, ___ ~~ (".to_q" | ".to_k" | ".to_v" | ".add_q_proj" | ".add_k_proj" | ".add_v_proj" | ".to_out.0" | ".to_add_out") ~~ ".weight"], {3072, 3072},
-    True, pr["SYNTH: unknown key ", n]; {3072, 3072}];
+    True, Print["SYNTH: unknown key ", n]; {3072, 3072}];
 
 dblKeys = {"attn.to_q.weight", "attn.to_k.weight", "attn.to_v.weight", "attn.add_q_proj.weight", "attn.add_k_proj.weight", "attn.add_v_proj.weight", "attn.norm_q.weight", "attn.norm_k.weight", "attn.norm_added_q.weight", "attn.norm_added_k.weight", "attn.to_out.0.weight", "attn.to_add_out.weight", "ff.linear_in.weight", "ff.linear_out.weight", "ff_context.linear_in.weight", "ff_context.linear_out.weight"};
 sglKeys = {"attn.to_qkv_mlp_proj.weight", "attn.to_out.weight", "attn.norm_q.weight", "attn.norm_k.weight"};
@@ -122,31 +120,31 @@ res = TInContext[ctx,
 
   nojit = Environment["NOJIT"] === "1";   (* eager forward, no TJit/graph capture -- isolates a forward-op bug from a capture bug *)
   tprewarm = AbsoluteTiming[Do[wf[k], {k, If[ synth, synKeys, Keys[wt]]}]][[1]];     (* upload-only, no forward *)
-  pr["  [prewarm done: ", Round[tprewarm, 2], " s; ", If[ nojit, "eager fwd ", "capturing "], ndbl, "+", nsgl, " blocks...]"];
+  Print["  [prewarm done: ", Round[tprewarm, 2], " s; ", If[ nojit, "eager fwd ", "capturing "], ndbl, "+", nsgl, " blocks...]"];
   {tcap, opsN} = If[ nojit,
     {AbsoluteTiming[TRealize@velFn[z0];][[1]], 0},
     With[{t = AbsoluteTiming[vfn = TJit[velFn]; vfn[z0];][[1]]}, {t, TJitOpCount[vfn]}]];
-  pr["  [", If[ nojit, "eager fwd", "capture"], " done: ", Round[tcap, 2], " s]"];
+  Print["  [", If[ nojit, "eager fwd", "capture"], " done: ", Round[tcap, 2], " s]"];
   trep = Min @ Table[AbsoluteTiming[If[ nojit, TRealize@velFn[z0], vfn[z0]]][[1]], {nrep}];     (* warm per-step *)
   (* THVM_FLUX_CHECK=1: print a deterministic output statistic for A/B
      correctness comparisons across kernel-path changes (same seed -> same
      stat within dtype tolerance). *)
   If[ Environment["THVM_FLUX_CHECK"] === "1",
       With[{o = Flatten@Normal@TRealize@velFn[z0]},
-           pr["  OUTSTAT  sum|x|=", N@Total@Abs@o, "  rms=", N@Sqrt@Mean[o^2], "  finite=", AllTrue[o, NumberQ]]]];
+           Print["  OUTSTAT  sum|x|=", N@Total@Abs@o, "  rms=", N@Sqrt@Mean[o^2], "  finite=", AllTrue[o, NumberQ]]]];
   prof = If[ Environment["THVM_METAL_PROFILE_PEROP"] === "1", TMetalPerOpProfile[], <||>];
   {tprewarm, tcap, trep, opsN, prof}];
 TContextDestroy[ctx];
 {tprewarm, tcap, trep, ops, prof} = res;
 
-pr["FLUX.2-klein-4B transformer forward  (dt=", dt, ", ", ops, " captured ops)"];
-pr["  COLD  = ", Round[tprewarm + tcap, 2], " s   (", Round[tprewarm, 2], " s weight upload + ", Round[tcap, 2], " s JIT capture)"];
-pr["  WARM  = ", Round[trep*1000, 1], " ms/step   (4-step sampler ~ ", Round[4*trep, 2], " s)"];
+Print["FLUX.2-klein-4B transformer forward  (dt=", dt, ", ", ops, " captured ops)"];
+Print["  COLD  = ", Round[tprewarm + tcap, 2], " s   (", Round[tprewarm, 2], " s weight upload + ", Round[tcap, 2], " s JIT capture)"];
+Print["  WARM  = ", Round[trep*1000, 1], " ms/step   (4-step sampler ~ ", Round[4*trep, 2], " s)"];
 If[ Length[prof] > 0,
-    pr["  --- top kernels by GPU time (per-op profile) ---"];
+    Print["  --- top kernels by GPU time (per-op profile) ---"];
     Module[{rows},
       rows = Reverse @ SortBy[Normal[prof], #[[2]]["GpuUs"] &];
       Do[ With[{kid = r[[1]], v = r[[2]]},
-          pr["    kid=", kid, "  gpu=", Round[v["GpuUs"]/Max[v["GpuSamples"],1]/1000., 0.01], " ms x", v["DispatchCount"],
+          Print["    kid=", kid, "  gpu=", Round[v["GpuUs"]/Max[v["GpuSamples"],1]/1000., 0.01], " ms x", v["DispatchCount"],
              "  ", Round[v["GFlopsPerSec"]/1000., 0.1], " TFLOPS  ", v["DispatchKind"]]],
         {r, Take[rows, UpTo[14]]}]]];
