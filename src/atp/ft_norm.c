@@ -790,6 +790,14 @@ static int ft_cell_try_rules(AtpState   *s,
   // A free var is never a redex on the subject side.
   if ((p->sym & WF_VAR_BIT) != 0u) return 0;
   u8 have_unorient = (u8)(s->n_unorient > 0u);
+  // A/B gate for the orient-pass winner re-match skip (default ON).
+  // THVM_NO_FT_REMATCH_SKIP=1 forces the unconditional re-match so an
+  // ON-vs-OFF sweep proves the skip is byte-identical, never just faster.
+  static int no_rematch_skip = -1;
+  if (no_rematch_skip < 0) {
+    const char *e = getenv("THVM_NO_FT_REMATCH_SKIP");
+    no_rematch_skip = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
   // Arena handle for the AC-match dispatch (AC-chain bindings allocate
   // into the scratch arena).  NULL-safe: the dispatch only deref's it
   // when the AC path actually fires.
@@ -833,6 +841,10 @@ static int ft_cell_try_rules(AtpState   *s,
   // under use_wm_mixmost_nf (see ft_wm_pattern_before).
   if (try_orient) {
     u32 best_rule = (u32)-1;
+    // subst_buf holds best_rule's bindings iff no later attempt has run
+    // ft_subst_reset since best_rule's match.  When the winner is the LAST
+    // candidate the scan touches, that re-match is redundant -- skip it.
+    u8  best_subst_live = 0u;
     u32 niter = FTPI_NITER;
     for (u32 k = 0; k < niter; k++) {
       u32 r = FTPI_RULE(k);
@@ -846,7 +858,8 @@ static int ft_cell_try_rules(AtpState   *s,
       if (lhs == NULL || s->rhs_ft[r] == NULL) continue;
       if (have_unorient && !s->r_orient[r]) continue;
       // Forward rewrite, no order check needed (oriented).
-      ft_subst_reset(subst_buf);
+      ft_subst_reset(subst_buf);   // clobbers any prior winner's bindings
+      best_subst_live = 0u;
       if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
         if (!s->use_wm_mixmost_nf) {
           *rule_out = r;
@@ -858,12 +871,18 @@ static int ft_cell_try_rules(AtpState   *s,
         if (best_rule == (u32)-1 ||
             !ft_wm_pattern_before(s->lhs_ft[best_rule], lhs)) {
           best_rule = r;
+          best_subst_live = 1u;   // subst_buf now holds best_rule's match
         }
       }
     }
     if (best_rule != (u32)-1) {
-      // Re-match the winner: subst_buf was overwritten by later
-      // attempts during the scan.
+      // Re-match the winner unless subst_buf still carries its bindings
+      // (winner was the last candidate the loop matched + no later reset).
+      if (best_subst_live && !no_rematch_skip) {
+        *rule_out = best_rule;
+        *dir_out  = 0u;
+        return 1;
+      }
       ft_subst_reset(subst_buf);
       if (ft_match_maybe_ac(ft_arena_local, s->lhs_ft[best_rule], p,
                             subst_buf)) {
