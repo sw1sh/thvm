@@ -915,6 +915,58 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // inert on the universal/ground-goal surface.
   mint back = MArgument_getInteger(args[50]);
   thvm_atp_set_use_backward_goal_argue(atp, (u8)(back != 0));
+  // === Waldmeister CP-emission-order knobs (src/atp/_.c).  Each aligns
+  // thvm's CP FIFO ages with WM's selection order on the
+  // ShefferAxiomsOrAssociativity proxy; all default OFF so the engine +
+  // the "Waldmeister"* presets stay byte-identical with these off.  See
+  // tools/baselines/wm_align_reports/soa.txt. ===
+  // Method -> {... "CPWMSide" -> True}: WM CP-formation side geometry swap
+  // (Unifikation1.c:916-917) -- store each derived unorientable equation
+  // with WM's KPLinks=sigma(r_Vater) as the stored LHS.  No setter on
+  // AtpState (cf. the bench s->use_cp_wm_side), set the field directly.
+  // args[51]; 0 = off (default).
+  mint cp_wm_side = MArgument_getInteger(args[51]);
+  atp->use_cp_wm_side = (u8)(cp_wm_side != 0);
+  // Method -> {... "WMFlatSubsume" -> True}: WM flatterm-faithful
+  // eset-subsume matcher (MO_TermpaarSubsummiertZweites).  args[52];
+  // 0 = off (default; standalone regresses soa firstdiv 19->16).
+  mint wm_flat_subsume = MArgument_getInteger(args[52]);
+  thvm_atp_set_use_wm_flat_subsume(atp, (u8)(wm_flat_subsume != 0));
+  // Method -> {... "WMCommSubsume" -> True}: commutativity-aware E-set
+  // subsumption widening.  args[53]; 0 = off (default).  DIAGNOSTIC knob:
+  // ON forks soa firstdiv 125->99 and explodes commutative-ring baselines.
+  mint wm_comm_subsume = MArgument_getInteger(args[53]);
+  thvm_atp_set_use_wm_comm_subsume(atp, (u8)(wm_comm_subsume != 0));
+  // Method -> {... "WMCommDefer" -> True}: commutativity-DEFER overlap
+  // gate.  args[54]; 0 = off (default).  Superseded by WMCommReage.
+  mint wm_comm_defer = MArgument_getInteger(args[54]);
+  thvm_atp_set_use_wm_comm_defer(atp, (u8)(wm_comm_defer != 0));
+  // Method -> {... "WMCommReage" -> True}: commutativity-REAGE overlap
+  // re-rank (inverse of WMCommDefer; promotes thvm's seq564-sibling CP to
+  // WM's faithful early age).  args[55]; 0 = off (default).
+  mint wm_comm_reage = MArgument_getInteger(args[55]);
+  thvm_atp_set_use_wm_comm_reage(atp, (u8)(wm_comm_reage != 0));
+  // Method -> {... "WMCommDropDup" -> True}: commutativity DROP-DUP re-age
+  // atop WMCommReage (lands at WM pick-289).  args[56]; 0 = off (default).
+  // Advances soa firstdiv 288->290; requires WMCommReage.
+  mint wm_comm_drop_dup = MArgument_getInteger(args[56]);
+  thvm_atp_set_use_wm_comm_drop_dup(atp, (u8)(wm_comm_drop_dup != 0));
+  // Method -> {... "WMLeafTiebreak" -> True}: leaf-arrival tiebreak --
+  // re-key an oriented var-differ==1 CP just below its two-faced sibling
+  // so it sorts first.  args[57]; 0 = off (default).  Clears the soa
+  // 290<->292 / 303<->305 / 351<->353 swap-pairs.
+  mint wm_leaf_tiebreak = MArgument_getInteger(args[57]);
+  thvm_atp_set_use_wm_leaf_tiebreak(atp, (u8)(wm_leaf_tiebreak != 0));
+  // Method -> {... "WMRevfaceGroup" -> True}: reverse-face shape-group
+  // tiebreak (sibling of WMLeafTiebreak one weight band up, soa w=209).
+  // args[58]; 0 = off (default).  Advances soa firstdiv past 778.
+  mint wm_revface_group = MArgument_getInteger(args[58]);
+  thvm_atp_set_use_wm_revface_group(atp, (u8)(wm_revface_group != 0));
+  // Method -> {... "WMPosGroup" -> True}: overlap-position raw-arrival
+  // grouping (sibling of WMRevfaceGroup one weight band down, soa w=120).
+  // args[59]; 0 = off (default).  Advances soa firstdiv past 966.
+  mint wm_posgroup = MArgument_getInteger(args[59]);
+  thvm_atp_set_use_wm_posgroup(atp, (u8)(wm_posgroup != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any

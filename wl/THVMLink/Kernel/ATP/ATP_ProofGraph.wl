@@ -522,7 +522,10 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     useEinsstern_, useNoOverlapBelowSkolem_, useReclassify_,
     useReversedCompletion_, useSueManagement_,
     useCriticalGoalInterreduce_, useCriticalGoalWeight_,
-    useBackwardGoalArgue_] := Block[{
+    useBackwardGoalArgue_, useCpWmSide_, useWmFlatSubsume_,
+    useWmCommSubsume_, useWmCommDefer_, useWmCommReage_,
+    useWmCommDropDup_, useWmLeafTiebreak_, useWmRevfaceGroup_,
+    useWmPosGroup_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr,
@@ -544,7 +547,10 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         useWmIntakeOrder, useWmMixmostNf, useEinsstern,
         useNoOverlapBelowSkolem, useReclassify, useReversedCompletion,
         useSueManagement, useCriticalGoalInterreduce,
-        useCriticalGoalWeight, useBackwardGoalArgue];
+        useCriticalGoalWeight, useBackwardGoalArgue, useCpWmSide,
+        useWmFlatSubsume, useWmCommSubsume, useWmCommDefer, useWmCommReage,
+        useWmCommDropDup, useWmLeafTiebreak, useWmRevfaceGroup,
+        useWmPosGroup];
     (* C engine returns LibraryFunctionError on memory-guard abort
        (THVM_ATP_RSS_ABORT_MB / THVM_ATP_HEAP_ABORT_FRAC) or other
        hard-stop conditions.  Bail BEFORE the structural part extraction

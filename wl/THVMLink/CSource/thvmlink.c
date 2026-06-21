@@ -251,6 +251,42 @@ EXTERN_C DLLEXPORT int thvm_wl_heap_pos(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Reclaim the dynamic heap an ATP run leaked into the shared context
+// heap.  A completed TFindProof leaves every axiom/goal/engine/trace
+// Term resident: the WL ProofObject builder decodes them by raw heap
+// loc (decodeAtpTerm -> $heapReadFn) AFTER thvm_wl_atp_run_proof
+// returns, so the run cannot pop its own terms.  Across repeated proofs
+// in one kernel HEAP_NEXT then climbs monotonically (~2M cells/DeMorgan)
+// until a heavy run trips the Cheney semi-space limit -- a GC fires on a
+// heap whose ATP terms are reachable only by raw loc (not in any root
+// set), relocating cells out from under the loc integers a persistent
+// KBO/LPO/FV index still holds -> SIGSEGV.  Fix: the WL ATP entry calls
+// this BEFORE encoding each run.  The FIRST call captures the heap base
+// (the position before any ATP term was ever allocated); every later
+// call pops HEAP_NEXT back to that base, reclaiming the PREVIOUS run's
+// terms once the next run begins (by which point the prior run's
+// ProofObject + every requested return-spec are fully decoded into
+// loc-free WL expressions).  thvm_atp_heap_reset bumps the KBO weight-
+// memo epoch so no entry keyed to a recycled loc survives; the next
+// run's thvm_atp_init re-invalidates the LPO/orient/unf memos + NULLs the
+// rule/CP indexes, so nothing reads a stale loc.  Returns the new
+// HEAP_NEXT.
+static int      g_atp_heap_base_set = 0;
+static uint64_t g_atp_heap_base     = 0;
+EXTERN_C DLLEXPORT int thvm_wl_atp_heap_recycle(WolframLibraryData libData,
+                                                mint argc, MArgument *args,
+                                                MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  if (!g_atp_heap_base_set) {
+    g_atp_heap_base     = (uint64_t)HEAP_NEXT;
+    g_atp_heap_base_set = 1;
+  } else {
+    thvm_atp_heap_reset(g_atp_heap_base);
+  }
+  MArgument_setInteger(res, (mint)HEAP_NEXT);
+  return LIBRARY_NO_ERROR;
+}
+
 // Lower bound of the active heap region.  When the Cheney GC has
 // swapped, live cells live in [gc_from_start(), HEAP_NEXT); WL
 // iterators that walk the heap use this as the lower bound.

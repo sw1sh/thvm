@@ -519,6 +519,7 @@ $heapReadFn  := $heapReadFn  = load["thvm_wl_heap_read",  {Integer},            
 $heapSetFn   := $heapSetFn   = load["thvm_wl_heap_set",   {Integer, Integer},       Integer];
 $gcCollectFn := $gcCollectFn = load["thvm_wl_gc_collect", {},                       Integer];
 $gcCountFn   := $gcCountFn   = load["thvm_wl_gc_count",   {},                       Integer];
+$atpHeapRecycleFn := $atpHeapRecycleFn = load["thvm_wl_atp_heap_recycle", {},       Integer];
 $kernelSourceCFn     := $kernelSourceCFn     = load["thvm_wl_kernel_source_c",     {Integer}, "UTF8String"];
 $kernelSourceMetalFn := $kernelSourceMetalFn = load["thvm_wl_kernel_source_metal", {Integer}, "UTF8String"];
 $kernelFlopsFn         := $kernelFlopsFn         = load["thvm_wl_kernel_flops",          {Integer}, Integer];
