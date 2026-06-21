@@ -39,7 +39,7 @@
 //
 // thvm port: the engine buffers nothing -- axioms are already queued
 // as CPs when the first thvm_atp_step runs.  atp_wm_intake_canonicalize
-// (hooked there, gated on use_wm_intake_order) recomputes WM's
+// (hooked there, gated on use_intake_order) recomputes WM's
 // canonical order from the queued TRACE_AXIOM rows + the registered
 // goal conjuncts (= WM's conclusions), PERMUTES the axiom slots'
 // cp_seq stamps into that order, and tags them ultimate (the
@@ -272,7 +272,7 @@ static int atp_wmi_eq_term_cmp(const AtpWmiStats *st,
 // The full SpezNormierung pipeline over the queued axiom set + the
 // registered goal conjuncts, followed by the Initial = Act_ultimate
 // restamp.  Runs once, from thvm_atp_step's first call (gated on
-// use_wm_intake_order); every later enqueue is a derived CP and takes
+// use_intake_order); every later enqueue is a derived CP and takes
 // the normal classification.
 static void atp_wm_intake_canonicalize(AtpState *s) {
   if (s == NULL || s->n_cps == 0u) return;

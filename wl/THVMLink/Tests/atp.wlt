@@ -3045,17 +3045,17 @@ VerificationTest[
 (* Reset so later tests / sessions see the baked-in scorer. *)
 TAtpSetLearnedScorer[Clear];
 
-(* WMMixmostNF option decoder round-trip (the WM `-nf mixmost` default
+(* MixmostNF option decoder round-trip (the WM `-nf mixmost` default
    strategy + Regelbaum retrieval order; args[42]). *)
 VerificationTest[
-    {WolframInstitute`THVMLink`ATP`Private`atpWmMixmostNfOpt[<|"WMMixmostNF" -> True|>],
-     WolframInstitute`THVMLink`ATP`Private`atpWmMixmostNfOpt[<|"WMMixmostNF" -> False|>],
-     WolframInstitute`THVMLink`ATP`Private`atpWmMixmostNfOpt[<||>]},
+    {WolframInstitute`THVMLink`ATP`Private`atpMixmostNfOpt[<|"MixmostNF" -> True|>],
+     WolframInstitute`THVMLink`ATP`Private`atpMixmostNfOpt[<|"MixmostNF" -> False|>],
+     WolframInstitute`THVMLink`ATP`Private`atpMixmostNfOpt[<||>]},
     {1, 0, 0},
     TestID -> "ATP/options/wm-mixmost-nf-decoder"
 ]
 
-(* KNOWN FAILING (pre-existing at daaeb018, NOT from the WMMixmostNF
+(* KNOWN FAILING (pre-existing at daaeb018, NOT from the MixmostNF
    port -- reproduced byte-identically from a clean daaeb018 worktree):
    Method -> "WaldmeisterLazy" on McCune-II dies in proof extraction
    with Part::partw on index 4294967296 = ATP_TRACE_NONE + 1 -- an

@@ -896,10 +896,10 @@ int main(int argc, char **argv) {
       // orphan-murders its queued CPs more broadly than WM's KPV_KillParent --
       // WM re-derives axiom2 and reselects it at pick 16, thvm kills that CP --
       // so the standalone matcher regresses soa firstdiv 19->16.  OFF by
-      // default until the orphan-handling matches WM; THVM_ATP_WM_FLAT_SUBSUME
+      // default until the orphan-handling matches WM; THVM_ATP_FLAT_SUBSUME
       // opts in for experimentation.
-      thvm_atp_set_use_wm_flat_subsume(
-          s, (getenv("THVM_ATP_WM_FLAT_SUBSUME") != NULL) ? 1u : 0u);
+      thvm_atp_set_use_flat_subsume(
+          s, (getenv("THVM_ATP_FLAT_SUBSUME") != NULL) ? 1u : 0u);
       // Commutativity-aware E-set subsumption widening (DEFAULT OFF):
       // drops a redundant equation whose RHS is one top-`.`-swap from the
       // new equation's RHS under a live commutativity axiom -- WM's
@@ -907,17 +907,17 @@ int main(int argc, char **argv) {
       // equation exactly as WM does, but is a DIAGNOSTIC knob, not a parity
       // win: ON forks soa firstdiv 125->99 (slot15 uniquely parents the
       // displaced pick-99 COMM copy) and explodes commutative-ring baselines
-      // via remove-and-rederive thrash.  THVM_ATP_WM_COMM_SUBSUME opts in.
-      thvm_atp_set_use_wm_comm_subsume(
-          s, (getenv("THVM_ATP_WM_COMM_SUBSUME") != NULL) ? 1u : 0u);
+      // via remove-and-rederive thrash.  THVM_ATP_COMM_SUBSUME opts in.
+      thvm_atp_set_use_comm_subsume(
+          s, (getenv("THVM_ATP_COMM_SUBSUME") != NULL) ? 1u : 0u);
       // Commutativity-DEFER overlap gate (DEFAULT OFF): suppresses the single
       // over-enumerated non-canonical comm-side overlap (soa slot15 sourced
       // seq564) in an oriented rule's birth batch WITHOUT removing the
-      // equation -- unlike THVM_ATP_WM_COMM_SUBSUME, slot15 stays live so its
-      // uniquely-parented pick-99 COMM copy survives.  THVM_ATP_WM_COMM_DEFER
+      // equation -- unlike THVM_ATP_COMM_SUBSUME, slot15 stays live so its
+      // uniquely-parented pick-99 COMM copy survives.  THVM_ATP_COMM_DEFER
       // opts in.  See tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_wm_comm_defer(
-          s, (getenv("THVM_ATP_WM_COMM_DEFER") != NULL) ? 1u : 0u);
+      thvm_atp_set_use_comm_defer(
+          s, (getenv("THVM_ATP_COMM_DEFER") != NULL) ? 1u : 0u);
       // Commutativity-REAGE overlap re-rank (DEFAULT OFF, INVERSE of
       // COMM_DEFER): instead of suppressing thvm's early seq564 copy, promote
       // thvm's single seq564-sibling CP (`(x.x).y = (x.y).y`, rule13 x eqn-10)
@@ -925,21 +925,21 @@ int main(int argc, char **argv) {
       // early age (pick-126) rather than buried at the eTT batch tail.  WM
       // forms cp877 in rule13's own batch from rule13 x eqn-9 (which thvm
       // absorbed), aged one slot after seq564 -> WM pick-126; this re-ranks
-      // thvm's re-derived analog to the matching age.  THVM_ATP_WM_COMM_REAGE
+      // thvm's re-derived analog to the matching age.  THVM_ATP_COMM_REAGE
       // opts in.  See tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_wm_comm_reage(
-          s, (getenv("THVM_ATP_WM_COMM_REAGE") != NULL) ? 1u : 0u);
+      thvm_atp_set_use_comm_reage(
+          s, (getenv("THVM_ATP_COMM_REAGE") != NULL) ? 1u : 0u);
       // Commutativity DROP-DUP re-age (DEFAULT OFF): atop COMM_REAGE, re-ages
       // the single DUPLICATE re-derivation of slot15's term `x.(y.x) = (y.y).x`
       // (slot15 is already a LIVE rule since pick-54) one FIFO slot later, past
       // its in-batch `x.(x.x) = y.(y.y)` successor (= WM's pick-288), so it
       // lands at WM's faithful pick-289 rather than thvm's over-early pick-288.
       // slot15 the rule -- and its uniquely-parented pick-99 COMM copy -- stay
-      // intact.  Advances soa firstdiv 288 -> 290.  THVM_ATP_WM_COMM_DROP_DUP
-      // opts in (requires THVM_ATP_WM_COMM_REAGE).  See
+      // intact.  Advances soa firstdiv 288 -> 290.  THVM_ATP_COMM_DROP_DUP
+      // opts in (requires THVM_ATP_COMM_REAGE).  See
       // tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_wm_comm_drop_dup(
-          s, (getenv("THVM_ATP_WM_COMM_DROP_DUP") != NULL) ? 1u : 0u);
+      thvm_atp_set_use_comm_drop_dup(
+          s, (getenv("THVM_ATP_COMM_DROP_DUP") != NULL) ? 1u : 0u);
       // Leaf-arrival tiebreak (DEFAULT OFF): when two CPs overlap the new fact
       // at the same position from a var-differ==1 (WM-oriented) partner and a
       // var-differ==0 (WM two-faced permutation) partner, thvm keys the
@@ -947,24 +947,24 @@ int main(int argc, char **argv) {
       // overlap geometry) and emits them reversed.  This re-keys the oriented
       // copy just below the sibling so it sorts FIRST as WM's single oriented
       // scan emits it.  Clears the soa 290<->292 / 303<->305 / 351<->353
-      // swap-pairs (firstdiv 290 -> trace end).  THVM_ATP_WM_LEAF_TIEBREAK opts
+      // swap-pairs (firstdiv 290 -> trace end).  THVM_ATP_LEAF_TIEBREAK opts
       // in.  See tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_wm_leaf_tiebreak(
-          s, (getenv("THVM_ATP_WM_LEAF_TIEBREAK") != NULL) ? 1u : 0u);
+      thvm_atp_set_use_leaf_tiebreak(
+          s, (getenv("THVM_ATP_LEAF_TIEBREAK") != NULL) ? 1u : 0u);
       // Reverse-face shape-group tiebreak (DEFAULT OFF): sibling of
-      // THVM_ATP_WM_LEAF_TIEBREAK one weight band up (soa w=209).  Within one
+      // THVM_ATP_LEAF_TIEBREAK one weight band up (soa w=209).  Within one
       // tops overlap-position group, re-keys a var-differ==1 partner's
       // reverse-face CP to sort immediately after the largest-keyed same-group
       // CP it ALPHA-matches (same reduced equation), restoring WM's adjacent
       // same-shape emission -- thvm's independent leaf DFS otherwise scatters
       // the reverse copy past the group's other-shape CPs (soa f=36 Cshape
       // arr=6 vs arr=1).  Advances soa firstdiv past 778.
-      // THVM_ATP_WM_REVFACE_GROUP opts in.  See
+      // THVM_ATP_REVFACE_GROUP opts in.  See
       // tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_wm_revface_group(
-          s, (getenv("THVM_ATP_WM_REVFACE_GROUP") != NULL) ? 1u : 0u);
+      thvm_atp_set_use_revface_group(
+          s, (getenv("THVM_ATP_REVFACE_GROUP") != NULL) ? 1u : 0u);
       // Overlap-position raw-arrival grouping (DEFAULT OFF): sibling of
-      // THVM_ATP_WM_REVFACE_GROUP one weight band down (soa w=120).  At a
+      // THVM_ATP_REVFACE_GROUP one weight band down (soa w=120).  At a
       // single A-phase tops overlap position WM emits every partner-face CP in
       // raw discrimination-tree arrival order; REVFACE_GROUP over-groups here,
       // pulling a vd=0 permutation partner's forward face up beside a vd=1
@@ -972,10 +972,10 @@ int main(int argc, char **argv) {
       // (restores raw arrival) and defers a vd=0 permutation partner's reverse
       // face past the higher-arrival same-group cluster, so the batch matches
       // WM's bracketed emission.  Advances soa firstdiv past 966.
-      // THVM_ATP_WM_POSGROUP opts in.  See
+      // THVM_ATP_POSGROUP opts in.  See
       // tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_wm_posgroup(
-          s, (getenv("THVM_ATP_WM_POSGROUP") != NULL) ? 1u : 0u);
+      thvm_atp_set_use_posgroup(
+          s, (getenv("THVM_ATP_POSGROUP") != NULL) ? 1u : 0u);
       // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
       // overlaps an equation's FRESH re-derivation, not the stale exhausted
       // original).  Verified to preserve all 73 byte-identical baselines and
@@ -1020,13 +1020,13 @@ int main(int argc, char **argv) {
       // w1=41 cCombinatorI CP and forks selection at pick 55).  No single
       // axiom rule satisfies both, so the bench DEFAULT keeps the swap OFF
       // (matching the /goal clean baselines, incl. BCKWToSKI__c2 -> Y/109);
-      // the soa Sheffer prefix is measured opt-in via THVM_ATP_CP_WM_SIDE.
+      // the soa Sheffer prefix is measured opt-in via THVM_ATP_CP_SIDE.
       // (THVM_ATP_NO_CP_WM_SIDE remains an explicit force-off override.)
       // FOLLOW-UP (2026-06-20): the faithful axiom-intake geometry that
       // would reconcile the two -- so the swap can default ON again -- is a
       // deeper WM intake-ordering port, left open.
-      s->use_cp_wm_side =
-          (getenv("THVM_ATP_CP_WM_SIDE") != NULL
+      s->use_cp_side =
+          (getenv("THVM_ATP_CP_SIDE") != NULL
            && getenv("THVM_ATP_NO_CP_WM_SIDE") == NULL) ? 1u : 0u;
       // Push-time queue-vs-queue subsumption OFF: thvm-native filter
       // with no WM counterpart (recentCPinsert queues every treated
@@ -1041,8 +1041,8 @@ int main(int argc, char **argv) {
       // + DSBaum leaf-list order) before pushing, so equal-weight CPs
       // receive their FIFO ages (w2) in WM's order.  Closes the
       // McCune-II sels 96-101 equal-weight tie residual.
-      // THVM_ATP_WM_EMISSION_ORDER env overrides.
-      thvm_atp_set_use_wm_emission_order(s, 1u);
+      // THVM_ATP_EMISSION_ORDER env overrides.
+      thvm_atp_set_use_emission_order(s, 1u);
       // WM loader-level axiom INTAKE: the spec loader canonically
       // sorts the initial equation set (SpezNormierung, WASIC/
       // SpezNormierung.c:758-791) and the `-clas` default
@@ -1051,8 +1051,8 @@ int main(int argc, char **argv) {
       // FIRST in canonical-sort FIFO order -- thvm popped them by
       // computed weight, interleaved with early CPs (the firstdiv 1-3
       // class of the alignment matrix, 35/43 divergent rows).
-      // THVM_ATP_WM_INTAKE_ORDER env overrides.
-      thvm_atp_set_use_wm_intake_order(s, 1u);
+      // THVM_ATP_INTAKE_ORDER env overrides.
+      thvm_atp_set_use_intake_order(s, 1u);
       // WM normal-form STRATEGY: `-nf mixmost` (the CLI default,
       // RUN/Parameter.c:418-419; NormalformZuRegelnOderGleichungen-
       // AufNochmal, NF/NFBildung.c:349-377) -- local fixpoint at the
@@ -1061,8 +1061,8 @@ int main(int argc, char **argv) {
       // mid-completion R the strategies reach different NFs, flipping
       // generation-time CP join verdicts (the duplicate-CP
       // multiplicity divergence class: McCune Assoc/EqInv @140,
-      // HigmanNeumann Assoc @48).  THVM_ATP_WM_MIXMOST env overrides.
-      thvm_atp_set_use_wm_mixmost_nf(s, 1u);
+      // HigmanNeumann Assoc @48).  THVM_ATP_MIXMOST_NF env overrides.
+      thvm_atp_set_use_mixmost_nf(s, 1u);
       // Backward subsumption / backward demodulation are NOT in this
       // preset: they are Vampire mechanisms (bs=unit_only / bd=all)
       // with no WM analog.  WM's only backward treatment of existing
@@ -1181,31 +1181,31 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_queue_subsume(s, (qs[0] != '0') ? 1u : 0u);
   }
 
-  // THVM_ATP_WM_EMISSION_ORDER=0/1: independent override of the WM
+  // THVM_ATP_EMISSION_ORDER=0/1: independent override of the WM
   // CP-emission-order mirror (default OFF engine-wide, ON in the
   // WALDMEISTER preset above).
   {
-    const char *eo = getenv("THVM_ATP_WM_EMISSION_ORDER");
+    const char *eo = getenv("THVM_ATP_EMISSION_ORDER");
     if (eo != NULL && eo[0] != '\0')
-      thvm_atp_set_use_wm_emission_order(s, (eo[0] != '0') ? 1u : 0u);
+      thvm_atp_set_use_emission_order(s, (eo[0] != '0') ? 1u : 0u);
   }
 
-  // THVM_ATP_WM_INTAKE_ORDER=0/1: independent override of the WM
+  // THVM_ATP_INTAKE_ORDER=0/1: independent override of the WM
   // loader-level axiom canonicalization + initial=ultimate intake
   // (default OFF engine-wide, ON in the WALDMEISTER preset above).
   {
-    const char *io = getenv("THVM_ATP_WM_INTAKE_ORDER");
+    const char *io = getenv("THVM_ATP_INTAKE_ORDER");
     if (io != NULL && io[0] != '\0')
-      thvm_atp_set_use_wm_intake_order(s, (io[0] != '0') ? 1u : 0u);
+      thvm_atp_set_use_intake_order(s, (io[0] != '0') ? 1u : 0u);
   }
 
-  // THVM_ATP_WM_MIXMOST=0/1: independent override of the WM mixmost
+  // THVM_ATP_MIXMOST_NF=0/1: independent override of the WM mixmost
   // normal-form strategy (default OFF engine-wide, ON in the
   // WALDMEISTER preset above).
   {
-    const char *mx = getenv("THVM_ATP_WM_MIXMOST");
+    const char *mx = getenv("THVM_ATP_MIXMOST_NF");
     if (mx != NULL && mx[0] != '\0')
-      thvm_atp_set_use_wm_mixmost_nf(s, (mx[0] != '0') ? 1u : 0u);
+      thvm_atp_set_use_mixmost_nf(s, (mx[0] != '0') ? 1u : 0u);
   }
 
   // THVM_ATP_LAZY_NORM=0/1: toggle deferred-selection / lazy normalization
@@ -1635,7 +1635,7 @@ int main(int argc, char **argv) {
          s->n_eqs_dropped_eset_subsumed,
          s->n_cps_dropped_connected,
          s->n_cps_dropped_orphan, s->n_cps_dropped_lrs);
-  if (s->use_wm_emission_order) {
+  if (s->use_emission_order) {
     printf("   wm-emission-order: rank-misses=%u\n", s->n_wmo_rank_misses);
   }
   if (s->use_lrs) {

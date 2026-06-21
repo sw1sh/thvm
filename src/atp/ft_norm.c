@@ -1093,7 +1093,7 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p) {
 //
 // Rule choice when SEVERAL patterns match at the cell: the default
 // engine keeps first-match-wins in slice order (the historic
-// behaviour).  Under use_wm_mixmost_nf the winner is WM's -- the
+// behaviour).  Under use_mixmost_nf the winner is WM's -- the
 // Regelbaum DFS minimum per ft_wm_pattern_before, newest slot on
 // alpha-identical ties -- because on a non-confluent mid-completion R
 // different matching rules at the SAME position reach different
@@ -1173,7 +1173,7 @@ static int ft_cell_try_rules(AtpState   *s,
   // (Gleichungsbaum) -- an unorientable equation fires at this cell
   // only when NO oriented rule matches here.  Pass 1: oriented rules
   // in slice order (first match wins), or in Regelbaum DFS order
-  // under use_wm_mixmost_nf (see ft_wm_pattern_before).
+  // under use_mixmost_nf (see ft_wm_pattern_before).
   if (try_orient) {
     u32 best_rule = (u32)-1;
     // subst_buf holds best_rule's bindings iff no later attempt has run
@@ -1196,7 +1196,7 @@ static int ft_cell_try_rules(AtpState   *s,
       ft_subst_reset(subst_buf);   // clobbers any prior winner's bindings
       best_subst_live = 0u;
       if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
-        if (!s->use_wm_mixmost_nf) {
+        if (!s->use_mixmost_nf) {
           *rule_out = r;
           *dir_out  = 0u;
           return 1;
@@ -1232,7 +1232,7 @@ static int ft_cell_try_rules(AtpState   *s,
   // pass 1 (Gleichungsbaum = the same DSBaum machinery,
   // MO_GleichungGefunden): first passing candidate in slice order by
   // default, DFS minimum over the MATCHED face's pattern under
-  // use_wm_mixmost_nf.
+  // use_mixmost_nf.
   if (try_unorient && have_unorient) {
     u32 best_rule = (u32)-1;
     u8  best_dir  = 0u;
@@ -1283,7 +1283,7 @@ static int ft_cell_try_rules(AtpState   *s,
             }
           }
           if (ft_v == KBO_GT) {
-            if (!s->use_wm_mixmost_nf) {
+            if (!s->use_mixmost_nf) {
               *rule_out = r;
               *dir_out  = 0u;
               return 1;
@@ -1306,7 +1306,7 @@ static int ft_cell_try_rules(AtpState   *s,
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
           if (ft_v == KBO_GT) {
-            if (!s->use_wm_mixmost_nf) {
+            if (!s->use_mixmost_nf) {
               *rule_out = r;
               *dir_out  = 1u;
               return 1;
@@ -1419,8 +1419,8 @@ static int find_redex_ft(AtpState        *s,
 // (TO_Schwanz = ->next, TO_TermEnde = ->end),
 // AnzNochZuBehandelnderTeilterme = children not yet visited.
 //
-// Gated by AtpState.use_wm_mixmost_nf (Method "WMMixmostNF" /
-// THVM_ATP_WM_MIXMOST): default OFF keeps the legacy walk
+// Gated by AtpState.use_mixmost_nf (Method "MixmostNF" /
+// THVM_ATP_MIXMOST_NF): default OFF keeps the legacy walk
 // byte-identical; ON in the Waldmeister* presets + the bench WM
 // preset.
 typedef struct {
@@ -1814,7 +1814,7 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   // rescan-from-root step loop.  Same slice/doE/record contracts; the
   // RI redex retrieval is leftmost-outermost by construction and does
   // not apply here.
-  if (s->use_wm_mixmost_nf) {
+  if (s->use_mixmost_nf) {
     u32 mslice_end = slice_first + slice_count;
     if (mslice_end > s->n_rules) mslice_end = s->n_rules;
     return atp_normalize_mixmost_ft(s, t, slice_first, mslice_end,

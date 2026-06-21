@@ -86,7 +86,7 @@ via `atp_wmo_eq_dist_rhs_base` -> TRACE_AXIOM returns dist_rhs=1, but WM stores 
 axiom with its .pr LHS distinguished (dist_rhs=0; verified vs WM CLASSDUMP w2=3).
 A gated fix (TRACE_AXIOM -> 0) was implemented + tested: it CORRECTLY flips the
 eqn-2 batch order to WM's (combos 2,3 -> 0,1, phases realign). BUT soa firstdiv
-STAYS 19 -- even combined with THVM_ATP_CP_WM_SIDE. The eqn-2 reorder is MOOT for
+STAYS 19 -- even combined with THVM_ATP_CP_SIDE. The eqn-2 reorder is MOOT for
 the pick-19 selection (thvm still picks CP_B seq=202 vs WM's CP_A; the reordered
 CPs don't change the w1=120 FIFO tiebreak). Probe reverted (inert).
 
@@ -96,7 +96,7 @@ formation-age/multiplicity of CP_A vs CP_B copies -- exactly the IRREDUCIBLE
 TENSION the engine already documents at src/atp/_.c:5005-5029: the axiom-swap soa
 needs forks the *tracked* CombinatorAxioms__BCKWToSKI__c2 at pick-55 via a
 downstream FIFO cascade "whichever stored order WM and thvm agree on", which is
-why `use_cp_wm_side` defaults OFF. soa stays DEFERRED for that documented,
+why `use_cp_side` defaults OFF. soa stays DEFERRED for that documented,
 principled reason. soa is also non-tracked (not in the 82 baseline); the tracked
 port is 78 identical + cf8aa3bb SKIToBCKW.
 
@@ -118,7 +118,7 @@ Knobs (cumulative): THVM_ATP_WALDMEISTER, _CP_WM_SIDE, _WM_FLAT_SUBSUME,
 _WM_COMM_REAGE, _WM_COMM_DROP_DUP, _WM_LEAF_TIEBREAK (-> 778),
 _WM_REVFACE_GROUP (-> 966).
 
-### firstdiv 778 -> 966: THVM_ATP_WM_REVFACE_GROUP (use_wm_revface_group)
+### firstdiv 778 -> 966: THVM_ATP_REVFACE_GROUP (use_revface_group)
 The w=209 cluster at picks 778/779/780 is a pure permutation (thvm-only=0),
 same KIND as the w=120 LEAF_TIEBREAK cluster but a DIFFERENT band and a
 DIFFERENT partner class. In thvm batch f=36 (the new equation -21

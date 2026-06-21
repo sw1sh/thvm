@@ -495,14 +495,14 @@ int main(void) {
     // `-pq interleave=` token, so PI_ParseInterleave fails and the
     // CP-queue uses moduloCP=1, thresholdCP=0 (KPVerwaltung.c:1216-1219):
     // CPdimension() == AnzAktivierterRE % 1 < 0 is FALSE always -- WM
-    // NEVER takes a FIFO pick.  Under use_wm_intake_order thvm mirrors
+    // NEVER takes a FIFO pick.  Under use_intake_order thvm mirrors
     // this: the queue is a pure smallest-weight heap, so the heavy
     // oldest CP is deferred to LAST, never surfaced at a modulo window
     // (contrast atp/select-cp-fifo-interleave, the legacy non-WM path,
     // which DOES surface it at selection 11).  Same fixture as that
     // test; here the FIFO dimension stays off for all 12 selections.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_intake_order(s, 1u);
+    thvm_atp_set_use_intake_order(s, 1u);
     Term heavy = mk_f(mk_f(mk_a(), mk_a()), mk_f(mk_a(), mk_a()));
     thvm_atp_cp_set(s, 0, heavy, mk_a());          // oldest + heaviest
     for (u32 i = 1; i <= 11; i++) {
@@ -1957,13 +1957,13 @@ int main(void) {
     Term jl = cp_a, jr = cp_b;
     CHECK_EQ((u32)atp_cp_trivially_joinable(s, &jl, &jr), 1u);
 
-    thvm_atp_set_use_wm_mixmost_nf(s, 1u);
+    thvm_atp_set_use_mixmost_nf(s, 1u);
     jl = cp_a; jr = cp_b;
     CHECK_EQ((u32)atp_cp_trivially_joinable(s, &jl, &jr), 0u);
     CHECK(kbo_eq(jl, mk_i(mk_v(VAR_x))));
     CHECK(kbo_eq(jr, mk_f(mk_i(mk_f(mk_v(1u), mk_v(VAR_x))), mk_v(1u))));
 
-    thvm_atp_set_use_wm_mixmost_nf(s, 0u);  // roundtrip
+    thvm_atp_set_use_mixmost_nf(s, 0u);  // roundtrip
     jl = cp_a; jr = cp_b;
     CHECK_EQ((u32)atp_cp_trivially_joinable(s, &jl, &jr), 1u);
     thvm_atp_free(s);
@@ -2005,7 +2005,7 @@ int main(void) {
     Term jl = cp_a, jr = cp_b;
     CHECK_EQ((u32)atp_cp_trivially_joinable(s, &jl, &jr), 1u);
 
-    thvm_atp_set_use_wm_mixmost_nf(s, 1u);
+    thvm_atp_set_use_mixmost_nf(s, 1u);
     jl = cp_a; jr = cp_b;
     CHECK_EQ((u32)atp_cp_trivially_joinable(s, &jl, &jr), 0u);
     CHECK(kbo_eq(jl, mk_f(mk_v(VAR_x), mk_v(VAR_x))));
@@ -2023,7 +2023,7 @@ int main(void) {
     // expected list [101(d2), 102(d3 head), 104, 103, 100(d4)]; after
     // removing the d3 head: [101, 104, 103, 100].
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     Term lhss[5] = {
       mk_i(mk_i(mk_i(mk_a()))),          // d4
       mk_i(mk_a()),                      // d2
@@ -2072,7 +2072,7 @@ int main(void) {
     // unifies with.  Legacy slot-major emission would queue old0's CP
     // first; WM order queues old1's first (smaller cp_seq).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     // old0: f(f(i(x), e), e) -> x      (lhs depth 4)
     s->lhs[0] = mk_f(mk_f(mk_i(mk_v(VAR_x)), mk_e()), mk_e());
     s->rhs[0] = mk_v(VAR_x);
@@ -2125,7 +2125,7 @@ int main(void) {
     //
     // eq (asymmetric unorientable): lhs = i(f(a,a)), rhs = f(a, i(a)).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     Term eq_lhs = mk_i(mk_f(mk_a(), mk_a()));        // KPRechts
     Term eq_rhs = mk_f(mk_a(), mk_i(mk_a()));        // KPLinks = WM-dist
     s->lhs[0] = eq_lhs;
@@ -2211,7 +2211,7 @@ int main(void) {
     // class: the first inserted heads the leaf list, the second inserts
     // immediately after it -- so their leaf-list ranks are 0 and 1.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     // eq0: i(f(x,a)) = f(a,x)   (distinguished lhs = i(f(x,a)), depth 3)
     s->lhs[0] = mk_i(mk_f(mk_v(VAR_x), mk_a()));
     s->rhs[0] = mk_f(mk_a(), mk_v(VAR_x));
@@ -2257,7 +2257,7 @@ int main(void) {
     // eq (asymmetric unorientable): lhs = i(f(a,a)) [reverse], rhs =
     // f(a,i(a)) [WM-distinguished].
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     s->lhs[0] = mk_i(mk_f(mk_a(), mk_a()));
     s->rhs[0] = mk_f(mk_a(), mk_i(mk_a()));
     s->r_orient[0] = 0u; s->r_trace[0] = 500u; s->n_rules++; s->n_unorient++;
@@ -2290,7 +2290,7 @@ int main(void) {
     // must receive a smaller FIFO age than a CP planted into an OLD
     // fact's proper position (eTT), regardless of slot order.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     // old: f(i(x), e) -> x   (top f(i(x),e); proper subterm i(x))
     s->lhs[0] = mk_f(mk_i(mk_v(VAR_x)), mk_e());
     s->rhs[0] = mk_v(VAR_x);
@@ -2335,7 +2335,7 @@ int main(void) {
     // them as IR victims in REVERSE leaf order (501 then 500); the drain
     // sort must restore leaf order (500 before 501).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     s->use_wm_demote = 1u;
     s->lhs[0] = mk_i(mk_a());                       // d2
     s->rhs[0] = mk_a();
@@ -2383,7 +2383,7 @@ int main(void) {
     // bucket and the rank-miss counter spiked.
     const u32 N_WIDE = 700u;
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     atp_ensure_rule_cap(s, N_WIDE + 1u);
     for (u32 k = 0; k < N_WIDE; k++) {
       // Distinct LHS per rule (i-chain depth k): the discrim tree gets
@@ -2446,7 +2446,7 @@ int main(void) {
     // fact's subterm f(f(y,z),w) holds distinct vars at those positions and
     // unifies by collapsing y=z=w, exercising exactly that chain.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     // Stored rule: f(f(x,x), x) -> a  (the repeated-variable partner leaf).
     s->lhs[0] = mk_f(mk_f(mk_v(VAR_x), mk_v(VAR_x)), mk_v(VAR_x));
     s->rhs[0] = mk_a();
@@ -2478,7 +2478,7 @@ int main(void) {
     // drain key sets bit 31 for rules (tree 0) and clears it for equations
     // (tree 1), so equation keys sort first.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     // slot 0: an orientable rule (lives in the rule tree, tree 0).
     s->lhs[0] = mk_i(mk_a());
     s->rhs[0] = mk_a();
@@ -2519,7 +2519,7 @@ int main(void) {
     // levels up.  The d2 node (root -> f -> v1) must list t768's parallel
     // FIRST.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     Term lhss[3] = {
       mk_f(mk_v(0u), mk_f(mk_v(1u), mk_v(0u))),                       // t740
       mk_f(mk_v(0u), mk_f(mk_v(0u), mk_f(mk_v(1u), mk_i(mk_v(1u))))), // t274
@@ -2581,7 +2581,7 @@ int main(void) {
     // t274 (long) the splitter, so the discriminator's `old_e2 > e2`
     // clause is false and no head-insert fires.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     Term lhss[3] = {
       mk_f(mk_v(0u), mk_f(mk_v(1u), mk_v(0u))),                       // t740
       mk_f(mk_v(0u), mk_f(mk_v(0u), mk_v(1u))),                       // t768 (short victim)
@@ -2649,7 +2649,7 @@ int main(void) {
     // before branch A).  A spurious fresh `anc` jump head-inserts branch A
     // ahead of branch B and yields the wrong [t65, t100, t79, t3].
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     Term v0 = mk_v(0u), v1 = mk_v(1u);
     // or = mk_f, not = mk_i
     Term lhss[4] = {
@@ -2713,7 +2713,7 @@ int main(void) {
     // The depth-1 node's HEAD outgoing exit must be the fresh non-leaf
     // (chain-node) jump for f(v0,v1).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     Term v0 = mk_v(0u), v1 = mk_v(1u);
     Term faces[3] = {
       mk_f(mk_f(v0, mk_a()), v0),                  // branch
@@ -2774,7 +2774,7 @@ int main(void) {
     // Only ONE entry reaches the chain node: the re-targeted survivor.  No
     // fresh head jump.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     Term v0 = mk_v(0u), v1 = mk_v(1u);
     Term faces[3] = {
       mk_f(mk_f(v0, mk_a()), v0),                  // branch
@@ -2831,7 +2831,7 @@ int main(void) {
     // Only ONE entry reaches the chain node: the re-targeted survivor.  No
     // fresh head jump.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     Term v0 = mk_v(0u), v1 = mk_v(1u);
     Term faces[3] = {
       mk_f(mk_f(v0, mk_a()), v0),                  // branch
@@ -2887,7 +2887,7 @@ int main(void) {
     // f-node is `up`, so S1's rewired jump must move to the exit-list HEAD:
     //   [R7, R9, ->S1] -> [S1, R7, R9].
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     Term faa = mk_f(mk_a(), mk_a());
     Term lhss[4] = {
       mk_f(mk_f(mk_a(), mk_a()), mk_i(mk_a())),   // S1
@@ -2981,7 +2981,7 @@ int main(void) {
     // M and S share the inner-right prefix `f(a, ...)` so their depth-of-
     // arg1 jumps share >= 2 cells (the f + its arg1).
     AtpState *s = thvm_atp_init(&UNIT_CFG, 100);
-    thvm_atp_set_use_wm_emission_order(s, 1u);
+    thvm_atp_set_use_emission_order(s, 1u);
     Term lhss[5] = {
       mk_f(mk_a(), mk_a()),                                            // B  700
       mk_f(mk_f(mk_a(), mk_e()), mk_f(mk_a(), mk_a())),                // M  701
@@ -3073,7 +3073,7 @@ int main(void) {
     // i(x) vs f(f(f(x,e),e),e): head positions i=2 > f=1 -> A2 is
     // Kleiner and pops FIRST despite being the heavier pair.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_intake_order(s, 1u);
+    thvm_atp_set_use_intake_order(s, 1u);
     CHECK(thvm_atp_add_equation(s, mk_i(mk_v(VAR_x)), mk_v(VAR_x)));
     CHECK(thvm_atp_add_equation(
         s, mk_f(mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e()), mk_e()),
@@ -3097,7 +3097,7 @@ int main(void) {
     // weight -- the light i(x) = x first.  Byte-identical legacy
     // intake; the canonicalization never runs.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    CHECK_EQ(s->use_wm_intake_order, 0u);
+    CHECK_EQ(s->use_intake_order, 0u);
     CHECK(thvm_atp_add_equation(s, mk_i(mk_v(VAR_x)), mk_v(VAR_x)));
     CHECK(thvm_atp_add_equation(
         s, mk_f(mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e()), mk_e()),
@@ -3117,7 +3117,7 @@ int main(void) {
     // (A2 heavy first by intake restamp); a weight-ordered ultimate
     // class would pop the light one first -- assert it does not.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_intake_order(s, 1u);
+    thvm_atp_set_use_intake_order(s, 1u);
     // Input order = canonical order (heavy first): the restamp is the
     // identity permutation, so a pri-ordered comparator would still
     // pop the LIGHT axiom first.  FIFO-within-ultimate keeps input.
@@ -3144,7 +3144,7 @@ int main(void) {
     // selection 3.  With the cap set (as the WM preset does), all three
     // axioms must still be queued + ultimate.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    thvm_atp_set_use_wm_intake_order(s, 1u);
+    thvm_atp_set_use_intake_order(s, 1u);
     thvm_atp_set_auto_max_cp_weight(s, 20u);   // the WM-preset bound that stashed it
     Term x = mk_v(VAR_x), y = mk_v(1u), z = mk_v(2u);
     // A1 light: ((x|x)|(x|x)) = x

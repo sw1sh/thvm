@@ -3768,7 +3768,7 @@ typedef struct {
   // atp_overlap_ij: 0/1 = outer rule i is the Vater [overlapped] face,
   // 2/3 = i's reversed face is the Vater).  0xff = unknown (a CP from a
   // path that does not tag combos).  The CP-formation side geometry
-  // (use_cp_wm_side) reads this to decide whether thvm's stored
+  // (use_cp_side) reads this to decide whether thvm's stored
   // orientation already matches WM's KPLinks = sigma(r_Vater) face or
   // needs the physical swap -- a per-combo distinction, not a blanket
   // reorder.  Threaded onto the TRACE_CP record so it survives to the
@@ -4576,7 +4576,7 @@ typedef struct {
   u32  last_popped_trace;
 
   // Transient: set by thvm_atp_orient_and_add's KBO_UN branch to 1 when
-  // the CP-formation side geometry swap (use_cp_wm_side) physically fired
+  // the CP-formation side geometry swap (use_cp_side) physically fired
   // for the just-stored unorientable equation, 0 otherwise.  The WM
   // emission-order mirror (atp_wmo_eq_dist_rhs) reads it back so the
   // distinguished-face flag matches the physical orientation even for the
@@ -4997,8 +4997,8 @@ typedef struct {
   // of the correct tree matcher -- needed to reproduce WM removing axiom2
   // on commutativity-add (firstdiv-19, ShefferAxioms OrAssociativity).
   // Default OFF; ON in the "Waldmeister"* presets alongside use_eset_subsume.
-  u8   use_wm_flat_subsume;
-  // Commutativity-aware E-set subsumption (env THVM_ATP_WM_COMM_SUBSUME,
+  u8   use_flat_subsume;
+  // Commutativity-aware E-set subsumption (env THVM_ATP_COMM_SUBSUME,
   // DEFAULT OFF).  After the plain GMSubsummierenMitGleichung test in
   // atp_eset_subsume_by_new, also drop an older equation whose LHS matches
   // the new equation's LHS EXACTLY and whose RHS equals the new RHS modulo
@@ -5011,7 +5011,7 @@ typedef struct {
   // soa firstdiv 125->99 (slot15 is the unique parent of the displaced
   // pick-99 COMM copy) and explodes a commutative-ring baseline via
   // remove-and-rederive thrash.  See tools/baselines/wm_align_reports/soa.txt.
-  u8   use_wm_comm_subsume;
+  u8   use_comm_subsume;
   u32  n_eqs_dropped_comm_subsumed;
 
   // WM CP-emission ORDER (FIFO age assignment): when set, each new
@@ -5028,9 +5028,9 @@ typedef struct {
   // order-mirror state (src/atp/wm_order.c); facts register on
   // creation and deregister at every removal site, keyed by birth
   // trace id (compaction-proof).  Default OFF (engine byte-identical);
-  // ON in the "Waldmeister"* presets via Method "WMEmissionOrder" /
-  // thvm_atp_set_use_wm_emission_order / THVM_ATP_WM_EMISSION_ORDER.
-  u8   use_wm_emission_order;
+  // ON in the "Waldmeister"* presets via Method "EmissionOrder" /
+  // thvm_atp_set_use_emission_order / THVM_ATP_EMISSION_ORDER.
+  u8   use_emission_order;
   void *wmo;
   u32  n_wmo_rank_misses;
 
@@ -5046,9 +5046,9 @@ typedef struct {
   // call permutes the queued axiom slots' cp_seq stamps into that
   // order and tags them ultimate (wm_intake_done latches the
   // once-only flush).  Default OFF (engine byte-identical); ON in
-  // the "Waldmeister"* presets via Method "WMIntakeOrder" /
-  // thvm_atp_set_use_wm_intake_order / THVM_ATP_WM_INTAKE_ORDER.
-  u8   use_wm_intake_order;
+  // the "Waldmeister"* presets via Method "IntakeOrder" /
+  // thvm_atp_set_use_intake_order / THVM_ATP_INTAKE_ORDER.
+  u8   use_intake_order;
   u8   wm_intake_done;
 
   // Waldmeister normal-form STRATEGY (the `-nf` option, default
@@ -5065,9 +5065,9 @@ typedef struct {
   // divergence class of the alignment matrix (McCune
   // EqualityOfInverses cp 1893, HigmanNeumann Associativity cp 597).
   // Default OFF (engine byte-identical); ON in the "Waldmeister"*
-  // presets via Method "WMMixmostNF" /
-  // thvm_atp_set_use_wm_mixmost_nf / THVM_ATP_WM_MIXMOST.
-  u8   use_wm_mixmost_nf;
+  // presets via Method "MixmostNF" /
+  // thvm_atp_set_use_mixmost_nf / THVM_ATP_MIXMOST_NF.
+  u8   use_mixmost_nf;
 
   // WM backward ground-joinability sterilization
   // (RueckwaertsGrundzusammenfuehrbarkeit, INF/Hauptkomponenten.c:
@@ -5406,7 +5406,7 @@ typedef struct {
   // suppresses root overlaps against any older rule whose birth trace is
   // <= the cutoff.  ATP_TRACE_NONE in r_rederive_cut means "not
   // re-derived"; a 0 r_dead_subsumer_lhs slot means "not subsumption-
-  // removed".  Only populated under use_wm_flat_subsume, so non-flat-
+  // removed".  Only populated under use_flat_subsume, so non-flat-
   // subsume runs are untouched.
   Term *r_dead_subsumer_lhs;      // per dead slot: subsuming eq lhs (GC-rooted)
   Term *r_dead_subsumer_rhs;      // per dead slot: subsuming eq rhs (GC-rooted)
@@ -5450,12 +5450,12 @@ typedef struct {
   // unorientable equation whose birth-batch already enumerated its CP set
   // (WM forms a fact's superposition lane once).  See r_overlap_done.
   u8    use_overlap_exhaust;
-  // Commutativity-DEFER overlap gate (env THVM_ATP_WM_COMM_DEFER, DEFAULT
+  // Commutativity-DEFER overlap gate (env THVM_ATP_COMM_DEFER, DEFAULT
   // OFF).  In thvm_atp_generate_cps_wm, when an ORIENTED outer rule's birth
   // batch would superpose against an UNORIENTABLE inner equation that is the
   // NON-CANONICAL commutativity side (its RHS carries the LHS-shared variable
   // on the comm-RIGHT under a live commutativity axiom -- the soa slot15
-  // `x.(y.x)=(y.y).x`), SKIP that one overlap.  Unlike use_wm_comm_subsume
+  // `x.(y.x)=(y.y).x`), SKIP that one overlap.  Unlike use_comm_subsume
   // this does NOT remove the equation (it stays a live rule, preserving its
   // unique parentage of the pick-99 COMM copy); it only suppresses the single
   // over-enumerated early-batch seq564 overlap so the WM-faithful late copy
@@ -5463,9 +5463,9 @@ typedef struct {
   // never installs slot15 as a producing rule (it subsumes the term via
   // eqn-10 + commutativity), so WM's slot19 batch never emits this overlap.
   // See tools/baselines/wm_align_reports/soa.txt.
-  u8    use_wm_comm_defer;
-  // Commutativity-REAGE overlap re-rank (env THVM_ATP_WM_COMM_REAGE, DEFAULT
-  // OFF).  The INVERSE of use_wm_comm_defer.  WM selects the seq564-SIBLING CP
+  u8    use_comm_defer;
+  // Commutativity-REAGE overlap re-rank (env THVM_ATP_COMM_REAGE, DEFAULT
+  // OFF).  The INVERSE of use_comm_defer.  WM selects the seq564-SIBLING CP
   // `(x.x).y = (x.y).y` (soa cp877) at pick-126: it forms cp877 in rule13's
   // OWN birth batch from rule13 x eqn-9, aged 578 -- one slot AFTER seq564
   // (`x.x = (y.(y.y)).x`, aged 577) -- so cp877 follows seq564 in the heap.
@@ -5480,8 +5480,8 @@ typedef struct {
   // later (cp_seq 565), landing at WM's faithful pick-126.  Exactly ONE copy
   // is re-aged (the first match in rule13's batch); the band picks 126.. then
   // re-zip as a rigid +1 shift.  See tools/baselines/wm_align_reports/soa.txt.
-  u8    use_wm_comm_reage;
-  // Commutativity DROP-DUP re-age (env THVM_ATP_WM_COMM_DROP_DUP, DEFAULT OFF).
+  u8    use_comm_reage;
+  // Commutativity DROP-DUP re-age (env THVM_ATP_COMM_DROP_DUP, DEFAULT OFF).
   // Re-ages the single DUPLICATE re-derivation of slot15's term `x.(y.x) =
   // (y.y).x` (thvm form LHS=(C3 V0 (C3 V1 V0)), RHS=(C3 (C3 V1 V1) V0)) that
   // thvm forms in rule34's birth batch.  slot15 (the rule of this exact shape)
@@ -5495,11 +5495,11 @@ typedef struct {
   // birth), so slot15 the rule -- and its uniquely-parented pick-99 COMM copy --
   // stay intact.  Advances soa firstdiv 288 -> 290 (the next residual at 290 is
   // a SEPARATE non-slot15 age inversion, `(x.(x.x)).y = y.y` vs `x.x =
-  // x.(y.(y.y))`).  Requires THVM_ATP_WM_COMM_REAGE.  See
+  // x.(y.(y.y))`).  Requires THVM_ATP_COMM_REAGE.  See
   // tools/baselines/wm_align_reports/soa.txt.
-  u8    use_wm_comm_drop_dup;
+  u8    use_comm_drop_dup;
   // Leaf-arrival tiebreak for the adjacent-leaf oriented-vs-permutation family
-  // (env THVM_ATP_WM_LEAF_TIEBREAK, DEFAULT OFF).  Two CPs that overlap the new
+  // (env THVM_ATP_LEAF_TIEBREAK, DEFAULT OFF).  Two CPs that overlap the new
   // fact at the SAME position with two DIFFERENT equation partners can age
   // reversed in thvm vs WM: a partner whose two sides carry the SAME variable
   // multiset (`wmo_eq_sides_var_differ`==0, a permutation equation WM keeps
@@ -5522,9 +5522,9 @@ typedef struct {
   // (early-batch fires re-age CPs WM already agrees on, leaving the selection
   // content unchanged) and the off-Sheffer corpus runs with the gate OFF.  See
   // tools/baselines/wm_align_reports/soa.txt.
-  u8    use_wm_leaf_tiebreak;
-  // Reverse-face shape-group tiebreak (env THVM_ATP_WM_REVFACE_GROUP, DEFAULT
-  // OFF).  Sibling of use_wm_leaf_tiebreak, one weight band up (soa w=209).
+  u8    use_leaf_tiebreak;
+  // Reverse-face shape-group tiebreak (env THVM_ATP_REVFACE_GROUP, DEFAULT
+  // OFF).  Sibling of use_leaf_tiebreak, one weight band up (soa w=209).
   // Within ONE tops overlap-position group (D phase, outer == new fact,
   // identical phase/k1/k2 key prefix) thvm orders competing partner CPs by the
   // partner's discrimination-tree leaf-arrival rank (k3).  When a PERMUTATION
@@ -5545,10 +5545,10 @@ typedef struct {
   // joined pairs -- never a generic equal-weight reorder; OFF byte-identical,
   // and the prior-knobs 1..965 prefix is preserved.  Advances soa firstdiv
   // 778 -> 966.  See tools/baselines/wm_align_reports/soa.txt.
-  u8    use_wm_revface_group;
+  u8    use_revface_group;
   // Overlap-position raw-arrival grouping for the permutation-vs-oriented
-  // partner family (env THVM_ATP_WM_POSGROUP, DEFAULT OFF).  Sibling of
-  // use_wm_revface_group, one weight band down (soa w=120).  At a single
+  // partner family (env THVM_ATP_POSGROUP, DEFAULT OFF).  Sibling of
+  // use_revface_group, one weight band down (soa w=120).  At a single
   // tops overlap position (A phase, identical phase/k1/k2 prefix) WM emits
   // every partner-face CP in raw discrimination-tree arrival order.
   // REVFACE_GROUP -- correct one band up where a permutation partner's
@@ -5572,7 +5572,7 @@ typedef struct {
   // reorder.  OFF byte-identical; the prior-6-knobs 1..965 prefix is
   // preserved.  Advances soa firstdiv 966 -> beyond.  See
   // tools/baselines/wm_align_reports/soa.txt.
-  u8    use_wm_posgroup;
+  u8    use_posgroup;
   // Waldmeister LRSortieren side-canonicalisation (SpezNormierung.c
   // :517-534, env THVM_ATP_LR_SORTIEREN, default OFF): a derived
   // unorientable equation is stored with WM's canonical left/right side
@@ -5582,7 +5582,7 @@ typedef struct {
   // axioms run LRSortieren).  Opt-in only.  See atp_lr_sortieren_rec.
   u8    use_lr_sortieren;
   // Waldmeister CP-formation side geometry (Unifikation1.c:916-917, env
-  // THVM_ATP_CP_WM_SIDE, default OFF): store each derived UNORIENTABLE
+  // THVM_ATP_CP_SIDE, default OFF): store each derived UNORIENTABLE
   // equation with WM's geometric side order -- KPLinks = sigma(r_i) (the
   // overlapped rule's RHS, WM's distinguished face) as the stored LHS,
   // KPRechts = sigma(l_i[p<-r_j]) (the reduct) as the stored RHS.  thvm's
@@ -5592,7 +5592,7 @@ typedef struct {
   // returns the FLIPPED flag (distinguished = stored LHS) so the emission
   // mirror stays consistent.  Unlike use_lr_sortieren this is a geometry
   // swap, not a structural size sort.
-  u8    use_cp_wm_side;
+  u8    use_cp_side;
   // IR-victim buffer (use_wm_demote only): original sides + the
   // TRACE_SIMPLIFY parent captured at drop time.  Filled by
   // thvm_atp_interreduce, drained by thvm_atp_step after CP
@@ -5601,7 +5601,7 @@ typedef struct {
   Term *irv_lhs;
   Term *irv_rhs;
   u32  *irv_parent;
-  // WM drain-order key per victim (use_wm_emission_order only), captured
+  // WM drain-order key per victim (use_emission_order only), captured
   // at push time BEFORE the victim leaves the wmo tree: WM's
   // IR_PufferAuslesen drains GMInterred (equation victims) before
   // RMLinksInterred (rule victims), each in its discrimination-tree
@@ -5802,11 +5802,11 @@ fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
 // regardless of heuristic weight (mirrors `initial = ultimate` in the
 // default DEF block, NewClassification.c).  Off = engine byte-identical.
 fn void      thvm_atp_set_use_initial_ultimate(AtpState *s, u8 on);
-fn void      thvm_atp_set_use_wm_intake_order(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_intake_order(AtpState *s, u8 on);
 // WM normal-form strategy `-nf mixmost` (the CLI default; see
-// AtpState.use_wm_mixmost_nf).  Default OFF = the legacy outermost
+// AtpState.use_mixmost_nf).  Default OFF = the legacy outermost
 // rescan walk; the "Waldmeister"* presets turn it ON.
-fn void      thvm_atp_set_use_wm_mixmost_nf(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_mixmost_nf(AtpState *s, u8 on);
 // Waldmeister `database=ultimate` (Parameter.c:166).  When on, CPs
 // derived from rule-database overlap also rank ultimate -- creates
 // the depth-first bias on newly-derived chains that lets WM crack
@@ -5927,39 +5927,39 @@ fn void      thvm_atp_set_use_pop_subsume(AtpState *s, u8 on);
 // (GMSubsummierenMitGleichung; see AtpState.use_eset_subsume).
 fn void      thvm_atp_set_use_eset_subsume(AtpState *s, u8 on);
 // WM flatterm-faithful (over-eager counter-cross) eset-subsume matcher
-// (see AtpState.use_wm_flat_subsume).
-fn void      thvm_atp_set_use_wm_flat_subsume(AtpState *s, u8 on);
+// (see AtpState.use_flat_subsume).
+fn void      thvm_atp_set_use_flat_subsume(AtpState *s, u8 on);
 // Commutativity-aware E-set subsumption widening
-// (see AtpState.use_wm_comm_subsume).  DEFAULT OFF.
-fn void      thvm_atp_set_use_wm_comm_subsume(AtpState *s, u8 on);
-// Commutativity-DEFER overlap gate (see AtpState.use_wm_comm_defer).
+// (see AtpState.use_comm_subsume).  DEFAULT OFF.
+fn void      thvm_atp_set_use_comm_subsume(AtpState *s, u8 on);
+// Commutativity-DEFER overlap gate (see AtpState.use_comm_defer).
 // DEFAULT OFF.
-fn void      thvm_atp_set_use_wm_comm_defer(AtpState *s, u8 on);
-// Commutativity-REAGE overlap re-rank (see AtpState.use_wm_comm_reage).
+fn void      thvm_atp_set_use_comm_defer(AtpState *s, u8 on);
+// Commutativity-REAGE overlap re-rank (see AtpState.use_comm_reage).
 // DEFAULT OFF.
-fn void      thvm_atp_set_use_wm_comm_reage(AtpState *s, u8 on);
-// Commutativity DROP-DUP re-age (see AtpState.use_wm_comm_drop_dup).
+fn void      thvm_atp_set_use_comm_reage(AtpState *s, u8 on);
+// Commutativity DROP-DUP re-age (see AtpState.use_comm_drop_dup).
 // DEFAULT OFF.
-fn void      thvm_atp_set_use_wm_comm_drop_dup(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_comm_drop_dup(AtpState *s, u8 on);
 // Leaf-arrival tiebreak for the adjacent-leaf comm-class-copy family
-// (see AtpState.use_wm_leaf_tiebreak).  DEFAULT OFF.
-fn void      thvm_atp_set_use_wm_leaf_tiebreak(AtpState *s, u8 on);
-// Reverse-face shape-group tiebreak (see AtpState.use_wm_revface_group).
+// (see AtpState.use_leaf_tiebreak).  DEFAULT OFF.
+fn void      thvm_atp_set_use_leaf_tiebreak(AtpState *s, u8 on);
+// Reverse-face shape-group tiebreak (see AtpState.use_revface_group).
 // DEFAULT OFF.
-fn void      thvm_atp_set_use_wm_revface_group(AtpState *s, u8 on);
-// Overlap-position raw-arrival grouping (see AtpState.use_wm_posgroup).
+fn void      thvm_atp_set_use_revface_group(AtpState *s, u8 on);
+// Overlap-position raw-arrival grouping (see AtpState.use_posgroup).
 // DEFAULT OFF.
-fn void      thvm_atp_set_use_wm_posgroup(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_posgroup(AtpState *s, u8 on);
 // Push-time queue-vs-queue subsumption gate (thvm-native, no WM
 // counterpart; see AtpState.use_queue_subsume).  Default ON; the
 // "Waldmeister"* presets turn it OFF.
 fn void      thvm_atp_set_use_queue_subsume(AtpState *s, u8 on);
 // WM CP-emission-order mirror (FIFO age parity; see
-// AtpState.use_wm_emission_order).  Default OFF; the "Waldmeister"*
+// AtpState.use_emission_order).  Default OFF; the "Waldmeister"*
 // presets turn it ON.  Turning it on registers the already-live facts
 // in slot order (an approximation of their insertion history when
 // enabled mid-run; presets enable it before the axioms load).
-fn void      thvm_atp_set_use_wm_emission_order(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_emission_order(AtpState *s, u8 on);
 // WM backward ground-joinability sterilization (-gj,
 // RueckwaertsGrundzusammenfuehrbarkeit; see
 // AtpState.use_bwd_ground_join).  Default OFF = WM's -gj default.

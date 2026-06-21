@@ -69,7 +69,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"WMEmissionOrder\", \"WMIntakeOrder\", \"WMMixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPWMSide\", \"WMFlatSubsume\", \"WMCommSubsume\", \"WMCommDefer\", \"WMCommReage\", \"WMCommDropDup\", \"WMLeafTiebreak\", \"WMRevfaceGroup\", \"WMPosGroup\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"CommDefer\", \"CommReage\", \"CommDropDup\", \"LeafTiebreak\", \"RevfaceGroup\", \"PosGroup\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 GeneralUtilities`SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -265,18 +265,18 @@ $atpRunProofFn := $atpRunProofFn = load[
         default, OFF in the "Waldmeister"* presets) *)
      Integer,
      (* args[40] = Waldmeister CP-emission ORDER (Method
-        "WMEmissionOrder"; sorts each new fact's CP batch into WM's
+        "EmissionOrder"; sorts each new fact's CP batch into WM's
         emission order so equal-weight CPs receive their FIFO ages in
         WM's order -- OFF by default, ON in the "Waldmeister"* presets) *)
      Integer,
      (* args[41] = Waldmeister loader-level axiom INTAKE (Method
-        "WMIntakeOrder"; SpezNormierung canonical sort of the initial
+        "IntakeOrder"; SpezNormierung canonical sort of the initial
         axiom set + the initial=ultimate MIN_INT/FIFO stamp so axioms
         pop first in sorted order -- OFF by default, ON in the
         "Waldmeister"* presets) *)
      Integer,
      (* args[42] = Waldmeister normal-form STRATEGY (Method
-        "WMMixmostNF"; the -nf mixmost default = local fixpoint at the
+        "MixmostNF"; the -nf mixmost default = local fixpoint at the
         reduced position + ancestor ascent, plus the Regelbaum
         within-position retrieval order -- OFF by default, ON in the
         "Waldmeister"* presets) *)
@@ -321,50 +321,50 @@ $atpRunProofFn := $atpRunProofFn = load[
         paramodulation lane, inert on universal/ground goals) *)
      Integer,
      (* args[51] = Waldmeister CP-formation side geometry swap (Method
-        "CPWMSide"; store each derived unorientable equation with WM's
+        "CPSide"; store each derived unorientable equation with WM's
         KPLinks=sigma(r_Vater) as the stored LHS, Unifikation1.c:916-917).
         OFF by default; advances the Sheffer OrAssociativity prefix but
         forks one combinator FIFO-age cascade, so off in the presets) *)
      Integer,
      (* args[52] = Waldmeister flatterm-faithful eset-subsume matcher
-        (Method "WMFlatSubsume"; MO_TermpaarSubsummiertZweites over-eager
+        (Method "FlatSubsume"; MO_TermpaarSubsummiertZweites over-eager
         counter-cross removal of axiom2 on commutativity-add).  OFF by
         default; standalone regresses soa firstdiv 19->16 via broader
         orphan-murder than WM's KPV_KillParent *)
      Integer,
      (* args[53] = Waldmeister commutativity-aware E-set subsumption
-        widening (Method "WMCommSubsume").  DIAGNOSTIC, OFF by default:
+        widening (Method "CommSubsume").  DIAGNOSTIC, OFF by default:
         drops the soa slot15 equation but forks firstdiv 125->99 and
         explodes commutative-ring baselines via remove-and-rederive thrash *)
      Integer,
      (* args[54] = Waldmeister commutativity-DEFER overlap gate (Method
-        "WMCommDefer"; suppress the over-enumerated non-canonical
+        "CommDefer"; suppress the over-enumerated non-canonical
         comm-side overlap without removing the equation).  OFF by
-        default; superseded by WMCommReage *)
+        default; superseded by CommReage *)
      Integer,
      (* args[55] = Waldmeister commutativity-REAGE overlap re-rank (Method
-        "WMCommReage"; INVERSE of WMCommDefer: promote thvm's seq564-sibling
+        "CommReage"; INVERSE of CommDefer: promote thvm's seq564-sibling
         CP to the head of eqn-10's birth batch so it is selected at WM's
         faithful early age).  OFF by default *)
      Integer,
      (* args[56] = Waldmeister commutativity DROP-DUP re-age (Method
-        "WMCommDropDup"; atop WMCommReage, re-age the duplicate
+        "CommDropDup"; atop CommReage, re-age the duplicate
         re-derivation of slot15's term one FIFO slot later = WM pick-289).
         OFF by default; advances soa firstdiv 288->290 *)
      Integer,
      (* args[57] = Waldmeister leaf-arrival tiebreak (Method
-        "WMLeafTiebreak"; re-key an oriented var-differ==1 CP just below
+        "LeafTiebreak"; re-key an oriented var-differ==1 CP just below
         its two-faced permutation sibling so it sorts first, as WM's
         single oriented scan emits it).  OFF by default; clears the soa
         290<->292 / 303<->305 / 351<->353 swap-pairs *)
      Integer,
      (* args[58] = Waldmeister reverse-face shape-group tiebreak (Method
-        "WMRevfaceGroup"; sibling of WMLeafTiebreak one weight band up,
+        "RevfaceGroup"; sibling of LeafTiebreak one weight band up,
         re-keys a reverse-face CP adjacent to the same-shape CP it
         ALPHA-matches).  OFF by default; advances soa firstdiv past 778 *)
      Integer,
      (* args[59] = Waldmeister overlap-position raw-arrival grouping
-        (Method "WMPosGroup"; sibling of WMRevfaceGroup one weight band
+        (Method "PosGroup"; sibling of RevfaceGroup one weight band
         down, un-groups an over-grouped vd=0 permutation partner so the
         batch matches WM's bracketed raw discrimination-tree arrival).
         OFF by default; advances soa firstdiv past 966 *)
@@ -2332,7 +2332,7 @@ atpQueueSubsumeOpt[o_Association] :=
     Switch[Lookup[o, "QueueSubsume", Automatic],
         False, 0, True | Automatic, 1, _, 1];
 
-(* "WMEmissionOrder" -> True | False: Waldmeister CP-emission ORDER
+(* "EmissionOrder" -> True | False: Waldmeister CP-emission ORDER
    (src/atp/wm_order.c).  WM assigns each queued CP a FIFO age
    w2 = ++CPNr in EMISSION order, and the heap breaks equal-weight
    ties on it; the mirror sorts each new fact's CP batch into WM's
@@ -2343,11 +2343,11 @@ atpQueueSubsumeOpt[o_Association] :=
    (selection-sequence identity 118/118 vs wmcli).  False/Automatic =
    off (engine byte-identical); True set in the "Waldmeister"*
    presets. *)
-atpWmEmissionOrderOpt[o_Association] :=
-    Switch[Lookup[o, "WMEmissionOrder", Automatic],
+atpEmissionOrderOpt[o_Association] :=
+    Switch[Lookup[o, "EmissionOrder", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* "WMIntakeOrder" -> True | False: Waldmeister loader-level axiom
+(* "IntakeOrder" -> True | False: Waldmeister loader-level axiom
    canonicalization + intake semantics (src/atp/wm_intake.c).  WM's
    spec loader canonically SORTS the initial equation set
    (SpezNormierung: symbol order -> per-equation side order -> variable
@@ -2358,11 +2358,11 @@ atpWmEmissionOrderOpt[o_Association] :=
    FIRST, in canonical-sort FIFO order; thvm popped them by computed
    weight, interleaved with early CPs.  False/Automatic = off (engine
    byte-identical); True set in the "Waldmeister"* presets. *)
-atpWmIntakeOrderOpt[o_Association] :=
-    Switch[Lookup[o, "WMIntakeOrder", Automatic],
+atpIntakeOrderOpt[o_Association] :=
+    Switch[Lookup[o, "IntakeOrder", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* "WMMixmostNF" -> True | False: Waldmeister normal-form STRATEGY
+(* "MixmostNF" -> True | False: Waldmeister normal-form STRATEGY
    (src/atp/ft_norm.c).  WM's `-nf` default "mixmost"
    (RUN/Parameter.c:418-419; NF/NFBildung.c:349-377) re-reduces a
    reduced position to a LOCAL fixpoint and then re-tries only the
@@ -2376,8 +2376,8 @@ atpWmIntakeOrderOpt[o_Association] :=
    joined away: McCune EqualityOfInverses, HigmanNeumann
    Associativity).  False/Automatic = off (engine byte-identical);
    True set in the "Waldmeister"* presets. *)
-atpWmMixmostNfOpt[o_Association] :=
-    Switch[Lookup[o, "WMMixmostNF", Automatic],
+atpMixmostNfOpt[o_Association] :=
+    Switch[Lookup[o, "MixmostNF", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
 (* "BackwardGroundJoin" -> True | False: Waldmeister's -gj backward
@@ -2505,12 +2505,12 @@ atpBackwardGoalArgueOpt[o_Association] :=
    single Waldmeister selection-order rule that aligns thvm's CP FIFO
    ages with WM's on the ShefferAxiomsOrAssociativity (soa) proxy.  All
    default OFF (engine + "Waldmeister"* presets stay byte-identical); the
-   soa-validated faithful set is CPWMSide + WMFlatSubsume + WMCommReage +
-   WMCommDropDup + WMLeafTiebreak + WMRevfaceGroup + WMPosGroup, which
+   soa-validated faithful set is CPSide + FlatSubsume + CommReage +
+   CommDropDup + LeafTiebreak + RevfaceGroup + PosGroup, which
    reproduces WM's selection order through 1319 selections.  See
    tools/baselines/wm_align_reports/soa.txt. === *)
 
-(* "CPWMSide" -> True | False: Waldmeister CP-formation side geometry
+(* "CPSide" -> True | False: Waldmeister CP-formation side geometry
    swap (Unifikation1.c:916-917).  Store each derived UNORIENTABLE
    equation with WM's KPLinks=sigma(r_Vater) (the overlapped rule's RHS)
    as the stored LHS, parent-overlap-aware (atp_cp_wm_side_swaps), so the
@@ -2518,91 +2518,91 @@ atpBackwardGoalArgueOpt[o_Association] :=
    OrAssociativity prefix to 124, but a residual axiom-orientation case
    forks one combinator FIFO-age cascade (BCKWToSKI__c2), so it is NOT in
    the "Waldmeister"* presets.  False/Automatic = off. *)
-atpCpWmSideOpt[o_Association] :=
-    Switch[Lookup[o, "CPWMSide", Automatic],
+atpCpSideOpt[o_Association] :=
+    Switch[Lookup[o, "CPSide", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* "WMFlatSubsume" -> True | False: Waldmeister flatterm-faithful
+(* "FlatSubsume" -> True | False: Waldmeister flatterm-faithful
    eset-subsume matcher (MO_TermpaarSubsummiertZweites).  WM removes
    axiom2 `x*x = x*(y*(y*y))` on commutativity-add via a binding-slot vs
    variable-symbol cross; the matcher is faithful but standalone its
    broader orphan-murder (vs WM's KPV_KillParent re-deriving + reselecting
    axiom2 at pick 16) regresses soa firstdiv 19->16.  Pairs with the
    CP-emission set to advance.  False/Automatic = off. *)
-atpWmFlatSubsumeOpt[o_Association] :=
-    Switch[Lookup[o, "WMFlatSubsume", Automatic],
+atpFlatSubsumeOpt[o_Association] :=
+    Switch[Lookup[o, "FlatSubsume", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* "WMCommSubsume" -> True | False: commutativity-aware E-set subsumption
+(* "CommSubsume" -> True | False: commutativity-aware E-set subsumption
    widening.  DIAGNOSTIC knob (not a parity win): drops the soa slot15
    equation as WM does, but ON forks soa firstdiv 125->99 (slot15 uniquely
    parents the displaced pick-99 COMM copy) and explodes commutative-ring
    baselines via remove-and-rederive thrash.  False/Automatic = off. *)
-atpWmCommSubsumeOpt[o_Association] :=
-    Switch[Lookup[o, "WMCommSubsume", Automatic],
+atpCommSubsumeOpt[o_Association] :=
+    Switch[Lookup[o, "CommSubsume", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* "WMCommDefer" -> True | False: commutativity-DEFER overlap gate.
+(* "CommDefer" -> True | False: commutativity-DEFER overlap gate.
    Suppresses the single over-enumerated non-canonical comm-side overlap
    (soa slot15 sourced seq564) in an oriented rule's birth batch WITHOUT
    removing the equation, so slot15's uniquely-parented pick-99 COMM copy
-   survives.  SUPERSEDED by WMCommReage (the inverse re-rank, which keeps
+   survives.  SUPERSEDED by CommReage (the inverse re-rank, which keeps
    the early CP rather than suppressing it).  False/Automatic = off. *)
-atpWmCommDeferOpt[o_Association] :=
-    Switch[Lookup[o, "WMCommDefer", Automatic],
+atpCommDeferOpt[o_Association] :=
+    Switch[Lookup[o, "CommDefer", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* "WMCommReage" -> True | False: commutativity-REAGE overlap re-rank
-   (INVERSE of WMCommDefer).  Instead of suppressing thvm's early seq564
+(* "CommReage" -> True | False: commutativity-REAGE overlap re-rank
+   (INVERSE of CommDefer).  Instead of suppressing thvm's early seq564
    copy, promote thvm's single seq564-sibling CP (`(x.x).y = (x.y).y`,
    rule13 x eqn-10) to the head of eqn-10's birth batch so it is selected
    at WM's faithful early age (pick-126) rather than buried at the eTT
    batch tail.  False/Automatic = off. *)
-atpWmCommReageOpt[o_Association] :=
-    Switch[Lookup[o, "WMCommReage", Automatic],
+atpCommReageOpt[o_Association] :=
+    Switch[Lookup[o, "CommReage", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* "WMCommDropDup" -> True | False: commutativity DROP-DUP re-age (atop
-   WMCommReage).  Re-ages the single DUPLICATE re-derivation of slot15's
+(* "CommDropDup" -> True | False: commutativity DROP-DUP re-age (atop
+   CommReage).  Re-ages the single DUPLICATE re-derivation of slot15's
    term `x.(y.x) = (y.y).x` one FIFO slot later, past its in-batch
    successor, so it lands at WM's faithful pick-289 rather than thvm's
    over-early pick-288.  Advances soa firstdiv 288->290.  Requires
-   WMCommReage.  False/Automatic = off. *)
-atpWmCommDropDupOpt[o_Association] :=
-    Switch[Lookup[o, "WMCommDropDup", Automatic],
+   CommReage.  False/Automatic = off. *)
+atpCommDropDupOpt[o_Association] :=
+    Switch[Lookup[o, "CommDropDup", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* "WMLeafTiebreak" -> True | False: leaf-arrival tiebreak.  When two CPs
+(* "LeafTiebreak" -> True | False: leaf-arrival tiebreak.  When two CPs
    overlap the new fact at the same position from a var-differ==1
    (WM-oriented) partner and a var-differ==0 (WM two-faced permutation)
    partner, re-key the oriented copy just below its sibling so it sorts
    FIRST, as WM's single oriented scan emits it.  Clears the soa 290<->292
    / 303<->305 / 351<->353 swap-pairs.  False/Automatic = off. *)
-atpWmLeafTiebreakOpt[o_Association] :=
-    Switch[Lookup[o, "WMLeafTiebreak", Automatic],
+atpLeafTiebreakOpt[o_Association] :=
+    Switch[Lookup[o, "LeafTiebreak", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* "WMRevfaceGroup" -> True | False: reverse-face shape-group tiebreak
-   (sibling of WMLeafTiebreak one weight band up, soa w=209).  Within one
+(* "RevfaceGroup" -> True | False: reverse-face shape-group tiebreak
+   (sibling of LeafTiebreak one weight band up, soa w=209).  Within one
    tops overlap-position group, re-key a var-differ==1 partner's
    reverse-face CP to sort immediately after the largest-keyed same-group
    CP it ALPHA-matches, restoring WM's adjacent same-shape emission that
    thvm's independent leaf DFS scatters.  Advances soa firstdiv past 778.
    False/Automatic = off. *)
-atpWmRevfaceGroupOpt[o_Association] :=
-    Switch[Lookup[o, "WMRevfaceGroup", Automatic],
+atpRevfaceGroupOpt[o_Association] :=
+    Switch[Lookup[o, "RevfaceGroup", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* "WMPosGroup" -> True | False: overlap-position raw-arrival grouping
-   (sibling of WMRevfaceGroup one weight band down, soa w=120).  At a
+(* "PosGroup" -> True | False: overlap-position raw-arrival grouping
+   (sibling of RevfaceGroup one weight band down, soa w=120).  At a
    single A-phase tops overlap position WM emits every partner-face CP in
-   raw discrimination-tree arrival order; this un-groups WMRevfaceGroup's
+   raw discrimination-tree arrival order; this un-groups RevfaceGroup's
    over-grouping there (defers a vd=0 permutation partner's reverse face
    past the higher-arrival same-group cluster) so the batch matches WM's
    bracketed emission.  Advances soa firstdiv past 966.  False/Automatic =
    off. *)
-atpWmPosGroupOpt[o_Association] :=
-    Switch[Lookup[o, "WMPosGroup", Automatic],
+atpPosGroupOpt[o_Association] :=
+    Switch[Lookup[o, "PosGroup", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
 (* True iff at least one axiom in `axParts` (atpAxiomParts triples
@@ -2735,16 +2735,16 @@ $AtpPresetDefaults = <|
         "QueueSubsume" -> False,
         (* WM CP-emission ORDER: equal-weight CPs receive their FIFO
            ages (w2) in Waldmeister's emission order (see
-           atpWmEmissionOrderOpt) -- selection-sequence identity. *)
-        "WMEmissionOrder" -> True,
+           atpEmissionOrderOpt) -- selection-sequence identity. *)
+        "EmissionOrder" -> True,
         (* WM loader-level axiom INTAKE: canonical sort of the initial
            axiom set + the initial=ultimate MIN_INT/FIFO stamp (see
-           atpWmIntakeOrderOpt) -- axioms pop first in WM's order. *)
-        "WMIntakeOrder" -> True,
+           atpIntakeOrderOpt) -- axioms pop first in WM's order. *)
+        "IntakeOrder" -> True,
         (* WM normal-form STRATEGY: -nf mixmost local-fixpoint walk +
-           Regelbaum retrieval order (see atpWmMixmostNfOpt) --
+           Regelbaum retrieval order (see atpMixmostNfOpt) --
            generation-time join-verdict identity. *)
-        "WMMixmostNF" -> True,
+        "MixmostNF" -> True,
         (* WM CP-generation filter knobs (KPFilterErgaenzen,
            INF/Unifikation1.c:1947-2014).  Every one defaults OFF in the
            unconfigured .pr Orkus run, so the faithful preset leaves them
@@ -2785,16 +2785,16 @@ $AtpPresetDefaults = <|
         "QueueSubsume" -> False,
         (* WM CP-emission ORDER: equal-weight CPs receive their FIFO
            ages (w2) in Waldmeister's emission order (see
-           atpWmEmissionOrderOpt) -- selection-sequence identity. *)
-        "WMEmissionOrder" -> True,
+           atpEmissionOrderOpt) -- selection-sequence identity. *)
+        "EmissionOrder" -> True,
         (* WM loader-level axiom INTAKE: canonical sort of the initial
            axiom set + the initial=ultimate MIN_INT/FIFO stamp (see
-           atpWmIntakeOrderOpt) -- axioms pop first in WM's order. *)
-        "WMIntakeOrder" -> True,
+           atpIntakeOrderOpt) -- axioms pop first in WM's order. *)
+        "IntakeOrder" -> True,
         (* WM normal-form STRATEGY: -nf mixmost local-fixpoint walk +
-           Regelbaum retrieval order (see atpWmMixmostNfOpt) --
+           Regelbaum retrieval order (see atpMixmostNfOpt) --
            generation-time join-verdict identity. *)
-        "WMMixmostNF" -> True,
+        "MixmostNF" -> True,
         "FreeVarInstance" -> True,
         (* WM CP-generation filter knobs -- all default OFF (see the
            "Waldmeister" entry). *)
@@ -2823,16 +2823,16 @@ $AtpPresetDefaults = <|
         "QueueSubsume" -> False,
         (* WM CP-emission ORDER: equal-weight CPs receive their FIFO
            ages (w2) in Waldmeister's emission order (see
-           atpWmEmissionOrderOpt) -- selection-sequence identity. *)
-        "WMEmissionOrder" -> True,
+           atpEmissionOrderOpt) -- selection-sequence identity. *)
+        "EmissionOrder" -> True,
         (* WM loader-level axiom INTAKE: canonical sort of the initial
            axiom set + the initial=ultimate MIN_INT/FIFO stamp (see
-           atpWmIntakeOrderOpt) -- axioms pop first in WM's order. *)
-        "WMIntakeOrder" -> True,
+           atpIntakeOrderOpt) -- axioms pop first in WM's order. *)
+        "IntakeOrder" -> True,
         (* WM normal-form STRATEGY: -nf mixmost local-fixpoint walk +
-           Regelbaum retrieval order (see atpWmMixmostNfOpt) --
+           Regelbaum retrieval order (see atpMixmostNfOpt) --
            generation-time join-verdict identity. *)
-        "WMMixmostNF" -> True,
+        "MixmostNF" -> True,
         (* WM CP-generation filter knobs -- all default OFF (see the
            "Waldmeister" entry). *)
         "Einsstern" -> False,
@@ -2969,16 +2969,16 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpFreeVarInstanceOpt[o], atpImplicitCpOpt[o], atpWmDemoteOpt[o],
          atpOrphanMurderOpt[o], atpPopSubsumeOpt[o], atpESetSubsumeOpt[o],
          atpBwdGroundJoinOpt[o], atpQueueSubsumeOpt[o],
-         atpWmEmissionOrderOpt[o], atpWmIntakeOrderOpt[o],
-         atpWmMixmostNfOpt[o], atpEinssternOpt[o],
+         atpEmissionOrderOpt[o], atpIntakeOrderOpt[o],
+         atpMixmostNfOpt[o], atpEinssternOpt[o],
          atpNoOverlapBelowSkolemOpt[o], atpReclassifyOpt[o],
          atpReversedCompletionOpt[o], atpSueManagementOpt[o],
          atpCriticalGoalInterreduceOpt[o], atpCriticalGoalWeightOpt[o],
-         atpBackwardGoalArgueOpt[o], atpCpWmSideOpt[o],
-         atpWmFlatSubsumeOpt[o], atpWmCommSubsumeOpt[o],
-         atpWmCommDeferOpt[o], atpWmCommReageOpt[o],
-         atpWmCommDropDupOpt[o], atpWmLeafTiebreakOpt[o],
-         atpWmRevfaceGroupOpt[o], atpWmPosGroupOpt[o]}
+         atpBackwardGoalArgueOpt[o], atpCpSideOpt[o],
+         atpFlatSubsumeOpt[o], atpCommSubsumeOpt[o],
+         atpCommDeferOpt[o], atpCommReageOpt[o],
+         atpCommDropDupOpt[o], atpLeafTiebreakOpt[o],
+         atpRevfaceGroupOpt[o], atpPosGroupOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];

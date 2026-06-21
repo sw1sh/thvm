@@ -1,6 +1,6 @@
 soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv 126 -> 288 -> 290
 
-## RESOLVED 2026-06-21: THVM_ATP_WM_POSGROUP -- A-phase raw-arrival cube grouping
+## RESOLVED 2026-06-21: THVM_ATP_POSGROUP -- A-phase raw-arrival cube grouping
 
 Atop the 6 prior knobs (firstdiv=966), the residual is a w=120 A-phase batch
 (soa f=41, rules=42).  All 7 emitted CPs share phase=0/k1=8/k2=1; they differ in
@@ -40,7 +40,7 @@ NEXT (firstdiv=1320): a w=224 double-cube batch (rules=48) -- `(x.(x.x)).y =
 
 
 
-## RESOLVED 2026-06-21: THVM_ATP_WM_COMM_DROP_DUP re-ages the one early slot15-term copy
+## RESOLVED 2026-06-21: THVM_ATP_COMM_DROP_DUP re-ages the one early slot15-term copy
 Atop COMM_REAGE (which lands firstdiv at 288), the residual at pick-288 is the
 DUPLICATE re-derivation of slot15's OWN term `x.(y.x) = (y.y).x` (canon
 `(x.x).y = y.(x.y)`).  slot15 (the rule of this exact shape) has been LIVE since
@@ -50,14 +50,14 @@ it -- WM RE-SELECTS a slot15-class copy one slot LATER, at pick-289 (its in-batc
 `x.(x.x) = y.(y.y)` successor, cp_seq 1524, is WM's pick-288).  Both engines select
 the slot15-class term 15 times at the IDENTICAL positions 54,101,107,110,113,121,
 140,149,205,208,267,275,_289_,322,333 -- the ONLY mismatch is this one copy: thvm
-288 vs WM 289.  THVM_ATP_WM_COMM_DROP_DUP RE-AGES it one slot past its successor
+288 vs WM 289.  THVM_ATP_COMM_DROP_DUP RE-AGES it one slot past its successor
 (smallest batch key strictly greater than its own), landing it at WM's faithful
 pick-289.  Gated on slot15 being live (re-derivation, not birth), so slot15 the rule
 -- and its uniquely-parented pick-99 COMM copy -- stay intact; NOT a drop (a drop
 would lose the slot15-class copy WM selects at 289, regressing to firstdiv=289).
 
-CONFIG: THVM_ATP_CP_WM_SIDE=1 THVM_ATP_WM_FLAT_SUBSUME=1 THVM_ATP_WM_COMM_REAGE=1
-        THVM_ATP_WM_COMM_DROP_DUP=1 THVM_ATP_WALDMEISTER=1
+CONFIG: THVM_ATP_CP_SIDE=1 THVM_ATP_FLAT_SUBSUME=1 THVM_ATP_COMM_REAGE=1
+        THVM_ATP_COMM_DROP_DUP=1 THVM_ATP_WALDMEISTER=1
         bin/test_atp_wolfram_bench soa.pr 200000 20   (soa.pr = /tmp/soa.pr, the
         3-axiom form; WM ref /tmp/soa_align/wm.txt, 711 selections)
 RESULT: firstdiv 288 -> 290, prefix 1..289 byte-identical, weights-exact,
@@ -68,29 +68,29 @@ RESULT: firstdiv 288 -> 290, prefix 1..289 byte-identical, weights-exact,
         out of scope for the slot15 fix, needs a distinct mechanism.
 CODE:   src/atp/_.c thvm_atp_generate_cps_wm DROP-DUP re-age block;
         atp_pair_is_slot15_term + atp_term_is_slot15_lhs/atp_term_is_slot15_rhs +
-        atp_slot15_rule_is_live; src/thvm.h use_wm_comm_drop_dup; setter
-        thvm_atp_set_use_wm_comm_drop_dup + THVM_ATP_WM_COMM_DROP_DUP env in
+        atp_slot15_rule_is_live; src/thvm.h use_comm_drop_dup; setter
+        thvm_atp_set_use_comm_drop_dup + THVM_ATP_COMM_DROP_DUP env in
         tests/test_atp_wolfram_bench.c.
 KNOB OFF (default): byte-identical -- bin/test_atp 136232/136232; REAGE-only soa
         firstdiv still 288; ZeroIsAbsorbing@5000 unchanged ON and OFF (steps=546
         cps=1097 max_cps=1117 -- the detector never fires off-Sheffer, slot15's
         term is not a live rule there).
 
-## RESOLVED 2026-06-21: THVM_ATP_WM_COMM_REAGE re-ages the one early seq564 copy
+## RESOLVED 2026-06-21: THVM_ATP_COMM_REAGE re-ages the one early seq564 copy
 The "global CP-formation reorder PROVEN impossible" verdict below is SUPERSEDED for
 the 126-band: a SINGLE-CP batch-key re-age closes it.  The band picks 126..~286 is a
 RIGID +1 SHIFT of ONE weight-120 copy (the seq564 sibling `(x.x).y = (x.y).y`, WM
 cp877).  thvm forms it in rule13's (slot19's) OWN birth batch from rule13 x slot15
 (the non-canonical comm-side equation WM never installs), where slot15's small
 leaf-list rank keys it ONE slot too early (cp_seq 564 -> pick-125, ahead of the
-rule13 x eqn-6 copy WM selects at 125).  THVM_ATP_WM_COMM_DEFER over-corrected by
-DELETING that copy (first seq564 then at pick-135).  THVM_ATP_WM_COMM_REAGE (the
+rule13 x eqn-6 copy WM selects at 125).  THVM_ATP_COMM_DEFER over-corrected by
+DELETING that copy (first seq564 then at pick-135).  THVM_ATP_COMM_REAGE (the
 INVERSE) instead bumps that one CP's batch key just past the rule13 x eqn-6 copy so
 it sorts one slot later (cp_seq 565 -> pick-126 = WM's cp877), re-zipping the whole
 weight-120 tail.  eqn-9 (rule13's WM cp877 parent) is ABSORBED in thvm (not a live
 rule), so FORCE-EMIT is unavailable; RE-AGE of the slot15-derived analog is the fix.
 
-CONFIG: THVM_ATP_CP_WM_SIDE=1 THVM_ATP_WM_FLAT_SUBSUME=1 THVM_ATP_WM_COMM_REAGE=1
+CONFIG: THVM_ATP_CP_SIDE=1 THVM_ATP_FLAT_SUBSUME=1 THVM_ATP_COMM_REAGE=1
         THVM_ATP_WALDMEISTER=1  bin/test_atp_wolfram_bench soa.pr 300 40
 RESULT: pick-126 = seq564 sibling (= WM cp877), prefix 1..125 byte-identical,
         pick-99 = COMM, thvm-only=0, the band 126.. is a clean +1 shift of the
@@ -99,8 +99,8 @@ RESULT: pick-126 = seq564 sibling (= WM cp877), prefix 1..125 byte-identical,
 CODE:   src/atp/_.c thvm_atp_generate_cps_wm re-age block (the comm-reage gate),
         atp_pair_is_seq564_sibling + atp_term_is_sq_dot_var/atp_term_is_dot_xy_dot_y
         + atp_eq_is_noncanonical_comm_side (slot15) + atp_rule_is_seq564_producer
-        (rule13/slot19); src/thvm.h use_wm_comm_reage; setter +
-        THVM_ATP_WM_COMM_REAGE env in tests/test_atp_wolfram_bench.c.
+        (rule13/slot19); src/thvm.h use_comm_reage; setter +
+        THVM_ATP_COMM_REAGE env in tests/test_atp_wolfram_bench.c.
 KNOB OFF (default): byte-identical -- bin/test_atp 136232/136232, soa firstdiv still
         125 (base two knobs) / 126 (+comm-defer); ZeroIsAbsorbing@5000 unchanged
         (proves steps=546 cps=1097, no AC-thrash -- reage is surgical, scoped to
@@ -127,7 +127,7 @@ interleave = the global reorder.  No local subsumption/orientation predicate
 fixes it.  (Verified workflow wf_5e7ce207.)
 
 CONFIG (opt-in):
-  THVM_ATP_CP_WM_SIDE=1 THVM_ATP_WM_FLAT_SUBSUME=1 THVM_ATP_WALDMEISTER=1
+  THVM_ATP_CP_SIDE=1 THVM_ATP_FLAT_SUBSUME=1 THVM_ATP_WALDMEISTER=1
   bin/test_atp_wolfram_bench /tmp/soa.pr <budget> <maxw>
 RESULT: prefix=124 identical=N firstdiv=125; thvm pop-set superset of WM's;
         weights-exact through the aligned prefix.
@@ -322,7 +322,7 @@ WALDMEISTER preset, /tmp/soa.pr 300 40, real-selection stream excl. ORPHAN):
   THVM_ATP_BWD_GROUND_JOIN=1 pick125 = seq564 prefix SAME  (no effect)
   THVM_ATP_FWD_SUB=1       pick125 = seq564   prefix SAME  (no effect)
   THVM_ATP_ESET_SUBSUME=0  diverges @10       THVM_ATP_WM_DEMOTE=0 diverges @10
-  THVM_ATP_WM_EMISSION_ORDER=0 diverges @16   THVM_ATP_POP_SUBSUME=0 diverges @16
+  THVM_ATP_EMISSION_ORDER=0 diverges @16   THVM_ATP_POP_SUBSUME=0 diverges @16
   THVM_ATP_IMPLICIT_CP=1   pick125 != E, prefix DIFF (other trajectory)
 
 CONCLUSION (DEFERRED, with the global trade now PROVEN): every prefix-
@@ -402,7 +402,7 @@ top-commutativity eset-subsume DOES drop slot15 exactly as WM does, and it
 STILL forks soa at pick-99 (worse than 125) AND explodes a commutative-ring
 baseline.  THIRD independent direct disproof of the local-subsume lever.
 --------------------------------------------------------------------------------
-IMPLEMENTED (gated THVM_ATP_WM_COMM_SUBSUME, DEFAULT OFF; knob OFF byte-identical,
+IMPLEMENTED (gated THVM_ATP_COMM_SUBSUME, DEFAULT OFF; knob OFF byte-identical,
 bin/test_atp 136232/136232 green):
   atp_eq_subsumes_pair_mod_top_comm (src/atp/_.c) widens atp_eset_subsume_by_new
   to also drop an older equation whose LHS matches the new equation's LHS and

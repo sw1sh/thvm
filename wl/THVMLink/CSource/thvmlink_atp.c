@@ -829,23 +829,23 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // (the historical thvm engine default).
   mint queue_subsume = MArgument_getInteger(args[39]);
   thvm_atp_set_use_queue_subsume(atp, (u8)(queue_subsume != 0));
-  // Method -> {... "WMEmissionOrder" -> True}: Waldmeister CP-emission
+  // Method -> {... "EmissionOrder" -> True}: Waldmeister CP-emission
   // ORDER (src/atp/wm_order.c): each new fact's CP batch is sorted
   // into WM's emission order before pushing, so equal-weight CPs
   // receive their FIFO ages (w2) in WM's order
   // (U1_KPsBildenZuFaktum phase walk + DSBaum leaf-list order).
   // args[40]; 0 = off (default, engine byte-identical).
   mint wm_emission = MArgument_getInteger(args[40]);
-  thvm_atp_set_use_wm_emission_order(atp, (u8)(wm_emission != 0));
+  thvm_atp_set_use_emission_order(atp, (u8)(wm_emission != 0));
   // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
   // overlaps an equation's fresh re-derivation, not the stale exhausted
   // original).  Verified faithful: preserves all 73 byte-identical
   // baselines and advances ShefferAxioms__OrAssociativity firstdiv 14->19;
   // no WL-path regression (TFindProof status identical with vs without).
-  // Keyed off WMEmissionOrder (ON in every Waldmeister* preset) as an
+  // Keyed off EmissionOrder (ON in every Waldmeister* preset) as an
   // interim until a dedicated "OverlapExhaust" arg slot is plumbed.
   thvm_atp_set_use_overlap_exhaust(atp, (u8)(wm_emission != 0));
-  // Method -> {... "WMIntakeOrder" -> True}: Waldmeister loader-level
+  // Method -> {... "IntakeOrder" -> True}: Waldmeister loader-level
   // axiom canonicalization + intake semantics (src/atp/wm_intake.c):
   // the first step permutes the queued axiom set into WM's canonical
   // sort order (SpezNormierung, WASIC/SpezNormierung.c:758-791) and
@@ -854,8 +854,8 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // before any derived CP, in WM's order.  args[41]; 0 = off
   // (default, engine byte-identical).
   mint wm_intake = MArgument_getInteger(args[41]);
-  thvm_atp_set_use_wm_intake_order(atp, (u8)(wm_intake != 0));
-  // Method -> {... "WMMixmostNF" -> True}: Waldmeister normal-form
+  thvm_atp_set_use_intake_order(atp, (u8)(wm_intake != 0));
+  // Method -> {... "MixmostNF" -> True}: Waldmeister normal-form
   // STRATEGY `-nf mixmost` (the CLI default, RUN/Parameter.c:418-419;
   // NF/NFBildung.c:349-377) + the Regelbaum within-position retrieval
   // order (MO_RegelGefunden, INF/MatchOperationen.c:565-651): local
@@ -866,7 +866,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // multiplicity alignment class).  args[42]; 0 = off (default,
   // engine byte-identical).
   mint wm_mixmost = MArgument_getInteger(args[42]);
-  thvm_atp_set_use_wm_mixmost_nf(atp, (u8)(wm_mixmost != 0));
+  thvm_atp_set_use_mixmost_nf(atp, (u8)(wm_mixmost != 0));
   // === Waldmeister CP-generation filter knobs (KPFilterErgaenzen,
   // INF/Unifikation1.c:1947-2014).  All default OFF (the unconfigured .pr
   // Orkus run), so the engine + the "Waldmeister"* presets stay byte-
@@ -920,53 +920,53 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // ShefferAxiomsOrAssociativity proxy; all default OFF so the engine +
   // the "Waldmeister"* presets stay byte-identical with these off.  See
   // tools/baselines/wm_align_reports/soa.txt. ===
-  // Method -> {... "CPWMSide" -> True}: WM CP-formation side geometry swap
+  // Method -> {... "CPSide" -> True}: WM CP-formation side geometry swap
   // (Unifikation1.c:916-917) -- store each derived unorientable equation
   // with WM's KPLinks=sigma(r_Vater) as the stored LHS.  No setter on
-  // AtpState (cf. the bench s->use_cp_wm_side), set the field directly.
+  // AtpState (cf. the bench s->use_cp_side), set the field directly.
   // args[51]; 0 = off (default).
   mint cp_wm_side = MArgument_getInteger(args[51]);
-  atp->use_cp_wm_side = (u8)(cp_wm_side != 0);
-  // Method -> {... "WMFlatSubsume" -> True}: WM flatterm-faithful
+  atp->use_cp_side = (u8)(cp_wm_side != 0);
+  // Method -> {... "FlatSubsume" -> True}: WM flatterm-faithful
   // eset-subsume matcher (MO_TermpaarSubsummiertZweites).  args[52];
   // 0 = off (default; standalone regresses soa firstdiv 19->16).
   mint wm_flat_subsume = MArgument_getInteger(args[52]);
-  thvm_atp_set_use_wm_flat_subsume(atp, (u8)(wm_flat_subsume != 0));
-  // Method -> {... "WMCommSubsume" -> True}: commutativity-aware E-set
+  thvm_atp_set_use_flat_subsume(atp, (u8)(wm_flat_subsume != 0));
+  // Method -> {... "CommSubsume" -> True}: commutativity-aware E-set
   // subsumption widening.  args[53]; 0 = off (default).  DIAGNOSTIC knob:
   // ON forks soa firstdiv 125->99 and explodes commutative-ring baselines.
   mint wm_comm_subsume = MArgument_getInteger(args[53]);
-  thvm_atp_set_use_wm_comm_subsume(atp, (u8)(wm_comm_subsume != 0));
-  // Method -> {... "WMCommDefer" -> True}: commutativity-DEFER overlap
-  // gate.  args[54]; 0 = off (default).  Superseded by WMCommReage.
+  thvm_atp_set_use_comm_subsume(atp, (u8)(wm_comm_subsume != 0));
+  // Method -> {... "CommDefer" -> True}: commutativity-DEFER overlap
+  // gate.  args[54]; 0 = off (default).  Superseded by CommReage.
   mint wm_comm_defer = MArgument_getInteger(args[54]);
-  thvm_atp_set_use_wm_comm_defer(atp, (u8)(wm_comm_defer != 0));
-  // Method -> {... "WMCommReage" -> True}: commutativity-REAGE overlap
-  // re-rank (inverse of WMCommDefer; promotes thvm's seq564-sibling CP to
+  thvm_atp_set_use_comm_defer(atp, (u8)(wm_comm_defer != 0));
+  // Method -> {... "CommReage" -> True}: commutativity-REAGE overlap
+  // re-rank (inverse of CommDefer; promotes thvm's seq564-sibling CP to
   // WM's faithful early age).  args[55]; 0 = off (default).
   mint wm_comm_reage = MArgument_getInteger(args[55]);
-  thvm_atp_set_use_wm_comm_reage(atp, (u8)(wm_comm_reage != 0));
-  // Method -> {... "WMCommDropDup" -> True}: commutativity DROP-DUP re-age
-  // atop WMCommReage (lands at WM pick-289).  args[56]; 0 = off (default).
-  // Advances soa firstdiv 288->290; requires WMCommReage.
+  thvm_atp_set_use_comm_reage(atp, (u8)(wm_comm_reage != 0));
+  // Method -> {... "CommDropDup" -> True}: commutativity DROP-DUP re-age
+  // atop CommReage (lands at WM pick-289).  args[56]; 0 = off (default).
+  // Advances soa firstdiv 288->290; requires CommReage.
   mint wm_comm_drop_dup = MArgument_getInteger(args[56]);
-  thvm_atp_set_use_wm_comm_drop_dup(atp, (u8)(wm_comm_drop_dup != 0));
-  // Method -> {... "WMLeafTiebreak" -> True}: leaf-arrival tiebreak --
+  thvm_atp_set_use_comm_drop_dup(atp, (u8)(wm_comm_drop_dup != 0));
+  // Method -> {... "LeafTiebreak" -> True}: leaf-arrival tiebreak --
   // re-key an oriented var-differ==1 CP just below its two-faced sibling
   // so it sorts first.  args[57]; 0 = off (default).  Clears the soa
   // 290<->292 / 303<->305 / 351<->353 swap-pairs.
   mint wm_leaf_tiebreak = MArgument_getInteger(args[57]);
-  thvm_atp_set_use_wm_leaf_tiebreak(atp, (u8)(wm_leaf_tiebreak != 0));
-  // Method -> {... "WMRevfaceGroup" -> True}: reverse-face shape-group
-  // tiebreak (sibling of WMLeafTiebreak one weight band up, soa w=209).
+  thvm_atp_set_use_leaf_tiebreak(atp, (u8)(wm_leaf_tiebreak != 0));
+  // Method -> {... "RevfaceGroup" -> True}: reverse-face shape-group
+  // tiebreak (sibling of LeafTiebreak one weight band up, soa w=209).
   // args[58]; 0 = off (default).  Advances soa firstdiv past 778.
   mint wm_revface_group = MArgument_getInteger(args[58]);
-  thvm_atp_set_use_wm_revface_group(atp, (u8)(wm_revface_group != 0));
-  // Method -> {... "WMPosGroup" -> True}: overlap-position raw-arrival
-  // grouping (sibling of WMRevfaceGroup one weight band down, soa w=120).
+  thvm_atp_set_use_revface_group(atp, (u8)(wm_revface_group != 0));
+  // Method -> {... "PosGroup" -> True}: overlap-position raw-arrival
+  // grouping (sibling of RevfaceGroup one weight band down, soa w=120).
   // args[59]; 0 = off (default).  Advances soa firstdiv past 966.
   mint wm_posgroup = MArgument_getInteger(args[59]);
-  thvm_atp_set_use_wm_posgroup(atp, (u8)(wm_posgroup != 0));
+  thvm_atp_set_use_posgroup(atp, (u8)(wm_posgroup != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any
