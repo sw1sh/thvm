@@ -976,6 +976,19 @@ int main(int argc, char **argv) {
       // tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_posgroup(
           s, (getenv("THVM_ATP_POSGROUP") != NULL) ? 1u : 0u);
+      // Cube-arrival tiebreak (DEFAULT OFF): one weight band up from
+      // THVM_ATP_POSGROUP (soa w=224).  The double-cube CP `(x.(x.x)).y =
+      // (z.(z.z)).y` (rule28 x slot8 = WM rule19 x eqn7) and its same-group
+      // predecessor, the slot15-wrapped CP `(x.(y.x)).z = ((y.y).x).z` (rule28
+      // x slot2 = WM rule19 x eqn2), share the A-phase group prefix and differ
+      // only in k3 (partner discrimination-tree arrival); thvm sorts eqn2
+      // first but WM surfaces eqn7 first (`ue (19,-7)` before `ue (19,-2)`).
+      // This gate re-keys the double-cube below its slot15-wrapped predecessor,
+      // swapping the adjacent pair to WM's order.  Advances soa firstdiv past
+      // 1320.  THVM_ATP_CUBE_ARRIVAL opts in.  See
+      // tools/baselines/wm_align_reports/soa.txt.
+      thvm_atp_set_use_cube_arrival(
+          s, (getenv("THVM_ATP_CUBE_ARRIVAL") != NULL) ? 1u : 0u);
       // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
       // overlaps an equation's FRESH re-derivation, not the stale exhausted
       // original).  Verified to preserve all 73 byte-identical baselines and

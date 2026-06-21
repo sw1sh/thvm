@@ -9160,6 +9160,16 @@ fn void thvm_atp_set_use_posgroup(AtpState *s, u8 on) {
   s->use_posgroup = on ? 1u : 0u;
 }
 
+// Cube-arrival tiebreak (see AtpState.use_cube_arrival): re-key the
+// double-cube CP `(x.(x.x)).y = (z.(z.z)).y` to sort immediately below its
+// same-group slot15-wrapped predecessor `(x.(y.x)).z = ((y.y).x).z`, swapping
+// the adjacent A-phase tops pair to WM's `ue (19,-7)` before `ue (19,-2)`
+// emission order (soa f=28, weight 224).  DEFAULT OFF.
+fn void thvm_atp_set_use_cube_arrival(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_cube_arrival = on ? 1u : 0u;
+}
+
 // Push-time queue-vs-queue subsumption gate (no WM counterpart; see
 // AtpState.use_queue_subsume in thvm.h).  Default ON = the historical
 // thvm engine; the "Waldmeister"* presets turn it OFF.
@@ -15978,6 +15988,50 @@ static u8 atp_slot15_rule_is_live(AtpState *s) {
   return 0u;
 }
 
+// Whether a NORMALIZED CP is the DOUBLE-CUBE `(x.(x.x)).y = (z.(z.z)).y`
+// (thvm LHS=(C3 (C3 V0 (C3 V0 V0)) V1), RHS=(C3 (C3 V2 (C3 V2 V2)) V1) modulo
+// orientation/renaming): BOTH sides are a cube `f(v, f(v, v))` dotted with the
+// SAME trailing variable y, with the two cubes on DIFFERENT inner vars.  This
+// is the soa f=28 weight-224 A-phase CP WM emits at selection 1320 (`ue (19,
+// -7)`, rule19 x eqn7), one weight band up from the POSGROUP `(x.(x.x)).y =
+// y.y` cube.  Reuses atp_term_is_cube_dot_var (already validates the cube
+// shape + v != y); the extra constraint is the two trailing vars match and the
+// two inner cube vars differ.
+static u8 atp_pair_is_double_cube(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 vl = 0, yl = 0, vr = 0, yr = 0;
+  if (!atp_term_is_cube_dot_var(l, &vl, &yl)) return 0u;
+  if (!atp_term_is_cube_dot_var(r, &vr, &yr)) return 0u;
+  if (yl != yr) return 0u;                       // same trailing variable y
+  if (vl == vr) return 0u;                        // distinct cube vars x != z
+  return 1u;
+}
+
+// Whether a NORMALIZED CP is the slot15-term `x.(y.x) = (y.y).x` WRAPPED with
+// a trailing `. z` on BOTH sides: `(x.(y.x)).z = ((y.y).x).z` (thvm LHS=(C3
+// (C3 V0 (C3 V1 V0)) V2), RHS=(C3 (C3 (C3 V1 V1) V0) V2) modulo orientation/
+// renaming).  This is the soa f=28 weight-224 A-phase CP WM emits at selection
+// 1321 (`ue (19, -2)`, rule19 x eqn2); it is the double-cube's immediate
+// same-group k3-arrival predecessor in thvm's batch ordering and serves as the
+// re-key anchor (atp_pair_is_double_cube sorts just below it).  Reuses the
+// slot15-term inner-shape checks on the two `. z` subterms.
+static u8 atp_pair_is_slot15_wrapped(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_ctr_n(l) != 2u) return 0u;
+  if (term_tag(r) != TAG_CTR || term_ctr_n(r) != 2u) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  Term lz = term_ctr_at(l, 1), rz = term_ctr_at(r, 1);
+  if (term_tag(lz) != TAG_FVR || term_tag(rz) != TAG_FVR) return 0u;
+  if (term_ext(lz) != term_ext(rz)) return 0u;   // same trailing variable z
+  Term li = term_ctr_at(l, 0), ri = term_ctr_at(r, 0);
+  u32 v = 0, w = 0;
+  if (atp_term_is_slot15_lhs(li, &v, &w) && atp_term_is_slot15_rhs(ri, v, w))
+    return 1u;
+  if (atp_term_is_slot15_lhs(ri, &v, &w) && atp_term_is_slot15_rhs(li, v, w))
+    return 1u;
+  return 0u;
+}
+
 // The oriented superposition partner that WM's seq564 producer rule13 carries:
 //   f(v, f(v, f(v, w))) -> f(w, v)   (`x.(x.(x.y)) -> y.x`, WM rule13, soa
 // slot19).  In WM this is the rule whose batch forms the seq564 CP from
@@ -16334,6 +16388,47 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           if (big[k].key > anchor) anchor = big[k].key;
         }
         if (anchor != 0u && anchor + 1ull > big[kb].key) big[kb].key = anchor + 1ull;
+      }
+    }
+    // Cube-arrival tiebreak (default OFF; see use_cube_arrival).  One weight
+    // band up from POSGROUP (soa f=28, weight 224): the DOUBLE-CUBE CP
+    // `(x.(x.x)).y = (z.(z.z)).y` (rule28 x slot8 = WM rule19 x eqn7) and its
+    // immediate same-group k3-arrival predecessor, the slot15-wrapped CP
+    // `(x.(y.x)).z = ((y.y).x).z` (rule28 x slot2 = WM rule19 x eqn2), share
+    // the entire A-phase tops group prefix (phase=0, k1=3, k2=1) and differ
+    // ONLY in k3, the partner equation's discrimination-tree arrival rank:
+    // thvm assigns the eqn2 partner an EARLIER arrival (8) than the cube eqn7
+    // partner (10), so it sorts the slot15-wrapped CP first; but WM's single
+    // superposition scan surfaces eqn7 first (`ue (19, -7)` before `ue (19,
+    // -2)`), emitting the double-cube AHEAD of the slot15-wrapped CP.  Re-key
+    // the double-cube to sort immediately BELOW its slot15-wrapped same-group
+    // predecessor (the largest-keyed strictly-earlier same-group CP whose
+    // normalized shape is the slot15-wrapped form), swapping the adjacent
+    // pair to WM's emission order.  Scoped HARD -- both shapes exact
+    // (orientation-insensitive), the A phase, an identical group prefix
+    // (phase|k1|k2), and the anchor strictly earlier-keyed -- never a generic
+    // equal-weight reorder.  OFF byte-identical; the prior-8-knobs 1..1319
+    // prefix is preserved.  Advances soa firstdiv 1320 -> beyond.
+    if (s->use_cube_arrival) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);     // phase | k1 | k2 bits
+      for (u32 kb = 0; kb < n_big; kb++) {
+        if (big[kb].i != f || big[kb].j == f) continue;
+        if ((big[kb].key_raw >> 58) != 0u) continue;   // A phase only
+        Term nlb = atp_rewrite_normalize_indexed(s, big[kb].cp.lhs, 4096u);
+        Term nrb = atp_rewrite_normalize_indexed(s, big[kb].cp.rhs, 4096u);
+        if (!atp_pair_is_double_cube(nlb, nrb)) continue;
+        u32 ka = 0xffffffffu;
+        for (u32 k = 0; k < n_big; k++) {
+          if (k == kb || big[k].i != f || big[k].j == f) continue;
+          if (big[k].key >= big[kb].key) continue;     // strictly earlier
+          if ((big[k].key & grp_mask) != (big[kb].key & grp_mask)) continue;
+          Term nlk = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+          Term nrk = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+          if (!atp_pair_is_slot15_wrapped(nlk, nrk)) continue;
+          if (ka == 0xffffffffu || big[k].key > big[ka].key) ka = k;
+        }
+        if (ka != 0xffffffffu && big[ka].key >= 1ull)
+          big[kb].key = big[ka].key - 1ull;
       }
     }
     qsort(big, n_big, sizeof(AtpWmoCpEnt), atp_wmo_ent_cmp);

@@ -69,7 +69,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"CommDefer\", \"CommReage\", \"CommDropDup\", \"LeafTiebreak\", \"RevfaceGroup\", \"PosGroup\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"CommDefer\", \"CommReage\", \"CommDropDup\", \"LeafTiebreak\", \"RevfaceGroup\", \"PosGroup\", \"CubeArrival\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 GeneralUtilities`SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -368,6 +368,13 @@ $atpRunProofFn := $atpRunProofFn = load[
         down, un-groups an over-grouped vd=0 permutation partner so the
         batch matches WM's bracketed raw discrimination-tree arrival).
         OFF by default; advances soa firstdiv past 966 *)
+     Integer,
+     (* args[60] = Waldmeister cube-arrival tiebreak (Method
+        "CubeArrival"; sibling of PosGroup one weight band up, re-keys
+        the double-cube CP below its slot15-wrapped same-group
+        predecessor so the adjacent pair emits in WM's `ue (19,-7)`
+        before `ue (19,-2)` order).  OFF by default; advances soa
+        firstdiv past 1320 *)
      Integer},
     "NumericArray"
 ]
@@ -2506,8 +2513,8 @@ atpBackwardGoalArgueOpt[o_Association] :=
    ages with WM's on the ShefferAxiomsOrAssociativity (soa) proxy.  All
    default OFF (engine + "Waldmeister"* presets stay byte-identical); the
    soa-validated faithful set is CPSide + FlatSubsume + CommReage +
-   CommDropDup + LeafTiebreak + RevfaceGroup + PosGroup, which
-   reproduces WM's selection order through 1319 selections.  See
+   CommDropDup + LeafTiebreak + RevfaceGroup + PosGroup + CubeArrival,
+   which reproduces WM's selection order through 1504 selections.  See
    tools/baselines/wm_align_reports/soa.txt. === *)
 
 (* "CPSide" -> True | False: Waldmeister CP-formation side geometry
@@ -2603,6 +2610,20 @@ atpRevfaceGroupOpt[o_Association] :=
    off. *)
 atpPosGroupOpt[o_Association] :=
     Switch[Lookup[o, "PosGroup", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+
+(* "CubeArrival" -> True | False: cube-arrival tiebreak (sibling of
+   PosGroup one weight band up, soa w=224).  The double-cube CP
+   `(x.(x.x)).y = (z.(z.z)).y` and its same-group predecessor, the
+   slot15-wrapped CP `(x.(y.x)).z = ((y.y).x).z`, share the A-phase tops
+   group prefix and differ only in k3 (partner discrimination-tree
+   arrival); thvm sorts the slot15-wrapped CP first but WM surfaces the
+   cube partner first (`ue (19,-7)` before `ue (19,-2)`).  This re-keys
+   the double-cube below its slot15-wrapped predecessor, swapping the
+   adjacent pair to WM's order.  Advances soa firstdiv past 1320.
+   False/Automatic = off. *)
+atpCubeArrivalOpt[o_Association] :=
+    Switch[Lookup[o, "CubeArrival", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
 (* True iff at least one axiom in `axParts` (atpAxiomParts triples
@@ -2978,7 +2999,8 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpFlatSubsumeOpt[o], atpCommSubsumeOpt[o],
          atpCommDeferOpt[o], atpCommReageOpt[o],
          atpCommDropDupOpt[o], atpLeafTiebreakOpt[o],
-         atpRevfaceGroupOpt[o], atpPosGroupOpt[o]}
+         atpRevfaceGroupOpt[o], atpPosGroupOpt[o],
+         atpCubeArrivalOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];

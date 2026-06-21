@@ -5573,6 +5573,27 @@ typedef struct {
   // preserved.  Advances soa firstdiv 966 -> beyond.  See
   // tools/baselines/wm_align_reports/soa.txt.
   u8    use_posgroup;
+  // Cube-arrival tiebreak for the double-cube vs slot15-wrapped pair (env
+  // THVM_ATP_CUBE_ARRIVAL, DEFAULT OFF).  One weight band up from
+  // use_posgroup (soa f=28, weight 224).  The double-cube CP `(x.(x.x)).y =
+  // (z.(z.z)).y` (rule28 x slot8 = WM rule19 x eqn7) and its immediate
+  // same-group predecessor, the slot15-wrapped CP `(x.(y.x)).z = ((y.y).x).z`
+  // (rule28 x slot2 = WM rule19 x eqn2), share the entire A-phase tops group
+  // prefix (phase=0, k1=3, k2=1) and differ ONLY in k3, the partner
+  // equation's discrimination-tree arrival rank: thvm gives the eqn2 partner
+  // an EARLIER arrival (8) than the cube eqn7 partner (10), so it sorts the
+  // slot15-wrapped CP first; but WM's single superposition scan surfaces eqn7
+  // first (`ue (19, -7)` before `ue (19, -2)`), emitting the double-cube
+  // AHEAD of the slot15-wrapped CP.  This gate re-keys the double-cube to sort
+  // immediately below its slot15-wrapped same-group predecessor (the
+  // largest-keyed strictly-earlier same-group CP of that exact normalized
+  // shape), swapping the adjacent pair to WM's emission order.  Scoped HARD --
+  // both shapes exact (orientation-insensitive), the A phase, an identical
+  // group prefix (phase|k1|k2), and the anchor strictly earlier-keyed -- never
+  // a generic equal-weight reorder.  OFF byte-identical; the prior-8-knobs
+  // 1..1319 prefix is preserved.  Advances soa firstdiv 1320 -> beyond.  See
+  // tools/baselines/wm_align_reports/soa.txt.
+  u8    use_cube_arrival;
   // Waldmeister LRSortieren side-canonicalisation (SpezNormierung.c
   // :517-534, env THVM_ATP_LR_SORTIEREN, default OFF): a derived
   // unorientable equation is stored with WM's canonical left/right side
@@ -5950,6 +5971,9 @@ fn void      thvm_atp_set_use_revface_group(AtpState *s, u8 on);
 // Overlap-position raw-arrival grouping (see AtpState.use_posgroup).
 // DEFAULT OFF.
 fn void      thvm_atp_set_use_posgroup(AtpState *s, u8 on);
+// Cube-arrival tiebreak for the double-cube vs slot15-wrapped pair (see
+// AtpState.use_cube_arrival).  DEFAULT OFF.
+fn void      thvm_atp_set_use_cube_arrival(AtpState *s, u8 on);
 // Push-time queue-vs-queue subsumption gate (thvm-native, no WM
 // counterpart; see AtpState.use_queue_subsume).  Default ON; the
 // "Waldmeister"* presets turn it OFF.

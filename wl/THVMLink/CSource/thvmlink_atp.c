@@ -967,6 +967,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // args[59]; 0 = off (default).  Advances soa firstdiv past 966.
   mint wm_posgroup = MArgument_getInteger(args[59]);
   thvm_atp_set_use_posgroup(atp, (u8)(wm_posgroup != 0));
+  // Method -> {... "CubeArrival" -> True}: cube-arrival tiebreak (sibling
+  // of PosGroup one weight band up, soa w=224).  Re-keys the double-cube CP
+  // below its slot15-wrapped same-group predecessor so the adjacent pair
+  // emits in WM's `ue (19,-7)` before `ue (19,-2)` order.  args[60]; 0 =
+  // off (default).  Advances soa firstdiv past 1320.
+  mint wm_cube_arrival = MArgument_getInteger(args[60]);
+  thvm_atp_set_use_cube_arrival(atp, (u8)(wm_cube_arrival != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any
