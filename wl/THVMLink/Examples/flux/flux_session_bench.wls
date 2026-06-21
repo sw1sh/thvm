@@ -16,8 +16,7 @@ If[ Environment["THVM_MMAP_NO_WILLNEED"] === $Failed, SetEnvironment["THVM_MMAP_
 If[ Environment["THVM_MAX_LIVE_BYTES"] === $Failed, SetEnvironment["THVM_MAX_LIVE_BYTES" -> "30000000000"]];
 If[ Environment["THVM_FLUX_TIMING"] === $Failed, SetEnvironment["THVM_FLUX_TIMING" -> "1"]];
 If[ Environment["THVM_METAL_PSO_CACHE_STATS"] === $Failed, SetEnvironment["THVM_METAL_PSO_CACHE_STATS" -> "1"]];
-PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"];
-Get[FileNameJoin[{DirectoryName[$InputFileName], "..", "..", "Kernel", "NN", "Examples", "FLUX", "FluxGenerate.wl"}]];
+PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`Examples`"];
 TInit[]; TReset[];
 pr[a___] := (WriteString["stdout", a, "\n"]; $Output // Flush);
 
