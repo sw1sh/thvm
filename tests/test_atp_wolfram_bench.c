@@ -900,6 +900,82 @@ int main(int argc, char **argv) {
       // opts in for experimentation.
       thvm_atp_set_use_wm_flat_subsume(
           s, (getenv("THVM_ATP_WM_FLAT_SUBSUME") != NULL) ? 1u : 0u);
+      // Commutativity-aware E-set subsumption widening (DEFAULT OFF):
+      // drops a redundant equation whose RHS is one top-`.`-swap from the
+      // new equation's RHS under a live commutativity axiom -- WM's
+      // commutativity-normalised Interreduktion.  Drops the soa slot15
+      // equation exactly as WM does, but is a DIAGNOSTIC knob, not a parity
+      // win: ON forks soa firstdiv 125->99 (slot15 uniquely parents the
+      // displaced pick-99 COMM copy) and explodes commutative-ring baselines
+      // via remove-and-rederive thrash.  THVM_ATP_WM_COMM_SUBSUME opts in.
+      thvm_atp_set_use_wm_comm_subsume(
+          s, (getenv("THVM_ATP_WM_COMM_SUBSUME") != NULL) ? 1u : 0u);
+      // Commutativity-DEFER overlap gate (DEFAULT OFF): suppresses the single
+      // over-enumerated non-canonical comm-side overlap (soa slot15 sourced
+      // seq564) in an oriented rule's birth batch WITHOUT removing the
+      // equation -- unlike THVM_ATP_WM_COMM_SUBSUME, slot15 stays live so its
+      // uniquely-parented pick-99 COMM copy survives.  THVM_ATP_WM_COMM_DEFER
+      // opts in.  See tools/baselines/wm_align_reports/soa.txt.
+      thvm_atp_set_use_wm_comm_defer(
+          s, (getenv("THVM_ATP_WM_COMM_DEFER") != NULL) ? 1u : 0u);
+      // Commutativity-REAGE overlap re-rank (DEFAULT OFF, INVERSE of
+      // COMM_DEFER): instead of suppressing thvm's early seq564 copy, promote
+      // thvm's single seq564-sibling CP (`(x.x).y = (x.y).y`, rule13 x eqn-10)
+      // to the head of eqn-10's birth batch so it is selected at WM's faithful
+      // early age (pick-126) rather than buried at the eTT batch tail.  WM
+      // forms cp877 in rule13's own batch from rule13 x eqn-9 (which thvm
+      // absorbed), aged one slot after seq564 -> WM pick-126; this re-ranks
+      // thvm's re-derived analog to the matching age.  THVM_ATP_WM_COMM_REAGE
+      // opts in.  See tools/baselines/wm_align_reports/soa.txt.
+      thvm_atp_set_use_wm_comm_reage(
+          s, (getenv("THVM_ATP_WM_COMM_REAGE") != NULL) ? 1u : 0u);
+      // Commutativity DROP-DUP re-age (DEFAULT OFF): atop COMM_REAGE, re-ages
+      // the single DUPLICATE re-derivation of slot15's term `x.(y.x) = (y.y).x`
+      // (slot15 is already a LIVE rule since pick-54) one FIFO slot later, past
+      // its in-batch `x.(x.x) = y.(y.y)` successor (= WM's pick-288), so it
+      // lands at WM's faithful pick-289 rather than thvm's over-early pick-288.
+      // slot15 the rule -- and its uniquely-parented pick-99 COMM copy -- stay
+      // intact.  Advances soa firstdiv 288 -> 290.  THVM_ATP_WM_COMM_DROP_DUP
+      // opts in (requires THVM_ATP_WM_COMM_REAGE).  See
+      // tools/baselines/wm_align_reports/soa.txt.
+      thvm_atp_set_use_wm_comm_drop_dup(
+          s, (getenv("THVM_ATP_WM_COMM_DROP_DUP") != NULL) ? 1u : 0u);
+      // Leaf-arrival tiebreak (DEFAULT OFF): when two CPs overlap the new fact
+      // at the same position from a var-differ==1 (WM-oriented) partner and a
+      // var-differ==0 (WM two-faced permutation) partner, thvm keys the
+      // oriented copy exactly one k3 leaf-step (1<<28) ABOVE its sibling (same
+      // overlap geometry) and emits them reversed.  This re-keys the oriented
+      // copy just below the sibling so it sorts FIRST as WM's single oriented
+      // scan emits it.  Clears the soa 290<->292 / 303<->305 / 351<->353
+      // swap-pairs (firstdiv 290 -> trace end).  THVM_ATP_WM_LEAF_TIEBREAK opts
+      // in.  See tools/baselines/wm_align_reports/soa.txt.
+      thvm_atp_set_use_wm_leaf_tiebreak(
+          s, (getenv("THVM_ATP_WM_LEAF_TIEBREAK") != NULL) ? 1u : 0u);
+      // Reverse-face shape-group tiebreak (DEFAULT OFF): sibling of
+      // THVM_ATP_WM_LEAF_TIEBREAK one weight band up (soa w=209).  Within one
+      // tops overlap-position group, re-keys a var-differ==1 partner's
+      // reverse-face CP to sort immediately after the largest-keyed same-group
+      // CP it ALPHA-matches (same reduced equation), restoring WM's adjacent
+      // same-shape emission -- thvm's independent leaf DFS otherwise scatters
+      // the reverse copy past the group's other-shape CPs (soa f=36 Cshape
+      // arr=6 vs arr=1).  Advances soa firstdiv past 778.
+      // THVM_ATP_WM_REVFACE_GROUP opts in.  See
+      // tools/baselines/wm_align_reports/soa.txt.
+      thvm_atp_set_use_wm_revface_group(
+          s, (getenv("THVM_ATP_WM_REVFACE_GROUP") != NULL) ? 1u : 0u);
+      // Overlap-position raw-arrival grouping (DEFAULT OFF): sibling of
+      // THVM_ATP_WM_REVFACE_GROUP one weight band down (soa w=120).  At a
+      // single A-phase tops overlap position WM emits every partner-face CP in
+      // raw discrimination-tree arrival order; REVFACE_GROUP over-groups here,
+      // pulling a vd=0 permutation partner's forward face up beside a vd=1
+      // oriented partner's same-shape CP.  This gate un-groups that firing
+      // (restores raw arrival) and defers a vd=0 permutation partner's reverse
+      // face past the higher-arrival same-group cluster, so the batch matches
+      // WM's bracketed emission.  Advances soa firstdiv past 966.
+      // THVM_ATP_WM_POSGROUP opts in.  See
+      // tools/baselines/wm_align_reports/soa.txt.
+      thvm_atp_set_use_wm_posgroup(
+          s, (getenv("THVM_ATP_WM_POSGROUP") != NULL) ? 1u : 0u);
       // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
       // overlaps an equation's FRESH re-derivation, not the stale exhausted
       // original).  Verified to preserve all 73 byte-identical baselines and
