@@ -1,4 +1,110 @@
-soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv=125
+soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv 126 -> 288 -> 290
+
+## RESOLVED 2026-06-21: THVM_ATP_WM_POSGROUP -- A-phase raw-arrival cube grouping
+
+Atop the 6 prior knobs (firstdiv=966), the residual is a w=120 A-phase batch
+(soa f=41, rules=42).  All 7 emitted CPs share phase=0/k1=8/k2=1; they differ in
+k3 (tops DFS partner-leaf arrival).  WM emits them in RAW arrival order with one
+exception; thvm diverges in two ways introduced by REVFACE_GROUP at this band:
+
+  (a) REVFACE pulls the `(x.(x.x)).y = y.y` cube CP of a vd=0 PERMUTATION
+      partner (j33, raw arrival 7) up beside the SAME-shape CP of a vd=1
+      ORIENTED partner (j7, arrival 1), jumping 16 intervening same-group CPs.
+      WM keeps j33 at its own raw arrival (j7 and j33 are independent leaves
+      surfaced at their own ages, not one re-derived equation).  POSGROUP
+      un-groups exactly this firing: the cube shape with a vd=1 oriented anchor.
+
+  (b) The `(x.x).y = (x.y).y` permutation partner's REVERSE face (j19 face0,
+      raw arrival 6) precedes the two arrival-7 cube CPs; WM brackets the
+      permutation partner's two faces around them (forward at 967, reverse at
+      970).  POSGROUP defers the reverse face past the largest same-group cube
+      arrival.
+
+Both parts are scoped HARD by NORMALIZED CP shape (atp_pair_is_posgroup_cube =
+`(x.(x.x)).y = y.y`; atp_pair_is_seq564_sibling = `(x.x).y = (x.y).y`), the A
+phase, identical group prefix, and the vd=0-permutation / vd=1-oriented split --
+never a generic equal-weight reorder.  A new key_raw field on AtpWmoCpEnt
+captures atp_wmo_rank's result before the re-key passes so the deferral reads
+true tree arrivals.
+
+RESULT: firstdiv 966 -> 1320 (clears the whole w=120 cube band), wm-only=0,
+        prefix 1..1319 byte-identical, weights-exact.
+KNOB OFF (default): byte-identical -- bin/test_atp 136232/136232; 6-knob soa
+        firstdiv still 966; ZeroIsAbsorbing@5000 trajectory identical ON and OFF
+        (step1500 rules=370 cps=315840, final steps=2404 rules=508 cps=579859).
+NEXT (firstdiv=1320): a w=224 double-cube batch (rules=48) -- `(x.(x.x)).y =
+        (z.(z.z)).y` vs `((x.x).y).z`, the SAME cube/permutation family one
+        weight band up.  The recurrence across weight bands (w=120, w=224, and
+        likely w=155/w=209) argues a UNIFIED U1 raw-arrival + reverse-face
+        bracketing port now subsumes the per-band knobs better than continuing.
+
+
+
+## RESOLVED 2026-06-21: THVM_ATP_WM_COMM_DROP_DUP re-ages the one early slot15-term copy
+Atop COMM_REAGE (which lands firstdiv at 288), the residual at pick-288 is the
+DUPLICATE re-derivation of slot15's OWN term `x.(y.x) = (y.y).x` (canon
+`(x.x).y = y.(x.y)`).  slot15 (the rule of this exact shape) has been LIVE since
+pick-54, so this copy is redundant: thvm forms it in rule34's birth batch and keys
+it ONE FIFO slot too early (cp_seq 1523), so it pops at pick-288.  WM does NOT drop
+it -- WM RE-SELECTS a slot15-class copy one slot LATER, at pick-289 (its in-batch
+`x.(x.x) = y.(y.y)` successor, cp_seq 1524, is WM's pick-288).  Both engines select
+the slot15-class term 15 times at the IDENTICAL positions 54,101,107,110,113,121,
+140,149,205,208,267,275,_289_,322,333 -- the ONLY mismatch is this one copy: thvm
+288 vs WM 289.  THVM_ATP_WM_COMM_DROP_DUP RE-AGES it one slot past its successor
+(smallest batch key strictly greater than its own), landing it at WM's faithful
+pick-289.  Gated on slot15 being live (re-derivation, not birth), so slot15 the rule
+-- and its uniquely-parented pick-99 COMM copy -- stay intact; NOT a drop (a drop
+would lose the slot15-class copy WM selects at 289, regressing to firstdiv=289).
+
+CONFIG: THVM_ATP_CP_WM_SIDE=1 THVM_ATP_WM_FLAT_SUBSUME=1 THVM_ATP_WM_COMM_REAGE=1
+        THVM_ATP_WM_COMM_DROP_DUP=1 THVM_ATP_WALDMEISTER=1
+        bin/test_atp_wolfram_bench soa.pr 200000 20   (soa.pr = /tmp/soa.pr, the
+        3-axiom form; WM ref /tmp/soa_align/wm.txt, 711 selections)
+RESULT: firstdiv 288 -> 290, prefix 1..289 byte-identical, weights-exact,
+        thvm-only=0, wm-only=0, pick-99 = COMM, all 15 slot15-class positions ==
+        WM.  pick-288 = `x.(x.x)=y.(y.y)` (WM's 288), pick-289 = slot15 term (WM's
+        289).  The next residual at 290 is a SEPARATE non-slot15 age inversion
+        (`(x.(x.x)).y = y.y` vs `x.x = x.(y.(y.y))`, the 3-cycle noted below) --
+        out of scope for the slot15 fix, needs a distinct mechanism.
+CODE:   src/atp/_.c thvm_atp_generate_cps_wm DROP-DUP re-age block;
+        atp_pair_is_slot15_term + atp_term_is_slot15_lhs/atp_term_is_slot15_rhs +
+        atp_slot15_rule_is_live; src/thvm.h use_wm_comm_drop_dup; setter
+        thvm_atp_set_use_wm_comm_drop_dup + THVM_ATP_WM_COMM_DROP_DUP env in
+        tests/test_atp_wolfram_bench.c.
+KNOB OFF (default): byte-identical -- bin/test_atp 136232/136232; REAGE-only soa
+        firstdiv still 288; ZeroIsAbsorbing@5000 unchanged ON and OFF (steps=546
+        cps=1097 max_cps=1117 -- the detector never fires off-Sheffer, slot15's
+        term is not a live rule there).
+
+## RESOLVED 2026-06-21: THVM_ATP_WM_COMM_REAGE re-ages the one early seq564 copy
+The "global CP-formation reorder PROVEN impossible" verdict below is SUPERSEDED for
+the 126-band: a SINGLE-CP batch-key re-age closes it.  The band picks 126..~286 is a
+RIGID +1 SHIFT of ONE weight-120 copy (the seq564 sibling `(x.x).y = (x.y).y`, WM
+cp877).  thvm forms it in rule13's (slot19's) OWN birth batch from rule13 x slot15
+(the non-canonical comm-side equation WM never installs), where slot15's small
+leaf-list rank keys it ONE slot too early (cp_seq 564 -> pick-125, ahead of the
+rule13 x eqn-6 copy WM selects at 125).  THVM_ATP_WM_COMM_DEFER over-corrected by
+DELETING that copy (first seq564 then at pick-135).  THVM_ATP_WM_COMM_REAGE (the
+INVERSE) instead bumps that one CP's batch key just past the rule13 x eqn-6 copy so
+it sorts one slot later (cp_seq 565 -> pick-126 = WM's cp877), re-zipping the whole
+weight-120 tail.  eqn-9 (rule13's WM cp877 parent) is ABSORBED in thvm (not a live
+rule), so FORCE-EMIT is unavailable; RE-AGE of the slot15-derived analog is the fix.
+
+CONFIG: THVM_ATP_CP_WM_SIDE=1 THVM_ATP_WM_FLAT_SUBSUME=1 THVM_ATP_WM_COMM_REAGE=1
+        THVM_ATP_WALDMEISTER=1  bin/test_atp_wolfram_bench soa.pr 300 40
+RESULT: pick-126 = seq564 sibling (= WM cp877), prefix 1..125 byte-identical,
+        pick-99 = COMM, thvm-only=0, the band 126.. is a clean +1 shift of the
+        comm-defer tail (ON[126:] == defer[125:] for the full traced tail).  The
+        next residual is the separate 3-cycle at picks ~287/289/291.
+CODE:   src/atp/_.c thvm_atp_generate_cps_wm re-age block (the comm-reage gate),
+        atp_pair_is_seq564_sibling + atp_term_is_sq_dot_var/atp_term_is_dot_xy_dot_y
+        + atp_eq_is_noncanonical_comm_side (slot15) + atp_rule_is_seq564_producer
+        (rule13/slot19); src/thvm.h use_wm_comm_reage; setter +
+        THVM_ATP_WM_COMM_REAGE env in tests/test_atp_wolfram_bench.c.
+KNOB OFF (default): byte-identical -- bin/test_atp 136232/136232, soa firstdiv still
+        125 (base two knobs) / 126 (+comm-defer); ZeroIsAbsorbing@5000 unchanged
+        (proves steps=546 cps=1097, no AC-thrash -- reage is surgical, scoped to
+        the rule13-producer x slot15 seq564-sibling pair).
 
 ## DEFINITIVE 2026-06-20: needs the global CP-formation reorder (local fix PROVEN impossible)
 
@@ -289,3 +395,66 @@ REGRESSION (documentary; no source change):
   git diff empty; bin/test_atp green 136232/136232; SKIToBCKW c1 @1868 intact
   (pick-1868 = (C10 C8 (C10 C7 C5))->..., C8/W head); pick-99 = COMM, pick-125 =
   seq564 unchanged; all baseline pick-seq md5 unchanged by construction (no code).
+
+================================================================================
+COMM-SUBSUME IMPLEMENTED + DIRECTLY DISPROVEN (2026-06-21): the scoped
+top-commutativity eset-subsume DOES drop slot15 exactly as WM does, and it
+STILL forks soa at pick-99 (worse than 125) AND explodes a commutative-ring
+baseline.  THIRD independent direct disproof of the local-subsume lever.
+--------------------------------------------------------------------------------
+IMPLEMENTED (gated THVM_ATP_WM_COMM_SUBSUME, DEFAULT OFF; knob OFF byte-identical,
+bin/test_atp 136232/136232 green):
+  atp_eq_subsumes_pair_mod_top_comm (src/atp/_.c) widens atp_eset_subsume_by_new
+  to also drop an older equation whose LHS matches the new equation's LHS and
+  whose RHS equals the new RHS modulo ONE top-`.`-child-swap (a.b == b.a),
+  gated on a live `f(x,y)=f(y,x)` equation (atp_op_is_live_commutative).  This
+  is precisely WM's commutativity-normalized Interreduktion -- NOT AC-saturation
+  (single top swap, no equivalence-class enumeration).
+
+CONFIRMED IT DROPS slot15 EXACTLY AS WM DOES (RULE_TRACE, knob ON):
+  ESET-SUBSUME kill (slot 15, trace 418) lhs=(C3 V0 (C3 V1 V0)) rhs=(C3 (C3 V1 V1) V0)
+  i.e. eqn-10 `x.(y.x)=x.(y.y)` (added later) drops slot15 `x.(y.x)=(y.y).x` the
+  moment it enters, one top-`.`-swap apart -- the over-enumeration source named
+  in the SLOT15-vs-EQN10 section above.  10 ESET kills total vs OFF's 2.
+
+RESULT: soa firstdiv 125 -> 99 (WORSE), NOT a blow-up (pick count 32110 ~ base):
+  knob OFF: picks 97,98,99 are ALL COMM `x.y=y.x` (pri=48, seq 581/599/632) ->
+            pick-99 = COMM, aligned with WM.
+  knob ON : pick 97,98 = COMM (581,627); the THIRD COMM copy is GONE.  pick-99
+            now lands a pri=65 CP (seq 591); the displaced w=120 CPs at that age
+            are ORPHANs tagged `pa=418(dead)` -- their parent IS the just-killed
+            slot15.  thvm loses the third COMM copy because slot15 is its UNIQUE
+            parent for that copy (CPGEN: `outer=slot15[x.(y.x)->(y.y).x]
+            inner=slot5[x.y->y.x COMM] pos=(root) combo=2`).  WM keeps its third
+            COMM copy from a DIFFERENT live parent (eqn-7/eqn-6 pairs, the
+            age-577 class) at the right FIFO age.  => dropping slot15 is correct
+            but its uniquely-parented COMM copy dies with it; matching WM needs
+            forming that COMM copy from WM's alternate parent at WM's age = the
+            GLOBAL CP-formation reorder, not any subsumption predicate.
+
+EXPLOSION on a NON-soa baseline (the AC-thrash MEMORY warns of, now demonstrated):
+  CommutativeRingAxioms__ZeroIsAbsorbing: OFF proves steps=546 cps=1097; ON does
+  NOT prove (=> RUNNING, timeout) and blows to cps=383752 (350x), rules=9386.
+  At a 5000-step cap it does 910 ESET kills (vs OFF's 1): the comm widening
+  remove-and-rederive thrashes on the commutative `.`-over-`+` ring, killing
+  `(x+x).y=x.(y+y)`-class equations and their commutative variants in lockstep
+  with rising re-derivation traces (1317..1792).  The single-top-swap, justified
+  only by "a live commutativity equation exists", is NOT surgical: any
+  commutative operator that interacts with a second operator cascades.
+
+SHORT-BASELINE SANITY (knob ON): 7/8 byte-identical (inert) -- GroupAxioms
+  LeftIdentity/LeftInverse/InverseOfInverse, BooleanAxioms And/OrCommutativity,
+  DoubleNegation, AndIdempotence all PROVED with identical steps/rules/cps.
+  ZeroIsAbsorbing is the one that explodes (above).
+
+VERDICT (FINAL, DEFERRED -- third direct disproof): the lever the task
+hypothesized (a scoped comm-aware backward subsumption that drops slot15 like
+WM) is now IMPLEMENTED and MEASURED.  It is correct in isolation (drops slot15
+byte-for-byte as WM, knob OFF inert, suite green) but (a) forks soa to 99
+because thvm's slot15 is the UNIQUE parent of the pick-99 COMM copy whereas WM's
+copy comes from a different live parent, and (b) explodes a commutative-ring
+baseline via remove-and-rederive AC-thrash.  No baseline-preserving local
+subsumption can both drop slot15 and preserve its uniquely-parented COMM copy;
+that requires matching WM's CP-formation graph + FIFO-age interleave globally.
+Knob retained DEFAULT OFF as the faithful WM mechanism whose isolated
+correctness pins the global-reorder dependency.

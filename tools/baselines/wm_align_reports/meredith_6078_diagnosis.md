@@ -1,5 +1,61 @@
 # Meredith AndAssoc @6078 -- root cause (instrumented-wmcli diagnosis)
 
+## GAP FULLY MEASURED (2026-06-21, run-confirmed, slot-reuse un-confounded)
+
+CP-gen is correct IN THE ACTUAL RUN (not just isolation): grepping the cpgen by
+the rule126/rule36 TERMS (not slots), thvm does 5 rule126-OUTER x rule36-INNER
+overlaps at positions (root),1.,1.1.,1.1.0.,1.1.1., and the **pos=1.1.** one
+yields cp(norm) = `C3(x_0, C3(x_0, x_1)) = C3(C3(x_1, x_1), x_0)` = `a.(a.b) =
+(b.b).a` = T. So thvm forms T from rule126 x rule36 exactly like WM. The earlier
+"rule126 never an outer T-producer (count 0)" was the SAME canonicalization
+artifact (a too-specific T pattern).
+
+The gap is the keep-MULTIPLICITY, now measured on a 6500-pick run:
+* thvm GENERATES T (cp(norm)=T) **451** times; CLASSIFIES/keeps only **28**.
+* The kept-T cp_seqs have a **drought of 7879 between seq 15233 and 23112**;
+  pick 6078 (~seq 23000) falls INSIDE it -> the pri=120 band is dry exactly there.
+* WM keeps T ~283 times and replenishes through the 6078 epoch.
+* T is `joinable=0` for all 451 (never dropped as joinable); cpfate shows no
+  perm/rule/queue DROP for T. So the 451->28 reduction is NOT a traced filter --
+  it is the push-time re-normalization / rule-set-timing (a generated T reduces to
+  a different CP under the rules live at push, or the wmo_rank batch keeps fewer).
+
+=> The lever is the keep-multiplicity of T across the drought, governed by
+wm_order.c's FIFO-formation reproduction + the rule-set/normalize timing. NOT a
+CP-gen gap. Closing it = reproduce WM's exact T-keep multiplicity/order (global
+wm_order rework, baseline-regression risk). The OPEN sub-question for a targeted
+fix: WHY do 423 of 451 generated T's not survive to the queue (push-renormalize
+to non-T? a transient rule reducing T that WM lacks?) -- pin that and the keep
+gap may be closable without a full global reorder.
+
+## CONTRADICTION RESOLVED (2026-06-21): thvm DOES form T from rule126 x rule36
+
+The long-running "UNRESOLVED CONTRADICTION" (thvm's complete enumeration of the
+@6078 parent pair allegedly lacks the 2-var target T) is settled: it was a
+term-matching artifact, the SAME canonicalization blind spot that bit every
+"thvm is missing CP X" finding this lineage.
+
+Method: captured the @6078 CP's RELIABLE formation parents from the instrumented
+ELProver (WM_CLASSDUMP, w2=23993): aP=126 = `x.(y.((z.x).(w.z))) -> (y.z).x`
+[**4 vars** -- the prior unit test used a wrong 3-var rule126, an ElternNr-reuse
+artifact], oP=36 = `x.((x.y).(y.z)) -> y.x`, overlap position = rule126's pos-1
+subterm `y.((z.x).(w.z))`. New probe tests/test_cp_mered6078.c builds those exact
+terms and enumerates all CPs. thvm's pos-1 overlap (A1#1) NORMALIZES to
+`(C3 V0 (C3 V0 V1)) # (C3 (C3 V1 V1) V0)` = `a.(a.b) # (b.b).a`, which IS T
+`(x.x).y # y.(y.x)` under the renaming V0<->V1 + orientation swap. (The probe's
+own is_T check still reports 0 -- it shares the same_eqn/normalize_vars
+canonicalization artifact; the PRINTED normalized form is the ground truth.)
+
+So thvm's CP-gen is CORRECT: it forms T from rule126 x rule36 exactly as WM does.
+@6078 is therefore NOT a CP-generation gap. It is the CP-formation MULTIPLICITY/
+TIMING drought (thvm forms T 16 times, last at cp_seq 15233, consumed before pick
+6078; WM keeps replenishing) -- exactly the WM-side deferred conclusion the
+"RESOLVED-AS-WM-SIDE" section below reached independently. Both routes now agree:
+thvm-side has no defect; the divergence is WM's CP-formation order/multiplicity,
+deferred (same family as the residual deep-multiplicity matrix rows).
+
+
+
 Date: 2026-06-17. Branch: main (worktree wm-parity).
 
 ## RESOLUTION (2026-06-17, supersedes everything below)
