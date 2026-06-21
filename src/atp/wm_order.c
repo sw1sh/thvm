@@ -170,6 +170,15 @@ typedef struct AtpWmOrder {
   WmoReg  *reg;
   u32      n_reg, cap_reg;
   u32      rank_misses;       // CPs the ranker could not place (fallback)
+  // Persistent tops-DFS arrival buffer.  wmo_tops_rank runs a fresh DFS
+  // per CP rank query; its arrival array (WMO_TOPS_ARR_CAP pointers, ~128KB)
+  // was malloc/free'd on every call -- a fixed per-CP cost that dominated
+  // the WM-faithful path's CP-generation self-time.  The DFS is never
+  // re-entrant (wmo_dfs only recurses into itself; atp_wmo_rank issues its
+  // two wmo_tops_rank calls sequentially), so one buffer reused across all
+  // calls is byte-identical to per-call allocation.  Lazily sized on first
+  // use; freed in atp_wmo_free.
+  void   **tops_arr;
 } AtpWmOrder;
 
 // ---------- cells ----------
@@ -1196,7 +1205,38 @@ typedef struct {
 typedef struct {
   WmoBind tvar[WMO_MAX_VARS + 1u];   // stored/tree vars by canonical id
   WmoBind qvar[WMO_MAX_VARS + 1u];   // query vars by canonical id
+  // Highest var-slot index written so far (0 = no binding).  Faces carry
+  // canonical first-occurrence numbering, so live var ids are a small
+  // prefix (<=5 across the measured WM corpus, table sized for 64).  The
+  // DFS copies the binding table per node descent for backtracking;
+  // copying only [0..hi] instead of the full 64-slot table cuts the
+  // dominant memmove cost.  A read of a slot index > hi is necessarily
+  // unbound (hi is the write watermark), so wmo_deref/unify treat it as
+  // NULL -- byte-identical to the full-table copy.
+  u32 hi;
 } WmoUnif;
+
+// Copy only the live prefix [0..src->hi] of both var tables (see WmoUnif.hi).
+static inline void wmo_unif_copy(WmoUnif *dst, const WmoUnif *src) {
+  u32 hi = (src->hi > WMO_MAX_VARS) ? WMO_MAX_VARS : src->hi;
+  u32 n = hi + 1u;
+  memcpy(dst->tvar, src->tvar, n * sizeof(WmoBind));
+  memcpy(dst->qvar, src->qvar, n * sizeof(WmoBind));
+  dst->hi = src->hi;
+}
+
+// Extend the watermark to cover var id `vid`, zeroing any slots in the
+// gap (old_hi, vid) so every index in [0..hi] is a valid binding cell
+// (NULL = unbound).  Without this a later read at a gapped index would
+// see uninitialised stack garbage instead of NULL.
+static inline void wmo_unif_extend(WmoUnif *u, u32 vid) {
+  if (vid <= u->hi) return;
+  for (u32 k = u->hi + 1u; k <= vid && k <= WMO_MAX_VARS; k++) {
+    u->tvar[k].cells = NULL;
+    u->qvar[k].cells = NULL;
+  }
+  u->hi = vid;
+}
 
 // Follow a variable's binding chain to its representative.  Updates
 // *cells/*len/*side in place to the deref'd term: either an unbound
@@ -1207,6 +1247,7 @@ typedef struct {
 static void wmo_deref(WmoUnif *u, const WmoCell **cells, u32 *len, u8 *side) {
   u32 guard = 2u * (WMO_MAX_VARS + 1u) + 1u;
   while (guard-- != 0u && (*cells)->is_var && *len == 1u) {
+    if ((*cells)->sym > u->hi) return;          // beyond watermark = unbound
     WmoBind *slot = (*side == 0u) ? &u->qvar[(*cells)->sym]
                                   : &u->tvar[(*cells)->sym];
     if (slot->cells == NULL) return;            // unbound representative
@@ -1231,11 +1272,13 @@ static u8 wmo_unify_cells(const WmoCell *a, u32 alen, u8 aside,
   u8 b_is_var = b->is_var && blen == 1u;
   if (a_is_var && b_is_var && aside == bside && a->sym == b->sym) return 1u;
   if (a_is_var) {
+    wmo_unif_extend(u, a->sym);
     WmoBind *slot = (aside == 0u) ? &u->qvar[a->sym] : &u->tvar[a->sym];
     slot->cells = b; slot->off = 0u; slot->len = blen; slot->side = bside;
     return 1u;
   }
   if (b_is_var) {
+    wmo_unif_extend(u, b->sym);
     WmoBind *slot = (bside == 0u) ? &u->qvar[b->sym] : &u->tvar[b->sym];
     slot->cells = a; slot->off = 0u; slot->len = alen; slot->side = aside;
     return 1u;
@@ -1251,12 +1294,18 @@ static u8 wmo_unify_cells(const WmoCell *a, u32 alen, u8 aside,
   return 1u;
 }
 
-static u8 wmo_unify_var(WmoBind *slot, const WmoCell *t, u32 tlen, u8 tside,
-                        WmoUnif *u, u32 fuel) {
-  if (slot->cells != NULL) {
+// Unify the var (canonical id `vid` in table `vside`: 0 = query, 1 = tree)
+// against the term slice `t`.  Takes the id (not a raw slot pointer) so it
+// can honour the WmoUnif.hi watermark: a slot index > hi is unbound (the
+// per-descent copy only carries [0..hi]), and a fresh bind extends hi.
+static u8 wmo_unify_var(u8 vside, u32 vid, const WmoCell *t, u32 tlen,
+                        u8 tside, WmoUnif *u, u32 fuel) {
+  WmoBind *slot = (vside == 0u) ? &u->qvar[vid] : &u->tvar[vid];
+  if (vid <= u->hi && slot->cells != NULL) {
     return wmo_unify_cells(slot->cells + slot->off, slot->len, slot->side,
                            t, tlen, tside, u, fuel);
   }
+  wmo_unif_extend(u, vid);
   slot->cells = t; slot->off = 0; slot->len = tlen; slot->side = tside;
   return 1u;
 }
@@ -1287,13 +1336,13 @@ static u8 wmo_unify_rest(WmoDfs *d, WmoLeaf *leaf, u32 si, u32 qi,
         si++; qi++;
       } else {
         u32 se = wmo_sub_end(key, si);
-        if (!wmo_unify_var(&u->qvar[qc->sym], key + si, se - si, 1u, u, 64u))
+        if (!wmo_unify_var(0u, qc->sym, key + si, se - si, 1u, u, 64u))
           return 0u;
         si = se; qi++;
       }
     } else {
       u32 qe = wmo_sub_end(d->q, qi);
-      if (!wmo_unify_var(&u->tvar[sc->sym], d->q + qi, qe - qi, 0u, u, 64u))
+      if (!wmo_unify_var(1u, sc->sym, d->q + qi, qe - qi, 0u, u, 64u))
         return 0u;
       si++; qi = qe;
     }
@@ -1312,7 +1361,8 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
   if (depth_guard == 0u) return;
   if (is_leaf) {
     WmoLeaf *leaf = (WmoLeaf *)n_raw;
-    WmoUnif u2 = *u;
+    WmoUnif u2;
+    wmo_unif_copy(&u2, u);
     u32 si = (spos != 0xffffffffu) ? spos : leaf->hang + 1u;
     if (wmo_unify_rest(d, leaf, si, qi, &u2)) wmo_dfs_emit(d, leaf);
     return;
@@ -1337,8 +1387,9 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
     if (nv > 1u) qsort(vkids, nv, sizeof(WmoKid), wmo_kid_cmp_vardesc);
     u32 qe = wmo_sub_end(d->q, qi);
     for (u32 k = 0; k < nv; k++) {
-      WmoUnif u2 = *u;
-      if (wmo_unify_var(&u2.tvar[vkids[k].sym.sym], d->q + qi, qe - qi, 0u,
+      WmoUnif u2;
+      wmo_unif_copy(&u2, u);
+      if (wmo_unify_var(1u, vkids[k].sym.sym, d->q + qi, qe - qi, 0u,
                         &u2, 64u)) {
         wmo_dfs(d, vkids[k].child, vkids[k].is_leaf, qe, 0xffffffffu, &u2,
                 depth_guard - 1u);
@@ -1353,7 +1404,8 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
     }
     if (nv > 1u) qsort(vkids, nv, sizeof(WmoKid), wmo_kid_cmp_vardesc);
     for (u32 k = 0; k < nv; k++) {
-      WmoUnif u2 = *u;
+      WmoUnif u2;
+      wmo_unif_copy(&u2, u);
       WmoCell vcell = vkids[k].sym;
       if (wmo_unify_cells(&d->q[qi], 1u, 0u, &vcell, 1u, 1u, &u2, 64u)) {
         wmo_dfs(d, vkids[k].child, vkids[k].is_leaf, qi + 1u, 0xffffffffu,
@@ -1361,8 +1413,9 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
       }
     }
     for (WmoEntry *e = n->exits; e != NULL; e = e->next) {
-      WmoUnif u2 = *u;
-      if (wmo_unify_var(&u2.qvar[qc->sym], e->sub, e->sub_len, 1u, &u2,
+      WmoUnif u2;
+      wmo_unif_copy(&u2, u);
+      if (wmo_unify_var(0u, qc->sym, e->sub, e->sub_len, 1u, &u2,
                         64u)) {
         u32 land = wmo_node_depth(e->start) + e->sub_len;
         wmo_dfs(d, e->ziel, e->ziel_leaf, qi + 1u,
@@ -1393,6 +1446,7 @@ static void atp_wmo_free(AtpWmOrder *w) {
   for (u32 t = 0; t < 2u; t++) wmo_free_subtree(w->tree[t].root, 0u);
   for (u32 r = 0; r < w->n_reg; r++) free(w->reg[r].cells);
   free(w->reg);
+  free(w->tops_arr);
   free(w);
 }
 
@@ -1720,8 +1774,13 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
   // WMO_MAX_CELLS (768) cells, so 4000 covers the deepest query without
   // cutting a descent short of its target leaf.
   enum { WMO_TOPS_ARR_CAP = 16384u };
-  WmoLeaf **arr = (WmoLeaf **)malloc(WMO_TOPS_ARR_CAP * sizeof(WmoLeaf *));
-  if (arr == NULL) return 0u;
+  // Reuse the per-AtpWmOrder arrival buffer instead of malloc/free per call
+  // (the DFS is non-re-entrant; see AtpWmOrder.tops_arr).  Lazily allocated.
+  if (w->tops_arr == NULL) {
+    w->tops_arr = (void **)malloc(WMO_TOPS_ARR_CAP * sizeof(WmoLeaf *));
+    if (w->tops_arr == NULL) return 0u;
+  }
+  WmoLeaf **arr = (WmoLeaf **)w->tops_arr;
   WmoDfs d = { q, qn, arr, 0u, WMO_TOPS_ARR_CAP };
   WmoUnif u;
   memset(&u, 0, sizeof u);
@@ -1743,7 +1802,6 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
       }
     }
   }
-  free(arr);
   return hit;
 }
 
