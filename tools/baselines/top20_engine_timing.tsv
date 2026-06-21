@@ -1,0 +1,22 @@
+theorem	wm_cps	thvm_engine_default_s	thvm_engine_wm_s	wmcli_s	source	winner	note
+WolframAxioms__OrAssociativity	3750287	60.91	60.91	5.838	banked	wmcli(thvm-noproof)	RSS-unsafe assoc-tier; banked PRE-index (Failed@60s)
+WolframAxioms__AndAssociativity	3750287	61.0	61.0	5.805	banked	wmcli(thvm-noproof)	RSS-unsafe assoc-tier; banked PRE-index (Failed@60s)
+CombinatorAxioms__SKIToBCKW__c1	1361578	60.0	61.1	7.656	live	wmcli(thvm-noproof)	neither config proves per-conjunct goal in 60s (RUNNING)
+CombinatorAxioms__SKIToBCKW__c2	903810	60.0	60.0	4.911	live	wmcli(thvm-noproof)	neither config proves per-conjunct goal in 60s (RUNNING)
+WolframAxioms__Commutativity	738928	5.8333	RSS-spike-killed	2.352	live	wmcli	WM preset RSS-spike>8GB KILLED; default proves at 567MB
+WolframAxioms__DoubleNegation	713503	3.5411	RSS-spike-killed	2.319	live	wmcli	WM preset RSS-spike>8GB KILLED; default proves at 318MB
+MeredithAxioms__OrAssociativity	603793	1.04	1.04	0.525	banked	wmcli	RSS-unsafe assoc-tier; banked PRE-index
+MeredithAxioms__AndAssociativity	603793	1.06	1.06	0.525	banked	wmcli	RSS-unsafe assoc-tier; banked PRE-index
+CombinatorAxioms__SKIToBCKW__c3	69	60.0	0.0008	0.001	live	thvm	WM proves instantly (8 steps); default RUNNING@60s
+BooleanAxioms__DeMorgan__c1	20843	0.1199	0.1973	0.01	live	wmcli	
+BooleanAxioms__ImpliesRobbinsAxioms__c3	20524	0.1171	0.198	0.01	live	wmcli	
+BooleanAxioms__ImpliesHuntingtonAxioms__c3	20524	0.1205	0.2028	0.01	live	wmcli	
+BooleanAxioms__DeMorgan__c2	20482	0.114	0.1945	0.01	live	wmcli	
+BooleanAxioms__OrAssociativity	11533	0.13	0.13	0.006	banked	wmcli	name-pattern assoc-tier; banked
+BooleanAxioms__ImpliesRobbinsAxioms__c2	11533	0.0439	0.1106	0.006	live	wmcli	
+BooleanAxioms__ImpliesHuntingtonAxioms__c2	11533	0.0444	0.111	0.006	live	wmcli	
+BooleanAxioms__AndAssociativity	11491	0.11	0.11	0.006	banked	wmcli	name-pattern assoc-tier; banked
+CommutativeRingWithIdentityAxioms__MinusOneYieldsInverse	2812	0.0204	0.0297	0.003	live	wmcli	
+CommutativeRingAxioms__ZeroIsAbsorbing	2523	0.017	0.0264	0.003	live	wmcli	
+CommutativeRingWithIdentityAxioms__ZeroIsAbsorbing	2428	0.0188	0.0259	0.002	live	wmcli	
+McCuneAxioms__Associativity	2202	0.1921	0.0219	0.002	live	wmcli	
