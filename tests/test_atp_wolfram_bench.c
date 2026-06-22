@@ -989,20 +989,34 @@ int main(int argc, char **argv) {
       // tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_cube_arrival(
           s, (getenv("THVM_ATP_CUBE_ARRIVAL") != NULL) ? 1u : 0u);
+      // WM IR-victim drain within-leaf chain tiebreak (DEFAULT OFF): fold a
+      // re-derivation victim's chain index within its discrimination-tree leaf
+      // into the drain-order key so two victims sharing a leaf re-enter the
+      // queue in WM's BK_Regeln -> TP_Nachf head-first chain order
+      // (DSBaumKnoten.h:482-495), not thvm's slot-scan push order.  The w=224
+      // nested cube-mirror pair at soa pick 1505 (traces 2570 at chainpos 2,
+      // 2817 at chainpos 1 in equation leaf rank 1) collided on one leaf-rank
+      // key; this tiebreak orders them head-first like WM.  Advances soa
+      // firstdiv past 1505.  THVM_ATP_DRAIN_CHAINPOS opts in (also turned on by
+      // FORMATION_FIFO below).  See tools/baselines/wm_align_reports/soa.txt.
+      thvm_atp_set_use_drain_chainpos(
+          s, (getenv("THVM_ATP_DRAIN_CHAINPOS") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /
-      // CUBE_ARRIVAL) that together reproduce WM's combined-superposition-scan
-      // emission order: per overlap position, every RULE-tree partner
-      // (discrimination-tree leaf-arrival order) precedes every EQUATION-tree
-      // partner (Unifikation1.c U1_KPsBildenZuRegel:1527-1547), so the
-      // surviving copy of a multiply-formed term inherits WM's CPNr age (w2 =
-      // ++CPNr at insertion, NewClassification.c C_Classify:325 <-
-      // recentCPinsert).  Atop the base CP_SIDE/FLAT_SUBSUME/COMM_REAGE/
-      // COMM_DROP_DUP knobs THVM_ATP_FORMATION_FIFO reaches soa firstdiv 1505 --
-      // exactly equivalent to setting the four individual correction flags (the
-      // setter runs last, after the four individual env reads above, so it ORs
-      // them on).  See tools/baselines/wm_align_reports/soa.txt.
+      // CUBE_ARRIVAL) plus the re-derivation drain within-leaf chain tiebreak
+      // (DRAIN_CHAINPOS) that together reproduce WM's combined-superposition-
+      // scan emission order AND its IR-victim re-queue order: per overlap
+      // position, every RULE-tree partner (discrimination-tree leaf-arrival
+      // order) precedes every EQUATION-tree partner (Unifikation1.c
+      // U1_KPsBildenZuRegel:1527-1547), so the surviving copy of a
+      // multiply-formed term inherits WM's CPNr age (w2 = ++CPNr at insertion,
+      // NewClassification.c C_Classify:325 <- recentCPinsert).  Atop the base
+      // CP_SIDE/FLAT_SUBSUME/COMM_REAGE/COMM_DROP_DUP knobs
+      // THVM_ATP_FORMATION_FIFO reaches soa firstdiv 1558 -- exactly equivalent
+      // to setting the five individual correction flags (the setter runs last,
+      // after the five individual env reads above, so it ORs them on).  See
+      // tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_formation_fifo(
           s, (getenv("THVM_ATP_FORMATION_FIFO") != NULL) ? 1u : 0u);
       // Overlap-exhausted-equation gate (WM: a newly-derived commutativity

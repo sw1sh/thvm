@@ -9185,11 +9185,23 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_formation_fifo = on ? 1u : 0u;
   if (on) {
-    s->use_leaf_tiebreak = 1u;
-    s->use_revface_group = 1u;
-    s->use_posgroup      = 1u;
-    s->use_cube_arrival  = 1u;
+    s->use_leaf_tiebreak    = 1u;
+    s->use_revface_group    = 1u;
+    s->use_posgroup         = 1u;
+    s->use_cube_arrival     = 1u;
+    s->use_drain_chainpos   = 1u;
   }
+}
+
+// WM IR-victim drain within-leaf chain tiebreak (see
+// AtpState.use_drain_chainpos): fold a re-derivation victim's chain index
+// within its discrimination-tree leaf into the drain-order key, so two
+// victims sharing a leaf re-enter the queue in WM's BK_Regeln -> TP_Nachf
+// head-first chain order (DSBaumKnoten.h:482-495) rather than thvm's
+// slot-scan push order.  DEFAULT OFF.
+fn void thvm_atp_set_use_drain_chainpos(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_drain_chainpos = on ? 1u : 0u;
 }
 
 // Push-time queue-vs-queue subsumption gate (no WM counterpart; see

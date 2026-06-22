@@ -1626,11 +1626,19 @@ static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t) {
 // re-entered equations.
 //
 // Key layout: bit 31 = 1 for rule victims (tree 0), 0 for equation
-// victims (tree 1) -- equations sort first; low bits = the victim's
-// distinguished-face (face 0) leaf-list rank in its tree.  Removals of
-// EARLIER-captured victims only delete leaves (never reorder), so ranks
-// captured at successive push moments preserve the pass-start relative
-// order between any two surviving victims.
+// victims (tree 1) -- equations sort first; the next field is the
+// victim's distinguished-face (face 0) leaf-list rank in its tree.
+// Removals of EARLIER-captured victims only delete leaves (never
+// reorder), so ranks captured at successive push moments preserve the
+// pass-start relative order between any two surviving victims.
+//
+// Within a leaf two victims share a leaf-list rank, so when
+// use_drain_chainpos is set the victim's chain index within the leaf is
+// folded into the low 8 bits as a tiebreak: WM's BK_forRegelnRobust walks
+// each leaf's fact chain head-first following TP_Nachf (DSBaumKnoten.h:
+// 482-495), and the chain prepends on insert (newest first), so
+// head-first = chain index 0,1,2.. ascending -- exactly this tiebreak.
+// (leafrank is shifted up by 8; both ranks are tiny, no overflow.)
 static u32 atp_wmo_victim_drain_key(AtpState *s, u32 trace) {
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   if (w == NULL) return 0x7fffffffu;
@@ -1649,7 +1657,18 @@ static u32 atp_wmo_victim_drain_key(AtpState *s, u32 trace) {
   for (WmoLeaf *l = w->tree[tree].ll_head; l != NULL; l = l->ll_next) {
     for (u32 c = 0; c < l->n_chain; c++) {
       if (l->chain[c].trace == trace && l->chain[c].face == 0u) {
-        return ((tree == 0u ? 1u : 0u) << 31) | (rank & 0x7fffffffu);
+        u32 hi = (tree == 0u ? 1u : 0u) << 31;
+        if (s->use_drain_chainpos) {
+          // Fold the within-leaf chain index `c` (head-first = newest =
+          // 0,1,2.., the order BK_forRegelnRobust reads the prepended leaf
+          // chain via BK_Regeln -> TP_Nachf, DSBaumKnoten.h:482-495 with the
+          // prepend at RegelHinzufuegen, DSBaumOperationen.c:343-346) below
+          // the leaf-list rank, so two victims sharing a leaf drain head-first
+          // like WM rather than by thvm's slot-scan push order.
+          u32 cp = (c > 0xffu) ? 0xffu : c;
+          return hi | (((rank & 0x7fffffu) << 8) | cp);
+        }
+        return hi | (rank & 0x7fffffffu);
       }
     }
     rank++;

@@ -5613,11 +5613,32 @@ typedef struct {
   // (atp_cp_set_interreduce) preserves cp_seq and re-derivation
   // (atp_wm_demote_drain) re-stamps it, mirroring WM's C_ReClassify
   // ("w2 wird nicht geaendert") / KPV_IROpferBehandeln respectively --
-  // already ported.  Atop the base CP_SIDE/FLAT_SUBSUME/COMM_REAGE/
-  // COMM_DROP_DUP knobs this reaches soa firstdiv 1505 -- exactly equivalent
-  // to setting the four individual correction flags.  OFF byte-identical;
-  // opt-in only.  See tools/baselines/wm_align_reports/soa.txt.
+  // already ported.  It additionally turns on the IR-victim drain
+  // within-leaf chain tiebreak (use_drain_chainpos).  Atop the base
+  // CP_SIDE/FLAT_SUBSUME/COMM_REAGE/COMM_DROP_DUP knobs this reaches soa
+  // firstdiv 1558 -- exactly equivalent to setting the five individual
+  // correction flags.  OFF byte-identical; opt-in only.  See
+  // tools/baselines/wm_align_reports/soa.txt.
   u8    use_formation_fifo;
+  // Waldmeister IR-victim drain within-leaf chain tiebreak (env
+  // THVM_ATP_DRAIN_CHAINPOS, DEFAULT OFF; also turned ON under
+  // use_formation_fifo).  WM drains the IR REPuffer that GMInterred /
+  // RMLinksInterred filled (Interreduktion.c:288-339) via
+  // RE_forGleichungenRobust / RE_forRegelnRobust = BK_forRegelnRobust
+  // (DSBaumKnoten.h:482-495): leaves in BK_NachfBlatt order, and WITHIN a
+  // leaf the fact chain head-first following TP_Nachf -- i.e. the leaf's
+  // chain order (PREPEND on insert => newest first, so head-first = chain
+  // index 0,1,2..).  atp_wmo_victim_drain_key keyed victims only by their
+  // leaf-list rank, so two victims sharing a leaf (the w=224 nested
+  // cube-mirror pair at soa pick 1505: traces 2570 at chainpos 2 and 2817
+  // at chainpos 1 in equation leaf rank 1) collided on one key and the
+  // stable sort fell back to thvm's slot-scan push order -- the OPPOSITE
+  // of WM's chain order.  This gate folds the victim's within-leaf chain
+  // index into the drain key as the low-order tiebreak (after leaf-list
+  // rank), so same-leaf victims drain head-first like BK_Regeln -> Nachf.
+  // OFF byte-identical; advances soa firstdiv 1505 -> beyond.  See
+  // tools/baselines/wm_align_reports/soa.txt.
+  u8    use_drain_chainpos;
   // Waldmeister LRSortieren side-canonicalisation (SpezNormierung.c
   // :517-534, env THVM_ATP_LR_SORTIEREN, default OFF): a derived
   // unorientable equation is stored with WM's canonical left/right side
@@ -6004,6 +6025,10 @@ fn void      thvm_atp_set_use_cube_arrival(AtpState *s, u8 on);
 // equivalent to setting those four flags (see AtpState.use_formation_fifo).
 // DEFAULT OFF.
 fn void      thvm_atp_set_use_formation_fifo(AtpState *s, u8 on);
+// WM IR-victim drain within-leaf chain tiebreak (see
+// AtpState.use_drain_chainpos).  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void      thvm_atp_set_use_drain_chainpos(AtpState *s, u8 on);
 // Push-time queue-vs-queue subsumption gate (thvm-native, no WM
 // counterpart; see AtpState.use_queue_subsume).  Default ON; the
 // "Waldmeister"* presets turn it OFF.

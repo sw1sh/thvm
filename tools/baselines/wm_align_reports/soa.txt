@@ -1,5 +1,49 @@
 soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv 126 -> 288 -> 290
 
+## ADVANCED 2026-06-22: THVM_ATP_DRAIN_CHAINPOS -- re-derivation drain within-leaf chain tiebreak
+
+Atop FormationFifo (firstdiv=1505), the residual at pick-1505 is a CLEAN ADJACENT
+2-ELEMENT TRANSPOSITION of the w=224 nested cube-mirror pair, re-stamped by the
+re-derivation drain atp_wm_demote_drain (NOT atp_wmo_rank).  The two victims
+(thvm seq 3506/3507, WM `ue (-17,0)`/`ue (-16,0)`) are demoted in ONE interreduce
+pass and share a discrimination-tree leaf (distinguished face = the `x.x` side,
+wmo equation tree leaf rank 1).  atp_wmo_victim_drain_key keyed victims ONLY by
+leaf-list rank, so the two collided on one key and the stable sort fell back to
+thvm's slot-scan push order -- the OPPOSITE of WM's chain order.
+
+ROOT (WM file:line): WM drains the IR REPuffer that GMInterred / RMLinksInterred
+filled (Interreduktion.c:288-339) via RE_forGleichungenRobust / RE_forRegelnRobust
+= BK_forRegelnRobust (DSBaumKnoten.h:482-495): leaves in BK_NachfBlatt order, and
+WITHIN a leaf the fact chain HEAD-FIRST following TP_Nachf.  The chain PREPENDS on
+insert (RegelHinzufuegen, DSBaumOperationen.c:343-346), so head-first = chain
+index 0,1,2.. ascending.  THVM_ATP_DRAIN_CHAINPOS folds the victim's within-leaf
+chain index into the drain key as the low-order tiebreak below leaf-list rank
+(src/atp/wm_order.c atp_wmo_victim_drain_key), so same-leaf victims drain
+head-first exactly like BK_Regeln -> Nachf.  Gated behind use_drain_chainpos
+(DEFAULT OFF; also turned ON under FormationFifo).
+
+RESULT: firstdiv 1505 -> 1558.  ON-vs-OFF prefix 1..1504 byte-identical, prefix
+        1..1557 weights-exact; WALDMEISTER-only common prefix byte-identical
+        (clean HEAD md5 073e9247...); bin/test_atp 136232/136232; wm_pr corpus
+        spot-check (DoubleNegation/InverseOfInverse/BooleanOrAssoc/Sheffer
+        Commutativity/McCune InverseOfComposite/Wolfram Commutativity) CPSEL
+        common-prefix byte-identical vs clean HEAD.  KNOB OFF (default):
+        byte-identical by construction (the gated branch returns the prior key).
+
+RESIDUAL at pick-1558 (re-derivation SCHEDULE, deeper frontier -- NOT a shape
+knob): the next cube-mirror pair (thvm seq 3706/3707, WM `ue (-14,0)`/`ue (-18,0)`)
+is ALSO a same-leaf pair, but WM emits them in OPPOSITE-of-chain-order (`-14`
+older, head=`-18` newer; WM picks `-14` first).  thvm demotes both in ONE pass
+(seq 3706 then 3707 by head-first chain); WM's `-14` carries a smaller w2 because
+WM reduces it in an EARLIER interreduce pass.  Confirmed lineage-dependent, NOT
+shape: the depth-1 cube-mirror pair (picks 290/291, `ue (24,-7)`/`ue (24,-6)`,
+genuine TWO-parent superposition) emits RIGHT-before-LEFT -- the OPPOSITE shape
+order to the re-derivation cases at 1505/1558 -- so a LEFT-before-RIGHT shape rule
+would mis-order it.  Matching pick-1558 requires reproducing WM's interreduce pass
+SCHEDULE (which new rule reduces which equation in which pass), which thvm's
+slot-by-slot interreduce does not; the wmo chain order itself is faithful (thvm
+chain [3089,2817,2570,2092] == WM eqn order [-18,-17,-16,-14]).  DEFERRED.
+
 ## RESOLVED 2026-06-22: THVM_ATP_CUBE_ARRIVAL -- w=224 double-cube k3-arrival swap
 
 Atop the 8 prior knobs (firstdiv=1320), the residual at pick-1320 is a CLEAN
