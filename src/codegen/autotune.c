@@ -811,6 +811,15 @@ static int kautotune_iso_begin(u32 kid) {
   if (out_nbytes == 0) {
     return 0;
   }
+  // metal_buf_alloc EXITS the process (not returns 0) when a request
+  // exceeds THVM_MAX_BUF_BYTES -- a pathological im2col/EXPAND
+  // intermediate.  Check the ceiling here so the isolated search declines
+  // such a kernel cleanly instead of aborting the whole run.  These giant
+  // intermediates are never the tunable conv/matmul targets anyway.
+  u64 ceiling = thvm_buf_byte_ceiling();
+  if (ceiling != 0 && out_nbytes > ceiling) {
+    return 0;
+  }
   ISO.out_buf_id = b->buf_alloc(out_nbytes);
   if (ISO.out_buf_id == 0) {
     return 0;
@@ -823,8 +832,26 @@ static int kautotune_iso_begin(u32 kid) {
       // the caller fall back to NOT searching this kernel in isolation.
       goto fail;
     }
+    // A strided-view input the dispatch path pre-materialises (gather)
+    // reads through metal_tendesc_strided_index(td, k) over the LIVE
+    // TenDesc's view, whose max element index can exceed input_numels[i]
+    // (the view's logical numel) -- a contiguous scratch buffer sized to
+    // numel would be read out of bounds.  Decline the isolated search for
+    // such a kernel rather than risk an OOB read on the scratch.  The
+    // high-value FLUX targets (conv/matmul tile kernels) read contiguous
+    // or chain-composed inputs, so this loses nothing that matters.
+    int composed = (ke->input_chain_composed != NULL
+                    && ke->input_chain_composed[i]);
+    u32 tid = ke->input_tids != NULL ? ke->input_tids[i] : 0;
+    if (!composed && tid != 0 && tid < TENS_NEXT) {
+      TenDesc const *td = &TENS[tid];
+      if (!td->view.contiguous || td->view.offset != 0 || td->nviews != 0) {
+        goto fail;
+      }
+    }
     u64 nbytes = dtype_storage_bytes(dt, numel);
-    if (nbytes == 0) {
+    if (nbytes == 0 || (ceiling != 0 && nbytes > ceiling)) {
+      // 0 == undecodable dtype; over-ceiling would exit(1) in buf_alloc.
       goto fail;
     }
     u32 buf = b->buf_alloc(nbytes);
