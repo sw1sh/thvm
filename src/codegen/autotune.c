@@ -874,6 +874,26 @@ fn int kernel_autotune(u32 kid) {
     }
   }
 
+  // Never run the BENCH SEARCH during a JIT capture.  The search executes
+  // direct bench dispatches (kernel_bench_fire); a dispatch during the
+  // capturing forward -- even with capture paused -- commits the in-flight
+  // capture command batch and perturbs the live activation / buffer-planner
+  // state the recorded sequence depends on, corrupting the captured forward
+  // (empirically: a BEAM=2 FLUX velocity-net capture diverges to NaN over the
+  // Euler steps, and the VAE then decodes garbage).  tinygrad autotunes
+  // captured kernels in a SEPARATE compile pass on test buffers AFTER capture
+  // (engine/jit.py jit_lower -> compile_linear -> codegen/opt/search.py
+  // beam_search times candidates on caller `rawbufs`), never during the
+  // capturing forward.  thvm has no such post-capture pass yet, so the faithful
+  // behavior is: a captured kernel keeps its hand-coded baseline (correct,
+  // already applied before this) unless a PRIOR eager autotune cached a winner
+  // -- which the cache-load path above safely applies (it never benches).  Mark
+  // autotuned so the fire-time trigger doesn't re-propose on every replay.
+  if (jit_is_capturing()) {
+    ke->schedule->autotuned = 1;
+    return 0;
+  }
+
   // Mark autotuned at the START so nested/direct bench dispatches do
   // not re-enter this path if a backend helper fires through the public
   // kernel path.  axes_reset_to_default preserves the flag.
