@@ -1226,7 +1226,18 @@ fn int kernel_autotune_isolated(u32 kid) {
     // cross-stage corruption this whole path exists to avoid).
     return 0;
   }
+  // The search fires the kernel many times on scratch buffers; each fire
+  // records a dispatch route into K_PROFILE[kid].kind, which the JIT
+  // replay's ICB-batching decision reads (cg_kernel_dispatch_kind ->
+  // jit_replay_try_metal_graph_run).  A benched variant that takes a
+  // different route than the captured baseline would leave `kind` wrong
+  // and corrupt the warm replay.  Snapshot the profile slot before the
+  // search and restore it after, so the search leaves zero profile
+  // footprint; the first real replay re-records the true winning route.
+  u64 prof[6];
+  cg_profile_snapshot(kid, prof);
   int applied = kernel_autotune(kid);
+  cg_profile_restore(kid, prof);
   kautotune_iso_end();
   return applied;
 }

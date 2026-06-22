@@ -186,6 +186,37 @@ u32 cg_kernel_dispatch_kind(u32 kid) {
   return (u32)K_PROFILE[kid].kind;
 }
 
+// Snapshot / restore the whole per-kid profile slot.  The post-capture
+// isolated autotune (codegen/autotune.c) FIRES the kernel many times on
+// scratch buffers; each fire calls cg_profile_record, mutating
+// K_PROFILE[kid].kind -- which cg_kernel_dispatch_kind feeds into the JIT
+// replay's ICB-batching decision (jit_replay_try_metal_graph_run).  If a
+// benched tile variant takes a different dispatch route than the captured
+// baseline, the search would leave `kind` wrong and the warm replay's
+// batching would diverge from the capture's.  Snapshot before the search,
+// restore after, so the search is profile-state-neutral.  Opaque u64[4]
+// blob (KProfileSlot is 5 u64-sized fields) so the caller needs no struct.
+void cg_profile_snapshot(u32 kid, u64 out[6]) {
+  for (u32 i = 0; i < 6; i++) out[i] = 0;
+  if (kid == 0 || kid >= KPROFILE_CAP) return;
+  KProfileSlot const *s = &K_PROFILE[kid];
+  out[0] = (u64)s->kind;
+  out[1] = s->dispatch_count;
+  out[2] = s->total_us;
+  out[3] = s->gpu_us;
+  out[4] = s->gpu_samples;
+}
+
+void cg_profile_restore(u32 kid, u64 const in[6]) {
+  if (kid == 0 || kid >= KPROFILE_CAP) return;
+  KProfileSlot *s = &K_PROFILE[kid];
+  s->kind           = (KDispatchKind)in[0];
+  s->dispatch_count = in[1];
+  s->total_us       = in[2];
+  s->gpu_us         = in[3];
+  s->gpu_samples    = in[4];
+}
+
 fn u64 cg_kernel_dispatch_count(u32 kid) {
   if (kid == 0 || kid >= KPROFILE_CAP) return 0;
   return K_PROFILE[kid].dispatch_count;
