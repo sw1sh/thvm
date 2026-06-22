@@ -17,7 +17,7 @@ typedef struct {
   u32 kb;                 // K-block staged in threadgroup memory
 } RmuTcTile;
 static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
-                            RmuTcTile *out);
+                            u32 batch_extent, RmuTcTile *out);
 
 
 static int rmt_collect_conv2d_info(KernelEntry const *ke,
@@ -265,14 +265,16 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
       if (uop_classify_batched_matmul(sroot, &b_ax, &b_ext, &m_ax, &m_ext,
                                       &n_ax, &n_ext, &k_ext)
           && (m_ext % 8u) == 0 && (n_ext % 8u) == 0 && b_ext >= 1) {
-        // THVM_TC_BATCHED: route through the register-blocked tiled emitter --
-        // grid = batch * m_tiles * n_tiles threadgroups, local_m*local_n*32
-        // threads, MUST match rmu_emit_matmul_tc_tiled's _batch/_tg decode.
-        static int _tcb_k = 0, _tcb = 0;
+        // THVM_TC_BATCHED (default ON): route through the register-blocked tiled
+        // emitter -- grid = batch * m_tiles * n_tiles threadgroups,
+        // local_m*local_n*32 threads, MUST match rmu_emit_matmul_tc_tiled's
+        // _batch/_tg decode.  THVM_TC_BATCHED=0 falls back to the parallel_tc grid.
+        static int _tcb_k = 0, _tcb = 1;
         if (!_tcb_k) { char const *e = getenv("THVM_TC_BATCHED");
-                       _tcb = (e != NULL && e[0] == '1'); _tcb_k = 1; }
+                       if (e != NULL && e[0] == '0') _tcb = 0; _tcb_k = 1; }
         RmuTcTile btile;
-        if (_tcb && (k_ext % 8u) == 0 && rmu_tc_pick_tile(m_ext, n_ext, k_ext, &btile)) {
+        if (_tcb && (k_ext % 8u) == 0
+            && rmu_tc_pick_tile(m_ext, n_ext, k_ext, b_ext, &btile)) {
           u32 tm = btile.local_m * btile.rm * 8u, tn = btile.local_n * btile.rn * 8u;
           if ((m_ext % tm) == 0 && (n_ext % tn) == 0) {
             u64 ntg = (u64)b_ext * (u64)(m_ext / tm) * (u64)(n_ext / tn);
@@ -323,7 +325,7 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
         u32 n_global = 0;
         for (u32 i = 0; i < na; i++) if (types[i] == KAX_GLOBAL) n_global++;
         RmuTcTile tile;
-        if (n_global >= 2 && rmu_tc_pick_tile(qM, qN, qK, &tile)) {
+        if (n_global >= 2 && rmu_tc_pick_tile(qM, qN, qK, 0u, &tile)) {
           u32 tile_m = tile.local_m * tile.rm * 8u;
           u32 tile_n = tile.local_n * tile.rn * 8u;
           u64 ntg = (u64)(qM / tile_m) * (u64)(qN / tile_n);
@@ -349,7 +351,7 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
         u32 n_global = 0;
         for (u32 i = 0; i < na; i++) if (types[i] == KAX_GLOBAL) n_global++;
         RmuTcTile tile;
-        if (n_global >= 2 && rmu_tc_pick_tile(fM, fN, fK, &tile)) {
+        if (n_global >= 2 && rmu_tc_pick_tile(fM, fN, fK, 0u, &tile)) {
           u32 tile_m = tile.local_m * tile.rm * 8u;
           u32 tile_n = tile.local_n * tile.rn * 8u;
           u64 ntg = (u64)(fM / tile_m) * (u64)(fN / tile_n);
@@ -394,7 +396,7 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
           for (u32 i = 0; i < na; i++) if (types[i] == KAX_GLOBAL) n_global++;
           RmuTcTile tile;
           if (n_global >= 2
-              && rmu_tc_pick_tile(g2.M, g2.N, g2.K, &tile)) {
+              && rmu_tc_pick_tile(g2.M, g2.N, g2.K, 0u, &tile)) {
             u32 tile_m = tile.local_m * tile.rm * 8u;
             u32 tile_n = tile.local_n * tile.rn * 8u;
             u64 ntg = (u64)(g2.M / tile_m) * (u64)(g2.N / tile_n);

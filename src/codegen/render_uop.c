@@ -1794,17 +1794,21 @@ static int rmu_fuse_epilogue_on(void) {
   return on;
 }
 
-// THVM_TC_BATCHED (default OFF): route a TRUE batched matmul (attention's
+// THVM_TC_BATCHED (default ON): route a TRUE batched matmul (attention's
 // Q@K^T and @V, batch=heads) through the register-blocked tiled emitter
 // (rmu_emit_matmul_tc_tiled) instead of the ~2-TFLOPS parallel_tc per-8x8-tile
-// body -- ~5x on the attention GEMM.  The emitter adds a per-batch base offset
-// (_batch * M*K / K*N / M*N) to the A/B/C addresses; the dispatch grid becomes
-// batch * m_tiles * n_tiles.  Flag-off keeps the byte-identical parallel_tc path.
+// body.  The emitter adds a per-batch base offset (_batch * M*K / K*N / M*N) to
+// the A/B/C addresses; the dispatch grid becomes batch * m_tiles * n_tiles.
+// Measured on M3 Max (FLUX.2-klein-4B, 128px): the DiT attention scores GEMM
+// goes 2635 -> 880 us (~3x), the @V GEMM 1515 -> 893 us (the batch-aware tile
+// picker upgrades its tile from 32x8 to 64x64), and the warm DiT stage drops
+// 2.03 -> 1.87 s end-to-end.  THVM_TC_BATCHED=0 forces the byte-identical
+// parallel_tc path back (a fallback / A-B knob).
 static int rmu_tc_batched_on(void) {
-  static int known = 0, on = 0;
+  static int known = 0, on = 1;
   if (!known) {
     char const *e = getenv("THVM_TC_BATCHED");
-    on = (e != NULL && e[0] == '1');
+    if (e != NULL && e[0] == '0') on = 0;
     known = 1;
   }
   return on;
@@ -2010,8 +2014,14 @@ static i64 rmu_range_coeff(Term t, u32 axis_id) {
 // tell the caller to emit the legacy 8x8 path.  Preference order
 // targets the common FLUX GEMM shapes (M/N multiples of 64; K multiple
 // of 32) while degrading gracefully for ragged M/N (e.g. M=24).
+// batch_extent: 0 or 1 for a plain 2-D GEMM; the batch count (e.g. attention's
+// 24 heads) for a batched gemm.  The min_tg occupancy floor counts the TOTAL
+// threadgroups the dispatch launches = per-batch tiles * batch_extent, so a
+// batched gemm with a small per-batch output (the @V N=128 attention shape)
+// can pick a LARGER per-batch tile -- the batch multiplier already fills the
+// GPU, and the fatter tile gives more A/B fragment reuse per threadgroup.
 static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
-                            RmuTcTile *out) {
+                            u32 batch_extent, RmuTcTile *out) {
   if ((m_extent % 8) != 0 || (n_extent % 8) != 0 || (k_extent % 8) != 0) {
     return 0;
   }
@@ -2068,13 +2078,14 @@ static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
   // MIN_TG ~ a few x the core count; env THVM_TC_MIN_TG tunes it.
   u32 min_tg = 160;
   { char const *e = getenv("THVM_TC_MIN_TG"); if (e && e[0]) min_tg = (u32)atoi(e); }
+  u32 bmul = (batch_extent > 1u) ? batch_extent : 1u;   // batched grid multiplier
   u32 best_lm = 0, best_ln = 0, best_rm = 0, best_rn = 0;
   u32 fb_lm = 0, fb_ln = 0, fb_rm = 0, fb_rn = 0, fb_tg = 0;
   for (u32 i = 0; i < sizeof(cands)/sizeof(cands[0]); i++) {
     u32 tm8 = cands[i].lm * cands[i].rm;
     u32 tn8 = cands[i].ln * cands[i].rn;
     if (m8 % tm8 != 0 || n8 % tn8 != 0) continue;
-    u32 tg = (m8 / tm8) * (n8 / tn8);                 // output-tile (threadgroup) count
+    u32 tg = (m8 / tm8) * (n8 / tn8) * bmul;          // total threadgroups (incl. batch)
     if (best_lm == 0 && tg >= min_tg) {               // first (largest) meeting the floor
       best_lm = cands[i].lm; best_ln = cands[i].ln;
       best_rm = cands[i].rm; best_rn = cands[i].rn;
@@ -2092,7 +2103,7 @@ static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
     fprintf(stderr, "[tc-pick] M=%u N=%u K=%u -> tile %ux%u (lm=%u ln=%u rm=%u rn=%u) tg=%u\n",
             m_extent, n_extent, k_extent, best_lm*best_rm*8u, best_ln*best_rn*8u,
             best_lm, best_ln, best_rm, best_rn,
-            (m8/(best_lm*best_rm))*(n8/(best_ln*best_rn)));
+            (m8/(best_lm*best_rm))*(n8/(best_ln*best_rn))*bmul);
   // The tiled kernel only pays off when there is reuse: require the
   // output tile to span more than a single 8x8 fragment.
   if (best_lm * best_rm * best_ln * best_rn <= 1) return 0;
@@ -3515,7 +3526,8 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     RmuTcTile _dt; int _tiled = ((!is_batched || rmu_tc_batched_on()) && !a_trans
         && m_par && n_par && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok
         && !(is_batched && (a_val != 0 || b_is_int8))
-        && rmu_tc_pick_tile(m_extent, n_extent, k_extent, &_dt));
+        && rmu_tc_pick_tile(m_extent, n_extent, k_extent,
+                            is_batched ? batch_extent : 0u, &_dt));
     fprintf(stderr, "[mm] M=%u N=%u K=%u batch=%u%s path=%s%s\n",
             m_extent, n_extent, k_extent, batch_extent,
             a_trans ? " Atrans" : "", _tiled ? "TILED" : "parallel_tc/other",
@@ -3527,7 +3539,8 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       // no fused-A producer, no int8 weight, no epilogue (all 0 for attention).
       && !(is_batched && (a_val != 0 || b_is_int8 || epilogue_value != 0))) {
     RmuTcTile tile;
-    if (rmu_tc_pick_tile(m_extent, n_extent, k_extent, &tile)) {
+    if (rmu_tc_pick_tile(m_extent, n_extent, k_extent,
+                         is_batched ? batch_extent : 0u, &tile)) {
       // rmu_buf_name returns a pointer to a shared static buffer, so the
       // three names must be copied to distinct locals before the call
       // (a single argument list would alias them all to the last name).
