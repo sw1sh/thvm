@@ -298,6 +298,18 @@ fxBoundMemory[] := (
     If[ Environment["THVM_METAL_REUSE_BUFS"] === $Failed,
         SetEnvironment["THVM_METAL_REUSE_BUFS" -> "0"]]);
 
+(* Evaluate body with BEAM=2 (autotune on), then restore the prior BEAM.  Used to
+   enable the VAE conv autotune for ONLY the eager pretune + the STAGE-3 VAE
+   capture, leaving the velocity/Qwen captures BEAM-off (those regress under BEAM).
+   A runtime SetEnvironment reaches the C getenv autotune gate (verified); replays
+   never re-autotune, so this only matters at the gen-1 lazy captures. *)
+SetAttributes[fxBeamScope, HoldFirst];
+fxBeamScope[body_] := Module[{beamSave = Environment["BEAM"], r},
+    SetEnvironment["BEAM" -> "2"];
+    r = body;
+    SetEnvironment["BEAM" -> If[ beamSave === $Failed, None, beamSave]];
+    r]
+
 fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
     {w, h, gridH, gridW, simg, stxt, tokDir, td, tfPath, qwPaths, vaePath,
      fxCfg, qwCfg, vaeCfg, sigmas, ctxQ, ctxT, ctxV, qwJit, wfq, velJit, ca,
@@ -371,6 +383,37 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
         Module[{vt, vKeys, wfV, wsubV},
             vt = TSafeTensorLoad[vaePath];  vKeys = Keys[vt];
             wfV = fxVaeLoader[vt, dev];  wsubV = fxVaeSub[wfV, vKeys];
+            (* EAGER PRETUNE the VAE conv decode (THVM_VAE_PRETUNE).  The VAE capture
+               can't BEAM-search -- a bench dispatch mid-capture corrupts the
+               recorded forward (autotune.c skips the search under jit_is_capturing);
+               the cache-load path it DOES run only APPLIES a winner found earlier.
+               So decode one representative latent EAGERLY under BEAM: that benches +
+               disk-caches each conv's tile-opt winner, keyed by the conv's
+               backend/dtype/shape/axis structure (capture-INDEPENDENT).  The VAE
+               TJit captures LAZILY on its first decode call (gen 1, STAGE 3), where
+               fxBeamScope re-enables BEAM so the bench-free cache-load applies those
+               winners; the capture bakes the tuned axes into the recorded kernels,
+               so every replay reuses them (capture.c dispatches the recorded ke
+               directly, no re-autotune).  Verified: 63/63 eager-stored VAE keys HIT
+               at capture; VAE warm 0.46s -> 0.08s.  The warm latent is RANDOM (a
+               zero latent yields a degenerate eager decode that NaNs the first
+               replay) and matches the replay's exact dtype path (bf16 GPU, f32 CPU).
+
+               KNOWN LIMITATION: the eager decode shares this context (ctxV == ctxT
+               == ctxQ; a separate context hits the LAM_SHAPE_TABLE loc-collision
+               documented above), so its bench dispatches pollute the later
+               velocity/Qwen capture state -- regressing dit ~2.0s -> ~6s and (with
+               stage-3-only BEAM) corrupting velocity latents.  Closing that needs a
+               tinygrad-style post-capture autotune pass (compile_linear/beam_search
+               on isolated test buffers), so THVM_VAE_PRETUNE is OFF by default. *)
+            If[ Environment["THVM_VAE_PRETUNE"] =!= $Failed,
+                fxBeamScope @ Module[{warmLat},
+                    warmLat = TRealize @ If[ dev === "cpu",
+                        TToDevice[TTensorCreate @ NumericArray[
+                            RandomVariate[NormalDistribution[], {simg, 128}], "Real32"], dev],
+                        TUOpCast[TToDevice[TTensorCreate @ NumericArray[
+                            RandomVariate[NormalDistribution[], {simg, 128}], "Real32"], dev], "bf16"]];
+                    TRealize @ vaeDecoder[warmLat, wfV, wsubV, vaeCfg]]];
             TJit[Function[lat, TRealize @ vaeDecoder[lat, wfV, wsubV, vaeCfg]]]]];
 
     <|"ctxQ" -> ctxQ, "ctxT" -> ctxT, "ctxV" -> ctxV, "dev" -> dev, "ca" -> ca,
@@ -417,13 +460,19 @@ FluxGenerate[prompts_List, opts : OptionsPattern[]] := Module[
                 encDev]];
         fxTiming[t1, t2];
 
-        (* --- STAGE 3: VAE decode each latent (VAE context). --- *)
+        (* --- STAGE 3: VAE decode each latent (VAE context).  Under THVM_VAE_PRETUNE,
+           BEAM is on for this stage ONLY (fxBeamScope) so the gen-1 lazy VAE capture
+           applies the eager-pretuned conv winners; the velocity/Qwen captures above
+           ran BEAM-off.  Replays here don't re-autotune, so wrapping every gen is a
+           cheap no-op after the first. --- *)
         {t3, results} = AbsoluteTiming @ TInContext[sess["ctxV"],
-            Map[
+            With[{decodeAll = Map[
                 Function[lat,
                     Module[{img = fxVaeDecodeCached[sess, lat]},
                         If[ returnImages, fxToImage[img], Normal[img]]]],
-                latents]];
+                latents] &},
+                If[ Environment["THVM_VAE_PRETUNE"] =!= $Failed,
+                    fxBeamScope @ decodeAll[], decodeAll[]]]];
         fxTiming[t3];
         results]]
 

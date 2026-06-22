@@ -856,11 +856,23 @@ fn int kernel_autotune(u32 kid) {
   int  cache_ready = kautotune_cache_path(ke, candidates, n_cand, n_runs,
                                           cache_path, sizeof(cache_path),
                                           &cache_key, depth, beam_width);
+  static int at_tr = -1;
+  if (at_tr < 0) at_tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
   if (cache_ready) {
     KOptSeq cached_seq = {0};
-    if (kautotune_cache_load(cache_path, cache_key, backend_id, n_runs,
-                             depth, beam_width, &cached_seq, NULL)
-        && kautotune_cached_seq_allowed(&cached_seq, candidates, n_cand)) {
+    int loaded = kautotune_cache_load(cache_path, cache_key, backend_id, n_runs,
+                                      depth, beam_width, &cached_seq, NULL);
+    int allowed = loaded && kautotune_cached_seq_allowed(&cached_seq,
+                                                         candidates, n_cand);
+    if (at_tr) {
+      fprintf(stderr,
+              "[autotune] %s kid=%u key=%016llx n_cand=%u -> %s (seq.n=%u)\n",
+              jit_is_capturing() ? "CAPTURE" : "eager",
+              (u32)(ke - KERNELS), (unsigned long long)cache_key, n_cand,
+              allowed ? "CACHE-HIT" : (loaded ? "load-disallowed" : "CACHE-MISS"),
+              (u32)cached_seq.n);
+    }
+    if (allowed) {
       ke->schedule->autotuned = 1;
       axes_reset_to_default(ke);
       if (cached_seq.n != 0) {
@@ -872,6 +884,10 @@ fn int kernel_autotune(u32 kid) {
         return 0;
       }
     }
+  } else if (at_tr) {
+    fprintf(stderr, "[autotune] %s kid=%u CACHE-NOT-READY n_cand=%u\n",
+            jit_is_capturing() ? "CAPTURE" : "eager",
+            (u32)(ke - KERNELS), n_cand);
   }
 
   // Never run the BENCH SEARCH during a JIT capture.  The search executes
