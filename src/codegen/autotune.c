@@ -52,7 +52,95 @@ typedef struct {
   u64     us;
 } KOptSeqBench;
 
+// === Isolated-buffer bench (port of tinygrad codegen/opt/search.py
+// `_time_program` + postrange.py `bufs_from_ast`) ===
+//
+// The default bench re-fires a kernel on its LIVE TENS buffers in the
+// shared context.  During a FLUX session that context is shared across the
+// qwen / DiT / VAE captures, so a search that dispatches on the live
+// buffers perturbs the cross-stage activation + tile-JIT state the next
+// capture depends on.  tinygrad instead times each candidate on FRESH
+// rawbufs allocated to the kernel's PARAM-slot byte sizes (bufs_from_ast),
+// never touching the live graph buffers.  This mirrors that: when ISO is
+// active, kernel_bench_fire dispatches the kernel on these scratch buffers
+// and kautotune_output_stat reads the scratch output instead of TENS.
+#define KAUTOTUNE_ISO_MAX_INPUTS 64
+typedef struct {
+  int      active;
+  Backend *backend;
+  u32      kid;
+  u32      n_inputs;
+  u32      in_buf_ids[KAUTOTUNE_ISO_MAX_INPUTS];
+  u32      out_buf_id;
+} KautotuneIso;
+static KautotuneIso ISO;  // file-static: only one isolated bench at a time
+
+// === Deferred post-capture bench queue (tinygrad jit.py:289-300) ===
+//
+// kernel_autotune CANNOT bench during a JIT capture (a bench dispatch
+// commits the in-flight capture batch + perturbs the recorded forward).  But
+// the cache KEY it computes mid-capture (the capture-phase
+// kautotune_structural_key, span open) is EXACTLY the key the warm replay's
+// re-capture cache-load looks up -- whereas a key recomputed AFTER the capture
+// (post span_end / post finalize) hashes a DIFFERENT DAG and never matches
+// (measured: re-capture HIT 4/217).  So during capture we DEFER: record the
+// (kid, capture-phase cache_key, cache_path, bench params) of every cache-MISS
+// kernel into this queue, then jit_capture_autotune_finalized (after the slot
+// clears, jit_is_capturing()==0, span still open so the kid's DAG is unchanged)
+// drains the queue, benches each on isolated scratch buffers, and STORES the
+// winner under the recorded capture-phase key.  The next re-capture's
+// cache-load then HITs that exact key and bakes the tuned PSO.
+#define KAUTOTUNE_POSTTUNE_CAP 8192
+typedef struct {
+  u32  kid;
+  u64  cache_key;
+  char cache_path[KAUTOTUNE_CACHE_PATH_CAP];
+  u32  n_runs;
+  u32  depth;
+  u32  beam_width;
+  u32  backend_id;
+  u32  slot;        // capturing JIT slot at enqueue (for per-slot drain scope)
+} KautotunePostItem;
+static KautotunePostItem KAUTOTUNE_POSTQ[KAUTOTUNE_POSTTUNE_CAP];
+static u32 KAUTOTUNE_POSTQ_N = 0;
+
+fn u32 jit_active_capture_slot(void);
+
+// Enqueue a cache-MISS kernel's capture-phase key for deferred post-capture
+// bench.  Dedup by cache_key so a kernel shape recorded N times (N replay
+// ops) is benched once.  No-op when the queue is full.
+static void kautotune_postq_enqueue(u32 kid, u64 cache_key,
+                                    char const *cache_path, u32 n_runs,
+                                    u32 depth, u32 beam_width, u32 backend_id) {
+  if (cache_key == 0 || cache_path == NULL || cache_path[0] == '\0') {
+    return;
+  }
+  for (u32 i = 0; i < KAUTOTUNE_POSTQ_N; i++) {
+    if (KAUTOTUNE_POSTQ[i].cache_key == cache_key) {
+      return;  // already queued (same shape)
+    }
+  }
+  if (KAUTOTUNE_POSTQ_N >= KAUTOTUNE_POSTTUNE_CAP) {
+    return;
+  }
+  KautotunePostItem *it = &KAUTOTUNE_POSTQ[KAUTOTUNE_POSTQ_N++];
+  it->kid        = kid;
+  it->cache_key  = cache_key;
+  it->n_runs     = n_runs;
+  it->depth      = depth;
+  it->beam_width = beam_width;
+  it->backend_id = backend_id;
+  it->slot       = jit_active_capture_slot();
+  snprintf(it->cache_path, sizeof(it->cache_path), "%s", cache_path);
+}
+
 static u32 kautotune_backend_id(KernelEntry const *ke);
+static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
+                                     KOpt const *candidates, u32 n_cand,
+                                     char const *cache_path, u64 cache_key,
+                                     u32 n_runs, u32 depth, u32 beam_width,
+                                     u32 backend_id, int cache_ready,
+                                     int apply_keep_route);
 
 static u32 kautotune_n_runs(void) {
   char const *e = getenv("BEAM_RUNS");
@@ -616,6 +704,13 @@ typedef struct {
   int    valid;       // 0 = stat could not be read (gate disabled for this kid)
   int    all_finite;  // 0 if any scanned element is NaN/Inf
   double sum_abs;     // sum of |x| over the scanned prefix
+  double wsum;        // POSITION-WEIGHTED sum: sum of x*(1 + (i mod P)/P).  A
+                      // permutation / partial-corruption tile that preserves
+                      // sum_abs (e.g. a mis-tiled TC matmul that scrambles
+                      // output positions but keeps the magnitude budget) drifts
+                      // here, so the gate rejects it.  The DiT matmul tiles that
+                      // NaN'd the warm FLUX replay pass a pure sum_abs gate on
+                      // synthetic scratch but diverge in wsum.
 } KautotuneOutStat;
 
 // Per-dtype divergence tolerance, relative to |baseline.sum_abs|.  bf16/f16
@@ -653,13 +748,17 @@ static double kautotune_decode_elem(void const *base, u32 dt, u64 idx) {
 // a stat with valid=0 (gate skipped) when the buffer can't be read or the
 // dtype isn't one we decode -- the gate never blocks a kid it can't measure.
 static KautotuneOutStat kautotune_output_stat(KernelEntry const *ke) {
-  KautotuneOutStat st = {0, 1, 0.0};
+  KautotuneOutStat st = {0, 1, 0.0, 0.0};
   if (ke == NULL || ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
     return st;
   }
   TenDesc const *td = &TENS[ke->output_tid];
-  Backend *b = td->backend;
-  if (b == NULL || b->buf_read == NULL || td->buf_id == 0) {
+  // Isolated bench: read the scratch output buffer, not the live TENS one.
+  Backend *b      = (ISO.active && ISO.kid == (u32)(ke - KERNELS))
+                  ? ISO.backend : td->backend;
+  u32      out_buf = (ISO.active && ISO.kid == (u32)(ke - KERNELS))
+                  ? ISO.out_buf_id : td->buf_id;
+  if (b == NULL || b->buf_read == NULL || out_buf == 0) {
     return st;
   }
   u32 dt    = ke->output_dtype;
@@ -684,12 +783,17 @@ static KautotuneOutStat kautotune_output_stat(KernelEntry const *ke) {
   if (host == NULL) {
     return st;
   }
-  if (b->buf_read(td->buf_id, host, nbytes) != 0) {
+  if (b->buf_read(out_buf, host, nbytes) != 0) {
     free(host);
     return st;
   }
   int all_finite = 1;
   double sum_abs = 0.0;
+  double wsum    = 0.0;
+  // Position weight period: a small prime so the weight pattern doesn't align
+  // with any power-of-two tile factor (which would let a tile-sized scramble
+  // hit identical weights and slip through).
+  enum { KAUTOTUNE_WSUM_PERIOD = 257 };
   for (u64 i = 0; i < scan; i++) {
     double v = kautotune_decode_elem(host, dt, i);
     if (!isfinite(v)) {
@@ -697,11 +801,14 @@ static KautotuneOutStat kautotune_output_stat(KernelEntry const *ke) {
       continue;
     }
     sum_abs += v < 0.0 ? -v : v;
+    double w = 1.0 + (double)(i % KAUTOTUNE_WSUM_PERIOD) / KAUTOTUNE_WSUM_PERIOD;
+    wsum += v * w;
   }
   free(host);
   st.valid      = 1;
   st.all_finite = all_finite;
   st.sum_abs    = sum_abs;
+  st.wsum       = wsum;
   return st;
 }
 
@@ -728,14 +835,34 @@ static int kautotune_stat_accept(KautotuneOutStat const *baseline,
   double bound = tol * ((baseline->sum_abs < 0.0 ? -baseline->sum_abs
                                                  : baseline->sum_abs)
                         + 1e-9);
-  return diff <= bound;
+  if (diff > bound) {
+    return 0;
+  }
+  // Position-weighted check: a tile that preserves the magnitude budget but
+  // scrambles element positions (a mis-rendered TC re-tile) drifts here even
+  // when sum_abs matches.  Bound it relative to |baseline.wsum| with the same
+  // per-dtype tolerance.
+  double wdiff = cand->wsum - baseline->wsum;
+  if (wdiff < 0.0) {
+    wdiff = -wdiff;
+  }
+  double wbound = tol * ((baseline->wsum < 0.0 ? -baseline->wsum
+                                               : baseline->wsum)
+                         + 1e-9);
+  return wdiff <= wbound;
 }
 
 static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
                                u32 n_runs, KautotuneOutStat const *baseline,
                                u64 early_stop, u64 *out_us) {
+  static int seq_tr = -1;
+  if (seq_tr < 0) seq_tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
   axes_reset_to_default(ke);
   if (!kautotune_apply_seq(ke, seq)) {
+    if (seq_tr && seq->n == 1) {
+      fprintf(stderr, "[seq] kid=%u op=%u axis=%u arg=%u APPLY-FAIL\n",
+              kid, seq->opts[0].op, seq->opts[0].axis, seq->opts[0].arg);
+    }
     axes_reset_to_default(ke);
     return 0;
   }
@@ -746,6 +873,14 @@ static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
   // skips it -- it can never win the search or be cached.
   KautotuneOutStat cand = kautotune_output_stat(ke);
   if (!kautotune_stat_accept(baseline, &cand, kautotune_stat_tol(ke->output_dtype))) {
+    if (seq_tr && seq->n == 1) {
+      fprintf(stderr,
+              "[seq] kid=%u op=%u axis=%u arg=%u NAN-REJECT "
+              "(base sum=%g finite=%d / cand sum=%g finite=%d)\n",
+              kid, seq->opts[0].op, seq->opts[0].axis, seq->opts[0].arg,
+              baseline ? baseline->sum_abs : 0.0, baseline ? baseline->all_finite : -1,
+              cand.sum_abs, cand.all_finite);
+    }
     axes_reset_to_default(ke);
     return 0;
   }
@@ -755,11 +890,183 @@ static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
   return 1;
 }
 
+// Fill a fresh scratch buffer with a small deterministic pattern.  Timing
+// doesn't depend on the data, but a non-degenerate finite fill keeps the
+// correctness gate (kautotune_output_stat) meaningful and avoids denormal
+// stalls on some GPUs.  Index-mod pattern in [0,1).
+static void kautotune_iso_fill(Backend *b, u32 buf_id, u32 dt, u64 numel) {
+  if (b == NULL || b->buf_write == NULL || buf_id == 0 || numel == 0) {
+    return;
+  }
+  u64 nbytes = dtype_storage_bytes(dt, numel);
+  if (nbytes == 0) {
+    return;
+  }
+  void *host = malloc((size_t)nbytes);
+  if (host == NULL) {
+    return;
+  }
+  memset(host, 0, (size_t)nbytes);
+  for (u64 i = 0; i < numel; i++) {
+    // Zero-mean, sign-alternating pattern in [-1, 1).  A non-negative [0,1)
+    // fill let a partial / scrambled reduction stay positive and scale with
+    // sum_abs, slipping the correctness gate; a signed zero-mean pattern makes
+    // a dropped or mis-placed term move the (weighted) sum measurably, so a
+    // mis-rendered tile is rejected.  Two coprime periods (17, 2) so the sign
+    // doesn't align with any power-of-two tile factor.
+    double mag  = (double)(i % 17) * (1.0 / 17.0);  // [0,1)
+    double v    = (i & 1) ? -mag : mag;             // [-1,1)
+    switch (dt) {
+      case DT_FP32:    ((f32 *)host)[i] = (f32)v; break;
+      case DT_FP64:    ((f64 *)host)[i] = v; break;
+      case DT_BF16:    ((u16 *)host)[i] = f32_to_bf16((f32)v); break;
+      case DT_FP16:    ((u16 *)host)[i] = f32_to_fp16((f32)v); break;
+      case DT_FP8E4M3: ((u8  *)host)[i] = f32_to_fp8e4m3((f32)v); break;
+      case DT_FP8E5M2: ((u8  *)host)[i] = f32_to_fp8e5m2((f32)v); break;
+      case DT_INT32:   ((i32 *)host)[i] = (i32)((i % 17) * ((i & 1) ? -1 : 1)); break;
+      default: break;  // leave zeros for dtypes we don't model
+    }
+  }
+  b->buf_write(buf_id, host, nbytes);
+  free(host);
+}
+
+// Allocate + fill fresh scratch buffers sized to this kernel's input/output
+// PARAM slots and install them in ISO.  Returns 1 on success, 0 if the
+// kernel can't be benched in isolation (no backend, missing dtype/numel
+// metadata, or an alloc failed -- caller then skips the isolated search).
+static int kautotune_iso_begin(u32 kid) {
+  memset(&ISO, 0, sizeof(ISO));
+  if (kid == 0 || kid >= KERNELS_NEXT) {
+    return 0;
+  }
+  KernelEntry *ke = &KERNELS[kid];
+  if (ke->n_inputs > KAUTOTUNE_ISO_MAX_INPUTS) {
+    return 0;
+  }
+  // Resolve the backend off the live output TenDesc (its dtype/numel are
+  // mirrored on the KernelEntry, but the backend pointer lives on TENS).
+  if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
+    return 0;
+  }
+  Backend *b = TENS[ke->output_tid].backend;
+  if (b == NULL || b->dispatch_kernel == NULL || b->buf_alloc == NULL
+      || b->buf_free == NULL) {
+    return 0;
+  }
+  if (ke->output_numel == 0) {
+    return 0;
+  }
+  u64 out_nbytes = dtype_storage_bytes(ke->output_dtype, ke->output_numel);
+  if (out_nbytes == 0) {
+    return 0;
+  }
+  // metal_buf_alloc EXITS the process (not returns 0) when a request
+  // exceeds THVM_MAX_BUF_BYTES -- a pathological im2col/EXPAND
+  // intermediate.  Check the ceiling here so the isolated search declines
+  // such a kernel cleanly instead of aborting the whole run.  These giant
+  // intermediates are never the tunable conv/matmul targets anyway.
+  u64 ceiling = thvm_buf_byte_ceiling();
+  if (ceiling != 0 && out_nbytes > ceiling) {
+    return 0;
+  }
+  ISO.out_buf_id = b->buf_alloc(out_nbytes);
+  if (ISO.out_buf_id == 0) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 dt    = ke->input_dtypes != NULL ? ke->input_dtypes[i] : ke->output_dtype;
+    u64 numel = ke->input_numels  != NULL ? ke->input_numels[i]  : 0;
+    if (numel == 0) {
+      // Unknown input extent -- can't size a scratch buffer; bail and let
+      // the caller fall back to NOT searching this kernel in isolation.
+      goto fail;
+    }
+    // A strided-view input the dispatch path pre-materialises (gather)
+    // reads through metal_tendesc_strided_index(td, k) over the LIVE
+    // TenDesc's view, whose max element index can exceed input_numels[i]
+    // (the view's logical numel) -- a contiguous scratch buffer sized to
+    // numel would be read out of bounds.  Decline the isolated search for
+    // such a kernel rather than risk an OOB read on the scratch.  The
+    // high-value FLUX targets (conv/matmul tile kernels) read contiguous
+    // or chain-composed inputs, so this loses nothing that matters.
+    int composed = (ke->input_chain_composed != NULL
+                    && ke->input_chain_composed[i]);
+    u32 tid = ke->input_tids != NULL ? ke->input_tids[i] : 0;
+    if (!composed && tid != 0 && tid < TENS_NEXT) {
+      TenDesc const *td = &TENS[tid];
+      if (!td->view.contiguous || td->view.offset != 0 || td->nviews != 0) {
+        goto fail;
+      }
+    }
+    u64 nbytes = dtype_storage_bytes(dt, numel);
+    if (nbytes == 0 || (ceiling != 0 && nbytes > ceiling)) {
+      // 0 == undecodable dtype; over-ceiling would exit(1) in buf_alloc.
+      goto fail;
+    }
+    u32 buf = b->buf_alloc(nbytes);
+    if (buf == 0) {
+      goto fail;
+    }
+    ISO.in_buf_ids[i] = buf;
+    kautotune_iso_fill(b, buf, dt, numel);
+  }
+  ISO.active   = 1;
+  ISO.backend  = b;
+  ISO.kid      = kid;
+  ISO.n_inputs = ke->n_inputs;
+  return 1;
+
+fail:
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (ISO.in_buf_ids[i] != 0) {
+      b->buf_free(ISO.in_buf_ids[i]);
+    }
+  }
+  if (ISO.out_buf_id != 0) {
+    b->buf_free(ISO.out_buf_id);
+  }
+  memset(&ISO, 0, sizeof(ISO));
+  return 0;
+}
+
+static void kautotune_iso_end(void) {
+  if (!ISO.active || ISO.backend == NULL) {
+    memset(&ISO, 0, sizeof(ISO));
+    return;
+  }
+  Backend *b = ISO.backend;
+  for (u32 i = 0; i < ISO.n_inputs; i++) {
+    if (ISO.in_buf_ids[i] != 0) {
+      b->buf_free(ISO.in_buf_ids[i]);
+    }
+  }
+  if (ISO.out_buf_id != 0) {
+    b->buf_free(ISO.out_buf_id);
+  }
+  memset(&ISO, 0, sizeof(ISO));
+}
+
 static void kernel_bench_fire(u32 kid) {
   if (kid == 0 || kid >= KERNELS_NEXT) {
     return;
   }
   KernelEntry *ke = &KERNELS[kid];
+  // Isolated bench: dispatch on the fresh scratch buffers, never touching
+  // the live TENS graph buffers (tinygrad _time_program on rawbufs).
+  if (ISO.active && ISO.kid == kid) {
+    Backend *b = ISO.backend;
+    if (b == NULL || b->dispatch_kernel == NULL) {
+      return;
+    }
+    jit_capture_pause();
+    backend_dispatch_flush_all();
+    b->dispatch_kernel(ke, ISO.in_buf_ids, ISO.out_buf_id);
+    backend_dispatch_flush_all();
+    jit_capture_resume();
+    ITRS++;
+    return;
+  }
   u32 resolved_tids[ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
@@ -909,11 +1216,23 @@ fn int kernel_autotune(u32 kid) {
   int  cache_ready = kautotune_cache_path(ke, candidates, n_cand, n_runs,
                                           cache_path, sizeof(cache_path),
                                           &cache_key, depth, beam_width);
+  static int at_tr = -1;
+  if (at_tr < 0) at_tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
   if (cache_ready) {
     KOptSeq cached_seq = {0};
-    if (kautotune_cache_load(cache_path, cache_key, backend_id, n_runs,
-                             depth, beam_width, &cached_seq, NULL)
-        && kautotune_cached_seq_allowed(&cached_seq, candidates, n_cand)) {
+    int loaded = kautotune_cache_load(cache_path, cache_key, backend_id, n_runs,
+                                      depth, beam_width, &cached_seq, NULL);
+    int allowed = loaded && kautotune_cached_seq_allowed(&cached_seq,
+                                                         candidates, n_cand);
+    if (at_tr) {
+      fprintf(stderr,
+              "[autotune] %s kid=%u key=%016llx n_cand=%u -> %s (seq.n=%u)\n",
+              jit_is_capturing() ? "CAPTURE" : "eager",
+              (u32)(ke - KERNELS), (unsigned long long)cache_key, n_cand,
+              allowed ? "CACHE-HIT" : (loaded ? "load-disallowed" : "CACHE-MISS"),
+              (u32)cached_seq.n);
+    }
+    if (allowed) {
       ke->schedule->autotuned = 1;
       if (cached_seq.n != 0) {
         axes_reset_to_default(ke);
@@ -930,12 +1249,88 @@ fn int kernel_autotune(u32 kid) {
         return 0;
       }
     }
+  } else if (at_tr) {
+    fprintf(stderr, "[autotune] %s kid=%u CACHE-NOT-READY n_cand=%u\n",
+            jit_is_capturing() ? "CAPTURE" : "eager",
+            (u32)(ke - KERNELS), n_cand);
   }
 
+  // Never run the BENCH SEARCH during a JIT capture.  The search executes
+  // direct bench dispatches (kernel_bench_fire); a dispatch during the
+  // capturing forward -- even with capture paused -- commits the in-flight
+  // capture command batch and perturbs the live activation / buffer-planner
+  // state the recorded sequence depends on, corrupting the captured forward
+  // (empirically: a BEAM=2 FLUX velocity-net capture diverges to NaN over the
+  // Euler steps, and the VAE then decodes garbage).  tinygrad autotunes
+  // captured kernels in a SEPARATE compile pass on test buffers AFTER capture
+  // (engine/jit.py jit_lower -> compile_linear -> codegen/opt/search.py
+  // beam_search times candidates on caller `rawbufs`), never during the
+  // capturing forward.  thvm has no such post-capture pass yet, so the faithful
+  // behavior is: a captured kernel keeps its hand-coded baseline (correct,
+  // already applied before this) unless a PRIOR eager autotune cached a winner
+  // -- which the cache-load path above safely applies (it never benches).  Mark
+  // autotuned so the fire-time trigger doesn't re-propose on every replay.
+  if (jit_is_capturing()) {
+    ke->schedule->autotuned = 1;
+    // Defer: record the capture-phase key so jit_capture_autotune_finalized
+    // benches + stores under it.  Only queue cache-MISS shapes (a HIT already
+    // returned 1 above with the winner applied), and only when the post-capture
+    // pass is enabled (THVM_POSTTUNE=1) -- otherwise the queue would grow
+    // unbounded across captures with nothing to drain it.
+    static int posttune_on = -1;
+    if (posttune_on < 0) {
+      char const *on = getenv("THVM_POSTTUNE");
+      posttune_on = (on != NULL && on[0] == '1');
+    }
+    if (cache_ready && posttune_on) {
+      kautotune_postq_enqueue(kid, cache_key, cache_path, n_runs, depth,
+                              beam_width, backend_id);
+    }
+    return 0;
+  }
+
+  return kautotune_bench_and_store(kid, ke, candidates, n_cand, cache_path,
+                                   cache_key, n_runs, depth, beam_width,
+                                   backend_id, cache_ready,
+                                   0 /* eager: re-dispatch re-records route */);
+}
+
+// Bench the kernel's candidate opt-sequences on isolated scratch buffers and
+// store the winner under (cache_path, cache_key).  Split out of kernel_autotune
+// so the deferred post-capture drain can reuse it with a recorded capture-phase
+// key/path (the autotuned/propose/cache-load preamble already ran upstream).
+static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
+                                     KOpt const *candidates, u32 n_cand,
+                                     char const *cache_path, u64 cache_key,
+                                     u32 n_runs, u32 depth, u32 beam_width,
+                                     u32 backend_id, int cache_ready,
+                                     int apply_keep_route) {
   // Mark autotuned at the START so nested/direct bench dispatches do
   // not re-enter this path if a backend helper fires through the public
   // kernel path.  axes_reset_to_default preserves the flag.
   ke->schedule->autotuned = 1;
+
+  // Bench on ISOLATED scratch buffers (tinygrad codegen/opt/search.py
+  // _time_program + postrange.py bufs_from_ast: every beam-search times
+  // candidates on FRESH rawbufs sized to the kernel's PARAM slots, never
+  // the live graph buffers).  The bench fires thus read/write only scratch
+  // -- they never touch the live activation tensors of an in-flight FLUX
+  // session, removing the live-BUFFER pollution.  When the kernel can't be
+  // sized for isolation (giant im2col intermediate, strided-view input),
+  // iso_setup is 0 and we DECLINE the search rather than fall back to the
+  // live buffers.  cg_profile_snapshot/restore additionally erases the
+  // search's K_PROFILE[kid].kind footprint (the JIT replay's ICB-batching
+  // decision reads it).  The PSO cache is rekeyed by a GC-invariant DAG
+  // content hash (metal _.m), so the search's hash-cons GC no longer collides
+  // the captured kernels' cached PSOs.
+  u64 prof_snap[6];
+  cg_profile_snapshot(kid, prof_snap);
+  int iso_setup = kautotune_iso_begin(kid);
+  if (!iso_setup) {
+    ke->schedule->autotuned = 1;
+    cg_profile_restore(kid, prof_snap);
+    return 0;
+  }
 
   // Speed-sanity gate (the time analogue of the NaN/parity gate): the
   // kernel arrives here ALREADY in its heuristic-optimized state
@@ -943,9 +1338,9 @@ fn int kernel_autotune(u32 kid) {
   // The search below resets to the PRE-heuristic no-opt baseline and
   // can only reach a thin proposer candidate set -- which for the big
   // single-block projections is far worse than the heuristic tile it
-  // would discard.  Measure the heuristic's real time NOW, before the
-  // first reset destroys that state; we refuse to leave the kernel
-  // slower than this.
+  // would discard.  Measure the heuristic's real time NOW (on the iso
+  // scratch buffers), before the first reset destroys that state; we
+  // refuse to leave the kernel slower than this.
   //
   // SNAPSHOT the heuristic state verbatim so the losing branch can
   // restore it bit-for-bit.  The heuristic lives in TWO places: the
@@ -957,22 +1352,6 @@ fn int kernel_autotune(u32 kid) {
   // a different, slow tile), so we copy + restore both fields directly.
   KpSchedule heuristic_sched = *ke->schedule;
   Term       heuristic_store_root = ke->cached_lift.store_root;
-
-  // Clean the JIT MSL PSO cache BEFORE measuring anything.  By the time
-  // a late kernel (e.g. block-20's projection) reaches the search, the
-  // fixed-size in-memory PSO cache is FULL of earlier kernels' PSOs.  A
-  // dispatch whose key isn't resident then BYPASSES the cache and
-  // recompiles the MSL EVERY fire -- so heuristic_us (and each
-  // candidate's us) would be dominated by recompile time, not the
-  // kernel's true GPU cost.  That inflated heuristic_us let a slow tile
-  // "beat" the heuristic and sail through the gate (the 0.3-TFLOPS
-  // big-projection picks at full scale).  Dropping here means this
-  // kernel's heuristic + its handful of candidates are the ONLY entries,
-  // so kernel_bench_us(min over n_runs) measures the true cached time
-  // (the first cold fire is filtered out by the min).
-#ifdef THVM_HAS_METAL
-  thvm_metal_jit_drop_in_memory_psos();
-#endif
   u64 heuristic_us = (kernel_bench_fire(kid), kernel_bench_us(kid, n_runs, 0));
 
   // Baseline (no opts).  Warm the JIT so the first variant doesn't
@@ -1005,6 +1384,8 @@ fn int kernel_autotune(u32 kid) {
   u32 n_beam = 0;
   u32 n_seen = 0;
 
+  static int cand_tr = -1;
+  if (cand_tr < 0) cand_tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
   for (u32 i = 0; i < n_cand; i++) {
     if (cg_now_us() - search_start > search_budget_us) break;  // per-kernel timeout
     KOptSeq seq = {0};
@@ -1012,7 +1393,16 @@ fn int kernel_autotune(u32 kid) {
     seq.opts[0] = candidates[i];
     seen[n_seen++] = seq;
     u64 us = 0;
-    if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &baseline_stat, best_us * 3, &us)) {
+    int ok = kautotune_bench_seq(kid, ke, &seq, n_runs, &baseline_stat,
+                                 best_us * 3, &us);
+    if (cand_tr) {
+      fprintf(stderr,
+              "[cand] kid=%u op=%u axis=%u arg=%u -> %s us=%llu (base=%llu)\n",
+              kid, candidates[i].op, candidates[i].axis, candidates[i].arg,
+              ok ? (us < best_us ? "WIN" : "ok-slow") : "reject",
+              (unsigned long long)us, (unsigned long long)best_us);
+    }
+    if (!ok) {
       continue;
     }
     if (us < best_us) {
@@ -1097,23 +1487,26 @@ fn int kernel_autotune(u32 kid) {
             best_seq.n, keep_heuristic ? "KEEP-HEURISTIC" : "APPLY-WINNER");
   }
 
-  int applied_winner = 0;
+  // Apply the winner only when it clears the speed-sanity margin; otherwise
+  // restore the heuristic state bit-for-bit so the kernel is never left
+  // slower than it arrived.  `autotuned` was set at the start;
+  // reset_to_default preserves it.
+  axes_reset_to_default(ke);
+  int applied = 0;
   if (!keep_heuristic) {
-    // The autotune genuinely beat the heuristic: apply the winner.
-    // `autotuned` was set at the start; reset_to_default preserves it.
-    axes_reset_to_default(ke);
-    applied_winner = kautotune_apply_seq(ke, &best_seq);
+    applied = kautotune_apply_seq(ke, &best_seq);
     // Apply of the winning seq SHOULD succeed (it benched fine); if it
-    // somehow declines, fall through to the heuristic restore.
+    // somehow declines, fall through to the heuristic restore below.
   }
-  if (applied_winner) {
+  if (applied) {
     if (cache_ready) {
       kautotune_cache_store(cache_path, cache_key, backend_id, n_runs,
                             depth, beam_width, best_seq, best_us);
     }
   } else {
     // Restore the heuristic state bit-for-bit (KpSchedule + store_root)
-    // and cache an empty seq.
+    // and cache an empty seq.  The cache-load path treats n==0 as "keep
+    // heuristic" (no reset), so a later HIT replays the heuristic correctly.
     *ke->schedule = heuristic_sched;
     ke->cached_lift.store_root = heuristic_store_root;
     if (cache_ready) {
@@ -1123,19 +1516,178 @@ fn int kernel_autotune(u32 kid) {
     }
   }
 
-  // Drop the JIT MSL PSO cache.  The search above compiled one PSO per
-  // benched candidate (~depth*n_cand per kernel), which overflows the
-  // fixed-size in-memory cache; once full, EVERY subsequent dispatch
-  // (warm replay included) bypasses the cache and recompiles -- a real
-  // warm regression independent of which tile won.  Dropping here means
-  // the final (heuristic-or-winner) kernel recompiles ONCE on the next
-  // dispatch and the warm replay repopulates the cache with only the
-  // live kernels.  Metal-only today (the search lives behind the Metal
-  // tile path); CPU/CUDA caches are unaffected.
-#ifdef THVM_HAS_METAL
-  thvm_metal_jit_drop_in_memory_psos();
-#endif
-  return applied_winner ? 1 : 0;
+  // Under POSTTUNE re-bake APPLY, the winner stays baked on ke and a later
+  // JIT REPLAY (not a fresh eager dispatch) is the first thing to fire it.
+  // The replay's route is chosen from cg_kernel_dispatch_kind(kid) BEFORE the
+  // dispatch records its route -- so a stale (pre-tile / untiled) kind would
+  // route the now-TILED kernel through the wrong dispatch path (e.g.
+  // METAL_ALIAS or a non-tile encoder) and produce a non-finite result on the
+  // very FIRST warm replay (the FLUX VAE CALL2 NaN).  A plain
+  // cg_profile_restore would re-install the untiled route, which is correct
+  // when an eager re-dispatch re-records the route first but wrong for the
+  // replay-first re-bake path.  So when a non-baseline winner is applied AND
+  // re-bake apply is on, fire the WINNER once on the isolated scratch (records
+  // the winner's true route into K_PROFILE[kid].kind) and KEEP that kind
+  // instead of restoring the untiled snapshot.  dispatch_count/total_us are
+  // still rewound so the search adds no spurious profile volume.
+  u64 winner_kind = 0;
+  int keep_winner_kind = 0;
+  if (applied && best_seq.n != 0 && apply_keep_route && ISO.active
+      && ISO.kid == kid) {
+    kernel_bench_fire(kid);                 // record the winner's route
+    winner_kind = (u64)cg_kernel_dispatch_kind(kid);
+    keep_winner_kind = 1;
+  }
+
+  // Tear down the isolated scratch buffers and erase the search's profile
+  // footprint.  Under re-bake apply, keep the winner's recorded dispatch
+  // kind (route) so the first warm replay dispatches the tiled kernel
+  // correctly; otherwise restore the pre-search snapshot (search is
+  // profile-state-neutral; the first real dispatch re-records the route).
+  kautotune_iso_end();
+  cg_profile_restore(kid, prof_snap);
+  if (keep_winner_kind) {
+    cg_profile_set_kind(kid, (KDispatchKind)winner_kind);
+  }
+  return applied;
+}
+
+// Drain the deferred post-capture bench queue (tinygrad jit.py compile_linear).
+// Called by jit_capture_autotune_finalized after the capture slot clears
+// (jit_is_capturing()==0) but BEFORE jit_capture_finalize -- so the apply runs
+// before the ICB/replay plan is computed (the tinygrad beam-before-graph_split
+// ordering).  Benches each queued kernel on isolated scratch buffers and, under
+// THVM_POSTTUNE_APPLY, leaves the winner baked on the captured KernelEntry (its
+// tile route recorded) so finalize plans on the tuned kernels and the warm
+// replay builds the tuned PSO.  The winner is also stored to the autotune disk
+// cache under the recorded capture-phase key.  `budget_sec`==0 is unbounded;
+// otherwise stop once exceeded.  Returns the number of kernels that newly tuned
+// (winner beat baseline).
+// Does this kernel qualify for tune-and-apply under the active scope?
+//
+// Default (THVM_POSTTUNE_SCOPE unset): conv2d-flat / reduce-unroll kernels only.
+//
+// The ORDERING is now correct -- the drain runs BEFORE jit_capture_finalize
+// (jit/capture.c jit_capture_end_common, the tinygrad jit_lower order:
+// compile_linear beam BEFORE graph_split_rewrite), so finalize plans the ICB on
+// the tuned kernels' dispatch route, NOT the stale untiled route.  That removed
+// the ordering-induced batch divergence the prior post-finalize re-bake suffered.
+//
+// A SEPARATE, still-open codegen bug blocks widening to all kernels: applying a
+// tuned LOCAL/UPCAST tile to an elementwise/norm kernel produces output that is
+// correct via the per-op dispatch path (single image: finite under
+// THVM_METAL_GRAPH_REPLAY=0) but NaN via the ICB-batched replay, AND NaN for the
+// 2-image batch even per-op.  The divergence is in the Metal tile renderer / ICB
+// interaction for tuned tiles (a downstream ICB-batched consumer reads a
+// LOCAL-retiled producer's output wrong; the batched shape mis-tiles), not in
+// the ordering.  Until that is fixed, full-scope apply is unsafe, so the default
+// stays conv2d/reduce -- the kernels whose tuned tile replays correctly through
+// both the ICB and the batch.  Empirically the conv2d kernels find no winning
+// tile on the FLUX VAE (already TC), so this is correctness-complete but not a
+// FLUX warm-time win; the DiT matmuls (the dominant cost) are already optimally
+// TC-tiled by hand_opts + render-time uop_recognise_tc and are NOT improved by
+// the autotune -- see propose.c (matmul kernels decline to propose).
+//
+// THVM_POSTTUNE_SCOPE=all re-bakes every tuned kernel -- a measurement / bug-fix
+// knob for working ON the renderer/ICB divergence; it currently NaNs the FLUX
+// ICB/batch replay.  The search (cache write) runs regardless of scope.
+static int kautotune_posttune_scope_allows(KernelEntry const *ke) {
+  // -1 unknown, 0 = conv/reduce only (default + "conv"), 1 = all.
+  static int scope = -1;
+  if (scope < 0) {
+    char const *e = getenv("THVM_POSTTUNE_SCOPE");
+    scope = (e != NULL && strcmp(e, "all") == 0) ? 1 : 0;
+  }
+  if (scope) {
+    return 1;
+  }
+  if (ke == NULL || ke->cached_lift.store_root == 0) {
+    return 0;
+  }
+  if (uop_dag_classify_conv2d_flat_shape(ke->cached_lift.store_root)) {
+    return 1;
+  }
+  return uop_dag_is_reduce_unroll_kernel(ke->cached_lift.store_root);
+}
+
+static u32 kautotune_posttune_drain(double budget_sec) {
+  static int tr = -1;
+  if (tr < 0) tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
+  static int apply = -1;
+  if (apply < 0) {
+    char const *e = getenv("THVM_POSTTUNE_APPLY");
+    apply = (e != NULL && e[0] == '1');     // default OFF (search-only)
+  }
+  u32 n_items = KAUTOTUNE_POSTQ_N;
+  u32 n_tuned = 0;
+
+  // APPLY: leave the winning opt-config applied to the captured KernelEntry.
+  // This drain runs BEFORE jit_capture_finalize (jit/capture.c), so finalize's
+  // ICB/replay plan is computed on the tuned kernels -- the tinygrad jit_lower
+  // ordering (beam compile_linear BEFORE graph_split_rewrite).  The warm replay's
+  // Metal PSO lookup folds the applied opts (metal_tile_jit_hash), so the first
+  // replay builds the TUNED PSO with no re-capture (the autotune cache key is
+  // non-deterministic across captures, so a cross-capture cache-load misses; the
+  // in-capture apply sidesteps it).  When handed apply_keep_route=1,
+  // bench_and_store fires the winner once on the iso scratch and keeps its
+  // dispatch route in K_PROFILE so finalize AND the first warm replay route the
+  // tiled kernel correctly.  Scoped per kernel by kautotune_posttune_scope_allows
+  // (ALL kernels by default now that tuning precedes finalize; DiT/attention
+  // included -- the batch replays the tuned runner without divergence).
+  struct timespec t0;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  for (u32 i = 0; i < n_items; i++) {
+    KautotunePostItem *it = &KAUTOTUNE_POSTQ[i];
+    u32 kid = it->kid;
+    if (kid == 0 || kid >= KERNELS_NEXT) continue;
+    KernelEntry *ke = &KERNELS[kid];
+    if (ke->schedule == NULL) continue;
+    if (budget_sec > 0.0) {
+      struct timespec now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      double el = (double)(now.tv_sec - t0.tv_sec)
+                + (double)(now.tv_nsec - t0.tv_nsec) * 1e-9;
+      if (el > budget_sec) {
+        if (tr) {
+          fprintf(stderr,
+                  "[autotune] post-capture: budget %.1fs exceeded at item %u/%u "
+                  "(%u tuned)\n", budget_sec, i, n_items, n_tuned);
+        }
+        break;
+      }
+    }
+    int scope_ok = apply && kautotune_posttune_scope_allows(ke);
+
+    // Re-propose candidates from the kid's current DAG so the bench has
+    // something to tune.  The winner is cached under the recorded capture-phase
+    // key; the cache-load validates the cached seq against this same proposal
+    // (kautotune_cached_seq_allowed).
+    KOpt candidates[KAUTOTUNE_MAX_CANDIDATES];
+    u32  n_cand = kernel_opts_propose(ke, candidates,
+                                      sizeof(candidates)/sizeof(*candidates));
+    if (n_cand == 0) continue;
+    int won = kautotune_bench_and_store(kid, ke, candidates, n_cand,
+                                        it->cache_path, it->cache_key,
+                                        it->n_runs, it->depth, it->beam_width,
+                                        it->backend_id, 1 /* cache_ready */,
+                                        scope_ok /* apply_keep_route */);
+    if (won) {
+      n_tuned++;
+    }
+    if (tr) {
+      fprintf(stderr,
+              "[posttune-drain] slot=%u kid=%u n_cand=%u scope_ok=%d won=%d "
+              "out_numel=%llu kind=%u\n",
+              it->slot, kid, n_cand, scope_ok, won,
+              (unsigned long long)ke->output_numel,
+              cg_kernel_dispatch_kind(kid));
+    }
+    if (!scope_ok) {
+      axes_reset_to_default(ke);
+    }
+  }
+  KAUTOTUNE_POSTQ_N = 0;  // consumed
+  return n_tuned;
 }
 
 // Should this kernel auto-tune on its next fire?  Three conditions:
@@ -1166,6 +1718,7 @@ static int autotune_jitbeam_enabled(void) {
   char const *e = getenv("JITBEAM");
   return e != NULL && atoi(e) > 0;
 }
+
 
 fn int kernel_should_autotune(KernelEntry const *ke) {
   static int tr = -1;

@@ -2037,6 +2037,14 @@ fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 // the best variants into short opt sequences when enabled, pick the
 // winner, and leave KpSchedule mutated to the winning sequence.
 // Returns 1 if a winning opt sequence was applied, 0 if baseline won.
+// Propose tinygrad-style opt candidates for `kid`, beam-search them by
+// timing each variant on FRESH isolated scratch buffers (tinygrad
+// codegen/opt/search.py _time_program + postrange.py bufs_from_ast --
+// never the live TENS graph buffers), apply + disk-cache the winner.
+// Benching on isolated buffers is what lets the search run in a shared
+// context (the FLUX qwen/DiT/VAE captures) without perturbing the live
+// activations or the tile-JIT shape table.  Returns 1 if a winner was
+// applied.  No-op while a JIT capture is recording (jit_is_capturing).
 fn int kernel_autotune(u32 kid);
 fn u64 kautotune_structural_key(struct KernelEntry const *ke);
 
@@ -3448,6 +3456,13 @@ char *cg_emit_tile_metal(KernelEntry const *ke);   // caller frees
 int   cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x, u32 *threads_x);
 u64   cg_now_us(void);
 void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);
+// Snapshot / restore the per-kid profile slot (kind + counters) so the
+// post-capture isolated autotune's bench fires leave no profile side
+// effects -- in particular K_PROFILE[kid].kind, which drives the JIT
+// replay ICB-batching decision.  Opaque u64[6] blob.
+void  cg_profile_snapshot(u32 kid, u64 out[6]);
+void  cg_profile_restore(u32 kid, u64 const in[6]);
+void  cg_profile_set_kind(u32 kid, KDispatchKind kind);
 // Record a true per-kernel GPU-time sample (us).  Metal-only, gated on
 // THVM_METAL_PROFILE_PEROP=1.  External linkage so the .m TU can call it.
 void  cg_profile_record_gpu(u32 kid, u64 gpu_us);
@@ -5694,29 +5709,67 @@ typedef struct {
   // tools/baselines/wm_align_reports/soa.txt.
   u8    use_cube_arrival;
   // Waldmeister CP-formation FIFO lineage (env THVM_ATP_FORMATION_FIFO,
-  // DEFAULT OFF).  The faithful mechanism the per-shape k3-arrival knobs
-  // (use_revface_group / use_posgroup / use_cube_arrival) are proxies for.
-  // WM stamps each surviving critical pair a FIFO age w2 = ++CPNr at the
-  // moment it is inserted (CLAS/NewClassification.c C_Classify:325,
-  // recentCPinsert <- KPV_GebildetesKPBehandelnMitVater/Mutter), strictly
-  // in the streaming order its single superposition scan emits overlaps:
-  // for the selected fact's LHS, per non-variable subterm position (flat-
-  // term TO_Schwanz order) it runs ONE TermMitDSBaumUnifizieren over the
-  // RULE tree then ONE over the EQUATION tree (Unifikation1.c
-  // U1_KPsBildenZuRegel:1527-1547), so within a position every rule
-  // partner (in discrimination-tree leaf-arrival order) precedes every
-  // equation partner (likewise).  thvm reconstructs that order as the k3
-  // field of atp_wmo_rank (= wmo_tops_rank's single-DFS arrival rank);
-  // the FORMATION_FIFO gate orders each batch STRICTLY by that combined-
-  // scan arrival, tree-before-equation, abandoning the per-shape re-key
-  // passes -- so the surviving copy of any multiply-formed term carries
-  // WM's CPNr age WITHOUT per-shape detection.  Re-classification
+  // DEFAULT OFF).  The SINGLE knob enabling the faithful WM CP-formation
+  // order: when set, thvm_atp_set_use_formation_fifo turns ON the four
+  // scoped k3-arrival re-key passes (use_leaf_tiebreak / use_revface_group /
+  // use_posgroup / use_cube_arrival).  Together those reproduce WM's single
+  // superposition-scan emission order: WM stamps each surviving critical
+  // pair a FIFO age w2 = ++CPNr at the moment it is inserted
+  // (CLAS/NewClassification.c C_Classify:325, recentCPinsert <-
+  // KPV_GebildetesKPBehandelnMitVater/Mutter), streaming over the selected
+  // fact's LHS per non-variable subterm position (flat-term TO_Schwanz
+  // order) one TermMitDSBaumUnifizieren over the RULE tree then one over the
+  // EQUATION tree (Unifikation1.c U1_KPsBildenZuRegel:1527-1547), so within
+  // a position every rule partner (discrimination-tree leaf-arrival order)
+  // precedes every equation partner (likewise).  thvm reconstructs that as
+  // the k3 field of atp_wmo_rank and the four passes re-key the divergent
+  // per-shape configurations onto it.  Re-classification
   // (atp_cp_set_interreduce) preserves cp_seq and re-derivation
   // (atp_wm_demote_drain) re-stamps it, mirroring WM's C_ReClassify
   // ("w2 wird nicht geaendert") / KPV_IROpferBehandeln respectively --
-  // already ported.  OFF byte-identical; opt-in only.  See
+  // already ported.  It additionally turns on the IR-victim drain
+  // within-leaf chain tiebreak (use_drain_chainpos).  Atop the base
+  // CP_SIDE/FLAT_SUBSUME/COMM_REAGE/COMM_DROP_DUP knobs this reaches soa
+  // firstdiv 1558 -- exactly equivalent to setting the five individual
+  // correction flags.  OFF byte-identical; opt-in only.  See
   // tools/baselines/wm_align_reports/soa.txt.
   u8    use_formation_fifo;
+  // Waldmeister IR-victim drain within-leaf chain tiebreak (env
+  // THVM_ATP_DRAIN_CHAINPOS, DEFAULT OFF; also turned ON under
+  // use_formation_fifo).  WM drains the IR REPuffer that GMInterred /
+  // RMLinksInterred filled (Interreduktion.c:288-339) via
+  // RE_forGleichungenRobust / RE_forRegelnRobust = BK_forRegelnRobust
+  // (DSBaumKnoten.h:482-495): leaves in BK_NachfBlatt order, and WITHIN a
+  // leaf the fact chain head-first following TP_Nachf -- i.e. the leaf's
+  // chain order (PREPEND on insert => newest first, so head-first = chain
+  // index 0,1,2..).  atp_wmo_victim_drain_key keyed victims only by their
+  // leaf-list rank, so two victims sharing a leaf (the w=224 nested
+  // cube-mirror pair at soa pick 1505: traces 2570 at chainpos 2 and 2817
+  // at chainpos 1 in equation leaf rank 1) collided on one key and the
+  // stable sort fell back to thvm's slot-scan push order -- the OPPOSITE
+  // of WM's chain order.  This gate folds the victim's within-leaf chain
+  // index into the drain key as the low-order tiebreak (after leaf-list
+  // rank), so same-leaf victims drain head-first like BK_Regeln -> Nachf.
+  // OFF byte-identical; advances soa firstdiv 1505 -> beyond.  See
+  // tools/baselines/wm_align_reports/soa.txt.
+  u8    use_drain_chainpos;
+  // Waldmeister GMInterred reducible-face drain order (env
+  // THVM_ATP_DRAIN_REVFACE, DEFAULT OFF; also turned ON under
+  // use_formation_fifo).  GMInterred fills the IR REPuffer via
+  // RE_forGMReferenzen = BK_ReferenzDurchlauf (DSBaumKnoten.h:499-514),
+  // which pulls each equation through the face the new object REDUCES
+  // (NF_ObjektAnwendbar tested per Gleichungsbaum twin), not its
+  // distinguished (LRSortieren) face.  atp_wmo_victim_drain_key keyed
+  // victims by their face-0 leaf only, so a pair whose distinguished faces
+  // coincide (the soa cube-mirror `x.x = cube` pair at pick 1558: traces
+  // 2092/-14 and 3089/-18 both index `x.x` in equation leaf rank 1)
+  // collided and fell back to chain order, draining 3089 before 2092 --
+  // the OPPOSITE of WM, whose distinct reducible cube faces sit in leaves
+  // 14 (2092) and 15 (3089), so WM drains 2092 first.  This gate ranks the
+  // victim by its reduced side's wmo face (reduced_thvm_side ^ dist_rhs)
+  // leaf-list position, matching GMInterred.  OFF byte-identical; advances
+  // soa firstdiv 1558 -> beyond.  See tools/baselines/wm_align_reports/soa.txt.
+  u8    use_drain_revface;
   // Waldmeister LRSortieren side-canonicalisation (SpezNormierung.c
   // :517-534, env THVM_ATP_LR_SORTIEREN, default OFF): a derived
   // unorientable equation is stored with WM's canonical left/right side
@@ -6097,10 +6150,19 @@ fn void      thvm_atp_set_use_posgroup(AtpState *s, u8 on);
 // Cube-arrival tiebreak for the double-cube vs slot15-wrapped pair (see
 // AtpState.use_cube_arrival).  DEFAULT OFF.
 fn void      thvm_atp_set_use_cube_arrival(AtpState *s, u8 on);
-// Waldmeister CP-formation FIFO lineage -- the faithful combined-scan
-// emission order that subsumes the per-shape k3-arrival proxy knobs (see
-// AtpState.use_formation_fifo).  DEFAULT OFF.
+// Waldmeister CP-formation FIFO lineage -- the SINGLE knob enabling the
+// faithful WM CP-formation order; ON it turns on the four scoped k3-arrival
+// re-key passes (leaf_tiebreak / revface_group / posgroup / cube_arrival),
+// equivalent to setting those four flags (see AtpState.use_formation_fifo).
+// DEFAULT OFF.
 fn void      thvm_atp_set_use_formation_fifo(AtpState *s, u8 on);
+// WM IR-victim drain within-leaf chain tiebreak (see
+// AtpState.use_drain_chainpos).  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void      thvm_atp_set_use_drain_chainpos(AtpState *s, u8 on);
+// WM GMInterred reducible-face drain order (see AtpState.use_drain_revface).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_drain_revface(AtpState *s, u8 on);
 // Push-time queue-vs-queue subsumption gate (thvm-native, no WM
 // counterpart; see AtpState.use_queue_subsume).  Default ON; the
 // "Waldmeister"* presets turn it OFF.

@@ -466,24 +466,66 @@ fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
 // thvm rmu_emit_group_reduce template which iterates the full
 // red_extent in strides of `k`.
 //
-// Validity: target axis_id must currently be a KAX_REDUCE leaf with
-// extent % k == 0.  Returns 0 on bail.
+// Validity: target axis_id must name KAX_REDUCE leaf(s) with extent % k
+// == 0.  An im2col-fused conv (the VAE decode) indexes its operands
+// (x and w) with the SAME contraction axis_id from SEPARATE address
+// subtrees -- the lifter emits the axis as MULTIPLE distinct UOP_RANGE
+// terms sharing one axis_id.  A single-leaf find_range bails on that
+// (its "multiple distinct" guard returns 0), which silently killed the
+// conv GROUP candidate.  Collect EVERY matching leaf and substitute each
+// with its GROUP_REDUCE-wrapped form; the rewriter recursion fixpoints
+// since the wrapped outputs are not themselves rule keys.  Returns 0 on
+// bail (no match, a non-REDUCE leaf, or extent not divisible).
 
 fn Term uop_dag_apply_group_reduce(Term root, u32 target_axis, u32 k) {
+  int gr_tr = getenv("THVM_GROUP_REDUCE_TRACE") != NULL;
   if (k == 0) return 0;
-  Term old_leaf = apply_opt_dag_find_range(root, target_axis);
-  if (old_leaf == 0) return 0;
-  if (uop_range_axis_type(old_leaf) != KAX_REDUCE) return 0;
-  u32 extent = uop_range_extent(old_leaf);
-  if (extent == 0 || extent % k != 0) return 0;
-
-  Term new_leaf = uop_range(target_axis, KAX_GROUP_REDUCE, extent);
-  Term wrapped  = uop_opt(new_leaf, UOP_OPT_GROUP_REDUCE, k);
-
+  Term ranges[APPLY_OPT_DAG_SPLIT_MAP_CAP];
+  u32 n_ranges = apply_opt_dag_collect_ranges(root, ranges,
+                                              APPLY_OPT_DAG_SPLIT_MAP_CAP);
   ApplyOptDagSplitCtx ctx;
-  ctx.n = 1;
-  ctx.entries[0].key = old_leaf;
-  ctx.entries[0].val = wrapped;
+  ctx.n = 0;
+  u32 extent = 0;
+  for (u32 i = 0; i < n_ranges; i++) {
+    Term r = ranges[i];
+    if (uop_range_axis_id(r) != target_axis) continue;
+    if (uop_range_axis_type(r) != KAX_REDUCE) {
+      if (gr_tr) fprintf(stderr, "[gr] axis=%u k=%u BAIL: leaf kax=%u != REDUCE\n",
+                         target_axis, k, uop_range_axis_type(r));
+      return 0;
+    }
+    u32 e = uop_range_extent(r);
+    if (e == 0 || e % k != 0) {
+      if (gr_tr) fprintf(stderr, "[gr] axis=%u k=%u BAIL: extent=%u not div\n",
+                         target_axis, k, e);
+      return 0;
+    }
+    if (extent == 0) extent = e;
+    else if (e != extent) {
+      // Same axis_id, different extent -> malformed; refuse to GROUP.
+      if (gr_tr) fprintf(stderr, "[gr] axis=%u k=%u BAIL: mixed extents %u/%u\n",
+                         target_axis, k, extent, e);
+      return 0;
+    }
+    if (ctx.n >= APPLY_OPT_DAG_SPLIT_MAP_CAP) return 0;
+    Term new_leaf = uop_range(target_axis, KAX_GROUP_REDUCE, e);
+    ctx.entries[ctx.n].key = r;
+    ctx.entries[ctx.n].val = uop_opt(new_leaf, UOP_OPT_GROUP_REDUCE, k);
+    ctx.n++;
+  }
+  if (ctx.n == 0) {
+    if (gr_tr) {
+      fprintf(stderr, "[gr] axis=%u k=%u BAIL: no REDUCE leaf matched; "
+              "collected %u/%u ranges:", target_axis, k, n_ranges,
+              APPLY_OPT_DAG_SPLIT_MAP_CAP);
+      for (u32 i = 0; i < n_ranges; i++) {
+        fprintf(stderr, " a%u(t=%u,e=%u)", uop_range_axis_id(ranges[i]),
+                uop_range_axis_type(ranges[i]), uop_range_extent(ranges[i]));
+      }
+      fputc('\n', stderr);
+    }
+    return 0;
+  }
 
   ApplyOptDagSubState st;
   st.memo_n             = 0;

@@ -989,23 +989,43 @@ int main(int argc, char **argv) {
       // tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_cube_arrival(
           s, (getenv("THVM_ATP_CUBE_ARRIVAL") != NULL) ? 1u : 0u);
-      // WM CP-formation FIFO lineage (DEFAULT OFF): the faithful mechanism
-      // the per-shape k3-arrival knobs (REVFACE_GROUP / POSGROUP /
-      // CUBE_ARRIVAL / LEAF_TIEBREAK) are proxies for.  WM stamps each
-      // surviving critical pair w2 = ++CPNr at insertion
-      // (NewClassification.c C_Classify:325 <- recentCPinsert <-
-      // KPV_GebildetesKPBehandelnMitVater/Mutter), strictly in its single
-      // combined-superposition-scan emission order: per overlap position,
-      // every RULE-tree partner (discrimination-tree leaf-arrival order)
-      // precedes every EQUATION-tree partner (Unifikation1.c
-      // U1_KPsBildenZuRegel:1527-1547).  thvm reconstructs that as the k3
-      // (combined-DFS arrival) field of atp_wmo_rank; ON, the batch sorts
-      // STRICTLY by that raw combined-scan key and the four k3-arrival
-      // re-key passes become no-ops, so the surviving copy of a
-      // multiply-formed term inherits WM's CPNr age without per-shape
-      // detection.  Re-classification preserves cp_seq and re-derivation
-      // re-stamps it (already ported: C_ReClassify / KPV_IROpferBehandeln).
-      // THVM_ATP_FORMATION_FIFO opts in.  See
+      // WM IR-victim drain within-leaf chain tiebreak (DEFAULT OFF): fold a
+      // re-derivation victim's chain index within its discrimination-tree leaf
+      // into the drain-order key so two victims sharing a leaf re-enter the
+      // queue in WM's BK_Regeln -> TP_Nachf head-first chain order
+      // (DSBaumKnoten.h:482-495), not thvm's slot-scan push order.  The w=224
+      // nested cube-mirror pair at soa pick 1505 (traces 2570 at chainpos 2,
+      // 2817 at chainpos 1 in equation leaf rank 1) collided on one leaf-rank
+      // key; this tiebreak orders them head-first like WM.  Advances soa
+      // firstdiv past 1505.  THVM_ATP_DRAIN_CHAINPOS opts in (also turned on by
+      // FORMATION_FIFO below).  See tools/baselines/wm_align_reports/soa.txt.
+      thvm_atp_set_use_drain_chainpos(
+          s, (getenv("THVM_ATP_DRAIN_CHAINPOS") != NULL) ? 1u : 0u);
+      // WM GMInterred reducible-face drain order (DEFAULT OFF).  GMInterred
+      // (RE_forGMReferenzen = BK_ReferenzDurchlauf, DSBaumKnoten.h:499-514)
+      // pulls each IR-victim through the face the new rule REDUCES, so a
+      // cube-mirror pair whose distinguished faces coincide (`x.x = cube`,
+      // soa pick 1558: traces 2092/-14 and 3089/-18) drains by the distinct
+      // reducible cube faces' leaf order, not the colliding `x.x` leaf.
+      // Advances soa firstdiv past 1558.  THVM_ATP_DRAIN_REVFACE opts in
+      // (also turned on by FORMATION_FIFO below).  See soa.txt.
+      thvm_atp_set_use_drain_revface(
+          s, (getenv("THVM_ATP_DRAIN_REVFACE") != NULL) ? 1u : 0u);
+      // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
+      // the faithful WM CP-formation order.  It turns on the four scoped
+      // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /
+      // CUBE_ARRIVAL) plus the re-derivation drain within-leaf chain tiebreak
+      // (DRAIN_CHAINPOS) that together reproduce WM's combined-superposition-
+      // scan emission order AND its IR-victim re-queue order: per overlap
+      // position, every RULE-tree partner (discrimination-tree leaf-arrival
+      // order) precedes every EQUATION-tree partner (Unifikation1.c
+      // U1_KPsBildenZuRegel:1527-1547), so the surviving copy of a
+      // multiply-formed term inherits WM's CPNr age (w2 = ++CPNr at insertion,
+      // NewClassification.c C_Classify:325 <- recentCPinsert).  Atop the base
+      // CP_SIDE/FLAT_SUBSUME/COMM_REAGE/COMM_DROP_DUP knobs
+      // THVM_ATP_FORMATION_FIFO reaches soa firstdiv 1558 -- exactly equivalent
+      // to setting the five individual correction flags (the setter runs last,
+      // after the five individual env reads above, so it ORs them on).  See
       // tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_formation_fifo(
           s, (getenv("THVM_ATP_FORMATION_FIFO") != NULL) ? 1u : 0u);

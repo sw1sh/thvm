@@ -1626,12 +1626,56 @@ static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t) {
 // re-entered equations.
 //
 // Key layout: bit 31 = 1 for rule victims (tree 0), 0 for equation
-// victims (tree 1) -- equations sort first; low bits = the victim's
-// distinguished-face (face 0) leaf-list rank in its tree.  Removals of
-// EARLIER-captured victims only delete leaves (never reorder), so ranks
-// captured at successive push moments preserve the pass-start relative
-// order between any two surviving victims.
-static u32 atp_wmo_victim_drain_key(AtpState *s, u32 trace) {
+// victims (tree 1) -- equations sort first; the next field is the
+// victim's distinguished-face (face 0) leaf-list rank in its tree.
+// Removals of EARLIER-captured victims only delete leaves (never
+// reorder), so ranks captured at successive push moments preserve the
+// pass-start relative order between any two surviving victims.
+//
+// Within a leaf two victims share a leaf-list rank, so when
+// use_drain_chainpos is set the victim's chain index within the leaf is
+// folded into the low 8 bits as a tiebreak: WM's BK_forRegelnRobust walks
+// each leaf's fact chain head-first following TP_Nachf (DSBaumKnoten.h:
+// 482-495), and the chain prepends on insert (newest first), so
+// head-first = chain index 0,1,2.. ascending -- exactly this tiebreak.
+// (leafrank is shifted up by 8; both ranks are tiny, no overflow.)
+//
+// GMInterred (use_drain_revface) refinement: WM's REPuffer is NOT filled
+// by the distinguished-face leaf list.  GMInterred (Interreduktion.c:
+// 285-307) runs RE_forGMReferenzen = BK_ReferenzDurchlauf (DSBaumKnoten.h:
+// 499-514), which walks the Gleichungsbaum leaf list and, per leaf, tests
+// NF_ObjektAnwendbar(Objekt, .) -- i.e. it pulls each equation through the
+// face the new object actually REDUCES, not through its distinguished
+// (LRSortieren) face.  WM indexes BOTH directions of an equation (the
+// blue/yellow twins), so the two faces sit in DIFFERENT leaves; the victim
+// re-enters the FIFO at its REDUCIBLE face's leaf-list position.  For the
+// soa cube-mirror pair (`x.x = cube`) the distinguished face is the small
+// `x.x` side -- identical for both twins, so face-0 ranking collides them
+// into one leaf and falls back to chain order (wrong); their reducible
+// cube faces sit in distinct leaves whose leaf-list order is WM's true
+// drain order.  reduced_thvm_side is the thvm side (0 lhs / 1 rhs) the new
+// rule reduced; the wmo face is reduced_thvm_side ^ dist_rhs (the same
+// face remap atp_wmo_eq_*_rank uses, wm_order.c:1834).
+
+// Leaf-list rank (and within-leaf chain index) of the (trace, face) entry
+// in `tree`.  Returns 0xffffffff if not found; *out_chain set to the chain
+// index when found.
+static u32 wmo_face_leafrank(AtpWmOrder *w, u8 tree, u32 trace, u8 face,
+                             u32 *out_chain) {
+  u32 rank = 0;
+  for (WmoLeaf *l = w->tree[tree].ll_head; l != NULL; l = l->ll_next) {
+    for (u32 c = 0; c < l->n_chain; c++) {
+      if (l->chain[c].trace == trace && l->chain[c].face == face) {
+        if (out_chain) *out_chain = c;
+        return rank;
+      }
+    }
+    rank++;
+  }
+  return 0xffffffffu;
+}
+
+static u32 atp_wmo_victim_drain_key(AtpState *s, u32 trace, u8 reduced_thvm_side) {
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   if (w == NULL) return 0x7fffffffu;
   // Find which tree holds this trace's distinguished (face 0) entry.
@@ -1645,16 +1689,29 @@ static u32 atp_wmo_victim_drain_key(AtpState *s, u32 trace) {
     }
   }
   if (!found_tree) return 0x7fffffffu;
-  u32 rank = 0;
-  for (WmoLeaf *l = w->tree[tree].ll_head; l != NULL; l = l->ll_next) {
-    for (u32 c = 0; c < l->n_chain; c++) {
-      if (l->chain[c].trace == trace && l->chain[c].face == 0u) {
-        return ((tree == 0u ? 1u : 0u) << 31) | (rank & 0x7fffffffu);
-      }
-    }
-    rank++;
+  u32 hi = (tree == 0u ? 1u : 0u) << 31;
+  // The face WM pulls the victim through: the reduced side remapped onto
+  // WM's distinguished/reverse face numbering.  Off (legacy) = face 0.
+  u8 key_face = s->use_drain_revface
+                  ? (u8)(reduced_thvm_side ^ wmo_trace_dist_rhs(w, trace))
+                  : 0u;
+  u32 chain = 0u;
+  u32 rank = wmo_face_leafrank(w, tree, trace, key_face, &chain);
+  if (rank == 0xffffffffu) {
+    // The reduced face is not registered (e.g. a mono equation has only
+    // face 0): fall back to the distinguished face.
+    rank = wmo_face_leafrank(w, tree, trace, 0u, &chain);
+    if (rank == 0xffffffffu) return 0x7fffffffu;
   }
-  return 0x7fffffffu;
+  if (s->use_drain_chainpos) {
+    // Fold the within-leaf chain index below the leaf-list rank, so two
+    // victims sharing a leaf drain head-first (BK_Regeln -> TP_Nachf,
+    // DSBaumKnoten.h:482-495; chain prepends newest-first at
+    // RegelHinzufuegen, DSBaumOperationen.c:343-346) like WM.
+    u32 cp = (chain > 0xffu) ? 0xffu : chain;
+    return hi | (((rank & 0x7fffffu) << 8) | cp);
+  }
+  return hi | (rank & 0x7fffffffu);
 }
 
 // Remove every registered face of the fact with birth trace id `trace`.

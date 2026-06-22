@@ -132,6 +132,43 @@ static u8 propose_reduce_axis_index(KernelEntry const *ke) {
   return 0xFF;
 }
 
+// Real DAG axis_id (and extent) of the reduce axis the autotune bench
+// will see.  The KOpt `axis` field for any DAG-applied opt (UNROLL/
+// GROUP_REDUCE) targets the UOP_RANGE leaf BY axis_id -- find_range
+// looks it up by id.  propose_reduce_axis_index returns a SLOT INDEX
+// (sorted-position), which equals the id only when axis_ids are dense
+// 0..n; a conv2d-flat kernel's gapped ids make them differ, so a
+// slot-index KOpt makes find_range miss and the candidate APPLY-FAILs.
+//
+// CRITICAL: read from cached_lift_init_root, NOT the live cached_lift
+// .store_root.  The autotune bench (kautotune_bench_seq) calls
+// axes_reset_to_default before every apply, which swaps store_root for
+// the materialize-time snapshot cached_lift_init_root.  A prior capture-
+// phase opt/renumber can leave store_root with a DIFFERENT axis numbering
+// (e.g. reduce at id=4) than the snapshot apply actually mutates (reduce
+// at id=2) -- proposing from the live root then emits an id that doesn't
+// exist post-reset, and the opt silently no-ops.  Propose from the same
+// DAG apply targets.  Returns 0xFFFFFFFF if no reduce axis.
+static u32 propose_reduce_axis_id(KernelEntry const *ke, u32 *out_extent) {
+  if (out_extent != NULL) *out_extent = 0;
+  if (ke == NULL) return 0xFFFFFFFFu;
+  Term root = ke->cached_lift_init_root != 0 ? ke->cached_lift_init_root
+                                             : ke->cached_lift.store_root;
+  if (root == 0) return 0xFFFFFFFFu;
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(root, ids, types, exts, MAX_AXES);
+  u32 best_id = 0xFFFFFFFFu, best_ext = 0;
+  for (u32 i = 0; i < n; i++) {
+    if (types[i] != KAX_REDUCE) continue;
+    if (best_id == 0xFFFFFFFFu || ids[i] > best_id) {  // last (largest-id) reduce
+      best_id  = ids[i];
+      best_ext = exts[i];
+    }
+  }
+  if (out_extent != NULL) *out_extent = best_ext;
+  return best_id;
+}
+
 // First LOOP-typed axis at or after `start` that can be split by
 // `factor`, or 0xFF if none.  Leading unit/broadcast axes are common
 // in movement-heavy graphs; picking axis 0 unconditionally makes those
@@ -226,13 +263,14 @@ static u32 propose_conv2d_upcast_opts(KernelEntry const *ke, KOpt *out,
 static u32 propose_conv2d_unroll_opts(KernelEntry const *ke, KOpt *out,
                                       u32 n, u32 cap) {
   static const u32 unroll_factors[] = {2};
-  u8 axis = propose_reduce_axis_index(ke);
-  if (axis == 0xFF) {
+  // KOP_UNROLL on the conv reduce axis is DAG-applied (uop_dag_apply_kopt
+  // -> uop_apply_split_dag -> find_range BY axis_id), so target the real
+  // reduce axis_id, not the sorted-slot index (see propose_reduce_axis_id).
+  u32 axis_size = 0;
+  u32 axis = propose_reduce_axis_id(ke, &axis_size);
+  if (axis == 0xFFFFFFFFu || axis_size == 0) {
     return n;
   }
-  TileAxisInfo info;
-  if (!tile_anno_axis_or_kernelaxes(ke, axis, &info)) return n;
-  u32 axis_size = info.extent;
   u32 n_unroll_factors = sizeof(unroll_factors)/sizeof(*unroll_factors);
   for (u32 i = 0; i < n_unroll_factors && n < cap; i++) {
     u32 f = unroll_factors[i];
@@ -240,6 +278,52 @@ static u32 propose_conv2d_unroll_opts(KernelEntry const *ke, KOpt *out,
       continue;
     }
     out[n].op   = KOP_UNROLL;
+    out[n].axis = axis;
+    out[n].arg  = f;
+    n++;
+  }
+  return n;
+}
+
+// Split-K (cooperative GROUP_REDUCE) proposer for the conv-reduce kernel.
+// Faithful port of tinygrad's GROUP/GROUPTOP opt actions
+// (tinygrad/codegen/opt/__init__.py kernel_opt_search_space) applied to the
+// conv2d-flat contraction.  The conv-reduce kernel reduces the channel
+// contraction (C_in, e.g. 512 on the VAE 3x3 convs) SERIALLY inside one
+// thread; without a split-K candidate the autotune search has no
+// parallel-reduction variant to consider for it at all.
+//
+// Emits KOP_GROUPTOP candidates at several group factors that DIVIDE the
+// reduce extent (so uop_dag_apply_group_reduce's `extent % k == 0` validity
+// check passes) AND fit the threadgroup-memory budget: the cooperative reduce
+// allocates one accumulator per group lane, and Metal threadgroups are capped
+// at ~1024 threads, so factors above 256 are pointless (and large factors
+// over-subdivide the grid -- the same lesson as hand_opts.c's THVM_GROUP_SZ
+// default of 16).  The factor list mirrors hand_opts.c's GROUPTOP sizes plus
+// the smaller divisors tinygrad enumerates; the NaN/parity + speed-sanity
+// gates in the autotune search keep only a correct AND faster winner (on
+// large-output-grid convs the serial baseline already saturates the GPU, so
+// split-K usually loses and the gate keeps the baseline -- exactly tinygrad's
+// `prod(output_loop_dims) <= 2048` GROUPTOP gate, applied here by measurement).
+static u32 propose_conv2d_group_opts(KernelEntry const *ke, KOpt *out,
+                                     u32 n, u32 cap) {
+  static const u32 group_factors[] = {32, 16, 8, 4, 2};
+  // GROUP_REDUCE is DAG-applied (uop_dag_apply_group_reduce -> find_range
+  // BY axis_id), so target the real reduce axis_id, not the sorted-slot
+  // index that propose_reduce_axis_index returns -- a conv2d-flat kernel's
+  // gapped axis_ids make the two differ, and a slot-index KOpt makes
+  // find_range miss -> the GROUP candidate APPLY-FAILs and is silently
+  // rejected before timing (the bug that kept the VAE conv serial).
+  u32 axis_size = 0;
+  u32 axis = propose_reduce_axis_id(ke, &axis_size);
+  if (axis == 0xFFFFFFFFu || axis_size == 0) return n;
+  u32 n_group_factors = sizeof(group_factors)/sizeof(*group_factors);
+  for (u32 i = 0; i < n_group_factors && n < cap; i++) {
+    u32 f = group_factors[i];
+    if (axis_size < f || axis_size % f != 0) {
+      continue;
+    }
+    out[n].op   = KOP_GROUPTOP;
     out[n].axis = axis;
     out[n].arg  = f;
     n++;
@@ -398,45 +482,36 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   static const u32 split_factors[] = {16, 8, 4, 2};
   u32 n_factors = sizeof(split_factors)/sizeof(*split_factors);
 
-  // Gate flip: BEAM TC entry checks DAG presence directly.  The body's
-  // `propose_tc_classify` already requires `cached_lift.store_root != 0`
-  // (DAG-side matmul classifier), so the outer `axes != NULL && axis_count
-  // > 0` proxy is redundant -- every materialized kernel that reaches
-  // this proposer has both, and `cached_lift.store_root != 0` is a
-  // strict tightening that matches what the body actually needs.
-  // TC candidates first (heuristic-ordered) but DO NOT return early: a
-  // matmul kernel must ALSO get the rich UPCAST/LOCAL/UNROLL/GROUP action
-  // space appended below.  tinygrad's `actions` (search.py:13-24) offers
-  // every OptOp on every kernel and prunes the inapplicable ones; the
-  // pre-rich thin TC-only return meant BEAM could never FIND the good tile
-  // for a FLUX matmul -- the whole motivation for porting the rich set.
+  // A matmul-shaped kernel is TC-tiled by the FIXED hand_opts + render path,
+  // not by this autotune proposer.  hand_opts.c Section 1 applies KOP_TC at the
+  // largest dividing tile AND the paired M/N KOP_GLOBAL parallel-promote, then
+  // render's uop_recognise_tc_parallel wraps the matmul reduce.  A bare KOP_TC
+  // candidate from here is structurally INCOMPLETE -- it omits the M/N GLOBAL
+  // stamps, so applying it to the reset (un-tiled) snapshot and re-rendering
+  // produces a non-parallel / mis-tiled matmul whose output diverges grossly
+  // from the hand_opts baseline (observed: 571x output magnitude, NaN on the
+  // warm FLUX DiT replay).  It can never reproduce -- let alone beat -- the
+  // hand_opts config, so DECLINE to propose for matmul kernels: the kernel keeps
+  // its correct hand_opts TC and is simply not part of the autotune search.
+  // (tinygrad applies TC once via a complete Opt on a fresh Kernel; thvm's TC is
+  // a render-time concern, so re-proposing it here is the bug, not the lever.)
+  // (Same decline for CUDA: the bare packed-TC tile candidate is the same
+  // structurally-incomplete matmul proposal -- both backends keep their fixed
+  // render-time TC and stay out of the autotune search.)
   if (propose_metal_backend_enabled() && ke->cached_lift.store_root != 0) {
     u32 dtype = 0;
     UopDagGemmShape shape;
     if (propose_tc_classify(ke, &dtype, &shape)
         && (dtype == DT_FP32 || dtype == DT_BF16)) {
-      // Rich tile search: enumerate every VALID simdgroup_matrix tile
-      // (local_m/n x rm/rn x kb) for this {M,N,K} and offer each as a
-      // packed KOP_TC.  The emitter unpacks + re-validates each before
-      // use; the heuristic remains the no-config default.  This replaces
-      // the old thin {32,16,8} arg set (which the emitter ignored, so the
-      // search saw 3 identical kernels) -- the actual FLUX perf lever.
-      int c_is_bf = (dtype == DT_BF16);
-      n = propose_tc_tile_candidates(shape.M, shape.N, shape.K, c_is_bf,
-                                     /*unit=*/8u, /*is_cuda=*/0, out, n, cap);
+      return 0;
     }
   }
-  // CUDA: same rich TC tile search, WMMA 16x16x16 fragments (unit=16).  The
-  // emitter-side override hook (rmu_tc_apply_opt_config CUDA path) is already
-  // wired; tc_tile_valid(is_cuda=1) rejects non-16-multiple K-blocks etc.
   if (propose_cuda_backend_enabled() && ke->cached_lift.store_root != 0) {
     u32 dtype = 0;
     UopDagGemmShape shape;
     if (propose_tc_classify(ke, &dtype, &shape)
         && (dtype == DT_FP32 || dtype == DT_BF16)) {
-      int c_is_bf = (dtype == DT_BF16);
-      n = propose_tc_tile_candidates(shape.M, shape.N, shape.K, c_is_bf,
-                                     /*unit=*/16u, /*is_cuda=*/1, out, n, cap);
+      return 0;
     }
   }
 
@@ -453,7 +528,8 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
     if (tile_analyze_conv2d_flat(ke, &conv)) {
       n = propose_conv2d_local_opts(ke, out, n, cap);
       n = propose_conv2d_upcast_opts(ke, out, n, cap);
-      return propose_conv2d_unroll_opts(ke, out, n, cap);
+      n = propose_conv2d_unroll_opts(ke, out, n, cap);
+      return propose_conv2d_group_opts(ke, out, n, cap);
     }
   }
 
@@ -466,6 +542,14 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   u32 axis_size = axis_idx == 0xFF ? propose_reduce_axis_size(ke)
                                    : (tile_anno_axis_or_kernelaxes(ke, axis_idx,
                                         &axis_info) ? axis_info.extent : 0);
+  // Reduce-axis split-class opts (UNROLL/GROUPTOP) are DAG-applied by
+  // axis_id (find_range), so build their KOpt from the real reduce axis_id
+  // -- propose_reduce_axis_index returns a sorted-SLOT index, which equals
+  // the id only when axis_ids are dense.  Falls back to the slot index when
+  // the DAG read declines (synthetic no-DAG fixtures), preserving prior
+  // behavior on the dense-id kernels these paths already handled.
+  u32 reduce_aid = propose_reduce_axis_id(ke, NULL);
+  u32 reduce_axis = (reduce_aid != 0xFFFFFFFFu) ? reduce_aid : (u32)axis_idx;
   if (axis_size > 0 && axis_idx != 0xFF
       && propose_metal_reduce_unroll_kernel(ke)) {
     for (u32 i = 0; i < n_factors; i++) {
@@ -473,7 +557,7 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
       if (axis_size % f != 0) continue;
       if (n >= cap) break;
       out[n].op   = KOP_UNROLL;
-      out[n].axis = axis_idx;
+      out[n].axis = reduce_axis;
       out[n].arg  = f;
       n++;
     }
