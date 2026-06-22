@@ -491,6 +491,11 @@ static u8   atp_wmo_eq_tops_rank(AtpState *s, u32 trace, u8 thvm_dir,
 // thvm_atp_step call can flush the intake before any pop.
 static void atp_wm_intake_canonicalize(AtpState *s);
 
+// Sync the WM-faithful trie-construction flag onto the wmo mirror (defined
+// in wm_order.c, included below).  Forward-declared so the setter above the
+// include can push the flag onto an already-created mirror.
+static void atp_wmo_sync_trie_faithful(AtpState *s);
+
 // Flat-transposition (commutativity `f(x,y)=f(y,x)`) predicate, defined
 // after the wm_order.c include; forward-declared so the emission-rank
 // mirror (atp_wmo_rank) can exclude commutativity partners from the
@@ -9192,6 +9197,21 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_cube_arrival     = 1u;
     s->use_drain_chainpos   = 1u;
     s->use_drain_revface    = 1u;
+    // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
+    // AltesBlattPolieren splice-after construction correctly reproduces WM's
+    // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
+    // (the firstdiv-1953 divergence: it moves the B-leaf from DFS arrival 6
+    // to WM's arrival 8), but STANDALONE it regresses firstdiv 1953 -> 1884
+    // by exposing a separate latent divergence at pick-1884 that the historical
+    // head-insert special case happened to mask: there the recursive tops DFS
+    // over the now-faithful tree orders a partner-face pair (the two faces of
+    // `dot(v,dot(dot(v,w),v))`) opposite to WM, swapping their CPNr ages
+    // (cp_seq 9012/9013).  Clearing 1884 needs WM's single-cursor backtracking
+    // walk (Unifikation1.c RumpfTermMitDSBaumUnifizieren + Delta*) so the leaf
+    // visit order matches WM exactly at that pair; the construction fix is the
+    // gated, byte-identical-OFF foundation that work builds on.  Enable both
+    // together via THVM_ATP_WM_TRIE_FAITHFUL once the cursor walk lands.
+    atp_wmo_sync_trie_faithful(s);
   }
 }
 
@@ -9215,6 +9235,12 @@ fn void thvm_atp_set_use_drain_revface(AtpState *s, u8 on) {
   s->use_drain_revface = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wm_trie_faithful = on ? 1u : 0u;
+  atp_wmo_sync_trie_faithful(s);
+}
+
 // Push-time queue-vs-queue subsumption gate (no WM counterpart; see
 // AtpState.use_queue_subsume in thvm.h).  Default ON = the historical
 // thvm engine; the "Waldmeister"* presets turn it OFF.
@@ -9233,6 +9259,7 @@ fn void thvm_atp_set_use_emission_order(AtpState *s, u8 on) {
   s->use_emission_order = on ? 1u : 0u;
   if (on && s->wmo == NULL) {
     s->wmo = (void *)atp_wmo_new();
+    atp_wmo_sync_trie_faithful(s);
     // Register already-live facts in slot order (creation order on the
     // preset path, where the flag is set before the axioms install).
     for (u32 i = 0; i < s->n_rules; i++) {

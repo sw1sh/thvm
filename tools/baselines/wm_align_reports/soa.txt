@@ -1,5 +1,85 @@
 soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv 126 -> 288 -> 290
 
+## INVESTIGATED 2026-06-22: THVM_ATP_WM_TRIE_FAITHFUL -- AltesBlattPolieren splice-after construction (firstdiv-1953 root-caused; net-advance blocked by a CP-formation geometry frontier)
+
+The pick-1953 residual (the rule-35 / equation-{-11,-9,-30,-26,-22,-29,-25,-21}
+emission batch where WM emits the partner shapes A/B/C round-robin and thvm groups
+them) was traced END-TO-END against the validated WM trie mirror
+(tools/baselines/wm_order_sim/wm_trie_mirror.py + wm_order_sim2.py).
+
+### ROOT CAUSE (mirror-validated, NOT a hunch)
+The rule-35 tops batch overlaps the new rule's subterm `dot(v1,v2)` (position [0])
+against the equation tree.  Dumping thvm's runtime tops-DFS leaf-arrival order for
+that exact query vs the mirror's faithful tree, the leaf SET and chain groupings
+are IDENTICAL except at arrivals 6-8: thvm visits the B-leaf `dot(v1,dot(v2,v1))`
+at arrival 6, but WM (mirror) visits it at arrival 8 -- AFTER the two deeper
+function/jump leaves `dot(v1,dot(v2,dot(v2,v2)))` and `dot(v1,dot(v2,dot(v3,..)))`.
+That single 6<->8 leaf-order inversion is what scatters the round-robin batch into
+thvm's grouped order.  The inversion comes from CONSTRUCTION, not the walk: WM's
+AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a BlattAufgeteilt
+parallel jump immediately AFTER its model survivor ("hinter den Eintrag setzen"),
+but thvm head-inserted it in one special case (the historical POLIER-PAR-HEAD),
+moving the split leaf's parallel face to the wrong outgoing-list (= DFS-arrival)
+position.
+
+### THE WALK IS NOT THE LEVER (recursive == cursor for a fixed tree)
+The mirror reproduces WM's emission order through rule 39 using a RECURSIVE tops
+DFS (wm_order_sim2.py tops_arrivals) -- byte-identically to WM's single-cursor
+backtracking walk (Unifikation1.c RumpfTermMitDSBaumUnifizieren + Delta*).  For a
+FIXED tree the two walks visit leaves in the same order (same per-node child
+ordering: exact-symbol child, then var children ascending symbol-code, then jump
+exits; WM's AbstiegVerwalten continuation chaining is equivalent to recursion).
+So the divergence is the TREE STRUCTURE the walk runs over, i.e. the construction.
+
+### THE CONSTRUCTION FIX (src/atp/wm_order.c, gated use_wm_trie_faithful)
+Three corrections, all gated behind THVM_ATP_WM_TRIE_FAITHFUL (DEFAULT OFF,
+byte-identical OFF):
+  1. AltesBlattPolieren parallels splice AFTER the survivor (never head-insert);
+     the POLIER-PAR-HEAD special case is kept only when the flag is off.
+  2. Jump dedup (wmo_jump_find): a (sub cells, target) jump already at a start
+     node is never re-created -- the mirror's _add_entry :88-90.
+  3. PositionNachTeilterm uses the surviving jump's OWN stored sub_len
+     (start_pos + surv->sub_len), the mirror's `land = start_pos + len(ent.sub)`
+     :204/:230, not a re-walk of the old key from start_pos.
+VALIDATED: with the gate ON the runtime tops-DFS leaf-arrival order at the rule-35
+query now reads arr6=`dot(v1,dot(v2,dot(v2,v2)))`, arr7=`dot(v1,dot(v2,dot(v3,..)))`,
+arr8=B-leaf -- EXACTLY the mirror's (= WM's) order.  The construction fix is
+faithful and correct for the 1953 divergence.
+
+### WHY IT DOES NOT NET-ADVANCE (the next frontier, characterized precisely)
+Applied alone the construction fix REGRESSES firstdiv 1953 -> 1884, exactly as the
+prior round predicted: it exposes a separate divergence at pick-1884 the
+head-insert had masked.  Picks 1884/1885 are a 2-element transposition of the CP
+faces `dot(v,dot(dot(v,w),v)) # dot(v,w)` (A, WM wants first) and
+`dot(v,dot(dot(w,v),v)) # dot(w,v)` (B).  WM forms BOTH in rule-44's batch:
+pick-1884 = parents (44, 39) [partner rule 39 = A], pick-1885 = parents (44, 37)
+[partner rule 37 = B], A before B.  thvm forms them with DIFFERENT outer rules --
+A from slot 100 (partner slot 80), B from slot 98 (partner slot 77) -- so slot
+98's batch (B) ages BEFORE slot 100's (A), giving B before A.  This is the SAME
+CP-formation OVERLAP-GEOMETRY class as the firstdiv-19 / firstdiv-1953 analyses:
+thvm's atp_overlap_ij assigns a critical pair to a DIFFERENT (outer-rule,
+position) than WM does, scattering its CPNr age across batches.  It is NOT the
+discrimination-tree walk (proven faithful via the mirror) and NOT the construction
+(now WM-faithful); it is the overlap-direction/position assignment in cp-gen, a
+deeper frontier that needs porting WM's exact TT(l)=?E vs l=?eTT outer/inner
+geometry (Unifikation1.c U1_KPsBildenZuRegel:1525-1547) so a CP inherits WM's
+position rank.  The mirror itself stops reproducing WM at rule 40 (a single
+out-of-order CP with a RULE-37 partner), confirming a construction/geometry detail
+beyond what the current mirror models begins there.
+
+### GATES (all hold; the construction fix is a gated, byte-identical-OFF foundation)
+- DEFAULT OFF byte-identical: bin/test_atp 136236/136236 (+ a new
+  atp/wm-trie-faithful-altes-blatt-polieren-splice-after unit test); WALDMEISTER-
+  only soa firstdiv=19 unchanged; FormationFifo soa firstdiv=1953 unchanged (the
+  flag is NOT auto-enabled under FormationFifo -- enabling it regresses to 1884);
+  wm_pr corpus spot-check (Sheffer Commutativity, Boolean OrAssoc 1266, AbelianGroup
+  InverseOfComposite, McCune Associativity 298, Wolfram Commutativity common-prefix
+  2405) CPSEL byte-identical vs clean HEAD 0a0dcfd5.
+- THVM_ATP_WM_TRIE_FAITHFUL ON: validated to reproduce WM's tops-DFS leaf-arrival
+  order for the rule-35 batch; standalone regresses 1953->1884 (the exposed
+  geometry frontier above), so it ships OFF, as the foundation for the cp-gen
+  geometry port that closes 1884+.
+
 ## ADVANCED 2026-06-22: THVM_ATP_DRAIN_REVFACE -- GMInterred reducible-face drain order
 
 Atop FormationFifo+DRAIN_CHAINPOS (firstdiv=1558), the residual at pick-1558 was

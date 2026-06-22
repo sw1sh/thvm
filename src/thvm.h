@@ -5770,6 +5770,21 @@ typedef struct {
   // leaf-list position, matching GMInterred.  OFF byte-identical; advances
   // soa firstdiv 1558 -> beyond.  See tools/baselines/wm_align_reports/soa.txt.
   u8    use_drain_revface;
+  // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
+  // default OFF; also turned ON under use_formation_fifo).  WM's
+  // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
+  // BlattAufgeteilt parallel jump immediately AFTER the surviving model in the
+  // start node's outgoing list ("hinter den Eintrag setzen"); thvm's historical
+  // path head-inserts the parallel in one special case (POLIER-PAR-HEAD), which
+  // makes the runtime tops DFS reach a split leaf's parallel face at the wrong
+  // arrival rank.  At soa rule-35's tops batch this scatters a partner family
+  // across leaf arrivals (the B-leaf `dot(v1,dot(v2,v1))` is visited at arrival
+  // 6 instead of WM's arrival 8, ahead of the two deeper function/jump leaves),
+  // grouping a round-robin batch (picks 1953-1960).  This gate restores WM's
+  // splice-after construction so the DFS leaf-arrival order matches WM's.
+  // OFF byte-identical (the gated branch keeps the head-insert).  See
+  // tools/baselines/wm_align_reports/soa.txt.
+  u8    use_wm_trie_faithful;
   // Waldmeister LRSortieren side-canonicalisation (SpezNormierung.c
   // :517-534, env THVM_ATP_LR_SORTIEREN, default OFF): a derived
   // unorientable equation is stored with WM's canonical left/right side
@@ -6163,6 +6178,10 @@ fn void      thvm_atp_set_use_drain_chainpos(AtpState *s, u8 on);
 // WM GMInterred reducible-face drain order (see AtpState.use_drain_revface).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_drain_revface(AtpState *s, u8 on);
+// WM-faithful discrimination-tree construction (see
+// AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void      thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on);
 // Push-time queue-vs-queue subsumption gate (thvm-native, no WM
 // counterpart; see AtpState.use_queue_subsume).  Default ON; the
 // "Waldmeister"* presets turn it OFF.

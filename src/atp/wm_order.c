@@ -192,6 +192,14 @@ typedef struct AtpWmOrder {
   u32      rc_qn;             // cached query cell count
   u32      rc_n_out;          // cached arrival count (held in tops_arr)
   WmoCell  rc_q[WMO_MAX_CELLS];   // cached query cells
+  // WM-faithful AltesBlattPolieren construction (use_wm_trie_faithful): when
+  // set, every BlattAufgeteilt parallel jump splices immediately AFTER the
+  // surviving model in the start node's outgoing list (DSBaumOperationen.c
+  // :521-526, "hinter den Eintrag setzen"), never head-inserts -- so the
+  // runtime DFS reaches a split leaf's parallel face at WM's exact arrival
+  // rank.  Set from AtpState.use_wm_trie_faithful at tree creation; default 0
+  // keeps the historical head-insert special case (byte-identical OFF).
+  u8       polier_after;
 } AtpWmOrder;
 
 // ---------- cells ----------
@@ -624,8 +632,29 @@ static void wmo_ct(const char *mech, WmoNode *start, void *ziel, u8 ziel_leaf) {
           wmo_node_depth(start), ziel_leaf, tr);
 }
 
+// WM-faithful jump dedup (DSBaumOperationen.c RumpfSprungeintragSetzen via
+// the mirror's _add_entry :88-90): a jump with the same (sub cells, target)
+// already at this start node is never re-created.  Returns the existing entry,
+// or NULL if none.  Only consulted on the WM-faithful construction path.
+static WmoEntry *wmo_jump_find(const WmoNode *start, const WmoCell *sub,
+                               u32 sub_len, const void *ziel, u8 ziel_leaf) {
+  for (WmoEntry *e = start->exits; e != NULL; e = e->next) {
+    if (e->ziel == ziel && e->ziel_leaf == ziel_leaf &&
+        e->sub_len == sub_len &&
+        memcmp(e->sub, sub, (size_t)sub_len * sizeof(WmoCell)) == 0)
+      return e;
+  }
+  return NULL;
+}
+
+static u8 g_wmo_polier_after = 0u;
+
 static WmoEntry *wmo_jump_prepend(WmoNode *start, const WmoCell *sub,
                                   u32 sub_len, void *ziel, u8 ziel_leaf) {
+  if (g_wmo_polier_after) {
+    WmoEntry *dup = wmo_jump_find(start, sub, sub_len, ziel, ziel_leaf);
+    if (dup != NULL) return dup;
+  }
   wmo_ct("PREPEND", start, ziel, ziel_leaf);
   WmoEntry *e = (WmoEntry *)calloc(1, sizeof(WmoEntry));
   e->start = start;
@@ -758,7 +787,8 @@ static void wmo_neue_spruenge(WmoStapel *stk, WmoLeaf *old, WmoNode *last,
 // Sprungeingaenge lists, never Sprungausgaenge).  node_at[m] covers cell
 // i+1+m.
 static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
-                                     WmoNode **node_at, u32 i, u32 j) {
+                                     WmoNode **node_at, u32 i, u32 j,
+                                     u8 polier_after) {
   // Snapshot the in-jumps to `old` before mutation (a tree walk; the trie
   // keeps no incoming list, so gather by target).  Outgoing-list order at
   // each node is preserved because the parallel is spliced right after its
@@ -790,8 +820,14 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
     // vs the new suffix position j+1: a subterm closing past the split
     // (e_old > j) "still lands in a leaf" -> parallel into the new leaf; one
     // closing inside the chain (e_old <= j) is re-targeted onto the chain
-    // node.
-    u32 e_old = wmo_sub_end(old->key, start_pos);
+    // node.  WM-faithful: PositionNachTeilterm is the survivor's OWN stored
+    // extent (start_pos + sub_len), the mirror's `land = start_pos +
+    // len(ent.sub)` (:204/:230), not a re-walk of the old key from start_pos
+    // -- a short jump (constant / partial subterm) closes EARLIER than the
+    // natural subterm end, so re-walking the key would mis-place it.  OFF
+    // keeps the historical key re-walk (byte-identical).
+    u32 e_old = polier_after ? (start_pos + surv->sub_len)
+                             : wmo_sub_end(old->key, start_pos);
     if (e_old > j) {
       // if-branch (:503-530): a fresh parallel jump to the NEW leaf,
       // carrying the NEW leaf's subterm at this start (its own length,
@@ -817,11 +853,16 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
       // subterm opened FURTHER above (i - start_pos > 1, the MeredithAxioms
       // And/OrAssoc @340 R27 jump start_pos=2 i=4 j=5) is a genuine parallel
       // and goes after the survivor, matching WM's CPNr/FIFO arrival.
-      if (start_pos < i && e_new < e_old && i - start_pos == 1u) {
+      if (!polier_after && start_pos < i && e_new < e_old &&
+          i - start_pos == 1u) {
         wmo_ct("POLIER-PAR-HEAD", sn, leaf, 1u);
         par->next = sn->exits;
         sn->exits = par;
       } else {
+        // WM-faithful (DSBaumOperationen.c :523-526): always splice the
+        // parallel immediately AFTER the survivor it parallels ("hinter den
+        // Eintrag setzen").  The historical head-insert special case
+        // (POLIER-PAR-HEAD) is kept only when polier_after is off.
         wmo_ct("POLIER-PAR-AFTER", sn, leaf, 1u);
         par->next = surv->next;
         surv->next = par;
@@ -886,7 +927,7 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
 }
 
 static void wmo_tree_insert(WmoTree *t, const WmoCell *key, u32 key_len,
-                            u32 depth, u32 trace, u8 face) {
+                            u32 depth, u32 trace, u8 face, u8 polier_after) {
   if (key_len == 0u || key_len > WMO_MAX_CELLS) return;
   if (t->root == NULL) t->root = wmo_node_new(NULL);
   WmoNode *node = t->root;
@@ -999,7 +1040,7 @@ static void wmo_tree_insert(WmoTree *t, const WmoCell *key, u32 key_len,
       if (j < old->key_len) wmo_kid_set(last, &old->key[j], old, 1u);
       wmo_blatt_einhaengen(&stk, last, key, j, leaf, /*untergrenze=*/anc_base);
       // AltesBlattPolieren (:665) then NeueSpruengeInsAlteBlatt (:666).
-      wmo_altes_blatt_polieren(t, old, leaf, node_at, i, j);
+      wmo_altes_blatt_polieren(t, old, leaf, node_at, i, j, polier_after);
       wmo_neue_spruenge(&stk, old, last, j, anc_base);
       return;
     }
@@ -1468,7 +1509,8 @@ static void atp_wmo_free(AtpWmOrder *w) {
 static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
                          const WmoCell *cells, u32 n_cells, u32 depth,
                          u8 dist_rhs) {
-  wmo_tree_insert(&w->tree[tree], cells, n_cells, depth, trace, face);
+  wmo_tree_insert(&w->tree[tree], cells, n_cells, depth, trace, face,
+                  w->polier_after);
   if (w->n_reg == w->cap_reg) {
     w->cap_reg = w->cap_reg ? w->cap_reg * 2u : 64u;
     w->reg = (WmoReg *)realloc(w->reg, w->cap_reg * sizeof(WmoReg));
@@ -1549,9 +1591,24 @@ static u8 wmo_term_is_ground(Term t) {
 // `cp_derived` selects the source surface; for mono / symmetric-face
 // equations the two faces alpha-renumber to each other, so the choice
 // is moot (dist_rhs forced 0).
+//
+// Sync the WM-faithful trie-construction flag from the AtpState onto the
+// AtpWmOrder + the file-static used by wmo_jump_prepend, so every subsequent
+// wmo_register insert uses WM's splice-after AltesBlattPolieren + jump dedup
+// (see AtpWmOrder.polier_after / AtpState.use_wm_trie_faithful).  Called by the
+// setter and before each insert in atp_wmo_insert_fact_ex.
+static void atp_wmo_sync_trie_faithful(AtpState *s) {
+  if (s == NULL) return;
+  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+  if (w != NULL) w->polier_after = s->use_wm_trie_faithful ? 1u : 0u;
+  g_wmo_polier_after = s->use_wm_trie_faithful ? 1u : 0u;
+}
+
 static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   if (w == NULL) return;
+  w->polier_after = s->use_wm_trie_faithful ? 1u : 0u;
+  g_wmo_polier_after = w->polier_after;
   u32 trace = s->r_trace[slot];
   WmoCell cells[WMO_MAX_CELLS];
   if (s->r_orient[slot]) {

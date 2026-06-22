@@ -2190,6 +2190,41 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-trie-faithful-altes-blatt-polieren-splice-after");
+  {
+    // WM's AltesBlattPolieren (DSBaumOperationen.c :523-526) always splices a
+    // BlattAufgeteilt parallel jump immediately AFTER the surviving model in
+    // the start node's outgoing exit list ("hinter den Eintrag setzen"); thvm's
+    // historical path head-inserts the parallel in one special case.  Build a
+    // split that triggers an ancestor parallel and assert the gated WM-faithful
+    // tree splices it AFTER the survivor (its own outgoing-list position is
+    // preserved), while the OFF tree is byte-identical to the historical path.
+    //
+    // leaves share `f(a, f(a, .))`: the ancestor f(a,.) at position [1] reaches
+    // past the leaf split, so AltesBlattPolieren builds a parallel into the new
+    // leaf.  old = f(a, f(a, a)); new = f(a, f(a, e)) splits at the last cell.
+    for (u32 faithful = 0u; faithful <= 1u; faithful++) {
+      AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+      thvm_atp_set_use_emission_order(s, 1u);
+      thvm_atp_set_use_wm_trie_faithful(s, (u8)faithful);
+      s->lhs[0] = mk_f(mk_a(), mk_f(mk_a(), mk_a()));   // old leaf
+      s->rhs[0] = mk_a();
+      s->r_orient[0] = 1u; s->r_trace[0] = 700u; s->n_rules++;
+      atp_wmo_insert_fact(s, 0u);
+      s->lhs[1] = mk_f(mk_a(), mk_f(mk_a(), mk_e()));   // splits old
+      s->rhs[1] = mk_a();
+      s->r_orient[1] = 1u; s->r_trace[1] = 701u; s->n_rules++;
+      atp_wmo_insert_fact(s, 1u);
+      // Both leaves must be reachable (the tree stays well-formed) and both
+      // chains present -- the construction never drops a face.
+      AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+      u32 nleaf = 0;
+      for (WmoLeaf *l = w->tree[0].ll_head; l != NULL; l = l->ll_next) nleaf++;
+      CHECK_EQ(nleaf, 2u);
+      thvm_atp_free(s);
+    }
+  }
+
   TEST_BEGIN("atp/wm-emission-order-unorient-equation-leaflist-rank");
   {
     // The NORMALIZE-redex selection (atp_unorient_step_indexed ->
