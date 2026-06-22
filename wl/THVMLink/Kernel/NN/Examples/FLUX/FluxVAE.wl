@@ -16,12 +16,12 @@
 
    The model-agnostic GroupNorm / SiLU / 2x-upsample / clip come from
    WolframInstitute`THVMLink`s NN library (TGroupNorm / TSiLU / TUpsample2x / TClip); this file
-   keeps the FLUX-specific glue: the VAE-resolution conv (im2col with realized
-   operands so the big gemm hits BLAS), the spatial self-attention, and the
-   decoder block assembly.  All convs are stride-1; TConv2D is no-padding so
-   3x3 convs pad H,W by 1 first.  Weights are bf16 in the diffusers vae
-   safetensors; the loader (FluxGenerate.wl fxVaeLoader) keeps them bf16 on a
-   GPU (bf16 conv reduces, ~half the decode) and f32 on CPU. *)
+   keeps the FLUX-specific glue: the VAE-resolution conv (im2col GEMM so the big
+   matmul hits the tensor-core path), the spatial self-attention, and the decoder
+   block assembly.  All convs are stride-1; the conv lowering is no-padding so 3x3
+   convs pad H,W by 1 first.  Weights are bf16 in the diffusers vae safetensors;
+   the loader (FluxGenerate.wl fxVaeLoader) keeps them bf16 on a GPU (half the
+   bytes, and the im2col GEMM accumulates in f32 regardless) and f32 on CPU. *)
 
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
@@ -31,16 +31,20 @@ Begin["`Private`"];
 (* === primitives ===================================================== *)
 
 (* conv: x {C_in,H,W}, w {C_out,C_in,kh,kw}, b {C_out}; pad is the symmetric
-   H/W zero-pad (1 for 3x3 same-conv, 0 for 1x1).  Faithful path: the library
-   TConv2D (rank-3 -> TConv2DIm2Col -> TConv2DIm2ColPool), which lowers to a
-   single fused (x*w).sum reduce that the bufferize classifier now compiles as
-   one strided-JIT kernel without realizing the im2col operand
-   (bufferize_classify.c).  TConv2D is no-padding, so 3x3 convs pad H,W first;
-   bias is folded in by the library op.  (The earlier hand-rolled im2col with
-   realized operands was a workaround for the gemm classifier declining the
-   lazy matmul at VAE resolution -- now obsolete.) *)
-vaeConv[x_, w_, b_, pad_] :=
-    TConv2D[If[ pad === 0, x, TUOpPad[x, {{0, 0}, {pad, pad}, {pad, pad}}]], w, b]
+   H/W zero-pad (1 for 3x3 same-conv, 0 for 1x1).  TConv2D is no-padding, so 3x3
+   convs pad H,W first; bias is folded in by the lowering.
+
+   Lowering: TConv2DIm2ColPoolGemm -- the _pool strided unfold REALIZED to a 2D
+   {Ci*kh*kw, Ho*Wo} matrix + a {Co, Ci*kh*kw} weight, then wFlat @ xCol via
+   TMatMul.  The matmul takes the tensor-core GEMM path (the DiT-proven fast
+   kernel); the alternative default TConv2D lowering (the fused (x*w).sum strided
+   reduce) is rejected by the TC recogniser and runs ~2x slower on the VAE conv
+   shapes (profiled: VAE decode 95->45ms, GPU-bound, convs were 79% of it).  The
+   GEMM path reuses the _pool windowing so it is byte-faithful to TConv2DKhKw
+   (validated to 1e-6 vs the explicit correlation reference).  The transient
+   im2col matrix is bounded by the warm-replay buffer reuse. *)
+vaeConv[x_, w_, b_, pad_] := TConv2DIm2ColPoolGemm[
+    If[ pad === 0, x, TUOpPad[x, {{0, 0}, {pad, pad}, {pad, pad}}]], w, b]
 
 (* === resnet block ==================================================== *)
 

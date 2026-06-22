@@ -186,16 +186,14 @@ fxQwenLoader[qwt_, dev_] := Module[{cache = <||>},
         If[ n === "model.embed_tokens.weight", qwt[n], TToDevice[qwt[n], dev]]]]
 
 (* VAE weights uploaded to the device.  On a GPU keep them bf16 (their stored
-   safetensors dtype): the VAE conv reduces are bandwidth-bound strided-JIT
-   kernels (NOT tensor-core matmuls -- recognise_tc.c rejects the conv
-   im2col shape), so halving the weight + activation bytes ~halves the decode.
-   bf16 buffers read correctly on Metal (the reduce accumulates in f32 and
-   stores back bf16, render_uop.c rmu_store_cast), and the latent feeding the
-   first conv is uploaded bf16 too so every conv is bf16(act) x bf16(W), not
-   the slow MIXED f32xbf16.  The CPU path stays f32 (its C JIT promotes bf16 to
-   f32 but needs host-boundary widening; f32 weights are already matched).
-   vaeDecoder asks for the latent-denorm stats as `bn_running_mean`/`bn_running_var`;
-   the safetensors store them dotted (`bn.running_mean`/`bn.running_var`), so alias. *)
+   safetensors dtype): vaeConv routes through the im2col GEMM (TConv2DIm2ColPoolGemm),
+   so each conv is a bf16(act) x bf16(W) tensor-core matmul accumulating in f32 --
+   half the weight + activation bytes feeding the TC GEMM.  The latent feeding the
+   first conv is uploaded bf16 too so the conv is bf16 x bf16, not the slow MIXED
+   f32 x bf16.  The CPU path stays f32 (its C JIT promotes bf16 to f32 but needs
+   host-boundary widening; f32 weights are already matched).  vaeDecoder asks for
+   the latent-denorm stats as `bn_running_mean`/`bn_running_var`; the safetensors
+   store them dotted (`bn.running_mean`/`bn.running_var`), so alias. *)
 fxVaeKey[n_] := Switch[n,
     "bn_running_mean", "bn.running_mean", "bn_running_var", "bn.running_var", _, n];
 fxVaeLoader[vt_, dev_] := Module[{cache = <||>, wdt = If[ dev === "cpu", "f32", "bf16"]},
