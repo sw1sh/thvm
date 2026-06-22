@@ -9171,17 +9171,25 @@ fn void thvm_atp_set_use_cube_arrival(AtpState *s, u8 on) {
 }
 
 // Waldmeister CP-formation FIFO lineage (see AtpState.use_formation_fifo):
-// order each selected fact's CP batch STRICTLY by WM's single combined-
-// superposition-scan arrival -- per overlap position, every rule-tree partner
-// (in discrimination-tree leaf-arrival order, k3) precedes every equation-tree
-// partner (likewise) -- and stamp cp_seq in that stream, so the surviving copy
-// of a multiply-formed term inherits WM's CPNr age (NewClassification.c
-// C_Classify:325 w2=++CPNr <- recentCPinsert) without the per-shape k3-arrival
-// re-key passes.  The proxy knobs (revface_group/posgroup/cube_arrival) become
-// no-ops when this is on.  DEFAULT OFF.
+// the SINGLE knob enabling the faithful WM CP-formation order -- it turns on
+// the four scoped k3-arrival re-key passes (leaf_tiebreak / revface_group /
+// posgroup / cube_arrival) that together reproduce WM's combined-superposition-
+// scan emission order (per overlap position, every rule-tree partner in
+// discrimination-tree leaf-arrival order precedes every equation-tree partner;
+// the surviving copy of a multiply-formed term inherits WM's CPNr age, w2 =
+// ++CPNr at insertion, NewClassification.c C_Classify:325 <- recentCPinsert).
+// Atop the base CP_SIDE/FLAT_SUBSUME/COMM_REAGE/COMM_DROP_DUP knobs this
+// reaches soa firstdiv 1505.  DEFAULT OFF (opt-in only); ON it is exactly
+// equivalent to setting the four individual correction flags.
 fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_formation_fifo = on ? 1u : 0u;
+  if (on) {
+    s->use_leaf_tiebreak = 1u;
+    s->use_revface_group = 1u;
+    s->use_posgroup      = 1u;
+    s->use_cube_arrival  = 1u;
+  }
 }
 
 // Push-time queue-vs-queue subsumption gate (no WM counterpart; see
@@ -16264,7 +16272,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // (firstdiv 290 -> trace end); the byte-identical 1..289 prefix is
     // preserved (the early-batch fires re-age CPs WM already agrees on, so the
     // selection content is unchanged there).
-    if (s->use_leaf_tiebreak && !s->use_formation_fifo) {
+    if (s->use_leaf_tiebreak) {
       for (u32 kb = 0; kb < n_big; kb++) {
         u32 jb = (big[kb].i == f) ? big[kb].j : big[kb].i;
         if (s->r_orient[jb]) continue;                 // equation partner only
@@ -16312,7 +16320,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // alpha-match (orientation-insensitive) -- never a generic equal-weight
     // reorder.  Advances soa firstdiv 778 -> 966 (clears multiple w=209/w=189
     // Cshape clusters); see tools/baselines/wm_align_reports/soa.txt.
-    if (s->use_revface_group && !s->use_formation_fifo) {
+    if (s->use_revface_group) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
       for (u32 kb = 0; kb < n_big; kb++) {
         if (big[kb].i != f) continue;                // D-phase tops, outer = f
@@ -16373,7 +16381,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // cluster.  Scoped HARD to the A phase, identical group prefix, the
     // `(x.x).y = (x.y).y` permutation reverse face, and a strictly-higher
     // raw-arrival same-group cube CP -- never a generic equal-weight reorder.
-    if (s->use_posgroup && !s->use_formation_fifo) {
+    if (s->use_posgroup) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);     // phase | k1 | k2 bits
       for (u32 kb = 0; kb < n_big; kb++) {
         if (big[kb].i != f || big[kb].j == f) continue;
@@ -16423,7 +16431,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // (phase|k1|k2), and the anchor strictly earlier-keyed -- never a generic
     // equal-weight reorder.  OFF byte-identical; the prior-8-knobs 1..1319
     // prefix is preserved.  Advances soa firstdiv 1320 -> beyond.
-    if (s->use_cube_arrival && !s->use_formation_fifo) {
+    if (s->use_cube_arrival) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);     // phase | k1 | k2 bits
       for (u32 kb = 0; kb < n_big; kb++) {
         if (big[kb].i != f || big[kb].j == f) continue;

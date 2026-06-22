@@ -975,12 +975,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   mint wm_cube_arrival = MArgument_getInteger(args[60]);
   thvm_atp_set_use_cube_arrival(atp, (u8)(wm_cube_arrival != 0));
   // Method -> {... "FormationFifo" -> True}: Waldmeister CP-formation FIFO
-  // lineage -- the faithful combined-superposition-scan emission order the
-  // per-shape k3-arrival knobs (RevfaceGroup / PosGroup / CubeArrival /
-  // LeafTiebreak) are proxies for.  Orders each batch STRICTLY by WM's
-  // single-scan arrival (tree before equation), stamping cp_seq = WM's
-  // w2 = ++CPNr, and makes those four k3-arrival passes no-ops.  args[61];
-  // 0 = off (default).
+  // lineage -- the SINGLE knob enabling the faithful WM CP-formation order.
+  // It turns ON the four scoped k3-arrival re-key passes (LeafTiebreak /
+  // RevfaceGroup / PosGroup / CubeArrival) that reproduce WM's single
+  // superposition-scan emission order (tree before equation), stamping
+  // cp_seq = WM's w2 = ++CPNr; equivalent to setting those four flags.  Atop
+  // the base CPSide/FlatSubsume/CommReage/CommDropDup knobs it reaches soa
+  // firstdiv 1505.  args[61]; 0 = off (default).
   mint wm_formation_fifo = MArgument_getInteger(args[61]);
   thvm_atp_set_use_formation_fifo(atp, (u8)(wm_formation_fifo != 0));
   // Record per-step normalization chains so the WL ProofObject

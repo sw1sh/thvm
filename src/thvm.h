@@ -5595,28 +5595,28 @@ typedef struct {
   // tools/baselines/wm_align_reports/soa.txt.
   u8    use_cube_arrival;
   // Waldmeister CP-formation FIFO lineage (env THVM_ATP_FORMATION_FIFO,
-  // DEFAULT OFF).  The faithful mechanism the per-shape k3-arrival knobs
-  // (use_revface_group / use_posgroup / use_cube_arrival) are proxies for.
-  // WM stamps each surviving critical pair a FIFO age w2 = ++CPNr at the
-  // moment it is inserted (CLAS/NewClassification.c C_Classify:325,
-  // recentCPinsert <- KPV_GebildetesKPBehandelnMitVater/Mutter), strictly
-  // in the streaming order its single superposition scan emits overlaps:
-  // for the selected fact's LHS, per non-variable subterm position (flat-
-  // term TO_Schwanz order) it runs ONE TermMitDSBaumUnifizieren over the
-  // RULE tree then ONE over the EQUATION tree (Unifikation1.c
-  // U1_KPsBildenZuRegel:1527-1547), so within a position every rule
-  // partner (in discrimination-tree leaf-arrival order) precedes every
-  // equation partner (likewise).  thvm reconstructs that order as the k3
-  // field of atp_wmo_rank (= wmo_tops_rank's single-DFS arrival rank);
-  // the FORMATION_FIFO gate orders each batch STRICTLY by that combined-
-  // scan arrival, tree-before-equation, abandoning the per-shape re-key
-  // passes -- so the surviving copy of any multiply-formed term carries
-  // WM's CPNr age WITHOUT per-shape detection.  Re-classification
+  // DEFAULT OFF).  The SINGLE knob enabling the faithful WM CP-formation
+  // order: when set, thvm_atp_set_use_formation_fifo turns ON the four
+  // scoped k3-arrival re-key passes (use_leaf_tiebreak / use_revface_group /
+  // use_posgroup / use_cube_arrival).  Together those reproduce WM's single
+  // superposition-scan emission order: WM stamps each surviving critical
+  // pair a FIFO age w2 = ++CPNr at the moment it is inserted
+  // (CLAS/NewClassification.c C_Classify:325, recentCPinsert <-
+  // KPV_GebildetesKPBehandelnMitVater/Mutter), streaming over the selected
+  // fact's LHS per non-variable subterm position (flat-term TO_Schwanz
+  // order) one TermMitDSBaumUnifizieren over the RULE tree then one over the
+  // EQUATION tree (Unifikation1.c U1_KPsBildenZuRegel:1527-1547), so within
+  // a position every rule partner (discrimination-tree leaf-arrival order)
+  // precedes every equation partner (likewise).  thvm reconstructs that as
+  // the k3 field of atp_wmo_rank and the four passes re-key the divergent
+  // per-shape configurations onto it.  Re-classification
   // (atp_cp_set_interreduce) preserves cp_seq and re-derivation
   // (atp_wm_demote_drain) re-stamps it, mirroring WM's C_ReClassify
   // ("w2 wird nicht geaendert") / KPV_IROpferBehandeln respectively --
-  // already ported.  OFF byte-identical; opt-in only.  See
-  // tools/baselines/wm_align_reports/soa.txt.
+  // already ported.  Atop the base CP_SIDE/FLAT_SUBSUME/COMM_REAGE/
+  // COMM_DROP_DUP knobs this reaches soa firstdiv 1505 -- exactly equivalent
+  // to setting the four individual correction flags.  OFF byte-identical;
+  // opt-in only.  See tools/baselines/wm_align_reports/soa.txt.
   u8    use_formation_fifo;
   // Waldmeister LRSortieren side-canonicalisation (SpezNormierung.c
   // :517-534, env THVM_ATP_LR_SORTIEREN, default OFF): a derived
@@ -5998,9 +5998,11 @@ fn void      thvm_atp_set_use_posgroup(AtpState *s, u8 on);
 // Cube-arrival tiebreak for the double-cube vs slot15-wrapped pair (see
 // AtpState.use_cube_arrival).  DEFAULT OFF.
 fn void      thvm_atp_set_use_cube_arrival(AtpState *s, u8 on);
-// Waldmeister CP-formation FIFO lineage -- the faithful combined-scan
-// emission order that subsumes the per-shape k3-arrival proxy knobs (see
-// AtpState.use_formation_fifo).  DEFAULT OFF.
+// Waldmeister CP-formation FIFO lineage -- the SINGLE knob enabling the
+// faithful WM CP-formation order; ON it turns on the four scoped k3-arrival
+// re-key passes (leaf_tiebreak / revface_group / posgroup / cube_arrival),
+// equivalent to setting those four flags (see AtpState.use_formation_fifo).
+// DEFAULT OFF.
 fn void      thvm_atp_set_use_formation_fifo(AtpState *s, u8 on);
 // Push-time queue-vs-queue subsumption gate (thvm-native, no WM
 // counterpart; see AtpState.use_queue_subsume).  Default ON; the

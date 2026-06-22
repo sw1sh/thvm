@@ -377,12 +377,13 @@ $atpRunProofFn := $atpRunProofFn = load[
         firstdiv past 1320 *)
      Integer,
      (* args[61] = Waldmeister CP-formation FIFO lineage (Method
-        "FormationFifo"; the faithful combined-superposition-scan
-        emission order the per-shape k3-arrival knobs RevfaceGroup /
-        PosGroup / CubeArrival / LeafTiebreak are proxies for -- orders
-        each batch STRICTLY by WM's single-scan arrival, tree before
-        equation, stamping cp_seq = WM's w2 = ++CPNr, and makes those
-        four k3-arrival passes no-ops).  OFF by default *)
+        "FormationFifo"; the SINGLE knob enabling the faithful WM
+        CP-formation order -- it turns ON the four scoped k3-arrival
+        re-key passes LeafTiebreak / RevfaceGroup / PosGroup /
+        CubeArrival, which reproduce WM's single superposition-scan
+        emission order, tree before equation, stamping cp_seq = WM's
+        w2 = ++CPNr; equivalent to setting those four flags.  Atop the
+        base knobs it reaches soa firstdiv 1505).  OFF by default *)
      Integer},
     "NumericArray"
 ]
@@ -2635,17 +2636,17 @@ atpCubeArrivalOpt[o_Association] :=
         True, 1, False | Automatic, 0, _, 0];
 
 (* "FormationFifo" -> True | False: Waldmeister CP-formation FIFO lineage.
-   The faithful mechanism the per-shape k3-arrival knobs (RevfaceGroup /
-   PosGroup / CubeArrival / LeafTiebreak) are proxies for.  WM stamps each
-   surviving critical pair w2 = ++CPNr at insertion (NewClassification.c
-   C_Classify), strictly in its single combined-superposition-scan emission
-   order: per overlap position every RULE-tree partner (discrimination-tree
-   leaf-arrival order) precedes every EQUATION-tree partner.  thvm
-   reconstructs that as the combined-DFS arrival field of its emission key;
-   ON, each batch sorts STRICTLY by that raw key and the four k3-arrival
-   re-key passes become no-ops, so a multiply-formed term's surviving copy
-   inherits WM's CPNr age WITHOUT per-shape detection.  False/Automatic =
-   off. *)
+   The SINGLE knob enabling the faithful WM CP-formation order: it turns ON
+   the four scoped k3-arrival re-key passes (LeafTiebreak / RevfaceGroup /
+   PosGroup / CubeArrival).  Together those reproduce WM's single
+   combined-superposition-scan emission order -- WM stamps each surviving
+   critical pair w2 = ++CPNr at insertion (NewClassification.c C_Classify),
+   per overlap position every RULE-tree partner (discrimination-tree
+   leaf-arrival order) precedes every EQUATION-tree partner -- so a
+   multiply-formed term's surviving copy inherits WM's CPNr age.  Setting
+   FormationFifo -> True is exactly equivalent to setting those four flags;
+   atop the base CPSide/FlatSubsume/CommReage/CommDropDup knobs it reaches
+   soa firstdiv 1505.  False/Automatic = off. *)
 atpFormationFifoOpt[o_Association] :=
     Switch[Lookup[o, "FormationFifo", Automatic],
         True, 1, False | Automatic, 0, _, 0];
