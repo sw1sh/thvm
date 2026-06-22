@@ -43,6 +43,29 @@ typedef struct {
   u64     us;
 } KOptSeqBench;
 
+// === Isolated-buffer bench (port of tinygrad codegen/opt/search.py
+// `_time_program` + postrange.py `bufs_from_ast`) ===
+//
+// The default bench re-fires a kernel on its LIVE TENS buffers in the
+// shared context.  During a FLUX session that context is shared across the
+// qwen / DiT / VAE captures, so a search that dispatches on the live
+// buffers perturbs the cross-stage activation + tile-JIT state the next
+// capture depends on.  tinygrad instead times each candidate on FRESH
+// rawbufs allocated to the kernel's PARAM-slot byte sizes (bufs_from_ast),
+// never touching the live graph buffers.  This mirrors that: when ISO is
+// active, kernel_bench_fire dispatches the kernel on these scratch buffers
+// and kautotune_output_stat reads the scratch output instead of TENS.
+#define KAUTOTUNE_ISO_MAX_INPUTS 64
+typedef struct {
+  int      active;
+  Backend *backend;
+  u32      kid;
+  u32      n_inputs;
+  u32      in_buf_ids[KAUTOTUNE_ISO_MAX_INPUTS];
+  u32      out_buf_id;
+} KautotuneIso;
+static KautotuneIso ISO;  // file-static: only one isolated bench at a time
+
 static u32 kautotune_backend_id(KernelEntry const *ke);
 
 static u32 kautotune_n_runs(void) {
@@ -623,8 +646,12 @@ static KautotuneOutStat kautotune_output_stat(KernelEntry const *ke) {
     return st;
   }
   TenDesc const *td = &TENS[ke->output_tid];
-  Backend *b = td->backend;
-  if (b == NULL || b->buf_read == NULL || td->buf_id == 0) {
+  // Isolated bench: read the scratch output buffer, not the live TENS one.
+  Backend *b      = (ISO.active && ISO.kid == (u32)(ke - KERNELS))
+                  ? ISO.backend : td->backend;
+  u32      out_buf = (ISO.active && ISO.kid == (u32)(ke - KERNELS))
+                  ? ISO.out_buf_id : td->buf_id;
+  if (b == NULL || b->buf_read == NULL || out_buf == 0) {
     return st;
   }
   u32 dt    = ke->output_dtype;
@@ -649,7 +676,7 @@ static KautotuneOutStat kautotune_output_stat(KernelEntry const *ke) {
   if (host == NULL) {
     return st;
   }
-  if (b->buf_read(td->buf_id, host, nbytes) != 0) {
+  if (b->buf_read(out_buf, host, nbytes) != 0) {
     free(host);
     return st;
   }
@@ -720,11 +747,149 @@ static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
   return 1;
 }
 
+// Fill a fresh scratch buffer with a small deterministic pattern.  Timing
+// doesn't depend on the data, but a non-degenerate finite fill keeps the
+// correctness gate (kautotune_output_stat) meaningful and avoids denormal
+// stalls on some GPUs.  Index-mod pattern in [0,1).
+static void kautotune_iso_fill(Backend *b, u32 buf_id, u32 dt, u64 numel) {
+  if (b == NULL || b->buf_write == NULL || buf_id == 0 || numel == 0) {
+    return;
+  }
+  u64 nbytes = dtype_storage_bytes(dt, numel);
+  if (nbytes == 0) {
+    return;
+  }
+  void *host = malloc((size_t)nbytes);
+  if (host == NULL) {
+    return;
+  }
+  memset(host, 0, (size_t)nbytes);
+  for (u64 i = 0; i < numel; i++) {
+    double v = (double)(i % 17) * (1.0 / 17.0);  // [0,1)
+    switch (dt) {
+      case DT_FP32:    ((f32 *)host)[i] = (f32)v; break;
+      case DT_FP64:    ((f64 *)host)[i] = v; break;
+      case DT_BF16:    ((u16 *)host)[i] = f32_to_bf16((f32)v); break;
+      case DT_FP16:    ((u16 *)host)[i] = f32_to_fp16((f32)v); break;
+      case DT_FP8E4M3: ((u8  *)host)[i] = f32_to_fp8e4m3((f32)v); break;
+      case DT_FP8E5M2: ((u8  *)host)[i] = f32_to_fp8e5m2((f32)v); break;
+      case DT_INT32:   ((i32 *)host)[i] = (i32)(i % 17); break;
+      default: break;  // leave zeros for dtypes we don't model
+    }
+  }
+  b->buf_write(buf_id, host, nbytes);
+  free(host);
+}
+
+// Allocate + fill fresh scratch buffers sized to this kernel's input/output
+// PARAM slots and install them in ISO.  Returns 1 on success, 0 if the
+// kernel can't be benched in isolation (no backend, missing dtype/numel
+// metadata, or an alloc failed -- caller then skips the isolated search).
+static int kautotune_iso_begin(u32 kid) {
+  memset(&ISO, 0, sizeof(ISO));
+  if (kid == 0 || kid >= KERNELS_NEXT) {
+    return 0;
+  }
+  KernelEntry *ke = &KERNELS[kid];
+  if (ke->n_inputs > KAUTOTUNE_ISO_MAX_INPUTS) {
+    return 0;
+  }
+  // Resolve the backend off the live output TenDesc (its dtype/numel are
+  // mirrored on the KernelEntry, but the backend pointer lives on TENS).
+  if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
+    return 0;
+  }
+  Backend *b = TENS[ke->output_tid].backend;
+  if (b == NULL || b->dispatch_kernel == NULL || b->buf_alloc == NULL
+      || b->buf_free == NULL) {
+    return 0;
+  }
+  if (ke->output_numel == 0) {
+    return 0;
+  }
+  u64 out_nbytes = dtype_storage_bytes(ke->output_dtype, ke->output_numel);
+  if (out_nbytes == 0) {
+    return 0;
+  }
+  ISO.out_buf_id = b->buf_alloc(out_nbytes);
+  if (ISO.out_buf_id == 0) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 dt    = ke->input_dtypes != NULL ? ke->input_dtypes[i] : ke->output_dtype;
+    u64 numel = ke->input_numels  != NULL ? ke->input_numels[i]  : 0;
+    if (numel == 0) {
+      // Unknown input extent -- can't size a scratch buffer; bail and let
+      // the caller fall back to NOT searching this kernel in isolation.
+      goto fail;
+    }
+    u64 nbytes = dtype_storage_bytes(dt, numel);
+    if (nbytes == 0) {
+      goto fail;
+    }
+    u32 buf = b->buf_alloc(nbytes);
+    if (buf == 0) {
+      goto fail;
+    }
+    ISO.in_buf_ids[i] = buf;
+    kautotune_iso_fill(b, buf, dt, numel);
+  }
+  ISO.active   = 1;
+  ISO.backend  = b;
+  ISO.kid      = kid;
+  ISO.n_inputs = ke->n_inputs;
+  return 1;
+
+fail:
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (ISO.in_buf_ids[i] != 0) {
+      b->buf_free(ISO.in_buf_ids[i]);
+    }
+  }
+  if (ISO.out_buf_id != 0) {
+    b->buf_free(ISO.out_buf_id);
+  }
+  memset(&ISO, 0, sizeof(ISO));
+  return 0;
+}
+
+static void kautotune_iso_end(void) {
+  if (!ISO.active || ISO.backend == NULL) {
+    memset(&ISO, 0, sizeof(ISO));
+    return;
+  }
+  Backend *b = ISO.backend;
+  for (u32 i = 0; i < ISO.n_inputs; i++) {
+    if (ISO.in_buf_ids[i] != 0) {
+      b->buf_free(ISO.in_buf_ids[i]);
+    }
+  }
+  if (ISO.out_buf_id != 0) {
+    b->buf_free(ISO.out_buf_id);
+  }
+  memset(&ISO, 0, sizeof(ISO));
+}
+
 static void kernel_bench_fire(u32 kid) {
   if (kid == 0 || kid >= KERNELS_NEXT) {
     return;
   }
   KernelEntry *ke = &KERNELS[kid];
+  // Isolated bench: dispatch on the fresh scratch buffers, never touching
+  // the live TENS graph buffers (tinygrad _time_program on rawbufs).
+  if (ISO.active && ISO.kid == kid) {
+    Backend *b = ISO.backend;
+    if (b == NULL || b->dispatch_kernel == NULL) {
+      return;
+    }
+    jit_capture_pause();
+    backend_dispatch_flush_all();
+    b->dispatch_kernel(ke, ISO.in_buf_ids, ISO.out_buf_id);
+    backend_dispatch_flush_all();
+    jit_capture_resume();
+    ITRS++;
+    return;
+  }
   u32 resolved_tids[ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
@@ -1010,6 +1175,35 @@ fn int kernel_autotune(u32 kid) {
   return 0;
 }
 
+// Post-capture beam search on ISOLATED scratch buffers (port of
+// tinygrad engine/jit.py jit_lower -> codegen/opt/search.py beam_search:
+// after a JIT function is captured, each captured kernel is beam-searched
+// by timing variants on fresh rawbufs, never the live graph buffers).
+//
+// kernel_autotune benches on the kernel's live TENS buffers.  During a
+// shared-context FLUX session that perturbs the next stage's capture, so
+// the in-capture path (kernel_autotune's jit_is_capturing guard) declines
+// to search.  This wrapper runs AFTER capture finalize (JIT_ACTIVE_SLOT==0,
+// so jit_is_capturing() is false) and installs fresh scratch buffers via
+// kautotune_iso_begin -- kernel_bench_fire + kautotune_output_stat then
+// read/write ONLY those, leaving the live activations + shape table
+// untouched.  Winners land in the same disk cache, so the warm replay
+// cache-HITs the tuned tiles.  Returns 1 if a winner was applied + cached.
+fn int kernel_autotune_isolated(u32 kid) {
+  if (kid == 0 || kid >= KERNELS_NEXT) {
+    return 0;
+  }
+  if (!kautotune_iso_begin(kid)) {
+    // Couldn't size scratch buffers for this kernel -- skip the isolated
+    // search (do NOT fall back to the live-buffer bench: that's the
+    // cross-stage corruption this whole path exists to avoid).
+    return 0;
+  }
+  int applied = kernel_autotune(kid);
+  kautotune_iso_end();
+  return applied;
+}
+
 // Should this kernel auto-tune on its next fire?  Three conditions:
 // the env opt-in is on, the per-program-shape `autotuned` flag is
 // still 0, and the proposer would offer at least one candidate
@@ -1037,6 +1231,15 @@ static int autotune_env_enabled(void) {
 static int autotune_jitbeam_enabled(void) {
   char const *e = getenv("JITBEAM");
   return e != NULL && atoi(e) > 0;
+}
+
+// Public gate for the post-capture isolated search (jit_capture_finalize ->
+// kernel_autotune_isolated).  tinygrad jit.py:73 `beam=getenv("JITBEAM",
+// BEAM.value)` -- JITBEAM, falling back to BEAM (and thvm's AUTOTUNE=1
+// alias).  When on, every captured kernel is beam-searched on fresh
+// scratch buffers right after the capture finalizes.
+fn int autotune_post_capture_enabled(void) {
+  return autotune_jitbeam_enabled() || autotune_env_enabled();
 }
 
 fn int kernel_should_autotune(KernelEntry const *ke) {
