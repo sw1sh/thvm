@@ -161,7 +161,7 @@ int main(void) {
   {
     KOptSeq noop = {0};  // n == 0 -> baseline sequence
     u64 us = 0;
-    int ok = kautotune_bench_seq(kadd, Kadd, &noop, 1, &base, &us);
+    int ok = kautotune_bench_seq(kadd, Kadd, &noop, 1, &base, 0, &us);
     CHECK_EQ(ok, 1);
   }
 
@@ -171,7 +171,7 @@ int main(void) {
                                .sum_abs = base.sum_abs * 0.5 };
     KOptSeq noop = {0};
     u64 us = 0;
-    int ok = kautotune_bench_seq(kadd, Kadd, &noop, 1, &wrong, &us);
+    int ok = kautotune_bench_seq(kadd, Kadd, &noop, 1, &wrong, 0, &us);
     CHECK_EQ(ok, 0);
   }
 
