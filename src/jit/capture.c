@@ -787,8 +787,9 @@ static u64 uop_content_hash_rec(Term t, u32 depth) {
     case UOP_PAD:     case UOP_SHRINK: {
       h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 0), depth + 1));
       u32 ndim = (u32)term_val(heap_read(loc + 1));
-      u32 npay = (op == UOP_PAD || op == UOP_SHRINK) ? 2 * ndim : ndim;
-      if (ndim > MAX_DIM) ndim = MAX_DIM, npay = (op == UOP_PAD || op == UOP_SHRINK) ? 2 * MAX_DIM : MAX_DIM;
+      if (ndim > MAX_DIM) ndim = MAX_DIM;     // clamp defensively
+      u32 per_dim = (op == UOP_PAD || op == UOP_SHRINK) ? 2u : 1u;
+      u32 npay = ndim * per_dim;
       h = uop_content_mix(h, (u64)ndim);
       for (u32 i = 0; i < npay; i++) {
         h = uop_content_hash_atom(h, heap_read(loc + 2 + i));
@@ -831,9 +832,20 @@ static u64 uop_content_hash_rec(Term t, u32 depth) {
       break;
     }
 
+    // --- UOP_AFTER [node, after_node]: ordering between sibling -----
+    // side-effects in a multi-store kernel.  uop_arity returns 0 for
+    // AFTER (it's a boundary-ish marker for the generic rewriter), so
+    // the default fixed-arity descent would miss both children -- hash
+    // them explicitly to stay collision-safe on multi-store DAGs.
+    case UOP_AFTER: {
+      h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 0), depth + 1));
+      h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 1), depth + 1));
+      break;
+    }
+
     // --- generic fixed-arity ops: recurse every Term child ----------
     // ADD/MUL/CMP/NEG/RECIP/EXP2/LOG2/SQRT/LOAD/DETACH, the integer ALU
-    // (IADD..ISHR/ILT), INDEX_E, IWHERE, STORE, ASSIGN, AFTER, ...
+    // (IADD..ISHR/ILT), INDEX_E, IWHERE, STORE, ASSIGN, ...
     default: {
       u8 ar = uop_arity((u8)op);
       for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
