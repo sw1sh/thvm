@@ -238,21 +238,23 @@ static u32 propose_conv2d_unroll_opts(KernelEntry const *ke, KOpt *out,
 // Split-K (cooperative GROUP_REDUCE) proposer for the conv-reduce kernel.
 // Faithful port of tinygrad's GROUP/GROUPTOP opt actions
 // (tinygrad/codegen/opt/__init__.py kernel_opt_search_space) applied to the
-// conv2d-flat contraction.  The conv-reduce kernel's REDUCE axis is the
-// flattened kh*kw*C_in contraction (~4608 elements for a 3x3, C_in=512 VAE
-// conv); without a split-K candidate the autotune search reduces it SERIALLY
-// inside one thread (an `_acc` loop) and never finds the parallel reduction.
+// conv2d-flat contraction.  The conv-reduce kernel reduces the channel
+// contraction (C_in, e.g. 512 on the VAE 3x3 convs) SERIALLY inside one
+// thread; without a split-K candidate the autotune search has no
+// parallel-reduction variant to consider for it at all.
 //
 // Emits KOP_GROUPTOP candidates at several group factors that DIVIDE the
 // reduce extent (so uop_dag_apply_group_reduce's `extent % k == 0` validity
 // check passes) AND fit the threadgroup-memory budget: the cooperative reduce
 // allocates one accumulator per group lane, and Metal threadgroups are capped
 // at ~1024 threads, so factors above 256 are pointless (and large factors
-// over-subdivide a small global grid -- the same lesson as hand_opts.c's
-// THVM_GROUP_SZ default of 16).  The factor list mirrors hand_opts.c's
-// GROUPTOP sizes plus the smaller divisors tinygrad enumerates; the NaN/parity
-// gate and the speed-sanity gate in the autotune search keep only the correct,
-// faster winner.
+// over-subdivide the grid -- the same lesson as hand_opts.c's THVM_GROUP_SZ
+// default of 16).  The factor list mirrors hand_opts.c's GROUPTOP sizes plus
+// the smaller divisors tinygrad enumerates; the NaN/parity + speed-sanity
+// gates in the autotune search keep only a correct AND faster winner (on
+// large-output-grid convs the serial baseline already saturates the GPU, so
+// split-K usually loses and the gate keeps the baseline -- exactly tinygrad's
+// `prod(output_loop_dims) <= 2048` GROUPTOP gate, applied here by measurement).
 static u32 propose_conv2d_group_opts(KernelEntry const *ke, KOpt *out,
                                      u32 n, u32 cap) {
   static const u32 group_factors[] = {32, 16, 8, 4, 2};
