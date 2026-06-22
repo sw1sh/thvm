@@ -226,6 +226,16 @@ static int propose_metal_reduce_unroll_kernel(KernelEntry const *ke) {
   if (!uop_dag_dtype_uniform(ke->cached_lift.store_root, DT_FP32)) {
     return 0;
   }
+  // A matmul (reduce-of-mul) passes the reduce-unroll structural walk, but
+  // its K axis is the simdgroup contraction axis -- splitting it produces
+  // the same broken simdgroup_load MSL as splitting M/N (see
+  // propose_rich_action_space).  KOP_TC is the only faithful tiling lever
+  // for a matmul; never offer a K-UNROLL on one.
+  Term base = ke->cached_lift_init_root != 0 ? ke->cached_lift_init_root
+                                             : ke->cached_lift.store_root;
+  if (uop_classify_matmul(base, NULL, NULL)) {
+    return 0;
+  }
   return uop_dag_is_reduce_unroll_kernel(ke->cached_lift.store_root);
 }
 
@@ -276,6 +286,25 @@ static u32 propose_rich_action_space(KernelEntry const *ke, KOpt *out,
   Term base = ke->cached_lift_init_root != 0 ? ke->cached_lift_init_root
                                              : ke->cached_lift.store_root;
   if (base == 0) return n;
+
+  // Skip the raw split/group action space on tensor-core MATMUL kernels.
+  // The Metal renderer recognises a matmul's reduce-of-mul structure
+  // (uop_classify_matmul, the same recogniser rmu_emit_matmul_tc uses) and
+  // emits a simdgroup_matrix tile whose load address expressions name the
+  // M/N/K axes by their UN-split ids.  An independent UPCAST/UNROLL/LOCAL/
+  // GROUP split inserts/renumbers one of those axes, so the simdgroup_load
+  // then references an axis var that was never declared in the tile loop
+  // ("use of undeclared identifier a2") -- the MSL fails to compile under
+  // JIT capture and silently falls back to a zero-producing path.  thvm's
+  // KOP_TC is the ONLY faithful tiling lever for these kernels (its tiles
+  // ARE proposed, above); tinygrad likewise lets the TC opt own a matmul's
+  // M/N/K and never stacks a raw split on a simdgroup axis.  The rich split
+  // set is the real lever for the NON-matmul bulk (elementwise / reduce /
+  // norm / softmax), which is exactly where BEAM had zero candidates before.
+  if (uop_classify_matmul(base, NULL, NULL)) {
+    return n;
+  }
+
   u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
   u32 n_ax = uop_dag_collect_axes(base, ids, types, exts, MAX_AXES);
   if (n_ax == 0) return n;

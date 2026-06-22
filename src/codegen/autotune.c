@@ -531,6 +531,21 @@ static int kautotune_seq_can_append(KOptSeq const *seq, KOpt opt) {
   if (opt.op == KOP_TC) {
     return seq->n == 0;
   }
+  // Never compose a raw split/group OptOp onto a TC sequence.  thvm's
+  // KOP_TC is MONOLITHIC tensor-core metadata (it re-marks M/N GLOBAL and
+  // stamps the simdgroup tile); a subsequent UPCAST/UNROLL/LOCAL/GROUP
+  // inserts/renumbers an axis the simdgroup_load address expression still
+  // names by its pre-split id -> the tile renderer (cg_emit_tile_metal)
+  // emits MSL referencing an undeclared axis var (the observed "use of
+  // undeclared identifier a2"), which fails to compile under JIT capture
+  // and silently falls back to a zero-producing path.  tinygrad's TC opt
+  // subsumes its own upcast/local structure -- further opts target only
+  // the post-TC axes -- so the mixed [TC, split] sequence has no faithful
+  // analogue here.  TC tiles and the rich split action space stay as
+  // independent (single-opt + split-only-depth) explorations.
+  if (kautotune_seq_has_op(seq, KOP_TC)) {
+    return 0;
+  }
   if (opt.op == KOP_LOCAL && kautotune_seq_has_op(seq, opt.op)) {
     return 0;
   }
