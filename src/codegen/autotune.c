@@ -806,8 +806,14 @@ static int kautotune_stat_accept(KautotuneOutStat const *baseline,
 static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
                                u32 n_runs, KautotuneOutStat const *baseline,
                                u64 *out_us) {
+  static int seq_tr = -1;
+  if (seq_tr < 0) seq_tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
   axes_reset_to_default(ke);
   if (!kautotune_apply_seq(ke, seq)) {
+    if (seq_tr && seq->n == 1) {
+      fprintf(stderr, "[seq] kid=%u op=%u axis=%u arg=%u APPLY-FAIL\n",
+              kid, seq->opts[0].op, seq->opts[0].axis, seq->opts[0].arg);
+    }
     axes_reset_to_default(ke);
     return 0;
   }
@@ -818,6 +824,14 @@ static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
   // skips it -- it can never win the search or be cached.
   KautotuneOutStat cand = kautotune_output_stat(ke);
   if (!kautotune_stat_accept(baseline, &cand, kautotune_stat_tol(ke->output_dtype))) {
+    if (seq_tr && seq->n == 1) {
+      fprintf(stderr,
+              "[seq] kid=%u op=%u axis=%u arg=%u NAN-REJECT "
+              "(base sum=%g finite=%d / cand sum=%g finite=%d)\n",
+              kid, seq->opts[0].op, seq->opts[0].axis, seq->opts[0].arg,
+              baseline ? baseline->sum_abs : 0.0, baseline ? baseline->all_finite : -1,
+              cand.sum_abs, cand.all_finite);
+    }
     axes_reset_to_default(ke);
     return 0;
   }
@@ -1267,13 +1281,23 @@ static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
   u32 n_beam = 0;
   u32 n_seen = 0;
 
+  static int cand_tr = -1;
+  if (cand_tr < 0) cand_tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
   for (u32 i = 0; i < n_cand; i++) {
     KOptSeq seq = {0};
     seq.n = 1;
     seq.opts[0] = candidates[i];
     seen[n_seen++] = seq;
     u64 us = 0;
-    if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &baseline_stat, &us)) {
+    int ok = kautotune_bench_seq(kid, ke, &seq, n_runs, &baseline_stat, &us);
+    if (cand_tr) {
+      fprintf(stderr,
+              "[cand] kid=%u op=%u axis=%u arg=%u -> %s us=%llu (base=%llu)\n",
+              kid, candidates[i].op, candidates[i].axis, candidates[i].arg,
+              ok ? (us < best_us ? "WIN" : "ok-slow") : "reject",
+              (unsigned long long)us, (unsigned long long)best_us);
+    }
+    if (!ok) {
       continue;
     }
     if (us < best_us) {

@@ -82,6 +82,43 @@ static u8 propose_reduce_axis_index(KernelEntry const *ke) {
   return 0xFF;
 }
 
+// Real DAG axis_id (and extent) of the reduce axis the autotune bench
+// will see.  The KOpt `axis` field for any DAG-applied opt (UNROLL/
+// GROUP_REDUCE) targets the UOP_RANGE leaf BY axis_id -- find_range
+// looks it up by id.  propose_reduce_axis_index returns a SLOT INDEX
+// (sorted-position), which equals the id only when axis_ids are dense
+// 0..n; a conv2d-flat kernel's gapped ids make them differ, so a
+// slot-index KOpt makes find_range miss and the candidate APPLY-FAILs.
+//
+// CRITICAL: read from cached_lift_init_root, NOT the live cached_lift
+// .store_root.  The autotune bench (kautotune_bench_seq) calls
+// axes_reset_to_default before every apply, which swaps store_root for
+// the materialize-time snapshot cached_lift_init_root.  A prior capture-
+// phase opt/renumber can leave store_root with a DIFFERENT axis numbering
+// (e.g. reduce at id=4) than the snapshot apply actually mutates (reduce
+// at id=2) -- proposing from the live root then emits an id that doesn't
+// exist post-reset, and the opt silently no-ops.  Propose from the same
+// DAG apply targets.  Returns 0xFFFFFFFF if no reduce axis.
+static u32 propose_reduce_axis_id(KernelEntry const *ke, u32 *out_extent) {
+  if (out_extent != NULL) *out_extent = 0;
+  if (ke == NULL) return 0xFFFFFFFFu;
+  Term root = ke->cached_lift_init_root != 0 ? ke->cached_lift_init_root
+                                             : ke->cached_lift.store_root;
+  if (root == 0) return 0xFFFFFFFFu;
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(root, ids, types, exts, MAX_AXES);
+  u32 best_id = 0xFFFFFFFFu, best_ext = 0;
+  for (u32 i = 0; i < n; i++) {
+    if (types[i] != KAX_REDUCE) continue;
+    if (best_id == 0xFFFFFFFFu || ids[i] > best_id) {  // last (largest-id) reduce
+      best_id  = ids[i];
+      best_ext = exts[i];
+    }
+  }
+  if (out_extent != NULL) *out_extent = best_ext;
+  return best_id;
+}
+
 // First LOOP-typed axis at or after `start` that can be split by
 // `factor`, or 0xFF if none.  Leading unit/broadcast axes are common
 // in movement-heavy graphs; picking axis 0 unconditionally makes those
@@ -176,13 +213,14 @@ static u32 propose_conv2d_upcast_opts(KernelEntry const *ke, KOpt *out,
 static u32 propose_conv2d_unroll_opts(KernelEntry const *ke, KOpt *out,
                                       u32 n, u32 cap) {
   static const u32 unroll_factors[] = {2};
-  u8 axis = propose_reduce_axis_index(ke);
-  if (axis == 0xFF) {
+  // KOP_UNROLL on the conv reduce axis is DAG-applied (uop_dag_apply_kopt
+  // -> uop_apply_split_dag -> find_range BY axis_id), so target the real
+  // reduce axis_id, not the sorted-slot index (see propose_reduce_axis_id).
+  u32 axis_size = 0;
+  u32 axis = propose_reduce_axis_id(ke, &axis_size);
+  if (axis == 0xFFFFFFFFu || axis_size == 0) {
     return n;
   }
-  TileAxisInfo info;
-  if (!tile_anno_axis_or_kernelaxes(ke, axis, &info)) return n;
-  u32 axis_size = info.extent;
   u32 n_unroll_factors = sizeof(unroll_factors)/sizeof(*unroll_factors);
   for (u32 i = 0; i < n_unroll_factors && n < cap; i++) {
     u32 f = unroll_factors[i];
@@ -218,15 +256,15 @@ static u32 propose_conv2d_unroll_opts(KernelEntry const *ke, KOpt *out,
 static u32 propose_conv2d_group_opts(KernelEntry const *ke, KOpt *out,
                                      u32 n, u32 cap) {
   static const u32 group_factors[] = {32, 16, 8, 4, 2};
-  u8 axis = propose_reduce_axis_index(ke);
-  if (axis == 0xFF) {
-    return n;
-  }
-  TileAxisInfo info;
-  if (!tile_anno_axis_or_kernelaxes(ke, axis, &info)) return n;
-  if (info.kax_type != KAX_REDUCE) return n;        // GROUP_REDUCE needs REDUCE
-  u32 axis_size = info.extent;
-  if (axis_size == 0) return n;
+  // GROUP_REDUCE is DAG-applied (uop_dag_apply_group_reduce -> find_range
+  // BY axis_id), so target the real reduce axis_id, not the sorted-slot
+  // index that propose_reduce_axis_index returns -- a conv2d-flat kernel's
+  // gapped axis_ids make the two differ, and a slot-index KOpt makes
+  // find_range miss -> the GROUP candidate APPLY-FAILs and is silently
+  // rejected before timing (the bug that kept the VAE conv serial).
+  u32 axis_size = 0;
+  u32 axis = propose_reduce_axis_id(ke, &axis_size);
+  if (axis == 0xFFFFFFFFu || axis_size == 0) return n;
   u32 n_group_factors = sizeof(group_factors)/sizeof(*group_factors);
   for (u32 i = 0; i < n_group_factors && n < cap; i++) {
     u32 f = group_factors[i];
@@ -329,6 +367,14 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   u32 axis_size = axis_idx == 0xFF ? propose_reduce_axis_size(ke)
                                    : (tile_anno_axis_or_kernelaxes(ke, axis_idx,
                                         &axis_info) ? axis_info.extent : 0);
+  // Reduce-axis split-class opts (UNROLL/GROUPTOP) are DAG-applied by
+  // axis_id (find_range), so build their KOpt from the real reduce axis_id
+  // -- propose_reduce_axis_index returns a sorted-SLOT index, which equals
+  // the id only when axis_ids are dense.  Falls back to the slot index when
+  // the DAG read declines (synthetic no-DAG fixtures), preserving prior
+  // behavior on the dense-id kernels these paths already handled.
+  u32 reduce_aid = propose_reduce_axis_id(ke, NULL);
+  u32 reduce_axis = (reduce_aid != 0xFFFFFFFFu) ? reduce_aid : (u32)axis_idx;
   if (axis_size > 0 && axis_idx != 0xFF
       && propose_metal_reduce_unroll_kernel(ke)) {
     for (u32 i = 0; i < n_factors; i++) {
@@ -336,7 +382,7 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
       if (axis_size % f != 0) continue;
       if (n >= cap) break;
       out[n].op   = KOP_UNROLL;
-      out[n].axis = axis_idx;
+      out[n].axis = reduce_axis;
       out[n].arg  = f;
       n++;
     }
@@ -447,8 +493,13 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   // can only help (it falls back to no-opt when the hand-coded-style opts
   // would slow the kernel, which is the common case on Metal).
   if (propose_metal_backend_enabled()) {
-    if (axis_idx != 0xFF && n < cap) {        // cooperative reduce
-      out[n].op = KOP_GROUPTOP; out[n].axis = axis_idx; out[n].arg = 16; n++;
+    // cooperative reduce: target the real reduce axis_id (find_range keys
+    // on id, not the sorted slot), and only when 16 divides the extent so
+    // uop_dag_apply_group_reduce's extent%k==0 validity holds (else the
+    // candidate APPLY-FAILs and is silently dropped before timing).
+    if (axis_idx != 0xFF && reduce_aid != 0xFFFFFFFFu && axis_size >= 16
+        && axis_size % 16 == 0 && n < cap) {
+      out[n].op = KOP_GROUPTOP; out[n].axis = reduce_aid; out[n].arg = 16; n++;
     }
     static const u32 metal_upcast[] = {4, 2};
     for (u32 i = 0; i < sizeof(metal_upcast)/sizeof(*metal_upcast) && n < cap; i++) {
