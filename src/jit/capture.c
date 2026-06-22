@@ -424,8 +424,23 @@ fn u32 jit_capture_begin(void) {
   return 0;
 }
 
-// Shared capture-end body: close the realize-dedup span, finalize the recorded
-// stream, then drain the deferred post-capture autotune queue.
+// Shared capture-end body: close the realize-dedup span, TUNE the captured
+// kernels, then finalize the recorded stream on the tuned kernels.
+//
+// Ordering ports tinygrad engine/jit.py jit_lower: memory_plan -> compile_linear
+// (beam tune each captured kernel) -> graph_split_rewrite (batch into the graph
+// runner) -> GraphRunner.  The beam tune runs BEFORE graph_split so the runner
+// is batched on the ALREADY-TUNED kernels.  thvm's jit_capture_finalize is the
+// memory_plan + graph_split combined (it computes replay_skip/pack liveness AND
+// the metal_graph_unsafe / metal_graph_recycle ICB-eligibility, which read each
+// kernel's dispatch ROUTE via cg_kernel_dispatch_kind).  So the autotune drain
+// must run BEFORE finalize -- otherwise finalize plans the ICB on the UNTILED
+// route and a later re-bake to a TILED kernel diverges the 2-image batch (a
+// strided-input matmul that finalize marked DAG-path/ICB-unsafe becomes a TILE
+// kernel that bakes the view strides in-kernel; the stale plan binds it wrong).
+// Tuning first lets finalize see the tiled route and take the TILE-exempt ICB
+// path, so ALL kernels (DiT/attention/matmul included) tune AND the batch
+// replays correctly.
 //
 // The span closes before the drain: the drain's iso-buffer bench fires dispatch
 // + may GC, and doing that while the span is open pollutes the shared loc->tid /
@@ -436,17 +451,21 @@ fn u32 jit_capture_begin(void) {
 static void jit_capture_end_common(u32 done_slot, const Term *roots,
                                    u32 n_roots) {
   // Close the span (reverts the substitution journal, wipes loc->tid) BEFORE
-  // finalize, which only inspects the recorded op list.
+  // the drain, which only inspects the recorded op list + KernelEntry metadata.
   materialized_loc_jit_span_end();
-  if (done_slot != 0) {
-    jit_capture_finalize(done_slot, roots, n_roots);
-  }
   // Clear the active slot BEFORE the drain: kernel_autotune's bench gate is
   // jit_is_capturing() (== JIT_ACTIVE_SLOT != 0).  The drain runs no-op when
   // the queue is empty (JITBEAM off / no MISS), so this is cheap on warm calls.
   JIT_ACTIVE_SLOT = 0;
   JIT_PAUSE_DEPTH = 0;
+  // TUNE first (tinygrad compile_linear): bench each captured cache-MISS kernel
+  // on isolated scratch and APPLY the winner to its KernelEntry + dispatch route.
   jit_capture_autotune_finalized(done_slot);
+  // FINALIZE second (tinygrad graph_split_rewrite + GraphRunner): plan the
+  // replay liveness/pack + ICB eligibility on the now-tuned kernels.
+  if (done_slot != 0) {
+    jit_capture_finalize(done_slot, roots, n_roots);
+  }
 }
 
 fn void jit_capture_end(void) {
@@ -2051,9 +2070,11 @@ static int jit_postcapture_jitbeam_enabled(void) {
 static u32 kautotune_posttune_drain(double budget_sec);
 
 // Bench every captured kernel that missed the autotune cache, faithful to
-// tinygrad engine/jit.py:289-300 (after the TinyJit records the kernel
-// sequence, jit_lower beam-searches each captured kernel on isolated test
-// buffers, then bakes the winner into the cached runner).
+// tinygrad engine/jit.py jit_lower -> compile_linear (after the TinyJit records
+// the kernel sequence, jit_lower beam-searches each captured kernel on isolated
+// test buffers, then graph_split_rewrite batches the runner from the TUNED
+// kernels).  jit_capture_end_common calls THIS before jit_capture_finalize, so
+// the apply lands before the ICB/replay plan is built (beam-before-graph_split).
 //
 // The capture-phase kernel_autotune (under jit_is_capturing) cannot bench -- a
 // bench dispatch mid-capture corrupts the recorded forward -- so it DEFERS the
@@ -2081,10 +2102,11 @@ static void jit_capture_autotune_finalized(u32 slot) {
   // Explicit opt-in (THVM_POSTTUNE=1), default OFF even under JITBEAM, so a
   // bare JITBEAM run stays foundation-identical.  The search WRITES every
   // winner to the autotune disk cache under the capture-phase key regardless
-  // of scope.  Re-bake APPLY (THVM_POSTTUNE_APPLY=1) is scoped per kernel in
-  // kautotune_posttune_drain (conv2d/reduce-unroll only by default): re-baking
-  // the attention/matmul/elementwise kernels diverges the multi-item batch
-  // replay, so only the batch-safe conv-class kernels keep their tuned tile.
+  // of scope.  APPLY (THVM_POSTTUNE_APPLY=1) bakes the winner onto the captured
+  // KernelEntry BEFORE finalize; scoped per kernel in kautotune_posttune_drain
+  // (ALL kernels by default, since the tune now precedes finalize: the ICB plan
+  // sees the tiled route, so the DiT/attention/matmul kernels tune AND the
+  // 2-image batch replays the tuned runner without divergence).
   {
     char const *on = getenv("THVM_POSTTUNE");
     if (on == NULL || on[0] != '1') {

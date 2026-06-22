@@ -1391,41 +1391,42 @@ static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
   return applied;
 }
 
-// Drain the deferred post-capture bench queue (tinygrad jit.py:289-300).
+// Drain the deferred post-capture bench queue (tinygrad jit.py compile_linear).
 // Called by jit_capture_autotune_finalized after the capture slot clears
-// (jit_is_capturing()==0).  Benches each queued kernel on isolated scratch
-// buffers and, under THVM_POSTTUNE_APPLY, leaves the winner baked on the
-// captured KernelEntry so the warm replay builds the tuned PSO (re-bake apply).
-// The winner is also stored to the autotune disk cache under the recorded
-// capture-phase key.  `budget_sec`==0 is unbounded; otherwise stop once
-// exceeded.  Returns the number of kernels that newly tuned (winner beat
-// baseline).
-// Does this kernel qualify for re-bake apply under the active scope?
+// (jit_is_capturing()==0) but BEFORE jit_capture_finalize -- so the apply runs
+// before the ICB/replay plan is computed (the tinygrad beam-before-graph_split
+// ordering).  Benches each queued kernel on isolated scratch buffers and, under
+// THVM_POSTTUNE_APPLY, leaves the winner baked on the captured KernelEntry (its
+// tile route recorded) so finalize plans on the tuned kernels and the warm
+// replay builds the tuned PSO.  The winner is also stored to the autotune disk
+// cache under the recorded capture-phase key.  `budget_sec`==0 is unbounded;
+// otherwise stop once exceeded.  Returns the number of kernels that newly tuned
+// (winner beat baseline).
+// Does this kernel qualify for tune-and-apply under the active scope?
 //
-// Default (THVM_POSTTUNE_SCOPE unset): only conv2d-flat / reduce-unroll
-// kernels.  Re-baking other classes (elementwise / norm / attention / matmul)
-// diverges the FLUX 2-image BATCH replay -- their tiled route changes the
-// recycling, dedup'd, ICB-batched replay stream whose plan was fixed on the
-// untiled kernels, and the 2nd batch item reads stale/aliased buffers (NaN).
-// The conv2d/reduce-unroll kernels replay through a simple per-image stream
-// that tolerates the post-finalize re-bake (CALL2 + 2-image CALL3 both stay
-// finite, distinct).  THVM_POSTTUNE_SCOPE=all re-bakes every tuned kernel (the
-// attention/matmul captures included) -- a measurement-only knob that breaks
-// the FLUX batch.
+// Default (THVM_POSTTUNE_SCOPE unset): ALL captured kernels (attention / matmul
+// / norm / elementwise / conv2d / reduce).  This is now safe because the drain
+// runs BEFORE jit_capture_finalize (jit/capture.c jit_capture_end_common, the
+// tinygrad jit_lower ordering: compile_linear beam BEFORE graph_split_rewrite):
+// the winner is baked + its dispatch ROUTE recorded before finalize computes the
+// metal_graph_unsafe / metal_graph_recycle ICB plan, so finalize sees the TILED
+// route and takes the TILE-exempt ICB path.  The 2-image batch then replays the
+// tuned runner correctly (no stale untiled binding) -- DiT/attention included.
 //
-// Empirical note (M3 Max, FLUX.2-klein-4B, current foundation): the conv2d
-// kernels of the VAE decode find NO winning tile (the im2col matmul is already
-// TC-tiled), so this conv-scope re-bake is correctness-complete but not a FLUX
-// warm-time win on this foundation -- the VAE is already ~0.4s and the dominant
-// cost is the DiT/velocity net, which is not safely re-bakeable here.  The
-// search still writes every winner to the disk cache regardless of scope.
+// THVM_POSTTUNE_SCOPE=conv restores the old narrow scope (conv2d-flat /
+// reduce-unroll only), kept as a measurement opt-out: it was the only batch-safe
+// scope under the prior post-finalize re-bake ordering, when re-baking a matmul
+// to a tile diverged the batch because finalize had already planned the ICB on
+// the untiled route.  THVM_POSTTUNE_SCOPE=all is an explicit alias for the
+// (now-default) full scope.
 static int kautotune_posttune_scope_allows(KernelEntry const *ke) {
-  static int scope_all = -1;
-  if (scope_all < 0) {
+  // -1 unknown, 0 = conv/reduce only, 1 = all (default).
+  static int scope = -1;
+  if (scope < 0) {
     char const *e = getenv("THVM_POSTTUNE_SCOPE");
-    scope_all = (e != NULL && strcmp(e, "all") == 0) ? 1 : 0;
+    scope = (e != NULL && strcmp(e, "conv") == 0) ? 0 : 1;
   }
-  if (scope_all) {
+  if (scope) {
     return 1;
   }
   if (ke == NULL || ke->cached_lift.store_root == 0) {
@@ -1448,17 +1449,19 @@ static u32 kautotune_posttune_drain(double budget_sec) {
   u32 n_items = KAUTOTUNE_POSTQ_N;
   u32 n_tuned = 0;
 
-  // RE-BAKE apply: leave the winning opt-config applied to the captured
-  // KernelEntry.  The warm replay's Metal PSO lookup folds the applied opts
-  // (metal_tile_jit_hash), so the first replay after this drain builds the
-  // TUNED PSO with no re-capture (the autotune cache key is non-deterministic
-  // across captures, so a cache-load re-capture misses anyway).  When handed
-  // apply_keep_route=1, bench_and_store fires the winner once on the iso scratch
-  // and keeps its dispatch route in K_PROFILE so the first warm replay routes
-  // the tiled kernel correctly (else CALL2 NaNs -- the route is read before the
-  // replay records it).  The re-bake is scoped per kernel by
-  // kautotune_posttune_scope_allows (conv2d/reduce-unroll only by default), so
-  // the batch-divergent attention/matmul/elementwise kernels reset to baseline.
+  // APPLY: leave the winning opt-config applied to the captured KernelEntry.
+  // This drain runs BEFORE jit_capture_finalize (jit/capture.c), so finalize's
+  // ICB/replay plan is computed on the tuned kernels -- the tinygrad jit_lower
+  // ordering (beam compile_linear BEFORE graph_split_rewrite).  The warm replay's
+  // Metal PSO lookup folds the applied opts (metal_tile_jit_hash), so the first
+  // replay builds the TUNED PSO with no re-capture (the autotune cache key is
+  // non-deterministic across captures, so a cross-capture cache-load misses; the
+  // in-capture apply sidesteps it).  When handed apply_keep_route=1,
+  // bench_and_store fires the winner once on the iso scratch and keeps its
+  // dispatch route in K_PROFILE so finalize AND the first warm replay route the
+  // tiled kernel correctly.  Scoped per kernel by kautotune_posttune_scope_allows
+  // (ALL kernels by default now that tuning precedes finalize; DiT/attention
+  // included -- the batch replays the tuned runner without divergence).
   struct timespec t0;
   clock_gettime(CLOCK_MONOTONIC, &t0);
   for (u32 i = 0; i < n_items; i++) {
