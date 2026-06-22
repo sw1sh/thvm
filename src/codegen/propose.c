@@ -78,6 +78,7 @@ static int propose_tc_classify(KernelEntry const *ke, u32 *out_dtype,
 // UPCAST/LOCAL, carried inside KOP_TC (never as an independent split,
 // which corrupts the simdgroup emitter).
 static u32 propose_tc_tile_candidates(u32 M, u32 N, u32 K, int c_is_bf,
+                                      u32 unit, int is_cuda,
                                       KOpt *out, u32 n, u32 cap) {
   // local_m/local_n: simdgroups along M/N.  rm/rn: register 8x8 tiles per
   // simdgroup.  kb: K-block staged in threadgroup memory (multiple of 8).
@@ -97,7 +98,7 @@ static u32 propose_tc_tile_candidates(u32 M, u32 N, u32 K, int c_is_bf,
             u32 rm = regs[ri],   rn = regs[rj];
             u32 kb = kbs[ki];
             if (!tc_tile_valid(M, N, K, lm, ln, rm, rn, kb,
-                               /*unit=*/8u, /*is_cuda=*/0, c_is_bf)) {
+                               unit, is_cuda, c_is_bf)) {
               continue;
             }
             n = propose_append_unique(out, n, cap,
@@ -422,7 +423,20 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
       // search saw 3 identical kernels) -- the actual FLUX perf lever.
       int c_is_bf = (dtype == DT_BF16);
       n = propose_tc_tile_candidates(shape.M, shape.N, shape.K, c_is_bf,
-                                     out, n, cap);
+                                     /*unit=*/8u, /*is_cuda=*/0, out, n, cap);
+    }
+  }
+  // CUDA: same rich TC tile search, WMMA 16x16x16 fragments (unit=16).  The
+  // emitter-side override hook (rmu_tc_apply_opt_config CUDA path) is already
+  // wired; tc_tile_valid(is_cuda=1) rejects non-16-multiple K-blocks etc.
+  if (propose_cuda_backend_enabled() && ke->cached_lift.store_root != 0) {
+    u32 dtype = 0;
+    UopDagGemmShape shape;
+    if (propose_tc_classify(ke, &dtype, &shape)
+        && (dtype == DT_FP32 || dtype == DT_BF16)) {
+      int c_is_bf = (dtype == DT_BF16);
+      n = propose_tc_tile_candidates(shape.M, shape.N, shape.K, c_is_bf,
+                                     /*unit=*/16u, /*is_cuda=*/1, out, n, cap);
     }
   }
 
