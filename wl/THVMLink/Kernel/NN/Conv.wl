@@ -78,16 +78,21 @@ TConv2DKhKw[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
 
 (* === tinygrad-`_pool` STRIDED-VIEW conv lowering ============
    TConv2DIm2ColPool / TConv2DIm2ColBatchedPool build the windowed
-   im2col view `xCol : {cIn*kh*kw, ...}` purely from movement ops
+   im2col view `xCol6 : {cIn,kh,kw,...}` purely from movement ops
    (RESHAPE / EXPAND / SHRINK / PERMUTE) -- a strided VIEW over the
    input, exactly like tinygrad's `_pool` unfold, rather than a
-   materialised im2col matrix.  The EXPAND-then-merge-RESHAPE that
-   produces the windowing isn't a single `View` (a stride-0 broadcast
-   axis can't merge with a real-stride axis), so the view-system keeps
-   it as a ShapeTracker chain; the dispatch pre-mat
-   (cpu_dispatch_kernel / metal_dispatch_kernel) gathers it once into a
-   contiguous matmul operand.  No PAD-and-sum: no kh*kw partial-sum
-   kernels and no giant zero-padded `repeat` intermediate.
+   materialised im2col matrix.
+
+   The conv is then `(xB * wB).sum` reducing the (cIn, kh, kw) axes
+   SEPARATELY -- tinygrad's mixin conv2d (mixin/__init__.py:1420), which
+   broadcasts x and weight to (cOut, cIn, kh, kw, hOut, wOut) and sums the
+   trailing 1+len(HW) axes.  Keeping cIn/kh/kw as DISTINCT reduce axes is
+   the load-bearing choice: each reduce range carries a plain linear stride
+   so the codegen indexes the unfold view with affine address arithmetic.
+   Flattening (cIn,kh,kw) into a single K axis (the prior `Reshape{cIn*kh*kw,
+   hOut*wOut}` + TMatMul) forced the renderer to recover (cIn,kh,kw) via
+   IDIV/IMOD on EVERY mac -- a ~20x slower per-mac address monster on the
+   FLUX VAE convs (256-spatial, K=cIn*9).
 
    Construction (stride 1, no padding, rank-3 input {cIn,H,W}, weights
    {cOut,cIn,kh,kw}; verified: (ky*(H+1)+hh) mod H = ky+hh within the
@@ -100,8 +105,8 @@ TConv2DKhKw[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
      x3   = Reshape(x2, {cIn,kh,H+1,kw,W+1});
      x4   = Shrink(x3, .., {0,kh},{0,Hout},{0,kw},{0,Wout});
      xCol6= Permute(x4, {0,1,3,2,4});           -> {cIn,kh,kw,Hout,Wout}
-     xCol = Reshape(xCol6, {cIn*kh*kw, Hout*Wout});
-   then `outFlat = wFlat @ xCol` -> cblas_sgemm, reshape + bias.
+   then broadcast x/w to {cOut,cIn,kh,kw,Hout,Wout}, MUL, SUM over the
+   {cIn,kh,kw} axes -> {cOut,Hout,Wout}, add bias.
 
    FORWARD is bit-for-bit correct, and BACKWARD is too (matches
    TConv2DKhKw / the PAD-and-sum path to f32 tolerance).  This path is
@@ -110,9 +115,8 @@ TConv2DKhKw[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
    body -- so the strided-view chain composes correctly even when `input`
    is itself a movement / compute DAG.) *)
 TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
-    input, inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
-    rh, rw, x1, x2, x3, x4, xCol6, xCol, wFlat, outFlat, outShaped,
-    biasBcast
+    input, inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut,
+    rh, rw, x1, x2, x3, x4, xCol6, xB, wB, outShaped, biasBcast
 },
     input = inputArg;
     inShape = tUopShape[input];
@@ -123,7 +127,6 @@ TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     kw   = wShape[[4]];
     hOut  = h  - kh + 1;
     wOut  = wd - kw + 1;
-    kSpat = kh * kw;
     rh = Ceiling[kh * (h + 1) / h];
     rw = Ceiling[kw * (wd + 1) / wd];
     x1 = TUOpReshape[
@@ -135,10 +138,14 @@ TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     x4 = TUOpShrink[x3,
         {{0, cIn}, {0, kh}, {0, hOut}, {0, kw}, {0, wOut}}];
     xCol6 = TUOpPermute[x4, {0, 1, 3, 2, 4}];        (* {cIn,kh,kw,hOut,wOut} *)
-    xCol  = TUOpReshape[xCol6, {cIn * kSpat, hOut * wOut}];
-    wFlat = TUOpReshape[weights, {cOut, cIn * kSpat}];
-    outFlat   = TMatMul[wFlat, xCol];               (* {cOut, hOut*wOut} *)
-    outShaped = TUOpReshape[outFlat, {cOut, hOut, wOut}];
+    (* broadcast x over cOut, weight over (hOut,wOut); reduce cIn,kh,kw. *)
+    xB = TUOpExpand[TUOpReshape[xCol6, {1, cIn, kh, kw, hOut, wOut}],
+                    {cOut, cIn, kh, kw, hOut, wOut}];
+    wB = TUOpExpand[TUOpReshape[weights, {cOut, cIn, kh, kw, 1, 1}],
+                    {cOut, cIn, kh, kw, hOut, wOut}];
+    (* SUM kw (axis 3), kh (axis 2), cIn (axis 1) -- high axis first so the
+       remaining axis ids stay valid -> {cOut, hOut, wOut}. *)
+    outShaped = Fold[TUOpReduce[#1, #2, "SUM"] &, TUOpMul[xB, wB], {3, 2, 1}];
     biasBcast = TUOpExpand[
         TUOpReshape[bias, {cOut, 1, 1}],
         {cOut, hOut, wOut}];
@@ -147,19 +154,16 @@ TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
 
 (* Rank-4 batched analogue of TConv2DIm2ColPool: input {B,cIn,H,W}.
 
-   The matmul keeps a 4-D output `{cOut, B, hOut, wOut}` instead of the
-   flattened `{cOut, B*hOut*wOut}` -- so the contiguous wOut axis stays a
-   separate output axis the renderer's conv template can land on the
-   thread lanes (coalesced conv-input reads) and register-block the cOut
-   ("M") axis.  Mechanically a TMatMul with extra trailing axes on the
-   RHS operand: wFlat:{cOut,K} broadcasts over (B,hOut,wOut),
-   xCol4:{K,B,hOut,wOut} broadcasts over cOut, MUL elementwise, REDUCE
-   the K axis.  Both reshapes are contiguity-preserving so EXPAND just
-   sets broadcast strides -- no extra materialization. *)
+   Like the rank-3 path, the (cIn, kh, kw) reduce axes stay SEPARATE
+   (tinygrad mixin/__init__.py:1420) so the unfold view is indexed with
+   affine strides instead of per-mac IDIV/IMOD K recovery.  x broadcasts
+   over cOut, weight over (B,hOut,wOut); MUL then SUM the cIn/kh/kw axes
+   -> {cOut, B, hOut, wOut}, permuted back to {B, cOut, hOut, wOut}.  The
+   reshapes are contiguity-preserving so EXPAND just sets broadcast
+   strides -- no extra materialization. *)
 TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
-    input, inShape, wShape, batch, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
-    kFlat, rh, rw, x1, x2, x3, x4, xCol6, xCol4, wFlat, wExp, xExp, out4,
-    outShaped, biasBcast
+    input, inShape, wShape, batch, cIn, cOut, h, wd, kh, kw, hOut, wOut,
+    rh, rw, x1, x2, x3, x4, xCol6, xB, wB, out4, outShaped, biasBcast
 },
     input = inputArg;
     inShape = tUopShape[input];
@@ -170,8 +174,6 @@ TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     kw   = wShape[[4]];
     hOut  = h  - kh + 1;
     wOut  = wd - kw + 1;
-    kSpat = kh * kw;
-    kFlat = cIn * kSpat;
     rh = Ceiling[kh * (h + 1) / h];
     rw = Ceiling[kw * (wd + 1) / wd];
     x1 = TUOpReshape[
@@ -184,13 +186,13 @@ TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     x4 = TUOpShrink[x3,
         {{0, batch}, {0, cIn}, {0, kh}, {0, hOut}, {0, kw}, {0, wOut}}];
     xCol6 = TUOpPermute[x4, {1, 2, 4, 0, 3, 5}];     (* {cIn,kh,kw,B,hOut,wOut} *)
-    xCol4 = TUOpReshape[xCol6, {kFlat, batch, hOut, wOut}];
-    wFlat = TUOpReshape[weights, {cOut, kFlat}];
-    wExp  = TUOpExpand[TUOpReshape[wFlat, {cOut, kFlat, 1, 1, 1}],
-                       {cOut, kFlat, batch, hOut, wOut}];
-    xExp  = TUOpExpand[TUOpReshape[xCol4, {1, kFlat, batch, hOut, wOut}],
-                       {cOut, kFlat, batch, hOut, wOut}];
-    out4      = TUOpReduce[TUOpMul[wExp, xExp], 1, "SUM"]; (* {cOut,B,hOut,wOut} *)
+    (* {cOut,cIn,kh,kw,B,hOut,wOut}: x over cOut, weight over (B,hOut,wOut). *)
+    xB = TUOpExpand[TUOpReshape[xCol6, {1, cIn, kh, kw, batch, hOut, wOut}],
+                    {cOut, cIn, kh, kw, batch, hOut, wOut}];
+    wB = TUOpExpand[TUOpReshape[weights, {cOut, cIn, kh, kw, 1, 1, 1}],
+                    {cOut, cIn, kh, kw, batch, hOut, wOut}];
+    (* SUM kw (3), kh (2), cIn (1) -- high axis first -> {cOut,B,hOut,wOut}. *)
+    out4      = Fold[TUOpReduce[#1, #2, "SUM"] &, TUOpMul[xB, wB], {3, 2, 1}];
     outShaped = TUOpPermute[out4, {1, 0, 2, 3}];           (* {B,cOut,hOut,wOut} *)
     biasBcast = TUOpExpand[
         TUOpReshape[bias, {1, cOut, 1, 1}],
