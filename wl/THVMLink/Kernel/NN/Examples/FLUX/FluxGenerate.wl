@@ -185,14 +185,22 @@ fxQwenLoader[qwt_, dev_] := Module[{cache = <||>},
     n |-> Lookup[cache, n, cache[n] =
         If[ n === "model.embed_tokens.weight", qwt[n], TToDevice[qwt[n], dev]]]]
 
-(* VAE: bf16 -> f32 (the VAE conv path wants f32), uploaded to the device.
+(* VAE weights uploaded to the device.  On a GPU keep them bf16 (their stored
+   safetensors dtype): the VAE conv reduces are bandwidth-bound strided-JIT
+   kernels (NOT tensor-core matmuls -- recognise_tc.c rejects the conv
+   im2col shape), so halving the weight + activation bytes ~halves the decode.
+   bf16 buffers read correctly on Metal (the reduce accumulates in f32 and
+   stores back bf16, render_uop.c rmu_store_cast), and the latent feeding the
+   first conv is uploaded bf16 too so every conv is bf16(act) x bf16(W), not
+   the slow MIXED f32xbf16.  The CPU path stays f32 (its C JIT promotes bf16 to
+   f32 but needs host-boundary widening; f32 weights are already matched).
    vaeDecoder asks for the latent-denorm stats as `bn_running_mean`/`bn_running_var`;
    the safetensors store them dotted (`bn.running_mean`/`bn.running_var`), so alias. *)
 fxVaeKey[n_] := Switch[n,
     "bn_running_mean", "bn.running_mean", "bn_running_var", "bn.running_var", _, n];
-fxVaeLoader[vt_, dev_] := Module[{cache = <||>},
+fxVaeLoader[vt_, dev_] := Module[{cache = <||>, wdt = If[ dev === "cpu", "f32", "bf16"]},
     n |-> Lookup[cache, n, cache[n] =
-        TRealize @ TToDevice[TUOpCast[vt[fxVaeKey[n]], "f32"], dev]]]
+        TRealize @ TToDevice[TUOpCast[vt[fxVaeKey[n]], wdt], dev]]]
 
 (* wsub[prefix]: the sub-Association of (key-with-prefix-stripped -> loaded TTerm)
    for every weight name under `prefix`.  `keys` is a List of names, so Select
@@ -471,7 +479,11 @@ fxQwenEncodeBatch[sess_, prompts_List] := With[
    rebinding only the uploaded packed latent.  Bounds live bytes + cuts the
    eager ~2s dispatch overhead to a batched ICB replay. *)
 fxVaeDecodeCached[sess_, lat_] := With[{dev = sess["dev"]},
-    sess["vaeJit"][TRealize @ TToDevice[TTensorCreate @ NumericArray[lat, "Real32"], dev]]]
+    With[{up = TToDevice[TTensorCreate @ NumericArray[lat, "Real32"], dev]},
+        (* Cast the latent to the VAE weight dtype (bf16 on a GPU) so every conv
+           is bf16(act) x bf16(W) -- a MIXED f32-act x bf16-weight conv falls to a
+           slow scalar path.  CPU weights are f32, so leave the f32 latent. *)
+        sess["vaeJit"][TRealize @ If[ dev === "cpu", up, TUOpCast[up, "bf16"]]]]]
 
 (* Capture the velocity net ONCE for the whole batch: z, enc, AND temb are all
    rebound TJit inputs (rc/rs/weights are closed over -- shared across images),
