@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/stat.h>   // iter X: stat() for persistent metallib disk cache
 #include <sys/types.h>
+#include <sys/mman.h>   // madvise(MADV_WILLNEED): pipeline the zero-copy wrap fault-in
 #include <dirent.h>
 #include <unistd.h>
 #include <errno.h>
@@ -259,6 +260,13 @@ static u64 METAL_LIB_CACHE_HITS;
 static u64 METAL_LIB_CACHE_MISSES;
 static u64 METAL_LIB_CACHE_BYTES_R;
 static u64 METAL_LIB_CACHE_BYTES_W;
+// Zero-copy disk-mmap wrap counters (THVM_METAL_PSO_CACHE_STATS dump): how
+// many weights wrapped, total bytes faulted resident, and the wall time the
+// synchronous fault-in loop cost.  This is the cold-start "weight realization"
+// the FLUX session pays at first forward -- measured, not guessed.
+static u64 METAL_ZC_WRAPS;
+static u64 METAL_ZC_FAULT_BYTES;
+static u64 METAL_ZC_FAULT_US;
 fn void thvm_metal_jit_counters_reset(void);
 static void metal_pso_cache_init(void);
 
@@ -757,22 +765,35 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
   // mmap, never read because view bounds stop at the weight's numel).
   u64 wrap_len = (maplen + page - 1) & ~(page - 1);
 
-  // Fault the wrapped pages RESIDENT synchronously.  newBufferWithBytesNoCopy
-  // wraps the VIRTUAL pages, but the GPU's access does NOT trigger the CPU
-  // page-fault handler that reads a lazy file-backed mmap from the SSD: a
-  // never-touched (e.g. THVM_MMAP_NO_WILLNEED) page reads as ZERO on the GPU.
-  // MADV_WILLNEED is only an async hint, so touch one byte per page to force
-  // them in before the GPU reads.  This costs ~1x the weight's bytes of host
-  // residency -- unavoidable, since the GPU reads these very pages in unified
-  // memory -- but stays zero-copy: NO separate device buffer + NO host staging
-  // copy (a staged upload pays ~2-3x: mmap fault + host stage + device buffer).
-  // The pages can be dropped (MADV_DONTNEED) after the weight's last use.
+  // Fault the wrapped pages RESIDENT.  newBufferWithBytesNoCopy wraps the
+  // VIRTUAL pages, but the GPU's access does NOT trigger the CPU page-fault
+  // handler that reads a lazy file-backed mmap from the SSD: a never-touched
+  // (e.g. THVM_MMAP_NO_WILLNEED) page reads as ZERO on the GPU.  We must force
+  // every page in before the GPU reads it.  This costs ~1x the weight's bytes
+  // of host residency -- unavoidable, since the GPU reads these very pages in
+  // unified memory -- but stays zero-copy: NO separate device buffer + NO host
+  // staging copy.  The pages can be dropped (MADV_DONTNEED) after last use.
+  //
+  // The dominant FLUX cold cost is THIS fault-in (608 weights, ~12.7 GB):
+  // with the file-level MADV_WILLNEED off (THVM_MMAP_NO_WILLNEED, set to bound
+  // RSS), a bare serial touch loop stalls on each page fault with no readahead
+  // (~570 MB/s = 22 s).  Issuing MADV_WILLNEED on JUST this weight's region
+  // first kicks off the kernel's async readahead for the exact pages the touch
+  // loop is about to read, pipelining the SSD reads (~1.7 GB/s = 7.6 s) WITHOUT
+  // the whole-file fault the file-level WILLNEED would cost -- RSS stays bounded
+  // to the wrapped weights.  madvise is a hint, so the touch loop still
+  // guarantees residency before the GPU bind.
   {
+    u64 t0 = cg_now_us();
+    madvise(page_base, (size_t)maplen, MADV_WILLNEED);
     volatile char sink = 0;
     char const *p = (char const *)page_base;
     for (u64 off = 0; off < maplen; off += page) sink ^= p[off];
     if (maplen > 0) sink ^= p[maplen - 1];
     (void)sink;
+    METAL_ZC_WRAPS++;
+    METAL_ZC_FAULT_BYTES += maplen;
+    METAL_ZC_FAULT_US += cg_now_us() - t0;
   }
 
   // Wrap the host pages in place FIRST (id<MTLBuffer> -- `id` here is the
@@ -1233,6 +1254,11 @@ static void metal_shutdown(void) {
             (unsigned long long)METAL_LIB_CACHE_MISSES,
             (unsigned long long)METAL_LIB_CACHE_BYTES_R,
             (unsigned long long)METAL_LIB_CACHE_BYTES_W);
+    fprintf(stderr,
+            "thvm: metal_zerocopy stats -- wraps=%llu fault_MB=%llu fault_ms=%llu\n",
+            (unsigned long long)METAL_ZC_WRAPS,
+            (unsigned long long)(METAL_ZC_FAULT_BYTES / (1024 * 1024)),
+            (unsigned long long)(METAL_ZC_FAULT_US / 1000));
   }
   METAL_BATCH_DEPTH = 0;
   METAL_FREELIST_LEN = 0;
