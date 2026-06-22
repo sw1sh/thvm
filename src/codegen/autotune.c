@@ -23,7 +23,12 @@
 #define KAUTOTUNE_N_RUNS 5
 #define KAUTOTUNE_CACHE_VERSION 3
 #define KAUTOTUNE_CACHE_PATH_CAP 1024
-#define KAUTOTUNE_MAX_CANDIDATES 16
+// Cap on the per-kernel proposer candidate set.  The rich action space
+// (propose_rich_action_space, codegen/propose.c) ported from tinygrad's
+// `actions` (search.py:13-24) produces up to ~50-190 candidates per
+// kernel, so the old 16-slot cap silently truncated the good tiles BEAM
+// needs to find.  256 KOpts on-stack (KOpt is 12 bytes -> ~3KB) is safe.
+#define KAUTOTUNE_MAX_CANDIDATES 256
 #define KAUTOTUNE_SEQ_MAX 4
 #define KAUTOTUNE_MAX_SEQS 64
 
@@ -792,7 +797,7 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
     return 0;
   }
 
-  KOpt cands[16];
+  KOpt cands[KAUTOTUNE_MAX_CANDIDATES];
   u32 n_cand = kernel_opts_propose(ke, cands, sizeof(cands)/sizeof(*cands));
   u32 n_out  = 1 + n_cand;
   if (n_out > cap) n_out = cap;
@@ -1124,7 +1129,7 @@ fn int kernel_should_autotune(KernelEntry const *ke) {
   if (ke->schedule->autotuned) {
     return 0;
   }
-  KOpt buf[16];
+  KOpt buf[KAUTOTUNE_MAX_CANDIDATES];
   u32 nc = kernel_opts_propose(ke, buf, sizeof(buf)/sizeof(*buf));
   if (tr) {
     fprintf(stderr, "[autotune] kid=%u n_cand=%u\n", (u32)(ke - KERNELS), nc);

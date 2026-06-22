@@ -229,6 +229,89 @@ static int propose_metal_reduce_unroll_kernel(KernelEntry const *ke) {
   return uop_dag_is_reduce_unroll_kernel(ke->cached_lift.store_root);
 }
 
+// Append `cand` to out[] iff it is not already present and there is room.
+// Returns the new count.  The autotune beam dedups whole sequences too,
+// but pruning identical single-opt candidates here keeps the proposed
+// set tight (mirrors tinygrad's `acted_kernels` dedup-by-applied-state).
+static u32 propose_append_unique(KOpt *out, u32 n, u32 cap, KOpt cand) {
+  if (n >= cap) return n;
+  for (u32 i = 0; i < n; i++) {
+    if (out[i].op == cand.op && out[i].axis == cand.axis
+        && out[i].arg == cand.arg) {
+      return n;
+    }
+  }
+  out[n] = cand;
+  return n + 1;
+}
+
+// Port of tinygrad's `actions` list (codegen/opt/search.py:13-24),
+// restricted to the 5 OptOps thvm has codegen for: UPCAST, UNROLL,
+// LOCAL, GROUP_REDUCE (=GROUP), TC.  tinygrad's GROUPTOP/SWAP/THREAD/
+// PADTO/NOLOCALS are skipped (no matching applicable OptOp on the thvm
+// split/group renderers).  Each candidate is emitted over the kernel's
+// REAL axis ids (uop_dag_collect_axes) -- thvm's KOP axis is a raw
+// axis_id that uop_dag_apply_kopt looks up by RANGE leaf, not tinygrad's
+// positional class index -- and the autotune apply step bails (returns 0,
+// loop `continue`s) on any that don't divide / don't match the axis type,
+// exactly like tinygrad's `_get_acted_kernels` prunes invalid opts.
+//
+//   UPCAST: arg in {2,3,4,5,7} over each output (LOOP) axis
+//   UNROLL: arg in {2,4,7,8,16} over each reduce axis
+//   LOCAL : arg in {2,3,4,8,13,16,29} over each output (LOOP) axis
+//   GROUP : arg in {4,8,16} over each reduce axis
+static u32 propose_rich_action_space(KernelEntry const *ke, KOpt *out,
+                                     u32 n, u32 cap) {
+  if (ke == NULL) return n;
+  // Enumerate axes from the BASE (pre-heuristic) DAG snapshot, not the
+  // current heuristic-optimized store_root.  kernel_opts_propose runs
+  // AFTER kernel_hand_coded_opts (so store_root's output axes are already
+  // KAX_GLOBAL / its reduce axes already split), but the autotune bench
+  // applies each candidate on the RESET state (axes_reset_to_default
+  // rewinds store_root to cached_lift_init_root, where the output axes are
+  // KAX_LOOP and the reduce axes KAX_REDUCE).  Proposing against the base
+  // is also exactly what tinygrad does -- its `actions` target the base
+  // kernel's axes.  Fall back to store_root for the synthetic / FFI path
+  // (no materialize -> init_root == 0).
+  Term base = ke->cached_lift_init_root != 0 ? ke->cached_lift_init_root
+                                             : ke->cached_lift.store_root;
+  if (base == 0) return n;
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n_ax = uop_dag_collect_axes(base, ids, types, exts, MAX_AXES);
+  if (n_ax == 0) return n;
+
+  static const u32 upcast_args[] = {2, 3, 4, 5, 7};
+  static const u32 unroll_args[] = {2, 4, 7, 8, 16};
+  static const u32 local_args [] = {2, 3, 4, 8, 13, 16, 29};
+  static const u32 group_args [] = {4, 8, 16};
+
+  // Output-axis (LOOP) opts: UPCAST then LOCAL.
+  for (u32 a = 0; a < n_ax && n < cap; a++) {
+    if (types[a] != KAX_LOOP) continue;
+    for (u32 i = 0; i < sizeof(upcast_args)/sizeof(*upcast_args) && n < cap; i++) {
+      n = propose_append_unique(out, n, cap,
+            (KOpt){ KOP_UPCAST, ids[a], upcast_args[i] });
+    }
+    for (u32 i = 0; i < sizeof(local_args)/sizeof(*local_args) && n < cap; i++) {
+      n = propose_append_unique(out, n, cap,
+            (KOpt){ KOP_LOCAL, ids[a], local_args[i] });
+    }
+  }
+  // Reduce-axis opts: UNROLL then GROUP.
+  for (u32 a = 0; a < n_ax && n < cap; a++) {
+    if (types[a] != KAX_REDUCE) continue;
+    for (u32 i = 0; i < sizeof(unroll_args)/sizeof(*unroll_args) && n < cap; i++) {
+      n = propose_append_unique(out, n, cap,
+            (KOpt){ KOP_UNROLL, ids[a], unroll_args[i] });
+    }
+    for (u32 i = 0; i < sizeof(group_args)/sizeof(*group_args) && n < cap; i++) {
+      n = propose_append_unique(out, n, cap,
+            (KOpt){ KOP_GROUP, ids[a], group_args[i] });
+    }
+  }
+  return n;
+}
+
 fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   if (ke == NULL || out == NULL || cap == 0) return 0;
   u32 n = 0;
@@ -242,6 +325,12 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   // > 0` proxy is redundant -- every materialized kernel that reaches
   // this proposer has both, and `cached_lift.store_root != 0` is a
   // strict tightening that matches what the body actually needs.
+  // TC candidates first (heuristic-ordered) but DO NOT return early: a
+  // matmul kernel must ALSO get the rich UPCAST/LOCAL/UNROLL/GROUP action
+  // space appended below.  tinygrad's `actions` (search.py:13-24) offers
+  // every OptOp on every kernel and prunes the inapplicable ones; the
+  // pre-rich thin TC-only return meant BEAM could never FIND the good tile
+  // for a FLUX matmul -- the whole motivation for porting the rich set.
   if (propose_metal_backend_enabled() && ke->cached_lift.store_root != 0) {
     u32 dtype = 0;
     if (propose_tc_classify(ke, &dtype)
@@ -254,7 +343,6 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
         out[n].arg  = tc_tiles[i];
         n++;
       }
-      return n;
     }
   }
 
@@ -391,32 +479,20 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
     }
   }
 
-  // General Metal candidates: UPCAST/LOCAL on output LOOP axes + GROUPTOP
-  // on the reduce axis, for EVERY Metal kernel -- not just the TC /
-  // conv2d-tile / reduce-tail special cases handled above (those return
-  // early or are THVM_TILE-gated, leaving the bulk of elementwise + plain
-  // reduce kernels with zero candidates so BEAM no-ops on them).  These
-  // are correctness-preserving axis transforms; kernel_apply_tune_candidate
-  // skips any that don't apply to a given kernel, and the bench keeps a
-  // variant only when it is faster than the un-opt'd baseline -- so this
-  // can only help (it falls back to no-opt when the hand-coded-style opts
-  // would slow the kernel, which is the common case on Metal).
+  // Rich action space for EVERY Metal kernel -- tinygrad's `actions`
+  // (search.py:13-24) offered on TC / matmul / elementwise / plain-reduce
+  // alike, not just the special cases handled above.  This is the whole
+  // point of the rich port: a FLUX matmul that got only ~3 TC tiles before
+  // now also gets UPCAST/LOCAL/UNROLL/GROUP candidates so BEAM can FIND a
+  // good tile instead of settling for a worse one.  propose_rich_action_space
+  // dedups against everything already emitted; the autotune apply step
+  // prunes any candidate that does not divide / match its axis type
+  // (returns 0 -> the search loop `continue`s), mirroring tinygrad's
+  // `_get_acted_kernels`.  The speed-sanity gate + per-variant bench keep
+  // only variants that beat the heuristic by a margin, so a larger
+  // candidate set can only ever help.
   if (propose_metal_backend_enabled()) {
-    if (axis_idx != 0xFF && n < cap) {        // cooperative reduce
-      out[n].op = KOP_GROUPTOP; out[n].axis = axis_idx; out[n].arg = 16; n++;
-    }
-    static const u32 metal_upcast[] = {4, 2};
-    for (u32 i = 0; i < sizeof(metal_upcast)/sizeof(*metal_upcast) && n < cap; i++) {
-      u8 ax = propose_loop_axis_for_factor(ke, 0, metal_upcast[i]);
-      if (ax == 0xFF) continue;
-      out[n].op = KOP_UPCAST; out[n].axis = ax; out[n].arg = metal_upcast[i]; n++;
-    }
-    static const u32 metal_local[] = {32, 16, 8};
-    for (u32 i = 0; i < sizeof(metal_local)/sizeof(*metal_local) && n < cap; i++) {
-      u8 ax = propose_loop_axis_for_factor(ke, 0, metal_local[i]);
-      if (ax == 0xFF) continue;
-      out[n].op = KOP_LOCAL; out[n].axis = ax; out[n].arg = metal_local[i]; n++;
-    }
+    n = propose_rich_action_space(ke, out, n, cap);
   }
   return n;
 }

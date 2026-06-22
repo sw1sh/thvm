@@ -2421,8 +2421,8 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_bench_variants(WolframLibraryData libData,
                                                      MArgument res) {
   (void)argc;
   u32 kid = (u32)MArgument_getInteger(args[0]);
-  KOpt opts[16];
-  u64  uss [16];
+  KOpt opts[256];
+  u64  uss [256];
   u32 n = 0;
   if (kid > 0 && kid < KERNELS_NEXT) {
     n = kernel_bench_variants(kid, opts, uss, (u32)(sizeof(opts)/sizeof(*opts)));
@@ -2450,7 +2450,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_propose(WolframLibraryData libData,
                                               MArgument res) {
   (void)argc;
   u32 kid = (u32)MArgument_getInteger(args[0]);
-  KOpt buf[16];
+  KOpt buf[256];
   u32  n = 0;
   if (kid > 0 && kid < KERNELS_NEXT) {
     n = kernel_opts_propose(&KERNELS[kid], buf, (u32)(sizeof(buf)/sizeof(*buf)));
