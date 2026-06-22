@@ -580,7 +580,8 @@ atpAutoTuneForClass["Boolean"] := {
        OrAssociativity / Distributivity) and symmetric (ExcludedMiddle /
        Noncontradiction / DoubleNegation) NotableTheorems.  The
        symmetric tautology cases (ExcludedMiddle, Noncontradiction)
-       are FVI-gated: Method->"WaldmeisterFVI" closes both via the
+       are FVI-gated: Method->{"Waldmeister", "FreeVarInstance" -> True}
+       closes both via the
        Waldmeister RechtsUnfreiErzeugen primitive; the lifter teaches
        the resulting $TraceFvi sibling to produce a real ProofObject.
        VampireUEQ stays at the front of the schedule as the parallel

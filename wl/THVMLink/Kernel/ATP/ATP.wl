@@ -2240,8 +2240,9 @@ atpVarWeightOpt[o_Association] :=
    reserved minimal constant (cAtp1) for every free RHS variable
    absent from the LHS.  Required to crack the FVI-gated theorems
    (ExcludedMiddle, Noncontradiction, EqualityOfInverses) under
-   Method->"Waldmeister".  True forces on (use Method->"WaldmeisterFVI"
-   for the standard FVI Waldmeister preset).  False forces off.
+   Method->"Waldmeister".  True forces on (use
+   Method->{"Waldmeister", "FreeVarInstance" -> True} for the standard
+   FVI Waldmeister path).  False forces off.
    Automatic also forces off on plain "Waldmeister" (matching the
    OK_OK baseline byte-for-byte); a future autotuner may turn this on
    when atpAxiomsNeedFvi fires and the in-budget trajectory shift is
@@ -2272,9 +2273,8 @@ atpImplicitCpOpt[o_Association] := Switch[Lookup[o, "UseImplicitCp", Automatic],
    `-kg r` treatment (combined-size < 50 gate, oriented-rules-only
    renormalize, joined victims discarded).  False/off keeps the legacy
    behavior: the slice-reduced pair re-queues during interreduction
-   (engine byte-identical).  On in the "Waldmeister"/"WaldmeisterFVI"
-   presets -- it closes the McCune-II selection-4 trajectory fork
-   against wmcli. *)
+   (engine byte-identical).  On in the "Waldmeister" preset -- it
+   closes the McCune-II selection-4 trajectory fork against wmcli. *)
 atpWmDemoteOpt[o_Association] := Switch[Lookup[o, "DemoteOnLhsSimplify", Automatic],
     True, 1, False | Automatic, 0, _, 0];
 
@@ -2632,12 +2632,12 @@ atpCubeArrivalOpt[o_Association] :=
    Waldmeister `RechtsUnfreiErzeugen` (FVI) hook can ground against
    the reserved minimal constant (src/atp/_.c:12515-12547).  Used by
    atpAnalyzeStructure as a precondition flag; an axiom-set autotuner
-   may consult it to dispatch the WaldmeisterFVI preset on FVI-gated
-   theorems.  Direct enabling on the plain "Waldmeister" preset is
-   measured to drift several short Boolean trajectories outside the
-   2x baseline budget, so the present autotuner does not flip FVI on
-   from this predicate alone; the user opts in via
-   Method->"WaldmeisterFVI" or "FreeVarInstance"->True. *)
+   may consult it to enable FVI on the "Waldmeister" preset for
+   FVI-gated theorems.  Direct enabling on the plain "Waldmeister"
+   preset is measured to drift several short Boolean trajectories
+   outside the 2x baseline budget, so the present autotuner does not
+   flip FVI on from this predicate alone; the user opts in via
+   Method->{"Waldmeister", "FreeVarInstance" -> True}. *)
 atpAxiomsNeedFvi[axParts_List] := AnyTrue[axParts,
     Block[{vars = #[[1]], l = #[[2]], r = #[[3]], lv, rv},
         lv = Cases[l, v_ /; MemberQ[vars, v], {0, Infinity}, Heads -> True];
@@ -2783,54 +2783,6 @@ $AtpPresetDefaults = <|
            wall, +17% peak RSS on mccune and 2.13x peak RSS on
            AndAssoc -- see atpImplicitCpOpt. *)
         "UseImplicitCp" -> False|>,
-    (* "WaldmeisterFVI": Waldmeister with FVI emission FORCED on, even
-       on axiom sets where the auto-detector says no.  Use this preset
-       explicitly on the three FVI-gated theorems (ExcludedMiddle,
-       Noncontradiction, McCuneAxioms/EqualityOfInverses).  AUTO-ON on
-       plain "Waldmeister" was measured to drift several short Boolean
-       proofs (AndCommutativity 1->8, AndIdempotence 4->11) outside the
-       2x-of-baseline budget and time out Meredith/OrAssociativity at
-       30s; sub-condition guard via input-axiom-shape predicate is
-       too coarse a trigger for AUTO. *)
-    "WaldmeisterFVI" -> <|
-        "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
-        "AutoPrecedence" -> True, "SkolemHighest" -> True,
-        "SelectionRatio" -> 51,
-        "RHSInterreduce" -> True, "UnfailingCP" -> True,
-        (* WM -ki default OFF; see the "Waldmeister" entry. *)
-        "CPSetInterreduce" -> False,
-        "DemoteOnLhsSimplify" -> True,
-        "OrphanMurder" -> True,
-        "PopSubsume" -> True,
-        "ESetSubsume" -> True,
-        "QueueSubsume" -> False,
-        (* WM CP-emission ORDER: equal-weight CPs receive their FIFO
-           ages (w2) in Waldmeister's emission order (see
-           atpEmissionOrderOpt) -- selection-sequence identity. *)
-        "EmissionOrder" -> True,
-        (* WM loader-level axiom INTAKE: canonical sort of the initial
-           axiom set + the initial=ultimate MIN_INT/FIFO stamp (see
-           atpIntakeOrderOpt) -- axioms pop first in WM's order. *)
-        "IntakeOrder" -> True,
-        (* WM normal-form STRATEGY: -nf mixmost local-fixpoint walk +
-           Regelbaum retrieval order (see atpMixmostNfOpt) --
-           generation-time join-verdict identity. *)
-        "MixmostNF" -> True,
-        "FreeVarInstance" -> True,
-        (* WM CP-generation filter knobs -- all default OFF (see the
-           "Waldmeister" entry). *)
-        "Einsstern" -> False,
-        "NoOverlapBelowSkolem" -> False,
-        "Reclassify" -> False,
-        "ReversedCompletion" -> False,
-        "SUEManagement" -> False,
-        "CriticalGoalInterreduce" -> False,
-        "CriticalGoalWeight" -> False,
-        "BackwardGoalArgue" -> False,
-        (* Stays opt-in for the same measured regressions as the
-           "Waldmeister" entry; FVI differs only in FreeVarInstance
-           emission, orthogonal to CP storage. *)
-        "UseImplicitCp" -> False|>,
     "WaldmeisterLazy" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
         "SkolemHighest" -> True,
@@ -2950,7 +2902,6 @@ $AtpPresetDefaults = <|
    False -- VampireUEQ is the lone True per Vampire's `tgt=full`. *)
 $AtpPresetGoalDirected = <|
     "Waldmeister" -> False,
-    "WaldmeisterFVI" -> False,
     "WaldmeisterLazy" -> False,
     "VampireUEQ"  -> True,
     "VampireUEQDefault" -> False,  (* matches Vampire's UEQ portfolio default slot which doesn't enable goal-MNF *)
@@ -3065,14 +3016,6 @@ atpParseMethod["Waldmeister"] := atpParseMethod[{"Waldmeister"}];
 atpParseMethod[{"Waldmeister", subopts___Rule}] :=
     atpDispatchPreset[$AtpPresetDefaults["Waldmeister"],
         $AtpPresetGoalDirected["Waldmeister"], {subopts}];
-
-(* Method -> "WaldmeisterFVI": Waldmeister + RechtsUnfreiErzeugen FVI
-   (see $AtpPresetDefaults note above).  Opt-in preset for FVI-gated
-   theorems; everything else should stay on plain "Waldmeister". *)
-atpParseMethod["WaldmeisterFVI"] := atpParseMethod[{"WaldmeisterFVI"}];
-atpParseMethod[{"WaldmeisterFVI", subopts___Rule}] :=
-    atpDispatchPreset[$AtpPresetDefaults["WaldmeisterFVI"],
-        Lookup[$AtpPresetGoalDirected, "WaldmeisterFVI", False], {subopts}];
 
 (* Method -> "WaldmeisterLazy": Waldmeister DISCOUNT-style preset
    bundling the spec-safe LazyNormalize combo.  LazyNormalize defers
