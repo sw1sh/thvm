@@ -1736,6 +1736,17 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
 
 #ifdef THVM_HAS_METAL
 static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
+  // THVM_JIT_GRAPH_DIAG: report once per slot (at its first op) whether the
+  // capture is ICB-batch-eligible and, if not, why -- the VAE-batching probe.
+  static u64 diag_seen_slots = 0;
+  if (start == 0 && getenv("THVM_JIT_GRAPH_DIAG") != NULL
+      && slot < 64 && !((diag_seen_slots >> slot) & 1u)) {
+    diag_seen_slots |= (1ull << slot);
+    fprintf(stderr,
+            "[graph-diag] slot=%u n_ops=%u replay_enabled=%d unsafe=%u recycle=%u force_icb=%d\n",
+            slot, c->n_ops, jit_metal_graph_replay_enabled(),
+            c->metal_graph_unsafe, c->metal_graph_recycle, jit_metal_graph_force_icb());
+  }
   if (!jit_metal_graph_replay_enabled()) {
     return 0;
   }
@@ -1823,6 +1834,14 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   }
   if (thvm_metal_jit_replay_run(slot, start, recs, n) != 0) {
     return 0;
+  }
+  if (getenv("THVM_JIT_GRAPH_DIAG") != NULL) {
+    static u64 diag_batch_seen = 0;
+    if (start == 0 && slot < 64 && !((diag_batch_seen >> slot) & 1u)) {
+      diag_batch_seen |= (1ull << slot);
+      fprintf(stderr, "[graph-diag] slot=%u ICB-batch start=%u n=%u consumed=%u (of %u ops)\n",
+              slot, start, n, consumed, c->n_ops);
+    }
   }
   HOT_JIT_GRAPH_RUNS++;
   HOT_JIT_GRAPH_DISPATCHES += n;
