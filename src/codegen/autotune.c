@@ -21,7 +21,11 @@
 // real wallclock; 5 is enough to separate small kernels from each
 // other against a ~10us-resolution clock.
 #define KAUTOTUNE_N_RUNS 5
-#define KAUTOTUNE_CACHE_VERSION 3
+// v4: kautotune_structural_key now folds a finer GC-invariant DAG
+// content hash (was root-op tag/ext + shapes only, which could collide
+// distinct kernels and reuse the wrong tuned tile).  Bump so v3 disk
+// entries (coarser key) are ignored rather than mis-keyed.
+#define KAUTOTUNE_CACHE_VERSION 4
 #define KAUTOTUNE_CACHE_PATH_CAP 1024
 #define KAUTOTUNE_MAX_CANDIDATES 16
 #define KAUTOTUNE_SEQ_MAX 4
@@ -187,9 +191,20 @@ static u64 kautotune_rangeified_key(KernelEntry const *ke) {
   }
   u64 h = 0xcbf29ce484222325ULL ^ 0x52414E4745584B41ULL;
   if (ke->schedule != NULL && axes_resolve_n_axes(ke) > 0) {
-    h = kautotune_hash_u64(h, 2);
+    h = kautotune_hash_u64(h, 3);
     h = kautotune_hash_u64(h, (u64)term_tag(ke->source_uop));
     h = kautotune_hash_u64(h, (u64)term_ext(ke->source_uop));
+    // Fold in a GC-invariant structural CONTENT hash of the kernel's
+    // lifted DAG.  The root op tag/ext alone is too coarse -- two
+    // distinct kernels with the same root op + identical I/O shapes
+    // and axis layout would collide and reuse each other's tuned tile
+    // config (wrong PSO).  Hash the pre-mutation root (init_root) so
+    // the key is independent of which candidate tile got applied
+    // during the search; fall back to the live store_root.
+    Term content_root = ke->cached_lift_init_root != 0
+                      ? ke->cached_lift_init_root
+                      : ke->cached_lift.store_root;
+    h = kautotune_hash_u64(h, uop_dag_content_hash(content_root));
     h = tile_anno_hash_axes(ke, h);
   } else {
     return 0;

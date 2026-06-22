@@ -1849,16 +1849,26 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   // slots and we re-compile for every BS.
   //
   // Input/output numels are excluded for symbolic kernels (below) for
-  // the same reason.  The UOp DAG (cached_lift.store_root) Term hash
-  // captures UOP_RANGE var_ids via kvar_collect_from_dag, so symbolic
-  // kernels at different BS values still share the same UOp identity.
+  // the same reason.  The UOp DAG content hash captures UOP_RANGE
+  // var_ids (via the extent token) and axis types, so symbolic kernels
+  // at different BS values still share the same UOp identity.
   u32 used_vars[KVAR_USED_CAP];
   u32 n_vars = kvar_collect_from_dag(ke->cached_lift.store_root,
                                      used_vars, KVAR_USED_CAP);
   int is_symbolic = (n_vars > 0);
+  // GC-INVARIANT structural content hash of the lifted DAG instead of
+  // the raw heap location of store_root.  The autotune/BEAM search
+  // hash-conses candidate DAG variants into the shared heap; a later GC
+  // relocates the captured kernels' store_root, which would silently
+  // change a heap-loc key -> warm-replay PSO miss/collision -> wrong or
+  // no PSO -> non-finite output.  uop_dag_content_hash is invariant
+  // under relocation: two structurally-identical kernels hash equal
+  // (they SHOULD share a PSO); two distinct kernels hash distinct
+  // (covering op codes, const bits, dtypes, shapes, axis types, applied
+  // opts, transpose flags, child structure -- recursively).
   if (ke->cached_lift.store_root != 0) {
-    u64 root_bits = (u64)ke->cached_lift.store_root;
-    h ^= root_bits; h *= 0x100000001b3ULL;
+    u64 content = uop_dag_content_hash(ke->cached_lift.store_root);
+    h ^= content; h *= 0x100000001b3ULL;
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {
     h ^= (u64)ke->input_dtypes[i]; h *= 0x100000001b3ULL;

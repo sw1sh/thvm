@@ -2073,6 +2073,14 @@ fn void jit_capture_pause(void);
 fn void jit_capture_resume(void);
 fn u32  jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words);
 
+// GC-invariant structural content hash of the lifted UOp DAG rooted at
+// `root` (Merkle-style: mix(op, dtype, payload, child hashes), memoized
+// over the DAG).  Used to key the Metal PSO / tile-JIT cache by kernel
+// CONTENT instead of the raw heap location of store_root, which GC
+// relocates mid-session.  Returns 0 for an empty root.  External
+// linkage so the separately-compiled Metal backend (.m) can call it.
+u64  uop_dag_content_hash(Term root);
+
 // Time `n_runs` back-to-back fires of `kid`; return min wallclock
 // us.  Used by autotune internally + exposed via LibraryLink for
 // the WL TKernelVariants surface.
