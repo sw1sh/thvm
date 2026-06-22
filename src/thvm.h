@@ -2037,17 +2037,15 @@ fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 // the best variants into short opt sequences when enabled, pick the
 // winner, and leave KpSchedule mutated to the winning sequence.
 // Returns 1 if a winning opt sequence was applied, 0 if baseline won.
+// Propose tinygrad-style opt candidates for `kid`, beam-search them by
+// timing each variant on FRESH isolated scratch buffers (tinygrad
+// codegen/opt/search.py _time_program + postrange.py bufs_from_ast --
+// never the live TENS graph buffers), apply + disk-cache the winner.
+// Benching on isolated buffers is what lets the search run in a shared
+// context (the FLUX qwen/DiT/VAE captures) without perturbing the live
+// activations or the tile-JIT shape table.  Returns 1 if a winner was
+// applied.  No-op while a JIT capture is recording (jit_is_capturing).
 fn int kernel_autotune(u32 kid);
-// Post-capture beam search on FRESH scratch buffers (tinygrad jit.py
-// jit_lower -> search.py beam_search on isolated rawbufs).  Allocates
-// input/output scratch buffers sized to this kernel's PARAM slots,
-// benches each opt variant on those, caches the winner, and frees the
-// scratch.  Never reads/writes the live TENS graph buffers, so a search
-// run between JIT captures (a shared-context FLUX session) can't perturb
-// the next stage's capture.  Returns 1 if a winner was applied.
-fn int kernel_autotune_isolated(u32 kid);
-// Gate for the post-capture isolated search (JITBEAM/BEAM/AUTOTUNE).
-fn int autotune_post_capture_enabled(void);
 fn u64 kautotune_structural_key(struct KernelEntry const *ke);
 
 // Cheap predicate used by the fire-time auto-tune trigger.  True

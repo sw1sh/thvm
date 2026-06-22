@@ -1107,6 +1107,35 @@ fn int kernel_autotune(u32 kid) {
   // kernel path.  axes_reset_to_default preserves the flag.
   ke->schedule->autotuned = 1;
 
+  // Bench on ISOLATED scratch buffers (tinygrad codegen/opt/search.py
+  // _time_program + postrange.py bufs_from_ast: every beam-search times
+  // candidates on FRESH rawbufs sized to the kernel's PARAM slots, never
+  // the live graph buffers).  The bench fires thus read/write only scratch
+  // -- they never touch the live activation tensors of an in-flight FLUX
+  // session, removing the live-BUFFER pollution.  When the kernel can't be
+  // sized for isolation (giant im2col intermediate, strided-view input),
+  // iso_setup is 0 and we DECLINE the search rather than fall back to the
+  // live buffers.  cg_profile_snapshot/restore additionally erases the
+  // search's K_PROFILE[kid].kind footprint (the JIT replay's ICB-batching
+  // decision reads it).
+  //
+  // NOTE (open): buffer isolation alone does NOT make a BEAM search safe to
+  // run mid-FLUX-session.  The search hash-conses candidate DAG variants
+  // into the SHARED heap; a later GC relocates the captured velocity/qwen
+  // kernels' cached_lift.store_root, and metal_tile_jit_hash
+  // (backend/metal/_.m) keys the PSO cache by that RAW heap loc -- so the
+  // warm replay collides/misses its PSO and corrupts (~5x slower + NaN).
+  // The real fix is rekeying the PSO cache by a stable structural DAG hash
+  // (kautotune_structural_key-style), tracked separately.
+  u64 prof_snap[6];
+  cg_profile_snapshot(kid, prof_snap);
+  int iso_setup = kautotune_iso_begin(kid);
+  if (!iso_setup) {
+    ke->schedule->autotuned = 1;
+    cg_profile_restore(kid, prof_snap);
+    return 0;
+  }
+
   // Baseline (no opts).  Warm the JIT so the first variant doesn't
   // pay the compile cost alone -- compile each before timing the
   // bench loop, so the measurements compare hot kernels.
@@ -1187,58 +1216,22 @@ fn int kernel_autotune(u32 kid) {
   // Re-apply the winner (or leave baseline if nothing beat it).
   // `autotuned` was set at the start; reset_to_default preserves it.
   axes_reset_to_default(ke);
+  int applied = 0;
   if (best_seq.n != 0) {
-    int applied = kautotune_apply_seq(ke, &best_seq);
+    applied = kautotune_apply_seq(ke, &best_seq);
     if (applied && cache_ready) {
       kautotune_cache_store(cache_path, cache_key, backend_id, n_runs,
                             depth, beam_width, best_seq, best_us);
     }
-    return applied;
-  }
-  if (cache_ready) {
+  } else if (cache_ready) {
     kautotune_cache_store(cache_path, cache_key, backend_id, n_runs,
                           depth, beam_width, best_seq, best_us);
   }
-  return 0;
-}
-
-// Post-capture beam search on ISOLATED scratch buffers (port of
-// tinygrad engine/jit.py jit_lower -> codegen/opt/search.py beam_search:
-// after a JIT function is captured, each captured kernel is beam-searched
-// by timing variants on fresh rawbufs, never the live graph buffers).
-//
-// kernel_autotune benches on the kernel's live TENS buffers.  During a
-// shared-context FLUX session that perturbs the next stage's capture, so
-// the in-capture path (kernel_autotune's jit_is_capturing guard) declines
-// to search.  This wrapper runs AFTER capture finalize (JIT_ACTIVE_SLOT==0,
-// so jit_is_capturing() is false) and installs fresh scratch buffers via
-// kautotune_iso_begin -- kernel_bench_fire + kautotune_output_stat then
-// read/write ONLY those, leaving the live activations + shape table
-// untouched.  Winners land in the same disk cache, so the warm replay
-// cache-HITs the tuned tiles.  Returns 1 if a winner was applied + cached.
-fn int kernel_autotune_isolated(u32 kid) {
-  if (kid == 0 || kid >= KERNELS_NEXT) {
-    return 0;
-  }
-  if (!kautotune_iso_begin(kid)) {
-    // Couldn't size scratch buffers for this kernel -- skip the isolated
-    // search (do NOT fall back to the live-buffer bench: that's the
-    // cross-stage corruption this whole path exists to avoid).
-    return 0;
-  }
-  // The search fires the kernel many times on scratch buffers; each fire
-  // records a dispatch route into K_PROFILE[kid].kind, which the JIT
-  // replay's ICB-batching decision reads (cg_kernel_dispatch_kind ->
-  // jit_replay_try_metal_graph_run).  A benched variant that takes a
-  // different route than the captured baseline would leave `kind` wrong
-  // and corrupt the warm replay.  Snapshot the profile slot before the
-  // search and restore it after, so the search leaves zero profile
-  // footprint; the first real replay re-records the true winning route.
-  u64 prof[6];
-  cg_profile_snapshot(kid, prof);
-  int applied = kernel_autotune(kid);
-  cg_profile_restore(kid, prof);
+  // Tear down the isolated scratch buffers and erase the search's profile
+  // footprint.  The winner (if any) stays applied to ke->schedule; the
+  // first real (non-iso) dispatch re-records the true route.
   kautotune_iso_end();
+  cg_profile_restore(kid, prof_snap);
   return applied;
 }
 
@@ -1271,14 +1264,6 @@ static int autotune_jitbeam_enabled(void) {
   return e != NULL && atoi(e) > 0;
 }
 
-// Public gate for the post-capture isolated search (jit_capture_finalize ->
-// kernel_autotune_isolated).  tinygrad jit.py:73 `beam=getenv("JITBEAM",
-// BEAM.value)` -- JITBEAM, falling back to BEAM (and thvm's AUTOTUNE=1
-// alias).  When on, every captured kernel is beam-searched on fresh
-// scratch buffers right after the capture finalizes.
-fn int autotune_post_capture_enabled(void) {
-  return autotune_jitbeam_enabled() || autotune_env_enabled();
-}
 
 fn int kernel_should_autotune(KernelEntry const *ke) {
   static int tr = -1;
