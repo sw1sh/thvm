@@ -1011,12 +1011,19 @@ int main(int argc, char **argv) {
       // (also turned on by FORMATION_FIFO below).  See soa.txt.
       thvm_atp_set_use_drain_revface(
           s, (getenv("THVM_ATP_DRAIN_REVFACE") != NULL) ? 1u : 0u);
-      // WM-faithful discrimination-tree construction (DEFAULT OFF; ON under
-      // FORMATION_FIFO).  Splices BlattAufgeteilt parallels AFTER the model
-      // (WM AltesBlattPolieren DSBaumOperationen.c :523-526) so the runtime
-      // tops DFS reaches a split leaf's parallel face at WM's arrival rank.
-      // Advances soa firstdiv past 1953.  THVM_ATP_WM_TRIE_FAITHFUL opts in
-      // (also turned on by FORMATION_FIFO below).  See soa.txt.
+      // WM-faithful discrimination-tree construction (DEFAULT OFF).  Splices
+      // BlattAufgeteilt parallels for genuine enclosing subterms AFTER the model
+      // (WM AltesBlattPolieren DSBaumOperationen.c :523-526), but keeps the
+      // NeuesBlattEinhaengen immediate-strict-ancestor jump (:466-467)
+      // head-inserted in BOTH construction modes -- so the runtime tops DFS
+      // reaches a split leaf's parallel face at WM's arrival rank.  With the
+      // FormationFifo base this reaches soa firstdiv 1953 (closes the rule-44
+      // partner-batch transposition at pick 1884 that the bare splice-after
+      // exposed).  NOT auto-enabled under FormationFifo: it neither advances nor
+      // regresses soa's firstdiv (the residual at 1953 is the equation-tree
+      // round-robin batch, untouched by this rule-tree construction), so it
+      // ships as the byte-identical-OFF faithful-construction foundation.
+      // THVM_ATP_WM_TRIE_FAITHFUL opts in.  See soa.txt.
       thvm_atp_set_use_wm_trie_faithful(
           s, (getenv("THVM_ATP_WM_TRIE_FAITHFUL") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling

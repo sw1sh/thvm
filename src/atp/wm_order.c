@@ -841,28 +841,34 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
       par->sub_len = e_new - start_pos;
       par->ziel = leaf;
       par->ziel_leaf = 1u;
-      // Outgoing-list placement.  WM's BlattAufgeteilt parallel goes
-      // immediately AFTER the model survivor (DSBaumOperationen.c :521-525,
-      // the NaechsterZieleintrag splice -- "hinter den Eintrag setzen, zu
-      // dem eine Parallele aufgebaut wird"); it never head-inserts.  The
-      // head-insert BooleanAxioms OrAssociativity @300 needs is the
-      // NeuesBlattEinhaengen RumpfSprungeintragSetzen jump (:466-467,
-      // head-inserted), emitted for the enclosing subterm whose first cell
-      // is the leaf-found branch key[i] -- an IMMEDIATE strict ancestor
-      // (i - start_pos == 1).  Keep the head-insert only there; an enclosing
-      // subterm opened FURTHER above (i - start_pos > 1, the MeredithAxioms
-      // And/OrAssoc @340 R27 jump start_pos=2 i=4 j=5) is a genuine parallel
-      // and goes after the survivor, matching WM's CPNr/FIFO arrival.
-      if (!polier_after && start_pos < i && e_new < e_old &&
-          i - start_pos == 1u) {
+      // Outgoing-list placement.  WM's BlattAufgeteilt parallel for a genuine
+      // enclosing subterm goes immediately AFTER the model survivor
+      // (DSBaumOperationen.c :521-525, the NaechsterZieleintrag splice --
+      // "hinter den Eintrag setzen, zu dem eine Parallele aufgebaut wird").
+      // The ONE exception is the NeuesBlattEinhaengen RumpfSprungeintragSetzen
+      // jump (:466-467), which is head-inserted: it is emitted for the
+      // enclosing subterm whose first cell is the leaf-found branch key[i] --
+      // an IMMEDIATE strict ancestor (i - start_pos == 1) that closes inside
+      // the new leaf (e_new < e_old) -- and WM consults this most-general
+      // outgoing jump FIRST.  This head-insert is WM-faithful in BOTH
+      // construction modes: it reproduces WM's CPNr/FIFO order regardless of
+      // the AltesBlattPolieren splice convention (BooleanAxioms OrAssociativity
+      // @300; soa rule-44 partner batch @1884, where the repeated-var partner's
+      // immediate-ancestor parallel must precede the distinct-var partner's).
+      // The polier_after splice-after convention applies only to enclosing
+      // subterms opened FURTHER above (i - start_pos > 1, the MeredithAxioms
+      // And/OrAssoc @340 R27 jump start_pos=2 i=4 j=5 + the soa rule-35 @1953
+      // batch), which are genuine parallels and go after the survivor.
+      if (start_pos < i && e_new < e_old && i - start_pos == 1u) {
         wmo_ct("POLIER-PAR-HEAD", sn, leaf, 1u);
         par->next = sn->exits;
         sn->exits = par;
       } else {
-        // WM-faithful (DSBaumOperationen.c :523-526): always splice the
-        // parallel immediately AFTER the survivor it parallels ("hinter den
-        // Eintrag setzen").  The historical head-insert special case
-        // (POLIER-PAR-HEAD) is kept only when polier_after is off.
+        // WM-faithful (DSBaumOperationen.c :523-526): splice the parallel
+        // immediately AFTER the survivor it parallels ("hinter den Eintrag
+        // setzen").  Under the historical (non-faithful) construction this
+        // ran only for the non-immediate-ancestor parallels; the faithful
+        // construction extends it to all but the immediate-ancestor head jump.
         wmo_ct("POLIER-PAR-AFTER", sn, leaf, 1u);
         par->next = surv->next;
         surv->next = par;

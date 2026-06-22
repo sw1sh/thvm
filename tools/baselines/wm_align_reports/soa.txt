@@ -1,5 +1,74 @@
 soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv 126 -> 288 -> 290
 
+## RESOLVED 2026-06-22: pick-1884 CP-formation geometry -- the immediate-strict-ancestor head jump is WM-faithful in BOTH construction modes (1884 regression closed; TRIE foundation now non-regressing)
+
+The prior round (below) showed THVM_ATP_WM_TRIE_FAITHFUL standalone REGRESSES 1953 ->
+1884 by a CP-formation overlap-geometry divergence at the rule-44 partner batch.
+That divergence is now ROOT-CAUSED and FIXED.
+
+### ROOT CAUSE (instrumented, not a hunch)
+The 1884/1885 pair is two phase-A tops CPs with the SAME outer rule (thvm f=56 = WM
+rule 44), SAME combo (0), SAME overlap position [0] -- they differ ONLY in the
+partner rule and that partner's tops-DFS arrival rank (k3):
+  A = WM CP 12261 parents (44,39), w2=9061: partner rule 39 = dot(dot(x,x),dot(x,y))->x
+  B = WM CP 12262 parents (44,37), w2=9062: partner rule 37 = dot(dot(x,x),dot(y,x))->x
+WM forms A (partner 39) before B (partner 37); thvm's raw atp_wmo_rank keyed them
+swapped (B's keyraw < A's, differing by exactly 1 in k3 = one 2^28 unit).  The two
+partner leaves share the prefix dot(dot(v1,v1),dot(...)) and split at the inner-left
+position: A stores the REPEATED tree var (v1), B a FRESH tree var (v2).  The query
+(rule 56's [0] subterm = dot(v1,v2)) reaches both via an ancestor parallel jump
+built by AltesBlattPolieren.
+
+The bug was NOT the tops DFS walk and NOT the arrival ranking -- both are faithful.
+It was the CONSTRUCTION: at the depth-4 start node, the A-leaf's parallel is a
+NeuesBlattEinhaengen immediate-strict-ancestor jump (start_pos=4, i=5, j=6,
+i-start_pos==1, e_new=7 < e_old=11) that WM HEAD-inserts (RumpfSprungeintragSetzen
+:466-467, consulted first), so A's leaf arrives BEFORE B's.  thvm head-inserted it
+under the historical path (POLIER-PAR-HEAD) but the TRIE-faithful path
+(use_wm_trie_faithful) had gated the head-insert behind `!polier_after`, forcing
+splice-AFTER (POLIER-PAR-AFTER) -- moving A's parallel behind B's, swapping the CPNr
+ages.  WMOCT confirmed: OFF=POLIER-PAR-HEAD (A first), ON=POLIER-PAR-AFTER (A last).
+
+### THE FIX (src/atp/wm_order.c wmo_altes_blatt_polieren :856-869)
+The immediate-strict-ancestor head-insert (start_pos < i && e_new < e_old &&
+i-start_pos==1) is WM-faithful in BOTH construction modes -- it reproduces the
+NeuesBlattEinhaengen head jump regardless of the AltesBlattPolieren splice
+convention.  Dropped the `!polier_after` guard so the head-insert applies whether or
+not use_wm_trie_faithful is set; the splice-after convention now governs only the
+non-immediate-ancestor parallels (i-start_pos > 1, the soa rule-35 @1953 batch +
+MeredithAxioms And/OrAssoc @340).  OFF is byte-identical by construction (the OFF
+predicate `!polier_after && ...` already reduced to the same condition).
+
+### RESULT
+FormationFifo + THVM_ATP_WM_TRIE_FAITHFUL: firstdiv 1884 -> 1953 (the 1884 pair
+emits A-before-B at WM's CPNr ages, restoring parity through 1952).  Gates: OFF
+byte-identical (WALDMEISTER-only soa firstdiv=19, FormationFifo soa firstdiv=1953,
+1..126734 / 1..121177 CPSEL prefixes byte-identical vs clean HEAD 2b24dfe7 -- the
+only diffs are wall-cutoff tail appends); bin/test_atp 136236/136236; 7-theorem
+wm_pr corpus byte-identical OFF (Sheffer Commutativity, Boolean OrAssoc 1266,
+AbelianGroup InverseOfComposite, McCune Associativity 298, Wolfram Commutativity
+3219, Boolean DoubleNegation, Group InverseOfInverse).
+
+### REMAINING FRONTIER at pick-1953 (DIFFERENT class: EQUATION-tree round-robin)
+With the 1884 regression closed, FormationFifo+TRIE+fix lands AT 1953 -- the SAME
+firstdiv as plain FormationFifo, because the TRIE rule-tree construction has ZERO
+effect on the 1953 batch (the keyraw is byte-identical FFifo vs FFifo+TRIE+fix
+there).  The 1953 residual is an EQUATION-tree (tree=1) ordering, not the rule-tree
+geometry the 1884 fix addresses.  Outer thvm f=52 = WM rule 33; the surviving CPs
+are combo=1 reverse-face overlaps onto the equation tree, normalized to weight 109
+`x1 # dot(dot(x1,dot(?,?)),dot(x2,x1))`.  WM emits these ROUND-ROBIN over partner
+equations (CP 9856 parents (33,-11)=A `dot(x1,x2)`, 9857 (33,-9)=B `dot(x2,x1)`,
+(33,-2)=C `dot(x2,x2)`, then repeat: A,B,C,A,B,C...), but thvm GROUPS them by shape
+(C,C,B,B,B,A,A,A) -- it sorts by per-partner eq-tree arrival (k3) + co-rank chain
+(k4), so each partner's faces emit together.  The eq-tree partners (jtr 3784/3993
+/6535/6957) are built via PREPEND + POLIER-PAR-AFTER at i-start_pos>1 (genuine
+splice-after parallels, NOT the immediate-ancestor head case), so the 1884 fix does
+not reach them.  Closing 1953 needs WM's single COMBINED eq-tree scan emission order
+(one face per partner per scan position, cycling partners) rather than thvm's
+per-partner enumeration + arrival/co-rank sort -- a deeper eqn-tree CP-formation
+restructure, DEFERRED (high cross-theorem regression risk; no-WM-run constraint
+forbids the validation sweep a DFS-order change would need).
+
 ## INVESTIGATED 2026-06-22: THVM_ATP_WM_TRIE_FAITHFUL -- AltesBlattPolieren splice-after construction (firstdiv-1953 root-caused; net-advance blocked by a CP-formation geometry frontier)
 
 The pick-1953 residual (the rule-35 / equation-{-11,-9,-30,-26,-22,-29,-25,-21}
