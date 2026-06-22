@@ -81,6 +81,10 @@ static u32 propose_tc_tile_candidates(u32 M, u32 N, u32 K, int c_is_bf,
                                       KOpt *out, u32 n, u32 cap) {
   // local_m/local_n: simdgroups along M/N.  rm/rn: register 8x8 tiles per
   // simdgroup.  kb: K-block staged in threadgroup memory (multiple of 8).
+  // Full action space (the tile config IS the matmul's UPCAST/LOCAL); the
+  // cold-search cost is bounded NOT by curating this set but by the per-kernel
+  // search timeout + per-candidate early-stop in kernel_autotune (mirrors
+  // tinygrad's BEAM_TIMEOUT_SEC + _time_program early_stop=best*3).
   static const u32 locals[]  = {4, 2, 1};
   static const u32 regs[]    = {8, 4, 2, 1};
   static const u32 kbs[]     = {64, 32, 16, 8};

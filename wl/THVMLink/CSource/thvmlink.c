@@ -2407,7 +2407,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_bench_us(WolframLibraryData l, mint a,
   (void)l; (void)a;
   u32 kid    = (u32)MArgument_getInteger(args[0]);
   u32 n_runs = (u32)MArgument_getInteger(args[1]);
-  u64 us = (kid > 0 && kid < KERNELS_NEXT) ? kernel_bench_us(kid, n_runs) : 0;
+  u64 us = (kid > 0 && kid < KERNELS_NEXT) ? kernel_bench_us(kid, n_runs, 0) : 0;
   MArgument_setInteger(res, (mint)us);
   return LIBRARY_NO_ERROR;
 }

@@ -718,7 +718,7 @@ static int kautotune_stat_accept(KautotuneOutStat const *baseline,
 
 static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
                                u32 n_runs, KautotuneOutStat const *baseline,
-                               u64 *out_us) {
+                               u64 early_stop, u64 *out_us) {
   axes_reset_to_default(ke);
   if (!kautotune_apply_seq(ke, seq)) {
     axes_reset_to_default(ke);
@@ -735,7 +735,7 @@ static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
     return 0;
   }
   if (out_us != NULL) {
-    *out_us = kernel_bench_us(kid, n_runs);
+    *out_us = kernel_bench_us(kid, n_runs, early_stop);
   }
   return 1;
 }
@@ -783,7 +783,7 @@ static void kernel_bench_fire(u32 kid) {
 // Time `n_runs` back-to-back direct dispatches of `kid`; return min
 // wallclock in microseconds.  Min (not mean) filters one-shot OS jitter
 // (page faults, scheduler hiccups).
-fn u64 kernel_bench_us(u32 kid, u32 n_runs) {
+fn u64 kernel_bench_us(u32 kid, u32 n_runs, u64 early_stop) {
   if (n_runs == 0) {
     n_runs = 1;
   }
@@ -793,6 +793,11 @@ fn u64 kernel_bench_us(u32 kid, u32 n_runs) {
     kernel_bench_fire(kid);
     u64 dt = cg_now_us() - t0;
     if (dt < best) best = dt;
+    // Early-stop (tinygrad _time_program: `if early_stop < min(tms): break`):
+    // once the min already exceeds the budget (best-so-far * 3) this variant
+    // cannot win, so stop the reps instead of paying n_runs full dispatches of
+    // a slow tile.  early_stop == 0 disables (baseline/heuristic/variant probes).
+    if (early_stop != 0 && best > early_stop) break;
   }
   return best;
 }
@@ -822,7 +827,7 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
   kernel_bench_fire(kid);                         // JIT warm
   out_opts[0] = (KOpt){ KOP_NONE, 0, 0 };
   u32 n_runs = kautotune_n_runs();
-  out_us  [0] = kernel_bench_us(kid, n_runs);
+  out_us  [0] = kernel_bench_us(kid, n_runs, 0);
 
   // Each candidate.
   for (u32 i = 0; i + 1 < n_out; i++) {
@@ -834,12 +839,25 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
     }
     kernel_bench_fire(kid);
     out_opts[i + 1] = cands[i];
-    out_us  [i + 1] = kernel_bench_us(kid, n_runs);
+    out_us  [i + 1] = kernel_bench_us(kid, n_runs, 0);
   }
 
   // Leave at baseline.
   axes_reset_to_default(ke);
   return n_out;
+}
+
+// Per-kernel beam-search wall-clock budget (tinygrad BEAM_TIMEOUT_SEC, default
+// 10s).  Bounds the cold autotune: with hundreds of tile candidates and no
+// device-side kernel abort on Metal (a slow tile's single dispatch runs to
+// completion), an exhaustive bench would take hours; once a kernel's search
+// exceeds this it stops and keeps the best found (the speed-sanity gate then
+// guarantees that best is >= the heuristic).
+static u64 kautotune_search_budget_us(void) {
+  char const *e = getenv("BEAM_TIMEOUT_SEC");
+  int s = (e != NULL && e[0]) ? atoi(e) : 10;
+  if (s <= 0) s = 10;
+  return (u64)s * 1000000ull;
 }
 
 // Run propose -> bench -> apply-winner.  Returns 1 if a winning opt
@@ -940,7 +958,7 @@ fn int kernel_autotune(u32 kid) {
 #ifdef THVM_HAS_METAL
   thvm_metal_jit_drop_in_memory_psos();
 #endif
-  u64 heuristic_us = (kernel_bench_fire(kid), kernel_bench_us(kid, n_runs));
+  u64 heuristic_us = (kernel_bench_fire(kid), kernel_bench_us(kid, n_runs, 0));
 
   // Baseline (no opts).  Warm the JIT so the first variant doesn't
   // pay the compile cost alone -- compile each before timing the
@@ -951,8 +969,10 @@ fn int kernel_autotune(u32 kid) {
   // every candidate against.  Read AFTER the no-opt fire so it reflects
   // the default (assumed-correct) kernel's result.
   KautotuneOutStat baseline_stat = kautotune_output_stat(ke);
-  u64 best_us = kernel_bench_us(kid, n_runs);
+  u64 best_us = kernel_bench_us(kid, n_runs, 0);
   KOptSeq best_seq = {0};
+  u64 search_start = cg_now_us();
+  u64 search_budget_us = kautotune_search_budget_us();
 
   if (depth == 0) {
     depth = 1;
@@ -971,12 +991,13 @@ fn int kernel_autotune(u32 kid) {
   u32 n_seen = 0;
 
   for (u32 i = 0; i < n_cand; i++) {
+    if (cg_now_us() - search_start > search_budget_us) break;  // per-kernel timeout
     KOptSeq seq = {0};
     seq.n = 1;
     seq.opts[0] = candidates[i];
     seen[n_seen++] = seq;
     u64 us = 0;
-    if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &baseline_stat, &us)) {
+    if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &baseline_stat, best_us * 3, &us)) {
       continue;
     }
     if (us < best_us) {
@@ -987,9 +1008,11 @@ fn int kernel_autotune(u32 kid) {
   }
 
   for (u32 d = 2; d <= depth && n_beam > 0; d++) {
+    if (cg_now_us() - search_start > search_budget_us) break;  // per-kernel timeout
     u32 n_next = 0;
     for (u32 b = 0; b < n_beam; b++) {
       for (u32 i = 0; i < n_cand; i++) {
+        if (cg_now_us() - search_start > search_budget_us) break;  // per-kernel timeout
         if (!kautotune_seq_can_append(&beam[b].seq, candidates[i])) {
           continue;
         }
@@ -1002,7 +1025,7 @@ fn int kernel_autotune(u32 kid) {
           seen[n_seen++] = seq;
         }
         u64 us = 0;
-        if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &baseline_stat, &us)) {
+        if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &baseline_stat, best_us * 3, &us)) {
           continue;
         }
         if (us < best_us) {

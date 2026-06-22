@@ -2068,7 +2068,7 @@ fn u32  jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words);
 // Time `n_runs` back-to-back fires of `kid`; return min wallclock
 // us.  Used by autotune internally + exposed via LibraryLink for
 // the WL TKernelVariants surface.
-fn u64 kernel_bench_us(u32 kid, u32 n_runs);
+fn u64 kernel_bench_us(u32 kid, u32 n_runs, u64 early_stop);
 
 // Bench every proposer candidate (slot 0 = baseline, no opts) and
 // write per-variant (KOpt, us) into out_opts/out_us.  Returns the
