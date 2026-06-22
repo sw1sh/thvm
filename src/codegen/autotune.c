@@ -1440,27 +1440,38 @@ static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
 // (winner beat baseline).
 // Does this kernel qualify for tune-and-apply under the active scope?
 //
-// Default (THVM_POSTTUNE_SCOPE unset): ALL captured kernels (attention / matmul
-// / norm / elementwise / conv2d / reduce).  This is now safe because the drain
-// runs BEFORE jit_capture_finalize (jit/capture.c jit_capture_end_common, the
-// tinygrad jit_lower ordering: compile_linear beam BEFORE graph_split_rewrite):
-// the winner is baked + its dispatch ROUTE recorded before finalize computes the
-// metal_graph_unsafe / metal_graph_recycle ICB plan, so finalize sees the TILED
-// route and takes the TILE-exempt ICB path.  The 2-image batch then replays the
-// tuned runner correctly (no stale untiled binding) -- DiT/attention included.
+// Default (THVM_POSTTUNE_SCOPE unset): conv2d-flat / reduce-unroll kernels only.
 //
-// THVM_POSTTUNE_SCOPE=conv restores the old narrow scope (conv2d-flat /
-// reduce-unroll only), kept as a measurement opt-out: it was the only batch-safe
-// scope under the prior post-finalize re-bake ordering, when re-baking a matmul
-// to a tile diverged the batch because finalize had already planned the ICB on
-// the untiled route.  THVM_POSTTUNE_SCOPE=all is an explicit alias for the
-// (now-default) full scope.
+// The ORDERING is now correct -- the drain runs BEFORE jit_capture_finalize
+// (jit/capture.c jit_capture_end_common, the tinygrad jit_lower order:
+// compile_linear beam BEFORE graph_split_rewrite), so finalize plans the ICB on
+// the tuned kernels' dispatch route, NOT the stale untiled route.  That removed
+// the ordering-induced batch divergence the prior post-finalize re-bake suffered.
+//
+// A SEPARATE, still-open codegen bug blocks widening to all kernels: applying a
+// tuned LOCAL/UPCAST tile to an elementwise/norm kernel produces output that is
+// correct via the per-op dispatch path (single image: finite under
+// THVM_METAL_GRAPH_REPLAY=0) but NaN via the ICB-batched replay, AND NaN for the
+// 2-image batch even per-op.  The divergence is in the Metal tile renderer / ICB
+// interaction for tuned tiles (a downstream ICB-batched consumer reads a
+// LOCAL-retiled producer's output wrong; the batched shape mis-tiles), not in
+// the ordering.  Until that is fixed, full-scope apply is unsafe, so the default
+// stays conv2d/reduce -- the kernels whose tuned tile replays correctly through
+// both the ICB and the batch.  Empirically the conv2d kernels find no winning
+// tile on the FLUX VAE (already TC), so this is correctness-complete but not a
+// FLUX warm-time win; the DiT matmuls (the dominant cost) are already optimally
+// TC-tiled by hand_opts + render-time uop_recognise_tc and are NOT improved by
+// the autotune -- see propose.c (matmul kernels decline to propose).
+//
+// THVM_POSTTUNE_SCOPE=all re-bakes every tuned kernel -- a measurement / bug-fix
+// knob for working ON the renderer/ICB divergence; it currently NaNs the FLUX
+// ICB/batch replay.  The search (cache write) runs regardless of scope.
 static int kautotune_posttune_scope_allows(KernelEntry const *ke) {
-  // -1 unknown, 0 = conv/reduce only, 1 = all (default).
+  // -1 unknown, 0 = conv/reduce only (default + "conv"), 1 = all.
   static int scope = -1;
   if (scope < 0) {
     char const *e = getenv("THVM_POSTTUNE_SCOPE");
-    scope = (e != NULL && strcmp(e, "conv") == 0) ? 0 : 1;
+    scope = (e != NULL && strcmp(e, "all") == 0) ? 1 : 0;
   }
   if (scope) {
     return 1;

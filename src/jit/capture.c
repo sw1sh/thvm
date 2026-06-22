@@ -435,12 +435,13 @@ fn u32 jit_capture_begin(void) {
 // the metal_graph_unsafe / metal_graph_recycle ICB-eligibility, which read each
 // kernel's dispatch ROUTE via cg_kernel_dispatch_kind).  So the autotune drain
 // must run BEFORE finalize -- otherwise finalize plans the ICB on the UNTILED
-// route and a later re-bake to a TILED kernel diverges the 2-image batch (a
-// strided-input matmul that finalize marked DAG-path/ICB-unsafe becomes a TILE
-// kernel that bakes the view strides in-kernel; the stale plan binds it wrong).
+// route and the re-baked TILED kernel replays against a stale plan (the prior
+// post-finalize re-bake's ordering-induced divergence; this reorder removes it).
 // Tuning first lets finalize see the tiled route and take the TILE-exempt ICB
-// path, so ALL kernels (DiT/attention/matmul included) tune AND the batch
-// replays correctly.
+// path.  (A SEPARATE, open Metal tile-renderer / ICB divergence still blocks
+// applying tuned LOCAL/UPCAST tiles to non-conv kernels -- see
+// kautotune_posttune_scope_allows -- so the apply scope stays conv/reduce; the
+// ordering fix is the prerequisite that unblocks widening once that is fixed.)
 //
 // The span closes before the drain: the drain's iso-buffer bench fires dispatch
 // + may GC, and doing that while the span is open pollutes the shared loc->tid /
@@ -2104,9 +2105,9 @@ static void jit_capture_autotune_finalized(u32 slot) {
   // winner to the autotune disk cache under the capture-phase key regardless
   // of scope.  APPLY (THVM_POSTTUNE_APPLY=1) bakes the winner onto the captured
   // KernelEntry BEFORE finalize; scoped per kernel in kautotune_posttune_drain
-  // (ALL kernels by default, since the tune now precedes finalize: the ICB plan
-  // sees the tiled route, so the DiT/attention/matmul kernels tune AND the
-  // 2-image batch replays the tuned runner without divergence).
+  // (conv2d/reduce by default -- the kernels whose tuned tile replays correctly
+  // through the ICB AND the batch; THVM_POSTTUNE_SCOPE=all widens it but hits an
+  // open Metal tile-renderer / ICB divergence on tuned LOCAL/UPCAST tiles).
   {
     char const *on = getenv("THVM_POSTTUNE");
     if (on == NULL || on[0] != '1') {
