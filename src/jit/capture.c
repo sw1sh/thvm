@@ -578,6 +578,286 @@ static u32 jit_capture_kernel_op_count(KernelEntry const *ke) {
   return jit_capture_dag_op_count_walk(ke->cached_lift.store_root, 0);
 }
 
+// === Stable structural content hash of a lifted-DAG (Merkle-style) ===
+//
+// The Metal PSO cache and the in-memory tile-JIT cache key a kernel by
+// its lifted UOp DAG.  Keying on the raw heap location of store_root is
+// WRONG: hash-consing/GC relocates DAG nodes mid-session (the autotune
+// BEAM search churns the shared heap), so a captured kernel's root loc
+// silently changes and warm replay misses or collides on the PSO cache
+// -> recompiles the wrong / no PSO -> non-finite output.
+//
+// This computes a GC-invariant content hash: hash(node) =
+// mix(op, dtype, payload values, then hash of each child), folded
+// recursively over the DAG.  Two structurally-identical kernels hash
+// equal (they SHOULD share a PSO); the danger is two DIFFERENT kernels
+// hashing equal (a real collision -> wrong PSO -> silent wrong
+// results), so we cover everything that affects the generated MSL:
+// op codes, leaf const bits + dtype, RANGE axis/type/extent (incl.
+// kvar-bound extents), movement-op dims/perms/pads, REDUCE kind+axes,
+// OPT kind+factor, CAST/BITCAST/COPY payload, buffer scope/dtype/shape,
+// and child structure recursively.
+//
+// Per-call memoization (loc-keyed, generation-stamped) keeps it linear
+// over the DAG even when shared subgraphs are referenced many times.
+
+#define UOP_CONTENT_HASH_CACHE_CAP 8192    // power of two, > deepest DAG
+typedef struct {
+  u32 gen;
+  u64 loc;
+  u64 hash;
+} UopContentHashSlot;
+static UopContentHashSlot UOP_CONTENT_HASH_CACHE[UOP_CONTENT_HASH_CACHE_CAP];
+static u32 UOP_CONTENT_HASH_GEN = 0;
+
+static inline u64 uop_content_mix(u64 h, u64 v) {
+  h ^= v;
+  h *= 0x100000001b3ULL;
+  return h;
+}
+
+static inline u32 uop_content_cache_hash(u64 loc) {
+  loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
+  loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
+  loc ^= loc >> 33;
+  return (u32)loc & (UOP_CONTENT_HASH_CACHE_CAP - 1);
+}
+
+static int uop_content_cache_lookup(u64 loc, u64 *out) {
+  u32 h = uop_content_cache_hash(loc);
+  for (u32 probe = 0; probe < UOP_CONTENT_HASH_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (UOP_CONTENT_HASH_CACHE_CAP - 1);
+    UopContentHashSlot *s = &UOP_CONTENT_HASH_CACHE[i];
+    if (s->gen != UOP_CONTENT_HASH_GEN) return 0;     // empty for this gen
+    if (s->loc == loc) { *out = s->hash; return 1; }
+  }
+  return 0;
+}
+
+static void uop_content_cache_insert(u64 loc, u64 hash) {
+  u32 h = uop_content_cache_hash(loc);
+  for (u32 probe = 0; probe < UOP_CONTENT_HASH_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (UOP_CONTENT_HASH_CACHE_CAP - 1);
+    UopContentHashSlot *s = &UOP_CONTENT_HASH_CACHE[i];
+    if (s->gen != UOP_CONTENT_HASH_GEN || s->loc == loc) {
+      s->gen = UOP_CONTENT_HASH_GEN;
+      s->loc = loc;
+      s->hash = hash;
+      return;
+    }
+  }
+  // table full -- caller falls back to recomputing this node (correct,
+  // just slower); never wrong.
+}
+
+// Hash a non-UOP term (NUM / TEN / leaf) by its identity-bearing bits:
+// tag + ext (dtype/opcode) + val (raw bits / id).  These are
+// GC-stable: NUM bits, TEN tensor-id, etc. don't move under GC.
+static inline u64 uop_content_hash_atom(u64 h, Term t) {
+  h = uop_content_mix(h, (u64)term_tag(t));
+  h = uop_content_mix(h, (u64)term_ext(t));
+  h = uop_content_mix(h, (u64)term_val(t));
+  return h;
+}
+
+static u64 uop_content_hash_rec(Term t, u32 depth) {
+  if (depth > 512) return 0xDEADBEEFULL;          // pathological guard
+  if (term_tag(t) != TAG_UOP) {
+    // Non-UOP leaf reached via a child slot (NUM payload, TEN handle,
+    // ERA sentinel, ...).  Hash its identity-bearing bits.
+    return uop_content_hash_atom(0xcbf29ce484222325ULL, t);
+  }
+
+  u64 loc = term_val(t);
+  u64 cached;
+  if (uop_content_cache_lookup(loc, &cached)) return cached;
+
+  u32 op = term_ext(t);
+  // Seed with the opcode AND the term ext (dtype lives in ext for some
+  // ops; opcode == ext for UOP, so this also seeds the op).
+  u64 h = 0xcbf29ce484222325ULL;
+  h = uop_content_mix(h, 0x55554F50ULL);          // "UOP" domain tag
+  h = uop_content_mix(h, (u64)op);
+
+  switch (op) {
+    // --- leaves: hash all distinguishing NUM payload directly -------
+    case UOP_CONST: {
+      // [NUM(bits)]; ext of the wrapping NUM carries the dtype.
+      Term num = heap_read(loc + 0);
+      h = uop_content_hash_atom(h, num);
+      break;
+    }
+    case UOP_VCONST: {
+      h = uop_content_mix(h, (u64)uop_vconst_dtype(t));
+      u32 n = uop_vconst_n(t);
+      h = uop_content_mix(h, (u64)n);
+      for (u32 i = 0; i < n; i++) {
+        h = uop_content_mix(h, (u64)uop_vconst_bits(t, i));
+      }
+      break;
+    }
+    case UOP_RANGE: {
+      // [NUM(axis_id), NUM(axis_type), NUM(extent)].  The extent may be
+      // a kvar-bound token (kvar_extent_is_var); we hash the raw extent
+      // value, which is the stable token, so symbolic kernels at
+      // different BS still hash identically (the var id is in the token).
+      h = uop_content_mix(h, (u64)uop_range_axis_id(t));
+      h = uop_content_mix(h, (u64)uop_range_axis_type(t));
+      h = uop_content_mix(h, (u64)uop_range_extent(t));
+      break;
+    }
+    case UOP_BUFFER: {
+      h = uop_content_mix(h, (u64)uop_buffer_scope(t));
+      h = uop_content_mix(h, (u64)uop_buffer_dtype(t));
+      u32 ndim = uop_buffer_ndim(t);
+      h = uop_content_mix(h, (u64)ndim);
+      for (u32 d = 0; d < ndim; d++) {
+        h = uop_content_mix(h, (u64)uop_buffer_dim(t, d));
+      }
+      break;
+    }
+    case UOP_PLACEHOLDER: {
+      h = uop_content_mix(h, (u64)uop_placeholder_dtype(t));
+      h = uop_content_mix(h, (u64)uop_placeholder_acc_id(t));
+      break;
+    }
+    case UOP_INVALID:
+      break;                                        // [NUM(0)] sentinel
+
+    // --- opt directive: kind + factor + the wrapped target ----------
+    case UOP_OPT: {
+      h = uop_content_mix(h, (u64)uop_opt_kind(t));
+      h = uop_content_mix(h, (u64)uop_opt_factor(t));
+      h = uop_content_mix(h, uop_content_hash_rec(uop_opt_target(t), depth + 1));
+      break;
+    }
+
+    // --- reduce: kind + each axis + the reduced source --------------
+    case UOP_REDUCE: {
+      h = uop_content_mix(h, (u64)uop_reduce_kind(t));
+      u32 n_axes = uop_reduce_n_axes(t);
+      h = uop_content_mix(h, (u64)n_axes);
+      for (u32 i = 0; i < n_axes; i++) {
+        h = uop_content_mix(h, (u64)uop_reduce_axis(t, i));
+      }
+      h = uop_content_mix(h, uop_content_hash_rec(uop_reduce_src(t), depth + 1));
+      break;
+    }
+
+    // --- bufferize: addrspace/removable/n_ranges + value + ranges ---
+    case UOP_BUFFERIZE: {
+      h = uop_content_mix(h, (u64)uop_bufferize_addrspace(t));
+      // removable lives at heap loc+2; hash it raw for completeness.
+      h = uop_content_hash_atom(h, heap_read(loc + 2));
+      u32 nr = uop_bufferize_n_ranges(t);
+      h = uop_content_mix(h, (u64)nr);
+      h = uop_content_mix(h,
+            uop_content_hash_rec(uop_bufferize_value(t), depth + 1));
+      for (u32 i = 0; i < nr; i++) {
+        h = uop_content_mix(h,
+              uop_content_hash_rec(uop_bufferize_range_at(t, i), depth + 1));
+      }
+      break;
+    }
+
+    // --- variadic STACK / END ---------------------------------------
+    case UOP_STACK: {
+      u32 n = (u32)term_val(heap_read(loc + 0));
+      h = uop_content_mix(h, (u64)n);
+      for (u32 i = 0; i < n; i++) {
+        h = uop_content_mix(h,
+              uop_content_hash_rec(uop_stack_src(t, i), depth + 1));
+      }
+      break;
+    }
+    case UOP_END: {
+      u32 n = (u32)term_val(heap_read(loc + 0));
+      h = uop_content_mix(h, (u64)n);
+      for (u32 i = 0; i < n; i++) {
+        h = uop_content_mix(h,
+              uop_content_hash_rec(heap_read(loc + 1 + i), depth + 1));
+      }
+      break;
+    }
+
+    // --- movement ops [src, NUM(ndim), payload NUMs...] -------------
+    // RESHAPE/EXPAND/PERMUTE carry `ndim` payload NUMs; PAD/SHRINK
+    // carry `2*ndim`.  We read ndim from loc+1 and hash the right span.
+    case UOP_RESHAPE: case UOP_EXPAND: case UOP_PERMUTE:
+    case UOP_PAD:     case UOP_SHRINK: {
+      h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 0), depth + 1));
+      u32 ndim = (u32)term_val(heap_read(loc + 1));
+      u32 npay = (op == UOP_PAD || op == UOP_SHRINK) ? 2 * ndim : ndim;
+      if (ndim > MAX_DIM) ndim = MAX_DIM, npay = (op == UOP_PAD || op == UOP_SHRINK) ? 2 * MAX_DIM : MAX_DIM;
+      h = uop_content_mix(h, (u64)ndim);
+      for (u32 i = 0; i < npay; i++) {
+        h = uop_content_hash_atom(h, heap_read(loc + 2 + i));
+      }
+      break;
+    }
+
+    // --- single-source ops with one trailing payload NUM ------------
+    // FLIP [src, NUM(mask)]; CAST/BITCAST [src, NUM(dst_dtype)];
+    // COPY [src, NUM(device+1)].
+    case UOP_FLIP: case UOP_CAST: case UOP_BITCAST: case UOP_COPY: {
+      h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 0), depth + 1));
+      h = uop_content_hash_atom(h, heap_read(loc + 1));
+      break;
+    }
+
+    // --- expander wrappers: one src child + NUM payload -------------
+    case UOP_UNROLL: {
+      h = uop_content_mix(h, (u64)uop_unroll_n_args(t));
+      h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 0), depth + 1));
+      break;
+    }
+    case UOP_CONTRACT: {
+      u32 n = uop_contract_n_args(t);
+      h = uop_content_mix(h, (u64)n);
+      for (u32 i = 0; i < n; i++) {
+        h = uop_content_mix(h, (u64)uop_contract_axis_id(t, i));
+        h = uop_content_mix(h, (u64)uop_contract_factor(t, i));
+      }
+      h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 0), depth + 1));
+      break;
+    }
+    case UOP_GEP: {
+      u32 n = uop_gep_n_idx(t);
+      h = uop_content_mix(h, (u64)n);
+      for (u32 i = 0; i < n; i++) {
+        h = uop_content_mix(h, (u64)uop_gep_idx(t, i));
+      }
+      h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 0), depth + 1));
+      break;
+    }
+
+    // --- generic fixed-arity ops: recurse every Term child ----------
+    // ADD/MUL/CMP/NEG/RECIP/EXP2/LOG2/SQRT/LOAD/DETACH, the integer ALU
+    // (IADD..ISHR/ILT), INDEX_E, IWHERE, STORE, ASSIGN, AFTER, ...
+    default: {
+      u8 ar = uop_arity((u8)op);
+      for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+        h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + i), depth + 1));
+      }
+      break;
+    }
+  }
+
+  uop_content_cache_insert(loc, h);
+  return h;
+}
+
+// Public entry: GC-invariant structural content hash of the UOp DAG
+// rooted at `root`.  Returns 0 for an empty root.  Bumps the per-call
+// memo generation so prior cache entries become invisible without a
+// memset (the heap may have been relocated between calls).
+u64 uop_dag_content_hash(Term root) {
+  if (root == 0) return 0;
+  UOP_CONTENT_HASH_GEN++;
+  if (UOP_CONTENT_HASH_GEN == 0) UOP_CONTENT_HASH_GEN = 1;  // skip sentinel
+  return uop_content_hash_rec(root, 0);
+}
+
 // Export the capture sequence as a flat table for WL-side profiling.
 // Header: {n_ops, row_width}.  Row width is JIT_CAPTURE_EXPORT_ROW_WIDTH:
 // {kind, kid, dispatch_kind, n_inputs, out_buf_id, input0, input1,
