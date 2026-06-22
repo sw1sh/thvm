@@ -19,7 +19,7 @@ FLOOR_PAGES=$(( FLOOR_GB * 1073741824 / PAGE ))
 
 avail_pages() {  # free + inactive + speculative + purgeable = reclaimable/available
   vm_stat | awk '
-    /Pages free/{f=$3} /Pages inactive/{i=$4} /Pages speculative/{s=$3} /Pages purgeable/{p=$3}
+    /Pages free/{f=$3} /Pages inactive/{i=$3} /Pages speculative/{s=$3} /Pages purgeable/{p=$3}
     END{gsub(/\./,"",f);gsub(/\./,"",i);gsub(/\./,"",s);gsub(/\./,"",p); print f+i+s+p}'
 }
 
