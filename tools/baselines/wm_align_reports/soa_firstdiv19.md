@@ -147,3 +147,96 @@ thvm emits P,P,Q,Q,Q,P,Q (P = `(x.(x.x)).y # y.y`, Q = square-of-`(x.y)` forms).
 The REVFACE_GROUP single-shape-adjacency rule does not apply; this is a
 different intra-batch emission-grouping tie (WM groups by overlap position, not
 reduced shape). A separate mechanism, deferred.
+
+## FAITHFUL CP-FORMATION FIFO PORT (THVM_ATP_FORMATION_FIFO, 2026-06-22)
+The user directed the no-compromise faithful route: port WM's CPNr FIFO
+lineage + subsumption/re-derivation age so the surviving copy of a multiply-
+formed term carries WM's age WITHOUT per-shape detection, superseding the
+proxy role of CubeArrival/PosGroup/RevfaceGroup. Full source characterization
++ the port + the empirical verdict:
+
+### WM's actual mechanism (source-pinned)
+WM stamps each surviving critical pair a FIFO age `w2 = ++CPNr` AT THE MOMENT
+it is classified/inserted (CLAS/NewClassification.c:325 `C_Classify`,
+:424 `C_CG_Classify`; the global counter `CPNr` at :220). CPs are inserted
+ONE OVERLAP AT A TIME by `recentCPinsert` (INF/KPVerwaltung.c:466-542) from
+`KPV_GebildetesKPBehandelnMitVater/Mutter` (:597-656), each called per overlap
+as `U1_KPsBildenZuRegel` (INF/Unifikation1.c:1486-1553) + Delta* (:694-802)
+stream overlaps. So **w2 = the streaming order of overlaps that survive on-
+generation treatment** (`KPBehandelt` :564-595 = `-kg r` rules-only normalize +
+GZ_ACVerzichtbar perm-drop + SS_TermpaarSubsummiertVonGM subsume). There is NO
+batch sort and NO de-duplication at formation: the same term from a different
+overlap pair gets a FRESH, LATER w2 (multiplicity preserved). Within a
+position WM runs ONE scan over the RULE tree then ONE over the EQUATION tree
+(:1527-1547), so every rule partner (discrimination-tree leaf-arrival order)
+precedes every equation partner. Re-classification preserves w2
+(NewClassification.c:435 `C_ReClassify`, "/* w2 wird nicht geaendert */" =
+w2 is not changed; KPVerwaltung.c:1201 AP_generic). Re-derivation (a rule
+killed by interreduction re-entering its reduced form) gets a fresh w2
+(KPVerwaltung.c:658-695 `KPV_IROpferBehandeln` -> recentCPinsert -> ++CPNr).
+Orphan murder discards a CP whose parent died (KPVerwaltung.c:1164 Waisenmord,
+:702-723 selectNonOrphan).
+
+### thvm port (file:line)
+The CPNr LIFECYCLE was already a faithful port (verified this session):
+`cp_seq = ++cp_seq_next` at formation (src/atp/_.c:7464, 7725 = w2=++CPNr);
+IR re-classification PRESERVES cp_seq (src/atp/_.c:12147, comment cites
+"w2 wird nicht geaendert"); demote-drain re-derivation re-STAMPS a fresh
+cp_seq (atp_wm_demote_drain). On-generation drop = atp_push_cps_traced's
+rules-only normalize + perm-subsume + rule-subsume (all ON in the WALDMEISTER
+preset). Selection breaks weight ties by min cp_seq (atp_cp_before:7345).
+The NEW gate THVM_ATP_FORMATION_FIFO (struct src/thvm.h use_formation_fifo;
+setter src/atp/_.c thvm_atp_set_use_formation_fifo; env in
+tests/test_atp_wolfram_bench.c; WL Method "FormationFifo" via ATP.wl
+atpFormationFifoOpt + ATP_ProofGraph.wl cEngineProof param + thvmlink_atp.c
+args[61]) orders each batch STRICTLY by the raw combined-scan arrival key
+(atp_wmo_rank's k3 = wmo_tops_rank's single-DFS arrival, tree-before-equation)
+and makes the four k3-arrival re-key passes (LeafTiebreak/RevfaceGroup/
+PosGroup/CubeArrival) NO-OPS (each guard `&& !s->use_formation_fifo`).
+
+### EMPIRICAL VERDICT (measured, banked /tmp/soa_align/wm.txt, align.py)
+  WM-only:                 firstdiv=19    (baseline, unchanged)
+  all-9 knobs (FF off):    firstdiv=1505  (baseline, unchanged)
+  FF-on (4 k3 knobs OFF):  firstdiv=290
+  FF-on + 4 k3 knobs ON:   firstdiv=290   (identical -> proves FF makes them
+                                           no-ops; first 289 CPSEL md5-identical)
+The faithful combined-scan FIFO reaches selection 289 ON ITS OWN -- subsuming
+LeafTiebreak's reach (290) -- then PLATEAUS at 290. It does NOT advance to
+1505. Reason (root-caused, not a hunch): the CPNr lifecycle is already
+faithful; the residual at 290+ is NOT a FIFO/age signal but thvm's RUNTIME
+DISCRIMINATION-TREE LEAF LAYOUT structurally diverging from WM's. thvm's
+wmo_tops_rank already runs WM's combined-scan DFS (exact-symbol child first,
+then var children ascending symbol-code = WM's SO_forSymboleAufwaerts, then
+jump exits; leaf chains newest-first = WM RegelHinzufuegen LIFO; leaf list
+ascending depth) -- a faithful port of Delta* + BO_ObjektEinfuegen. But for
+this fact set two partner equations (e.g. soa eqn2 vs eqn7 at rule19's
+overlap, the firstdiv=1505 double-cube pair) land at DIFFERENT leaves whose
+DFS-arrival order disagrees with WM's actual run, because the two engines
+build structurally different tries from different insertion/canonicalization
+histories. The per-shape knobs (CubeArrival etc.) are therefore NOT proxies
+for a missing FIFO signal -- they are CORRECTIONS for thvm's trie-layout
+divergence, detected by reduced shape. The 290 divergence (forward vs reverse
+face of the same re-derived equation) is the same class REVFACE_GROUP patches.
+
+### REMAINING STEPS to close the class fully (faithful, no scoped knobs)
+Closing firstdiv past 1505 via the faithful route requires byte-reproducing
+WM's RUNTIME discrimination-tree LEAF ORDER at each selection (not just the
+insertion algorithm, which is ported) so wmo_tops_rank's DFS reaches partner
+leaves in WM's exact order. Concretely: (a) dump WM's leaf-arrival order for
+rule19's overlap batch (WM_HEAPDUMP / a new Delta*-arrival trace in
+Unifikation1.c) vs thvm's wmo_tops_rank d.out[] for the same query subterm,
+find the first leaf-order inversion; (b) trace it to the insertion event that
+placed eqn2's vs eqn7's leaf -- likely a canonicalization or jump-split order
+difference in wmo_tree_insert vs BO_ObjektEinfuegen/BlattAufgeteilt; (c) port
+that exact insertion-order detail. This is a deep indexing-subsystem port with
+high regression risk to the 73 aligned theorems; FORMATION_FIFO is the gated,
+byte-identical-OFF foundation it would build on (it isolates the trie-layout
+divergence from the now-confirmed-faithful CPNr lifecycle).
+
+### GATES (all hold)
+bin/test_atp 136232/136232 (knob OFF byte-identical); all-9 firstdiv=1505
+unchanged; WM-only firstdiv=19 unchanged; FF makes the k3 knobs no-ops
+(290==290, first-289 CPSEL md5-identical); atp.wlt 64/2 (the 2 are the
+documented pre-existing failures, no new regression). WL Method
+"FormationFifo" parses to config-vector entry 1/0 (validated via
+atpFormationFifoOpt + atpParseMethod). DEFAULT OFF everywhere.

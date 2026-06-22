@@ -974,6 +974,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // off (default).  Advances soa firstdiv past 1320.
   mint wm_cube_arrival = MArgument_getInteger(args[60]);
   thvm_atp_set_use_cube_arrival(atp, (u8)(wm_cube_arrival != 0));
+  // Method -> {... "FormationFifo" -> True}: Waldmeister CP-formation FIFO
+  // lineage -- the faithful combined-superposition-scan emission order the
+  // per-shape k3-arrival knobs (RevfaceGroup / PosGroup / CubeArrival /
+  // LeafTiebreak) are proxies for.  Orders each batch STRICTLY by WM's
+  // single-scan arrival (tree before equation), stamping cp_seq = WM's
+  // w2 = ++CPNr, and makes those four k3-arrival passes no-ops.  args[61];
+  // 0 = off (default).
+  mint wm_formation_fifo = MArgument_getInteger(args[61]);
+  thvm_atp_set_use_formation_fifo(atp, (u8)(wm_formation_fifo != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any

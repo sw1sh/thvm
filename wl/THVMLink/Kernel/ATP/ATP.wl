@@ -69,7 +69,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"CommDefer\", \"CommReage\", \"CommDropDup\", \"LeafTiebreak\", \"RevfaceGroup\", \"PosGroup\", \"CubeArrival\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"CommDefer\", \"CommReage\", \"CommDropDup\", \"LeafTiebreak\", \"RevfaceGroup\", \"PosGroup\", \"CubeArrival\", \"FormationFifo\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 GeneralUtilities`SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -375,6 +375,14 @@ $atpRunProofFn := $atpRunProofFn = load[
         predecessor so the adjacent pair emits in WM's `ue (19,-7)`
         before `ue (19,-2)` order).  OFF by default; advances soa
         firstdiv past 1320 *)
+     Integer,
+     (* args[61] = Waldmeister CP-formation FIFO lineage (Method
+        "FormationFifo"; the faithful combined-superposition-scan
+        emission order the per-shape k3-arrival knobs RevfaceGroup /
+        PosGroup / CubeArrival / LeafTiebreak are proxies for -- orders
+        each batch STRICTLY by WM's single-scan arrival, tree before
+        equation, stamping cp_seq = WM's w2 = ++CPNr, and makes those
+        four k3-arrival passes no-ops).  OFF by default *)
      Integer},
     "NumericArray"
 ]
@@ -2626,6 +2634,22 @@ atpCubeArrivalOpt[o_Association] :=
     Switch[Lookup[o, "CubeArrival", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
+(* "FormationFifo" -> True | False: Waldmeister CP-formation FIFO lineage.
+   The faithful mechanism the per-shape k3-arrival knobs (RevfaceGroup /
+   PosGroup / CubeArrival / LeafTiebreak) are proxies for.  WM stamps each
+   surviving critical pair w2 = ++CPNr at insertion (NewClassification.c
+   C_Classify), strictly in its single combined-superposition-scan emission
+   order: per overlap position every RULE-tree partner (discrimination-tree
+   leaf-arrival order) precedes every EQUATION-tree partner.  thvm
+   reconstructs that as the combined-DFS arrival field of its emission key;
+   ON, each batch sorts STRICTLY by that raw key and the four k3-arrival
+   re-key passes become no-ops, so a multiply-formed term's surviving copy
+   inherits WM's CPNr age WITHOUT per-shape detection.  False/Automatic =
+   off. *)
+atpFormationFifoOpt[o_Association] :=
+    Switch[Lookup[o, "FormationFifo", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+
 (* True iff at least one axiom in `axParts` (atpAxiomParts triples
    {vars, lhs, rhs}) has a side whose variables are not a subset of
    the other side -- i.e. a free-on-one-side variable that the
@@ -2951,7 +2975,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpCommDeferOpt[o], atpCommReageOpt[o],
          atpCommDropDupOpt[o], atpLeafTiebreakOpt[o],
          atpRevfaceGroupOpt[o], atpPosGroupOpt[o],
-         atpCubeArrivalOpt[o]}
+         atpCubeArrivalOpt[o], atpFormationFifoOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];

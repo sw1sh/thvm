@@ -9170,6 +9170,20 @@ fn void thvm_atp_set_use_cube_arrival(AtpState *s, u8 on) {
   s->use_cube_arrival = on ? 1u : 0u;
 }
 
+// Waldmeister CP-formation FIFO lineage (see AtpState.use_formation_fifo):
+// order each selected fact's CP batch STRICTLY by WM's single combined-
+// superposition-scan arrival -- per overlap position, every rule-tree partner
+// (in discrimination-tree leaf-arrival order, k3) precedes every equation-tree
+// partner (likewise) -- and stamp cp_seq in that stream, so the surviving copy
+// of a multiply-formed term inherits WM's CPNr age (NewClassification.c
+// C_Classify:325 w2=++CPNr <- recentCPinsert) without the per-shape k3-arrival
+// re-key passes.  The proxy knobs (revface_group/posgroup/cube_arrival) become
+// no-ops when this is on.  DEFAULT OFF.
+fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_formation_fifo = on ? 1u : 0u;
+}
+
 // Push-time queue-vs-queue subsumption gate (no WM counterpart; see
 // AtpState.use_queue_subsume in thvm.h).  Default ON = the historical
 // thvm engine; the "Waldmeister"* presets turn it OFF.
@@ -16250,7 +16264,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // (firstdiv 290 -> trace end); the byte-identical 1..289 prefix is
     // preserved (the early-batch fires re-age CPs WM already agrees on, so the
     // selection content is unchanged there).
-    if (s->use_leaf_tiebreak) {
+    if (s->use_leaf_tiebreak && !s->use_formation_fifo) {
       for (u32 kb = 0; kb < n_big; kb++) {
         u32 jb = (big[kb].i == f) ? big[kb].j : big[kb].i;
         if (s->r_orient[jb]) continue;                 // equation partner only
@@ -16298,7 +16312,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // alpha-match (orientation-insensitive) -- never a generic equal-weight
     // reorder.  Advances soa firstdiv 778 -> 966 (clears multiple w=209/w=189
     // Cshape clusters); see tools/baselines/wm_align_reports/soa.txt.
-    if (s->use_revface_group) {
+    if (s->use_revface_group && !s->use_formation_fifo) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
       for (u32 kb = 0; kb < n_big; kb++) {
         if (big[kb].i != f) continue;                // D-phase tops, outer = f
@@ -16359,7 +16373,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // cluster.  Scoped HARD to the A phase, identical group prefix, the
     // `(x.x).y = (x.y).y` permutation reverse face, and a strictly-higher
     // raw-arrival same-group cube CP -- never a generic equal-weight reorder.
-    if (s->use_posgroup) {
+    if (s->use_posgroup && !s->use_formation_fifo) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);     // phase | k1 | k2 bits
       for (u32 kb = 0; kb < n_big; kb++) {
         if (big[kb].i != f || big[kb].j == f) continue;
@@ -16409,7 +16423,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // (phase|k1|k2), and the anchor strictly earlier-keyed -- never a generic
     // equal-weight reorder.  OFF byte-identical; the prior-8-knobs 1..1319
     // prefix is preserved.  Advances soa firstdiv 1320 -> beyond.
-    if (s->use_cube_arrival) {
+    if (s->use_cube_arrival && !s->use_formation_fifo) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);     // phase | k1 | k2 bits
       for (u32 kb = 0; kb < n_big; kb++) {
         if (big[kb].i != f || big[kb].j == f) continue;
