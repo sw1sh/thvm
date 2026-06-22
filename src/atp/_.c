@@ -462,7 +462,8 @@ static void atp_wmo_free(struct AtpWmOrder *w);
 static void atp_wmo_insert_fact(AtpState *s, u32 slot);
 static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived);
 static void atp_wmo_remove_trace(AtpState *s, u32 trace);
-static u32  atp_wmo_victim_drain_key(AtpState *s, u32 trace);
+static u32  atp_wmo_victim_drain_key(AtpState *s, u32 trace,
+                                     u8 reduced_thvm_side);
 static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t);
 static u64  atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
                          const CriticalPair *cp);
@@ -9190,6 +9191,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_posgroup         = 1u;
     s->use_cube_arrival     = 1u;
     s->use_drain_chainpos   = 1u;
+    s->use_drain_revface    = 1u;
   }
 }
 
@@ -9202,6 +9204,15 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_drain_chainpos(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_drain_chainpos = on ? 1u : 0u;
+}
+
+// WM GMInterred reducible-face drain order (see AtpState.use_drain_revface):
+// rank an IR-victim by the leaf-list position of the face the new rule
+// actually reduced (the GMInterred BK_ReferenzDurchlauf pull face), not its
+// distinguished face.  DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_drain_revface(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_drain_revface = on ? 1u : 0u;
 }
 
 // Push-time queue-vs-queue subsumption gate (no WM counterpart; see
@@ -12284,9 +12295,10 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // untouched pair).
       if (s->use_wm_demote) {
         // Capture the WM drain-order key while the victim is still in the
-        // wmo tree (the atp_wmo_remove_trace below evicts it).
+        // wmo tree (the atp_wmo_remove_trace below evicts it).  The LHS
+        // face (thvm side 0) is the one the new rule reduced here.
         u32 wmo_key = s->use_emission_order
-            ? atp_wmo_victim_drain_key(s, s->r_trace[i]) : 0u;
+            ? atp_wmo_victim_drain_key(s, s->r_trace[i], 0u) : 0u;
         atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
       } else {
         atp_add_equation_simplified(s, reduced, old_rhs, simplify_parent);
@@ -12546,8 +12558,9 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         // instead and drained after CP generation (WM IR buffer).
         u32 simplify_parent = s->r_trace[j];
         if (s->use_wm_demote) {
+          // bwd_demod reduced the LHS face (thvm side 0).
           u32 wmo_key = s->use_emission_order
-              ? atp_wmo_victim_drain_key(s, s->r_trace[j]) : 0u;
+              ? atp_wmo_victim_drain_key(s, s->r_trace[j], 0u) : 0u;
           atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
         } else {
           atp_add_equation_simplified(s, reduced_lhs, reduced,
@@ -12600,8 +12613,9 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         // enter the PU_REPuffer untouched, Interreduktion.c:290, and
         // drain after CP generation via IR_PufferAuslesen).
         if (s->use_wm_demote) {
+          // The RHS face (thvm side 1) is the reducible one here.
           u32 wmo_key = s->use_emission_order
-              ? atp_wmo_victim_drain_key(s, s->r_trace[j]) : 0u;
+              ? atp_wmo_victim_drain_key(s, s->r_trace[j], 1u) : 0u;
           atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
         } else {
           atp_add_equation_simplified(s, old_lhs, reduced, simplify_parent);

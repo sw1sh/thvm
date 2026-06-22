@@ -1,5 +1,56 @@
 soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv 126 -> 288 -> 290
 
+## ADVANCED 2026-06-22: THVM_ATP_DRAIN_REVFACE -- GMInterred reducible-face drain order
+
+Atop FormationFifo+DRAIN_CHAINPOS (firstdiv=1558), the residual at pick-1558 was
+the cube-mirror pair (thvm seq 3706/3707, WM `ue (-14,0)`/`ue (-18,0)`): WM picks
+`-14` first, thvm picked `-18` first.  The 1505-era diagnosis framed this as a
+within-pass chain-order transposition that DRAIN_CHAINPOS could not capture; the
+real root is the DRAIN PULL FACE.
+
+ROOT (WM file:line): WM's IR REPuffer is NOT filled by the distinguished-face
+leaf list.  GMInterred (Interreduktion.c:285-307) runs RE_forGMReferenzen =
+BK_ReferenzDurchlauf (DSBaumKnoten.h:499-514), which walks the Gleichungsbaum
+leaf list and tests NF_ObjektAnwendbar(Objekt, .) per leaf -- it pulls each
+equation through the face the new object REDUCES, not its distinguished
+(LRSortieren) face.  WM indexes BOTH twins of an unoriented equation, so the two
+faces live in DIFFERENT leaves; the victim re-enters the FIFO (and gets its late
+w2 = ++CPNr) at its REDUCIBLE face's leaf-list position.
+
+THE PROOF (instrumented thvm wmo tree at pick-711, the pass that demotes both):
+the distinguished (`x.x`) face collides BOTH into equation leaf rank 1 (chain
+[3089/-18, 2092/-14, 221, 184], newest-first), so face-0 ranking ties them and
+DRAIN_CHAINPOS falls back to head-first = 3089/-18 first (wrong).  Their REVERSE
+(cube) faces sit in DISTINCT leaves: 2092/-14 at reverse-leaf rank 14, 3089/-18
+at reverse-leaf rank 15 -- so GMInterred drains 2092/-14 BEFORE 3089/-18, exactly
+WM's order.  The same mechanism explains the 1505 pair (2817/-17 reverse-leaf 15,
+2570/-16 reverse-leaf 16 -> -17 before -16) which head-first only matched by
+coincidence (both their face-0 entries sat in leaf 1 at ascending chainpos).
+
+THE FIX (src/atp/wm_order.c atp_wmo_victim_drain_key + src/atp/_.c demote sites):
+the drain key now ranks a victim by the leaf-list position of the face the new
+rule actually reduced -- reduced_thvm_side ^ dist_rhs, the same face remap
+atp_wmo_eq_*_rank uses (wm_order.c:1834).  The three demote sites pass the
+reduced side (LHS-collapse / bwd_demod = side 0; unorientable RHS reduce = side
+1).  Mono / single-face victims fall back to face 0.  Gated behind
+use_drain_revface (THVM_ATP_DRAIN_REVFACE; DEFAULT OFF; also turned ON under
+FormationFifo).
+
+RESULT: firstdiv 1558 -> 1953 (advance 395).  ON-vs-OFF prefix 1..1952
+        weights-exact; OFF byte-identical by construction (the gated branch keeps
+        the prior face-0 key).  Verified vs clean HEAD (1938c08e): WALDMEISTER-
+        only / base-4knob / FFifo-without-revface all CPSEL BYTE-IDENTICAL (full
+        41591/41597-line traces); WALDMEISTER-only firstdiv=19 unchanged;
+        bin/test_atp 136234/136234 (+ a new revface drain unit test); wm_pr
+        corpus spot-check (Sheffer Commutativity, Boolean OrAssoc 1266,
+        InverseOfInverse, McCune Associativity 298) CPSEL byte-identical.
+
+RESIDUAL at pick-1953 (different class, NOT the IR-drain schedule): WM's pick is
+`ue (35, -11)` -- a RULE-OVERLAP CP (rule 35 superposed on equation -11), part of
+a large rule-35 emission batch.  This is the global CP-formation emission order
+for rule overlaps (atp_wmo_rank), the same class soa's firstdiv-19 analysis
+flagged, not the interreduce pass schedule.  DEFERRED.
+
 ## ADVANCED 2026-06-22: THVM_ATP_DRAIN_CHAINPOS -- re-derivation drain within-leaf chain tiebreak
 
 Atop FormationFifo (firstdiv=1505), the residual at pick-1505 is a CLEAN ADJACENT

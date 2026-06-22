@@ -1001,6 +1001,16 @@ int main(int argc, char **argv) {
       // FORMATION_FIFO below).  See tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_drain_chainpos(
           s, (getenv("THVM_ATP_DRAIN_CHAINPOS") != NULL) ? 1u : 0u);
+      // WM GMInterred reducible-face drain order (DEFAULT OFF).  GMInterred
+      // (RE_forGMReferenzen = BK_ReferenzDurchlauf, DSBaumKnoten.h:499-514)
+      // pulls each IR-victim through the face the new rule REDUCES, so a
+      // cube-mirror pair whose distinguished faces coincide (`x.x = cube`,
+      // soa pick 1558: traces 2092/-14 and 3089/-18) drains by the distinct
+      // reducible cube faces' leaf order, not the colliding `x.x` leaf.
+      // Advances soa firstdiv past 1558.  THVM_ATP_DRAIN_REVFACE opts in
+      // (also turned on by FORMATION_FIFO below).  See soa.txt.
+      thvm_atp_set_use_drain_revface(
+          s, (getenv("THVM_ATP_DRAIN_REVFACE") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /

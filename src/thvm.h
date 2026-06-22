@@ -5639,6 +5639,23 @@ typedef struct {
   // OFF byte-identical; advances soa firstdiv 1505 -> beyond.  See
   // tools/baselines/wm_align_reports/soa.txt.
   u8    use_drain_chainpos;
+  // Waldmeister GMInterred reducible-face drain order (env
+  // THVM_ATP_DRAIN_REVFACE, DEFAULT OFF; also turned ON under
+  // use_formation_fifo).  GMInterred fills the IR REPuffer via
+  // RE_forGMReferenzen = BK_ReferenzDurchlauf (DSBaumKnoten.h:499-514),
+  // which pulls each equation through the face the new object REDUCES
+  // (NF_ObjektAnwendbar tested per Gleichungsbaum twin), not its
+  // distinguished (LRSortieren) face.  atp_wmo_victim_drain_key keyed
+  // victims by their face-0 leaf only, so a pair whose distinguished faces
+  // coincide (the soa cube-mirror `x.x = cube` pair at pick 1558: traces
+  // 2092/-14 and 3089/-18 both index `x.x` in equation leaf rank 1)
+  // collided and fell back to chain order, draining 3089 before 2092 --
+  // the OPPOSITE of WM, whose distinct reducible cube faces sit in leaves
+  // 14 (2092) and 15 (3089), so WM drains 2092 first.  This gate ranks the
+  // victim by its reduced side's wmo face (reduced_thvm_side ^ dist_rhs)
+  // leaf-list position, matching GMInterred.  OFF byte-identical; advances
+  // soa firstdiv 1558 -> beyond.  See tools/baselines/wm_align_reports/soa.txt.
+  u8    use_drain_revface;
   // Waldmeister LRSortieren side-canonicalisation (SpezNormierung.c
   // :517-534, env THVM_ATP_LR_SORTIEREN, default OFF): a derived
   // unorientable equation is stored with WM's canonical left/right side
@@ -6029,6 +6046,9 @@ fn void      thvm_atp_set_use_formation_fifo(AtpState *s, u8 on);
 // AtpState.use_drain_chainpos).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
 fn void      thvm_atp_set_use_drain_chainpos(AtpState *s, u8 on);
+// WM GMInterred reducible-face drain order (see AtpState.use_drain_revface).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_drain_revface(AtpState *s, u8 on);
 // Push-time queue-vs-queue subsumption gate (thvm-native, no WM
 // counterpart; see AtpState.use_queue_subsume).  Default ON; the
 // "Waldmeister"* presets turn it OFF.

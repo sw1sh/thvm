@@ -2345,9 +2345,11 @@ int main(void) {
     s->rhs[1] = mk_a();
     s->r_orient[1] = 1u; s->r_trace[1] = 501u; s->n_rules++;
     atp_wmo_insert_fact(s, 1u);
-    // Leaf list: the d2 leaf (500) precedes the d4 leaf (501).
-    u32 key500 = atp_wmo_victim_drain_key(s, 500u);
-    u32 key501 = atp_wmo_victim_drain_key(s, 501u);
+    // Leaf list: the d2 leaf (500) precedes the d4 leaf (501).  Oriented
+    // rules carry only face 0, so the reduced side (LHS = thvm side 0) maps
+    // to that face.
+    u32 key500 = atp_wmo_victim_drain_key(s, 500u, 0u);
+    u32 key501 = atp_wmo_victim_drain_key(s, 501u, 0u);
     CHECK(key500 < key501);
     // Both are rules (tree 0) -> bit 31 set on each.
     CHECK_EQ(key500 >> 31, 1u);
@@ -2361,6 +2363,44 @@ int main(void) {
     // drains first -> smaller cp_seq / FIFO age, matching WM.
     CHECK_EQ(s->irv_wmo_key[0], key500);
     CHECK_EQ(s->irv_wmo_key[1], key501);
+    s->n_irv = 0u;
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/wm-emission-order-ir-victim-drain-revface");
+  {
+    // GMInterred reducible-face drain order (use_drain_revface): WM's
+    // RE_forGMReferenzen = BK_ReferenzDurchlauf pulls each IR-victim through
+    // the face the new object REDUCES, not its distinguished face.  Two
+    // non-mono equations sharing a distinguished face (same stored LHS) but
+    // with distinct reverse (RHS) faces collide on the face-0 leaf; their
+    // reverse faces sit in DIFFERENT leaves whose leaf-list order is WM's
+    // true drain order.  This is the soa cube-mirror pair at pick 1558.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_emission_order(s, 1u);
+    thvm_atp_set_use_drain_revface(s, 1u);
+    s->use_wm_demote = 1u;
+    // eq A (trace 700): f(a,a) = i(a)        -- reverse face d1
+    s->lhs[0] = mk_f(mk_a(), mk_a());
+    s->rhs[0] = mk_i(mk_a());
+    s->r_orient[0] = 0u; s->r_trace[0] = 700u; s->n_rules++; s->n_unorient++;
+    atp_wmo_insert_fact(s, 0u);
+    // eq B (trace 701): f(a,a) = i(i(i(a)))  -- reverse face d3
+    s->lhs[1] = mk_f(mk_a(), mk_a());
+    s->rhs[1] = mk_i(mk_i(mk_i(mk_a())));
+    s->r_orient[1] = 0u; s->r_trace[1] = 701u; s->n_rules++; s->n_unorient++;
+    atp_wmo_insert_fact(s, 1u);
+    // Reduced side = RHS (thvm side 1, the reverse face): the d1 reverse
+    // leaf precedes the d3 reverse leaf, so 700 drains before 701 -- even
+    // though both share the f(a,a) distinguished leaf where face-0 ranking
+    // would tie (and fall back to chain order = 701 first, the wrong way).
+    u32 k700 = atp_wmo_victim_drain_key(s, 700u, 1u);
+    u32 k701 = atp_wmo_victim_drain_key(s, 701u, 1u);
+    CHECK(k700 < k701);
+    // Face-0 ranking would instead collide both on the shared f(a,a) leaf.
+    u32 f0_700 = atp_wmo_victim_drain_key(s, 700u, 0u);
+    u32 f0_701 = atp_wmo_victim_drain_key(s, 701u, 0u);
+    CHECK_EQ(f0_700 >> 8, f0_701 >> 8);   // same leaf-list rank (collide)
     s->n_irv = 0u;
     thvm_atp_free(s);
   }
@@ -2490,8 +2530,8 @@ int main(void) {
     s->rhs[1] = mk_f(mk_a(), mk_i(mk_a()));
     s->r_orient[1] = 0u; s->r_trace[1] = 601u; s->n_rules++; s->n_unorient++;
     atp_wmo_insert_fact(s, 1u);
-    u32 key_rule = atp_wmo_victim_drain_key(s, 600u);
-    u32 key_eq   = atp_wmo_victim_drain_key(s, 601u);
+    u32 key_rule = atp_wmo_victim_drain_key(s, 600u, 0u);
+    u32 key_eq   = atp_wmo_victim_drain_key(s, 601u, 0u);
     CHECK_EQ(key_rule >> 31, 1u);   // rule tree -> bit 31 set
     CHECK_EQ(key_eq   >> 31, 0u);   // equation tree -> bit 31 clear
     CHECK(key_eq < key_rule);       // equation victim drains first
