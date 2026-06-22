@@ -684,6 +684,13 @@ typedef struct {
   int    valid;       // 0 = stat could not be read (gate disabled for this kid)
   int    all_finite;  // 0 if any scanned element is NaN/Inf
   double sum_abs;     // sum of |x| over the scanned prefix
+  double wsum;        // POSITION-WEIGHTED sum: sum of x*(1 + (i mod P)/P).  A
+                      // permutation / partial-corruption tile that preserves
+                      // sum_abs (e.g. a mis-tiled TC matmul that scrambles
+                      // output positions but keeps the magnitude budget) drifts
+                      // here, so the gate rejects it.  The DiT matmul tiles that
+                      // NaN'd the warm FLUX replay pass a pure sum_abs gate on
+                      // synthetic scratch but diverge in wsum.
 } KautotuneOutStat;
 
 // Per-dtype divergence tolerance, relative to |baseline.sum_abs|.  bf16/f16
@@ -721,7 +728,7 @@ static double kautotune_decode_elem(void const *base, u32 dt, u64 idx) {
 // a stat with valid=0 (gate skipped) when the buffer can't be read or the
 // dtype isn't one we decode -- the gate never blocks a kid it can't measure.
 static KautotuneOutStat kautotune_output_stat(KernelEntry const *ke) {
-  KautotuneOutStat st = {0, 1, 0.0};
+  KautotuneOutStat st = {0, 1, 0.0, 0.0};
   if (ke == NULL || ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
     return st;
   }
@@ -762,6 +769,11 @@ static KautotuneOutStat kautotune_output_stat(KernelEntry const *ke) {
   }
   int all_finite = 1;
   double sum_abs = 0.0;
+  double wsum    = 0.0;
+  // Position weight period: a small prime so the weight pattern doesn't align
+  // with any power-of-two tile factor (which would let a tile-sized scramble
+  // hit identical weights and slip through).
+  enum { KAUTOTUNE_WSUM_PERIOD = 257 };
   for (u64 i = 0; i < scan; i++) {
     double v = kautotune_decode_elem(host, dt, i);
     if (!isfinite(v)) {
@@ -769,11 +781,14 @@ static KautotuneOutStat kautotune_output_stat(KernelEntry const *ke) {
       continue;
     }
     sum_abs += v < 0.0 ? -v : v;
+    double w = 1.0 + (double)(i % KAUTOTUNE_WSUM_PERIOD) / KAUTOTUNE_WSUM_PERIOD;
+    wsum += v * w;
   }
   free(host);
   st.valid      = 1;
   st.all_finite = all_finite;
   st.sum_abs    = sum_abs;
+  st.wsum       = wsum;
   return st;
 }
 
@@ -800,7 +815,21 @@ static int kautotune_stat_accept(KautotuneOutStat const *baseline,
   double bound = tol * ((baseline->sum_abs < 0.0 ? -baseline->sum_abs
                                                  : baseline->sum_abs)
                         + 1e-9);
-  return diff <= bound;
+  if (diff > bound) {
+    return 0;
+  }
+  // Position-weighted check: a tile that preserves the magnitude budget but
+  // scrambles element positions (a mis-rendered TC re-tile) drifts here even
+  // when sum_abs matches.  Bound it relative to |baseline.wsum| with the same
+  // per-dtype tolerance.
+  double wdiff = cand->wsum - baseline->wsum;
+  if (wdiff < 0.0) {
+    wdiff = -wdiff;
+  }
+  double wbound = tol * ((baseline->wsum < 0.0 ? -baseline->wsum
+                                               : baseline->wsum)
+                         + 1e-9);
+  return wdiff <= wbound;
 }
 
 static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
@@ -859,7 +888,14 @@ static void kautotune_iso_fill(Backend *b, u32 buf_id, u32 dt, u64 numel) {
   }
   memset(host, 0, (size_t)nbytes);
   for (u64 i = 0; i < numel; i++) {
-    double v = (double)(i % 17) * (1.0 / 17.0);  // [0,1)
+    // Zero-mean, sign-alternating pattern in [-1, 1).  A non-negative [0,1)
+    // fill let a partial / scrambled reduction stay positive and scale with
+    // sum_abs, slipping the correctness gate; a signed zero-mean pattern makes
+    // a dropped or mis-placed term move the (weighted) sum measurably, so a
+    // mis-rendered tile is rejected.  Two coprime periods (17, 2) so the sign
+    // doesn't align with any power-of-two tile factor.
+    double mag  = (double)(i % 17) * (1.0 / 17.0);  // [0,1)
+    double v    = (i & 1) ? -mag : mag;             // [-1,1)
     switch (dt) {
       case DT_FP32:    ((f32 *)host)[i] = (f32)v; break;
       case DT_FP64:    ((f64 *)host)[i] = v; break;
@@ -867,7 +903,7 @@ static void kautotune_iso_fill(Backend *b, u32 buf_id, u32 dt, u64 numel) {
       case DT_FP16:    ((u16 *)host)[i] = f32_to_fp16((f32)v); break;
       case DT_FP8E4M3: ((u8  *)host)[i] = f32_to_fp8e4m3((f32)v); break;
       case DT_FP8E5M2: ((u8  *)host)[i] = f32_to_fp8e5m2((f32)v); break;
-      case DT_INT32:   ((i32 *)host)[i] = (i32)(i % 17); break;
+      case DT_INT32:   ((i32 *)host)[i] = (i32)((i % 17) * ((i & 1) ? -1 : 1)); break;
       default: break;  // leave zeros for dtypes we don't model
     }
   }

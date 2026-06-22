@@ -320,25 +320,24 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   static const u32 split_factors[] = {16, 8, 4, 2};
   u32 n_factors = sizeof(split_factors)/sizeof(*split_factors);
 
-  // Gate flip: BEAM TC entry checks DAG presence directly.  The body's
-  // `propose_tc_classify` already requires `cached_lift.store_root != 0`
-  // (DAG-side matmul classifier), so the outer `axes != NULL && axis_count
-  // > 0` proxy is redundant -- every materialized kernel that reaches
-  // this proposer has both, and `cached_lift.store_root != 0` is a
-  // strict tightening that matches what the body actually needs.
+  // A matmul-shaped kernel is TC-tiled by the FIXED hand_opts + render path,
+  // not by this autotune proposer.  hand_opts.c Section 1 applies KOP_TC at the
+  // largest dividing tile AND the paired M/N KOP_GLOBAL parallel-promote, then
+  // render's uop_recognise_tc_parallel wraps the matmul reduce.  A bare KOP_TC
+  // candidate from here is structurally INCOMPLETE -- it omits the M/N GLOBAL
+  // stamps, so applying it to the reset (un-tiled) snapshot and re-rendering
+  // produces a non-parallel / mis-tiled matmul whose output diverges grossly
+  // from the hand_opts baseline (observed: 571x output magnitude, NaN on the
+  // warm FLUX DiT replay).  It can never reproduce -- let alone beat -- the
+  // hand_opts config, so DECLINE to propose for matmul kernels: the kernel keeps
+  // its correct hand_opts TC and is simply not part of the autotune search.
+  // (tinygrad applies TC once via a complete Opt on a fresh Kernel; thvm's TC is
+  // a render-time concern, so re-proposing it here is the bug, not the lever.)
   if (propose_metal_backend_enabled() && ke->cached_lift.store_root != 0) {
     u32 dtype = 0;
     if (propose_tc_classify(ke, &dtype)
         && (dtype == DT_FP32 || dtype == DT_BF16)) {
-      static const u32 tc_tiles[] = {32, 16, 8};
-      u32 n_tc_tiles = sizeof(tc_tiles)/sizeof(*tc_tiles);
-      for (u32 i = 0; i < n_tc_tiles && n < cap; i++) {
-        out[n].op   = KOP_TC;
-        out[n].axis = 0;
-        out[n].arg  = tc_tiles[i];
-        n++;
-      }
-      return n;
+      return 0;
     }
   }
 

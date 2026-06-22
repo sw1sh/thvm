@@ -77,23 +77,37 @@ int main(void) {
   // === (2) stat_accept: NaN candidate rejected, close one accepted ===
   TEST_BEGIN("autotune-gate/stat-accept-rejects-nan");
   KautotuneOutStat nan_cand = { .valid = 1, .all_finite = 0,
-                                .sum_abs = base.sum_abs };
+                                .sum_abs = base.sum_abs, .wsum = base.wsum };
   CHECK_EQ(kautotune_stat_accept(&base, &nan_cand,
                                  kautotune_stat_tol(DT_FP32)), 0);
 
   TEST_BEGIN("autotune-gate/stat-accept-rejects-gross-divergence");
   // A finite candidate whose magnitude doubled -- a real miscompile.
   KautotuneOutStat far_cand = { .valid = 1, .all_finite = 1,
-                                .sum_abs = base.sum_abs * 2.0 + 1.0 };
+                                .sum_abs = base.sum_abs * 2.0 + 1.0,
+                                .wsum = base.wsum * 2.0 + 1.0 };
   CHECK_EQ(kautotune_stat_accept(&base, &far_cand,
                                  kautotune_stat_tol(DT_FP32)), 0);
 
   TEST_BEGIN("autotune-gate/stat-accept-allows-within-tol");
-  // f32 reorder noise: a tiny relative perturbation must pass.
+  // f32 reorder noise: a tiny relative perturbation must pass (both the
+  // magnitude budget AND the position-weighted sum within tol).
   KautotuneOutStat near_cand = { .valid = 1, .all_finite = 1,
-                                 .sum_abs = base.sum_abs * (1.0 + 1e-5) };
+                                 .sum_abs = base.sum_abs * (1.0 + 1e-5),
+                                 .wsum    = base.wsum * (1.0 + 1e-5) };
   CHECK_EQ(kautotune_stat_accept(&base, &near_cand,
                                  kautotune_stat_tol(DT_FP32)), 1);
+
+  TEST_BEGIN("autotune-gate/stat-accept-rejects-position-scramble");
+  // A tile that PRESERVES the magnitude budget (sum_abs matches) but scrambles
+  // element positions diverges in the position-weighted sum -> rejected.  This
+  // is the DiT-matmul mis-tile that NaN'd the warm FLUX replay yet slipped a
+  // pure sum_abs gate on synthetic scratch.
+  KautotuneOutStat scramble_cand = { .valid = 1, .all_finite = 1,
+                                     .sum_abs = base.sum_abs,
+                                     .wsum    = base.wsum * 1.5 + 1.0 };
+  CHECK_EQ(kautotune_stat_accept(&base, &scramble_cand,
+                                 kautotune_stat_tol(DT_FP32)), 0);
 
   TEST_BEGIN("autotune-gate/stat-accept-unmeasured-candidate-passes");
   // valid=0 (gate could not read this backend) -> never block.
