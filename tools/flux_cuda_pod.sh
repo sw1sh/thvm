@@ -99,7 +99,12 @@ gcc -std=c11 -O2 -w -fPIC -shared -D_GNU_SOURCE -DTHVM_HAS_CUDA $ATP -I"$GS/incl
   -L"$GS/lib" -L"$GS/lib/stubs" -Wl,-rpath,"$GS/lib" -lcuda -lnvrtc -lm -ldl
 echo "built THVMLink-cuda.so"
 # nvrtc dlopens its builtins from the system lib path, so LD_LIBRARY_PATH must include $GS/lib.
+echo "=== CUDA baseline (no BEAM) ==="
 LD_LIBRARY_PATH="$GS/lib" SYNTH=1 DEV=cuda THVM_MAX_LIVE_BYTES=40000000000 \
+  WOLFRAMSCRIPT_ENTITLEMENTID="$WOLFRAMSCRIPT_ENTITLEMENTID" \
+  wolframscript -f wl/THVMLink/Examples/flux/flux_bench.wls
+echo "=== CUDA JITBEAM=2 (searchable TC tiles + timeout pruning) ==="
+LD_LIBRARY_PATH="$GS/lib" SYNTH=1 DEV=cuda THVM_MAX_LIVE_BYTES=40000000000 JITBEAM=2 BEAM_TIMEOUT_SEC=10 THVM_FLUX_CHECK=1 \
   WOLFRAMSCRIPT_ENTITLEMENTID="$WOLFRAMSCRIPT_ENTITLEMENTID" \
   wolframscript -f wl/THVMLink/Examples/flux/flux_bench.wls
 REMOTE
