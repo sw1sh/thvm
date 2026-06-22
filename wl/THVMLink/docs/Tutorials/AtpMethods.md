@@ -321,10 +321,3 @@ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
 ```
 
 The seeded xorshift64 inside the random pick makes the trajectory reproducible; pass `"RandomSeed" -> n` to switch seed.
-
-## Where the code lives
-
-- `wl/THVMLink/Kernel/ATP/ATP.wl` - the WL surface: method parser (`atpParseMethod`) and preset dispatcher.
-- `wl/THVMLink/Kernel/ATP/ATP_Method.wl` - the portfolio scheduler, `atpAnalyzeStructure`, and the `Automatic` problem-aware front-load (`atpAutoTune`).
-- `src/atp/_.c` and `src/atp/precedence.c` - the C engine: completion loop, CP selection, redundancy checks, precedence generation.
-- `docs/tutorial/atp_methods.md` - the long-form reference covering every single suboption and every method head.

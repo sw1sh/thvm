@@ -139,11 +139,4 @@ The importer returns function applications as String-headed compound terms (<cod
 
 If you want to coerce a particular String head into a Symbol after the fact, `expr /. h_String[args___] :> Symbol[h][args]` is the one-liner.
 
-## Where the code lives
-
-- [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) and its `EBNFParse`-driven grammar sit in the [Wolfram/WolframParser](paclet:Wolfram/WolframParser/guide/WolframParser) paclet.  See the [Parsing TPTP](paclet:Wolfram/WolframParser/tutorial/ParsingTPTP) tech note for the grammar internals.
-- `wl/THVMLink/Kernel/ATP/ATP.wl` - the `TFindProof[File[...]]` / `TFindProof[String]` dispatch overloads.
-- `wl/THVMLink/Kernel/ATP/SMT.wl` - the parallel `Method -> "SMT"` congruence-closure dispatch (see the [SMT](paclet:WolframInstitute/THVMLink/tutorial/SMT) tech note).
-- `wl/THVMLink/Tests/atp_tptp.wlt` - end-to-end coverage on representative `.p` files from the UEQ division.
-
-Extending coverage to a new TPTP form is mostly about adding productions to the BNF grammar in Wolfram/WolframParser; the dispatch surface above usually picks the new shape up without changes.
+[TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) and its `EBNFParse`-driven grammar sit in the [Wolfram/WolframParser](paclet:Wolfram/WolframParser/guide/WolframParser) paclet; see the [Parsing TPTP](paclet:Wolfram/WolframParser/tutorial/ParsingTPTP) tech note for the grammar internals. Extending coverage to a new TPTP form is mostly about adding productions to that grammar; the [TFindProof]() dispatch usually picks the new shape up without changes.

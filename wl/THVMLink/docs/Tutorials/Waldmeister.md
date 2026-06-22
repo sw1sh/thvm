@@ -16,7 +16,7 @@ RelatedTutorials: [ATP, AtpMethods, Disproof, TPTPImport]
 
 The design target is exact and singular: **perfect byte-parity with `wmcli`'s lemma-selection sequence, and faster wall time than `wmcli`, period.** Not "also proves the theorem", not "close enough" - the same critical pairs in the same order, derived in less time, entirely inside the Wolfram kernel with no temporary `.pr` file, no shelled-out binary, no SZS text round-trip. Everything in this note is measured against that target.
 
-The external CLI ([TFindProof]() with `Method -> "WaldmeisterProcess"`, which shells out to `wmcli`) and the Wolfram built-in [FindEquationalProof]() (FEQ) are the **benchmarks `thvm` is measured against**, not alternatives a reader picks between. The comparison sections below show `thvm` reproducing `wmcli`'s lemmas byte-for-byte (the parity axis) and closing on its wall time (the speed axis), and they state honestly where the target is not yet fully met so the remaining work is visible.
+The external CLI ([TFindProof]() with `Method -> "WaldmeisterProcess"`, which shells out to `wmcli`) and the Wolfram built-in [FindEquationalProof]() (FEQ) are the **benchmarks `thvm` is measured against**, not alternatives a reader picks between. Both benchmarks are themselves Waldmeister: `wmcli` is the reference Waldmeister binary, and FEQ is the Wolfram Language's own Waldmeister-based equational prover. So every comparison here is one Waldmeister implementation against another - `thvm`'s in-process faithful Waldmeister against the reference binary on the parity axis, and against the built-in on the easy-tier wall-time axis. The comparison sections below show `thvm` reproducing `wmcli`'s lemmas byte-for-byte (the parity axis) and closing on its wall time (the speed axis), and they state honestly where the target is not yet fully met so the remaining work is visible.
 
 > SAFETY NOTE. Waldmeister-class saturation on a single-operator Sheffer / Wolfram / Robbins / Meredith goal can blow the queue up to tens of gigabytes of resident memory. Every `wmcli` (external `Method -> "WaldmeisterProcess"`) number in this note is **banked** from a recorded sweep - do not re-run the external CLI on a hard theorem. The in-process `Method -> "Waldmeister"` cells here are restricted to small / bounded goals and each carries a `TimeConstraint`.
 
@@ -71,25 +71,26 @@ A second family ports individual Waldmeister tie-break and side-geometry rules a
 
 | Knob               | What it ports | soa first-divergence after |
 |--------------------|---------------|-----------------------------|
-| `"CPSide"`       | Critical-pair formation side-geometry swap (`Unifikation1.c:916-917`): store each derived unorientable equation with Waldmeister's `KPLinks = sigma(r_parent)` (the overlapped rule's right-hand side) as the stored left-hand side, parent-overlap-aware. | 125 |
+| `"CPSide"`       | Critical-pair formation side-geometry swap: store each derived unorientable equation with Waldmeister's `KPLinks = sigma(r_parent)` (the overlapped rule's right-hand side) as the stored left-hand side, parent-overlap-aware. | 125 |
 | `"FlatSubsume"`  | Flatterm-faithful E-set subsumption matcher (`MO_TermpaarSubsummiertZweites`): Waldmeister's binding-slot vs variable-symbol cross that removes axiom 2 on commutativity-add. Standalone it *regresses* (its broader orphan-murder vs Waldmeister's `KPV_KillParent` re-derive-and-reselect); it advances only paired with the rest of the set. | 125 (paired) |
 | `"CommReage"`    | Commutativity-REAGE overlap re-rank: promote `thvm`'s single seq564-sibling CP to the head of its birth batch so it is selected at Waldmeister's faithful early age (pick-126) rather than buried at the batch tail. | 288 |
 | `"CommDropDup"`  | Layered atop `"CommReage"`: re-age the single duplicate re-derivation of slot-15's term one FIFO slot later so it lands at Waldmeister's pick-289 instead of `thvm`'s over-early pick-288. Requires `"CommReage"`. | 290 |
 | `"LeafTiebreak"` | Leaf-arrival tie-break: when two CPs overlap the new fact at the same position from an oriented (variable-differ = 1) partner and a two-faced permutation (variable-differ = 0) partner, re-key the oriented copy just below its sibling so it sorts first, as Waldmeister's single oriented scan emits it. Clears the soa 290 / 303 / 351 swap-pairs. | past 290 |
 | `"RevfaceGroup"` | Reverse-face shape-group tie-break (sibling of `"LeafTiebreak"` one weight band up): within one overlap-position group, re-key an oriented partner's reverse-face CP adjacent to the same-shape CP it alpha-matches, restoring Waldmeister's adjacent same-shape emission that `thvm`'s independent leaf walk scatters. | 966 |
 | `"PosGroup"`     | Overlap-position raw-arrival grouping (sibling of `"RevfaceGroup"` one weight band down): un-group `"RevfaceGroup"`'s over-grouping at a single overlap position, deferring a permutation partner's reverse face past the higher-arrival cluster so the batch matches Waldmeister's bracketed raw discrimination-tree arrival. | 1320 |
+| `"CubeArrival"`  | Cube-arrival tie-break (sibling of `"PosGroup"` one weight band up, soa w=224): the double-cube CP `(x.(x.x)).y = (z.(z.z)).y` and its same-group predecessor, the slot-15-wrapped CP `(x.(y.x)).z = ((y.y).x).z`, share the overlap group and differ only in partner discrimination-tree arrival; `thvm` sorts the slot-15-wrapped CP first but Waldmeister surfaces the cube partner first (`ue (19,-7)` before `ue (19,-2)`). Re-key the double-cube below its predecessor, swapping the adjacent pair. | 1505 |
 
 Two further knobs are kept for diagnosis only and are *excluded* from any faithful set: `"CommSubsume"` (a commutativity-aware subsumption widening that drops the right equation but forks soa first-divergence 125 -> 99 and explodes commutative-ring baselines) and `"CommDefer"` (superseded by `"CommReage"`, which keeps the early CP rather than suppressing it).
 
 Stacking Family 2 in order advances the soa first-divergence index monotonically:
 
 ```wl
-{19, 125, 288, 290, 966, 1320}
+{19, 125, 288, 290, 966, 1320, 1505}
 ```
 <!-- => the soa first-divergence as the knobs stack: bare 19, then +CPSide/FlatSubsume,
-        +CommReage, +CommDropDup, +RevfaceGroup, +PosGroup -->
+        +CommReage, +CommDropDup, +RevfaceGroup, +PosGroup, +CubeArrival -->
 
-The full soa-validated set that reproduces Waldmeister's selection order through the first 1319 selections is `"CPSide"` + `"FlatSubsume"` + `"CommReage"` + `"CommDropDup"` + `"LeafTiebreak"` + `"RevfaceGroup"` + `"PosGroup"`, all `-> True`:
+The full soa-validated set that reproduces Waldmeister's selection order through the first 1504 selections is `"CPSide"` + `"FlatSubsume"` + `"CommReage"` + `"CommDropDup"` + `"LeafTiebreak"` + `"RevfaceGroup"` + `"PosGroup"` + `"CubeArrival"`, all `-> True`:
 
 ```wl
 #| eval: false
@@ -98,17 +99,17 @@ TFindProof["ShefferAxiomsOrAssociativity",
         "CPSide" -> True, "FlatSubsume" -> True,
         "CommReage" -> True, "CommDropDup" -> True,
         "LeafTiebreak" -> True, "RevfaceGroup" -> True,
-        "PosGroup" -> True},
+        "PosGroup" -> True, "CubeArrival" -> True},
     TimeConstraint -> 60]
 ```
 
-Pinned `eval: false`: the soa proxy is a single-operator Sheffer-class saturation whose queue is unsafe to run during a shared-kernel doc build. The alignment is exercised by the engine's own test bench (`tools/baselines/wm_align_reports/soa.txt`), not here.
+Pinned `eval: false`: the soa proxy is a single-operator Sheffer-class saturation whose queue is unsafe to run during a shared-kernel doc build. The alignment is exercised by the engine's own test bench, not here.
 
 ## Byte parity for lemma generation
 
-A lemma, in completion, is a selected critical pair. So "does `thvm` derive the same lemmas as Waldmeister, in the same order" reduces to "do the two engines select the same critical pairs in the same sequence". On the proxy used to develop Family 1 + Family 2 above - `"ShefferAxiomsOrAssociativity"` - they do: the first **1319** critical-pair selections are identical (first-divergence index 1320 against the banked `wmcli` reference), with the per-CP weights byte-exact throughout. That is byte-level reproduction of Waldmeister's lemma stream over a 1300-step saturation prefix. Parity is not yet perfect - the sequences part at selection 1320, inside a higher weight band of the same cube / permutation CP family the Family-2 knobs already handle one band down - and closing that band (a unified raw-arrival + reverse-face port that subsumes the per-band knobs) is the next step toward full-sequence parity.
+A lemma, in completion, is a selected critical pair. So "does `thvm` derive the same lemmas as Waldmeister, in the same order" reduces to "do the two engines select the same critical pairs in the same sequence". On the proxy used to develop Family 1 + Family 2 above - `"ShefferAxiomsOrAssociativity"` - they do: the first **1504** critical-pair selections are identical (first-divergence index 1505 against the banked `wmcli` reference), with the per-CP weights byte-exact throughout. That is byte-level reproduction of Waldmeister's lemma stream over a 1500-step saturation prefix. Parity is not yet perfect - the sequences part at selection 1505, inside a higher weight band of the same cube / permutation CP family the Family-2 knobs already handle one band down - and closing that band (a unified raw-arrival + reverse-face port that subsumes the per-band knobs) is the next step toward full-sequence parity.
 
-This is not a one-off. A recorded alignment sweep (`tools/baselines/wm_align_matrix.tsv`) compares `thvm`'s selection sequence against the banked `wmcli` trace across the notable-theorem corpus. The matrix records, per theorem, how many selections each engine makes, the identical prefix length, and whether the sequences are fully identical. Tallying its full-identity column (the banked verdicts inlined here so the cell stays self-contained):
+This is not a one-off. A recorded alignment sweep compares `thvm`'s selection sequence against the banked `wmcli` trace across the notable-theorem corpus, recording per theorem how many selections each engine makes, the identical prefix length, and whether the sequences are fully identical. Tallying its full-identity column (the banked verdicts inlined here so the cell stays self-contained):
 
 ```wl
 Counts[Join[
@@ -133,7 +134,7 @@ TFindProof["InverseOfInverse", "AbelianGroupAxioms", "Lemmas",
 The two benchmarks `thvm` is held to:
 
 - `Method -> "WaldmeisterProcess"` - the real `wmcli` binary, shelled out (its numbers here are banked). This is the parity *and* speed reference: the goal is to match its lemma sequence byte-for-byte and finish in less wall time.
-- [FindEquationalProof]() (FEQ) - the Wolfram Language built-in equational prover. A second wall-time reference on the easy tier.
+- [FindEquationalProof]() (FEQ) - the Wolfram Language built-in equational prover, itself Waldmeister-based. A second wall-time reference on the easy tier (one Waldmeister against another).
 
 Against the first, this section shows `thvm` reproducing `wmcli`'s proof byte-for-byte on the hard Sheffer / combinator classes that are the whole reason the emulation exists, and tracks the wall-time gap as it closes toward the "faster, period" half of the target.
 
@@ -153,7 +154,7 @@ TFindProof["DoubleNegation", "WolframAxioms",
 ```
 <!-- => ProofObject - proves live in a few seconds (~3.6s wall) -->
 
-The bar chart below renders from the measured `thvm` walls and the banked `wmcli` walls (`tools/baselines/wm_cli_sweep.tsv`):
+The bar chart below renders from the measured `thvm` walls and the banked `wmcli` walls (inlined as literals):
 
 ```wl
 With[{
@@ -171,11 +172,11 @@ With[{
 ```
 <!-- => grouped bar chart: thvm ~5.2/3.6s (full Wolfram wall) vs wmcli ~2.35/2.32s (bare engine) on the two Sheffer goals -->
 
-The two bars measure different things, and the gap is honest active work. The `thvm` bar is the **full Wolfram wall** - the C engine plus the `ProofObject` reconstruction the in-process path always does; the `wmcli` bar is the **bare external engine** with no proof-object lift. Both land in the low single-digit seconds, and the proofs are byte-identical, so the parity half of the target is done; the wall-time half is not yet met on this tier and is being closed (the discrimination-tree port already moved these goals from memory-spike-killed into range, and shaving the engine and lift the rest of the way is in progress). The committed `top20` engine charts predate the discrimination tree and understate `thvm` on the Sheffer tier - read the live numbers here, not those.
+The two bars measure different things, and the gap is honest active work. The `thvm` bar is the **full Wolfram wall** - the C engine plus the `ProofObject` reconstruction the in-process path always does; the `wmcli` bar is the **bare external engine** with no proof-object lift. Both land in the low single-digit seconds, and the proofs are byte-identical, so the parity half of the target is done; the wall-time half is not yet met on this tier and is being closed (the discrimination-tree port already moved these goals from memory-spike-killed into range, and shaving the engine and lift the rest of the way is in progress).
 
 ### Speed against FEQ on bounded group / Boolean theorems
 
-On the easy tier - group and Boolean theorems crack quickly - the FEQ benchmark is the directly comparable one, since both it and `thvm` are full in-process Wolfram calls (engine plus `ProofObject` reconstruction), so their walls line up like-for-like. (The `wmcli` sweep is bare-engine and sub-millisecond on these tiny goals; comparing it against a full Wolfram wall would misread, so it is shown in the table further down rather than bar-charted here.) The walls below are banked from `tools/baselines/thvm_notable_theorems.tsv` and `tools/baselines/wl_notable_theorems.tsv` (inlined as `{label, thvm-seconds, FEQ-seconds}` so the cell stays self-contained):
+On the easy tier - group and Boolean theorems crack quickly - the FEQ benchmark is the directly comparable one: it is the Wolfram built-in's own Waldmeister, and like `thvm` it is a full in-process Wolfram call (engine plus `ProofObject` reconstruction), so their walls line up like-for-like - two Waldmeister implementations on the same goal. (The `wmcli` sweep is bare-engine and sub-millisecond on these tiny goals; comparing it against a full Wolfram wall would misread, so it is shown in the table further down rather than bar-charted here.) The walls below are banked (inlined as `{label, thvm-seconds, FEQ-seconds}` so the cell stays self-contained):
 
 ```wl
 With[{
@@ -195,11 +196,11 @@ With[{
 ```
 <!-- => grouped bar chart: thvm 0.01-0.05s per theorem vs FEQ ~0.2s (its fixed startup floor) -->
 
-`thvm`'s `Method -> "Waldmeister"` finishes each of these in 10-50 ms against FEQ's roughly fixed 0.2 s startup floor. One class needs a named knob to stay in that range: the frustrated-vacuum-implication (FVI) gated goals - `ExcludedMiddle`, `Noncontradiction`, `McCuneAxioms/EqualityOfInverses` - run ~25 s on `ExcludedMiddle` under the plain preset, because their proof needs the FVI emission rule that `Method -> "WaldmeisterFVI"` turns on; with that preset they drop back into the sub-second range. They are off the chart above because they belong to the FVI preset, not the plain one.
+`thvm`'s `Method -> "Waldmeister"` finishes each of these in 10-50 ms against FEQ's roughly fixed 0.2 s startup floor. One class needs a suboption to stay in that range: the frustrated-vacuum-implication (FVI) gated goals - `ExcludedMiddle`, `Noncontradiction`, `McCuneAxioms/EqualityOfInverses` - run ~25 s on `ExcludedMiddle` under the plain preset, because their proof needs the FVI emission rule that the generic suboption `"FreeVarInstance" -> True` turns on; with `Method -> {"Waldmeister", "FreeVarInstance" -> True}` they drop back into the sub-second range. They are off the chart above because they need that suboption, not the plain preset.
 
 ### What the external CLI numbers look like
 
-The banked `wmcli` walls (`tools/baselines/wm_cli_sweep.tsv`, columns `wm_cps` and `wm_wall_s`) for a spread of theorems, inlined here so the cell touches no files:
+The banked `wmcli` critical-pair counts and walls for a spread of theorems, inlined here so the cell touches no files:
 
 ```wl
 Grid[{{"theory / theorem", "wmcli CPs", "wmcli wall (s)"},
@@ -224,15 +225,8 @@ Within a comparable timeout, `thvm`'s in-process engine proves roughly 25 notabl
 `Method -> "Waldmeister"` is the faithful path: the in-process emulation whose whole purpose is to hit byte-parity with `wmcli` and beat its wall time. The other entries here are not competing choices - they are the variant of the faithful path for one goal class and the two yardsticks that measure it.
 
 - `Method -> "Waldmeister"` - the faithful in-process Waldmeister. Same unfailing-completion loop, same `Mix` weight, same emission order, no external dependency, `TimeConstrained` / `Abort[]` interrupt it. This is what the byte-parity and wall-time results above describe.
-- `Method -> "WaldmeisterFVI"` - the same faithful path with frustrated-vacuum-implication emission turned on, the form needed for `ExcludedMiddle`, `Noncontradiction`, and `McCuneAxioms/EqualityOfInverses`. A knob on the faithful path, not a different prover.
-- `Method -> "WaldmeisterProcess"` - the real `wmcli` binary, the **parity-and-speed yardstick**: the source of the banked lemma traces parity is checked against and the wall times speed is measured against. Needs `wmcli` built from source on `$WMCLI`; returns `Failure["ExternalNoProof", ...]` if absent. Resource-unsafe on Sheffer-class goals - the reason this note banks rather than runs it.
-- [FindEquationalProof]() - the Wolfram built-in equational prover, the second wall-time yardstick on the easy tier.
+- `Method -> {"Waldmeister", "FreeVarInstance" -> True}` - the same faithful path with frustrated-vacuum-implication emission turned on via the generic `"FreeVarInstance"` suboption, the form needed for `ExcludedMiddle`, `Noncontradiction`, and `McCuneAxioms/EqualityOfInverses`. A suboption on the faithful path, not a different prover.
+- `Method -> "WaldmeisterProcess"` - the real `wmcli` binary, the **parity-and-speed yardstick**: the source of the banked lemma traces parity is checked against and the wall times speed is measured against. Returns `Failure["ExternalNoProof", ...]` if the binary is unavailable. Resource-unsafe on Sheffer-class goals - the reason this note banks rather than runs it.
+- [FindEquationalProof]() (FEQ) - the Wolfram built-in equational prover, which is itself Waldmeister-based, so comparing against it is one Waldmeister against another. The second wall-time yardstick on the easy tier.
 
-## Where the code lives
-
-- `wl/THVMLink/Kernel/ATP/ATP.wl` - the WL surface: the `"Waldmeister"` preset Association, the per-knob option parsers (`atpEmissionOrderOpt`, `atpIntakeOrderOpt`, `atpMixmostNfOpt`, and the Family-2 `atp*` parsers), and `TAtpDescribeMethod`.
-- `src/atp/_.c` - the C completion engine: the unfailing-completion loop, critical-pair selection, and the `args[40..59]` knob slots that the WL parsers fill.
-- `src/atp/wm_order.c` - the discrimination-tree retrieval order that stamps FIFO ages to mirror Waldmeister's `Regelbaum` / `Gleichungsbaum` scan (the emission-order machinery).
-- `tools/baselines/wm_align_reports/soa.txt` - the byte-alignment diagnosis for the soa proxy (the first-divergence progression 19 -> 1320).
-- `tools/baselines/wm_align_matrix.tsv` - the corpus-wide selection-sequence parity matrix.
-- The general Method surface is the [AtpMethods](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods) tech note; the engine overview is [ATP](paclet:WolframInstitute/THVMLink/tutorial/ATP).
+The general Method surface is the [AtpMethods](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods) tech note; the engine overview is [ATP](paclet:WolframInstitute/THVMLink/tutorial/ATP).
