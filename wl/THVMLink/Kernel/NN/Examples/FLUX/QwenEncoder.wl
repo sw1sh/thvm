@@ -78,19 +78,29 @@ qwLayerW[wf_, i_] := With[{p = "model.layers." <> ToString[i] <> "."}, <|
    {S, S}; W the layer weights; cfg has heads/kv_heads/head_dim/eps.  qk-norm
    before rotary (TRMSNorm); GQA-expand k/v (TRepeatKV); masked attention
    (THeadAttention); SwiGLU MLP. *)
+(* bf16Act: realize an activation as bf16 so the downstream fxLinear matmul is
+   bf16(act) x bf16(W) -- recognised as a tensor-core matmul and lowered to the
+   TILED simdgroup path.  The Qwen embed + RMSNorm keep f32, so without this the
+   projections feed a MIXED f32xbf16 matmul that is NOT recognised and falls to the
+   generic scalar accumulator (~7x slower).  The cast must be REALIZED (not a lazy
+   CAST(INDEX_E) operand): the recogniser peels one cast but then sees the f32 buffer
+   underneath and declines; a realized cast gives a clean bf16 INDEX_E.  bf16(act)
+   matches how HF Qwen3 runs the linears (bf16 weights AND activations). *)
+bf16Act[t_] := TRealize @ TUOpCast[t, "bf16"]
+
 qwLayer[x_, cos_, sin_, addMask_, W_, cfg_] := Block[
     {h, hkv, dh, eps, scale, rep, s, xn, q, k, v, attnOut, hh, hn},
     h = cfg["heads"];  hkv = cfg["kv_heads"];  dh = cfg["head_dim"];
     eps = cfg["eps"];  scale = 1/Sqrt[N[dh]];  rep = h/hkv;  s = Dimensions[x][[1]];
-    xn = TRMSNorm[x, W["input_ln"], eps];
+    xn = bf16Act @ TRMSNorm[x, W["input_ln"], eps];
     q = TRMSNorm[ArrayReshape[fxLinear[xn, W["q_proj"]], {s, h, dh}], W["q_norm"], eps];
     k = TRMSNorm[ArrayReshape[fxLinear[xn, W["k_proj"]], {s, hkv, dh}], W["k_norm"], eps];
     v = ArrayReshape[fxLinear[xn, W["v_proj"]], {s, hkv, dh}];
     q = TRoPEHalfSplit[q, cos, sin];  k = TRoPEHalfSplit[k, cos, sin];
-    attnOut = fxLinear[THeadAttention[q, TRepeatKV[k, rep], TRepeatKV[v, rep], scale, addMask], W["o_proj"]];
+    attnOut = fxLinear[bf16Act @ THeadAttention[q, TRepeatKV[k, rep], TRepeatKV[v, rep], scale, addMask], W["o_proj"]];
     hh = x + attnOut;
-    hn = TRMSNorm[hh, W["post_ln"], eps];
-    hh + fxLinear[TSiLU[fxLinear[hn, W["gate_proj"]]]*fxLinear[hn, W["up_proj"]], W["down_proj"]]
+    hn = bf16Act @ TRMSNorm[hh, W["post_ln"], eps];
+    hh + fxLinear[bf16Act[TSiLU[fxLinear[hn, W["gate_proj"]]]*fxLinear[hn, W["up_proj"]]], W["down_proj"]]
 ]
 
 (* DEVICE forward over the 27 decoder layers.  x {S,dim} embedded token rows;
