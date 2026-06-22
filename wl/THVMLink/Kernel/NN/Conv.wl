@@ -9,6 +9,8 @@ GeneralUtilities`SetUsage[TConv2D, "TConv2D[input$, weights$, bias$] builds a st
 GeneralUtilities`SetUsage[TConv2DIm2Col, "TConv2DIm2Col[input$, weights$, bias$] is the im2col + matmul lowering of a stride-1, no-padding 2-D convolution, with the same signature and output shape as TConv2D. It builds the im2col operand xCol : {C_in*kh*kw, H_out*W_out}, then out = w_flat @ xCol via TMatMul (cblas_sgemm). TConv2D's default path."];
 GeneralUtilities`SetUsage[TConv2DIm2ColBatched, "TConv2DIm2ColBatched[input$, weights$, bias$] is the rank-4 batched im2col lowering for input$ of shape {B, C, H, W}. It builds xCol : {C*kh*kw, B*H_out*W_out}, runs one matmul, then reshapes back to {B, C_out, H_out, W_out}."];
 GeneralUtilities`SetUsage[TConv2DKhKw, "TConv2DKhKw[input$, weights$, bias$] is the kh*kw partial-sum convolution lowering, the explicit reference body for TConv2D."];
+
+GeneralUtilities`SetUsage[TConv2DIm2ColPoolGemm, "TConv2DIm2ColPoolGemm[input$, weights$, bias$] is the GEMM lowering of the strided-view _pool unfold: it realizes the im2col view as a contiguous {C_in*kh*kw, H_out*W_out} matrix and the weight as {C_out, C_in*kh*kw}, then out = w_flat @ xCol via TMatMul so the matmul takes the tensor-core GEMM path (the fused conv reduce is rejected by the TC recogniser). Same signature/output as TConv2D; byte-faithful to TConv2DKhKw. ~2x the fused reduce on the FLUX.2 VAE convs."];
 GeneralUtilities`SetUsage[TMaxPool2d, "TMaxPool2d[x$] and TMaxPool2d[x$, k$] run a non-overlapping k$ x k$ max-pool over the trailing two axes of a rank-3 {C, H, W} or rank-4 batched {B, C, H, W} channels-first tensor. Default k$ = 2."];
 GeneralUtilities`SetUsage[TUpsample2x, "TUpsample2x[x$] is the nearest-neighbour 2x upsample of a {C, H, W} tensor to {C, 2H, 2W} via repeat-interleave (each pixel expanded to a 2x2 block). The VAE / U-Net decoder upsampler."];
 
@@ -114,9 +116,24 @@ TConv2DKhKw[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
    (`input` is pushed onto a contiguous buffer boundary first -- see the
    body -- so the strided-view chain composes correctly even when `input`
    is itself a movement / compute DAG.) *)
+(* Shared rank-3 _pool unfold: x {cIn,H,W} -> strided VIEW {cIn,kh,kw,hOut,wOut}
+   (movement ops only; see the construction note above).  Both the expand-mul-
+   reduce body (TConv2DIm2ColPool) and the GEMM body (TConv2DIm2ColPoolGemm)
+   build their im2col from this one windowing so they index identically. *)
+conv2dPoolUnfold[input_, cIn_, h_, wd_, kh_, kw_, hOut_, wOut_] := Module[{rh, rw, x1, x2, x3, x4},
+    rh = Ceiling[kh * (h + 1) / h];
+    rw = Ceiling[kw * (wd + 1) / wd];
+    x1 = TUOpReshape[
+        TUOpExpand[TUOpReshape[input, {cIn, 1, h, 1, wd}], {cIn, rh, h, rw, wd}],
+        {cIn, rh * h, rw * wd}];
+    x2 = TUOpShrink[x1, {{0, cIn}, {0, kh * (h + 1)}, {0, kw * (wd + 1)}}];
+    x3 = TUOpReshape[x2, {cIn, kh, h + 1, kw, wd + 1}];
+    x4 = TUOpShrink[x3, {{0, cIn}, {0, kh}, {0, hOut}, {0, kw}, {0, wOut}}];
+    TUOpPermute[x4, {0, 1, 3, 2, 4}]]                (* {cIn,kh,kw,hOut,wOut} *)
+
 TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     input, inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut,
-    rh, rw, x1, x2, x3, x4, xCol6, xB, wB, outShaped, biasBcast
+    xCol6, xB, wB, outShaped, biasBcast
 },
     input = inputArg;
     inShape = tUopShape[input];
@@ -127,17 +144,7 @@ TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     kw   = wShape[[4]];
     hOut  = h  - kh + 1;
     wOut  = wd - kw + 1;
-    rh = Ceiling[kh * (h + 1) / h];
-    rw = Ceiling[kw * (wd + 1) / wd];
-    x1 = TUOpReshape[
-        TUOpExpand[TUOpReshape[input, {cIn, 1, h, 1, wd}],
-                   {cIn, rh, h, rw, wd}],
-        {cIn, rh * h, rw * wd}];
-    x2 = TUOpShrink[x1, {{0, cIn}, {0, kh * (h + 1)}, {0, kw * (wd + 1)}}];
-    x3 = TUOpReshape[x2, {cIn, kh, h + 1, kw, wd + 1}];
-    x4 = TUOpShrink[x3,
-        {{0, cIn}, {0, kh}, {0, hOut}, {0, kw}, {0, wOut}}];
-    xCol6 = TUOpPermute[x4, {0, 1, 3, 2, 4}];        (* {cIn,kh,kw,hOut,wOut} *)
+    xCol6 = conv2dPoolUnfold[input, cIn, h, wd, kh, kw, hOut, wOut];
     (* broadcast x over cOut, weight over (hOut,wOut); reduce cIn,kh,kw. *)
     xB = TUOpExpand[TUOpReshape[xCol6, {1, cIn, kh, kw, hOut, wOut}],
                     {cOut, cIn, kh, kw, hOut, wOut}];
@@ -149,6 +156,36 @@ TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     biasBcast = TUOpExpand[
         TUOpReshape[bias, {cOut, 1, 1}],
         {cOut, hOut, wOut}];
+    outShaped + biasBcast
+]
+
+(* GEMM lowering of the (correct) _pool unfold: instead of the broadcast
+   expand-mul-reduce (one fused strided reduce per conv -- the default), reshape
+   the unfold VIEW xCol6 {cIn,kh,kw,hOut,wOut} to a 2D matrix {cIn*kh*kw,
+   hOut*wOut} and the weight to {cOut, cIn*kh*kw}, then out = wFlat @ xCol via
+   TMatMul.  REALIZING xCol + wFlat hands the matmul two contiguous 2D leaves so
+   it takes the tensor-core GEMM path (the fused conv reduce is rejected by
+   recognise_tc).  On the FLUX.2 VAE this is ~2x the fused reduce (TC GEMM >>
+   strided bf16 reduce), and it reuses the _pool windowing so it is byte-faithful
+   (the THVM_CONV_POOL=0 PAD-and-sum lowering mishandled a pre-padded input;
+   this path does not).  TConv2DKhKw stays the partial-sum reference. *)
+TConv2DIm2ColPoolGemm[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
+    inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut,
+    xCol6, xCol, wFlat, outFlat, outShaped, biasBcast
+},
+    inShape = tUopShape[input];
+    wShape  = tUopShape[weights];
+    {cIn, h, wd} = inShape;
+    cOut = wShape[[1]];  kh = wShape[[3]];  kw = wShape[[4]];
+    hOut = h - kh + 1;  wOut = wd - kw + 1;
+    xCol6 = conv2dPoolUnfold[input, cIn, h, wd, kh, kw, hOut, wOut];
+    (* Realize the unfold to a contiguous {cIn*kh*kw, hOut*wOut} matrix and the
+       weight to {cOut, cIn*kh*kw} so TMatMul sees two 2D leaves (TC-eligible). *)
+    xCol  = TRealize @ TUOpReshape[xCol6, {cIn * kh * kw, hOut * wOut}];
+    wFlat = TRealize @ TUOpReshape[weights, {cOut, cIn * kh * kw}];
+    outFlat   = TMatMul[wFlat, xCol];                   (* {cOut, hOut*wOut} *)
+    outShaped = TUOpReshape[outFlat, {cOut, hOut, wOut}];
+    biasBcast = TUOpExpand[TUOpReshape[bias, {cOut, 1, 1}], {cOut, hOut, wOut}];
     outShaped + biasBcast
 ]
 

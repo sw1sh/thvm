@@ -330,7 +330,8 @@ GeneralUtilities`SetUsage[TUOpSrcs, "TUOpSrcs[u$] returns the source-cell terms 
    NN/*.wl's SetUsage + definitions reuse them. *)
 {
     TAttention, TBatchNorm, TBatchNormTrain, TCategoricalCrossEntropy, TCausalMask,
-    TCausalMaskSym, TClip, TConv2D, TConv2DIm2Col, TConv2DIm2ColBatched, TConv2DKhKw,
+    TCausalMaskSym, TClip, TConv2D, TConv2DIm2Col, TConv2DIm2ColBatched,
+    TConv2DIm2ColPoolGemm, TConv2DKhKw,
     TCrossEntropyLoss, TDecodeAttend, TDot, TEmbedding, TEmbeddingMatrix, TFromLayer,
     TFromNet, TGELU, TGather, TGlorot, TGroupNorm, THeadAttention, TL2Loss, TLayerNorm,
     TLayerNormAffine, TLayerToTensors, TLayerWeights, TLinear, TLog, TMSELoss, TMatMul,
