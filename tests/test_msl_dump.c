@@ -192,6 +192,51 @@ int main(void) {
     dump("matmul 32x2304x25 (KOP_UPCAST N/4)", buf);
   }
 
+  // --- 6) conv-reduce WITH KOP_GROUPTOP (split-K) applied to the
+  // kh*kw*C_in contraction axis ---
+  // This is the VAE conv-decode shape: out[p] = sum_r(x[..]*w[..]) over a
+  // large reduce extent R (kh*kw*C_in).  The serial baseline reduces R in
+  // one thread (an `_acc` loop).  KOP_GROUPTOP(reduce, 16) -- the candidate
+  // the conv2d GROUP proposer now emits -- must lower to a threadgroup
+  // cooperative reduction (shared-memory accumulator + barrier), not a
+  // serial loop.  Eyeball: a `threadgroup` array + `threadgroup_barrier`
+  // appear, and the per-thread strided fold replaces the full-extent loop.
+  TEST_BEGIN("msl/conv-reduce-grouptop-parallel");
+  {
+    u32 P = 1024;       // output patches (small global grid)
+    u32 R = 4608;       // kh*kw*C_in = 3*3*512 -- the VAE conv contraction
+    u32 dC[1] = { P };
+    u32 dX[1] = { P * R };
+    u32 dW[1] = { R };
+    Term out = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dC);
+    Term mX  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dX);
+    Term mW  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dW);
+    Term in_bufs[2] = { mX, mW };
+    Term r_p  = uop_range(0, 0, P);   // output patch (LOOP)
+    Term r_r  = uop_range(1, 1, R);   // contraction (REDUCE)
+    Term kR   = uop_const(DT_INT32, R);
+    Term pR   = uop_int_binary(UOP_IMUL, r_p, kR);
+    Term addrX= uop_int_binary(UOP_IADD, pR, r_r);
+    Term ldX  = uop_index_e(mX, addrX);
+    Term ldW  = uop_index_e(mW, r_r);
+    Term mul  = uop_binary(UOP_MUL, ldX, ldW);
+    Term red  = uop_reduce(REDUCE_SUM, 1, mul);
+    Term st   = uop_store(out, r_p, red);
+    KOpt grp  = { KOP_GROUPTOP, 1 /*reduce axis*/, 16 };
+    Term st_g = uop_dag_apply_group_reduce(st, grp.axis, grp.arg);
+    CHECK(st_g != 0);   // factor 16 divides 4608 -> valid GROUP_REDUCE
+    char buf[16384];
+    FILE *fp = fmemopen(buf, sizeof(buf), "w");
+    cg_render_uop_kernel(st_g, "k_conv_grp", out, in_bufs, 2, fp);
+    fclose(fp);
+    dump("conv-reduce P=1024 R=4608 (KOP_GROUPTOP/16)", buf);
+    // The cooperative reduction must use threadgroup memory + a barrier
+    // (parallel reduction), not a serial single-thread accumulator loop.
+    CHECK(strstr(buf, "threadgroup") != NULL);
+    CHECK(strstr(buf, "threadgroup_barrier") != NULL
+          || strstr(buf, "simd_sum") != NULL);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
