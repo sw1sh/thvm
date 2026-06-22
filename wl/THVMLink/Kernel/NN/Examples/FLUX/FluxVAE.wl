@@ -20,7 +20,8 @@
    operands so the big gemm hits BLAS), the spatial self-attention, and the
    decoder block assembly.  All convs are stride-1; TConv2D is no-padding so
    3x3 convs pad H,W by 1 first.  Weights are bf16 in the diffusers vae
-   safetensors; cast to f32. *)
+   safetensors; the loader (FluxGenerate.wl fxVaeLoader) keeps them bf16 on a
+   GPU (bf16 conv reduces, ~half the decode) and f32 on CPU. *)
 
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
