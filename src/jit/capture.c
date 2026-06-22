@@ -175,7 +175,7 @@ static u32 JIT_PAUSE_DEPTH = 0;     // nested suppression for internal
                                     // benchmark fires (autotune, variants)
 
 static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots);
-static void jit_capture_autotune_finalized(JitCapture *c);
+static void jit_capture_autotune_finalized(u32 slot);
 static int jit_bufref_contains(JitCaptureBufRef const *refs, u32 n,
                                Backend *b, u32 buf_id);
 
@@ -425,20 +425,24 @@ fn void jit_capture_end(void) {
   // wipe the loc->tid cache) BEFORE finalize, which only inspects the
   // recorded op list.
   materialized_loc_jit_span_end();
+  u32 done_slot = JIT_ACTIVE_SLOT;
   if (JIT_ACTIVE_SLOT != 0) {
     jit_capture_finalize(JIT_ACTIVE_SLOT, NULL, 0);
   }
   JIT_ACTIVE_SLOT = 0;
   JIT_PAUSE_DEPTH = 0;
+  jit_capture_autotune_finalized(done_slot);
 }
 
 fn void jit_capture_end_with_result(Term root) {
   materialized_loc_jit_span_end();
+  u32 done_slot = JIT_ACTIVE_SLOT;
   if (JIT_ACTIVE_SLOT != 0) {
     jit_capture_finalize(JIT_ACTIVE_SLOT, &root, root != 0 ? 1u : 0u);
   }
   JIT_ACTIVE_SLOT = 0;
   JIT_PAUSE_DEPTH = 0;
+  jit_capture_autotune_finalized(done_slot);
 }
 
 // Multi-root variant: a JIT-captured function whose return is a LIST (or
@@ -450,11 +454,13 @@ fn void jit_capture_end_with_result(Term root) {
 // _TTerm return.  roots[] are the resolved result Terms (one per handle).
 fn void jit_capture_end_with_results(const Term *roots, u32 n_roots) {
   materialized_loc_jit_span_end();
+  u32 done_slot = JIT_ACTIVE_SLOT;
   if (JIT_ACTIVE_SLOT != 0) {
     jit_capture_finalize(JIT_ACTIVE_SLOT, roots, n_roots);
   }
   JIT_ACTIVE_SLOT = 0;
   JIT_PAUSE_DEPTH = 0;
+  jit_capture_autotune_finalized(done_slot);
 }
 
 fn void jit_capture_drop(u32 slot) {
@@ -1733,40 +1739,45 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
   }
 
   free(needed);
-
-  // === Post-capture autotune (tinygrad engine/jit.py jit_lower ->
-  // codegen/opt/search.py beam_search) ===
-  //
-  // The capture is finalized and JIT_ACTIVE_SLOT is about to clear, so the
-  // search runs OUTSIDE the capturing forward (jit_is_capturing() is false
-  // by the time we return).  But it can run on fresh scratch buffers right
-  // now via kernel_autotune_isolated -- that path never touches the live
-  // TENS graph buffers or the shape table, so it can't perturb the next
-  // stage's capture in the shared FLUX context.  Each captured kernel is
-  // beam-searched once (deduped); winners land in the disk cache, so the
-  // warm replay's fire-time trigger cache-HITs the tuned tiles.  Gated on
-  // JITBEAM/BEAM (jit.py:73).  Skip the live-buffer in-capture path
-  // entirely: that is what corrupted FLUX to NaN.
-  jit_capture_autotune_finalized(c);
 }
 
-// Walk the finalized op stream and beam-search each unique captured kernel
-// on isolated scratch buffers.  No-op unless the post-capture gate
-// (JITBEAM/BEAM/AUTOTUNE) is on.  Dedup so a kernel referenced by N
-// replay ops is searched once.  Sets jit_capture_pause around the whole
-// pass so the isolated dispatches (even though JIT_ACTIVE_SLOT is still
-// this slot here -- finalize runs before jit_capture_end clears it) never
-// re-enter the capture recorder.
-static void jit_capture_autotune_finalized(JitCapture *c) {
-  if (c == NULL || c->ops == NULL || c->n_ops == 0) {
+// Walk a just-finalized capture's op stream and beam-search each unique
+// captured kernel on isolated scratch buffers (tinygrad engine/jit.py
+// jit_lower -> codegen/opt/search.py beam_search: after capture, each
+// captured kernel is beam-searched on fresh rawbufs).
+//
+// MUST be called AFTER jit_capture_end* has cleared JIT_ACTIVE_SLOT and
+// run the finalize bookkeeping.  Running the search DURING finalize (while
+// the slot is still in_use, even paused) corrupted the subsequent replay:
+// the bench fires perturbed the finalize's buffer/liveness state, slowing
+// the warm DiT replay ~5x and breaking its output.  Decoupling the search
+// to after the slot clears makes it a clean, separate pass over the
+// recorded kids -- the live capture is fully sealed by then.
+//
+// No-op unless the post-capture gate (JITBEAM/BEAM/AUTOTUNE) is on.  Dedup
+// so a kernel referenced by N replay ops is searched once.  Winners land
+// in the disk cache AND are applied to ke->schedule; the warm replay then
+// uses the tuned tiles.
+static void jit_capture_autotune_finalized(u32 slot) {
+  if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) {
+    return;
+  }
+  JitCapture *c = &JIT_CAPTURES[slot];
+  if (!c->in_use || c->ops == NULL || c->n_ops == 0) {
     return;
   }
   if (!autotune_post_capture_enabled()) {
     return;
   }
+  // Master kill-switch for the post-capture pass (diagnostic / opt-out).
+  {
+    char const *off = getenv("THVM_POSTTUNE");
+    if (off != NULL && off[0] == '0') {
+      return;
+    }
+  }
   static int tr = -1;
   if (tr < 0) tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
-  jit_capture_pause();
   u32 n_tuned = 0;
   for (u32 i = 0; i < c->n_ops; i++) {
     JitCaptureOp *op = &c->ops[i];
@@ -1785,7 +1796,6 @@ static void jit_capture_autotune_finalized(JitCapture *c) {
       n_tuned++;
     }
   }
-  jit_capture_resume();
   if (tr) {
     fprintf(stderr, "[autotune] post-capture: tuned %u kernels (n_ops=%u)\n",
             n_tuned, c->n_ops);
