@@ -372,6 +372,10 @@ fn int jit_is_capturing(void) {
   return JIT_ACTIVE_SLOT != 0 && JIT_PAUSE_DEPTH == 0;
 }
 
+fn u32 jit_active_capture_slot(void) {
+  return JIT_ACTIVE_SLOT;
+}
+
 fn void jit_capture_pause(void) {
   if (JIT_ACTIVE_SLOT != 0) {
     JIT_PAUSE_DEPTH++;
@@ -2074,13 +2078,13 @@ static void jit_capture_autotune_finalized(u32 slot) {
   if (!jit_postcapture_jitbeam_enabled()) {
     return;
   }
-  // Explicit opt-in (THVM_POSTTUNE=1), default OFF even under JITBEAM.  The
-  // search WRITES winners to the autotune disk cache under the capture-phase
-  // key; a later JITBEAM capture's cache-load APPLIES them.  A tuned config can
-  // be correct on the iso-bench + single-image replay yet diverge in the
-  // 2-image batch replay (the batch-VAE NaN), so a cached winner could poison a
-  // future batch run.  Until that divergence is fixed, the pass only runs when
-  // explicitly enabled, so a bare JITBEAM run stays foundation-identical.
+  // Explicit opt-in (THVM_POSTTUNE=1), default OFF even under JITBEAM, so a
+  // bare JITBEAM run stays foundation-identical.  The search WRITES every
+  // winner to the autotune disk cache under the capture-phase key regardless
+  // of scope.  Re-bake APPLY (THVM_POSTTUNE_APPLY=1) is scoped per kernel in
+  // kautotune_posttune_drain (conv2d/reduce-unroll only by default): re-baking
+  // the attention/matmul/elementwise kernels diverges the multi-item batch
+  // replay, so only the batch-safe conv-class kernels keep their tuned tile.
   {
     char const *on = getenv("THVM_POSTTUNE");
     if (on == NULL || on[0] != '1') {

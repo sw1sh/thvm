@@ -217,6 +217,17 @@ void cg_profile_restore(u32 kid, u64 const in[6]) {
   s->gpu_samples    = in[4];
 }
 
+// Overwrite only the dispatch route, leaving the count/timing untouched.
+// The POSTTUNE re-bake apply uses this to keep a tuned kernel's TILED
+// route after cg_profile_restore rewinds the search's profile volume:
+// the first warm replay reads cg_kernel_dispatch_kind(kid) to pick its
+// dispatch path, so the route must already be the tiled one or the replay
+// routes the tiled kernel wrong (non-finite on the first call).
+void cg_profile_set_kind(u32 kid, KDispatchKind kind) {
+  if (kid == 0 || kid >= KPROFILE_CAP) return;
+  K_PROFILE[kid].kind = kind;
+}
+
 fn u64 cg_kernel_dispatch_count(u32 kid) {
   if (kid == 0 || kid >= KPROFILE_CAP) return 0;
   return K_PROFILE[kid].dispatch_count;

@@ -3380,6 +3380,7 @@ void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);
 // replay ICB-batching decision.  Opaque u64[6] blob.
 void  cg_profile_snapshot(u32 kid, u64 out[6]);
 void  cg_profile_restore(u32 kid, u64 const in[6]);
+void  cg_profile_set_kind(u32 kid, KDispatchKind kind);
 // Record a true per-kernel GPU-time sample (us).  Metal-only, gated on
 // THVM_METAL_PROFILE_PEROP=1.  External linkage so the .m TU can call it.
 void  cg_profile_record_gpu(u32 kid, u64 gpu_us);
