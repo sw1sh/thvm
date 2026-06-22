@@ -186,6 +186,25 @@ int main(void) {
   CHECK(strstr(buft, "(device const float4*)(in1 + ") != NULL);
   CHECK_EQ(compile_through_metal(buft), 0);
 
+  TEST_BEGIN("render-uop-metal/matmul-tc-tiled-autotune-packed-config");
+  // SAME M=128,N=64,K=16 tiled matmul, but the OPT_TC carries an autotune-
+  // PACKED tile config (tc_tile_pack) instead of factor 0.  The emitter must
+  // emit THAT geometry (lm=2 ln=1 rm=2 rn=2 kb=16 -> 32x16, KB=16) and the
+  // MSL must still compile through xcrun metal -- proving the autotune can
+  // drive an arbitrary VALID tile, not just the heuristic.
+  u32 packed_tile = tc_tile_pack(2, 1, 2, 2, 16);
+  CHECK(tc_tile_valid(128, 64, 16, 2, 1, 2, 2, 16, 8, 0, 0));
+  Term ttc_p  = uop_opt(tred, UOP_OPT_TC, packed_tile);
+  Term st_t_p = uop_store(out, tCaddr, ttc_p);
+  char buft_p[16384];
+  FILE *mpt_p = fmemopen(buft_p, sizeof(buft_p), "w");
+  cg_render_uop_kernel(st_t_p, "k_gemm_tiled_packed", out, t_in, 2, mpt_p);
+  fclose(mpt_p);
+  CHECK(strstr(buft_p,
+    "TC tiled matmul: tile 32x16, 2x1 simdgroups, 2x2 reg, KB=16 */") != NULL);
+  CHECK(strstr(buft_p, "simdgroup_multiply_accumulate(_acc[") != NULL);
+  CHECK_EQ(compile_through_metal(buft_p), 0);
+
   TEST_BEGIN("render-uop-metal/matmul-tc-tiled-q8-int8-weight");
   // q8 weight-only-quantized FLUX path: A {M,K} bf16, B = Transpose[Cast[
   // W_int8, bf16]] (W {N,K} contiguous int8, so B's K-axis has stride 1 and

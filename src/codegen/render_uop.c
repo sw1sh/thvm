@@ -2124,6 +2124,36 @@ static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
   return 1;
 }
 
+// If the KOP_TC opt carried an autotune-chosen tile config (factor packed
+// via tc_tile_pack, bit 31 set), unpack it and -- when it passes the SAME
+// validity/SMEM/occupancy check the env override applies -- overwrite the
+// heuristic-picked tile in *out.  An invalid or absent config leaves *out
+// untouched (the heuristic stays), so the default (factor 0/8/16/32) path
+// is byte-identical.  `unit`/`is_cuda` match the backend picker.
+static void rmu_tc_apply_opt_config(u32 tc_opt_factor,
+                                    u32 m_extent, u32 n_extent, u32 k_extent,
+                                    u32 unit, int is_cuda, int c_is_bf,
+                                    RmuTcTile *out) {
+  if (!tc_tile_is_packed(tc_opt_factor)) return;
+  u32 lm, ln, rm, rn, kb;
+  tc_tile_unpack(tc_opt_factor, &lm, &ln, &rm, &rn, &kb);
+  if (!tc_tile_valid(m_extent, n_extent, k_extent, lm, ln, rm, rn, kb,
+                     unit, is_cuda, c_is_bf)) {
+    if (getenv("THVM_TC_DBG"))
+      fprintf(stderr, "[tc-opt] M=%u N=%u K=%u packed tile "
+              "(lm=%u ln=%u rm=%u rn=%u kb=%u) INVALID -> heuristic\n",
+              m_extent, n_extent, k_extent, lm, ln, rm, rn, kb);
+    return;
+  }
+  out->local_m = lm; out->local_n = ln;
+  out->rm = rm;      out->rn = rn;
+  out->kb = kb;
+  if (getenv("THVM_TC_DBG"))
+    fprintf(stderr, "[tc-opt] M=%u N=%u K=%u -> packed tile "
+            "(lm=%u ln=%u rm=%u rn=%u kb=%u)\n",
+            m_extent, n_extent, k_extent, lm, ln, rm, rn, kb);
+}
+
 // CUDA WMMA tile picker: pick (local_m, local_n, rm, rn, kb) for an
 // (M,N,K) matmul where the unit fragment is 16x16x16 (nvcuda::wmma)
 // rather than Metal's 8x8 simdgroup_matrix.  TILE_M = local_m*rm*16,
@@ -3015,11 +3045,17 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // epilogue (the default / flag-off path; byte-identical codegen).
   Term store_value   = heap_read(sloc + 2);
   Term epilogue_value = 0, opt_tc_term = 0;
+  // tc_opt_node is the OPT_TC term itself (in BOTH the bare and the
+  // epilogue case) -- its `factor` carries the autotune-chosen tile
+  // config (tc_tile_pack), read below where the picker runs.
+  Term tc_opt_node = store_value;
   if (!(term_tag(store_value) == TAG_UOP && term_ext(store_value) == UOP_OPT
         && uop_opt_kind(store_value) == UOP_OPT_TC)) {
     if (!rmu_epilogue_find_single_tc(store_value, &opt_tc_term)) return 0;
     epilogue_value = store_value;
+    tc_opt_node = opt_tc_term;
   }
+  u32 tc_opt_factor = uop_opt_factor(tc_opt_node);
   // TC matmul shape assumes a single reduce axis (K).  Multi-axis
   // REDUCE inputs would need a separate dispatch path.
   if (uop_reduce_n_axes(tc_red) != 1) return 0;
@@ -3251,6 +3287,10 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       RmuTcTile tile;
       if (batch_axis_id == 0xFFFFFFFFu && !a_trans && m_par_c && n_par_c
           && rmu_tc_pick_tile_cuda(m_extent, n_extent, k_extent, c_is_bf, &tile)) {
+        // Autotune-chosen tile (KOP_TC packed factor) overrides the CUDA
+        // heuristic when it passes the wmma validity/SMEM/occupancy check.
+        rmu_tc_apply_opt_config(tc_opt_factor, m_extent, n_extent, k_extent,
+                                16u, /*is_cuda=*/1, c_is_bf, &tile);
         char a_nm[24], b_nm[24], c_nm[24];
         snprintf(a_nm, sizeof(a_nm), "%s", rmu_buf_name(buf_a));
         snprintf(b_nm, sizeof(b_nm), "%s", rmu_buf_name(buf_b));
@@ -3496,6 +3536,11 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       snprintf(b_nm, sizeof(b_nm), "%s", rmu_buf_name(buf_b));
       snprintf(c_nm, sizeof(c_nm), "%s", rmu_buf_name(buf_c));
       int c_is_bf = (uop_buffer_dtype(buf_c) == DT_BF16);
+      // Autotune-chosen tile (KOP_TC packed factor) overrides the heuristic
+      // when valid -- the same hook the env override uses, now driven by the
+      // BEAM search instead of getenv.  Invalid/absent -> heuristic unchanged.
+      rmu_tc_apply_opt_config(tc_opt_factor, m_extent, n_extent, k_extent,
+                              8u, /*is_cuda=*/0, c_is_bf, &tile);
       // Stage as bfloat when A is bf16 and B is bf16 OR an int8 weight (the
       // q8 path casts char -> bfloat into the bfloat staging buffer, so the
       // MMA runs at the native bf16 tensor-core rate).  A bf16-A / int8-B

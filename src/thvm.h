@@ -2929,6 +2929,88 @@ fn Term uop_opt_target(Term t);   // 0 on tag mismatch
 fn u32  uop_opt_kind  (Term t);
 fn u32  uop_opt_factor(Term t);
 
+// === KOP_TC tile-config packing =====================================
+// The simdgroup/WMMA tiled matmul emitter (render_uop.c) is geometrised
+// by a RmuTcTile {local_m, local_n, rm, rn, kb}.  Historically that
+// struct was chosen SHAPE-HEURISTICALLY by rmu_tc_pick_tile and the
+// KOP_TC opt's `arg`/`factor` (the MMA tile-size hint 8/16/32) was
+// IGNORED by the emitter, so the autotune searched identical kernels.
+//
+// To make the tile autotune-searchable, the proposer now packs a full
+// RmuTcTile into the KOP_TC `arg` (== the OPT_TC node's `factor`).  The
+// emitter unpacks it and, if it passes the SAME validity/SMEM checks the
+// env-override path uses, emits THAT tile.  Bit 31 distinguishes a packed
+// config from a legacy heuristic hint (factor 0/8/16/32, bit 31 clear) so
+// the default path is byte-identical.
+//
+// Layout (low->high): lm:3 ln:3 rm:4 rn:4 kb:7 | bit31 = packed flag.
+#define TC_TILE_PACK_FLAG  0x80000000u
+static inline u32 tc_tile_pack(u32 lm, u32 ln, u32 rm, u32 rn, u32 kb) {
+  return TC_TILE_PACK_FLAG
+       | ((lm & 0x7u))
+       | ((ln & 0x7u) << 3)
+       | ((rm & 0xFu) << 6)
+       | ((rn & 0xFu) << 10)
+       | ((kb & 0x7Fu) << 14);
+}
+static inline int tc_tile_is_packed(u32 factor) {
+  return (factor & TC_TILE_PACK_FLAG) != 0u;
+}
+static inline void tc_tile_unpack(u32 factor, u32 *lm, u32 *ln,
+                                  u32 *rm, u32 *rn, u32 *kb) {
+  if (lm) *lm = (factor)        & 0x7u;
+  if (ln) *ln = (factor >> 3)   & 0x7u;
+  if (rm) *rm = (factor >> 6)   & 0xFu;
+  if (rn) *rn = (factor >> 10)  & 0xFu;
+  if (kb) *kb = (factor >> 14)  & 0x7Fu;
+}
+// Validity predicate shared by the proposer (so it only offers valid
+// candidates) and the emitter (so a packed config is used only when it
+// passes the SAME checks the env override applies, else falls back to the
+// heuristic -- never emitting invalid MSL).  `unit` is the MMA fragment
+// edge (8 = Metal simdgroup_matrix, 16 = CUDA wmma).  `is_cuda` selects
+// the kb step (8 for Metal, 16 for CUDA) and the per-block thread/smem
+// caps.  `c_is_bf` sizes the bf16 convert scratch (CUDA) so the SMEM
+// budget matches the emitter.  Returns 1 iff the tile divides the shape,
+// fits the per-block smem cap, and clears the thread/occupancy bound.
+static inline int tc_tile_valid(u32 m_extent, u32 n_extent, u32 k_extent,
+                                u32 lm, u32 ln, u32 rm, u32 rn, u32 kb,
+                                u32 unit, int is_cuda, int c_is_bf) {
+  if (lm < 1u || ln < 1u || rm < 1u || rn < 1u) return 0;
+  if ((m_extent % unit) != 0u || (n_extent % unit) != 0u
+      || (k_extent % unit) != 0u) return 0;
+  u32 mu = m_extent / unit, nu = n_extent / unit;
+  u32 tmu = lm * rm, tnu = ln * rn;
+  if (tmu == 0u || tnu == 0u) return 0;
+  if ((mu % tmu) != 0u || (nu % tnu) != 0u) return 0;
+  u32 kb_step = is_cuda ? 16u : 8u;
+  if (kb < kb_step || (kb % kb_step) != 0u || (k_extent % kb) != 0u) return 0;
+  u32 tile_m = tmu * unit, tile_n = tnu * unit;
+  if (is_cuda) {
+    // nvcuda::wmma: 32 threads/warp, lm*ln warps; cap 1024 threads/block.
+    if ((lm * ln * 32u) > 1024u) return 0;
+    // Static __shared__ cap (48 KiB).  A {tile_m x kb} + B {kb x tile_n}
+    // staging, +8 leading pad, 2-byte elems; bf16 out adds nwarps*256 f32.
+    u64 nwarps = (u64)lm * ln;
+    u64 c_scratch = c_is_bf ? nwarps * 256u * 4u : 0u;
+    u64 smem = (u64)(tile_m + tile_n) * (u64)(kb + 8u) * 2u + c_scratch;
+    if (smem > 48u * 1024u) return 0;
+  } else {
+    // Metal: 32 threads/simdgroup, lm*ln simdgroups; 1024 threads/tg cap.
+    if ((lm * ln * 32u) > 1024u) return 0;
+    // Threadgroup memory: double-buffered A/B staging (2x) at the worst-
+    // case 4-byte (float) stage; bf16 out adds nsg*64 f32 scratch.  Apple
+    // tg-memory limit 32 KiB.
+    u64 nsg = (u64)lm * ln;
+    u64 c_scratch = c_is_bf ? nsg * 64u * 4u : 0u;
+    u64 smem = (2ull * tile_m * kb + 2ull * kb * tile_n) * 4u + c_scratch;
+    if (smem > 32u * 1024u) return 0;
+  }
+  // Require real reuse: the output tile must span more than one fragment.
+  if (lm * rm * ln * rn <= 1u) return 0;
+  return 1;
+}
+
 // Recognise the matmul shape on a UOP_STORE root and wrap the inner
 // REDUCE with UOP_OPT(_, TC, 0) so render_uop's simdgroup_matrix
 // template fires. Returns the input root unchanged on any non-match.

@@ -47,9 +47,14 @@ fn void kernel_opts_propose_tc_counters_reset(void) {
   PROPOSE_TC_DAG = 0;
 }
 
+static u32 propose_append_unique(KOpt *out, u32 n, u32 cap, KOpt cand);
+
 // Matmul-shape + dtype gate for the TC tile-size proposer.  Reads
-// uop_dag_classify_matmul_shape over ke->cached_lift.store_root.
-static int propose_tc_classify(KernelEntry const *ke, u32 *out_dtype) {
+// uop_dag_classify_matmul_shape over ke->cached_lift.store_root.  When
+// out_shape is non-NULL it also returns the full {M,N,K,dtype} so the
+// proposer can enumerate valid RmuTcTile candidates for the search.
+static int propose_tc_classify(KernelEntry const *ke, u32 *out_dtype,
+                               UopDagGemmShape *out_shape) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
   UopDagGemmShape shape;
   if (!uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke,
@@ -57,8 +62,48 @@ static int propose_tc_classify(KernelEntry const *ke, u32 *out_dtype) {
     return 0;
   }
   if (out_dtype != NULL) *out_dtype = shape.dtype;
+  if (out_shape != NULL) *out_shape = shape;
   PROPOSE_TC_DAG++;
   return 1;
+}
+
+// Enumerate VALID simdgroup_matrix tile configs for an (M,N,K) matmul and
+// emit them as packed KOP_TC candidates (tc_tile_pack -> the opt arg the
+// emitter unpacks).  Only tiles that pass tc_tile_valid -- the SAME
+// divisibility/threadgroup-memory/occupancy check the emitter applies --
+// are offered, so the autotune never benches an invalid kernel.  Ordered
+// largest-tile-first (best A/B fragment reuse) so the cap keeps the most
+// promising candidates.  This is the matmul analogue of tinygrad's
+// TC+UPCAST+LOCAL action space: the tile config IS the matmul's
+// UPCAST/LOCAL, carried inside KOP_TC (never as an independent split,
+// which corrupts the simdgroup emitter).
+static u32 propose_tc_tile_candidates(u32 M, u32 N, u32 K, int c_is_bf,
+                                      KOpt *out, u32 n, u32 cap) {
+  // local_m/local_n: simdgroups along M/N.  rm/rn: register 8x8 tiles per
+  // simdgroup.  kb: K-block staged in threadgroup memory (multiple of 8).
+  static const u32 locals[]  = {4, 2, 1};
+  static const u32 regs[]    = {8, 4, 2, 1};
+  static const u32 kbs[]     = {64, 32, 16, 8};
+  for (u32 li = 0; li < sizeof(locals)/sizeof(*locals) && n < cap; li++) {
+    for (u32 lj = 0; lj < sizeof(locals)/sizeof(*locals) && n < cap; lj++) {
+      for (u32 ri = 0; ri < sizeof(regs)/sizeof(*regs) && n < cap; ri++) {
+        for (u32 rj = 0; rj < sizeof(regs)/sizeof(*regs) && n < cap; rj++) {
+          for (u32 ki = 0; ki < sizeof(kbs)/sizeof(*kbs) && n < cap; ki++) {
+            u32 lm = locals[li], ln = locals[lj];
+            u32 rm = regs[ri],   rn = regs[rj];
+            u32 kb = kbs[ki];
+            if (!tc_tile_valid(M, N, K, lm, ln, rm, rn, kb,
+                               /*unit=*/8u, /*is_cuda=*/0, c_is_bf)) {
+              continue;
+            }
+            n = propose_append_unique(out, n, cap,
+                  (KOpt){ KOP_TC, 0, tc_tile_pack(lm, ln, rm, rn, kb) });
+          }
+        }
+      }
+    }
+  }
+  return n;
 }
 
 static u32 propose_reduce_axis_size(KernelEntry const *ke) {
@@ -362,16 +407,18 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   // for a FLUX matmul -- the whole motivation for porting the rich set.
   if (propose_metal_backend_enabled() && ke->cached_lift.store_root != 0) {
     u32 dtype = 0;
-    if (propose_tc_classify(ke, &dtype)
+    UopDagGemmShape shape;
+    if (propose_tc_classify(ke, &dtype, &shape)
         && (dtype == DT_FP32 || dtype == DT_BF16)) {
-      static const u32 tc_tiles[] = {32, 16, 8};
-      u32 n_tc_tiles = sizeof(tc_tiles)/sizeof(*tc_tiles);
-      for (u32 i = 0; i < n_tc_tiles && n < cap; i++) {
-        out[n].op   = KOP_TC;
-        out[n].axis = 0;
-        out[n].arg  = tc_tiles[i];
-        n++;
-      }
+      // Rich tile search: enumerate every VALID simdgroup_matrix tile
+      // (local_m/n x rm/rn x kb) for this {M,N,K} and offer each as a
+      // packed KOP_TC.  The emitter unpacks + re-validates each before
+      // use; the heuristic remains the no-config default.  This replaces
+      // the old thin {32,16,8} arg set (which the emitter ignored, so the
+      // search saw 3 identical kernels) -- the actual FLUX perf lever.
+      int c_is_bf = (dtype == DT_BF16);
+      n = propose_tc_tile_candidates(shape.M, shape.N, shape.K, c_is_bf,
+                                     out, n, cap);
     }
   }
 

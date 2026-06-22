@@ -1541,6 +1541,77 @@ int main(void) {
     unlink(dl_path);
   }
 
+  TEST_BEGIN("render-uop/tc-tiled-opt-config-flows-to-emitter");
+  // The KOP_TC autotune carries a tile config in the OPT_TC factor
+  // (tc_tile_pack).  Build the SAME M=128,N=64,K=16 tiled matmul twice:
+  // once with factor 0 (heuristic) and once with a PACKED config, and
+  // assert the emitted "TC tiled matmul: ..." geometry comment reflects
+  // THAT config -- proving the autotune can now control the tile (the
+  // emitter no longer ignores the opt arg).
+  {
+    u32 cdimsO[2] = {128, 64};
+    u32 cdimsA[2] = {128, 16};
+    u32 cdimsB[2] = {16, 64};
+    Term cOut = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, cdimsO);
+    Term cA   = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, cdimsA);
+    Term cB   = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, cdimsB);
+    Term c_in[2] = { cA, cB };
+    Term cm = uop_range(0, 5 /*GLOBAL*/, 128);
+    Term cn = uop_range(1, 5 /*GLOBAL*/, 64);
+    Term ck = uop_range(2, 1 /*REDUCE*/, 16);
+    Term cc16 = uop_const(DT_INT32, 16);
+    Term cc64 = uop_const(DT_INT32, 64);
+    Term cAaddr = uop_int_binary(UOP_IADD,
+                    uop_int_binary(UOP_IMUL, cm, cc16), ck);
+    Term cBaddr = uop_int_binary(UOP_IADD,
+                    uop_int_binary(UOP_IMUL, ck, cc64), cn);
+    Term cmul = uop_binary(UOP_MUL, uop_index_e(cA, cAaddr),
+                           uop_index_e(cB, cBaddr));
+    Term cred = uop_reduce(REDUCE_SUM, 2, cmul);
+    Term cCaddr = uop_int_binary(UOP_IADD,
+                    uop_int_binary(UOP_IMUL, cm, cc64), cn);
+    // Heuristic (factor 0).
+    Term hOpt = uop_opt(cred, UOP_OPT_TC, 0);
+    Term hSt  = uop_store(cOut, cCaddr, hOpt);
+    char hBuf[16384];
+    FILE *hFp = fmemopen(hBuf, sizeof(hBuf), "w");
+    cg_render_uop_kernel(hSt, "k_tc_heur", cOut, c_in, 2, hFp);
+    fclose(hFp);
+    CHECK(contains(hBuf, "TC tiled matmul"));
+    // The heuristic fixes KB=8 -- so the comment must say KB=8.
+    CHECK(contains(hBuf, "KB=8 */"));
+
+    // Packed config: lm=2 ln=1 rm=2 rn=2 kb=16.  Valid for M=128,N=64,K=16:
+    // tile 32x16, 2x1 simdgroups, 2x2 reg, KB=16.  Distinct from the
+    // heuristic (KB differs; the heuristic never picks KB=16).
+    u32 packed = tc_tile_pack(2, 1, 2, 2, 16);
+    CHECK(tc_tile_is_packed(packed));
+    Term pOpt = uop_opt(cred, UOP_OPT_TC, packed);
+    Term pSt  = uop_store(cOut, cCaddr, pOpt);
+    char pBuf[16384];
+    FILE *pFp = fmemopen(pBuf, sizeof(pBuf), "w");
+    cg_render_uop_kernel(pSt, "k_tc_packed", cOut, c_in, 2, pFp);
+    fclose(pFp);
+    // The emitted geometry must reflect the PACKED tile, not the heuristic.
+    CHECK(contains(pBuf,
+      "TC tiled matmul: tile 32x16, 2x1 simdgroups, 2x2 reg, KB=16 */"));
+
+    // A packed config that DOES NOT divide the shape must be REJECTED by
+    // the emitter (tc_tile_valid fails) and fall back to the heuristic --
+    // never emit invalid MSL.  lm=4 rm=8 -> tile_m needs m8=16 % 32 != 0.
+    u32 bad = tc_tile_pack(4, 1, 8, 2, 16);
+    CHECK(!tc_tile_valid(128, 64, 16, 4, 1, 8, 2, 16, 8, 0, 0));
+    Term bOpt = uop_opt(cred, UOP_OPT_TC, bad);
+    Term bSt  = uop_store(cOut, cCaddr, bOpt);
+    char bBuf[16384];
+    FILE *bFp = fmemopen(bBuf, sizeof(bBuf), "w");
+    cg_render_uop_kernel(bSt, "k_tc_bad", cOut, c_in, 2, bFp);
+    fclose(bFp);
+    // Invalid config -> heuristic KB=8 (byte-identical to the factor-0 case).
+    CHECK(contains(bBuf, "TC tiled matmul"));
+    CHECK(contains(bBuf, "KB=8 */"));
+  }
+
   thvm_free();
   TEST_REPORT();
 }
