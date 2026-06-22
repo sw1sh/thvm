@@ -36,6 +36,18 @@ static id<MTLLibrary>      METAL_LIB    = nil;
 static id<MTLCommandBuffer> METAL_BATCH_CMD = nil;
 static u32                  METAL_BATCH_DEPTH = 0;
 static u32                  METAL_ENCODING_DEPTH = 0;
+// Pipelined flush: a committed-but-not-yet-waited command buffer.  A realize-
+// boundary flush commits its batch and returns WITHOUT blocking, so the CPU can
+// encode the next realize while the GPU runs this one (the queue executes
+// committed buffers in order, so the next realize's kernels still see this
+// one's outputs without a CPU sync).  The deferred-decref free of THIS batch's
+// buffers waits until this buffer completes -- which the NEXT flush forces
+// before it frees -- so a buffer is never freed while the GPU still reads it.
+// A host read (buf_read) or an explicit drain waits on the pending buffer.
+static id<MTLCommandBuffer> METAL_PENDING_CMD = nil;
+static u32                 *METAL_PENDING_DECREFS = NULL;
+static u32                  METAL_PENDING_DECREF_LEN = 0;
+static u32                  METAL_PENDING_DECREF_CAP = 0;
 
 static void metal_buf_decref(u32 buf_id);
 static void metal_buf_free(u32 buf_id);
@@ -183,13 +195,85 @@ static u64 metal_freelist_limit_bytes(void) {
   return 256ull * 1024ull * 1024ull;
 }
 
+static u64 METAL_FLUSH_COMMITS;       // batched command-buffer commits+waits
+static u64 METAL_STANDALONE_COMMITS;  // per-kernel standalone commits+waits
+static u64 METAL_FLUSH_WAIT_US;       // total wall spent in commit+waitUntilCompleted
+
+// Pipelining is opt-in (THVM_METAL_PIPELINE).  Default OFF preserves the
+// commit+wait-per-flush behaviour; the FLUX session turns it ON (fxBoundMemory)
+// to overlap CPU encode of realize N+1 with GPU exec of realize N.
+static int metal_pipeline_enabled(void) {
+  static int known = 0, on = 0;
+  if (!known) { char const *e = getenv("THVM_METAL_PIPELINE");
+                on = (e != NULL && e[0] == '1'); known = 1; }
+  return on;
+}
+
+// Run the deferred decrefs that were captured for the just-completed buffer.
+static void metal_run_pending_decrefs(void) {
+  u32 n = METAL_PENDING_DECREF_LEN;
+  METAL_PENDING_DECREF_LEN = 0;
+  for (u32 i = 0; i < n; i++) metal_buf_decref(METAL_PENDING_DECREFS[i]);
+}
+
+// Wait on the pending (committed-but-unwaited) buffer, if any, then free the
+// buffers that were deferred while it was in flight.  No-op when nothing is
+// pending.  Called before any host read, before freeing the current batch's
+// buffers, and at shutdown.
+static void metal_drain_pending(void) {
+  if (METAL_PENDING_CMD != nil) {
+    u64 _t0 = cg_now_us();
+    [METAL_PENDING_CMD waitUntilCompleted];
+    METAL_FLUSH_WAIT_US += cg_now_us() - _t0;
+    metal_record_gpu_time(METAL_PENDING_CMD);
+    METAL_PENDING_CMD = nil;
+    metal_run_pending_decrefs();
+  }
+}
+
 static void metal_dispatch_flush(void) {
   id<MTLCommandBuffer> cmd = METAL_BATCH_CMD;
   METAL_BATCH_CMD = nil;
+  if (metal_pipeline_enabled()) {
+    // Pipelined: drain the PREVIOUS pending buffer (freeing its deferred
+    // buffers now that the GPU is past them), then commit THIS batch WITHOUT
+    // blocking and stash it + its deferred-decref list as the new pending.
+    metal_drain_pending();
+    if (cmd != nil) {
+      [cmd commit];
+      METAL_FLUSH_COMMITS++;
+      METAL_PENDING_CMD = cmd;
+      // Move the current deferred-decref list into the pending slot (it must
+      // not be freed until THIS buffer completes -- the next drain).
+      u32 n = METAL_DEFER_DECREF_LEN;
+      if (n > METAL_PENDING_DECREF_CAP) {
+        METAL_PENDING_DECREFS = (u32 *)realloc(METAL_PENDING_DECREFS,
+                                               (size_t)n * sizeof(u32));
+        METAL_PENDING_DECREF_CAP = METAL_PENDING_DECREFS ? n : 0;
+      }
+      if (METAL_PENDING_DECREFS != NULL) {
+        memcpy(METAL_PENDING_DECREFS, METAL_DEFER_DECREFS, (size_t)n * sizeof(u32));
+        METAL_PENDING_DECREF_LEN = n;
+      } else {
+        // realloc failed: fall back to freeing now (after a wait for safety).
+        [cmd waitUntilCompleted];
+        METAL_PENDING_CMD = nil;
+        for (u32 i = 0; i < n; i++) metal_buf_decref(METAL_DEFER_DECREFS[i]);
+      }
+      METAL_DEFER_DECREF_LEN = 0;
+      METAL_DEFER_DECREF_BYTES = 0;
+    }
+    metal_record_memory_peak();
+    return;
+  }
+  // Non-pipelined (default): commit + wait, then free deferred buffers.
   if (cmd != nil) {
+    u64 _t0 = cg_now_us();
     [cmd commit];
     [cmd waitUntilCompleted];
+    METAL_FLUSH_WAIT_US += cg_now_us() - _t0;
     metal_record_gpu_time(cmd);
+    METAL_FLUSH_COMMITS++;
   }
   u32 n = METAL_DEFER_DECREF_LEN;
   METAL_DEFER_DECREF_LEN = 0;
@@ -209,10 +293,14 @@ static void metal_dispatch_begin(void) {
   METAL_BATCH_DEPTH++;
 }
 
+static u64 METAL_FLUSH_FROM_REALIZE_END;
+static u64 METAL_FLUSH_FROM_BUF_READ;
+
 static void metal_dispatch_end(void) {
   if (METAL_BATCH_DEPTH == 0) return;
   METAL_BATCH_DEPTH--;
   if (METAL_BATCH_DEPTH == 0) {
+    if (METAL_BATCH_CMD != nil) METAL_FLUSH_FROM_REALIZE_END++;
     metal_dispatch_flush();
   }
 }
@@ -233,6 +321,7 @@ static void metal_submit_if_standalone(id<MTLCommandBuffer> cmd) {
   [cmd commit];
   [cmd waitUntilCompleted];
   metal_record_gpu_time(cmd);
+  METAL_STANDALONE_COMMITS++;
 }
 
 // Forward decls for the JIT counters: definitions live inside the
@@ -976,11 +1065,15 @@ static void metal_buf_incref(u32 buf_id) {
   metal_record_memory_peak();
 }
 
+static u64 METAL_DECREF_FLUSHES;  // refcount==1 guard flushes (buffer-lifetime churn)
+
 static void metal_buf_decref(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
   if (METAL_BUFS[buf_id].refcount == 0) return;
   if (METAL_BUFS[buf_id].refcount == 1) {
+    if (METAL_BATCH_CMD != nil) METAL_DECREF_FLUSHES++;
     metal_dispatch_flush();
+    metal_drain_pending();   // about to free: the GPU must be done reading it
   }
   if (--METAL_BUFS[buf_id].refcount != 0) return;
   if (!metal_buf_freelist_push_impl(buf_id)) {
@@ -1013,7 +1106,11 @@ static void metal_buf_decref_after_batch(u32 buf_id) {
 }
 
 static int metal_buf_read(u32 buf_id, void *dst, u64 nbytes) {
+  if (METAL_BATCH_CMD != nil) METAL_FLUSH_FROM_BUF_READ++;
   metal_dispatch_flush();
+  // Pipelined flushes commit without waiting; a host read of GPU-written bytes
+  // must block until the writing buffer (now pending) completes.
+  metal_drain_pending();
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
   if (METAL_BUFS[buf_id].buf == nil)            return -1;
   if (METAL_BUFS[buf_id].refcount == 0)         return -1;
@@ -1030,6 +1127,9 @@ static int metal_buf_read(u32 buf_id, void *dst, u64 nbytes) {
 
 static int metal_buf_write(u32 buf_id, const void *src, u64 nbytes) {
   metal_dispatch_flush();
+  // A host write must not race the GPU still reading these bytes in the
+  // pending (committed-but-unwaited) buffer.
+  metal_drain_pending();
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
   if (METAL_BUFS[buf_id].buf == nil)            return -1;
   if (METAL_BUFS[buf_id].refcount == 0)         return -1;
@@ -1122,6 +1222,7 @@ void thvm_metal_buf_pool_rollback_with_preserve(u32 wm) {
   if (wm < 1) wm = 1;
   if (wm > METAL_BUFS_NEXT) return;
   metal_dispatch_flush();
+  metal_drain_pending();   // a freed buffer must not still be read by the GPU
   for (u32 i = wm; i < METAL_BUFS_NEXT; i++) {
     if (METAL_BUFS[i].preserved) continue;
     if (METAL_BUFS[i].jit_pinned) continue;   // sticky JIT retain
@@ -1164,6 +1265,7 @@ void thvm_metal_buf_clear_preserved(u32 wm) {
 u64 thvm_metal_buf_free_unpreserved_all(void) {
   u64 freed = 0;
   metal_dispatch_flush();
+  metal_drain_pending();   // a freed buffer must not still be read by the GPU
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
     if (METAL_BUFS[i].buf == nil) continue;
     if (METAL_BUFS[i].refcount == 0) continue;
@@ -1279,6 +1381,14 @@ static void metal_shutdown(void) {
             (unsigned long long)METAL_ZC_WRAPS,
             (unsigned long long)(METAL_ZC_FAULT_BYTES / (1024 * 1024)),
             (unsigned long long)(METAL_ZC_FAULT_US / 1000));
+    fprintf(stderr,
+            "thvm: metal_commits stats -- batched=%llu standalone=%llu decref_flushes=%llu wait_ms=%llu from_realize_end=%llu from_buf_read=%llu\n",
+            (unsigned long long)METAL_FLUSH_COMMITS,
+            (unsigned long long)METAL_STANDALONE_COMMITS,
+            (unsigned long long)METAL_DECREF_FLUSHES,
+            (unsigned long long)(METAL_FLUSH_WAIT_US / 1000),
+            (unsigned long long)METAL_FLUSH_FROM_REALIZE_END,
+            (unsigned long long)METAL_FLUSH_FROM_BUF_READ);
   }
   METAL_BATCH_DEPTH = 0;
   METAL_FREELIST_LEN = 0;
