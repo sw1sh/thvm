@@ -3395,6 +3395,15 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
 // NULL.  Used by the WL TMetalGpuTime[] surface for per-step GPU-time
 // measurement.
 void thvm_metal_gpu_time(u64 *out_total_us, u64 *out_flush_count);
+// Drop every in-memory compiled MTLComputePipelineState (the JIT MSL
+// PSO cache, 256 slots).  The BEAM autotune search compiles hundreds
+// of throwaway candidate PSOs that overflow the fixed-size cache;
+// once full, metal_jit_lookup_idx returns table-full and EVERY later
+// dispatch bypasses the cache and recompiles (bypass>0, warm replay
+// regresses).  Calling this after a kernel's search clears the
+// candidate garbage so the warm replay repopulates with only the
+// live (heuristic-or-winner) kernels and never thrashes.
+void thvm_metal_jit_drop_in_memory_psos(void);
 #endif
 
 fn void cpu_jit_cache_reset(void);

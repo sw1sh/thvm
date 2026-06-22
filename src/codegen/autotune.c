@@ -862,13 +862,18 @@ fn int kernel_autotune(u32 kid) {
                              depth, beam_width, &cached_seq, NULL)
         && kautotune_cached_seq_allowed(&cached_seq, candidates, n_cand)) {
       ke->schedule->autotuned = 1;
-      axes_reset_to_default(ke);
       if (cached_seq.n != 0) {
+        axes_reset_to_default(ke);
         if (kautotune_apply_seq(ke, &cached_seq)) {
           return 1;
         }
         axes_reset_to_default(ke);
       } else {
+        // Empty seq = the speed-sanity gate decided the heuristic
+        // (hand_opts, which ran on the fire path BEFORE this autotune
+        // call) beat every candidate.  The kernel is currently in that
+        // heuristic-optimized state, so do NOT axes_reset_to_default --
+        // that would strip the winning heuristic tile.  Just keep it.
         return 0;
       }
     }
@@ -878,6 +883,44 @@ fn int kernel_autotune(u32 kid) {
   // not re-enter this path if a backend helper fires through the public
   // kernel path.  axes_reset_to_default preserves the flag.
   ke->schedule->autotuned = 1;
+
+  // Speed-sanity gate (the time analogue of the NaN/parity gate): the
+  // kernel arrives here ALREADY in its heuristic-optimized state
+  // (kernel_hand_coded_opts ran on the fire path before this call).
+  // The search below resets to the PRE-heuristic no-opt baseline and
+  // can only reach a thin proposer candidate set -- which for the big
+  // single-block projections is far worse than the heuristic tile it
+  // would discard.  Measure the heuristic's real time NOW, before the
+  // first reset destroys that state; we refuse to leave the kernel
+  // slower than this.
+  //
+  // SNAPSHOT the heuristic state verbatim so the losing branch can
+  // restore it bit-for-bit.  The heuristic lives in TWO places: the
+  // KpSchedule's applied_opts log (tile_anno axes derive from it) and
+  // the in-place-mutated cached_lift.store_root DAG (the matmul-TC
+  // path rewrites store_root).  Re-running kernel_hand_coded_opts on
+  // the reset DAG does NOT reproduce it (the search's apply/reset
+  // cycles leave the DAG in a state from which the heuristic re-derives
+  // a different, slow tile), so we copy + restore both fields directly.
+  KpSchedule heuristic_sched = *ke->schedule;
+  Term       heuristic_store_root = ke->cached_lift.store_root;
+
+  // Clean the JIT MSL PSO cache BEFORE measuring anything.  By the time
+  // a late kernel (e.g. block-20's projection) reaches the search, the
+  // fixed-size in-memory PSO cache is FULL of earlier kernels' PSOs.  A
+  // dispatch whose key isn't resident then BYPASSES the cache and
+  // recompiles the MSL EVERY fire -- so heuristic_us (and each
+  // candidate's us) would be dominated by recompile time, not the
+  // kernel's true GPU cost.  That inflated heuristic_us let a slow tile
+  // "beat" the heuristic and sail through the gate (the 0.3-TFLOPS
+  // big-projection picks at full scale).  Dropping here means this
+  // kernel's heuristic + its handful of candidates are the ONLY entries,
+  // so kernel_bench_us(min over n_runs) measures the true cached time
+  // (the first cold fire is filtered out by the min).
+#ifdef THVM_HAS_METAL
+  thvm_metal_jit_drop_in_memory_psos();
+#endif
+  u64 heuristic_us = (kernel_bench_fire(kid), kernel_bench_us(kid, n_runs));
 
   // Baseline (no opts).  Warm the JIT so the first variant doesn't
   // pay the compile cost alone -- compile each before timing the
@@ -956,22 +999,85 @@ fn int kernel_autotune(u32 kid) {
     }
   }
 
-  // Re-apply the winner (or leave baseline if nothing beat it).
-  // `autotuned` was set at the start; reset_to_default preserves it.
-  axes_reset_to_default(ke);
-  if (best_seq.n != 0) {
-    int applied = kautotune_apply_seq(ke, &best_seq);
-    if (applied && cache_ready) {
+  // Speed-sanity gate: NEVER leave the kernel slower than the
+  // heuristic-optimized state it arrived in.  If no candidate beat the
+  // heuristic by a healthy MARGIN, restore that state from the verbatim
+  // snapshot and cache an EMPTY seq.  The cache-load path treats n==0 as
+  // "keep heuristic" (it does NOT reset), so a later cache HIT replays
+  // the heuristic correctly (hand_opts runs on the fire path before this
+  // autotune).
+  //
+  // Why a margin, not just `best_us < heuristic_us`: the autotune benches
+  // each kernel in ISOLATION (one dispatch, waitUntilCompleted), but the
+  // warm path replays ALL kernels batched in a single ICB.  A tile that
+  // shaves a few microseconds off a kernel's SOLO latency (e.g. a tiny
+  // threadgroup with low occupancy) is frequently SLOWER once it has to
+  // share the GPU with hundreds of sibling kernels.  A marginal,
+  // noise-level isolated win (~10us on a ~130us kernel) routinely flips
+  // to a loss on replay.  Requiring the winner to be at least MARGIN_PCT
+  // faster filters those out and only overrides the (well-tuned,
+  // tinygrad-faithful) heuristic when the isolated speedup is large.
+  // Default 10% (THVM_AUTOTUNE_MARGIN_PCT overrides); raise it toward 50
+  // for a fleet of tiny kernels whose isolated wins don't transfer.
+  u32 margin_pct = 10;
+  {
+    char const *m = getenv("THVM_AUTOTUNE_MARGIN_PCT");
+    if (m != NULL && m[0] != '\0') {
+      int v = atoi(m);
+      if (v >= 0 && v <= 100) margin_pct = (u32)v;
+    }
+  }
+  // Winner accepted iff best_us <= heuristic_us * (1 - margin_pct/100).
+  // Integer form: best_us * 100 <= heuristic_us * (100 - margin_pct).
+  int beats_margin = ((u64)best_us * 100
+                      <= (u64)heuristic_us * (100 - margin_pct));
+  int keep_heuristic = (best_seq.n == 0 || !beats_margin);
+  if (getenv("THVM_AUTOTUNE_TRACE") != NULL) {
+    fprintf(stderr, "[autotune-gate] kid=%u heuristic_us=%llu best_us=%llu "
+            "best_seq.n=%u -> %s\n", kid,
+            (unsigned long long)heuristic_us, (unsigned long long)best_us,
+            best_seq.n, keep_heuristic ? "KEEP-HEURISTIC" : "APPLY-WINNER");
+  }
+
+  int applied_winner = 0;
+  if (!keep_heuristic) {
+    // The autotune genuinely beat the heuristic: apply the winner.
+    // `autotuned` was set at the start; reset_to_default preserves it.
+    axes_reset_to_default(ke);
+    applied_winner = kautotune_apply_seq(ke, &best_seq);
+    // Apply of the winning seq SHOULD succeed (it benched fine); if it
+    // somehow declines, fall through to the heuristic restore.
+  }
+  if (applied_winner) {
+    if (cache_ready) {
       kautotune_cache_store(cache_path, cache_key, backend_id, n_runs,
                             depth, beam_width, best_seq, best_us);
     }
-    return applied;
+  } else {
+    // Restore the heuristic state bit-for-bit (KpSchedule + store_root)
+    // and cache an empty seq.
+    *ke->schedule = heuristic_sched;
+    ke->cached_lift.store_root = heuristic_store_root;
+    if (cache_ready) {
+      KOptSeq empty = {0};
+      kautotune_cache_store(cache_path, cache_key, backend_id, n_runs,
+                            depth, beam_width, empty, heuristic_us);
+    }
   }
-  if (cache_ready) {
-    kautotune_cache_store(cache_path, cache_key, backend_id, n_runs,
-                          depth, beam_width, best_seq, best_us);
-  }
-  return 0;
+
+  // Drop the JIT MSL PSO cache.  The search above compiled one PSO per
+  // benched candidate (~depth*n_cand per kernel), which overflows the
+  // fixed-size in-memory cache; once full, EVERY subsequent dispatch
+  // (warm replay included) bypasses the cache and recompiles -- a real
+  // warm regression independent of which tile won.  Dropping here means
+  // the final (heuristic-or-winner) kernel recompiles ONCE on the next
+  // dispatch and the warm replay repopulates the cache with only the
+  // live kernels.  Metal-only today (the search lives behind the Metal
+  // tile path); CPU/CUDA caches are unaffected.
+#ifdef THVM_HAS_METAL
+  thvm_metal_jit_drop_in_memory_psos();
+#endif
+  return applied_winner ? 1 : 0;
 }
 
 // Should this kernel auto-tune on its next fire?  Three conditions:
