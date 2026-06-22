@@ -320,6 +320,15 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
     qwPaths = FileNameJoin[{modelDir, "text_encoder", #}] & /@
         {"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"};
     vaePath = FileNameJoin[{modelDir, "vae", "diffusion_pytorch_model.safetensors"}];
+    (* Warm the OS page cache for all three safetensors NOW, on background
+       threads, so the ~6 s of SSD read overlaps the JIT capture below instead
+       of stalling serially inside the first forward's zero-copy fault-in (each
+       weight is faulted resident at its first matmul; with the page already
+       cached that fault runs at memory speed).  Non-blocking -- returns at once;
+       the reads race ahead of the loaders.  Transformer first (its velocity
+       capture runs first AND is the bulk + the long capture), then Qwen, then
+       the small VAE. *)
+    TDiskPrefetchAsync[Join[{tfPath}, qwPaths, {vaePath}]];
     fxCfg = <|"eps" -> 1.*^-6, "num_double" -> 5, "num_single" -> 20, "heads" -> 24, "head_dim" -> 128|>;
     qwCfg = <|"heads" -> 32, "kv_heads" -> 8, "head_dim" -> 128, "eps" -> 1.*^-6,
               "theta" -> 1000000, "layers" -> 27, "captureLayers" -> {8, 17, 26}|>;

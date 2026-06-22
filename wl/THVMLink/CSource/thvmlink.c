@@ -1647,6 +1647,24 @@ EXTERN_C DLLEXPORT int thvm_wl_disk_drop_weight(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// Kick off a detached background read() of a whole safetensors file so its
+// bytes land in the OS page cache before the zero-copy wrap's fault-in loop
+// (src/backend/metal/_.m) touches them at the first matmul.  The FLUX session
+// calls this for the transformer / Qwen / VAE files at build start: the ~6 s
+// of SSD read then overlaps the JIT capture instead of stalling serially
+// inside the first forward.  Best-effort (returns 1 always); see
+// thvm_file_prefetch_async.  args[0] = path (UTF8String).
+EXTERN_C DLLEXPORT int thvm_wl_file_prefetch_async(WolframLibraryData libData,
+                                                   mint argc, MArgument *args,
+                                                   MArgument res) {
+  (void)argc;
+  char *path = MArgument_getUTF8String(args[0]);
+  thvm_file_prefetch_async(path);
+  libData->UTF8String_disown(path);
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
 // Debug-only: dump View internals for a TenDesc as a flat integer
 // MTensor: {ndim, dims..., strides..., offset, contiguous, nviews,
 // buf_id, producer_kid}.  Gated on THVM_WL_TENSOR_VIEW_DEBUG so it

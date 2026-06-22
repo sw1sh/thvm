@@ -783,14 +783,34 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
   // the whole-file fault the file-level WILLNEED would cost -- RSS stays bounded
   // to the wrapped weights.  madvise is a hint, so the touch loop still
   // guarantees residency before the GPU bind.
+  //
+  // The byte-touch re-reads the WHOLE region even when the pages are already
+  // cache-resident (a warm session, or after the background TDiskPrefetchAsync
+  // streamed the file in): a strided 1-byte-per-page walk of 12.7 GB still
+  // costs ~3.8 s of pure RAM bandwidth + TLB churn for nothing.  mincore()
+  // reports which pages are already resident, so we touch ONLY the non-resident
+  // ones -- a fully-prefetched/warm weight set faults in ~0 (just the mincore
+  // scan), while a genuinely cold page still gets forced in.
   {
     u64 t0 = cg_now_us();
     madvise(page_base, (size_t)maplen, MADV_WILLNEED);
-    volatile char sink = 0;
+    u64 npages = (maplen + page - 1) / page;
     char const *p = (char const *)page_base;
-    for (u64 off = 0; off < maplen; off += page) sink ^= p[off];
-    if (maplen > 0) sink ^= p[maplen - 1];
-    (void)sink;
+    unsigned char *resid = (unsigned char *)malloc((size_t)npages);
+    if (resid != NULL && mincore(page_base, (size_t)maplen, (char *)resid) == 0) {
+      // Touch ONLY pages mincore reports not-resident (low bit 0).
+      volatile char sink = 0;
+      for (u64 i = 0; i < npages; i++)
+        if ((resid[i] & 1) == 0) sink ^= p[i * page];
+      (void)sink;
+    } else {
+      // mincore unavailable: fall back to touching every page.
+      volatile char sink = 0;
+      for (u64 off = 0; off < maplen; off += page) sink ^= p[off];
+      if (maplen > 0) sink ^= p[maplen - 1];
+      (void)sink;
+    }
+    free(resid);
     METAL_ZC_WRAPS++;
     METAL_ZC_FAULT_BYTES += maplen;
     METAL_ZC_FAULT_US += cg_now_us() - t0;

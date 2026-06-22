@@ -21,6 +21,8 @@
 // buffer pointer) and frees the bookkeeping cell.  We never free() an
 // mmap; a stray free() on mmap'd memory is undefined behaviour.
 
+#include <pthread.h>   // thvm_file_prefetch_async: background page-cache warm
+
 // Per-mapping bookkeeping carried as the CpuBuf `handle`, so the release
 // callback can munmap the exact region it mapped (the page-aligned base
 // and full length), independent of the buffer pointer handed to the
@@ -59,6 +61,54 @@ fn void thvm_disk_buf_dontneed(u32 cpu_buf_id) {
   if (m == NULL || m->base == NULL || m->base == MAP_FAILED || m->maplen == 0)
     return;
   madvise(m->base, (size_t)m->maplen, MADV_DONTNEED);
+}
+
+// Background sequential prefetch of a whole safetensors file into the OS
+// page cache.  The FLUX cold start faults each weight resident at its first
+// matmul (the zero-copy wrap's touch loop, src/backend/metal/_.m); even with
+// per-region MADV_WILLNEED that fault-in is serial INSIDE the first forward,
+// so the ~6 s of SSD read does not overlap the JIT capture.  Kicking off a
+// detached pthread that read()s the file front-to-back at session-build start
+// warms the SAME unified page cache the mmaps fault from, so by the time the
+// capture's matmuls run the pages are already resident (warm fault = memory
+// speed).  read() (not mmap) keeps this independent of the per-tensor maps and
+// adds NO extra RSS beyond the page cache the faults would populate anyway.
+// Best-effort: any failure (open/read) just leaves the cold fault-in path.
+typedef struct { char path[4096]; } DiskPrefetchArg;
+
+static void *disk_prefetch_main(void *vp) {
+  DiskPrefetchArg *a = (DiskPrefetchArg *)vp;
+  int fd = open(a->path, O_RDONLY);
+  if (fd >= 0) {
+    // Hint the kernel we'll read it all sequentially, then stream it through a
+    // reused buffer so the pages land in the cache (the read target is thrown
+    // away; only the cache residency matters).
+#ifdef F_RDAHEAD
+    fcntl(fd, F_RDAHEAD, 1);
+#endif
+    enum { CHUNK = 8u << 20 };           // 8 MB streaming window
+    void *buf = malloc(CHUNK);
+    if (buf != NULL) {
+      ssize_t n;
+      while ((n = read(fd, buf, CHUNK)) > 0) { /* discard; warms page cache */ }
+      free(buf);
+    }
+    close(fd);
+  }
+  free(a);
+  return NULL;
+}
+
+fn void thvm_file_prefetch_async(const char *path) {
+  if (path == NULL || path[0] == '\0') return;
+  DiskPrefetchArg *a = (DiskPrefetchArg *)malloc(sizeof(*a));
+  if (a == NULL) return;
+  size_t len = strlen(path);
+  if (len >= sizeof(a->path)) { free(a); return; }   // path too long: skip
+  memcpy(a->path, path, len + 1);
+  pthread_t th;
+  if (pthread_create(&th, NULL, disk_prefetch_main, a) != 0) { free(a); return; }
+  pthread_detach(th);
 }
 
 // True iff `cpu_buf_id` is a disk-mmap CpuBuf (its on_release is

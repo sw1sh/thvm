@@ -41,6 +41,9 @@ This is a lazy, mmap-backed, zero-copy disk-tensor view: bytes page in on demand
 GeneralUtilities`SetUsage[TDiskDropWeight, "TDiskDropWeight[w$] streams a disk-mmap weight w$ (a lazy mmap-backed disk TTerm, e.g. from TSafeTensorLoad) out of resident memory after it has been used: it releases any Metal zero-copy wrap of the weight (the borrowed MTLBuffer aliasing its mmap pages) and MADV_DONTNEEDs the underlying disk mapping so the faulted-in pages leave RSS.
 The mmap stays valid (file-backed, read-only), so a later use re-faults and re-wraps the weight fresh.  Used by a per-block streaming forward to keep only the active block's weights resident.  TDiskDropWeight[{w$1, w$2, ...}] drops a list.  A no-op (returns the weight unchanged) for a non-disk / non-wrapped tensor."];
 
+GeneralUtilities`SetUsage[TDiskPrefetchAsync, "TDiskPrefetchAsync[path$] kicks off a detached background read of the whole file path$ so its bytes land in the OS page cache before a later mmap fault touches them; returns path$ immediately (non-blocking).
+TDiskPrefetchAsync[{path$1, path$2, $$}] prefetches several files concurrently.  Used at FLUX-session build to warm the transformer / Qwen / VAE safetensors so the ~6 s of SSD read overlaps the JIT capture instead of stalling serially inside the first forward (the zero-copy wrap's fault-in then hits warm pages).  Best-effort: a missing/unreadable file is silently ignored."];
+
 Begin["`Private`"];
 
 (* Forward-declare sibling-owned symbols so bare references resolve to the
@@ -52,11 +55,18 @@ $tensorMMapFn := $tensorMMapFn = load["thvm_wl_tensor_mmap", {"UTF8String", Inte
 
 $diskDropWeightFn := $diskDropWeightFn = load["thvm_wl_disk_drop_weight", {Integer}, Integer]
 
+$filePrefetchFn := $filePrefetchFn = load["thvm_wl_file_prefetch_async", {"UTF8String"}, Integer]
+
 (* Drop a disk-mmap weight's resident pages + Metal wrap (the streaming
    per-block reclaim).  Accepts a single TTerm or a list; returns the input. *)
 TDiskDropWeight[ws_List] := (TDiskDropWeight /@ ws; ws)
 TDiskDropWeight[w_TTerm] := (ensureInit[]; $diskDropWeightFn[ttermRaw[w]]; w)
 TDiskDropWeight[w_]      := w
+
+(* Non-blocking background page-cache warm of a safetensors file (or list).
+   Returns the path(s); the read runs on a detached thread. *)
+TDiskPrefetchAsync[paths_List] := (TDiskPrefetchAsync /@ paths; paths)
+TDiskPrefetchAsync[path_String] := (ensureInit[]; $filePrefetchFn[path]; path)
 
 (* safetensors dtype name <-> thvm dtype string (tinygrad safe_dtypes /
    inverse_safe_dtypes).  LOAD covers the byte-aligned dtypes PLUS the
