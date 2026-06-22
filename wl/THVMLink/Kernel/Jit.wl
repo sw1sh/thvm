@@ -55,7 +55,6 @@ $jitCaptureEndResultFn := $jitCaptureEndResultFn = load["thvm_wl_jit_capture_end
 $jitCaptureEndResultMultiFn := $jitCaptureEndResultMultiFn = load["thvm_wl_jit_capture_end_result_multi", {{Integer, 1}}, Integer]
 $jitCaptureDropFn    := $jitCaptureDropFn    = load["thvm_wl_jit_capture_drop",     {Integer}, Integer]
 $jitCaptureOpCountFn := $jitCaptureOpCountFn = load["thvm_wl_jit_capture_op_count", {Integer}, Integer]
-$jitCaptureNeedsRecaptureFn := $jitCaptureNeedsRecaptureFn = load["thvm_wl_jit_capture_needs_recapture", {Integer}, Integer]
 $jitCaptureOpsFn     := $jitCaptureOpsFn     = load["thvm_wl_jit_capture_ops",      {Integer}, {Integer, 1}]
 $jitReplayFn         := $jitReplayFn         = load["thvm_wl_jit_replay",           {Integer}, Integer]
 $jitCaptureSetInputsFn := $jitCaptureSetInputsFn = load["thvm_wl_jit_capture_set_inputs", {Integer, {Integer, 1}}, Integer]
@@ -136,13 +135,15 @@ jitCaptureOnce[a_Association, args_List, inTids_List] := Module[{slot, fnRes},
      (b) first call -> capture-begin, run fn, capture-end, store slot.
 
    POST-CAPTURE AUTOTUNE APPLY (tinygrad jit.py:289-300): under JITBEAM, the
-   first capture's jit_capture_autotune_finalized (C) beam-searches each
-   captured kernel on isolated buffers and disk-caches the winner under the
-   capture-phase structural key.  jit_capture_needs_recapture then reports 1,
-   so we DROP the slot + re-capture ONCE: the re-capture's cache-load path
-   (kernel_autotune under jit_is_capturing) HITs those just-cached keys and
-   bakes the TUNED PSOs the replay dispatches.  Bounded to a single re-capture
-   (the C flag is single-shot), so the steady state is replay-only. *)
+   capture's jit_capture_autotune_finalized (C) beam-searches each captured
+   kernel on isolated buffers and APPLIES the winning opt-config to the captured
+   KernelEntry's schedule in place.  The replay's Metal ICB build looks up each
+   kernel's PSO by a hash that folds its applied opts (metal_tile_jit_hash), so
+   the FIRST replay -- which runs after this capture-end search -- builds the
+   TUNED PSOs with no re-capture needed (the opts are already on the captured
+   kernels).  This is the re-bake apply; re-capture is unnecessary and unsafe
+   here (its fresh intermediate tids change the structural key, so its
+   cache-load misses anyway). *)
 TJitClosure[a_Association][args___] := Module[{
     key = Hash[a],
     rec, inTids, st
@@ -166,17 +167,8 @@ TJitClosure[a_Association][args___] := Module[{
         st = jitCaptureOnce[a, {args}, inTids];
         If[ FailureQ[st],
             st,
-            (* Post-capture autotune wants the tuned PSOs baked: re-capture
-               once so the cache-load apply path runs.  Drop the just-built
-               slot, then re-run the capture -- its kernels now HIT the cache. *)
-            If[ $jitCaptureNeedsRecaptureFn[st["slot"]] === 1,
-                $jitCaptureDropFn[st["slot"]];
-                st = jitCaptureOnce[a, {args}, inTids]];
-            If[ FailureQ[st],
-                st,
-                $tJitState[key] = st;
-                st["result"]]
-        ]
+            $tJitState[key] = st;
+            st["result"]]
     ]
 ]
 

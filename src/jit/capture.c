@@ -165,16 +165,6 @@ typedef struct {
   u32              *graph_input_ids;    // [graph_input_n]; buf_ids (diag only)
   u64              *graph_input_addrs;  // [graph_input_n]; dptrs the cuGraph baked
   u32               graph_input_n;
-  // Set by jit_capture_autotune_finalized when the post-capture BEAM search
-  // (JITBEAM) freshly tuned >=1 of this capture's kernels.  Signals the WL
-  // closure (Jit.wl) to drop + re-capture ONCE: the re-capture's cache-load
-  // path (kernel_autotune under jit_is_capturing) HITs the just-cached
-  // capture-phase keys and bakes the TUNED PSOs the replay dispatches.
-  // Queried + cleared by jit_capture_needs_recapture.  tinygrad applies the
-  // post-capture beam winner by recompiling the captured kernel (engine/jit.py
-  // jit_lower -> CompiledRunner over the tuned ProgramSpec); thvm re-capture is
-  // the equivalent: re-lower the stage with the now-cached tuned opt configs.
-  u32               needs_recapture;
 } JitCapture;
 
 static JitCapture JIT_CAPTURES[JIT_CAPTURE_NSLOTS];
@@ -417,7 +407,6 @@ fn u32 jit_capture_begin(void) {
       }
       jit_capture_clear_ops(&JIT_CAPTURES[i]);
       JIT_CAPTURES[i].in_use   = 1;
-      JIT_CAPTURES[i].needs_recapture = 0;
       JIT_ACTIVE_SLOT          = i;
       JIT_PAUSE_DEPTH          = 0;
       // Open the realize-dedup span (gated by THVM_JIT_REALIZE_DEDUP):
@@ -431,29 +420,37 @@ fn u32 jit_capture_begin(void) {
   return 0;
 }
 
-fn void jit_capture_end(void) {
-  // Close the realize-dedup span (restore the deferred heap rewrites +
-  // wipe the loc->tid cache) BEFORE finalize, which only inspects the
-  // recorded op list.
+// Shared capture-end body: close the realize-dedup span, finalize the recorded
+// stream, then drain the deferred post-capture autotune queue.
+//
+// The span closes before the drain: the drain's iso-buffer bench fires dispatch
+// + may GC, and doing that while the span is open pollutes the shared loc->tid /
+// substitution-journal state, perturbing later captures.  The drain does NOT
+// need the capture-phase DAG -- the bench re-bakes the winner in place onto the
+// captured KernelEntry, which the warm replay's PSO lookup then folds in (it
+// does not depend on a cross-capture cache-load).
+static void jit_capture_end_common(u32 done_slot, const Term *roots,
+                                   u32 n_roots) {
+  // Close the span (reverts the substitution journal, wipes loc->tid) BEFORE
+  // finalize, which only inspects the recorded op list.
   materialized_loc_jit_span_end();
-  u32 done_slot = JIT_ACTIVE_SLOT;
-  if (JIT_ACTIVE_SLOT != 0) {
-    jit_capture_finalize(JIT_ACTIVE_SLOT, NULL, 0);
+  if (done_slot != 0) {
+    jit_capture_finalize(done_slot, roots, n_roots);
   }
+  // Clear the active slot BEFORE the drain: kernel_autotune's bench gate is
+  // jit_is_capturing() (== JIT_ACTIVE_SLOT != 0).  The drain runs no-op when
+  // the queue is empty (JITBEAM off / no MISS), so this is cheap on warm calls.
   JIT_ACTIVE_SLOT = 0;
   JIT_PAUSE_DEPTH = 0;
   jit_capture_autotune_finalized(done_slot);
 }
 
+fn void jit_capture_end(void) {
+  jit_capture_end_common(JIT_ACTIVE_SLOT, NULL, 0);
+}
+
 fn void jit_capture_end_with_result(Term root) {
-  materialized_loc_jit_span_end();
-  u32 done_slot = JIT_ACTIVE_SLOT;
-  if (JIT_ACTIVE_SLOT != 0) {
-    jit_capture_finalize(JIT_ACTIVE_SLOT, &root, root != 0 ? 1u : 0u);
-  }
-  JIT_ACTIVE_SLOT = 0;
-  JIT_PAUSE_DEPTH = 0;
-  jit_capture_autotune_finalized(done_slot);
+  jit_capture_end_common(JIT_ACTIVE_SLOT, &root, root != 0 ? 1u : 0u);
 }
 
 // Multi-root variant: a JIT-captured function whose return is a LIST (or
@@ -464,21 +461,13 @@ fn void jit_capture_end_with_result(Term root) {
 // replay (issue #5).  The single-root end_with_result only covered a bare
 // _TTerm return.  roots[] are the resolved result Terms (one per handle).
 fn void jit_capture_end_with_results(const Term *roots, u32 n_roots) {
-  materialized_loc_jit_span_end();
-  u32 done_slot = JIT_ACTIVE_SLOT;
-  if (JIT_ACTIVE_SLOT != 0) {
-    jit_capture_finalize(JIT_ACTIVE_SLOT, roots, n_roots);
-  }
-  JIT_ACTIVE_SLOT = 0;
-  JIT_PAUSE_DEPTH = 0;
-  jit_capture_autotune_finalized(done_slot);
+  jit_capture_end_common(JIT_ACTIVE_SLOT, roots, n_roots);
 }
 
 fn void jit_capture_drop(u32 slot) {
   if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) return;
   jit_capture_clear_ops(&JIT_CAPTURES[slot]);
   JIT_CAPTURES[slot].in_use = 0;
-  JIT_CAPTURES[slot].needs_recapture = 0;
   if (JIT_ACTIVE_SLOT == slot) {
     JIT_ACTIVE_SLOT = 0;
     JIT_PAUSE_DEPTH = 0;
@@ -2053,28 +2042,27 @@ static int jit_postcapture_jitbeam_enabled(void) {
   return e != NULL && atoi(e) > 0;
 }
 
-// Walk a just-finalized capture's op stream and beam-search each unique
-// captured kernel.  Faithful to tinygrad engine/jit.py:289-300: after the
-// TinyJit records the kernel sequence, jit_lower beam-searches every captured
-// kernel on isolated test buffers (codegen/opt/search.py beam_search times
-// candidates on fresh rawbufs), then bakes the winner into the cached runner.
+// Drain the deferred post-capture bench queue that the capture-phase
+// kernel_autotune filled (autotune.c kautotune_postq_enqueue).
+static u32 kautotune_posttune_drain(double budget_sec);
+
+// Bench every captured kernel that missed the autotune cache, faithful to
+// tinygrad engine/jit.py:289-300 (after the TinyJit records the kernel
+// sequence, jit_lower beam-searches each captured kernel on isolated test
+// buffers, then bakes the winner into the cached runner).
 //
-// MUST run AFTER jit_capture_end* clears JIT_ACTIVE_SLOT: the slot is sealed,
-// so kernel_autotune's bench fires (on its OWN isolated scratch buffers --
-// kautotune_iso_begin) cannot perturb the live capture's buffer/liveness
-// state.  Crucially jit_is_capturing() is now FALSE, so kernel_autotune runs
-// the real BENCH SEARCH (not the capture-time cache-load-only path) and caches
-// the winner under the CAPTURE-phase kautotune_structural_key -- the SAME key
-// the replay/re-capture will look up (the captured kernels carry the
-// capture-phase lifted DAG).  Without this pass nothing ever searches with the
-// capture-phase keys, so the warm replay's cache-load always MISSES.
+// The capture-phase kernel_autotune (under jit_is_capturing) cannot bench -- a
+// bench dispatch mid-capture corrupts the recorded forward -- so it DEFERS the
+// cache-MISS kernels into a queue with their capture-phase cache key/path.
+// This pass drains that queue once the capture slot has cleared
+// (jit_is_capturing()==0), benching each on isolated scratch buffers.  The
+// winner is BAKED in place onto the captured KernelEntry (kautotune_posttune_drain
+// under THVM_POSTTUNE_APPLY): the warm replay's Metal PSO lookup folds the
+// applied opts (metal_tile_jit_hash), so the first replay builds the tuned PSO.
 //
-// No-op unless JITBEAM>0.  THVM_POSTTUNE=0 force-disables (diagnostic).
-// THVM_POSTTUNE_BUDGET_SEC caps the total pass wall time (default unbounded:
+// Default OFF (THVM_POSTTUNE!=1) even under JITBEAM -- see the opt-in gate
+// below.  THVM_POSTTUNE_BUDGET_SEC caps total pass wall time (0 = unbounded:
 // the search runs on the cold CALL1 capture, which the bench budgets for).
-// Dedups so a kernel referenced by N replay ops is searched once.  Sets
-// c->needs_recapture when >=1 kernel newly tunes, so the WL closure re-captures
-// the stage once to bake the tuned PSOs (the cache-load apply path).
 static void jit_capture_autotune_finalized(u32 slot) {
   if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) {
     return;
@@ -2086,9 +2074,16 @@ static void jit_capture_autotune_finalized(u32 slot) {
   if (!jit_postcapture_jitbeam_enabled()) {
     return;
   }
+  // Explicit opt-in (THVM_POSTTUNE=1), default OFF even under JITBEAM.  The
+  // search WRITES winners to the autotune disk cache under the capture-phase
+  // key; a later JITBEAM capture's cache-load APPLIES them.  A tuned config can
+  // be correct on the iso-bench + single-image replay yet diverge in the
+  // 2-image batch replay (the batch-VAE NaN), so a cached winner could poison a
+  // future batch run.  Until that divergence is fixed, the pass only runs when
+  // explicitly enabled, so a bare JITBEAM run stays foundation-identical.
   {
-    char const *off = getenv("THVM_POSTTUNE");
-    if (off != NULL && off[0] == '0') {
+    char const *on = getenv("THVM_POSTTUNE");
+    if (on == NULL || on[0] != '1') {
       return;
     }
   }
@@ -2102,73 +2097,17 @@ static void jit_capture_autotune_finalized(u32 slot) {
   struct timespec t0;
   clock_gettime(CLOCK_MONOTONIC, &t0);
 
-  u32 n_tuned = 0;
-  u32 n_seen = 0;
-  for (u32 i = 0; i < c->n_ops; i++) {
-    JitCaptureOp *op = &c->ops[i];
-    if (op->kind != JIT_OP_DISPATCH) continue;
-    if (op->replay_skip) continue;          // dead op -- never dispatched
-    if (op->kid == 0 || op->kid >= KERNELS_NEXT) continue;
-    // Dedup: skip a kid already searched earlier in this stream.
-    int seen = 0;
-    for (u32 j = 0; j < i; j++) {
-      if (c->ops[j].kind == JIT_OP_DISPATCH && c->ops[j].kid == op->kid) {
-        seen = 1;
-        break;
-      }
-    }
-    if (seen) continue;
-    n_seen++;
-    // Bounded: once the pass exceeds its wall budget, stop searching new
-    // kernels (the already-tuned ones still cached + recapture-applied).
-    if (budget_sec > 0.0) {
-      struct timespec now;
-      clock_gettime(CLOCK_MONOTONIC, &now);
-      double el = (double)(now.tv_sec - t0.tv_sec)
-                + (double)(now.tv_nsec - t0.tv_nsec) * 1e-9;
-      if (el > budget_sec) {
-        if (tr) {
-          fprintf(stderr,
-                  "[autotune] post-capture: budget %.1fs exceeded at kid=%u "
-                  "(%u tuned / %u searched)\n",
-                  budget_sec, op->kid, n_tuned, n_seen);
-        }
-        break;
-      }
-    }
-    // kernel_autotune (not capturing now) runs the iso-buffer bench search and
-    // caches the winner under the capture-phase key.  Returns 1 when a winner
-    // was applied (beat the baseline); that is the signal a re-capture will
-    // pick up a different opt-config than the baseline this capture baked.
-    if (kernel_autotune(op->kid)) {
-      n_tuned++;
-    }
-  }
-  if (n_tuned > 0) {
-    c->needs_recapture = 1;
-  }
+  u32 n_tuned = kautotune_posttune_drain(budget_sec);
   if (tr) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     double el = (double)(now.tv_sec - t0.tv_sec)
               + (double)(now.tv_nsec - t0.tv_nsec) * 1e-9;
     fprintf(stderr,
-            "[autotune] post-capture slot=%u: tuned %u / %u unique kernels "
-            "(n_ops=%u, %.2fs) recapture=%u\n",
-            slot, n_tuned, n_seen, c->n_ops, el, c->needs_recapture);
+            "[autotune] post-capture slot=%u: tuned %u kernels "
+            "(n_ops=%u, %.2fs)\n",
+            slot, n_tuned, c->n_ops, el);
   }
-}
-
-// Query (and clear) the post-tune recapture flag for `slot`.  Returns 1 once
-// after a post-capture search freshly tuned a kernel, then 0 (single-shot, so
-// a stage re-captures at most once per post-tune pass).  The WL closure drops
-// + re-runs the capture when this returns 1.
-fn u32 jit_capture_needs_recapture(u32 slot) {
-  if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) return 0;
-  JitCapture *c = &JIT_CAPTURES[slot];
-  u32 r = c->needs_recapture;
-  c->needs_recapture = 0;
-  return r;
 }
 
 #ifdef THVM_HAS_METAL

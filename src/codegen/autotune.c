@@ -70,7 +70,67 @@ typedef struct {
 } KautotuneIso;
 static KautotuneIso ISO;  // file-static: only one isolated bench at a time
 
+// === Deferred post-capture bench queue (tinygrad jit.py:289-300) ===
+//
+// kernel_autotune CANNOT bench during a JIT capture (a bench dispatch
+// commits the in-flight capture batch + perturbs the recorded forward).  But
+// the cache KEY it computes mid-capture (the capture-phase
+// kautotune_structural_key, span open) is EXACTLY the key the warm replay's
+// re-capture cache-load looks up -- whereas a key recomputed AFTER the capture
+// (post span_end / post finalize) hashes a DIFFERENT DAG and never matches
+// (measured: re-capture HIT 4/217).  So during capture we DEFER: record the
+// (kid, capture-phase cache_key, cache_path, bench params) of every cache-MISS
+// kernel into this queue, then jit_capture_autotune_finalized (after the slot
+// clears, jit_is_capturing()==0, span still open so the kid's DAG is unchanged)
+// drains the queue, benches each on isolated scratch buffers, and STORES the
+// winner under the recorded capture-phase key.  The next re-capture's
+// cache-load then HITs that exact key and bakes the tuned PSO.
+#define KAUTOTUNE_POSTTUNE_CAP 8192
+typedef struct {
+  u32  kid;
+  u64  cache_key;
+  char cache_path[KAUTOTUNE_CACHE_PATH_CAP];
+  u32  n_runs;
+  u32  depth;
+  u32  beam_width;
+  u32  backend_id;
+} KautotunePostItem;
+static KautotunePostItem KAUTOTUNE_POSTQ[KAUTOTUNE_POSTTUNE_CAP];
+static u32 KAUTOTUNE_POSTQ_N = 0;
+
+// Enqueue a cache-MISS kernel's capture-phase key for deferred post-capture
+// bench.  Dedup by cache_key so a kernel shape recorded N times (N replay
+// ops) is benched once.  No-op when the queue is full.
+static void kautotune_postq_enqueue(u32 kid, u64 cache_key,
+                                    char const *cache_path, u32 n_runs,
+                                    u32 depth, u32 beam_width, u32 backend_id) {
+  if (cache_key == 0 || cache_path == NULL || cache_path[0] == '\0') {
+    return;
+  }
+  for (u32 i = 0; i < KAUTOTUNE_POSTQ_N; i++) {
+    if (KAUTOTUNE_POSTQ[i].cache_key == cache_key) {
+      return;  // already queued (same shape)
+    }
+  }
+  if (KAUTOTUNE_POSTQ_N >= KAUTOTUNE_POSTTUNE_CAP) {
+    return;
+  }
+  KautotunePostItem *it = &KAUTOTUNE_POSTQ[KAUTOTUNE_POSTQ_N++];
+  it->kid        = kid;
+  it->cache_key  = cache_key;
+  it->n_runs     = n_runs;
+  it->depth      = depth;
+  it->beam_width = beam_width;
+  it->backend_id = backend_id;
+  snprintf(it->cache_path, sizeof(it->cache_path), "%s", cache_path);
+}
+
 static u32 kautotune_backend_id(KernelEntry const *ke);
+static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
+                                     KOpt const *candidates, u32 n_cand,
+                                     char const *cache_path, u64 cache_key,
+                                     u32 n_runs, u32 depth, u32 beam_width,
+                                     u32 backend_id, int cache_ready);
 
 static u32 kautotune_n_runs(void) {
   char const *e = getenv("BEAM_RUNS");
@@ -1114,9 +1174,37 @@ fn int kernel_autotune(u32 kid) {
   // autotuned so the fire-time trigger doesn't re-propose on every replay.
   if (jit_is_capturing()) {
     ke->schedule->autotuned = 1;
+    // Defer: record the capture-phase key so jit_capture_autotune_finalized
+    // benches + stores under it.  Only queue cache-MISS shapes (a HIT already
+    // returned 1 above with the winner applied), and only when the post-capture
+    // pass is enabled (THVM_POSTTUNE=1) -- otherwise the queue would grow
+    // unbounded across captures with nothing to drain it.
+    static int posttune_on = -1;
+    if (posttune_on < 0) {
+      char const *on = getenv("THVM_POSTTUNE");
+      posttune_on = (on != NULL && on[0] == '1');
+    }
+    if (cache_ready && posttune_on) {
+      kautotune_postq_enqueue(kid, cache_key, cache_path, n_runs, depth,
+                              beam_width, backend_id);
+    }
     return 0;
   }
 
+  return kautotune_bench_and_store(kid, ke, candidates, n_cand, cache_path,
+                                   cache_key, n_runs, depth, beam_width,
+                                   backend_id, cache_ready);
+}
+
+// Bench the kernel's candidate opt-sequences on isolated scratch buffers and
+// store the winner under (cache_path, cache_key).  Split out of kernel_autotune
+// so the deferred post-capture drain can reuse it with a recorded capture-phase
+// key/path (the autotuned/propose/cache-load preamble already ran upstream).
+static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
+                                     KOpt const *candidates, u32 n_cand,
+                                     char const *cache_path, u64 cache_key,
+                                     u32 n_runs, u32 depth, u32 beam_width,
+                                     u32 backend_id, int cache_ready) {
   // Mark autotuned at the START so nested/direct bench dispatches do
   // not re-enter this path if a backend helper fires through the public
   // kernel path.  axes_reset_to_default preserves the flag.
@@ -1132,16 +1220,9 @@ fn int kernel_autotune(u32 kid) {
   // iso_setup is 0 and we DECLINE the search rather than fall back to the
   // live buffers.  cg_profile_snapshot/restore additionally erases the
   // search's K_PROFILE[kid].kind footprint (the JIT replay's ICB-batching
-  // decision reads it).
-  //
-  // NOTE (open): buffer isolation alone does NOT make a BEAM search safe to
-  // run mid-FLUX-session.  The search hash-conses candidate DAG variants
-  // into the SHARED heap; a later GC relocates the captured velocity/qwen
-  // kernels' cached_lift.store_root, and metal_tile_jit_hash
-  // (backend/metal/_.m) keys the PSO cache by that RAW heap loc -- so the
-  // warm replay collides/misses its PSO and corrupts (~5x slower + NaN).
-  // The real fix is rekeying the PSO cache by a stable structural DAG hash
-  // (kautotune_structural_key-style), tracked separately.
+  // decision reads it).  The PSO cache is rekeyed by a GC-invariant DAG
+  // content hash (metal _.m), so the search's hash-cons GC no longer collides
+  // the captured kernels' cached PSOs.
   u64 prof_snap[6];
   cg_profile_snapshot(kid, prof_snap);
   int iso_setup = kautotune_iso_begin(kid);
@@ -1248,6 +1329,85 @@ fn int kernel_autotune(u32 kid) {
   kautotune_iso_end();
   cg_profile_restore(kid, prof_snap);
   return applied;
+}
+
+// Drain the deferred post-capture bench queue (tinygrad jit.py:289-300).
+// Called by jit_capture_autotune_finalized after the capture slot clears
+// (jit_is_capturing()==0).  Benches each queued kernel on isolated scratch
+// buffers and, under THVM_POSTTUNE_APPLY, leaves the winner baked on the
+// captured KernelEntry so the warm replay builds the tuned PSO (re-bake apply).
+// The winner is also stored to the autotune disk cache under the recorded
+// capture-phase key.  `budget_sec`==0 is unbounded; otherwise stop once
+// exceeded.  Returns the number of kernels that newly tuned (winner beat
+// baseline).
+static u32 kautotune_posttune_drain(double budget_sec) {
+  static int tr = -1;
+  if (tr < 0) tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
+  u32 n_items = KAUTOTUNE_POSTQ_N;
+  u32 n_tuned = 0;
+  struct timespec t0;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  for (u32 i = 0; i < n_items; i++) {
+    KautotunePostItem *it = &KAUTOTUNE_POSTQ[i];
+    u32 kid = it->kid;
+    if (kid == 0 || kid >= KERNELS_NEXT) continue;
+    KernelEntry *ke = &KERNELS[kid];
+    if (ke->schedule == NULL) continue;
+    if (budget_sec > 0.0) {
+      struct timespec now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      double el = (double)(now.tv_sec - t0.tv_sec)
+                + (double)(now.tv_nsec - t0.tv_nsec) * 1e-9;
+      if (el > budget_sec) {
+        if (tr) {
+          fprintf(stderr,
+                  "[autotune] post-capture: budget %.1fs exceeded at item %u/%u "
+                  "(%u tuned)\n", budget_sec, i, n_items, n_tuned);
+        }
+        break;
+      }
+    }
+    // Re-propose candidates from the kid's current DAG so the bench has
+    // something to tune.  The winner is cached under the recorded capture-phase
+    // key; the cache-load validates the cached seq against this same proposal
+    // (kautotune_cached_seq_allowed).
+    KOpt candidates[KAUTOTUNE_MAX_CANDIDATES];
+    u32  n_cand = kernel_opts_propose(ke, candidates,
+                                      sizeof(candidates)/sizeof(*candidates));
+    if (n_cand == 0) continue;
+    int won = kautotune_bench_and_store(kid, ke, candidates, n_cand,
+                                        it->cache_path, it->cache_key,
+                                        it->n_runs, it->depth, it->beam_width,
+                                        it->backend_id, 1 /* cache_ready */);
+    if (won) {
+      n_tuned++;
+    }
+    // RE-BAKE apply: leave the winning opt-config applied to the captured
+    // KernelEntry.  The warm replay's Metal PSO lookup folds the applied opts
+    // (metal_tile_jit_hash), so the first replay after this drain builds the
+    // TUNED PSO with no re-capture (the autotune cache key is non-deterministic
+    // across captures -- intermediate-activation tids + lowering vary -- so a
+    // cache-load re-capture misses anyway).
+    //
+    // DEFAULT OFF (reset to baseline = search-only).  Re-bake makes the
+    // single-image warm replay correct + tuned (FLUX CALL2 4.2s vs 3.5s
+    // baseline, finite), but the 2-image BATCH replay's VAE decode goes
+    // non-finite (CALL3 $Failed) -- the tuned PSO is valid for the captured
+    // shape but the per-item rebind in the batch replay diverges.  Until that
+    // batch-VAE divergence is fixed, the safe default keeps every call finite;
+    // THVM_POSTTUNE_APPLY=1 opts into the re-bake (correct for single-image
+    // replay).  The winner is cached on disk regardless.
+    static int apply = -1;
+    if (apply < 0) {
+      char const *e = getenv("THVM_POSTTUNE_APPLY");
+      apply = (e != NULL && e[0] == '1');   // default OFF (search-only)
+    }
+    if (!apply) {
+      axes_reset_to_default(ke);
+    }
+  }
+  KAUTOTUNE_POSTQ_N = 0;  // consumed
+  return n_tuned;
 }
 
 // Should this kernel auto-tune on its next fire?  Three conditions:
