@@ -391,6 +391,18 @@ EXTERN_C DLLEXPORT int thvm_wl_jit_capture_op_count(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// Single-shot query: did the post-capture JITBEAM search freshly tune a
+// kernel of `slot`?  Returns 1 once (then 0), signalling the WL closure to
+// drop + re-capture so the tuned opt-configs are baked into the replay PSOs.
+EXTERN_C DLLEXPORT int thvm_wl_jit_capture_needs_recapture(WolframLibraryData libData,
+                                                           mint argc, MArgument *args,
+                                                           MArgument res) {
+  (void)libData; (void)argc;
+  u32 slot = (u32)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)jit_capture_needs_recapture(slot));
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_jit_capture_ops(WolframLibraryData libData,
                                                mint argc, MArgument *args,
                                                MArgument res) {

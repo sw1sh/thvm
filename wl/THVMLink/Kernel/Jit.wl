@@ -55,6 +55,7 @@ $jitCaptureEndResultFn := $jitCaptureEndResultFn = load["thvm_wl_jit_capture_end
 $jitCaptureEndResultMultiFn := $jitCaptureEndResultMultiFn = load["thvm_wl_jit_capture_end_result_multi", {{Integer, 1}}, Integer]
 $jitCaptureDropFn    := $jitCaptureDropFn    = load["thvm_wl_jit_capture_drop",     {Integer}, Integer]
 $jitCaptureOpCountFn := $jitCaptureOpCountFn = load["thvm_wl_jit_capture_op_count", {Integer}, Integer]
+$jitCaptureNeedsRecaptureFn := $jitCaptureNeedsRecaptureFn = load["thvm_wl_jit_capture_needs_recapture", {Integer}, Integer]
 $jitCaptureOpsFn     := $jitCaptureOpsFn     = load["thvm_wl_jit_capture_ops",      {Integer}, {Integer, 1}]
 $jitReplayFn         := $jitReplayFn         = load["thvm_wl_jit_replay",           {Integer}, Integer]
 $jitCaptureSetInputsFn := $jitCaptureSetInputsFn = load["thvm_wl_jit_capture_set_inputs", {Integer, {Integer, 1}}, Integer]
@@ -101,9 +102,50 @@ TJit[fn_] := TJitClosure[<|
    explicit TSet.  No TTerm args (the slot-feeding TJit[fn] usage) -> {}. *)
 jitArgTids[args_List] := TTermVal /@ TRealize /@ Cases[args, _TTerm]
 
+(* One capture pass over the held fn: begin a slot, run the body, end+pin the
+   result roots, declare the input-rebind sites.  Returns the state assoc
+   <|slot, result|> or a Failure when the slot pool is full. *)
+jitCaptureOnce[a_Association, args_List, inTids_List] := Module[{slot, fnRes},
+    slot = $jitCaptureBeginFn[];
+    If[ slot === 0,
+        Failure["TJit", <|
+            "MessageTemplate" -> "TJit capture-slot pool full (cap = 16)"
+        |>],
+        Internal`WithLocalSettings[
+            Null,
+            fnRes = a["fn"][args],
+            (* Mark EVERY returned tensor handle (a bare TTerm, or any
+               in a list / nested structure) as a capture result, so all
+               their output buffers are pinned + replayed.  A list return
+               (TGrad over several params) needs each root pinned, else
+               it is reclaimed as garbage. *)
+            With[{roots = Cases[{fnRes}, t_TTerm :> ttermRaw[t], Infinity]},
+                If[ roots === {},
+                    $jitCaptureEndResultFn[0],
+                    $jitCaptureEndResultMultiFn[roots]]]
+        ];
+        (* Declare this call's input tensors so later calls rebind them
+           in place of an explicit TSet. *)
+        If[ inTids =!= {}, $jitCaptureSetInputsFn[slot, inTids]];
+        <|"slot" -> slot, "result" -> fnRes|>
+    ]
+]
+
+(* Direct invocation: dispatch through the side store.  Two paths:
+     (a) closure has captured -> replay only
+     (b) first call -> capture-begin, run fn, capture-end, store slot.
+
+   POST-CAPTURE AUTOTUNE APPLY (tinygrad jit.py:289-300): under JITBEAM, the
+   first capture's jit_capture_autotune_finalized (C) beam-searches each
+   captured kernel on isolated buffers and disk-caches the winner under the
+   capture-phase structural key.  jit_capture_needs_recapture then reports 1,
+   so we DROP the slot + re-capture ONCE: the re-capture's cache-load path
+   (kernel_autotune under jit_is_capturing) HITs those just-cached keys and
+   bakes the TUNED PSOs the replay dispatches.  Bounded to a single re-capture
+   (the C flag is single-shot), so the steady state is replay-only. *)
 TJitClosure[a_Association][args___] := Module[{
     key = Hash[a],
-    rec, slot, fnRes, inTids
+    rec, inTids, st
 },
     ensureInit[];
     (* Realize inputs + collect tids BEFORE capture/replay so the input's
@@ -121,29 +163,19 @@ TJitClosure[a_Association][args___] := Module[{
             $jitReplayWithInputsFn[rec["slot"], inTids]];
         rec["result"],
         (* (b) capture *)
-        slot = $jitCaptureBeginFn[];
-        If[ slot === 0,
-            Failure["TJit", <|
-                "MessageTemplate" -> "TJit capture-slot pool full (cap = 16)"
-            |>],
-            Internal`WithLocalSettings[
-                Null,
-                fnRes = a["fn"][{args}],
-                (* Mark EVERY returned tensor handle (a bare TTerm, or any
-                   in a list / nested structure) as a capture result, so all
-                   their output buffers are pinned + replayed.  A list return
-                   (TGrad over several params) needs each root pinned, else
-                   it is reclaimed as garbage. *)
-                With[{roots = Cases[{fnRes}, t_TTerm :> ttermRaw[t], Infinity]},
-                    If[ roots === {},
-                        $jitCaptureEndResultFn[0],
-                        $jitCaptureEndResultMultiFn[roots]]]
-            ];
-            (* Declare this call's input tensors so later calls rebind them
-               in place of an explicit TSet. *)
-            If[ inTids =!= {}, $jitCaptureSetInputsFn[slot, inTids]];
-            $tJitState[key] = <|"slot" -> slot, "result" -> fnRes|>;
-            fnRes
+        st = jitCaptureOnce[a, {args}, inTids];
+        If[ FailureQ[st],
+            st,
+            (* Post-capture autotune wants the tuned PSOs baked: re-capture
+               once so the cache-load apply path runs.  Drop the just-built
+               slot, then re-run the capture -- its kernels now HIT the cache. *)
+            If[ $jitCaptureNeedsRecaptureFn[st["slot"]] === 1,
+                $jitCaptureDropFn[st["slot"]];
+                st = jitCaptureOnce[a, {args}, inTids]];
+            If[ FailureQ[st],
+                st,
+                $tJitState[key] = st;
+                st["result"]]
         ]
     ]
 ]
