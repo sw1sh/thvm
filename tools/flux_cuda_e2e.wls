@@ -87,8 +87,10 @@ result = Catch[
        loc = PacletObject["WolframInstitute/THVMLink"]["Location"];
        Get["WolframInstitute`THVMLink`"];
        Get[FileNameJoin[{loc, "Examples", "flux", "FluxGenerate.wl"}]];
-       (* ToExpression after the Gets so FluxGenerate resolves on the pod *)
-       gen = ToExpression["Function[{p,z,s}, AbsoluteTiming@FluxGenerate[p,\"ImageSize\"->z,\"Seed\"->s,\"Device\"->\"cuda\",\"ReturnImages\"->False]]"];
+       (* ToExpression after the Gets so FluxGenerate resolves on the pod.  Map
+          ImageData on the pod so the {3,H,W} pixel arrays (not Image objects) cross
+          back over WSTP for the local Export + pixel-identical check. *)
+       gen = ToExpression["Function[{p,z,s}, AbsoluteTiming[ImageData/@FluxGenerate[p,\"ImageSize\"->z,RandomSeeding->s,\"Device\"->\"cuda\"]]]"];
        With[{c = gen[ps, sz, sd], w = gen[ps, sz, sd]},
          {c[[1]], w[[1]], c[[2]], w[[2]]}]]]];
   If[ !MatchQ[res, {_?NumericQ, _?NumericQ, _List, _List}], Throw["generation -> " <> ToString[Short[res]]]];

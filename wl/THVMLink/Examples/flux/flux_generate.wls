@@ -65,19 +65,18 @@ pr["prompts: ", prompts];
 
 tStart = AbsoluteTime[];
 imgs = FluxGenerate[prompts,
-    "ImageSize" -> imgSize, "Seed" -> seed, "Device" -> dev, "ReturnImages" -> False];
+    "ImageSize" -> imgSize, RandomSeeding -> seed, "Device" -> dev];
 tTotal = AbsoluteTime[] - tStart;
 
-(* imgs is a list of {3,H,W} pixel arrays in [0,1].  Export + stats per item. *)
+(* imgs is a list of Images.  Export + pixel stats per item. *)
 MapIndexed[
-    Function[{px, idx},
-        Module[{i = First[idx], flat, img, path},
+    Function[{img, idx},
+        Module[{i = First[idx], px = ImageData[img], flat, path},
             flat = Flatten[px];
-            img = Image[Clip[px, {0., 1.}], Interleaving -> False, ColorSpace -> "RGB"];
             path = FileNameJoin[{outDir, "img_" <> ToString[i] <> ".png"}];
             Export[path, img];
             pr["  img ", i, "  ", prompts[[i]]];
-            pr["    -> ", path, "   ", Dimensions[px][[2]], "x", Dimensions[px][[3]]];
+            pr["    -> ", path, "   ", Row[ImageDimensions[img], "x"]];
             pr["    pixel  min=", Round[Min[flat], 0.0001], "  max=", Round[Max[flat], 0.0001],
                "  mean=", Round[Mean[flat], 0.0001], "  finite=", AllTrue[flat, NumberQ[#] && Abs[#] < Infinity &]]]],
     imgs];

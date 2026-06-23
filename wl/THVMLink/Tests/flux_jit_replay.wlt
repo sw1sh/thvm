@@ -115,3 +115,75 @@ VerificationTest[
     True,
     TestID -> "flux/jit-replay-matches-direct-hazard-free-chain"
 ]
+
+(* A multi-input capture Function[{img, txt}, ...] must REBIND a changed txt on
+   warm replay (the second JIT input, feeding the block matmuls like the FLUX
+   context embedding).  Capture on txtA, replay on a very different txtB: the
+   replay must match a direct forward on txtB AND differ from the txtA capture.
+   This isolates that single-shot multi-input rebind is correct -- the residual
+   warm-prompt-collapse below is the per-step-loop interaction, not this.
+   Model-free; skipped on non-Metal. *)
+VerificationTest[
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], cfg, rnd, mkW, Ws, fwd, imgA, txtA, txtB,
+            directB, jc, cap, rep, repVsDirectB, repVsCap},
+        If[ ctx === 0, Return[True]];
+        cfg = <|"heads" -> 4, "head_dim" -> 24, "eps" -> 1.*^-6|>;
+        rnd[lo_, hi_, d__] := TToDevice[
+            TTensorCreate @ NumericArray[RandomReal[{lo, hi}, {d}], "Real32"], "metal"];
+        mkW[] := <|
+            "wq" -> rnd[-0.05, 0.05, 96, 96],  "wk" -> rnd[-0.05, 0.05, 96, 96],
+            "wv" -> rnd[-0.05, 0.05, 96, 96],  "wqt" -> rnd[-0.05, 0.05, 96, 96],
+            "wkt" -> rnd[-0.05, 0.05, 96, 96], "wvt" -> rnd[-0.05, 0.05, 96, 96],
+            "wo" -> rnd[-0.05, 0.05, 96, 96],  "wot" -> rnd[-0.05, 0.05, 96, 96]|>;
+        {repVsDirectB, repVsCap} = TInContext[ctx,
+            SeedRandom[11];
+            Ws = Table[mkW[], {3}];
+            fwd = Function[{img, txt}, Module[{hh = img, tt = txt, r},
+                Do[ r = TRealize @ fxBlock[hh, tt, Ws[[i]], cfg];
+                    hh = r[[1]];  tt = r[[2]], {i, 3}];
+                hh]];
+            imgA = rnd[-0.05, 0.05, 8, 96];
+            txtA = rnd[-0.05, 0.05, 12, 96];
+            txtB = rnd[4.95, 5.05, 12, 96];
+            directB = N @ Normal @ TRealize @ fwd[imgA, txtB];
+            jc = TJit[fwd];
+            cap = N @ Normal @ jc[imgA, txtA];
+            rep = N @ Normal @ jc[imgA, txtB];
+            {Max @ Abs @ Flatten[rep - directB], Max @ Abs @ Flatten[rep - cap]}];
+        TContextDestroy[ctx];
+        repVsDirectB < 1.*^-4 && repVsCap > 1.*^-3 || ctx === 0
+    ],
+    True,
+    TestID -> "flux/jit-replay-rebinds-changed-text-encoding-single-shot"
+]
+
+(* REGRESSION (KNOWN-FAILING, weights-gated) for the FLUX.2-klein warm-prompt-
+   collapse.  A warm FluxGenerate -- a second prompt on a cached session, OR any
+   prompt after the first in a batch -- decodes the FIRST prompt's image content:
+   "a blue bird" generated after "a red apple on a table" (same session) comes out
+   an APPLE.  Each stage's JIT rebinds correctly in isolation (verified: the qwen
+   encodings differ, a single velJit call rebinds enc, the vaeJit rebinds the
+   latent), so the collapse is the per-step Euler loop's multi-input replay
+   interaction in the velocity capture -- a C-level capture/input-replace issue
+   (src/jit/capture.c), NOT WL-fixable.  Left failing per "write a normal failing
+   test" so whoever fixes capture.c has a check.  Skipped without the weights. *)
+VerificationTest[
+    TInit[]; TReset[];
+    Needs["WolframInstitute`THVMLink`Examples`"];
+    Module[{md = Environment["HOME"] <> "/.cache/thvm/flux2-klein-4b", apple, bird},
+        If[ ! FileExistsQ @ FileNameJoin[{md, "transformer",
+                "diffusion_pytorch_model.safetensors"}], Return[True]];   (* skip: no weights *)
+        (* COLD captures the velocity on the apple prompt; the WARM bird replay must
+           NOT collapse to the apple -- a clearly different image (different prompt). *)
+        apple = FluxGenerate["a red apple on a table",
+            "ImageSize" -> {128, 128}, RandomSeeding -> 0, ProgressReporting -> False];
+        bird = FluxGenerate["a blue bird",
+            "ImageSize" -> {128, 128}, RandomSeeding -> 0, ProgressReporting -> False];
+        (* a real apple vs a real bird differ across most of the frame; the collapse
+           makes them near-identical (only seed-noise apart, max|d| ~ the bf16 floor). *)
+        Max @ Abs @ Flatten[ImageData[apple] - ImageData[bird]] > 0.4
+    ],
+    True,
+    TestID -> "flux/warm-prompt-rebinds-text-encoding"
+]

@@ -62,15 +62,15 @@ If[ !DirectoryQ[outDir], CreateDirectory[outDir]];
 pr["FLUX.2-klein-4B  dev=", dev, "  ", side, "x", side, "  batch=", Length[prompts], "  seed=", seed];
 pr["prompts: ", prompts];
 
-doRun[tag_] := Module[{t0 = AbsoluteTime[], px, dt},
-    px = FluxGenerate[prompts, "ImageSize" -> imgSize, "Seed" -> seed,
-                      "Device" -> dev, "ReturnImages" -> False];
+doRun[tag_] := Module[{t0 = AbsoluteTime[], imgs, dt},
+    imgs = FluxGenerate[prompts, "ImageSize" -> imgSize, RandomSeeding -> seed,
+                        "Device" -> dev];
     dt = AbsoluteTime[] - t0;
-    MapIndexed[Function[{p, idx}, Module[{i = First[idx], path},
+    MapIndexed[Function[{img, idx}, Module[{i = First[idx], path},
         path = FileNameJoin[{outDir, tag <> "_" <> ToString[i] <> ".png"}];
-        Export[path, Image[Clip[p, {0., 1.}], Interleaving -> False, ColorSpace -> "RGB"]];
-        pr["  ", tag, " img ", i, " -> ", path]]], px];
-    {dt, px}];
+        Export[path, img];
+        pr["  ", tag, " img ", i, " -> ", path]]], imgs];
+    {dt, ImageData /@ imgs}];
 
 (* COLD: first call builds + caches the session, then generates. *)
 {tCold, pxCold} = doRun["cold"];
