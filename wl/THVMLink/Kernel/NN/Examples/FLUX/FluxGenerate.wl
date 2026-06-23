@@ -270,7 +270,10 @@ FluxGenerate[prompt_String, opts : OptionsPattern[]] := First @ FluxGenerate[{pr
 (* build (or fetch) the persistent session for these settings. *)
 fxSessionGet[dev_, imgSize_, nSteps_, modelDir_] := Module[
     {key = {modelDir, dev, imgSize, nSteps}},
-    Lookup[$fxSession, Key[key], $fxSession[key] = fxSessionBuild[dev, imgSize, nSteps, modelDir]]]
+    Lookup[$fxSession, Key[key],
+        $fxSession[key] = Module[{tBuild, s},
+            {tBuild, s} = AbsoluteTiming[fxSessionBuild[dev, imgSize, nSteps, modelDir]];
+            fxTiming["session-build", tBuild]; s]]]
 
 (* The three models' weights (~16 GB across Qwen + transformer + VAE
    safetensors) are zero-copy disk-mmap wraps.  The default MADV_WILLNEED
@@ -357,14 +360,15 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
     (* --- load + RoPE + temb + capture velJit (in the shared context). --- *)
     ctxT = TContextNew[dev];
     {velJit, ca, rc, rs, tembFn} = TInContext[ctxT,
-        Module[{wt, wfT, rope, rcL, rsL, caL, tembFnL, vj},
+        Module[{wt, wfT, rope, rcL, rsL, caL, tembFnL, vj, tLoadTf, tCapTf},
             caL = If[ dev === "cpu", TRealize[#] &, (TRealize @ TToDevice[TUOpCast[#, "bf16"], dev]) &];
-            wt = TSafeTensorLoad[tfPath];
+            {tLoadTf, wt} = AbsoluteTiming[TSafeTensorLoad[tfPath]];
             wfT = fxTransformerLoader[wt, dev];
             rope = fxRopeTable[gridH, gridW, stxt];
             rcL = caL @ TTensorCreate[rope["cos"]];  rsL = caL @ TTensorCreate[rope["sin"]];
             tembFnL = fxTembFn[wfT, dev];
-            vj = fxVelocityJit[rcL, rsL, wfT, fxCfg];
+            {tCapTf, vj} = AbsoluteTiming[fxVelocityJit[rcL, rsL, wfT, fxCfg]];
+            fxTiming["tf-load", tLoadTf, "tf-capture", tCapTf];
             {vj, caL, rcL, rsL, tembFnL}]];
 
     (* --- Qwen context: load weights + capture the 27-layer device forward.
@@ -373,12 +377,13 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
        Every shape is concrete (kvar-free). --- *)
     ctxQ = ctxT;  (* shared context (see above): distinct heap locs, no LAM_SHAPE collision *)
     {qwJit, wfq} = TInContext[ctxQ,
-        Module[{qw, wfqL, qct, qcos, qsin, qj},
-            qw = Join[TSafeTensorLoad[qwPaths[[1]]], TSafeTensorLoad[qwPaths[[2]]]];
+        Module[{qw, wfqL, qct, qcos, qsin, qj, tLoadQw, tCapQw},
+            {tLoadQw, qw} = AbsoluteTiming[Join[TSafeTensorLoad[qwPaths[[1]]], TSafeTensorLoad[qwPaths[[2]]]]];
             wfqL = fxQwenLoader[qw, dev];
             qct = TRoPEHalfSplitTable[stxt, qwCfg["head_dim"], qwCfg["theta"]];
             qcos = TToDevice[qct[[1]], dev];  qsin = TToDevice[qct[[2]], dev];
-            qj = TJit[Function[{x, addMask}, qwenForward[x, addMask, qcos, qsin, wfqL, qwCfg]]];
+            {tCapQw, qj} = AbsoluteTiming[TJit[Function[{x, addMask}, qwenForward[x, addMask, qcos, qsin, wfqL, qwCfg]]]];
+            fxTiming["qw-load", tLoadQw, "qw-capture", tCapQw];
             {qj, wfqL}]];
 
     (* --- VAE context: load weights (f32) + capture the conv decode.  The packed
@@ -483,9 +488,12 @@ FluxGenerate[prompts_List, opts : OptionsPattern[]] := Module[
         fxTiming[t3];
         results]]
 
-(* per-stage timing print, gated by THVM_FLUX_TIMING (off by default). *)
+(* per-stage timing print, gated by THVM_FLUX_TIMING (off by default).  Accepts
+   either bare numbers ({t1, t2}) or label/number pairs ("tf-load", t, ...). *)
 fxTiming[ts__] := If[ Environment["THVM_FLUX_TIMING"] =!= $Failed,
-    WriteString["stdout", "    [stage] ", Round[{ts}, 0.01], " s\n"]; $Output // Flush]
+    WriteString["stdout", "    [stage] ",
+        StringRiffle[(If[ NumberQ[#], ToString[Round[#, 0.01]], ToString[#]] &) /@ {ts}, " "],
+        " s\n"]; $Output // Flush]
 
 (* HoldAll so debug arguments (e.g. Mean[Flatten[Normal[enc]]]) are NOT
    evaluated unless THVM_FLUX_TIMING is set -- otherwise a device->host Normal

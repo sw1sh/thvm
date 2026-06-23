@@ -356,6 +356,13 @@ static u64 METAL_LIB_CACHE_BYTES_W;
 static u64 METAL_ZC_WRAPS;
 static u64 METAL_ZC_FAULT_BYTES;
 static u64 METAL_ZC_FAULT_US;
+// Sub-phase breakdown of the zero-copy fault-in (THVM_ZC_PHASE_STATS): which of
+// madvise / mincore-scan / page-touch / newBufferWithBytesNoCopy dominates.
+static u64 METAL_ZC_MADV_US;
+static u64 METAL_ZC_MINCORE_US;
+static u64 METAL_ZC_TOUCH_US;
+static u64 METAL_ZC_WRAP_US;
+static u64 METAL_ZC_TOUCHED_PAGES;
 fn void thvm_metal_jit_counters_reset(void);
 static void metal_pso_cache_init(void);
 
@@ -882,38 +889,65 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
   // scan), while a genuinely cold page still gets forced in.
   {
     u64 t0 = cg_now_us();
-    madvise(page_base, (size_t)maplen, MADV_WILLNEED);
     u64 npages = (maplen + page - 1) / page;
     char const *p = (char const *)page_base;
+    // mincore FIRST: which pages are already resident (warm cache, e.g. after
+    // the background TDiskPrefetchAsync streamed the file in)?  The
+    // page-table-walking madvise(MADV_WILLNEED) is itself ~0.4 us/MB on macOS
+    // (5+ s over 12.7 GB) EVEN when every page is already resident -- pure
+    // overhead on a prefetched weight set.  So issue it ONLY when mincore finds
+    // a non-resident page, scoped to the whole region (it kicks the kernel's
+    // async readahead for the genuinely-cold pages); the touch loop below then
+    // forces residency.  A fully-prefetched weight faults in ~0 (just the
+    // mincore scan), the dominant FLUX-cold case.
     unsigned char *resid = (unsigned char *)malloc((size_t)npages);
-    if (resid != NULL && mincore(page_base, (size_t)maplen, (char *)resid) == 0) {
-      // Touch ONLY pages mincore reports not-resident (low bit 0).
-      volatile char sink = 0;
-      for (u64 i = 0; i < npages; i++)
-        if ((resid[i] & 1) == 0) sink ^= p[i * page];
-      (void)sink;
+    int have_resid = (resid != NULL && mincore(page_base, (size_t)maplen, (char *)resid) == 0);
+    u64 tMin = cg_now_us();
+    u64 tMad = tMin;
+    if (have_resid) {
+      // Count missing pages; only madvise + touch if any are non-resident.
+      u64 missing = 0;
+      for (u64 i = 0; i < npages; i++) if ((resid[i] & 1) == 0) missing++;
+      if (missing != 0) {
+        madvise(page_base, (size_t)maplen, MADV_WILLNEED);
+        tMad = cg_now_us();
+        volatile char sink = 0;
+        for (u64 i = 0; i < npages; i++)
+          if ((resid[i] & 1) == 0) sink ^= p[i * page];
+        (void)sink;
+      }
+      METAL_ZC_TOUCHED_PAGES += missing;
     } else {
-      // mincore unavailable: fall back to touching every page.
+      // mincore unavailable: madvise + touch every page (the safe fallback).
+      madvise(page_base, (size_t)maplen, MADV_WILLNEED);
+      tMad = cg_now_us();
       volatile char sink = 0;
       for (u64 off = 0; off < maplen; off += page) sink ^= p[off];
       if (maplen > 0) sink ^= p[maplen - 1];
       (void)sink;
+      METAL_ZC_TOUCHED_PAGES += npages;
     }
     free(resid);
+    u64 tTouch = cg_now_us();
     METAL_ZC_WRAPS++;
     METAL_ZC_FAULT_BYTES += maplen;
-    METAL_ZC_FAULT_US += cg_now_us() - t0;
+    METAL_ZC_MINCORE_US += tMin - t0;
+    METAL_ZC_MADV_US    += tMad - tMin;
+    METAL_ZC_TOUCH_US   += tTouch - tMad;
+    METAL_ZC_FAULT_US   += tTouch - t0;
   }
 
   // Wrap the host pages in place FIRST (id<MTLBuffer> -- `id` here is the
   // Objective-C generic-object keyword, so the slot index below is named
   // `slot`, not `id`, to avoid shadowing it).  deallocator:nil keeps these
   // mmap pages owned by the CPU-side DiskMap; ARC only owns the wrapper.
+  u64 tWrap0 = cg_now_us();
   id<MTLBuffer> wrapped =
       [METAL_DEVICE newBufferWithBytesNoCopy:page_base
                                       length:wrap_len
                                      options:MTLResourceStorageModeShared
                                  deallocator:nil];
+  METAL_ZC_WRAP_US += cg_now_us() - tWrap0;
   if (wrapped == nil) {
     fprintf(stderr,
       "thvm_metal_buf_wrap_external: no-copy wrap of %llu bytes failed\n",
@@ -1381,6 +1415,14 @@ static void metal_shutdown(void) {
             (unsigned long long)METAL_ZC_WRAPS,
             (unsigned long long)(METAL_ZC_FAULT_BYTES / (1024 * 1024)),
             (unsigned long long)(METAL_ZC_FAULT_US / 1000));
+    if (getenv("THVM_ZC_PHASE_STATS") != NULL)
+      fprintf(stderr,
+              "thvm: metal_zerocopy phases -- madvise_ms=%llu mincore_ms=%llu touch_ms=%llu wrap_ms=%llu touched_pages=%llu\n",
+              (unsigned long long)(METAL_ZC_MADV_US / 1000),
+              (unsigned long long)(METAL_ZC_MINCORE_US / 1000),
+              (unsigned long long)(METAL_ZC_TOUCH_US / 1000),
+              (unsigned long long)(METAL_ZC_WRAP_US / 1000),
+              (unsigned long long)METAL_ZC_TOUCHED_PAGES);
     fprintf(stderr,
             "thvm: metal_commits stats -- batched=%llu standalone=%llu decref_flushes=%llu wait_ms=%llu from_realize_end=%llu from_buf_read=%llu\n",
             (unsigned long long)METAL_FLUSH_COMMITS,

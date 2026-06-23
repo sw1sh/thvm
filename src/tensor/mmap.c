@@ -74,26 +74,81 @@ fn void thvm_disk_buf_dontneed(u32 cpu_buf_id) {
 // speed).  read() (not mmap) keeps this independent of the per-tensor maps and
 // adds NO extra RSS beyond the page cache the faults would populate anyway.
 // Best-effort: any failure (open/read) just leaves the cold fault-in path.
+// One reader thread covers a [start, end) byte segment of a file: pread()s it
+// front-to-back through a throwaway buffer so the pages land in the unified
+// page cache.  Splitting a big file across several segment-readers raises the
+// SSD queue depth -- a single sequential reader saturates one I/O stream
+// (~1-2 GB/s on this NVMe), but N parallel pread streams hit ~the device's full
+// bandwidth, so a 7.7 GB transformer warms in ~1.5 s instead of ~4 s.  This is
+// what lets the prefetch fully LEAD the zero-copy fault-in (fault_ms -> ~0).
+typedef struct { char path[4096]; u64 start, end; } SegArg;
+
+static void *disk_prefetch_seg(void *vp) {
+  SegArg *s = (SegArg *)vp;
+  int fd = open(s->path, O_RDONLY);
+  if (fd >= 0) {
+#ifdef F_RDAHEAD
+    fcntl(fd, F_RDAHEAD, 1);
+#endif
+    enum { CHUNK = 8u << 20 };           // 8 MB pread window
+    void *buf = malloc(CHUNK);
+    if (buf != NULL) {
+      u64 off = s->start;
+      while (off < s->end) {
+        size_t want = (s->end - off < CHUNK) ? (size_t)(s->end - off) : CHUNK;
+        ssize_t n = pread(fd, buf, want, (off_t)off);
+        if (n <= 0) break;
+        off += (u64)n;
+      }
+      free(buf);
+    }
+    close(fd);
+  }
+  free(s);
+  return NULL;
+}
+
+// Background page-cache warm of a whole file, split across N parallel
+// segment-readers (THVM_PREFETCH_THREADS, default 4).  Detached: the caller
+// returns immediately; the readers race ahead of the loaders/fault-in.
 typedef struct { char path[4096]; } DiskPrefetchArg;
 
 static void *disk_prefetch_main(void *vp) {
   DiskPrefetchArg *a = (DiskPrefetchArg *)vp;
-  int fd = open(a->path, O_RDONLY);
-  if (fd >= 0) {
-    // Hint the kernel we'll read it all sequentially, then stream it through a
-    // reused buffer so the pages land in the cache (the read target is thrown
-    // away; only the cache residency matters).
-#ifdef F_RDAHEAD
-    fcntl(fd, F_RDAHEAD, 1);
-#endif
-    enum { CHUNK = 8u << 20 };           // 8 MB streaming window
-    void *buf = malloc(CHUNK);
-    if (buf != NULL) {
-      ssize_t n;
-      while ((n = read(fd, buf, CHUNK)) > 0) { /* discard; warms page cache */ }
-      free(buf);
-    }
-    close(fd);
+  static int nthreads = -1;
+  if (nthreads < 0) {
+    const char *e = getenv("THVM_PREFETCH_THREADS");
+    int v = (e != NULL) ? atoi(e) : 4;
+    nthreads = (v < 1) ? 1 : (v > 16 ? 16 : v);
+  }
+  struct stat st;
+  u64 sz = 0;
+  if (stat(a->path, &st) == 0 && st.st_size > 0) sz = (u64)st.st_size;
+  if (sz == 0) { free(a); return NULL; }
+
+  int nseg = nthreads;
+  if ((u64)nseg > sz) nseg = 1;
+  u64 t0 = cg_now_us();
+  pthread_t th[16];
+  int spawned = 0;
+  u64 seg = (sz + (u64)nseg - 1) / (u64)nseg;
+  for (int i = 0; i < nseg; i++) {
+    SegArg *s = (SegArg *)malloc(sizeof(*s));
+    if (s == NULL) break;
+    memcpy(s->path, a->path, strlen(a->path) + 1);
+    s->start = (u64)i * seg;
+    s->end   = (s->start + seg < sz) ? s->start + seg : sz;
+    if (s->start >= s->end) { free(s); continue; }
+    if (pthread_create(&th[spawned], NULL, disk_prefetch_seg, s) == 0) spawned++;
+    else { disk_prefetch_seg(s); }   // fall back to inline on spawn failure
+  }
+  for (int i = 0; i < spawned; i++) pthread_join(th[i], NULL);
+
+  if (getenv("THVM_PREFETCH_STATS") != NULL) {
+    const char *base = strrchr(a->path, '/');
+    fprintf(stderr, "thvm: prefetch done %s -- %llu MB in %llu ms (%d threads)\n",
+            base ? base + 1 : a->path, (unsigned long long)(sz >> 20),
+            (unsigned long long)((cg_now_us() - t0) / 1000), spawned);
   }
   free(a);
   return NULL;
