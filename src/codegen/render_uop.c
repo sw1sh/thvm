@@ -1794,29 +1794,35 @@ static int rmu_fuse_epilogue_on(void) {
   return on;
 }
 
-// THVM_TC_BATCHED (default OFF -- CORRECTNESS BUG, see below): route a TRUE
-// batched matmul (attention's Q@K^T and @V, batch=heads) through the tiled emitter
+// THVM_TC_BATCHED (default OFF -- residual FLUX-pipeline correctness gap): route
+// a TRUE batched matmul (attention's Q@K^T and @V, batch=heads) through the
+// register-blocked tiled emitter (rmu_emit_matmul_tc_tiled) instead of the
+// ~2-TFLOPS parallel_tc per-8x8-tile body.  The emitter offsets the A/B/C
+// addresses by each operand's REAL per-batch stride (rmu_range_coeff, NOT a
+// packed M*K/K*N/M*N -- the attention Q/K/V are strided {heads,seq,head_dim}
+// views) and the C store steps M rows by C's real M-axis stride c_row_stride
+// (the @V output is M-major {seqQ,heads,headDim}); the dispatch grid becomes
+// batch * m_tiles * n_tiles.
 //
-// DISABLED BY DEFAULT: rmu_emit_matmul_tc_tiled's batched path computes WRONG
-// results for the FLUX attention's strided/transposed Q/K {heads,seq,head_dim}
-// views on Metal -- the DiT/Qwen produce a NOISE latent, which the (correct) VAE
-// faithfully decodes into a garbage patchwork image (root-caused 2026-06-23:
-// FluxGenerate gave garbage with this ON, a correct cat with it OFF; every
-// individual op + the VAE are bit-identical CPU/Metal, so the fault is the
-// batch-axis stride/transpose handling here, not the ops).  The parallel_tc
-// fallback is byte-identical + correct.  THVM_TC_BATCHED=1 opts back in.
-// TODO: fix the batched-tiled emitter's strided-attention address math, validate
-// a Metal batched Q@K^T against the parallel_tc path, then restore the default.
+// The isolated batched matmul is now CORRECT: the scores and @V kernels match the
+// parallel_tc path AND the CPU reference at maxdiff=0 across heads=24, seq in
+// {64,320,512,576}, head_dim=128, in bf16, standalone, under TJit capture+replay,
+// and via the real THeadAttention (two bugs fixed: the M-major @V C-row-stride and
+// a mixed-dtype bf16-A/f32-B vectorized-load reinterpret -- see the staging code).
+// BUT a full FluxGenerate at the default STILL decodes a garbage patchwork with
+// this ON (std ~0.15 vs the correct ~0.24): some interaction in the 25-block DiT
+// velocity net corrupts when the batched matmul takes the tiled path, NOT
+// reproduced by any isolated/JIT/replay attention test.  Bisected: with the gate
+// ON, routing the batched matmuls back to parallel_tc (THVM_TC_TILE=0) restores
+// the cat, and EITHER the scores- or the @V-tiled kernel alone degrades it -- so
+// the fault is shared in the tiled emit path under the full pipeline, not the
+// per-matmul values.  Left OFF until that pipeline interaction is root-caused;
+// the parallel_tc fallback is correct.  THVM_TC_BATCHED=1 opts both gates back in
+// for continued investigation.
 //
-// The register-blocked tiled emitter (when correct) is the perf win:
-// (rmu_emit_matmul_tc_tiled) instead of the ~2-TFLOPS parallel_tc per-8x8-tile
-// body.  The emitter adds a per-batch base offset (_batch * M*K / K*N / M*N) to
-// the A/B/C addresses; the dispatch grid becomes batch * m_tiles * n_tiles.
-// Measured on M3 Max (FLUX.2-klein-4B, 128px): the DiT attention scores GEMM
-// goes 2635 -> 880 us (~3x), the @V GEMM 1515 -> 893 us (the batch-aware tile
-// picker upgrades its tile from 32x8 to 64x64), and the warm DiT stage drops
-// 2.03 -> 1.87 s end-to-end.  THVM_TC_BATCHED=0 forces the byte-identical
-// parallel_tc path back (a fallback / A-B knob).
+// When correct this is the perf win: on M3 Max (FLUX.2-klein-4B, 128px) the DiT
+// scores GEMM goes 2635 -> 880 us (~3x), the @V GEMM 1515 -> 893 us, warm DiT
+// 2.03 -> 1.87 s end-to-end.
 static int rmu_tc_batched_on(void) {
   static int known = 0, on = 0;
   if (!known) {
@@ -2704,7 +2710,8 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                                      Term m_range_term, Term n_range_term,
                                      u32 batch_extent, u32 m_extent, u32 a_lead,
                                      u32 batch_stride_a, u32 batch_stride_b,
-                                     u32 batch_stride_c, u32 c_row_stride) {
+                                     u32 batch_stride_c, u32 c_row_stride,
+                                     int a_buf_bf, int b_buf_bf) {
   // THVM_FUSE_MATMUL_INPUT: a_val != 0 means A is a fused elementwise producer.
   // The A-staging then computes a_val inline at (m = _tm + row, k = KK0 + col)
   // -- declaring `uint a<m>` / `uint a<k>` in scope so rmu_emit_term renders the
@@ -2788,14 +2795,23 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   // valid when the inner extent and source leading dim are multiples of 4 (the
   // canonical packed FLUX shapes always are; scalar fallback otherwise).  Cuts
   // the staging-loop instruction count ~4x and saturates memory bandwidth.
-  int a_vec = (t.kb % 4u == 0) && (k_extent % 4u == 0);
-  int b_vec = !b_trans && (tile_n % 4u == 0) && (n_extent % 4u == 0);
+  // The vectorized load casts the DEVICE buffer to `sel4*` (a raw reinterpret),
+  // so it is valid only when the buffer's own element type equals `sel`
+  // (`stage_bf` -> bfloat else float).  A mixed-dtype matmul (e.g. the attention
+  // @V with a bf16 softmax A and an f32 V B: B!=bf16 forces sel=float, but A is
+  // bf16) would float4-load a bfloat buffer -- reading 16 bytes where 8 live,
+  // total corruption.  Require buffer-dtype == sel to vectorize; otherwise the
+  // scalar staging load reads each element at its native dtype and widens to sel.
+  int a_sel_match = (a_buf_bf != 0) == (stage_bf != 0);
+  int b_sel_match = (b_buf_bf != 0) == (stage_bf != 0);
+  int a_vec = a_sel_match && (t.kb % 4u == 0) && (k_extent % 4u == 0);
+  int b_vec = b_sel_match && !b_trans && (tile_n % 4u == 0) && (n_extent % 4u == 0);
   // A transposed B (B = Transpose[W], W {N,K} contiguous: B[k][n] = W[n][k])
   // can't vectorize its N-run (strided by b_nstride), but ITS K-run is W's
   // contiguous axis -- so read 4 consecutive K as a vector (coalesced) and
   // scatter to the strided threadgroup slots.  Needs kb and the W row stride
   // 4-aligned; else a scalar coalesced gather.
-  int b_tvec = b_trans && (t.kb % 4u == 0) && (b_nstride % 4 == 0);
+  int b_tvec = b_sel_match && b_trans && (t.kb % 4u == 0) && (b_nstride % 4 == 0);
   u32 a_elems = tile_m * t.kb, b_elems = t.kb * tile_n;
   // Emit-helper macros for the cooperative load of one K-block.  BUFOFF is the
   // MSL expression selecting the destination buffer half (an element offset
@@ -3558,9 +3574,11 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
         && !(is_batched && (a_val != 0 || b_is_int8))
         && rmu_tc_pick_tile(m_extent, n_extent, k_extent,
                             is_batched ? batch_extent : 0u, &_dt));
-    fprintf(stderr, "[mm] M=%u N=%u K=%u batch=%u%s path=%s%s\n",
+    fprintf(stderr, "[mm] M=%u N=%u K=%u batch=%u dtA=%u dtB=%u dtC=%u%s path=%s%s\n",
             m_extent, n_extent, k_extent, batch_extent,
-            a_trans ? " Atrans" : "", _tiled ? "TILED" : "parallel_tc/other",
+            uop_buffer_dtype(buf_a), uop_buffer_dtype(buf_b), uop_buffer_dtype(buf_c),
+            a_trans ? " Atrans" : "",
+            _tiled ? "TILED" : "parallel_tc/other",
             epilogue_value != 0 ? " +epi" : "");
   }
   if ((!is_batched || rmu_tc_batched_on()) && !a_trans && m_par && n_par
@@ -3610,6 +3628,14 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       // the M-major @V output {M,B,N} (= {seqQ, heads, headDim}) has c_m ==
       // heads*headDim != n_extent.
       u32 c_row = is_batched ? (u32)c_m : n_extent;
+      // Actual operand BUFFER dtypes -- the vectorized load reinterprets the
+      // device buffer as `sel4`, so it is only valid when the buffer is itself
+      // bf16/f32 matching `sel`.  A mixed-dtype matmul (bf16 A x f32 B, e.g. the
+      // attention @V) would otherwise float4-load the bf16 operand -> corruption.
+      // A fused-A producer has no plain buffer (a_vec is never taken for it), so
+      // report it as matching `sel` (it stages via the scalar producer path).
+      int a_buf_bf = (a_val != 0) ? stage_bf : (uop_buffer_dtype(buf_a) == DT_BF16);
+      int b_buf_bf = b_is_int8 ? stage_bf : (uop_buffer_dtype(buf_b) == DT_BF16);
       rmu_emit_matmul_tc_tiled(a_nm, b_nm, c_nm, n_extent,
                                k_extent, tile, c_is_bf, stage_bf,
                                b_trans, ldb, fp, depth, b_is_int8,
@@ -3617,7 +3643,8 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
                                epilogue_value, opt_tc_term,
                                m_range_term, n_range_term,
                                is_batched ? batch_extent : 0u, m_extent,
-                               a_lead, (u32)bsa, (u32)bsb, (u32)bsc, (u32)c_row);
+                               a_lead, (u32)bsa, (u32)bsb, (u32)bsc, (u32)c_row,
+                               a_buf_bf, b_buf_bf);
       return 1;
     }
   }

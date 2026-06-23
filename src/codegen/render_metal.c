@@ -265,12 +265,12 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
       if (uop_classify_batched_matmul(sroot, &b_ax, &b_ext, &m_ax, &m_ext,
                                       &n_ax, &n_ext, &k_ext)
           && (m_ext % 8u) == 0 && (n_ext % 8u) == 0 && b_ext >= 1) {
-        // THVM_TC_BATCHED (default OFF -- CORRECTNESS BUG, see render_uop.c): the
-        // register-blocked tiled emitter computes WRONG attention on Metal (garbage
-        // FLUX latents).  This dispatch-grid gate MUST match rmu_emit_matmul_tc_tiled's
-        // gate -- if they disagree the grid and kernel mismatch (worse than either
-        // consistent path).  Default OFF -> the parallel_tc grid (correct).
-        // THVM_TC_BATCHED=1 opts BOTH gates back in once the emitter is fixed.
+        // THVM_TC_BATCHED (default OFF -- residual FLUX-pipeline gap, see
+        // render_uop.c): the batched-tiled emitter is correct in isolation but a full
+        // FluxGenerate still decodes garbage with it on.  This dispatch-grid gate
+        // MUST match rmu_emit_matmul_tc_tiled's gate -- if they disagree the grid and
+        // kernel mismatch (worse than either consistent path).  Default OFF -> the
+        // parallel_tc grid (correct).  THVM_TC_BATCHED=1 opts BOTH gates back in.
         static int _tcb_k = 0, _tcb = 0;
         if (!_tcb_k) { char const *e = getenv("THVM_TC_BATCHED");
                        if (e != NULL && e[0] == '1') _tcb = 1; _tcb_k = 1; }
@@ -283,6 +283,10 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
             if (ntg > 0 && ntg <= 0xFFFFFFFFu) {
               if (groups_x  != NULL) *groups_x  = (u32)ntg;
               if (threads_x != NULL) *threads_x = btile.local_m * btile.local_n * 32u;
+              if (getenv("THVM_DISP_TRACE"))
+                fprintf(stderr, "[disp] BATCHED tiled M=%u N=%u K=%u b=%u tile=%ux%u "
+                        "grid=%llu threads=%u\n", m_ext, n_ext, k_ext, b_ext, tm, tn,
+                        (unsigned long long)ntg, btile.local_m * btile.local_n * 32u);
               return 1;
             }
           }
