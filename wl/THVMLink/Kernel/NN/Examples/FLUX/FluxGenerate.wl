@@ -328,10 +328,15 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
        of stalling serially inside the first forward's zero-copy fault-in (each
        weight is faulted resident at its first matmul; with the page already
        cached that fault runs at memory speed).  Non-blocking -- returns at once;
-       the reads race ahead of the loaders.  Transformer first (its velocity
-       capture runs first AND is the bulk + the long capture), then Qwen, then
-       the small VAE. *)
-    TDiskPrefetchAsync[Join[{tfPath}, qwPaths, {vaePath}]];
+       the reads race ahead of the loaders.  ORDER MATCHES ACCESS ORDER: Qwen
+       runs FIRST (STAGE 1 text-encode) and the transformer SECOND (STAGE 2
+       velocity sample), so prefetch Qwen first -- it is used immediately, with
+       the smallest eviction window, while the transformer (the 7.4 GB bulk)
+       warms during the ~5 s Qwen encode and is fresh when STAGE 2 faults it.
+       Prefetching the transformer first (the old order) left it idle through the
+       whole build + Qwen stage, so ~5 GB of it evicted under cache pressure and
+       the STAGE-2 fault-in re-read it serially.  VAE (small) last. *)
+    TDiskPrefetchAsync[Join[qwPaths, {tfPath, vaePath}]];
     fxCfg = <|"eps" -> 1.*^-6, "num_double" -> 5, "num_single" -> 20, "heads" -> 24, "head_dim" -> 128|>;
     qwCfg = <|"heads" -> 32, "kv_heads" -> 8, "head_dim" -> 128, "eps" -> 1.*^-6,
               "theta" -> 1000000, "layers" -> 27, "captureLayers" -> {8, 17, 26}|>;
