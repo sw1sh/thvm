@@ -1647,6 +1647,30 @@ EXTERN_C DLLEXPORT int thvm_wl_disk_drop_weight(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// Background fault-in of a disk-mmap weight's pages into THIS process (the
+// inverse of thvm_wl_disk_drop_weight).  args[0] = a weight Term (TAG_TEN over
+// a disk-mmap CPU buffer).  Spawns a detached thread that touches one byte per
+// page across the weight's mapping so the OS faults every page resident, then
+// returns at once.  The FLUX session warms the transformer weights with this
+// during STAGE 1 (Qwen encode), while the transformer is idle, so its ~3 GB
+// minor fault overlaps the Qwen compute instead of stalling the STAGE-2
+// velocity sample's first matmul.  No-op for a non-disk / non-mapped weight.
+// Returns 1.
+EXTERN_C DLLEXPORT int thvm_wl_disk_warm_async(WolframLibraryData libData,
+                                               mint argc, MArgument *args,
+                                               MArgument res) {
+  (void)libData; (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  if (term_tag(t) == TAG_TEN) {
+    u32 tid = (u32)term_val(t);
+    if (tid != 0 && tid < TENS_NEXT) {
+      thvm_disk_buf_warm_async(TENS[tid].buf_id);
+    }
+  }
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
 // Kick off a detached background read() of a whole safetensors file so its
 // bytes land in the OS page cache before the zero-copy wrap's fault-in loop
 // (src/backend/metal/_.m) touches them at the first matmul.  The FLUX session

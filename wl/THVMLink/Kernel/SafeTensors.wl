@@ -44,6 +44,9 @@ The mmap stays valid (file-backed, read-only), so a later use re-faults and re-w
 GeneralUtilities`SetUsage[TDiskPrefetchAsync, "TDiskPrefetchAsync[path$] kicks off a detached background read of the whole file path$ so its bytes land in the OS page cache before a later mmap fault touches them; returns path$ immediately (non-blocking).
 TDiskPrefetchAsync[{path$1, path$2, $$}] prefetches several files concurrently.  Used at FLUX-session build to warm the transformer / Qwen / VAE safetensors so the ~6 s of SSD read overlaps the JIT capture instead of stalling serially inside the first forward (the zero-copy wrap's fault-in then hits warm pages).  Best-effort: a missing/unreadable file is silently ignored."];
 
+GeneralUtilities`SetUsage[TDiskWarmAsync, "TDiskWarmAsync[w$] background-faults a disk-mmap weight w$ (a lazy mmap-backed disk TTerm, e.g. from TSafeTensorLoad) resident in THIS process: a detached thread touches one byte per page across the weight's mapping so the OS faults every page in, then returns the weight at once (non-blocking).  The inverse of TDiskDropWeight.
+TDiskWarmAsync[{w$1, w$2, $$}] warms a list of weights and returns the list.  TDiskPrefetchAsync only warms the OS page cache (a file read); the per-process minor fault that maps those pages into THIS address space still happens serially at the first matmul.  Warming an idle model's weights ahead of its forward (e.g. the FLUX transformer during the Qwen text-encode stage) moves that minor fault off the forward's critical path.  A no-op (returns the weight unchanged) for a non-disk / non-mapped tensor."];
+
 Begin["`Private`"];
 
 (* Forward-declare sibling-owned symbols so bare references resolve to the
@@ -57,6 +60,8 @@ $diskDropWeightFn := $diskDropWeightFn = load["thvm_wl_disk_drop_weight", {Integ
 
 $filePrefetchFn := $filePrefetchFn = load["thvm_wl_file_prefetch_async", {"UTF8String"}, Integer]
 
+$diskWarmFn := $diskWarmFn = load["thvm_wl_disk_warm_async", {Integer}, Integer]
+
 (* Drop a disk-mmap weight's resident pages + Metal wrap (the streaming
    per-block reclaim).  Accepts a single TTerm or a list; returns the input. *)
 TDiskDropWeight[ws_List] := (TDiskDropWeight /@ ws; ws)
@@ -67,6 +72,13 @@ TDiskDropWeight[w_]      := w
    Returns the path(s); the read runs on a detached thread. *)
 TDiskPrefetchAsync[paths_List] := (TDiskPrefetchAsync /@ paths; paths)
 TDiskPrefetchAsync[path_String] := (ensureInit[]; $filePrefetchFn[path]; path)
+
+(* Non-blocking background fault-in of a disk-mmap weight's pages into this
+   process (inverse of TDiskDropWeight).  Accepts a single TTerm or a list;
+   returns the input. *)
+TDiskWarmAsync[ws_List] := (TDiskWarmAsync /@ ws; ws)
+TDiskWarmAsync[w_TTerm] := (ensureInit[]; $diskWarmFn[ttermRaw[w]]; w)
+TDiskWarmAsync[w_]      := w
 
 (* safetensors dtype name <-> thvm dtype string (tinygrad safe_dtypes /
    inverse_safe_dtypes).  LOAD covers the byte-aligned dtypes PLUS the

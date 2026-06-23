@@ -567,6 +567,16 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[{
         Module[{wt, wfT, rope, rcL, rsL, caL, tembFnL, vj, tLoadTf, tCapTf},
             caL = If[dev === "cpu", TRealize[#]&, (TRealize @ TToDevice[TUOpCast[#, "bf16"], dev])&];
             {tLoadTf, wt} = AbsoluteTiming[TSafeTensorLoad[tfPath]];
+(* COLD-START OVERLAP: background-fault the transformer's disk-mmap pages
+   resident NOW, while it is idle.  The transformer is not touched until STAGE
+   2 (velocity sample); STAGE 1 (Qwen encode) runs first.  TDiskPrefetchAsync
+   above only warms the OS page cache; the per-process minor fault that maps
+   those ~3 GB of pages into this address space still happens serially at the
+   first STAGE-2 matmul (the zero-copy wrap's touch loop).  Kicking it off here
+   on a detached thread overlaps that fault with the rest of session-build plus
+   the Qwen text-encode, so STAGE 2 finds the transformer already resident.
+   FLUX_NO_WARM_TF=1 disables it for an A/B baseline. *)
+            If[ Environment["FLUX_NO_WARM_TF"] =!= "1", TDiskWarmAsync[Values[wt]]];
             wfT = fxTransformerLoader[wt, dev];
             rope = fxRopeTable[gridH, gridW, stxt];
             rcL = caL @ TTensorCreate[rope["cos"]];

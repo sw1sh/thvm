@@ -198,6 +198,96 @@ fn int thvm_disk_buf_map_info(u32 cpu_buf_id, void **base_out, u64 *maplen_out,
   return 1;
 }
 
+// Background fault-in of a disk-mmap weight's pages into THIS process.  The
+// inverse of thvm_disk_buf_dontneed: it touches one byte per page across the
+// weight's whole mapping so the OS faults every page resident, then returns
+// without blocking (a detached pthread does the touching).  TDiskPrefetchAsync
+// only warms the OS PAGE CACHE (a read() of the file); the per-process minor
+// fault that maps those cached pages into THIS address space still happens
+// serially at the first matmul (the zero-copy wrap's touch loop, metal/_.m).
+// Calling this on the transformer weights during STAGE 1 (Qwen encode), while
+// the transformer is idle, moves that minor fault OFF the STAGE-2 critical
+// path: by the time the velocity sample first binds a transformer weight its
+// pages are already resident, so the wrap's touch loop finds nothing to fault.
+// Best-effort: a non-disk / unmapped buf is a no-op; a spawn failure faults
+// inline (still correct, just not overlapped).  One reader thread covers a
+// [off, end) page-stride segment of the mapping; splitting across N threads
+// raises the fault-stream concurrency to ~full SSD bandwidth (same rationale
+// as zc_parallel_touch).
+typedef struct {
+  char const *base;
+  u64 off, end, page;
+} DiskWarmSeg;
+
+static void *disk_warm_seg(void *vp) {
+  DiskWarmSeg *s = (DiskWarmSeg *)vp;
+  volatile char sink = 0;
+  for (u64 o = s->off; o < s->end; o += s->page) sink ^= s->base[o];
+  (void)sink;
+  free(s);
+  return NULL;
+}
+
+typedef struct {
+  char const *base;
+  u64 maplen, page;
+  int nthreads;
+} DiskWarmArg;
+
+static void *disk_warm_main(void *vp) {
+  DiskWarmArg *a = (DiskWarmArg *)vp;
+  u64 npages = (a->maplen + a->page - 1u) / a->page;
+  int nseg = a->nthreads;
+  if ((u64)nseg > npages) nseg = (int)(npages > 0u ? npages : 1u);
+  u64 segpages = (npages + (u64)nseg - 1u) / (u64)nseg;
+  u64 seg = segpages * a->page;
+  if (seg == 0u) seg = a->page;
+  pthread_t th[16];
+  int spawned = 0;
+  for (int i = 0; i < nseg && i < 16; i++) {
+    u64 o = (u64)i * seg;
+    if (o >= a->maplen) break;
+    DiskWarmSeg *s = (DiskWarmSeg *)malloc(sizeof(*s));
+    if (s == NULL) break;
+    s->base = a->base;
+    s->off  = o;
+    s->end  = (o + seg < a->maplen) ? o + seg : a->maplen;
+    s->page = a->page;
+    if (pthread_create(&th[spawned], NULL, disk_warm_seg, s) == 0) spawned++;
+    else disk_warm_seg(s);   // inline fallback on spawn failure
+  }
+  for (int i = 0; i < spawned; i++) pthread_join(th[i], NULL);
+  free(a);
+  return NULL;
+}
+
+fn void thvm_disk_buf_warm_async(u32 cpu_buf_id) {
+  void *base = NULL;
+  u64 maplen = 0u, minor = 0u;
+  if (!thvm_disk_buf_map_info(cpu_buf_id, &base, &maplen, &minor)) return;
+  if (base == NULL || maplen == 0u) return;
+  static int nthreads = -1;
+  if (nthreads < 0) {
+    const char *e = getenv("THVM_FAULT_THREADS");
+    if (e == NULL) e = getenv("THVM_PREFETCH_THREADS");
+    int v = (e != NULL) ? atoi(e) : 8;
+    nthreads = (v < 1) ? 1 : (v > 16 ? 16 : v);
+  }
+  DiskWarmArg *a = (DiskWarmArg *)malloc(sizeof(*a));
+  if (a == NULL) return;
+  a->base     = (char const *)base;
+  a->maplen   = maplen;
+  a->page     = (u64)sysconf(_SC_PAGESIZE);
+  if (a->page == 0u) a->page = 4096u;
+  a->nthreads = nthreads;
+  pthread_t th;
+  if (pthread_create(&th, NULL, disk_warm_main, a) != 0) {
+    disk_warm_main(a);   // run inline (blocking) if the spawn fails
+    return;
+  }
+  pthread_detach(th);
+}
+
 // Map [byte_offset, byte_offset + nbytes) of `path` read-only and wrap it
 // as a CPU TAG_TEN of the given dtype + shape.  Returns 0 (an invalid
 // Term, all-zero) on any failure; callers must check.  The mapping is
