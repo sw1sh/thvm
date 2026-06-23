@@ -851,6 +851,19 @@ static Term materialize_copy(Term term) {
     free(stage);
     return src_mat;
   }
+  // A disk-mmap weight is uploaded ONCE and re-bound across many kernels
+  // (and, for FLUX, across JIT-captured replay steps).  Its staged device
+  // buffer must therefore never be recycled into a DIFFERENT tensor while a
+  // live reference (a heap TAG_TEN leaf or a not-yet-recorded capture input)
+  // still names it: the size-keyed Metal freelist would otherwise hand an
+  // eager (uncaptured) weight's reclaimed buffer to a later same-size weight,
+  // overwriting the first weight's bytes under a binding that still points at
+  // it.  The zero-copy wrap is immune (borrowed buffers dedup by host_base and
+  // skip the size freelist); the staged copy earns the same immunity by
+  // caching its uploads by copy-loc unconditionally (below) so each weight
+  // owns a stable, refcounted buffer.
+  int is_disk_weight = (srcb == &CPU_BACKEND)
+                    && thvm_disk_buf_is_mapped(sd->buf_id);
   u32 dst_tid = tensor_alloc(target, sd->view.shape, dtype);
   target->buf_write(TENS[dst_tid].buf_id, stage, nbytes);
   free(stage);
@@ -865,23 +878,29 @@ static Term materialize_copy(Term term) {
   // Sticky retain so the per-realize pool rollback does not reclaim the
   // uploaded weight buffer; cache for re-realize / JIT-replay reuse.
   //
-  // Only pin+cache while a JIT capture is active.  A JIT-captured graph
-  // replays the SAME upload-cached weight buffer across every replay step,
-  // so the upload must survive pool rollback (and stay deduped by copy-loc).
-  // An EAGER forward, by contrast, uploads each weight, consumes it in one
-  // kernel, and never reads that copy-loc again within the realize -- a
-  // sticky pin would then leak every uploaded weight for the lifetime of the
-  // context (a single 27-layer Qwen forward pinned all ~8GB of weights at
-  // once, growing live ~0.37GB/layer with nothing freed).  Leaving the eager
-  // upload UNPINNED lets the per-realize rollback reclaim it once the kernel
-  // that consumes it has fired, bounding a forward's resident set to its
-  // genuinely-live working set.  We also skip the cache insert when not
-  // pinning: a non-pinned tid would be freed by rollback and could later
-  // alias a different tensor, so the (copy_loc -> tid) entry must not outlive
-  // the buffer.  Mirror: tinygrad pins a COPY's dest only when the lazy graph
-  // that owns it stays alive (a JIT'd schedule); an eager copy's dest dies
-  // with its schedule.
-  if (jit_is_capturing()) {
+  // Pin+cache when a JIT capture is active OR when the source is a disk-mmap
+  // weight.  A JIT-captured graph replays the SAME upload-cached buffer across
+  // every replay step, so the upload must survive pool rollback (and stay
+  // deduped by copy-loc).  A disk-mmap weight earns the pin too, EVEN eager:
+  // it is uploaded once and re-bound by many kernels, and an unpinned eager
+  // weight buffer is reclaimable by the per-realize rollback, so the size-keyed
+  // Metal freelist then hands it to a later same-size weight, silently
+  // overwriting the first weight's bytes under a binding (a heap TAG_TEN leaf
+  // or a capture input recorded after the upload) that still points at it.
+  // (Concretely on FLUX: a {3072,3072} block proj uploaded just before the
+  // velocity capture was recycled into a {3072,3072} weight uploaded during
+  // capture, so the captured kernel read the wrong weight, a wrong image at
+  // std 0.091 vs the correct 0.229.)  The zero-copy wrap never hits this: its
+  // borrowed buffers dedup by host_base and skip the size freelist, so two
+  // distinct weights never share device storage.  Pinning the staged disk
+  // weight by copy-loc gives it the same immunity (each weight owns a stable,
+  // refcounted buffer that the freelist cannot re-hand).  This makes the
+  // weight set device-resident (non-evictable), which is exactly what the
+  // live-buffer load wants; a plain eager intermediate (non-disk, non-weight)
+  // stays UNPINNED so the rollback still bounds an ordinary forward's resident
+  // set.  Mirror: tinygrad pins a COPY's dest while a LazyBuffer that owns it
+  // stays alive.
+  if (jit_is_capturing() || is_disk_weight) {
     if (target->buf_jit_pin != NULL) target->buf_jit_pin(TENS[dst_tid].buf_id);
     copy_upload_insert(loc, target->id, dst_tid);
   }

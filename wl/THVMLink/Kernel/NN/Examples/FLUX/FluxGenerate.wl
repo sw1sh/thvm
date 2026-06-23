@@ -438,6 +438,17 @@ fxBoundMemory[] := (
    at a slower cold; the live-bytes ceiling below stays a ~60%-RAM safety belt. *)
     fxEnvDefault["THVM_FWD_RECLAIM", "0"];
     fxEnvDefault["THVM_MAX_LIVE_BYTES", ToString[Round[0.6 $SystemMemory]]];
+(* Live (non-evictable) weight buffers instead of the default zero-copy mmap
+   wrap.  The wrap aliases the safetensors page cache, which the OS evicts under
+   session memory pressure; the transformer is then re-faulted page-by-page at
+   the DiT (velocity) stage, the dominant FLUX-cold cost on a memory-pressured
+   box.  THVM_ZEROCOPY=0 uploads each weight to a real device buffer once
+   (sequential read) and pins it, so the weights stay resident like MLX's.  The
+   upload is a one-time ~3.7 GB copy: on an UNPRESSURED warm cache the wrap is
+   faster (no copy), so a user who is not memory-bound can export
+   THVM_ZEROCOPY=1 to restore the wrap.  Default to live buffers here for cold
+   parity under the typical pressured session (notebook + kernel resident). *)
+    fxEnvDefault["THVM_ZEROCOPY", "0"];
 (* Buffer-reuse OFF for the FLUX session: the velocity/Qwen/VAE captures
    recycle output buffers, and on Apple9 (M3) the batched ICB's [cmd
    setBarrier] does NOT reliably order those write-after-write recycles, so
