@@ -574,17 +574,16 @@ fxStageFrac[lo_, hi_, i_, n_, k_, nk_] := lo + (hi - lo) * ((i - 1) + k/nk)/n;
 (* per-stage timing print, gated by THVM_FLUX_TIMING (off by default).  Accepts
    either bare numbers ({t1, t2}) or label/number pairs ("tf-load", t, ...). *)
 fxTiming[ts__] := If[ Environment["THVM_FLUX_TIMING"] =!= $Failed,
-    WriteString["stdout", "    [stage] ",
+    Print["    [stage] ",
         StringRiffle[(If[ NumberQ[#], ToString[Round[#, 0.01]], ToString[#]] &) /@ {ts}, " "],
-        " s\n"]; $Output // Flush]
+        " s"]]
 
 (* HoldAll so debug arguments (e.g. Mean[Flatten[Normal[enc]]]) are NOT
    evaluated unless THVM_FLUX_TIMING is set -- otherwise a device->host Normal
    readout would fire on every prompt just to compute a debug mean, defeating
    the keep-tensors-on-device path below. *)
 SetAttributes[fxDbg, HoldAll];
-fxDbg[a___] := If[ Environment["THVM_FLUX_TIMING"] =!= $Failed,
-    WriteString["stdout", a, "\n"]; $Output // Flush]
+fxDbg[a___] := If[ Environment["THVM_FLUX_TIMING"] =!= $Failed, Print[a]]
 
 (* ============================================================
    STAGE-1 (Qwen) and STAGE-3 (VAE) batch helpers for the session.
