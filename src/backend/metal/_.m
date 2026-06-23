@@ -833,10 +833,15 @@ static void *zc_touch_seg(void *vp) {
   return NULL;
 }
 static void zc_parallel_touch(char const *base, u64 len, u64 page) {
+  // The fault-in touch re-reads pages evicted between the build-time prefetch
+  // and first-forward use; more concurrent fault streams (8) clear them faster
+  // than the 4-thread prefetch (the prefetch over 3 files would over-spawn at 8
+  // each).  THVM_FAULT_THREADS overrides; falls back to THVM_PREFETCH_THREADS.
   static int nthreads = -1;
   if (nthreads < 0) {
-    const char *e = getenv("THVM_PREFETCH_THREADS");
-    int v = (e != NULL) ? atoi(e) : 4;
+    const char *e = getenv("THVM_FAULT_THREADS");
+    if (e == NULL) e = getenv("THVM_PREFETCH_THREADS");
+    int v = (e != NULL) ? atoi(e) : 8;
     nthreads = (v < 1) ? 1 : (v > 16 ? 16 : v);
   }
   if (base == NULL || len == 0 || page == 0 || nthreads <= 1) {
