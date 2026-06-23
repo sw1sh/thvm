@@ -1469,6 +1469,12 @@ static void metal_shutdown(void) {
             (unsigned long long)METAL_LIB_CACHE_BYTES_R,
             (unsigned long long)METAL_LIB_CACHE_BYTES_W);
     fprintf(stderr,
+            "thvm: metal_jit_build stats -- hits=%llu misses=%llu bypass=%llu compile_ms=%llu\n",
+            (unsigned long long)METAL_JIT_BUILD_HITS,
+            (unsigned long long)METAL_JIT_BUILD_MISSES,
+            (unsigned long long)METAL_JIT_BUILD_BYPASS,
+            (unsigned long long)(METAL_JIT_BUILD_COMPILE_US / 1000));
+    fprintf(stderr,
             "thvm: metal_zerocopy stats -- wraps=%llu fault_MB=%llu fault_ms=%llu\n",
             (unsigned long long)METAL_ZC_WRAPS,
             (unsigned long long)(METAL_ZC_FAULT_BYTES / (1024 * 1024)),

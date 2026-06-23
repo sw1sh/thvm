@@ -591,12 +591,13 @@ fxSampleJitFull[rc_, rs_, wf_, cfg_, tembs_, dts_, dev_] :=
    concrete M=8 (fxModLinear) so the symbolic-M kvar never declines the Metal ICB.
    This is the feasible faithful sampler pending the B1 whole-loop capture above. *)
 fxSampleJit[vfn_, z0_, enc0_, sigmas_, tembFn_, ca_] := Module[
-    {z = TRealize @ TUOpCast[z0, "f32"], k, dt, v},
+    {z = TRealize @ TUOpCast[z0, "f32"], k, dt, v, ts},
     Do[ dt = sigmas[[k + 1]] - sigmas[[k]];
         (* velocity from the bf16-input replay (ca: bf16 on GPU / f32 on CPU); the
            Euler accumulates in the f32 z accumulator -- exactly the host path's
            f32 step with a bf16 net input, but z never leaves the device. *)
-        v = vfn[ca @ z, enc0, tembFn[sigmas[[k]]]];
+        {ts, v} = AbsoluteTiming[vfn[ca @ z, enc0, tembFn[sigmas[[k]]]]];
+        fxDbg["    vel step ", k, " = ", Round[ts, 0.001], " s"];
         z = TRealize @ TUOpAdd[z, TUOpMul[TUOpCast[v, "f32"], TUOpConst[N[dt]]]],
         {k, 1, Length[sigmas] - 1}];
     z]
