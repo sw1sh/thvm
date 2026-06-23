@@ -427,11 +427,16 @@ fxEnvDefault[name_String, value_String] := If[Environment[name] === $Failed, Set
 fxBoundMemory[] := (
     fxEnvDefault["THVM_MMAP_NO_WILLNEED", "1"];
 (* A bare FluxGenerate call should just work without the caller exporting any
-   THVM_* knob.  Forward-activation reclaim keeps the live set bounded (the
-   fwd->peak activation set is freed as the gen proceeds), and the live-bytes
-   ceiling is a safety belt at ~60% of physical RAM (the validated 30GB-on-48GB
-   bench point) so a runaway never pages the box.  Both stay overridable. *)
-    fxEnvDefault["THVM_FWD_RECLAIM", "1"];
+   THVM_* knob.  THVM_FWD_RECLAIM defaults OFF here: it is a realize-boundary GC
+   (built for training) that frees the stranded cross-realize weight DiskMaps and
+   MADV_DONTNEEDs their mmap pages, so every fresh-process cold re-faults ~16GB of
+   weights from disk: the profiled ~8s of cold "materialize".  Off, the
+   disk-mmap weights stay RAM-resident like mflux (read once, stay in RAM): cold
+   drops ~22s -> ~15s, activations are still freed by the per-realize watermark
+   rollback, and the ~19GB resident weight set fits a 48GB box for inference.  A
+   memory-constrained caller exports THVM_FWD_RECLAIM=1 to bound the working set
+   at a slower cold; the live-bytes ceiling below stays a ~60%-RAM safety belt. *)
+    fxEnvDefault["THVM_FWD_RECLAIM", "0"];
     fxEnvDefault["THVM_MAX_LIVE_BYTES", ToString[Round[0.6 $SystemMemory]]];
 (* Buffer-reuse OFF for the FLUX session: the velocity/Qwen/VAE captures
    recycle output buffers, and on Apple9 (M3) the batched ICB's [cmd
