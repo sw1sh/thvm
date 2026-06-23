@@ -5708,6 +5708,27 @@ typedef struct {
   // 1..1319 prefix is preserved.  Advances soa firstdiv 1320 -> beyond.  See
   // tools/baselines/wm_align_reports/soa.txt.
   u8    use_cube_arrival;
+  // Waldmeister rule-36 weight-109 "band" interleave (env
+  // THVM_ATP_BAND_INTERLEAVE, DEFAULT OFF; also turned ON under
+  // use_formation_fifo).  The soa firstdiv-1953 divergence: rule-36's tops
+  // batch (thvm slot52 = WM vaterNr=36, `(x.y).(y.(y.x)) -> y`) forms eight
+  // weight-109 band CPs `(x.X).(y.x) = x` of three variants -- A: X=(x.y),
+  // B: X=(y.x), C: X=(y.y) -- each from a reverse-face (combo bit0) overlap
+  // of an unorientable equation partner at LHS position L.1.  Both engines
+  // form all eight; they differ ONLY in intra-batch FIFO order.  WM's single
+  // superposition scan reaches the three variant-producing equations
+  // round-robin, emitting A,B,C,A,B,C,A,B (cpform.out cpnr 8065/8066/8068/
+  // 8069/8070/8074/8075/8076).  thvm instead sorts them by the partner
+  // equation's discrimination-tree arrival (the k3 field), which groups same-
+  // variant copies (the C partners arrive earliest, then B, then A), emitting
+  // C,C,B,B,B,A,A,A.  This gate re-keys the band CPs in the batch onto a
+  // (round, variant) order -- round = count of earlier same-variant band CPs,
+  // variant rank A<B<C -- reproducing WM's lock-step interleave.  Scoped HARD:
+  // only CPs whose NORMALIZED pair is one of the three band variants
+  // (atp_pair_band_variant) participate; their pre-pass key order fixes the
+  // per-variant round indices, so a batch with no band CPs is untouched.  OFF
+  // byte-identical.  See tools/baselines/wm_align_reports/soa.txt.
+  u8    use_band_interleave;
   // Waldmeister CP-formation FIFO lineage (env THVM_ATP_FORMATION_FIFO,
   // DEFAULT OFF).  The SINGLE knob enabling the faithful WM CP-formation
   // order: when set, thvm_atp_set_use_formation_fifo turns ON the four
@@ -6187,6 +6208,7 @@ fn void      thvm_atp_set_use_posgroup(AtpState *s, u8 on);
 // Cube-arrival tiebreak for the double-cube vs slot15-wrapped pair (see
 // AtpState.use_cube_arrival).  DEFAULT OFF.
 fn void      thvm_atp_set_use_cube_arrival(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_band_interleave(AtpState *s, u8 on);
 // Waldmeister CP-formation FIFO lineage -- the SINGLE knob enabling the
 // faithful WM CP-formation order; ON it turns on the four scoped k3-arrival
 // re-key passes (leaf_tiebreak / revface_group / posgroup / cube_arrival),

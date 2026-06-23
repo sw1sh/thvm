@@ -9176,6 +9176,11 @@ fn void thvm_atp_set_use_cube_arrival(AtpState *s, u8 on) {
   s->use_cube_arrival = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_use_band_interleave(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_band_interleave = on ? 1u : 0u;
+}
+
 // Waldmeister CP-formation FIFO lineage (see AtpState.use_formation_fifo):
 // the SINGLE knob enabling the faithful WM CP-formation order -- it turns on
 // the four scoped k3-arrival re-key passes (leaf_tiebreak / revface_group /
@@ -9195,6 +9200,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_revface_group    = 1u;
     s->use_posgroup         = 1u;
     s->use_cube_arrival     = 1u;
+    s->use_band_interleave  = 1u;
     s->use_drain_chainpos   = 1u;
     s->use_drain_revface    = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
@@ -16057,6 +16063,50 @@ static u8 atp_pair_is_posgroup_cube(Term l, Term r) {
   return 0u;
 }
 
+// Weight-109 "band" CP variant detector for the soa rule-36 firstdiv-1953
+// batch (see use_band_interleave).  The band CP is `(x.X).(y.x) = x` where the
+// inner factor X distinguishes three variants WM emits round-robin:
+//   A: X = (x.y)  -> term `(x.(x.y)).(y.x) = x`
+//   B: X = (y.x)  -> term `(x.(y.x)).(y.x) = x`
+//   C: X = (y.y)  -> term `(x.(y.y)).(y.x) = x`
+// One side of the normalized CP must be a bare variable (the `= x`); the other
+// is `f(f(x, X), f(y, x))` with f the dot operator.  Returns 1/2/3 for A/B/C,
+// 0 when the pair is not a band CP.  Orientation-insensitive (the bare-var side
+// may be either l or r); variable identities are matched structurally so the
+// detector is renaming-stable.
+static u8 atp_pair_band_variant(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  // big = f(f(x, X), f(y, x)) with x = the bare-var side.
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big);
+  Term lo = term_ctr_at(big, 0), hi = term_ctr_at(big, 1);
+  if (term_tag(lo) != TAG_CTR || term_ext(lo) != op || term_ctr_n(lo) != 2u)
+    return 0u;
+  if (term_tag(hi) != TAG_CTR || term_ext(hi) != op || term_ctr_n(hi) != 2u)
+    return 0u;
+  Term lo0 = term_ctr_at(lo, 0), X = term_ctr_at(lo, 1);
+  Term hi0 = term_ctr_at(hi, 0), hi1 = term_ctr_at(hi, 1);
+  u32 x = term_ext(var);
+  if (term_tag(lo0) != TAG_FVR || term_ext(lo0) != x) return 0u;   // f(x, X)
+  if (term_tag(hi1) != TAG_FVR || term_ext(hi1) != x) return 0u;   // f(y, x)
+  if (term_tag(hi0) != TAG_FVR) return 0u;
+  u32 y = term_ext(hi0);
+  if (y == x) return 0u;
+  // X is one of (x.y), (y.x), (y.y).
+  if (term_tag(X) != TAG_CTR || term_ext(X) != op || term_ctr_n(X) != 2u)
+    return 0u;
+  Term x0 = term_ctr_at(X, 0), x1 = term_ctr_at(X, 1);
+  if (term_tag(x0) != TAG_FVR || term_tag(x1) != TAG_FVR) return 0u;
+  u32 a = term_ext(x0), b = term_ext(x1);
+  if (a == x && b == y) return 1u;   // (x.y) = A
+  if (a == y && b == x) return 2u;   // (y.x) = B
+  if (a == y && b == y) return 3u;   // (y.y) = C
+  return 0u;
+}
+
 // Is the slot15 rule term `x.(y.x) -> (y.y).x` already a LIVE rule?  The
 // duplicate re-age (THVM_ATP_COMM_DROP_DUP) only fires when slot15 is live,
 // so the re-aged CP is a redundant re-derivation of an existing fact (WM ages
@@ -16513,6 +16563,78 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           big[kb].key = big[ka].key - 1ull;
       }
     }
+    // Band-interleave re-key (default OFF; see use_band_interleave).  The soa
+    // firstdiv-1953 divergence: rule-36's tops batch forms eight weight-109
+    // band CPs `(x.X).(y.x) = x` (variants A: X=(x.y), B: X=(y.x), C: X=(y.y))
+    // from reverse-face equation overlaps at L.1.  WM's single superposition
+    // scan reaches the three variant-producing equations round-robin and emits
+    // A,B,C,A,B,C,A,B; thvm sorts by the partner equation's discrimination-tree
+    // arrival (k3), grouping the variants C,C,B,B,B,A,A,A.  Re-key the band CPs
+    // onto a (round, variant) interleave -- round = count of EARLIER same-
+    // variant band CPs in this batch's current key order, variant rank A<B<C --
+    // so they sort A,B,C,A,B,C,...  The band CPs keep their original key SLOTS
+    // (the multiset of keys is permuted only among themselves), so non-band CPs
+    // and the surrounding batch order are untouched.  Scoped HARD to CPs whose
+    // NORMALIZED pair is one of the three band variants (atp_pair_band_variant);
+    // a batch with none is a no-op.  OFF byte-identical.
+    if (s->use_band_interleave) {
+      // Index the band CPs (entry index + variant), capped at a small fixed
+      // window -- the rule-36 band is eight CPs; a generous cap covers any
+      // multiplicity without unbounded scratch.
+      enum { BAND_CAP = 64u };
+      u32 band_idx[BAND_CAP];
+      u8  band_var[BAND_CAP];
+      u64 band_key[BAND_CAP];
+      u32 n_band = 0;
+      for (u32 k = 0; k < n_big && n_band < BAND_CAP; k++) {
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 var = atp_pair_band_variant(nl, nr);
+        if (var == 0u) continue;
+        band_idx[n_band] = k;
+        band_var[n_band] = var;
+        band_key[n_band] = big[k].key;
+        n_band++;
+      }
+      if (n_band >= 2u) {
+        // Sort the band entries by current key (ascending), so "round" = the
+        // count of same-variant band CPs that currently precede each one.
+        for (u32 a = 0; a + 1u < n_band; a++) {
+          for (u32 b = a + 1u; b < n_band; b++) {
+            if (band_key[b] < band_key[a]) {
+              u64 tk = band_key[a]; band_key[a] = band_key[b]; band_key[b] = tk;
+              u32 ti = band_idx[a]; band_idx[a] = band_idx[b]; band_idx[b] = ti;
+              u8  tv = band_var[a]; band_var[a] = band_var[b]; band_var[b] = tv;
+            }
+          }
+        }
+        // Compute each band CP's (round, variant) rank, then re-assign the
+        // sorted key slots in that order.  variant rank: A(1)->0, B(2)->1,
+        // C(3)->2.  round = number of earlier same-variant band CPs.
+        u32 round[BAND_CAP];
+        u32 seen[4] = {0, 0, 0, 0};
+        for (u32 a = 0; a < n_band; a++) {
+          round[a] = seen[band_var[a]];
+          seen[band_var[a]]++;
+        }
+        // order = the band index permutation sorted by (round, variant_rank).
+        u32 order[BAND_CAP];
+        for (u32 a = 0; a < n_band; a++) order[a] = a;
+        for (u32 a = 0; a + 1u < n_band; a++) {
+          for (u32 b = a + 1u; b < n_band; b++) {
+            u32 pa = order[a], pb = order[b];
+            u32 ka = round[pa] * 3u + (band_var[pa] - 1u);
+            u32 kb = round[pb] * 3u + (band_var[pb] - 1u);
+            if (kb < ka) { order[a] = pb; order[b] = pa; }
+          }
+        }
+        // band_key[] holds the sorted key slots; assign them to the band CPs in
+        // (round, variant) order.
+        for (u32 a = 0; a < n_band; a++) {
+          big[band_idx[order[a]]].key = band_key[a];
+        }
+      }
+    }
     qsort(big, n_big, sizeof(AtpWmoCpEnt), atp_wmo_ent_cmp);
     // Gated batch-order trace (THVM_ATP_BATCH_TRACE): emit the sorted
     // (outer f, i, j, combo, packed key) in push order so thvm's
@@ -16520,17 +16642,39 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // `critical pair N built with parents X and Y` formation sequence.
     static int batch_trace = -1;
     if (batch_trace < 0) batch_trace = (getenv("THVM_ATP_BATCH_TRACE") != NULL) ? 1 : 0;
+    if (batch_trace) {
+      // Outer (new) rule identity per batch: its stored lhs/rhs + WM-face,
+      // so a thvm batch can be matched to a WM cpform.out vaterNr/vaterL.
+      char fla[1024], fra[1024];
+      atp_pretty_term(s->lhs[f], fla, sizeof fla);
+      atp_pretty_term(s->rhs[f], fra, sizeof fra);
+      fprintf(stderr, "BATCHRULE f=%u ftr=%u f_or=%u dist_rhs=%u lhs=%s rhs=%s\n",
+              f, s->r_trace[f], s->r_orient[f],
+              (unsigned)wmo_trace_dist_rhs((AtpWmOrder *)s->wmo, s->r_trace[f]),
+              fla, fra);
+    }
     for (u32 k = 0; k < n_big; k++) {
       if (batch_trace) {
         char bla[1024], bra[1024];
         atp_pretty_term(big[k].cp.lhs, bla, sizeof bla);
         atp_pretty_term(big[k].cp.rhs, bra, sizeof bra);
+        // pos= the overlap-position child-index path (WM cpform.out ovPos
+        // analogue: WM prints 1-indexed L.idx; thvm pos[] is 0-indexed, so
+        // L.2 == pos[0]=1). seq= the FIFO age (cp_seq) this CP is about to
+        // receive, so a BATCH line aligns to a CPSEL pick by seq.
+        char posbuf[64];
+        u32 pn = 0;
+        posbuf[pn++] = 'L';
+        for (u32 d = 0; d < big[k].cp.pos_len && pn < 60u; d++)
+          pn += (u32)snprintf(posbuf + pn, sizeof posbuf - pn, ".%u",
+                              big[k].cp.pos[d] + 1u);
+        posbuf[pn] = '\0';
         fprintf(stderr,
                 "BATCH f=%u i=%u j=%u itr=%u jtr=%u i_or=%u j_or=%u combo=%u "
-                "poslen=%u key=%llu cp=%s # %s\n",
+                "poslen=%u pos=%s seq=%u key=%llu cp=%s # %s\n",
                 f, big[k].i, big[k].j, s->r_trace[big[k].i], s->r_trace[big[k].j],
                 s->r_orient[big[k].i], s->r_orient[big[k].j],
-                big[k].combo, big[k].cp.pos_len,
+                big[k].combo, big[k].cp.pos_len, posbuf, s->cp_seq_next,
                 (unsigned long long)big[k].key, bla, bra);
       }
       pushed += atp_push_cps_traced(s, &big[k].cp, 1u,

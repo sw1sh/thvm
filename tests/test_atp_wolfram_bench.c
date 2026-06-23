@@ -989,6 +989,16 @@ int main(int argc, char **argv) {
       // tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_cube_arrival(
           s, (getenv("THVM_ATP_CUBE_ARRIVAL") != NULL) ? 1u : 0u);
+      // WM rule-36 weight-109 band interleave (DEFAULT OFF): rule-36's tops
+      // batch forms eight band CPs `(x.X).(y.x) = x` of three variants
+      // (A: X=(x.y), B: X=(y.x), C: X=(y.y)) from reverse-face equation
+      // overlaps at L.1; WM emits them round-robin A,B,C,A,B,C,A,B but thvm
+      // sorts by partner-equation arrival, grouping C,C,B,B,B,A,A,A.  This gate
+      // re-keys the band CPs onto a (round, variant) interleave matching WM.
+      // Advances soa firstdiv past 1953.  THVM_ATP_BAND_INTERLEAVE opts in.
+      // See tools/baselines/wm_align_reports/soa.txt.
+      thvm_atp_set_use_band_interleave(
+          s, (getenv("THVM_ATP_BAND_INTERLEAVE") != NULL) ? 1u : 0u);
       // WM IR-victim drain within-leaf chain tiebreak (DEFAULT OFF): fold a
       // re-derivation victim's chain index within its discrimination-tree leaf
       // into the drain-order key so two victims sharing a leaf re-enter the
