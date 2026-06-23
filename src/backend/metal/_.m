@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <pthread.h>    // parallel page-fault of evicted zero-copy wrap pages
 #include <dlfcn.h>      // dladdr: locate default.metallib next to the dylib
 
 #import <Foundation/Foundation.h>
@@ -815,6 +816,57 @@ void thvm_metal_buf_arena_release(u32 arena_buf_id) {
   metal_buf_decref(arena_buf_id);
 }
 
+// Parallel page-fault of a contiguous mmap byte range: N worker threads each
+// touch a 1-byte-per-page stride over a disjoint sub-range, so the kernel's
+// file-backed page faults issue concurrently and hit ~full SSD bandwidth.  A
+// single serial touch stalls one fault at a time (~1.7 GB/s); N parallel fault
+// streams reach ~3.9 GB/s.  Used by the zero-copy wrap when mincore finds a
+// large non-resident region (weights evicted between the build-time prefetch
+// and the first-forward fault-in).  Blocks until resident (the GPU bind right
+// after needs the pages).
+typedef struct { char const *base; u64 off, end, page; } ZcTouchSeg;
+static void *zc_touch_seg(void *vp) {
+  ZcTouchSeg *s = (ZcTouchSeg *)vp;
+  volatile char sink = 0;
+  for (u64 o = s->off; o < s->end; o += s->page) sink ^= s->base[o];
+  (void)sink;
+  return NULL;
+}
+static void zc_parallel_touch(char const *base, u64 len, u64 page) {
+  static int nthreads = -1;
+  if (nthreads < 0) {
+    const char *e = getenv("THVM_PREFETCH_THREADS");
+    int v = (e != NULL) ? atoi(e) : 4;
+    nthreads = (v < 1) ? 1 : (v > 16 ? 16 : v);
+  }
+  if (base == NULL || len == 0 || page == 0 || nthreads <= 1) {
+    volatile char sink = 0;
+    for (u64 o = 0; o < len; o += page) sink ^= base[o];
+    (void)sink;
+    return;
+  }
+  pthread_t th[16];
+  ZcTouchSeg segs[16];
+  int spawned = 0;
+  u64 npages = (len + page - 1) / page;
+  u64 segpages = (npages + (u64)nthreads - 1) / (u64)nthreads;
+  u64 seg = segpages * page;
+  if (seg == 0) seg = page;
+  for (int i = 0; i < nthreads; i++) {
+    u64 o = (u64)i * seg;
+    if (o >= len) break;
+    segs[spawned].base = base;
+    segs[spawned].off  = o;
+    segs[spawned].end  = (o + seg < len) ? o + seg : len;
+    segs[spawned].page = page;
+    if (pthread_create(&th[spawned], NULL, zc_touch_seg, &segs[spawned]) == 0)
+      spawned++;
+    else
+      zc_touch_seg(&segs[spawned]);   // inline fallback on spawn failure
+  }
+  for (int i = 0; i < spawned; i++) pthread_join(th[i], NULL);
+}
+
 // Zero-copy wrap of a host pointer into the METAL_BUFS table.  `page_base`
 // must be page-aligned (mmap bases are) and `maplen` a page multiple, so
 // newBufferWithBytesNoCopy can wrap the bytes in place: on Apple unified
@@ -905,26 +957,32 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
     u64 tMin = cg_now_us();
     u64 tMad = tMin;
     if (have_resid) {
-      // Count missing pages; only madvise + touch if any are non-resident.
+      // Count missing pages; only touch if any are non-resident.
       u64 missing = 0;
       for (u64 i = 0; i < npages; i++) if ((resid[i] & 1) == 0) missing++;
       if (missing != 0) {
-        madvise(page_base, (size_t)maplen, MADV_WILLNEED);
         tMad = cg_now_us();
-        volatile char sink = 0;
-        for (u64 i = 0; i < npages; i++)
-          if ((resid[i] & 1) == 0) sink ^= p[i * page];
-        (void)sink;
+        // A large mostly-missing region (weights evicted between prefetch and
+        // fault-in): re-fault the WHOLE region with PARALLEL threads -- N
+        // concurrent fault streams hit ~full SSD bandwidth, vs the serial
+        // madvise readahead's ~1.7 GB/s.  Re-touching the few resident pages
+        // is cheap RAM bandwidth.  A sparse miss (a handful of pages) stays
+        // serial, touching only the missing ones.
+        if (missing * 4 >= npages && maplen >= (4u << 20)) {
+          zc_parallel_touch(p, maplen, page);
+        } else {
+          madvise(page_base, (size_t)maplen, MADV_WILLNEED);
+          volatile char sink = 0;
+          for (u64 i = 0; i < npages; i++)
+            if ((resid[i] & 1) == 0) sink ^= p[i * page];
+          (void)sink;
+        }
       }
       METAL_ZC_TOUCHED_PAGES += missing;
     } else {
-      // mincore unavailable: madvise + touch every page (the safe fallback).
-      madvise(page_base, (size_t)maplen, MADV_WILLNEED);
+      // mincore unavailable: parallel-touch every page (the safe fallback).
       tMad = cg_now_us();
-      volatile char sink = 0;
-      for (u64 off = 0; off < maplen; off += page) sink ^= p[off];
-      if (maplen > 0) sink ^= p[maplen - 1];
-      (void)sink;
+      zc_parallel_touch(p, maplen, page);
       METAL_ZC_TOUCHED_PAGES += npages;
     }
     free(resid);

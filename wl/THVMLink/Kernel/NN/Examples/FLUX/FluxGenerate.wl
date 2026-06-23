@@ -430,7 +430,7 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
 
     <|"ctxQ" -> ctxQ, "ctxT" -> ctxT, "ctxV" -> ctxV, "dev" -> dev, "ca" -> ca,
       "wfq" -> wfq, "qwCfg" -> qwCfg, "td" -> td, "stxt" -> stxt,
-      "rc" -> rc, "rs" -> rs, "tembFn" -> tembFn,
+      "rc" -> rc, "rs" -> rs, "tembFn" -> tembFn, "tfPath" -> tfPath,
       "velJit" -> velJit, "sigmas" -> sigmas, "simg" -> simg, "fxCfg" -> fxCfg,
       "vaeCfg" -> vaeCfg, "qwJit" -> qwJit, "vaeJit" -> vaeJit|>]
 
