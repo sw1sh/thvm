@@ -2704,7 +2704,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                                      Term m_range_term, Term n_range_term,
                                      u32 batch_extent, u32 m_extent, u32 a_lead,
                                      u32 batch_stride_a, u32 batch_stride_b,
-                                     u32 batch_stride_c) {
+                                     u32 batch_stride_c, u32 c_row_stride) {
   // THVM_FUSE_MATMUL_INPUT: a_val != 0 means A is a fused elementwise producer.
   // The A-staging then computes a_val inline at (m = _tm + row, k = KK0 + col)
   // -- declaring `uint a<m>` / `uint a<k>` in scope so rmu_emit_term renders the
@@ -2749,10 +2749,15 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   }
   // This threadgroup's output-tile origin.
   // THVM_TC_BATCHED: a batched matmul folds the batch axis into the grid as
-  // batch * m_tiles * n_tiles threadgroups.  Decode _batch + the per-batch tg
-  // and offset A/B/C to this batch's contiguous slice (strides M*K / K*N / M*N);
-  // `auto` gives the base pointers each buffer's own element type.  Then the rest
-  // of the emitter is byte-unchanged -- it just reads from _abb/_bbb/_cbb.
+  // batch * m_tiles * n_tiles threadgroups.  Decode _batch + the per-batch tg and
+  // offset A/B/C to this batch's slice by the caller-supplied REAL batch strides
+  // (rmu_range_coeff, NOT the packed M*K / K*N / M*N -- the attention operands are
+  // strided {heads,seq,head_dim} views).  The C store likewise uses c_row_stride
+  // (C's real M-axis stride) not n_extent: the @V output is M-major {seqQ, heads,
+  // headDim} so its M rows are heads*headDim apart, while the scores output is
+  // {heads, seqQ, seqK} where the M stride IS seqK == n_extent.  `auto` gives the
+  // base pointers each buffer's own element type; the rest of the emitter then
+  // reads from _abb/_bbb/_cbb unchanged.
   const char *_tgv = "tg";
   if (batch_extent > 0u) {
     u32 _mn = (m_extent / tile_m) * n_tiles_n;
@@ -3000,7 +3005,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
         IND(depth); fputs("simdgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
         IND(depth); fprintf(fp,
           "{ uint _cb = (_tm + _sm + %uu) * %uu + _tn + _sn + %uu;\n",
-          mi * 8u, n_extent, ni * 8u);
+          mi * 8u, c_row_stride, ni * 8u);
         if (epilogue_value != 0) {
           // Apply the elementwise epilogue per output element.  The matmul value
           // is substituted at the SAME dtype its un-fused realized output buffer
@@ -3024,7 +3029,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
             "    uint _m = _tm + _sm + %uu + _e / 8u; uint _n = _tn + _sn + %uu + _e %% 8u;"
             " (void)_m; (void)_n;\n", mi * 8u, ni * 8u);
           IND(depth); fprintf(fp,
-            "    %s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)(", c_name, n_extent);
+            "    %s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)(", c_name, c_row_stride);
           rmu_hoist_clear();
           rmu_hoist_add(opt_tc_term,  mm_read);
           rmu_hoist_add(m_range_term, "_m");
@@ -3037,13 +3042,13 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
           IND(depth); fprintf(fp,
             "  for (uint _e = thread_index_in_simdgroup; _e < 64u; _e += 32u) "
             "%s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)_cstage[_sgi64 + _e]; }\n",
-            c_name, n_extent);
+            c_name, c_row_stride);
         }
         IND(depth); fputs("simdgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
       } else {
         IND(depth); fprintf(fp,
           "simdgroup_store(_acc[%u], &%s[(_tm + _sm + %uu) * %uu + _tn + _sn + %uu], %uu);\n",
-          mi * t.rn + ni, c_name, mi * 8u, n_extent, ni * 8u, n_extent);
+          mi * t.rn + ni, c_name, mi * 8u, c_row_stride, ni * 8u, c_row_stride);
       }
     }
   }
@@ -3239,6 +3244,13 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   i64 a_m = rmu_range_coeff(addr_a, m_axis_id);
   i64 b_k = rmu_range_coeff(addr_b, red_axis);
   i64 b_n = rmu_range_coeff(addr_b, n_axis_id_v);
+  // C's real per-axis strides.  The store assumes a unit-stride N axis (the
+  // inner contiguous output column) and steps M rows by c_m.  Contiguous {M,N}
+  // and the {B,M,N} scores output both have c_m == N == n_extent, c_n == 1; the
+  // M-major @V output {seqQ, heads, headDim} has c_m == heads*headDim != n_extent.
+  i64 c_m = rmu_range_coeff(addr_c, m_axis_id);
+  i64 c_n = rmu_range_coeff(addr_c, n_axis_id_v);
+  if (c_m <= 0) c_m = (i64)n_extent;   // non-batched packed output: c_m == N
   int a_trans, b_trans; i64 lda, ldb;
   if      (a_k == 1) { a_trans = 0; lda = a_m; }
   else if (a_m == 1) { a_trans = 1; lda = a_k; }
@@ -3247,6 +3259,11 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   else if (b_k == 1) { b_trans = 1; ldb = b_n; }
   else return 0;
   if (lda <= 0 || ldb <= 0) return 0;
+  // Both the tiled and parallel_tc C stores assume a UNIT-stride N output column
+  // (they write 8 contiguous N elements per row and step rows by c_m).  A batched
+  // output whose N axis is not unit-stride would be mis-scattered; bail to the
+  // scalar accumulator (correct).  Non-batched packed outputs always have c_n==1.
+  if (batch_axis_id != 0xFFFFFFFFu && c_n != 1) return 0;
 
   // CUDA WMMA path.  The simdgroup_matrix template below is Metal-
   // only; CUDA gets its own emit.  WMMA's natural fp32-accumulate
@@ -3588,6 +3605,11 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       i64 bsa = is_batched ? rmu_range_coeff(addr_a, batch_axis_id) : 0;
       i64 bsb = is_batched ? rmu_range_coeff(addr_b, batch_axis_id) : 0;
       i64 bsc = is_batched ? rmu_range_coeff(addr_c, batch_axis_id) : 0;
+      // C's REAL M-axis (row) stride (c_m, computed above).  Contiguous {M,N}
+      // and the {B,M,N} scores output both have c_m == n_extent (byte-identical);
+      // the M-major @V output {M,B,N} (= {seqQ, heads, headDim}) has c_m ==
+      // heads*headDim != n_extent.
+      u32 c_row = is_batched ? (u32)c_m : n_extent;
       rmu_emit_matmul_tc_tiled(a_nm, b_nm, c_nm, n_extent,
                                k_extent, tile, c_is_bf, stage_bf,
                                b_trans, ldb, fp, depth, b_is_int8,
@@ -3595,7 +3617,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
                                epilogue_value, opt_tc_term,
                                m_range_term, n_range_term,
                                is_batched ? batch_extent : 0u, m_extent,
-                               a_lead, (u32)bsa, (u32)bsb, (u32)bsc);
+                               a_lead, (u32)bsa, (u32)bsb, (u32)bsc, (u32)c_row);
       return 1;
     }
   }
@@ -3798,14 +3820,14 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     fputs("for (uint _e = thread_index_in_simdgroup; _e < 64u; _e += 32u) {\n", fp);
     for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
     fprintf(fp, "%s[_cbase + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)_ctile[_e];\n",
-            rmu_buf_name(buf_c), n_extent);
+            rmu_buf_name(buf_c), (u32)c_m);
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     fputs("}\n", fp);
   } else {
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     fprintf(fp, "simdgroup_store(_c_mat, &%s[", rmu_buf_name(buf_c));
     rmu_emit_term(addr_c, fp);
-    fprintf(fp, "], %u);\n", n_extent);
+    fprintf(fp, "], %u);\n", (u32)c_m);
   }
 
   // Close any blocks opened above based on which path we took.
