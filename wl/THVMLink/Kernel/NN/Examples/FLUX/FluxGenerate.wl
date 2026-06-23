@@ -286,6 +286,15 @@ fxSessionGet[dev_, imgSize_, nSteps_, modelDir_] := Module[
 fxBoundMemory[] := (
     If[ Environment["THVM_MMAP_NO_WILLNEED"] === $Failed,
         SetEnvironment["THVM_MMAP_NO_WILLNEED" -> "1"]];
+    (* A bare FluxGenerate call should just work without the caller exporting any
+       THVM_* knob.  Forward-activation reclaim keeps the live set bounded (the
+       fwd->peak activation set is freed as the gen proceeds), and the live-bytes
+       ceiling is a safety belt at ~60% of physical RAM (the validated 30GB-on-48GB
+       bench point) so a runaway never pages the box.  Both stay overridable. *)
+    If[ Environment["THVM_FWD_RECLAIM"] === $Failed,
+        SetEnvironment["THVM_FWD_RECLAIM" -> "1"]];
+    If[ Environment["THVM_MAX_LIVE_BYTES"] === $Failed,
+        SetEnvironment["THVM_MAX_LIVE_BYTES" -> ToString[Round[0.6 $SystemMemory]]]];
     (* Buffer-reuse OFF for the FLUX session: the velocity/Qwen/VAE captures
        recycle output buffers, and on Apple9 (M3) the batched ICB's [cmd
        setBarrier] does NOT reliably order those write-after-write recycles, so
