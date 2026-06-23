@@ -36,7 +36,7 @@
 
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
-FluxGenerate::usage = "FluxGenerate[prompt$] generates an Image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder).\nFluxGenerate[prompt$, spec$] returns the part(s) named by spec$: \"Image\" (the default Image), \"Latent\" (the final packed latent, a {S$img, 128} NumericArray that can be fed back via \"InitialLatent\"), \"Embedding\" (the Qwen text embedding, a {512, 7680} NumericArray), All (an Association of all parts), or a list of those keys (an Association of just those parts).\nFluxGenerate[prompt$, n$] generates n$ images of the same prompt, each with a distinct fresh seed, reusing one model session (only the first is a cold start); FluxGenerate[prompt$, n$, spec$] returns a list of n$ spec$ results.\nFluxGenerate[{prompt$1, prompt$2, $$}] (optionally with a trailing spec$) generates one result per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (every result after the first is warm).\nThe following options can be given:\n  \"ImageSize\" {256, 256}    output size; a scalar n$ means a square n$ x n$ image, a pair {w$, h$} a rectangle (rounded to the /16 patch grid).\n  \"Steps\" Automatic    number of Euler sampling steps; Automatic uses \"NumSteps\".\n  RandomSeeding Automatic    Automatic gives a fresh random image each call; an integer seed makes the result reproducible (same seed -> byte-identical image).\n  \"InitialLatent\" Automatic    Automatic samples fresh z0 ~ N(0,1); a {S$img, 128} array (e.g. a \"Latent\" result) seeds STAGE 2 deterministically instead of the per-image random noise, enabling latent round-trips.\n  \"NegativePrompt\" None    FLUX.2-klein is guidance-distilled (4-step, no classifier-free guidance), so a negative prompt is unsupported; giving one issues FluxGenerate::nocfg and is ignored.\n  \"ShowSteps\" False    True decodes each Euler-step latent through the VAE and shows the denoising progression live (in a notebook); the per-step Images + raw latents are then included under the \"Steps\" key of an All / {\"Steps\"} return.\n  ProgressReporting Automatic    Automatic or True shows a live progress panel (a no-op with no front end); False runs silent.\n  \"Device\" \"metal\"    backend to run on (\"metal\" | \"cpu\" | \"cuda\").\n  \"NumSteps\" 4    legacy alias for \"Steps\".\n  \"ModelDir\" Automatic    weight directory (Automatic -> ~/.cache/thvm/flux2-klein-4b).";
+FluxGenerate::usage = "FluxGenerate[prompt$] generates an Image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder).\nFluxGenerate[prompt$, spec$] returns the part(s) named by spec$: \"Image\" (the default Image), \"Latent\" (the initial packed-latent noise z$0, a {S$img, 128} NumericArray that can be fed back via \"InitialLatent\" to reproduce the image -- the round-trip handle), \"Embedding\" (the Qwen text embedding, a {512, 7680} NumericArray), All (an Association of all parts), or a list of those keys (an Association of just those parts).\nFluxGenerate[prompt$, n$] generates n$ images of the same prompt, each with a distinct fresh seed, reusing one model session (only the first is a cold start); FluxGenerate[prompt$, n$, spec$] returns a list of n$ spec$ results.\nFluxGenerate[{prompt$1, prompt$2, $$}] (optionally with a trailing spec$) generates one result per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (every result after the first is warm).\nThe following options can be given:\n  \"ImageSize\" {256, 256}    output size; a scalar n$ means a square n$ x n$ image, a pair {w$, h$} a rectangle (rounded to the /16 patch grid).\n  \"Steps\" Automatic    number of Euler sampling steps; Automatic uses \"NumSteps\".\n  RandomSeeding Automatic    Automatic gives a fresh random image each call; an integer seed makes the result reproducible (same seed -> byte-identical image).\n  \"InitialLatent\" Automatic    Automatic samples fresh z$0 ~ N(0,1); a {S$img, 128} array (e.g. a \"Latent\" result) is used as z$0 to seed STAGE 2 deterministically instead of the per-image random noise, so a saved latent reproduces its image (a latent round-trip).\n  \"NegativePrompt\" None    FLUX.2-klein is guidance-distilled (4-step, no classifier-free guidance), so a negative prompt is unsupported; giving one issues FluxGenerate::nocfg and is ignored.\n  \"ShowSteps\" False    True decodes each Euler-step latent through the VAE and shows the denoising progression live (in a notebook); the per-step Images + raw latents are then included under the \"Steps\" key of an All / {\"Steps\"} return.\n  ProgressReporting Automatic    Automatic or True shows a live progress panel (a no-op with no front end); False runs silent.\n  \"Device\" \"metal\"    backend to run on (\"metal\" | \"cpu\" | \"cuda\").\n  \"NumSteps\" 4    legacy alias for \"Steps\".\n  \"ModelDir\" Automatic    weight directory (Automatic -> ~/.cache/thvm/flux2-klein-4b).";
 
 FluxGenerate::nocfg = "FLUX.2-klein-4B is a guidance-distilled 4-step flow-matching model with no classifier-free guidance, so the \"NegativePrompt\" `1` cannot be applied (a negative prompt needs the conditional-vs-unconditional CFG pass klein was distilled to skip).  It is ignored.";
 
@@ -559,7 +559,7 @@ fxAssemble[parts_, ks_List] := KeyTake[parts, ks];
    `spec` selects which parts to return; `initLat` (Automatic | a {simg,128} array)
    seeds STAGE 2; `showSteps` adds the per-step decoded progression. *)
 fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSteps_, modelDir_] := Module[
-    {sess, encDev, latents, stepLatsAll, embeds, results, n = Length[prompts],
+    {sess, encDev, z0hosts, latents, stepLatsAll, embeds, results, n = Length[prompts],
      need, wantImg, wantLat, wantEmb, wantSteps, z0fixed},
 
     (* cold-build (or fetch) the session -- indeterminate while the weights load. *)
@@ -575,13 +575,16 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
         wantSteps = showSteps;
         z0fixed = fxValidateInitLat[initLat, simg];
 
-        (* --- STAGE 1: Qwen text-encode the whole batch (in the Qwen context). --- *)
+        (* --- STAGE 1: Qwen text-encode the whole batch (in the Qwen context).  An
+           "Embedding" return reads each {stxt,7680} device tensor to the host HERE,
+           INSIDE the ctxQ block where it was realized (a device->host Normal must run
+           in the tensor's own context; reading it after TInContext returns segfaults).
+           The device tensors still feed STAGE 2 directly -- the host read is an extra
+           copy paid only when asked. --- *)
         fxReport[If[ n > 1, "Encoding " <> ToString[n] <> " prompts...", "Encoding prompt..."], 0.45];
-        {t1, encDev} = AbsoluteTiming @ TInContext[sess["ctxQ"],
-            fxQwenEncodeBatch[sess, prompts]];                         (* {n,stxt,7680} device *)
-        (* the {stxt,7680} embedding for an "Embedding" return -- read to the host
-           only when asked (the device tensor otherwise feeds STAGE 2 directly). *)
-        embeds = If[ wantEmb, Normal /@ encDev, ConstantArray[Null, n]];
+        {t1, {encDev, embeds}} = AbsoluteTiming @ TInContext[sess["ctxQ"],
+            Module[{ed = fxQwenEncodeBatch[sess, prompts]},          (* {n,stxt,7680} device *)
+                {ed, If[ wantEmb, Normal /@ ed, ConstantArray[Null, n]]}]];
 
         (* --- STAGE 2: transformer sample each prompt's latent (transformer
            context).  velJit is the persistent per-step capture; fxSampleJit keeps
@@ -593,23 +596,26 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
            reproduces its image); Automatic samples fresh per-image seeded noise. --- *)
         If[ !wantImg && !wantLat && !wantSteps,
             (* embedding-only: skip the sampler entirely. *)
-            latents = ConstantArray[Null, n];  stepLatsAll = ConstantArray[Null, n],
-        (* else run STAGE 2 *)
+            z0hosts = ConstantArray[Null, n];  latents = ConstantArray[Null, n];
+            stepLatsAll = ConstantArray[Null, n],
+        (* else run STAGE 2.  z0host is the {simg,128} INITIAL noise the sampler
+           starts from -- the round-trip handle returned as "Latent" (fed back via
+           "InitialLatent" it reproduces the image deterministically, exactly as a
+           saved seed would).  finalLat (the denoised latent) feeds the VAE decode. *)
         fxReport[fxImgText["Generating", 1, n] <> "...", 0.55];
-        {t2, {latents, stepLatsAll}} = AbsoluteTiming @ TInContext[sess["ctxT"],
+        {t2, {z0hosts, latents, stepLatsAll}} = AbsoluteTiming @ TInContext[sess["ctxT"],
             Transpose @ MapIndexed[
                 Function[{encArr, idx},
-                    Module[{ee, z, i = First[idx], samp, lat, steps,
+                    Module[{ee, z0host, z, i = First[idx], samp, lat, steps,
                             stepCb = (fxReport[
                                 fxImgText["Generating", i, n] <> " (step " <> ToString[#1] <>
                                     " of " <> ToString[#2] <> ")...",
                                 fxStageFrac[0.55, 0.90, i, n, #1, #2]] &)},
                         ee = ca @ encArr;   (* {stxt,7680} device, straight from STAGE 1 *)
-                        z = If[ z0fixed =!= None,
-                            ca @ TTensorCreate @ NumericArray[z0fixed, "Real32"],
+                        z0host = If[ z0fixed =!= None, z0fixed,
                             (If[ seed === Automatic, SeedRandom[], SeedRandom[seed + i]];
-                             ca @ TTensorCreate @ NumericArray[
-                                RandomVariate[NormalDistribution[], {simg, 128}], "Real32"])];
+                             RandomVariate[NormalDistribution[], {simg, 128}])];
+                        z = ca @ TTensorCreate @ NumericArray[z0host, "Real32"];
                         samp = fxSampleJit[
                             sess["velJit"], z, ee, sigmas, sess["tembFn"], ca, stepCb, wantSteps];
                         If[ wantSteps,
@@ -617,7 +623,7 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
                             {lat, steps} = {Normal[samp], Null}];
                         fxDbg["  enc[", i, "] mean=", Round[Mean[Flatten[Normal[encArr]]], 0.0001],
                             "  lat mean=", Round[Mean[Flatten[lat]], 0.0001]];
-                        {lat, steps}]],
+                        {z0host, lat, steps}]],
                 encDev]];
         fxTiming[t1, t2]];
 
@@ -628,26 +634,27 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
            this stage ONLY (fxBeamScope) so the gen-1 lazy VAE capture applies the
            eager-pretuned conv winners; replays here don't re-autotune. --- *)
         results = If[ !wantImg && !wantSteps,
-            (* no decode needed -- assemble from the embedding / latent alone. *)
+            (* no decode needed -- assemble from the embedding / z0 latent alone. *)
             MapThread[
                 fxAssemble[fxImageParts[#1, #2, #3, Null, Null], spec] &,
-                {Range[n], embeds, latents}],
-        (* else run STAGE 3 *)
+                {Range[n], embeds, z0hosts}],
+        (* else run STAGE 3.  The decode runs on the FINAL (denoised) latent; the
+           "Latent" return part is the INITIAL z0 (the round-trip handle). *)
         fxReport[fxImgText["Decoding", 1, n] <> "...", 0.90];
         {t3, results} = AbsoluteTiming @ TInContext[sess["ctxV"],
             With[{decodeAll = MapIndexed[
-                Function[{lat, idx},
+                Function[{finalLat, idx},
                     Module[{i = First[idx], img, stepImgs},
                         fxReport[fxImgText["Decoding", i, n] <> "...",
                             fxStageFrac[0.90, 1.0, i, n, 1, 1]];
-                        img = If[ wantImg, fxToImage @ fxVaeDecodeCached[sess, lat], Null];
+                        img = If[ wantImg, fxToImage @ fxVaeDecodeCached[sess, finalLat], Null];
                         (* decode each step latent to an Image (the progression). *)
                         stepImgs = If[ wantSteps && stepLatsAll[[i]] =!= Null,
                             fxToImage @ fxVaeDecodeCached[sess, #] & /@ stepLatsAll[[i]], Null];
                         (* live-show the progression filmstrip in a notebook. *)
                         If[ showSteps && stepImgs =!= Null, fxShowProgression[stepImgs, i, n]];
                         fxAssemble[
-                            fxImageParts[i, embeds[[i]], lat, img,
+                            fxImageParts[i, embeds[[i]], z0hosts[[i]], img,
                                 If[ stepImgs =!= Null, {stepImgs, stepLatsAll[[i]]}, Null]],
                             spec]]],
                 latents] &},
@@ -659,10 +666,12 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
 
 (* assemble the per-part Association for one image: which parts are present depends
    on what the spec needed (a missing part is Null and dropped, so an All / list
-   return only carries the parts that were actually computed).  "Steps" packs the
-   per-step decoded Images + raw latents as <|"Images"->.., "Latents"->..|>. *)
-fxImageParts[i_, emb_, lat_, img_, steps_] := DeleteCases[
-    <|"Image" -> img, "Latent" -> If[ lat === Null, Null, NumericArray[lat, "Real32"]],
+   return only carries the parts that were actually computed).  "Latent" is the
+   INITIAL z0 noise (the round-trip handle: fed back via "InitialLatent" it
+   reproduces the image).  "Steps" packs the per-step decoded Images + the running
+   (denoised) per-step latents as <|"Images"->.., "Latents"->..|>. *)
+fxImageParts[i_, emb_, z0_, img_, steps_] := DeleteCases[
+    <|"Image" -> img, "Latent" -> If[ z0 === Null, Null, NumericArray[z0, "Real32"]],
       "Embedding" -> If[ emb === Null, Null, NumericArray[emb, "Real32"]],
       "Steps" -> If[ steps === Null, Null,
           <|"Images" -> steps[[1]], "Latents" -> (NumericArray[#, "Real32"] & /@ steps[[2]])|>]|>,
