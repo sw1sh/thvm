@@ -1794,8 +1794,21 @@ static int rmu_fuse_epilogue_on(void) {
   return on;
 }
 
-// THVM_TC_BATCHED (default ON): route a TRUE batched matmul (attention's
-// Q@K^T and @V, batch=heads) through the register-blocked tiled emitter
+// THVM_TC_BATCHED (default OFF -- CORRECTNESS BUG, see below): route a TRUE
+// batched matmul (attention's Q@K^T and @V, batch=heads) through the tiled emitter
+//
+// DISABLED BY DEFAULT: rmu_emit_matmul_tc_tiled's batched path computes WRONG
+// results for the FLUX attention's strided/transposed Q/K {heads,seq,head_dim}
+// views on Metal -- the DiT/Qwen produce a NOISE latent, which the (correct) VAE
+// faithfully decodes into a garbage patchwork image (root-caused 2026-06-23:
+// FluxGenerate gave garbage with this ON, a correct cat with it OFF; every
+// individual op + the VAE are bit-identical CPU/Metal, so the fault is the
+// batch-axis stride/transpose handling here, not the ops).  The parallel_tc
+// fallback is byte-identical + correct.  THVM_TC_BATCHED=1 opts back in.
+// TODO: fix the batched-tiled emitter's strided-attention address math, validate
+// a Metal batched Q@K^T against the parallel_tc path, then restore the default.
+//
+// The register-blocked tiled emitter (when correct) is the perf win:
 // (rmu_emit_matmul_tc_tiled) instead of the ~2-TFLOPS parallel_tc per-8x8-tile
 // body.  The emitter adds a per-batch base offset (_batch * M*K / K*N / M*N) to
 // the A/B/C addresses; the dispatch grid becomes batch * m_tiles * n_tiles.
@@ -1805,10 +1818,10 @@ static int rmu_fuse_epilogue_on(void) {
 // 2.03 -> 1.87 s end-to-end.  THVM_TC_BATCHED=0 forces the byte-identical
 // parallel_tc path back (a fallback / A-B knob).
 static int rmu_tc_batched_on(void) {
-  static int known = 0, on = 1;
+  static int known = 0, on = 0;
   if (!known) {
     char const *e = getenv("THVM_TC_BATCHED");
-    if (e != NULL && e[0] == '0') on = 0;
+    if (e != NULL && e[0] == '1') on = 1;
     known = 1;
   }
   return on;
