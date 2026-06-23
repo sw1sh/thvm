@@ -1493,6 +1493,74 @@ static AtpWmOrder *atp_wmo_new(void) {
   return w;
 }
 
+// Gated full eq/rule-tree structure dump (THVM_WMO_TREEDUMP): print every
+// node's kids (edge cell + child kind) and exit list (sub cells + target +
+// order) so thvm's discrimination-tree CONSTRUCTION can be diffed leaf/exit
+// by leaf/exit against the validated mirror (wm_trie_mirror.py).  Env-gated,
+// off in every normal run (one cached getenv, pure stderr).
+static void wmo_treedump_node(FILE *fp, WmoNode *n, u32 depth) {
+  for (u32 k = 0; k < n->n_kids; k++) {
+    WmoCell *c = &n->kids[k].sym;
+    for (u32 d = 0; d < depth; d++) fputc(' ', fp);
+    fprintf(fp, "kid[%u] edge=%d %s\n", k,
+            c->is_var ? -(int)c->sym : (int)c->sym,
+            n->kids[k].is_leaf ? "LEAF" : "node");
+    if (n->kids[k].is_leaf) {
+      WmoLeaf *l = (WmoLeaf *)n->kids[k].child;
+      for (u32 d = 0; d < depth + 2u; d++) fputc(' ', fp);
+      fprintf(fp, "leaf_key=[");
+      for (u32 cc = 0; cc < l->key_len; cc++)
+        fprintf(fp, "%s%d", cc ? "," : "",
+                l->key[cc].is_var ? -(int)l->key[cc].sym : (int)l->key[cc].sym);
+      fprintf(fp, "] chain=");
+      for (u32 cc = 0; cc < l->n_chain; cc++)
+        fprintf(fp, "%s(t=%u,f=%u)", cc ? "," : "",
+                l->chain[cc].trace, l->chain[cc].face);
+      fputc('\n', fp);
+    }
+  }
+  u32 ei = 0;
+  for (WmoEntry *e = n->exits; e != NULL; e = e->next, ei++) {
+    for (u32 d = 0; d < depth; d++) fputc(' ', fp);
+    fprintf(fp, "exit[%u] sub=[", ei);
+    for (u32 cc = 0; cc < e->sub_len; cc++)
+      fprintf(fp, "%s%d", cc ? "," : "",
+              e->sub[cc].is_var ? -(int)e->sub[cc].sym : (int)e->sub[cc].sym);
+    fprintf(fp, "] -> %s", e->ziel_leaf ? "LEAF" : "node");
+    if (e->ziel_leaf) {
+      WmoLeaf *l = (WmoLeaf *)e->ziel;
+      fprintf(fp, " key=[");
+      for (u32 cc = 0; cc < l->key_len; cc++)
+        fprintf(fp, "%s%d", cc ? "," : "",
+                l->key[cc].is_var ? -(int)l->key[cc].sym : (int)l->key[cc].sym);
+      fprintf(fp, "]");
+    }
+    fputc('\n', fp);
+  }
+  for (u32 k = 0; k < n->n_kids; k++) {
+    if (!n->kids[k].is_leaf) {
+      for (u32 d = 0; d < depth; d++) fputc(' ', fp);
+      fprintf(fp, "node[edge=%d]:\n",
+              n->kids[k].sym.is_var ? -(int)n->kids[k].sym.sym
+                                    : (int)n->kids[k].sym.sym);
+      wmo_treedump_node(fp, (WmoNode *)n->kids[k].child, depth + 1u);
+    }
+  }
+}
+
+static void wmo_maybe_treedump(AtpWmOrder *w) {
+  static int on = -1;
+  if (on < 0) on = getenv("THVM_WMO_TREEDUMP") != NULL ? 1 : 0;
+  if (!on) return;
+  const char *at = getenv("THVM_WMO_TREEDUMP_AT");
+  u32 target = at ? (u32)atoi(at) : 71u;
+  static u32 dumped = 0u;
+  if (w->n_reg != target || dumped == target) return;
+  dumped = target;
+  fprintf(stderr, "WMOTREE tree=1 nreg=%u\n", w->n_reg);
+  if (w->tree[1].root != NULL) wmo_treedump_node(stderr, w->tree[1].root, 0u);
+}
+
 static void wmo_free_subtree(void *n_raw, u8 is_leaf) {
   if (n_raw == NULL) return;
   if (is_leaf) { wmo_leaf_free((WmoLeaf *)n_raw); return; }
@@ -1530,6 +1598,7 @@ static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
   memcpy(r->cells, cells, n_cells * sizeof(WmoCell));
   r->n_cells = n_cells;
   w->tree_rev++;             // invalidate the wmo_tops_rank arrival memo
+  wmo_maybe_treedump(w);
 }
 
 // Whether WM's distinguished (indexed) face for the fact with birth
@@ -1634,6 +1703,61 @@ static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
     if (lhs_ground != rhs_ground) {
       dist_rhs = rhs_ground ? 1u : 0u;
     }
+  }
+  // Tree INSERTION order follows the STORED orientation (lhs face first,
+  // rhs face second) -- WM's RUndEVerwaltung GleichungEinfuegen inserts
+  // flat(l) then flat(r) (RUndEVerwaltung.c:485-497), and the mirror
+  // (wm_trie_mirror.py: ('E',eid,0)=flat(l) then ('E',eid,1)=flat(r))
+  // matches.  The CONSTRUCTION (BlattAufgeteilt splice-after) is order
+  // sensitive: inserting the rhs face first when dist_rhs=1 inverted the
+  // two faces of the soa 3rd axiom at the depth-1 d node, flipping the
+  // E29/E30 group exits and the rule-35 round-robin (firstdiv 1953).  The
+  // dist_rhs bit STILL governs the rank-key face remap, but only via the
+  // chain's stored WM-face LABEL (0 = distinguished = thvm dir XOR dist_rhs),
+  // not the insertion order: the lhs leaf carries WM-face = dist_rhs (it is
+  // the reverse face when the distinguished side is the rhs), the rhs leaf
+  // carries WM-face = !dist_rhs.  wmo_tops_rank/wmo_leaflist_rank look the
+  // partner up by that WM-face, so the remap is byte-identical to the prior
+  // (dist-first) registration; only the physical tree exit order changes.
+  if (s->use_wmo_insert_lr) {
+    // WM GleichungEinfuegen order: WM inserts the equation's two faces into
+    // the Gleichungsbaum as flat(l) then flat(r) where (l,r) is WM's STORED
+    // (LRSortieren-canonical) orientation -- l is the side that is Kleiner
+    // under the SpezNormierung side comparator (variable < non-variable,
+    // preorder; SpezNormierung.c:517-534).  thvm does NOT reorient a derived
+    // equation's stored sides (LRSortieren-on-store regresses CP formation),
+    // so the stored lhs is not always WM's l.  Recover WM's insertion order
+    // WITHOUT touching the stored orientation: insert the LR-smaller face
+    // first.  The chain WM-face LABEL still follows dist_rhs (the partner
+    // lookup keys on WM-face = thvm-dir XOR dist_rhs), so the rank is
+    // byte-identical to the prior dist-first registration; only the physical
+    // tree exit order moves to WM's.  See AtpState.use_wmo_insert_lr.
+    Term lhs_face = s->lhs[slot];
+    Term rhs_face = s->rhs[slot];
+    // atp_lr_sortieren_rec(a,b) > 0 means a is Groesser (should be the rhs);
+    // insert the Kleiner side first.  lhs_is_l = stored lhs is WM's l.
+    u8 lhs_is_l = (atp_lr_sortieren_rec(lhs_face, rhs_face) <= 0) ? 1u : 0u;
+    Term first  = lhs_is_l ? lhs_face : rhs_face;
+    Term second = lhs_is_l ? rhs_face : lhs_face;
+    // WM-face label of the first (= WM's l) face: it is the distinguished
+    // face iff WM's l side carries the distinguished side.  thvm's stored lhs
+    // is the distinguished side iff dist_rhs==0; so the lhs face's WM-face is
+    // dist_rhs, and the side inserted first carries WM-face = (first is lhs)
+    // ? dist_rhs : !dist_rhs.
+    u8 first_face  = lhs_is_l ? dist_rhs : (u8)(dist_rhs ^ 1u);
+    u8 second_face = (u8)(first_face ^ 1u);
+    u32 n = wmo_face_cells(first, cells, WMO_MAX_CELLS);
+    if (n == 0u) return;
+    wmo_register(w, trace, 1u, first_face, cells, n, wmo_term_depth(first),
+                 dist_rhs);
+    if (!mono) {
+      u32 n2 = wmo_face_cells(second, cells, WMO_MAX_CELLS);
+      if (n2 != 0u) {
+        wmo_register(w, trace, 1u, second_face, cells, n2,
+                     wmo_term_depth(second), dist_rhs);
+      }
+    }
+    return;
   }
   Term dist = dist_rhs ? s->rhs[slot] : s->lhs[slot];
   Term rev  = dist_rhs ? s->lhs[slot] : s->rhs[slot];
@@ -1964,6 +2088,44 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
       w->rc_n_out = d.n_out;
     }
   }
+  // Arrival-dump probe (THVM_WMO_ARRDUMP): emit the eq-tree DFS leaf-arrival
+  // order with each arrived leaf's chain (trace/face) so the runtime trie
+  // walk can be compared leaf-by-leaf against WM's TT(l)=?E emission order.
+  // Throttled to one dump per distinct (qn, query-cells) bucket and bounded
+  // to the registration-count window THVM_WMO_ARRDUMP_LO/_HI; env-gated, off
+  // in every normal run.
+  if (tree == 1u && getenv("THVM_WMO_ARRDUMP") != NULL) {
+    // Gate to the registration window named by THVM_WMO_ARRDUMP_LO/HI (the
+    // rule-35 era is ~64-66 registered faces); dump every distinct query once.
+    const char *lo_s = getenv("THVM_WMO_ARRDUMP_LO");
+    const char *hi_s = getenv("THVM_WMO_ARRDUMP_HI");
+    u32 lo = lo_s ? (u32)atoi(lo_s) : 0u;
+    u32 hi = hi_s ? (u32)atoi(hi_s) : 0xffffffffu;
+    static u8 dumped[8192];   // throttle: one dump per (qn,cells-hash) bucket
+    u32 h = qn;
+    for (u32 c = 0; c < qn; c++) h = h * 131u + (q[c].is_var ? (9000u + q[c].sym) : q[c].sym);
+    u32 bucket = h & 8191u;
+    if (w->n_reg >= lo && w->n_reg <= hi && !dumped[bucket]) {
+      dumped[bucket] = 1u;
+      fprintf(stderr, "WMOARR nreg=%u tree=1 qn=%u n_out=%u q=[", w->n_reg, qn, d.n_out);
+      for (u32 c = 0; c < qn; c++)
+        fprintf(stderr, "%s%d", c ? "," : "",
+                q[c].is_var ? -(int)q[c].sym : (int)q[c].sym);
+      fprintf(stderr, "]\n");
+      for (u32 a = 0; a < d.n_out; a++) {
+        WmoLeaf *l = d.out[a];
+        fprintf(stderr, "  arr=%u leaf_key=[", a);
+        for (u32 c = 0; c < l->key_len; c++)
+          fprintf(stderr, "%s%d", c ? "," : "",
+                  l->key[c].is_var ? -(int)l->key[c].sym : (int)l->key[c].sym);
+        fprintf(stderr, "] chain=");
+        for (u32 c = 0; c < l->n_chain; c++)
+          fprintf(stderr, "%s(t=%u,f=%u)", c ? "," : "",
+                  l->chain[c].trace, l->chain[c].face);
+        fprintf(stderr, "\n");
+      }
+    }
+  }
   u8 hit = 0u;
   for (u32 a = 0; a < d.n_out && !hit; a++) {
     WmoLeaf *l = d.out[a];
@@ -2148,6 +2310,17 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
     if (!wmo_tops_rank(w, tree, qsub, s->r_trace[j], j_face_wm, &arr, &ch)) {
       w->rank_misses++;
       arr = 0x3fffu;
+    }
+    // Tops-phase per-CP rank trace (THVM_WMO_RANKTRACE): partner trace/face,
+    // DFS arrival, chain index + the CP's joined sides.  Env-gated; used to
+    // read the rule-35 @1953 8-partner emission order.
+    if (getenv("THVM_WMO_RANKTRACE") != NULL && tree == 1u && phase == 0u) {
+      fprintf(stderr, "WMORANK f=%u j=%u jtr=%u jfwm=%u arr=%u ch=%u k1=%u nreg=%u lhs=",
+              f, j, s->r_trace[j], j_face_wm, arr, ch, k1, w->n_reg);
+      atp_dbg_print_term(stderr, cp->lhs);
+      fprintf(stderr, " rhs=");
+      atp_dbg_print_term(stderr, cp->rhs);
+      fprintf(stderr, "\n");
     }
     // Co-rank the two faces of a CP-derived unorientable equation partner
     // at the SAME overlap position.  WM stores such an equation as an

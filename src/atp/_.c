@@ -9241,6 +9241,13 @@ fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
   atp_wmo_sync_trie_faithful(s);
 }
 
+// WM Gleichungsbaum insertion order (lhs face first, rhs face second; see
+// AtpState.use_wmo_insert_lr).  Default OFF; opt-in via THVM_ATP_WMO_INSERT_LR.
+fn void thvm_atp_set_use_wmo_insert_lr(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wmo_insert_lr = on ? 1u : 0u;
+}
+
 // Push-time queue-vs-queue subsumption gate (no WM counterpart; see
 // AtpState.use_queue_subsume in thvm.h).  Default ON = the historical
 // thvm engine; the "Waldmeister"* presets turn it OFF.

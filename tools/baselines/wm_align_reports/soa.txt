@@ -1,5 +1,314 @@
 soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv 126 -> 288 -> 290
 
+## ROOTED 2026-06-23 (DEFINITIVE, with byte-exact raw-CP proof): pick-1953 is NOT overlap geometry -- it is the EQ-TREE INSERTION ORDER of the 3rd axiom's two faces, and the gated fix (use_wmo_insert_lr) DEMONSTRABLY reorders the rule-35 batch to WM's round-robin but EXPOSES an earlier latent cross-batch FIFO divergence at pick-113
+
+The "CP-FORMATION OVERLAP-GEOMETRY" re-rooting immediately below (and the eq-tree-
+DFS-interleave section under it) is REFUTED by a direct, orientation-aware match of
+thvm's RAW (pre-normalization) critical pairs against WM's eight raw weight-109
+collapse CPs (cp10320=-11, cp10321=-9, cp10323=-30, cp10324=-26, cp10325=-22,
+cp10329=-29, cp10330=-25, cp10331=-21 in the banked /tmp/soa_align/wm.txt rule-35
+batch). The match (tools/wm_align_sweep canon, no WM run) is unambiguous:
+
+  WM partner  thvm j  thvm pos  thvm k1  thvm phase
+  -11         20      [0]       1        0 (A/tops)
+  -9          14      [0]       1        0
+  -30         49      [0]       1        0
+  -26         45      [0]       1        0
+  -22         37      [0]       1        0
+  -29         48      [0]       1        0
+  -25         40      [0]       1        0
+  -21         36      [0]       1        0
+
+ALL EIGHT form at the SAME overlap position pos=[0] (preorder rank k1=1) in BOTH
+engines -- there is NO geometry divergence (no deep-face x subterm-position spread,
+no k1 fan-out). The 11-drill "WM spreads k1 / thvm collapses k1" root is FALSE: WM
+also forms them all at the new rule's first-argument position. The independent WM
+mirror (wm_order_sim2 over the banked trace) confirms pos (0,) for all eight, and
+the U1_KPsBildenZuRegel source iterates TT(l) but every collapse partner unifies
+at l|[0] (the d(x,y) arm) only.
+
+### The real divergence: eq-tree DFS leaf-arrival ORDER of two leaf-groups
+The eight split across THREE eq-tree leaves at the q=[3,-1,-2] (= d(x1,x2)) query
+(THVM_WMO_ARRDUMP, nreg=71):
+  arr12  leaf [3,3,-1,-1,-2]            chain -11,-9          (the {-11,-9} group)
+  arr14  leaf [3,3,3,-1,3,-1,-1,-2,-3]  chain -29,-25,-21     (E29-distinguished face)
+  arr16  leaf [3,3,-1,3,-2,3,-2,-2,-3]  chain -30,-26,-22     (E30-distinguished face)
+thvm sorts by (phase,k1,k2,arr,ch): arr12 < arr14 < arr16 -> emits {-11,-9},
+{-29,-25,-21}, {-30,-26,-22}. WM's SUE ages (7805,7806 | 7808,7809,7810 | 7814,
+7815,7816) emit {-11,-9}, {-30,-26,-22}, {-29,-25,-21} -- the A,B,C round-robin.
+So WM reaches the E30-group leaf BEFORE the E29-group leaf; thvm reaches them in
+the opposite order. The {-11,-9} group is already in agreement; only the E29/E30
+groups are swapped.
+
+### Root cause: the 3rd axiom's two faces are inserted into the eq-tree in
+### inverted order, which (via AltesBlattPolieren splice-after) flips E29/E30
+The E29-group and E30-group leaves are AltesBlattPolieren parallels that splice
+immediately AFTER the E2 (3rd axiom, thvm trace 13) face exits at the depth-1 d
+node of the eq-tree: the E29 group follows the E2 face with sub d(d(x,x),y)
+(cells [f,f,v,v,v], = E2's d(d(d(x2,x2),x1),...) rhs-first-arg side), the E30
+group follows the E2 face with sub d(x,d(y,z)) (cells [f,v,f,v,v], = E2's
+d(d(x1,d(x2,x3)),...) lhs-first-arg side). So the E29/E30 emission order is
+determined entirely by which E2 face exit comes first at that node.
+
+The validated mirror (wm_trie_mirror.py) keeps E2.face0 (sub d(x,d(y,z)), WM's
+flat(l)) BEFORE E2.face1 (sub d(d(x,x),y), WM's flat(r)) throughout: face0 is
+hung first (_hang head-insert :150/:163), face1 then splits face0's leaf and its
+jump is spliced AFTER face0's (BlattAufgeteilt AltesBlattPolieren where='after',
+:228-229). thvm INVERTED them (face1 before face0) at the very first insert: at the
+trace-13 registration, atp_wmo_insert_fact_ex inserted the WM-DISTINGUISHED face
+first, and for this CP-derived equation dist_rhs=1 (WM-distinguished = thvm stored
+rhs = the d(d(x,x),y) face), so the rhs face entered the empty tree first and the
+lhs face split-after -> face1 < face0. WM's tree INSERTION order instead follows
+the STORED (LRSortieren) orientation flat(l) then flat(r) -- independent of the
+distinguished face (KPLinks, a CP-formation property used only for the rank-key).
+
+### The fix (gated, byte-identical OFF): use_wmo_insert_lr (THVM_ATP_WMO_INSERT_LR)
+src/atp/wm_order.c atp_wmo_insert_fact_ex: when set, insert the equation's two
+faces in WM's GleichungEinfuegen order -- the LRSortieren-Kleiner face first (via
+atp_lr_sortieren_rec, key-side only, stored orientation untouched), the Groesser
+face second. The chain WM-face LABEL still follows dist_rhs (lhs leaf = dist_rhs,
+rhs leaf = !dist_rhs), so the wmo_tops_rank/wmo_leaflist_rank partner lookup is
+byte-identical to the prior dist-first registration; ONLY the physical tree exit
+order moves to WM's. VERIFIED to correct the rule-35 batch: with the gate ON the
+E30-group leaf moves to DFS arrival 14 and the E29-group leaf to arrival 17 (was
+14 / 16) -- the E30 group now precedes the E29 group, exactly WM's A,B,C round-robin
+emission for picks 1953-1960. src/thvm.h use_wmo_insert_lr; setter
+thvm_atp_set_use_wmo_insert_lr; bench env THVM_ATP_WMO_INSERT_LR.
+
+### Outcome + the residual: ON exposes an earlier latent cross-batch FIFO at pick-113
+GATES (OFF byte-identical, all met): FormationFifo firstdiv=1953 unchanged;
+WALDMEISTER-only firstdiv=19 unchanged; bin/test_atp 136236/136236; 15 wm_pr
+theorems CPSEL byte-identical vs clean HEAD c43a3f17 (BooleanAxioms And{Comm,Assoc},
+DroppingAlwaysFalse, ImpliesRobbins_c1; HuntingtonAxioms DoubleNegation;
+AbelianTarski Comm; McCune {InverseOfComposite, EqualityOfInverses};
+HigmanNeumann RightIdentity; AbelianGroup ImpliesAbelianMcCune; AbelianMcCune
+{Assoc, Comm, ImpliesMcCune, InverseOfComposite, InverseOfInverse}).
+ON (THVM_ATP_WMO_INSERT_LR=1): firstdiv REGRESSES 1953 -> 113. The pick-113
+regression is the documented exposure-cascade pattern (cf. WM_TRIE_FAITHFUL
+standalone exposing pick-1884): the now-correct construction surfaces an EARLIER
+latent divergence the wrong-but-masking dist-first order hid. At pick-113 WM and
+thvm pick the SAME two weight-120 CPs (x.x # (y.(y.y)).x and x.(y.x) # (y.y).x)
+in SWAPPED order -- a CROSS-BATCH FIFO-age inversion (the two CPs are formed in
+DIFFERENT new-fact batches, so it is not a within-batch arrival sort like rule-35;
+it is two batches' arrival ranks shifting relative to each other when the tree
+moved). An LRSortieren-Kleiner-first variant of the insert order does NOT fix
+pick-113 (still 113), and THVM_ATP_LR_SORTIEREN (reorient the STORED side, which
+WOULD make thvm's stored orientation match WM's flat(l)) regresses harder to 22
+because it perturbs CP formation (the KPAction order gate keys on cp.peak). So the
+faithful insertion order is correct for the rule-35 batch but the global FIFO-age
+reconciliation needs WM's per-equation stored orientation WITHOUT perturbing CP
+formation -- the next lever. The fix is retained DEFAULT OFF as the proven
+root-cause mechanism (rule-35 batch reordered to WM's round-robin, byte-identical
+OFF) whose pick-113 exposure pins that next dependency.
+
+Probes added (all env-gated, byte-identical OFF, pure getenv stderr):
+THVM_WMO_TREEDUMP[_AT] = full eq/rule-tree node+exit structure dump for leaf/exit
+diff vs the mirror (src/atp/wm_order.c wmo_maybe_treedump).
+
+## RE-ROOTED 2026-06-23: pick-1953 is CP-FORMATION OVERLAP-GEOMETRY, not the eq-tree DFS arrival -- the "EQUATION-tree DFS interleave" attribution (section below) is REFUTED by the leaf layout; a round-robin re-key is the WRONG tool (regresses 1953 -> 52) [SUPERSEDED by the section above: there is NO geometry divergence; all 8 form at pos[0]/k1=1 in both engines]
+
+The CORRECTED-2026-06-23 section below attributes pick-1953 to thvm's EQUATION-tree
+DFS reaching the partner families in a GROUPED order where WM's combined scan
+reaches them INTERLEAVED, and proposes extending the WM-trie-faithful construction
+to the eq-tree to fix the arrival order.  Driven end-to-end against the banked
+/tmp/soa_align/wm.txt (no WM run) with two new env-gated probes
+(THVM_WMO_ARRDUMP = the eq-tree DFS leaf-arrival list with each leaf's chain;
+THVM_WMO_RANKTRACE = the per-CP packed-key fields), this attribution is REFUTED:
+
+### The eq-tree construction is ALREADY shared + faithful for BOTH trees
+wmo_register -> wmo_tree_insert (src/atp/wm_order.c) is the SAME code for the rule
+tree (tree=0) and the equation tree (tree=1), and it already passes w->polier_after
+to both, so use_wm_trie_faithful's splice-after/jump-dedup/head-insert corrections
+apply to the eq-tree too.  Verified: under THVM_ATP_WM_TRIE_FAITHFUL the rule-35
+query's eq-tree arrivals are BYTE-IDENTICAL (C-leaf arr=5, B-leaf arr=6, A-leaf
+arr=10, same chains) -- there is no separate, less-faithful eq-tree construction
+branch to "extend".  wmo_tree_remove likewise carries the full collapse +
+Sprung-reissue parallel-order restoration (the mirror's remove()).
+
+### The 8 partners share THREE leaves, so a single DFS CANNOT round-robin them
+For the f=52 batch (= WM rule 35; nreg=71) the eight weight-109 collapse CPs
+`x1 # ((x1.<MID>).(x2.x1))` overlap rule-35 at ONE position (combo=1, poslen=1) on
+the new rule's pos[1] subterm `x2.(x2.x1)`.  thvm's eq-tree DFS over that query
+reaches the partner faces at exactly THREE leaves, each holding its whole
+same-shape family chain (THVM_WMO_ARRDUMP, q=[3,-1,-2] x1.x2 at nreg=71):
+  arr=5  leaf x1.(y.y)  chain = eq30(t6957,f1), eq29(t6535,f1), ...   = family C (2)
+  arr=6  leaf x1.(y.x)  chain = eq11(t3993,f0), eq9(t3784,f0), ...,(t418,f1) = B (3)
+  arr=10 leaf x1.(x.y)  chain = ...(t4752,f0),...,(t676,f1)           = family A (3)
+thvm sorts the batch by (arr,ch) so each family's same-leaf chain emits together:
+C,C,B,B,B,A,A,A (cp_seq 7739,7743,7749,7751,7752,7760,7762,7763, CPFORM trace).
+WM's SUE ages 7805-7816 give A,B,C,A,B,C,A,B (round-robin: cp10320..cp10331
+parents (35,-11/-9/-30/-26/-22/-29/-25/-21)).
+
+The decisive structural fact: family C is the two equations eq29/eq30 whose
+WM-INDEXED reverse faces are `x3.(x2.x2)` and `x3.(x1.x1)` -- BOTH canonicalize to
+the IDENTICAL discrimination key `x.(y.y)`.  Identical keys MUST share a leaf in
+ANY discrimination tree, WM's included (WM inserts both equation directions into
+RE_Gleichungsbaum, RUndEVerwaltung.c GleichungEinfuegen:485-497, the reverse keyed
+by TiefeRechts = its own left side).  So WM ALSO holds eq29/eq30's `x.(y.y)` faces
+at one shared leaf, and WM's MitAllen (Unifikation1.c:1464-1468) processes a leaf's
+whole chain in one pass.  Therefore WM's C ages 7808/7814 being NON-ADJACENT (a B
+and an A age between them) is IMPOSSIBLE to produce from a single TT(l)=?E DFS over
+that query -- no DFS-arrival ordering of thvm's (or WM's) leaves yields round-robin.
+
+### Root: WM forms these 8 via DIFFERENT overlap geometry than thvm
+The round-robin therefore is NOT an eq-tree DFS-arrival signal.  WM forms the 8 CPs
+by matching each partner's DEEP DISTINGUISHED face against the appropriate subterm
+position of rule-35 (U1_KPsBildenZuRegel section 2 iterates ALL of l's subterms,
+:1527-1537), interleaving the families across positions; thvm forms the identical
+8 CPs via the SHALLOW reverse `x.(y.y)`/`x.(y.x)`/`x.(x.y)` face at the single
+pos[1] overlap, collapsing each family onto one leaf.  Same CP SET, DIFFERENT
+(outer-position, inner-face) LINEAGE -> different emission order.  This is the
+CP-formation OVERLAP-GEOMETRY class (atp_overlap_ij assigns a CP to a different
+(outer, position) than WM), exactly what the firstdiv-19 / pick-1884 analyses and
+the SUPERSEDED-2026-06-23 section flagged -- NOT the eq-tree construction.  The
+prior "EQUATION-tree DFS interleave" framing mistook thvm's arr-grouped emission
+for the cause; the cause is upstream, in which (face,position) thvm builds the CP
+from.
+
+### Why no re-key advances (measured)
+A general WM-faithful round-robin re-key was implemented + measured (gated
+THVM_ATP_EQTREE_RR, since reverted): re-key each A-phase tops (phase,k1,k2) group
+column-major over its distinct arrival-leaf families.  It REGRESSES firstdiv
+1953 -> 52 whether the families are ordered ascending or descending arrival and
+whether or not restricted to equation partners -- because WM does NOT round-robin
+in general (its emission IS the eq-tree DFS arrival = thvm's arr sort for the vast
+majority of groups; the rule-35 appearance is the geometry artifact above, not a
+universal interleave).  No leaf-arrival re-key can both produce the rule-35
+round-robin and preserve the 1..1952 prefix.  Closing 1953 requires the
+atp_overlap_ij geometry port (build these CPs from WM's deep-face/subterm-position
+lineage so their k1/position spreads as WM's does), a deep cp-gen change whose
+per-CP position assignment the no-WM-run constraint cannot validate (it needs WM's
+overlap-position dump, not just the selection trace).  DEFERRED with this hard
+structural proof, superseding the eq-tree-construction hypothesis.
+
+GATES (this re-rooting is documentary + adds two env-gated diagnostics only):
+bin/test_atp 136236/136236 (probes byte-identical OFF, pure getenv stderr);
+FormationFifo soa firstdiv=1953 unchanged; WALDMEISTER-only firstdiv=19 unchanged;
+12 wm_pr theorems CPSEL byte-identical vs clean HEAD c43a3f17 (BooleanAxioms
+And{Commutativity,Associativity,Idempotence,Distributivity,Absorption} + DeMorgan_c1,
+AbelianGroup {InverseOfComposite,InverseOfInverse,ImpliesMcCuneAxioms}, AbelianMcCune
+{Commutativity,Associativity}, AbelianTarski Commutativity).  Probes:
+src/atp/wm_order.c wmo_tops_rank (WMOARR, THVM_WMO_ARRDUMP[_LO/_HI]) + atp_wmo_rank
+(WMORANK, THVM_WMO_RANKTRACE).
+
+## CORRECTED 2026-06-23: pick-1953 is NOT over-formation -- slot48/49 ARE WM E#29/E#30; the residual is the EQUATION-tree DFS interleave (emission ORDER, not CP-SET)
+
+The "thvm over-forms thvm-only `x.(y.y)=deep.x` equations j=48/49 WM never forms"
+premise (the section immediately below, dated 2026-06-23, and the WM-trie sections)
+is REFUTED by exact structural comparison against the banked /tmp/soa_align/wm.txt
+(no WM run).  The prior claim rested on a flawed manual variable-comparison that
+treated the trailing var as fresh.  With orientation-insensitive joint-variable
+canonicalization:
+
+  thvm slot48 `x.(y.y) = ((z.(z.z)).y).x`  ==  WM E#29 `((z.(z.z)).y).w = w.(y.y)`
+    (rename w<->x: byte-identical equation; WM `...and added to E as such with
+     number 29` at wm.txt L53986, parents ue (-21,-10))
+  thvm slot49 `x.(y.y) = (y.(z.(z.z))).x`  ==  WM E#30
+    (WM `added to E ... number 30`)
+
+WM keeps 29 distinct E-members and BOTH slot48/49 are among them.  So thvm forms the
+SAME CP set as WM at the pick-1953 batch -- there is NO over-formation to suppress.
+KPActionGR (the outer order test on the slot48 source overlap, outer rule36 eq
+`x.(y.x)=((z.(z.z)).y).x` x inner rule19 `x.(x.(x.y))->y.x`, combo-0 ROOT) is
+KBO-INCOMPARABLE in thvm (cp.rhs `((z.(z.z)).y).x` vs peak `x.(y.x)`: var x appears
+twice in peak, once in rhs -> KBO_UN) so thvm KEEPS it -- and WM's
+`TermGroesserUnif(KPLinks,Ueberlappung)` returns the same KBO_UN verdict, so WM
+keeps it too.  thvm's atp_cp_order_gate IS WM's KPActionGR/GG byte-for-byte here.
+
+### THE REAL pick-1953 residual: equation discrimination-tree DFS arrival order
+At the f=52 batch (= WM rule 35) the eight weight-109 collapse CPs `((x.<mid>).(y.x))
+= x` are IDENTICAL in both engines (same 8 partner equations, same A/B/C `<mid>`
+shapes); only the EMISSION ORDER differs:
+  WM   : A,B,C,A,B,C,A,B  (round-robin -- picks 1953=(35,-11) 1954=(35,-9)
+                           1955=(35,-30) 1956=(35,-26) 1957=(35,-22) 1958=(35,-29)
+                           1959=(35,-25) 1960=(35,-21))
+  thvm : C,C,B,B,B,A,A,A  (grouped by shape)
+All 8 thvm CPs carry phase=0 (tops/A), k1=1 (SAME overlap position [1]), k2=1
+(eq-tree); they differ ONLY in k3=arr (the eq-tree DFS leaf-arrival rank computed by
+wmo_tops_rank/wmo_dfs): C-family arr=5, B-family arr=6, A-family arr=10.  thvm sorts
+arr5<arr6<arr10 -> grouped.  WM's single combined eq-tree scan (Unifikation1.c
+U1_KPsBildenZuGleichung phase A `TT(l) =? E`, one TermMitDSBaumUnifizieren walk per
+Index over MitAllen at each leaf) reaches the families INTERLEAVED.  The raw DFS
+arrival list (THVM_WMO_ARRDUMP probe, qn=3 face=1) is C(arr5),B(arr6),A(arr10) --
+thvm's eq-tree GROUPS the same-shape leaves where WM's tree interleaves them.
+
+So the divergence is the EQUATION discrimination-tree CONSTRUCTION (the order
+BlattAufgeteilt chains/parallels the leaves), NOT the walk (the recursive DFS is
+faithful for a fixed tree, proven by the mirror) and NOT cp-gen geometry (the CP set
+matches).  THVM_ATP_WM_TRIE_FAITHFUL leaves this arrival order BYTE-IDENTICAL
+(verified: arr 5/6/10 unchanged ON) because it fixes only the RULE tree; the 1953
+partners (jtr 3784/3993/6535/6957) are eq-tree splice-after parallels at
+i-start_pos>1, untouched by the rule-tree head-insert fix.
+
+### NO scoped re-key advances 1953 without regressing the 1..1952 prefix
+- The co-rank logic (wmo_eq_sides_var_differ -> anchor both faces on the earlier
+  leaf) is load-bearing for the prefix: disabling it (THVM_X_NO_CORANK probe)
+  regresses firstdiv 1953 -> 53.  It is correct for the asymmetric oriented-variant
+  equations it targets; it is just not the lever for the E#29/30-family round-robin.
+- Swapping k3<->k4 (chain-major) yields C,C,B,A,B,B,A,A -- not WM's A,B,C round-robin.
+- WM's partner order within a family is NON-monotonic in birth index (A = -11,-26,-25
+  i.e. 11,26,25), confirming it is the eq-tree chain/arrival order (head/tail
+  BlattAufgeteilt insertion), reproducible ONLY by porting WM's full equation
+  discrimination-tree construction -- the multi-session effort the rule-tree TRIE
+  work demonstrates, and the one the no-WM-run constraint cannot validate beyond
+  firstdiv.  DEFERRED to the eq-tree construction port (the genuine next lever).
+
+## SUPERSEDED 2026-06-23 (premise refuted above): pick-1953 is NOT intake-orientation (LRSortieren/dist_rhs) -- it is a CP-formation overlap-geometry divergence (thvm forms a CP WM never forms, keeping an `x.(y.y)=deep.x` equation WM lacks)
+
+The pick-1953 residual was driven end-to-end with the banked WM ref
+(/tmp/soa_align/wm.txt, no WM run) to settle the orientation hypothesis. It is
+NOT an intake-orientation issue: WM does NOT reorient derived equations
+(LRSortieren runs only at SPECIFICATION intake, SpezNormierung.c:758-791
+SN_SpezifikationAuswerten -> LRSortieren over get_equations(); a DERIVED equation
+keeps its CP lhs unchanged in RE_ErzeugteGleichung, RUndEVerwaltung.c:411-429,
+where the distinguished face RichtungAusgezeichnet=TRUE rides selRec.lhs). WM's
+distinguished face is KPLinks = MGU(TP_RechteSeite(Vater)) = sigma(r of the OUTER
+rule), Unifikation1.c:916 -- a CP-FORMATION-GEOMETRY property, NOT recoverable
+from stored content (E#29/30 distinguish the DEEP left side; E#21-28 the SHALLOW
+left side; the same equation feeds multiple batches).
+
+### THE EXACT pick-1953 batch (instrumented, runtime BATCH/CPFORM traces)
+All seven diverging w=10 collapse-CPs `((x.m).(y.x)) = x` are formed in ONE outer
+rule's batch (thvm f=52, i=52), overlapping seven partner equations at combo=1:
+  C-form (m=y.y): partners j=49,48 (cp_seq 7739,7743)
+  B-form (m=y.x): partners j=37,36,14 (cp_seq 7749,7751,7752)
+  A-form (m=x.y): partners j=45,40 (cp_seq 7760,7762)
+WM emits A,B,C round-robin (picks 1953,1954,1955,1956,1957...) from its single
+combined superposition scan; thvm forms C,C,B,B,B,A,A because the partners' tops-
+DFS arrival ranks (arr, keyed by j_face_wm = j_face XOR dist_rhs) order them
+C<B<A. The partners j=37/36/45/40 map exactly to WM E#22/E#21/E#26/E#25
+(distinguished = the shallow `x.(...)` side, thvm dist_rhs=0, CORRECT); j=14 maps
+to E#11 (distinguished = the larger `(x.x).y` side, dist_rhs=1, CORRECT).
+
+### WHY ORIENTATION CANNOT FIX IT (dist_rhs lever tested, regresses)
+The C-form partners j=48/49 are equations `x.(y.y) = (y.(z.(z.z))).x` and
+`x.(y.y) = ((z.(z.z)).y).x`. WM's E-set NEVER contains an `x.(y.y) = deep.x`
+equation (it keeps `x.(y.y)` only in E#10 `x.(y.x)=x.(y.y)`, E#12 `x.(y.y)=x.(x.y)`,
+rule 12, rule 46) and WM NEVER forms the originating CP (`d(x1,d(x2,x2)) # d(d(x2,
+d(x3,d(x3,x3))),x1)` is absent from the full -a4 trace). So j=48/49 are thvm-only
+equations born from an overlap WM does not perform -- a CP-formation geometry /
+under-reduction difference: WM reduces the `x.(y.y)` face (via E#12-class ordered
+rewriting) so the equation collapses to an E#26-shape, while thvm keeps it.
+A precisely-scoped dist_rhs override (THVM_ATP_NARROW_ORIENT, a shallow-`v.(p.q)`-
+side pin gated on the OTHER side carrying a side-only self-cube `c.(c.c)` -- it
+fired on EXACTLY j=48 and j=49, verified by trace) REGRESSES firstdiv 1953 -> 1581:
+those same two equations' emission face also feeds the earlier pick-1581 w=120
+batch (E#12 `x.(y.y) # x.(x.y)`), where the heuristic dist_rhs=1 aligns with WM
+but the "faithful" dist_rhs=0 does not. No single dist_rhs value reconciles both
+batches -> it is geometry, not orientation. The knob was therefore NOT landed
+(it only regresses).
+
+### NEXT LEVER (the real one): ordered-rewrite the `x.(y.y)` face / CP-formation geometry
+Closing 1953 needs thvm to either (a) NOT form the j=48/49 overlap (WM's exact
+TT(l)=?E vs l=?eTT outer/inner geometry, Unifikation1.c U1_KPsBildenZuRegel:
+1525-1547, so the CP is assigned WM's outer/position and is never built here), or
+(b) ordered-reduce the `x.(y.y)` face of those equations to `x.(x.y)` via the
+E#12-analog the way WM's unfailing-completion rewrite does, collapsing j=48/49 to
+the E#26-shape WM keeps. Both are downstream of the CP-formation/normalization
+subsystems, NOT intake orientation. This is the SAME overlap-geometry frontier the
+1884 round characterized (atp_overlap_ij assigns a CP to a different (outer,
+position) than WM).
+
 ## RESOLVED 2026-06-22: pick-1884 CP-formation geometry -- the immediate-strict-ancestor head jump is WM-faithful in BOTH construction modes (1884 regression closed; TRIE foundation now non-regressing)
 
 The prior round (below) showed THVM_ATP_WM_TRIE_FAITHFUL standalone REGRESSES 1953 ->

@@ -1026,6 +1026,10 @@ int main(int argc, char **argv) {
       // THVM_ATP_WM_TRIE_FAITHFUL opts in.  See soa.txt.
       thvm_atp_set_use_wm_trie_faithful(
           s, (getenv("THVM_ATP_WM_TRIE_FAITHFUL") != NULL) ? 1u : 0u);
+      // WM Gleichungsbaum insertion order (lhs face first, rhs face second).
+      // DEFAULT OFF; THVM_ATP_WMO_INSERT_LR opts in.  See soa.txt.
+      thvm_atp_set_use_wmo_insert_lr(
+          s, (getenv("THVM_ATP_WMO_INSERT_LR") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /

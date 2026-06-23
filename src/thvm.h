@@ -5785,6 +5785,28 @@ typedef struct {
   // OFF byte-identical (the gated branch keeps the head-insert).  See
   // tools/baselines/wm_align_reports/soa.txt.
   u8    use_wm_trie_faithful;
+  // Waldmeister equation-tree INSERTION ORDER (env THVM_ATP_WMO_INSERT_LR,
+  // default OFF).  WM's RUndEVerwaltung GleichungEinfuegen inserts an
+  // unorientable equation's two faces into the Gleichungsbaum as flat(l)
+  // THEN flat(r) -- stored-lhs face first, stored-rhs face second
+  // (RUndEVerwaltung.c GleichungEinfuegen).  thvm's atp_wmo_insert_fact_ex
+  // historically inserted the WM-DISTINGUISHED face first, which for a
+  // CP-derived equation with dist_rhs=1 (distinguished = stored rhs) is the
+  // STORED-RHS face -- the opposite order.  Because BlattAufgeteilt is
+  // order-sensitive (the second face splits the first leaf and splices its
+  // jump AFTER), inserting rhs-first inverted the two faces of soa's 3rd
+  // axiom at the depth-1 d node, which (via the AltesBlattPolieren parallels
+  // the E29/E30-family leaves splice after) flipped the rule-35 round-robin
+  // emission order (firstdiv 1953: the 8 weight-109 collapse CPs all form at
+  // pos[0]/k1=1; only their eq-tree DFS-arrival groups diverge, and the E30
+  // group must arrive before the E29 group as WM emits A,B,C round-robin).
+  // This gate inserts lhs-first/rhs-second like WM; the dist_rhs bit STILL
+  // drives the rank-key face remap, now carried purely by each leaf chain's
+  // stored WM-face LABEL (lhs leaf = dist_rhs, rhs leaf = !dist_rhs), so the
+  // wmo_tops_rank/wmo_leaflist_rank partner lookup is byte-identical to the
+  // prior dist-first registration -- only the physical tree exit order
+  // changes.  OFF byte-identical.  See tools/baselines/wm_align_reports/soa.txt.
+  u8    use_wmo_insert_lr;
   // Waldmeister LRSortieren side-canonicalisation (SpezNormierung.c
   // :517-534, env THVM_ATP_LR_SORTIEREN, default OFF): a derived
   // unorientable equation is stored with WM's canonical left/right side
@@ -6182,6 +6204,7 @@ fn void      thvm_atp_set_use_drain_revface(AtpState *s, u8 on);
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
 fn void      thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_wmo_insert_lr(AtpState *s, u8 on);
 // Push-time queue-vs-queue subsumption gate (thvm-native, no WM
 // counterpart; see AtpState.use_queue_subsume).  Default ON; the
 // "Waldmeister"* presets turn it OFF.
