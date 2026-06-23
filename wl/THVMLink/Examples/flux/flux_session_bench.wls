@@ -33,14 +33,14 @@ p2 = "a blue bird on a branch";
 
 pr["FLUX.2-klein-4B SESSION bench  dev=", dev, "  size=", side, "x", side];
 
-stats[px_] := With[{f = Flatten[px]},
+stats[img_] := With[{f = Flatten @ ImageData[img]},
     {Round[Min[f], 0.0001], Round[Max[f], 0.0001], Round[Mean[f], 0.0001],
      AllTrue[f, NumberQ[#] && Abs[#] < Infinity &]}];
 
 run[label_, prompts_] := Module[{dt, imgs, s},
     {dt, imgs} = AbsoluteTiming @ FluxGenerate[prompts,
-        "ImageSize" -> imgSize, "Device" -> dev, "ReturnImages" -> False];
-    s = stats /@ (If[ ListQ[First[imgs]] || ArrayDepth[imgs] >= 3, imgs, {imgs}]);
+        "ImageSize" -> imgSize, "Device" -> dev];
+    s = stats /@ imgs;
     pr[label, "  ", Round[dt, 0.01], " s"];
     Do[ pr["    img ", i, "  min=", s[[i, 1]], " max=", s[[i, 2]], " mean=", s[[i, 3]], " finite=", s[[i, 4]]],
         {i, Length[s]}];
@@ -58,8 +58,8 @@ pr["SUMMARY  call1=", Round[dt1, 0.01], "s (<10)  call2=", Round[dt2, 0.01], "s 
    while call2 was p2 at seed+1 (different noise) -- NOT comparable.  So compare
    only batch[1] vs call1 here; a clean batch==sequential check needs identical
    per-item seeds, run in flux_batch_parity.wls. *)
-If[ ListQ[imgs3] && Length[imgs3] === 2 && ArrayDepth[First[imgs3]] === 3,
-    Module[{b1 = First[imgs3], s1 = First[imgs1], e1},
+If[ ListQ[imgs3] && Length[imgs3] === 2 && ImageQ[First[imgs3]],
+    Module[{b1 = ImageData @ First[imgs3], s1 = ImageData @ First[imgs1], e1},
         e1 = Max @ Abs[Flatten[b1] - Flatten[s1]];
         pr["PARITY  batch[1] vs seq call1(p1, seed+1) maxabs=", Round[e1, 0.0001]]]];
 pr["DONE"];

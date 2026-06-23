@@ -559,7 +559,7 @@ fxAssemble[parts_, ks_List] := KeyTake[parts, ks];
    `spec` selects which parts to return; `initLat` (Automatic | a {simg,128} array)
    seeds STAGE 2; `showSteps` adds the per-step decoded progression. *)
 fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSteps_, modelDir_] := Module[
-    {sess, encDev, z0hosts, latents, stepLatsAll, embeds, results, n = Length[prompts],
+    {sess, encHost, z0hosts, latents, stepLatsAll, embeds, results, n = Length[prompts],
      need, wantImg, wantLat, wantEmb, wantSteps, z0fixed},
 
     (* cold-build (or fetch) the session -- indeterminate while the weights load. *)
@@ -575,16 +575,15 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
         wantSteps = showSteps;
         z0fixed = fxValidateInitLat[initLat, simg];
 
-        (* --- STAGE 1: Qwen text-encode the whole batch (in the Qwen context).  An
-           "Embedding" return reads each {stxt,7680} device tensor to the host HERE,
-           INSIDE the ctxQ block where it was realized (a device->host Normal must run
-           in the tensor's own context; reading it after TInContext returns segfaults).
-           The device tensors still feed STAGE 2 directly -- the host read is an extra
-           copy paid only when asked. --- *)
+        (* --- STAGE 1: Qwen text-encode the whole batch (in the Qwen context).
+           fxQwenEncodeBatch returns one {stxt,7680} HOST array per prompt (a distinct
+           snapshot -- the captured qwJit output buffer is recycled across replays, so
+           the encodings must be copied off-device before the next prompt overwrites
+           it).  An "Embedding" return is then just those same host arrays. --- *)
         fxReport[If[ n > 1, "Encoding " <> ToString[n] <> " prompts...", "Encoding prompt..."], 0.45];
-        {t1, {encDev, embeds}} = AbsoluteTiming @ TInContext[sess["ctxQ"],
-            Module[{ed = fxQwenEncodeBatch[sess, prompts]},          (* {n,stxt,7680} device *)
-                {ed, If[ wantEmb, Normal /@ ed, ConstantArray[Null, n]]}]];
+        {t1, encHost} = AbsoluteTiming @ TInContext[sess["ctxQ"],
+            fxQwenEncodeBatch[sess, prompts]];                       (* {n,stxt,7680} host *)
+        embeds = If[ wantEmb, encHost, ConstantArray[Null, n]];
 
         (* --- STAGE 2: transformer sample each prompt's latent (transformer
            context).  velJit is the persistent per-step capture; fxSampleJit keeps
@@ -611,7 +610,10 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
                                 fxImgText["Generating", i, n] <> " (step " <> ToString[#1] <>
                                     " of " <> ToString[#2] <> ")...",
                                 fxStageFrac[0.55, 0.90, i, n, #1, #2]] &)},
-                        ee = ca @ encArr;   (* {stxt,7680} device, straight from STAGE 1 *)
+                        (* upload this prompt's host encoding to the device for the
+                           velocity replay (ca: cast + TToDevice, bf16 on a GPU so the
+                           context_embedder matmul stays on the tensor cores). *)
+                        ee = ca @ TTensorCreate @ NumericArray[encArr, "Real32"];
                         z0host = If[ z0fixed =!= None, z0fixed,
                             (If[ seed === Automatic, SeedRandom[], SeedRandom[seed + i]];
                              RandomVariate[NormalDistribution[], {simg, 128}])];
@@ -621,10 +623,10 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
                         If[ wantSteps,
                             {lat, steps} = {Normal[samp[[1]]], samp[[2]]},
                             {lat, steps} = {Normal[samp], Null}];
-                        fxDbg["  enc[", i, "] mean=", Round[Mean[Flatten[Normal[encArr]]], 0.0001],
+                        fxDbg["  enc[", i, "] mean=", Round[Mean[Flatten[encArr]], 0.0001],
                             "  lat mean=", Round[Mean[Flatten[lat]], 0.0001]];
                         {z0host, lat, steps}]],
-                encDev]];
+                encHost]];
         fxTiming[t1, t2]];
 
         (* --- STAGE 3: VAE decode each latent (VAE context).  The final latent gives
@@ -743,11 +745,15 @@ fxQwenEncodeBatch[sess_, prompts_List] := With[
                on replay -- a lazy/non-contiguous input gets 0 sites and silently
                keeps the capture-time (first prompt's) bytes (see capture.c). *)
             xr = TRealize[in["x"]];  mr = TRealize[in["addMask"]];
-            (* Keep the Qwen encoding ON DEVICE (TRealize, not Normal): STAGE 2
-               (shared context) feeds it straight into the velocity JIT, so a
-               ~512x7680 device->host->device roundtrip + NumericArray rebuild is
-               avoided per prompt. *)
-            {tRep, out} = AbsoluteTiming[TRealize @ jit[xr, mr]];
+            (* Read each encoding to a DISTINCT host array (Normal).  The qwJit replay
+               writes its {stxt,7680} output into the SAME captured output buffer every
+               call, so the per-prompt device tensors all ALIAS that one buffer -- left
+               on-device, every prompt in a batch would read the LAST replay's bytes
+               (the batch prompt-collapse: {apple,bird} decoded two birds).  Copying to
+               the host snapshots each prompt's encoding before the next replay
+               overwrites the buffer; STAGE 2 re-uploads per prompt.  (For n=1 there is
+               one replay, so this is just the single host read either way.) *)
+            {tRep, out} = AbsoluteTiming[Normal @ TRealize @ jit[xr, mr]];
             fxDbg["    qwen x mean=", Round[Mean[Flatten[Normal[xr]]], 0.0001],
                 "  tokenize=", Round[tTok, 0.001], " replay=", Round[tRep, 0.001]];
             out]] /@ prompts]

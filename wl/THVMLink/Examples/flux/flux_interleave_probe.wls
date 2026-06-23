@@ -15,7 +15,7 @@ sess = fxSessionGet["metal", {256, 256}, 4, md];
 pr["session built"];
 (* generate the SAME prompt+seed twice -- the persistent session must produce
    IDENTICAL images (no cross-call JIT corruption). *)
-genImg[p_, s_] := First @ FluxGenerate[{p}, "ImageSize"->{256,256}, "Seed"->s, "Device"->"metal", "ReturnImages"->False];
+genImg[p_, s_] := ImageData @ FluxGenerate[p, "ImageSize"->{256,256}, RandomSeeding->s, "Device"->"metal"];
 img1 = genImg["a red apple on a table", 0];
 img2 = genImg["a red apple on a table", 0];
 pr["img1 mean=", Round[Mean[Flatten[img1]],0.0001], "  img2 mean=", Round[Mean[Flatten[img2]],0.0001]];
