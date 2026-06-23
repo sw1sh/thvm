@@ -677,11 +677,32 @@ TEST_DEFINES := $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,) $(ATP
 # Per-call compile is ~3-4 sec the first time per def-shape;
 # cache-by-content (build.c FNV hash on the wrapped source) catches
 # repeat calls so subsequent TAOTCompile is instant.
-build/thvm_inline.c: $(SRC) tools/inline_includes.py | $(BUILD)
-	python3 tools/inline_includes.py src/thvm.c > $@
+# src/thvm.c #includes the codegen/backend .c files (render_uop.c,
+# render_metal.c, etc.) directly, so a change to any of them must re-flatten
+# the amalgamation.  $(SRC) (find src) already lists them, but Make compares
+# mtimes at *second* granularity and only rebuilds on a strictly-newer
+# prereq -- an editor save + a fast `make` land in the same second and the
+# rebuild is SILENTLY skipped, shipping a stale dylib.
+#
+# Fix: the flatten/embed recipes are marked FORCE so they ALWAYS run (they
+# are ~1s), but each writes to a temp and only replaces (and advances the
+# mtime of) $@ on a real CONTENT change.  So a same-second source edit is
+# never missed, yet the expensive blob -> dylib relink only fires when the
+# flattened runtime source genuinely changed.  The explicit codegen/backend
+# wildcards document the include surface (and guard any $(SRC) find-ordering
+# quirk).
+.PHONY: FORCE
+FORCE:
 
-build/thvm_runtime_blob.c: build/thvm_inline.c tools/embed_blob.py
-	python3 tools/embed_blob.py build/thvm_inline.c thvm_runtime_src macho > $@
+build/thvm_inline.c: $(SRC) $(wildcard src/codegen/*.c src/backend/*/*.c src/backend/*/*/*.c) tools/inline_includes.py FORCE | $(BUILD)
+	@python3 tools/inline_includes.py src/thvm.c > $@.tmp
+	@if [ -f $@ ] && cmp -s $@.tmp $@; then rm -f $@.tmp; \
+	 else mv -f $@.tmp $@; echo "regenerated $@"; fi
+
+build/thvm_runtime_blob.c: build/thvm_inline.c tools/embed_blob.py FORCE
+	@python3 tools/embed_blob.py build/thvm_inline.c thvm_runtime_src macho > $@.tmp
+	@if [ -f $@ ] && cmp -s $@.tmp $@; then rm -f $@.tmp; \
+	 else mv -f $@.tmp $@; echo "regenerated $@"; fi
 
 # AOT-using test binaries link build/thvm_runtime_blob.c so the
 # extern thvm_runtime_src symbol resolves.
