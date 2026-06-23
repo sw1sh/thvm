@@ -402,10 +402,21 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
        lambda a globally-unique loc, so no collision.  The cross-capture buffer
        aliasing the per-context split was meant to prevent does NOT occur: each TJit
        capture retains its own buffers, so the three replays read/write disjoint
-       slots (verified -- the batch produces correct, distinct images).  Weights are
+       slots.  Weights are
        zero-copy disk-mmap wraps (~0 phys footprint on Apple unified memory), so all
        three models co-reside well under the 30GB ceiling.  Each stage crosses to
-       the next as a HOST array. *)
+       the next as a HOST array.
+
+       KNOWN BUG (pre-existing, C-level, not WL-fixable): only the FIRST prompt in a
+       session generates the correct image.  The COLD first prompt is right (a cold
+       "a blue bird" is a real bird), but every WARM prompt -- a later prompt in a
+       batch OR a second call on the cached session -- decodes the FIRST prompt's
+       content (a warm "a blue bird" after "a red apple on a table" comes out an
+       apple).  Each stage's JIT rebinds correctly in isolation (the qwen encodings
+       differ per prompt, a single velJit call rebinds enc, the vaeJit rebinds the
+       latent), so the collapse is the velocity per-step Euler loop's multi-input
+       replay interaction in src/jit/capture.c's input-replace.  See the failing
+       flux/warm-prompt-rebinds-text-encoding test in Tests/flux_jit_replay.wlt. *)
 
     (* --- load + RoPE + temb + capture velJit (in the shared context). --- *)
     ctxT = TContextNew[dev];

@@ -118,6 +118,8 @@ FluxGenerate["a cat", "NegativePrompt" -> "blurry"]
 ```
 <!-- => FluxGenerate::nocfg fires; an Image of a cat is returned -->
 
+- **Warm-prompt collapse (known bug).** Only the *first* prompt in a session currently generates the correct image. A cold first prompt is right, but a later prompt in a batch, a second call on the cached session, or any `n > 1` count decodes the *first* prompt's content (a warm `"a blue bird"` after `"a red apple on a table"` comes out an apple). This is a C-level JIT capture/replay issue in the velocity sampler (the per-step Euler loop's text-encoding rebind), tracked by the failing `flux/warm-prompt-rebinds-text-encoding` regression test; for now, generate each distinct prompt in a fresh session.
+
 - **Latent shape.** An `"InitialLatent"` array must be `{S_img, 128}` for the current `"ImageSize"` (`S_img = (`*w*`/16)(`*h*`/16)`); a mismatch issues `FluxGenerate::badlatent` and falls back to fresh noise.
 - **Weights.** The first call needs the FLUX.2-klein-4B weights (~16 GB across the Qwen, transformer, and VAE safetensors) under `"ModelDir"`; without them the session build fails.
 - **Reproducibility floor.** On a GPU the bf16 tensor-core reductions are not bit-reproducible across dispatches, so two identical seeded runs (and a latent round-trip) agree only to ~`1/64` per channel, not byte-for-byte.
