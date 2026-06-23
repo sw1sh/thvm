@@ -124,7 +124,9 @@ qwChatEncode[prompt_String, td_] := With[{sp = td["special"]},
         {sp["im_start"]}, qwEncodeText["user\n" <> prompt, td], {sp["im_end"]},
         qwEncodeText["\n", td], {sp["im_start"]}, qwEncodeText["assistant\n", td],
         {sp["think"]}, qwEncodeText["\n\n", td], {sp["think_end"]},
-        qwEncodeText["\n\n", td]]]
+        qwEncodeText["\n\n", td]
+    ]
+]
 
 (* tokenize a prompt to {ids, attMask}, right-padded / truncated to seqLen with
    the pad id (151643); attMask is 1 on real tokens, 0 on pad. *)

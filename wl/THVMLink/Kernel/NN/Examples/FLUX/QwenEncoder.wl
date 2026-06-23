@@ -50,9 +50,13 @@ qwBf16ToF32[u16_] := With[{shape = Dimensions[u16], flat = Flatten[u16]},
         Flatten @ ImportByteArray[
             ByteArray @ Flatten @ Transpose @ {
                 ConstantArray[0, Length[flat]], ConstantArray[0, Length[flat]],
-                Mod[flat, 256], Quotient[flat, 256]},
-            {"Binary", "Real32"}],
-        shape]]
+                Mod[flat, 256], Quotient[flat, 256]
+            },
+            {"Binary", "Real32"}
+        ],
+        shape
+    ]
+]
 
 (* Per-layer weight Association from a name -> TTerm loader wf (HF names).
    Weights stay bf16; fxLinear's bf16-direct matmul reads them as-is. *)
@@ -96,7 +100,8 @@ qwLayer[x_, cos_, sin_, addMask_, W_, cfg_] := Block[
     attnOut = fxLinear[bf16Act @ THeadAttention[q, TRepeatKV[k, rep], TRepeatKV[v, rep], scale, addMask], W["o_proj"]];
     hh = x + attnOut;
     hn = bf16Act @ TRMSNorm[hh, W["post_ln"], eps];
-    hh + fxLinear[bf16Act[TSiLU[fxLinear[hn, W["gate_proj"]]]*fxLinear[hn, W["up_proj"]]], W["down_proj"]]]
+    hh + fxLinear[bf16Act[TSiLU[fxLinear[hn, W["gate_proj"]]]*fxLinear[hn, W["up_proj"]]], W["down_proj"]]
+]
 
 (* DEVICE forward over the 27 decoder layers.  x {S,dim} embedded token rows;
    addMask {S,S} additive causal+padding mask; cos/sin {S,1,head_dim} the rotary
@@ -114,8 +119,10 @@ qwenForward[x0_, addMask_, cos_, sin_, wf_, cfg_] := Block[
     x = x0;  captured = <||>;
     Do[ x = TRealize @ qwLayer[x, cos, sin, addMask, qwLayerW[wf, i], lcfg];
         If[ MemberQ[caps, i], captured[i] = x],
-        {i, 0, nL - 1}];
-    TRealize @ Join[Sequence @@ (captured[#] & /@ caps), 2]]
+        {i, 0, nL - 1}
+    ];
+    TRealize @ Join[Sequence @@ (captured[#] & /@ caps), 2]
+]
 
 (* host-prep of the device inputs (cos/sin/mask/x) for qwenForward.  Returns
    <|"cos","sin","addMask","x"|> as device TTerms.  cos/sin depend only on S
@@ -132,7 +139,8 @@ qwenInputs[inputIds_List, attMask_List, wf_, cfg_] := Block[
     {cos, sin} = TRoPEHalfSplitTable[s, dh, theta];
     <|"cos" -> toDev[cos], "sin" -> toDev[sin],
       "addMask" -> toDev @ TPaddingCausalMask[attMask],
-      "x" -> toDev @ qwEmbed[wf["model.embed_tokens.weight"], inputIds]|>]
+      "x" -> toDev @ qwEmbed[wf["model.embed_tokens.weight"], inputIds]|>
+]
 
 (* Full encoder.  inputIds {S} host int list (0-indexed); attMask {S} host list
    (1 real / 0 pad); wf a name -> TTerm loader (HF names, both shards merged);
@@ -140,7 +148,8 @@ qwenInputs[inputIds_List, attMask_List, wf_, cfg_] := Block[
    {S, 3*hidden} per-token concat of the captured hidden states. *)
 qwenEncode[inputIds_List, attMask_List, wf_, cfg_] := With[
     {in = qwenInputs[inputIds, attMask, wf, cfg]},
-    qwenForward[in["x"], in["addMask"], in["cos"], in["sin"], wf, cfg]]
+    qwenForward[in["x"], in["addMask"], in["cos"], in["sin"], wf, cfg]
+]
 
 End[];
 
