@@ -36,7 +36,7 @@
 
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
-FluxGenerate::usage = "FluxGenerate[prompt$] generates an image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder), returning an Image.\nFluxGenerate[{prompt$1, prompt$2, $$}] generates one image per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (the second image is warm, not a second cold start).\nOptions: \"ImageSize\" (default {256, 256}), RandomSeeding (Automatic -> a fresh random image each call; give an integer for a reproducible seed), \"Device\" (\"metal\" | \"cpu\" | \"cuda\"), \"NumSteps\" (4), \"ModelDir\" (Automatic -> ~/.cache/thvm/flux2-klein-4b), \"ReturnImages\" (True; False returns raw {3, H, W} arrays).";
+FluxGenerate::usage = "FluxGenerate[prompt$] generates an Image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder).\nFluxGenerate[prompt$, n$] generates n$ images of the same prompt, each with a distinct fresh seed, reusing one model session (only the first is a cold start).\nFluxGenerate[{prompt$1, prompt$2, $$}] generates one image per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (every image after the first is warm).\nThe following options can be given:\n  \"ImageSize\" {256, 256}    output size; a scalar n$ means a square n$ x n$ image, a pair {w$, h$} a rectangle (rounded to the /16 patch grid).\n  \"Steps\" Automatic    number of Euler sampling steps; Automatic uses \"NumSteps\".\n  RandomSeeding Automatic    Automatic gives a fresh random image each call; an integer seed makes the result reproducible (same seed -> byte-identical image).\n  ProgressReporting Automatic    Automatic or True shows a live progress panel (a no-op with no front end); False runs silent.\n  \"Device\" \"metal\"    backend to run on (\"metal\" | \"cpu\" | \"cuda\").\n  \"NumSteps\" 4    legacy alias for \"Steps\".\n  \"ModelDir\" Automatic    weight directory (Automatic -> ~/.cache/thvm/flux2-klein-4b).\n  \"ReturnImages\" True    True returns Image objects; False returns raw {3, H, W} pixel arrays.";
 
 Begin["`Private`"];
 
@@ -257,8 +257,9 @@ fxTembFn[wf_, dev_][sigma_] := With[{
    ============================================================ *)
 
 Options[FluxGenerate] = {
-    "ImageSize" -> {256, 256}, RandomSeeding -> Automatic, "Device" -> "metal",
-    "NumSteps" -> 4, "ModelDir" -> Automatic, "ReturnImages" -> True};
+    "ImageSize" -> {256, 256}, "Steps" -> Automatic, RandomSeeding -> Automatic,
+    "Device" -> "metal", "NumSteps" -> 4, "ModelDir" -> Automatic,
+    "ReturnImages" -> True, ProgressReporting -> Automatic};
 
 (* module-level session cache: key -> <|ctx, wfq, qwCfg, td, stxt,
    wfT, ca, rc, rs, tembFn, velJit, sigmas, simg, fxCfg,
@@ -266,6 +267,12 @@ Options[FluxGenerate] = {
 $fxSession = <||>;
 
 FluxGenerate[prompt_String, opts : OptionsPattern[]] := First @ FluxGenerate[{prompt}, opts];
+
+(* n images of the SAME prompt: one entry per copy, so each gets a distinct fresh
+   seed (the per-image SeedRandom in STAGE 2), reusing the one session -- only the
+   first image pays the cold build, the rest replay warm. *)
+FluxGenerate[prompt_String, n_Integer?Positive, opts : OptionsPattern[]] :=
+    FluxGenerate[ConstantArray[prompt, n], opts];
 
 (* build (or fetch) the persistent session for these settings. *)
 fxSessionGet[dev_, imgSize_, nSteps_, modelDir_] := Module[
@@ -449,37 +456,83 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[
       "vaeCfg" -> vaeCfg, "qwJit" -> qwJit, "vaeJit" -> vaeJit|>]
 
 FluxGenerate[prompts_List, opts : OptionsPattern[]] := Module[
-    {imgSize, seed, dev, nSteps, modelDir, returnImages, sess, key,
-     encDev, latents, results},
+    {imgSize, seed, dev, nSteps, modelDir, returnImages, reportQ},
 
-    imgSize = OptionValue["ImageSize"];
+    (* a bare ImageSize -> n means a square n x n image (Set::shape if {n,n} is not
+       formed); a pair {w, h} passes through.  Keep this normalize FIRST so the
+       scalar reaches the session key + grid math as a pair. *)
+    imgSize = Replace[OptionValue["ImageSize"], n_?NumberQ :> {Round[n], Round[n]}];
     seed = OptionValue[RandomSeeding];  dev = OptionValue["Device"];
-    nSteps = OptionValue["NumSteps"];  returnImages = OptionValue["ReturnImages"];
+    (* "Steps" is the idiomatic step-count control; "NumSteps" is the legacy alias.
+       "Steps" wins when given an integer, else fall back to "NumSteps". *)
+    nSteps = Replace[OptionValue["Steps"], Except[_Integer] :> OptionValue["NumSteps"]];
+    returnImages = OptionValue["ReturnImages"];
     modelDir = OptionValue["ModelDir"] /. Automatic ->
         Environment["HOME"] <> "/.cache/thvm/flux2-klein-4b";
+    (* ProgressReporting -> True | Automatic shows the progress panel (Automatic and
+       True both report -- the panel itself is a near-no-op with no front end, e.g.
+       in wolframscript, so it never errors headless); False runs silent. *)
+    reportQ = OptionValue[ProgressReporting] =!= False;
 
-    key = {modelDir, dev, imgSize, nSteps};
+    fxWithProgress[reportQ,
+        fxGenerateBody[prompts, imgSize, seed, dev, nSteps, modelDir, returnImages]]]
+
+(* Run `body` under a live progress panel that re-reads the mutated `text` +
+   `progress` (RuleDelayed so each panel refresh sees the current values).  When
+   reporting is off, just evaluate the body (no panel).  fxReport (a Block-scoped
+   stage updater) is bound to mutate the two panel vars; fxGenerateBody calls it
+   to advance the stage text + fraction.  The session build is held indeterminate
+   (Progress -> Indeterminate) because its cold weight load can't be sub-divided
+   from here; the per-image stages drive a concrete 0.45 -> 1.0 fraction. *)
+SetAttributes[fxWithProgress, HoldRest];
+fxWithProgress[reportQ_, body_] := If[ TrueQ[reportQ],
+    Module[{progress = 0., text = "Loading FLUX.2-klein-4B..."},
+        Block[{fxReport = Function[{t, p}, text = t; progress = p]},
+            Progress`EvaluateWithProgress[body,
+                <|"Text" :> text, "Progress" :> progress, "RemainingTime" -> Automatic|>]]],
+    Block[{fxReport = (Null &)}, body]]
+
+(* default: fxReport is a no-op (so fxGenerateBody works even if called directly,
+   outside fxWithProgress -- e.g. a future internal caller). *)
+fxReport[_, _] := Null;
+
+(* fraction layout (after the cold build, which is held indeterminate):
+   encode 0.45 -> 0.55, sample 0.55 -> 0.90 (scoped per image, each image's N
+   Euler steps subdivide its slice), decode 0.90 -> 1.0 (scoped per image). *)
+fxGenerateBody[prompts_, imgSize_, seed_, dev_, nSteps_, modelDir_, returnImages_] := Module[
+    {sess, encDev, latents, results, n = Length[prompts]},
+
+    (* cold-build (or fetch) the session -- indeterminate while the weights load. *)
+    fxReport["Loading FLUX.2-klein-4B...", Indeterminate];
     sess = fxSessionGet[dev, imgSize, nSteps, modelDir];
 
-    Module[{ca = sess["ca"], stxt = sess["stxt"], simg = sess["simg"],
-            sigmas = sess["sigmas"], n = Length[prompts], t1, t2, t3},
+    Module[{ca = sess["ca"], simg = sess["simg"], sigmas = sess["sigmas"], t1, t2, t3},
         (* --- STAGE 1: Qwen text-encode the whole batch (in the Qwen context). --- *)
+        fxReport[If[ n > 1, "Encoding " <> ToString[n] <> " prompts...", "Encoding prompt..."], 0.45];
         {t1, encDev} = AbsoluteTiming @ TInContext[sess["ctxQ"],
             fxQwenEncodeBatch[sess, prompts]];                         (* {n,stxt,7680} device *)
 
         (* --- STAGE 2: transformer sample each prompt's latent (transformer
            context).  velJit is the persistent per-step capture; fxSampleJit keeps
            the running latent z ON DEVICE across the 4 Euler steps (device add, no
-           per-step host read of v / re-upload of z) -- one final host read. --- *)
+           per-step host read of v / re-upload of z) -- one final host read.  Each
+           image owns the [0.55, 0.90] slice scaled by its index; its per-step
+           callback advances inside that slice (fxStageFrac). --- *)
+        fxReport[fxImgText["Generating", 1, n] <> "...", 0.55];
         {t2, latents} = AbsoluteTiming @ TInContext[sess["ctxT"],
             MapIndexed[
                 Function[{encArr, idx},
-                    Module[{ee, z, i = First[idx], lat},
+                    Module[{ee, z, i = First[idx], lat,
+                            stepCb = (fxReport[
+                                fxImgText["Generating", i, n] <> " (step " <> ToString[#1] <>
+                                    " of " <> ToString[#2] <> ")...",
+                                fxStageFrac[0.55, 0.90, i, n, #1, #2]] &)},
                         ee = ca @ encArr;   (* {stxt,7680} device, straight from STAGE 1 *)
                         If[ seed === Automatic, SeedRandom[], SeedRandom[seed + i]];
                         z = ca @ TTensorCreate @ NumericArray[
                             RandomVariate[NormalDistribution[], {simg, 128}], "Real32"];
-                        lat = Normal @ fxSampleJit[sess["velJit"], z, ee, sigmas, sess["tembFn"], ca];
+                        lat = Normal @ fxSampleJit[
+                            sess["velJit"], z, ee, sigmas, sess["tembFn"], ca, stepCb];
                         fxDbg["  enc[", i, "] mean=", Round[Mean[Flatten[Normal[encArr]]], 0.0001],
                             "  lat mean=", Round[Mean[Flatten[lat]], 0.0001]];
                         lat]],
@@ -491,16 +544,29 @@ FluxGenerate[prompts_List, opts : OptionsPattern[]] := Module[
            applies the eager-pretuned conv winners; the velocity/Qwen captures above
            ran BEAM-off.  Replays here don't re-autotune, so wrapping every gen is a
            cheap no-op after the first. --- *)
+        fxReport[fxImgText["Decoding", 1, n] <> "...", 0.90];
         {t3, results} = AbsoluteTiming @ TInContext[sess["ctxV"],
-            With[{decodeAll = Map[
-                Function[lat,
-                    Module[{img = fxVaeDecodeCached[sess, lat]},
+            With[{decodeAll = MapIndexed[
+                Function[{lat, idx},
+                    Module[{i = First[idx], img},
+                        fxReport[fxImgText["Decoding", i, n] <> "...",
+                            fxStageFrac[0.90, 1.0, i, n, 1, 1]];
+                        img = fxVaeDecodeCached[sess, lat];
                         If[ returnImages, fxToImage[img], Normal[img]]]],
                 latents] &},
                 If[ Environment["THVM_VAE_PRETUNE"] =!= $Failed,
                     fxBeamScope @ decodeAll[], decodeAll[]]]];
         fxTiming[t3];
+        fxReport["Done.", 1.0];
         results]]
+
+(* "Generating image 3 of 5" for a batch, plain "Generating image" for a single. *)
+fxImgText[verb_, i_, n_] := If[ n > 1,
+    verb <> " image " <> ToString[i] <> " of " <> ToString[n], verb <> " image"];
+
+(* fraction within [lo, hi] for image i of n at sub-step k of nk: each image owns
+   an equal 1/n slice of [lo, hi], and its sub-steps subdivide that slice. *)
+fxStageFrac[lo_, hi_, i_, n_, k_, nk_] := lo + (hi - lo) * ((i - 1) + k/nk)/n;
 
 (* per-stage timing print, gated by THVM_FLUX_TIMING (off by default).  Accepts
    either bare numbers ({t1, t2}) or label/number pairs ("tf-load", t, ...). *)
@@ -603,17 +669,20 @@ fxSampleJitFull[rc_, rs_, wf_, cfg_, tembs_, dts_, dev_] :=
    each step (ca: bf16 on GPU) so the next replay's matmuls stay on the tensor
    cores / batched ICB.  temb is M=1 ({1,3072}); its modulation matmuls pad to a
    concrete M=8 (fxModLinear) so the symbolic-M kvar never declines the Metal ICB.
-   This is the feasible faithful sampler pending the B1 whole-loop capture above. *)
-fxSampleJit[vfn_, z0_, enc0_, sigmas_, tembFn_, ca_] := Module[
-    {z = TRealize @ TUOpCast[z0, "f32"], k, dt, v, ts},
+   This is the feasible faithful sampler pending the B1 whole-loop capture above.
+   `stepCb` (optional, default no-op) is called as stepCb[k, nSteps] after each of
+   the nSteps Euler updates -- the progress hook for FluxGenerate's panel. *)
+fxSampleJit[vfn_, z0_, enc0_, sigmas_, tembFn_, ca_, stepCb_ : (Null &)] := Module[
+    {z = TRealize @ TUOpCast[z0, "f32"], nSteps = Length[sigmas] - 1, k, dt, v, ts},
     Do[ dt = sigmas[[k + 1]] - sigmas[[k]];
         (* velocity from the bf16-input replay (ca: bf16 on GPU / f32 on CPU); the
            Euler accumulates in the f32 z accumulator -- exactly the host path's
            f32 step with a bf16 net input, but z never leaves the device. *)
         {ts, v} = AbsoluteTiming[vfn[ca @ z, enc0, tembFn[sigmas[[k]]]]];
         fxDbg["    vel step ", k, " = ", Round[ts, 0.001], " s"];
-        z = TRealize @ TUOpAdd[z, TUOpMul[TUOpCast[v, "f32"], TUOpConst[N[dt]]]],
-        {k, 1, Length[sigmas] - 1}];
+        z = TRealize @ TUOpAdd[z, TUOpMul[TUOpCast[v, "f32"], TUOpConst[N[dt]]]];
+        stepCb[k, nSteps],
+        {k, 1, nSteps}];
     z]
 
 (* {3,H,W} pixels in [0,1] -> an Image (clip for any tiny fp overshoot). *)
