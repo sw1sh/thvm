@@ -17134,6 +17134,19 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         // overlap as TWO MGUs aged far apart -- so the surviving content must
         // defer.  A lone combo=0 shared-leaf overlap (no twin equation) keeps its
         // head slot.
+        //
+        // The twin must be the SAME equation WM derives as the second MGU --
+        // either the DROPPED tautology (E7's own overlap reduces to `x=x`) or a
+        // copy alpha-equal to this CP's surviving content (a genuine repeated-
+        // variable double MGU, f=59/f=61: both faces reduce to the same
+        // `x.(y.x) = x.(y.(x.x))`).  A twin that survives to DIFFERENT,
+        // alpha-distinct content is NOT a shared-MGU partner: the two overlaps
+        // are genuinely independent CPs WM emits in their natural arrival order
+        // (Meredith rule-48 f=39: j=18 `...(x.x) = ...` and j=25 `...(y.x) = ...`
+        // both survive, distinct -- WM picks j=25's ch=0 leaf before j=18's ch=1,
+        // its raw co-rank order).  Deferring a survivor whose twin is itself a
+        // survivor would re-key BOTH into the band and REVERSE their raw order.
+        // Gate on the twin being a tautology OR alpha-equal to kd's content.
         u8 has_twin = 0u;
         for (u32 ks = 0; ks < n_big && !has_twin; ks++) {
           if (ks == kd) continue;
@@ -17144,7 +17157,12 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           if (big[ks].combo != 0u) continue;
           if (big[ks].cp.pos_len != 2u ||
               big[ks].cp.pos[0] != 1u || big[ks].cp.pos[1] != 1u) continue;
-          has_twin = 1u;
+          Term tsl = atp_rewrite_normalize_indexed(s, big[ks].cp.lhs, 4096u);
+          Term tsr = atp_rewrite_normalize_indexed(s, big[ks].cp.rhs, 4096u);
+          if (kbo_eq(tsl, tsr)                                 // dropped tautology
+              || atp_pair_alpha_eq(tsl, tsr, ndl, ndr)) {     // same MGU content
+            has_twin = 1u;
+          }
         }
         if (!has_twin) continue;
         // Re-age to just before the band's LAST same-weight CP (WM ages E6's
