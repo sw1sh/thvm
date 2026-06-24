@@ -585,16 +585,21 @@ fxWeightBaseBuild[dev_, modelDir_, q8_] := Module[{
    footprint on Apple unified memory), so all three models co-reside well under
    the 30GB ceiling.  Each stage crosses to the next as a HOST array.
 
-   KNOWN BUG (pre-existing, C-level, not WL-fixable): only the FIRST prompt in a
-   session generates the correct image.  The COLD first prompt is right (a cold
-   "a blue bird" is a real bird), but every WARM prompt -- a later prompt in a
-   batch OR a second call on the cached session -- decodes the FIRST prompt's
-   content (a warm "a blue bird" after "a red apple on a table" comes out an
-   apple).  Each stage's JIT rebinds correctly in isolation (the qwen encodings
-   differ per prompt, a single velJit call rebinds enc, the vaeJit rebinds the
-   latent), so the collapse is the velocity per-step Euler loop's multi-input
-   replay interaction in src/jit/capture.c's input-replace.  See the failing
-   flux/warm-prompt-rebinds-text-encoding test in Tests/flux_jit_replay.wlt. *)
+   WARM-PROMPT-COLLAPSE (FIXED): previously only the FIRST prompt in a session
+   decoded correctly -- every WARM prompt (a later prompt in a batch OR a second
+   call on the cached session) came out as the FIRST prompt's image (a warm "a
+   blue bird" after "a red apple" decoded an apple).  The cause was NOT the
+   velocity: it produces distinct latents per prompt (verified -- distinct
+   per-prompt latent means and a 0.99 image divergence once decoded eagerly).  It
+   was the VAE decode's TJit REPLAY baking its latent input -- the warm replay
+   re-decoded the FIRST prompt's latent for every image.  Fixed by decoding the
+   VAE EAGERLY (vaeJit below is a bare Function, not TJit-captured), so each
+   prompt's distinct latent is read on a fresh materialise; velocity + Qwen stay
+   TJit'd (fast).  Cost: the VAE re-materialises per decode (no captured replay);
+   the faster fix is a proper VAE latent-rebind in src/jit/capture.c (the conv
+   im2col appears to stage the latent past the rebind site).  The
+   flux/warm-prompt-rebinds-text-encoding test in Tests/flux_jit_replay.wlt now
+   passes. *)
     ctxT = TContextNew[dev];
     (* --- load transformer weights + temb closure (in the shared context).  The
        cast helper caL is built here and reused by every size-specific session. --- *)
@@ -763,10 +768,13 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
                     TRealize @ vaeDecoder[warmLat, base["wfV"], base["wsubV"], vaeCfg]
                 ]
             ];
-            TJit[
-                Function[lat,
-                    TRealize @ vaeDecoder[lat, base["wfV"], base["wsubV"], vaeCfg]
-                ]
+(* EAGER decode (a bare Function, NOT TJit): the VAE TJit replay baked its latent
+   input, collapsing every warm prompt's image to the first prompt's (see the
+   WARM-PROMPT-COLLAPSE note in the context block above).  A bare Function
+   re-materialises the conv decode per call, so each prompt's distinct latent is
+   read; velocity + Qwen keep their TJit speed. *)
+            Function[lat,
+                TRealize @ vaeDecoder[lat, base["wfV"], base["wsubV"], vaeCfg]
             ]
         ]
     ];
