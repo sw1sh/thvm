@@ -52,6 +52,13 @@ fxLinear[x_, w_TTerm] := TRealize[TMatMul[TRealize[x], Transpose[w]]]
        outer TRealize or the shared joint-attention chain re-lifts. --- *)
 fxLinearFused[x_, w_TTerm] := TMatMul[TRealize[x], Transpose[w]]
 
+(* q8: a quantised projection arrives as its int8 Association, not a bare TTerm.
+   The int8 matmul must be a realised STORE(REDUCE) for the tensor-core recogniser
+   (see fxLinear), so a fully-fused form is impossible; reuse the q8 fxLinear,
+   which realises the matmul and leaves the dequant multiply to fuse into the
+   consumer (the same single-consumer benefit fxLinearFused gives the bf16 path). *)
+fxLinearFused[x_, q_Association] := fxLinear[x, q]
+
 (* --- q8 weight-only quantization.  A diffusers linear weight {out, in} is
        stored int8 with a per-output-channel (per-row) fp scale:
          scale[o] = max_i |w[o,i]| / 127        (1-D {out})
