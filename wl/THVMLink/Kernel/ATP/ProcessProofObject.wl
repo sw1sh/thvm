@@ -979,7 +979,7 @@ Options[TVampireProofObject] = {
     "Mode"          -> "casc",
     "Binary"        -> Automatic,
     "ParseFormulas" -> False,
-    "LiftToProofObject" -> False
+    "LiftToProofObject" -> True
 }
 
 (* E-prover wrapper: chain TEproverProof + the generic SZS-to-
@@ -990,7 +990,7 @@ Options[TEproverProofObject] = {
     TimeConstraint  -> 30,
     "Binary"        -> Automatic,
     "ParseFormulas" -> False,
-    "LiftToProofObject" -> False
+    "LiftToProofObject" -> True
 }
 
 TEproverProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[
@@ -1061,7 +1061,7 @@ Options[TWaldmeisterProofObject] = {
        because the Proof entries lack the rewrite metadata
        (Orientation, Rule, Side, Position) the verifier needs;
        extracting those from the SZS DAG is unsupported. *)
-    "LiftToProofObject" -> False
+    "LiftToProofObject" -> True
 }
 
 (* Two-arg (Theory, thm) form: resolve to a banked .pr file under
