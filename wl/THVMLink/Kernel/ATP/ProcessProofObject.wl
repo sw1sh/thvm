@@ -1050,6 +1050,7 @@ TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
    otherwise GENERATES the .pr at runtime via wmGenerateProblemFor. *)
 Options[TWaldmeisterProofObject] = {
     TimeConstraint  -> 30,
+    "WMCLI"         -> Automatic,
     "Binary"        -> Automatic,
     "MathlinkPath"  -> Automatic,
     "ParseFormulas" -> False,
@@ -1092,7 +1093,7 @@ TWaldmeisterProofObject[problemFile_String, opts : OptionsPattern[]] /;
     Block[
         {wmR = TWaldmeisterProof[problemFile,
                 FilterRules[{opts},
-                    {TimeConstraint, "Binary", "MathlinkPath"}]],
+                    {TimeConstraint, "WMCLI", "Binary", "MathlinkPath"}]],
             liftQ = TrueQ @ OptionValue["LiftToProofObject"],
             parseOpt, assoc},
         (* LiftToProofObject implies ParseFormulas: the lift needs

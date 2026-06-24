@@ -3910,13 +3910,22 @@ TFindProof[theory_String, returnSpec_String,
     atpTheoryCompletion[theory, returnSpec, opts];
 TFindProof[thm_String, theory_String,
         opts:OptionsPattern[]] /; ! atpReturnSpecQ[theory] := Catch[
-    Block[{cjRaw, methodOpt = OptionValue[TFindProof, {opts}, Method]},
+    Block[{cjRaw, methodOpt = OptionValue[TFindProof, {opts}, Method],
+            methodName, methodSubs},
+        (* A list Method -> {"WaldmeisterProcess", "WMCLI" -> path, ...}
+           carries the external-tool name as the head and its per-tool
+           suboptions (the binary path, TimeConstraint, ...) as the rest;
+           a bare-string Method has no suboptions.  The suboptions ride
+           alongside the call options (and, listed first, take
+           precedence over a same-named top-level option). *)
+        methodName = If[ ListQ[methodOpt], First[methodOpt], methodOpt];
+        methodSubs = If[ ListQ[methodOpt], Rest[methodOpt], {}];
         (* Method -> "VampireProcess" / "TweeProcess" / etc. route
            through the external CLI wrappers and return a thvm-shaped
            ProofObject, so the same downstream consumers (proof
            comparator, ProofFunction verifier, dataset accessors) see
            the same shape across internal preset vs external CLI. *)
-        If[ methodOpt === "VampireProcess",
+        If[ methodName === "VampireProcess",
             (* Fully-qualified path: ATP.wl loads before
                ProcessProofObject.wl in the alphabetical autoloader
                order, so the symbol is unresolved when this RHS is
@@ -3926,25 +3935,25 @@ TFindProof[thm_String, theory_String,
                includes the CLI wrapper's options PLUS the
                builder-only ParseFormulas. *)
             Throw[WolframInstitute`THVMLink`ATP`TVampireProofObject[theory, thm,
-                FilterRules[{opts},
+                FilterRules[Join[methodSubs, {opts}],
                     Options[WolframInstitute`THVMLink`ATP`TVampireProofObject]]],
                 "TATPError"]
         ];
-        If[ methodOpt === "TweeProcess",
+        If[ methodName === "TweeProcess",
             Throw[WolframInstitute`THVMLink`ATP`TTweeProofObject[theory, thm,
-                FilterRules[{opts},
+                FilterRules[Join[methodSubs, {opts}],
                     Options[WolframInstitute`THVMLink`ATP`TTweeProofObject]]],
                 "TATPError"]
         ];
-        If[ methodOpt === "WaldmeisterProcess",
+        If[ methodName === "WaldmeisterProcess",
             Throw[WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
-                FilterRules[{opts},
+                FilterRules[Join[methodSubs, {opts}],
                     Options[WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject]]],
                 "TATPError"]
         ];
-        If[ methodOpt === "EproverProcess",
+        If[ methodName === "EproverProcess",
             Throw[WolframInstitute`THVMLink`ATP`TEproverProofObject[theory, thm,
-                FilterRules[{opts},
+                FilterRules[Join[methodSubs, {opts}],
                     Options[WolframInstitute`THVMLink`ATP`TEproverProofObject]]],
                 "TATPError"]
         ];

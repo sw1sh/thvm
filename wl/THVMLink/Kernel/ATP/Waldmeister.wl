@@ -34,6 +34,7 @@ Begin["`Private`"]
 
 Options[TWaldmeisterProof] = {
     TimeConstraint -> 30,
+    "WMCLI" -> Automatic,
     "Binary" -> Automatic,
     "MathlinkPath" -> Automatic
 }
@@ -153,7 +154,10 @@ TWaldmeisterProof[problemFile_String, opts : OptionsPattern[]] /;
     Block[{
         bin, fwk, cmd, out, secs, status, derivation
     },
-        bin = wmBinary[OptionValue["Binary"]];
+        (* "WMCLI" suboption wins; else "Binary"; else Automatic ->
+           $WMCLI env / PATH / dev-location auto-detect in wmBinary. *)
+        bin = wmBinary[
+            Replace[OptionValue["WMCLI"], Automatic :> OptionValue["Binary"]]];
         If[ MissingQ[bin],
             Message[TWaldmeisterProof::nowm];
             Return[$Failed]
