@@ -16063,52 +16063,75 @@ static u8 atp_pair_is_posgroup_cube(Term l, Term r) {
   return 0u;
 }
 
-// Weight-109 "band" CP variant detector for the soa rule-36 firstdiv-1953
-// batch (see use_band_interleave).  The band CP is `(x.X).(y.x) = x` where the
-// inner factor X distinguishes three variants WM emits round-robin:
-//   A: X = (x.y)  -> term `(x.(x.y)).(y.x) = x`
-//   B: X = (y.x)  -> term `(x.(y.x)).(y.x) = x`
-//   C: X = (y.y)  -> term `(x.(y.y)).(y.x) = x`
-// One side of the normalized CP must be a bare variable (the `= x`); the other
-// is `f(f(x, X), f(y, x))` with f the dot operator.  Returns 1/2/3 for A/B/C,
-// 0 when the pair is not a band CP.  Orientation-insensitive (the bare-var side
-// may be either l or r); variable identities are matched structurally so the
-// detector is renaming-stable.
-static u8 atp_pair_band_variant(Term l, Term r) {
-  Term big, var;
-  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
-  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
-  else return 0u;
-  // big = f(f(x, X), f(y, x)) with x = the bare-var side.
-  if (term_ctr_n(big) != 2u) return 0u;
-  u32 op = term_ext(big);
-  Term lo = term_ctr_at(big, 0), hi = term_ctr_at(big, 1);
-  if (term_tag(lo) != TAG_CTR || term_ext(lo) != op || term_ctr_n(lo) != 2u)
-    return 0u;
-  if (term_tag(hi) != TAG_CTR || term_ext(hi) != op || term_ctr_n(hi) != 2u)
-    return 0u;
-  Term lo0 = term_ctr_at(lo, 0), X = term_ctr_at(lo, 1);
-  Term hi0 = term_ctr_at(hi, 0), hi1 = term_ctr_at(hi, 1);
-  u32 x = term_ext(var);
-  if (term_tag(lo0) != TAG_FVR || term_ext(lo0) != x) return 0u;   // f(x, X)
-  if (term_tag(hi1) != TAG_FVR || term_ext(hi1) != x) return 0u;   // f(y, x)
-  if (term_tag(hi0) != TAG_FVR) return 0u;
-  u32 y = term_ext(hi0);
-  if (y == x) return 0u;
-  // X is one of (x.y), (y.x), (y.y).
+// Classify a 2-variable leaf factor X = f(a, b) as a band variant relative to
+// the bare variable x (the other variable y is the one that is not x):
+//   1 = (x.y)   2 = (y.x)   3 = (y.y)
+// 0 when X is not a clean 2-var factor over {x, y} (e.g. (x.x), or a non-leaf).
+static u8 atp_band_variant_of(Term X, u32 op, u32 x) {
   if (term_tag(X) != TAG_CTR || term_ext(X) != op || term_ctr_n(X) != 2u)
     return 0u;
   Term x0 = term_ctr_at(X, 0), x1 = term_ctr_at(X, 1);
   if (term_tag(x0) != TAG_FVR || term_tag(x1) != TAG_FVR) return 0u;
   u32 a = term_ext(x0), b = term_ext(x1);
-  if (a == x && b == y) return 1u;   // (x.y) = A
-  if (a == y && b == x) return 2u;   // (y.x) = B
-  if (a == y && b == y) return 3u;   // (y.y) = C
+  if (a == x && b != x) return 1u;            // (x.y)
+  if (a != x && b == x) return 2u;            // (y.x)
+  if (a != x && b != x && a == b) return 3u;  // (y.y)
   return 0u;
 }
 
+// Weight-109 "band" CP variant detector for the soa rule-batch L.1/L.2 overlap
+// positions (see use_band_interleave).  GENERAL over the band's outer shape: a
+// band CP normalizes to `f(P, Q) = x` (equal to a bare variable x) where one of
+// the two children is the VARIANT-bearing factor `f(x, X)` -- X = f(a, b) the
+// 2-var leaf whose structure round-robins across the batch -- and the OTHER
+// child is a CONSTANT 2-var leaf factor (the band's fixed "tail").  WM's single
+// superposition scan reaches the variant-producing equations round-robin and
+// emits the variants interleaved (x.y),(y.x),(y.y),(x.y),...; the cursor-walk at
+// the overlap query position revisits the variant-distinguishing leaf across
+// positions (Unifikation1.c RumpfTermMitDSBaumUnifizieren + the Delta*/jump
+// continuations).  ONE rule covers every clean interleaving family:
+//   `(x.X).(y.x) = x`        variant at [0,1], tail (y.x)  (vater 36/46, L.1)
+//   `(x.X).(x.x) = x`        variant at [0,1], tail (x.x)  (vater 37,    L.1)
+//   `(x.x).(x.X) = x`        variant at [1,1], tail (x.x)  (vater 38,    L.2)
+// The variant-bearing child is whichever of P, Q is f(x, 2-var-leaf); the sibling
+// must itself be a constant 2-var leaf factor (so non-band shapes -- a bare
+// child, a deeper tower, or a second varying factor -- are rejected).  Returns
+// 1/2/3 for the variant class, 0 otherwise.  Orientation-insensitive (the bare-
+// var side is either l or r); variable identities matched structurally so the
+// detector is renaming-stable.  vc_side selects WHICH child of big bears the
+// variant: 0 = variant at [0,1] (left child's right, the L.1 families), 1 =
+// variant at [1,1] (right child's right, the L.2 family).  Fixing the side per
+// overlap position is essential -- the AMBIGUOUS double-mixed-leaf shapes (e.g.
+// `(x.y).(x.(x.y))`, where BOTH children are varying mixed factors) must NOT be
+// pulled into the wrong position's interleave pool, so the variant child is
+// pinned to the position's structural path.  The L.2.2 cursor-walk GROUPS the
+// same shapes (handled separately), so the deeper positions never call this.
+static u8 atp_pair_band_variant_side(Term l, Term r, u32 vc_side) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big), x = term_ext(var);
+  // Variant-bearing child f(x, X) with X a 2-var leaf, at the position's side.
+  Term vc = term_ctr_at(big, vc_side), sib = term_ctr_at(big, 1u - vc_side);
+  if (term_tag(vc) != TAG_CTR || term_ext(vc) != op || term_ctr_n(vc) != 2u)
+    return 0u;
+  Term vc0 = term_ctr_at(vc, 0), X = term_ctr_at(vc, 1);
+  if (term_tag(vc0) != TAG_FVR || term_ext(vc0) != x) return 0u;   // (x . X)
+  u8 v = atp_band_variant_of(X, op, x);
+  if (v == 0u) return 0u;
+  // Sibling must be a constant 2-var leaf factor (both children variables).
+  if (term_tag(sib) != TAG_CTR || term_ext(sib) != op || term_ctr_n(sib) != 2u)
+    return 0u;
+  Term s0 = term_ctr_at(sib, 0), s1 = term_ctr_at(sib, 1);
+  if (term_tag(s0) != TAG_FVR || term_tag(s1) != TAG_FVR) return 0u;
+  return v;
+}
+
 // Weight-109 "band" CP variant detector for the soa rule-36 L.2.2 batch (one
-// overlap position DEEPER than the L.1 band atp_pair_band_variant handles).
+// overlap position DEEPER than the L.1/L.2 bands atp_pair_band_variant_side
+// handles).
 // The L.2.2 band CP is `((U.c).(d.e)) = g` (a depth-3 left tower dotted with a
 // two-var factor, equal to a bare variable), with three variants WM emits
 // GROUPED (NOT interleaved -- the OPPOSITE arrival relationship to L.1):
@@ -16611,39 +16634,58 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       }
     }
     // Band-interleave re-key (default OFF; see use_band_interleave).  The soa
-    // firstdiv-1953 divergence: rule-36's tops batch forms eight weight-109
-    // band CPs `(x.X).(y.x) = x` (variants A: X=(x.y), B: X=(y.x), C: X=(y.y))
-    // from reverse-face equation overlaps at L.1.  WM's single superposition
-    // scan reaches the three variant-producing equations round-robin and emits
-    // A,B,C,A,B,C,A,B; thvm sorts by the partner equation's discrimination-tree
-    // arrival (k3), grouping the variants C,C,B,B,B,A,A,A.  Re-key the band CPs
-    // onto a (round, variant) interleave -- round = count of EARLIER same-
-    // variant band CPs in this batch's current key order, variant rank A<B<C --
-    // so they sort A,B,C,A,B,C,...  The band CPs keep their original key SLOTS
-    // (the multiset of keys is permuted only among themselves), so non-band CPs
-    // and the surrounding batch order are untouched.  Scoped HARD to CPs whose
-    // NORMALIZED pair is one of the three band variants (atp_pair_band_variant);
-    // a batch with none is a no-op.  OFF byte-identical.
+    // firstdiv-1953 divergence: a rule's tops batch forms weight-109 band CPs at
+    // an interleaving overlap position (`f(P, Q) = x`, one child the variant-
+    // bearing `f(x, X)` with X in {(x.y), (y.x), (y.y)}, the other a constant
+    // 2-var tail).  WM's single superposition scan reaches the variant-producing
+    // equations round-robin and emits the variants interleaved
+    // (x.y),(y.x),(y.y),(x.y),...; thvm sorts by the partner equation's
+    // discrimination-tree arrival (k3), grouping the variants.  Re-key the band
+    // CPs onto a (round, variant) interleave -- round = count of EARLIER same-
+    // variant band CPs in this batch's current key order, variant rank
+    // (x.y)<(y.x)<(y.y) -- so they sort (x.y),(y.x),(y.y),(x.y),...  The band
+    // CPs keep their original key SLOTS (the multiset of keys is permuted only
+    // among themselves), so non-band CPs and the surrounding batch order are
+    // untouched.  GENERAL over the band's outer shape (atp_pair_band_variant_side
+    // is tail-agnostic, pinning only the position's variant-child path), so ONE
+    // rule clears every clean interleaving band family at its position:
+    // `(x.X).(y.x)` (vater 36/46, L.1, firstdiv 1953->1967), the idempotent-tail
+    // `(x.X).(x.x)` (vater 37, L.1), and the L.2 `(x.x).(x.X)` (vater 38) --
+    // advancing firstdiv past 1985.  Scoped HARD
+    // to the L.1 (pos[0]==0) and L.2 (pos[0]==1) overlap positions, run
+    // independently per position: those cursor-walks interleave, whereas the
+    // L.2.2 position GROUPS the same shapes (handled separately below) -- so the
+    // re-key must not reach the deeper positions.  OFF byte-identical.
     if (s->use_band_interleave) {
-      // Index the band CPs (entry index + variant), capped at a small fixed
-      // window -- the rule-36 band is eight CPs; a generous cap covers any
-      // multiplicity without unbounded scratch.
+      // Interleave each interleaving overlap position INDEPENDENTLY: the L.1
+      // (pos[0]==0) and L.2 (pos[0]==1) bands are distinct cursor-walk families
+      // with disjoint key ranges, so each position's variants round-robin among
+      // themselves.  A single shared pool would conflate the two batches' round
+      // counters; iterate the positions separately.
       enum { BAND_CAP = 64u };
-      u32 band_idx[BAND_CAP];
-      u8  band_var[BAND_CAP];
-      u64 band_key[BAND_CAP];
-      u32 n_band = 0;
-      for (u32 k = 0; k < n_big && n_band < BAND_CAP; k++) {
-        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
-        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
-        u8 var = atp_pair_band_variant(nl, nr);
-        if (var == 0u) continue;
-        band_idx[n_band] = k;
-        band_var[n_band] = var;
-        band_key[n_band] = big[k].key;
-        n_band++;
-      }
-      if (n_band >= 2u) {
+      for (u32 ovp = 0u; ovp <= 1u; ovp++) {
+        // Index this position's band CPs (entry index + variant), capped at a
+        // small fixed window -- the band families run to ~11 CPs; a generous cap
+        // covers any multiplicity without unbounded scratch.
+        u32 band_idx[BAND_CAP];
+        u8  band_var[BAND_CAP];
+        u64 band_key[BAND_CAP];
+        u32 n_band = 0;
+        for (u32 k = 0; k < n_big && n_band < BAND_CAP; k++) {
+          // Length-1 pos path [ovp]: L.1 (ovp==0) and L.2 (ovp==1).  The
+          // variant-bearing child side matches the position: L.1 -> [0,1],
+          // L.2 -> [1,1] (the minimal clean-family path set).
+          if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != ovp) continue;
+          Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+          Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+          u8 var = atp_pair_band_variant_side(nl, nr, ovp);
+          if (var == 0u) continue;
+          band_idx[n_band] = k;
+          band_var[n_band] = var;
+          band_key[n_band] = big[k].key;
+          n_band++;
+        }
+        if (n_band < 2u) continue;
         // Sort the band entries by current key (ascending), so "round" = the
         // count of same-variant band CPs that currently precede each one.
         for (u32 a = 0; a + 1u < n_band; a++) {
@@ -16656,8 +16698,8 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           }
         }
         // Compute each band CP's (round, variant) rank, then re-assign the
-        // sorted key slots in that order.  variant rank: A(1)->0, B(2)->1,
-        // C(3)->2.  round = number of earlier same-variant band CPs.
+        // sorted key slots in that order.  variant rank: (x.y)(1)->0,
+        // (y.x)(2)->1, (y.y)(3)->2.  round = number of earlier same-variant CPs.
         u32 round[BAND_CAP];
         u32 seen[4] = {0, 0, 0, 0};
         for (u32 a = 0; a < n_band; a++) {
