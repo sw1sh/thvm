@@ -655,6 +655,7 @@ $kernelBenchVariantsFn    := $kernelBenchVariantsFn    = load["thvm_wl_kernel_be
 $lamShapeSetFn   := $lamShapeSetFn   = load["thvm_wl_lam_shape_set",   {Integer, {Integer, 1}},     Integer];
 $lamShapeCountFn := $lamShapeCountFn = load["thvm_wl_lam_shape_count", {},                           Integer];
 $termShapeInFn   := $termShapeInFn   = load["thvm_wl_term_shape_in",   {Integer},                    {Integer, 1}];
+$termDtypeInFn   := $termDtypeInFn   = load["thvm_wl_term_dtype_in",   {Integer},                    Integer];
 $kernelInfoFn  := $kernelInfoFn  = load["thvm_wl_kernel_info",     {Integer},                        {Integer, 1}];
 $tensCountFn   := $tensCountFn   = load["thvm_wl_tens_count",      {},                               Integer];
 $totalBufBytesFn := $totalBufBytesFn = load["thvm_wl_total_buf_bytes", {},                            Integer];

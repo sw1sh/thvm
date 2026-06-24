@@ -10,6 +10,8 @@ GeneralUtilities`SetUsage[TConv2DIm2Col, "TConv2DIm2Col[input$, weights$, bias$]
 GeneralUtilities`SetUsage[TConv2DIm2ColBatched, "TConv2DIm2ColBatched[input$, weights$, bias$] is the rank-4 batched im2col lowering for input$ of shape {B, C, H, W}. It builds xCol : {C*kh*kw, B*H_out*W_out}, runs one matmul, then reshapes back to {B, C_out, H_out, W_out}."];
 GeneralUtilities`SetUsage[TConv2DKhKw, "TConv2DKhKw[input$, weights$, bias$] is the kh*kw partial-sum convolution lowering, the explicit reference body for TConv2D."];
 
+GeneralUtilities`SetUsage[TConv2DIm2ColPool, "TConv2DIm2ColPool[input$, weights$, bias$] is the strided-view _pool im2col lowering of a stride-1, no-padding rank-3 {C_in, H, W} convolution: the im2col operand stays a movement-only VIEW (RESHAPE/EXPAND/SHRINK/PERMUTE), broadcast against the weight and reduced over the (C_in, kh, kw) axes in one fused multiply-reduce -- no materialised im2col matrix. Same signature/output as TConv2D; TConv2D's default rank-3 lowering."];
+GeneralUtilities`SetUsage[TConv2DIm2ColBatchedPool, "TConv2DIm2ColBatchedPool[input$, weights$, bias$] is the rank-4 batched {B, C_in, H, W} analogue of TConv2DIm2ColPool: the _pool unfold stays a movement-only VIEW broadcast against the weight and reduced over (C_in, kh, kw) in one fused multiply-reduce, permuted back to {B, C_out, H_out, W_out}. TConv2D's default rank-4 lowering."];
 GeneralUtilities`SetUsage[TConv2DIm2ColPoolGemm, "TConv2DIm2ColPoolGemm[input$, weights$, bias$] is the GEMM lowering of the strided-view _pool unfold: it realizes the im2col view as a contiguous {C_in*kh*kw, H_out*W_out} matrix and the weight as {C_out, C_in*kh*kw}, then out = w_flat @ xCol via TMatMul so the matmul takes the tensor-core GEMM path (the fused conv reduce is rejected by the TC recogniser). Same signature/output as TConv2D; byte-faithful to TConv2DKhKw. ~2x the fused reduce on the FLUX.2 VAE convs."];
 GeneralUtilities`SetUsage[TMaxPool2d, "TMaxPool2d[x$] and TMaxPool2d[x$, k$] run a non-overlapping k$ x k$ max-pool over the trailing two axes of a rank-3 {C, H, W} or rank-4 batched {B, C, H, W} channels-first tensor. Default k$ = 2."];
 GeneralUtilities`SetUsage[TUpsample2x, "TUpsample2x[x$] is the nearest-neighbour 2x upsample of a {C, H, W} tensor to {C, 2H, 2W} via repeat-interleave (each pixel expanded to a 2x2 block). The VAE / U-Net decoder upsampler."];
@@ -116,6 +118,12 @@ TConv2DKhKw[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
    (`input` is pushed onto a contiguous buffer boundary first -- see the
    body -- so the strided-view chain composes correctly even when `input`
    is itself a movement / compute DAG.) *)
+(* The conv reduce's f32 accumulation is sum_acc_dtype, applied generically
+   by tSumAxes (Tensor.wl, the `.sum()` rule -- tinygrad mixin/reduce.py:43 +
+   dtype.py:274): a bf16/f16 (x*w) is upcast to f32 for the cIn*kh*kw running
+   sum then cast back, so the conv body is the plain idiomatic (x*w).sum and
+   carries no conv-specific dtype hand-casts. *)
+
 (* Shared rank-3 _pool unfold: x {cIn,H,W} -> strided VIEW {cIn,kh,kw,hOut,wOut}
    (movement ops only; see the construction note above).  Both the expand-mul-
    reduce body (TConv2DIm2ColPool) and the GEMM body (TConv2DIm2ColPoolGemm)
@@ -135,7 +143,21 @@ TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     input, inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut,
     xCol6, xB, wB, outShaped, biasBcast
 },
-    input = inputArg;
+    (* Push `input` onto a contiguous buffer boundary BEFORE the _pool
+       unfold.  The unfold's first op RESHAPE[input,{cIn,1,h,1,wd}] (and the
+       EXPAND/SHRINK windowing after it) assumes a contiguous row-major input
+       layout: a RESHAPE that splits/merges axes is only a pure VIEW over
+       contiguous memory.  When `input` is itself a deep movement/compute DAG
+       (a chained conv -> GroupNorm -> SiLU -> conv, or the unpatchify PERMUTE),
+       composing the unfold reshapes onto that non-contiguous view mis-indexes
+       the strided gather and the fused reduce over-fuses into one mis-compiled
+       kernel (NaN/Inf on CPU, washed-out garbage on Metal -- the FLUX.2 VAE
+       decoded to flat gray).  Realizing `input` (the small {cIn,H,W} activation,
+       NOT the big im2col view, which stays a view feeding the fused reduce)
+       gives the unfold a contiguous leaf -- the boundary the GEMM lowering got
+       for free by realizing xCol.  Matches TConv2DKhKw / TConv2DIm2ColPoolGemm
+       to f32 tolerance on the full VAE chain. *)
+    input = TRealize[inputArg];
     inShape = tUopShape[input];
     wShape  = tUopShape[weights];
     {cIn, h, wd}      = inShape;
@@ -150,12 +172,11 @@ TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
                     {cOut, cIn, kh, kw, hOut, wOut}];
     wB = TUOpExpand[TUOpReshape[weights, {cOut, cIn, kh, kw, 1, 1}],
                     {cOut, cIn, kh, kw, hOut, wOut}];
-    (* SUM kw (axis 3), kh (axis 2), cIn (axis 1) -- high axis first so the
-       remaining axis ids stay valid -> {cOut, hOut, wOut}. *)
-    outShaped = Fold[TUOpReduce[#1, #2, "SUM"] &, TUOpMul[xB, wB], {3, 2, 1}];
-    biasBcast = TUOpExpand[
-        TUOpReshape[bias, {cOut, 1, 1}],
-        {cOut, hOut, wOut}];
+    (* (x*w).sum over (cIn,kh,kw) -> {cOut, hOut, wOut}.  tSumAxes carries the
+       sum_acc_dtype f32 accumulation (cast up, reduce, cast back) for a
+       bf16/f16 conv, matching tinygrad's (x*weight).sum (mixin/__init__.py:1432). *)
+    outShaped = tSumAxes[TUOpMul[xB, wB], {1, 2, 3}, tUopDType[weights]];
+    biasBcast = TUOpExpand[TUOpReshape[bias, {cOut, 1, 1}], {cOut, hOut, wOut}];
     outShaped + biasBcast
 ]
 
@@ -202,7 +223,8 @@ TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     input, inShape, wShape, batch, cIn, cOut, h, wd, kh, kw, hOut, wOut,
     rh, rw, x1, x2, x3, x4, xCol6, xB, wB, out4, outShaped, biasBcast
 },
-    input = inputArg;
+    (* Contiguous-input boundary before the unfold -- see TConv2DIm2ColPool. *)
+    input = TRealize[inputArg];
     inShape = tUopShape[input];
     wShape  = tUopShape[weights];
     {batch, cIn, h, wd} = inShape;
@@ -228,8 +250,9 @@ TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
                     {cOut, cIn, kh, kw, batch, hOut, wOut}];
     wB = TUOpExpand[TUOpReshape[weights, {cOut, cIn, kh, kw, 1, 1, 1}],
                     {cOut, cIn, kh, kw, batch, hOut, wOut}];
-    (* SUM kw (3), kh (2), cIn (1) -- high axis first -> {cOut,B,hOut,wOut}. *)
-    out4      = Fold[TUOpReduce[#1, #2, "SUM"] &, TUOpMul[xB, wB], {3, 2, 1}];
+    (* (x*w).sum over (cIn,kh,kw) with sum_acc_dtype f32 accumulation ->
+       {cOut,B,hOut,wOut} (see TConv2DIm2ColPool). *)
+    out4      = tSumAxes[TUOpMul[xB, wB], {1, 2, 3}, tUopDType[weights]];
     outShaped = TUOpPermute[out4, {1, 0, 2, 3}];           (* {B,cOut,hOut,wOut} *)
     biasBcast = TUOpExpand[
         TUOpReshape[bias, {1, cOut, 1, 1}],

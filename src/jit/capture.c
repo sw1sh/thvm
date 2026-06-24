@@ -1642,16 +1642,33 @@ static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
     }
 
     u32 slot_idx = n_slots;
-    u64 best_size = UINT64_MAX;
     for (u32 s = 0; s < n_slots; s++) {
-      if (slots[s].backend != backend || slots[s].nbytes < nbytes
+      // EXACT-size reuse only.  A larger dead slot reused for a smaller output
+      // leaves stale bytes in the slot tail [nbytes, slots[s].nbytes): the new
+      // kernel writes only its own `nbytes`, so the [nbytes, slot) tail keeps
+      // the previous occupant's data.  thvm's eager-then-replay model never
+      // re-zeros a directly-reused slot (unlike metal_buf_freelist_try_pop,
+      // which memsets on pop AND already matches size EXACTLY -- _.m:688), so a
+      // consumer that reads past the new output's numel sees that stale tail.
+      // The FLUX.2 VAE fused conv (TConv2DIm2ColPool, Conv.wl) reads its
+      // operands through strided _pool-unfold + broadcast EXPAND views whose
+      // max-reachable byte index runs into the tail; on warm replay a 512KB
+      // f32 slot reused for a 128KB bf16 output exposed 384KB of stale f32
+      // bytes reinterpreted as bf16 -> inf/NaN -> the all-NaN decoded image.
+      // The GEMM lowering is immune only because it realizes a fully-written
+      // contiguous im2col.  Exact-size reuse keeps the velocity-net's
+      // same-shape block-activation collapse (the actual footprint lever)
+      // while never handing a view a slot longer than its own logical numel --
+      // matching tinygrad's planner, which slices each buffer into the shared
+      // arena as a SLICE of its own exact `buf.arg` extent (schedule/memory.py
+      // build_replace_map, :57-59), never handing a buffer a region wider than
+      // its logical numel.
+      if (slots[s].backend != backend || slots[s].nbytes != nbytes
           || slots[s].last_use >= i) {
         continue;
       }
-      if (slots[s].nbytes < best_size) {
-        slot_idx = s;
-        best_size = slots[s].nbytes;
-      }
+      slot_idx = s;
+      break;
     }
     if (slot_idx == n_slots) {
       slots[n_slots].backend  = backend;

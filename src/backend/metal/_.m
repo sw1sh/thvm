@@ -1127,6 +1127,20 @@ int thvm_metal_buf_is_borrowed(u32 buf_id) {
   return METAL_BUFS[buf_id].borrowed ? 1 : 0;
 }
 
+// Pack {borrowed, jit_pinned, owns_data, preserved, refcount} into one u32 for
+// the warm-replay NaN bisect (classify a bad leaf buffer: borrowed weight vs
+// recycled owned transient).
+u32 thvm_metal_buf_meta(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return 0;
+  MetalBuf const *b = &METAL_BUFS[buf_id];
+  u32 rc = b->refcount > 255 ? 255 : b->refcount;
+  return (u32)(b->borrowed ? 1 : 0)
+       | ((u32)(b->jit_pinned ? 1 : 0) << 1)
+       | ((u32)(b->owns_data ? 1 : 0) << 2)
+       | ((u32)(b->preserved ? 1 : 0) << 3)
+       | (rc << 8);
+}
+
 // Explicitly drop a borrowed disk-mmap wrap.  The per-realize pool rollback
 // + thvm_metal_buf_free_unpreserved_all SKIP borrowed slots (they hold no
 // device-owned bytes and a heap TAG_TEN may still reference the slot across

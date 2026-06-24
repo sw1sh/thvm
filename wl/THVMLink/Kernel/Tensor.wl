@@ -266,6 +266,35 @@ TUOpReduce[src_, axis_Integer, kind_String] := (
     TTerm[$uopReduceFn[reduceKindCode[kind], axis, ttermRaw[src]]]
 )
 
+(* sum_acc_dtype (tinygrad dtype.py:274 + mixin/reduce.py:43): a SUM
+   accumulates in least_upper_dtype(dt, float32), i.e. a bf16/f16 input
+   is upcast to f32 for the running sum -- otherwise a long reduce
+   (cIn*kh*kw up to 512*9 on the FLUX VAE) rounds to death in 8-bit
+   mantissa -- then cast back to the input dtype (mixin/reduce.py:44, the
+   half/fp8 result-dtype clause).  f32 / integer inputs are unchanged, so
+   an all-f32 reduce (GPT-2 / MNIST default) gets no extra CAST UOP.
+
+   This is `.sum()`'s acc-dtype rule, applied ONCE around a (possibly
+   multi-axis) SUM -- never per single-axis fold step (that would thrash
+   the dtype between every axis).  tSumAxes is the faithful `.sum(axes)`. *)
+sumAccDType[dt_String] := If[ MemberQ[{"bf16", "f16"}, dt], "f32", dt]
+
+tSumAxes[t_TTerm, axes : {___Integer}] := tSumAxes[t, axes, tUopDType[t]]
+(* sum_acc_dtype: accumulate a bf16/f16 SUM in f32 then cast back (tinygrad
+   mixin/reduce.py:43, dtype.py:274).  `dt` is the dtype to upcast-from +
+   cast-back-to.  The 2-arg form queries `t`, which resolves for a leaf but
+   returns a NON-string for a lazy compute term whose dtype the WL-build-time
+   query can't resolve (a captured JIT graph -- e.g. the conv product xB*wB) --
+   pass an explicit RESOLVABLE leaf dtype (the conv weight) in that case.  An
+   unresolvable `dt` accumulates in f32 and returns f32 (no bogus cast). *)
+tSumAxes[t_TTerm, axes : {___Integer}, dt_] := Module[{acc, body},
+    acc  = If[ StringQ[dt], sumAccDType[dt], "f32"];
+    body = If[ acc === dt, t, TUOpCast[t, acc]];
+    (* reduce high axis first so the lower axis ids stay valid *)
+    body = Fold[TUOpReduce[#1, #2, "SUM"] &, body, Reverse @ Sort @ axes];
+    If[ StringQ[dt] && acc =!= dt, TUOpCast[body, dt], body]
+]
+
 (* === Symbolic-shape (kvar) surface ===
    Build a forward over a runtime-variable dimension so a single materialized
    graph runs at any length without re-lift (tinygrad symbolic shapes).  The
@@ -829,10 +858,10 @@ TTerm /: Log[t_TTerm ? tensorTermQ] :=
    reductions. *)
 TTerm /: Total[t_TTerm ? tensorTermQ]                  := TUOpReduce[t, 0, "SUM"]
 TTerm /: Total[t_TTerm ? tensorTermQ, axis_Integer]    := TUOpReduce[t, axis - 1, "SUM"]
-TTerm /: Total[t_TTerm ? tensorTermQ, All]             := Fold[
-    TUOpReduce[#1, 0, "SUM"] &, t,
-    Range[Length[tUopShape[t]]]    (* one reduce per axis, all from axis 0 *)
-]
+(* Total[t, All] sums every axis to a scalar -- a `.sum()` over all axes,
+   so it carries the sum_acc_dtype f32 accumulation (tSumAxes). *)
+TTerm /: Total[t_TTerm ? tensorTermQ, All]             :=
+    tSumAxes[t, Range[0, Length[tUopShape[t]] - 1]]
 
 TTerm /: Less[a_TTerm ? tensorTermQ, b_] :=
     TUOpCmplt[a,

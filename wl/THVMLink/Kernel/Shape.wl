@@ -99,6 +99,14 @@ tUopShape[t_TTerm] := With[{raw = ttermRaw[t]},
 ]
 tUopShape[_] := $Failed
 
+(* tUopDType[t]: the dtype NAME ("f32" / "bf16" / ...) the runtime infers
+   for a TTerm -- a realized TEN's stored dtype, or an unrealized UOP's
+   inferred dtype (term_dtype_in walks the graph without materializing).
+   term_dtype_in always succeeds (defaulting to f32), so this returns a
+   usable dtype for any tensor-valued term. *)
+tUopDType[t_TTerm] := dtypeName[$termDtypeInFn[ttermRaw[t]]]
+tUopDType[_] := "f32"
+
 End[];
 
 EndPackage[];

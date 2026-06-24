@@ -260,14 +260,16 @@ fxQwenLoader[qwt_, dev_] := Module[{cache = <||>},
 ]
 
 (* VAE weights uploaded to the device.  On a GPU keep them bf16 (their stored
-   safetensors dtype): vaeConv routes through the im2col GEMM (TConv2DIm2ColPoolGemm),
-   so each conv is a bf16(act) x bf16(W) tensor-core matmul accumulating in f32 --
-   half the weight + activation bytes feeding the TC GEMM.  The latent feeding the
-   first conv is uploaded bf16 too so the conv is bf16 x bf16, not the slow MIXED
-   f32 x bf16.  The CPU path stays f32 (its C JIT promotes bf16 to f32 but needs
-   host-boundary widening; f32 weights are already matched).  vaeDecoder asks for
-   the latent-denorm stats as `bn_running_mean`/`bn_running_var`; the safetensors
-   store them dotted (`bn.running_mean`/`bn.running_var`), so alias. *)
+   safetensors dtype): vaeConv routes through the fused strided-view conv
+   (TConv2DIm2ColPool), so each conv is a bf16(act) x bf16(W) multiply with an
+   f32-accumulated reduce (sum_acc_dtype / tSumAxes) -- half the weight + activation bytes,
+   and the im2col stays a VIEW (no materialised spatial gather, so the footprint
+   is flat in resolution).  The latent feeding the first conv is uploaded bf16 too
+   so the conv is bf16 x bf16, not the slow MIXED f32 x bf16.  The CPU path stays
+   f32 (its C JIT promotes bf16 to f32 but needs host-boundary widening; f32
+   weights are already matched).  vaeDecoder asks for the latent-denorm stats as
+   `bn_running_mean`/`bn_running_var`; the safetensors store them dotted
+   (`bn.running_mean`/`bn.running_var`), so alias. *)
 
 fxVaeKey[n_] := Switch[ n,
     "bn_running_mean",
@@ -968,17 +970,21 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
        the latent-token count Simg=(w/16)(h/16).  Without this guard a too-large
        ImageSize climbs to the ceiling mid-capture and aborts -- slow, and heavy
        host memory pressure.  Fail fast with a clear message; raise
-       THVM_MAX_LIVE_BYTES (and have the host RAM) to lift the cap.  5.68e9 is the
-       measured cold-256 RetainedBytes (TMetalBufSummary[]["RetainedBytes"]). *)
+       THVM_MAX_LIVE_BYTES (and have the host RAM) to lift the cap.  3.64e9 is the
+       measured cold-256 RetainedBytes (TMetalBufSummary[]["RetainedBytes"], no
+       FWD_RECLAIM); the fused-view VAE conv (TConv2DIm2ColPool) keeps the im2col
+       a strided VIEW instead of materialising the spatial gather, so the per-256
+       retained footprint dropped from the old 5.68e9 GEMM value -- which lets
+       larger ImageSizes through this gate. *)
     With[{
         simg0   = Times @@ Round[imgSize/16],
         ceiling = With[{e = Environment["THVM_MAX_LIVE_BYTES"]},
                        If[ StringQ[e] && e =!= "", ToExpression[e], 0.6 $SystemMemory]]
       },
-        With[{est = 5.68*^9 (simg0/256.0)},
+        With[{est = 3.64*^9 (simg0/256.0)},
             If[ est > 0.9 ceiling,
                 Message[FluxGenerate::imgtoobig, imgSize, Round[est/1.*^9],
-                    Round[ceiling/1.*^9], 16 Floor[Sqrt[0.9 ceiling 256.0/(5.68*^9)]],
+                    Round[ceiling/1.*^9], 16 Floor[Sqrt[0.9 ceiling 256.0/(3.64*^9)]],
                     Round[$SystemMemory/1.*^9]];
                 Return[ConstantArray[$Failed, n], Module]
             ]

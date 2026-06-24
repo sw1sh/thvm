@@ -2613,6 +2613,22 @@ EXTERN_C DLLEXPORT int thvm_wl_term_shape_in(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// Run term_dtype_in on an arbitrary Term and return its dtype code as
+// an Int.  term_dtype_in always succeeds (defaults to DT_FP32), so the
+// caller gets a usable dtype for any shapeable term -- including an
+// unrealized UOP whose dtype the runtime infers without materializing.
+EXTERN_C DLLEXPORT int thvm_wl_term_dtype_in(WolframLibraryData libData,
+                                             mint argc,
+                                             MArgument *args,
+                                             MArgument res) {
+  (void)libData; (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  u32 dt = DT_FP32;
+  term_dtype_in(t, 0, &dt);
+  MArgument_setInteger(res, (mint)dt);
+  return LIBRARY_NO_ERROR;
+}
+
 // === memory introspection (used by lenet-mnist/memory-probe.wls) ===
 EXTERN_C DLLEXPORT int thvm_wl_tens_count(WolframLibraryData libData, mint argc,
                                           MArgument *args, MArgument res) {
