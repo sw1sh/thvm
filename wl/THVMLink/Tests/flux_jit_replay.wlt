@@ -158,16 +158,18 @@ VerificationTest[
     TestID -> "flux/jit-replay-rebinds-changed-text-encoding-single-shot"
 ]
 
-(* REGRESSION (KNOWN-FAILING, weights-gated) for the FLUX.2-klein warm-prompt-
-   collapse.  A warm FluxGenerate -- a second prompt on a cached session, OR any
-   prompt after the first in a batch -- decodes the FIRST prompt's image content:
-   "a blue bird" generated after "a red apple on a table" (same session) comes out
-   an APPLE.  Each stage's JIT rebinds correctly in isolation (verified: the qwen
-   encodings differ, a single velJit call rebinds enc, the vaeJit rebinds the
-   latent), so the collapse is the per-step Euler loop's multi-input replay
-   interaction in the velocity capture -- a C-level capture/input-replace issue
-   (src/jit/capture.c), NOT WL-fixable.  Left failing per "write a normal failing
-   test" so whoever fixes capture.c has a check.  Skipped without the weights. *)
+(* REGRESSION (weights-gated) for the FLUX.2-klein warm-prompt-collapse.  A warm
+   FluxGenerate -- a second prompt on a cached session, OR any prompt after the
+   first in a batch -- once decoded the FIRST prompt's image content: "a blue
+   bird" after "a red apple on a table" (same session) came out an APPLE.  Root
+   cause was the JIT replay's GATHER handling in src/jit/capture.c: a conv im2col
+   that unfolds a freshly-realized activation records a replayable JIT_OP_GATHER,
+   and (a) its replay was gated to f32/int32 so the bf16 Metal path skipped it,
+   and (b) the replay memory planner didn't count the gather's src/dst as
+   buffer uses, so it recycled the source slot before the gather fired.  Both
+   bake the capture-step bytes on every warm replay.  Fixed by gating the gather
+   replay on itemsize and teaching jit_capture_op_reads_buf/writes_buf about
+   JIT_OP_GATHER.  Skipped without the weights. *)
 VerificationTest[
     TInit[]; TReset[];
     Needs["WolframInstitute`THVMLink`Examples`"];
@@ -175,10 +177,12 @@ VerificationTest[
         If[ ! FileExistsQ @ FileNameJoin[{md, "transformer",
                 "diffusion_pytorch_model.safetensors"}], Return[True]];   (* skip: no weights *)
         (* COLD captures the velocity on the apple prompt; the WARM bird replay must
-           NOT collapse to the apple -- a clearly different image (different prompt). *)
-        apple = FluxGenerate["a red apple on a table",
+           NOT collapse to the apple -- a clearly different image (different prompt).
+           Fully-qualify FluxGenerate: the bare symbol parses into Global` (the .wlt's
+           read context) BEFORE the in-body Needs runs, so it would stay unevaluated. *)
+        apple = WolframInstitute`THVMLink`Examples`FluxGenerate["a red apple on a table",
             "ImageSize" -> {128, 128}, RandomSeeding -> 0, ProgressReporting -> False];
-        bird = FluxGenerate["a blue bird",
+        bird = WolframInstitute`THVMLink`Examples`FluxGenerate["a blue bird",
             "ImageSize" -> {128, 128}, RandomSeeding -> 0, ProgressReporting -> False];
         (* a real apple vs a real bird differ across most of the frame; the collapse
            makes them near-identical (only seed-noise apart, max|d| ~ the bf16 floor). *)

@@ -1398,6 +1398,13 @@ static int jit_capture_op_reads_buf(JitCaptureOp const *op,
         return td->backend == backend && td->buf_id == buf_id;
       }
       return 0;
+    case JIT_OP_GATHER:
+      // A replayable gather re-reads gather_src_buf each step.  The replay
+      // memory planner MUST see this read or it recycles the source slot
+      // before the gather fires (the FLUX VAE conv_shortcut over a TRealize'd
+      // up-block output: src buffer reused, gather reads corrupt bytes).
+      return (Backend *)op->gather_backend == backend
+          && op->gather_src_buf == buf_id;
   }
   return 0;
 }
@@ -1417,6 +1424,13 @@ static int jit_capture_op_writes_buf(JitCaptureOp const *op,
         return td->backend == backend && td->buf_id == buf_id;
       }
       return 0;
+    case JIT_OP_GATHER:
+      // The gather writes its contiguous dst buffer on every replay; the
+      // planner must treat that as a write so it neither recycles the dst's
+      // slot out from under a downstream reader nor reuses the dst for an
+      // earlier buffer whose lifetime overlaps the gather.
+      return (Backend *)op->gather_backend == backend
+          && op->gather_dst_buf == buf_id;
   }
   return 0;
 }
@@ -1431,16 +1445,25 @@ static void jit_capture_replace_future_dispatch_inputs(JitCapture *c,
   }
   for (u32 i = start + 1; i < c->n_ops; i++) {
     JitCaptureOp *op = &c->ops[i];
-    if (op->replay_skip || op->kind != JIT_OP_DISPATCH) {
+    if (op->replay_skip) {
       continue;
     }
-    u32 *ids = op->heap_in_buf_ids != NULL
-             ? op->heap_in_buf_ids
-             : op->in_buf_ids;
-    for (u32 j = 0; j < op->n_inputs; j++) {
-      if (jit_dispatch_input_backend(op, j) == backend
-          && ids[j] == old_buf_id) {
-        ids[j] = new_buf_id;
+    if (op->kind == JIT_OP_DISPATCH) {
+      u32 *ids = op->heap_in_buf_ids != NULL
+               ? op->heap_in_buf_ids
+               : op->in_buf_ids;
+      for (u32 j = 0; j < op->n_inputs; j++) {
+        if (jit_dispatch_input_backend(op, j) == backend
+            && ids[j] == old_buf_id) {
+          ids[j] = new_buf_id;
+        }
+      }
+    } else if (op->kind == JIT_OP_GATHER) {
+      // A gather re-reads old_buf_id as its source: redirect it to the
+      // recycled slot too, or the gather replays off the freed buffer.
+      if ((Backend *)op->gather_backend == backend
+          && op->gather_src_buf == old_buf_id) {
+        op->gather_src_buf = new_buf_id;
       }
     }
   }
@@ -2374,7 +2397,11 @@ static void jit_capture_build_input_sites(JitCapture *c) {
     for (u32 k = 0; k < c->n_inputs_decl; k++) {
       u32 sc = 0;
       for (u32 s = 0; s < c->n_sites; s++) if (c->sites[s].slot_index == k) sc++;
-      fprintf(stderr, "  decl[%u] buf=%u -> %u site(s)\n", k, c->input_buf_ids[k], sc);
+      fprintf(stderr, "  decl[%u] buf=%u -> %u site(s):", k, c->input_buf_ids[k], sc);
+      for (u32 s = 0; s < c->n_sites; s++)
+        if (c->sites[s].slot_index == k)
+          fprintf(stderr, " op%u/pos%d", c->sites[s].op_index, (int)c->sites[s].pos);
+      fprintf(stderr, "\n");
     }
   }
 }
@@ -2626,9 +2653,16 @@ fn u32 jit_replay(u32 slot) {
         // cache was just re-appended) into the contiguous dst buffer.
         Backend *b = (Backend *)op->gather_backend;
         if (b == NULL || b->buf_read == NULL || b->buf_write == NULL) break;
-        if (op->gather_dtype != DT_FP32 && op->gather_dtype != DT_INT32) break;
+        // The gather is a pure strided byte permutation (dst[k] = src[strided(k)]),
+        // so it is valid for ANY dtype whose itemsize the copy switch handles
+        // (1/2/4/8 bytes) -- it never interprets the values.  Gate on itemsize,
+        // NOT a dtype allow-list: a bf16/f16 (2-byte) source -- every Metal VAE
+        // conv im2col, whose weights+activations are bf16 -- would otherwise hit
+        // the old DT_FP32/DT_INT32-only guard, skip the replay, and leave the
+        // contiguous dst holding the CAPTURE-step bytes (the VAE up-block
+        // conv_shortcut baked its first prompt's input on every warm replay).
         u32 esz = dtype_itemsize(op->gather_dtype);
-        if (esz == 0) break;
+        if (esz != 1 && esz != 2 && esz != 4 && esz != 8) break;
         // Rebuild a TenDesc shell from the stored view + chain so the
         // shared strided-index walker maps each dst element to its source
         // offset (handles broadcast strides and ShapeTracker chains).
@@ -2664,6 +2698,8 @@ fn u32 jit_replay(u32 slot) {
           default: free(raw); free(dst); raw = NULL; dst = NULL; break;
         }
         if (dst != NULL) b->buf_write(op->gather_dst_buf, dst, dst_bytes);
+        if (trace) fprintf(stderr, "[replay] op%u GATHER src=%u dst=%u numel=%u dt=%u\n",
+                           i, op->gather_src_buf, op->gather_dst_buf, numel, op->gather_dtype);
         free(raw);
         free(dst);
         ITRS++;
