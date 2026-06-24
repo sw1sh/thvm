@@ -268,7 +268,7 @@ assembleGoalsDataset[axioms_, conjPairs_, chains_, ruleList_] := Block[{
         {g, Length[conjPairs]}
     ];
     allEntries = Join[axiomEntries, hypEntries, chainEntries];
-    SortBy[allEntries, $ProofKeyOrder[First[#]] &]
+    pruneUnusedAxioms @ SortBy[allEntries, $ProofKeyOrder[First[#]] &]
 ]
 
 (* Single-goal surface kept for the existing call sites. *)
@@ -281,6 +281,48 @@ $ProofKeyOrder[{"CriticalPairLemma", k_}] := {3, k}
 $ProofKeyOrder[{"SubstitutionLemma", k_}] := {4, k}
 $ProofKeyOrder[{"Conclusion", k_}] := {5, k}
 $ProofKeyOrder[_] := {6, 0}
+
+(* FindEquationalProof parity: FEP's ProofDataset lists only the axioms
+   its proof actually cites (as an Input / Construct / MatchingConstruct
+   of some later entry), not the whole input axiom set -- a 1-axiom
+   commutativity rewrite over a 6-axiom Boolean theory is a 3-row proof
+   (one Axiom, the Hypothesis, the Conclusion), not an 8-row one.
+
+   Drop every {"Axiom", k} row no other entry's Proof references, then
+   renumber the survivors 1..m in their original order and rewrite every
+   citation through that map.  The proof body is structurally unchanged:
+   it only ever cited the kept axioms, and the renumber is a bijection on
+   the keys it cites, so the verifier replays identically.  Hypothesis /
+   CriticalPairLemma / SubstitutionLemma / Conclusion keys are untouched
+   (only Axiom indices move).  Applied as the final step of both the
+   axiom-cited EXT dataset and the completion-trace CPL dataset. *)
+pruneUnusedAxioms[entries_List] := Block[{
+    cited, axKeys, keptAx, axRule
+},
+    (* Axiom indices any entry's Proof cites (Input / Construct /
+       MatchingConstruct); the {0, Infinity} scan also catches a
+       citation nested in a list field, should one ever appear. *)
+    cited = DeleteDuplicates @ Cases[
+        Lookup[#, "Proof", <||>] & /@ Values[Association[entries]],
+        {"Axiom", k_} :> k, {0, Infinity}];
+    axKeys = Cases[Keys[entries], {"Axiom", k_} :> k];
+    keptAx = Select[axKeys, MemberQ[cited, #] &];
+    (* No axiom dropped -> identity (keeps the common path byte-identical). *)
+    If[ Length[keptAx] === Length[axKeys], Return[entries]];
+    (* Concrete `{"Axiom", old} -> {"Axiom", new}` rewrite rules, one per
+       kept axiom -- built with the renumber substituted in so the
+       ReplaceAll below carries no unresolved lookup (a held axRemap[k]
+       on a delayed rhs would leak). *)
+    axRule = MapIndexed[
+        {"Axiom", #1} -> {"Axiom", First[#2]} &, keptAx];
+    (Function[rule,
+        With[{key = First[rule] /. axRule, val = Last[rule]},
+            If[ MatchQ[First[rule], {"Axiom", _}] &&
+                    ! MemberQ[keptAx, First[rule][[2]]],
+                Nothing,
+                key -> (val /. axRule)]]
+    ] /@ entries) // DeleteCases[Nothing]
+]
 
 (* === C-engine proof decoder ======================================= *)
 
@@ -1005,7 +1047,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         inProgress, aliveRulesAt, slN, cpN, axiomKeyFor, rewriteOnce,
         prepareRules, runBfs, reverseBfsPath, emitNorm, resolveCp,
         resolveTrace, resolveRule, axiomEntries, canonInfo, canonKeyOf,
-        cjp, nGoals, cjps, splitTrivial, chainEntries, allEntries,
+        cjp, nGoals, cjps, chainEntries, allEntries,
         stmt, l2n, i2n, dterm, tL, tR,
         (* restore the caller's held originals during this build's decoding *)
         $atpSymObj = Lookup[enc["State"], "symObj", <||>],
@@ -1781,48 +1823,6 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         nGoals = Length[enc["ConjPairs"]];
         cjps = If[ nGoals > 1, cjp, {cjp}];
 
-        (* WM-CLI parity: if a goal chain's Conclusion Statement is a
-           trivial `lhs == lhs` (i.e. the last rewrite landed on an
-           identity), WM emits TWO entries -- the normalize step as a
-           SubstitutionLemma, then a trivial Conclusion -- where thvm
-           would emit ONE Conclusion with Source -> "cpl".  Split to
-           match the CLI sequence (parity_wm_wmcli +1 trajectory gap on
-           every AbelianGroup/Group/Boolean case). *)
-        splitTrivial[goalEntries_, g_] := If[
-            Length[goalEntries] > 0 &&
-            goalEntries[[-1, 1, 1]] === $ConclusionSym &&
-            Extract[goalEntries[[-1, 2, "Statement"]], {1, 1}, HoldForm] === Extract[goalEntries[[-1, 2, "Statement"]], {1, 2}, HoldForm],
-            Module[{lastEntry = goalEntries[[-1]], lastProof, lastStmt,
-                    lhsHF, newSlKey, newSubLem, newConclusion},
-                lastStmt = lastEntry[[2, "Statement"]];
-                lastProof = lastEntry[[2, "Proof"]];
-                lhsHF = Extract[lastStmt, {1, 1}, HoldForm];
-                slN += 1;
-                newSlKey = {$SubstitutionLemmaSym, slN};
-                newSubLem = newSlKey -> <|
-                    "Statement" -> lastStmt,
-                    "Proof" -> Append[lastProof, "Source" -> "norm"]
-                |>;
-                newConclusion = {$ConclusionSym, g} -> <|
-                    "Statement" -> lastStmt,
-                    "Proof" -> <|
-                        "Input" -> newSlKey,
-                        "Construct" -> newSlKey,
-                        "Position" -> {},
-                        "Rule" -> ReleaseHold[Hold[Rule][lhsHF, lhsHF]],
-                        "Orientation" -> 1,
-                        "ConstructSide" -> 1,
-                        "InputOrientation" -> 1,
-                        "Side" -> 1,
-                        "OutputExpression" -> lastStmt,
-                        "Source" -> "trivial"
-                    |>
-                |>;
-                Join[Most[goalEntries], {newSubLem, newConclusion}]
-            ],
-            goalEntries
-        ];
-
         (* the goal chains: conjunct g's MainSteps slice rewrites one
            side of that conjunct's running equation, citing its
            (resolved) rule, and closes into {Conclusion, g}.  A
@@ -1846,8 +1846,14 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                             Inactive[Equal] @@ runEq, g]},
                         atpDbgFail["buildCplDataset.empty-goal-chain"];
                         Throw[$Failed]],
-                    splitTrivial[
-                        Table[
+                    (* FindEquationalProof parity: the final goal-chain
+                       rewrite IS the Conclusion, carrying its real
+                       Construct / Rule / Orientation / Side -- even when
+                       it lands on a trivial `lhs == lhs` (the closing
+                       rewrite to the meet).  FEP does NOT split that into
+                       a normalize SubstitutionLemma plus a degenerate
+                       `lhs -> lhs` Conclusion, so neither do we. *)
+                    Table[
                             Block[{step = gSteps[[s]], cInfo, cKey, mr,
                                    dir, ori, ruleEq, newEq, st, isLast,
                                    key, inKey},
@@ -1907,8 +1913,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                 |>
                             ],
                             {s, Length[gSteps]}
-                        ],
-                        g]
+                        ]
                 ]
             ],
             {g, Length[cjps]}
@@ -1931,7 +1936,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             entries,
             chainEntries
         ];
-        allEntries
+        pruneUnusedAxioms[allEntries]
     ]]
 ]
 
