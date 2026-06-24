@@ -36,7 +36,7 @@
 
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
-FluxGenerate::usage = "FluxGenerate[prompt$] generates an Image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder).\nFluxGenerate[prompt$, spec$] returns the part(s) named by spec$: \"Image\" (the default Image), \"Latent\" (the initial packed-latent noise z$0, a {S$img, 128} NumericArray that can be fed back via \"InitialLatent\" to reproduce the image -- the round-trip handle), \"Embedding\" (the Qwen text embedding, a {512, 7680} NumericArray), All (an Association of all parts), or a list of those keys (an Association of just those parts).\nFluxGenerate[prompt$, n$] generates n$ images of the same prompt, each with a distinct fresh seed, reusing one model session (only the first is a cold start); FluxGenerate[prompt$, n$, spec$] returns a list of n$ spec$ results.\nFluxGenerate[{prompt$1, prompt$2, $$}] (optionally with a trailing spec$) generates one result per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (every result after the first is warm).\nThe following options can be given:\n  \"ImageSize\" {256, 256}    output size; a scalar n$ means a square n$ x n$ image, a pair {w$, h$} a rectangle (rounded to the /16 patch grid).\n  \"Steps\" Automatic    number of Euler sampling steps; Automatic uses \"NumSteps\".\n  RandomSeeding Automatic    Automatic gives a fresh random image each call; an integer seed makes the result reproducible (same seed -> byte-identical image).\n  \"InitialLatent\" Automatic    Automatic samples fresh z$0 ~ N(0,1); a {S$img, 128} array (e.g. a \"Latent\" result) is used as z$0 to seed STAGE 2 deterministically instead of the per-image random noise, so a saved latent reproduces its image (a latent round-trip).\n  \"NegativePrompt\" None    FLUX.2-klein is guidance-distilled (4-step, no classifier-free guidance), so a negative prompt is unsupported; giving one issues FluxGenerate::nocfg and is ignored.\n  \"ShowSteps\" False    True decodes each Euler-step latent through the VAE and shows the denoising progression live (in a notebook); the per-step Images + raw latents are then included under the \"Steps\" key of an All / {\"Steps\"} return.\n  ProgressReporting Automatic    Automatic or True shows a live progress panel (a no-op with no front end); False runs silent.\n  \"Device\" \"metal\"    backend to run on (\"metal\" | \"cpu\" | \"cuda\").\n  \"NumSteps\" 4    legacy alias for \"Steps\".\n  \"ModelDir\" Automatic    weight directory (Automatic -> ~/.cache/thvm/flux2-klein-4b).";
+FluxGenerate::usage = "FluxGenerate[prompt$] generates an Image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder).\nFluxGenerate[prompt$, spec$] returns the part(s) named by spec$: \"Image\" (the default Image), \"Latent\" (the initial packed-latent noise z$0, a {S$img, 128} NumericArray that can be fed back via \"InitialLatent\" to reproduce the image -- the round-trip handle), \"Embedding\" (the Qwen text embedding, a {512, 7680} NumericArray), All (an Association of all parts), or a list of those keys (an Association of just those parts).\nFluxGenerate[prompt$, n$] generates n$ images of the same prompt, each with a distinct fresh seed, reusing one model session (only the first is a cold start); FluxGenerate[prompt$, n$, spec$] returns a list of n$ spec$ results.\nFluxGenerate[{prompt$1, prompt$2, $$}] (optionally with a trailing spec$) generates one result per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (every result after the first is warm).\nThe following options can be given:\n  \"ImageSize\" {256, 256}    output size; a scalar n$ means a square n$ x n$ image, a pair {w$, h$} a rectangle (rounded to the /16 patch grid).\n  \"Steps\" Automatic    number of Euler sampling steps; Automatic uses \"NumSteps\".\n  RandomSeeding Automatic    Automatic gives a fresh random image each call; an integer seed makes the result reproducible (same seed -> byte-identical image).\n  \"InitialLatent\" Automatic    Automatic samples fresh z$0 ~ N(0,1); a {S$img, 128} array (e.g. a \"Latent\" result) is used as z$0 to seed STAGE 2 deterministically instead of the per-image random noise, so a saved latent reproduces its image (a latent round-trip).\n  \"NegativePrompt\" None    FLUX.2-klein is guidance-distilled (4-step, no classifier-free guidance), so a negative prompt is unsupported; giving one issues FluxGenerate::nocfg and is ignored.\n  \"ShowSteps\" False    True decodes each Euler-step latent through the VAE and shows the denoising progression live (in a notebook); the per-step Images + raw latents are then included under the \"Steps\" key of an All / {\"Steps\"} return.\n  ProgressReporting Automatic    Automatic or True shows a live progress panel (a no-op with no front end); False runs silent.\n  \"Device\" \"metal\"    backend to run on (\"metal\" | \"cpu\" | \"cuda\").\n  \"NumSteps\" 4    legacy alias for \"Steps\".\n  \"ModelDir\" Automatic    weight directory (Automatic -> ~/.cache/thvm/flux2-klein-4b).\n  \"Q8\" False    weight-only int8 quantization of the large QKV/MLP projections; default False (bf16).  q8 halves the device weight footprint but Metal has no int8 matmul (it casts to bf16 in-kernel), so it is a memory-fit option, not a speed one (env FLUX_Q8=1 is an equivalent fallback).";
 
 FluxGenerate::nocfg = "FLUX.2-klein-4B is a guidance-distilled 4-step flow-matching model with no classifier-free guidance, so the \"NegativePrompt\" `1` cannot be applied (a negative prompt needs the conditional-vs-unconditional CFG pass klein was distilled to skip).  It is ignored.";
 
@@ -217,7 +217,7 @@ qwTokenize[prompt_String, td_, seqLen_ : 512] := Module[{ids, pad, n, mask},
    full-forward sampler captures once with no per-block input rebind, so the
    lazy form is fine and keeps host residency to ~one weight at a time. *)
 
-(* q8 gate (env FLUX_Q8=1): a 2-D weight with both dims >= 2048 is a per-block
+(* q8 gate (the "Q8" option, or env FLUX_Q8=1 as a fallback): a 2-D weight with both dims >= 2048 is a per-block
    QKV / out / MLP projection -- the warm-hot bulk AND ~all the resident weight
    bytes.  Quantising those to int8 + per-output-channel scale halves the device
    weight footprint and the cold upload; fxLinear reads int8 on the tensor-core
@@ -226,16 +226,22 @@ qwTokenize[prompt_String, td_, seqLen_ : 512] := Module[{ids, pad, n, mask},
    linears that run at M<=8) stay bf16 -- the quant overhead would not pay off
    and the leading-unit-axis temb path is codegen-sensitive. *)
 
-fxQuant8Q[] := Environment["FLUX_Q8"] === "1";
+(* Resolve the q8 request to a single boolean: the "Q8" option wins, env FLUX_Q8=1
+   is a fallback so existing env-driven scripts keep working.  Resolved ONCE at the
+   entry handler and threaded as a plain boolean (the session key + the loader read
+   it directly), so an env-driven and an option-driven q8 share one session key and
+   neither collides with a bf16 session. *)
 
-fxLoadTfWeight[n_, t_, dev_] := If[ fxQuant8Q[] && fxQuantizableQ[n, Dimensions[t]],
+fxQuant8Q[q8_] := TrueQ[q8] || Environment["FLUX_Q8"] === "1";
+
+fxLoadTfWeight[n_, t_, dev_, q8_] := If[ q8 && fxQuantizableQ[n, Dimensions[t]],
     fxQuantizeWeight[TToDevice[t, dev]]
     ,
     TToDevice[t, dev]
 ]
 
-fxTransformerLoader[wt_, dev_] := Module[{cache = <||>},
-    n |-> Lookup[cache, n, cache[n] = fxLoadTfWeight[n, wt[n], dev]]
+fxTransformerLoader[wt_, dev_, q8_] := Module[{cache = <||>},
+    n |-> Lookup[cache, n, cache[n] = fxLoadTfWeight[n, wt[n], dev, q8]]
 ]
 
 (* Qwen text encoder: bf16, contiguous exactly like the transformer.  The
@@ -348,12 +354,13 @@ Options[FluxGenerate] = {
     "Device" -> "metal",
     "NumSteps" -> 4,
     "ModelDir" -> Automatic,
-    ProgressReporting -> Automatic
+    ProgressReporting -> Automatic,
+    "Q8" -> False
 };
 
 (* module-level session cache: key -> <|ctx, wfq, qwCfg, td, stxt,
    wfT, ca, rc, rs, tembFn, velJit, sigmas, simg, fxCfg,
-   wfV, wsubV, vaeCfg, dev|>.  One entry per {modelDir,dev,imgSize,nSteps}. *)
+   wfV, wsubV, vaeCfg, dev|>.  One entry per {modelDir,dev,imgSize,nSteps,q8}. *)
 
 $fxSession = <||>;
 
@@ -394,14 +401,14 @@ FluxGenerate[prompts_List, opts : OptionsPattern[]] := FluxGenerate[prompts, "Im
 
 (* build (or fetch) the persistent session for these settings. *)
 
-fxSessionGet[dev_, imgSize_, nSteps_, modelDir_] := Module[{key = {modelDir, dev, imgSize, nSteps}},
+fxSessionGet[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{key = {modelDir, dev, imgSize, nSteps, q8}},
     Lookup[
         $fxSession
         ,
         Key[key]
         ,
         $fxSession[key] = Module[{tBuild, s},
-            {tBuild, s} = AbsoluteTiming[fxSessionBuild[dev, imgSize, nSteps, modelDir]];
+            {tBuild, s} = AbsoluteTiming[fxSessionBuild[dev, imgSize, nSteps, modelDir, q8]];
             fxTiming["session-build", tBuild];
             s
         ]
@@ -438,17 +445,21 @@ fxBoundMemory[] := (
    at a slower cold; the live-bytes ceiling below stays a ~60%-RAM safety belt. *)
     fxEnvDefault["THVM_FWD_RECLAIM", "0"];
     fxEnvDefault["THVM_MAX_LIVE_BYTES", ToString[Round[0.6 $SystemMemory]]];
-(* Live (non-evictable) weight buffers instead of the default zero-copy mmap
-   wrap.  The wrap aliases the safetensors page cache, which the OS evicts under
-   session memory pressure; the transformer is then re-faulted page-by-page at
-   the DiT (velocity) stage, the dominant FLUX-cold cost on a memory-pressured
-   box.  THVM_ZEROCOPY=0 uploads each weight to a real device buffer once
-   (sequential read) and pins it, so the weights stay resident like MLX's.  The
-   upload is a one-time ~3.7 GB copy: on an UNPRESSURED warm cache the wrap is
-   faster (no copy), so a user who is not memory-bound can export
-   THVM_ZEROCOPY=1 to restore the wrap.  Default to live buffers here for cold
-   parity under the typical pressured session (notebook + kernel resident). *)
-    fxEnvDefault["THVM_ZEROCOPY", "0"];
+(* Zero-copy mmap weight wraps (THVM_ZEROCOPY=1): each weight aliases its
+   safetensors page-cache pages rather than being uploaded to a pinned device
+   buffer.  This is the memory-SAFE default and the load-bearing reason a bare
+   FluxGenerate cannot crash the kernel: a borrowed wrap holds no device-owned
+   bytes, so metal_record_memory_peak skips it (src/backend/metal/_.m) and the
+   ~16GB of FLUX weights never count toward the THVM_MAX_LIVE_BYTES ceiling --
+   no matter how many sessions co-reside (a second ImageSize) or how loaded the
+   host kernel already is.  Live device buffers (THVM_ZEROCOPY=0) upload + pin
+   each weight, which DOES count: a single FLUX session then sits near 0.6*RAM
+   and any second resident weight set tips it over, firing the ceiling backstop
+   that kills the kernel.  The wrap's one cost is that the OS may evict the
+   page-cache under pressure and re-fault it at the DiT stage (a slower cold) --
+   but a slower cold beats a dead kernel.  A user who is not memory-bound and
+   wants the pinned-resident cold can export THVM_ZEROCOPY=0. *)
+    fxEnvDefault["THVM_ZEROCOPY", "1"];
 (* Buffer-reuse OFF for the FLUX session: the velocity/Qwen/VAE captures
    recycle output buffers, and on Apple9 (M3) the batched ICB's [cmd
    setBarrier] does NOT reliably order those write-after-write recycles, so
@@ -477,7 +488,7 @@ fxBeamScope[body_] := Module[{beamSave = Environment["BEAM"], r},
     r
 ]
 
-fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[{
+fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
     w,
     h,
     gridH,
@@ -588,7 +599,7 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_] := Module[{
    the Qwen text-encode, so STAGE 2 finds the transformer already resident.
    FLUX_NO_WARM_TF=1 disables it for an A/B baseline. *)
             If[ Environment["FLUX_NO_WARM_TF"] =!= "1", TDiskWarmAsync[Values[wt]]];
-            wfT = fxTransformerLoader[wt, dev];
+            wfT = fxTransformerLoader[wt, dev, q8];
             rope = fxRopeTable[gridH, gridW, stxt];
             rcL = caL @ TTensorCreate[rope["cos"]];
             rsL = caL @ TTensorCreate[rope["sin"]];
@@ -712,7 +723,7 @@ FluxGenerate[prompt_String, spec_, opts : OptionsPattern[]] := (
 );
 
 FluxGenerate[prompts_List, spec_ ? fxSpecQ, opts : OptionsPattern[]] := Module[
-    {imgSize, seed, dev, nSteps, modelDir, initLat, negPrompt, showSteps, reportQ}
+    {imgSize, seed, dev, nSteps, modelDir, initLat, negPrompt, showSteps, reportQ, q8}
     ,
 (* a bare ImageSize -> n means a square n x n image (Set::shape if {n,n} is not
    formed); a pair {w, h} passes through.  Keep this normalize FIRST so the
@@ -731,10 +742,11 @@ FluxGenerate[prompts_List, spec_ ? fxSpecQ, opts : OptionsPattern[]] := Module[
    True both report -- the panel itself is a near-no-op with no front end, e.g.
    in wolframscript, so it never errors headless); False runs silent. *)
     reportQ = OptionValue[ProgressReporting] =!= False;
+    q8 = fxQuant8Q[TrueQ[OptionValue["Q8"]]];
 (* FLUX.2-klein is guidance-distilled (no CFG), so a negative prompt cannot be
    applied -- warn loudly (don't silently no-op) and proceed without it. *)
     If[negPrompt =!= None, Message[FluxGenerate::nocfg, negPrompt]];
-    fxWithProgress[reportQ, fxGenerateBody[prompts, spec, imgSize, seed, initLat, showSteps, dev, nSteps, modelDir]]
+    fxWithProgress[reportQ, fxGenerateBody[prompts, spec, imgSize, seed, initLat, showSteps, dev, nSteps, modelDir, q8]]
 ]
 
 (* Run `body` under a live progress panel that re-reads the mutated `text` +
@@ -796,7 +808,7 @@ fxAssemble[parts_, ks_List] := KeyTake[parts, ks];
    `spec` selects which parts to return; `initLat` (Automatic | a {simg,128} array)
    seeds STAGE 2; `showSteps` adds the per-step decoded progression. *)
 
-fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSteps_, modelDir_] := Module[
+fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSteps_, modelDir_, q8_] := Module[
     {
         sess,
         encHost,
@@ -816,7 +828,7 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
     ,
     (* cold-build (or fetch) the session -- indeterminate while the weights load. *)
     fxReport["Loading FLUX.2-klein-4B...", Indeterminate];
-    sess = fxSessionGet[dev, imgSize, nSteps, modelDir];
+    sess = fxSessionGet[dev, imgSize, nSteps, modelDir, q8];
     Module[{ca = sess["ca"], simg = sess["simg"], sigmas = sess["sigmas"], t1, t2, t3},
         need = fxNeeded[spec, showSteps];
         wantImg = MemberQ[need, "Image"];
