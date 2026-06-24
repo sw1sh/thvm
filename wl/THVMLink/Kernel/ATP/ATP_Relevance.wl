@@ -343,9 +343,30 @@ TRelevantAxioms[conjRaw_, axRaw_List, opts : OptionsPattern[]] :=
    for its top-level Axioms list / ConjectureStatement: keep the
    ForAll wrapper if present, but rewrite every nested `Equal[lhs,
    rhs]` to `Inactive[Equal][lhs, rhs]` so trivial tautology axioms
-   `a == a` don't collapse to True under ReleaseHold. *)
+   `a == a` don't collapse to True under ReleaseHold.
+
+   The rule matches an ACTIVE `Equal[a, b]` application head only, so
+   it is idempotent on an already-`Inactive[Equal]`-headed equation:
+   `Inactive[Equal][a, b]` has head `Inactive[Equal]` (not the bare
+   `Equal` symbol), so it is left untouched.  A blanket
+   `Equal -> Inactive[Equal]` instead rewrites the `Equal` symbol
+   nested inside an existing `Inactive[Equal]` head and produces the
+   double-wrapped `Inactive[Inactive[Equal]]`.  Axioms reach here
+   already Inactivated by atpNormalizeAxioms, so the active-only rule
+   is required to keep the displayed axiom field a clean single
+   Inactive[Equal] (matching FindEquationalProof). *)
 holdToInactive[axHC_HoldComplete] :=
-    ReleaseHold[axHC /. Equal -> Inactive[Equal]]
+    ReleaseHold[axHC /. Equal[a_, b_] :> Inactive[Equal][a, b]]
+
+(* Render a held equation in the form FindEquationalProof uses for the
+   displayed slots of its ProofObject (Theorems and the top-level Axioms
+   list): an ACTIVE `Equal`, with the same reflexive collapse FEP shows
+   (`ForAll[{x}, x == x]` -> True).  Built on holdToInactive so the
+   axiom first becomes a clean single Inactive[Equal] (held against the
+   reflexive `a == a` collapse), then Activate restores the active head
+   -- reproducing FEP's `ForAll[{x}, lhs == rhs]` byte for byte, with no
+   Inactive wrapper leaking into the user-visible proof object. *)
+holdToProofStmt[axHC_HoldComplete] := Activate[holdToInactive[axHC]]
 
 End[];
 EndPackage[];

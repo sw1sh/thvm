@@ -4431,13 +4431,13 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
            Each attempt is built into a ProofObject and run through
            WL's verifier; only a verifying proof is returned. *)
         varNames = cRes["VarSyms"];
-        axEq = holdToInactive /@ enc["AxHCsRaw"];
+        axEq = holdToProofStmt /@ enc["AxHCsRaw"];
         (* Multi-goal "ConjHCRaw" is the LIST of held conjuncts; the
            ProofObject statement is then the list of goal equations,
            matching FindEquationalProof's Theorems for a conjunction. *)
         conjStmt = If[ nGoals > 1,
-            holdToInactive /@ enc["ConjHCRaw"],
-            holdToInactive[enc["ConjHCRaw"]]];
+            holdToProofStmt /@ enc["ConjHCRaw"],
+            holdToProofStmt[enc["ConjHCRaw"]]];
         Module[{tryBuild, poA, poB, poFinal},
             (* Raise $RecursionLimit: a long completion proof (the deep
                Sheffer/Wolfram theorems run to ~300+ steps) walks a deep
@@ -4553,7 +4553,7 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
            Construct / Position / Rule / Orientation provenance - same
            shape as the goal-directed case, minus Hypothesis and
            Conclusion (no goal). *)
-        axEq = holdToInactive /@ enc["AxHCsRaw"];
+        axEq = holdToProofStmt /@ enc["AxHCsRaw"];
         varNames = cRes["VarSyms"];
         ds = Block[{$RecursionLimit = Max[$RecursionLimit, 16384]},
             Check[
