@@ -9192,9 +9192,9 @@ fn void thvm_atp_set_use_comm_drop_dup(AtpState *s, u8 on) {
 
 // Inner-swap anchor gate for the DROP-DUP re-age (see
 // AtpState.use_comm_drop_dup_class_gate): skip the slot15-term re-age when its
-// smallest-keyed successor is the permutation class `(x.y).y = (y.x).y` -- the
-// Meredith OrAssociativity rule-51 anchor WM emits AFTER the slot15-term.
-// DEFAULT OFF.
+// smallest-keyed successor is a Meredith-harmful anchor WM emits AFTER the
+// slot15-term -- the permutation class `(x.y).y = (y.x).y` (rule-51) or the
+// slot15-rotate `x.(y.x) = (x.y).x` (rule-59).  DEFAULT OFF.
 fn void thvm_atp_set_use_comm_drop_dup_class_gate(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_comm_drop_dup_class_gate = on ? 1u : 0u;
@@ -16223,6 +16223,49 @@ static u8 atp_pair_is_inner_swap_class(Term l, Term r) {
   return (u8)(la == rb && lb == ra);          // inner pair transposed
 }
 
+// f(f(a, b), a): `(a.b).a` -- the RHS face of the slot15-ROTATE anchor below.
+// outer-right var = a, comm-left = f(a, b) reusing the same outer var on its left.
+static u8 atp_term_is_dot_ab_dot_a(Term t, u32 *out_a, u32 *out_b) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
+  if (term_tag(t1) != TAG_FVR) return 0u;                  // outer-right var a
+  if (term_tag(t0) != TAG_CTR || term_ext(t0) != term_ext(t) ||
+      term_ctr_n(t0) != 2u) return 0u;                     // f(a, b)
+  Term t00 = term_ctr_at(t0, 0), t01 = term_ctr_at(t0, 1);
+  if (term_tag(t00) != TAG_FVR || term_tag(t01) != TAG_FVR) return 0u;
+  u32 a = term_ext(t1);
+  if (term_ext(t00) != a) return 0u;          // comm-left reuses outer var a
+  *out_a = a;
+  *out_b = term_ext(t01);
+  return (u8)(a != *out_b);                    // a != b
+}
+
+// Whether a NORMALIZED CP is the slot15-ROTATE anchor `x.(y.x) = (x.y).x`
+// (thvm LHS=(C3 V0 (C3 V1 V0)) shared with atp_term_is_slot15_lhs, RHS=(C3
+// (C3 V0 V1) V0); modulo orientation and variable renaming).  This is the
+// SECOND Meredith-harmful DROP-DUP anchor (after the inner-swap class above):
+// at Meredith OrAssociativity rule-59 the smallest-keyed CP strictly above the
+// slot15-term is this ROTATE of the slot15-term itself -- the SAME `x.(y.x)`
+// outer/inner shape on the LHS, but with `(x.y).x` (comm-left reuses the outer
+// var) on the RHS instead of slot15's `(y.y).x`.  WM emits this rotate AFTER
+// the slot15-term (it keeps the slot15-term at its raw leaf age, seq 6011,
+// ahead of the rotate's seq 6010); thvm's +1 splice ages the slot15-term past
+// it, swapping the pair (firstdiv 1374).  No soa DROP-DUP anchor is this exact
+// shape (soa's nearest variant is `x.(x.y) = (x.y).x`, inner pair NOT swapped),
+// so skipping the re-age on this anchor leaves every soa fire byte-identical.
+static u8 atp_pair_is_slot15_rotate(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 lv = 0, lw = 0, rv = 0, rw = 0;
+  if (atp_term_is_slot15_lhs(l, &lv, &lw) &&
+      atp_term_is_dot_ab_dot_a(r, &rv, &rw))
+    return (u8)(lv == rv && lw == rw);
+  if (atp_term_is_slot15_lhs(r, &lv, &lw) &&
+      atp_term_is_dot_ab_dot_a(l, &rv, &rw))
+    return (u8)(lv == rv && lw == rw);
+  return 0u;
+}
+
 // f(f(v, f(v, v)), y) with v != y, all bare vars: `(x.(x.x)).y`.
 static u8 atp_term_is_cube_dot_var(Term t, u32 *out_v, u32 *out_y) {
   if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
@@ -16726,18 +16769,28 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // live, so slot15 the rule -- and its uniquely-parented pick-99 COMM copy --
     // stay intact.  Advances soa firstdiv 288 -> 290.
     //
-    // Inner-swap anchor skip (use_comm_drop_dup_class_gate): the smallest-keyed
-    // CP strictly above the slot15-term is the re-age anchor.  On soa that
+    // Anchor skip (use_comm_drop_dup_class_gate): the smallest-keyed CP
+    // strictly above the slot15-term is the re-age anchor.  On soa that
     // successor is always a tautology or an asymmetric/slot15-class CP WM emits
     // BEFORE the slot15-term, so +1 is faithful.  On Meredith OrAssociativity
-    // rule-51 the smallest-keyed CP above is instead the permutation CLASS
-    // `(x.y).y = (y.x).y` (atp_pair_is_inner_swap_class) -- a duplicate copy of
-    // the band's class equation that WM emits AFTER the slot15-term, not before.
-    // The slot15-term's own raw leaf arrival (k3=4) already places it at WM's
-    // pick-1175 slot, ahead of that class copy (k3=15); +1 splices it past the
-    // copy and mis-orders the pair (firstdiv 1175).  Skip the re-age when the
-    // anchor is the inner-swap class: no soa anchor is this exact shape, so every
-    // soa fire stays byte-identical.  Advances Meredith firstdiv 1175 -> beyond.
+    // TWO anchor shapes are instead emitted AFTER the slot15-term, so splicing
+    // past them mis-orders the pair:
+    //   rule-51: the permutation CLASS `(x.y).y = (y.x).y`
+    //            (atp_pair_is_inner_swap_class) -- a duplicate copy of the
+    //            band's class equation.  The slot15-term's raw leaf arrival
+    //            (k3=4) already places it at WM's pick-1175 slot, ahead of the
+    //            class copy (k3=15); +1 splices it past, firstdiv 1175.
+    //   rule-59: the slot15-ROTATE `x.(y.x) = (x.y).x`
+    //            (atp_pair_is_slot15_rotate) -- the SAME `x.(y.x)` LHS as the
+    //            slot15-term, but `(x.y).x` (comm-left reuses the outer var) on
+    //            the RHS instead of `(y.y).x`.  WM keeps the slot15-term at its
+    //            raw leaf age (seq 6011) ahead of the rotate (seq 6010); +1 ages
+    //            it past, firstdiv 1374.
+    // Skip the re-age when the anchor is EITHER shape: no soa anchor is either
+    // exact shape (soa's nearest rotate variant is `x.(x.y) = (x.y).x`, inner
+    // pair NOT swapped), so every soa fire stays byte-identical.  Advances
+    // Meredith firstdiv 1175 -> 1374 (class) -> 4190 (rotate, = the
+    // COMM_DROP_DUP-OFF ceiling).
     if (s->use_comm_drop_dup && atp_slot15_rule_is_live(s)) {
       u32 dup = 0xffffffffu;
       for (u32 k = 0; k < n_big; k++) {
@@ -16762,7 +16815,13 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (s->use_comm_drop_dup_class_gate && anc_k != 0xffffffffu) {
           Term al = atp_rewrite_normalize_indexed(s, big[anc_k].cp.lhs, 4096u);
           Term ar = atp_rewrite_normalize_indexed(s, big[anc_k].cp.rhs, 4096u);
-          anchor_is_class = atp_pair_is_inner_swap_class(al, ar);
+          // Skip the re-age when the anchor is a Meredith-harmful shape WM
+          // emits AFTER the slot15-term: the inner-swap permutation class
+          // `(x.y).y = (y.x).y` (rule-51) OR the slot15-ROTATE `x.(y.x) =
+          // (x.y).x` (rule-59).  Neither shape occurs as a soa anchor, so soa
+          // fires stay byte-identical.
+          anchor_is_class = (u8)(atp_pair_is_inner_swap_class(al, ar) ||
+                                 atp_pair_is_slot15_rotate(al, ar));
         }
         if (anchor != 0xffffffffffffffffull && !anchor_is_class)
           big[dup].key = anchor + 1u;

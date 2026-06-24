@@ -5618,11 +5618,14 @@ typedef struct {
   // Inner-swap anchor gate for the DROP-DUP re-age (env
   // THVM_ATP_COMM_DROP_DUP_CLASS_GATE, DEFAULT OFF; auto-on under
   // use_formation_fifo).  Skip the slot15-term re-age when the smallest-keyed
-  // CP strictly above it is the permutation CLASS `(x.y).y = (y.x).y`
-  // (atp_pair_is_inner_swap_class) -- the Meredith OrAssociativity rule-51
-  // anchor WM emits AFTER the slot15-term, not before, so splicing past it
-  // mis-orders the pair.  No soa anchor is this shape, so soa stays
-  // byte-identical.  Advances Meredith firstdiv 1175 -> beyond.
+  // CP strictly above it is a Meredith-harmful anchor WM emits AFTER the
+  // slot15-term: the permutation CLASS `(x.y).y = (y.x).y`
+  // (atp_pair_is_inner_swap_class, rule-51) OR the slot15-ROTATE `x.(y.x) =
+  // (x.y).x` (atp_pair_is_slot15_rotate, rule-59).  Both are emitted after the
+  // slot15-term, not before, so splicing past either mis-orders the pair.
+  // Neither shape occurs as a soa anchor, so soa stays byte-identical.
+  // Advances Meredith firstdiv 1175 -> 1374 (class) -> 4190 (rotate, = the
+  // COMM_DROP_DUP-OFF ceiling).
   u8    use_comm_drop_dup_class_gate;
   // Leaf-arrival tiebreak for the adjacent-leaf oriented-vs-permutation family
   // (env THVM_ATP_LEAF_TIEBREAK, DEFAULT OFF).  Two CPs that overlap the new
