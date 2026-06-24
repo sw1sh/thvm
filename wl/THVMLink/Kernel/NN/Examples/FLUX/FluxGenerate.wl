@@ -44,6 +44,8 @@ FluxGenerate::badlatent = "The \"InitialLatent\" value has dimensions `1`, but t
 
 FluxGenerate::badspec = "`1` is not a valid return spec; use \"Image\", \"Latent\", \"Embedding\", All, or a list of those keys.  Returning the Image.";
 
+FluxGenerate::imgtoobig = "ImageSize `1` would need ~`2` GB of device buffers -- a cold capture pins the model's whole activation set with no reuse, scaling with the latent-token count -- exceeding the THVM_MAX_LIVE_BYTES ceiling of `3` GB.  Use ImageSize <= `4`, or raise THVM_MAX_LIVE_BYTES (you have `5` GB host RAM).";
+
 Begin["`Private`"];
 
 (* ============================================================
@@ -950,6 +952,28 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
         z0fixed
     }
     ,
+    (* Pre-flight: reject an ImageSize whose cold-capture footprint would blow the
+       THVM_MAX_LIVE_BYTES ceiling BEFORE building.  A cold JIT capture pins the
+       model's whole activation set with no buffer reuse (~15.9 GB at 256x256,
+       Simg=256), so the footprint scales ~linearly with the latent-token count
+       Simg=(w/16)(h/16).  Without this guard a too-large ImageSize (e.g. 512 ->
+       ~64 GB) climbs to the ceiling mid-capture and aborts -- slow, and heavy
+       host memory pressure.  Fail fast with a clear message; raise
+       THVM_MAX_LIVE_BYTES (and have the host RAM) to lift the cap. *)
+    With[{
+        simg0   = Times @@ Round[imgSize/16],
+        ceiling = With[{e = Environment["THVM_MAX_LIVE_BYTES"]},
+                       If[ StringQ[e] && e =!= "", ToExpression[e], 0.6 $SystemMemory]]
+      },
+        With[{est = 15.9*^9 (simg0/256.0)},
+            If[ est > 0.9 ceiling,
+                Message[FluxGenerate::imgtoobig, imgSize, Round[est/1.*^9],
+                    Round[ceiling/1.*^9], 16 Floor[Sqrt[0.9 ceiling 256.0/(15.9*^9)]],
+                    Round[$SystemMemory/1.*^9]];
+                Return[ConstantArray[$Failed, n], Module]
+            ]
+        ]
+    ];
     (* cold-build (or fetch) the session -- indeterminate while the weights load. *)
     fxReport["Loading FLUX.2-klein-4B...", Indeterminate];
     sess = fxSessionGet[dev, imgSize, nSteps, modelDir, q8];

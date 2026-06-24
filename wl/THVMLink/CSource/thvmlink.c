@@ -38,6 +38,27 @@ static void extern_pin_manager(WolframLibraryData libData, mbool mode, mint id) 
   if (mode == 0) extern_pin_handle_drop((u64)id);
 }
 
+// === ceiling / heap-exhaust recovery (mirrors thvmlink_atp.c) ===
+// THVM_WL_RECOVER(tag) at the top of a GPU/heap-touching LibraryLink entry arms
+// a setjmp target: a thvm_fatal() raised anywhere inside (the THVM_MAX_LIVE_BYTES
+// ceiling backstop in the Metal backend, or a heap_alloc exhaust) longjmps back
+// here and the entry returns LIBRARY_FUNCTION_ERROR -- the WolframKernel keeps
+// running instead of being killed by exit(1) (the FLUX large-ImageSize OOM that
+// crashed the user's kernel).  THVM_WL_DONE() disarms before a normal return so
+// a later non-armed entry's exhaust can't longjmp into this entry's dead frame.
+// Single-threaded inside a LibraryLink call, so the shared global hook is safe.
+#define THVM_WL_RECOVER(tag)                                                   \
+  static jmp_buf _thvm_jb_##tag;                                               \
+  thvm_heap_exhaust_jmp = &_thvm_jb_##tag;                                      \
+  thvm_heap_exhausted = 0;                                                     \
+  if (setjmp(_thvm_jb_##tag) != 0) {                                           \
+    thvm_heap_exhaust_jmp = NULL;                                              \
+    fprintf(stderr, "thvm_wl_" #tag ": ceiling/heap exhausted -- returning "   \
+                    "LIBRARY_FUNCTION_ERROR (kernel preserved)\n");            \
+    return LIBRARY_FUNCTION_ERROR;                                             \
+  }
+#define THVM_WL_DONE() (thvm_heap_exhaust_jmp = NULL)
+
 EXTERN_C DLLEXPORT mint WolframLibrary_getVersion(void) {
   return WolframLibraryVersion;
 }
@@ -2150,9 +2171,11 @@ EXTERN_C DLLEXPORT int thvm_wl_materialize(WolframLibraryData libData, mint argc
 EXTERN_C DLLEXPORT int thvm_wl_realize(WolframLibraryData libData, mint argc,
                                        MArgument *args, MArgument res) {
   (void)libData; (void)argc;
+  THVM_WL_RECOVER(realize);
   Term t = (Term)MArgument_getInteger(args[0]);
   Term r = thvm_realize(t);
   MArgument_setInteger(res, (mint)r);
+  THVM_WL_DONE();
   return LIBRARY_NO_ERROR;
 }
 

@@ -563,18 +563,45 @@ static void metal_record_memory_peak(void) {
   {
     u64 ceiling = thvm_live_byte_ceiling();
     if (ceiling != 0 && retained > ceiling) {
+      // Emergency reclaim before failing: free every recyclable (refcount==0)
+      // freelist buffer -- a cold JIT capture parks recyclable kernel outputs
+      // here, so freeing them may drop a large-ImageSize gen back under the
+      // ceiling -- then recompute retained.
+      u32 fln = METAL_FREELIST_LEN;
+      for (u32 fi = 0; fi < fln; fi++) {
+        u32 bid = METAL_FREELIST[fi];
+        if (bid != 0 && bid < METAL_BUFS_NEXT
+            && METAL_BUFS[bid].buf != nil && METAL_BUFS[bid].refcount == 0) {
+          metal_buf_free(bid);
+        }
+      }
+      METAL_FREELIST_LEN = 0;
+      retained = 0;
+      for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+        if (METAL_BUFS[i].buf == nil || METAL_BUFS[i].borrowed) continue;
+        retained += METAL_BUFS[i].nbytes;
+      }
+    }
+    if (ceiling != 0 && retained > ceiling) {
       fprintf(stderr,
         "metal: total live buffer bytes %llu exceed THVM_MAX_LIVE_BYTES "
-        "ceiling %llu (live=%llu deferred=%llu freelist=%llu).  The "
-        "schedule is pinning more buffers than fit -- likely the per-op "
-        "fallback path materializing im2col intermediates and/or the JIT "
-        "capture pinning every kernel output without buffer reuse "
-        "(see docs/plans/beautiful_mnist_parity.md M1/M3/M4).  Raise "
-        "THVM_MAX_LIVE_BYTES (bytes; 0 = unlimited) if this is "
-        "intentional.\n",
+        "ceiling %llu (live=%llu deferred=%llu freelist=%llu) after reclaim.  "
+        "A cold JIT capture pins every kernel output without reuse, so a large "
+        "ImageSize can balloon past the ceiling.  Raise THVM_MAX_LIVE_BYTES "
+        "(bytes; 0 = unlimited) or use a smaller ImageSize.\n",
         (unsigned long long)retained, (unsigned long long)ceiling,
         (unsigned long long)live, (unsigned long long)METAL_DEFER_DECREF_BYTES,
         (unsigned long long)metal_freelist_bytes());
+      // Recoverable: when a LibraryLink entry has armed thvm_heap_exhaust_jmp,
+      // longjmp back so it returns LIBRARY_FUNCTION_ERROR (the WolframKernel
+      // survives); only a bare run (no setjmp armed) exit(1)s.  Inlined rather
+      // than calling thvm_fatal() -- that symbol is static to the core TU and
+      // not visible to this separately-compiled Metal backend object; the jmp
+      // hook + flag are extern globals, so they link.
+      if (thvm_heap_exhaust_jmp != NULL) {
+        thvm_heap_exhausted = 1;
+        longjmp(*thvm_heap_exhaust_jmp, 1);
+      }
       exit(1);
     }
   }
