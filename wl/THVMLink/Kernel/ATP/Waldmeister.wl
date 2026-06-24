@@ -38,22 +38,26 @@ Options[TWaldmeisterProof] = {
     "MathlinkPath" -> Automatic
 }
 
-(* Resolve wmcli location: $WMCLI env var > a $PATH scan for "wmcli".
-   There is no canonical install location for the wmcli build, so set
-   WMCLI to point at it (or symlink it into /usr/local/bin, ~/.local/bin,
-   etc.).  A truly-absent binary yields Missing -> the nowm message fires
-   instead of RunProcess failing opaquely on bare "wmcli". *)
-wmBinary[Automatic] := Block[{env = Environment["WMCLI"]},
-    Which[
-        StringQ[env] && FileExistsQ[env], env,
-        True, SelectFirst[
-            Map[
-                dir |-> FileNameJoin[{dir, "wmcli"}],
-                StringSplit[Replace[Environment["PATH"], Except[_String] -> ""], ":"]
-            ],
-            FileExistsQ
+(* Resolve wmcli location: $WMCLI env var > a $PATH scan > a short list of
+   common dev-build locations under $HomeDirectory (the wmcli is built
+   alongside the Waldmeister source, with no canonical install path, so
+   auto-detect the usual spots before giving up).  A truly-absent binary
+   yields Missing -> the nowm message fires instead of RunProcess failing
+   opaquely on bare "wmcli". *)
+wmBinary[Automatic] := Block[{env = Environment["WMCLI"], cands},
+    If[ StringQ[env] && FileExistsQ[env], Return[env]];
+    cands = Join[
+        Map[
+            dir |-> FileNameJoin[{dir, "wmcli"}],
+            StringSplit[Replace[Environment["PATH"], Except[_String] -> ""], ":"]
+        ],
+        Map[
+            rel |-> FileNameJoin[Prepend[rel, $HomeDirectory]],
+            {{".local", "bin", "wmcli"}, {"bin", "wmcli"},
+                {"src", "wolfram", "waldmeister", "wmcli"}}
         ]
-    ]
+    ];
+    SelectFirst[cands, FileExistsQ]
 ]
 
 wmBinary[s_String] := s
