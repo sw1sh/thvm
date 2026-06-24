@@ -43,7 +43,7 @@ Used as the Method \[Rule] \"VampireProcess\" dispatch target in TFindProof, so 
 Options: TimeConstraint, Mode, Binary, ParseFormulas, LiftToProofObject; see the ATP documentation."];
 
 GeneralUtilities`SetUsage[TWaldmeisterProofObject, "TWaldmeisterProofObject[file$.pr] runs the local Waldmeister binary via TWaldmeisterProof on a .pr problem file and converts the proof protocol through TSZSDerivationToProofObject to a thvm-shaped proof Association.
-TWaldmeisterProofObject[theory$, thm$] resolves to a pre-generated .pr file under tools/baselines/wm_pr/, returning a NoCachedPr Failure (with the converter command line) when it is missing.
+TWaldmeisterProofObject[theory$, thm$] resolves to a banked .pr file under tools/baselines/wm_pr/ when present, and otherwise GENERATES the .pr at runtime from the theory's symbolic axioms + the NotableTheorem conjecture (byte-identical to the banked-file construction).
 Used as the Method \[Rule] \"WaldmeisterProcess\" dispatch target in TFindProof.
 Options: TimeConstraint, Binary, MathlinkPath, ParseFormulas, LiftToProofObject; see the ATP documentation."];
 
@@ -685,6 +685,232 @@ buildDatasetFromDerivation[derivation_List, parseFormulasQ_:False] := Block[
     Association @@ entries
 ]
 
+(* ----------------------------------------------------------------- *)
+(* Runtime symbolic -> Waldmeister .pr generator.
+
+   Turns AxiomaticTheory axioms + a NotableTheorem conjecture (or
+   explicit ForAll/Equal axioms + a goal) into a Waldmeister .pr
+   problem string, so TWaldmeisterProofObject no longer hard-fails on
+   a cache-miss against the banked tools/baselines/wm_pr/ files.
+
+   Path: symbolic -> TPTP CNF strings (in-memory, the same encoding
+   tools/vampire/export_tptp.wls bakes) -> .pr (the same construction
+   tools/baselines/tptp_to_pr.wls bakes).  Composing the two existing
+   pipelines in-process keeps the output byte-identical to the banked
+   .pr files (verified against tools/baselines/wm_pr/).
+
+   No external process: pure WL string surgery. *)
+
+(* Lower-case TPTP functor names for the standard WL heads
+   AxiomaticTheory uses (mirrors export_tptp.wls's $opNames).  Heads
+   not listed fall through to "op_" <> ToLowerCase[SymbolName]. *)
+$wmOpNames = <|
+    CircleTimes -> "and", CirclePlus -> "or", OverBar -> "not",
+    CircleMinus -> "nand_op", CircleDot -> "fop", Diamond -> "diamond",
+    Star -> "star", Wedge -> "wedge", Vee -> "vee", SmallCircle -> "circ",
+    Times -> "mul", Plus -> "add", Equivalent -> "equiv",
+    Implies -> "implies", Not -> "lnot", And -> "land", Or -> "lor",
+    Nand -> "nand", Nor -> "nor"
+|>;
+
+wmOpNameForHead[h_] := Lookup[$wmOpNames, h,
+    "op_" <> ToLowerCase[ToString[h, InputForm]]];
+
+(* Camel-case-fold underscore names so WM's lexer accepts them
+   (mirrors tptp_to_pr.wls's sanitize): sk_c1 -> skC1, op_centerdot
+   -> opCenterdot.  A leading-$ name folds to "dollar"<>rest. *)
+wmSanitize[s_String] := Which[
+    StringStartsQ[s, "$"], "dollar" <> Capitalize[StringDrop[s, 1]],
+    StringContainsQ[s, "_"],
+        With[{parts = StringSplit[s, "_"]},
+            First[parts] <> StringJoin[Capitalize /@ Rest[parts]]],
+    True, s];
+
+(* TPTP-string-level term renderer.  Mirrors export_tptp.wls's
+   renderTerm + renderConst.  The AxiomaticTheory formal variables
+   (\[FormalA] etc.) are inert symbols (no DownValues), so a plain
+   `===` lookup against the var-map and `List @@ expr` recursion are
+   safe -- no Hold gymnastics needed. *)
+wmLookupVar[expr_, rules_List] := Block[{found = $Failed},
+    Do[ If[ expr === First[rules[[i]]], found = Last[rules[[i]]]; Break[]],
+        {i, Length[rules]}];
+    found];
+
+wmRenderConst[v_] := Block[{nm},
+    nm = ToString[v, InputForm];
+    nm = StringReplace[nm, {
+        "\\[Formal" ~~ x : LetterCharacter .. ~~ "]" :> "f_" <> ToLowerCase[x],
+        "\\[" ~~ x__ ~~ "]" :> "u_" <> ToLowerCase[x]}];
+    nm = StringReplace[nm, RegularExpression["[^a-z0-9_]"] -> "_"];
+    If[ nm === "" || StringMatchQ[nm, RegularExpression["[0-9].*"]],
+        nm = "k" <> nm];
+    nm];
+
+wmRenderTerm[expr_, vmap_List] := Block[{v = wmLookupVar[expr, vmap]},
+    Which[
+        v =!= $Failed, v,
+        AtomQ[expr], wmRenderConst[expr],
+        True, wmOpNameForHead[Head[expr]] <> "(" <>
+            StringRiffle[wmRenderTerm[#, vmap] & /@ (List @@ expr), ","] <>
+            ")"]];
+
+(* The bound variables of a ForAll-wrapped axiom (else {}). *)
+wmExtractVars[expr_] := If[ Head[expr] === ForAll,
+    With[{v = expr[[1]]}, If[ Head[v] === List, List @@ v, {v}]], {}];
+wmStripForAll[expr_] := If[ Head[expr] === ForAll, expr[[2]], expr];
+
+(* X1.. for axiom variables; sk_c1.. (skolem CONSTANTS) for the goal's
+   universally-quantified variables. *)
+wmVarMap[vars_List] := MapIndexed[#1 -> "X" <> ToString[#2[[1]]] &, vars];
+wmSkolemMap[vars_List] := MapIndexed[#1 -> "sk_c" <> ToString[#2[[1]]] &, vars];
+
+(* One axiom -> "lhs = rhs" TPTP body (raw, unsanitized); $Failed if
+   not an equation. *)
+wmAxBody[expr_] := Block[{
+        body = wmStripForAll[expr], vars = wmExtractVars[expr], vmap},
+    vmap = wmVarMap[vars];
+    If[ ! MatchQ[body, _Equal | Inactive[Equal][_, _]], Return[$Failed]];
+    wmRenderTerm[body[[1]], vmap] <> " = " <> wmRenderTerm[body[[2]], vmap]];
+
+(* The conjecture -> "lhs = rhs" with its universal vars skolemized to
+   fresh sk_c constants (the CONCLUSION body). *)
+wmGoalBody[expr_] := Block[{
+        body = wmStripForAll[expr], vars = wmExtractVars[expr], vmap},
+    vmap = wmSkolemMap[vars];
+    If[ ! MatchQ[body, _Equal | Inactive[Equal][_, _] |
+            _Unequal | Inactive[Unequal][_, _]],
+        Return[$Failed]];
+    wmRenderTerm[body[[1]], vmap] <> " = " <> wmRenderTerm[body[[2]], vmap]];
+
+(* Walk a rendered TPTP-body string and collect every (name, arity)
+   pair (mirrors tptp_to_pr.wls's collectSig): an identifier followed
+   by `(` is a functor whose arity = comma-count+1 at depth 1; a bare
+   identifier is a nullary constant.  Variables (X<n>) are dropped by
+   the caller.  Names are sanitized on the way out. *)
+wmCollectSig[term_String] := Module[{
+        out = <||>, n = StringLength[term], pos = 1, c, k, name, ipos,
+        idepth, iargs},
+    While[ pos <= n,
+        c = StringTake[term, {pos, pos}];
+        If[ StringMatchQ[c, LetterCharacter],
+            k = pos;
+            While[ k <= n && StringMatchQ[StringTake[term, {k, k}],
+                    LetterCharacter | DigitCharacter | "_"], k++];
+            name = wmSanitize[StringTake[term, {pos, k - 1}]];
+            If[ k <= n && StringTake[term, {k, k}] === "(",
+                ipos = k + 1; idepth = 1;
+                iargs = If[ ipos <= n && StringTake[term, {ipos, ipos}] === ")",
+                    0, 1];
+                While[ idepth > 0 && ipos <= n,
+                    Switch[ StringTake[term, {ipos, ipos}],
+                        "(", idepth++,
+                        ")", idepth--,
+                        ",", If[ idepth === 1, iargs++]];
+                    ipos++];
+                If[ ! KeyExistsQ[out, name], out[name] = iargs];
+                pos = k + 1,
+                If[ ! KeyExistsQ[out, name], out[name] = 0];
+                pos = k],
+            pos++]];
+    out];
+
+(* Sanitize a rendered TPTP body for .pr emit (drop underscores from
+   every identifier, preserving arity since parens are untouched). *)
+wmSanitizeBody[term_String] := StringReplace[term,
+    id : (LetterCharacter ~~ (LetterCharacter | DigitCharacter | "_") ...) :>
+        wmSanitize[id]];
+
+wmCollectVars[term_String] := DeleteDuplicates @
+    StringCases[term, RegularExpression["\\bX\\d+\\b"]];
+
+(* Assemble the full .pr text from rendered (unsanitized) TPTP bodies.
+   nameRaw is the problem NAME (e.g. "WolframAxioms__Commutativity"),
+   sanitized for the NAME field.  Construction is byte-identical to
+   tools/baselines/tptp_to_pr.wls. *)
+wmBuildPr[nameRaw_String, axBodies_List, goalBody_String] := Module[{
+        allTerms, sigByName, sig, vars, precList, sigBlock, varBlock,
+        precBlock, weightBlock, eqBlock, conclusion},
+    allTerms = Join[axBodies, {goalBody}];
+    (* split each "lhs = rhs" body into its two term-strings for sig/var
+       collection (the bodies are unsanitized TPTP, " = " separated). *)
+    allTerms = Flatten[StringTrim /@ StringSplit[#, " = ", 2] & /@ allTerms];
+    sigByName = Merge[wmCollectSig /@ allTerms, First];
+    sigByName = KeySelect[sigByName,
+        ! StringMatchQ[#, "X" ~~ DigitCharacter ..] &];
+    sig = Sort @ Normal @ sigByName;
+    vars = DeleteDuplicates @ Sort @ Flatten[wmCollectVars /@ allTerms];
+    (* precedence: arity ascending, then alphabetical -- skolem
+       constants (arity 0) first (highest), operators last. *)
+    precList = First /@ SortBy[sig, {Last, First}];
+    sigBlock = StringRiffle[
+        Replace[#, (nm_ -> a_Integer) :>
+            nm <> ": " <>
+                If[ a > 0, StringJoin @@ ConstantArray["ANY ", a], ""] <>
+                "-> ANY"] & /@ sig,
+        "\n              "];
+    varBlock = StringRiffle[vars, ", "] <> ": ANY";
+    precBlock = StringRiffle[precList, " > "];
+    weightBlock = StringRiffle[
+        Replace[#, (nm_ -> _Integer) :> nm <> "=1"] & /@ sig, ", "];
+    eqBlock = StringRiffle[wmSanitizeBody /@ axBodies, "\n              "];
+    conclusion = wmSanitizeBody[goalBody];
+    StringJoin[
+        "NAME          ", wmSanitize[nameRaw], "\n",
+        "MODE          PROOF\n",
+        "SORTS         ANY\n",
+        "SIGNATURE     ", sigBlock, "\n",
+        "ORDERING      KBO\n",
+        "              ", weightBlock, "\n",
+        "              ", precBlock, "\n",
+        "VARIABLES     ", varBlock, "\n",
+        "EQUATIONS     ", eqBlock, "\n",
+        "CONCLUSION    ", conclusion, "\n"]];
+
+(* Top-level: (axioms, conjecture) -> .pr string.  axioms is a list of
+   ForAll/Equal forms (as AxiomaticTheory[theory] returns), conjecture
+   a single ForAll/Equal/Unequal.  nameRaw labels the problem.  The
+   AxiomaticTheory formal variables (\[FormalA] etc.) are inert symbols,
+   so no Hold is needed: wmRenderTerm's own HoldFirst protects subterm
+   capture during the walk. *)
+wmGenerateProblem[nameRaw_String, axioms_List, conjecture_] := Block[{
+        axBodies, goalBody},
+    axBodies = DeleteCases[wmAxBody /@ axioms, $Failed];
+    goalBody = wmGoalBody[conjecture];
+    If[ axBodies === {} || goalBody === $Failed,
+        Return[Failure["WmGenerate", <|
+            "Reason" -> "no equational axioms or non-equational goal",
+            "Name" -> nameRaw|>]]];
+    wmBuildPr[nameRaw, axBodies, goalBody]];
+
+(* (theory, thm) -> .pr string, resolving axioms + the NotableTheorem
+   the SAME way TFindProof's atpProveFromTheory does: axioms from
+   AxiomaticTheory[theory], the conjecture from
+   AxiomaticTheory[theory, "NotableTheorems"][thm].  A multi-conjunct
+   theorem keys each conjunct under a trailing "__c<i>" name (mirrors
+   the banked-file convention); takeConjunct picks one (1-based, the
+   default 1).  Returns the .pr string or a Failure. *)
+wmGenerateProblemFor[theory_String, thm_String, takeConjunct_Integer : 1] :=
+    Block[{axioms, nt, cjRaw, conjuncts, idx, nm},
+        axioms = AxiomaticTheory[theory];
+        If[ ! ListQ[axioms],
+            Return[Failure["WmGenerate", <|
+                "Reason" -> "AxiomaticTheory[\"" <> theory <>
+                    "\"] did not resolve to an axiom list"|>]]];
+        nt = AxiomaticTheory[theory, "NotableTheorems"];
+        cjRaw = If[ AssociationQ[nt], Lookup[nt, thm, Missing[]], Missing[]];
+        If[ MissingQ[cjRaw],
+            Return[Failure["WmGenerate", <|
+                "Reason" -> "theorem \"" <> thm <>
+                    "\" not in AxiomaticTheory[\"" <> theory <>
+                    "\", \"NotableTheorems\"]"|>]]];
+        conjuncts = If[ MatchQ[cjRaw, _List], cjRaw, {cjRaw}];
+        idx = Clip[takeConjunct, {1, Length[conjuncts]}];
+        nm = theory <> "__" <> thm <>
+            If[ Length[conjuncts] > 1, "__c" <> ToString[idx], ""];
+        wmGenerateProblem[nm, axioms, conjuncts[[idx]]]];
+
+(* ----------------------------------------------------------------- *)
+
 End[]
 
 Options[TSZSDerivationToProofObject] = {"ParseFormulas" -> False}
@@ -818,9 +1044,10 @@ TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
 (* Waldmeister wrapper: chain TWaldmeisterProof + the generic
    SZS-shaped builder.  WM's proof protocol parses into the same
    inference-record Association shape as Vampire's SZS, so the
-   exact same TSZSDerivationToProofObject path lifts it.  Only
-   supports the PATH form (.pr file) for now; the two-arg
-   (Theory, thm) form needs a TPTP->.pr converter, deferred. *)
+   exact same TSZSDerivationToProofObject path lifts it.  The
+   (Theory, thm) form resolves a banked .pr under
+   tools/baselines/wm_pr/ when present (byte-stable fast path) and
+   otherwise GENERATES the .pr at runtime via wmGenerateProblemFor. *)
 Options[TWaldmeisterProofObject] = {
     TimeConstraint  -> 30,
     "Binary"        -> Automatic,
@@ -836,26 +1063,27 @@ Options[TWaldmeisterProofObject] = {
     "LiftToProofObject" -> False
 }
 
-(* Two-arg (Theory, thm) form: resolve to a pre-generated .pr file
-   under tools/baselines/wm_pr/.  Pre-generate the .pr files via
-   tools/baselines/tptp_to_pr.wls; missing .pr returns
-   `NoCachedPr` Failure with the converter command line. *)
+(* Two-arg (Theory, thm) form: resolve to a banked .pr file under
+   tools/baselines/wm_pr/ when present (byte-stable fast path); on
+   cache-miss, GENERATE the .pr at runtime from the symbolic axioms +
+   conjecture (wmGenerateProblemFor) to a temp file and proceed.  Never
+   hard-fails on a missing banked file. *)
 TWaldmeisterProofObject[theory_String, thm_String,
         opts : OptionsPattern[]] /; FileExtension[theory] =!= "pr" :=
     Block[{path = FileNameJoin[{
             Directory[], "tools", "baselines", "wm_pr",
-            theory <> "__" <> thm <> ".pr"}]},
+            theory <> "__" <> thm <> ".pr"}], pr, tmp},
         If[ FileExistsQ[path],
             TWaldmeisterProofObject[path, opts],
-            Failure["NoCachedPr", <|
-                "Theory" -> theory,
-                "Theorem" -> thm,
-                "Reason" -> StringJoin[
-                    "Run `wolframscript -f tools/baselines/tptp_to_pr.wls ",
-                    "tools/baselines/vampire_tptp/", theory, "__", thm,
-                    ".p tools/baselines/wm_pr/", theory, "__", thm, ".pr`"
-                ]
-            |>]
+            (* cache-miss: generate the .pr from the symbolic theory. *)
+            pr = WolframInstitute`THVMLink`ATP`Private`wmGenerateProblemFor[
+                theory, thm];
+            If[ FailureQ[pr], Return[pr]];
+            tmp = FileNameJoin[{$TemporaryDirectory,
+                WolframInstitute`THVMLink`ATP`Private`wmSanitize[
+                    theory <> "__" <> thm] <> ".pr"}];
+            Export[tmp, pr, "Text"];
+            TWaldmeisterProofObject[tmp, opts]
         ]
     ]
 

@@ -13,14 +13,14 @@ RelatedGuides: [THVMLink]
 
 <code>[TWaldmeisterProofObject]()[*file*]</code> runs the local Waldmeister binary via [TWaldmeisterProof]() on a `.pr` problem *file* and converts the proof protocol through [TSZSDerivationToProofObject]() into a `thvm`-shaped proof Association.
 
-<code>[TWaldmeisterProofObject]()[*theory*, *thm*]</code> resolves a pre-generated `.pr` file under `tools/baselines/wm_pr/` from the (*theory*, *thm*) pair.
+<code>[TWaldmeisterProofObject]()[*theory*, *thm*]</code> resolves a banked `.pr` file under `tools/baselines/wm_pr/` from the (*theory*, *thm*) pair when one is present, and otherwise GENERATES the `.pr` at runtime from the theory's symbolic axioms and the named [NotableTheorem]() conjecture.
 
 It is the `Method -> "WaldmeisterProcess"` dispatch target in [TFindProof]().
 
 ## Details & Options
 
 - Each protocol inference lands under the internal engine's `ProofDataset` construct keys (`{"Axiom", n}`, `{"CriticalPairLemma", n}`, ...), with `"Backend" -> "SZS"`.
-- The `(theory, thm)` form returns a `NoCachedPr` `Failure` (carrying the converter command line) when the pre-generated `.pr` file is missing, because there is no in-process TPTP-to-`.pr` converter.
+- The `(theory, thm)` form uses a banked `.pr` under `tools/baselines/wm_pr/` as a byte-stable fast path; on a cache-miss it generates the `.pr` in-process (symbolic axioms and conjecture to TPTP CNF strings, then to `.pr` -- byte-identical to the banked construction) rather than failing.
 - Options:
   - `TimeConstraint`, `"Binary"`, `"MathlinkPath"` - forwarded to [TWaldmeisterProof]().
   - `"ParseFormulas"` (default `False`) - when `True`, each step's `Statement` is parsed into a Wolfram expression.
@@ -37,7 +37,7 @@ Needs["WolframInstitute`THVMLink`ATP`"];
 TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse",
     "LiftToProofObject" -> True, TimeConstraint -> 10]
 ```
-<!-- => ProofObject[...] (or Failure["NoCachedPr", ...] when the .pr file is absent) -->
+<!-- => ProofObject[...] (the .pr is generated at runtime on a cache-miss; Failure["ExternalNoProof", ...] when wmcli is unavailable) -->
 
 ## Properties & Relations
 
@@ -47,4 +47,4 @@ TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse",
 
 ## Possible Issues
 
-- The `(theory, thm)` form depends on a pre-generated `.pr` file (Waldmeister consumes its own `.pr` format, not TPTP); a missing file returns a `NoCachedPr` `Failure` with the generator command line rather than a proof.
+- The `(theory, thm)` form prefers a banked `.pr` file (Waldmeister consumes its own `.pr` format, not TPTP) for byte-stability, but no longer depends on one: a cache-miss is handled by generating the `.pr` at runtime. A non-equational conjecture (one Waldmeister's unit-equational format cannot express) returns a `Failure["WmGenerate", ...]`.
