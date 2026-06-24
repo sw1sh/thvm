@@ -9203,6 +9203,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_band_interleave  = 1u;
     s->use_drain_chainpos   = 1u;
     s->use_drain_revface    = 1u;
+    s->use_revface_cubeorder = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9239,6 +9240,16 @@ fn void thvm_atp_set_use_drain_chainpos(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_drain_revface(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_drain_revface = on ? 1u : 0u;
+}
+
+// Reverse-face cube emission order (see AtpState.use_revface_cubeorder):
+// sort a tops-batch's forward-cube CPs `x.(y.(y.y)) = x.x` before its
+// reverse-cube CPs `(x.(x.x)).y = y.y` within one A-tops k2=1 group, matching
+// WM's forward-before-reverse single-scan emission.  DEFAULT OFF; also turned
+// ON under use_formation_fifo.
+fn void thvm_atp_set_use_revface_cubeorder(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_revface_cubeorder = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -16063,6 +16074,50 @@ static u8 atp_pair_is_posgroup_cube(Term l, Term r) {
   return 0u;
 }
 
+// f(x, f(y, f(y, y))) with x != y, all bare vars: `x.(y.(y.y))`.  The FORWARD
+// cube face -- the recursive `(y.(y.y))` sits on the RIGHT of the outermost
+// dot, mirror of atp_term_is_cube_dot_var's `(x.(x.x)).y` (recursive on the
+// left).  *out_x binds the outer-left variable so the idempotent sibling
+// `x.x` can be checked against it.
+static u8 atp_term_is_var_dot_cube(Term t, u32 *out_x, u32 *out_y) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
+  if (term_tag(t0) != TAG_FVR) return 0u;                  // x
+  if (term_tag(t1) != TAG_CTR || term_ext(t1) != term_ext(t) ||
+      term_ctr_n(t1) != 2u) return 0u;                     // f(y, f(y,y))
+  Term t10 = term_ctr_at(t1, 0), t11 = term_ctr_at(t1, 1);
+  if (term_tag(t10) != TAG_FVR) return 0u;                 // y
+  if (term_tag(t11) != TAG_CTR || term_ext(t11) != term_ext(t) ||
+      term_ctr_n(t11) != 2u) return 0u;                    // f(y, y)
+  Term t110 = term_ctr_at(t11, 0), t111 = term_ctr_at(t11, 1);
+  if (term_tag(t110) != TAG_FVR || term_tag(t111) != TAG_FVR) return 0u;
+  u32 y = term_ext(t10);
+  if (term_ext(t110) != y || term_ext(t111) != y) return 0u;
+  *out_x = term_ext(t0);
+  *out_y = y;
+  return (u8)(*out_x != y);
+}
+
+// f(x, x) with the x bound by the sibling `x.(y.(y.y))`.
+static u8 atp_term_is_dot_xx(Term t, u32 x) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
+  if (term_tag(t0) != TAG_FVR || term_tag(t1) != TAG_FVR) return 0u;
+  return (u8)(term_ext(t0) == x && term_ext(t1) == x);
+}
+
+// Whether a NORMALIZED CP is the FORWARD cube `x.(y.(y.y)) = x.x` shape (the
+// soa weight-120 FWD face, mirror of atp_pair_is_posgroup_cube's reverse
+// `(x.(x.x)).y = y.y`), modulo orientation and variable renaming.
+static u8 atp_pair_is_fwd_cube(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 x = 0, y = 0;
+  if (atp_term_is_var_dot_cube(l, &x, &y) && atp_term_is_dot_xx(r, x)) return 1u;
+  if (atp_term_is_var_dot_cube(r, &x, &y) && atp_term_is_dot_xx(l, x)) return 1u;
+  return 0u;
+}
+
 // Classify a 2-variable leaf factor X = f(a, b) as a band variant relative to
 // the bare variable x (the other variable y is the one that is not x):
 //   1 = (x.y)   2 = (y.x)   3 = (y.y)
@@ -16785,6 +16840,77 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         for (u32 a = 0; a < n_l22; a++) {
           big[l22_idx[order2[a]]].key = l22_key[a];
         }
+      }
+    }
+    // Reverse-face cube emission order (default OFF; see use_revface_cubeorder).
+    // The soa firstdiv-2540 divergence: a tops batch forms the FORWARD cube
+    // `x.(y.(y.y)) = x.x` (atp_pair_is_fwd_cube) by overlapping the new fact
+    // onto an asymmetric var-differ partner equation's REVERSE face.  WM stores
+    // that partner ORIENTED; its single discrimination-tree scan reaches the
+    // overlap on the partner's EARLY distinguished-face leaf, so WM ages the
+    // forward cube there (ahead of the reverse cubes it emits later -- picks
+    // 2538-2542 FWD, then 2543+ REV).  thvm's co-rank (atp_wmo_rank, the
+    // wmo_eq_sides_var_differ branch) normally pulls the cube onto that early
+    // forward leaf too, BUT suppresses it when the cube reproduces a live
+    // equation (the soa pick-113 case: `atp_pop_eq_subsumed` zeroes the forward
+    // anchor), leaving the cube at its LATE reverse-face arrival.  At rule-60/
+    // 64 that suppression is wrong -- WM still co-ranks the cube early -- so it
+    // scatters past the reverse cubes (firstdiv 2540).  This gate re-applies
+    // the un-suppressed co-rank: it re-keys exactly the cubes the suppression
+    // mis-aged (arr_o < cur_arr AND subsumed) onto WM's early forward-leaf slot
+    // (arrival arr_o, chain ch_o*2+1, mirroring atp_wmo_rank's anchor branch).
+    // Scoped HARD: A phase (key>>58==0), the equation tree (k2 == 1), the exact
+    // normalized forward-cube shape, a var-differ partner, and the suppressed-
+    // co-rank condition -- never a generic equal-weight reorder.  A cube whose
+    // forward face is NOT subsumed-suppressed (its k3 is its genuine arrival,
+    // soa rule-37 picks 349-355) is left untouched.  OFF byte-identical.
+    if (s->use_revface_cubeorder) {
+      for (u32 kb = 0; kb < n_big; kb++) {
+        if ((big[kb].key >> 58) != 0u) continue;     // A phase only
+        if (((big[kb].key >> 42) & 3u) != 1u) continue; // equation-tree k2 == 1
+        // L.2 overlap position only (pos path [1]).  At L.1 (pos[0]==0) the
+        // co-rank suppression IS WM-faithful (the new fact's L.1 subterm
+        // genuinely reaches the cube on the late leaf), so re-applying the
+        // anchor there mis-orders the L.1 cube cluster (soa picks ~965).  Only
+        // the L.2 cursor walk surfaces the cube on the early forward leaf.
+        if (big[kb].cp.pos_len != 1u || big[kb].cp.pos[0] != 1u) continue;
+        Term nlb = atp_rewrite_normalize_indexed(s, big[kb].cp.lhs, 4096u);
+        Term nrb = atp_rewrite_normalize_indexed(s, big[kb].cp.rhs, 4096u);
+        if (!atp_pair_is_fwd_cube(nlb, nrb)) continue;
+        AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+        u32 jt = s->r_trace[big[kb].j];
+        if (!wmo_eq_sides_var_differ(s->lhs[big[kb].j], s->rhs[big[kb].j]))
+          continue;
+        u8  j_dr_b = wmo_trace_dist_rhs(w, jt);
+        u8  j_face_wm_b = (big[kb].combo & 1u) ^ j_dr_b;
+        u8  i_face_b = (big[kb].combo >> 1) & 1u;
+        Term qsub_b = i_face_b ? s->rhs[big[kb].i] : s->lhs[big[kb].i];
+        for (u32 d = 0; d < big[kb].cp.pos_len; d++) {
+          if (term_tag(qsub_b) != TAG_CTR) break;
+          qsub_b = term_ctr_at(qsub_b, big[kb].cp.pos[d]);
+        }
+        u32 cur_arr = 0, cur_ch = 0, arr_o = 0, ch_o = 0;
+        if (!wmo_tops_rank(w, 1u, qsub_b, jt, j_face_wm_b, &cur_arr, &cur_ch))
+          continue;
+        if (!wmo_tops_rank(w, 1u, qsub_b, jt, (u8)(j_face_wm_b ^ 1u),
+                           &arr_o, &ch_o))
+          continue;
+        if (arr_o >= cur_arr) continue;              // forward not earlier
+        if (kbo_eq(nlb, nrb) || !atp_pop_eq_subsumed(s, nlb, nrb))
+          continue;                                  // not a suppressed cube
+        // Re-key the cube to the slot the un-suppressed co-rank would have
+        // given it: its forward-leaf arrival arr_o, chain ch_o*2+1 (so it
+        // sorts right after the partner's distinguished-face CP, exactly as
+        // atp_wmo_rank's `arr = arr_o; ch = ch_o*2+1` branch does).  This
+        // places the cube in WM's single-scan leaf order -- not blindly ahead
+        // of every reverse cube, so a partial-interleave batch (soa rule-61:
+        // reverse cubes both before AND after the forward leaf) keeps its
+        // surrounding order.  Replace only the k3|k4|k5 (arrival|chain) bits;
+        // phase|k1|k2 stay.
+        u32 new_arr = arr_o > 0x3fffu ? 0x3fffu : arr_o;
+        u32 new_ch  = (ch_o * 2u + 1u) > 0x3fffu ? 0x3fffu : (ch_o * 2u + 1u);
+        big[kb].key = (big[kb].key & ~((1ull << 42) - 1ull)) |
+                      ((u64)new_arr << 28) | ((u64)new_ch << 14);
       }
     }
     qsort(big, n_big, sizeof(AtpWmoCpEnt), atp_wmo_ent_cmp);

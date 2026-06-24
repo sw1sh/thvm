@@ -1021,6 +1021,15 @@ int main(int argc, char **argv) {
       // (also turned on by FORMATION_FIFO below).  See soa.txt.
       thvm_atp_set_use_drain_revface(
           s, (getenv("THVM_ATP_DRAIN_REVFACE") != NULL) ? 1u : 0u);
+      // Reverse-face cube emission order (DEFAULT OFF).  Within one A-tops
+      // k2=1 equation-partner group at a single overlap position, sorts the
+      // weight-120 FORWARD cube `x.(y.(y.y)) = x.x` CPs before the REVERSE
+      // cube `(x.(x.x)).y = y.y` CPs, matching WM's single-scan
+      // forward-before-reverse emission (soa picks 2538-2542 FWD then 2543+
+      // REV).  Advances soa firstdiv past 2540.  THVM_ATP_REVFACE_CUBEORDER
+      // opts in (also turned on by FORMATION_FIFO below).  See soa.txt.
+      thvm_atp_set_use_revface_cubeorder(
+          s, (getenv("THVM_ATP_REVFACE_CUBEORDER") != NULL) ? 1u : 0u);
       // WM-faithful discrimination-tree construction (DEFAULT OFF).  Splices
       // BlattAufgeteilt parallels for genuine enclosing subterms AFTER the model
       // (WM AltesBlattPolieren DSBaumOperationen.c :523-526), but keeps the

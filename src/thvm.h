@@ -5791,6 +5791,30 @@ typedef struct {
   // leaf-list position, matching GMInterred.  OFF byte-identical; advances
   // soa firstdiv 1558 -> beyond.  See tools/baselines/wm_align_reports/soa.txt.
   u8    use_drain_revface;
+  // Reverse-face cube emission order (env THVM_ATP_REVFACE_CUBEORDER, DEFAULT
+  // OFF; also turned ON under use_formation_fifo).  The soa firstdiv-2540
+  // divergence, one overlap position's weight-120 equation-partner group: a
+  // selected fact's tops batch forms, at its L.2 subterm against the EQUATION
+  // tree (atp_wmo_rank k2=1), both faces of the asymmetric cube identity --
+  // the FORWARD face `x.x = x.(y.(y.y))` (atp_pair_is_fwd_cube) and the
+  // REVERSE face `x.x = (y.(y.y)).x` (atp_pair_is_posgroup_cube).  WM stores
+  // these partners ORIENTED and its single discrimination-tree scan over the
+  // query subterm surfaces every partner's FORWARD-face CP before its
+  // reverse-face CP, so WM ages (and selects) all the forward cubes ahead of
+  // the reverse cubes (picks 2538-2542 FWD, then 2543+ REV).  thvm instead
+  // keys both by the partner equation's tree arrival (k3): the reverse-cube
+  // partners index at an EARLIER leaf (arrival 12/14) than the forward-cube
+  // partners (arrival 16), so thvm emits the reverse cubes first -- the
+  // OPPOSITE block order (firstdiv 2540: thvm picks REV where WM picks FWD).
+  // This gate re-keys, within one A-tops k2 group (identical phase|k1|k2
+  // prefix), every forward-cube CP that thvm sorts AFTER a same-group
+  // reverse-cube CP to sort immediately BEFORE the earliest such reverse cube,
+  // restoring WM's forward-before-reverse cube emission.  Scoped HARD: A phase
+  // (tops, key>>58==0), the partner is the equation tree (k2==1), and both the
+  // re-keyed CP and its anchor are the EXACT normalized cube faces -- never a
+  // generic equal-weight reorder.  OFF byte-identical; advances soa firstdiv
+  // 2540 -> beyond.  See tools/baselines/wm_align_reports/soa.txt.
+  u8    use_revface_cubeorder;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6222,6 +6246,9 @@ fn void      thvm_atp_set_use_drain_chainpos(AtpState *s, u8 on);
 // WM GMInterred reducible-face drain order (see AtpState.use_drain_revface).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_drain_revface(AtpState *s, u8 on);
+// Reverse-face cube emission order (see AtpState.use_revface_cubeorder).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_revface_cubeorder(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
