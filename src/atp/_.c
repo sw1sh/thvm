@@ -345,6 +345,14 @@ u64 g_atp_unorient_step_calls     = 0;
 u64 g_atp_unorient_step_fires     = 0;
 u64 g_atp_unorient_step_empty     = 0;
 u64 g_atp_unorient_step_us        = 0;
+// WM cp-gen overlap-candidate accounting (profile only): the candidates the
+// index actually iterates vs the full-scan partner count (n + first) the
+// unindexed loops would have visited per new fact.  Their ratio is the
+// O(n_rules)-scan reduction.
+u64 g_atp_wmcp_cand               = 0;
+u64 g_atp_wmcp_full               = 0;
+u64 g_atp_wmcp_zero               = 0;
+u64 g_atp_wmcp_nonzero            = 0;
 u8  g_atp_phase_enabled           = 0;
 // Perm-subsume AC-operator mask (WM GZ_ACVerzichtbar / dokgP).  Set by
 // thvm_atp_set_perm_subsume_mask (from thvm_atp_auto_ac's detected AC
@@ -4127,7 +4135,37 @@ static void atp_cp_index_descend(u32 node, u32 pos, u32 qend) {
   }
 }
 
-// Build cp_index from s->lhs[0..n_rules): one whole-LHS term per rule,
+// Insert one whole-face term `t` (a rule's lhs OR rhs) into the cp_index,
+// keyed to `rule`.  Both faces of every rule are inserted: an UNFAILING
+// overlap (atp_overlap_ij combos 1-3) plants the inner rule's RHS face
+// (or walks the outer's RHS face), so a candidate filter that indexed the
+// LHS face only would MISS the j whose RHS unifies with the query subterm
+// -- dropping a CP and breaking WM-trace parity.  Indexing both faces
+// keeps the candidate set a sound SUPERSET of every overlap combo; the
+// de-dup in atp_cp_cand_add collapses the two face records of one rule.
+static void atp_cp_index_insert_face(AtpRuleIndex *ix, Term t, u32 rule) {
+  AtpDTreeVarMap vm;
+  atp_dtree_varmap_reset(&vm);
+  u32 node = atp_ri_insert_term(ix, ix->root, t, &vm);
+  u32 rec  = atp_ri_rec_new(ix);
+  ix->recs[rec].rule       = rule;
+  ix->recs[rec].next       = ix->nodes[node].rec_head;
+  ix->nodes[node].rec_head = rec;
+}
+
+static void atp_cp_seen_ensure(AtpState *s) {
+  if (g_atp_cp_seencap < s->n_rules) {
+    u32 cap = g_atp_cp_seencap ? g_atp_cp_seencap : 1024u;
+    while (cap < s->n_rules) cap *= 2u;
+    u32 *p = (u32 *)realloc(g_atp_cp_seen, (size_t)cap * sizeof(u32));
+    if (p == NULL) thvm_fatal("atp_cp_index: seen OOM");
+    g_atp_cp_seen   = p;
+    for (u32 k = g_atp_cp_seencap; k < cap; k++) g_atp_cp_seen[k] = 0u;
+    g_atp_cp_seencap = cap;
+  }
+}
+
+// Build cp_index from s->lhs/rhs[0..n_rules): both whole faces per rule,
 // keyed by the atp_dtree_flatsym first-appearance symbol string.  Rebuilt
 // (like rule_index) whenever R mutates.
 static void atp_cp_index_rebuild(AtpState *s) {
@@ -4144,88 +4182,80 @@ static void atp_cp_index_rebuild(AtpState *s) {
       && ix->root != ATP_DTREE_NIL
       && s->r_revision - ix->built_revision
              == s->n_rules - ix->n_rules_built) {
-    AtpDTreeVarMap vm;
     for (u32 i = ix->n_rules_built; i < s->n_rules; i++) {
-      atp_dtree_varmap_reset(&vm);
-      u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
-      u32 rec  = atp_ri_rec_new(ix);
-      ix->recs[rec].rule    = i;
-      ix->recs[rec].next    = ix->nodes[node].rec_head;
-      ix->nodes[node].rec_head = rec;
+      atp_cp_index_insert_face(ix, s->lhs[i], i);
+      atp_cp_index_insert_face(ix, s->rhs[i], i);
     }
     ix->n_rules_built  = s->n_rules;
     ix->built_revision = s->r_revision;
-    if (g_atp_cp_seencap < s->n_rules) {
-      u32 cap = g_atp_cp_seencap ? g_atp_cp_seencap : 1024u;
-      while (cap < s->n_rules) cap *= 2u;
-      u32 *p = (u32 *)realloc(g_atp_cp_seen, (size_t)cap * sizeof(u32));
-      if (p == NULL) thvm_fatal("atp_cp_index: seen OOM");
-      g_atp_cp_seen   = p;
-      for (u32 k = g_atp_cp_seencap; k < cap; k++) g_atp_cp_seen[k] = 0u;
-      g_atp_cp_seencap = cap;
-    }
+    atp_cp_seen_ensure(s);
     return;
   }
   ix->n_nodes = 0;
   ix->n_recs  = 0;
   ix->root    = atp_ri_node_new(ix, ATP_DTREE_NIL);
-  AtpDTreeVarMap vm;
   for (u32 i = 0; i < s->n_rules; i++) {
-    atp_dtree_varmap_reset(&vm);
-    u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
-    u32 rec  = atp_ri_rec_new(ix);
-    ix->recs[rec].rule    = i;
-    ix->recs[rec].next    = ix->nodes[node].rec_head;
-    ix->nodes[node].rec_head = rec;
+    atp_cp_index_insert_face(ix, s->lhs[i], i);
+    atp_cp_index_insert_face(ix, s->rhs[i], i);
   }
   ix->n_rules_built  = s->n_rules;
   ix->built_revision = s->r_revision;
-  if (g_atp_cp_seencap < s->n_rules) {
-    u32 cap = g_atp_cp_seencap ? g_atp_cp_seencap : 1024u;
-    while (cap < s->n_rules) cap *= 2u;
-    u32 *p = (u32 *)realloc(g_atp_cp_seen, (size_t)cap * sizeof(u32));
-    if (p == NULL) thvm_fatal("atp_cp_index: seen OOM");
-    g_atp_cp_seen   = p;
-    for (u32 k = g_atp_cp_seencap; k < cap; k++) g_atp_cp_seen[k] = 0u;
-    g_atp_cp_seencap = cap;
-  }
+  atp_cp_seen_ensure(s);
 }
 
-// Collect the candidate partner rules for overlapping a new rule whose
-// LHS is `li`: every rule j with lj unifiable with a non-var subterm of
-// li.  `li` is flattened once; each non-var position queries cp_index.
-// Returns the count (in g_atp_cp_cand) or sets g_atp_cp_overflow.
-static u32 atp_cp_index_collect(AtpState *s, Term li) {
-  static Term qflat[ATP_RI_FLAT_CAP];
-  static u32  qsubsz[ATP_RI_FLAT_CAP];
-  static u32  qflatsym[ATP_RI_FLAT_CAP];
-  u8  folded = 0;
-  u32 pos    = 0;
-  if (!atp_ri_flatten(li, qflat, qsubsz, qflatsym, &folded,
-                      ATP_RI_FLAT_CAP, &pos)) {
-    g_atp_cp_overflow = 1u;            // subject too deep -> exact scan
-    return 0;
-  }
-  g_atp_cp_ix       = s->cp_index;
-  g_atp_cp_qflat    = qflat;
-  g_atp_cp_qsubsz   = qsubsz;
-  g_atp_cp_qflatsym = qflatsym;
+// Begin a candidate-collection pass: clear the buffer + de-dup epoch so a
+// fresh query rule's candidates accumulate from empty.  Both faces of the
+// query rule descend into the SAME pass, so a rule reachable via either
+// face is collected once.
+static void atp_cp_collect_begin(void) {
   g_atp_cp_ncand    = 0;
   g_atp_cp_overflow = 0;
   if (++g_atp_cp_epoch == 0u) {        // wrapped: clear so stale != epoch
     for (u32 k = 0; k < g_atp_cp_seencap; k++) g_atp_cp_seen[k] = 0u;
     g_atp_cp_epoch = 1u;
   }
-  // Every non-variable subterm position of li is a candidate overlap
-  // site -- cp_visit walks exactly these (it skips TAG_FVR).  Querying
-  // each gathers the rules whose lhs could unify there.
+}
+
+// Descend cp_index against every non-var subterm position of one query
+// FACE `qf` (a rule's lhs or rhs), accumulating into the current pass.
+// cp_visit walks exactly the non-var positions; querying each gathers the
+// rules whose stored face could unify there.  Sets g_atp_cp_overflow on a
+// too-deep subject.
+static void atp_cp_index_collect_face(AtpState *s, Term qf) {
+  static Term qflat[ATP_RI_FLAT_CAP];
+  static u32  qsubsz[ATP_RI_FLAT_CAP];
+  static u32  qflatsym[ATP_RI_FLAT_CAP];
+  u8  folded = 0;
+  u32 pos    = 0;
+  if (!atp_ri_flatten(qf, qflat, qsubsz, qflatsym, &folded,
+                      ATP_RI_FLAT_CAP, &pos)) {
+    g_atp_cp_overflow = 1u;            // subject too deep -> exact scan
+    return;
+  }
+  g_atp_cp_ix       = s->cp_index;
+  g_atp_cp_qflat    = qflat;
+  g_atp_cp_qsubsz   = qsubsz;
+  g_atp_cp_qflatsym = qflatsym;
   for (u32 p = 0; p < pos; p++) {
     u32 qsym = qflatsym[p];
     if (qsym >= ATP_DTREE_STAR_BASE && qsym < ATP_DTREE_CTR_BASE) continue; // var
     u32 qend = p + qsubsz[p];
     atp_cp_index_descend(s->cp_index->root, p, qend);
-    if (g_atp_cp_overflow) return 0;
+    if (g_atp_cp_overflow) return;
   }
+}
+
+// Collect the candidate partner rules for overlapping a new rule `f` as
+// the OUTER face: every rule whose stored face unifies with a non-var
+// subterm of either of f's faces.  Both faces of f are queried because an
+// unfailing outer overlaps from its RHS face too (atp_overlap_ij combos
+// 2/3).  Returns the count (in g_atp_cp_cand) or sets g_atp_cp_overflow.
+static u32 atp_cp_index_collect(AtpState *s, u32 f) {
+  atp_cp_collect_begin();
+  atp_cp_index_collect_face(s, s->lhs[f]);
+  if (g_atp_cp_overflow) return 0;
+  atp_cp_index_collect_face(s, s->rhs[f]);
+  if (g_atp_cp_overflow) return 0;
   return g_atp_cp_ncand;
 }
 
@@ -4248,7 +4278,11 @@ static void atp_cp_subindex_insert(AtpRuleIndex *ix, Term t, u32 rule,
   }
 }
 
-// Build cp_subindex: every non-var subterm of every rule LHS -> rule.
+// Build cp_subindex: every non-var subterm of BOTH faces of every rule ->
+// rule.  Both faces are inserted for the same unfailing-overlap reason as
+// atp_cp_index_rebuild: the new rule's face plants into an OLD rule's RHS
+// face too (atp_overlap_ij combos 1/2 in the old-i x new-j direction), so
+// indexing only the LHS subterms would drop those partners.
 static void atp_cp_subindex_rebuild(AtpState *s) {
   AtpRuleIndex *ix = s->cp_subindex;
   // Incremental fast-path: same shape as atp_cp_index_rebuild,
@@ -4262,6 +4296,8 @@ static void atp_cp_subindex_rebuild(AtpState *s) {
     for (u32 i = ix->n_rules_built; i < s->n_rules; i++) {
       atp_dtree_varmap_reset(&vm);
       atp_cp_subindex_insert(ix, s->lhs[i], i, &vm);
+      atp_dtree_varmap_reset(&vm);
+      atp_cp_subindex_insert(ix, s->rhs[i], i, &vm);
     }
     ix->n_rules_built  = s->n_rules;
     ix->built_revision = s->r_revision;
@@ -4274,36 +4310,44 @@ static void atp_cp_subindex_rebuild(AtpState *s) {
   for (u32 i = 0; i < s->n_rules; i++) {
     atp_dtree_varmap_reset(&vm);
     atp_cp_subindex_insert(ix, s->lhs[i], i, &vm);
+    atp_dtree_varmap_reset(&vm);
+    atp_cp_subindex_insert(ix, s->rhs[i], i, &vm);
   }
   ix->n_rules_built  = s->n_rules;
   ix->built_revision = s->r_revision;
 }
 
-// Collect candidate partner rules for the (old i x new j) direction:
-// every rule i whose LHS li has a NON-VAR subterm unifiable with the new
-// rule's whole LHS `lj`.  Query the subterm index once with `lj`.
-static u32 atp_cp_subindex_collect(AtpState *s, Term lj) {
+// Descend cp_subindex against one whole query face `qf` (a rule's lhs or
+// rhs), accumulating into the current pass: gather every rule whose stored
+// face has a non-var subterm unifiable with `qf`.
+static void atp_cp_subindex_collect_face(AtpState *s, Term qf) {
   static Term qflat[ATP_RI_FLAT_CAP];
   static u32  qsubsz[ATP_RI_FLAT_CAP];
   static u32  qflatsym[ATP_RI_FLAT_CAP];
   u8  folded = 0;
   u32 pos    = 0;
-  if (!atp_ri_flatten(lj, qflat, qsubsz, qflatsym, &folded,
+  if (!atp_ri_flatten(qf, qflat, qsubsz, qflatsym, &folded,
                       ATP_RI_FLAT_CAP, &pos)) {
     g_atp_cp_overflow = 1u;
-    return 0;
+    return;
   }
   g_atp_cp_ix       = s->cp_subindex;
   g_atp_cp_qflat    = qflat;
   g_atp_cp_qsubsz   = qsubsz;
   g_atp_cp_qflatsym = qflatsym;
-  g_atp_cp_ncand    = 0;
-  g_atp_cp_overflow = 0;
-  if (++g_atp_cp_epoch == 0u) {
-    for (u32 k = 0; k < g_atp_cp_seencap; k++) g_atp_cp_seen[k] = 0u;
-    g_atp_cp_epoch = 1u;
-  }
   atp_cp_index_descend(s->cp_subindex->root, 0u, pos);
+}
+
+// Collect candidate partner rules for the (old i x new f) direction: every
+// old rule i whose stored face has a non-var subterm unifiable with one of
+// f's whole faces.  Both faces of f are queried because an unfailing new
+// rule plants from its RHS face too (atp_overlap_ij combo 1 in this
+// direction).  Returns the count (in g_atp_cp_cand) or sets overflow.
+static u32 atp_cp_subindex_collect(AtpState *s, u32 f) {
+  atp_cp_collect_begin();
+  atp_cp_subindex_collect_face(s, s->lhs[f]);
+  if (g_atp_cp_overflow) return 0;
+  atp_cp_subindex_collect_face(s, s->rhs[f]);
   if (g_atp_cp_overflow) return 0;
   return g_atp_cp_ncand;
 }
@@ -16436,6 +16480,9 @@ static u32 atp_wmo_collect_pair(AtpState *s, u32 i, u32 j,
   }
   u32 combo_end[4] = {0, 0, 0, 0};
   u32 nbuf = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH, combo_end);
+  if (g_atp_phase_enabled) {
+    if (nbuf == 0u) g_atp_wmcp_zero++; else g_atp_wmcp_nonzero++;
+  }
   if (nbuf == 0u) return 0;
   if (*n_big + nbuf > *cap_big) {
     u32 cap = *cap_big ? *cap_big : 256u;
@@ -16469,9 +16516,77 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
 
   CriticalPair buf[ATP_CP_BATCH];
   u32 pushed = 0;
+#ifdef ATP_RULE_INDEX
+  // Overlap-partner index (default ON for the WM presets, gated by
+  // use_cp_index).  The two collect loops below superpose a new fact `f`
+  // against EVERY existing rule -- an O(n_rules)/step scan that profiles at
+  // ~95% of the WM saturation, yet most pairs collect zero CPs (no
+  // unifiable subterm).  The discrimination-tree filter returns a sound
+  // SUPERSET of the truly-overlapping partners (both faces indexed +
+  // queried, so every unfailing combo is covered), and the authoritative
+  // thvm_unify in cp_visit gates emission, so the CP SET is identical.  The
+  // batch is re-keyed by atp_wmo_rank and re-sorted, and each direction's
+  // candidates are visited in ASCENDING rule order (atp_cp_cand_sort),
+  // exactly as the full scans did -- so the per-CP FIFO `seq` tiebreak is
+  // byte-identical too.  On a candidate-buffer / subject-depth overflow the
+  // affected direction falls back to the exact n_rules scan, preserving the
+  // set even when the index over-runs its scratch.
+  u8 cp_ix = s->use_cp_index ? 1u : 0u;
+  if (cp_ix) {
+    if (s->cp_index == NULL)    s->cp_index    = atp_ri_new();
+    if (s->cp_subindex == NULL) s->cp_subindex = atp_ri_new();
+    // Stale iff EITHER the rule count or the rule-set revision moved (an
+    // interreduce drop+add keeps n_rules constant while renumbering slots).
+    if (s->cp_index->n_rules_built != n ||
+        s->cp_index->built_revision != s->r_revision) {
+      atp_cp_index_rebuild(s);
+      atp_cp_subindex_rebuild(s);
+    }
+  }
+#endif
   for (u32 f = first; f < last; f++) {
     AtpWmoCpEnt *big = NULL;
     u32 n_big = 0, cap_big = 0;
+#ifdef ATP_RULE_INDEX
+    if (cp_ix) {
+      // tops + self: f as the OUTER.  Candidates j (ascending) are rules
+      // whose stored face unifies with a non-var subterm of one of f's
+      // faces.  f itself is in the index (whole-LHS at its root), so the
+      // self pair is collected.
+      u32 nc = atp_cp_index_collect(s, f);
+      if (g_atp_cp_overflow) {
+        if (g_atp_phase_enabled) g_atp_wmcp_cand += n;
+        for (u32 j = 0; j < n; j++)
+          atp_wmo_collect_pair(s, f, j, &big, &n_big, &cap_big, buf);
+      } else {
+        if (g_atp_phase_enabled) g_atp_wmcp_cand += nc;
+        atp_cp_cand_sort();
+        for (u32 c = 0; c < nc; c++)
+          atp_wmo_collect_pair(s, f, g_atp_cp_cand[c], &big, &n_big,
+                               &cap_big, buf);
+      }
+      // eTT: f as the INNER, planted into OLD facts (i < first).  Candidates
+      // i (ascending) are OLD rules whose stored face has a non-var subterm
+      // unifiable with one of f's faces.
+      nc = atp_cp_subindex_collect(s, f);
+      if (g_atp_cp_overflow) {
+        if (g_atp_phase_enabled) g_atp_wmcp_cand += first;
+        for (u32 i = 0; i < first; i++)
+          atp_wmo_collect_pair(s, i, f, &big, &n_big, &cap_big, buf);
+      } else {
+        atp_cp_cand_sort();
+        for (u32 c = 0; c < nc; c++) {
+          u32 i = g_atp_cp_cand[c];
+          if (i < first) {
+            if (g_atp_phase_enabled) g_atp_wmcp_cand += 1u;
+            atp_wmo_collect_pair(s, i, f, &big, &n_big, &cap_big, buf);
+          }
+        }
+      }
+      if (g_atp_phase_enabled) g_atp_wmcp_full += (u64)n + (u64)first;
+    } else
+#endif
+    {
     // tops + self: f as the outer (positions in f's faces)
     for (u32 j = 0; j < n; j++) {
       atp_wmo_collect_pair(s, f, j, &big, &n_big, &cap_big, buf);
@@ -16479,6 +16594,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // eTT: f as the inner, planted into the OLD facts' positions
     for (u32 i = 0; i < first; i++) {
       atp_wmo_collect_pair(s, i, f, &big, &n_big, &cap_big, buf);
+    }
     }
     for (u32 k = 0; k < n_big; k++) {
       big[k].key = atp_wmo_rank(s, f, big[k].i, big[k].j, big[k].combo,
@@ -17076,10 +17192,11 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
       atp_cp_index_rebuild(s);          // grows g_atp_cp_seen to cover n
       atp_cp_subindex_rebuild(s);
     }
-    // (new x all_R): for each new rule i, candidates j are rules whose lj
-    // unifies with a non-var subterm of li -- the whole-LHS index query.
+    // (new x all_R): for each new rule i, candidates j are rules whose
+    // stored face unifies with a non-var subterm of one of i's faces --
+    // the whole-face index query (both faces, for the unfailing overlap).
     for (u32 i = first; i < last; i++) {
-      u32 nc = atp_cp_index_collect(s, s->lhs[i]);
+      u32 nc = atp_cp_index_collect(s, i);
       if (g_atp_cp_overflow) {
         for (u32 j = 0; j < n; j++) pushed += atp_gen_one(s, i, j, buf);
       } else {
@@ -17090,10 +17207,11 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
       }
     }
     // (old x new): for each new rule j, candidates i are OLD rules whose
-    // li has a non-var subterm unifiable with the new lj -- the subterm
-    // index query.  Only i < first (old) are this loop's partners.
+    // stored face has a non-var subterm unifiable with one of j's faces --
+    // the subterm index query (both faces).  Only i < first (old) are this
+    // loop's partners.
     for (u32 j = first; j < last; j++) {
-      u32 nc = atp_cp_subindex_collect(s, s->lhs[j]);
+      u32 nc = atp_cp_subindex_collect(s, j);
       if (g_atp_cp_overflow) {
         for (u32 i = 0; i < first; i++) pushed += atp_gen_one(s, i, j, buf);
       } else {

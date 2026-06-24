@@ -1234,6 +1234,19 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_incr_ir(s, 1u);
     }
   }
+  // THVM_ATP_CP_INDEX=0: disable the cp-gen overlap-partner index (it is ON
+  // by default in the WM preset).  The index is a sound, parity-identical
+  // candidate filter -- it prunes well on multi-symbol theories but is a
+  // near-no-op on single-operator theories (Sheffer/OrAssoc) where every
+  // rule LHS shares the binary head.  This override allows A/B measurement
+  // and a safety-off.  An explicit "1" force-enables it independent of the
+  // preset.
+  {
+    const char *ci = getenv("THVM_ATP_CP_INDEX");
+    if (ci != NULL && ci[0] != '\0') {
+      thvm_atp_set_use_cp_index(s, (ci[0] != '0') ? 1u : 0u);
+    }
+  }
   // THVM_ATP_DATABASE_ULTIMATE=1: port of WM's `database = ultimate`
   // (Parameter.c:166 -- the other half of the WM default classification
   // alongside initial=ultimate).  Tags every CP derived from rule-
@@ -1804,6 +1817,21 @@ int main(int argc, char **argv) {
              100.0 * (double)g_atp_unorient_step_empty /
                      (double)g_atp_unorient_step_calls,
              g_atp_unorient_step_us / 1e6);
+    }
+    if (g_atp_wmcp_full > 0) {
+      printf("   wm-cp-cand: %llu candidates / %llu full-scan partners "
+             "(%.1f%% visited, prune %.1fx)\n",
+             (unsigned long long)g_atp_wmcp_cand,
+             (unsigned long long)g_atp_wmcp_full,
+             100.0 * (double)g_atp_wmcp_cand / (double)g_atp_wmcp_full,
+             (double)g_atp_wmcp_full / (double)(g_atp_wmcp_cand ? g_atp_wmcp_cand : 1));
+      printf("   wm-cp-overlap: %llu zero-yield / %llu nonzero-yield pairs "
+             "(%.1f%% wasted overlaps)\n",
+             (unsigned long long)g_atp_wmcp_zero,
+             (unsigned long long)g_atp_wmcp_nonzero,
+             100.0 * (double)g_atp_wmcp_zero /
+                     (double)((g_atp_wmcp_zero + g_atp_wmcp_nonzero)
+                              ? (g_atp_wmcp_zero + g_atp_wmcp_nonzero) : 1));
     }
     {
       u64 unf_total = g_atp_unf_memo_hits + g_atp_unf_memo_misses;
