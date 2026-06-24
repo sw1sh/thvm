@@ -1786,6 +1786,12 @@ static void atp_fv_index_remove(AtpFvIndex *ix, u32 seq) {
 static void atp_fv_index_rebuild(AtpState *s) {
   AtpFvIndex *ix = s->fv_index;
   if (ix == NULL) return;
+  // The WM presets disable use_queue_subsume (the queue must match WM's
+  // FIFO composition), so the index is never queried -- rebuilding it is
+  // pure waste, and its tree dominates the GC heap on large saturations.
+  // The insert is gated the same way, so the index stays empty; skipping
+  // the rebuild is byte-identical to the saturation (nothing reads it).
+  if (!s->use_queue_subsume) return;
   ix->n_nodes = 0;
   ix->n_recs  = 0;
   ix->n_live  = 0;
@@ -7473,7 +7479,12 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   s->n_cps++;
   atp_cp_sift_up(s, i);
 #ifdef ATP_FV_INDEX
-  atp_fv_index_insert(s->fv_index, lhs, rhs, packed, seq);
+  // Only build the CP-subsumption index when the query will actually run.
+  // The WM presets disable use_queue_subsume, so the index would be built
+  // (102M+ nodes on OrAssociativity) and never queried -- pure waste that
+  // exhausts the GC heap.  Byte-identical when skipped: nothing reads it.
+  if (s->use_queue_subsume)
+    atp_fv_index_insert(s->fv_index, lhs, rhs, packed, seq);
 #endif
 }
 
