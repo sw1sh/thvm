@@ -556,10 +556,12 @@ static void metal_record_memory_peak(void) {
   }
   // Backstop: abort rather than thrash the host if the total Metal
   // buffer footprint blows past the ceiling.  See thvm_live_byte_ceiling
-  // (src/thvm.h) -- the JIT capture run pins every kernel output and the
-  // schedule does not yet reuse buffers across non-overlapping
-  // lifetimes, so a high-batch-size cold capture can balloon without
-  // bound.  Fail loud with the diagnostic instead.
+  // (src/thvm.h) -- a cold JIT capture pins its working set of kernel
+  // outputs; the replay memory planner (jit_capture_pack_replay_temporaries)
+  // recycles dead-lifetime intermediates AND drops their live-heap refs so the
+  // resident set is bounded to the live working set, but a high-batch-size /
+  // large-ImageSize capture can still scale past the ceiling.  Fail loud with
+  // the diagnostic instead.
   {
     u64 ceiling = thvm_live_byte_ceiling();
     if (ceiling != 0 && retained > ceiling) {
@@ -586,8 +588,8 @@ static void metal_record_memory_peak(void) {
       fprintf(stderr,
         "metal: total live buffer bytes %llu exceed THVM_MAX_LIVE_BYTES "
         "ceiling %llu (live=%llu deferred=%llu freelist=%llu) after reclaim.  "
-        "A cold JIT capture pins every kernel output without reuse, so a large "
-        "ImageSize can balloon past the ceiling.  Raise THVM_MAX_LIVE_BYTES "
+        "A cold JIT capture pins its activation working set, so a large "
+        "ImageSize can scale past the ceiling.  Raise THVM_MAX_LIVE_BYTES "
         "(bytes; 0 = unlimited) or use a smaller ImageSize.\n",
         (unsigned long long)retained, (unsigned long long)ceiling,
         (unsigned long long)live, (unsigned long long)METAL_DEFER_DECREF_BYTES,
@@ -711,6 +713,13 @@ static u32 metal_buf_alloc(u64 nbytes) {
       "intermediate.  Raise THVM_MAX_BUF_BYTES (bytes; 0 = unlimited) if "
       "this is intentional.\n",
       (unsigned long long)nbytes, (unsigned long long)ceiling);
+    // Recoverable (mirrors the metal_record_memory_peak ceiling): longjmp to the
+    // LibraryLink setjmp so the entry returns LIBRARY_FUNCTION_ERROR (the
+    // WolframKernel survives) when armed; a bare run (no setjmp) still exit(1)s.
+    if (thvm_heap_exhaust_jmp != NULL) {
+      thvm_heap_exhausted = 1;
+      longjmp(*thvm_heap_exhaust_jmp, 1);
+    }
     exit(1);
   }
   u64 limit = metal_defer_limit_bytes();
@@ -1299,6 +1308,32 @@ void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out) {
   }
   if (nbytes_out)   *nbytes_out   = METAL_BUFS[i].nbytes;
   if (refcount_out) *refcount_out = METAL_BUFS[i].refcount;
+}
+
+// Richer per-buffer dump for memory diagnostics: lets the WL bridge
+// classify non-borrowed footprint (activation pinning vs uploaded weight
+// copies that defeat ZEROCOPY borrowing) by buffer size + flags.  Slot
+// flags only (no tensor shape -- that lives in the heap's TAG_TEN, not the
+// MetalBuf); nbytes + borrowed already discriminate weight-shaped vs
+// activation-shaped allocations.
+void thvm_metal_buf_get_ex(u32 i, u64 *nbytes_out, u32 *refcount_out,
+                           u32 *borrowed_out, u32 *jit_pinned_out,
+                           u32 *owns_data_out, u32 *preserved_out) {
+  u64 nbytes = 0; u32 refcount = 0, borrowed = 0, pinned = 0, owns = 0, pres = 0;
+  if (i != 0 && i < METAL_BUFS_NEXT && METAL_BUFS[i].buf != nil) {
+    nbytes   = METAL_BUFS[i].nbytes;
+    refcount = METAL_BUFS[i].refcount;
+    borrowed = METAL_BUFS[i].borrowed;
+    pinned   = METAL_BUFS[i].jit_pinned;
+    owns     = METAL_BUFS[i].owns_data;
+    pres     = METAL_BUFS[i].preserved;
+  }
+  if (nbytes_out)     *nbytes_out     = nbytes;
+  if (refcount_out)   *refcount_out   = refcount;
+  if (borrowed_out)   *borrowed_out   = borrowed;
+  if (jit_pinned_out) *jit_pinned_out = pinned;
+  if (owns_data_out)  *owns_data_out  = owns;
+  if (preserved_out)  *preserved_out  = pres;
 }
 
 u32 thvm_metal_buf_pool_begin(void) {

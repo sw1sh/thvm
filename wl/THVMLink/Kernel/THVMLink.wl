@@ -667,6 +667,7 @@ $kernelInputsFn  := $kernelInputsFn  = load["thvm_wl_kernel_inputs",   {Integer}
 $tensTableFn     := $tensTableFn     = load["thvm_wl_tens_table",      {},        {Integer, 1}];
 $cpuBufTableFn   := $cpuBufTableFn   = load["thvm_wl_cpu_buf_table",   {},        {Integer, 1}];
 $metalBufTableFn := $metalBufTableFn = load["thvm_wl_metal_buf_table", {},        {Integer, 1}];
+$metalBufTableExFn := $metalBufTableExFn = load["thvm_wl_metal_buf_table_ex", {}, {Integer, 1}];
 $metalBufSummaryFn := $metalBufSummaryFn = load["thvm_wl_metal_buf_summary", {},  {Integer, 1}];
 $metalGpuTimeFn  := $metalGpuTimeFn  = load["thvm_wl_metal_gpu_time",  {},        {Integer, 1}];
 $metalPerOpProfileFn := $metalPerOpProfileFn = load["thvm_wl_metal_perop_profile", {}, {Integer, 1}];

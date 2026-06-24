@@ -1362,6 +1362,57 @@ static void jit_capture_release_one_retained(JitCapture *c, Backend *b,
   if (b->buf_decref != NULL)    b->buf_decref(buf_id);
 }
 
+// Release the LIVE-HEAP reference on a packed-away recording intermediate.
+//
+// thvm executes the cold forward eagerly: every kernel output becomes a live
+// TenDesc in TENS holding a backend buffer ref (TenDesc lifetime decoupled from
+// the buffer's via tensor/release.c).  When the replay memory planner packs an
+// op's output `old_out` onto a reused slot `new_out`, it redirects every replay
+// reference and drops the CAPTURE's pin+ref -- but the recording-time TenDesc
+// at KERNELS[op->kid].output_tid still pins `old_out` at refcount 1, so the
+// buffer never frees and the cold capture's whole intermediate set stays
+// resident (the FLUX 15.9GB-at-256 footprint).  That recording intermediate is
+// dead: replay writes `new_out`, and no live tensor outside the capture reads a
+// packed intermediate (the result root is excluded from packing).  So drop the
+// heap's hold the same way tensor_release does at refcount 0 -- decref the
+// buffer and clear the descriptor's buf_id so a later tensor_release of that
+// TenDesc won't double-decref.  Mirrors tinygrad's planner freeing the
+// originals once buffers become arena SLICEs (schedule/memory.py:51-59); here
+// the eager-then-capture model needs the heap ref dropped explicitly.
+static void jit_capture_release_packed_heap_output(JitCaptureOp const *op,
+                                                   Backend *b, u32 old_out) {
+  if (op == NULL || b == NULL || old_out == 0 || b->buf_decref == NULL) {
+    return;
+  }
+  if (op->kid == 0 || op->kid >= KERNELS_NEXT) {
+    return;
+  }
+  u32 tid = KERNELS[op->kid].output_tid;
+  if (tid == 0 || tid >= TENS_NEXT) {
+    return;
+  }
+  TenDesc *td = &TENS[tid];
+  // Only release if this descriptor still owns the packed-away buffer on this
+  // backend (a view-alias may have already migrated it).
+  if (td->backend != b || td->buf_id != old_out) {
+    return;
+  }
+  // Drop the heap's premature buffer hold (decref parks old_out on the recycle
+  // freelist if this was its last ref), then clear ONLY the descriptor's
+  // buf_id so a later tensor_release of this TenDesc won't double-decref the
+  // buffer.  KEEP td->backend: jit_replay's DISPATCH path reads
+  // TENS[ke->output_tid].backend to find the backend vtable (capture.c:2676)
+  // and writes to the redirected op->out_buf_id (capture.c:2686) -- it never
+  // reads td->buf_id for the output -- so nulling backend would make replay
+  // skip the dispatch and leave the output buffer unwritten (garbage replay).
+  // Freelisting (not hard-freeing) old_out is safe: the packer redirected
+  // every reference off it and it is never a slot's canonical reuse target, so
+  // the captured stream no longer names old_out; a replay fresh-alloc that
+  // pops the slot reuses memory the capture genuinely abandoned.
+  b->buf_decref(old_out);
+  td->buf_id = 0;
+}
+
 static u64 jit_dispatch_output_nbytes(JitCaptureOp const *op) {
   if (op == NULL || op->kind != JIT_OP_DISPATCH
       || op->kid == 0 || op->kid >= KERNELS_NEXT) {
@@ -1567,6 +1618,14 @@ static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
   if (slots == NULL) {
     return;
   }
+  // THVM_JIT_PACK_DEBUG (gated, like THVM_JIT_REPLAY_TRACE): one summary line
+  // per finalized capture -- packable intermediates, how many the planner
+  // recycled, and the bytes reclaimed.  The recording-buffer footprint a cold
+  // capture pins is exactly (packable - packed) plus the result roots, so this
+  // is the first number to read when a capture's resident set is too large.
+  int pack_dbg = getenv("THVM_JIT_PACK_DEBUG") != NULL;
+  u64 dbg_n_packable = 0, dbg_n_packed = 0;
+  u64 dbg_bytes_packable = 0, dbg_bytes_packed = 0;
   u32 n_slots = 0;
   for (u32 i = 0; i < c->n_ops; i++) {
     JitCaptureOp *op = &c->ops[i];
@@ -1575,6 +1634,7 @@ static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
     if (!jit_capture_replay_packable_output(op, &backend, &nbytes)) {
       continue;
     }
+    if (pack_dbg) { dbg_n_packable++; dbg_bytes_packable += nbytes; }
     u32 last_use = i;
     if (!jit_capture_replay_lifetime(c, i, backend, op->out_buf_id,
                                      &last_use)) {
@@ -1623,7 +1683,20 @@ static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
     // reused) until a same-size alloc pops it with a clean memset -- safe
     // reuse, per-capture buffer ownership preserved, memory bound intact.
     jit_capture_release_one_retained(c, backend, old_out);
+    // Drop the recording intermediate's LIVE-HEAP buffer ref too, or the cold
+    // capture's whole intermediate set stays resident (see helper comment).
+    jit_capture_release_packed_heap_output(op, backend, old_out);
     slots[slot_idx].last_use = last_use;
+    if (pack_dbg) { dbg_n_packed++; dbg_bytes_packed += nbytes; }
+  }
+  if (pack_dbg) {
+    fprintf(stderr,
+      "[jit_pack] ops=%u packable=%llu (%.1fMB) packed=%llu (%.1fMB reclaimed) "
+      "root=%d\n",
+      c->n_ops,
+      (unsigned long long)dbg_n_packable, dbg_bytes_packable / 1.0e6,
+      (unsigned long long)dbg_n_packed, dbg_bytes_packed / 1.0e6,
+      (int)(root != 0));
   }
   free(slots);
 }

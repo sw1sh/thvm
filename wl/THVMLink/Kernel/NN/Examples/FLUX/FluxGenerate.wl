@@ -44,7 +44,7 @@ FluxGenerate::badlatent = "The \"InitialLatent\" value has dimensions `1`, but t
 
 FluxGenerate::badspec = "`1` is not a valid return spec; use \"Image\", \"Latent\", \"Embedding\", All, or a list of those keys.  Returning the Image.";
 
-FluxGenerate::imgtoobig = "ImageSize `1` would need ~`2` GB of device buffers -- a cold capture pins the model's whole activation set with no reuse, scaling with the latent-token count -- exceeding the THVM_MAX_LIVE_BYTES ceiling of `3` GB.  Use ImageSize <= `4`, or raise THVM_MAX_LIVE_BYTES (you have `5` GB host RAM).";
+FluxGenerate::imgtoobig = "ImageSize `1` would need ~`2` GB of device buffers -- the cold captures pin their activation working set, scaling with the latent-token count -- exceeding the THVM_MAX_LIVE_BYTES ceiling of `3` GB.  Use ImageSize <= `4`, or raise THVM_MAX_LIVE_BYTES (you have `5` GB host RAM).";
 
 Begin["`Private`"];
 
@@ -454,6 +454,13 @@ fxBoundMemory[] := (
    at a slower cold; the live-bytes ceiling below stays a ~60%-RAM safety belt. *)
     fxEnvDefault["THVM_FWD_RECLAIM", "0"];
     fxEnvDefault["THVM_MAX_LIVE_BYTES", ToString[Round[0.6 $SystemMemory]]];
+(* The per-buffer ceiling (THVM_MAX_BUF_BYTES, C default 1GB) guards against an
+   unfused im2col/EXPAND blowing up, but a legitimate FLUX VAE conv at a larger
+   ImageSize unfolds a large-but-real im2col (~1.2GB at 512x512, scaling with
+   pixels).  Raise it to ~10% of host RAM so high-res convs allocate while a
+   truly-absurd buffer still trips it; the THVM_MAX_LIVE_BYTES total still bounds
+   the sum. *)
+    fxEnvDefault["THVM_MAX_BUF_BYTES", ToString[Round[0.1 $SystemMemory]]];
 (* Zero-copy mmap weight wraps (THVM_ZEROCOPY=1): each weight aliases its
    safetensors page-cache pages rather than being uploaded to a pinned device
    buffer.  This is the memory-SAFE default and the load-bearing reason a bare
@@ -953,22 +960,25 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
     }
     ,
     (* Pre-flight: reject an ImageSize whose cold-capture footprint would blow the
-       THVM_MAX_LIVE_BYTES ceiling BEFORE building.  A cold JIT capture pins the
-       model's whole activation set with no buffer reuse (~15.9 GB at 256x256,
-       Simg=256), so the footprint scales ~linearly with the latent-token count
-       Simg=(w/16)(h/16).  Without this guard a too-large ImageSize (e.g. 512 ->
-       ~64 GB) climbs to the ceiling mid-capture and aborts -- slow, and heavy
+       THVM_MAX_LIVE_BYTES ceiling BEFORE building.  The cold JIT captures pin
+       their live working set of activations (~5.7 GB non-borrowed at 256x256,
+       Simg=256, after the replay memory planner recycles per-block/per-step
+       intermediates -- jit_capture_pack_replay_temporaries; the 16 GB of weights
+       are ZEROCOPY-borrowed and never count), and that set scales ~linearly with
+       the latent-token count Simg=(w/16)(h/16).  Without this guard a too-large
+       ImageSize climbs to the ceiling mid-capture and aborts -- slow, and heavy
        host memory pressure.  Fail fast with a clear message; raise
-       THVM_MAX_LIVE_BYTES (and have the host RAM) to lift the cap. *)
+       THVM_MAX_LIVE_BYTES (and have the host RAM) to lift the cap.  5.68e9 is the
+       measured cold-256 RetainedBytes (TMetalBufSummary[]["RetainedBytes"]). *)
     With[{
         simg0   = Times @@ Round[imgSize/16],
         ceiling = With[{e = Environment["THVM_MAX_LIVE_BYTES"]},
                        If[ StringQ[e] && e =!= "", ToExpression[e], 0.6 $SystemMemory]]
       },
-        With[{est = 15.9*^9 (simg0/256.0)},
+        With[{est = 5.68*^9 (simg0/256.0)},
             If[ est > 0.9 ceiling,
                 Message[FluxGenerate::imgtoobig, imgSize, Round[est/1.*^9],
-                    Round[ceiling/1.*^9], 16 Floor[Sqrt[0.9 ceiling 256.0/(15.9*^9)]],
+                    Round[ceiling/1.*^9], 16 Floor[Sqrt[0.9 ceiling 256.0/(5.68*^9)]],
                     Round[$SystemMemory/1.*^9]];
                 Return[ConstantArray[$Failed, n], Module]
             ]

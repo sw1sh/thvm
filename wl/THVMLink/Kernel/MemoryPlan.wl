@@ -51,6 +51,8 @@ The report lists the top-5 largest bufs by nbytes, the top-5 longest-lived by al
 GeneralUtilities`SetUsage[TCpuBufTable, "TCpuBufTable[] returns a list of {nbytes, refcount, preserved, freeable, owns_data} rows, one per live CPU buffer."];
 GeneralUtilities`SetUsage[TMetalBufTable, "TMetalBufTable[] returns a list of {nbytes, refcount} rows, one per Metal buffer.
 The list is empty when the dylib was built without Metal support."];
+GeneralUtilities`SetUsage[TMetalBufTableEx, "TMetalBufTableEx[] returns a list of {nbytes, refcount, borrowed, jit_pinned, owns_data, preserved} rows, one per Metal buffer.
+The list is empty when the dylib was built without Metal support."];
 GeneralUtilities`SetUsage[TMetalBufSummary, "TMetalBufSummary[] returns an Association keyed by \"LiveBytes\", \"RetainedBytes\", \"DeferredBytes\", \"DeferredCount\", \"FreelistCount\", \"PeakLiveBytes\", \"PeakRetainedBytes\", and \"PeakDeferredBytes\" for the Metal buffer table.
 RetainedBytes includes recycle-list buffers that no live tensor references."];
 GeneralUtilities`SetUsage[TMetalMemoryProfile, "TMetalMemoryProfile[] returns a flat Metal memory profile derived from TMetalBufSummary[] and TMetalBufTable[].
@@ -78,6 +80,7 @@ Begin["`Private`"];
    TTensTable / TTensCount / TTotalBufBytes are defined in Tensor.wl. *)
 TCpuBufTable[]           := (ensureInit[]; Partition[Normal @ $cpuBufTableFn[],   5])
 TMetalBufTable[]         := (ensureInit[]; Partition[Normal @ $metalBufTableFn[], 2])
+TMetalBufTableEx[]       := (ensureInit[]; Partition[Normal @ $metalBufTableExFn[], 6])
 TMetalBufSummary[]       := Module[{v},
     ensureInit[];
     v = PadRight[Normal @ $metalBufSummaryFn[], 8, 0];

@@ -2761,6 +2761,9 @@ EXTERN_C DLLEXPORT int thvm_wl_cpu_buf_table(WolframLibraryData libData, mint ar
 #ifdef THVM_HAS_METAL
 extern u32  thvm_metal_buf_count(void);
 extern void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out);
+extern void thvm_metal_buf_get_ex(u32 i, u64 *nbytes_out, u32 *refcount_out,
+                                  u32 *borrowed_out, u32 *jit_pinned_out,
+                                  u32 *owns_data_out, u32 *preserved_out);
 extern u64  thvm_metal_live_bytes(void);
 extern u64  thvm_metal_retained_bytes(void);
 extern u64  thvm_metal_deferred_bytes(void);
@@ -2795,6 +2798,37 @@ EXTERN_C DLLEXPORT int thvm_wl_metal_buf_table(WolframLibraryData libData, mint 
     thvm_metal_buf_get((u32)(b + 1), &nbytes, &refcount);
     dst[b * nCols + 0] = (mint)nbytes;
     dst[b * nCols + 1] = (mint)refcount;
+  }
+#endif
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+// Richer per-buffer dump for memory diagnostics.  Cols:
+// [nbytes, refcount, borrowed, jit_pinned, owns_data, preserved].
+EXTERN_C DLLEXPORT int thvm_wl_metal_buf_table_ex(WolframLibraryData libData, mint argc,
+                                                  MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  mint nRows = 0;
+#ifdef THVM_HAS_METAL
+  u32 c = thvm_metal_buf_count();
+  if (c > 1) nRows = (mint)(c - 1);
+#endif
+  mint nCols = 6;
+  mint dims[1] = {nRows * nCols};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+#ifdef THVM_HAS_METAL
+  for (mint b = 0; b < nRows; b++) {
+    u64 nbytes = 0; u32 rc = 0, bor = 0, pin = 0, own = 0, pre = 0;
+    thvm_metal_buf_get_ex((u32)(b + 1), &nbytes, &rc, &bor, &pin, &own, &pre);
+    dst[b * nCols + 0] = (mint)nbytes;
+    dst[b * nCols + 1] = (mint)rc;
+    dst[b * nCols + 2] = (mint)bor;
+    dst[b * nCols + 3] = (mint)pin;
+    dst[b * nCols + 4] = (mint)own;
+    dst[b * nCols + 5] = (mint)pre;
   }
 #endif
   MArgument_setMTensor(res, out);
