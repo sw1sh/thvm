@@ -16107,6 +16107,53 @@ static u8 atp_pair_band_variant(Term l, Term r) {
   return 0u;
 }
 
+// Weight-109 "band" CP variant detector for the soa rule-36 L.2.2 batch (one
+// overlap position DEEPER than the L.1 band atp_pair_band_variant handles).
+// The L.2.2 band CP is `((U.c).(d.e)) = g` (a depth-3 left tower dotted with a
+// two-var factor, equal to a bare variable), with three variants WM emits
+// GROUPED (NOT interleaved -- the OPPOSITE arrival relationship to L.1):
+//   A: ((x.x).y).(x.y) = y   -> f(f(f(x,x),y), f(x,y)) = y
+//   B: ((x.y).y).(x.y) = y   -> f(f(f(x,y),y), f(x,y)) = y
+//   C: ((x.y).x).(y.x) = x   -> f(f(f(x,y),x), f(y,x)) = x
+// One side of the normalized CP is a bare variable (the `= g`); the other is
+// `f(f(f(a,b),c), f(d,e))` with f the dot operator.  Returns 1/2/3 for A/B/C, 0
+// otherwise.  Orientation-insensitive (bare-var side is either l or r); the
+// variable identities are matched structurally so the detector is renaming-
+// stable.  The bare var (g) coincides with one of the two distinct variables in
+// the big side, exactly as in shapes A/B/C above.
+static u8 atp_pair_band_l22_variant(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  // big = f(f(f(a,b), c), f(d,e)).
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big);
+  Term lo = term_ctr_at(big, 0), hi = term_ctr_at(big, 1);     // (U.c) , (d.e)
+  if (term_tag(lo) != TAG_CTR || term_ext(lo) != op || term_ctr_n(lo) != 2u)
+    return 0u;
+  if (term_tag(hi) != TAG_CTR || term_ext(hi) != op || term_ctr_n(hi) != 2u)
+    return 0u;
+  Term U = term_ctr_at(lo, 0), c = term_ctr_at(lo, 1);          // ((a.b) . c)
+  if (term_tag(U) != TAG_CTR || term_ext(U) != op || term_ctr_n(U) != 2u)
+    return 0u;
+  Term a = term_ctr_at(U, 0), b = term_ctr_at(U, 1);            // (a . b)
+  Term d = term_ctr_at(hi, 0), e = term_ctr_at(hi, 1);          // (d . e)
+  if (term_tag(a) != TAG_FVR || term_tag(b) != TAG_FVR) return 0u;
+  if (term_tag(c) != TAG_FVR) return 0u;
+  if (term_tag(d) != TAG_FVR || term_tag(e) != TAG_FVR) return 0u;
+  u32 va = term_ext(a), vb = term_ext(b), vc = term_ext(c);
+  u32 vd = term_ext(d), ve = term_ext(e), vg = term_ext(var);
+  // Two distinct variables x, y; the bare var g is one of them.
+  // A: a=x b=x c=y d=x e=y, g=y
+  if (va == vb && vc != va && vd == va && ve == vc && vg == vc) return 1u;
+  // B: a=x b=y c=y d=x e=y, g=y   (b=c=e=y, a=d=x)
+  if (va != vb && vb == vc && vd == va && ve == vb && vg == vb) return 2u;
+  // C: a=x b=y c=x d=y e=x, g=x   (a=c=e=x, b=d=y)
+  if (va != vb && vc == va && vd == vb && ve == va && vg == va) return 3u;
+  return 0u;
+}
+
 // Is the slot15 rule term `x.(y.x) -> (y.y).x` already a LIVE rule?  The
 // duplicate re-age (THVM_ATP_COMM_DROP_DUP) only fires when slot15 is live,
 // so the re-aged CP is a redundant re-derivation of an existing fact (WM ages
@@ -16632,6 +16679,69 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         // (round, variant) order.
         for (u32 a = 0; a < n_band; a++) {
           big[band_idx[order[a]]].key = band_key[a];
+        }
+      }
+      // Position-aware sub-logic: the SAME tops batch forms a SECOND weight-109
+      // band one overlap position DEEPER (ovPos=L.2.2, thvm pos[0]==1 &&
+      // pos[1]==1), the depth-3 tower CPs `((U.c).(d.e)) = g` (variants A/B/C in
+      // atp_pair_band_l22_variant).  Here WM's single superposition scan emits
+      // the variants GROUPED -- all A, then all B, then all C (cpform.out cpnr
+      // 8145<8153<8162 = inner-partner-leaf tops-arrival order 5<6<10) -- the
+      // OPPOSITE of the L.1 round-robin.  thvm's k3 (new-fact query-subterm leaf
+      // arrival) sorts them C,B,A (the shared early leaf k3=4 holds the C+B
+      // groups ahead of A at k3=5), scattering the groups.  Re-key the L.2.2
+      // band CPs onto a STABLE (variant_rank, original_key) order: each variant's
+      // members keep their relative key order, the groups sort A<B<C.  The band
+      // CPs keep their own key SLOTS (the multiset is permuted only among
+      // themselves), so non-band CPs are untouched.  CRITICALLY scoped to ovPos
+      // L.2.2: the L.1 batch ALSO forms the same A/B/C shapes (combo=1, pos=L.2,
+      // pos_len==1, picks ~1961-1963), already WM-aligned; touching those by
+      // shape alone regresses firstdiv to 1961.  OFF byte-identical (shares the
+      // use_band_interleave gate).  Advances soa firstdiv 1967 -> 1985.
+      u32 l22_idx[BAND_CAP];
+      u8  l22_var[BAND_CAP];
+      u64 l22_key[BAND_CAP];
+      u32 n_l22 = 0;
+      for (u32 k = 0; k < n_big && n_l22 < BAND_CAP; k++) {
+        // ovPos L.2.2: 0-indexed pos path [1, 1] of length 2.
+        if (big[k].cp.pos_len != 2u) continue;
+        if (big[k].cp.pos[0] != 1u || big[k].cp.pos[1] != 1u) continue;
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 var = atp_pair_band_l22_variant(nl, nr);
+        if (var == 0u) continue;
+        l22_idx[n_l22] = k;
+        l22_var[n_l22] = var;
+        l22_key[n_l22] = big[k].key;
+        n_l22++;
+      }
+      if (n_l22 >= 2u) {
+        // Sort the band entries by current key (ascending) -- so the assignment
+        // permutes only the key MULTISET among themselves and preserves the
+        // within-variant relative order under the stable variant-rank sort.
+        for (u32 a = 0; a + 1u < n_l22; a++) {
+          for (u32 b = a + 1u; b < n_l22; b++) {
+            if (l22_key[b] < l22_key[a]) {
+              u64 tk = l22_key[a]; l22_key[a] = l22_key[b]; l22_key[b] = tk;
+              u32 ti = l22_idx[a]; l22_idx[a] = l22_idx[b]; l22_idx[b] = ti;
+              u8  tv = l22_var[a]; l22_var[a] = l22_var[b]; l22_var[b] = tv;
+            }
+          }
+        }
+        // order2 = entry permutation grouped by variant rank A(1)<B(2)<C(3),
+        // each group keeping its key-ascending relative order (STABLE: the
+        // l22_* arrays are already key-ascending, so emitting variant 1 then 2
+        // then 3 in array order preserves the within-variant sequence).
+        u32 order2[BAND_CAP];
+        u32 n_ord = 0;
+        for (u8 v = 1u; v <= 3u; v++) {
+          for (u32 a = 0; a < n_l22; a++) {
+            if (l22_var[a] == v) order2[n_ord++] = a;
+          }
+        }
+        // Assign the ascending key slots to the band CPs in grouped order.
+        for (u32 a = 0; a < n_l22; a++) {
+          big[l22_idx[order2[a]]].key = l22_key[a];
         }
       }
     }

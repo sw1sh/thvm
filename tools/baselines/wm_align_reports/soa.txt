@@ -22,14 +22,34 @@ soa (ShefferAxiomsOrAssociativity) WM-alignment diagnosis -- firstdiv 126 -> 288
 ## scoped to the band shape.  FormationFifo firstdiv 1953 -> 1967; WALDMEISTER-only
 ## still 19; wm_pr corpus CPSEL byte-identical to clean HEAD b1c6c0df.
 ##
-## The NEW divergence at 1967 is a SECOND band family from the SAME slot-52 batch
-## at position L.2.2 -- `((P1.P2).c).(d.c) = c`, three variants WM emits GROUPED
-## P,Q,R (NOT interleaved, the OPPOSITE relationship to L.1).  A grouping re-key for
-## it regressed firstdiv to 1961 (it perturbs CPs selecting before the L.2.2 region,
-## i.e. it interacts with non-band CPs at pick ~1961), so it was dropped; the L.2.2
-## family needs WM's actual cursor-walk arrival order, not a per-shape group/
-## interleave heuristic.  A third family at 1985 (`(x.X).(x.x) = x`, idempotent
-## tail) is yet another permutation.  See below for the cursor-walk analysis.
+## ADVANCED 1967 -> 1985 (position-aware band re-key, 2026-06-24).  The 1967
+## divergence is a SECOND band family from the SAME slot-52 batch one overlap
+## position DEEPER (ovPos=L.2.2, thvm pos[0]==1 && pos[1]==1) -- the depth-3 tower
+## CPs `((U.c).(d.e)) = g`, three variants A: ((x.x).y).(x.y)=y, B: ((x.y).y).(x.y)=y,
+## C: ((x.y).x).(y.x)=x (atp_pair_band_l22_variant).  WM's single superposition scan
+## emits the variants GROUPED -- all A, then all B, then all C (cpform.out cpnr
+## 8145<8153<8162 = inner-partner-leaf tops-arrival 5<6<10) -- the OPPOSITE of the
+## L.1 round-robin; thvm's k3 (new-fact query-subterm leaf arrival) sorts them C,B,A
+## (shared early leaf k3=4 holds the C+B groups ahead of A at k3=5), scattering the
+## groups across picks 1967-1982.  use_band_interleave gained a POSITION-AWARE sub-
+## logic (thvm_atp_generate_cps_wm): after the L.1 interleave it collects the L.2.2
+## band CPs (scoped HARD to pos_len==2 && pos==[1,1] AND the A/B/C shape) and re-keys
+## them onto a STABLE (variant_rank, key) GROUP -- A's in key order, then B's, then
+## C's -- so the distinct-key sequence becomes A,B,C.  The L.2.2 scope is LOAD-
+## BEARING: the L.1 batch ALSO forms the same A/B/C shapes (combo=1, pos=L.2,
+## pos_len==1) which already select WM-aligned at picks 1961-1963; a blanket grouping
+## keyed on shape alone touches those and regresses to 1961 (the prior session's
+## drop).  Restricting to ovPos=L.2.2 leaves picks 1961-1963 byte-untouched.
+## FormationFifo firstdiv 1967 -> 1985; OFF byte-identical (CPSEL prefix 1..1966 md5
+## 53be9fd3.. == clean HEAD 12c070f1); WALDMEISTER-only still 19; wm_pr corpus CPSEL
+## byte-identical to clean HEAD 12c070f1 (15 theorems checked).
+##
+## The NEXT divergence at 1985 is a THIRD band family from the same slot-52 batch:
+## the idempotent-tail band `(x.X).(x.x) = x`, X in {(x.y),(y.x),(y.y)} (thvm seqs
+## 7961/7965 = (x.(y.y)), 7971/7973/7974 = (x.(y.x)), 7981/7983/7984 = (x.(x.y))).
+## thvm emits (y.y),(y.x),(x.y); WM's group/interleave order again differs -- a
+## candidate for the same position-aware technique (resolve its ovPos + cpform.out
+## arrival order before keying).  See below for the cursor-walk analysis.
 
 ## SETTLED WITH THE WM PER-CP DUMP (cpform.out, 2026-06-23): the EXACT WM dump the
 ## section below requested is now banked at /tmp/soa_align/cpform.out (10000 CPs, one
