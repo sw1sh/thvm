@@ -364,6 +364,13 @@ Options[FluxGenerate] = {
 
 $fxSession = <||>;
 
+(* module-level weight base cache: key -> the size-INDEPENDENT load.  ONE entry per
+   {modelDir,dev,q8} holds the shared context, the cast helper, and all
+   transformer/Qwen/VAE weights + the (fixed-length) Qwen forward capture.  Every
+   ImageSize/Steps session reuses this base, so the ~16 GB of weights load ONCE. *)
+
+$fxWeightBase = <||>;
+
 (* A return spec is a String key ("Image" | "Latent" | "Embedding"), the symbol
    All, or a List of String keys -- type-distinguishable from the Integer count, so
    `spec` can be the last positional argument (idiomatic WL, like Import[file,fmt]).
@@ -488,12 +495,27 @@ fxBeamScope[body_] := Module[{beamSave = Environment["BEAM"], r},
     r
 ]
 
-fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
-    w,
-    h,
-    gridH,
-    gridW,
-    simg,
+(* fetch (or build once) the size-INDEPENDENT weight base for these
+   {modelDir,dev,q8}.  Every ImageSize/Steps session reuses it, so the ~16 GB
+   of transformer/Qwen/VAE weights load into ONE device context exactly once. *)
+
+fxWeightBase[dev_, modelDir_, q8_] := Module[{key = {modelDir, dev, q8}},
+    Lookup[
+        $fxWeightBase
+        ,
+        Key[key]
+        ,
+        $fxWeightBase[key] = fxWeightBaseBuild[dev, modelDir, q8]
+    ]
+]
+
+(* LAYER 1 -- the size-INDEPENDENT load, built ONCE per {modelDir,dev,q8}: the
+   ONE shared context, the cast helper, all three models' weights, the temb
+   closure, and the (fixed text-length) Qwen forward capture.  The image RoPE
+   table, the velocity/VAE captures, and the sigma schedule depend on ImageSize
+   and live in fxSessionBuild (LAYER 2). *)
+
+fxWeightBaseBuild[dev_, modelDir_, q8_] := Module[{
     stxt,
     tokDir,
     td,
@@ -502,25 +524,16 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
     vaePath,
     fxCfg,
     qwCfg,
-    vaeCfg,
-    sigmas,
-    ctxQ,
     ctxT,
-    ctxV,
-    qwJit,
-    wfq,
-    velJit,
-    ca,
-    rc,
-    rs,
+    caL,
+    wfT,
     tembFn,
-    vaeJit
+    wfq,
+    qwJit,
+    wfV,
+    wsubV
 },
     fxBoundMemory[];
-    {w, h} = imgSize;
-    gridH = Round[h / 16];
-    gridW = Round[w / 16];
-    simg = gridH gridW;
     stxt = 512;
     tokDir = FileNameJoin[{modelDir, "tokenizer"}];
     tfPath = FileNameJoin[{modelDir, "transformer", "diffusion_pytorch_model.safetensors"}];
@@ -550,26 +563,27 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
         "layers" -> 27,
         "captureLayers" -> {8, 17, 26}
     |>;
-    vaeCfg = <|"eps" -> 1.*^-6, "epsBn" -> 1.*^-4, "gridH" -> gridH, "gridW" -> gridW|>;
     td = qwTokenizerData[tokDir];
-    sigmas = fxSigmas[simg, nSteps];
-(* ONE shared persistent context for all three models.  An earlier design used
-   a separate context per model, but LAM_SHAPE_TABLE (the side table that tells
-   materialize a captured lambda's input shape) is keyed by raw heap loc, and
-   heap locs are PER-CONTEXT -- each context's heap restarts at the same low
-   locs.  So the qwJit and velJit capture lambdas landed at the SAME loc in
-   their separate contexts and collided in that global table: whichever
-   captured second read the other's Shape, built its view index from the wrong
-   dims, and leaked a stale tensor handle into the index expression -- the
-   tile-JIT codegen then emitted `/*?*/` ("expected expression") and every
-   transformer kernel failed to compile.  A single context gives every capture
-   lambda a globally-unique loc, so no collision.  The cross-capture buffer
-   aliasing the per-context split was meant to prevent does NOT occur: each TJit
-   capture retains its own buffers, so the three replays read/write disjoint
-   slots.  Weights are
-   zero-copy disk-mmap wraps (~0 phys footprint on Apple unified memory), so all
-   three models co-reside well under the 30GB ceiling.  Each stage crosses to
-   the next as a HOST array.
+(* ONE shared persistent context for all three models, reused across EVERY
+   ImageSize/Steps session.  An earlier design used a separate context per
+   model, but LAM_SHAPE_TABLE (the side table that tells materialize a captured
+   lambda's input shape) is keyed by raw heap loc, and heap locs are
+   PER-CONTEXT -- each context's heap restarts at the same low locs.  So the
+   qwJit and velJit capture lambdas landed at the SAME loc in their separate
+   contexts and collided in that global table: whichever captured second read
+   the other's Shape, built its view index from the wrong dims, and leaked a
+   stale tensor handle into the index expression -- the tile-JIT codegen then
+   emitted `/*?*/` ("expected expression") and every transformer kernel failed
+   to compile.  A single context gives every capture lambda a globally-unique
+   loc, so no collision.  Because this same context is shared across sessions
+   too, a second ImageSize never builds a second context with colliding locs
+   (and never re-loads the 16 GB of weights) -- the size-specific velJit/vaeJit
+   captures of every session land at fresh locs in the one heap.  The
+   cross-capture buffer aliasing the per-context split was meant to prevent does
+   NOT occur: each TJit capture retains its own buffers, so the replays
+   read/write disjoint slots.  Weights are zero-copy disk-mmap wraps (~0 phys
+   footprint on Apple unified memory), so all three models co-reside well under
+   the 30GB ceiling.  Each stage crosses to the next as a HOST array.
 
    KNOWN BUG (pre-existing, C-level, not WL-fixable): only the FIRST prompt in a
    session generates the correct image.  The COLD first prompt is right (a cold
@@ -581,13 +595,14 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
    latent), so the collapse is the velocity per-step Euler loop's multi-input
    replay interaction in src/jit/capture.c's input-replace.  See the failing
    flux/warm-prompt-rebinds-text-encoding test in Tests/flux_jit_replay.wlt. *)
-    (* --- load + RoPE + temb + capture velJit (in the shared context). --- *)
     ctxT = TContextNew[dev];
-    {velJit, ca, rc, rs, tembFn} = TInContext[
+    (* --- load transformer weights + temb closure (in the shared context).  The
+       cast helper caL is built here and reused by every size-specific session. --- *)
+    {wfT, caL, tembFn} = TInContext[
         ctxT
         ,
-        Module[{wt, wfT, rope, rcL, rsL, caL, tembFnL, vj, tLoadTf, tCapTf},
-            caL = If[dev === "cpu", TRealize[#]&, (TRealize @ TToDevice[TUOpCast[#, "bf16"], dev])&];
+        Module[{wt, wfTL, caLL, tembFnL, tLoadTf},
+            caLL = If[dev === "cpu", TRealize[#]&, (TRealize @ TToDevice[TUOpCast[#, "bf16"], dev])&];
             {tLoadTf, wt} = AbsoluteTiming[TSafeTensorLoad[tfPath]];
 (* COLD-START OVERLAP: background-fault the transformer's disk-mmap pages
    resident NOW, while it is idle.  The transformer is not touched until STAGE
@@ -599,23 +614,19 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
    the Qwen text-encode, so STAGE 2 finds the transformer already resident.
    FLUX_NO_WARM_TF=1 disables it for an A/B baseline. *)
             If[ Environment["FLUX_NO_WARM_TF"] =!= "1", TDiskWarmAsync[Values[wt]]];
-            wfT = fxTransformerLoader[wt, dev, q8];
-            rope = fxRopeTable[gridH, gridW, stxt];
-            rcL = caL @ TTensorCreate[rope["cos"]];
-            rsL = caL @ TTensorCreate[rope["sin"]];
-            tembFnL = fxTembFn[wfT, dev];
-            {tCapTf, vj} = AbsoluteTiming[fxVelocityJit[rcL, rsL, wfT, fxCfg]];
-            fxTiming["tf-load", tLoadTf, "tf-capture", tCapTf];
-            {vj, caL, rcL, rsL, tembFnL}
+            wfTL = fxTransformerLoader[wt, dev, q8];
+            tembFnL = fxTembFn[wfTL, dev];
+            fxTiming["tf-load", tLoadTf];
+            {wfTL, caLL, tembFnL}
         ]
     ];
 (* --- Qwen context: load weights + capture the 27-layer device forward.
    cos/sin (length stxt) are closed over (constant across prompts); the
    per-prompt {stxt,2560} x + {stxt,stxt} addMask are the rebound JIT inputs.
-   Every shape is concrete (kvar-free). --- *)
-    ctxQ = ctxT;(* shared context (see above): distinct heap locs, no LAM_SHAPE collision *)
+   Every shape is concrete (kvar-free).  Text length stxt is fixed, so this
+   capture is ImageSize-independent and belongs in the weight base. --- *)
     {qwJit, wfq} = TInContext[
-        ctxQ
+        ctxT
         ,
         Module[{qw, wfqL, qct, qcos, qsin, qj, tLoadQw, tCapQw},
             {tLoadQw, qw} = AbsoluteTiming[Join[TSafeTensorLoad[qwPaths[[1]]], TSafeTensorLoad[qwPaths[[2]]]]];
@@ -634,19 +645,88 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
             {qj, wfqL}
         ]
     ];
-(* --- VAE context: load weights (f32) + capture the conv decode.  The packed
-   latent {simg,128} is the only rebound JIT input.  TRealize the body:
-   vaeDecoder ends with a lazy TClip, so a bare capture would hand the replay
-   an unrealized UOP (Normal -> Missing). --- *)
-    ctxV = ctxT;(* shared context (see above) *)
-    vaeJit = TInContext[
-        ctxV
+(* --- VAE context: load weights (f32) + build the conv-decode sub-weights.  The
+   size-specific conv-decode capture lives in fxSessionBuild (it closes over the
+   ImageSize grid via vaeCfg). --- *)
+    {wfV, wsubV} = TInContext[
+        ctxT
         ,
-        Module[{vt, vKeys, wfV, wsubV},
+        Module[{vt, vKeys, wfVL, wsubVL},
             vt = TSafeTensorLoad[vaePath];
             vKeys = Keys[vt];
-            wfV = fxVaeLoader[vt, dev];
-            wsubV = fxVaeSub[wfV, vKeys];
+            wfVL = fxVaeLoader[vt, dev];
+            wsubVL = fxVaeSub[wfVL, vKeys];
+            {wfVL, wsubVL}
+        ]
+    ];
+    <|
+        "ctxT" -> ctxT,
+        "caL" -> caL,
+        "wfT" -> wfT,
+        "tembFn" -> tembFn,
+        "wfq" -> wfq,
+        "qwJit" -> qwJit,
+        "wfV" -> wfV,
+        "wsubV" -> wsubV,
+        "td" -> td,
+        "fxCfg" -> fxCfg,
+        "qwCfg" -> qwCfg,
+        "stxt" -> stxt
+    |>
+]
+
+(* LAYER 2 -- the size-SPECIFIC build, one per {modelDir,dev,imgSize,nSteps,q8}.
+   Fetches the shared weight base and adds ONLY the ImageSize-dependent pieces:
+   the image RoPE table, the velocity + VAE conv-decode captures, and the sigma
+   schedule.  All captures land in the base's shared context. *)
+
+fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
+    base,
+    w,
+    h,
+    gridH,
+    gridW,
+    simg,
+    ctxT,
+    caL,
+    vaeCfg,
+    sigmas,
+    rope,
+    rc,
+    rs,
+    velJit,
+    vaeJit
+},
+    base = fxWeightBase[dev, modelDir, q8];
+    ctxT = base["ctxT"];
+    caL = base["caL"];
+    {w, h} = imgSize;
+    gridH = Round[h / 16];
+    gridW = Round[w / 16];
+    simg = gridH gridW;
+    vaeCfg = <|"eps" -> 1.*^-6, "epsBn" -> 1.*^-4, "gridH" -> gridH, "gridW" -> gridW|>;
+    sigmas = fxSigmas[simg, nSteps];
+    (* --- image RoPE + velocity capture (in the shared context). --- *)
+    {rc, rs, velJit} = TInContext[
+        ctxT
+        ,
+        Module[{ropeT, rcL, rsL, vj, tCapTf},
+            ropeT = fxRopeTable[gridH, gridW, base["stxt"]];
+            rcL = caL @ TTensorCreate[ropeT["cos"]];
+            rsL = caL @ TTensorCreate[ropeT["sin"]];
+            {tCapTf, vj} = AbsoluteTiming[fxVelocityJit[rcL, rsL, base["wfT"], base["fxCfg"]]];
+            fxTiming["tf-capture", tCapTf];
+            {rcL, rsL, vj}
+        ]
+    ];
+(* --- VAE conv decode: capture the conv decode.  The packed latent {simg,128}
+   is the only rebound JIT input.  TRealize the body: vaeDecoder ends with a
+   lazy TClip, so a bare capture would hand the replay an unrealized UOP
+   (Normal -> Missing). --- *)
+    vaeJit = TInContext[
+        ctxT
+        ,
+        Module[{},
 (* EAGER PRETUNE the VAE conv decode (THVM_VAE_PRETUNE).  The VAE capture
    can't BEAM-search -- a bench dispatch mid-capture corrupts the
    recorded forward (autotune.c skips the search under jit_is_capturing);
@@ -680,35 +760,35 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
                             "bf16"
                         ]
                     ];
-                    TRealize @ vaeDecoder[warmLat, wfV, wsubV, vaeCfg]
+                    TRealize @ vaeDecoder[warmLat, base["wfV"], base["wsubV"], vaeCfg]
                 ]
             ];
             TJit[
                 Function[lat,
-                    TRealize @ vaeDecoder[lat, wfV, wsubV, vaeCfg]
+                    TRealize @ vaeDecoder[lat, base["wfV"], base["wsubV"], vaeCfg]
                 ]
             ]
         ]
     ];
     <|
-        "ctxQ" -> ctxQ,
-        "ctxT" -> ctxT,
-        "ctxV" -> ctxV,
+        "ctxQ" -> base["ctxT"],
+        "ctxT" -> base["ctxT"],
+        "ctxV" -> base["ctxT"],
         "dev" -> dev,
-        "ca" -> ca,
-        "wfq" -> wfq,
-        "qwCfg" -> qwCfg,
-        "td" -> td,
-        "stxt" -> stxt,
+        "ca" -> base["caL"],
+        "wfq" -> base["wfq"],
+        "qwCfg" -> base["qwCfg"],
+        "td" -> base["td"],
+        "stxt" -> base["stxt"],
         "rc" -> rc,
         "rs" -> rs,
-        "tembFn" -> tembFn,
+        "tembFn" -> base["tembFn"],
         "velJit" -> velJit,
         "sigmas" -> sigmas,
         "simg" -> simg,
-        "fxCfg" -> fxCfg,
+        "fxCfg" -> base["fxCfg"],
         "vaeCfg" -> vaeCfg,
-        "qwJit" -> qwJit,
+        "qwJit" -> base["qwJit"],
         "vaeJit" -> vaeJit
     |>
 ]
