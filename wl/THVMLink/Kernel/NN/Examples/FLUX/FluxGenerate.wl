@@ -592,14 +592,31 @@ fxWeightBaseBuild[dev_, modelDir_, q8_] := Module[{
    velocity: it produces distinct latents per prompt (verified -- distinct
    per-prompt latent means and a 0.99 image divergence once decoded eagerly).  It
    was the VAE decode's TJit REPLAY baking its latent input -- the warm replay
-   re-decoded the FIRST prompt's latent for every image.  Fixed by decoding the
-   VAE EAGERLY (vaeJit below is a bare Function, not TJit-captured), so each
-   prompt's distinct latent is read on a fresh materialise; velocity + Qwen stay
-   TJit'd (fast).  Cost: the VAE re-materialises per decode (no captured replay);
-   the faster fix is a proper VAE latent-rebind in src/jit/capture.c (the conv
-   im2col appears to stage the latent past the rebind site).  The
-   flux/warm-prompt-rebinds-text-encoding test in Tests/flux_jit_replay.wlt now
-   passes. *)
+   re-decoded the FIRST prompt's latent for every image.
+
+   PRIMARY CAUSE (FIXED): the VAE's first conv lowers its im2col over the latent
+   as a strided VIEW chain that needs a CONTIGUOUS base, so the scheduler
+   uploaded the latent into a contiguous device buffer.  But TJit realized the
+   input arg into a DIFFERENT buffer (TRealize is non-memoizing, and the upload
+   cache was only primed inside the capture scope) -- so the captured conv read
+   the fn-body buffer while input_replace declared the separately-realized one,
+   and the rebind found 0 sites.  FIXED by realizing the JIT input arg INSIDE
+   the capture scope (Jit.wl jitCaptureOnce) so materialize_copy pins + caches
+   the upload by copy-loc; the conv body's re-realize of the same latent now
+   HITS that cache and reuses the declared buffer, so input_replace rebinds the
+   warm latent.  Verified on the real VAE weights: denorm/unpatch + mid block +
+   up blocks 0-1 replay byte-exactly (replay_err 0).
+
+   SECONDARY CAUSE (OPEN): up_block 2 (512ch, 32x32) still partially bakes -- the
+   freshly-realized warm latent's derived activation buffer aliases a captured
+   intermediate's scratch buffer, so a mid-chain write corrupts the rebound value
+   (replay_err 1.9 isolated -> 210 fed the real up_block 1 output; cat/dog image
+   divergence 0.33 vs eager 0.91 at 64x64).  This is a JIT replay
+   input/intermediate buffer-aliasing issue in src/jit/capture.c, not the conv
+   rebind.  Until it is fixed the VAE stays EAGER (correct, ~0.91 divergence) so
+   each prompt's distinct latent is read; velocity + Qwen keep their TJit speed.
+   The flux/warm-prompt-rebinds-text-encoding test in Tests/flux_jit_replay.wlt
+   covers the JIT path. *)
     ctxT = TContextNew[dev];
     (* --- load transformer weights + temb closure (in the shared context).  The
        cast helper caL is built here and reused by every size-specific session. --- *)
@@ -768,11 +785,29 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
                     TRealize @ vaeDecoder[warmLat, base["wfV"], base["wsubV"], vaeCfg]
                 ]
             ];
-(* EAGER decode (a bare Function, NOT TJit): the VAE TJit replay baked its latent
-   input, collapsing every warm prompt's image to the first prompt's (see the
-   WARM-PROMPT-COLLAPSE note in the context block above).  A bare Function
-   re-materialises the conv decode per call, so each prompt's distinct latent is
-   read; velocity + Qwen keep their TJit speed. *)
+(* EAGER decode (a bare Function, NOT TJit).  The VAE TJit replay baked its
+   latent input, collapsing every warm prompt's image to the first prompt's
+   (see the WARM-PROMPT-COLLAPSE note in the context block above).
+
+   The PRIMARY rebind bug -- the conv im2col staging the latent into a SECOND
+   device buffer the declared input never named, so input_replace found 0
+   rebind sites -- is now FIXED (Jit.wl realizes the JIT input inside the
+   capture scope so materialize_copy caches the upload by copy-loc and the conv
+   body reuses the declared buffer).  With that fix a JIT'd conv re-reads its
+   fresh input: the latent now rebinds, and the denorm/unpatch + mid block +
+   up blocks 0-1 replay byte-exactly (replay_err 0 on the real VAE weights).
+
+   A SECOND, deeper bug remains: in up_block 2 (512-channel, 32x32 spatial) the
+   freshly-realized warm latent's derived activation buffer ALIASES a captured
+   intermediate's scratch buffer, so a mid-chain write corrupts the rebound
+   value -- the warm decode only partially responds to the latent (cat/dog
+   image divergence 0.33 vs the eager 0.91 at 64x64; replay_err jumps from 1.9
+   isolated to 210 when up_block 2 is fed the real up_block 1 output).  That is
+   a JIT replay input/intermediate buffer-aliasing issue in capture.c, NOT the
+   conv rebind.  Until it is fixed, decode EAGERLY so each prompt's distinct
+   latent is read on a fresh materialise; velocity + Qwen keep their TJit speed.
+   The flux/warm-prompt-rebinds-text-encoding test in Tests/flux_jit_replay.wlt
+   covers the JIT path. *)
             Function[lat,
                 TRealize @ vaeDecoder[lat, base["wfV"], base["wsubV"], vaeCfg]
             ]

@@ -467,9 +467,12 @@ fn void kernel_fire_by_id(u32 kid) {
       if (!dt_known) { char const *e = getenv("THVM_DISPATCH_TRACE");
                        dt_on = (e != NULL && e[0] == '1'); dt_known = 1; }
       if (dt_on) {
-        fprintf(stderr, "[dispatch] kid=%u gen=%u depth=%u cap=%d out_buf=%u\n",
+        fprintf(stderr, "[dispatch] kid=%u gen=%u depth=%u cap=%d out_buf=%u in=[",
                 (u32)(ke - KERNELS), KERNEL_FIRE_GEN, KERNEL_FIRE_SCOPE_DEPTH,
                 jit_is_capturing() ? 1 : 0, out_buf_id);
+        for (u32 ti = 0; ti < ke->n_inputs; ti++)
+          fprintf(stderr, "%u ", in_buf_ids[ti]);
+        fprintf(stderr, "]\n");
         fflush(stderr);
       }
     }
