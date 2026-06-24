@@ -9259,6 +9259,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_drain_chainpos   = 1u;
     s->use_drain_revface    = 1u;
     s->use_revface_cubeorder = 1u;
+    s->use_mered_dmgu       = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9305,6 +9306,16 @@ fn void thvm_atp_set_use_drain_revface(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_revface_cubeorder(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_revface_cubeorder = on ? 1u : 0u;
+}
+
+// Shared-reverse-face double-MGU defer (see AtpState.use_mered_dmgu): in a
+// weight-120 tops-A equation-tree band, defer the chain-head (newest-equation)
+// combo=0 CP that shares a reverse-face leaf with an older equation's combo=0
+// CP -- WM ages that content as the older equation's late second MGU, not at
+// the band head.  DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_mered_dmgu(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_mered_dmgu = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -17028,6 +17039,96 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         for (u32 a = 0; a < n_l22; a++) {
           big[l22_idx[order2[a]]].key = l22_key[a];
         }
+      }
+    }
+    // Shared-reverse-face double-MGU defer (default OFF; see use_mered_dmgu).
+    // The Meredith OrAssociativity firstdiv-809 divergence: a weight-120 tops-A
+    // equation-tree band at pos L.2.2 holds two equations (E6 `a.(a.b)=a.(b.b)`,
+    // E7 `a.(b.a)=a.(b.b)`) that WM stores oriented at DISTINCT distinguished-face
+    // leaves but which SHARE one reverse face `a.(b.b)`.  thvm overlaps the new
+    // fact's subterm onto that shared reverse face, so BOTH equations' combo=0
+    // overlaps land at the same discrimination-tree leaf (k3=arr==0): one
+    // normalizes to a tautology (dropped at push), the other to the surviving
+    // content `(x.y).x = (y.y).x`.  thvm keys the surviving combo=0 CP at the
+    // band HEAD; WM never scans the shared reverse face -- its single
+    // distinguished-face scan surfaces E6's overlap as TWO MGUs aged far apart
+    // (the first at the band's natural slot, the second at CPNr 2832, just before
+    // the band's final weight-120 CP E9), so the surviving content belongs at
+    // that LATE second-MGU slot, not the head.  Defer it to the band's
+    // penultimate same-weight slot (the largest same-weight same-(phase|k1|k2)
+    // key below the band max, +1 -- the use_comm_reage anchor+1 splice), so the
+    // combo=1 CPs lead the band.  Scoped HARD to phase A (key>>58==0), equation
+    // tree (k2==1), pos L.2.2, arr==0, combo==0, a NON-tautology normal form, AND
+    // a sibling combo=0 arr==0 L.2.2 overlap from a DIFFERENT equation at the same
+    // shared leaf (the tautology twin); a lone shared-leaf overlap or any
+    // non-L.2.2 band is left untouched.  OFF byte-identical; advances Meredith
+    // firstdiv 809 -> 1040, soa firstdiv 2808 unchanged.
+    if (s->use_mered_dmgu) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      for (u32 kd = 0; kd < n_big; kd++) {
+        if ((big[kd].key >> 58) != 0u) continue;          // A phase only
+        if (((big[kd].key >> 42) & 3u) != 1u) continue;   // equation tree k2==1
+        if (((big[kd].key >> 28) & 0x3fffu) != 0u) continue;  // arr==0
+        if (big[kd].combo != 0u) continue;
+        if (big[kd].cp.pos_len != 2u ||
+            big[kd].cp.pos[0] != 1u || big[kd].cp.pos[1] != 1u) continue;
+        // The deferred CP must be a NON-TRIVIAL equation: a shared-reverse-face
+        // overlap that normalizes to a tautology is discarded at push (it never
+        // claims a FIFO slot), so only the surviving content `(x.y).x = (y.y).x`
+        // -- the equation WM ages as a LATE second MGU -- is re-aged.  Compare
+        // the joined/reduced sides (atp_rewrite_normalize_indexed, as the other
+        // re-key gates do); skip a tautology.
+        Term ndl = atp_rewrite_normalize_indexed(s, big[kd].cp.lhs, 4096u);
+        Term ndr = atp_rewrite_normalize_indexed(s, big[kd].cp.rhs, 4096u);
+        if (kbo_eq(ndl, ndr)) continue;                       // tautology: dropped
+        // Require a SIBLING combo=0 arr==0 L.2.2 CP from a DIFFERENT equation at
+        // the same shared reverse-face leaf (the second equation E7 whose own
+        // overlap is the tautology twin).  This shared-leaf multiplicity is what
+        // WM resolves by scanning a single distinguished face and surfacing the
+        // overlap as TWO MGUs aged far apart -- so the surviving content must
+        // defer.  A lone combo=0 shared-leaf overlap (no twin equation) keeps its
+        // head slot.
+        u8 has_twin = 0u;
+        for (u32 ks = 0; ks < n_big && !has_twin; ks++) {
+          if (ks == kd) continue;
+          if (big[ks].j == big[kd].j) continue;             // different equation
+          if ((big[ks].key >> 58) != 0u) continue;
+          if (((big[ks].key >> 42) & 3u) != 1u) continue;
+          if (((big[ks].key >> 28) & 0x3fffu) != 0u) continue;   // arr==0
+          if (big[ks].combo != 0u) continue;
+          if (big[ks].cp.pos_len != 2u ||
+              big[ks].cp.pos[0] != 1u || big[ks].cp.pos[1] != 1u) continue;
+          has_twin = 1u;
+        }
+        if (!has_twin) continue;
+        // Re-age to just before the band's LAST same-weight CP (WM ages E6's
+        // second MGU at CPNr 2832, immediately before the band's final weight-120
+        // CP E9 at 2833).  Anchor on same-(phase|k1|k2) CPs of the SAME priority
+        // as the deferred CP -- the higher-arrival (k3>5) CPs in this group are
+        // heavier (they introduce extra overlap variables) and are NOT part of
+        // the weight-120 band, so they must not set the target.  The deferred
+        // CP's key becomes (largest same-weight band key, +1), landing it as the
+        // band's penultimate entry just before that final CP.
+        // Find the two largest same-weight band keys in one pass: band_max is
+        // the final CP (E9); band_pen the one before it.  The deferred CP splices
+        // just before E9 -> band_pen + 1.
+        u32 d_pri = atp_cp_priority(s, ndl, ndr);
+        u64 grp = big[kd].key & grp_mask;
+        u64 band_max = 0u, band_pen = 0u;
+        for (u32 ks = 0; ks < n_big; ks++) {
+          if (ks == kd) continue;
+          if ((big[ks].key & grp_mask) != grp) continue;
+          Term nsl = atp_rewrite_normalize_indexed(s, big[ks].cp.lhs, 4096u);
+          Term nsr = atp_rewrite_normalize_indexed(s, big[ks].cp.rhs, 4096u);
+          if (kbo_eq(nsl, nsr)) continue;                  // tautology: dropped
+          if (atp_cp_priority(s, nsl, nsr) != d_pri) continue;  // same weight only
+          if (big[ks].key > band_max) { band_pen = band_max; band_max = big[ks].key; }
+          else if (big[ks].key > band_pen) band_pen = big[ks].key;
+        }
+        // Splice just before the band's final same-weight CP (E9): the largest
+        // same-weight key below the band max, +1.  This places the deferred CP at
+        // the band's penultimate slot, matching WM's CPNr 2832 < 2833 (E9).
+        if (band_pen != 0u) big[kd].key = band_pen + 1u;
       }
     }
     // Reverse-face cube emission order (default OFF; see use_revface_cubeorder).

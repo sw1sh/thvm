@@ -5815,6 +5815,30 @@ typedef struct {
   // generic equal-weight reorder.  OFF byte-identical; advances soa firstdiv
   // 2540 -> beyond.  See tools/baselines/wm_align_reports/soa.txt.
   u8    use_revface_cubeorder;
+  // Shared-reverse-face double-MGU defer (env THVM_ATP_MERED_DMGU, default OFF;
+  // also turned ON under use_formation_fifo).  The MeredithAxioms OrAssociativity
+  // firstdiv-809 divergence, one selected fact's weight-120 tops batch at its
+  // L.2.2 subterm against the EQUATION tree (atp_wmo_rank phase A, k2==1): two
+  // equations WM stores oriented at DISTINCT distinguished-face leaves (E6
+  // `a.(a.b)=a.(b.b)`, E7 `a.(b.a)=a.(b.b)`) SHARE one reverse face `a.(b.b)`.
+  // thvm overlaps the new fact's subterm onto that shared reverse face, so BOTH
+  // equations' combo=0 overlaps land at the same discrimination-tree leaf
+  // (arr==0): one normalizes to a tautology (dropped at push), the other to the
+  // surviving content `(x.y).x = (y.y).x`, which thvm keys at the band HEAD.  WM
+  // never scans the shared reverse face: its single distinguished-face scan
+  // surfaces E6's overlap as TWO MGUs aged far apart (the first at the band's
+  // natural slot, the second at CPNr 2832 -- after the E10/E7/E5/E8 partners,
+  // just before the band's final weight-120 CP E9 at 2833), so the surviving
+  // content belongs at that LATE second-MGU slot.  Defer it to the band's
+  // penultimate same-weight slot (the largest same-weight same-(phase|k1|k2) key
+  // below the band max, +1; mirrors use_comm_reage's anchor+1 splice), letting
+  // the combo=1 CPs lead the band.  Scoped HARD: phase A (key>>58==0), equation
+  // tree (k2==1), pos L.2.2, arr==0, combo==0, a NON-tautology normal form, AND a
+  // SIBLING combo=0 arr==0 L.2.2 overlap from a DIFFERENT equation at the same
+  // shared leaf (the tautology twin) -- so a lone shared-leaf overlap, or any
+  // non-L.2.2 band, never triggers.  OFF byte-identical; advances Meredith
+  // firstdiv 809 -> 1040, soa firstdiv 2808 unchanged.
+  u8    use_mered_dmgu;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6249,6 +6273,9 @@ fn void      thvm_atp_set_use_drain_revface(AtpState *s, u8 on);
 // Reverse-face cube emission order (see AtpState.use_revface_cubeorder).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_revface_cubeorder(AtpState *s, u8 on);
+// Shared-reverse-face double-MGU defer (see AtpState.use_mered_dmgu).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_mered_dmgu(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

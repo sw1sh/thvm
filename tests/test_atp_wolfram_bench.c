@@ -1030,6 +1030,18 @@ int main(int argc, char **argv) {
       // opts in (also turned on by FORMATION_FIFO below).  See soa.txt.
       thvm_atp_set_use_revface_cubeorder(
           s, (getenv("THVM_ATP_REVFACE_CUBEORDER") != NULL) ? 1u : 0u);
+      // Shared-reverse-face double-MGU defer (DEFAULT OFF).  The Meredith
+      // OrAssociativity firstdiv-809 divergence: in a weight-120 tops-A
+      // equation-tree band at pos L.2.2, two var-differ equations WM stores at
+      // distinct distinguished-face leaves share one reverse face, so thvm's
+      // overlap onto that shared face lands both combo=0 CPs at one
+      // discrimination-tree leaf and the chain-head (newest) keys ahead of the
+      // older -- but WM ages the newer content as the older equation's late
+      // SECOND MGU.  Defers that chain-head combo=0 CP to the band's penultimate
+      // slot.  THVM_ATP_MERED_DMGU opts in (also turned on by FORMATION_FIFO
+      // below).  See soa.txt.
+      thvm_atp_set_use_mered_dmgu(
+          s, (getenv("THVM_ATP_MERED_DMGU") != NULL) ? 1u : 0u);
       // WM-faithful discrimination-tree construction (DEFAULT OFF).  Splices
       // BlattAufgeteilt parallels for genuine enclosing subterms AFTER the model
       // (WM AltesBlattPolieren DSBaumOperationen.c :523-526), but keeps the
