@@ -10313,6 +10313,53 @@ static Term atp_proof_record_side(AtpState *s, Term t, u32 side,
   return t;
 }
 
+// The term reached on `side` after keeping `k` of that side's recorded
+// rewrites: k == 0 is the side's seed (the first step's `before`, or the
+// seed `seed` when the side recorded no steps), otherwise the k-th step's
+// `after`.  `lo`/`hi` bound the side's [lo, hi) slice in out[].
+static Term atp_chain_term(const AtpProofStep *out, u32 lo, u32 hi,
+                           Term seed, u32 k) {
+  if (lo >= hi) return seed;             // no steps recorded this side
+  if (k == 0u) return out[lo].before;
+  return out[lo + (k - 1u)].after;
+}
+
+// Goal-chain meet trim (Option B): the two sides are each recorded to
+// their INDEPENDENT joint fixpoint, but FindEquationalProof stops the
+// moment the sides coincide.  On a non-confluent completion that join is
+// reached BEFORE either fixpoint (e.g. the unorientable a.a == b.b rule,
+// grounded to a reserved min-const, fires once more on each side after
+// they already met -- a 2-step out-and-back that nets to a no-op).  Find
+// the earliest (i, j), minimizing i + j, where keeping i lhs steps and j
+// rhs steps lands both sides on kbo-equal terms, then drop every step
+// past that meet on either side.  The kept chain still closes the goal:
+// lhs walks to the meet, rhs walks to the same meet, meet == meet.
+static u32 atp_proof_trim_to_meet(const AtpProofStep *out, u32 n0, u32 n,
+                                  Term seed_lhs, Term seed_rhs,
+                                  AtpProofStep *trimmed) {
+  u32 best_i = n0, best_j = n - n0, best_sum = (n0) + (n - n0);
+  u8  found = 0u;
+  for (u32 i = 0; i <= n0; i++) {
+    Term tl = atp_chain_term(out, 0u, n0, seed_lhs, i);
+    for (u32 j = 0; j <= n - n0; j++) {
+      if (i + j >= best_sum) continue;   // can't beat the current best
+      Term tr = atp_chain_term(out, n0, n, seed_rhs, j);
+      if (kbo_eq(tl, tr)) {
+        best_i = i; best_j = j; best_sum = i + j; found = 1u;
+      }
+    }
+  }
+  if (!found) {                           // sides never coincide on a prefix
+    for (u32 k = 0; k < n; k++) trimmed[k] = out[k];
+    return n;
+  }
+  // Compact: keep out[0, best_i) (lhs) then out[n0, n0+best_j) (rhs).
+  u32 w = 0u;
+  for (u32 k = 0; k < best_i; k++)            trimmed[w++] = out[k];
+  for (u32 k = 0; k < best_j; k++)            trimmed[w++] = out[n0 + k];
+  return w;
+}
+
 fn u32 thvm_atp_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
   if (s == NULL || out == NULL || cap == 0u) return 0;
   // Single-NF extraction only: no goal, or an existential (narrowing)
@@ -10325,11 +10372,25 @@ fn u32 thvm_atp_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
   // form, then R down to the same normal form, ending at NF == NF.
   u32  n = 0;
   Term nf_lhs = atp_proof_record_side(s, s->goal_lhs, 0u, out, cap, &n);
+  u32  n0 = n;                            // boundary: side-0 steps in [0, n0)
   Term nf_rhs = atp_proof_record_side(s, s->goal_rhs, 1u, out, cap, &n);
 
   // Not single-NF provable -- the two sides never meet under R.  A
   // symmetric goal closed only by the MNF search lands here.
   if (!kbo_eq(nf_lhs, nf_rhs)) return 0;
+
+  // Trim both chains back to the EARLIEST cross-side meet so the
+  // reconstructed proof stops where FindEquationalProof stops, instead
+  // of trailing the post-meet round-trip to each side's fixpoint.
+  static AtpProofStep trimmed[ATP_PROOF_MAX_STEPS * 2u];
+  u32 cmin = cap < (u32)(ATP_PROOF_MAX_STEPS * 2u)
+                 ? cap : (u32)(ATP_PROOF_MAX_STEPS * 2u);
+  if (n <= cmin) {
+    u32 m = atp_proof_trim_to_meet(out, n0, n, s->goal_lhs, s->goal_rhs,
+                                   trimmed);
+    for (u32 k = 0; k < m; k++) out[k] = trimmed[k];
+    n = m;
+  }
 
   return n;
 }
