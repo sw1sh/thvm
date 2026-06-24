@@ -5637,6 +5637,16 @@ typedef struct {
   // content unchanged) and the off-Sheffer corpus runs with the gate OFF.  See
   // tools/baselines/wm_align_reports/soa.txt.
   u8    use_leaf_tiebreak;
+  // Leaf-tiebreak FACE GATE (DEFAULT OFF; also turned on by FORMATION_FIFO).
+  // Refines use_leaf_tiebreak: the var-differ==1-first flip is WM-faithful only
+  // when the new fact overlaps the oriented (var-differ==1) partner on its
+  // WM-DISTINGUISHED face AND the permutation (var-differ==0) partner on its
+  // WM-DISTINGUISHED face too.  When the var-differ==0 partner is overlapped on
+  // its WM-REVERSE face (and the var-differ==1 partner on its distinguished
+  // face), thvm's DFS arrival already matches WM's formation order, so the flip
+  // is wrong -- skip it.  Advances Meredith OrAssociativity firstdiv 1040 ->
+  // 1047, soa firstdiv 2808 unchanged.  See tools/baselines/wm_align_reports.
+  u8    use_leaf_tiebreak_facegate;
   // Reverse-face shape-group tiebreak (env THVM_ATP_REVFACE_GROUP, DEFAULT
   // OFF).  Sibling of use_leaf_tiebreak, one weight band up (soa w=209).
   // Within ONE tops overlap-position group (D phase, outer == new fact,
@@ -6247,6 +6257,9 @@ fn void      thvm_atp_set_use_comm_drop_dup(AtpState *s, u8 on);
 // Leaf-arrival tiebreak for the adjacent-leaf comm-class-copy family
 // (see AtpState.use_leaf_tiebreak).  DEFAULT OFF.
 fn void      thvm_atp_set_use_leaf_tiebreak(AtpState *s, u8 on);
+// Leaf-tiebreak face gate (see AtpState.use_leaf_tiebreak_facegate).
+// DEFAULT OFF.
+fn void      thvm_atp_set_use_leaf_tiebreak_facegate(AtpState *s, u8 on);
 // Reverse-face shape-group tiebreak (see AtpState.use_revface_group).
 // DEFAULT OFF.
 fn void      thvm_atp_set_use_revface_group(AtpState *s, u8 on);

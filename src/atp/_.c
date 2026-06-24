@@ -9200,6 +9200,16 @@ fn void thvm_atp_set_use_leaf_tiebreak(AtpState *s, u8 on) {
   s->use_leaf_tiebreak = on ? 1u : 0u;
 }
 
+// Leaf-tiebreak face gate (see AtpState.use_leaf_tiebreak_facegate): skip the
+// var-differ==1-first flip when the oriented partner is overlapped on its WM-
+// distinguished face but the permutation partner on its WM-reverse face -- a
+// configuration where thvm's DFS arrival already matches WM's formation order.
+// DEFAULT OFF.
+fn void thvm_atp_set_use_leaf_tiebreak_facegate(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_leaf_tiebreak_facegate = on ? 1u : 0u;
+}
+
 // Reverse-face shape-group tiebreak (see AtpState.use_revface_group):
 // re-key a var-differ==1 (WM-oriented) equation partner's reverse-face CP
 // to sort immediately after the largest-keyed same-group CP it alpha-matches
@@ -9252,6 +9262,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
   s->use_formation_fifo = on ? 1u : 0u;
   if (on) {
     s->use_leaf_tiebreak    = 1u;
+    s->use_leaf_tiebreak_facegate = 1u;
     s->use_revface_group    = 1u;
     s->use_posgroup         = 1u;
     s->use_cube_arrival     = 1u;
@@ -16706,7 +16717,29 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // (firstdiv 290 -> trace end); the byte-identical 1..289 prefix is
     // preserved (the early-batch fires re-age CPs WM already agrees on, so the
     // selection content is unchanged there).
+    //
+    // Face gate (use_leaf_tiebreak_facegate): the flip above assumes thvm's
+    // tree DFS keys the var-differ==1 partner ADJACENT-HIGHER than the var-
+    // differ==0 partner -- i.e. inverted vs WM's single oriented scan, which
+    // reaches the var-differ==1 distinguished-face leaf first -- so the re-key
+    // restores WM's order.  That holds only when the new fact overlaps the
+    // var-differ==1 partner on its WM-DISTINGUISHED face (jb_face_wm==0): WM's
+    // scan reaches that same face, and the inversion is real.  When instead the
+    // var-differ==1 partner is overlapped on its DISTINGUISHED face but the
+    // var-differ==0 partner on its WM-REVERSE face (ja_face_wm==1), thvm's DFS
+    // arrival ALREADY matches WM's formation order (WM forms the permutation
+    // partner's CP from its earlier-reached distinguished-face leaf FIRST, the
+    // oriented partner's second), so flipping is wrong.  At Meredith
+    // OrAssociativity rule-45's weight-120 band that exact (jb_fwm==0,
+    // ja_fwm==1) pair (`x.(y.y) = (y.x).x` over the oriented `(x.(x.x)).y = y.y`
+    // vs `(x.y).y = (x.x).y` over the permutation `(x.(y.x)).z = z.(x.(z.y))`)
+    // is WM-faithful unflipped: WM forms the permutation CP at CPNr 4563 before
+    // the oriented CP at 4573.  Skip the re-key on that face configuration.
+    // Scoped to the i==f tops phase (the partner is j); a no-op when the flip
+    // condition itself does not fire.  OFF byte-identical; advances Meredith
+    // firstdiv 1040 -> 1047, soa firstdiv 2808 unchanged.
     if (s->use_leaf_tiebreak) {
+      AtpWmOrder *w = (AtpWmOrder *)s->wmo;
       for (u32 kb = 0; kb < n_big; kb++) {
         u32 jb = (big[kb].i == f) ? big[kb].j : big[kb].i;
         if (s->r_orient[jb]) continue;                 // equation partner only
@@ -16725,6 +16758,19 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           break;
         }
         if (ka != 0xffffffffu && big[ka].key >= 1ull) {
+          if (s->use_leaf_tiebreak_facegate) {
+            u32 ja = (big[ka].i == f) ? big[ka].j : big[ka].i;
+            u8 jb_face = (big[kb].i == f) ? (big[kb].combo & 1u)
+                                          : ((big[kb].combo >> 1) & 1u);
+            u8 ja_face = (big[ka].i == f) ? (big[ka].combo & 1u)
+                                          : ((big[ka].combo >> 1) & 1u);
+            u8 jb_fwm = jb_face ^ wmo_trace_dist_rhs(w, s->r_trace[jb]);
+            u8 ja_fwm = ja_face ^ wmo_trace_dist_rhs(w, s->r_trace[ja]);
+            // WM-faithful unflipped: oriented partner on its distinguished face,
+            // permutation partner on its reverse face -- thvm's arrival already
+            // matches WM's formation order.
+            if (jb_fwm == 0u && ja_fwm == 1u) continue;
+          }
           big[kb].key = big[ka].key - 1ull;
         }
       }

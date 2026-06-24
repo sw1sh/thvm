@@ -951,6 +951,15 @@ int main(int argc, char **argv) {
       // in.  See tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_leaf_tiebreak(
           s, (getenv("THVM_ATP_LEAF_TIEBREAK") != NULL) ? 1u : 0u);
+      // Leaf-tiebreak FACE GATE (DEFAULT OFF; also on under FORMATION_FIFO):
+      // skip the var-differ==1-first flip when the oriented partner is
+      // overlapped on its WM-distinguished face but the permutation partner on
+      // its WM-reverse face -- thvm's DFS arrival already matches WM's
+      // formation order there.  Advances Meredith OrAssociativity firstdiv
+      // 1040 -> 1047, soa firstdiv 2808 unchanged.  THVM_ATP_LEAF_TIEBREAK_-
+      // FACEGATE opts in.
+      thvm_atp_set_use_leaf_tiebreak_facegate(
+          s, (getenv("THVM_ATP_LEAF_TIEBREAK_FACEGATE") != NULL) ? 1u : 0u);
       // Reverse-face shape-group tiebreak (DEFAULT OFF): sibling of
       // THVM_ATP_LEAF_TIEBREAK one weight band up (soa w=209).  Within one
       // tops overlap-position group, re-keys a var-differ==1 partner's
