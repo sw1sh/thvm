@@ -940,6 +940,15 @@ int main(int argc, char **argv) {
       // tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_comm_drop_dup(
           s, (getenv("THVM_ATP_COMM_DROP_DUP") != NULL) ? 1u : 0u);
+      // Inner-swap anchor gate for the DROP-DUP re-age (DEFAULT OFF; auto-on
+      // under FORMATION_FIFO): skip the slot15-term re-age when its smallest-
+      // keyed successor is the permutation class `(x.y).y = (y.x).y` (the
+      // Meredith OrAssociativity rule-51 anchor WM emits AFTER the slot15-term).
+      // No soa anchor is this shape, so soa stays byte-identical.  Advances
+      // Meredith firstdiv 1175 -> beyond.  THVM_ATP_COMM_DROP_DUP_CLASS_GATE
+      // opts in (requires THVM_ATP_COMM_DROP_DUP).
+      thvm_atp_set_use_comm_drop_dup_class_gate(
+          s, (getenv("THVM_ATP_COMM_DROP_DUP_CLASS_GATE") != NULL) ? 1u : 0u);
       // Leaf-arrival tiebreak (DEFAULT OFF): when two CPs overlap the new fact
       // at the same position from a var-differ==1 (WM-oriented) partner and a
       // var-differ==0 (WM two-faced permutation) partner, thvm keys the

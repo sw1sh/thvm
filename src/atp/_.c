@@ -9190,6 +9190,16 @@ fn void thvm_atp_set_use_comm_drop_dup(AtpState *s, u8 on) {
   s->use_comm_drop_dup = on ? 1u : 0u;
 }
 
+// Inner-swap anchor gate for the DROP-DUP re-age (see
+// AtpState.use_comm_drop_dup_class_gate): skip the slot15-term re-age when its
+// smallest-keyed successor is the permutation class `(x.y).y = (y.x).y` -- the
+// Meredith OrAssociativity rule-51 anchor WM emits AFTER the slot15-term.
+// DEFAULT OFF.
+fn void thvm_atp_set_use_comm_drop_dup_class_gate(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_comm_drop_dup_class_gate = on ? 1u : 0u;
+}
+
 // Leaf-arrival tiebreak for the adjacent-leaf oriented-vs-permutation family
 // (see AtpState.use_leaf_tiebreak): re-key a var-differ==1 (WM-oriented)
 // equation CP that landed exactly one k3 leaf-step above a var-differ==0 (WM
@@ -9271,6 +9281,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_drain_revface    = 1u;
     s->use_revface_cubeorder = 1u;
     s->use_mered_dmgu       = 1u;
+    s->use_comm_drop_dup_class_gate = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -16173,6 +16184,45 @@ static u8 atp_pair_is_slot15_term(Term l, Term r) {
   return 0u;
 }
 
+// f(f(a, b), c): `(a.b).c` with a, b, c bare vars; binds all three.
+static u8 atp_term_is_dot_ab_dot_c(Term t, u32 *out_a, u32 *out_b, u32 *out_c) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
+  if (term_tag(t1) != TAG_FVR) return 0u;
+  if (term_tag(t0) != TAG_CTR || term_ext(t0) != term_ext(t) ||
+      term_ctr_n(t0) != 2u) return 0u;
+  Term t00 = term_ctr_at(t0, 0), t01 = term_ctr_at(t0, 1);
+  if (term_tag(t00) != TAG_FVR || term_tag(t01) != TAG_FVR) return 0u;
+  *out_a = term_ext(t00);
+  *out_b = term_ext(t01);
+  *out_c = term_ext(t1);
+  return 1u;
+}
+
+// Whether a NORMALIZED CP is the inner-swap permutation CLASS `(x.y).y = (y.x).y`
+// (the commutativity transposition of the inner dot, both sides sharing the same
+// outer-right variable; modulo orientation and variable renaming).  The DROP-DUP
+// re-age below selects the smallest-keyed CP strictly above the slot15-term as its
+// anchor; on Sheffer (soa) that successor is always a tautology or an asymmetric/
+// slot15-class CP WM emits BEFORE the slot15-term, so the +1 splice is faithful.
+// On Meredith OrAssociativity rule-51, the smallest-keyed CP above the slot15-term
+// is instead THIS permutation class (a DUPLICATE copy of the band's `(x.y).y=(y.x).y`
+// equation), which WM emits AFTER the slot15-term -- the slot15-term's own raw
+// leaf arrival already places it at WM's pick-1175 slot, ahead of the class copy.
+// Splicing it past the class copy mis-orders the pair (firstdiv 1175).  No soa
+// DROP-DUP anchor is this exact inner-swap shape, so skipping the re-age when the
+// anchor matches it leaves every soa fire byte-identical.
+static u8 atp_pair_is_inner_swap_class(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 la = 0, lb = 0, lc = 0, ra = 0, rb = 0, rc = 0;
+  if (!atp_term_is_dot_ab_dot_c(l, &la, &lb, &lc)) return 0u;
+  if (!atp_term_is_dot_ab_dot_c(r, &ra, &rb, &rc)) return 0u;
+  if (lc != rc) return 0u;                    // same outer-right var
+  if (la == lb) return 0u;                    // genuine swap (not idempotent)
+  return (u8)(la == rb && lb == ra);          // inner pair transposed
+}
+
 // f(f(v, f(v, v)), y) with v != y, all bare vars: `(x.(x.x)).y`.
 static u8 atp_term_is_cube_dot_var(Term t, u32 *out_v, u32 *out_y) {
   if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
@@ -16675,6 +16725,19 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // the FIRST in-batch slot15-term CP (normalized) and gated on slot15 being
     // live, so slot15 the rule -- and its uniquely-parented pick-99 COMM copy --
     // stay intact.  Advances soa firstdiv 288 -> 290.
+    //
+    // Inner-swap anchor skip (use_comm_drop_dup_class_gate): the smallest-keyed
+    // CP strictly above the slot15-term is the re-age anchor.  On soa that
+    // successor is always a tautology or an asymmetric/slot15-class CP WM emits
+    // BEFORE the slot15-term, so +1 is faithful.  On Meredith OrAssociativity
+    // rule-51 the smallest-keyed CP above is instead the permutation CLASS
+    // `(x.y).y = (y.x).y` (atp_pair_is_inner_swap_class) -- a duplicate copy of
+    // the band's class equation that WM emits AFTER the slot15-term, not before.
+    // The slot15-term's own raw leaf arrival (k3=4) already places it at WM's
+    // pick-1175 slot, ahead of that class copy (k3=15); +1 splices it past the
+    // copy and mis-orders the pair (firstdiv 1175).  Skip the re-age when the
+    // anchor is the inner-swap class: no soa anchor is this exact shape, so every
+    // soa fire stays byte-identical.  Advances Meredith firstdiv 1175 -> beyond.
     if (s->use_comm_drop_dup && atp_slot15_rule_is_live(s)) {
       u32 dup = 0xffffffffu;
       for (u32 k = 0; k < n_big; k++) {
@@ -16687,12 +16750,22 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       }
       if (dup != 0xffffffffu) {
         u64 anchor = 0xffffffffffffffffull;
+        u32 anc_k = 0xffffffffu;
         for (u32 k = 0; k < n_big; k++) {
           if (k == dup) continue;
-          if (big[k].key > big[dup].key && big[k].key < anchor)
+          if (big[k].key > big[dup].key && big[k].key < anchor) {
             anchor = big[k].key;
+            anc_k = k;
+          }
         }
-        if (anchor != 0xffffffffffffffffull) big[dup].key = anchor + 1u;
+        u8 anchor_is_class = 0u;
+        if (s->use_comm_drop_dup_class_gate && anc_k != 0xffffffffu) {
+          Term al = atp_rewrite_normalize_indexed(s, big[anc_k].cp.lhs, 4096u);
+          Term ar = atp_rewrite_normalize_indexed(s, big[anc_k].cp.rhs, 4096u);
+          anchor_is_class = atp_pair_is_inner_swap_class(al, ar);
+        }
+        if (anchor != 0xffffffffffffffffull && !anchor_is_class)
+          big[dup].key = anchor + 1u;
       }
     }
     // Leaf-arrival tiebreak (default OFF; see use_leaf_tiebreak).  Two CPs

@@ -2205,6 +2205,9 @@ u32  thvm_metal_buf_arena_view(u32 arena_buf_id, u64 offset, u64 nbytes);
 void thvm_metal_buf_arena_release(u32 arena_buf_id);
 // True iff buf_id is a borrowed (newBufferWithBytesNoCopy) disk-mmap wrap.
 int  thvm_metal_buf_is_borrowed(u32 buf_id);
+// Packed {borrowed:bit0, jit_pinned:bit1, owns_data:bit2, preserved:bit3,
+// refcount:bits8+} for the warm-replay NaN bisect.
+u32  thvm_metal_buf_meta(u32 buf_id);
 // Explicitly free a borrowed disk-mmap wrap (flushes dispatch, drops the
 // MTLBuffer ARC ref; the mmap pages stay owned by the CPU-side DiskMap).
 // No-op on a non-borrowed slot.  The streaming per-block loader calls this
@@ -5612,6 +5615,15 @@ typedef struct {
   // x.(y.(y.y))`).  Requires THVM_ATP_COMM_REAGE.  See
   // tools/baselines/wm_align_reports/soa.txt.
   u8    use_comm_drop_dup;
+  // Inner-swap anchor gate for the DROP-DUP re-age (env
+  // THVM_ATP_COMM_DROP_DUP_CLASS_GATE, DEFAULT OFF; auto-on under
+  // use_formation_fifo).  Skip the slot15-term re-age when the smallest-keyed
+  // CP strictly above it is the permutation CLASS `(x.y).y = (y.x).y`
+  // (atp_pair_is_inner_swap_class) -- the Meredith OrAssociativity rule-51
+  // anchor WM emits AFTER the slot15-term, not before, so splicing past it
+  // mis-orders the pair.  No soa anchor is this shape, so soa stays
+  // byte-identical.  Advances Meredith firstdiv 1175 -> beyond.
+  u8    use_comm_drop_dup_class_gate;
   // Leaf-arrival tiebreak for the adjacent-leaf oriented-vs-permutation family
   // (env THVM_ATP_LEAF_TIEBREAK, DEFAULT OFF).  Two CPs that overlap the new
   // fact at the SAME position with two DIFFERENT equation partners can age
@@ -6254,6 +6266,9 @@ fn void      thvm_atp_set_use_comm_reage(AtpState *s, u8 on);
 // Commutativity DROP-DUP re-age (see AtpState.use_comm_drop_dup).
 // DEFAULT OFF.
 fn void      thvm_atp_set_use_comm_drop_dup(AtpState *s, u8 on);
+// Inner-swap anchor gate for the DROP-DUP re-age
+// (see AtpState.use_comm_drop_dup_class_gate).  DEFAULT OFF.
+fn void      thvm_atp_set_use_comm_drop_dup_class_gate(AtpState *s, u8 on);
 // Leaf-arrival tiebreak for the adjacent-leaf comm-class-copy family
 // (see AtpState.use_leaf_tiebreak).  DEFAULT OFF.
 fn void      thvm_atp_set_use_leaf_tiebreak(AtpState *s, u8 on);
