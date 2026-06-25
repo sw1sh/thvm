@@ -18934,26 +18934,29 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       }
     }
     // L.1 `(x.x).y`-distribution band interleave (default OFF; see
-    // use_l1_xxdist_interleave).  The Meredith OrAssociativity firstdiv-12811
-    // divergence: the f=179 tops batch forms a weight-120 L.1/combo0 group
-    // holding TWO A `(x.x).y = y.(x.y)` and TWO B `(x.x).y = y.(y.x)`
-    // distribution survivors (atp_pair_is_xx_y_dist 1/2).  The upstream
-    // use_l1_xxdist_front has already grouped them A,A,B,B (it emits the A-run
-    // then the B-run).  But WM's single superposition scan emits the band
-    // ROUND-ROBIN A,B,A,B (picks 12810: A, 12811: B, 12812: A, 12813: B).
-    // Re-key onto a (round, variant) interleave -- round = count of EARLIER
-    // same-variant band CPs in the current key order, variant rank A(1)<B(2) --
-    // so they sort A,B,A,B.  The band CPs keep their key SLOTS (the multiset is
-    // permuted only among themselves), the same round-robin idiom as
-    // use_l12_band155 but on the A/B distribution pair.  Scoped HARD to an
-    // L.1/combo0 group (one (phase|k1|k2) prefix) holding >=2 A AND >=2 B --
-    // the exact f=179 signature.  The EARLIER f=167 batch holds exactly one A
-    // (seq 58341) and one B (seq 58358): use_l1_xxdist_front already orders that
-    // single pair A,B and WM agrees (firstdiv was past it), so the >=2-each gate
-    // leaves f=167 byte-identical.  soa forms NO L.1/combo0 group with >=2 A and
-    // >=2 B at one (phase|k1|k2) prefix (its A/B distribution survivors are
+    // use_l1_xxdist_interleave).  Two Meredith OrAssociativity divergences, same
+    // shape family: a weight-120 L.1/combo0 group holding TWO A `(x.x).y =
+    // y.(x.y)` and TWO B `(x.x).y = y.(y.x)` distribution survivors
+    // (atp_pair_is_xx_y_dist 1/2).  The upstream use_l1_xxdist_front grouped them
+    // A,A,B,B (A-run then B-run) to fix the SINGLE-pair f=167 batch.  But WM's
+    // single superposition scan emits the multi-pair band in PARTNER-ARRIVAL
+    // order, which differs per batch by the start variant: the f=179 batch wants
+    // A,B,A,B (picks 12810..12813) while the f=180 batch wants B,A,A,B (picks
+    // 12914..12917 -- the B distribution survivor's producer arrives at the
+    // lowest slot).  Restore that scan order by ranking the group's survivors on
+    // their RAW partner-arrival key (key_raw -- the atp_wmo_rank result BEFORE
+    // any gated re-key, untouched by the front pass) and re-assigning the
+    // ascending key-slot multiset in raw order.  The band CPs keep their key
+    // SLOTS (the multiset is permuted only among themselves).  A strict
+    // (round,variant) round-robin would force A,B,A,B for BOTH and mis-order
+    // f=180; key_raw discriminates the start variant.  Scoped HARD to an
+    // L.1/combo0 group (one (phase|k1|k2) prefix) holding >=2 A AND >=2 B -- the
+    // f=179/f=180 signature.  The EARLIER f=167 batch holds exactly one A + one B
+    // (use_l1_xxdist_front already orders it A,B and WM agrees), so the >=2-each
+    // gate leaves it byte-identical.  soa forms NO L.1/combo0 group with >=2 A
+    // and >=2 B at one (phase|k1|k2) prefix (its A/B distribution survivors are
     // scattered across batches/groups), so the gate leaves soa byte-identical.
-    // OFF byte-identical.  Advances Meredith firstdiv 12811 -> beyond.
+    // OFF byte-identical.  Advances Meredith firstdiv 12811 -> 12990.
     if (s->use_l1_xxdist_interleave) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
       enum { XI_CAP = 64u };
@@ -18998,7 +19001,8 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         u32 na = 0, nb = 0;
         for (u32 a = 0; a < ng; a++) { if (gvar[a] == 1u) na++; else nb++; }
         if (na < 2u || nb < 2u) continue;
-        // Sort the band entries by current key (ascending).
+        // Sort the band entries by current key (ascending) to get the ascending
+        // key-slot multiset to redistribute.
         for (u32 p = 0; p + 1u < ng; p++)
           for (u32 q = p + 1u; q < ng; q++)
             if (gkey[q] < gkey[p]) {
@@ -19006,21 +19010,27 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
               u32 ti = ge[p]; ge[p] = ge[q]; ge[q] = ti;
               u8  tv = gvar[p]; gvar[p] = gvar[q]; gvar[q] = tv;
             }
-        // (round, variant) rank: round = count of earlier same-variant CPs.
-        u32 round[XI_CAP];
-        u32 seen[3] = {0, 0, 0};
-        for (u32 a = 0; a < ng; a++) { round[a] = seen[gvar[a]]; seen[gvar[a]]++; }
-        // order = entries sorted by (round, variant_rank), each variant A(1)<B(2).
+        // Restore WM's natural superposition-scan order: rank the survivors by
+        // their RAW partner-arrival key (key_raw, the atp_wmo_rank result BEFORE
+        // the gated re-key passes).  The upstream use_l1_xxdist_front pass pulled
+        // the A members ahead of the B members (A,A,B,B) to fix the SINGLE-pair
+        // f=167 batch; here in the >=2-each multi-pair groups it instead has to
+        // be reverted to the partner-arrival interleave WM actually emits.  The
+        // raw key already encodes that scan order byte-for-byte: f=179 raw is
+        // A,B,A,B (A-producer arrives before B's), f=180 raw is B,A,A,B (the B
+        // distribution survivor's producer arrives BEFORE the A's at the lowest
+        // slot, then A,A,B), matching WM's picks 12914..12917 = B,A,A,B exactly.
+        // A strict (round,variant) round-robin would force A,B,A,B for BOTH and
+        // mis-order f=180; key_raw discriminates the start variant per batch.
         u32 order[XI_CAP];
         for (u32 a = 0; a < ng; a++) order[a] = a;
         for (u32 a = 0; a + 1u < ng; a++)
           for (u32 b = a + 1u; b < ng; b++) {
-            u32 pa = order[a], pb = order[b];
-            u32 ka = round[pa] * 2u + (gvar[pa] - 1u);
-            u32 kb = round[pb] * 2u + (gvar[pb] - 1u);
-            if (kb < ka) { order[a] = pb; order[b] = pa; }
+            if (big[ge[order[b]]].key_raw < big[ge[order[a]]].key_raw) {
+              u32 t = order[a]; order[a] = order[b]; order[b] = t;
+            }
           }
-        // Re-assign the sorted key slots in (round, variant) order.
+        // Re-assign the ascending key slots in raw-arrival order.
         for (u32 a = 0; a < ng; a++)
           big[ge[order[a]]].key = gkey[a];
       }
