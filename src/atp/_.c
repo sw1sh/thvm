@@ -9296,6 +9296,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_corank_own_arr   = 1u;
     s->use_l1_cube_rotate   = 1u;
     s->use_l1_xxdist_front  = 1u;
+    s->use_l22_xxdist_defer = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9381,6 +9382,16 @@ fn void thvm_atp_set_use_l1_cube_rotate(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1_xxdist_front(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1_xxdist_front = on ? 1u : 0u;
+}
+
+// L.2.2 `(x.(y.(y.y))).(x.(z.z))`-distribution duplicate defer (see
+// AtpState.use_l22_xxdist_defer): defer the re-derived combo=0 j_or=0 L.2.2 CP
+// `(x.(y.(y.y))).(x.(z.z)) = x` to the end of the batch's weight-209 run,
+// matching WM's CP-formation FIFO age for the re-derived duplicate.  DEFAULT
+// OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l22_xxdist_defer(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l22_xxdist_defer = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -16888,6 +16899,54 @@ static u8 atp_pair_is_xx_y_dist(Term l, Term r) {
   return 0u;
 }
 
+// `f(f(x, f(y, f(y, y))), f(x, f(z, z)))` -- the L.2.2 weight-209 shape
+// `(x.(y.(y.y))).(x.(z.z))` with x, y, z three distinct bare vars (y != x,
+// z != x, z != y).  Binds nothing; just validates the skeleton.  This is the
+// Meredith OrAssociativity f=64 L.2.2 re-derived duplicate (CPSEL seq 7977)
+// WM ages at the END of the batch's j_or=0 weight-209 run, not its head (see
+// use_l22_xxdist_defer).
+static u8 atp_term_is_yyy_zz_dist(Term t) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  u32 op = term_ext(t);
+  Term lo = term_ctr_at(t, 0), hi = term_ctr_at(t, 1);   // (x.(y.(y.y))) , (x.(z.z))
+  if (term_tag(lo) != TAG_CTR || term_ext(lo) != op || term_ctr_n(lo) != 2u)
+    return 0u;
+  if (term_tag(hi) != TAG_CTR || term_ext(hi) != op || term_ctr_n(hi) != 2u)
+    return 0u;
+  Term lx = term_ctr_at(lo, 0), lcube = term_ctr_at(lo, 1);  // x , (y.(y.y))
+  Term hx = term_ctr_at(hi, 0), hzz = term_ctr_at(hi, 1);    // x , (z.z)
+  if (term_tag(lx) != TAG_FVR || term_tag(hx) != TAG_FVR) return 0u;
+  u32 x = term_ext(lx);
+  if (term_ext(hx) != x) return 0u;                          // both outer = x
+  // lcube = (y.(y.y)) -- the self-cube `f(y, f(y,y))` on a var y != x.
+  u32 y = 0;
+  if (!atp_term_is_self_cube(lcube, &y)) return 0u;
+  if (y == x) return 0u;
+  // hzz = (z.z) -- the idempotent leaf on a var z, distinct from x and y.
+  if (term_tag(hzz) != TAG_CTR || term_ext(hzz) != op || term_ctr_n(hzz) != 2u)
+    return 0u;
+  Term z0 = term_ctr_at(hzz, 0), z1 = term_ctr_at(hzz, 1);
+  if (term_tag(z0) != TAG_FVR || term_tag(z1) != TAG_FVR) return 0u;
+  u32 z = term_ext(z0);
+  if (term_ext(z1) != z) return 0u;                          // both = z
+  return (u8)(z != x && z != y);
+}
+
+// Whether a NORMALIZED CP is the L.2.2 `(x.(y.(y.y))).(x.(z.z)) = x`
+// distribution shape: one side is the `(x.(y.(y.y))).(x.(z.z))` factor
+// (atp_term_is_yyy_zz_dist), the other is the bare outer var x.  Returns 1, 0
+// otherwise.  Orientation-insensitive (the bare-var side is either l or r).
+static u8 atp_pair_is_yyy_zz_dist(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (!atp_term_is_yyy_zz_dist(big)) return 0u;
+  // The bare var g equals the outer var x of the big side.
+  u32 x = term_ext(term_ctr_at(term_ctr_at(big, 0), 0));
+  return (u8)(term_ext(var) == x);
+}
+
 // Whether a NORMALIZED CP is the slot15-term `x.(y.x) = (y.y).x` WRAPPED with
 // a trailing `. z` on BOTH sides: `(x.(y.x)).z = ((y.y).x).z` (thvm LHS=(C3
 // (C3 V0 (C3 V1 V0)) V2), RHS=(C3 (C3 (C3 V1 V1) V0) V2) modulo orientation/
@@ -17910,6 +17969,51 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         // same-weight key below the band max, +1.  This places the deferred CP at
         // the band's penultimate slot, matching WM's CPNr 2832 < 2833 (E9).
         if (band_pen != 0u) big[kd].key = band_pen + 1u;
+      }
+    }
+    // L.2.2 `(x.(y.(y.y))).(x.(z.z))`-distribution duplicate defer (default OFF;
+    // see use_l22_xxdist_defer).  The Meredith OrAssociativity firstdiv-11791
+    // divergence: the f=64 tops batch's weight-209 j_or=0 L.2.2 run has a HEAD
+    // CP (CPSEL seq 7977) that normalizes to `(x.(y.(y.y))).(x.(z.z)) = x`
+    // (atp_pair_is_yyy_zz_dist) -- a RE-DERIVATION of a canonical term first
+    // selected ~14 batches earlier.  thvm keys it at the run head (arr=1); WM's
+    // single superposition scan ages this re-derived duplicate at the END of the
+    // run (selected at WM 12298, after seq 7981..7987), so the surviving content
+    // belongs at its late re-derivation slot.  Re-key it just past the run's
+    // largest same-weight same-(phase|k1|k2) key (the use_comm_reage anchor+1
+    // splice), so the distinct-content CPs lead.  Scoped HARD to phase 0, k2==1,
+    // L.2.2, combo==0, j_or==0, normalized-CP == the yyy_zz_dist shape -- the
+    // exact f=64 signature.  OFF byte-identical, soa byte-identical.  Advances
+    // Meredith firstdiv 11791 -> beyond.
+    if (s->use_l22_xxdist_defer) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      for (u32 kd = 0; kd < n_big; kd++) {
+        if ((big[kd].key >> 58) != 0u) continue;          // phase 0
+        if (((big[kd].key >> 42) & 3u) != 1u) continue;   // equation tree k2==1
+        if (big[kd].combo != 0u) continue;                // combo 0 only
+        if (s->r_orient[big[kd].j] != 0u) continue;       // partner oriented r->l
+        if (big[kd].cp.pos_len != 2u ||
+            big[kd].cp.pos[0] != 1u || big[kd].cp.pos[1] != 1u) continue;  // L.2.2
+        Term ndl = atp_rewrite_normalize_indexed(s, big[kd].cp.lhs, 4096u);
+        Term ndr = atp_rewrite_normalize_indexed(s, big[kd].cp.rhs, 4096u);
+        if (!atp_pair_is_yyy_zz_dist(ndl, ndr)) continue;
+        // Defer just past the run's largest same-weight same-(phase|k1|k2) key:
+        // band_max + 1 places the re-derived duplicate after every distinct-
+        // content CP of the run.
+        u32 d_pri = atp_cp_priority(s, ndl, ndr);
+        u64 grp = big[kd].key & grp_mask;
+        u64 band_max = 0u;
+        for (u32 ks = 0; ks < n_big; ks++) {
+          if (ks == kd) continue;
+          if ((big[ks].key & grp_mask) != grp) continue;
+          Term nsl = atp_rewrite_normalize_indexed(s, big[ks].cp.lhs, 4096u);
+          Term nsr = atp_rewrite_normalize_indexed(s, big[ks].cp.rhs, 4096u);
+          if (kbo_eq(nsl, nsr)) continue;                 // tautology: dropped
+          if (atp_cp_priority(s, nsl, nsr) != d_pri) continue;  // same weight only
+          if (big[ks].key > band_max) band_max = big[ks].key;
+        }
+        if (band_max != 0u && band_max + 1u > big[kd].key)
+          big[kd].key = band_max + 1u;
       }
     }
     // Reverse-face cube emission order (default OFF; see use_revface_cubeorder).

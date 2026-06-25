@@ -1115,6 +1115,14 @@ int main(int argc, char **argv) {
       // FORMATION_FIFO below).  See soa.txt.
       thvm_atp_set_use_l1_xxdist_front(
           s, (getenv("THVM_ATP_L1_XXDIST_FRONT") != NULL) ? 1u : 0u);
+      // L.2.2 `(x.(y.(y.y))).(x.(z.z))`-distribution duplicate defer (DEFAULT
+      // OFF): defer the re-derived combo=0 j_or=0 L.2.2 CP
+      // `(x.(y.(y.y))).(x.(z.z)) = x` to the end of the batch's weight-209 run,
+      // matching WM's CP-formation FIFO age -- the Meredith OrAssociativity
+      // firstdiv-11791 divergence.  THVM_ATP_L22_XXDIST_DEFER opts in (also
+      // turned on by FORMATION_FIFO below).  See soa.txt.
+      thvm_atp_set_use_l22_xxdist_defer(
+          s, (getenv("THVM_ATP_L22_XXDIST_DEFER") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /

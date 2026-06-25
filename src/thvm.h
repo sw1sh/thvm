@@ -5942,6 +5942,22 @@ typedef struct {
   // both-present gate leaves soa byte-identical.  OFF byte-identical.  Advances
   // Meredith firstdiv 11539 -> beyond.
   u8    use_l1_xxdist_front;
+  // L.2.2 `(x.(y.(y.y))).(x.(z.z))`-distribution duplicate defer (env
+  // THVM_ATP_L22_XXDIST_DEFER, default OFF; also turned ON under
+  // use_formation_fifo).  The Meredith OrAssociativity firstdiv-11791
+  // divergence: the f=64 tops batch forms a weight-209 j_or=0 L.2.2 run whose
+  // HEAD CP (CPSEL seq 7977) normalizes to `(x.(y.(y.y))).(x.(z.z)) = x`
+  // (atp_pair_is_yyy_zz_dist) -- a RE-DERIVATION of a canonical term first
+  // selected ~14 batches earlier.  thvm keys it at the run head; WM's single
+  // superposition scan ages this re-derived duplicate at the END of the run
+  // (selected at WM 12298, after the rest of the run), since the surviving
+  // content belongs at its late re-derivation slot.  Defer it to just after the
+  // run's largest same-weight key (the use_comm_reage anchor+1 splice), so the
+  // distinct-content CPs lead.  Scoped HARD to phase 0, k2==1, L.2.2, combo==0,
+  // j_or==0, normalized-CP == the yyy_zz_dist shape -- the exact f=64 signature.
+  // OFF byte-identical, soa byte-identical.  Advances Meredith firstdiv 11791
+  // -> beyond.
+  u8    use_l22_xxdist_defer;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6397,6 +6413,10 @@ fn void      thvm_atp_set_use_l1_cube_rotate(AtpState *s, u8 on);
 // L.1 `(x.x).y`-distribution front-age (see AtpState.use_l1_xxdist_front).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1_xxdist_front(AtpState *s, u8 on);
+// L.2.2 `(x.(y.(y.y))).(x.(z.z))`-distribution duplicate defer (see
+// AtpState.use_l22_xxdist_defer).  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void      thvm_atp_set_use_l22_xxdist_defer(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
