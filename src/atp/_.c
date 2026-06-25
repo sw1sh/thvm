@@ -16373,6 +16373,54 @@ static u8 atp_pair_is_slot15_rotate(Term l, Term r) {
   return 0u;
 }
 
+// f(c, f(b, a)): `c.(b.a)` with a, b, c bare vars -- the RHS face of the
+// 3-variable associativity-rotation anchor below.
+static u8 atp_term_is_var_dot_ba(Term t, u32 *out_a, u32 *out_b, u32 *out_c) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
+  if (term_tag(t0) != TAG_FVR) return 0u;                  // outer-left var c
+  if (term_tag(t1) != TAG_CTR || term_ext(t1) != term_ext(t) ||
+      term_ctr_n(t1) != 2u) return 0u;                     // f(b, a)
+  Term t10 = term_ctr_at(t1, 0), t11 = term_ctr_at(t1, 1);
+  if (term_tag(t10) != TAG_FVR || term_tag(t11) != TAG_FVR) return 0u;
+  *out_c = term_ext(t0);
+  *out_b = term_ext(t10);
+  *out_a = term_ext(t11);
+  return 1u;
+}
+
+// Whether a NORMALIZED CP is the 3-variable associativity-rotation
+// `(a.b).c = c.(b.a)` (the top operands swapped AND the inner pair reversed;
+// modulo orientation and variable renaming).  This is the THIRD Meredith-
+// harmful DROP-DUP anchor (after the inner-swap class and the slot15-rotate):
+// at Meredith OrAssociativity rule-133 (f=133) the smallest-keyed CP strictly
+// above the slot15-term is this rotation -- a DIFFERENT partner equation
+// indexed at the discrimination-tree leaf one arrival AFTER the slot15-term's
+// leaf (slot15-term raw arrival 0, rotation arrival 1, same overlap position).
+// WM's single distinguished-face scan reaches the slot15-term's earlier leaf
+// FIRST, so it ages that CP BEFORE the rotation (WM emits the slot15-term
+// content at pick-7560, the rotation at pick-7561); thvm's raw arrival already
+// agrees, but the +1 splice ages the slot15-term past the rotation, inverting
+// the pair (firstdiv 7560).  No soa DROP-DUP anchor is this exact shape (every
+// soa anchor is a cube CP, a tautology, or an asymmetric form -- none is the
+// `(a.b).c = c.(b.a)` 3-var rotation), so skipping the re-age on this anchor
+// leaves every soa fire byte-identical.
+static u8 atp_pair_is_assoc_rotation(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 la = 0, lb = 0, lc = 0, ra = 0, rb = 0, rc = 0;
+  // One side is `(a.b).c`, the other `c.(b.a)`.
+  if (atp_term_is_dot_ab_dot_c(l, &la, &lb, &lc) &&
+      atp_term_is_var_dot_ba(r, &ra, &rb, &rc))
+    return (u8)(la == ra && lb == rb && lc == rc &&
+                la != lb && lb != lc && la != lc);
+  if (atp_term_is_dot_ab_dot_c(r, &ra, &rb, &rc) &&
+      atp_term_is_var_dot_ba(l, &la, &lb, &lc))
+    return (u8)(la == ra && lb == rb && lc == rc &&
+                la != lb && lb != lc && la != lc);
+  return 0u;
+}
+
 // f(f(v, f(v, v)), y) with v != y, all bare vars: `(x.(x.x)).y`.
 static u8 atp_term_is_cube_dot_var(Term t, u32 *out_v, u32 *out_y) {
   if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
@@ -16991,11 +17039,14 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           Term ar = atp_rewrite_normalize_indexed(s, big[anc_k].cp.rhs, 4096u);
           // Skip the re-age when the anchor is a Meredith-harmful shape WM
           // emits AFTER the slot15-term: the inner-swap permutation class
-          // `(x.y).y = (y.x).y` (rule-51) OR the slot15-ROTATE `x.(y.x) =
-          // (x.y).x` (rule-59).  Neither shape occurs as a soa anchor, so soa
-          // fires stay byte-identical.
+          // `(x.y).y = (y.x).y` (rule-51), the slot15-ROTATE `x.(y.x) =
+          // (x.y).x` (rule-59), OR the 3-var associativity-rotation
+          // `(a.b).c = c.(b.a)` (rule-133, the partner one leaf arrival past
+          // the slot15-term's leaf).  None of the three shapes occurs as a soa
+          // anchor, so soa fires stay byte-identical.
           anchor_is_class = (u8)(atp_pair_is_inner_swap_class(al, ar) ||
-                                 atp_pair_is_slot15_rotate(al, ar));
+                                 atp_pair_is_slot15_rotate(al, ar) ||
+                                 atp_pair_is_assoc_rotation(al, ar));
         }
         // Chain-head leaf-sibling skip (use_comm_drop_dup_class_gate): the
         // slot15-term CP is at the HEAD (raw chain index k4==0) of its
