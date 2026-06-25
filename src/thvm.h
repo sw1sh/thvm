@@ -5971,6 +5971,20 @@ typedef struct {
   // byte-identical, soa byte-identical.  Advances Meredith firstdiv 11839 ->
   // beyond.
   u8    use_l1_xxx_cube_defer;
+  // L.2 `x.(x.x) = y.(y.y)` self-cube-equality defer (env
+  // THVM_ATP_L2_SELFCUBE_DEFER, default OFF; also turned ON under
+  // use_formation_fifo).  The Meredith OrAssociativity firstdiv-11847
+  // divergence: the f=170 tops batch forms a weight-120 L.2/combo0/k2==0 group
+  // whose self-cube-equality CP (CPSEL seq 60829, `x.(x.x) = y.(y.y)`) thvm keys
+  // ahead of the group's fwd/posgroup cubes; WM ages it LAST (WM selects it at
+  // 11849, the cubes at 11847/11848).  Re-key it just past the group's largest
+  // weight-120 same-(phase|k1|k2) key (band_max+1).  The self-cube equality is
+  // UBIQUITOUS (soa forms it 1405x), so the defer is gated on the EXACT f=170
+  // group structure: a higher-keyed weight-120 fwd_cube AND a higher-keyed
+  // weight-120 posgroup_cube both present -- soa has ZERO such groups, so this
+  // fires NEVER on soa (inherently soa-safe).  OFF byte-identical.  Advances
+  // Meredith firstdiv 11847 -> beyond.
+  u8    use_l2_selfcube_defer;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6433,6 +6447,10 @@ fn void      thvm_atp_set_use_l22_xxdist_defer(AtpState *s, u8 on);
 // L.1 `(x.x).x = y.(y.y)` cube defer (see AtpState.use_l1_xxx_cube_defer).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1_xxx_cube_defer(AtpState *s, u8 on);
+// L.2 `x.(x.x) = y.(y.y)` self-cube-equality defer (see
+// AtpState.use_l2_selfcube_defer).  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void      thvm_atp_set_use_l2_selfcube_defer(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

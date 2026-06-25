@@ -9298,6 +9298,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1_xxdist_front  = 1u;
     s->use_l22_xxdist_defer = 1u;
     s->use_l1_xxx_cube_defer = 1u;
+    s->use_l2_selfcube_defer = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9402,6 +9403,16 @@ fn void thvm_atp_set_use_l22_xxdist_defer(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1_xxx_cube_defer(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1_xxx_cube_defer = on ? 1u : 0u;
+}
+
+// L.2 `x.(x.x) = y.(y.y)` self-cube-equality defer (see
+// AtpState.use_l2_selfcube_defer): defer the leading self-cube-equality CP
+// `x.(x.x) = y.(y.y)` of an f=170-signature L.2/combo0/k2==0 cube group to the
+// end of the group's weight-120 run, matching WM's CP-formation FIFO age.
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l2_selfcube_defer(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l2_selfcube_defer = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -18284,6 +18295,75 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // (pos[0]==0), combo==0, tops (i==f), k2==0, phase 0, normalized-CP == E or
     // a cube C/D, and a group holding an E member.  OFF byte-identical, soa
     // byte-identical.  Advances Meredith firstdiv 11839 -> beyond.
+    // L.2 `x.(x.x) = y.(y.y)` self-cube-equality defer (default OFF; see
+    // use_l2_selfcube_defer).  The Meredith OrAssociativity firstdiv-11847
+    // divergence: the f=170 tops batch forms a weight-120 L.2/combo0/k2==0 group
+    // whose self-cube-equality CP (CPSEL seq 60829, `x.(x.x) = y.(y.y)` --
+    // already that clean form at batch time) thvm keys ahead of the group's
+    // fwd/posgroup cubes; WM's single superposition scan ages it LAST (WM
+    // selects it at 11849, the cubes at 11847/11848).  Re-key it just past the
+    // group's largest weight-120 same-(phase|k1|k2) key (band_max+1).  The
+    // self-cube equality is a UBIQUITOUS shape (soa forms it 1405x), so the
+    // defer is gated on the EXACT f=170 group structure: a HIGHER-keyed
+    // weight-120 fwd_cube AND a HIGHER-keyed weight-120 posgroup_cube both
+    // present in the same group.  soa has ZERO L.2/combo0/k2==0 distinct-var
+    // self-cube-equality CPs with both a higher fwd AND a higher posgroup cube
+    // (its 60 L.2 self-cube cases are all fwd-only or cube-free), so this
+    // structure gate fires NEVER on soa (inherently soa-safe).  OFF
+    // byte-identical, soa byte-identical.  Advances Meredith firstdiv 11847 ->
+    // beyond.
+    if (s->use_l2_selfcube_defer) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      for (u32 kd = 0; kd < n_big; kd++) {
+        if (big[kd].i != f || big[kd].j == f) continue;   // tops, partner = j
+        if (big[kd].combo != 0u) continue;                // combo 0 only
+        if ((big[kd].key >> 58) != 0u) continue;          // phase 0
+        if (((big[kd].key >> 42) & 3u) != 0u) continue;   // rule-tree k2 == 0
+        if (big[kd].cp.pos_len != 1u || big[kd].cp.pos[0] != 1u) continue; // L.2
+        Term ndl = atp_rewrite_normalize_indexed(s, big[kd].cp.lhs, 4096u);
+        Term ndr = atp_rewrite_normalize_indexed(s, big[kd].cp.rhs, 4096u);
+        if (!atp_pair_is_self_cube_eq(ndl, ndr)) continue;
+        // Distinct cube vars (`x.(x.x) = y.(y.y)`, x != y): the same-var copy is
+        // a tautology dropped at push, so only the genuine distinct-var equality
+        // claims a FIFO slot and needs deferral.
+        u32 vl = 0, vr = 0;
+        (void)atp_term_is_self_cube(ndl, &vl);
+        (void)atp_term_is_self_cube(ndr, &vr);
+        if (vl == vr) continue;
+        // Group structure gate + band max in one pass: require a HIGHER-keyed
+        // weight-120 fwd_cube AND a HIGHER-keyed weight-120 posgroup_cube in the
+        // same group, AND that this is the group's ONLY weight-120 self-cube
+        // equality (no other distinct-var self-cube equality below or above).
+        // That singleton condition is the discriminator between the f=170-class
+        // defer (where thvm wrongly heads the self-cube equality and WM ages it
+        // last) and the earlier f=100/101/142 batches (which carry MULTIPLE
+        // self-cube equalities WM keeps interleaved with the cubes -- thvm is
+        // already WM-aligned there, so they must be left untouched).  No soa
+        // group has a fwd+posgroup pair above a singleton self-cube equality
+        // either, so the gate stays soa-safe.  band_max = the group's largest
+        // weight-120 key (the defer target).
+        u64 grp = big[kd].key & grp_mask;
+        u64 band_max = 0u;
+        u8 has_fwd_hi = 0u, has_pos_hi = 0u, other_sc = 0u;
+        for (u32 ks = 0; ks < n_big; ks++) {
+          if (ks == kd) continue;
+          if ((big[ks].key & grp_mask) != grp) continue;
+          Term nsl = atp_rewrite_normalize_indexed(s, big[ks].cp.lhs, 4096u);
+          Term nsr = atp_rewrite_normalize_indexed(s, big[ks].cp.rhs, 4096u);
+          if (kbo_eq(nsl, nsr)) continue;                 // tautology: dropped
+          if (atp_cp_priority(s, nsl, nsr) != 120u) continue;   // weight-120 band
+          if (big[ks].key > band_max) band_max = big[ks].key;
+          if (atp_pair_is_self_cube_eq(nsl, nsr)) other_sc = 1u;
+          if (big[ks].key > big[kd].key) {
+            if (atp_pair_is_fwd_cube(nsl, nsr)) has_fwd_hi = 1u;
+            if (atp_pair_is_posgroup_cube(nsl, nsr)) has_pos_hi = 1u;
+          }
+        }
+        if (!has_fwd_hi || !has_pos_hi || other_sc) continue;   // not the f=170 signature
+        if (band_max != 0u && band_max + 1u > big[kd].key)
+          big[kd].key = band_max + 1u;
+      }
+    }
     if (s->use_l1_xxx_cube_defer) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
       for (u32 kd = 0; kd < n_big; kd++) {
