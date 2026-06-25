@@ -16948,10 +16948,22 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       for (u32 k = 0; k < n_big; k++) {
         if (big[k].key_owncorank == big[k].key) continue;  // no collapse
         u8 j_dr = wmo_trace_dist_rhs(cw, s->r_trace[big[k].j]);
-        u8 j_face_wm = (u8)((big[k].combo & 1u) ^ j_dr);
-        if (!j_face_wm || j_dr) continue;
+        if (j_dr) continue;                  // oriented LHS->RHS partner only
         if (!atp_pair_is_sq_inner_class(s->lhs[big[k].j], s->rhs[big[k].j]))
           continue;
+        // The `(x.(x.x)).y = y.y` partner (dist_rhs==0) admits TWO distinct
+        // overlap CPs WM ages independently, one per face:
+        //   - j_face_wm==1 (reverse, RHS `y.y`): the firstdiv-4190 light-left
+        //     CP, collapsed onto the earlier distinguished-face arrival.
+        //   - j_face_wm==0 (distinguished, LHS `(x.(x.x)).y`): the firstdiv-
+        //     10030 HEAVY-left CP `(x.(y.(y.y))).(x.(z.z)) = x` (Meredith f=63
+        //     j=10), whose OWN arrival is LATE (k3=13, past the light-left
+        //     siblings) but the co-rank collapses onto the reverse face's
+        //     EARLY k3=1.  WM ages it ~210 picks later (pick 10242 vs 10030).
+        // Both faces re-key onto their own arrival when distinct (the sibling-
+        // alpha-eq check below keeps a genuine double-MGU collapsed).  soa's
+        // `(x.(x.x)).y=y.y` is dist_rhs=1, excluded above, so soa stays
+        // byte-identical regardless of which face this fires on.
         Term jl = big[k].cp.lhs, jr = big[k].cp.rhs;
         if (atp_cp_trivially_joinable(s, &jl, &jr)) continue;
         Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
