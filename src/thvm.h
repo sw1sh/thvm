@@ -5925,6 +5925,22 @@ typedef struct {
   // stays byte-identical.  OFF byte-identical.  Advances Meredith firstdiv
   // 10097 -> beyond.
   u8    use_l1_cube_rotate;
+  // L.1 cube join-form classifier fallback (default OFF; also turned ON under
+  // use_formation_fifo).  The Meredith OrAssociativity firstdiv-14006
+  // divergence: the f=186 L.1/combo0/k2==0 weight-120 cube band holds THREE
+  // fwd-cube (B) copies, but the third (j-trace 12859) over-reduces under the
+  // indexed normalizer atp_rewrite_normalize_indexed to the tautology
+  // `x.(y.(y.y)) = x.(y.(y.y))`, so use_l1_cube_rotate's B/D/C classifier misses
+  // it and strands it among the rotated D-run -- emitting P,P,Q,P,Q,Q where WM
+  // groups P,P,P,Q,Q,Q.  The CP's push-side trivially_joinable normal form (its
+  // CPSEL selection shape) is the clean fwd-cube `x.x = x.(y.(y.y))`, identical
+  // to its two correctly-classified sibling B copies.  When set,
+  // use_l1_cube_rotate re-classifies an indexed-unclassified cube member on its
+  // trivially_joinable form so the precursor joins its sibling B-run.  soa's
+  // cube bands carry no such tautology-form precursor inside the md5 window, so
+  // the fallback fires on none of them -- soa byte-identical.  OFF byte-
+  // identical.  Advances Meredith firstdiv 14006 -> beyond.
+  u8    use_l1cube_joinform;
   // L.1 `(x.x).y`-distribution front-age (env THVM_ATP_L1_XXDIST_FRONT, default
   // OFF; also turned ON under use_formation_fifo).  The Meredith OrAssociativity
   // firstdiv-11539 divergence: the f=167 tops batch forms seven weight-120 CPs
@@ -6635,6 +6651,9 @@ fn void      thvm_atp_set_use_eset_distdir(AtpState *s, u8 on);
 // L.1 cube-triple group rotation (see AtpState.use_l1_cube_rotate).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1_cube_rotate(AtpState *s, u8 on);
+// L.1 cube join-form classifier fallback (see AtpState.use_l1cube_joinform).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l1cube_joinform(AtpState *s, u8 on);
 // L.1 `(x.x).y`-distribution front-age (see AtpState.use_l1_xxdist_front).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1_xxdist_front(AtpState *s, u8 on);

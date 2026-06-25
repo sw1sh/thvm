@@ -9310,6 +9310,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l2tail_face_swap = 1u;
     s->use_l1_selfcube_defer = 1u;
     s->use_l2_selfcube_dist_defer = 1u;
+    s->use_l1cube_joinform  = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9385,6 +9386,16 @@ fn void thvm_atp_set_use_eset_distdir(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1_cube_rotate(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1_cube_rotate = on ? 1u : 0u;
+}
+
+// L.1 cube join-form classifier fallback (see AtpState.use_l1cube_joinform):
+// re-classify an indexed-unclassified L.1 cube member on its trivially_joinable
+// (CPSEL selection) form so a tautology-over-reduced fwd-cube precursor joins
+// its sibling B-run in use_l1_cube_rotate.  DEFAULT OFF; also ON under
+// use_formation_fifo.
+fn void thvm_atp_set_use_l1cube_joinform(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l1cube_joinform = on ? 1u : 0u;
 }
 
 // L.1 `(x.x).y`-distribution front-age (see AtpState.use_l1_xxdist_front):
@@ -18788,6 +18799,27 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
                : atp_pair_is_posgroup_cube(nl, nr)  ? 2u   // D
                : atp_pair_is_self_cube_eq(nl, nr)   ? 3u   // C
                                                     : 0u;
+        // Cube-precursor join-form fallback (default OFF; see use_l1cube_joinform).
+        // The indexed normalizer atp_rewrite_normalize_indexed over-reduces a cube
+        // CP whose two overlap sides share structure to a TAUTOLOGY: the Meredith
+        // OrAssociativity f=186 band's third fwd-cube copy (j-trace 12859) reduces
+        // to `x.(y.(y.y)) = x.(y.(y.y))` under the indexed walk, so no classifier
+        // matches it and it strands among the rotated D-run AFTER the Q copies
+        // (firstdiv 14006: WM emits P,P,P,Q,Q,Q, thvm P,P,Q,P,Q,Q).  Its push-side
+        // trivially_joinable form -- the CP's actual selection (CPSEL) shape -- is
+        // the clean fwd-cube `x.x = x.(y.(y.y))`, identical to its two correctly-
+        // classified sibling B copies.  Re-classify ONLY an indexed-TAUTOLOGY
+        // (kbo_eq) member, ONLY as B (fwd-cube): a precursor that index-normalizes
+        // to a NON-tautology partial shape (the f=172 E/D members) is deliberately
+        // left for use_l1cube_group / use_l1_xxx_cube_defer.  soa's cube bands carry
+        // no such tautology-form fwd-cube precursor in the md5 window, so the
+        // fallback fires on none of them -- soa byte-identical.
+        if (cls == 0u && s->use_l1cube_joinform && kbo_eq(nl, nr)) {
+          Term jl = big[k].cp.lhs, jr = big[k].cp.rhs;
+          (void)atp_cp_trivially_joinable(s, &jl, &jr);
+          thvm_normalize_vars(&jl, &jr);
+          if (atp_pair_is_fwd_cube(jl, jr)) cls = 1u;   // B only
+        }
         if (cls == 0u) continue;
         cube_idx[n_cube] = k;
         cube_grp[n_cube] = big[k].key & grp_mask;
