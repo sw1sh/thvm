@@ -1100,6 +1100,13 @@ int main(int argc, char **argv) {
       // DEFAULT OFF; THVM_ATP_WMO_INSERT_LR opts in.  See soa.txt.
       thvm_atp_set_use_wmo_insert_lr(
           s, (getenv("THVM_ATP_WMO_INSERT_LR") != NULL) ? 1u : 0u);
+      // L.1 cube-triple group rotation (DEFAULT OFF): rotate the leading C-run
+      // of a C,C,B,B,D,D cube triple at an L.1/combo0/k2==0 tops group to the
+      // end (-> B,B,D,D,C,C), matching WM's CP-formation FIFO age -- the
+      // Meredith OrAssociativity firstdiv-10097 divergence.  THVM_ATP_L1_CUBE_ROTATE
+      // opts in (also turned on by FORMATION_FIFO below).  See soa.txt.
+      thvm_atp_set_use_l1_cube_rotate(
+          s, (getenv("THVM_ATP_L1_CUBE_ROTATE") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /

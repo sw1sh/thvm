@@ -5902,6 +5902,29 @@ typedef struct {
   // unchanged).  Advances Meredith firstdiv 6078 -> 6110 (better than the gate's
   // 6081: the faithful test also retains the eqn-12 sibling).
   u8    use_eset_distdir;
+  // L.1 cube-triple group rotation (env THVM_ATP_L1_CUBE_ROTATE, default OFF;
+  // also turned ON under use_formation_fifo).  The Meredith OrAssociativity
+  // firstdiv-10097 divergence: a tops batch (f=154) forms three weight-120
+  // cube shapes at the SAME L.1 overlap position (pos[0]==0, combo==0, the
+  // rule-tree k2==0 band) -- C `x.(x.x) = y.(y.y)` (the self-cube equality),
+  // B `x.(y.(y.y)) = x.x` (atp_pair_is_fwd_cube), D `(x.(x.x)).y = y.y`
+  // (atp_pair_is_posgroup_cube) -- each as a consecutive duplicate run.  thvm's
+  // k3 (the partner equation's discrimination-tree leaf arrival) sorts the
+  // C-run FIRST (arr 95-97, ahead of B at 104-106 and D at 107-109), giving
+  // C,C,B,B,D,D; but WM's single superposition scan ages the C-run LAST -- it
+  // selects the B-cps (ue (164,84/86)) then the D-cps (ue (164,80/82)) then the
+  // C-cps (ue (164,155/152)), i.e. B,B,D,D,C,C.  Re-key the leading C-run to
+  // sort AFTER the B and D runs (the key MULTISET is permuted only among these
+  // CPs, so non-cube CPs are untouched).  Scoped HARD to the EXACT divergent
+  // signature: an L.1/combo0/k2==0 same-(phase|k1) group whose current key
+  // order is a C-run, then a B-run, then a D-run (all three present) -- the one
+  // pattern WM ages C-last.  No soa L.1/combo0/k2==0 group matches that
+  // signature (soa's nearest cube triple at k2==0 is f=51's C,D,B singles, a
+  // C-run then D-run then B-run -- B and D swapped -- left untouched; soa's
+  // C,C,B,B,D,D triple at f=34 is the equation tree k2==1, excluded), so soa
+  // stays byte-identical.  OFF byte-identical.  Advances Meredith firstdiv
+  // 10097 -> beyond.
+  u8    use_l1_cube_rotate;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6351,6 +6374,9 @@ fn void      thvm_atp_set_use_mered_dmgu(AtpState *s, u8 on);
 // AtpState.use_eset_distdir).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
 fn void      thvm_atp_set_use_eset_distdir(AtpState *s, u8 on);
+// L.1 cube-triple group rotation (see AtpState.use_l1_cube_rotate).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l1_cube_rotate(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

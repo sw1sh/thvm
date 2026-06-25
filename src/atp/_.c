@@ -9294,6 +9294,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_eset_distdir     = 1u;
     s->use_comm_drop_dup_class_gate = 1u;
     s->use_corank_own_arr   = 1u;
+    s->use_l1_cube_rotate   = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9360,6 +9361,15 @@ fn void thvm_atp_set_use_mered_dmgu(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_eset_distdir(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_eset_distdir = on ? 1u : 0u;
+}
+
+// L.1 cube-triple group rotation (see AtpState.use_l1_cube_rotate): rotate the
+// leading C-run of a C,C,B,B,D,D cube triple at an L.1/combo0/k2==0 tops group
+// to the end so it sorts as B,B,D,D,C,C, matching WM's CP-formation FIFO age.
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l1_cube_rotate(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l1_cube_rotate = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -16740,6 +16750,39 @@ static u8 atp_pair_is_double_cube(Term l, Term r) {
   return 1u;
 }
 
+// `f(v, f(v, v))` -- the SELF-CUBE term `x.(x.x)` (all three leaves the same
+// bare variable v).  Binds *out_v.
+static u8 atp_term_is_self_cube(Term t, u32 *out_v) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
+  if (term_tag(t0) != TAG_FVR) return 0u;                  // v
+  if (term_tag(t1) != TAG_CTR || term_ext(t1) != term_ext(t) ||
+      term_ctr_n(t1) != 2u) return 0u;                     // f(v, v)
+  Term t10 = term_ctr_at(t1, 0), t11 = term_ctr_at(t1, 1);
+  if (term_tag(t10) != TAG_FVR || term_tag(t11) != TAG_FVR) return 0u;
+  u32 v = term_ext(t0);
+  if (term_ext(t10) != v || term_ext(t11) != v) return 0u;
+  *out_v = v;
+  return 1u;
+}
+
+// Whether a batch-time-normalized CP is the SELF-CUBE EQUALITY `x.(x.x) =
+// y.(y.y)` shape: BOTH sides are a self-cube `f(v, f(v, v))`.  The Meredith
+// OrAssociativity weight-120 cube triple's `C` shape (see use_l1_cube_rotate).
+// The final selected equation has DISTINCT cube variables (CPSEL pick-10097:
+// (C3 V0 (C3 V0 V0)) = (C3 V1 (C3 V1 V1))), but at CP-formation time the two
+// sides batch-normalize to a self-cube on the SAME variable (the genuine
+// variable distinction is introduced only by a later interreduction renaming),
+// so this accepts vl == vr too.  A true tautology of this shape is dropped at
+// push (kbo_eq) and never claims a FIFO slot, so accepting the collapsed form
+// only re-keys CPs that genuinely survive as the distinct-variable C.
+static u8 atp_pair_is_self_cube_eq(Term l, Term r) {
+  u32 v = 0;
+  if (!atp_term_is_self_cube(l, &v)) return 0u;
+  if (!atp_term_is_self_cube(r, &v)) return 0u;
+  return 1u;
+}
+
 // Whether a NORMALIZED CP is the slot15-term `x.(y.x) = (y.y).x` WRAPPED with
 // a trailing `. z` on BOTH sides: `(x.(y.x)).z = ((y.y).x).z` (thvm LHS=(C3
 // (C3 V0 (C3 V1 V0)) V2), RHS=(C3 (C3 (C3 V1 V1) V0) V2) modulo orientation/
@@ -17805,6 +17848,107 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         u32 new_ch  = (ch_o * 2u + 1u) > 0x3fffu ? 0x3fffu : (ch_o * 2u + 1u);
         big[kb].key = (big[kb].key & ~((1ull << 42) - 1ull)) |
                       ((u64)new_arr << 28) | ((u64)new_ch << 14);
+      }
+    }
+    // L.1 cube-triple group rotation (default OFF; see use_l1_cube_rotate).
+    // The Meredith OrAssociativity firstdiv-10097 divergence: a tops batch
+    // forms three weight-120 cube shapes at the SAME L.1 overlap position
+    // (pos[0]==0, combo==0, rule-tree k2==0) -- C `x.(x.x) = y.(y.y)`
+    // (atp_pair_is_self_cube_eq), B `x.(y.(y.y)) = x.x` (atp_pair_is_fwd_cube),
+    // D `(x.(x.x)).y = y.y` (atp_pair_is_posgroup_cube) -- each a consecutive
+    // duplicate run.  thvm's k3 (partner equation discrimination-tree leaf
+    // arrival) keys the C-run FIRST (arr 95-97, ahead of B at 104-106, D at
+    // 107-109), giving C,C,B,B,D,D; WM's single superposition scan ages the
+    // C-run LAST (selecting B-cps `ue (164,84/86)`, then D-cps `ue (164,80/82)`,
+    // then C-cps `ue (164,155/152)`), i.e. B,B,D,D,C,C.  Rotate the leading
+    // C-run to sort AFTER the B and D runs.  Same pool-rekey idiom as the L.2.2
+    // grouped passes: collect this group's cube CPs, sort by current key, and
+    // IF the order is exactly a C-run, then a B-run, then a D-run (all three
+    // present) re-assign the key MULTISET in (B-run, D-run, C-run) order --
+    // each shape keeping its within-run relative order, every non-cube CP
+    // untouched.  Scoped HARD to that EXACT divergent signature, which no soa
+    // L.1/combo0/k2==0 group matches (soa's nearest k2==0 cube triple, f=51's
+    // C,D,B, is a C-run then D-run then B-run -- B/D swapped -- and is left
+    // alone; soa's C,C,B,B,D,D at f=34 is the equation tree k2==1, excluded by
+    // the k2==0 gate).  OFF byte-identical, soa byte-identical.  Advances
+    // Meredith firstdiv 10097 -> beyond.
+    if (s->use_l1_cube_rotate) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      enum { CUBE_CAP = 64u };
+      // Index this batch's L.1/combo0/k2==0 phase-A cube CPs, grouped by their
+      // (phase|k1|k2) prefix (one tops overlap-position group).  Each entry
+      // records its big[] index, group prefix, current key, and shape class
+      // (1 = B fwd-cube, 2 = D posgroup-cube, 3 = C self-cube-eq).
+      u32 cube_idx[CUBE_CAP];
+      u64 cube_grp[CUBE_CAP];
+      u64 cube_key[CUBE_CAP];
+      u8  cube_cls[CUBE_CAP];
+      u32 n_cube = 0;
+      for (u32 k = 0; k < n_big && n_cube < CUBE_CAP; k++) {
+        if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
+        if (big[k].combo != 0u) continue;                 // combo 0 only
+        if ((big[k].key >> 58) != 0u) continue;           // A phase
+        if (((big[k].key >> 42) & 3u) != 0u) continue;    // rule-tree k2 == 0
+        if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 cls = atp_pair_is_fwd_cube(nl, nr)       ? 1u   // B
+               : atp_pair_is_posgroup_cube(nl, nr)  ? 2u   // D
+               : atp_pair_is_self_cube_eq(nl, nr)   ? 3u   // C
+                                                    : 0u;
+        if (cls == 0u) continue;
+        cube_idx[n_cube] = k;
+        cube_grp[n_cube] = big[k].key & grp_mask;
+        cube_key[n_cube] = big[k].key;
+        cube_cls[n_cube] = cls;
+        n_cube++;
+      }
+      // Process each distinct (phase|k1|k2) group independently.
+      for (u32 a0 = 0; a0 < n_cube; a0++) {
+        u64 grp = cube_grp[a0];
+        u8 seen_grp = 0u;
+        for (u32 b = 0; b < a0; b++) if (cube_grp[b] == grp) { seen_grp = 1u; break; }
+        if (seen_grp) continue;                           // group already done
+        // Gather this group's cube entries (local index list), key-ascending.
+        u32 ge[CUBE_CAP];
+        u32 ng = 0;
+        for (u32 b = 0; b < n_cube; b++)
+          if (cube_grp[b] == grp && ng < CUBE_CAP) ge[ng++] = b;
+        if (ng < 3u) continue;                            // need B, C, and D
+        for (u32 p = 0; p + 1u < ng; p++)
+          for (u32 q = p + 1u; q < ng; q++)
+            if (cube_key[ge[q]] < cube_key[ge[p]]) {
+              u32 t = ge[p]; ge[p] = ge[q]; ge[q] = t;
+            }
+        // Signature check: the class sequence (key-ascending) must be a maximal
+        // C-run (cls 3), then a B-run (cls 1), then a D-run (cls 2), with all
+        // three runs non-empty -- the exact WM-ages-C-last divergent pattern.
+        u8 have_b = 0u, have_c = 0u, have_d = 0u, sig = 1u, stage = 0u;
+        // stage advances 0:C -> 1:B -> 2:D; any out-of-sequence class breaks it.
+        for (u32 a = 0; a < ng; a++) {
+          u8 cls = cube_cls[ge[a]];
+          if (cls == 3u) { have_c = 1u; if (stage > 0u) { sig = 0u; break; } }
+          else if (cls == 1u) { have_b = 1u; if (stage == 0u) stage = 1u;
+                                else if (stage > 1u) { sig = 0u; break; } }
+          else /* cls == 2u */ { have_d = 1u; if (stage <= 1u) stage = 2u; }
+        }
+        if (!sig || !have_b || !have_c || !have_d) continue;
+        // Reorder: emit the B-run, then the D-run, then the C-run, each run
+        // keeping its within-run key order.  Re-assign the (ascending) key
+        // MULTISET in that permuted order, so the key slots are permuted only
+        // among these cube CPs and every other CP is untouched.
+        u64 keys_sorted[CUBE_CAP];
+        for (u32 a = 0; a < ng; a++) keys_sorted[a] = cube_key[ge[a]];
+        // perm = entries in (B, D, C) class order, each class key-ascending (ge
+        // is already key-ascending, so emitting a class in ge order is stable).
+        u32 perm[CUBE_CAP];
+        u32 np = 0;
+        static const u8 class_order[3] = {1u, 2u, 3u};   // B, D, C
+        for (u32 ci = 0; ci < 3u; ci++)
+          for (u32 a = 0; a < ng; a++)
+            if (cube_cls[ge[a]] == class_order[ci]) perm[np++] = ge[a];
+        for (u32 a = 0; a < ng; a++)
+          big[cube_idx[perm[a]]].key = keys_sorted[a];
       }
     }
     atp_wmo_ent_sort(big, n_big);
