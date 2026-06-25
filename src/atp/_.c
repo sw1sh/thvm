@@ -16618,6 +16618,41 @@ static u8 atp_pair_band_l22_variant(Term l, Term r) {
   return 0u;
 }
 
+// Weight-109 L.2.2 "band" CP variant detector for the slot15-tail family
+// (a SECOND L.2.2 grouping family, alongside the left-tower A/B/C shapes
+// atp_pair_band_l22_variant handles).  The CP normalizes to
+//   `(x.(y.x)) . TAIL = x`
+// -- the slot15 LHS `x.(y.x)` (atp_term_is_slot15_lhs) dotted with a constant
+// 2-var TAIL leaf, equal to the bare outer variable x.  WM's single
+// superposition scan emits the tail variants GROUPED (all (x.y), then all
+// (y.x)), but thvm's k3 (new-fact query-subterm leaf arrival) orders them by
+// the partner equation's arrival -- which surfaces (y.x) (k3=4) ahead of (x.y)
+// (k3=5), scattering the groups (Meredith OrAssociativity f=152, picks
+// 9894-9898: WM 4x(x.y) then (y.x); thvm 3x(x.y),(y.x),(x.y)).  Returns the
+// tail-variant rank for the L.2.2 grouping: (x.y)->1, (y.x)->2, (y.y)->3, 0
+// otherwise.  Orientation-insensitive (the bare-var side is either l or r);
+// variable identities matched structurally (renaming-stable).  The tail must be
+// a CONSTANT 2-var leaf (both children variables) that is a variant of the SAME
+// outer var x, so the deeper towers and second-varying-factor shapes are
+// rejected -- this never coincides with the left-tower atp_pair_band_l22_variant
+// shape (whose left child is `((a.b).c)`, not the slot15 LHS `f(x,f(y,x))`).
+static u8 atp_pair_band_l22_slot15tail(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big);
+  Term P = term_ctr_at(big, 0), Q = term_ctr_at(big, 1);   // (x.(y.x)) . TAIL
+  u32 v = 0, w = 0;
+  if (!atp_term_is_slot15_lhs(P, &v, &w)) return 0u;        // P = x.(y.x)
+  if (term_ext(var) != v) return 0u;                        // bare var g == x
+  // TAIL = a constant 2-var leaf, a tail-variant of the outer var x (= v).
+  if (term_tag(Q) != TAG_CTR || term_ext(Q) != op || term_ctr_n(Q) != 2u)
+    return 0u;
+  return atp_band_variant_of(Q, op, v);
+}
+
 // Is the slot15 rule term `x.(y.x) -> (y.y).x` already a LIVE rule?  The
 // duplicate re-age (THVM_ATP_COMM_DROP_DUP) only fires when slot15 is live,
 // so the re-aged CP is a redundant re-derivation of an existing fact (WM ages
@@ -17472,6 +17507,58 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         // Assign the ascending key slots to the band CPs in grouped order.
         for (u32 a = 0; a < n_l22; a++) {
           big[l22_idx[order2[a]]].key = l22_key[a];
+        }
+      }
+      // Slot15-tail L.2.2 grouping (shares the use_band_interleave gate): a
+      // SECOND L.2.2 band family `(x.(y.x)) . TAIL = x` (atp_pair_band_l22_slot15tail)
+      // whose tail variants WM emits GROUPED (all (x.y), then all (y.x)) but
+      // thvm scatters by the partner equation's k3 arrival ((y.x) k3=4 ahead of
+      // (x.y) k3=5).  Same mechanism as the left-tower L.2.2 group above, but a
+      // DISJOINT shape -- so it runs as its OWN pool with its own tail-variant
+      // rank ((x.y)<(y.x)<(y.y)); the multiset of keys is permuted only among
+      // these CPs, leaving every other CP (including the left-tower L.2.2 group)
+      // untouched.  Scoped HARD to pos L.2.2 ([1,1]) and the exact slot15-tail
+      // shape; no soa L.2.2 CP is this shape, so soa stays byte-identical.
+      // Advances Meredith firstdiv 9897 -> beyond.
+      u32 s15_idx[BAND_CAP];
+      u8  s15_var[BAND_CAP];
+      u64 s15_key[BAND_CAP];
+      u32 n_s15 = 0;
+      for (u32 k = 0; k < n_big && n_s15 < BAND_CAP; k++) {
+        if (big[k].cp.pos_len != 2u) continue;
+        if (big[k].cp.pos[0] != 1u || big[k].cp.pos[1] != 1u) continue;
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 var = atp_pair_band_l22_slot15tail(nl, nr);
+        if (var == 0u) continue;
+        s15_idx[n_s15] = k;
+        s15_var[n_s15] = var;
+        s15_key[n_s15] = big[k].key;
+        n_s15++;
+      }
+      if (n_s15 >= 2u) {
+        // Sort by current key ascending: the assignment permutes only the key
+        // MULTISET among these CPs and preserves within-variant relative order.
+        for (u32 a = 0; a + 1u < n_s15; a++) {
+          for (u32 b = a + 1u; b < n_s15; b++) {
+            if (s15_key[b] < s15_key[a]) {
+              u64 tk = s15_key[a]; s15_key[a] = s15_key[b]; s15_key[b] = tk;
+              u32 ti = s15_idx[a]; s15_idx[a] = s15_idx[b]; s15_idx[b] = ti;
+              u8  tv = s15_var[a]; s15_var[a] = s15_var[b]; s15_var[b] = tv;
+            }
+          }
+        }
+        // order = entry permutation grouped by tail-variant rank
+        // (x.y)(1)<(y.x)(2)<(y.y)(3), each group keeping its key-ascending order.
+        u32 s15_order[BAND_CAP];
+        u32 n_s15o = 0;
+        for (u8 v = 1u; v <= 3u; v++) {
+          for (u32 a = 0; a < n_s15; a++) {
+            if (s15_var[a] == v) s15_order[n_s15o++] = a;
+          }
+        }
+        for (u32 a = 0; a < n_s15; a++) {
+          big[s15_idx[s15_order[a]]].key = s15_key[a];
         }
       }
     }
