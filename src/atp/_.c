@@ -9300,6 +9300,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1_xxx_cube_defer = 1u;
     s->use_l2_selfcube_defer = 1u;
     s->use_l12_band155      = 1u;
+    s->use_l1swap109        = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9424,6 +9425,16 @@ fn void thvm_atp_set_use_l2_selfcube_defer(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l12_band155(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l12_band155 = on ? 1u : 0u;
+}
+
+// L.1 inner-swap reorder (see AtpState.use_l1swap109): re-key the f=172
+// L.1/combo-0/D-phase weight-109 survivor pair `(x.(x.y)).(x.y) = x` (G) and
+// `(x.(y.x)).(y.x) = x` (H) so the surviving H sorts one slot before the
+// surviving G, matching WM's global CPNr age (H=464 before G=551).  DEFAULT OFF;
+// also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l1swap109(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l1swap109 = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -16733,6 +16744,36 @@ static u8 atp_band_variant_of(Term X, u32 op, u32 x) {
   return 0u;
 }
 
+// Weight-109 L.1 inner-swap variant detector for the Meredith OrAssociativity
+// f=172 tops batch.  The two FIFO-adjacent survivors at the L.1/combo-0/D-phase
+// overlap position normalize to `(x.X).X = x`, a repeated 2-var leaf X dotted
+// onto its own `x.X` prefix and reduced to the bare outer var x, with two
+// variants that thvm forms in the order G,H but WM ages reversed (WM's global
+// CPNr for the H copy 464 precedes the G copy 551):
+//   G: X = (x.y)  -> `(x.(x.y)).(x.y) = x`   (thvm seq 62076)
+//   H: X = (y.x)  -> `(x.(y.x)).(y.x) = x`   (thvm seq 62077)
+// Returns 1 for G, 2 for H, 0 otherwise.  Orientation-insensitive (the bare-var
+// side is either l or r); var identities matched structurally so the detector is
+// renaming-stable (x, y two distinct vars).  Scoped HARD to L.1 by the caller --
+// soa's only adjacent G/H survivors inside the md5 window are at L.2, so the L.1
+// scope keeps the reorder off soa byte-identical.
+static u8 atp_pair_l1swap_variant(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big), x = term_ext(var);
+  Term pre = term_ctr_at(big, 0), suf = term_ctr_at(big, 1);   // (x.X) , X
+  if (term_tag(pre) != TAG_CTR || term_ext(pre) != op || term_ctr_n(pre) != 2u)
+    return 0u;
+  Term px = term_ctr_at(pre, 0), X = term_ctr_at(pre, 1);       // x , X
+  if (term_tag(px) != TAG_FVR || term_ext(px) != x) return 0u;
+  // the suffix factor must be the SAME 2-var leaf X (structural equality)
+  if (!kbo_eq(X, suf)) return 0u;
+  return atp_band_variant_of(X, op, x);   // 1 = (x.y) = G, 2 = (y.x) = H
+}
+
 // Weight-109 "band" CP variant detector for the soa rule-batch L.1/L.2 overlap
 // positions (see use_band_interleave).  GENERAL over the band's outer shape: a
 // band CP normalizes to `f(P, Q) = x` (equal to a bare variable x) where one of
@@ -18431,6 +18472,41 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         for (u32 a = 0; a < n155; a++)
           big[b155_idx[order[a]]].key = b155_key[a];
       }
+    }
+    // L.1 inner-swap reorder (default OFF; see use_l1swap109).  The Meredith
+    // OrAssociativity firstdiv-12096 divergence: the f=172 tops batch forms two
+    // FIFO-adjacent weight-109 D-phase/L.1/combo-0 survivors G `(x.(x.y)).(x.y) =
+    // x` and H `(x.(y.x)).(y.x) = x` (atp_pair_l1swap_variant 1/2).  thvm ages G
+    // before H (the G producers arrive earlier in the rule-tree DFS, so the
+    // surviving G copy carries the smaller key); WM's global CPNr ages the H copy
+    // (464) before the G copy (551).  Find the smallest-key G copy and the
+    // smallest-key H copy in this batch (the two survivors -- the higher-key dups
+    // are dropped at push); when thvm has G first (g_min < h_min), re-key the
+    // surviving H ONE unit below the surviving G so H pushes first and inherits
+    // the smaller FIFO age, matching WM.  Scoped HARD to L.1 (pos [0]), combo-0,
+    // phase-0 (D, k2 rule-tree == 0), tops (i==f, partner j) -- soa's only
+    // adjacent G/H survivors inside the md5 window are at L.2, so the swap is soa
+    // byte-identical.  OFF byte-identical.  Advances Meredith firstdiv 12096 ->
+    // beyond.
+    if (s->use_l1swap109) {
+      u32 g_idx = 0xffffffffu, h_idx = 0xffffffffu;
+      u64 g_min = ~0ull, h_min = ~0ull;
+      for (u32 k = 0; k < n_big; k++) {
+        if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
+        if (big[k].combo != 0u) continue;                 // combo 0 only
+        if ((big[k].key >> 58) != 0u) continue;           // phase 0 (D)
+        if (((big[k].key >> 42) & 3u) != 0u) continue;    // rule-tree k2 == 0
+        if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 var = atp_pair_l1swap_variant(nl, nr);
+        if (var == 1u && big[k].key < g_min) { g_min = big[k].key; g_idx = k; }
+        else if (var == 2u && big[k].key < h_min) { h_min = big[k].key; h_idx = k; }
+      }
+      // Both survivors present and thvm orders G before H: pull H just below G.
+      if (g_idx != 0xffffffffu && h_idx != 0xffffffffu && g_min < h_min &&
+          g_min >= 1ull)
+        big[h_idx].key = g_min - 1ull;
     }
     if (s->use_l2_selfcube_defer) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
