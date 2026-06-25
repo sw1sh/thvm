@@ -9297,6 +9297,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1_cube_rotate   = 1u;
     s->use_l1_xxdist_front  = 1u;
     s->use_l22_xxdist_defer = 1u;
+    s->use_l1_xxx_cube_defer = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9392,6 +9393,15 @@ fn void thvm_atp_set_use_l1_xxdist_front(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l22_xxdist_defer(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l22_xxdist_defer = on ? 1u : 0u;
+}
+
+// L.1 `(x.x).x = y.(y.y)` cube defer (see AtpState.use_l1_xxx_cube_defer):
+// defer the leading E `(x.x).x = y.(y.y)` CP of an L.1/combo0/k2==0 cube group
+// to the end of the group's cube run, matching WM's CP-formation FIFO age.
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l1_xxx_cube_defer(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l1_xxx_cube_defer = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -16947,6 +16957,49 @@ static u8 atp_pair_is_yyy_zz_dist(Term l, Term r) {
   return (u8)(term_ext(var) == x);
 }
 
+// `f(f(f(x, f(x, x)), y), y)` -- the L.1/combo0 batch-time precursor
+// `((x.(x.x)).y).y` of the f=170 E shape: a self-cube `x.(x.x)` dotted with a
+// var y, then dotted with the SAME var y again, x != y, all bare vars.  Binds
+// *out_x (the cube var) and *out_y.  (The CP further reduces to the selection-
+// time form `(x.x).x = y.(y.y)` only after later interreductions, so the E CP
+// must be classified by THIS batch-time precursor, not its selection shape.)
+static u8 atp_term_is_selfcube_y_y(Term t, u32 *out_x, u32 *out_y) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  u32 op = term_ext(t);
+  Term lo = term_ctr_at(t, 0), y1 = term_ctr_at(t, 1);   // ((x.(x.x)).y) , y
+  if (term_tag(y1) != TAG_FVR) return 0u;
+  if (term_tag(lo) != TAG_CTR || term_ext(lo) != op || term_ctr_n(lo) != 2u)
+    return 0u;
+  Term cube = term_ctr_at(lo, 0), y0 = term_ctr_at(lo, 1);  // (x.(x.x)) , y
+  if (term_tag(y0) != TAG_FVR) return 0u;
+  if (term_ext(y0) != term_ext(y1)) return 0u;               // both y
+  u32 x = 0;
+  if (!atp_term_is_self_cube(cube, &x)) return 0u;           // (x.(x.x))
+  u32 y = term_ext(y1);
+  if (x == y) return 0u;
+  *out_x = x;
+  *out_y = y;
+  return 1u;
+}
+
+// Whether a BATCH-TIME normalized CP is the f=170 E precursor
+// `((x.(x.x)).y).y = x.(x.x)`: one side is the `((x.(x.x)).y).y` factor
+// (atp_term_is_selfcube_y_y), the other is the self-cube `x.(x.x)`
+// (atp_term_is_self_cube) on the SAME cube var x.  Returns 1, 0 otherwise.
+// This is the Meredith OrAssociativity f=170 L.1/combo0 CP (CPSEL seq 60598)
+// WM ages at the END of the group's cube C/D runs, not its head (see
+// use_l1_xxx_cube_defer).  Orientation-insensitive.
+static u8 atp_pair_is_xxx_self_cube(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 x = 0, y = 0, cx = 0;
+  if (atp_term_is_selfcube_y_y(l, &x, &y) && atp_term_is_self_cube(r, &cx))
+    return (u8)(cx == x);
+  if (atp_term_is_selfcube_y_y(r, &x, &y) && atp_term_is_self_cube(l, &cx))
+    return (u8)(cx == x);
+  return 0u;
+}
+
 // Whether a NORMALIZED CP is the slot15-term `x.(y.x) = (y.y).x` WRAPPED with
 // a trailing `. z` on BOTH sides: `(x.(y.x)).z = ((y.y).x).z` (thvm LHS=(C3
 // (C3 V0 (C3 V1 V0)) V2), RHS=(C3 (C3 (C3 V1 V1) V0) V2) modulo orientation/
@@ -18214,6 +18267,55 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
             if (cube_cls[ge[a]] == class_order[ci]) perm[np++] = ge[a];
         for (u32 a = 0; a < ng; a++)
           big[cube_idx[perm[a]]].key = keys_sorted[a];
+      }
+    }
+    // L.1 `(x.x).x = y.(y.y)` cube defer (default OFF; see
+    // use_l1_xxx_cube_defer).  The Meredith OrAssociativity firstdiv-11839
+    // divergence: the f=170 tops batch forms a weight-120 L.1/combo0/k2==0 group
+    // keyed by ascending CP age into E,C,C,C,D,D,D, where E `(x.x).x = y.(y.y)`
+    // (atp_pair_is_xxx_self_cube) is the left-triple/self-cube equality and C/D
+    // are the fwd/posgroup cubes.  WM's single superposition scan ages E LAST,
+    // emitting C,C,C,D,D,D,E (CPSEL 11845: E seq 60598, after the cubes).  Defer
+    // the E member(s) to the END of the group's cube run (cube members keep
+    // their relative key order).  Same pool-rekey idiom as the cube-rotate /
+    // xxdist passes: collect the group's E + cube CPs, sort by current key, then
+    // re-assign the key MULTISET in (cube, E) order -- the slots are permuted
+    // only among those CPs, every other CP untouched.  Scoped HARD to L.1
+    // (pos[0]==0), combo==0, tops (i==f), k2==0, phase 0, normalized-CP == E or
+    // a cube C/D, and a group holding an E member.  OFF byte-identical, soa
+    // byte-identical.  Advances Meredith firstdiv 11839 -> beyond.
+    if (s->use_l1_xxx_cube_defer) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      for (u32 kd = 0; kd < n_big; kd++) {
+        if (big[kd].i != f || big[kd].j == f) continue;   // tops, partner = j
+        if (big[kd].combo != 0u) continue;                // combo 0 only
+        if ((big[kd].key >> 58) != 0u) continue;          // phase 0
+        if (((big[kd].key >> 42) & 3u) != 0u) continue;   // rule-tree k2 == 0
+        if (big[kd].cp.pos_len != 1u || big[kd].cp.pos[0] != 0u) continue; // L.1
+        Term ndl = atp_rewrite_normalize_indexed(s, big[kd].cp.lhs, 4096u);
+        Term ndr = atp_rewrite_normalize_indexed(s, big[kd].cp.rhs, 4096u);
+        if (!atp_pair_is_xxx_self_cube(ndl, ndr)) continue;
+        // Defer E to just past the largest weight-120 same-(phase|k1|k2) key in
+        // the group (the group's cube C/D selection members are all weight-120
+        // -- fwd `x.x = x.(y.(y.y))` and posgroup `y.y = (x.(x.x)).y` and their
+        // partially-reduced precursors keep weight 120; the E precursor is
+        // heavier at batch time but reduces to the same weight-120 band at
+        // selection).  band_max + 1 places E after every cube member, matching
+        // WM's C,C,C,D,D,D,E ordering (E aged last).  A group with no
+        // weight-120 cube member leaves E untouched.
+        u64 grp = big[kd].key & grp_mask;
+        u64 band_max = 0u;
+        for (u32 ks = 0; ks < n_big; ks++) {
+          if (ks == kd) continue;
+          if ((big[ks].key & grp_mask) != grp) continue;
+          Term nsl = atp_rewrite_normalize_indexed(s, big[ks].cp.lhs, 4096u);
+          Term nsr = atp_rewrite_normalize_indexed(s, big[ks].cp.rhs, 4096u);
+          if (kbo_eq(nsl, nsr)) continue;                 // tautology: dropped
+          if (atp_cp_priority(s, nsl, nsr) != 120u) continue;   // weight-120 band
+          if (big[ks].key > band_max) band_max = big[ks].key;
+        }
+        if (band_max != 0u && band_max + 1u > big[kd].key)
+          big[kd].key = band_max + 1u;
       }
     }
     // L.1 `(x.x).y`-distribution front-age (default OFF; see

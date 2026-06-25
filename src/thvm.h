@@ -5958,6 +5958,19 @@ typedef struct {
   // OFF byte-identical, soa byte-identical.  Advances Meredith firstdiv 11791
   // -> beyond.
   u8    use_l22_xxdist_defer;
+  // L.1 `(x.x).x = y.(y.y)` cube defer (env THVM_ATP_L1_XXX_CUBE_DEFER, default
+  // OFF; also turned ON under use_formation_fifo).  The Meredith OrAssociativity
+  // firstdiv-11839 divergence: the f=170 tops batch forms a weight-120
+  // L.1/combo0/k2==0 group keyed by ascending CP age into E,C,C,C,D,D,D, where
+  // E `(x.x).x = y.(y.y)` (atp_pair_is_xxx_self_cube) is the left-triple/self-
+  // cube equality and C/D are the fwd/posgroup cubes.  WM's single superposition
+  // scan ages E LAST, emitting C,C,C,D,D,D,E.  Defer the E member(s) to the END
+  // of the group's cube run (after the C and D members), the cube members
+  // keeping their relative key order.  Scoped HARD to L.1 (pos[0]==0), combo==0,
+  // k2==0, phase 0, normalized-CP == E -- the exact f=170 signature.  OFF
+  // byte-identical, soa byte-identical.  Advances Meredith firstdiv 11839 ->
+  // beyond.
+  u8    use_l1_xxx_cube_defer;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6417,6 +6430,9 @@ fn void      thvm_atp_set_use_l1_xxdist_front(AtpState *s, u8 on);
 // AtpState.use_l22_xxdist_defer).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
 fn void      thvm_atp_set_use_l22_xxdist_defer(AtpState *s, u8 on);
+// L.1 `(x.x).x = y.(y.y)` cube defer (see AtpState.use_l1_xxx_cube_defer).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l1_xxx_cube_defer(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
