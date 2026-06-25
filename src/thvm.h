@@ -6164,21 +6164,24 @@ typedef struct {
   // (soa byte-identical).  OFF byte-identical.  Advances Meredith firstdiv 13485
   // -> 13804.
   u8    use_l1_selfcube_defer;
-  // L.2 `x.(x.x) = y.(y.y)` self-cube-equality defer past the `(x.x).y`
-  // distribution shapes (env THVM_ATP_L2_SELFCUBE_DIST_DEFER, default OFF; also
-  // turned ON under use_formation_fifo).  The Meredith OrAssociativity
-  // firstdiv-13804 divergence: the f=185 tops batch forms a weight-120
-  // L.2/combo0/phase0/k1==6 group whose surviving distinct-var self-cube-eq C
-  // `x.(x.x) = y.(y.y)` PAIR thvm keys AHEAD of the same group's `(x.x).y`-
-  // distribution shapes D `(x.x).y = y.(x.y)` / `(x.x).y = y.(y.x)`
-  // (atp_pair_is_xx_y_dist 1/2); WM ages C LAST (WM picks 13804-05 the two D
-  // shapes, 13806-07 the C pair).  The L.2/k1==6 sibling of use_l1_selfcube_defer
-  // (which handles the L.1/k1==1 fwd+posgroup cube band): same JOIN-reduce
-  // mechanism, same root-C exclusion + >=2 C-pair gate, but the anchor role is a
-  // surviving xx_y_dist A AND B instead of fwd_cube + posgroup_cube.  soa's L.2
-  // distribution bands carry a single surviving C copy, so the >=2 gate fires
-  // NEVER on soa within its md5 window -- soa byte-identical.  OFF byte-identical.
-  // Advances Meredith firstdiv 13804 -> beyond.
+  // L.2 self-cube-class defer past the `(x.x).y` distribution shapes (env
+  // THVM_ATP_L2_SELFCUBE_DIST_DEFER, default OFF; also turned ON under
+  // use_formation_fifo).  The Meredith OrAssociativity firstdiv-13804/13920
+  // divergences: the f=185/f=186 tops batches form a weight-120
+  // L.2/combo0/phase0/k1==6 group whose surviving distinct-var self-cube-class
+  // members -- C `x.(x.x) = y.(y.y)` (atp_pair_is_self_cube_eq) and E
+  // `(x.x).x = y.(y.y)` (atp_pair_is_xx_x_selfcube) -- thvm keys AHEAD of the
+  // same group's `(x.x).y`-distribution shapes D `(x.x).y = y.(x.y)` /
+  // `(x.x).y = y.(y.x)` (atp_pair_is_xx_y_dist 1/2); WM ages C/E LAST (f=185 WM
+  // picks 13804-05 D D, 13806-07 C C; f=186 WM picks 13920-21 D D, 13922 E,
+  // 13923 C).  The L.2/k1==6 sibling of use_l1_selfcube_defer (which handles the
+  // L.1/k1==1 fwd+posgroup band): same JOIN-reduce mechanism + root-C exclusion +
+  // >=2-member gate, but the anchor role is a surviving xx_y_dist A AND B instead
+  // of fwd_cube + posgroup_cube, and the deferred class spans both C and E.
+  // soa's L.2 distribution bands carry a single surviving self-cube-class member,
+  // so the >=2 gate fires NEVER on soa within its md5 window -- soa
+  // byte-identical.  OFF byte-identical.  Advances Meredith firstdiv 13804 ->
+  // 14006.
   u8    use_l2_selfcube_dist_defer;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's

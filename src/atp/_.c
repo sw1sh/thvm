@@ -17294,6 +17294,39 @@ static u8 atp_pair_is_xx_y_dist(Term l, Term r) {
   return 0u;
 }
 
+// `f(f(x, x), x)` -- the `(x.x).x` left-idempotent triple: a left child that is
+// the idempotent leaf `f(x, x)` (both leaves the same bare var x), dotted with
+// the SAME bare var x.  Binds *out_x.
+static u8 atp_term_is_xx_x(Term t, u32 *out_x) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
+  if (term_tag(t1) != TAG_FVR) return 0u;                   // x
+  if (term_tag(t0) != TAG_CTR || term_ext(t0) != term_ext(t) ||
+      term_ctr_n(t0) != 2u) return 0u;                      // f(x, x)
+  Term t00 = term_ctr_at(t0, 0), t01 = term_ctr_at(t0, 1);
+  if (term_tag(t00) != TAG_FVR || term_tag(t01) != TAG_FVR) return 0u;
+  u32 x = term_ext(t1);
+  if (term_ext(t00) != x || term_ext(t01) != x) return 0u;  // all three x
+  *out_x = x;
+  return 1u;
+}
+
+// Whether a NORMALIZED CP is the `(x.x).x = y.(y.y)` shape: one side is the
+// left-idempotent triple `(x.x).x` (atp_term_is_xx_x), the other is a self-cube
+// `y.(y.y)` (atp_term_is_self_cube) on a DIFFERENT variable.  The reduced E
+// member of the Meredith OrAssociativity f=186 L.2 weight-120 band (the
+// fully-reduced selection form of use_l1_xxx_cube_defer's batch-time precursor),
+// which WM ages alongside the self-cube equality C past the `(x.x).y`
+// distribution shapes.  Orientation-insensitive, renaming-stable.
+static u8 atp_pair_is_xx_x_selfcube(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 x = 0, y = 0;
+  if (atp_term_is_xx_x(l, &x) && atp_term_is_self_cube(r, &y)) return (u8)(x != y);
+  if (atp_term_is_xx_x(r, &x) && atp_term_is_self_cube(l, &y)) return (u8)(x != y);
+  return 0u;
+}
+
 // `f(f(x, f(y, f(y, y))), f(x, f(z, z)))` -- the L.2.2 weight-209 shape
 // `(x.(y.(y.y))).(x.(z.z))` with x, y, z three distinct bare vars (y != x,
 // z != x, z != y).  Binds nothing; just validates the skeleton.  This is the
@@ -19443,22 +19476,25 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           big[sc_idx[cs[p]]].key = cube_max + 1u + (u64)p;
       }
     }
-    // L.2 `x.(x.x) = y.(y.y)` self-cube-equality defer past `(x.x).y`
-    // distribution shapes (default OFF; see use_l2_selfcube_dist_defer).  The
-    // Meredith OrAssociativity firstdiv-13804 divergence: the f=185 tops batch
-    // forms a weight-120 L.2/combo0/phase0/k1==6 group whose surviving distinct-
-    // var self-cube-eq C `x.(x.x) = y.(y.y)` PAIR thvm keys AHEAD of the same
-    // group's `(x.x).y`-distribution shapes D `(x.x).y = y.(x.y)` /
-    // `(x.x).y = y.(y.x)` (atp_pair_is_xx_y_dist 1/2); WM ages C LAST (WM picks
-    // 13804-05 the two D shapes, 13806-07 the C pair).  The L.2/k1==6 sibling of
+    // L.2 self-cube-class defer past `(x.x).y` distribution shapes (default OFF;
+    // see use_l2_selfcube_dist_defer).  The Meredith OrAssociativity
+    // firstdiv-13804/13920 divergences: the f=185/f=186 tops batches form a
+    // weight-120 L.2/combo0/phase0/k1==6 group whose surviving distinct-var
+    // self-cube-class members -- C `x.(x.x) = y.(y.y)` (atp_pair_is_self_cube_eq)
+    // and E `(x.x).x = y.(y.y)` (atp_pair_is_xx_x_selfcube) -- thvm keys AHEAD of
+    // the same group's `(x.x).y`-distribution shapes D `(x.x).y = y.(x.y)` /
+    // `(x.x).y = y.(y.x)` (atp_pair_is_xx_y_dist 1/2); WM ages C/E LAST (f=185:
+    // WM picks 13804-05 the two D shapes then 13806-07 the C pair; f=186: WM
+    // picks 13920-21 the D shapes, 13922 E, 13923 C).  The L.2/k1==6 sibling of
     // use_l1_selfcube_defer (which handles the L.1/k1==1 fwd+posgroup band): same
-    // JOIN-reduce mechanism + root-C exclusion + >=2 C-pair gate, but the anchor
-    // role is a surviving xx_y_dist A AND B instead of fwd_cube + posgroup_cube.
-    // Re-key the surviving C pair just above the group's highest dist-anchor key
-    // so the order becomes D,C.  soa's L.2 distribution bands carry a single
-    // surviving C copy (ncs==1), so the >=2 gate fires NEVER on soa within its
-    // md5 window -- soa byte-identical.  OFF byte-identical.  Advances Meredith
-    // firstdiv 13804 -> beyond.
+    // JOIN-reduce mechanism + root-C exclusion + >=2-member gate, but the anchor
+    // role is a surviving xx_y_dist A AND B instead of fwd_cube + posgroup_cube,
+    // and the deferred class spans both C and E.  Re-key the surviving C/E
+    // members keyed below the dist anchors just above the group's highest
+    // dist-anchor key so the order becomes D,...,E,C.  soa's L.2 distribution
+    // bands carry a single surviving self-cube-class member, so the >=2 gate
+    // fires NEVER on soa within its md5 window -- soa byte-identical.  OFF
+    // byte-identical.  Advances Meredith firstdiv 13804 -> 14006.
     if (s->use_l2_selfcube_dist_defer) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
       // Root-C exclusion (same rationale as use_l1_selfcube_defer): a rule that
@@ -19480,7 +19516,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       enum { SD_CAP = 64u };
       u32 sd_idx[SD_CAP];
       u64 sd_key[SD_CAP];
-      u8  sd_cls[SD_CAP];                                  // 1 = C, 2 = dist A/B
+      u8  sd_cls[SD_CAP];                                  // 1 = C/E member, 2 = dist A/B
       u32 n_sd = 0;
       for (u32 kd = 0; !has_root_c && kd < n_big && n_sd < SD_CAP; kd++) {
         if (big[kd].i != f || big[kd].j == f) continue;   // tops, partner = j
@@ -19496,6 +19532,8 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           (void)atp_term_is_self_cube(ndl, &vl);
           (void)atp_term_is_self_cube(ndr, &vr);
           if (vl != vr) cls = 1u;                         // C: distinct-var self-cube eq
+        } else if (atp_pair_is_xx_x_selfcube(ndl, ndr)) {
+          cls = 1u;                                       // E: (x.x).x = y.(y.y) -- defers with C
         } else if (atp_pair_is_xx_y_dist(ndl, ndr)) {
           cls = 2u;                                       // D: (x.x).y distribution
         }
@@ -19530,7 +19568,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           if ((sd_key[b] & grp_mask) == grp && sd_cls[b] == 1u &&
               sd_key[b] < d_max && ncs < SD_CAP)
             cs[ncs++] = b;
-        if (ncs < 2u) continue;                           // need the C-pair
+        if (ncs < 2u) continue;                           // need the C/E pair
         for (u32 p = 0; p + 1u < ncs; p++)
           for (u32 q = p + 1u; q < ncs; q++)
             if (sd_key[cs[q]] < sd_key[cs[p]]) { u32 t = cs[p]; cs[p] = cs[q]; cs[q] = t; }
