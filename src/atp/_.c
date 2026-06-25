@@ -16997,7 +16997,38 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           anchor_is_class = (u8)(atp_pair_is_inner_swap_class(al, ar) ||
                                  atp_pair_is_slot15_rotate(al, ar));
         }
-        if (anchor != 0xffffffffffffffffull && !anchor_is_class)
+        // Chain-head leaf-sibling skip (use_comm_drop_dup_class_gate): the
+        // slot15-term CP is at the HEAD (raw chain index k4==0) of its
+        // discrimination-tree leaf, and the chosen anchor is a DIFFERENT partner
+        // indexed in the SAME leaf (identical raw phase|k1|k2|k3 prefix = same
+        // arrival) at a later chain position.  WM's single distinguished-face
+        // scan walks that leaf's fact chain in order (wm_order.c:34-44; the
+        // RegelHinzufuegen chain + KPVerwaltung single-scan), reaching the
+        // chain-head slot15-term FIRST, so it ages that CP BEFORE the anchor --
+        // exactly the order thvm's raw chain rank already produces (dup k4==0 <
+        // anchor k4).  Deferring past the same-leaf successor would invert WM's
+        // faithful leaf-chain order.  The DROP-DUP re-age is for a slot15-term
+        // whose raw arrival lands at a DIFFERENT (earlier) leaf than WM's late
+        // re-derived copy; a same-leaf chain-head sibling is not that case.
+        // Meredith OrAssociativity rule-119 (f=118): the slot15-term j19
+        // `x.(y.x) = (y.y).x` (chain-head, k4==0) and the anchor j16
+        // `x.(x.y) = (y.y).x` share the `x.(y.y)` query leaf (k3==1); WM emits
+        // j19 (ue (-13,-7)) before j16 (ue (-13,-6)), thvm's raw order agrees.
+        // No soa DROP-DUP fire is a same-leaf different-partner chain-head pair
+        // (every soa same-leaf re-age is a same-partner combo pair or a
+        // chain-position > 0 dup), so soa stays byte-identical.  Advances
+        // Meredith firstdiv 6110 -> beyond.
+        u8 anchor_same_leaf_head = 0u;
+        if (s->use_comm_drop_dup_class_gate && anc_k != 0xffffffffu) {
+          const u64 leaf_mask = ~((1ull << 28) - 1ull);  // phase | k1 | k2 | k3
+          u32 dup_chain = (u32)((big[dup].key_raw >> 14) & 0x3fffu);
+          if (dup_chain == 0u &&
+              big[anc_k].j != big[dup].j &&
+              (big[anc_k].key_raw & leaf_mask) == (big[dup].key_raw & leaf_mask))
+            anchor_same_leaf_head = 1u;
+        }
+        if (anchor != 0xffffffffffffffffull && !anchor_is_class &&
+            !anchor_same_leaf_head)
           big[dup].key = anchor + 1u;
       }
     }
