@@ -5883,30 +5883,25 @@ typedef struct {
   // non-L.2.2 band, never triggers.  OFF byte-identical; advances Meredith
   // firstdiv 809 -> 1040, soa firstdiv 2808 unchanged.
   u8    use_mered_dmgu;
-  // Meredith xxy late re-age (env THVM_ATP_MERED_XXY_REAGE, default OFF; also
-  // turned ON under use_formation_fifo).  The MeredithAxioms OrAssociativity
-  // firstdiv-6078 divergence: WM selects the xxy CP `(x.x).y = y.(y.x)` (thvm
-  // normalized `x.(x.y) = (y.y).x`) at pick 6078, but thvm selects a 3-var band
-  // CP `x.(y.z) = (z.y).x` there.  In the slot-117 (WM rule-124, the 4-var rule
-  // `x0.(x1.((x2.x0).(x3.x2))) -> (x1.x2).x0`) tops batch thvm forms FOUR xxy CPs
-  // aged 23108/23145/23158 (LIVE) and 23217 (an ORPHAN whose combo=0 parent is
-  // dead, discarded at pop).  The three live copies select at picks 6020/6021/
-  // 6070, BEFORE the band fills, so at pick 6078 thvm's weight-120 band holds no
-  // live xxy and falls through to the 3-var.  WM forms its FOURTH xxy from
-  // rule-124 x eqn-12 (`a.(b.(c.a)) = a.((a.c).b)`, KBO-incomparable, kept
-  // unoriented) -- an equation thvm never installs -- aged LATE (after the band's
-  // 3-var at 23221) with a LIVE parent, so it survives to pick 6078.  thvm lacks
-  // eqn-12, so it has no faithful late xxy source.  Re-age thvm's LAST live xxy
-  // (the largest-keyed one in this batch, seq 23158, currently pick 6070) to one
-  // FIFO slot below the band's 3-var CP `x.(y.z) = (z.y).x` (the anchor, seq
-  // 23221), so it lands at pick 6078 like WM's late copy and the 3-var slides to
-  // 6079.  The B-run `x.(y.y) = (y.y).x` (picks 6071-6077) keeps its slots; only
-  // the xxy moves.  Scoped HARD by the NORMALIZED xxy + 3-var-anchor content
-  // (atp_pair_is_xxy / atp_pair_is_xyz_swap), so soa -- which forms ZERO xxy and
-  // ZERO 3-var-swap CPs in this epoch (the eqn-12 content is a Meredith-only
-  // discriminator) -- stays byte-identical.  OFF byte-identical; advances
-  // Meredith firstdiv 6078 -> beyond, soa firstdiv 2808 unchanged.
-  u8    use_mered_xxy_reage;
+  // WM-faithful distinguished-direction E-set subsumption (env
+  // THVM_ATP_ESET_DISTDIR, default OFF; also turned ON under
+  // use_formation_fifo).  thvm's flat new-equation E-subsumption
+  // (atp_wm_flat_subsumes_pair) is 4-WAY: it tries both PATTERN orientations
+  // AND both SUBJECT orientations of the old equation.  WM's
+  // GMSubsummierenMitGleichung (INF/Interreduktion.c:251-279) gates the subject
+  // on TP_RichtungAusgezeichnet (:261) so it tests each old equation ONLY in its
+  // distinguished (stored) orientation -- never the reversed face -- while
+  // SS_TermpaarSubsummiertTermpaar (Subsumption.c:104-110) still tries both
+  // pattern orientations.  The two subject-swapped combos are thvm's over-match.
+  // With them dropped (atp_wm_flat_subsumes_pair_distdir) the Meredith eqn-12
+  // content `a.((a.b).c) = a.(c.(b.a))` (and its sibling) -- which the 3-var-swap
+  // `x.(y.z) = (z.y).x` subsumes only in eqn-12's REVERSED orientation -- survives
+  // exactly as WM keeps it, with NO content gate.  soa relies on the 4-way ONLY
+  // in that it must agree with the 1-way: across the whole soa run the subject-swap
+  // combos fire ZERO times, so soa stays byte-identical (firstdiv 2808, CPSEL
+  // unchanged).  Advances Meredith firstdiv 6078 -> 6110 (better than the gate's
+  // 6081: the faithful test also retains the eqn-12 sibling).
+  u8    use_eset_distdir;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6352,9 +6347,10 @@ fn void      thvm_atp_set_use_revface_cubeorder(AtpState *s, u8 on);
 // Shared-reverse-face double-MGU defer (see AtpState.use_mered_dmgu).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_mered_dmgu(AtpState *s, u8 on);
-// Meredith xxy late re-age (see AtpState.use_mered_xxy_reage).
-// DEFAULT OFF; also turned ON under use_formation_fifo.
-fn void      thvm_atp_set_use_mered_xxy_reage(AtpState *s, u8 on);
+// WM-faithful distinguished-direction E-set subsumption (see
+// AtpState.use_eset_distdir).  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void      thvm_atp_set_use_eset_distdir(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

@@ -1070,16 +1070,17 @@ int main(int argc, char **argv) {
       // below).  See soa.txt.
       thvm_atp_set_use_mered_dmgu(
           s, (getenv("THVM_ATP_MERED_DMGU") != NULL) ? 1u : 0u);
-      // Meredith xxy late re-age (DEFAULT OFF).  The Meredith OrAssociativity
-      // firstdiv-6078 divergence: WM selects the xxy CP `x.(x.y) = (y.y).x` at
-      // pick 6078 (its late rule-124 x eqn-12 copy with a live parent), but thvm
-      // -- which never installs eqn-12 -- has consumed all its live xxy copies
-      // before the weight-120 band fills and falls to the 3-var `x.(y.z) =
-      // (z.y).x`.  Re-ages thvm's last live xxy in slot-117's batch to one FIFO
-      // slot below the 3-var so it lands at pick 6078.  THVM_ATP_MERED_XXY_REAGE
-      // opts in (also turned on by FORMATION_FIFO below).  See soa.txt.
-      thvm_atp_set_use_mered_xxy_reage(
-          s, (getenv("THVM_ATP_MERED_XXY_REAGE") != NULL) ? 1u : 0u);
+      // WM-faithful distinguished-direction E-set subsumption (DEFAULT OFF).
+      // The flat new-equation E-subsumer is 4-way (both pattern AND both subject
+      // orientations of the old equation); WM's GMSubsummierenMitGleichung
+      // (INF/Interreduktion.c:261) tests the old equation ONLY in its
+      // distinguished (stored) orientation (TP_RichtungAusgezeichnet).  Drops the
+      // two subject-swapped match attempts so WM-kept equations survive -- the
+      // faithful fix for the Meredith firstdiv-6078 eqn-12 divergence,
+      // superseding the retired content gate.  THVM_ATP_ESET_DISTDIR opts in
+      // (also turned on by FORMATION_FIFO below).  See soa.txt.
+      thvm_atp_set_use_eset_distdir(
+          s, (getenv("THVM_ATP_ESET_DISTDIR") != NULL) ? 1u : 0u);
       // WM-faithful discrimination-tree construction (DEFAULT OFF).  Splices
       // BlattAufgeteilt parallels for genuine enclosing subterms AFTER the model
       // (WM AltesBlattPolieren DSBaumOperationen.c :523-526), but keeps the

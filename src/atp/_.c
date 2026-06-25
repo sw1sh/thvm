@@ -7881,11 +7881,6 @@ static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs);
 // WM -ks "s" pop-time E-subsumption test; defined next to
 // atp_cp_rule_subsumed.
 static u8 atp_pop_eq_subsumed(AtpState *s, Term lhs, Term rhs);
-// Meredith eqn-12 retention-gate content predicates (defined with the
-// CP-formation re-key shape matchers, far below; used by the E-set subsume
-// skip in atp_eset_subsume_by_new).
-static u8 atp_pair_is_xyz_swap(Term l, Term r);
-static u8 atp_pair_is_eqn12(Term l, Term r);
 // On-demand FT-mirror population for any caller of atp_rewrite_normalize_ft
 // (definition with atp_cp_trivially_joinable, far below).
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
@@ -9296,7 +9291,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_drain_revface    = 1u;
     s->use_revface_cubeorder = 1u;
     s->use_mered_dmgu       = 1u;
-    s->use_mered_xxy_reage  = 1u;
+    s->use_eset_distdir     = 1u;
     s->use_comm_drop_dup_class_gate = 1u;
     s->use_corank_own_arr   = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
@@ -9357,14 +9352,14 @@ fn void thvm_atp_set_use_mered_dmgu(AtpState *s, u8 on) {
   s->use_mered_dmgu = on ? 1u : 0u;
 }
 
-// Meredith xxy late re-age (see AtpState.use_mered_xxy_reage): in slot-117's
-// tops batch (the 4-var rule whose overlaps form the xxy `x.(x.y) = (y.y).x`),
-// re-age thvm's last live xxy copy to one FIFO slot below the band's 3-var CP
-// `x.(y.z) = (z.y).x`, so it lands at WM's firstdiv-6078 pick like WM's late
-// rule-124 x eqn-12 copy.  DEFAULT OFF; also turned ON under use_formation_fifo.
-fn void thvm_atp_set_use_mered_xxy_reage(AtpState *s, u8 on) {
+// WM-faithful distinguished-direction E-set subsumption (see
+// AtpState.use_eset_distdir): test each old equation only in its distinguished
+// (stored) orientation, dropping the two subject-swapped match attempts of the
+// general 4-way flat subsumer.  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void thvm_atp_set_use_eset_distdir(AtpState *s, u8 on) {
   if (s == NULL) return;
-  s->use_mered_xxy_reage = on ? 1u : 0u;
+  s->use_eset_distdir = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -13804,6 +13799,43 @@ static u8 atp_wm_flat_subsumes_pair(Term p_lhs, Term p_rhs, Term lhs, Term rhs) 
   }
 }
 
+// WM-FAITHFUL distinguished-direction variant of atp_wm_flat_subsumes_pair: the
+// new-equation E-set subsumption test WM actually runs (GMSubsummierenMitGleichung,
+// INF/Interreduktion.c:251-279).  WM gates the subject on TP_RichtungAusgezeichnet
+// (Interreduktion.c:261), so the OLD equation is tested ONLY in its distinguished
+// (stored) orientation -- never the reversed face.  SS_TermpaarSubsummiertTermpaar
+// (Subsumption.c:104-110) still tries BOTH PATTERN (new-equation) orientations
+// against that one fixed subject.  This is exactly atp_wm_flat_subsumes_pair MINUS
+// the two subject-swapped combos (rhs,lhs) -- the over-match that the general 4-way
+// path adds because thvm stores one arbitrary orientation per equation and tries
+// the subject reversed too.  thvm's stored order matches WM's distinguished order
+// wherever it matters (the same CP-normalization fixes both), so dropping the two
+// subject-reversal attempts is the faithful test.  This retains the Meredith eqn-12
+// content `a.((a.b).c) = a.(c.(b.a))` (and its sibling) that the 3-var-swap
+// `x.(y.z) = (z.y).x` subsumes only in eqn-12's reversed orientation -- WM keeps
+// both, so thvm now keeps them too, with NO content gate.
+static u8 atp_wm_flat_subsumes_pair_distdir(Term p_lhs, Term p_rhs,
+                                            Term lhs, Term rhs) {
+  for (;;) {
+    if (atp_wmflat_mo(p_lhs, p_rhs, lhs, rhs)) return 1;
+    if (atp_wmflat_mo(p_rhs, p_lhs, lhs, rhs)) return 1;
+    if (term_tag(lhs) != TAG_CTR || term_tag(rhs) != TAG_CTR) return 0;
+    if (term_ext(lhs) != term_ext(rhs)) return 0;
+    u32 n = term_ctr_n(lhs);
+    if (term_ctr_n(rhs) != n) return 0;
+    u32 diff = n;
+    for (u32 i = 0; i < n; i++) {
+      if (!kbo_eq(term_ctr_at(lhs, i), term_ctr_at(rhs, i))) {
+        if (diff != n) return 0;
+        diff = i;
+      }
+    }
+    if (diff == n) return 0;
+    lhs = term_ctr_at(lhs, diff);
+    rhs = term_ctr_at(rhs, diff);
+  }
+}
+
 // WM -ks "s" pop-time E-subsumption test (SS_TermpaarSubsummiertVonGM,
 // INF/Subsumption.c:91-104).  Returns 1 if `(lhs, rhs)` is subsumed by
 // a live unorientable equation under the SubsumptionBody semantics
@@ -13934,7 +13966,11 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
     if (s->r_orient[i]) continue;   // E only (RE_forGleichungenRobust)
     if (s->r_dead[i]) continue;
     u8 subsumed = s->use_flat_subsume
-        ? atp_wm_flat_subsumes_pair(new_lhs, new_rhs, s->lhs[i], s->rhs[i])
+        ? (s->use_eset_distdir
+               ? atp_wm_flat_subsumes_pair_distdir(new_lhs, new_rhs,
+                                                   s->lhs[i], s->rhs[i])
+               : atp_wm_flat_subsumes_pair(new_lhs, new_rhs,
+                                           s->lhs[i], s->rhs[i]))
         : atp_eq_subsumes_pair(new_lhs, new_rhs, s->lhs[i], s->rhs[i]);
     // Commutativity-aware widening (THVM_ATP_COMM_SUBSUME, DEFAULT OFF):
     // after the plain test, also drop the candidate when the new equation
@@ -13947,26 +13983,6 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
       comm_subsumed = 1;
     }
     if (!subsumed)
-      continue;
-    // Meredith eqn-12 retention gate (use_mered_xxy_reage, default OFF; also ON
-    // under use_formation_fifo).  thvm's 4-way E-set subsumption over-matches
-    // WM's single distinguished-direction test (TP_RichtungAusgezeichnet,
-    // Interreduktion.c:261): the 3-var-swap `x.(y.z) = (z.y).x` (installed at
-    // the Meredith OrAssociativity pick-6023 step as the new equation) subsumes
-    // the eqn-12 content `a.((a.b).c) = a.(c.(b.a))` only in a NON-distinguished
-    // direction, so WM keeps eqn-12 (its eq number 12, installed pick 1194)
-    // while thvm kills it.  With eqn-12 dead, its later rule-124 (slot-117)
-    // overlap forms thvm's late xxy CP `(x.x).y = y.(y.x)` with a DEAD parent --
-    // discarded as an orphan at pop -- so at the firstdiv pick 6078 thvm has no
-    // live xxy and falls to a 3-var band CP, where WM selects the xxy.  Skip the
-    // kill for exactly this (subsumer 3-var-swap, victim eqn-12) content pair so
-    // eqn-12 survives and forms the live late xxy WM selects at 6078.  Scoped
-    // HARD by both content shapes: soa forms ZERO of either (the eqn-12 content
-    // is a Meredith-only discriminator), so every soa subsumption stays byte-
-    // identical.  Advances Meredith firstdiv past 6078.
-    if (s->use_mered_xxy_reage &&
-        atp_pair_is_xyz_swap(new_lhs, new_rhs) &&
-        atp_pair_is_eqn12(s->lhs[i], s->rhs[i]))
       continue;
     s->r_dead_lhs_save[i] = s->lhs[i];
     s->r_dead_rhs_save[i] = s->rhs[i];
@@ -16607,159 +16623,6 @@ static u8 atp_pair_is_slot15_wrapped(Term l, Term r) {
   if (atp_term_is_slot15_lhs(li, &v, &w) && atp_term_is_slot15_rhs(ri, v, w))
     return 1u;
   if (atp_term_is_slot15_lhs(ri, &v, &w) && atp_term_is_slot15_rhs(li, v, w))
-    return 1u;
-  return 0u;
-}
-
-// f(v, f(v, y)) with v != y, both bare vars: the `x.(x.y)` xxy LHS face.
-static u8 atp_term_is_var_dot_var_dot_var(Term t, u32 *out_v, u32 *out_y) {
-  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
-  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
-  if (term_tag(t0) != TAG_FVR) return 0u;                  // v
-  if (term_tag(t1) != TAG_CTR || term_ext(t1) != term_ext(t) ||
-      term_ctr_n(t1) != 2u) return 0u;                     // f(v, y)
-  Term t10 = term_ctr_at(t1, 0), t11 = term_ctr_at(t1, 1);
-  if (term_tag(t10) != TAG_FVR || term_tag(t11) != TAG_FVR) return 0u;
-  u32 v = term_ext(t0);
-  if (term_ext(t10) != v) return 0u;                       // inner-left reuses v
-  *out_v = v;
-  *out_y = term_ext(t11);
-  return (u8)(v != *out_y);
-}
-
-// f(f(y, y), v) with the v, y bound by the sibling `x.(x.y)`: the `(y.y).x` face.
-static u8 atp_term_is_sq_y_dot_v(Term t, u32 v, u32 y) {
-  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
-  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
-  if (term_tag(t1) != TAG_FVR || term_ext(t1) != v) return 0u;
-  if (term_tag(t0) != TAG_CTR || term_ext(t0) != term_ext(t) ||
-      term_ctr_n(t0) != 2u) return 0u;
-  Term t00 = term_ctr_at(t0, 0), t01 = term_ctr_at(t0, 1);
-  if (term_tag(t00) != TAG_FVR || term_tag(t01) != TAG_FVR) return 0u;
-  return (u8)(term_ext(t00) == y && term_ext(t01) == y);
-}
-
-// Whether a NORMALIZED CP is the xxy `x.(x.y) = (y.y).x` shape (thvm LHS=(C3
-// V0 (C3 V0 V1)), RHS=(C3 (C3 V1 V1) V0); the same equation WM writes
-// `(x.x).y = y.(y.x)`), modulo orientation and variable renaming.  This is the
-// late-aged CP WM selects at the Meredith OrAssociativity firstdiv-6078 pick;
-// the MERED_XXY_REAGE gate re-ages thvm's last live copy in slot-117's batch.
-static u8 atp_pair_is_xxy(Term l, Term r) {
-  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
-  if (term_ext(l) != term_ext(r)) return 0u;
-  u32 v = 0, y = 0;
-  if (atp_term_is_var_dot_var_dot_var(l, &v, &y) && atp_term_is_sq_y_dot_v(r, v, y))
-    return 1u;
-  if (atp_term_is_var_dot_var_dot_var(r, &v, &y) && atp_term_is_sq_y_dot_v(l, v, y))
-    return 1u;
-  return 0u;
-}
-
-// f(x, f(y, z)) with x, y, z three distinct bare vars: `x.(y.z)`.
-static u8 atp_term_is_x_dot_yz(Term t, u32 *out_x, u32 *out_y, u32 *out_z) {
-  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
-  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
-  if (term_tag(t0) != TAG_FVR) return 0u;                  // x
-  if (term_tag(t1) != TAG_CTR || term_ext(t1) != term_ext(t) ||
-      term_ctr_n(t1) != 2u) return 0u;                     // f(y, z)
-  Term t10 = term_ctr_at(t1, 0), t11 = term_ctr_at(t1, 1);
-  if (term_tag(t10) != TAG_FVR || term_tag(t11) != TAG_FVR) return 0u;
-  u32 x = term_ext(t0), y = term_ext(t10), z = term_ext(t11);
-  if (x == y || x == z || y == z) return 0u;               // three distinct vars
-  *out_x = x;
-  *out_y = y;
-  *out_z = z;
-  return 1u;
-}
-
-// f(f(z, y), x) with the x, y, z bound by the sibling `x.(y.z)`: `(z.y).x`.
-static u8 atp_term_is_zy_dot_x(Term t, u32 x, u32 y, u32 z) {
-  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
-  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
-  if (term_tag(t1) != TAG_FVR || term_ext(t1) != x) return 0u;
-  if (term_tag(t0) != TAG_CTR || term_ext(t0) != term_ext(t) ||
-      term_ctr_n(t0) != 2u) return 0u;
-  Term t00 = term_ctr_at(t0, 0), t01 = term_ctr_at(t0, 1);
-  if (term_tag(t00) != TAG_FVR || term_tag(t01) != TAG_FVR) return 0u;
-  return (u8)(term_ext(t00) == z && term_ext(t01) == y);
-}
-
-// Whether a NORMALIZED CP is the 3-var band CP `x.(y.z) = (z.y).x` (thvm
-// LHS=(C3 V0 (C3 V1 V2)), RHS=(C3 (C3 V2 V1) V0); the inner pair transposed in
-// the reduct), modulo orientation and variable renaming.  This is the CP thvm
-// selects at the Meredith OrAssociativity firstdiv-6078 pick AHEAD of the late
-// xxy; the MERED_XXY_REAGE gate uses it as the re-age anchor (the last live xxy
-// splices to one FIFO slot below it).
-static u8 atp_pair_is_xyz_swap(Term l, Term r) {
-  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
-  if (term_ext(l) != term_ext(r)) return 0u;
-  u32 x = 0, y = 0, z = 0;
-  if (atp_term_is_x_dot_yz(l, &x, &y, &z) && atp_term_is_zy_dot_x(r, x, y, z))
-    return 1u;
-  if (atp_term_is_x_dot_yz(r, &x, &y, &z) && atp_term_is_zy_dot_x(l, x, y, z))
-    return 1u;
-  return 0u;
-}
-
-// f(a, f(f(a, b), c)) with a, b, c three distinct bare vars: `a.((a.b).c)` --
-// the eqn-12 LHS face (the doubled outer var on the inner dot's LEFT).
-static u8 atp_term_is_a_dot_ab_c(Term t, u32 *out_a, u32 *out_b, u32 *out_c) {
-  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
-  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
-  if (term_tag(t0) != TAG_FVR) return 0u;                  // a
-  if (term_tag(t1) != TAG_CTR || term_ext(t1) != term_ext(t) ||
-      term_ctr_n(t1) != 2u) return 0u;                     // f(f(a,b), c)
-  Term t10 = term_ctr_at(t1, 0), t11 = term_ctr_at(t1, 1);
-  if (term_tag(t10) != TAG_CTR || term_ext(t10) != term_ext(t) ||
-      term_ctr_n(t10) != 2u) return 0u;                    // f(a, b)
-  if (term_tag(t11) != TAG_FVR) return 0u;                 // c
-  Term t100 = term_ctr_at(t10, 0), t101 = term_ctr_at(t10, 1);
-  if (term_tag(t100) != TAG_FVR || term_tag(t101) != TAG_FVR) return 0u;
-  u32 a = term_ext(t0);
-  if (term_ext(t100) != a) return 0u;                      // inner-left reuses a
-  u32 b = term_ext(t101), c = term_ext(t11);
-  if (a == b || a == c || b == c) return 0u;               // three distinct vars
-  *out_a = a;
-  *out_b = b;
-  *out_c = c;
-  return 1u;
-}
-
-// f(a, f(c, f(b, a))) with the a, b, c bound by the sibling `a.((a.b).c)`:
-// `a.(c.(b.a))` -- the eqn-12 RHS face.
-static u8 atp_term_is_a_dot_c_ba(Term t, u32 a, u32 b, u32 c) {
-  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
-  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
-  if (term_tag(t0) != TAG_FVR || term_ext(t0) != a) return 0u;
-  if (term_tag(t1) != TAG_CTR || term_ext(t1) != term_ext(t) ||
-      term_ctr_n(t1) != 2u) return 0u;                     // f(c, f(b, a))
-  Term t10 = term_ctr_at(t1, 0), t11 = term_ctr_at(t1, 1);
-  if (term_tag(t10) != TAG_FVR || term_ext(t10) != c) return 0u;
-  if (term_tag(t11) != TAG_CTR || term_ext(t11) != term_ext(t) ||
-      term_ctr_n(t11) != 2u) return 0u;                    // f(b, a)
-  Term t110 = term_ctr_at(t11, 0), t111 = term_ctr_at(t11, 1);
-  if (term_tag(t110) != TAG_FVR || term_tag(t111) != TAG_FVR) return 0u;
-  return (u8)(term_ext(t110) == b && term_ext(t111) == a);
-}
-
-// Whether a stored equation is the eqn-12 content `a.((a.b).c) = a.(c.(b.a))`
-// (thvm LHS=(C3 V0 (C3 (C3 V0 V1) V2)), RHS=(C3 V0 (C3 V2 (C3 V1 V0)))), modulo
-// orientation and variable renaming.  This is the KBO-incomparable equation WM
-// keeps unoriented (its eq number 12, installed at WM pick 1194) and overlaps
-// against rule-124 to form its late xxy CP -- but thvm's E-set subsumption kills
-// it when the 3-var-swap `x.(y.z) = (z.y).x` enters (an over-match of WM's
-// distinguished-direction subsumption).  The MERED_XXY_REAGE retention gate
-// detects exactly this victim+subsumer pair and skips the kill.  Discriminated
-// from its sibling `a.((b.a).c) = a.(c.(a.b))` (the doubled var on the inner
-// dot's RIGHT, which WM also drops) by binding the doubled var to the inner
-// dot's LEFT child.
-static u8 atp_pair_is_eqn12(Term l, Term r) {
-  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
-  if (term_ext(l) != term_ext(r)) return 0u;
-  u32 a = 0, b = 0, c = 0;
-  if (atp_term_is_a_dot_ab_c(l, &a, &b, &c) && atp_term_is_a_dot_c_ba(r, a, b, c))
-    return 1u;
-  if (atp_term_is_a_dot_ab_c(r, &a, &b, &c) && atp_term_is_a_dot_c_ba(l, a, b, c))
     return 1u;
   return 0u;
 }
