@@ -9309,6 +9309,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1cube_arrival   = 1u;
     s->use_l2tail_face_swap = 1u;
     s->use_l1_selfcube_defer = 1u;
+    s->use_l2_selfcube_dist_defer = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9521,6 +9522,16 @@ fn void thvm_atp_set_use_l2tail_face_swap(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1_selfcube_defer(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1_selfcube_defer = on ? 1u : 0u;
+}
+
+// L.2 `x.(x.x) = y.(y.y)` self-cube-equality defer past the `(x.x).y`
+// distribution shapes (see AtpState.use_l2_selfcube_dist_defer): defer the
+// leading distinct-var self-cube-equality CP pair of an f=185-signature
+// L.2/combo0/phase0/k1==6 weight-120 group to just past the group's xx_y_dist
+// anchors.  DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l2_selfcube_dist_defer(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l2_selfcube_dist_defer = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -19430,6 +19441,101 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
             if (sc_key[cs[q]] < sc_key[cs[p]]) { u32 t = cs[p]; cs[p] = cs[q]; cs[q] = t; }
         for (u32 p = 0; p < ncs; p++)
           big[sc_idx[cs[p]]].key = cube_max + 1u + (u64)p;
+      }
+    }
+    // L.2 `x.(x.x) = y.(y.y)` self-cube-equality defer past `(x.x).y`
+    // distribution shapes (default OFF; see use_l2_selfcube_dist_defer).  The
+    // Meredith OrAssociativity firstdiv-13804 divergence: the f=185 tops batch
+    // forms a weight-120 L.2/combo0/phase0/k1==6 group whose surviving distinct-
+    // var self-cube-eq C `x.(x.x) = y.(y.y)` PAIR thvm keys AHEAD of the same
+    // group's `(x.x).y`-distribution shapes D `(x.x).y = y.(x.y)` /
+    // `(x.x).y = y.(y.x)` (atp_pair_is_xx_y_dist 1/2); WM ages C LAST (WM picks
+    // 13804-05 the two D shapes, 13806-07 the C pair).  The L.2/k1==6 sibling of
+    // use_l1_selfcube_defer (which handles the L.1/k1==1 fwd+posgroup band): same
+    // JOIN-reduce mechanism + root-C exclusion + >=2 C-pair gate, but the anchor
+    // role is a surviving xx_y_dist A AND B instead of fwd_cube + posgroup_cube.
+    // Re-key the surviving C pair just above the group's highest dist-anchor key
+    // so the order becomes D,C.  soa's L.2 distribution bands carry a single
+    // surviving C copy (ncs==1), so the >=2 gate fires NEVER on soa within its
+    // md5 window -- soa byte-identical.  OFF byte-identical.  Advances Meredith
+    // firstdiv 13804 -> beyond.
+    if (s->use_l2_selfcube_dist_defer) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      // Root-C exclusion (same rationale as use_l1_selfcube_defer): a rule that
+      // directly produces a surviving distinct-var self-cube-eq at the ROOT
+      // overlap keeps its L.2 C copies interleaved ahead of the anchors.
+      u8 has_root_c = 0u;
+      for (u32 kr = 0; kr < n_big; kr++) {
+        if (big[kr].i != f || big[kr].j == f) continue;
+        if (big[kr].combo != 0u) continue;
+        if (big[kr].cp.pos_len != 0u) continue;           // ROOT overlap only
+        Term rl = big[kr].cp.lhs, rr = big[kr].cp.rhs;
+        if (atp_cp_trivially_joinable(s, &rl, &rr)) continue;   // tautology
+        if (!atp_pair_is_self_cube_eq(rl, rr)) continue;
+        u32 rvl = 0, rvr = 0;
+        (void)atp_term_is_self_cube(rl, &rvl);
+        (void)atp_term_is_self_cube(rr, &rvr);
+        if (rvl != rvr) { has_root_c = 1u; break; }
+      }
+      enum { SD_CAP = 64u };
+      u32 sd_idx[SD_CAP];
+      u64 sd_key[SD_CAP];
+      u8  sd_cls[SD_CAP];                                  // 1 = C, 2 = dist A/B
+      u32 n_sd = 0;
+      for (u32 kd = 0; !has_root_c && kd < n_big && n_sd < SD_CAP; kd++) {
+        if (big[kd].i != f || big[kd].j == f) continue;   // tops, partner = j
+        if (big[kd].combo != 0u) continue;                // combo 0 only
+        if ((big[kd].key >> 58) != 0u) continue;          // phase 0
+        if (((big[kd].key >> 42) & 3u) != 0u) continue;   // rule-tree k2 == 0
+        if (big[kd].cp.pos_len != 1u || big[kd].cp.pos[0] != 1u) continue; // L.2
+        Term ndl = big[kd].cp.lhs, ndr = big[kd].cp.rhs;
+        if (atp_cp_trivially_joinable(s, &ndl, &ndr)) continue;  // tautology: dropped
+        u8 cls = 0u;
+        if (atp_pair_is_self_cube_eq(ndl, ndr)) {
+          u32 vl = 0, vr = 0;
+          (void)atp_term_is_self_cube(ndl, &vl);
+          (void)atp_term_is_self_cube(ndr, &vr);
+          if (vl != vr) cls = 1u;                         // C: distinct-var self-cube eq
+        } else if (atp_pair_is_xx_y_dist(ndl, ndr)) {
+          cls = 2u;                                       // D: (x.x).y distribution
+        }
+        if (cls == 0u) continue;
+        sd_idx[n_sd] = kd;
+        sd_key[n_sd] = big[kd].key;
+        sd_cls[n_sd] = cls;
+        n_sd++;
+      }
+      for (u32 a0 = 0; a0 < n_sd; a0++) {
+        u64 grp = sd_key[a0] & grp_mask;
+        u8 seen = 0u;
+        for (u32 b = 0; b < a0; b++) if ((sd_key[b] & grp_mask) == grp) { seen = 1u; break; }
+        if (seen) continue;
+        // Distinct dist variants A and B must both be present (the f=185 anchor
+        // pair), and the highest dist-anchor key is the defer target.
+        u64 d_max = 0u;
+        u8 have_a = 0u, have_b = 0u;
+        for (u32 b = 0; b < n_sd; b++) {
+          if ((sd_key[b] & grp_mask) != grp) continue;
+          if (sd_cls[b] != 2u) continue;
+          if (sd_key[b] > d_max) d_max = sd_key[b];
+          Term dl = big[sd_idx[b]].cp.lhs, dr = big[sd_idx[b]].cp.rhs;
+          (void)atp_cp_trivially_joinable(s, &dl, &dr);
+          u8 var = atp_pair_is_xx_y_dist(dl, dr);
+          if (var == 1u) have_a = 1u; else if (var == 2u) have_b = 1u;
+        }
+        if (!have_a || !have_b) continue;                 // not the f=185 dist anchor pair
+        u32 cs[SD_CAP];
+        u32 ncs = 0;
+        for (u32 b = 0; b < n_sd; b++)
+          if ((sd_key[b] & grp_mask) == grp && sd_cls[b] == 1u &&
+              sd_key[b] < d_max && ncs < SD_CAP)
+            cs[ncs++] = b;
+        if (ncs < 2u) continue;                           // need the C-pair
+        for (u32 p = 0; p + 1u < ncs; p++)
+          for (u32 q = p + 1u; q < ncs; q++)
+            if (sd_key[cs[q]] < sd_key[cs[p]]) { u32 t = cs[p]; cs[p] = cs[q]; cs[q] = t; }
+        for (u32 p = 0; p < ncs; p++)
+          big[sd_idx[cs[p]]].key = d_max + 1u + (u64)p;
       }
     }
     if (s->use_l1_xxx_cube_defer) {

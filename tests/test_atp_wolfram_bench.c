@@ -1156,6 +1156,16 @@ int main(int argc, char **argv) {
       // FORMATION_FIFO below).  See soa.txt.
       thvm_atp_set_use_l1_selfcube_defer(
           s, (getenv("THVM_ATP_L1_SELFCUBE_DEFER") != NULL) ? 1u : 0u);
+      // L.2 self-cube-equality defer past the `(x.x).y` distribution shapes
+      // (DEFAULT OFF): defer the leading distinct-var self-cube-equality CP pair
+      // `x.(x.x) = y.(y.y)` of an f=185-signature L.2/combo0/phase0/k1==6
+      // weight-120 group (a higher-keyed xx_y_dist A AND B present) to just past
+      // the distribution anchors, matching WM's CP-formation FIFO age -- the
+      // Meredith OrAssociativity firstdiv-13804 divergence.
+      // THVM_ATP_L2_SELFCUBE_DIST_DEFER opts in (also turned on by FORMATION_FIFO
+      // below).  See soa.txt.
+      thvm_atp_set_use_l2_selfcube_dist_defer(
+          s, (getenv("THVM_ATP_L2_SELFCUBE_DIST_DEFER") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /
