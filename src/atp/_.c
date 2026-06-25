@@ -16485,6 +16485,49 @@ static u8 atp_pair_is_assoc_rotation(Term l, Term r) {
   return 0u;
 }
 
+// f(v, f(v, w)): `v.(v.w)` -- outer-left var v, inner f(v, w) reusing the
+// SAME outer var v on its LEFT (mirror of slot15_lhs's `v.(w.v)`, which
+// reuses v on the inner RIGHT).  Binds v, w; requires v != w.
+static u8 atp_term_is_v_dot_vw(Term t, u32 *out_v, u32 *out_w) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
+  if (term_tag(t0) != TAG_FVR) return 0u;                  // outer-left var v
+  if (term_tag(t1) != TAG_CTR || term_ext(t1) != term_ext(t) ||
+      term_ctr_n(t1) != 2u) return 0u;                     // f(v, w)
+  Term t10 = term_ctr_at(t1, 0), t11 = term_ctr_at(t1, 1);
+  if (term_tag(t10) != TAG_FVR || term_tag(t11) != TAG_FVR) return 0u;
+  u32 v = term_ext(t0);
+  if (term_ext(t10) != v) return 0u;          // inner-LEFT reuses outer var v
+  *out_v = v;
+  *out_w = term_ext(t11);
+  return (u8)(v != *out_w);                    // v != w
+}
+
+// Whether a NORMALIZED CP is the slot15 INNER-REVERSE sibling `(w.w).v =
+// v.(v.w)` (thvm sides (C3 (C3 V_w V_w) V_v) and (C3 V_v (C3 V_v V_w));
+// modulo orientation and variable renaming) -- the SAME `(w.w).v` doubled-cube
+// side as the slot15-term `(w.w).v = v.(w.v)`, but with the inner pair of the
+// `v.(...)` side REVERSED (`v.(v.w)` reuses v on the inner LEFT, where the
+// slot15-term's `v.(w.v)` reuses it on the inner RIGHT).  This NORMALIZED shape
+// arises as the DROP-DUP anchor in BOTH the Meredith and Sheffer (soa)
+// families -- their slot15-term and sibling normalize identically and both
+// index the slot15-term at an earlier leaf -- so the shape alone cannot tell
+// the faithful soa splice from the harmful Meredith one.  Their slot15-term CPs,
+// partner equations, and key fields are all identical; the discriminator is the
+// partner-equation TRACE ORDER at the call site (the OLDER partner's CP ages
+// first under WM's leaf-chain scan).
+static u8 atp_pair_is_slot15_inner_rev(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 v = 0, w = 0, rv = 0, rw = 0;
+  // One side is `v.(v.w)`, the other `(w.w).v`.
+  if (atp_term_is_v_dot_vw(l, &v, &w) && atp_term_is_slot15_rhs(r, v, w))
+    return 1u;
+  if (atp_term_is_v_dot_vw(r, &rv, &rw) && atp_term_is_slot15_rhs(l, rv, rw))
+    return 1u;
+  return 0u;
+}
+
 // f(f(v, f(v, v)), y) with v != y, all bare vars: `(x.(x.x)).y`.
 static u8 atp_term_is_cube_dot_var(Term t, u32 *out_v, u32 *out_y) {
   if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
@@ -17191,6 +17234,34 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           anchor_is_class = (u8)(atp_pair_is_inner_swap_class(al, ar) ||
                                  atp_pair_is_slot15_rotate(al, ar) ||
                                  atp_pair_is_assoc_rotation(al, ar));
+          // Slot15 INNER-REVERSE sibling anchor `(w.w).v = v.(v.w)` (the same
+          // doubled-cube `(w.w).v` side as the slot15-term `(w.w).v = v.(w.v)`,
+          // but with the `v.(...)` inner pair reversed).  This anchor occurs in
+          // BOTH families with a BYTE-IDENTICAL slot15-term CP, identical partner
+          // equations, and identical rank fields (both index the slot15-term at a
+          // strictly earlier leaf than the sibling) -- so no local property of
+          // the CP, partner, or key distinguishes the faithful soa splice (soa
+          // f=199/202/204/209/211) from the harmful Meredith one (rule-157,
+          // f=156, WM picks 10519/10520).  The genuine discriminator is the
+          // PARTNER-EQUATION TRACE ORDER: WM's per-leaf fact chains prepend at
+          // insertion (wm_order.c:34-44), so its single superposition scan reaches
+          // the OLDER partner's leaf first and ages that partner's CP first.  At
+          // Meredith the slot15-term's partner (trace 44160) is OLDER than the
+          // sibling's (44697), so WM ages the slot15-term BEFORE the sibling and
+          // the +1 splice (which moves it AFTER) inverts the pair; at every soa
+          // fire the slot15-term's partner is instead NEWER than the sibling's,
+          // so the sibling-first order the splice produces is consistent and stays
+          // byte-identical.  Skip the re-age ONLY when the anchor is the inner-
+          // reverse sibling, the slot15-term arrives strictly earlier, AND its
+          // producing partner is the OLDER equation.  Advances Meredith firstdiv
+          // 10519 -> beyond; soa byte-identical.
+          if (atp_pair_is_slot15_inner_rev(al, ar)) {
+            u32 dup_arr = (u32)((big[dup].key_raw >> 28) & 0x3fffu);
+            u32 anc_arr = (u32)((big[anc_k].key_raw >> 28) & 0x3fffu);
+            u32 dup_tr = s->r_trace[big[dup].j];
+            u32 anc_tr = s->r_trace[big[anc_k].j];
+            if (dup_arr < anc_arr && dup_tr < anc_tr) anchor_is_class = 1u;
+          }
         }
         // Chain-head leaf-sibling skip (use_comm_drop_dup_class_gate): the
         // slot15-term CP is at the HEAD (raw chain index k4==0) of its
