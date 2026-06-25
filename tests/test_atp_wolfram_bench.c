@@ -1009,6 +1009,14 @@ int main(int argc, char **argv) {
       // tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_cube_arrival(
           s, (getenv("THVM_ATP_CUBE_ARRIVAL") != NULL) ? 1u : 0u);
+      // Two-face co-rank correction (DEFAULT OFF; also ON under FORMATION_FIFO
+      // below): re-key a WM-reverse-face overlap of the `(x.(x.x)).y = y.y`
+      // partner (dist_rhs=0) onto its OWN tops-DFS arrival when it is a distinct
+      // (non-double-MGU) surviving CP, matching WM's independent aging.  Advances
+      // Meredith OrAssociativity firstdiv 4190 -> 6078.  THVM_ATP_CORANK_OWN_ARR
+      // opts in.  See tools/baselines/wm_align_reports/soa.txt.
+      thvm_atp_set_use_corank_own_arr(
+          s, (getenv("THVM_ATP_CORANK_OWN_ARR") != NULL) ? 1u : 0u);
       // WM rule-36 weight-109 band interleave (DEFAULT OFF): rule-36's tops
       // batch forms eight band CPs `(x.X).(y.x) = x` of three variants
       // (A: X=(x.y), B: X=(y.x), C: X=(y.y)) from reverse-face equation

@@ -2367,6 +2367,14 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
         Term nr = atp_rewrite_normalize_indexed(s, cp->rhs, 4096u);
         if (!kbo_eq(nl, nr) && atp_pop_eq_subsumed(s, nl, nr)) hit_o = 0u;
       }
+      if (s->corank_force_own) {
+        // Own-arrival variant (computed alongside the default collapse key by
+        // the batch loop under use_corank_own_arr): never collapse in branch
+        // (c); key this face on its OWN arrival.  The genuine same-leaf
+        // double-MGU (arr_o == arr) still slots via ch*2.  The batch-level
+        // sibling-alpha-eq pass picks between this and the collapse key.
+        if (hit_o && arr_o == arr) ch = ch * 2u;
+      } else
       if (hit_o && arr_o < arr) {
         // The other face arrives earlier: anchor on it, this face follows.
         // Slot the follower at 2*ch_o+1 so it sorts right after the anchor's

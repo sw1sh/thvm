@@ -5733,6 +5733,25 @@ typedef struct {
   // 1..1319 prefix is preserved.  Advances soa firstdiv 1320 -> beyond.  See
   // tools/baselines/wm_align_reports/soa.txt.
   u8    use_cube_arrival;
+  // Two-face co-rank correction (env THVM_ATP_CORANK_OWN_ARR, DEFAULT OFF;
+  // also turned ON under use_formation_fifo).  The var-differ reverse-face
+  // co-rank in atp_wmo_rank anchors a CP's reverse face onto the EARLIER-
+  // arriving forward face's tops-DFS arrival.  That collapse is WM-faithful
+  // only for a double-MGU (two unifiers WM's single oriented scan emits
+  // consecutively as the SAME critical pair); when the two faces yield
+  // DISTINCT CPs, WM ages each at its own arrival.  The Meredith OrAssoc
+  // firstdiv-4190 divergence is one such case: the `(x.(x.x)).y = y.y`
+  // partner's WM-reverse-face overlap is a distinct CP WM emits ~300 picks
+  // later, not collapsed.  This gate re-keys such a reverse face to its own
+  // arrival, scoped (in thvm_atp_generate_cps_wm) to that partner shape +
+  // dist_rhs==0 + jfwm==1 + a surviving non-double-MGU CP, so soa stays
+  // byte-identical.  Advances Meredith OrAssociativity firstdiv 4190 -> 6078.
+  u8    use_corank_own_arr;
+  // Transient: when set, atp_wmo_rank skips the branch-(c) collapse and keys
+  // each reverse face on its OWN arrival.  The batch loop sets it to compute
+  // the own-arrival key variant alongside the default collapse key, then the
+  // sibling-alpha-eq pass picks between the two.  Never persists across a CP.
+  u8    corank_force_own;
   // Waldmeister rule-36 weight-109 "band" interleave (env
   // THVM_ATP_BAND_INTERLEAVE, DEFAULT OFF; also turned ON under
   // use_formation_fifo).  The soa firstdiv-1953 divergence: rule-36's tops
@@ -6287,6 +6306,8 @@ fn void      thvm_atp_set_use_posgroup(AtpState *s, u8 on);
 // Cube-arrival tiebreak for the double-cube vs slot15-wrapped pair (see
 // AtpState.use_cube_arrival).  DEFAULT OFF.
 fn void      thvm_atp_set_use_cube_arrival(AtpState *s, u8 on);
+// Two-face co-rank correction (see AtpState.use_corank_own_arr).  DEFAULT OFF.
+fn void      thvm_atp_set_use_corank_own_arr(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_band_interleave(AtpState *s, u8 on);
 // Waldmeister CP-formation FIFO lineage -- the SINGLE knob enabling the
 // faithful WM CP-formation order; ON it turns on the four scoped k3-arrival

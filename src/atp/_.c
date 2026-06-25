@@ -9251,6 +9251,16 @@ fn void thvm_atp_set_use_cube_arrival(AtpState *s, u8 on) {
   s->use_cube_arrival = on ? 1u : 0u;
 }
 
+// Two-face co-rank correction (see AtpState.use_corank_own_arr): re-key the
+// WM-reverse-face overlap of the `(x.(x.x)).y = y.y` partner onto its OWN
+// tops-DFS arrival when it is a distinct (non-double-MGU) surviving CP, the
+// scoped fix for the Meredith OrAssociativity firstdiv-4190 class (the
+// batch-level pass lives in thvm_atp_generate_cps_wm).  DEFAULT OFF.
+fn void thvm_atp_set_use_corank_own_arr(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_corank_own_arr = on ? 1u : 0u;
+}
+
 fn void thvm_atp_set_use_band_interleave(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_band_interleave = on ? 1u : 0u;
@@ -9282,6 +9292,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_revface_cubeorder = 1u;
     s->use_mered_dmgu       = 1u;
     s->use_comm_drop_dup_class_gate = 1u;
+    s->use_corank_own_arr   = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -15982,6 +15993,7 @@ typedef struct {
   u8  combo;
   u64 key;
   u64 key_raw;    // atp_wmo_rank result before the gated re-key passes
+  u64 key_owncorank;  // own-arrival variant (use_corank_own_arr; 0 = same as key)
   u32 seq;        // original index: stable tiebreak
 } AtpWmoCpEnt;
 
@@ -16119,6 +16131,49 @@ static u8 atp_term_is_dot_xy_dot_y(Term t, u32 v, u32 y) {
   Term t00 = term_ctr_at(t0, 0), t01 = term_ctr_at(t0, 1);
   if (term_tag(t00) != TAG_FVR || term_tag(t01) != TAG_FVR) return 0u;
   return (u8)(term_ext(t00) == v && term_ext(t01) == y);
+}
+
+// Whether a stored equation is the var-differ asymmetric `(x.(x.x)).y = y.y`
+// (thvm LHS=(C3 (C3 V0 (C3 V0 V0)) V1), RHS=(C3 V1 V1)), modulo orientation +
+// variable renaming.  This is the partner equation whose WM-reverse-face
+// overlaps WM ages at an independent (own) arrival rather than collapsed onto
+// the forward face -- the Meredith OrAssociativity firstdiv-4190 class.
+static u8 atp_term_is_sq_inner_dot_var(Term t, u32 *out_v, u32 *out_y) {
+  // f(f(v, f(v, v)), y) with v != y: `(x.(x.x)).y`.
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
+  if (term_tag(t1) != TAG_FVR) return 0u;
+  if (term_tag(t0) != TAG_CTR || term_ext(t0) != term_ext(t) ||
+      term_ctr_n(t0) != 2u) return 0u;
+  Term t00 = term_ctr_at(t0, 0), t01 = term_ctr_at(t0, 1);
+  if (term_tag(t00) != TAG_FVR) return 0u;
+  if (term_tag(t01) != TAG_CTR || term_ext(t01) != term_ext(t) ||
+      term_ctr_n(t01) != 2u) return 0u;
+  Term t010 = term_ctr_at(t01, 0), t011 = term_ctr_at(t01, 1);
+  if (term_tag(t010) != TAG_FVR || term_tag(t011) != TAG_FVR) return 0u;
+  u32 v = term_ext(t00);
+  if (term_ext(t010) != v || term_ext(t011) != v) return 0u;  // inner = v.v
+  *out_v = v;
+  *out_y = term_ext(t1);
+  return (u8)(*out_v != *out_y);
+}
+
+static u8 atp_pair_is_sq_inner_class(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 v = 0, y = 0;
+  // RHS = y.y (squared sibling var).
+  if (atp_term_is_sq_inner_dot_var(l, &v, &y) && term_tag(r) == TAG_CTR &&
+      term_ctr_n(r) == 2u && term_tag(term_ctr_at(r, 0)) == TAG_FVR &&
+      term_tag(term_ctr_at(r, 1)) == TAG_FVR &&
+      term_ext(term_ctr_at(r, 0)) == y && term_ext(term_ctr_at(r, 1)) == y)
+    return 1u;
+  if (atp_term_is_sq_inner_dot_var(r, &v, &y) && term_tag(l) == TAG_CTR &&
+      term_ctr_n(l) == 2u && term_tag(term_ctr_at(l, 0)) == TAG_FVR &&
+      term_tag(term_ctr_at(l, 1)) == TAG_FVR &&
+      term_ext(term_ctr_at(l, 0)) == y && term_ext(term_ctr_at(l, 1)) == y)
+    return 1u;
+  return 0u;
 }
 
 static u8 atp_pair_is_seq564_sibling(Term l, Term r) {
@@ -16715,6 +16770,73 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       big[k].key = atp_wmo_rank(s, f, big[k].i, big[k].j, big[k].combo,
                                 &big[k].cp);
       big[k].key_raw = big[k].key;
+      big[k].key_owncorank = big[k].key;
+      if (s->use_corank_own_arr) {
+        s->corank_force_own = 1u;
+        big[k].key_owncorank = atp_wmo_rank(s, f, big[k].i, big[k].j,
+                                            big[k].combo, &big[k].cp);
+        s->corank_force_own = 0u;
+      }
+    }
+    // Two-face co-rank correction (default OFF; auto-ON under FormationFifo;
+    // see use_corank_own_arr).  The var-differ reverse-face co-rank in
+    // atp_wmo_rank (wm_order.c, branch arr_o < arr) anchors a CP's reverse face
+    // onto the earlier-arriving forward face's tops-DFS arrival.  That collapse
+    // is WM-faithful only for a double-MGU -- two unifiers WM's single oriented
+    // scan emits consecutively as the SAME critical pair.  When the two faces
+    // yield DISTINCT critical pairs, WM ages each at its own face's arrival.
+    //
+    // The Meredith OrAssociativity firstdiv-4190 divergence is one such case:
+    // the `(x.(x.x)).y = y.y` partner (f=31 j=12), overlapped on its WM-reverse
+    // face, gives a CP distinct from its forward face, which WM emits ~300 picks
+    // later; thvm's collapse keys it one FIFO slot too early.  Re-key those CPs
+    // to their own arrival (key_owncorank, computed above with the collapse
+    // suppressed) when the reverse face is a genuine independent CP.
+    //
+    // Scoped HARD to keep soa (ShefferAxiomsOrAssociativity) byte-identical:
+    //   - j_face_wm == 1: only the partner's WM-reverse face (the one WM does
+    //     not scan directly) can age independently.
+    //   - dist_rhs == 0: the partner must be oriented LHS->RHS, so its reverse
+    //     (RHS) face is the independent overlap.  soa's `(x.(x.x)).y=y.y` is
+    //     oriented dist_rhs=1, so the same overlap is jfwm=0 and never reaches
+    //     here -- a double-MGU WM collapses, kept byte-identical.
+    //   - partner shape `(x.(x.x)).y = y.y` (atp_pair_is_sq_inner_class): other
+    //     var-differ partners keep WM's collapse even across distinct faces.
+    //   - the reverse face must SURVIVE push (not trivially joinable): a CP that
+    //     joins to a tautology is dropped, so re-keying it would only perturb
+    //     unrelated dropped CPs' FIFO ages.
+    //   - no sibling forward face (same f, j, position; opposite planted face)
+    //     yields an alpha-equal normalized CP: an alpha-equal sibling IS the
+    //     double-MGU WM emits collapsed, so keep the collapse there.
+    if (s->use_corank_own_arr) {
+      AtpWmOrder *cw = (AtpWmOrder *)s->wmo;
+      for (u32 k = 0; k < n_big; k++) {
+        if (big[k].key_owncorank == big[k].key) continue;  // no collapse
+        u8 j_dr = wmo_trace_dist_rhs(cw, s->r_trace[big[k].j]);
+        u8 j_face_wm = (u8)((big[k].combo & 1u) ^ j_dr);
+        if (!j_face_wm || j_dr) continue;
+        if (!atp_pair_is_sq_inner_class(s->lhs[big[k].j], s->rhs[big[k].j]))
+          continue;
+        Term jl = big[k].cp.lhs, jr = big[k].cp.rhs;
+        if (atp_cp_trivially_joinable(s, &jl, &jr)) continue;
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 keep_collapse = 0u;
+        for (u32 m = 0; m < n_big && !keep_collapse; m++) {
+          if (m == k) continue;
+          if (big[m].i != big[k].i || big[m].j != big[k].j) continue;
+          if (big[m].combo != (big[k].combo ^ 1u)) continue;  // sibling face
+          if (big[m].cp.pos_len != big[k].cp.pos_len) continue;
+          u8 same_pos = 1u;
+          for (u32 d = 0; d < big[k].cp.pos_len; d++)
+            if (big[m].cp.pos[d] != big[k].cp.pos[d]) { same_pos = 0u; break; }
+          if (!same_pos) continue;
+          Term snl = atp_rewrite_normalize_indexed(s, big[m].cp.lhs, 4096u);
+          Term snr = atp_rewrite_normalize_indexed(s, big[m].cp.rhs, 4096u);
+          if (atp_pair_alpha_eq(nl, nr, snl, snr)) keep_collapse = 1u;
+        }
+        if (!keep_collapse) big[k].key = big[k].key_owncorank;
+      }
     }
     // Commutativity-REAGE re-rank (default OFF; INVERSE of comm-defer).  WM
     // selects the seq564-sibling CP `(x.x).y = (x.y).y` at pick-126.  thvm
