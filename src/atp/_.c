@@ -16049,11 +16049,65 @@ typedef struct {
   u32 seq;        // original index: stable tiebreak
 } AtpWmoCpEnt;
 
-static int atp_wmo_ent_cmp(const void *pa, const void *pb) {
-  const AtpWmoCpEnt *a = (const AtpWmoCpEnt *)pa;
-  const AtpWmoCpEnt *b = (const AtpWmoCpEnt *)pb;
-  if (a->key != b->key) return a->key < b->key ? -1 : 1;
-  return a->seq < b->seq ? -1 : (a->seq > b->seq ? 1 : 0);
+// The per-batch CP emission order is the total order (key:u64, seq:u32)
+// where seq is the ORIGINAL array index (e->seq = n_big-1 at append, never
+// reordered after).  Because equal-key elements therefore already sit in
+// seq-ascending order in `big[]`, a STABLE sort by key alone reproduces the
+// (key, seq) order byte-for-byte.  atp_wmo_ent_sort does that with an 8-bit
+// LSD radix on the u64 key: 8 stable passes over a {key, idx} side array
+// (the 80-byte structs are gathered once at the end, not moved per pass).
+// File-scope ping-pong scratch, grown on demand, kept for the process.
+typedef struct { u64 key; u32 idx; } AtpWmoKeyIdx;
+static AtpWmoKeyIdx *g_atp_wmo_ki = NULL, *g_atp_wmo_ki2 = NULL;
+static AtpWmoCpEnt  *g_atp_wmo_gather = NULL;
+static u32 g_atp_wmo_ki_cap = 0, g_atp_wmo_gather_cap = 0;
+
+static void atp_wmo_ent_sort(AtpWmoCpEnt *big, u32 n) {
+  if (n < 2u) return;
+  // Insertion sort for tiny batches -- below the radix crossover the 8
+  // counting passes lose to a direct compare; output order is identical.
+  if (n < 32u) {
+    for (u32 i = 1u; i < n; i++) {
+      AtpWmoCpEnt v = big[i];
+      u32 j = i;
+      while (j > 0u && (big[j - 1u].key > v.key ||
+                        (big[j - 1u].key == v.key && big[j - 1u].seq > v.seq))) {
+        big[j] = big[j - 1u]; j--;
+      }
+      big[j] = v;
+    }
+    return;
+  }
+  if (g_atp_wmo_ki_cap < n) {
+    u32 nc = g_atp_wmo_ki_cap ? g_atp_wmo_ki_cap : 256u;
+    while (nc < n) nc *= 2u;
+    g_atp_wmo_ki  = (AtpWmoKeyIdx *)realloc(g_atp_wmo_ki,  (size_t)nc * sizeof(AtpWmoKeyIdx));
+    g_atp_wmo_ki2 = (AtpWmoKeyIdx *)realloc(g_atp_wmo_ki2, (size_t)nc * sizeof(AtpWmoKeyIdx));
+    if (g_atp_wmo_ki == NULL || g_atp_wmo_ki2 == NULL) thvm_fatal("wmo: radix scratch OOM");
+    g_atp_wmo_ki_cap = nc;
+  }
+  if (g_atp_wmo_gather_cap < n) {
+    u32 nc = g_atp_wmo_gather_cap ? g_atp_wmo_gather_cap : 256u;
+    while (nc < n) nc *= 2u;
+    g_atp_wmo_gather = (AtpWmoCpEnt *)realloc(g_atp_wmo_gather, (size_t)nc * sizeof(AtpWmoCpEnt));
+    if (g_atp_wmo_gather == NULL) thvm_fatal("wmo: gather scratch OOM");
+    g_atp_wmo_gather_cap = nc;
+  }
+  AtpWmoKeyIdx *src = g_atp_wmo_ki, *dst = g_atp_wmo_ki2;
+  for (u32 i = 0u; i < n; i++) { src[i].key = big[i].key; src[i].idx = i; }
+  // 8 LSD passes; each is stable, so equal keys keep ascending idx == seq.
+  for (u32 pass = 0u; pass < 8u; pass++) {
+    u32 shift = pass * 8u;
+    u32 cnt[256] = {0};
+    for (u32 i = 0u; i < n; i++) cnt[(src[i].key >> shift) & 0xffu]++;
+    u32 acc = 0u;
+    for (u32 b = 0u; b < 256u; b++) { u32 c = cnt[b]; cnt[b] = acc; acc += c; }
+    for (u32 i = 0u; i < n; i++) dst[cnt[(src[i].key >> shift) & 0xffu]++] = src[i];
+    AtpWmoKeyIdx *t = src; src = dst; dst = t;
+  }
+  // src now holds the sorted permutation; gather the structs in one pass.
+  for (u32 i = 0u; i < n; i++) g_atp_wmo_gather[i] = big[src[i].idx];
+  memcpy(big, g_atp_wmo_gather, (size_t)n * sizeof(AtpWmoCpEnt));
 }
 
 // Structural alpha-equality of two terms under a first-seen variable
@@ -17753,7 +17807,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
                       ((u64)new_arr << 28) | ((u64)new_ch << 14);
       }
     }
-    qsort(big, n_big, sizeof(AtpWmoCpEnt), atp_wmo_ent_cmp);
+    atp_wmo_ent_sort(big, n_big);
     // Gated batch-order trace (THVM_ATP_BATCH_TRACE): emit the sorted
     // (outer f, i, j, combo, packed key) in push order so thvm's
     // per-fact CP enumeration order can be diffed against Waldmeister's

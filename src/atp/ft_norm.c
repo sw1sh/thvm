@@ -448,6 +448,10 @@ typedef struct {
   // Scratch candidate buffer (ascending slot order), reused per query.
   u32        *cand;
   u32         cand_cap;
+  // Scratch ping-pong buffer for the LSD-radix candidate sort (sized in
+  // lockstep with `cand`; reused per query, no per-call malloc).
+  u32        *cand_tmp;
+  u32         cand_tmp_cap;
   // Instrumentation (THVM_ATPFT_PRUNE_STATS=1 prints on teardown).
   u64         q_queries;
   u64         q_candidates;   // candidates returned (summed over queries)
@@ -1021,10 +1025,54 @@ static void ftdt_descend(FtPiIndex *ix, u32 node,
   }
 }
 
-// ascending-u32 comparator for qsort (candidate ordering).
-static int ftdt_u32_cmp(const void *a, const void *b) {
-  u32 x = *(const u32 *)a, y = *(const u32 *)b;
-  return (x > y) - (x < y);
+// Order-preserving ascending-u32 sort of a[0..n) -- the byte-identical
+// replacement for `qsort(a, n, sizeof(u32), ftdt_u32_cmp)`.  An ascending
+// sort over distinct-or-not u32 keys has a UNIQUE result, so the dedup that
+// follows is unaffected by which sort produces it.  Two regimes:
+//   * n < FTDT_SORT_INS: inlined insertion sort -- no qsort function-pointer
+//     indirection (the comparator was the hottest sampled leaf at ~800M
+//     calls; the small-n bucket is the bulk of them).
+//   * n >= FTDT_SORT_INS: 8-bit LSD radix with the pass count adapted to the
+//     max key (rule slots live in [0, n_rules), typically < 65536 -> 2
+//     passes).  Uses ix->cand_tmp as the ping-pong buffer.
+enum { FTDT_SORT_INS = 24u };
+static void ftdt_sort_u32(FtPiIndex *ix, u32 *a, u32 n) {
+  if (n < FTDT_SORT_INS) {
+    for (u32 i = 1u; i < n; i++) {
+      u32 v = a[i], j = i;
+      while (j > 0u && a[j - 1u] > v) { a[j] = a[j - 1u]; j--; }
+      a[j] = v;
+    }
+    return;
+  }
+  // Max key -> number of 8-bit passes (1 for <256, 2 for <65536, ...).
+  u32 mx = a[0];
+  for (u32 i = 1u; i < n; i++) if (a[i] > mx) mx = a[i];
+  u32 passes = 1u;
+  for (u64 lim = 0xffull; mx > lim && passes < 4u; lim = (lim << 8) | 0xffull)
+    passes++;
+  if (ix->cand_tmp_cap < n) {
+    u32 nc = ix->cand_tmp_cap ? ix->cand_tmp_cap : 64u;
+    while (nc < n) nc *= 2u;
+    u32 *nb = (u32 *)realloc(ix->cand_tmp, (size_t)nc * sizeof(u32));
+    if (nb == NULL) thvm_fatal("ftdt: radix scratch OOM");
+    ix->cand_tmp = nb;
+    ix->cand_tmp_cap = nc;
+  }
+  u32 *src = a, *dst = ix->cand_tmp;
+  for (u32 pass = 0u; pass < passes; pass++) {
+    u32 shift = pass * 8u;
+    u32 cnt[256] = {0};
+    for (u32 i = 0u; i < n; i++) cnt[(src[i] >> shift) & 0xffu]++;
+    u32 acc = 0u;
+    for (u32 b = 0u; b < 256u; b++) { u32 c = cnt[b]; cnt[b] = acc; acc += c; }
+    for (u32 i = 0u; i < n; i++) dst[cnt[(src[i] >> shift) & 0xffu]++] = src[i];
+    u32 *t = src; src = dst; dst = t;
+  }
+  // If an odd number of passes left the sorted data in cand_tmp, copy back
+  // so the caller's `a` (== ix->cand) holds the result.
+  if (src != a)
+    for (u32 i = 0u; i < n; i++) a[i] = src[i];
 }
 
 // Fill ix->cand[0..count) with the rule slots whose LHS/RHS preorder is
@@ -1040,7 +1088,7 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p) {
   u32 out = 0u;
   ftdt_descend(ix, 0u, p, p_end, &out);
   if (out > 1u) {
-    qsort(ix->cand, out, sizeof(u32), ftdt_u32_cmp);
+    ftdt_sort_u32(ix, ix->cand, out);
     u32 w = 1u;
     for (u32 r = 1u; r < out; r++) {
       if (ix->cand[r] != ix->cand[w - 1u]) ix->cand[w++] = ix->cand[r];
