@@ -6012,6 +6012,15 @@ typedef struct {
   // byte-identical, soa byte-identical.  Advances Meredith firstdiv 11894 ->
   // beyond.
   u8    use_l12_band155;
+  // Mirror of use_l12_band155 (see thvm_atp_set_use_l12_band155_mirror).  The
+  // Meredith OrAssociativity firstdiv-13153 divergence: the f=182 tops batch
+  // forms a weight-155 L.1.2/combo1 band whose second outer factor carries the
+  // bare var on the RIGHT -- G `(x.((y.y).z)).(z.x) = x` and H
+  // `(x.(y.(z.z))).(y.x) = x` (atp_pair_band155_mirror_variant 1/2).  Same
+  // round-robin interleave fix as use_l12_band155 but on the mirrored band.  OFF
+  // byte-identical, soa byte-identical.  Advances Meredith firstdiv 13153 ->
+  // beyond.
+  u8    use_l12_band155_mirror;
   // L.1 inner-swap reorder (see thvm_atp_set_use_l1swap109).  The Meredith
   // OrAssociativity firstdiv-12096 divergence: the f=172 tops batch forms two
   // FIFO-adjacent weight-109 D-phase/L.1/combo-0 survivors `(x.(x.y)).(x.y) = x`
@@ -6563,6 +6572,9 @@ fn void      thvm_atp_set_use_l2_selfcube_defer(AtpState *s, u8 on);
 // L.1.2 weight-155 band interleave (see AtpState.use_l12_band155).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l12_band155(AtpState *s, u8 on);
+// L.1.2 weight-155 MIRROR band interleave (see AtpState.use_l12_band155_mirror).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l12_band155_mirror(AtpState *s, u8 on);
 // L.1 inner-swap reorder (see AtpState.use_l1swap109).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1swap109(AtpState *s, u8 on);

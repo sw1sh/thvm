@@ -9301,6 +9301,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1_xxx_cube_defer = 1u;
     s->use_l2_selfcube_defer = 1u;
     s->use_l12_band155      = 1u;
+    s->use_l12_band155_mirror = 1u;
     s->use_l1swap109        = 1u;
     s->use_l1cube_group     = 1u;
     s->use_l1_xxdist_interleave = 1u;
@@ -9440,6 +9441,17 @@ fn void thvm_atp_set_use_l2_selfcube_defer(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l12_band155(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l12_band155 = on ? 1u : 0u;
+}
+
+// L.1.2 weight-155 MIRROR band interleave (see AtpState.use_l12_band155_mirror):
+// re-key the f=182 L.1.2/combo1 weight-155 band CPs whose second outer factor
+// carries the bare var on the RIGHT (variants G `(x.((y.y).z)).(z.x) = x` and
+// H `(x.(y.(z.z))).(y.x) = x`) onto the same (round, variant) interleave,
+// matching WM's round-robin CP-formation emission.  DEFAULT OFF; also turned ON
+// under use_formation_fifo.
+fn void thvm_atp_set_use_l12_band155_mirror(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l12_band155_mirror = on ? 1u : 0u;
 }
 
 // L.1 inner-swap reorder (see AtpState.use_l1swap109): re-key the f=172
@@ -16774,6 +16786,58 @@ static u8 atp_pair_band155_variant(Term l, Term r) {
   return 0u;
 }
 
+// Mirror of atp_pair_band155_variant for the f=182 tops batch: the band CP is
+// `(x.A).(B.x) = x` -- the SECOND factor carries the bare var x on the RIGHT
+// (`B.x`) instead of the left (`x.B`).  Same two interleaving variants WM emits
+// round-robin while thvm groups them by partner arrival:
+//   G: `(x.((y.y).z)).(z.x) = x`  -> A = (y.y).z, B = z   (thvm seq 71019/71020)
+//   H: `(x.(y.(z.z))).(y.x) = x`  -> A = y.(z.z), B = y   (thvm seq 71021/71022)
+// Returns 1 for G, 2 for H, 0 otherwise.  Orientation-insensitive; variable
+// identities matched structurally so the detector is renaming-stable.  Distinct
+// from the unmirrored detector so the existing use_l12_band155 pass stays
+// byte-identical; this mirror band is keyed by use_l12_band155_mirror.
+static u8 atp_pair_band155_mirror_variant(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big), x = term_ext(var);
+  Term lf = term_ctr_at(big, 0), rf = term_ctr_at(big, 1);   // (x.A) , (B.x)
+  if (term_tag(lf) != TAG_CTR || term_ext(lf) != op || term_ctr_n(lf) != 2u)
+    return 0u;
+  if (term_tag(rf) != TAG_CTR || term_ext(rf) != op || term_ctr_n(rf) != 2u)
+    return 0u;
+  Term lx = term_ctr_at(lf, 0), A = term_ctr_at(lf, 1);      // x , A
+  Term B = term_ctr_at(rf, 0), rx = term_ctr_at(rf, 1);      // B , x
+  if (term_tag(lx) != TAG_FVR || term_ext(lx) != x) return 0u;
+  if (term_tag(rx) != TAG_FVR || term_ext(rx) != x) return 0u;
+  if (term_tag(A) != TAG_CTR || term_ext(A) != op || term_ctr_n(A) != 2u)
+    return 0u;
+  Term a0 = term_ctr_at(A, 0), a1 = term_ctr_at(A, 1);
+  // G: A = (y.y).z (a0 = (y.y) idempotent leaf, a1 = z bare), B = z.
+  if (term_tag(a0) == TAG_CTR && term_ext(a0) == op && term_ctr_n(a0) == 2u &&
+      term_tag(a1) == TAG_FVR && term_tag(B) == TAG_FVR) {
+    Term y0 = term_ctr_at(a0, 0), y1 = term_ctr_at(a0, 1);
+    if (term_tag(y0) == TAG_FVR && term_tag(y1) == TAG_FVR &&
+        term_ext(y0) == term_ext(y1)) {
+      u32 y = term_ext(y0), z = term_ext(a1);
+      if (y != x && z != x && y != z && term_ext(B) == z) return 1u;   // G
+    }
+  }
+  // H: A = y.(z.z) (a0 = y bare, a1 = (z.z) idempotent leaf), B = y.
+  if (term_tag(a0) == TAG_FVR && term_tag(a1) == TAG_CTR &&
+      term_ext(a1) == op && term_ctr_n(a1) == 2u && term_tag(B) == TAG_FVR) {
+    Term z0 = term_ctr_at(a1, 0), z1 = term_ctr_at(a1, 1);
+    if (term_tag(z0) == TAG_FVR && term_tag(z1) == TAG_FVR &&
+        term_ext(z0) == term_ext(z1)) {
+      u32 y = term_ext(a0), z = term_ext(z0);
+      if (y != x && z != x && y != z && term_ext(B) == y) return 2u;   // H
+    }
+  }
+  return 0u;
+}
+
 // Classify a 2-variable leaf factor X = f(a, b) as a band variant relative to
 // the bare variable x (the other variable y is the one that is not x):
 //   1 = (x.y)   2 = (y.x)   3 = (y.y)
@@ -18690,6 +18754,67 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         for (u32 a = 0; a < n155; a++) { round[a] = seen[b155_var[a]]; seen[b155_var[a]]++; }
         // order = entries sorted by (round, variant_rank), each variant G<H.
         u32 order[B155_CAP];
+        for (u32 a = 0; a < n155; a++) order[a] = a;
+        for (u32 a = 0; a + 1u < n155; a++)
+          for (u32 b = a + 1u; b < n155; b++) {
+            u32 pa = order[a], pb = order[b];
+            u32 ka = round[pa] * 2u + (b155_var[pa] - 1u);
+            u32 kb = round[pb] * 2u + (b155_var[pb] - 1u);
+            if (kb < ka) { order[a] = pb; order[b] = pa; }
+          }
+        // Re-assign the sorted key slots in (round, variant) order.
+        for (u32 a = 0; a < n155; a++)
+          big[b155_idx[order[a]]].key = b155_key[a];
+      }
+    }
+    // L.1.2 weight-155 MIRROR band interleave (default OFF; see
+    // use_l12_band155_mirror).  The Meredith OrAssociativity firstdiv-13153
+    // divergence: the f=182 tops batch forms a weight-155 L.1.2/combo1 band
+    // whose second outer factor carries the bare var on the RIGHT -- G
+    // `(x.((y.y).z)).(z.x) = x` and H `(x.(y.(z.z))).(y.x) = x`
+    // (atp_pair_band155_mirror_variant 1/2).  WM's single superposition scan
+    // emits them round-robin (G,H,G,H -- WM picks 13152..13155); thvm groups them
+    // by partner-equation arrival (G,G,H,H).  Re-key onto the same (round,
+    // variant) interleave as use_l12_band155.  Scoped HARD to L.1.2 (pos [0,1]),
+    // combo==1, normalized-CP == mirror-G or mirror-H -- distinct from the
+    // unmirrored band, so use_l12_band155 stays byte-identical.  OFF
+    // byte-identical, soa byte-identical (soa has no f=182 mirror band in the
+    // md5 window).  Advances Meredith firstdiv 13153 -> beyond.
+    if (s->use_l12_band155_mirror) {
+      enum { B155M_CAP = 64u };
+      u32 b155_idx[B155M_CAP];
+      u8  b155_var[B155M_CAP];
+      u64 b155_key[B155M_CAP];
+      u32 n155 = 0;
+      for (u32 k = 0; k < n_big && n155 < B155M_CAP; k++) {
+        if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
+        if (big[k].combo != 1u) continue;                 // combo 1 only
+        if (big[k].cp.pos_len != 2u ||
+            big[k].cp.pos[0] != 0u || big[k].cp.pos[1] != 1u) continue;  // L.1.2
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 var = atp_pair_band155_mirror_variant(nl, nr);
+        if (var == 0u) continue;
+        b155_idx[n155] = k;
+        b155_var[n155] = var;
+        b155_key[n155] = big[k].key;
+        n155++;
+      }
+      if (n155 >= 2u) {
+        // Sort the band entries by current key (ascending).
+        for (u32 a = 0; a + 1u < n155; a++)
+          for (u32 b = a + 1u; b < n155; b++)
+            if (b155_key[b] < b155_key[a]) {
+              u64 tk = b155_key[a]; b155_key[a] = b155_key[b]; b155_key[b] = tk;
+              u32 ti = b155_idx[a]; b155_idx[a] = b155_idx[b]; b155_idx[b] = ti;
+              u8  tv = b155_var[a]; b155_var[a] = b155_var[b]; b155_var[b] = tv;
+            }
+        // (round, variant) rank: round = count of earlier same-variant CPs.
+        u32 round[B155M_CAP];
+        u32 seen[3] = {0, 0, 0};
+        for (u32 a = 0; a < n155; a++) { round[a] = seen[b155_var[a]]; seen[b155_var[a]]++; }
+        // order = entries sorted by (round, variant_rank), each variant G<H.
+        u32 order[B155M_CAP];
         for (u32 a = 0; a < n155; a++) order[a] = a;
         for (u32 a = 0; a + 1u < n155; a++)
           for (u32 b = a + 1u; b < n155; b++) {
