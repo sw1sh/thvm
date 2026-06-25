@@ -9297,6 +9297,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1_cube_rotate   = 1u;
     s->use_l1_xxdist_front  = 1u;
     s->use_l22_xxdist_defer = 1u;
+    s->use_l21_selfcube_owncorank = 1u;
     s->use_l1_xxx_cube_defer = 1u;
     s->use_l2_selfcube_defer = 1u;
     s->use_l12_band155      = 1u;
@@ -9399,6 +9400,17 @@ fn void thvm_atp_set_use_l1_xxdist_front(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l22_xxdist_defer(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l22_xxdist_defer = on ? 1u : 0u;
+}
+
+// L.2.1 self-cube two-face reverse-face own-arrival (see
+// AtpState.use_l21_selfcube_owncorank): re-key the f=64 L.2.1 weight-209 CP
+// `(x.(y.(y.y))).((z.z).x) = x` (the WM-reverse face of the self-cube partner
+// `x.(y.(y.y)) = x.x`) to its OWN late arrival, so it sorts at WM's deferred
+// FIFO slot rather than co-ranked adjacent to its sibling forward face.
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l21_selfcube_owncorank(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l21_selfcube_owncorank = on ? 1u : 0u;
 }
 
 // L.1 `(x.x).x = y.(y.y)` cube defer (see AtpState.use_l1_xxx_cube_defer):
@@ -17106,6 +17118,49 @@ static u8 atp_pair_is_yyy_zz_dist(Term l, Term r) {
   return (u8)(term_ext(var) == x);
 }
 
+// `f(f(x, f(y, f(y, y))), f(f(z, z), x))` -- the L.2.1 weight-209 shape
+// `(x.(y.(y.y))).((z.z).x)` with x, y, z three distinct bare vars (y != x,
+// z != x, z != y).  Binds nothing; just validates the skeleton.  This is the
+// Meredith OrAssociativity f=64 L.2.1 two-face reverse-face CP (CPSEL seq 8279)
+// off the self-cube partner `x.(y.(y.y)) = x.x`; WM ages it at its OWN late
+// arrival, not co-ranked adjacent to its sibling forward face (see
+// use_l21_selfcube_owncorank).  The lo factor is the forward cube
+// `x.(y.(y.y))` (atp_term_is_var_dot_cube); the hi factor is `(z.z).x`.
+static u8 atp_term_is_cube_zz_dist(Term t) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  u32 op = term_ext(t);
+  Term lo = term_ctr_at(t, 0), hi = term_ctr_at(t, 1);   // (x.(y.(y.y))) , ((z.z).x)
+  u32 x = 0, y = 0;
+  if (!atp_term_is_var_dot_cube(lo, &x, &y)) return 0u;      // x.(y.(y.y))
+  // hi = ((z.z).x) -- the idempotent leaf `z.z` dotted with the outer var x.
+  if (term_tag(hi) != TAG_CTR || term_ext(hi) != op || term_ctr_n(hi) != 2u)
+    return 0u;
+  Term hzz = term_ctr_at(hi, 0), hx = term_ctr_at(hi, 1);   // (z.z) , x
+  if (term_tag(hx) != TAG_FVR || term_ext(hx) != x) return 0u;  // outer = x
+  if (term_tag(hzz) != TAG_CTR || term_ext(hzz) != op || term_ctr_n(hzz) != 2u)
+    return 0u;
+  Term z0 = term_ctr_at(hzz, 0), z1 = term_ctr_at(hzz, 1);
+  if (term_tag(z0) != TAG_FVR || term_tag(z1) != TAG_FVR) return 0u;
+  u32 z = term_ext(z0);
+  if (term_ext(z1) != z) return 0u;                          // both = z
+  return (u8)(z != x && z != y);
+}
+
+// Whether a NORMALIZED CP is the L.2.1 `(x.(y.(y.y))).((z.z).x) = x`
+// distribution shape: one side is the `(x.(y.(y.y))).((z.z).x)` factor
+// (atp_term_is_cube_zz_dist), the other is the bare outer var x.  Returns 1, 0
+// otherwise.  Orientation-insensitive (the bare-var side is either l or r).
+static u8 atp_pair_is_cube_zz_dist(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (!atp_term_is_cube_zz_dist(big)) return 0u;
+  // The bare var g equals the outer var x of the big side (lo's first child).
+  u32 x = term_ext(term_ctr_at(term_ctr_at(big, 0), 0));
+  return (u8)(term_ext(var) == x);
+}
+
 // `f(f(f(x, f(x, x)), y), y)` -- the L.1/combo0 batch-time precursor
 // `((x.(x.x)).y).y` of the f=170 E shape: a self-cube `x.(x.x)` dotted with a
 // var y, then dotted with the SAME var y again, x != y, all bare vars.  Binds
@@ -17512,6 +17567,66 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (atp_cp_trivially_joinable(s, &jl, &jr)) continue;
         Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
         Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 keep_collapse = 0u;
+        for (u32 m = 0; m < n_big && !keep_collapse; m++) {
+          if (m == k) continue;
+          if (big[m].i != big[k].i || big[m].j != big[k].j) continue;
+          if (big[m].combo != (big[k].combo ^ 1u)) continue;  // sibling face
+          if (big[m].cp.pos_len != big[k].cp.pos_len) continue;
+          u8 same_pos = 1u;
+          for (u32 d = 0; d < big[k].cp.pos_len; d++)
+            if (big[m].cp.pos[d] != big[k].cp.pos[d]) { same_pos = 0u; break; }
+          if (!same_pos) continue;
+          Term snl = atp_rewrite_normalize_indexed(s, big[m].cp.lhs, 4096u);
+          Term snr = atp_rewrite_normalize_indexed(s, big[m].cp.rhs, 4096u);
+          if (atp_pair_alpha_eq(nl, nr, snl, snr)) keep_collapse = 1u;
+        }
+        if (!keep_collapse) big[k].key = big[k].key_owncorank;
+      }
+    }
+    // L.2.1 self-cube two-face reverse-face own-arrival (default OFF; see
+    // use_l21_selfcube_owncorank).  The Meredith OrAssociativity firstdiv-13053
+    // divergence is the dist_rhs==1 sibling of the use_corank_own_arr case: the
+    // f=64 tops batch overlaps the new fact onto the self-cube partner
+    // `x.(y.(y.y)) = x.x` (atp_pair_is_fwd_cube, oriented dist_rhs==1) at L.2.1,
+    // giving the WM-reverse face CP `(x.(y.(y.y))).((z.z).x) = x` (seq 8279,
+    // atp_pair_is_cube_zz_dist).  Its sibling forward face is X `(x.z).((z.(y.
+    // (y.y))).x) = x` (seq 8278), one chain step earlier; the var-differ co-rank
+    // in atp_wmo_rank collapses the reverse face onto X's arrival, keying Y at
+    // the run head (pick 13053).  But WM's single oriented scan reaches this
+    // reverse-face overlap on a LATE distinguished-face leaf, so it ages Y ~13
+    // chain steps later (pick 13532, after seq 8289, before seq 8294) -- the two
+    // faces are DISTINCT critical pairs, not a double-MGU WM collapses.  Re-key
+    // the reverse face to its own arrival (key_owncorank, computed above with
+    // the collapse suppressed).  Scoped HARD: phase 0 (key>>58==0), equation
+    // tree (k2==1), combo==0, L.2.1 (pos [1,0]), the self-cube partner
+    // (atp_pair_is_fwd_cube) oriented dist_rhs==1 with Y on its WM-reverse face
+    // (jfwm==1), a var-differ partner, the surviving cube_zz_dist normalized CP,
+    // a genuine collapse (key_owncorank != key), and no alpha-equal sibling
+    // forward face (a real double-MGU stays collapsed).  soa has no self-cube-
+    // partner L.2.1 overlap of this shape, so OFF/ON both byte-identical there.
+    if (s->use_l21_selfcube_owncorank) {
+      AtpWmOrder *cw = (AtpWmOrder *)s->wmo;
+      for (u32 k = 0; k < n_big; k++) {
+        if (big[k].key_owncorank == big[k].key) continue;  // no collapse
+        if ((big[k].key >> 58) != 0u) continue;            // phase 0
+        if (((big[k].key >> 42) & 3u) != 1u) continue;     // equation tree k2==1
+        if (big[k].combo != 0u) continue;                  // combo 0 (reverse) only
+        if (big[k].cp.pos_len != 2u ||
+            big[k].cp.pos[0] != 1u || big[k].cp.pos[1] != 0u) continue;  // L.2.1
+        if (!wmo_eq_sides_var_differ(s->lhs[big[k].j], s->rhs[big[k].j]))
+          continue;                                        // var-differ partner
+        if (!atp_pair_is_fwd_cube(s->lhs[big[k].j], s->rhs[big[k].j]))
+          continue;                                        // self-cube partner
+        u8 j_dr = wmo_trace_dist_rhs(cw, s->r_trace[big[k].j]);
+        if (!j_dr) continue;                               // oriented dist_rhs==1
+        u8 j_face_wm = (big[k].combo & 1u) ^ j_dr;
+        if (!j_face_wm) continue;                          // WM-reverse face only
+        Term jl = big[k].cp.lhs, jr = big[k].cp.rhs;
+        if (atp_cp_trivially_joinable(s, &jl, &jr)) continue;
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        if (!atp_pair_is_cube_zz_dist(nl, nr)) continue;   // Y shape
         u8 keep_collapse = 0u;
         for (u32 m = 0; m < n_big && !keep_collapse; m++) {
           if (m == k) continue;

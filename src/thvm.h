@@ -5958,6 +5958,17 @@ typedef struct {
   // OFF byte-identical, soa byte-identical.  Advances Meredith firstdiv 11791
   // -> beyond.
   u8    use_l22_xxdist_defer;
+  // L.2.1 self-cube two-face reverse-face own-arrival (see
+  // AtpState.use_l21_selfcube_owncorank).  DEFAULT OFF; also turned ON under
+  // use_formation_fifo.  The Meredith OrAssociativity firstdiv-13053 divergence:
+  // the f=64 tops batch forms the L.2.1 weight-209 CP `(x.(y.(y.y))).((z.z).x)
+  // = x` (CPSEL seq 8279) as the WM-reverse face of the self-cube partner
+  // `x.(y.(y.y)) = x.x` (dist_rhs=1).  thvm co-ranks that reverse face adjacent
+  // to its sibling forward face (X, seq 8278); WM ages it at its OWN late
+  // arrival (~13 chain steps later, pick 13532 not 13053).  Re-key the reverse
+  // face to its own arrival (key_owncorank).  OFF byte-identical, soa byte-
+  // identical.  Advances Meredith firstdiv 13053 -> beyond.
+  u8    use_l21_selfcube_owncorank;
   // L.1 `(x.x).x = y.(y.y)` cube defer (env THVM_ATP_L1_XXX_CUBE_DEFER, default
   // OFF; also turned ON under use_formation_fifo).  The Meredith OrAssociativity
   // firstdiv-11839 divergence: the f=170 tops batch forms a weight-120
@@ -6538,6 +6549,10 @@ fn void      thvm_atp_set_use_l1_xxdist_front(AtpState *s, u8 on);
 // AtpState.use_l22_xxdist_defer).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
 fn void      thvm_atp_set_use_l22_xxdist_defer(AtpState *s, u8 on);
+// L.2.1 self-cube two-face reverse-face own-arrival (see
+// AtpState.use_l21_selfcube_owncorank).  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void      thvm_atp_set_use_l21_selfcube_owncorank(AtpState *s, u8 on);
 // L.1 `(x.x).x = y.(y.y)` cube defer (see AtpState.use_l1_xxx_cube_defer).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1_xxx_cube_defer(AtpState *s, u8 on);
