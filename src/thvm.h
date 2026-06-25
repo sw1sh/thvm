@@ -6035,6 +6035,25 @@ typedef struct {
   // byte-identical.  Advances Meredith firstdiv 12108 -> beyond (to the band's
   // 7th-slot E-vs-S content delta).
   u8    use_l1cube_group;
+  // L.1 `(x.x).y`-distribution band interleave (see
+  // thvm_atp_set_use_l1_xxdist_interleave).  The Meredith OrAssociativity
+  // firstdiv-12811 divergence: the f=179 tops batch forms a weight-120
+  // L.1/combo0 group holding TWO A `(x.x).y = y.(x.y)` and TWO B `(x.x).y =
+  // y.(y.x)` distribution survivors (atp_pair_is_xx_y_dist 1/2).  thvm keys
+  // them by partner-arrival (k3) into the GROUPED order A,A,B,B; WM's single
+  // superposition scan emits them ROUND-ROBIN A,B,A,B (picks 12810..12813).
+  // Re-key onto a (round, variant) interleave -- round = count of EARLIER
+  // same-variant band CPs in the current key order, variant rank A(1)<B(2) --
+  // so they sort A,B,A,B.  Same round-robin idiom as use_l12_band155, but on
+  // the A/B distribution pair.  The band CPs keep their key SLOTS (the multiset
+  // is permuted only among themselves), every other CP untouched.  Scoped HARD
+  // to an L.1/combo0 group holding >=2 A AND >=2 B (the exact f=179 signature):
+  // the EARLIER f=167 batch holds exactly one A and one B (use_l1_xxdist_front
+  // already orders that pair A,B and WM agrees), so the >=2-each gate leaves
+  // f=167 untouched.  soa forms NO L.1/combo0 group with >=2 A and >=2 B
+  // distribution survivors at one (phase|k1|k2) prefix, so soa is byte-identical.
+  // OFF byte-identical.  Advances Meredith firstdiv 12811 -> beyond.
+  u8    use_l1_xxdist_interleave;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6510,6 +6529,10 @@ fn void      thvm_atp_set_use_l1swap109(AtpState *s, u8 on);
 // L.1 weight-120 cube B/D/E grouping (see AtpState.use_l1cube_group).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1cube_group(AtpState *s, u8 on);
+// L.1 `(x.x).y`-distribution band interleave (see
+// AtpState.use_l1_xxdist_interleave).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l1_xxdist_interleave(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

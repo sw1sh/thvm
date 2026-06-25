@@ -9302,6 +9302,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l12_band155      = 1u;
     s->use_l1swap109        = 1u;
     s->use_l1cube_group     = 1u;
+    s->use_l1_xxdist_interleave = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9446,6 +9447,17 @@ fn void thvm_atp_set_use_l1swap109(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1cube_group(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1cube_group = on ? 1u : 0u;
+}
+
+// L.1 `(x.x).y`-distribution band interleave (see
+// AtpState.use_l1_xxdist_interleave): re-key the f=179 L.1/combo0 weight-120
+// distribution band's >=2 A `(x.x).y = y.(x.y)` and >=2 B `(x.x).y = y.(y.x)`
+// survivors onto a (round, variant) round-robin (A,B,A,B), matching WM's
+// single-superposition-scan emission.  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void thvm_atp_set_use_l1_xxdist_interleave(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l1_xxdist_interleave = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -18919,6 +18931,98 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
             if (gcls[a] == class_order[ci]) perm[np++] = a;
         for (u32 a = 0; a < ng; a++)
           big[ge[perm[a]]].key = keys_sorted[a];
+      }
+    }
+    // L.1 `(x.x).y`-distribution band interleave (default OFF; see
+    // use_l1_xxdist_interleave).  The Meredith OrAssociativity firstdiv-12811
+    // divergence: the f=179 tops batch forms a weight-120 L.1/combo0 group
+    // holding TWO A `(x.x).y = y.(x.y)` and TWO B `(x.x).y = y.(y.x)`
+    // distribution survivors (atp_pair_is_xx_y_dist 1/2).  The upstream
+    // use_l1_xxdist_front has already grouped them A,A,B,B (it emits the A-run
+    // then the B-run).  But WM's single superposition scan emits the band
+    // ROUND-ROBIN A,B,A,B (picks 12810: A, 12811: B, 12812: A, 12813: B).
+    // Re-key onto a (round, variant) interleave -- round = count of EARLIER
+    // same-variant band CPs in the current key order, variant rank A(1)<B(2) --
+    // so they sort A,B,A,B.  The band CPs keep their key SLOTS (the multiset is
+    // permuted only among themselves), the same round-robin idiom as
+    // use_l12_band155 but on the A/B distribution pair.  Scoped HARD to an
+    // L.1/combo0 group (one (phase|k1|k2) prefix) holding >=2 A AND >=2 B --
+    // the exact f=179 signature.  The EARLIER f=167 batch holds exactly one A
+    // (seq 58341) and one B (seq 58358): use_l1_xxdist_front already orders that
+    // single pair A,B and WM agrees (firstdiv was past it), so the >=2-each gate
+    // leaves f=167 byte-identical.  soa forms NO L.1/combo0 group with >=2 A and
+    // >=2 B at one (phase|k1|k2) prefix (its A/B distribution survivors are
+    // scattered across batches/groups), so the gate leaves soa byte-identical.
+    // OFF byte-identical.  Advances Meredith firstdiv 12811 -> beyond.
+    if (s->use_l1_xxdist_interleave) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      enum { XI_CAP = 64u };
+      // Index this batch's L.1/combo0 A/B distribution CPs (xi_var 1 = A, 2 =
+      // B), tagged by their (phase|k1|k2) prefix.
+      u32 xi_idx[XI_CAP];
+      u64 xi_grp[XI_CAP];
+      u64 xi_key[XI_CAP];
+      u8  xi_var[XI_CAP];
+      u32 n_xi = 0;
+      for (u32 k = 0; k < n_big && n_xi < XI_CAP; k++) {
+        if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
+        if (big[k].combo != 0u) continue;                 // combo 0 only
+        if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 var = atp_pair_is_xx_y_dist(nl, nr);
+        if (var == 0u) continue;
+        xi_idx[n_xi] = k;
+        xi_grp[n_xi] = big[k].key & grp_mask;
+        xi_key[n_xi] = big[k].key;
+        xi_var[n_xi] = var;
+        n_xi++;
+      }
+      // Process each distinct (phase|k1|k2) group independently.
+      for (u32 a0 = 0; a0 < n_xi; a0++) {
+        u64 grp = xi_grp[a0];
+        u8 seen_grp = 0u;
+        for (u32 b = 0; b < a0; b++) if (xi_grp[b] == grp) { seen_grp = 1u; break; }
+        if (seen_grp) continue;                           // group already done
+        // Gather this group's A/B band entries (local index list).
+        u32 ge[XI_CAP];
+        u64 gkey[XI_CAP];
+        u8  gvar[XI_CAP];
+        u32 ng = 0;
+        for (u32 b = 0; b < n_xi; b++)
+          if (xi_grp[b] == grp && ng < XI_CAP) {
+            ge[ng] = xi_idx[b]; gkey[ng] = xi_key[b]; gvar[ng] = xi_var[b]; ng++;
+          }
+        // Require >=2 A AND >=2 B -- the f=179 round-robin signature (f=167 holds
+        // one A + one B, soa scatters its survivors), so the gate is a no-op there.
+        u32 na = 0, nb = 0;
+        for (u32 a = 0; a < ng; a++) { if (gvar[a] == 1u) na++; else nb++; }
+        if (na < 2u || nb < 2u) continue;
+        // Sort the band entries by current key (ascending).
+        for (u32 p = 0; p + 1u < ng; p++)
+          for (u32 q = p + 1u; q < ng; q++)
+            if (gkey[q] < gkey[p]) {
+              u64 tk = gkey[p]; gkey[p] = gkey[q]; gkey[q] = tk;
+              u32 ti = ge[p]; ge[p] = ge[q]; ge[q] = ti;
+              u8  tv = gvar[p]; gvar[p] = gvar[q]; gvar[q] = tv;
+            }
+        // (round, variant) rank: round = count of earlier same-variant CPs.
+        u32 round[XI_CAP];
+        u32 seen[3] = {0, 0, 0};
+        for (u32 a = 0; a < ng; a++) { round[a] = seen[gvar[a]]; seen[gvar[a]]++; }
+        // order = entries sorted by (round, variant_rank), each variant A(1)<B(2).
+        u32 order[XI_CAP];
+        for (u32 a = 0; a < ng; a++) order[a] = a;
+        for (u32 a = 0; a + 1u < ng; a++)
+          for (u32 b = a + 1u; b < ng; b++) {
+            u32 pa = order[a], pb = order[b];
+            u32 ka = round[pa] * 2u + (gvar[pa] - 1u);
+            u32 kb = round[pb] * 2u + (gvar[pb] - 1u);
+            if (kb < ka) { order[a] = pb; order[b] = pa; }
+          }
+        // Re-assign the sorted key slots in (round, variant) order.
+        for (u32 a = 0; a < ng; a++)
+          big[ge[order[a]]].key = gkey[a];
       }
     }
     atp_wmo_ent_sort(big, n_big);
