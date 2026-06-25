@@ -33,8 +33,7 @@
    dynamic for the same reason. *)
 
 BeginPackage["WolframInstitute`THVMLink`", {
-    "Wolfram`DiagrammaticComputation`",
-    "Wolfram`DiagrammaticComputation`Diagram`"
+    "Wolfram`DiagrammaticComputation`"
 }];
 
 Begin["`Private`"];
