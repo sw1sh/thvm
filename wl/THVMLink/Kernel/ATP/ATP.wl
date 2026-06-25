@@ -2896,7 +2896,30 @@ $AtpPresetDefaults = <|
         (* Stays opt-in: the measured flip costs 2.8x steps, +55%
            wall, +17% peak RSS on mccune and 2.13x peak RSS on
            AndAssoc -- see atpImplicitCpOpt. *)
-        "UseImplicitCp" -> False|>,
+        "UseImplicitCp" -> False,
+        (* WM CP-SELECTION-FAITHFUL stack: the validated set that
+           reproduces Waldmeister's exact critical-pair selection
+           sequence -- soa firstdiv 2808 (the FULL ShefferAxioms-
+           OrAssociativity proof; WM saturates at pick 2807) and
+           MeredithAxioms OrAssociativity firstdiv 6110.  Every flag is
+           set EXPLICITLY True (not left to FormationFifo's C-level
+           auto-on): the WL LibraryFunction passes all 67 args every call,
+           so an unset emission-order arg would pass 0 and could reset what
+           FormationFifo turned on -- pinning each True sidesteps that.
+           The four base side/subsumption knobs (CPSide / FlatSubsume /
+           CommReage / CommDropDup) are NOT auto-on'd by FormationFifo and
+           must be set here.  FormationFifo additionally C-auto-ons the
+           four within-leaf drain/cube-order corrections that are not
+           WL-exposed (band_interleave / drain_chainpos / drain_revface /
+           revface_cubeorder).  See atpFormationFifoOpt + the AtpMethods /
+           Waldmeister tutorials. *)
+        "CPSide" -> True, "FlatSubsume" -> True,
+        "CommReage" -> True, "CommDropDup" -> True,
+        "LeafTiebreak" -> True, "RevfaceGroup" -> True,
+        "PosGroup" -> True, "CubeArrival" -> True,
+        "FormationFifo" -> True, "MeredDmgu" -> True,
+        "EsetDistdir" -> True, "CommDropDupClassGate" -> True,
+        "CorankOwnArr" -> True, "LeafTiebreakFacegate" -> True|>,
     "WaldmeisterLazy" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
         "SkolemHighest" -> True,
