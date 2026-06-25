@@ -6021,6 +6021,20 @@ typedef struct {
   // byte-identical, soa byte-identical.  Advances Meredith firstdiv 13153 ->
   // beyond.
   u8    use_l12_band155_mirror;
+  // Idempotent / mirror-cube age-inverted co-rank tiebreak (see
+  // thvm_atp_set_use_idem_cube_mirror).  The Meredith OrAssociativity
+  // firstdiv-13247 divergence: the f=183 tops batch combo0 forms a P copy
+  // `(x.x) = x.(y.(y.y))` and a Q copy `(x.x) = (y.(y.y)).x`
+  // (atp_pair_idem_cube_mirror_variant 1/2) whose oriented-rule partners land at
+  // adjacent leaf-list co-ranks -- but inverted: thvm keys P ONE arr unit (1<<28)
+  // ABOVE Q even though P's partner is the OLDER rule.  WM's superposition scan
+  // reaches the older partner first, emitting P before Q.  Swap the keys so P
+  // sorts ahead.  Scoped to the P/Q content + both combo0 + both oriented-rule
+  // partners + the age inversion (P partner older), which fires on this f=183
+  // band but not on soa's many in-order arr-adjacent P/Q pairs.  OFF
+  // byte-identical, soa byte-identical.  Advances Meredith firstdiv 13247 ->
+  // beyond.
+  u8    use_idem_cube_mirror;
   // L.1 inner-swap reorder (see thvm_atp_set_use_l1swap109).  The Meredith
   // OrAssociativity firstdiv-12096 divergence: the f=172 tops batch forms two
   // FIFO-adjacent weight-109 D-phase/L.1/combo-0 survivors `(x.(x.y)).(x.y) = x`
@@ -6575,6 +6589,9 @@ fn void      thvm_atp_set_use_l12_band155(AtpState *s, u8 on);
 // L.1.2 weight-155 MIRROR band interleave (see AtpState.use_l12_band155_mirror).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l12_band155_mirror(AtpState *s, u8 on);
+// Idempotent / mirror-cube arr-tie tiebreak (see AtpState.use_idem_cube_mirror).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_idem_cube_mirror(AtpState *s, u8 on);
 // L.1 inner-swap reorder (see AtpState.use_l1swap109).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1swap109(AtpState *s, u8 on);

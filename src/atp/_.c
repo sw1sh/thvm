@@ -9302,6 +9302,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l2_selfcube_defer = 1u;
     s->use_l12_band155      = 1u;
     s->use_l12_band155_mirror = 1u;
+    s->use_idem_cube_mirror = 1u;
     s->use_l1swap109        = 1u;
     s->use_l1cube_group     = 1u;
     s->use_l1_xxdist_interleave = 1u;
@@ -9452,6 +9453,17 @@ fn void thvm_atp_set_use_l12_band155(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l12_band155_mirror(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l12_band155_mirror = on ? 1u : 0u;
+}
+
+// Idempotent / mirror-cube age-inverted co-rank tiebreak (see
+// AtpState.use_idem_cube_mirror): within an f-tops combo0 batch, when a P copy
+// `(x.x) = x.(y.(y.y))` is keyed ONE arr unit above a Q copy
+// `(x.x) = (y.(y.y)).x` (both oriented-rule partners) yet P's partner is the
+// OLDER rule, swap their keys so P sorts ahead -- WM's scan reaches the older
+// partner first.  DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_idem_cube_mirror(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_idem_cube_mirror = on ? 1u : 0u;
 }
 
 // L.1 inner-swap reorder (see AtpState.use_l1swap109): re-key the f=172
@@ -16786,6 +16798,55 @@ static u8 atp_pair_band155_variant(Term l, Term r) {
   return 0u;
 }
 
+// Idempotent / mirror-cube CP variant detector for the f=183 tops batch: the
+// reduced CP is `(x.x) = M` where M is a cube leaf `y.(y.y)` placed either to
+// the RIGHT of x (variant P, `(x.x) = x.(y.(y.y))`) or to the LEFT of x
+// (variant Q, `(x.x) = (y.(y.y)).x`).  The bare idempotent side `x.x` is on
+// either l or r (orientation-insensitive); variable identities matched
+// structurally so the detector is renaming-stable (x, y distinct).  Returns 1
+// for P, 2 for Q, 0 otherwise.
+static u8 atp_pair_idem_cube_mirror_variant(Term l, Term r) {
+  Term idem, mix;
+  // One side must be `x.x` (the idempotent leaf), the other the mixed term.
+  Term sides[2] = {l, r};
+  int found = -1;
+  for (int s = 0; s < 2; s++) {
+    Term t = sides[s];
+    if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) continue;
+    Term c0 = term_ctr_at(t, 0), c1 = term_ctr_at(t, 1);
+    if (term_tag(c0) == TAG_FVR && term_tag(c1) == TAG_FVR &&
+        term_ext(c0) == term_ext(c1)) { found = s; break; }
+  }
+  if (found < 0) return 0u;
+  idem = sides[found];
+  mix  = sides[1 - found];
+  u32 op = term_ext(idem), x = term_ext(term_ctr_at(idem, 0));
+  if (term_tag(mix) != TAG_CTR || term_ext(mix) != op || term_ctr_n(mix) != 2u)
+    return 0u;
+  Term m0 = term_ctr_at(mix, 0), m1 = term_ctr_at(mix, 1);
+  // cube = y.(y.y): a 2-arg op whose left is bare y and right is (y.y).
+  // is_cube checks t == y.(y.y) for some y != x, returns 1 + sets *outy.
+  // P: mix = (x . cube).  Q: mix = (cube . x).
+  Term bare, cube;
+  u8 mode;  // 1 = P (x left), 2 = Q (x right)
+  if (term_tag(m0) == TAG_FVR && term_ext(m0) == x) { bare = m0; cube = m1; mode = 1u; }
+  else if (term_tag(m1) == TAG_FVR && term_ext(m1) == x) { bare = m1; cube = m0; mode = 2u; }
+  else return 0u;
+  (void)bare;
+  if (term_tag(cube) != TAG_CTR || term_ext(cube) != op || term_ctr_n(cube) != 2u)
+    return 0u;
+  Term cy = term_ctr_at(cube, 0), cyy = term_ctr_at(cube, 1);   // y , (y.y)
+  if (term_tag(cy) != TAG_FVR) return 0u;
+  u32 y = term_ext(cy);
+  if (y == x) return 0u;
+  if (term_tag(cyy) != TAG_CTR || term_ext(cyy) != op || term_ctr_n(cyy) != 2u)
+    return 0u;
+  Term cy0 = term_ctr_at(cyy, 0), cy1 = term_ctr_at(cyy, 1);
+  if (term_tag(cy0) != TAG_FVR || term_tag(cy1) != TAG_FVR) return 0u;
+  if (term_ext(cy0) != y || term_ext(cy1) != y) return 0u;
+  return mode;   // 1 = P, 2 = Q
+}
+
 // Mirror of atp_pair_band155_variant for the f=182 tops batch: the band CP is
 // `(x.A).(B.x) = x` -- the SECOND factor carries the bare var x on the RIGHT
 // (`B.x`) instead of the left (`x.B`).  Same two interleaving variants WM emits
@@ -18826,6 +18887,61 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         // Re-assign the sorted key slots in (round, variant) order.
         for (u32 a = 0; a < n155; a++)
           big[b155_idx[order[a]]].key = b155_key[a];
+      }
+    }
+    // Idempotent / mirror-cube age-inverted co-rank tiebreak (default OFF; see
+    // use_idem_cube_mirror).  The Meredith OrAssociativity firstdiv-13247
+    // divergence: the f=183 tops combo0 batch forms a P copy
+    // `(x.x) = x.(y.(y.y))` and a Q copy `(x.x) = (y.(y.y)).x`
+    // (atp_pair_idem_cube_mirror_variant 1/2) whose oriented-rule partners land
+    // at adjacent leaf-list co-ranks, but INVERTED -- thvm keys P exactly ONE
+    // arr unit (1<<28) ABOVE Q even though P's partner is the OLDER rule (the
+    // j=11 trace-261 rule vs Q's j=143 trace-41881 rule).  WM's superposition
+    // scan reaches the older partner first, so it emits P before Q (it groups
+    // the two P copies, pick 13246/13248, then the two Q copies, 13247/13249);
+    // thvm interleaves them P,Q,P,Q.  Detect the exact configuration -- a P copy
+    // keyed (Q.key + 1<<28), both combo0, both oriented-rule partners, P's
+    // partner OLDER -- and swap the two keys so P sorts first.  soa has many
+    // in-order arr-adjacent P/Q pairs in its md5 window, but the age inversion +
+    // P/Q content + oriented-combo0 scope fires on NONE of them, so the swap is a
+    // no-op there -- soa byte-identical.  OFF byte-identical.  Advances Meredith
+    // firstdiv 13247 -> beyond.
+    if (s->use_idem_cube_mirror) {
+      const u64 ARR_UNIT = 1ull << 28;
+      for (u32 kp = 0; kp < n_big; kp++) {
+        if (big[kp].i != f || big[kp].j == f) continue;   // tops, partner = j
+        if (big[kp].combo != 0u) continue;                // combo 0 only
+        u32 jp = big[kp].j;
+        if (!s->r_orient[jp]) continue;                   // oriented-rule partner
+        // Reduce + var-normalize the CP into its stored (CPSEL) form so the
+        // classifier sees `(x.x) = x.(y.(y.y))` / `(x.x) = (y.(y.y)).x`, not the
+        // raw deep-overlap pair.  atp_cp_trivially_joinable rewrites both sides
+        // to normal form (read-only on the rule set); thvm_normalize_vars then
+        // canonicalises the variable ids.
+        Term pl = big[kp].cp.lhs, pr = big[kp].cp.rhs;
+        (void)atp_cp_trivially_joinable(s, &pl, &pr);
+        thvm_normalize_vars(&pl, &pr);
+        if (atp_pair_idem_cube_mirror_variant(pl, pr) != 1u) continue;  // P only
+        // Find the Q copy keyed exactly ONE arr unit BELOW P (same phase/k1/k2/
+        // k4/k5, arr = P.arr - 1) whose oriented-rule partner is YOUNGER (larger
+        // trace) than P's -- the age-inverted leaf-list rank thvm assigns but WM
+        // emits P-first on.  Swap their keys so P sorts ahead.
+        u64 want = big[kp].key - ARR_UNIT;
+        for (u32 kq = 0; kq < n_big; kq++) {
+          if (kq == kp) continue;
+          if (big[kq].i != f || big[kq].j == f) continue;
+          if (big[kq].combo != 0u) continue;
+          if (big[kq].key != want) continue;              // arr = P.arr - 1
+          u32 jq = big[kq].j;
+          if (!s->r_orient[jq]) continue;
+          if (s->r_trace[jq] <= s->r_trace[jp]) continue; // P's partner OLDER
+          Term ql = big[kq].cp.lhs, qr = big[kq].cp.rhs;
+          (void)atp_cp_trivially_joinable(s, &ql, &qr);
+          thvm_normalize_vars(&ql, &qr);
+          if (atp_pair_idem_cube_mirror_variant(ql, qr) != 2u) continue;  // Q
+          u64 tmp = big[kp].key; big[kp].key = big[kq].key; big[kq].key = tmp;
+          break;
+        }
       }
     }
     // L.1 inner-swap reorder (default OFF; see use_l1swap109).  The Meredith
