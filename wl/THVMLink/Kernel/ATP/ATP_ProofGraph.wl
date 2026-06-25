@@ -567,7 +567,9 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     useBackwardGoalArgue_, useCpWmSide_, useWmFlatSubsume_,
     useWmCommSubsume_, useWmCommDefer_, useWmCommReage_,
     useWmCommDropDup_, useWmLeafTiebreak_, useWmRevfaceGroup_,
-    useWmPosGroup_, useWmCubeArrival_, useWmFormationFifo_] := Block[{
+    useWmPosGroup_, useWmCubeArrival_, useWmFormationFifo_,
+    useWmMeredDmgu_, useWmEsetDistdir_, useWmCommDropDupClassGate_,
+    useWmCorankOwnArr_, useWmLeafTiebreakFacegate_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr,
@@ -592,7 +594,9 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         useCriticalGoalWeight, useBackwardGoalArgue, useCpWmSide,
         useWmFlatSubsume, useWmCommSubsume, useWmCommDefer, useWmCommReage,
         useWmCommDropDup, useWmLeafTiebreak, useWmRevfaceGroup,
-        useWmPosGroup, useWmCubeArrival, useWmFormationFifo];
+        useWmPosGroup, useWmCubeArrival, useWmFormationFifo,
+        useWmMeredDmgu, useWmEsetDistdir, useWmCommDropDupClassGate,
+        useWmCorankOwnArr, useWmLeafTiebreakFacegate];
     (* C engine returns LibraryFunctionError on memory-guard abort
        (THVM_ATP_RSS_ABORT_MB / THVM_ATP_HEAP_ABORT_FRAC) or other
        hard-stop conditions.  Bail BEFORE the structural part extraction

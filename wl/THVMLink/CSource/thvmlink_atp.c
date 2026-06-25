@@ -984,6 +984,32 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // firstdiv 1505.  args[61]; 0 = off (default).
   mint wm_formation_fifo = MArgument_getInteger(args[61]);
   thvm_atp_set_use_formation_fifo(atp, (u8)(wm_formation_fifo != 0));
+  // The next five knobs are auto-on under FormationFifo (set above), so they
+  // take a TRI-STATE override: -1 = Automatic (leave at FormationFifo's
+  // value), 0 = force off, 1 = force on.  Only call the setter on an explicit
+  // 0/1 -- the -1 default must run AFTER FormationFifo and leave its flags
+  // untouched.
+  // Method -> {... "MeredDmgu" -> True}: shared-reverse-face double-MGU defer.
+  // args[62]; -1 = Automatic.  Advances Meredith OrAssociativity firstdiv.
+  mint wm_mered_dmgu = MArgument_getInteger(args[62]);
+  if (wm_mered_dmgu >= 0) thvm_atp_set_use_mered_dmgu(atp, (u8)(wm_mered_dmgu != 0));
+  // Method -> {... "EsetDistdir" -> True}: WM distinguished-direction E-set
+  // subsumption (test each old equation only in its stored orientation;
+  // Interreduktion.c:261).  args[63]; -1 = Automatic.
+  mint wm_eset_distdir = MArgument_getInteger(args[63]);
+  if (wm_eset_distdir >= 0) thvm_atp_set_use_eset_distdir(atp, (u8)(wm_eset_distdir != 0));
+  // Method -> {... "CommDropDupClassGate" -> True}: inner-swap anchor gate for
+  // the DROP-DUP re-age.  args[64]; -1 = Automatic.
+  mint wm_comm_drop_dup_class_gate = MArgument_getInteger(args[64]);
+  if (wm_comm_drop_dup_class_gate >= 0) thvm_atp_set_use_comm_drop_dup_class_gate(atp, (u8)(wm_comm_drop_dup_class_gate != 0));
+  // Method -> {... "CorankOwnArr" -> True}: two-face co-rank correction.
+  // args[65]; -1 = Automatic.
+  mint wm_corank_own_arr = MArgument_getInteger(args[65]);
+  if (wm_corank_own_arr >= 0) thvm_atp_set_use_corank_own_arr(atp, (u8)(wm_corank_own_arr != 0));
+  // Method -> {... "LeafTiebreakFacegate" -> True}: leaf-tiebreak face gate.
+  // args[66]; -1 = Automatic.
+  mint wm_leaf_tiebreak_facegate = MArgument_getInteger(args[66]);
+  if (wm_leaf_tiebreak_facegate >= 0) thvm_atp_set_use_leaf_tiebreak_facegate(atp, (u8)(wm_leaf_tiebreak_facegate != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any
