@@ -17985,20 +17985,48 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         u32 ng = 0;
         for (u32 b = 0; b < n_cube; b++)
           if (cube_grp[b] == grp && ng < CUBE_CAP) ge[ng++] = b;
-        if (ng < 3u) continue;                            // need B, C, and D
         for (u32 p = 0; p + 1u < ng; p++)
           for (u32 q = p + 1u; q < ng; q++)
             if (cube_key[ge[q]] < cube_key[ge[p]]) {
               u32 t = ge[p]; ge[p] = ge[q]; ge[q] = t;
             }
+        if (ng < 3u) continue;                            // need B, C, and D
+        // A leading C-run holds a GENUINE (distinct-cube-var) self-cube-equality
+        // CP: one whose two sides do NOT batch-normalize to the same self-cube.
+        // The plain clean-signature groups carry only same-var tautology C copies
+        // (their distinct-var form is introduced by a later interreduction
+        // renaming); a genuine distinct-var C in the LEADING run is the Meredith
+        // f=165 weight-120 signature where thvm must defer the surviving C past
+        // B and D.  Detect it so the trailing-C tolerance below fires ONLY there.
+        u8 genuine_lead_c = 0u;
+        for (u32 a = 0; a < ng; a++) {
+          if (cube_cls[ge[a]] == 1u || cube_cls[ge[a]] == 2u) break; // past lead C-run
+          if (cube_cls[ge[a]] != 3u) continue;
+          Term gnl = atp_rewrite_normalize_indexed(s, big[cube_idx[ge[a]]].cp.lhs, 4096u);
+          Term gnr = atp_rewrite_normalize_indexed(s, big[cube_idx[ge[a]]].cp.rhs, 4096u);
+          if (!kbo_eq(gnl, gnr)) { genuine_lead_c = 1u; break; }
+        }
         // Signature check: the class sequence (key-ascending) must be a maximal
         // C-run (cls 3), then a B-run (cls 1), then a D-run (cls 2), with all
         // three runs non-empty -- the exact WM-ages-C-last divergent pattern.
+        // A TRAILING C-run (cls 3 after the D-run) is tolerated ONLY when the
+        // leading C-run holds a genuine distinct-var C (genuine_lead_c): WM emits
+        // that genuine surviving C even later than the trailing tautology copies,
+        // so deferring the whole C-run past B/D leaves it last (the trailing
+        // tautology copies are dropped at push and never claim a FIFO slot).
+        // Without a genuine leading C the trailing C is just another dropped
+        // tautology and the group's surviving B/D order is unaffected by
+        // rotation, so the stricter no-trailing-C check stays for those.
         u8 have_b = 0u, have_c = 0u, have_d = 0u, sig = 1u, stage = 0u;
         // stage advances 0:C -> 1:B -> 2:D; any out-of-sequence class breaks it.
+        // A C at stage 2 (after the D-run began) is the tolerated TRAILING copy
+        // (genuine_lead_c only); a C at stage 1 (between B and D) is still
+        // out-of-sequence and breaks the signature.
         for (u32 a = 0; a < ng; a++) {
           u8 cls = cube_cls[ge[a]];
-          if (cls == 3u) { have_c = 1u; if (stage > 0u) { sig = 0u; break; } }
+          if (cls == 3u) { have_c = 1u;
+                           if (stage == 1u || (stage == 2u && !genuine_lead_c)) {
+                             sig = 0u; break; } }
           else if (cls == 1u) { have_b = 1u; if (stage == 0u) stage = 1u;
                                 else if (stage > 1u) { sig = 0u; break; } }
           else /* cls == 2u */ { have_d = 1u; if (stage <= 1u) stage = 2u; }
