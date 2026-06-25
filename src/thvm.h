@@ -6054,6 +6054,31 @@ typedef struct {
   // distribution survivors at one (phase|k1|k2) prefix, so soa is byte-identical.
   // OFF byte-identical.  Advances Meredith firstdiv 12811 -> beyond.
   u8    use_l1_xxdist_interleave;
+  // L.1 weight-120 cube B/D raw-arrival order (see
+  // thvm_atp_set_use_l1cube_arrival).  The Meredith OrAssociativity
+  // firstdiv-12990 divergence: the f=181 tops batch forms a weight-120
+  // L.1/combo0/phase0/k2==0 group holding TWO B `x.x = x.(y.(y.y))` (fwd_cube)
+  // and TWO D `x.x = (y.(y.y)).x` (posgroup_cube) cube survivors (plus a genuine
+  // E xxx_self_cube and a dropped C tautology, both left alone).  An upstream
+  // re-key pass renumbered the four B/D survivors into the GROUPED order
+  // B,B,D,D; WM's single superposition scan emits them in raw PARTNER-ARRIVAL
+  // order D,B,B,D (picks 12990..12993 -- the D survivor's producer arrives at
+  // the lowest slot).  Restore that scan order by ranking ONLY the group's B/D
+  // cube survivors on their RAW partner-arrival key (key_raw, the atp_wmo_rank
+  // result BEFORE any gated re-key) and re-assigning the ascending B/D key-slot
+  // multiset in raw order.  Same key_raw idiom as use_l1_xxdist_interleave, but
+  // on the B/D cube pair.  The B/D CPs keep their key SLOTS (the multiset is
+  // permuted only among themselves); the C/E members and every other CP are
+  // untouched (an E member's placement stays with use_l1cube_group /
+  // use_l1_xxx_cube_defer).  Scoped HARD to an L.1/combo0/phase0/k2==0 group
+  // holding >=2 B AND >=2 D cube survivors -- the f=181 signature.  The EARLIER
+  // f=170/f=172 cube groups also hold >=2 B + >=2 D, but their B/D raw arrival
+  // order already equals their key order (B,B,D,D), so the raw re-key is a no-op
+  // there; only f=181's D-first raw order (D,B,B,D) actually permutes.  soa
+  // forms NO L.1/combo0/phase0/k2==0 group with >=2 B and >=2 D cube survivors
+  // at one (phase|k1|k2) prefix, so soa is byte-identical.  OFF byte-identical.
+  // Advances Meredith firstdiv 12990 -> beyond.
+  u8    use_l1cube_arrival;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6533,6 +6558,10 @@ fn void      thvm_atp_set_use_l1cube_group(AtpState *s, u8 on);
 // AtpState.use_l1_xxdist_interleave).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1_xxdist_interleave(AtpState *s, u8 on);
+// L.1 weight-120 cube B/D raw-arrival order (see
+// AtpState.use_l1cube_arrival).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l1cube_arrival(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

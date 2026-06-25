@@ -9303,6 +9303,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1swap109        = 1u;
     s->use_l1cube_group     = 1u;
     s->use_l1_xxdist_interleave = 1u;
+    s->use_l1cube_arrival   = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9458,6 +9459,16 @@ fn void thvm_atp_set_use_l1cube_group(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1_xxdist_interleave(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1_xxdist_interleave = on ? 1u : 0u;
+}
+
+// L.1 weight-120 cube B/D raw-arrival order (see AtpState.use_l1cube_arrival):
+// re-key the f=181 L.1/combo0/phase0/k2==0 weight-120 cube band's >=2 B `x.x =
+// x.(y.(y.y))` and >=2 D `x.x = (y.(y.y)).x` survivors (no C/E member) onto the
+// RAW partner-arrival order (key_raw), matching WM's single-superposition-scan
+// emission D,B,B,D.  DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l1cube_arrival(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l1cube_arrival = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -19023,6 +19034,112 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         // A strict (round,variant) round-robin would force A,B,A,B for BOTH and
         // mis-order f=180; key_raw discriminates the start variant per batch.
         u32 order[XI_CAP];
+        for (u32 a = 0; a < ng; a++) order[a] = a;
+        for (u32 a = 0; a + 1u < ng; a++)
+          for (u32 b = a + 1u; b < ng; b++) {
+            if (big[ge[order[b]]].key_raw < big[ge[order[a]]].key_raw) {
+              u32 t = order[a]; order[a] = order[b]; order[b] = t;
+            }
+          }
+        // Re-assign the ascending key slots in raw-arrival order.
+        for (u32 a = 0; a < ng; a++)
+          big[ge[order[a]]].key = gkey[a];
+      }
+    }
+    // L.1 weight-120 cube B/D raw-arrival order (default OFF; see
+    // use_l1cube_arrival).  The Meredith OrAssociativity firstdiv-12990
+    // divergence: the f=181 tops batch forms a weight-120 L.1/combo0/phase0/
+    // k2==0 group holding TWO B `x.x = x.(y.(y.y))` (atp_pair_is_fwd_cube) and
+    // TWO D `x.x = (y.(y.y)).x` (atp_pair_is_posgroup_cube) cube survivors (plus
+    // a genuine E xxx_self_cube and a dropped C tautology, both left alone).  An
+    // upstream re-key pass renumbered the four B/D survivors into the GROUPED
+    // order B,B,D,D; WM's single superposition scan emits them in raw
+    // PARTNER-ARRIVAL order D,B,B,D (picks 12990..12993 -- the D survivor's
+    // producer arrives at the lowest slot, then B,B, then the late D).  Restore
+    // that scan order by ranking ONLY the group's B/D cube survivors on their
+    // RAW partner-arrival key (key_raw -- the atp_wmo_rank result BEFORE any
+    // gated re-key) and re-assigning the ascending B/D key-slot multiset in raw
+    // order.  The B/D CPs keep their key SLOTS (the multiset is permuted only
+    // among themselves); the C/E members and every other CP are untouched (an E
+    // member's placement stays with use_l1cube_group / use_l1_xxx_cube_defer).
+    // Same key_raw idiom as the use_l1_xxdist_interleave pass above, but on the
+    // B/D cube pair.
+    //
+    // Scoped HARD to an L.1/combo0/phase0/k2==0 group holding >=2 B AND >=2 D
+    // cube survivors -- the f=181 signature.  The EARLIER f=170/f=172 cube
+    // groups also hold >=2 B + >=2 D, but their B/D raw arrival order already
+    // equals their key order (B,B,D,D), so the raw-arrival re-key below is a
+    // no-op there; only f=181's D-first raw order (D,B,B,D) actually permutes.
+    // soa forms NO L.1/combo0/phase0/k2==0 group with >=2 B and >=2 D cube
+    // survivors at one (phase|k1|k2) prefix, so soa is byte-identical.  OFF
+    // byte-identical.  Advances Meredith firstdiv 12990 -> beyond.
+    if (s->use_l1cube_arrival) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      enum { CA_CAP = 64u };
+      // Index this batch's L.1/combo0/phase0/k2==0 cube B/D CPs (class 1 = B
+      // fwd_cube, 2 = D posgroup_cube), tagged by their (phase|k1|k2) prefix.
+      // C (self_cube_eq) and E (xxx_self_cube) members are NOT collected: they
+      // keep their own key slots (an E member's placement is handled by
+      // use_l1cube_group / use_l1_xxx_cube_defer; a C tautology is dropped at
+      // push).  Only the B and D survivors participate in the raw-arrival sort.
+      u32 ca_idx[CA_CAP];
+      u64 ca_grp[CA_CAP];
+      u64 ca_key[CA_CAP];
+      u8  ca_cls[CA_CAP];
+      u32 n_ca = 0;
+      for (u32 k = 0; k < n_big && n_ca < CA_CAP; k++) {
+        if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
+        if (big[k].combo != 0u) continue;                 // combo 0 only
+        if ((big[k].key >> 58) != 0u) continue;           // phase 0
+        if (((big[k].key >> 42) & 3u) != 0u) continue;    // rule-tree k2 == 0
+        if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 cls = atp_pair_is_fwd_cube(nl, nr)       ? 1u   // B
+               : atp_pair_is_posgroup_cube(nl, nr)  ? 2u   // D
+                                                    : 0u;
+        if (cls == 0u) continue;
+        ca_idx[n_ca] = k;
+        ca_grp[n_ca] = big[k].key & grp_mask;
+        ca_key[n_ca] = big[k].key;
+        ca_cls[n_ca] = cls;
+        n_ca++;
+      }
+      // Process each distinct (phase|k1|k2) group independently.
+      for (u32 a0 = 0; a0 < n_ca; a0++) {
+        u64 grp = ca_grp[a0];
+        u8 seen_grp = 0u;
+        for (u32 b = 0; b < a0; b++) if (ca_grp[b] == grp) { seen_grp = 1u; break; }
+        if (seen_grp) continue;                           // group already done
+        // Gather this group's B/D cube entries (local index list).
+        u32 ge[CA_CAP];
+        u64 gkey[CA_CAP];
+        u32 ng = 0;
+        u8 nb = 0u, nd = 0u;
+        for (u32 b = 0; b < n_ca; b++) {
+          if (ca_grp[b] != grp || ng >= CA_CAP) continue;
+          ge[ng] = ca_idx[b]; gkey[ng] = ca_key[b];
+          if (ca_cls[b] == 1u) nb++; else nd++;
+          ng++;
+        }
+        // Require >=2 B AND >=2 D -- the exact f=181 signature.  The earlier
+        // f=170/f=172 cube groups also hold >=2 B + >=2 D, but their B/D raw
+        // arrival order already matches their key order (B,B,D,D), so the
+        // raw-arrival re-key below is a no-op there; only f=181's D-first raw
+        // order (D,B,B,D) actually permutes.
+        if (nb < 2u || nd < 2u) continue;
+        // Sort the cube entries by current key (ascending) to get the ascending
+        // key-slot multiset to redistribute.
+        for (u32 p = 0; p + 1u < ng; p++)
+          for (u32 q = p + 1u; q < ng; q++)
+            if (gkey[q] < gkey[p]) {
+              u64 tk = gkey[p]; gkey[p] = gkey[q]; gkey[q] = tk;
+              u32 ti = ge[p]; ge[p] = ge[q]; ge[q] = ti;
+            }
+        // Restore WM's natural superposition-scan order: rank the cube
+        // survivors by their RAW partner-arrival key (key_raw, the atp_wmo_rank
+        // result BEFORE the gated re-key passes that grouped them B,B,D,D).
+        u32 order[CA_CAP];
         for (u32 a = 0; a < ng; a++) order[a] = a;
         for (u32 a = 0; a + 1u < ng; a++)
           for (u32 b = a + 1u; b < ng; b++) {
