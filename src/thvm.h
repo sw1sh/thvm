@@ -6138,6 +6138,32 @@ typedef struct {
   // byte-identical, soa byte-identical.  Advances Meredith firstdiv 13349 ->
   // beyond.
   u8    use_l2tail_face_swap;
+  // L.1 `x.(x.x) = y.(y.y)` self-cube-equality defer (env
+  // THVM_ATP_L1_SELFCUBE_DEFER, default OFF; also turned ON under
+  // use_formation_fifo).  The Meredith OrAssociativity firstdiv-13485
+  // divergence: the f=185 tops batch forms a weight-120 L.1/combo0/phase0/k2==0
+  // group whose surviving distinct-var self-cube-equality C `x.(x.x) = y.(y.y)`
+  // PAIR thvm keys AHEAD of the same group's fwd-cube A `x.(y.(y.y)) = x.x` and
+  // posgroup-cube B `(x.(x.x)).y = y.y` (C's k3-arrival 121/122 sorts below the
+  // cubes' 135/138); WM's single superposition scan ages C LAST (WM picks
+  // 13485-86 A, 13487-88 B, 13489-90 C).  At batch time A/B/C all collapse to a
+  // same-var tautology under the per-side normalize, so they are unrecognisable
+  // by the reduced-shape classifiers -- instead each candidate is JOIN-reduced
+  // exactly as the push filter does (atp_cp_trivially_joinable): joined==1 is a
+  // dropped tautology (no FIFO slot), joined==0 yields the distinct-var rule-NF
+  // selection form on which fwd_cube/posgroup_cube/self_cube_eq ARE
+  // recognisable.  Re-key the surviving C pair just above the group's highest
+  // cube key (cube_max+1...) so the order becomes A,B,C.  Gated HARD: (a) the
+  // rule carries NO surviving distinct-var self-cube-eq at the ROOT overlap
+  // position (poslen==0) -- a root-C means WM forms C BEFORE the L.1 cubes and
+  // keeps them interleaved (the f=143 batch, where thvm is already aligned), so
+  // the defer must NOT fire; (b) the group holds a surviving fwd_cube AND a
+  // surviving posgroup_cube; (c) >= 2 surviving distinct-var C copies (the
+  // f=185 C-pair signature).  soa's L.1 cube bands carry only a SINGLE surviving
+  // C copy (ncs==1), so the >=2 gate fires NEVER on soa within its md5 window
+  // (soa byte-identical).  OFF byte-identical.  Advances Meredith firstdiv 13485
+  // -> 13804.
+  u8    use_l1_selfcube_defer;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6635,6 +6661,10 @@ fn void      thvm_atp_set_use_l1cube_arrival(AtpState *s, u8 on);
 // AtpState.use_l2tail_face_swap).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l2tail_face_swap(AtpState *s, u8 on);
+// L.1 `x.(x.x) = y.(y.y)` self-cube-equality defer (see
+// AtpState.use_l1_selfcube_defer).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l1_selfcube_defer(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

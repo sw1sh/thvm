@@ -9308,6 +9308,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1_xxdist_interleave = 1u;
     s->use_l1cube_arrival   = 1u;
     s->use_l2tail_face_swap = 1u;
+    s->use_l1_selfcube_defer = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9511,6 +9512,15 @@ fn void thvm_atp_set_use_l1cube_arrival(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l2tail_face_swap(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l2tail_face_swap = on ? 1u : 0u;
+}
+
+// L.1 `x.(x.x) = y.(y.y)` self-cube-equality defer (see
+// AtpState.use_l1_selfcube_defer): defer the leading self-cube-equality CP of
+// an f=185-signature L.1/combo0/phase0/k2==0 weight-120 group to the end of the
+// group's cube run.  DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l1_selfcube_defer(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l1_selfcube_defer = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -19294,6 +19304,132 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (!has_fwd_hi || !has_pos_hi || other_sc) continue;   // not the f=170 signature
         if (band_max != 0u && band_max + 1u > big[kd].key)
           big[kd].key = band_max + 1u;
+      }
+    }
+    // L.1 `x.(x.x) = y.(y.y)` self-cube-equality defer (default OFF; see
+    // use_l1_selfcube_defer).  The Meredith OrAssociativity firstdiv-13485
+    // divergence: the f=185 tops batch forms a weight-120 L.1/combo0/phase0/k2==0
+    // group whose surviving distinct-var self-cube-equality C `x.(x.x) = y.(y.y)`
+    // PAIR thvm keys AHEAD of the same group's fwd-cube A `x.(y.(y.y)) = x.x` and
+    // posgroup-cube B `(x.(x.x)).y = y.y` -- C's k3-arrival (121/122) sorts below
+    // the cubes' (135/138); WM's single superposition scan ages C LAST (WM picks
+    // 13485-86 A, 13487-88 B, 13489-90 C).  At batch time A/B/C all collapse to a
+    // same-var tautology under the per-side normalize, so the reduced-shape
+    // classifiers cannot see them; instead each candidate is JOIN-reduced exactly
+    // as the push filter does (atp_cp_trivially_joinable): joined==1 is a dropped
+    // tautology (no FIFO slot), joined==0 yields the distinct-var rule-NF
+    // selection form on which fwd_cube/posgroup_cube/self_cube_eq ARE
+    // recognisable.  Re-key the surviving C pair just above the group's highest
+    // cube key (cube_max+1...) so the order becomes A,B,C.  Gated HARD:
+    //   (a) the rule carries NO surviving distinct-var self-cube-eq at the ROOT
+    //       overlap (poslen==0) -- a root-C means WM forms C BEFORE the L.1 cubes
+    //       and keeps them interleaved (the f=143 batch, already aligned), so the
+    //       defer must NOT fire and regress it;
+    //   (b) the group holds a surviving fwd_cube AND a surviving posgroup_cube;
+    //   (c) >= 2 surviving distinct-var C copies (the f=185 C-pair signature).
+    // soa's L.1 cube bands carry only a SINGLE surviving C copy (ncs==1), so the
+    // >=2 gate fires NEVER on soa within its md5 window -- soa byte-identical.
+    // OFF byte-identical.  Advances Meredith firstdiv 13485 -> 13804.
+    if (s->use_l1_selfcube_defer) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      // The f=185 weight-120 cube band collapses at batch time: the surviving
+      // distinct-var C / fwd-cube A / posgroup-cube B all reduce to a same-var
+      // tautology under the per-side normalize, so they are unrecognisable by
+      // the reduced-shape classifiers (atp_pair_is_fwd_cube etc.).  Instead
+      // JOIN-reduce each candidate exactly as the push filter does
+      // (atp_cp_trivially_joinable): a genuine tautology returns joined==1 and
+      // is dropped at push (claims no FIFO slot); a survivor returns joined==0
+      // and (ndl, ndr) carry its distinct-var rule-NF selection form, on which
+      // the cube classes ARE recognisable.  cls: 1 = C (distinct-var
+      // self_cube_eq), 2 = A (fwd_cube), 3 = B (posgroup_cube).
+      // ROOT-C exclusion: when this rule directly produces a surviving distinct-
+      // var self-cube equality at the ROOT overlap position (poslen==0), WM
+      // forms that C BEFORE the L.1 cubes and keeps the L.1 C copies interleaved
+      // ahead of them (the f=143 batch: WM picks the root-C at 8974, the L.1
+      // cubes after).  Only when there is NO root-C does WM form the L.1 cubes
+      // first and age the L.1 C last (the f=185 batch).  Skip the whole defer
+      // for a rule carrying a root-C.
+      u8 has_root_c = 0u;
+      for (u32 kr = 0; kr < n_big; kr++) {
+        if (big[kr].i != f || big[kr].j == f) continue;
+        if (big[kr].combo != 0u) continue;
+        if (big[kr].cp.pos_len != 0u) continue;           // ROOT overlap only
+        Term rl = big[kr].cp.lhs, rr = big[kr].cp.rhs;
+        if (atp_cp_trivially_joinable(s, &rl, &rr)) continue;   // tautology
+        if (!atp_pair_is_self_cube_eq(rl, rr)) continue;
+        u32 rvl = 0, rvr = 0;
+        (void)atp_term_is_self_cube(rl, &rvl);
+        (void)atp_term_is_self_cube(rr, &rvr);
+        if (rvl != rvr) { has_root_c = 1u; break; }
+      }
+      enum { SC_CAP = 64u };
+      u32 sc_idx[SC_CAP];
+      u64 sc_key[SC_CAP];
+      u8  sc_cls[SC_CAP];
+      u32 n_sc = 0;
+      for (u32 kd = 0; !has_root_c && kd < n_big && n_sc < SC_CAP; kd++) {
+        if (big[kd].i != f || big[kd].j == f) continue;   // tops, partner = j
+        if (big[kd].combo != 0u) continue;                // combo 0 only
+        if ((big[kd].key >> 58) != 0u) continue;          // phase 0
+        if (((big[kd].key >> 42) & 3u) != 0u) continue;   // rule-tree k2 == 0
+        if (big[kd].cp.pos_len != 1u || big[kd].cp.pos[0] != 0u) continue; // L.1
+        Term ndl = big[kd].cp.lhs, ndr = big[kd].cp.rhs;
+        if (atp_cp_trivially_joinable(s, &ndl, &ndr)) continue;  // tautology: dropped
+        u8 cls = 0u;
+        if (atp_pair_is_self_cube_eq(ndl, ndr)) {
+          u32 vl = 0, vr = 0;
+          (void)atp_term_is_self_cube(ndl, &vl);
+          (void)atp_term_is_self_cube(ndr, &vr);
+          if (vl != vr) cls = 1u;                         // C: distinct-var self-cube eq
+        } else if (atp_pair_is_fwd_cube(ndl, ndr)) {
+          cls = 2u;                                       // A: x.(y.(y.y)) = x.x
+        } else if (atp_pair_is_posgroup_cube(ndl, ndr)) {
+          cls = 3u;                                       // B: (x.(x.x)).y = y.y
+        }
+        if (cls == 0u) continue;
+        sc_idx[n_sc] = kd;
+        sc_key[n_sc] = big[kd].key;
+        sc_cls[n_sc] = cls;
+        n_sc++;
+      }
+      // Process each distinct (phase|k1|k2) group independently.
+      for (u32 a0 = 0; a0 < n_sc; a0++) {
+        u64 grp = sc_key[a0] & grp_mask;
+        u8 seen = 0u;
+        for (u32 b = 0; b < a0; b++) if ((sc_key[b] & grp_mask) == grp) { seen = 1u; break; }
+        if (seen) continue;                               // group already processed
+        // Largest surviving A (fwd) and B (posgroup) keys in the group.
+        u64 a_max = 0u, b_max = 0u;
+        u8 have_a = 0u, have_b = 0u;
+        for (u32 b = 0; b < n_sc; b++) {
+          if ((sc_key[b] & grp_mask) != grp) continue;
+          if (sc_cls[b] == 2u) { have_a = 1u; if (sc_key[b] > a_max) a_max = sc_key[b]; }
+          else if (sc_cls[b] == 3u) { have_b = 1u; if (sc_key[b] > b_max) b_max = sc_key[b]; }
+        }
+        if (!have_a || !have_b) continue;                 // not the f=185 cube band
+        u64 cube_max = (a_max > b_max) ? a_max : b_max;
+        // Defer the surviving distinct-var self-cube-eq C members of this group
+        // (those keyed BELOW the cube run) to just ABOVE the highest cube key,
+        // preserving their relative order -- WM ages C right after the A/B cubes
+        // (A,B,C), not interleaved before them.  Re-key in key-ascending order
+        // so the first C lands at cube_max+1, the next at cube_max+2, etc.
+        u32 cs[SC_CAP];
+        u32 ncs = 0;
+        for (u32 b = 0; b < n_sc; b++)
+          if ((sc_key[b] & grp_mask) == grp && sc_cls[b] == 1u &&
+              sc_key[b] < cube_max && ncs < SC_CAP)
+            cs[ncs++] = b;
+        // The f=185 signature carries a PAIR of surviving distinct-var C copies
+        // (WM picks 13485-86 the C-pair); soa's L.1 cube bands carry a single C
+        // copy.  Require >= 2 C members so the defer fires on the f=185 band and
+        // never on a soa single-C band (soa byte-identical).
+        if (ncs < 2u) continue;
+        // key-ascending order of the C members.
+        for (u32 p = 0; p + 1u < ncs; p++)
+          for (u32 q = p + 1u; q < ncs; q++)
+            if (sc_key[cs[q]] < sc_key[cs[p]]) { u32 t = cs[p]; cs[p] = cs[q]; cs[q] = t; }
+        for (u32 p = 0; p < ncs; p++)
+          big[sc_idx[cs[p]]].key = cube_max + 1u + (u64)p;
       }
     }
     if (s->use_l1_xxx_cube_defer) {
