@@ -1107,6 +1107,14 @@ int main(int argc, char **argv) {
       // opts in (also turned on by FORMATION_FIFO below).  See soa.txt.
       thvm_atp_set_use_l1_cube_rotate(
           s, (getenv("THVM_ATP_L1_CUBE_ROTATE") != NULL) ? 1u : 0u);
+      // L.1 `(x.x).y`-distribution front-age (DEFAULT OFF): pull the A/B
+      // `(x.x).y = y.(x.y)` / `(x.x).y = y.(y.x)` distribution CPs of an
+      // L.1/combo0 tops group to the front (A before B), matching WM's
+      // CP-formation FIFO age -- the Meredith OrAssociativity firstdiv-11539
+      // divergence.  THVM_ATP_L1_XXDIST_FRONT opts in (also turned on by
+      // FORMATION_FIFO below).  See soa.txt.
+      thvm_atp_set_use_l1_xxdist_front(
+          s, (getenv("THVM_ATP_L1_XXDIST_FRONT") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /

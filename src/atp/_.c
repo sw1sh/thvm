@@ -9295,6 +9295,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_comm_drop_dup_class_gate = 1u;
     s->use_corank_own_arr   = 1u;
     s->use_l1_cube_rotate   = 1u;
+    s->use_l1_xxdist_front  = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9370,6 +9371,16 @@ fn void thvm_atp_set_use_eset_distdir(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1_cube_rotate(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1_cube_rotate = on ? 1u : 0u;
+}
+
+// L.1 `(x.x).y`-distribution front-age (see AtpState.use_l1_xxdist_front):
+// pull the A `(x.x).y = y.(x.y)` and B `(x.x).y = y.(y.x)` distribution CPs of
+// an L.1/combo0 tops group to the front of the group (A before B), matching
+// WM's CP-formation FIFO age.  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void thvm_atp_set_use_l1_xxdist_front(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l1_xxdist_front = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -16826,6 +16837,57 @@ static u8 atp_pair_is_self_cube_eq(Term l, Term r) {
   return 1u;
 }
 
+// `f(f(x, x), y)` -- the `(x.x).y` factor: a left child that is the idempotent
+// 2-var leaf `x.x` (both children the SAME bare var x), dotted with a bare var
+// y distinct from x.  Binds *out_x, *out_y.
+static u8 atp_term_is_xx_dot_var(Term t, u32 *out_x, u32 *out_y) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  Term t0 = term_ctr_at(t, 0), t1 = term_ctr_at(t, 1);
+  if (term_tag(t1) != TAG_FVR) return 0u;                  // y
+  if (term_tag(t0) != TAG_CTR || term_ext(t0) != term_ext(t) ||
+      term_ctr_n(t0) != 2u) return 0u;                     // f(x, x)
+  Term t00 = term_ctr_at(t0, 0), t01 = term_ctr_at(t0, 1);
+  if (term_tag(t00) != TAG_FVR || term_tag(t01) != TAG_FVR) return 0u;
+  u32 x = term_ext(t00);
+  if (term_ext(t01) != x) return 0u;                        // both leaves x
+  *out_x = x;
+  *out_y = term_ext(t1);
+  return (u8)(x != *out_y);
+}
+
+// Whether a NORMALIZED CP is the weight-120 `(x.x).y`-distribution shape: one
+// side is the `(x.x).y` factor (atp_term_is_xx_dot_var), the other is
+// `f(y, f(x, y))` (variant A) or `f(y, f(y, x))` (variant B) -- the bare vars
+// matched structurally so the detector is renaming-stable.  Returns 1 for A
+// (`(x.x).y = y.(x.y)`), 2 for B (`(x.x).y = y.(y.x)`), 0 otherwise.  These are
+// the Meredith OrAssociativity f=167 L.1/combo0 CPs (CPSEL seq 58373/58375)
+// WM ages AHEAD of the same group's cube C/D shapes (see use_l1_xxdist_front).
+// Orientation-insensitive (the `(x.x).y` factor is either l or r).
+static u8 atp_pair_is_xx_y_dist(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 op = term_ext(l);
+  Term big = l, oth = r;
+  u32 x = 0, y = 0;
+  if (!atp_term_is_xx_dot_var(big, &x, &y)) {
+    big = r; oth = l;
+    if (!atp_term_is_xx_dot_var(big, &x, &y)) return 0u;
+  }
+  // oth = f(y, f(x, y))  [A]  or  f(y, f(y, x))  [B].
+  if (term_tag(oth) != TAG_CTR || term_ext(oth) != op || term_ctr_n(oth) != 2u)
+    return 0u;
+  Term o0 = term_ctr_at(oth, 0), o1 = term_ctr_at(oth, 1);
+  if (term_tag(o0) != TAG_FVR || term_ext(o0) != y) return 0u;   // f(y, .)
+  if (term_tag(o1) != TAG_CTR || term_ext(o1) != op || term_ctr_n(o1) != 2u)
+    return 0u;
+  Term i0 = term_ctr_at(o1, 0), i1 = term_ctr_at(o1, 1);
+  if (term_tag(i0) != TAG_FVR || term_tag(i1) != TAG_FVR) return 0u;
+  u32 a = term_ext(i0), b = term_ext(i1);
+  if (a == x && b == y) return 1u;                          // f(y, f(x, y))  A
+  if (a == y && b == x) return 2u;                          // f(y, f(y, x))  B
+  return 0u;
+}
+
 // Whether a NORMALIZED CP is the slot15-term `x.(y.x) = (y.y).x` WRAPPED with
 // a trailing `. z` on BOTH sides: `(x.(y.x)).z = ((y.y).x).z` (thvm LHS=(C3
 // (C3 V0 (C3 V1 V0)) V2), RHS=(C3 (C3 (C3 V1 V1) V0) V2) modulo orientation/
@@ -18048,6 +18110,120 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
             if (cube_cls[ge[a]] == class_order[ci]) perm[np++] = ge[a];
         for (u32 a = 0; a < ng; a++)
           big[cube_idx[perm[a]]].key = keys_sorted[a];
+      }
+    }
+    // L.1 `(x.x).y`-distribution front-age (default OFF; see
+    // use_l1_xxdist_front).  The Meredith OrAssociativity firstdiv-11539
+    // divergence: the f=167 tops batch forms seven weight-120 CPs at the SAME
+    // L.1/combo0 overlap-position group (one (phase|k1|k2) prefix), keyed by
+    // ascending CP age into C,C,D,A,B,D,D -- where A `(x.x).y = y.(x.y)` and B
+    // `(x.x).y = y.(y.x)` are the (x.x).y-distribution shapes
+    // (atp_pair_is_xx_y_dist 1/2) and C/D are the cube shapes.  WM's single
+    // superposition scan ages the A/B distribution CPs FIRST, emitting
+    // A,B,C,C,D,D,D (CPSEL 11539: A seq 58373, 11540: B seq 58375, then the
+    // cubes).  Pull the A/B members to the lowest key slots of the group (A
+    // before B), the cube C/D members keeping their relative key order.  Same
+    // pool-rekey idiom as the cube-rotate pass: collect the group's weight-120
+    // distribution + cube CPs, sort by current key, then re-assign the key
+    // MULTISET in (A, B, cube) order -- the slots are permuted only among the
+    // group's CPs, every other CP untouched.  Scoped HARD to L.1 (pos[0]==0),
+    // combo==0, tops (i==f), and a group holding BOTH an A and a B member (the
+    // exact f=167 distribution-pair signature): soa's only L.1/combo0 A/B
+    // occurrence (f=24) holds a lone B with no paired A, so the both-present
+    // gate leaves soa byte-identical.  OFF byte-identical, soa byte-identical.
+    // Advances Meredith firstdiv 11539 -> beyond.
+    if (s->use_l1_xxdist_front) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      enum { XX_CAP = 64u };
+      // Index this batch's L.1/combo0 tops CPs that normalize to A or B
+      // (xx_cls 1 = A, 2 = B), grouped by their (phase|k1|k2) prefix.
+      u32 xx_idx[XX_CAP];
+      u64 xx_grp[XX_CAP];
+      u64 xx_key[XX_CAP];
+      u8  xx_cls[XX_CAP];
+      u32 n_xx = 0;
+      for (u32 k = 0; k < n_big && n_xx < XX_CAP; k++) {
+        if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
+        if (big[k].combo != 0u) continue;                 // combo 0 only
+        if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 cls = atp_pair_is_xx_y_dist(nl, nr);
+        if (cls == 0u) continue;
+        xx_idx[n_xx] = k;
+        xx_grp[n_xx] = big[k].key & grp_mask;
+        xx_key[n_xx] = big[k].key;
+        xx_cls[n_xx] = cls;
+        n_xx++;
+      }
+      // Process each distinct (phase|k1|k2) group containing an A/B member.
+      for (u32 a0 = 0; a0 < n_xx; a0++) {
+        u64 grp = xx_grp[a0];
+        u8 seen_grp = 0u;
+        for (u32 b = 0; b < a0; b++) if (xx_grp[b] == grp) { seen_grp = 1u; break; }
+        if (seen_grp) continue;                           // group already done
+        // Gather this group's weight-120 distribution + cube CPs -- the A/B
+        // shapes AND the cube C/D shapes they interleave with (the
+        // consecutive-seq weight-120 block at the f=167 signature).  Each entry
+        // records its big[] index, current key, and class: 1 = A, 2 = B, 0 =
+        // cube (C `x.x = x.(y.(y.y))`, D `x.x = (y.(y.y)).x`, or the equality
+        // self-cube).  Restricting the gather to the cube/dist shapes keeps the
+        // re-key a contiguous permutation of just those CPs' key slots; the
+        // surrounding L.1/combo0 CPs (different shapes/weights) are untouched.
+        u32 ge[XX_CAP];
+        u8  gcls[XX_CAP];
+        u64 gkey[XX_CAP];
+        u32 ng = 0;
+        for (u32 k = 0; k < n_big && ng < XX_CAP; k++) {
+          if (big[k].i != f || big[k].j == f) continue;
+          if (big[k].combo != 0u) continue;
+          if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue;
+          if ((big[k].key & grp_mask) != grp) continue;
+          Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+          Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+          u8 cls = atp_pair_is_xx_y_dist(nl, nr);          // 1 = A, 2 = B
+          if (cls == 0u) {
+            // Cube C/D members of the same weight-120 block keep relative order.
+            if (!atp_pair_is_fwd_cube(nl, nr) &&
+                !atp_pair_is_posgroup_cube(nl, nr) &&
+                !atp_pair_is_self_cube_eq(nl, nr)) continue;
+          }
+          ge[ng] = k;
+          gcls[ng] = cls;
+          gkey[ng] = big[k].key;
+          ng++;
+        }
+        // Sort the group's entries by current key (ascending).
+        for (u32 p = 0; p + 1u < ng; p++)
+          for (u32 q = p + 1u; q < ng; q++)
+            if (gkey[q] < gkey[p]) {
+              u64 tk = gkey[p]; gkey[p] = gkey[q]; gkey[q] = tk;
+              u32 ti = ge[p]; ge[p] = ge[q]; ge[q] = ti;
+              u8  tc = gcls[p]; gcls[p] = gcls[q]; gcls[q] = tc;
+            }
+        // Require the group to hold BOTH an A and a B member -- the exact
+        // Meredith f=167 signature (the A/B distribution pair WM ages at the
+        // group head).  soa's single L.1/combo0 A/B occurrence (f=24) holds only
+        // a B (no A), so this both-present gate leaves soa byte-identical.
+        u32 na = 0, nb = 0;
+        for (u32 a = 0; a < ng; a++) {
+          if (gcls[a] == 1u) na++; else if (gcls[a] == 2u) nb++;
+        }
+        if (na == 0u || nb == 0u) continue;
+        // Re-permute: emit the A members (cls 1), then the B members (cls 2),
+        // then every other member (cls 0) -- each class keeping its within-class
+        // key order (ge is key-ascending, so emitting a class in ge order is
+        // stable).  Re-assign the (ascending) key MULTISET in that order.
+        u64 keys_sorted[XX_CAP];
+        for (u32 a = 0; a < ng; a++) keys_sorted[a] = gkey[a];
+        u32 perm[XX_CAP];
+        u32 np = 0;
+        static const u8 class_order[3] = {1u, 2u, 0u};   // A, B, rest
+        for (u32 ci = 0; ci < 3u; ci++)
+          for (u32 a = 0; a < ng; a++)
+            if (gcls[a] == class_order[ci]) perm[np++] = a;
+        for (u32 a = 0; a < ng; a++)
+          big[ge[perm[a]]].key = keys_sorted[a];
       }
     }
     atp_wmo_ent_sort(big, n_big);

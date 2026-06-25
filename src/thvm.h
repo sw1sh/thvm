@@ -5925,6 +5925,23 @@ typedef struct {
   // stays byte-identical.  OFF byte-identical.  Advances Meredith firstdiv
   // 10097 -> beyond.
   u8    use_l1_cube_rotate;
+  // L.1 `(x.x).y`-distribution front-age (env THVM_ATP_L1_XXDIST_FRONT, default
+  // OFF; also turned ON under use_formation_fifo).  The Meredith OrAssociativity
+  // firstdiv-11539 divergence: the f=167 tops batch forms seven weight-120 CPs
+  // at the SAME L.1/combo0 overlap position (CPSEL seq-ascending C,C,D,A,B,D,D),
+  // where A `(x.x).y = y.(x.y)` and B `(x.x).y = y.(y.x)` are the
+  // (x.x).y-distribution shapes (atp_pair_is_xx_y_dist) and C/D are the cube
+  // shapes.  thvm keys the group by ascending CP age, emitting C,C,D,A,B,D,D;
+  // WM's single superposition scan ages the A/B distribution CPs FIRST, emitting
+  // A,B,C,C,D,D,D.  Pull the A/B members to the lowest key slots of the group (A
+  // before B), the cube C/D members keeping their relative order (the key
+  // MULTISET is permuted only among the group's weight-120 distribution + cube
+  // CPs, so non-group CPs are untouched).  Scoped HARD to L.1 (pos[0]==0),
+  // combo==0, and a group holding BOTH an A and a B member: soa's only
+  // L.1/combo0 A/B occurrence (f=24) holds a lone B with no paired A, so the
+  // both-present gate leaves soa byte-identical.  OFF byte-identical.  Advances
+  // Meredith firstdiv 11539 -> beyond.
+  u8    use_l1_xxdist_front;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6377,6 +6394,9 @@ fn void      thvm_atp_set_use_eset_distdir(AtpState *s, u8 on);
 // L.1 cube-triple group rotation (see AtpState.use_l1_cube_rotate).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1_cube_rotate(AtpState *s, u8 on);
+// L.1 `(x.x).y`-distribution front-age (see AtpState.use_l1_xxdist_front).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l1_xxdist_front(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
