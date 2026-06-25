@@ -6113,6 +6113,31 @@ typedef struct {
   // at one (phase|k1|k2) prefix, so soa is byte-identical.  OFF byte-identical.
   // Advances Meredith firstdiv 12990 -> beyond.
   u8    use_l1cube_arrival;
+  // L.2 weight-18 cube-tail two-face group swap (see
+  // thvm_atp_set_use_l2tail_face_swap).  The Meredith OrAssociativity
+  // firstdiv-13349 divergence: the f=184 tops batch forms a four-CP
+  // L.2/combo0/phase0/k1==6 weight-18 cube-tail band, two faces with
+  // byte-identical reduced content -- T `((x.(y.y)).(y.x)) = x`
+  // (atp_pair_l2tail_face 1) and S `((x.(y.y)).(x.y)) = x` (face 2) -- each
+  // formed from TWO oriented-rule partners whose stored second factor is the
+  // `x.(z.z)` (bare-left, side A) or `(z.z).x` (bare-right, side B) cube-tail.
+  // thvm's discrimination-tree DFS groups the band T,T,S,S (the trie reaches T's
+  // inner `(y.(y.z))` leaf before S's `(y.(z.y))` leaf); WM's single
+  // superposition scan groups it S,S,T,T (picks 13349..13352).  The face order
+  // hinges on the cube-tail side of each face's EARLIEST-arriving partner: when
+  // the earliest-arr partner per face is side A (bare-left, the older partner),
+  // WM emits the S-face group first; swap the two face groups' keys so S sorts
+  // ahead of T.  soa's structurally-identical f=232 band (also four-CP TTSS,
+  // same reduced T/S content, same partner-age pattern) has its faces' earliest-
+  // arr partner on side B (bare-right) -- the partner cube-tail sides are
+  // assigned to ages in the OPPOSITE order there -- so the side-A earliest-arr
+  // gate does NOT fire on it and soa stays byte-identical.  Scoped HARD: an
+  // L.2/combo0/phase0/k1==6 batch holding EXACTLY two T and two S surviving
+  // faces, each face's two partners oriented rules carrying side A and side B,
+  // and each face's earliest-key (earliest-arr) partner on side A.  OFF
+  // byte-identical, soa byte-identical.  Advances Meredith firstdiv 13349 ->
+  // beyond.
+  u8    use_l2tail_face_swap;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6606,6 +6631,10 @@ fn void      thvm_atp_set_use_l1_xxdist_interleave(AtpState *s, u8 on);
 // AtpState.use_l1cube_arrival).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1cube_arrival(AtpState *s, u8 on);
+// L.2 weight-18 cube-tail two-face group swap (see
+// AtpState.use_l2tail_face_swap).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l2tail_face_swap(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

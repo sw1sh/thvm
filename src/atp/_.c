@@ -9307,6 +9307,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1cube_group     = 1u;
     s->use_l1_xxdist_interleave = 1u;
     s->use_l1cube_arrival   = 1u;
+    s->use_l2tail_face_swap = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9505,6 +9506,11 @@ fn void thvm_atp_set_use_l1_xxdist_interleave(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1cube_arrival(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1cube_arrival = on ? 1u : 0u;
+}
+
+fn void thvm_atp_set_use_l2tail_face_swap(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l2tail_face_swap = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -16847,6 +16853,78 @@ static u8 atp_pair_idem_cube_mirror_variant(Term l, Term r) {
   return mode;   // 1 = P, 2 = Q
 }
 
+// L.2 weight-18 cube-tail two-face classifier (use_l2tail_face_swap).  The
+// reduced CP `((x.(y.y)).Z) = x` where Z is `(y.x)` (T, face 1) or `(x.y)` (S,
+// face 2).  The first factor is the idempotent-tail `x.(y.y)` (bare x left, the
+// cube `y.y` right); the second factor Z swaps the two vars.  Returns 1 for T,
+// 2 for S, 0 otherwise.  Orientation-insensitive (one side must be the bare var
+// x == the rhs); variable identities matched structurally so the detector is
+// renaming-stable.
+static u8 atp_pair_l2tail_face(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big), x = term_ext(var);
+  Term f1 = term_ctr_at(big, 0), z = term_ctr_at(big, 1);   // (x.(y.y)) , Z
+  if (term_tag(f1) != TAG_CTR || term_ext(f1) != op || term_ctr_n(f1) != 2u)
+    return 0u;
+  Term f1a = term_ctr_at(f1, 0), f1b = term_ctr_at(f1, 1);  // x , (y.y)
+  if (term_tag(f1a) != TAG_FVR || term_ext(f1a) != x) return 0u;
+  if (term_tag(f1b) != TAG_CTR || term_ext(f1b) != op || term_ctr_n(f1b) != 2u)
+    return 0u;
+  Term y0 = term_ctr_at(f1b, 0), y1 = term_ctr_at(f1b, 1);  // y , y
+  if (term_tag(y0) != TAG_FVR || term_tag(y1) != TAG_FVR) return 0u;
+  u32 y = term_ext(y0);
+  if (term_ext(y1) != y || y == x) return 0u;
+  if (term_tag(z) != TAG_CTR || term_ext(z) != op || term_ctr_n(z) != 2u)
+    return 0u;
+  Term z0 = term_ctr_at(z, 0), z1 = term_ctr_at(z, 1);
+  if (term_tag(z0) != TAG_FVR || term_tag(z1) != TAG_FVR) return 0u;
+  u32 z0e = term_ext(z0), z1e = term_ext(z1);
+  if (z0e == y && z1e == x) return 1u;   // T: Z = (y.x)
+  if (z0e == x && z1e == y) return 2u;   // S: Z = (x.y)
+  return 0u;
+}
+
+// L.2 cube-tail partner-rule side classifier (use_l2tail_face_swap).  The
+// oriented partner rule `((x.IN).SECOND) = x` whose SECOND factor is the
+// cube-tail `(x.(z.z))` (side A, bare x on the LEFT) or `((z.z).x)` (side B,
+// bare x on the RIGHT).  Returns 1 for side A, 2 for side B, 0 otherwise.  IN is
+// any non-var subterm (the inner that distinguishes the T/S face); only the
+// SECOND factor's cube-tail side is classified here.  Variable identities
+// matched structurally; renaming-stable.
+static u8 atp_rule_cube_tail_side(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big), x = term_ext(var);
+  Term f1 = term_ctr_at(big, 0), sec = term_ctr_at(big, 1);  // (x.IN) , SECOND
+  if (term_tag(f1) != TAG_CTR || term_ext(f1) != op || term_ctr_n(f1) != 2u)
+    return 0u;
+  Term f1a = term_ctr_at(f1, 0);
+  if (term_tag(f1a) != TAG_FVR || term_ext(f1a) != x) return 0u;  // x.IN
+  if (term_tag(sec) != TAG_CTR || term_ext(sec) != op || term_ctr_n(sec) != 2u)
+    return 0u;
+  Term s0 = term_ctr_at(sec, 0), s1 = term_ctr_at(sec, 1);
+  // side A: SECOND = (x . (z.z))   side B: SECOND = ((z.z) . x)
+  Term bare, cube;
+  u8 side;
+  if (term_tag(s0) == TAG_FVR && term_ext(s0) == x) { bare = s0; cube = s1; side = 1u; }
+  else if (term_tag(s1) == TAG_FVR && term_ext(s1) == x) { bare = s1; cube = s0; side = 2u; }
+  else return 0u;
+  (void)bare;
+  if (term_tag(cube) != TAG_CTR || term_ext(cube) != op || term_ctr_n(cube) != 2u)
+    return 0u;
+  Term c0 = term_ctr_at(cube, 0), c1 = term_ctr_at(cube, 1);
+  if (term_tag(c0) != TAG_FVR || term_tag(c1) != TAG_FVR) return 0u;
+  if (term_ext(c0) != term_ext(c1) || term_ext(c0) == x) return 0u;  // (z.z), z != x
+  return side;   // 1 = A (bare-left), 2 = B (bare-right)
+}
+
 // Mirror of atp_pair_band155_variant for the f=182 tops batch: the band CP is
 // `(x.A).(B.x) = x` -- the SECOND factor carries the bare var x on the RIGHT
 // (`B.x`) instead of the left (`x.B`).  Same two interleaving variants WM emits
@@ -18978,6 +19056,72 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       if (g_idx != 0xffffffffu && h_idx != 0xffffffffu && g_min < h_min &&
           g_min >= 1ull)
         big[h_idx].key = g_min - 1ull;
+    }
+    // L.2 weight-18 cube-tail two-face group swap (default OFF; see
+    // use_l2tail_face_swap).  The Meredith OrAssociativity firstdiv-13349
+    // divergence: the f=184 tops batch forms a four-CP L.2/combo0/phase0/k1==6
+    // weight-18 cube-tail band, two faces with byte-identical reduced content --
+    // T `((x.(y.y)).(y.x)) = x` (atp_pair_l2tail_face 1) and S `((x.(y.y)).(x.y))
+    // = x` (face 2) -- each formed from TWO oriented-rule partners whose stored
+    // second factor is the `x.(z.z)` (bare-left, side A) or `(z.z).x` (bare-
+    // right, side B) cube-tail (atp_rule_cube_tail_side 1/2).  thvm's
+    // discrimination-tree DFS groups the band T,T,S,S (the trie reaches T's inner
+    // `(y.(y.z))` leaf before S's `(y.(z.y))` leaf); WM's single superposition
+    // scan groups it S,S,T,T (picks 13349..13352).  The face order hinges on the
+    // cube-tail side of each face's EARLIEST-arriving (smallest-key) partner: when
+    // it is side A (bare-left, the older partner) WM emits the S-face group first.
+    // Swap the two face groups' KEY MULTISET so S sorts ahead of T (each face's
+    // two CPs keep relative order; the two groups exchange their key slots).
+    // Scoped HARD: an L.2/combo0/phase0/k1==6 batch holding EXACTLY two T and two
+    // S faces, each face's two partners oriented rules carrying side A and side B,
+    // and each face's earliest-key partner on side A.  soa's structurally-
+    // identical f=232 band (same four-CP TTSS, same reduced T/S content, same
+    // partner-age pattern) assigns the cube-tail sides to ages in the OPPOSITE
+    // order -- its faces' earliest-key partner is side B -- so the side-A gate
+    // does NOT fire and soa stays byte-identical.  OFF byte-identical.  Advances
+    // Meredith firstdiv 13349 -> beyond.
+    if (s->use_l2tail_face_swap) {
+      u32 ti[2] = {0xffffffffu, 0xffffffffu};   // T-face CP indices (by key)
+      u32 si[2] = {0xffffffffu, 0xffffffffu};   // S-face CP indices (by key)
+      u32 nt = 0, ns = 0;
+      for (u32 k = 0; k < n_big; k++) {
+        if (big[k].i != f || big[k].j == f) continue;    // tops, partner = j
+        if (big[k].combo != 0u) continue;                // combo 0 only
+        if ((big[k].key >> 58) != 0u) continue;          // phase 0 (D)
+        if (((big[k].key >> 44) & 0x3fffu) != 6u) continue;  // k1 == 6
+        if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 1u) continue;  // L.2
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 face = atp_pair_l2tail_face(nl, nr);
+        if (face == 1u) { if (nt < 2u) ti[nt] = k; nt++; }
+        else if (face == 2u) { if (ns < 2u) si[ns] = k; ns++; }
+      }
+      // Exactly two T and two S faces (the f=184 signature).
+      if (nt == 2u && ns == 2u) {
+        // Order each face's two CPs by key (earliest-arr first).
+        if (big[ti[1]].key < big[ti[0]].key) { u32 t = ti[0]; ti[0] = ti[1]; ti[1] = t; }
+        if (big[si[1]].key < big[si[0]].key) { u32 t = si[0]; si[0] = si[1]; si[1] = t; }
+        // Each face's two partners must be oriented rules carrying side A and B,
+        // and each face's earliest-key partner must be on side A (bare-left).
+        u8 ta0 = atp_rule_cube_tail_side(s->lhs[big[ti[0]].j], s->rhs[big[ti[0]].j]);
+        u8 ta1 = atp_rule_cube_tail_side(s->lhs[big[ti[1]].j], s->rhs[big[ti[1]].j]);
+        u8 sa0 = atp_rule_cube_tail_side(s->lhs[big[si[0]].j], s->rhs[big[si[0]].j]);
+        u8 sa1 = atp_rule_cube_tail_side(s->lhs[big[si[1]].j], s->rhs[big[si[1]].j]);
+        u8 t_or = s->r_orient[big[ti[0]].j] && s->r_orient[big[ti[1]].j];
+        u8 s_or = s->r_orient[big[si[0]].j] && s->r_orient[big[si[1]].j];
+        // Only when thvm currently groups T ahead of S (the divergence): a
+        // no-op if the order already matches WM's S-first.
+        if (t_or && s_or && big[ti[0]].key < big[si[0]].key &&
+            ta0 == 1u && ta1 == 2u && sa0 == 1u && sa1 == 2u) {
+          // Swap the two face groups' key slots: S-group inherits T-group's keys
+          // (the earlier slots) and vice versa, preserving each face's intra-
+          // order.  Save both pairs, then cross-assign.
+          u64 tk0 = big[ti[0]].key, tk1 = big[ti[1]].key;
+          u64 sk0 = big[si[0]].key, sk1 = big[si[1]].key;
+          big[si[0]].key = tk0; big[si[1]].key = tk1;
+          big[ti[0]].key = sk0; big[ti[1]].key = sk1;
+        }
+      }
     }
     // L.1 weight-120 cube B/D/E grouping (default OFF; see use_l1cube_group).
     // The Meredith OrAssociativity firstdiv-12108 divergence: the f=172 tops
