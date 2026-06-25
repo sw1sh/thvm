@@ -1140,6 +1140,13 @@ int main(int argc, char **argv) {
       // below).  See soa.txt.
       thvm_atp_set_use_l2_selfcube_defer(
           s, (getenv("THVM_ATP_L2_SELFCUBE_DEFER") != NULL) ? 1u : 0u);
+      // L.1.2 weight-155 band interleave (DEFAULT OFF): re-key the f=170
+      // L.1.2/combo1 weight-155 band CPs (variants G/H) onto a round-robin
+      // interleave, matching WM's CP-formation emission -- the Meredith
+      // OrAssociativity firstdiv-11894 divergence.  THVM_ATP_L12_BAND155 opts in
+      // (also turned on by FORMATION_FIFO below).  See soa.txt.
+      thvm_atp_set_use_l12_band155(
+          s, (getenv("THVM_ATP_L12_BAND155") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /

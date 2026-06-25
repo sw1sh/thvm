@@ -5985,6 +5985,22 @@ typedef struct {
   // fires NEVER on soa (inherently soa-safe).  OFF byte-identical.  Advances
   // Meredith firstdiv 11847 -> beyond.
   u8    use_l2_selfcube_defer;
+  // L.1.2 weight-155 band interleave (env THVM_ATP_L12_BAND155, default OFF;
+  // also turned ON under use_formation_fifo).  The Meredith OrAssociativity
+  // firstdiv-11894 divergence: the f=170 tops batch forms a weight-155
+  // L.1.2/combo1 band with two interleaving variants G `(x.((y.y).z)).(x.z) = x`
+  // and H `(x.(y.(z.z))).(x.y) = x` (atp_pair_band155_variant 1/2).  WM's single
+  // superposition scan emits them round-robin (G,H,G,H -- WM picks 11893..11896
+  // = G,H,G,H); thvm sorts by the partner equation's arrival, GROUPING them
+  // (G,G,H,H).  Re-key the band CPs onto a (round, variant) interleave (round =
+  // count of EARLIER same-variant band CPs in this batch's key order, variant
+  // rank G<H), the same round-robin idiom as use_band_interleave but at the
+  // L.1.2/combo1 position.  The band CPs keep their key SLOTS (the multiset is
+  // permuted only among themselves).  Scoped HARD to L.1.2 (pos [0,1]), combo==1,
+  // normalized-CP == G or H -- the exact f=170 band signature.  OFF
+  // byte-identical, soa byte-identical.  Advances Meredith firstdiv 11894 ->
+  // beyond.
+  u8    use_l12_band155;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6451,6 +6467,9 @@ fn void      thvm_atp_set_use_l1_xxx_cube_defer(AtpState *s, u8 on);
 // AtpState.use_l2_selfcube_defer).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
 fn void      thvm_atp_set_use_l2_selfcube_defer(AtpState *s, u8 on);
+// L.1.2 weight-155 band interleave (see AtpState.use_l12_band155).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l12_band155(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

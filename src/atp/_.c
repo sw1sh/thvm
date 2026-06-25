@@ -9299,6 +9299,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l22_xxdist_defer = 1u;
     s->use_l1_xxx_cube_defer = 1u;
     s->use_l2_selfcube_defer = 1u;
+    s->use_l12_band155      = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9413,6 +9414,16 @@ fn void thvm_atp_set_use_l1_xxx_cube_defer(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l2_selfcube_defer(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l2_selfcube_defer = on ? 1u : 0u;
+}
+
+// L.1.2 weight-155 band interleave (see AtpState.use_l12_band155): re-key the
+// f=170 L.1.2/combo1 weight-155 band CPs (variants G `(x.((y.y).z)).(x.z) = x`
+// and H `(x.(y.(z.z))).(x.y) = x`) onto a (round, variant) interleave, matching
+// WM's round-robin CP-formation emission.  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void thvm_atp_set_use_l12_band155(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l12_band155 = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -16654,6 +16665,58 @@ static u8 atp_pair_is_fwd_cube(Term l, Term r) {
   return 0u;
 }
 
+// Weight-155 L.1.2 band CP variant detector for the Meredith OrAssociativity
+// f=170 tops batch.  The band CP is `(x.A).(x.B) = x` -- a left factor `x.A`
+// dotted with a right factor `x.B`, equal to the bare outer var x -- with two
+// interleaving variants WM emits round-robin (thvm groups them by partner
+// arrival):
+//   G: `(x.((y.y).z)).(x.z) = x`  -> A = (y.y).z, B = z   (thvm seq 60774/60775)
+//   H: `(x.(y.(z.z))).(x.y) = x`  -> A = y.(z.z), B = y   (thvm seq 60776/60777)
+// Returns 1 for G, 2 for H, 0 otherwise.  Orientation-insensitive (the bare-var
+// side is either l or r); variable identities matched structurally so the
+// detector is renaming-stable (x, y, z three distinct vars).
+static u8 atp_pair_band155_variant(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big), x = term_ext(var);
+  Term lf = term_ctr_at(big, 0), rf = term_ctr_at(big, 1);   // (x.A) , (x.B)
+  if (term_tag(lf) != TAG_CTR || term_ext(lf) != op || term_ctr_n(lf) != 2u)
+    return 0u;
+  if (term_tag(rf) != TAG_CTR || term_ext(rf) != op || term_ctr_n(rf) != 2u)
+    return 0u;
+  Term lx = term_ctr_at(lf, 0), A = term_ctr_at(lf, 1);      // x , A
+  Term rx = term_ctr_at(rf, 0), B = term_ctr_at(rf, 1);      // x , B
+  if (term_tag(lx) != TAG_FVR || term_ext(lx) != x) return 0u;
+  if (term_tag(rx) != TAG_FVR || term_ext(rx) != x) return 0u;
+  if (term_tag(A) != TAG_CTR || term_ext(A) != op || term_ctr_n(A) != 2u)
+    return 0u;
+  Term a0 = term_ctr_at(A, 0), a1 = term_ctr_at(A, 1);
+  // G: A = (y.y).z (a0 = (y.y) idempotent leaf, a1 = z bare), B = z.
+  if (term_tag(a0) == TAG_CTR && term_ext(a0) == op && term_ctr_n(a0) == 2u &&
+      term_tag(a1) == TAG_FVR && term_tag(B) == TAG_FVR) {
+    Term y0 = term_ctr_at(a0, 0), y1 = term_ctr_at(a0, 1);
+    if (term_tag(y0) == TAG_FVR && term_tag(y1) == TAG_FVR &&
+        term_ext(y0) == term_ext(y1)) {
+      u32 y = term_ext(y0), z = term_ext(a1);
+      if (y != x && z != x && y != z && term_ext(B) == z) return 1u;   // G
+    }
+  }
+  // H: A = y.(z.z) (a0 = y bare, a1 = (z.z) idempotent leaf), B = y.
+  if (term_tag(a0) == TAG_FVR && term_tag(a1) == TAG_CTR &&
+      term_ext(a1) == op && term_ctr_n(a1) == 2u && term_tag(B) == TAG_FVR) {
+    Term z0 = term_ctr_at(a1, 0), z1 = term_ctr_at(a1, 1);
+    if (term_tag(z0) == TAG_FVR && term_tag(z1) == TAG_FVR &&
+        term_ext(z0) == term_ext(z1)) {
+      u32 y = term_ext(a0), z = term_ext(z0);
+      if (y != x && z != x && y != z && term_ext(B) == y) return 2u;   // H
+    }
+  }
+  return 0u;
+}
+
 // Classify a 2-variable leaf factor X = f(a, b) as a band variant relative to
 // the bare variable x (the other variable y is the one that is not x):
 //   1 = (x.y)   2 = (y.x)   3 = (y.y)
@@ -18307,11 +18370,68 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // defer is gated on the EXACT f=170 group structure: a HIGHER-keyed
     // weight-120 fwd_cube AND a HIGHER-keyed weight-120 posgroup_cube both
     // present in the same group.  soa has ZERO L.2/combo0/k2==0 distinct-var
-    // self-cube-equality CPs with both a higher fwd AND a higher posgroup cube
-    // (its 60 L.2 self-cube cases are all fwd-only or cube-free), so this
-    // structure gate fires NEVER on soa (inherently soa-safe).  OFF
-    // byte-identical, soa byte-identical.  Advances Meredith firstdiv 11847 ->
-    // beyond.
+    // L.1.2 weight-155 band interleave (default OFF; see use_l12_band155).  The
+    // Meredith OrAssociativity firstdiv-11894 divergence: the f=170 tops batch
+    // forms a weight-155 L.1.2/combo1 band with two interleaving variants G
+    // `(x.((y.y).z)).(x.z) = x` and H `(x.(y.(z.z))).(x.y) = x`
+    // (atp_pair_band155_variant 1/2).  WM's single superposition scan emits them
+    // round-robin (G,H,G,H -- WM picks 11893..11896); thvm sorts by the partner
+    // equation's arrival, GROUPING them (G,G,H,H).  Re-key onto a (round,
+    // variant) interleave -- round = count of EARLIER same-variant band CPs in
+    // the current key order, variant rank G(1)<H(2) -- so they sort G,H,G,H.
+    // The band CPs keep their key SLOTS (the multiset is permuted only among
+    // themselves), the same round-robin idiom as use_band_interleave but at the
+    // L.1.2/combo1 position.  Scoped HARD to L.1.2 (pos [0,1]), combo==1,
+    // normalized-CP == G or H.  OFF byte-identical, soa byte-identical.  Advances
+    // Meredith firstdiv 11894 -> beyond.
+    if (s->use_l12_band155) {
+      enum { B155_CAP = 64u };
+      u32 b155_idx[B155_CAP];
+      u8  b155_var[B155_CAP];
+      u64 b155_key[B155_CAP];
+      u32 n155 = 0;
+      for (u32 k = 0; k < n_big && n155 < B155_CAP; k++) {
+        if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
+        if (big[k].combo != 1u) continue;                 // combo 1 only
+        if (big[k].cp.pos_len != 2u ||
+            big[k].cp.pos[0] != 0u || big[k].cp.pos[1] != 1u) continue;  // L.1.2
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 var = atp_pair_band155_variant(nl, nr);
+        if (var == 0u) continue;
+        b155_idx[n155] = k;
+        b155_var[n155] = var;
+        b155_key[n155] = big[k].key;
+        n155++;
+      }
+      if (n155 >= 2u) {
+        // Sort the band entries by current key (ascending).
+        for (u32 a = 0; a + 1u < n155; a++)
+          for (u32 b = a + 1u; b < n155; b++)
+            if (b155_key[b] < b155_key[a]) {
+              u64 tk = b155_key[a]; b155_key[a] = b155_key[b]; b155_key[b] = tk;
+              u32 ti = b155_idx[a]; b155_idx[a] = b155_idx[b]; b155_idx[b] = ti;
+              u8  tv = b155_var[a]; b155_var[a] = b155_var[b]; b155_var[b] = tv;
+            }
+        // (round, variant) rank: round = count of earlier same-variant CPs.
+        u32 round[B155_CAP];
+        u32 seen[3] = {0, 0, 0};
+        for (u32 a = 0; a < n155; a++) { round[a] = seen[b155_var[a]]; seen[b155_var[a]]++; }
+        // order = entries sorted by (round, variant_rank), each variant G<H.
+        u32 order[B155_CAP];
+        for (u32 a = 0; a < n155; a++) order[a] = a;
+        for (u32 a = 0; a + 1u < n155; a++)
+          for (u32 b = a + 1u; b < n155; b++) {
+            u32 pa = order[a], pb = order[b];
+            u32 ka = round[pa] * 2u + (b155_var[pa] - 1u);
+            u32 kb = round[pb] * 2u + (b155_var[pb] - 1u);
+            if (kb < ka) { order[a] = pb; order[b] = pa; }
+          }
+        // Re-assign the sorted key slots in (round, variant) order.
+        for (u32 a = 0; a < n155; a++)
+          big[b155_idx[order[a]]].key = b155_key[a];
+      }
+    }
     if (s->use_l2_selfcube_defer) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
       for (u32 kd = 0; kd < n_big; kd++) {
