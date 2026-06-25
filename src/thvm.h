@@ -6012,6 +6012,29 @@ typedef struct {
   // L.2, so the swap is soa byte-identical.  OFF byte-identical.  Advances
   // Meredith firstdiv 12096 -> beyond.
   u8    use_l1swap109;
+  // L.1 weight-120 cube B/D/E grouping (see thvm_atp_set_use_l1cube_group).  The
+  // Meredith OrAssociativity firstdiv-12108 divergence: the f=172 tops batch
+  // forms a weight-120 L.1/combo0/phase0/k2==0 cube band whose seven surviving
+  // CPs thvm keys (by CP age) into the INTERLEAVED order B,B,D,B,D,E,D -- where
+  // B `x.x = x.(y.(y.y))` (atp_pair_is_fwd_cube), D `x.x = (y.(y.y)).x`
+  // (atp_pair_is_posgroup_cube), E `(x.x).x = y.(y.y)` (atp_pair_is_xxx_self_cube).
+  // WM's single superposition scan GROUPS the band by shape, ageing all B's
+  // first, then all D's, then the left-triple member (WM emits B,B,B,D,D,D,S,
+  // picks 12106-12112).  Two survivors are not yet in cube form at batch time:
+  // the third B is the wrapped precursor `((x.(y.(y.y))).z).x = x.(y.(y.y))`
+  // (atp_pair_is_fwd_cube_wrap) and the third D is `(((x.(x.x)).y).z).y =
+  // (x.(x.x)).y` (atp_pair_is_posgroup_wrap).  Re-key the band's B/D/E members in
+  // (B, D, E) class order (each class keeping its within-class key order) so the
+  // surviving B's sort ahead of the surviving D's ahead of the E left-triple
+  // member.  Same pool-rekey idiom as use_l1_cube_rotate.  Scoped HARD to an
+  // L.1/combo0/phase0/k2==0 group holding ALL of B, D, AND an E member whose B/D
+  // members are key-INTERLEAVED (not already B*D*) -- the exact f=172 signature.
+  // The E presence-gate occurs at this position only in the Meredith f=170/f=172
+  // batches (same gate as the soa-byte-identical use_l1_xxx_cube_defer), so soa
+  // forms no such interleaved B+D+E cube band.  OFF byte-identical, soa
+  // byte-identical.  Advances Meredith firstdiv 12108 -> beyond (to the band's
+  // 7th-slot E-vs-S content delta).
+  u8    use_l1cube_group;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6484,6 +6507,9 @@ fn void      thvm_atp_set_use_l12_band155(AtpState *s, u8 on);
 // L.1 inner-swap reorder (see AtpState.use_l1swap109).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1swap109(AtpState *s, u8 on);
+// L.1 weight-120 cube B/D/E grouping (see AtpState.use_l1cube_group).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l1cube_group(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

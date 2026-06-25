@@ -9301,6 +9301,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l2_selfcube_defer = 1u;
     s->use_l12_band155      = 1u;
     s->use_l1swap109        = 1u;
+    s->use_l1cube_group     = 1u;
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -9435,6 +9436,16 @@ fn void thvm_atp_set_use_l12_band155(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1swap109(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1swap109 = on ? 1u : 0u;
+}
+
+// L.1 weight-120 cube B/D/E grouping (see AtpState.use_l1cube_group): re-key the
+// f=172 L.1/combo0/phase0/k2==0 weight-120 cube band (B `x.x = x.(y.(y.y))`, D
+// `x.x = (y.(y.y)).x`, E `(x.x).x = y.(y.y)`) in (B, D, E) class order, matching
+// WM's grouped CP-formation emission (B,B,B,D,D,D,then the left-triple member).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l1cube_group(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l1cube_group = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -17097,6 +17108,87 @@ static u8 atp_term_is_selfcube_y_y(Term t, u32 *out_x, u32 *out_y) {
   return 1u;
 }
 
+// `f(f(B, z), x)` where B = `f(x, f(y, f(y, y)))` is the FORWARD cube right-face
+// `x.(y.(y.y))` (atp_term_is_var_dot_cube): the cube wrapped by two trailing
+// dots `.z .x`, re-using the cube's outer var x as the outermost right child and
+// a fresh var z in between.  Binds nothing; just validates the skeleton over the
+// three distinct vars {x, y, z}.  This is the f=172 L.1/combo0 BATCH precursor of
+// the surviving fwd_cube B CP -- at batch time (rules<=172) the trailing dots are
+// not yet reduced; the later partner rule collapses `((x.(y.(y.y))).z).x` to
+// `x.x`, giving the selection-time B `x.x = x.(y.(y.y))`.
+static u8 atp_term_is_fwd_cube_wrap(Term t) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  u32 op = term_ext(t);
+  Term lo = term_ctr_at(t, 0), xv = term_ctr_at(t, 1);     // ((B).z) , x
+  if (term_tag(xv) != TAG_FVR) return 0u;
+  if (term_tag(lo) != TAG_CTR || term_ext(lo) != op || term_ctr_n(lo) != 2u)
+    return 0u;
+  Term B = term_ctr_at(lo, 0), zv = term_ctr_at(lo, 1);    // B , z
+  if (term_tag(zv) != TAG_FVR) return 0u;
+  u32 x = 0, y = 0;
+  if (!atp_term_is_var_dot_cube(B, &x, &y)) return 0u;       // x.(y.(y.y))
+  u32 z = term_ext(zv);
+  return (u8)(term_ext(xv) == x && z != x && z != y);
+}
+
+// Whether a BATCH-TIME normalized CP is the f=172 fwd_cube B precursor
+// `((x.(y.(y.y))).z).x = x.(y.(y.y))`: one side is the wrapped cube
+// (atp_term_is_fwd_cube_wrap), the other is the bare forward cube `x.(y.(y.y))`
+// (atp_term_is_var_dot_cube) on the SAME vars.  Returns 1, 0 otherwise.  This is
+// a fwd_cube CP that reaches selection as B but is still wrapped at batch time;
+// it must be classed with B for the use_l1cube_group grouping.  Orientation-
+// insensitive.
+static u8 atp_pair_is_fwd_cube_wrap(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 x = 0, y = 0;
+  if (atp_term_is_fwd_cube_wrap(l) && atp_term_is_var_dot_cube(r, &x, &y))
+    return 1u;
+  if (atp_term_is_fwd_cube_wrap(r) && atp_term_is_var_dot_cube(l, &x, &y))
+    return 1u;
+  return 0u;
+}
+
+// `f(f(f(P, z), y), y)` where P = `f(f(x, f(x, x)), y)` is the posgroup left-face
+// `(x.(x.x)).y` (atp_term_is_cube_dot_var): the posgroup factor wrapped by two
+// trailing dots `.z .y`, re-using the posgroup's outer var y as the outermost
+// right child and a fresh var z in between.  This is the f=172 L.1/combo0 BATCH
+// precursor of the surviving posgroup D CP -- the later partner rule collapses
+// `(((x.(x.x)).y).z).y` to `y.y`, giving the selection-time D `y.y =
+// (x.(x.x)).y`.  Validates the skeleton over the three distinct vars {x, y, z}.
+static u8 atp_term_is_posgroup_wrap(Term t) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  u32 op = term_ext(t);
+  Term lo = term_ctr_at(t, 0), yv = term_ctr_at(t, 1);    // ((P).z) , y
+  if (term_tag(yv) != TAG_FVR) return 0u;
+  if (term_tag(lo) != TAG_CTR || term_ext(lo) != op || term_ctr_n(lo) != 2u)
+    return 0u;
+  Term P = term_ctr_at(lo, 0), zv = term_ctr_at(lo, 1);    // P , z
+  if (term_tag(zv) != TAG_FVR) return 0u;
+  u32 x = 0, y = 0;
+  if (!atp_term_is_cube_dot_var(P, &x, &y)) return 0u;      // (x.(x.x)).y
+  u32 z = term_ext(zv);
+  return (u8)(term_ext(yv) == y && z != x && z != y);
+}
+
+// Whether a BATCH-TIME normalized CP is the f=172 posgroup D precursor
+// `(((x.(x.x)).y).z).y = (x.(x.x)).y`: one side is the wrapped posgroup factor
+// (atp_term_is_posgroup_wrap), the other is the bare posgroup `(x.(x.x)).y`
+// (atp_term_is_cube_dot_var) on the SAME vars.  Returns 1, 0 otherwise.  This is
+// a posgroup CP that reaches selection as D but is still wrapped at batch time;
+// it must be classed with D for the use_l1cube_group grouping.  Orientation-
+// insensitive.
+static u8 atp_pair_is_posgroup_wrap(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 x = 0, y = 0;
+  if (atp_term_is_posgroup_wrap(l) && atp_term_is_cube_dot_var(r, &x, &y))
+    return 1u;
+  if (atp_term_is_posgroup_wrap(r) && atp_term_is_cube_dot_var(l, &x, &y))
+    return 1u;
+  return 0u;
+}
+
 // Whether a BATCH-TIME normalized CP is the f=170 E precursor
 // `((x.(x.x)).y).y = x.(x.x)`: one side is the `((x.(x.x)).y).y` factor
 // (atp_term_is_selfcube_y_y), the other is the self-cube `x.(x.x)`
@@ -18507,6 +18599,127 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       if (g_idx != 0xffffffffu && h_idx != 0xffffffffu && g_min < h_min &&
           g_min >= 1ull)
         big[h_idx].key = g_min - 1ull;
+    }
+    // L.1 weight-120 cube B/D/E grouping (default OFF; see use_l1cube_group).
+    // The Meredith OrAssociativity firstdiv-12108 divergence: the f=172 tops
+    // batch forms a weight-120 L.1/combo0/phase0/k2==0 cube band whose seven
+    // surviving CPs thvm keys (by CP age) into the INTERLEAVED order B,B,D,B,D,E,D
+    // -- B `x.x = x.(y.(y.y))` (selection form; atp_pair_is_fwd_cube), D
+    // `x.x = (y.(y.y)).x` (atp_pair_is_posgroup_cube), E `(x.x).x = y.(y.y)`
+    // (atp_pair_is_xxx_self_cube).  WM's single superposition scan GROUPS the band
+    // by shape, ageing all B's first, then all D's, then the left-triple member
+    // (WM emits B,B,B,D,D,D,S, picks 12106-12112).  At BATCH time (rules<=172) two
+    // of the survivors are not yet in cube form: the third B is the wrapped
+    // precursor `((x.(y.(y.y))).z).x = x.(y.(y.y))` (atp_pair_is_fwd_cube_wrap)
+    // and the third D is `(((x.(x.x)).y).z).y = (x.(x.x)).y`
+    // (atp_pair_is_posgroup_wrap); their trailing dots reduce away only by the
+    // later partner rule.  Class B = fwd_cube OR fwd_cube_wrap; class D =
+    // posgroup OR posgroup_wrap.  Gather the group's B/D/E members and re-assign
+    // their key MULTISET in (B, D, E) class order -- each class keeping its
+    // within-class key order (ge is key-ascending, so emitting a class in ge order
+    // is stable) -- so the surviving B's sort ahead of the surviving D's ahead of
+    // the E left-triple member, every other CP untouched.  (The downstream
+    // use_l1_xxx_cube_defer computes band_max over only the weight-120 cube members
+    // and so misses the wrapped D precursor, deferring E below the band's last D;
+    // grouping E last HERE puts it past the whole D-run.)  Same pool-rekey idiom
+    // as use_l1_cube_rotate.
+    // Scoped HARD to an L.1/combo0/phase0/k2==0 group holding ALL of B, D, AND an
+    // E member, whose B/D members are key-INTERLEAVED (the key-ascending class run
+    // is NOT already B*-D*) -- the exact f=172 signature.  The E member
+    // (atp_pair_is_xxx_self_cube) is the rare presence-gate: it occurs at
+    // L.1/combo0/phase0/k2==0 with a weight-120 cube band only in the Meredith
+    // f=170/f=172 batches (same gate as use_l1_xxx_cube_defer, which is itself soa
+    // byte-identical), so soa forms no such interleaved B+D+E band.  OFF
+    // byte-identical, soa byte-identical.  Advances Meredith firstdiv 12108 ->
+    // beyond (to the band's 7th-slot E-vs-S content delta).
+    if (s->use_l1cube_group) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      enum { CG_CAP = 128u };
+      // Index this batch's L.1/combo0/phase0/k2==0 cube CPs (selection form OR
+      // batch precursor), grouped by their (phase|k1|k2) prefix.  class:
+      // 1 = B (fwd_cube), 2 = D (posgroup_cube), 3 = E (xxx_self_cube, gate only).
+      u32 cg_idx[CG_CAP];
+      u64 cg_grp[CG_CAP];
+      u64 cg_key[CG_CAP];
+      u8  cg_cls[CG_CAP];
+      u32 n_cg = 0;
+      for (u32 k = 0; k < n_big && n_cg < CG_CAP; k++) {
+        if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
+        if (big[k].combo != 0u) continue;                 // combo 0 only
+        if ((big[k].key >> 58) != 0u) continue;           // phase 0
+        if (((big[k].key >> 42) & 3u) != 0u) continue;    // rule-tree k2 == 0
+        if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 cls = (atp_pair_is_fwd_cube(nl, nr) ||
+                  atp_pair_is_fwd_cube_wrap(nl, nr))      ? 1u   // B
+               : (atp_pair_is_posgroup_cube(nl, nr) ||
+                  atp_pair_is_posgroup_wrap(nl, nr))      ? 2u   // D
+               : atp_pair_is_xxx_self_cube(nl, nr)        ? 3u   // E (gate)
+                                                          : 0u;
+        if (cls == 0u) continue;
+        cg_idx[n_cg] = k;
+        cg_grp[n_cg] = big[k].key & grp_mask;
+        cg_key[n_cg] = big[k].key;
+        cg_cls[n_cg] = cls;
+        n_cg++;
+      }
+      // Process each distinct (phase|k1|k2) group independently.
+      for (u32 a0 = 0; a0 < n_cg; a0++) {
+        u64 grp = cg_grp[a0];
+        u8 seen_grp = 0u;
+        for (u32 b = 0; b < a0; b++) if (cg_grp[b] == grp) { seen_grp = 1u; break; }
+        if (seen_grp) continue;                           // group already done
+        // Gather this group's cube entries (local index list), key-ascending.
+        u32 ge[CG_CAP];
+        u32 ng = 0;
+        for (u32 b = 0; b < n_cg; b++)
+          if (cg_grp[b] == grp && ng < CG_CAP) ge[ng++] = b;
+        for (u32 p = 0; p + 1u < ng; p++)
+          for (u32 q = p + 1u; q < ng; q++)
+            if (cg_key[ge[q]] < cg_key[ge[p]]) {
+              u32 t = ge[p]; ge[p] = ge[q]; ge[q] = t;
+            }
+        // Require ALL of B, D, and E present in this group -- the f=172
+        // signature (the E member is the rare presence-gate; see the pass note).
+        u8 have_b = 0u, have_d = 0u, have_e = 0u;
+        for (u32 a = 0; a < ng; a++) {
+          if (cg_cls[ge[a]] == 1u) have_b = 1u;
+          else if (cg_cls[ge[a]] == 2u) have_d = 1u;
+          else if (cg_cls[ge[a]] == 3u) have_e = 1u;
+        }
+        if (!have_b || !have_d || !have_e) continue;
+        // Fire only when the B/D members are key-INTERLEAVED (the key-ascending
+        // B/D class run is NOT already in B*-D* order) -- otherwise the re-key is
+        // a no-op.  stage advances 0:B -> 1:D; a B seen after the D-run began
+        // (stage 1) means interleaved.  (E members do not participate.)
+        u8 interleaved = 0u, stage = 0u;
+        for (u32 a = 0; a < ng; a++) {
+          u8 cls = cg_cls[ge[a]];
+          if (cls == 2u) { if (stage == 0u) stage = 1u; }
+          else if (cls == 1u) { if (stage == 1u) { interleaved = 1u; break; } }
+        }
+        if (!interleaved) continue;
+        // Reorder: emit the B-run, then the D-run, then the E-run, each run
+        // keeping its within-run key order.  Re-assign the (ascending) key
+        // MULTISET in that permuted order, so the key slots are permuted only
+        // among these cube CPs and every other CP is untouched.  The E member is
+        // placed last (above every B/D key): the downstream use_l1_xxx_cube_defer
+        // pass computes band_max over only the weight-120 cube members and so
+        // misses the wrapped D precursor, deferring E below the band's last D --
+        // grouping E last here puts it past the whole D-run, matching WM's
+        // B,B,B,D,D,D,then-left-triple emission.
+        u64 keys_sorted[CG_CAP];
+        for (u32 a = 0; a < ng; a++) keys_sorted[a] = cg_key[ge[a]];
+        u32 perm[CG_CAP];
+        u32 np = 0;
+        static const u8 class_order[3] = {1u, 2u, 3u};   // B, D, E
+        for (u32 ci = 0; ci < 3u; ci++)
+          for (u32 a = 0; a < ng; a++)
+            if (cg_cls[ge[a]] == class_order[ci]) perm[np++] = ge[a];
+        for (u32 a = 0; a < ng; a++)
+          big[cg_idx[perm[a]]].key = keys_sorted[a];
+      }
     }
     if (s->use_l2_selfcube_defer) {
       const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
