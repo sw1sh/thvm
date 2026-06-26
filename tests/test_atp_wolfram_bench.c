@@ -1174,6 +1174,16 @@ int main(int argc, char **argv) {
       // below).  Scoped HARD to the WolframAxioms seed.
       thvm_atp_set_use_wolf_collapse_defer(
           s, (getenv("THVM_ATP_WOLF_COLLAPSE_DEFER") != NULL) ? 1u : 0u);
+      // WolframAxioms self-root vs axiom-partner formation swap (DEFAULT OFF):
+      // at the weight-1520 firstdiv-862 band re-key the phase-2 root
+      // self-overlap (combo=0, ovPos=L, unoriented inner -- WM aP==oP) just
+      // above its unoriented phase-4 axiom-partner twin (combo=2, ovPos=L --
+      // WM aP=-2 oP=-1) in the SAME batch, so the partner ages first (WM's
+      // pick-862) and the self-root takes WM's later slot (pick-870).
+      // THVM_ATP_WOLF_SELFROOT_DEFER opts in (also turned on by FORMATION_FIFO
+      // below).  Scoped HARD to the WolframAxioms seed.
+      thvm_atp_set_use_wolf_selfroot_defer(
+          s, (getenv("THVM_ATP_WOLF_SELFROOT_DEFER") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /

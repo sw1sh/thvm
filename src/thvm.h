@@ -6500,6 +6500,22 @@ typedef struct {
   u8    wolf_axiom_is_live_cache;
   u32   wolf_axiom_cache_revision;
   u32   n_cps_wolf_collapse_defer;  // diagnostics: early eTT collapse-copy defers
+  // WolframAxioms self-root vs axiom-partner formation-order swap (env
+  // THVM_ATP_WOLF_SELFROOT_DEFER, default OFF; also turned ON under
+  // use_formation_fifo).  At the firstdiv-862 weight-1520 band the new fact f
+  // overlaps onto ITSELF (combo=0 F-phase root self-overlap, ovPos=L, an
+  // unoriented inner -- WM aP==oP) AND onto an axiom partner (combo=2 eTTE,
+  // ovPos=L, WM aP=-2 oP=-1); both reduce to the SAME content.  thvm's batch
+  // sort keys the phase-2 self-root BELOW the phase-4 axiom-partner, so the
+  // self-root heads the band (cp_seq 132051 < 132052) and selects at pick 862
+  // where WM selects the axiom-partner; WM ages the axiom-partner first and
+  // defers the self-root to pick 870.  This formation re-key splices the
+  // self-root's key just ABOVE its unoriented axiom-partner twin in the SAME
+  // batch, so the partner ages first and the self-root takes WM's later slot.
+  // Scoped HARD to the WolframAxioms seed; OFF byte-identical.  Advances
+  // WolframAxioms OrAssociativity firstdiv 862 -> further.
+  u8    use_wolf_selfroot_defer;
+  u32   n_cps_wolf_selfroot_defer;  // diagnostics: self-root formation re-keys
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -7031,6 +7047,10 @@ fn void      thvm_atp_set_use_l2_selfcube_dist_defer(AtpState *s, u8 on);
 // AtpState.use_wolf_collapse_defer).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
 fn void      thvm_atp_set_use_wolf_collapse_defer(AtpState *s, u8 on);
+// WolframAxioms self-root vs axiom-partner formation-order swap (see
+// AtpState.use_wolf_selfroot_defer).  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void      thvm_atp_set_use_wolf_selfroot_defer(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

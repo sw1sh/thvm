@@ -9448,6 +9448,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l2_selfcube_dist_defer = 1u;
     s->use_l1cube_joinform  = 1u;
     s->use_wolf_collapse_defer = 1u;
+    s->use_wolf_selfroot_defer = 1u;
     // Bisection knob (THVM_ATP_CUBE_DETECTORS_OFF=1): drop the post-10030
     // Meredith cube/corank re-key cluster (the L.1/L.2 detectors layered atop
     // the base FormationFifo k3-arrival passes) so the upstream overlap-geometry
@@ -9777,6 +9778,17 @@ fn void thvm_atp_set_use_l2_selfcube_dist_defer(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_wolf_collapse_defer(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_wolf_collapse_defer = on ? 1u : 0u;
+}
+
+// WolframAxioms self-root vs axiom-partner formation-order swap (see
+// use_wolf_selfroot_defer): at the weight-1520 firstdiv-862 band re-key the
+// phase-2 root self-overlap (combo=0, ovPos=L, unoriented inner) just ABOVE its
+// unoriented phase-4 axiom-partner twin (combo=2, ovPos=L) in the SAME batch, so
+// the axiom-partner ages first (WM's pick-862) and the self-root takes WM's later
+// slot (pick-870).  DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_wolf_selfroot_defer(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wolf_selfroot_defer = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -20930,6 +20942,46 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         // Re-assign the ascending key-slot multiset in raw-arrival order.
         for (u32 a = 0; a < ng; a++)
           big[ge[order[a]]].key = gkey[a];
+      }
+    }
+    // WolframAxioms self-root vs axiom-partner formation swap (see
+    // use_wolf_selfroot_defer).  At the firstdiv-862 weight-1520 band the new
+    // fact f forms two CPs reducing to the SAME content from DIFFERENT lineage:
+    //   - the root self-overlap (i==j==f, combo=0 F-phase, ovPos=L depth-0, an
+    //     unoriented inner -- WM cpnr=133585 aP==oP==-2), phase 2; and
+    //   - the eTTE axiom-partner overlap (i==f, j!=f unoriented, combo=2,
+    //     ovPos=L depth-0 -- WM cpnr=132107 aP=-2 oP=-1), phase 4.
+    // thvm's batch sort keys the phase-2 self-root BELOW the phase-4 partner, so
+    // the self-root heads the band (cp_seq 132051 < 132052) and is selected at
+    // pick 862 where WM selects the axiom-partner; WM ages the axiom-partner
+    // first and defers the self-root to pick 870.  Re-key the self-root just
+    // ABOVE its unoriented axiom-partner twin in this SAME batch so the partner
+    // ages first and the self-root takes WM's later slot.  Scoped HARD to the
+    // WolframAxioms seed; OFF byte-identical.
+    if (s->use_wolf_selfroot_defer && !s->r_orient[f] &&
+        atp_wolfram_axiom_is_live(s)) {
+      for (u32 k = 0; k < n_big; k++) {
+        // The phase-2 root self-overlap: f overlapped onto itself, F-phase
+        // (combo 0), at the bare root (ovPos=L, pos_len 0), unoriented inner.
+        if (big[k].i != f || big[k].j != f) continue;
+        if (big[k].combo != 0u || big[k].cp.pos_len != 0u) continue;
+        if ((big[k].key_raw >> 58) != 2u) continue;
+        // Its unoriented axiom-partner twin in the same batch: f as the outer
+        // (i==f) overlapped onto a DISTINCT unoriented partner (j!=f, both faces
+        // unoriented), eTTE phase-4 (combo 2) at the bare root (ovPos=L).
+        u64 anchor = 0xffffffffffffffffull;
+        for (u32 q = 0; q < n_big; q++) {
+          if (q == k) continue;
+          if (big[q].i != f || big[q].j == f) continue;
+          if (big[q].combo != 2u || big[q].cp.pos_len != 0u) continue;
+          if ((big[q].key_raw >> 58) != 4u) continue;
+          if (s->r_orient[big[q].i] || s->r_orient[big[q].j]) continue;
+          if (big[q].key < anchor) anchor = big[q].key;
+        }
+        if (anchor != 0xffffffffffffffffull && big[k].key < anchor) {
+          big[k].key = anchor + 1u;        // splice the self-root just past it
+          s->n_cps_wolf_selfroot_defer++;
+        }
       }
     }
     atp_wmo_ent_sort(big, n_big);
