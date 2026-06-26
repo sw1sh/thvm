@@ -20946,18 +20946,20 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     }
     // WolframAxioms self-root vs axiom-partner formation swap (see
     // use_wolf_selfroot_defer).  At the firstdiv-862 weight-1520 band the new
-    // fact f forms two CPs reducing to the SAME content from DIFFERENT lineage:
-    //   - the root self-overlap (i==j==f, combo=0 F-phase, ovPos=L depth-0, an
-    //     unoriented inner -- WM cpnr=133585 aP==oP==-2), phase 2; and
-    //   - the eTTE axiom-partner overlap (i==f, j!=f unoriented, combo=2,
-    //     ovPos=L depth-0 -- WM cpnr=132107 aP=-2 oP=-1), phase 4.
-    // thvm's batch sort keys the phase-2 self-root BELOW the phase-4 partner, so
-    // the self-root heads the band (cp_seq 132051 < 132052) and is selected at
-    // pick 862 where WM selects the axiom-partner; WM ages the axiom-partner
-    // first and defers the self-root to pick 870.  Re-key the self-root just
-    // ABOVE its unoriented axiom-partner twin in this SAME batch so the partner
-    // ages first and the self-root takes WM's later slot.  Scoped HARD to the
-    // WolframAxioms seed; OFF byte-identical.
+    // fact f forms THREE CPs WM ages in this order (cpnr = FIFO age):
+    //   - cpnr 132107 eTTE aP=-2 oP=-1 ovPos=L      (axiom-partner)      -> pick 862
+    //   - cpnr 132124 eTTR aP=-2 oP=1  ovPos=L.1.2  (rule-1 partner)     -> pick 870
+    //   - cpnr 133585 eTTE aP=-2 oP=-2 ovPos=L      (root self-overlap)  -> pick 872
+    // The self-overlap (i==j==f, combo=0 F-phase, ovPos=L depth-0, unoriented
+    // inner; phase 2) reduces to the SAME content as the axiom-partner, yet
+    // thvm's batch sort keys it BELOW BOTH the phase-4 eTTE axiom-partner
+    // (combo=2, ovPos=L) and the phase-4 eTTR rule-1 partner (combo=2,
+    // ovPos=L.1.2, oriented partner = the axiom rule, trace 1), so the self-root
+    // heads the band and selects where WM selects a partner.  WM ages both
+    // partners first and defers the self-root LAST.  Re-key the self-root just
+    // ABOVE the LATER (max-key) of its two partner twins in this SAME batch so
+    // both partners age first and the self-root takes WM's pick-872 slot.
+    // Scoped HARD to the WolframAxioms seed; OFF byte-identical.
     if (s->use_wolf_selfroot_defer && !s->r_orient[f] &&
         atp_wolfram_axiom_is_live(s)) {
       for (u32 k = 0; k < n_big; k++) {
@@ -20966,20 +20968,34 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (big[k].i != f || big[k].j != f) continue;
         if (big[k].combo != 0u || big[k].cp.pos_len != 0u) continue;
         if ((big[k].key_raw >> 58) != 2u) continue;
-        // Its unoriented axiom-partner twin in the same batch: f as the outer
-        // (i==f) overlapped onto a DISTINCT unoriented partner (j!=f, both faces
-        // unoriented), eTTE phase-4 (combo 2) at the bare root (ovPos=L).
-        u64 anchor = 0xffffffffffffffffull;
+        u64 anchor = 0u;
+        u8  found  = 0u;
         for (u32 q = 0; q < n_big; q++) {
           if (q == k) continue;
+          // f as the outer (i==f), overlapped onto a DISTINCT partner (j!=f),
+          // phase-4 eTT* (combo 2).  Two band twins WM ages before the
+          // self-root:
+          //   (a) the bare-root unoriented axiom-partner   (ovPos=L,     pos_len 0,
+          //       both faces unoriented -- cpnr 132107);
+          //   (b) the L.1.2 rule-1 partner                 (ovPos=L.1.2, pos_len 2,
+          //       oriented partner j = the axiom rule, trace 1 -- cpnr 132124).
           if (big[q].i != f || big[q].j == f) continue;
-          if (big[q].combo != 2u || big[q].cp.pos_len != 0u) continue;
+          if (big[q].combo != 2u) continue;
           if ((big[q].key_raw >> 58) != 4u) continue;
-          if (s->r_orient[big[q].i] || s->r_orient[big[q].j]) continue;
-          if (big[q].key < anchor) anchor = big[q].key;
+          u8 twin = 0u;
+          if (big[q].cp.pos_len == 0u &&
+              !s->r_orient[big[q].i] && !s->r_orient[big[q].j])
+            twin = 1u;                                // (a) axiom-partner
+          else if (big[q].cp.pos_len == 2u &&
+                   big[q].cp.pos[0] == 0u && big[q].cp.pos[1] == 1u &&
+                   s->r_trace[big[q].j] == 1u)
+            twin = 1u;                                // (b) L.1.2 rule-1 partner
+          if (!twin) continue;
+          if (big[q].key > anchor) anchor = big[q].key;
+          found = 1u;
         }
-        if (anchor != 0xffffffffffffffffull && big[k].key < anchor) {
-          big[k].key = anchor + 1u;        // splice the self-root just past it
+        if (found && big[k].key < anchor) {
+          big[k].key = anchor + 1u;        // splice past the latest partner twin
           s->n_cps_wolf_selfroot_defer++;
         }
       }
