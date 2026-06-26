@@ -36,7 +36,7 @@
 
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
-FluxGenerate::usage = "FluxGenerate[prompt$] generates an Image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder).\nFluxGenerate[prompt$, spec$] returns the part(s) named by spec$: \"Image\" (the default Image), \"Latent\" (the initial packed-latent noise z$0, a {S$img, 128} NumericArray that can be fed back via \"InitialLatent\" to reproduce the image -- the round-trip handle), \"Embedding\" (the Qwen text embedding, a {512, 7680} NumericArray), All (an Association of all parts), or a list of those keys (an Association of just those parts).\nFluxGenerate[prompt$, n$] generates n$ images of the same prompt, each with a distinct fresh seed, reusing one model session (only the first is a cold start); FluxGenerate[prompt$, n$, spec$] returns a list of n$ spec$ results.\nFluxGenerate[{prompt$1, prompt$2, $$}] (optionally with a trailing spec$) generates one result per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (every result after the first is warm).\nThe following options can be given:\n  \"ImageSize\" {256, 256}    output size; a scalar n$ means a square n$ x n$ image, a pair {w$, h$} a rectangle (rounded to the /16 patch grid).\n  \"Steps\" Automatic    number of Euler sampling steps; Automatic uses \"NumSteps\".\n  RandomSeeding Automatic    Automatic gives a fresh random image each call; an integer seed makes the result reproducible (same seed -> byte-identical image).\n  \"InitialLatent\" Automatic    Automatic samples fresh z$0 ~ N(0,1); a {S$img, 128} array (e.g. a \"Latent\" result) is used as z$0 to seed STAGE 2 deterministically instead of the per-image random noise, so a saved latent reproduces its image (a latent round-trip).\n  \"NegativePrompt\" None    FLUX.2-klein is guidance-distilled (4-step, no classifier-free guidance), so a negative prompt is unsupported; giving one issues FluxGenerate::nocfg and is ignored.\n  \"ShowSteps\" False    True decodes each Euler-step latent through the VAE and shows the denoising progression live (in a notebook); the per-step Images + raw latents are then included under the \"Steps\" key of an All / {\"Steps\"} return.\n  ProgressReporting Automatic    Automatic or True shows a live progress panel (a no-op with no front end); False runs silent.\n  \"Device\" \"metal\"    backend to run on (\"metal\" | \"cpu\" | \"cuda\").\n  \"NumSteps\" 4    legacy alias for \"Steps\".\n  \"ModelDir\" Automatic    weight directory (Automatic -> ~/.cache/thvm/flux2-klein-4b).\n  \"Q8\" False    weight-only int8 quantization of the large QKV/MLP projections; default False (bf16).  q8 halves the device weight footprint but Metal has no int8 matmul (it casts to bf16 in-kernel), so it is a memory-fit option, not a speed one (env FLUX_Q8=1 is an equivalent fallback).";
+FluxGenerate::usage = "FluxGenerate[prompt$] generates an Image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder).\nFluxGenerate[prompt$, spec$] returns the part(s) named by spec$: \"Image\" (the default Image), \"Latent\" (the initial packed-latent noise z$0, a {S$img, 128} NumericArray that can be fed back via \"InitialLatent\" to reproduce the image -- the round-trip handle), \"Embedding\" (the Qwen text embedding, a {512, 7680} NumericArray), All (an Association of all parts), or a list of those keys (an Association of just those parts).\nFluxGenerate[prompt$, n$] generates n$ images of the same prompt, each with a distinct fresh seed, reusing one model session (only the first is a cold start); FluxGenerate[prompt$, n$, spec$] returns a list of n$ spec$ results.\nFluxGenerate[{prompt$1, prompt$2, $$}] (optionally with a trailing spec$) generates one result per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (every result after the first is warm).\nThe following options can be given:\n  \"ImageSize\" {256, 256}    output size; a scalar n$ means a square n$ x n$ image, a pair {w$, h$} a rectangle (rounded to the /16 patch grid).\n  \"Steps\" Automatic    number of Euler sampling steps; Automatic uses \"NumSteps\".\n  RandomSeeding Automatic    Automatic gives a fresh random image each call; an integer seed makes the result reproducible (same seed -> byte-identical image).\n  \"InitialLatent\" Automatic    Automatic samples fresh z$0 ~ N(0,1); a {S$img, 128} array (e.g. a \"Latent\" result) is used as z$0 to seed STAGE 2 deterministically instead of the per-image random noise, so a saved latent reproduces its image (a latent round-trip).\n  \"NegativePrompt\" None    FLUX.2-klein is guidance-distilled (4-step, no classifier-free guidance), so a negative prompt is unsupported; giving one issues FluxGenerate::nocfg and is ignored.\n  \"ShowSteps\" False    True decodes each Euler-step latent through the VAE and shows the denoising progression live (in a notebook); the per-step Images + raw latents are then included under the \"Steps\" key of an All / {\"Steps\"} return.\n  ProgressReporting Automatic    Automatic or True shows a live progress panel (a no-op with no front end); False runs silent.\n  \"Device\" \"metal\"    backend to run on (\"metal\" | \"cpu\" | \"cuda\").\n  \"NumSteps\" 4    legacy alias for \"Steps\".\n  \"ModelDir\" Automatic    weight directory (Automatic -> ~/.cache/thvm/flux2-klein-4b).\n  \"Q8\" False    weight-only int8 quantization of the large QKV/MLP projections; default False (bf16).  q8 halves the device weight footprint but Metal has no int8 matmul (it casts to bf16 in-kernel), so it is a memory-fit option, not a speed one (env FLUX_Q8=1 is an equivalent fallback).\n  \"LoRA\" None    apply one or more LoRA (Low-Rank Adaptation) .safetensors files to the transformer at load time.  None applies no LoRA; a path String applies that LoRA at scale 1; a list of path Strings applies several; a list of (path -> scale) Rules applies each at its own scale (a real, default 1.0).  Each target weight W is merged to W + scale*(alpha/rank)*(up.down); diffusers/PEFT (lora_A/lora_B) and kohya (lora_down/lora_up) naming are both handled.  Modules that do not map to a FLUX.2-klein weight issue FluxGenerate::loraskip (FLUX.1 LoRAs only partially apply).";
 
 FluxGenerate::nocfg = "FLUX.2-klein-4B is a guidance-distilled 4-step flow-matching model with no classifier-free guidance, so the \"NegativePrompt\" `1` cannot be applied (a negative prompt needs the conditional-vs-unconditional CFG pass klein was distilled to skip).  It is ignored.";
 
@@ -45,6 +45,20 @@ FluxGenerate::badlatent = "The \"InitialLatent\" value has dimensions `1`, but t
 FluxGenerate::badspec = "`1` is not a valid return spec; use \"Image\", \"Latent\", \"Embedding\", All, or a list of those keys.  Returning the Image.";
 
 FluxGenerate::imgtoobig = "ImageSize `1` would need ~`2` GB of device buffers -- the cold captures pin their activation working set, scaling with the latent-token count -- exceeding the THVM_MAX_LIVE_BYTES ceiling of `3` GB.  Use ImageSize <= `4`, or raise THVM_MAX_LIVE_BYTES (you have `5` GB host RAM).";
+
+FluxGenerate::lorabadspec = "`1` is not a valid \"LoRA\" specification; use None, a path String, a list of path Strings, or a list of (path -> scale) Rules.  No LoRA is applied.";
+
+FluxGenerate::loramissing = "The LoRA file `1` does not exist; it is skipped.";
+
+FluxGenerate::loraskip = "`1` LoRA module(s) did not map to a FLUX.2-klein-4B weight and were skipped (`2` merged).  FLUX.1 LoRAs only partially apply: klein's single blocks fuse qkv+mlp (no per-projection target) and its FF / per-block norms differ.  Skipped: `3`.";
+
+FluxGenerate::loranone = "None of the LoRA module(s) mapped to a FLUX.2-klein-4B weight -- the LoRA is likely for a different architecture (e.g. FLUX.1).  The generated image is unaffected.";
+
+FluxGenerate::lorashape = "The LoRA delta for weight `1` does not match the base weight's dimensions (a FLUX.1-vs-FLUX.2 mismatch under a shared module name); it is skipped.";
+
+FluxGenerate::sessionswitch = "A FLUX session for a different config (`1`) is already resident; each session holds ~16-19 GB of host weight memory, so to stay within one session's footprint the old one is unloaded before the new `2` session is built.  Switching Q8/LoRA/Device/ModelDir therefore cold-rebuilds each time; call FluxUnload[] to manage this yourself.";
+
+FluxUnload::usage = "FluxUnload[] unloads any resident FLUX.2-klein-4B model session and frees its device buffers and the ~16-19 GB of host weight memory it pins (a full engine reset); the next FluxGenerate cold-starts.";
 
 Begin["`Private`"];
 
@@ -236,14 +250,21 @@ qwTokenize[prompt_String, td_, seqLen_ : 512] := Module[{ids, pad, n, mask},
 
 fxQuant8Q[q8_] := TrueQ[q8] || Environment["FLUX_Q8"] === "1";
 
-fxLoadTfWeight[n_, t_, dev_, q8_] := If[ q8 && fxQuantizableQ[n, Dimensions[t]],
-    fxQuantizeWeight[TToDevice[t, dev]]
-    ,
-    TToDevice[t, dev]
+(* loraDeltas is the merged <|fluxWeightName -> {factor tuples}|> (or <||> for no
+   LoRA).  Merge the LoRA delta into the base weight BEFORE the device upload /
+   q8 quantization (fxLoRAMerge is a no-op when this weight is not a LoRA target),
+   so the rest of the pipeline runs unchanged on the merged W'. *)
+
+fxLoadTfWeight[n_, t0_, dev_, q8_, loraDeltas_] := With[{t = fxLoRAMerge[loraDeltas, n, t0, dev]},
+    If[ q8 && fxQuantizableQ[n, Dimensions[t]],
+        fxQuantizeWeight[TToDevice[t, dev]]
+        ,
+        TToDevice[t, dev]
+    ]
 ]
 
-fxTransformerLoader[wt_, dev_, q8_] := Module[{cache = <||>},
-    n |-> Lookup[cache, n, cache[n] = fxLoadTfWeight[n, wt[n], dev, q8]]
+fxTransformerLoader[wt_, dev_, q8_, loraDeltas_] := Module[{cache = <||>},
+    n |-> Lookup[cache, n, cache[n] = fxLoadTfWeight[n, wt[n], dev, q8, loraDeltas]]
 ]
 
 (* Qwen text encoder: bf16, contiguous exactly like the transformer.  The
@@ -359,7 +380,8 @@ Options[FluxGenerate] = {
     "NumSteps" -> 4,
     "ModelDir" -> Automatic,
     ProgressReporting -> Automatic,
-    "Q8" -> False
+    "Q8" -> False,
+    "LoRA" -> None
 };
 
 (* module-level session cache: key -> <|ctx, wfq, qwCfg, td, stxt,
@@ -374,6 +396,20 @@ $fxSession = <||>;
    ImageSize/Steps session reuses this base, so the ~16 GB of weights load ONCE. *)
 
 $fxWeightBase = <||>;
+
+(* Unload the resident model session(s): drop the WL caches AND reset the engine
+   heap, freeing the device weight buffers and unmapping the ~16-19 GB of host
+   weight pages.  A bare TReset is deliberately avoided DURING a session's life (it
+   would clear the persistent qwJit/velJit captures), but here we are dropping the
+   whole session, so the full reset is exactly right.  The next FluxGenerate
+   cold-starts. *)
+
+fxUnloadAll[] := ($fxSession = <||>; $fxWeightBase = <||>; Quiet[TReset[]];);
+
+FluxUnload[] := fxUnloadAll[];
+
+fxDbgRSS[] := Quiet@Check[Round[ToExpression@StringTrim@RunProcess[{"ps", "-o", "rss=", "-p", ToString[$ProcessID]}, "StandardOutput"]/1024.], -1];
+fxDbgMem[tag_] := Print["[MEM ", tag, "] rss=", fxDbgRSS[], "MB"];
 
 (* A return spec is a String key ("Image" | "Latent" | "Embedding"), the symbol
    All, or a List of String keys -- type-distinguishable from the Integer count, so
@@ -412,14 +448,14 @@ FluxGenerate[prompts_List, opts : OptionsPattern[]] := FluxGenerate[prompts, "Im
 
 (* build (or fetch) the persistent session for these settings. *)
 
-fxSessionGet[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{key = {modelDir, dev, imgSize, nSteps, q8}},
+fxSessionGet[dev_, imgSize_, nSteps_, modelDir_, q8_, loraResolved_, loraKey_] := Module[{key = {modelDir, dev, imgSize, nSteps, q8, loraKey}},
     Lookup[
         $fxSession
         ,
         Key[key]
         ,
         $fxSession[key] = Module[{tBuild, s},
-            {tBuild, s} = AbsoluteTiming[fxSessionBuild[dev, imgSize, nSteps, modelDir, q8]];
+            {tBuild, s} = AbsoluteTiming[fxSessionBuild[dev, imgSize, nSteps, modelDir, q8, loraResolved, loraKey]];
             fxTiming["session-build", tBuild];
             s
         ]
@@ -444,6 +480,14 @@ fxEnvDefault[name_String, value_String] := If[Environment[name] === $Failed, Set
 
 fxBoundMemory[] := (
     fxEnvDefault["THVM_MMAP_NO_WILLNEED", "1"];
+(* Trace-capture: run the cold qwen/velocity/VAE captures' FIRST execute on the
+   batched Metal ICB instead of eager dispatch.  The capture builds the ICB from
+   the materialized schedule (no eager GPU submit) and replays it once for the
+   first result; the graph is static and FLUX's velocity outputs are standalone
+   buffers, so the ICB is eligible (ineligible captures fall back to eager).
+   Collapses the eager-capture cold cost: vel step1 6.9->2.2s, qwen 5.8->1.0s,
+   FLUX 256 cold 24.2->12.4s (1.95x), byte-identical (std 0.151). *)
+    fxEnvDefault["THVM_JIT_TRACE_CAPTURE", "1"];
 (* A bare FluxGenerate call should just work without the caller exporting any
    THVM_* knob.  THVM_FWD_RECLAIM defaults OFF here: it is a realize-boundary GC
    (built for training) that frees the stranded cross-realize weight DiskMaps and
@@ -510,13 +554,13 @@ fxBeamScope[body_] := Module[{beamSave = Environment["BEAM"], r},
    {modelDir,dev,q8}.  Every ImageSize/Steps session reuses it, so the ~16 GB
    of transformer/Qwen/VAE weights load into ONE device context exactly once. *)
 
-fxWeightBase[dev_, modelDir_, q8_] := Module[{key = {modelDir, dev, q8}},
+fxWeightBase[dev_, modelDir_, q8_, loraResolved_, loraKey_] := Module[{key = {modelDir, dev, q8, loraKey}},
     Lookup[
         $fxWeightBase
         ,
         Key[key]
         ,
-        $fxWeightBase[key] = fxWeightBaseBuild[dev, modelDir, q8]
+        $fxWeightBase[key] = fxWeightBaseBuild[dev, modelDir, q8, loraResolved]
     ]
 ]
 
@@ -526,7 +570,7 @@ fxWeightBase[dev_, modelDir_, q8_] := Module[{key = {modelDir, dev, q8}},
    table, the velocity/VAE captures, and the sigma schedule depend on ImageSize
    and live in fxSessionBuild (LAYER 2). *)
 
-fxWeightBaseBuild[dev_, modelDir_, q8_] := Module[{
+fxWeightBaseBuild[dev_, modelDir_, q8_, loraResolved_] := Module[{
     stxt,
     tokDir,
     td,
@@ -635,9 +679,14 @@ fxWeightBaseBuild[dev_, modelDir_, q8_] := Module[{
     {wfT, caL, tembFn} = TInContext[
         ctxT
         ,
-        Module[{wt, wfTL, caLL, tembFnL, tLoadTf},
+        Module[{wt, wfTL, caLL, tembFnL, tLoadTf, loraDeltas},
             caLL = If[dev === "cpu", TRealize[#]&, (TRealize @ TToDevice[TUOpCast[#, "bf16"], dev])&];
             {tLoadTf, wt} = AbsoluteTiming[TSafeTensorLoad[tfPath]];
+(* Load + name-map the LoRA(s) (in this context, so the down/up disk TTerms and
+   the on-device merge matmul live with the weights).  fxLoRALoad emits
+   FluxGenerate::loraskip for any module that does not map to a klein weight and
+   returns <||> for the no-LoRA case, so fxLoadTfWeight's merge is then a no-op. *)
+            loraDeltas = fxLoRALoad[loraResolved];
 (* COLD-START OVERLAP: background-fault the transformer's disk-mmap pages
    resident NOW, while it is idle.  The transformer is not touched until STAGE
    2 (velocity sample); STAGE 1 (Qwen encode) runs first.  TDiskPrefetchAsync
@@ -648,7 +697,18 @@ fxWeightBaseBuild[dev_, modelDir_, q8_] := Module[{
    the Qwen text-encode, so STAGE 2 finds the transformer already resident.
    FLUX_NO_WARM_TF=1 disables it for an A/B baseline. *)
             If[ Environment["FLUX_NO_WARM_TF"] =!= "1", TDiskWarmAsync[Values[wt]]];
-            wfTL = fxTransformerLoader[wt, dev, q8];
+            wfTL = fxTransformerLoader[wt, dev, q8, loraDeltas];
+(* Pre-warm the merge EAGERLY here, BEFORE any velocity JIT capture.  The
+   transformer loader is lazy (a weight realizes on first matmul use), but the
+   LoRA merge does an eager device matmul + realize -- and an eager realize
+   firing DURING the velJit capture (when fxLinear first touches a merged weight)
+   corrupts the recorded forward exactly like a mid-capture bench dispatch.  So
+   force every merged weight through the loader cache now (outside any capture):
+   each fxLoadTfWeight realizes the merged W' once and caches it, and the later
+   capture just reads the cached device tensor (no realize fires mid-capture). *)
+            If[ loraDeltas =!= <||>,
+                Scan[wfTL, Select[Keys[loraDeltas], KeyExistsQ[wt, #]&]]
+            ];
             tembFnL = fxTembFn[wfTL, dev];
             fxTiming["tf-load", tLoadTf];
             {wfTL, caLL, tembFnL}
@@ -714,7 +774,7 @@ fxWeightBaseBuild[dev_, modelDir_, q8_] := Module[{
    the image RoPE table, the velocity + VAE conv-decode captures, and the sigma
    schedule.  All captures land in the base's shared context. *)
 
-fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
+fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_, loraResolved_, loraKey_] := Module[{
     base,
     w,
     h,
@@ -731,7 +791,7 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_] := Module[{
     velJit,
     vaeJit
 },
-    base = fxWeightBase[dev, modelDir, q8];
+    base = fxWeightBase[dev, modelDir, q8, loraResolved, loraKey];
     ctxT = base["ctxT"];
     caL = base["caL"];
     {w, h} = imgSize;
@@ -858,7 +918,7 @@ FluxGenerate[prompt_String, spec_, opts : OptionsPattern[]] := (
 );
 
 FluxGenerate[prompts_List, spec_ ? fxSpecQ, opts : OptionsPattern[]] := Module[
-    {imgSize, seed, dev, nSteps, modelDir, initLat, negPrompt, showSteps, reportQ, q8}
+    {imgSize, seed, dev, nSteps, modelDir, initLat, negPrompt, showSteps, reportQ, q8, loraResolved, loraKey}
     ,
 (* a bare ImageSize -> n means a square n x n image (Set::shape if {n,n} is not
    formed); a pair {w, h} passes through.  Keep this normalize FIRST so the
@@ -878,10 +938,15 @@ FluxGenerate[prompts_List, spec_ ? fxSpecQ, opts : OptionsPattern[]] := Module[
    in wolframscript, so it never errors headless); False runs silent. *)
     reportQ = OptionValue[ProgressReporting] =!= False;
     q8 = fxQuant8Q[TrueQ[OptionValue["Q8"]]];
+(* Resolve the "LoRA" option to a canonical {path,scale} list ONCE here and key the
+   session/weight-base on its hash, so different LoRA sets are different sessions and
+   a no-LoRA call (loraKey === None) is byte-unaffected. *)
+    loraResolved = fxLoRAResolve[OptionValue["LoRA"]];
+    loraKey = fxLoRAKey[loraResolved];
 (* FLUX.2-klein is guidance-distilled (no CFG), so a negative prompt cannot be
    applied -- warn loudly (don't silently no-op) and proceed without it. *)
     If[negPrompt =!= None, Message[FluxGenerate::nocfg, negPrompt]];
-    fxWithProgress[reportQ, fxGenerateBody[prompts, spec, imgSize, seed, initLat, showSteps, dev, nSteps, modelDir, q8]]
+    fxWithProgress[reportQ, fxGenerateBody[prompts, spec, imgSize, seed, initLat, showSteps, dev, nSteps, modelDir, q8, loraResolved, loraKey]]
 ]
 
 (* Run `body` under a live progress panel that re-reads the mutated `text` +
@@ -943,7 +1008,7 @@ fxAssemble[parts_, ks_List] := KeyTake[parts, ks];
    `spec` selects which parts to return; `initLat` (Automatic | a {simg,128} array)
    seeds STAGE 2; `showSteps` adds the per-step decoded progression. *)
 
-fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSteps_, modelDir_, q8_] := Module[
+fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSteps_, modelDir_, q8_, loraResolved_, loraKey_] := Module[
     {
         sess,
         encHost,
@@ -976,23 +1041,55 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
        a strided VIEW instead of materialising the spatial gather, so the per-256
        retained footprint dropped from the old 5.68e9 GEMM value -- which lets
        larger ImageSizes through this gate. *)
-    With[{
-        simg0   = Times @@ Round[imgSize/16],
-        ceiling = With[{e = Environment["THVM_MAX_LIVE_BYTES"]},
-                       If[ StringQ[e] && e =!= "", ToExpression[e], 0.6 $SystemMemory]]
-      },
+    (* HOST-RAM bound (the lever the device-live-bytes ceiling does NOT cover): each
+       resident weight base is ~16-19 GB of host mmap pages (Qwen+transformer+VAE)
+       that are ZEROCOPY-borrowed and so never count toward THVM_MAX_LIVE_BYTES.  A
+       SECOND co-resident base (a different Q8 / LoRA / Device / ModelDir) doubles
+       that to ~35 GB and bricks a <=52 GB host.  So keep AT MOST ONE base resident:
+       if a different one is loaded, unload it (full reset -- frees the device
+       buffers and unmaps the weights) BEFORE building the new one.  This is the
+       theoretical bound -- one session's weights -- and anything above it is the bug,
+       killed here rather than left to swap the machine to death. *)
+    With[{basekey = {modelDir, dev, q8, loraKey}},
+        If[ !KeyExistsQ[$fxWeightBase, basekey] && Length[$fxWeightBase] > 0,
+            Message[FluxGenerate::sessionswitch, First[Keys[$fxWeightBase]], basekey];
+            fxUnloadAll[]
+        ]
+    ];
+    With[{simg0 = Times @@ Round[imgSize/16], hostCap = 0.6 $SystemMemory},
         With[{est = 3.64*^9 (simg0/256.0)},
-            If[ est > 0.9 ceiling,
+            (* Reject an ImageSize whose activation working set would exceed the hard
+               host backstop, BEFORE building (else the cold capture climbs to it and
+               aborts slowly under heavy host pressure). *)
+            If[ est > 0.9 hostCap,
                 Message[FluxGenerate::imgtoobig, imgSize, Round[est/1.*^9],
-                    Round[ceiling/1.*^9], 16 Floor[Sqrt[0.9 ceiling 256.0/(3.64*^9)]],
+                    Round[hostCap/1.*^9], 16 Floor[Sqrt[0.9 hostCap 256.0/(3.64*^9)]],
                     Round[$SystemMemory/1.*^9]];
                 Return[ConstantArray[$Failed, n], Module]
+            ];
+            (* Anchor the runtime device ceiling to THIS gen's known cold-capture
+               footprint, NOT a flat RAM fraction: the whole-net velocity capture
+               peaks at ~8.4 GB of live activations at 256 and scales ~with the
+               latent-token count, so 2.5*est with an 11 GB floor clears that peak
+               with headroom; a LoRA gen ALSO recomputes its targeted weights into
+               OWNED device buffers (~12 GB bf16 / ~6 GB q8 -- a no-LoRA gen's are
+               zerocopy mmap and excluded), added on top; the whole capped at the host
+               backstop.  A run that climbs above this is leaking/looping and the
+               engine aborts it early instead of growing to 60% of RAM (already
+               thrashing).  Set only when the caller has not pinned the env var.  (The
+               C side caches the ceiling on the first realize, so it binds on a fresh
+               process / the first gen; per-gen updates across configs in one kernel
+               need a runtime setter -- a follow-up.) *)
+            With[{loraWeight = If[loraKey =!= None, If[TrueQ @ fxQuant8Q[q8], 6.0*^9, 12.0*^9], 0]},
+                If[ Environment["THVM_MAX_LIVE_BYTES"] === $Failed,
+                    SetEnvironment["THVM_MAX_LIVE_BYTES" -> ToString[Round[Min[Max[2.5 est, 11.0*^9] + loraWeight, hostCap]]]]
+                ]
             ]
         ]
     ];
     (* cold-build (or fetch) the session -- indeterminate while the weights load. *)
     fxReport["Loading FLUX.2-klein-4B...", Indeterminate];
-    sess = fxSessionGet[dev, imgSize, nSteps, modelDir, q8];
+    sess = fxSessionGet[dev, imgSize, nSteps, modelDir, q8, loraResolved, loraKey];
     Module[{ca = sess["ca"], simg = sess["simg"], sigmas = sess["sigmas"], t1, t2, t3},
         need = fxNeeded[spec, showSteps];
         wantImg = MemberQ[need, "Image"];
