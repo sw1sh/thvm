@@ -6222,6 +6222,46 @@ typedef struct {
   // at one (phase|k1|k2) prefix, so soa is byte-identical.  OFF byte-identical.
   // Advances Meredith firstdiv 12990 -> beyond.
   u8    use_l1cube_arrival;
+  // L.1 weight-120 cube B/D/E full raw-arrival order (see
+  // thvm_atp_set_use_l1cube_arrsplit).  The Meredith OrAssociativity
+  // firstdiv-14657 divergence: the f=191 tops batch forms a weight-120
+  // L.1/combo0/phase0/k2==0 group holding THREE B `x.x = x.(y.(y.y))` (fwd_cube),
+  // THREE D `x.x = (y.(y.y)).x` (posgroup_cube) AND ONE E `(x.x).x = y.(y.y)`
+  // (atp_pair_is_xxx_self_cube) cube survivor (B/D wrap-precursors included).  The
+  // base use_l1cube_arrival pass sorts only the B/D survivors by raw partner-
+  // arrival key (key_raw) and leaves the E member to use_l1cube_group /
+  // use_l1_xxx_cube_defer (which defers E LAST), so the band emits thvm
+  // P,Q,Q,P,Q,P,R.  But WM's single superposition scan ages ALL THREE shapes in
+  // ONE raw partner-arrival sweep -- verified against the WM_NO_AUTO=1 CPFORMDUMP
+  // (cpnr == pick under the .pr's own strategy): cpnr 14656-14662 are all sec=eTTR
+  // aP=94 ovFace=R/rev ovPos=L.2.2, differing ONLY by partner oP, whose cpnr-
+  // ascending order 49,48,54,46,50,47,52 reduces to shapes P,P,Q,Q,R,Q,P.  thvm's
+  // key_raw already encodes that same raw arrival for the E member: sorting all of
+  // B/D/E by key_raw yields P,P,Q,Q,R,Q,P byte-for-byte.  This pass re-keys the
+  // group's B/D/E survivors (wrap-inclusive B/D classes, same as use_l1cube_group)
+  // onto key_raw order, ranking the E by its own raw arrival instead of grouping
+  // it last.
+  //
+  // Scoped HARD to the f=191-class signature with THREE gates, each distinguishing
+  // it from a structurally similar band the existing passes already align:
+  //   (1) >=3 B AND >=3 D AND >=1 E -- excludes the f=181 2 B + 2 D + 1 E band.
+  //   (2) a key_raw BIMODAL gap (>= 4 wmo-rank steps, ~2^28 each) -- the partners
+  //       span two arrival generations (a main cluster, a big gap, a late cluster).
+  //   (3) the E member is NOT the key_raw-front CP.  The f=170/f=172-class bands
+  //       have key_raw order E,B,B,B,D,D,D (the E HEADS the raw arrival); WM ages
+  //       that E last (it is the mother-phase self-cube-equality the firstdiv-10097
+  //       root cause records) -- use_l1cube_group / use_l1_xxx_cube_defer produce
+  //       that, and re-keying by raw arrival would wrongly head the E (regressing
+  //       firstdiv to 11839).  The f=191-class bands have key_raw order
+  //       D,D,B,B,E,B,D (the E is INTERIOR), the single-raw-sweep case WM emits in
+  //       pure arrival order.  The E-front vs E-interior split is exactly the
+  //       mother-phase-aged-last vs single-sweep distinction the CPFORMDUMP shows.
+  // The E presence-gate restricts firing to the Meredith cube batches (the same
+  // L.1/combo0/phase0/k2==0 xxx_self_cube gate use_l1cube_group /
+  // use_l1_xxx_cube_defer use, both soa byte-identical), so soa forms no such
+  // B+D+E band and is byte-identical.  OFF byte-identical; also ON under
+  // use_formation_fifo.  Advances Meredith firstdiv 14657 -> 14851.
+  u8    use_l1cube_arrsplit;
   // L.2 weight-18 cube-tail two-face group swap (see
   // thvm_atp_set_use_l2tail_face_swap).  The Meredith OrAssociativity
   // firstdiv-13349 divergence: the f=184 tops batch forms a four-CP
@@ -6833,6 +6873,10 @@ fn void      thvm_atp_set_use_l1_xxdist_interleave(AtpState *s, u8 on);
 // AtpState.use_l1cube_arrival).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1cube_arrival(AtpState *s, u8 on);
+// L.1 weight-120 cube B/D/E full raw-arrival order (see
+// AtpState.use_l1cube_arrsplit).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l1cube_arrsplit(AtpState *s, u8 on);
 // L.2 weight-18 cube-tail two-face group swap (see
 // AtpState.use_l2tail_face_swap).
 // DEFAULT OFF; also turned ON under use_formation_fifo.

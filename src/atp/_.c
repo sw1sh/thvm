@@ -9350,6 +9350,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1cube_group     = 1u;
     s->use_l1_xxdist_interleave = 1u;
     s->use_l1cube_arrival   = 1u;
+    s->use_l1cube_arrsplit  = 1u;
     s->use_l2tail_face_swap = 1u;
     s->use_l1_selfcube_defer = 1u;
     s->use_l2_selfcube_dist_defer = 1u;
@@ -9381,6 +9382,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
       s->use_l1cube_group     = 0u;
       s->use_l1_xxdist_interleave = 0u;
       s->use_l1cube_arrival   = 0u;
+      s->use_l1cube_arrsplit  = 0u;
       s->use_l2tail_face_swap = 0u;
       s->use_l1_selfcube_defer = 0u;
       s->use_l2_selfcube_dist_defer = 0u;
@@ -9594,6 +9596,17 @@ fn void thvm_atp_set_use_l1_xxdist_interleave(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1cube_arrival(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1cube_arrival = on ? 1u : 0u;
+}
+
+// L.1 weight-120 cube B/D/E full raw-arrival order (see
+// AtpState.use_l1cube_arrsplit): extend the use_l1cube_arrival raw-arrival sort
+// to ALSO include the E (xxx_self_cube) class, so the f=191 L.1/combo0/phase0/
+// k2==0 weight-120 cube band's >=2 B + >=2 D + E survivors all rank by key_raw,
+// matching WM's single-superposition-scan emission P,P,Q,Q,R,Q,P.  DEFAULT OFF;
+// also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l1cube_arrsplit(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l1cube_arrsplit = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_l2tail_face_swap(AtpState *s, u8 on) {
@@ -20035,6 +20048,148 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
             }
           }
         // Re-assign the ascending key slots in raw-arrival order.
+        for (u32 a = 0; a < ng; a++)
+          big[ge[order[a]]].key = gkey[a];
+      }
+    }
+    // L.1 weight-120 cube B/D/E full raw-arrival order (default OFF; see
+    // use_l1cube_arrsplit).  The Meredith OrAssociativity firstdiv-14657
+    // divergence: the f=191 tops batch forms a weight-120 L.1/combo0/phase0/k2==0
+    // group holding THREE B `x.x = x.(y.(y.y))` (fwd_cube), THREE D
+    // `x.x = (y.(y.y)).x` (posgroup_cube) AND ONE E `(x.x).x = y.(y.y)`
+    // (atp_pair_is_xxx_self_cube).  The base use_l1cube_arrival pass above sorts
+    // only the B/D survivors by key_raw and leaves the E member to
+    // use_l1cube_group / use_l1_xxx_cube_defer, so the band emits thvm's
+    // P,Q,Q,P,Q,P,R.  WM's single superposition scan ages ALL THREE shapes in ONE
+    // raw partner-arrival sweep (verified against the WM_NO_AUTO=1 CPFORMDUMP:
+    // cpnr 14656-14662 all sec=eTTR aP=94 ovFace=R/rev ovPos=L.2.2, differing only
+    // by partner oP 49,48,54,46,50,47,52 -> shapes P,P,Q,Q,R,Q,P).  thvm's key_raw
+    // already encodes that same raw arrival order for the E member: re-key ALL of
+    // the group's B/D/E survivors onto key_raw order, so the E is ranked by its
+    // own raw arrival within the band instead of grouped last.  Same key_raw idiom
+    // as use_l1cube_arrival (B/D wrap-precursors included, the use_l1cube_group
+    // classes), just covering the E class.  THREE gates scope it to the f=191-class
+    // single-raw-sweep band, each distinguishing it from a similar band the
+    // existing passes already align:
+    //   (1) >=3 B AND >=3 D AND >=1 E -- excludes the f=181 2 B + 2 D + 1 E band.
+    //   (2) key_raw BIMODAL gap (>= 4 wmo-rank steps) -- two arrival generations.
+    //   (3) the E is NOT the key_raw-front CP -- the f=170/f=172 bands have key_raw
+    //       order E,B,B,B,D,D,D (the E HEADS the arrival; WM ages it last via the
+    //       mother phase, use_l1_xxx_cube_defer handles it, and raw arrival would
+    //       wrongly head the E -> firstdiv regresses to 11839); the f=191 band has
+    //       key_raw order D,D,B,B,E,B,D (E INTERIOR), the case WM emits in pure
+    //       arrival order.
+    // The E presence-gate restricts firing to the Meredith cube batches (the same
+    // L.1/combo0/phase0/k2==0 xxx_self_cube gate use_l1cube_group /
+    // use_l1_xxx_cube_defer use, both soa byte-identical), so soa forms no such
+    // band -- soa byte-identical.  OFF byte-identical.  Advances Meredith firstdiv
+    // 14657 -> 14851.
+    if (s->use_l1cube_arrsplit) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      enum { CS_CAP = 64u };
+      // Index this batch's L.1/combo0/phase0/k2==0 cube B/D/E CPs (class 1 = B
+      // fwd_cube, 2 = D posgroup_cube, 3 = E xxx_self_cube), tagged by their
+      // (phase|k1|k2) prefix.
+      u32 cs_idx[CS_CAP];
+      u64 cs_grp[CS_CAP];
+      u64 cs_key[CS_CAP];
+      u8  cs_cls[CS_CAP];
+      u32 n_cs = 0;
+      for (u32 k = 0; k < n_big && n_cs < CS_CAP; k++) {
+        if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
+        if (big[k].combo != 0u) continue;                 // combo 0 only
+        if ((big[k].key >> 58) != 0u) continue;           // phase 0
+        if (((big[k].key >> 42) & 3u) != 0u) continue;    // rule-tree k2 == 0
+        if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        // class B = fwd_cube OR fwd_cube_wrap (the batch precursor whose trailing
+        // dots reduce away only by the later partner rule), class D = posgroup_cube
+        // OR posgroup_wrap, class E = xxx_self_cube -- the same B/D wrap-inclusive
+        // classes use_l1cube_group uses, so the two late-arrival cube survivors
+        // that are not yet in reduced cube form at batch time still rank.
+        u8 cls = (atp_pair_is_fwd_cube(nl, nr) ||
+                  atp_pair_is_fwd_cube_wrap(nl, nr))      ? 1u   // B
+               : (atp_pair_is_posgroup_cube(nl, nr) ||
+                  atp_pair_is_posgroup_wrap(nl, nr))      ? 2u   // D
+               : atp_pair_is_xxx_self_cube(nl, nr)        ? 3u   // E
+                                                          : 0u;
+        if (cls == 0u) continue;
+        cs_idx[n_cs] = k;
+        cs_grp[n_cs] = big[k].key & grp_mask;
+        cs_key[n_cs] = big[k].key;
+        cs_cls[n_cs] = cls;
+        n_cs++;
+      }
+      // Process each distinct (phase|k1|k2) group independently.
+      for (u32 a0 = 0; a0 < n_cs; a0++) {
+        u64 grp = cs_grp[a0];
+        u8 seen_grp = 0u;
+        for (u32 b = 0; b < a0; b++) if (cs_grp[b] == grp) { seen_grp = 1u; break; }
+        if (seen_grp) continue;                           // group already done
+        // Gather this group's B/D/E cube entries (local index list).
+        u32 ge[CS_CAP];
+        u64 gkey[CS_CAP];
+        u32 ng = 0;
+        u8 nb = 0u, nd = 0u, ne = 0u;
+        for (u32 b = 0; b < n_cs; b++) {
+          if (cs_grp[b] != grp || ng >= CS_CAP) continue;
+          ge[ng] = cs_idx[b]; gkey[ng] = cs_key[b];
+          if (cs_cls[b] == 1u) nb++; else if (cs_cls[b] == 2u) nd++; else ne++;
+          ng++;
+        }
+        // Require >=3 B AND >=3 D AND >=1 E -- the f=191-class signature (the
+        // >=3 floor excludes the f=181 2 B + 2 D + 1 E band).
+        if (nb < 3u || nd < 3u || ne < 1u) continue;
+        // Sort the cube entries by current key (ascending) to get the ascending
+        // key-slot multiset to redistribute.
+        for (u32 p = 0; p + 1u < ng; p++)
+          for (u32 q = p + 1u; q < ng; q++)
+            if (gkey[q] < gkey[p]) {
+              u64 tk = gkey[p]; gkey[p] = gkey[q]; gkey[q] = tk;
+              u32 ti = ge[p]; ge[p] = ge[q]; ge[q] = ti;
+            }
+        // Rank ALL B/D/E survivors by their RAW partner-arrival key (key_raw).
+        u32 order[CS_CAP];
+        for (u32 a = 0; a < ng; a++) order[a] = a;
+        for (u32 a = 0; a + 1u < ng; a++)
+          for (u32 b = a + 1u; b < ng; b++)
+            if (big[ge[order[b]]].key_raw < big[ge[order[a]]].key_raw) {
+              u32 t = order[a]; order[a] = order[b]; order[b] = t;
+            }
+        // BIMODAL-arrival gate: WM uses the raw-arrival (key_raw) order for this
+        // band ONLY when the partners span TWO arrival generations -- a large
+        // key_raw gap separates a main (early) cluster from a late cluster.  Each
+        // wmo_rank key slot quantizes by ~2^28 (one partner step); a gap of >=4
+        // such steps marks a generation boundary.  In the contiguous f=170/f=172
+        // bands (all consecutive key_raw one step apart) WM instead shape-groups
+        // and ages the E last (use_l1_xxx_cube_defer already handles those, and
+        // re-keying them by key_raw would wrongly head the E) -- the no-gap case
+        // is left untouched.  In the bimodal f=191 band (a 5-member main cluster
+        // ending with the E, a big gap, then a 2-member late cluster) WM emits the
+        // pure raw-arrival order P,P,Q,Q,R,Q,P.
+        u64 max_gap = 0u;
+        for (u32 a = 0; a + 1u < ng; a++) {
+          u64 g = big[ge[order[a + 1u]]].key_raw - big[ge[order[a]]].key_raw;
+          if (g > max_gap) max_gap = g;
+        }
+        if (max_gap < (4ull << 28)) continue;             // contiguous: leave alone
+        // E-position gate: fire ONLY when the E member is NOT the key_raw-front
+        // CP.  The f=170-class bands (key_raw order E,B,B,B,D,D,D -- the E heads
+        // the raw arrival) need WM's shape-grouped + E-deferred order, which
+        // use_l1cube_group / use_l1_xxx_cube_defer already produce; re-keying them
+        // by raw arrival would WRONGLY head the E and regress firstdiv to 11839.
+        // The f=191-class bands (key_raw order D,D,B,B,E,B,D -- the E is interior)
+        // are the ones WM emits in pure raw arrival.  The E-front vs E-interior
+        // split is exactly the mother-phase-aged-last (f=170) vs single-raw-sweep
+        // (f=191) distinction the WM_NO_AUTO CPFORMDUMP records.
+        {
+          u8 front_cls = 0u;
+          for (u32 b = 0; b < n_cs; b++)
+            if (cs_idx[b] == ge[order[0]]) { front_cls = cs_cls[b]; break; }
+          if (front_cls == 3u) continue;                  // E heads raw arrival: leave alone
+        }
+        // Re-assign the ascending key-slot multiset in raw-arrival order.
         for (u32 a = 0; a < ng; a++)
           big[ge[order[a]]].key = gkey[a];
       }
