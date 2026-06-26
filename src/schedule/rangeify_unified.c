@@ -1293,7 +1293,16 @@ static int rb_matmul_epilogue_fusable(u32 node_idx) {
   return 0;
 }
 
+fn void run_rangeify_unified_impl(Term root);
+
 fn void run_rangeify_unified(Term root) {
+  if (!sched_prof_enabled()) { run_rangeify_unified_impl(root); return; }
+  double _t0 = sched_prof_now();
+  run_rangeify_unified_impl(root);
+  sched_prof_add(SCHED_PROF_RANGEIFY, _t0);
+}
+
+fn void run_rangeify_unified_impl(Term root) {
   // Clear per-node state.
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     RU_RANGE_MAP[i].out_ndim   = 0;

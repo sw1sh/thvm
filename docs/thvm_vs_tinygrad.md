@@ -80,14 +80,14 @@ Both compilers lower a tensor program to device kernels through structurally ide
 | `pm_apply_rangeify` rewrite | `rangeify_unified.c:1001+` (BUFFERIZE/INDEX emit) | Faithful |
 | `get_kernel_graph` / `pm_remove_bufferize` / `split_kernels` | `materialize.c` + `kernel_lift.c` | Faithful intent; thvm uses explicit strand checks where tinygrad uses symbolic coverage proofs |
 | `hand_coded_optimizations` | `hand_opts.c` | Near line-by-line port; 3 sections skipped |
-| BEAM `search.py` | **(none)** | **Missing** |
-| Expander / devectorizer (`late/*.py`) | `uop/expander.c`, `devectorize.c` | **Ported but not wired into production render (test-only)** |
+| BEAM `search.py` | `codegen/autotune.c` | **Engine present + wired** (`BEAM>0`/`AUTOTUNE=1`); proposer (`propose.c`) narrower than search.py's ~200 actions |
+| Expander / devectorizer (`late/*.py`) | `uop/expander.c`, `devectorize.c` | **Ported AND wired into production render** (`render_uop.c:6425/6433`, gated by `uop_has_upcast_or_unroll`, commit `d5af3033a`; verified 2026-06-26 bit-exact, fully scalarized) |
 | Renderers (llvmir/cstyle/ptx/metal) | `render_uop.c` + backend renderers | Faithful (CPU/CUDA/Metal only) |
 | `memory_plan_rewrite` | `THVM_ARENA_PLAN` (TLSF arena) | Partial; no reuse-distance layout opt |
 | Graph batching (`graph_split_rewrite`) | `THVM_METAL_GRAPH_REPLAY` / `THVM_CUDA_JIT_GRAPH` + `jit/capture.c` | Partial |
 | Gradient (`gradient.py`, post-kernelize UOP) | `interact/uop_grad.c` (term/AST level) | Different layer; fewer backward rules |
 
-**Faithful-vs-simplified summary:** the rangeify walk, INDEX/BUFFERIZE rewrite, hand-coded heuristic core, and renderers are faithful. The *default* realize seed is intentionally over-conservative (a perf choice, not a porting gap). Genuinely simplified: movement-op/ShapeTracker merge, validity-mask union, ending-ranges PCONTIG. (Reduce-into-reduce fusion is now faithful and default-on -- `THVM_FUSE_REDUCE_INTO_REDUCE`.) Genuinely missing: BEAM, ImageDType, mask-UPCAST, THREAD, late arange/reduce-collapse rewrites, wired expander/devectorizer.
+**Faithful-vs-simplified summary:** the rangeify walk, INDEX/BUFFERIZE rewrite, hand-coded heuristic core, and renderers are faithful. The *default* realize seed is intentionally over-conservative (a perf choice, not a porting gap). Genuinely simplified: movement-op/ShapeTracker merge, validity-mask union, ending-ranges PCONTIG. (Reduce-into-reduce fusion is now faithful and default-on -- `THVM_FUSE_REDUCE_INTO_REDUCE`.) Genuinely missing: ImageDType, mask-UPCAST, THREAD (CUDA warp-shuffle reduce). **Landed 2026-06-26** (so NOT missing, despite older text below): arange/reduce-collapse (`uop/reduce_collapse.c`), wired expander/devectorizer, full-extent UNROLL, ShapeTracker view-cancellation (split+resplit/unfold+col2im cancel to views), conv-backward col2im fusion (`THVM_FUSE_CONV_BWD` now default-on, -48% conv-train peak), importer PAD/SHRINK (offset,size) correctness. BEAM engine exists (`autotune.c`); only the proposer breadth is residual.
 
 ---
 
@@ -159,7 +159,7 @@ The key code is `ru_seed_boundary_holds` (`rangeify_unified.c:163-166`): in defa
 | GROUPTOP early gate (84-90) | `GROUPTOP` | **PORTED + ENHANCED** | Selects *largest* divisible reduce axis (not just 0,1,2); load-bearing on CUDA (2.2x: 10.8 ms on vs 23.5 ms off); `THVM_GROUPTOP`, `THVM_GROUP_SZ` |
 | Mask UPCAST (97-106) | `UPCAST` | **MISSING** | no `IWHERE`/`WHERE` mask-axis detection in DAG walk |
 | Main UPCAST loop (108-134) | `UPCAST` | **PORTED + ENHANCED** | stride heuristic 1:1; thvm adds reduce-heavy **occupancy floor** (`THVM_UPCAST_REDUCE_MIN_GRID`, auto = SM_count x 80) - no tinygrad equivalent |
-| UNROLL last reduce (138-150) | `UNROLL` | **PARTIAL** | split-by-4 only; **full-extent `UNROLL(last,0)` disabled** (renderer bug in `rmu_emit_store_reduce`: matcher assumes axis survives) |
+| UNROLL last reduce (138-150) | `UNROLL` | **PORTED** | full-extent `UNROLL(last,0)` + split-by-4 + the `s<=3` second-axis unroll. `uop_dag_apply_split` keeps an extent-1 reduce RANGE so `rmu_emit_store_reduce` emits straight-line `#pragma unroll(extent)` accumulation (verified bit-exact). CUDA still skips (V100 register pressure) per heuristic.py:37/109 |
 | Easy UPCAST fallback (153-155) | `UPCAST` | **PORTED** | identical |
 | LOCAL placement (159-176) | `LOCAL` | **PORTED** | identical ranking + factor picking; `THVM_LOCAL_INNER_FIRST` tuning knob (net within-noise) |
 | THREAD (180-189) | `THREAD` | **MISSING** | no `KOP_THREAD`; CPU goes through cBLAS |
@@ -350,7 +350,7 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
   unfused optimizer" claim was an artifact of the inflated 207 count. Cross-param
   multi-output kernels remain a *possible* small win but are not a parity gap. Likewise
   reduce-into-reduce fusion is NOT a gap (forward+backward already matches tinygrad).
-- **Late rewrite / arange-reduce collapse** - *medium*. No `REDUCE(SUM,[RANGE]) -> range*extent` collapse (`simplify.py:146-155`); misses reduce-epilogue inlining.
+- **Late rewrite / arange-reduce collapse** - *PORTED (2026-06-26)*. `src/uop/reduce_collapse.c` (`uop_reduce_arange_collapse`, wired in materialize.c on `store_root`) folds `REDUCE(SUM)` of a range-affine `IWHERE(ILT(...))` to the closed-form clamped count (mirrors tinygrad `codegen/simplify.py`); the N-trip reduce loop is eliminated, numerically exact. Also fixed the `from_tinygrad` importer reading PAD/SHRINK as `(begin,end)` widths instead of current tinygrad's `(offset,size)` -- which had produced wrong values for arange/padded imports.
 - **PCONTIG per-axis ending-ranges check** - *small*. thvm realizes *all* non-realized axes on ending ranges; tinygrad checks per-axis contiguity (`indexing.py:227`). Where: `rangeify_unified.c:864-888`.
 - **BIND const-fold UOp + `ALWAYS_CONTIGUOUS` set** - *small*. No `Ops.BIND`; may leak scalar-load kernels. Where: `bufferize_classify.c` recognition + rangeify skip-op gate.
 - **Stranded-range symbolic coverage proof** - *medium*. Strand checks are conservative; tinygrad proves coverage symbolically. Gates some broadcast-reduce fusions.
@@ -360,9 +360,9 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 - **ImageDType float4 UPCAST** - *medium* (small if no image workloads). No `ImageDType`.
 - **Mask UPCAST (WHERE detection)** - *medium/small*. No `IWHERE` mask-axis walker; masked dims count against occupancy.
 - **THREAD axis + warp-shuffle reduce** - *large*. No `KOP_THREAD`; CPU via cBLAS; CUDA uses 16-thread GROUP_REDUCE instead of 32-lane warp-shuffle (2-3x slower per-warp reduce).
-- **Full-extent UNROLL** - *medium*. Disabled by `rmu_emit_store_reduce` renderer bug; split-by-4 only.
+- **Full-extent UNROLL** - *PORTED*. `hand_opts.c` Section 7 now applies tinygrad's `UNROLL(last, 0)` (full extent) + the `s<=3` second-axis unroll; `uop_dag_apply_split` leaves a live extent-1 reduce RANGE so `rmu_emit_store_reduce` renders straight-line `#pragma unroll(extent)` accumulation (numerically exact). The historical "bare #pragma unroll, no loop" defect predated the multi-axis reduce machinery and no longer reproduces.
 - **Multi-reduce TC (`TC_OPT>=1`)** - *small*. `hand_opt_classify_matmul` requires single reduce axis. Where: `hand_opts.c:192-202`.
-- **Wired expander/devectorizer** - *medium*. `uop/expander.c`/`devectorize.c` exist but are test-only, not in production render. Affects vector-register pressure on reduce-heavy kernels.
+- **Wired expander/devectorizer** - *PORTED (2026-06-26)*. `uop_expand_graph`/`uop_devectorize_graph` run in the production CPU/Metal/CUDA render path (`render_uop.c:6425/6433`, gated by `uop_has_upcast_or_unroll`, commit `d5af3033a`); reduce-heavy kernels render fully scalarized with no surviving VECTORIZE temporaries, verified bit-exact.
 - **Dynamic local-size tuning** (`realize.py:63-82`) - *medium*. No micro-benchmark local-size loop.
 
 **Infrastructure**

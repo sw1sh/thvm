@@ -180,24 +180,52 @@ def _find_buffer(u):
 
 
 def _movement_begin_end(u, kind: str):
-    """Decode PAD / SHRINK lo+hi vectors into a flat [lo0,hi0,lo1,hi1,...].
+    """Decode a PAD / SHRINK movement-arg into thvm's flat
+    [begin0,end0,begin1,end1,...] per-axis bounds.
 
-    Current tinygrad exposes the per-dim ((lo,hi),...) tuple directly via
-    the UOp.marg accessor (movement-arg); use it when present.  Older
-    tinygrad encoded the params as the two trailing scalar srcs after the
-    data src[0]: lo and hi, each a per-dim VCONST or a broadcast CONST,
-    or a ((lo,hi),...) tuple in u.arg -- kept as fallbacks.  For SHRINK
-    lo/hi are begin/end ranges; for PAD they are the before/after widths.
+    IMPORTANT SEMANTIC CONVERSION.  Current tinygrad's movement-arg
+    (`UOp.marg`) for PAD and SHRINK is a per-dim `(offset, size)` tuple,
+    NOT `(before_width, after_width)` / `(begin, end)` (tinygrad
+    `uop/ops.py` shape rule: PAD/SHRINK output dim == `size`, with the
+    input of length `s` placed at `offset` so that `offset + s <= size`
+    for PAD and `offset + size <= s` for SHRINK).  thvm's UOP_PAD takes
+    `(begin_width, end_width)` and UOP_SHRINK takes a `[begin, end)`
+    slice, so we MUST translate:
+
+      PAD:    begin = offset
+              end   = size - offset - in_dim      (trailing pad width)
+      SHRINK: begin = offset
+              end   = offset + size               (slice upper bound)
+
+    Reading tinygrad's `(offset, size)` straight through as thvm
+    `(begin, end)` is what corrupted the arange/cumsum construction: the
+    PAD `((3, 7),)` over a length-4 input is offset=3 / out_size=7 (thvm
+    begin=3, end=0), but the literal read gave thvm a (3, 7) before/after
+    pad -> a length-14 buffer whose downstream rank-changing RESHAPE then
+    failed to decompose and zeroed the whole result.
     """
     Ops = _ops()
-    in_ndim = len(_shape_of(u.src[0]))
+    in_shape = _shape_of(u.src[0])
+    in_ndim = len(in_shape)
+
+    def _pairs_to_thvm(pairs):
+        flat: list[int] = []
+        for d, pair in enumerate(pairs):
+            offset = int(pair[0])
+            size = int(pair[1])
+            in_dim = int(in_shape[d]) if d < in_ndim else 0
+            if kind == "PAD":
+                begin = offset
+                end = size - offset - in_dim
+            else:  # SHRINK
+                begin = offset
+                end = offset + size
+            flat.extend([begin, end])
+        return flat
 
     marg = getattr(u, "marg", None)
     if marg is not None:
-        flat: list[int] = []
-        for pair in marg:
-            flat.extend([int(pair[0]), int(pair[1])])
-        return flat
+        return _pairs_to_thvm(marg)
 
     # VCONST was removed in newer tinygrad; guard the attribute lookup.
     vconst = getattr(Ops, "VCONST", None)
@@ -214,18 +242,12 @@ def _movement_begin_end(u, kind: str):
     param_ops = (Ops.CONST,) if vconst is None else (vconst, Ops.CONST)
     param_srcs = [s for s in u.src[1:] if s.op in param_ops]
     if len(param_srcs) >= 2:
-        lo = _vec(param_srcs[-2], in_ndim)
-        hi = _vec(param_srcs[-1], in_ndim)
-        flat: list[int] = []
-        for d in range(in_ndim):
-            flat.extend([lo[d], hi[d]])
-        return flat
+        offs = _vec(param_srcs[-2], in_ndim)
+        sizes = _vec(param_srcs[-1], in_ndim)
+        return _pairs_to_thvm(list(zip(offs, sizes)))
     arg = u.arg
     if arg is not None:
-        flat = []
-        for pair in arg:
-            flat.extend([int(pair[0]), int(pair[1])])
-        return flat
+        return _pairs_to_thvm(arg)
     raise NotImplementedError(
         f"cannot decode {kind} params (no CONST/VCONST srcs, no arg) for {u.op}")
 

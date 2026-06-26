@@ -790,13 +790,29 @@ static Term uop_fold_add_divmod_recombine(Term a, Term b) {
 
 // === invalid_gate / propagate_invalid (tinygrad symbolic.py:25-65) ===
 
-// The valid-given index folds (propagate_invalid push + uop_given_valid)
-// gate behind THVM_FUSE_CONV_BWD so the shared index simplifier stays
-// bit-identical when the conv-backward fusion is off.  Cached: the env
-// is fixed for the process lifetime.
+// The valid-given index folds (propagate_invalid push + uop_given_valid).
+//
+// This is a SEPARATE, opt-in (default OFF) optimization, decoupled from
+// THVM_FUSE_CONV_BWD.  It was previously bundled into the conv-bwd fuse
+// gate, but it is (a) NOT needed for the conv-backward memory win -- the
+// rangeify RESHAPE placeholder fold (schedule/indexing.c
+// apply_movement_op_reshape_composed) is what collapses the col2im into a
+// strided view -- and (b) INCORRECT under thvm's INVALID lowering when a
+// PAD gate is present: propagate_invalid pushes the `WHERE(cond, x, INV)`
+// border gate up through the conv reduce-body MUL into
+// `WHERE(cond, weight*x, INV)`, and a containing simplify can drop the
+// WHERE wrapper leaving a bare INVALID.  tinygrad's INVALID carries full
+// gate semantics through LOAD/STORE lowering; thvm renders a bare INVALID
+// in a value slot as the constant 0 (render_uop.c `/*INVALID*/0`), so the
+// stripped gate makes the WHOLE padded-conv output collapse to 0 (forward
+// sum -> 0, gradients -> 0/nan).  Keeping this fold OFF by default leaves
+// the padded conv correct while the fuse memory win is unaffected.  Enable
+// THVM_VALID_FOLD=1 only on graphs with no PAD gates.  (Tracked: the
+// propagate_invalid port must preserve the gate on the LOAD address rather
+// than hoist it past the reduce body before it can be default-on.)
 static int uop_valid_fold_enabled(void) {
   static int v = -1;
-  if (v < 0) { char const *e = getenv("THVM_FUSE_CONV_BWD"); v = (e && e[0] == '1') ? 1 : 0; }
+  if (v < 0) { char const *e = getenv("THVM_VALID_FOLD"); v = (e && e[0] == '1') ? 1 : 0; }
   return v;
 }
 

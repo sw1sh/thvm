@@ -889,16 +889,16 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   //   else: if full_shape[last_unrollable] % 4 == 0: UNROLL(last, 4)
   //
   // thvm's KOP_UNROLL split needs k > 0, so we translate `0` (tinygrad's
-  // "full extent" sentinel) into the actual extent.
-  //
-  // THVM RENDERER LIMIT: a FULL-extent UNROLL (k == extent, leaving the
-  // outer REDUCE axis at extent 1) confuses rmu_emit_store_reduce's
-  // reduce-range matcher: the REDUCE node's axis field no longer names
-  // any live RANGE, so the renderer emits a bare `#pragma unroll` with
-  // no following loop and the kernel produces wrong output.  Until the
-  // renderer's reduce matcher is fixed to follow UNROLL'd reduce axes,
-  // suppress the full-extent UNROLL.  The split-by-4 branch (factor 4 <
-  // extent) is unaffected and still applies.
+  // "full extent" sentinel) into the actual extent.  A FULL-extent UNROLL
+  // (k == extent) leaves the outer REDUCE axis at extent 1 and wraps the
+  // inner full-extent range in OPT(UNROLL): uop_dag_apply_split keeps the
+  // REDUCE node's axis field naming the (now extent-1) outer RANGE, so
+  // rmu_emit_store_reduce's matcher still finds it and emits an extent-1
+  // reduce loop around the straight-line `#pragma unroll(extent)` inner
+  // accumulation -- numerically exact, fully unrolled.  (The historical
+  // "renderer emits a bare #pragma unroll with no loop" defect predated
+  // the multi-axis reduce machinery; the split-by-k DAG that this opt
+  // now produces always leaves a live reduce RANGE.)
   //
   // CUDA SKIP: stacking UNROLL on top of UPCAST blows V100 register
   // pressure -- nvrtc spills, the kernel runs at a fraction of peak.
@@ -917,10 +917,28 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         u32 last = unr[n_unr - 1];
         u32 ext  = ax.extent[last];
         if (ext <= 32) {
-          // tinygrad: UNROLL(last, 0) -- full extent.
-          // thvm: see THVM RENDERER LIMIT in the comment above; skip
-          // full-extent UNROLL.
-          (void)last;
+          // tinygrad heuristic.py:141 -- UNROLL(last, 0), full extent.
+          // thvm: k=0 sentinel -> actual extent (full-extent unroll).
+          KOpt opt = { KOP_UNROLL, ax.axis_id[last], ext };
+          if (kernel_apply_opt(ke, opt)) {
+            n_applied++;
+            // tinygrad heuristic.py:143-144 -- if it's small, fully
+            // unroll a SECOND reduce dimension too (s<=3 and the new
+            // last unrollable dim is also <=3).  Re-snapshot: the first
+            // UNROLL renumbered axes.
+            if (ext <= 3 && hand_opt_snapshot_axes(ke, &ax)) {
+              u32 unr2[MAX_AXES];
+              u32 n_unr2 = hand_opt_unrollable_dims(&ax, unr2);
+              if (n_unr2 > 0) {
+                u32 last2 = unr2[n_unr2 - 1];
+                u32 ext2  = ax.extent[last2];
+                if (ext2 <= 3) {
+                  KOpt opt2 = { KOP_UNROLL, ax.axis_id[last2], ext2 };
+                  if (kernel_apply_opt(ke, opt2)) n_applied++;
+                }
+              }
+            }
+          }
         } else {
           if (ext % 4 == 0) {
             KOpt opt = { KOP_UNROLL, ax.axis_id[last], 4 };
