@@ -1166,6 +1166,14 @@ int main(int argc, char **argv) {
       // below).  See soa.txt.
       thvm_atp_set_use_l2_selfcube_dist_defer(
           s, (getenv("THVM_ATP_L2_SELFCUBE_DIST_DEFER") != NULL) ? 1u : 0u);
+      // WolframAxioms early eTT collapse-copy defer (DEFAULT OFF): discard at
+      // selection the early eTT/B-phase deep-collapse copy `BIG=v` when its
+      // tops/A-phase twin is still queued at the same priority -- the
+      // WolframAxioms OrAssociativity firstdiv-781 divergence.
+      // THVM_ATP_WOLF_COLLAPSE_DEFER opts in (also turned on by FORMATION_FIFO
+      // below).  Scoped HARD to the WolframAxioms seed.
+      thvm_atp_set_use_wolf_collapse_defer(
+          s, (getenv("THVM_ATP_WOLF_COLLAPSE_DEFER") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /

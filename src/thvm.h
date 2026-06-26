@@ -4604,6 +4604,13 @@ typedef struct {
   // with the parallel CP arrays.  Default 0 (engine byte-identical
   // when the flag is off).
   u8   *cp_ultimate;
+  // WolframAxioms formation phase per queued CP (atp_wmo_rank phase: 0=tops/A,
+  // 1=eTT/B, etc.), stamped at push and moved with the parallel CP arrays.
+  // Lazily allocated ONLY under use_wolf_collapse_defer (NULL otherwise -> every
+  // slot-move site is a NULL-guarded no-op, engine byte-identical).  Read at
+  // selection to defer an early eTT-phase deep-collapse copy past its queued
+  // tops-phase twin (see use_wolf_collapse_defer).
+  u8   *cp_form_phase;
   u8    use_initial_ultimate;
   // Waldmeister `database=ultimate` action (Parameter.c:166 -- the WM
   // default along with initial=ultimate).  Tags CPs derived during
@@ -6468,6 +6475,31 @@ typedef struct {
   // CPFORM (sec/ovFace/ovPos/aP/oP) for the seven rawCPs with parents 94,{46-54};
   // a fresh WM_CPFORMDUMP matched BY TERMS is the outstanding input.
   u8    cube_detectors_off;
+  // WolframAxioms early eTT collapse-copy DEFER (env THVM_ATP_WOLF_COLLAPSE_DEFER,
+  // default OFF; also turned ON under use_formation_fifo).  WolframAxioms
+  // OrAssociativity firstdiv-781: thvm forms a deep collapse CP `BIG = v` (v a bare
+  // variable) twice with the SAME content but DIFFERENT formation lineage -- an
+  // eTT/B-phase copy (the new fact planted as INNER) AND a tops/A-phase copy (the
+  // new fact as OUTER).  thvm gives the eTT copy a LOWER cp_seq (its batch pushed
+  // earlier) so it heads the weight band (pick 781) where WM has a DIFFERENT CP; WM
+  // ages the surviving content at the tops formation (pick 790, where it joins).
+  // The band aligns EXACTLY if the early eTT copy is deferred past its tops twin.
+  // DEFER it at SELECTION: when the chosen CP is the eTT/B-phase overlap whose
+  // INNER fact (the new fact f) is UNORIENTED (cp_form_phase code 0xfe), reduces to
+  // a bare variable (deep collapse), AND an IDENTICAL phase-0 (tops) twin is still
+  // pending in the queue at the SAME priority, discard this early copy (re-pick) so
+  // the tops twin surfaces at WM's slot.  The UNORIENTED-inner gate is what
+  // separates 781 (defer) from every keep-case (first@174/@252/@283/... -- each an
+  // eTT collapse copy with an ORIENTED inner, which WM selects + joins normally);
+  // the phase-0-twin-in-queue gate excludes first@463 (tops twin not yet formed).
+  // Scoped HARD to the WolframAxioms seed; OFF byte-identical.  Advances
+  // WolframAxioms OrAssociativity firstdiv 781 -> 862.
+  u8    use_wolf_collapse_defer;
+  // Cached WolframAxioms-seed liveness (atp_wolfram_axiom_is_live), keyed on
+  // r_revision so the per-selection scope check is O(1) after the first hit.
+  u8    wolf_axiom_is_live_cache;
+  u32   wolf_axiom_cache_revision;
+  u32   n_cps_wolf_collapse_defer;  // diagnostics: early eTT collapse-copy defers
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6995,6 +7027,10 @@ fn void      thvm_atp_set_use_l1_selfcube_defer(AtpState *s, u8 on);
 // shapes (see AtpState.use_l2_selfcube_dist_defer).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l2_selfcube_dist_defer(AtpState *s, u8 on);
+// WolframAxioms early eTT collapse-copy defer (see
+// AtpState.use_wolf_collapse_defer).  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void      thvm_atp_set_use_wolf_collapse_defer(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

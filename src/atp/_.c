@@ -657,6 +657,9 @@ static void atp_unf_flathash(const u32 *flatsym, const u32 *subsz,
 // block, where the discrimination-tree skeleton lives); the shim
 // below dispatches to it.
 static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap);
+// WolframAxioms-seed discriminator (defined with the atp_pair_is_* predicates
+// far below); the select-time collapse-copy defer needs it up here.
+static u8 atp_wolfram_axiom_is_live(AtpState *s);
 // Preorder node count -- defined after atp_compare; the indexed
 // normalizer needs it up here to size an incremental-flatten splice.
 static u32 atp_symbol_count(Term t);
@@ -880,10 +883,15 @@ static u8  g_cpform_i_or    = 0xffu;
 static u8  g_cpform_j_or    = 0xffu;
 static u8  g_cpform_pos_len = 0xffu;
 static u8  g_cpform_pos[CP_MAX_DEPTH];
+// WolframAxioms formation phase (atp_wmo_rank key>>58) of the CP currently being
+// pushed, carried from the batch emission loop to the heap/implicit push so it can
+// be stamped into cp_form_phase.  0xff = unset (non-batch push); the push stamps 0.
+static u8  g_cp_form_phase = 0xffu;
 
 static void atp_cpform_geom_clear(void) {
   g_cpform_i = g_cpform_j = g_cpform_itr = g_cpform_jtr = 0xffffffffu;
   g_cpform_combo = g_cpform_i_or = g_cpform_j_or = g_cpform_pos_len = 0xffu;
+  g_cp_form_phase = 0xffu;
 }
 
 // Gated classification-order trace (env THVM_ATP_CP_FORM_TRACE).  Emits
@@ -1046,6 +1054,19 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
     }
     s->cp_ultimate = nu;
     for (u32 i = s->cp_cap; i < cap; i++) s->cp_ultimate[i] = 0u;
+  }
+  // Lazy-grow cp_form_phase only under the WolframAxioms collapse-defer flag;
+  // NULL (engine byte-identical) otherwise.  Stores each queued CP's
+  // atp_wmo_rank formation phase so selection can read it.
+  if (s->use_wolf_collapse_defer) {
+    u8 *np = (u8 *)realloc(s->cp_form_phase, cap * sizeof(u8));
+    if (np == NULL) {
+      fprintf(stderr, "atp_ensure_cp_cap: realloc cp_form_phase to %u failed\n",
+              cap);
+      exit(1);
+    }
+    s->cp_form_phase = np;
+    for (u32 i = s->cp_cap; i < cap; i++) s->cp_form_phase[i] = 0u;
   }
   for (u32 i = s->cp_cap; i < cap; i++) {
     s->cp_packed[i] = NULL;
@@ -4494,6 +4515,9 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // presets gate it OFF so the passive queue and its FIFO ages match
   // WM's recentCPinsert exactly (see AtpState.use_queue_subsume).
   s->use_queue_subsume = 1u;
+  // WolframAxioms-seed liveness cache sentinel (r_revision starts at 0, so a
+  // zeroed cache_revision would spuriously match before the first real scan).
+  s->wolf_axiom_cache_revision = 0xffffffffu;
   // use_lazy_normalize stays OFF by default (calloc zeroed): the deferred-
   // selection CP normalization is an opt-in via thvm_atp_set_use_lazy_normalize
   // (Method suboption "LazyNormalize" on the WL side, wired through the
@@ -4693,6 +4717,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_seq);
   free(s->cp_pri2);
   free(s->cp_ultimate);
+  free(s->cp_form_phase);
   free(s->cp_last_norm_r_revision);
   // Deferred-CP (`implicit_pair`) arc commit 1: the descriptor array and
   // the per-slot tag bitset are plain malloc'd blocks (no per-slot owned
@@ -7486,6 +7511,11 @@ static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
     s->cp_ultimate[i] = s->cp_ultimate[j];
     s->cp_ultimate[j] = tu;
   }
+  if (s->cp_form_phase != NULL) {
+    u8 tf = s->cp_form_phase[i];
+    s->cp_form_phase[i] = s->cp_form_phase[j];
+    s->cp_form_phase[j] = tf;
+  }
   // Deferred-CP descriptor + tag bit travel with the slot: a fresh
   // implicit push sifts up immediately, so missing this swap would
   // desync the descriptor from its slot on the FIRST sift.
@@ -7562,6 +7592,8 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
                  :                        0u;
   u32 seq        = s->cp_seq_next++;
   s->cp_seq[i]   = seq;
+  if (s->cp_form_phase != NULL)
+    s->cp_form_phase[i] = (g_cp_form_phase == 0xffu) ? 0u : g_cp_form_phase;
   atp_cp_form_trace(seq, cp_nodes, lhs, rhs);
   s->n_cps++;
   atp_cp_sift_up(s, i);
@@ -7827,6 +7859,8 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
                                                               s->w2_mode)
                   :                        0u;
   s->cp_seq[i]    = s->cp_seq_next++;
+  if (s->cp_form_phase != NULL)
+    s->cp_form_phase[i] = (g_cp_form_phase == 0xffu) ? 0u : g_cp_form_phase;
   atp_cp_form_trace(s->cp_seq[i], cp_nodes, lhs, rhs);
   // No THVM_ATPFT_CPQ mirror: the FT queue's slot-occupied invariant
   // tracks cp_packed[i], and a deferred slot is exactly the NULL case
@@ -8032,6 +8066,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
       s->cp_pri2[i]  = s->cp_pri2[last];
       s->cp_last_norm_r_revision[i] = s->cp_last_norm_r_revision[last];
       if (s->cp_ultimate != NULL) s->cp_ultimate[i] = s->cp_ultimate[last];
+      if (s->cp_form_phase != NULL) s->cp_form_phase[i] = s->cp_form_phase[last];
       atp_cp_implicit_move(s, /*dst=*/i, /*src=*/last);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_move(s, /*dst=*/i, /*src=*/last);
@@ -8116,6 +8151,34 @@ static void atp_cp_slot_read(const AtpState *s, u32 i,
   } else {
     acp_unpack(s->cp_packed[i], lhs, rhs);
   }
+}
+
+// WolframAxioms early eTT collapse-copy defer (see use_wolf_collapse_defer).
+// Whether the chosen queue slot `j` -- CP `(jl, jr)` at priority `pri` -- has an
+// IDENTICAL twin still pending at the SAME priority whose formation phase is 0
+// (tops/A-phase).  thvm forms the deep collapse content twice: an eTT/B-phase copy
+// (cp_form_phase 1) that lands at a LOW cp_seq (heading the band) and a tops/A-phase
+// copy (phase 0).  WM ages the surviving content at the tops formation; deferring
+// the eTT copy past its queued tops twin reproduces WM's order.  The phase-0 twin
+// must be PRESENT in the queue (not merely a future re-derivation): that is what
+// separates firstdiv-781 (tops twin queued) from the keep-cases first@395 (twin is
+// also eTT, never phase 0) and first@463 (the tops twins form ~780 picks later, so
+// none is queued here).  Identity is orientation-insensitive structural equality of
+// the reduced+var-normalized sides.
+static u8 atp_cp_has_queued_tops_twin(const AtpState *s, u32 j, Term jl, Term jr,
+                                      u32 pri) {
+  if (s->cp_form_phase == NULL) return 0u;
+  for (u32 q = 0; q < s->n_cps; q++) {
+    if (q == j) continue;
+    if (s->cp_pri[q] != pri) continue;          // duplicates share the weight band
+    if (s->cp_form_phase[q] != 0u) continue;     // the survivor is the tops copy
+    Term ql = 0, qr = 0;
+    atp_cp_slot_read(s, q, &ql, &qr);
+    if ((kbo_eq(jl, ql) && kbo_eq(jr, qr)) ||
+        (kbo_eq(jl, qr) && kbo_eq(jr, ql)))
+      return 1u;
+  }
+  return 0u;
 }
 
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
@@ -8211,6 +8274,26 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // away rule, extract+discard it without counting a selection and
   // re-pick.  WM IncAnzKPEntfernt ticks per discard (KPVerwaltung.c:539).
   int orphan = s->use_orphan_murder && atp_cp_is_orphan(s, s->cp_trace[j]);
+  // WolframAxioms early eTT collapse-copy defer (see use_wolf_collapse_defer):
+  // the chosen CP is the eTT/B-phase (cp_form_phase 1) copy of a deep collapse
+  // `BIG = v` whose tops/A-phase twin is still queued at the same priority.  WM
+  // ages the surviving content at the tops formation, so thvm's early eTT copy
+  // heads the band where WM has a different CP -- the firstdiv-781 over-selection.
+  // Discard the eTT copy (fold into `orphan`; no CPSEL, no counted selection) so
+  // the tops twin surfaces at WM's slot.  Scoped HARD to the WolframAxioms seed;
+  // the queued-tops-twin gate keeps the keep-cases (first@395/@463) intact.
+  u8 wolf_defer = 0u;
+  if (!orphan && s->use_wolf_collapse_defer && s->cp_form_phase != NULL &&
+      s->cp_form_phase[j] == 0xfeu && atp_wolfram_axiom_is_live(s)) {
+    Term cl = 0, cr = 0;
+    atp_cp_slot_read(s, j, &cl, &cr);
+    if ((term_tag(cl) == TAG_FVR || term_tag(cr) == TAG_FVR) &&
+        atp_cp_has_queued_tops_twin(s, j, cl, cr, s->cp_pri[j])) {
+      wolf_defer = 1u;
+      orphan = 1;
+      s->n_cps_wolf_collapse_defer++;
+    }
+  }
   if (!orphan) s->cp_select_count++;
 
   // Unpack the chosen CP from its byte string into two fresh heap
@@ -8267,7 +8350,11 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       atp_dbg_print_term(stderr, *lhs_out);
       fputs(" rhs=", stderr);
       atp_dbg_print_term(stderr, *rhs_out);
-      if (orphan) {
+      if (wolf_defer) {
+        // Deferred early eTT collapse copy: tagged distinctly from a genuine
+        // orphan so the aligner skips it as a non-selection.
+        fputs(" WOLFDEFER", stderr);
+      } else if (orphan) {
         Term te = s->trace[s->cp_trace[j]];
         u32 pa = (u32)term_val(term_ctr_at(te, 0));
         u32 pb = (u32)term_val(term_ctr_at(te, 1));
@@ -8309,6 +8396,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_pri2[j]  = s->cp_pri2[last];
     s->cp_last_norm_r_revision[j] = s->cp_last_norm_r_revision[last];
     if (s->cp_ultimate != NULL) s->cp_ultimate[j] = s->cp_ultimate[last];
+    if (s->cp_form_phase != NULL) s->cp_form_phase[j] = s->cp_form_phase[last];
     atp_cp_implicit_move(s, /*dst=*/j, /*src=*/last);
 #ifdef THVM_ATPFT_CPQ
     // Move the (still-owned) FT entry from the last slot into j; zero
@@ -8321,7 +8409,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   }
 
   if (orphan) {
-    s->n_cps_dropped_orphan++;
+    if (!wolf_defer) s->n_cps_dropped_orphan++;  // collapse defers count separately
     if (s->n_cps == 0u && s->n_cp_stash > 0u
         && s->auto_max_cp_weight_base > 0u) {
       atp_auto_maxw_drain(s, 1u);
@@ -9359,6 +9447,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1_selfcube_defer = 1u;
     s->use_l2_selfcube_dist_defer = 1u;
     s->use_l1cube_joinform  = 1u;
+    s->use_wolf_collapse_defer = 1u;
     // Bisection knob (THVM_ATP_CUBE_DETECTORS_OFF=1): drop the post-10030
     // Meredith cube/corank re-key cluster (the L.1/L.2 detectors layered atop
     // the base FormationFifo k3-arrival passes) so the upstream overlap-geometry
@@ -9679,6 +9768,15 @@ fn void thvm_atp_set_use_l1_selfcube_defer(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l2_selfcube_dist_defer(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l2_selfcube_dist_defer = on ? 1u : 0u;
+}
+
+// WolframAxioms early eTT collapse-copy defer (see use_wolf_collapse_defer):
+// discard at selection the early eTT/B-phase deep-collapse copy when its
+// tops/A-phase twin is still queued, deferring the content to WM's late slot.
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_wolf_collapse_defer(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wolf_collapse_defer = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -12354,6 +12452,7 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
       // The NF-witness cookie travels with the CP (per-CP, not per-slot).
       s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
       if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
+      if (s->cp_form_phase != NULL) s->cp_form_phase[w] = s->cp_form_phase[i];
       atp_cp_implicit_move(s, /*dst=*/w, /*src=*/i);
     }
     w++;
@@ -12548,6 +12647,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
         s->cp_trace[w] = s->cp_trace[i];
         s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
         if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
+        if (s->cp_form_phase != NULL) s->cp_form_phase[w] = s->cp_form_phase[i];
         if (is_impl) {
           // Deferred survivor: carry the push-time heap keys (see the
           // cookie path below for why recomputing on the raw pair
@@ -12591,6 +12691,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->cp_trace[w] = s->cp_trace[i];
       s->cp_last_norm_r_revision[w] = r_rev_snap;
       if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
+      if (s->cp_form_phase != NULL) s->cp_form_phase[w] = s->cp_form_phase[i];
       if (is_impl) {
         // Implicit NF-confirmed survivor: stay deferred, carry the
         // push-time heap keys (the descriptor design -- the cached
@@ -12707,6 +12808,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // CP).  Without this carry-over the next reheapify resorts the
     // axiom by Mix weight and loses the ultimate front.
     if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
+    if (s->cp_form_phase != NULL) s->cp_form_phase[w] = s->cp_form_phase[i];
     if (is_impl && nf_witness) {
       // Implicit survivor confirmed in NF under the full current R:
       // stay deferred (the raw trace pair is still the slot's exact
@@ -17477,6 +17579,59 @@ static u8 atp_slot15_rule_is_live(AtpState *s) {
   return 0u;
 }
 
+// Whether `t` is the Wolfram-axiom LHS `((a.b).c).(a.((a.c).a))` over bare vars
+// (the single 6-symbol Sheffer-stroke axiom that seeds the WolframAxioms
+// NotableTheorems problems): root dot(A, B) with A = dot(dot(a,b),c) and
+// B = dot(a, dot(dot(a,c), a)), and the variable identities a==B.0==B.1.0.0==B.1.1,
+// c==A.1==B.1.0.1.  The WolframAxioms problem discriminator (atp_wolfram_axiom_is_
+// live), so the Wolfram-scoped detectors are a no-op on every other problem.
+static u8 atp_term_is_wolfram_axiom_lhs(Term t) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  u32 op = term_ext(t);
+  Term A = term_ctr_at(t, 0), B = term_ctr_at(t, 1);
+  if (term_tag(A) != TAG_CTR || term_ext(A) != op || term_ctr_n(A) != 2u)
+    return 0u;
+  Term A0 = term_ctr_at(A, 0), A1 = term_ctr_at(A, 1);
+  if (term_tag(A0) != TAG_CTR || term_ext(A0) != op || term_ctr_n(A0) != 2u)
+    return 0u;
+  Term a0 = term_ctr_at(A0, 0), b0 = term_ctr_at(A0, 1);
+  if (term_tag(a0) != TAG_FVR || term_tag(b0) != TAG_FVR ||
+      term_tag(A1) != TAG_FVR)
+    return 0u;
+  u32 a = term_ext(a0), b = term_ext(b0), c = term_ext(A1);
+  if (a == b || a == c || b == c) return 0u;
+  if (term_tag(B) != TAG_CTR || term_ext(B) != op || term_ctr_n(B) != 2u)
+    return 0u;
+  Term B0 = term_ctr_at(B, 0), B1 = term_ctr_at(B, 1);
+  if (term_tag(B0) != TAG_FVR || term_ext(B0) != a) return 0u;
+  if (term_tag(B1) != TAG_CTR || term_ext(B1) != op || term_ctr_n(B1) != 2u)
+    return 0u;
+  Term B10 = term_ctr_at(B1, 0), B11 = term_ctr_at(B1, 1);
+  if (term_tag(B11) != TAG_FVR || term_ext(B11) != a) return 0u;
+  if (term_tag(B10) != TAG_CTR || term_ext(B10) != op || term_ctr_n(B10) != 2u)
+    return 0u;
+  Term B100 = term_ctr_at(B10, 0), B101 = term_ctr_at(B10, 1);
+  if (term_tag(B100) != TAG_FVR || term_ext(B100) != a) return 0u;
+  if (term_tag(B101) != TAG_FVR || term_ext(B101) != c) return 0u;
+  return 1u;
+}
+
+// Whether the WolframAxioms seed axiom `((a.b).c).(a.((a.c).a)) = c` is a live
+// rule -- the problem discriminator that scopes the Wolfram-only detectors.  The
+// axiom is rule 0; cached per rule-set revision so the per-selection check is O(1).
+static u8 atp_wolfram_axiom_is_live(AtpState *s) {
+  if (s->wolf_axiom_cache_revision == s->r_revision)
+    return s->wolf_axiom_is_live_cache;
+  u8 live = 0u;
+  for (u32 k = 0; k < s->n_rules; k++) {
+    if (s->r_dead != NULL && s->r_dead[k]) continue;
+    if (atp_term_is_wolfram_axiom_lhs(s->lhs[k])) { live = 1u; break; }
+  }
+  s->wolf_axiom_is_live_cache = live;
+  s->wolf_axiom_cache_revision = s->r_revision;
+  return live;
+}
+
 // Whether a NORMALIZED CP is the DOUBLE-CUBE `(x.(x.x)).y = (z.(z.z)).y`
 // (thvm LHS=(C3 (C3 V0 (C3 V0 V0)) V1), RHS=(C3 (C3 V2 (C3 V2 V2)) V1) modulo
 // orientation/renaming): BOTH sides are a cube `f(v, f(v, v))` dotted with the
@@ -20835,6 +20990,23 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       g_cpform_pos_len = big[k].cp.pos_len;
       for (u32 d = 0; d < big[k].cp.pos_len && d < CP_MAX_DEPTH; d++)
         g_cpform_pos[d] = big[k].cp.pos[d];
+      // Carry the ORIGINAL formation phase (key_raw, before any detector re-key)
+      // so the push can stamp cp_form_phase for the WolframAxioms collapse-defer.
+      // Encode the eTT/B-phase (1) overlaps whose INNER fact (the new fact f,
+      // planted as the inner of an old partner) is UNORIENTED as a distinct code
+      // 0xfe: that is the formation lineage of the WolframAxioms firstdiv-781
+      // collapse copy WM ages late (every kept eTT collapse copy at first@174/
+      // @252/@283/... has an ORIENTED inner instead).  Everything else keeps the
+      // raw phase value.
+      {
+        u8 ph = (u8)(big[k].key_raw >> 58);
+        u32 inner = (big[k].j == f) ? big[k].j
+                  : (big[k].i == f) ? big[k].i : 0xffffffffu;
+        if (ph == 1u && inner != 0xffffffffu && !s->r_orient[inner])
+          g_cp_form_phase = 0xfeu;
+        else
+          g_cp_form_phase = ph;
+      }
       pushed += atp_push_cps_traced(s, &big[k].cp, 1u,
                                     s->r_trace[big[k].i],
                                     s->r_trace[big[k].j],
