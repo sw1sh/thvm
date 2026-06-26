@@ -9353,6 +9353,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1cube_arrsplit  = 1u;
     s->use_l1selfdist_face  = 1u;
     s->use_ette_arrkey      = 1u;
+    s->use_l11_sqdist_interleave = 1u;
     s->use_l2tail_face_swap = 1u;
     s->use_l1_selfcube_defer = 1u;
     s->use_l2_selfcube_dist_defer = 1u;
@@ -9387,6 +9388,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
       s->use_l1cube_arrsplit  = 0u;
       s->use_l1selfdist_face  = 0u;
       s->use_ette_arrkey      = 0u;
+      s->use_l11_sqdist_interleave = 0u;
       s->use_l2tail_face_swap = 0u;
       s->use_l1_selfcube_defer = 0u;
       s->use_l2_selfcube_dist_defer = 0u;
@@ -9632,6 +9634,15 @@ fn void thvm_atp_set_use_l1selfdist_face(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_ette_arrkey(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_ette_arrkey = on ? 1u : 0u;
+}
+
+// L.1.1 weight-155 square-distribution two-variant interleave (see
+// AtpState.use_l11_sqdist_interleave): re-key the f=195 L.1.1 weight-155 band's
+// B/A square-distribution variants onto a (round, variant) round-robin, matching
+// WM's B,A,B,A emission.  DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l11_sqdist_interleave(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l11_sqdist_interleave = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_l2tail_face_swap(AtpState *s, u8 on) {
@@ -17154,6 +17165,62 @@ static u8 atp_pair_l21_selfsq_deep(Term l, Term r) {
   return 1u;
 }
 
+// L.1.1 weight-155 square-distribution two-variant band member
+// (use_l11_sqdist_interleave).  The reduced CP `((INNER.z).(F.z)) = z` where
+// INNER carries a self-square nested in a left/right distribution and F is the
+// bare var the OTHER side of the square names:
+//   B `((((x.x).y).z).(y.z)) = z`  -> INNER=((x.x).y) (square on the deep LEFT),
+//                                     F=y                          (variant 1)
+//   A `(((x.(y.y)).z).(x.z)) = z`  -> INNER=(x.(y.y)) (square on the deep RIGHT),
+//                                     F=x                          (variant 2)
+// The head is `(INNER.z).(F.z)`: first factor INNER.z, second factor F.z (F a
+// bare var, z the bare var == rhs).  Returns 1 for B, 2 for A, 0 otherwise.
+// Orientation-insensitive (one side == the bare var z == rhs); variable
+// identities matched structurally so the detector is renaming-stable.
+static u8 atp_pair_l11_sqdist_variant(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big), z = term_ext(var);
+  Term f1 = term_ctr_at(big, 0), f2 = term_ctr_at(big, 1);   // (INNER.z) , (F.z)
+  if (term_tag(f1) != TAG_CTR || term_ext(f1) != op || term_ctr_n(f1) != 2u)
+    return 0u;
+  Term inner = term_ctr_at(f1, 0), f1z = term_ctr_at(f1, 1);
+  if (term_tag(f1z) != TAG_FVR || term_ext(f1z) != z) return 0u;   // INNER.z
+  if (term_tag(f2) != TAG_CTR || term_ext(f2) != op || term_ctr_n(f2) != 2u)
+    return 0u;
+  Term ff = term_ctr_at(f2, 0), f2z = term_ctr_at(f2, 1);
+  if (term_tag(ff) != TAG_FVR || term_tag(f2z) != TAG_FVR || term_ext(f2z) != z)
+    return 0u;                                                     // (F.z), F a var
+  u32 fv = term_ext(ff);
+  if (fv == z) return 0u;
+  // INNER is a 2-ary distribution `(P.Q)` holding one self-square `w.w` and the
+  // var fv on the other side.  B: INNER=((x.x).y) -> P=(x.x), Q=y==fv.
+  //                          A: INNER=(x.(y.y))   -> P=x==fv, Q=(y.y).
+  if (term_tag(inner) != TAG_CTR || term_ext(inner) != op || term_ctr_n(inner) != 2u)
+    return 0u;
+  Term p = term_ctr_at(inner, 0), q = term_ctr_at(inner, 1);
+  // B: P = (x.x) square, Q = fv (bare).
+  if (term_tag(q) == TAG_FVR && term_ext(q) == fv &&
+      term_tag(p) == TAG_CTR && term_ext(p) == op && term_ctr_n(p) == 2u) {
+    Term p0 = term_ctr_at(p, 0), p1 = term_ctr_at(p, 1);
+    if (term_tag(p0) == TAG_FVR && term_tag(p1) == TAG_FVR &&
+        term_ext(p0) == term_ext(p1) && term_ext(p0) != fv && term_ext(p0) != z)
+      return 1u;                                                   // B
+  }
+  // A: P = fv (bare), Q = (y.y) square.
+  if (term_tag(p) == TAG_FVR && term_ext(p) == fv &&
+      term_tag(q) == TAG_CTR && term_ext(q) == op && term_ctr_n(q) == 2u) {
+    Term q0 = term_ctr_at(q, 0), q1 = term_ctr_at(q, 1);
+    if (term_tag(q0) == TAG_FVR && term_tag(q1) == TAG_FVR &&
+        term_ext(q0) == term_ext(q1) && term_ext(q0) != fv && term_ext(q0) != z)
+      return 2u;                                                   // A
+  }
+  return 0u;
+}
+
 // Mirror of atp_pair_band155_variant for the f=182 tops batch: the band CP is
 // `(x.A).(B.x) = x` -- the SECOND factor carries the bare var x on the RIGHT
 // (`B.x`) instead of the left (`x.B`).  Same two interleaving variants WM emits
@@ -19556,6 +19623,83 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           }
         for (u32 a = 0; a < ng; a++)
           big[ea_idx[ge[ord[a]]]].key = keys_sorted[a];
+      }
+    }
+    // L.1.1 weight-155 square-distribution two-variant interleave (default OFF;
+    // see use_l11_sqdist_interleave).  The Meredith OrAssociativity firstdiv-15129
+    // divergence: an L.1.1 tops batch (f=195) forms a weight-155 band of
+    // `((INNER.z).(F.z)) = z` whose two square-distribution variants -- B
+    // `((((x.x).y).z).(y.z)) = z` (square deep-left) and A `(((x.(y.y)).z).(x.z))
+    // = z` (square deep-right), atp_pair_l11_sqdist_variant 1/2 -- WM emits ROUND-
+    // ROBIN (B,A,B,A) while thvm groups them by partner-equation arrival (B,B,A,A).
+    // Re-key the band's variant members onto a (round, variant) round-robin (round
+    // = count of earlier same-variant band CPs; variant rank = first-appearance
+    // order in the key-sorted band, so the leading variant is preserved),
+    // preserving the key-slot multiset.  Same idiom as use_band_interleave.  soa's
+    // L.1.1 sqdist bands are already interleaved leading with A, so the first-
+    // appearance rank keeps them A,B,A,B (a no-op) -- soa byte-identical; thvm's
+    // grouped Meredith band B,B,A,A leads with B -> B,A,B,A.  Scoped HARD to a
+    // pos==[0,0] band holding BOTH a B and an A variant.  OFF byte-identical.
+    // Advances Meredith firstdiv 15129 -> 15195.
+    if (s->use_l11_sqdist_interleave) {
+      enum { SD_CAP = 64u };
+      u32 sd_idx[SD_CAP];
+      u8  sd_var[SD_CAP];
+      u64 sd_key[SD_CAP];
+      u32 n_sd = 0;
+      for (u32 k = 0; k < n_big && n_sd < SD_CAP; k++) {
+        if (big[k].cp.pos_len != 2u ||
+            big[k].cp.pos[0] != 0u || big[k].cp.pos[1] != 0u) continue;  // L.1.1
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 v = atp_pair_l11_sqdist_variant(nl, nr);
+        if (v == 0u) continue;
+        sd_idx[n_sd] = k;
+        sd_var[n_sd] = v;
+        sd_key[n_sd] = big[k].key;
+        n_sd++;
+      }
+      // Need BOTH variants present (the f=195 interleave signature).
+      u8 have_b = 0u, have_a = 0u;
+      for (u32 a = 0; a < n_sd; a++) {
+        if (sd_var[a] == 1u) have_b = 1u; else have_a = 1u;
+      }
+      if (n_sd >= 2u && have_b && have_a) {
+        // Sort band entries by current key (ascending) so "round" = the count of
+        // earlier same-variant band CPs.
+        for (u32 a = 0; a + 1u < n_sd; a++)
+          for (u32 b = a + 1u; b < n_sd; b++)
+            if (sd_key[b] < sd_key[a]) {
+              u64 tk = sd_key[a]; sd_key[a] = sd_key[b]; sd_key[b] = tk;
+              u32 ti = sd_idx[a]; sd_idx[a] = sd_idx[b]; sd_idx[b] = ti;
+              u8  tv = sd_var[a]; sd_var[a] = sd_var[b]; sd_var[b] = tv;
+            }
+        u32 round[SD_CAP];
+        u32 seen[3] = {0, 0, 0};
+        for (u32 a = 0; a < n_sd; a++) { round[a] = seen[sd_var[a]]; seen[sd_var[a]]++; }
+        // Variant rank = FIRST-APPEARANCE order in the key-sorted band (NOT a fixed
+        // B<A), so the round-robin preserves whichever variant currently leads.
+        // thvm's grouped Meredith band (B,B,A,A) leads with B -> B,A,B,A; soa's
+        // already-interleaved bands (A,B,A,B) lead with A -> A,B,A,B (a no-op),
+        // so the round-robin re-key never disturbs a band already in WM's order.
+        u32 var_rank[3] = {0u, 0u, 0u};
+        u8  rank_set[3] = {0u, 0u, 0u};
+        u32 next_rank = 0u;
+        for (u32 a = 0; a < n_sd; a++) {
+          if (!rank_set[sd_var[a]]) { var_rank[sd_var[a]] = next_rank++; rank_set[sd_var[a]] = 1u; }
+        }
+        // order = band permutation sorted by (round, variant_rank).
+        u32 order[SD_CAP];
+        for (u32 a = 0; a < n_sd; a++) order[a] = a;
+        for (u32 a = 0; a + 1u < n_sd; a++)
+          for (u32 b = a + 1u; b < n_sd; b++) {
+            u32 pa = order[a], pb = order[b];
+            u32 ka = round[pa] * 2u + var_rank[sd_var[pa]];
+            u32 kb = round[pb] * 2u + var_rank[sd_var[pb]];
+            if (kb < ka) { order[a] = pb; order[b] = pa; }
+          }
+        for (u32 a = 0; a < n_sd; a++)
+          big[sd_idx[order[a]]].key = sd_key[a];
       }
     }
     // L.1 weight-120 cube B/D/E grouping (default OFF; see use_l1cube_group).

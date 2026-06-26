@@ -6315,6 +6315,28 @@ typedef struct {
   // OFF byte-identical; also ON under use_formation_fifo.  Advances Meredith
   // firstdiv 15043 -> 15129.
   u8    use_ette_arrkey;
+  // L.1.1 weight-155 square-distribution two-variant interleave (see
+  // thvm_atp_set_use_l11_sqdist_interleave).  The Meredith OrAssociativity
+  // firstdiv-15129 divergence: an L.1.1 tops batch (f=195) forms a weight-155 band
+  // of `((INNER.z).(F.z)) = z` whose two square-distribution variants
+  // (atp_pair_l11_sqdist_variant) -- B `((((x.x).y).z).(y.z)) = z` (square on the
+  // deep left) and A `(((x.(y.y)).z).(x.z)) = z` (square on the deep right) -- WM
+  // emits ROUND-ROBIN (B,A,B,A) while thvm groups them by partner-equation arrival
+  // (B,B,A,A).  This is the use_band_interleave round-robin family, NOT the
+  // use_ette_arrkey arrival-sort family: the eqn-tops arrival here orders the band
+  // B,B,A,A (sorting by it is a no-op), so the fix is a (round, variant) interleave
+  // re-key.  Collect the L.1.1 band's variant members, sort by current key, then
+  // re-assign the key-slot multiset in (round, variant) order -- round = count of
+  // earlier same-variant band CPs; variant rank = FIRST-APPEARANCE order in the
+  // key-sorted band (NOT a fixed B<A).  thvm's grouped Meredith band (B,B,A,A)
+  // leads with B -> B,A,B,A; soa's L.1.1 sqdist bands are ALREADY interleaved
+  // leading with A (A,B,A,B) -> the first-appearance rank keeps them A,B,A,B, so
+  // the re-key is a no-op there and soa stays byte-identical (a fixed B<A rank
+  // would wrongly force soa's bands to B,A,B,A).  Same idiom as
+  // use_band_interleave, on the L.1.1 square-distribution band.  Scoped HARD to
+  // the pos==[0,0] band holding BOTH a B and an A variant.  OFF byte-identical;
+  // also ON under use_formation_fifo.  Advances Meredith firstdiv 15129 -> 15195.
+  u8    use_l11_sqdist_interleave;
   // L.2 weight-18 cube-tail two-face group swap (see
   // thvm_atp_set_use_l2tail_face_swap).  The Meredith OrAssociativity
   // firstdiv-13349 divergence: the f=184 tops batch forms a four-CP
@@ -6937,6 +6959,10 @@ fn void      thvm_atp_set_use_l1selfdist_face(AtpState *s, u8 on);
 // Equation-tree (eTTE) tops-arrival re-key (see AtpState.use_ette_arrkey).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_ette_arrkey(AtpState *s, u8 on);
+// L.1.1 weight-155 square-distribution two-variant interleave (see
+// AtpState.use_l11_sqdist_interleave).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l11_sqdist_interleave(AtpState *s, u8 on);
 // L.2 weight-18 cube-tail two-face group swap (see
 // AtpState.use_l2tail_face_swap).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
