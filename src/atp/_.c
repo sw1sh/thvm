@@ -864,16 +864,59 @@ static void atp_dbg_print_term(FILE *fp, Term t) {
   fprintf(fp, "?%u/%u", tag, term_ext(t));
 }
 
+// Overlap geometry of the CP currently being pushed, set by the WM batch
+// loop (thvm_atp_generate_cps_wm) immediately before atp_push_cps_traced and
+// read back by atp_cp_form_trace so the CPFORM dump carries the SAME
+// (parent-i, parent-j, face combo, overlap position) lineage Waldmeister's
+// WM_CPFORMDUMP prints.  -1 = unset (e.g. the rule-database push path, axiom
+// seeding) so the trace prints "-" there.  Single-threaded saturation, so a
+// plain static carrier is safe.
+static u32 g_cpform_i   = 0xffffffffu;
+static u32 g_cpform_j   = 0xffffffffu;
+static u32 g_cpform_itr = 0xffffffffu;
+static u32 g_cpform_jtr = 0xffffffffu;
+static u8  g_cpform_combo   = 0xffu;
+static u8  g_cpform_i_or    = 0xffu;
+static u8  g_cpform_j_or    = 0xffu;
+static u8  g_cpform_pos_len = 0xffu;
+static u8  g_cpform_pos[CP_MAX_DEPTH];
+
+static void atp_cpform_geom_clear(void) {
+  g_cpform_i = g_cpform_j = g_cpform_itr = g_cpform_jtr = 0xffffffffu;
+  g_cpform_combo = g_cpform_i_or = g_cpform_j_or = g_cpform_pos_len = 0xffu;
+}
+
 // Gated classification-order trace (env THVM_ATP_CP_FORM_TRACE).  Emits
 // one CPFORM line per CP at the moment cp_seq is stamped, so thvm's
 // CP-classification order can be aligned against Waldmeister's verbose
 // `... added to SUE: w, age` sequence and the first cross-batch
-// age-order divergence localized.  Off by default; one cached env probe.
+// age-order divergence localized.  Carries the overlap geometry set by the
+// batch push loop (g_cpform_*) so a thvm CPFORM line can be diffed against a
+// WM WM_CPFORMDUMP line by (combo, position, parents) on the same rawCP.  Off
+// by default; one cached env probe.
 static void atp_cp_form_trace(u32 seq, u32 w, Term lhs, Term rhs) {
   static int on = -1;
   if (on < 0) on = (getenv("THVM_ATP_CP_FORM_TRACE") != NULL) ? 1 : 0;
   if (!on) return;
-  fprintf(stderr, "CPFORM seq=%u w=%u lhs=", seq, w);
+  char posbuf[64];
+  if (g_cpform_pos_len == 0xffu) {
+    posbuf[0] = '-'; posbuf[1] = '\0';
+  } else {
+    u32 pn = 0;
+    posbuf[pn++] = 'L';
+    for (u32 d = 0; d < g_cpform_pos_len && pn < 60u; d++)
+      pn += (u32)snprintf(posbuf + pn, sizeof posbuf - pn, ".%u",
+                          g_cpform_pos[d] + 1u);
+    posbuf[pn] = '\0';
+  }
+  fprintf(stderr,
+          "CPFORM seq=%u w=%u i=%d j=%d itr=%d jtr=%d i_or=%d j_or=%d "
+          "combo=%d pos=%s lhs=",
+          seq, w, (int)g_cpform_i, (int)g_cpform_j,
+          (int)g_cpform_itr, (int)g_cpform_jtr,
+          (g_cpform_i_or == 0xffu) ? -1 : (int)g_cpform_i_or,
+          (g_cpform_j_or == 0xffu) ? -1 : (int)g_cpform_j_or,
+          (g_cpform_combo == 0xffu) ? -1 : (int)g_cpform_combo, posbuf);
   atp_dbg_print_term(stderr, lhs);
   fprintf(stderr, " rhs=");
   atp_dbg_print_term(stderr, rhs);
@@ -20038,10 +20081,27 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
                 big[k].combo, big[k].cp.pos_len, posbuf, s->cp_seq_next,
                 (unsigned long long)big[k].key, bla, bra);
       }
+      // Carry the overlap geometry to atp_cp_form_trace, which fires from the
+      // actual cp_seq-stamping site (atp_cp_push) and would otherwise see only
+      // the surviving lhs/rhs.  Matches WM's WM_CPFORMDUMP fields (parents,
+      // face combo, position).  Cleared after the push so unrelated push paths
+      // (axiom seed, rule-database overlap) print "-".  No-op when the trace
+      // is off (atp_cp_form_trace early-returns before reading these).
+      g_cpform_i   = big[k].i;
+      g_cpform_j   = big[k].j;
+      g_cpform_itr = s->r_trace[big[k].i];
+      g_cpform_jtr = s->r_trace[big[k].j];
+      g_cpform_combo = big[k].combo;
+      g_cpform_i_or  = s->r_orient[big[k].i];
+      g_cpform_j_or  = s->r_orient[big[k].j];
+      g_cpform_pos_len = big[k].cp.pos_len;
+      for (u32 d = 0; d < big[k].cp.pos_len && d < CP_MAX_DEPTH; d++)
+        g_cpform_pos[d] = big[k].cp.pos[d];
       pushed += atp_push_cps_traced(s, &big[k].cp, 1u,
                                     s->r_trace[big[k].i],
                                     s->r_trace[big[k].j],
                                     big[k].i, big[k].j);
+      atp_cpform_geom_clear();
     }
     free(big);
     // Mark f overlap-exhausted: its full superposition lane is now
