@@ -9352,6 +9352,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1cube_arrival   = 1u;
     s->use_l1cube_arrsplit  = 1u;
     s->use_l1selfdist_face  = 1u;
+    s->use_ette_arrkey      = 1u;
     s->use_l2tail_face_swap = 1u;
     s->use_l1_selfcube_defer = 1u;
     s->use_l2_selfcube_dist_defer = 1u;
@@ -9385,6 +9386,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
       s->use_l1cube_arrival   = 0u;
       s->use_l1cube_arrsplit  = 0u;
       s->use_l1selfdist_face  = 0u;
+      s->use_ette_arrkey      = 0u;
       s->use_l2tail_face_swap = 0u;
       s->use_l1_selfcube_defer = 0u;
       s->use_l2_selfcube_dist_defer = 0u;
@@ -9619,6 +9621,17 @@ fn void thvm_atp_set_use_l1cube_arrsplit(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1selfdist_face(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1selfdist_face = on ? 1u : 0u;
+}
+
+// Equation-tree (eTTE) tops-arrival re-key (see AtpState.use_ette_arrkey):
+// re-key each (phase|k1|k2) tops group's UNORIENTABLE-EQUATION-partner CPs onto
+// their eqn-tree-tops DFS arrival (atp_wmo_eq_tops_rank), reproducing WM's
+// equation-tree leaf-list formation order so a deep-redex overlap defers to its
+// arrival slot instead of heading the band.  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void thvm_atp_set_use_ette_arrkey(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_ette_arrkey = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_l2tail_face_swap(AtpState *s, u8 on) {
@@ -17094,6 +17107,53 @@ static u8 atp_pair_l1selfdist_face(Term l, Term r) {
   return 0u;
 }
 
+// L.2.1 weight-209 self-square deep-redex band member (use_ette_arrkey).  The
+// reduced CP `(((x.(x.x)).y).((z.z).y)) = y`: the head's left factor is the
+// self-square distribution `((x.(x.x)).y)` (a self-cube `x.(x.x)` distributed
+// over y), the right factor `((z.z).y)` carries an INDEPENDENT square `z.z`, and
+// the rhs is the bare var y.  This is the firstdiv-15043 band's deep-redex member
+// (thvm eqn-tops arrival 10) whose two-face co-rank wrongly anchors it at the
+// band head; it is the rare shape that gates the eTTE arrival re-key.  soa never
+// forms it (the independent `z.z` square partner does not arise in soa's eqn-
+// partner tops bands), so gating the re-key on this shape leaves soa untouched.
+// Returns 1 on a match, 0 otherwise; orientation-insensitive, renaming-stable.
+static u8 atp_pair_l21_selfsq_deep(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big), y = term_ext(var);
+  Term f1 = term_ctr_at(big, 0), f2 = term_ctr_at(big, 1);   // ((x.(x.x)).y) , ((z.z).y)
+  if (term_tag(f1) != TAG_CTR || term_ext(f1) != op || term_ctr_n(f1) != 2u)
+    return 0u;
+  Term cube = term_ctr_at(f1, 0), f1b = term_ctr_at(f1, 1);  // x.(x.x) , y
+  if (term_tag(f1b) != TAG_FVR || term_ext(f1b) != y) return 0u;
+  // cube = x.(x.x): x bare on the left, (x.x) on the right, same x.
+  if (term_tag(cube) != TAG_CTR || term_ext(cube) != op || term_ctr_n(cube) != 2u)
+    return 0u;
+  Term cx = term_ctr_at(cube, 0), csq = term_ctr_at(cube, 1);
+  if (term_tag(cx) != TAG_FVR) return 0u;
+  u32 x = term_ext(cx);
+  if (term_tag(csq) != TAG_CTR || term_ext(csq) != op || term_ctr_n(csq) != 2u)
+    return 0u;
+  Term csq0 = term_ctr_at(csq, 0), csq1 = term_ctr_at(csq, 1);
+  if (term_tag(csq0) != TAG_FVR || term_tag(csq1) != TAG_FVR) return 0u;
+  if (term_ext(csq0) != x || term_ext(csq1) != x || x == y) return 0u;  // (x.x)
+  // f2 = (z.z).y: independent square z.z on the left, y on the right, z != x, z != y.
+  if (term_tag(f2) != TAG_CTR || term_ext(f2) != op || term_ctr_n(f2) != 2u)
+    return 0u;
+  Term zsq = term_ctr_at(f2, 0), f2b = term_ctr_at(f2, 1);
+  if (term_tag(f2b) != TAG_FVR || term_ext(f2b) != y) return 0u;
+  if (term_tag(zsq) != TAG_CTR || term_ext(zsq) != op || term_ctr_n(zsq) != 2u)
+    return 0u;
+  Term z0 = term_ctr_at(zsq, 0), z1 = term_ctr_at(zsq, 1);
+  if (term_tag(z0) != TAG_FVR || term_tag(z1) != TAG_FVR) return 0u;
+  u32 z = term_ext(z0);
+  if (term_ext(z1) != z || z == x || z == y) return 0u;     // (z.z), z distinct
+  return 1u;
+}
+
 // Mirror of atp_pair_band155_variant for the f=182 tops batch: the band CP is
 // `(x.A).(B.x) = x` -- the SECOND factor carries the bare var x on the RIGHT
 // (`B.x`) instead of the left (`x.B`).  Same two interleaving variants WM emits
@@ -19399,6 +19459,103 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           big[ui[0]].key = vk0; big[ui[1]].key = vk1;
           big[vi[0]].key = uk0; big[vi[1]].key = uk1;
         }
+      }
+    }
+    // Equation-tree (eTTE) tops-arrival re-key (default OFF; see use_ette_arrkey).
+    // The Meredith OrAssociativity firstdiv-15043 divergence is the first genuine
+    // eTTE FORMATION-ORDER band: an old tops batch (f=65) overlaps the new fact
+    // onto UNORIENTABLE EQUATION partners (j_or==0) at one L.2.1/(phase|k1|k2)
+    // group, forming a weight-209 self-square-distribution band.  WM ages those
+    // CPs in its equation-tree leaf-list traversal order -- the eqn-tree-tops DFS
+    // arrival of each overlap's redex subterm against the partner equation's face.
+    // thvm's atp_wmo_rank computes that arrival but its two-face co-rank wrongly
+    // ANCHORS the band's deep-redex member (eqn-tops arrival 10) on a sibling
+    // face's earlier arrival (packs k3=1), heading the band; WM instead defers it
+    // to the arrival-10 slot, keeping the shallow-redex CPs (arrival 1,5,6,7,8)
+    // first.  Verified against the WM_NO_AUTO=1 SUE stream: the group's ten
+    // weight-209 CPs select in EXACT eqn-tops (arrival, chain) order
+    // (1,5,5,6,6,7,7,8,10,12 -> WM picks 15042,15043,15171,...,15482,15483).
+    // Re-key the group's equation-partner CPs (whose eqn-tops arrival is defined)
+    // onto (arrival, chain) ascending, preserving the key-slot multiset.
+    //
+    // Scoped HARD: the re-key fires only on a (phase|k1|k2) group that holds an
+    // atp_pair_l21_selfsq_deep member -- the band's deep-redex self-square CP
+    // `(((x.(x.x)).y).((z.z).y)) = y`, which soa NEVER forms.  soa's eqn-partner
+    // tops bands (the use_band_interleave round-robin / grouped families) carry no
+    // such member, so the re-key never fires on soa -- soa byte-identical.  The
+    // co-rank stays untouched everywhere else (it is load-bearing for soa's
+    // bands).  OFF byte-identical.  Advances Meredith firstdiv 15043 -> beyond.
+    if (s->use_ette_arrkey) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      enum { EA_CAP = 256u };
+      u32 ea_idx[EA_CAP];
+      u64 ea_grp[EA_CAP];
+      u64 ea_key[EA_CAP];
+      u32 ea_arr[EA_CAP];
+      u32 ea_ch[EA_CAP];
+      u8  ea_deep[EA_CAP];
+      u32 n_ea = 0;
+      for (u32 k = 0; k < n_big && n_ea < EA_CAP; k++) {
+        if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
+        if (s->r_orient[big[k].j] != 0u) continue;        // EQUATION partner only
+        // eqn-tree-tops DFS arrival of this overlap's redex subterm against the
+        // partner equation's overlap face (the same arrival atp_wmo_rank packs).
+        u8 i_face = (big[k].combo >> 1) & 1u;
+        u8 j_face = big[k].combo & 1u;
+        Term i_outer = i_face ? s->rhs[big[k].i] : s->lhs[big[k].i];
+        Term qsub = i_outer;
+        for (u32 d = 0; d < big[k].cp.pos_len; d++) {
+          if (term_tag(qsub) != TAG_CTR) break;
+          qsub = term_ctr_at(qsub, big[k].cp.pos[d]);
+        }
+        u32 arr = 0, ch = 0;
+        if (!atp_wmo_eq_tops_rank(s, s->r_trace[big[k].j], j_face, qsub, &arr, &ch))
+          continue;                                       // arrival undefined: leave alone
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        ea_idx[n_ea] = k;
+        ea_grp[n_ea] = big[k].key & grp_mask;
+        ea_key[n_ea] = big[k].key;
+        ea_arr[n_ea] = arr;
+        ea_ch[n_ea]  = ch;
+        ea_deep[n_ea] = atp_pair_l21_selfsq_deep(nl, nr);
+        n_ea++;
+      }
+      // Process each distinct (phase|k1|k2) group independently.
+      for (u32 a0 = 0; a0 < n_ea; a0++) {
+        u64 grp = ea_grp[a0];
+        u8 seen_grp = 0u;
+        for (u32 b = 0; b < a0; b++) if (ea_grp[b] == grp) { seen_grp = 1u; break; }
+        if (seen_grp) continue;
+        u32 ge[EA_CAP];
+        u32 ng = 0;
+        u8 has_deep = 0u;
+        for (u32 b = 0; b < n_ea; b++)
+          if (ea_grp[b] == grp && ng < EA_CAP) { if (ea_deep[b]) has_deep = 1u; ge[ng++] = b; }
+        if (ng < 2u || !has_deep) continue;               // f=65 band signature only
+        // Key-slot multiset to redistribute: the group's keys, ascending.
+        u64 keys_sorted[EA_CAP];
+        for (u32 a = 0; a < ng; a++) keys_sorted[a] = ea_key[ge[a]];
+        for (u32 p = 0; p + 1u < ng; p++)
+          for (u32 q = p + 1u; q < ng; q++)
+            if (keys_sorted[q] < keys_sorted[p]) {
+              u64 t = keys_sorted[p]; keys_sorted[p] = keys_sorted[q]; keys_sorted[q] = t;
+            }
+        // Stable order by (arrival, chain), ties by current key -- WM's eqn-tree
+        // leaf-list emission.  An already-arrival-ordered group is a no-op.
+        u32 ord[EA_CAP];
+        for (u32 a = 0; a < ng; a++) ord[a] = a;
+        for (u32 a = 0; a + 1u < ng; a++)
+          for (u32 b = a + 1u; b < ng; b++) {
+            u32 ia = ge[ord[a]], ib = ge[ord[b]];
+            u8 lt = (ea_arr[ib] < ea_arr[ia]) ||
+                    (ea_arr[ib] == ea_arr[ia] && ea_ch[ib] < ea_ch[ia]) ||
+                    (ea_arr[ib] == ea_arr[ia] && ea_ch[ib] == ea_ch[ia] &&
+                     ea_key[ib] < ea_key[ia]);
+            if (lt) { u32 t = ord[a]; ord[a] = ord[b]; ord[b] = t; }
+          }
+        for (u32 a = 0; a < ng; a++)
+          big[ea_idx[ge[ord[a]]]].key = keys_sorted[a];
       }
     }
     // L.1 weight-120 cube B/D/E grouping (default OFF; see use_l1cube_group).

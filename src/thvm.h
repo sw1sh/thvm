@@ -6285,6 +6285,36 @@ typedef struct {
   // byte-identical; also ON under use_formation_fifo.  Advances Meredith firstdiv
   // 14851 -> beyond.
   u8    use_l1selfdist_face;
+  // Equation-tree (eTTE) tops-arrival re-key (see thvm_atp_set_use_ette_arrkey).
+  // The Meredith OrAssociativity firstdiv-15043 divergence is the first genuine
+  // eTTE FORMATION-ORDER band: an old tops batch (f=65) overlaps the new fact onto
+  // a run of UNORIENTABLE EQUATION partners (j_or==0) at one (phase|k1|k2) group,
+  // producing weight-209 CPs.  WM forms/ages these in its equation-tree leaf-list
+  // traversal order -- the eqn-tree-tops DFS arrival of each overlap's redex
+  // subterm against the partner equation's face (Unifikation1.c
+  // U1_KPsBildenZuGleichung, MO_GleichungGefunden).  thvm's atp_wmo_rank already
+  // computes that arrival (the `arr` it packs for tree==1 partners), but the
+  // two-face co-rank / combo handling perturbs the within-group order, so thvm
+  // ages the deep-redex CP T (eqn-tops arr=10) at the band head while WM defers it
+  // to the arr-10 slot (440 picks later), keeping the shallow-redex CPs (arr 1,5,6
+  // ...) first.  Verified against the WM_NO_AUTO=1 SUE stream: the group's ten
+  // weight-209 CPs select in EXACT (arr, chain) ascending order
+  // (arr 1,5,5,6,6,7,7,8,10,12 -> WM picks 15042,15043,15171,15263,15381,15479,
+  // 15480,15481,15482,15483).  This pass re-keys the (phase|k1|k2) tops group's
+  // equation-partner (tree==1) CPs whose eqn-tops arrival is defined onto (arr,
+  // chain) order, preserving the key-slot multiset (every other CP -- rule
+  // partners, arrival-miss CPs -- untouched).
+  //
+  // Scoped HARD: the re-key fires only on a group that holds the band's deep-redex
+  // member atp_pair_l21_selfsq_deep `(((x.(x.x)).y).((z.z).y)) = y`, which soa
+  // NEVER forms.  The eqn-tops arrival is NOT universally WM's emission order --
+  // soa's eqn-partner tops bands need the round-robin / grouped orders the
+  // two-face co-rank already produces (use_band_interleave family), so a blanket
+  // arrival re-key would break ~3200 soa groups.  Gating on the deep-redex shape
+  // (absent from soa) leaves the co-rank untouched there -- soa byte-identical.
+  // OFF byte-identical; also ON under use_formation_fifo.  Advances Meredith
+  // firstdiv 15043 -> 15129.
+  u8    use_ette_arrkey;
   // L.2 weight-18 cube-tail two-face group swap (see
   // thvm_atp_set_use_l2tail_face_swap).  The Meredith OrAssociativity
   // firstdiv-13349 divergence: the f=184 tops batch forms a four-CP
@@ -6904,6 +6934,9 @@ fn void      thvm_atp_set_use_l1cube_arrsplit(AtpState *s, u8 on);
 // AtpState.use_l1selfdist_face).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1selfdist_face(AtpState *s, u8 on);
+// Equation-tree (eTTE) tops-arrival re-key (see AtpState.use_ette_arrkey).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_ette_arrkey(AtpState *s, u8 on);
 // L.2 weight-18 cube-tail two-face group swap (see
 // AtpState.use_l2tail_face_swap).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
