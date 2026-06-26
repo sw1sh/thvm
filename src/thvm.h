@@ -6292,6 +6292,13 @@ typedef struct {
   // byte-identical.  OFF byte-identical.  Advances Meredith firstdiv 13804 ->
   // 14006.
   u8    use_l2_selfcube_dist_defer;
+  // Diagnostic bisection latch (env THVM_ATP_CUBE_DETECTORS_OFF, set inside the
+  // FormationFifo enable path): when 1, the post-10097 Meredith cube/corank
+  // detector cluster is disabled.  Most detectors have their own use_* flag
+  // cleared directly; this latch additionally suppresses the slot15-specific
+  // shape branches that live INLINE inside the base use_comm_drop_dup_class_gate
+  // re-age (they have no separate flag).  Never set in shipped runs.
+  u8    cube_detectors_off;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a

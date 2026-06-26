@@ -9311,6 +9311,38 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1_selfcube_defer = 1u;
     s->use_l2_selfcube_dist_defer = 1u;
     s->use_l1cube_joinform  = 1u;
+    // Bisection knob (THVM_ATP_CUBE_DETECTORS_OFF=1): drop the post-10030
+    // Meredith cube/corank re-key cluster (the L.1/L.2 detectors layered atop
+    // the base FormationFifo k3-arrival passes) so the upstream overlap-geometry
+    // formation order can be measured/ported WITHOUT the post-hoc rekey.  Off
+    // it is byte-identical; on it leaves the base FormationFifo passes (leaf_
+    // tiebreak/revface_group/posgroup/cube_arrival/band_interleave/drain_*/
+    // revface_cubeorder/mered_dmgu/eset_distdir/comm_drop_dup) intact, which
+    // reach Meredith firstdiv 10097.  Scoped to FormationFifo (the only path
+    // that turns the detectors on) and DIAGNOSTIC-ONLY: never on in shipped runs.
+    // use_corank_own_arr stays ON: its two-face own-arrival co-rank is the last
+    // pass BEFORE the L.1/L.2 cube cluster (it reaches firstdiv 10097); disabling
+    // it would regress to the firstdiv-4190 divergence, not the detector boundary.
+    if (atp_env_on("THVM_ATP_CUBE_DETECTORS_OFF")) {
+      s->cube_detectors_off   = 1u;
+      s->use_l1_cube_rotate   = 0u;
+      s->use_l1_xxdist_front  = 0u;
+      s->use_l22_xxdist_defer = 0u;
+      s->use_l21_selfcube_owncorank = 0u;
+      s->use_l1_xxx_cube_defer = 0u;
+      s->use_l2_selfcube_defer = 0u;
+      s->use_l12_band155      = 0u;
+      s->use_l12_band155_mirror = 0u;
+      s->use_idem_cube_mirror = 0u;
+      s->use_l1swap109        = 0u;
+      s->use_l1cube_group     = 0u;
+      s->use_l1_xxdist_interleave = 0u;
+      s->use_l1cube_arrival   = 0u;
+      s->use_l2tail_face_swap = 0u;
+      s->use_l1_selfcube_defer = 0u;
+      s->use_l2_selfcube_dist_defer = 0u;
+      s->use_l1cube_joinform  = 0u;
+    }
     // NOTE: use_wm_trie_faithful is NOT auto-enabled here.  The WM-faithful
     // AltesBlattPolieren splice-after construction correctly reproduces WM's
     // discrimination-tree leaf-arrival order for soa's rule-35 tops batch
@@ -18042,7 +18074,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           // reverse sibling, the slot15-term arrives strictly earlier, AND its
           // producing partner is the OLDER equation.  Advances Meredith firstdiv
           // 10519 -> beyond; soa byte-identical.
-          if (atp_pair_is_slot15_inner_rev(al, ar)) {
+          if (!s->cube_detectors_off && atp_pair_is_slot15_inner_rev(al, ar)) {
             u32 dup_arr = (u32)((big[dup].key_raw >> 28) & 0x3fffu);
             u32 anc_arr = (u32)((big[anc_k].key_raw >> 28) & 0x3fffu);
             u32 dup_tr = s->r_trace[big[dup].j];
