@@ -9351,6 +9351,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1_xxdist_interleave = 1u;
     s->use_l1cube_arrival   = 1u;
     s->use_l1cube_arrsplit  = 1u;
+    s->use_l1selfdist_face  = 1u;
     s->use_l2tail_face_swap = 1u;
     s->use_l1_selfcube_defer = 1u;
     s->use_l2_selfcube_dist_defer = 1u;
@@ -9383,6 +9384,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
       s->use_l1_xxdist_interleave = 0u;
       s->use_l1cube_arrival   = 0u;
       s->use_l1cube_arrsplit  = 0u;
+      s->use_l1selfdist_face  = 0u;
       s->use_l2tail_face_swap = 0u;
       s->use_l1_selfcube_defer = 0u;
       s->use_l2_selfcube_dist_defer = 0u;
@@ -9607,6 +9609,16 @@ fn void thvm_atp_set_use_l1cube_arrival(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l1cube_arrsplit(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l1cube_arrsplit = on ? 1u : 0u;
+}
+
+// L.1 weight-109 self-square-distribution two-face group swap (see
+// AtpState.use_l1selfdist_face): swap the f=193 L.1/combo0/phase0/k2==0 weight-109
+// band's two U `(((x.x).y).(y.x)) = y` (reverse-inner) faces ahead of its two V
+// `(((x.x).y).(x.y)) = y` (forward-inner) faces, matching WM's partner-sweep
+// emission U,U,V,V.  DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l1selfdist_face(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l1selfdist_face = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_l2tail_face_swap(AtpState *s, u8 on) {
@@ -17045,6 +17057,43 @@ static u8 atp_rule_cube_tail_side(Term l, Term r) {
   return side;   // 1 = A (bare-left), 2 = B (bare-right)
 }
 
+// L.1 weight-109 self-square-distribution two-face classifier
+// (use_l1selfdist_face).  The reduced CP `(((x.x).y).Z) = y` where the inner
+// factor Z is `(y.x)` (U, face 1 -- the REVERSE inner) or `(x.y)` (V, face 2 --
+// the FORWARD inner).  The head's left factor is the self-square distribution
+// `(x.x).y` (the idempotent `x.x` on the left, the partner var y on the right);
+// the second factor Z swaps the two vars; the rhs is the bare var y.  Returns 1
+// for U, 2 for V, 0 otherwise.  Orientation-insensitive (one side must be the
+// bare var y == the rhs); variable identities matched structurally so the
+// detector is renaming-stable.
+static u8 atp_pair_l1selfdist_face(Term l, Term r) {
+  Term big, var;
+  if (term_tag(l) == TAG_FVR && term_tag(r) == TAG_CTR) { var = l; big = r; }
+  else if (term_tag(r) == TAG_FVR && term_tag(l) == TAG_CTR) { var = r; big = l; }
+  else return 0u;
+  if (term_ctr_n(big) != 2u) return 0u;
+  u32 op = term_ext(big), y = term_ext(var);
+  Term f1 = term_ctr_at(big, 0), z = term_ctr_at(big, 1);   // ((x.x).y) , Z
+  if (term_tag(f1) != TAG_CTR || term_ext(f1) != op || term_ctr_n(f1) != 2u)
+    return 0u;
+  Term sq = term_ctr_at(f1, 0), f1b = term_ctr_at(f1, 1);   // (x.x) , y
+  if (term_tag(f1b) != TAG_FVR || term_ext(f1b) != y) return 0u;
+  if (term_tag(sq) != TAG_CTR || term_ext(sq) != op || term_ctr_n(sq) != 2u)
+    return 0u;
+  Term x0 = term_ctr_at(sq, 0), x1 = term_ctr_at(sq, 1);    // x , x
+  if (term_tag(x0) != TAG_FVR || term_tag(x1) != TAG_FVR) return 0u;
+  u32 x = term_ext(x0);
+  if (term_ext(x1) != x || x == y) return 0u;               // (x.x), x != y
+  if (term_tag(z) != TAG_CTR || term_ext(z) != op || term_ctr_n(z) != 2u)
+    return 0u;
+  Term z0 = term_ctr_at(z, 0), z1 = term_ctr_at(z, 1);
+  if (term_tag(z0) != TAG_FVR || term_tag(z1) != TAG_FVR) return 0u;
+  u32 z0e = term_ext(z0), z1e = term_ext(z1);
+  if (z0e == y && z1e == x) return 1u;   // U: Z = (y.x)  (reverse inner)
+  if (z0e == x && z1e == y) return 2u;   // V: Z = (x.y)  (forward inner)
+  return 0u;
+}
+
 // Mirror of atp_pair_band155_variant for the f=182 tops batch: the band CP is
 // `(x.A).(B.x) = x` -- the SECOND factor carries the bare var x on the RIGHT
 // (`B.x`) instead of the left (`x.B`).  Same two interleaving variants WM emits
@@ -19294,6 +19343,61 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           u64 sk0 = big[si[0]].key, sk1 = big[si[1]].key;
           big[si[0]].key = tk0; big[si[1]].key = tk1;
           big[ti[0]].key = sk0; big[ti[1]].key = sk1;
+        }
+      }
+    }
+    // L.1 weight-109 self-square-distribution two-face group swap (default OFF;
+    // see use_l1selfdist_face).  The Meredith OrAssociativity firstdiv-14851
+    // divergence: the f=193 tops batch forms a four-CP L.1/combo0/phase0/k2==0
+    // weight-109 band, two faces of `(((x.x).y).Z) = y` with byte-identical
+    // reduced content except the inner factor Z -- U `(((x.x).y).(y.x)) = y`
+    // (reverse inner, atp_pair_l1selfdist_face 1) and V `(((x.x).y).(x.y)) = y`
+    // (forward inner, face 2), each formed twice (two partners).  thvm keys the
+    // band V,V,U,U (the forward-inner partners arrive at the lower keys); WM's
+    // single superposition scan emits U,U,V,V (the WM_NO_AUTO CPFORMDUMP cpnr
+    // 14851-14854 are all sec=eTTR aP=95 ovFace=R/rev ovPos=L -- ONE partner
+    // sweep whose cpnr-ascending oP order 56,48,54,35 reduces to U,U,V,V, a pure
+    // partner-order face grouping with no vater-face field).  Swap the two face
+    // groups' KEY MULTISET so the U (reverse-inner) face sorts ahead of the V
+    // (forward-inner) face, each face's two CPs keeping their relative order --
+    // the same key-multiset swap idiom as use_l2tail_face_swap.  Scoped HARD to an
+    // L.1/combo0/phase0/k2==0 batch holding EXACTLY two U and two V faces with the
+    // V group currently key-ahead of the U group (the f=193 divergence); a no-op
+    // when the order already matches WM's U-first.  This self-square-distribution
+    // two-face band occurs at this L.1/combo0/phase0/k2==0 position only in the
+    // Meredith batch, so soa forms no such UUVV band -- soa byte-identical.  OFF
+    // byte-identical.  Advances Meredith firstdiv 14851 -> beyond.
+    if (s->use_l1selfdist_face) {
+      u32 ui[2] = {0xffffffffu, 0xffffffffu};   // U-face CP indices (by key)
+      u32 vi[2] = {0xffffffffu, 0xffffffffu};   // V-face CP indices (by key)
+      u32 nu = 0, nv = 0;
+      for (u32 k = 0; k < n_big; k++) {
+        if (big[k].i != f || big[k].j == f) continue;    // tops, partner = j
+        if (big[k].combo != 0u) continue;                // combo 0 only
+        if ((big[k].key >> 58) != 0u) continue;          // phase 0
+        if (((big[k].key >> 42) & 3u) != 0u) continue;   // rule-tree k2 == 0
+        if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue;  // L.1
+        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+        u8 face = atp_pair_l1selfdist_face(nl, nr);
+        if (face == 1u) { if (nu < 2u) ui[nu] = k; nu++; }
+        else if (face == 2u) { if (nv < 2u) vi[nv] = k; nv++; }
+      }
+      // Exactly two U and two V faces (the f=193 signature).
+      if (nu == 2u && nv == 2u) {
+        // Order each face's two CPs by key (earliest-arr first).
+        if (big[ui[1]].key < big[ui[0]].key) { u32 t = ui[0]; ui[0] = ui[1]; ui[1] = t; }
+        if (big[vi[1]].key < big[vi[0]].key) { u32 t = vi[0]; vi[0] = vi[1]; vi[1] = t; }
+        // Only when thvm currently groups V ahead of U (the divergence): a no-op
+        // if the order already matches WM's U-first.
+        if (big[vi[0]].key < big[ui[0]].key) {
+          // Swap the two face groups' key slots: U-group inherits V-group's keys
+          // (the earlier slots) and vice versa, preserving each face's intra-
+          // order.  Save both pairs, then cross-assign.
+          u64 vk0 = big[vi[0]].key, vk1 = big[vi[1]].key;
+          u64 uk0 = big[ui[0]].key, uk1 = big[ui[1]].key;
+          big[ui[0]].key = vk0; big[ui[1]].key = vk1;
+          big[vi[0]].key = uk0; big[vi[1]].key = uk1;
         }
       }
     }

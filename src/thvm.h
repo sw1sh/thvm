@@ -6262,6 +6262,29 @@ typedef struct {
   // B+D+E band and is byte-identical.  OFF byte-identical; also ON under
   // use_formation_fifo.  Advances Meredith firstdiv 14657 -> 14851.
   u8    use_l1cube_arrsplit;
+  // L.1 weight-109 self-square-distribution two-face group swap (see
+  // thvm_atp_set_use_l1selfdist_face).  The Meredith OrAssociativity
+  // firstdiv-14851 divergence: the f=193 tops batch forms a four-CP
+  // L.1/combo0/phase0/k2==0 weight-109 band, two faces of the self-square
+  // distribution `(((x.x).y).Z) = y` with byte-identical reduced content except
+  // the inner factor Z -- U `(((x.x).y).(y.x)) = y` (reverse inner,
+  // atp_pair_l1selfdist_face 1) and V `(((x.x).y).(x.y)) = y` (forward inner,
+  // face 2) -- each formed twice (two partners).  thvm's key/seq order groups the
+  // band V,V,U,U (the forward-inner partners arrive at the lower keys); WM's
+  // single superposition scan groups it U,U,V,V (the WM_NO_AUTO CPFORMDUMP cpnr
+  // 14851-14854 are all sec=eTTR aP=95 ovFace=R/rev ovPos=L, ONE partner sweep
+  // whose cpnr-ascending oP order 56,48,54,35 reduces to U,U,V,V -- a pure
+  // partner-order face grouping, no vater-face field to key on).  Swap the two
+  // face groups' KEY MULTISET so the U (reverse-inner) face sorts ahead of the V
+  // (forward-inner) face, each face's two CPs keeping their relative order.
+  // Scoped HARD to an L.1/combo0/phase0/k2==0 batch holding EXACTLY two U and two
+  // V faces with the V group currently key-ahead of the U group (the f=193
+  // divergence signature); a no-op when the order already matches WM.  This
+  // self-square-distribution two-face band occurs at this position only in the
+  // Meredith batch, so soa forms no such UUVV band -- soa byte-identical.  OFF
+  // byte-identical; also ON under use_formation_fifo.  Advances Meredith firstdiv
+  // 14851 -> beyond.
+  u8    use_l1selfdist_face;
   // L.2 weight-18 cube-tail two-face group swap (see
   // thvm_atp_set_use_l2tail_face_swap).  The Meredith OrAssociativity
   // firstdiv-13349 divergence: the f=184 tops batch forms a four-CP
@@ -6877,6 +6900,10 @@ fn void      thvm_atp_set_use_l1cube_arrival(AtpState *s, u8 on);
 // AtpState.use_l1cube_arrsplit).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l1cube_arrsplit(AtpState *s, u8 on);
+// L.1 weight-109 self-square-distribution two-face group swap (see
+// AtpState.use_l1selfdist_face).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l1selfdist_face(AtpState *s, u8 on);
 // L.2 weight-18 cube-tail two-face group swap (see
 // AtpState.use_l2tail_face_swap).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
