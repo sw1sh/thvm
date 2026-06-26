@@ -2094,7 +2094,8 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
   // Throttled to one dump per distinct (qn, query-cells) bucket and bounded
   // to the registration-count window THVM_WMO_ARRDUMP_LO/_HI; env-gated, off
   // in every normal run.
-  if (tree == 1u && getenv("THVM_WMO_ARRDUMP") != NULL) {
+  if ((tree == 1u || getenv("THVM_WMO_ARRDUMP_RULE") != NULL) &&
+      getenv("THVM_WMO_ARRDUMP") != NULL) {
     // Gate to the registration window named by THVM_WMO_ARRDUMP_LO/HI (the
     // rule-35 era is ~64-66 registered faces); dump every distinct query once.
     const char *lo_s = getenv("THVM_WMO_ARRDUMP_LO");
@@ -2107,7 +2108,7 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
     u32 bucket = h & 8191u;
     if (w->n_reg >= lo && w->n_reg <= hi && !dumped[bucket]) {
       dumped[bucket] = 1u;
-      fprintf(stderr, "WMOARR nreg=%u tree=1 qn=%u n_out=%u q=[", w->n_reg, qn, d.n_out);
+      fprintf(stderr, "WMOARR nreg=%u tree=%u qn=%u n_out=%u q=[", w->n_reg, tree, qn, d.n_out);
       for (u32 c = 0; c < qn; c++)
         fprintf(stderr, "%s%d", c ? "," : "",
                 q[c].is_var ? -(int)q[c].sym : (int)q[c].sym);
