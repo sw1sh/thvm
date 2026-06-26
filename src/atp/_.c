@@ -657,6 +657,9 @@ static void atp_unf_flathash(const u32 *flatsym, const u32 *subsz,
 // block, where the discrimination-tree skeleton lives); the shim
 // below dispatches to it.
 static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap);
+// WolframAxioms-seed problem discriminator (defined with the atp_pair_is_*
+// shape predicates far below); the deep pop-time join retry needs it up here.
+static u8 atp_wolfram_axiom_is_live(AtpState *s);
 // Preorder node count -- defined after atp_compare; the indexed
 // normalizer needs it up here to size an incremental-flatten splice.
 static u32 atp_symbol_count(Term t);
@@ -4494,6 +4497,10 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // presets gate it OFF so the passive queue and its FIFO ages match
   // WM's recentCPinsert exactly (see AtpState.use_queue_subsume).
   s->use_queue_subsume = 1u;
+  // WolframAxioms-seed liveness cache sentinel: r_revision starts at 0, so a
+  // zeroed cache_revision would spuriously match before the first real scan.
+  // Seed it to UINT32_MAX (never a live revision) to force the first lookup.
+  s->wolf_axiom_cache_revision = 0xffffffffu;
   // use_lazy_normalize stays OFF by default (calloc zeroed): the deferred-
   // selection CP normalization is an opt-in via thvm_atp_set_use_lazy_normalize
   // (Method suboption "LazyNormalize" on the WL side, wired through the
@@ -8118,6 +8125,49 @@ static void atp_cp_slot_read(const AtpState *s, u32 i,
   }
 }
 
+// WolframAxioms deep collapse-CP discard at selection (see use_wolf_deep_join).
+// Whether the chosen CP `(jl, jr)` -- one side a bare variable -- reduces to a
+// trivial join under a HIGH step cap (the cap-64 select-time normalize having
+// already missed it).  Such a CP is a deep collapse `BIG = v` WM's GMInterred
+// drops from the passive set the moment an enabling rule arrives; thvm's period-16
+// cap-64 sweep can miss it before the weight band is selected.  Re-normalize the
+// non-variable side to its high-cap fixpoint and test equality with the variable.
+static u8 atp_cp_deep_joins_to_var(AtpState *s, Term jl, Term jr) {
+  if (term_tag(jl) != TAG_FVR && term_tag(jr) != TAG_FVR) return 0u;
+  const u32 WOLF_DEEP_CAP = 4096u;
+  Term lv = (term_tag(jl) == TAG_FVR) ? jl
+              : atp_rewrite_normalize(s, jl, s->lhs, s->rhs, s->n_rules,
+                                      WOLF_DEEP_CAP);
+  Term rv = (term_tag(jr) == TAG_FVR) ? jr
+              : atp_rewrite_normalize(s, jr, s->lhs, s->rhs, s->n_rules,
+                                      WOLF_DEEP_CAP);
+  return (u8)kbo_eq(lv, rv);
+}
+
+// WolframAxioms deep collapse-CP discard at selection (see use_wolf_deep_join).
+// Whether the chosen queue slot `j` -- CP `(jl, jr)` in priority band `pri` --
+// has an IDENTICAL twin still pending at a strictly-LATER cp_seq.  WM keeps ONE
+// re-derived copy of such a deep collapse CP (the late one); thvm forms it twice.
+// When the chosen EARLY copy both deep-joins to a variable AND has a later twin,
+// it is the stale passive entry WM's GMInterred already removed -- discard it so
+// the late twin surfaces at WM's faithful slot.  Identity is orientation-
+// insensitive structural equality of the two reduced+var-normalized sides; the
+// duplicates share the band, so the scan is bounded to same-pri slots.
+static u8 atp_cp_has_later_twin(const AtpState *s, u32 j, Term jl, Term jr,
+                                u32 pri, u32 seq) {
+  for (u32 q = 0; q < s->n_cps; q++) {
+    if (q == j) continue;
+    if (s->cp_pri[q] != pri) continue;       // duplicates share the weight band
+    if (s->cp_seq[q] <= seq) continue;       // only a strictly-LATER twin defers
+    Term ql = 0, qr = 0;
+    atp_cp_slot_read(s, q, &ql, &qr);
+    if ((kbo_eq(jl, ql) && kbo_eq(jr, qr)) ||
+        (kbo_eq(jl, qr) && kbo_eq(jr, ql)))
+      return 1u;
+  }
+  return 0u;
+}
+
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s == NULL) return 0;
   // Auto-MaxWeight: if the active queue is empty but CPs are deferred
@@ -8211,6 +8261,31 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // away rule, extract+discard it without counting a selection and
   // re-pick.  WM IncAnzKPEntfernt ticks per discard (KPVerwaltung.c:539).
   int orphan = s->use_orphan_murder && atp_cp_is_orphan(s, s->cp_trace[j]);
+  // WolframAxioms deep collapse-CP discard (see use_wolf_deep_join): the chosen
+  // CP is the EARLY copy of a deep collapse `BIG = v` that WM's GMInterred already
+  // removed from the passive set (it deep-joins to v) and re-derived once at a
+  // later CPNr.  thvm's period-16 cap-64 sweep can miss the early copy before the
+  // weight band is reached, so it over-selects it ahead of WM's late copy -- the
+  // WolframAxioms OrAssociativity firstdiv-781 divergence.  Discard the early copy
+  // when it BOTH deep-joins to a variable (so WM's unbounded GMInterred would have
+  // dropped it) AND has an identical later-seq twin still queued (the surviving
+  // copy WM keeps); fold into `orphan` so the existing discard+re-pick machinery
+  // skips it without a CPSEL or a counted selection.  The deep-join gate keeps a
+  // productive early copy (one that becomes a rule, e.g. the Meredith-class
+  // first@10 pair) intact -- only a trivially-collapsing duplicate is dropped.
+  // Scoped HARD to the WolframAxioms seed; every other problem stays byte-identical
+  // (the discriminator is a no-op there).
+  u8 wolf_dj = 0u;
+  if (!orphan && s->use_wolf_deep_join && atp_wolfram_axiom_is_live(s)) {
+    Term cl = 0, cr = 0;
+    atp_cp_slot_read(s, j, &cl, &cr);
+    if (atp_cp_deep_joins_to_var(s, cl, cr) &&
+        atp_cp_has_later_twin(s, j, cl, cr, s->cp_pri[j], s->cp_seq[j])) {
+      wolf_dj = 1u;
+      orphan = 1;
+      s->n_cps_wolf_deep_join++;
+    }
+  }
   if (!orphan) s->cp_select_count++;
 
   // Unpack the chosen CP from its byte string into two fresh heap
@@ -8267,7 +8342,11 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       atp_dbg_print_term(stderr, *lhs_out);
       fputs(" rhs=", stderr);
       atp_dbg_print_term(stderr, *rhs_out);
-      if (orphan) {
+      if (wolf_dj) {
+        // Stale deep-collapse early copy (GMInterred-equivalent removal): tagged
+        // distinctly from a genuine orphan so the aligner skips it (non-selection).
+        fputs(" WOLFDEEPJOIN", stderr);
+      } else if (orphan) {
         Term te = s->trace[s->cp_trace[j]];
         u32 pa = (u32)term_val(term_ctr_at(te, 0));
         u32 pb = (u32)term_val(term_ctr_at(te, 1));
@@ -8321,7 +8400,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   }
 
   if (orphan) {
-    s->n_cps_dropped_orphan++;
+    if (!wolf_dj) s->n_cps_dropped_orphan++;  // deep-join discards count separately
     if (s->n_cps == 0u && s->n_cp_stash > 0u
         && s->auto_max_cp_weight_base > 0u) {
       atp_auto_maxw_drain(s, 1u);
@@ -9679,6 +9758,15 @@ fn void thvm_atp_set_use_l1_selfcube_defer(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l2_selfcube_dist_defer(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l2_selfcube_dist_defer = on ? 1u : 0u;
+}
+
+// WolframAxioms deep collapse-CP discard at selection (see
+// AtpState.use_wolf_deep_join): discard the early copy of a deep collapse CP
+// `BIG=v` that reduces to v under a high cap and has an identical later-seq twin,
+// reproducing WM's GMInterred passive-set removal.  DEFAULT OFF (opt-in only).
+fn void thvm_atp_set_use_wolf_deep_join(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wolf_deep_join = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -17475,6 +17563,68 @@ static u8 atp_slot15_rule_is_live(AtpState *s) {
     if (atp_pair_is_slot15_term(s->lhs[k], s->rhs[k])) return 1u;
   }
   return 0u;
+}
+
+// Whether `t` is the Wolfram-axiom LHS `((a.b).c).(a.((a.c).a))` over bare
+// vars (the single 6-symbol Sheffer-stroke axiom that seeds the WolframAxioms
+// NotableTheorems problems): root dot(A, B) with
+//   A = dot(dot(a, b), c)        -- the `(a.b).c` left factor
+//   B = dot(a, dot(dot(a, c), a))-- the `a.((a.c).a)` right factor
+// and the variable identities a==B.0==B.1.0.0==B.1.1, c==A.1==B.1.0.1, with a,
+// b, c the three problem variables.  Used ONLY as the WolframAxioms problem
+// discriminator (atp_wolfram_axiom_is_live), so the Wolfram-scoped formation
+// detectors are a no-op on Meredith/Sheffer/Boolean/etc. whose seed axioms
+// have a different shape.
+static u8 atp_term_is_wolfram_axiom_lhs(Term t) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  u32 op = term_ext(t);
+  Term A = term_ctr_at(t, 0), B = term_ctr_at(t, 1);
+  // A = dot(dot(a, b), c)
+  if (term_tag(A) != TAG_CTR || term_ext(A) != op || term_ctr_n(A) != 2u)
+    return 0u;
+  Term A0 = term_ctr_at(A, 0), A1 = term_ctr_at(A, 1);
+  if (term_tag(A0) != TAG_CTR || term_ext(A0) != op || term_ctr_n(A0) != 2u)
+    return 0u;
+  Term a0 = term_ctr_at(A0, 0), b0 = term_ctr_at(A0, 1);
+  if (term_tag(a0) != TAG_FVR || term_tag(b0) != TAG_FVR ||
+      term_tag(A1) != TAG_FVR)
+    return 0u;
+  u32 a = term_ext(a0), b = term_ext(b0), c = term_ext(A1);
+  if (a == b || a == c || b == c) return 0u;
+  // B = dot(a, dot(dot(a, c), a))
+  if (term_tag(B) != TAG_CTR || term_ext(B) != op || term_ctr_n(B) != 2u)
+    return 0u;
+  Term B0 = term_ctr_at(B, 0), B1 = term_ctr_at(B, 1);
+  if (term_tag(B0) != TAG_FVR || term_ext(B0) != a) return 0u;
+  if (term_tag(B1) != TAG_CTR || term_ext(B1) != op || term_ctr_n(B1) != 2u)
+    return 0u;
+  Term B10 = term_ctr_at(B1, 0), B11 = term_ctr_at(B1, 1);
+  if (term_tag(B11) != TAG_FVR || term_ext(B11) != a) return 0u;
+  if (term_tag(B10) != TAG_CTR || term_ext(B10) != op || term_ctr_n(B10) != 2u)
+    return 0u;
+  Term B100 = term_ctr_at(B10, 0), B101 = term_ctr_at(B10, 1);
+  if (term_tag(B100) != TAG_FVR || term_ext(B100) != a) return 0u;
+  if (term_tag(B101) != TAG_FVR || term_ext(B101) != c) return 0u;
+  return 1u;
+}
+
+// Whether the WolframAxioms seed axiom `((a.b).c).(a.((a.c).a)) = c` is a live
+// rule -- the problem discriminator that scopes the Wolfram-only formation
+// detectors.  The axiom is rule 0 (oriented LHS->RHS, RHS the bare var c), so
+// the scan finds it immediately; cached on the state per rule-set revision so
+// the per-selection check is O(1) after the first hit.  A no-op on every other
+// NotableTheorems problem (their seed axioms are not this shape).
+static u8 atp_wolfram_axiom_is_live(AtpState *s) {
+  if (s->wolf_axiom_cache_revision == s->r_revision)
+    return s->wolf_axiom_is_live_cache;
+  u8 live = 0u;
+  for (u32 k = 0; k < s->n_rules; k++) {
+    if (s->r_dead != NULL && s->r_dead[k]) continue;
+    if (atp_term_is_wolfram_axiom_lhs(s->lhs[k])) { live = 1u; break; }
+  }
+  s->wolf_axiom_is_live_cache = live;
+  s->wolf_axiom_cache_revision = s->r_revision;
+  return live;
 }
 
 // Whether a NORMALIZED CP is the DOUBLE-CUBE `(x.(x.x)).y = (z.(z.z)).y`

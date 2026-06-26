@@ -1166,6 +1166,17 @@ int main(int argc, char **argv) {
       // below).  See soa.txt.
       thvm_atp_set_use_l2_selfcube_dist_defer(
           s, (getenv("THVM_ATP_L2_SELFCUBE_DIST_DEFER") != NULL) ? 1u : 0u);
+      // WolframAxioms deep collapse-CP discard at selection (DEFAULT OFF, opt-in
+      // only -- NOT auto-enabled by FORMATION_FIFO): discard the early copy of a
+      // deep collapse CP `BIG=v` that reduces to v under a high cap and has an
+      // identical later-seq twin, reproducing WM's GMInterred passive-set removal
+      // (the WolframAxioms OrAssociativity firstdiv-781 root cause).  OPEN: the
+      // high-cap reducibility probe still diverges from WM on productive-rule CPs,
+      // so this is the diagnostic harness for the dump-guided fix, not yet a
+      // band-advance.  THVM_ATP_WOLF_DEEP_JOIN opts in.  Scoped HARD to the
+      // WolframAxioms seed so every other problem stays byte-identical.
+      thvm_atp_set_use_wolf_deep_join(
+          s, (getenv("THVM_ATP_WOLF_DEEP_JOIN") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /

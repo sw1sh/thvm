@@ -5122,6 +5122,7 @@ typedef struct {
   u8  *r_trace_dead;              // bitset over trace ids (8 ids / byte)
   u32  r_trace_dead_cap;          // capacity in bits (== trace ids)
   u32  n_cps_dropped_orphan;      // diagnostics: orphan CPs skipped at pop
+  u32  n_cps_wolf_deep_join;      // diagnostics: WolframAxioms deep collapse-CP discards
 
   // Deferred-CP (`implicit_pair`) arc: opt-in flag that switches
   // `atp_push_cps_traced` to record rule-x-rule CPs as compact trace-
@@ -6468,6 +6469,35 @@ typedef struct {
   // CPFORM (sec/ovFace/ovPos/aP/oP) for the seven rawCPs with parents 94,{46-54};
   // a fresh WM_CPFORMDUMP matched BY TERMS is the outstanding input.
   u8    cube_detectors_off;
+  // WolframAxioms deep collapse-CP discard at selection (env
+  // THVM_ATP_WOLF_DEEP_JOIN, default OFF -- NOT auto-enabled; opt-in only).  Root
+  // cause of the WolframAxioms OrAssociativity firstdiv-781 divergence: WM forms a
+  // deep collapse CP `BIG = v` (v a bare variable, BIG a ~17-level right-nested
+  // chain) twice, in two separate tops batches.  WM's GMInterred
+  // (KPV_KPMengeInterreduzieren) runs after EVERY rule addition; when a rule
+  // arrives that makes the EARLY copy reducible (BIG ->* v), GMInterred removes it
+  // from the passive set, leaving only the LATE re-derived copy -- so WM SELECTS
+  // the content once, at the late slot (pick 790).  thvm's GMInterred sweep runs
+  // only every 16 rules at a 64-step cap, so it misses the early copy before the
+  // weight band is selected, and thvm over-selects it at the band head (pick 781,
+  // KEPT) where WM has a different CP, then again late (pick 791, JOINED).
+  //
+  // The gate discards the early copy at selection when it BOTH (a) reduces to a
+  // bare variable under a HIGH step cap (would-be GMInterred-removed) AND (b) has
+  // an identical later-seq twin still queued (WM's surviving copy).  OPEN: the
+  // high-cap reducibility probe (a) currently DIVERGES from WM's normalize on the
+  // productive-rule cases (e.g. pick-39's CP, which WM keeps as a rule yet thvm's
+  // cap-4096 normalize reduces to the bare var) -- so enabling this under
+  // FormationFifo regresses firstdiv to 41.  Cracking 781 needs WM's GMInterred
+  // removal geometry (which rule reduces the early copy, and the per-CP formation
+  // vs selection rule-count window) to scope (a) to exactly the GMInterred-removed
+  // class.  Scoped HARD to the WolframAxioms seed (atp_wolfram_axiom_is_live).
+  // OFF byte-identical; the env opt-in is the diagnostic harness for that work.
+  u8    use_wolf_deep_join;
+  // Cached WolframAxioms-seed liveness (atp_wolfram_axiom_is_live), keyed on
+  // r_revision so the per-selection scope check is O(1) after the first hit.
+  u8    wolf_axiom_is_live_cache;
+  u32   wolf_axiom_cache_revision;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -6995,6 +7025,9 @@ fn void      thvm_atp_set_use_l1_selfcube_defer(AtpState *s, u8 on);
 // shapes (see AtpState.use_l2_selfcube_dist_defer).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l2_selfcube_dist_defer(AtpState *s, u8 on);
+// WolframAxioms deep pop-time JOIN (see AtpState.use_wolf_deep_join).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_wolf_deep_join(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
