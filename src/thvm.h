@@ -6317,6 +6317,25 @@ typedef struct {
   // already gates (leading C-run then fwd-cube run then posgroup-cube run, all at
   // one L.1/combo0/k2==0 tops group); the geometry confirms WHY that detector is
   // correct but does not yield a simpler general rule.
+  //
+  // CURRENT FRONTIER: firstdiv-14657.  The full-detector stack's first remaining
+  // divergence is a weight-120 cube band at Meredith picks 14656-14662, all seven
+  // CPs in ONE L.1/combo0/phase0/k2==0 tops group keyed by the new fact i=191
+  // (WM rule 94) overlapped onto seven old partner rules.  Three reduced shapes:
+  // P `(x.x)=(y.(y.y)).x` (posgroup_cube), Q `(x.x)=x.(y.(y.y))` (fwd_cube),
+  // R `(x.x).x=y.(y.y)` (xxx_self_cube).  thvm's FIFO/seq order emits P,Q,Q,P,Q,P,R
+  // (partner j 76,78,80,74,145,142,12; jtr 12066,12607,13068,11574,42680,41373,283);
+  // WM picks P,P,Q,Q,R,Q,P (SUE cps 21484-21490, parents 94 with old rules
+  // 49,48,54,46,50,47,52).  Same {3P,3Q,1R} multiset, different order -- a pure
+  // formation-order reconciliation.  VERIFIED no thvm-local key reproduces WM's
+  // order: sort by jtr asc/desc, partner-rule j asc/desc, or WM parent2 asc/desc
+  // all give a different sequence (jtr-asc -> R,P,P,Q,Q,P,Q).  WM forms these via
+  // the eTTR mother phase (cross-checked: WM_CPFORMDUMP [14600,15000] holds four
+  // sibling copies cpnr 14758-14761 sec=eTTR aP=94 oP=81/83/85/87 -- but those are
+  // DIFFERENT copies, partners 81-87, not this band's 46-54; the selected copies'
+  // formation cpnr lies outside every banked window).  Cracking 14657 needs WM's
+  // CPFORM (sec/ovFace/ovPos/aP/oP) for the seven rawCPs with parents 94,{46-54};
+  // a fresh WM_CPFORMDUMP matched BY TERMS is the outstanding input.
   u8    cube_detectors_off;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
