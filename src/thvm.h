@@ -6298,6 +6298,25 @@ typedef struct {
   // cleared directly; this latch additionally suppresses the slot15-specific
   // shape branches that live INLINE inside the base use_comm_drop_dup_class_gate
   // re-age (they have no separate flag).  Never set in shipped runs.
+  //
+  // ROOT CAUSE of the firstdiv-10097 band the cluster compensates for (verified
+  // against WM_CPFORMDUMP windows [1,1500] and [10080,10400], plus the rule-tree
+  // arrival dump): Waldmeister forms the self-cube-equality CP `x.(x.x)=y.(y.y)`
+  // ONLY via the MOTHER/eTT phase (16 formations, all sec=eTTE/eTTR, ZERO father
+  // sec=2*).  thvm OVER-FORMS it in the tops/father phase (the new fact's proper-
+  // position overlap onto an old cube partner, e.g. Meredith batch f=154 i=154
+  // j=145/142 combo=0 pos=L.1), where the partner's self-cube leaf is structurally
+  // shallow so thvm's rule-tree DFS arrives it FIRST (arr=91, ahead of the fwd-
+  // cube/posgroup-cube at arr 92-95), giving C,C,A,A,B,B instead of WM's father-
+  // phase-early A,A,B,B then mother-phase-late C,C.  A blanket "drop/defer the
+  // father-phase C" was tried and REJECTED: thvm's father-phase C is load-bearing
+  // -- in every NON-collision batch (Meredith f=25/29/101) it stands in for WM's
+  // mother-phase C and is already correctly placed (the aligned prefix proves it),
+  // so an unconditional transform regresses firstdiv to 404/4034.  The deferral is
+  // faithful only under the EXACT triple-collision signature use_l1_cube_rotate
+  // already gates (leading C-run then fwd-cube run then posgroup-cube run, all at
+  // one L.1/combo0/k2==0 tops group); the geometry confirms WHY that detector is
+  // correct but does not yield a simpler general rule.
   u8    cube_detectors_off;
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
