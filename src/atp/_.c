@@ -19596,36 +19596,43 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
     // Meredith batch, so soa forms no such UUVV band -- soa byte-identical.  OFF
     // byte-identical.  Advances Meredith firstdiv 14851 -> beyond.
     if (s->use_l1selfdist_face) {
-      u32 ui[2] = {0xffffffffu, 0xffffffffu};   // U-face CP indices (by key)
-      u32 vi[2] = {0xffffffffu, 0xffffffffu};   // V-face CP indices (by key)
-      u32 nu = 0, nv = 0;
-      for (u32 k = 0; k < n_big; k++) {
-        if (big[k].i != f || big[k].j == f) continue;    // tops, partner = j
-        if (big[k].combo != 0u) continue;                // combo 0 only
-        if ((big[k].key >> 58) != 0u) continue;          // phase 0
-        if (((big[k].key >> 42) & 3u) != 0u) continue;   // rule-tree k2 == 0
-        if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue;  // L.1
-        Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
-        Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
-        u8 face = atp_pair_l1selfdist_face(nl, nr);
-        if (face == 1u) { if (nu < 2u) ui[nu] = k; nu++; }
-        else if (face == 2u) { if (nv < 2u) vi[nv] = k; nv++; }
-      }
-      // Exactly two U and two V faces (the f=193 signature).
-      if (nu == 2u && nv == 2u) {
-        // Order each face's two CPs by key (earliest-arr first).
-        if (big[ui[1]].key < big[ui[0]].key) { u32 t = ui[0]; ui[0] = ui[1]; ui[1] = t; }
-        if (big[vi[1]].key < big[vi[0]].key) { u32 t = vi[0]; vi[0] = vi[1]; vi[1] = t; }
-        // Only when thvm currently groups V ahead of U (the divergence): a no-op
-        // if the order already matches WM's U-first.
-        if (big[vi[0]].key < big[ui[0]].key) {
-          // Swap the two face groups' key slots: U-group inherits V-group's keys
-          // (the earlier slots) and vice versa, preserving each face's intra-
-          // order.  Save both pairs, then cross-assign.
-          u64 vk0 = big[vi[0]].key, vk1 = big[vi[1]].key;
-          u64 uk0 = big[ui[0]].key, uk1 = big[ui[1]].key;
-          big[ui[0]].key = vk0; big[ui[1]].key = vk1;
-          big[vi[0]].key = uk0; big[vi[1]].key = uk1;
+      // The self-square-distribution U/V band forms at the L.1 overlap position
+      // (Meredith f=193, firstdiv-14851) AND at the L.2 position (f=197,
+      // firstdiv-15295) -- the same two-face reverse-before-forward divergence one
+      // overlap position deeper.  Process each position independently (its own
+      // key range, its own 2U+2V signature).
+      for (u32 ovp = 0u; ovp <= 1u; ovp++) {
+        u32 ui[2] = {0xffffffffu, 0xffffffffu};   // U-face CP indices (by key)
+        u32 vi[2] = {0xffffffffu, 0xffffffffu};   // V-face CP indices (by key)
+        u32 nu = 0, nv = 0;
+        for (u32 k = 0; k < n_big; k++) {
+          if (big[k].i != f || big[k].j == f) continue;    // tops, partner = j
+          if (big[k].combo != 0u) continue;                // combo 0 only
+          if ((big[k].key >> 58) != 0u) continue;          // phase 0
+          if (((big[k].key >> 42) & 3u) != 0u) continue;   // rule-tree k2 == 0
+          if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != ovp) continue; // L.1/L.2
+          Term nl = atp_rewrite_normalize_indexed(s, big[k].cp.lhs, 4096u);
+          Term nr = atp_rewrite_normalize_indexed(s, big[k].cp.rhs, 4096u);
+          u8 face = atp_pair_l1selfdist_face(nl, nr);
+          if (face == 1u) { if (nu < 2u) ui[nu] = k; nu++; }
+          else if (face == 2u) { if (nv < 2u) vi[nv] = k; nv++; }
+        }
+        // Exactly two U and two V faces (the f=193/f=197 signature).
+        if (nu == 2u && nv == 2u) {
+          // Order each face's two CPs by key (earliest-arr first).
+          if (big[ui[1]].key < big[ui[0]].key) { u32 t = ui[0]; ui[0] = ui[1]; ui[1] = t; }
+          if (big[vi[1]].key < big[vi[0]].key) { u32 t = vi[0]; vi[0] = vi[1]; vi[1] = t; }
+          // Only when thvm currently groups V ahead of U (the divergence): a no-op
+          // if the order already matches WM's U-first.
+          if (big[vi[0]].key < big[ui[0]].key) {
+            // Swap the two face groups' key slots: U-group inherits V-group's keys
+            // (the earlier slots) and vice versa, preserving each face's intra-
+            // order.  Save both pairs, then cross-assign.
+            u64 vk0 = big[vi[0]].key, vk1 = big[vi[1]].key;
+            u64 uk0 = big[ui[0]].key, uk1 = big[ui[1]].key;
+            big[ui[0]].key = vk0; big[ui[1]].key = vk1;
+            big[vi[0]].key = uk0; big[vi[1]].key = uk1;
+          }
         }
       }
     }
