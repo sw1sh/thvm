@@ -17569,6 +17569,95 @@ static u8 atp_pair_is_xx_y_dist(Term l, Term r) {
   return 0u;
 }
 
+// Whether a CP is the clean weight-120 `(x.y).x`-distribution shape: one side is
+// the head `(x.y).x` (the `f(x,y)` factor dotted with the SAME bare x on the
+// right), the other carries a self-square `y.y` -- `x.(y.y)` (R) or `(y.y).x` (S).
+// Returns 1 for R, 2 for S, 0 otherwise.  The SELECTION form of the f=196
+// distribution CPs (the batch form is matched by atp_pair_is_xyx_dist_wrap).
+// Orientation-insensitive; renaming-stable.
+static u8 atp_pair_is_xyx_dist(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_CTR) return 0u;
+  if (term_ext(l) != term_ext(r)) return 0u;
+  u32 op = term_ext(l);
+  u32 x = 0, y = 0;
+  Term oth = 0;
+  u8 ok = 0u;
+  for (u32 side = 0; side < 2u && !ok; side++) {
+    Term h = side == 0u ? l : r, o = side == 0u ? r : l;
+    if (term_tag(h) != TAG_CTR || term_ext(h) != op || term_ctr_n(h) != 2u) continue;
+    Term h0 = term_ctr_at(h, 0), h1 = term_ctr_at(h, 1);
+    if (term_tag(h0) != TAG_CTR || term_ext(h0) != op || term_ctr_n(h0) != 2u) continue;
+    if (term_tag(h1) != TAG_FVR) continue;
+    Term hx = term_ctr_at(h0, 0), hy = term_ctr_at(h0, 1);
+    if (term_tag(hx) != TAG_FVR || term_tag(hy) != TAG_FVR) continue;
+    if (term_ext(hx) != term_ext(h1)) continue;            // right == left-left == x
+    x = term_ext(hx); y = term_ext(hy);
+    if (x == y) continue;
+    oth = o; ok = 1u;
+  }
+  if (!ok) return 0u;
+  if (term_tag(oth) != TAG_CTR || term_ext(oth) != op || term_ctr_n(oth) != 2u)
+    return 0u;
+  Term o0 = term_ctr_at(oth, 0), o1 = term_ctr_at(oth, 1);
+  if (term_tag(o0) == TAG_FVR && term_ext(o0) == x &&                 // R: x.(y.y)
+      term_tag(o1) == TAG_CTR && term_ext(o1) == op && term_ctr_n(o1) == 2u) {
+    Term q0 = term_ctr_at(o1, 0), q1 = term_ctr_at(o1, 1);
+    if (term_tag(q0) == TAG_FVR && term_tag(q1) == TAG_FVR &&
+        term_ext(q0) == y && term_ext(q1) == y) return 1u;
+  }
+  if (term_tag(o1) == TAG_FVR && term_ext(o1) == x &&                 // S: (y.y).x
+      term_tag(o0) == TAG_CTR && term_ext(o0) == op && term_ctr_n(o0) == 2u) {
+    Term q0 = term_ctr_at(o0, 0), q1 = term_ctr_at(o0, 1);
+    if (term_tag(q0) == TAG_FVR && term_tag(q1) == TAG_FVR &&
+        term_ext(q0) == y && term_ext(q1) == y) return 2u;
+  }
+  return 0u;
+}
+
+// Batch-precursor form of the `(x.y).x`-distribution CP (see use_l1cube_group's
+// f=196 exclusion).  At the f=196 batch (rules <= 196) the survivor's clean
+// `(x.y).x = x.(y.y)` shape is not yet reduced; the CP is stored heavy as
+//   lhs = `x.(P . RHS)` ,  rhs = RHS
+// where the RHS is ALREADY the clean distribution side `x.(w.w)` (R) or `(w.w).x`
+// (S) -- with x the bare left of the lhs and x != w -- and that same RHS appears
+// VERBATIM as the lhs's right-grandchild (the heavy left part P reduces away only
+// by the later partner rule).  Anchor on the clean RHS plus the verbatim RHS
+// embedded in the lhs: returns 1 for the R precursor, 2 for S, 0 otherwise.  The
+// indexed normalizer over-reduces this at batch time, so the caller passes the
+// raw var-normalized cp.  Distinct enough that no soa L.1/combo0 cube group
+// carries it (verified soa byte-identical).
+static u8 atp_pair_is_xyx_dist_wrap(Term l, Term r) {
+  // lhs = x.(P.RHS): a 2-ary node, bare var x on the left, a 2-ary right child.
+  if (term_tag(l) != TAG_CTR || term_ctr_n(l) != 2u) return 0u;
+  u32 op = term_ext(l);
+  Term lx = term_ctr_at(l, 0), lr = term_ctr_at(l, 1);
+  if (term_tag(lx) != TAG_FVR) return 0u;
+  u32 x = term_ext(lx);
+  if (term_tag(lr) != TAG_CTR || term_ext(lr) != op || term_ctr_n(lr) != 2u)
+    return 0u;
+  Term q = term_ctr_at(lr, 1);                 // the lhs's right-grandchild
+  // q must be structurally identical to the rhs (the embedded distribution side).
+  if (!kbo_eq(q, r)) return 0u;
+  // rhs = clean `x.(w.w)` (R) or `(w.w).x` (S), x == the lhs's bare left, w != x.
+  if (term_tag(r) != TAG_CTR || term_ext(r) != op || term_ctr_n(r) != 2u) return 0u;
+  Term r0 = term_ctr_at(r, 0), r1 = term_ctr_at(r, 1);
+  // R: r0 == x (bare), r1 = (w.w)
+  if (term_tag(r0) == TAG_FVR && term_ext(r0) == x &&
+      term_tag(r1) == TAG_CTR && term_ext(r1) == op && term_ctr_n(r1) == 2u) {
+    Term w0 = term_ctr_at(r1, 0), w1 = term_ctr_at(r1, 1);
+    if (term_tag(w0) == TAG_FVR && term_tag(w1) == TAG_FVR &&
+        term_ext(w0) == term_ext(w1) && term_ext(w0) != x) return 1u;
+  }
+  // S: r1 == x (bare), r0 = (w.w)
+  if (term_tag(r1) == TAG_FVR && term_ext(r1) == x &&
+      term_tag(r0) == TAG_CTR && term_ext(r0) == op && term_ctr_n(r0) == 2u) {
+    Term w0 = term_ctr_at(r0, 0), w1 = term_ctr_at(r0, 1);
+    if (term_tag(w0) == TAG_FVR && term_tag(w1) == TAG_FVR &&
+        term_ext(w0) == term_ext(w1) && term_ext(w0) != x) return 2u;
+  }
+  return 0u;
+}
+
 // `f(f(x, x), x)` -- the `(x.x).x` left-idempotent triple: a left child that is
 // the idempotent leaf `f(x, x)` (both leaves the same bare var x), dotted with
 // the SAME bare var x.  Binds *out_x.
@@ -19791,6 +19880,32 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           else if (cg_cls[ge[a]] == 3u) have_e = 1u;
         }
         if (!have_b || !have_d || !have_e) continue;
+        // EXCLUDE the f=196 band: a group that ALSO holds an `(x.y).x`-distribution
+        // member (in either its clean atp_pair_is_xyx_dist form or its heavy batch
+        // precursor atp_pair_is_xyx_dist_wrap) is the f=196 mixed cube+distribution
+        // band, where WM ages the SECOND fwd-cube by raw partner arrival (deferred
+        // past the distribution pairs) rather than B-grouped at the head; grouping
+        // the B-run here wrongly pulls that second cube forward (firstdiv-15195:
+        // thvm Q,Q,R,S,R,S,q vs WM Q,R,S,R,S,q,P).  f=172/f=181's cube-only bands
+        // carry no such distribution member, so the exclusion leaves them
+        // untouched; use_l1cube_group is already soa byte-identical (its E-presence
+        // gate keeps it Meredith-only) so an exclusion only makes it fire LESS --
+        // soa stays byte-identical.  The distribution survivor is matched on its
+        // RAW var-normalized form (the indexed normalizer over-reduces the clean
+        // `(x.y).x` at batch time; the heavy precursor's clean rhs `x.(w.w)`
+        // survives and is keyed by atp_pair_is_xyx_dist_wrap).
+        u8 has_xyx = 0u;
+        for (u32 kx = 0; kx < n_big && !has_xyx; kx++) {
+          if (big[kx].i != f || big[kx].j == f) continue;
+          if (big[kx].combo != 0u) continue;
+          if ((big[kx].key & grp_mask) != grp) continue;
+          if (big[kx].cp.pos_len != 1u || big[kx].cp.pos[0] != 0u) continue;
+          Term xl = big[kx].cp.lhs, xr = big[kx].cp.rhs;
+          thvm_normalize_vars(&xl, &xr);
+          if (atp_pair_is_xyx_dist(xl, xr) || atp_pair_is_xyx_dist_wrap(xl, xr))
+            has_xyx = 1u;
+        }
+        if (has_xyx) continue;                            // f=196 band: leave alone
         // Fire only when the B/D members are key-INTERLEAVED (the key-ascending
         // B/D class run is NOT already in B*-D* order) -- otherwise the re-key is
         // a no-op.  stage advances 0:B -> 1:D; a B seen after the D-run began
