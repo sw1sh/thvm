@@ -9354,6 +9354,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1selfdist_face  = 1u;
     s->use_ette_arrkey      = 1u;
     s->use_l11_sqdist_interleave = 1u;
+    s->use_l2cube_arrswap   = 1u;
     s->use_l2tail_face_swap = 1u;
     s->use_l1_selfcube_defer = 1u;
     s->use_l2_selfcube_dist_defer = 1u;
@@ -9389,6 +9390,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
       s->use_l1selfdist_face  = 0u;
       s->use_ette_arrkey      = 0u;
       s->use_l11_sqdist_interleave = 0u;
+      s->use_l2cube_arrswap   = 0u;
       s->use_l2tail_face_swap = 0u;
       s->use_l1_selfcube_defer = 0u;
       s->use_l2_selfcube_dist_defer = 0u;
@@ -9643,6 +9645,16 @@ fn void thvm_atp_set_use_ette_arrkey(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_l11_sqdist_interleave(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_l11_sqdist_interleave = on ? 1u : 0u;
+}
+
+// L.2 weight-120 fwd/posgroup-cube raw-arrival swap (see
+// AtpState.use_l2cube_arrswap): swap an L.2/combo0 fwd-cube + posgroup-cube pair's
+// key slots back to key_raw (raw partner-arrival) order when the two-face co-rank
+// inverted them, deferring the over-early fwd-cube to its WM arrival slot.
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_l2cube_arrswap(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_l2cube_arrswap = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_l2tail_face_swap(AtpState *s, u8 on) {
@@ -19789,6 +19801,50 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           }
         for (u32 a = 0; a < n_sd; a++)
           big[sd_idx[order[a]]].key = sd_key[a];
+      }
+    }
+    // L.2 weight-120 fwd/posgroup-cube raw-arrival swap (default OFF; see
+    // use_l2cube_arrswap).  The Meredith OrAssociativity firstdiv-15201
+    // divergence: an L.2/combo0 tops batch (f=196) forms an adjacent fwd-cube Q
+    // `x.(y.(y.y)) = x.x` and posgroup-cube P `(x.(x.x)).y = y.y` whose two-face
+    // co-rank (use_corank_own_arr / atp_wmo_rank) keys Q below P (thvm Q,P) even
+    // though their RAW partner arrival has P below Q; WM ages them by raw arrival,
+    // emitting P,Q.  When an L.2/combo0 fwd-cube and posgroup-cube share one
+    // (phase|k1|k2) group with their CURRENT keys INVERTED relative to key_raw
+    // (fwd keyed below posgroup but key_raw'd above), swap their key slots to
+    // restore key_raw (= WM) order.  Scoped HARD to that exact key-vs-key_raw
+    // inversion on an L.2 fwd+posgroup pair: soa's L.2 cube pairs are co-ranked
+    // faithfully (no key/key_raw inversion), so the swap never fires on soa -- soa
+    // byte-identical.  OFF byte-identical.  Advances Meredith firstdiv 15201 ->
+    // beyond.
+    if (s->use_l2cube_arrswap) {
+      const u64 grp_mask = ~((1ull << 42) - 1ull);   // phase | k1 | k2 bits
+      for (u32 kf = 0; kf < n_big; kf++) {
+        if (big[kf].i != f || big[kf].j == f) continue;    // tops, partner = j
+        if (big[kf].combo != 0u) continue;                 // combo 0 only
+        if (big[kf].cp.pos_len != 1u || big[kf].cp.pos[0] != 1u) continue; // L.2
+        Term nlf = atp_rewrite_normalize_indexed(s, big[kf].cp.lhs, 4096u);
+        Term nrf = atp_rewrite_normalize_indexed(s, big[kf].cp.rhs, 4096u);
+        if (!atp_pair_is_fwd_cube(nlf, nrf)) continue;     // the fwd-cube Q
+        u64 grp = big[kf].key & grp_mask;
+        // Find a posgroup-cube P in the same group keyed ABOVE this fwd-cube but
+        // key_raw'd BELOW it (the inversion).
+        for (u32 kp = 0; kp < n_big; kp++) {
+          if (kp == kf) continue;
+          if (big[kp].i != f || big[kp].j == f) continue;
+          if (big[kp].combo != 0u) continue;
+          if (big[kp].cp.pos_len != 1u || big[kp].cp.pos[0] != 1u) continue;
+          if ((big[kp].key & grp_mask) != grp) continue;
+          if (big[kf].key >= big[kp].key) continue;        // fwd must be keyed below P
+          if (big[kf].key_raw <= big[kp].key_raw) continue; // but key_raw'd ABOVE P
+          Term nlp = atp_rewrite_normalize_indexed(s, big[kp].cp.lhs, 4096u);
+          Term nrp = atp_rewrite_normalize_indexed(s, big[kp].cp.rhs, 4096u);
+          if (!atp_pair_is_posgroup_cube(nlp, nrp)) continue;
+          // Inverted fwd+posgroup pair: swap their key slots so posgroup (lower
+          // key_raw) sorts first, restoring WM's raw-arrival order.
+          u64 t = big[kf].key; big[kf].key = big[kp].key; big[kp].key = t;
+          break;
+        }
       }
     }
     // L.1 weight-120 cube B/D/E grouping (default OFF; see use_l1cube_group).

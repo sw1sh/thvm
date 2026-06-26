@@ -6337,6 +6337,22 @@ typedef struct {
   // the pos==[0,0] band holding BOTH a B and an A variant.  OFF byte-identical;
   // also ON under use_formation_fifo.  Advances Meredith firstdiv 15129 -> 15195.
   u8    use_l11_sqdist_interleave;
+  // L.2 weight-120 fwd/posgroup-cube raw-arrival swap (see
+  // thvm_atp_set_use_l2cube_arrswap).  The Meredith OrAssociativity
+  // firstdiv-15201 divergence: an L.2/combo0 tops batch (f=196) forms an adjacent
+  // fwd-cube Q `x.(y.(y.y)) = x.x` and posgroup-cube P `(x.(x.x)).y = y.y` whose
+  // two-face co-rank (use_corank_own_arr / atp_wmo_rank) keys Q BELOW P (thvm
+  // emits Q,P) even though their RAW partner arrival has P below Q; WM ages them
+  // by raw arrival, emitting P,Q.  Verified: the pair's key_raw order is exactly
+  // P,Q (the co-rank inverted them in the final key).  When an L.2/combo0 fwd-cube
+  // and posgroup-cube are adjacent in one (phase|k1|k2) group with their CURRENT
+  // keys INVERTED relative to key_raw (fwd keyed below posgroup but key_raw'd
+  // above), swap their key slots to restore key_raw (= WM) order.  Scoped HARD to
+  // that exact key-vs-key_raw inversion on an L.2 fwd+posgroup pair -- soa's L.2
+  // cube pairs are co-ranked faithfully (no key/key_raw inversion), so the swap
+  // never fires on soa -- soa byte-identical.  OFF byte-identical; also ON under
+  // use_formation_fifo.  Advances Meredith firstdiv 15201 -> beyond.
+  u8    use_l2cube_arrswap;
   // L.2 weight-18 cube-tail two-face group swap (see
   // thvm_atp_set_use_l2tail_face_swap).  The Meredith OrAssociativity
   // firstdiv-13349 divergence: the f=184 tops batch forms a four-CP
@@ -6963,6 +6979,10 @@ fn void      thvm_atp_set_use_ette_arrkey(AtpState *s, u8 on);
 // AtpState.use_l11_sqdist_interleave).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_l11_sqdist_interleave(AtpState *s, u8 on);
+// L.2 weight-120 fwd/posgroup-cube raw-arrival swap (see
+// AtpState.use_l2cube_arrswap).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_l2cube_arrswap(AtpState *s, u8 on);
 // L.2 weight-18 cube-tail two-face group swap (see
 // AtpState.use_l2tail_face_swap).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
