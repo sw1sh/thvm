@@ -237,10 +237,16 @@ static Term gc_evacuate(Term t, u64 *alloc) {
 
 // Re-key the LAM shape table via forward pointers.  Called BEFORE
 // from/to space swap so the from-space cells still hold valid fwd
-// pointers.  Book-loc-keyed entries (high-bit set) are untouched --
-// book locs don't move.
+// pointers.  Book-loc-keyed entries (BOOK bit set) are untouched --
+// book locs don't move.  The key carries the context slot id in
+// LAM_SHAPE_CTX_MASK; GC only moves cells of the CURRENT context's
+// heap, so entries keyed to a DIFFERENT context pass through
+// untouched (their locs are not in this from-space).  For current-
+// context dyn entries we strip the ctx bits, remap the bare loc, and
+// re-apply the ctx (+ never the book) bits.
 static void gc_remap_lam_shape(void) {
   u32 cap = LAM_SHAPE_CAP;
+  u64 cur_ctx = ((u64)thvm_context_current() & 0xF) << LAM_SHAPE_CTX_SHIFT;
   // Snapshot occupied entries; rebuild in place.
   typedef struct { u64 key; Shape shape; } Pair;
   Pair *snap = (Pair *)malloc(sizeof(Pair) * cap);
@@ -257,22 +263,29 @@ static void gc_remap_lam_shape(void) {
   for (u32 i = 0; i < n_snap; i++) {
     u64 key = snap[i].key;
     if (key & LAM_SHAPE_BOOK_BIT) {
-      // Book key: passes through untouched.
+      // Book key: passes through untouched (book locs don't move).
       lam_shape_set_keyed(key, &snap[i].shape);
       continue;
     }
-    // Dyn loc: look up forward pointer.  Drop the entry if the LAM
-    // didn't survive the trace -- it's unreachable, the shape isn't
-    // needed.
-    if (key < GC_FROM_START || key >= GC_FROM_END) {
+    if ((key & LAM_SHAPE_CTX_MASK) != cur_ctx) {
+      // Entry belongs to another context's heap -- its loc is not in
+      // this from-space, so leave it alone.
+      lam_shape_set_keyed(key, &snap[i].shape);
+      continue;
+    }
+    // Current-context dyn loc: strip the ctx bits, look up the
+    // forward pointer, re-apply the ctx bits.  Drop the entry if the
+    // LAM didn't survive the trace -- it's unreachable, shape unneeded.
+    u64 loc = key & ~LAM_SHAPE_CTX_MASK;
+    if (loc < GC_FROM_START || loc >= GC_FROM_END) {
       // Loc is outside from-space (permanent region or already in
       // to-space-as-from after a previous GC cycle).  Keep as-is.
       lam_shape_set_keyed(key, &snap[i].shape);
       continue;
     }
-    Term cell = HEAP[key];
+    Term cell = HEAP[loc];
     if (term_tag(cell) == GC_FWD_TAG) {
-      lam_shape_set_keyed(term_val(cell), &snap[i].shape);
+      lam_shape_set_keyed(term_val(cell) | cur_ctx, &snap[i].shape);
     }
     // else: drop (no forward = unreachable).
   }

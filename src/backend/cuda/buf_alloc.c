@@ -22,7 +22,10 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
     fprintf(stderr, "cuda_buf_alloc: backend not initialised\n");
     return 0;
   }
-  u64 ceiling = thvm_buf_byte_ceiling();
+  // The per-realize ARENA block is exempt from the per-buffer im2col ceiling
+  // (planner-bounded working set; see cpu_buf_alloc).  cpu_arena_alloc_inflight
+  // is the shared gate set by arena_ensure.
+  u64 ceiling = cpu_arena_alloc_inflight() ? 0 : thvm_buf_byte_ceiling();
   if (ceiling != 0 && nbytes > ceiling) {
     fprintf(stderr,
       "cuda_buf_alloc: refusing %llu-byte allocation (> THVM_MAX_BUF_BYTES "

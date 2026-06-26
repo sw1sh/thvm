@@ -21,6 +21,9 @@
 
 #ifndef _WIN32
 #include <dlfcn.h>  // Windows: dlopen family shimmed in util/portable_win.h
+#include <spawn.h>      // posix_spawn for the parallel cold-start compile pool
+#include <sys/wait.h>   // waitpid for the spawned clang workers
+extern char **environ;
 #endif
 #include <unistd.h>
 #include <sys/stat.h>
@@ -64,6 +67,25 @@ static u32 cpu_jit_warmup(void) {
   static int v = -1;
   if (v < 0) { const char *e = getenv("THVM_CPU_JIT_WARMUP"); v = e ? atoi(e) : CPU_JIT_WARMUP; }
   return (u32)v;
+}
+
+// Optimization level for the clang JIT compile, tunable via
+// THVM_CPU_JIT_OPT (one of "O0".."O3", default "O3").  -O3 (not
+// -ffast-math, so float semantics are bit-identical) gives the deeply
+// nested conv-backward gather-reduce kernels ~1.6x over -O2 at steady
+// state; a cold-dominated run could trade a faster opt-level (compiles
+// quicker) for slightly slower kernels, but the dylib cache amortizes
+// the compile across every later step so -O3 stays the default.  The
+// dylib filename embeds the tag so an artifact built at a DIFFERENT opt
+// level is never reused under the wrong assumptions.
+static const char *cpu_jit_opt_tag(void) {
+  static char tag[4] = {0};
+  if (tag[0] == '\0') {
+    const char *e = getenv("THVM_CPU_JIT_OPT");
+    char c = (e != NULL && e[0] == 'O' && e[1] >= '0' && e[1] <= '3') ? e[1] : '3';
+    tag[0] = 'O'; tag[1] = c; tag[2] = '\0';
+  }
+  return tag;
 }
 typedef struct {
   u64       key;          // 0 = empty
@@ -210,8 +232,8 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   char src_path[256], dl_path[256];
   snprintf(src_path, sizeof src_path, "/tmp/thvm_jit_%016llx.c",
            (unsigned long long)key);
-  snprintf(dl_path,  sizeof dl_path,  "/tmp/thvm_jit_%016llx_O3.dylib",
-           (unsigned long long)key);
+  snprintf(dl_path,  sizeof dl_path,  "/tmp/thvm_jit_%016llx_%s.dylib",
+           (unsigned long long)key, cpu_jit_opt_tag());
 
   // Skip the compile if the .dylib is already on disk (e.g. from a
   // previous session) and current.  Stat-only check; we don't try to
@@ -233,15 +255,16 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   fclose(f);
 
   char cmd[768];
-  // -O3 (not -O2): on the rendered conv-backward gather-reduce kernels
-  // (deeply-nested masked-index expressions) -O3's extra unrolling +
-  // scalar opts give ~1.6x over -O2 with NO float-semantics change
-  // (-O3 does NOT enable -ffast-math, so the reduction stays scalar +
-  // bit-identical).  The dylib cache filename carries an _O3 tag so a
-  // prior session's -O2 artifact is never reused after this flag change.
+  // -O3 default (not -O2): on the rendered conv-backward gather-reduce
+  // kernels (deeply-nested masked-index expressions) -O3's extra
+  // unrolling + scalar opts give ~1.6x over -O2 with NO float-semantics
+  // change (-O3 does NOT enable -ffast-math, so the reduction stays
+  // scalar + bit-identical).  THVM_CPU_JIT_OPT overrides; the dylib
+  // filename carries the opt tag so an artifact built at a different
+  // level is never reused under the wrong assumptions.
   snprintf(cmd, sizeof cmd,
-           "clang -O3 -fPIC -shared -o '%s' '%s' 2>/dev/null",
-           dl_path, src_path);
+           "clang -%s -fPIC -shared -o '%s' '%s' 2>/dev/null",
+           cpu_jit_opt_tag(), dl_path, src_path);
   if (system(cmd) != 0) return NULL;
 
   void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
@@ -300,14 +323,277 @@ static int cpu_jit_narrow_float(u32 dt) {
   return dtype_is_float(dt) && dtype_itemsize(dt) < 4;
 }
 
-fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+// Shared JIT-eligibility predicate (the head of cpu_jit_dispatch).  A
+// kernel that fails this can't be CPU-JITted, so the parallel precompile
+// pass skips it (no wasted clang).
+static int cpu_jit_eligible(KernelEntry const *ke) {
   if (!cg_supports(ke)) return 0;
   if (cpu_jit_narrow_float(ke->output_dtype)) return 0;
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (ke->input_dtypes != NULL && cpu_jit_narrow_float(ke->input_dtypes[i])) {
+    if (ke->input_dtypes != NULL && cpu_jit_narrow_float(ke->input_dtypes[i]))
       return 0;
-    }
   }
+  return 1;
+}
+
+#ifndef _WIN32
+// --- Parallel cold-start compile pool -------------------------------------
+//
+// One pending compile job: the rendered source already written to
+// src_path, plus the dylib path + cache key it resolves to.  func_name
+// is the kernel's entry-point symbol in the COMBINED dylib (k_<hex>),
+// unique per kernel so many kernels coexist in one dlopen'd image.
+typedef struct {
+  u64  key;
+  char src_path[256];
+  char dl_path[256];
+  char func_name[24];
+} CpuJitJob;
+
+#endif  // !_WIN32
+
+#ifndef _WIN32
+// Combined-dylib cold-start lever.  The dominant cost of a cold realize
+// on macOS is NOT clang (the parallel pool compiles 20 kernels in
+// ~160ms) but the FIRST dlopen of each freshly-built, unsigned dylib:
+// syspolicyd runs a per-image code-provenance check that costs ~240ms
+// the first time it sees a given dylib's content, and that check
+// SERIALIZES (dyld holds a global lock; the security daemon is one IPC
+// endpoint), so N kernels = N x 240ms = ~3s of pure dlopen on a 20-
+// kernel forward.  The verdict is cached per unique dylib content, and
+// ONE dylib holding all N kernels pays the check exactly ONCE
+// regardless of how many functions it contains (measured: 1 fn or 40
+// fns both ~270ms).  So we concatenate every fresh kernel's rendered
+// source (entry points uniquely renamed k_<hex>) into ONE combined .c,
+// compile it to ONE .dylib, and dlopen it once -- collapsing the N slow
+// first-dlopens to one.  Content-addressed on disk so an identical
+// batch in a later process reuses it with a single (verdict-cached)
+// dlopen.  Returns the dlopen'd handle (caller dlsyms each k_<hex>) or
+// NULL on any failure (caller falls back to per-kernel build).
+static void *cpu_jit_build_combined(CpuJitJob const *jobs, u32 njobs,
+                                    char *out_dl_path, size_t out_cap) {
+  if (njobs == 0) return NULL;
+  // Batch key = FNV-1a over every job's per-kernel content key, so a
+  // structurally-identical batch (same kernels, same order) maps to the
+  // same combined dylib across processes.
+  u64 bk = 0xcbf29ce484222325ULL;
+  for (u32 i = 0; i < njobs; i++) { bk ^= jobs[i].key; bk *= 0x100000001b3ULL; }
+  bk |= (1ULL << 63);
+  char comb_c[256], comb_dl[256];
+  snprintf(comb_c,  sizeof comb_c,  "/tmp/thvm_jit_comb_%016llx.c",
+           (unsigned long long)bk);
+  snprintf(comb_dl, sizeof comb_dl, "/tmp/thvm_jit_comb_%016llx_%s.dylib",
+           (unsigned long long)bk, cpu_jit_opt_tag());
+  snprintf(out_dl_path, out_cap, "%s", comb_dl);
+
+  struct stat st;
+  if (stat(comb_dl, &st) != 0) {
+    // Concatenate every job's already-written per-kernel .c into the
+    // combined .c.  Each per-kernel source was rendered with its unique
+    // k_<hex> entry-point name, so the symbols never collide; duplicate
+    // #include / typedef / #define lines are byte-identical redefinitions
+    // (legal C11) and clang accepts them.
+    FILE *cf = fopen(comb_c, "w");
+    if (cf == NULL) return NULL;
+    for (u32 i = 0; i < njobs; i++) {
+      FILE *jf = fopen(jobs[i].src_path, "r");
+      if (jf == NULL) { fclose(cf); return NULL; }
+      char buf[8192];
+      size_t r;
+      while ((r = fread(buf, 1, sizeof buf, jf)) > 0) fwrite(buf, 1, r, cf);
+      fputc('\n', jf == NULL ? cf : cf);  // separator
+      fclose(jf);
+    }
+    fclose(cf);
+    char optflag[8];
+    snprintf(optflag, sizeof optflag, "-%s", cpu_jit_opt_tag());
+    char *argv[8] = { (char *)"clang", optflag, (char *)"-fPIC",
+                      (char *)"-shared", (char *)"-o", comb_dl, comb_c, NULL };
+    pid_t pid;
+    if (posix_spawnp(&pid, "clang", NULL, NULL, argv, environ) != 0) return NULL;
+    int status;
+    waitpid(pid, &status, 0);
+    if (stat(comb_dl, &st) != 0) return NULL;   // compile failed
+  }
+  return dlopen(comb_dl, RTLD_NOW | RTLD_LOCAL);
+}
+#endif  // !_WIN32
+
+fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
+#ifdef _WIN32
+  (void)kid_lo; (void)kid_hi;
+#else
+  static int known = 0, enabled = 1;
+  if (!known) {
+    const char *e = getenv("THVM_CPU_JIT_PARALLEL");
+    enabled = (e == NULL) ? 1 : (e[0] != '0');
+    known = 1;
+  }
+  if (!enabled) return;
+  if (kid_lo < 1) kid_lo = 1;
+  if (kid_hi > KERNELS_NEXT) kid_hi = KERNELS_NEXT;
+  if (kid_lo >= kid_hi) return;
+
+  // Collect pending compile jobs.  Cap the batch; a single realize emits at
+  // most a few hundred kernels.  Heap-allocated (each CpuJitJob is ~520B, so
+  // a 1024 stack array would be ~520KB -- well past a safe frame).
+  enum { CPU_JIT_BATCH_CAP = 1024 };
+  CpuJitJob *jobs = (CpuJitJob *)malloc(CPU_JIT_BATCH_CAP * sizeof(CpuJitJob));
+  if (jobs == NULL) return;
+  u32 njobs = 0;
+  u64 *seen_keys = (u64 *)malloc(CPU_JIT_BATCH_CAP * sizeof(u64));
+  if (seen_keys == NULL) { free(jobs); return; }
+  u32 nseen = 0;
+
+  for (u32 kid = kid_lo; kid < kid_hi && njobs < CPU_JIT_BATCH_CAP; kid++) {
+    KernelEntry *ke = &KERNELS[kid];
+    if (ke->cached_lift.store_root == 0) continue;
+    // Only CPU-routed kernels reach cpu_jit_dispatch; skip Metal/CUDA
+    // outputs so a GPU run doesn't spawn useless clang jobs.
+    if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) continue;
+    if (TENS[ke->output_tid].backend != &CPU_BACKEND) continue;
+    if (!cpu_jit_eligible(ke)) continue;
+    // Already resolved for this kid -> nothing to compile.
+    if (kid < KERNELS_CAP && KID_JIT_FN != NULL && KID_JIT_FN[kid] != NULL)
+      continue;
+
+    // Apply the SAME first-fire opt decision the dispatch path applies, so
+    // the rendered source -- and therefore its hash + dylib -- is identical
+    // to what cpu_jit_dispatch will look up.  kernel_hand_coded_opts rewrites
+    // cached_lift.store_root (UPCAST register-blocking etc.) and is idempotent
+    // (guards on hand_coded_done), so the later fire-path call is a no-op.
+    // Without this the precompile renders the UN-optimized kernel, hashes to a
+    // different key, and builds a dylib the dispatch never uses (it then
+    // recompiles the optimized kernel serially -- net loss).
+    if (kernel_should_hand_code_opts(ke)) kernel_hand_coded_opts(ke);
+    // BEAM/autotune (when enabled) benchmarks variants at fire time and
+    // rewrites store_root AFTER hand_opts, so a pre-rendered hash wouldn't
+    // match; leave those kernels to the lazy fire-time compile.
+    if (kernel_should_autotune(ke)) continue;
+
+    char *src = cpu_jit_render_canon(ke);
+    if (src == NULL) continue;
+    u64 key = cpu_src_hash(src);
+
+    // Already compiled in-memory?  Skip.
+    CpuJitSlot *s = cpu_jit_lookup_slot(key);
+    if (s != NULL && s->key == key && s->func != NULL) { free(src); continue; }
+
+    char dl_path[256];
+    snprintf(dl_path, sizeof dl_path, "/tmp/thvm_jit_%016llx_%s.dylib",
+             (unsigned long long)key, cpu_jit_opt_tag());
+    struct stat st;
+    if (stat(dl_path, &st) == 0) { free(src); continue; }  // on-disk cache hit
+
+    // De-dup the batch by hash: two structurally-identical kernels render
+    // to the same source -> same dylib; compile it once.
+    int dup = 0;
+    for (u32 i = 0; i < nseen; i++) if (seen_keys[i] == key) { dup = 1; break; }
+    if (dup) { free(src); continue; }
+    if (nseen < CPU_JIT_BATCH_CAP) seen_keys[nseen++] = key;
+
+    // Rename the entry point from `k` to a per-kernel-unique `k_<hex>` so
+    // the combined dylib can hold every kernel without symbol collision.
+    // The renderer emits exactly one top-level definition (`void k(...)`,
+    // the entry point); helper math calls are libm names, statics don't
+    // exist in the C target's emit, so a single signature rewrite is
+    // sufficient.  The on-disk per-kernel .c keeps the renamed symbol; the
+    // lazy single-kernel cpu_jit_build path (interpreter-fallback warmup)
+    // still dlsyms "k", so it renders its own "k"-named source separately
+    // and is unaffected.
+    char func_name[24];
+    snprintf(func_name, sizeof func_name, "k_%016llx", (unsigned long long)key);
+    // Match the full entry-point signature prefix (not a bare "void k(")
+    // so a stray substring elsewhere can never be rewritten.  The C target
+    // emits exactly "void k(void *out_v, ...".  If it isn't found (an
+    // unexpected render shape), skip this kernel from the combined batch --
+    // it falls back to the lazy per-kernel cpu_jit_build on first dispatch
+    // rather than risk a "void k" symbol collision in the shared image.
+    static const char ENTRY_SIG[] = "void k(void *out_v";
+    char *sig = strstr(src, ENTRY_SIG);
+    if (sig == NULL) { free(src); continue; }
+    {
+      // Rewrite "void k(void *out_v..." -> "void k_<hex>(void *out_v...".
+      size_t pre = (size_t)(sig - src);
+      size_t suf_off = pre + 6;   // skip "void k", keep "(void *out_v..."
+      size_t suflen = strlen(src + suf_off);
+      size_t namelen = strlen(func_name);
+      char *renamed = (char *)malloc(pre + 5 + namelen + suflen + 1);
+      if (renamed == NULL) { free(src); continue; }
+      memcpy(renamed, src, pre);
+      memcpy(renamed + pre, "void ", 5);
+      memcpy(renamed + pre + 5, func_name, namelen);
+      memcpy(renamed + pre + 5 + namelen, src + suf_off, suflen + 1);
+      free(src);
+      src = renamed;
+    }
+
+    // Write the renamed source to its hash-named .c (the combined build
+    // concatenates these; the per-kernel filename keys on the content hash
+    // so an identical kernel reuses the same .c across batches).
+    char src_path[256];
+    snprintf(src_path, sizeof src_path, "/tmp/thvm_jit_comb_src_%016llx.c",
+             (unsigned long long)key);
+    FILE *f = fopen(src_path, "w");
+    if (f != NULL) { fputs(src, f); fclose(f); }
+    free(src);
+    if (f == NULL) continue;
+
+    jobs[njobs].key = key;
+    snprintf(jobs[njobs].src_path, sizeof jobs[njobs].src_path, "%s", src_path);
+    snprintf(jobs[njobs].dl_path,  sizeof jobs[njobs].dl_path,  "%s", dl_path);
+    snprintf(jobs[njobs].func_name, sizeof jobs[njobs].func_name, "%s", func_name);
+    njobs++;
+  }
+
+  free(seen_keys);
+
+  if (njobs == 0) { free(jobs); return; }
+
+  int dbg = (getenv("THVM_CPU_JIT_PARALLEL_DBG") != NULL);
+  u64 t0 = dbg ? cg_now_us() : 0;
+  // Build ONE combined dylib holding every fresh kernel (entry points
+  // renamed k_<hex>), then dlopen it ONCE.  This collapses the N slow
+  // first-dlopen syspolicyd provenance checks (the dominant cold cost on
+  // macOS) to a single check.  The single combined clang invocation
+  // compiles all N kernels in one TU; on a 20-kernel forward that one
+  // clang is comparable to the old ncores-wide parallel pool but pays
+  // one fork/exec instead of N.
+  char comb_dl[256] = {0};
+  void *h = cpu_jit_build_combined(jobs, njobs, comb_dl, sizeof comb_dl);
+  if (dbg)
+    fprintf(stderr, "[jit-pre] combined-compiled %u kernels in %.0f ms (range [%u,%u))\n",
+            njobs, (double)(cg_now_us() - t0) / 1000.0, kid_lo, kid_hi);
+
+  // dlsym every kernel's k_<hex> entry point out of the single combined
+  // image and populate the in-memory cache so the dispatch loop finds a
+  // resolved fn pointer (no serial recompile, no per-kernel dlopen).  The
+  // one shared dl_handle is recorded on the FIRST slot we fill; the rest
+  // reference into the same image (dropping it would unmap them), so they
+  // store func only.  cpu_jit_cache_reset dlcloses every non-NULL handle,
+  // which closes this shared image exactly once.
+  if (h != NULL) {
+    int handle_owned = 0;
+    for (u32 i = 0; i < njobs; i++) {
+      CpuJitFn jfn = (CpuJitFn)dlsym(h, jobs[i].func_name);
+      if (jfn == NULL) continue;
+      CpuJitSlot *s = cpu_jit_lookup_slot(jobs[i].key);
+      if (s != NULL && s->func == NULL) {
+        s->key = jobs[i].key;
+        s->func = jfn;
+        s->dl_handle = handle_owned ? NULL : h;
+        handle_owned = 1;
+      }
+    }
+    // No kernel claimed the handle (all slots already filled) -- drop it.
+    if (!handle_owned) dlclose(h);
+  }
+  free(jobs);
+#endif  // _WIN32
+}
+
+fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (!cpu_jit_eligible(ke)) return 0;
   // Per-kid fast path: if this kid was already compiled to a JIT fn
   // pointer, reuse it directly -- skips cpu_jit_render_canon (heap
   // walk into a tmpfile) and the source hash entirely.  The kid -> fn
@@ -318,6 +604,9 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // through to the full source-hash path which has its own warmup
   // gate + on-disk dylib reuse.
   u32 _kid = (u32)(ke - KERNELS);
+  if (getenv("THVM_CPU_JIT_PARALLEL_DBG"))
+    fprintf(stderr, "[jit-disp] kid=%u kidfn=%p\n", _kid,
+            (KID_JIT_FN != NULL && _kid < KERNELS_CAP) ? KID_JIT_FN[_kid] : (void*)1);
   if (_kid < KERNELS_CAP && KID_JIT_FN != NULL && KID_JIT_FN[_kid] != NULL) {
     CpuJitFn _jfn = (CpuJitFn)KID_JIT_FN[_kid];
     u32 ni = ke->n_inputs;
@@ -379,8 +668,8 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     // its compile cache: one-shot kernels pay no compile cost;
     // training-loop kernels cross the threshold almost immediately.
     char dl_path[256];
-    snprintf(dl_path, sizeof dl_path, "/tmp/thvm_jit_%016llx_O3.dylib",
-             (unsigned long long)key);
+    snprintf(dl_path, sizeof dl_path, "/tmp/thvm_jit_%016llx_%s.dylib",
+             (unsigned long long)key, cpu_jit_opt_tag());
     struct stat st;
     int dl_exists = (stat(dl_path, &st) == 0);
     if (!dl_exists) {

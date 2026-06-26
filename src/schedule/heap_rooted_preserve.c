@@ -30,6 +30,7 @@
 // at heap[loc] holds the new term with SUB=1; we want the
 // resolved tag, not the SUB pointer's own tag).
 fn void mark_heap_rooted_preserve(void) {
+  double _hp0 = sched_prof_enabled() ? sched_prof_now() : 0.0;
   for (u64 i = 0; i < HEAP_NEXT; i++) {
     Term t = HEAP[i];
     if (t == 0) continue;
@@ -38,4 +39,5 @@ fn void mark_heap_rooted_preserve(void) {
     u32 tid = (u32)term_val(r);
     tensor_mark_buf_preserved(tid);
   }
+  if (sched_prof_enabled()) sched_prof_add(SCHED_PROF_HEAP_PRESERVE, _hp0);
 }

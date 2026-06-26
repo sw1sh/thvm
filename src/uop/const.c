@@ -21,10 +21,19 @@
 //
 // Cleared by uop_const_cache_reset() in thvm_init / thvm_free; a
 // stale entry pointing into a freed heap range would mis-resolve.
+//
+// Multi-context: the cached `term` carries a per-context heap loc
+// (the wrapping NUM cell lives in CURRENT_CTX->heap, and heap_next
+// restarts at 0 per context).  A const Term cached by context A and
+// returned to context B would dereference B's heap at A's loc --
+// garbage.  The key folds the current context slot id (bits 48..51)
+// so cross-context lookups never alias (the FLUX cross-session bug:
+// a 2nd model context reused the 1st context's cached const/movement
+// Terms and read its heap -> a malformed `{}[[2]]` shape).
 
 #define UOP_CONST_CACHE_CAP  (1u << 14)         // 16K slots, ~50% load is fine
 typedef struct {
-  u64 key;                                       // (dtype << 32) | bits, 0 = empty
+  u64 key;                                       // (ctx << 48) | (dtype << 32) | bits, 0 = empty
   Term term;                                     // cached uop_const Term
 } UopConstSlot;
 static UopConstSlot UOP_CONST_CACHE[UOP_CONST_CACHE_CAP];
@@ -39,7 +48,11 @@ static inline u64 uop_const_key(u32 dtype, u32 bits) {
   // Pack into a non-zero u64 key; ensure key is never 0 (we use 0
   // as the empty-slot sentinel).  dtype | bits are both u32; OR a
   // high marker bit so {dtype=0, bits=0} doesn't collide with empty.
-  return ((u64)dtype << 32) | (u64)bits | (1ULL << 63);
+  // Fold the context slot (0..15) into bits 48..51 so a const cached
+  // in one context is never returned to another (its heap loc would
+  // dereference the wrong context's heap).
+  u64 ctx = (u64)thvm_context_current() & 0xF;
+  return ((u64)dtype << 32) | (u64)bits | (ctx << 48) | (1ULL << 63);
 }
 
 fn Term uop_const(u32 dtype, u32 bits) {

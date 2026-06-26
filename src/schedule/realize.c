@@ -151,6 +151,7 @@ fn Term thvm_realize(Term expr) {
     CURRENT_CTX->default_device = (u32)want_device;
   }
 
+  double _rt0 = sched_prof_enabled() ? sched_prof_now() : 0.0;
   grad_memo_begin_realize();
   u32 cpu_wm   = cpu_buf_pool_begin();
   u32 metal_wm = thvm_metal_buf_pool_begin();
@@ -207,7 +208,22 @@ fn Term thvm_realize(Term expr) {
   for (int iter = 0; iter < THVM_REALIZE_MAX_ITERS; iter++) {
     u32 kn0   = KERNELS_NEXT;
     u64 itrs0 = ITRS;
-    res = wnf(res);
+    // Cold-start lever: parallel-compile every kernel the prior iteration's
+    // materialize emitted BEFORE this wnf fires them one-at-a-time.  Without
+    // this, each kernel's first dispatch blocks on its own serial clang
+    // (~0.3s x N kernels = the bulk of cold-forward wall); the parallel
+    // posix_spawn pool collapses that to one ncores-wide pass, and the
+    // dispatch below then hits the populated dylib cache (no recompile).
+    // Idempotent + cache-keyed, so calling it with the growing kernel range
+    // every iteration is safe.
+    SCHED_PROF_BLOCK(SCHED_PROF_PRECOMPILE,
+                     cpu_jit_precompile_range(kn_at_call_start, KERNELS_NEXT));
+    // Same cold-start lever on Metal: parallel-compile every tile kernel's
+    // MSL->AIR + PSO before the serial wnf dispatch fires them one-at-a-time
+    // (each lazy compile is ~1.5s of newLibraryWithSource: on cold start).
+    // No-op stub off Metal; THVM_METAL_JIT_PARALLEL=0 disables.
+    thvm_metal_precompile_range(kn_at_call_start, KERNELS_NEXT);
+    SCHED_PROF_BLOCK(SCHED_PROF_WNF, res = wnf(res));
     // Count cross-subgraph consumers over the whole live graph before
     // materialize so the arena planner won't recycle a buf read by a
     // sibling subgraph.  Re-populated each iteration (the graph can grow
@@ -219,7 +235,10 @@ fn Term thvm_realize(Term expr) {
     kernel_compute_consumer_counts();
     res = mat;
   }
-  res = wnf(res);
+  SCHED_PROF_BLOCK(SCHED_PROF_PRECOMPILE,
+                   cpu_jit_precompile_range(kn_at_call_start, KERNELS_NEXT));
+  thvm_metal_precompile_range(kn_at_call_start, KERNELS_NEXT);
+  SCHED_PROF_BLOCK(SCHED_PROF_WNF, res = wnf(res));
   if (getenv("THVM_KCNT")) {
     fprintf(stderr, "DBG realize emit: %u kernels in %d iters\n",
             KERNELS_NEXT - kn_at_call_start, iters_used);
@@ -232,7 +251,7 @@ fn Term thvm_realize(Term expr) {
   // (result + WNF_LAST_STACK + DEFS) AND overlays mark_heap_rooted_preserve
   // to cover pending UOP cells the root-set walk misses (e.g. forward
   // intermediates a future TGrad realize will need).
-  mark_gc_preserve(res);
+  SCHED_PROF_BLOCK(SCHED_PROF_GC_PRESERVE, mark_gc_preserve(res));
   jit_capture_mark_preserved();
 
   // Arena planner cross-step leak fix: drop the preserved bit on
@@ -304,7 +323,7 @@ fn Term thvm_realize(Term expr) {
     const char *e = getenv("THVM_KGC");
     kgc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
   }
-  if (!kgc_disabled_env) kernel_gc_sweep(res);
+  if (!kgc_disabled_env) SCHED_PROF_BLOCK(SCHED_PROF_KGC, kernel_gc_sweep(res));
 
   // Cross-realize loc -> tid cache: scoped to ONE realize call so a
   // forward intermediate emitted as a kernel mid-pass stays reachable
@@ -321,6 +340,7 @@ fn Term thvm_realize(Term expr) {
 
   // Restore the session default device (scoped device routing, above).
   CURRENT_CTX->default_device = saved_default_device;
+  if (sched_prof_enabled()) sched_prof_add(SCHED_PROF_REALIZE_TOTAL, _rt0);
   return res;
 }
 
@@ -361,6 +381,11 @@ fn Term thvm_realize_many(Term ctr_term) {
   for (int iter = 0; iter < THVM_REALIZE_MAX_ITERS; iter++) {
     u32 kn0   = KERNELS_NEXT;
     u64 itrs0 = ITRS;
+    // Cold-start lever: parallel-compile the prior iteration's emitted
+    // kernels before the per-child wnf below fires them serially (see
+    // thvm_realize for the full rationale).  Idempotent + cache-keyed.
+    cpu_jit_precompile_range(kn_at_call_start, KERNELS_NEXT);
+    thvm_metal_precompile_range(kn_at_call_start, KERNELS_NEXT);
     // wnf is a no-op on a CTR (passive), so drive each child to
     // fire its kernels / ASSIGNs.  Materialize then walks the
     // entire bundle, sharing forward-kernel dedup across roots.

@@ -64,6 +64,50 @@ typedef u64 Term;
 
 #define fn static inline
 
+// === Schedule profiler (THVM_SCHED_PROF=1) ==========================
+// Coarse per-phase wall-time accumulators for the cold materialize/
+// schedule/render pipeline.  Off by default: every SCHED_PROF_* call
+// expands to a getenv-cached early bailout, so a default build pays one
+// predicted branch per phase boundary and nothing else.  Set
+// THVM_SCHED_PROF=1 to arm the atexit dump (see sched_prof.c).
+enum {
+  SCHED_PROF_BUFFERIZE = 0,   // bufferize_classify
+  SCHED_PROF_RANGEIFY,        // run_rangeify_unified (inside bufferize_classify)
+  SCHED_PROF_TOPO,            // topo_sort_buffers_unified
+  SCHED_PROF_ARENA,           // arena_compute
+  SCHED_PROF_EMIT,            // emit_kernel_for_boundary loop (visit+render+alloc)
+  SCHED_PROF_RENDER,          // cg_render_uop_kernel_c_root (subset of EMIT)
+  SCHED_PROF_VISIT,           // visit() walk (subset of EMIT)
+  SCHED_PROF_HEAP_PRESERVE,   // mark_heap_rooted_preserve
+  SCHED_PROF_GC_PRESERVE,     // mark_gc_preserve
+  SCHED_PROF_KGC,             // kernel_gc_sweep
+  SCHED_PROF_MATERIALIZE,     // whole thvm_materialize (top-level)
+  SCHED_PROF_REALIZE_TOTAL,   // whole thvm_realize / _many wall
+  SCHED_PROF_WNF,             // wnf() drive (fires kernels: compile+dispatch)
+  SCHED_PROF_PRECOMPILE,      // cpu_jit_precompile_range / metal precompile
+  SCHED_PROF_ROLLBACK,        // pool rollback + fwd reclaim tail
+  SCHED_PROF_N
+};
+extern double  SCHED_PROF_SEC[SCHED_PROF_N];
+extern u64     SCHED_PROF_CNT[SCHED_PROF_N];
+extern int     SCHED_PROF_ENABLED;   // -1 = uncached, 0 = off, 1 = on
+
+int    sched_prof_enabled(void);
+double sched_prof_now(void);
+void   sched_prof_add(int slot, double t0);
+
+// Time a statement/block into a profiler slot.  Compiles to the bare
+// body when profiling is off (the env check short-circuits cheaply).
+#define SCHED_PROF_BLOCK(slot, body)                  \
+  do {                                                \
+    if (!sched_prof_enabled()) { body; }              \
+    else {                                            \
+      double _spt0 = sched_prof_now();                \
+      body;                                           \
+      sched_prof_add((slot), _spt0);                  \
+    }                                                 \
+  } while (0)
+
 // === Term bit layout ===
 //
 //   bit  63        62..56     55..38         37..0
@@ -789,6 +833,13 @@ struct Backend {
   // alias check than buf_storage_root since arena reuse can land
   // a fresh buf at the same dptr without updating parent_buf_id.
   u64   (*buf_addr)(u32 buf_id);
+  // Optional: GPU-side zero-fill of a buffer's full extent, ordered before the
+  // next dispatch by the backend's own hazard tracking (no host sync).  The
+  // JIT replay loop calls this to clear a RECYCLED (replay_packed) output slot
+  // before its producer fires, so a partial-write kernel leaves zeros -- not
+  // the prior occupant's stale bytes -- in the elements it doesn't store.
+  // NULL on backends whose buffers are always exactly producer-covered.
+  void  (*buf_zero)(u32 buf_id);
   void  (*dispatch_begin)(void);
   void  (*dispatch_flush)(void);
   void  (*dispatch_end)(void);
@@ -2164,8 +2215,21 @@ fn u32  shape_numel(Shape s);
 u32  thvm_metal_buf_pool_begin(void);
 void thvm_metal_buf_pool_rollback_with_preserve(u32 wm);
 void thvm_metal_buf_mark_preserved(u32 buf_id);
+// GPU-side zero-fill of a buffer's full extent (blit fillBuffer), ordered
+// before the next dispatch by Metal's hazard tracking.  Used by the JIT replay
+// loop to clear a recycled (replay_packed) output slot before a partial-write
+// kernel fires.  No-op stub on non-Metal builds.
+void thvm_metal_buf_gpu_zero(u32 buf_id);
 void thvm_metal_buf_clear_preserved(u32 wm);
 u64  thvm_metal_buf_free_unpreserved_all(void);
+// Cold-start lever: parallel-compile every Metal-routed tile kernel in
+// [kid_lo, kid_hi) whose PSO isn't already cached, BEFORE the serial fire
+// loop dispatches them one-at-a-time (mirrors cpu_jit_precompile_range).
+// The MSL->AIR + pipeline-state compiles run concurrently via dispatch_apply;
+// the populated PSO cache makes the subsequent dispatch all cache hits.
+// Idempotent + hash-keyed.  No-op stub on non-Metal builds.
+// Knob THVM_METAL_JIT_PARALLEL=0 reverts to the lazy per-dispatch compile.
+void thvm_metal_precompile_range(u32 kid_lo, u32 kid_hi);
 u32  thvm_metal_buf_count(void);
 void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out);
 // Zero-copy wrap of a page-aligned host region (a disk-mmap weight's DiskMap
@@ -2240,6 +2304,12 @@ fn u32  uop_reduce_kind   (Term red);
 fn u32  uop_reduce_n_axes (Term red);
 fn u32  uop_reduce_axis   (Term red, u32 i);   // i in [0..n_axes)
 fn Term uop_reduce_src    (Term red);
+// Closed-form collapse of a single-axis SUM REDUCE over a pure RANGE (the
+// arange / cumsum / one-hot triangular-mask construction).  Port of
+// tinygrad codegen/simplify.py pm_reduce_simplify.  Returns `root`
+// unchanged when no foldable reduce is present.  Gated off by
+// THVM_NO_REDUCE_COLLAPSE=1.
+fn Term uop_reduce_arange_collapse(Term root);
 fn Term uop_reshape(Term src, u32 ndim, const u32 *dims);
 fn Term uop_permute(Term src, u32 ndim, const u32 *perm);
 fn Term uop_expand (Term src, u32 ndim, const u32 *dims);
@@ -2592,6 +2662,11 @@ u32  uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap);
 // fire?  True iff the env opt-in is on (default ON; HAND_CODED_OPTS=0
 // or NOOPT=1 disables) AND the per-shape autotuned flag is still 0.
 fn int kernel_should_hand_code_opts(struct KernelEntry const *ke);
+// Non-static export of the first-fire opt decision for the separately
+// compiled Metal TU (backend/metal/_.m).  Applies kernel_hand_coded_opts
+// (idempotent) and returns 1 if the kernel is eligible for parallel
+// precompile, 0 if it must defer to the lazy fire-time compile (autotune).
+int thvm_kernel_apply_first_fire_opts(struct KernelEntry *ke);
 
 // === Slice 5 decode shims (Metal-TU-callable) =========================
 // Thin external-linkage wrappers over heap_read / term_* / UOp
@@ -3496,6 +3571,12 @@ extern Backend CUDA_BACKEND;
 int thvm_metal_jit_replay_dispatch_ready(JitReplayDispatch const *op);
 int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
                               JitReplayDispatch const *ops, u32 n_ops);
+// Trace-capture route stamp: classify the dispatch route `ke` would take and
+// cg_profile_record it, WITHOUT GPU work.  Lets jit_capture_finalize read the
+// correct dispatch kind for ICB eligibility when THVM_JIT_TRACE_CAPTURE skipped
+// the eager dispatch.  Returns the stamped KDispatchKind.
+int thvm_metal_kernel_route_classify(struct KernelEntry *ke, u32 *in_buf_ids,
+                                     u32 out_buf_id);
 // Read the process-wide Metal GPU-time accumulator.  *out_total_us =
 // summed [cmd GPUEndTime]-[cmd GPUStartTime] microseconds across every
 // command-buffer flush/submit; *out_flush_count = number of
@@ -3515,6 +3596,18 @@ void thvm_metal_jit_drop_in_memory_psos(void);
 #endif
 
 fn void cpu_jit_cache_reset(void);
+
+// Parallel cold-start JIT warm: render + clang-compile every JIT-eligible
+// CPU kernel in [kid_lo, kid_hi) CONCURRENTLY (a posix_spawn pool of up to
+// ncores clang processes) and populate the on-disk dylib cache + in-memory
+// CpuJitSlot table BEFORE the serial dispatch loop fires them one-at-a-time.
+// Idempotent: a hash already on disk / in cache is skipped, and the batch is
+// de-duped by source hash so two workers never compile the same dylib.  A
+// no-op when THVM_CPU_JIT_PARALLEL=0.  The subsequent cpu_jit_dispatch fires
+// then hit the cache (no compile), collapsing ~Nx serial-clang wait to one
+// parallel pass.  Called from thvm_realize / thvm_realize_many once the
+// materialize fixpoint has emitted the kernel table, before the driving wnf.
+fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi);
 
 fn void backend_dispatch_begin_all(void);
 fn void backend_dispatch_flush_all(void);

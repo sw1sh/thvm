@@ -15,6 +15,16 @@
 //
 // Cleared by uop_mov_cache_reset() in thvm_init -- a stale entry
 // pointing into a freed heap range would mis-resolve.
+//
+// Multi-context: the cached `term` AND its `src` key are per-context
+// heap locs (heap_next restarts at 0 per context).  An entry cached
+// by context A and looked up in context B both mis-keys (B's src loc
+// collides with A's distinct node) and mis-resolves (the returned
+// term dereferences B's heap at A's loc).  The key folds the current
+// context slot id so cross-context entries never alias (the FLUX
+// cross-session bug: a 2nd model context reused the 1st context's
+// cached movement Terms and read its heap -> a malformed `{}[[2]]`
+// shape).
 
 #define UOP_MOV_CACHE_CAP (1u << 18)            // 256K slots
 typedef struct {
@@ -32,6 +42,10 @@ fn void uop_mov_cache_reset(void) {
 // valid hash.
 static inline u64 uop_mov_hash(u32 op, u64 src, u32 const *vals, u32 n_vals) {
   u64 h = 0xcbf29ce484222325ULL;
+  // Fold the context slot so an entry keyed in one context never
+  // matches a same-(op,src,vals) construction in another (their src
+  // locs collide because heap_next restarts per context).
+  h ^= (u64)thvm_context_current(); h *= 0x100000001b3ULL;
   h ^= (u64)op; h *= 0x100000001b3ULL;
   h ^= src;     h *= 0x100000001b3ULL;
   for (u32 i = 0; i < n_vals; i++) {

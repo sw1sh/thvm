@@ -699,12 +699,19 @@ static u32 metal_buf_freelist_try_pop(u64 nbytes) {
   return 0;   // miss
 }
 
+// Defined in backend/cpu/buf_alloc.c (unity C TU): set by arena_ensure around
+// the per-realize working-set ARENA alloc so this allocator exempts that one
+// planner-bounded block from the per-buffer im2col ceiling.
+extern int cpu_arena_alloc_inflight(void);
+
 static u32 metal_buf_alloc(u64 nbytes) {
   if (METAL_DEVICE == nil) return 0;
   // Refuse a pathologically large single allocation rather than
   // newBufferWithLength: it and pin tens of GB of wired unified
-  // memory.  See thvm_buf_byte_ceiling (src/thvm.h).
-  u64 ceiling = thvm_buf_byte_ceiling();
+  // memory.  See thvm_buf_byte_ceiling (src/thvm.h).  The per-realize ARENA
+  // block is exempt (planner-bounded working set, not a runaway im2col); the
+  // 8 GiB total-live ceiling in metal_record_memory_peak still backstops it.
+  u64 ceiling = cpu_arena_alloc_inflight() ? 0 : thvm_buf_byte_ceiling();
   if (ceiling != 0 && nbytes > ceiling) {
     fprintf(stderr,
       "metal_buf_alloc: refusing %llu-byte allocation (> THVM_MAX_BUF_BYTES "
@@ -1270,6 +1277,31 @@ static int metal_buf_read(u32 buf_id, void *dst, u64 nbytes) {
   if (nbytes > cap) nbytes = cap;
   memcpy(dst, (char *)[METAL_BUFS[buf_id].buf contents] + off, (size_t)nbytes);
   return 0;
+}
+
+// GPU-side zero-fill of a buffer's full extent, encoded into the active batch
+// command buffer via a blit fillBuffer.  Metal's automatic hazard tracking
+// (MTLHazardTrackingModeTracked, the default for newBufferWithLength) orders
+// this fill BEFORE the immediately-following compute dispatch that writes the
+// same buffer -- no host sync, no flush.  Used by the JIT replay loop to clear
+// a RECYCLED (replay_packed) output slot before its producer fires, so a
+// kernel that writes fewer elements than the slot holds (a partial / windowed
+// store) leaves zeros in the unwritten region rather than the prior occupant's
+// stale bytes.  Mirrors metal_buf_freelist_try_pop's memset-on-pop (the
+// recycle-zero invariant the direct packer reuse otherwise skipped).
+void thvm_metal_buf_gpu_zero(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  id<MTLBuffer> buf = METAL_BUFS[buf_id].buf;
+  if (buf == nil) return;
+  u64 off = METAL_BUFS[buf_id].byte_offset;
+  u64 cap = METAL_BUFS[buf_id].nbytes;
+  if (off >= cap) return;
+  id<MTLCommandBuffer> cmd = metal_command_buffer();
+  if (cmd == nil) return;
+  id<MTLBlitCommandEncoder> enc = [cmd blitCommandEncoder];
+  [enc fillBuffer:buf range:NSMakeRange((NSUInteger)off, (NSUInteger)(cap - off)) value:0];
+  [enc endEncoding];
+  metal_submit_if_standalone(cmd);
 }
 
 static int metal_buf_write(u32 buf_id, const void *src, u64 nbytes) {
@@ -2633,6 +2665,188 @@ static id<MTLComputePipelineState> metal_tile_jit_pipeline(KernelEntry *ke) {
 // required.
 u64 thvm_metal_tile_jit_hash(KernelEntry const *ke) {
   return metal_tile_jit_hash(ke);
+}
+
+// === Cold-start lever: parallel per-kernel MSL compile ====================
+//
+// The serial fire path (metal_dispatch_kernel -> metal_tile_jit_encode ->
+// metal_tile_jit_pipeline -> metal_tile_jit_build) compiles each tile
+// kernel's MSL -> AIR (newLibraryWithSource: / MTLCodeGenService) + builds
+// its MTLComputePipelineState ONE AT A TIME on the dispatching thread.
+// MSL->AIR is NOT persistently cached across cold starts beyond the
+// .metallib byte cache, and the first cold start pays ~1.5s per distinct
+// shader -> the bulk of cold-forward wall.
+//
+// This mirrors cpu_jit_precompile_range (src/backend/cpu/jit.c): at realize
+// (and JIT-capture finalize), collect every Metal-routed tile kernel in the
+// emitted range whose PSO isn't already cached, render its MSL serially (the
+// renderer hash-conses into the shared heap -- NOT thread-safe), dedup by the
+// existing metal_tile_jit_hash, then compile the deduped set CONCURRENTLY via
+// dispatch_apply.  newLibraryWithSource: / MTLCodeGenService / newComputePipe-
+// lineStateWithFunction: are all thread-safe and run off the GPU command
+// stream, so N shaders compile in one ncores-wide pass.  The PSOs are then
+// installed serially into METAL_JIT_CACHE (open-addressing table -- single
+// writer), so the subsequent serial dispatch loop is all cache hits.
+//
+// Idempotent + hash-keyed: re-calling with the growing kernel range each
+// realize iteration only ever compiles not-yet-cached shaders, and the
+// .metallib + PSO disk caches still hit.  Knob THVM_METAL_JIT_PARALLEL=0
+// reverts to the lazy per-dispatch serial compile.
+
+typedef struct {
+  u64                          key;
+  char                        *src;        // rendered MSL (malloc'd)
+  id<MTLComputePipelineState>  pso;        // built in the parallel region
+} MetalPrecompileJob;
+
+#define METAL_PRECOMPILE_BATCH_CAP 1024
+
+// Build the MTLLibrary + MTLComputePipelineState for one job's already-
+// rendered MSL.  This is metal_tile_jit_build's compile half, factored out so
+// it can run on a worker thread WITHOUT touching the shared METAL_JIT_CACHE
+// table (the caller installs serially).  Thread-safe: each Metal compile API
+// is independent + the disk caches are per-key files (atomic tmp+rename).
+static id<MTLComputePipelineState>
+metal_precompile_build_one(u64 key, char const *src) {
+  NSError *err = nil;
+  int lib_via_data = 0;
+  id<MTLLibrary> lib = metal_lib_for_src(src, &err, &lib_via_data);
+  if (lib == nil) return nil;
+  id<MTLFunction> mtlFn = [lib newFunctionWithName:@"k"];
+  if (mtlFn == nil) return nil;
+  MTLComputePipelineDescriptor *desc =
+      [[MTLComputePipelineDescriptor alloc] init];
+  [desc setComputeFunction:mtlFn];
+  [desc setSupportIndirectCommandBuffers:YES];
+  int try_archive = !lib_via_data;
+  id<MTLComputePipelineState> pso =
+      try_archive ? metal_pso_cache_try_load(key, mtlFn, desc) : nil;
+  if (pso != nil) return pso;
+  err = nil;
+  pso = [METAL_DEVICE newComputePipelineStateWithDescriptor:desc
+                                                     options:MTLPipelineOptionNone
+                                                  reflection:NULL
+                                                       error:&err];
+  if (pso == nil) return nil;
+  if (try_archive) metal_pso_cache_store(key, desc);
+  return pso;
+}
+
+void thvm_metal_precompile_range(u32 kid_lo, u32 kid_hi) {
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) return;
+  static int known = 0, enabled = 1, dbg = 0;
+  if (!known) {
+    const char *e = getenv("THVM_METAL_JIT_PARALLEL");
+    enabled = (e == NULL) ? 1 : (e[0] != '0');
+    dbg = (getenv("THVM_METAL_JIT_PARALLEL_DBG") != NULL) ? 1 : 0;
+    known = 1;
+  }
+  // When parallel is disabled we normally do nothing (the lazy per-dispatch
+  // serial compile handles every kernel).  BUT with the DBG timer on we still
+  // run -- driving the SAME compiles serially in a timed loop -- so the
+  // serial-vs-parallel pool wall is an in-process, apples-to-apples
+  // measurement.  The work is idempotent (it just pre-populates the PSO cache
+  // the lazy path would build anyway), so this is measurement-only, not a
+  // behaviour change for the serial mode the user selected.
+  if (!enabled && !dbg) return;
+  if (!metal_tile_enabled()) return;
+  if (kid_lo < 1) kid_lo = 1;
+  if (kid_hi > KERNELS_NEXT) kid_hi = KERNELS_NEXT;
+  if (kid_lo >= kid_hi) return;
+
+  MetalPrecompileJob *jobs =
+      (MetalPrecompileJob *)calloc(METAL_PRECOMPILE_BATCH_CAP,
+                                   sizeof(MetalPrecompileJob));
+  if (jobs == NULL) return;
+  u32 njobs = 0;
+
+  // --- Serial collection + render + dedup ---------------------------------
+  // The renderer (cg_emit_tile_metal -> uop_recognise_tc_parallel + hash-cons)
+  // mutates the shared heap, so it MUST run single-threaded here.  It is cheap
+  // relative to the compile, which is the part we parallelise.
+  for (u32 kid = kid_lo; kid < kid_hi && njobs < METAL_PRECOMPILE_BATCH_CAP;
+       kid++) {
+    KernelEntry *ke = &KERNELS[kid];
+    if (ke->cached_lift.store_root == 0) continue;
+    // Only kernels that will dispatch on the Metal backend.
+    if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) continue;
+    if (TENS[ke->output_tid].backend != &METAL_BACKEND) continue;
+    // Must be tile-eligible -- the only Metal path that goes through the
+    // newLibraryWithSource: JIT compile (MPS / DAG-encoder paths don't).
+    u32 tg = 0, tt = 0;
+    if (!cg_tile_metal_dispatch_shape(ke, &tg, &tt)) continue;
+
+    // Apply the SAME first-fire opt decision the dispatch path applies so the
+    // rendered source -- and its hash -- match what metal_tile_jit_pipeline
+    // will look up.  Idempotent (hand_coded_done guard).  Returns 0 for
+    // autotune kernels (store_root rewritten at fire time AFTER hand_opts, so a
+    // pre-rendered hash wouldn't match) -- leave those to the lazy compile.
+    if (!thvm_kernel_apply_first_fire_opts(ke)) continue;
+
+    u64 key = metal_tile_jit_hash(ke);
+    // Already resolved in the in-memory PSO cache?  Skip.
+    u32 idx = metal_jit_lookup_idx(key);
+    if (idx != (u32)-1 && METAL_JIT_CACHE[idx].key == key) continue;
+
+    // De-dup the batch by hash (two structurally-identical kernels share a
+    // PSO -- compile once).
+    int dup = 0;
+    for (u32 i = 0; i < njobs; i++) if (jobs[i].key == key) { dup = 1; break; }
+    if (dup) continue;
+
+    char *src = cg_emit_tile_metal(ke);
+    if (src == NULL) continue;
+    jobs[njobs].key = key;
+    jobs[njobs].src = src;
+    jobs[njobs].pso = nil;
+    njobs++;
+  }
+
+  if (njobs == 0) { free(jobs); return; }
+
+  u64 t0 = dbg ? cg_now_us() : 0;
+
+  // --- MSL->AIR + PSO compile ---------------------------------------------
+  // PARALLEL (the lever): dispatch_apply blocks until every iteration
+  // completes; each builds its own PSO with no shared mutable state (the disk
+  // caches are per-key files).  GCD sizes the worker pool to the active core
+  // count.  SERIAL (parallel disabled + DBG on): the same compiles in a timed
+  // loop, so the printed wall is directly comparable to the parallel run.
+  if (enabled && njobs > 1) {
+    dispatch_apply(njobs, DISPATCH_APPLY_AUTO, ^(size_t i) {
+      @autoreleasepool {
+        jobs[i].pso = metal_precompile_build_one(jobs[i].key, jobs[i].src);
+      }
+    });
+  } else {
+    for (u32 i = 0; i < njobs; i++) {
+      @autoreleasepool {
+        jobs[i].pso = metal_precompile_build_one(jobs[i].key, jobs[i].src);
+      }
+    }
+  }
+
+  // --- Serial install into the in-memory PSO cache ------------------------
+  u32 installed = 0;
+  for (u32 i = 0; i < njobs; i++) {
+    free(jobs[i].src);
+    jobs[i].src = NULL;
+    if (jobs[i].pso == nil) continue;
+    u32 idx = metal_jit_lookup_idx(jobs[i].key);
+    if (idx == (u32)-1) continue;     // table full -- lazy path handles it
+    if (METAL_JIT_CACHE[idx].key == jobs[i].key) continue;  // raced -> already in
+    METAL_JIT_CACHE[idx].key = jobs[i].key;
+    METAL_JIT_PSOS [idx]     = jobs[i].pso;
+    installed++;
+  }
+
+  if (dbg) {
+    fprintf(stderr,
+            "[metal-precompile] mode=%s jobs=%u installed=%u pool_wall=%.1fms\n",
+            (enabled && njobs > 1) ? "parallel" : "serial",
+            njobs, installed, (cg_now_us() - t0) / 1000.0);
+  }
+  free(jobs);
 }
 
 #define METAL_GRAPH_CACHE_CAP 256
@@ -4084,6 +4298,70 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   return rc;
 }
 
+// Trace-capture route stamp (THVM_JIT_TRACE_CAPTURE): classify which dispatch
+// route `ke` WOULD take and stamp it via cg_profile_record, WITHOUT encoding or
+// submitting any GPU work.  The recording pass skips the eager metal_dispatch_-
+// kernel (uop_kernel.c), but jit_capture_finalize reads cg_kernel_dispatch_kind
+// to decide ICB eligibility (the metal_graph_unsafe loop exempts METAL_TILE; the
+// ICB batch loop only batches METAL_TILE).  Without this stamp every captured
+// kernel reads as KDISPATCH_NONE -> finalize treats tile kernels as DAG-path ->
+// a strided matmul input wrongly trips metal_graph_unsafe -> the whole capture
+// declines the ICB even though the eager path would have batched it.  Mirrors
+// metal_dispatch_kernel's MPS->tile->DAG decision ORDER so the stamped route
+// matches what the first ICB replay (or per-op fallback) actually dispatches.
+//
+// Returns the stamped KDispatchKind.  Pure: no command buffer, no buffer
+// allocation, no GPU submit -- just the same eligibility predicates.
+int thvm_metal_kernel_route_classify(struct KernelEntry *ke, u32 *in_buf_ids,
+                                     u32 out_buf_id) {
+  if (METAL_DEVICE == nil || ke == NULL) return KDISPATCH_NONE;
+  u32 kid = (u32)(ke - KERNELS);
+  // MPS first (metal_dispatch_kernel order): a large 2-D GEMM whose operands +
+  // output are offset-0 takes the vendor GEMM.  Reuse the same classify + size
+  // gates metal_try_mps_gemm applies before it encodes.
+  if (metal_mps_enabled() && ke->cached_lift.store_root != 0
+      && in_buf_ids != NULL) {
+    UopDagGemmShape g;
+    if (uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke, &g)
+        && (g.dtype == DT_BF16 || g.dtype == DT_FP32)) {
+      g.M = kvar_extent_runtime(g.M); g.N = kvar_extent_runtime(g.N);
+      g.K = kvar_extent_runtime(g.K);
+      if (g.M != 0 && g.N > 1 && g.K > 1
+          && (u64)g.M * g.N * g.K >= metal_mps_min_macs()
+          && g.a_input < ke->n_inputs && g.b_input < ke->n_inputs) {
+        u32 a_buf = in_buf_ids[g.a_input];
+        u32 b_buf = in_buf_ids[g.b_input];
+        if (a_buf != 0 && a_buf < METAL_BUFS_NEXT
+            && b_buf != 0 && b_buf < METAL_BUFS_NEXT
+            && out_buf_id != 0 && out_buf_id < METAL_BUFS_NEXT
+            && METAL_BUFS[a_buf].byte_offset == 0
+            && METAL_BUFS[b_buf].byte_offset == 0
+            && METAL_BUFS[out_buf_id].byte_offset == 0) {
+          cg_profile_record(kid, KDISPATCH_METAL_MPS, 0);
+          return KDISPATCH_METAL_MPS;
+        }
+      }
+    }
+  }
+  // Tile path: the generated-tile kernel -- the ICB-batchable route.  Gate
+  // matches metal_dispatch_kernel exactly (tile enabled AND dispatch shape
+  // resolves).  metal_tile_jit_encode can still bail for a few shapes the per-op
+  // path declines, but cg_tile_metal_dispatch_shape is the same eligibility test
+  // jit_replay_try_metal_graph_run / metal_graph_build re-apply, so stamping tile
+  // here is consistent with the ICB build's own gate.
+  u32 tg = 0, tt = 0;
+  if (metal_tile_enabled() && cg_tile_metal_dispatch_shape(ke, &tg, &tt)) {
+    cg_profile_record(kid, KDISPATCH_METAL_TILE, 0);
+    return KDISPATCH_METAL_TILE;
+  }
+  // DAG per-op fallback.
+  if (metal_kernel_supported(ke)) {
+    cg_profile_record(kid, KDISPATCH_METAL_OP, 0);
+    return KDISPATCH_METAL_OP;
+  }
+  return KDISPATCH_NONE;
+}
+
 // === AOT-on-Metal: cached book_heap MTLBuffer wrapper ================
 //
 // Phase 7 iter BB: book_heap is a fixed pointer for the lifetime of
@@ -5396,6 +5674,7 @@ Backend METAL_BACKEND = {
   .buf_freelist_remove = thvm_metal_buf_freelist_remove,
   .buf_jit_pin     = metal_buf_jit_pin,
   .buf_jit_unpin   = metal_buf_jit_unpin,
+  .buf_zero        = thvm_metal_buf_gpu_zero,
   .dispatch_begin  = metal_dispatch_begin,
   .dispatch_flush  = metal_dispatch_flush,
   .dispatch_end    = metal_dispatch_end,

@@ -657,19 +657,10 @@ EXPORT uint32_t py_cuda_dag_dispatch_shape(uint64_t root,
   }
   if (total == 0 || total > 0xFFFFFFFFu) return 0;
   uint32_t grid, block;
-  // SIMD_REDUCE: one warp per reduce-axis tuple -- grid = product of
-  // reduce-dependent output axes (a pure-broadcast axis is spread over
-  // the 32 lanes), block = 32.  Mirrors src/backend/cuda/jit.c's
-  // cuda_dag_dispatch_shape.
-  if (rmu_dag_has_simd_reduce(root)
-      && local_total <= 1 && group_reduce_extent == 0) {
-    uint64_t sg = rmu_dag_simd_warp_grid(root);
-    if (sg == 0) sg = total;
-    if (sg > 0xFFFFFFFFu) return 0;
-    if (grid_x  != NULL) *grid_x  = (uint32_t)sg;
-    if (block_x != NULL) *block_x = 32u;
-    return 1;
-  }
+  // (The MLX-derived SIMD_REDUCE warp-grid special-case was removed with the
+  // FAST_MATH/SIMD_REDUCE/VEC_LOAD OptOps purge -- 7a2218e6b.  The generic
+  // dispatch-shape below now handles every kernel; the IR no longer emits a
+  // SIMD_REDUCE opt that would need a per-warp grid.)
   if (group_reduce_extent != 0) {
     if (group_reduce_extent > 1024) return 0;
     grid  = (uint32_t)total;
@@ -700,9 +691,9 @@ EXPORT uint32_t py_const_KOP_PADTO(void)    { return KOP_PADTO; }
 EXPORT uint32_t py_const_KOP_NOLOCALS(void) { return KOP_NOLOCALS; }
 EXPORT uint32_t py_const_KOP_TC(void)       { return KOP_TC; }
 EXPORT uint32_t py_const_KOP_GLOBAL(void)   { return KOP_GLOBAL; }
-EXPORT uint32_t py_const_KOP_FAST_MATH(void) { return KOP_FAST_MATH; }
-EXPORT uint32_t py_const_KOP_SIMD_REDUCE(void) { return KOP_SIMD_REDUCE; }
-EXPORT uint32_t py_const_KOP_VEC_LOAD(void) { return KOP_VEC_LOAD; }
+// KOP_FAST_MATH / KOP_SIMD_REDUCE / KOP_VEC_LOAD were purged from the IR
+// (7a2218e6b); their py_const_* exports are dropped.  _read_uint32_const
+// returns -1 for the now-absent symbols, which the Python layer tolerates.
 
 // ---------------- exposed enums (to avoid magic numbers in Python) ----------------
 EXPORT uint32_t py_const_DT_INT32(void)         { return DT_INT32; }
@@ -748,7 +739,5 @@ EXPORT uint32_t py_const_UOP_OPT_UPCAST(void)       { return UOP_OPT_UPCAST; }
 EXPORT uint32_t py_const_UOP_OPT_TC(void)           { return UOP_OPT_TC; }
 EXPORT uint32_t py_const_UOP_OPT_LOCAL(void)        { return UOP_OPT_LOCAL; }
 EXPORT uint32_t py_const_UOP_OPT_GROUP_REDUCE(void) { return UOP_OPT_GROUP_REDUCE; }
-EXPORT uint32_t py_const_UOP_OPT_CONV(void)         { return UOP_OPT_CONV; }
-EXPORT uint32_t py_const_UOP_OPT_FAST_MATH(void)    { return UOP_OPT_FAST_MATH; }
-EXPORT uint32_t py_const_UOP_OPT_SIMD_REDUCE(void)  { return UOP_OPT_SIMD_REDUCE; }
-EXPORT uint32_t py_const_UOP_OPT_VEC_LOAD(void)     { return UOP_OPT_VEC_LOAD; }
+// UOP_OPT_CONV / UOP_OPT_FAST_MATH / UOP_OPT_SIMD_REDUCE / UOP_OPT_VEC_LOAD
+// were purged from the IR (7a2218e6b); exports dropped (Python -> -1).

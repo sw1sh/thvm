@@ -17,19 +17,67 @@ fn u64 cpu_buf_peak_bytes(void) { return CPU_MEM_PEAK; }
 fn u64 cpu_buf_live_bytes(void) { return CPU_MEM_LIVE; }
 fn void cpu_buf_peak_reset(void) { CPU_MEM_PEAK = CPU_MEM_LIVE; }
 
+// When > 0 the next cpu_buf_alloc is the per-realize working-set ARENA block
+// (arena_ensure), whose size is bounded by the faithful memory planner
+// (arena_compute's TLSF working-set, the analog of tinygrad schedule/memory.py)
+// -- NOT a runaway im2col/EXPAND.  A large eval batch legitimately needs a
+// multi-GB packed working set (beautiful_mnist BS=10000 eval forward = 1.19 GB,
+// tinygrad's own peak there is 1.31 GB), so the per-buffer im2col ceiling must
+// not refuse it.  The total-live ceiling (thvm_live_byte_ceiling, 8 GiB) still
+// backstops a genuinely pathological arena.  Set by cpu_arena_alloc_inflight_set
+// around arena_ensure's alloc; the metal arena path uses the same gate.
+int CPU_ARENA_ALLOC_INFLIGHT = 0;
+void cpu_arena_alloc_inflight_set(int on) { CPU_ARENA_ALLOC_INFLIGHT = on; }
+int  cpu_arena_alloc_inflight(void) { return CPU_ARENA_ALLOC_INFLIGHT; }
+
 fn u32 cpu_buf_alloc(u64 nbytes) {
+  // THVM_DEBUG_BIG_ALLOC=<bytes>: trace every allocation at or above the given
+  // size (decimal bytes) so a large materialization can be attributed by size
+  // (e.g. distinguishing the planner arena block from an unfused im2col).
+  // Diagnostic only; off unless set.
+  {
+    char const *dbg = getenv("THVM_DEBUG_BIG_ALLOC");
+    if (dbg != NULL && dbg[0] != '\0') {
+      u64 thresh = strtoull(dbg, NULL, 10);
+      if (thresh != 0 && nbytes >= thresh)
+        fprintf(stderr, "cpu_buf_alloc: BIG %llu bytes (%llu f32 elems)%s\n",
+                (unsigned long long)nbytes, (unsigned long long)(nbytes / 4),
+                CPU_ARENA_ALLOC_INFLIGHT ? " [arena]" : "");
+    }
+  }
   // Refuse a pathologically large single allocation rather than
   // calloc() it and thrash the host.  See thvm_buf_byte_ceiling.
-  u64 ceiling = thvm_buf_byte_ceiling();
-  if (ceiling != 0 && nbytes > ceiling) {
-    fprintf(stderr,
-      "cpu_buf_alloc: refusing %llu-byte allocation (> THVM_MAX_BUF_BYTES "
-      "ceiling %llu); a kernel program is asking for a buffer far larger "
-      "than any legitimate tensor -- likely an unfused im2col/EXPAND "
-      "intermediate.  Raise THVM_MAX_BUF_BYTES (bytes; 0 = unlimited) if "
-      "this is intentional.\n",
-      (unsigned long long)nbytes, (unsigned long long)ceiling);
-    exit(1);
+  //
+  // The per-realize ARENA block (CPU_ARENA_ALLOC_INFLIGHT) is exempt from this
+  // per-buffer im2col ceiling: its size is the planner's bounded working set,
+  // not a runaway EXPAND, and a large eval batch legitimately needs multi-GB
+  // (BS=10000 forward = 1.19 GB, matching tinygrad's 1.31 GB).  It is instead
+  // bounded by the total-live ceiling so a genuinely pathological arena (e.g. a
+  // mis-planned tens-of-GB working set) is still caught.
+  if (CPU_ARENA_ALLOC_INFLIGHT) {
+    u64 live_ceiling = thvm_live_byte_ceiling();
+    if (live_ceiling != 0 && CPU_MEM_LIVE + nbytes > live_ceiling) {
+      fprintf(stderr,
+        "cpu_buf_alloc: refusing %llu-byte ARENA allocation (live %llu + req > "
+        "THVM_MAX_LIVE_BYTES ceiling %llu); the per-realize working set exceeds "
+        "the total-live budget.  Raise THVM_MAX_LIVE_BYTES (bytes; 0 = "
+        "unlimited) if this is intentional.\n",
+        (unsigned long long)nbytes, (unsigned long long)CPU_MEM_LIVE,
+        (unsigned long long)live_ceiling);
+      exit(1);
+    }
+  } else {
+    u64 ceiling = thvm_buf_byte_ceiling();
+    if (ceiling != 0 && nbytes > ceiling) {
+      fprintf(stderr,
+        "cpu_buf_alloc: refusing %llu-byte allocation (> THVM_MAX_BUF_BYTES "
+        "ceiling %llu); a kernel program is asking for a buffer far larger "
+        "than any legitimate tensor -- likely an unfused im2col/EXPAND "
+        "intermediate.  Raise THVM_MAX_BUF_BYTES (bytes; 0 = unlimited) if "
+        "this is intentional.\n",
+        (unsigned long long)nbytes, (unsigned long long)ceiling);
+      exit(1);
+    }
   }
   // bm4a: free-list lookup first.  Recycles a slot whose nbytes
   // matches; reset to a clean state by cpu_buf_freelist_try_pop.

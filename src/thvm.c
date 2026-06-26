@@ -323,6 +323,14 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // Wired into render_uop.c between expander/devectorize/load_store_fold so
 // the post-devectorize graph shrinks before reaching the linearizer.
 #include "uop/symbolic_rewrite.c"
+// uop/reduce_collapse.c -- closed-form collapse of a single-axis SUM
+// REDUCE over a pure RANGE (the arange / cumsum / one-hot triangular-mask
+// construction).  Faithful port of tinygrad codegen/simplify.py
+// pm_reduce_simplify (reduce_unparented + the bound-collapse rules).
+// Wired into the kernel store_root rewrite (schedule/materialize.c) so
+// thvm folds the construction to its closed form instead of iterating the
+// reduce axis, matching tinygrad's arange/reduce-collapse.
+#include "uop/reduce_collapse.c"
 // uop/linearize.c -- port of tinygrad codegen/late/linearizer.py.
 // Walks a post-devectorize DAG and produces a LinKernel: an ordered
 // list of UOp Terms ready for the new render_linearized.c emit walk.
@@ -345,6 +353,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "schedule/tile.c"
 #include "schedule/kernel_alloc.c"
 #include "schedule/uop_meta.c"
+#include "schedule/sched_prof.c"
 #include "schedule/consumer_count.c"
 #include "schedule/bufferize.c"
 #include "schedule/bufferize_classify.c"
@@ -674,6 +683,19 @@ Backend *ctx_ensure_backend(i32 dev) {
 }
 
 void thvm_init(void) {
+  // THVM_FUSE_CONV_BWD now defaults ON: fuse the conv-backward col2im into
+  // a strided view instead of materializing it (tinygrad never materializes
+  // it -- docs/thvm_vs_tinygrad.md SS3.7).  The placeholder reshape round-
+  // trip (schedule/indexing.c apply_movement_op_reshape_composed) +
+  // fold_add_divmod_recombine (uop/index_simplify.c, ported from tinygrad
+  // symbolic.py:28-49) collapse the unfold+col2im split/re-split so the
+  // fused read iterates the correct strided count -- no 21-trillion-element
+  // cross-product.  The three gate readers (ru_fuse_conv_bwd_enabled,
+  // uop_valid_fold_enabled, bufferize_fuse_conv_bwd_enabled) all test
+  // getenv("THVM_FUSE_CONV_BWD")=="1", so default the env here (only if the
+  // caller left it unset) to flip them together.  An explicit
+  // THVM_FUSE_CONV_BWD=0 still opts OUT (back to the materializing path).
+  setenv("THVM_FUSE_CONV_BWD", "1", 0);
   init_ctx_arrays(CURRENT_CTX);
   // Bind the main thread's WNF spine routing to the just-allocated
   // ctx state.  Worker threads spawned by the parallel pool re-bind

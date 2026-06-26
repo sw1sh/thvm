@@ -651,6 +651,18 @@ fn void copy_upload_cache_reset(void) {
   memset(COPY_UPLOAD_CACHE, 0, sizeof(COPY_UPLOAD_CACHE));
 }
 
+// The cached (loc -> tid) is per-context (both the copy-node loc and the
+// uploaded TenDesc id live in CURRENT_CTX, and heap_next / tens_next
+// restart at 0 per context).  Fold the context slot into backend_id so a
+// copy-node at the same loc in a different context never returns the wrong
+// context's tid (the FLUX cross-session bug: a 2nd model context reused the
+// 1st context's uploaded buffer tids -> a dead/foreign tensor -> realize
+// LibraryFunctionError).  backend_id is small (< 256); pack the ctx slot
+// above it so the (loc, backend_id) discrimination is preserved.
+static inline u32 copy_upload_ctx_backend(u32 backend_id) {
+  return backend_id | (thvm_context_current() << 16);
+}
+
 static inline u32 copy_upload_hash(u64 loc, u32 backend_id) {
   u64 k = loc * 0x9e3779b97f4a7c15ULL + backend_id;
   k ^= k >> 33;
@@ -658,6 +670,7 @@ static inline u32 copy_upload_hash(u64 loc, u32 backend_id) {
 }
 
 static u32 copy_upload_lookup(u64 loc, u32 backend_id) {
+  backend_id = copy_upload_ctx_backend(backend_id);
   u32 h = copy_upload_hash(loc, backend_id);
   for (u32 probe = 0; probe < COPY_UPLOAD_CACHE_CAP; probe++) {
     u32 i = (h + probe) & (COPY_UPLOAD_CACHE_CAP - 1);
@@ -671,6 +684,7 @@ static u32 copy_upload_lookup(u64 loc, u32 backend_id) {
 
 static void copy_upload_insert(u64 loc, u32 backend_id, u32 tid) {
   if (loc == 0 || tid == 0) return;
+  backend_id = copy_upload_ctx_backend(backend_id);
   u32 h = copy_upload_hash(loc, backend_id);
   for (u32 probe = 0; probe < COPY_UPLOAD_CACHE_CAP; probe++) {
     u32 i = (h + probe) & (COPY_UPLOAD_CACHE_CAP - 1);
@@ -1612,7 +1626,12 @@ static int arena_ensure(void) {
   if (ARENA_BUF_ID != 0)        return 1;
   if (ARENA_SIZE == 0)          return 0;
   if (CURRENT_BACKEND == &CPU_BACKEND) {
+    // The arena block is the planner-bounded working set, not a runaway
+    // im2col -- exempt it from the per-buffer im2col ceiling (still bounded
+    // by the total-live ceiling inside cpu_buf_alloc).
+    cpu_arena_alloc_inflight_set(1);
     ARENA_BUF_ID = cpu_buf_alloc(ARENA_SIZE);
+    cpu_arena_alloc_inflight_set(0);
     if (ARENA_BUF_ID == 0)      return 0;
     ARENA_DATA = (u8 *)CPU_BUFS[ARENA_BUF_ID].data;
     // Per-realize arena: this block is sized to fit this pass's
@@ -1628,7 +1647,9 @@ static int arena_ensure(void) {
   }
 #ifdef THVM_HAS_CUDA
   if (CURRENT_BACKEND == &CUDA_BACKEND) {
+    cpu_arena_alloc_inflight_set(1);
     ARENA_BUF_ID = cuda_buf_alloc(ARENA_SIZE);
+    cpu_arena_alloc_inflight_set(0);
     if (ARENA_BUF_ID == 0)      return 0;
     ARENA_DPTR = cuda_buf_dptr(ARENA_BUF_ID);
     CUDA_BUFS[ARENA_BUF_ID].skip_freelist = 1;
@@ -1644,7 +1665,13 @@ static int arena_ensure(void) {
     // so the view zeroing below memsets through [buf contents].  Mirror of the
     // CUDA branch above (cuda_buf_alloc + skip_freelist) and tinygrad
     // schedule/memory.py:56 (UOp.new_buffer for the shared arena).
+    // Same arena exemption as the CPU branch: the planner-bounded working set
+    // must not be refused by the per-buffer im2col ceiling (metal_buf_alloc
+    // consults cpu_arena_alloc_inflight); the 8 GiB total-live ceiling in
+    // metal_record_memory_peak still backstops a pathological arena.
+    cpu_arena_alloc_inflight_set(1);
     ARENA_BUF_ID = thvm_metal_buf_arena_alloc(ARENA_SIZE);
+    cpu_arena_alloc_inflight_set(0);
     if (ARENA_BUF_ID == 0)      return 0;
     return 1;
   }
@@ -5885,7 +5912,9 @@ static Term emit_kernel_for_boundary(u32 bi) {
   TENS[out_tid].producer_kid = kid;
 
   VisitMemo memo = {0};
-  u32 result = visit(root_term, ke, boundary_loc, &memo);
+  u32 result;
+  SCHED_PROF_BLOCK(SCHED_PROF_VISIT,
+                   result = visit(root_term, ke, boundary_loc, &memo));
   visit_memo_free(&memo);
   if (result == VISIT_BAIL) {
     kernel_dealloc_last(kid);
@@ -5966,6 +5995,17 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // kernel_lift_to_uop sets cached_lift.store_root = ru_root and
     // returns 0 if ru_root is 0 -- so inside this branch we already
     // know cached_lift.store_root holds the unified pass's root.
+    //
+    // arange/reduce-collapse (tinygrad codegen/simplify.py
+    // pm_reduce_simplify, run at rangeify.py:606 right after the rangeify
+    // walk): fold a single-axis SUM REDUCE over a pure RANGE (the
+    // triangular-mask arange/cumsum/one-hot construction) to its closed
+    // form BEFORE the walker rewrite, so the kernel renders without the
+    // inner reduce-axis loop.  Runs on the raw RANGE-arithmetic store_root
+    // -- the same form tinygrad collapses.  No-op (returns root) when the
+    // body isn't the IWHERE(ILT(affine(r)), val, 0) mask shape.
+    ke->cached_lift.store_root =
+        uop_reduce_arange_collapse(ke->cached_lift.store_root);
     Term ru_rewritten = unified_store_root_for_walker(ke, ke->cached_lift.store_root);
     // Re-apply the broadcast-collapsed REDUCE repair AFTER the inline:
     // a per-channel-mean-style producer fused into a reduce collapses its
@@ -6381,7 +6421,17 @@ static Term materialize_strip_detach(Term term) {
   return r;
 }
 
+fn Term thvm_materialize_impl(Term term);
+
 fn Term thvm_materialize(Term term) {
+  if (!sched_prof_enabled()) return thvm_materialize_impl(term);
+  double _t0 = sched_prof_now();
+  Term r = thvm_materialize_impl(term);
+  sched_prof_add(SCHED_PROF_MATERIALIZE, _t0);
+  return r;
+}
+
+fn Term thvm_materialize_impl(Term term) {
   term = materialize_strip_detach(term);
   HOT_MATERIALIZE_CALLS++;
   // REF / ALO transparency: jump (don't unfold) into the body cell.
@@ -6574,17 +6624,17 @@ fn Term thvm_materialize(Term term) {
     }
   }
 
-  bufferize_classify(term);
+  SCHED_PROF_BLOCK(SCHED_PROF_BUFFERIZE, bufferize_classify(term));
   // The unified rangeify pass projects its UOP_BUFFERIZE Terms back
   // onto BUFFERIZE_NODES.realized; we capture them into
   // BOUNDARY_BUFFERIZE_TERM[] here.  Mirror: tinygrad walks the
   // lowered tsink for BUFFERIZE+STORE pairs (tinygrad/engine/realize.py).
-  topo_sort_buffers_unified(term);
+  SCHED_PROF_BLOCK(SCHED_PROF_TOPO, topo_sort_buffers_unified(term));
   mem_plan_reset();
   // Arena planner: pre-compute per-boundary offsets into a shared
   // arena buf.  Mirror: tinygrad/schedule/memory.py memory_plan_rewrite
   // (called inside lower_schedule_item before kernel dispatch).
-  arena_compute();
+  SCHED_PROF_BLOCK(SCHED_PROF_ARENA, arena_compute());
   // Cross-pass shared-buffer recycle: in the LAST consuming sub-pass of a
   // TAG_CTR bundle, schedule each shared INPUT buffer (cached by the
   // producing sub-pass, recorded NEVER there) to be freed after its last
@@ -6606,6 +6656,7 @@ fn Term thvm_materialize(Term term) {
   u32 kernels_at_start = KERNELS_NEXT;
   u32 tens_at_start    = TENS_NEXT;
   Term sink_kernel = 0;
+  double _emit_t0 = sched_prof_enabled() ? sched_prof_now() : 0.0;
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
     Term k = emit_kernel_for_boundary(i);
     if (k == 0) {
@@ -6647,10 +6698,12 @@ fn Term thvm_materialize(Term term) {
         }
       }
       arena_reset();
+      if (sched_prof_enabled()) sched_prof_add(SCHED_PROF_EMIT, _emit_t0);
       return term;
     }
     if (BOUNDARY_ORDER[i] == term_val(term)) sink_kernel = k;
   }
+  if (sched_prof_enabled()) sched_prof_add(SCHED_PROF_EMIT, _emit_t0);
   // End-of-pass: pop any planner-pushed bufs still on CPU_FREELIST so
   // a subsequent thvm_realize -> materialize iteration doesn't pull
   // from them (the chain rule's freshly-emitted UOPs may still

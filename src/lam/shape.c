@@ -34,9 +34,34 @@
 // book LAM and a dyn LAM at the same numeric loc.  We use the
 // top bit (LAM_SHAPE_BOOK_BIT) to distinguish: book locs OR'd
 // with this bit on insert/lookup; dyn locs use the raw value.
+//
+// Multi-context: HEAP and BOOK_HEAP are per-context (each context's
+// heap_next / book_next restart at 0), but this table is a single
+// file-static global shared across every context (see thvm.c
+// thvm_context_destroy -- wiping it per-context would clobber other
+// live contexts' entries).  So two contexts' lambdas can land at the
+// SAME numeric loc and collide here: whichever inserted second would
+// overwrite the first context's shape, and a lookup in the first
+// context would then read the second's dims -- the FLUX
+// cross-session bug (a 2nd weight-base context's velJit capture
+// reused the 1st context's locs, read a stale/wrong shape, and
+// emitted a malformed `{}[[2]]` tile-JIT kernel).  We fold the
+// current context's slot id (0..15) into the key so cross-context
+// locs never collide.  Layout of the u64 key:
+//   bit  63       : BOOK flag (book loc vs dyn loc)
+//   bits 56..59   : context slot id (CONTEXTS_CAP == 16 -> 4 bits)
+//   bits 0..37    : raw loc (VAL_BITS == 38 bounds an addressable loc)
 
 #define LAM_SHAPE_CAP        (1u << 12)
 #define LAM_SHAPE_BOOK_BIT   (1ULL << 63)
+#define LAM_SHAPE_CTX_SHIFT  56
+#define LAM_SHAPE_CTX_MASK   (0xFULL << LAM_SHAPE_CTX_SHIFT)
+
+// Fold the current context's slot id into a raw (dyn or book) loc.
+static inline u64 lam_shape_ctx_key(u64 raw) {
+  u64 ctx = (u64)thvm_context_current() & 0xF;
+  return raw | (ctx << LAM_SHAPE_CTX_SHIFT);
+}
 
 typedef struct {
   u8    occupied;    // 0 = empty slot (key=0 / loc=0 are valid keys,
@@ -87,17 +112,17 @@ static int lam_shape_lookup_keyed(u64 key, Shape *out) {
 }
 
 fn void lam_shape_set(u64 lam_loc, Shape const *shape) {
-  lam_shape_set_keyed(lam_loc, shape);
+  lam_shape_set_keyed(lam_shape_ctx_key(lam_loc), shape);
 }
 fn int lam_shape_lookup(u64 lam_loc, Shape *out) {
-  return lam_shape_lookup_keyed(lam_loc, out);
+  return lam_shape_lookup_keyed(lam_shape_ctx_key(lam_loc), out);
 }
 
 fn void lam_shape_set_book(u64 book_loc, Shape const *shape) {
-  lam_shape_set_keyed(book_loc | LAM_SHAPE_BOOK_BIT, shape);
+  lam_shape_set_keyed(lam_shape_ctx_key(book_loc) | LAM_SHAPE_BOOK_BIT, shape);
 }
 fn int lam_shape_lookup_book(u64 book_loc, Shape *out) {
-  return lam_shape_lookup_keyed(book_loc | LAM_SHAPE_BOOK_BIT, out);
+  return lam_shape_lookup_keyed(lam_shape_ctx_key(book_loc) | LAM_SHAPE_BOOK_BIT, out);
 }
 
 // Stats / introspection for tests.

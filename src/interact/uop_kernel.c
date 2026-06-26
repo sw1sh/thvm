@@ -161,8 +161,14 @@ fn int assign_fire_claim(u64 loc) {
 // tinygrad moving an op's operands to the kernel's device before dispatch.
 // Reset on the same lifecycle as the UOP_COPY upload cache
 // (copy_upload_cache_reset sites).
+// src_tid / dst_tid are per-context TenDesc ids (tens_next restarts at 0
+// per context), so an entry keyed in one context must never be returned
+// in another -- the `ctx` field discriminates the current context slot at
+// every match (the FLUX cross-session bug class: a 2nd model context
+// reusing the 1st's uploaded-input tids).  backend_id is the kernel's
+// target backend (load-bearing for a CPU-weight-into-Metal stage).
 #define KIN_UP_CAP (1u << 15)
-static struct { u32 src_tid; u32 backend_id; u32 dst_tid; } KIN_UP[KIN_UP_CAP];
+static struct { u32 src_tid; u32 backend_id; u32 dst_tid; u32 ctx; } KIN_UP[KIN_UP_CAP];
 fn void kernel_input_upload_reset(void) { memset(KIN_UP, 0, sizeof(KIN_UP)); }
 
 // Drop the Metal zero-copy disk-mmap WRAP cached for src_tid (a disk-mmap CPU
@@ -184,7 +190,8 @@ fn void thvm_kernel_input_drop_wrap(u32 src_tid) {
   for (u32 p = 0; p < KIN_UP_CAP; p++) {
     u32 i = (h + p) & (KIN_UP_CAP - 1);
     if (KIN_UP[i].src_tid == 0) return;                    // not cached
-    if (KIN_UP[i].src_tid == src_tid && KIN_UP[i].backend_id == backend_id) {
+    if (KIN_UP[i].src_tid == src_tid && KIN_UP[i].backend_id == backend_id
+        && KIN_UP[i].ctx == thvm_context_current()) {
       u32 dt = KIN_UP[i].dst_tid;
       if (dt != 0 && dt < TENS_NEXT) {
         u32 wbid = TENS[dt].buf_id;
@@ -197,6 +204,7 @@ fn void thvm_kernel_input_drop_wrap(u32 src_tid) {
       // run-of-set chain, so re-pack the run after i: lift any later entry whose
       // home bucket lies at or before i (the standard backward-shift delete).
       KIN_UP[i].src_tid = 0; KIN_UP[i].backend_id = 0; KIN_UP[i].dst_tid = 0;
+      KIN_UP[i].ctx = 0;
       u32 j = i;
       for (u32 q = 1; q < KIN_UP_CAP; q++) {
         u32 k = (i + q) & (KIN_UP_CAP - 1);
@@ -230,7 +238,8 @@ static u32 kernel_input_on_backend(u32 src_tid, Backend *dst_b) {
   for (u32 p = 0; p < KIN_UP_CAP; p++) {
     u32 i = (h + p) & (KIN_UP_CAP - 1);
     if (KIN_UP[i].src_tid == 0) break;
-    if (KIN_UP[i].src_tid == src_tid && KIN_UP[i].backend_id == dst_b->id) {
+    if (KIN_UP[i].src_tid == src_tid && KIN_UP[i].backend_id == dst_b->id
+        && KIN_UP[i].ctx == thvm_context_current()) {
       u32 dt = KIN_UP[i].dst_tid;
       if (dt < TENS_NEXT && TENS[dt].buf_id != 0 && TENS[dt].backend == dst_b
           && (dst_b->buf_refcount == NULL
@@ -297,8 +306,10 @@ static u32 kernel_input_on_backend(u32 src_tid, Backend *dst_b) {
   for (u32 p = 0; p < KIN_UP_CAP; p++) {
     u32 i = (h + p) & (KIN_UP_CAP - 1);
     if (KIN_UP[i].src_tid == 0
-        || (KIN_UP[i].src_tid == src_tid && KIN_UP[i].backend_id == dst_b->id)) {
-      KIN_UP[i].src_tid = src_tid; KIN_UP[i].backend_id = dst_b->id; KIN_UP[i].dst_tid = dst_tid;
+        || (KIN_UP[i].src_tid == src_tid && KIN_UP[i].backend_id == dst_b->id
+            && KIN_UP[i].ctx == thvm_context_current())) {
+      KIN_UP[i].src_tid = src_tid; KIN_UP[i].backend_id = dst_b->id;
+      KIN_UP[i].dst_tid = dst_tid; KIN_UP[i].ctx = thvm_context_current();
       break;
     }
   }
@@ -457,6 +468,33 @@ fn void kernel_fire_by_id(u32 kid) {
       jit_capture_record((u32)(ke - KERNELS),
                          in_buf_ids, ke->n_inputs, out_buf_id);
     }
+    // Trace-capture (THVM_JIT_TRACE_CAPTURE): the op stream is now recorded with
+    // its concrete (kid, in_buf_ids, out_buf_id) -- everything metal_graph_build
+    // needs to encode the ICB.  SKIP the eager GPU submit for this Metal kernel;
+    // jit_capture_end_common runs one ICB replay after finalize to fill the
+    // result buffer.  Collapses the cold step from N standalone submits to one
+    // batched ICB.  Metal-only: CPU/CUDA keep the eager dispatch (the per-op
+    // replay still works there, but the win is the Metal ICB batch).  A nested
+    // benchmark fire (jit_capture_pause) is NOT trace_pending, so autotune's
+    // isolated-scratch bench still dispatches eagerly.
+#ifdef THVM_HAS_METAL
+    if (b == &METAL_BACKEND && jit_capture_trace_pending()) {
+      // Stamp the dispatch ROUTE the eager pass would have recorded, so
+      // jit_capture_finalize reads the correct cg_kernel_dispatch_kind for ICB
+      // eligibility (tile kernels stay ICB-batchable instead of being misread as
+      // DAG-path and tripping metal_graph_unsafe).  Pure: no GPU work.  The
+      // route classifier lives in the Metal TU, so guard the whole branch under
+      // THVM_HAS_METAL -- on a CPU-only build b == &METAL_BACKEND is always
+      // false anyway, so trace-capture is a no-op there (the eager CPU dispatch
+      // runs as before).
+      thvm_metal_kernel_route_classify(ke, in_buf_ids, out_buf_id);
+      ke->fire_assign_seq = ASSIGN_SEQ;
+      ke->fire_pass       = ASSIGN_PASS_EPOCH;
+      ITRS++;
+      multi_emit(RULE_UOP_KERNEL, MULTI_TERM, (u64)kid, 0, 0);
+      return;
+    }
+#endif
     // THVM_DISPATCH_TRACE=1: one line per actual dispatch, with the
     // fire-gen + scope depth + capturing flag.  Used to localize
     // redundant re-dispatch (e.g. a kernel firing N x per step): if the
@@ -510,4 +548,21 @@ fn Term interact_kernel(Term kernel) {
   }
   kernel_fire_by_id(kid);
   return outbuf;
+}
+
+// Export for the separately-compiled Metal TU (backend/metal/_.m, which only
+// sees thvm.h -- the static-inline `fn` first-fire-opt predicates here are not
+// linkable from it).  Applies the SAME first-fire hand-coded-opt decision the
+// dispatch path applies (kernel_should_hand_code_opts -> kernel_hand_coded_-
+// opts, idempotent via the hand_coded_done guard) so a pre-rendered kernel's
+// source -- and therefore its PSO hash -- matches what the fire-path dispatch
+// will look up.  Returns 1 if the kernel is eligible for parallel precompile,
+// 0 if it should be left to the lazy fire-time compile (BEAM/autotune rewrites
+// store_root at fire time AFTER hand_opts, so a pre-rendered hash wouldn't
+// match -- mirrors cpu_jit_precompile_range's autotune skip).
+int thvm_kernel_apply_first_fire_opts(struct KernelEntry *ke) {
+  if (ke == NULL) return 0;
+  if (kernel_should_hand_code_opts(ke)) kernel_hand_coded_opts(ke);
+  if (kernel_should_autotune(ke)) return 0;
+  return 1;
 }

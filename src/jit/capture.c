@@ -165,6 +165,13 @@ typedef struct {
   u32              *graph_input_ids;    // [graph_input_n]; buf_ids (diag only)
   u64              *graph_input_addrs;  // [graph_input_n]; dptrs the cuGraph baked
   u32               graph_input_n;
+  // Trace-capture (THVM_JIT_TRACE_CAPTURE): set when the recording pass skipped
+  // the eager per-kernel GPU dispatch (recorded the op stream only).  The result
+  // buffers are then UNFILLED at finalize -- so jit_capture_end_common runs one
+  // jit_replay (ICB build + batched submit) right after finalize to produce the
+  // FIRST result, collapsing the cold step from N eager submits to the ICB-replay
+  // cost.  Default 0: the eager pass fills the buffers and no extra replay runs.
+  u32               trace_capture_pending;
 } JitCapture;
 
 static JitCapture JIT_CAPTURES[JIT_CAPTURE_NSLOTS];
@@ -176,6 +183,8 @@ static u32 JIT_PAUSE_DEPTH = 0;     // nested suppression for internal
 
 static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots);
 static void jit_capture_autotune_finalized(u32 slot);
+fn u32 jit_replay(u32 slot);
+fn int jit_trace_capture_enabled(void);
 static int jit_bufref_contains(JitCaptureBufRef const *refs, u32 n,
                                Backend *b, u32 buf_id);
 
@@ -372,6 +381,17 @@ fn int jit_is_capturing(void) {
   return JIT_ACTIVE_SLOT != 0 && JIT_PAUSE_DEPTH == 0;
 }
 
+// True iff we are actively recording (jit_is_capturing) AND the active capture
+// armed trace-capture (THVM_JIT_TRACE_CAPTURE).  kernel_fire_by_id reads this to
+// RECORD the op but SKIP the eager GPU dispatch; the one-shot ICB replay in
+// jit_capture_end_common then produces the first result.  Returns 0 when not
+// capturing or when a nested benchmark fire paused the capture (so a paused
+// autotune bench still dispatches eagerly on its isolated scratch).
+fn int jit_capture_trace_pending(void) {
+  if (JIT_ACTIVE_SLOT == 0 || JIT_PAUSE_DEPTH != 0) return 0;
+  return JIT_CAPTURES[JIT_ACTIVE_SLOT].trace_capture_pending != 0;
+}
+
 fn u32 jit_active_capture_slot(void) {
   return JIT_ACTIVE_SLOT;
 }
@@ -411,6 +431,10 @@ fn u32 jit_capture_begin(void) {
       }
       jit_capture_clear_ops(&JIT_CAPTURES[i]);
       JIT_CAPTURES[i].in_use   = 1;
+      // Trace-capture: arm the eager-dispatch skip for THIS capture span only.
+      // Latched at begin so the per-fire query (jit_capture_trace_pending) and
+      // the finalize-time one-shot replay agree, even if the env var read races.
+      JIT_CAPTURES[i].trace_capture_pending = jit_trace_capture_enabled() ? 1u : 0u;
       JIT_ACTIVE_SLOT          = i;
       JIT_PAUSE_DEPTH          = 0;
       // Open the realize-dedup span (gated by THVM_JIT_REALIZE_DEDUP):
@@ -467,6 +491,21 @@ static void jit_capture_end_common(u32 done_slot, const Term *roots,
   if (done_slot != 0) {
     jit_capture_finalize(done_slot, roots, n_roots);
   }
+  // TRACE-CAPTURE one-shot: the recording pass SKIPPED the eager per-kernel GPU
+  // dispatch (kernel_fire_by_id under jit_capture_trace_pending), so the result
+  // buffers are unfilled.  Run ONE jit_replay -- the exact path warm calls take
+  // (ICB build + batched submit when eligible; per-op dispatch otherwise) -- to
+  // produce the FIRST result against the captured input buffers.  No input
+  // substitution: the captured (in_buf_ids, out_buf_id) ARE the first call's
+  // buffers, so a plain jit_replay reproduces what the eager pass would have
+  // computed, bit-identically, but at the ICB-replay cost (the cold-start win).
+  // Disarm after firing so the slot's warm replays don't re-trigger it.
+  if (done_slot != 0
+      && JIT_CAPTURES[done_slot].in_use
+      && JIT_CAPTURES[done_slot].trace_capture_pending) {
+    JIT_CAPTURES[done_slot].trace_capture_pending = 0;
+    jit_replay(done_slot);
+  }
 }
 
 fn void jit_capture_end(void) {
@@ -511,6 +550,36 @@ fn u32 jit_capture_op_count(u32 slot) {
 static int jit_metal_graph_replay_enabled(void) {
   char const *e = getenv("THVM_METAL_GRAPH_REPLAY");
   return e == NULL || e[0] != '0';
+}
+
+// THVM_JIT_TRACE_CAPTURE=1 (default OFF) -- build the replay ICB during/right-
+// after capture and produce the FIRST result via an ICB replay, WITHOUT the
+// eager per-kernel GPU dispatch the recording pass otherwise runs.
+//
+// thvm's capture is execute-and-record: kernel_fire_by_id records each (kid,
+// in_buf_ids, out_buf_id) tuple, then eagerly dispatches it on a standalone
+// command buffer (the slow ~4s-on-FLUX-velocity cold step).  Subsequent calls
+// REPLAY the recorded stream through the batched Metal ICB (~0.6s).  The ICB is
+// built by metal_graph_build purely from the recorded tuple + KERNELS[kid]'s
+// lifted DAG (PSO compiled on demand) + the buffer table -- NONE of which needs
+// the eager submit (the output buffer is allocated at fire time, before
+// dispatch).  So under this gate the recording pass SKIPS the eager dispatch
+// (kernel_fire_by_id, gated on jit_is_capturing()) and jit_capture_end_common
+// runs one jit_replay after finalize to fill the result buffers via the ICB --
+// the same path warm replays take, so the first result is bit-identical to the
+// eager pass but pays only the ICB build + one batched submit.
+//
+// Default ON.  Only the Metal ICB path benefits (CPU/CUDA keep the eager pass,
+// the per-fire skip is Metal-gated in kernel_fire_by_id) and it is
+// eligibility-gated -- ICB-ineligible captures (arena-recycled / non-static /
+// M3 setBarrier) fall back to the eager pass, so default-on is correctness-safe.
+// Default-on (not env-gated-default-off) because WL SetEnvironment (the
+// fxBoundMemory default) does NOT reliably reach this dylib's getenv, so an
+// in-script default-on never fired.  THVM_JIT_TRACE_CAPTURE=0 in the PROCESS env
+// (before launch) disables.  Not memoised (getenv per capture-begin, ~3/gen).
+fn int jit_trace_capture_enabled(void) {
+  char const *e = getenv("THVM_JIT_TRACE_CAPTURE");
+  return (e == NULL || e[0] != '0');
 }
 
 // THVM_JIT_REPLAY_NOSKIP=1 -- disable the liveness-based replay_skip
@@ -1593,17 +1662,31 @@ static int jit_capture_replay_lifetime(JitCapture *c, u32 idx,
   return 1;
 }
 
-static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
-  // The replay memory planner (tinygrad's _internal_memory_planner): reuse a
-  // dead-lifetime temporary buffer for a later op of the same size+backend so
-  // the capture's resident set is bounded to its live working set, not the sum
-  // of every intermediate.  For the FLUX velocity net this collapses ~6.75GB
-  // of 25-block activations to ~one block's worth -- the lever for a <10GB
-  // full-forward.  The reuse makes two ops write one physical buffer; the
-  // per-command [cmd setBarrier] in metal_graph_build orders that WAW so the
-  // batched ICB stays correct (confirmed on M3 by flux_jit_replay.wlt).  The
-  // result buffer is excluded by jit_capture_replay_packable_output.  Runs for
-  // with-result captures too by default; THVM_JIT_PACK_RESULT=0 disables.
+static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root,
+                                                JitCaptureBufRef const *held,
+                                                u32 n_held) {
+  // The replay memory planner (tinygrad's memory_plan_rewrite,
+  // schedule/memory.py): reuse a dead-lifetime temporary buffer for a later op
+  // of the same size+backend so the capture's resident set is bounded to its
+  // live working set, not the sum of every intermediate.  For the FLUX velocity
+  // net this collapses ~6.75GB of 25-block activations to ~one block's worth --
+  // the lever for a <10GB full-forward.  The reuse makes two ops write one
+  // physical buffer; the per-command [cmd setBarrier] in metal_graph_build
+  // orders that WAW so the batched ICB stays correct (confirmed on M3 by
+  // flux_jit_replay.wlt).  Runs for with-result captures too by default;
+  // THVM_JIT_PACK_RESULT=0 disables.
+  //
+  // `held` is the tinygrad memory_plan_rewrite `held_bufs` set (memory.py:13
+  // _can_plan): buffers that must NEVER be recycled -- the capture's result
+  // roots and its declared replay inputs.  A held buffer escapes the capture
+  // (the WL/py caller reads the root after replay; an input is re-substituted
+  // each replay), so packing it away (redirecting its producer to another
+  // slot) or recycling its slot for a later op corrupts the value a downstream
+  // reader -- INCLUDING ops still inside this same capture -- depends on.  The
+  // FLUX VAE decode is a with-result capture whose root-feeding intermediates
+  // were being recycled, so warm replay (gen2+) read a slot a later op had
+  // already overwritten -> NaN image; gen1 is the eager pass and never touches
+  // the packed assignment, so it masked the bug.
   static int pack_result = -1;
   if (pack_result < 0) {
     char const *e = getenv("THVM_JIT_PACK_RESULT");
@@ -1632,6 +1715,13 @@ static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
     Backend *backend = NULL;
     u64 nbytes = 0;
     if (!jit_capture_replay_packable_output(op, &backend, &nbytes)) {
+      continue;
+    }
+    // tinygrad _can_plan (memory.py:13): a held buffer (result root or declared
+    // replay input) is neither recycled nor packed away.  Skipping it as a
+    // VICTIM here keeps it in its own slot (never redirected) AND keeps it out
+    // of `slots[]`, so no later op recycles it as a TARGET either.
+    if (jit_bufref_contains(held, n_held, backend, op->out_buf_id)) {
       continue;
     }
     if (pack_dbg) { dbg_n_packable++; dbg_bytes_packable += nbytes; }
@@ -1718,9 +1808,13 @@ static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
   free(slots);
 }
 #else
-static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
+static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root,
+                                                JitCaptureBufRef const *held,
+                                                u32 n_held) {
   (void)c;
   (void)root;
+  (void)held;
+  (void)n_held;
 }
 #endif
 
@@ -1801,7 +1895,41 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
   }
 
   jit_capture_sink_assigns(c, has_result);
-  jit_capture_pack_replay_temporaries(c, has_result);
+  // Build the tinygrad memory_plan_rewrite `held_bufs` set (memory.py:13): the
+  // capture's result-root buffers plus its declared replay inputs.  These
+  // escape the capture and must never be recycled or packed away by the
+  // planner.  The root bufs are exactly the ones jit_capture_root_needed seeds
+  // BEFORE the reverse-liveness loop pollutes `needed` with intermediates, so
+  // re-derive them cleanly here.
+  JitCaptureBufRef *held = (JitCaptureBufRef *)calloc(
+      JIT_CAPTURE_RETAIN_CAP, sizeof(JitCaptureBufRef));
+  u32 n_held = 0;
+  if (held != NULL) {
+    for (u32 ri = 0; ri < n_roots; ri++) {
+      jit_capture_root_needed(roots[ri], held, &n_held);
+    }
+    if (c->input_buf_ids != NULL) {
+      for (u32 k = 0; k < c->n_inputs_decl; k++) {
+        u32 ib = c->input_buf_ids[k];
+        if (ib == 0) continue;
+        // A declared input's backend is whichever op reads it; record under
+        // every backend a captured op uses it on (cheap -- bufref dedups).
+        for (u32 oi = 0; oi < c->n_ops; oi++) {
+          JitCaptureOp *op = &c->ops[oi];
+          if (op->kind != JIT_OP_DISPATCH) continue;
+          u32 const *ids = op->heap_in_buf_ids != NULL
+                         ? op->heap_in_buf_ids : op->in_buf_ids;
+          for (u32 j = 0; j < op->n_inputs; j++) {
+            if (ids[j] == ib) {
+              jit_bufref_add(held, &n_held, jit_dispatch_input_backend(op, j), ib);
+            }
+          }
+        }
+      }
+    }
+  }
+  jit_capture_pack_replay_temporaries(c, has_result, held, n_held);
+  free(held);
 
   // Dedup pass: if a DISPATCH writes (kid, in_buf_ids, out_buf_id) IDENTICAL
   // to a prior DISPATCH and nothing between them writes to any of the
@@ -2348,6 +2476,16 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   if (n < 2 || consumed < 2) {
     return 0;
   }
+  // Recycled-slot zero-fill (see the per-op DISPATCH path in jit_replay): a
+  // packer-recycled output (replay_packed) that a partial-write kernel only
+  // covers in part must be cleared before the batch fires, or the unwritten
+  // region keeps the prior occupant's stale bytes.  The blit fillBuffer is
+  // hazard-ordered before the ICB's dispatches that write the same slot.
+  for (u32 i = start; i < start + consumed && i < c->n_ops; i++) {
+    JitCaptureOp *po = &c->ops[i];
+    if (po->kind == JIT_OP_DISPATCH && po->replay_packed && !po->replay_skip)
+      thvm_metal_buf_gpu_zero(po->out_buf_id);
+  }
   if (thvm_metal_jit_replay_run(slot, start, recs, n) != 0) {
     return 0;
   }
@@ -2677,6 +2815,23 @@ fn u32 jit_replay(u32 slot) {
         u32 *ids = op->heap_in_buf_ids != NULL
                  ? op->heap_in_buf_ids
                  : op->in_buf_ids;
+        // Recycled-slot zero-fill: a packer-recycled output buffer
+        // (replay_packed -- jit_capture_pack_replay_temporaries reused a
+        // dead-lifetime slot for this op) may be written only partially by a
+        // kernel whose store covers fewer elements than the slot holds (a
+        // windowed/strided store, e.g. the FLUX VAE up-block op).  In the eager
+        // capture pass the output was a FRESH zero buffer, so the unwritten
+        // region read as zeros; on warm replay the recycled slot still holds
+        // the PRIOR occupant's bytes (a different tensor, possibly a different
+        // dtype -- f32 bytes reinterpreted as bf16 are NaN), and a downstream
+        // op that reads the full buffer then sees garbage -> the NaN decoded
+        // image on gen2+.  Zero the slot first (GPU blit fill, hazard-ordered
+        // before this dispatch, no host sync), mirroring
+        // metal_buf_freelist_try_pop's memset-on-pop -- the recycle-zero
+        // invariant the direct packer reuse otherwise skipped.
+        if (op->replay_packed && b->buf_zero != NULL) {
+          b->buf_zero(op->out_buf_id);
+        }
         int rc = b->dispatch_kernel(ke, ids, op->out_buf_id);
         if (trace) fprintf(stderr, "[replay]   dispatch rc=%d\n", rc);
         if (rc == 0) {
