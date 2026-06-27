@@ -6538,6 +6538,19 @@ typedef struct {
   // corpus hit the same cap but keep their capped behaviour byte-identical.
   u8    use_wolf_dup_orphan;
   u32   n_cps_wolf_dup_orphan;  // diagnostics: trace-cap orphan recoveries
+  // WolframAxioms firstdiv-936 redundant self-overlap drop.  A bare-root
+  // self-overlap (i==j==f, combo 0, ovPos=L depth-0, F-phase) of an UNORIENTED
+  // fact whose alpha-renamed content EQUALS an earlier combo=1 partner overlap
+  // of the SAME batch re-derives content the partner already produced.  WM does
+  // not select this self-overlap copy in the traced window (it forms the content
+  // once, via the partner); thvm over-selects it as the firstdiv-936 extra K_A
+  // at pick 936.  The formation site stamps cp_form_phase code 0xfd and the
+  // selection site drops it as a non-counted selection (tag WOLFSELFDUP, skipped
+  // by the aligner).  DEFAULT OFF; turned ON under use_formation_fifo.  Scoped
+  // HARD to the WolframAxioms seed; the combo=1 content-twin gate excludes
+  // band-862 (combo=2 axiom-partner twin), keeping firstdiv 781..930 intact.
+  u8    use_wolf_selfdup_drop;
+  u32   n_cps_wolf_selfdup_drop;  // diagnostics: redundant self-overlap drops
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -7076,6 +7089,10 @@ fn void      thvm_atp_set_use_wolf_selfroot_defer(AtpState *s, u8 on);
 // WolframAxioms trace-cap orphan recovery (see AtpState.use_wolf_dup_orphan).
 // DEFAULT OFF; also turned ON under use_formation_fifo.
 fn void      thvm_atp_set_use_wolf_dup_orphan(AtpState *s, u8 on);
+// WolframAxioms firstdiv-936 redundant self-overlap drop (see
+// AtpState.use_wolf_selfdup_drop).  DEFAULT OFF; also turned ON under
+// use_formation_fifo.
+fn void      thvm_atp_set_use_wolf_selfdup_drop(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

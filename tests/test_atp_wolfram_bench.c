@@ -1192,6 +1192,14 @@ int main(int argc, char **argv) {
       // THVM_ATP_WOLF_DUP_ORPHAN opts in.  Scoped HARD to the WolframAxioms seed.
       thvm_atp_set_use_wolf_dup_orphan(
           s, (getenv("THVM_ATP_WOLF_DUP_ORPHAN") != NULL) ? 1u : 0u);
+      // WolframAxioms firstdiv-936 redundant self-overlap drop (DEFAULT OFF;
+      // also turned ON by FORMATION_FIFO below): a bare-root self-overlap whose
+      // content equals an earlier combo=1 partner of the same batch is a
+      // redundant re-derivation WM does not select in the traced window.  The
+      // formation site stamps cp_form_phase 0xfd; the selection site drops it.
+      // THVM_ATP_WOLF_SELFDUP_DROP opts in.  Scoped HARD to the WolframAxioms seed.
+      thvm_atp_set_use_wolf_selfdup_drop(
+          s, (getenv("THVM_ATP_WOLF_SELFDUP_DROP") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /

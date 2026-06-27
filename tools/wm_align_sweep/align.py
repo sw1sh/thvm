@@ -221,7 +221,8 @@ def parse_thvm(out_path, trace_path):
         if not ln.startswith('CPSEL'):
             continue
         ln = ln.rstrip('\n')
-        if ' ORPHAN' in ln or ' WOLFDEFER' in ln or ' WOLFDUPORPHAN' in ln:
+        if (' ORPHAN' in ln or ' WOLFDEFER' in ln or ' WOLFDUPORPHAN' in ln
+                or ' WOLFSELFDUP' in ln):
             continue
         m = CPSEL_RE.match(ln)
         if m is None:

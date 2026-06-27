@@ -1062,10 +1062,11 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
     s->cp_ultimate = nu;
     for (u32 i = s->cp_cap; i < cap; i++) s->cp_ultimate[i] = 0u;
   }
-  // Lazy-grow cp_form_phase only under the WolframAxioms collapse-defer flag;
+  // Lazy-grow cp_form_phase only under the WolframAxioms collapse-defer or
+  // redundant self-overlap-drop flags (both stamp formation codes into it);
   // NULL (engine byte-identical) otherwise.  Stores each queued CP's
   // atp_wmo_rank formation phase so selection can read it.
-  if (s->use_wolf_collapse_defer) {
+  if (s->use_wolf_collapse_defer || s->use_wolf_selfdup_drop) {
     u8 *np = (u8 *)realloc(s->cp_form_phase, cap * sizeof(u8));
     if (np == NULL) {
       fprintf(stderr, "atp_ensure_cp_cap: realloc cp_form_phase to %u failed\n",
@@ -8347,6 +8348,19 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       s->n_cps_wolf_collapse_defer++;
     }
   }
+  // WolframAxioms firstdiv-936 redundant self-overlap drop (see
+  // use_wolf_selfdup_drop): the formation site stamped cp_form_phase 0xfd on a
+  // bare-root self-overlap that re-derives an earlier combo=1 partner's content
+  // in the same batch.  WM does not select this copy in the traced window; drop
+  // it (no CPSEL, no counted selection) so the partner content already in R/the
+  // queue carries the band and WM's next content surfaces at this slot.
+  u8 wolf_selfdup = 0u;
+  if (!orphan && s->use_wolf_selfdup_drop && s->cp_form_phase != NULL &&
+      s->cp_form_phase[j] == 0xfdu && atp_wolfram_axiom_is_live(s)) {
+    wolf_selfdup = 1u;
+    orphan = 1;
+    s->n_cps_wolf_selfdup_drop++;
+  }
   if (!orphan) s->cp_select_count++;
 
   // Unpack the chosen CP from its byte string into two fresh heap
@@ -8407,6 +8421,11 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
         // Deferred early eTT collapse copy: tagged distinctly from a genuine
         // orphan so the aligner skips it as a non-selection.
         fputs(" WOLFDEFER", stderr);
+      } else if (wolf_selfdup) {
+        // Redundant bare-root self-overlap (use_wolf_selfdup_drop): the content
+        // is already produced by an earlier combo=1 partner of the same batch.
+        // Tagged distinctly so the aligner skips it as a non-selection.
+        fputs(" WOLFSELFDUP", stderr);
       } else if (orphan && s->cp_trace[j] == ATP_TRACE_NONE) {
         // Trace-cap orphan recovery (see use_wolf_dup_orphan): the CP lost its
         // TRACE_CP entry to the proof-trace soft cap, so the parents live in
@@ -9513,6 +9532,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_wolf_collapse_defer = 1u;
     s->use_wolf_selfroot_defer = 1u;
     s->use_wolf_dup_orphan  = 1u;
+    s->use_wolf_selfdup_drop = 1u;
     // Bisection knob (THVM_ATP_CUBE_DETECTORS_OFF=1): drop the post-10030
     // Meredith cube/corank re-key cluster (the L.1/L.2 detectors layered atop
     // the base FormationFifo k3-arrival passes) so the upstream overlap-geometry
@@ -9863,6 +9883,16 @@ fn void thvm_atp_set_use_wolf_selfroot_defer(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_wolf_dup_orphan(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_wolf_dup_orphan = on ? 1u : 0u;
+}
+
+// WolframAxioms firstdiv-936 redundant self-overlap drop (see
+// use_wolf_selfdup_drop): the formation site stamps cp_form_phase 0xfd on a
+// bare-root self-overlap whose content equals an earlier combo=1 partner of the
+// same batch, and the selection site drops it as a non-counted selection.
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_wolf_selfdup_drop(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wolf_selfdup_drop = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -21155,6 +21185,36 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           g_cp_form_phase = 0xfeu;
         else
           g_cp_form_phase = ph;
+        // WolframAxioms firstdiv-936 redundant self-overlap (see
+        // use_wolf_selfdup_drop): a bare-root self-overlap (i==j==f, combo 0,
+        // ovPos=L depth-0, F-phase) of an UNORIENTED fact whose reduced content
+        // (alpha-renamed) EQUALS an earlier combo=1 partner overlap of the same
+        // batch is a redundant re-derivation.  WM forms the content once (via the
+        // partner) and does NOT select this self-overlap copy in the traced
+        // window; thvm over-selects it (the firstdiv-936 extra K_A at pick 936).
+        // Stamp code 0xfd so the selection site drops it as a non-selection.
+        // Scoped HARD to the WolframAxioms seed; the combo=1 content-twin gate
+        // excludes band-862 (where the self-root content matches a combo=2
+        // axiom-partner, not a combo=1 partner) so the 781..930 bands are intact.
+        if (s->use_wolf_selfdup_drop && !s->r_orient[f] &&
+            big[k].i == f && big[k].j == f &&
+            big[k].combo == 0u && big[k].cp.pos_len == 0u && ph == 2u &&
+            atp_wolfram_axiom_is_live(s)) {
+          Term sl = big[k].cp.lhs, sr = big[k].cp.rhs;
+          thvm_normalize_vars(&sl, &sr);
+          for (u32 q = 0; q < n_big; q++) {
+            if (q == k) continue;
+            if (big[q].i != f || big[q].j == f) continue;
+            if (big[q].combo != 1u) continue;
+            Term ql = big[q].cp.lhs, qr = big[q].cp.rhs;
+            thvm_normalize_vars(&ql, &qr);
+            if ((kbo_eq(ql, sl) && kbo_eq(qr, sr)) ||
+                (kbo_eq(ql, sr) && kbo_eq(qr, sl))) {
+              g_cp_form_phase = 0xfdu;
+              break;
+            }
+          }
+        }
       }
       pushed += atp_push_cps_traced(s, &big[k].cp, 1u,
                                     s->r_trace[big[k].i],
