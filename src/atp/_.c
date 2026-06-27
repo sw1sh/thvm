@@ -887,11 +887,18 @@ static u8  g_cpform_pos[CP_MAX_DEPTH];
 // pushed, carried from the batch emission loop to the heap/implicit push so it can
 // be stamped into cp_form_phase.  0xff = unset (non-batch push); the push stamps 0.
 static u8  g_cp_form_phase = 0xffu;
+// WolframAxioms trace-cap orphan recovery (see use_wolf_dup_orphan): the outer
+// parent's birthing trace id of the CP currently being pushed, carried from the
+// CP-push loop to the heap/implicit push so it can be stamped into cp_par_a --
+// orphan provenance that survives the proof-trace soft cap (where cp_trace ==
+// ATP_TRACE_NONE drops the TRACE_CP parents).  ATP_TRACE_NONE = unset.
+static u32 g_cp_par_a = ATP_TRACE_NONE;
 
 static void atp_cpform_geom_clear(void) {
   g_cpform_i = g_cpform_j = g_cpform_itr = g_cpform_jtr = 0xffffffffu;
   g_cpform_combo = g_cpform_i_or = g_cpform_j_or = g_cpform_pos_len = 0xffu;
   g_cp_form_phase = 0xffu;
+  g_cp_par_a = ATP_TRACE_NONE;
 }
 
 // Gated classification-order trace (env THVM_ATP_CP_FORM_TRACE).  Emits
@@ -1067,6 +1074,23 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
     }
     s->cp_form_phase = np;
     for (u32 i = s->cp_cap; i < cap; i++) s->cp_form_phase[i] = 0u;
+  }
+  // Lazy-grow cp_par_a only under the WolframAxioms trace-cap orphan recovery
+  // flag; NULL (engine byte-identical) otherwise.  Stores each queued CP's
+  // outer-parent trace id so the orphan test survives the proof-trace soft cap.
+  // Initialize from 0 on the FIRST allocation (was NULL) so no slot can carry a
+  // garbage trace id into the dead-parent test; subsequent grows only init the
+  // fresh tail.
+  if (s->use_wolf_dup_orphan) {
+    u8 was_null = (s->cp_par_a == NULL);
+    u32 *npa = (u32 *)realloc(s->cp_par_a, cap * sizeof(u32));
+    if (npa == NULL) {
+      fprintf(stderr, "atp_ensure_cp_cap: realloc cp_par_a to %u failed\n", cap);
+      exit(1);
+    }
+    s->cp_par_a = npa;
+    for (u32 i = was_null ? 0u : s->cp_cap; i < cap; i++)
+      s->cp_par_a[i] = ATP_TRACE_NONE;
   }
   for (u32 i = s->cp_cap; i < cap; i++) {
     s->cp_packed[i] = NULL;
@@ -4718,6 +4742,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_pri2);
   free(s->cp_ultimate);
   free(s->cp_form_phase);
+  free(s->cp_par_a);
   free(s->cp_last_norm_r_revision);
   // Deferred-CP (`implicit_pair`) arc commit 1: the descriptor array and
   // the per-slot tag bitset are plain malloc'd blocks (no per-slot owned
@@ -7516,6 +7541,11 @@ static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
     s->cp_form_phase[i] = s->cp_form_phase[j];
     s->cp_form_phase[j] = tf;
   }
+  if (s->cp_par_a != NULL) {
+    u32 ta = s->cp_par_a[i];
+    s->cp_par_a[i] = s->cp_par_a[j];
+    s->cp_par_a[j] = ta;
+  }
   // Deferred-CP descriptor + tag bit travel with the slot: a fresh
   // implicit push sifts up immediately, so missing this swap would
   // desync the descriptor from its slot on the FIRST sift.
@@ -7594,6 +7624,7 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   s->cp_seq[i]   = seq;
   if (s->cp_form_phase != NULL)
     s->cp_form_phase[i] = (g_cp_form_phase == 0xffu) ? 0u : g_cp_form_phase;
+  if (s->cp_par_a != NULL) s->cp_par_a[i] = g_cp_par_a;
   atp_cp_form_trace(seq, cp_nodes, lhs, rhs);
   s->n_cps++;
   atp_cp_sift_up(s, i);
@@ -7861,6 +7892,7 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   s->cp_seq[i]    = s->cp_seq_next++;
   if (s->cp_form_phase != NULL)
     s->cp_form_phase[i] = (g_cp_form_phase == 0xffu) ? 0u : g_cp_form_phase;
+  if (s->cp_par_a != NULL) s->cp_par_a[i] = g_cp_par_a;
   atp_cp_form_trace(s->cp_seq[i], cp_nodes, lhs, rhs);
   // No THVM_ATPFT_CPQ mirror: the FT queue's slot-occupied invariant
   // tracks cp_packed[i], and a deferred slot is exactly the NULL case
@@ -8067,6 +8099,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
       s->cp_last_norm_r_revision[i] = s->cp_last_norm_r_revision[last];
       if (s->cp_ultimate != NULL) s->cp_ultimate[i] = s->cp_ultimate[last];
       if (s->cp_form_phase != NULL) s->cp_form_phase[i] = s->cp_form_phase[last];
+      if (s->cp_par_a != NULL) s->cp_par_a[i] = s->cp_par_a[last];
       atp_cp_implicit_move(s, /*dst=*/i, /*src=*/last);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_move(s, /*dst=*/i, /*src=*/last);
@@ -8274,6 +8307,26 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // away rule, extract+discard it without counting a selection and
   // re-pick.  WM IncAnzKPEntfernt ticks per discard (KPVerwaltung.c:539).
   int orphan = s->use_orphan_murder && atp_cp_is_orphan(s, s->cp_trace[j]);
+  // WolframAxioms trace-cap orphan recovery (see use_wolf_dup_orphan): a CP
+  // formed after the proof-trace soft cap (cp_trace == ATP_TRACE_NONE) lost
+  // its TRACE_CP parent provenance, so atp_cp_is_orphan can never flag it --
+  // thvm then over-selects a re-derived duplicate whose parent rule WM has
+  // interreduced away (the firstdiv-926 `BIG = var` collapse re-derivation,
+  // seq 177652: its parent rule's trace died at pick-911's interreduction but
+  // the CP carries no trace to test).  The cp_par_a side-array stamps the
+  // outer parent's trace id at push INDEPENDENT of the capped heavy trace
+  // buffer, so the orphan test survives the cap.  Scoped HARD to the
+  // WolframAxioms seed under FormationFifo: soa / Meredith / corpus all hit
+  // the same cap but keep their exact capped (provenance-lost) behaviour, so
+  // every other baseline is byte-identical.
+  if (!orphan && s->use_wolf_dup_orphan && s->cp_par_a != NULL
+      && s->cp_trace[j] == ATP_TRACE_NONE
+      && s->cp_par_a[j] != ATP_TRACE_NONE
+      && atp_trace_is_dead(s, s->cp_par_a[j])
+      && atp_wolfram_axiom_is_live(s)) {
+    orphan = 1;
+    s->n_cps_wolf_dup_orphan++;
+  }
   // WolframAxioms early eTT collapse-copy defer (see use_wolf_collapse_defer):
   // the chosen CP is the eTT/B-phase (cp_form_phase 1) copy of a deep collapse
   // `BIG = v` whose tops/A-phase twin is still queued at the same priority.  WM
@@ -8354,6 +8407,15 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
         // Deferred early eTT collapse copy: tagged distinctly from a genuine
         // orphan so the aligner skips it as a non-selection.
         fputs(" WOLFDEFER", stderr);
+      } else if (orphan && s->cp_trace[j] == ATP_TRACE_NONE) {
+        // Trace-cap orphan recovery (see use_wolf_dup_orphan): the CP lost its
+        // TRACE_CP entry to the proof-trace soft cap, so the parents live in
+        // the cp_par_a side-array, not the (absent) trace entry.  Skipped by
+        // the aligner exactly like a genuine orphan (no counted selection).
+        fprintf(stderr, " WOLFDUPORPHAN par_a=%u(%s)",
+                (s->cp_par_a != NULL) ? s->cp_par_a[j] : ATP_TRACE_NONE,
+                (s->cp_par_a != NULL && atp_trace_is_dead(s, s->cp_par_a[j]))
+                    ? "dead" : "live");
       } else if (orphan) {
         Term te = s->trace[s->cp_trace[j]];
         u32 pa = (u32)term_val(term_ctr_at(te, 0));
@@ -8397,6 +8459,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_last_norm_r_revision[j] = s->cp_last_norm_r_revision[last];
     if (s->cp_ultimate != NULL) s->cp_ultimate[j] = s->cp_ultimate[last];
     if (s->cp_form_phase != NULL) s->cp_form_phase[j] = s->cp_form_phase[last];
+    if (s->cp_par_a != NULL) s->cp_par_a[j] = s->cp_par_a[last];
     atp_cp_implicit_move(s, /*dst=*/j, /*src=*/last);
 #ifdef THVM_ATPFT_CPQ
     // Move the (still-owned) FT entry from the last slot into j; zero
@@ -9449,6 +9512,7 @@ fn void thvm_atp_set_use_formation_fifo(AtpState *s, u8 on) {
     s->use_l1cube_joinform  = 1u;
     s->use_wolf_collapse_defer = 1u;
     s->use_wolf_selfroot_defer = 1u;
+    s->use_wolf_dup_orphan  = 1u;
     // Bisection knob (THVM_ATP_CUBE_DETECTORS_OFF=1): drop the post-10030
     // Meredith cube/corank re-key cluster (the L.1/L.2 detectors layered atop
     // the base FormationFifo k3-arrival passes) so the upstream overlap-geometry
@@ -9789,6 +9853,16 @@ fn void thvm_atp_set_use_wolf_collapse_defer(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_wolf_selfroot_defer(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_wolf_selfroot_defer = on ? 1u : 0u;
+}
+
+// WolframAxioms trace-cap orphan recovery (see use_wolf_dup_orphan): stamp the
+// outer parent's trace id into the cp_par_a side-array so a CP formed past the
+// proof-trace soft cap (cp_trace == ATP_TRACE_NONE) can still be orphan-tested
+// against its dead parent at selection -- the firstdiv-926 re-derived-duplicate
+// over-selection.  DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void thvm_atp_set_use_wolf_dup_orphan(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_wolf_dup_orphan = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_wm_trie_faithful(AtpState *s, u8 on) {
@@ -15934,8 +16008,15 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       deferred = atp_cp_implicit_push(s, cp_lhs, cp_rhs,
                                       parent_a, parent_b, t, cp_ult);
     }
+    // Trace-cap orphan recovery (see use_wolf_dup_orphan): stamp the outer
+    // parent's trace id into cp_par_a so the orphan test survives the proof-
+    // trace soft cap (where t == ATP_TRACE_NONE drops the TRACE_CP parents).
+    // Only consulted when cp_trace == NONE, so a deferred CP (which keeps its
+    // real trace) is unaffected; harmless to stamp either way.
+    g_cp_par_a = parent_a;
     if (!deferred) atp_cp_heap_push(s, cp_lhs, cp_rhs, t, cp_ult,
                                     raw_untreated);
+    g_cp_par_a = ATP_TRACE_NONE;
     pushed++;
   }
   return pushed;

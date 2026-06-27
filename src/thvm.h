@@ -4611,6 +4611,15 @@ typedef struct {
   // selection to defer an early eTT-phase deep-collapse copy past its queued
   // tops-phase twin (see use_wolf_collapse_defer).
   u8   *cp_form_phase;
+  // WolframAxioms trace-cap orphan recovery (see use_wolf_dup_orphan): the
+  // outer parent's birthing trace id per queued CP, stamped at push and moved
+  // with the parallel CP arrays.  Lazily allocated ONLY under
+  // use_wolf_dup_orphan (NULL otherwise -> every slot-move site is a
+  // NULL-guarded no-op, engine byte-identical).  Read at selection so a CP
+  // whose heavy TRACE_CP entry was dropped by the proof-trace soft cap
+  // (cp_trace == ATP_TRACE_NONE) can still be orphan-tested against its dead
+  // parent rule -- the firstdiv-926 re-derived-duplicate over-selection.
+  u32  *cp_par_a;
   u8    use_initial_ultimate;
   // Waldmeister `database=ultimate` action (Parameter.c:166 -- the WM
   // default along with initial=ultimate).  Tags CPs derived during
@@ -6516,6 +6525,19 @@ typedef struct {
   // WolframAxioms OrAssociativity firstdiv 862 -> further.
   u8    use_wolf_selfroot_defer;
   u32   n_cps_wolf_selfroot_defer;  // diagnostics: self-root formation re-keys
+  // WolframAxioms trace-cap orphan recovery (see cp_par_a).  At the firstdiv-926
+  // band thvm forms the deep collapse `BIG = var` content twice: once selected
+  // at pick 911 (its parent rule then interreduced away, killing that rule's
+  // trace), once re-derived as a duplicate that pick-911's interreduction should
+  // orphan -- but the re-derivation formed AFTER the proof-trace soft cap, so it
+  // carries no TRACE_CP parents and atp_cp_is_orphan can never flag it.  thvm
+  // then selects the duplicate at pick 926 where WM (no trace cap) orphan-drops
+  // it.  The cp_par_a side-array restores the outer parent's trace id, so the
+  // dead-parent orphan test survives the cap.  DEFAULT OFF; also turned ON under
+  // use_formation_fifo.  Scoped HARD to the WolframAxioms seed: soa / Meredith /
+  // corpus hit the same cap but keep their capped behaviour byte-identical.
+  u8    use_wolf_dup_orphan;
+  u32   n_cps_wolf_dup_orphan;  // diagnostics: trace-cap orphan recoveries
   // WM-faithful discrimination-tree construction (env THVM_ATP_WM_TRIE_FAITHFUL,
   // default OFF; also turned ON under use_formation_fifo).  WM's
   // AltesBlattPolieren (DSBaumOperationen.c :523-526) ALWAYS splices a
@@ -7051,6 +7073,9 @@ fn void      thvm_atp_set_use_wolf_collapse_defer(AtpState *s, u8 on);
 // AtpState.use_wolf_selfroot_defer).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.
 fn void      thvm_atp_set_use_wolf_selfroot_defer(AtpState *s, u8 on);
+// WolframAxioms trace-cap orphan recovery (see AtpState.use_wolf_dup_orphan).
+// DEFAULT OFF; also turned ON under use_formation_fifo.
+fn void      thvm_atp_set_use_wolf_dup_orphan(AtpState *s, u8 on);
 // WM-faithful discrimination-tree construction (see
 // AtpState.use_wm_trie_faithful).  DEFAULT OFF; also turned ON under
 // use_formation_fifo.

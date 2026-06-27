@@ -1184,6 +1184,14 @@ int main(int argc, char **argv) {
       // below).  Scoped HARD to the WolframAxioms seed.
       thvm_atp_set_use_wolf_selfroot_defer(
           s, (getenv("THVM_ATP_WOLF_SELFROOT_DEFER") != NULL) ? 1u : 0u);
+      // WolframAxioms trace-cap orphan recovery (DEFAULT OFF; also turned ON by
+      // FORMATION_FIFO below): stamp the outer parent's trace id into a cp_par_a
+      // side-array so a CP formed past the proof-trace soft cap (cp_trace ==
+      // NONE) can still be orphan-tested against its dead parent rule -- the
+      // firstdiv-926 re-derived `BIG = var` collapse duplicate WM orphan-drops.
+      // THVM_ATP_WOLF_DUP_ORPHAN opts in.  Scoped HARD to the WolframAxioms seed.
+      thvm_atp_set_use_wolf_dup_orphan(
+          s, (getenv("THVM_ATP_WOLF_DUP_ORPHAN") != NULL) ? 1u : 0u);
       // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
       // the faithful WM CP-formation order.  It turns on the four scoped
       // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /
