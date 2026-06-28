@@ -1052,7 +1052,8 @@ cplReconCp[cEq_, mEq_, pos_, varSyms_] := Block[{
 buildCplDataset[enc_, conjPair_, cRes_] := Catch[
     Block[{$RecursionLimit = 100000, $IterationLimit = 1000000},
     Module[{
-        trace, traceRaw, traceOffsets, decodeTraceEntry, mainRules = cRes["MainRules"],
+        trace, traceRaw, traceOffsets, decodeTraceEntry, traceReasons,
+        traceParentAs, orientFviIdx, deathOf, mainRules = cRes["MainRules"],
         rTrace = cRes["RTrace"],
         (* Goal chain: the MNF front chain when the goal was closed by
            the bidirectional MNF search (GREEN side-0 + RED side-1
@@ -1108,6 +1109,20 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
               "Side" -> If[ reason === $TraceNormStep, traceRaw[[c + 6 + posLen + 1]], 0],
               "Fwd"  -> If[ reason === $TraceNormStep, traceRaw[[c + 6 + posLen + 2]], 1]|>];
         trace /: Part[trace, k_Integer] := decodeTraceEntry[k];
+        (* Vectorized reason / parentA columns (packed Part) + a one-pass
+           alive-rule index, so aliveRulesAt[ti] is O(rules) not O(ti) and
+           never forces the per-entry Association decode over the prefix.
+           deathOf[r] = first SIMPLIFY trace index that retired rule r. *)
+        traceReasons = traceRaw[[traceOffsets + 1]];
+        traceParentAs = traceRaw[[traceOffsets + 2]];
+        With[{nTr = Length[traceOffsets]},
+            orientFviIdx = Pick[Range[0, nTr - 1],
+                Unitize[(traceReasons - $TraceOrient) (traceReasons - $TraceFvi)], 0];
+            deathOf = <||>;
+            Scan[
+                With[{pa = traceParentAs[[# + 1]]},
+                    If[ ! KeyExistsQ[deathOf, pa], deathOf[pa] = #]] &,
+                Pick[Range[0, nTr - 1], Unitize[traceReasons - $TraceSimplify], 0]]];
         (* the trace-decoded terms carry bare variable symbols;
            atpEncodeProblem's AxPairs / ConjPair carry Pattern[v, _]
            wrappers -- strip them so every comparison is bare-to-bare
@@ -1152,25 +1167,13 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            rule set -- completion interreduces rules away, so the
            final set may lack a rule the normalization needed.
            Returns {{traceIdx, ruleEq}, ...}. *)
-        (* Scan the trace prefix for alive rules with DIRECT raw reads
-           (reason at offset+1, ParentA at offset+2) rather than the full
-           per-entry Association: aliveRulesAt[ti] touches every entry in
-           [0, ti), so decoding each into an 8-key Association here would
-           force the whole trace and defeat the lazy decode.  Only the few
-           surviving ORIENT/FVI rules get their terms decoded (tL/tR).  The
-           dropped set is an Association for O(1) membership. *)
-        aliveRulesAt[ti_] := Block[{dropped, reasonAt, droppedSet},
-            reasonAt[s_] := traceRaw[[traceOffsets[[s + 1]] + 1]];
-            dropped = Cases[Range[0, ti - 1],
-                s_ /; reasonAt[s] === $TraceSimplify :>
-                    traceRaw[[traceOffsets[[s + 1]] + 2]]];
-            droppedSet = AssociationThread[dropped -> True];
-            Table[
-                {t, {tL[trace[[t + 1]]], tR[trace[[t + 1]]]}},
-                {t, Select[Range[0, ti - 1],
-                    (reasonAt[#] === $TraceOrient || reasonAt[#] === $TraceFvi) &&
-                        ! KeyExistsQ[droppedSet, #] &]}
-            ]
+        (* Alive ORIENT/FVI rules at trace point ti, from the precomputed
+           orientFviIdx + deathOf -- O(rules), no prefix scan.  Terms are
+           decoded (tL/tR) only for the survivors. *)
+        aliveRulesAt[ti_] := Table[
+            {t, {tL[trace[[t + 1]]], tR[trace[[t + 1]]]}},
+            {t, Select[orientFviIdx,
+                # < ti && (! KeyExistsQ[deathOf, #] || deathOf[#] >= ti) &]}
         ];
 
         (* axiom key whose {lhs,rhs} matches eq up to a side swap *)
