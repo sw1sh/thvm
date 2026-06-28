@@ -21423,13 +21423,15 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     if (f_eq)                                                  // F self l=?l
       sw_self_phase(s, f, fl, fr, fl, fr, f_eq, path, &pushed);
     if (two_faced) {
-      sw_self_phase(s, f, fl, fr, fr, fl, f_eq, path, &pushed); // C self l=?r
+      // C self r=?l (combo 2), BEFORE D: after Elter1Andersherum (Unifikation1.c:
+      // 1629) WM's C unifies the swapped l (= the stored reverse face fr) with the
+      // stored lhs fl, i.e. r=?l -- NOT l=?r.  There is no l=?r (combo 1) self-step.
+      sw_self_phase(s, f, fr, fl, fl, fr, f_eq, path, &pushed);
       SwVaterCtx vd = { s, fr, fl, f, s->r_trace[f], f_eq, 1u, 0u };
       cp_walk_positions(fr, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vd, 0u);
       pushed += vd.pushed;                                     // D toplevel(r)
       sw_mutter_phase(s, w, f, fr, fl, f_eq, 1u, path, &pushed); // E subterm(r)
-      sw_self_phase(s, f, fr, fl, fl, fr, f_eq, path, &pushed); // self r=?l (combo 2)
-      sw_self_phase(s, f, fr, fl, fr, fl, f_eq, path, &pushed); // G self r=?r
+      sw_self_phase(s, f, fr, fl, fr, fl, f_eq, path, &pushed); // G self r=?r (combo 3)
     }
     if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
   }
