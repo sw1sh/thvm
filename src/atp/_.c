@@ -21279,7 +21279,7 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term lin, Term rin,
 }
 
 typedef struct {
-  AtpState *s; Term lo, ro; u32 i_out, t_out; u8 o_eq; u32 pushed;
+  AtpState *s; Term lo, ro; u32 i_out, t_out; u8 o_eq, rev_tree; u32 pushed;
 } SwVaterCtx;
 static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
   SwVaterCtx *c = (SwVaterCtx *)raw;
@@ -21288,7 +21288,10 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
   if (sub == 0 || term_tag(sub) == TAG_FVR) return c->pushed;
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   static WmoPartnerHit hits[4096];
-  for (u8 tree = 0u; tree < 2u; tree++) {            // rules then equations
+  // forward face queries rule tree then equation tree; the reverse face (WM D)
+  // queries equations BEFORE rules (Unifikation1.c:1642 vs :1601).
+  for (u8 t = 0u; t < 2u; t++) {
+    u8 tree = c->rev_tree ? (u8)(1u - t) : t;
     u32 nh = wmo_tops_enum(w, tree, sub, hits, 4096u);
     for (u32 h = 0; h < nh; h++) {
       u32 j = sw_trace_to_idx(s, hits[h].trace);
@@ -21320,6 +21323,35 @@ static u32 sw_mutter_visit(const u32 *q, u32 q_len, void *raw) {
   return c->pushed;
 }
 
+// Mutter / proper-subterm phase: plant the new fact's chosen face (f_in_l ->
+// f_in_r) into each old fact's PROPER subterms, partner-major in WM leaf-list
+// order.  rev_tree flips the tree order (forward B: rules then eqns; reverse E:
+// eqns then rules, Unifikation1.c:1654 vs :1613).
+static void sw_mutter_phase(AtpState *s, AtpWmOrder *w, u32 f,
+                            Term f_in_l, Term f_in_r, u8 f_in_eq, u8 rev_tree,
+                            u32 *path, u32 *pushed) {
+  static WmoPartnerHit lhits[8192];
+  for (u8 t = 0u; t < 2u; t++) {
+    u8 tree = rev_tree ? (u8)(1u - t) : t;
+    u32 nh = wmo_leaflist_enum(w, tree, lhits, 8192u);
+    for (u32 h = 0; h < nh; h++) {
+      u32 j = sw_trace_to_idx(s, lhits[h].trace);
+      if (j == 0xffffffffu || j == f) continue;        // self handled in Vater
+      u8 jdr = wmo_trace_dist_rhs(w, lhits[h].trace);
+      u8 tf  = (u8)(lhits[h].face ^ jdr);
+      Term lo = tf ? s->rhs[j] : s->lhs[j];
+      Term ro = tf ? s->lhs[j] : s->rhs[j];
+      u8 o_eq = s->use_unfailing_cp && !s->r_orient[j];
+      Term lin = thvm_rename_vars(f_in_l, CP_RENAME_OFFSET);
+      Term rin = thvm_rename_vars(f_in_r, CP_RENAME_OFFSET);
+      SwMutterCtx mc = { s, lo, ro, lin, rin, lhits[h].trace, s->r_trace[f],
+                         j, f, o_eq, f_in_eq, 0u };
+      cp_walk_positions(lo, path, 0u, CP_MAX_DEPTH, sw_mutter_visit, &mc, 0u);
+      *pushed += mc.pushed;
+    }
+  }
+}
+
 static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
   u32 first = added.first, last = added.first + added.count, n = s->n_rules;
   if (last > n) last = n;
@@ -21330,34 +21362,21 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
   u32 pushed = 0u;
   for (u32 f = first; f < last; f++) {
     u8 f_eq = s->use_unfailing_cp && !s->r_orient[f];
-    // Vater / toplevel (position-major over f's forward face)
-    SwVaterCtx vc = { s, s->lhs[f], s->rhs[f], f, s->r_trace[f], f_eq, 0u };
-    cp_walk_positions(s->lhs[f], path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vc, 0u);
-    pushed += vc.pushed;
-    if (f_eq) {                                       // reverse face (equation)
-      SwVaterCtx vr = { s, s->rhs[f], s->lhs[f], f, s->r_trace[f], f_eq, 0u };
-      cp_walk_positions(s->rhs[f], path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vr, 0u);
-      pushed += vr.pushed;
-    }
-    // Mutter / proper-subterm (partner-major: f's LHS into old facts)
-    static WmoPartnerHit lhits[8192];
-    for (u8 tree = 0u; tree < 2u; tree++) {
-      u32 nh = wmo_leaflist_enum(w, tree, lhits, 8192u);
-      for (u32 h = 0; h < nh; h++) {
-        u32 j = sw_trace_to_idx(s, lhits[h].trace);
-        if (j == 0xffffffffu || j == f) continue;     // self handled in Vater
-        u8 jdr = wmo_trace_dist_rhs(w, lhits[h].trace);
-        u8 tf  = (u8)(lhits[h].face ^ jdr);
-        Term lo = tf ? s->rhs[j] : s->lhs[j];
-        Term ro = tf ? s->lhs[j] : s->rhs[j];
-        u8 o_eq = s->use_unfailing_cp && !s->r_orient[j];
-        Term lin = thvm_rename_vars(s->lhs[f], CP_RENAME_OFFSET);
-        Term rin = thvm_rename_vars(s->rhs[f], CP_RENAME_OFFSET);
-        SwMutterCtx mc = { s, lo, ro, lin, rin, lhits[h].trace, s->r_trace[f],
-                           j, f, o_eq, f_eq, 0u };
-        cp_walk_positions(lo, path, 0u, CP_MAX_DEPTH, sw_mutter_visit, &mc, 0u);
-        pushed += mc.pushed;
-      }
+    // A two-faced (non-mono) equation re-runs the toplevel+subterm sweeps on its
+    // reverse face; a mono-equation (alpha-equivalent faces) and a rule do not
+    // (WM TP_IstKeineMonogleichung, Unifikation1.c:1630).
+    u8 two_faced = f_eq && !atp_eq_is_mono(s, f);
+    // WM U1 per-fact order: A toplevel(l), B subterm(l), [F self via the trie],
+    // then for a two-faced equation D toplevel(r), E subterm(r), [C/G self].
+    SwVaterCtx va = { s, s->lhs[f], s->rhs[f], f, s->r_trace[f], f_eq, 0u, 0u };
+    cp_walk_positions(s->lhs[f], path, 0u, CP_MAX_DEPTH, sw_vater_visit, &va, 0u);
+    pushed += va.pushed;                                       // A
+    sw_mutter_phase(s, w, f, s->lhs[f], s->rhs[f], f_eq, 0u, path, &pushed); // B
+    if (two_faced) {
+      SwVaterCtx vd = { s, s->rhs[f], s->lhs[f], f, s->r_trace[f], f_eq, 1u, 0u };
+      cp_walk_positions(s->rhs[f], path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vd, 0u);
+      pushed += vd.pushed;                                     // D
+      sw_mutter_phase(s, w, f, s->rhs[f], s->lhs[f], f_eq, 1u, path, &pushed); // E
     }
     if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
   }
