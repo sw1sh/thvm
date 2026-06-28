@@ -21420,18 +21420,23 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     cp_walk_positions(fl, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &va, 0u);
     pushed += va.pushed;                                       // A toplevel(l)
     sw_mutter_phase(s, w, f, fl, fr, f_eq, 0u, path, &pushed); // B subterm(l)
-    if (f_eq)                                                  // F self l=?l
-      sw_self_phase(s, f, fl, fr, fl, fr, f_eq, path, &pushed);
+    // The self-overlap steps F/C/G (WM Term1MitTerm2Unifizieren on the Elter1 copy)
+    // use the STORED faces sl/sr directly -- NOT the dist_rhs-adjusted fl/fr (which
+    // are only for the discrimination-tree partner sweeps A/B/D/E).  Using fl/fr here
+    // walked the wrong face for a dist_rhs==1 fact and missed the combo2 (r=?l) self
+    // at deep positions (the Absorption pos-L.2 self).
+    Term sl = s->lhs[f], sr = s->rhs[f];
+    if (f_eq)                                                  // F self l=?l (combo0)
+      sw_self_phase(s, f, sl, sr, sl, sr, f_eq, path, &pushed);
     if (two_faced) {
-      // C self r=?l (combo 2), BEFORE D: after Elter1Andersherum (Unifikation1.c:
-      // 1629) WM's C unifies the swapped l (= the stored reverse face fr) with the
-      // stored lhs fl, i.e. r=?l -- NOT l=?r.  There is no l=?r (combo 1) self-step.
-      sw_self_phase(s, f, fr, fl, fl, fr, f_eq, path, &pushed);
+      // C self r=?l (combo2), BEFORE D (Unifikation1.c:1629-1633, after the l<->r
+      // swap): the stored rhs overlapped by the stored lhs.  No l=?r (combo1) step.
+      sw_self_phase(s, f, sr, sl, sl, sr, f_eq, path, &pushed);
       SwVaterCtx vd = { s, fr, fl, f, s->r_trace[f], f_eq, 1u, 0u };
       cp_walk_positions(fr, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vd, 0u);
       pushed += vd.pushed;                                     // D toplevel(r)
       sw_mutter_phase(s, w, f, fr, fl, f_eq, 1u, path, &pushed); // E subterm(r)
-      sw_self_phase(s, f, fr, fl, fr, fl, f_eq, path, &pushed); // G self r=?r (combo 3)
+      sw_self_phase(s, f, sr, sl, sr, sl, f_eq, path, &pushed); // G self r=?r (combo3)
     }
     if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
   }
