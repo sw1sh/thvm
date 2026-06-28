@@ -21265,6 +21265,13 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term lin, Term rin,
                         u32 i_out, u32 i_in, u8 o_eq, u8 in_eq) {
   Term sub = cp_subterm_at(lo, p, p_len);
   if (sub == 0 || term_tag(sub) == TAG_FVR) return 0u;
+  // Head-symbol pre-filter: two constructors with different head symbols can
+  // never unify (thvm_unify returns 0 at its TAG_CTR `term_ext(s)!=term_ext(t)`
+  // check).  Skipping here is behaviour-identical -- only true-fail pairs are
+  // rejected -- and avoids the 512-byte RewriteSubst zero-init, two unify_walks
+  // and the kbo_eq descent for the majority of subterms that can't match.
+  if (term_tag(sub) == TAG_CTR && term_tag(lin) == TAG_CTR &&
+      term_ext(sub) != term_ext(lin)) return 0u;
   RewriteSubst subst = {{0}};
   if (!thvm_unify(sub, lin, &subst)) return 0u;
   CriticalPair cp;
