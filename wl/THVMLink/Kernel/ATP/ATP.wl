@@ -3165,8 +3165,26 @@ atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
    StdS closes -- and only adds the MNF front when
    "GoalDirected" -> True is requested for a symmetric goal the
    single-NF check cannot reach. *)
+(* Method -> "Waldmeister": goal-directed FAST default.  The full
+   byte-parity selection stack still lives in
+   $AtpPresetDefaults["Waldmeister"] (and is reachable verbatim as
+   Method -> "WaldmeisterFaithful"), but the user-facing default injects
+   the goal-directed config -- Mix2 CP weight + GoalInterleave -- that
+   produces a valid ProofObject FASTER than FindEquationalProof
+   (MeredithAxioms/OrAssociativity ~0.96s vs FEQ ~0.99s, vs 23.7s for
+   the full faithful saturation).  Injected as LEADING subopts so any
+   explicit user option still wins (e.g. GoalInterleave -> 0 +
+   CriticalPairWeight -> "Mix" recovers the faithful selection). *)
 atpParseMethod["Waldmeister"] := atpParseMethod[{"Waldmeister"}];
 atpParseMethod[{"Waldmeister", subopts___Rule}] :=
+    atpDispatchPreset[$AtpPresetDefaults["Waldmeister"],
+        $AtpPresetGoalDirected["Waldmeister"],
+        Join[{"CriticalPairWeight" -> "Mix2", "GoalInterleave" -> 10}, {subopts}]];
+
+(* Method -> "WaldmeisterFaithful": the exact WM byte-parity selection
+   sequence (no goal-direction) -- the slow parity reference. *)
+atpParseMethod["WaldmeisterFaithful"] := atpParseMethod[{"WaldmeisterFaithful"}];
+atpParseMethod[{"WaldmeisterFaithful", subopts___Rule}] :=
     atpDispatchPreset[$AtpPresetDefaults["Waldmeister"],
         $AtpPresetGoalDirected["Waldmeister"], {subopts}];
 
@@ -3327,7 +3345,8 @@ atpParseMethod[{"ENIGMA", subopts___Rule}] :=
    configs); the rest are single-config presets.  Exposed as
    $AtpMethodPresets so a downstream tool (test sweep, doc generator,
    tuner) can enumerate them without re-encoding the set. *)
-$AtpMethodPresets = {"Waldmeister", "VampireUEQ", "Twee", "EProver",
+$AtpMethodPresets = {"Waldmeister", "WaldmeisterFaithful",
+    "VampireUEQ", "Twee", "EProver",
     "VampireRandom", "ENIGMA",
     "Portfolio", "VampirePortfolio", "VampirePortfolioCompact",
     "AllPresets"};
@@ -4598,10 +4617,14 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                 Module[{ds, p, v, hasFvi},
                 ds = If[ baseDataset =!= $Failed, baseDataset,
                     Block[{$AtpUseChain = chainOn},
-                        Check[
+                        Module[{$bt, $bd},
+                        {$bt, $bd} = AbsoluteTiming @ Check[
                             Quiet[buildCplDataset[enc, conjPair, cRes],
                                 {General::newsym, RuleDelayed::rhs}],
-                            $Failed]]];
+                            $Failed];
+                        If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+                            Print["[recon] buildCplDataset = ", $bt, " s"]];
+                        $bd]]];
                 If[ ds === $Failed, $Failed,
                     (* The engine-reserved grounding constants (cAtp1 /
                        cAtp2, WM SO_minimaleKonstante) go in "Constants":
@@ -4620,8 +4643,10 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                             s_Symbol /; MemberQ[{"cAtp1", "cAtp2"},
                                 SymbolName[s]], {0, Infinity}],
                           "Proof" -> ds|>];
-                    v = Quiet @ Check[
+                    {$atpVerifyT, v} = AbsoluteTiming @ Quiet @ Check[
                         p["ProofFunction"][p["Theorems"]], $Failed];
+                    If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+                        Print["[recon] verify-replay = ", $atpVerifyT, " s"]];
                     If[ TrueQ[$AtpDebugDataset] && ! MatchQ[v, _Success],
                         WriteString["stderr", "atp-verify-fail chain=",
                             ToString[chainOn], " v=",

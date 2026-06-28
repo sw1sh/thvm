@@ -1152,14 +1152,24 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            rule set -- completion interreduces rules away, so the
            final set may lack a rule the normalization needed.
            Returns {{traceIdx, ruleEq}, ...}. *)
-        aliveRulesAt[ti_] := Block[{dropped},
+        (* Scan the trace prefix for alive rules with DIRECT raw reads
+           (reason at offset+1, ParentA at offset+2) rather than the full
+           per-entry Association: aliveRulesAt[ti] touches every entry in
+           [0, ti), so decoding each into an 8-key Association here would
+           force the whole trace and defeat the lazy decode.  Only the few
+           surviving ORIENT/FVI rules get their terms decoded (tL/tR).  The
+           dropped set is an Association for O(1) membership. *)
+        aliveRulesAt[ti_] := Block[{dropped, reasonAt, droppedSet},
+            reasonAt[s_] := traceRaw[[traceOffsets[[s + 1]] + 1]];
             dropped = Cases[Range[0, ti - 1],
-                s_ /; trace[[s + 1]]["Reason"] === $TraceSimplify :>
-                    trace[[s + 1]]["ParentA"]];
+                s_ /; reasonAt[s] === $TraceSimplify :>
+                    traceRaw[[traceOffsets[[s + 1]] + 2]]];
+            droppedSet = AssociationThread[dropped -> True];
             Table[
                 {t, {tL[trace[[t + 1]]], tR[trace[[t + 1]]]}},
                 {t, Select[Range[0, ti - 1],
-                    (trace[[# + 1]]["Reason"] === $TraceOrient || trace[[# + 1]]["Reason"] === $TraceFvi) && ! MemberQ[dropped, #] &]}
+                    (reasonAt[#] === $TraceOrient || reasonAt[#] === $TraceFvi) &&
+                        ! KeyExistsQ[droppedSet, #] &]}
             ]
         ];
 
