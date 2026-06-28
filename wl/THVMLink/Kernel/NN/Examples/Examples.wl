@@ -37,16 +37,19 @@ If[ Environment["THVM_MAX_LIVE_BYTES"]   === $Failed, SetEnvironment["THVM_MAX_L
 
 Needs["WolframInstitute`THVMLink`"];
 
-(* Load every model package (FLUX/*.wl, and any future model subdirectory) into
-   the shared Examples`Private` context.  Definition order is irrelevant -- every
-   definition is SetDelayed and each file self-registers the context via its own
-   BeginPackage -- so a plain recursive Get over the subdirectories suffices. *)
+(* Load every model package (FLUX/*.wl, Krea/*.wl, and any future model
+   subdirectory) into the shared Examples`Private` context.  The generic pipeline
+   framework (Pipeline.wl) loads FIRST: a model file references the framework's
+   PUBLIC symbols (tisModelSpec / tisPipeline / tisRegisterComponent), and a bare
+   reference resolves to a Private stub if the public symbol does not exist yet at
+   the model file's parse time.  After Pipeline.wl the rest load in path order --
+   every definition is SetDelayed and each file self-registers its context via its
+   own BeginPackage, so among the model files order is irrelevant. *)
 With[{base = DirectoryName[$InputFileName]},
-    Scan[
-        Get,
-        Sort @ Select[
-            FileNames["*.wl", base, Infinity],
-            FileBaseName[#] =!= "Examples" &
-        ]
+    Module[{all, framework},
+        all = Select[FileNames["*.wl", base, Infinity], FileBaseName[#] =!= "Examples" &];
+        framework = Select[all, FileBaseName[#] === "Pipeline" &];
+        Scan[Get, framework];
+        Scan[Get, Sort @ Complement[all, framework]]
     ]
 ]

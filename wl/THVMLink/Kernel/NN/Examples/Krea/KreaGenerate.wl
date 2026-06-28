@@ -146,11 +146,14 @@ krRegisterVae[] := tisRegisterComponent["AutoencoderKLQwenImage", <|
         ]]
 |>]
 
-(* Qwen3 text encoder (Qwen3VLModel / Qwen3 language tower): tap the hidden states
-   after the Krea select-layers and STACK them per token to {Stxt, L, txtDim}
-   (diffusers Krea2 text_encoder_select_layers).  The thvm Qwen3 encoder
-   (qwenForward) captures the per-layer states; here the loader builds the weight
-   lookup + rotary, the forward returns the stacked tapped states. *)
+(* Qwen3-VL text encoder (Qwen3VLModel language tower): run the 36 decoder
+   layers, tap the Krea select-layers, and STACK them per token to {Stxt, L,
+   txtDim} (diffusers Krea2 text_encoder_select_layers).  The loader builds the
+   weight lookup + the encoder config (layer count / dims from the spec's
+   text_config, the actDType + weightPrefix for the device), the forward runs
+   krQwenEncodeStack (KreaEncoder.wl).  For text-to-image only the language tower
+   is used; the mrope collapses to plain rope (no image tokens), so the Qwen3
+   half-split rope is exact (see KreaEncoder.wl). *)
 krRegisterEncoder[] := (
     tisRegisterComponent["Qwen3VLModel", krQwenEncoderImpl[]];
     tisRegisterComponent["Qwen3Model", krQwenEncoderImpl[]]
@@ -158,10 +161,51 @@ krRegisterEncoder[] := (
 
 krQwenEncoderImpl[] := <|
     "loader" -> Function[{compSpec, dev},
-        <|"dir" -> compSpec["dir"], "dev" -> dev, "cfg" -> krQwenConfig[compSpec]|>],
+        <|"wf" -> krQwenLoader[TSafeTensorLoad[krEncWeightPath[compSpec]], dev],
+          "cfg" -> krEncConfig[compSpec, dev]|>],
     "forward" -> Function[{built, ids, attMask},
-        krQwenEncodeStacked[built, ids, attMask]]
+        krQwenEncodeStack[ids, attMask, built["wf"], built["cfg"]]]
 |>
+
+(* a name->TTerm encoder loader: the embed table stays HOST-resident (qwEmbed
+   host-gathers its rows), everything else uploads to the device cast to the
+   working dtype, cached per name. *)
+krQwenLoader[qwt_, dev_] := Module[{cache = <||>, embedKey},
+    embedKey = First[Select[Keys[qwt], StringEndsQ[#, "embed_tokens.weight"] &], "embed_tokens.weight"];
+    n |-> Lookup[cache, n, cache[n] =
+        If[ StringEndsQ[n, "embed_tokens.weight"], qwt[n],
+            TToDevice[TUOpCast[qwt[n], If[dev === "cpu", "f32", "bf16"]], dev]]]
+]
+
+(* encoder config from the spec's text_config (Qwen3-VL-4B) + the device dtype +
+   the language-tower weight prefix.  A tiny-validation override comes via
+   compSpec["thvmConfig"]. *)
+krEncConfig[compSpec_, dev_] := Module[{tc, base},
+    If[ KeyExistsQ[compSpec, "thvmConfig"], Return[compSpec["thvmConfig"]]];
+    tc = Lookup[Lookup[compSpec, "config", <||>], "text_config", <||>];
+    base = krQwenTextConfig[<|
+        "layers" -> Lookup[tc, "num_hidden_layers", 36],
+        "heads" -> Lookup[tc, "num_attention_heads", 32],
+        "kv_heads" -> Lookup[tc, "num_key_value_heads", 8],
+        "head_dim" -> Lookup[tc, "head_dim", 128],
+        "hidden" -> Lookup[tc, "hidden_size", 2560],
+        "intermediate" -> Lookup[tc, "intermediate_size", 9728],
+        "eps" -> Lookup[tc, "rms_norm_eps", 1.*^-6],
+        "theta" -> N @ Lookup[Lookup[tc, "rope_parameters", <||>], "rope_theta", 5000000],
+        "txtLayers" -> $kreaConfig["txtLayers"],
+        "weightPrefix" -> krEncWeightPrefix[compSpec],
+        "actDType" -> If[dev === "cpu", "f32", "bf16"]
+    |>];
+    base
+]
+
+(* the language-tower weight prefix inside the text_encoder safetensors: the
+   standalone Qwen3VLTextModel stores layers.* / embed_tokens.weight; inside the
+   full Qwen3VLModel the tower is under model.language_model.* (the loader probes
+   the actual keys, falling back to "").  Overridable via compSpec["weightPrefix"]. *)
+krEncWeightPrefix[compSpec_] := Lookup[compSpec, "weightPrefix", ""]
+
+krEncWeightPath[compSpec_] := Lookup[compSpec, "weightPath", FileNameJoin[{compSpec["dir"], "model.safetensors"}]]
 
 (* register all Krea components.  Done lazily (krEnsureRegistered, run once on the
    first spec/pipeline call) NOT at load time: the Examples loader Gets the model
@@ -188,8 +232,6 @@ krMergeConfig[compSpec_] := Lookup[compSpec, "thvmConfig", $kreaConfig]
 krMergeVaeConfig[compSpec_] := Lookup[compSpec, "thvmConfig", $kreaVaeConfig]
 krPatch[cfg_] := Lookup[cfg, "patch", 2]
 
-krQwenConfig[compSpec_] := Lookup[compSpec, "thvmConfig", <||>]
-
 (* wsub[prefix]: the sub-Association of (key-with-prefix-stripped -> loaded TTerm)
    for every weight under prefix (reused from the FLUX VAE idiom). *)
 krVaeSub[wf_, keys_][prefix_] := Association @ Map[
@@ -206,20 +248,6 @@ krUnpatchify[zPacked_, gridH_, gridW_, zDim_, patch_] := TUOpReshape[
         {2, 0, 3, 1, 4}],
     {zDim, gridH patch, gridW patch}]
 
-(* === Qwen3 stacked-tap encoder ===================================
-   Run the thvm Qwen3 encoder layers and STACK the tapped hidden states per token
-   to {Stxt, L, txtDim}.  Reuses qwenInputs (host-prep of x/mask/rope) + qwLayer
-   (one decoder layer) from QwenEncoder.wl, capturing the selected layers.  For
-   the tiny CPU validation the caller supplies the stacked states directly; the
-   full GPU path uses the Qwen3-4B / Qwen3-VL language tower (see the report's
-   Qwen3-VL note). *)
-KreaGenerate::wip = "The Krea-2 Qwen3-VL stacked-tap text encoder is wired for the GPU full-weight path; on CPU pass a precomputed stacked text embedding via the spec for tiny-config validation.";
-
-krQwenEncodeStacked[built_, ids_, attMask_] := If[
-    KeyExistsQ[built, "stackedStates"],
-    built["stackedStates"],
-    (Message[KreaGenerate::wip]; $Failed)
-]
 
 (* === spec ========================================================= *)
 

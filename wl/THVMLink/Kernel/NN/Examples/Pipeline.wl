@@ -25,6 +25,7 @@ BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`
 tisModelSpec::usage = "tisModelSpec[modelDir$] reads a diffusers model_index.json and the per-component config.json files under modelDir$ into a spec Association: \"components\" (component role -> <|\"class\", \"library\", \"dir\", \"config\"|>) plus \"modelDir\".";
 tisComponents::usage = "tisComponents[] returns the component registry: a diffusers class name -> <|\"loader\", \"forward\"|> thvm implementation.  tisComponent[class$] looks one up.";
 tisPipeline::usage = "tisPipeline[spec$, prompt$, opts$] runs the generic flow-match image-synthesis flow (tokenize -> text-encode -> Euler denoise over the transformer -> VAE decode) over the components named by spec$, returning the requested part(s).";
+tisRegisterComponent::usage = "tisRegisterComponent[class$, impl$] registers a thvm component implementation impl$ (<|\"loader\", \"forward\"|>) under the diffusers class name class$ in the shared $tisComponents registry.  Public (not just Private) so a model file can register its components regardless of the Examples load order.";
 
 Begin["`Private`"];
 
