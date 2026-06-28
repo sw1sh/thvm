@@ -381,6 +381,27 @@ static int ru_subtree_uses_axis(Term t, u32 aid, u32 depth) {
   return 0;
 }
 
+// Find the extent of the UOP_RANGE leaf with axis_id == aid anywhere in
+// subtree `t`, or 0 if absent.  Mirror of ru_subtree_uses_axis but returns
+// the extent.  Used by the THVM_FUSE_MATMUL_INPUT rank-grow remap to match a
+// leaked producer range to the matmul axis (M / K) of equal extent.
+static u32 ru_subtree_axis_extent(Term t, u32 aid, u32 depth) {
+  if (depth > 64) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  u8 op = term_ext(r);
+  if (op == UOP_RANGE)
+    return (uop_range_axis_id(r) == aid) ? uop_range_extent(r) : 0;
+  if (op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(r);
+  for (u8 i = 0; i < ar; i++) {
+    u32 e = ru_subtree_axis_extent(heap_read(loc + i), aid, depth + 1);
+    if (e != 0) return e;
+  }
+  return 0;
+}
+
 // Build f32 CONST term with given value.
 static u32 ru_f32_bits(f32 v) {
   u32 b;
@@ -1166,9 +1187,16 @@ static int rb_matmul_input_fusable(u32 node_idx) {
     u32 ci = cidxs[0];
     u8 cop = BUFFERIZE_NODES[ci].op;
     if (cop == UOP_REDUCE) {
-      // Terminal: fusable iff it is the matmul reduce (the only reduce thvm's
+      // Terminal: fusable iff it is a 2-D matmul reduce (the only reduce thvm's
       // codegen can inline an elementwise A operand into via the TC A-staging).
-      return (BUFFERIZE_NODES[ci].reasons & BUFFERIZE_REASON_MATMUL) ? 1 : 0;
+      // A BATCHED matmul (the attention scores / context, output {heads, S, S})
+      // is excluded: the rank-grow range remap that keeps the inlined reduce
+      // 1-axis (the THVM_FUSE_MATMUL_INPUT exact-substitute port below) is a 2-D
+      // {M,N}-output remap; a batched output's extra batch axis would mis-bind,
+      // so keep the batched producer (the q*scale pre-scale) realized -- correct,
+      // its own kernel.  out_ndim == 2 is the plain {M,N} projection shape.
+      if (!(BUFFERIZE_NODES[ci].reasons & BUFFERIZE_REASON_MATMUL)) return 0;
+      return (RU_RANGE_MAP[ci].out_ndim == 2) ? 1 : 0;
     }
     // Only chain through non-realized movement/elementwise hops.  A realized
     // intermediate would itself materialize -> stop (no clean inline).
@@ -1760,6 +1788,22 @@ fn void run_rangeify_unified_impl(Term root) {
       // THVM_FUSE_MATMUL_INPUT: a single-consumer elementwise feeding ONE matmul
       // reduce is fused INTO that matmul (the TC A-staging computes it inline),
       // so we DON'T keep it realized.  Otherwise the GEMM-operand rule holds.
+      // THVM_FUSE_MATMUL_INPUT: a single-consumer elementwise producer feeding
+      // ONE matmul reduce is un-realized and spliced into the matmul's A operand.
+      // The matmul lowering wraps A in RESHAPE({M,K,1})+EXPAND({M,K,N}) -- a
+      // rank-growing movement.  thvm's POSITIONAL ru_build_axis_subst does not
+      // compose its producer->consumer remap up that RESHAPE->EXPAND->MUL->REDUCE
+      // chain, so the producer's own {M,K} RANGE leaves leak into the reduce body
+      // as free LOOP axes -- which the conv-bwd absorb then folds into the reduce
+      // (1-axis K -> 3-axis {M,K,N}, recognise_tc declines, the matmul mis-sums).
+      // The reduce-rebuild below ports tinygrad's exact src.substitute for THIS
+      // rank-grow case: it remaps each leaked producer LOOP range onto the matmul
+      // axis (the reduce K range, or an output M range) of equal extent, keeping
+      // the reduce 1-axis so the TC tiled emitter handles the fused A -- bit-exact
+      // (the producer is evaluated at exactly the (m,k) the matmul iterates).
+      // rb_matmul_input_fusable already guarantees the consumer chain terminates
+      // at a matmul REDUCE (the only shape the remap targets), so the un-realize
+      // is safe.  Default-OFF flag, so the baseline is unaffected.
       int fuse_mm = (ru_fuse_matmul_input_on() && ru_fuse_matmul_input_target_ok()
                      && rb_feeds_matmul_reduce(i)
                      && rb_matmul_input_fusable(i));
@@ -2862,6 +2906,124 @@ fn void pm_apply_rangeify(Term root) {
       // 2+ widened axes) previously fell through and computed 0.
       rewritten = ru_reduce_repair_broadcast_body(
           rewritten, RU_REDUCE_RANGES[i].ranges, n_rrng);
+      // THVM_FUSE_MATMUL_INPUT rank-grow remap (the EXACT-substitute port):
+      // a fused elementwise A producer (THVM_FUSE_MATMUL_INPUT) is spliced into
+      // the matmul's A operand through the matmul-lowering RESHAPE({M,K,1})+
+      // EXPAND({M,K,N}).  thvm's positional ru_build_axis_subst remaps the
+      // producer's ranges at the RESHAPE edge, but that map does NOT compose up
+      // the RESHAPE->EXPAND->MUL->REDUCE chain (each upper splice carries an
+      // empty map), so the producer's OWN {M,K} RANGE leaves survive in the
+      // reduce body as free LOOP axes whose aids differ from the matmul's M (an
+      // output axis) and K (the reduce axis).  Left alone, the conv-bwd absorb
+      // below folds them into the reduce (1-axis K -> 3-axis {M,K,N}) and the
+      // matmul mis-sums over the producer's M -> a wrong result (and on a block
+      // an O(M*N*M*K) nest that hangs).  tinygrad avoids this because its
+      // s.substitute(zip(orig_ranges,end_ranges)) maps by EXACT range identity
+      // through every movement op (rangeify.py:294 / indexing.py:78); thvm's
+      // positional map cannot.  Port it for the rank-grow matmul case: remap
+      // each leaked producer LOOP range (a free aid that is neither an output
+      // axis nor the reduce axis) onto the matmul axis (the reduce K range, or
+      // an output M range) of EQUAL extent -- the producer's A[m,k] read, whose
+      // m IS the matmul's M output axis and k IS its reduce K axis.  This keeps
+      // the reduce 1-axis (recognise_tc fires, the TC tiled emitter handles the
+      // fused A), bit-exact: the producer is evaluated at exactly (m,k) the
+      // matmul iterates.  Gated on the flag (default-OFF) AND on the leaked-axis
+      // structure (a 1-axis SUM reduce with free LOOP producer aids), so flag-
+      // off and every non-fused reduce are byte-identical.  The EQUAL-ndim
+      // common case and the conv-bwd path below are unaffected (no flag, or no
+      // leaked producer LOOP aid resolves an extent match).
+      // Only a clean 2-D matmul reduce: body MUL(A_tree, B_index) over a single
+      // K range.  The leaked producer LOOP ranges are the producer's {m, k}.
+      // Map each onto the matmul axis it occupies, disambiguating by structure:
+      //   k (the contraction): the producer's k threads through the SAME
+      //     RESHAPE/EXPAND as the weight's k -- so it is the axis whose extent
+      //     equals the reduce K extent.  Bind to the reduce range.
+      //   m: the producer-only axis.  Bind to the OUTPUT range of equal extent
+      //     that the weight operand B does NOT read (so it is M, never N -- a
+      //     FLUX QKV is {S,512}@{512,512}, K==N==512, so an extent-only match
+      //     would alias m's M<->N; the "not read by B" test breaks the tie).
+      // K binds first (its reduce-range target is unambiguous), then m.  Default-
+      // OFF flag + the 1-axis-SUM matmul-shape gate keep flag-off and every
+      // non-fused / conv reduce byte-identical.
+      if (ru_fuse_matmul_input_on() && kind == REDUCE_SUM && n_rrng == 1
+          && rm->out_ndim == 2
+          && term_tag(rewritten) == TAG_UOP && term_ext(rewritten) == UOP_REDUCE) {
+        Term rbody = uop_reduce_src(rewritten);
+        Term b_idx = 0;   // the weight operand (the clean INDEX_E side of the MUL)
+        Term a_side = 0;  // the OTHER operand (must be a FUSED producer, not bare)
+        if (term_tag(rbody) == TAG_UOP && term_ext(rbody) == UOP_MUL) {
+          Term o0 = term_resolve(heap_read(term_val(rbody) + 0));
+          Term o1 = term_resolve(heap_read(term_val(rbody) + 1));
+          Term c0 = (term_tag(o0)==TAG_UOP && term_ext(o0)==UOP_CAST)
+                  ? term_resolve(heap_read(term_val(o0)+0)) : o0;
+          Term c1 = (term_tag(o1)==TAG_UOP && term_ext(o1)==UOP_CAST)
+                  ? term_resolve(heap_read(term_val(o1)+0)) : o1;
+          if (term_tag(c1)==TAG_UOP && term_ext(c1)==UOP_INDEX_E) { b_idx = c1; a_side = c0; }
+          else if (term_tag(c0)==TAG_UOP && term_ext(c0)==UOP_INDEX_E) { b_idx = c0; a_side = c1; }
+        }
+        // Only fire when A is genuinely a FUSED ELEMENTWISE producer (an
+        // ALU tree -- the input-fusion inlined SiLU/MUL/ADD over the matmul
+        // input), NOT a bare INDEX_E (a normal realized 2-D matmul operand) and
+        // NOT a MOVEMENT view (the batched attention A is a PERMUTE/RESHAPE over
+        // a buffer -- it has free batch/output axes my 2-D M-bind would mis-map,
+        // corrupting the scores/context matmul).  Require A's top op to be a
+        // unary/binary/ternary elementwise or CAST so the remap fires ONLY on a
+        // real input-fusion producer.
+        if (a_side == 0) b_idx = 0;
+        else if (term_tag(a_side) != TAG_UOP) b_idx = 0;
+        else {
+          u8 aop = term_ext(a_side);
+          int a_is_ew = uop_is_unary_elementwise(aop)
+                     || uop_is_binary_elementwise(aop)
+                     || uop_is_ternary_elementwise(aop)
+                     || aop == UOP_CAST || aop == UOP_BITCAST;
+          if (!a_is_ew) b_idx = 0;   // bare INDEX_E or a movement view: not fused
+        }
+        Term k_rng = 0;
+        for (u32 k = 0; k < n_rrng; k++) {
+          Term kr = RU_REDUCE_RANGES[i].ranges[k];
+          if (term_tag(kr)==TAG_UOP && term_ext(kr)==UOP_RANGE) { k_rng = kr; break; }
+        }
+        u32 k_ext = (k_rng != 0) ? uop_range_extent(k_rng) : 0;
+        RuFreeAxisSet mg_fs;
+        mg_fs.n_bound = 0;
+        mg_fs.n_free  = 0;
+        ru_collect_free_axes_rec(rbody, &mg_fs, 0);
+        RuAxisSubst mg_map;
+        mg_map.n = 0;
+        for (u8 fi = 0; fi < mg_fs.n_free && b_idx != 0 && k_rng != 0; fi++) {
+          if (mg_fs.free_types[fi] != KAX_LOOP) continue;
+          u32 faid = mg_fs.free_aids[fi];
+          if (faid == uop_range_axis_id(k_rng)) continue; // already the reduce axis
+          int is_out = 0;
+          for (u8 a = 0; a < rm->out_ndim && !is_out; a++)
+            if (ru_expr_references_aid(rm->out_rngs[a], faid, 0)) is_out = 1;
+          if (is_out) continue;                           // a genuine output axis
+          u32 fext = ru_subtree_axis_extent(rbody, faid, 0);
+          if (fext == 0) continue;
+          Term bind = 0;
+          // m-leak FIRST: an output range of equal extent NOT read by the weight
+          // B (so M, never N).  If none qualifies (fext != any non-B-read output
+          // extent), fall through to the K bind when fext == k_ext.
+          for (u8 a = 0; a < rm->out_ndim && bind == 0; a++) {
+            Term orng = rm->out_rngs[a];
+            if (term_tag(orng)==TAG_UOP && term_ext(orng)==UOP_RANGE
+                && uop_range_extent(orng) == fext
+                && !ru_expr_references_aid(b_idx, uop_range_axis_id(orng), 0))
+              bind = orng;
+          }
+          // k-leak: the contraction axis (extent == reduce K extent).
+          if (bind == 0 && fext == k_ext) bind = k_rng;
+          if (bind != 0 && uop_range_axis_id(bind) != faid
+              && mg_map.n < RU_AXIS_SUBST_CAP)
+            ru_axis_subst_add(&mg_map, faid, bind);
+        }
+        if (mg_map.n > 0) {
+          Term nb = ru_subtree_rewrite_ranges(rbody, &mg_map, 0);
+          if (nb != rbody)
+            rewritten = uop_reduce_multi(kind, n_rrng, new_axes, nb);
+        }
+      }
       // THVM_FUSE_CONV_BWD: absorb stranded window-low LOOP axes into the
       // reduce.  When this reduce reads a now-realized activation/param
       // buffer through a col2im window (the conv data-grad on the 2nd
