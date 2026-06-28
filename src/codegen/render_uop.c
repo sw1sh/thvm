@@ -3032,8 +3032,20 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
           // rounds to bf16 at its store, so the epilogue rounds `(bfloat)` first.
           // _m/_n substitute the M/N range vars in the epilogue's gate[n] /
           // X[m,n] / activation index reads.
+          //
+          // THVM_FUSE_MATMUL_EPILOGUE (this whole `epilogue_value != 0` block is
+          // unreachable unless the gate un-realized a matmul into its consumer):
+          // the OPT_TC term's intrinsic dtype is the f32 reduce ACCUMULATOR, but a
+          // bf16-staged matmul (bf16 A, bf16/int8 B -- the FLUX q8/bf16 projection)
+          // un-fused realizes its output to a BF16 buffer, rounding the f32
+          // accumulator once.  To stay bit-identical to that un-fused
+          // (matmul -> bf16 buffer -> scale) path, round _cstage to bf16 FIRST,
+          // then apply the scale -- one intermediate rounding, matching the
+          // separate-kernel path.  Gated by stage_bf (the bf16-input matmul) so a
+          // genuinely f32-output epilogue keeps the full-precision read.
           u32 mm_dt = DT_FP32;
           (void)term_dtype_in(opt_tc_term, 0, &mm_dt);
+          if (stage_bf && mm_dt == DT_FP32) mm_dt = DT_BF16;
           char const *mm_read = (mm_dt == DT_BF16)
                               ? "((bfloat)_cstage[_sgi64 + _e])"
                               : (mm_dt == DT_FP16)

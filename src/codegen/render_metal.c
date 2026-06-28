@@ -145,6 +145,107 @@ static int rmt_dag_has_opt_axes(KernelEntry const *ke) {
   return 0;
 }
 
+// THVM_FUSE_MATMUL_EPILOGUE: walk a (post-uop_recognise_tc_parallel) store value
+// for EXACTLY ONE UOP_OPT_TC, recording whether any ELEMENTWISE op sits above it
+// (the epilogue wrapper -- the q8 dequant MUL(OPT_TC, scale)).  A bare matmul's
+// transformed value is the OPT_TC itself at the top (n_ew == 0), so the caller
+// rejects it.  Movement/CAST/elementwise/index-int are walked; a second OPT_TC,
+// a REDUCE outside the OPT_TC, or an unknown op aborts.  Returns the OPT_TC term
+// (or 0), and sets *n_ew to the count of elementwise hops above it.
+static Term rmt_epi_walk_opt_tc(Term t, int *n_opt, int *n_ew, int above_ew,
+                                int depth) {
+  if (depth > 64 || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_OPT) {
+    if (uop_opt_kind(t) != UOP_OPT_TC) return 0;
+    (*n_opt)++;
+    if (above_ew) (*n_ew)++;
+    return t;
+  }
+  if (op == UOP_CONST || op == UOP_INDEX_E || op == UOP_BUFFER
+      || op == UOP_RANGE) return 0;
+  if (op == UOP_REDUCE) return 0;            // bare reduce outside an OPT_TC
+  int is_ew = op == UOP_CAST || op == UOP_BITCAST
+           || uop_is_unary_elementwise((u8)op)
+           || uop_is_binary_elementwise((u8)op)
+           || uop_is_ternary_elementwise((u8)op)
+           || uop_is_movement((u8)op);
+  if (!is_ew) return 0;
+  u8 ar = uop_arity((u8)op);
+  Term found = 0;
+  for (u8 i = 0; i < ar; i++) {
+    Term f = rmt_epi_walk_opt_tc(heap_read(term_val(t) + i), n_opt, n_ew, 1,
+                                 depth + 1);
+    if (f != 0) found = f;
+  }
+  return found;
+}
+
+// THVM_FUSE_MATMUL_EPILOGUE: recover M/N/K for an epilogue-fused matmul so the
+// dispatch grid matches the renderer EXACTLY.  The renderer (cg_emit_via_uop)
+// runs uop_recognise_tc_parallel on cached_root before emitting, which collapses
+// any consumer-split M/N and wraps the matmul REDUCE in OPT_TC; we apply the SAME
+// transform here, then read M/N/K off a synthetic bare-REDUCE store built from the
+// OPT_TC's inner reduce.  Requires the OPT_TC to sit UNDER an elementwise wrapper
+// (n_ew > 0) -- a BARE matmul's transformed value is the OPT_TC at the top
+// (n_ew == 0), so this returns 0 for it, keeping the bare path on its own grid.
+// Returns 1 + M/N/K on a clean epilogue matmul; 0 otherwise (and 0 gate-off,
+// since uop_recognise_tc_parallel's epilogue branch only fires under the gate).
+static int rmt_epilogue_tc_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K) {
+  if (out_M != NULL) *out_M = 0;
+  if (out_N != NULL) *out_N = 0;
+  if (out_K != NULL) *out_K = 0;
+  if (!ru_fuse_epilogue_on()) return 0;
+  if (sroot == 0 || term_tag(sroot) != TAG_UOP
+      || term_ext(sroot) != UOP_STORE) return 0;
+  Term troot = uop_recognise_tc_parallel(sroot);
+  if (troot == 0 || term_tag(troot) != TAG_UOP
+      || term_ext(troot) != UOP_STORE) return 0;
+  Term value = heap_read(term_val(troot) + 2);
+  int dbg = getenv("THVM_DISP_TRACE") != NULL;
+  // A bare-OPT_TC top (the plain matmul) is handled by the existing tc_template
+  // path, not here -- require the OPT_TC to be wrapped by an elementwise epilogue.
+  if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
+      && uop_opt_kind(value) == UOP_OPT_TC) {
+    if (dbg) fprintf(stderr, "[epi-decline] bare OPT_TC top\n");
+    return 0;
+  }
+  int n_opt = 0, n_ew = 0;
+  Term opt = rmt_epi_walk_opt_tc(value, &n_opt, &n_ew, 0, 0);
+  if (opt == 0 || n_opt != 1 || n_ew == 0) {
+    if (dbg) fprintf(stderr, "[epi-decline] walk opt=%d n_opt=%d n_ew=%d val_op=%u\n",
+                     opt != 0, n_opt, n_ew,
+                     term_tag(value) == TAG_UOP ? term_ext(value) : 999u);
+    return 0;
+  }
+  Term reduce = uop_opt_target(opt);
+  if (reduce == 0 || term_tag(reduce) != TAG_UOP
+      || term_ext(reduce) != UOP_REDUCE) return 0;
+  // Synthetic bare-REDUCE store so uop_classify_matmul / uop_matmul_mn_axes (which
+  // read slot+2) classify the matmul shape (the real slot+2 is the epilogue chain).
+  Term synth = uop_store(heap_read(term_val(troot) + 0),
+                         heap_read(term_val(troot) + 1), reduce);
+  u32 m_axis, m_ext, n_axis, n_ext, k_ext = 0, unit_axis = 0;
+  if (!uop_classify_matmul(synth, &k_ext, &unit_axis) || unit_axis != 0) {
+    if (dbg) fprintf(stderr, "[epi-decline] classify_matmul fail unit_axis=%u\n",
+                     unit_axis);
+    return 0;
+  }
+  if (!uop_matmul_mn_axes(synth, &m_axis, &m_ext, &n_axis, &n_ext)) {
+    if (dbg) fprintf(stderr, "[epi-decline] mn_axes fail\n");
+    return 0;
+  }
+  if (m_ext == 0 || n_ext == 0 || k_ext == 0) {
+    if (dbg) fprintf(stderr, "[epi-decline] zero ext M=%u N=%u K=%u\n",
+                     m_ext, n_ext, k_ext);
+    return 0;
+  }
+  if (out_M != NULL) *out_M = m_ext;
+  if (out_N != NULL) *out_N = n_ext;
+  if (out_K != NULL) *out_K = k_ext;
+  return 1;
+}
+
 // q8 weight-only-quantized matmul detection for dispatch-grid sizing.
 // The B operand is a CAST(int8 -> bf16) over the INT8 weight buffer
 // (TMatMul[x, Transpose[Cast[w_int8, bf16]]]); uop_dag_classify_matmul_shape
@@ -252,6 +353,42 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
       Term v = heap_read(term_val(sroot) + 2);
       if (term_tag(v) == TAG_UOP && term_ext(v) == UOP_OPT
           && uop_opt_kind(v) == UOP_OPT_TC) tc_template = 1;
+    }
+    // THVM_FUSE_MATMUL_EPILOGUE (default OFF): an epilogue-fused store value is an
+    // elementwise chain over the matmul REDUCE (MUL(REDUCE, per-N scale) for the
+    // q8 dequant), so `v` above is NOT a bare OPT_TC -> tc_template stays 0 and
+    // the matmul would fall to the generic GLOBAL-axis-product grid, over-
+    // launching ~32x the threadgroups (the fused kernel ran ~10x slow -- and a
+    // wrong grid races the parallel tiled body, corrupting the output).  Size the
+    // TILE grid here to MATCH THE RENDERER EXACTLY: the renderer (cg_emit_via_uop)
+    // applies uop_recognise_tc_parallel to cached_root before emitting, so apply
+    // the SAME transform here and read M/N/K off the resulting OPT_TC.  This makes
+    // dispatch + render agree regardless of the pre-transform DAG state (bare vs
+    // OPT_TC-wrapped vs hand-opts-mutated, which differs across the prefetch and
+    // fire calls).  STRICTLY ADDITIVE + FULLY GATED: rmt_epilogue_tc_shape returns
+    // 0 when the gate is off AND for any BARE matmul (its transformed value is a
+    // bare OPT_TC, no elementwise wrapper), so a bare bf16/int8 TC matmul never
+    // enters this branch and keeps HEAD's (tg,tt) byte-for-byte.
+    if (!tc_template) {
+      u32 eM = 0, eN = 0, eK = 0;
+      if (rmt_epilogue_tc_shape(sroot, &eM, &eN, &eK)
+          && eM != 0 && eN != 0 && eK != 0
+          && (eM % 8u) == 0 && (eN % 8u) == 0 && (eK % 8u) == 0) {
+        RmuTcTile tile;
+        if (rmu_tc_pick_tile(eM, eN, eK, 0u, &tile)) {
+          u32 tile_m = tile.local_m * tile.rm * 8u;
+          u32 tile_n = tile.local_n * tile.rn * 8u;
+          if ((eM % tile_m) == 0 && (eN % tile_n) == 0) {
+            u64 ntg = (u64)(eM / tile_m) * (u64)(eN / tile_n);
+            u32 nthreads = tile.local_m * tile.local_n * 32u;
+            if (ntg > 0 && ntg <= 0xFFFFFFFFu) {
+              if (groups_x  != NULL) *groups_x  = (u32)ntg;
+              if (threads_x != NULL) *threads_x = nthreads;
+              return 1;
+            }
+          }
+        }
+      }
     }
     // TRUE batched gemm (attention's mhaBmm): the value is OPT(_, TC, 0)
     // wrapped and the batch/M/N axes are GLOBAL, but uop_dag_classify_matmul_-
