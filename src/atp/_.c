@@ -21233,6 +21233,137 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
   return pushed;
 }
 
+// ===========================================================================
+// Single-walk native CP formation -- the FAITHFUL Waldmeister port.
+// Emits critical pairs in WM's U1_KPsBildenZuFaktum order, so cp_seq == WM's
+// cpnr BY CONSTRUCTION: no atp_wmo_rank reconstruct, none of the ~40 per-band
+// re-key corrections, none of the selection-time detectors.  Gated (env
+// THVM_ATP_SINGLE_WALK for the bench, Method knob for users); DEFAULT OFF until
+// proven byte-identical-or-better.  WM order (Unifikation1.c:1486/1561):
+//   - Vater/toplevel sweep FIRST, POSITION-MAJOR over the new fact's face:
+//     each non-var position p -> old partners (rules tree then equation tree)
+//     in tops-DFS arrival order -> form a CP at p (the old fact rewrites f@p).
+//   - Mutter/proper-subterm sweep, partner-major: each old fact in leaf-list
+//     order -> f's whole LHS planted into the old fact's PROPER subterms.
+//   - the new fact is already in the wmo trie, so self-overlaps appear as
+//     partners (WM R'=R u {l} trick); the rule root-self overlap is excluded.
+// cpnr is stamped only on SURVIVORS after the joinable/ordering drop, so the
+// gate runs BEFORE the per-CP push/seq.
+static u32 sw_trace_to_idx(AtpState *s, u32 trace) {
+  if (trace == ATP_TRACE_NONE) return 0xffffffffu;
+  for (u32 i = 0; i < s->n_rules; i++)
+    if (s->r_trace[i] == trace) return i;
+  return 0xffffffffu;
+}
+
+// Form ONE CP: outer face (lo,ro) overlapped at position p by the already-
+// renamed inner face (lin,rin); push it on its own so cp_seq is the next FIFO
+// slot.  atp_cp_gen_gates (joinable/ordering) runs BEFORE the push == WM's
+// "drop before ++CPNr".  Returns 1 if a CP survived and was pushed.
+static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term lin, Term rin,
+                        const u32 *p, u32 p_len, u32 t_out, u32 t_in,
+                        u32 i_out, u32 i_in, u8 o_eq, u8 in_eq) {
+  Term sub = cp_subterm_at(lo, p, p_len);
+  if (sub == 0 || term_tag(sub) == TAG_FVR) return 0u;
+  RewriteSubst subst = {{0}};
+  if (!thvm_unify(sub, lin, &subst)) return 0u;
+  CriticalPair cp;
+  cp.lhs  = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), &subst);
+  cp.rhs  = thvm_unify_apply(ro, &subst);
+  cp.peak = thvm_unify_apply(lo, &subst);
+  cp.pos_len = (u8)p_len;
+  for (u32 d = 0; d < p_len; d++) cp.pos[d] = (u8)p[d];
+  cp.combo = 0xffu;
+  if (atp_cp_gen_gates(s, &cp, 0u, 1u, o_eq, in_eq) == 0u) return 0u;
+  return atp_push_cps_traced(s, &cp, 1u, t_out, t_in, i_out, i_in);
+}
+
+typedef struct {
+  AtpState *s; Term lo, ro; u32 i_out, t_out; u8 o_eq; u32 pushed;
+} SwVaterCtx;
+static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
+  SwVaterCtx *c = (SwVaterCtx *)raw;
+  AtpState *s = c->s;
+  Term sub = cp_subterm_at(c->lo, p, p_len);
+  if (sub == 0 || term_tag(sub) == TAG_FVR) return c->pushed;
+  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+  static WmoPartnerHit hits[4096];
+  for (u8 tree = 0u; tree < 2u; tree++) {            // rules then equations
+    u32 nh = wmo_tops_enum(w, tree, sub, hits, 4096u);
+    for (u32 h = 0; h < nh; h++) {
+      u32 j = sw_trace_to_idx(s, hits[h].trace);
+      if (j == 0xffffffffu) continue;
+      if (j == c->i_out && p_len == 0u && !c->o_eq) continue;  // no rule self-root
+      u8 jdr = wmo_trace_dist_rhs(w, hits[h].trace);
+      u8 tf  = (u8)(hits[h].face ^ jdr);
+      Term lin = thvm_rename_vars(tf ? s->rhs[j] : s->lhs[j], CP_RENAME_OFFSET);
+      Term rin = thvm_rename_vars(tf ? s->lhs[j] : s->rhs[j], CP_RENAME_OFFSET);
+      u8 in_eq = s->use_unfailing_cp && !s->r_orient[j];
+      c->pushed += sw_form_push(s, c->lo, c->ro, lin, rin, p, p_len,
+                                c->t_out, hits[h].trace, c->i_out, j,
+                                c->o_eq, in_eq);
+    }
+  }
+  return c->pushed;
+}
+
+typedef struct {
+  AtpState *s; Term lo, ro, lin, rin; u32 t_out, t_in, i_out, i_in;
+  u8 o_eq, in_eq; u32 pushed;
+} SwMutterCtx;
+static u32 sw_mutter_visit(const u32 *q, u32 q_len, void *raw) {
+  SwMutterCtx *c = (SwMutterCtx *)raw;
+  if (q_len == 0u) return c->pushed;                 // eTT: PROPER subterms only
+  c->pushed += sw_form_push(c->s, c->lo, c->ro, c->lin, c->rin, q, q_len,
+                            c->t_out, c->t_in, c->i_out, c->i_in,
+                            c->o_eq, c->in_eq);
+  return c->pushed;
+}
+
+static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
+  u32 first = added.first, last = added.first + added.count, n = s->n_rules;
+  if (last > n) last = n;
+  if (first > last) return 0u;
+  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+  if (w == NULL) return thvm_atp_generate_cps_wm(s, added);
+  u32 path[CP_MAX_DEPTH];
+  u32 pushed = 0u;
+  for (u32 f = first; f < last; f++) {
+    u8 f_eq = s->use_unfailing_cp && !s->r_orient[f];
+    // Vater / toplevel (position-major over f's forward face)
+    SwVaterCtx vc = { s, s->lhs[f], s->rhs[f], f, s->r_trace[f], f_eq, 0u };
+    cp_walk_positions(s->lhs[f], path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vc, 0u);
+    pushed += vc.pushed;
+    if (f_eq) {                                       // reverse face (equation)
+      SwVaterCtx vr = { s, s->rhs[f], s->lhs[f], f, s->r_trace[f], f_eq, 0u };
+      cp_walk_positions(s->rhs[f], path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vr, 0u);
+      pushed += vr.pushed;
+    }
+    // Mutter / proper-subterm (partner-major: f's LHS into old facts)
+    static WmoPartnerHit lhits[8192];
+    for (u8 tree = 0u; tree < 2u; tree++) {
+      u32 nh = wmo_leaflist_enum(w, tree, lhits, 8192u);
+      for (u32 h = 0; h < nh; h++) {
+        u32 j = sw_trace_to_idx(s, lhits[h].trace);
+        if (j == 0xffffffffu || j == f) continue;     // self handled in Vater
+        u8 jdr = wmo_trace_dist_rhs(w, lhits[h].trace);
+        u8 tf  = (u8)(lhits[h].face ^ jdr);
+        Term lo = tf ? s->rhs[j] : s->lhs[j];
+        Term ro = tf ? s->lhs[j] : s->rhs[j];
+        u8 o_eq = s->use_unfailing_cp && !s->r_orient[j];
+        Term lin = thvm_rename_vars(s->lhs[f], CP_RENAME_OFFSET);
+        Term rin = thvm_rename_vars(s->rhs[f], CP_RENAME_OFFSET);
+        SwMutterCtx mc = { s, lo, ro, lin, rin, lhits[h].trace, s->r_trace[f],
+                           j, f, o_eq, f_eq, 0u };
+        cp_walk_positions(lo, path, 0u, CP_MAX_DEPTH, sw_mutter_visit, &mc, 0u);
+        pushed += mc.pushed;
+      }
+    }
+    if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
+  }
+  return pushed;
+}
+
 static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   u32 first = added.first;
   u32 last  = added.first + added.count;
@@ -21241,6 +21372,9 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   if (first > last) return 0;
 
   if (s->use_emission_order && s->wmo != NULL) {
+    static int sw_gate = -1;
+    if (sw_gate < 0) sw_gate = getenv("THVM_ATP_SINGLE_WALK") ? 1 : 0;
+    if (sw_gate) return thvm_atp_generate_cps_singlewalk(s, added);
     return thvm_atp_generate_cps_wm(s, added);
   }
 
