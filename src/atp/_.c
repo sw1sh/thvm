@@ -21406,25 +21406,30 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     // reverse face; a mono-equation (alpha-equivalent faces) and a rule do not
     // (WM TP_IstKeineMonogleichung, Unifikation1.c:1630).
     u8 two_faced = f_eq && !atp_eq_is_mono(s, f);
+    // The new fact's WM-DISTINGUISHED (forward) face is its stored lhs only when
+    // dist_rhs==0; for a dist_rhs==1 equation WM's forward face is the stored RHS,
+    // so the A/B/F forward sweeps must run on `fl` (= rhs there) and D/E/G on `fr`
+    // -- otherwise the forward/reverse sweeps swap and same-pri CPs get the wrong
+    // age (the Absorption pick-100 L.2-vs-L.2.1 reorder).
+    u8 f_dr = wmo_trace_dist_rhs(w, s->r_trace[f]);
+    Term fl = f_dr ? s->rhs[f] : s->lhs[f];   // WM forward (distinguished) face
+    Term fr = f_dr ? s->lhs[f] : s->rhs[f];   // WM reverse face
     // WM U1 per-fact order: A toplevel(l), B subterm(l), [F self via the trie],
-    // then for a two-faced equation D toplevel(r), E subterm(r), [C/G self].
-    SwVaterCtx va = { s, s->lhs[f], s->rhs[f], f, s->r_trace[f], f_eq, 0u, 0u };
-    cp_walk_positions(s->lhs[f], path, 0u, CP_MAX_DEPTH, sw_vater_visit, &va, 0u);
+    // then for a two-faced equation D toplevel(r), E subterm(r), [C/r=?l/G self].
+    SwVaterCtx va = { s, fl, fr, f, s->r_trace[f], f_eq, 0u, 0u };
+    cp_walk_positions(fl, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &va, 0u);
     pushed += va.pushed;                                       // A toplevel(l)
-    sw_mutter_phase(s, w, f, s->lhs[f], s->rhs[f], f_eq, 0u, path, &pushed); // B subterm(l)
+    sw_mutter_phase(s, w, f, fl, fr, f_eq, 0u, path, &pushed); // B subterm(l)
     if (f_eq)                                                  // F self l=?l
-      sw_self_phase(s, f, s->lhs[f], s->rhs[f], s->lhs[f], s->rhs[f], f_eq, path, &pushed);
+      sw_self_phase(s, f, fl, fr, fl, fr, f_eq, path, &pushed);
     if (two_faced) {
-      // C self l=?r
-      sw_self_phase(s, f, s->lhs[f], s->rhs[f], s->rhs[f], s->lhs[f], f_eq, path, &pushed);
-      SwVaterCtx vd = { s, s->rhs[f], s->lhs[f], f, s->r_trace[f], f_eq, 1u, 0u };
-      cp_walk_positions(s->rhs[f], path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vd, 0u);
+      sw_self_phase(s, f, fl, fr, fr, fl, f_eq, path, &pushed); // C self l=?r
+      SwVaterCtx vd = { s, fr, fl, f, s->r_trace[f], f_eq, 1u, 0u };
+      cp_walk_positions(fr, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vd, 0u);
       pushed += vd.pushed;                                     // D toplevel(r)
-      sw_mutter_phase(s, w, f, s->rhs[f], s->lhs[f], f_eq, 1u, path, &pushed); // E subterm(r)
-      // self r=?l (combo 2: reverse outer face, forward inner face)
-      sw_self_phase(s, f, s->rhs[f], s->lhs[f], s->lhs[f], s->rhs[f], f_eq, path, &pushed);
-      // G self r=?r
-      sw_self_phase(s, f, s->rhs[f], s->lhs[f], s->rhs[f], s->lhs[f], f_eq, path, &pushed);
+      sw_mutter_phase(s, w, f, fr, fl, f_eq, 1u, path, &pushed); // E subterm(r)
+      sw_self_phase(s, f, fr, fl, fl, fr, f_eq, path, &pushed); // self r=?l (combo 2)
+      sw_self_phase(s, f, fr, fl, fr, fl, f_eq, path, &pushed); // G self r=?r
     }
     if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
   }
