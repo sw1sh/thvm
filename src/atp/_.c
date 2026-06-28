@@ -21296,7 +21296,10 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
     for (u32 h = 0; h < nh; h++) {
       u32 j = sw_trace_to_idx(s, hits[h].trace);
       if (j == 0xffffffffu) continue;
-      if (j == c->i_out && p_len == 0u && !c->o_eq) continue;  // no rule self-root
+      if (j == c->i_out) {
+        if (c->o_eq) continue;        // equation: self handled by explicit F/C/G
+        if (p_len == 0u) continue;    // rule: skip the trivial self-root only
+      }
       u8 jdr = wmo_trace_dist_rhs(w, hits[h].trace);
       u8 tf  = (u8)(hits[h].face ^ jdr);
       Term lin = thvm_rename_vars(tf ? s->rhs[j] : s->lhs[j], CP_RENAME_OFFSET);
@@ -21352,6 +21355,34 @@ static void sw_mutter_phase(AtpState *s, AtpWmOrder *w, u32 f,
   }
 }
 
+// WM self-overlap step F (l=?l, Unifikation1.c:1620) / C (l=?r, :1631) /
+// G (r=?r, :1661): overlap the new equation's `outer` face (rhs `outer_r`) onto
+// its own `inner` face (rhs `inner_r`) at ALL positions; the trivial root
+// identities (F/G) are dropped by the joinable gate.  Done as explicit steps so
+// they land at WM's F/C/G slots -- the A/B/D/E partner sweeps EXCLUDE self for an
+// equation (WM MitAllenAusser), otherwise the trie-trick interleaves the self
+// overlap too early (the Absorption picks-67/68 tie-break swap).
+typedef struct {
+  AtpState *s; Term lo, ro, lin, rin; u32 t_self, i_self; u8 f_eq; u32 pushed;
+} SwSelfCtx;
+static u32 sw_self_visit(const u32 *p, u32 p_len, void *raw) {
+  SwSelfCtx *c = (SwSelfCtx *)raw;
+  c->pushed += sw_form_push(c->s, c->lo, c->ro, c->lin, c->rin, p, p_len,
+                            c->t_self, c->t_self, c->i_self, c->i_self,
+                            c->f_eq, c->f_eq);
+  return c->pushed;
+}
+static void sw_self_phase(AtpState *s, u32 f, Term outer, Term outer_r,
+                          Term inner, Term inner_r, u8 f_eq,
+                          u32 *path, u32 *pushed) {
+  SwSelfCtx sc = { s, outer, outer_r,
+                   thvm_rename_vars(inner, CP_RENAME_OFFSET),
+                   thvm_rename_vars(inner_r, CP_RENAME_OFFSET),
+                   s->r_trace[f], f, f_eq, 0u };
+  cp_walk_positions(outer, path, 0u, CP_MAX_DEPTH, sw_self_visit, &sc, 0u);
+  *pushed += sc.pushed;
+}
+
 static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
   u32 first = added.first, last = added.first + added.count, n = s->n_rules;
   if (last > n) last = n;
@@ -21370,13 +21401,21 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     // then for a two-faced equation D toplevel(r), E subterm(r), [C/G self].
     SwVaterCtx va = { s, s->lhs[f], s->rhs[f], f, s->r_trace[f], f_eq, 0u, 0u };
     cp_walk_positions(s->lhs[f], path, 0u, CP_MAX_DEPTH, sw_vater_visit, &va, 0u);
-    pushed += va.pushed;                                       // A
-    sw_mutter_phase(s, w, f, s->lhs[f], s->rhs[f], f_eq, 0u, path, &pushed); // B
+    pushed += va.pushed;                                       // A toplevel(l)
+    sw_mutter_phase(s, w, f, s->lhs[f], s->rhs[f], f_eq, 0u, path, &pushed); // B subterm(l)
+    if (f_eq)                                                  // F self l=?l
+      sw_self_phase(s, f, s->lhs[f], s->rhs[f], s->lhs[f], s->rhs[f], f_eq, path, &pushed);
     if (two_faced) {
+      // C self l=?r
+      sw_self_phase(s, f, s->lhs[f], s->rhs[f], s->rhs[f], s->lhs[f], f_eq, path, &pushed);
       SwVaterCtx vd = { s, s->rhs[f], s->lhs[f], f, s->r_trace[f], f_eq, 1u, 0u };
       cp_walk_positions(s->rhs[f], path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vd, 0u);
-      pushed += vd.pushed;                                     // D
-      sw_mutter_phase(s, w, f, s->rhs[f], s->lhs[f], f_eq, 1u, path, &pushed); // E
+      pushed += vd.pushed;                                     // D toplevel(r)
+      sw_mutter_phase(s, w, f, s->rhs[f], s->lhs[f], f_eq, 1u, path, &pushed); // E subterm(r)
+      // self r=?l (combo 2: reverse outer face, forward inner face)
+      sw_self_phase(s, f, s->rhs[f], s->lhs[f], s->lhs[f], s->rhs[f], f_eq, path, &pushed);
+      // G self r=?r
+      sw_self_phase(s, f, s->rhs[f], s->lhs[f], s->rhs[f], s->lhs[f], f_eq, path, &pushed);
     }
     if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
   }
