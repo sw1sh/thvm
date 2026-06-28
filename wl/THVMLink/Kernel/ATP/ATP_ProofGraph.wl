@@ -579,7 +579,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
 },
     precArray = atpPrecedenceArray[precedenceSpec, enc];
     symbolWeightsArr = atpSymbolWeightsArray[symbolWeightsSpec, enc];
-    raw = $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
+    {$atpSplitT, raw} = AbsoluteTiming @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
         unfailingCP, cpSetInterreduce, connectedness, precArray,
@@ -597,6 +597,9 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         useWmPosGroup, useWmCubeArrival, useWmFormationFifo,
         useWmMeredDmgu, useWmEsetDistdir, useWmCommDropDupClassGate,
         useWmCorankOwnArr, useWmLeafTiebreakFacegate];
+    If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+        Print["[split] C solve + trace-gen = ", $atpSplitT,
+              " s  (WL reconstruction = total wall - this)"]];
     (* C engine returns LibraryFunctionError on memory-guard abort
        (THVM_ATP_RSS_ABORT_MB / THVM_ATP_HEAP_ABORT_FRAC) or other
        hard-stop conditions.  Bail BEFORE the structural part extraction
