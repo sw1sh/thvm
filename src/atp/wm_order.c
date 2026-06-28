@@ -2028,32 +2028,26 @@ static u8 atp_wmo_eq_leaflist_rank(AtpState *s, u32 trace, u8 thvm_dir,
 // `face_term` at CP position path; rank of the first arrival whose
 // chain contains (trace, face).  Rule tree consults the chain HEAD
 // only (BK_Regeln = first entry; MGUMitBlattGefundenAusschluss).
-static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
-                        u32 partner_trace, u8 partner_face,
-                        u32 *out_arrival, u32 *out_chain) {
-  WmoCell q[WMO_MAX_CELLS];
+// Fill *d with the tops-DFS arrival list for `query_sub` against `tree`: the
+// arrival-ordered leaves whose stored face unifies with the query.  `q` (caller
+// buffer, WMO_MAX_CELLS) receives the query cells and *d->q points at it, so the
+// caller must keep `q` alive while it reads *d.  Returns the query cell count
+// (0 = empty/var query; *d untouched).  The N-way arrival-list cache (struct
+// WmoRankCacheEnt, gated on tree_rev) lives here so BOTH callers benefit:
+// wmo_tops_rank (find one partner's arrival) and wmo_tops_enum (enumerate all
+// partners in arrival order, for the single-walk native CP formation).
+//
+// Sizing: combinator signatures (CombinatorAxioms / Meredith opCenterdot) build
+// very wide trees -- one query subterm can unify with several thousand leaves --
+// so the per-slot buffer is WMO_TOPS_ARR_CAP and heap-allocated; the depth_guard
+// (4000) bounds the trie descent by query-cell count (a query face holds up to
+// WMO_MAX_CELLS=768 cells).  An overflowing list (n_out at the cap) is still a
+// valid cache entry: out[] holds the truncated prefix the DFS re-derives
+// identically, and callers only read out[0..n_out).
+static u32 wmo_tops_dfs_fill(AtpWmOrder *w, u8 tree, Term query_sub,
+                             WmoCell *q, WmoDfs *d) {
   u32 qn = wmo_face_cells(query_sub, q, WMO_MAX_CELLS);
   if (qn == 0u) return 0u;
-  // Arrival buffer for the tops DFS.  The combinator signatures
-  // (CombinatorAxioms / Meredith opCenterdot) build very wide
-  // discrimination trees: a single query subterm can unify with several
-  // thousand stored leaves, far past the old 512 cap (SKIToBCKW c2:
-  // 2069 of these scans truncated, scrambling the equal-weight FIFO
-  // age order WM's selection heap breaks ties on).  Heap-allocated so
-  // a large cap does not blow the stack frame; sized to comfortably
-  // hold every live leaf (the rule/equation trees never exceed a few
-  // thousand faces in the WM presets).  The depth_guard bounds the trie
-  // descent by query-cell count; a query face can hold up to
-  // WMO_MAX_CELLS (768) cells, so 4000 covers the deepest query without
-  // cutting a descent short of its target leaf.
-  // N-way arrival-list cache (struct WmoRankCacheEnt).  Look for a live entry
-  // (rev still equal to tree_rev) matching this (tree, query); a hit reuses the
-  // stored arrival list in place and skips the whole tree walk.  The arrival
-  // list is a pure function of (tree structure, query cells); the partner
-  // (trace, face) scan below reads each arrived leaf's chain.  Any overflowing
-  // arrival list (n_out at the cap) is still a valid entry: out[] holds the
-  // truncated prefix the DFS would re-derive identically, and the scan only
-  // reads out[0..n_out).
   u32 rc_hit = WMO_RC_N;
   if (!w->no_rankcache) {
     for (u32 e = 0; e < WMO_RC_N; e++) {
@@ -2066,9 +2060,8 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
       }
     }
   }
-  WmoDfs d;
   if (rc_hit < WMO_RC_N) {
-    d = (WmoDfs){ q, qn, w->rc[rc_hit].out, w->rc[rc_hit].n_out, WMO_TOPS_ARR_CAP };
+    *d = (WmoDfs){ q, qn, w->rc[rc_hit].out, w->rc[rc_hit].n_out, WMO_TOPS_ARR_CAP };
   } else {
     // Miss: run the DFS into a slot buffer and record it.  Round-robin
     // eviction; when the cache is disabled (THVM_WMO_NO_RANKCACHE) slot 0 is a
@@ -2081,12 +2074,12 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
           (WmoLeaf **)malloc(WMO_TOPS_ARR_CAP * sizeof(WmoLeaf *));
       if (w->rc[slot].out == NULL) return 0u;
     }
-    d = (WmoDfs){ q, qn, w->rc[slot].out, 0u, WMO_TOPS_ARR_CAP };
+    *d = (WmoDfs){ q, qn, w->rc[slot].out, 0u, WMO_TOPS_ARR_CAP };
     WmoUnif u;
     memset(&u, 0, sizeof u);
     if (w->tree[tree].root != NULL) {
       // dispatch from the root: kids keyed by cell 0
-      wmo_dfs(&d, w->tree[tree].root, 0u, 0u, 0xffffffffu, &u, 4000u);
+      wmo_dfs(d, w->tree[tree].root, 0u, 0u, 0xffffffffu, &u, 4000u);
     }
     if (!w->no_rankcache) {
       w->rc[slot].valid = 1u;
@@ -2094,9 +2087,19 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
       w->rc[slot].rev   = w->tree_rev;
       w->rc[slot].qn    = qn;
       memcpy(w->rc[slot].q, q, (size_t)qn * sizeof(WmoCell));
-      w->rc[slot].n_out = d.n_out;
+      w->rc[slot].n_out = d->n_out;
     }
   }
+  return qn;
+}
+
+static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
+                        u32 partner_trace, u8 partner_face,
+                        u32 *out_arrival, u32 *out_chain) {
+  WmoCell q[WMO_MAX_CELLS];
+  WmoDfs d;
+  u32 qn = wmo_tops_dfs_fill(w, tree, query_sub, q, &d);
+  if (qn == 0u) return 0u;
   // Arrival-dump probe (THVM_WMO_ARRDUMP): emit the eq-tree DFS leaf-arrival
   // order with each arrived leaf's chain (trace/face) so the runtime trie
   // walk can be compared leaf-by-leaf against WM's TT(l)=?E emission order.
@@ -2151,6 +2154,36 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
     }
   }
   return hit;
+}
+
+// One partner emitted by the single-walk Vater enumeration.
+typedef struct { u32 trace; u32 arrival; u8 face; } WmoPartnerHit;
+
+// Enumerate ALL partners (trace,face) whose stored face unifies with `query_sub`
+// against `tree`, in tops-DFS arrival order -- the WM Vater-phase yield order
+// (U1_KPsBildenZuRegel step 2).  Writes up to `max` hits to out[], returns the
+// count.  Mirrors wmo_tops_rank's partner scan (rule tree: 1 chain entry per
+// leaf; equation tree: all) but collects every partner rather than matching one.
+// For thvm_atp_generate_cps_singlewalk (native CP formation, in progress).
+__attribute__((unused))
+static u32 wmo_tops_enum(AtpWmOrder *w, u8 tree, Term query_sub,
+                         WmoPartnerHit *out, u32 max) {
+  WmoCell q[WMO_MAX_CELLS];
+  WmoDfs d;
+  u32 qn = wmo_tops_dfs_fill(w, tree, query_sub, q, &d);
+  if (qn == 0u) return 0u;
+  u32 n = 0u;
+  for (u32 a = 0; a < d.n_out && n < max; a++) {
+    WmoLeaf *l = d.out[a];
+    u32 c_limit = (tree == 0u) ? 1u : l->n_chain;
+    for (u32 c = 0; c < c_limit && c < l->n_chain && n < max; c++) {
+      out[n].trace   = l->chain[c].trace;
+      out[n].face    = l->chain[c].face;
+      out[n].arrival = a;
+      n++;
+    }
+  }
+  return n;
 }
 
 // Public wrapper: WM MO_GleichungGefunden retrieval rank for one
