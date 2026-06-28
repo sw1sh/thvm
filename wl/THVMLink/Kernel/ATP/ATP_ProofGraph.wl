@@ -1451,6 +1451,20 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 Return[<|"Key" -> hit["Key"], "Eq" -> hit["Eq"],
                     "Swapped" -> (c0 === 2), "CSide0WlPos" -> c0|>]];
             pos = cte["Pos"];
+            (* Single-parent re-derivation (WM ue(-X,0)): a TRACE_CP with one
+               parent absent (ATP_TRACE_NONE) re-derives an EXISTING fact by
+               rewriting the present parent's equation -- there is no second
+               rule to superpose, so it is NOT a two-parent CriticalPairLemma,
+               and indexing the absent parent (trace[[NONE+1]] = part 2^32)
+               crashes.  (Meredith OrAssociativity hits this; see
+               atp_wmo_eq_dist_rhs_base in src/atp/_.c.)  Bridge it with the
+               sound emitNorm real-rewrite path from the present parent, exactly
+               as the degenerate-overlap / no-geometry fallbacks below do. *)
+            If[ cte["ParentA"] === $AtpTraceNone || cte["ParentB"] === $AtpTraceNone,
+                With[{realP = If[ cte["ParentA"] === $AtpTraceNone,
+                        cte["ParentB"], cte["ParentA"]]},
+                    aInfo = resolveTrace[realP];
+                    Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]]];
             aTe = trace[[cte["ParentA"] + 1]];
             bTe = trace[[cte["ParentB"] + 1]];
             ruleAEq = {tL[aTe], tR[aTe]};
@@ -1521,6 +1535,15 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            NORM_STEP propagates this through the chain so its Side /
            equation order match the chain root's convention. *)
         resolveTrace[ti_] := Block[{te, ruleEq, pInfo, pEq, info},
+            If[ ti === $AtpTraceNone,
+                (* A cited parent was never traced -- almost always the
+                   proof-trace buffer overflowed (a CP formed past t_max gets
+                   trace = ATP_TRACE_NONE, so its NORM_STEP chain is rootless).
+                   Abort the lift cleanly instead of indexing part 2^32; the
+                   default trace cap (THVM_ATP_TRACE_MAX) is set high enough in
+                   ATP.wl that real completions don't reach here. *)
+                atpDbgFail["resolveTrace.noParent (raise THVM_ATP_TRACE_MAX)"];
+                Throw[$Failed]];
             (* Cache check: an unset DownValue leaves traceInfo[ti]
                unevaluated (Head == the symbol traceInfo itself).
                A set DownValue evaluates to its stored Association,
@@ -1579,6 +1602,18 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                             parentTe, parentReason, cSide0WlPos,
                             wlEq, wlSide, newCSide0WlPos,
                             sl, st, dir, dirEq, extras},
+                        (* The rewrite rule has no traced TRACE_ORIENT entry
+                           (atp_rewrite_normalize_record stores rule_trace =
+                           r_trace[rule], which is ATP_TRACE_NONE when that rule
+                           slot carries no trace id): ParentB is then NONE, so
+                           the rule cannot be cited as a direct Substitution-
+                           Lemma, and resolveTrace[ParentB] / trace[[ParentB+1]]
+                           would index part 2^32.  Bridge the step with emitNorm
+                           (the sound BFS rewrite path) from the previous chain
+                           link, exactly as the chain-off retry path does. *)
+                        If[ te["ParentB"] === $AtpTraceNone,
+                            pInfo = resolveTrace[te["ParentA"]];
+                            Return[emitNorm[pInfo["Key"], pInfo["Eq"], ruleEq, ti]]];
                         pInfo = resolveTrace[te["ParentA"]];
                         rInfo = resolveTrace[te["ParentB"]];
                         rTe = trace[[te["ParentB"] + 1]];

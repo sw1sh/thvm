@@ -191,6 +191,19 @@ Scan[
     {"THVM_ATP_FLATTERM", "THVM_ATP_KBO_FLAT",
      "THVM_ATP_WMFPA",    "THVM_ATP_CP_INDEX"}];
 
+(* Default the proof-trace cap high enough that real completions (e.g.
+   MeredithAxioms OrAssociativity, ~hundreds of thousands of trace entries
+   with the NORM_STEP chain recorded) do not overflow the buffer.  A CP formed
+   past t_max gets trace = ATP_TRACE_NONE, which orphans its NORM_STEP chain
+   (parent = none) and makes the proof-object reconstruction in ATP_ProofGraph
+   fail with a Part 2^32 error.  The buffer grows on demand (atp_trace_ensure),
+   so a high cap costs no memory until it is actually reached.  The cap is
+   memoized at the engine's first proof call, so set it before then; users can
+   still override THVM_ATP_TRACE_MAX. *)
+If[ Environment["THVM_ATP_TRACE_MAX"] === $Failed ||
+    Environment["THVM_ATP_TRACE_MAX"] === None,
+    SetEnvironment["THVM_ATP_TRACE_MAX" -> "4194304"]];
+
 (* `load` is the LibraryFunctionLoad helper defined in
    WolframInstitute`THVMLink`Private` by THVMLink.wl; alias it here so bare `load[...]`
    in $atpRunProofFn / $atpRunExistFn / ... resolves to the same
