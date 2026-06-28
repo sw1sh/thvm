@@ -2186,6 +2186,30 @@ static u32 wmo_tops_enum(AtpWmOrder *w, u8 tree, Term query_sub,
   return n;
 }
 
+// Enumerate every registered face of `tree` in WM leaf-list order (ll_head ->
+// ll_next), the Mutter-phase yield order (U1_KPsBildenZuRegel step 3: l =? eTT of
+// the tree's faces).  out[].arrival = the leaf-list rank (one per leaf, shared by
+// a leaf's chain entries), matching wmo_leaflist_rank.  This is the ORDER
+// primitive; the single-walk Mutter step still unifies f's whole LHS into each
+// listed face's subterms to decide which actually overlap (the filter) -- that
+// per-leaf overlap test is the walk's job, not this enumerator's.
+__attribute__((unused))
+static u32 wmo_leaflist_enum(AtpWmOrder *w, u8 tree, WmoPartnerHit *out,
+                             u32 max) {
+  u32 n = 0u;
+  u32 rank = 0u;
+  for (WmoLeaf *l = w->tree[tree].ll_head; l != NULL && n < max; l = l->ll_next) {
+    for (u32 c = 0; c < l->n_chain && n < max; c++) {
+      out[n].trace   = l->chain[c].trace;
+      out[n].face    = l->chain[c].face;
+      out[n].arrival = rank;
+      n++;
+    }
+    rank++;
+  }
+  return n;
+}
+
 // Public wrapper: WM MO_GleichungGefunden retrieval rank for one
 // unorientable equation face against a concrete redex subterm.  WM's
 // NormalformMixMost reduces a position by walking the Gleichungsbaum in
