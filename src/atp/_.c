@@ -21305,10 +21305,11 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
     for (u32 h = 0; h < nh; h++) {
       u32 j = sw_trace_to_idx(s, hits[h].trace);
       if (j == 0xffffffffu) continue;
-      if (j == c->i_out) {
-        if (c->o_eq) continue;        // equation: self handled by explicit F/C/G
-        if (p_len == 0u) continue;    // rule: skip the trivial self-root only
-      }
+      // Self-overlaps are NEVER formed in the partner Vater sweep: WM (and the
+      // byte-identical rank path) ranks the i==j self-overlaps AFTER the A/B
+      // partner sweeps, emitted by the explicit F/C/G steps below -- for rules
+      // too, not just equations.  Skip self entirely here.
+      if (j == c->i_out) continue;
       u8 jdr = wmo_trace_dist_rhs(w, hits[h].trace);
       u8 tf  = (u8)(hits[h].face ^ jdr);
       Term lin = thvm_rename_vars(tf ? s->rhs[j] : s->lhs[j], CP_RENAME_OFFSET);
@@ -21414,8 +21415,9 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     u8 f_dr = wmo_trace_dist_rhs(w, s->r_trace[f]);
     Term fl = f_dr ? s->rhs[f] : s->lhs[f];   // WM forward (distinguished) face
     Term fr = f_dr ? s->lhs[f] : s->rhs[f];   // WM reverse face
-    // WM U1 per-fact order: A toplevel(l), B subterm(l), [F self via the trie],
-    // then for a two-faced equation D toplevel(r), E subterm(r), [C/r=?l/G self].
+    // WM U1 per-fact order: A toplevel(l), B subterm(l), F self l=?l, then for a
+    // two-faced equation C self r=?l, D toplevel(r), E subterm(r), G self r=?r.
+    // The self-overlaps ALWAYS follow the partner sweeps (WM ranks i==j last).
     SwVaterCtx va = { s, fl, fr, f, s->r_trace[f], f_eq, 0u, 0u };
     cp_walk_positions(fl, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &va, 0u);
     pushed += va.pushed;                                       // A toplevel(l)
@@ -21426,8 +21428,7 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     // walked the wrong face for a dist_rhs==1 fact and missed the combo2 (r=?l) self
     // at deep positions (the Absorption pos-L.2 self).
     Term sl = s->lhs[f], sr = s->rhs[f];
-    if (f_eq)                                                  // F self l=?l (combo0)
-      sw_self_phase(s, f, sl, sr, sl, sr, f_eq, path, &pushed);
+    sw_self_phase(s, f, sl, sr, sl, sr, f_eq, path, &pushed);  // F self l=?l, ALL facts
     if (two_faced) {
       // C self r=?l (combo2), BEFORE D (Unifikation1.c:1629-1633, after the l<->r
       // swap): the stored rhs overlapped by the stored lhs.  No l=?r (combo1) step.
