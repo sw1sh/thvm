@@ -21349,8 +21349,8 @@ static void sw_mutter_phase(AtpState *s, AtpWmOrder *w, u32 f,
     u32 nh = wmo_leaflist_enum(w, tree, lhits, 8192u);
     for (u32 h = 0; h < nh; h++) {
       u32 j = sw_trace_to_idx(s, lhits[h].trace);
-      if (j == 0xffffffffu || j == f) continue;        // self handled in Vater
-      u8 jdr = wmo_trace_dist_rhs(w, lhits[h].trace);
+      if (j == 0xffffffffu) continue;   // INCLUDE self: WM's subterm sweep has no
+      u8 jdr = wmo_trace_dist_rhs(w, lhits[h].trace);  // MitAllenAusser -> l/r =? eTT(self)
       u8 tf  = (u8)(lhits[h].face ^ jdr);
       Term lo = tf ? s->rhs[j] : s->lhs[j];
       Term ro = tf ? s->lhs[j] : s->rhs[j];
@@ -21383,13 +21383,17 @@ static u32 sw_self_visit(const u32 *p, u32 p_len, void *raw) {
   return c->pushed;
 }
 static void sw_self_phase(AtpState *s, u32 f, Term outer, Term outer_r,
-                          Term inner, Term inner_r, u8 f_eq,
+                          Term inner, Term inner_r, u8 f_eq, u8 root_only,
                           u32 *path, u32 *pushed) {
   SwSelfCtx sc = { s, outer, outer_r,
                    thvm_rename_vars(inner, CP_RENAME_OFFSET),
                    thvm_rename_vars(inner_r, CP_RENAME_OFFSET),
                    s->r_trace[f], f, f_eq, 0u };
-  cp_walk_positions(outer, path, 0u, CP_MAX_DEPTH, sw_self_visit, &sc, 0u);
+  if (root_only)                       // F/C/G are toplevel-only; subterm self
+    sc.pushed += sw_form_push(s, outer, outer_r, sc.lin, sc.rin, path, 0u,
+                              s->r_trace[f], s->r_trace[f], f, f, f_eq, f_eq);
+  else
+    cp_walk_positions(outer, path, 0u, CP_MAX_DEPTH, sw_self_visit, &sc, 0u);
   *pushed += sc.pushed;
 }
 
@@ -21422,22 +21426,19 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     cp_walk_positions(fl, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &va, 0u);
     pushed += va.pushed;                                       // A toplevel(l)
     sw_mutter_phase(s, w, f, fl, fr, f_eq, 0u, path, &pushed); // B subterm(l)
-    // The self-overlap steps F/C/G (WM Term1MitTerm2Unifizieren on the Elter1 copy)
-    // use the STORED faces sl/sr directly -- NOT the dist_rhs-adjusted fl/fr (which
-    // are only for the discrimination-tree partner sweeps A/B/D/E).  Using fl/fr here
-    // walked the wrong face for a dist_rhs==1 fact and missed the combo2 (r=?l) self
-    // at deep positions (the Absorption pos-L.2 self).
-    Term sl = s->lhs[f], sr = s->rhs[f];
-    sw_self_phase(s, f, sl, sr, sl, sr, f_eq, path, &pushed);  // F self l=?l, ALL facts
+    // F/C/G are ROOT-ONLY toplevel self-steps on the WM-distinguished faces fl/fr
+    // (Term1MitTerm2Unifizieren on the Elter1 copy, Unifikation1.c:1620/1631/1661).
+    // The SUBTERM self-overlaps come from the B/E Mutter sweeps (which now include
+    // self).  C is l=?r (combo1) after Elter1Andersherum, NOT r=?l -- combo2 (r=?l)
+    // is produced only by the E Mutter-self, never by an explicit step.
+    sw_self_phase(s, f, fl, fr, fl, fr, f_eq, 1u, path, &pushed);  // F root l=?l (combo0)
     if (two_faced) {
-      // C self r=?l (combo2), BEFORE D (Unifikation1.c:1629-1633, after the l<->r
-      // swap): the stored rhs overlapped by the stored lhs.  No l=?r (combo1) step.
-      sw_self_phase(s, f, sr, sl, sl, sr, f_eq, path, &pushed);
+      sw_self_phase(s, f, fl, fr, fr, fl, f_eq, 1u, path, &pushed);  // C root l=?r (combo1)
       SwVaterCtx vd = { s, fr, fl, f, s->r_trace[f], f_eq, 1u, 0u };
       cp_walk_positions(fr, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vd, 0u);
       pushed += vd.pushed;                                     // D toplevel(r)
       sw_mutter_phase(s, w, f, fr, fl, f_eq, 1u, path, &pushed); // E subterm(r)
-      sw_self_phase(s, f, sr, sl, sr, sl, f_eq, path, &pushed); // G self r=?r (combo3)
+      sw_self_phase(s, f, fr, fl, fr, fl, f_eq, 1u, path, &pushed); // G root r=?r (combo3)
     }
     if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
   }
