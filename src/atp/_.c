@@ -21275,6 +21275,15 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term lin, Term rin,
   for (u32 d = 0; d < p_len; d++) cp.pos[d] = (u8)p[d];
   cp.combo = 0xffu;
   if (atp_cp_gen_gates(s, &cp, 0u, 1u, o_eq, in_eq) == 0u) return 0u;
+  // Stamp the CP_FORM_TRACE geometry: the per-CP push bypasses the batch loop
+  // that normally sets g_cpform_*, so the walk's CPFORM lines would show i=-1.
+  g_cpform_i = i_out; g_cpform_j = i_in;
+  g_cpform_itr = t_out; g_cpform_jtr = t_in;
+  g_cpform_i_or = (i_out < s->n_rules) ? s->r_orient[i_out] : 0xffu;
+  g_cpform_j_or = (i_in  < s->n_rules) ? s->r_orient[i_in]  : 0xffu;
+  g_cpform_combo = 0xffu;
+  g_cpform_pos_len = (u8)p_len;
+  for (u32 d = 0; d < p_len && d < CP_MAX_DEPTH; d++) g_cpform_pos[d] = (u8)p[d];
   return atp_push_cps_traced(s, &cp, 1u, t_out, t_in, i_out, i_in);
 }
 
