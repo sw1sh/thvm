@@ -3524,7 +3524,7 @@ atpStatisticsAssoc[cRes_] := <|
     "Status" -> atpReturnStatus[cRes["Status"]],
     "Steps" -> If[ ListQ[cRes["MainSteps"]], Length[cRes["MainSteps"]], 0],
     "Rules" -> If[ ListQ[cRes["MainRules"]], Length[cRes["MainRules"]], 0],
-    "Trace" -> If[ ListQ[cRes["Trace"]], Length[cRes["Trace"]], 0],
+    "Trace" -> If[ IntegerQ[cRes["NTrace"]], cRes["NTrace"], 0],
     "QueueSize" -> Replace[cRes["NCps"], Except[_Integer] -> 0]
 |>;
 
@@ -3861,7 +3861,19 @@ atpReturnValue[bundle_, "Lemmas"] := atpMainRulesLemmas[bundle["cRes"]];
 atpReturnValue[bundle_, "PreprocessedAxioms"] :=
     holdToInactive /@ bundle["enc"]["AxHCsRaw"];
 atpReturnValue[bundle_, "RelevantAxioms"] := bundle["RelevantAxioms"];
-atpReturnValue[bundle_, "RawTrace"] := bundle["cRes"]["Trace"];
+atpReturnValue[bundle_, "RawTrace"] := With[{cR = bundle["cRes"]},
+    Module[{rw = cR["TraceRaw"], offs = cR["TraceOffsets"]},
+        If[ ! ListQ[offs], Return[$Failed]];
+        Table[
+            Block[{c = offs[[k]], reason, posLen, pos},
+                reason = rw[[c + 1]]; posLen = rw[[c + 6]];
+                pos = If[ posLen === 0, {}, rw[[c + 7 ;; c + 6 + posLen]]];
+                <|"Reason" -> reason, "ParentA" -> rw[[c + 2]],
+                  "ParentB" -> rw[[c + 3]], "LhsRaw" -> rw[[c + 4]],
+                  "RhsRaw" -> rw[[c + 5]], "Pos" -> (pos + 1),
+                  "Side" -> If[ reason === $TraceNormStep, rw[[c + 6 + posLen + 1]], 0],
+                  "Fwd"  -> If[ reason === $TraceNormStep, rw[[c + 6 + posLen + 2]], 1]|>],
+            {k, Length[offs]}]]];
 atpReturnValue[bundle_, "Statistics"] := atpStatisticsAssoc[bundle["cRes"]];
 atpReturnValue[bundle_, "Status"] :=
     atpReturnStatus[bundle["cRes"]["Status"]];

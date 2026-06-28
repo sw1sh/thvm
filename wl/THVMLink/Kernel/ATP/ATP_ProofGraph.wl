@@ -638,26 +638,20 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
        (side, fwd) after pos[] so the WL extractor can re-emit the
        SubstitutionLemma directly from the C engine's recorded chain
        instead of re-deriving the rewrite path by search. *)
-    traceEntries = Table[
-        Block[{reason, pa, pb, l, r, posLen, pos, side, fwd},
-            reason = raw[[cur + 1]]; pa = raw[[cur + 2]];
-            pb = raw[[cur + 3]]; l = raw[[cur + 4]];
-            r = raw[[cur + 5]]; posLen = raw[[cur + 6]];
-            pos = If[ posLen === 0, {},
-                raw[[cur + 7 ;; cur + 6 + posLen]]];
-            cur = cur + 6 + posLen;
-            side = If[ reason === $TraceNormStep, raw[[cur + 1]], 0];
-            fwd  = If[ reason === $TraceNormStep, raw[[cur + 2]], 1];
-            If[ reason === $TraceNormStep, cur = cur + 2 ];
-            <|
-                "Reason" -> reason, "ParentA" -> pa, "ParentB" -> pb,
-                "LhsRaw" -> l, "RhsRaw" -> r,
-                "Pos" -> (pos + 1),
-                "Side" -> side, "Fwd" -> fwd
-            |>
-        ],
+    (* Lazy trace decode: a cheap single pass records each entry's start
+       offset; the full per-entry Association is built on demand
+       (decodeTraceEntry in buildCplDataset, memoized) only for the
+       ~few-hundred proof-path entries the reconstruction reaches -- avoids
+       eagerly building ~nTrace (e.g. 35k) Associations of which ~99% are
+       non-proof record_norm steps. *)
+    {$decT, traceOffsets} = AbsoluteTiming @ Table[
+        Block[{st = cur, reason = raw[[cur + 1]], posLen = raw[[cur + 6]]},
+            cur = cur + 6 + posLen + If[ reason === $TraceNormStep, 2, 0 ];
+            st],
         {nTrace}
     ];
+    If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+        Print["[recon] trace-offset-pass = ", $decT, " s  (nTrace = ", nTrace, ")"]];
     (* MAIN steps block. *)
     {mainSteps, cur} =
         decodeStepsBlock[raw, cur, nSteps, labelToName, idToName];
@@ -678,7 +672,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         "MnfSteps" -> If[ mnfNSteps === 0, {}, mnfSteps],
         "MainRules" -> mainRules,
         "RTrace" -> rTrace,
-        "Trace" -> traceEntries,
+        "TraceRaw" -> raw, "TraceOffsets" -> traceOffsets, "NTrace" -> nTrace,
         "NCps" -> nCps,
         "RecordNorm" -> recordNorm,
         "L2N" -> labelToName, "I2N" -> idToName,
@@ -1033,7 +1027,7 @@ cplReconCp[cEq_, mEq_, pos_, varSyms_] := Block[{
 buildCplDataset[enc_, conjPair_, cRes_] := Catch[
     Block[{$RecursionLimit = 100000, $IterationLimit = 1000000},
     Module[{
-        trace = cRes["Trace"], mainRules = cRes["MainRules"],
+        trace, traceRaw, traceOffsets, decodeTraceEntry, mainRules = cRes["MainRules"],
         rTrace = cRes["RTrace"],
         (* Goal chain: the MNF front chain when the goal was closed by
            the bidirectional MNF search (GREEN side-0 + RED side-1
@@ -1072,6 +1066,23 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         dterm[ri_] := dterm[ri] = decodeAtpTerm[ri, l2n, i2n];
         tL[e_] := dterm[e["LhsRaw"]];
         tR[e_] := dterm[e["RhsRaw"]];
+        (* Lazy per-entry trace decode: build the 8-key Association on demand
+           (memoized) from the raw block at the precomputed offset.  An UpValue
+           on Part makes trace[[ti+1]] decode entry ti transparently, so the
+           reconstruction's ~14 trace[[..]] sites are unchanged but only the
+           proof-path entries (a few hundred of ~nTrace) are ever built. *)
+        traceRaw = cRes["TraceRaw"]; traceOffsets = cRes["TraceOffsets"];
+        Clear[decodeTraceEntry];
+        decodeTraceEntry[k_] := decodeTraceEntry[k] = Block[
+            {c = traceOffsets[[k]], reason, posLen, pos},
+            reason = traceRaw[[c + 1]]; posLen = traceRaw[[c + 6]];
+            pos = If[ posLen === 0, {}, traceRaw[[c + 7 ;; c + 6 + posLen]]];
+            <|"Reason" -> reason, "ParentA" -> traceRaw[[c + 2]],
+              "ParentB" -> traceRaw[[c + 3]], "LhsRaw" -> traceRaw[[c + 4]],
+              "RhsRaw" -> traceRaw[[c + 5]], "Pos" -> (pos + 1),
+              "Side" -> If[ reason === $TraceNormStep, traceRaw[[c + 6 + posLen + 1]], 0],
+              "Fwd"  -> If[ reason === $TraceNormStep, traceRaw[[c + 6 + posLen + 2]], 1]|>];
+        trace /: Part[trace, k_Integer] := decodeTraceEntry[k];
         (* the trace-decoded terms carry bare variable symbols;
            atpEncodeProblem's AxPairs / ConjPair carry Pattern[v, _]
            wrappers -- strip them so every comparison is bare-to-bare
