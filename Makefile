@@ -995,7 +995,7 @@ $(BIN)/test_atp_wolfram_bench_ft_unify: tests/test_atp_wolfram_bench.c $(SRC) | 
 	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
 	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
 	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
-	  -DTHVM_ATPFT_UNIFY \
+	  -DTHVM_ATPFT_UNIFY -DTHVM_ATP_AC \
 	  -o $@ $< $(TEST_LDFLAGS)
 
 # FT-unifier-enabled ATP regression suite -- the full 135624-assertion
