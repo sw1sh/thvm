@@ -156,6 +156,25 @@ typedef struct {
   WmoLeaf *ll_head;
 } WmoTree;
 
+// Multi-entry arrival-list cache for wmo_tops_rank.  Each entry caches one
+// distinct (tree, query-subterm)'s DFS-ordered arrival list (the leaves whose
+// stored face unifies with the query).  The per-CP DFS that fills this is the
+// WM-faithful path's dominant cp-gen cost, and a new fact's ~1000 CPs cycle
+// through only ~dozens of distinct query positions, so an N-way cache turns
+// almost every per-CP DFS into a skip.  WMO_TOPS_ARR_CAP is the per-entry
+// arrival-buffer cap (heap-allocated lazily per slot, ~128KB each).
+#define WMO_TOPS_ARR_CAP 16384u
+#define WMO_RC_N 64u
+typedef struct {
+  u8        valid;
+  u8        tree;               // 0 rules / 1 equations
+  u64       rev;                // tree_rev at which this entry was filled
+  u32       qn;                 // query cell count
+  u32       n_out;              // arrival count held in out[]
+  WmoCell   q[WMO_MAX_CELLS];   // query cells (the cache key)
+  WmoLeaf **out;                // arrival buffer (lazily malloc'd, WMO_TOPS_ARR_CAP)
+} WmoRankCacheEnt;
+
 typedef struct {
   u32 trace;
   u8  tree;                   // 0 = rule tree, 1 = equation tree
@@ -170,28 +189,20 @@ typedef struct AtpWmOrder {
   WmoReg  *reg;
   u32      n_reg, cap_reg;
   u32      rank_misses;       // CPs the ranker could not place (fallback)
-  // Persistent tops-DFS arrival buffer.  wmo_tops_rank runs a fresh DFS
-  // per CP rank query; its arrival array (WMO_TOPS_ARR_CAP pointers, ~128KB)
-  // was malloc/free'd on every call -- a fixed per-CP cost that dominated
-  // the WM-faithful path's CP-generation self-time.  The DFS is never
-  // re-entrant (wmo_dfs only recurses into itself; atp_wmo_rank issues its
-  // two wmo_tops_rank calls sequentially), so one buffer reused across all
-  // calls is byte-identical to per-call allocation.  Lazily sized on first
-  // use; freed in atp_wmo_free.
-  void   **tops_arr;
-  // Single-entry arrival-list memo for wmo_tops_rank (see the DFS-skip
-  // there).  The cached arrivals live in tops_arr; these fields are the
-  // key (tree revision + tree id + query cells) and the arrival count.
-  // tree_rev is bumped by every tree/chain mutation (wmo_register /
-  // atp_wmo_remove_trace / atp_wmo_rename_trace), invalidating the memo.
+  // Multi-entry arrival-list cache for wmo_tops_rank (struct WmoRankCacheEnt
+  // above).  wmo_tops_rank runs a fresh discrimination-tree DFS per CP rank
+  // query -- the WM-faithful path's dominant cp-gen self-time.  A new fact's
+  // ~1000 CPs cycle through only ~dozens of distinct (tree, query-subterm)
+  // positions, so caching the N most-recent distinct queries' arrival lists
+  // turns nearly every per-CP DFS into a skip (the old single entry caught
+  // only an immediately-repeated query, ~58%).  tree_rev is bumped by every
+  // tree/chain mutation (wmo_register / atp_wmo_remove_trace /
+  // atp_wmo_rename_trace); each entry gates rev==tree_rev, so a mutation
+  // invalidates the whole cache -- byte-identical to recomputing.
   u64      tree_rev;          // ++ on every tree/chain mutation
-  u8       no_rankcache;      // THVM_WMO_NO_RANKCACHE: disable the memo
-  u8       rc_valid;          // a memo entry is present
-  u8       rc_tree;           // cached query's tree (0 rules / 1 equations)
-  u64      rc_rev;            // tree_rev at which the entry was filled
-  u32      rc_qn;             // cached query cell count
-  u32      rc_n_out;          // cached arrival count (held in tops_arr)
-  WmoCell  rc_q[WMO_MAX_CELLS];   // cached query cells
+  u8       no_rankcache;      // THVM_WMO_NO_RANKCACHE: disable the cache
+  u32      rc_next;           // round-robin eviction cursor
+  WmoRankCacheEnt rc[WMO_RC_N];
   // WM-faithful AltesBlattPolieren construction (use_wm_trie_faithful): when
   // set, every BlattAufgeteilt parallel jump splices immediately AFTER the
   // surviving model in the start node's outgoing list (DSBaumOperationen.c
@@ -1576,7 +1587,7 @@ static void atp_wmo_free(AtpWmOrder *w) {
   for (u32 t = 0; t < 2u; t++) wmo_free_subtree(w->tree[t].root, 0u);
   for (u32 r = 0; r < w->n_reg; r++) free(w->reg[r].cells);
   free(w->reg);
-  free(w->tops_arr);
+  for (u32 e = 0; e < WMO_RC_N; e++) free(w->rc[e].out);
   free(w);
 }
 
@@ -2035,57 +2046,55 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
   // descent by query-cell count; a query face can hold up to
   // WMO_MAX_CELLS (768) cells, so 4000 covers the deepest query without
   // cutting a descent short of its target leaf.
-  enum { WMO_TOPS_ARR_CAP = 16384u };
-  // Reuse the per-AtpWmOrder arrival buffer instead of malloc/free per call
-  // (the DFS is non-re-entrant; see AtpWmOrder.tops_arr).  Lazily allocated.
-  if (w->tops_arr == NULL) {
-    w->tops_arr = (void **)malloc(WMO_TOPS_ARR_CAP * sizeof(WmoLeaf *));
-    if (w->tops_arr == NULL) return 0u;
+  // N-way arrival-list cache (struct WmoRankCacheEnt).  Look for a live entry
+  // (rev still equal to tree_rev) matching this (tree, query); a hit reuses the
+  // stored arrival list in place and skips the whole tree walk.  The arrival
+  // list is a pure function of (tree structure, query cells); the partner
+  // (trace, face) scan below reads each arrived leaf's chain.  Any overflowing
+  // arrival list (n_out at the cap) is still a valid entry: out[] holds the
+  // truncated prefix the DFS would re-derive identically, and the scan only
+  // reads out[0..n_out).
+  u32 rc_hit = WMO_RC_N;
+  if (!w->no_rankcache) {
+    for (u32 e = 0; e < WMO_RC_N; e++) {
+      WmoRankCacheEnt *re = &w->rc[e];
+      if (re->valid && re->rev == w->tree_rev && re->tree == tree &&
+          re->qn == qn &&
+          memcmp(re->q, q, (size_t)qn * sizeof(WmoCell)) == 0) {
+        rc_hit = e;
+        break;
+      }
+    }
   }
-  WmoLeaf **arr = (WmoLeaf **)w->tops_arr;
-  WmoDfs d = { q, qn, arr, 0u, WMO_TOPS_ARR_CAP };
-
-  // Arrival-list memo (single entry).  The DFS fills d.out[] (= tops_arr)
-  // with the arrival-ordered list of leaves whose stored face unifies
-  // with this query subterm -- a pure function of (tree structure, query
-  // cells); the partner (trace, face) scan that follows reads each
-  // arrived leaf's chain.  Within one new-fact CP batch the rank loop
-  // (thvm_atp_generate_cps_wm) issues this DFS once per CP with NO tree
-  // mutation in between, and consecutive CPs very often repeat the same
-  // (tree, query subterm) with only the partner differing (the two-face
-  // co-rank issues two calls with an identical query; the eTT/tops
-  // enumeration repeats one overlap position across partners).  Measured
-  // 52-65% of calls repeat the immediately-prior (tree, q).  The result
-  // stays in tops_arr between calls, so a repeat reuses it in place and
-  // skips the whole tree walk, re-running only the cheap chain scan.  The
-  // key carries tree_rev, bumped on every insert/remove/rename (the only
-  // tree/chain mutators), so a stale entry can never be served --
-  // byte-identical to recomputing.  Gated by THVM_WMO_NO_RANKCACHE for
-  // the ON-vs-OFF identity sweep.
-  u8 cache_hit = !w->no_rankcache && w->rc_valid &&
-                 w->rc_rev == w->tree_rev && w->rc_tree == tree &&
-                 w->rc_qn == qn &&
-                 memcmp(w->rc_q, q, (size_t)qn * sizeof(WmoCell)) == 0;
-  if (cache_hit) {
-    d.n_out = w->rc_n_out;  // tops_arr already holds this query's arrivals
+  WmoDfs d;
+  if (rc_hit < WMO_RC_N) {
+    d = (WmoDfs){ q, qn, w->rc[rc_hit].out, w->rc[rc_hit].n_out, WMO_TOPS_ARR_CAP };
   } else {
+    // Miss: run the DFS into a slot buffer and record it.  Round-robin
+    // eviction; when the cache is disabled (THVM_WMO_NO_RANKCACHE) slot 0 is a
+    // plain scratch buffer that is never recorded, so every call re-walks --
+    // the ON-vs-OFF identity behaviour.
+    u32 slot = w->no_rankcache ? 0u : w->rc_next;
+    if (!w->no_rankcache) w->rc_next = (w->rc_next + 1u) % WMO_RC_N;
+    if (w->rc[slot].out == NULL) {
+      w->rc[slot].out =
+          (WmoLeaf **)malloc(WMO_TOPS_ARR_CAP * sizeof(WmoLeaf *));
+      if (w->rc[slot].out == NULL) return 0u;
+    }
+    d = (WmoDfs){ q, qn, w->rc[slot].out, 0u, WMO_TOPS_ARR_CAP };
     WmoUnif u;
     memset(&u, 0, sizeof u);
     if (w->tree[tree].root != NULL) {
       // dispatch from the root: kids keyed by cell 0
       wmo_dfs(&d, w->tree[tree].root, 0u, 0u, 0xffffffffu, &u, 4000u);
     }
-    // Record this DFS as the memo entry.  An overflowing arrival list
-    // (d.n_out at the cap) is recorded but the entry can still be reused:
-    // d.out holds the same truncated prefix the DFS would re-derive
-    // identically, and the partner scan only reads d.out[0..n_out).
     if (!w->no_rankcache) {
-      w->rc_valid = 1u;
-      w->rc_rev = w->tree_rev;
-      w->rc_tree = tree;
-      w->rc_qn = qn;
-      memcpy(w->rc_q, q, (size_t)qn * sizeof(WmoCell));
-      w->rc_n_out = d.n_out;
+      w->rc[slot].valid = 1u;
+      w->rc[slot].tree  = tree;
+      w->rc[slot].rev   = w->tree_rev;
+      w->rc[slot].qn    = qn;
+      memcpy(w->rc[slot].q, q, (size_t)qn * sizeof(WmoCell));
+      w->rc[slot].n_out = d.n_out;
     }
   }
   // Arrival-dump probe (THVM_WMO_ARRDUMP): emit the eq-tree DFS leaf-arrival
