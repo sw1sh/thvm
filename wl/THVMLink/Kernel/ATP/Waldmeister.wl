@@ -167,9 +167,13 @@ TWaldmeisterProof[problemFile_String, opts : OptionsPattern[]] /;
             Return[$Failed]
         ];
         fwk = wmMathlinkPath[OptionValue["MathlinkPath"]];
+        (* Match FEQ/ELProver: ELProver.c prepends "-auto" so the Automodus
+           heuristic picks the goal-directed shortcut (a shorter proof); bare
+           wmcli does blind completion and finds a longer proof.  Add -auto so
+           Method->"WaldmeisterProcess" matches FindEquationalProof. *)
         cmd = StringJoin[
             "DYLD_FRAMEWORK_PATH='", fwk, "' ",
-            bin, " ", problemFile, " 2>&1"
+            bin, " -auto ", problemFile, " 2>&1"
         ];
         {secs, out} = AbsoluteTiming @ RunProcess[
             {"sh", "-c", cmd}, "StandardOutput"
@@ -185,7 +189,7 @@ TWaldmeisterProof[problemFile_String, opts : OptionsPattern[]] /;
         derivation = If[ status === "Proved", parseProtocol[out], {}];
         <|
             "Status" -> status,
-            "Strategy" -> "waldmeister-default",
+            "Strategy" -> "waldmeister-auto",
             "Seconds" -> N @ Round[secs, 0.01],
             "ProofLength" -> Length[derivation],
             "Inferences" -> derivation,

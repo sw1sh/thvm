@@ -646,6 +646,27 @@ liftToProofObject[assoc_Association] := Block[
        <|Statement, Proof|>).  Augments the Proof field in-place;
        leaves Axioms/Hypotheses/CPLs untouched. *)
     prfList = augmentSingleRewriteEntries[prfList, varSyms];
+    (* Drop degenerate True-closure SubstitutionLemmas: a SubstitutionLemma
+       whose Statement collapsed to True is the final goal-reduction step, which
+       FindEquationalProof folds into the Conclusion rather than emitting as a
+       separate lemma.  Before removing them, re-point every reference (the
+       Conclusion's Construct, or a later lemma's Input/Construct) onto the
+       True-lemma's OWN predecessor (its Input, else Construct), chaining through
+       consecutive True-closures, so no pointer is left dangling.  Then remove
+       the True entries.  Makes Method->"WaldmeisterProcess" match FEQ's proof
+       length while keeping the proof DAG well-formed. *)
+    Module[{relinkAssoc, trueSLs, predOf, resolve, relink},
+        trueSLs = Cases[prfList,
+            (k_ -> e_) /; First[k] === "SubstitutionLemma" && TrueQ[e["Statement"]] :> k];
+        If[ trueSLs =!= {},
+            relinkAssoc = Association[prfList];
+            predOf[k_] := With[{pr = Lookup[relinkAssoc[k], "Proof", <||>]},
+                Lookup[pr, "Input", Lookup[pr, "Construct", k]]];
+            resolve[k_] := FixedPoint[If[MemberQ[trueSLs, #], predOf[#], #] &, k, 32];
+            relink = (# -> resolve[#]) & /@ trueSLs;
+            prfList = DeleteCases[prfList, (k_ -> _) /; MemberQ[trueSLs, k]];
+            prfList = prfList /. relink
+        ]];
     ProofObject[
         "EquationalLogic",
         inactivateEqual @ withVariablePatterns[goalLifted, varSyms],
