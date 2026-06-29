@@ -81,20 +81,19 @@ fxLinearFused[x_, q_Association] := fxLinear[x, q]
    the weight directly (Transpose / Dimensions) -- an int8 Association would break
    it -- and their input temb carries a symbolic-M kvar (no resolvable dequant row
    count); they are tiny M=1 matmuls with no q8 payoff, so leave them bf16. *)
-fxQuantizableQ[name_String, dims_List] :=
-    Length[dims] === 2 && Min[dims] >= 2048 &&
-    ! StringContainsQ[name, "modulation" | "norm_out" | "timestep_embedder"];
+fxQuantizableQ[name_String, dims_List] := Length[dims] === 2 && Min[dims] >= 2048 && ! StringContainsQ[name, "modulation" | "norm_out" | "timestep_embedder"];
 
 fxQuantizeWeight[w_TTerm] := With[{shape = Dimensions[w]},
     Module[{sumShape, maxsq, rms, scale, inv, wq},
         sumShape = ReplacePart[shape, Length[shape] -> 1];       (* {out, 1} *)
         maxsq = TUOpReshape[TUOpReduce[w * w, Length[shape] - 1, "MAX"], sumShape];
         rms   = Sqrt[maxsq + 1.*^-12];                           (* max|w| per row *)
-        scale = rms * (1./127.);                                 (* {out, 1} *)
+        scale = rms * (1. / 127.);                                 (* {out, 1} *)
         inv   = TUOpRecip[scale];                                (* exact 1/scale *)
         wq    = TUOpCast[w * TUOpExpand[inv, shape], "i8"];      (* truncate to int8 *)
-        <|"q" -> TRealize[wq],
-          "s" -> TRealize[TUOpCast[TUOpReshape[scale, {First[shape]}], "bf16"]]|>]]
+        <|"q" -> TRealize[wq], "s" -> TRealize[TUOpCast[TUOpReshape[scale, {First[shape]}], "bf16"]]|>
+    ]
+]
 
 (* q8 linear: int8 matmul on the TC tiled path (the Cast->bf16 is folded into
    the kernel B-staging), realised, then dequantised by the per-output-channel
@@ -118,7 +117,8 @@ fxLinear[x_, q_Association] := Module[{xr, mm, outShape},
        concrete-M activation; the temb-fed ones (symbolic-M) are excluded upstream. *)
     outShape = ReplacePart[Dimensions[xr], -1 -> First[Dimensions[q["q"]]]];
     (* scale-multiply left UNREALIZED so it fuses into the consumer kernel. *)
-    TUOpMul[mm, TUOpExpand[TUOpReshape[q["s"], {1, Last[outShape]}], outShape]]]
+    TUOpMul[mm, TUOpExpand[TUOpReshape[q["s"], {1, Last[outShape]}], outShape]]
+]
 
 (* --- affine-free LayerNorm over the last axis (FLUX block norms use
        elementwise_affine=False; the modulation supplies scale/shift).  This is
@@ -133,12 +133,13 @@ fxLayerNorm[x_, eps_] := TLayerNorm[x, eps]
        row and writes denormals into the rest (the TLayerNormAffine caveat). --- *)
 fxModulate[x_, shift_, scale_, eps_] := With[{s = Dimensions[x], ln = TLayerNorm[x, eps]},
     With[{scB = TUOpExpand[scale, s], shB = TUOpExpand[shift, s]},
-        ln * (scB + 1) + shB]]
+        ln * (scB + 1) + shB
+    ]
+]
 
 (* --- gated residual: x + gate * y; gate {1,dim} EXPAND'd over the seq axis
        (same numel-cycle caveat as fxModulate). --- *)
-fxGateAdd[x_, gate_, y_] := With[{s = Dimensions[y]},
-    x + TUOpExpand[gate, s] * y]
+fxGateAdd[x_, gate_, y_] := With[{s = Dimensions[y]}, x + TUOpExpand[gate, s] * y]
 
 (* --- DOUBLE-stream block (MMDiT).  img0/txt0 {Simg/Stxt, dim}; mods is the
        per-block modulation vectors (post-SiLU-Linear) keyed
@@ -154,11 +155,9 @@ fxGateAdd[x_, gate_, y_] := With[{s = Dimensions[y]},
        -- TRealize[{img, txt}] -- not per root.  A per-root realize re-lifts the
        shared chain into a duplicate kernel set (94 vs 58 kernels/block; same
        output). --- *)
-fxDoubleBlock[img0_, txt0_, mods_, ropeCos_, ropeSin_, W_, cfg_] := Module[
-    {h, dh, eps, scale, simg, stxt, dim, imgN, txtN, qi, ki, vi, qt, kt, vt,
-     Q, K, V, rc, rs, ctx, ctxT, ctxI, img, txt, imgN2, txtN2},
-    h = cfg["heads"];  dh = cfg["head_dim"];  eps = cfg["eps"];  scale = 1/Sqrt[N[dh]];
-    simg = Dimensions[img0][[1]];  stxt = Dimensions[txt0][[1]];  dim = h*dh;
+fxDoubleBlock[img0_, txt0_, mods_, ropeCos_, ropeSin_, W_, cfg_] := Module[{h, dh, eps, scale, simg, stxt, dim, imgN, txtN, qi, ki, vi, qt, kt, vt, Q, K, V, rc, rs, ctx, ctxT, ctxI, img, txt, imgN2, txtN2},
+    h = cfg["heads"];  dh = cfg["head_dim"];  eps = cfg["eps"];  scale = 1 / Sqrt[N[dh]];
+    simg = Dimensions[img0][[1]];  stxt = Dimensions[txt0][[1]];  dim = h * dh;
     (* attention: modulate, project, per-head RMSNorm (v unnormed) *)
     imgN = fxModulate[img0, mods["img_shift_msa"], mods["img_scale_msa"], eps];
     txtN = fxModulate[txt0, mods["txt_shift_msa"], mods["txt_scale_msa"], eps];
@@ -179,12 +178,11 @@ fxDoubleBlock[img0_, txt0_, mods_, ropeCos_, ropeSin_, W_, cfg_] := Module[
     txt = fxGateAdd[txt0, mods["txt_gate_msa"], fxLinear[ctxT, W["to_add_out"]]];
     (* SwiGLU MLP per stream *)
     imgN2 = fxModulate[img, mods["img_shift_mlp"], mods["img_scale_mlp"], eps];
-    img = fxGateAdd[img, mods["img_gate_mlp"],
-        fxLinearFused[TSwiGLU[fxLinear[imgN2, W["ff_linear_in"]]], W["ff_linear_out"]]];
+    img = fxGateAdd[img, mods["img_gate_mlp"], fxLinearFused[TSwiGLU[fxLinear[imgN2, W["ff_linear_in"]]], W["ff_linear_out"]]];
     txtN2 = fxModulate[txt, mods["txt_shift_mlp"], mods["txt_scale_mlp"], eps];
-    txt = fxGateAdd[txt, mods["txt_gate_mlp"],
-        fxLinearFused[TSwiGLU[fxLinear[txtN2, W["ffc_linear_in"]]], W["ffc_linear_out"]]];
-    {img, txt}]
+    txt = fxGateAdd[txt, mods["txt_gate_mlp"], fxLinearFused[TSwiGLU[fxLinear[txtN2, W["ffc_linear_in"]]], W["ffc_linear_out"]]];
+    {img, txt}
+]
 
 (* --- SINGLE-stream block (parallel ViT-22B): the QKV projections are fused
        with the FF input projection (to_qkv_mlp_proj {3*dim + 2*mlp, dim}) and
@@ -192,10 +190,9 @@ fxDoubleBlock[img0_, txt0_, mods_, ropeCos_, ropeSin_, W_, cfg_] := Module[
        (to_out {dim, dim + mlp}).  x0 {S, dim} is the ALREADY [txt; img]-concat
        sequence; mod is one shift/scale/gate; one gated residual.  Op-order per
        diffusers Flux2ParallelSelfAttnProcessor. --- *)
-fxSingleBlock[x0_, mod_, ropeCos_, ropeSin_, W_, cfg_] := Module[
-    {h, dh, eps, scale, s, dim, qkvw, xn, qkvmlp, qkv, mlp, q, k, v, rc, rs, attn, mlpG},
-    h = cfg["heads"];  dh = cfg["head_dim"];  eps = cfg["eps"];  scale = 1/Sqrt[N[dh]];
-    s = Dimensions[x0][[1]];  dim = h*dh;
+fxSingleBlock[x0_, mod_, ropeCos_, ropeSin_, W_, cfg_] := Module[{h, dh, eps, scale, s, dim, qkvw, xn, qkvmlp, qkv, mlp, q, k, v, rc, rs, attn, mlpG},
+    h = cfg["heads"];  dh = cfg["head_dim"];  eps = cfg["eps"];  scale = 1 / Sqrt[N[dh]];
+    s = Dimensions[x0][[1]];  dim = h * dh;
     xn     = fxModulate[x0, mod["shift"], mod["scale"], eps];
     (* realize the fused projection: qkv + mlp are both shrinks of it, so the
        attention and MLP paths would otherwise each re-lift this big matmul into
@@ -214,7 +211,8 @@ fxSingleBlock[x0_, mod_, ropeCos_, ropeSin_, W_, cfg_] := Module[
     mlpG = TSwiGLU[mlp];                                         (* {S, mlp} *)
     (* realize the joined attn|mlp before to_out: it feeds the final matmul's
        contraction operand, so a leaf read keeps that lift shallow. *)
-    fxGateAdd[x0, mod["gate"], fxLinearFused[TRealize @ Join[attn, mlpG, 2], W["to_out"]]]]
+    fxGateAdd[x0, mod["gate"], fxLinearFused[TRealize @ Join[attn, mlpG, 2], W["to_out"]]]
+]
 
 (* ============================================================
    Full transformer forward (loop 5 double + 20 single blocks).
@@ -237,57 +235,82 @@ fxSingleBlock[x0_, mod_, ropeCos_, ropeSin_, W_, cfg_] := Module[
    Dimensions[v]/TTensorDType[v] return $Failed/Missing in a JIT capture (the kvar
    is unresolved at graph-build time) -- which poisons the whole modulation.  w is
    kvar-free, so TLastDim[w]/TDType[w] are always concrete. *)
-fxModLinear[v_, w_] := TMatMul[
-    Join[v, TZeros[{7, Last[Dimensions[w]]}], 1], Transpose[w]][[1 ;; 1]]
+fxModLinear[v_, w_] := TMatMul[Join[v, TZeros[{7, Last[Dimensions[w]]}], 1], Transpose[w]][[1 ;; 1]]
 
 (* --- Flux2Modulation: SiLU(temb) -> Linear(modW) -> chunk(3*sets) into a
        list of {1,dim} vectors, in order (shift,scale,gate) per set.  temb is
        {1,dim}; modW is {sets*3*dim, dim} (shared across all blocks). --- *)
 fxModChunks[temb_, modW_, sets_] := Module[{d, mod},
-    d   = Last[Dimensions[modW]] ;                          (* dim: from the kvar-free
+    d   = Last[Dimensions[modW]];                          (* dim: from the kvar-free
         weight, NOT Dimensions[temb] (the captured temb has a symbolic-M kvar, so
         its shape query returns $Failed at graph-build time). *)
     mod = fxModLinear[TSiLU[temb], modW];                   (* {1, sets*3*d} *)
-    Table[mod[[All, (i - 1) d + 1 ;; i d]], {i, 3 sets}]]
+    Table[mod[[All, (i - 1) d + 1 ;; i d]], {i, 3 sets}]
+]
 
 (* --- AdaLayerNormContinuous (norm_out): emb=Linear(SiLU(temb)); the diffusers
        chunk is (scale, shift); out = (1+scale)*LayerNorm(x) + shift. --- *)
 fxNormOut[x_, temb_, normW_, eps_] := With[{d = Last[Dimensions[normW]], emb = fxModLinear[TSiLU[temb], normW]},
     (* d (dim) from the kvar-free normW {2*dim,dim}, NOT Dimensions[x] (x can carry a
        symbolic-seq kvar in a JIT capture -> $Failed shape query). *)
-    fxModulate[x, emb[[All, d + 1 ;; 2 d]], emb[[All, 1 ;; d]], eps]]
+    fxModulate[x, emb[[All, d + 1 ;; 2 d]], emb[[All, 1 ;; d]], eps]
+]
 
 (* assemble a double-block mods Association from the 6 shared img/txt chunks *)
 fxDoubleMods[dImg_, dTxt_] := <|
-    "img_shift_msa" -> dImg[[1]], "img_scale_msa" -> dImg[[2]], "img_gate_msa" -> dImg[[3]],
-    "img_shift_mlp" -> dImg[[4]], "img_scale_mlp" -> dImg[[5]], "img_gate_mlp" -> dImg[[6]],
-    "txt_shift_msa" -> dTxt[[1]], "txt_scale_msa" -> dTxt[[2]], "txt_gate_msa" -> dTxt[[3]],
-    "txt_shift_mlp" -> dTxt[[4]], "txt_scale_mlp" -> dTxt[[5]], "txt_gate_mlp" -> dTxt[[6]]|>
+    "img_shift_msa" -> dImg[[1]],
+    "img_scale_msa" -> dImg[[2]],
+    "img_gate_msa" -> dImg[[3]],
+    "img_shift_mlp" -> dImg[[4]],
+    "img_scale_mlp" -> dImg[[5]],
+    "img_gate_mlp" -> dImg[[6]],
+    "txt_shift_msa" -> dTxt[[1]],
+    "txt_scale_msa" -> dTxt[[2]],
+    "txt_gate_msa" -> dTxt[[3]],
+    "txt_shift_mlp" -> dTxt[[4]],
+    "txt_scale_mlp" -> dTxt[[5]],
+    "txt_gate_mlp" -> dTxt[[6]]
+|>
 
 (* per-block weight Associations from a name->TTerm loader wf (diffusers names) *)
-fxDblW[wf_, i_] := With[{p = "transformer_blocks." <> ToString[i] <> "."}, <|
-    "to_q" -> wf[p <> "attn.to_q.weight"], "to_k" -> wf[p <> "attn.to_k.weight"], "to_v" -> wf[p <> "attn.to_v.weight"],
-    "add_q_proj" -> wf[p <> "attn.add_q_proj.weight"], "add_k_proj" -> wf[p <> "attn.add_k_proj.weight"], "add_v_proj" -> wf[p <> "attn.add_v_proj.weight"],
-    "norm_q" -> wf[p <> "attn.norm_q.weight"], "norm_k" -> wf[p <> "attn.norm_k.weight"],
-    "norm_added_q" -> wf[p <> "attn.norm_added_q.weight"], "norm_added_k" -> wf[p <> "attn.norm_added_k.weight"],
-    "to_out_0" -> wf[p <> "attn.to_out.0.weight"], "to_add_out" -> wf[p <> "attn.to_add_out.weight"],
-    "ff_linear_in" -> wf[p <> "ff.linear_in.weight"], "ff_linear_out" -> wf[p <> "ff.linear_out.weight"],
-    "ffc_linear_in" -> wf[p <> "ff_context.linear_in.weight"], "ffc_linear_out" -> wf[p <> "ff_context.linear_out.weight"]|>]
+fxDblW[wf_, i_] := With[{p = "transformer_blocks." <> ToString[i] <> "."},
+    <|
+        "to_q" -> wf[p <> "attn.to_q.weight"],
+        "to_k" -> wf[p <> "attn.to_k.weight"],
+        "to_v" -> wf[p <> "attn.to_v.weight"],
+        "add_q_proj" -> wf[p <> "attn.add_q_proj.weight"],
+        "add_k_proj" -> wf[p <> "attn.add_k_proj.weight"],
+        "add_v_proj" -> wf[p <> "attn.add_v_proj.weight"],
+        "norm_q" -> wf[p <> "attn.norm_q.weight"],
+        "norm_k" -> wf[p <> "attn.norm_k.weight"],
+        "norm_added_q" -> wf[p <> "attn.norm_added_q.weight"],
+        "norm_added_k" -> wf[p <> "attn.norm_added_k.weight"],
+        "to_out_0" -> wf[p <> "attn.to_out.0.weight"],
+        "to_add_out" -> wf[p <> "attn.to_add_out.weight"],
+        "ff_linear_in" -> wf[p <> "ff.linear_in.weight"],
+        "ff_linear_out" -> wf[p <> "ff.linear_out.weight"],
+        "ffc_linear_in" -> wf[p <> "ff_context.linear_in.weight"],
+        "ffc_linear_out" -> wf[p <> "ff_context.linear_out.weight"]
+    |>
+]
 
-fxSglW[wf_, i_] := With[{p = "single_transformer_blocks." <> ToString[i] <> "."}, <|
-    "to_qkv_mlp_proj" -> wf[p <> "attn.to_qkv_mlp_proj.weight"], "to_out" -> wf[p <> "attn.to_out.weight"],
-    "norm_q" -> wf[p <> "attn.norm_q.weight"], "norm_k" -> wf[p <> "attn.norm_k.weight"]|>]
+fxSglW[wf_, i_] := With[{p = "single_transformer_blocks." <> ToString[i] <> "."},
+    <|
+        "to_qkv_mlp_proj" -> wf[p <> "attn.to_qkv_mlp_proj.weight"],
+        "to_out" -> wf[p <> "attn.to_out.weight"],
+        "norm_q" -> wf[p <> "attn.norm_q.weight"],
+        "norm_k" -> wf[p <> "attn.norm_k.weight"]
+    |>
+]
 
 (* --- the full transformer.  hidden0 {S_img, in_ch}; enc0 {S_txt, joint_dim};
        temb {1, dim}; ropeCos/Sin {S_txt+S_img, head_dim} ([txt;img] order);
        wf a name->TTerm loader.  Eager block-by-block realize bounds memory
        (each fxLinear materialises its f32 weight cast).  Returns {S_img, out_ch}. --- *)
-fxTransformer[hidden0_, enc0_, temb_, ropeCos_, ropeSin_, wf_, cfg_] := Module[
-    {eps, nD, nS, stxt, mods, smod, hidden, enc, ss},
+fxTransformer[hidden0_, enc0_, temb_, ropeCos_, ropeSin_, wf_, cfg_] := Module[{eps, nD, nS, stxt, mods, smod, hidden, enc, ss},
     eps = cfg["eps"];  nD = cfg["num_double"];  nS = cfg["num_single"];
     stxt = Dimensions[enc0][[1]];
-    mods = fxDoubleMods[fxModChunks[temb, wf["double_stream_modulation_img.linear.weight"], 2],
-                        fxModChunks[temb, wf["double_stream_modulation_txt.linear.weight"], 2]];
+    mods = fxDoubleMods[fxModChunks[temb, wf["double_stream_modulation_img.linear.weight"], 2], fxModChunks[temb, wf["double_stream_modulation_txt.linear.weight"], 2]];
     ss   = fxModChunks[temb, wf["single_stream_modulation.linear.weight"], 1];
     smod = <|"shift" -> ss[[1]], "scale" -> ss[[2]], "gate" -> ss[[3]]|>;
     hidden = TRealize @ fxLinear[hidden0, wf["x_embedder.weight"]];      (* {S_img, dim} *)
@@ -303,7 +326,8 @@ fxTransformer[hidden0_, enc0_, temb_, ropeCos_, ropeSin_, wf_, cfg_] := Module[
     hidden = TRealize @ Join[enc, hidden, 1];                             (* {S_txt+S_img, dim} *)
     Do[ hidden = TRealize @ fxSingleBlock[hidden, smod, ropeCos, ropeSin, fxSglW[wf, i], cfg], {i, 0, nS - 1}];
     hidden = hidden[[stxt + 1 ;; Dimensions[hidden][[1]]]];               (* drop text *)
-    fxLinear[fxNormOut[hidden, temb, wf["norm_out.linear.weight"], eps], wf["proj_out.weight"]]]
+    fxLinear[fxNormOut[hidden, temb, wf["norm_out.linear.weight"], eps], wf["proj_out.weight"]]
+]
 
 End[];
 

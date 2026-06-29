@@ -34,28 +34,20 @@
      A future DPLL(T) shell on top will turn this into a real
      SMT solver. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
 
-GeneralUtilities`SetUsage[TSatEUF, "TSatEUF[eqs$, diseqs$] decides the quantifier-free first-order theory of equality with uninterpreted functions (QF_UF) via congruence closure, where eqs$ is a list of equalities lhs$ == rhs$ and diseqs$ a list of disequalities lhs$ != rhs$.
+SetUsage[TSatEUF, "TSatEUF[eqs$, diseqs$] decides the quantifier-free first-order theory of equality with uninterpreted functions (QF_UF) via congruence closure, where eqs$ is a list of equalities lhs$ == rhs$ and diseqs$ a list of disequalities lhs$ != rhs$.
 Returns an Association keyed by \"Status\" (\"SAT\" or \"UNSAT\"); on SAT a \"Classes\" key lists the inferred equivalence classes of subterms, on UNSAT a \"Witness\" key names the disequality whose two sides collapsed."];
 
-TFindProof::nonground =
-    "TFindProof Method -> \"SMT\" skipping non-ground input: the term `1` " <>
-    "contains a Pattern[]/Blank[] variable.  Congruence closure is a " <>
-    "quantifier-free decision procedure; use the default completion engine " <>
-    "for variable-bearing axioms.";
+TFindProof::nonground = "TFindProof Method -> \"SMT\" skipping non-ground input: the term `1` " <> "contains a Pattern[]/Blank[] variable.  Congruence closure is a " <> "quantifier-free decision procedure; use the default completion engine " <> "for variable-bearing axioms.";
 
-TFindProof::noconjecture =
-    "TFindProof Method -> \"SMT\" requires a conjecture in the input; got " <>
-    "axioms only.";
+TFindProof::noconjecture = "TFindProof Method -> \"SMT\" requires a conjecture in the input; got " <> "axioms only.";
 
-GeneralUtilities`SetUsage[TSmtDecide, "TSmtDecide[formula$] decides a quantifier-free Boolean combination of equality atoms (Equal or Unequal) via lazy DPLL(T): atom-abstraction, a SatisfiabilityInstances propositional kernel, and congruence closure as the theory solver.
+SetUsage[TSmtDecide, "TSmtDecide[formula$] decides a quantifier-free Boolean combination of equality atoms (Equal or Unequal) via lazy DPLL(T): atom-abstraction, a SatisfiabilityInstances propositional kernel, and congruence closure as the theory solver.
 Returns an Association keyed by \"Status\" (\"SAT\" or \"UNSAT\"); on SAT a \"Model\" key gives a satisfying atom assignment (each atom to True or False) certified by congruence closure.
 Handles the And, Or, Not, Implies, Equivalent, and Xor combinators."];
 
-TSatEUF::badin =
-    "TSatEUF inputs must be lists of equalities (HoldPattern[Equal[_,_]]) " <>
-    "and disequalities (HoldPattern[Unequal[_,_]]); got `1` / `2`.";
+TSatEUF::badin = "TSatEUF inputs must be lists of equalities (HoldPattern[Equal[_,_]]) " <> "and disequalities (HoldPattern[Unequal[_,_]]); got `1` / `2`.";
 
 Begin["`Private`"];
 
@@ -113,13 +105,9 @@ ccFind[t_] := Block[{p = $parent[t]},
 ccUnion[a_, b_] := Block[{ra = ccFind[a], rb = ccFind[b]},
     If[ ra === rb,
         Null,
-        If[ $rank[ra] < $rank[rb],
-            {ra, rb} = {rb, ra}
-        ];
+        If[$rank[ra] < $rank[rb], {ra, rb} = {rb, ra}];
         $parent[rb] = ra;
-        If[ $rank[ra] === $rank[rb],
-            $rank[ra] = $rank[ra] + 1
-        ];
+        If[$rank[ra] === $rank[rb], $rank[ra] = $rank[ra] + 1];
         (* relocate b's use list into a's so future congruence
            probes see all parents of the merged class. *)
         $use[ra] = DeleteDuplicates @ Join[$use[ra], $use[rb]];
@@ -138,23 +126,14 @@ congruencePropagate[rep_] := Module[{parents = $use[rep], n, u, v},
         u = parents[[ii]];
         Do[
             v = parents[[jj]];
-            If[ congruentQ[u, v] && ccFind[u] =!= ccFind[v],
-                ccUnion[u, v]
-            ],
+            If[congruentQ[u, v] && ccFind[u] =!= ccFind[v], ccUnion[u, v]],
             {jj, ii + 1, n}
         ],
         {ii, 1, n}
     ]
 ]
 
-congruentQ[u_, v_] :=
-    u =!= v &&
-    Head[u] === Head[v] &&
-    Length[u] === Length[v] &&
-    AllTrue[
-        Transpose[{args[u], args[v]}],
-        ccFind[#[[1]]] === ccFind[#[[2]]] &
-    ]
+congruentQ[u_, v_] := u =!= v && Head[u] === Head[v] && Length[u] === Length[v] && AllTrue[Transpose[{args[u], args[v]}], ccFind[#[[1]]] === ccFind[#[[2]]] &]
 
 (* ----- API ----- *)
 
@@ -167,48 +146,41 @@ congruentQ[u_, v_] :=
    preprocessing, a user passing a reflexive `a == a` (which WL
    evaluates to True before TSatEUF sees it) hits the badin guard and
    gets $Failed instead of the obvious SAT verdict. *)
-atpSmtPreprocess[eqs_List, diseqs_List] :=
-    Module[{eqsFalse, diseqsTrue, eqsClean, diseqsClean},
-        eqsFalse = MemberQ[eqs, False];
-        diseqsTrue = MemberQ[diseqs, False];
-        If[ eqsFalse, Return[{"UNSAT", "Witness" -> False}, Module]];
-        If[ diseqsTrue, Return[{"UNSAT", "Witness" -> False}, Module]];
-        eqsClean = DeleteCases[eqs, True];
-        diseqsClean = DeleteCases[diseqs, True];
-        {"Continue", eqsClean, diseqsClean}
-    ]
+atpSmtPreprocess[eqs_List, diseqs_List] := Module[{eqsFalse, diseqsTrue, eqsClean, diseqsClean},
+    eqsFalse = MemberQ[eqs, False];
+    diseqsTrue = MemberQ[diseqs, False];
+    If[eqsFalse, Return[{"UNSAT", "Witness" -> False}, Module]];
+    If[diseqsTrue, Return[{"UNSAT", "Witness" -> False}, Module]];
+    eqsClean = DeleteCases[eqs, True];
+    diseqsClean = DeleteCases[diseqs, True];
+    {"Continue", eqsClean, diseqsClean}
+]
 
-TSatEUF[eqs_List, diseqs_List] :=
-    Module[{pre = atpSmtPreprocess[eqs, diseqs], eqsC, diseqsC},
-        If[ First[pre] === "UNSAT",
-            Return @ <|"Status" -> "UNSAT", pre[[2]]|>];
-        eqsC = pre[[2]]; diseqsC = pre[[3]];
-        (* Accept Inactive[Equal][a, b] as an alias for Equal[a, b]
-           (the inert form FindEquationalProof's ProofObject "Lemmas"
-           spec returns).  Inactive[Unequal] same.  Strip Inactive
-           before the strict-head check + congruence closure. *)
-        eqsC = Replace[eqsC, Inactive[Equal][a_, b_] :> Equal[a, b], {1}];
-        diseqsC = Replace[diseqsC, Inactive[Unequal][a_, b_] :> Unequal[a, b], {1}];
-        If[ ! (AllTrue[eqsC, MatchQ[#, _Equal] &] && AllTrue[diseqsC, MatchQ[#, _Unequal] &]),
-            Message[TSatEUF::badin, eqs, diseqs]; $Failed,
-            Block[{$parent, $rank, $use, $subterms, witness, classes},
-                ccInit[];
-                Scan[(ccAddTerm[#[[1]]]; ccAddTerm[#[[2]]]) &, eqsC];
-                Scan[(ccAddTerm[#[[1]]]; ccAddTerm[#[[2]]]) &, diseqsC];
-                Scan[ccUnion[#[[1]], #[[2]]] &, eqsC];
-                witness = SelectFirst[
-                    diseqsC,
-                    ccFind[#[[1]]] === ccFind[#[[2]]] &,
-                    None
-                ];
-                If[ witness =!= None,
-                    <|"Status" -> "UNSAT", "Witness" -> witness|>,
-                    classes = GatherBy[$subterms, ccFind];
-                    <|"Status" -> "SAT", "Classes" -> classes|>
-                ]
+TSatEUF[eqs_List, diseqs_List] := Module[{pre = atpSmtPreprocess[eqs, diseqs], eqsC, diseqsC},
+    If[First[pre] === "UNSAT", Return @ <|"Status" -> "UNSAT", pre[[2]]|>];
+    eqsC = pre[[2]]; diseqsC = pre[[3]];
+    (* Accept Inactive[Equal][a, b] as an alias for Equal[a, b]
+       (the inert form FindEquationalProof's ProofObject "Lemmas"
+       spec returns).  Inactive[Unequal] same.  Strip Inactive
+       before the strict-head check + congruence closure. *)
+    eqsC = Replace[eqsC, Inactive[Equal][a_, b_] :> Equal[a, b], {1}];
+    diseqsC = Replace[diseqsC, Inactive[Unequal][a_, b_] :> Unequal[a, b], {1}];
+    If[ ! (AllTrue[eqsC, MatchQ[#, _Equal] &] && AllTrue[diseqsC, MatchQ[#, _Unequal] &]),
+        Message[TSatEUF::badin, eqs, diseqs]; $Failed,
+        Block[{$parent, $rank, $use, $subterms, witness, classes},
+            ccInit[];
+            Scan[(ccAddTerm[#[[1]]]; ccAddTerm[#[[2]]]) &, eqsC];
+            Scan[(ccAddTerm[#[[1]]]; ccAddTerm[#[[2]]]) &, diseqsC];
+            Scan[ccUnion[#[[1]], #[[2]]] &, eqsC];
+            witness = SelectFirst[diseqsC, ccFind[#[[1]]] === ccFind[#[[2]]] &, None];
+            If[ witness =!= None,
+                <|"Status" -> "UNSAT", "Witness" -> witness|>,
+                classes = GatherBy[$subterms, ccFind];
+                <|"Status" -> "SAT", "Classes" -> classes|>
             ]
         ]
     ]
+]
 
 (* ----- atpSmtEntail: the shared SMT entailment decider -----
    The implementation behind TFindProof[goal, hyps, Method -> "SMT"] and the
@@ -221,37 +193,33 @@ TSatEUF[eqs_List, diseqs_List] :=
      - malformed input    -> $Failed. *)
 
 (* Single non-list hypothesis: auto-wrap. *)
-atpSmtEntail[goal_, hyp : (_Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
-    atpSmtEntail[goal, {hyp}]
+atpSmtEntail[goal_, hyp : (_Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] := atpSmtEntail[goal, {hyp}]
 
-atpSmtEntail[goal_, hypotheses_List : {}] :=
-    Block[{eqs, diseqs, res},
-        {eqs, diseqs} = collectLiterals[
-            Append[hypotheses, negate[goal]]
-        ];
-        If[ eqs === $Failed,
-            $Failed,
-            res = TSatEUF[eqs, diseqs];
-            Which[
-                res["Status"] === "UNSAT",
-                <|
-                    "Status" -> "Proved",
-                    "Method" -> "CongruenceClosure",
-                    "Goal" -> goal,
-                    "Hypotheses" -> hypotheses,
-                    "Witness" -> res["Witness"]
-                |>,
-                (* SAT: hypotheses /\ ~goal is satisfiable, so the goal is NOT
-                   entailed.  Build a CounterexampleObject from the congruence-
-                   closure quotient: a finite refuting model in FindFiniteModels
-                   structure (the ground analog of the finite algebra
-                   FindEquationalCounterexample returns). *)
-                res["Status"] === "SAT",
-                atpGroundCounterexample[goal, hypotheses],
-                True, $Failed
-            ]
+atpSmtEntail[goal_, hypotheses_List : {}] := Block[{eqs, diseqs, res},
+    {eqs, diseqs} = collectLiterals[Append[hypotheses, negate[goal]]];
+    If[ eqs === $Failed,
+        $Failed,
+        res = TSatEUF[eqs, diseqs];
+        Which[
+            res["Status"] === "UNSAT",
+            <|
+                "Status" -> "Proved",
+                "Method" -> "CongruenceClosure",
+                "Goal" -> goal,
+                "Hypotheses" -> hypotheses,
+                "Witness" -> res["Witness"]
+            |>,
+            (* SAT: hypotheses /\ ~goal is satisfiable, so the goal is NOT
+               entailed.  Build a CounterexampleObject from the congruence-
+               closure quotient: a finite refuting model in FindFiniteModels
+               structure (the ground analog of the finite algebra
+               FindEquationalCounterexample returns). *)
+            res["Status"] === "SAT",
+            atpGroundCounterexample[goal, hypotheses],
+            True, $Failed
         ]
     ]
+]
 
 negate[Equal[a_, b_]] := Unequal[a, b]
 negate[Unequal[a_, b_]] := Equal[a, b]
@@ -282,14 +250,11 @@ collectLiterals[lits_List] := Module[{eqAcc = {}, diseqAcc = {}, l},
    which congruence closure cannot handle (it is a ground decision procedure);
    reject any non-ground clause with TFindProof::nonground rather than crash. *)
 
-tptpDispatchSMT[imported_Association] := Block[
-    {axioms = imported["Axioms"], conj = imported["Conjecture"],
-     nonGround},
+tptpDispatchSMT[imported_Association] := Block[{axioms = imported["Axioms"], conj = imported["Conjecture"], nonGround},
     Which[
         conj === None,
             Message[TFindProof::noconjecture]; $Failed,
-        (nonGround = SelectFirst[Append[axioms, conj], ! groundQ[#] &,
-            None]) =!= None,
+        (nonGround = SelectFirst[Append[axioms, conj], ! groundQ[#] &, None]) =!= None,
             Message[TFindProof::nonground, nonGround]; $Failed,
         True,
             atpSmtEntail[conj, axioms]
@@ -310,49 +275,31 @@ groundQ[expr_] := FreeQ[expr, _Pattern | _Blank | _BlankSequence | _BlankNullSeq
    out one truth assignment and there are 2^|atoms| assignments
    total. *)
 
-TSmtDecide[formula_] := Block[
-    {atoms, propVars, abstraction, blocking = True, instance,
-     model, theoryRes, eqs, diseqs, normFormula},
+TSmtDecide[formula_] := Block[{atoms, propVars, abstraction, blocking = True, instance, model, theoryRes, eqs, diseqs, normFormula},
     (* Strip Inactive[Equal] / Inactive[Unequal] so the atom collector
        and the SatisfiabilityInstances boolean kernel see bare Equal /
        Unequal heads.  Without this, an Inactive-wrapped atom list
        contributes zero atoms, the Heads === Equal | Unequal Cases
        filter never fires, and the formula falls through to the empty-
        atoms TrueQ branch (UNSAT for every non-literally-True input). *)
-    normFormula = formula /. {
-        Inactive[Equal][a_, b_] :> a == b,
-        Inactive[Unequal][a_, b_] :> Unequal[a, b]};
+    normFormula = formula /. {Inactive[Equal][a_, b_] :> a == b, Inactive[Unequal][a_, b_] :> Unequal[a, b]};
     atoms = collectAtoms[normFormula];
-    If[ atoms === {},
-        Return @ <|"Status" -> If[TrueQ[normFormula], "SAT", "UNSAT"],
-                   "Model" -> <||>|>
-    ];
+    If[atoms === {}, Return @ <|"Status" -> If[TrueQ[normFormula], "SAT", "UNSAT"], "Model" -> <||>|>];
     propVars = Table[Unique["smt$p"], {Length[atoms]}];
     abstraction = normFormula /. Thread[atoms -> propVars];
     While[ True,
-        instance = Quiet @ SatisfiabilityInstances[
-            And[abstraction, blocking], propVars, 1];
-        If[ instance === {} || Head[instance] =!= List,
-            Return @ <|"Status" -> "UNSAT"|>
-        ];
+        instance = Quiet @ SatisfiabilityInstances[And[abstraction, blocking], propVars, 1];
+        If[instance === {} || Head[instance] =!= List, Return @ <|"Status" -> "UNSAT"|>];
         model = AssociationThread[atoms, First @ instance];
         {eqs, diseqs} = modelToLiterals[model];
         theoryRes = TSatEUF[eqs, diseqs];
-        If[ theoryRes["Status"] === "SAT",
-            Return @ <|"Status" -> "SAT", "Model" -> model|>
-        ];
+        If[theoryRes["Status"] === "SAT", Return @ <|"Status" -> "SAT", "Model" -> model|>];
         (* T-conflict: forbid this exact propositional assignment. *)
-        blocking = And[blocking, Not[
-            And @@ MapThread[
-                If[#2, #1, Not[#1]] &,
-                {propVars, First @ instance}
-            ]
-        ]];
+        blocking = And[blocking, Not[And @@ MapThread[If[#2, #1, Not[#1]] &, {propVars, First @ instance}]]];
     ]
 ]
 
-collectAtoms[formula_] := Sort @ DeleteDuplicates @ Cases[
-    formula, (_Equal | _Unequal), {0, Infinity}, Heads -> False]
+collectAtoms[formula_] := Sort @ DeleteDuplicates @ Cases[formula, (_Equal | _Unequal), {0, Infinity}, Heads -> False]
 
 modelToLiterals[model_Association] := Module[{eqAcc = {}, diseqAcc = {}},
     KeyValueMap[
@@ -370,27 +317,24 @@ modelToLiterals[model_Association] := Module[{eqAcc = {}, diseqAcc = {}},
 (* Boolean-combination goal.  An entailment hyps |= phi is UNSAT of
    hyps /\ ~phi; ask TSmtDecide on that. *)
 
-atpSmtEntail[goal_ /; ! MatchQ[goal, _Equal | _Unequal | _String | _File],
-        hypotheses_List : {}] :=
-    Block[{res = TSmtDecide[And @@ Append[hypotheses, Not[goal]]]},
-        Which[
-            res["Status"] === "UNSAT",
-            <|
-                "Status" -> "Proved",
-                "Method" -> "DPLL(T)+CongruenceClosure",
-                "Goal" -> goal,
-                "Hypotheses" -> hypotheses
-            |>,
-            (* SAT: hyps /\ ~goal has a model; the goal is not entailed.
-               TSmtDecide certified a satisfying truth assignment over the
-               equality atoms; return it as the refuting CounterexampleObject.
-               No finite algebra here, so "Setup" carries the assignment. *)
-            res["Status"] === "SAT",
-            CounterexampleObject["DPLL(T)+CongruenceClosure", goal, hypotheses,
-                <|"Setup" -> res["Model"], "Counterexample" -> res["Model"]|>],
-            True, $Failed
-        ]
+atpSmtEntail[goal_ /; ! MatchQ[goal, _Equal | _Unequal | _String | _File], hypotheses_List : {}] := Block[{res = TSmtDecide[And @@ Append[hypotheses, Not[goal]]]},
+    Which[
+        res["Status"] === "UNSAT",
+        <|
+            "Status" -> "Proved",
+            "Method" -> "DPLL(T)+CongruenceClosure",
+            "Goal" -> goal,
+            "Hypotheses" -> hypotheses
+        |>,
+        (* SAT: hyps /\ ~goal has a model; the goal is not entailed.
+           TSmtDecide certified a satisfying truth assignment over the
+           equality atoms; return it as the refuting CounterexampleObject.
+           No finite algebra here, so "Setup" carries the assignment. *)
+        res["Status"] === "SAT",
+        CounterexampleObject["DPLL(T)+CongruenceClosure", goal, hypotheses, <|"Setup" -> res["Model"], "Counterexample" -> res["Model"]|>],
+        True, $Failed
     ]
+]
 
 End[];
 EndPackage[];

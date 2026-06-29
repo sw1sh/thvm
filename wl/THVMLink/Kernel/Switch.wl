@@ -8,63 +8,74 @@
    def can MAT on the iteration counter, decrement it via OP2
    SUB, and recurse via TRef. *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[TNum, "TNum[i$] returns a TTerm wrapping a TAG_NUM atom holding the integer i$ as DT_I32.
+SetUsage[TNum, "TNum[i$] returns a TTerm wrapping a TAG_NUM atom holding the integer i$ as DT_I32.
 TNum[i$, dtype$] picks the dtype (\"i32\" or \"f32\"); for f32 the value is bit-reinterpreted, so use TUOpConst for arithmetic floats."];
-GeneralUtilities`SetUsage[TOp2, "TOp2[opcode$, x$, y$] returns a TAG_OP2 term computing opcode$(x$, y$) once both operands reduce to TAG_NUM.
+SetUsage[TOp2, "TOp2[opcode$, x$, y$] returns a TAG_OP2 term computing opcode$(x$, y$) once both operands reduce to TAG_NUM.
 Opcodes include \"+\", \"-\", \"*\", \"==\", \"<\"."];
-GeneralUtilities`SetUsage[TMatNum, "TMatNum[matchVal$, handler$, fallback$] returns a TAG_MAT atom that dispatches by the tag of its applied argument: a TAG_NUM equal to matchVal$ runs handler$, a TAG_CTR with ext matchVal$ destructures (handler$ applied positionally to each child), and anything else applies fallback$.
+SetUsage[TMatNum, "TMatNum[matchVal$, handler$, fallback$] returns a TAG_MAT atom that dispatches by the tag of its applied argument: a TAG_NUM equal to matchVal$ runs handler$, a TAG_CTR with ext matchVal$ destructures (handler$ applied positionally to each child), and anything else applies fallback$.
 TMatCtr is a sugar alias for the CTR-destructuring case."];
 
-GeneralUtilities`SetUsage[TMatCtr, "TMatCtr[ctorName$, handler$, fallback$] is sugar for TMatNum[ctorName$, handler$, fallback$] used to destructure a CTR (anonymous CTR uses 0).
+SetUsage[TMatCtr, "TMatCtr[ctorName$, handler$, fallback$] is sugar for TMatNum[ctorName$, handler$, fallback$] used to destructure a CTR (anonymous CTR uses 0).
 On a matching CTR it applies handler$ positionally to each child; used by TGradMany to bind multi-target gradient results into a body lambda."];
-GeneralUtilities`SetUsage[TIfZero, "TIfZero[counter$, thenTerm$, elseTerm$] is sugar for a TMatNum on 0 applied to counter$, with elseTerm$ wrapped in a discarding lambda so it reads like a plain conditional."];
+SetUsage[TIfZero, "TIfZero[counter$, thenTerm$, elseTerm$] is sugar for a TMatNum on 0 applied to counter$, with elseTerm$ wrapped in a discarding lambda so it reads like a plain conditional."];
 
-GeneralUtilities`SetUsage[TEql, "TEql[a$, b$] returns a TAG_EQL term that reduces to NUM(1) when a$ and b$ are structurally equal and NUM(0) otherwise.
+SetUsage[TEql, "TEql[a$, b$] returns a TAG_EQL term that reduces to NUM(1) when a$ and b$ are structurally equal and NUM(0) otherwise.
 Strict on both arguments; a SUP on either side commutes (clones the other side via DUP), and ERA/ANY short-circuit.
 Prefer this over TOp2[\"==\", $$] for theorem-proving where the arguments may be SUPs or structures."];
 
-GeneralUtilities`SetUsage[TCtr, "TCtr[label$, c$1, c$2, $$] constructs a TAG_CTR with the given integer label$ and child terms (arity capped at 16, matching HVM4's CTR limit).
+SetUsage[TCtr, "TCtr[label$, c$1, c$2, $$] constructs a TAG_CTR with the given integer label$ and child terms (arity capped at 16, matching HVM4's CTR limit).
 An IC-level dup of the result fires DUP-CTR."];
 
-GeneralUtilities`SetUsage[TBookCtr, "TBookCtr[label$, c$1, c$2, $$] constructs a TAG_CTR in BOOK_HEAP rather than the dynamic HEAP.
+SetUsage[TBookCtr, "TBookCtr[label$, c$1, c$2, $$] constructs a TAG_CTR in BOOK_HEAP rather than the dynamic HEAP.
 Use when building CTR inputs destined for the Metal AOT path, whose heap MTLBuffer is bound to BOOK_HEAP, so destructure derefs only resolve for values in that range."];
 
-GeneralUtilities`SetUsage[TMatChain, "TMatChain[arms$, fallback$] takes an association of label to handler and builds nested TMatNum atoms so one matcher dispatches multiple constructor labels.
+SetUsage[TMatChain, "TMatChain[arms$, fallback$] takes an association of label to handler and builds nested TMatNum atoms so one matcher dispatches multiple constructor labels.
 Each handler receives the destructured CTR fields positionally; fallback$ handles labels that do not match."];
 
 Begin["`Private`"];
 
 $op2Codes = <|
-    "+"  -> 0,   "ADD" -> 0,
-    "-"  -> 1,   "SUB" -> 1,
-    "*"  -> 2,   "MUL" -> 2,
-    "==" -> 3,   "EQ"  -> 3,
-    "<"  -> 4,   "LT"  -> 4,
-    "/"  -> 5,   "DIV" -> 5,
-    "%"  -> 6,   "MOD" -> 6,
-    "^"  -> 7,   "XOR" -> 7,
-    "&"  -> 8,   "AND" -> 8,
-    "|"  -> 9,   "OR"  -> 9,
-    "<<" -> 10,  "SHL" -> 10,
-    ">>" -> 11,  "SHR" -> 11,
-    ">"  -> 12,  "GT"  -> 12,
-    "<=" -> 13,  "LE"  -> 13,
-    ">=" -> 14,  "GE"  -> 14,
-    "!=" -> 15,  "NE"  -> 15
+    "+" -> 0,
+    "ADD" -> 0,
+    "-" -> 1,
+    "SUB" -> 1,
+    "*" -> 2,
+    "MUL" -> 2,
+    "==" -> 3,
+    "EQ" -> 3,
+    "<" -> 4,
+    "LT" -> 4,
+    "/" -> 5,
+    "DIV" -> 5,
+    "%" -> 6,
+    "MOD" -> 6,
+    "^" -> 7,
+    "XOR" -> 7,
+    "&" -> 8,
+    "AND" -> 8,
+    "|" -> 9,
+    "OR" -> 9,
+    "<<" -> 10,
+    "SHL" -> 10,
+    ">>" -> 11,
+    "SHR" -> 11,
+    ">" -> 12,
+    "GT" -> 12,
+    "<=" -> 13,
+    "LE" -> 13,
+    ">=" -> 14,
+    "GE" -> 14,
+    "!=" -> 15,
+    "NE" -> 15
 |>;
 
-$termNewOp2Fn := $termNewOp2Fn = load["thvm_wl_term_new_op2",
-    {Integer, Integer, Integer}, Integer]
-$termNewMatFn := $termNewMatFn = load["thvm_wl_term_new_mat",
-    {Integer, Integer, Integer}, Integer]
-$termNewEqlFn := $termNewEqlFn = load["thvm_wl_term_new_eql",
-    {Integer, Integer}, Integer]
-$termNewCtrFn := $termNewCtrFn = load["thvm_wl_term_new_ctr",
-    {Integer, {Integer, 1}}, Integer]
-$termNewBookCtrFn := $termNewBookCtrFn = load["thvm_wl_term_new_book_ctr",
-    {Integer, {Integer, 1}}, Integer]
+$termNewOp2Fn := $termNewOp2Fn = load["thvm_wl_term_new_op2", {Integer, Integer, Integer}, Integer]
+$termNewMatFn := $termNewMatFn = load["thvm_wl_term_new_mat", {Integer, Integer, Integer}, Integer]
+$termNewEqlFn := $termNewEqlFn = load["thvm_wl_term_new_eql", {Integer, Integer}, Integer]
+$termNewCtrFn := $termNewCtrFn = load["thvm_wl_term_new_ctr", {Integer, {Integer, 1}}, Integer]
+$termNewBookCtrFn := $termNewBookCtrFn = load["thvm_wl_term_new_book_ctr", {Integer, {Integer, 1}}, Integer]
 
 (* TAG_NUM is just a packed term - no library call needed. *)
 TNum[i_Integer] := TNum[i, "i32"]
@@ -96,12 +107,7 @@ numCoerce[x_] := x
 
 TOp2[op_String, x_, y_] := (
     ensureInit[];
-    TTerm[$termNewOp2Fn[
-        Lookup[$op2Codes, op,
-            (Message[TOp2::badop, op]; 0)],
-        ttermRaw[numCoerce[x]],
-        ttermRaw[numCoerce[y]]
-    ]]
+    TTerm[$termNewOp2Fn[Lookup[$op2Codes, op, (Message[TOp2::badop, op]; 0)], ttermRaw[numCoerce[x]], ttermRaw[numCoerce[y]]]]
 )
 TOp2::badop = "Unknown OP2 opcode `1`; expected one of \"+\", \"-\", \"*\", \"==\", \"<\".";
 
@@ -120,14 +126,12 @@ TMatNum[matchVal_Integer, handler_, fallback_] := (
     ensureInit[];
     TTerm[$termNewMatFn[matchVal, ttermRaw[handler], ttermRaw[fallback]]]
 )
-TMatCtr[ctorName_Integer, handler_, fallback_] :=
-    TMatNum[ctorName, handler, fallback]
+TMatCtr[ctorName_Integer, handler_, fallback_] := TMatNum[ctorName, handler, fallback]
 
 (* Sugar: TIfZero[counter, then, else] - elseTerm doesn't take the
    counter; we wrap it in a discarding lambda (the bound name is
    never referenced) so MAT-MIS lands correctly. *)
-TIfZero[counter_, thenTerm_, elseTerm_] :=
-    TApp[TMatNum[0, thenTerm, TLam[ignored, elseTerm]], counter]
+TIfZero[counter_, thenTerm_, elseTerm_] := TApp[TMatNum[0, thenTerm, TLam[ignored, elseTerm]], counter]
 
 TCtr[label_Integer, children___] := (
     ensureInit[];
@@ -149,11 +153,7 @@ TBookCtr[label_Integer, children___] := (
    The chain dispatches by matching the applied arg's CTR label
    against each TMatNum in turn; if none match, fallback gets the
    arg via APP-MAT-MIS.  Mirrors HVM4's `lam { #K1: h1; #K2: h2 }`. *)
-TMatChain[arms_Association, fallback_] := Fold[
-    {acc, arm} |-> TMatNum[arm[[1]], arm[[2]], acc],
-    fallback,
-    Reverse @ Normal @ arms
-]
+TMatChain[arms_Association, fallback_] := Fold[{acc, arm} |-> TMatNum[arm[[1]], arm[[2]], acc], fallback, Reverse @ Normal @ arms]
 
 (* === numeric arithmetic UpValues ====================================
    Lift `k - 1`, `k + 1`, `2 * k` etc. against integer-context TTerms
@@ -187,36 +187,25 @@ TMatChain[arms_Association, fallback_] := Fold[
    binder (no annotation) stays numeric so ordinary IC lambdas reduce
    as before. *)
 numericTermQ[t_TTerm] := With[{raw = ttermRaw[t], tag = $termTagFn[ttermRaw[t]]},
-    tag === $TagNUM ||
-    tag === $TagOP2 || tag === $TagMAT ||
-    tag === $TagSUP ||
-    And[ tag === $TagVAR, TTermShape[t] === {} ] ||
-    And[ Or[tag === $TagDP0, tag === $TagDP1],
-         BitAnd[$termExtFn[raw], $DupGradFlag] === 0 ]
+    tag === $TagNUM || tag === $TagOP2 || tag === $TagMAT || tag === $TagSUP || And[tag === $TagVAR, TTermShape[t] === {}] || And[Or[tag === $TagDP0, tag === $TagDP1], BitAnd[$termExtFn[raw], $DupGradFlag] === 0]
 ]
 numericTermQ[_] := False
 
 (* Plus[k, n] / Plus[n, k]: build TOp2["+"] (or "-" if n<0 to keep
    NUMs unsigned).  Multi-arg Plus folds pairwise. *)
-TTerm /: Plus[t_TTerm ? numericTermQ, n_Integer] :=
-    If[ n < 0, TOp2["-", t, TNum[-n]], TOp2["+", t, TNum[n]]]
-TTerm /: Plus[n_Integer, t_TTerm ? numericTermQ] :=
-    If[ n < 0, TOp2["-", t, TNum[-n]], TOp2["+", t, TNum[n]]]
-TTerm /: Plus[a_TTerm ? numericTermQ, b_TTerm ? numericTermQ] :=
-    TOp2["+", a, b]
+TTerm /: Plus[t_TTerm ? numericTermQ, n_Integer] := If[n < 0, TOp2["-", t, TNum[-n]], TOp2["+", t, TNum[n]]]
+TTerm /: Plus[n_Integer, t_TTerm ? numericTermQ] := If[n < 0, TOp2["-", t, TNum[-n]], TOp2["+", t, TNum[n]]]
+TTerm /: Plus[a_TTerm ? numericTermQ, b_TTerm ? numericTermQ] := TOp2["+", a, b]
 
 (* Subtract: WL flattens `a - b` to `Plus[a, Times[-1, b]]`, so
    matching just the binary form here covers the explicit case. *)
-TTerm /: Subtract[a_TTerm ? numericTermQ, b_TTerm ? numericTermQ] :=
-    TOp2["-", a, b]
-TTerm /: Subtract[t_TTerm ? numericTermQ, n_Integer] :=
-    TOp2["-", t, TNum[n]]
+TTerm /: Subtract[a_TTerm ? numericTermQ, b_TTerm ? numericTermQ] := TOp2["-", a, b]
+TTerm /: Subtract[t_TTerm ? numericTermQ, n_Integer] := TOp2["-", t, TNum[n]]
 
 (* Times[k, n] / Times[n, k] / Times[k1, k2]. *)
 TTerm /: Times[t_TTerm ? numericTermQ, n_Integer] := TOp2["*", t, TNum[n]]
 TTerm /: Times[n_Integer, t_TTerm ? numericTermQ] := TOp2["*", TNum[n], t]
-TTerm /: Times[a_TTerm ? numericTermQ, b_TTerm ? numericTermQ] :=
-    TOp2["*", a, b]
+TTerm /: Times[a_TTerm ? numericTermQ, b_TTerm ? numericTermQ] := TOp2["*", a, b]
 
 (* Equal / Less for control-flow predicates. *)
 TTerm /: Equal[t_TTerm ? numericTermQ, n_Integer] := TOp2["==", t, TNum[n]]

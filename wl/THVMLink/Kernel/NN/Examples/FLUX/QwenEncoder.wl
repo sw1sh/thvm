@@ -42,8 +42,7 @@ Begin["`Private`"];
    reused for every prompt in the session; only the per-id row slice + decode
    (~512 rows) runs per call. *)
 qwEmbedWords[table_] := qwEmbedWords[table] = Normal[TTensorData[table]]
-qwEmbed[table_, ids_List] :=
-    TTensorCreate @ qwBf16ToF32 @ qwEmbedWords[table][[ids + 1]]
+qwEmbed[table_, ids_List] := TTensorCreate @ qwBf16ToF32 @ qwEmbedWords[table][[ids + 1]]
 
 qwBf16ToF32[u16_] := With[{shape = Dimensions[u16], flat = Flatten[u16]},
     ArrayReshape[
@@ -60,19 +59,21 @@ qwBf16ToF32[u16_] := With[{shape = Dimensions[u16], flat = Flatten[u16]},
 
 (* Per-layer weight Association from a name -> TTerm loader wf (HF names).
    Weights stay bf16; fxLinear's bf16-direct matmul reads them as-is. *)
-qwLayerW[wf_, i_] := With[{p = "model.layers." <> ToString[i] <> "."}, <|
-    "input_ln" -> wf[p <> "input_layernorm.weight"],
-    "q_proj" -> wf[p <> "self_attn.q_proj.weight"],
-    "k_proj" -> wf[p <> "self_attn.k_proj.weight"],
-    "v_proj" -> wf[p <> "self_attn.v_proj.weight"],
-    "o_proj" -> wf[p <> "self_attn.o_proj.weight"],
-    "q_norm" -> wf[p <> "self_attn.q_norm.weight"],
-    "k_norm" -> wf[p <> "self_attn.k_norm.weight"],
-    "post_ln" -> wf[p <> "post_attention_layernorm.weight"],
-    "gate_proj" -> wf[p <> "mlp.gate_proj.weight"],
-    "up_proj" -> wf[p <> "mlp.up_proj.weight"],
-    "down_proj" -> wf[p <> "mlp.down_proj.weight"]
-|>]
+qwLayerW[wf_, i_] := With[{p = "model.layers." <> ToString[i] <> "."},
+    <|
+        "input_ln" -> wf[p <> "input_layernorm.weight"],
+        "q_proj" -> wf[p <> "self_attn.q_proj.weight"],
+        "k_proj" -> wf[p <> "self_attn.k_proj.weight"],
+        "v_proj" -> wf[p <> "self_attn.v_proj.weight"],
+        "o_proj" -> wf[p <> "self_attn.o_proj.weight"],
+        "q_norm" -> wf[p <> "self_attn.q_norm.weight"],
+        "k_norm" -> wf[p <> "self_attn.k_norm.weight"],
+        "post_ln" -> wf[p <> "post_attention_layernorm.weight"],
+        "gate_proj" -> wf[p <> "mlp.gate_proj.weight"],
+        "up_proj" -> wf[p <> "mlp.up_proj.weight"],
+        "down_proj" -> wf[p <> "mlp.down_proj.weight"]
+    |>
+]
 
 (* One HF Qwen3 decoder layer.  x {S, dim}; cos/sin {S, 1, head_dim}; addMask
    {S, S}; W the layer weights; cfg has heads/kv_heads/head_dim/eps.  qk-norm
@@ -88,10 +89,9 @@ qwLayerW[wf_, i_] := With[{p = "model.layers." <> ToString[i] <> "."}, <|
    matches how HF Qwen3 runs the linears (bf16 weights AND activations). *)
 bf16Act[t_] := TRealize @ TUOpCast[t, "bf16"]
 
-qwLayer[x_, cos_, sin_, addMask_, W_, cfg_] := Block[
-    {h, hkv, dh, eps, scale, rep, s, xn, q, k, v, attnOut, hh, hn},
+qwLayer[x_, cos_, sin_, addMask_, W_, cfg_] := Block[{h, hkv, dh, eps, scale, rep, s, xn, q, k, v, attnOut, hh, hn},
     h = cfg["heads"];  hkv = cfg["kv_heads"];  dh = cfg["head_dim"];
-    eps = cfg["eps"];  scale = 1/Sqrt[N[dh]];  rep = h/hkv;  s = Dimensions[x][[1]];
+    eps = cfg["eps"];  scale = 1 / Sqrt[N[dh]];  rep = h / hkv;  s = Dimensions[x][[1]];
     xn = bf16Act @ TRMSNorm[x, W["input_ln"], eps];
     q = TRMSNorm[ArrayReshape[fxLinear[xn, W["q_proj"]], {s, h, dh}], W["q_norm"], eps];
     k = TRMSNorm[ArrayReshape[fxLinear[xn, W["k_proj"]], {s, hkv, dh}], W["k_norm"], eps];
@@ -100,7 +100,7 @@ qwLayer[x_, cos_, sin_, addMask_, W_, cfg_] := Block[
     attnOut = fxLinear[bf16Act @ THeadAttention[q, TRepeatKV[k, rep], TRepeatKV[v, rep], scale, addMask], W["o_proj"]];
     hh = x + attnOut;
     hn = bf16Act @ TRMSNorm[hh, W["post_ln"], eps];
-    hh + fxLinear[bf16Act[TSiLU[fxLinear[hn, W["gate_proj"]]]*fxLinear[hn, W["up_proj"]]], W["down_proj"]]
+    hh + fxLinear[bf16Act[TSiLU[fxLinear[hn, W["gate_proj"]]] * fxLinear[hn, W["up_proj"]]], W["down_proj"]]
 ]
 
 (* DEVICE forward over the 27 decoder layers.  x {S,dim} embedded token rows;
@@ -111,43 +111,37 @@ qwLayer[x_, cos_, sin_, addMask_, W_, cfg_] := Block[
    addMask as the only per-prompt rebound inputs (cos/sin + weights are closed
    over, constant across prompts of the same length).  Every shape is concrete
    (kvar-free): S comes from the host-prepped x, dim/head_dim from cfg. *)
-qwenForward[x0_, addMask_, cos_, sin_, wf_, cfg_] := Block[
-    {nL, caps, lcfg, x, captured},
+qwenForward[x0_, addMask_, cos_, sin_, wf_, cfg_] := Block[{nL, caps, lcfg, x, captured},
     nL = cfg["layers"];  caps = cfg["captureLayers"];
-    lcfg = <|"heads" -> cfg["heads"], "kv_heads" -> cfg["kv_heads"],
-             "head_dim" -> cfg["head_dim"], "eps" -> cfg["eps"]|>;
+    lcfg = <|"heads" -> cfg["heads"], "kv_heads" -> cfg["kv_heads"], "head_dim" -> cfg["head_dim"], "eps" -> cfg["eps"]|>;
     x = x0;  captured = <||>;
     Do[ x = TRealize @ qwLayer[x, cos, sin, addMask, qwLayerW[wf, i], lcfg];
-        If[ MemberQ[caps, i], captured[i] = x],
+        If[MemberQ[caps, i], captured[i] = x],
         {i, 0, nL - 1}
     ];
-    TRealize @ Join[Sequence @@ (captured[#] & /@ caps), 2]
+    TRealize @ Join[Sequence @@ (captured[#]& /@ caps), 2]
 ]
 
 (* host-prep of the device inputs (cos/sin/mask/x) for qwenForward.  Returns
    <|"cos","sin","addMask","x"|> as device TTerms.  cos/sin depend only on S
    (cacheable per length); addMask + x are per-prompt. *)
-qwenInputs[inputIds_List, attMask_List, wf_, cfg_] := Block[
-    {dh, theta, s, dev, toDev, cos, sin},
+qwenInputs[inputIds_List, attMask_List, wf_, cfg_] := Block[{dh, theta, s, dev, toDev, cos, sin},
     dh = cfg["head_dim"];  theta = cfg["theta"];  s = Length[inputIds];
     (* place x/cos/sin/mask on the device the layer weights live on: otherwise the
        additive mask (host) drags the attention-scores reduce onto the CPU, where
        bf16 has no gemm and the {H,S,D,S} expand materialises (2GB at S=512)
        instead of routing through the device batched gemm. *)
     dev = TDevice[wf["model.layers.0.self_attn.q_proj.weight"]];
-    toDev = If[ dev === None || dev === "cpu", # &, TToDevice[#, dev] &];
+    toDev = If[dev === None || dev === "cpu", #&, TToDevice[#, dev]&];
     {cos, sin} = TRoPEHalfSplitTable[s, dh, theta];
-    <|"cos" -> toDev[cos], "sin" -> toDev[sin],
-      "addMask" -> toDev @ TPaddingCausalMask[attMask],
-      "x" -> toDev @ qwEmbed[wf["model.embed_tokens.weight"], inputIds]|>
+    <|"cos" -> toDev[cos], "sin" -> toDev[sin], "addMask" -> toDev @ TPaddingCausalMask[attMask], "x" -> toDev @ qwEmbed[wf["model.embed_tokens.weight"], inputIds]|>
 ]
 
 (* Full encoder.  inputIds {S} host int list (0-indexed); attMask {S} host list
    (1 real / 0 pad); wf a name -> TTerm loader (HF names, both shards merged);
    cfg has heads/kv_heads/head_dim/eps/theta/layers/captureLayers.  Returns the
    {S, 3*hidden} per-token concat of the captured hidden states. *)
-qwenEncode[inputIds_List, attMask_List, wf_, cfg_] := With[
-    {in = qwenInputs[inputIds, attMask, wf, cfg]},
+qwenEncode[inputIds_List, attMask_List, wf_, cfg_] := With[{in = qwenInputs[inputIds, attMask, wf, cfg]},
     qwenForward[in["x"], in["addMask"], in["cos"], in["sin"], wf, cfg]
 ]
 

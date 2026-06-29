@@ -27,60 +27,60 @@
      - TScheduleGraph (kernel DAG) ... Visualization.wl
      - heap-graph KERNEL rendering ... Visualization.wl (via kerVertexId) *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[TKernel, "TKernel[t$] wraps a UOP_KERNEL TTerm t$ as a typed kernel object.
+SetUsage[TKernel, "TKernel[t$] wraps a UOP_KERNEL TTerm t$ as a typed kernel object.
 TKernel[kid$] resolves a kernel id back to its pinned heap term and wraps that.
 Query with Information[k$, \"Properties\"] for the property list, k$[\"Name\"] to fetch one, and k$[] to dispatch.
 A TKernel auto-coerces to its underlying TTerm inside any UOp constructor."];
 
-GeneralUtilities`SetUsage[TKernelQ, "TKernelQ[k$] returns True if k$ is a well-formed TKernel object wrapping a UOP_KERNEL term."];
+SetUsage[TKernelQ, "TKernelQ[k$] returns True if k$ is a well-formed TKernel object wrapping a UOP_KERNEL term."];
 
-GeneralUtilities`SetUsage[TKernelProgram, "TKernelProgram[k$] returns the kernel's program as a list of associations <|\"Op\", \"Sources\", \"Arg\", \"Numel\", \"Dtype\"|>.
+SetUsage[TKernelProgram, "TKernelProgram[k$] returns the kernel's program as a list of associations <|\"Op\", \"Sources\", \"Arg\", \"Numel\", \"Dtype\"|>.
 Sources are tagged KIn[slot$] for kernel-input references and KOp[idx$] for SSA references to earlier program slots."];
 
-GeneralUtilities`SetUsage[KIn, "KIn[slot$] tags a kernel-program source operand that reads from input slot$ (one of TKernelInputs).
+SetUsage[KIn, "KIn[slot$] tags a kernel-program source operand that reads from input slot$ (one of TKernelInputs).
 Returned by TKernelProgram in each op's Sources list."];
 
-GeneralUtilities`SetUsage[KOp, "KOp[idx$] tags a kernel-program source operand that reads from the output of program op index idx$.
+SetUsage[KOp, "KOp[idx$] tags a kernel-program source operand that reads from the output of program op index idx$.
 Returned by TKernelProgram in each op's Sources list."];
 
-GeneralUtilities`SetUsage[TKernelDispatch, "TKernelDispatch[k$] dispatches the kernel by TWnf-firing its underlying term, the same as calling k$[]."];
+SetUsage[TKernelDispatch, "TKernelDispatch[k$] dispatches the kernel by TWnf-firing its underlying term, the same as calling k$[]."];
 
 (* === kernel-entry introspection (kid-keyed, no TKernel wrap needed) === *)
 
-GeneralUtilities`SetUsage[TKernelCount, "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table."];
-GeneralUtilities`SetUsage[TKernelProgramCacheSize, "TKernelProgramCacheSize[] returns 0.
+SetUsage[TKernelCount, "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table."];
+SetUsage[TKernelProgramCacheSize, "TKernelProgramCacheSize[] returns 0.
 The kernel-program hash-cons cache is gone (the body lives on the lifted UOp DAG, hash-consed by the heap); kept as a no-op for legacy callers."];
-GeneralUtilities`SetUsage[TKernelProgramKey, "TKernelProgramKey[kid$] returns the structural key for the kernel's shared schedule slot, or 0 when the kernel has no shared axes entry.
+SetUsage[TKernelProgramKey, "TKernelProgramKey[kid$] returns the structural key for the kernel's shared schedule slot, or 0 when the kernel has no shared axes entry.
 Kernels with the same nonzero key share one C-side KpSchedule slot, so autotuning one representative applies to the whole program shape."];
-GeneralUtilities`SetUsage[TKernelInfo, "TKernelInfo[kid$] returns the shape header for KERNELS[kid$] as an Association: \"n_inputs\", \"n_ops\", \"output_numel\", \"output_dtype\".
+SetUsage[TKernelInfo, "TKernelInfo[kid$] returns the shape header for KERNELS[kid$] as an Association: \"n_inputs\", \"n_ops\", \"output_numel\", \"output_dtype\".
 \"n_ops\" is always 0 and \"program\" is always {} (the per-op program array is gone); use TKernelSource for the lifted UOp DAG."];
-GeneralUtilities`SetUsage[TKernelTileUops, "TKernelTileUops[kid$] returns the tile-UOp plan snapshot at KERNELS[kid$].tile_uops as a List of Associations with keys \"id\", \"op\", \"dtype\", \"src\", \"extra\".
+SetUsage[TKernelTileUops, "TKernelTileUops[kid$] returns the tile-UOp plan snapshot at KERNELS[kid$].tile_uops as a List of Associations with keys \"id\", \"op\", \"dtype\", \"src\", \"extra\".
 TILE_AXIS entries also expose \"axis_type\" and \"extent\". Slot 0 (the TILE_NONE sentinel) is included so list indices match C-side TileUop[] indices.
 Returns Missing[\"NotLowered\"] when no rangeify tile plan exists."];
 
 (* === codegen / profiling surface (delegated to TKernel properties) === *)
 
-GeneralUtilities`SetUsage[TKernelSource, "TKernelSource[kid$] returns the source kid$'s program renders to on the active backend (the DEV env var, \"C\" otherwise).
+SetUsage[TKernelSource, "TKernelSource[kid$] returns the source kid$'s program renders to on the active backend (the DEV env var, \"C\" otherwise).
 TKernelSource[kid$, backend$] renders on the named backend \"C\" or \"Metal\".
 Returns an empty string when kernel_lift_to_uop declines (too many inputs, no scalar arena, etc.) and the kernel falls back to the per-op interpreter.
 Equivalent property surface: TKernel[kid$][\"Source\"] and TKernel[kid$][\"Source\", backend$]."];
-GeneralUtilities`SetUsage[TKernelFlops, "TKernelFlops[kid$] gives the static flop estimate for one execution of kid$, equal to TKernel[kid$][\"Flops\"].
+SetUsage[TKernelFlops, "TKernelFlops[kid$] gives the static flop estimate for one execution of kid$, equal to TKernel[kid$][\"Flops\"].
 Sums over the lifted UOp DAG (1 flop per elementwise op per element, 1 flop per reduce source element); 0 for movement and load."];
-GeneralUtilities`SetUsage[TKernelDispatchKind, "TKernelDispatchKind[kid$] gives the route the last fire of kid$ took, equal to TKernel[kid$][\"DispatchKind\"].
+SetUsage[TKernelDispatchKind, "TKernelDispatchKind[kid$] gives the route the last fire of kid$ took, equal to TKernel[kid$][\"DispatchKind\"].
 Possible routes: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", \"interpreter\", \"metal-jit\", \"metal-op\", \"tile\", \"metal-tile\", \"metal-gemm\", \"metal-conv\", \"metal-alias\"."];
-GeneralUtilities`SetUsage[TKernelDispatchCount, "TKernelDispatchCount[kid$] gives the cumulative number of times kid$ has fired since thvm_init, equal to TKernel[kid$][\"DispatchCount\"]."];
-GeneralUtilities`SetUsage[TKernelTotalUs, "TKernelTotalUs[kid$] gives the cumulative wallclock microseconds across every fire of kid$, equal to TKernel[kid$][\"TotalUs\"]."];
-GeneralUtilities`SetUsage[TKernelJitDylibPath, "TKernelJitDylibPath[kid$] gives the on-disk path the JIT cache uses for kid$'s compiled .dylib, equal to TKernel[kid$][\"JitDylibPath\"].
+SetUsage[TKernelDispatchCount, "TKernelDispatchCount[kid$] gives the cumulative number of times kid$ has fired since thvm_init, equal to TKernel[kid$][\"DispatchCount\"]."];
+SetUsage[TKernelTotalUs, "TKernelTotalUs[kid$] gives the cumulative wallclock microseconds across every fire of kid$, equal to TKernel[kid$][\"TotalUs\"]."];
+SetUsage[TKernelJitDylibPath, "TKernelJitDylibPath[kid$] gives the on-disk path the JIT cache uses for kid$'s compiled .dylib, equal to TKernel[kid$][\"JitDylibPath\"].
 The path is deterministic from the program hash; the file may not exist if the JIT bailed at codegen."];
-GeneralUtilities`SetUsage[TKernelProfile, "TKernelProfile[kid$] returns Information[TKernel[kid$]], an Association of every property listed by Information[k$, \"Properties\"] including the profiling fields."];
-GeneralUtilities`SetUsage[TProfileAll, "TProfileAll[] returns TKernelProfile for every live kernel, keyed by kid."];
-GeneralUtilities`SetUsage[TProfileDelta, "TProfileDelta[before$, after$] subtracts two TProfileAll[] snapshots and returns only the kernels that fired in the window.
+SetUsage[TKernelProfile, "TKernelProfile[kid$] returns Information[TKernel[kid$]], an Association of every property listed by Information[k$, \"Properties\"] including the profiling fields."];
+SetUsage[TProfileAll, "TProfileAll[] returns TKernelProfile for every live kernel, keyed by kid."];
+SetUsage[TProfileDelta, "TProfileDelta[before$, after$] subtracts two TProfileAll[] snapshots and returns only the kernels that fired in the window.
 DispatchCount, TotalUs, AvgUs, and GFlopsPerSec describe the delta; static fields such as ProgramKey come from the after$ snapshot."];
-GeneralUtilities`SetUsage[TProfileProgramGroups, "TProfileProgramGroups[profile$] groups a TProfileAll[] snapshot or TProfileDelta[] result by nonzero TKernelProgramKey, returning rows sorted by TotalUs.
+SetUsage[TProfileProgramGroups, "TProfileProgramGroups[profile$] groups a TProfileAll[] snapshot or TProfileDelta[] result by nonzero TKernelProgramKey, returning rows sorted by TotalUs.
 This is the profile view used for per-program-shape autotune triage."];
-GeneralUtilities`SetUsage[TProfileFusionGaps, "TProfileFusionGaps[profile$] annotates TProfileProgramGroups[profile$] with rangeify, tile, and proposer status and returns the hot groups not yet tile-tunable.
+SetUsage[TProfileFusionGaps, "TProfileFusionGaps[profile$] annotates TProfileProgramGroups[profile$] with rangeify, tile, and proposer status and returns the hot groups not yet tile-tunable.
 Useful with TMetalMemoryProfile[] to find fusion work that matters for both time and retained memory."];
 
 (* === axis-typed scheduling slot (mirrors tinygrad's Kernel.opt) ===
@@ -89,41 +89,41 @@ Useful with TMetalMemoryProfile[] to find fusion work that matters for both time
    block just packages the C-side state into typed WL objects with
    summary boxes. *)
 
-GeneralUtilities`SetUsage[TOpt, "TOpt[op$, axis$, arg$] is a typed kernel-optimization action, mirroring tinygrad's Opt(OptOps.UPCAST, axis=2, arg=4).
+SetUsage[TOpt, "TOpt[op$, axis$, arg$] is a typed kernel-optimization action, mirroring tinygrad's Opt(OptOps.UPCAST, axis=2, arg=4).
 op$ is one of \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GLOBAL\", \"GROUP\", \"GROUPTOP\", \"SWAP\", or \"TC\" (recognized f32 MMA/GEMM kernels); \"PADTO\" and \"NOLOCALS\" are reserved and rejected until a renderer consumes them.
 axis$ is 0-indexed; arg$ is op-specific (split factor for UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP, full axis size for GLOBAL, target axis for SWAP, MMA tile size for TC).
 Apply via TKernelApplyOpt[kid$, TOpt[$$]] and introspect via TKernelOpts[kid$]."];
 
-GeneralUtilities`SetUsage[TKernelOpts, "TKernelOpts[kid$] returns a wrapped TKernelOpts[<|\"Kid\", \"AxisTypes\", \"FullShape\", \"Applied\"|>] summarising the kernel's axis-typed scheduling plan as carried in C.
+SetUsage[TKernelOpts, "TKernelOpts[kid$] returns a wrapped TKernelOpts[<|\"Kid\", \"AxisTypes\", \"FullShape\", \"Applied\"|>] summarising the kernel's axis-typed scheduling plan as carried in C.
 AxisTypes parallels FullShape; each entry is one of \"LOOP\", \"REDUCE\", \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GLOBAL\", \"GROUP_REDUCE\". The default (no opts applied) is all LOOP for elementwise output axes plus a trailing REDUCE for reduce kernels.
 Applied is the chronological list of TOpt actions."];
 
-GeneralUtilities`SetUsage[TKernelApplyOpt, "TKernelApplyOpt[kid$, TOpt[op$, axis$, arg$]] mutates the kernel's C-side scheduling plan and returns the updated TKernelOpts wrapper.
+SetUsage[TKernelApplyOpt, "TKernelApplyOpt[kid$, TOpt[op$, axis$, arg$]] mutates the kernel's C-side scheduling plan and returns the updated TKernelOpts wrapper.
 It splits the indicated axis (UPCAST/UNROLL/LOCAL/GROUP), marks a full LOOP axis as GLOBAL, swaps two axes (SWAP), or records TC metadata for recognized f32 MMA/GEMM kernels.
 Returns Failure[\"opt-rejected\"] on validation failure (axis out of range, arg not dividing the axis size, opts table full, unsupported TC size, or reserved opt not implemented)."];
 
-GeneralUtilities`SetUsage[TKernelProposed, "TKernelProposed[kid$] returns a list of TOpt[$$] candidates suggested by the C-side shape-heuristic proposer.
+SetUsage[TKernelProposed, "TKernelProposed[kid$] returns a list of TOpt[$$] candidates suggested by the C-side shape-heuristic proposer.
 CPU heuristics propose UNROLL on reduce axes plus UPCAST on divisible elementwise output axes. With DEV=metal, recognized f32 GEMM kernels propose TC tile sizes; with DEV=metal and THVM_TILE=1, supported f32 tile kernels propose LOCAL factors for elementwise output axes and GROUP factors for reduce axes.
 TKernelAutotune and TKernelVariants consume this list."];
 
-GeneralUtilities`SetUsage[TKernelVariant, "TKernelVariant[<|\"Kid\", \"Opt\", \"WallUs\"|>] is a typed wrapper for one proposed-or-measured kernel variant, returned by TKernelVariants[kid$].
+SetUsage[TKernelVariant, "TKernelVariant[<|\"Kid\", \"Opt\", \"WallUs\"|>] is a typed wrapper for one proposed-or-measured kernel variant, returned by TKernelVariants[kid$].
 Opt is a TOpt or None and WallUs is the measured wallclock per fire. Carries summary boxes so notebook output renders the (op, axis, arg) triple and timing next to the kid."];
 
-GeneralUtilities`SetUsage[TKernelVariants, "TKernelVariants[kid$] returns a list of TKernelVariant: one for the no-opt baseline followed by one per TKernelProposed candidate.
+SetUsage[TKernelVariants, "TKernelVariants[kid$] returns a list of TKernelVariant: one for the no-opt baseline followed by one per TKernelProposed candidate.
 Each WallUs is measured by BEAM_RUNS back-to-back fires (default 5, min wallclock). Like TKernelAutotune internally but reports every candidate's measurement instead of just applying the winner, useful for inspecting what the proposer found.
 Leaves the kernel's KpSchedule at the baseline (no opts applied), since inspecting implies the user does not want to commit."];
 
-GeneralUtilities`SetUsage[TKernelAutotune, "TKernelAutotune[kid$] benchmarks every TKernelProposed candidate against the no-opt baseline, applies the winning sequence to the kernel's C-side KpSchedule, and returns the resulting TKernelOpts.
+SetUsage[TKernelAutotune, "TKernelAutotune[kid$] benchmarks every TKernelProposed candidate against the no-opt baseline, applies the winning sequence to the kernel's C-side KpSchedule, and returns the resulting TKernelOpts.
 Each candidate runs BEAM_RUNS dispatches (default 5, min wallclock); the best candidates optionally expand into short opt sequences (AUTOTUNE_DEPTH, BEAM). Winners are cached on disk under $XDG_CACHE_HOME/thvm/autotune or AUTOTUNE_CACHE_DIR unless AUTOTUNE_CACHE=0 or AUTOTUNE_DISABLE=1.
 Because axes live on a shared schedule slot, the winner auto-applies to other kernels with the same structural key. Returns the unchanged TKernelOpts when no candidate beat baseline."];
 
-GeneralUtilities`SetUsage[TKernelAutotuneAll, "TKernelAutotuneAll[] runs TKernelAutotune on every currently-live kernel and returns an Association mapping each kid to its tuned TKernelOpts.
+SetUsage[TKernelAutotuneAll, "TKernelAutotuneAll[] runs TKernelAutotune on every currently-live kernel and returns an Association mapping each kid to its tuned TKernelOpts.
 Useful for exhaustive diagnostics; TKernelAutotuneUnique[] is usually cheaper for training-loop pre-warm."];
 
-GeneralUtilities`SetUsage[TKernelAutotuneUnique, "TKernelAutotuneUnique[] groups live kernels with proposer candidates by nonzero TKernelProgramKey and runs TKernelAutotune on one representative per shared schedule shape.
+SetUsage[TKernelAutotuneUnique, "TKernelAutotuneUnique[] groups live kernels with proposer candidates by nonzero TKernelProgramKey and runs TKernelAutotune on one representative per shared schedule shape.
 Zero-key kernels are tuned individually because they do not share a KpSchedule slot. Returns an Association mapping each representative kid to its TKernelOpts."];
 
-GeneralUtilities`SetUsage[TKernelAutotuneTop, "TKernelAutotuneTop[n$] tunes at most n$ representative kernels from the current TProfileAll[] snapshot, ordered by static Flops.
+SetUsage[TKernelAutotuneTop, "TKernelAutotuneTop[n$] tunes at most n$ representative kernels from the current TProfileAll[] snapshot, ordered by static Flops.
 TKernelAutotuneTop[profile$, n$, metric$] uses an explicit TProfileAll[] or TProfileDelta[] snapshot and metric \"Flops\", \"ReduceFlops\", \"TotalUs\", or \"DispatchCount\" (\"ReduceFlops\" ignores non-reduction program groups).
 Only groups with TKernelProposed candidates are tuned, making this the bounded alternative to TKernelAutotuneUnique[] for memory-sensitive training-loop canaries."];
 
@@ -133,19 +133,19 @@ Only groups with TKernelProposed candidates are tuned, making this the bounded a
    kid -> kernel info needs them.  Tensor.wl owns the parallel
    TenDesc accessors; MemoryPlan.wl owns the per-backend buf
    accessors. *)
-GeneralUtilities`SetUsage[TKernelTable, "TKernelTable[] returns a list of {n_inputs, output_tid, fired, spliced, consumer_count, output_numel, output_dtype} per live kernel.
+SetUsage[TKernelTable, "TKernelTable[] returns a list of {n_inputs, output_tid, fired, spliced, consumer_count, output_numel, output_dtype} per live kernel.
 This is a snapshot, not a live view."];
-GeneralUtilities`SetUsage[TKernelInputs, "TKernelInputs[kid$] returns the input_tids of kernel kid$ (length n_inputs)."];
-GeneralUtilities`SetUsage[TKernelStoreRoot, "TKernelStoreRoot[kid$] returns the lifted UOP DAG (cached_lift.store_root) as a TTerm.
+SetUsage[TKernelInputs, "TKernelInputs[kid$] returns the input_tids of kernel kid$ (length n_inputs)."];
+SetUsage[TKernelStoreRoot, "TKernelStoreRoot[kid$] returns the lifted UOP DAG (cached_lift.store_root) as a TTerm.
 Walk with TTermExpr or TTermSubexprs to inspect for residual UOP_BUFFERIZE or TAG_TEN leaves the renderer would lower to a buf{loc} undeclared-identifier fallback.
 Returns Missing[\"LiftDeclined\"] when the kernel has no lifted DAG."];
-GeneralUtilities`SetUsage[TKernelHasBufferizeLeak, "TKernelHasBufferizeLeak[kid$] returns True if the kernel's lifted DAG carries an unresolved UOP_BUFFERIZE leaf the unified rewriter failed to map to a UOP_BUFFER input slot.
+SetUsage[TKernelHasBufferizeLeak, "TKernelHasBufferizeLeak[kid$] returns True if the kernel's lifted DAG carries an unresolved UOP_BUFFERIZE leaf the unified rewriter failed to map to a UOP_BUFFER input slot.
 Such leaks emit buf{loc} undeclared identifiers in MSL/C99 and fail Metal compile. Cheap structural check, no dispatch."];
-GeneralUtilities`SetUsage[TKernelHasTenLeak, "TKernelHasTenLeak[kid$] returns True if the kernel's lifted DAG carries a bare TAG_TEN leaf (same fallback semantics as a BUFFERIZE leak).
+SetUsage[TKernelHasTenLeak, "TKernelHasTenLeak[kid$] returns True if the kernel's lifted DAG carries a bare TAG_TEN leaf (same fallback semantics as a BUFFERIZE leak).
 Pair with TKernelHasBufferizeLeak."];
-GeneralUtilities`SetUsage[TKernelAuditLeaks, "TKernelAuditLeaks[] returns a List of <|Kid, BufferizeLeak, TenLeak|> rows for every live kernel that has at least one leak.
+SetUsage[TKernelAuditLeaks, "TKernelAuditLeaks[] returns a List of <|Kid, BufferizeLeak, TenLeak|> rows for every live kernel that has at least one leak.
 Use to triage which kernels would fail Metal compile before any GPU dispatch."];
-GeneralUtilities`SetUsage[TKernelLeakReport, "TKernelLeakReport[kid$] returns <|Kid, BufferizeLeak, TenLeak, FallbackRefs, BufLines|> for kid$.
+SetUsage[TKernelLeakReport, "TKernelLeakReport[kid$] returns <|Kid, BufferizeLeak, TenLeak, FallbackRefs, BufLines|> for kid$.
 FallbackRefs counts the distinct buf<NNNN> identifiers in TKernelSource[kid$, \"Metal\"] and BufLines lists the 1-based source lines that reference them. Use to pinpoint which body terms the unified rewriter failed to lower."];
 
 (* === explosion-audit helpers ============================
@@ -156,22 +156,22 @@ FallbackRefs counts the distinct buf<NNNN> identifiers in TKernelSource[kid$, \"
    bytes.  All pure WL on top of TKernelSource + TMemoryPlan;
    no GPU work. *)
 
-GeneralUtilities`SetUsage[TKernelSourceHashes, "TKernelSourceHashes[] returns an Association mapping each kid to the MD5 hash of TKernelSource[kid$, \"Metal\"].
+SetUsage[TKernelSourceHashes, "TKernelSourceHashes[] returns an Association mapping each kid to the MD5 hash of TKernelSource[kid$, \"Metal\"].
 Kernels whose Metal source is empty (lift declined) hash an empty string and group together; use TKernelDuplicateGroups[] to surface the structural duplicates downstream."];
 
-GeneralUtilities`SetUsage[TKernelDuplicateGroups, "TKernelDuplicateGroups[] returns an Association mapping each MSL hash to its list of kids {kid$1, kid$2, $$}, for every hash backing at least two kernels, sorted by group size descending.
+SetUsage[TKernelDuplicateGroups, "TKernelDuplicateGroups[] returns an Association mapping each MSL hash to its list of kids {kid$1, kid$2, $$}, for every hash backing at least two kernels, sorted by group size descending.
 Empty-source kernels (lift declined) are skipped so they don't dominate the report."];
 
-GeneralUtilities`SetUsage[TKernelOpHistogram, "TKernelOpHistogram[] returns an Association mapping each op name to a count, summarising the kinds of work the live kernel fleet does.
+SetUsage[TKernelOpHistogram, "TKernelOpHistogram[] returns an Association mapping each op name to a count, summarising the kinds of work the live kernel fleet does.
 Counts are coarse (one tally per kernel that mentions the signature in its MSL, not per dynamic instance); keys cover matmul, conv, reduce_sum, reduce_max, elementwise, exp, log, sqrt, rsqrt, cast, compare."];
 
-GeneralUtilities`SetUsage[TKernelOutputBytes, "TKernelOutputBytes[] returns an Association mapping each kid to its output-buffer size in bytes, derived from TMemoryPlan[]'s producer_kid index.
+SetUsage[TKernelOutputBytes, "TKernelOutputBytes[] returns an Association mapping each kid to its output-buffer size in bytes, derived from TMemoryPlan[]'s producer_kid index.
 Kernels with no buffer entry (external or unrealized) map to 0."];
 
-GeneralUtilities`SetUsage[TKernelMemoryTopProducers, "TKernelMemoryTopProducers[] returns the top kernels by output-buffer bytes, each as <|Kid, OutputBytes, MSLLines, HashGroup|>.
+SetUsage[TKernelMemoryTopProducers, "TKernelMemoryTopProducers[] returns the top kernels by output-buffer bytes, each as <|Kid, OutputBytes, MSLLines, HashGroup|>.
 TKernelMemoryTopProducers[n$] returns the top n$ (default 20). HashGroup is the list of kids sharing the kernel's MSL hash (length 1 when unique); pair with TKernelDuplicateGroups[] to triage hot allocations."];
 
-GeneralUtilities`SetUsage[TBufferProducerKid, "TBufferProducerKid[bufid$] returns the kid that produced buffer bufid$, or 0 when the buffer is external (no producing kernel).
+SetUsage[TBufferProducerKid, "TBufferProducerKid[bufid$] returns the kid that produced buffer bufid$, or 0 when the buffer is external (no producing kernel).
 Pure WL: walks the TMemoryPlan[] Bufs records and returns the recorded producer_kid for the matching buf entry."];
 
 (* Forward-decl TTensTable: defined in Tensor.wl which loads
@@ -187,13 +187,12 @@ Begin["`Private`"];
    opcode is KERNEL.  Used by both TKernel construction and the
    guard on Information / dispatch UpValues. *)
 tKernelTermQ[t_TTerm] := TTermTag[t] === $TagUOP && TTermExt[t] === $UopKernel
-tKernelTermQ[___]     := False
+tKernelTermQ[___] := False
 
 (* Canonical internal form: TKernel[<|"Term" -> ..., "Kid" -> ...|>].
    tKernelInternalQ guards every UpValue so callers can't construct
    ill-formed TKernel[] shells that downstream code would crash on. *)
-tKernelInternalQ[TKernel[a_Association]] :=
-    KeyExistsQ[a, "Term"] && KeyExistsQ[a, "Kid"]
+tKernelInternalQ[TKernel[a_Association]] := KeyExistsQ[a, "Term"] && KeyExistsQ[a, "Kid"]
 tKernelInternalQ[___] := False
 
 TKernelQ = tKernelInternalQ
@@ -202,7 +201,7 @@ TKernelQ = tKernelInternalQ
    Loader symbols ($kernelTableFn etc.) live in THVMLink.wl alongside
    every other LibraryFunctionLoad call; both files share
    WolframInstitute`THVMLink`Private` so the references resolve. *)
-TKernelTable[]           := (ensureInit[]; Partition[Normal @ $kernelTableFn[], 7])
+TKernelTable[] := (ensureInit[]; Partition[Normal @ $kernelTableFn[], 7])
 TKernelInputs[k_Integer] := (ensureInit[]; Normal @ $kernelInputsFn[k])
 
 (* Read kid out of the UOP_KERNEL cell's NUM(kid) child at base+1.
@@ -212,10 +211,7 @@ kidOfKernelTerm[t_TTerm] := TTermVal[THeapRead[TTermVal[t] + 1]]
 (* === constructors === *)
 
 (* From a kernel TTerm: validate, extract kid, wrap canonically. *)
-TKernel[t_TTerm /; tKernelTermQ[t]] := TKernel[<|
-    "Term" -> t,
-    "Kid"  -> kidOfKernelTerm[t]
-|>]
+TKernel[t_TTerm /; tKernelTermQ[t]] := TKernel[<|"Term" -> t, "Kid" -> kidOfKernelTerm[t]|>]
 
 (* From a kid integer: scan the heap for the pinned UOP_KERNEL cell
    whose NUM(kid) matches.  Pinning is done by emit_kernel_for_boundary
@@ -226,9 +222,7 @@ TKernel[kid_Integer] := Module[{lo = THeapBase[], n = THeapPos[], hit},
     hit = SelectFirst[
         Range[lo, n - 1],
         Block[{c = THeapRead[#]},
-            TTermTag[c] === $TagUOP &&
-            TTermExt[c] === $UopKernel &&
-            kidOfKernelTerm[c] === kid
+            TTermTag[c] === $TagUOP && TTermExt[c] === $UopKernel && kidOfKernelTerm[c] === kid
         ] &,
         $Failed
     ];
@@ -246,8 +240,7 @@ TKernel[kid_Integer] := Module[{lo = THeapBase[], n = THeapPos[], hit},
    fresh KernelEntry, populates input_tids/program/output_*, and
    pins a UOP_KERNEL cell.  Stub returns Failure with the API
    shape so callers can scaffold against it. *)
-TKernel[spec_Association] /;
-    KeyExistsQ[spec, "OutputShape"] && KeyExistsQ[spec, "Program"] :=
+TKernel[spec_Association] /; KeyExistsQ[spec, "OutputShape"] && KeyExistsQ[spec, "Program"] :=
     Failure["TKernel", <|
         "MessageTemplate" -> "TKernel[<|...|>] custom-program construction needs the thvm_wl_kernel_emit_program C bridge (not yet implemented).  Spec keys: `1`",
         "MessageParameters" -> {Keys[spec]}
@@ -257,10 +250,10 @@ TKernel[spec_Association] /;
    ttermRaw + TTermVal/Tag/Ext are the four entry points that every
    downstream UOp constructor uses.  Routing them through the inner
    Term value lets you write TUOpAdd[k, x] without an explicit unwrap. *)
-TKernel /: ttermRaw [k:TKernel[a_Association] /; tKernelInternalQ[k]] := ttermRaw [a["Term"]]
-TKernel /: TTermVal [k:TKernel[a_Association] /; tKernelInternalQ[k]] := TTermVal [a["Term"]]
-TKernel /: TTermTag [k:TKernel[a_Association] /; tKernelInternalQ[k]] := TTermTag [a["Term"]]
-TKernel /: TTermExt [k:TKernel[a_Association] /; tKernelInternalQ[k]] := TTermExt [a["Term"]]
+TKernel /: ttermRaw[k:TKernel[a_Association] /; tKernelInternalQ[k]] := ttermRaw[a["Term"]]
+TKernel /: TTermVal[k:TKernel[a_Association] /; tKernelInternalQ[k]] := TTermVal[a["Term"]]
+TKernel /: TTermTag[k:TKernel[a_Association] /; tKernelInternalQ[k]] := TTermTag[a["Term"]]
+TKernel /: TTermExt[k:TKernel[a_Association] /; tKernelInternalQ[k]] := TTermExt[a["Term"]]
 TKernel /: TTermExpr[k:TKernel[a_Association] /; tKernelInternalQ[k]] := TTermExpr[a["Term"]]
 
 (* === property surface (used by both Information and k["name"]) === *)
@@ -268,10 +261,7 @@ TKernel /: TTermExpr[k:TKernel[a_Association] /; tKernelInternalQ[k]] := TTermEx
 (* Decode KSRC_AS_INPUT(slot) vs program-index references.  Mirrors
    the KSRC_INPUT_FLAG / KSRC_INDEX macros in src/thvm.h:247. *)
 $kSrcInputFlag = 16^^80000000
-decodeKSrc[s_Integer] := If[ BitAnd[s, $kSrcInputFlag] =!= 0,
-    KIn[BitAnd[s, 16^^7FFFFFFF]],
-    KOp[s]
-]
+decodeKSrc[s_Integer] := If[BitAnd[s, $kSrcInputFlag] =!= 0, KIn[BitAnd[s, 16^^7FFFFFFF]], KOp[s]]
 
 (* Decode the flat MTensor returned by thvm_wl_kernel_info into a
    list of association records.  Layout (mirrors thvmlink.c:836):
@@ -281,10 +271,10 @@ decodeKSrc[s_Integer] := If[ BitAnd[s, $kSrcInputFlag] =!= 0,
 decodeKernelInfo[kid_Integer] := Block[{raw, nInputs, nOps, header},
     raw = Normal @ $kernelInfoFn[kid];
     nInputs = raw[[1]];
-    nOps    = raw[[2]];
-    header  = <|
-        "InputCount"  -> nInputs,
-        "OpCount"     -> nOps,
+    nOps = raw[[2]];
+    header = <|
+        "InputCount" -> nInputs,
+        "OpCount" -> nOps,
         "OutputNumel" -> raw[[3]],
         "OutputDtype" -> dtypeName[raw[[4]]]
     |>;
@@ -292,13 +282,10 @@ decodeKernelInfo[kid_Integer] := Block[{raw, nInputs, nOps, header},
      Table[
         Block[{base = 4 + 6 (i - 1)},
             <|
-                "Op"      -> Lookup[$uopNames, raw[[base + 1]], "?"],
-                "Sources" -> Take[
-                    {decodeKSrc[raw[[base + 3]]], decodeKSrc[raw[[base + 4]]]},
-                    raw[[base + 2]]
-                ],
-                "Arg"     -> raw[[base + 5]],
-                "Numel"   -> raw[[base + 6]]
+                "Op" -> Lookup[$uopNames, raw[[base + 1]], "?"],
+                "Sources" -> Take[{decodeKSrc[raw[[base + 3]]], decodeKSrc[raw[[base + 4]]]}, raw[[base + 2]]],
+                "Arg" -> raw[[base + 5]],
+                "Numel" -> raw[[base + 6]]
             |>
         ],
         {i, nOps}
@@ -311,13 +298,13 @@ decodeKernelInfo[kid_Integer] := Block[{raw, nInputs, nOps, header},
    association so individual properties can index by name. *)
 kernelRowAsoc[kid_Integer] := Block[{row = TKernelTable[][[kid]]},
     <|
-        "InputCount"    -> row[[1]],
-        "OutputTid"     -> row[[2]],
-        "Fired"         -> row[[3]] === 1,
-        "Spliced"       -> row[[4]] === 1,
+        "InputCount" -> row[[1]],
+        "OutputTid" -> row[[2]],
+        "Fired" -> row[[3]] === 1,
+        "Spliced" -> row[[4]] === 1,
         "ConsumerCount" -> row[[5]],
-        "OutputNumel"   -> row[[6]],
-        "OutputDtype"   -> dtypeName[row[[7]]]
+        "OutputNumel" -> row[[6]],
+        "OutputDtype" -> dtypeName[row[[7]]]
     |>
 ]
 
@@ -334,31 +321,55 @@ kernelRowAsoc[kid_Integer] := Block[{row = TKernelTable[][[kid]]},
      dispatch profile    : Flops, DispatchKind, DispatchCount, TotalUs,
                            AvgUs, GFlopsPerSec *)
 $tKernelProperties = {
-    "Kid", "Term", "OutputTid", "OutputShape", "OutputDtype",
-    "OutputNumel", "InputCount", "InputTids", "InputTensors",
-    "OpCount", "Program", "ProgramKey", "Fired", "Spliced", "ConsumerCount",
-    "Source", "JitDylibPath",
-    "Flops", "DispatchKind", "DispatchCount", "TotalUs",
-    "AvgUs", "GFlopsPerSec"
+    "Kid",
+    "Term",
+    "OutputTid",
+    "OutputShape",
+    "OutputDtype",
+    "OutputNumel",
+    "InputCount",
+    "InputTids",
+    "InputTensors",
+    "OpCount",
+    "Program",
+    "ProgramKey",
+    "Fired",
+    "Spliced",
+    "ConsumerCount",
+    "Source",
+    "JitDylibPath",
+    "Flops",
+    "DispatchKind",
+    "DispatchCount",
+    "TotalUs",
+    "AvgUs",
+    "GFlopsPerSec"
 }
 
 (* Build a TAG_TEN-wrapped TTerm from a tid.  Looks up the tid's
    dtype out of TTensTable[] (column 3) so the packed Term has a
    correct ext field; without this, downstream TTensorShape /
    TTensorData calls on the result would mis-decode dtype. *)
-tenTermFromTid[tid_Integer] := With[{
-    dtype = TTensTable[][[tid, 3]]
-},
+tenTermFromTid[tid_Integer] := With[{dtype = TTensTable[][[tid, 3]]},
     packTerm[0, $TagTEN, dtype, tid]
 ]
 
 (* C-side dispatch enum -> readable label.  Mirrors KDispatchKind in
    src/thvm.h. *)
 $dispatchKindNames = <|
-    0 -> "none",        1 -> "blas-dot",   2 -> "blas-gemv", 3 -> "blas-gemm",
-    4 -> "jit",         5 -> "interpreter",
-    6 -> "metal-jit",   7 -> "metal-op",   8 -> "tile",      9 -> "metal-tile",
-    10 -> "metal-gemm", 11 -> "metal-conv", 12 -> "metal-gemv",
+    0 -> "none",
+    1 -> "blas-dot",
+    2 -> "blas-gemv",
+    3 -> "blas-gemm",
+    4 -> "jit",
+    5 -> "interpreter",
+    6 -> "metal-jit",
+    7 -> "metal-op",
+    8 -> "tile",
+    9 -> "metal-tile",
+    10 -> "metal-gemm",
+    11 -> "metal-conv",
+    12 -> "metal-gemv",
     13 -> "metal-alias"
 |>
 decodeDispatchKind[k_Integer] := Lookup[$dispatchKindNames, k, "unknown"]
@@ -366,65 +377,50 @@ decodeDispatchKind[k_Integer] := Lookup[$dispatchKindNames, k, "unknown"]
 (* Single-property fetch.  Composed from kernelRowAsoc + decoded
    program; "Term" / "Kid" come straight from the wrapper.  All
    profiling/source clauses ensureInit + call the loader fn. *)
-tKernelProp[k:TKernel[a_Association], "Kid"]   := a["Kid"]
-tKernelProp[k:TKernel[a_Association], "Term"]  := a["Term"]
-tKernelProp[k:TKernel[a_Association], "InputTids"]    := TKernelInputs[a["Kid"]]
-tKernelProp[k:TKernel[a_Association], "InputTensors"] :=
-    tenTermFromTid /@ TKernelInputs[a["Kid"]]
-tKernelProp[k:TKernel[a_Association], "Program"]      := decodeKernelInfo[a["Kid"]][[2]]
-tKernelProp[k:TKernel[a_Association], "ProgramKey"]   := TKernelProgramKey[a["Kid"]]
-tKernelProp[k:TKernel[a_Association], "OpCount"]      := decodeKernelInfo[a["Kid"]][[1]]["OpCount"]
-tKernelProp[k:TKernel[a_Association], "OutputShape"]  := With[{
-    tid = kernelRowAsoc[a["Kid"]]["OutputTid"]
-},
-    If[ tid > 0, TTensorShape[tenTermFromTid[tid]], Missing["NoOutput"]]
+tKernelProp[k:TKernel[a_Association], "Kid"] := a["Kid"]
+tKernelProp[k:TKernel[a_Association], "Term"] := a["Term"]
+tKernelProp[k:TKernel[a_Association], "InputTids"] := TKernelInputs[a["Kid"]]
+tKernelProp[k:TKernel[a_Association], "InputTensors"] := tenTermFromTid /@ TKernelInputs[a["Kid"]]
+tKernelProp[k:TKernel[a_Association], "Program"] := decodeKernelInfo[a["Kid"]][[2]]
+tKernelProp[k:TKernel[a_Association], "ProgramKey"] := TKernelProgramKey[a["Kid"]]
+tKernelProp[k:TKernel[a_Association], "OpCount"] := decodeKernelInfo[a["Kid"]][[1]]["OpCount"]
+tKernelProp[k:TKernel[a_Association], "OutputShape"] := With[{tid = kernelRowAsoc[a["Kid"]]["OutputTid"]},
+    If[tid > 0, TTensorShape[tenTermFromTid[tid]], Missing["NoOutput"]]
 ]
 
 (* === codegen / profile properties ===
    Each routes through the loader fn declared in THVMLink.wl.  Both
    files share WolframInstitute`THVMLink`Private` so the $...Fn symbols resolve. *)
-tKernelProp[k:TKernel[a_Association], "Source"]              := TKernelSource[a["Kid"]]
+tKernelProp[k:TKernel[a_Association], "Source"] := TKernelSource[a["Kid"]]
 tKernelProp[k:TKernel[a_Association], "Source", backend_String] := TKernelSource[a["Kid"], backend]
 tKernelProp[k:TKernel[a_Association], "JitDylibPath"] := (ensureInit[]; $kernelJitDylibPathFn[a["Kid"]])
-tKernelProp[k:TKernel[a_Association], "Flops"]         := (ensureInit[]; $kernelFlopsFn[a["Kid"]])
-tKernelProp[k:TKernel[a_Association], "DispatchKind"]  := (ensureInit[];
-    decodeDispatchKind[$kernelDispatchKindFn[a["Kid"]]])
+tKernelProp[k:TKernel[a_Association], "Flops"] := (ensureInit[]; $kernelFlopsFn[a["Kid"]])
+tKernelProp[k:TKernel[a_Association], "DispatchKind"] := (ensureInit[]; decodeDispatchKind[$kernelDispatchKindFn[a["Kid"]]])
 tKernelProp[k:TKernel[a_Association], "DispatchCount"] := (ensureInit[]; $kernelDispatchCountFn[a["Kid"]])
-tKernelProp[k:TKernel[a_Association], "TotalUs"]       := (ensureInit[]; $kernelTotalUsFn[a["Kid"]])
-tKernelProp[k:TKernel[a_Association], "AvgUs"]         := With[{
-    n = tKernelProp[k, "DispatchCount"], us = tKernelProp[k, "TotalUs"]
-},
+tKernelProp[k:TKernel[a_Association], "TotalUs"] := (ensureInit[]; $kernelTotalUsFn[a["Kid"]])
+tKernelProp[k:TKernel[a_Association], "AvgUs"] := With[{n = tKernelProp[k, "DispatchCount"], us = tKernelProp[k, "TotalUs"]},
     If[n > 0, N[us / n], 0]
 ]
-tKernelProp[k:TKernel[a_Association], "GFlopsPerSec"]  := With[{
-    n     = tKernelProp[k, "DispatchCount"],
-    us    = tKernelProp[k, "TotalUs"],
-    flops = tKernelProp[k, "Flops"]
-},
+tKernelProp[k:TKernel[a_Association], "GFlopsPerSec"] := With[{n = tKernelProp[k, "DispatchCount"], us = tKernelProp[k, "TotalUs"], flops = tKernelProp[k, "Flops"]},
     If[us > 0 && n > 0, N[flops * n / (us * 1000)], 0]
 ]
 
 (* Catchall: row-association lookup for any string we don't have a
    dedicated clause for, with a Missing[] fallback for unknown keys. *)
-tKernelProp[k:TKernel[a_Association], prop_String] := Lookup[
-    kernelRowAsoc[a["Kid"]], prop, Missing["UnknownProperty", prop]
-]
+tKernelProp[k:TKernel[a_Association], prop_String] := Lookup[kernelRowAsoc[a["Kid"]], prop, Missing["UnknownProperty", prop]]
 
 (* === Information surface ===
    Two UpValues: one for the property-list query, one for individual
    fetches.  The MatchQ pattern on the second covers any string a
    user passes in - including ones we don't know about, which fall
    through to a Missing[] via tKernelProp's catchall. *)
-TKernel /: Information[k:TKernel[_Association] /; tKernelInternalQ[k], "Properties"] :=
-    $tKernelProperties
+TKernel /: Information[k:TKernel[_Association] /; tKernelInternalQ[k], "Properties"] := $tKernelProperties
 
-TKernel /: Information[k:TKernel[_Association] /; tKernelInternalQ[k], prop_String] :=
-    tKernelProp[k, prop]
+TKernel /: Information[k:TKernel[_Association] /; tKernelInternalQ[k], prop_String] := tKernelProp[k, prop]
 
 (* Property list as the default Information[k] form too, so
    `Information[k]` shows the summary-box + property list. *)
-TKernel /: Information[k:TKernel[_Association] /; tKernelInternalQ[k]] :=
-    Association[(# -> tKernelProp[k, #]) & /@ $tKernelProperties]
+TKernel /: Information[k:TKernel[_Association] /; tKernelInternalQ[k]] := Association[(# -> tKernelProp[k, #]) & /@ $tKernelProperties]
 
 (* === call syntax ===
    k[]            - dispatch (TWnf the underlying kernel term).
@@ -436,11 +432,9 @@ TKernel /: Information[k:TKernel[_Association] /; tKernelInternalQ[k]] :=
    k[args__TTerm] - planned: rebind inputs and dispatch.  Stub
                      returns Failure for now (would need
                      materialize_inplace_rebind). *)
-k_TKernel[] /; tKernelInternalQ[k] :=
-    TWnf[k[[1]]["Term"]]
+k_TKernel[] /; tKernelInternalQ[k] := TWnf[k[[1]]["Term"]]
 
-k_TKernel[prop_String] /; tKernelInternalQ[k] :=
-    tKernelProp[k, prop]
+k_TKernel[prop_String] /; tKernelInternalQ[k] := tKernelProp[k, prop]
 
 k_TKernel[args__TTerm] /; tKernelInternalQ[k] :=
     Failure["TKernel", <|
@@ -461,51 +455,46 @@ TKernelProgram[k_TKernel /; tKernelInternalQ[k]] := tKernelProp[k, "Program"]
    the property surface (`k["Flops"]`) and these accessors return
    identical values via the same loaders. *)
 tActiveBackendName[] := With[{e = Environment["DEV"]},
-    If[ StringQ[e] && ToLowerCase[e] === "metal", "Metal", "C"]]
+    If[StringQ[e] && ToLowerCase[e] === "metal", "Metal", "C"]
+]
 
-TKernelSource[kid_Integer]                       := TKernelSource[kid, tActiveBackendName[]]
-TKernelSource[kid_Integer, "C"]                  := (ensureInit[]; $kernelSourceCFn[kid])
-TKernelSource[kid_Integer, "Metal"]              := (ensureInit[]; $kernelSourceMetalFn[kid])
-TKernelSource[kid_Integer, b_String] := Failure["UnknownBackend",
-    <|"Message" -> "TKernelSource backend must be \"C\" or \"Metal\"",
-      "Backend" -> b|>]
-TKernelFlops[kid_Integer]         := (ensureInit[]; $kernelFlopsFn[kid])
-TKernelStoreRoot[kid_Integer] := With[{
-    raw = (ensureInit[]; $kernelStoreRootFn[kid])
-},
-    If[ raw === 0, Missing["LiftDeclined"], TTerm[raw]]
+TKernelSource[kid_Integer] := TKernelSource[kid, tActiveBackendName[]]
+TKernelSource[kid_Integer, "C"] := (ensureInit[]; $kernelSourceCFn[kid])
+TKernelSource[kid_Integer, "Metal"] := (ensureInit[]; $kernelSourceMetalFn[kid])
+TKernelSource[kid_Integer, b_String] := Failure["UnknownBackend", <|"Message" -> "TKernelSource backend must be \"C\" or \"Metal\"", "Backend" -> b|>]
+TKernelFlops[kid_Integer] := (ensureInit[]; $kernelFlopsFn[kid])
+TKernelStoreRoot[kid_Integer] := With[{raw = (ensureInit[]; $kernelStoreRootFn[kid])},
+    If[raw === 0, Missing["LiftDeclined"], TTerm[raw]]
 ]
 
 (* Structural search: walk a TTermExpr snapshot and return True iff any
    subexpression matches one of `pats`.  Used by the leak audits below.
    Cheap pattern walk; no dispatch. *)
-WolframInstitute`THVMLink`Private`tKernelTermContainsPatterns[term_TTerm, pats_List] :=
-    Module[{snap = TTermExpr[term]},
-        AnyTrue[pats, !FreeQ[snap, #] &]
-    ]
+WolframInstitute`THVMLink`Private`tKernelTermContainsPatterns[term_TTerm, pats_List] := Module[{snap = TTermExpr[term]},
+    AnyTrue[pats, ! FreeQ[snap, #] &]
+]
 WolframInstitute`THVMLink`Private`tKernelTermContainsPatterns[_, _] := False
 
 TKernelHasBufferizeLeak[kid_Integer] := Module[{root},
     root = TKernelStoreRoot[kid];
-    If[ !MatchQ[root, _TTerm], Return[False]];
-    WolframInstitute`THVMLink`Private`tKernelTermContainsPatterns[root,
-        {"UOP"["BUFFERIZE", ___]}]
+    If[! MatchQ[root, _TTerm], Return[False]];
+    WolframInstitute`THVMLink`Private`tKernelTermContainsPatterns[root, {"UOP"["BUFFERIZE", ___]}]
 ]
 TKernelHasTenLeak[kid_Integer] := Module[{root, snap},
     root = TKernelStoreRoot[kid];
-    If[ !MatchQ[root, _TTerm], Return[False]];
+    If[! MatchQ[root, _TTerm], Return[False]];
     snap = TTermExpr[root];
     (* TAG_TEN appears in TTermExpr as bare "TEN"[tid].  Look for any
        "TEN"[_Integer] anywhere in the lifted DAG - the rewriter should
        have converted all of these to "UOP"["BUFFER", ...] input slots. *)
-    !FreeQ[snap, "TEN"[_Integer]]
+    ! FreeQ[snap, "TEN"[_Integer]]
 ]
 TKernelAuditLeaks[] := Module[{kids = If[TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {}], rows},
     rows = Map[
         k |-> <|
-            "Kid"           -> k,
+            "Kid" -> k,
             "BufferizeLeak" -> TKernelHasBufferizeLeak[k],
-            "TenLeak"       -> TKernelHasTenLeak[k]
+            "TenLeak" -> TKernelHasTenLeak[k]
         |>,
         kids
     ];
@@ -514,55 +503,50 @@ TKernelAuditLeaks[] := Module[{kids = If[TKernelCount[] > 1, Range[1, TKernelCou
 
 TKernelLeakReport[kid_Integer] := Module[{src, fbRefs, lines, hits},
     src = TKernelSource[kid, "Metal"];
-    If[ !StringQ[src] || src === "",
+    If[ ! StringQ[src] || src === "",
         Return[<|
-            "Kid"           -> kid,
+            "Kid" -> kid,
             "BufferizeLeak" -> TKernelHasBufferizeLeak[kid],
-            "TenLeak"       -> TKernelHasTenLeak[kid],
-            "FallbackRefs"  -> 0,
-            "BufLines"      -> {},
-            "MSL"           -> Missing["NoMSL"]
+            "TenLeak" -> TKernelHasTenLeak[kid],
+            "FallbackRefs" -> 0,
+            "BufLines" -> {},
+            "MSL" -> Missing["NoMSL"]
         |>]];
     fbRefs = DeleteDuplicates @ StringCases[src, RegularExpression["\\bbuf\\d{4,}"]];
-    lines  = StringSplit[src, "\n"];
-    hits   = Select[Range[Length[lines]],
-        i |-> StringMatchQ[lines[[i]], ___ ~~ "buf" ~~ DigitCharacter ..  ~~ ___] && !StringMatchQ[lines[[i]], ___ ~~ "buffer(" ~~ ___]];
+    lines = StringSplit[src, "\n"];
+    hits = Select[Range[Length[lines]],
+        i |-> StringMatchQ[lines[[i]], ___ ~~ "buf" ~~ DigitCharacter ..  ~~ ___] && ! StringMatchQ[lines[[i]], ___ ~~ "buffer(" ~~ ___]];
     <|
-        "Kid"           -> kid,
+        "Kid" -> kid,
         "BufferizeLeak" -> TKernelHasBufferizeLeak[kid],
-        "TenLeak"       -> TKernelHasTenLeak[kid],
-        "FallbackRefs"  -> Length[fbRefs],
+        "TenLeak" -> TKernelHasTenLeak[kid],
+        "FallbackRefs" -> Length[fbRefs],
         "FallbackNames" -> fbRefs,
-        "BufLines"      -> hits,
-        "MSL"           -> src
+        "BufLines" -> hits,
+        "MSL" -> src
     |>
 ]
-TKernelDispatchKind[kid_Integer]  := (ensureInit[];
-    decodeDispatchKind[$kernelDispatchKindFn[kid]])
+TKernelDispatchKind[kid_Integer] := (ensureInit[]; decodeDispatchKind[$kernelDispatchKindFn[kid]])
 TKernelDispatchCount[kid_Integer] := (ensureInit[]; $kernelDispatchCountFn[kid])
-TKernelTotalUs[kid_Integer]       := (ensureInit[]; $kernelTotalUsFn[kid])
-TKernelJitDylibPath[kid_Integer]  := (ensureInit[]; $kernelJitDylibPathFn[kid])
-TKernelProgramKey[kid_Integer]    := (ensureInit[]; $kernelProgramKeyFn[kid])
+TKernelTotalUs[kid_Integer] := (ensureInit[]; $kernelTotalUsFn[kid])
+TKernelJitDylibPath[kid_Integer] := (ensureInit[]; $kernelJitDylibPathFn[kid])
+TKernelProgramKey[kid_Integer] := (ensureInit[]; $kernelProgramKeyFn[kid])
 
 (* TKernelProfile = same Association shape Information[TKernel[kid]]
    would return, but synthesized directly from the loader fns so it
    keeps working after the kernel term has fired (and its heap pin
    has been substituted away). *)
 TKernelProfile[kid_Integer] := <|
-    "Kid"           -> kid,
-    "Flops"         -> TKernelFlops[kid],
-    "DispatchKind"  -> TKernelDispatchKind[kid],
+    "Kid" -> kid,
+    "Flops" -> TKernelFlops[kid],
+    "DispatchKind" -> TKernelDispatchKind[kid],
     "DispatchCount" -> TKernelDispatchCount[kid],
-    "TotalUs"       -> TKernelTotalUs[kid],
-    "AvgUs"         -> If[ TKernelDispatchCount[kid] > 0,
-                           N[TKernelTotalUs[kid] / TKernelDispatchCount[kid]],
-                           0],
-    "GFlopsPerSec"  -> If[ TKernelTotalUs[kid] > 0 && TKernelDispatchCount[kid] > 0,
-                           N[TKernelFlops[kid] * TKernelDispatchCount[kid] / (TKernelTotalUs[kid] * 1000)],
-                           0],
-    "ProgramKey"    -> TKernelProgramKey[kid],
-    "JitDylibPath"  -> TKernelJitDylibPath[kid],
-    "Source"        -> TKernelSource[kid]
+    "TotalUs" -> TKernelTotalUs[kid],
+    "AvgUs" -> If[TKernelDispatchCount[kid] > 0, N[TKernelTotalUs[kid] / TKernelDispatchCount[kid]], 0],
+    "GFlopsPerSec" -> If[TKernelTotalUs[kid] > 0 && TKernelDispatchCount[kid] > 0, N[TKernelFlops[kid] * TKernelDispatchCount[kid] / (TKernelTotalUs[kid] * 1000)], 0],
+    "ProgramKey" -> TKernelProgramKey[kid],
+    "JitDylibPath" -> TKernelJitDylibPath[kid],
+    "Source" -> TKernelSource[kid]
 |>
 
 (* === axis-typed scheduling slot ============================
@@ -574,22 +558,30 @@ TKernelProfile[kid_Integer] := <|
 
 (* String <-> KOP_ ordinal.  Order MUST match KOP_* in src/thvm.h.
    KOP_NONE = 0 is the empty-slot sentinel, never user-visible. *)
-$kopNames = {"NONE", "UPCAST", "UNROLL", "LOCAL", "GROUP",
-             "GROUPTOP", "SWAP", "PADTO", "NOLOCALS", "TC",
-             "GLOBAL"}
+$kopNames = {
+    "NONE",
+    "UPCAST",
+    "UNROLL",
+    "LOCAL",
+    "GROUP",
+    "GROUPTOP",
+    "SWAP",
+    "PADTO",
+    "NOLOCALS",
+    "TC",
+    "GLOBAL"
+}
 
 kopOrdinal[op_String] := With[{i = FirstPosition[$kopNames, op, {-1}][[1]]},
-    If[ i > 0, i - 1, $Failed]]
+    If[i > 0, i - 1, $Failed]
+]
 
-kopName[ord_Integer] := If[ ord >= 0 && ord < Length[$kopNames],
-    $kopNames[[ord + 1]], "?"]
+kopName[ord_Integer] := If[ord >= 0 && ord < Length[$kopNames], $kopNames[[ord + 1]], "?"]
 
 (* String <-> KAX_ ordinal.  Order MUST match KAX_* in src/thvm.h. *)
-$kaxNames = {"LOOP", "REDUCE", "UPCAST", "UNROLL",
-             "LOCAL", "GLOBAL", "GROUP_REDUCE"}
+$kaxNames = {"LOOP", "REDUCE", "UPCAST", "UNROLL", "LOCAL", "GLOBAL", "GROUP_REDUCE"}
 
-kaxName[ord_Integer] := If[ ord >= 0 && ord < Length[$kaxNames],
-    $kaxNames[[ord + 1]], "?"]
+kaxName[ord_Integer] := If[ord >= 0 && ord < Length[$kaxNames], $kaxNames[[ord + 1]], "?"]
 
 (* Decode the packed {Integer, 1} payload from thvm_wl_kernel_axes_get
    into a {axisTypes, fullShape, applied} triple.  Layout:
@@ -598,47 +590,40 @@ kaxName[ord_Integer] := If[ ord >= 0 && ord < Length[$kaxNames],
      [2+n_axes..2+2*n_axes-1]         full_shape[i],
      [2+2*n_axes..]                   applied as (op, axis, arg) triples. *)
 decodeKernelAxes[packed_List] := Module[{nA, nO, base, axisTypes, fullShape, applied},
-    If[ Length[packed] < 2, Return[{{}, {}, {}}] ];
+    If[Length[packed] < 2, Return[{{}, {}, {}}]];
     nA = packed[[1]]; nO = packed[[2]];
     axisTypes = kaxName /@ packed[[3 ;; 2 + nA]];
     fullShape = packed[[3 + nA ;; 2 + 2*nA]];
-    base      = 2 + 2*nA;
-    applied   = Table[
-        TOpt[ kopName @ packed[[base + 3*(i - 1) + 1]],
-              packed[[base + 3*(i - 1) + 2]],
-              packed[[base + 3*(i - 1) + 3]] ],
+    base = 2 + 2*nA;
+    applied = Table[
+        TOpt[kopName @ packed[[base + 3*(i - 1) + 1]], packed[[base + 3*(i - 1) + 2]], packed[[base + 3*(i - 1) + 3]]],
         {i, nO}];
     {axisTypes, fullShape, applied}]
 
 TKernelOpts[kid_Integer] := (ensureInit[];
     Module[{packed, decoded},
-        packed  = Normal @ $kernelAxesGetFn[kid];
+        packed = Normal @ $kernelAxesGetFn[kid];
         decoded = decodeKernelAxes[packed];
         TKernelOpts[<|
-            "Kid"       -> kid,
+            "Kid" -> kid,
             "AxisTypes" -> decoded[[1]],
             "FullShape" -> decoded[[2]],
-            "Applied"   -> decoded[[3]]
+            "Applied" -> decoded[[3]]
         |>]
     ])
 
 TKernelApplyOpt[kid_Integer, TOpt[op_String, axis_Integer, arg_Integer]] :=
     (ensureInit[];
         Module[{ord = kopOrdinal[op]},
-            If[ ord === $Failed, Return[Failure["unknown-opt", <|"Op" -> op|>]] ];
-            If[ $kernelApplyOptFn[kid, ord, axis, arg] === 1,
-                TKernelOpts[kid],
-                Failure["opt-rejected", <|"Kid" -> kid, "Opt" -> TOpt[op, axis, arg]|>]
-            ]
+            If[ord === $Failed, Return[Failure["unknown-opt", <|"Op" -> op|>]]];
+            If[$kernelApplyOptFn[kid, ord, axis, arg] === 1, TKernelOpts[kid], Failure["opt-rejected", <|"Kid" -> kid, "Opt" -> TOpt[op, axis, arg]|>]]
         ])
 
 TKernelProposed[kid_Integer] := (ensureInit[];
     Module[{packed},
         packed = Normal @ $kernelProposeFn[kid];
         Table[
-            TOpt[ kopName @ packed[[3*(i - 1) + 1]],
-                  packed[[3*(i - 1) + 2]],
-                  packed[[3*(i - 1) + 3]] ],
+            TOpt[kopName @ packed[[3*(i - 1) + 1]], packed[[3*(i - 1) + 2]], packed[[3*(i - 1) + 3]]],
             {i, Length[packed]/3}
         ]
     ])
@@ -656,51 +641,38 @@ TKernelAutotuneUnique[] := (ensureInit[];
         props = Association @ Table[k -> TKernelProposed[k], {k, kids}];
         candidates = Keys @ Select[props, Length[#] > 0 &];
         groups = GatherBy[candidates, TKernelProgramKey];
-        reps = Flatten[
-            If[TKernelProgramKey[First[#]] === 0, #, {First[#]}] & /@ groups
-        ];
+        reps = Flatten[If[TKernelProgramKey[First[#]] === 0, #, {First[#]}] & /@ groups];
         Association @ Table[k -> TKernelAutotune[k], {k, reps}]
     ])
 
 tKernelAutotuneTopHasOp[row_Association, op_String] := Or[
-    AnyTrue[
-        Keys @ Lookup[row, "Ops", <||>],
-        ToString[#] === op &],
+    AnyTrue[Keys @ Lookup[row, "Ops", <||>], ToString[#] === op &],
     (* Fallback when info["program"] is empty (THVM_PHASE_C7_FREE_PROGRAM
        freed program[] post-lift): derive REDUCE-presence from
        AxisTypes, which axis.c populates via the lifted DAG. *)
-    op === "REDUCE" && MemberQ[
-        Lookup[row, "AxisTypes", {}],
-        "REDUCE" | "GROUP_REDUCE"]
+    op === "REDUCE" && MemberQ[Lookup[row, "AxisTypes", {}], "REDUCE" | "GROUP_REDUCE"]
 ]
 
 tKernelAutotuneTopMetric[row_Association, metric_String] := Switch[metric,
-    "TotalUs",       Lookup[row, "TotalUs", 0],
+    "TotalUs", Lookup[row, "TotalUs", 0],
     "DispatchCount", Lookup[row, "DispatchCount", 0],
-    "ReduceFlops",   If[tKernelAutotuneTopHasOp[row, "REDUCE"],
-                         Lookup[row, "Flops", 0],
-                         0],
-    "Flops",         Lookup[row, "Flops", 0],
-    _,               Lookup[row, "Flops", 0]]
+    "ReduceFlops", If[tKernelAutotuneTopHasOp[row, "REDUCE"], Lookup[row, "Flops", 0], 0],
+    "Flops", Lookup[row, "Flops", 0],
+    _, Lookup[row, "Flops", 0]]
 
 TKernelAutotuneTop[n_Integer] := TKernelAutotuneTop[TProfileAll[], n, "Flops"]
-TKernelAutotuneTop[n_Integer, metric_String] :=
-    TKernelAutotuneTop[TProfileAll[], n, metric]
+TKernelAutotuneTop[n_Integer, metric_String] := TKernelAutotuneTop[TProfileAll[], n, metric]
 TKernelAutotuneTop[profile_Association, n_Integer, metric_String : "Flops"] :=
     (ensureInit[];
      Module[{limit, groups, reps},
         limit = Max[0, n];
         groups = Select[
-            ReverseSortBy[
-                TProfileProgramGroups[profile],
-                tKernelAutotuneTopMetric[#, metric] &],
+            ReverseSortBy[TProfileProgramGroups[profile], tKernelAutotuneTopMetric[#, metric] &],
             tKernelAutotuneTopMetric[#, metric] > 0 &];
         reps = DeleteDuplicates @ Cases[
             groups,
-            row_ /; Length[Quiet @ Check[TKernelProposed[row["RepKid"]], {}]] > 0
-                :> row["RepKid"]];
-        Association @ Table[k -> TKernelAutotune[k],
-            {k, Take[reps, UpTo[limit]]}]
+            row_ /; Length[Quiet @ Check[TKernelProposed[row["RepKid"]], {}]] > 0 :> row["RepKid"]];
+        Association @ Table[k -> TKernelAutotune[k], {k, Take[reps, UpTo[limit]]}]
     ])
 
 (* Inspect-only sibling of TKernelAutotune: bench the no-opt
@@ -714,13 +686,10 @@ TKernelVariants[kid_Integer] := (ensureInit[];
     Module[{packed},
         packed = Normal @ $kernelBenchVariantsFn[kid];
         Table[
-            With[{op = packed[[4*(i - 1) + 1]],
-                  ax = packed[[4*(i - 1) + 2]],
-                  ar = packed[[4*(i - 1) + 3]],
-                  us = packed[[4*(i - 1) + 4]]},
+            With[{op = packed[[4*(i - 1) + 1]], ax = packed[[4*(i - 1) + 2]], ar = packed[[4*(i - 1) + 3]], us = packed[[4*(i - 1) + 4]]},
                 TKernelVariant[<|
-                    "Kid"    -> kid,
-                    "Opt"    -> If[ i === 1, None, TOpt[kopName[op], ax, ar]],
+                    "Kid" -> kid,
+                    "Opt" -> If[i === 1, None, TOpt[kopName[op], ax, ar]],
                     "WallUs" -> us
                 |>]],
             {i, Length[packed]/4}
@@ -728,9 +697,7 @@ TKernelVariants[kid_Integer] := (ensureInit[];
     ])
 
 (* All currently-live kernels' profiles, indexed by kid. *)
-TProfileAll[] := Association[
-    Table[k -> TKernelProfile[k], {k, 1, TKernelCount[] - 1}]
-]
+TProfileAll[] := Association[Table[k -> TKernelProfile[k], {k, 1, TKernelCount[] - 1}]]
 
 tProfileZero[kid_Integer] := <|
     "Kid" -> kid,
@@ -752,7 +719,7 @@ TProfileDelta[before_Association, after_Association] := Module[{kids},
                 a = Lookup[after, kid, tProfileZero[kid]];
                 dc = a["DispatchCount"] - b["DispatchCount"];
                 du = a["TotalUs"] - b["TotalUs"];
-                If[dc <= 0 && du <= 0,
+                If[ dc <= 0 && du <= 0,
                     Nothing,
                     flops = Lookup[a, "Flops", 0];
                     kid -> Join[
@@ -761,9 +728,7 @@ TProfileDelta[before_Association, after_Association] := Module[{kids},
                             "DispatchCount" -> dc,
                             "TotalUs" -> du,
                             "AvgUs" -> If[dc > 0, N[du / dc], 0],
-                            "GFlopsPerSec" -> If[du > 0 && dc > 0,
-                                N[flops * dc / (du * 1000)],
-                                0]
+                            "GFlopsPerSec" -> If[du > 0 && dc > 0, N[flops * dc / (du * 1000)], 0]
                         |>
                     ]
                 ]
@@ -771,26 +736,20 @@ TProfileDelta[before_Association, after_Association] := Module[{kids},
             {kid, kids}],
         Nothing]]
 
-tProfileGroupKey[row_Association] := If[Lookup[row, "ProgramKey", 0] === 0,
-    "kid:" <> ToString[row["Kid"]],
-    "key:" <> ToString[row["ProgramKey"]]]
+tProfileGroupKey[row_Association] := If[Lookup[row, "ProgramKey", 0] === 0, "kid:" <> ToString[row["Kid"]], "key:" <> ToString[row["ProgramKey"]]]
 
 TProfileProgramGroups[profile_Association] := Module[{groups},
     groups = GatherBy[Values[profile], tProfileGroupKey];
     ReverseSortBy[
         Table[
-            Module[{rep, repKid, info, nDispatch, totalUs, totalFlops,
-                    dispatchKinds},
+            Module[{rep, repKid, info, nDispatch, totalUs, totalFlops, dispatchKinds},
                 rep = First @ ReverseSortBy[group, Lookup[#, "TotalUs", 0] &];
                 repKid = rep["Kid"];
                 info = TKernelInfo[repKid];
                 nDispatch = Total[Lookup[#, "DispatchCount", 0] & /@ group];
                 totalUs = Total[Lookup[#, "TotalUs", 0] & /@ group];
-                totalFlops = Total[
-                    Lookup[#, "Flops", 0] * Lookup[#, "DispatchCount", 0] & /@ group];
-                dispatchKinds = GroupBy[group,
-                    Lookup[#, "DispatchKind", "none"] &,
-                    Total[Lookup[#, "DispatchCount", 0] & /@ #] &];
+                totalFlops = Total[Lookup[#, "Flops", 0] * Lookup[#, "DispatchCount", 0] & /@ group];
+                dispatchKinds = GroupBy[group, Lookup[#, "DispatchKind", "none"] &, Total[Lookup[#, "DispatchCount", 0] & /@ #] &];
                 <|
                     "Key" -> Lookup[rep, "ProgramKey", 0],
                     "RepKid" -> repKid,
@@ -800,9 +759,7 @@ TProfileProgramGroups[profile_Association] := Module[{groups},
                     "TotalUs" -> totalUs,
                     "AvgUs" -> If[nDispatch > 0, N[totalUs / nDispatch], 0],
                     "Flops" -> totalFlops,
-                    "GFlopsPerSec" -> If[totalUs > 0,
-                        N[totalFlops / (totalUs * 1000)],
-                        0],
+                    "GFlopsPerSec" -> If[totalUs > 0, N[totalFlops / (totalUs * 1000)], 0],
                     "InputCount" -> info["n_inputs"],
                     "OpCount" -> info["n_ops"],
                     "OutputNumel" -> info["output_numel"],
@@ -815,17 +772,14 @@ TProfileProgramGroups[profile_Association] := Module[{groups},
                        THVM_PHASE_C7_FREE_PROGRAM=1 when "Ops" goes
                        empty.  tKernelAutotuneTopHasOp consults this
                        for REDUCE-presence in that case. *)
-                    "AxisTypes" -> Quiet @ Check[
-                        First[TKernelOpts[repKid]]["AxisTypes"],
-                        {}
-                    ]
+                    "AxisTypes" -> Quiet @ Check[First[TKernelOpts[repKid]]["AxisTypes"], {}]
                 |>
             ],
             {group, groups}],
         Lookup[#, "TotalUs", 0] &]]
 
 tFusionStatus[tileQ_, proposalCount_Integer] := Which[
-    !tileQ, "scalar-only",
+    ! tileQ, "scalar-only",
     proposalCount <= 0, "tile-no-proposals",
     True, "tile-tunable"
 ]
@@ -836,7 +790,7 @@ TProfileFusionGaps[profile_Association] := Module[{rows},
             kid = row["RepKid"];
             tile = TKernelTileUops[kid];
             proposed = TKernelProposed[kid];
-            tileQ = !MissingQ[tile];
+            tileQ = ! MissingQ[tile];
             status = tFusionStatus[tileQ, Length[proposed]];
             Join[row, <|
                 "ScalarLowered" -> True,
@@ -854,7 +808,7 @@ TProfileFusionGaps[profile_Association] := Module[{rows},
 (* === kernel-entry introspection ===
    Direct kid-keyed accessors.  The TKernel object's property
    surface ultimately routes through these too (decodeKernelInfo). *)
-TKernelCount[]            := (ensureInit[]; $kernelCountFn[])
+TKernelCount[] := (ensureInit[]; $kernelCountFn[])
 TKernelProgramCacheSize[] := (ensureInit[]; $kernelProgramCacheSizeFn[])
 
 (* TKernelInfo[kid] returns a flat Association with the kernel's
@@ -864,17 +818,22 @@ TKernelProgramCacheSize[] := (ensureInit[]; $kernelProgramCacheSizeFn[])
    and "program" is always {}. *)
 TKernelInfo[kid_Integer] := (ensureInit[]; Module[{raw = $kernelInfoFn[kid]},
     <|
-        "n_inputs"     -> raw[[1]],
-        "n_ops"        -> raw[[2]],
+        "n_inputs" -> raw[[1]],
+        "n_ops" -> raw[[2]],
         "output_numel" -> raw[[3]],
         "output_dtype" -> dtypeName[raw[[4]]],
-        "program"      -> {}
+        "program" -> {}
     |>
 ])
 
 $tileAxisNames = <|
-    0 -> "LOOP",   1 -> "REDUCE", 2 -> "UPCAST", 3 -> "UNROLL",
-    4 -> "LOCAL",  5 -> "GLOBAL", 6 -> "GROUP_REDUCE"
+    0 -> "LOOP",
+    1 -> "REDUCE",
+    2 -> "UPCAST",
+    3 -> "UNROLL",
+    4 -> "LOCAL",
+    5 -> "GLOBAL",
+    6 -> "GROUP_REDUCE"
 |>
 
 TKernelTileUops[kid_Integer] := Missing["NotLowered"]
@@ -885,25 +844,20 @@ TKernelTileUops[kid_Integer] := Missing["NotLowered"]
    so the renderer returns "") still gets an entry; downstream
    helpers filter that case explicitly. *)
 TKernelSourceHashes[] := Module[{kids},
-    kids = If[ TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {} ];
-    Association @ Table[
-        k -> Hash[TKernelSource[k, "Metal"], "MD5"],
-        {k, kids}
-    ]
+    kids = If[TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {}];
+    Association @ Table[k -> Hash[TKernelSource[k, "Metal"], "MD5"], {k, kids}]
 ]
 
 (* Group kids by identical MSL.  Drops the empty-source hash so
    "lift declined" kernels don't dominate the duplicate report;
    filters out singleton groups before sorting. *)
-TKernelDuplicateGroups[] := Module[{
-    hashes, emptyHash, grouped, withDupes, sorted
-},
-    hashes    = TKernelSourceHashes[];
+TKernelDuplicateGroups[] := Module[{hashes, emptyHash, grouped, withDupes, sorted},
+    hashes = TKernelSourceHashes[];
     emptyHash = Hash["", "MD5"];
-    grouped   = GroupBy[Normal @ hashes, Last -> First];
-    grouped   = KeyDrop[grouped, emptyHash];
+    grouped = GroupBy[Normal @ hashes, Last -> First];
+    grouped = KeyDrop[grouped, emptyHash];
     withDupes = Select[grouped, Length[#] >= 2 &];
-    sorted    = ReverseSortBy[Normal @ withDupes, Length @* Last];
+    sorted = ReverseSortBy[Normal @ withDupes, Length @* Last];
     Association @ sorted
 ]
 
@@ -927,55 +881,54 @@ TKernelDuplicateGroups[] := Module[{
    - "elementwise" is the catch-all bucket: kernels with no
      reduce loop and no matmul/conv pattern. *)
 tKernelOpBuckets[] := <|
-    "matmul" -> 0, "conv" -> 0,
-    "reduce_sum" -> 0, "reduce_max" -> 0,
+    "matmul" -> 0,
+    "conv" -> 0,
+    "reduce_sum" -> 0,
+    "reduce_max" -> 0,
     "elementwise" -> 0,
-    "exp" -> 0, "log" -> 0, "sqrt" -> 0, "rsqrt" -> 0,
-    "cast" -> 0, "compare" -> 0
+    "exp" -> 0,
+    "log" -> 0,
+    "sqrt" -> 0,
+    "rsqrt" -> 0,
+    "cast" -> 0,
+    "compare" -> 0
 |>
 
 (* Per-kernel classification.  Returns an Association whose
    buckets sum to the kernel's contribution to the histogram.
    Empty MSL contributes nothing. *)
 tKernelClassifyMSL[src_String] /; src === "" := tKernelOpBuckets[]
-tKernelClassifyMSL[src_String] := Module[{
-    h, hasReduce, hasFmax, hasFmin, hasMatmul, hasConv,
-    isElementwise
-},
+tKernelClassifyMSL[src_String] := Module[{h, hasReduce, hasFmax, hasFmin, hasMatmul, hasConv, isElementwise},
     h = tKernelOpBuckets[];
     hasReduce = StringContainsQ[src, "/*reduce*/"];
-    hasFmax   = StringContainsQ[src, "fmax" | "max("];
-    hasFmin   = StringContainsQ[src, "fmin" | "min("];
+    hasFmax = StringContainsQ[src, "fmax" | "max("];
+    hasFmin = StringContainsQ[src, "fmin" | "min("];
     (* Matmul fingerprint: two output ranges + one reduce range
        + an fma-style chain ("+= ... *" inside the reduce loop).
        Conv fingerprint: three or more nested /*reduce*/ markers
        (kernel H/W + input channel). *)
-    hasMatmul = hasReduce && StringCount[src, "/*reduce*/"] === 1
-                && StringContainsQ[src, " += " ~~ ___ ~~ " * "];
-    hasConv   = StringCount[src, "/*reduce*/"] >= 2;
-    isElementwise = !hasReduce && !hasMatmul && !hasConv;
-    h["matmul"]      = If[hasMatmul, 1, 0];
-    h["conv"]        = If[hasConv, 1, 0];
-    h["reduce_max"]  = If[hasReduce && (hasFmax || hasFmin) && !hasMatmul && !hasConv, 1, 0];
-    h["reduce_sum"]  = If[hasReduce && !hasFmax && !hasFmin && !hasMatmul && !hasConv, 1, 0];
+    hasMatmul = hasReduce && StringCount[src, "/*reduce*/"] === 1 && StringContainsQ[src, " += " ~~ ___ ~~ " * "];
+    hasConv = StringCount[src, "/*reduce*/"] >= 2;
+    isElementwise = ! hasReduce && ! hasMatmul && ! hasConv;
+    h["matmul"] = If[hasMatmul, 1, 0];
+    h["conv"] = If[hasConv, 1, 0];
+    h["reduce_max"] = If[hasReduce && (hasFmax || hasFmin) && ! hasMatmul && ! hasConv, 1, 0];
+    h["reduce_sum"] = If[hasReduce && ! hasFmax && ! hasFmin && ! hasMatmul && ! hasConv, 1, 0];
     h["elementwise"] = If[isElementwise, 1, 0];
-    h["exp"]         = If[StringContainsQ[src, "exp(" | "exp2(" | "metal::exp"], 1, 0];
-    h["log"]         = If[StringContainsQ[src, "log(" | "log2(" | "metal::log"], 1, 0];
-    h["sqrt"]        = If[StringContainsQ[src, "sqrt(" | "metal::sqrt"], 1, 0];
-    h["rsqrt"]       = If[StringContainsQ[src, "rsqrt(" | "metal::rsqrt"], 1, 0];
-    h["cast"]        = If[StringContainsQ[src, "static_cast<" | "as_type<"], 1, 0];
-    h["compare"]     = If[StringContainsQ[src, " == " | " != " | " < " | " > " | " <= " | " >= "], 1, 0];
+    h["exp"] = If[StringContainsQ[src, "exp(" | "exp2(" | "metal::exp"], 1, 0];
+    h["log"] = If[StringContainsQ[src, "log(" | "log2(" | "metal::log"], 1, 0];
+    h["sqrt"] = If[StringContainsQ[src, "sqrt(" | "metal::sqrt"], 1, 0];
+    h["rsqrt"] = If[StringContainsQ[src, "rsqrt(" | "metal::rsqrt"], 1, 0];
+    h["cast"] = If[StringContainsQ[src, "static_cast<" | "as_type<"], 1, 0];
+    h["compare"] = If[StringContainsQ[src, " == " | " != " | " < " | " > " | " <= " | " >= "], 1, 0];
     h
 ]
 
 TKernelOpHistogram[] := Module[{kids, classified, totals, keys},
-    kids = If[ TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {} ];
+    kids = If[TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {}];
     classified = tKernelClassifyMSL[TKernelSource[#, "Metal"]] & /@ kids;
     keys = Keys @ tKernelOpBuckets[];
-    totals = Association @ Table[
-        k -> Total[Lookup[#, k, 0] & /@ classified],
-        {k, keys}
-    ];
+    totals = Association @ Table[k -> Total[Lookup[#, k, 0] & /@ classified], {k, keys}];
     totals
 ]
 
@@ -985,42 +938,27 @@ TKernelOpHistogram[] := Module[{kids, classified, totals, keys},
 TKernelOutputBytes[] := Module[{plan, bufs, kids, kidBytes},
     plan = TMemoryPlan[];
     bufs = plan[[1]]["Bufs"];
-    kids = If[ TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {} ];
-    kidBytes = GroupBy[
-        Select[bufs, #["producer_kid"] > 0 &],
-        #["producer_kid"] &,
-        Total[#["nbytes"] & /@ #] &
-    ];
+    kids = If[TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {}];
+    kidBytes = GroupBy[Select[bufs, #["producer_kid"] > 0 &], #["producer_kid"] &, Total[#["nbytes"] & /@ #] &];
     Association @ Table[ k -> Lookup[kidBytes, k, 0], {k, kids} ]
 ]
 
 (* Top-N producers by output bytes, joined with MSL line count
    and the structural-duplicate group the kid sits in (a
    length-1 list means unique). *)
-TKernelMemoryTopProducers[n_Integer : 20] := Module[{
-    bytes, dupGroups, kidToGroup, ranked
-},
+TKernelMemoryTopProducers[n_Integer : 20] := Module[{bytes, dupGroups, kidToGroup, ranked},
     bytes = TKernelOutputBytes[];
     dupGroups = TKernelDuplicateGroups[];
-    kidToGroup = Association @ Flatten[
-        KeyValueMap[
-            {h, kids} |-> Map[(# -> kids) &, kids],
-            dupGroups],
-        1];
+    kidToGroup = Association @ Flatten[KeyValueMap[{h, kids} |-> Map[(# -> kids) &, kids], dupGroups], 1];
     ranked = ReverseSortBy[Normal @ bytes, Last];
     ranked = Take[ranked, UpTo[Max[0, n]]];
     Map[
-        entry |-> With[{
-            kid = First[entry],
-            outB = Last[entry],
-            src = TKernelSource[First[entry], "Metal"]
-        },
+        entry |-> With[{kid = First[entry], outB = Last[entry], src = TKernelSource[First[entry], "Metal"]},
             <|
-                "Kid"         -> kid,
+                "Kid" -> kid,
                 "OutputBytes" -> outB,
-                "MSLLines"    -> If[ StringQ[src] && src =!= "",
-                                     Length @ StringSplit[src, "\n"], 0],
-                "HashGroup"   -> Lookup[kidToGroup, kid, {kid}]
+                "MSLLines" -> If[StringQ[src] && src =!= "", Length @ StringSplit[src, "\n"], 0],
+                "HashGroup" -> Lookup[kidToGroup, kid, {kid}]
             |>
         ],
         ranked
@@ -1033,7 +971,7 @@ TKernelMemoryTopProducers[n_Integer : 20] := Module[{
 TBufferProducerKid[bufid_Integer] := Module[{plan, hit},
     plan = TMemoryPlan[];
     hit = SelectFirst[plan[[1]]["Bufs"], #["id"] === bufid &, Missing[]];
-    If[ MissingQ[hit], 0, hit["producer_kid"] ]
+    If[MissingQ[hit], 0, hit["producer_kid"]]
 ]
 
 End[];

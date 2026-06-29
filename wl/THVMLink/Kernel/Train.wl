@@ -25,15 +25,15 @@
    now (the batched forward keeps the batch axis for a rank-2 input;
    FlattenLayer / conv batching is a TFromNet follow-up). *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[TNetTrain, "TNetTrain[net$, data$, \"TrainingNet\", opts$] returns an inert TTerm: the whole optimiser as a recursive interaction-net term whose base case is the forward; TWnf drives it, firing every training step in place and reducing to the trained forward term.
+SetUsage[TNetTrain, "TNetTrain[net$, data$, \"TrainingNet\", opts$] returns an inert TTerm: the whole optimiser as a recursive interaction-net term whose base case is the forward; TWnf drives it, firing every training step in place and reducing to the trained forward term.
 TNetTrain[net$, data$, opts$] is the convenience form that TWnf's it for you and returns the trained forward.
 net$ is a NetChain (e.g. NetModel[\"LeNet\"]), whose batched forward is lifted directly; data$ is a list of input-to-class rules or a dataset name (\"MNIST\"). Inputs are reshaped to the net's input shape internally.
 A lifted TFromNet[net$] term is inference-only (training it would need the batched forward re-lifted, which needs the NetChain), so pass the NetChain instead.
 Options: MaxTrainingRounds, \"LearningRate\", \"Momentum\" (>0 adds per-weight velocity for SGD-with-momentum), \"Method\" (\"SGD\" or \"Adam\"), \"WeightDecay\" (>0 adds L2 regularization), \"Loss\", TargetDevice; see the training documentation for details."];
 
-GeneralUtilities`SetUsage[TNetPredict, "TNetPredict[trainedNet$, inputs$] runs the trained forward term on inputs$ and returns the predicted integer classes.
+SetUsage[TNetPredict, "TNetPredict[trainedNet$, inputs$] runs the trained forward term on inputs$ and returns the predicted integer classes.
 inputs$ is reshaped to the net's input shape and predicted in batch-sized chunks, so any number of inputs works.
 TNetPredict[handle$, x$] consumes the handle association the {x$, y$} TNetTrain overload returns and returns the raw logits rows."];
 
@@ -43,12 +43,12 @@ Begin["`Private`"];
 
 Options[TNetTrain] = {
     MaxTrainingRounds -> 30,
-    "LearningRate"    -> 0.05,
-    "Momentum"        -> 0.0,
-    "Method"          -> "SGD",
-    "WeightDecay"     -> 0.0,
-    "Loss"            -> Automatic,
-    TargetDevice      -> "CPU"
+    "LearningRate" -> 0.05,
+    "Momentum" -> 0.0,
+    "Method" -> "SGD",
+    "WeightDecay" -> 0.0,
+    "Loss" -> Automatic,
+    TargetDevice -> "CPU"
 };
 
 $trainLoopCounter = 0;
@@ -60,13 +60,13 @@ freshTrainName[] := (
 
 (* === data resolution === *)
 resolveData[name_String] := ResourceData[name, "TrainingData"]
-resolveData[data_List]   := data
-resolveData[data_]       := Normal[data]      (* Dataset / EntityValue / ... *)
+resolveData[data_List] := data
+resolveData[data_] := Normal[data] (* Dataset / EntityValue / ... *)
 
 (* one example -> a flat-or-shaped real array matching the net's input. *)
-toInput[img_Image, inShape_List]      := ArrayReshape[ImageData[img], inShape]
+toInput[img_Image, inShape_List] := ArrayReshape[ImageData[img], inShape]
 toInput[a_NumericArray, inShape_List] := ArrayReshape[Normal[a], inShape]
-toInput[a_, inShape_List]             := ArrayReshape[a, inShape]
+toInput[a_, inShape_List] := ArrayReshape[a, inShape]
 
 batchTensors[data_List, inShape_List, nClasses_Integer] := {
     TTensorCreate @ NumericArray[toInput[#[[1]], inShape] & /@ data, "Real32"],
@@ -83,15 +83,10 @@ buildLoop[params_List, grads_List, lr_TTerm, name_String] := Module[{stepRefs},
     stepRefs = MapThread[
         {p, g, i} |-> With[{nm = name <> "_p" <> ToString[i]},
             TDef[nm, TMaterialize[TNf[TAssign[p, TUOpAdd[p, TUOpNeg[TUOpMul[lr, g]]]]]]];
-            TRef[nm]],
+            TRef[nm]
+        ],
         {params, grads, Range[Length[params]]}];
-    TDef[name,
-        TLam[k,
-            TIfZero[k, TUOpConst[0.0],
-                Fold[
-                    TPriForce[#2, #1] &,
-                    TApp[TRef[name], TOp2["-", k, TNum[1]]],
-                    Reverse[stepRefs]]]]];
+    TDef[name, TLam[k, TIfZero[k, TUOpConst[0.0], Fold[TPriForce[#2, #1] &, TApp[TRef[name], TOp2["-", k, TNum[1]]], Reverse[stepRefs]]]]];
     name
 ]
 
@@ -102,23 +97,17 @@ buildLoop[params_List, grads_List, lr_TTerm, name_String] := Module[{stepRefs},
    updated v).  The step worklist fires stepRefs in order, so listing the
    v-assign before the p-assign per weight gives the correct read-after-write
    (p sees the new v).  Converges markedly faster than plain SGD. *)
-buildLoopMomentum[params_List, grads_List, vels_List, lr_TTerm, beta_TTerm, name_String] :=
-    Module[{stepRefs},
-        stepRefs = Flatten @ MapThread[
-            {p, g, v, i} |-> With[{vnm = name <> "_v" <> ToString[i], pnm = name <> "_p" <> ToString[i]},
-                TDef[vnm, TMaterialize[TNf[TAssign[v, TUOpAdd[TUOpMul[beta, v], g]]]]];
-                TDef[pnm, TMaterialize[TNf[TAssign[p, TUOpAdd[p, TUOpNeg[TUOpMul[lr, v]]]]]]];
-                {TRef[vnm], TRef[pnm]}],
-            {params, grads, vels, Range[Length[params]]}];
-        TDef[name,
-            TLam[k,
-                TIfZero[k, TUOpConst[0.0],
-                    Fold[
-                        TPriForce[#2, #1] &,
-                        TApp[TRef[name], TOp2["-", k, TNum[1]]],
-                        Reverse[stepRefs]]]]];
-        name
-    ]
+buildLoopMomentum[params_List, grads_List, vels_List, lr_TTerm, beta_TTerm, name_String] := Module[{stepRefs},
+    stepRefs = Flatten @ MapThread[
+        {p, g, v, i} |-> With[{vnm = name <> "_v" <> ToString[i], pnm = name <> "_p" <> ToString[i]},
+            TDef[vnm, TMaterialize[TNf[TAssign[v, TUOpAdd[TUOpMul[beta, v], g]]]]];
+            TDef[pnm, TMaterialize[TNf[TAssign[p, TUOpAdd[p, TUOpNeg[TUOpMul[lr, v]]]]]]];
+            {TRef[vnm], TRef[pnm]}
+        ],
+        {params, grads, vels, Range[Length[params]]}];
+    TDef[name, TLam[k, TIfZero[k, TUOpConst[0.0], Fold[TPriForce[#2, #1] &, TApp[TRef[name], TOp2["-", k, TNum[1]]], Reverse[stepRefs]]]]];
+    name
+]
 
 (* === trained-model registry (slot for TNetPredict) ===
    keyed by the forward term's id, plus a `$thvmLastTrained` fallback: a
@@ -126,11 +115,9 @@ buildLoopMomentum[params_List, grads_List, vels_List, lr_TTerm, beta_TTerm, name
    differs from the one we registered, but it shares the (in-place trained)
    weights and input slot, so the most-recent registration still predicts. *)
 $thvmTrainRegistry = <||>;
-$thvmLastTrained   = Missing[];
+$thvmLastTrained = Missing[];
 
-registerTrained[fwd_TTerm, xSlot_TTerm, inShape_List, nBatch_Integer] := With[{
-    entry = <|"Fwd" -> fwd, "Input" -> xSlot, "InShape" -> inShape, "Batch" -> nBatch|>
-},
+registerTrained[fwd_TTerm, xSlot_TTerm, inShape_List, nBatch_Integer] := With[{entry = <|"Fwd" -> fwd, "Input" -> xSlot, "InShape" -> inShape, "Batch" -> nBatch|>},
     $thvmTrainRegistry[TTermVal[fwd]] = entry;
     $thvmLastTrained = entry;
     fwd
@@ -146,16 +133,21 @@ argmaxRows[out_] := (First @ Ordering[#, -1] - 1) & /@ out
    trailing SoftmaxLayer, into a fresh input-shaped chain.  Non-softmax nets
    round-trip unchanged (same weights), so this is safe to always apply. *)
 rebuildLayer[l_ConvolutionLayer] := ConvolutionLayer[
-    NetExtract[l, "OutputChannels"], NetExtract[l, "KernelSize"],
-    "Weights" -> NetExtract[l, "Weights"], "Biases" -> NetExtract[l, "Biases"]]
+    NetExtract[l, "OutputChannels"],
+    NetExtract[l, "KernelSize"],
+    "Weights" -> NetExtract[l, "Weights"],
+    "Biases" -> NetExtract[l, "Biases"]
+]
 rebuildLayer[l_LinearLayer] := LinearLayer[
     NetExtract[l, "OutputDimensions"],
-    "Weights" -> NetExtract[l, "Weights"], "Biases" -> NetExtract[l, "Biases"]]
+    "Weights" -> NetExtract[l, "Weights"],
+    "Biases" -> NetExtract[l, "Biases"]
+]
 rebuildLayer[l_] := l
 
 stripSoftmax[net_NetChain] := Module[{n, keep, layers},
-    n      = Length[net];
-    keep   = If[ MatchQ[NetExtract[net, n], _SoftmaxLayer], n - 1, n];
+    n = Length[net];
+    keep = If[MatchQ[NetExtract[net, n], _SoftmaxLayer], n - 1, n];
     layers = Table[rebuildLayer[NetExtract[net, i]], {i, keep}];
     NetChain[layers, "Input" -> netInputShape[net]]
 ]
@@ -170,54 +162,44 @@ stripSoftmax[net_NetChain] := Module[{n, keep, layers},
    step kernels are fixed and carry no step counter, and the m/sqrt(v) ratio
    keeps the step well-scaled (~lr per element) regardless.  Use a small
    LearningRate (~0.005); ADAM's adaptive step is roughly lr in magnitude. *)
-buildLoopAdam[params_List, grads_List, ms_List, vs_List, lr_TTerm, name_String] :=
-    Module[{stepRefs, b1, b2, om1, om2, eps},
-        b1 = TUOpConst[0.9];  b2 = TUOpConst[0.999];
-        om1 = TUOpConst[0.1]; om2 = TUOpConst[0.001];  eps = TUOpConst[1.*^-8];
-        stepRefs = Flatten @ MapThread[
-            {p, g, m, v, i} |-> With[{mnm = name <> "_m" <> ToString[i], vnm = name <> "_v" <> ToString[i],
-                  pnm = name <> "_p" <> ToString[i]},
-                TDef[mnm, TMaterialize[TNf[TAssign[m,
-                    TUOpAdd[TUOpMul[b1, m], TUOpMul[om1, g]]]]]];
-                TDef[vnm, TMaterialize[TNf[TAssign[v,
-                    TUOpAdd[TUOpMul[b2, v], TUOpMul[om2, TUOpMul[g, g]]]]]]];
-                TDef[pnm, TMaterialize[TNf[TAssign[p,
-                    TUOpAdd[p, TUOpNeg[TUOpMul[lr,
-                        TUOpMul[m, TUOpRecip[TUOpAdd[TUOpSqrt[v], eps]]]]]]]]]];
-                {TRef[mnm], TRef[vnm], TRef[pnm]}],
-            {params, grads, ms, vs, Range[Length[params]]}];
-        TDef[name,
-            TLam[k,
-                TIfZero[k, TUOpConst[0.0],
-                    Fold[
-                        TPriForce[#2, #1] &,
-                        TApp[TRef[name], TOp2["-", k, TNum[1]]],
-                        Reverse[stepRefs]]]]];
-        name
-    ]
+buildLoopAdam[params_List, grads_List, ms_List, vs_List, lr_TTerm, name_String] := Module[{stepRefs, b1, b2, om1, om2, eps},
+    b1 = TUOpConst[0.9];
+    b2 = TUOpConst[0.999];
+    om1 = TUOpConst[0.1];
+    om2 = TUOpConst[0.001];
+    eps = TUOpConst[1.*^-8];
+    stepRefs = Flatten @ MapThread[
+        {p, g, m, v, i} |-> With[{mnm = name <> "_m" <> ToString[i], vnm = name <> "_v" <> ToString[i], pnm = name <> "_p" <> ToString[i]},
+            TDef[mnm, TMaterialize[TNf[TAssign[m, TUOpAdd[TUOpMul[b1, m], TUOpMul[om1, g]]]]]];
+            TDef[vnm, TMaterialize[TNf[TAssign[v, TUOpAdd[TUOpMul[b2, v], TUOpMul[om2, TUOpMul[g, g]]]]]]];
+            TDef[pnm, TMaterialize[TNf[TAssign[p, TUOpAdd[p, TUOpNeg[TUOpMul[lr, TUOpMul[m, TUOpRecip[TUOpAdd[TUOpSqrt[v], eps]]]]]]]]]];
+            {TRef[mnm], TRef[vnm], TRef[pnm]}
+        ],
+        {params, grads, ms, vs, Range[Length[params]]}];
+    TDef[name, TLam[k, TIfZero[k, TUOpConst[0.0], Fold[TPriForce[#2, #1] &, TApp[TRef[name], TOp2["-", k, TNum[1]]], Reverse[stepRefs]]]]];
+    name
+]
 
 (* === build the inert training-loop term from a Wolfram net (shared core) ===
    Strip a trailing SoftmaxLayer (train on logits), derive the input shape,
    build the forward over a fresh input slot, then the cross-entropy +
    shared-backward + inert SGD loop.  A lifted LAM is inference-only; the
    NetChain entry point lifts the batched forward here directly. *)
-inertTrainFrom[net_NetChain, dataSpec_, rounds_Integer, opt_Association] := Module[{
-    logitNet, inShape, nClasses, data, xSlot, tgtSlot, fwd, params
-},
+inertTrainFrom[net_NetChain, dataSpec_, rounds_Integer, opt_Association] := Module[{logitNet, inShape, nClasses, data, xSlot, tgtSlot, fwd, params},
     logitNet = stripSoftmax[net];
-    inShape  = netInputShape[logitNet];
+    inShape = netInputShape[logitNet];
     If[ inShape === $Failed,
         Message[TFromNet::noinput, net];
         Return[$Failed]
     ];
-    data     = resolveData[dataSpec];
+    data = resolveData[dataSpec];
     nClasses = Max[data[[All, 2]]] + 1;
     {xSlot, tgtSlot} = batchTensors[data, inShape, nClasses];
     (* The param terms are the float-leaf TTerms baked into THIS batched
        forward: the very tensors the inert SGD loop updates in place.
        Read them straight off the graph (TNetParams), MINUS the input slot
        (itself a float TEN leaf of the forward, but not a weight). *)
-    fwd    = TFromNet[logitNet, xSlot];
+    fwd = TFromNet[logitNet, xSlot];
     params = trainableParams[fwd, xSlot];
     inertTrainCore[fwd, params, xSlot, tgtSlot, inShape, Length[data], rounds, opt]
 ]
@@ -229,7 +211,8 @@ inertTrainFrom[net_NetChain, dataSpec_, rounds_Integer, opt_Association] := Modu
    LAM (TFromNet[net]) where the input is a bound variable, not a concrete
    forward. *)
 trainableParams[fwd_, xSlot_TTerm] := With[{xv = TTermVal[xSlot]},
-    Select[gradFloatLeafTerms[fwd], TTermVal[#] =!= xv &]]
+    Select[gradFloatLeafTerms[fwd], TTermVal[#] =!= xv &]
+]
 
 (* A TNetTrain-trained forward IS a known network: the training registry
    recorded its input slot explicitly (for TNetPredict), so TNetParams on it
@@ -237,25 +220,24 @@ trainableParams[fwd_, xSlot_TTerm] := With[{xv = TTermVal[xSlot]},
    LAM form gives, for a forward that was built over a concrete input slot.
    An UNregistered concrete forward stays an applied evaluation (NN.wl's
    TNetParams messages on it); a LAM falls through to the structural form. *)
-TNetParams[fwd_TTerm] /; KeyExistsQ[$thvmTrainRegistry, TTermVal[fwd]] :=
-    trainableParams[fwd, $thvmTrainRegistry[TTermVal[fwd]]["Input"]]
+TNetParams[fwd_TTerm] /; KeyExistsQ[$thvmTrainRegistry, TTermVal[fwd]] := trainableParams[fwd, $thvmTrainRegistry[TTermVal[fwd]]["Input"]]
 
 (* === inert training-loop core over a prebuilt batched forward ===
    `fwd` is the batched forward TTerm (logits), `params` its trainable
    float-leaf handles, `xSlot` the input slot, `tgtSlot` the one-hot target.
    The NetChain entry point (inertTrainFrom) lifts the batched forward and
    hands it here. *)
-inertTrainCore[fwd_, params_, xSlot_, tgtSlot_, inShape_, nData_,
-               rounds_Integer, opt_Association] := Module[{
-    methodVal, momentumVal, wdVal, loss, grads, effGrads, lr, name, vels, ms, vs
-},
-    methodVal = opt["Method"];  momentumVal = opt["Momentum"];  wdVal = opt["WeightDecay"];
-    lr     = TUOpConst[N[opt["LearningRate"]]];
-    loss   = TCategoricalCrossEntropy[fwd, tgtSlot];
-    grads  = TGrad[loss, params];
+inertTrainCore[fwd_, params_, xSlot_, tgtSlot_, inShape_, nData_, rounds_Integer, opt_Association] := Module[{methodVal, momentumVal, wdVal, loss, grads, effGrads, lr, name, vels, ms, vs},
+    methodVal = opt["Method"];
+    momentumVal = opt["Momentum"];
+    wdVal = opt["WeightDecay"];
+    lr = TUOpConst[N[opt["LearningRate"]]];
+    loss = TCategoricalCrossEntropy[fwd, tgtSlot];
+    grads = TGrad[loss, params];
     effGrads = If[ TrueQ[wdVal > 0],
         With[{wd = TUOpConst[N[wdVal]]},
-            MapThread[TUOpAdd[#1, TUOpMul[wd, #2]] &, {grads, params}]],
+            MapThread[TUOpAdd[#1, TUOpMul[wd, #2]] &, {grads, params}]
+        ],
         grads];
     name = freshTrainName[];
     Which[
@@ -280,7 +262,9 @@ inertTrainCore[fwd_, params_, xSlot_, tgtSlot_, inShape_, nData_,
    net).  Guide the caller to pass the NetChain to TNetTrain instead, which
    lifts the batched forward directly (inertTrainFrom). *)
 inertTrainTerm[_TTerm, _, _Integer, _Association] := (
-    Message[TNetTrain::needsnet]; $Failed)
+    Message[TNetTrain::needsnet];
+    $Failed
+)
 
 (* === public dispatch ===
    `prop` argument like built-in NetTrain: "TrainingNet" returns the inert
@@ -292,11 +276,11 @@ inertTrainTerm[_TTerm, _, _Integer, _Association] := (
    optimiser config is bundled into one `opt` association. *)
 TNetTrain[net : (_TTerm | _NetChain), dataSpec_, "TrainingNet", opts : OptionsPattern[]] := With[{
     rounds = OptionValue[MaxTrainingRounds],
-    opt    = <|
+    opt = <|
         "LearningRate" -> OptionValue["LearningRate"],
-        "Momentum"     -> OptionValue["Momentum"],
-        "Method"       -> OptionValue["Method"],
-        "WeightDecay"  -> OptionValue["WeightDecay"]
+        "Momentum" -> OptionValue["Momentum"],
+        "Method" -> OptionValue["Method"],
+        "WeightDecay" -> OptionValue["WeightDecay"]
     |>
 },
     If[ MatchQ[net, _TTerm],
@@ -305,13 +289,11 @@ TNetTrain[net : (_TTerm | _NetChain), dataSpec_, "TrainingNet", opts : OptionsPa
     ]
 ]
 
-TNetTrain[net : (_TTerm | _NetChain), dataSpec_, opts : OptionsPattern[]] := With[{
-    t = TNetTrain[net, dataSpec, "TrainingNet", opts]
-},
+TNetTrain[net : (_TTerm | _NetChain), dataSpec_, opts : OptionsPattern[]] := With[{t = TNetTrain[net, dataSpec, "TrainingNet", opts]},
     If[ t === $Failed,
         $Failed,
-        TWnf[t];                       (* drive the inert loop -> trains in place *)
-        $thvmLastTrained["Fwd"]        (* the trained forward term *)
+        TWnf[t]; (* drive the inert loop -> trains in place *)
+        $thvmLastTrained["Fwd"] (* the trained forward term *)
     ]
 ]
 
@@ -323,19 +305,17 @@ TNetTrain[net : (_TTerm | _NetChain), dataSpec_, opts : OptionsPattern[]] := Wit
    input slot, build the inert SGD loop, TWnf-drive it, and hand back the
    association.  `net` is a raw NeuralNetworks net (NetChain / layer);
    `x`, `y` are rank-2 host arrays. *)
-TNetTrain[net_, x_List, y_List, opts : OptionsPattern[]] := Module[{
-    xS, yT, lr, rounds, lossFn, fwd, params, loss, grads, name
-},
-    xS     = TTensorCreate[N @ x];
-    yT     = TTensorCreate[N @ y];
-    lr     = TUOpConst[N @ OptionValue[TNetTrain, {opts}, "LearningRate"]];
+TNetTrain[net_, x_List, y_List, opts : OptionsPattern[]] := Module[{xS, yT, lr, rounds, lossFn, fwd, params, loss, grads, name},
+    xS = TTensorCreate[N @ x];
+    yT = TTensorCreate[N @ y];
+    lr = TUOpConst[N @ OptionValue[TNetTrain, {opts}, "LearningRate"]];
     rounds = OptionValue[TNetTrain, {opts}, MaxTrainingRounds];
     lossFn = OptionValue[TNetTrain, {opts}, "Loss"] /. Automatic -> ({f, t} |-> TCategoricalCrossEntropy[f, t]);
-    fwd    = TFromNet[net, xS];
+    fwd = TFromNet[net, xS];
     params = trainableParams[fwd, xS];
-    loss   = lossFn[fwd, yT];
-    grads  = TGrad[loss, params];
-    name   = freshTrainName[];
+    loss = lossFn[fwd, yT];
+    grads = TGrad[loss, params];
+    name = freshTrainName[];
     buildLoop[params, grads, lr, name];
     TWnf @ TApp[TRef[name], TNum[rounds]];
     <|"Forward" -> fwd, "Input" -> xS, "Params" -> params|>
@@ -345,17 +325,15 @@ TNetTrain[net_, x_List, y_List, opts : OptionsPattern[]] := Module[{
    input slot has that leading dimension.  Predict in chunks of that size,
    padding the final partial chunk with the last input (those rows are
    discarded), so any number of inputs works. *)
-TNetPredict[net_TTerm, inputs_List] := Module[{
-    entry, xSlot, inShape, fwd, nBatch, n, padded, chunkPreds
-},
+TNetPredict[net_TTerm, inputs_List] := Module[{entry, xSlot, inShape, fwd, nBatch, n, padded, chunkPreds},
     entry = Lookup[$thvmTrainRegistry, TTermVal[net], $thvmLastTrained];
-    If[ MissingQ[entry], Return[$Failed]];
-    xSlot   = entry["Input"];
+    If[MissingQ[entry], Return[$Failed]];
+    xSlot = entry["Input"];
     inShape = entry["InShape"];
-    fwd     = entry["Fwd"];
-    nBatch  = entry["Batch"];
-    n       = Length[inputs];
-    padded  = Join[inputs, ConstantArray[Last[inputs], Mod[-n, nBatch]]];
+    fwd = entry["Fwd"];
+    nBatch = entry["Batch"];
+    n = Length[inputs];
+    padded = Join[inputs, ConstantArray[Last[inputs], Mod[-n, nBatch]]];
     chunkPreds = (chunk |-> (
         TSet[xSlot, TTensorCreate @ NumericArray[toInput[#, inShape] & /@ chunk, "Real32"]];
         argmaxRows[Normal @ TTensorData @ TRealize @ fwd]
@@ -374,10 +352,8 @@ TNetPredict[trained_Association, x_List] := (
 )
 
 (* === UpValues: NetTrain[net_TTerm, ...] delegates to TNetTrain === *)
-TTerm /: NetTrain[net_TTerm, dataSpec_, "TrainingNet", opts : OptionsPattern[]] :=
-    TNetTrain[net, dataSpec, "TrainingNet", opts]
-TTerm /: NetTrain[net_TTerm, dataSpec_, opts : OptionsPattern[]] :=
-    TNetTrain[net, dataSpec, opts]
+TTerm /: NetTrain[net_TTerm, dataSpec_, "TrainingNet", opts : OptionsPattern[]] := TNetTrain[net, dataSpec, "TrainingNet", opts]
+TTerm /: NetTrain[net_TTerm, dataSpec_, opts : OptionsPattern[]] := TNetTrain[net, dataSpec, opts]
 
 End[];
 EndPackage[];

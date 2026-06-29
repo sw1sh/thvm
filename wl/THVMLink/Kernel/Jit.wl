@@ -29,19 +29,19 @@
    depends on inputs (e.g. branching on a Variable), the user
    should TJitDrop and re-capture when the shape changes. *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[TJit, "TJit[fn$] returns a closure that captures fn$'s kernel-dispatch sequence on the first call and replays it on later calls, returning the same result handle whose buffer each replay rewrites.
+SetUsage[TJit, "TJit[fn$] returns a closure that captures fn$'s kernel-dispatch sequence on the first call and replays it on later calls, returning the same result handle whose buffer each replay rewrites.
 closure$[x$] passes per-call TTerm inputs: the first call captures over x$, and each later call rebinds its input in place (tinygrad's input_replace), so a fixed forward generates by closure$[next$] with no explicit TSet.
 Per-call wallclock drops from materialize+dispatch to dispatch only. HoldFirst; recapture with TJitDrop[closure$] then re-create."];
-GeneralUtilities`SetUsage[TJitOpCount, "TJitOpCount[closure$] returns the number of kernel dispatches captured for the JIT closure (0 before the first call)."];
-GeneralUtilities`SetUsage[TJitCaptureOps, "TJitCaptureOps[closure$] returns the decoded captured TJit replay sequence as a list of associations.
+SetUsage[TJitOpCount, "TJitOpCount[closure$] returns the number of kernel dispatches captured for the JIT closure (0 before the first call)."];
+SetUsage[TJitCaptureOps, "TJitCaptureOps[closure$] returns the decoded captured TJit replay sequence as a list of associations.
 Dispatch rows carry Kid, DispatchKind, ProgramKey, NInputs, OutBuf, Input0, Input1, OutputNumel, OpCount, ScalarUopCount, TileUopCount, ReplaySkip, and ReplayPacked; assign rows carry DstTid and SrcTid."];
-GeneralUtilities`SetUsage[TJitCaptureRuns, "TJitCaptureRuns[closure$] groups a captured TJit replay sequence into consecutive dispatch runs split by assign records, with per-run dispatch-kind, program-key, output-size, and lowering summaries."];
-GeneralUtilities`SetUsage[TJitCaptureGraphRuns, "TJitCaptureGraphRuns[closure$] groups a captured TJit replay sequence into Metal ICB-eligible replay chunks of live metal-tile dispatches (metal-alias records consumed but not encoded), split by assign and non-tile dispatch records."];
-GeneralUtilities`SetUsage[TJitCaptureSummary, "TJitCaptureSummary[closure$] returns compact counts for a captured TJit replay sequence: dispatch/assign counts, dispatch-kind counts, consecutive dispatch-run lengths, top program-key counts, and the largest dispatch runs."];
-GeneralUtilities`SetUsage[TJitDrop, "TJitDrop[closure$] releases the JIT closure's capture slot so the closure re-captures on its next call."];
-GeneralUtilities`SetUsage[TJitClosure, "TJitClosure[assoc$] is the wrapped form returned by TJit; treat it as opaque and invoke it through the documented surface."];
+SetUsage[TJitCaptureRuns, "TJitCaptureRuns[closure$] groups a captured TJit replay sequence into consecutive dispatch runs split by assign records, with per-run dispatch-kind, program-key, output-size, and lowering summaries."];
+SetUsage[TJitCaptureGraphRuns, "TJitCaptureGraphRuns[closure$] groups a captured TJit replay sequence into Metal ICB-eligible replay chunks of live metal-tile dispatches (metal-alias records consumed but not encoded), split by assign and non-tile dispatch records."];
+SetUsage[TJitCaptureSummary, "TJitCaptureSummary[closure$] returns compact counts for a captured TJit replay sequence: dispatch/assign counts, dispatch-kind counts, consecutive dispatch-run lengths, top program-key counts, and the largest dispatch runs."];
+SetUsage[TJitDrop, "TJitDrop[closure$] releases the JIT closure's capture slot so the closure re-captures on its next call."];
+SetUsage[TJitClosure, "TJitClosure[assoc$] is the wrapped form returned by TJit; treat it as opaque and invoke it through the documented surface."];
 
 Begin["`Private`"];
 
@@ -49,14 +49,14 @@ Begin["`Private`"];
    begin / end take no args, the others take a slot id.  Capture
    slots are 1-indexed; 0 means "no slot available" / "no capture
    active". *)
-$jitCaptureBeginFn   := $jitCaptureBeginFn   = load["thvm_wl_jit_capture_begin",    {},        Integer]
-$jitCaptureEndFn     := $jitCaptureEndFn     = load["thvm_wl_jit_capture_end",      {},        Integer]
+$jitCaptureBeginFn := $jitCaptureBeginFn = load["thvm_wl_jit_capture_begin", {}, Integer]
+$jitCaptureEndFn := $jitCaptureEndFn = load["thvm_wl_jit_capture_end", {}, Integer]
 $jitCaptureEndResultFn := $jitCaptureEndResultFn = load["thvm_wl_jit_capture_end_result", {Integer}, Integer]
 $jitCaptureEndResultMultiFn := $jitCaptureEndResultMultiFn = load["thvm_wl_jit_capture_end_result_multi", {{Integer, 1}}, Integer]
-$jitCaptureDropFn    := $jitCaptureDropFn    = load["thvm_wl_jit_capture_drop",     {Integer}, Integer]
+$jitCaptureDropFn := $jitCaptureDropFn = load["thvm_wl_jit_capture_drop", {Integer}, Integer]
 $jitCaptureOpCountFn := $jitCaptureOpCountFn = load["thvm_wl_jit_capture_op_count", {Integer}, Integer]
-$jitCaptureOpsFn     := $jitCaptureOpsFn     = load["thvm_wl_jit_capture_ops",      {Integer}, {Integer, 1}]
-$jitReplayFn         := $jitReplayFn         = load["thvm_wl_jit_replay",           {Integer}, Integer]
+$jitCaptureOpsFn := $jitCaptureOpsFn = load["thvm_wl_jit_capture_ops", {Integer}, {Integer, 1}]
+$jitReplayFn := $jitReplayFn = load["thvm_wl_jit_replay", {Integer}, Integer]
 $jitCaptureSetInputsFn := $jitCaptureSetInputsFn = load["thvm_wl_jit_capture_set_inputs", {Integer, {Integer, 1}}, Integer]
 $jitReplayWithInputsFn := $jitReplayWithInputsFn = load["thvm_wl_jit_replay_with_inputs", {Integer, {Integer, 1}}, Integer]
 
@@ -120,9 +120,7 @@ jitArgTids[args_List] := TTermVal /@ TRealize /@ Cases[args, _TTerm]
 jitCaptureOnce[a_Association, args_List] := Module[{slot, fnRes, inTids},
     slot = $jitCaptureBeginFn[];
     If[ slot === 0,
-        Failure["TJit", <|
-            "MessageTemplate" -> "TJit capture-slot pool full (cap = 16)"
-        |>],
+        Failure["TJit", <|"MessageTemplate" -> "TJit capture-slot pool full (cap = 16)"|>],
         inTids = jitArgTids[args];
         Internal`WithLocalSettings[
             Null,
@@ -133,13 +131,11 @@ jitCaptureOnce[a_Association, args_List] := Module[{slot, fnRes, inTids},
                (TGrad over several params) needs each root pinned, else
                it is reclaimed as garbage. *)
             With[{roots = Cases[{fnRes}, t_TTerm :> ttermRaw[t], Infinity]},
-                If[ roots === {},
-                    $jitCaptureEndResultFn[0],
-                    $jitCaptureEndResultMultiFn[roots]]]
+                If[roots === {}, $jitCaptureEndResultFn[0], $jitCaptureEndResultMultiFn[roots]]]
         ];
         (* Declare this call's input tensors so later calls rebind them
            in place of an explicit TSet. *)
-        If[ inTids =!= {}, $jitCaptureSetInputsFn[slot, inTids]];
+        If[inTids =!= {}, $jitCaptureSetInputsFn[slot, inTids]];
         <|"slot" -> slot, "result" -> fnRes|>
     ]
 ]
@@ -158,13 +154,11 @@ jitCaptureOnce[a_Association, args_List] := Module[{slot, fnRes, inTids},
    kernels).  This is the re-bake apply; re-capture is unnecessary and unsafe
    here (its fresh intermediate tids change the structural key, so its
    cache-load misses anyway). *)
-TJitClosure[a_Association][args___] := Module[{
-    key = Hash[a],
-    rec, inTids, st
-},
+TJitClosure[a_Association][args___] := Module[{key = Hash[a], rec, inTids, st},
     ensureInit[];
     rec = $tJitState[key];
-    If[ !MissingQ[rec],
+    If[ ! MissingQ[rec]
+        ,
         (* (a) replay: realize this call's inputs to get their fresh per-call
            buffers, substitute them at the captured sites (tinygrad
            input_replace), re-dispatch, and return the SAME result handle --
@@ -172,10 +166,9 @@ TJitClosure[a_Association][args___] := Module[{
            surfaces the fresh result.  No inputs -> plain re-dispatch (the
            slot-feeding usage). *)
         inTids = jitArgTids[{args}];
-        If[ inTids === {},
-            $jitReplayFn[rec["slot"]],
-            $jitReplayWithInputsFn[rec["slot"], inTids]];
-        rec["result"],
+        If[inTids === {}, $jitReplayFn[rec["slot"]], $jitReplayWithInputsFn[rec["slot"], inTids]];
+        rec["result"]
+        ,
         (* (b) capture: jitCaptureOnce realizes the inputs INSIDE the capture
            scope so the upload caches by copy-loc and the fn body reuses the
            declared input buffer (see jitCaptureOnce). *)
@@ -189,16 +182,14 @@ TJitClosure[a_Association][args___] := Module[{
 
 TJitOpCount[TJitClosure[a_Association]] := Module[{rec},
     rec = $tJitState[Hash[a]];
-    If[ MissingQ[rec], 0, $jitCaptureOpCountFn[rec["slot"]]]
+    If[MissingQ[rec], 0, $jitCaptureOpCountFn[rec["slot"]]]
 ]
 
-TJitCaptureOps[TJitClosure[a_Association]] := Module[{
-    rec, raw, n, rowWidth
-},
+TJitCaptureOps[TJitClosure[a_Association]] := Module[{rec, raw, n, rowWidth},
     rec = $tJitState[Hash[a]];
-    If[ MissingQ[rec], Return[{}] ];
+    If[MissingQ[rec], Return[{}]];
     raw = Normal @ $jitCaptureOpsFn[rec["slot"]];
-    If[ Length[raw] < 2, Return[{}] ];
+    If[Length[raw] < 2, Return[{}]];
     n = raw[[1]];
     rowWidth = raw[[2]];
     Table[
@@ -219,7 +210,8 @@ TJitCaptureOps[TJitClosure[a_Association]] := Module[{
                     "TileUopCount" -> raw[[base + 12]],
                     "ReplaySkip" -> (rowWidth >= 15 && raw[[base + 15]] =!= 0),
                     "ReplayPacked" -> (rowWidth >= 16 && raw[[base + 16]] =!= 0)
-                |>,
+                |>
+                ,
                 <|
                     "Kind" -> "ASSIGN",
                     "DstTid" -> raw[[base + 13]],
@@ -228,25 +220,22 @@ TJitCaptureOps[TJitClosure[a_Association]] := Module[{
                     "ReplayPacked" -> False
                 |>
             ]
-        ],
+        ]
+        ,
         {i, n}
     ]
 ]
 
-captureCounts[rows_, key_] := ReverseSort @ Counts[
-    Lookup[rows, key, 0] /. 0 -> Nothing]
+captureCounts[rows_, key_] := ReverseSort @ Counts[Lookup[rows, key, 0] /. 0 -> Nothing]
 
 jitGraphRunLimit[] := Module[{raw = Environment["THVM_METAL_GRAPH_MAX_DISPATCHES"], n},
-    If[ ! StringQ[raw] || StringLength[StringTrim[raw]] == 0, Return[256]];
-    If[ ! StringMatchQ[StringTrim[raw], DigitCharacter ..], Return[256]];
+    If[! StringQ[raw] || StringLength[StringTrim[raw]] == 0, Return[256]];
+    If[! StringMatchQ[StringTrim[raw], DigitCharacter ..], Return[256]];
     n = ToExpression[StringTrim[raw]];
-    If[ 2 <= n <= 512, n, 256]
+    If[2 <= n <= 512, n, 256]
 ]
 
-TJitCaptureRuns[c_TJitClosure] := Module[{
-    ops = TJitCaptureOps[c], runs = {}, cur = {}, start = 0,
-    flush
-},
+TJitCaptureRuns[c_TJitClosure] := Module[{ops = TJitCaptureOps[c], runs = {}, cur = {}, start = 0, flush},
     flush[end_] := If[Length[cur] > 0,
         AppendTo[runs, <|
             "Start" -> start,
@@ -272,11 +261,7 @@ TJitCaptureRuns[c_TJitClosure] := Module[{
     runs
 ]
 
-TJitCaptureGraphRuns[c_TJitClosure] := Module[{
-    ops = TJitCaptureOps[c], runs = {}, i = 1, n, j, consumed, aliases,
-    skipped, encoded, tileCount, jitCount, blocker, blockerOp, op, kind,
-    limit = jitGraphRunLimit[]
-},
+TJitCaptureGraphRuns[c_TJitClosure] := Module[{ops = TJitCaptureOps[c], runs = {}, i = 1, n, j, consumed, aliases, skipped, encoded, tileCount, jitCount, blocker, blockerOp, op, kind, limit = jitGraphRunLimit[]},
     n = Length[ops];
     While[i <= n,
         j = i;
@@ -341,10 +326,7 @@ TJitCaptureGraphRuns[c_TJitClosure] := Module[{
     runs
 ]
 
-TJitCaptureSummary[c_TJitClosure] := Module[{
-    ops = TJitCaptureOps[c], dispatches, runs, graphRuns, programCounts,
-    liveDispatches
-},
+TJitCaptureSummary[c_TJitClosure] := Module[{ops = TJitCaptureOps[c], dispatches, runs, graphRuns, programCounts, liveDispatches},
     dispatches = Select[ops, #["Kind"] === "DISPATCH" &];
     liveDispatches = Select[dispatches, !TrueQ[#["ReplaySkip"]] &];
     runs = TJitCaptureRuns[c];
@@ -355,8 +337,7 @@ TJitCaptureSummary[c_TJitClosure] := Module[{
         "KindCounts" -> Counts[Lookup[ops, "Kind", ""]],
         "DispatchKindCounts" -> Counts[Lookup[dispatches, "DispatchKind", ""]],
         "ReplaySkipped" -> Count[Lookup[ops, "ReplaySkip", False], True],
-        "ReplayPackedDispatches" ->
-            Count[Lookup[dispatches, "ReplayPacked", False], True],
+        "ReplayPackedDispatches" -> Count[Lookup[dispatches, "ReplayPacked", False], True],
         "ReplayLiveDispatches" -> Length[liveDispatches],
         "DispatchRuns" -> Lookup[runs, "Count", {}],
         "RunCount" -> Length[runs],
@@ -378,7 +359,7 @@ TJitCaptureSummary[c_TJitClosure] := Module[{
 
 TJitDrop[TJitClosure[a_Association]] := Module[{key = Hash[a], rec},
     rec = $tJitState[key];
-    If[ !MissingQ[rec],
+    If[ ! MissingQ[rec],
         $jitCaptureDropFn[rec["slot"]];
         $tJitState = KeyDrop[$tJitState, key]];
     Null

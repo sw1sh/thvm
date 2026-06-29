@@ -20,16 +20,16 @@ Begin["`Private`"];
 (* === resolution-shifted sigma schedule ==============================
    diffusers FlowMatchEuler `mu`-shift for klein.  Constants from the FLUX.2
    generate pipeline; `seq` is the image token count (256 for 256x256). *)
-fxSigmas[seq_:256, nSteps_:4] := Module[
-    {a1, b1, a2, b2, m200, m10, a, b, mu, lin, sig},
+fxSigmas[seq_ : 256, nSteps_ : 4] := Module[{a1, b1, a2, b2, m200, m10, a, b, mu, lin, sig},
     a1 = 8.73809524*^-5;  b1 = 1.89833333;
     a2 = 0.00016927;      b2 = 0.45666666;
-    m200 = a2*seq + b2;   m10 = a1*seq + b1;
-    a = (m200 - m10)/190;  b = m200 - 200 a;
-    mu = a*nSteps + b;     (* diffusers compute_empirical_mu: a*num_steps+b (was hardcoded 4) *)
-    lin = Subdivide[1.0, 1.0/nSteps, nSteps - 1];          (* [1, .75, .5, .25] *)
-    sig = (Exp[mu]/(Exp[mu] + (1.0/# - 1.0))) & /@ lin;
-    Append[sig, 0.0]]                                      (* sigmasFull, len nSteps+1 *)
+    m200 = a2 * seq + b2;   m10 = a1 * seq + b1;
+    a = (m200 - m10) / 190;  b = m200 - 200 a;
+    mu = a * nSteps + b;     (* diffusers compute_empirical_mu: a*num_steps+b (was hardcoded 4) *)
+    lin = Subdivide[1.0, 1.0 / nSteps, nSteps - 1];          (* [1, .75, .5, .25] *)
+    sig = (Exp[mu] / (Exp[mu] + (1.0 / # - 1.0)))& /@ lin;
+    Append[sig, 0.0]
+] (* sigmasFull, len nSteps+1 *)
 
 (* === sinusoidal timestep basis (weight-free part of the time embedder) ==
    diffusers get_timestep_embedding: dim 256, cos-first.  The pipeline feeds the
@@ -38,8 +38,8 @@ fxSigmas[seq_:256, nSteps_:4] := Module[
    BEFORE time_proj -- so the sinusoid argument is sigma*1000.  (Verified: thvm
    TSinusoidalEmbedding[sigma*1000] -> temb MLP std 0.3398 matches the reference
    step-0 temb, and the per-step velocity matches the reference to corr 0.9999.) *)
-fxTimestepSinusoid[sigma_, dim_:256] :=
-    Normal @ TSinusoidalEmbedding[N[sigma*1000.], dim]     (* {256} cos-first host list *)
+fxTimestepSinusoid[sigma_, dim_ : 256] :=
+    Normal @ TSinusoidalEmbedding[N[sigma * 1000.], dim]     (* {256} cos-first host list *)
 
 (* === 4-axis interleaved RoPE table ==================================
    FLUX.2 FluxPosEmbed: axes_dims {32,32,32,32}, theta 2000.  Token positions
@@ -47,17 +47,17 @@ fxTimestepSinusoid[sigma_, dim_:256] :=
    Sequence is text-first: [512 text ; 256 img].  Per axis a, 16 freq pairs
    theta_j = 1/2000^(2j/32); angle = pos[a]*theta_j; the head_dim-128 cos/sin
    tables interleave (cos,sin) per pair, concatenated over the 4 axes. *)
-fxRopeTable[gridH_:16, gridW_:16, nTxt_:512, theta_:2000., axDim_:32] := Module[
-    {half, invFreq, posImg, posTxt, pos, ang, cosT, sinT},
-    half = axDim/2;                                        (* 16 freq pairs per axis *)
-    invFreq = (1.0/theta^(2 Range[0, half - 1]/axDim));    (* {16} *)
+fxRopeTable[gridH_ : 16, gridW_ : 16, nTxt_ : 512, theta_ : 2000., axDim_ : 32] := Module[{half, invFreq, posImg, posTxt, pos, ang, cosT, sinT},
+    half = axDim / 2;                                        (* 16 freq pairs per axis *)
+    invFreq = (1.0 / theta ^ (2 Range[0, half - 1] / axDim));    (* {16} *)
     posImg = Flatten[Table[{0, h, w, 0}, {h, 0, gridH - 1}, {w, 0, gridW - 1}], 1]; (* {256,4} *)
     posTxt = Table[{0, 0, 0, i}, {i, 0, nTxt - 1}];        (* {512,4} *)
     pos = Join[posTxt, posImg];                            (* {768,4} text-first *)
     (* per token, per axis: outer(pos[a], invFreq) -> {16}; interleave cos/sin *)
-    ang = Function[p, Flatten[Table[Riffle[#, #] &[p[[ax]] invFreq], {ax, 4}]]] /@ pos;
+    ang = Function[p, Flatten[Table[Riffle[#, #]&[p[[ax]] invFreq], {ax, 4}]]] /@ pos;
     cosT = Cos[ang];  sinT = Sin[ang];                     (* {768,128} *)
-    <|"cos" -> cosT, "sin" -> sinT|>]
+    <|"cos" -> cosT, "sin" -> sinT|>
+]
 
 (* === the sampler loop ===============================================
    vel is the velocity field (zPacked, temb) -> {256,128}: the TJit-wrapped
@@ -74,7 +74,8 @@ fxSample[vel_, z0_, sigmas_, tembFn_] := Module[{z = z0, vfn, k, dt, v},
         v = vfn[z, tembFn[sigmas[[k]]]];
         z = TRealize @ TUOpAdd[z, TUOpMul[v, TUOpConst[N[dt]]]],
         {k, 1, Length[sigmas] - 1}];
-    z]
+    z
+]
 
 End[];
 

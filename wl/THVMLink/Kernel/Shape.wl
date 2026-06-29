@@ -32,9 +32,7 @@ bitsToInt32[bits_Integer] := If[bits >= 2^31, bits - 2^32, bits]
 
 (* For a TAG_NUM cell, decode its raw bits to a printable scalar
    string per the dtype encoded in `ext`.  Other tags return "". *)
-scalarTextFromCell[cellTerm_] := With[{
-    tag = TTermTag[cellTerm], ext = TTermExt[cellTerm], val = TTermVal[cellTerm]
-},
+scalarTextFromCell[cellTerm_] := With[{tag = TTermTag[cellTerm], ext = TTermExt[cellTerm], val = TTermVal[cellTerm]},
     If[ tag === $TagNUM,
         Switch[ext,
             $DTFp32, ToString[bitsToReal32[val]],
@@ -50,8 +48,7 @@ scalarTextFromCell[cellTerm_] := With[{
    diagrams' inferred shape matches what materialize would emit. *)
 
 (* Quoted "{d0,d1,...}" string for label display. *)
-shapeText[shape_List] :=
-    "{" <> StringRiffle[ToString /@ shape, ","] <> "}"
+shapeText[shape_List] := "{" <> StringRiffle[ToString /@ shape, ","] <> "}"
 shapeText[_] := ""
 
 (* Elementwise broadcast: pick the non-scalar side.  Mirrors the
@@ -65,10 +62,7 @@ broadcastShape[s1_, _] := s1
    Delete so an earlier drop does not shift the index of a later one.
    Out-of-range axes are ignored; a full reduce collapses to rank-0 {}
    (a genuine scalar). *)
-dropAxes[shape_List, axes_List] := Delete[
-    shape,
-    List /@ (Select[axes, 0 <= # < Length[shape] &] + 1)
-]
+dropAxes[shape_List, axes_List] := Delete[shape, List /@ (Select[axes, 0 <= # < Length[shape] &] + 1)]
 dropAxes[_, _] := {}
 
 (* TenDesc shape lookup: TENS[id].view.shape via the loaded

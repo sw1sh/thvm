@@ -75,19 +75,19 @@ fxLoRAKey[resolved_List] := If[resolved === {}, None, Hash[resolved, "SHA256"]];
    "alpha", or $Failed if the name is not a recognised LoRA tensor. *)
 
 fxLoRASplit[name_String] := Which[
-    StringEndsQ[name, ".lora_A.weight"],    {StringDrop[name, -StringLength[".lora_A.weight"]],    "down"},
-    StringEndsQ[name, ".lora_B.weight"],    {StringDrop[name, -StringLength[".lora_B.weight"]],    "up"},
+    StringEndsQ[name, ".lora_A.weight"], {StringDrop[name, -StringLength[".lora_A.weight"]], "down"},
+    StringEndsQ[name, ".lora_B.weight"], {StringDrop[name, -StringLength[".lora_B.weight"]], "up"},
     StringEndsQ[name, ".lora_down.weight"], {StringDrop[name, -StringLength[".lora_down.weight"]], "down"},
-    StringEndsQ[name, ".lora_up.weight"],   {StringDrop[name, -StringLength[".lora_up.weight"]],   "up"},
-    StringEndsQ[name, ".lora_A"],           {StringDrop[name, -StringLength[".lora_A"]],           "down"},
-    StringEndsQ[name, ".lora_B"],           {StringDrop[name, -StringLength[".lora_B"]],           "up"},
+    StringEndsQ[name, ".lora_up.weight"], {StringDrop[name, -StringLength[".lora_up.weight"]], "up"},
+    StringEndsQ[name, ".lora_A"], {StringDrop[name, -StringLength[".lora_A"]], "down"},
+    StringEndsQ[name, ".lora_B"], {StringDrop[name, -StringLength[".lora_B"]], "up"},
     (* XLabs-AI FLUX LoRAs use a bare ".down.weight"/".up.weight" suffix off a
        "...processor.<proj>_lora<n>" module (a third convention, FLUX.1-only) --
        recognise them so such a file is REPORTED via loraskip, not silently no-op'd. *)
-    StringEndsQ[name, ".down.weight"],      {StringDrop[name, -StringLength[".down.weight"]],      "down"},
-    StringEndsQ[name, ".up.weight"],        {StringDrop[name, -StringLength[".up.weight"]],        "up"},
-    StringEndsQ[name, ".alpha"],            {StringDrop[name, -StringLength[".alpha"]],            "alpha"},
-    True,                                   $Failed
+    StringEndsQ[name, ".down.weight"], {StringDrop[name, -StringLength[".down.weight"]], "down"},
+    StringEndsQ[name, ".up.weight"], {StringDrop[name, -StringLength[".up.weight"]], "up"},
+    StringEndsQ[name, ".alpha"], {StringDrop[name, -StringLength[".alpha"]], "alpha"},
+    True, $Failed
 ];
 
 (* kohya stores the module path with dots replaced by underscores and a
@@ -125,9 +125,7 @@ fxLoRADekohya[mod_String] := Module[{m = mod},
    any "diffusion_model." / "model." wrappers so the mapping table sees the bare
    diffusers module path. *)
 
-fxLoRAStripPrefix[mod_String] := StringReplace[
-    mod, StartOfString ~~ ("transformer." | "diffusion_model." | "model.diffusion_model." | "model.") -> ""
-];
+fxLoRAStripPrefix[mod_String] := StringReplace[mod, StartOfString ~~ ("transformer." | "diffusion_model." | "model.diffusion_model." | "model.") -> ""];
 
 (* The mapping: a bare FLUX module path -> a LIST of targets, each a
    {thvmWeightName, sliceSpec} pair.  sliceSpec is All (the up-factor B feeds the
@@ -163,11 +161,11 @@ fxLoRAModuleMap[mod_String] := Module[{m = fxLoRAStripPrefix[mod], dm, db, sb, r
                 "txt_attn.qkv", {{p <> "attn.add_q_proj.weight", "third1"}, {p <> "attn.add_k_proj.weight", "third2"}, {p <> "attn.add_v_proj.weight", "third3"}},
                 "img_attn.proj", {{p <> "attn.to_out.0.weight", All}},
                 "txt_attn.proj", {{p <> "attn.to_add_out.weight", All}},
-                "img_mlp.0",     {{p <> "ff.linear_in.weight", All}},
-                "img_mlp.2",     {{p <> "ff.linear_out.weight", All}},
-                "txt_mlp.0",     {{p <> "ff_context.linear_in.weight", All}},
-                "txt_mlp.2",     {{p <> "ff_context.linear_out.weight", All}},
-                _,               {}
+                "img_mlp.0", {{p <> "ff.linear_in.weight", All}},
+                "img_mlp.2", {{p <> "ff.linear_out.weight", All}},
+                "txt_mlp.0", {{p <> "ff_context.linear_in.weight", All}},
+                "txt_mlp.2", {{p <> "ff_context.linear_out.weight", All}},
+                _, {}
             ]
         ]
     ];
@@ -179,7 +177,7 @@ fxLoRAModuleMap[mod_String] := Module[{m = fxLoRAStripPrefix[mod], dm, db, sb, r
             Return @ Switch[sb[[1, 2]],
                 "linear1", {{p <> "attn.to_qkv_mlp_proj.weight", All}},
                 "linear2", {{p <> "attn.to_out.weight", All}},
-                _,         {}
+                _, {}
             ]
         ]
     ];
@@ -188,15 +186,15 @@ fxLoRAModuleMap[mod_String] := Module[{m = fxLoRAStripPrefix[mod], dm, db, sb, r
     If[ db =!= {},
         With[{p = "transformer_blocks." <> db[[1, 1]] <> "."},
             Return @ Switch[db[[1, 2]],
-                "attn.to_q",       {{p <> "attn.to_q.weight", All}},
-                "attn.to_k",       {{p <> "attn.to_k.weight", All}},
-                "attn.to_v",       {{p <> "attn.to_v.weight", All}},
+                "attn.to_q", {{p <> "attn.to_q.weight", All}},
+                "attn.to_k", {{p <> "attn.to_k.weight", All}},
+                "attn.to_v", {{p <> "attn.to_v.weight", All}},
                 "attn.add_q_proj", {{p <> "attn.add_q_proj.weight", All}},
                 "attn.add_k_proj", {{p <> "attn.add_k_proj.weight", All}},
                 "attn.add_v_proj", {{p <> "attn.add_v_proj.weight", All}},
-                "attn.to_out.0",   {{p <> "attn.to_out.0.weight", All}},
+                "attn.to_out.0", {{p <> "attn.to_out.0.weight", All}},
                 "attn.to_add_out", {{p <> "attn.to_add_out.weight", All}},
-                _,                 {}
+                _, {}
             ]
         ]
     ];
@@ -235,9 +233,7 @@ fxLoRANormalizeName[name_String] := Module[{split, mod, role, targets},
    down/up are kept as lazy mmap TTerms; the rank is read from down's leading
    dim. *)
 
-fxLoRALoadOne[path_String, scale_] := Module[
-    {tensors, byMod, modTargets, deltas, unmatched, names}
-    ,
+fxLoRALoadOne[path_String, scale_] := Module[{tensors, byMod, modTargets, deltas, unmatched, names},
     If[ ! FileExistsQ[path],
         Message[FluxGenerate::loramissing, path];
         Return[<|"deltas" -> <||>, "unmatched" -> {}|>]
@@ -312,12 +308,7 @@ fxLoRALoad[resolved_List] := Module[{loaded, merged, allUnmatched, nMatched},
     loaded = fxLoRALoadOne[#[[1]], #[[2]]]& /@ resolved;
     merged = <||>;
     Do[
-        Do[
-            merged[k] = Join[Lookup[merged, k, {}], one["deltas"][k]]
-            ,
-            {k, Keys[one["deltas"]]}
-        ]
-        ,
+        Do[merged[k] = Join[Lookup[merged, k, {}], one["deltas"][k]], {k, Keys[one["deltas"]]}],
         {one, loaded}
     ];
     allUnmatched = DeleteDuplicates @ Flatten[#["unmatched"]& /@ loaded];
@@ -336,11 +327,8 @@ fxLoRALoad[resolved_List] := Module[{loaded, merged, allUnmatched, nMatched},
    line, and cap the list length. *)
 
 fxLoRASkipSummary[unmatched_List] := Module[{collapsed},
-    collapsed = DeleteDuplicates[
-        StringReplace[#, ("blocks." ~~ DigitCharacter ..) -> "blocks.N"]& /@ unmatched
-    ];
-    StringRiffle[Take[collapsed, UpTo[12]], ", "] <>
-        If[Length[collapsed] > 12, ", ...", ""]
+    collapsed = DeleteDuplicates[StringReplace[#, ("blocks." ~~ DigitCharacter ..) -> "blocks.N"]& /@ unmatched];
+    StringRiffle[Take[collapsed, UpTo[12]], ", "] <> If[Length[collapsed] > 12, ", ...", ""]
 ];
 
 (* ============================================================
@@ -358,8 +346,8 @@ fxLoRASliceRows[All, outFull_] := {1, outFull};
 fxLoRASliceRows[spec_String, outFull_] := If[ Mod[outFull, 3] =!= 0,
     $Failed
     ,
-    With[{third = outFull/3, k = Switch[spec, "third1", 0, "third2", 1, "third3", 2, _, $Failed]},
-        If[k === $Failed, $Failed, {k*third + 1, third}]
+    With[{third = outFull / 3, k = Switch[spec, "third1", 0, "third2", 1, "third3", 2, _, $Failed]},
+        If[k === $Failed, $Failed, {k * third + 1, third}]
     ]
 ];
 
@@ -407,9 +395,7 @@ fxLoRADelta[factors_List, dev_] := Module[{dt = If[dev === "cpu", "f32", "bf16"]
    delta), added in f32 for accuracy, and cast back to t's dtype so the merged
    weight is byte-compatible with the no-LoRA loader's bf16 upload. *)
 
-fxLoRAMerge[loraDeltas_, name_String, t_, dev_] := If[
-    loraDeltas === <||> || ! KeyExistsQ[loraDeltas, name]
-    ,
+fxLoRAMerge[loraDeltas_, name_String, t_, dev_] := If[ loraDeltas === <||> || ! KeyExistsQ[loraDeltas, name],
     t
     ,
     Module[{factors, dims = Dimensions[t], dt = TTensorDType[TRealize[t]], delta, baseD},
@@ -417,10 +403,7 @@ fxLoRAMerge[loraDeltas_, name_String, t_, dev_] := If[
            {out,in} does not match the base weight (a FLUX.1-vs-FLUX.2 dim mismatch
            under a shared module name, or a fused-qkv third that does not divide):
            drop that factor with a message rather than building a malformed add. *)
-        factors = Select[
-            loraDeltas[name],
-            Function[f, fxLoRAFactorDims[f] === dims]
-        ];
+        factors = Select[loraDeltas[name], Function[f, fxLoRAFactorDims[f] === dims]];
         If[ factors === {},
             Message[FluxGenerate::lorashape, name];
             Return[t, Module]

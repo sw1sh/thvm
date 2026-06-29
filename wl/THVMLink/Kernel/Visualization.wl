@@ -28,19 +28,19 @@
        k<loc>     UOP_KERNEL cell at heap loc <loc>
        t<id>      TAG_TEN tensor handle for tid <id>           *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[THeapGraph, "THeapGraph[] renders the whole heap as a Graph: every IC agent, UOP cell and TEN handle becomes a vertex, with edges following data flow (sources point at consumers).
+SetUsage[THeapGraph, "THeapGraph[] renders the whole heap as a Graph: every IC agent, UOP cell and TEN handle becomes a vertex, with edges following data flow (sources point at consumers).
 THeapGraph[term$] seeds the walk from term$, including only the agents it reaches.
 THeapGraph[{t$1, t$2, $$}] seeds the walk from several terms.
 UOP_KERNEL cells expose their TKernelInputs as input edges, so a fused view shows the same kernel-DAG topology as TScheduleGraph; styling matches the other renderers.
 Options: \"ShowEdgeLabels\" (default False), plus all standard Graph options."];
 
-GeneralUtilities`SetUsage[TScheduleGraph, "TScheduleGraph[] returns a Graph of the live kernel schedule: one vertex per emitted kernel, with directed edges from producer kernel to consumer kernel labeled by the connecting TenDesc id.
+SetUsage[TScheduleGraph, "TScheduleGraph[] returns a Graph of the live kernel schedule: one vertex per emitted kernel, with directed edges from producer kernel to consumer kernel labeled by the connecting TenDesc id.
 External inputs (TenDescs with no producer kernel, such as weights and host tensors) appear as TEN-shaped vertices when \"ShowExternalInputs\" is True (default); disconnected kernels render as isolated vertices.
 Options: \"ShowExternalInputs\", plus all standard Graph options."];
 
-GeneralUtilities`SetUsage[TMemoryPlanGantt, "TMemoryPlanGantt[plan$] returns a Gantt-style Graphics chart of buffer lifecycles for a TMemoryPlan, with topological depth on the kernel DAG along x and one packed row per buffer.
+SetUsage[TMemoryPlanGantt, "TMemoryPlanGantt[plan$] returns a Gantt-style Graphics chart of buffer lifecycles for a TMemoryPlan, with topological depth on the kernel DAG along x and one packed row per buffer.
 Each bar spans the buffer's live depth range, colored by status, with hover tooltips exposing buf id, nbytes, dtype, status, depths and alias tids.
 Options: \"TopN\" (largest buffers to show), \"BarHeight\" (\"Linear\" or \"Log\")."];
 
@@ -147,14 +147,14 @@ discoverAgents[seedTerms_List : {}] := Block[{lo = THeapBase[], n = THeapPos[], 
    so they return {}. *)
 agentChildSlots[term_] := With[{tag = TTermTag[term], base = TTermVal[term]},
     Switch[tag,
-        $TagLAM | $TagDUP,                   {base},
+        $TagLAM | $TagDUP, {base},
         $TagAPP | $TagSUP | $TagMAT | $TagOP2, {base, base + 1},
-        $TagALO,                             {base},                (* slot 1 = state metadata *)
-        $TagDSU | $TagDDU,                   {base, base + 1, base + 2},
-        $TagCTR,                             Range[base + 1, base + TTermVal[THeapRead[base]]],
-        $TagVAR,                             {base},                (* heap[base] = LAM body *)
-        $TagDP0 | $TagDP1,                   {base},                (* heap[base] = DUP body *)
-        _,                                   {}
+        $TagALO, {base}, (* slot 1 = state metadata *)
+        $TagDSU | $TagDDU, {base, base + 1, base + 2},
+        $TagCTR, Range[base + 1, base + TTermVal[THeapRead[base]]],
+        $TagVAR, {base}, (* heap[base] = LAM body *)
+        $TagDP0 | $TagDP1, {base}, (* heap[base] = DUP body *)
+        _, {}
     ]
 ]
 
@@ -167,10 +167,10 @@ agentChildSlots[term_] := With[{tag = TTermTag[term], base = TTermVal[term]},
 agentFromAtomSeed[term_] := With[{tag = TTermTag[term], val = TTermVal[term]},
     Switch[tag,
         $TagNUM, "natom" <> ToString[val] -> <|"tag" -> $TagNUM, "value" -> val|>,
-        $TagERA, "eraatom"                -> <|"tag" -> $TagERA|>,
+        $TagERA, "eraatom" -> <|"tag" -> $TagERA|>,
         $TagREF, refVertexId[TTermExt[term]] -> <|"tag" -> $TagREF, "defId" -> TTermExt[term]|>,
-        $TagTEN, tenVertexId[val]         -> <|"tag" -> $TagTEN, "dtype" -> TTermExt[term]|>,
-        _,       Nothing
+        $TagTEN, tenVertexId[val] -> <|"tag" -> $TagTEN, "dtype" -> TTermExt[term]|>,
+        _, Nothing
     ]
 ]
 
@@ -197,49 +197,42 @@ agentFromAtomSeed[term_] := With[{tag = TTermTag[term], val = TTermVal[term]},
    atoms aren't first-class agents (they render inline on slot
    edges), and the DUP wrapper is the only node that ties both
    projections to the atom.  Keep the wrapper visible in that case. *)
-agentIsDead[term_] := Block[
-    {tag = TTermTag[term], body, btag, lam},
+agentIsDead[term_] := Block[{tag = TTermTag[term], body, btag, lam},
     Which[
         tag === $TagLAM,
             TTermSub[THeapRead[TTermVal[term]]] === 1,
         tag === $TagDUP,
             body = THeapRead[TTermVal[term]];
             btag = TTermTag[body];
-            TTermSub[body] === 1 &&
-                btag =!= $TagNUM && btag =!= $TagERA &&
-                btag =!= $TagTEN && btag =!= $TagANY &&
-                btag =!= $TagREF,
+            TTermSub[body] === 1 && btag =!= $TagNUM && btag =!= $TagERA && btag =!= $TagTEN && btag =!= $TagANY && btag =!= $TagREF,
         tag === $TagAPP,
             (* APP-LAM has fired: left slot is a LAM whose binder
                is SUB-flagged.  The APP wrapper is logically gone. *)
             lam = THeapRead[TTermVal[term]];
-            TTermTag[lam] === $TagLAM &&
-                TTermSub[THeapRead[TTermVal[lam]]] === 1,
+            TTermTag[lam] === $TagLAM && TTermSub[THeapRead[TTermVal[lam]]] === 1,
         True, False
     ]
 ]
-agentIsDeadVar[term_] := Block[
-    {tag = TTermTag[term], isVarLike},
+agentIsDeadVar[term_] := Block[{tag = TTermTag[term], isVarLike},
     isVarLike = (tag === $TagVAR || tag === $TagDP0 || tag === $TagDP1);
     isVarLike && TTermSub[THeapRead[TTermVal[term]]] === 1
 ]
 
-reachableICAgents[seedTerms_List] := Block[
-    {result = <||>, queue, t, rule, vid, info, atomRule},
+reachableICAgents[seedTerms_List] := Block[{result = <||>, queue, t, rule, vid, info, atomRule},
     Do[
         atomRule = agentFromAtomSeed[seed];
         If[ atomRule =!= Nothing,
             {vid, info} = {First[atomRule], Last[atomRule]};
-            If[ ! KeyExistsQ[result, vid], result[vid] = info]],
+            If[! KeyExistsQ[result, vid], result[vid] = info]],
         {seed, seedTerms}
     ];
     queue = seedTerms;
     While[ Length[queue] > 0,
-        t    = First[queue]; queue = Rest[queue];
+        t = First[queue]; queue = Rest[queue];
         (* Skip VAR/DP0/DP1 whose binder is SUB-flagged: the
            substituted value is surfaced by childVertexId as an edge
            endpoint, no LAM/DUP agent should be registered. *)
-        If[ agentIsDeadVar[t], Continue[]];
+        If[agentIsDeadVar[t], Continue[]];
         rule = agentFromTerm[t];
         If[ rule =!= Nothing,
             {vid, info} = {First[rule], Last[rule]};
@@ -278,8 +271,7 @@ discoverEras[] := Block[{lo = THeapBase[], n = THeapPos[]},
    (e.g. APP-LAM beta) wrote the substituted value there.  For
    visualisation purposes we treat the substituted value as the
    logical content of the slot and resolve "through" the dead binder. *)
-varIsSubResolved[loc_Integer] := Block[
-    {t = THeapRead[loc], tag, binder},
+varIsSubResolved[loc_Integer] := Block[{t = THeapRead[loc], tag, binder},
     tag = TTermTag[t];
     If[ tag === $TagVAR || tag === $TagDP0 || tag === $TagDP1,
         binder = THeapRead[TTermVal[t]];
@@ -295,94 +287,82 @@ varIsSubResolved[loc_Integer] := Block[
    re-route the wire to a vertex keyed on the binder loc holding the
    substituted value (so post-beta diagrams show the substituted
    literal where the variable used to be, instead of a ghost LAM). *)
-childVertexId[loc_Integer] :=
-    Block[{t = THeapRead[loc], tag, val, ext, binder, btag, varTag, subResolved},
-        tag = TTermTag[t]; val = TTermVal[t]; ext = TTermExt[t];
-        varTag = (tag === $TagVAR || tag === $TagDP0 || tag === $TagDP1);
-        subResolved = varTag && TTermSub[THeapRead[val]] === 1;
-        If[ subResolved,
-            binder = THeapRead[val];
-            btag = TTermTag[binder];
-            Switch[btag,
-                $TagNUM, numVertexId[val],
-                $TagERA, eraVertexId[val],
-                _,       numVertexId[val]
-            ],
-            Switch[tag,
-                $TagLAM | $TagAPP | $TagSUP | $TagDUP, icVertexId[val],
-                $TagVAR,                               icVertexId[val],
-                $TagDP0 | $TagDP1,                     icVertexId[val],
-                $TagERA,                               eraVertexId[loc],
-                $TagUOP,
-                    If[ ext === $UopKernel, kerVertexId[val], uopVertexId[val]],
-                $TagTEN,                               tenVertexId[val],
-                $TagREF,                               refVertexId[ext],
-                $TagALO,                               aloVertexId[val],
-                $TagCTR,                               ctrVertexId[val],
-                $TagMAT,                               matVertexId[val],
-                $TagOP2,                               op2VertexId[val],
-                $TagDSU,                               dsuVertexId[val],
-                $TagDDU,                               dduVertexId[val],
-                $TagNUM,                               numVertexId[loc],
-                _, Nothing
-            ]
-        ]
-    ]
-
-icPortRecord[base_Integer, offset_Integer, port_String] :=
-    Block[{loc = base + offset, t = THeapRead[base + offset], tag, src},
-        tag = TTermTag[t];
-        src = childVertexId[loc];
-        If[ src === Nothing, Nothing,
-            {src, icVertexId[base],
-             port <> Switch[tag,
-                 $TagVAR, " var",
-                 $TagDP0, " dp0",
-                 $TagDP1, " dp1",
-                 _, ""]}
-        ]
-    ]
-
-icEdgeRecords[base_Integer, tag_Integer] :=
-    icPortRecord[base, #[[1]], #[[2]]] & /@ icPorts[tag]
-
-(* For non-KERNEL UOPs, walk their compute slots and emit
-   src -> uop edges. *)
-uopEdgeRecord[loc_Integer, offset_Integer] :=
-    Block[{cellLoc = loc + offset, t, tag, val},
-        t = THeapRead[cellLoc];
-        tag = TTermTag[t];
-        val = TTermVal[t];
+childVertexId[loc_Integer] := Block[{t = THeapRead[loc], tag, val, ext, binder, btag, varTag, subResolved},
+    tag = TTermTag[t]; val = TTermVal[t]; ext = TTermExt[t];
+    varTag = (tag === $TagVAR || tag === $TagDP0 || tag === $TagDP1);
+    subResolved = varTag && TTermSub[THeapRead[val]] === 1;
+    If[ subResolved,
+        binder = THeapRead[val];
+        btag = TTermTag[binder];
+        Switch[btag,
+            $TagNUM, numVertexId[val],
+            $TagERA, eraVertexId[val],
+            _, numVertexId[val]
+        ],
         Switch[tag,
+            $TagLAM | $TagAPP | $TagSUP | $TagDUP, icVertexId[val],
+            $TagVAR, icVertexId[val],
+            $TagDP0 | $TagDP1, icVertexId[val],
+            $TagERA, eraVertexId[loc],
             $TagUOP,
-                {If[ TTermExt[t] === $UopKernel,
-                     kerVertexId[val], uopVertexId[val]],
-                 uopVertexId[loc], "src" <> ToString[offset]},
-            $TagTEN,
-                {tenVertexId[val], uopVertexId[loc], "src" <> ToString[offset]},
-            $TagNUM,
-                Nothing,    (* numeric arg, surfaced via vertex label *)
-            $TagLAM | $TagAPP | $TagSUP | $TagDUP,
-                {icVertexId[val], uopVertexId[loc], "src" <> ToString[offset]},
-            $TagERA,
-                {eraVertexId[cellLoc], uopVertexId[loc], "src" <> ToString[offset]},
+                If[ext === $UopKernel, kerVertexId[val], uopVertexId[val]],
+            $TagTEN, tenVertexId[val],
+            $TagREF, refVertexId[ext],
+            $TagALO, aloVertexId[val],
+            $TagCTR, ctrVertexId[val],
+            $TagMAT, matVertexId[val],
+            $TagOP2, op2VertexId[val],
+            $TagDSU, dsuVertexId[val],
+            $TagDDU, dduVertexId[val],
+            $TagNUM, numVertexId[loc],
             _, Nothing
         ]
     ]
+]
 
-uopEdgeRecords[loc_Integer, opcode_Integer] /; opcode =!= $UopKernel :=
-    Table[uopEdgeRecord[loc, off], {off, 0, uopArity[opcode] - 1}]
+icPortRecord[base_Integer, offset_Integer, port_String] := Block[{loc = base + offset, t = THeapRead[base + offset], tag, src},
+    tag = TTermTag[t];
+    src = childVertexId[loc];
+    If[ src === Nothing, Nothing,
+        {src, icVertexId[base],
+         port <> Switch[tag,
+             $TagVAR, " var",
+             $TagDP0, " dp0",
+             $TagDP1, " dp1",
+             _, ""]}
+    ]
+]
+
+icEdgeRecords[base_Integer, tag_Integer] := icPortRecord[base, #[[1]], #[[2]]] & /@ icPorts[tag]
+
+(* For non-KERNEL UOPs, walk their compute slots and emit
+   src -> uop edges. *)
+uopEdgeRecord[loc_Integer, offset_Integer] := Block[{cellLoc = loc + offset, t, tag, val},
+    t = THeapRead[cellLoc];
+    tag = TTermTag[t];
+    val = TTermVal[t];
+    Switch[tag,
+        $TagUOP,
+            {If[TTermExt[t] === $UopKernel, kerVertexId[val], uopVertexId[val]], uopVertexId[loc], "src" <> ToString[offset]},
+        $TagTEN,
+            {tenVertexId[val], uopVertexId[loc], "src" <> ToString[offset]},
+        $TagNUM,
+            Nothing, (* numeric arg, surfaced via vertex label *)
+        $TagLAM | $TagAPP | $TagSUP | $TagDUP,
+            {icVertexId[val], uopVertexId[loc], "src" <> ToString[offset]},
+        $TagERA,
+            {eraVertexId[cellLoc], uopVertexId[loc], "src" <> ToString[offset]},
+        _, Nothing
+    ]
+]
+
+uopEdgeRecords[loc_Integer, opcode_Integer] /; opcode =!= $UopKernel := Table[uopEdgeRecord[loc, off], {off, 0, uopArity[opcode] - 1}]
 
 (* For UOP_KERNEL cells, the heap children (output_buf TEN, NUM kid)
    describe the OUTPUT, not inputs.  Pull TKernelInputs[kid] from
    the C side and emit one TEN -> KERNEL edge per input tid.  Same
    topology TScheduleGraph builds. *)
-kernelEdgeRecords[loc_Integer] := Block[{
-    kid     = TTermVal[THeapRead[loc + 1]],
-    outTid  = TTermVal[THeapRead[loc]],
-    consVid = kerVertexId[loc],
-    inputs
-},
+kernelEdgeRecords[loc_Integer] := Block[{kid = TTermVal[THeapRead[loc + 1]], outTid = TTermVal[THeapRead[loc]], consVid = kerVertexId[loc], inputs},
     inputs = TKernelInputs[kid];
     Append[
         ({tenVertexId[#], consVid, "in"} & /@ inputs),
@@ -396,19 +376,12 @@ uopEdgeRecords[loc_Integer, $UopKernel] := kernelEdgeRecords[loc]
 
 (* Generic edge record for a fixed-arity parent at `base` whose
    children sit at base + offset.  Targets the parent's `vid`. *)
-genericPortRecord[parentVid_String, base_Integer, offset_Integer, port_String] :=
-    Block[{src = childVertexId[base + offset]},
-        If[ src === Nothing, Nothing, {src, parentVid, port}]
-    ]
+genericPortRecord[parentVid_String, base_Integer, offset_Integer, port_String] := Block[{src = childVertexId[base + offset]},
+    If[src === Nothing, Nothing, {src, parentVid, port}]
+]
 
-ctrEdgeRecords[base_Integer] := Block[{
-    parentVid = ctrVertexId[base],
-    n         = TTermVal[THeapRead[base]]
-},
-    Table[
-        genericPortRecord[parentVid, base, i, "c" <> ToString[i - 1]],
-        {i, n}
-    ]
+ctrEdgeRecords[base_Integer] := Block[{parentVid = ctrVertexId[base], n = TTermVal[THeapRead[base]]},
+    Table[genericPortRecord[parentVid, base, i, "c" <> ToString[i - 1]], {i, n}]
 ]
 
 matEdgeRecords[base_Integer] := With[{parentVid = matVertexId[base]},
@@ -461,12 +434,11 @@ agentEdgeRecords[vid_String, info_Association] := Switch[info["tag"],
 ]
 
 (* === SUB-decoration (dashed outline) === *)
-icSubVertices[base_Integer, tag_Integer] :=
-    Table[
-        With[{loc = base + p[[1]]},
-            If[ TTermSub[THeapRead[loc]] == 1, icVertexId[base], Nothing]],
-        {p, icPorts[tag]}
-    ]
+icSubVertices[base_Integer, tag_Integer] := Table[
+    With[{loc = base + p[[1]]},
+        If[TTermSub[THeapRead[loc]] == 1, icVertexId[base], Nothing]],
+    {p, icPorts[tag]}
+]
 
 subVerticesForAgent[vid_String, info_Association] := Switch[info["tag"],
     $TagLAM | $TagAPP | $TagSUP | $TagDUP,
@@ -477,14 +449,7 @@ subVerticesForAgent[vid_String, info_Association] := Switch[info["tag"],
 (* === labels === *)
 
 icLabel[base_Integer, tag_Integer] := With[{arity = Length[icPorts[tag]]},
-    Column[
-        {
-            TTagName[tag],
-            If[ arity > 1,
-                "@" <> ToString[base] <> ".." <> ToString[base + arity - 1],
-                "@" <> ToString[base]
-            ]
-        }, Center, Spacings -> 0]
+    Column[{TTagName[tag], If[arity > 1, "@" <> ToString[base] <> ".." <> ToString[base + arity - 1], "@" <> ToString[base]]}, Center, Spacings -> 0]
 ]
 
 (* For KERNEL: surface kid + program op count for at-a-glance read.
@@ -523,43 +488,32 @@ vertexCategory[vid_String, info_Association] := Switch[info["tag"],
     $TagUOP,
         Switch[info["opcode"],
             $UopKernel, "KERNEL",
-            $UopConst,  "CONST",
+            $UopConst, "CONST",
             $UopReduce, "REDUCE",
-            $UopGrad,   "GRAD",
-            _,          "UOP"],
+            $UopGrad, "GRAD",
+            _, "UOP"],
     $TagTEN,
         With[{id = ToExpression[StringDrop[vid, 1]]},
-            If[ MemberQ[$externalTids, id], "ExternalTEN", "TEN"]],
+            If[MemberQ[$externalTids, id], "ExternalTEN", "TEN"]],
     _, TTagName[info["tag"]]
 ]
 
 (* Label helpers for the new tag types. *)
-ctrLabel[base_Integer, ctrTag_Integer] :=
-    Column[{"CTR#" <> ToString[ctrTag],
-            "@" <> ToString[base]}, Center, Spacings -> 0]
+ctrLabel[base_Integer, ctrTag_Integer] := Column[{"CTR#" <> ToString[ctrTag], "@" <> ToString[base]}, Center, Spacings -> 0]
 
-matLabel[base_Integer, ctrTag_Integer] :=
-    Column[{"MAT#" <> ToString[ctrTag],
-            "@" <> ToString[base]}, Center, Spacings -> 0]
+matLabel[base_Integer, ctrTag_Integer] := Column[{"MAT#" <> ToString[ctrTag], "@" <> ToString[base]}, Center, Spacings -> 0]
 
-op2Label[base_Integer, opcode_Integer] :=
-    Column[{"OP2 " <> Lookup[$op2Names, opcode, "?" <> ToString[opcode]],
-            "@" <> ToString[base]}, Center, Spacings -> 0]
+op2Label[base_Integer, opcode_Integer] := Column[{"OP2 " <> Lookup[$op2Names, opcode, "?" <> ToString[opcode]], "@" <> ToString[base]}, Center, Spacings -> 0]
 
-aloLabel[base_Integer] :=
-    Block[{stateCell = THeapRead[base + 1]},
-        Column[{"ALO",
-                "s" <> ToString[TTermVal[stateCell]] <> "@" <> ToString[base]},
-            Center, Spacings -> 0]
-    ]
+aloLabel[base_Integer] := Block[{stateCell = THeapRead[base + 1]},
+    Column[{"ALO", "s" <> ToString[TTermVal[stateCell]] <> "@" <> ToString[base]}, Center, Spacings -> 0]
+]
 
 refLabel[defId_Integer] := "REF\nd" <> ToString[defId]
 
-numLabel[loc_Integer] :=
-    Block[{t = THeapRead[loc]},
-        Column[{ToString[TTermVal[t]],
-                "@" <> ToString[loc]}, Center, Spacings -> 0]
-    ]
+numLabel[loc_Integer] := Block[{t = THeapRead[loc]},
+    Column[{ToString[TTermVal[t]], "@" <> ToString[loc]}, Center, Spacings -> 0]
+]
 
 (* Atom-NUM vertices come from seed terms (NUM packed in a Term word,
    no heap cell of its own).  The vertex id is "natom" <> value to
@@ -581,29 +535,22 @@ vertexLabel[vid_String, info_Association] := Switch[info["tag"],
     $TagDSU, Column[{"DSU", "@" <> ToString[ToExpression[StringDrop[vid, 1]]]}, Center, Spacings -> 0],
     $TagDDU, Column[{"DDU", "@" <> ToString[ToExpression[StringDrop[vid, 1]]]}, Center, Spacings -> 0],
     $TagNUM,
-        If[ StringStartsQ[vid, "natom"],
-            numAtomLabel[ToExpression[StringDrop[vid, 5]]],
-            numLabel[ToExpression[StringDrop[vid, 1]]]],
+        If[StringStartsQ[vid, "natom"], numAtomLabel[ToExpression[StringDrop[vid, 5]]], numLabel[ToExpression[StringDrop[vid, 1]]]],
     _, ""
 ]
 
 (* === public entry === *)
 
-Options[THeapGraph] = Join[
-    {"ShowEdgeLabels" -> False},
-    Options[Graph]
-];
+Options[THeapGraph] = Join[{"ShowEdgeLabels" -> False}, Options[Graph]];
 
 (* ERA locs that appear in some slot of one of `agents`; gives the
    reachable-mode entry points the ERA list they need to render ERA
    vertices with the correct shape (the no-arg path uses
    discoverEras[] which walks the full heap). *)
-icAgentSpan[vid_String, info_Association] := With[
-    {tag = info["tag"], base = ToExpression[StringDrop[vid, 1]]},
+icAgentSpan[vid_String, info_Association] := With[{tag = info["tag"], base = ToExpression[StringDrop[vid, 1]]},
     Which[
         tag === $TagLAM || tag === $TagDUP, {base},
-        tag === $TagAPP || tag === $TagSUP || tag === $TagMAT || tag === $TagOP2 || tag === $TagALO,
-            {base, base + 1},
+        tag === $TagAPP || tag === $TagSUP || tag === $TagMAT || tag === $TagOP2 || tag === $TagALO, {base, base + 1},
         tag === $TagDSU || tag === $TagDDU, {base, base + 1, base + 2},
         tag === $TagCTR, Range[base + 1, base + TTermVal[THeapRead[base]]],
         True, {}
@@ -615,28 +562,22 @@ erasReachableFrom[agents_Association] := DeleteDuplicates @ Cases[
     loc_Integer /; TTermTag[THeapRead[loc]] === $TagERA
 ]
 
-THeapGraph[opts : OptionsPattern[]] :=
-    buildHeapGraph[discoverAgents[{}], discoverEras[], opts]
-THeapGraph[ts_List, opts : OptionsPattern[]] :=
-    With[{agents = reachableICAgents[ts]},
-        buildHeapGraph[agents, erasReachableFrom[agents], opts]]
-THeapGraph[term_, opts : OptionsPattern[]] :=
-    With[{agents = reachableICAgents[{term}]},
-        buildHeapGraph[agents, erasReachableFrom[agents], opts]]
+THeapGraph[opts : OptionsPattern[]] := buildHeapGraph[discoverAgents[{}], discoverEras[], opts]
+THeapGraph[ts_List, opts : OptionsPattern[]] := With[{agents = reachableICAgents[ts]},
+    buildHeapGraph[agents, erasReachableFrom[agents], opts]]
+THeapGraph[term_, opts : OptionsPattern[]] := With[{agents = reachableICAgents[{term}]},
+    buildHeapGraph[agents, erasReachableFrom[agents], opts]]
 
-buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGraph]] := Block[{
-    edgeRecords, edges, edgeLabels, vertices, vshapes, subVertices,
-    layout, showLabels
-},
-    showLabels  = OptionValue["ShowEdgeLabels"];
+buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGraph]] := Block[{edgeRecords, edges, edgeLabels, vertices, vshapes, subVertices, layout, showLabels},
+    showLabels = OptionValue["ShowEdgeLabels"];
     edgeRecords = Flatten[KeyValueMap[agentEdgeRecords, agents], 1];
     (* Tag each edge with its port name so DirectedEdge[a, b, "src0"]
        and DirectedEdge[a, b, "src1"] are distinct: a UOP reading
        the same TEN through two slots gets two parallel arrows.  The
        caller can hide labels via "ShowEdgeLabels" -> False (default)
        but the tag still keeps Graph from collapsing the edges. *)
-    edges       = DirectedEdge[#[[1]], #[[2]], #[[3]]] & /@ edgeRecords;
-    edgeLabels  = MapThread[Rule, {edges, Last /@ edgeRecords}];
+    edges = DirectedEdge[#[[1]], #[[2]], #[[3]]] & /@ edgeRecords;
+    edgeLabels = MapThread[Rule, {edges, Last /@ edgeRecords}];
 
     vertices = DeleteDuplicates @ Join[
         Keys[agents],
@@ -663,19 +604,12 @@ buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGra
                 Switch[StringTake[v, 1],
                     "t", augmented[v] = <|"tag" -> $TagTEN, "dtype" -> 0|>,
                     "n", augmented[v] = <|"tag" -> $TagNUM|>,
-                    "r", augmented[v] = <|"tag" -> $TagREF,
-                                          "defId" -> ToExpression[StringDrop[v, 1]]|>,
+                    "r", augmented[v] = <|"tag" -> $TagREF, "defId" -> ToExpression[StringDrop[v, 1]]|>,
                     _, Null]],
             {v, vertices}
         ];
         vshapes = Join[
-            KeyValueMap[
-                {vid, info} |-> vid -> nodeShapeFn[
-                    vertexCategory[vid, info],
-                    vertexLabel[vid, info]
-                ],
-                augmented
-            ],
+            KeyValueMap[{vid, info} |-> vid -> nodeShapeFn[vertexCategory[vid, info], vertexLabel[vid, info]], augmented],
             (eraVertexId[#] -> nodeShapeFn["ERA", ""]) & /@ eras
         ]
     ];
@@ -686,10 +620,7 @@ buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGra
         FilterRules[{userOpts}, Except[GraphLayout | VertexSize | "ShowEdgeLabels"]],
         VertexShapeFunction -> vshapes,
         VertexSize -> 0.45,
-        EdgeLabels -> If[ showLabels,
-            Map[#[[1]] -> Placed[#[[2]], 0.5] &, edgeLabels],
-            None
-        ],
+        EdgeLabels -> If[showLabels, Map[#[[1]] -> Placed[#[[2]], 0.5] &, edgeLabels], None],
         EdgeLabelStyle -> Directive[FontFamily -> "Helvetica", FontSize -> 9, LightDarkSwitched[Black, White]],
         EdgeStyle -> edgeStyleDirective,
         GraphLayout -> layout,
@@ -723,35 +654,20 @@ buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGra
 (* Compose a short per-kernel label.  Two lines:
      kid, op count
      output shape and dtype (or "no out" for the rare bail). *)
-scheduleKernelLabel[kid_Integer] := Block[{
-    info = decodeKernelInfo[kid],
-    row  = kernelRowAsoc[kid],
-    shape
-},
+scheduleKernelLabel[kid_Integer] := Block[{info = decodeKernelInfo[kid], row = kernelRowAsoc[kid], shape},
     shape = With[{tid = row["OutputTid"]},
-        If[ tid > 0, TTensorShape[tenTermFromTid[tid]], {}]];
+        If[tid > 0, TTensorShape[tenTermFromTid[tid]], {}]];
     "k" <> ToString[kid] <> " (" <> ToString[info[[1]]["OpCount"]] <> "ops)" <> "\n" <> ToString[shape] <> " " <> row["OutputDtype"]
 ]
 
-scheduleExternalLabel[tid_Integer] := Block[{
-    shape = TTensorShape[tenTermFromTid[tid]],
-    dtype = TTensorDType[tenTermFromTid[tid]]
-},
+scheduleExternalLabel[tid_Integer] := Block[{shape = TTensorShape[tenTermFromTid[tid]], dtype = TTensorDType[tenTermFromTid[tid]]},
     "t" <> ToString[tid] <> "\n" <> ToString[shape] <> " " <> If[StringQ[dtype], dtype, "?"]
 ]
 
-Options[TScheduleGraph] = Join[
-    {"ShowExternalInputs" -> True},
-    Options[Graph]
-];
+Options[TScheduleGraph] = Join[{"ShowExternalInputs" -> True}, Options[Graph]];
 
-TScheduleGraph[opts : OptionsPattern[]] := Block[{
-    nKernels = TKernelCount[] - 1,
-    showExt = OptionValue["ShowExternalInputs"],
-    tens, kernelVerts, edges, edgeLabels, extTids, extVerts,
-    vshapes
-},
-    If[ nKernels <= 0, Return[Graph[{}, ImageSize -> 240]]];
+TScheduleGraph[opts : OptionsPattern[]] := Block[{nKernels = TKernelCount[] - 1, showExt = OptionValue["ShowExternalInputs"], tens, kernelVerts, edges, edgeLabels, extTids, extVerts, vshapes},
+    If[nKernels <= 0, Return[Graph[{}, ImageSize -> 240]]];
     tens = TTensTable[];
 
     kernelVerts = Table["k" <> ToString[k], {k, nKernels}];
@@ -761,18 +677,11 @@ TScheduleGraph[opts : OptionsPattern[]] := Block[{
        vertex if there's no producer).  Edge label is the tid. *)
     {edges, edgeLabels, extTids} = Block[{es = {}, ls = {}, exs = {}},
         Do[
-            Block[{
-                inTids = TKernelInputs[kid],
-                consumerVert = "k" <> ToString[kid],
-                producerKid, srcVert
-            },
+            Block[{inTids = TKernelInputs[kid], consumerVert = "k" <> ToString[kid], producerKid, srcVert},
                 Do[
-                    producerKid = If[ tid > 0 && tid <= Length[tens],
-                                      tens[[tid, 1]], 0];
-                    srcVert = If[ producerKid =!= 0,
-                                  "k" <> ToString[producerKid],
-                                  "t" <> ToString[tid]];
-                    If[ producerKid === 0, AppendTo[exs, tid]];
+                    producerKid = If[tid > 0 && tid <= Length[tens], tens[[tid, 1]], 0];
+                    srcVert = If[producerKid =!= 0, "k" <> ToString[producerKid], "t" <> ToString[tid]];
+                    If[producerKid === 0, AppendTo[exs, tid]];
                     AppendTo[es, DirectedEdge[srcVert, consumerVert]];
                     AppendTo[ls, DirectedEdge[srcVert, consumerVert] -> tid],
                     {tid, inTids}
@@ -783,12 +692,12 @@ TScheduleGraph[opts : OptionsPattern[]] := Block[{
         {es, ls, DeleteDuplicates[exs]}
     ];
 
-    extVerts = If[ showExt, "t" <> ToString[#] & /@ extTids, {}];
+    extVerts = If[showExt, "t" <> ToString[#] & /@ extTids, {}];
     (* Drop edges pointing into hidden external vertices, otherwise
        Graph would auto-add stub vertices for them. *)
-    If[ !showExt,
-        edges = Select[edges, !StringStartsQ[#[[1]], "t"] &];
-        edgeLabels = Select[edgeLabels, !StringStartsQ[#[[1, 1]], "t"] &]
+    If[ ! showExt,
+        edges = Select[edges, ! StringStartsQ[#[[1]], "t"] &];
+        edgeLabels = Select[edgeLabels, ! StringStartsQ[#[[1, 1]], "t"] &]
     ];
 
     vshapes = Join[
@@ -836,172 +745,130 @@ TScheduleGraph[opts : OptionsPattern[]] := Block[{
  formatBytes, backendsActive};
 
 Options[TMemoryPlanGantt] = {"TopN" -> 40, "BarHeight" -> "Linear"};
-TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
-    Block[{
-        allBufs = a["Bufs"],
-        bufs,
-        topN,
-        barHeightMode,
-        packed,
-        maxDepth,
-        totalBytes,
-        peak,
-        savingsPct,
-        totalHeight,
-        omittedCount,
-        legendStatuses
-    },
-        topN = OptionValue["TopN"];
-        barHeightMode = OptionValue["BarHeight"];
-        If[ allBufs === {}, Return[Graphics[{}, ImageSize -> 320]]];
-        bufs = If[ MatchQ[topN, _Integer] && topN > 0 && Length[allBufs] > topN,
-            TakeLargestBy[allBufs, #["nbytes"] &, topN],
-            allBufs
-        ];
-        omittedCount = Length[allBufs] - Length[bufs];
-        maxDepth = Max[#["last_use_depth"] & /@ allBufs];
-        totalBytes = Total[#["nbytes"] & /@ allBufs];
-        peak = peakConcurrentLive[allBufs];
-        savingsPct = If[ peak["total_bytes"] > 0,
-            Round[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"], 0.1],
-            0
-        ];
-        {packed, totalHeight} = linearScanPack[bufs, barHeightMode];
-        If[ totalHeight === 0, totalHeight = 1];
-        legendStatuses = DeleteDuplicates[#["status"] & /@ packed];
-        Graphics[
-            {
-                b |-> Block[{
-                    y0 = b["y_range"][[1]],
-                    y1 = b["y_range"][[2]],
-                    h, inset, x0, x1
-                },
-                    h = y1 - y0;
-                    inset = 0.05 h;
-                    x0 = b["alloc_depth"];
-                    x1 = If[ b["status"] === "Preserved",
-                        maxDepth + 1,
-                        b["last_use_depth"] + 1
-                    ];
-                    {
-                        FaceForm[statusFill[b["status"]]],
-                        EdgeForm[Directive[
-                            statusEdge[b["status"]],
-                            Thickness[0.0015]
-                        ]],
-                        Tooltip[
-                            Rectangle[
-                                {x0, y0 + inset},
-                                {x1, y1 - inset},
-                                RoundingRadius -> 0.06
-                            ],
-                            Column[{
-                                Row[{"buf ", b["id"], " (",
-                                     If[b["backend"] === 1, "CPU",
-                                        If[b["backend"] === 2, "Metal", "?"]],
-                                     ")"}],
-                                Row[{"nbytes: ", formatBytes[b["nbytes"]]}],
-                                Row[{"dtype: ",  b["dtype"]}],
-                                Row[{"status: ", b["status"]}],
-                                Row[{"depth: ",  b["alloc_depth"], " .. ",
-                                                  b["last_use_depth"]}],
-                                Row[{"producer kid: ", b["producer_kid"]}],
-                                Row[{"consumer kids: ", b["consumer_kids"]}],
-                                Row[{"alias tids: ", b["alias_tids"]}]
-                            }]
+TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] := Block[{allBufs = a["Bufs"], bufs, topN, barHeightMode, packed, maxDepth, totalBytes, peak, savingsPct, totalHeight, omittedCount, legendStatuses},
+    topN = OptionValue["TopN"];
+    barHeightMode = OptionValue["BarHeight"];
+    If[allBufs === {}, Return[Graphics[{}, ImageSize -> 320]]];
+    bufs = If[ MatchQ[topN, _Integer] && topN > 0 && Length[allBufs] > topN,
+        TakeLargestBy[allBufs, #["nbytes"] &, topN],
+        allBufs
+    ];
+    omittedCount = Length[allBufs] - Length[bufs];
+    maxDepth = Max[#["last_use_depth"] & /@ allBufs];
+    totalBytes = Total[#["nbytes"] & /@ allBufs];
+    peak = peakConcurrentLive[allBufs];
+    savingsPct = If[ peak["total_bytes"] > 0,
+        Round[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"], 0.1],
+        0
+    ];
+    {packed, totalHeight} = linearScanPack[bufs, barHeightMode];
+    If[totalHeight === 0, totalHeight = 1];
+    legendStatuses = DeleteDuplicates[#["status"] & /@ packed];
+    Graphics[
+        {
+            b |-> Block[{y0 = b["y_range"][[1]], y1 = b["y_range"][[2]], h, inset, x0, x1},
+                h = y1 - y0;
+                inset = 0.05 h;
+                x0 = b["alloc_depth"];
+                x1 = If[ b["status"] === "Preserved",
+                    maxDepth + 1,
+                    b["last_use_depth"] + 1
+                ];
+                {
+                    FaceForm[statusFill[b["status"]]],
+                    EdgeForm[Directive[
+                        statusEdge[b["status"]],
+                        Thickness[0.0015]
+                    ]],
+                    Tooltip[
+                        Rectangle[
+                            {x0, y0 + inset},
+                            {x1, y1 - inset},
+                            RoundingRadius -> 0.06
                         ],
-                        If[ h > 0.05 totalHeight,
-                            Text[
-                                Style[
-                                    Column[{
-                                        Row[{"buf", b["id"],
-                                             " kid", b["producer_kid"],
-                                             " ", formatBytes[b["nbytes"]]}],
-                                        Row[{"tid:",
-                                             StringRiffle[ToString /@ b["alias_tids"], ","]}]
-                                    }, ItemSize -> Automatic, Spacings -> 0],
-                                    FontSize -> Scaled[0.013],
-                                    FontFamily -> "Source Code Pro"
-                                ],
-                                {(x0 + x1)/2, (y0 + y1)/2}
+                        Column[{
+                            Row[{"buf ", b["id"], " (", If[b["backend"] === 1, "CPU", If[b["backend"] === 2, "Metal", "?"]], ")"}],
+                            Row[{"nbytes: ", formatBytes[b["nbytes"]]}],
+                            Row[{"dtype: ", b["dtype"]}],
+                            Row[{"status: ", b["status"]}],
+                            Row[{"depth: ", b["alloc_depth"], " .. ", b["last_use_depth"]}],
+                            Row[{"producer kid: ", b["producer_kid"]}],
+                            Row[{"consumer kids: ", b["consumer_kids"]}],
+                            Row[{"alias tids: ", b["alias_tids"]}]
+                        }]
+                    ],
+                    If[ h > 0.05 totalHeight,
+                        Text[
+                            Style[
+                                Column[{
+                                    Row[{"buf", b["id"], " kid", b["producer_kid"], " ", formatBytes[b["nbytes"]]}],
+                                    Row[{"tid:", StringRiffle[ToString /@ b["alias_tids"], ","]}]
+                                }, ItemSize -> Automatic, Spacings -> 0],
+                                FontSize -> Scaled[0.013],
+                                FontFamily -> "Source Code Pro"
                             ],
-                            Sequence @@ {}
-                        ]
-                    }
-                ] /@ packed
-            },
-            Frame -> True,
-            FrameTicks -> {
-                Automatic,
-                Block[{step, label, isLinear},
-                    isLinear = barHeightMode =!= "Log";
-                    label = If[ isLinear,
-                        formatBytes,
-                        y |-> ToString[Round[y, 0.1]]
-                    ];
-                    step = totalHeight / 6.0;
-                    If[ step <= 0, step = 1];
-                    Table[{y, label[y]}, {y, 0, totalHeight, step}]
-                ]
-            },
-            FrameLabel -> {
-                "topological depth (kernel DAG)",
-                If[ barHeightMode === "Log",
-                    "stacked Log2[1+nbytes], linear-scan slot allocator",
-                    "memory (KiB), linear-scan slot allocator"]
-            },
-            Epilog -> {
-                {Dashed, Thick, StandardRed,
-                    Line[{{peak["peak_depth"], 0},
-                          {peak["peak_depth"], totalHeight}}]},
-                Text[
-                    Style[
-                        Row[{"peak ", formatBytes[peak["peak_bytes"]],
-                             " @ depth ", peak["peak_depth"]}],
-                        FontSize -> Scaled[0.014],
-                        FontFamily -> "Source Code Pro",
-                        StandardRed
-                    ],
-                    {peak["peak_depth"], totalHeight},
-                    {-1, -1}
-                ]
-            },
-            PlotLabel -> Column[{
-                Row[{"TMemoryPlan / ", backendsActive[allBufs], " - ",
-                     Length[allBufs], " bufs / ",
-                     Length[a["Kernels"]], " kernels / ",
-                     formatBytes[totalBytes], " total / depth ",
-                     If[ allBufs === {}, 0, maxDepth + 1]}],
-                Row[{"peak concurrent: ",
-                     formatBytes[peak["peak_bytes"]],
-                     " at depth ", peak["peak_depth"],
-                     " (slot-reuse headroom ", savingsPct, "%)"}],
-                If[ omittedCount > 0,
-                    With[{
-                      shownBytes = Total[#["nbytes"] & /@ bufs],
-                      shownPct = Round[100. Total[#["nbytes"] & /@ bufs] / totalBytes, 0.1]
-                    },
-                      Row[{Style["showing top " <> ToString[Length[bufs]] <> " of " <> ToString[Length[allBufs]] <> " bufs (= " <> ToString[shownPct] <> "% of bytes)", Italic, GrayLevel[0.4]]}]
-                    ],
-                    Sequence @@ {}
-                ]
-            }, Alignment -> Center],
-            ImageSize -> Large,
-            AspectRatio -> 1/2,
-            PlotRangePadding -> Scaled[0.02]
-        ] // Legended[#,
-            SwatchLegend[
-                statusFill /@ legendStatuses,
-                legendStatuses,
-                LegendMarkers -> Graphics[{
-                    EdgeForm[Directive[Black, Thickness[0.02]]],
-                    Rectangle[{0, 0}, {1, 1}, RoundingRadius -> 0.18]
-                }],
-                LegendLabel -> "buffer status",
-                LabelStyle -> {FontSize -> 11}
+                            {(x0 + x1)/2, (y0 + y1)/2}
+                        ],
+                        Sequence @@ {}
+                    ]
+                }
+            ] /@ packed
+        },
+        Frame -> True,
+        FrameTicks -> {
+            Automatic,
+            Block[{step, label, isLinear},
+                isLinear = barHeightMode =!= "Log";
+                label = If[isLinear, formatBytes, y |-> ToString[Round[y, 0.1]]];
+                step = totalHeight / 6.0;
+                If[step <= 0, step = 1];
+                Table[{y, label[y]}, {y, 0, totalHeight, step}]
             ]
-        ] &
-    ]
+        },
+        FrameLabel -> {
+            "topological depth (kernel DAG)",
+            If[barHeightMode === "Log", "stacked Log2[1+nbytes], linear-scan slot allocator", "memory (KiB), linear-scan slot allocator"]
+        },
+        Epilog -> {
+            {Dashed, Thick, StandardRed,
+                Line[{{peak["peak_depth"], 0}, {peak["peak_depth"], totalHeight}}]},
+            Text[
+                Style[
+                    Row[{"peak ", formatBytes[peak["peak_bytes"]], " @ depth ", peak["peak_depth"]}],
+                    FontSize -> Scaled[0.014],
+                    FontFamily -> "Source Code Pro",
+                    StandardRed
+                ],
+                {peak["peak_depth"], totalHeight},
+                {-1, -1}
+            ]
+        },
+        PlotLabel -> Column[{
+            Row[{"TMemoryPlan / ", backendsActive[allBufs], " - ", Length[allBufs], " bufs / ", Length[a["Kernels"]], " kernels / ", formatBytes[totalBytes], " total / depth ", If[allBufs === {}, 0, maxDepth + 1]}],
+            Row[{"peak concurrent: ", formatBytes[peak["peak_bytes"]], " at depth ", peak["peak_depth"], " (slot-reuse headroom ", savingsPct, "%)"}],
+            If[ omittedCount > 0,
+                With[{shownBytes = Total[#["nbytes"] & /@ bufs], shownPct = Round[100. Total[#["nbytes"] & /@ bufs] / totalBytes, 0.1]},
+                    Row[{Style["showing top " <> ToString[Length[bufs]] <> " of " <> ToString[Length[allBufs]] <> " bufs (= " <> ToString[shownPct] <> "% of bytes)", Italic, GrayLevel[0.4]]}]
+                ],
+                Sequence @@ {}
+            ]
+        }, Alignment -> Center],
+        ImageSize -> Large,
+        AspectRatio -> 1/2,
+        PlotRangePadding -> Scaled[0.02]
+    ] // Legended[#,
+        SwatchLegend[
+            statusFill /@ legendStatuses,
+            legendStatuses,
+            LegendMarkers -> Graphics[{
+                EdgeForm[Directive[Black, Thickness[0.02]]],
+                Rectangle[{0, 0}, {1, 1}, RoundingRadius -> 0.18]
+            }],
+            LegendLabel -> "buffer status",
+            LabelStyle -> {FontSize -> 11}
+        ]
+    ] &
+]
 
 End[];
 

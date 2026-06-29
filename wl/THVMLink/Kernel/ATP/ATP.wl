@@ -54,14 +54,14 @@ Needs["Wolfram`Parser`"];
      ATP_ProofGraph.wl   proof decoder + ProofDataset + critical-pair-lemma DAG
      ATP_Method.wl       TAtpSchedule / TAtpDescribeMethod + structure auto-tune
      ATP_Relevance.wl    TRelevantAxioms premise-selection filter *)
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
 
-GeneralUtilities`SetUsage[TATP, "TATP[{lhs$1 == rhs$1, $$}, conjecture$] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.
+SetUsage[TATP, "TATP[{lhs$1 == rhs$1, $$}, conjecture$] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.
 TATP[File[path$]] parses a Waldmeister .pr file and runs the saturator directly.
 Variables are written as x_ (Pattern[name, Blank[]]); with Witness options the result also carries Witness / Witnesses bindings.
 Options: MaxSteps, Witness, AllWitnesses, MaxDepth, MaxWitnesses."];
 
-GeneralUtilities`SetUsage[TFindProof, "TFindProof[conjecture$, axioms$] runs thvm's C equational-completion engine and returns a WL ProofObject (same head FindEquationalProof returns, with the full property interface: p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).
+SetUsage[TFindProof, "TFindProof[conjecture$, axioms$] runs thvm's C equational-completion engine and returns a WL ProofObject (same head FindEquationalProof returns, with the full property interface: p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).
 TFindProof[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory; a multi-equation theorem (an n$-element list) is proved as one conjunction off a single saturation, returning ONE ProofObject with a {\"Hypothesis\", g$} / {\"Conclusion\", g$} row pair per conjunct (FindEquationalProof parity).
 TFindProof[conjecture$, \"Theory\"] proves the conjecture (an equation, a list of equations, or an Association whose Values are taken) against the named theory's axioms.
 TFindProof[axioms$] and TFindProof[\"Theory\"] saturate with no goal, returning a ProofObject whose Theorems is None; bound these with TimeConstraint since a non-terminating axiom set never saturates.
@@ -71,69 +71,69 @@ An optional last argument picks the return type from \"ProofObject\", \"Lemmas\"
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
 Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"CommDefer\", \"CommReage\", \"CommDropDup\", \"LeafTiebreak\", \"RevfaceGroup\", \"PosGroup\", \"CubeArrival\", \"FormationFifo\", \"MeredDmgu\", \"EsetDistdir\", \"CommDropDupClassGate\", \"CorankOwnArr\", \"LeafTiebreakFacegate\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
-GeneralUtilities`SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
+SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
-GeneralUtilities`SetUsage[CounterexampleObject, "CounterexampleObject[method$, proposition$, axioms$, data$] is the equational dual of ProofObject -- the disproof artifact TFindProof[conjecture$, axioms$, \"Counterexample\"] returns when the goal is refutable, mirroring the Wolfram Function Repository's FindEquationalCounterexample result.
+SetUsage[CounterexampleObject, "CounterexampleObject[method$, proposition$, axioms$, data$] is the equational dual of ProofObject -- the disproof artifact TFindProof[conjecture$, axioms$, \"Counterexample\"] returns when the goal is refutable, mirroring the Wolfram Function Repository's FindEquationalCounterexample result.
 It renders as a summary box and supports a property interface co[prop$]: \"Method\", \"Proposition\"/\"Goal\", \"Axioms\"/\"Hypotheses\", \"Setup\"/\"Model\" (the refuting model), \"Counterexample\"/\"Witness\" (the falsifying assignment), \"NormalForms\", \"Domain\", \"FalsificationFunction\" (a nullary function returning False in the model), \"VerificationFunction\" (returns True since the axioms hold), \"Data\", \"Properties\".
 For a finite model (a ground congruence-closure quotient) \"Model\" follows the FindFiniteModels structure: a Cayley table per operator and an element per constant over {0, $$, k$-1}. For an infinite initial term algebra it carries the convergent rules, and \"NormalForms\" the two normal forms separating the goal's sides."];
 
-GeneralUtilities`SetUsage[TAtpCpDataset, "TAtpCpDataset[conjectures$, axioms$] proves each conjecture against the shared axioms with per-critical-pair feature recording on, labels the processed critical pairs by trace-DAG reachability from each proof (1 = proof-relevant, 0 = not), and returns the dataset keyed \"Features\" (an n$ by 14 matrix), \"Labels\" (a 0/1 vector), \"FeatureNames\", \"NRows\", \"NPositive\", \"NProofs\".
+SetUsage[TAtpCpDataset, "TAtpCpDataset[conjectures$, axioms$] proves each conjecture against the shared axioms with per-critical-pair feature recording on, labels the processed critical pairs by trace-DAG reachability from each proof (1 = proof-relevant, 0 = not), and returns the dataset keyed \"Features\" (an n$ by 14 matrix), \"Labels\" (a 0/1 vector), \"FeatureNames\", \"NRows\", \"NPositive\", \"NProofs\".
 TAtpCpDataset[theory$] runs every AxiomaticTheory[theory$, \"NotableTheorems\"] against the theory's axioms. Only proved runs contribute rows.
 This is the ENIGMA training-data foundation: feed \"Features\" / \"Labels\" to a classifier (e.g. TNetTrain) and push the result back with TAtpSetLearnedScorer.
 Options: Method, TimeConstraint, MaxSteps."];
 
-GeneralUtilities`SetUsage[TAtpTrainScorer, "TAtpTrainScorer[dataset$] trains a critical-pair selection model on a TAtpCpDataset result (or any Association keyed \"Features\" and \"Labels\") with thvm's own TNetTrain and returns <|\"Model\", \"TrainAUC\", \"NRows\", \"NPositive\", \"Hidden\"|>. The \"Model\" is exactly the Association TAtpSetLearnedScorer consumes (Mean / InvStd standardization folded in). A two-class softmax network is trained and its head collapsed to the single proof-relevance logit the engine ranks by.
+SetUsage[TAtpTrainScorer, "TAtpTrainScorer[dataset$] trains a critical-pair selection model on a TAtpCpDataset result (or any Association keyed \"Features\" and \"Labels\") with thvm's own TNetTrain and returns <|\"Model\", \"TrainAUC\", \"NRows\", \"NPositive\", \"Hidden\"|>. The \"Model\" is exactly the Association TAtpSetLearnedScorer consumes (Mean / InvStd standardization folded in). A two-class softmax network is trained and its head collapsed to the single proof-relevance logit the engine ranks by.
 TAtpTrainScorer[theory$] and TAtpTrainScorer[conjectures$, axioms$] prep the dataset via TAtpCpDataset and train in one call (the dataset options route to the proof phase, the rest to training); the result also reports \"NProofs\".
 Pair with TAtpSetLearnedScorer to close the ENIGMA loop (prove, dataset, train, push, reprove with Method \"ENIGMA\").
 Options: \"Hidden\" (0 = linear/logistic, >0 = one-hidden-layer ReLU MLP, default 16, max 64), MaxTrainingRounds, \"LearningRate\", \"Method\" (the optimizer)."];
 
-GeneralUtilities`SetUsage[TAtpSetLearnedScorer, "TAtpSetLearnedScorer[model$] pushes a trained critical-pair selection model into the C ATP engine; proofs run with \"CriticalPairWeight\" set to \"Learned\" then use it instead of the baked-in logistic regression. Returns True on success, False on a malformed model.
+SetUsage[TAtpSetLearnedScorer, "TAtpSetLearnedScorer[model$] pushes a trained critical-pair selection model into the C ATP engine; proofs run with \"CriticalPairWeight\" set to \"Learned\" then use it instead of the baked-in logistic regression. Returns True on success, False on a malformed model.
 TAtpSetLearnedScorer[Clear] (or None) drops the model and reverts to the baked-in scorer.
 model$ is an Association keyed \"Kind\" (\"Linear\" or \"MLP\"), \"Mean\", \"InvStd\", and the weights (\"W\"/\"B\" for linear, \"W1\"/\"B1\"/\"W2\"/\"B2\" for a one-hidden-layer ReLU network, hidden width at most 64). Features are standardized by Mean and InvStd before the forward pass (default identity); the model outputs a raw logit, higher = selected sooner."];
 
-GeneralUtilities`SetUsage[TAtpCpGraph, "TAtpCpGraph[lhs$ == rhs$] encodes one equation or critical pair (also accepts Inactive[Equal][lhs$, rhs$] and a HoldForm of either) into the anonymised typed hypergraph the ENIGMA Tier 2 graph neural network message-passes over. Returns an Association keyed \"NodeTypes\", \"NodeFeatures\" (an NNodes by 6 matrix), \"Edges\" (a list of {src$, dst$, type$}), \"NNodes\", \"NEdges\", \"NodeLabels\", \"Symbols\".
+SetUsage[TAtpCpGraph, "TAtpCpGraph[lhs$ == rhs$] encodes one equation or critical pair (also accepts Inactive[Equal][lhs$, rhs$] and a HoldForm of either) into the anonymised typed hypergraph the ENIGMA Tier 2 graph neural network message-passes over. Returns an Association keyed \"NodeTypes\", \"NodeFeatures\" (an NNodes by 6 matrix), \"Edges\" (a list of {src$, dst$, type$}), \"NNodes\", \"NEdges\", \"NodeLabels\", \"Symbols\".
 Node 0 is the critical-pair super-node; the rest are term occurrences (preorder walk of lhs then rhs), symbol nodes (one per distinct operator/constant), and var nodes (one per distinct variable). Node types code 0 CPSuper, 1 Term, 2 Symbol, 3 Var; edge types code the term-to-symbol, term-to-child, and cp-to-side-root links.
 The six node-feature columns are purely structural (is_term, is_symbol, is_var, arity, occurrence_count, is_cpsuper) and never encode the concrete label/id/value, so equations equal up to a consistent symbol/variable renaming produce bit-identical graphs. \"NodeLabels\" and \"Symbols\" keep the concrete per-node identity so TAtpCpGraphEquation reconstructs the original equation. lhs and rhs share one encoder state (a shared symbol or variable is a single deduped node).
 This is the per-equation encoder TAtpGraphDataset emits; pair it with a GNN trained on the dataset."];
 
-GeneralUtilities`SetUsage[TAtpCpGraphEquation, "TAtpCpGraphEquation[graph$] reconstructs the original equation from a TAtpCpGraph result, returning Inactive[Equal][lhs$, rhs$]. It is the exact inverse of TAtpCpGraph, reading the per-node \"Symbols\" identities and the \"Edges\" term structure (each term node's head, ordered children, and the two side roots).
+SetUsage[TAtpCpGraphEquation, "TAtpCpGraphEquation[graph$] reconstructs the original equation from a TAtpCpGraph result, returning Inactive[Equal][lhs$, rhs$]. It is the exact inverse of TAtpCpGraph, reading the per-node \"Symbols\" identities and the \"Edges\" term structure (each term node's head, ordered children, and the two side roots).
 Returns $Failed if the graph carries no \"Symbols\" (e.g. a graph decoded without the live encoder state)."];
 
-GeneralUtilities`SetUsage[TAtpGraphDataset, "TAtpGraphDataset[conjectures$, axioms$] proves each conjecture against the shared axioms and turns the verified ProofObject's lemmas into a labelled graph dataset <|\"Graphs\", \"Labels\", \"NPos\", \"NNeg\", \"NProofs\"|>, where each graph is a TAtpCpGraph Association, label 1 marks a proof-essential lemma and 0 a saturated-but-unused rule.
+SetUsage[TAtpGraphDataset, "TAtpGraphDataset[conjectures$, axioms$] proves each conjecture against the shared axioms and turns the verified ProofObject's lemmas into a labelled graph dataset <|\"Graphs\", \"Labels\", \"NPos\", \"NNeg\", \"NProofs\"|>, where each graph is a TAtpCpGraph Association, label 1 marks a proof-essential lemma and 0 a saturated-but-unused rule.
 TAtpGraphDataset[theory$] runs every AxiomaticTheory[theory$, \"NotableTheorems\"] against the theory's axioms.
 TAtpGraphDataset[proofObject$] (or a list of them) yields the proof-essential positives only; TAtpGraphDataset[proofObject$, lemmas$] adds negatives from a supplied saturated set (TFindProof[$$, \"Lemmas\"]).
 Positives are the CriticalPairLemma / SubstitutionLemma equations of the proof chain; negatives are the saturated rule set minus any rule structurally equal to a positive (a canonical-key match that anonymises variables and treats each equation as an unordered pair). Only proved runs contribute graphs.
 Unlike TAtpCpDataset's per-critical-pair rows, this sources clean positives straight from the verified proof object; feed \"Graphs\" / \"Labels\" to a GNN.
 Options: Method, TimeConstraint, MaxSteps."];
 
-GeneralUtilities`SetUsage[TAtpTrainGnn, "TAtpTrainGnn[dataset$] trains a graph convolutional network (GCN) on a TAtpGraphDataset (or any <|\"Graphs\", \"Labels\"|>) in thvm's own tensor stack and returns <|\"Model\", \"TrainAUC\", \"LossStart\", \"LossEnd\", \"NPos\", \"NNeg\"|>, where \"Model\" is the \"GNN\"-kind weight Association the scorers consume.
+SetUsage[TAtpTrainGnn, "TAtpTrainGnn[dataset$] trains a graph convolutional network (GCN) on a TAtpGraphDataset (or any <|\"Graphs\", \"Labels\"|>) in thvm's own tensor stack and returns <|\"Model\", \"TrainAUC\", \"LossStart\", \"LossEnd\", \"NPos\", \"NNeg\"|>, where \"Model\" is the \"GNN\"-kind weight Association the scorers consume.
 The forward batches every graph to a common padded node count, runs \"Rounds\" rounds of row-normalised-adjacency message passing, masked-mean-pools to a graph embedding, and reads out a two-class proof-relevance head trained with categorical cross-entropy and Adam. The reported \"TrainAUC\" is the Mann-Whitney rank AUC on the training graphs.
 TAtpTrainGnn[theory$] and TAtpTrainGnn[conjectures$, axioms$] prep the dataset via TAtpGraphDataset and train in one call.
 This is the Tier 2 deliverable, a symbol-independent network learning proof relevance from clause structure, complementing the Tier 1 hand-feature scorer.
 Options: \"Hidden\", \"Rounds\", MaxTrainingRounds, \"LearningRate\"."];
 
-GeneralUtilities`SetUsage[TAtpGnnScore, "TAtpGnnScore[model$, dataset$] scores a graph dataset (TAtpGraphDataset output, or any <|\"Graphs\"|>) with a trained GNN model$ (the \"Model\" from TAtpTrainGnn), returning the per-graph proof-relevance score (the readout's logit_pos minus logit_neg) as a list, one entry per graph.
+SetUsage[TAtpGnnScore, "TAtpGnnScore[model$, dataset$] scores a graph dataset (TAtpGraphDataset output, or any <|\"Graphs\"|>) with a trained GNN model$ (the \"Model\" from TAtpTrainGnn), returning the per-graph proof-relevance score (the readout's logit_pos minus logit_neg) as a list, one entry per graph.
 It runs the same forward as training with the model's weights held constant. The GCN is node-count agnostic, so a model trained on one corpus scores graphs of any size; this is what held-out evaluation and the engine's critical-pair re-rank use."];
 
-GeneralUtilities`SetUsage[TFindProofReranked, "TFindProofReranked[conjecture$, axioms$, model$] proves the conjecture while re-ranking the critical-pair queue with a trained GNN model$ (the \"Model\" from TAtpTrainGnn): it drives the C saturation in \"RerankPeriod\"-step chunks and, between chunks, pulls the live queued critical pairs, scores each with TAtpGnnScore, and pushes the priorities back into the engine's selection heap. Returns the status string (\"PROVED\", \"TIMEOUT\", \"QUEUE_EMPTY\", $$).
+SetUsage[TFindProofReranked, "TFindProofReranked[conjecture$, axioms$, model$] proves the conjecture while re-ranking the critical-pair queue with a trained GNN model$ (the \"Model\" from TAtpTrainGnn): it drives the C saturation in \"RerankPeriod\"-step chunks and, between chunks, pulls the live queued critical pairs, scores each with TAtpGnnScore, and pushes the priorities back into the engine's selection heap. Returns the status string (\"PROVED\", \"TIMEOUT\", \"QUEUE_EMPTY\", $$).
 This is the ENIGMA inference loop driven from WL over the persistent-handle bridge; completeness is preserved (re-ranking only permutes selection order, the periodic FIFO pick still fires).
 Options: \"RerankPeriod\", MaxSteps, \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"QueueCap\"."];
 
-GeneralUtilities`SetUsage[TAtpSetGnnScorer, "TAtpSetGnnScorer[model$] pushes a trained GCN model (the \"Model\" Association from TAtpTrainGnn) into the C ATP engine, so a persistent proof handle with a non-zero re-rank period (TFindProofGnnReranked) re-ranks the critical-pair queue by running the GCN forward on thvm's own tensor runtime in C, with no WL round-trip in the proof loop.
+SetUsage[TAtpSetGnnScorer, "TAtpSetGnnScorer[model$] pushes a trained GCN model (the \"Model\" Association from TAtpTrainGnn) into the C ATP engine, so a persistent proof handle with a non-zero re-rank period (TFindProofGnnReranked) re-ranks the critical-pair queue by running the GCN forward on thvm's own tensor runtime in C, with no WL round-trip in the proof loop.
 TAtpSetGnnScorer[path$] loads a pretrained GCN from a .safetensors file (TSafeTensorLoad, lazy mmap-backed) and pushes it.
 TAtpSetGnnScorer[Clear] (or None) drops the model.
 Returns True on success, False on a malformed model."];
 
-GeneralUtilities`SetUsage[TAtpSaveGnnScorer, "TAtpSaveGnnScorer[model$, path$] saves a trained GCN model (the \"Model\" Association from TAtpTrainGnn) to path$ as a .safetensors file (TSafeTensorSave): each weight array becomes one named tensor and the scalar config (Rounds / Hidden / NMax) rides in the file's __metadata__. TAtpSetGnnScorer[path$] reloads it. Returns path$.
+SetUsage[TAtpSaveGnnScorer, "TAtpSaveGnnScorer[model$, path$] saves a trained GCN model (the \"Model\" Association from TAtpTrainGnn) to path$ as a .safetensors file (TSafeTensorSave): each weight array becomes one named tensor and the scalar config (Rounds / Hidden / NMax) rides in the file's __metadata__. TAtpSetGnnScorer[path$] reloads it. Returns path$.
 This is how a pretrained GCN ships as a paclet asset."];
 
-GeneralUtilities`SetUsage[TAtpGnnScorerAsset, "TAtpGnnScorerAsset[] returns the bundled-asset path of the pretrained GCN scorer (wl/THVMLink/Assets/gcn_atp.safetensors); TAtpSetGnnScorer[TAtpGnnScorerAsset[]] loads it.
+SetUsage[TAtpGnnScorerAsset, "TAtpGnnScorerAsset[] returns the bundled-asset path of the pretrained GCN scorer (wl/THVMLink/Assets/gcn_atp.safetensors); TAtpSetGnnScorer[TAtpGnnScorerAsset[]] loads it.
 Returns Missing[\"NotBundled\"] if the asset file is absent."];
 
-GeneralUtilities`SetUsage[TAtpLoadGnnScorer, "TAtpLoadGnnScorer[path$] loads a GCN scorer .safetensors file (saved by TAtpSaveGnnScorer) and returns the \"Model\" Association (the W1 / Ws / Bh / Wout / Bout weights plus Rounds / Hidden / NMax).
+SetUsage[TAtpLoadGnnScorer, "TAtpLoadGnnScorer[path$] loads a GCN scorer .safetensors file (saved by TAtpSaveGnnScorer) and returns the \"Model\" Association (the W1 / Ws / Bh / Wout / Bout weights plus Rounds / Hidden / NMax).
 TAtpSetGnnScorer[path$] is shorthand for TAtpSetGnnScorer[TAtpLoadGnnScorer[path$]]."];
 
-GeneralUtilities`SetUsage[TFindProofGnnReranked, "TFindProofGnnReranked[conjecture$, axioms$, model$] proves the conjecture with the trained GCN model$ (the \"Model\" from TAtpTrainGnn) guiding critical-pair selection entirely in C: it pushes the GCN weights into the engine (TAtpSetGnnScorer), then drives one saturation in which the engine re-ranks the live queue every \"RerankPeriod\" selections on thvm's own tensor runtime. Returns the status string (\"PROVED\", \"TIMEOUT\", \"QUEUE_EMPTY\", $$).
+SetUsage[TFindProofGnnReranked, "TFindProofGnnReranked[conjecture$, axioms$, model$] proves the conjecture with the trained GCN model$ (the \"Model\" from TAtpTrainGnn) guiding critical-pair selection entirely in C: it pushes the GCN weights into the engine (TAtpSetGnnScorer), then drives one saturation in which the engine re-ranks the live queue every \"RerankPeriod\" selections on thvm's own tensor runtime. Returns the status string (\"PROVED\", \"TIMEOUT\", \"QUEUE_EMPTY\", $$).
 Unlike TFindProofReranked there is no WL round-trip in the proof loop, so it is far faster; completeness is preserved (re-ranking only permutes selection order, the periodic FIFO pick still fires).
 Options: \"RerankPeriod\", MaxSteps, \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\"."];
 
@@ -200,8 +200,7 @@ Scan[
    so a high cap costs no memory until it is actually reached.  The cap is
    memoized at the engine's first proof call, so set it before then; users can
    still override THVM_ATP_TRACE_MAX. *)
-If[ Environment["THVM_ATP_TRACE_MAX"] === $Failed ||
-    Environment["THVM_ATP_TRACE_MAX"] === None,
+If[ Environment["THVM_ATP_TRACE_MAX"] === $Failed || Environment["THVM_ATP_TRACE_MAX"] === None,
     SetEnvironment["THVM_ATP_TRACE_MAX" -> "4194304"]];
 
 (* `load` is the LibraryFunctionLoad helper defined in
@@ -541,10 +540,7 @@ TAtpSetLearnedScorer[model_] := $atpSetLearnedScorerFn[
    matrices, so Flatten gives the row-major order the C side reads.  Clear
    / None / {} -> {} (clears the model). *)
 serializeGnnModel[Clear | None | {}] := {}
-serializeGnnModel[m_Association] := Block[{
-    rR = Lookup[m, "Rounds", Length[m["W1"]]],
-    hH = Lookup[m, "Hidden", Length[m["Bh"][[1]]]]
-},
+serializeGnnModel[m_Association] := Block[{rR = Lookup[m, "Rounds", Length[m["W1"]]], hH = Lookup[m, "Hidden", Length[m["Bh"][[1]]]]},
     Join[
         {N[rR], N[hH]},
         Flatten @ Table[
@@ -599,19 +595,17 @@ TAtpLoadGnnScorer[path_String] := Module[{meta, tens, rR},
     If[ ! FileExistsQ[path], Return[$Failed]];
     meta = TSafeTensorLoadMetadata[path];
     tens = TSafeTensorLoad[path];
-    rR = ToExpression @ Lookup[meta, "Rounds",
-        ToString @ Length @ Select[Keys[tens], StringStartsQ["W1_"]]];
+    rR = ToExpression @ Lookup[meta, "Rounds", ToString @ Length @ Select[Keys[tens], StringStartsQ["W1_"]]];
     <|
         "Kind" -> "GNN",
-        "W1"   -> Table[Normal @ tens["W1_" <> ToString[r - 1]], {r, rR}],
-        "Ws"   -> Table[Normal @ tens["Ws_" <> ToString[r - 1]], {r, rR}],
-        "Bh"   -> Table[Normal @ tens["Bh_" <> ToString[r - 1]], {r, rR}],
+        "W1" -> Table[Normal @ tens["W1_" <> ToString[r - 1]], {r, rR}],
+        "Ws" -> Table[Normal @ tens["Ws_" <> ToString[r - 1]], {r, rR}],
+        "Bh" -> Table[Normal @ tens["Bh_" <> ToString[r - 1]], {r, rR}],
         "Wout" -> Normal @ tens["Wout"],
         "Bout" -> Normal @ tens["Bout"],
         "Rounds" -> rR,
-        "Hidden" -> ToExpression @ Lookup[meta, "Hidden",
-            ToString @ Length @ First @ Normal @ tens["Bh_0"]],
-        "NMax"   -> ToExpression @ Lookup[meta, "NMax", "0"]
+        "Hidden" -> ToExpression @ Lookup[meta, "Hidden", ToString @ Length @ First @ Normal @ tens["Bh_0"]],
+        "NMax" -> ToExpression @ Lookup[meta, "NMax", "0"]
     |>
 ]
 
@@ -649,8 +643,7 @@ $AtpFeatureNames = {"size_sum", "max_depth", "n_distinct_vars",
     "age", "top_symbol_l", "top_symbol_r", "shares_goal_sub",
     "orientable", "unif_measure"};
 
-Options[TAtpCpDataset] = {Method -> {"Completion"}, TimeConstraint -> 30,
-    MaxSteps -> Automatic};
+Options[TAtpCpDataset] = {Method -> {"Completion"}, TimeConstraint -> 30, MaxSteps -> Automatic};
 
 (* Run `proveFn[]` for its dataset side-effect with the recorder pointed
    at a fresh temp file, then parse the accumulated TSV into the result
@@ -671,9 +664,17 @@ atpDatasetCollect[proveFn_, nProofs_] := Module[{
     dataRows = Select[raw,
         ListQ[#] && Length[#] === 15 && NumberQ[First[#]] &];
     If[ dataRows === {},
-        Return[<|"Features" -> {}, "Labels" -> {},
-            "FeatureNames" -> $AtpFeatureNames, "NRows" -> 0,
-            "NPositive" -> 0, "NProofs" -> nProofs|>]];
+        Return[
+            <|
+                "Features" -> {},
+                "Labels" -> {},
+                "FeatureNames" -> $AtpFeatureNames,
+                "NRows" -> 0,
+                "NPositive" -> 0,
+                "NProofs" -> nProofs
+            |>
+        ]
+    ];
     labels = Round[dataRows[[All, 1]]];
     <|
         "Features" -> dataRows[[All, 2 ;; 15]],
@@ -696,10 +697,7 @@ TAtpCpDataset[theory_String, opts : OptionsPattern[]] := Module[{
         Length[thms]]
 ]
 
-TAtpCpDataset[conjectures_List, axioms_List, opts : OptionsPattern[]] := Module[{
-    m = OptionValue[Method],
-    tc = OptionValue[TimeConstraint]
-},
+TAtpCpDataset[conjectures_List, axioms_List, opts : OptionsPattern[]] := Module[{m = OptionValue[Method], tc = OptionValue[TimeConstraint]},
     atpDatasetCollect[
         Function[Scan[
             TFindProof[#, axioms, "Status", Method -> m, TimeConstraint -> tc] &,
@@ -727,8 +725,7 @@ atpScorerAuc[scores_List, labels_List] := Module[{nP, nN, ranks},
     N[(Total[Pick[ranks, labels, 1]] - nP (nP + 1)/2) / (nP nN)]
 ]
 
-Options[TAtpTrainScorer] = {"Hidden" -> 16, MaxTrainingRounds -> 300,
-    "LearningRate" -> 0.01, "Method" -> "Adam"};
+Options[TAtpTrainScorer] = {"Hidden" -> 16, MaxTrainingRounds -> 300, "LearningRate" -> 0.01, "Method" -> "Adam"};
 
 TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] := Module[{
     x = N[dataset["Features"]], y = dataset["Labels"], mean, sd, invStd,
@@ -736,10 +733,10 @@ TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] := Module[{
     w1, b1, w2, b2, wMat, bVec, model, scores
 },
     If[ Length[x] === 0, Return[$Failed]];
-    mean   = Mean[x];
-    sd     = StandardDeviation[x];
+    mean = Mean[x];
+    sd = StandardDeviation[x];
     invStd = MapThread[If[ # > 0., 1./#, 1.] &, {sd}] // Quiet;
-    z      = (# - mean) * invStd & /@ x;
+    z = (# - mean) * invStd & /@ x;
     yOneHot = (If[ # == 1, {0., 1.}, {1., 0.}] &) /@ y;
     net = If[ h > 0,
         NetChain[{LinearLayer[h], Ramp, LinearLayer[2], SoftmaxLayer[]},
@@ -768,13 +765,24 @@ TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] := Module[{
             b2 = SelectFirst[vecs, Length[#] === 2 &];
             (* Collapse the 2-class head to a single proof-relevance logit:
                score = z1 - z0 (the log-odds). *)
-            model = <|"Kind" -> "MLP", "Mean" -> mean, "InvStd" -> invStd,
-                "W1" -> w1, "B1" -> b1,
-                "W2" -> (w2[[2]] - w2[[1]]), "B2" -> (b2[[2]] - b2[[1]])|>,
+            model = <|
+                "Kind" -> "MLP",
+                "Mean" -> mean,
+                "InvStd" -> invStd,
+                "W1" -> w1,
+                "B1" -> b1,
+                "W2" -> (w2[[2]] - w2[[1]]),
+                "B2" -> (b2[[2]] - b2[[1]])
+            |>,
             wMat = orientW[First[mats], 14];
             bVec = SelectFirst[vecs, Length[#] === 2 &];
-            model = <|"Kind" -> "Linear", "Mean" -> mean, "InvStd" -> invStd,
-                "W" -> (wMat[[2]] - wMat[[1]]), "B" -> (bVec[[2]] - bVec[[1]])|>
+            model = <|
+                "Kind" -> "Linear",
+                "Mean" -> mean,
+                "InvStd" -> invStd,
+                "W" -> (wMat[[2]] - wMat[[1]]),
+                "B" -> (bVec[[2]] - bVec[[1]])
+            |>
         ]
     ];
     scores = atpScorerLogit[model, #] & /@ z;
@@ -835,8 +843,7 @@ $termTagFn := $termTagFn = WolframInstitute`THVMLink`Private`$termTagFn
 $termExtFn := $termExtFn = WolframInstitute`THVMLink`Private`$termExtFn
 $termValFn := $termValFn = WolframInstitute`THVMLink`Private`$termValFn
 $heapReadFn := $heapReadFn = WolframInstitute`THVMLink`Private`$heapReadFn
-$atpHeapRecycleFn := $atpHeapRecycleFn =
-    WolframInstitute`THVMLink`Private`$atpHeapRecycleFn
+$atpHeapRecycleFn := $atpHeapRecycleFn = WolframInstitute`THVMLink`Private`$atpHeapRecycleFn
 
 (* === WL-expression to Term encoder ================================ *)
 
@@ -854,22 +861,16 @@ $atpHeapRecycleFn := $atpHeapRecycleFn =
 
 (* Look up an existing var or extend the var table; return
    {var_id, state'}. *)
-ensureVar[varName_String, state_Association] := Block[{
-    vars = state["var"]
-},
+ensureVar[varName_String, state_Association] := Block[{vars = state["var"]},
     If[ KeyExistsQ[vars, varName],
         {vars[varName], state},
-        {Length[vars],
-         Append[state, "var" -> Append[vars, varName -> Length[vars]]]}
+        {Length[vars], Append[state, "var" -> Append[vars, varName -> Length[vars]]]}
     ]
 ]
 
 (* Look up an existing symbol or assign a fresh label; return
    {label, state'}. *)
-ensureSym[sym_String, state_Association] := Block[{
-    syms = state["sym"],
-    nextLab = state["next_lab"]
-},
+ensureSym[sym_String, state_Association] := Block[{syms = state["sym"], nextLab = state["next_lab"]},
     If[ KeyExistsQ[syms, sym],
         {syms[sym], state},
         {
@@ -884,22 +885,14 @@ ensureSym[sym_String, state_Association] := Block[{
     ]
 ]
 
-encodeAtpTerm[Verbatim[Pattern][name_Symbol, Blank[]], state_Association] := Block[{
-    varName = SymbolName[Unevaluated[name]],
-    varId, st
-},
+encodeAtpTerm[Verbatim[Pattern][name_Symbol, Blank[]], state_Association] := Block[{varName = SymbolName[Unevaluated[name]], varId, st},
     {varId, st} = ensureVar[varName, state];
-    {$termNewFn[0, 22 (* TAG_FVR *), varId, 0],
-     atpKeepVarObj[st, varId, Hold[name]]}
+    {$termNewFn[0, 22 (* TAG_FVR *), varId, 0], atpKeepVarObj[st, varId, Hold[name]]}
 ]
 
-encodeAtpTerm[s_Symbol, state_Association] := Block[{
-    sym = ToString[Unevaluated[s]],
-    lab, st
-},
+encodeAtpTerm[s_Symbol, state_Association] := Block[{sym = ToString[Unevaluated[s]], lab, st},
     {lab, st} = ensureSym[sym, state];
-    {$termNewCtrFn[lab, {}],
-     atpKeepSymObj[st, lab, Hold[s]]}
+    {$termNewCtrFn[lab, {}], atpKeepSymObj[st, lab, Hold[s]]}
 ]
 
 (* A numeric literal (e.g. the `1` in OverTilde[1], the identity-
@@ -907,10 +900,7 @@ encodeAtpTerm[s_Symbol, state_Association] := Block[{
    0-arity constant: encode it by value.  Without this rule the
    general clause below folds over List @@ n -- a non-list for an
    atom -- and the encoder diverges. *)
-encodeAtpTerm[n:(_Integer | _Real | _Rational), state_Association] := Block[{
-    sym = ToString[n, InputForm],
-    lab, st
-},
+encodeAtpTerm[n : (_Integer | _Real | _Rational), state_Association] := Block[{sym = ToString[n, InputForm], lab, st},
     {lab, st} = ensureSym[sym, state];
     {$termNewCtrFn[lab, {}], st}
 ]
@@ -924,29 +914,21 @@ encodeAtpTerm[n:(_Integer | _Real | _Rational), state_Association] := Block[{
    to the same label.  Without this rule the general clause below
    folds over List @@ "a" -- a non-list for an atom -- and the
    encoder diverges. *)
-encodeAtpTerm[s_String, state_Association] := Block[{
-    lab, st
-},
+encodeAtpTerm[s_String, state_Association] := Block[{lab, st},
     {lab, st} = ensureSym[s, state];
     {$termNewCtrFn[lab, {}], st}
 ]
 
 (* Fold step that threads the encoder state through a list of
    children: accumulator is {encoded_terms_so_far, state}. *)
-encodeChildStep[{terms_, state_}, child_] := Block[{
-    enc = encodeAtpTerm[child, state]
-},
+encodeChildStep[{terms_, state_}, child_] := Block[{enc = encodeAtpTerm[child, state]},
     {Append[terms, enc[[1]]], enc[[2]]}
 ]
 
-encodeAtpTerm[expr_, state_Association] := Block[{
-    sym = ToString[Head[expr]],
-    lab, st, childEncs
-},
+encodeAtpTerm[expr_, state_Association] := Block[{sym = ToString[Head[expr]], lab, st, childEncs},
     {lab, st} = ensureSym[sym, state];
     st = atpKeepSymObj[st, lab, Extract[expr, 0, Hold]];
-    {childEncs, st} =
-        Fold[encodeChildStep, {{}, st}, List @@ expr];
+    {childEncs, st} = Fold[encodeChildStep, {{}, st}, List @@ expr];
     {$termNewCtrFn[lab, childEncs], st}
 ]
 
@@ -1019,9 +1001,9 @@ atpCpGraphDecode[raw_List] := Module[{
     nodeFeat = If[ nN > 0,
         Partition[raw[[off + 1 ;; off + nN*fd]], fd], {}];
     off += nN*fd;
-    eSrc  = Round[raw[[off + 1 ;; off + nE]]];   off += nE;
-    eDst  = Round[raw[[off + 1 ;; off + nE]]];   off += nE;
-    eType = Round[raw[[off + 1 ;; off + nE]]];   off += nE;
+    eSrc = Round[raw[[off + 1 ;; off + nE]]]; off += nE;
+    eDst = Round[raw[[off + 1 ;; off + nE]]]; off += nE;
+    eType = Round[raw[[off + 1 ;; off + nE]]]; off += nE;
     nLabel = If[ Length[raw] >= off + nN, Round[raw[[off + 1 ;; off + nN]]], ConstantArray[0, nN]];
     <|
         "NodeTypes" -> nodeTypes,
@@ -1040,9 +1022,7 @@ atpCpGraphDecode[raw_List] := Module[{
    resolve each SYMBOL / VAR node's raw label to its concrete name and
    attach the per-node "Symbols" list -- the un-anonymised identity that
    makes TAtpCpGraphEquation an exact inverse. *)
-atpCpGraphFromSides[{lhsHC_HoldComplete, rhsHC_HoldComplete}] := Module[{
-    st = encodeAtpTermInit[], lr, rr, lt, rt, fin, symInv, varInv, g
-},
+atpCpGraphFromSides[{lhsHC_HoldComplete, rhsHC_HoldComplete}] := Module[{st = encodeAtpTermInit[], lr, rr, lt, rt, fin, symInv, varInv, g},
     lr = encodeAtpTerm[lhsHC[[1]], st];
     rr = encodeAtpTerm[rhsHC[[1]], lr[[2]]];
     lt = lr[[1]];
@@ -1074,8 +1054,8 @@ TAtpCpGraphEquation[graph_Association] := Module[{
     symOf, childOf, rootSide, rebuild
 },
     If[ MissingQ[syms] || syms === {}, Return[$Failed]];
-    symOf[t_]    := SelectFirst[edges, MatchQ[#, {t, _, 0}] &][[2]];
-    childOf[t_]  := Cases[edges, {t, c_, 1} :> c];
+    symOf[t_] := SelectFirst[edges, MatchQ[#, {t, _, 0}] &][[2]];
+    childOf[t_] := Cases[edges, {t, c_, 1} :> c];
     rootSide[e_] := SelectFirst[edges, MatchQ[#, {0, _, e}] &][[2]];
     rebuild[t_] := With[{s = symOf[t]},
         With[{name = syms[[s + 1]], kids = rebuild /@ childOf[t]},
@@ -1114,7 +1094,7 @@ atpCanonRec[Verbatim[Pattern][name_Symbol, Blank[]], st_] :=
 atpCanonRec[Verbatim[Slot][k_], st_] := atpCanonVar["s$" <> ToString[k], st]
 atpCanonRec[Verbatim[Blank][], st_] := atpCanonVar["b$", st]
 atpCanonRec[s_Symbol, st_] := {$atpCanonConst[ToString[Unevaluated[s]]], st}
-atpCanonRec[n:(_Integer | _Real | _Rational), st_] :=
+atpCanonRec[n : (_Integer | _Real | _Rational), st_] :=
     {$atpCanonConst[ToString[n, InputForm]], st}
 atpCanonRec[expr_, st_] := Module[{st2, childCanon},
     {childCanon, st2} = Fold[atpCanonStep, {{}, st}, List @@ expr];
@@ -1206,8 +1186,7 @@ atpEqCanonKeyOf[{lhsHC_HoldComplete, rhsHC_HoldComplete}] := Module[{lr, rr},
 ]
 atpEqCanonKeyOf[_] := $Failed
 
-Options[TAtpGraphDataset] = {Method -> {"Completion"}, TimeConstraint -> 30,
-    MaxSteps -> Automatic};
+Options[TAtpGraphDataset] = {Method -> {"Completion"}, TimeConstraint -> 30, MaxSteps -> Automatic};
 
 (* Prove `conj` against `axioms`, collect its labelled graph rows.
    Returns {rows, proved} where proved is 1 when the run yielded a
@@ -1223,9 +1202,7 @@ atpGraphRowsForProof[conj_, axioms_, m_, tc_] := Module[{p, lemmas},
 
 (* Turn a list of {heldSides, label} rows into the dataset Association,
    encoding each kept equation to a graph via the C extractor. *)
-atpGraphDatasetFromRows[rows_, nProofs_] := Module[{
-    graphs, labels, nPos
-},
+atpGraphDatasetFromRows[rows_, nProofs_] := Module[{graphs, labels, nPos},
     graphs = atpCpGraphFromSides[#[[1]]] & /@ rows;
     labels = #[[2]] & /@ rows;
     nPos = Total[labels];
@@ -1253,17 +1230,12 @@ TAtpGraphDataset[po_ProofObject, sat_List] :=
 TAtpGraphDataset[pos : {__ProofObject}] :=
     atpGraphDatasetFromRows[Catenate[atpGraphRows[#, {}] & /@ pos], Length[pos]]
 
-TAtpGraphDataset[conjectures_List, axioms_List, opts : OptionsPattern[]] :=
-    Module[{
-        m = OptionValue[Method],
-        tc = OptionValue[TimeConstraint],
-        results, rows, nProofs
-    },
-        results = (atpGraphRowsForProof[#, axioms, m, tc] & /@ conjectures);
-        rows = Catenate[First /@ results];
-        nProofs = Total[Last /@ results];
-        atpGraphDatasetFromRows[rows, nProofs]
-    ]
+TAtpGraphDataset[conjectures_List, axioms_List, opts : OptionsPattern[]] := Module[{m = OptionValue[Method], tc = OptionValue[TimeConstraint], results, rows, nProofs},
+    results = (atpGraphRowsForProof[#, axioms, m, tc] & /@ conjectures);
+    rows = Catenate[First /@ results];
+    nProofs = Total[Last /@ results];
+    atpGraphDatasetFromRows[rows, nProofs]
+]
 
 TAtpGraphDataset[theory_String, opts : OptionsPattern[]] := Module[{
     thms = AxiomaticTheory[theory, "NotableTheorems"],
@@ -1345,9 +1317,14 @@ atpGnnTensors[dataset_Association, nCap_] := Module[{
     nNodesArr = N[eff];
     yArr = (If[ # == 1, {0., 1.}, {1., 0.}] &) /@ labels;
     <|
-        "X" -> xArr, "A" -> aArr, "Mask" -> maskArr,
-        "NNodes" -> nNodesArr, "Y" -> yArr,
-        "N" -> n, "B" -> b, "F" -> f
+        "X" -> xArr,
+        "A" -> aArr,
+        "Mask" -> maskArr,
+        "NNodes" -> nNodesArr,
+        "Y" -> yArr,
+        "N" -> n,
+        "B" -> b,
+        "F" -> f
     |>
 ]
 
@@ -1370,7 +1347,7 @@ atpGnnForwardLogits[xT_, aT_, maskRowT_, nNodesT_,
             lastDim = hH,
             {r, rR}];
         pooled3 = atpBatchMatMul[maskRowT, h, b, 1, n, hH];
-        pooled  = ArrayReshape[
+        pooled = ArrayReshape[
             pooled3 * TUOpRecip[TUOpExpand[nNodesT, {b, 1, hH}]],
             {b, hH}];
         pooled . wout + TUOpExpand[TUOpReshape[bout, {1, 2}], {b, 2}]
@@ -1380,9 +1357,14 @@ atpGnnForwardLogits[xT_, aT_, maskRowT_, nNodesT_,
    lemma corpus is small and class-skewed, so 2 rounds at width 16
    under-propagates and the rank AUC stays near chance; H = 32 / R = 3
    reliably lifts the train AUC.  See docs/plans/atp_tier2_gnn.md. *)
-Options[TAtpTrainGnn] = {"Hidden" -> 32, "Rounds" -> 3,
-    MaxTrainingRounds -> 300, "LearningRate" -> 0.01,
-    "BatchSize" -> 128, "NodeCap" -> 64}
+Options[TAtpTrainGnn] = {
+    "Hidden" -> 32,
+    "Rounds" -> 3,
+    MaxTrainingRounds -> 300,
+    "LearningRate" -> 0.01,
+    "BatchSize" -> 128,
+    "NodeCap" -> 64
+}
 
 (* Minibatched trainer.  Keeps the params + Adam state (m / v / b1pow /
    b2pow) persistent and runs each Adam step over a minibatch of
@@ -1476,7 +1458,9 @@ TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
         "Bh" -> (Normal @ TRealize @ # & /@ bhs),
         "Wout" -> (Normal @ TRealize @ wout),
         "Bout" -> (Normal @ TRealize @ bout),
-        "NMax" -> nMax, "Hidden" -> hH, "Rounds" -> rR
+        "NMax" -> nMax,
+        "Hidden" -> hH,
+        "Rounds" -> rR
     |>;
     <|
         "Model" -> model,
@@ -1513,10 +1497,7 @@ atpTrainGnnOnCorpus[_, _] := $Failed
    constant TTensors, returning the per-graph proof-relevance score
    logit_pos - logit_neg.  This is the inference path -- used for the
    held-out (by-problem) measure and, later, the engine re-rank hook. *)
-TAtpGnnScore[model_Association, dataset_Association] := Module[{
-    bt, b, n, f, hH, rR, xT, aT, maskRowT, nNodesT,
-    w1s, wss, bhs, wout, bout, logits, p
-},
+TAtpGnnScore[model_Association, dataset_Association] := Module[{bt, b, n, f, hH, rR, xT, aT, maskRowT, nNodesT, w1s, wss, bhs, wout, bout, logits, p},
     bt = atpGnnTensors[dataset];
     If[ bt === $Failed, Return[$Failed]];
     b = bt["B"];  n = bt["N"];  f = bt["F"];
@@ -1543,9 +1524,14 @@ TAtpGnnScore[model_Association, dataset_Association] := Module[{
    same shape the baked-in learned scorer uses. *)
 atpRerankPriority[score_] := Round[Clip[1000000. - 10000. * score, {0., 2.*^9}]]
 
-Options[TFindProofReranked] = {"RerankPeriod" -> 200, MaxSteps -> 30000,
-    "CriticalPairWeight" -> "Gt", "Ordering" -> "KBO",
-    "AutoPrecedence" -> True, "QueueCap" -> 4096}
+Options[TFindProofReranked] = {
+    "RerankPeriod" -> 200,
+    MaxSteps -> 30000,
+    "CriticalPairWeight" -> "Gt",
+    "Ordering" -> "KBO",
+    "AutoPrecedence" -> True,
+    "QueueCap" -> 4096
+}
 
 (* Drive a proof in chunks, re-ranking the live CP queue with the GNN
    every "RerankPeriod" steps: pull the queued CPs, encode each to its
@@ -1555,8 +1541,7 @@ Options[TFindProofReranked] = {"RerankPeriod" -> 200, MaxSteps -> 30000,
    the inference loop that wires the Tier 2 GNN into live selection;
    completeness holds (re-ranking only permutes order + the periodic FIFO
    pick still fires). *)
-TFindProofReranked[conjecture_, axioms_List, model_Association,
-    opts : OptionsPattern[]] := Module[{
+TFindProofReranked[conjecture_, axioms_List, model_Association, opts : OptionsPattern[]] := Module[{
     enc = atpEncodeProblem[axioms, conjecture],
     k = OptionValue["RerankPeriod"], maxSteps = OptionValue[MaxSteps],
     cpw = Lookup[$AtpCpWeightCodes, OptionValue["CriticalPairWeight"], 3],
@@ -1589,17 +1574,20 @@ TFindProofReranked[conjecture_, axioms_List, model_Association,
     atpStatusFor[st]
 ]
 
-Options[TFindProofGnnReranked] = {"RerankPeriod" -> 200, MaxSteps -> 30000,
-    "CriticalPairWeight" -> "Gt", "Ordering" -> "KBO",
-    "AutoPrecedence" -> True}
+Options[TFindProofGnnReranked] = {
+    "RerankPeriod" -> 200,
+    MaxSteps -> 30000,
+    "CriticalPairWeight" -> "Gt",
+    "Ordering" -> "KBO",
+    "AutoPrecedence" -> True
+}
 
 (* C-driven inference loop: push the model once, set the re-rank period on
    the persistent handle, run the saturation in a SINGLE chunk (the C
    engine re-ranks itself between selections), then free.  The GCN forward
    runs in C on thvm's tensor runtime, so the WL kernel is idle while the
    proof runs. *)
-TFindProofGnnReranked[conjecture_, axioms_List, model_Association,
-    opts : OptionsPattern[]] := Module[{
+TFindProofGnnReranked[conjecture_, axioms_List, model_Association, opts : OptionsPattern[]] := Module[{
     enc = atpEncodeProblem[axioms, conjecture],
     k = OptionValue["RerankPeriod"], maxSteps = OptionValue[MaxSteps],
     cpw = Lookup[$AtpCpWeightCodes, OptionValue["CriticalPairWeight"], 3],
@@ -1620,10 +1608,7 @@ TFindProofGnnReranked[conjecture_, axioms_List, model_Association,
 
 (* === Status decoder + stats Association builder =================== *)
 
-$atpStatusName = <|
-    0 -> "RUNNING", 1 -> "PROVED", 2 -> "REFUTED",
-    3 -> "TIMEOUT", 4 -> "QUEUE_EMPTY"
-|>
+$atpStatusName = <|0 -> "RUNNING", 1 -> "PROVED", 2 -> "REFUTED", 3 -> "TIMEOUT", 4 -> "QUEUE_EMPTY"|>
 
 atpStatusFor[code_Integer] :=
     Lookup[$atpStatusName, code, "UNKNOWN(" <> ToString[code] <> ")"]
@@ -1643,11 +1628,8 @@ atpStatsAssoc[stats_List] := <|
    a held body, returning HoldComplete[body-with-patterns].  Building
    the substitution rules via Function with HoldFirst keeps each
    bound symbol unevaluated during rule construction. *)
-applyForAllSubst[hcBody_HoldComplete, vars_List] := Block[{
-    rules
-},
-    rules = Function[{v}, v :> Pattern[v, Blank[]],
-        {HoldAll}] /@ vars;
+applyForAllSubst[hcBody_HoldComplete, vars_List] := Block[{rules},
+    rules = Function[{v}, v :> Pattern[v, Blank[]], {HoldAll}] /@ vars;
     hcBody /. rules
 ]
 
@@ -1763,9 +1745,7 @@ axiomOrientationFlag[axHC_HoldComplete] := Replace[axHC, {
    HoldComplete[ForAll[..., Equal[lhs, rhs]]]) into
    {term_lhs, term_rhs, state'}.  Throws "TATPError" Failure on
    shape mismatch. *)
-encodeEquation[axHCRaw_HoldComplete, state_, label_] := Block[{
-    axHC, lhs, rhs, lr, rr
-},
+encodeEquation[axHCRaw_HoldComplete, state_, label_] := Block[{axHC, lhs, rhs, lr, rr},
     axHC = forAllToPattern[axHCRaw];
     If[ ! MatchQ[axHC, HoldComplete[Equal[_, _]]],
         Throw[Failure["TATPParseError",
@@ -1782,9 +1762,7 @@ encodeEquation[axHCRaw_HoldComplete, state_, label_] := Block[{
 
 (* Fold step over axiom HoldCompletes; threads the encoder state
    and accumulates packed [lhs, rhs] term pairs. *)
-encodeAxiomFold[{terms_, state_, idx_}, axHC_] := Block[{
-    r = encodeEquation[axHC, state, idx]
-},
+encodeAxiomFold[{terms_, state_, idx_}, axHC_] := Block[{r = encodeEquation[axHC, state, idx]},
     {Join[terms, {r[[1]], r[[2]]}], r[[3]], idx + 1}
 ]
 
@@ -1846,9 +1824,7 @@ atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
     (* Encode every conjunct with the SHARED encoder state so symbol
        labels stay consistent across the axioms and all goals. *)
     goalRes = Fold[
-        {acc, cjHC} |-> Block[{
-            r = encodeEquation[cjHC, acc[[2]], "conjecture"]
-        },
+        {acc, cjHC} |-> Block[{r = encodeEquation[cjHC, acc[[2]], "conjecture"]},
             {Join[acc[[1]], {r[[1]], r[[2]]}], r[[3]]}
         ],
         {{}, st},
@@ -1921,39 +1897,30 @@ Options[TATP] = {
 
 (* Resolve one Witness entry to its {name, id} pair using the
    encoder state.  Throws on names not present in axioms. *)
-witnessPair[w_, state_Association] := Block[{
-    wn, wid
-},
+witnessPair[w_, state_Association] := Block[{wn, wid},
     If[ ! MatchQ[w, Verbatim[Pattern][_Symbol, Blank[]]],
         Throw[Failure["TATPParseError",
             <|"Reason" -> "Witness entries must be `x_` patterns"|>],
             "TATPError"]
     ];
-    wn = Replace[w,
-        Verbatim[Pattern][s_Symbol, Blank[]] :>
-            SymbolName[Unevaluated[s]]];
+    wn = Replace[w, Verbatim[Pattern][s_Symbol, Blank[]] :> SymbolName[Unevaluated[s]]];
     wid = Lookup[state["var"], wn, $Failed];
     If[ wid === $Failed,
         Throw[Failure["TATPParseError",
-            <|"Reason" -> "Witness var `" <> wn <>
-                "` not present in axioms / conjecture"|>],
+            <|"Reason" -> "Witness var `" <> wn <> "` not present in axioms / conjecture"|>],
             "TATPError"]
     ];
     {wn, wid}
 ]
 
 (* Map all Witness specs to {names, ids}. *)
-atpResolveWitnessIds[witnessSpec_List, state_Association] := Block[{
-    pairs = Map[witnessPair[#, state] &, witnessSpec]
-},
+atpResolveWitnessIds[witnessSpec_List, state_Association] := Block[{pairs = Map[witnessPair[#, state] &, witnessSpec]},
     {pairs[[All, 1]], pairs[[All, 2]]}
 ]
 
 (* File-form dispatch (.pr file). *)
 TATP[File[path_String], OptionsPattern[]] := Catch[
-    Block[{
-        stats
-    },
+    Block[{stats},
         ensureInit[];
         stats = Normal @ $atpRunFileFn[path, OptionValue[MaxSteps]];
         atpStatsAssoc[stats]
@@ -1962,55 +1929,34 @@ TATP[File[path_String], OptionsPattern[]] := Catch[
 ]
 
 (* Universal goal: just status + stats. *)
-tatpUniversal[enc_, maxSteps_] := Block[{
-    stats = Normal @ $atpRunFn[
-        enc["Packed"], maxSteps, enc["MaxLab"]
-    ]
-},
+tatpUniversal[enc_, maxSteps_] := Block[{stats = Normal @ $atpRunFn[enc["Packed"], maxSteps, enc["MaxLab"]]},
     atpStatsAssoc[stats]
 ]
 
 (* Single-witness narrow: one binding per witness name. *)
-tatpWitness[enc_, maxSteps_, witnessSpec_List] := Block[{
-    names, ids, stats, witnessVals, witnessAssoc
-},
+tatpWitness[enc_, maxSteps_, witnessSpec_List] := Block[{names, ids, stats, witnessVals, witnessAssoc},
     {names, ids} = atpResolveWitnessIds[witnessSpec, enc["State"]];
-    stats = Normal @ $atpRunExistFn[
-        enc["Packed"], maxSteps, enc["MaxLab"], ids
-    ];
+    stats = Normal @ $atpRunExistFn[enc["Packed"], maxSteps, enc["MaxLab"], ids];
     witnessVals = stats[[5 ;; 4 + Length[ids]]];
     witnessAssoc = AssociationThread[Symbol /@ names -> witnessVals];
     Append[atpStatsAssoc[stats], "Witness" -> witnessAssoc]
 ]
 
 (* Multi-witness: saturate then narrow_all. *)
-tatpAllWitnesses[enc_, maxSteps_, witnessSpec_, maxDepth_, maxWitnesses_] := Block[{
-    names, ids, stats, nFound, k, witnessRows, witnessAssocs
-},
+tatpAllWitnesses[enc_, maxSteps_, witnessSpec_, maxDepth_, maxWitnesses_] := Block[{names, ids, stats, nFound, k, witnessRows, witnessAssocs},
     {names, ids} = atpResolveWitnessIds[witnessSpec, enc["State"]];
-    stats = Normal @ $atpRunAllFn[
-        enc["Packed"], maxSteps, enc["MaxLab"],
-        ids, maxDepth, maxWitnesses
-    ];
+    stats = Normal @ $atpRunAllFn[enc["Packed"], maxSteps, enc["MaxLab"], ids, maxDepth, maxWitnesses];
     nFound = stats[[5]];
     k = Length[ids];
-    witnessRows = If[ nFound > 0 && k > 0,
-        Partition[stats[[6 ;; 5 + nFound * k]], k],
-        {}
-    ];
-    witnessAssocs = Table[
-        AssociationThread[Symbol /@ names -> ws],
-        {ws, witnessRows}
-    ];
+    witnessRows = If[ nFound > 0 && k > 0, Partition[stats[[6 ;; 5 + nFound * k]], k], {}];
+    witnessAssocs = Table[AssociationThread[Symbol /@ names -> ws], {ws, witnessRows}];
     Append[atpStatsAssoc[stats], "Witnesses" -> witnessAssocs]
 ]
 
 (* Single non-list axiom: auto-wrap to a 1-element list, same shape
    as the TFindProof single-axiom wrap.  TATP is HoldAll so pattern
    matching doesn't evaluate; the wrap re-dispatches the held form. *)
-TATP[axiom : (_Equal | _Unequal | _ForAll
-        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
-        conjecture_, opts:OptionsPattern[]] :=
+TATP[axiom : (_Equal | _Unequal | _ForAll | Inactive[Equal][_, _] | Inactive[Unequal][_, _]), conjecture_, opts : OptionsPattern[]] :=
     TATP[{axiom}, conjecture, opts];
 
 TATP[axioms_, conjecture_, OptionsPattern[]] := Catch[
@@ -2054,9 +2000,15 @@ TATP[axioms_, conjecture_, OptionsPattern[]] := Catch[
    "AutoPrecedence" -- True/Automatic = Waldmeister structure-driven
      precedence (PhilMarlow port), False = identity precedence. *)
 $AtpCpWeightCodes = <|
-    "Add" -> 0, "Max" -> 1, "Ord" -> 2, "Gt" -> 3,
-    "Mix" -> 4, "Mix2" -> 5, "Unif" -> 6,
-    "Goal" -> 7, "CPinGoal" -> 7,
+    "Add" -> 0,
+    "Max" -> 1,
+    "Ord" -> 2,
+    "Gt" -> 3,
+    "Mix" -> 4,
+    "Mix2" -> 5,
+    "Unif" -> 6,
+    "Goal" -> 7,
+    "CPinGoal" -> 7,
     "Twee" -> 8,   (* Twee KB-completion asymmetric weight (Smallbone),
                      biases toward CPs whose smaller side is small;
                      ported from src/Twee/CP.hs Twee.CP.score. *)
@@ -2862,10 +2814,13 @@ atpDispatchPreset[defaults_Association, defaultGD_, subopts_List] :=
    forwards to atpDispatchPreset. *)
 $AtpPresetDefaults = <|
     "Waldmeister" -> <|
-        "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
-        "AutoPrecedence" -> True, "SkolemHighest" -> True,
+        "CriticalPairWeight" -> "Mix",
+        "Ordering" -> "KBO",
+        "AutoPrecedence" -> True,
+        "SkolemHighest" -> True,
         "SelectionRatio" -> 51,
-        "RHSInterreduce" -> True, "UnfailingCP" -> True,
+        "RHSInterreduce" -> True,
+        "UnfailingCP" -> True,
         (* WM CLI default: -ki ships with no period and no checkpoints
            (RUN/Parameter.c:378-387), so KPV_KPMengeInterreduzieren
            never fires (KPVerwaltung.c:1030-1043), and no Sinai
@@ -2926,15 +2881,23 @@ $AtpPresetDefaults = <|
            WL-exposed (band_interleave / drain_chainpos / drain_revface /
            revface_cubeorder).  See atpFormationFifoOpt + the AtpMethods /
            Waldmeister tutorials. *)
-        "CPSide" -> True, "FlatSubsume" -> True,
-        "CommReage" -> True, "CommDropDup" -> True,
-        "LeafTiebreak" -> True, "RevfaceGroup" -> True,
-        "PosGroup" -> True, "CubeArrival" -> True,
-        "FormationFifo" -> True, "MeredDmgu" -> True,
-        "EsetDistdir" -> True, "CommDropDupClassGate" -> True,
-        "CorankOwnArr" -> True, "LeafTiebreakFacegate" -> True|>,
+        "CPSide" -> True,
+        "FlatSubsume" -> True,
+        "CommReage" -> True,
+        "CommDropDup" -> True,
+        "LeafTiebreak" -> True,
+        "RevfaceGroup" -> True,
+        "PosGroup" -> True,
+        "CubeArrival" -> True,
+        "FormationFifo" -> True,
+        "MeredDmgu" -> True,
+        "EsetDistdir" -> True,
+        "CommDropDupClassGate" -> True,
+        "CorankOwnArr" -> True,
+        "LeafTiebreakFacegate" -> True|>,
     "WaldmeisterLazy" -> <|
-        "Ordering" -> "LPO", "AutoPrecedence" -> True,
+        "Ordering" -> "LPO",
+        "AutoPrecedence" -> True,
         "SkolemHighest" -> True,
         "LazyNormalize" -> True,
         "CPSetInterreduce" -> True,
@@ -2966,12 +2929,16 @@ $AtpPresetDefaults = <|
         "CriticalGoalInterreduce" -> False,
         "CriticalGoalWeight" -> False,
         "BackwardGoalArgue" -> False,
-        "UnfailingCP" -> True, "RHSInterreduce" -> True|>,
+        "UnfailingCP" -> True,
+        "RHSInterreduce" -> True|>,
     "VampireUEQ" -> <|
-        "Ordering" -> "LPO", "AutoPrecedence" -> True,
-        "SelectionRatio" -> 10, "UnfailingCP" -> True,
+        "Ordering" -> "LPO",
+        "AutoPrecedence" -> True,
+        "SelectionRatio" -> 10,
+        "UnfailingCP" -> True,
         "AutoMaxWeight" -> True,
-        "BackwardSubsume" -> True, "BackwardDemod" -> True,
+        "BackwardSubsume" -> True,
+        "BackwardDemod" -> True,
         "RHSInterreduce" -> True|>,
     (* "VampireUEQDefault": mirrors the FIRST slot of Vampire 5.0.1's
        UEQ portfolio schedule (CASC/Schedules.cpp:5224):
@@ -2985,7 +2952,8 @@ $AtpPresetDefaults = <|
        axiom-relevance filter active.  See
        docs/atp/vampire_case_teardown.md for the full mapping. *)
     "VampireUEQDefault" -> <|
-        "Ordering" -> "KBO", "AutoPrecedence" -> True,
+        "Ordering" -> "KBO",
+        "AutoPrecedence" -> True,
         "SelectionRatio" -> 2,
         "AxiomRelevance" -> {"SInE",
             "SineTolerance" -> 3.0,
@@ -2996,9 +2964,11 @@ $AtpPresetDefaults = <|
         "LRS" -> True|>,
     "Twee" -> <|
         "CriticalPairWeight" -> "Twee",
-        "GroundJoin" -> True, "Connectedness" -> True,
+        "GroundJoin" -> True,
+        "Connectedness" -> True,
         "UnfailingCP" -> True,
-        "BackwardSubsume" -> True, "BackwardDemod" -> True,
+        "BackwardSubsume" -> True,
+        "BackwardDemod" -> True,
         "RHSInterreduce" -> True,
         "AutoMaxWeight" -> 20|>,
     "EProver" -> <|
@@ -3020,11 +2990,15 @@ $AtpPresetDefaults = <|
        config is the experimentally-validated combination users
        should reach for first. *)
     "VampireRandom" -> <|
-        "Ordering" -> "LPO", "AutoPrecedence" -> True,
-        "SelectionRatio" -> 10, "UnfailingCP" -> True,
-        "GroundJoin" -> True, "BackwardDemod" -> True,
+        "Ordering" -> "LPO",
+        "AutoPrecedence" -> True,
+        "SelectionRatio" -> 10,
+        "UnfailingCP" -> True,
+        "GroundJoin" -> True,
+        "BackwardDemod" -> True,
         "RHSInterreduce" -> True,
-        "RandomRatio" -> 32, "RandomSeed" -> 3681690318,
+        "RandomRatio" -> 32,
+        "RandomSeed" -> 3681690318,
         "LRS" -> True|>,
     (* "ENIGMA": ML-guided critical-pair selection.  CriticalPairWeight
        -> "Learned" ranks CPs by the trained proof-relevance scorer
@@ -3042,10 +3016,14 @@ $AtpPresetDefaults = <|
        cooperative selection.  Override with "CoopRatio" -> 0 for
        pure-learned.  See docs/atp/ml_guidance.md. *)
     "ENIGMA" -> <|
-        "CriticalPairWeight" -> "Learned", "Ordering" -> "KBO",
-        "AutoPrecedence" -> True, "UnfailingCP" -> True,
-        "RHSInterreduce" -> True, "AutoMaxWeight" -> 20,
-        "CoopWeight" -> "Gt", "CoopRatio" -> 2|>
+        "CriticalPairWeight" -> "Learned",
+        "Ordering" -> "KBO",
+        "AutoPrecedence" -> True,
+        "UnfailingCP" -> True,
+        "RHSInterreduce" -> True,
+        "AutoMaxWeight" -> 20,
+        "CoopWeight" -> "Gt",
+        "CoopRatio" -> 2|>
 |>;
 
 (* Per-preset default for the GoalDirected (MNF front) toggle.  Mostly
@@ -3053,12 +3031,12 @@ $AtpPresetDefaults = <|
 $AtpPresetGoalDirected = <|
     "Waldmeister" -> False,
     "WaldmeisterLazy" -> False,
-    "VampireUEQ"  -> True,
+    "VampireUEQ" -> True,
     "VampireUEQDefault" -> False,  (* matches Vampire's UEQ portfolio default slot which doesn't enable goal-MNF *)
-    "Twee"        -> False,
-    "EProver"     -> False,
+    "Twee" -> False,
+    "EProver" -> False,
     "VampireRandom" -> True,
-    "ENIGMA"      -> False
+    "ENIGMA" -> False
 |>;
 
 (* Shared suboption decoder for the completion-family methods.  Returns
@@ -3374,27 +3352,19 @@ $VampirePortfolio = {
     (* 1: VampireUEQ-faithful single config (the flag-complete preset). *)
     "VampireUEQ",
     (* 2: Twee weight + GroundJoin + Connectedness + BS + BD + RHSI. *)
-    {"Completion", "CriticalPairWeight" -> "Twee",
-        "GroundJoin" -> True, "Connectedness" -> True,
-        "BackwardSubsume" -> True, "BackwardDemod" -> True,
-        "RHSInterreduce" -> True, "AutoMaxWeight" -> 20},
+    {"Completion", "CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20},
     (* 3: RelLevel weight + SInE relevance filter for cross-system. *)
-    {"Completion", "CriticalPairWeight" -> "RelLevel",
-        "AxiomRelevance" -> "SInE", "AutoMaxWeight" -> 20},
+    {"Completion", "CriticalPairWeight" -> "RelLevel", "AxiomRelevance" -> "SInE", "AutoMaxWeight" -> 20},
     (* 4: ConjSym weight + GoalDirected MNF front. *)
-    {"GoalDirected", "CriticalPairWeight" -> "ConjSym",
-        "AutoMaxWeight" -> 20},
+    {"GoalDirected", "CriticalPairWeight" -> "ConjSym", "AutoMaxWeight" -> 20},
     (* 5: Diversity weight + UnfailingCP for asymmetric saturation. *)
-    {"Completion", "CriticalPairWeight" -> "Diversity",
-        "UnfailingCP" -> True, "AutoMaxWeight" -> 20},
+    {"Completion", "CriticalPairWeight" -> "Diversity", "UnfailingCP" -> True, "AutoMaxWeight" -> 20},
     (* 6: Mix2 + LRS + AutoMaxWeight: Vampire age:weight balance. *)
-    {"Completion", "CriticalPairWeight" -> "Mix2", "LRS" -> True,
-        "AutoMaxWeight" -> 20},
+    {"Completion", "CriticalPairWeight" -> "Mix2", "LRS" -> True, "AutoMaxWeight" -> 20},
     (* 7: KBO Waldmeister default. *)
     {"Waldmeister"},
     (* 8: LPO + GoalInterleave for combinator-shape goals. *)
-    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True,
-        "GoalInterleave" -> 50, "AutoMaxWeight" -> 20},
+    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True, "GoalInterleave" -> 50, "AutoMaxWeight" -> 20},
     (* 9: GoalDirected + SInE for cross-system many-axiom goals. *)
     {"GoalDirected", "AxiomRelevance" -> "SInE"},
     (* 10: Add weight, the bare default for combinator / Sheffer-X. *)
@@ -3405,8 +3375,7 @@ $VampirePortfolio = {
        other rotation entry walls on.  The tight age bias forces the long
        derivation chain through before the CP queue blows up; SR=1 and
        SR>=5 both miss it. *)
-    {"Completion", "CriticalPairWeight" -> "Mix2",
-        "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
+    {"Completion", "CriticalPairWeight" -> "Mix2", "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
     (* 12: Vampire's McCune-cracking config (LPO + arity + LRS +
        RandomRatio 32 + Vampire's exact seed + GroundJoin +
        BackwardDemod + RHSInterreduce + UnfailingCP).  The
@@ -3418,8 +3387,7 @@ $VampirePortfolio = {
        / E `-G InvFreqRank`).  Rarer symbols outrank common ones; on
        cross-system goals where a symbol appears in few axioms the
        trajectory differs from the AutoPrecedence Fuchs-arity entry. *)
-    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> "Occurrence",
-        "SelectionRatio" -> 10, "AutoMaxWeight" -> 20}
+    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> "Occurrence", "SelectionRatio" -> 10, "AutoMaxWeight" -> 20}
 };
 
 (* Hook VampirePortfolio into atpScheduleFor so the rotation expands
@@ -3437,8 +3405,7 @@ atpScheduleFor["VampirePortfolio", _, _] := $VampirePortfolio;
 $VampirePortfolioCompact = {
     "VampireUEQ",
     "Twee",
-    {"Completion", "CriticalPairWeight" -> "Mix2",
-        "AutoPrecedence" -> True, "AutoMaxWeight" -> 20}
+    {"Completion", "CriticalPairWeight" -> "Mix2", "AutoPrecedence" -> True, "AutoMaxWeight" -> 20}
 };
 atpParseMethod["VampirePortfolioCompact"] :=
     {-2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0};
@@ -3577,9 +3544,7 @@ atpStatisticsAssoc[cRes_] := <|
    together make the rule -- and hence any set of such rules -- terminating
    under `//.`. *)
 atpRuleSizeReducingQ[{l_, r_}, varSyms_List] :=
-    LeafCount[l] > LeafCount[r] &&
-    AllTrue[varSyms,
-        Count[l, #, {0, Infinity}] >= Count[r, #, {0, Infinity}] &];
+    LeafCount[l] > LeafCount[r] && AllTrue[varSyms, Count[l, #, {0, Infinity}] >= Count[r, #, {0, Infinity}] &];
 atpRuleSizeReducingQ[_, _] := False;
 
 (* ===== CounterexampleObject: a summary-boxed disproof artifact =====
@@ -3776,8 +3741,7 @@ atpGroundCounterexample[goalIn_, hypsIn_List] :=
             Inactive[Unequal][a_, b_] :> Unequal[a, b]} &;
         goal = strip[goalIn];
         hyps = strip /@ hypsIn;
-        If[ ! atpGroundProblemQ[goal, hyps] ||
-            ! MatchQ[goal, _Equal | _Unequal], Return[$Failed]];
+        If[ ! atpGroundProblemQ[goal, hyps] || ! MatchQ[goal, _Equal | _Unequal], Return[$Failed]];
         {eqs, diseqs} = collectLiterals[Append[hyps, negate[goal]]];
         If[ eqs === $Failed, Return[$Failed]];
         res = TSatEUF[eqs, diseqs];
@@ -3845,7 +3809,7 @@ atpSaturationCountermodel[bundle_] := Block[
     (* "when possible" build a finite model in FindFiniteModels structure;
        else carry the convergent rules as the (infinite initial algebra). *)
     fm = atpFiniteModelFromRules[rules, varSyms,
-        DeleteDuplicates @ Cases[conjPair, _?AtomQ, {0, Infinity}]];
+        DeleteDuplicates @ Cases[conjPair, _ ? AtomQ, {0, Infinity}]];
     data = If[ AssociationQ[fm],
         <|"Setup" -> fm["Model"], "Domain" -> fm["Domain"],
           "NormalForms" -> {nfL, nfR},
@@ -3887,12 +3851,22 @@ atpReturnValue[bundle_, "RawTrace"] := With[{cR = bundle["cRes"]},
             Block[{c = offs[[k]], reason, posLen, pos},
                 reason = rw[[c + 1]]; posLen = rw[[c + 6]];
                 pos = If[ posLen === 0, {}, rw[[c + 7 ;; c + 6 + posLen]]];
-                <|"Reason" -> reason, "ParentA" -> rw[[c + 2]],
-                  "ParentB" -> rw[[c + 3]], "LhsRaw" -> rw[[c + 4]],
-                  "RhsRaw" -> rw[[c + 5]], "Pos" -> (pos + 1),
-                  "Side" -> If[ reason === $TraceNormStep, rw[[c + 6 + posLen + 1]], 0],
-                  "Fwd"  -> If[ reason === $TraceNormStep, rw[[c + 6 + posLen + 2]], 1]|>],
-            {k, Length[offs]}]]];
+                <|
+                    "Reason" -> reason,
+                    "ParentA" -> rw[[c + 2]],
+                    "ParentB" -> rw[[c + 3]],
+                    "LhsRaw" -> rw[[c + 4]],
+                    "RhsRaw" -> rw[[c + 5]],
+                    "Pos" -> (pos + 1),
+                    "Side" -> If[ reason === $TraceNormStep, rw[[c + 6 + posLen + 1]], 0],
+                    "Fwd" -> If[ reason === $TraceNormStep, rw[[c + 6 + posLen + 2]], 1]
+                |>
+            ]
+            ,
+            {k, Length[offs]}
+        ]
+    ]
+];
 atpReturnValue[bundle_, "Statistics"] := atpStatisticsAssoc[bundle["cRes"]];
 atpReturnValue[bundle_, "Status"] :=
     atpReturnStatus[bundle["cRes"]["Status"]];
@@ -3906,9 +3880,7 @@ atpReturnValue[bundle_, "Status"] :=
    form.  A multi-goal conjunction returns one path per conjunct.
    $Failed when the run did not prove, no goal chain was recorded, or
    the recorded chain does not connect. *)
-atpChainPath[start_, steps_List] := Block[{
-    afters = #["After"] & /@ steps
-},
+atpChainPath[start_, steps_List] := Block[{afters = #["After"] & /@ steps},
     If[ (#["Before"] & /@ steps) === Most @ Prepend[afters, start],
         Prepend[afters, start],
         $Failed]
@@ -3988,16 +3960,20 @@ atpProjectReturn[bundle_, spec_List] :=
     Association[# -> atpReturnValue[bundle, #] & /@ spec];
 
 Options[TFindProof] = {
-    MaxSteps -> 200000, Method -> Automatic,
-    TimeConstraint -> Infinity, PortfolioFrontLoad -> 1,
+    MaxSteps -> 200000,
+    Method -> Automatic,
+    TimeConstraint -> Infinity,
+    PortfolioFrontLoad -> 1,
     (* Forwarded to the Process-method builders ({Vampire,Twee,
        Waldmeister,Eprover}ProofObject) when Method is one of the
        *Process names; ignored by the internal-engine path. *)
-    "Binary" -> Automatic, "ParseFormulas" -> False,
+    "Binary" -> Automatic,
+    "ParseFormulas" -> False,
     "LiftToProofObject" -> False,
     (* "ProofObject" (default) returns the built-in ProofObject; "TProofObject"
        returns the native, extensible thvm proof object (see TProofObject.wl). *)
-    "ProofForm" -> "ProofObject"};
+    "ProofForm" -> "ProofObject"
+};
 
 (* String form: resolve theorem + theory names through
    AxiomaticTheory, then run the expression form.  The conjecture
@@ -4021,19 +3997,18 @@ atpConjList[cj_] := {cj};
    returning ONE ProofObject with a {Hypothesis, g} / {Conclusion, g}
    row pair per conjunct ($Failed unless every conjunct is proved). *)
 atpProveFromTheory[cjArg_, theory_String,
-        opts:OptionsPattern[TFindProof]] :=
+        opts : OptionsPattern[TFindProof]] :=
     atpProveFromTheory[cjArg, theory, "ProofObject", opts];
 (* The returnSpec threads through to the expression-form call; a
    multi-conjunct theorem returns ONE projection for the whole
    conjunction (e.g. "Status" is a single tag). *)
 atpProveFromTheory[cjArg_, theory_String, returnSpec_,
-        opts:OptionsPattern[TFindProof]] := Catch[
+        opts : OptionsPattern[TFindProof]] := Catch[
     Block[{axRaw, axioms, cjList = atpConjList[cjArg]},
         axRaw = AxiomaticTheory[theory];
         If[ ! ListQ[axRaw],
             Throw[Failure["TATPParseError",
-                <|"Reason" -> "AxiomaticTheory[\"" <> theory <>
-                    "\"] did not resolve to an axiom list"|>],
+                <|"Reason" -> "AxiomaticTheory[\"" <> theory <> "\"] did not resolve to an axiom list"|>],
                 "TATPError"]
         ];
         axRaw = atpApplyRelevance[axRaw, cjList,
@@ -4064,11 +4039,9 @@ atpProveFromTheory[cjArg_, theory_String, returnSpec_,
    form would otherwise read the spec as a theorem name.  The /; guard
    on the prove form (theory =!= a return spec) sends it to the
    completion form below. *)
-TFindProof[theory_String, returnSpec_String,
-        opts:OptionsPattern[]] /; atpReturnSpecQ[returnSpec] :=
+TFindProof[theory_String, returnSpec_String, opts : OptionsPattern[]] /; atpReturnSpecQ[returnSpec] :=
     atpTheoryCompletion[theory, returnSpec, opts];
-TFindProof[thm_String, theory_String,
-        opts:OptionsPattern[]] /; ! atpReturnSpecQ[theory] := Catch[
+TFindProof[thm_String, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpecQ[theory] := Catch[
     Block[{cjRaw, methodOpt = OptionValue[TFindProof, {opts}, Method],
             methodName, methodSubs},
         (* A list Method -> {"WaldmeisterProcess", "WMCLI" -> path, ...}
@@ -4119,9 +4092,7 @@ TFindProof[thm_String, theory_String,
         cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
         If[ MissingQ[cjRaw],
             Throw[Failure["TATPParseError",
-                <|"Reason" -> "theorem \"" <> thm <>
-                    "\" not in AxiomaticTheory[\"" <> theory <>
-                    "\", \"NotableTheorems\"]"|>],
+                <|"Reason" -> "theorem \"" <> thm <> "\" not in AxiomaticTheory[\"" <> theory <> "\", \"NotableTheorems\"]"|>],
                 "TATPError"]
         ];
         atpProveFromTheory[cjRaw, theory, opts]
@@ -4129,14 +4100,11 @@ TFindProof[thm_String, theory_String,
     "TATPError"
 ]
 (* (theorem, theory, returnSpec): prove the named theorem, projected. *)
-TFindProof[thm_String, theory_String,
-        returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] := Catch[
+TFindProof[thm_String, theory_String, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] := Catch[
     Block[{cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm]},
         If[ MissingQ[cjRaw],
             Throw[Failure["TATPParseError",
-                <|"Reason" -> "theorem \"" <> thm <>
-                    "\" not in AxiomaticTheory[\"" <> theory <>
-                    "\", \"NotableTheorems\"]"|>],
+                <|"Reason" -> "theorem \"" <> thm <> "\" not in AxiomaticTheory[\"" <> theory <> "\", \"NotableTheorems\"]"|>],
                 "TATPError"]
         ];
         atpProveFromTheory[cjRaw, theory, returnSpec, opts]
@@ -4155,23 +4123,16 @@ TFindProof[thm_String, theory_String,
    work.  The /; guard keeps a (axioms, returnSpec) COMPLETION call --
    whose 2nd arg is a return-spec String, not a theory name -- from
    matching here. *)
-TFindProof[
-        cj : (_List | _ForAll | _Equal | _Unequal
-            | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
-        theory_String, opts:OptionsPattern[]] /; ! atpReturnSpecQ[theory] :=
+TFindProof[cj : (_List | _ForAll | _Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _]), theory_String, opts : OptionsPattern[]] /; ! atpReturnSpecQ[theory] :=
     atpProveFromTheory[cj, theory, opts];
-TFindProof[
-        cj : (_List | _ForAll | _Equal | _Unequal
-            | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
-        theory_String, returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
+TFindProof[cj : (_List | _ForAll | _Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _]), theory_String, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     atpProveFromTheory[cj, theory, returnSpec, opts];
 (* An Association (e.g. the whole NotableTheorems table) "just does
    Values": each value is proved on its own, so a theorem that fails to
    prove is $Failed in its slot rather than failing the whole call. *)
-TFindProof[thms_Association, theory_String, opts:OptionsPattern[]] :=
+TFindProof[thms_Association, theory_String, opts : OptionsPattern[]] :=
     atpProveFromTheory[#, theory, opts] & /@ Values[thms];
-TFindProof[thms_Association, theory_String,
-        returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
+TFindProof[thms_Association, theory_String, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     atpProveFromTheory[#, theory, returnSpec, opts] & /@ Values[thms];(* Expression form: run thvm's C ATP completion engine on the
    conjecture + axioms, decode the equational rewrite chain, and
    wrap it in a verifier-shaped WL ProofObject.  Returns $Failed
@@ -4190,10 +4151,9 @@ TFindProof[thms_Association, theory_String,
    The parser handles the TPTP UEQ fragment (one equational literal
    per cnf clause).  fof / tff / thf clauses + include directives are
    skipped with a console warning.  See Kernel/ATP/TPTPImport.wl. *)
-TFindProof[File[path_String], opts:OptionsPattern[]] :=
+TFindProof[File[path_String], opts : OptionsPattern[]] :=
     tptpDispatch[TPTPImport[File[path]], opts]
-TFindProof[s_String, opts:OptionsPattern[]] /;
-        StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
+TFindProof[s_String, opts : OptionsPattern[]] /; StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
     tptpDispatch[TPTPImport[s], opts]
 
 (* Convert TPTP's String-headed terms ("and"[X, Y], "a"[]) into
@@ -4234,7 +4194,7 @@ tptpInternalize[expr_] :=
         s_String /; StringLength[s] > 0 :> tptpStringToSymbol[s]
     };
 
-tptpDispatch[imported_Association, opts:OptionsPattern[TFindProof]] := If[
+tptpDispatch[imported_Association, opts : OptionsPattern[TFindProof]] := If[
     "SMT" === OptionValue[TFindProof, {opts}, Method],
     (* Ground SMT path: the congruence-closure dispatcher checks groundness
        (rejecting variable-bearing clauses with TFindProof::nonground) and
@@ -4256,12 +4216,9 @@ tptpDispatch[imported_Association, opts:OptionsPattern[TFindProof]] := If[
    OptionValue[TFindProof, {opts}, Method] -- is the reliable WL idiom for
    option-keyed dispatch: a bare OptionValue inside `/;` does not always see
    the supplied opts. *)
-TFindProof[conjecture_, axioms_List, opts:OptionsPattern[]] /;
-        ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
+TFindProof[conjecture_, axioms_List, opts : OptionsPattern[]] /; ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
     atpSmtEntail[conjecture, atpFlattenAxioms[axioms]];
-TFindProof[conjecture_, axioms_List,
-        returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] /;
-        ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
+TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] /; ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
     atpSmtProject[atpSmtEntail[conjecture, atpFlattenAxioms[axioms]], returnSpec];
 
 (* Project an atpSmtEntail result (a "Proved" decision Association or a
@@ -4280,15 +4237,10 @@ atpSmtProject[r_, _] := r;
    surface TFindProof[goal, hyps, "Counterexample"] works for Boolean goals
    without an explicit Method -> "SMT". *)
 atpBooleanGoalQ[goal_] :=
-    MatchQ[Head[goal],
-        And | Or | Not | Implies | Equivalent | Xor | Nand | Nor | Xnor] &&
-    FreeQ[goal, _Pattern | _Blank | _BlankSequence | _BlankNullSequence |
-        ForAll | Exists];
-TFindProof[goal_ /; atpBooleanGoalQ[goal], axioms_List,
-        opts : OptionsPattern[]] :=
+    MatchQ[Head[goal], And | Or | Not | Implies | Equivalent | Xor | Nand | Nor | Xnor] && FreeQ[goal, _Pattern | _Blank | _BlankSequence | _BlankNullSequence | ForAll | Exists];
+TFindProof[goal_ /; atpBooleanGoalQ[goal], axioms_List, opts : OptionsPattern[]] :=
     atpSmtEntail[goal, atpFlattenAxioms[axioms]];
-TFindProof[goal_ /; atpBooleanGoalQ[goal], axioms_List,
-        returnSpec_?atpReturnSpecQ, opts : OptionsPattern[]] :=
+TFindProof[goal_ /; atpBooleanGoalQ[goal], axioms_List, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     atpSmtProject[atpSmtEntail[goal, atpFlattenAxioms[axioms]], returnSpec];
 
 (* Pass Inactive[Equal] / Inactive[Unequal] THROUGH unchanged --
@@ -4357,21 +4309,9 @@ atpNormalizeAxioms[ax_List] :=
    options) so an options-only call like `TFindProof[axioms,
    TimeConstraint -> 10]` (the completion form) does not match here
    with the option read as a Rule axiom. *)
-TFindProof[conjecture_,
-        axiom : (_Equal | _Unequal | _ForAll | _TwoWayRule
-        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]
-        | Inactive[Rule][_, _] | Inactive[TwoWayRule][_, _]
-        | Rule[Except[MaxSteps | Method | TimeConstraint
-            | PortfolioFrontLoad | _String], _]),
-        opts:OptionsPattern[]] :=
+TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _TwoWayRule | Inactive[Equal][_, _] | Inactive[Unequal][_, _] | Inactive[Rule][_, _] | Inactive[TwoWayRule][_, _] | Rule[Except[MaxSteps | Method | TimeConstraint | PortfolioFrontLoad | _String], _]), opts : OptionsPattern[]] :=
     TFindProof[conjecture, {axiom}, opts];
-TFindProof[conjecture_,
-        axiom : (_Equal | _Unequal | _ForAll | _TwoWayRule
-        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]
-        | Inactive[Rule][_, _] | Inactive[TwoWayRule][_, _]
-        | Rule[Except[MaxSteps | Method | TimeConstraint
-            | PortfolioFrontLoad | _String], _]),
-        returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
+TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _TwoWayRule | Inactive[Equal][_, _] | Inactive[Unequal][_, _] | Inactive[Rule][_, _] | Inactive[TwoWayRule][_, _] | Rule[Except[MaxSteps | Method | TimeConstraint | PortfolioFrontLoad | _String], _]), returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     TFindProof[conjecture, {axiom}, returnSpec, opts];
 
 
@@ -4419,8 +4359,7 @@ TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
                 Method -> OptionValue[Method],
                 TimeConstraint -> OptionValue[TimeConstraint]],
             "ProofObject"]], {General::shdw}];
-TFindProof[conjecture_, axioms_List,
-        returnSpec_?atpReturnSpecQ, OptionsPattern[]] :=
+TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, OptionsPattern[]] :=
     Quiet[Block[{
             Global`a, Global`b, Global`c, Global`d, Global`e,
             Global`f, Global`g, Global`h, Global`i, Global`j,
@@ -4547,10 +4486,16 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
         (* status 1 == PROVED.  A non-PROVED run still returns a bundle
            (the ProofObject is $Failed) so the introspectives reflect it. *)
         If[ cRes["Status"] =!= 1,
-            Return[<|"enc" -> enc, "cRes" -> cRes,
-                "ProofObject" -> $Failed, "RelevantAxioms" -> relAx,
-                "AppliedMethod" -> OptionValue[Method],
-                "WallTime" -> atpWallTime|>]
+            Return[
+                <|
+                    "enc" -> enc,
+                    "cRes" -> cRes,
+                    "ProofObject" -> $Failed,
+                    "RelevantAxioms" -> relAx,
+                    "AppliedMethod" -> OptionValue[Method],
+                    "WallTime" -> atpWallTime
+                |>
+            ]
         ];
         extSteps = cRes["ExtSteps"];
         (* Preferred path: the no-completion EXT chain cites the
@@ -4684,10 +4629,14 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                 poB = tryBuild[False, $Failed];
                 If[ MatchQ[poB, _ProofObject], poB, $Failed]
             ];
-            <|"enc" -> enc, "cRes" -> cRes,
-                "ProofObject" -> poFinal, "RelevantAxioms" -> relAx,
+            <|
+                "enc" -> enc,
+                "cRes" -> cRes,
+                "ProofObject" -> poFinal,
+                "RelevantAxioms" -> relAx,
                 "AppliedMethod" -> OptionValue[Method],
-                "WallTime" -> atpWallTime|>
+                "WallTime" -> atpWallTime
+            |>
         ]
     ]]]]),
     "TATPError"
@@ -4748,24 +4697,23 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
                 <|"Variables" -> Union[varNames,
                     Cases[ds, s_Symbol /; atpXVarQ[s], {0, Infinity}]],
                   "Constants" -> {}, "Proof" -> ds|>]];
-        <|"enc" -> enc, "cRes" -> cRes, "ProofObject" -> po,
-          "RelevantAxioms" -> <|"Mode" -> None,
-              "Kept" -> axioms, "Dropped" -> {}|>,
-          "AppliedMethod" -> OptionValue[Method],
-          "WallTime" -> atpWallTime|>
+        <|
+            "enc" -> enc,
+            "cRes" -> cRes,
+            "ProofObject" -> po,
+            "RelevantAxioms" -> <|"Mode" -> None, "Kept" -> axioms, "Dropped" -> {}|>,
+            "AppliedMethod" -> OptionValue[Method],
+            "WallTime" -> atpWallTime
+        |>
     ],
     "TATPError"
 ];
 
 (* Single non-list axiom: auto-wrap and re-dispatch.  Same shape as
    the (conj, single_ax) wrap, at the completion entry. *)
-TFindProof[axiom : (_Equal | _Unequal | _ForAll
-        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
-        opts:OptionsPattern[]] :=
+TFindProof[axiom : (_Equal | _Unequal | _ForAll | Inactive[Equal][_, _] | Inactive[Unequal][_, _]), opts : OptionsPattern[]] :=
     TFindProof[{axiom}, opts];
-TFindProof[axiom : (_Equal | _Unequal | _ForAll
-        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
-        returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
+TFindProof[axiom : (_Equal | _Unequal | _ForAll | Inactive[Equal][_, _] | Inactive[Unequal][_, _]), returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     TFindProof[{axiom}, returnSpec, opts];
 
 (* Completion of an explicit axiom list.  Default return is
@@ -4780,8 +4728,7 @@ TFindProof[axioms_List, OptionsPattern[]] :=
                 Method -> OptionValue[Method],
                 TimeConstraint -> OptionValue[TimeConstraint]],
             "ProofObject"]];
-TFindProof[axioms_List, returnSpec_?atpReturnSpecQ,
-        OptionsPattern[]] :=
+TFindProof[axioms_List, returnSpec_ ? atpReturnSpecQ, OptionsPattern[]] :=
     Block[{$atpEmitForm = OptionValue["ProofForm"]},
         atpProjectReturn[
             atpCompletionBundle[atpNormalizeAxioms[axioms],
@@ -4793,13 +4740,12 @@ TFindProof[axioms_List, returnSpec_?atpReturnSpecQ,
 (* Completion of a named theory: resolve its axioms the same way the
    theory-prove forms do (unquantify + canonicalize), then complete. *)
 atpTheoryCompletion[theory_String, returnSpec_,
-        opts:OptionsPattern[TFindProof]] := Catch[
+        opts : OptionsPattern[TFindProof]] := Catch[
     Block[{axRaw, axioms},
         axRaw = AxiomaticTheory[theory];
         If[ ! ListQ[axRaw],
             Throw[Failure["TATPParseError",
-                <|"Reason" -> "AxiomaticTheory[\"" <> theory <>
-                    "\"] did not resolve to an axiom list"|>],
+                <|"Reason" -> "AxiomaticTheory[\"" <> theory <> "\"] did not resolve to an axiom list"|>],
                 "TATPError"]
         ];
         axioms = CanonicalizePatterns /@ (unquantifyFormula /@ axRaw);
@@ -4830,10 +4776,10 @@ TFindProof[theory_String, OptionsPattern[]] :=
    in user code keep working byte-identically. *)
 Options[TFindEquationalProof] = Options[TFindProof];
 TFindEquationalProof::badmethod = TFindProof::badmethod;
-TFindEquationalProof::badcpw    = TFindProof::badcpw;
-TFindEquationalProof::dropax    = TFindProof::dropax;
+TFindEquationalProof::badcpw = TFindProof::badcpw;
+TFindEquationalProof::dropax = TFindProof::dropax;
 TFindEquationalProof::badorient = TFindProof::badorient;
-TFindEquationalProof::badrel    = TFindProof::badrel;
+TFindEquationalProof::badrel = TFindProof::badrel;
 TFindEquationalProof[args___] := TFindProof[args];
 
 On[General::shdw];

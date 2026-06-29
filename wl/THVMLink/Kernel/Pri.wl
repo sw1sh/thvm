@@ -40,23 +40,23 @@
      TPriDrain[]                fire all queued callbacks; clear
      TPriCallbacks[]            inspect the slot -> fn registration *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[TPri, "TPri[fn$, val$, cont$] builds a PRI redex that, when wnf reduces it, forces val$ (firing kernel chains and ASSIGN side effects), enqueues the snapshotted value for the WL callback fn$ unless fn$ is None, then returns cont$.
+SetUsage[TPri, "TPri[fn$, val$, cont$] builds a PRI redex that, when wnf reduces it, forces val$ (firing kernel chains and ASSIGN side effects), enqueues the snapshotted value for the WL callback fn$ unless fn$ is None, then returns cont$.
 fn$ auto-registers under a fresh slot on first use and reuses that slot on later calls.
 TPri[slot$, val$, cont$] is the low-level form with an explicit integer slot; slot 0 is the pure-sequencer mode (no callback).
 Callbacks fire when the host calls TPriDrain[]; their return values are ignored."];
 
-GeneralUtilities`SetUsage[TPriForce, "TPriForce[val$, cont$] is sugar for TPri[0, val$, cont$]: a pure sequencer with no WL callback that forces val$ via wnf as a side effect and returns cont$."];
+SetUsage[TPriForce, "TPriForce[val$, cont$] is sugar for TPri[0, val$, cont$]: a pure sequencer with no WL callback that forces val$ via wnf as a side effect and returns cont$."];
 
-GeneralUtilities`SetUsage[TPriRegister, "TPriRegister[slot$, fn$] associates WL function fn$ with PRI slot slot$, returning slot$.
+SetUsage[TPriRegister, "TPriRegister[slot$, fn$] associates WL function fn$ with PRI slot slot$, returning slot$.
 Use it for explicit control over slot ids (e.g. cross-session stable slots); TPri[fn$, $$] auto-registers transparently in the common case.
 fn$ = None clears the slot."];
 
-GeneralUtilities`SetUsage[TPriDrain, "TPriDrain[] dequeues every (slot, value) pair recorded by TPri firings since the last drain, dispatches each to its registered WL callback, and returns the number of callbacks fired.
+SetUsage[TPriDrain, "TPriDrain[] dequeues every (slot, value) pair recorded by TPri firings since the last drain, dispatches each to its registered WL callback, and returns the number of callbacks fired.
 Slots with no registered callback are skipped silently."];
 
-GeneralUtilities`SetUsage[TPriCallbacks, "TPriCallbacks[] returns the current slot-to-fn registration as a read-only Association."];
+SetUsage[TPriCallbacks, "TPriCallbacks[] returns the current slot-to-fn registration as a read-only Association."];
 
 Begin["`Private`"];
 
@@ -64,16 +64,11 @@ Begin["`Private`"];
 $ThvmPrimPri = 16
 
 (* === bridge function bindings === *)
-$termNewPriFn  := $termNewPriFn  = load["thvm_wl_term_new_pri",
-    {Integer}, Integer]
-$priDrainFn    := $priDrainFn    = load["thvm_wl_pri_drain",
-    {}, {Integer, 1}]
-$priBindSlotFn   := $priBindSlotFn   = load["thvm_wl_bind_pri_slot",
-    {Integer, Integer}, Integer]
-$priUnbindSlotFn := $priUnbindSlotFn = load["thvm_wl_unbind_pri_slot",
-    {Integer}, Integer]
-$priLastCbIdFn   := $priLastCbIdFn   = load["thvm_wl_pri_last_cb_id",
-    {}, Integer]
+$termNewPriFn := $termNewPriFn = load["thvm_wl_term_new_pri", {Integer}, Integer]
+$priDrainFn := $priDrainFn = load["thvm_wl_pri_drain", {}, {Integer, 1}]
+$priBindSlotFn := $priBindSlotFn = load["thvm_wl_bind_pri_slot", {Integer, Integer}, Integer]
+$priUnbindSlotFn := $priUnbindSlotFn = load["thvm_wl_unbind_pri_slot", {Integer}, Integer]
+$priLastCbIdFn := $priLastCbIdFn = load["thvm_wl_pri_last_cb_id", {}, Integer]
 
 (* === slot -> fn registration ===
    Per-session.  Three paths in priority order:
@@ -96,10 +91,10 @@ $priLastCbIdFn   := $priLastCbIdFn   = load["thvm_wl_pri_last_cb_id",
    object for path (A).  Registration replaces; TPriRegister[slot,
    None] clears all three. *)
 $priCallbacks = <||>
-$priFnSlot    = <||>     (* fn -> slot (deduplicated) *)
-$priCbId      = <||>     (* slot -> LibraryLink callback id *)
+$priFnSlot = <||>     (* fn -> slot (deduplicated) *)
+$priCbId = <||>     (* slot -> LibraryLink callback id *)
 $priForeignCb = <||>     (* slot -> ForeignCallback (keep alive) *)
-$priNextSlot  = 1        (* slot 0 reserved for pure-sequencer *)
+$priNextSlot = 1        (* slot 0 reserved for pure-sequencer *)
 
 (* Bridge function loaders for paths (A) and (B).  Lazy: Needs[]
    the FFI paclet on first use; the load itself is also memoized
@@ -117,13 +112,11 @@ loadForeignBridge[name_String, type_] := Module[{r},
        the message channel flushes. *)
     Off[CompileUtilities`Symbols`SystemSymbolQ::shdw];
     r = Quiet @ ForeignFunctionLoad[$lib, name, type];
-    If[ !MatchQ[r, _ForeignFunction], $Failed, r]
+    If[! MatchQ[r, _ForeignFunction], $Failed, r]
 ]
 
-$priBindForeignFn   := $priBindForeignFn   = loadForeignBridge[
-    "thvm_pri_bind_foreign",   {"CInt", "OpaqueRawPointer"} -> "Void"]
-$priUnbindForeignFn := $priUnbindForeignFn = loadForeignBridge[
-    "thvm_pri_unbind_foreign", {"CInt"} -> "Void"]
+$priBindForeignFn := $priBindForeignFn = loadForeignBridge["thvm_pri_bind_foreign", {"CInt", "OpaqueRawPointer"} -> "Void"]
+$priUnbindForeignFn := $priUnbindForeignFn = loadForeignBridge["thvm_pri_unbind_foreign", {"CInt"} -> "Void"]
 
 (* Wrap a user fn so it returns the right shape for the int64 return
    FFI signature: 0 means "no override, use cont"; any other Integer
@@ -132,9 +125,9 @@ $priUnbindForeignFn := $priUnbindForeignFn = loadForeignBridge[
    Already-wrapped CFs (returning Integer directly) pass through. *)
 wrapForeignFn[fn_] := v |-> With[{r = fn[TTerm[v]]},
     Which[
-        IntegerQ[r],          r,           (* explicit override *)
-        MatchQ[r, _TTerm],    ttermRaw[r], (* TTerm wrapper *)
-        True,                 0            (* trace mode *)
+        IntegerQ[r], r, (* explicit override *)
+        MatchQ[r, _TTerm], ttermRaw[r], (* TTerm wrapper *)
+        True, 0 (* trace mode *)
     ]
 ]
 
@@ -143,18 +136,15 @@ wrapForeignFn[fn_] := v |-> With[{r = fn[TTerm[v]]},
    int64 return path works) or an already-built ForeignCallback object
    (used as-is, signature must be {"Integer64"} -> "Integer64"). *)
 tryConnectForeign[slot_Integer, fcb_ /; MatchQ[fcb, _ManagedObject]] := (
-    If[ $priBindForeignFn === $Failed, Return[$Failed]];
+    If[$priBindForeignFn === $Failed, Return[$Failed]];
     $priBindForeignFn[slot, fcb];
     $priForeignCb[slot] = fcb;
     fcb
 )
 tryConnectForeign[slot_Integer, fn_] := Module[{cb},
-    If[ $priBindForeignFn === $Failed, Return[$Failed]];
-    cb = Quiet @ Check[
-        CreateForeignCallback[wrapForeignFn[fn],
-            {"Integer64"} -> "Integer64"],
-        $Failed];
-    If[ cb === $Failed, Return[$Failed]];
+    If[$priBindForeignFn === $Failed, Return[$Failed]];
+    cb = Quiet @ Check[CreateForeignCallback[wrapForeignFn[fn], {"Integer64"} -> "Integer64"], $Failed];
+    If[cb === $Failed, Return[$Failed]];
     $priBindForeignFn[slot, cb];
     $priForeignCb[slot] = cb;     (* must outlive the binding *)
     cb
@@ -162,11 +152,10 @@ tryConnectForeign[slot_Integer, fn_] := Module[{cb},
 
 (* Path (B): connect a CompiledFunction. *)
 tryConnectCompiled[slot_Integer, fn_CompiledFunction] := Module[{ok, id},
-    ok = Quiet @ Check[ConnectLibraryCallbackFunction["thvm_pri_cb", fn],
-                       $Failed];
-    If[ ok =!= True, Return[$Failed]];
+    ok = Quiet @ Check[ConnectLibraryCallbackFunction["thvm_pri_cb", fn], $Failed];
+    If[ok =!= True, Return[$Failed]];
     id = $priLastCbIdFn[];
-    If[ ! IntegerQ[id] || id <= 0, Return[$Failed]];
+    If[! IntegerQ[id] || id <= 0, Return[$Failed]];
     $priBindSlotFn[slot, id];
     $priCbId[slot] = id;
     id
@@ -179,22 +168,24 @@ clearSync[slot_Integer] := (
         $priCbId = KeyDrop[$priCbId, slot]
     ];
     If[ KeyExistsQ[$priForeignCb, slot],
-        If[ $priUnbindForeignFn =!= $Failed, $priUnbindForeignFn[slot]];
+        If[$priUnbindForeignFn =!= $Failed, $priUnbindForeignFn[slot]];
         $priForeignCb = KeyDrop[$priForeignCb, slot]
     ];
 )
 
 TPriRegister[slot_Integer, fn_] := Module[{result},
     clearSync[slot];
-    If[ fn === None,
+    If[ fn === None
+        ,
         $priCallbacks = KeyDrop[$priCallbacks, slot];
-        $priFnSlot    = Select[$priFnSlot, # =!= slot &],
+        $priFnSlot = Select[$priFnSlot, # =!= slot &]
+        ,
         $priCallbacks[slot] = fn;
-        $priFnSlot[fn]      = slot;
+        $priFnSlot[fn] = slot;
         (* Try foreign first (arbitrary WL), fall back to compiled
            (numerical only), else just queue. *)
         result = tryConnectForeign[slot, fn];
-        If[ result === $Failed, tryConnectCompiled[slot, fn]]
+        If[result === $Failed, tryConnectCompiled[slot, fn]]
     ];
     slot
 ]
@@ -221,34 +212,25 @@ ensureSlot[fn_] := If[ KeyExistsQ[$priFnSlot, fn],
    third arg is supplied. *)
 TPri[slot_Integer, val_, cont_] := (
     ensureInit[];
-    TApp[
-        TApp[
-            TApp[TTerm[$termNewPriFn[$ThvmPrimPri]], TNum[slot]],
-            val
-        ],
-        cont
-    ]
+    TApp[TApp[TApp[TTerm[$termNewPriFn[$ThvmPrimPri]], TNum[slot]], val], cont]
 )
 
-TPri[fn_ /; ! IntegerQ[fn], val_, cont_] :=
-    TPri[ensureSlot[fn], val, cont]
+TPri[fn_ /; ! IntegerQ[fn], val_, cont_] := TPri[ensureSlot[fn], val, cont]
 
 TPriForce[val_, cont_] := TPri[0, val, cont]
 
 (* === drain: poll the C queue, fire callbacks, clear === *)
 TPriDrain[] := Module[{raw, n, fired = 0},
     raw = Normal @ $priDrainFn[];
-    n   = Length[raw] / 2;
+    n = Length[raw] / 2;
     Do[
-        With[{
-            slot  = raw[[2 i - 1]],
-            valTm = TTerm[raw[[2 i]]]
-        },
+        With[{slot = raw[[2 i - 1]], valTm = TTerm[raw[[2 i]]]},
             If[ KeyExistsQ[$priCallbacks, slot],
                 $priCallbacks[slot][valTm];
                 fired += 1
             ]
-        ],
+        ]
+        ,
         {i, n}
     ];
     fired

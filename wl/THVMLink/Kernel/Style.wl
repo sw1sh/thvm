@@ -35,12 +35,12 @@ Begin["`Private`"];
      "TriangleUp"    apex at top    (APP, SUP)
      "Disk"          circle of radius Min[sz]
      "Ring"          unfilled circle (ERA) *)
-$shapeDraw["Rect"]         := {pos, sz} |-> Rectangle[pos - sz, pos + sz, RoundingRadius -> 0.18 Min[sz]]
+$shapeDraw["Rect"] := {pos, sz} |-> Rectangle[pos - sz, pos + sz, RoundingRadius -> 0.18 Min[sz]]
 $shapeDraw["TriangleDown"] := {pos, sz} |-> Triangle[{pos + {-sz[[1]], sz[[2]]}, pos + {sz[[1]], sz[[2]]}, pos + {0, -sz[[2]]}}]
-$shapeDraw["TriangleUp"]   := {pos, sz} |-> Triangle[{pos + {-sz[[1]], -sz[[2]]}, pos + {sz[[1]], -sz[[2]]}, pos + {0, sz[[2]]}}]
-$shapeDraw["Disk"]         := {pos, sz} |-> Disk[pos, Min[sz]]
-$shapeDraw["Ring"]         := {pos, sz} |-> {AbsoluteThickness[1.4], Circle[pos, Min[sz]]}
-$shapeDraw[_]              := $shapeDraw["Rect"]
+$shapeDraw["TriangleUp"] := {pos, sz} |-> Triangle[{pos + {-sz[[1]], -sz[[2]]}, pos + {sz[[1]], -sz[[2]]}, pos + {0, sz[[2]]}}]
+$shapeDraw["Disk"] := {pos, sz} |-> Disk[pos, Min[sz]]
+$shapeDraw["Ring"] := {pos, sz} |-> {AbsoluteThickness[1.4], Circle[pos, Min[sz]]}
+$shapeDraw[_] := $shapeDraw["Rect"]
 
 (* Color helpers.  All renderers use LightDarkSwitched so the same
    palette reads in both themes. *)
@@ -48,9 +48,9 @@ nodeFill[c_] := LightDarkSwitched[Lighter[c, 0.6], Darker[c, 0.4]]
 nodeEdge[c_] := LightDarkSwitched[c, Lighter[c, 0.2]]
 
 styleEntry[shape_String, color_] := <|
-    "Fill"      -> nodeFill[color],
-    "Edge"      -> nodeEdge[color],
-    "Shape"     -> shape,
+    "Fill" -> nodeFill[color],
+    "Edge" -> nodeEdge[color],
+    "Shape" -> shape,
     "TextColor" -> LightDarkSwitched[Black, White]
 |>
 
@@ -59,36 +59,36 @@ styleEntry[shape_String, color_] := <|
    ADD), it should still funnel back into one of these strings. *)
 $nodeStyle = <|
     (* IC compounds *)
-    "LAM"         -> styleEntry["TriangleDown", StandardGreen],
-    "APP"         -> styleEntry["TriangleUp",   StandardBlue],
-    "SUP"         -> styleEntry["TriangleUp",   StandardOrange],
-    "DUP"         -> styleEntry["TriangleDown", StandardPurple],
+    "LAM" -> styleEntry["TriangleDown", StandardGreen],
+    "APP" -> styleEntry["TriangleUp", StandardBlue],
+    "SUP" -> styleEntry["TriangleUp", StandardOrange],
+    "DUP" -> styleEntry["TriangleDown", StandardPurple],
     (* IC leaves *)
-    "VAR"         -> styleEntry["Disk",         StandardGreen],
-    "DP0"         -> styleEntry["Disk",         StandardPurple],
-    "DP1"         -> styleEntry["Disk",         StandardPurple],
-    "NUM"         -> styleEntry["Disk",         StandardGray],
-    "ERA"         -> styleEntry["Ring",         StandardGray],
+    "VAR" -> styleEntry["Disk", StandardGreen],
+    "DP0" -> styleEntry["Disk", StandardPurple],
+    "DP1" -> styleEntry["Disk", StandardPurple],
+    "NUM" -> styleEntry["Disk", StandardGray],
+    "ERA" -> styleEntry["Ring", StandardGray],
     (* Compute UOPs *)
-    "UOP"         -> styleEntry["Rect",         StandardBlue],
-    "CONST"       -> styleEntry["Disk",         StandardYellow],
-    "REDUCE"      -> styleEntry["Rect",         StandardPurple],
-    "GRAD"        -> styleEntry["Rect",         StandardRed],
-    "KERNEL"      -> styleEntry["Rect",         StandardOrange],
+    "UOP" -> styleEntry["Rect", StandardBlue],
+    "CONST" -> styleEntry["Disk", StandardYellow],
+    "REDUCE" -> styleEntry["Rect", StandardPurple],
+    "GRAD" -> styleEntry["Rect", StandardRed],
+    "KERNEL" -> styleEntry["Rect", StandardOrange],
     (* Tensor handles *)
-    "TEN"         -> styleEntry["Rect",         StandardCyan],
-    "ExternalTEN" -> styleEntry["Rect",         Darker[StandardCyan, 0.2]],
+    "TEN" -> styleEntry["Rect", StandardCyan],
+    "ExternalTEN" -> styleEntry["Rect", Darker[StandardCyan, 0.2]],
     (* Lazy / book / case nodes *)
-    "REF"         -> styleEntry["Disk",         StandardYellow],
-    "ALO"         -> styleEntry["TriangleDown", Darker[StandardYellow, 0.15]],
-    "CTR"         -> styleEntry["TriangleDown", StandardRed],
-    "MAT"         -> styleEntry["TriangleUp",   StandardRed],
-    "OP2"         -> styleEntry["Rect",         StandardBlue],
+    "REF" -> styleEntry["Disk", StandardYellow],
+    "ALO" -> styleEntry["TriangleDown", Darker[StandardYellow, 0.15]],
+    "CTR" -> styleEntry["TriangleDown", StandardRed],
+    "MAT" -> styleEntry["TriangleUp", StandardRed],
+    "OP2" -> styleEntry["Rect", StandardBlue],
     (* Dynamic-label SUP / DUP (HVM4 DSU / DDU): same shapes as
        SUP / DUP, darker shade marks them as the strict-on-label
        variant. *)
-    "DSU"         -> styleEntry["TriangleUp",   Darker[StandardOrange, 0.25]],
-    "DDU"         -> styleEntry["TriangleDown", Darker[StandardPurple, 0.25]]
+    "DSU" -> styleEntry["TriangleUp", Darker[StandardOrange, 0.25]],
+    "DDU" -> styleEntry["TriangleDown", Darker[StandardPurple, 0.25]]
 |>
 
 (* Lookup with a sensible fallback so a new tag accidentally
@@ -101,25 +101,19 @@ styleFor[type_String] := Lookup[$nodeStyle, type, $nodeStyle["UOP"]]
    style; label is anything Pane can render (string, Column, Row).
    Pane's "ShrinkToFit" makes long labels readable without an
    external Inset tweak. *)
-drawNode[pos_, sz_, type_String, label_] := Block[{
-    s = styleFor[type],
-    isHollow = MemberQ[{"Ring"}, styleFor[type]["Shape"]]
-},
+drawNode[pos_, sz_, type_String, label_] := Block[{s = styleFor[type], isHollow = MemberQ[{"Ring"}, styleFor[type]["Shape"]]},
     {
-        If[ isHollow, {}, FaceForm[s["Fill"]]],
+        If[isHollow, {}, FaceForm[s["Fill"]]],
         EdgeForm[Directive[s["Edge"], AbsoluteThickness[1.5]]],
         $shapeDraw[s["Shape"]][pos, sz],
         If[ label === None || label === "" || isHollow,
             {},
             Inset[
                 Pane[
-                    Style[label,
-                        FontFamily -> "Source Code Pro",
-                        FontSize   -> 9,
-                        FontColor  -> s["TextColor"]],
+                    Style[label, FontFamily -> "Source Code Pro", FontSize -> 9, FontColor -> s["TextColor"]],
                     {Round[160 sz[[1]]], Round[140 sz[[2]]]},
                     ImageSizeAction -> "ShrinkToFit",
-                    Alignment       -> Center
+                    Alignment -> Center
                 ],
                 pos, Center, {2 sz[[1]], 2 sz[[2]]}
             ]
@@ -133,10 +127,7 @@ drawNode[pos_, sz_, type_String, label_] := Block[{
 nodeShapeFn[type_String, label_] := {pos, vid, sz} |-> drawNode[pos, sz, type, label]
 
 (* Common edge style (every renderer uses the same arrow look). *)
-edgeStyleDirective := Directive[
-    LightDarkSwitched[Darker[StandardBlue, 0.1], Lighter[StandardBlue, 0.2]],
-    AbsoluteThickness[1.4]
-]
+edgeStyleDirective := Directive[LightDarkSwitched[Darker[StandardBlue, 0.1], Lighter[StandardBlue, 0.2]], AbsoluteThickness[1.4]]
 
 End[];
 EndPackage[];

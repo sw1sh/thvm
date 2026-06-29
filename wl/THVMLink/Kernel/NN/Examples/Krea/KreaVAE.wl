@@ -47,11 +47,14 @@ Begin["`Private`"];
    {Co,Ci,kh,kw} slice at time index kT (1-based) -- the only temporal slice that
    acts on a single frame.  A 1x1x1 conv collapses to {Co,Ci,1,1}. *)
 krVaeLastSlice[w_] := With[{d = Dimensions[w]},
-    TUOpReshape[w[[All, All, d[[3]]]], {d[[1]], d[[2]], d[[4]], d[[5]]}]]
+    TUOpReshape[w[[All, All, d[[3]]]], {d[[1]], d[[2]], d[[4]], d[[5]]}]
+]
 
 krVaeConv[x_, w_, b_, pad_] := With[{w2 = krVaeLastSlice[w]},
     With[{xp = If[pad === 0, x, TUOpPad[x, {{0, 0}, {pad, pad}, {pad, pad}}]]},
-        TConv2DIm2ColPool[xp, w2, b]]]
+        TConv2DIm2ColPool[xp, w2, b]
+    ]
+]
 
 (* a 1x1 conv given an ALREADY-2D {Co,Ci,1,1} weight (the attention to_qkv/proj
    stored {Co,Ci,1,1}; no temporal slice). *)
@@ -70,7 +73,8 @@ krVaeNorm[x_, gamma_, eps_] := Module[{c, hh, ww, sq, denom, g},
     g = TUOpReshape[gamma, {c, 1, 1}];
     TUOpMul[
         TUOpMul[TUOpMul[x, TUOpExpand[denom, {c, hh, ww}] // TUOpRecip], TUOpConst[N[Sqrt[c]]]],
-        TUOpExpand[g, {c, hh, ww}]]
+        TUOpExpand[g, {c, hh, ww}]
+    ]
 ]
 
 (* === resnet block: shortcut + (norm1 -> SiLU -> conv3x3 -> norm2 -> SiLU ->
@@ -82,8 +86,10 @@ krVaeResBlock[x_, W_, eps_] := Module[{h, sc},
     h = krVaeConv[TSiLU @ krVaeNorm[h, W["norm2.gamma"], eps], W["conv2.weight"], W["conv2.bias"], 1];
     sc = If[ KeyExistsQ[W, "conv_shortcut.weight"],
         (* conv_shortcut is a 1x1x1 causal conv -> last-slice {Co,Ci,1,1} 1x1 conv. *)
-        krVaeConv[x, W["conv_shortcut.weight"], W["conv_shortcut.bias"], 0],
-        x];
+        krVaeConv[x, W["conv_shortcut.weight"], W["conv_shortcut.bias"], 0]
+        ,
+        x
+    ];
     TUOpAdd[sc, h]
 ]
 
@@ -113,10 +119,14 @@ krVaeAttn[x_, W_, eps_] := Module[{c, hh, ww, n, hn, qkv, q, k, v, scores, attn,
 
 krVaeUpBlock[x_, resBlocks_List, upConv_, eps_] := Module[{h},
     h = Fold[krVaeResBlock[#1, #2, eps] &, x, resBlocks];
-    If[ upConv === None, h,
+    If[ upConv === None,
+        h
+        ,
         (* resample.1.weight is a 2-D Conv2d {Co,Ci,kh,kw} (NOT 3-D); pad 1. *)
         With[{up = TUpsample2x[h]},
-            TConv2DIm2ColPool[TUOpPad[up, {{0, 0}, {1, 1}, {1, 1}}], upConv["weight"], upConv["bias"]]]]
+            TConv2DIm2ColPool[TUOpPad[up, {{0, 0}, {1, 1}, {1, 1}}], upConv["weight"], upConv["bias"]]
+        ]
+    ]
 ]
 
 (* === latent denorm: z {z_dim, gH, gW} *= latents_std (per channel) += mean.
@@ -137,8 +147,7 @@ krVaeDenorm[z_, mean_List, std_List] := Module[{c, hh, ww, m, s},
    3 up-blocks upsample (the first three), the last does not -> /8 spatial
    upsampling on the (already /8 VAE-downsampled) latent recovers full res. *)
 
-krVaeDecode[z_, W_, wsub_, cfg_] := Module[
-    {eps, dimMult, nRes, nUp, z2, h, i, up, resB},
+krVaeDecode[z_, W_, wsub_, cfg_] := Module[{eps, dimMult, nRes, nUp, z2, h, i, up, resB},
     eps = cfg["eps"];
     dimMult = cfg["dimMult"];
     nRes = cfg["numResBlocks"];
@@ -152,11 +161,8 @@ krVaeDecode[z_, W_, wsub_, cfg_] := Module[
     h = krVaeAttn[h, wsub["decoder.mid_block.attentions.0."], eps];
     h = krVaeResBlock[h, wsub["decoder.mid_block.resnets.1."], eps];
     (* up-blocks: each has nRes+1 ResBlocks; all but the last upsample 2x. *)
-    Do[ resB = Table[wsub["decoder.up_blocks." <> ToString[i] <> ".resnets." <> ToString[#] <> "."] &[m],
-            {m, 0, nRes}];
-        up = If[ i < nUp - 1,
-            wsub["decoder.up_blocks." <> ToString[i] <> ".upsamplers.0.resample.1."],
-            None];
+    Do[ resB = Table[wsub["decoder.up_blocks." <> ToString[i] <> ".resnets." <> ToString[#] <> "."] &[m], {m, 0, nRes}];
+        up = If[ i < nUp - 1, wsub["decoder.up_blocks." <> ToString[i] <> ".upsamplers.0.resample.1."], None];
         h = TRealize @ krVaeUpBlock[h, resB, up, eps],
         {i, 0, nUp - 1}];
     (* head: norm_out (L2-channel) -> SiLU -> conv_out (3x3 ->3) -> clip(-1,1) -> [0,1]. *)

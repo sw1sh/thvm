@@ -10,9 +10,9 @@
    WolframInstitute`THVMLink`ATP`Private` context, so it references ATP.wl's
    dispatches and helpers by bare name. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`"}];
 
-GeneralUtilities`SetUsage[TFindStringProof, "TFindStringProof[thm$, axioms$] proves a string-rewriting theorem over the multiway/semi-Thue axioms and returns the ProofObject.
+SetUsage[TFindStringProof, "TFindStringProof[thm$, axioms$] proves a string-rewriting theorem over the multiway/semi-Thue axioms and returns the ProofObject.
 Words are encoded as right-nested CenterDot terms over one symbol per character ('ABC' encodes to A\[CenterDot](B\[CenterDot]C)), with the associativity bridge axiom appended so a rewrite applies at any position of a word; the encoding follows the Wolfram Function Repository FindStringProof.
 An axiom written 'BA' -> 'AB' is installed as a PRE-ORIENTED rewrite rule (one-directional string rewriting); an axiom written {'BA', 'AB'}, 'BA' == 'AB', or 'BA' <-> 'AB' is an equation the engine orients itself.
 A theorem is a pair in any of the same shapes (direction is meaningless for a goal); a list of theorems is a multi-goal conjunction returning ONE ProofObject with a Hypothesis/Conclusion row pair per conjunct.
@@ -24,7 +24,7 @@ An optional last argument picks the TFindProof return spec ('Status', 'Path', $$
    below resolve to the same public symbol regardless of load order. *)
 TFindEquationalPath;
 
-GeneralUtilities`SetUsage[TStringPath, "TStringPath[thm$, axioms$] proves a string-rewriting theorem (TFindStringProof shapes) and returns the rewrite path decoded back to plain strings: the list of words from the theorem's source word to its target word.
+SetUsage[TStringPath, "TStringPath[thm$, axioms$] proves a string-rewriting theorem (TFindStringProof shapes) and returns the rewrite path decoded back to plain strings: the list of words from the theorem's source word to its target word.
 Returns $Failed when the goal is not proved.  Intermediate CenterDot re-bracketings introduced by the associativity bridge decode to the same word; adjacent duplicates are deleted."];
 
 (* Forward declarations: the Kernel loader's canonical string sort
@@ -50,23 +50,18 @@ Begin["`Private`"];
    throws the TATPError shape TFindProof surfaces as $Failed. *)
 atpStringToWord[s_String] := Block[{chars = Characters[s]},
     If[ chars === {} || ! AllTrue[chars, StringMatchQ[#, LetterCharacter] &],
-        Throw[Failure["TATPParseError",
-            <|"Word" -> s, "Reason" -> "expected a nonempty word of letters"|>],
-            "TATPError"]
+        Throw[Failure["TATPParseError", <|"Word" -> s, "Reason" -> "expected a nonempty word of letters"|>], "TATPError"]
     ];
     (* Quiet the shdw chatter a fresh Global`C / Global`D / etc emits
        when it shadows the System symbol of the same name. *)
-    Fold[CenterDot[#2, #1] &,
-        Reverse[Quiet[Symbol["Global`" <> #], {General::shdw}] & /@ chars]]
+    Fold[CenterDot[#2, #1] &, Reverse[Quiet[Symbol["Global`" <> #], {General::shdw}] & /@ chars]]
 ]
 
 (* Inverse: flatten ANY CenterDot bracketing back to the plain string.
    Path intermediates re-bracket through the associativity bridge, so
    the decode must not assume the right-comb shape. *)
 atpWordToString[w_] := Block[{leaves = Flatten[w //. CenterDot[x_, y_] :> {x, y}]},
-    If[ AllTrue[leaves, MatchQ[#, _Symbol] &],
-        StringJoin[SymbolName /@ leaves],
-        $Failed]
+    If[AllTrue[leaves, MatchQ[#, _Symbol] &], StringJoin[SymbolName /@ leaves], $Failed]
 ]
 
 (* One string-rewriting item (axiom or theorem) in engine shape.  A
@@ -80,10 +75,7 @@ atpStringItem[l_String == r_String] :=
     Inactive[Equal][atpStringToWord[l], atpStringToWord[r]]
 atpStringItem[{l_String, r_String}] :=
     Inactive[Equal][atpStringToWord[l], atpStringToWord[r]]
-atpStringItem[bad_] := Throw[Failure["TATPParseError",
-    <|"Item" -> bad,
-      "Reason" -> "expected a word pair: \"l\" -> \"r\", \"l\" == \"r\", \"l\" <-> \"r\", or {\"l\", \"r\"}"|>],
-    "TATPError"]
+atpStringItem[bad_] := Throw[Failure["TATPParseError", <|"Item" -> bad, "Reason" -> "expected a word pair: \"l\" -> \"r\", \"l\" == \"r\", \"l\" <-> \"r\", or {\"l\", \"r\"}"|>], "TATPError"]
 
 (* A theorem's direction is meaningless (the goal is an equation), so
    normalize Rule theorems to equations; only AXIOMS keep Rule's
@@ -99,11 +91,8 @@ atpStringGoal[item_] := atpStringItem[item]
    Global`, so a Private-context variable never compares equal on the
    way back and the ProofObject collapses to $Failed.  Multi-character
    names cannot collide with single-letter word symbols. *)
-$atpStringAssoc = With[{
-    x = Symbol["Global`x$w"], y = Symbol["Global`y$w"],
-    z = Symbol["Global`z$w"]},
-    ForAll[{x, y, z},
-        CenterDot[x, CenterDot[y, z]] == CenterDot[CenterDot[x, y], z]]]
+$atpStringAssoc = With[{x = Symbol["Global`x$w"], y = Symbol["Global`y$w"], z = Symbol["Global`z$w"]},
+    ForAll[{x, y, z}, CenterDot[x, CenterDot[y, z]] == CenterDot[CenterDot[x, y], z]]]
 
 (* === TFindStringProof ============================================== *)
 
@@ -118,10 +107,8 @@ atpStringAxioms[{l_String, r_String}] := {atpStringItem[{l, r}]}
 atpStringAxioms[axs_List] := atpStringItem /@ axs
 atpStringAxioms[ax_] := {atpStringItem[ax]}
 
-TFindStringProof[thms_, axioms_, opts:OptionsPattern[TFindProof]] :=
-    TFindStringProof[thms, axioms, "ProofObject", opts]
-TFindStringProof[thms_, axioms_,
-        returnSpec_?atpReturnSpecQ, opts:OptionsPattern[TFindProof]] := Catch[
+TFindStringProof[thms_, axioms_, opts : OptionsPattern[TFindProof]] := TFindStringProof[thms, axioms, "ProofObject", opts]
+TFindStringProof[thms_, axioms_, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[TFindProof]] := Catch[
     Block[{
         goals = Replace[atpStringGoals[thms], {g_} :> g],
         axs = Append[atpStringAxioms[axioms], $atpStringAssoc],
@@ -135,8 +122,7 @@ TFindStringProof[thms_, axioms_,
         $Context = "Global`",
         $ContextPath = Prepend[DeleteCases[$ContextPath, "Global`"], "Global`"]
     },
-        TFindProof[goals, axs, returnSpec, opts] /.
-            EquationalLogic -> StringLogic
+        TFindProof[goals, axs, returnSpec, opts] /. EquationalLogic -> StringLogic
     ],
     "TATPError"
 ]
@@ -162,47 +148,33 @@ atpRowEq[row_] := Replace[row["Statement"], {
    walker (ATP_EquationalPath.wl) leans on for proofs whose steps its
    upstream unifier cannot reconstruct -- notably string-rewriting
    CriticalPairLemmas. *)
-atpDatasetGoalPath[rows_Association, g_Integer] := Block[{
-    hypKey = {"Hypothesis", g}, concKey = {"Conclusion", g},
-    walk, eqs, lSeq, rSeq
-},
-    If[ ! KeyExistsQ[rows, hypKey] || ! KeyExistsQ[rows, concKey],
-        Return[$Failed]];
+atpDatasetGoalPath[rows_Association, g_Integer] := Block[{hypKey = {"Hypothesis", g}, concKey = {"Conclusion", g}, walk, eqs, lSeq, rSeq},
+    If[! KeyExistsQ[rows, hypKey] || ! KeyExistsQ[rows, concKey], Return[$Failed]];
     (* The per-goal chain is linear: walk backward from the Conclusion
        via Proof.Input until the Hypothesis (bounded by the row count,
        so a malformed cyclic Input chain cannot loop). *)
-    walk = NestWhileList[rows[#]["Proof"]["Input"] &, concKey,
-        # =!= hypKey && KeyExistsQ[rows, #] &, 1, Length[rows] + 1];
-    If[ Last[walk] =!= hypKey, Return[$Failed]];
+    walk = NestWhileList[rows[#]["Proof"]["Input"] &, concKey, # =!= hypKey && KeyExistsQ[rows, #] &, 1, Length[rows] + 1];
+    If[Last[walk] =!= hypKey, Return[$Failed]];
     eqs = atpRowEq[rows[#]] & /@ Reverse[walk];
-    If[ MemberQ[eqs, $Failed], Return[$Failed]];
+    If[MemberQ[eqs, $Failed], Return[$Failed]];
     lSeq = First /@ Split[eqs[[All, 1]]];
     rSeq = First /@ Split[eqs[[All, 2]]];
-    If[ Last[lSeq] === Last[rSeq],
-        Join[lSeq, Rest @ Reverse @ rSeq],
-        $Failed]
+    If[Last[lSeq] === Last[rSeq], Join[lSeq, Rest @ Reverse @ rSeq], $Failed]
 ]
 
 (* The bare path off a ProofObject: one path per Hypothesis, the single
    path when there is one goal.  $Failed when no chain reconstructs. *)
-atpDatasetEqPath[po_ProofObject] := Block[{
-    rows = Association @ Normal @ po["ProofDataset"], goals
-},
-    If[ ! AssociationQ[rows], Return[$Failed]];
+atpDatasetEqPath[po_ProofObject] := Block[{rows = Association @ Normal @ po["ProofDataset"], goals},
+    If[! AssociationQ[rows], Return[$Failed]];
     goals = Sort @ Cases[Keys[rows], {"Hypothesis", g_Integer} :> g];
-    Replace[atpDatasetGoalPath[rows, #] & /@ goals, {
-        {} -> $Failed,
-        {single_} :> single
-    }]
+    Replace[atpDatasetGoalPath[rows, #] & /@ goals, {{} -> $Failed, {single_} :> single}]
 ]
 
 (* === TStringPath ==================================================== *)
 
 atpSquashDups[l_List] := First /@ Split[l]
 
-TStringPath[thms_, axioms_, opts:OptionsPattern[TFindProof]] := Block[{
-    path = TFindStringProof[thms, axioms, "Path", opts]
-},
+TStringPath[thms_, axioms_, opts : OptionsPattern[TFindProof]] := Block[{path = TFindStringProof[thms, axioms, "Path", opts]},
     (* The prove-time "Path" reads the engine's live goal chain, which is
        not always recorded for a multi-goal conjunction.  Fall back to
        re-walking a ProofObject's proof dataset, which reconstructs the
@@ -210,7 +182,7 @@ TStringPath[thms_, axioms_, opts:OptionsPattern[TFindProof]] := Block[{
        the ProofObject. *)
     If[ path === $Failed,
         With[{po = TFindStringProof[thms, axioms, "ProofObject", opts]},
-            If[ MatchQ[po, _ProofObject], path = atpDatasetEqPath[po]]]
+            If[MatchQ[po, _ProofObject], path = atpDatasetEqPath[po]]]
     ];
     Which[
         path === $Failed, $Failed,

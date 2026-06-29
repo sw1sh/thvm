@@ -7,9 +7,9 @@
    and it shares the WolframInstitute`THVMLink`ATP`Private` context, so it references
    ATP.wl's loaders, encoder, and helpers by bare name. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
 
-GeneralUtilities`SetUsage[TRelevantAxioms, "TRelevantAxioms[conjecture$, axioms$] reports which axioms the relevance filter keeps versus drops for proving conjecture$, without running a proof.
+SetUsage[TRelevantAxioms, "TRelevantAxioms[conjecture$, axioms$] reports which axioms the relevance filter keeps versus drops for proving conjecture$, without running a proof.
 TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.
 Returns an association with keys \"Mode\", \"Kept\" (a list of axioms), and \"Dropped\" (a list of associations with keys \"Axiom\", \"Symbols\", \"Reason\").
 The relevance mode is set by the Method \"AxiomRelevance\" suboption: None keeps all; \"Safe\" (default) drops only confined dead-weight axioms (sound and completeness-preserving); \"Connected\" applies symbol-reachability pruning (heuristic); \"SInE\" applies SInE premise selection. \"Connected\" and \"SInE\" accept tuning options ({\"Connected\", \"FrequencyCutoff\", \"MaxGenerations\"}, {\"SInE\", \"SineTolerance\", \"SineDepth\", \"SineGenerality\"}); see the ATP documentation for the full option surface."];
@@ -49,31 +49,23 @@ atpFnSyms[expr_] := Block[{vars, patternVars, body},
        axiom shape (an axiom without an outer ForAll wrapper).  Walk
        the expression for Pattern wrappers and collect their first
        arg. *)
-    patternVars = DeleteDuplicates @
-        Cases[expr, Verbatim[Pattern][s_Symbol, _] :> s, {0, Infinity}];
+    patternVars = DeleteDuplicates @ Cases[expr, Verbatim[Pattern][s_Symbol, _] :> s, {0, Infinity}];
     body = expr /. ForAll[_, e_] :> e;
     (* Heads -> True is essential here: the discriminating function
        symbol is usually an operator (CenterDot, OverTilde, ...)
        appearing as a HEAD, which Cases skips by default. *)
-    DeleteDuplicates @ DeleteCases[
-        Cases[body, s_Symbol, {0, Infinity}, Heads -> True],
-        Alternatives @@ Join[vars, patternVars,
-            {Equal, Inactive, ForAll, Exists, List, And, Or, Not,
-             Implies, Pattern, Blank, HoldPattern, Verbatim, Rule}]]
+    DeleteDuplicates @ DeleteCases[Cases[body, s_Symbol, {0, Infinity}, Heads -> True], Alternatives @@ Join[vars, patternVars, {Equal, Inactive, ForAll, Exists, List, And, Or, Not, Implies, Pattern, Blank, HoldPattern, Verbatim, Rule}]]
 ]
 
 (* {lhs, rhs} symbol form of an axiom (raw or unquantified). *)
 atpAxSides[axForm_] := Block[{eq},
     eq = axForm /. ForAll[_, e_] :> e;
-    If[ MatchQ[eq, _Equal], List @@ eq, {eq, eq}]
+    If[MatchQ[eq, _Equal], List @@ eq, {eq, eq}]
 ]
 
 (* private symbols of `ax` (relative to the conjecture + other
    axioms): function symbols of ax that occur nowhere else. *)
-atpConfinedSymbols[ax_, others_, conjRaw_] :=
-    Complement[atpFnSyms[ax],
-        If[others === {}, {}, Union @@ (atpFnSyms /@ others)],
-        atpFnSyms[conjRaw]]
+atpConfinedSymbols[ax_, others_, conjRaw_] := Complement[atpFnSyms[ax], If[others === {}, {}, Union @@ (atpFnSyms /@ others)], atpFnSyms[conjRaw]]
 
 (* Does ax carry a private symbol on BOTH sides?  Then neither rewrite
    direction can fire without that symbol already present, so ax can
@@ -84,7 +76,7 @@ atpConfinedSymbols[ax_, others_, conjRaw_] :=
    witnessing symbols, or {}. *)
 atpSafeDropSymbols[ax_, others_, conjRaw_] := Block[{priv, sides},
     priv = atpConfinedSymbols[ax, others, conjRaw];
-    If[ priv === {}, Return[{}]];
+    If[priv === {}, Return[{}]];
     sides = atpAxSides[ax];
     Intersection[priv, atpFnSyms[sides[[1]]], atpFnSyms[sides[[2]]]]
 ]
@@ -97,8 +89,7 @@ atpSafeDropSymbols[ax_, others_, conjRaw_] := Block[{priv, sides},
    {"Completion", "AxiomRelevance" -> "SInE"}. *)
 atpRelevanceSpec[Automatic | "Portfolio"] := "Safe"
 atpRelevanceSpec["Completion" | "GoalDirected" | "MNF" | "Waldmeister"] := "Safe"
-atpRelevanceSpec[{("Completion" | "GoalDirected" | "MNF" | "Waldmeister"),
-        subopts___Rule}] := Block[{o, r, dd},
+atpRelevanceSpec[{("Completion" | "GoalDirected" | "MNF" | "Waldmeister"), subopts___Rule}] := Block[{o, r, dd},
     o = Association[subopts];
     r = Lookup[o, "AxiomRelevance", Automatic];
     dd = Lookup[o, "DropDivergentAxioms", Automatic];  (* back-compat *)
@@ -114,7 +105,7 @@ atpRelevanceSpec[{("Completion" | "GoalDirected" | "MNF" | "Waldmeister"),
 atpRelevanceSpec[{subopts___Rule}] := Block[{o, r},
     o = Association[subopts];
     r = Lookup[o, "AxiomRelevance", Automatic];
-    If[ r === Automatic, "Safe", atpNormRelevance[r]]
+    If[r === Automatic, "Safe", atpNormRelevance[r]]
 ]
 atpRelevanceSpec[_] := "Safe"
 
@@ -133,49 +124,32 @@ atpNormRelevance["SInE"] := {"SInE", <||>}
 atpNormRelevance[{"SInE", a_Association}] := {"SInE", a}
 atpNormRelevance[{"SInE", o___Rule}] := {"SInE", Association[o]}
 (* Numeric/symbolic shorthand: {"SInE", st, sd, sgt}. *)
-atpNormRelevance[{"SInE", st_?NumericQ}] :=
-    {"SInE", <|"SineTolerance" -> st|>}
-atpNormRelevance[{"SInE", st_?NumericQ, sd_Integer}] :=
-    {"SInE", <|"SineTolerance" -> st, "SineDepth" -> sd|>}
-atpNormRelevance[{"SInE", st_?NumericQ, sd_Integer, sgt_Integer}] :=
-    {"SInE", <|"SineTolerance" -> st, "SineDepth" -> sd,
-               "SineGenerality" -> sgt|>}
-atpNormRelevance[other_] := (
-    Message[TFindProof::badrel, other]; "Safe")
+atpNormRelevance[{"SInE", st_ ? NumericQ}] := {"SInE", <|"SineTolerance" -> st|>}
+atpNormRelevance[{"SInE", st_ ? NumericQ, sd_Integer}] := {"SInE", <|"SineTolerance" -> st, "SineDepth" -> sd|>}
+atpNormRelevance[{"SInE", st_ ? NumericQ, sd_Integer, sgt_Integer}] := {"SInE", <|"SineTolerance" -> st, "SineDepth" -> sd, "SineGenerality" -> sgt|>}
+atpNormRelevance[other_] := (Message[TFindProof::badrel, other]; "Safe")
 
 (* Partition `axFormList` into kept / dropped (with reasons) under a
    relevance spec.  Returns <|"Kept" -> {...}, "Dropped" -> {<|"Axiom",
    "Symbols", "Reason"|>...}, "Mode" -> ...|>.  Order-preserving:
    auto-precedence keys off axiom/label order, so re-sorting would
    change the LPO orientation. *)
-atpRelevancePartition[axFormList_, conjRaw_, specRaw_] :=
-    Block[{spec = atpNormRelevance[specRaw], dropAssoc},
-        Switch[spec,
-            None,
-                <|"Kept" -> axFormList, "Dropped" -> {}, "Mode" -> None|>,
-            "Safe",
-                dropAssoc = DeleteMissing @ Map[
-                    ax |-> Block[{syms},
-                        syms = atpSafeDropSymbols[ax,
-                            DeleteCases[axFormList, ax], conjRaw];
-                        If[ syms === {}, Missing[],
-                            <|"Axiom" -> ax, "Symbols" -> syms,
-                              "Reason" -> "ConfinedBothSides"|>]],
-                    axFormList];
-                <|"Kept" -> Select[axFormList,
-                        FreeQ[#["Axiom"] & /@ dropAssoc, #] &],
-                  "Dropped" -> dropAssoc, "Mode" -> "Safe"|>,
-            {"Connected", _},
-                atpConnectedPartition[axFormList, conjRaw, Last[spec]],
-            {"SInE", _},
-                atpSinePartition[axFormList, conjRaw, Last[spec]]
-        ]
+atpRelevancePartition[axFormList_, conjRaw_, specRaw_] := Block[{spec = atpNormRelevance[specRaw], dropAssoc},
+    Switch[spec,
+        None,
+            <|"Kept" -> axFormList, "Dropped" -> {}, "Mode" -> None|>,
+        "Safe",
+            dropAssoc = DeleteMissing @ Map[ax |-> Block[{syms}, syms = atpSafeDropSymbols[ax, DeleteCases[axFormList, ax], conjRaw]; If[syms === {}, Missing[], <|"Axiom" -> ax, "Symbols" -> syms, "Reason" -> "ConfinedBothSides"|>]], axFormList];
+            <|"Kept" -> Select[axFormList, FreeQ[#["Axiom"] & /@ dropAssoc, #] &], "Dropped" -> dropAssoc, "Mode" -> "Safe"|>,
+        {"Connected", _},
+            atpConnectedPartition[axFormList, conjRaw, Last[spec]],
+        {"SInE", _},
+            atpSinePartition[axFormList, conjRaw, Last[spec]]
     ]
+]
 
 (* SInE-style connectivity partition. *)
-atpConnectedPartition[axFormList_, conjRaw_, opts_Association] := Block[{
-    symLists, nAx, freq, cutoff, ignored, relevant, keep, changed, gen,
-    maxGen, dropAssoc},
+atpConnectedPartition[axFormList_, conjRaw_, opts_Association] := Block[{symLists, nAx, freq, cutoff, ignored, relevant, keep, changed, gen, maxGen, dropAssoc},
     nAx = Length[axFormList];
     symLists = atpFnSyms /@ axFormList;
     freq = Counts[Flatten[symLists]];
@@ -188,22 +162,14 @@ atpConnectedPartition[axFormList_, conjRaw_, opts_Association] := Block[{
     changed = True; gen = 0;
     While[ changed && gen < maxGen,
         changed = False;
-        Do[ If[ ! keep[[i]] &&
-                IntersectingQ[Complement[symLists[[i]], ignored], relevant],
+        Do[ If[ ! keep[[i]] && IntersectingQ[Complement[symLists[[i]], ignored], relevant],
                 keep[[i]] = True;
-                relevant = Union[relevant,
-                    Complement[symLists[[i]], ignored]];
+                relevant = Union[relevant, Complement[symLists[[i]], ignored]];
                 changed = True],
             {i, nAx}];
         gen++];
-    dropAssoc = Table[
-        If[ ! keep[[i]],
-            <|"Axiom" -> axFormList[[i]],
-              "Symbols" -> Complement[symLists[[i]], ignored],
-              "Reason" -> "Disconnected"|>, Nothing],
-        {i, nAx}];
-    <|"Kept" -> Pick[axFormList, keep],
-      "Dropped" -> dropAssoc, "Mode" -> "Connected"|>
+    dropAssoc = Table[If[! keep[[i]], <|"Axiom" -> axFormList[[i]], "Symbols" -> Complement[symLists[[i]], ignored], "Reason" -> "Disconnected"|>, Nothing], {i, nAx}];
+    <|"Kept" -> Pick[axFormList, keep], "Dropped" -> dropAssoc, "Mode" -> "Connected"|>
 ]
 
 (* Vampire-faithful SInE (Sumo-Inspired premise selection, Hoder &
@@ -239,105 +205,73 @@ atpConnectedPartition[axFormList_, conjRaw_, opts_Association] := Block[{
    an axiom can trigger it); st=Infinity collapses to plain
    symbol-reachability (any shared symbol triggers).  Depth sd=0 keeps
    no axiom; sd large saturates to the full connected component. *)
-atpSinePartition[axFormList_, conjRaw_, opts_Association] := Block[{
-    symLists, nAx, occ, minOccA, st, sd, sgt, conjSyms, frontier,
-    visited, axTaken, keep, gen, newFrontier, dropAssoc, generalQ},
+atpSinePartition[axFormList_, conjRaw_, opts_Association] := Block[{symLists, nAx, occ, minOccA, st, sd, sgt, conjSyms, frontier, visited, axTaken, keep, gen, newFrontier, dropAssoc, generalQ},
     nAx = Length[axFormList];
-    If[ nAx === 0,
-        Return[<|"Kept" -> {}, "Dropped" -> {}, "Mode" -> "SInE"|>]];
+    If[nAx === 0, Return[<|"Kept" -> {}, "Dropped" -> {}, "Mode" -> "SInE"|>]];
     symLists = atpFnSyms /@ axFormList;
     occ = Counts[Flatten[symLists]];
-    st  = N @ Lookup[opts, "SineTolerance",  3.];
-    sd  =     Lookup[opts, "SineDepth",      2 ];
-    sgt =     Lookup[opts, "SineGenerality", 8 ];
+    st = N @ Lookup[opts, "SineTolerance", 3.];
+    sd = Lookup[opts, "SineDepth", 2];
+    sgt = Lookup[opts, "SineGenerality", 8];
     (* Per-axiom minOcc.  An axiom with no function symbols (e.g.
        a == a - vacuously true) has no minOcc; we never D-relate
        any symbol to it, so it stays dropped unless seeded directly,
        matching Vampire's behavior of skipping empty-signature units. *)
-    minOccA = Table[
-        If[ symLists[[i]] === {}, Infinity,
-            Min[Lookup[occ, #, Infinity] & /@ symLists[[i]]]],
-        {i, nAx}];
+    minOccA = Table[If[symLists[[i]] === {}, Infinity, Min[Lookup[occ, #, Infinity] & /@ symLists[[i]]]], {i, nAx}];
     (* "Too-general" predicate: a symbol with occ(s) > sgt is not used
        as a trigger.  sgt <= 0 disables the cutoff (mirrors Vampire's
        --sine_generality_threshold 0 = off). *)
-    generalQ = If[ IntegerQ[sgt] && sgt > 0,
-        s |-> Lookup[occ, s, 0] > sgt,
-        s |-> False];
+    generalQ = If[IntegerQ[sgt] && sgt > 0, s |-> Lookup[occ, s, 0] > sgt, s |-> False];
     (* Seed: conjecture's symbols, minus the too-general ones. *)
     conjSyms = atpFnSyms[conjRaw];
     frontier = Select[conjSyms, ! generalQ[#] &];
     visited = frontier;
     axTaken = ConstantArray[False, nAx];
     Do[ newFrontier = {};
-        Do[ If[ ! axTaken[[i]] && symLists[[i]] =!= {} &&
-                AnyTrue[frontier, s |->
-                    MemberQ[symLists[[i]], s] &&
-                    Lookup[occ, s, 0] <= st * minOccA[[i]]],
+        Do[ If[ ! axTaken[[i]] && symLists[[i]] =!= {} && AnyTrue[frontier, s |-> MemberQ[symLists[[i]], s] && Lookup[occ, s, 0] <= st * minOccA[[i]]],
                 axTaken[[i]] = True;
-                newFrontier = Union[newFrontier,
-                    Select[symLists[[i]],
-                        ! MemberQ[visited, #] && ! generalQ[#] &]]],
+                newFrontier = Union[newFrontier, Select[symLists[[i]], ! MemberQ[visited, #] && ! generalQ[#] &]]],
             {i, nAx}];
-        If[ newFrontier === {}, Break[]];
+        If[newFrontier === {}, Break[]];
         visited = Union[visited, newFrontier];
         frontier = newFrontier,
         {gen, sd}];
     keep = axTaken;
-    dropAssoc = Table[
-        If[ ! keep[[i]],
-            <|"Axiom" -> axFormList[[i]],
-              "Symbols" -> symLists[[i]],
-              "Reason" -> "SInEUnreachable"|>, Nothing],
-        {i, nAx}];
-    <|"Kept" -> Pick[axFormList, keep],
-      "Dropped" -> dropAssoc, "Mode" -> "SInE"|>
+    dropAssoc = Table[If[! keep[[i]], <|"Axiom" -> axFormList[[i]], "Symbols" -> symLists[[i]], "Reason" -> "SInEUnreachable"|>, Nothing], {i, nAx}];
+    <|"Kept" -> Pick[axFormList, keep], "Dropped" -> dropAssoc, "Mode" -> "SInE"|>
 ]
 
 (* Apply the relevance filter, Message the dropped axioms, return the
    kept list (order-preserving). *)
 atpApplyRelevance[axFormList_, conjRaw_, specRaw_] := Block[{part},
     part = atpRelevancePartition[axFormList, conjRaw, specRaw];
-    If[ part["Dropped"] =!= {},
-        Message[TFindProof::dropax,
-            #["Symbols"] & /@ part["Dropped"], part["Mode"]]];
+    If[part["Dropped"] =!= {}, Message[TFindProof::dropax, #["Symbols"] & /@ part["Dropped"], part["Mode"]]];
     part["Kept"]
 ]
 
 (* Public: inspect the relevance decision without proving. *)
 Options[TRelevantAxioms] = {Method -> Automatic}
-TRelevantAxioms[thm_String, theory_String, opts : OptionsPattern[]] :=
-    Block[{axRaw, cjRaw},
-        axRaw = AxiomaticTheory[theory];
-        cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
-        If[ ! ListQ[axRaw] || MissingQ[cjRaw], Return[$Failed]];
-        TRelevantAxioms[cjRaw, axRaw, opts]
-    ]
+TRelevantAxioms[thm_String, theory_String, opts : OptionsPattern[]] := Block[{axRaw, cjRaw},
+    axRaw = AxiomaticTheory[theory];
+    cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
+    If[! ListQ[axRaw] || MissingQ[cjRaw], Return[$Failed]];
+    TRelevantAxioms[cjRaw, axRaw, opts]
+]
 (* Conjecture-expression against a NAMED theory: resolve the axioms
    through AxiomaticTheory, then run the relevance partition. *)
-TRelevantAxioms[
-        conjRaw : (_List | _ForAll | _Equal | _Unequal
-            | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
-        theory_String, opts : OptionsPattern[]] :=
-    Block[{axRaw},
-        axRaw = AxiomaticTheory[theory];
-        If[ ! ListQ[axRaw], Return[$Failed]];
-        TRelevantAxioms[conjRaw, axRaw, opts]
-    ]
+TRelevantAxioms[conjRaw : (_List | _ForAll | _Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _]), theory_String, opts : OptionsPattern[]] := Block[{axRaw},
+    axRaw = AxiomaticTheory[theory];
+    If[! ListQ[axRaw], Return[$Failed]];
+    TRelevantAxioms[conjRaw, axRaw, opts]
+]
 (* Single non-list axiom: auto-wrap to a 1-element list, same shape
    as TFindProof's wrap. *)
-TRelevantAxioms[conjRaw_, axiom : (_Equal | _Unequal | _ForAll
-        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
-        opts : OptionsPattern[]] :=
-    TRelevantAxioms[conjRaw, {axiom}, opts]
+TRelevantAxioms[conjRaw_, axiom : (_Equal | _Unequal | _ForAll | Inactive[Equal][_, _] | Inactive[Unequal][_, _]), opts : OptionsPattern[]] := TRelevantAxioms[conjRaw, {axiom}, opts]
 
 TRelevantAxioms[conjRaw_, axRaw_List, opts : OptionsPattern[]] :=
     (* Same normalization pipeline as TFindProof's entry:
        atpNormalizeConj + atpNormalizeAxioms. *)
-    atpRelevancePartition[
-        atpNormalizeAxioms[axRaw],
-        atpNormalizeConj[conjRaw],
-        atpRelevanceSpec[OptionValue[Method]]]
+    atpRelevancePartition[atpNormalizeAxioms[axRaw], atpNormalizeConj[conjRaw], atpRelevanceSpec[OptionValue[Method]]]
 
 (* Render a held expression in the form WL's ProofObject expects
    for its top-level Axioms list / ConjectureStatement: keep the
@@ -355,8 +289,7 @@ TRelevantAxioms[conjRaw_, axRaw_List, opts : OptionsPattern[]] :=
    already Inactivated by atpNormalizeAxioms, so the active-only rule
    is required to keep the displayed axiom field a clean single
    Inactive[Equal] (matching FindEquationalProof). *)
-holdToInactive[axHC_HoldComplete] :=
-    ReleaseHold[axHC /. Equal[a_, b_] :> Inactive[Equal][a, b]]
+holdToInactive[axHC_HoldComplete] := ReleaseHold[axHC /. Equal[a_, b_] :> Inactive[Equal][a, b]]
 
 (* Render a held equation in the form FindEquationalProof uses for the
    displayed slots of its ProofObject (Theorems and the top-level Axioms

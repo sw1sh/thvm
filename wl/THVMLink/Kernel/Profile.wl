@@ -46,34 +46,34 @@
    input/op explosions, alias bloat, and round-over-round bench
    growth without scrolling raw heap dumps. *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[TProfile, "TProfile[] returns an Association snapshotting the current runtime state (heap cells by tag, tensors, kernels, ITRS).
+SetUsage[TProfile, "TProfile[] returns an Association snapshotting the current runtime state (heap cells by tag, tensors, kernels, ITRS).
 TProfile[label$] sets the \"Label\" key to label$."];
 
-GeneralUtilities`SetUsage[TProfileTable, "TProfileTable[{profile$1, profile$2, $$}] renders a Tabular comparing the headline metrics across snapshots."];
+SetUsage[TProfileTable, "TProfileTable[{profile$1, profile$2, $$}] renders a Tabular comparing the headline metrics across snapshots."];
 
-GeneralUtilities`SetUsage[TProfileGrowth, "TProfileGrowth[{profile$1, profile$2, $$}] returns an Association of round-over-round growth ratios for HeapCells, Tensors, DistinctBufs, Kernels, MaxKernelInputs, and MaxKernelOps."];
+SetUsage[TProfileGrowth, "TProfileGrowth[{profile$1, profile$2, $$}] returns an Association of round-over-round growth ratios for HeapCells, Tensors, DistinctBufs, Kernels, MaxKernelInputs, and MaxKernelOps."];
 
-GeneralUtilities`SetUsage[TProfilePlot, "TProfilePlot[{profile$1, profile$2, $$}, key$] line-plots metric key$ across snapshots.
+SetUsage[TProfilePlot, "TProfilePlot[{profile$1, profile$2, $$}, key$] line-plots metric key$ across snapshots.
 Common keys: \"HeapCells\", \"Kernels\", \"MaxKernelInputs\"."];
 
-GeneralUtilities`SetUsage[TProfileReport, "TProfileReport[profile$] returns a short string rendering of headline metrics plus per-tag cell counts.
+SetUsage[TProfileReport, "TProfileReport[profile$] returns a short string rendering of headline metrics plus per-tag cell counts.
 TProfileReport[{p$1, p$2, $$}] formats a sequence of snapshots, annotating each with round-over-round growth ratios.
 Use for stdout or notebook display."];
 
-GeneralUtilities`SetUsage[THotCounters, "THotCounters[] returns an Association of the per-context hot-path counter snapshot (keys $THotCounterNames): heap_replace calls/cells, is_redex calls, redex_enumerate calls/cells, wnf/realize/materialize calls, kernel and grad fires, JIT replay calls/dispatches/assigns, and graph replay runs/dispatches.
+SetUsage[THotCounters, "THotCounters[] returns an Association of the per-context hot-path counter snapshot (keys $THotCounterNames): heap_replace calls/cells, is_redex calls, redex_enumerate calls/cells, wnf/realize/materialize calls, kernel and grad fires, JIT replay calls/dispatches/assigns, and graph replay runs/dispatches.
 Use to attribute per-step time to the substitution cascade, chain-rule expansion, kernel emit/dispatch, or graph replay."];
 
-GeneralUtilities`SetUsage[THotCountersReset, "THotCountersReset[] zeros the per-context hot-path counters."];
+SetUsage[THotCountersReset, "THotCountersReset[] zeros the per-context hot-path counters."];
 
-GeneralUtilities`SetUsage[THotCountersDelta, "THotCountersDelta[label$, body$] resets the counters, evaluates body$ (held), and returns an Association with keys \"Label\", \"WallMs\", and \"Counters\" (a THotCounters[] snapshot).
+SetUsage[THotCountersDelta, "THotCountersDelta[label$, body$] resets the counters, evaluates body$ (held), and returns an Association with keys \"Label\", \"WallMs\", and \"Counters\" (a THotCounters[] snapshot).
 Pair with THotCountersReport[{d$1, d$2, $$}] to compare per-iteration scaling."];
 
-GeneralUtilities`SetUsage[THotCountersReport, "THotCountersReport[{delta$1, delta$2, $$}] renders a Tabular comparing the wallclock and counter values across THotCountersDelta snapshots, with per-counter ratios across consecutive entries.
+SetUsage[THotCountersReport, "THotCountersReport[{delta$1, delta$2, $$}] renders a Tabular comparing the wallclock and counter values across THotCountersDelta snapshots, with per-counter ratios across consecutive entries.
 Use to read off quadratic or cubic growth at a glance."];
 
-GeneralUtilities`SetUsage[$THotCounterNames, "$THotCounterNames is the ordered list of counter names keying the THotCounters[] snapshot.
+SetUsage[$THotCounterNames, "$THotCounterNames is the ordered list of counter names keying the THotCounters[] snapshot.
 Order matches the C-side hot_counters_snapshot payload in src/instrument/hot_counters.c."];
 
 (* Forward-declare bridge symbols owned by THVMLink.wl. *)
@@ -97,87 +97,79 @@ profilePerKernel[] := Module[{kt, info},
     kt = TKernelTable[];
     Table[
         info = WolframInstitute`THVMLink`Private`decodeKernelInfo[k][[1]];
-        <| "Kid"    -> k,
-           "Inputs" -> info["InputCount"],
-           "Ops"    -> info["OpCount"],
-           "Numel"  -> info["OutputNumel"]
+        <|
+            "Kid" -> k,
+            "Inputs" -> info["InputCount"],
+            "Ops" -> info["OpCount"],
+            "Numel" -> info["OutputNumel"]
         |>,
         {k, 1, Length[kt]}]
 ]
 
 profileTensorStats[] := Module[{tt},
     tt = TTensTable[];
-    {Length[tt],
-     Length @ Union[#[[2]] & /@ tt],            (* distinct buf_ids *)
-     Count[#[[5]] & /@ tt, 0]}                  (* non-contig aliases *)
+    {
+        Length[tt],
+        Length @ Union[#[[2]] & /@ tt], (* distinct buf_ids *)
+        Count[#[[5]] & /@ tt, 0] (* non-contig aliases *)
+    }
 ]
 
 TProfile[] := TProfile[""]
-TProfile[label_String] := Module[{
-    perK, tStats, maxIn, maxOps
-},
+TProfile[label_String] := Module[{perK, tStats, maxIn, maxOps},
     perK = profilePerKernel[];
     tStats = profileTensorStats[];
-    maxIn  = If[ Length[perK] > 0, Max[#["Inputs"] & /@ perK], 0];
-    maxOps = If[ Length[perK] > 0, Max[#["Ops"]    & /@ perK], 0];
-    <| "Label"            -> label,
-       "HeapCells"        -> THeapPos[] - THeapBase[],
-       "CellsByTag"       -> profileCellsByTag[],
-       "Tensors"          -> tStats[[1]],
-       "DistinctBufs"     -> tStats[[2]],
-       "NonContigAliases" -> tStats[[3]],
-       "Kernels"          -> Length[perK],
-       "MaxKernelInputs"  -> maxIn,
-       "MaxKernelOps"     -> maxOps,
-       "PerKernel"        -> perK,
-       "ITRS"             -> TItrs[]
+    maxIn = If[Length[perK] > 0, Max[#["Inputs"] & /@ perK], 0];
+    maxOps = If[Length[perK] > 0, Max[#["Ops"] & /@ perK], 0];
+    <|
+        "Label" -> label,
+        "HeapCells" -> THeapPos[] - THeapBase[],
+        "CellsByTag" -> profileCellsByTag[],
+        "Tensors" -> tStats[[1]],
+        "DistinctBufs" -> tStats[[2]],
+        "NonContigAliases" -> tStats[[3]],
+        "Kernels" -> Length[perK],
+        "MaxKernelInputs" -> maxIn,
+        "MaxKernelOps" -> maxOps,
+        "PerKernel" -> perK,
+        "ITRS" -> TItrs[]
     |>
 ]
 
 (* Headline metrics shown in TProfileTable, in display order. *)
-$tabularKeys = {"Label", "HeapCells", "Tensors", "DistinctBufs",
-                "NonContigAliases", "Kernels", "MaxKernelInputs",
-                "MaxKernelOps", "ITRS"}
+$tabularKeys = {
+    "Label",
+    "HeapCells",
+    "Tensors",
+    "DistinctBufs",
+    "NonContigAliases",
+    "Kernels",
+    "MaxKernelInputs",
+    "MaxKernelOps",
+    "ITRS"
+}
 
 TProfileTable[ps_List] := Module[{rows, allTags, tagRows},
-    rows = Table[
-        AssociationMap[ p[#] &, $tabularKeys ],
-        {p, ps}];
+    rows = Table[AssociationMap[p[#] &, $tabularKeys], {p, ps}];
     (* Per-tag breakdown columns: union of all tags seen. *)
     allTags = Union @ Flatten[Keys[#["CellsByTag"]] & /@ ps];
-    tagRows = Table[
-        AssociationThread[ allTags, Lookup[p["CellsByTag"], #, 0] & /@ allTags ],
-        {p, ps}];
-    Tabular[ MapThread[ Join, {rows, tagRows} ] ]
+    tagRows = Table[AssociationThread[allTags, Lookup[p["CellsByTag"], #, 0] & /@ allTags], {p, ps}];
+    Tabular[MapThread[Join, {rows, tagRows}]]
 ]
 
 TProfileGrowth[ps_List] := Module[{
-    keys = {"HeapCells", "Tensors", "DistinctBufs", "Kernels",
-            "MaxKernelInputs", "MaxKernelOps"},
+    keys = {"HeapCells", "Tensors", "DistinctBufs", "Kernels", "MaxKernelInputs", "MaxKernelOps"},
     pairs, ratios
 },
-    If[ Length[ps] < 2, Return[<||>] ];
+    If[Length[ps] < 2, Return[<||>]];
     pairs = Partition[ps, 2, 1];
-    ratios = AssociationMap[
-        k |-> Map[ pp |-> ratio[ pp[[1]][k], pp[[2]][k] ], pairs ],
-        keys];
+    ratios = AssociationMap[k |-> Map[pp |-> ratio[pp[[1]][k], pp[[2]][k]], pairs], keys];
     ratios
 ]
 
-ratio[a_, b_] := If[ a == 0, "n/a", Round[N[b / a], 0.01]]
+ratio[a_, b_] := If[a == 0, "n/a", Round[N[b / a], 0.01]]
 
-formatProfileLine[label_, p_] := label <> ": cells=" <> ToString[p["HeapCells"]] <>
-    " (" <> StringRiffle[
-        Table[ k <> "=" <> ToString[p["CellsByTag"][k]],
-            {k, SortBy[Keys[p["CellsByTag"]], -p["CellsByTag"][#] &]}],
-        " "] <> ")\n" <>
-    "  tensors=" <> ToString[p["Tensors"]] <>
-    " distinct_bufs=" <> ToString[p["DistinctBufs"]] <>
-    " aliases=" <> ToString[p["NonContigAliases"]] <>
-    " kernels=" <> ToString[p["Kernels"]] <>
-    " max_inputs=" <> ToString[p["MaxKernelInputs"]] <>
-    " max_ops=" <> ToString[p["MaxKernelOps"]] <>
-    " ITRS=" <> ToString[p["ITRS"]]
+formatProfileLine[label_, p_] := label <> ": cells=" <> ToString[p["HeapCells"]] <> " (" <> StringRiffle[Table[k <> "=" <> ToString[p["CellsByTag"][k]], {k, SortBy[Keys[p["CellsByTag"]], -p["CellsByTag"][#] &]}], " "] <> ")\n" <> "  tensors=" <> ToString[p["Tensors"]] <> " distinct_bufs=" <> ToString[p["DistinctBufs"]] <> " aliases=" <> ToString[p["NonContigAliases"]] <> " kernels=" <> ToString[p["Kernels"]] <> " max_inputs=" <> ToString[p["MaxKernelInputs"]] <> " max_ops=" <> ToString[p["MaxKernelOps"]] <> " ITRS=" <> ToString[p["ITRS"]]
 
 TProfileReport[p_Association] := formatProfileLine[p["Label"], p]
 TProfileReport[ps_List] := StringJoin[
@@ -185,22 +177,22 @@ TProfileReport[ps_List] := StringJoin[
         Table[
             If[ i == 1,
                 formatProfileLine[ps[[i]]["Label"], ps[[i]]],
-                Module[{prev = ps[[i-1]], cur = ps[[i]]},
-                    formatProfileLine[ps[[i]]["Label"], cur] <>
-                    "  growth: cells x" <> ToString[ratio[prev["HeapCells"], cur["HeapCells"]]] <>
-                    " kernels x" <> ToString[ratio[prev["Kernels"], cur["Kernels"]]] <>
-                    " max_inputs x" <> ToString[ratio[prev["MaxKernelInputs"], cur["MaxKernelInputs"]]] <>
-                    " max_ops x" <> ToString[ratio[prev["MaxKernelOps"], cur["MaxKernelOps"]]]]],
+                Module[{prev = ps[[i - 1]], cur = ps[[i]]},
+                    formatProfileLine[ps[[i]]["Label"], cur] <> "  growth: cells x" <> ToString[ratio[prev["HeapCells"], cur["HeapCells"]]] <> " kernels x" <> ToString[ratio[prev["Kernels"], cur["Kernels"]]] <> " max_inputs x" <> ToString[ratio[prev["MaxKernelInputs"], cur["MaxKernelInputs"]]] <> " max_ops x" <> ToString[ratio[prev["MaxKernelOps"], cur["MaxKernelOps"]]]
+                ]
+            ],
             {i, 1, Length[ps]}],
         "\n"]]
 
 TProfilePlot[ps_List, key_] := Module[{xs, ys},
     xs = Range[Length[ps]];
     ys = (#[key]) & /@ ps;
-    ListLinePlot[ Transpose[{xs, ys}],
+    ListLinePlot[
+        Transpose[{xs, ys}],
         PlotMarkers -> Automatic,
         PlotLabel -> key,
-        AxesLabel -> {"snapshot index", key} ]
+        AxesLabel -> {"snapshot index", key}
+    ]
 ]
 
 (* === hot-path counters ===
@@ -209,16 +201,27 @@ TProfilePlot[ps_List, key_] := Module[{xs, ys},
    bump HOT_COUNTER_COUNT in `src/thvm.h` AND extend the snapshot/reset
    helpers + the LibraryLink wrapper. *)
 $THotCounterNames = {
-    "HeapReplaceCalls", "HeapReplaceCells",
+    "HeapReplaceCalls",
+    "HeapReplaceCells",
     "IsRedexCalls",
-    "RedexEnumCalls", "RedexEnumCells",
-    "WnfCalls", "RealizeCalls", "MaterializeCalls",
-    "KernelFires", "GradFires",
-    "JitReplayCalls", "JitReplayDispatches", "JitReplayAssigns",
-    "JitGraphRuns", "JitGraphDispatches"}
+    "RedexEnumCalls",
+    "RedexEnumCells",
+    "WnfCalls",
+    "RealizeCalls",
+    "MaterializeCalls",
+    "KernelFires",
+    "GradFires",
+    "JitReplayCalls",
+    "JitReplayDispatches",
+    "JitReplayAssigns",
+    "JitGraphRuns",
+    "JitGraphDispatches"
+}
 
-THotCounters[] := (ensureInit[];
-    AssociationThread[$THotCounterNames, $hotCountersFn[]])
+THotCounters[] := (
+    ensureInit[];
+    AssociationThread[$THotCounterNames, $hotCountersFn[]]
+)
 
 THotCountersReset[] := (ensureInit[]; $hotCountersResetFn[]; Null)
 
@@ -228,9 +231,8 @@ THotCountersDelta[label_String, body_] := Module[{t0, t1},
     t0 = AbsoluteTime[];
     body;
     t1 = AbsoluteTime[];
-    <| "Label"    -> label,
-       "WallMs"   -> Round[1000.0 (t1 - t0), 0.01],
-       "Counters" -> THotCounters[] |>]
+    <|"Label" -> label, "WallMs" -> Round[1000.0 (t1 - t0), 0.01], "Counters" -> THotCounters[]|>
+]
 
 (* Render a sequence of THotCountersDelta snapshots as a Tabular with
    per-counter values and ratios between consecutive rows.  Shows at a
@@ -243,22 +245,26 @@ THotCountersReport[ds_List] := Module[{
     rows = Table[
         Module[{c = d["Counters"]},
             Join[
-                <| "Label"  -> d["Label"], "WallMs" -> d["WallMs"] |>,
-                AssociationThread[$THotCounterNames, Lookup[c, $THotCounterNames, 0]]]],
+                <|"Label" -> d["Label"], "WallMs" -> d["WallMs"]|>,
+                AssociationThread[$THotCounterNames, Lookup[c, $THotCounterNames, 0]]
+            ]
+        ],
         {d, ds}];
-    withRatios = If[ Length[rows] < 2, rows,
+    withRatios = If[ Length[rows] < 2,
+        rows,
         Module[{out = {rows[[1]]}, prev = rows[[1]], cur, r},
             Do[
                 cur = rows[[i]];
-                r = AssociationMap[
-                    k |-> "x" <> ToString[ratio[prev[k], cur[k]]],
-                    Drop[headerKeys, 1]];
+                r = AssociationMap[k |-> "x" <> ToString[ratio[prev[k], cur[k]]], Drop[headerKeys, 1]];
                 AppendTo[out, cur];
                 AppendTo[out, Join[<| "Label" -> "  ratio" |>, r]];
                 prev = cur,
                 {i, 2, Length[rows]}];
-            out]];
-    Tabular[withRatios]]
+            out
+        ]
+    ];
+    Tabular[withRatios]
+]
 
 End[];
 

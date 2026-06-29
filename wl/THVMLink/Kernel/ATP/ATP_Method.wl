@@ -8,13 +8,13 @@
    and it shares the WolframInstitute`THVMLink`ATP`Private` context, so it references
    ATP.wl's loaders, encoder, and helpers by bare name. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
 
-GeneralUtilities`SetUsage[TAtpSchedule, "TAtpSchedule[method$] returns the schedule (a list of single-config Methods) that TFindProof would expand the Method option method$ to, without running the C engine; useful for debugging a Method choice or counting portfolio entries before allocating TimeConstraint.
+SetUsage[TAtpSchedule, "TAtpSchedule[method$] returns the schedule (a list of single-config Methods) that TFindProof would expand the Method option method$ to, without running the C engine; useful for debugging a Method choice or counting portfolio entries before allocating TimeConstraint.
 TAtpSchedule[method$, conjecture$, axioms$] threads the conjecture and axioms through Automatic's structure-recognized auto-tune, so the result matches what TFindProof[conjecture$, axioms$] with Method method$ would dispatch.
 TAtpSchedule[method$, \"Theorem\", \"Theory\"] resolves names through AxiomaticTheory."];
 
-GeneralUtilities`SetUsage[TAtpDescribeMethod, "TAtpDescribeMethod[method$] returns an Association describing what a Method spec resolves to.
+SetUsage[TAtpDescribeMethod, "TAtpDescribeMethod[method$] returns an Association describing what a Method spec resolves to.
 For a named preset (Waldmeister, VampireUEQ, Twee, EProver), returns the preset's full defaults Association.
 For a list spec {\"Twee\", subopts$$}, returns the preset defaults merged with the user's overrides -- the options that reach the C engine.
 For a non-preset config {\"Completion\", subopts$$}, returns Association[subopts$].
@@ -35,32 +35,23 @@ Begin["`Private`"];
    TAtpSchedule["NotARealMethod"] silently returns {"NotARealMethod"}.
    Recognized strings are the named presets + the three completion-
    family heads + "Automatic". *)
-$AtpKnownMethodNames := Join[$AtpMethodPresets,
-    {"Completion", "GoalDirected", "MNF", "Automatic"}]
+$AtpKnownMethodNames := Join[$AtpMethodPresets, {"Completion", "GoalDirected", "MNF", "Automatic"}]
 TAtpSchedule[m_String] /; ! MemberQ[$AtpKnownMethodNames, m] :=
     (Message[TFindProof::badmethod, m]; $Failed)
 TAtpSchedule[m_] := atpScheduleFor[m]
-TAtpSchedule[m_String, cj_, ax_List] /;
-        ! MemberQ[$AtpKnownMethodNames, m] :=
+TAtpSchedule[m_String, cj_, ax_List] /; ! MemberQ[$AtpKnownMethodNames, m] :=
     (Message[TFindProof::badmethod, m]; $Failed)
-TAtpSchedule[m_, cj_,
-        axiom : (_Equal | _Unequal | _ForAll
-            | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
+TAtpSchedule[m_, cj_, axiom : (_Equal | _Unequal | _ForAll | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
     TAtpSchedule[m, cj, {axiom}]
 TAtpSchedule[m_, cj_, ax_List] := atpScheduleFor[m, ax, cj]
-TAtpSchedule[m_, thm_String, theory_String] := With[{
-        cj = AxiomaticTheory[theory, "NotableTheorems"][thm],
-        ax = AxiomaticTheory[theory]},
+TAtpSchedule[m_, thm_String, theory_String] := With[{cj = AxiomaticTheory[theory, "NotableTheorems"][thm], ax = AxiomaticTheory[theory]},
     If[ MissingQ[cj] || ! ListQ[ax],
         $Failed,
         TAtpSchedule[m, cj, ax]]
 ]
 (* Conjecture-expression against a NAMED theory: resolve the axioms
    through AxiomaticTheory, then thread through atpScheduleFor. *)
-TAtpSchedule[m_,
-        cj : (_List | _ForAll | _Equal | _Unequal
-            | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
-        theory_String] := With[{ax = AxiomaticTheory[theory]},
+TAtpSchedule[m_, cj : (_List | _ForAll | _Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _]), theory_String] := With[{ax = AxiomaticTheory[theory]},
     If[ ! ListQ[ax], $Failed, TAtpSchedule[m, cj, ax]]
 ]
 
@@ -70,25 +61,19 @@ TAtpSchedule[m_,
    dispatch.  Schedule-style Methods (Automatic / Portfolio /
    VampirePortfolio[Compact]) return a <|"Schedule" -> ...|> wrapper
    describing the multi-entry rotation. *)
-TAtpDescribeMethod[name_String] /;
-        KeyExistsQ[$AtpPresetDefaults, name] :=
+TAtpDescribeMethod[name_String] /; KeyExistsQ[$AtpPresetDefaults, name] :=
     $AtpPresetDefaults[name]
-TAtpDescribeMethod[{name_String, subopts___Rule}] /;
-        KeyExistsQ[$AtpPresetDefaults, name] :=
+TAtpDescribeMethod[{name_String, subopts___Rule}] /; KeyExistsQ[$AtpPresetDefaults, name] :=
     Join[$AtpPresetDefaults[name], Association[{subopts}]]
-TAtpDescribeMethod[name : ("Portfolio" | "VampirePortfolio"
-        | "VampirePortfolioCompact" | "AllPresets"
-        | "Automatic")] :=
+TAtpDescribeMethod[name : ("Portfolio" | "VampirePortfolio" | "VampirePortfolioCompact" | "AllPresets" | "Automatic")] :=
     <|"Schedule" -> atpScheduleFor[name]|>
 TAtpDescribeMethod[Automatic] :=
     <|"Schedule" -> atpScheduleFor[Automatic]|>
 (* Catch unrecognized string Method names BEFORE the catch-all
    silently returns <||>.  Same recognized set as TAtpSchedule. *)
-TAtpDescribeMethod[m_String] /;
-        ! MemberQ[$AtpKnownMethodNames, m] :=
+TAtpDescribeMethod[m_String] /; ! MemberQ[$AtpKnownMethodNames, m] :=
     (Message[TFindProof::badmethod, m]; $Failed)
-TAtpDescribeMethod[{m_String, subopts___Rule}] /;
-        ! MemberQ[$AtpKnownMethodNames, m] :=
+TAtpDescribeMethod[{m_String, subopts___Rule}] /; ! MemberQ[$AtpKnownMethodNames, m] :=
     (Message[TFindProof::badmethod, m]; $Failed)
 TAtpDescribeMethod[{m_String, subopts___Rule}] :=
     Association[{subopts}]
@@ -98,18 +83,14 @@ TAtpDescribeMethod[m_String] := <||>
    etc. produce structure-tailored schedules when conjecture + axioms
    are in hand.  Single-config presets ignore the problem context;
    pass-through to the 1-arg form. *)
-TAtpDescribeMethod[m_, cj_,
-        axiom : (_Equal | _Unequal | _ForAll
-            | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
+TAtpDescribeMethod[m_, cj_, axiom : (_Equal | _Unequal | _ForAll | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
     TAtpDescribeMethod[m, cj, {axiom}]
 TAtpDescribeMethod[m_, cj_, ax_List] :=
     With[{s = atpScheduleFor[m, ax, cj]},
         If[ ListQ[s] && Length[s] > 1,
             <|"Schedule" -> s|>,
             TAtpDescribeMethod[m]]]
-TAtpDescribeMethod[m_, thm_String, theory_String] := With[{
-        cj = AxiomaticTheory[theory, "NotableTheorems"][thm],
-        ax = AxiomaticTheory[theory]},
+TAtpDescribeMethod[m_, thm_String, theory_String] := With[{cj = AxiomaticTheory[theory, "NotableTheorems"][thm], ax = AxiomaticTheory[theory]},
     If[ MissingQ[cj] || ! ListQ[ax],
         $Failed,
         TAtpDescribeMethod[m, cj, ax]]]
@@ -199,42 +180,33 @@ atpIsVar[t_, vars_] := MemberQ[vars, t]
 
 (* a binary application op[_, _] with op a non-variable head.  Returns
    the head, or $Failed.  Mirrors prec_is_binop (precedence.c:43). *)
-atpBinHead[t_, vars_] := If[
-    MatchQ[t, _[_, _]] && ! atpIsVar[Head[t], vars] && Head[t] =!= List,
-    Head[t], $Failed]
+atpBinHead[t_, vars_] := If[MatchQ[t, _[_, _]] && ! atpIsVar[Head[t], vars] && Head[t] =!= List, Head[t], $Failed]
 
 (* Commutativity  f[x,y] == f[y,x].  Port of prec_is_commutativity
    (precedence.c:51) / TO_IstKommutativitaet. *)
 atpLawCommutative[l_, r_, vars_] := Block[{f},
     f = atpBinHead[l, vars];
-    f =!= $Failed && atpBinHead[r, vars] === f &&
-        MatchQ[{l, r}, {f[a_, b_], f[b_, a_]}] &&
-        atpIsVar[l[[1]], vars] && atpIsVar[l[[2]], vars] &&
-        l[[1]] =!= l[[2]]
+    f =!= $Failed && atpBinHead[r, vars] === f && MatchQ[{l, r}, {f[a_, b_], f[b_, a_]}] && atpIsVar[l[[1]], vars] && atpIsVar[l[[2]], vars] && l[[1]] =!= l[[2]]
 ]
 
 (* one orientation of associativity: a = f[f[x,y],z], b = f[x,f[y,z]].
    Port of prec_assoc_dir (precedence.c:65). *)
 atpAssocDir[a_, b_, f_, vars_] :=
-    MatchQ[a, f[f[x_, y_], z_] /;
-        atpIsVar[x, vars] && atpIsVar[y, vars] && atpIsVar[z, vars] &&
-        MatchQ[b, f[x, f[y, z]]]]
+    MatchQ[a, f[f[x_, y_], z_] /; atpIsVar[x, vars] && atpIsVar[y, vars] && atpIsVar[z, vars] && MatchQ[b, f[x, f[y, z]]]]
 
 (* Associativity (either side flattened).  Port of
    prec_is_associativity (precedence.c:90). *)
 atpLawAssociative[l_, r_, vars_] := Block[{f},
     f = atpBinHead[l, vars];
     If[ f === $Failed, f = atpBinHead[r, vars]];
-    f =!= $Failed &&
-        (atpAssocDir[l, r, f, vars] || atpAssocDir[r, l, f, vars])
+    f =!= $Failed && (atpAssocDir[l, r, f, vars] || atpAssocDir[r, l, f, vars])
 ]
 
 (* Idempotence  f[x,x] == x.  Port of prec_is_idempotence
    (precedence.c:104) / Sinai Idempotenz. *)
 atpLawIdempotent[l_, r_, vars_] := Block[{f},
     f = atpBinHead[l, vars];
-    f =!= $Failed && atpIsVar[l[[1]], vars] && l[[1]] === l[[2]] &&
-        r === l[[1]]
+    f =!= $Failed && atpIsVar[l[[1]], vars] && l[[1]] === l[[2]] && r === l[[1]]
 ]
 
 (* a constant (a nullary CTR): an atom that is not a bound variable, or
@@ -242,8 +214,7 @@ atpLawIdempotent[l_, r_, vars_] := Block[{f},
    integer.  Waldmeister's prec_is_identity wants the unit slot to be a
    nullary CTR (precedence.c:126); in WL the "unit" is a ground term
    with no bound variable. *)
-atpIsConstTerm[t_, vars_] := FreeQ[t, Alternatives @@ vars] &&
-    ! atpIsVar[t, vars]
+atpIsConstTerm[t_, vars_] := FreeQ[t, Alternatives @@ vars] && ! atpIsVar[t, vars]
 
 (* Left/right identity  f[e,x]==x  /  f[x,e]==x, e a constant.  Port of
    prec_is_identity (precedence.c:118).  side 0 = left, 1 = right. *)
@@ -262,8 +233,7 @@ atpLawInverse[l_, r_, vars_, side_] := Block[{f, inv, var},
     If[ f === $Failed || ! atpIsConstTerm[r, vars], Return[False]];
     inv = l[[side + 1]];
     var = l[[2 - side]];
-    atpIsVar[var, vars] && MatchQ[inv, _[_]] && ! atpIsVar[Head[inv], vars] &&
-        atpIsVar[inv[[1]], vars] && inv[[1]] === var
+    atpIsVar[var, vars] && MatchQ[inv, _[_]] && ! atpIsVar[Head[inv], vars] && atpIsVar[inv[[1]], vars] && inv[[1]] === var
 ]
 
 (* one orientation of left distributivity: a = f[x,g[y,z]],
@@ -276,10 +246,8 @@ atpDistribDir[a_, b_, vars_] := Block[{f, g, x, inner},
     inner = a[[2]];
     g = atpBinHead[inner, vars];
     If[ g === $Failed || g === f, Return[$Failed]];
-    If[ ! atpIsVar[inner[[1]], vars] || ! atpIsVar[inner[[2]], vars] ||
-        inner[[1]] === inner[[2]], Return[$Failed]];
-    If[ MatchQ[b, g[f[x, inner[[1]]], f[x, inner[[2]]]]],
-        {f, g}, $Failed]
+    If[ ! atpIsVar[inner[[1]], vars] || ! atpIsVar[inner[[2]], vars] || inner[[1]] === inner[[2]], Return[$Failed]];
+    If[ MatchQ[b, g[f[x, inner[[1]]], f[x, inner[[2]]]]], {f, g}, $Failed]
 ]
 
 (* Distributivity f over g (either orientation).  Port of
@@ -312,23 +280,12 @@ atpAnalyzeStructure[axioms_List, conjecture_ : Null] := Block[{
     (* per-operator law flags *)
     ops = <||>;
     Module[{tag},
-        tag[h_, key_] := ops[h] = Append[Lookup[ops, h, <|
-            "Commutative" -> False, "Associative" -> False,
-            "Idempotent" -> False, "HasUnit" -> False,
-            "HasInverse" -> False, "Distributes" -> False,
-            "Arity" -> 0|>], key -> True];
+        tag[h_, key_] := ops[h] = Append[Lookup[ops, h, <|"Commutative" -> False, "Associative" -> False, "Idempotent" -> False, "HasUnit" -> False, "HasInverse" -> False, "Distributes" -> False, "Arity" -> 0|>], key -> True];
         Do[ Block[{vs = p[[1]], l = p[[2]], r = p[[3]], f, d},
             (* record arity of every applied non-variable head *)
             Scan[
-                t |-> If[ MatchQ[t, _[___]] && ! atpIsVar[Head[t], vs] &&
-                    Head[t] =!= List && Head[t] =!= Equal,
-                    ops[Head[t]] = Append[
-                        Lookup[ops, Head[t], <|
-                            "Commutative" -> False, "Associative" -> False,
-                            "Idempotent" -> False, "HasUnit" -> False,
-                            "HasInverse" -> False, "Distributes" -> False,
-                            "Arity" -> 0|>],
-                        "Arity" -> Length[t]]],
+                t |-> If[ MatchQ[t, _[___]] && ! atpIsVar[Head[t], vs] && Head[t] =!= List && Head[t] =!= Equal,
+                    ops[Head[t]] = Append[Lookup[ops, Head[t], <|"Commutative" -> False, "Associative" -> False, "Idempotent" -> False, "HasUnit" -> False, "HasInverse" -> False, "Distributes" -> False, "Arity" -> 0|>], "Arity" -> Length[t]]],
                 {l, r}, {0, Infinity}, Heads -> False];
             If[ atpLawCommutative[l, r, vs], tag[atpBinHead[l, vs], "Commutative"]];
             If[ atpLawAssociative[l, r, vs],
@@ -366,13 +323,11 @@ atpAnalyzeStructure[axioms_List, conjecture_ : Null] := Block[{
        separates).  HasUnit allowed -- some AxiomaticTheory combinator
        presentations set HasUnit on Application (the Y axiom shape). *)
     allHeads = Keys[ops];
-    isComb = Length[Select[Values[ops], #["Arity"] == 2 &]] == 1 &&
-        ! hasComm && ! hasInv && Length[parts] >= 4;
+    isComb = Length[Select[Values[ops], #["Arity"] == 2 &]] == 1 && ! hasComm && ! hasInv && Length[parts] >= 4;
     (* Sheffer / Nand: a single binary operator, no other structure
        (no associativity, commutativity is the GOAL not an axiom).
        WolframAxioms is the canonical case (one CenterDot axiom). *)
-    isSheffer = Length[allHeads] == 1 && First[Values[ops]]["Arity"] == 2 &&
-        ! hasAssoc && ! hasComm && ! hasUnit && ! hasInv && ! hasDistrib;
+    isSheffer = Length[allHeads] == 1 && First[Values[ops]]["Arity"] == 2 && ! hasAssoc && ! hasComm && ! hasUnit && ! hasInv && ! hasDistrib;
     (* Boolean lattice presentation: two binary ops that are both
        commutative AND distribute, plus a unary "complement" head
        (Huntington-style axioms where associativity is a THEOREM, not
@@ -380,15 +335,12 @@ atpAnalyzeStructure[axioms_List, conjecture_ : Null] := Block[{
        AC-class detection misses).  Symmetric goals dominate here
        (DeMorgan, ExcludedMiddle, Noncontradiction), so GoalDirected
        must come first in the front-load. *)
-    isBoolean = Length[Select[Values[ops],
-            #["Arity"] == 2 && #["Commutative"] && #["Distributes"] &]] >= 2 &&
-        AnyTrue[Values[ops], #["Arity"] == 1 &];
+    isBoolean = Length[Select[Values[ops], #["Arity"] == 2 && #["Commutative"] && #["Distributes"] &]] >= 2 && AnyTrue[Values[ops], #["Arity"] == 1 &];
     (* AC theory with a unary complement (Huntington, Robbins): the
        symmetric goals (DoubleNegation, ImpliesRobbins) need MNF/
        GoalDirected, but the bulk completion still wants the AC weight
        schedule -- so this is a "GoalDirected first, then AC" variant. *)
-    isACWithComplement = ! isBoolean && hasComm && hasAssoc &&
-        AnyTrue[Values[ops], #["Arity"] == 1 &];
+    isACWithComplement = ! isBoolean && hasComm && hasAssoc && AnyTrue[Values[ops], #["Arity"] == 1 &];
     (* CancellativeAbelianGroup -- the single-axiom McCune / AbelianMcCune
        characterization.  Shape: ONE axiom over a single binary op + a
        single unary op (the inverse), with no standard law detector
@@ -398,10 +350,7 @@ atpAnalyzeStructure[axioms_List, conjecture_ : Null] := Block[{
        Mix2 from the default $AtpSchedule fallback doesn't crack these
        in reasonable time, but GT-bare cracks in 0.0s on the C bench
        (see test_atp_wolfram_bench's amc_assoc probe). *)
-    isCAG = Length[parts] == 1 &&
-        Length[Select[Values[ops], #["Arity"] == 2 &]] == 1 &&
-        AnyTrue[Values[ops], #["Arity"] == 1 &] &&
-        ! hasAssoc && ! hasComm && ! hasUnit && ! hasInv && ! hasDistrib;
+    isCAG = Length[parts] == 1 && Length[Select[Values[ops], #["Arity"] == 2 &]] == 1 && AnyTrue[Values[ops], #["Arity"] == 1 &] && ! hasAssoc && ! hasComm && ! hasUnit && ! hasInv && ! hasDistrib;
     class = Which[
         isComb, "Combinatory",
         isSheffer, "Sheffer",
@@ -415,14 +364,18 @@ atpAnalyzeStructure[axioms_List, conjecture_ : Null] := Block[{
         hasComm && hasAssoc, "AC",
         isCAG, "CancellativeAbelianGroup",
         True, "General"];
-    <|"Operators" -> ops, "ACOperators" -> acOps, "Class" -> class,
-      "NOperators" -> Length[ops], "MaxArity" -> maxArity,
-      "NAxioms" -> Length[parts]|>
+    <|
+        "Operators" -> ops,
+        "ACOperators" -> acOps,
+        "Class" -> class,
+        "NOperators" -> Length[ops],
+        "MaxArity" -> maxArity,
+        "NAxioms" -> Length[parts]
+    |>
 ]
 (* the named-theory / single-arg conveniences resolve through
    AxiomaticTheory like the rest of the surface. *)
-atpAnalyzeStructure[theory_String] :=
-    atpAnalyzeStructure[AxiomaticTheory[theory]]
+atpAnalyzeStructure[theory_String] := atpAnalyzeStructure[AxiomaticTheory[theory]]
 
 (* === atpAutoTune ===================================================
    Map the detected structure class to an ORDERED list of tailored
@@ -434,18 +387,15 @@ atpAnalyzeStructure[theory_String] :=
 atpAutoTune[axioms_List, conjecture_ : Null] := Block[{prof = atpAnalyzeStructure[axioms, conjecture]},
     atpAutoTuneForClass[prof["Class"]]
 ]
-atpAutoTune[theory_String, conjecture_ : Null] :=
-    atpAutoTune[AxiomaticTheory[theory], conjecture]
+atpAutoTune[theory_String, conjecture_ : Null] := atpAutoTune[AxiomaticTheory[theory], conjecture]
 
 (* Tafel2 row -> thvm config list.  Decoding key:
    GtS  -> Gt weight, KBO, GoalInterleave 50  (Sinai.h:110)
    StdS -> KBO, GoalInterleave 50, GoalDirected MNF front (Sinai.h:109)
    KombS-> Add weight, KBO                    (Sinai.h:111) *)
-atpGtS = {"Completion", "CriticalPairWeight" -> "Gt",
-    "GoalInterleave" -> 50}
+atpGtS = {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50}
 atpStdS = {"Completion", "GoalInterleave" -> 50}
-atpKombS = {"Completion", "CriticalPairWeight" -> "Add",
-    "Ordering" -> "LPO", "AutoPrecedence" -> True}
+atpKombS = {"Completion", "CriticalPairWeight" -> "Add", "Ordering" -> "LPO", "AutoPrecedence" -> True}
 
 atpAutoTuneForClass["AbelianGroup" | "Group"] := {
     (* Mix + KBO + AutoPrec + SR=51 + RHSI + UnfailingCP + CPSetIR --
@@ -459,35 +409,33 @@ atpAutoTuneForClass["AbelianGroup" | "Group"] := {
        GtS (below) wins on IOC + ImpliesMcCune but loses on
        ImpliesAbelianMcCune by +8; Mix-first hedges.  Front-load
        Mix; keep GtS as the fallback. *)
-    {"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
-        "AutoPrecedence" -> True, "SelectionRatio" -> 51,
-        "RHSInterreduce" -> True, "UnfailingCP" -> True,
-        "CPSetInterreduce" -> True},
+    {"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True, "SelectionRatio" -> 51, "RHSInterreduce" -> True, "UnfailingCP" -> True, "CPSetInterreduce" -> True},
     (* Tafel2: Gruppe -> GtS (Sinai.h:115).  AutoPrecedence puts the
        unary inverse on top (Sinai Group precedence "+-0", Sinai.h:117/
        precedence.c:329) so i(i(x)) -> x orients cleanly. *)
-    {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50,
-        "AutoPrecedence" -> True},
-    atpGtS}
+    {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50, "AutoPrecedence" -> True},
+    atpGtS
+}
 atpAutoTuneForClass["Ring"] := {
     (* Tafel2: Ring -> kbo(Std) (Sinai.h:122); structure precedence
        puts the distributor "*" above "+" (Tafel3 Ring "*+",
        Sinai.h:243 / precedence.c:331). *)
     {"Completion", "Ordering" -> "KBO", "AutoPrecedence" -> True},
-    atpGtS}
+    atpGtS
+}
 atpAutoTuneForClass["AC"] := {
     (* AC theories: GtS family -- a KBO with ordering-directed (gt) CP
        weight handles commutative+associative operators (Sinai Verband /
        group rows all use GtS / kbo, Sinai.h:114-122). *)
     atpGtS,
-    {"Completion", "CriticalPairWeight" -> "Mix2", "GoalInterleave" -> 50}}
+    {"Completion", "CriticalPairWeight" -> "Mix2", "GoalInterleave" -> 50}
+}
 atpAutoTuneForClass["Lattice"] := {
     (* Tafel2: Verband -> kbo(Std),cph(gt),gj() ... lpo(std),itl(re)
        (Sinai.h:120) -- GroundJoin on, then an LPO pass. *)
-    {"Completion", "CriticalPairWeight" -> "Gt", "GroundJoin" -> True,
-        "GoalInterleave" -> 50},
-    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True,
-        "GoalInterleave" -> 100}}
+    {"Completion", "CriticalPairWeight" -> "Gt", "GroundJoin" -> True, "GoalInterleave" -> 50},
+    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True, "GoalInterleave" -> 100}
+}
 atpAutoTuneForClass["Monoid"] := {atpGtS, atpStdS}
 atpAutoTuneForClass["Combinatory"] := {
     (* Tafel2: Kombinatorlogik* -> KombS = cph(add) (Sinai.h:111,125).
@@ -497,7 +445,8 @@ atpAutoTuneForClass["Combinatory"] := {
        walls plain completion (~10s under LPO+AutoPrec). *)
     atpKombS,
     "GoalDirected",
-    {"Completion", "CriticalPairWeight" -> "Add"}}
+    {"Completion", "CriticalPairWeight" -> "Add"}
+}
 atpAutoTuneForClass["Sheffer"] := {
     (* No Tafel2 Sheffer row.  Measured per-entry behavior:
        - Mix2 + SelectionRatio 2 (aggressive 1-FIFO-per-2 age bias)
@@ -529,14 +478,11 @@ atpAutoTuneForClass["Sheffer"] := {
        Run the AMW-free variant FIRST so Hillman + ImpliesWolfram cases
        crack on entry 1 instead of falling through to the safety tail. *)
     {"Completion", "CriticalPairWeight" -> "Mix2", "SelectionRatio" -> 2},
-    {"Completion", "CriticalPairWeight" -> "Mix2",
-        "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
+    {"Completion", "CriticalPairWeight" -> "Mix2", "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
     {"Completion", "CriticalPairWeight" -> "Add", "AutoMaxWeight" -> 20},
     {"GoalDirected", "CriticalPairWeight" -> "Mix2", "AutoMaxWeight" -> 20},
-    {"Completion", "CriticalPairWeight" -> "Mix2",
-        "AxiomRelevance" -> "SInE", "AutoMaxWeight" -> 20},
-    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True,
-        "AutoMaxWeight" -> 20},
+    {"Completion", "CriticalPairWeight" -> "Mix2", "AxiomRelevance" -> "SInE", "AutoMaxWeight" -> 20},
+    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True, "AutoMaxWeight" -> 20},
     (* Vampire LRS (Limited Resource Strategy): predicts how many CPs
        the saturator can REACH in the remaining time budget and prunes
        the queue to those.  Sound (discarded CPs are unreachable in
@@ -545,8 +491,7 @@ atpAutoTuneForClass["Sheffer"] := {
        For the deep cross-axiom Sheffer Implies-X family where the
        lean configs above wall, LRS narrows the heap-min selection to
        the budget-tractable subset. *)
-    {"Completion", "CriticalPairWeight" -> "Mix2", "LRS" -> True,
-        "AutoMaxWeight" -> 20},
+    {"Completion", "CriticalPairWeight" -> "Mix2", "LRS" -> True, "AutoMaxWeight" -> 20},
     (* Twee-style config: Twee's CP weight (asymmetric, biases small
        reduct) + GroundJoin + Connectedness BOTH on (Twee.Join.Config
        defaults cfg_ground_join=True, cfg_use_connectedness_standalone=
@@ -557,11 +502,7 @@ atpAutoTuneForClass["Sheffer"] := {
        backward demodulation): every redundancy criterion the engine
        has, on the same entry, so the CP queue stays tightest for the
        deep Implies-X family that walls every cheaper config. *)
-    {"Completion", "CriticalPairWeight" -> "Twee",
-        "GroundJoin" -> True, "Connectedness" -> True,
-        "AutoMaxWeight" -> 20,
-        "BackwardSubsume" -> True, "BackwardDemod" -> True,
-        "RHSInterreduce" -> True},
+    {"Completion", "CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "AutoMaxWeight" -> 20, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True},
     (* WM-style p>q>nand scheme (LPO + SkolemHighest, the structural
        precedence Waldmeister's wolfram.pr / thm.pr ORDERING block
        encodes -- see project_atp_wm_sheffer_lpo memory).  The
@@ -572,9 +513,8 @@ atpAutoTuneForClass["Sheffer"] := {
        WolframAxioms/Commutativity in 60s).  Front-load it for the
        cross-axiom Implies-X / *-Associativity cases the lean Mix2/Add
        entries above wall on. *)
-    {"GoalDirected", "Ordering" -> "LPO", "SkolemHighest" -> True,
-        "CriticalPairWeight" -> "Add",
-        "UnfailingCP" -> True, "AutoMaxWeight" -> 20}}
+    {"GoalDirected", "Ordering" -> "LPO", "SkolemHighest" -> True, "CriticalPairWeight" -> "Add", "UnfailingCP" -> True, "AutoMaxWeight" -> 20}
+}
 atpAutoTuneForClass["Boolean"] := {
     (* BooleanAxioms has both asymmetric (DeMorgan / Absorption /
        OrAssociativity / Distributivity) and symmetric (ExcludedMiddle /
@@ -590,13 +530,15 @@ atpAutoTuneForClass["Boolean"] := {
        budget, so the autotuner does not enable it. *)
     "VampireUEQ",
     "GoalDirected",
-    {"Completion", "CriticalPairWeight" -> "Mix2"}}
+    {"Completion", "CriticalPairWeight" -> "Mix2"}
+}
 atpAutoTuneForClass["ACWithComplement"] := {
     (* Huntington / Robbins: AC operator + unary complement.  The
        symmetric goals (DoubleNegation, ImpliesRobbins) need MNF
        first; bulk completion (GtS) is the fallback. *)
     "GoalDirected",
-    atpGtS}
+    atpGtS
+}
 (* CancellativeAbelianGroup: GT weight cracks the single-axiom CAG
    (AbelianMcCune / McCune characterization) in 0.0s on the C bench
    where Mix2-bare from the default tail can wall.  Empirical: GT
@@ -605,7 +547,8 @@ atpAutoTuneForClass["ACWithComplement"] := {
 atpAutoTuneForClass["CancellativeAbelianGroup"] := {
     {"Completion", "CriticalPairWeight" -> "Gt"},
     atpGtS,
-    {"Completion"}}
+    {"Completion"}
+}
 
 atpAutoTuneForClass[_] := {}   (* "General": no front-load, just tail *)
 
@@ -625,14 +568,17 @@ atpAutoTuneForClass[_] := {}   (* "General": no front-load, just tail *)
    has been exhausted -- so a proof reachable without pruning is never
    missed. *)
 atpTunedSchedule[axioms_, conjecture_] := Block[{base, sineTail},
-    base = DeleteDuplicates @ Join[
-        Quiet @ Check[atpAutoTune[axioms, conjecture], {}],
-        $AtpSchedule];
+    base = DeleteDuplicates @ Join[Quiet @ Check[atpAutoTune[axioms, conjecture], {}], $AtpSchedule];
     sineTail = If[ Length[axioms] >= 8,
-        {{"Completion", "CriticalPairWeight" -> "Mix2",
-            "AxiomRelevance" -> "SInE"},
-         {"GoalDirected", "AxiomRelevance" -> "SInE"}}, {}];
-    DeleteDuplicates @ Join[base, sineTail]]
+        {
+            {"Completion", "CriticalPairWeight" -> "Mix2", "AxiomRelevance" -> "SInE"},
+            {"GoalDirected", "AxiomRelevance" -> "SInE"}
+        }
+        ,
+        {}
+    ];
+    DeleteDuplicates @ Join[base, sineTail]
+]
 
 End[];
 EndPackage[];

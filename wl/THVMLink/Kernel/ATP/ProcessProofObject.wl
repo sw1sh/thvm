@@ -28,31 +28,31 @@
      to "SubstitutionLemma" (a benign default; tweak the table to
      add a prover's idiosyncratic inference). *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"Wolfram`Parser`"}]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "Wolfram`Parser`"}]
 
-GeneralUtilities`SetUsage[TSZSDerivationToProofObject, "TSZSDerivationToProofObject[derivation$] builds a thvm-shaped proof Association from a parsed SZS derivation (the list returned by Wolfram`Parser`TPTPImport[$$, \"SZS\"]).
+SetUsage[TSZSDerivationToProofObject, "TSZSDerivationToProofObject[derivation$] builds a thvm-shaped proof Association from a parsed SZS derivation (the list returned by Wolfram`Parser`TPTPImport[$$, \"SZS\"]).
 Works for any ATP that emits SZS-framed fof+inference output (Vampire, E, iProver, Twee --tstp, Otter, ...).
 The SZS-rule to thvm-construct mapping comes from $SZSRuleToConstruct.
 Option ParseFormulas (default False) parses formula bodies into WL expressions instead of keeping raw SZS strings."];
 
-GeneralUtilities`SetUsage[$SZSRuleToConstruct, "$SZSRuleToConstruct is an Association mapping SZS inference-rule names (superposition, forward_demodulation, ...) to thvm ProofObject construct types (CriticalPairLemma, SubstitutionLemma, ...).
+SetUsage[$SZSRuleToConstruct, "$SZSRuleToConstruct is an Association mapping SZS inference-rule names (superposition, forward_demodulation, ...) to thvm ProofObject construct types (CriticalPairLemma, SubstitutionLemma, ...).
 Edit this Association to support a prover's idiosyncratic inference rule; unmapped rules fall through to SubstitutionLemma."];
 
-GeneralUtilities`SetUsage[TVampireProofObject, "TVampireProofObject[theory$, thm$] runs the Vampire CLI via TVampireProof and converts the result through TSZSDerivationToProofObject to a thvm-shaped proof Association.
+SetUsage[TVampireProofObject, "TVampireProofObject[theory$, thm$] runs the Vampire CLI via TVampireProof and converts the result through TSZSDerivationToProofObject to a thvm-shaped proof Association.
 Used as the Method \[Rule] \"VampireProcess\" dispatch target in TFindProof, so proofs from differing Methods (internal preset vs external CLI) can be compared structurally.
 Options: TimeConstraint, Mode, Binary, ParseFormulas, LiftToProofObject; see the ATP documentation."];
 
-GeneralUtilities`SetUsage[TWaldmeisterProofObject, "TWaldmeisterProofObject[file$.pr] runs the local Waldmeister binary via TWaldmeisterProof on a .pr problem file and converts the proof protocol through TSZSDerivationToProofObject to a thvm-shaped proof Association.
+SetUsage[TWaldmeisterProofObject, "TWaldmeisterProofObject[file$.pr] runs the local Waldmeister binary via TWaldmeisterProof on a .pr problem file and converts the proof protocol through TSZSDerivationToProofObject to a thvm-shaped proof Association.
 TWaldmeisterProofObject[theory$, thm$] resolves to a banked .pr file under tools/baselines/wm_pr/ when present, and otherwise GENERATES the .pr at runtime from the theory's symbolic axioms + the NotableTheorem conjecture (byte-identical to the banked-file construction).
 Used as the Method \[Rule] \"WaldmeisterProcess\" dispatch target in TFindProof.
 Options: TimeConstraint, Binary, MathlinkPath, ParseFormulas, LiftToProofObject; see the ATP documentation."];
 
-GeneralUtilities`SetUsage[TTweeProofObject, "TTweeProofObject[theory$, thm$] runs the Twee CLI via TTweeProof and returns a thvm-shaped proof Association.
+SetUsage[TTweeProofObject, "TTweeProofObject[theory$, thm$] runs the Twee CLI via TTweeProof and returns a thvm-shaped proof Association.
 Twee's --tstp output is SZS-framed but its proof body is a human-readable equation chain (not TPTP fof inferences), so the lemma-list shape is built directly rather than via TSZSDerivationToProofObject; the dataset is keyed by {\"Axiom\", n$} and {\"Lemma\", n$} only, with no per-step construct-class metadata.
 Used as the Method \[Rule] \"TweeProcess\" dispatch target in TFindProof.
 Options: TimeConstraint, Binary."];
 
-GeneralUtilities`SetUsage[TEproverProofObject, "TEproverProofObject[theory$, thm$] runs the E prover CLI on the canonical TPTP problem file and lifts the SZS proof into a thvm-shaped proof Association via TSZSDerivationToProofObject.
+SetUsage[TEproverProofObject, "TEproverProofObject[theory$, thm$] runs the E prover CLI on the canonical TPTP problem file and lifts the SZS proof into a thvm-shaped proof Association via TSZSDerivationToProofObject.
 E's --proof-object --tstp-format emits the same SZS-framed fof+inference DAG as Vampire's --proof tptp, so the lift path is shared.
 Options: TimeConstraint, Binary, ParseFormulas, LiftToProofObject; LiftToProofObject wraps the Association into a literal ProofObject head. See the ATP documentation."];
 
@@ -629,7 +629,7 @@ liftToProofObject[assoc_Association] := Block[{goalRaw, axiomsRaw, dsRaw, goalLi
         <|
             "Variables" -> varSyms,
             "Constants" -> constSyms,
-            "Proof"     -> prfList
+            "Proof" -> prfList
         |>]
 ]
 
@@ -732,8 +732,8 @@ wmRenderTerm[expr_, vmap_List] := Block[{v = wmLookupVar[expr, vmap]},
         True, wmOpNameForHead[Head[expr]] <> "(" <> StringRiffle[wmRenderTerm[#, vmap] & /@ (List @@ expr), ","] <> ")"]];
 
 (* The bound variables of a ForAll-wrapped axiom (else {}). *)
-wmExtractVars[expr_] := If[Head[expr] === ForAll, With[{v = expr[[1]]}, If[Head[v] === List, List @@ v, {v}]], {}];
-wmStripForAll[expr_] := If[ Head[expr] === ForAll, expr[[2]], expr];
+wmExtractVars[expr_] := If[MatchQ[expr, _ForAll], With[{v = expr[[1]]}, If[MatchQ[v, _List], List @@ v, {v}]], {}];
+wmStripForAll[expr_] := If[MatchQ[expr, _ForAll], expr[[2]], expr];
 
 (* X1.. for axiom variables; sk_c1.. (skolem CONSTANTS) for the goal's
    universally-quantified variables. *)
@@ -1003,37 +1003,35 @@ Options[TWaldmeisterProofObject] = {
    cache-miss, GENERATE the .pr at runtime from the symbolic axioms +
    conjecture (wmGenerateProblemFor) to a temp file and proceed.  Never
    hard-fails on a missing banked file. *)
-TWaldmeisterProofObject[theory_String, thm_String, opts : OptionsPattern[]] /; FileExtension[theory] =!= "pr" :=
-    Block[{path = FileNameJoin[{Directory[], "tools", "baselines", "wm_pr", theory <> "__" <> thm <> ".pr"}], pr, tmp},
-        If[ FileExistsQ[path],
-            TWaldmeisterProofObject[path, opts],
-            (* cache-miss: generate the .pr from the symbolic theory. *)
-            pr = WolframInstitute`THVMLink`ATP`Private`wmGenerateProblemFor[theory, thm];
-            If[ FailureQ[pr], Return[pr]];
-            tmp = FileNameJoin[{$TemporaryDirectory, WolframInstitute`THVMLink`ATP`Private`wmSanitize[theory <> "__" <> thm] <> ".pr"}];
-            Export[tmp, pr, "Text"];
-            TWaldmeisterProofObject[tmp, opts]
-        ]
+TWaldmeisterProofObject[theory_String, thm_String, opts : OptionsPattern[]] /; FileExtension[theory] =!= "pr" := Block[{path = FileNameJoin[{Directory[], "tools", "baselines", "wm_pr", theory <> "__" <> thm <> ".pr"}], pr, tmp},
+    If[ FileExistsQ[path],
+        TWaldmeisterProofObject[path, opts],
+        (* cache-miss: generate the .pr from the symbolic theory. *)
+        pr = WolframInstitute`THVMLink`ATP`Private`wmGenerateProblemFor[theory, thm];
+        If[ FailureQ[pr], Return[pr]];
+        tmp = FileNameJoin[{$TemporaryDirectory, WolframInstitute`THVMLink`ATP`Private`wmSanitize[theory <> "__" <> thm] <> ".pr"}];
+        Export[tmp, pr, "Text"];
+        TWaldmeisterProofObject[tmp, opts]
     ]
+]
 
-TWaldmeisterProofObject[problemFile_String, opts : OptionsPattern[]] /; FileExtension[problemFile] === "pr" :=
-    Block[{wmR = TWaldmeisterProof[problemFile, FilterRules[{opts}, {TimeConstraint, "WMCLI", "Binary", "MathlinkPath"}]], liftQ = TrueQ @ OptionValue["LiftToProofObject"], parseOpt, assoc},
-        (* LiftToProofObject implies ParseFormulas: the lift needs
-           WL-parsed formula bodies to walk. *)
-        parseOpt = "ParseFormulas" -> (liftQ || TrueQ @ OptionValue["ParseFormulas"]);
-        If[ wmR["Status"] =!= "Proved",
-            Failure["ExternalNoProof", <|
-                "Tool" -> "Waldmeister",
-                "Status" -> wmR["Status"],
-                "Seconds" -> wmR["Seconds"]
-            |>],
-            assoc = TSZSDerivationToProofObject[wmR["Inferences"], parseOpt];
-            If[ liftQ,
-                WolframInstitute`THVMLink`ATP`Private`liftToProofObject[assoc],
-                assoc
-            ]
+TWaldmeisterProofObject[problemFile_String, opts : OptionsPattern[]] /; FileExtension[problemFile] === "pr" := Block[{wmR = TWaldmeisterProof[problemFile, FilterRules[{opts}, {TimeConstraint, "WMCLI", "Binary", "MathlinkPath"}]], liftQ = TrueQ @ OptionValue["LiftToProofObject"], parseOpt, assoc},
+    (* LiftToProofObject implies ParseFormulas: the lift needs
+       WL-parsed formula bodies to walk. *)
+    parseOpt = "ParseFormulas" -> (liftQ || TrueQ @ OptionValue["ParseFormulas"]);
+    If[ wmR["Status"] =!= "Proved",
+        Failure["ExternalNoProof", <|
+            "Tool" -> "Waldmeister",
+            "Status" -> wmR["Status"],
+            "Seconds" -> wmR["Seconds"]
+        |>],
+        assoc = TSZSDerivationToProofObject[wmR["Inferences"], parseOpt];
+        If[ liftQ,
+            WolframInstitute`THVMLink`ATP`Private`liftToProofObject[assoc],
+            assoc
         ]
     ]
+]
 
 (* Twee wrapper: Twee's --tstp proof body is not TPTP fof, so we
    build a coarser dataset (Axioms + Lemmas with no inference

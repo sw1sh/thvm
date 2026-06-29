@@ -79,8 +79,7 @@ krQwenDefaultTaps[nLayers_Integer, nTaps_Integer] := Module[{step},
 krActRealize[t_, "f32"] := TRealize[t]
 krActRealize[t_, dt_] := TRealize @ TUOpCast[t, dt]
 
-krQwLayer[x_, cos_, sin_, addMask_, W_, cfg_] := Block[
-    {h, hkv, dh, eps, scale, rep, s, act, xn, q, k, v, attnOut, hh, hn},
+krQwLayer[x_, cos_, sin_, addMask_, W_, cfg_] := Block[{h, hkv, dh, eps, scale, rep, s, act, xn, q, k, v, attnOut, hh, hn},
     h = cfg["heads"];  hkv = cfg["kv_heads"];  dh = cfg["head_dim"];
     eps = cfg["eps"];  scale = 1/Sqrt[N[dh]];  rep = h/hkv;  s = Dimensions[x][[1]];
     act = (krActRealize[#, cfg["actDType"]] &);
@@ -116,11 +115,9 @@ krQwLayerW[wf_, i_, prefix_] := With[{p = prefix <> "layers." <> ToString[i] <> 
        transformers hidden_states[i+1]; the diffusers taps select these.  cfg has
        layers / heads / kv_heads / head_dim / eps / weightPrefix / captureLayers /
        actDType.  Returns {S, L, dim}. --- *)
-krQwenEncodeStackedForward[x0_, addMask_, cos_, sin_, wf_, cfg_] := Block[
-    {nL, caps, prefix, lcfg, x, captured, stacked},
+krQwenEncodeStackedForward[x0_, addMask_, cos_, sin_, wf_, cfg_] := Block[{nL, caps, prefix, lcfg, x, captured, stacked},
     nL = cfg["layers"];  caps = cfg["captureLayers"];  prefix = cfg["weightPrefix"];
-    lcfg = <|"heads" -> cfg["heads"], "kv_heads" -> cfg["kv_heads"],
-             "head_dim" -> cfg["head_dim"], "eps" -> cfg["eps"], "actDType" -> cfg["actDType"]|>;
+    lcfg = <|"heads" -> cfg["heads"], "kv_heads" -> cfg["kv_heads"], "head_dim" -> cfg["head_dim"], "eps" -> cfg["eps"], "actDType" -> cfg["actDType"]|>;
     x = x0;  captured = <||>;
     Do[ x = TRealize @ krQwLayer[x, cos, sin, addMask, krQwLayerW[wf, i, prefix], lcfg];
         If[ MemberQ[caps, i], captured[i] = x],
@@ -138,22 +135,18 @@ krQwenEncodeStackedForward[x0_, addMask_, cos_, sin_, wf_, cfg_] := Block[
 (* host-prep of the device inputs (cos/sin/mask/x), reusing the FLUX qwenInputs
    path but with the Qwen3-VL theta + the cfg's embed-weight prefix.  Returns
    <|"cos","sin","addMask","x"|> device TTerms. *)
-krQwenInputs[inputIds_List, attMask_List, wf_, cfg_] := Block[
-    {dh, theta, s, prefix, dev, toDev, cos, sin},
+krQwenInputs[inputIds_List, attMask_List, wf_, cfg_] := Block[{dh, theta, s, prefix, dev, toDev, cos, sin},
     dh = cfg["head_dim"];  theta = cfg["theta"];  s = Length[inputIds];  prefix = cfg["weightPrefix"];
     dev = TDevice[wf[prefix <> "layers.0.self_attn.q_proj.weight"]];
     toDev = If[ dev === None || dev === "cpu", # &, TToDevice[#, dev] &];
     {cos, sin} = TRoPEHalfSplitTable[s, dh, theta];
-    <|"cos" -> toDev[cos], "sin" -> toDev[sin],
-      "addMask" -> toDev @ TPaddingCausalMask[attMask],
-      "x" -> toDev @ qwEmbed[wf[prefix <> "embed_tokens.weight"], inputIds]|>
+    <|"cos" -> toDev[cos], "sin" -> toDev[sin], "addMask" -> toDev @ TPaddingCausalMask[attMask], "x" -> toDev @ qwEmbed[wf[prefix <> "embed_tokens.weight"], inputIds]|>
 ]
 
 (* full encoder: inputIds {S} host int list (0-indexed); attMask {S} host list
    (1 real / 0 pad); wf a name->TTerm loader; cfg as above.  Returns the
    {S, L, dim} stacked tapped states the Krea DiT txtfusion consumes. *)
-krQwenEncodeStack[inputIds_List, attMask_List, wf_, cfg_] := With[
-    {in = krQwenInputs[inputIds, attMask, wf, cfg]},
+krQwenEncodeStack[inputIds_List, attMask_List, wf_, cfg_] := With[{in = krQwenInputs[inputIds, attMask, wf, cfg]},
     krQwenEncodeStackedForward[in["x"], in["addMask"], in["cos"], in["sin"], wf, cfg]
 ]
 

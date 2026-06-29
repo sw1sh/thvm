@@ -23,28 +23,21 @@
    from the Wolfram/WolframParser paclet (declared in BeginPackage so
    Needs auto-loads it). *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"Wolfram`Parser`"}]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "Wolfram`Parser`"}]
 
-GeneralUtilities`SetUsage[TVampireProof, "TVampireProof[file$] runs the local Vampire CLI on the TPTP problem file$ and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawSZS.
+SetUsage[TVampireProof, "TVampireProof[file$] runs the local Vampire CLI on the TPTP problem file$ and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawSZS.
 TVampireProof[theory$, thm$] resolves the TPTP file under tools/baselines/vampire_tptp from the (theory$, thm$) pair (the bench-harness convention) and proves it.
 Options: TimeConstraint, Mode, Binary; see the ATP documentation for the strategy decode and ProofObject mapping."];
 
-TVampireProof::novamp =
-    "Vampire CLI not found on PATH.  Install via `brew install vampire`."
+TVampireProof::novamp = "Vampire CLI not found on PATH.  Install via `brew install vampire`."
 
-TVampireProof::badfile =
-    "TPTP problem file not found: `1`"
+TVampireProof::badfile = "TPTP problem file not found: `1`"
 
-TVampireProof::badtptp =
-    "Vampire returned a result but TPTPImport could not parse it: `1`"
+TVampireProof::badtptp = "Vampire returned a result but TPTPImport could not parse it: `1`"
 
 Begin["`Private`"]
 
-Options[TVampireProof] = {
-    TimeConstraint -> 30,
-    "Mode" -> "casc",
-    "Binary" -> Automatic
-}
+Options[TVampireProof] = {TimeConstraint -> 30, "Mode" -> "casc", "Binary" -> Automatic}
 
 (* Resolve the vampire binary: the common Homebrew / /usr/local prefixes
    first, then any $PATH dir.  No default, so a truly-absent binary yields
@@ -73,14 +66,10 @@ foldReorients[derivation_List] := Block[{aliases, fold},
         derivation,
         s_Association /; s["Rule"] === "reorient_equations" && ListQ[s["Parents"]] && Length[s["Parents"]] == 1 :> (s["Name"] -> s["Parents"][[1]])
     ];
-    fold[n_] := If[ KeyExistsQ[aliases, n], fold[aliases[n]], n];
+    fold[n_] := If[KeyExistsQ[aliases, n], fold[aliases[n]], n];
     DeleteCases[
         Map[
-            step |-> If[
-                KeyExistsQ[step, "Parents"],
-                Append[step, "Parents" -> Map[fold, step["Parents"]]],
-                step
-            ],
+            step |-> If[KeyExistsQ[step, "Parents"], Append[step, "Parents" -> Map[fold, step["Parents"]]], step],
             derivation
         ],
         KeyValuePattern["Rule" -> "reorient_equations"]
@@ -93,12 +82,7 @@ foldReorients[derivation_List] := Block[{aliases, fold},
    refutation was reported. *)
 extractStrategy[src_String] := Block[{lines, idx, stratLine},
     lines = StringSplit[src, "\n"];
-    idx = FirstPosition[
-        lines,
-        l_String /; StringContainsQ[l, "Refutation found"],
-        Missing["NotFound"],
-        {1}
-    ];
+    idx = FirstPosition[lines, l_String /; StringContainsQ[l, "Refutation found"], Missing["NotFound"], {1}];
     If[ MissingQ[idx],
         Missing["NotFound"],
         stratLine = SelectFirst[
@@ -108,13 +92,7 @@ extractStrategy[src_String] := Block[{lines, idx, stratLine},
         ];
         If[ MissingQ[stratLine],
             Missing["NotFound"],
-            StringTrim @ StringReplace[
-                stratLine,
-                {
-                    RegularExpression["^% "] -> "",
-                    RegularExpression[" on .*"] -> ""
-                }
-            ]
+            StringTrim @ StringReplace[stratLine, {RegularExpression["^% "] -> "", RegularExpression[" on .*"] -> ""}]
         ]
     ]
 ]
@@ -123,21 +101,14 @@ extractStrategy[src_String] := Block[{lines, idx, stratLine},
    file under tools/baselines/vampire_tptp/.  Mirrors the bench
    harness convention so callers can use the same (theory, thm) tuple
    they use elsewhere. *)
-TVampireProof[theory_String, thm_String, opts : OptionsPattern[]] :=
-    TVampireProof[
-        FileNameJoin[{
-            Directory[], "tools", "baselines", "vampire_tptp",
-            theory <> "__" <> thm <> ".p"
-        }],
-        opts
-    ]
+TVampireProof[theory_String, thm_String, opts : OptionsPattern[]] := TVampireProof[
+    FileNameJoin[{Directory[], "tools", "baselines", "vampire_tptp", theory <> "__" <> thm <> ".p"}],
+    opts
+]
 
 TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=
-    Block[{
-        bin, tc, mode, cmd, out, secs, status,
-        proofText, solutionFile, derivation, foldedDerivation
-    },
+    Block[{bin, tc, mode, cmd, out, secs, status, proofText, solutionFile, derivation, foldedDerivation},
         bin = vampireBinary[OptionValue["Binary"]];
         If[ MissingQ[bin],
             Message[TVampireProof::novamp];
@@ -149,13 +120,8 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
         ];
         tc = OptionValue[TimeConstraint];
         mode = OptionValue["Mode"];
-        cmd = StringJoin[
-            bin, " --mode ", mode, " --proof tptp -t ",
-            ToString[N[tc]], " ", problemFile, " 2>&1"
-        ];
-        {secs, out} = AbsoluteTiming @ RunProcess[
-            {"sh", "-c", cmd}, "StandardOutput"
-        ];
+        cmd = StringJoin[bin, " --mode ", mode, " --proof tptp -t ", ToString[N[tc]], " ", problemFile, " 2>&1"];
+        {secs, out} = AbsoluteTiming @ RunProcess[{"sh", "-c", cmd}, "StandardOutput"];
         status = Which[
             StringContainsQ[out, "SZS status Unsatisfiable"] || StringContainsQ[out, "SZS status Theorem"],
                 "Proved",
@@ -168,44 +134,27 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
            to a separate file ("Solution written to <path>") rather
            than stdout.  Detect + read that file; fall back to the
            inline proof body present in single-strategy modes. *)
-        solutionFile = First[
-            StringCases[
-                out,
-                "Solution written to \"" ~~ p : Except["\""].. ~~ "\"" :> p,
-                1
-            ],
-            None
-        ];
+        solutionFile = First[StringCases[out, "Solution written to \"" ~~ p : Except["\""].. ~~ "\"" :> p, 1], None];
         proofText = Which[
             status =!= "Proved", out,
             StringQ[solutionFile] && FileExistsQ[solutionFile],
                 Import[solutionFile, "Text"],
             True, out
         ];
-        derivation = If[
-            status === "Proved",
-            Quiet @ Check[
-                Wolfram`Parser`TPTPImport[proofText, "SZS"],
-                $Failed
-            ],
+        derivation = If[ status === "Proved",
+            Quiet @ Check[Wolfram`Parser`TPTPImport[proofText, "SZS"], $Failed],
             Missing["NoProof"]
         ];
         (* A proof that Vampire found but TPTPImport could not parse must
            not masquerade as a 0-length "Proved" with empty Inferences. *)
-        If[ status === "Proved" && derivation === $Failed,
-            Message[TVampireProof::badtptp, proofText]];
-        foldedDerivation = If[
-            AssociationQ[derivation] && KeyExistsQ[derivation, "Derivation"],
+        If[status === "Proved" && derivation === $Failed, Message[TVampireProof::badtptp, proofText]];
+        foldedDerivation = If[ AssociationQ[derivation] && KeyExistsQ[derivation, "Derivation"],
             foldReorients[derivation["Derivation"]],
             {}
         ];
         <|
             "Status" -> status,
-            "Strategy" -> If[
-                status === "Proved",
-                extractStrategy[out],
-                Missing["NoProof"]
-            ],
+            "Strategy" -> If[status === "Proved", extractStrategy[out], Missing["NoProof"]],
             "Seconds" -> N @ Round[secs, 0.01],
             "ProofLength" -> If[status === "Proved", Length[foldedDerivation], 0],
             "Inferences" -> foldedDerivation,

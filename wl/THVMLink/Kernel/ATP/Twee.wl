@@ -23,24 +23,19 @@
    instead (Vampire's --proof tptp emits TPTP fof clauses with
    inference(rule, [], parents) records). *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`"]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`"}]
 
-GeneralUtilities`SetUsage[TTweeProof, "TTweeProof[file$] runs the local Twee 2.x binary on a TPTP problem file$ (with --tstp --quiet) and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Lemmas, Axioms, RawProof.
+SetUsage[TTweeProof, "TTweeProof[file$] runs the local Twee 2.x binary on a TPTP problem file$ (with --tstp --quiet) and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Lemmas, Axioms, RawProof.
 TTweeProof[\"Theory\", \"thm\"] resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.
 Options: TimeConstraint, Binary. Twee emits no per-step inference DAG; for that use TVampireProof."]
 
-TTweeProof::notwee =
-    "Twee CLI not found.  Install via `cabal install twee`."
+TTweeProof::notwee = "Twee CLI not found.  Install via `cabal install twee`."
 
-TTweeProof::badfile =
-    "TPTP problem file not found: `1`"
+TTweeProof::badfile = "TPTP problem file not found: `1`"
 
 Begin["`Private`"]
 
-Options[TTweeProof] = {
-    TimeConstraint -> 30,
-    "Binary" -> Automatic
-}
+Options[TTweeProof] = {TimeConstraint -> 30, "Binary" -> Automatic}
 
 (* Resolve twee: the cabal/Homebrew/usr-local prefixes first (cabal
    installs to ~/.cabal/bin), then any $PATH dir.  No default, so a
@@ -71,10 +66,7 @@ parseAxiomLine[l_String] := Replace[
         "Axiom " ~~ n : DigitCharacter .. ~~ " (" ~~ name__ ~~ "): " ~~ stmt__ :>
             <|"Name" -> "axiom" <> n, "Statement" -> StringTrim @ stmt|>
     ],
-    {
-        {entry_Association, ___} -> entry,
-        _ -> Nothing
-    }
+    {{entry_Association, ___} -> entry, _ -> Nothing}
 ]
 
 parseLemmaLine[l_String] := Replace[
@@ -83,10 +75,7 @@ parseLemmaLine[l_String] := Replace[
         "Lemma " ~~ n : DigitCharacter .. ~~ ": " ~~ stmt__ :>
             <|"Name" -> "lemma" <> n, "Statement" -> StringTrim @ stmt|>
     ],
-    {
-        {entry_Association, ___} -> entry,
-        _ -> Nothing
-    }
+    {{entry_Association, ___} -> entry, _ -> Nothing}
 ]
 
 (* Parse Twee's proof body.  Each "Axiom N (...): ..." line + each
@@ -104,14 +93,10 @@ parseTweeProof[proofText_String] := Block[{lines, axEntries, lemEntries, goalSee
     |>
 ]
 
-TTweeProof[theory_String, thm_String, opts : OptionsPattern[]] :=
-    TTweeProof[
-        FileNameJoin[{
-            Directory[], "tools", "baselines", "vampire_tptp",
-            theory <> "__" <> thm <> ".p"
-        }],
-        opts
-    ]
+TTweeProof[theory_String, thm_String, opts : OptionsPattern[]] := TTweeProof[
+    FileNameJoin[{Directory[], "tools", "baselines", "vampire_tptp", theory <> "__" <> thm <> ".p"}],
+    opts
+]
 
 TTweeProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=
@@ -126,13 +111,8 @@ TTweeProof[problemFile_String, opts : OptionsPattern[]] /;
             Return[$Failed]
         ];
         tc = OptionValue[TimeConstraint];
-        cmd = StringJoin[
-            "timeout ", ToString[N[tc + 2]], " ",
-            bin, " --tstp --quiet ", problemFile, " 2>&1"
-        ];
-        {secs, out} = AbsoluteTiming @ RunProcess[
-            {"sh", "-c", cmd}, "StandardOutput"
-        ];
+        cmd = StringJoin["timeout ", ToString[N[tc + 2]], " ", bin, " --tstp --quiet ", problemFile, " 2>&1"];
+        {secs, out} = AbsoluteTiming @ RunProcess[{"sh", "-c", cmd}, "StandardOutput"];
         status = Which[
             StringContainsQ[out, "SZS status Unsatisfiable"] || StringContainsQ[out, "SZS status Theorem"],
                 "Proved",
@@ -142,12 +122,7 @@ TTweeProof[problemFile_String, opts : OptionsPattern[]] /;
                 "Failed"
         ];
         proofBody = If[ status === "Proved",
-            StringCases[
-                out,
-                "SZS output start Proof" ~~ body__ ~~ "SZS output end Proof" :>
-                    StringTrim @ body,
-                1
-            ],
+            StringCases[out, "SZS output start Proof" ~~ body__ ~~ "SZS output end Proof" :> StringTrim @ body, 1],
             {}
         ];
         parsed = If[ Length[proofBody] > 0,

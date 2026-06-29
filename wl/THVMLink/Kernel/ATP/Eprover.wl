@@ -13,24 +13,19 @@
    "fof_nnf"; these map through $SZSRuleToConstruct's table (any
    unmapped name defaults to SubstitutionLemma). *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"Wolfram`Parser`"}]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "Wolfram`Parser`"}]
 
-GeneralUtilities`SetUsage[TEproverProof, "TEproverProof[file$, opts$] runs the local E prover binary on the TPTP problem file$ (path ending in .p) and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawSZS.
+SetUsage[TEproverProof, "TEproverProof[file$, opts$] runs the local E prover binary on the TPTP problem file$ (path ending in .p) and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawSZS.
 TEproverProof[\"Theory\", \"thm\"] resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.
 Options: TimeConstraint, Binary; see the ATP documentation."];
 
-TEproverProof::noeprover =
-    "E prover binary not found.  Install via `brew install eprover`."
+TEproverProof::noeprover = "E prover binary not found.  Install via `brew install eprover`."
 
-TEproverProof::badfile =
-    "TPTP problem file not found: `1`"
+TEproverProof::badfile = "TPTP problem file not found: `1`"
 
 Begin["`Private`"]
 
-Options[TEproverProof] = {
-    TimeConstraint -> 30,
-    "Binary" -> Automatic
-}
+Options[TEproverProof] = {TimeConstraint -> 30, "Binary" -> Automatic}
 
 (* Resolve eprover: the known prefixes first, then any $PATH dir.  No
    default, so a truly-absent binary yields Missing -> the noeprover
@@ -48,21 +43,14 @@ eproverBinary[Automatic] := SelectFirst[
 
 eproverBinary[s_String] := s
 
-TEproverProof[theory_String, thm_String, opts : OptionsPattern[]] :=
-    TEproverProof[
-        FileNameJoin[{
-            Directory[], "tools", "baselines", "vampire_tptp",
-            theory <> "__" <> thm <> ".p"
-        }],
-        opts
-    ]
+TEproverProof[theory_String, thm_String, opts : OptionsPattern[]] := TEproverProof[
+    FileNameJoin[{Directory[], "tools", "baselines", "vampire_tptp", theory <> "__" <> thm <> ".p"}],
+    opts
+]
 
 TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=
-    Block[{
-        bin, tc, cmd, out, secs, status,
-        derivation, foldedDerivation
-    },
+    Block[{bin, tc, cmd, out, secs, status, derivation, foldedDerivation},
         bin = eproverBinary[OptionValue["Binary"]];
         If[ MissingQ[bin],
             Message[TEproverProof::noeprover];
@@ -73,15 +61,8 @@ TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
             Return[$Failed]
         ];
         tc = OptionValue[TimeConstraint];
-        cmd = StringJoin[
-            bin,
-            " --auto-schedule --proof-object --tstp-format",
-            " --cpu-limit=", ToString[N[tc]], " ",
-            problemFile, " 2>&1"
-        ];
-        {secs, out} = AbsoluteTiming @ RunProcess[
-            {"sh", "-c", cmd}, "StandardOutput"
-        ];
+        cmd = StringJoin[bin, " --auto-schedule --proof-object --tstp-format", " --cpu-limit=", ToString[N[tc]], " ", problemFile, " 2>&1"];
+        {secs, out} = AbsoluteTiming @ RunProcess[{"sh", "-c", cmd}, "StandardOutput"];
         status = Which[
             StringContainsQ[out, "SZS status Theorem"] || StringContainsQ[out, "SZS status Unsatisfiable"],
                 "Proved",
@@ -91,16 +72,10 @@ TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
                 "Failed"
         ];
         derivation = If[ status === "Proved",
-            Quiet @ Check[
-                Wolfram`Parser`TPTPImport[out, "SZS"],
-                $Failed
-            ],
+            Quiet @ Check[Wolfram`Parser`TPTPImport[out, "SZS"], $Failed],
             Missing["NoProof"]
         ];
-        foldedDerivation = If[ AssociationQ[derivation] && KeyExistsQ[derivation, "Derivation"],
-            derivation["Derivation"],
-            {}
-        ];
+        foldedDerivation = If[AssociationQ[derivation] && KeyExistsQ[derivation, "Derivation"], derivation["Derivation"], {}];
         <|
             "Status" -> status,
             "Strategy" -> "eprover-auto-schedule",

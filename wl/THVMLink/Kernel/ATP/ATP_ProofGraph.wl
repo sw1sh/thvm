@@ -39,7 +39,7 @@ toHoldEq[expr_] := HoldForm[expr] /. Inactive[Equal] -> Equal
    the string form of TFindProof to normalize the
    AxiomaticTheory-resolved formulas. *)
 
-wrap[expr_, head_: List] := Replace[expr, x : Except[_head] :> head[x]]
+wrap[expr_, head_ : List] := Replace[expr, x : Except[_head] :> head[x]]
 
 (* Rename every Pattern variable in `expr` to a canonical short name
    (a, b, c, ..., then a1, b1, ... if more are needed).
@@ -83,20 +83,16 @@ atpFreshGlobalSymbol[name_String] := Module[{n = name, k = 0},
 ]
 
 (* Forward ref: skolemPatterns calls universalPatterns. *)
-skolemPatterns[expr_ /; ! FreeQ[expr, _Exists], bound_: {}] :=
-    expr //. HoldPattern[Exists[var_, cond___, sub_]] :> With[{
-        vars = wrap[var]
-    },
-        With[{repl = Thread[vars -> (
-            If[Length[bound] > 0, Unique[#] @@ bound, Unique[#]] &) /@ vars]},
+skolemPatterns[expr_ /; ! FreeQ[expr, _Exists], bound_ : {}] :=
+    expr //. HoldPattern[Exists[var_, cond___, sub_]] :> With[{vars = wrap[var]},
+        With[{repl = Thread[vars -> (If[Length[bound] > 0, Unique[#] @@ bound, Unique[#]] &) /@ vars]},
             If[ Length[{cond}] > 0,
                 universalPatterns[sub, bound] && cond /. repl,
                 universalPatterns[sub, bound] /. repl]]]
 skolemPatterns[expr_, ___] := expr
 
-universalPatterns[expr_ /; ! FreeQ[expr, _ForAll], bound_: {}] :=
-    expr //. HoldPattern[
-        ForAll[var_, cond___, ForAll[var2_, cond2___, sub_]]] :>
+universalPatterns[expr_ /; ! FreeQ[expr, _ForAll], bound_ : {}] :=
+    expr //. HoldPattern[ForAll[var_, cond___, ForAll[var2_, cond2___, sub_]]] :>
         ForAll[Join[wrap[var], wrap[var2]], cond && cond2, sub] //.
     HoldPattern[ForAll[var_, cond___, sub_]] :> With[{vars = wrap[var]},
         With[{repl = Thread[vars -> Unique /@ vars]},
@@ -108,10 +104,10 @@ universalPatterns[expr_ /; ! FreeQ[expr, _ForAll], bound_: {}] :=
 universalPatterns[expr_, ___] := expr
 
 unquantifyFormula[expr_] := expr /. {
-    Inactive[Equal][a_, b_]   :> a == b,
+    Inactive[Equal][a_, b_] :> a == b,
     Inactive[Unequal][a_, b_] :> Unequal[a, b],
-    universal_ForAll          :> universalPatterns[universal],
-    existential_Exists        :> skolemPatterns[existential]}
+    universal_ForAll :> universalPatterns[universal],
+    existential_Exists :> skolemPatterns[existential]}
 
 (* === rewrite-rule list ============================================ *)
 
@@ -126,10 +122,7 @@ stripPatterns[expr_] := expr /.
    list, used by buildRuleList's Table+Flatten.  RHS has Pattern
    wrappers stripped so substitution binds and re-emits bare
    symbols instead of literal `x_`s. *)
-oneAxiomRules[axioms_, axiomKeys_, i_] := Block[{
-    ax = axioms[[i]],
-    key = axiomKeys[[i]]
-},
+oneAxiomRules[axioms_, axiomKeys_, i_] := Block[{ax = axioms[[i]], key = axiomKeys[[i]]},
     {
         <|
             "Rule" -> ax[[1]] -> stripPatterns[ax[[2]]],
@@ -146,13 +139,7 @@ oneAxiomRules[axioms_, axiomKeys_, i_] := Block[{
     }
 ]
 
-buildRuleList[axioms_, axiomKeys_] := Flatten[
-    Table[
-        oneAxiomRules[axioms, axiomKeys, i],
-        {i, Length[axioms]}
-    ],
-    1
-]
+buildRuleList[axioms_, axiomKeys_] := Flatten[Table[oneAxiomRules[axioms, axiomKeys, i], {i, Length[axioms]}], 1]
 
 (* === ProofDataset builder ========================================= *)
 
@@ -168,16 +155,11 @@ buildRuleList[axioms_, axiomKeys_] := Flatten[
    a Direction-2 step makes the verifier read the axiom's `lhs ==
    rhs` Statement as the rule `rhs -> lhs` -- exactly the backward
    rewrite the chain applied. *)
-chainEntry[stepRec_, isLast_, lemmaIdx_, prevKey_, ruleEntry_, concIdx_] := Block[{
-    stepKey, absPos, side, relPos, statement
-},
-    stepKey = If[ isLast,
-        {$ConclusionSym, concIdx},
-        {$SubstitutionLemmaSym, lemmaIdx}
-    ];
+chainEntry[stepRec_, isLast_, lemmaIdx_, prevKey_, ruleEntry_, concIdx_] := Block[{stepKey, absPos, side, relPos, statement},
+    stepKey = If[isLast, {$ConclusionSym, concIdx}, {$SubstitutionLemmaSym, lemmaIdx}];
     absPos = stepRec["Position"];
-    side = If[ Length[absPos] >= 1, absPos[[1]], 1];
-    relPos = If[ Length[absPos] >= 1, Drop[absPos, 1], {}];
+    side = If[Length[absPos] >= 1, absPos[[1]], 1];
+    relPos = If[Length[absPos] >= 1, Drop[absPos, 1], {}];
     statement = toHoldEq[stepRec["NewExpr"]];
     stepKey -> <|
         "Statement" -> statement,
@@ -186,7 +168,7 @@ chainEntry[stepRec_, isLast_, lemmaIdx_, prevKey_, ruleEntry_, concIdx_] := Bloc
             "Construct" -> ruleEntry["AxiomKey"],
             "Position" -> relPos,
             "Rule" -> stepRec["Rule"],
-            "Orientation" -> If[ ruleEntry["Direction"] === 2, -1, 1],
+            "Orientation" -> If[ruleEntry["Direction"] === 2, -1, 1],
             "ConstructSide" -> 1,
             "InputOrientation" -> 1,
             "Side" -> side,
@@ -225,10 +207,7 @@ trivialConclusionEntry[hypInactive_, concIdx_] := {$ConclusionSym, concIdx} -> <
    Position, RuleIdx, Rule|>); `ruleList` is the forward+backward rule
    table the RuleIdx fields index into.  An empty chain is the
    trivial-tautology case for that conjunct. *)
-assembleGoalsDataset[axioms_, conjPairs_, chains_, ruleList_] := Block[{
-    axCount = Length[axioms], hypsInactive,
-    axiomEntries, hypEntries, slN = 0, chainEntries, allEntries
-},
+assembleGoalsDataset[axioms_, conjPairs_, chains_, ruleList_] := Block[{axCount = Length[axioms], hypsInactive, axiomEntries, hypEntries, slN = 0, chainEntries, allEntries},
     hypsInactive = Inactive[Equal] @@ # & /@ conjPairs;
     axiomEntries = Table[
         {$AxiomSym, k} -> <|
@@ -254,10 +233,7 @@ assembleGoalsDataset[axioms_, conjPairs_, chains_, ruleList_] := Block[{
                         chain[[s]],
                         s === Length[chain],
                         base + s,
-                        If[ s === 1,
-                            {$HypothesisSym, g},
-                            {$SubstitutionLemmaSym, base + s - 1}
-                        ],
+                        If[s === 1, {$HypothesisSym, g}, {$SubstitutionLemmaSym, base + s - 1}],
                         ruleList[[chain[[s, "RuleIdx"]]]],
                         g
                     ],
@@ -272,8 +248,7 @@ assembleGoalsDataset[axioms_, conjPairs_, chains_, ruleList_] := Block[{
 ]
 
 (* Single-goal surface kept for the existing call sites. *)
-assembleDataset[axioms_, conjPair_, chain_, ruleList_] :=
-    assembleGoalsDataset[axioms, {conjPair}, {chain}, ruleList]
+assembleDataset[axioms_, conjPair_, chain_, ruleList_] := assembleGoalsDataset[axioms, {conjPair}, {chain}, ruleList]
 
 $ProofKeyOrder[{"Axiom", k_}] := {1, k}
 $ProofKeyOrder[{"Hypothesis", k_}] := {2, k}
@@ -296,29 +271,23 @@ $ProofKeyOrder[_] := {6, 0}
    CriticalPairLemma / SubstitutionLemma / Conclusion keys are untouched
    (only Axiom indices move).  Applied as the final step of both the
    axiom-cited EXT dataset and the completion-trace CPL dataset. *)
-pruneUnusedAxioms[entries_List] := Block[{
-    cited, axKeys, keptAx, axRule
-},
+pruneUnusedAxioms[entries_List] := Block[{cited, axKeys, keptAx, axRule},
     (* Axiom indices any entry's Proof cites (Input / Construct /
        MatchingConstruct); the {0, Infinity} scan also catches a
        citation nested in a list field, should one ever appear. *)
-    cited = DeleteDuplicates @ Cases[
-        Lookup[#, "Proof", <||>] & /@ Values[Association[entries]],
-        {"Axiom", k_} :> k, {0, Infinity}];
+    cited = DeleteDuplicates @ Cases[Lookup[#, "Proof", <||>] & /@ Values[Association[entries]], {"Axiom", k_} :> k, {0, Infinity}];
     axKeys = Cases[Keys[entries], {"Axiom", k_} :> k];
     keptAx = Select[axKeys, MemberQ[cited, #] &];
     (* No axiom dropped -> identity (keeps the common path byte-identical). *)
-    If[ Length[keptAx] === Length[axKeys], Return[entries]];
+    If[Length[keptAx] === Length[axKeys], Return[entries]];
     (* Concrete `{"Axiom", old} -> {"Axiom", new}` rewrite rules, one per
        kept axiom -- built with the renumber substituted in so the
        ReplaceAll below carries no unresolved lookup (a held axRemap[k]
        on a delayed rhs would leak). *)
-    axRule = MapIndexed[
-        {"Axiom", #1} -> {"Axiom", First[#2]} &, keptAx];
+    axRule = MapIndexed[{"Axiom", #1} -> {"Axiom", First[#2]} &, keptAx];
     (Function[rule,
         With[{key = First[rule] /. axRule, val = Last[rule]},
-            If[ MatchQ[First[rule], {"Axiom", _}] &&
-                    ! MemberQ[keptAx, First[rule][[2]]],
+            If[ MatchQ[First[rule], {"Axiom", _}] && ! MemberQ[keptAx, First[rule][[2]]],
                 Nothing,
                 key -> (val /. axRule)]]
     ] /@ entries) // DeleteCases[Nothing]
@@ -347,16 +316,14 @@ $atpVarObj = <||>;
    that name. *)
 atpHeadFor[label_, name_] := If[ KeyExistsQ[$atpSymObj, label],
     ReleaseHold @ $atpSymObj[label],
-    If[ StringMatchQ[name, NumberString], ToExpression[name], Symbol[name]]]
+    If[StringMatchQ[name, NumberString], ToExpression[name], Symbol[name]]]
 
 (* Decode a raw packed ATP Term back to a WL expression.  CTR ->
    head[children...] (arity 0 -> bare symbol); FVR -> the bound
    variable's bare symbol.  labelToName / idToName invert the
    encoder state's `sym` / `var` maps; $atpSymObj / $atpVarObj carry the
    held originals when available. *)
-decodeAtpTerm[raw_Integer, labelToName_, idToName_] := Block[{
-    tag = $termTagFn[raw]
-},
+decodeAtpTerm[raw_Integer, labelToName_, idToName_] := Block[{tag = $termTagFn[raw]},
     Which[
         tag === $AtpTagFVR,
             With[{id = $termExtFn[raw]},
@@ -364,21 +331,12 @@ decodeAtpTerm[raw_Integer, labelToName_, idToName_] := Block[{
                     ReleaseHold @ $atpVarObj[id],
                     Symbol @ Lookup[idToName, id, "x" <> ToString[id]]]],
         tag === $AtpTagCTR,
-            Block[{
-                label = $termExtFn[raw],
-                loc = $termValFn[raw],
-                arity, head
-            },
-                arity = $termValFn[
-                    $heapReadFn[loc]];
+            Block[{label = $termExtFn[raw], loc = $termValFn[raw], arity, head},
+                arity = $termValFn[$heapReadFn[loc]];
                 head = atpHeadFor[label, Lookup[labelToName, label, "C" <> ToString[label]]];
                 If[ arity === 0,
                     head,
-                    head @@ Table[
-                        decodeAtpTerm[
-                            $heapReadFn[loc + k],
-                            labelToName, idToName],
-                        {k, arity}]
+                    head @@ Table[decodeAtpTerm[$heapReadFn[loc + k], labelToName, idToName], {k, arity}]
                 ]
             ],
         True, Missing["UndecodableTerm", tag]
@@ -389,17 +347,14 @@ decodeAtpTerm[raw_Integer, labelToName_, idToName_] := Block[{
    (1-based, points one BEFORE the first int of the block).  Reads
    `n` step records; returns {records, cursorAfter}.  Each step is
    side, rule, fwd, pos_len, pos[0..pos_len), before, after. *)
-decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
-    cur = c0, recs
-},
+decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{cur = c0, recs},
     recs = Table[
         Block[{side, ruleIx, fwd, posLen, posPath, beforeRaw, afterRaw},
             side = raw[[cur + 1]];
             ruleIx = raw[[cur + 2]];
             fwd = raw[[cur + 3]];
             posLen = raw[[cur + 4]];
-            posPath = If[ posLen === 0, {},
-                raw[[cur + 5 ;; cur + 4 + posLen]]];
+            posPath = If[posLen === 0, {}, raw[[cur + 5 ;; cur + 4 + posLen]]];
             beforeRaw = raw[[cur + 5 + posLen]];
             afterRaw = raw[[cur + 6 + posLen]];
             cur = cur + 6 + posLen;
@@ -452,8 +407,7 @@ atpSymName[s_] := ToString[s]
 atpGroundConstNames[enc_] := Block[{names},
     names = Cases[
         Hold @@ {enc["ConjPair"]},
-        s_Symbol /; AtomQ[Unevaluated[s]] :>
-            SymbolName[Unevaluated[s]],
+        s_Symbol /; AtomQ[Unevaluated[s]] :> SymbolName[Unevaluated[s]],
         {0, Infinity}, Heads -> False];
     DeleteDuplicates[names]
 ]
@@ -462,25 +416,18 @@ atpGroundConstNames[enc_] := Block[{names},
    (element i = precedence rank of label i; element 0 is the unused
    label-0 placeholder).  An empty List leaves the C default in place. *)
 atpPrecedenceArray[None, enc_] := {}
-atpPrecedenceArray[order_List, enc_] := Block[{
-    sym = enc["State"]["sym"], maxLab = enc["MaxLab"], names, ranks, arr
-},
+atpPrecedenceArray[order_List, enc_] := Block[{sym = enc["State"]["sym"], maxLab = enc["MaxLab"], names, ranks, arr},
     names = atpSymName /@ order;
     (* Highest-to-lowest: first name gets the largest rank.  Unlisted
        symbols stay 0. *)
     ranks = AssociationThread[names -> Range[Length[names], 1, -1]];
     arr = ConstantArray[0, maxLab + 1];
     KeyValueMap[
-        {nm, lab} |-> If[ KeyExistsQ[ranks, nm] && lab >= 1 && lab <= maxLab,
-            arr[[lab + 1]] = ranks[nm]],
+        {nm, lab} |-> If[KeyExistsQ[ranks, nm] && lab >= 1 && lab <= maxLab, arr[[lab + 1]] = ranks[nm]],
         sym];
     arr
 ]
-atpPrecedenceArray["SkolemHighest", enc_] := Block[{
-    sym = enc["State"]["sym"], maxLab = enc["MaxLab"], skNames, arr,
-    nNonSk, skRankOf,
-    reservedNames = {"cAtp1", "cAtp2"}
-},
+atpPrecedenceArray["SkolemHighest", enc_] := Block[{sym = enc["State"]["sym"], maxLab = enc["MaxLab"], skNames, arr, nNonSk, skRankOf, reservedNames = {"cAtp1", "cAtp2"}},
     (* Skolem constants get strict order above every operator, matching
        Waldmeister's `p > q > r > nand` ORDERING block: first-occurring
        skolem name (k of them) ranks highest, second next, etc.  Equal-
@@ -494,10 +441,8 @@ atpPrecedenceArray["SkolemHighest", enc_] := Block[{
        precedence chain). *)
     skNames = atpGroundConstNames[enc];
     arr = ConstantArray[0, maxLab + 1];
-    nNonSk = Count[Keys[sym],
-        nm_ /; ! MemberQ[skNames, nm] && ! MemberQ[reservedNames, nm]];
-    skRankOf = AssociationThread[skNames,
-        Range[nNonSk + Length[skNames], nNonSk + 1, -1]];
+    nNonSk = Count[Keys[sym], nm_ /; ! MemberQ[skNames, nm] && ! MemberQ[reservedNames, nm]];
+    skRankOf = AssociationThread[skNames, Range[nNonSk + Length[skNames], nNonSk + 1, -1]];
     Block[{nonSkRank = 0},
         KeyValueMap[
             {nm, lab} |-> If[ lab >= 1 && lab <= maxLab,
@@ -518,19 +463,14 @@ atpPrecedenceArray[_, enc_] := {}
    SymbolGewichte port (CLAS/SymbolGewichte.c::SG_SymbGewichteEintragen,
    -w DEF=2:VAR=5:f=5:g=0). *)
 atpSymbolWeightsArray[None, enc_] := {}
-atpSymbolWeightsArray[map_Association, enc_] := Block[{
-    sym = enc["State"]["sym"], maxLab = enc["MaxLab"], arr,
-    nameMap = KeyMap[atpSymName, map]
-},
+atpSymbolWeightsArray[map_Association, enc_] := Block[{sym = enc["State"]["sym"], maxLab = enc["MaxLab"], arr, nameMap = KeyMap[atpSymName, map]},
     arr = ConstantArray[0, maxLab + 1];
     KeyValueMap[
-        {nm, lab} |-> If[ KeyExistsQ[nameMap, nm] && lab >= 1 && lab <= maxLab,
-            arr[[lab + 1]] = nameMap[nm]],
+        {nm, lab} |-> If[KeyExistsQ[nameMap, nm] && lab >= 1 && lab <= maxLab, arr[[lab + 1]] = nameMap[nm]],
         sym];
     arr
 ]
-atpSymbolWeightsArray[rules_List, enc_] :=
-    atpSymbolWeightsArray[Association[rules], enc]
+atpSymbolWeightsArray[rules_List, enc_] := atpSymbolWeightsArray[Association[rules], enc]
 atpSymbolWeightsArray[_, enc_] := {}
 
 (* Run the C ATP completion engine + proof extraction.  The C glue
@@ -605,9 +545,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
        hard-stop conditions.  Bail BEFORE the structural part extraction
        so an aborted run returns a clean Failure association instead of
        crashing the kernel via Part[][[k]] on a Failure expression. *)
-    If[ MatchQ[raw, _LibraryFunctionError],
-        Return[<|"Status" -> "Aborted", "Reason" -> raw|>]
-    ];
+    If[MatchQ[raw, _LibraryFunctionError], Return[<|"Status" -> "Aborted", "Reason" -> raw|>]];
     raw = Normal @ raw;
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
@@ -625,8 +563,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     mainRules = Table[
         Block[{l = raw[[cur + 1]], r = raw[[cur + 2]]},
             cur = cur + 2;
-            {decodeAtpTerm[l, labelToName, idToName],
-             decodeAtpTerm[r, labelToName, idToName]}
+            {decodeAtpTerm[l, labelToName, idToName], decodeAtpTerm[r, labelToName, idToName]}
         ],
         {nRules}
     ];
@@ -644,31 +581,27 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
        ~few-hundred proof-path entries the reconstruction reaches -- avoids
        eagerly building ~nTrace (e.g. 35k) Associations of which ~99% are
        non-proof record_norm steps. *)
-    {$decT, traceOffsets} = AbsoluteTiming @ Module[
-        {res = atpTraceOffsets[raw, nTrace, cur, $TraceNormStep]},
+    {$decT, traceOffsets} = AbsoluteTiming @ Module[{res = atpTraceOffsets[raw, nTrace, cur, $TraceNormStep]},
         cur = Last[res];      (* resume the post-trace block read *)
         Most[res]
     ];
     If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
         Print["[recon] trace-offset-pass = ", $decT, " s  (nTrace = ", nTrace, ")"]];
     (* MAIN steps block. *)
-    {mainSteps, cur} =
-        decodeStepsBlock[raw, cur, nSteps, labelToName, idToName];
+    {mainSteps, cur} = decodeStepsBlock[raw, cur, nSteps, labelToName, idToName];
     (* EXT rules block (2*extNRules) -- skipped, the simple path
        re-derives rules from the axiom list. *)
     cur = cur + 2 extNRules;
     (* EXT steps block. *)
-    {extSteps, cur} =
-        decodeStepsBlock[raw, cur, extNSteps, labelToName, idToName];
+    {extSteps, cur} = decodeStepsBlock[raw, cur, extNSteps, labelToName, idToName];
     (* MNF steps block: the GREEN/RED front chains for a goal closed
        by the MNF bidirectional search.  Same per-step layout. *)
-    {mnfSteps, cur} =
-        decodeStepsBlock[raw, cur, mnfNSteps, labelToName, idToName];
+    {mnfSteps, cur} = decodeStepsBlock[raw, cur, mnfNSteps, labelToName, idToName];
     <|
         "Status" -> status,
-        "ExtSteps" -> If[ extNSteps === 0, {}, extSteps],
-        "MainSteps" -> If[ nSteps === 0, {}, mainSteps],
-        "MnfSteps" -> If[ mnfNSteps === 0, {}, mnfSteps],
+        "ExtSteps" -> If[extNSteps === 0, {}, extSteps],
+        "MainSteps" -> If[nSteps === 0, {}, mainSteps],
+        "MnfSteps" -> If[mnfNSteps === 0, {}, mnfSteps],
         "MainRules" -> mainRules,
         "RTrace" -> rTrace,
         "TraceRaw" -> raw, "TraceOffsets" -> traceOffsets, "NTrace" -> nTrace,
@@ -726,7 +659,7 @@ identifyRule[before_, relPos_, after_, ruleList_] := Block[{idx},
     idx = FirstPosition[ruleList,
         re_ /; Quiet[ReplaceAt[before, re["Rule"], relPos]] === after,
         Missing[], {1}, Heads -> False];
-    If[ MissingQ[idx], Missing[], First[idx] ]
+    If[MissingQ[idx], Missing[], First[idx] ]
 ]
 
 (* Turn the C engine's decoded step list into assembleDataset's
@@ -739,11 +672,7 @@ buildCEngineChain[steps_, conjPair_, ruleList_] := Catch[
     Block[{lhs, rhs, chain = {}},
         {lhs, rhs} = conjPair;
         Do[
-            Block[{
-                s = step["Side"], relPos = step["PosPath"],
-                before = step["Before"], after = step["After"],
-                ruleIx, newL, newR
-            },
+            Block[{s = step["Side"], relPos = step["PosPath"], before = step["Before"], after = step["After"], ruleIx, newL, newR},
                 ruleIx = identifyRule[before, relPos, after, ruleList];
                 If[ MissingQ[ruleIx],
                     atpDbgFail["buildCEngineChain.identifyRule"]; Throw[$Failed]];
@@ -784,7 +713,7 @@ buildCEngineChains[steps_, conjPairs_, ruleList_] := Catch[
                 atpDbgFail["buildCEngineChains.unjoined-goal"];
                 Throw[$Failed]];
             chain = buildCEngineChain[gSteps, conjPairs[[g]], ruleList];
-            If[ chain === $Failed, Throw[$Failed]];
+            If[chain === $Failed, Throw[$Failed]];
             chain
         ],
         {g, Length[conjPairs]}
@@ -829,7 +758,7 @@ atpTraceOffsets = Compile[
             offs[[i]] = cur;
             reason = raw[[cur + 1]];
             posLen = raw[[cur + 6]];
-            cur = cur + 6 + posLen + If[ reason == nsReason, 2, 0 ];
+            cur = cur + 6 + posLen + If[reason == nsReason, 2, 0 ];
         , {i, nt}];
         offs[[nt + 1]] = cur;
         offs
@@ -884,19 +813,13 @@ cplVarQ[v_, varSyms_] := MatchQ[v, _Symbol] && (MemberQ[varSyms, v] || atpXVarQ[
    Cases scan plus ReplaceAll per call was the dominant cost. *)
 cplCanonVars[expr_, varSyms_] := cplCanonVars[expr, varSyms] =
     Block[{occ},
-        occ = DeleteDuplicates @ Cases[expr,
-            v_Symbol /; cplVarQ[v, varSyms], {0, Infinity},
-            Heads -> True];
-        expr /. MapThread[Rule,
-            {occ, Table[Symbol["cplV" <> ToString[i]],
-                {i, Length[occ]}]}]
+        occ = DeleteDuplicates @ Cases[expr, v_Symbol /; cplVarQ[v, varSyms], {0, Infinity}, Heads -> True];
+        expr /. MapThread[Rule, {occ, Table[Symbol["cplV" <> ToString[i]], {i, Length[occ]}]}]
     ]
 
 (* True iff the two equation lists are equal up to a side swap and
    variable renaming. *)
-cplEqSetQ[a_List, b_List, varSyms_] := With[{
-    ca = cplCanonVars[a, varSyms]
-},
+cplEqSetQ[a_List, b_List, varSyms_] := With[{ca = cplCanonVars[a, varSyms]},
     ca === cplCanonVars[b, varSyms] || ca === cplCanonVars[Reverse[b], varSyms]
 ]
 
@@ -904,8 +827,7 @@ cplEqSetQ[a_List, b_List, varSyms_] := With[{
    `expr`.  Used to gate reverse-direction rewriting on whether the
    rule's lhs vars are a subset of its rhs vars -- the same
    atp_vars_contained guard ordered rewriting uses in the C engine. *)
-cplVarsIn[expr_, varSyms_] := DeleteDuplicates @ Cases[expr,
-    v_Symbol /; cplVarQ[v, varSyms], {0, Infinity}, Heads -> True]
+cplVarsIn[expr_, varSyms_] := DeleteDuplicates @ Cases[expr, v_Symbol /; cplVarQ[v, varSyms], {0, Infinity}, Heads -> True]
 
 (* True iff overlapping ParentB's rule `ruleBEq` onto ParentA's rule
    `ruleAEq` at superposition position `pos` is DEGENERATE for the WL
@@ -927,7 +849,7 @@ cplVarsIn[expr_, varSyms_] := DeleteDuplicates @ Cases[expr,
 cplDegenerateOverlapQ[ruleAEq_List, ruleBEq_List, pos_, varSyms_] :=
     Block[{sub, rl, res},
         sub = Quiet @ Extract[ruleAEq[[1]], pos];
-        If[ MatchQ[sub, _Extract] || MissingQ[sub], Return[False]];
+        If[MatchQ[sub, _Extract] || MissingQ[sub], Return[False]];
         rl = cplAsRule[ruleBEq, varSyms];
         MatchQ[sub, First[rl]] && (res = Quiet @ Replace[sub, rl]; res === sub)
     ]
@@ -953,22 +875,18 @@ atpXVarQ[_] := False
    rhs, which the kernel flags with RuleDelayed::rhs; building the rules per
    concrete symbol keeps every Pattern off a rule rhs and is silent. *)
 cplPatternize[term_, varSyms_] := Module[{vars},
-    vars = DeleteDuplicates @ Cases[term,
-        v_Symbol /; (MemberQ[varSyms, v] || atpXVarQ[v]), {0, Infinity}];
+    vars = DeleteDuplicates @ Cases[term, v_Symbol /; (MemberQ[varSyms, v] || atpXVarQ[v]), {0, Infinity}];
     term /. (Rule[#, Pattern[#, Blank[]]] & /@ vars)]
 
 (* A completion rule {lhs, rhs} as a WL rewrite rule, with the lhs
    variables patternized so the rule actually fires. *)
-cplAsRule[eq_List, varSyms_] :=
-    cplPatternize[eq[[1]], varSyms] -> eq[[2]]
+cplAsRule[eq_List, varSyms_] := cplPatternize[eq[[1]], varSyms] -> eq[[2]]
 
 (* Compare an entry's Statement equation to a rule's {lhs, rhs}
    (up to variable renaming): +1 when they agree, -1 when reversed.
    This is the Orientation the verifier needs to read a cited
    entry's Statement as the rule the step actually applied. *)
-cplOrient[entryEq_, ruleEq_, varSyms_] := With[{
-    ce = cplCanonVars[entryEq, varSyms]
-},
+cplOrient[entryEq_, ruleEq_, varSyms_] := With[{ce = cplCanonVars[entryEq, varSyms]},
     Which[
         ce === cplCanonVars[ruleEq, varSyms], 1,
         ce === cplCanonVars[Reverse[ruleEq], varSyms], -1,
@@ -1001,14 +919,11 @@ cplUnifyLoop[lst_List, sub_, vars_] := Block[{s, t, ss, tt, rest},
     tt = t //. Normal[sub];
     Which[
         ss === tt, cplUnifyLoop[rest, sub, vars],
-        cplVarQ[ss, vars], If[ ! FreeQ[tt, ss], $Failed,
-            cplUnifyLoop[rest, Append[sub, ss -> tt], vars]],
-        cplVarQ[tt, vars], If[ ! FreeQ[ss, tt], $Failed,
-            cplUnifyLoop[rest, Append[sub, tt -> ss], vars]],
+        cplVarQ[ss, vars], If[! FreeQ[tt, ss], $Failed, cplUnifyLoop[rest, Append[sub, ss -> tt], vars]],
+        cplVarQ[tt, vars], If[! FreeQ[ss, tt], $Failed, cplUnifyLoop[rest, Append[sub, tt -> ss], vars]],
         AtomQ[ss] || AtomQ[tt], $Failed,
         Head[ss] =!= Head[tt] || Length[ss] =!= Length[tt], $Failed,
-        True, cplUnifyLoop[
-            Join[Thread[{List @@ ss, List @@ tt}], rest], sub, vars]
+        True, cplUnifyLoop[Join[Thread[{List @@ ss, List @@ tt}], rest], sub, vars]
     ]
 ]
 
@@ -1021,20 +936,17 @@ cplUnifyLoop[lst_List, sub_, vars_] := Block[{s, t, ss, tt, rest},
    peak with the subterm at `pos` rewritten to the Matching rule's rhs,
    both under the unifier.  Returns {lhs, rhs}, or $Failed when the
    geometry does not unify (a wrong face / truncated position). *)
-cplReconCp[cEq_, mEq_, pos_, varSyms_] := Block[{
-    cf, cv, mf, mv, peak, subt, sub
-},
+cplReconCp[cEq_, mEq_, pos_, varSyms_] := Block[{cf, cv, mf, mv, peak, subt, sub},
     {cf, cv} = cplFreshen[cEq, varSyms];
     {mf, mv} = cplFreshen[mEq, varSyms];
     peak = cf[[1]];
-    subt = If[ pos === {}, peak, Quiet @ Extract[peak, pos]];
-    If[ MatchQ[subt, _Extract] || MissingQ[subt], Return[$Failed]];
+    subt = If[pos === {}, peak, Quiet @ Extract[peak, pos]];
+    If[MatchQ[subt, _Extract] || MissingQ[subt], Return[$Failed]];
     sub = cplUnify[subt, mf[[1]], Join[cv, mv]];
-    If[ sub === $Failed, Return[$Failed]];
+    If[sub === $Failed, Return[$Failed]];
     {
         cf[[2]] //. Normal[sub],
-        (If[ pos === {}, mf[[2]], ReplacePart[peak, pos -> mf[[2]]]]) //.
-            Normal[sub]
+        (If[pos === {}, mf[[2]], ReplacePart[peak, pos -> mf[[2]]]]) //. Normal[sub]
     }
 ]
 
@@ -1068,8 +980,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            Axiom / CriticalPairLemma entry, so an MNF front-collision
            proof verifies the same way a completion proof does. *)
         usingMnf = (ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {}),
-        mainSteps = If[ ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {},
-            cRes["MnfSteps"], cRes["MainSteps"]],
+        mainSteps = If[ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {}, cRes["MnfSteps"], cRes["MainSteps"]],
         axPairs = enc["AxPairs"], varSyms, entries, traceInfo,
         inProgress, aliveRulesAt, slN, cpN, axiomKeyFor, rewriteOnce,
         prepareRules, runBfs, reverseBfsPath, emitNorm, resolveCp,
@@ -1099,15 +1010,19 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            proof-path entries (a few hundred of ~nTrace) are ever built. *)
         traceRaw = cRes["TraceRaw"]; traceOffsets = cRes["TraceOffsets"];
         Clear[decodeTraceEntry];
-        decodeTraceEntry[k_] := decodeTraceEntry[k] = Block[
-            {c = traceOffsets[[k]], reason, posLen, pos},
+        decodeTraceEntry[k_] := decodeTraceEntry[k] = Block[{c = traceOffsets[[k]], reason, posLen, pos},
             reason = traceRaw[[c + 1]]; posLen = traceRaw[[c + 6]];
-            pos = If[ posLen === 0, {}, traceRaw[[c + 7 ;; c + 6 + posLen]]];
-            <|"Reason" -> reason, "ParentA" -> traceRaw[[c + 2]],
-              "ParentB" -> traceRaw[[c + 3]], "LhsRaw" -> traceRaw[[c + 4]],
-              "RhsRaw" -> traceRaw[[c + 5]], "Pos" -> (pos + 1),
-              "Side" -> If[ reason === $TraceNormStep, traceRaw[[c + 6 + posLen + 1]], 0],
-              "Fwd"  -> If[ reason === $TraceNormStep, traceRaw[[c + 6 + posLen + 2]], 1]|>];
+            pos = If[posLen === 0, {}, traceRaw[[c + 7 ;; c + 6 + posLen]]];
+            <|
+                "Reason" -> reason,
+                "ParentA" -> traceRaw[[c + 2]],
+                "ParentB" -> traceRaw[[c + 3]],
+                "LhsRaw" -> traceRaw[[c + 4]],
+                "RhsRaw" -> traceRaw[[c + 5]],
+                "Pos" -> (pos + 1),
+                "Side" -> If[reason === $TraceNormStep, traceRaw[[c + 6 + posLen + 1]], 0],
+                "Fwd" -> If[reason === $TraceNormStep, traceRaw[[c + 6 + posLen + 2]], 1]
+            |>];
         trace /: Part[trace, k_Integer] := decodeTraceEntry[k];
         (* Vectorized reason / parentA columns (packed Part) + a one-pass
            alive-rule index, so aliveRulesAt[ti] is O(rules) not O(ti) and
@@ -1116,12 +1031,11 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         traceReasons = traceRaw[[traceOffsets + 1]];
         traceParentAs = traceRaw[[traceOffsets + 2]];
         With[{nTr = Length[traceOffsets]},
-            orientFviIdx = Pick[Range[0, nTr - 1],
-                Unitize[(traceReasons - $TraceOrient) (traceReasons - $TraceFvi)], 0];
+            orientFviIdx = Pick[Range[0, nTr - 1], Unitize[(traceReasons - $TraceOrient) (traceReasons - $TraceFvi)], 0];
             deathOf = <||>;
             Scan[
                 With[{pa = traceParentAs[[# + 1]]},
-                    If[ ! KeyExistsQ[deathOf, pa], deathOf[pa] = #]] &,
+                    If[! KeyExistsQ[deathOf, pa], deathOf[pa] = #]] &,
                 Pick[Range[0, nTr - 1], Unitize[traceReasons - $TraceSimplify], 0]]];
         (* the trace-decoded terms carry bare variable symbols;
            atpEncodeProblem's AxPairs / ConjPair carry Pattern[v, _]
@@ -1155,9 +1069,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            verifier-legal and folds the duplicate rows -- along with
            any lineage only the duplicates needed, since the dedup
            check runs BEFORE the parents are resolved. *)
-        canonKeyOf[eq_] := First @ Sort[
-            {cplCanonVars[eq, varSyms],
-             cplCanonVars[Reverse[eq], varSyms]}];
+        canonKeyOf[eq_] := First @ Sort[{cplCanonVars[eq, varSyms], cplCanonVars[Reverse[eq], varSyms]}];
 
         (* The rules alive when the rule at trace index `ti` was
            oriented: every TRACE_ORIENT born before ti, minus the
@@ -1172,15 +1084,11 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            decoded (tL/tR) only for the survivors. *)
         aliveRulesAt[ti_] := Table[
             {t, {tL[trace[[t + 1]]], tR[trace[[t + 1]]]}},
-            {t, Select[orientFviIdx,
-                # < ti && (! KeyExistsQ[deathOf, #] || deathOf[#] >= ti) &]}
+            {t, Select[orientFviIdx, # < ti && (! KeyExistsQ[deathOf, #] || deathOf[#] >= ti) &]}
         ];
 
         (* axiom key whose {lhs,rhs} matches eq up to a side swap *)
-        axiomKeyFor[eq_] := Block[{
-            i = FirstPosition[axPairs, p_ /; cplEqSetQ[p, eq, varSyms],
-                Missing[], {1}, Heads -> False]
-        },
+        axiomKeyFor[eq_] := Block[{i = FirstPosition[axPairs, p_ /; cplEqSetQ[p, eq, varSyms], Missing[], {1}, Heads -> False]},
             If[ MissingQ[i],
                 atpDbgFail["axiomKeyFor.missing"]; Throw[$Failed],
                 {$AxiomSym, First[i]}]
@@ -1204,43 +1112,31 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            list of {traceIdx, fwdRules, revRules} where each slot is a
            (possibly empty) rule list. *)
         prepareRules[aliveList_] := Table[
-            Block[{eqA = ar[[2]], lv, rv, fwd, rev,
-                   minC = Symbol["cAtp1"]},
+            Block[{eqA = ar[[2]], lv, rv, fwd, rev, minC = Symbol["cAtp1"]},
                 lv = cplVarsIn[eqA[[1]], varSyms];
                 rv = cplVarsIn[eqA[[2]], varSyms];
                 fwd = {cplAsRule[eqA, varSyms]};
-                rev = If[ SubsetQ[rv, lv],
-                    {cplAsRule[Reverse[eqA], varSyms]}, {}];
+                rev = If[SubsetQ[rv, lv], {cplAsRule[Reverse[eqA], varSyms]}, {}];
                 If[ ! SubsetQ[lv, rv],
-                    AppendTo[fwd, cplAsRule[
-                        {eqA[[1]], eqA[[2]] /.
-                            Thread[Complement[rv, lv] -> minC]},
-                        varSyms]]];
+                    AppendTo[fwd, cplAsRule[{eqA[[1]], eqA[[2]] /. Thread[Complement[rv, lv] -> minC]}, varSyms]]];
                 If[ ! SubsetQ[rv, lv],
-                    AppendTo[rev, cplAsRule[
-                        {eqA[[2]], eqA[[1]] /.
-                            Thread[Complement[lv, rv] -> minC]},
-                        varSyms]]];
+                    AppendTo[rev, cplAsRule[{eqA[[2]], eqA[[1]] /. Thread[Complement[lv, rv] -> minC]}, varSyms]]];
                 {ar[[1]], fwd, rev}],
             {ar, aliveList}
         ];
 
         rewriteOnce[eq_, preRules_, tryReverse_] := Block[{out = {}},
             Do[
-                Block[{traceIdx = pr[[1]], fwdRules = pr[[2]],
-                       revRules = pr[[3]], sub, new},
+                Block[{traceIdx = pr[[1]], fwdRules = pr[[2]], revRules = pr[[3]], sub, new},
                     Do[
                         sub = eq[[side + 1]];
                         Do[
                             Do[
                                 new = Quiet @ ReplaceAt[sub, rl, pos];
                                 If[ new =!= sub && FreeQ[new, ReplaceAt],
-                                    AppendTo[out, {
-                                        ReplacePart[eq, side + 1 -> new],
-                                        traceIdx, side, pos, 1}]
+                                    AppendTo[out, {ReplacePart[eq, side + 1 -> new], traceIdx, side, pos, 1}]
                                 ],
-                                {pos, Position[sub, rl[[1]],
-                                    {0, Infinity}, Heads -> False]}
+                                {pos, Position[sub, rl[[1]], {0, Infinity}, Heads -> False]}
                             ],
                             {rl, fwdRules}
                         ];
@@ -1249,12 +1145,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                 Do[
                                     new = Quiet @ ReplaceAt[sub, rl, pos];
                                     If[ new =!= sub && FreeQ[new, ReplaceAt],
-                                        AppendTo[out, {
-                                            ReplacePart[eq, side + 1 -> new],
-                                            traceIdx, side, pos, -1}]
+                                        AppendTo[out, {ReplacePart[eq, side + 1 -> new], traceIdx, side, pos, -1}]
                                     ],
-                                    {pos, Position[sub, rl[[1]],
-                                        {0, Infinity}, Heads -> False]}
+                                    {pos, Position[sub, rl[[1]], {0, Infinity}, Heads -> False]}
                                 ],
                                 {rl, revRules}
                             ]
@@ -1273,10 +1166,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            queue emptiness.  Uses a CreateDataStructure["Queue"] for
            O(1) push/pop on long BFS runs.  `wallSec` bounds the
            single-BFS wall time (Infinity == no bound). *)
-        runBfs[start_, target_, preRules_, tryReverse_, cap_,
-               wallSec_:Infinity] :=
-            Block[{queue, seenA, found = Missing[], explored = 0,
-                   nbrs, t0 = AbsoluteTime[]},
+        runBfs[start_, target_, preRules_, tryReverse_, cap_, wallSec_ : Infinity] :=
+            Block[{queue, seenA, found = Missing[], explored = 0, nbrs, t0 = AbsoluteTime[]},
                 queue = CreateDataStructure["Queue"];
                 queue["Push", {start, {}}];
                 seenA = <|start -> True|>;
@@ -1312,32 +1203,29 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            position; only the orientation differs).  Each emitted
            forward step carries the forward RESULT eq in slot 1 so the
            emitNorm loop emits the right intermediate Statements. *)
-        reverseBfsPath[rev_List, targetEq_] :=
-            Block[{eqs, k = Length[rev]},
-                (* The reverse search visits target, rev[1].eq, ...,
-                   rev[k].eq == start.  Prepending target and reversing
-                   gives the forward sequence eqs with eqs[[1]] == start
-                   and eqs[[k+1]] == target.  Forward step j rewrites
-                   eqs[[j]] into eqs[[j+1]] using the reverse step that
-                   crossed that same boundary (rev[[k-j+1]]) with its
-                   direction flipped; relPos / side are shared by a
-                   rewrite and its inverse (same redex location). *)
-                eqs = Reverse @ Prepend[rev[[All, 1]], targetEq];
-                Table[
-                    With[{rstep = rev[[k - j + 1]]},
-                        {eqs[[j + 1]], rstep[[2]], rstep[[3]],
-                         rstep[[4]], -rstep[[5]]}],
-                    {j, k}
-                ]
-            ];
+        reverseBfsPath[rev_List, targetEq_] := Block[{eqs, k = Length[rev]},
+            (* The reverse search visits target, rev[1].eq, ...,
+               rev[k].eq == start.  Prepending target and reversing
+               gives the forward sequence eqs with eqs[[1]] == start
+               and eqs[[k+1]] == target.  Forward step j rewrites
+               eqs[[j]] into eqs[[j+1]] using the reverse step that
+               crossed that same boundary (rev[[k-j+1]]) with its
+               direction flipped; relPos / side are shared by a
+               rewrite and its inverse (same redex location). *)
+            eqs = Reverse @ Prepend[rev[[All, 1]], targetEq];
+            Table[
+                With[{rstep = rev[[k - j + 1]]},
+                    {eqs[[j + 1]], rstep[[2]], rstep[[3]], rstep[[4]], -rstep[[5]]}],
+                {j, k}
+            ]
+        ];
 
         (* re-derive startEq ->* targetEq, replaying with the rules
            alive when the rule at trace `ti` was oriented; emit a
            SubstitutionLemma per step; return the final entry's
            {key, eq}.  inKey is the dataset key of startEq. *)
         emitNorm[inKey_, startEq_, targetEq_, ti_] :=
-            Block[{aliveList, preRules, found, curKey, curEq, st,
-                   cInfo, rEq, hit},
+            Block[{aliveList, preRules, found, curKey, curEq, st, cInfo, rEq, hit},
                 aliveList = aliveRulesAt[ti];
                 (* Precompute rule data once, shared across both BFS
                    phases; cplAsRule is the dominant per-node cost. *)
@@ -1353,8 +1241,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                    outer two-phase retry / FindEquationalProof fall
                    through. *)
                 found = runBfs[startEq, targetEq, preRules, False, 50000, 2];
-                If[ MissingQ[found],
-                    found = runBfs[startEq, targetEq, preRules, True, 600, 2]];
+                If[MissingQ[found], found = runBfs[startEq, targetEq, preRules, True, 600, 2]];
                 (* Phase 3: bidirectional fallback.  A start ->* target
                    bridge whose net direction INCREASES term size (a CP
                    that expands the equation, or a derivation that must
@@ -1372,10 +1259,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                    verifier replays via the step's emitted dir / the
                    cited rule's Statement orientation. *)
                 If[ MissingQ[found],
-                    Block[{rev = runBfs[targetEq, startEq, preRules, True,
-                            50000, 3]},
-                        If[ ! MissingQ[rev],
-                            found = reverseBfsPath[rev, targetEq]]]];
+                    Block[{rev = runBfs[targetEq, startEq, preRules, True, 50000, 3]},
+                        If[! MissingQ[rev], found = reverseBfsPath[rev, targetEq]]]];
                 If[ MissingQ[found],
                     atpDbgFail["emitNorm.no-rewrite-path ti=" <>
                         ToString[ti] <> " start=" <>
@@ -1399,8 +1284,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         curEq = hit["Eq"];
                         Continue[]];
                     cInfo = resolveTrace[step[[2]]];
-                    rEq = {tL[trace[[step[[2]] + 1]]],
-                           tR[trace[[step[[2]] + 1]]]};
+                    rEq = {tL[trace[[step[[2]] + 1]]], tR[trace[[step[[2]] + 1]]]};
                     slN++;
                     st = stmt[step[[1]]];
                     AppendTo[entries, {$SubstitutionLemmaSym, slN} -> <|
@@ -1415,9 +1299,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                entry-vs-rule alignment, this is the
                                Orientation the verifier needs to read
                                the cited Statement the same way. *)
-                            "Rule" -> cplAsRule[
-                                If[ step[[5]] === -1,
-                                    Reverse[rEq], rEq], varSyms],
+                            "Rule" -> cplAsRule[If[step[[5]] === -1, Reverse[rEq], rEq], varSyms],
                             "Orientation" -> step[[5]] * cplOrient[cInfo["Eq"], rEq, varSyms],
                             "ConstructSide" -> 1,
                             "InputOrientation" -> 1,
@@ -1428,8 +1310,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                     |>];
                     curKey = {$SubstitutionLemmaSym, slN};
                     curEq = step[[1]];
-                    canonInfo[canonKeyOf[curEq]] =
-                        <|"Key" -> curKey, "Eq" -> curEq|>;
+                    canonInfo[canonKeyOf[curEq]] = <|"Key" -> curKey, "Eq" -> curEq|>;
                     ,
                     {step, found}
                 ];
@@ -1458,19 +1339,15 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             Block[{cands, hit},
                 cands = Flatten[
                     Table[
-                        {role[[1]], role[[2]], role[[3]], role[[4]],
-                         cFace, mFace},
-                        {role, {
-                            {aInfo, ruleAEq, bInfo, ruleBEq},
-                            {bInfo, ruleBEq, aInfo, ruleAEq}}},
+                        {role[[1]], role[[2]], role[[3]], role[[4]], cFace, mFace},
+                        {role, {{aInfo, ruleAEq, bInfo, ruleBEq}, {bInfo, ruleBEq, aInfo, ruleAEq}}},
                         {cFace, {Identity, Reverse}},
                         {mFace, {Identity, Reverse}}],
                     2];
                 hit = SelectFirst[cands,
-                    cand |-> With[{r = cplReconCp[cand[[5]][cand[[2]]],
-                            cand[[6]][cand[[4]]], pos, varSyms]},
+                    cand |-> With[{r = cplReconCp[cand[[5]][cand[[2]]], cand[[6]][cand[[4]]], pos, varSyms]},
                         ListQ[r] && cplEqSetQ[r, cpEq, varSyms]]];
-                If[ MissingQ[hit], Return[Missing[]]];
+                If[MissingQ[hit], Return[Missing[]]];
                 <|"Construct" -> hit[[1]]["Key"],
                   "ConstructInfo" -> hit[[1]],
                   "ConstructEq" -> hit[[5]][hit[[2]]],
@@ -1481,10 +1358,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
 
         (* emit a CriticalPairLemma for the TRACE_CP at trace index
            ti; return its <|Key, Eq|>. *)
-        resolveCp[ti_] := Block[{
-            cte, cpEq, pos, aTe, bTe, ruleAEq, ruleBEq, aInfo, bInfo,
-            geom, key, st, cEq, mEq, hit, c0
-        },
+        resolveCp[ti_] := Block[{cte, cpEq, pos, aTe, bTe, ruleAEq, ruleBEq, aInfo, bInfo, geom, key, st, cEq, mEq, hit, c0},
             cte = trace[[ti + 1]];
             (* WL's verifier builds the CP as
                (Construct's non-overlap side, overlap side rewritten)
@@ -1499,9 +1373,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                so descendant NORM_STEPs keep the side mapping. *)
             hit = canonInfo[canonKeyOf[cpEq]];
             If[ AssociationQ[hit],
-                c0 = If[ cplCanonVars[cpEq, varSyms] === cplCanonVars[hit["Eq"], varSyms], 2, 1];
-                Return[<|"Key" -> hit["Key"], "Eq" -> hit["Eq"],
-                    "Swapped" -> (c0 === 2), "CSide0WlPos" -> c0|>]];
+                c0 = If[cplCanonVars[cpEq, varSyms] === cplCanonVars[hit["Eq"], varSyms], 2, 1];
+                Return[<|"Key" -> hit["Key"], "Eq" -> hit["Eq"], "Swapped" -> (c0 === 2), "CSide0WlPos" -> c0|>]];
             pos = cte["Pos"];
             (* Single-parent re-derivation (WM ue(-X,0)): a TRACE_CP with one
                parent absent (ATP_TRACE_NONE) re-derives an EXISTING fact by
@@ -1513,8 +1386,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                sound emitNorm real-rewrite path from the present parent, exactly
                as the degenerate-overlap / no-geometry fallbacks below do. *)
             If[ cte["ParentA"] === $AtpTraceNone || cte["ParentB"] === $AtpTraceNone,
-                With[{realP = If[ cte["ParentA"] === $AtpTraceNone,
-                        cte["ParentB"], cte["ParentA"]]},
+                With[{realP = If[cte["ParentA"] === $AtpTraceNone, cte["ParentB"], cte["ParentA"]]},
                     aInfo = resolveTrace[realP];
                     Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]]];
             aTe = trace[[cte["ParentA"] + 1]];
@@ -1547,8 +1419,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                the sound emitNorm bridge instead of emitting a Critical-
                PairLemma whose geometry the verifier would replay into a
                different equation. *)
-            geom = chooseCpGeometry[aInfo, ruleAEq, bInfo, ruleBEq,
-                pos, cpEq];
+            geom = chooseCpGeometry[aInfo, ruleAEq, bInfo, ruleBEq, pos, cpEq];
             If[ MissingQ[geom],
                 atpDbgFail["resolveCp.no-geometry@" <> ToString[ti]];
                 Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]];
@@ -1561,15 +1432,12 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 "Statement" -> st,
                 "Proof" -> <|
                     "Construct" -> geom["Construct"],
-                    "Orientation" ->
-                        cplOrient[geom["ConstructInfo"]["Eq"], cEq, varSyms],
+                    "Orientation" -> cplOrient[geom["ConstructInfo"]["Eq"], cEq, varSyms],
                     "Rule" -> cplAsRule[cEq, varSyms],
                     "Side" -> 1,
-                    "Subpattern" -> Extract[
-                        cplAsRule[cEq, varSyms][[1]], pos],
+                    "Subpattern" -> Extract[cplAsRule[cEq, varSyms][[1]], pos],
                     "MatchingConstruct" -> geom["Matching"],
-                    "MatchingOrientation" ->
-                        cplOrient[geom["MatchingInfo"]["Eq"], mEq, varSyms],
+                    "MatchingOrientation" -> cplOrient[geom["MatchingInfo"]["Eq"], mEq, varSyms],
                     "MatchingRule" -> cplAsRule[mEq, varSyms],
                     "MatchingSide" -> 1,
                     "Position" -> pos
@@ -1600,8 +1468,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                unevaluated (Head == the symbol traceInfo itself).
                A set DownValue evaluates to its stored Association,
                whose Head is Association, not traceInfo. *)
-            If[ Head[traceInfo[ti]] =!= traceInfo,
-                Return[traceInfo[ti]] ];
+            If[Head[traceInfo[ti]] =!= traceInfo, Return[traceInfo[ti]] ];
             If[ TrueQ[inProgress[ti]],
                 atpDbgFail["resolveTrace.cycle@" <> ToString[ti]];
                 Throw[$Failed]];
@@ -1612,8 +1479,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 te["Reason"] === $TraceCp,
                     resolveCp[ti],
                 te["Reason"] === $TraceAxiom,
-                    <|"Key" -> axiomKeyFor[ruleEq], "Eq" -> ruleEq,
-                      "Swapped" -> False|>,
+                    <|"Key" -> axiomKeyFor[ruleEq], "Eq" -> ruleEq, "Swapped" -> False|>,
                 te["Reason"] === $TraceNormStep && ! TrueQ[$AtpUseChain],
                     (* Chain-off retry path: NORM_STEP entries pass
                        through transparently so ORIENT/SIMPLIFY land
@@ -1647,13 +1513,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                        entry's stored order. *)
                     Block[{hit = canonInfo[canonKeyOf[ruleEq]], c0},
                     If[ AssociationQ[hit],
-                        c0 = If[ cplCanonVars[ruleEq, varSyms] === cplCanonVars[hit["Eq"], varSyms], 1, 2];
-                        <|"Key" -> hit["Key"], "Eq" -> hit["Eq"],
-                          "Swapped" -> (c0 === 2), "CSide0WlPos" -> c0|>,
-                    Module[{pInfo, rInfo, rTe, rEq, swapped,
-                            parentTe, parentReason, cSide0WlPos,
-                            wlEq, wlSide, newCSide0WlPos,
-                            sl, st, dir, dirEq, extras},
+                        c0 = If[cplCanonVars[ruleEq, varSyms] === cplCanonVars[hit["Eq"], varSyms], 1, 2];
+                        <|"Key" -> hit["Key"], "Eq" -> hit["Eq"], "Swapped" -> (c0 === 2), "CSide0WlPos" -> c0|>,
+                    Module[{pInfo, rInfo, rTe, rEq, swapped, parentTe, parentReason, cSide0WlPos, wlEq, wlSide, newCSide0WlPos, sl, st, dir, dirEq, extras},
                         (* The rewrite rule has no traced TRACE_ORIENT entry
                            (atp_rewrite_normalize_record stores rule_trace =
                            r_trace[rule], which is ATP_TRACE_NONE when that rule
@@ -1703,8 +1565,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                inheriting it flips the mapping when
                                atp_orient_and_add swapped the CP. *)
                             parentReason === $TraceOrient || parentReason === $TraceFvi || parentReason === $TraceSimplify,
-                                If[ tL[parentTe] === pInfo["Eq"][[1]],
-                                    1, 2],
+                                If[tL[parentTe] === pInfo["Eq"][[1]], 1, 2],
                             (* chained NORM_STEP: parent is itself a
                                NORM_STEP that already computed its
                                mapping -- the rewrite preserves which
@@ -1715,10 +1576,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                {cte.Rhs, cte.Lhs}, so cte.Lhs (C side
                                0) sits at WL pos 2. *)
                             True,
-                                If[ swapped, 2, 1]
+                                If[swapped, 2, 1]
                         ];
-                        wlSide = If[ te["Side"] === 0,
-                            cSide0WlPos, 3 - cSide0WlPos];
+                        wlSide = If[te["Side"] === 0, cSide0WlPos, 3 - cSide0WlPos];
                         (* Data-driven correction: the C recorder
                            threads the step's UNCHANGED side through
                            verbatim (eq_other in atp_rewrite_normalize_
@@ -1732,13 +1592,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                            when the convention disagrees with the data
                            -- and the data matches the OTHER side --
                            trust the data and flip the mapping. *)
-                        Block[{cUnch = If[ te["Side"] === 0,
-                                tR[te], tL[te]], cu},
+                        Block[{cUnch = If[te["Side"] === 0, tR[te], tL[te]], cu},
                             cu = cplCanonVars[cUnch, varSyms];
-                            If[ cu =!= cplCanonVars[
-                                    pInfo["Eq"][[3 - wlSide]], varSyms] &&
-                                cu === cplCanonVars[
-                                    pInfo["Eq"][[wlSide]], varSyms],
+                            If[ cu =!= cplCanonVars[pInfo["Eq"][[3 - wlSide]], varSyms] && cu === cplCanonVars[pInfo["Eq"][[wlSide]], varSyms],
                                 cSide0WlPos = 3 - cSide0WlPos;
                                 wlSide = 3 - wlSide]];
                         (* te records BOTH post-step sides (te.Lhs =
@@ -1748,14 +1604,12 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                            pInfo.Eq's unchanged side, which can diverge
                            from C's actual other side once the chain
                            switches which C side it rewrites. *)
-                        wlEq = If[ cSide0WlPos === 1,
-                            {tL[te], tR[te]},
-                            {tR[te], tL[te]}];
+                        wlEq = If[cSide0WlPos === 1, {tL[te], tR[te]}, {tR[te], tL[te]}];
                         newCSide0WlPos = cSide0WlPos;
                         slN++;
                         sl = {$SubstitutionLemmaSym, slN};
                         st = stmt[wlEq];
-                        dir = If[ te["Fwd"] === 1, 1, -1];
+                        dir = If[te["Fwd"] === 1, 1, -1];
                         (* The replay rule for the direction the engine
                            fired.  When the replacement side introduces
                            variables, the engine fired the grounded WM
@@ -1764,13 +1618,10 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                            template in src/atp/_.c) -- cite that
                            instance so the verifier's ReplaceAt replay
                            reproduces the recorded Statement. *)
-                        dirEq = If[ dir === -1, Reverse[rEq], rEq];
-                        extras = Complement[
-                            cplVarsIn[dirEq[[2]], varSyms],
-                            cplVarsIn[dirEq[[1]], varSyms]];
+                        dirEq = If[dir === -1, Reverse[rEq], rEq];
+                        extras = Complement[cplVarsIn[dirEq[[2]], varSyms], cplVarsIn[dirEq[[1]], varSyms]];
                         If[ extras =!= {},
-                            dirEq = {dirEq[[1]], dirEq[[2]] /.
-                                Thread[extras -> Symbol["cAtp1"]]}];
+                            dirEq = {dirEq[[1]], dirEq[[2]] /. Thread[extras -> Symbol["cAtp1"]]}];
                         AppendTo[entries, sl -> <|
                             "Statement" -> st,
                             "Proof" -> <|
@@ -1786,11 +1637,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                 "Source" -> "norm"
                             |>
                         |>];
-                        canonInfo[canonKeyOf[wlEq]] =
-                            <|"Key" -> sl, "Eq" -> wlEq|>;
-                        <|"Key" -> sl, "Eq" -> wlEq,
-                          "Swapped" -> swapped,
-                          "CSide0WlPos" -> newCSide0WlPos|>
+                        canonInfo[canonKeyOf[wlEq]] = <|"Key" -> sl, "Eq" -> wlEq|>;
+                        <|"Key" -> sl, "Eq" -> wlEq, "Swapped" -> swapped, "CSide0WlPos" -> newCSide0WlPos|>
                     ]]],
                 te["Reason"] === $TraceFvi,
                     (* Waldmeister RechtsUnfreiErzeugen (FVI) sibling.
@@ -1817,38 +1665,27 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                        the grounded statement absorbs this leaf. *)
                     Block[{hit = canonInfo[canonKeyOf[ruleEq]], c0},
                     If[ AssociationQ[hit],
-                        c0 = If[ cplCanonVars[ruleEq, varSyms] === cplCanonVars[hit["Eq"], varSyms], 1, 2];
-                        <|"Key" -> hit["Key"], "Eq" -> hit["Eq"],
-                          "Swapped" -> (c0 === 2), "CSide0WlPos" -> c0|>,
-                    Module[{pInfo, pEq, lhsP, rhsP, lvP, rvP, freeVars,
-                            minConstSym, key},
+                        c0 = If[cplCanonVars[ruleEq, varSyms] === cplCanonVars[hit["Eq"], varSyms], 1, 2];
+                        <|"Key" -> hit["Key"], "Eq" -> hit["Eq"], "Swapped" -> (c0 === 2), "CSide0WlPos" -> c0|>,
+                    Module[{pInfo, pEq, lhsP, rhsP, lvP, rvP, freeVars, minConstSym, key},
                         pInfo = resolveTrace[te["ParentA"]];
                         pEq = pInfo["Eq"];
                         {lhsP, rhsP} = pEq;
-                        lvP = DeleteDuplicates @ Cases[lhsP,
-                            v_Symbol /; cplVarQ[v, varSyms],
-                            {0, Infinity}, Heads -> True];
-                        rvP = DeleteDuplicates @ Cases[rhsP,
-                            v_Symbol /; cplVarQ[v, varSyms],
-                            {0, Infinity}, Heads -> True];
-                        freeVars = Union[
-                            Complement[rvP, lvP],
-                            Complement[lvP, rvP]];
+                        lvP = DeleteDuplicates @ Cases[lhsP, v_Symbol /; cplVarQ[v, varSyms], {0, Infinity}, Heads -> True];
+                        rvP = DeleteDuplicates @ Cases[rhsP, v_Symbol /; cplVarQ[v, varSyms], {0, Infinity}, Heads -> True];
+                        freeVars = Union[Complement[rvP, lvP], Complement[lvP, rvP]];
                         minConstSym = Symbol["cAtp1"];
                         slN++;
                         key = {$SubstitutionLemmaSym, slN};
                         AppendTo[entries, key -> <|
                             "Statement" -> stmt[ruleEq],
                             "Proof" -> <||>,
-                            "Substitution" -> Thread[
-                                freeVars -> minConstSym],
+                            "Substitution" -> Thread[freeVars -> minConstSym],
                             "Source" -> "fvi",
                             "Input" -> pInfo["Key"]
                         |>];
-                        canonInfo[canonKeyOf[ruleEq]] =
-                            <|"Key" -> key, "Eq" -> ruleEq|>;
-                        <|"Key" -> key, "Eq" -> ruleEq,
-                          "Swapped" -> False|>
+                        canonInfo[canonKeyOf[ruleEq]] = <|"Key" -> key, "Eq" -> ruleEq|>;
+                        <|"Key" -> key, "Eq" -> ruleEq, "Swapped" -> False|>
                     ]]],
                 te["Reason"] === $TraceOrient || te["Reason"] === $TraceSimplify,
                     pInfo = resolveTrace[te["ParentA"]];
@@ -1862,15 +1699,12 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                        BFS bridges the rule's normalization. *)
                     If[ (TrueQ[$AtpUseChain] && trace[[te["ParentA"] + 1]]["Reason"] === $TraceNormStep) || cplEqSetQ[ruleEq, pEq, varSyms],
                         Join[
-                            <|"Key" -> pInfo["Key"], "Eq" -> pEq,
-                              "Swapped" -> TrueQ[pInfo["Swapped"]]|>,
+                            <|"Key" -> pInfo["Key"], "Eq" -> pEq, "Swapped" -> TrueQ[pInfo["Swapped"]]|>,
                             (* propagate CSide0WlPos when inherited
                                from a NORM_STEP (chained interreduce
                                etc.) so downstream NORM_STEPs find the
                                right side-to-position mapping. *)
-                            If[ KeyExistsQ[pInfo, "CSide0WlPos"],
-                                <|"CSide0WlPos" -> pInfo["CSide0WlPos"]|>,
-                                <||>]
+                            If[KeyExistsQ[pInfo, "CSide0WlPos"], <|"CSide0WlPos" -> pInfo["CSide0WlPos"]|>, <||>]
                         ],
                         emitNorm[pInfo["Key"], pEq, ruleEq, ti]
                     ],
@@ -1902,8 +1736,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            goal-directed buildCplDataset would emit. *)
         If[ conjPair === {0, 0} && mainSteps === {},
             Do[
-                Quiet @ Check[resolveRule[k - 1], Null,
-                    {General::stop}],
+                Quiet @ Check[resolveRule[k - 1], Null, {General::stop}],
                 {k, Length[mainRules]}];
             Throw[Join[axiomEntries, entries]]];
 
@@ -1912,7 +1745,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            multi-goal conjunction (atpEncodeProblem's "ConjPair"
            shape). *)
         nGoals = Length[enc["ConjPairs"]];
-        cjps = If[ nGoals > 1, cjp, {cjp}];
+        cjps = If[nGoals > 1, cjp, {cjp}];
 
         (* the goal chains: conjunct g's MainSteps slice rewrites one
            side of that conjunct's running equation, citing its
@@ -1926,15 +1759,13 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            lift fails. *)
         chainEntries = Join @@ Table[
             Block[{gSteps, runEq, prevChainKey},
-                gSteps = Select[mainSteps,
-                    Quotient[#["Side"], 2] === g - 1 &];
+                gSteps = Select[mainSteps, Quotient[#["Side"], 2] === g - 1 &];
                 gSteps = Append[#, "Side" -> Mod[#["Side"], 2]] & /@ gSteps;
                 runEq = cjps[[g]];
                 prevChainKey = {$HypothesisSym, g};
                 If[ gSteps === {},
                     If[ runEq[[1]] === runEq[[2]],
-                        {trivialConclusionEntry[
-                            Inactive[Equal] @@ runEq, g]},
+                        {trivialConclusionEntry[Inactive[Equal] @@ runEq, g]},
                         atpDbgFail["buildCplDataset.empty-goal-chain"];
                         Throw[$Failed]],
                     (* FindEquationalProof parity: the final goal-chain
@@ -1945,9 +1776,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                        a normalize SubstitutionLemma plus a degenerate
                        `lhs -> lhs` Conclusion, so neither do we. *)
                     Table[
-                            Block[{step = gSteps[[s]], cInfo, cKey, mr,
-                                   dir, ori, ruleEq, newEq, st, isLast,
-                                   key, inKey},
+                            Block[{step = gSteps[[s]], cInfo, cKey, mr, dir, ori, ruleEq, newEq, st, isLast, key, inKey},
                                 (* MNF cites its rule by TRACE index
                                    (resolveTrace), completion cites by
                                    live-rule index (resolveRule ->
@@ -1957,9 +1786,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                    rule's oriented equation, read off
                                    mainRules for a live rule or the
                                    trace node for an MNF citation. *)
-                                cInfo = If[ usingMnf,
-                                    resolveTrace[step["RuleC"]],
-                                    resolveRule[step["RuleC"]]];
+                                cInfo = If[usingMnf, resolveTrace[step["RuleC"]], resolveRule[step["RuleC"]]];
                                 cKey = cInfo["Key"];
                                 mr = If[ usingMnf,
                                     With[{te = trace[[step["RuleC"] + 1]]},
@@ -1975,15 +1802,13 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                    step-direction * entry-vs-rule
                                    alignment, so the SubstitutionLemma
                                    replays the same rewrite. *)
-                                dir = If[ step["Fwd"] === 1, 1, -1];
+                                dir = If[step["Fwd"] === 1, 1, -1];
                                 ori = dir * cplOrient[cInfo["Eq"], mr, varSyms];
-                                ruleEq = If[ dir === -1, Reverse[mr], mr];
-                                newEq = ReplacePart[runEq,
-                                    step["Side"] + 1 -> step["After"]];
+                                ruleEq = If[dir === -1, Reverse[mr], mr];
+                                newEq = ReplacePart[runEq, step["Side"] + 1 -> step["After"]];
                                 runEq = newEq;
                                 isLast = s === Length[gSteps];
-                                key = If[ isLast, {$ConclusionSym, g},
-                                    {$SubstitutionLemmaSym, ++slN}];
+                                key = If[isLast, {$ConclusionSym, g}, {$SubstitutionLemmaSym, ++slN}];
                                 inKey = prevChainKey;
                                 prevChainKey = key;
                                 st = stmt[newEq];

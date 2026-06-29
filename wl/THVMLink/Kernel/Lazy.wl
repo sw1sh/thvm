@@ -34,35 +34,35 @@
    force one layer at a time.  TLazyMap / TLazyFold force the full
    stream; use carefully on TLazyRange[bigN]. *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[TLazyRange, "TLazyRange[n$] streams 1 to n$ as a lazy TTerm.
+SetUsage[TLazyRange, "TLazyRange[n$] streams 1 to n$ as a lazy TTerm.
 TLazyRange[a$, b$] and TLazyRange[a$, b$, step$] stream a$ to b$, optionally by step$.
 The result is an APP-REF chain to a recursive lazyRange TDef; forcing one element via TWnf exposes the next Cons while the rest stays unforced. TLazyRange[10^6] allocates O(1) cells at construction."];
-GeneralUtilities`SetUsage[TLazyPermutations, "TLazyPermutations[xs$] returns a TTerm lazily enumerating Permutations[xs$] in lex order.
+SetUsage[TLazyPermutations, "TLazyPermutations[xs$] returns a TTerm lazily enumerating Permutations[xs$] in lex order.
 It is backed by a recursive permsLex TDef that consumes one outer Cons per fired interaction. TLazyTake[TLazyPermutations[Range[20]], 5] allocates O(1) at construction."];
-GeneralUtilities`SetUsage[TLazySplits, "TLazySplits[xs$, n$] returns a TTerm lazily enumerating the ordered n$-way splits of xs$ (parts may be empty).
+SetUsage[TLazySplits, "TLazySplits[xs$, n$] returns a TTerm lazily enumerating the ordered n$-way splits of xs$ (parts may be empty).
 TLazySplits[xs$] defaults to n$ = 2."];
-GeneralUtilities`SetUsage[TLazyTuples, "TLazyTuples[{xs$1, xs$2, $$}] returns a TTerm lazily enumerating the cross product Tuples[{xs$1, xs$2, $$}]."];
-GeneralUtilities`SetUsage[TLazySubsets, "TLazySubsets[xs$] returns a TTerm lazily enumerating Subsets[xs$], sorted by cardinality then lex order."];
+SetUsage[TLazyTuples, "TLazyTuples[{xs$1, xs$2, $$}] returns a TTerm lazily enumerating the cross product Tuples[{xs$1, xs$2, $$}]."];
+SetUsage[TLazySubsets, "TLazySubsets[xs$] returns a TTerm lazily enumerating Subsets[xs$], sorted by cardinality then lex order."];
 
-GeneralUtilities`SetUsage[TLazyFirst, "TLazyFirst[s$] forces the head of stream s$ and returns the decoded WL value.
+SetUsage[TLazyFirst, "TLazyFirst[s$] forces the head of stream s$ and returns the decoded WL value.
 Returns Missing[\"EmptyStream\"] when the head reduces to Nil or ERA."];
-GeneralUtilities`SetUsage[TLazyRest, "TLazyRest[s$] forces the head of stream s$ and returns the still-unforced tail TTerm."];
-GeneralUtilities`SetUsage[TLazyTake, "TLazyTake[s$, n$] returns a TTerm holding the first n$ elements of stream s$ as a lazy Cons chain.
+SetUsage[TLazyRest, "TLazyRest[s$] forces the head of stream s$ and returns the still-unforced tail TTerm."];
+SetUsage[TLazyTake, "TLazyTake[s$, n$] returns a TTerm holding the first n$ elements of stream s$ as a lazy Cons chain.
 The result stays an unforced APP-APP-REF redex until something walks it; the elements are produced one at a time by IC reduction. Use TLazyToList[TLazyTake[s$, n$]] to force into a WL List."];
-GeneralUtilities`SetUsage[TLazyToList, "TLazyToList[s$] forces every element of stream s$ and returns a WL List. Hangs if the stream is infinite."];
-GeneralUtilities`SetUsage[TLazyMap, "TLazyMap[f$, s$] returns a lazy Cons-stream whose i-th element is f$ applied to the i-th element of stream s$.
+SetUsage[TLazyToList, "TLazyToList[s$] forces every element of stream s$ and returns a WL List. Hangs if the stream is infinite."];
+SetUsage[TLazyMap, "TLazyMap[f$, s$] returns a lazy Cons-stream whose i-th element is f$ applied to the i-th element of stream s$.
 f$ is a TTerm (typically a TLam); forcing one element of the result fires exactly the interactions for that step. A plain WL function f$ forces s$ and maps host-side instead."];
-GeneralUtilities`SetUsage[TLazySelect, "TLazySelect[s$, p$] returns a Cons-stream of those elements h$ of stream s$ for which TApp[p$, h$] reduces to a non-zero NUM. p$ is a TTerm predicate."];
-GeneralUtilities`SetUsage[TLazySelectFirst, "TLazySelectFirst[s$, p$] forces stream s$ one Cons at a time and returns the first head whose TApp[p$, h$] reduces to a non-zero NUM, decoded via FromTTerm.
+SetUsage[TLazySelect, "TLazySelect[s$, p$] returns a Cons-stream of those elements h$ of stream s$ for which TApp[p$, h$] reduces to a non-zero NUM. p$ is a TTerm predicate."];
+SetUsage[TLazySelectFirst, "TLazySelectFirst[s$, p$] forces stream s$ one Cons at a time and returns the first head whose TApp[p$, h$] reduces to a non-zero NUM, decoded via FromTTerm.
 Returns Missing[\"NotFound\"] on stream end."];
-GeneralUtilities`SetUsage[TLazyCatenate, "TLazyCatenate[ss$] flattens a Cons-stream of Cons-streams ss$ into a single stream."];
-GeneralUtilities`SetUsage[TLazyCases, "TLazyCases[s$, pattern$] forces stream s$ and returns a WL List of {element-TTerm, bindings} for each Cons head matching the held WL pattern$.
+SetUsage[TLazyCatenate, "TLazyCatenate[ss$] flattens a Cons-stream of Cons-streams ss$ into a single stream."];
+SetUsage[TLazyCases, "TLazyCases[s$, pattern$] forces stream s$ and returns a WL List of {element-TTerm, bindings} for each Cons head matching the held WL pattern$.
 bindings is an Association of binder name to TTerm. Input stays lazy; output is eager."];
-GeneralUtilities`SetUsage[TLazyChoice, "TLazyChoice[xs$] returns a fresh SUP-stream over the encoded elements of list xs$: ERA on the empty list, the bare element on a singleton, nested SUPs otherwise.
+SetUsage[TLazyChoice, "TLazyChoice[xs$] returns a fresh SUP-stream over the encoded elements of list xs$: ERA on the empty list, the bare element on a singleton, nested SUPs otherwise.
 All branches share a label so downstream DUP-SUP annihilations are clean."];
-GeneralUtilities`SetUsage[TLazyFold, "TLazyFold[f$, x$, s$] is Fold[f$, x$, TLazyToList[s$]], forcing the full stream s$."];
+SetUsage[TLazyFold, "TLazyFold[f$, x$, s$] is Fold[f$, x$, TLazyToList[s$]], forcing the full stream s$."];
 
 (* WL <-> TTerm coercion lives in Expr.wl as ToTTerm / FromTTerm.
    The private workhorses tlazyEncode / tlazyDecode stay here so
@@ -73,49 +73,45 @@ GeneralUtilities`SetUsage[TLazyFold, "TLazyFold[f$, x$, s$] is Fold[f$, x$, TLaz
    instead of phantom WolframInstitute`THVMLink`Private`X.  Lazy.wl is parsed before
    Ref.wl and Switch.wl in alphabetical order, so the public names
    don't yet exist when this file's body runs. *)
-{TDef, TRef, TIfZero, TOp2, TNum, TMatCtr, TPatternMatch, TMatchBindings,
- TMatch, TMatchSum, TMatchProduct, TMatchPart, TMatchValues,
- ToTTerm, FromTTerm, TFreshLabel, TSup, TEra};
+{TDef, TRef, TIfZero, TOp2, TNum, TMatCtr, TPatternMatch, TMatchBindings, TMatch, TMatchSum, TMatchProduct, TMatchPart, TMatchValues, ToTTerm, FromTTerm, TFreshLabel, TSup, TEra};
 
 Begin["`Private`"];
 
 (* === reserved CTR labels ===
    Above 1000 to keep clear of ATP / hand-rolled CTRs that start
    their numbering from 0/1.  Symbol labels start at 10001. *)
-$LazyCons  = 1001
-$LazyNil   = 1002
+$LazyCons = 1001
+$LazyNil = 1002
 $LazyTuple = 1003
 
 (* === per-session symbol label table === *)
 $lazyNextSymLabel = 10001
-$lazySymLabel     = <||>
-$lazyLabelSym     = <||>
+$lazySymLabel = <||>
+$lazyLabelSym = <||>
 
 freshSymLabel[name_String] := Block[{lab = $lazyNextSymLabel},
     $lazySymLabel[name] = lab;
-    $lazyLabelSym[lab]  = name;
+    $lazyLabelSym[lab] = name;
     $lazyNextSymLabel = lab + 1;
     lab
 ]
 
-symLabelFor[name_String] :=
-    Lookup[$lazySymLabel, name, freshSymLabel[name]]
+symLabelFor[name_String] := Lookup[$lazySymLabel, name, freshSymLabel[name]]
 
-$termNewCtrFn := $termNewCtrFn = load["thvm_wl_term_new_ctr",
-    {Integer, {Integer, 1}}, Integer]
+$termNewCtrFn := $termNewCtrFn = load["thvm_wl_term_new_ctr", {Integer, {Integer, 1}}, Integer]
 
 (* === encode === *)
 
-tlazyEncode[t_TTerm]   := t
+tlazyEncode[t_TTerm] := t
 tlazyEncode[n_Integer] := (ensureInit[];
     TTerm[$termNewFn[0, $TagNUM, $DTInt32, n]]
 )
-tlazyEncode[s_Symbol]  := (ensureInit[];
+tlazyEncode[s_Symbol] := (ensureInit[];
     With[{lab = symLabelFor[ToString[Unevaluated[s]]]},
         TTerm[$termNewCtrFn[lab, {}]]
     ]
 )
-tlazyEncode[l_List]    := (ensureInit[];
+tlazyEncode[l_List] := (ensureInit[];
     With[{children = ttermRaw /@ (tlazyEncode /@ l)},
         TTerm[$termNewCtrFn[$LazyTuple, children]]
     ]
@@ -126,19 +122,21 @@ tlazyEncode[l_List]    := (ensureInit[];
    don't clash with the special $LazyCons / $LazyNil / $LazyTuple
    slots.  A 0-ary symbol falls through to the `tlazyEncode[s_Symbol]`
    rule above; this clause covers the n>=1 case. *)
-tlazyEncode[expr_] /; ! MatchQ[expr, _TTerm] && Head[Head[Unevaluated[expr]]] === Symbol :=
-    (ensureInit[];
-     With[{lab = symLabelFor[ToString[Head[Unevaluated[expr]]]],
-           children = ttermRaw /@ (tlazyEncode /@ List @@ Unevaluated[expr])},
+tlazyEncode[expr_] /; ! MatchQ[expr, _TTerm] && Head[Head[Unevaluated[expr]]] === Symbol := (ensureInit[];
+    With[{
+        lab = symLabelFor[ToString[Head[Unevaluated[expr]]]],
+        children = ttermRaw /@ (tlazyEncode /@ List @@ Unevaluated[expr])
+    },
         TTerm[$termNewCtrFn[lab, children]]
-     ])
+    ]
+)
 
 (* tlazyEncode itself stays a private workhorse; the public
    coercion ToTTerm[v] in Expr.wl forwards to it. *)
 
 (* === decode === *)
 
-tlazyDecode[t_TTerm]   := tlazyDecodeRaw[ttermRaw[t]]
+tlazyDecode[t_TTerm] := tlazyDecodeRaw[ttermRaw[t]]
 tlazyDecode[t_Integer] := tlazyDecodeRaw[t]
 
 tlazyDecodeRaw[raw_Integer] := With[{tag = $termTagFn[raw]},
@@ -151,19 +149,12 @@ tlazyDecodeRaw[raw_Integer] := With[{tag = $termTagFn[raw]},
                from auto-dup'd recursive bodies fire their DUP-XXX at
                readback and resolve to a CTR head. *)
             With[{forced = ttermRaw[TCnf[TTerm[raw]]]},
-                If[ forced === raw,
-                    TTerm[raw],
-                    tlazyDecodeRaw[forced]
-                ]
+                If[forced === raw, TTerm[raw], tlazyDecodeRaw[forced]]
             ]
     ]
 ]
 
-tlazyDecodeCtr[raw_Integer] := Block[{
-    label    = $termExtFn[raw],
-    n        = $termCtrNFn[raw],
-    children
-},
+tlazyDecodeCtr[raw_Integer] := Block[{label = $termExtFn[raw], n = $termCtrNFn[raw], children},
     children = Table[$termCtrAtFn[raw, i], {i, 0, n - 1}];
     Which[
         label === $LazyNil,
@@ -174,10 +165,7 @@ tlazyDecodeCtr[raw_Integer] := Block[{
             tlazyDecodeRaw /@ children,
         KeyExistsQ[$lazyLabelSym, label],
             With[{name = $lazyLabelSym[label]},
-                If[ n === 0,
-                    Symbol[name],
-                    Symbol[name] @@ (tlazyDecodeRaw /@ children)
-                ]
+                If[n === 0, Symbol[name], Symbol[name] @@ (tlazyDecodeRaw /@ children)]
             ],
         True,
             CTR @@ Prepend[tlazyDecodeRaw /@ children, label]
@@ -188,18 +176,16 @@ tlazyDecodeCtr[raw_Integer] := Block[{
    it's not already a CTR/ERA in WHNF (TDef-driven streams expose
    unforced ALO/APP redexes between Cons cells).  Each element is
    decoded via tlazyDecodeRaw, which auto-forces. *)
-tlazyConsToList[raw_Integer] := Block[{
-    out = {}, cur = raw, tag, label, forced
-},
+tlazyConsToList[raw_Integer] := Block[{out = {}, cur = raw, tag, label, forced},
     While[ True,
         tag = $termTagFn[cur];
         If[ tag =!= $TagCTR && tag =!= $TagERA,
             forced = ttermRaw[TCnf[TTerm[cur]]];
-            If[ forced === cur, Break[]];
+            If[forced === cur, Break[]];
             cur = forced;
             tag = $termTagFn[cur]
         ];
-        If[ tag =!= $TagCTR, Break[]];
+        If[tag =!= $TagCTR, Break[]];
         label = $termExtFn[cur];
         Which[
             label === $LazyNil,
@@ -222,20 +208,16 @@ ctrCell[label_Integer, children_List] := (ensureInit[];
     TTerm[$termNewCtrFn[label, ttermRaw /@ children]]
 )
 
-nilTerm[]            := ctrCell[$LazyNil,  {}]
-consTerm[h_, t_]     := ctrCell[$LazyCons, {h, t}]
-tupleTerm[xs_List]   := ctrCell[$LazyTuple, tlazyEncode /@ xs]
+nilTerm[] := ctrCell[$LazyNil, {}]
+consTerm[h_, t_] := ctrCell[$LazyCons, {h, t}]
+tupleTerm[xs_List] := ctrCell[$LazyTuple, tlazyEncode /@ xs]
 
 (* SUP-stream right-fold: &L{x_0, &L{x_1, ..., &L{x_{n-1}, ERA}}}.
    Same label across all branches so a downstream DUP same-label
    collapses pairwise.  Used by the eager combinatorial generators. *)
 supStream[branches_List] /; Length[branches] === 0 := TEra[]
 supStream[branches_List] := Block[{label = TFreshLabel[]},
-    Fold[
-        TSup[label, #2, #1] &,
-        TEra[],
-        Reverse[branches]
-    ]
+    Fold[TSup[label, #2, #1] &, TEra[], Reverse[branches]]
 ]
 
 (* === IC-native lazy range ===
@@ -255,12 +237,7 @@ registerLazyRangeDef[] := Module[{aVar, stepVar, kVar},
                 nilTerm[],
                 consTerm[
                     aVar,
-                    TApp[
-                        TApp[
-                            TApp[TRef[$LazyRangeDefName],
-                                 TOp2["+", aVar, stepVar]],
-                            stepVar],
-                        TOp2["-", kVar, TNum[1]]]
+                    TApp[TApp[TApp[TRef[$LazyRangeDefName], TOp2["+", aVar, stepVar]], stepVar], TOp2["-", kVar, TNum[1]]]
                 ]
             ]
         ]]]
@@ -268,22 +245,15 @@ registerLazyRangeDef[] := Module[{aVar, stepVar, kVar},
 ]
 
 (* Compute Length[Range[a, b, step]] without materializing it. *)
-rangeCount[a_Integer, b_Integer, 0]    := 0
-rangeCount[a_Integer, b_Integer, step_Integer] := If[ step > 0,
-    Max[0, Quotient[b - a, step] + 1],
-    Max[0, Quotient[a - b, -step] + 1]
-]
+rangeCount[a_Integer, b_Integer, 0] := 0
+rangeCount[a_Integer, b_Integer, step_Integer] := If[step > 0, Max[0, Quotient[b - a, step] + 1], Max[0, Quotient[a - b, -step] + 1]]
 
-TLazyRange[n_Integer]                    := TLazyRange[1, n, 1]
-TLazyRange[a_Integer, b_Integer]         := TLazyRange[a, b, 1]
+TLazyRange[n_Integer] := TLazyRange[1, n, 1]
+TLazyRange[a_Integer, b_Integer] := TLazyRange[a, b, 1]
 TLazyRange[a_Integer, b_Integer, step_Integer] := (
     ensureInit[];
     registerLazyRangeDef[];
-    TApp[
-        TApp[
-            TApp[TRef[$LazyRangeDefName], TNum[a]],
-            TNum[step]],
-        TNum[rangeCount[a, b, step]]]
+    TApp[TApp[TApp[TRef[$LazyRangeDefName], TNum[a]], TNum[step]], TNum[rangeCount[a, b, step]]]
 )
 
 (* === IC-native lazy `take` ===
@@ -312,14 +282,7 @@ registerLazyTakeDef[] := Module[{nVar, sVar, hVar, tVar, ignVar},
                 TApp[
                     TMatCtr[$LazyCons,
                         TLam[hVar, TLam[tVar,
-                            consTerm[
-                                hVar,
-                                TApp[
-                                    TApp[TRef[$LazyTakeDefName],
-                                         TOp2["-", nVar, TNum[1]]],
-                                    tVar
-                                ]
-                            ]
+                            consTerm[hVar, TApp[TApp[TRef[$LazyTakeDefName], TOp2["-", nVar, TNum[1]]], tVar]]
                         ]],
                         TLam[ignVar, nilTerm[]]
                     ],
@@ -358,14 +321,13 @@ TLazyTake[t_TTerm, n_Integer ? NonNegative] := (
 
 $LazyHelpersRegistered = False
 
-defConcat[]    := Module[{xs, ys, h, t, ig},
+defConcat[] := Module[{xs, ys, h, t, ig},
     TDef["$THVMLink__lazyConcat",
         TLam[xs, TLam[ys,
             TApp[
                 TMatCtr[$LazyCons,
                     TLam[h, TLam[t,
-                        consTerm[h,
-                            TApp[TApp[TRef["$THVMLink__lazyConcat"], t], ys]]
+                        consTerm[h, TApp[TApp[TRef["$THVMLink__lazyConcat"], t], ys]]
                     ]],
                     TLam[ig, ys]
                 ],
@@ -381,9 +343,7 @@ defPrependEach[] := Module[{x, xs, h, t, ig},
             TApp[
                 TMatCtr[$LazyCons,
                     TLam[h, TLam[t,
-                        consTerm[
-                            consTerm[x, h],
-                            TApp[TApp[TRef["$THVMLink__lazyPrependEach"], x], t]]
+                        consTerm[consTerm[x, h], TApp[TApp[TRef["$THVMLink__lazyPrependEach"], x], t]]
                     ]],
                     TLam[ig, nilTerm[]]
                 ],
@@ -413,8 +373,7 @@ defPermsLex[] := Module[{xs, ig},
                 TMatCtr[$LazyCons,
                     Module[{h, t},
                         TLam[h, TLam[t,
-                            TApp[TApp[TRef["$THVMLink__lazyChooseEach"], xs],
-                                 nilTerm[]]
+                            TApp[TApp[TRef["$THVMLink__lazyChooseEach"], xs], nilTerm[]]
                         ]]
                     ],
                     TLam[ig, consTerm[nilTerm[], nilTerm[]]]
@@ -431,22 +390,7 @@ defChooseEach[] := Module[{remaining, before, x, rest, ig},
             TApp[
                 TMatCtr[$LazyCons,
                     TLam[x, TLam[rest,
-                        TApp[
-                            TApp[TRef["$THVMLink__lazyConcat"],
-                                TApp[
-                                    TApp[TRef["$THVMLink__lazyPrependEach"], x],
-                                    TApp[TRef["$THVMLink__lazyPermsLex"],
-                                        TApp[
-                                            TApp[TRef["$THVMLink__lazyConcat"],
-                                                before],
-                                            rest]]]],
-                            TApp[
-                                TApp[TRef["$THVMLink__lazyChooseEach"],
-                                    rest],
-                                TApp[
-                                    TApp[TRef["$THVMLink__lazyConcat"],
-                                        before],
-                                    consTerm[x, nilTerm[]]]]]
+                        TApp[TApp[TRef["$THVMLink__lazyConcat"], TApp[TApp[TRef["$THVMLink__lazyPrependEach"], x], TApp[TRef["$THVMLink__lazyPermsLex"], TApp[TApp[TRef["$THVMLink__lazyConcat"], before], rest]]]], TApp[TApp[TRef["$THVMLink__lazyChooseEach"], rest], TApp[TApp[TRef["$THVMLink__lazyConcat"], before], consTerm[x, nilTerm[]]]]]
                     ]],
                     TLam[ig, nilTerm[]]
                 ],
@@ -466,16 +410,13 @@ defChooseEach[] := Module[{remaining, before, x, rest, ig},
    needed.  Total work for full enumeration is O(n * 2^n); a
    sharing-friendly variant is future work. *)
 
-defSubsets[]   := Module[{xs, h, t, ig},
+defSubsets[] := Module[{xs, h, t, ig},
     TDef["$THVMLink__lazySubsets",
         TLam[xs,
             TApp[
                 TMatCtr[$LazyCons,
                     TLam[h, TLam[t,
-                        TApp[TApp[TRef["$THVMLink__lazyConcat"],
-                                  TApp[TRef["$THVMLink__lazySubsets"], t]],
-                            TApp[TApp[TRef["$THVMLink__lazyPrependEach"], h],
-                                TApp[TRef["$THVMLink__lazySubsets"], t]]]
+                        TApp[TApp[TRef["$THVMLink__lazyConcat"], TApp[TRef["$THVMLink__lazySubsets"], t]], TApp[TApp[TRef["$THVMLink__lazyPrependEach"], h], TApp[TRef["$THVMLink__lazySubsets"], t]]]
                     ]],
                     TLam[ig, consTerm[nilTerm[], nilTerm[]]]
                 ],
@@ -495,14 +436,13 @@ defSubsets[]   := Module[{xs, h, t, ig},
            Cons(x, rest) -> concat(prependEach(x, sub),
                                    tuplesHelper(rest, sub)) *)
 
-defTuples[]       := Module[{lists, h, t, ig},
+defTuples[] := Module[{lists, h, t, ig},
     TDef["$THVMLink__lazyTuples",
         TLam[lists,
             TApp[
                 TMatCtr[$LazyCons,
                     TLam[h, TLam[t,
-                        TApp[TApp[TRef["$THVMLink__lazyTuplesHelper"], h],
-                            TApp[TRef["$THVMLink__lazyTuples"], t]]
+                        TApp[TApp[TRef["$THVMLink__lazyTuplesHelper"], h], TApp[TRef["$THVMLink__lazyTuples"], t]]
                     ]],
                     TLam[ig, consTerm[nilTerm[], nilTerm[]]]
                 ],
@@ -518,11 +458,7 @@ defTuplesHelper[] := Module[{xs, sub, x, rest, ig},
             TApp[
                 TMatCtr[$LazyCons,
                     TLam[x, TLam[rest,
-                        TApp[TApp[TRef["$THVMLink__lazyConcat"],
-                                  TApp[TApp[TRef["$THVMLink__lazyPrependEach"], x],
-                                       sub]],
-                            TApp[TApp[TRef["$THVMLink__lazyTuplesHelper"], rest],
-                                sub]]
+                        TApp[TApp[TRef["$THVMLink__lazyConcat"], TApp[TApp[TRef["$THVMLink__lazyPrependEach"], x], sub]], TApp[TApp[TRef["$THVMLink__lazyTuplesHelper"], rest], sub]]
                     ]],
                     TLam[ig, nilTerm[]]
                 ],
@@ -552,7 +488,7 @@ defTuplesHelper[] := Module[{xs, sub, x, rest, ig},
    "Empty-first" branch fires before "h-in-first", matching WL's
    k=0..L cut-position order at n=2. *)
 
-defSplits[]              := Module[{xs, n, h, t, ig},
+defSplits[] := Module[{xs, n, h, t, ig},
     TDef["$THVMLink__lazySplits",
         TLam[xs, TLam[n,
             TIfZero[TOp2["-", n, TNum[1]],
@@ -560,18 +496,10 @@ defSplits[]              := Module[{xs, n, h, t, ig},
                 TApp[
                     TMatCtr[$LazyCons,
                         TLam[h, TLam[t,
-                            TApp[TApp[TRef["$THVMLink__lazyConcat"],
-                                    TApp[TApp[TRef["$THVMLink__lazyPrependEach"],
-                                              nilTerm[]],
-                                        TApp[TApp[TRef["$THVMLink__lazySplits"], xs],
-                                            TOp2["-", n, TNum[1]]]]],
-                                TApp[TApp[TRef["$THVMLink__lazyPrependHToFirstEach"], h],
-                                    TApp[TApp[TRef["$THVMLink__lazySplits"], t], n]]]
+                            TApp[TApp[TRef["$THVMLink__lazyConcat"], TApp[TApp[TRef["$THVMLink__lazyPrependEach"], nilTerm[]], TApp[TApp[TRef["$THVMLink__lazySplits"], xs], TOp2["-", n, TNum[1]]]]], TApp[TApp[TRef["$THVMLink__lazyPrependHToFirstEach"], h], TApp[TApp[TRef["$THVMLink__lazySplits"], t], n]]]
                         ]],
                         TLam[ig,
-                            TApp[TApp[TRef["$THVMLink__lazyPrependEach"], nilTerm[]],
-                                TApp[TApp[TRef["$THVMLink__lazySplits"], xs],
-                                    TOp2["-", n, TNum[1]]]]
+                            TApp[TApp[TRef["$THVMLink__lazyPrependEach"], nilTerm[]], TApp[TApp[TRef["$THVMLink__lazySplits"], xs], TOp2["-", n, TNum[1]]]]
                         ]
                     ],
                     xs
@@ -588,14 +516,7 @@ defSplits[]              := Module[{xs, n, h, t, ig},
 defPrependHToFirst[] := Module[{h, s, fp, rp, ig},
     TDef["$THVMLink__lazyPrependHToFirst",
         TLam[h, TLam[s,
-            TApp[
-                TMatCtr[$LazyCons,
-                    TLam[fp, TLam[rp,
-                        consTerm[consTerm[h, fp], rp]
-                    ]],
-                    TLam[ig, nilTerm[]]
-                ],
-                s]
+            TApp[TMatCtr[$LazyCons, TLam[fp, TLam[rp, consTerm[consTerm[h, fp], rp]]], TLam[ig, nilTerm[]]], s]
         ]]
     ]
 ]
@@ -606,9 +527,7 @@ defPrependHToFirstEach[] := Module[{h, ss, s, rs, ig},
             TApp[
                 TMatCtr[$LazyCons,
                     TLam[s, TLam[rs,
-                        consTerm[
-                            TApp[TApp[TRef["$THVMLink__lazyPrependHToFirst"], h], s],
-                            TApp[TApp[TRef["$THVMLink__lazyPrependHToFirstEach"], h], rs]]
+                        consTerm[TApp[TApp[TRef["$THVMLink__lazyPrependHToFirst"], h], s], TApp[TApp[TRef["$THVMLink__lazyPrependHToFirstEach"], h], rs]]
                     ]],
                     TLam[ig, nilTerm[]]
                 ],
@@ -627,9 +546,7 @@ defLazyMap[] := Module[{f, s, h, t, ig},
             TApp[
                 TMatCtr[$LazyCons,
                     TLam[h, TLam[t,
-                        consTerm[
-                            TApp[f, h],
-                            TApp[TApp[TRef["$THVMLink__lazyMap"], f], t]]
+                        consTerm[TApp[f, h], TApp[TApp[TRef["$THVMLink__lazyMap"], f], t]]
                     ]],
                     TLam[ig, nilTerm[]]
                 ],
@@ -670,14 +587,11 @@ TLazyPermutations[xs_List] := (
     TApp[TRef["$THVMLink__lazyPermsLex"], encodeAsConsList[xs]]
 )
 
-TLazySplits[xs_List]                       := TLazySplits[xs, 2]
+TLazySplits[xs_List] := TLazySplits[xs, 2]
 TLazySplits[xs_List, n_Integer ? Positive] := (
     ensureInit[];
     registerLazyHelpers[];
-    TApp[
-        TApp[TRef["$THVMLink__lazySplits"], encodeAsConsList[xs]],
-        TNum[n]
-    ]
+    TApp[TApp[TRef["$THVMLink__lazySplits"], encodeAsConsList[xs]], TNum[n]]
 )
 
 TLazyTuples[lists : {___List}] := (
@@ -702,14 +616,11 @@ TLazySubsets[xs_List] := (
        Missing["NotAStream"]    on a non-stream root *)
 lazyStep[t_TTerm] := lazyStepForced @ TCnf[t]
 
-lazyStepForced[forced_TTerm] := With[{
-    raw = ttermRaw[forced], tag = TTermTag[forced]
-},
+lazyStepForced[forced_TTerm] := With[{raw = ttermRaw[forced], tag = TTermTag[forced]},
     Switch[ tag,
         $TagSUP,
             With[{loc = $termValFn[raw]},
-                {decodeForced[$heapReadFn[loc]],
-                 TTerm[$heapReadFn[loc + 1]]}
+                {decodeForced[$heapReadFn[loc]], TTerm[$heapReadFn[loc + 1]]}
             ],
         $TagERA,
             Missing["EmptyStream"],
@@ -719,8 +630,7 @@ lazyStepForced[forced_TTerm] := With[{
                     label === $LazyNil,
                         Missing["EmptyStream"],
                     label === $LazyCons,
-                        {decodeForced[$termCtrAtFn[raw, 0]],
-                         TTerm[$termCtrAtFn[raw, 1]]},
+                        {decodeForced[$termCtrAtFn[raw, 0]], TTerm[$termCtrAtFn[raw, 1]]},
                     True,
                         Missing["NotAStream"]
                 ]
@@ -736,20 +646,14 @@ lazyStepForced[forced_TTerm] := With[{
    then walking the post-WHNF shape. *)
 decodeForced[raw_Integer] := tlazyDecodeRaw[ttermRaw @ TCnf[TTerm[raw]]]
 
-TLazyFirst[t_TTerm] := Replace[lazyStep[t], {
-    {h_, _}        :> h,
-    m_Missing      :> m
-}]
+TLazyFirst[t_TTerm] := Replace[lazyStep[t], {{h_, _} :> h, m_Missing :> m}]
 
-TLazyRest[t_TTerm] := Replace[lazyStep[t], {
-    {_, r_}        :> r,
-    _Missing       :> t
-}]
+TLazyRest[t_TTerm] := Replace[lazyStep[t], {{_, r_} :> r, _Missing :> t}]
 
 TLazyToList[t_TTerm] := Block[{out = {}, cur = t, step},
     While[ True,
         step = lazyStep[cur];
-        If[ MissingQ[step], Break[]];
+        If[MissingQ[step], Break[]];
         AppendTo[out, step[[1]]];
         cur = step[[2]]
     ];
@@ -811,28 +715,23 @@ registerLazyPred[p_TTerm] := Module[{name},
 
 TLazySelect[s_TTerm, p_TTerm] := Module[{predRef, raws},
     predRef = registerLazyPred[p];
-    raws    = consListAsRawTerms[s];
-    encodeAsConsListOfTerms @ Select[raws,
-        With[{r = TWnf @ TApp[predRef, TTerm[#]]},
-             TTermTag[r] === $TagNUM && TTermVal[r] =!= 0] &
-    ]
+    raws = consListAsRawTerms[s];
+    encodeAsConsListOfTerms @ Select[raws, With[{r = TWnf @ TApp[predRef, TTerm[#]]}, TTermTag[r] === $TagNUM && TTermVal[r] =!= 0] &]
 ]
 
-TLazyCatenate[ss_TTerm] := encodeAsConsListOfTerms @ Catenate[
-    consListAsRawTerms /@ (TTerm /@ consListAsRawTerms[ss])
-]
+TLazyCatenate[ss_TTerm] := encodeAsConsListOfTerms @ Catenate[consListAsRawTerms /@ (TTerm /@ consListAsRawTerms[ss])]
 
 (* Helper: walk a Cons-list TTerm forcing each Cons cell, return a List
    of raw-Integer Term values for the elements.  Stops at Nil / ERA. *)
 consListAsRawTerms[s_TTerm] := Block[{cur = ttermRaw[s], out = {}, tag, label, forced, h},
     While[ True,
         forced = ttermRaw @ TCnf[TTerm[cur]];
-        tag    = $termTagFn[forced];
-        If[ tag === $TagERA, Break[]];
-        If[ tag =!= $TagCTR, Break[]];
+        tag = $termTagFn[forced];
+        If[tag === $TagERA, Break[]];
+        If[tag =!= $TagCTR, Break[]];
         label = $termExtFn[forced];
         Which[
-            label === $LazyNil,  Break[],
+            label === $LazyNil, Break[],
             label === $LazyCons,
                 AppendTo[out, $termCtrAtFn[forced, 0]];
                 cur = $termCtrAtFn[forced, 1],
@@ -844,33 +743,25 @@ consListAsRawTerms[s_TTerm] := Block[{cur = ttermRaw[s], out = {}, tag, label, f
 
 (* Helper: build a fresh Cons-list TTerm from a List of raw-Integer
    element Terms (as returned by consListAsRawTerms). *)
-encodeAsConsListOfTerms[raws_List] := Fold[
-    consTerm[TTerm[#2], #1] &,
-    nilTerm[],
-    Reverse[raws]
-]
+encodeAsConsListOfTerms[raws_List] := Fold[consTerm[TTerm[#2], #1] &, nilTerm[], Reverse[raws]]
 
 (* TLazySelectFirst[s, p]: walk the stream one Cons at a time,
    apply `p` to each head via TApp+TWnf, return the FIRST head whose
    result reduces to a non-zero NUM, decoded via FromTTerm.
    Returns Missing["NotFound"] when the stream is exhausted.  Lazy
    on input (only forces as far as the first hit), eager on output. *)
-TLazySelectFirst[s_TTerm, p_TTerm] := Block[{
-    predRef = registerLazyPred[p],
-    cur = ttermRaw[s], forced, tag, label, headRaw, predResult
-},
+TLazySelectFirst[s_TTerm, p_TTerm] := Block[{predRef = registerLazyPred[p], cur = ttermRaw[s], forced, tag, label, headRaw, predResult},
     While[ True,
         forced = ttermRaw @ TCnf[TTerm[cur]];
-        tag    = $termTagFn[forced];
-        If[ tag === $TagERA, Return[Missing["NotFound"]]];
-        If[ tag =!= $TagCTR, Return[Missing["NotFound"]]];
+        tag = $termTagFn[forced];
+        If[tag === $TagERA, Return[Missing["NotFound"]]];
+        If[tag =!= $TagCTR, Return[Missing["NotFound"]]];
         label = $termExtFn[forced];
-        If[ label === $LazyNil, Return[Missing["NotFound"]]];
-        If[ label =!= $LazyCons, Return[Missing["NotFound"]]];
-        headRaw    = $termCtrAtFn[forced, 0];
+        If[label === $LazyNil, Return[Missing["NotFound"]]];
+        If[label =!= $LazyCons, Return[Missing["NotFound"]]];
+        headRaw = $termCtrAtFn[forced, 0];
         predResult = TWnf @ TApp[predRef, TTerm[headRaw]];
-        If[ TTermTag[predResult] === $TagNUM &&
-            TTermVal[predResult] =!= 0,
+        If[ TTermTag[predResult] === $TagNUM && TTermVal[predResult] =!= 0,
             Return[ FromTTerm @ TTerm[headRaw] ]
         ];
         cur = $termCtrAtFn[forced, 1]
@@ -882,9 +773,7 @@ TLazySelectFirst[s_TTerm, p_TTerm] := Block[{
    {head-TTerm, bindings} for every match.  Multi-match patterns
    (when supported in Pattern.wl) yield multiple entries per head. *)
 SetAttributes[TLazyCases, HoldRest]
-TLazyCases[s_TTerm, pat_] := Block[{
-    raws = consListAsRawTerms[s], h, m, out = {}
-},
+TLazyCases[s_TTerm, pat_] := Block[{raws = consListAsRawTerms[s], h, m, out = {}},
     Do[
         h = TTerm[r];
         (* With[{p = pat}, ...] syntactically substitutes the held
@@ -915,9 +804,7 @@ TLazyChoice[xs_List] := (
         Switch[Length[encoded],
             0, TEra[],
             1, encoded[[1]],
-            _, Fold[TSup[lab, #2, #1] &,
-                    Last[encoded],
-                    Reverse[Most[encoded]]]
+            _, Fold[TSup[lab, #2, #1] &, Last[encoded], Reverse[Most[encoded]]]
         ]
     ]
 )

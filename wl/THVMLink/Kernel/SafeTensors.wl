@@ -24,27 +24,27 @@
                             -> the low-level disk-tensor constructor.
 *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[TSafeTensorLoad, "TSafeTensorLoad[path$] loads a .safetensors file and returns an Association of name$ to TTerm.
+SetUsage[TSafeTensorLoad, "TSafeTensorLoad[path$] loads a .safetensors file and returns an Association of name$ to TTerm.
 Each tensor is a lazy mmap-backed disk view (TTensorMMap) into the file at its data offset, reshaped to the header's shape; bytes page in on demand, a CPU op consumes them directly and a realize on another backend uploads them."];
 
-GeneralUtilities`SetUsage[TSafeTensorSave, "TSafeTensorSave[assoc$, path$] writes assoc$ (name$ to TTerm) to path$ as a .safetensors file and returns path$.
+SetUsage[TSafeTensorSave, "TSafeTensorSave[assoc$, path$] writes assoc$ (name$ to TTerm) to path$ as a .safetensors file and returns path$.
 TSafeTensorSave[assoc$, path$, metadata$] also writes a string-valued __metadata__ Association into the header.
 The file is an 8-byte little-endian header length, a space-padded JSON header (dtype, shape, data_offsets per tensor), then each tensor's little-endian bytes; each TTerm is realized and read once."];
 
-GeneralUtilities`SetUsage[TSafeTensorLoadMetadata, "TSafeTensorLoadMetadata[path$] returns the __metadata__ Association of a .safetensors file (an empty Association if absent), without loading any tensors."];
+SetUsage[TSafeTensorLoadMetadata, "TSafeTensorLoadMetadata[path$] returns the __metadata__ Association of a .safetensors file (an empty Association if absent), without loading any tensors."];
 
-GeneralUtilities`SetUsage[TTensorMMap, "TTensorMMap[path$, byteOffset$, nbytes$, dtype$, shape$] maps the file region [byteOffset$, byteOffset$ + nbytes$) of path$ read-only and wraps it as a CPU TTerm of the given dtype$ (a thvm dtype string like \"f32\") and integer shape$ list.
+SetUsage[TTensorMMap, "TTensorMMap[path$, byteOffset$, nbytes$, dtype$, shape$] maps the file region [byteOffset$, byteOffset$ + nbytes$) of path$ read-only and wraps it as a CPU TTerm of the given dtype$ (a thvm dtype string like \"f32\") and integer shape$ list.
 This is a lazy, mmap-backed, zero-copy disk-tensor view: bytes page in on demand and the mapping is released with the tensor."];
 
-GeneralUtilities`SetUsage[TDiskDropWeight, "TDiskDropWeight[w$] streams a disk-mmap weight w$ (a lazy mmap-backed disk TTerm, e.g. from TSafeTensorLoad) out of resident memory after it has been used: it releases any Metal zero-copy wrap of the weight (the borrowed MTLBuffer aliasing its mmap pages) and MADV_DONTNEEDs the underlying disk mapping so the faulted-in pages leave RSS.
+SetUsage[TDiskDropWeight, "TDiskDropWeight[w$] streams a disk-mmap weight w$ (a lazy mmap-backed disk TTerm, e.g. from TSafeTensorLoad) out of resident memory after it has been used: it releases any Metal zero-copy wrap of the weight (the borrowed MTLBuffer aliasing its mmap pages) and MADV_DONTNEEDs the underlying disk mapping so the faulted-in pages leave RSS.
 The mmap stays valid (file-backed, read-only), so a later use re-faults and re-wraps the weight fresh.  Used by a per-block streaming forward to keep only the active block's weights resident.  TDiskDropWeight[{w$1, w$2, ...}] drops a list.  A no-op (returns the weight unchanged) for a non-disk / non-wrapped tensor."];
 
-GeneralUtilities`SetUsage[TDiskPrefetchAsync, "TDiskPrefetchAsync[path$] kicks off a detached background read of the whole file path$ so its bytes land in the OS page cache before a later mmap fault touches them; returns path$ immediately (non-blocking).
+SetUsage[TDiskPrefetchAsync, "TDiskPrefetchAsync[path$] kicks off a detached background read of the whole file path$ so its bytes land in the OS page cache before a later mmap fault touches them; returns path$ immediately (non-blocking).
 TDiskPrefetchAsync[{path$1, path$2, $$}] prefetches several files concurrently.  Used at FLUX-session build to warm the transformer / Qwen / VAE safetensors so the ~6 s of SSD read overlaps the JIT capture instead of stalling serially inside the first forward (the zero-copy wrap's fault-in then hits warm pages).  Best-effort: a missing/unreadable file is silently ignored."];
 
-GeneralUtilities`SetUsage[TDiskWarmAsync, "TDiskWarmAsync[w$] background-faults a disk-mmap weight w$ (a lazy mmap-backed disk TTerm, e.g. from TSafeTensorLoad) resident in THIS process: a detached thread touches one byte per page across the weight's mapping so the OS faults every page in, then returns the weight at once (non-blocking).  The inverse of TDiskDropWeight.
+SetUsage[TDiskWarmAsync, "TDiskWarmAsync[w$] background-faults a disk-mmap weight w$ (a lazy mmap-backed disk TTerm, e.g. from TSafeTensorLoad) resident in THIS process: a detached thread touches one byte per page across the weight's mapping so the OS faults every page in, then returns the weight at once (non-blocking).  The inverse of TDiskDropWeight.
 TDiskWarmAsync[{w$1, w$2, $$}] warms a list of weights and returns the list.  TDiskPrefetchAsync only warms the OS page cache (a file read); the per-process minor fault that maps those pages into THIS address space still happens serially at the first matmul.  Warming an idle model's weights ahead of its forward (e.g. the FLUX transformer during the Qwen text-encode stage) moves that minor fault off the forward's critical path.  A no-op (returns the weight unchanged) for a non-disk / non-mapped tensor."];
 
 Begin["`Private`"];
@@ -66,7 +66,7 @@ $diskWarmFn := $diskWarmFn = load["thvm_wl_disk_warm_async", {Integer}, Integer]
    per-block reclaim).  Accepts a single TTerm or a list; returns the input. *)
 TDiskDropWeight[ws_List] := (TDiskDropWeight /@ ws; ws)
 TDiskDropWeight[w_TTerm] := (ensureInit[]; $diskDropWeightFn[ttermRaw[w]]; w)
-TDiskDropWeight[w_]      := w
+TDiskDropWeight[w_] := w
 
 (* Non-blocking background page-cache warm of a safetensors file (or list).
    Returns the path(s); the read runs on a detached thread. *)
@@ -78,7 +78,7 @@ TDiskPrefetchAsync[path_String] := (ensureInit[]; $filePrefetchFn[path]; path)
    returns the input. *)
 TDiskWarmAsync[ws_List] := (TDiskWarmAsync /@ ws; ws)
 TDiskWarmAsync[w_TTerm] := (ensureInit[]; $diskWarmFn[ttermRaw[w]]; w)
-TDiskWarmAsync[w_]      := w
+TDiskWarmAsync[w_] := w
 
 (* safetensors dtype name <-> thvm dtype string (tinygrad safe_dtypes /
    inverse_safe_dtypes).  LOAD covers the byte-aligned dtypes PLUS the
@@ -113,11 +113,16 @@ $safeToThvm = <|
    gracefully declines them ($Failed) rather than malforming the file. *)
 $thvmToSafe = <|
     "bool" -> "BOOL",
-    "i8" -> "I8", "u8" -> "U8",
-    "i16" -> "I16", "u16" -> "U16",
-    "i32" -> "I32", "u32" -> "U32",
-    "i64" -> "I64", "u64" -> "U64",
-    "f32" -> "F32", "f64" -> "F64"
+    "i8" -> "I8",
+    "u8" -> "U8",
+    "i16" -> "I16",
+    "u16" -> "U16",
+    "i32" -> "I32",
+    "u32" -> "U32",
+    "i64" -> "I64",
+    "u64" -> "U64",
+    "f32" -> "F32",
+    "f64" -> "F64"
 |>
 
 (* thvm dtype string -> WL NumericArray type.  Drives the little-endian
@@ -191,10 +196,9 @@ loadSafeEntry[path_String, dataStart_Integer, spec_Association] := Module[{thvmD
    referenced shard into one name -> TTerm Association.  Mirrors
    transformers' sharded from_pretrained.  More specific than the bare
    single-file def below, so it matches index paths first. *)
-TSafeTensorLoad[indexPath_String] /; StringEndsQ[indexPath, ".index.json"] := Module[
-    {idx, dir, shards},
-    idx    = Developer`ReadRawJSONFile[indexPath];
-    dir    = DirectoryName[indexPath];
+TSafeTensorLoad[indexPath_String] /; StringEndsQ[indexPath, ".index.json"] := Module[{idx, dir, shards},
+    idx = Developer`ReadRawJSONFile[indexPath];
+    dir = DirectoryName[indexPath];
     shards = DeleteDuplicates @ Values @ Lookup[idx, "weight_map", <||>];
     Join @@ (TSafeTensorLoad[FileNameJoin[{dir, #}]] & /@ shards)
 ]
@@ -203,7 +207,7 @@ TSafeTensorLoad[path_String] := Module[{dataStart, json, entries},
     ensureInit[];
     {dataStart, json} = safeReadHeader[path];
     entries = KeyDrop[json, "__metadata__"];
-    Map[loadSafeEntry[path, dataStart, #] &, entries]   (* maps values, keeps names *)
+    Map[loadSafeEntry[path, dataStart, #] &, entries] (* maps values, keeps names *)
 ]
 
 (* Realize a TTerm, read its NumericArray + shape + safetensors dtype. *)
@@ -212,7 +216,7 @@ saveTensorInfo[t_TTerm] := Module[{r, na, dt, safeDt, shape, numel},
     dt = TTensorDType[r];
     safeDt = Lookup[$thvmToSafe, dt, $Failed];
     If[safeDt === $Failed, Return[$Failed]];
-    na = TTensorData[r];                 (* NumericArray, tensor dtype *)
+    na = TTensorData[r]; (* NumericArray, tensor dtype *)
     shape = TTensorShape[r];
     numel = If[shape === {}, 1, Times @@ shape];
     <|
@@ -263,7 +267,7 @@ TSafeTensorSave[assoc_Association, path_String, metadata_Association] := Module[
        is one UTF-8 byte, so byte-length padding stays a space-pad. *)
     hbytes = ToCharacterCode[json, "UTF8"];
     pad = Mod[-Length[hbytes], 8];
-    hbytes = Join[hbytes, ConstantArray[32, pad]];   (* 32 = ASCII space *)
+    hbytes = Join[hbytes, ConstantArray[32, pad]]; (* 32 = ASCII space *)
     (* Write: 8-byte LE header-byte-length, JSON, then each tensor's LE
        bytes. *)
     Quiet @ DeleteFile[path];

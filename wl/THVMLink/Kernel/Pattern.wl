@@ -28,22 +28,22 @@
    TMatchBindings via TTermEq when the same name appears multiple
    times: mismatches drop that branch. *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[TMatch, "TMatch[m$] is the canonical outer container wrapping a Match expression, as returned by TPatternMatch."];
-GeneralUtilities`SetUsage[TMatchSum, "TMatchSum[m$1, m$2, $$] represents alternative matches (lazy OR).
+SetUsage[TMatch, "TMatch[m$] is the canonical outer container wrapping a Match expression, as returned by TPatternMatch."];
+SetUsage[TMatchSum, "TMatchSum[m$1, m$2, $$] represents alternative matches (lazy OR).
 Empty TMatchSum[] means no match; SequenceHold and Flat so nested unions auto-flatten."];
-GeneralUtilities`SetUsage[TMatchProduct, "TMatchProduct[m$1, m$2, $$] represents the conjunction of sub-matches (head plus each argument).
+SetUsage[TMatchProduct, "TMatchProduct[m$1, m$2, $$] represents the conjunction of sub-matches (head plus each argument).
 Empty TMatchProduct[] is a vacuously-true match producing the empty bindings."];
-GeneralUtilities`SetUsage[TMatchPart, "TMatchPart[part$, HoldPattern[p$], submatch$] tags submatch$ as having matched the held WL pattern p$ at heap position part$ (a List of integer offsets)."];
-GeneralUtilities`SetUsage[TMatchValues, "TMatchValues[v$1, v$2, $$] holds a sequence of leaf TTerms or held values; the leaf-level Match.
+SetUsage[TMatchPart, "TMatchPart[part$, HoldPattern[p$], submatch$] tags submatch$ as having matched the held WL pattern p$ at heap position part$ (a List of integer offsets)."];
+SetUsage[TMatchValues, "TMatchValues[v$1, v$2, $$] holds a sequence of leaf TTerms or held values; the leaf-level Match.
 SequenceHold and Flat."];
-GeneralUtilities`SetUsage[TMatchObjectQ, "TMatchObjectQ[expr$] returns True if expr$ is one of TMatch, TMatchSum, TMatchProduct, TMatchPart, TMatchValues."];
-GeneralUtilities`SetUsage[TPatternMatch, "TPatternMatch[expr$, pattern$] matches the TTerm expr$ against the held WL pattern pattern$, returning a TMatch object on success or TMatchSum[] on no match.
+SetUsage[TMatchObjectQ, "TMatchObjectQ[expr$] returns True if expr$ is one of TMatch, TMatchSum, TMatchProduct, TMatchPart, TMatchValues."];
+SetUsage[TPatternMatch, "TPatternMatch[expr$, pattern$] matches the TTerm expr$ against the held WL pattern pattern$, returning a TMatch object on success or TMatchSum[] on no match.
 See TMatchBindings, TMatchApply, TMatchParts for accessors."];
-GeneralUtilities`SetUsage[TMatchBindings, "TMatchBindings[match$] returns a List of binding-Associations (one per outcome), each mapping binder names to TTerm values; repeat-binder consistency is enforced via TTermEq."];
-GeneralUtilities`SetUsage[TMatchApply, "TMatchApply[rhs$, match$] returns a List of TTerms produced by substituting each outcome's bindings into the held WL rhs$ template."];
-GeneralUtilities`SetUsage[TMatchParts, "TMatchParts[match$] returns a List of Associations mapping each path (List of integer offsets) to the TTerm captured at that position, for path-keyed inspection of where each subterm came from."];
+SetUsage[TMatchBindings, "TMatchBindings[match$] returns a List of binding-Associations (one per outcome), each mapping binder names to TTerm values; repeat-binder consistency is enforced via TTermEq."];
+SetUsage[TMatchApply, "TMatchApply[rhs$, match$] returns a List of TTerms produced by substituting each outcome's bindings into the held WL rhs$ template."];
+SetUsage[TMatchParts, "TMatchParts[match$] returns a List of Associations mapping each path (List of integer offsets) to the TTerm captured at that position, for path-keyed inspection of where each subterm came from."];
 
 (* Forward refs to private symbols owned by sibling files. *)
 {ToTTerm, TSubexprAt, TTermSubexprs, TTermSame, TTermEq};
@@ -57,13 +57,12 @@ Begin["`Private`"];
    user-side patterns and bound TTerms don't get re-evaluated when
    the match tree is reshuffled. *)
 
-SetAttributes[TMatchSum,     {Flat, OneIdentity}]
+SetAttributes[TMatchSum, {Flat, OneIdentity}]
 SetAttributes[TMatchProduct, {Flat, OneIdentity}]
-SetAttributes[TMatchValues,  {Flat, OneIdentity}]
+SetAttributes[TMatchValues, {Flat, OneIdentity}]
 
 (* TMatchObjectQ - shape predicate. *)
-TMatchObjectQ[expr_] :=
-    MatchQ[expr, _TMatch | _TMatchSum | _TMatchProduct | _TMatchPart | _TMatchValues]
+TMatchObjectQ[expr_] := MatchQ[expr, _TMatch | _TMatchSum | _TMatchProduct | _TMatchPart | _TMatchValues]
 
 (* === pattern dispatch ============================================
    buildMatch[t_TTerm, pat] returns a Match object.  The matcher
@@ -71,65 +70,41 @@ TMatchObjectQ[expr_] :=
    later replay paths / patterns / submatches without re-walking. *)
 
 (* Numeric literal pattern - expr must be NUM with that value. *)
-buildMatch[t_TTerm, n_Integer] :=
-    If[ TTermTag[t] === $TagNUM && TTermVal[t] === n,
-        TMatchPart[{}, HoldPattern[n], TMatchValues[t]],
-        TMatchSum[]
-    ]
+buildMatch[t_TTerm, n_Integer] := If[TTermTag[t] === $TagNUM && TTermVal[t] === n, TMatchPart[{}, HoldPattern[n], TMatchValues[t]], TMatchSum[]]
 
 (* TTerm literal pattern - exact structural equality. *)
-buildMatch[t_TTerm, lit_TTerm] :=
-    If[ TTermSame[t, lit],
-        TMatchPart[{}, HoldPattern[lit], TMatchValues[t]],
-        TMatchSum[]
-    ]
+buildMatch[t_TTerm, lit_TTerm] := If[TTermSame[t, lit], TMatchPart[{}, HoldPattern[lit], TMatchValues[t]], TMatchSum[]]
 
 (* Blank: matches anything; no name.  We still wrap in TMatchPart
    so consumers see the held pattern. *)
-buildMatch[t_TTerm, p : Verbatim[Blank][]] :=
-    TMatchPart[{}, HoldPattern[p], TMatchValues[t]]
+buildMatch[t_TTerm, p : Verbatim[Blank][]] := TMatchPart[{}, HoldPattern[p], TMatchValues[t]]
 
 (* Head-restricted Blank.  Only accept if t's head matches headSym
    (registered ctor or tag-name string match). *)
-buildMatch[t_TTerm, p : Verbatim[Blank][headSym_Symbol]] :=
-    If[ matchHead[t, headSym],
-        TMatchPart[{}, HoldPattern[p], TMatchValues[t]],
-        TMatchSum[]
-    ]
+buildMatch[t_TTerm, p : Verbatim[Blank][headSym_Symbol]] := If[matchHead[t, headSym], TMatchPart[{}, HoldPattern[p], TMatchValues[t]], TMatchSum[]]
 
 (* Named blank: x_ - TMatchPart with HoldPattern[name_]. *)
-buildMatch[t_TTerm, p : Verbatim[Pattern][name_Symbol, Verbatim[Blank][]]] :=
-    TMatchPart[{}, HoldPattern[p], TMatchValues[t]]
+buildMatch[t_TTerm, p : Verbatim[Pattern][name_Symbol, Verbatim[Blank][]]] := TMatchPart[{}, HoldPattern[p], TMatchValues[t]]
 
 (* Named head-restricted: x_h.  Two-step: head-check, then label. *)
-buildMatch[t_TTerm, p : Verbatim[Pattern][name_Symbol, Verbatim[Blank][headSym_Symbol]]] :=
-    If[ matchHead[t, headSym],
-        TMatchPart[{}, HoldPattern[p], TMatchValues[t]],
-        TMatchSum[]
-    ]
+buildMatch[t_TTerm, p : Verbatim[Pattern][name_Symbol, Verbatim[Blank][headSym_Symbol]]] := If[matchHead[t, headSym], TMatchPart[{}, HoldPattern[p], TMatchValues[t]], TMatchSum[]]
 
 (* List literal as pattern - treat as Tuple-CTR (Lazy.wl shape). *)
-buildMatch[t_TTerm, l_List] :=
-    matchTupleCtr[t, l]
+buildMatch[t_TTerm, l_List] := matchTupleCtr[t, l]
 
 (* Atomic Symbol pattern (e.g. `a` -> 0-ary CTR with ctor "a"). *)
-buildMatch[t_TTerm, sym_Symbol] :=
-    matchCompound[t, sym, {}]
+buildMatch[t_TTerm, sym_Symbol] := matchCompound[t, sym, {}]
 
 (* Compound symbolic pattern: head[arg1, arg2, ...]. *)
-buildMatch[t_TTerm, expr_] :=
-    With[{h = Head[Unevaluated[expr]]},
-        If[ MatchQ[h, _Symbol],
-            matchCompound[t, h, List @@ Unevaluated[expr]],
-            TMatchSum[]
-        ]
-    ]
+buildMatch[t_TTerm, expr_] := With[{h = Head[Unevaluated[expr]]},
+    If[MatchQ[h, _Symbol], matchCompound[t, h, List @@ Unevaluated[expr]], TMatchSum[]]
+]
 
 (* === head / ctor checks ========================================== *)
 
 matchHead[t_TTerm, headSym_Symbol] := Block[{
-    tag    = TTermTag[t],
-    label  = Lookup[$lazySymLabel, ToString[Unevaluated[headSym]], None],
+    tag = TTermTag[t],
+    label = Lookup[$lazySymLabel, ToString[Unevaluated[headSym]], None],
     tagInv
 },
     Which[
@@ -151,64 +126,53 @@ matchCompound[t_TTerm, head_Symbol, args_List] := Block[{
     label = Lookup[$lazySymLabel, ToString[Unevaluated[head]], None],
     raw, n, childMatches, anyFail
 },
-    If[ label === None || TTermTag[t] =!= $TagCTR || TTermExt[t] =!= label,
-        Return @ TMatchSum[]
-    ];
+    If[label === None || TTermTag[t] =!= $TagCTR || TTermExt[t] =!= label, Return @ TMatchSum[]];
     raw = ttermRaw[t];
-    n   = $termCtrNFn[raw];
-    If[ n =!= Length[args], Return @ TMatchSum[] ];
-    anyFail      = False;
+    n = $termCtrNFn[raw];
+    If[n =!= Length[args], Return @ TMatchSum[]];
+    anyFail = False;
     childMatches = Table[
         Module[{cm = buildMatch[TTerm[$termCtrAtFn[raw, i]], args[[i + 1]]]},
-            If[ cm === TMatchSum[], anyFail = True];
+            If[cm === TMatchSum[], anyFail = True];
             shiftPath[cm, {i + 1}]
         ],
         {i, 0, n - 1}];
-    If[ anyFail, Return @ TMatchSum[] ];
-    TMatchPart[{},
-        HoldPattern[head @@ args],
-        TMatchProduct @@ childMatches]
+    If[anyFail, Return @ TMatchSum[]];
+    TMatchPart[{}, HoldPattern[head @@ args], TMatchProduct @@ childMatches]
 ]
 
 (* List-pattern variant - expr must be a Tuple-CTR ($LazyTuple)
    with same arity, then per-arg matching. *)
-matchTupleCtr[t_TTerm, args_List] := Block[{
-    raw, n, childMatches, anyFail
-},
-    If[ TTermTag[t] =!= $TagCTR || TTermExt[t] =!= $LazyTuple,
-        Return @ TMatchSum[]
-    ];
+matchTupleCtr[t_TTerm, args_List] := Block[{raw, n, childMatches, anyFail},
+    If[TTermTag[t] =!= $TagCTR || TTermExt[t] =!= $LazyTuple, Return @ TMatchSum[]];
     raw = ttermRaw[t];
-    n   = $termCtrNFn[raw];
-    If[ n =!= Length[args], Return @ TMatchSum[] ];
-    anyFail      = False;
+    n = $termCtrNFn[raw];
+    If[n =!= Length[args], Return @ TMatchSum[]];
+    anyFail = False;
     childMatches = Table[
         Module[{cm = buildMatch[TTerm[$termCtrAtFn[raw, i]], args[[i + 1]]]},
-            If[ cm === TMatchSum[], anyFail = True];
+            If[cm === TMatchSum[], anyFail = True];
             shiftPath[cm, {i + 1}]
         ],
         {i, 0, n - 1}];
-    If[ anyFail, Return @ TMatchSum[] ];
-    TMatchPart[{},
-        HoldPattern[args],
-        TMatchProduct @@ childMatches]
+    If[anyFail, Return @ TMatchSum[]];
+    TMatchPart[{}, HoldPattern[args], TMatchProduct @@ childMatches]
 ]
 
 (* shiftPath: prepend prefix to the part of every TMatchPart at the
    top level of a Match tree.  Empty TMatchSum[] passes through. *)
-shiftPath[TMatchPart[part_, hp_, sub_], prefix_List] :=
-    TMatchPart[Join[prefix, part], hp, sub]
-shiftPath[m_TMatchSum, _]     := m
+shiftPath[TMatchPart[part_, hp_, sub_], prefix_List] := TMatchPart[Join[prefix, part], hp, sub]
+shiftPath[m_TMatchSum, _] := m
 shiftPath[m_TMatchProduct, _] := m
-shiftPath[m_TMatchValues, _]  := m
-shiftPath[m_, _]              := m
+shiftPath[m_TMatchValues, _] := m
+shiftPath[m_, _] := m
 
 (* === public entry ================================================ *)
 
 SetAttributes[TPatternMatch, HoldRest]
 
 TPatternMatch[t_TTerm, pat_] := With[{m = buildMatch[t, pat]},
-    If[ m === TMatchSum[], TMatchSum[], TMatch[m]]
+    If[m === TMatchSum[], TMatchSum[], TMatch[m]]
 ]
 
 (* === Match-object accessors ====================================== *)
@@ -226,10 +190,7 @@ TMatchBindings[TMatchSum[ms___]] := Catenate[TMatchBindings /@ {ms}]
 
 TMatchBindings[TMatchProduct[ms___]] := Module[{combos},
     combos = Tuples[TMatchBindings /@ {ms}];
-    Select[
-        mergeBindings /@ combos,
-        # =!= $bindingsConflict &
-    ]
+    Select[mergeBindings /@ combos, # =!= $bindingsConflict &]
 ]
 
 (* TMatchPart bindings: when the held pattern is `name_` or `name_h`,
@@ -237,18 +198,17 @@ TMatchBindings[TMatchProduct[ms___]] := Module[{combos},
    recurse into the submatch.  We drop the `_HoldPattern` type check
    in the LHS because it interacts oddly with HoldPattern's
    matcher-special status. *)
-TMatchBindings[TMatchPart[_, hp_, sub_]] :=
-    Module[{name = bindingNameOf[hp]},
-        If[ name === None,
-            TMatchBindings[sub],
-            With[{leaf = leafValueOf[sub]},
-                If[ leaf === None,
-                    TMatchBindings[sub],
-                    {<|name -> leaf|>}
-                ]
+TMatchBindings[TMatchPart[_, hp_, sub_]] := Module[{name = bindingNameOf[hp]},
+    If[ name === None,
+        TMatchBindings[sub],
+        With[{leaf = leafValueOf[sub]},
+            If[ leaf === None,
+                TMatchBindings[sub],
+                {<|name -> leaf|>}
             ]
         ]
     ]
+]
 
 TMatchBindings[TMatchValues[___]] := {<||>}
 
@@ -259,18 +219,17 @@ TMatchBindings[_] := {}
    is a pattern-matcher head with special semantics in LHS, so we
    wrap it with Verbatim to match it literally; same for the inner
    Pattern / Blank. *)
-bindingNameOf[Verbatim[HoldPattern][
-        Verbatim[Pattern][n_Symbol, Verbatim[Blank][___]]]] := n
+bindingNameOf[Verbatim[HoldPattern][Verbatim[Pattern][n_Symbol, Verbatim[Blank][___]]]] := n
 bindingNameOf[_] := None
 
 (* First leaf TTerm of a submatch tree (used by TMatchBindings to
    pair a binder name with its captured value).  Returns None when
    the submatch is empty / non-leaf-bearing. *)
-leafValueOf[TMatchValues[v_, ___]]              := v
-leafValueOf[TMatchPart[_, _, sub_]]              := leafValueOf[sub]
-leafValueOf[TMatchProduct[m_, ___]]              := leafValueOf[m]
-leafValueOf[TMatchSum[m_, ___]]                  := leafValueOf[m]
-leafValueOf[_]                                   := None
+leafValueOf[TMatchValues[v_, ___]] := v
+leafValueOf[TMatchPart[_, _, sub_]] := leafValueOf[sub]
+leafValueOf[TMatchProduct[m_, ___]] := leafValueOf[m]
+leafValueOf[TMatchSum[m_, ___]] := leafValueOf[m]
+leafValueOf[_] := None
 
 (* Internal: merge a List of binding Associations into one,
    enforcing TTermEq for repeated names.  Returns
@@ -279,7 +238,7 @@ mergeBindings[bs_List] := Module[{out = <||>, ok = True},
     Scan[
         a |-> KeyValueMap[
             {k, v} |-> If[ KeyExistsQ[out, k],
-                If[ !TTermEq[out[k], v], ok = False];,
+                If[! TTermEq[out[k], v], ok = False];,
                 AssociateTo[out, k -> v]
             ],
             a
@@ -295,23 +254,20 @@ mergeBindings[bs_List] := Module[{out = <||>, ok = True},
 
 SetAttributes[TMatchApply, HoldFirst]
 
-TMatchApply[rhs_, match_] := tlazyEncode[applyEnv[#, rhs]] & /@
-    TMatchBindings[match]
+TMatchApply[rhs_, match_] := tlazyEncode[applyEnv[#, rhs]] & /@ TMatchBindings[match]
 
 (* Recursive substitution helper.  Pattern binders get replaced
    with their bound TTerms; everything else passes through. *)
 SetAttributes[applyEnv, HoldRest]
 applyEnv[env_Association, sym_Symbol] := Lookup[env, sym, sym]
-applyEnv[env_Association, e_] :=
-    With[{h = Head[Unevaluated[e]]},
-        Which[
-            IntegerQ[e] || NumericQ[e] || MatchQ[e, _TTerm], e,
-            ListQ[e],          applyEnv[env, #] & /@ e,
-            MatchQ[h, _Symbol],
-                Apply[h, applyEnv[env, #] & /@ List @@ Unevaluated[e]],
-            True, e
-        ]
+applyEnv[env_Association, e_] := With[{h = Head[Unevaluated[e]]},
+    Which[
+        IntegerQ[e] || NumericQ[e] || MatchQ[e, _TTerm], e,
+        ListQ[e], applyEnv[env, #] & /@ e,
+        MatchQ[h, _Symbol], Apply[h, applyEnv[env, #] & /@ List @@ Unevaluated[e]],
+        True, e
     ]
+]
 
 (* TMatchParts - enumerate (path -> TTerm) Associations per
    outcome.  Useful for path-keyed inspection. *)
@@ -325,15 +281,13 @@ TMatchParts[TMatchProduct[ms___]] := Module[{combos},
     mergePartsAll /@ combos
 ]
 
-TMatchParts[TMatchPart[part_, _, sub_]] :=
-    Map[partsPrepend[part, #] &, TMatchParts[sub]]
+TMatchParts[TMatchPart[part_, _, sub_]] := Map[partsPrepend[part, #] &, TMatchParts[sub]]
 
 TMatchParts[TMatchValues[v_, ___]] := {<|{} -> v|>}
 
 TMatchParts[_] := {<||>}
 
-partsPrepend[prefix_List, a_Association] :=
-    KeyMap[Join[prefix, #] &, a]
+partsPrepend[prefix_List, a_Association] := KeyMap[Join[prefix, #] &, a]
 
 mergePartsAll[as_List] := Module[{out = <||>},
     Scan[(out = Join[out, #]) &, as];

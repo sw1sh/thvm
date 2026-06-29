@@ -30,91 +30,87 @@
                       runtime between trials with TReset.  Returns a
                       Tabular comparing wall, fires, idle/active. *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
 (* Forward-declare sibling-owned symbols so resolution lands in
    WolframInstitute`THVMLink` not Private`. *)
 {TInit, TReset, TNf, TTerm};
 
-GeneralUtilities`SetUsage[TThreads, "TThreads[] returns the worker count nf will use on the next call.
+SetUsage[TThreads, "TThreads[] returns the worker count nf will use on the next call.
 TThreads[n$] sets the count and returns the resolved value; n$ = 0 reverts to the $THVM_THREADS env var, and the value is clamped to the runtime's thread range."];
 
-GeneralUtilities`SetUsage[TPoolStats, "TPoolStats[] returns the most recent nf-run worker-pool snapshot as an Association.
+SetUsage[TPoolStats, "TPoolStats[] returns the most recent nf-run worker-pool snapshot as an Association.
 Pool-level keys are \"Workers\", \"DrainRounds\", \"DrainWallNs\", \"TotalFires\"; \"PerWorker\" is a list of per-worker associations keyed \"Id\", \"Fires\", \"Steals\", \"StealAttempts\", \"Pushes\", \"ActiveNs\", \"IdleNs\", \"Wakeups\", \"ItrsDelta\"."];
 
-GeneralUtilities`SetUsage[TNfProfiled, "TNfProfiled[term$] runs TNf[term$] and returns an Association with key \"Result\" (the normalized _TTerm) and key \"Stats\" (the TPoolStats[] snapshot for that run)."];
+SetUsage[TNfProfiled, "TNfProfiled[term$] runs TNf[term$] and returns an Association with key \"Result\" (the normalized _TTerm) and key \"Stats\" (the TPoolStats[] snapshot for that run)."];
 
-GeneralUtilities`SetUsage[TPoolStatsReport, "TPoolStatsReport[stats$] renders a Tabular summary of a TPoolStats[] snapshot stats$: wall time, total fires, and per-worker fires, steals, and active/idle ratio."];
+SetUsage[TPoolStatsReport, "TPoolStatsReport[stats$] renders a Tabular summary of a TPoolStats[] snapshot stats$: wall time, total fires, and per-worker fires, steals, and active/idle ratio."];
 
-GeneralUtilities`SetUsage[TPoolStatsBench, "TPoolStatsBench[builder$, threadCounts$] runs TNfProfiled on builder$ under each thread count in the list threadCounts$, calling TReset between runs for a clean heap, and returns a Dataset comparing wall time, total fires, and idle ratios.
+SetUsage[TPoolStatsBench, "TPoolStatsBench[builder$, threadCounts$] runs TNfProfiled on builder$ under each thread count in the list threadCounts$, calling TReset between runs for a clean heap, and returns a Dataset comparing wall time, total fires, and idle ratios.
 builder$ is held (HoldFirst) and re-evaluated after each TReset so the term is rebuilt against the fresh heap; pass a term-producing expression, e.g. TPoolStatsBench[treeIter[14, TNum[#]&], {1, 2, 4, 8}], or a no-arg Function, e.g. TPoolStatsBench[(treeIter[14, TNum[#]&])&, {1, 2, 4, 8}]."];
 
 Begin["`Private`"];
 
 (* === LibraryLink loaders ============================================ *)
 
-$poolSetThreadsFn       := $poolSetThreadsFn       = load[
-    "thvm_wl_pool_set_threads", {Integer}, Integer];
-$poolGetThreadsFn       := $poolGetThreadsFn       = load[
-    "thvm_wl_pool_get_threads", {}, Integer];
-$poolStatsPoolFieldFn   := $poolStatsPoolFieldFn   = load[
-    "thvm_wl_pool_stats_pool_field", {Integer}, Integer];
-$poolStatsWorkerFieldFn := $poolStatsWorkerFieldFn = load[
-    "thvm_wl_pool_stats_worker_field", {Integer, Integer}, Integer];
+$poolSetThreadsFn := $poolSetThreadsFn = load["thvm_wl_pool_set_threads", {Integer}, Integer];
+$poolGetThreadsFn := $poolGetThreadsFn = load["thvm_wl_pool_get_threads", {}, Integer];
+$poolStatsPoolFieldFn := $poolStatsPoolFieldFn = load["thvm_wl_pool_stats_pool_field", {Integer}, Integer];
+$poolStatsWorkerFieldFn := $poolStatsWorkerFieldFn = load["thvm_wl_pool_stats_worker_field", {Integer, Integer}, Integer];
 
-ensureInit[];   (* Pool helpers all need the runtime up. *)
+ensureInit[]; (* Pool helpers all need the runtime up. *)
 
 (* === Field codes: mirror thvm_wl_pool_stats_*_field switches ===== *)
 
 (* Pool-level scalars. *)
-$poolFieldNWorkers     = 0;
-$poolFieldDrainRounds  = 1;
-$poolFieldDrainWallNs  = 2;
-$poolFieldTotalFires   = 3;
+$poolFieldNWorkers = 0;
+$poolFieldDrainRounds = 1;
+$poolFieldDrainWallNs = 2;
+$poolFieldTotalFires = 3;
 
 (* Per-worker fields. *)
-$workerFieldFires         = 0;
-$workerFieldSteals        = 1;
+$workerFieldFires = 0;
+$workerFieldSteals = 1;
 $workerFieldStealAttempts = 2;
-$workerFieldPushes        = 3;
-$workerFieldActiveNs      = 4;
-$workerFieldIdleNs        = 5;
-$workerFieldWakeups       = 6;
-$workerFieldItrsDelta     = 7;
+$workerFieldPushes = 3;
+$workerFieldActiveNs = 4;
+$workerFieldIdleNs = 5;
+$workerFieldWakeups = 6;
+$workerFieldItrsDelta = 7;
 
 (* === API =========================================================== *)
 
-TThreads[]            := (ensureInit[]; $poolGetThreadsFn[])
-TThreads[n_Integer]   := (ensureInit[]; $poolSetThreadsFn[n])
+TThreads[] := (ensureInit[]; $poolGetThreadsFn[])
+TThreads[n_Integer] := (ensureInit[]; $poolSetThreadsFn[n])
 
 readWorkerStats[id_Integer] := <|
-    "Id"            -> id,
-    "Fires"         -> $poolStatsWorkerFieldFn[id, $workerFieldFires],
-    "Steals"        -> $poolStatsWorkerFieldFn[id, $workerFieldSteals],
+    "Id" -> id,
+    "Fires" -> $poolStatsWorkerFieldFn[id, $workerFieldFires],
+    "Steals" -> $poolStatsWorkerFieldFn[id, $workerFieldSteals],
     "StealAttempts" -> $poolStatsWorkerFieldFn[id, $workerFieldStealAttempts],
-    "Pushes"        -> $poolStatsWorkerFieldFn[id, $workerFieldPushes],
-    "ActiveNs"      -> $poolStatsWorkerFieldFn[id, $workerFieldActiveNs],
-    "IdleNs"        -> $poolStatsWorkerFieldFn[id, $workerFieldIdleNs],
-    "Wakeups"       -> $poolStatsWorkerFieldFn[id, $workerFieldWakeups],
-    "ItrsDelta"     -> $poolStatsWorkerFieldFn[id, $workerFieldItrsDelta]
+    "Pushes" -> $poolStatsWorkerFieldFn[id, $workerFieldPushes],
+    "ActiveNs" -> $poolStatsWorkerFieldFn[id, $workerFieldActiveNs],
+    "IdleNs" -> $poolStatsWorkerFieldFn[id, $workerFieldIdleNs],
+    "Wakeups" -> $poolStatsWorkerFieldFn[id, $workerFieldWakeups],
+    "ItrsDelta" -> $poolStatsWorkerFieldFn[id, $workerFieldItrsDelta]
 |>
 
 TPoolStats[] := Module[{nw},
     ensureInit[];
     nw = $poolStatsPoolFieldFn[$poolFieldNWorkers];
     <|
-        "Workers"     -> nw,
+        "Workers" -> nw,
         "DrainRounds" -> $poolStatsPoolFieldFn[$poolFieldDrainRounds],
         "DrainWallNs" -> $poolStatsPoolFieldFn[$poolFieldDrainWallNs],
-        "TotalFires"  -> $poolStatsPoolFieldFn[$poolFieldTotalFires],
-        "PerWorker"   -> Table[readWorkerStats[i], {i, 0, nw - 1}]
+        "TotalFires" -> $poolStatsPoolFieldFn[$poolFieldTotalFires],
+        "PerWorker" -> Table[readWorkerStats[i], {i, 0, nw - 1}]
     |>
 ]
 
 TNfProfiled[t_] := Module[{result},
     ensureInit[];
     result = TNf[t];
-    <| "Result" -> result, "Stats" -> TPoolStats[] |>
+    <|"Result" -> result, "Stats" -> TPoolStats[]|>
 ]
 
 (* === Renderer ====================================================== *)
@@ -123,37 +119,25 @@ formatNs[ns_Integer] := Which[
     ns >= 10^9, ToString[N[ns / 10.^9, 3]] <> " s",
     ns >= 10^6, ToString[N[ns / 10.^6, 3]] <> " ms",
     ns >= 10^3, ToString[N[ns / 10.^3, 3]] <> " us",
-    True,       ToString[ns] <> " ns"
+    True, ToString[ns] <> " ns"
 ]
 
-ratioPercent[a_, b_] := If[ b > 0, ToString[Round[100. a / b, 0.1]] <> "%", "-"]
+ratioPercent[a_, b_] := If[b > 0, ToString[Round[100. a / b, 0.1]] <> "%", "-"]
 
 TPoolStatsReport[s_Association] := Module[{wall, perW, totalActive, totalIdle},
-    wall        = s["DrainWallNs"];
-    perW        = s["PerWorker"];
+    wall = s["DrainWallNs"];
+    perW = s["PerWorker"];
     totalActive = Total[#["ActiveNs"] & /@ perW];
-    totalIdle   = Total[#["IdleNs"]   & /@ perW];
+    totalIdle = Total[#["IdleNs"] & /@ perW];
     Column[{
         Style["Pool stats", Bold],
-        Row[{"workers: ", s["Workers"],
-             "  drain rounds: ", s["DrainRounds"],
-             "  wall: ", formatNs[wall],
-             "  total fires: ", s["TotalFires"]}],
-        Row[{"active / wall: ", formatNs[totalActive], " (",
-             ratioPercent[totalActive, wall * s["Workers"]],
-             " of N*wall)",
-             "   idle: ", formatNs[totalIdle]}],
+        Row[{"workers: ", s["Workers"], "  drain rounds: ", s["DrainRounds"], "  wall: ", formatNs[wall], "  total fires: ", s["TotalFires"]}],
+        Row[{"active / wall: ", formatNs[totalActive], " (", ratioPercent[totalActive, wall * s["Workers"]], " of N*wall)", "   idle: ", formatNs[totalIdle]}],
         Tabular[
             Prepend[
-                (w |-> {
-                    w["Id"], w["Fires"],
-                    w["Pushes"],
-                    w["Steals"], w["StealAttempts"],
-                    w["Wakeups"],
-                    formatNs[w["ActiveNs"]], formatNs[w["IdleNs"]]
-                }) /@ perW,
-                {"id", "fires", "pushes", "steals", "stealAttempts",
-                 "wakeups", "active", "idle"}],
+                (w |-> {w["Id"], w["Fires"], w["Pushes"], w["Steals"], w["StealAttempts"], w["Wakeups"], formatNs[w["ActiveNs"]], formatNs[w["IdleNs"]]}) /@ perW,
+                {"id", "fires", "pushes", "steals", "stealAttempts", "wakeups", "active", "idle"}
+            ],
             TableHeadings -> Automatic
         ]
     }]
@@ -162,9 +146,8 @@ TPoolStatsReport[s_Association] := Module[{wall, perW, totalActive, totalIdle},
 (* === Bench helper ================================================== *)
 
 SetAttributes[TPoolStatsBench, HoldFirst];
-TPoolStatsBench[builder_, threadCounts_List] := Module[
-    {rows, prevThreads = TThreads[]},
-    rows = (n |-> Module[ {p, t},
+TPoolStatsBench[builder_, threadCounts_List] := Module[{rows, prevThreads = TThreads[]},
+    rows = (n |-> Module[{p, t},
         TReset[];
         TThreads[n];
         (* Rebuild the term against the fresh heap on every iteration: the
@@ -173,25 +156,16 @@ TPoolStatsBench[builder_, threadCounts_List] := Module[
         t = builder;
         p = TNfProfiled[t];
         <|
-            "Threads"     -> n,
+            "Threads" -> n,
             "DrainWallNs" -> p["Stats", "DrainWallNs"],
-            "TotalFires"  -> p["Stats", "TotalFires"],
-            "ActiveNs"    -> Total[#["ActiveNs"] & /@ p["Stats", "PerWorker"]],
-            "IdleNs"      -> Total[#["IdleNs"]   & /@ p["Stats", "PerWorker"]]
+            "TotalFires" -> p["Stats", "TotalFires"],
+            "ActiveNs" -> Total[#["ActiveNs"] & /@ p["Stats", "PerWorker"]],
+            "IdleNs" -> Total[#["IdleNs"] & /@ p["Stats", "PerWorker"]]
         |>
     ]) /@ threadCounts;
     TThreads[prevThreads];
     Dataset[
-        AssociationThread[
-            {"threads", "wall", "fires", "active", "idle", "idle%"},
-            #] & /@ (r |-> {
-                r["Threads"],
-                formatNs[r["DrainWallNs"]],
-                r["TotalFires"],
-                formatNs[r["ActiveNs"]],
-                formatNs[r["IdleNs"]],
-                ratioPercent[r["IdleNs"], r["ActiveNs"] + r["IdleNs"]]
-            }) /@ rows
+        AssociationThread[{"threads", "wall", "fires", "active", "idle", "idle%"}, #] & /@ (r |-> {r["Threads"], formatNs[r["DrainWallNs"]], r["TotalFires"], formatNs[r["ActiveNs"]], formatNs[r["IdleNs"]], ratioPercent[r["IdleNs"], r["ActiveNs"] + r["IdleNs"]]}) /@ rows
     ]
 ]
 

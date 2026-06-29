@@ -20,7 +20,7 @@ Begin["`Private`"];
 (* === arity ============================================================ *)
 
 uopArity[$UopMaterialize] = 1
-uopArity[$UopKernel] = 2   (* output_buf, NUM(kid) -- kid skipped *)
+uopArity[$UopKernel] = 2 (* output_buf, NUM(kid) -- kid skipped *)
 uopArity[$UopConst] = 0
 uopArity[$UopAdd] = 2
 uopArity[$UopMul] = 2
@@ -95,9 +95,7 @@ opcodeFromHeap[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell, f
 
 $uopOpcodeContext = <||>
 
-uopShapeOf[base_Integer] := With[{
-    op = Lookup[$uopOpcodeContext, base, opcodeFromHeap[base]]
-},
+uopShapeOf[base_Integer] := With[{op = Lookup[$uopOpcodeContext, base, opcodeFromHeap[base]]},
     uopShapeOfFor[op, base]
 ]
 
@@ -111,12 +109,9 @@ uopSrcShape[base_Integer, off_Integer] := cellShape[THeapRead[base + off]]
 
 uopShapeOfFor[$UopConst, _] := {1}
 
-uopShapeOfFor[op_, base_] /; MemberQ[{$UopAdd, $UopMul, $UopCmplt, $UopCmpeq}, op] :=
-    broadcastShape[uopSrcShape[base, 0], uopSrcShape[base, 1]]
+uopShapeOfFor[op_, base_] /; MemberQ[{$UopAdd, $UopMul, $UopCmplt, $UopCmpeq}, op] := broadcastShape[uopSrcShape[base, 0], uopSrcShape[base, 1]]
 
-uopShapeOfFor[op_, base_] /;
-        MemberQ[{$UopNeg, $UopRecip, $UopExp2, $UopLog2, $UopSqrt}, op] :=
-    uopSrcShape[base, 0]
+uopShapeOfFor[op_, base_] /; MemberQ[{$UopNeg, $UopRecip, $UopExp2, $UopLog2, $UopSqrt}, op] := uopSrcShape[base, 0]
 
 (* REDUCE heap layout (src/uop/reduce.c):
      heap[base + 0]     = src
@@ -125,10 +120,7 @@ uopShapeOfFor[op_, base_] /;
      heap[base + 3 + i] = NUM(axis_i)   for i in 0..n_axes-1
    A multi-axis REDUCE folds n_axes axes in one shot, so drop them all. *)
 uopShapeOfFor[$UopReduce, base_] := With[{nAxes = TTermVal[THeapRead[base + 2]]},
-    dropAxes[
-        uopSrcShape[base, 0],
-        Table[TTermVal[THeapRead[base + 3 + i]], {i, 0, nAxes - 1}]
-    ]
+    dropAxes[uopSrcShape[base, 0], Table[TTermVal[THeapRead[base + 3 + i]], {i, 0, nAxes - 1}]]
 ]
 
 (* EXPAND heap layout (src/uop/expand.c):

@@ -33,7 +33,7 @@
    free-on-last-refcount GC -- so it no longer needs setting here.)  Guarded so a
    caller can override either. *)
 If[ Environment["THVM_MMAP_NO_WILLNEED"] === $Failed, SetEnvironment["THVM_MMAP_NO_WILLNEED" -> "1"]];
-If[ Environment["THVM_MAX_LIVE_BYTES"]   === $Failed, SetEnvironment["THVM_MAX_LIVE_BYTES"   -> "30000000000"]];
+If[ Environment["THVM_MAX_LIVE_BYTES"] === $Failed, SetEnvironment["THVM_MAX_LIVE_BYTES" -> "30000000000"]];
 
 Needs["WolframInstitute`THVMLink`"];
 

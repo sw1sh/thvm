@@ -24,11 +24,11 @@
    remain in Lazy.wl so the TLazyXxx generators can still reach
    them. *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[ToTTerm, "ToTTerm[expr$] packs a WL value into a TTerm.
+SetUsage[ToTTerm, "ToTTerm[expr$] packs a WL value into a TTerm.
 An Integer becomes a NUM; a Symbol a 0-ary CTR labelled by the symbol name (interned via symLabelFor); a List a Tuple-CTR (label $LazyTuple); a compound head$[args$] a CTR labelled by Head with the encoded arguments as children. A TTerm argument passes through unchanged."];
-GeneralUtilities`SetUsage[FromTTerm, "FromTTerm[t$] decodes a TTerm t$ to a WL value: a NUM becomes an Integer; a CTR becomes the labelled symbol applied to its decoded children, a List, or similar. Opaque heads are auto-forced through TCnf so DP-rooted Cons cells fire their readback duplication."];
+SetUsage[FromTTerm, "FromTTerm[t$] decodes a TTerm t$ to a WL value: a NUM becomes an Integer; a CTR becomes the labelled symbol applied to its decoded children, a List, or similar. Opaque heads are auto-forced through TCnf so DP-rooted Cons cells fire their readback duplication."];
 
 (* Forward refs to the workhorses still owned by Lazy.wl. *)
 {tlazyEncode, tlazyDecode};

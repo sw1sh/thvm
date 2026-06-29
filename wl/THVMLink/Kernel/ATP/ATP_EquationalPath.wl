@@ -20,15 +20,13 @@
    Sibling of ATP.wl / ATP_Strings.wl in the WolframInstitute`THVMLink`ATP` context,
    sharing WolframInstitute`THVMLink`ATP`Private`. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`"}];
 
-GeneralUtilities`SetUsage[TFindEquationalPath,
-    "TFindEquationalPath[thm$, axioms$] proves thm$ over axioms$ and returns the witnessing rewrite path: the list of terms from the theorem's lhs to its rhs, where consecutive entries differ by one rewrite.
+SetUsage[TFindEquationalPath, "TFindEquationalPath[thm$, axioms$] proves thm$ over axioms$ and returns the witnessing rewrite path: the list of terms from the theorem's lhs to its rhs, where consecutive entries differ by one rewrite.
 TFindEquationalPath[proof$] returns the path for a precomputed ProofObject.
 TFindEquationalPath[$$, prop$] returns property prop$ of the replacement path instead of the default 'Path': one of 'Path', 'Rules' (the rule applied at each step), 'Rewrites' (the concrete ReplaceAt/Replace operation at each step), 'Substitutions' / 'Bindings' (the per-step variable bindings), 'Justification' ({lemma, orientation, position} per step), 'RewriteTest' (a Success/Failure checking the rewrite sequence reproduces the path), or 'ProofObject'; All returns every property as an Association, and a list of property names returns the corresponding sub-Association.
 The path assembles the lhs chain forward then the rhs chain reversed through the shared normal form, matching the Wolfram Function Repository FindEquationalPath; with one-sided Rule axioms it is a forward replacement path.
-Options are TFindProof's (for the [thm$, axioms$] form) plus the path options 'Reverse', 'Simplify', 'Canonicalize', 'TerminalLemmas', and 'Cache'."
-];
+Options are TFindProof's (for the [thm$, axioms$] form) plus the path options 'Reverse', 'Simplify', 'Canonicalize', 'TerminalLemmas', and 'Cache'."];
 
 (* Siblings whose public symbols this file references by bare name; the
    Kernel loader's path sort can place this file first, so forward-declare
@@ -445,10 +443,8 @@ atpEqPathPropQ[p_] := MatchQ[p, _String | All | {___String}];
 
 TFindEquationalPath[po_ProofObject, opts : OptionsPattern[]] := TFindEquationalPath[po, "Path", opts]
 
-TFindEquationalPath[po_ProofObject, prop_ ? atpEqPathPropQ, opts : OptionsPattern[]] := Block[{
-    res = findEquationalPath[po, Automatic, Automatic, prop, Sequence @@ FilterRules[{opts}, $atpEqPathOptions]]
-},
-    Which[ 
+TFindEquationalPath[po_ProofObject, prop_ ? atpEqPathPropQ, opts : OptionsPattern[]] := Block[{res = findEquationalPath[po, Automatic, Automatic, prop, Sequence @@ FilterRules[{opts}, $atpEqPathOptions]]},
+    Which[
         ! FailureQ[res],
             res,
         prop === "Path",
@@ -463,8 +459,7 @@ TFindEquationalPath[po_ProofObject, prop_ ? atpEqPathPropQ, opts : OptionsPatter
 
 TFindEquationalPath[thm_, axioms_, opts : OptionsPattern[]] := TFindEquationalPath[thm, axioms, "Path", opts]
 
-TFindEquationalPath[thm_, axioms_, prop_ ? atpEqPathPropQ, opts : OptionsPattern[]] := Block[
-    {po = TFindProof[thm, axioms, "ProofObject", Sequence @@ FilterRules[{opts}, Options[TFindProof]]]},
+TFindEquationalPath[thm_, axioms_, prop_ ? atpEqPathPropQ, opts : OptionsPattern[]] := Block[{po = TFindProof[thm, axioms, "ProofObject", Sequence @@ FilterRules[{opts}, Options[TFindProof]]]},
     If[ MatchQ[po, _ProofObject],
         TFindEquationalPath[po, prop, Sequence @@ FilterRules[{opts}, $atpEqPathOptions]],
         $Failed

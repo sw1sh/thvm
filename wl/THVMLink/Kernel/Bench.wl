@@ -32,14 +32,14 @@
                                 a CI run can drop a snapshot to disk
                                 and the next commit can diff it. *)
 
-BeginPackage["WolframInstitute`THVMLink`"];
+BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-GeneralUtilities`SetUsage[TBench, "TBench[spec$] runs spec$[\"NumSteps\"] iterations of the caller's step function under TInit and the active backend, snapshots TMemoryPlan, and returns an Association of stable metrics: name, backend, n_steps, wall_time_ms, ms_per_step, kernel_count, ten_count, total_live_kib, peak_concurrent_kib, slot_reuse_headroom_pct.
+SetUsage[TBench, "TBench[spec$] runs spec$[\"NumSteps\"] iterations of the caller's step function under TInit and the active backend, snapshots TMemoryPlan, and returns an Association of stable metrics: name, backend, n_steps, wall_time_ms, ms_per_step, kernel_count, ten_count, total_live_kib, peak_concurrent_kib, slot_reuse_headroom_pct.
 spec$ keys: \"Name\" (label), \"InitFn\" (Function[] returning the initial hosts value), \"StepFn\" (Function[hosts, t] returning updated hosts), \"NumSteps\" (Integer step count)."];
 
-GeneralUtilities`SetUsage[TBenchReport, "TBenchReport[bench$] formats a TBench result Association as a Column of Row entries for stdout or notebook display."];
+SetUsage[TBenchReport, "TBenchReport[bench$] formats a TBench result Association as a Column of Row entries for stdout or notebook display."];
 
-GeneralUtilities`SetUsage[TBenchExport, "TBenchExport[bench$, file$] writes TBenchReport[bench$] to file$ as plain text, so a later run can diff against the prior snapshot."];
+SetUsage[TBenchExport, "TBenchExport[bench$, file$] writes TBenchReport[bench$] to file$ as plain text, so a later run can diff against the prior snapshot."];
 
 (* Forward-declare bridge symbols owned by THVMLink.wl + MemoryPlan.wl *)
 {TMemoryPlan, TKernelCount, TTensCount, TTotalBufBytes};
@@ -72,28 +72,16 @@ TBench[spec_Association] := Block[{
 },
     hosts = initFn[];
     t0 = AbsoluteTime[];
-    Do[
-        hosts = stepFn[hosts, t],
-        {t, 0, nSteps - 1}
-    ];
+    Do[hosts = stepFn[hosts, t], {t, 0, nSteps - 1}];
     t1 = AbsoluteTime[];
     wallMs = (t1 - t0) * 1000.0;
-    msPerStep = If[ nSteps > 0, wallMs / nSteps, 0];
+    msPerStep = If[nSteps > 0, wallMs / nSteps, 0];
     plan = First @ TMemoryPlan[];
     bufs = plan["Bufs"];
     peak = plan["Peak"];
     totalKib = formatKib[peak["total_bytes"]];
-    headroomPct = If[ peak["total_bytes"] > 0,
-        Round[
-            100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"],
-            0.1
-        ],
-        0
-    ];
-    backendId = If[ bufs === {},
-        0,
-        First @ Commonest[#["backend"] & /@ bufs]
-    ];
+    headroomPct = If[peak["total_bytes"] > 0, Round[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"], 0.1], 0];
+    backendId = If[bufs === {}, 0, First @ Commonest[#["backend"] & /@ bufs]];
     backend = backendNameLabel[backendId];
     <|
         "name" -> name,
@@ -120,8 +108,7 @@ TBenchReport[bench_Association] := Column[{
     Row[{"  slot_reuse_headroom_pct: ", bench["slot_reuse_headroom_pct"]}]
 }]
 
-TBenchExport[bench_Association, file_String] :=
-    Export[file, ToString[TBenchReport[bench], OutputForm], "Text"]
+TBenchExport[bench_Association, file_String] := Export[file, ToString[TBenchReport[bench], OutputForm], "Text"]
 
 End[];
 EndPackage[];

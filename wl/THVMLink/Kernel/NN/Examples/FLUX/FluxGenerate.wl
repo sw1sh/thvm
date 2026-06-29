@@ -334,12 +334,7 @@ fxVaeSub[wf_, keys_][prefix_] := Association @ Map[(StringDrop[#, StringLength[p
    a later VAE decode.)  CPU stays f32 (its weights are f32, already matched). *)
 
 fxTembFn[wf_, dev_][sigma_] := With[{s = TRealize @ TToDevice[TTensorCreate[{fxTimestepSinusoid[sigma, 256]}], dev]},
-    With[{
-        temb = fxLinear[
-            TSiLU @ fxLinear[s, wf["time_guidance_embed.timestep_embedder.linear_1.weight"]],
-            wf["time_guidance_embed.timestep_embedder.linear_2.weight"]
-        ]
-    },
+    With[{temb = fxLinear[TSiLU @ fxLinear[s, wf["time_guidance_embed.timestep_embedder.linear_1.weight"]], wf["time_guidance_embed.timestep_embedder.linear_2.weight"]]},
         If[dev === "cpu", temb, TRealize @ TUOpCast[temb, "bf16"]]
     ]
 ]
@@ -408,7 +403,7 @@ fxUnloadAll[] := ($fxSession = <||>; $fxWeightBase = <||>; Quiet[TReset[]];);
 
 FluxUnload[] := fxUnloadAll[];
 
-fxDbgRSS[] := Quiet@Check[Round[ToExpression@StringTrim@RunProcess[{"ps", "-o", "rss=", "-p", ToString[$ProcessID]}, "StandardOutput"]/1024.], -1];
+fxDbgRSS[] := Quiet@Check[Round[ToExpression@StringTrim@RunProcess[{"ps", "-o", "rss=", "-p", ToString[$ProcessID]}, "StandardOutput"] / 1024.], -1];
 fxDbgMem[tag_] := Print["[MEM ", tag, "] rss=", fxDbgRSS[], "MB"];
 
 (* A return spec is a String key ("Image" | "Latent" | "Embedding"), the symbol
@@ -555,13 +550,7 @@ fxBeamScope[body_] := Module[{beamSave = Environment["BEAM"], r},
    of transformer/Qwen/VAE weights load into ONE device context exactly once. *)
 
 fxWeightBase[dev_, modelDir_, q8_, loraResolved_, loraKey_] := Module[{key = {modelDir, dev, q8, loraKey}},
-    Lookup[
-        $fxWeightBase
-        ,
-        Key[key]
-        ,
-        $fxWeightBase[key] = fxWeightBaseBuild[dev, modelDir, q8, loraResolved]
-    ]
+    Lookup[$fxWeightBase, Key[key], $fxWeightBase[key] = fxWeightBaseBuild[dev, modelDir, q8, loraResolved]]
 ]
 
 (* LAYER 1 -- the size-INDEPENDENT load, built ONCE per {modelDir,dev,q8}: the
@@ -570,24 +559,7 @@ fxWeightBase[dev_, modelDir_, q8_, loraResolved_, loraKey_] := Module[{key = {mo
    table, the velocity/VAE captures, and the sigma schedule depend on ImageSize
    and live in fxSessionBuild (LAYER 2). *)
 
-fxWeightBaseBuild[dev_, modelDir_, q8_, loraResolved_] := Module[{
-    stxt,
-    tokDir,
-    td,
-    tfPath,
-    qwPaths,
-    vaePath,
-    fxCfg,
-    qwCfg,
-    ctxT,
-    caL,
-    wfT,
-    tembFn,
-    wfq,
-    qwJit,
-    wfV,
-    wsubV
-},
+fxWeightBaseBuild[dev_, modelDir_, q8_, loraResolved_] := Module[{stxt, tokDir, td, tfPath, qwPaths, vaePath, fxCfg, qwCfg, ctxT, caL, wfT, tembFn, wfq, qwJit, wfV, wsubV},
     fxBoundMemory[];
     stxt = 512;
     tokDir = FileNameJoin[{modelDir, "tokenizer"}];
@@ -774,23 +746,7 @@ fxWeightBaseBuild[dev_, modelDir_, q8_, loraResolved_] := Module[{
    the image RoPE table, the velocity + VAE conv-decode captures, and the sigma
    schedule.  All captures land in the base's shared context. *)
 
-fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_, loraResolved_, loraKey_] := Module[{
-    base,
-    w,
-    h,
-    gridH,
-    gridW,
-    simg,
-    ctxT,
-    caL,
-    vaeCfg,
-    sigmas,
-    rope,
-    rc,
-    rs,
-    velJit,
-    vaeJit
-},
+fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_, loraResolved_, loraKey_] := Module[{base, w, h, gridH, gridW, simg, ctxT, caL, vaeCfg, sigmas, rope, rc, rs, velJit, vaeJit},
     base = fxWeightBase[dev, modelDir, q8, loraResolved, loraKey];
     ctxT = base["ctxT"];
     caL = base["caL"];
@@ -917,9 +873,7 @@ FluxGenerate[prompt_String, spec_, opts : OptionsPattern[]] := (
     FluxGenerate[prompt, "Image", opts]
 );
 
-FluxGenerate[prompts_List, spec_ ? fxSpecQ, opts : OptionsPattern[]] := Module[
-    {imgSize, seed, dev, nSteps, modelDir, initLat, negPrompt, showSteps, reportQ, q8, loraResolved, loraKey}
-    ,
+FluxGenerate[prompts_List, spec_ ? fxSpecQ, opts : OptionsPattern[]] := Module[{imgSize, seed, dev, nSteps, modelDir, initLat, negPrompt, showSteps, reportQ, q8, loraResolved, loraKey},
 (* a bare ImageSize -> n means a square n x n image (Set::shape if {n,n} is not
    formed); a pair {w, h} passes through.  Keep this normalize FIRST so the
    scalar reaches the session key + grid math as a pair. *)
@@ -1008,24 +962,7 @@ fxAssemble[parts_, ks_List] := KeyTake[parts, ks];
    `spec` selects which parts to return; `initLat` (Automatic | a {simg,128} array)
    seeds STAGE 2; `showSteps` adds the per-step decoded progression. *)
 
-fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSteps_, modelDir_, q8_, loraResolved_, loraKey_] := Module[
-    {
-        sess,
-        encHost,
-        z0hosts,
-        latents,
-        stepLatsAll,
-        embeds,
-        results,
-        n = Length[prompts],
-        need,
-        wantImg,
-        wantLat,
-        wantEmb,
-        wantSteps,
-        z0fixed
-    }
-    ,
+fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSteps_, modelDir_, q8_, loraResolved_, loraKey_] := Module[{sess, encHost, z0hosts, latents, stepLatsAll, embeds, results, n = Length[prompts], need, wantImg, wantLat, wantEmb, wantSteps, z0fixed},
     (* Pre-flight: reject an ImageSize whose cold-capture footprint would blow the
        THVM_MAX_LIVE_BYTES ceiling BEFORE building.  The cold JIT captures pin
        their live working set of activations (~5.7 GB non-borrowed at 256x256,
@@ -1051,20 +988,20 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
        theoretical bound -- one session's weights -- and anything above it is the bug,
        killed here rather than left to swap the machine to death. *)
     With[{basekey = {modelDir, dev, q8, loraKey}},
-        If[ !KeyExistsQ[$fxWeightBase, basekey] && Length[$fxWeightBase] > 0,
+        If[ ! KeyExistsQ[$fxWeightBase, basekey] && Length[$fxWeightBase] > 0,
             Message[FluxGenerate::sessionswitch, First[Keys[$fxWeightBase]], basekey];
             fxUnloadAll[]
         ]
     ];
-    With[{simg0 = Times @@ Round[imgSize/16], hostCap = 0.6 $SystemMemory},
-        With[{est = 3.64*^9 (simg0/256.0)},
+    With[{simg0 = Times @@ Round[imgSize / 16], hostCap = 0.6 $SystemMemory},
+        With[{est = 3.64*^9 (simg0 / 256.0)},
             (* Reject an ImageSize whose activation working set would exceed the hard
                host backstop, BEFORE building (else the cold capture climbs to it and
                aborts slowly under heavy host pressure). *)
             If[ est > 0.9 hostCap,
-                Message[FluxGenerate::imgtoobig, imgSize, Round[est/1.*^9],
-                    Round[hostCap/1.*^9], 16 Floor[Sqrt[0.9 hostCap 256.0/(3.64*^9)]],
-                    Round[$SystemMemory/1.*^9]];
+                Message[FluxGenerate::imgtoobig, imgSize, Round[est / 1.*^9],
+                    Round[hostCap / 1.*^9], 16 Floor[Sqrt[0.9 hostCap 256.0 / (3.64*^9)]],
+                    Round[$SystemMemory / 1.*^9]];
                 Return[ConstantArray[$Failed, n], Module]
             ];
             (* Anchor the runtime device ceiling to THIS gen's known cold-capture
@@ -1333,9 +1270,7 @@ fxDbg[a___] := If[Environment["THVM_FLUX_TIMING"] =!= $Failed, Print[a]]
    the captured buffers instead of allocating a fresh forward each call).  Each
    Normal read crosses to the host as a {stxt,7680} f32 array (~15MB). *)
 
-fxQwenEncodeBatch[sess_, prompts_List] := With[{
-    wfq = sess["wfq"], qwCfg = sess["qwCfg"], td = sess["td"], stxt = sess["stxt"], jit = sess["qwJit"]
-},
+fxQwenEncodeBatch[sess_, prompts_List] := With[{wfq = sess["wfq"], qwCfg = sess["qwCfg"], td = sess["td"], stxt = sess["stxt"], jit = sess["qwJit"]},
     Function[p,
             Module[{tok, in, out, tTok, tIn, tRep, xr, mr},
                 {tTok, tok} = AbsoluteTiming @ qwTokenize[p, td, stxt];
@@ -1373,9 +1308,7 @@ fxQwenEncodeBatch[sess_, prompts_List] := With[{
    eager ~2s dispatch overhead to a batched ICB replay. *)
 
 fxVaeDecodeCached[sess_, lat_] := With[{dev = sess["dev"]},
-    With[
-        {up = TToDevice[TTensorCreate @ NumericArray[lat, "Real32"], dev]}
-        ,
+    With[{up = TToDevice[TTensorCreate @ NumericArray[lat, "Real32"], dev]},
 (* Cast the latent to the VAE weight dtype (bf16 on a GPU) so every conv
    is bf16(act) x bf16(W) -- a MIXED f32-act x bf16-weight conv falls to a
    slow scalar path.  CPU weights are f32, so leave the f32 latent. *)
@@ -1443,9 +1376,7 @@ fxSampleJitFull[rc_, rs_, wf_, cfg_, tembs_, dts_, dev_] := TJit[
    by default, so the no-extra-host-read fast path is unchanged -- the per-step
    reads are only paid when the caller asks to see the denoising progression. *)
 
-fxSampleJit[vfn_, z0_, enc0_, sigmas_, tembFn_, ca_, stepCb_ : (Null&), collectSteps_ : False] := Module[
-    {z = TRealize @ TUOpCast[z0, "f32"], nSteps = Length[sigmas] - 1, k, dt, v, ts, stepLats = {}}
-    ,
+fxSampleJit[vfn_, z0_, enc0_, sigmas_, tembFn_, ca_, stepCb_ : (Null&), collectSteps_ : False] := Module[{z = TRealize @ TUOpCast[z0, "f32"], nSteps = Length[sigmas] - 1, k, dt, v, ts, stepLats = {}},
     Do[
         dt = sigmas[[k + 1]] - sigmas[[k]];
 (* velocity from the bf16-input replay (ca: bf16 on GPU / f32 on CPU); the

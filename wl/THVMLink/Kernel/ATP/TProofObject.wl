@@ -22,14 +22,14 @@
    Sibling of ATP.wl in the WolframInstitute`THVMLink`ATP` context, sharing
    WolframInstitute`THVMLink`ATP`Private`. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`"}];
 
-GeneralUtilities`SetUsage[TProofObject, "TProofObject[data$] is a native thvm proof object: data$ is an Association carrying the proof's 'ProofType', held 'Theorem' and 'Axioms', 'Variables' / 'Constants', the keyed proof 'Steps', and 'Status'.
+SetUsage[TProofObject, "TProofObject[data$] is a native thvm proof object: data$ is an Association carrying the proof's 'ProofType', held 'Theorem' and 'Axioms', 'Variables' / 'Constants', the keyed proof 'Steps', and 'Status'.
 TProofObject[data$][prop$] returns a property: 'ProofType', 'Theorem' (or 'Theorems'), 'Axioms', 'Variables', 'Constants', 'Status', 'Statistics', 'ProofAssociation', 'ProofDataset', 'ProofLength', 'ProofGraph', 'ProofFunction', or 'Properties'.
 It mirrors the built-in ProofObject property interface; TToProofObject[obj$] converts it to a genuine ProofObject.
 TFindProof returns a TProofObject instead of a ProofObject when called with the option 'ProofForm' -> 'TProofObject'."];
 
-GeneralUtilities`SetUsage[TToProofObject, "TToProofObject[TProofObject[$$]] converts a thvm TProofObject to the built-in ProofObject it shadows (logic, theorem, axioms, and the proof Association)."];
+SetUsage[TToProofObject, "TToProofObject[TProofObject[$$]] converts a thvm TProofObject to the built-in ProofObject it shadows (logic, theorem, axioms, and the proof Association)."];
 
 Begin["`Private`"];
 
