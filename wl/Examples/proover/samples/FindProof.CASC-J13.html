@@ -1,0 +1,80 @@
+<h2>FindProof 0.1</h2>
+
+<p>Nik Murzin<br>
+Wolfram Institute, USA</p>
+
+<h3>Architecture</h3>
+
+<p>FindProof 0.1 [Sys1] is the unit-equational entry of the thvm automated
+reasoning system. It is an unfailing (ordered) Knuth-Bendix completion prover
+[Lib1]: the unit-equational axioms are saturated towards a convergent rewrite
+system while the negated conjecture is normalised, and a refutation is reported
+when the two sides of the conjecture are joined. Equations that cannot be
+oriented by the reduction ordering are used unfailingly, so both faces are
+superposed, which preserves refutational completeness. Two reduction orderings
+are supported, the Knuth-Bendix ordering and the lexicographic path ordering,
+with symbol precedences generated automatically. Critical pairs between oriented
+rules are the basic inferences; redundant critical pairs are discarded by
+ground-joinability testing, the Bachmair-Dershowitz connectedness criterion,
+forward and backward subsumption and demodulation, and right-hand-side
+interreduction. A proof object is reconstructed from the saturation trace,
+checked internally by replaying every rewrite step, and rendered as a TPTP
+CNFRefutation.</p>
+
+<h3>Strategies</h3>
+
+<p>The search is ordered by a weighted critical-pair selection heuristic over a
+priority queue, with a Waldmeister-style selection ratio that interleaves a
+first-in-first-out pick at a fixed cadence so that fairness, and hence
+completeness, is retained. The default strategy is problem-aware: the algebraic
+structure of the axioms together with the goal is recognised (group, abelian
+group, ring, combinatory logic, associative-commutative, and Sheffer/nand
+classes), after which a configuration tuned for that class is front-loaded and a
+fixed fallback portfolio is appended, so that the schedule never solves less
+than the portfolio alone. Named configurations modelled on the published
+defaults of Waldmeister, Vampire-UEQ, Twee, and E are available. Under a wall-
+clock limit the available time is divided across the configurations of the
+schedule. Strategy tuning is structural, being selected from the detected
+algebraic class of the problem, and is not tuned to individual competition
+problems.</p>
+
+<h3>Implementation</h3>
+
+<p>The completion engine is implemented in C, with terms represented as
+flatterms over a term bank, perfect-discrimination-tree indexing for rewriting
+and subsumption, a binary heap for the critical-pair queue, and an off-heap
+trace from which proofs are reconstructed. The proof search surface, the
+problem encoding, the proof-object reconstruction, and the TPTP/SZS rendering
+are implemented in the Wolfram Language as the THVMLink paclet [Sys1], and are
+driven through the Wolfram Engine. Input problems in TPTP syntax are parsed by
+the WolframParser paclet [Lib2]. The system is run as a single command per
+problem through wolframscript.</p>
+
+<h3>Expected Competition Performance</h3>
+
+<p>FindProof is entered in the UEQ division. As a first entry built on an
+unfailing-completion core with structure-aware strategy selection modelled on
+Waldmeister and Vampire-UEQ, it is expected to solve the standard equational
+classes, including Boolean and ternary Boolean algebra, group theory, ring
+theory, and combinatory logic, while trailing the established UEQ systems on the
+hardest problems that demand very long completions or more aggressive
+redundancy elimination. A mid-field placement is anticipated.</p>
+
+<h3>References</h3>
+
+<p><strong>Sys1</strong></p>
+
+<p>Murzin N. (2026), <strong>FindProof: Equational Theorem Proving in the
+Wolfram Language</strong>, Wolfram Institute Technical Note.</p>
+
+<p><strong>Lib1</strong></p>
+
+<p>Bachmair L., Dershowitz N., Plaisted D. (1989), <strong>Completion Without
+Failure</strong>, <em>Resolution of Equations in Algebraic Structures</em>,
+Volume 2, pp.1-30, Academic Press.</p>
+
+<p><strong>Lib2</strong></p>
+
+<p>Sutcliffe G. (2017), <strong>The TPTP Problem Library and Associated
+Infrastructure, From CNF to TH0, TPTP v6.4.0</strong>, <em>Journal of Automated
+Reasoning</em> 59(4), pp.483-502, Springer.</p>

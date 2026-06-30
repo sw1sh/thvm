@@ -1,0 +1,10 @@
+% ProoVer 2026 -- FindProof sample solutions
+% Output of: wolframscript -f szs.wls <proof.p>   (one SZS status line per proof)
+%
+% SZS status Verified for example1_proof.p
+% SZS status Verified for example2_proof.p
+% SZS status Verified for example3_proof.p
+% SZS status FailedVerified for example1_e_proof.p
+% SZS status FailedVerified for example2_e_proof.p
+% SZS status FailedVerified for example3_e_proof.p
+% SZS status FailedVerified for example4_e_proof.p

@@ -1,0 +1,58 @@
+<h2>FindProof 0.1</h2>
+
+<p>Nik Murzin<br>
+Wolfram Institute, USA</p>
+
+<h3>Overview</h3>
+
+<p>FindProof 0.1 is a checker for TSTP first-order proofs, entered in ProoVer
+2026. Checking is treated as proof replay: a proof is parsed into its sequence
+of annotated formulae, and each derived step is validated independently by
+dispatching on the inference rule that introduced it. A single SZS verdict is
+then reported for the whole proof, one of Verified, FailedVerified, or
+NotVerified. The checker is deliberately conservative. A step whose validity
+cannot be established is reported as NotVerified rather than guessed, so that an
+unsound proof is never accepted; soundness of the checker is favoured over
+coverage, in keeping with the scoring, which penalises accepting a buggy proof
+far more heavily than abstaining.</p>
+
+<h3>Implementation</h3>
+
+<p>The checker is implemented in the Wolfram Language. Formulae are parsed from
+the TSTP source by the WolframParser paclet, which yields symbolic expressions
+on which the per-rule obligations are discharged. For an instantiate step the
+conclusion is required to be a substitution instance of a parent, checked by
+pattern matching. For a negated_conjecture step the conclusion is required to be
+the logical negation of the parent: the negation of the parent is re-parsed
+through the same front end and compared with the stated conclusion up to
+variable renaming and negation-normal form, so that a wrong quantifier dual is
+caught. For a skolemize step a genuinely fresh Skolem symbol must be introduced
+and must actually occur in the resulting formula, a structural and
+equisatisfiability check, since Skolemisation is not a logical consequence. For
+a consequence, horn, or deduction step the conclusion is required to be entailed
+by the parents, which is decided by bounded Herbrand instantiation of the
+universally quantified premises followed by a propositional tautology test over
+the resulting ground atoms. The refutation is required to close with the empty
+clause, $false. Steps that use inference rules outside this repertoire cause the
+proof to be reported as NotVerified. The checker is run as a single command per
+proof through the Wolfram Engine.</p>
+
+<h3>Expected Competition Performance</h3>
+
+<p>On the provided examples the checker classifies every proof correctly, the
+three valid proofs as Verified and the four buggy proofs as FailedVerified, and
+in each buggy case it localises the faulty step: a universal conjecture negated
+as a universal rather than an existential, a single disjunct drawn from a
+disjunction, the reuse of an already-introduced Skolem symbol, and a declared
+Skolem symbol that is absent from the resulting formula. On the hidden set the
+checker is expected to be sound by construction, never accepting an unsound
+proof, and to abstain with NotVerified on proofs that use inference rules
+outside the implemented repertoire.</p>
+
+<h3>References</h3>
+
+<p><strong>Sys1</strong></p>
+
+<p>Sutcliffe G. (2008), <strong>The SZS Ontologies for Automated Reasoning
+Software</strong>, Rudnicki P., Sutcliffe G. (eds), <em>Proceedings of the LPAR
+Workshops</em>, pp.38-49, CEUR Workshop Proceedings 418.</p>
