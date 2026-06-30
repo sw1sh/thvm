@@ -64,10 +64,8 @@ $kreaVaeConfig = <|
     "dimMult" -> {1, 2, 4, 4},
     "numResBlocks" -> 2,
     "zDim" -> 16,
-    "latentsMean" -> {-0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517,
-        1.5508, 0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921},
-    "latentsStd" -> {2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
-        3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.916}
+    "latentsMean" -> {-0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508, 0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921},
+    "latentsStd" -> {2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743, 3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.916}
 |>;
 
 krImageConfig[] := $kreaConfig
@@ -86,22 +84,23 @@ krImageConfig[overrides_Association] := Join[$kreaConfig, overrides]
 krFp8Q[t_] := TTensorDType[t] === "fp8e4m3"
 
 krLoadFp8[t_, dev_] := With[{wdt = If[dev === "cpu", "f32", "bf16"]},
-    TToDevice[TUOpCast[t, wdt], dev]]
+    TUOpCast[TRealize @ TToDevice[t, dev], wdt]
+]
 
-(* a name->TTerm transformer loader: dequantize fp8 weights, cast the rest, cache
-   per name.  The 1-D scales/biases/modulation in the FP8 file are stored
-   high-precision and pass straight through. *)
+(* a name->TTerm transformer loader.  Keep each weight RESIDENT ON-DEVICE in its
+   stored fp8 (~12 GB total) and fuse the dequant cast into the consuming matmul
+   (decode-on-load); realizing the full bf16 here instead would double resident
+   memory to ~24 GB.  Cache per name; 1-D scales/biases/modulation are stored
+   high-precision in the FP8 file and pass through with the same lazy cast. *)
 krTransformerLoader[wt_, dev_] := Module[{cache = <||>},
-    n |-> Lookup[cache, n, cache[n] = TRealize @ krLoadFp8[wt[n], dev]]]
+    n |-> Lookup[cache, n, cache[n] = krLoadFp8[wt[n], dev]]
+]
 
 (* === position ids ================================================
    The (t,h,w) rotary coordinates for the [text ; image] sequence (diffusers
    Krea2 _prepare position ids): text tokens are all (0,0,0); image token (h,w)
    is (0, h, w).  Returns a {Stxt+Simg, 3} host list. *)
-krPositionIds[stxt_, gridH_, gridW_] := Join[
-    ConstantArray[{0, 0, 0}, stxt],
-    Flatten[Table[{0, h, w}, {h, 0, gridH - 1}, {w, 0, gridW - 1}], 1]
-]
+krPositionIds[stxt_, gridH_, gridW_] := Join[ConstantArray[{0, 0, 0}, stxt], Flatten[Table[{0, h, w}, {h, 0, gridH - 1}, {w, 0, gridW - 1}], 1]]
 
 (* === component registration ======================================
    Register the Krea transformer + VAE (and the Qwen3 text encoder) into the
@@ -115,17 +114,20 @@ krPositionIds[stxt_, gridH_, gridW_] := Join[
    ids, the key-padding mask, and the weights. *)
 krRegisterTransformer[] := tisRegisterComponent["Krea2Transformer2DModel", <|
     "loader" -> Function[{compSpec, dev},
-        <|"wf" -> krTransformerLoader[TSafeTensorLoad[krTfWeightPath[compSpec]], dev],
-          "cfg" -> krMergeConfig[compSpec], "dev" -> dev|>],
+        <|"wf" -> krTransformerLoader[TSafeTensorLoad[krTfWeightPath[compSpec]], dev], "cfg" -> Append[krMergeConfig[compSpec], "device" -> dev], "dev" -> dev|>],
     "forward" -> Function[{built, textEmb, attMask, run},
-        Module[{wf = built["wf"], cfg = built["cfg"], stxt, pos, mask},
-            stxt = Dimensions[textEmb][[1]];
+        Module[{wf = built["wf"], cfg = built["cfg"], dev = built["dev"], stxt, simg, pos, mask, pre},
+            stxt = Dimensions[textEmb][[1]];  simg = run["simg"];
             pos = krPositionIds[stxt, run["gridH"], run["gridW"]];
             mask = attMask;
-            (* the velocity step closure: unpack {simg, ch*patch^2} latent rows,
-               run krTransformer, return the velocity. *)
-            Function[{zPacked, sigma}, krTransformer[zPacked, textEmb, sigma, pos, mask, wf, cfg]]
-        ]]
+            (* precompute the FIXED ctx/rope/addMask ONCE (host->device builds kept
+               OUTSIDE the capture); the JIT-capturable velNet is then pure device
+               ops over (img, t, tvec).  The sampler TJit-captures velNet once and
+               feeds condFn[sigma] -> {t, tvec} each step. *)
+            pre = krTransformerPre[textEmb, stxt, simg, pos, mask, wf, cfg];
+            <|"velNet" -> Function[{zPacked, t, tvec}, krTransformerBlocks[zPacked, pre["ctx"], t, tvec, pre["rope"], pre["addMask"], stxt, simg, wf, cfg]], "condFn" -> Function[sigma, With[{te = krTimeEmbed[sigma, wf, cfg, dev]}, {te["t"], te["tvec"]}]]|>
+        ]
+    ]
 |>]
 
 (* VAE: the loader builds the decoder weight lookup + the wsub slicer; the
@@ -136,14 +138,18 @@ krRegisterVae[] := tisRegisterComponent["AutoencoderKLQwenImage", <|
         Module[{vt = TSafeTensorLoad[krVaeWeightPath[compSpec]], keys, wf},
             keys = Keys[vt];
             wf = Module[{cache = <||>},
-                n |-> Lookup[cache, n, cache[n] = TRealize @ TToDevice[TUOpCast[vt[n], If[dev === "cpu", "f32", "bf16"]], dev]]];
-            <|"wf" -> wf, "keys" -> keys, "cfg" -> krMergeVaeConfig[compSpec], "dev" -> dev|>]],
+                n |-> Lookup[cache, n, cache[n] = TRealize @ TToDevice[TUOpCast[vt[n], If[dev === "cpu", "f32", "bf16"]], dev]]
+            ];
+            <|"wf" -> wf, "keys" -> keys, "cfg" -> krMergeVaeConfig[compSpec], "dev" -> dev|>
+        ]
+    ],
     "forward" -> Function[{built, zFinal, run},
         Module[{wf = built["wf"], keys = built["keys"], cfg = built["cfg"], zSpatial, wsub},
             wsub = krVaeSub[wf, keys];
             zSpatial = krUnpatchify[zFinal, run["gridH"], run["gridW"], cfg["zDim"], krPatch[cfg]];
             krVaeDecode[zSpatial, wf, wsub, cfg]
-        ]]
+        ]
+    ]
 |>]
 
 (* Qwen3-VL text encoder (Qwen3VLModel language tower): run the 36 decoder
@@ -161,10 +167,14 @@ krRegisterEncoder[] := (
 
 krQwenEncoderImpl[] := <|
     "loader" -> Function[{compSpec, dev},
-        <|"wf" -> krQwenLoader[TSafeTensorLoad[krEncWeightPath[compSpec]], dev],
-          "cfg" -> krEncConfig[compSpec, dev]|>],
+        Module[{st = TSafeTensorLoad[krEncWeightPath[compSpec]], cs},
+            cs = If[ KeyExistsQ[compSpec, "weightPrefix"], compSpec, Append[compSpec, "weightPrefix" -> krEncDetectPrefix[Keys[st]]]];
+            <|"wf" -> krQwenLoader[st, dev], "cfg" -> krEncConfig[cs, dev]|>
+        ]
+    ],
     "forward" -> Function[{built, ids, attMask},
-        krQwenEncodeStack[ids, attMask, built["wf"], built["cfg"]]]
+        krQwenEncodeStack[ids, attMask, built["wf"], built["cfg"]]
+    ]
 |>
 
 (* a name->TTerm encoder loader: the embed table stays HOST-resident (qwEmbed
@@ -172,9 +182,7 @@ krQwenEncoderImpl[] := <|
    working dtype, cached per name. *)
 krQwenLoader[qwt_, dev_] := Module[{cache = <||>, embedKey},
     embedKey = First[Select[Keys[qwt], StringEndsQ[#, "embed_tokens.weight"] &], "embed_tokens.weight"];
-    n |-> Lookup[cache, n, cache[n] =
-        If[ StringEndsQ[n, "embed_tokens.weight"], qwt[n],
-            TToDevice[TUOpCast[qwt[n], If[dev === "cpu", "f32", "bf16"]], dev]]]
+    n |-> Lookup[cache, n, cache[n] = If[ StringEndsQ[n, "embed_tokens.weight"], qwt[n], TToDevice[TUOpCast[qwt[n], If[dev === "cpu", "f32", "bf16"]], dev]]]
 ]
 
 (* encoder config from the spec's text_config (Qwen3-VL-4B) + the device dtype +
@@ -205,6 +213,16 @@ krEncConfig[compSpec_, dev_] := Module[{tc, base},
    the actual keys, falling back to "").  Overridable via compSpec["weightPrefix"]. *)
 krEncWeightPrefix[compSpec_] := Lookup[compSpec, "weightPrefix", ""]
 
+(* detect the language-tower weight prefix from the safetensors keys: the
+   standalone Qwen3VLTextModel stores "layers.0.*" (prefix ""), the packaged
+   Qwen3VLModel stores "language_model.layers.0.*" (prefix "language_model.").
+   Strip the known layer-0 suffix off the matching key. *)
+krEncDetectPrefix[keys_List] := With[{suf = "layers.0.self_attn.q_proj.weight"},
+    With[{m = SelectFirst[keys, StringEndsQ[#, suf] &, suf]},
+        StringDrop[m, -StringLength[suf]]
+    ]
+]
+
 krEncWeightPath[compSpec_] := Lookup[compSpec, "weightPath", FileNameJoin[{compSpec["dir"], "model.safetensors"}]]
 
 (* register all Krea components.  Done lazily (krEnsureRegistered, run once on the
@@ -234,19 +252,13 @@ krPatch[cfg_] := Lookup[cfg, "patch", 2]
 
 (* wsub[prefix]: the sub-Association of (key-with-prefix-stripped -> loaded TTerm)
    for every weight under prefix (reused from the FLUX VAE idiom). *)
-krVaeSub[wf_, keys_][prefix_] := Association @ Map[
-    (StringDrop[#, StringLength[prefix]] -> wf[#]) &,
-    Select[keys, StringStartsQ[#, prefix] &]]
+krVaeSub[wf_, keys_][prefix_] := Association @ Map[(StringDrop[#, StringLength[prefix]] -> wf[#]) &, Select[keys, StringStartsQ[#, prefix] &]]
 
 (* unpatchify: the denoised packed latent {simg, z_dim*patch^2} -> {z_dim, gH, gW}.
    The transformer's last layer emits patch*patch*channels per image token; the
    diffusers _unpack_latents reshapes {(gH gW), C p p} -> permute -> {C, gH p,
    gW p}.  patch p, z_dim C; latent grid gH=gridH, gW=gridW (the patched side). *)
-krUnpatchify[zPacked_, gridH_, gridW_, zDim_, patch_] := TUOpReshape[
-    TUOpPermute[
-        TUOpReshape[zPacked, {gridH, gridW, zDim, patch, patch}],
-        {2, 0, 3, 1, 4}],
-    {zDim, gridH patch, gridW patch}]
+krUnpatchify[zPacked_, gridH_, gridW_, zDim_, patch_] := TUOpReshape[TUOpPermute[TUOpReshape[zPacked, {gridH, gridW, zDim, patch, patch}], {2, 0, 3, 1, 4}], {zDim, gridH patch, gridW patch}]
 
 
 (* === spec ========================================================= *)
@@ -257,6 +269,17 @@ krSpec[modelDir_String] := (krEnsureRegistered[]; tisModelSpec[modelDir])
    Build the Krea spec from the config dir and run tisPipeline.  Full-weight
    generation (the 12 GB FP8 transformer + Qwen3-VL + the QwenImage VAE) runs on
    the GPU; this routes the request through the generic pipeline. *)
+
+(* Krea distilled-turbo sigma schedule: FlowMatchEuler with a FIXED exponential
+   shift mu = 1.15.  scheduler_config.json has base_shift == max_shift == 1.15, so
+   use_dynamic_shifting collapses to a constant mu at every resolution (NOT the
+   FLUX resolution-empirical mu of fxSigmas).  lin = linspace(1, 1/nSteps, nSteps);
+   sigma = exp(mu) / (exp(mu) + (1/lin - 1)); terminal 0 appended (len nSteps+1). *)
+krSigmas[nSteps_] := Module[{mu = 1.15, lin, sig},
+    lin = Subdivide[1.0, 1.0/nSteps, nSteps - 1];
+    sig = (Exp[mu]/(Exp[mu] + (1.0/# - 1.0))) & /@ lin;
+    Append[sig, 0.0]
+]
 
 Options[KreaGenerate] = {
     "ImageSize" -> {1024, 1024},
@@ -272,9 +295,7 @@ Options[KreaGenerate] = {
 
 krDefaultModelDir[] := FileNameJoin[{$HomeDirectory, ".cache", "thvm", "krea2", "krea2_cfg"}]
 
-KreaGenerate[prompt_, opts : OptionsPattern[]] := Module[{
-    modelDir, dev, steps, seed, initLat, imgSize, w, h, gridH, gridW, spec, runOpts
-},
+KreaGenerate[prompt_, opts : OptionsPattern[]] := Module[{modelDir, dev, steps, seed, initLat, imgSize, w, h, gridH, gridW, spec, runOpts},
     modelDir = OptionValue["ModelDir"];
     If[modelDir === Automatic, modelDir = krDefaultModelDir[]];
     If[ ! FileExistsQ[FileNameJoin[{modelDir, "model_index.json"}]],
@@ -292,9 +313,13 @@ KreaGenerate[prompt_, opts : OptionsPattern[]] := Module[{
     gridH = Round[h/16];  gridW = Round[w/16];
     spec = krSpec[modelDir];
     runOpts = <|
-        "Device" -> dev, "Steps" -> steps, "Seed" -> seed,
-        "InitialLatent" -> initLat, "Grid" -> {gridH, gridW},
-        "TextSeqLen" -> 512
+        "Device" -> dev,
+        "Steps" -> steps,
+        "Seed" -> seed,
+        "InitialLatent" -> initLat,
+        "Grid" -> {gridH, gridW},
+        "TextSeqLen" -> 512,
+        "Sigmas" -> krSigmas[steps]
     |>;
     tisPipeline[spec, prompt, runOpts]
 ]

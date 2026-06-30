@@ -154,7 +154,8 @@ tisBuildComponent[spec_, role_String, dev_] := Module[{comp, class, impl},
 
 tisPipeline[spec_Association, prompt_, opts_Association] := Module[{
     dev, seqLen, nSteps, gridH, gridW, simg, seed, initLat,
-    tok, enc, tf, vae, ids, attMask, textEmb, sigmas, stepFn, z0, zFinal, image
+    tok, enc, tf, vae, ids, attMask, textEmb, sigmas, stepFn, z0, zFinal, image,
+    tEnc, tBuild, tDenoise, tVae
 },
     dev = Lookup[opts, "Device", "cpu"];
     seqLen = Lookup[opts, "TextSeqLen", 512];
@@ -166,7 +167,7 @@ tisPipeline[spec_Association, prompt_, opts_Association] := Module[{
     (* --- build components from the spec --- *)
     tok = tisBuildComponent[spec, "tokenizer", dev];
     enc = tisBuildComponent[spec, "text_encoder", dev];
-    tf  = tisBuildComponent[spec, "transformer", dev];
+    tf = tisBuildComponent[spec, "transformer", dev];
     vae = tisBuildComponent[spec, "vae", dev];
     If[ AnyTrue[{tok, enc, tf, vae}, # === $Failed &], Return[$Failed]];
     (* --- STAGE 1: tokenize --- *)
@@ -182,8 +183,9 @@ tisPipeline[spec_Association, prompt_, opts_Association] := Module[{
     |>];
     z0 = tisInitialLatent[initLat, simg, tf["comp"]["config"], seed, dev];
     zFinal = tisEulerSample[stepFn, z0, sigmas];
-    (* --- STAGE 4: VAE decode --- *)
-    image = vae["impl"]["forward"][vae["built"], zFinal, <|
+    (* --- STAGE 4: VAE decode (TRealize so the lazy decoder graph materializes to a
+       concrete TTerm the caller can Normal-read). --- *)
+    image = TRealize @ vae["impl"]["forward"][vae["built"], zFinal, <|
         "gridH" -> gridH, "gridW" -> gridW, "device" -> dev
     |>];
     <|"latent" -> z0, "denoised" -> zFinal, "image" -> image, "embedding" -> textEmb|>
@@ -208,12 +210,32 @@ tisInitialLatent[initLat_, simg_, cfg_, seed_, dev_] := Module[{ch, patch, packD
 ]
 
 (* Euler flow-match loop: z <- z + (sigmaNext - sigma) * velocity, over the
-   sigma schedule (descending to 0).  stepFn is the transformer velocity
-   closure; each step is realized so the running latent stays a concrete TTerm. *)
+   sigma schedule (descending to 0).  The transformer velocity is either a plain
+   closure (z, sigma) -> v (non-JIT), or a <|velNet, condFn|> pair: velNet
+   (z, cond$$) -> v is TJit-captured ONCE and REPLAYED each step rebinding z + the
+   per-step conditioning condFn[sigma].  The JIT form bounds the tensor-descriptor
+   count to a SINGLE forward and amortizes the dispatch (the non-JIT loop
+   re-dispatches the whole net every step -- slow, and it exhausts the descriptor
+   pool on a 12B DiT).  dt is applied outside the captured graph; each step is
+   realized so the running latent stays a concrete TTerm. *)
 
-tisEulerSample[stepFn_, z0_, sigmas_] := Module[{z = z0, k, dt, v},
+tisEulerSample[stepFn_Function, z0_, sigmas_] := Module[{z = z0, k, dt, v},
     Do[ dt = sigmas[[k + 1]] - sigmas[[k]];
         v = stepFn[z, sigmas[[k]]];
+        z = TRealize @ TUOpAdd[z, TUOpMul[v, TUOpConst[N[dt]]]],
+        {k, 1, Length[sigmas] - 1}
+    ];
+    z
+]
+
+tisEulerSample[tfOut_Association, z0_, sigmas_] := Module[{z = z0, vn = tfOut["velNet"], cf = tfOut["condFn"], k, dt, v},
+    (* The velocity net realizes each block eagerly to bound fp8-transient memory
+       (a fully-lazy capture would pin the whole transformer as bf16 on top of the
+       fp8 resident, ~36 GB), so it is called directly each step rather than
+       TJit-captured.  The O(N) scheduler (rc_memo) keeps the per-step re-schedule
+       cheap, so direct calls cost no speed vs a JIT replay. *)
+    Do[ dt = sigmas[[k + 1]] - sigmas[[k]];
+        v = vn[z, Sequence @@ cf[sigmas[[k]]]];
         z = TRealize @ TUOpAdd[z, TUOpMul[v, TUOpConst[N[dt]]]],
         {k, 1, Length[sigmas] - 1}
     ];

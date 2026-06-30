@@ -28,7 +28,7 @@ $imageSynthGenerators = <|
 
 Options[TImageSynthesize] = {Method -> "Flux-2"};
 
-TImageSynthesize[args___, opts : OptionsPattern[]] := Block[{method = OptionValue[Method], gen},
+TImageSynthesize[args___, opts : OptionsPattern[]] := Block[{method = Lookup[<|opts|>, Method, "Flux-2"], gen},
     gen = Lookup[$imageSynthGenerators, method, Missing[]];
     If[ MissingQ[gen],
         Message[TImageSynthesize::badmethod, method, Keys[$imageSynthGenerators]];

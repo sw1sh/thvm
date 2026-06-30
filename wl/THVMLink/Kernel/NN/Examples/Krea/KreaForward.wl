@@ -54,7 +54,8 @@ krRMSNorm[x_, scale_, eps_] := TRMSNorm[x, scale + 1, eps]
 krLinearBias[x_, w_, b_] := Module[{y, s},
     y = fxLinear[x, w];                          (* fxLinear realizes -> concrete shape *)
     s = Dimensions[y];
-    TUOpAdd[y, TUOpExpand[TUOpReshape[b, {1, Last[s]}], s]]]
+    TUOpAdd[y, TUOpExpand[TUOpReshape[b, {1, Last[s]}], s]]
+]
 
 (* --- GELU-tanh: the mmdit.py timestep / text projections use
        GELU(approximate="tanh"); the NN-library TGELU is exactly that tanh
@@ -74,8 +75,7 @@ krMLP[x_, W_] := fxLinear[TUOpMul[TSiLU @ fxLinear[x, W["gate"]], fxLinear[x, W[
          rope q,k (interleaved) if rope
          attn = sdpa(q, repeat_kv(k), repeat_kv(v))            (GQA)
          out  = wo(attn * sigmoid(gate)) --- *)
-krAttention[x_, s_Integer, rope_, mask_, W_, cfg_] := Module[
-    {h, hkv, dh, eps, scale, rep, q, k, v, gate, attn},
+krAttention[x_, s_Integer, rope_, mask_, W_, cfg_] := Module[{h, hkv, dh, eps, scale, rep, q, k, v, gate, attn},
     h = cfg["heads"];  hkv = cfg["kvHeads"];  dh = cfg["headDim"];
     eps = cfg["eps"];  scale = 1/Sqrt[N[dh]];  rep = h/hkv;
     q = krRMSNorm[ArrayReshape[fxLinear[x, W["wq"]], {s, h, dh}],   W["qnorm"], eps];
@@ -93,14 +93,17 @@ krAttention[x_, s_Integer, rope_, mask_, W_, cfg_] := Module[
 (* --- per-block weight Associations from a name->TTerm loader wf (mmdit.py
        names).  prefix is the block path (blocks.i. / txtfusion.*_blocks.j.). --- *)
 krAttnW[wf_, p_] := <|
-    "wq" -> wf[p <> "attn.wq.weight"], "wk" -> wf[p <> "attn.wk.weight"],
-    "wv" -> wf[p <> "attn.wv.weight"], "wo" -> wf[p <> "attn.wo.weight"],
+    "wq" -> wf[p <> "attn.wq.weight"],
+    "wk" -> wf[p <> "attn.wk.weight"],
+    "wv" -> wf[p <> "attn.wv.weight"],
+    "wo" -> wf[p <> "attn.wo.weight"],
     "gate" -> wf[p <> "attn.gate.weight"],
     "qnorm" -> wf[p <> "attn.qknorm.qnorm.scale"],
     "knorm" -> wf[p <> "attn.qknorm.knorm.scale"]
 |>
 krMlpW[wf_, p_] := <|
-    "gate" -> wf[p <> "mlp.gate.weight"], "up" -> wf[p <> "mlp.up.weight"],
+    "gate" -> wf[p <> "mlp.gate.weight"],
+    "up" -> wf[p <> "mlp.up.weight"],
     "down" -> wf[p <> "mlp.down.weight"]
 |>
 
@@ -123,14 +126,11 @@ krFusionBlock[x_, s_Integer, mask_, wf_, p_, cfg_] := Module[{a, m},
          2 refiner_blocks attend across the Stxt token axis (text mask)
        The batch dim is 1 here (one prompt), so b*l = Stxt and the layerwise
        attention runs over the L (tapped-layer) axis per token. --- *)
-krTextFusion[context_, txtMask_, wf_, cfg_] := Module[
-    {stxt, nl, td, fcfg, h, proj, refined, i},
+krTextFusion[context_, txtMask_, wf_, cfg_] := Module[{stxt, nl, td, fcfg, h, proj, refined, i},
     {stxt, nl, td} = Dimensions[context];                          (* leaf -> concrete *)
-    fcfg = <|"heads" -> cfg["txtHeads"], "kvHeads" -> cfg["txtKvHeads"],
-             "headDim" -> td/cfg["txtHeads"], "eps" -> cfg["eps"]|>;
+    fcfg = <|"heads" -> cfg["txtHeads"], "kvHeads" -> cfg["txtKvHeads"], "headDim" -> td/cfg["txtHeads"], "eps" -> cfg["eps"]|>;
     h = context;                                                   (* {stxt, L, td} *)
-    Do[ h = krFusionBlockBatched[h, stxt, nl, td, wf,
-                "txtfusion.layerwise_blocks." <> ToString[i] <> ".", fcfg], {i, 0, 1}];
+    Do[ h = krFusionBlockBatched[h, stxt, nl, td, wf, "txtfusion.layerwise_blocks." <> ToString[i] <> ".", fcfg], {i, 0, 1}];
     (* projector: a Linear(L -> 1) over the tapped-layer axis -> proj[t,d] =
        sum_l h[t,l,d] * W[0,l].  projector.weight is {1, L}; a 3-D fxLinear matmul
        mis-batches here, so do the weighted sum explicitly: broadcast W {L} over
@@ -141,8 +141,7 @@ krTextFusion[context_, txtMask_, wf_, cfg_] := Module[
             1, "SUM"],
         {stxt, td}];
     refined = proj;
-    Do[ refined = krFusionBlock[refined, stxt, txtMask, wf,
-                "txtfusion.refiner_blocks." <> ToString[i] <> ".", fcfg], {i, 0, 1}];
+    Do[ refined = krFusionBlock[refined, stxt, txtMask, wf, "txtfusion.refiner_blocks." <> ToString[i] <> ".", fcfg], {i, 0, 1}];
     refined
 ]
 
@@ -151,11 +150,31 @@ krTextFusion[context_, txtMask_, wf_, cfg_] := Module[
    the batch by looping (stxt small) -- a faithful per-token attention over the L
    tapped-layer axis.  All dims (stxt/nl/td) are host integers (threaded in), so
    the per-row slice + reshape never queries a derived TTerm's shape. *)
-krFusionBlockBatched[h_, stxt_Integer, nl_Integer, td_Integer, wf_, p_, cfg_] := Module[{rows},
-    rows = Table[
-        TUOpReshape[krFusionBlock[TUOpReshape[h[[i]], {nl, td}], nl, None, wf, p, cfg], {1, nl, td}],
-        {i, 1, stxt}];
-    Join[Sequence @@ rows, 1]
+krFusionBlockBatched[h_, stxt_Integer, nl_Integer, td_Integer, wf_, p_, cfg_] := Module[{x, W, mlpW, heads, dh, eps, scale, xf, xn, q4, k4, v4, gate, fold, attn, m},
+    (* TextFusionBlock applied to ALL stxt tokens at once: pre-norm gated attention
+       over the nl (tapped-layer) axis + SwiGLU MLP, two residuals.  The attention is
+       batched over the stxt tokens by FOLDING stxt into THeadAttention's head batch
+       axis (S=nl, H=stxt*heads) -- ONE batched attention, vs the old per-token
+       loop+Join that lowered to ~512 pad-adds ({stxt,nl,td} each ~= 27 GB) AND hit a
+       3-D-slice+matmul correctness bug (x[[t]] . w returns garbage in thvm).  No GQA
+       here (txtKvHeads==txtHeads), no rope.  Fold validated cosine 1.0 vs a per-token
+       reference; peak ~286 MB at full Krea dims. *)
+    x = TRealize[h];                                                  (* {stxt, nl, td} *)
+    W = krAttnW[wf, p];  mlpW = krMlpW[wf, p];
+    heads = cfg["heads"];  dh = td/heads;  eps = cfg["eps"];  scale = 1/Sqrt[N[dh]];
+    xf = TUOpReshape[x, {stxt*nl, td}];                               (* flatten for rank-2 fxLinear *)
+    xn = krRMSNorm[xf, wf[p <> "prenorm.scale"], eps];
+    q4 = krRMSNorm[TUOpReshape[fxLinear[xn, W["wq"]], {stxt, nl, heads, dh}], W["qnorm"], eps];
+    k4 = krRMSNorm[TUOpReshape[fxLinear[xn, W["wk"]], {stxt, nl, heads, dh}], W["knorm"], eps];
+    v4 =          TUOpReshape[fxLinear[xn, W["wv"]], {stxt, nl, heads, dh}];
+    gate = fxLinear[xn, W["gate"]];                                   (* {stxt*nl, td} *)
+    fold = t4 |-> TUOpReshape[Transpose[t4, {2, 1, 3, 4}], {nl, stxt*heads, dh}];
+    attn = THeadAttention[fold[q4], fold[k4], fold[v4], scale, None]; (* {nl, stxt*heads*dh} *)
+    attn = TUOpReshape[Transpose[TUOpReshape[attn, {nl, stxt, heads, dh}], {2, 1, 3, 4}], {stxt*nl, td}];
+    attn = fxLinear[TUOpMul[attn, TSigmoid[gate]], W["wo"]];          (* {stxt*nl, td} *)
+    m = TUOpAdd[xf, attn];                                            (* residual 1 *)
+    m = TUOpAdd[m, krMLP[krRMSNorm[m, wf[p <> "postnorm.scale"], eps], mlpW]];   (* residual 2 *)
+    TUOpReshape[m, {stxt, nl, td}]
 ]
 
 (* --- single-stream DiT block (SingleStreamBlock): shared time modulation
@@ -166,8 +185,7 @@ krFusionBlockBatched[h_, stxt_Integer, nl_Integer, td_Integer, wf_, p_, cfg_] :=
          x = x + postgate * mlp ((1+postscale)*postnorm(x) + postshift)
        tvec {1,6F} broadcasts over the sequence; mod.lin {6F} is the per-block
        learned modulation offset. --- *)
-krBlock[x_, s_Integer, tvec_, rope_, mask_, wf_, i_, cfg_] := Module[
-    {p, f, modLin, mod, pre, post, prescale, preshift, pregate, postscale, postshift, postgate, a, m},
+krBlock[x_, s_Integer, tvec_, rope_, mask_, wf_, i_, cfg_] := Module[{p, f, modLin, mod, pre, post, prescale, preshift, pregate, postscale, postshift, postgate, a, m},
     p = "blocks." <> ToString[i] <> ".";  f = cfg["features"];
     modLin = wf[p <> "mod.lin"];                                   (* {6F} *)
     (* tvec {1,6F} + mod.lin {6F} -> chunk 6 into {1,F} modulation vectors. *)
@@ -186,11 +204,13 @@ krBlock[x_, s_Integer, tvec_, rope_, mask_, wf_, i_, cfg_] := Module[
    The shape {s,f} is threaded as host integers (never queried from the derived
    x, whose tracked shape may be symbolic). *)
 krModulate[x_, scale_, shift_, s_Integer, f_Integer] := With[{sh = {s, f}},
-    TUOpAdd[TUOpMul[x, TUOpAdd[TUOpExpand[scale, sh], TUOpConst[1.]]], TUOpExpand[shift, sh]]]
+    TUOpAdd[TUOpMul[x, TUOpAdd[TUOpExpand[scale, sh], TUOpConst[1.]]], TUOpExpand[shift, sh]]
+]
 
 (* x + gate * y; gate {1,F} EXPAND'd over the seq axis to {s,F}. *)
 krGateAdd[x_, gate_, y_, s_Integer, f_Integer] := With[{sh = {s, f}},
-    TUOpAdd[x, TUOpMul[TUOpExpand[gate, sh], y]]]
+    TUOpAdd[x, TUOpMul[TUOpExpand[gate, sh], y]]
+]
 
 (* === RoPE table ====================================================
    Per-axis interleaved RoPE for the (t,h,w) position ids.  For axis a with dim
@@ -199,7 +219,7 @@ krGateAdd[x_, gate_, y_, s_Integer, f_Integer] := With[{sh = {s, f}},
    TRoPEInterleaved pair (2j,2j+1) shares angle j.  Concatenate over the axes to
    head_dim = sum(axesDims).  Returns <|cos,sin|> each {S,1,head_dim}. *)
 
-krRopeTable[pos_List, axesDims_List, theta_] := Module[{angRows, cosT, sinT, hd},
+krRopeTable[pos_List, axesDims_List, theta_, dev_] := Module[{angRows, cosT, sinT, hd},
     hd = Total[axesDims];
     angRows = Map[
         Function[p,
@@ -213,8 +233,8 @@ krRopeTable[pos_List, axesDims_List, theta_] := Module[{angRows, cosT, sinT, hd}
         ],
         pos
     ];                                                       (* {S, head_dim} *)
-    cosT = ArrayReshape[TTensorCreate[N[Cos[angRows]]], {Length[pos], 1, hd}];
-    sinT = ArrayReshape[TTensorCreate[N[Sin[angRows]]], {Length[pos], 1, hd}];
+    cosT = TToDevice[ArrayReshape[TTensorCreate[N[Cos[angRows]]], {Length[pos], 1, hd}], dev];
+    sinT = TToDevice[ArrayReshape[TTensorCreate[N[Sin[angRows]]], {Length[pos], 1, hd}], dev];
     <|"cos" -> cosT, "sin" -> sinT|>
 ]
 
@@ -228,8 +248,7 @@ krRopeTable[pos_List, axesDims_List, theta_] := Module[{angRows, cosT, sinT, hd}
 krTimeEmbed[sigma_, wf_, cfg_, dev_] := Module[{tdim, sinus, t, tvec},
     tdim = cfg["tDim"];
     sinus = TToDevice[TTensorCreate[{Normal @ TSinusoidalEmbedding[N[sigma*1000.], tdim]}], dev];
-    t = krLinearBias[TGELU @ krLinearBias[sinus, wf["tmlp.0.weight"], wf["tmlp.0.bias"]],
-                     wf["tmlp.2.weight"], wf["tmlp.2.bias"]];          (* {1, F} *)
+    t = krLinearBias[TGELU @ krLinearBias[sinus, wf["tmlp.0.weight"], wf["tmlp.0.bias"]], wf["tmlp.2.weight"], wf["tmlp.2.bias"]];          (* {1, F} *)
     tvec = krLinearBias[TGELU[t], wf["tproj.1.weight"], wf["tproj.1.bias"]];  (* {1, 6F} *)
     <|"t" -> t, "tvec" -> tvec|>
 ]
@@ -240,47 +259,87 @@ krTimeEmbed[sigma_, wf_, cfg_, dev_] := Module[{tdim, sinus, t, tvec},
    0 pad), or None; wf the name->TTerm loader; cfg the architecture config.
    Returns the velocity {Simg, ch*patch^2} over the image tokens. *)
 
-krTransformer[img_, context_, sigma_, pos_, mask_, wf_, cfg_] := Module[
-    {dev, stxt, simg, te, t, tvec, ctx, hidden, combined, rope, addMask, txtAddMask, i, out},
+(* the DiT CORE: takes a PRECOMPUTED timestep embedding (t, tvec) so it is a
+   pure velocity net over (img, t, tvec), the JIT-capturable unit.  No per-block
+   TRealize -- the whole 28-block graph stays lazy so the sampler can TJit-capture
+   it ONCE and replay it (rebinding img/t/tvec) each step; that bounds the
+   tensor-descriptor count to a single forward (the non-JIT loop re-dispatches the
+   entire net every step, which both blows the descriptor pool and is slow). *)
+(* the FIXED precompute (independent of img/t/tvec): the text-fusion context, the
+   per-axis RoPE table, and the additive key-padding mask.  krRopeTable / krAddMask
+   do host->device builds (TTensorCreate), which MUST stay OUTSIDE the JIT-captured
+   velocity net -- a host op inside the capture makes TJit silently fall back to
+   re-running the whole forward every step (the descriptor blowup + the wait).
+   Computed ONCE per generation; also avoids recomputing the text-fusion
+   sub-transformer 8 times. *)
+krTransformerPre[context_, stxt_, simg_, pos_, mask_, wf_, cfg_] := Module[{addMask, txtAddMask, ctx, rope, dev},
+    dev = Lookup[cfg, "device", "cpu"];
+    addMask = krAddMask[If[ mask === None, None, Join[mask, ConstantArray[1, simg]]], stxt + simg, dev];
+    txtAddMask = krAddMask[If[ mask === None, None, Take[mask, stxt]], stxt, dev];
+    ctx = TRealize @ krTextFusion[context, txtAddMask, wf, cfg];   (* {Stxt, txtD} *)
+    ctx = TRealize @ krLinearBias[TGELU @ krLinearBias[krRMSNorm[ctx, wf["txtmlp.0.scale"], cfg["eps"]], wf["txtmlp.1.weight"], wf["txtmlp.1.bias"]], wf["txtmlp.3.weight"], wf["txtmlp.3.bias"]];   (* {Stxt, F} *)
+    rope = krRopeTable[pos, cfg["axesDims"], cfg["theta"], dev];
+    <|"ctx" -> ctx, "rope" -> rope, "addMask" -> addMask|>
+]
+
+(* the velocity net: PURE device ops over (img, t, tvec) with the precomputed
+   ctx/rope/addMask + the weights closed over.  patch-embed img, prepend the fixed
+   text context, run the 28 blocks (per-block realized to bound fp8-transient
+   memory), drop the text prefix, final layer.  The sampler calls it directly each
+   step; the O(N) scheduler keeps the per-step re-schedule cheap. *)
+krTransformerBlocks[img_, ctx_, t_, tvec_, rope_, addMask_, stxt_, simg_, wf_, cfg_] := Module[{hidden, combined, i, out},
+    hidden = krLinearBias[img, wf["first.weight"], wf["first.bias"]];   (* {Simg, F} *)
+    combined = Join[ctx, hidden, 1];                                   (* {Stxt+Simg, F} *)
+    (* Realize each block eagerly.  The fp8 weights decode to a transient bf16 per
+       matmul (bufferize_fp8_cast_feeds_matmul -- resident only for that matmul);
+       a fully-lazy 28-block graph references ALL blocks' transients at once, so a
+       cold capture pins the whole transformer as bf16 (~24 GB) on top of the 12 GB
+       fp8 resident (~36 GB peak).  Per-block TRealize frees each block's transients
+       before the next, bounding the DiT working set to ~one block (~14 GB).  The
+       O(N) scheduler (rc_memo) makes per-step re-scheduling cheap, so this costs no
+       speed vs a JIT capture.  (The historical ~80 GB was the text-fusion Join
+       blowup, since fixed -- not the DiT stack.) *)
+    Do[ combined = TRealize @ krBlock[combined, stxt + simg, tvec, rope, addMask, wf, i, cfg], {i, 0, cfg["layers"] - 1}];
+    out = combined[[stxt + 1 ;; stxt + simg]];                         (* {Simg, F} *)
+    krLast[out, simg, t, wf, cfg]
+]
+
+(* core = precompute + blocks (the non-JIT path, e.g. the tiny CPU validation). *)
+krTransformerCore[img_, context_, t_, tvec_, pos_, mask_, wf_, cfg_] := Module[{stxt, simg, pre},
+    stxt = Dimensions[context][[1]];  simg = Dimensions[img][[1]];
+    pre = krTransformerPre[context, stxt, simg, pos, mask, wf, cfg];
+    krTransformerBlocks[img, pre["ctx"], t, tvec, pre["rope"], pre["addMask"], stxt, simg, wf, cfg]
+]
+
+(* sigma-driven wrapper (the CPU validation path): build the timestep embedding,
+   then run the core. *)
+krTransformer[img_, context_, sigma_, pos_, mask_, wf_, cfg_] := Module[{dev, te},
     dev = TDevice[wf["first.weight"]];
     If[dev === None, dev = "cpu"];
-    stxt = Dimensions[context][[1]];  simg = Dimensions[img][[1]];
-    (* image patch embed (first, biased) + timestep modulation. *)
-    hidden = krLinearBias[img, wf["first.weight"], wf["first.bias"]];   (* {Simg, F} *)
-    te = krTimeEmbed[sigma, wf, cfg, dev];  t = te["t"];  tvec = te["tvec"];
-    (* additive attention masks from the key-padding mask (or None). *)
-    addMask = krAddMask[mask, stxt + simg];
-    txtAddMask = krAddMask[If[mask === None, None, Take[mask, stxt]], stxt];
-    (* text fusion + projection to F. *)
-    ctx = krTextFusion[context, txtAddMask, wf, cfg];                  (* {Stxt, txtD} *)
-    ctx = krLinearBias[
-        TGELU @ krLinearBias[krRMSNorm[ctx, wf["txtmlp.0.scale"], cfg["eps"]],
-            wf["txtmlp.1.weight"], wf["txtmlp.1.bias"]],
-        wf["txtmlp.3.weight"], wf["txtmlp.3.bias"]];                   (* {Stxt, F} *)
-    (* text-first combined stream + per-axis RoPE. *)
-    combined = Join[ctx, hidden, 1];                                   (* {Stxt+Simg, F} *)
-    rope = krRopeTable[pos, cfg["axesDims"], cfg["theta"]];
-    Do[ combined = TRealize @ krBlock[combined, stxt + simg, tvec, rope, addMask, wf, i, cfg],
-        {i, 0, cfg["layers"] - 1}];
-    (* last layer over the IMAGE tokens (drop the text prefix). *)
-    out = combined[[stxt + 1 ;; stxt + simg]];
-    krLast[out, simg, t, wf, cfg]
+    te = krTimeEmbed[sigma, wf, cfg, dev];
+    krTransformerCore[img, context, te["t"], te["tvec"], pos, mask, wf, cfg]
 ]
 
 (* additive key-padding mask {S,S} from a {S} 0/1 mask: 0 on valid keys,
    -inf (a large negative) on padded keys, broadcast over query rows.  None
    gives None (no mask). *)
-krAddMask[mask_, s_] := If[ mask === None, None,
+krAddMask[mask_, s_, dev_] := If[ mask === None,
+    None
+    ,
     With[{neg = -1.*^9},
-        TTensorCreate[N @ Table[If[mask[[j]] == 1 || mask[[j]] == 1., 0., neg], {i, s}, {j, s}]]]]
+        (* TToDevice the host-built mask onto the compute device: otherwise it stays
+           CPU-resident and term_device_in routes the whole masked-attention output
+           (and its wo matmul) onto the CPU interpreter -- a 122s scalar walk. *)
+        TToDevice[TTensorCreate[N @ Table[If[mask[[j]] == 1 || mask[[j]] == 1., 0., neg], {i, s}, {j, s}]], dev]
+    ]
+]
 
 (* last layer: SimpleModulation(t) -> (1+scale)*RMSNorm(x) + shift -> Linear+bias.
    modulation.lin {2,F}: scale,shift = chunk2(t + lin).  norm is zero-centered. *)
 krLast[x_, simg_Integer, t_, wf_, cfg_] := Module[{f, modLin, mod, scale, shift, normed},
     f = cfg["features"];
     modLin = wf["last.modulation.lin"];                               (* {2, F} *)
-    mod = TUOpAdd[TUOpExpand[TUOpReshape[t, {1, 1, f}], {1, 2, f}],
-                  TUOpReshape[modLin, {1, 2, f}]];                     (* {1,2,F} *)
+    mod = TUOpAdd[TUOpExpand[TUOpReshape[t, {1, 1, f}], {1, 2, f}], TUOpReshape[modLin, {1, 2, f}]];                     (* {1,2,F} *)
     scale = TUOpReshape[mod[[All, 1]], {1, f}];
     shift = TUOpReshape[mod[[All, 2]], {1, f}];
     normed = krModulate[krRMSNorm[x, wf["last.norm.scale"], cfg["eps"]], scale, shift, simg, f];

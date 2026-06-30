@@ -38,18 +38,29 @@ If[ Environment["THVM_MAX_LIVE_BYTES"] === $Failed, SetEnvironment["THVM_MAX_LIV
 Needs["WolframInstitute`THVMLink`"];
 
 (* Load every model package (FLUX/*.wl, Krea/*.wl, and any future model
-   subdirectory) into the shared Examples`Private` context.  The generic pipeline
-   framework (Pipeline.wl) loads FIRST: a model file references the framework's
-   PUBLIC symbols (tisModelSpec / tisPipeline / tisRegisterComponent), and a bare
-   reference resolves to a Private stub if the public symbol does not exist yet at
-   the model file's parse time.  After Pipeline.wl the rest load in path order --
-   every definition is SetDelayed and each file self-registers its context via its
-   own BeginPackage, so among the model files order is irrelevant. *)
+   subdirectory) into the shared Examples`Private` context, in THREE waves so that
+   cross-file PUBLIC symbol references bind the DEFINED symbol, not a Private stub:
+
+   1. The generic pipeline framework (Pipeline.wl) FIRST -- a model file references
+      its PUBLIC symbols (tisModelSpec / tisPipeline / tisRegisterComponent), and a
+      bare reference would resolve to a Private stub if the public symbol did not
+      exist at the model file's parse time.
+   2. Implementation files (KreaForward / KreaVAE / FLUX layers, ...) next, sorted.
+   3. Assembler files, those named with a Generate suffix, LAST.  An assembler's
+      registered forward closures reference the implementation files' PUBLIC helpers
+      (krVaeDecode,
+      krTransformerPre, ...) by bare name at PARSE time; those publics must already
+      exist so the closure binds the defined symbol.  (Pre-this-ordering KreaGenerate
+      sorted before KreaVAE, so its VAE-forward bound a stub Examples`Private`krVaeDecode
+      that stayed held at call time -- the decoded image was never evaluated.) *)
 With[{base = DirectoryName[$InputFileName]},
-    Module[{all, framework},
+    Module[{all, framework, assemblers, impl},
         all = Select[FileNames["*.wl", base, Infinity], FileBaseName[#] =!= "Examples" &];
         framework = Select[all, FileBaseName[#] === "Pipeline" &];
+        assemblers = Select[all, StringEndsQ[FileBaseName[#], "Generate"] &];
+        impl = Complement[all, framework, assemblers];
         Scan[Get, framework];
-        Scan[Get, Sort @ Complement[all, framework]]
+        Scan[Get, Sort @ impl];
+        Scan[Get, Sort @ assemblers]
     ]
 ]
