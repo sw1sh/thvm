@@ -1101,6 +1101,13 @@ void thvm_metal_buf_freelist_push(u32 buf_id) {
   metal_buf_freelist_push(buf_id);
 }
 
+// Public one-shot decref for a single-use transient (the fp8->bf16 cast a
+// matmul consumed this realize -- see materialize.c thvm_free_fp8_transients).
+// Drops one refcount; frees / freelists the slot at zero like any decref.
+void thvm_metal_buf_decref_one(u32 buf_id) {
+  metal_buf_decref(buf_id);
+}
+
 // Undo a metal_buf_freelist_push: if `buf_id` is still parked on the
 // recycle list (no intervening metal_buf_alloc popped it), pull it off
 // and restore refcount = 1.  Used by the per-realize memory planner to
@@ -2306,26 +2313,70 @@ static int            METAL_CGS_READY = -1;    // -1 unprobed, 0 unavailable, 1 
 // Resolve MTLCodeGenServiceCreate/BuildRequest once.  Metal already loads
 // MTLCompiler, so the symbols are usually reachable via RTLD_DEFAULT; fall
 // back to an explicit dlopen of the private framework.
-static void metal_cgs_init(void) {
-  if (METAL_CGS_READY != -1) return;
+//
+// THREAD-SAFE via pthread_once: thvm_metal_precompile_range compiles kernels in
+// PARALLEL (dispatch_apply), so metal_cgs_init is called concurrently from many
+// threads.  The OLD body set METAL_CGS_READY=0 ("in progress") BEFORE the slow
+// dlopen, then early-returned on `READY != -1`.  Under the race, thread A set
+// READY=0 and entered the dlopen while threads B..J saw READY==0 (!=-1),
+// returned EARLY with READY still 0, and their metal_lib_for_src then saw
+// `READY == 1` FALSE -> skipped the disk cache -> newLibraryWithSource fallback
+// -> NEVER persisted the .metallib.  At gen scale (50-100 DiT kernels compiled
+// in one parallel cold pass) almost every kernel raced during init and never
+// landed on disk, so EVERY run recompiled via MTLCompiler (~2-3 min) -- the
+// capture timeout.  pthread_once makes every concurrent caller BLOCK until the
+// single init completes, then all observe the FINAL READY (0 or 1).
+static pthread_once_t METAL_CGS_ONCE = PTHREAD_ONCE_INIT;
+
+static void metal_cgs_init_once(void) {
   METAL_CGS_READY = 0;
   if (getenv("THVM_METAL_LIB_CACHE") != NULL
       && getenv("THVM_METAL_LIB_CACHE")[0] == '0') return;
   MtlCgsCreateFn create = (MtlCgsCreateFn)dlsym(RTLD_DEFAULT, "MTLCodeGenServiceCreate");
   MtlCgsBuildFn  build  = (MtlCgsBuildFn)dlsym(RTLD_DEFAULT, "MTLCodeGenServiceBuildRequest");
   if (create == NULL || build == NULL) {
+    // RTLD_LOCAL (NOT RTLD_GLOBAL): MTLCompiler.framework bundles its OWN copy
+    // of LLVM.  RTLD_GLOBAL promotes that LLVM's symbols -- including its
+    // `llvm::cl` CommandLine static registrations (the `-h`/`-help` option) --
+    // into the global namespace, where they collide with the LLVM the host
+    // process already links (the WolframKernel's own LLVM), aborting mid-run
+    // with `CommandLine Error: Option 'h' registered more than once!` on the
+    // next LLVM static-init.  We only need the MTLCodeGenService* symbols, and
+    // `dlsym(h, ...)` resolves them on the returned HANDLE regardless of
+    // GLOBAL/LOCAL -- GLOBAL only controls whether OTHER libraries see these
+    // symbols, which we never want.  Keeping the framework's LLVM private to
+    // this handle prevents the double-registration.  (When the symbols are
+    // already reachable via RTLD_DEFAULT -- Metal pre-loaded MTLCompiler -- this
+    // branch never runs, which is why the crash only surfaces on hosts where
+    // the lazy dlopen actually fires.)
     void *h = dlopen("/System/Library/PrivateFrameworks/MTLCompiler.framework/MTLCompiler",
-                     RTLD_NOW | RTLD_GLOBAL);
+                     RTLD_NOW | RTLD_LOCAL);
+    if (getenv("THVM_METAL_CGS_DEBUG"))
+      fprintf(stderr, "thvm: metal_cgs_init -- lazy dlopen(MTLCompiler, "
+              "RTLD_LOCAL) %s (this branch only fires when RTLD_DEFAULT "
+              "missed the symbols)\n", h ? "ok" : "FAILED");
     if (h != NULL) {
       create = (MtlCgsCreateFn)dlsym(h, "MTLCodeGenServiceCreate");
       build  = (MtlCgsBuildFn)dlsym(h, "MTLCodeGenServiceBuildRequest");
     }
+  } else if (getenv("THVM_METAL_CGS_DEBUG")) {
+    fprintf(stderr, "thvm: metal_cgs_init -- MTLCodeGenService symbols found "
+            "via RTLD_DEFAULT (no lazy dlopen needed)\n");
   }
   if (create == NULL || build == NULL) return;
   METAL_CGS = create("thvm");
   if (METAL_CGS == NULL) return;
   METAL_CGS_BUILD = build;
+  // Publish READY=1 LAST, after METAL_CGS + METAL_CGS_BUILD are fully set, so a
+  // concurrent reader that sees READY==1 (post pthread_once) also sees them.
   METAL_CGS_READY = 1;
+}
+
+// pthread_once wrapper: runs metal_cgs_init_once exactly once across all
+// threads; every caller returns only after init has finished, so the
+// METAL_CGS_READY they read is the final value (never the transient 0).
+static void metal_cgs_init(void) {
+  pthread_once(&METAL_CGS_ONCE, metal_cgs_init_once);
 }
 
 // Compile MSL `src` to a .metallib blob (NSData of MTLB...ENDT), or nil on
@@ -2426,6 +2477,14 @@ static id<MTLLibrary> metal_lib_for_src(char const *src, NSError **err,
         METAL_LIB_CACHE_HITS++;
         METAL_LIB_CACHE_BYTES_R += (u64)[libdata length];
       } else {
+        // DIAGNOSTIC (THVM_DBG_KERNEL_SHARE): one line per DISTINCT cold compile
+        // (a cache miss = a NEW kernel source MTLCompiler must build).  Count
+        // these for an N-block run: if the total grows ~linearly with N the
+        // identical blocks are NOT sharing (the cold-compile blowup); if it
+        // stays flat they share.  `src` is the hash; `len` the source size.
+        if (getenv("THVM_DBG_KERNEL_SHARE"))
+          fprintf(stderr, "[kernel-share] COLD-COMPILE src=%016llx len=%zu\n",
+                  (unsigned long long)key, strlen(src));
         libdata = metal_cgs_compile(src);
         if (libdata != nil) {
           METAL_LIB_CACHE_MISSES++;
@@ -4124,7 +4183,39 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   int tile_supported = metal_tile_enabled()
       && cg_tile_metal_dispatch_shape(ke, &tile_groups_x, &tile_threads_x);
   int dag_supported = metal_kernel_supported(ke);
-  if (!tile_supported && !dag_supported) return -1;
+  if (!tile_supported && !dag_supported) {
+    // THVM_DBG_REJECT: this kernel is about to fall to the CPU uop_walk
+    // interpreter (KDISPATCH_INTERPRETER) -- BOTH the tile render AND the
+    // DAG-encoder declined.  Report n_inputs, the store-VALUE op, output
+    // shape, and the per-input dtypes so the slow refiner matmuls (route=
+    // uop_walk, 122s each) can be pinpointed: a UOP_OPT(TC) store-value is a
+    // matmul, n_inputs>30 = the limit_bufs split missed it, a non-fp32/i32
+    // input dtype = the dag-support dtype gate (metal_kernel_supported).
+    if (getenv("THVM_DBG_REJECT")) {
+      u32 kid_r = (u32)(ke - KERNELS);
+      u32 store_op = 0xFFFF, store_v_op = 0xFFFF;
+      Term sr = ke->cached_lift.store_root;
+      u32 sr_op = 0; u64 sr_loc = 0;
+      if (sr != 0 && uop_dag_decode_uop(sr, &sr_op, &sr_loc)) {
+        store_op = sr_op;
+        if (sr_op == UOP_STORE) {
+          Term v = uop_dag_heap_read(sr_loc, 2);
+          u32 v_op = 0; u64 v_loc = 0;
+          store_v_op = uop_dag_decode_uop(v, &v_op, &v_loc) ? v_op : 0xFFFE;
+        }
+      }
+      fprintf(stderr,
+        "[reject] UOP_WALK FALLBACK kid=%u n_inputs=%u store_op=%u store_value_op=%u "
+        "out_numel=%llu tile_enabled=%d store_root=%s in_dtypes=[",
+        kid_r, ke->n_inputs, store_op, store_v_op,
+        (unsigned long long)ke->output_numel, metal_tile_enabled(),
+        ke->cached_lift.store_root ? "set" : "0");
+      for (u32 i = 0; i < ke->n_inputs && i < 12; i++)
+        fprintf(stderr, "%s%u", i ? "," : "", ke->input_dtypes[i]);
+      fprintf(stderr, "]\n");
+    }
+    return -1;
+  }
 
   // Profile this dispatch.  kid = ke - KERNELS gives the slot index
   // the WL TKernelProfile / TKernelDispatchKind surface reads.

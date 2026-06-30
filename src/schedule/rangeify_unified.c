@@ -67,6 +67,7 @@ typedef struct {
   u8  realized_partial;
   u8  axes_mask;          // bit i set iff axis i is in realize list (partial mode)
   u8  n_realized_axes;
+  u8  pinned;             // limit_bufs forced this boundary; remove_bufferize must NOT un-realize it
 } RuRealizeEntry;
 
 // Per-node ending-ranges list. We store up to RU_ENDING_PER_NODE entries
@@ -255,6 +256,41 @@ fn int ru_fuse_epilogue_on(void) {
 // producer stays a realized buffer operand (correct, BLAS-eligible).
 fn int ru_fuse_matmul_input_target_ok(void) {
   return CURRENT_CTX != NULL && CURRENT_CTX->default_device == THVM_DEV_METAL;
+}
+
+// Per-device hard kernel-buffer cap.  Mirror tinygrad
+// schedule/rangeify.py:377 `DEVICE_MAX_BUFS = {"METAL": 31, "WEBGPU": 8}`.
+// Metal binds the output at buffer index 0 and each input at 1+i
+// (backend/metal/_.m:2604-2611); the Metal `[[buffer(n)]]` attribute caps n
+// at 30, so a kernel may reference at most 31 distinct buffers.  A kernel that
+// exceeds this is a HARD compile error (`'buffer' attribute parameter is out
+// of bounds: must be between 0 and 30`), never a valid choice -- so this is a
+// correctness constraint, not a tunable opt, and is default-ON for Metal.
+//
+// THVM_MAX_KERNEL_BUFFERS mirrors tinygrad's `MAX_KERNEL_BUFFERS` ContextVar
+// (helpers.py:253): if set (>0) it overrides the device default for any
+// device.  0 / unset falls back to the device table (Metal=31, others 0 =
+// "no limit", their real cap being effectively unbounded for codegen here).
+//
+// Returns 0 == "no limit" (the buffer-split pass is skipped).
+static u32 ru_device_max_bufs(void) {
+  char const *e = getenv("THVM_MAX_KERNEL_BUFFERS");
+  if (e != NULL) {
+    int v = atoi(e);
+    if (v > 0) return (u32)v;
+    // v == 0 explicitly disables the limit (tinygrad: MAX_KERNEL_BUFFERS.value
+    // 0 falls through to the device table -- but here an explicit 0 from the
+    // env means "off", matching the documented override semantics).
+    return 0;
+  }
+  if (CURRENT_CTX == NULL) return 0;
+  switch (CURRENT_CTX->default_device) {
+    case THVM_DEV_METAL: return 31;   // tinygrad DEVICE_MAX_BUFS["METAL"]
+    // CPU / CUDA: no codegen buffer-index cap (CUDA kernel params + CPU args
+    // are not bound by a 31-slot table), so no limit. tinygrad's table omits
+    // them too (DEVICE_MAX_BUFS.get(device, 0) == 0 == no limit).
+    default: return 0;
+  }
 }
 
 // Whether a bufferize-classify realized node is seeded as a structural
@@ -1321,6 +1357,141 @@ static int rb_matmul_epilogue_fusable(u32 node_idx) {
   return 0;
 }
 
+// Count the DISTINCT input buffers a kernel rooted at `node_idx` references.
+// Mirror tinygrad limit_bufs's gated toposort (schedule/rangeify.py:383-388):
+//   bufs=set(); root.toposort(gate=lambda u: u not in {STAGE,AFTER,PARAM,...})
+// i.e. descend the value graph but STOP-AND-COUNT at every load/buffer
+// boundary, deduping by loc.  thvm's rb_collect_accessed_buffers is exactly
+// that gate (stops at UOP_BUFFER / realized boundary / leaf TEN-PARAM), so we
+// reuse it over the root's direct src subtrees.  `cap` bounds the count; we
+// only care whether it exceeds MAX_BUFS-1, so once it saturates `cap` the
+// caller already knows it's over budget.
+#define RU_LIMIT_BUFS_CAP 64
+static u32 ru_kernel_input_bufs(u32 node_idx) {
+  u64 locs[RU_LIMIT_BUFS_CAP];
+  u32 n = 0;
+  u64 loc = BUFFERIZE_NODES[node_idx].loc;
+  u8  ar  = uop_arity(BUFFERIZE_NODES[node_idx].op);
+  for (u8 s = 0; s < ar; s++)
+    n = rb_collect_accessed_buffers(heap_read(loc + s), locs,
+                                    n, RU_LIMIT_BUFS_CAP, 0);
+  return n;
+}
+
+// Is `src` a BROADCAST EXPANDER -- a value whose output is much larger than the
+// data it actually reads (the attention `EXPAND(reshape(a,{B,M,K,1}),{B,M,K,N})`
+// MUL: {B,M,K,N} output, ~{B,M,K}+{B,K,N} of real input)?  Realizing such a node
+// MATERIALIZES a buffer far bigger than its inputs (the 14 GB Krea broadcast);
+// limit_bufs must NEVER pick it as a split point -- tinygrad never bufferizes a
+// broadcast either (it bufferizes elementwise *compute*, and the {B,M,K,N} MUL
+// stays a lazy strided read inside the REDUCE).  We compute the same out/in
+// ratio tinygrad uses for PCONTIG (rangeify.py:289): out_numel vs the sum of the
+// distinct input-buffer numels the subtree reads.  Ratio >= 4 means the node
+// grows the data 4x+ -- a broadcast expander.  Returns 1 to mean "do not realize
+// this src; prefer a cheaper one".
+#define RU_BROADCAST_EXPAND_RATIO 4u
+static int ru_src_is_broadcast_expander(Term src) {
+  u64 out_numel = rb_term_numel(src);
+  if (out_numel == 0) return 0;                  // unknown shape: don't special-case
+  Term terms[RU_LIMIT_BUFS_CAP];
+  u32 n = 0;
+  Term r = term_resolve(src);
+  if (term_tag(r) == TAG_UOP) {
+    u8  op  = term_ext(r);
+    u64 loc = term_val(r);
+    u8  ar  = uop_arity(op);
+    for (u8 s = 0; s < ar; s++)
+      n = rb_collect_accessed_buffer_terms(heap_read(loc + s), terms,
+                                           n, RU_LIMIT_BUFS_CAP, 0);
+  }
+  u64 in_sum = 0;
+  for (u32 i = 0; i < n; i++) in_sum += rb_term_numel(terms[i]);
+  if (in_sum == 0) return 0;                     // no measurable input: not a clear expander
+  // out >= ratio * in  <=>  broadcast that inflates the data `ratio`x or more.
+  return out_numel >= (u64)RU_BROADCAST_EXPAND_RATIO * in_sum;
+}
+
+// PORT of tinygrad limit_bufs (schedule/rangeify.py:378-399).
+//
+// A single elementwise kernel may reference at most MAX_BUFS distinct buffers
+// (output + inputs).  If a kernel root would exceed (MAX_BUFS - 1) INPUT
+// buffers (the -1 reserves the output slot, rangeify.py:390), tinygrad
+// bufferizes the root's elementwise srcs -- forcing each into its OWN kernel
+// so the root reads it as a single buffer.  Here the thvm analog of
+// "bufferize this src" is PRE-MARKING it realized (RU_REALIZE_MAP[src]
+// .realized_full = 1) DURING the reverse-topo walk, BEFORE the walk reaches
+// the src: the walk processes consumers-before-producers, so a src marked here
+// while we process `root` is visited later and takes the realized-node branch
+// (line ~1581) which mints fresh LOOP out_rngs + consistent in_rngs for it --
+// i.e. the walk's own machinery produces a clean materialize boundary, exactly
+// as for any other realized node.  pm_apply_rangeify then emits a
+// UOP_BUFFERIZE on it and codegen splits it into its own kernel.  (A post-walk
+// re-mark would leave the src's already-committed children indexed by the old
+// consumer-inherited ranges, so the in-walk pre-mark is the faithful spot.)
+//
+// `root_idx` is the elementwise node currently being processed.  Tinygrad's
+// UPat matches every Binary|Ternary node; we mirror that by calling this for
+// each elementwise node in the walk (not only realized ones), so a nested
+// over-fused subexpression splits even when its own root stays fused.  The
+// gated buffer count (rb_collect_accessed_buffers stops at realized
+// boundaries) means a src realized by an earlier (closer-to-sink) root already
+// caps the count for roots below it -- giving the recursive fixpoint tinygrad
+// gets from re-running pm_limit_bufs.
+static void ru_limit_bufs_node(u32 root_idx) {
+  u32 max_bufs = ru_device_max_bufs();
+  if (max_bufs < 2) return;                  // 0 == no limit; <2 underflow-guard
+  u32 input_cap = max_bufs - 1;              // -1 reserves the output buffer
+
+  u8 rop = BUFFERIZE_NODES[root_idx].op;
+  int root_ew = uop_is_unary_elementwise(rop)
+             || uop_is_binary_elementwise(rop)
+             || uop_is_ternary_elementwise(rop)
+             || rop == UOP_CAST || rop == UOP_BITCAST;
+  if (!root_ew) return;                      // tinygrad UPat: Binary|Ternary only
+
+  if (ru_kernel_input_bufs(root_idx) <= input_cap) return;   // within budget
+
+  // Over budget: bufferize (force-realize) the elementwise srcs so each
+  // becomes its own kernel.  Mirror rangeify.py:392-397: for s in root.src:
+  // if s in GroupOp.Elementwise and s.device is not None: bufferize(s).
+  //
+  // PASS 0 realizes only CHEAP (non-broadcast) elementwise srcs; PASS 1 falls
+  // back to broadcast-expander srcs ONLY if the kernel is still over budget
+  // after pass 0 (splitting somewhere is mandatory to stay under the hard cap).
+  // Never realize a broadcast expander preferentially -- that materializes a
+  // buffer far larger than the data it reads (the 14 GB attention MUL).
+  u64 rloc = BUFFERIZE_NODES[root_idx].loc;
+  u8  rar  = uop_arity(rop);
+  for (u32 pass = 0; pass < 2; pass++) {
+    if (ru_kernel_input_bufs(root_idx) <= input_cap) return;  // now within budget
+    for (u8 s = 0; s < rar; s++) {
+      Term src = term_resolve(heap_read(rloc + s));
+      if (term_tag(src) != TAG_UOP) continue;            // leaf: not splittable
+      u8 sop = term_ext(src);
+      int s_ew = uop_is_unary_elementwise(sop)
+              || uop_is_binary_elementwise(sop)
+              || uop_is_ternary_elementwise(sop)
+              || sop == UOP_CAST || sop == UOP_BITCAST;
+      if (!s_ew) continue;                               // only elementwise srcs
+      // Pass 0: skip broadcast expanders (prefer cheap srcs).  Pass 1: allow
+      // them, but only because the kernel is genuinely still over budget.
+      if (pass == 0 && ru_src_is_broadcast_expander(src)) continue;
+      u32 sidx = bufferize_info_find(term_val(src));
+      if (sidx == 0xFFFFFFFFu) continue;
+      if (rb_node_realized(sidx)) continue;              // already a boundary
+      // s.device is not None: realize routes uniform-device here, so the src is
+      // on the kernel's device by construction (term_device_in of the graph ==
+      // the realize target, which is the device whose max we just applied).
+      // Pre-mark the full-realize boundary; the walk mints its ranges later.
+      RU_REALIZE_MAP[sidx].realized_full    = 1;
+      RU_REALIZE_MAP[sidx].realized_partial = 0;
+      RU_REALIZE_MAP[sidx].axes_mask        = 0;
+      RU_REALIZE_MAP[sidx].n_realized_axes  = MAX_DIM;
+      RU_REALIZE_MAP[sidx].pinned           = 1;  // survive remove_bufferize
+    }
+  }
+}
+
 fn void run_rangeify_unified_impl(Term root);
 
 fn void run_rangeify_unified(Term root) {
@@ -1344,6 +1515,7 @@ fn void run_rangeify_unified_impl(Term root) {
     RU_REALIZE_MAP[i].realized_partial = 0;
     RU_REALIZE_MAP[i].axes_mask        = 0;
     RU_REALIZE_MAP[i].n_realized_axes  = 0;
+    RU_REALIZE_MAP[i].pinned           = 0;
     RU_ENDING_RANGES[i].n = 0;
     RU_REDUCE_RANGES[i].n = 0;
     for (u32 a = 0; a < MAX_DIM; a++) RU_REDUCE_RANGES[i].ranges[a] = 0;
@@ -1634,6 +1806,16 @@ fn void run_rangeify_unified_impl(Term root) {
       RU_ENDING_RANGES[node_idx].n = 0;
     }
 
+    // *** Mirror limit_bufs (tinygrad schedule/rangeify.py:378-399) ***
+    // Before deriving this node's input ranges (and thus before the walk
+    // descends into its srcs), enforce the device kernel-buffer cap: if this
+    // elementwise node's fused subtree would read more distinct buffers than
+    // the device allows in one kernel, pre-mark its elementwise srcs realized
+    // so each splits into its own kernel.  The srcs are visited later in this
+    // same reverse-topo walk and pick up fresh LOOP ranges via the realized
+    // branch above.  Pinned, so remove_bufferize cannot re-fuse them.
+    ru_limit_bufs_node(node_idx);
+
     // *** Mirror indexing.py:243-254 ***
     // "rngs is the input ranges" -- apply movement-op swizzle / REDUCE
     // axis injection.
@@ -1763,6 +1945,10 @@ fn void run_rangeify_unified_impl(Term root) {
       u32 i = RU_TOPO_ORDER[oi];
       if (!(RU_REALIZE_MAP[i].realized_full || RU_REALIZE_MAP[i].realized_partial))
         continue;
+      // limit_bufs pinned this boundary to keep a Metal kernel under the
+      // 31-buffer hard cap (ru_limit_bufs_node).  Un-realizing it would re-fuse
+      // the over-budget kernel -> Metal compile error.  Never remove it.
+      if (RU_REALIZE_MAP[i].pinned) continue;
       // THVM_FUSE_MATMUL_EPILOGUE: un-realize an OPT_TC matmul REDUCE whose only
       // consumer is an elementwise epilogue chain (rb_matmul_epilogue_fusable),
       // so its REDUCE subtree inlines into that consumer's store -- the codegen

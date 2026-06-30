@@ -160,6 +160,25 @@ static u32 gc_node_size(Term t) {
         case UOP_ADD: case UOP_MUL:
         case UOP_CMPLT: case UOP_CMPEQ:
           return 2;
+        // 2-cell ops the evacuator MUST size correctly or it leaves the src
+        // cell(s) in from-space (which becomes garbage to-space after the swap
+        // -> shape/value corruption when a live node of this op survives a
+        // collection).  CAST/BITCAST = [src, NUM(dst_dtype)]; this was the fp8
+        // weight bug (a cached TUOpCast(fp8) corrupted after GC, the {128}
+        // scale shape bled into the realized output).  INDEX_E/AFTER = 2 src
+        // cells; the integer/bitwise ALU ops = [a, b] (index arithmetic).
+        case UOP_CAST: case UOP_BITCAST:
+        case UOP_INDEX_E: case UOP_AFTER:
+        case UOP_RANGE:                       // [NUM(axis_type), NUM(extent)]
+        case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+        case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IOR:
+        case UOP_IXOR: case UOP_ISHR:
+          return 2;
+        case UOP_INVALID: return 1;           // [NUM(0)]
+        // 3-cell ternary / store / opt.
+        case UOP_IWHERE: case UOP_STORE:      // [cond,then,else] / [buf,addr,value]
+        case UOP_OPT:                         // [target, NUM(kind), NUM(factor)]
+          return 3;
         case UOP_FLIP:   return 2;
         // UOP_REDUCE: heap = [src, kind, n_axes, axis_0, ..., axis_{n-1}].
         // Total cells = 3 + n_axes (multi-axis port).
@@ -177,6 +196,12 @@ static u32 gc_node_size(Term t) {
           Term ndim_cell = HEAP[loc + 1];
           if (term_tag(ndim_cell) != TAG_NUM) return 0;
           return 2 + 2 * (u32)term_val(ndim_cell);
+        }
+        // UOP_BUFFER = [NUM(scope), NUM(dtype), NUM(ndim), NUM(d0)..].
+        case UOP_BUFFER: {
+          Term ndim_cell = HEAP[loc + 2];
+          if (term_tag(ndim_cell) != TAG_NUM) return 0;
+          return 3 + (u32)term_val(ndim_cell);
         }
         default: return 0;
       }

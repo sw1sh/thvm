@@ -108,6 +108,102 @@ fn void thvm_realize_fwd_reclaim(void) {
   thvm_metal_buf_clear_preserved(1);
 }
 
+// Auto-trigger a Cheney collection at a realize boundary on EITHER heap-cell
+// pressure (the historical trigger) OR device-byte pressure.  The dyn heap
+// fills slowly (a few cells per realize), but each WL-held TTerm wrapper for a
+// discarded prior-realize result pins a LARGE device buffer; WL's
+// ManagedLibraryExpression GC is lazy in script mode, so those wrappers (and
+// their buffers) accumulate -- device bytes grow ~6-8GB/denoise-step long
+// before the heap-cell trigger fires.  A Cheney collection re-roots through
+// EXTERN_PINNED (the live WL wrappers) and drops nothing WL still holds, but it
+// compacts the heap so the next realize's fwd_reclaim free-unpreserved pass can
+// reclaim buffers whose wrappers WL HAS since collected (the manager fired
+// extern_pin_handle_drop).  Safe now that gc_node_size evacuates every UOP op
+// correctly (the CAST/BITCAST fix).  Trigger when metal live bytes have grown
+// past a bound since the last GC (default 512MB; THVM_GC_DEVICE_MB overrides,
+// 0 disables).  Off-Metal thvm_metal_live_bytes() returns 0 -> never fires.
+// `*res_io` rides the GC root set and is re-fetched after the space swap.
+fn void thvm_realize_maybe_gc(Term *res_io) {
+  if (!gc_enabled()) return;
+  static int gc_disabled_env  = -1;
+  static int gc_kb_env        = -1;
+  static int gc_device_mb_env = -1;
+  static u64 gc_device_baseline = 0;
+  if (gc_disabled_env == -1) {
+    const char *e = getenv("THVM_GC");
+    gc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
+  }
+  if (gc_kb_env == -1) {
+    const char *e = getenv("THVM_GC_KB");
+    gc_kb_env = (e != NULL) ? atoi(e) : 0;
+  }
+  if (gc_device_mb_env == -1) {
+    const char *e = getenv("THVM_GC_DEVICE_MB");
+    gc_device_mb_env = (e != NULL) ? atoi(e) : 512;
+  }
+  if (gc_disabled_env) return;
+  u64 trigger_words = (gc_kb_env > 0)
+                        ? (u64)gc_kb_env * 128
+                        : (gc_from_end() - gc_from_start()) / 2;
+  int heap_pressure = HEAP_NEXT > gc_from_start() + trigger_words;
+  int device_pressure = 0;
+  if (gc_device_mb_env > 0) {
+    u64 dev = thvm_metal_live_bytes();
+    if (dev > gc_device_baseline + (u64)gc_device_mb_env * (1ull << 20))
+      device_pressure = 1;
+  }
+  if (heap_pressure || device_pressure) {
+    Term roots[1] = { *res_io };
+    gc_collect(roots, 1);
+    *res_io = roots[0];
+    gc_device_baseline = thvm_metal_live_bytes();
+  }
+}
+
+// === Ceiling-abort cleanup (Q2: the THVM_MAX_LIVE_BYTES retry-leak) ===
+// When the Metal ceiling backstop fires mid-realize it longjmps straight out to
+// the LibraryLink entry's THVM_WL_RECOVER, BYPASSING the pool-rollback at the
+// normal realize exit -- so every buffer this failed realize allocated leaks,
+// and live bytes grow monotonically across retries (28->45 GB over ~333 failed
+// realizes, the 20-min wedge).  We stash the entry pool watermarks + an active
+// flag in globals; thvm_realize_ceiling_cleanup() (called from the recovery
+// branch) HARD-rolls the pools back to those watermarks, freeing the orphaned
+// in-progress buffers so the next realize starts clean.  An over-budget run then
+// fails in seconds instead of leaking for 20 minutes.
+static u32 REALIZE_ABORT_CPU_WM   = 0;
+static u32 REALIZE_ABORT_METAL_WM = 0;
+#ifdef THVM_HAS_CUDA
+static u32 REALIZE_ABORT_CUDA_WM  = 0;
+#endif
+static int REALIZE_ABORT_ACTIVE   = 0;
+static u32 REALIZE_ABORT_SCOPE_DEPTH = 0;
+static u32 REALIZE_ABORT_SAVED_DEVICE = 0;
+
+// Public: invoked by the LibraryLink ceiling-recovery branch (and safe to call
+// when no realize is in flight -- it no-ops).  Frees everything this realize
+// allocated since its entry watermark.
+fn void thvm_realize_ceiling_cleanup(void) {
+  if (!REALIZE_ABORT_ACTIVE) return;
+  REALIZE_ABORT_ACTIVE = 0;
+  // The longjmp interrupted dispatch mid-flight; drain/flush so a freed buffer
+  // is not still referenced by an in-flight GPU command, then hard-roll the
+  // pools (no "preserve" -- the realize FAILED, its buffers are orphaned).
+  cpu_buf_pool_rollback(REALIZE_ABORT_CPU_WM);
+  thvm_metal_buf_pool_rollback_with_preserve(REALIZE_ABORT_METAL_WM);
+  thvm_metal_buf_clear_preserved(REALIZE_ABORT_METAL_WM);
+#ifdef THVM_HAS_CUDA
+  cuda_buf_pool_rollback_with_preserve(REALIZE_ABORT_CUDA_WM);
+  cuda_buf_clear_preserved(REALIZE_ABORT_CUDA_WM);
+#endif
+  // Unwind the materialized-loc scope the realize entered so a later realize's
+  // scope depth (and its cross-realize cache) starts clean.
+  while (materialized_loc_scope_depth() > REALIZE_ABORT_SCOPE_DEPTH)
+    materialized_loc_scope_leave();
+  materialized_loc_clear();
+  // Restore the session default device the realize may have re-routed.
+  if (CURRENT_CTX != NULL) CURRENT_CTX->default_device = REALIZE_ABORT_SAVED_DEVICE;
+}
+
 fn Term thvm_realize(Term expr) {
   HOT_REALIZE_CALLS++;
   // TEN short-circuit: a Term that's already a TAG_TEN (typical when
@@ -167,6 +263,18 @@ fn Term thvm_realize(Term expr) {
   // entirely and so never see a populated cache (gated by the scope
   // counter below).
   materialized_loc_clear();
+  // Arm the ceiling-abort cleanup BEFORE entering the scope: if the Metal
+  // ceiling backstop longjmps out before the normal exit below, the recovery
+  // path (thvm_realize_ceiling_cleanup) hard-rolls these pools so the failed
+  // realize's in-progress buffers don't leak across retries.
+  REALIZE_ABORT_CPU_WM   = cpu_wm;
+  REALIZE_ABORT_METAL_WM = metal_wm;
+#ifdef THVM_HAS_CUDA
+  REALIZE_ABORT_CUDA_WM  = cuda_wm;
+#endif
+  REALIZE_ABORT_SAVED_DEVICE = saved_default_device;
+  REALIZE_ABORT_SCOPE_DEPTH  = materialized_loc_scope_depth();
+  REALIZE_ABORT_ACTIVE       = 1;
   materialized_loc_scope_enter();
 
   // wnf is the only reducer -- `nf` is the inspector primitive (see
@@ -254,6 +362,11 @@ fn Term thvm_realize(Term expr) {
   SCHED_PROF_BLOCK(SCHED_PROF_GC_PRESERVE, mark_gc_preserve(res));
   jit_capture_mark_preserved();
 
+  // Reached the normal exit: disarm the ceiling-abort cleanup (the rollback
+  // below supersedes it).  A subsequent non-realize entry's ceiling longjmp
+  // must not roll back into this finished realize's stale watermarks.
+  REALIZE_ABORT_ACTIVE = 0;
+
   // Arena planner cross-step leak fix: drop the preserved bit on
   // every arena view CpuBuf (and its parent arena) so pool_rollback
   // reclaims the entire arena cohort.  By construction arena views
@@ -273,6 +386,10 @@ fn Term thvm_realize(Term expr) {
   cpu_buf_pool_rollback_with_preserve(cpu_wm);
   thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
   thvm_realize_fwd_reclaim();
+  // Free this realize's fp8->bf16 cast single-use transients (the matmul that
+  // consumed each has fired).  Runs AFTER fwd_reclaim's heap-rooted preserve so
+  // we unhook + decref buffers that scan would otherwise pin forever.
+  thvm_free_fp8_transients(term_tag(res) == TAG_TEN ? (u32)term_val(res) : 0);
   cpu_buf_clear_preserved(cpu_wm);
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);
@@ -291,26 +408,7 @@ fn Term thvm_realize(Term expr) {
   // read, so cached raw Term integers can't go stale.
   // THVM_GC=0 disables; THVM_GC_KB overrides the trigger threshold
   // (in KB of heap; one cell = 8B).
-  if (gc_enabled()) {
-    static int gc_disabled_env = -1;
-    static int gc_kb_env       = -1;
-    if (gc_disabled_env == -1) {
-      const char *e = getenv("THVM_GC");
-      gc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
-    }
-    if (gc_kb_env == -1) {
-      const char *e = getenv("THVM_GC_KB");
-      gc_kb_env = (e != NULL) ? atoi(e) : 0;
-    }
-    u64 trigger_words = (gc_kb_env > 0)
-                          ? (u64)gc_kb_env * 128
-                          : (gc_from_end() - gc_from_start()) / 2;
-    if (!gc_disabled_env && HEAP_NEXT > gc_from_start() + trigger_words) {
-      Term roots[1] = { res };
-      gc_collect(roots, 1);
-      res = roots[0];
-    }
-  }
+  thvm_realize_maybe_gc(&res);
 
   // Kernel-arena GC: free per-kernel heap arrays + decref output
   // TenDescs for kernels no longer reachable from any pinned Term.
@@ -434,6 +532,10 @@ fn Term thvm_realize_many(Term ctr_term) {
   cpu_buf_pool_rollback_with_preserve(cpu_wm);
   thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
   thvm_realize_fwd_reclaim();
+  // Free this realize's fp8->bf16 cast single-use transients (the matmul that
+  // consumed each has fired).  Runs AFTER fwd_reclaim's heap-rooted preserve so
+  // we unhook + decref buffers that scan would otherwise pin forever.
+  thvm_free_fp8_transients(term_tag(res) == TAG_TEN ? (u32)term_val(res) : 0);
   cpu_buf_clear_preserved(cpu_wm);
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);
@@ -443,26 +545,7 @@ fn Term thvm_realize_many(Term ctr_term) {
   cuda_buf_clear_preserved(cuda_wm);
 #endif
 
-  if (gc_enabled()) {
-    static int gc_disabled_env = -1;
-    static int gc_kb_env       = -1;
-    if (gc_disabled_env == -1) {
-      const char *e = getenv("THVM_GC");
-      gc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
-    }
-    if (gc_kb_env == -1) {
-      const char *e = getenv("THVM_GC_KB");
-      gc_kb_env = (e != NULL) ? atoi(e) : 0;
-    }
-    u64 trigger_words = (gc_kb_env > 0)
-                          ? (u64)gc_kb_env * 128
-                          : (gc_from_end() - gc_from_start()) / 2;
-    if (!gc_disabled_env && HEAP_NEXT > gc_from_start() + trigger_words) {
-      Term roots[1] = { res };
-      gc_collect(roots, 1);
-      res = roots[0];
-    }
-  }
+  thvm_realize_maybe_gc(&res);
 
   static int kgc_disabled_env = -1;
   if (kgc_disabled_env == -1) {

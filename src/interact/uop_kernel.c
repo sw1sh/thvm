@@ -514,6 +514,33 @@ fn void kernel_fire_by_id(u32 kid) {
         fflush(stderr);
       }
     }
+    // THVM_DBG_KIND: report the UPSTREAM dispatch decision -- WHICH backend
+    // each kernel dispatches on, BEFORE any metal-render attempt.  A matmul
+    // (store value is UOP_OPT(TC), or a REDUCE(MUL) under it) that dispatches
+    // on the CPU backend goes straight to the uop_walk interpreter (~122s for
+    // the {512,2560} refiner matmuls) -- it never reaches metal at all.  Prints
+    // backend, n_inputs, store-value op, output shape so the 2 slow matmuls'
+    // upstream routing is pinned: if backend=cpu the output buffer was allocated
+    // on the CPU backend (term_device_in picked CPU for this op); if backend=
+    // metal but it's still slow, the decline is in metal_dispatch_kernel.
+    if (getenv("THVM_DBG_KIND")) {
+      char const *bn = (b == &CPU_BACKEND) ? "cpu"
+#ifdef THVM_HAS_METAL
+                     : (b == &METAL_BACKEND) ? "metal"
+#endif
+                     : "?";
+      u32 sv_op = 0xFFFF;
+      Term sr = ke->cached_lift.store_root;
+      if (sr != 0 && term_tag(sr) == TAG_UOP && term_ext(sr) == UOP_STORE) {
+        Term v = heap_read(term_val(sr) + 2);
+        sv_op = (term_tag(v) == TAG_UOP) ? term_ext(v) : 0xFFFE;
+      }
+      // Only print the matmul-sized kernels (out_numel large) to keep it terse;
+      // a {512,2560} matmul has out_numel 1310720.
+      fprintf(stderr, "[kind] kid=%u backend=%s n_inputs=%u store_value_op=%u "
+              "out_numel=%llu\n", (u32)(ke - KERNELS), bn, ke->n_inputs, sv_op,
+              (unsigned long long)ke->output_numel);
+    }
     b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
     // Precise memo bookkeeping: record this dispatch's OUTPUT write so a
     // downstream kernel reading it re-fires iff WE re-fired (propagates

@@ -339,7 +339,13 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
   if (ke == NULL) return 0;
   // Metal hardware caps buffer attributes at index 30; reject
   // kernels that won't render (matches the renderer's reject).
-  if (ke->n_inputs > 30) return 0;
+  if (ke->n_inputs > 30) {
+    if (getenv("THVM_DBG_REJECT"))
+      fprintf(stderr, "[reject] dispatch_shape kid=%u n_inputs=%u out_numel=%llu "
+              "reason=N_INPUTS>30\n", (unsigned)(ke - KERNELS), ke->n_inputs,
+              (unsigned long long)ke->output_numel);
+    return 0;
+  }
   // DAG-mode + per-axis OPTs present (hand-coded-opts / autotune ran
   // and mutated the DAG): the conv2d-flat / scalar-tile readers can't
   // see those (they key off the empty applied_opts log), so derive
@@ -631,15 +637,43 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
 // renderer reconstructs slot positions from the DAG itself.
 static char *cg_emit_via_uop(KernelEntry const *ke) {
   kernel_lift_count_attempt();
+  // THVM_DBG_REJECT: env-gated reject diagnostic.  These metal-render rejects
+  // fall the kernel back to the CPU uop_walk interpreter (KDISPATCH_INTERPRETER)
+  // -- a single-element scalar reduce, ~1000x slower for a matmul.  The print
+  // names the kernel (kid), its n_inputs, its store-VALUE op (UOP_OPT_TC == a
+  // matmul; a movement/CAST/IDIV op above it = a non-affine operand), output
+  // shape, and the reject reason, so the slow refiner matmuls can be pinpointed.
+  int _dbg_reject = (getenv("THVM_DBG_REJECT") != NULL);
+  u32 _dbg_store_op = 0xFFFF;
+  if (_dbg_reject && ke->cached_lift.store_root != 0
+      && term_tag(ke->cached_lift.store_root) == TAG_UOP
+      && term_ext(ke->cached_lift.store_root) == UOP_STORE) {
+    Term _v = heap_read(term_val(ke->cached_lift.store_root) + 2);
+    _dbg_store_op = (term_tag(_v) == TAG_UOP) ? term_ext(_v) : 0xFFFE;
+  }
   // Metal hardware caps buffer attributes at index 30 (31 slots total
   // including output).  Reject kernels with too many inputs.
-  if (ke->n_inputs > 30) return NULL;
+  if (ke->n_inputs > 30) {
+    if (_dbg_reject)
+      fprintf(stderr, "[reject] cg_emit_via_uop kid=%u n_inputs=%u store_op=%u "
+              "out_numel=%llu reason=N_INPUTS>30\n",
+              (unsigned)(ke - KERNELS), ke->n_inputs, _dbg_store_op,
+              (unsigned long long)ke->output_numel);
+    return NULL;
+  }
   // Read the cached KernelUopLift populated by emit_kernel_for_boundary.
   // cached_root==0 means the materialize-time lift declined (no
   // source_uop / no unified store_root / n_inputs over cap) -- no
   // amount of re-running will help.
   Term cached_root = ke->cached_lift.store_root;
-  if (cached_root == 0) return NULL;
+  if (cached_root == 0) {
+    if (_dbg_reject)
+      fprintf(stderr, "[reject] cg_emit_via_uop kid=%u n_inputs=%u "
+              "out_numel=%llu reason=STORE_ROOT==0(lift declined)\n",
+              (unsigned)(ke - KERNELS), ke->n_inputs,
+              (unsigned long long)ke->output_numel);
+    return NULL;
+  }
   kernel_lift_count_success();
   // Render to a malloc'd string, matching cg_emit_tile_metal's
   // contract.  Use kernel name "k" so MTLLibrary lookup behaves like

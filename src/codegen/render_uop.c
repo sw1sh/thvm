@@ -235,6 +235,18 @@ static const char *rmu_buf_name(Term t) {
   static char fallback[24];
   snprintf(fallback, sizeof(fallback), "buf%llu",
            (unsigned long long)term_val(t));
+  // DIAGNOSTIC (THVM_DBG_KERNEL_SHARE): the `buf<loc>` fallback bakes a
+  // per-instance HEAP LOC into the kernel SOURCE.  Two structurally-identical
+  // kernels (e.g. the same transformer block in different layers) that hit this
+  // fallback render DIFFERENT source -> different metal_src_hash -> they do NOT
+  // share a compiled PSO/.metallib -> N-deep nets compile ~Nx too many kernels
+  // (the cold-compile blowup).  An unresolved BUFFERIZE leaf is the usual cause
+  // (the rangeify pass didn't promote it to a structural in<N> slot).
+  if (getenv("THVM_DBG_KERNEL_SHARE"))
+    fprintf(stderr, "[kernel-share] WARNING: buf<loc> fallback baked into MSL "
+            "(%s) -- this kernel will NOT share across identical-shape "
+            "instances (unresolved buffer; per-instance loc in source)\n",
+            fallback);
   return fallback;
 }
 
@@ -254,6 +266,13 @@ static const char *rmu_msl_type_name(u32 dtype) {
     case DT_INT64: return "long";
     case DT_INT8:  return "char";   // MSL char is signed 8-bit (tinygrad type_map)
     case DT_UINT8: return "uchar";
+    // fp8 has no native GPU scalar: the BUFFER stores 1 raw byte/element, so
+    // its POINTER must be `uchar` (1-byte stride) -- NOT the `float` default,
+    // which read 4 bytes/element at a 4x stride (out-of-bounds + garbage).
+    // The element VALUE is decoded to float at the load site via
+    // thvm_fp8e4m3_decode / thvm_fp8e5m2_decode (rmu_emit_fp8_helpers).
+    case DT_FP8E4M3:
+    case DT_FP8E5M2: return "uchar";
     default:       return "float";  // safe fallback for the renderer
   }
 }
@@ -275,6 +294,10 @@ static const char *rmu_cuda_type_name(u32 dtype) {
     case DT_INT64: return "long long";
     case DT_INT8:  return "signed char";
     case DT_UINT8: return "unsigned char";
+    // fp8: 1 raw byte/element pointer (same as MSL); decoded to float at the
+    // load site via the __device__ thvm_fp8*_decode helpers.
+    case DT_FP8E4M3:
+    case DT_FP8E5M2: return "unsigned char";
     default:       return "float";
   }
 }
@@ -300,6 +323,81 @@ static const char *rmu_gpu_alu_type_name(u32 dtype) {
   if (RMU_TARGET == CG_TARGET_CUDA && (dtype == DT_BF16 || dtype == DT_FP16))
     return "float";
   return rmu_gpu_type_name(dtype);
+}
+
+// Emit the GPU fp8 -> float decode helpers into the kernel prologue.  fp8 has
+// no native GPU scalar; a buffer stores one raw byte/element and the load site
+// wraps the byte in one of these decoders.  DIRECT PORT of the CPU
+// fp8e4m3_to_f32 / fp8e5m2_to_f32 (src/dtype/fp8.c:92-128), which themselves
+// port tinygrad's fp8_to_float (tinygrad/dtype.py:228-287): both formats expand
+// the u8 into the f16 (half) bit layout and let the native half->float
+// conversion finish.  e5m2 maps directly onto half's 5-exp/10-mantissa layout;
+// e4m3 needs explicit subnormal renormalization first.  Emitted once per kernel
+// that has an fp8 input (rmu_kernel_has_fp8_input), so fp8-free kernels are
+// byte-identical to before.  MSL uses `as_type<half>(uint16)`; CUDA uses
+// __ushort_as_half (cuda_fp16.h).
+static void rmu_emit_fp8_helpers(FILE *fp) {
+  if (RMU_TARGET == CG_TARGET_CUDA) {
+    fputs(
+      "__device__ __forceinline__ float thvm_fp8e5m2_decode(unsigned char x){\n"
+      "  unsigned short ur=(unsigned short)x<<8;\n"
+      "  if((ur&0x7FFFu)>0x7C00u) ur=0x7FFFu;\n"
+      "  return __half2float(__ushort_as_half(ur));\n"
+      "}\n"
+      "__device__ __forceinline__ float thvm_fp8e4m3_decode(unsigned char x){\n"
+      "  unsigned short ur=(unsigned short)x<<8;\n"
+      "  unsigned short sign=(unsigned short)(ur&0x8000u);\n"
+      "  unsigned short exponent=(unsigned short)((((unsigned int)ur&0x7800u)>>1)+0x2000u);\n"
+      "  unsigned short mantissa=(unsigned short)((ur&0x0700u)>>1);\n"
+      "  unsigned int absx=(unsigned int)x&0x7Fu;\n"
+      "  if(absx==0x7Fu){ ur=0x7FFFu; }\n"
+      "  else if(exponent==0x2000u){\n"
+      "    if(mantissa!=0u){\n"
+      "      mantissa<<=1;\n"
+      "      while((mantissa&0x0400u)==0u){ mantissa<<=1; exponent-=0x0400u; }\n"
+      "      mantissa&=0x03FFu;\n"
+      "    } else { exponent=0; }\n"
+      "    ur=(unsigned short)(sign|exponent|mantissa);\n"
+      "  } else { ur=(unsigned short)(sign|exponent|mantissa); }\n"
+      "  return __half2float(__ushort_as_half(ur));\n"
+      "}\n", fp);
+  } else {
+    fputs(
+      "static inline float thvm_fp8e5m2_decode(uchar x){\n"
+      "  ushort ur=(ushort)x<<8;\n"
+      "  if((ur&0x7FFFu)>0x7C00u) ur=0x7FFFu;\n"
+      "  return float(as_type<half>(ur));\n"
+      "}\n"
+      "static inline float thvm_fp8e4m3_decode(uchar x){\n"
+      "  ushort ur=(ushort)x<<8;\n"
+      "  ushort sign=(ushort)(ur&0x8000u);\n"
+      "  ushort exponent=(ushort)((((uint)ur&0x7800u)>>1)+0x2000u);\n"
+      "  ushort mantissa=(ushort)((ur&0x0700u)>>1);\n"
+      "  uint absx=(uint)x&0x7Fu;\n"
+      "  if(absx==0x7Fu){ ur=0x7FFFu; }\n"
+      "  else if(exponent==0x2000u){\n"
+      "    if(mantissa!=0u){\n"
+      "      mantissa<<=1;\n"
+      "      while((mantissa&0x0400u)==0u){ mantissa<<=1; exponent-=0x0400u; }\n"
+      "      mantissa&=0x03FFu;\n"
+      "    } else { exponent=0; }\n"
+      "    ur=(ushort)(sign|exponent|mantissa);\n"
+      "  } else { ur=(ushort)(sign|exponent|mantissa); }\n"
+      "  return float(as_type<half>(ur));\n"
+      "}\n", fp);
+  }
+}
+
+// 1 iff any discovered buffer slot is an fp8 dtype (so the prologue should emit
+// the fp8 decode helpers).  slot_bufs[0] is the output; inputs are [1..n].
+static u32 rmu_slot_dtype(Term t);   // fwd decl (defined just below)
+static int rmu_kernel_has_fp8_input(Term const *slot_bufs, u32 n_inputs) {
+  for (u32 i = 0; i <= n_inputs; i++) {
+    if (slot_bufs[i] == 0) continue;
+    u32 dt = rmu_slot_dtype(slot_bufs[i]);
+    if (dt == DT_FP8E4M3 || dt == DT_FP8E5M2) return 1;
+  }
+  return 0;
 }
 
 // Kernel-signature dtype for a discovered buffer slot.  Slots come in
@@ -703,6 +801,20 @@ static void rmu_emit_term(Term t, FILE *fp) {
       // stays 2-byte; the store converts back implicitly) mirrors the C
       // target (bf16 -> "float") and Metal's native bfloat auto-promotion.
       u32 ldt = rmu_slot_dtype(buf);
+      // fp8 GPU load: the buffer is `uchar*` (1 raw byte/element); decode the
+      // byte to float via the prologue helper (rmu_emit_fp8_helpers).  Without
+      // this the raw byte flows into arithmetic as an integer (garbage).  The
+      // C/CPU target never routes fp8 here (it promotes via f32 at materialize),
+      // so this is GPU-only.
+      int fp8_load = (RMU_TARGET != CG_TARGET_C
+                      && (ldt == DT_FP8E4M3 || ldt == DT_FP8E5M2));
+      if (fp8_load) {
+        fprintf(fp, "thvm_fp8e%s_decode(%s[",
+                (ldt == DT_FP8E4M3) ? "4m3" : "5m2", bn);
+        rmu_emit_term(addr, fp);
+        fputs("])", fp);
+        return;
+      }
       int cuda_half_load = (RMU_TARGET == CG_TARGET_CUDA
                             && (ldt == DT_BF16 || ldt == DT_FP16));
       if (cuda_half_load) fputs("((float)", fp);
@@ -6141,6 +6253,16 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
   }
   fputs("#include <metal_stdlib>\n", fp);
   fputs("using namespace metal;\n\n", fp);
+  // fp8 decode helpers if any input/output is fp8 (rmu_emit_fp8_helpers).
+  {
+    int has_fp8 = (rmu_slot_dtype(out_buf) == DT_FP8E4M3
+                   || rmu_slot_dtype(out_buf) == DT_FP8E5M2);
+    for (u32 i = 0; i < n_inputs && !has_fp8; i++) {
+      u32 dt = rmu_slot_dtype(in_bufs[i]);
+      if (dt == DT_FP8E4M3 || dt == DT_FP8E5M2) has_fp8 = 1;
+    }
+    if (has_fp8) rmu_emit_fp8_helpers(fp);
+  }
   fprintf(fp, "kernel void %s(\n", kernel_name);
   // Output goes to buffer(0); each input goes to buffer(1+i).
   u32 out_dtype = rmu_slot_dtype(out_buf);
@@ -6257,6 +6379,8 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   }
   fputs("#include <metal_stdlib>\n", fp);
   fputs("using namespace metal;\n\n", fp);
+  // fp8 decode helpers if any input/output is fp8 (rmu_emit_fp8_helpers).
+  if (rmu_kernel_has_fp8_input(slot_bufs, n_inputs)) rmu_emit_fp8_helpers(fp);
   fprintf(fp, "kernel void %s(\n", kernel_name);
   u32 out_dtype = rmu_slot_dtype(out_buf);
   fprintf(fp, "    device %s *out [[ buffer(0) ]]",
@@ -6769,6 +6893,8 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
     fputs("using namespace nvcuda;\n", fp);
   }
   fputs("typedef unsigned int uint;\n", fp);
+  // fp8 decode helpers if any input/output is fp8 (rmu_emit_fp8_helpers).
+  if (rmu_kernel_has_fp8_input(slot_bufs, n_inputs)) rmu_emit_fp8_helpers(fp);
   // nvrtc device compilation predefines no <math.h> macros; the
   // REDUCE_MAX accumulator init (-INFINITY) and any +INFINITY guard
   // need a definition.  __int_as_float of the fp32 +inf bit pattern is

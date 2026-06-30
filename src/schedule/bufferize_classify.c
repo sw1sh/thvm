@@ -1340,6 +1340,220 @@ static int bufferize_node_is_maxpool_mask_norm(u64 loc, u8 op) {
       && (u32)term_val(heap_read(term_val(rsrc) + 1)) == REDUCE_SUM;
 }
 
+// THVM fp8-matmul-decode lever: a fp8->wider CAST whose value fuses into a
+// consuming matmul reduce lowers the fp8 DECODE into the matmul's innermost
+// reduce loop -- so each fp8 weight element is decoded once per OUTPUT ROW it
+// contributes to (M-fold redundant): a {512,2560}x{2560,2560} fp8 matmul ran
+// 35 ms vs 6 ms for a bf16-leaf weight (6x), the text-fusion velnet bottleneck.
+// REALIZING the cast to a transient bf16 buffer first decodes each element ONCE
+// (in a cheap memory-bandwidth pass, ~13 MB/weight, freed after the matmul --
+// NOT a resident 24 GB), then the matmul reads bf16 at full speed (5.6 ms,
+// matching the leaf).  This detector marks such a CAST as a realize boundary.
+// True iff: info is a CAST/BITCAST, its source dtype is fp8, AND its value
+// reaches a matmul MUL through pure movement/cast hops (the weight read of
+// TMatMul[x, Transpose[Cast[w_fp8, bf16]]]).
+static int bufferize_fp8_cast_feeds_matmul(UOpInfo const *info) {
+  static int known = 0, enabled = 1;
+  if (!known) {
+    char const *e = getenv("THVM_NO_FP8_CAST_REALIZE");
+    enabled = !(e != NULL && e[0] == '1');   // default ON; opt out for A/B
+    known = 1;
+  }
+  if (!enabled) return 0;
+  if (info->op != UOP_CAST && info->op != UOP_BITCAST) return 0;
+  // Source must be fp8 (the resident weight); the cast widens to bf16/f16/f32.
+  u32 src_dt = DT_FP32;
+  if (!term_dtype_in(heap_read(info->loc + 0), 0, &src_dt)) return 0;
+  if (src_dt != DT_FP8E4M3 && src_dt != DT_FP8E5M2) return 0;
+  // Walk consumers: the cast's value must reach a matmul MUL through pure
+  // movement (RESHAPE/PERMUTE/EXPAND -- the Transpose+broadcast of the matmul
+  // lowering) / cast hops.  BFS a few hops; stop at the MUL whose REDUCE is a
+  // matmul.  Bounded.
+  u64 queue[64]; u32 qh = 0, qt = 0;
+  queue[qt++] = info->loc;
+  u32 budget = 64;
+  while (qh < qt && budget-- > 0) {
+    u64 cur = queue[qh++];
+    u64 cons[8];
+    u32 nc = bufferize_consumers_for_loc(cur, cons, 8);
+    for (u32 c = 0; c < nc; c++) {
+      Term ct = term_resolve(term_new(0, TAG_UOP, 0, cons[c]));
+      // We only have the loc; read the op via the bufferize node.
+      u32 cidx = bufferize_info_find(cons[c]);
+      if (cidx == 0xFFFFFFFFu) continue;
+      u8 cop = BUFFERIZE_NODES[cidx].op;
+      (void)ct;
+      if (cop == UOP_MUL) {
+        // Is this MUL the reduced source of a matmul reduce?  Its consumer is a
+        // REDUCE that bufferize_uop_is_matmul accepts.
+        u64 mcons[8];
+        u32 mnc = bufferize_consumers_for_loc(cons[c], mcons, 8);
+        for (u32 m = 0; m < mnc; m++) {
+          u32 midx = bufferize_info_find(mcons[m]);
+          if (midx != 0xFFFFFFFFu && BUFFERIZE_NODES[midx].op == UOP_REDUCE
+              && bufferize_uop_is_matmul(mcons[m]))
+            return 1;
+        }
+        continue;
+      }
+      // Chain through pure movement / cast hops only.
+      if (uop_is_movement(cop) || cop == UOP_CAST || cop == UOP_BITCAST) {
+        if (qt < 64) queue[qt++] = cons[c];
+      }
+    }
+  }
+  return 0;
+}
+
+// True iff `t`'s source subtree (bounded DFS) contains an EXPAND whose value
+// derives from a REDUCE through movement / unary (RECIP, SQRT, ADD-of-const)
+// hops -- the RMSNorm broadcast-back `EXPAND(RESHAPE(RECIP(SQRT(REDUCE(x*x)+eps))))`
+// (see NN/Norm.wl TRMSNorm).  This is the reduce-then-broadcast that, fused
+// lazily into a downstream batched matmul reduce, mis-stages on Metal (the q/k
+// RMSNorm-into-GQA-attention divergence at S>=32): the inner reduce's per-row
+// normalizer is re-indexed wrong through the matmul's rank-grow EXPAND.
+// True iff `t` derives from a REDUCE through movement / unary (RECIP, SQRT,
+// NEG) / ADD-or-MUL-of-const hops -- the `RECIP(SQRT(REDUCE(x*x)/d + eps))`
+// normalizer body.  Searches BOTH operands of ADD/MUL (the reduce may sit on
+// either side of the `/d` or `+eps`).  Does NOT cross a second reduce or a real
+// two-value contraction (both operands non-const non-movement).
+static int bufferize_derives_from_reduce(Term t, u32 depth) {
+  if (depth > 24 || term_tag(t) != TAG_UOP) return 0;
+  u8 op = term_ext(t);
+  if (op == UOP_REDUCE) return 1;
+  if (uop_is_movement(op) || uop_is_unary_elementwise(op)
+      || op == UOP_RECIP || op == UOP_SQRT || op == UOP_NEG) {
+    return bufferize_derives_from_reduce(
+        term_resolve(heap_read(term_val(t) + 0)), depth + 1);
+  }
+  if (op == UOP_ADD || op == UOP_MUL) {
+    return bufferize_derives_from_reduce(
+               term_resolve(heap_read(term_val(t) + 0)), depth + 1)
+        || bufferize_derives_from_reduce(
+               term_resolve(heap_read(term_val(t) + 1)), depth + 1);
+  }
+  return 0;
+}
+
+// True iff `t`'s source subtree (bounded DFS) contains an EXPAND whose value
+// derives from a REDUCE -- the RMSNorm broadcast-back
+// `EXPAND(RESHAPE(RECIP(SQRT(REDUCE(x*x)/d + eps))))` (see NN/Norm.wl TRMSNorm).
+// This reduce-then-broadcast, fused lazily into a downstream batched matmul
+// reduce, mis-stages on Metal (the q/k RMSNorm-into-GQA-attention divergence at
+// S>=32): the inner reduce's per-row normalizer is re-indexed wrong through the
+// matmul's rank-grow EXPAND.
+static int bufferize_subtree_has_reduce_broadcast(Term t, u32 depth) {
+  if (depth > 24 || term_tag(t) != TAG_UOP) return 0;
+  u8 op = term_ext(t);
+  if (op == UOP_EXPAND
+      && bufferize_derives_from_reduce(
+             term_resolve(heap_read(term_val(t) + 0)), 0)) {
+    return 1;
+  }
+  if (uop_is_movement(op) || uop_is_unary_elementwise(op)
+      || op == UOP_RECIP || op == UOP_SQRT || op == UOP_NEG) {
+    return bufferize_subtree_has_reduce_broadcast(
+        term_resolve(heap_read(term_val(t) + 0)), depth + 1);
+  }
+  if (op == UOP_ADD || op == UOP_MUL) {
+    return bufferize_subtree_has_reduce_broadcast(
+               term_resolve(heap_read(term_val(t) + 0)), depth + 1)
+        || bufferize_subtree_has_reduce_broadcast(
+               term_resolve(heap_read(term_val(t) + 1)), depth + 1);
+  }
+  return 0;
+}
+
+// rmsnorm-feeds-matmul lever toggle (default ON; opt out for A/B).
+static int bufferize_rmsnorm_matmul_realize_enabled(void) {
+  static int known = 0, enabled = 1;
+  if (!known) {
+    char const *e = getenv("THVM_NO_RMSNORM_MATMUL_REALIZE");
+    enabled = !(e != NULL && e[0] == '1');
+    known = 1;
+  }
+  return enabled;
+}
+
+// True iff `operand`, walked back through pure movement (RESHAPE/PERMUTE/EXPAND
+// + cast), bottoms out at a non-const value (an EXPAND of a CONST scalar -- the
+// matmul scale -- is NOT a genuine contraction operand).
+static int bufferize_operand_is_nonconst(Term operand, u32 depth) {
+  if (depth > 24 || term_tag(operand) != TAG_UOP) return 0;
+  u8 op = term_ext(operand);
+  if (op == UOP_CONST) return 0;
+  if (uop_is_movement(op) || op == UOP_CAST || op == UOP_BITCAST) {
+    return bufferize_operand_is_nonconst(
+        term_resolve(heap_read(term_val(operand) + 0)), depth + 1);
+  }
+  return 1;   // a real value (LOAD / MUL / REDUCE / ...)
+}
+
+// True iff `reduce_loc` is a genuine contraction reduce: its source is a MUL of
+// two DISTINCT non-const operands (a matmul / batched-bmm: q@k, @V, x@W).  This
+// is independent of bufferize_uop_is_matmul, which declines the 4D batched
+// mhaBmm reduce (the GQA attention q@k / @V) -- the very reduces whose RMSNorm
+// input we must realize.
+static int bufferize_reduce_is_contraction(u64 reduce_loc) {
+  Term mul = term_resolve(heap_read(reduce_loc + 0));
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  Term a = term_resolve(heap_read(term_val(mul) + 0));
+  Term b = term_resolve(heap_read(term_val(mul) + 1));
+  if (term_val(a) == term_val(b)) return 0;           // x*x (rmsnorm mean): not a contraction
+  return bufferize_operand_is_nonconst(a, 0) && bufferize_operand_is_nonconst(b, 0);
+}
+
+// Walk a contraction-reduce MUL operand back through the matmul-staging
+// movement (RESHAPE/PERMUTE/EXPAND/CAST) to the FIRST elementwise (non-movement)
+// node -- the actual matmul input expression.  If that node's subtree carries
+// the RMSNorm reduce-broadcast (rsqrt-of-mean) normalizer, return its loc to
+// force-realize; else 0.  The matmul input is the RMSNorm output directly
+// (`q = rms`), OR a rope of it (`q = rope(rms)` -- an ADD of MULs whose subtree
+// still contains the rmsnorm reduce-broadcast).  Realizing it cuts the lazy
+// reduce-broadcast -> matmul fusion that mis-stages on Metal at S>=32.
+static u64 bufferize_rmsnorm_under_operand(Term operand, u32 depth) {
+  if (depth > 24 || term_tag(operand) != TAG_UOP) return 0;
+  u8 op = term_ext(operand);
+  if (uop_is_movement(op) || op == UOP_CAST || op == UOP_BITCAST) {
+    return bufferize_rmsnorm_under_operand(
+        term_resolve(heap_read(term_val(operand) + 0)), depth + 1);
+  }
+  // First non-movement node: the matmul input expression (rms output, or a
+  // rope/elementwise wrapping it).  Realize it iff it carries the normalizer.
+  if (bufferize_subtree_has_reduce_broadcast(operand, 0)) return term_val(operand);
+  return 0;
+}
+
+// For a contraction reduce (q@k / @V / x@W: source MUL of two distinct non-const
+// operands) whose operands are RMSNorm outputs, force-realize EACH such rmsnorm
+// output (the boundary that makes the norm its own kernel).  Lazily fused into
+// the batched GQA attention matmul on Metal, the RMSNorm's per-row normalizer
+// mis-stages through the matmul's RESHAPE{M,K,1}+EXPAND{M,K,N} rank-grow ->
+// wrong output for S>=32 (the Krea DiT q/k-RMSNorm; bit-identical to CPU once
+// realized first -- what tinygrad does, a norm feeding a matmul is its own
+// kernel).  Keyed on bufferize_reduce_is_contraction (NOT bufferize_uop_is_matmul,
+// which declines the 4D batched mhaBmm reduce -- the very ones we must fix).
+// Returns the count of boundaries marked.
+static u32 bufferize_rmsnorm_feeds_matmul(UOpInfo const *info) {
+  if (!bufferize_rmsnorm_matmul_realize_enabled()) return 0;
+  if (info->op != UOP_REDUCE) return 0;
+  if (!bufferize_reduce_is_contraction(info->loc)) return 0;
+  Term mul = term_resolve(heap_read(info->loc + 0));
+  u32 marked = 0;
+  for (u32 i = 0; i < 2; i++) {
+    u64 rms = bufferize_rmsnorm_under_operand(
+        term_resolve(heap_read(term_val(mul) + i)), 0);
+    if (rms != 0) {
+      u32 ridx = bufferize_info_find(rms);
+      if (ridx != 0xFFFFFFFFu) {
+        bufferize_node_mark(&BUFFERIZE_NODES[ridx], BUFFERIZE_REASON_REDUCE);
+        marked++;
+      }
+    }
+  }
+  return marked;
+}
+
 fn void bufferize_classify(Term root) {
   bufferize_info_clear();
   // Always touch the bufferize graph so its state stays in sync with
@@ -1417,6 +1631,22 @@ fn void bufferize_classify(Term root) {
     }
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
+      // fp8-matmul-decode lever: realize a fp8->bf16 weight CAST that feeds a
+      // matmul so the per-element decode runs ONCE in a transient bf16 buffer,
+      // not M-fold redundant in the matmul's inner reduce loop (6x faster).
+      if (bufferize_fp8_cast_feeds_matmul(info)) {
+        // FP8_TRANSIENT flags the boundary so emit records its bf16 tid and
+        // end-of-realize frees it (single-use: only the matmul reduce reads it
+        // this realize).  Without the free, mark_heap_rooted_preserve pins the
+        // kloc+0 cell forever -> 13MB-per-matmul leak (the 128px OOM wall).
+        bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE | BUFFERIZE_REASON_FP8_TRANSIENT);
+      }
+      // Realize each RMSNorm output that feeds a (batched) matmul: the
+      // reduce-broadcast normalizer mis-stages through the matmul rank-grow
+      // EXPAND on Metal (the Krea q/k-RMSNorm -> GQA attention divergence at
+      // S>=32).  Faithful: a norm feeding a matmul is its own kernel.  `info`
+      // is the contraction reduce; the boundaries go on its rmsnorm operands.
+      (void)bufferize_rmsnorm_feeds_matmul(info);
       if (info->consumer_count >= 2) {
         // Mirror tinygrad: a multi-consumer REDUCE-EPILOGUE elementwise is
         // NOT pre-realized.  tinygrad's pm_generate_realize_map seeds only

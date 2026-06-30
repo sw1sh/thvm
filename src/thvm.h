@@ -594,7 +594,7 @@ int             dtype_is_packed   (u32 dt);
 // === Capacities ===
 #define HEAP_CAP     (1ULL << 28)   // 256M cells * 8B = 2 GiB.  Cheney splits in half (1 GiB per semi-space).  Bumped from 1<<26 so the HVM bench fib_nat (~1.2B cells over its tree) fits without GC.
 #define WNF_CAP      (1ULL << 16)   // 64K stack slots.
-#define TENS_CAP     (1ULL << 20)   // 1M tensor descriptor slots.
+#define TENS_CAP     (1ULL << 24)   // 16M tensor descriptor slots (mmap-backed, virtual-only; the Krea 12B DiT forward generates >4M views, and the JIT capture of one forward must fit before replays reuse its buffers).
 #define KERNELS_CAP  (1ULL << 18)   // 256K compiled kernels.
 #define BOOK_CAP     (1ULL << 28)   // 256M cells of static def template heap (2 GiB) -- iter Z+? per-thread arena needs at V>=8 SAT collapse.
 #define DEFS_CAP     256            // max named definitions for TAG_REF.
@@ -1760,6 +1760,17 @@ fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
 // this reason, so backward / non-attention reduces keep their conservative
 // always-realize boundary (default PCONTIG off never sets it -> no effect).
 #define BUFFERIZE_REASON_PCONTIG_ATTN (1u << 8)
+// fp8 weight -> bf16 cast force-realized to feed a matmul (see
+// bufferize_fp8_cast_feeds_matmul).  Without realizing the cast the scalar
+// matmul re-decodes each fp8 weight element M times in its inner reduce loop
+// (5x slower).  But the realized bf16 IS a single-use transient -- its only
+// consumer is the matmul reduce in the SAME realize -- so it must be FREED at
+// end-of-realize.  On Metal it gets a legacy (non-arena) alloc whose kloc+0
+// output cell mark_heap_rooted_preserve would otherwise pin forever (the
+// 13MB-per-matmul leak: 24GB base + per-step growth).  This reason flags the
+// boundary so emit records its tid in FP8_TRANSIENT_TIDS and end-of-realize
+// frees it after the consuming matmul has fired.
+#define BUFFERIZE_REASON_FP8_TRANSIENT (1u << 9)
 typedef struct {
   u64 loc;             // heap loc of the underlying UOp value
   u32 buffer_id;       // 1-based stable id within this graph
@@ -2180,6 +2191,7 @@ fn u32 tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 fn u32  materialized_loc_lookup       (u64 loc);
 fn void materialized_loc_insert       (u64 loc, u32 tid);
 fn void materialized_loc_clear        (void);
+fn void thvm_free_fp8_transients      (u32 result_tid);
 // UOP_COPY persistent device-upload cache (schedule/materialize.c).
 // Reset on GC compaction / thvm reset / free (its keys are heap locs).
 fn void copy_upload_cache_reset       (void);
@@ -2222,6 +2234,12 @@ void thvm_metal_buf_mark_preserved(u32 buf_id);
 void thvm_metal_buf_gpu_zero(u32 buf_id);
 void thvm_metal_buf_clear_preserved(u32 wm);
 u64  thvm_metal_buf_free_unpreserved_all(void);
+// One-shot decref of a single-use transient buffer (fp8->bf16 cast consumed by
+// a matmul this realize).  No-op stub on non-Metal builds.
+void thvm_metal_buf_decref_one(u32 buf_id);
+// Current Metal device live-buffer bytes (0 on non-Metal builds).  Drives the
+// realize-boundary device-byte GC trigger (thvm_realize_maybe_gc).
+u64  thvm_metal_live_bytes(void);
 // Cold-start lever: parallel-compile every Metal-routed tile kernel in
 // [kid_lo, kid_hi) whose PSO isn't already cached, BEFORE the serial fire
 // loop dispatches them one-at-a-time (mirrors cpu_jit_precompile_range).
@@ -3473,6 +3491,11 @@ fn Term thvm_materialize(Term term);
 // independent roots into one pass.
 fn Term thvm_realize(Term expr);
 fn Term thvm_realize_many(Term ctr_term);
+// Ceiling-abort cleanup: hard-rolls a failed (longjmp'd-out) realize's pools
+// back to its entry watermarks so an over-budget run doesn't leak across
+// retries.  Called from the LibraryLink THVM_WL_RECOVER recovery branch; a
+// no-op when no realize is in flight.
+fn void thvm_realize_ceiling_cleanup(void);
 
 // === interact/uop_grad ===
 // Forward-declared so materialize_expr can reduce UOP_GRAD nodes
@@ -4737,6 +4760,12 @@ typedef struct {
   // LPO order-gate to candidate faces only.  Rebuilt with rule_index
   // whenever R mutates (shares rule_index_dirty / n_rules_built).
   struct AtpRuleIndex *unorient_index;
+  // GJ all-rules discrimination index (every live rule's stored l->r LHS,
+  // no orientable filter) for the ground-join rewrite (gj_rewrite_step):
+  // replaces its per-step linear O(R) scan with an indexed candidate
+  // collect gated by the model order.  Lazily built; rebuilt on
+  // (n_rules, r_revision) change.  Off unless THVM_ATP_GJ_INDEX.
+  struct AtpRuleIndex *gj_rule_index;
   // Opt-in flatterm fast-path for the MIXED (orientable + unorientable)
   // normalize loop.  OFF by default: the engine is byte-identical to the
   // tree mixed loop.  When set, atp_rewrite_normalize_ordered's mixed
@@ -5671,6 +5700,10 @@ typedef struct {
   // {"DemoteOnLhsSimplify" -> True} (in the "Waldmeister" presets)
   // via thvm_atp_set_use_wm_demote.
   u8    use_wm_demote;
+  // firstdiv-11 probe (env THVM_ATP_KEEP_LHS_REDUCIBLE, default OFF): keep an
+  // LHS-reducible oriented rule live instead of dropping it at the always-on
+  // interreduce site, to test whether dropping -auto rule 3 ranks the carrier late.
+  u8    keep_lhs_reducible;
   // Overlap-exhausted-equation gate (env THVM_ATP_OVERLAP_EXHAUST, default
   // OFF): a newly-added fact does not re-superpose against an old
   // unorientable equation whose birth-batch already enumerated its CP set

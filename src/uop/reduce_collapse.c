@@ -209,14 +209,56 @@ static Term rc_collapse_one(Term red) {
 // the simplifying constructors (which hash-cons).  Returns the rewritten
 // root (== root when nothing folded).  Bounded recursion; a small memo
 // avoids re-walking shared sub-DAGs.
-#define RC_MEMO_CAP 4096
-typedef struct { u64 key[RC_MEMO_CAP]; Term val[RC_MEMO_CAP]; u32 n; } RcMemo;
+// Open-addressed memo (Term key -> rewritten Term).  Was a LINEAR-scan array:
+// rc_memo_get scanned all `n` entries per node, so visiting K nodes cost O(K^2)
+// -- the dominant deep-graph JIT-capture cost (per-kernel store_root of O(depth)
+// nodes, rewritten for every kernel: 0.98 ms @ 4 blocks -> 7.5 ms @ 8 blocks in
+// profiling, ~O(N^2.7)).  A hash makes each lookup O(1).  Key 0 = empty (the
+// caller never memoizes a 0 Term: rc_rewrite_rec returns early on non-UOP and
+// guards root==0).  Power-of-2 capacity; mask-index open addressing.  At load
+// the table just stops memoizing (correct, slow -- the prior >CAP behavior).
+// Open-addressed memo (Term key -> rewritten Term), generation-stamped so the
+// per-call reset is O(1) (bump `cur_gen`) instead of memset'ing the whole
+// table.  A slot is "live" iff slot_gen[i] == m->cur_gen.  This replaces the
+// old LINEAR-scan array whose rc_memo_get scanned all `n` entries per node
+// (O(K^2) over a K-node store_root; the dominant deep-graph JIT-capture cost:
+// 0.98 ms @ 4 blocks -> 7.5 ms @ 8 blocks before this).  Key 0 never memoized
+// (caller guards root==0; non-UOP returns early).  Power-of-2 capacity.
+#define RC_MEMO_CAP 16384            /* power of 2 */
+typedef struct {
+  u64 key[RC_MEMO_CAP];
+  Term val[RC_MEMO_CAP];
+  u32 slot_gen[RC_MEMO_CAP];
+  u32 cur_gen;
+  u32 n;
+} RcMemo;
+static inline u32 rc_memo_hash(Term t) {
+  u64 v = (u64)t;
+  v ^= v >> 33; v *= 0xff51afd7ed558ccdULL;
+  v ^= v >> 33; v *= 0xc4ceb9fe1a85ec53ULL;
+  v ^= v >> 33;
+  return (u32)v & (RC_MEMO_CAP - 1);
+}
 static Term rc_memo_get(RcMemo *m, Term t, int *hit) {
-  for (u32 i = 0; i < m->n; i++) if (m->key[i] == t) { *hit = 1; return m->val[i]; }
+  u32 h = rc_memo_hash(t);
+  for (u32 probe = 0; probe < RC_MEMO_CAP; probe++) {
+    u32 i = (h + probe) & (RC_MEMO_CAP - 1);
+    if (m->slot_gen[i] != m->cur_gen) { *hit = 0; return 0; }  // empty (this gen)
+    if (m->key[i] == (u64)t) { *hit = 1; return m->val[i]; }
+  }
   *hit = 0; return 0;
 }
 static void rc_memo_put(RcMemo *m, Term t, Term v) {
-  if (m->n < RC_MEMO_CAP) { m->key[m->n] = t; m->val[m->n] = v; m->n++; }
+  if (m->n * 2 >= RC_MEMO_CAP) return;                 // keep load < 0.5: stop memoizing
+  u32 h = rc_memo_hash(t);
+  for (u32 probe = 0; probe < RC_MEMO_CAP; probe++) {
+    u32 i = (h + probe) & (RC_MEMO_CAP - 1);
+    if (m->slot_gen[i] != m->cur_gen) {                // empty (this gen): claim
+      m->key[i] = (u64)t; m->val[i] = v;
+      m->slot_gen[i] = m->cur_gen; m->n++; return;
+    }
+    if (m->key[i] == (u64)t) { m->val[i] = v; return; }  // update
+  }
 }
 
 static Term rc_rewrite_rec(Term t, RcMemo *m, u32 depth) {
@@ -305,6 +347,14 @@ fn Term uop_reduce_arange_collapse(Term root) {
   }
   if (!enabled) return root;
   if (root == 0) return root;
-  RcMemo memo; memo.n = 0;
+  // File-scope static (single-threaded per realize; ~384 KB, too big for the
+  // stack).  Zero-initialized once at load (slot_gen all 0, cur_gen 0); each
+  // call bumps cur_gen so all prior stamps read as empty -- an O(1) reset.
+  static RcMemo memo;
+  memo.n = 0;
+  if (++memo.cur_gen == 0) {            // wrap (astronomically rare): hard-clear
+    memset(memo.slot_gen, 0, sizeof(memo.slot_gen));
+    memo.cur_gen = 1;
+  }
   return rc_rewrite_rec(root, &memo, 0);
 }

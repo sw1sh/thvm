@@ -53,6 +53,10 @@ static void extern_pin_manager(WolframLibraryData libData, mbool mode, mint id) 
   thvm_heap_exhausted = 0;                                                     \
   if (setjmp(_thvm_jb_##tag) != 0) {                                           \
     thvm_heap_exhaust_jmp = NULL;                                              \
+    /* Q2: free the failed realize's in-progress buffers so an over-budget    \
+       run doesn't leak across retries (28->45 GB / 20-min wedge).  No-ops    \
+       when no realize was in flight. */                                      \
+    thvm_realize_ceiling_cleanup();                                           \
     fprintf(stderr, "thvm_wl_" #tag ": ceiling/heap exhausted -- returning "   \
                     "LIBRARY_FUNCTION_ERROR (kernel preserved)\n");            \
     return LIBRARY_FUNCTION_ERROR;                                             \

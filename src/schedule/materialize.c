@@ -46,6 +46,17 @@ fn u64  bypass_gate_bcast_count         (void) { return BYPASS_GATE_BCAST;      
 static Term BOUNDARY_BUFFERIZE_TERM[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_ORDER_LEN = 0;
 
+// fp8-cast single-use transients (BUFFERIZE_REASON_FP8_TRANSIENT): the bf16
+// weight a force-realized fp8->bf16 cast materializes, consumed only by the
+// matmul reduce that fired this realize.  Recorded at emit, freed wholesale at
+// end-of-realize (thvm_free_fp8_transients) so mark_heap_rooted_preserve's
+// raw-heap kloc+0 scan can't pin them across realizes (the 13MB/matmul leak).
+#define FP8_TRANSIENT_CAP 4096
+static u32 FP8_TRANSIENT_TIDS [FP8_TRANSIENT_CAP];
+static u64 FP8_TRANSIENT_KLOCS[FP8_TRANSIENT_CAP];  // kloc+0 holds TAG_TEN(tid)
+static u64 FP8_TRANSIENT_PINS [FP8_TRANSIENT_CAP];  // diagnostic kernel-term pin
+static u32 FP8_TRANSIENT_LEN = 0;
+
 // Open-addressed loc -> BOUNDARY_ORDER index hash.  Without it,
 // boundary_index_for_loc was an O(BOUNDARY_ORDER_LEN) scan per
 // visited UOP child, called from every emit_kernel_for_boundary's
@@ -75,6 +86,103 @@ static void boundary_hash_insert(u64 loc, u32 idx) {
       return;
     }
   }
+}
+
+// Open-addressed BUFFERIZE-Term -> BOUNDARY_ORDER index hashes.  Without these,
+// unified_rewrite_buffer_for_bufferize{,_extend} (+ the n_ranges decomp helper)
+// did an O(BOUNDARY_ORDER_LEN) linear scan of BOUNDARY_BUFFERIZE_TERM[] for
+// EVERY BUFFERIZE/INDEX_E node the per-kernel subtree rewrite visits -- O(N)
+// per node, O(N) nodes per kernel, O(N) kernels = O(N^2)+ on a deep chain (the
+// 28-transformer-block JIT capture: emit_kernels grew 1.8 ms @ N=4 -> 330 ms @
+// N=28 in profiling, ~O(N^2.7)).  This is the same class of bug BOUNDARY_HASH
+// fixed for boundary_index_for_loc, but keyed by Term (the bufferize) instead
+// of loc, so it escaped that fix.  Two indexes:
+//   _TERM_HASH:  the BUFFERIZE Term itself -> bi (the identity match).
+//   _VALUE_HASH: the bufferize's VALUE subtree Term -> bi (the fallback match,
+//                two bufferizes wrapping the same value = the same buffer).
+// Both share BOUNDARY_HASH's open-addressing + Term-mix.  Built once per realize
+// in topo_sort_boundaries (alongside boundary_hash_insert), so lookups are O(1).
+static u32 BOUNDARY_BUF_TERM_HASH [BOUNDARY_HASH_CAP];
+static u32 BOUNDARY_BUF_VALUE_HASH[BOUNDARY_HASH_CAP];
+
+static inline u32 boundary_term_hash_of(Term t) {
+  u64 v = (u64)t;
+  v ^= v >> 33; v *= 0xff51afd7ed558ccdULL;
+  v ^= v >> 33; v *= 0xc4ceb9fe1a85ec53ULL;
+  v ^= v >> 33;
+  return (u32)v & (BOUNDARY_HASH_CAP - 1);
+}
+
+static void boundary_buf_hash_clear(void) {
+  for (u32 i = 0; i < BOUNDARY_HASH_CAP; i++) {
+    BOUNDARY_BUF_TERM_HASH[i]  = BOUNDARY_HASH_EMPTY;
+    BOUNDARY_BUF_VALUE_HASH[i] = BOUNDARY_HASH_EMPTY;
+  }
+}
+
+// Insert (buf_term, value_term) -> idx.  Keeps the FIRST idx for a given key
+// (matches the linear scans' `break` on first match).  value_term may be 0
+// (no value subtree); skip the value index then.
+static void boundary_buf_hash_insert(Term buf_term, Term value_term, u32 idx) {
+  if (buf_term != 0) {
+    u32 h = boundary_term_hash_of(buf_term);
+    for (u32 probe = 0; probe < BOUNDARY_HASH_CAP; probe++) {
+      u32 i = (h + probe) & (BOUNDARY_HASH_CAP - 1);
+      if (BOUNDARY_BUF_TERM_HASH[i] == BOUNDARY_HASH_EMPTY) {
+        BOUNDARY_BUF_TERM_HASH[i] = idx; break;
+      }
+      // Same Term re-inserted (shouldn't happen -- boundaries are distinct
+      // bufferizes): keep the first, stop.
+      if (BOUNDARY_BUFFERIZE_TERM[BOUNDARY_BUF_TERM_HASH[i]] == buf_term) break;
+    }
+  }
+  if (value_term != 0) {
+    u32 h = boundary_term_hash_of(value_term);
+    for (u32 probe = 0; probe < BOUNDARY_HASH_CAP; probe++) {
+      u32 i = (h + probe) & (BOUNDARY_HASH_CAP - 1);
+      if (BOUNDARY_BUF_VALUE_HASH[i] == BOUNDARY_HASH_EMPTY) {
+        BOUNDARY_BUF_VALUE_HASH[i] = idx; break;
+      }
+      // Another boundary with the same value subtree already mapped: keep the
+      // FIRST (the linear fallback also returned the first match), stop.
+      Term existing = BOUNDARY_BUFFERIZE_TERM[BOUNDARY_BUF_VALUE_HASH[i]];
+      if (existing != 0 && uop_bufferize_value(existing) == value_term) break;
+    }
+  }
+}
+
+// O(1) lookup: the BOUNDARY_ORDER index whose BUFFERIZE Term == buf, or
+// 0xFFFFFFFF.  Mirrors the `BOUNDARY_BUFFERIZE_TERM[bi] == buf` scans.
+static u32 boundary_buf_term_index(Term buf) {
+  if (buf == 0) return 0xFFFFFFFFu;
+  u32 h = boundary_term_hash_of(buf);
+  for (u32 probe = 0; probe < BOUNDARY_HASH_CAP; probe++) {
+    u32 i = (h + probe) & (BOUNDARY_HASH_CAP - 1);
+    u32 idx = BOUNDARY_BUF_TERM_HASH[i];
+    if (idx == BOUNDARY_HASH_EMPTY) return 0xFFFFFFFFu;
+    if (idx < BOUNDARY_ORDER_LEN && BOUNDARY_BUFFERIZE_TERM[idx] == buf) return idx;
+  }
+  return 0xFFFFFFFFu;
+}
+
+// O(1) value-match fallback: a BOUNDARY_ORDER index whose bufferize VALUE ==
+// want_value (excluding the entry whose buf Term == exclude), or 0xFFFFFFFF.
+static u32 boundary_buf_value_index(Term want_value, Term exclude) {
+  if (want_value == 0) return 0xFFFFFFFFu;
+  u32 h = boundary_term_hash_of(want_value);
+  for (u32 probe = 0; probe < BOUNDARY_HASH_CAP; probe++) {
+    u32 i = (h + probe) & (BOUNDARY_HASH_CAP - 1);
+    u32 idx = BOUNDARY_BUF_VALUE_HASH[i];
+    if (idx == BOUNDARY_HASH_EMPTY) return 0xFFFFFFFFu;
+    if (idx < BOUNDARY_ORDER_LEN) {
+      Term cand = BOUNDARY_BUFFERIZE_TERM[idx];
+      if (cand != 0 && cand != exclude
+          && term_tag(cand) == TAG_UOP && term_ext(cand) == UOP_BUFFERIZE
+          && uop_bufferize_value(cand) == want_value)
+        return idx;
+    }
+  }
+  return 0xFFFFFFFFu;
 }
 
 // Persistent loc -> tid cache: once emit_kernel_for_boundary realizes
@@ -569,6 +677,36 @@ fn void materialized_loc_clear(void) {
   }
   MATERIALIZED_LOC_LEN = 0;
   xpass_shared_tid_reset();
+}
+
+// Free the fp8->bf16 cast single-use transients emitted this realize (recorded
+// in emit_kernel_for_boundary under BUFFERIZE_REASON_FP8_TRANSIENT).  Each
+// such bf16 weight buffer's ONLY consumer is the matmul reduce that already
+// fired by the time this runs, so it is dead.  Left alone it leaks: its
+// emit-time kloc+0 TAG_TEN cell makes mark_heap_rooted_preserve re-preserve
+// the buffer every subsequent realize (13MB/matmul -> the 128px OOM wall).
+// We zero the kloc+0 and diagnostic pin cells so the heap scan no longer sees
+// the buffer, then decref it.  Skipped during JIT capture (the capture pin
+// keeps replay-read buffers live; the leak can't accumulate across a one-shot
+// capture).  result_tid is never freed (defensive: it is the matmul output,
+// not a cast transient, but guard anyway).
+fn void thvm_free_fp8_transients(u32 result_tid) {
+  if (jit_is_capturing()) { FP8_TRANSIENT_LEN = 0; return; }
+  for (u32 i = 0; i < FP8_TRANSIENT_LEN; i++) {
+    u32 tid  = FP8_TRANSIENT_TIDS[i];
+    u64 kloc = FP8_TRANSIENT_KLOCS[i];
+    u64 pin  = FP8_TRANSIENT_PINS[i];
+    // Unhook from the heap so the next realize's heap-rooted preserve scan
+    // cannot re-mark this buffer.  Both cells are emit scratch (the kernel's
+    // own output cell + its THeapDiagram pin); nothing reads them after fire.
+    if (kloc != 0) heap_set(kloc + 0, 0);
+    if (pin  != 0) heap_set(pin,      0);
+    if (tid == 0 || tid >= TENS_NEXT || tid == result_tid) continue;
+    u32 bid = TENS[tid].buf_id;
+    if (bid == 0) continue;
+    if (TENS[tid].backend == &METAL_BACKEND) thvm_metal_buf_decref_one(bid);
+  }
+  FP8_TRANSIENT_LEN = 0;
 }
 
 fn u32 materialized_loc_lookup(u64 loc) {
@@ -1796,15 +1934,19 @@ static u32 boundary_depth_rec(u64 loc) {
 // true last_use_depth is the realized PARENT'S depth, not the
 // non-realized intermediate's "depth" (which equals the
 // child's, see boundary_depth_rec where non-realized just inherits).
+// `visited` is an EPOCH array (per-loc last-visited stamp), NOT a 0/1 bitmap:
+// the caller bumps `epoch` per parent instead of memset'ing the whole
+// HEAP_NEXT-sized bitmap, turning the per-parent reset from O(HEAP_NEXT) into
+// O(1) -- the deep-graph O(N^2) (N boundaries x O(N) heap memset) collapse.
 static void boundary_last_use_descend(u64 from_loc, u32 visiting_depth,
-                                      u8 *visited) {
+                                      u32 *visited, u32 epoch) {
   // Heap loc 0 is a valid allocation; only HEAP_NEXT bounds gates
   // the read.  (Earlier code treated 0 as a sentinel which silently
   // dropped last-use updates for the first-allocated boundary in
   // any heap-clean tests.)
   if (from_loc >= HEAP_NEXT) return;
-  if (visited[from_loc]) return;
-  visited[from_loc] = 1;
+  if (visited[from_loc] == epoch) return;
+  visited[from_loc] = epoch;
   u32 idx = bufferize_info_find(from_loc);
   if (idx == 0xFFFFFFFFu) return;
   if (BUFFERIZE_NODES[idx].realized) {
@@ -1828,7 +1970,7 @@ static void boundary_last_use_descend(u64 from_loc, u32 visiting_depth,
     for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
     if (dup) continue;
     seen[n_seen++] = cloc;
-    boundary_last_use_descend(cloc, visiting_depth, visited);
+    boundary_last_use_descend(cloc, visiting_depth, visited, epoch);
   }
 }
 
@@ -1840,8 +1982,13 @@ static void boundary_last_use_descend(u64 from_loc, u32 visiting_depth,
 static void boundary_compute_last_use(void) {
   for (u32 i = 0; i < BUFFERIZE_NODES_CAP; i++) BOUNDARY_LAST_USE[i] = 0;
   if (HEAP_NEXT == 0) return;
-  u8 *visited = (u8 *)calloc(HEAP_NEXT, 1);
+  // Epoch-stamped visited array (u32 per loc): bump `epoch` per parent instead
+  // of memset'ing HEAP_NEXT bytes per parent.  calloc zero-inits to epoch 0, so
+  // we start the per-parent epoch at 1 (0 means "never visited").  This turns
+  // the per-parent O(HEAP_NEXT) reset into O(1) -- the deep-graph quadratic.
+  u32 *visited = (u32 *)calloc(HEAP_NEXT, sizeof(u32));
   if (visited == NULL) return;
+  u32 epoch = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     UOpInfo *p = &BUFFERIZE_NODES[i];
     if (!p->realized)                              continue;
@@ -1850,10 +1997,9 @@ static void boundary_compute_last_use(void) {
     u8 ar = uop_arity(p->op);
     u64 seen[MAX_UOP_SRC] = {0};
     u8  n_seen = 0;
-    // Reset the visited bitmap per-parent so the walk doesn't
-    // collapse across parents (each parent independently roots
-    // its own consumer-depth update).
-    memset(visited, 0, HEAP_NEXT);
+    // Fresh epoch per-parent so the walk doesn't collapse across parents
+    // (each parent independently roots its own consumer-depth update).
+    epoch++;
     for (u8 c = 0; c < ar; c++) {
       Term child = term_resolve(heap_read(p->loc + c));
       if (term_tag(child) != TAG_UOP)         continue;
@@ -1863,7 +2009,7 @@ static void boundary_compute_last_use(void) {
       for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
       if (dup) continue;
       seen[n_seen++] = cloc;
-      boundary_last_use_descend(cloc, p_depth, visited);
+      boundary_last_use_descend(cloc, p_depth, visited, epoch);
     }
   }
   free(visited);
@@ -1876,10 +2022,10 @@ static void boundary_compute_last_use(void) {
 // only the recorded quantity differs (fire-order position, not depth).
 static u32 boundary_index_for_loc(u64 loc);
 static void boundary_last_use_pos_descend(u64 from_loc, u32 visiting_pos,
-                                          u8 *visited) {
+                                          u32 *visited, u32 epoch) {
   if (from_loc >= HEAP_NEXT) return;
-  if (visited[from_loc]) return;
-  visited[from_loc] = 1;
+  if (visited[from_loc] == epoch) return;
+  visited[from_loc] = epoch;
   u32 idx = bufferize_info_find(from_loc);
   if (idx == 0xFFFFFFFFu) return;
   // Terminate the lifetime walk only at a node that is ACTUALLY MATERIALIZED
@@ -1915,7 +2061,7 @@ static void boundary_last_use_pos_descend(u64 from_loc, u32 visiting_pos,
     for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
     if (dup) continue;
     seen[n_seen++] = cloc;
-    boundary_last_use_pos_descend(cloc, visiting_pos, visited);
+    boundary_last_use_pos_descend(cloc, visiting_pos, visited, epoch);
   }
 }
 
@@ -1929,8 +2075,11 @@ static void boundary_last_use_pos_descend(u64 from_loc, u32 visiting_pos,
 static void boundary_compute_last_use_pos(void) {
   for (u32 i = 0; i < BUFFERIZE_NODES_CAP; i++) BOUNDARY_LAST_USE_POS[i] = 0;
   if (HEAP_NEXT == 0) return;
-  u8 *visited = (u8 *)calloc(HEAP_NEXT, 1);
+  // Epoch-stamped visited array (see boundary_compute_last_use): O(1) per-parent
+  // reset instead of memset(HEAP_NEXT) -- the deep-graph O(N^2) collapse.
+  u32 *visited = (u32 *)calloc(HEAP_NEXT, sizeof(u32));
   if (visited == NULL) return;
+  u32 epoch = 0;
   for (u32 pos = 0; pos < BOUNDARY_ORDER_LEN; pos++) {
     u64 ploc = BOUNDARY_ORDER[pos];
     u32 i = bufferize_info_find(ploc);
@@ -1940,7 +2089,7 @@ static void boundary_compute_last_use_pos(void) {
     u8 ar = uop_arity(p->op);
     u64 seen[MAX_UOP_SRC] = {0};
     u8  n_seen = 0;
-    memset(visited, 0, HEAP_NEXT);
+    epoch++;
     for (u8 c = 0; c < ar; c++) {
       Term child = term_resolve(heap_read(p->loc + c));
       if (term_tag(child) != TAG_UOP)         continue;
@@ -1950,7 +2099,7 @@ static void boundary_compute_last_use_pos(void) {
       for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
       if (dup) continue;
       seen[n_seen++] = cloc;
-      boundary_last_use_pos_descend(cloc, pos, visited);
+      boundary_last_use_pos_descend(cloc, pos, visited, epoch);
     }
   }
   free(visited);
@@ -2151,27 +2300,21 @@ static Term unified_rewrite_buffer_for_tid_extend(KernelEntry *ke, u32 tid) {
 // hasn't been wired through input_tids[]).
 static Term unified_rewrite_buffer_for_bufferize(KernelEntry const *ke,
                                                  Term buf) {
-  for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
-    if (BOUNDARY_BUFFERIZE_TERM[bi] != buf) continue;
-    u32 tid = BOUNDARY_TID[bi];
-    return unified_rewrite_buffer_for_tid(ke, tid);
+  // O(1) identity match (boundary_buf_term_index) replacing the O(N) scan.
+  u32 bi = boundary_buf_term_index(buf);
+  if (bi != 0xFFFFFFFFu) {
+    return unified_rewrite_buffer_for_tid(ke, BOUNDARY_TID[bi]);
   }
   // Fallback: identity match missed (often because addrspace or
   // closed_ranges differ between the consumer-side INDEX_E.buf and
   // the boundary's stored bufferize term).  Match by producer value
   // instead -- two bufferize terms wrapping the same value subtree
-  // refer to the same realized buffer.
+  // refer to the same realized buffer.  O(1) via boundary_buf_value_index.
   if (term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_BUFFERIZE) {
     Term want_value = uop_bufferize_value(buf);
-    if (want_value != 0) {
-      for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
-        Term cand = BOUNDARY_BUFFERIZE_TERM[bi];
-        if (cand == 0 || cand == buf) continue;
-        if (term_tag(cand) != TAG_UOP || term_ext(cand) != UOP_BUFFERIZE) continue;
-        if (uop_bufferize_value(cand) != want_value) continue;
-        u32 tid = BOUNDARY_TID[bi];
-        return unified_rewrite_buffer_for_tid(ke, tid);
-      }
+    u32 vbi = boundary_buf_value_index(want_value, buf);
+    if (vbi != 0xFFFFFFFFu) {
+      return unified_rewrite_buffer_for_tid(ke, BOUNDARY_TID[vbi]);
     }
   }
   return 0;
@@ -2190,23 +2333,15 @@ static Term unified_rewrite_buffer_for_bufferize_extend(KernelEntry *ke,
                                                         Term buf) {
   Term repl = unified_rewrite_buffer_for_bufferize(ke, buf);
   if (repl != 0) return repl;
-  // Look up boundary's producer tid and extend.
+  // Look up boundary's producer tid and extend.  O(1) via the term + value
+  // hash indexes (replacing the two O(N) scans).
   u32 tid = 0;
-  for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
-    if (BOUNDARY_BUFFERIZE_TERM[bi] == buf) { tid = BOUNDARY_TID[bi]; break; }
-  }
+  u32 bi = boundary_buf_term_index(buf);
+  if (bi != 0xFFFFFFFFu) tid = BOUNDARY_TID[bi];
   if (tid == 0 && term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_BUFFERIZE) {
     Term want_value = uop_bufferize_value(buf);
-    if (want_value != 0) {
-      for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
-        Term cand = BOUNDARY_BUFFERIZE_TERM[bi];
-        if (cand == 0 || cand == buf) continue;
-        if (term_tag(cand) != TAG_UOP || term_ext(cand) != UOP_BUFFERIZE) continue;
-        if (uop_bufferize_value(cand) != want_value) continue;
-        tid = BOUNDARY_TID[bi];
-        break;
-      }
-    }
+    u32 vbi = boundary_buf_value_index(want_value, buf);
+    if (vbi != 0xFFFFFFFFu) tid = BOUNDARY_TID[vbi];
   }
   if (tid == 0) return 0;
   return unified_rewrite_buffer_for_tid_extend(ke, tid);
@@ -2668,15 +2803,13 @@ static Term try_inline_bufferize_via_axis_table(
   u8 ax_n = rangeify_unified_index_axes_lookup(
       term_val(resolved), ax_rngs, MAX_DIM);
   if (ax_n < n_ranges) return 0;
-  // First scan BOUNDARY_BUFFERIZE_TERM[] (the realized-as-kernel
-  // boundaries); fall back to RU_BUFFERIZE_TERM[] for orphan
-  // BUFFERIZEs whose node didn't become a separate kernel.
+  // First look up BOUNDARY_BUFFERIZE_TERM[] (the realized-as-kernel
+  // boundaries) O(1) via the term hash; fall back to RU_BUFFERIZE_TERM[] for
+  // orphan BUFFERIZEs whose node didn't become a separate kernel.
   u32 prod_idx = 0xFFFFFFFFu;
-  for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
-    if (BOUNDARY_BUFFERIZE_TERM[bi] == inner_buf) {
-      prod_idx = bufferize_info_find(BOUNDARY_ORDER[bi]);
-      break;
-    }
+  {
+    u32 bi = boundary_buf_term_index(inner_buf);
+    if (bi != 0xFFFFFFFFu) prod_idx = bufferize_info_find(BOUNDARY_ORDER[bi]);
   }
   if (prod_idx == 0xFFFFFFFFu) {
     prod_idx = rangeify_unified_node_idx_for_bufferize(inner_buf);
@@ -3126,8 +3259,8 @@ static u32 axext_lookup(AxExtMap const *m, u32 aid) {
   return 0;
 }
 
-static void axext_collect_rec(AxExtMap *m, Term t, u8 *visited, u64 cap,
-                              u32 depth) {
+static void axext_collect_rec(AxExtMap *m, Term t, u32 *visited, u64 cap,
+                              u32 epoch, u32 depth) {
   if (depth > 256) return;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return;
@@ -3136,10 +3269,12 @@ static void axext_collect_rec(AxExtMap *m, Term t, u8 *visited, u64 cap,
   // reach a node.  A DAG node shared by N parents (residual fan-in,
   // stacked-backward) must be walked ONCE, not once per incoming edge --
   // else exponential in depth (a 2-layer transformer backward never
-  // finishes).  Same loc-indexed bitmap as materialize_subst_cached_rec.
+  // finishes).  `visited` is an EPOCH array (per-call stamp), so the caller
+  // reuses a persistent buffer with an O(1) epoch bump instead of a per-call
+  // calloc(HEAP_NEXT) -- the deep-graph emit O(N^2) (N kernels x O(heap) zero).
   u64 loc = term_val(r);
-  if (loc < cap && visited[loc]) return;
-  if (loc < cap) visited[loc] = 1;
+  if (loc < cap && visited[loc] == epoch) return;
+  if (loc < cap) visited[loc] = epoch;
   u8 op = term_ext(r);
   if (op == UOP_RANGE) {
     axext_add(m, uop_range_axis_id(r), uop_range_extent(r));
@@ -3160,17 +3295,43 @@ static void axext_collect_rec(AxExtMap *m, Term t, u8 *visited, u64 cap,
   if (op == UOP_BUFFER) return;
   u8 ar = uop_arity(op);
   for (u8 i = 0; i < ar; i++)
-    axext_collect_rec(m, heap_read(loc + i), visited, cap, depth + 1);
+    axext_collect_rec(m, heap_read(loc + i), visited, cap, epoch, depth + 1);
 }
 
-// Allocate the loc-indexed visited bitmap (cap = HEAP_NEXT) once, then walk.
-// On OOM, fall back to the unmemoized walk (correct, just slow on a shared
-// DAG -- the pre-fix behavior).
+// Persistent epoch-stamped visited buffer for axext_collect: allocated once and
+// grown to HEAP_NEXT, reused across the per-kernel calls with an O(1) epoch
+// bump.  This replaces the per-call calloc(HEAP_NEXT) that made the deep-chain
+// emit loop O(N_kernels x HEAP_NEXT) = O(N^2).  Reset at session teardown is
+// unnecessary (the epoch monotonically advances; wrap is astronomically far).
+static u32 *AXEXT_VISITED     = NULL;
+static u64  AXEXT_VISITED_CAP = 0;
+static u32  AXEXT_EPOCH       = 0;
+
+// Walk `t` collecting axis extents.  Uses the persistent epoch buffer; on OOM
+// (grow failed) falls back to cap=0 (the unmemoized walk -- correct, just slow
+// on a shared DAG, the pre-memo behavior).
 static void axext_collect(AxExtMap *m, Term t) {
-  u64 cap = HEAP_NEXT;
-  u8 *visited = (cap > 0) ? (u8 *)calloc(cap, 1) : NULL;
-  axext_collect_rec(m, t, visited, visited != NULL ? cap : 0, 0);
-  free(visited);
+  u64 want = HEAP_NEXT;
+  if (want > AXEXT_VISITED_CAP) {
+    u32 *grown = (u32 *)realloc(AXEXT_VISITED, want * sizeof(u32));
+    if (grown != NULL) {
+      // Zero only the newly-grown tail; the existing region keeps its stamps
+      // (all < the next epoch, so they read as "unvisited" anyway).
+      memset(grown + AXEXT_VISITED_CAP, 0,
+             (want - AXEXT_VISITED_CAP) * sizeof(u32));
+      AXEXT_VISITED = grown;
+      AXEXT_VISITED_CAP = want;
+    }
+  }
+  u64 cap = (AXEXT_VISITED != NULL) ? AXEXT_VISITED_CAP : 0;
+  // Bump the epoch; if it would wrap to 0 (the "never visited" sentinel),
+  // hard-clear and restart at 1.
+  if (++AXEXT_EPOCH == 0) {
+    if (AXEXT_VISITED != NULL)
+      memset(AXEXT_VISITED, 0, AXEXT_VISITED_CAP * sizeof(u32));
+    AXEXT_EPOCH = 1;
+  }
+  axext_collect_rec(m, t, AXEXT_VISITED, cap, AXEXT_EPOCH, 0);
 }
 
 // Return 1 if subtree `t` references a UOP_RANGE leaf with axis_id `aid`.
@@ -3296,31 +3457,69 @@ typedef struct {
   u32                 gen;
 } BufferizeScanVisited;
 
-// Open a top-level scan: allocate the shared stamp array + first gen.
-// On OOM, cap=0 so seen() always returns 0 (no memoization, still correct
-// -- the walk just re-scans shared subtrees, as the legacy >1024 overflow
-// path did, but every scan is small enough at OOM scale).
+// PERSISTENT stamp buffer shared by every bufferize_scan: grown once to
+// HEAP_NEXT and reused across scans, with a global monotonic generation so each
+// open is an O(1) gen bump instead of a per-call calloc(HEAP_NEXT).  These
+// scans run in the 3 per-kernel emit gates (has_resid / has_stranded /
+// has_bcast); a fresh calloc per gate per kernel was O(N_kernels x HEAP_NEXT) =
+// O(N^2), the dominant deep-chain JIT-capture cost (28-block emit: ~7.8 ms of
+// 9.3 ms rewrite at N=8 lived in these gate callocs).  `gen` never resets per
+// scan -- it advances globally, so stale marks from a prior scan read as a
+// different gen ("unvisited").  64-bit gen never wraps in practice.
+static u32 *BUFSCAN_STAMP     = NULL;
+static u64  BUFSCAN_STAMP_CAP = 0;
+static u32  BUFSCAN_GEN       = 0;
+
+// Open a top-level scan: bind the arena to the shared persistent stamp buffer
+// (grow it to HEAP_NEXT if needed) and take a fresh global generation.  On OOM
+// (grow failed) cap=0 so seen() returns 0 (no memoization, still correct).
 static void bufferize_scan_open(BufferizeScanVisited *v, BufferizeScanArena *a) {
-  u64 cap = HEAP_NEXT;
-  a->stamp = (cap > 0) ? (u32 *)calloc(cap, sizeof(u32)) : NULL;
-  a->cap   = (a->stamp != NULL) ? (u32)cap : 0;
-  a->next_gen = 1;
+  u64 want = HEAP_NEXT;
+  if (want > BUFSCAN_STAMP_CAP) {
+    u32 *grown = (u32 *)realloc(BUFSCAN_STAMP, want * sizeof(u32));
+    if (grown != NULL) {
+      memset(grown + BUFSCAN_STAMP_CAP, 0,
+             (want - BUFSCAN_STAMP_CAP) * sizeof(u32));
+      BUFSCAN_STAMP = grown;
+      BUFSCAN_STAMP_CAP = want;
+    }
+  }
+  // Bump the global gen; wrap-guard hard-clears (astronomically rare).
+  if (++BUFSCAN_GEN == 0) {
+    if (BUFSCAN_STAMP != NULL)
+      memset(BUFSCAN_STAMP, 0, BUFSCAN_STAMP_CAP * sizeof(u32));
+    BUFSCAN_GEN = 1;
+  }
+  a->stamp    = BUFSCAN_STAMP;
+  a->cap      = (BUFSCAN_STAMP != NULL) ? (u32)BUFSCAN_STAMP_CAP : 0;
+  a->next_gen = BUFSCAN_GEN;
   v->a   = a;
   v->gen = a->next_gen;
 }
 
 static void bufferize_scan_close(BufferizeScanArena *a) {
-  free(a->stamp);
+  // The stamp buffer is persistent (shared); nothing to free per scan.  Just
+  // detach the arena's view so a stale pointer can't be reused after close.
   a->stamp = NULL;
   a->cap = 0;
 }
 
 // Start a fresh context sharing the parent's arena but with a new gen,
 // invalidating all prior marks in O(1).  Replaces every legacy `iv.n = 0`.
+// Advances the GLOBAL generation (not just the arena copy) so a child gen
+// minted here can never collide with the gen a later top-level
+// bufferize_scan_open takes -- the persistent stamp buffer is shared across
+// every scan, so all generations must come from one monotonic source.
 static void bufferize_scan_fresh(BufferizeScanVisited *child,
                                  BufferizeScanVisited const *parent) {
   child->a   = parent->a;
-  child->gen = ++parent->a->next_gen;
+  if (++BUFSCAN_GEN == 0) {
+    if (BUFSCAN_STAMP != NULL)
+      memset(BUFSCAN_STAMP, 0, BUFSCAN_STAMP_CAP * sizeof(u32));
+    BUFSCAN_GEN = 1;
+  }
+  parent->a->next_gen = BUFSCAN_GEN;
+  child->gen = BUFSCAN_GEN;
 }
 
 static int bufferize_scan_seen(BufferizeScanVisited *v, Term t) {
@@ -4382,6 +4581,7 @@ static int reduce_is_conv_weight_grad(u64 reduce_loc, u32 node_ndim) {
 static void topo_sort_boundaries(Term root) {
   BOUNDARY_ORDER_LEN = 0;
   boundary_hash_clear();
+  boundary_buf_hash_clear();
   for (u32 i = 0; i < BOUNDARY_ORDER_CAP; i++) BOUNDARY_BUFFERIZE_TERM[i] = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_CAP; i++)
     BOUNDARY_DEPTH[i] = BOUNDARY_DEPTH_INVALID;
@@ -4529,6 +4729,15 @@ static void topo_sort_boundaries(Term root) {
     BOUNDARY_ORDER[idx] = items[i].loc;
     BOUNDARY_BUFFERIZE_TERM[idx] = items[i].buf;
     boundary_hash_insert(items[i].loc, idx);
+    // Index the bufferize Term + its value subtree -> idx so the per-kernel
+    // rewrite's bufferize lookups are O(1) instead of an O(N) scan (the deep-
+    // chain O(N^2) emit hot path).
+    {
+      Term bt  = items[i].buf;
+      Term val = (bt != 0 && term_tag(bt) == TAG_UOP && term_ext(bt) == UOP_BUFFERIZE)
+               ? uop_bufferize_value(bt) : 0;
+      boundary_buf_hash_insert(bt, val, idx);
+    }
     {
       char const *e = getenv("THVM_DUMP_BOUNDARY_ORDER");
       if (e != NULL && e[0] == '1') {
@@ -5887,6 +6096,34 @@ static Term emit_kernel_for_boundary(u32 bi) {
   i32      op_dev     = term_device_in(root_term);
   Backend *op_backend = (op_dev < 0) ? CURRENT_BACKEND : ctx_ensure_backend(op_dev);
   if (op_backend == NULL) op_backend = CURRENT_BACKEND;
+  // THVM_DBG_KIND: the TRUE upstream device decision.  A kernel's OUTPUT buffer
+  // (and thus its dispatch backend) is allocated on `op_backend` = the device
+  // term_device_in(root_term) finds in the kernel's graph (the device is in the
+  // graph -- tinygrad).  If a {512,2560} matmul gets op_backend=CPU on a metal
+  // run, it dispatches via cpu_dispatch_kernel -> the uop_walk interpreter
+  // (~122s) and NEVER reaches the metal renderer (cg_emit_via_uop is never
+  // called).  This fires for matmul-sized boundaries so the 2 slow refiner
+  // matmuls' device routing is pinned: op_dev<0 means term_device_in found NO
+  // device in the graph (defaulting to CURRENT_BACKEND); op_dev=0 (CPU) means a
+  // CPU-resident leaf leaked into the matmul's operand subtree.
+  if (getenv("THVM_DBG_KIND")) {
+    char const *bn = (op_backend == &CPU_BACKEND) ? "cpu"
+#ifdef THVM_HAS_METAL
+                   : (op_backend == &METAL_BACKEND) ? "metal"
+#endif
+                   : "?";
+    u32 sv_op = 0xFFFF;
+    if (term_tag(root_term) == TAG_UOP && term_ext(root_term) == UOP_STORE) {
+      Term v = heap_read(term_val(root_term) + 2);
+      sv_op = (term_tag(v) == TAG_UOP) ? term_ext(v) : 0xFFFE;
+    }
+    u64 onum = (u64)shape_numel(out_shape);
+    if (onum >= 65536u)   /* skip tiny kernels; a {512,2560} matmul = 1310720 */
+      fprintf(stderr, "[kind] boundary loc=%llu op=%u store_value_op=%u "
+              "op_dev=%d backend=%s out_numel=%llu out_dtype=%u\n",
+              (unsigned long long)boundary_loc, (unsigned)op, sv_op,
+              op_dev, bn, (unsigned long long)onum, out_dtype);
+  }
   u32 out_tid = (op_backend == CURRENT_BACKEND)
                   ? arena_tensor_alloc(bi, out_shape, out_dtype) : 0;
   if (out_tid == 0) {
@@ -5896,6 +6133,40 @@ static Term emit_kernel_for_boundary(u32 bi) {
 #ifdef THVM_HAS_CUDA
     if (out_tid != 0 && op_backend == &CUDA_BACKEND) ARENA_ALLOCS_LEGACY++;
 #endif
+  }
+
+  // === THVM_REALIZE_SIZE_LOG standing node-size probe (default OFF) ===
+  // For every realized boundary that gets a MATERIALIZED output BUFFER whose
+  // byte size >= the env threshold, emit one stderr line naming the culprit
+  // (size + op + shape + dtype + device).  Localizes which node materializes a
+  // huge buffer in a real forward (e.g. a 14 GB attention broadcast or a
+  // dequant-to-f32 weight).  Cheap: only the getenv + a size compare run when
+  // off; the line is emitted only above threshold.  This is the permanent
+  // version of the temporary [bigrealize] probe.
+  {
+    static long REALIZE_SIZE_LOG_THR = -1;   // -1 = unread, 0 = off
+    if (REALIZE_SIZE_LOG_THR == -1) {
+      char const *e = getenv("THVM_REALIZE_SIZE_LOG");
+      REALIZE_SIZE_LOG_THR = (e != NULL) ? atol(e) : 0;
+      if (REALIZE_SIZE_LOG_THR < 0) REALIZE_SIZE_LOG_THR = 0;
+    }
+    if (REALIZE_SIZE_LOG_THR > 0) {
+      u64 nbytes = dtype_storage_bytes(out_dtype, (u64)shape_numel(out_shape));
+      if (nbytes >= (u64)REALIZE_SIZE_LOG_THR) {
+        char const *dev =
+            (op_backend == &CPU_BACKEND)   ? "cpu"
+          : (op_backend == &METAL_BACKEND) ? "metal"
+#ifdef THVM_HAS_CUDA
+          : (op_backend == &CUDA_BACKEND)  ? "cuda"
+#endif
+          : "?";
+        fprintf(stderr, "thvm_realize_size: %llu B  op=%s  shape=(",
+                (unsigned long long)nbytes, bypass_dbg_op_name(op));
+        for (u32 d = 0; d < out_shape.ndim; d++)
+          fprintf(stderr, "%s%u", d ? "," : "", out_shape.dims[d]);
+        fprintf(stderr, ")  dtype=%s  device=%s\n", dtype_name(out_dtype), dev);
+      }
+    }
   }
   u32 kid     = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
@@ -6204,6 +6475,21 @@ static Term emit_kernel_for_boundary(u32 bi) {
 
   BOUNDARY_TID [bi] = out_tid;
   BOUNDARY_TERM[bi] = kernel_term;
+
+  // fp8-cast single-use transient: record its bf16 tid so end-of-realize frees
+  // the buffer (its only consumer is the matmul reduce that fires this realize;
+  // mark_heap_rooted_preserve would otherwise pin the kloc+0 cell forever).
+  {
+    u32 tbinfo = bufferize_info_find(boundary_loc);
+    if (tbinfo != 0xFFFFFFFFu
+        && (BUFFERIZE_NODES[tbinfo].reasons & BUFFERIZE_REASON_FP8_TRANSIENT)
+        && out_tid != 0 && FP8_TRANSIENT_LEN < FP8_TRANSIENT_CAP) {
+      FP8_TRANSIENT_TIDS [FP8_TRANSIENT_LEN] = out_tid;
+      FP8_TRANSIENT_KLOCS[FP8_TRANSIENT_LEN] = kloc;
+      FP8_TRANSIENT_PINS [FP8_TRANSIENT_LEN] = pin;
+      FP8_TRANSIENT_LEN++;
+    }
+  }
 
   // Record this output buf so a later-depth emit can recycle it.
   // last_use_depth = 0 means "no consumer is itself a realize
