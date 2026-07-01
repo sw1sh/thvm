@@ -66,7 +66,7 @@ TFindProof[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory; a mu
 TFindProof[conjecture$, \"Theory\"] proves the conjecture (an equation, a list of equations, or an Association whose Values are taken) against the named theory's axioms.
 TFindProof[axioms$] and TFindProof[\"Theory\"] saturate with no goal, returning a ProofObject whose Theorems is None; bound these with TimeConstraint since a non-terminating axiom set never saturates.
 Argument order is conjecture-first (matching FindEquationalProof); TATP is the axioms-first surface. Equations may be written lhs$ == rhs$, a pre-oriented rewrite rule, or a two-way rule (plus their Inactive forms). A List conjecture is a multi-goal conjunction proved off ONE saturation: the result is one ProofObject whose Proof dataset carries one Hypothesis/Conclusion row pair per conjunct, $Failed unless every conjunct is proved; \"Status\" returns a single tag for the whole conjunction.
-An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved.
+An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\", \"TPTP\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved. \"TPTP\" renders the proof as an SZS-wrapped TPTP CNFRefutation string -- the CASC output format -- for File / TPTP-string input.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
 Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"CommDefer\", \"CommReage\", \"CommDropDup\", \"LeafTiebreak\", \"RevfaceGroup\", \"PosGroup\", \"CubeArrival\", \"FormationFifo\", \"MeredDmgu\", \"EsetDistdir\", \"CommDropDupClassGate\", \"CorankOwnArr\", \"LeafTiebreakFacegate\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
@@ -3480,7 +3480,7 @@ atpScheduleFor[m_] := {m};
    bare ProofObject, so existing call shapes are unchanged. *)
 $AtpReturnSpecs = {"ProofObject", "Lemmas", "PreprocessedAxioms",
     "RelevantAxioms", "RawTrace", "Statistics", "Status", "Path",
-    "AppliedMethod", "WallTime", "PortfolioTrace", "Counterexample"};
+    "AppliedMethod", "WallTime", "PortfolioTrace", "Counterexample", "TPTP"};
 
 atpReturnSpecQ[All] := True;
 atpReturnSpecQ[x_String] := MemberQ[$AtpReturnSpecs, x];
@@ -3839,7 +3839,62 @@ $atpEmitForm = "ProofObject";
 atpEmitProof[po_ProofObject, "TProofObject"] := atpProofObjectToTProofObject[po];
 atpEmitProof[po_, _] := po;
 
+(* Problem name for the "TPTP" spec's SZS header; the File / string entries
+   Block-scope it to the input's basename. *)
+$atpProblemName = "problem";
+
+(* SZS + TPTP CNFRefutation exporter for the "TPTP" return spec.  Walks the
+   ProofObject's dataset and emits one cnf() per step: inputs as `axiom`, the
+   goal negated as `negated_conjecture`, each critical-pair / substitution
+   lemma as a `plain` step whose inference() cites its parents, closing with
+   $false.  Every derived step is a genuine status(thm) consequence of its
+   cited parents (the ProofObject's own ProofFunction verifies the proof), so
+   the derivation is GDV-checkable.  Renders a TPTP-sourced ProofObject: the
+   parser prefixes function/constant symbols with Tptp$ and leaves TPTP
+   variables as bare uppercase symbols, which tells them apart. *)
+atpProofObjectToTPTP[po_ProofObject, problem_String] := Module[
+    {tptpQ, strip, tp, ds, axName, pname, lines},
+    tptpQ[s_Symbol] := StringStartsQ[SymbolName[s], "Tptp$"];
+    strip[s_Symbol] := If[ tptpQ[s], StringDrop[SymbolName[s], 5], SymbolName[s]];
+    tp[HoldForm[e_]] := tp[e];
+    tp[Equal[l_, r_]] := tp[l] <> " = " <> tp[r];
+    tp[f_Symbol[a__]] := strip[f] <> "(" <> StringRiffle[tp /@ {a}, ","] <> ")";
+    tp[s_Symbol] := If[ tptpQ[s], strip[s], SymbolName[s]];
+    tp[e_] := ToString[e];
+    ds = Normal[po["ProofDataset"]];
+    axName = Association @ Cases[Normal[Keys[ds]], k : {"Axiom", n_} :> (k -> "ax" <> ToString[n])];
+    pname[k : {"Axiom", _}] := axName[k];
+    pname[{"CriticalPairLemma", n_}] := "cpl" <> ToString[n];
+    pname[{"SubstitutionLemma", n_}] := "sl" <> ToString[n];
+    pname[{"Hypothesis", _}] := "negated_conjecture";
+    lines = Flatten @ Last @ Reap @ KeyValueMap[
+        Function[{key, rec},
+            With[{tag = key[[1]], st = rec["Statement"], pf = rec["Proof"]},
+                Switch[tag,
+                    "Axiom",
+                        Sow["cnf(" <> pname[key] <> ", axiom, " <> tp[st] <> ")."],
+                    "Hypothesis",
+                        With[{s = st /. HoldForm[Equal[l_, r_]] :> {tp[l], tp[r]}},
+                            Sow["cnf(negated_conjecture, negated_conjecture, " <> s[[1]] <> " != " <> s[[2]] <> ")."]],
+                    "CriticalPairLemma",
+                        Sow["cnf(cpl" <> ToString[key[[2]]] <> ", plain, " <> tp[st] <> ", inference(sup, [status(thm)], [" <> pname[pf["Construct"]] <> ", " <> pname[pf["MatchingConstruct"]] <> "]))."],
+                    "SubstitutionLemma",
+                        Sow["cnf(sl" <> ToString[key[[2]]] <> ", plain, " <> tp[st] <> ", inference(rw, [status(thm)], [" <> pname[pf["Input"]] <> ", " <> pname[pf["Construct"]] <> "]))."],
+                    "Conclusion",
+                        Sow["cnf(contradiction, plain, $false, inference(rw, [status(thm)], [negated_conjecture, " <> pname[pf["Construct"]] <> "]))."]
+                ]
+            ]], ds];
+    StringRiffle[
+        Join[
+            {"% SZS status Unsatisfiable for " <> problem, "% SZS output start CNFRefutation for " <> problem},
+            lines,
+            {"% SZS output end CNFRefutation for " <> problem}],
+        "\n"]
+]
+atpProofObjectToTPTP[_, problem_String] := $Failed;
+
 atpReturnValue[bundle_, "ProofObject"] := atpEmitProof[bundle["ProofObject"], $atpEmitForm];
+atpReturnValue[bundle_, "TPTP"] := atpProofObjectToTPTP[bundle["ProofObject"], $atpProblemName];
 atpReturnValue[bundle_, "Lemmas"] := atpMainRulesLemmas[bundle["cRes"]];
 atpReturnValue[bundle_, "PreprocessedAxioms"] :=
     holdToInactive /@ bundle["enc"]["AxHCsRaw"];
@@ -4155,6 +4210,24 @@ TFindProof[File[path_String], opts : OptionsPattern[]] :=
     tptpDispatch[TPTPImport[File[path]], opts]
 TFindProof[s_String, opts : OptionsPattern[]] /; StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
     tptpDispatch[TPTPImport[s], opts]
+
+(* TPTP input + a return spec (e.g. "TPTP" for the SZS+TPTP CNFRefutation
+   string): scope the SZS problem name to the file's basename, then thread the
+   spec through the dispatcher. *)
+TFindProof[File[path_String], returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
+    Block[{$atpProblemName = FileNameTake[path]},
+        tptpDispatch[TPTPImport[File[path]], returnSpec, opts]]
+TFindProof[s_String, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] /; StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
+    tptpDispatch[TPTPImport[s], returnSpec, opts]
+
+tptpDispatch[imported_Association, returnSpec_, opts : OptionsPattern[TFindProof]] := If[
+    "SMT" === OptionValue[TFindProof, {opts}, Method],
+    atpSmtProject[tptpDispatchSMT[imported], returnSpec],
+    If[ imported["Conjecture"] === None,
+        TFindProof[tptpInternalize /@ imported["Axioms"], returnSpec, opts],
+        TFindProof[tptpInternalize @ imported["Conjecture"],
+            tptpInternalize /@ imported["Axioms"], returnSpec, opts]]
+]
 
 (* Convert TPTP's String-headed terms ("and"[X, Y], "a"[]) into
    Symbol-headed terms in a private context so atpEncodeProblem and
