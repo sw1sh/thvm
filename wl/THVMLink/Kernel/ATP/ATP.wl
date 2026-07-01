@@ -4094,7 +4094,7 @@ atpProveFromTheory[cjArg_, theory_String, returnSpec_,
    form would otherwise read the spec as a theorem name.  The /; guard
    on the prove form (theory =!= a return spec) sends it to the
    completion form below. *)
-TFindProof[theory_String, returnSpec_String, opts : OptionsPattern[]] /; atpReturnSpecQ[returnSpec] :=
+TFindProof[theory_String, returnSpec_String, opts : OptionsPattern[]] /; atpReturnSpecQ[returnSpec] && ! FileExistsQ[theory] :=
     atpTheoryCompletion[theory, returnSpec, opts];
 TFindProof[thm_String, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpecQ[theory] := Catch[
     Block[{cjRaw, methodOpt = OptionValue[TFindProof, {opts}, Method],
@@ -4210,6 +4210,12 @@ TFindProof[File[path_String], opts : OptionsPattern[]] :=
     tptpDispatch[TPTPImport[File[path]], opts]
 TFindProof[s_String, opts : OptionsPattern[]] /; StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
     tptpDispatch[TPTPImport[s], opts]
+(* A bare filename string is accepted as the TPTP file -- no File[...] wrapper
+   needed.  The FileExistsQ pattern test makes this more specific than the
+   theory-name string form, so an existing path is read as a file, not resolved
+   through AxiomaticTheory. *)
+TFindProof[path_String ? FileExistsQ, opts : OptionsPattern[]] :=
+    tptpDispatch[TPTPImport[File[path]], opts]
 
 (* TPTP input + a return spec (e.g. "TPTP" for the SZS+TPTP CNFRefutation
    string): scope the SZS problem name to the file's basename, then thread the
@@ -4219,6 +4225,9 @@ TFindProof[File[path_String], returnSpec_ ? atpReturnSpecQ, opts : OptionsPatter
         tptpDispatch[TPTPImport[File[path]], returnSpec, opts]]
 TFindProof[s_String, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] /; StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
     tptpDispatch[TPTPImport[s], returnSpec, opts]
+TFindProof[path_String ? FileExistsQ, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
+    Block[{$atpProblemName = FileNameTake[path]},
+        tptpDispatch[TPTPImport[File[path]], returnSpec, opts]]
 
 tptpDispatch[imported_Association, returnSpec_, opts : OptionsPattern[TFindProof]] := If[
     "SMT" === OptionValue[TFindProof, {opts}, Method],
