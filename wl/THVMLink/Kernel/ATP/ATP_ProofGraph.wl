@@ -979,8 +979,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            completion-derived -- resolves through the trace DAG into an
            Axiom / CriticalPairLemma entry, so an MNF front-collision
            proof verifies the same way a completion proof does. *)
-        usingMnf = (ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {}),
-        mainSteps = If[ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {}, cRes["MnfSteps"], cRes["MainSteps"]],
+        usingMnf = (Environment["THVM_ATP_PREFER_MAINSTEPS"] === $Failed) && ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {},
+        mainSteps = If[(Environment["THVM_ATP_PREFER_MAINSTEPS"] === $Failed) && ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {}, cRes["MnfSteps"], cRes["MainSteps"]],
         axPairs = enc["AxPairs"], varSyms, entries, traceInfo,
         inProgress, aliveRulesAt, slN, cpN, axiomKeyFor, rewriteOnce,
         prepareRules, runBfs, reverseBfsPath, emitNorm, resolveCp,
@@ -1413,6 +1413,41 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                ordered rewrites that the verifier replays. *)
             If[ cplDegenerateOverlapQ[ruleAEq, ruleBEq, pos, varSyms],
                 Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]];
+            (* Goal critical pair: one parent's resolved equation IS a
+               conjecture conjunct (the skolemized goal fed as an ordinary
+               TRACE_AXIOM, whose lineage bottoms out at the skolem-bearing
+               input equation).  Such a CP is a superposition of the OTHER
+               parent's rule ONTO the Hypothesis, not a rule-vs-rule
+               overlap: chooseCpGeometry / cplReconCp only reconstruct
+               rule-vs-rule peaks, so they return Missing[], and the
+               emitNorm bridge from a parent RULE's equation cannot reach
+               cpEq (cpEq is the goal side rewritten, not the rule side).
+               But cpEq IS a single ordered rewrite of the goal conjunct by
+               the other parent's rule, so bridge it with emitNorm rooted at
+               the {Hypothesis, g} entry and the conjunct equation: emitNorm
+               then finds that one rewrite (against the rules alive at ti,
+               which include the other parent) and emits a verifier-legal
+               SubstitutionLemma chain whose Input is the Hypothesis --
+               exactly the goal-chain shape FindEquationalProof replays.
+               Detected by content (the trace carries no goal tag), the
+               direct dual of axiomKeyFor: match a parent's Eq against the
+               conjunct pairs.  Only fires for a genuine goal parent, so the
+               two-rule path below is untouched. *)
+            Block[{gA = FirstPosition[cjps, p_ /; cplEqSetQ[p, aInfo["Eq"], varSyms], Missing[], {1}, Heads -> False],
+                   gB = FirstPosition[cjps, p_ /; cplEqSetQ[p, bInfo["Eq"], varSyms], Missing[], {1}, Heads -> False]},
+                If[ ! MissingQ[gA],
+                    Return[emitNorm[{$HypothesisSym, First[gA]}, cjps[[First[gA]]], cpEq, ti]]];
+                If[ ! MissingQ[gB],
+                    Return[emitNorm[{$HypothesisSym, First[gB]}, cjps[[First[gB]]], cpEq, ti]]]];
+            (* Re-derivation: the stored CP equation IS one of its own
+               parents' (up to side swap / alpha) -- a two-parent overlap
+               that reproduces an existing fact rather than a new peak.
+               chooseCpGeometry/cplReconCp can't rebuild it as a fresh
+               CriticalPairLemma (the "peak" would collapse), so cite the
+               parent directly: the proof step that needed this node just
+               reuses that already-emitted fact.  Sound (identical Eq). *)
+            If[ cplEqSetQ[aInfo["Eq"], cpEq, varSyms], Return[aInfo]];
+            If[ cplEqSetQ[bInfo["Eq"], cpEq, varSyms], Return[bInfo]];
             (* Select the face/role geometry that reproduces the stored CP
                under the verifier's convention.  When no combination does
                (a position truncated past CP_MAX_DEPTH, say), fall back to
@@ -1422,7 +1457,27 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             geom = chooseCpGeometry[aInfo, ruleAEq, bInfo, ruleBEq, pos, cpEq];
             If[ MissingQ[geom],
                 atpDbgFail["resolveCp.no-geometry@" <> ToString[ti]];
-                Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]];
+                If[ Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
+                    WriteString["stderr", "CP25 pA=", ToString[cte["ParentA"]],
+                        " rA=", ToString[trace[[cte["ParentA"]+1]]["Reason"]],
+                        " pB=", ToString[cte["ParentB"]],
+                        " rB=", ToString[trace[[cte["ParentB"]+1]]["Reason"]],
+                        " pos=", ToString[pos, InputForm],
+                        " ruleAEq=", ToString[ruleAEq, InputForm],
+                        " ruleBEq=", ToString[ruleBEq, InputForm],
+                        " aEq=", ToString[aInfo["Eq"], InputForm],
+                        " bEq=", ToString[bInfo["Eq"], InputForm],
+                        " cpEq=", ToString[cpEq, InputForm], "\n"]];
+                (* Bridge the CP with a sound emitNorm rewrite path.  A goal /
+                   two-parent overlap's stored CP is reachable from ONE of the
+                   two parents (the other is the matching side), so try parent
+                   A, and on failure fall back to parent B before giving up.
+                   emitNorm throws BEFORE emitting any step, so the retry is
+                   side-effect-free. *)
+                Return[With[{resA = Catch[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]},
+                    If[ resA === $Failed,
+                        emitNorm[bInfo["Key"], bInfo["Eq"], cpEq, ti],
+                        resA]]]];
             cEq = geom["ConstructEq"];
             mEq = geom["MatchingEq"];
             cpN++;

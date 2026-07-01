@@ -214,7 +214,8 @@ load = WolframInstitute`THVMLink`Private`load;
    logs a tag to stderr first.  Off by default; flip from a probe to
    pinpoint which assembly invariant fails on a given trace. *)
 $AtpDebugDataset = False;
-atpDbgFail[tag_] := If[ TrueQ[$AtpDebugDataset],
+atpDbgFail[tag_] := If[ TrueQ[$AtpDebugDataset] ||
+        Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
     WriteString["stderr", "atp-fail @ ", tag, "\n"]];
 
 (* When True (default), resolveTrace emits a SubstitutionLemma per
@@ -2045,6 +2046,16 @@ $AtpCpWeightCodes = <|
                          Buckets CPs by integer stagger group; within a
                          bucket the insertion-age tie-break picks
                          oldest-first. *)
+    "WMQ" -> 14,       (* Waldmeister -auto (Automodus/StdS) CP measure:
+                         weight = S^2 + S - 1, S = total symbol count of the
+                         CP.  DERIVED exactly from wmcli -a4 verbose weights
+                         on WolframAxioms/OrAssociativity (S->w: 14->209,
+                         26->701, 30->929).  Depends ONLY on total size S,
+                         not the l/r split -> structurally-close CPs share a
+                         weight bucket and the cp_seq FIFO age tie-break
+                         decides, matching WM's best-first (fixes the OrAssoc
+                         rule-52 compound-vs-collapser selection where Mix's
+                         split-aware g factor over-distinguishes same-S CPs). *)
     Automatic -> -1
 |>;
 
@@ -4650,9 +4661,14 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                     Block[{$AtpUseChain = chainOn},
                         Module[{$bt, $bd},
                         {$bt, $bd} = AbsoluteTiming @ Check[
-                            Quiet[buildCplDataset[enc, conjPair, cRes],
-                                {General::newsym, RuleDelayed::rhs}],
-                            $Failed];
+                            If[ Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
+                                buildCplDataset[enc, conjPair, cRes],
+                                Quiet[buildCplDataset[enc, conjPair, cRes],
+                                    {General::newsym, RuleDelayed::rhs}]],
+                            (If[ Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
+                                WriteString["stderr", "BUILDERR msgs=",
+                                    ToString[$MessageList, InputForm], "\n"]];
+                             $Failed)];
                         If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
                             Print["[recon] buildCplDataset = ", $bt, " s"]];
                         $bd]]];
