@@ -3962,6 +3962,7 @@ typedef struct {
 // same sub-term (linear matching).
 fn u8   thvm_match            (Term pattern, Term term, RewriteSubst *subst);
 fn Term thvm_subst_apply      (Term term, const RewriteSubst *subst);
+extern const char *g_thvm_phase;
 fn Term thvm_rewrite_step     (Term t, const Term *lhs, const Term *rhs,
                                u32 n_rules);
 fn Term thvm_rewrite_normalize(Term t, const Term *lhs, const Term *rhs,
@@ -4465,7 +4466,37 @@ typedef enum {
                               // the cp_seq age tie-break (oldest-first
                               // within a bucket) dominates the heap
                               // selection.
-  ATP_CP_WEIGHT_LAST = 14,
+  ATP_CP_WEIGHT_WMQ = 14,    // Waldmeister -auto (Automodus/StdS) CP measure:
+                              // weight = S*S + S - 1, S = total symbol count of
+                              // the CP (symcount(l)+symcount(r)).  DERIVED exactly
+                              // from wmcli -a4 verbose weights on WolframAxioms/
+                              // OrAssociativity (S -> w: 14->209, 26->701,
+                              // 30->929; constant 2nd difference => quadratic
+                              // S^2+S-1).  Depends ONLY on total size S, not the
+                              // l/r split, so structurally-close CPs share a
+                              // weight bucket and the cp_seq FIFO age tie-break
+                              // decides -- matching WM's best-first.  Mix's
+                              // split-aware g factor over-distinguishes same-S
+                              // CPs (OrAssoc rule-52 compound vs collapser: both
+                              // S=30/w=929 in WM, but 1109 vs 701 under Mix,
+                              // which is why thvm picks the collapser at rule 52
+                              // where WM picks the older compound).
+                              // SUPERSEDED by WMQ2: WMQ is only exact for
+                              // COLLAPSERS (min side = 1); it mis-weights every
+                              // split CP.  See WMQ2.
+  ATP_CP_WEIGHT_WMQ2 = 15,   // Waldmeister -auto CP measure, DERIVED from the
+                              // full wmcli emission trace (wm3.txt, 3780 CP/
+                              // weight pairs, WolframAxioms/OrAssociativity):
+                              // weight = b*b + 2*b + a*(b+1), a = min side
+                              // symbol count, b = max side symbol count.  Fits
+                              // 96.5% of WM's real selection weights exactly
+                              // (WMQ's S*S+S-1 fit only 23%: it is the a==1
+                              // special case of this).  The 131 large-CP misses
+                              // fit totalS*(totalS+2) (a second regime).  This
+                              // is WM's genuine split-AWARE measure; it should
+                              // reproduce WM's selection order far better than
+                              // WMQ, which only ties collapsers.
+  ATP_CP_WEIGHT_LAST = 16,
 } AtpCpWeightMode;
 
 // Deferred-CP (`implicit_pair`) arc: lightweight per-CP descriptor that
@@ -4550,6 +4581,13 @@ typedef struct {
   // rebuild-an-INC-SUP-tree-every-step O(n) scan.
   u32  *cp_pri;
   u32  *cp_seq;
+  // THVM_ATP_GJ_KEEP: ground-joinable CPs are KEPT (so they age the FIFO
+  // dimension faithfully, as Waldmeister keeps them in its 168k unselected
+  // set) but forced to never-weight-selectable priority (WM Act_never) --
+  // the weight pick skips them; the FIFO pick reaches them (no-op join).
+  // Replaces GroundJoin's drop, which loses the FIFO agers and over-selects
+  // a heavier non-ground-joinable CP in their place (the firstdiv-251 bug).
+  u8   *cp_deprio;
   // Goal-interleave: per-CP goal-directed weight (CPinGoal), parallel to
   // cp_pri.  Filled at push only when use_goal_interleave > 0; the
   // selection then takes a goal-min pick every use_goal_interleave-th
@@ -4775,6 +4813,14 @@ typedef struct {
   // THVM_ATP_FLATTERM=1 at init, or via thvm_atp_set_use_flatterm.  Same
   // normal forms as the tree path (asserted by ATP_FLATTERM_DIFF).
   u8                   use_flatterm;
+  // Opt-in faithful Waldmeister interreduction PHASE ORDER
+  // (thvm_atp_interreduce_wm).  THVM_ATP_WM_INTERRED=1 to enable.  When set,
+  // interreduction runs WM's strict phases (all E-member drops / GMInterred,
+  // then all R-LHS drops / RMLinksInterred, then R-RHS compose /
+  // RMRechtsInterred) instead of thvm's single interleaved pass.  Default OFF
+  // = the existing pass runs byte-identical.  Faithful only when
+  // keep_lhs_reducible==0 and use_eager_orphan_sweep==0 (the WM Method layout).
+  u8                   use_wm_interred;
   // Opt-in faithful Waldmeister-FPA normalize path (src/wmfpa/wmfpa.h:
   // flatterm rep + DSBaum discrimination tree + NormalformInnermost).
   // OFF by default (THVM_ATP_WMFPA=1 to enable); when set, the orientable
@@ -4849,6 +4895,15 @@ typedef struct {
   // as Waldmeister's does.  0 until the first goal_check.
   Term goal_lhs_nf;
   Term goal_rhs_nf;
+  // Goal-check revision cache: the goal's joinability changes only when R
+  // changes.  thvm_atp_goal_check runs twice per step (top-of-step +
+  // post-cp-gen); the two calls at the same r_revision recompute the same
+  // (large) goal normalize.  Stores r_revision+1 of the last RUNNING
+  // verdict (0 = never); a matching r_revision skips the redundant
+  // normalize.  Runtime profiling showed goal_check is a hidden ~1/3 of
+  // wall on big goals (OrAssociativity).  PROVED is never cached (it stops
+  // the loop), so a stale cache can only DELAY, never miss, a proof.
+  u32 goal_check_running_rev;
 
   // Multi-goal conjunction (FindEquationalProof[{g1, g2}, axioms]):
   // every conjunct proved off ONE saturation.  goals_lhs/goals_rhs are
@@ -4922,6 +4977,31 @@ typedef struct {
   u32   n_trace;
   u32   t_cap;
   u32   t_max;
+
+  // Off-heap trace-equation store (env THVM_ATP_TRACE_PACK).  The proof
+  // DAG's per-step equation (children 2,3 of each trace entry) is the
+  // dominant IC live set on deep completions (a 1601-rule run pins
+  // ~130M cells of trace Terms, exhausting the from-space at ~rule 250).
+  // When trace_pack is on, atp_trace_push stores those two Terms as
+  // packed bytes here and leaves NUM(0) sentinels in the term, so the
+  // GC-rooted trace spine stays tiny; reads reconstruct via
+  // atp_trace_eq_load.  Default OFF -> byte-identical legacy behaviour.
+  u8    trace_pack;
+  u8   *trace_eq_buf;     // append-only packed (lhs,rhs) pairs
+  u64   trace_eq_len;     // bytes used
+  u64   trace_eq_cap;     // bytes allocated
+  u64  *trace_eq_off;     // [t_cap] byte offset of entry i's pair (+1; 0=none)
+
+  // Lean CP trace (env THVM_ATP_CP_TRACE_LEAN).  Like trace_pack it plants
+  // NUM(0) sentinels for a TRACE_CP entry's children 2/3, but stores the
+  // pair NOWHERE -- the queued CP already carries its terms in cp_packed
+  // (selection unpacks them there), and a CP that becomes a rule has the
+  // rule's own terms for the proof DAG.  The millions of joinable CPs that
+  // never enter the proof simply drop their terms.  Requires the packed
+  // CP path (not IMPLICIT_CP, which reads children 2/3 back).  Trades the
+  // exact CP-lemma statement in the proof object for the ability to hold
+  // WM's full working set; the search + goal-join are unaffected.
+  u8    cp_trace_lean;
 
   // Stage 7.1: count of CPs dropped at generate-time because both
   // sides normalize to the same term under current R (trivial
@@ -5077,6 +5157,10 @@ typedef struct {
   u32  auto_max_cp_weight_slope;    // multiplier on the deepest rule LHS
   u32  auto_max_cp_weight_cur;      // the live bound (recomputed on growth)
   u32  max_rule_lhs_weight;         // deepest rule LHS symbol count seen
+  // r_revision+1 at which auto_max_cp_weight_cur was last computed (0 =
+  // never).  The deepest-rule scan is O(n_rules) and ran every step;
+  // cached here so it re-scans only when R actually changed.
+  u32  auto_maxw_rev;
                                     // (monotone; feeds the auto bound so it
                                     // need not rescan R on every CP push)
   // Overflow stash for CPs deferred by the growing bound.  Parallel to
@@ -8036,6 +8120,9 @@ fn AtpStatus thvm_atp_step(AtpState *s);
 
 // Drive thvm_atp_step until it returns non-RUNNING.
 fn AtpStatus thvm_atp_run (AtpState *s);
+// Rebuild the off-heap packed proof-trace into live Term entries after a
+// terminated search (definition in src/atp/_.c).
+fn void thvm_atp_materialize_trace(AtpState *s);
 
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction

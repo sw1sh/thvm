@@ -30,9 +30,11 @@ volatile int thvm_heap_exhausted = 0;
 // WolframKernel orphan accumulation that crashes Darwin's VM
 // (feedback_wolframscript_oom_risk.md).  Non-WL callers leave the
 // hook NULL and get the historical exit() behaviour.
+const char *g_thvm_phase = "init";   // DIAG: last ATP phase entered
+
 __attribute__((noreturn))
 fn void thvm_fatal(const char *msg) {
-  fprintf(stderr, "thvm fatal: %s\n", msg);
+  fprintf(stderr, "thvm fatal: %s [phase=%s]\n", msg, g_thvm_phase);
   if (thvm_heap_exhaust_jmp != NULL) {
     thvm_heap_exhausted = 1;
     longjmp(*thvm_heap_exhaust_jmp, 1);

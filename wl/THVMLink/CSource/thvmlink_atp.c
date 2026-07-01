@@ -1297,6 +1297,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   g_atp_abort_libData = NULL;
   if (st == ATP_ABORTED) { thvm_atp_free(atp); return LIBRARY_FUNCTION_ERROR; }
 
+  // Rebuild the off-heap packed proof-trace (THVM_ATP_TRACE_PACK) into
+  // live Term entries now the search has terminated -- kept packed during
+  // saturation to avoid the proof-trace GC-heap blowup, materialized once
+  // here so the extractor + WL reader below see a normal Term trace.
+  thvm_atp_materialize_trace(atp);
+
   // (1) MAIN-state proof extraction: re-normalize both goal sides
   // under the completion-saturated R, recording every forward
   // rewrite.  A hard goal's chain cites completion-derived rules,

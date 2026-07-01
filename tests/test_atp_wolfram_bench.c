@@ -1787,6 +1787,24 @@ int main(int argc, char **argv) {
     const char *amw = getenv("THVM_ATP_AUTO_MAXW");
     if (amw != NULL && *amw != 0) {
       thvm_atp_set_auto_max_cp_weight(s, (u32)strtoul(amw, NULL, 10));
+      // Optional slope override: the auto bound is base + slope*deepest;
+      // the default slope 2 grows past every CP on deepening theorems
+      // (Wolfram) so it never binds.  A smaller slope makes it actually
+      // stash heavy CPs (bounding memory) while still growing to re-admit
+      // them (completeness preserved).
+      const char *slp = getenv("THVM_ATP_MAXW_SLOPE");
+      if (slp != NULL && *slp != 0) {
+        s->auto_max_cp_weight_slope = (u32)strtoul(slp, NULL, 10);
+      }
+    }
+  }
+  // Optional HARD CP-weight cap (Waldmeister -mw): CPs whose max side size
+  // exceeds the cap are stashed off the main queue (bounding memory) and
+  // re-admitted lazily, so completeness is preserved.  THVM_ATP_MAXW=<cap>.
+  {
+    const char *mw = getenv("THVM_ATP_MAXW");
+    if (mw != NULL && *mw != 0) {
+      thvm_atp_set_max_cp_weight(s, (u32)strtoul(mw, NULL, 10));
     }
   }
 

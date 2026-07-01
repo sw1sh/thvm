@@ -152,40 +152,49 @@ static void ft_subst_rewind(AtpFtSubst *s, u32 wm_target) {
 int ft_match(const AtpFtCell *pat, const AtpFtCell *subj, AtpFtSubst *out) {
   if (pat == NULL || subj == NULL) return 0;
 
-  // Variable pattern: bind or check consistency.
-  if (ft_m_is_var(pat)) {
-    u32 id = ft_m_var_id(pat);
-    if (id >= ATPFT_MAX_VARS) return 0;
-    AtpFtCell *prev = out->bind[id];
-    if (prev == NULL) {
-      out->bind[id]                = (AtpFtCell *)subj;
-      out->bound_ids[out->wm]      = id;
-      out->wm                     += 1u;
-      return 1;
-    }
-    // Repeated-var consistency check -- structural equality, matches
-    // rewrite/_.c:36 (kbo_eq on the Term side).
-    return ft_eq(prev, subj);
-  }
-
-  // CTR pattern: subj must be a same-shape CTR.
-  if (ft_m_is_var(subj)) return 0;          // pat is CTR, subj is var -> fail
-  if (pat->sym != subj->sym)   return 0;
-  if (pat->arity != subj->arity) return 0;
-
-  // Walk children via the sibling stride.  Save the entry watermark
-  // so a deep failure rewinds the bindings we introduced here.
+  // Iterative lockstep walk of the two flatterm preorders.  Both `pat`
+  // and `subj` are flat (preorder) AtpFtCell chains, and syntactic
+  // matching is deterministic (no backtracking), so the recursive
+  // descent collapses to a single linear scan -- no per-node call frame.
+  //   * pat CTR cell: the aligned subj cell must be a same-shape CTR;
+  //     descend BOTH (->next) into their children.
+  //   * pat var cell (a leaf): bind it to the aligned subj SUBTERM
+  //     (the cell stands for [sc, sc->end]); on a repeated var, check
+  //     structural equality (ft_eq, == the Term-side kbo_eq).  Then
+  //     skip the consumed subj subterm (->end->next) and advance pat
+  //     to its next preorder cell (->next; a var's end is itself).
+  // The single entry watermark rewinds every binding on any failure --
+  // the net post-failure subst state is identical to the recursive
+  // version's incremental per-level rewinds (there is no retry path).
   u32 wm_save = out->wm;
-  u16 arity   = pat->arity;
-  const AtpFtCell *pc = pat->next;
-  const AtpFtCell *sc = subj->next;
-  for (u16 i = 0; i < arity; i++) {
-    if (!ft_match(pc, sc, out)) {
-      ft_subst_rewind(out, wm_save);
-      return 0;
+  const AtpFtCell *pc     = pat;
+  const AtpFtCell *pc_end = (pat->end != NULL) ? pat->end->next : NULL;
+  const AtpFtCell *sc     = subj;
+  while (pc != pc_end) {
+    if (sc == NULL) { ft_subst_rewind(out, wm_save); return 0; }
+    if (ft_m_is_var(pc)) {
+      u32 id = ft_m_var_id(pc);
+      if (id >= ATPFT_MAX_VARS) { ft_subst_rewind(out, wm_save); return 0; }
+      AtpFtCell *prev = out->bind[id];
+      if (prev == NULL) {
+        out->bind[id]           = (AtpFtCell *)sc;
+        out->bound_ids[out->wm] = id;
+        out->wm                += 1u;
+      } else if (!ft_eq(prev, sc)) {
+        ft_subst_rewind(out, wm_save);
+        return 0;
+      }
+      sc = (sc->end != NULL) ? sc->end->next : NULL;   // skip subj subterm
+      pc = pc->next;                                   // var leaf -> next cell
+    } else {
+      // pat CTR: subj must be a same-shape CTR.
+      if (ft_m_is_var(sc) || pc->sym != sc->sym || pc->arity != sc->arity) {
+        ft_subst_rewind(out, wm_save);
+        return 0;
+      }
+      pc = pc->next;   // descend into children (both preorders)
+      sc = sc->next;
     }
-    pc = pc->end->next;
-    sc = sc->end->next;
   }
   return 1;
 }

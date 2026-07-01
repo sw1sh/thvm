@@ -274,18 +274,19 @@ Term ft_to_term(const AtpFtCell *x) {
 int ft_eq(const AtpFtCell *x, const AtpFtCell *y) {
   if (x == y) return 1;
   if (x == NULL || y == NULL) return 0;
-  if (x->sym != y->sym) return 0;
-  if (x->arity != y->arity) return 0;
-  if (ft_is_var(x)) {
-    // var ids already compared via sym; nothing more.
-    return 1;
-  }
-  const AtpFtCell *cx = x->next;
-  const AtpFtCell *cy = y->next;
-  for (u16 i = 0; i < x->arity; i++) {
-    if (!ft_eq(cx, cy)) return 0;
-    cx = cx->end->next;
-    cy = cy->end->next;
+  // Iterative lockstep walk of the two flatterm preorders.  Two terms
+  // are structurally equal iff their preorders agree cell-for-cell on
+  // (sym, arity): arity fully determines the shape, so matching every
+  // aligned (sym, arity) pair forces identical trees of identical
+  // length -- y exhausts its subterm exactly when x reaches x_end.
+  // Collapses the recursion to a single linear scan (no call frame).
+  const AtpFtCell *x_end = (x->end != NULL) ? x->end->next : NULL;
+  const AtpFtCell *px = x, *py = y;
+  while (px != x_end) {
+    if (py == NULL) return 0;
+    if (px->sym != py->sym || px->arity != py->arity) return 0;
+    px = px->next;
+    py = py->next;
   }
   return 1;
 }

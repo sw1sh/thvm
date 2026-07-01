@@ -1499,6 +1499,15 @@ typedef struct {
   u8           side;
   u32         *chain_tail;
   AtpFtSubst  *subst;
+  // Proof-chain recording as AtpProofStep[] (goal extractor), distinct
+  // from the TRACE_NORM_STEP `record` path: when psteps != NULL each
+  // reduction appends {side, rule, fwd, pos, before, after} so
+  // thvm_atp_proof_extract reconstructs the CLOSING chain in the SAME
+  // FT-mixmost (WM innermost) order the search proved with -- the
+  // Term-side outermost extractor over-joins and loses the goal-closer.
+  AtpProofStep *psteps;
+  u32          *pn;
+  u32           pcap;
 } FtMixmost;
 
 // WM NFB_RegelOderGleichungAngewendet: one reduction attempt at the
@@ -1522,9 +1531,11 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   u8  pos[ATP_PROOF_MAX_DEPTH];
   u8  pos_len  = 0u;
   int have_pos = 0;
-  if (m->record) {
+  if (m->record || m->psteps != NULL) {
     have_pos = ft_find_position(m->root, e->cell, pos, &pos_len);
   }
+  // AtpProofStep needs the term BEFORE the splice; capture it now.
+  Term before_term = (m->psteps != NULL) ? ft_to_term(m->root) : (Term)0;
   AtpFtCell *parent   = (m->depth == 0u) ? NULL : m->st[m->depth - 1u].ins;
   AtpFtCell *rhs_tmpl = (dir == 0u) ? m->s->rhs_ft[rule]
                                     : m->s->lhs_ft[rule];
@@ -1537,6 +1548,17 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   e->cell = (m->depth == 0u) ? m->root : parent->next;
   e->left = ft_cell_arity(e->cell);
   e->ins  = NULL;
+  if (m->psteps != NULL && *m->pn < m->pcap) {
+    AtpProofStep *st = &m->psteps[*m->pn];
+    st->side    = m->side;
+    st->rule    = rule;
+    st->fwd     = (dir == 0u) ? 1u : 0u;
+    st->pos_len = have_pos ? pos_len : 0u;
+    for (u8 k = 0; k < st->pos_len; k++) st->pos[k] = pos[k];
+    st->before  = before_term;
+    st->after   = ft_to_term(m->root);
+    (*m->pn)++;
+  }
   if (m->record) {
     Term step_term = ft_to_term(m->root);
     u8  fwd        = (dir == 0u) ? 1u : 0u;
@@ -1558,7 +1580,9 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
                                            u32 step_cap, u8 doE,
                                            int record, Term eq_other,
                                            u8 side, u32 *chain_tail,
-                                           AtpFtSubst *subst) {
+                                           AtpFtSubst *subst,
+                                           AtpProofStep *psteps, u32 *pn,
+                                           u32 pcap) {
   FtNfPathEnt st_fixed[64];
   FtMixmost m = {
     .s = s, .arena = (AtpFt *)s->ft_arena_ptr, .root = t,
@@ -1567,15 +1591,37 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     .doE = doE, .budget = step_cap, .record = record,
     .eq_other = eq_other, .side = side, .chain_tail = chain_tail,
     .subst = subst,
+    .psteps = psteps, .pn = pn, .pcap = pcap,
   };
   FtNfPathEnt *heap_st = NULL;
   m.st[0].cell = t;
   m.st[0].ins  = NULL;
   m.st[0].left = ft_cell_arity(t);
+  // Critical-pair overlaps can normalize to pathologically large terms
+  // (variable-multiplication blowup: a small rule's RHS instantiated under
+  // a deep unifier -- the goal-directed OrAssociativity heap-blowup, ~650
+  // -> 90000 nodes).  Such NFs are always far over the auto-MaxWeight bound
+  // and get stashed/dropped at intake -- but only AFTER ft_to_term has
+  // built the full term on the main heap, exhausting it.  When
+  // THVM_ATP_NF_CAP>0, stop reducing once this normalize has grown the live
+  // FT set past the cap: the result stays over-bound (the CP is discarded
+  // exactly as before) but is never materialized at full size.  The cap is
+  // set well above any legitimate NF (the faithful-preset proof's NFs stay
+  // <~250 symbols), so on-path proofs are byte-identical.  Off (0) = no cap.
+  AtpFt *nf_arena = m.arena;
+  u64 nf_start = nf_arena->n_persistent_alive;
+  static int nf_cap = -1;
+  if (nf_cap < 0) { const char *e = getenv("THVM_ATP_NF_CAP");
+    nf_cap = (e && *e) ? (int)strtol(e, NULL, 10) : 0; }
   // Root fixpoint (the loop before WeiterInVO, NFBildung.c:355).
-  while (ft_mixmost_reduce_here(&m)) {}
+  while (ft_mixmost_reduce_here(&m)) {
+    if (nf_cap > 0 &&
+        nf_arena->n_persistent_alive - nf_start > (u64)nf_cap) break;
+  }
   for (;;) {
     if (m.budget == 0u) break;
+    if (nf_cap > 0 &&
+        nf_arena->n_persistent_alive - nf_start > (u64)nf_cap) break;
     // WeiterInVO (:289-300): ascend past exhausted positions, then
     // step to the next unvisited child (PfadEinsWeiterSetzen).
     while (m.st[m.depth].left == 0u) {
@@ -1803,6 +1849,33 @@ AtpFtCell *atp_rewrite_normalize_ft_record(AtpState *s, AtpFtCell *t,
                                        eq_other, side, chain_tail);
 }
 
+// FT-mixmost (WM innermost) normalize that records each rewrite as an
+// AtpProofStep into out[*n .. cap).  The ORDER-FAITHFUL goal-chain
+// extractor: it reproduces goal_check's FT-mixmost join so the closing
+// chain actually closes -- the legacy Term-side OUTERMOST extractor
+// (atp_proof_record_side) over-joins the CPs WM keeps, loses the
+// goal-closer, and returns an empty chain (buildCplDataset.empty-goal-
+// chain -> ProofObject $Failed even though the engine PROVED).
+AtpFtCell *atp_rewrite_normalize_ft_proofsteps(AtpState *s, AtpFtCell *t,
+                                               u32 step_cap, u8 side,
+                                               AtpProofStep *out, u32 *n,
+                                               u32 cap);
+AtpFtCell *atp_rewrite_normalize_ft_proofsteps(AtpState *s, AtpFtCell *t,
+                                               u32 step_cap, u8 side,
+                                               AtpProofStep *out, u32 *n,
+                                               u32 cap) {
+  if (t == NULL) return NULL;
+  if (s->n_rules == 0u) return t;
+  ft_clear_subst_fresh(t);
+  AtpFtSubst subst;
+  memset(&subst, 0, sizeof(subst));
+  return atp_normalize_mixmost_ft(s, t, /*slice_first=*/0u,
+                                  /*slice_end=*/s->n_rules, step_cap,
+                                  /*doE=*/1u, /*record=*/0, /*eq_other=*/0,
+                                  side, /*chain_tail=*/NULL, &subst,
+                                  out, n, cap);
+}
+
 // Slice-aware fixpoint.  Rewrites `t` against only the rule slice
 // [slice_first, slice_first + slice_count) of s->lhs_ft / s->rhs_ft.
 // Mirrors the Term-side `atp_proof_rewrite_step_slice` /
@@ -1867,7 +1940,8 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
     if (mslice_end > s->n_rules) mslice_end = s->n_rules;
     return atp_normalize_mixmost_ft(s, t, slice_first, mslice_end,
                                     step_cap, doE, record, eq_other,
-                                    side, chain_tail, &subst);
+                                    side, chain_tail, &subst,
+                                    /*psteps=*/NULL, /*pn=*/NULL, /*pcap=*/0u);
   }
 
   int use_full_range = (slice_first == 0u && slice_count == s->n_rules);
