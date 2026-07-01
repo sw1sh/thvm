@@ -3849,17 +3849,15 @@ $atpProblemName = "problem";
    lemma as a `plain` step whose inference() cites its parents, closing with
    $false.  Every derived step is a genuine status(thm) consequence of its
    cited parents (the ProofObject's own ProofFunction verifies the proof), so
-   the derivation is GDV-checkable.  Renders a TPTP-sourced ProofObject: the
-   parser prefixes function/constant symbols with Tptp$ and leaves TPTP
-   variables as bare uppercase symbols, which tells them apart. *)
+   the derivation is GDV-checkable.  The parsed symbols carry their plain TPTP
+   names in Global` (functors / constants lowercase, TPTP variables uppercase),
+   so SymbolName -- which drops the context -- is the TPTP token directly. *)
 atpProofObjectToTPTP[po_ProofObject, problem_String] := Module[
-    {tptpQ, strip, tp, ds, axName, pname, lines},
-    tptpQ[s_Symbol] := StringStartsQ[SymbolName[s], "Tptp$"];
-    strip[s_Symbol] := If[ tptpQ[s], StringDrop[SymbolName[s], 5], SymbolName[s]];
+    {tp, ds, axName, pname, lines},
     tp[HoldForm[e_]] := tp[e];
     tp[Equal[l_, r_]] := tp[l] <> " = " <> tp[r];
-    tp[f_Symbol[a__]] := strip[f] <> "(" <> StringRiffle[tp /@ {a}, ","] <> ")";
-    tp[s_Symbol] := If[ tptpQ[s], strip[s], SymbolName[s]];
+    tp[f_Symbol[a__]] := SymbolName[f] <> "(" <> StringRiffle[tp /@ {a}, ","] <> ")";
+    tp[s_Symbol] := SymbolName[s];
     tp[e_] := ToString[e];
     ds = Normal[po["ProofDataset"]];
     axName = Association @ Cases[Normal[Keys[ds]], k : {"Axiom", n_} :> (k -> "ax" <> ToString[n])];
@@ -4239,22 +4237,28 @@ tptpDispatch[imported_Association, returnSpec_, opts : OptionsPattern[TFindProof
 ]
 
 (* Convert TPTP's String-headed terms ("and"[X, Y], "a"[]) into
-   Symbol-headed terms in a private context so atpEncodeProblem and
-   the WL ProofObject verifier (which expect Symbol heads) work as
-   usual.  The conversion is one-way at dispatch time: TPTPImport's
-   user-visible output stays String-headed for clean InputForm display
-   ("and"[X, Y] instead of WolframInstitute`THVMLink`...`Tptp`and[X, Y]). *)
+   Symbol-headed terms so atpEncodeProblem and the WL ProofObject verifier
+   (which expect Symbol heads) work as usual.  The symbols land in Global`
+   with their plain TPTP names -- so a parsed problem reads and prints as
+   ordinary WL (inverse[inverse[a]], not a qualified private symbol).  Each
+   is force-cleared on internalization so a pre-existing Global definition
+   (a user's `a`, or a previous parse) cannot evaluate it; it stays inert.
+   The conversion is one-way at dispatch time -- TPTPImport's user-visible
+   output stays String-headed for clean InputForm display. *)
 (* CamelCase-fold underscored names so Symbol[] accepts them.
    sk_c1 -> skC1, op_overtilde -> opOvertilde, $true -> Dollar$true.
    Symbol[] rejects identifier strings with `_` (parsed as Blank) or
    leading `$` (parsed as $-prefix); this fold side-steps both. *)
-tptpStringToSymbol[s_String] :=
-    Symbol["WolframInstitute`THVMLink`ATP`Private`Tptp$" <> Which[
+tptpStringToSymbol[s_String] := With[
+    {name = "Global`" <> Which[
         StringStartsQ[s, "$"], "Dollar" <> StringDrop[s, 1],
         StringContainsQ[s, "_"], With[{parts = StringSplit[s, "_"]},
             First[parts] <> StringJoin[Capitalize /@ Rest[parts]]],
         True, s
-    ]];
+    ]},
+    ClearAll[name];
+    Symbol[name]
+];
 (* Internalize: convert "h"[args...] -> Tptp$h[args...].  Nullary
    "a"[] (with empty args) collapses to bare Symbol Tptp$a so it
    matches the WL ProofObject decoder's `Symbol[name]` shape for
