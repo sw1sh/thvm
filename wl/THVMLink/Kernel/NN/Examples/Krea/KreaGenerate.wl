@@ -303,7 +303,9 @@ KreaGenerate[prompt_, opts : OptionsPattern[]] := Module[{modelDir, dev, steps, 
         Return[$Failed]
     ];
     dev = OptionValue["Device"];
-    steps = Replace[OptionValue["Steps"], Automatic -> $kreaConfig["steps"]];
+    (* 8 = the Krea 2 Turbo distilled step count (the fixed-mu 1.15 schedule,
+       krSigmas). *)
+    steps = Replace[OptionValue["Steps"], Automatic -> 8];
     seed = OptionValue[RandomSeeding];
     initLat = OptionValue["InitialLatent"];
     imgSize = OptionValue["ImageSize"];
@@ -319,7 +321,8 @@ KreaGenerate[prompt_, opts : OptionsPattern[]] := Module[{modelDir, dev, steps, 
         "InitialLatent" -> initLat,
         "Grid" -> {gridH, gridW},
         "TextSeqLen" -> 512,
-        "Sigmas" -> krSigmas[steps]
+        "Sigmas" -> krSigmas[steps],
+        "ProgressReporting" -> OptionValue[ProgressReporting]
     |>;
     tisPipeline[spec, prompt, runOpts]
 ]

@@ -152,10 +152,16 @@ tisBuildComponent[spec_, role_String, dev_] := Module[{comp, class, impl},
    denoised latent + image (the caller's KreaGenerate assembles the return
    parts), keeping this orchestration model-agnostic. *)
 
-tisPipeline[spec_Association, prompt_, opts_Association] := Module[{
+tisPipeline::sigmas = "The sigma schedule `1` is not a numeric vector; check the \"Steps\" / \"Sigmas\" options.";
+
+tisPipeline[spec_Association, prompt_, opts_Association] := tisWithProgress[
+    Lookup[opts, "ProgressReporting", Automatic] =!= False,
+    tisPipelineCore[spec, prompt, opts]
+]
+
+tisPipelineCore[spec_Association, prompt_, opts_Association] := Module[{
     dev, seqLen, nSteps, gridH, gridW, simg, seed, initLat,
-    tok, enc, tf, vae, ids, attMask, textEmb, sigmas, stepFn, z0, zFinal, image,
-    tEnc, tBuild, tDenoise, tVae
+    tok, enc, tf, vae, ids, attMask, textEmb, sigmas, stepFn, z0, zFinal, image
 },
     dev = Lookup[opts, "Device", "cpu"];
     seqLen = Lookup[opts, "TextSeqLen", 512];
@@ -165,19 +171,30 @@ tisPipeline[spec_Association, prompt_, opts_Association] := Module[{
     seed = Lookup[opts, "Seed", Automatic];
     initLat = Lookup[opts, "InitialLatent", Automatic];
     (* --- build components from the spec --- *)
+    tisReport["Loading model components...", 0.];
     tok = tisBuildComponent[spec, "tokenizer", dev];
     enc = tisBuildComponent[spec, "text_encoder", dev];
     tf = tisBuildComponent[spec, "transformer", dev];
     vae = tisBuildComponent[spec, "vae", dev];
     If[ AnyTrue[{tok, enc, tf, vae}, # === $Failed &], Return[$Failed]];
     (* --- STAGE 1: tokenize --- *)
+    tisReport["Tokenizing the prompt...", 0.02];
     {ids, attMask} = tok["impl"]["forward"][tok["built"], prompt, seqLen];
     (* --- STAGE 2: text-encode (stacked tapped hidden states for Krea) --- *)
+    tisReport["Encoding the prompt...", 0.05];
     textEmb = enc["impl"]["forward"][enc["built"], ids, attMask];
     (* --- STAGE 3: flow-match Euler denoise over the transformer velocity net.
        The transformer forward yields a step closure (z, sigma) |-> velocity
-       closing over the text embedding, the RoPE/position ids, and weights. --- *)
+       closing over the text embedding, the RoPE/position ids, and weights.
+       Guard the schedule before any device work: a non-numeric sigma vector
+       (a bad "Steps" / "Sigmas" option) would otherwise cascade into opaque
+       Part / TUOpConst failures deep in the denoise loop. --- *)
     sigmas = Lookup[opts, "Sigmas", fxSigmas[simg, nSteps]];
+    If[ ! VectorQ[sigmas, NumericQ],
+        Message[tisPipeline::sigmas, Short[sigmas]];
+        Return[$Failed]
+    ];
+    tisReport["Building the velocity net...", 0.25];
     stepFn = tf["impl"]["forward"][tf["built"], textEmb, attMask, <|
         "gridH" -> gridH, "gridW" -> gridW, "simg" -> simg, "device" -> dev
     |>];
@@ -185,11 +202,43 @@ tisPipeline[spec_Association, prompt_, opts_Association] := Module[{
     zFinal = tisEulerSample[stepFn, z0, sigmas];
     (* --- STAGE 4: VAE decode (TRealize so the lazy decoder graph materializes to a
        concrete TTerm the caller can Normal-read). --- *)
+    tisReport["Decoding the latent...", 0.92];
     image = TRealize @ vae["impl"]["forward"][vae["built"], zFinal, <|
         "gridH" -> gridH, "gridW" -> gridW, "device" -> dev
     |>];
     <|"latent" -> z0, "denoised" -> zFinal, "image" -> image, "embedding" -> textEmb|>
 ]
+
+(* Run body under a live progress panel that re-reads the mutated text +
+   progress (RuleDelayed, so each panel refresh sees the current values); the
+   Block-scoped tisReport[text, frac] is what the pipeline stages call to
+   advance it.  Reporting off -> just the body.  Same mechanism as FLUX's
+   fxWithProgress (FluxGenerate.wl); Progress`EvaluateWithProgress is a
+   near-no-op with no front end, so headless (wl / wolframscript) runs never
+   error. *)
+
+SetAttributes[tisWithProgress, HoldRest];
+
+tisWithProgress[reportQ_, body_] := If[ TrueQ[reportQ],
+    Module[{progress = 0., text = "Loading model components..."},
+        Block[{
+            tisReport = Function[{t, p},
+                text = t;
+                progress = p
+            ]
+        },
+            Progress`EvaluateWithProgress[body, <|"Text" :> text, "Progress" :> progress, "RemainingTime" -> Automatic|>]
+        ]
+    ]
+    ,
+    Block[{tisReport = (Null &)},
+        body
+    ]
+]
+
+(* default: a no-op, so the pipeline stages work when evaluated outside
+   tisWithProgress (e.g. a future internal caller). *)
+tisReport = (Null &);
 
 (* fresh packed-latent noise z0 ~ N(0,1), or a supplied initial latent.  The
    packed latent is {simg, channels*patch^2}; the transformer config gives the
@@ -219,25 +268,27 @@ tisInitialLatent[initLat_, simg_, cfg_, seed_, dev_] := Module[{ch, patch, packD
    pool on a 12B DiT).  dt is applied outside the captured graph; each step is
    realized so the running latent stays a concrete TTerm. *)
 
-tisEulerSample[stepFn_Function, z0_, sigmas_] := Module[{z = z0, k, dt, v},
-    Do[ dt = sigmas[[k + 1]] - sigmas[[k]];
+tisEulerSample[stepFn_Function, z0_, sigmas_] := Module[{z = z0, n = Length[sigmas] - 1, k, dt, v},
+    Do[ tisReport["Denoising (step " <> IntegerString[k] <> "/" <> IntegerString[n] <> ")...", 0.35 + 0.55 (k - 1)/n];
+        dt = sigmas[[k + 1]] - sigmas[[k]];
         v = stepFn[z, sigmas[[k]]];
         z = TRealize @ TUOpAdd[z, TUOpMul[v, TUOpConst[N[dt]]]],
-        {k, 1, Length[sigmas] - 1}
+        {k, 1, n}
     ];
     z
 ]
 
-tisEulerSample[tfOut_Association, z0_, sigmas_] := Module[{z = z0, vn = tfOut["velNet"], cf = tfOut["condFn"], k, dt, v},
+tisEulerSample[tfOut_Association, z0_, sigmas_] := Module[{z = z0, vn = tfOut["velNet"], cf = tfOut["condFn"], n = Length[sigmas] - 1, k, dt, v},
     (* The velocity net realizes each block eagerly to bound fp8-transient memory
        (a fully-lazy capture would pin the whole transformer as bf16 on top of the
        fp8 resident, ~36 GB), so it is called directly each step rather than
        TJit-captured.  The O(N) scheduler (rc_memo) keeps the per-step re-schedule
        cheap, so direct calls cost no speed vs a JIT replay. *)
-    Do[ dt = sigmas[[k + 1]] - sigmas[[k]];
+    Do[ tisReport["Denoising (step " <> IntegerString[k] <> "/" <> IntegerString[n] <> ")...", 0.35 + 0.55 (k - 1)/n];
+        dt = sigmas[[k + 1]] - sigmas[[k]];
         v = vn[z, Sequence @@ cf[sigmas[[k]]]];
         z = TRealize @ TUOpAdd[z, TUOpMul[v, TUOpConst[N[dt]]]],
-        {k, 1, Length[sigmas] - 1}
+        {k, 1, n}
     ];
     z
 ]
