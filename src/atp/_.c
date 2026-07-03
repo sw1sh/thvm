@@ -1565,6 +1565,358 @@ static void acp_unpack(const u8 *buf, Term *lhs, Term *rhs) {
   if (rhs != NULL) *rhs = r;
 }
 
+// === Fused varnorm + pack + KBO-weigh (one walk per CP) =============
+//
+// The CP push pipeline historically walked every surviving CP three
+// times: thvm_normalize_vars rebuilt the pair with dense var ids (one
+// walk + a full Term-cell rebuild), acp_pack walked the rebuilt pair
+// to serialize it, and the GT/MIX weigh (thvm_kbo_nomemo via
+// kbo_lin_addto) walked it a third time for the weight/variable
+// balances.  The three are fused here into ONE preorder pass over the
+// PRE-renumber pair that simultaneously
+//   (a) assigns canonically dense var ids by first occurrence -- the
+//       exact thvm_normalize_vars numbering (lhs fully, then rhs; see
+//       unify/_.c nv_rewrite) -- WITHOUT materializing renumbered
+//       Term cells,
+//   (b) emits the packed byte string of the renumbered pair into
+//       g_acp_scratch -- byte-identical to normalize-then-acp_pack,
+//   (c) encodes each side as a flat preorder node array (dense ids)
+//       and accumulates the whole-pair weight balance (phidiff) and
+//       per-variable occurrence balance -- the exact sums
+//       thvm_kbo_nomemo's Vortest computes for the top-level compare
+//       (matching subtrees cancel there, so the net sums are equal;
+//       kbo_lin_decide_clear's sign classification is accumulation-
+//       order-invariant).
+// The weigh (acp_fuse_kbo) then decides GT/LT/UN/EQ from the flat
+// form: identity is a memcmp, the weight/var verdict comes from the
+// accumulated balances, and only a genuine phi tie descends -- via a
+// mirror of kbo_lin_rek over the flat arrays (kbo_flat_rek's decision
+// core with the Term path's arity guard restored, since a flat node
+// carries its arity here).  The renumber's KBO-cap property is what
+// makes this sound where weighing the RAW pair is not: raw overlap
+// terms carry j-side ids >= CP_RENAME_OFFSET, above the KBO balance
+// caps (see atp_cp_order_gate); the dense ids stay inside them.
+//
+// Anomalies -- a NUM/ERA atom, a non-NUM arity cell, arity >
+// REWRITE_MAX_ARITY, or > REWRITE_MAX_VAR distinct variables (the
+// classes where nv_rewrite bails or the flat encoding cannot mirror
+// thvm_kbo) -- abort the fused walk; the caller falls back to the
+// classic normalize + pack + Term-weigh pipeline, so the fused path
+// never has to replicate the bail semantics.  Unreachable on ATP
+// first-order signatures; the fallback counter should stay 0.
+//
+// Kill switch: THVM_ATP_NO_FUSE_PACK=1 (same-binary A/B).  Certifier:
+// THVM_ATP_FUSE_CHECK=1 re-runs the classic pipeline per CP and
+// asserts byte-equal packing + verdict-equal weighing.
+
+// Dense-id map: old id -> position == dense id, first-occurrence
+// ordered (the exact nv_rewrite assignment).
+typedef struct {
+  u32 old_id[REWRITE_MAX_VAR];
+  u32 n;
+} AcpNvMap;
+
+// Flat preorder node.  sym >= 0 is a CTR label, sym < 0 encodes a
+// (dense) variable id as -(id+1); w is the node's own KBO weight; sz
+// the subtree span in nodes; ar the CTR arity (0 for a variable) --
+// the field kbo/_.c's KboFlatNode lacks, restored here so the lex
+// descent keeps thvm_kbo's ns != nt incomparability guard.
+typedef struct {
+  i32 sym;
+  u32 w;
+  u32 sz;
+  u32 ar;
+} AcpFlatNode;
+
+// Per-CP flat pool: lhs at [0, fl_n), rhs at [fl_n, fl_n + fr_n).
+// Grown geometrically, persistent across CPs (single-threaded
+// saturation, like g_acp_scratch).
+static AcpFlatNode *g_acpf_pool = NULL;
+static u32          g_acpf_cap  = 0u;
+
+static void acpf_ensure(u32 need) {
+  if (need <= g_acpf_cap) return;
+  u32 ncap = g_acpf_cap ? g_acpf_cap : 1024u;
+  while (need > ncap) ncap *= 2u;
+  AcpFlatNode *np = (AcpFlatNode *)realloc(g_acpf_pool,
+                                           (size_t)ncap * sizeof *np);
+  if (np == NULL) thvm_fatal("acpf_ensure: OOM");
+  g_acpf_pool = np;
+  g_acpf_cap  = ncap;
+}
+
+// Fused-walk state for the CP being packed.  `valid` marks the flat
+// encoding + balances live for exactly one weigh (atp_weigh_compare
+// consumes it; atp_cp_heap_push clears it on every exit path).
+typedef struct {
+  AcpNvMap  map;
+  long long phidiff;                 // w(lhs) - w(rhs)
+  int       bal[REWRITE_MAX_VAR];    // count(lhs,v) - count(rhs,v), dense v
+  u32       fl_n, fr_n;              // per-side flat node counts
+  u8        valid;
+} AcpFuse;
+static AcpFuse g_acp_fuse;
+
+// Fused-pipeline shape counters (PROFILE=2 printout; fallbacks should
+// be 0 on ATP signatures).
+u64 g_acp_fuse_n_ok = 0;
+u64 g_acp_fuse_n_fb = 0;
+
+// One preorder step of the fused walk: pack `t` (renumbered on emit)
+// at scratch position *pos, bump *nodes once per node, and -- when
+// `fz` is non-NULL -- append the flat node at *fpos and accumulate the
+// weight/var balances with `sign` (+1 lhs, -1 rhs).  Returns 0 on an
+// anomaly (see the header comment); the caller falls back whole.
+static u8 acp_fuse_walk(Term t, const KboConfig *cfg, AcpNvMap *m,
+                        u32 *pos, u32 *nodes, AcpFuse *fz, int sign,
+                        u32 *fpos) {
+  (*nodes)++;
+  acp_scratch_ensure(*pos, 21u);
+  u8 *p = g_acp_scratch + *pos;
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      // nv_rewrite's defensive guards (non-NUM arity cell, over-arity
+      // node) leave the subtree un-renumbered there; abort to the
+      // classic pipeline instead of mirroring the bail.
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) return 0;
+      u32 n = (u32)term_val(n_cell);
+      if (n > REWRITE_MAX_ARITY) return 0;
+      u32 lab = term_ext(t);
+      *p++ = (u8)'C';
+      acp_put_varint(&p, lab);
+      acp_put_varint(&p, n);
+      *pos = (u32)(p - g_acp_scratch);
+      u32 here = 0u;
+      if (fz != NULL) {
+        acpf_ensure(*fpos + 1u);
+        here = (*fpos)++;
+        u32 w = (lab < cfg->n_labels) ? cfg->weights[lab] : 0u;
+        g_acpf_pool[here].sym = (i32)lab;
+        g_acpf_pool[here].w   = w;
+        g_acpf_pool[here].ar  = n;
+        fz->phidiff += (long long)sign * (long long)w;
+      }
+      for (u32 i = 0; i < n; i++) {
+        if (!acp_fuse_walk(heap_read(base + 1u + (u64)i), cfg, m, pos,
+                           nodes, fz, sign, fpos)) return 0;
+      }
+      if (fz != NULL) g_acpf_pool[here].sz = *fpos - here;
+      return 1;
+    }
+    case TAG_FVR: {
+      u32 old = term_ext(t);
+      u32 d = 0u;
+      for (; d < m->n; d++) {
+        if (m->old_id[d] == old) break;
+      }
+      if (d == m->n) {
+        if (m->n >= REWRITE_MAX_VAR) return 0;   // nv keeps ids past a
+                                                 // full map; fall back
+        m->old_id[m->n++] = old;
+        if (fz != NULL) fz->bal[d] = 0;
+      }
+      *p++ = (u8)'V';
+      acp_put_varint(&p, d);
+      *pos = (u32)(p - g_acp_scratch);
+      if (fz != NULL) {
+        acpf_ensure(*fpos + 1u);
+        g_acpf_pool[*fpos].sym = -(i32)(d + 1u);
+        g_acpf_pool[*fpos].w   = cfg->var_weight;
+        g_acpf_pool[*fpos].sz  = 1u;
+        g_acpf_pool[*fpos].ar  = 0u;
+        (*fpos)++;
+        fz->phidiff += (long long)sign * (long long)cfg->var_weight;
+        fz->bal[d]  += sign;
+      }
+      return 1;
+    }
+    default:
+      return 0;   // NUM / ERA atom: the flat compare cannot mirror
+                  // thvm_kbo's term_val identity; classic path handles
+  }
+}
+
+// Fused renumber+pack of a raw pair into the scratch (no flat encode,
+// no balances): bytes identical to thvm_normalize_vars-then-
+// acp_pack_term x2.  Serves the off-heap trace store.  Returns 0 on
+// an anomaly (caller renumbers + packs classically).
+static u8 acp_trace_pack_fused(Term lhs, Term rhs, u32 *pos) {
+  AcpNvMap m;
+  m.n = 0u;
+  u32 nodes = 0u, fpos = 0u;
+  if (!acp_fuse_walk(lhs, NULL, &m, pos, &nodes, NULL, +1, &fpos)) return 0;
+  if (!acp_fuse_walk(rhs, NULL, &m, pos, &nodes, NULL, -1, &fpos)) return 0;
+  return 1;
+}
+
+// Fused counterpart of thvm_normalize_vars + acp_pack_ex: packs the
+// renumbered pair into a fresh exact-size malloc and leaves the flat
+// encoding + balances armed in g_acp_fuse for the weigh.  NULL on an
+// anomaly (nothing armed; caller runs the classic pipeline).
+static u8 *acp_pack_fused(const KboConfig *cfg, Term lhs, Term rhs,
+                          u32 *out_len, u32 *out_nodes,
+                          u32 *out_lhs_nodes) {
+  AcpFuse *fz = &g_acp_fuse;
+  fz->valid   = 0u;
+  fz->map.n   = 0u;
+  fz->phidiff = 0;
+  u32 pos = 0u, nodes = 0u, fpos = 0u;
+  if (!acp_fuse_walk(lhs, cfg, &fz->map, &pos, &nodes, fz, +1, &fpos)) {
+    return NULL;
+  }
+  u32 lhs_nodes = nodes, fl = fpos;
+  if (!acp_fuse_walk(rhs, cfg, &fz->map, &pos, &nodes, fz, -1, &fpos)) {
+    return NULL;
+  }
+  fz->fl_n  = fl;
+  fz->fr_n  = fpos - fl;
+  fz->valid = 1u;
+  u8 *buf = (u8 *)malloc(pos ? pos : 1u);
+  if (buf == NULL) thvm_fatal("acp_pack_fused: OOM");
+  memcpy(buf, g_acp_scratch, pos);
+  if (out_len != NULL) *out_len = pos;
+  *out_nodes     = nodes;
+  *out_lhs_nodes = lhs_nodes;
+  return buf;
+}
+
+// Add the flat subtree at a[pos] to one side of the current balance
+// scope (mirror of kbo_lin_addto_walk / kbo_flat_addto): one linear
+// sweep over the contiguous slice.
+static void acpf_addto(KboLin *st, const AcpFlatNode *a, u32 pos, int sign,
+                       long long *phidiff) {
+  u32 end = pos + a[pos].sz;
+  for (u32 i = pos; i < end; i++) {
+    *phidiff += (long long)sign * (long long)a[i].w;
+    if (a[i].sym < 0) kbo_bump(st, (u32)(-a[i].sym) - 1u, sign);
+  }
+}
+
+// Combined Vortest over two flat slices (mirror of kbo_vortest):
+// matching subtrees cancel and are skipped, divergent subtrees go
+// wholly onto + / -.  Returns 1 iff structurally identical.  The
+// arity test mirrors kbo_vortest's ns == nt gate exactly.
+static int acpf_vortest(KboLin *st, const AcpFlatNode *a, u32 pa,
+                        const AcpFlatNode *b, u32 pb, long long *phidiff) {
+  if (a[pa].sym == b[pb].sym) {
+    if (a[pa].sym < 0) return 1;                     // same variable
+    if (a[pa].ar == b[pb].ar) {
+      // Identical-slice fast path: byte-equal flat slices are
+      // structurally equal subtrees -- no divergence, no contribution.
+      if (a[pa].sz == b[pb].sz &&
+          memcmp(&a[pa], &b[pb],
+                 (size_t)a[pa].sz * sizeof(AcpFlatNode)) == 0) {
+        return 1;
+      }
+      u32 ca = pa + 1u, cb = pb + 1u;
+      int ident = 1;
+      for (u32 i = 0; i < a[pa].ar; i++) {
+        ident &= acpf_vortest(st, a, ca, b, cb, phidiff);
+        ca += a[ca].sz;
+        cb += b[cb].sz;
+      }
+      return ident;
+    }
+  }
+  // diverge: a[pa] wholly on +, b[pb] wholly on -.
+  acpf_addto(st, a, pa, +1, phidiff);
+  acpf_addto(st, b, pb, -1, phidiff);
+  return 0;
+}
+
+// Decision after Vortest -- mirror of kbo_lin_rek's per-level logic
+// (KBOEntscheidungRek + KBOEntscheidungLex) over the flat slices,
+// including the Term path's arity guard.  Precondition: the subtrees
+// are not identical and the balance table is cleared.
+static KboCmp acpf_rek(KboLin *st, const AcpFlatNode *a, u32 pa,
+                       const AcpFlatNode *b, u32 pb,
+                       long long phidiff, KboCmp varcmp) {
+  switch (varcmp) {
+    case KBO_GT:
+      if (phidiff < 0) return KBO_UN;
+      if (phidiff > 0) return KBO_GT;
+      break;
+    case KBO_LT:
+      if (phidiff < 0) return KBO_LT;
+      if (phidiff > 0) return KBO_UN;
+      break;
+    case KBO_EQ:
+      if (phidiff < 0) return KBO_LT;
+      if (phidiff > 0) return KBO_GT;
+      break;
+    default:
+      return KBO_UN;
+  }
+  // phi tie: compare top symbols by precedence.
+  if (a[pa].sym < 0 || b[pb].sym < 0) return KBO_UN;
+  const KboConfig *cfg = st->cfg;
+  u32 la = (u32)a[pa].sym, lb = (u32)b[pb].sym;
+  u32 ps = (la < cfg->n_labels) ? cfg->precedence[la] : 0;
+  u32 pt = (lb < cfg->n_labels) ? cfg->precedence[lb] : 0;
+  if (ps > pt) return (varcmp == KBO_LT) ? KBO_UN : KBO_GT;
+  if (ps < pt) return (varcmp == KBO_GT) ? KBO_UN : KBO_LT;
+  if (la != lb) return KBO_UN;
+  if (a[pa].ar != b[pb].ar) return KBO_UN;   // kbo_lin_rek's ns != nt
+  // KBOEntscheidungLex: first non-identical child pair decides; the
+  // deeper result maps back through this level's varcmp.
+  u32 ca = pa + 1u, cb = pb + 1u;
+  for (u32 i = 0; i < a[pa].ar; i++) {
+    long long phi = 0;
+    int ident = acpf_vortest(st, a, ca, b, cb, &phi);
+    if (ident) {
+      kbo_lin_clear(st);
+      ca += a[ca].sz;
+      cb += b[cb].sz;
+      continue;
+    }
+    KboCmp cvar  = kbo_lin_decide_clear(st);
+    KboCmp inner = acpf_rek(st, a, ca, b, cb, phi, cvar);
+    return kbo_map_through(varcmp, inner);
+  }
+  return KBO_EQ;
+}
+
+// The fused CP weigh: verdict-identical to
+// thvm_kbo_nomemo(lhs', rhs', cfg) on the renumbered pair the fused
+// walk encoded.  Identity = flat memcmp (== Vortest's ident); the
+// top-level phidiff/var balances come pre-accumulated from the pack
+// walk; only a phi tie descends via the flat Rek/Lex mirror above.
+static KboCmp acp_fuse_kbo(const KboConfig *cfg) {
+  const AcpFuse *fz = &g_acp_fuse;
+  const AcpFlatNode *a = g_acpf_pool;
+  const AcpFlatNode *b = g_acpf_pool + fz->fl_n;
+  if (fz->fl_n == fz->fr_n &&
+      memcmp(a, b, (size_t)fz->fl_n * sizeof(AcpFlatNode)) == 0) {
+    return KBO_EQ;
+  }
+  // Variable-domination verdict from the accumulated balances --
+  // kbo_lin_decide_clear's sign classification over the dense ids.
+  KboCmp varcmp = KBO_EQ;
+  for (u32 k = 0; k < fz->map.n; k++) {
+    int v = fz->bal[k];
+    if (v == 0) continue;
+    switch (varcmp) {
+      case KBO_EQ: varcmp = (v < 0) ? KBO_LT : KBO_GT; break;
+      case KBO_LT: if (v > 0) varcmp = KBO_UN; break;
+      case KBO_GT: if (v < 0) varcmp = KBO_UN; break;
+      default: break;
+    }
+  }
+  KboLin *st = &g_kbo_st;
+  st->cfg       = cfg;
+  st->n_touched = 0;
+  return acpf_rek(st, a, 0u, b, 0u, fz->phidiff, varcmp);
+}
+
+// Set around atp_trace_push_cp by the fused push loop: the off-heap
+// trace store renumbers the raw pair during its own byte emit.
+static u8 g_trace_eq_nv = 0u;
+// Set around atp_cp_heap_push by the fused push loop: the heap push
+// takes the fused pack (its caller skipped the treated renumber).
+static u8 g_cp_push_fused = 0u;
+
 // Count nodes in one packed preorder term, advancing `*pp` past it.
 // Non-allocating (unlike acp_unpack_term) so it is safe to call from the
 // hot CP-selection comparator without touching the term heap.
@@ -5481,8 +5833,20 @@ static u64 atp_trace_eq_store(AtpState *s, Term lhs, Term rhs) {
   // Pack into the shared scratch first (acp_pack_term emits there),
   // then append the exact bytes -- no 21-bytes/node bound pre-walk.
   u32 pos = 0u, nodes = 0u;
-  acp_pack_term(lhs, &pos, &nodes);
-  acp_pack_term(rhs, &pos, &nodes);
+  u8 stored = 0u;
+  if (g_trace_eq_nv) {
+    // Fused push loop: the raw pair arrives un-renumbered; renumber
+    // during the byte emit (bytes identical to normalize-then-pack).
+    stored = acp_trace_pack_fused(lhs, rhs, &pos);
+    if (!stored) {
+      pos = 0u;
+      thvm_normalize_vars(&lhs, &rhs);   // anomaly: classic pipeline
+    }
+  }
+  if (!stored) {
+    acp_pack_term(lhs, &pos, &nodes);
+    acp_pack_term(rhs, &pos, &nodes);
+  }
   if (s->trace_eq_len + pos > s->trace_eq_cap) {
     u64 ncap = s->trace_eq_cap ? s->trace_eq_cap * 2u : (1u << 20);
     while (s->trace_eq_len + pos > ncap) ncap *= 2u;
@@ -7361,6 +7725,12 @@ static int atp_term_touches_goal(const AtpState *s, Term t);
 // (AC mask, WPO/RPO/LPO, opt-in flat) falls back to atp_compare.
 // THVM_ATP_KBO_NOMEMO_MAX overrides the threshold (0 = disabled).
 static KboCmp atp_weigh_compare(AtpState *s, Term lhs, Term rhs, u32 nodes) {
+  // Fused CP weigh: the pack walk already encoded both faces + the
+  // whole-pair weight/var balances (acp_pack_fused).  Verdict-identical
+  // to the thvm_kbo_nomemo route below on the renumbered pair; the
+  // fused gate (atp_cp_push_fuse_ok) admits only the plain-KBO route,
+  // so this branch never bypasses an AC/WPO/RPO/LPO ordering.
+  if (g_acp_fuse.valid) return acp_fuse_kbo(s->kbo);
   static i64 nomemo_max = -1;
   if (nomemo_max < 0) {
     const char *e = getenv("THVM_ATP_KBO_NOMEMO_MAX");
@@ -8672,9 +9042,52 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
   }
   // Pack the CP into a byte string outside the managed heap.  The pack
   // walk counts per-side nodes as it goes; the weigh below reuses them.
+  // Fused push loop (g_cp_push_fused): lhs/rhs arrive UN-renumbered;
+  // acp_pack_fused renumbers during the byte emit and arms the flat
+  // weigh state (consumed by atp_weigh_compare, cleared on every exit
+  // below).  An anomaly falls back to the classic pipeline, starting
+  // with the treated renumber the fused caller skipped.
   u32  cp_nodes  = 0u;
   u32  lhs_nodes = 0u;
-  u8  *packed    = acp_pack_ex(lhs, rhs, NULL, &cp_nodes, &lhs_nodes);
+  u8  *packed    = NULL;
+  if (g_cp_push_fused) {
+    u32 flen = 0u;
+    packed = acp_pack_fused(s->kbo, lhs, rhs, &flen, &cp_nodes, &lhs_nodes);
+    if (packed == NULL) {
+      g_acp_fuse_n_fb++;
+      thvm_normalize_vars(&lhs, &rhs);
+    } else {
+      g_acp_fuse_n_ok++;
+      // THVM_ATP_FUSE_CHECK=1: per-CP differential certifier -- the
+      // classic normalize+pack must byte-match the fused emit and the
+      // classic memo-free KBO must verdict-match the fused weigh.
+      static int fuse_check = -1;
+      if (fuse_check < 0) fuse_check = atp_env_on("THVM_ATP_FUSE_CHECK");
+      if (fuse_check) {
+        Term cl = lhs, cr = rhs;
+        thvm_normalize_vars(&cl, &cr);
+        u32 rlen = 0u, rn = 0u, rl = 0u;
+        u8 *ref = acp_pack_ex(cl, cr, &rlen, &rn, &rl);
+        KboCmp cf = acp_fuse_kbo(s->kbo);
+        KboCmp cc = thvm_kbo_nomemo(cl, cr, s->kbo);
+        if (rlen != flen || rn != cp_nodes || rl != lhs_nodes ||
+            memcmp(ref, packed, rlen) != 0 || cf != cc) {
+          fprintf(stderr,
+                  "ATP_FUSE_CHECK MISMATCH len=%u/%u nodes=%u/%u "
+                  "lhs_nodes=%u/%u bytes=%s kbo=%d/%d\n",
+                  flen, rlen, cp_nodes, rn, lhs_nodes, rl,
+                  (rlen == flen && memcmp(ref, packed, rlen) == 0)
+                    ? "EQ" : "DIFF",
+                  (int)cf, (int)cc);
+          abort();
+        }
+        free(ref);
+      }
+    }
+  }
+  if (packed == NULL) {
+    packed = acp_pack_ex(lhs, rhs, NULL, &cp_nodes, &lhs_nodes);
+  }
   // Waldmeister NEVER weight-caps an ultimate CP -- an initial axiom is
   // the spec (Act_ultimate, w1=INT32_MIN) and must always enter the
   // queue.  Deferring a heavy axiom to the auto-MaxWeight stash (or
@@ -8690,6 +9103,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     // engine leaves it 0.
     if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) {
       free(packed);
+      g_acp_fuse.valid = 0u;
       return;
     }
     // Auto-MaxWeight (completeness-preserving): defer an over-bound CP to
@@ -8706,12 +9120,14 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
       u32 bound = atp_auto_maxw_bound(s);
       if (bound > 0u && cp_nodes > bound) {
         atp_cp_stash_push(s, packed, cp_nodes, trace, is_ultimate);
+        g_acp_fuse.valid = 0u;
         return;
       }
     }
   }
   atp_cp_heap_insert_packed(s, packed, cp_nodes, lhs, rhs, trace,
                             is_ultimate, lhs_nodes);
+  g_acp_fuse.valid = 0u;   // the fused weigh state is consume-once
 }
 
 // Lazily allocate the deferred-CP descriptor array + tag bitset to the
@@ -17952,10 +18368,63 @@ static void atp_bwd_ground_join_walk(AtpState *s, u32 skip_lo, u32 skip_hi) {
 // half the per-CP filter cost.  They run only under -DATP_CP_DIAG;
 // the default hot loop skips them.  Skipping is behavior-identical:
 // same CPs queued, same proof, identical step/rule/cps trajectory.
+// May the CP push loop take the fused single-pass pipeline
+// (acp_pack_fused: varnorm + pack + weigh in one walk)?  Requires that
+// NOTHING downstream consumes the renumbered pair as Term cells: every
+// push-side filter off, the weigh on the plain-KBO route, no
+// goal/sos/w2/learned weighing, no implicit-CP descriptor path, and no
+// Term-printing debug env.  The env/compile legs are cached; the
+// AtpState legs are re-checked per push batch (cheap flag reads).
+static u8 atp_cp_push_fuse_ok(const AtpState *s) {
+#if !defined(ATP_VAR_NORM) || defined(ATP_CP_DIAG) || defined(THVM_ATPFT_CPQ)
+  // Without the renumber the classic pack IS the raw pack; the DIAG /
+  // FT-queue builds consume the renumbered Terms unconditionally.
+  (void)s;
+  return 0u;
+#else
+  static int env_ok = -1;
+  if (env_ok < 0) {
+    env_ok = !atp_env_on("THVM_ATP_NO_FUSE_PACK")
+          && getenv("THVM_ATP_CP_FORM_TRACE")  == NULL
+          && getenv("THVM_ATP_W367_TRACE")     == NULL
+          && getenv("THVM_ATP_CPGEN_DEBUG")    == NULL
+          && getenv("THVM_ATP_CPRAW_DEBUG")    == NULL
+          && getenv("THVM_ATP_KBO_NOMEMO_MAX") == NULL;
+  }
+  if (!env_ok) return 0u;
+  if (s->kbo == NULL || s->wpo != NULL || s->rpo != NULL || s->lpo != NULL) {
+    return 0u;
+  }
+#ifdef THVM_ATP_AC
+  if (thvm_atp_get_ac_mask() != 0ull) return 0u;
+#endif
+  u32 mode = s->cp_weight_mode;
+  if (mode != ATP_CP_WEIGHT_ADD && mode != ATP_CP_WEIGHT_MAX &&
+      mode != ATP_CP_WEIGHT_GT  && mode != ATP_CP_WEIGHT_MIX &&
+      mode != ATP_CP_WEIGHT_MIX2) {
+    return 0u;
+  }
+  if (s->use_mix_heuristic) return 0u;
+  if (s->goal_lhs != 0 && (s->use_sos || s->use_goal_interleave > 0u)) {
+    return 0u;
+  }
+  if (s->w2_modulo > 0u || s->gnn_coop) return 0u;
+  if (s->use_perm_subsume || s->use_rule_subsume_drop ||
+      s->use_queue_subsume || s->use_connectedness || s->use_implicit_cp) {
+    return 0u;
+  }
+#ifdef ATP_CP_GROUND_JOIN
+  if (s->use_ground_join) return 0u;
+#endif
+  return 1u;
+#endif
+}
+
 static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                u32 ncps, u32 parent_a, u32 parent_b,
                                u32 rule_a, u32 rule_b) {
   u32 pushed = 0;
+  u8 fuse = atp_cp_push_fuse_ok(s);
 #ifndef ATP_CP_DIAG
   (void)rule_a;
   (void)rule_b;
@@ -18082,6 +18551,11 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
 #ifdef ATP_CP_DIAG
     _nv_need = 1u;
 #endif
+    // Fused pipeline: the heap push renumbers during its own byte
+    // emit (acp_pack_fused), so the treated pair keeps its raw-id
+    // handles here.  Every gate between this point and the push that
+    // could consume the renumbered pair is off under fuse.
+    if (fuse) _nv_need = 0u;
     // Pre-treatment handles: when the treatment wrote nothing back
     // (the raw >= 50 untreated class, or a no-op normalize returning
     // the same cells), the treated pair IS the raw pair, so the
@@ -18238,7 +18712,15 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // consume.  Same alpha-canonical result as normalizing eagerly.
     {
       u64 _dvr_t0 = g_atp_phase_detail ? atp_now_us() : 0;
-      if (_nv_ran && raw_lhs == _nv_pre_l && raw_rhs == _nv_pre_r) {
+      if (fuse) {
+        // Fused: an off-heap trace store renumbers during its own
+        // byte emit (g_trace_eq_nv below), a lean trace stores the
+        // pair nowhere; only a Term-materialized trace still needs
+        // the renumbered raw Terms.
+        if (!s->trace_pack && !s->cp_trace_lean) {
+          thvm_normalize_vars(&raw_lhs, &raw_rhs);
+        }
+      } else if (_nv_ran && raw_lhs == _nv_pre_l && raw_rhs == _nv_pre_r) {
         // Treatment wrote nothing back: normalize(raw) == the treated
         // renumber already computed above.  Reuse it.
         raw_lhs = cp_lhs;
@@ -18284,8 +18766,10 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       }
     }
     u64 _dtr_t0 = g_atp_phase_detail ? atp_now_us() : 0;
+    g_trace_eq_nv = (u8)(fuse && s->trace_pack);
     u32 t = atp_trace_push_cp(s, parent_a, parent_b, raw_lhs, raw_rhs,
                               cps[i].pos, cps[i].pos_len, cps[i].combo);
+    g_trace_eq_nv = 0u;
     if (g_atp_phase_detail) g_atp_cpg_us_trace += atp_now_us() - _dtr_t0;
     // Derived overlap CP: ultimate iff WM's `database=ultimate` flag is
     // on (NewClassification.c:711; Parameter.c default).  Off-by-default
@@ -18324,8 +18808,10 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                ? s->r_uid[rule_a] : 0u;
     g_cp_uid_b = (s->r_uid != NULL && rule_b < s->n_rules)
                ? s->r_uid[rule_b] : 0u;
+    g_cp_push_fused = fuse;
     if (!deferred) atp_cp_heap_push(s, cp_lhs, cp_rhs, t, cp_ult,
                                     raw_untreated);
+    g_cp_push_fused = 0u;
     if (g_atp_phase_detail) g_atp_cpg_us_pack += atp_now_us() - _dpk_t0;
     g_cp_par_a = ATP_TRACE_NONE;
     g_cp_uid_a = g_cp_uid_b = 0u;

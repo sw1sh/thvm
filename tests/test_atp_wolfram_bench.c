@@ -2079,6 +2079,11 @@ int main(int argc, char **argv) {
              g_atp_cpg_us_trace / 1e6, g_atp_cpg_us_pack / 1e6,
              g_atp_cpg_us_kbo / 1e6,
              sump / 1e6, g_atp_cpg_us_pushloop / 1e6);
+      if (g_acp_fuse_n_ok + g_acp_fuse_n_fb > 0) {
+        printf("   fused pack: ok=%llu fallback=%llu\n",
+               (unsigned long long)g_acp_fuse_n_ok,
+               (unsigned long long)g_acp_fuse_n_fb);
+      }
     }
     if (g_atp_unorient_step_calls > 0) {
       printf("   unorient-step: %llu calls  %llu fires  %llu empty (%.0f%% wasted)  %.2fs total\n",
