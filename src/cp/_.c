@@ -135,13 +135,14 @@ typedef struct {
 } CpCtx;
 
 // cp.peak (= sigma(l_i)) is read ONLY by the connectedness gate
-// (atp/_.c:16856, use_connectedness) and the equation-parent KPAction
-// ordering gate (atp/_.c:17076/17151, i_eq/j_eq).  For the common
-// oriented-rule x oriented-rule overlap with connectedness off it is never
-// read -- yet cp_visit computed it unconditionally (1 of 3 thvm_unify_apply
-// builds, ~1/3 of cp-gen).  atp_overlap_ij sets this to
-// (use_connectedness || i_eq || j_eq) per pair; default 1 stays safe for
-// any other caller.  Pure speedup -- the CP set is byte-identical.
+// (atp/_.c, use_connectedness), the equation-parent KPAction ordering
+// gate (i_eq/j_eq), and the nusfu below-skolem gate when armed with a
+// non-empty skolem registry.  For the common oriented-rule x
+// oriented-rule overlap with those off it is never read -- yet cp_visit
+// computed it unconditionally (1 of 3 thvm_unify_apply builds, ~1/3 of
+// cp-gen).  atp_overlap_ij sets this per pair from those predicates;
+// default 1 stays safe for any other caller.  Pure speedup -- the CP
+// set is byte-identical.
 u8 g_cp_need_peak = 1u;
 
 static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {

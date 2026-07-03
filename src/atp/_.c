@@ -19276,10 +19276,13 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   u8 i_un = i_eq && !i_mono;
   u8 j_un = j_eq && !j_mono;
   // cp.peak (sigma(l_i)) is read only by the connectedness gate
-  // (:16856) and the equation-parent KPAction ordering (:17076/:17151,
-  // i_eq/j_eq).  Otherwise the Term cp_visit must NOT spend a third
+  // (:16856), the equation-parent KPAction ordering (:17076/:17151,
+  // i_eq/j_eq), and the nusfu gate when armed with a non-empty skolem
+  // registry.  Otherwise the Term cp_visit must NOT spend a third
   // thvm_unify_apply building it -- gate it for this pair.
-  g_cp_need_peak = (s->use_connectedness || i_eq || j_eq) || atp_kapur_on() ? 1u : 0u;
+  g_cp_need_peak = (s->use_connectedness || i_eq || j_eq) || atp_kapur_on() ||
+                   (s->use_no_overlap_below_skolem && s->n_skolem_labels != 0u)
+                       ? 1u : 0u;
 
   // Root-overlap ownership (WM Unifikation1.c U1_KPsBildenZuRegel /
   // U1_KPsBildenZuGleichung).  WM forms each root-x-root overlap of a
@@ -24424,12 +24427,14 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   CriticalPair cp;
   cp.lhs  = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), &subst);
   cp.rhs  = thvm_unify_apply(ro, &subst);
-  // cp.peak is read only by the connectedness gate and the equation-
-  // parent KPAction ordering gate -- the batch former's g_cp_need_peak
-  // discipline (cp/_.c:137-146, set per pair at atp_overlap_ij:18657).
-  // For the dominant rule x rule overlap it is never read; skipping the
-  // third unify_apply build is the same pure allocation cut.
-  cp.peak = ((s->use_connectedness || o_eq || in_eq) || atp_kapur_on())
+  // cp.peak is read only by the connectedness gate, the equation-parent
+  // KPAction ordering gate, and the armed nusfu gate -- the batch
+  // former's g_cp_need_peak discipline (cp/_.c:137-146, set per pair at
+  // atp_overlap_ij).  For the dominant rule x rule overlap it is never
+  // read; skipping the third unify_apply build is the same pure
+  // allocation cut.
+  cp.peak = ((s->use_connectedness || o_eq || in_eq) || atp_kapur_on() ||
+             (s->use_no_overlap_below_skolem && s->n_skolem_labels != 0u))
                 ? thvm_unify_apply(lo, &subst) : 0;
   thvm_unify_undo(&subst);
   cp.pos_len = (u8)p_len;
