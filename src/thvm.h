@@ -5043,6 +5043,18 @@ typedef struct {
   u64   trace_eq_cap;     // bytes allocated
   u64  *trace_eq_off;     // [t_cap] byte offset of entry i's pair (+1; 0=none)
 
+  // Caller-owned extra GC roots.  thvm_atp_gc_collect evacuates the
+  // state's own live set only; a caller holding Term handles across a
+  // collection (the WL bridge keeps the encoder-built axiom/goal wire
+  // terms for the post-PROVED EXT-state re-seed) registers them here so
+  // every collect relocates them in place instead of leaving forwarding
+  // stubs behind (a stubbed handle decodes WL-side with a garbage arity
+  // -- the kernel-killing 28GB DAG-unfold).  NULL/0 (the default and
+  // every non-bridge caller) is byte-identical to the historical root
+  // set.
+  Term *gc_extra_roots;
+  u32   n_gc_extra_roots;
+
   // Lean CP trace (env THVM_ATP_CP_TRACE_LEAN).  Like trace_pack it plants
   // NUM(0) sentinels for a TRACE_CP entry's children 2/3, but stores the
   // pair NOWHERE -- the queued CP already carries its terms in cp_packed
@@ -7378,6 +7390,14 @@ extern int (*thvm_atp_abort_hook)(void);
 #include <setjmp.h>
 extern jmp_buf  *thvm_heap_exhaust_jmp;
 extern volatile int thvm_heap_exhausted;
+// Capture-recycle mark-park callback (extern fn-pointer because the
+// separately-compiled Metal TU cannot see the core TU's static `fn` symbols).
+// Set by jit_capture_begin to jit_caprecycle_release_hook's Metal wrapper;
+// invoked per candidate by thvm_metal_buf_park_unpreserved_pinned -- the
+// realize-end sweep that offers every dead (jit_pinned yet unpreserved after
+// mark_gc_preserve) captured buffer to the release pool (see jit/capture.c).
+extern void (*thvm_metal_caprelease_hook)(u32 buf_id);
+void thvm_metal_buf_park_unpreserved_pinned(void);
 // Unified fatal-condition recovery: longjmp via thvm_heap_exhaust_jmp
 // when set, exit(1) otherwise.  Replaces ad-hoc exit(1) calls in OOM
 // paths so a LibraryLink entry can recover and return

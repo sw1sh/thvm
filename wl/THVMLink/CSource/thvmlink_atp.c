@@ -518,6 +518,27 @@ static u32 atp_extract_goal_chains(AtpState *s, AtpProofStep *out, u32 cap) {
   return n;
 }
 
+// Capped TREE-size count (DAG unfolded), iterative.  Diagnostic only:
+// reports how large a term would decode WL-side (decodeAtpTerm builds
+// the unshared tree), without hanging on an exponential unfold --
+// stops as soon as `cap` nodes have been counted.
+static u32 wl_atp_tree_count_upto(Term t, u32 cap) {
+  enum { WL_TCU_STACK = 4096 };
+  static Term stk[WL_TCU_STACK];
+  u32 sp = 0u, n = 0u;
+  stk[sp++] = t;
+  while (sp > 0u) {
+    Term cur = stk[--sp];
+    if (++n >= cap) return cap;
+    if (term_tag(cur) != TAG_CTR) continue;
+    u32 k = term_ctr_n(cur);
+    for (u32 i = 0; i < k && sp < WL_TCU_STACK; i++) {
+      stk[sp++] = term_ctr_at(cur, i);
+    }
+  }
+  return n;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
                                              mint argc, MArgument *args,
                                              MArgument res) {
@@ -1015,6 +1036,21 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // args[66]; -1 = Automatic.
   mint wm_leaf_tiebreak_facegate = MArgument_getInteger(args[66]);
   if (wm_leaf_tiebreak_facegate >= 0) thvm_atp_set_use_leaf_tiebreak_facegate(atp, (u8)(wm_leaf_tiebreak_facegate != 0));
+  // Method -> {... "TracePack" -> True}: off-heap packed proof trace.
+  // The on-heap trace's raw CP terms are ~99.9% of the GC live set on
+  // a deep completion (6.6s / 25% of the OrAssociativity bench wall in
+  // mid-run collections), so atp_trace_eq_store packs the (lhs, rhs)
+  // pairs off-heap at push -- NUM sentinels on-heap, every search-time
+  // reader through atp_trace_eq_load -- with the trajectory
+  // byte-identical.  thvm_atp_materialize_trace below rebuilds live
+  // Term entries post-run, so extraction and the WL lift see a normal
+  // Term trace either way.  ON in the "Waldmeister"* presets, matching
+  // the C bench default.  args[67]; TRI-STATE: -1 = Automatic (leave
+  // thvm_atp_init's default: on-heap, or the THVM_ATP_TRACE_PACK=1
+  // env), 0 = force on-heap, 1 = force off-heap.  Applied before any
+  // axiom intake / trace push (nothing has run since init).
+  mint trace_pack_in = MArgument_getInteger(args[67]);
+  if (trace_pack_in >= 0) atp->trace_pack = (u8)(trace_pack_in != 0);
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any
@@ -1190,6 +1226,37 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     thvm_atp_free(atp);
     return LIBRARY_FUNCTION_ERROR;
   }
+  // Keep the encoder-built wire terms alive across the run's GCs.  The
+  // wire's Int64 array holds Term HANDLES the WL encoder allocated
+  // BEFORE this call; they are read again AFTER the run (the EXT-state
+  // re-seed below), but the collector only roots the AtpState's own
+  // terms -- any collection (the in-loop heap-pressure passes or the
+  // post-run Cheney pass) would leave GC_FWD_TAG stubs at the wire
+  // cells.  Seeding EXT from a stubbed handle silently degrades it to
+  // an arity-0 constant C-side (term_ctr_n's NUM guard) and, worse,
+  // emits the stub handle into the output steps, where the WL decoder
+  // reads the forwarding cell's val as an arity (~2^27) and dies
+  // building the child Table (28GB kernel kill, macOS SIGKILL).
+  // Register a live copy of every wire handle as extra GC roots; every
+  // collect relocates them in place.
+  u32   n_wire_live = 2u * n_ax + 2u * wire.n_goals;
+  Term *wire_live   = (Term *)malloc((size_t)(n_wire_live > 0u
+                                              ? n_wire_live : 1u)
+                                     * sizeof(Term));
+  if (wire_live == NULL) {
+    thvm_atp_free(atp);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  for (u32 i = 0; i < n_ax; i++) {
+    wire_live[2u * i + 0u] = atp_wire_ax_lhs(&wire, i);
+    wire_live[2u * i + 1u] = atp_wire_ax_rhs(&wire, i);
+  }
+  for (u32 g = 0; g < wire.n_goals; g++) {
+    wire_live[2u * n_ax + 2u * g + 0u] = atp_wire_goal_lhs(&wire, g);
+    wire_live[2u * n_ax + 2u * g + 1u] = atp_wire_goal_rhs(&wire, g);
+  }
+  atp->gc_extra_roots   = wire_live;
+  atp->n_gc_extra_roots = n_wire_live;
   // Apply SoS AFTER the goal is set so the symbol-mask snapshot
   // includes the goal-side labels (union over all conjuncts).
   thvm_atp_set_use_sos(atp, (u8)(use_sos != 0));
@@ -1314,8 +1381,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
 #endif
   thvm_atp_abort_hook = NULL;
   g_atp_abort_libData = NULL;
-  fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
-  if (st == ATP_ABORTED) { thvm_atp_free(atp); return LIBRARY_FUNCTION_ERROR; }
+  if (st == ATP_ABORTED) {
+    atp->gc_extra_roots   = NULL;
+    atp->n_gc_extra_roots = 0u;
+    free(wire_live);
+    thvm_atp_free(atp);
+    return LIBRARY_FUNCTION_ERROR;
+  }
 
   // Rebuild the off-heap packed proof-trace (THVM_ATP_TRACE_PACK) into
   // live Term entries now the search has terminated -- kept packed during
@@ -1386,12 +1458,17 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     g_skip_ext = (ev != NULL && ev[0] == '1') ? 1 : 0;
   }
   if (!g_skip_ext && st == ATP_PROVED) {
+    // Seed the EXT state from `wire_live` -- the GC-rooted copies of
+    // the encoder-built wire handles (see the registration above).
+    // The raw wire array's handles are stale after any collection
+    // (forwarding stubs); wire_live was relocated in place by every
+    // collect, so these reads see live terms.
     ext = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
     if (ext != NULL) {
       ext->wall_deadline_us = atp->wall_deadline_us;
       for (u32 i = 0; i < n_ax; i++) {
-        Term lhs = atp_wire_ax_lhs(&wire, i);
-        Term rhs = atp_wire_ax_rhs(&wire, i);
+        Term lhs = wire_live[2u * i + 0u];
+        Term rhs = wire_live[2u * i + 1u];
         if (atp_wire_ax_flag(&wire, i) == 1) {
           thvm_atp_install_oriented_rule(ext, lhs, rhs);
         } else {
@@ -1400,10 +1477,34 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       }
       // The same goal set as the main state; a multi-goal run extracts
       // one axiom-cited chain per conjunct, goal-tagged in `side`.
-      atp_wire_install_goals(ext, &wire);
+      if (wire.n_goals == 1u) {
+        Term gl = wire_live[2u * n_ax + 0u];
+        Term gr = wire_live[2u * n_ax + 1u];
+        if (gl != 0u || gr != 0u) thvm_atp_set_goal(ext, gl, gr);
+      } else if (wire.n_goals > 1u) {
+        Term gls[ATP_MAX_GOALS], grs[ATP_MAX_GOALS];
+        for (u32 g = 0; g < wire.n_goals; g++) {
+          gls[g] = wire_live[2u * n_ax + 2u * g + 0u];
+          grs[g] = wire_live[2u * n_ax + 2u * g + 1u];
+        }
+        thvm_atp_set_goals(ext, gls, grs, wire.n_goals);
+      }
       ext_n_steps = atp_extract_goal_chains(ext, ext_proof,
                                             ATP_PROOF_MAX_STEPS);
       ext_n_rules = ext->n_rules;
+      if (getenv("THVM_ATP_TIME_SPLIT") != NULL) {
+        for (u32 i = 0; i < ext_n_steps && i < 8u; i++) {
+          fprintf(stderr,
+                  "[ext-step %u] side=%u rule=%u fwd=%u pos_len=%u "
+                  "before<=%u after<=%u braw=%llx araw=%llx\n",
+                  i, ext_proof[i].side, ext_proof[i].rule,
+                  (u32)ext_proof[i].fwd, (u32)ext_proof[i].pos_len,
+                  wl_atp_tree_count_upto(ext_proof[i].before, 1000000u),
+                  wl_atp_tree_count_upto(ext_proof[i].after, 1000000u),
+                  (unsigned long long)ext_proof[i].before,
+                  (unsigned long long)ext_proof[i].after);
+        }
+      }
     }
   }
 
@@ -1513,6 +1614,9 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   }
 
   if (ext != NULL) thvm_atp_free(ext);
+  atp->gc_extra_roots   = NULL;
+  atp->n_gc_extra_roots = 0u;
+  free(wire_live);
   thvm_atp_free(atp);
   MArgument_setMNumericArray(res, out);
   thvm_heap_exhaust_jmp = NULL;

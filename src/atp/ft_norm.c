@@ -961,6 +961,13 @@ typedef struct FtDtNode_s {
   u32  cap_edge, leaf_cap, leaf_un_cap;
   u32 *labels;     // edge labels (concrete sym, FTDT_VAR0+k, or FTDT_STAR)
   u32 *kids;       // child node indices, parallel to labels
+  u8  *kid_mask;   // kids[e]'s sub_mask, mirrored parent-side so the
+                   // query's per-edge prune test reads this sequential
+                   // byte array instead of fetching each child's node
+                   // struct (a random ~90B line per considered edge).
+                   // Maintained at the two insert-path sites only
+                   // (ftdt_edge_get seeds 0, ftdt_insert_pattern ORs the
+                   // class bit alongside the child's own sub_mask).
   u32 *leaf;       // ascending ORIENTED rule slots ending at this node
   u32 *leaf_aux;   // parallel: (idmap_ofs << 1) | face  (see FtDtRec)
   u32 *leaf_un;    // ascending UNORIENTABLE rule slots ending at this node
@@ -1018,7 +1025,8 @@ static u32 ftdt_node_new(FtPiIndex *ix) {
     ix->dt_cap_nodes = nc;
   }
   FtDtNode *nd = &ix->dt_nodes[i];
-  nd->labels = NULL; nd->kids = NULL; nd->n_edge = 0u; nd->cap_edge = 0u;
+  nd->labels = NULL; nd->kids = NULL; nd->kid_mask = NULL;
+  nd->n_edge = 0u; nd->cap_edge = 0u;
   nd->n_var_edge = 0u;
   nd->leaf = NULL; nd->leaf_aux = NULL; nd->leaf_n = 0u; nd->leaf_cap = 0u;
   nd->leaf_un = NULL; nd->leaf_un_aux = NULL;
@@ -1038,6 +1046,16 @@ static u32 ftdt_edge_find(const FtPiIndex *ix, u32 node, u32 label) {
   return FTDT_NO_NODE;
 }
 
+// OR `bit` into node's parent-side kid_mask mirror for the edge
+// labelled `label` (insert path only -- cold; the query loop reads the
+// mirror instead of the child's node struct).
+static void ftdt_edge_mask_or(FtPiIndex *ix, u32 node, u32 label, u8 bit) {
+  FtDtNode *nd = &ix->dt_nodes[node];
+  for (u32 e = 0; e < nd->n_edge; e++) {
+    if (nd->labels[e] == label) { nd->kid_mask[e] |= bit; return; }
+  }
+}
+
 // Find-or-create the child of `node` reached by `label`; returns its
 // index.  Realloc may move ix->dt_nodes, so re-fetch the node pointer
 // after any node allocation.
@@ -1050,9 +1068,13 @@ static u32 ftdt_edge_get(FtPiIndex *ix, u32 node, u32 label) {
     u32 nc = nd->cap_edge ? nd->cap_edge * 2u : 4u;
     u32 *nl = (u32 *)realloc(nd->labels, nc * sizeof(u32));
     u32 *nk = (u32 *)realloc(nd->kids,   nc * sizeof(u32));
-    if (nl == NULL || nk == NULL) thvm_fatal("ftdt: edge array OOM");
+    u8  *nm = (u8  *)realloc(nd->kid_mask, nc * sizeof(u8));
+    if (nl == NULL || nk == NULL || nm == NULL) {
+      thvm_fatal("ftdt: edge array OOM");
+    }
     nd->labels = nl;
     nd->kids   = nk;
+    nd->kid_mask = nm;
     nd->cap_edge = nc;
   }
   // Keep the query partition (see FtDtNode): a var/star edge appends at
@@ -1070,8 +1092,11 @@ static u32 ftdt_edge_get(FtPiIndex *ix, u32 node, u32 label) {
           (nd->n_edge - pos) * sizeof(u32));
   memmove(&nd->kids[pos + 1u], &nd->kids[pos],
           (nd->n_edge - pos) * sizeof(u32));
+  memmove(&nd->kid_mask[pos + 1u], &nd->kid_mask[pos],
+          (nd->n_edge - pos) * sizeof(u8));
   nd->labels[pos] = label;
   nd->kids[pos]   = child;
+  nd->kid_mask[pos] = 0u;   // fresh child; insert_pattern ORs the class bit
   nd->n_edge++;
   nd->label0 = nd->labels[0];   // keep the header mirror current
   nd->kid0   = nd->kids[0];
@@ -1154,8 +1179,10 @@ static void ftdt_insert_pattern(FtPiIndex *ix, const AtpFtCell *pat, u32 rule,
     } else {
       label = p->sym;
     }
+    u32 parent = node;
     node = ftdt_edge_get(ix, node, label);   // may realloc; node index stable
     ix->dt_nodes[node].sub_mask |= class_bit;
+    ftdt_edge_mask_or(ix, parent, label, class_bit);   // parent-side mirror
   }
   ftdt_leaf_push(ix, node, rule, unor, (idmap_ofs << 1) | (u32)face);
 }
@@ -1550,6 +1577,171 @@ out:
   while (un > 0u) bind[ub[--un]] = NULL;
 }
 
+// v3 walk: ftdt_descend2 with two mechanical changes, byte-identical in
+// exploration order, candidate set, and binding records (kill switch
+// THVM_NO_FT_DTV3=1 reverts to ftdt_descend2; the THVM_FT_DTV2_DIFF
+// harness certifies the default walk against the classic per query):
+//   1. CONCRETE-EDGE TAIL ITERATION: at a branch node the (at most one)
+//      matching concrete edge is the LAST exploration step -- descend2
+//      recursed into it and immediately unwound.  v3 folds it back into
+//      the outer for(;;) as an iterative hop, eliminating the call
+//      bracket for the most common branch continuation (~10^8
+//      recursions per OrAssociativity batch).  Var-region bindings made
+//      before the hop stay logged in the SAME frame's undo list and
+//      unwind at the shared exit, exactly as they would across the
+//      recursive call.
+//   2. PARENT-SIDE CHILD-MASK MIRROR: every per-edge prune test reads
+//      nd->kid_mask[e] (a sequential byte array maintained at insert
+//      time) instead of ix->dt_nodes[kids[e]].sub_mask (a dependent
+//      random load of the child's ~90B struct per considered edge).
+static void ftdt_descend3(const FtDtDesc *d, u32 node,
+                          const AtpFtCell *sc, u32 nbound, u8 pure) {
+  FtPiIndex *ix = d->ix;
+  const FtDtNode *nd = &ix->dt_nodes[node];
+  const u8 want = d->want;
+  const AtpFtCell **bind = d->bind;
+  u16 ub[ATPFT_MAX_VARS];
+  u32 un = 0u;
+  u32 dp = 0u;
+  if (g_ftdt_pd) dp = g_ftdt_dp;
+  // Entry prune: only the root call arrives unchecked -- recursions and
+  // iterative hops below pre-check the child mask before advancing.
+  if ((nd->sub_mask & want) == 0u) {
+    if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+    return;
+  }
+  for (;;) {
+    if (g_ftdt_pd) {
+      g_atp_pushn_dt_node++;
+      g_atp_pushn_dt_hist[(dp < ATP_DT_HIST_N - 1u) ? dp
+                                                    : ATP_DT_HIST_N - 1u]++;
+    }
+    if (sc == d->sc_end) {            // subject consumed: emit this node's leaves
+      if (g_ftdt_pd) g_atp_pushn_dt_emit++;
+      ftdt_emit_leaf(ix, node, d->out, want, bind, nbound, pure);
+      goto out;
+    }
+    if (nd->n_edge == 1u) {
+      u32 label0 = nd->label0;
+      if (label0 < FTDT_VAR0) {
+        // Single concrete edge: lockstep hop (as descend2's chain).
+        if ((sc->sym & WF_VAR_BIT) != 0u || label0 != sc->sym) goto out;
+        if ((nd->kid_mask[0] & want) == 0u) {
+          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          goto out;
+        }
+        if (g_ftdt_pd) { g_atp_pushn_dt_chain++; dp++; }
+        node = nd->kid0;
+        nd   = &ix->dt_nodes[node];
+        sc   = sc->next;
+        continue;
+      }
+      if (label0 != FTDT_STAR) {
+        // Single variable edge V_k: follow iteratively.
+        u32 k = label0 - FTDT_VAR0;
+        const AtpFtCell *bk = bind[k];
+        if (bk != NULL) {
+          if (g_ftdt_pd) {
+            g_atp_pushn_dt_fteq++;
+            g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(sc);
+          }
+          if (bk->sym != sc->sym) goto out;     // first-cell fail-fast
+          if (!ft_eq(bk, sc)) goto out;
+          if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
+        }
+        if ((nd->kid_mask[0] & want) == 0u) {
+          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          goto out;
+        }
+        if (bk == NULL) {
+          if (g_ftdt_pd) g_atp_pushn_dt_bind1++;
+          bind[k] = sc;
+          ub[un++] = (u16)k;
+          if (k + 1u > nbound) nbound = k + 1u;
+        }
+        if (g_ftdt_pd) { g_atp_pushn_dt_chain++; dp++; }
+        node = nd->kid0;
+        nd   = &ix->dt_nodes[node];
+        sc   = (sc->end != NULL) ? sc->end->next : d->sc_end;
+        continue;
+      }
+      // Single STAR edge: fall through to the branch path below.
+    }
+    // Branch node (or single STAR edge).  Var/star region first, then
+    // the ascending concrete region.  All per-edge prune tests read the
+    // parent-side kid_mask mirror.
+    {
+      const AtpFtCell *skip = (sc->end != NULL) ? sc->end->next : d->sc_end;
+      u32 nv = nd->n_var_edge;
+      if (g_ftdt_pd) {
+        g_atp_pushn_dt_edge += nd->n_edge;
+        g_atp_pushn_dt_branch++;
+      }
+      for (u32 e = 0; e < nv; e++) {
+        u32 label = nd->labels[e];
+        if (label == FTDT_STAR) {
+          if ((nd->kid_mask[e] & want) == 0u) {
+            if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+            continue;
+          }
+          if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
+          ftdt_descend3(d, nd->kids[e], skip, nbound, 0u);
+          continue;
+        }
+        u32 k = label - FTDT_VAR0;
+        const AtpFtCell *bk = bind[k];
+        if (bk != NULL) {
+          if (g_ftdt_pd) {
+            g_atp_pushn_dt_fteq++;
+            g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(sc);
+          }
+          if (bk->sym != sc->sym) continue;     // first-cell fail-fast
+          if (!ft_eq(bk, sc)) continue;
+          if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
+        }
+        if ((nd->kid_mask[e] & want) == 0u) {
+          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          continue;
+        }
+        if (bk == NULL) {
+          if (g_ftdt_pd) { g_atp_pushn_dt_bind1++; g_ftdt_dp = dp + 1u; }
+          bind[k] = sc;
+          ftdt_descend3(d, nd->kids[e], skip,
+                        (k + 1u > nbound) ? k + 1u : nbound, pure);
+          bind[k] = NULL;
+        } else {
+          if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
+          ftdt_descend3(d, nd->kids[e], skip, nbound, pure);
+        }
+      }
+      if ((sc->sym & WF_VAR_BIT) == 0u) {
+        for (u32 e = nv; e < nd->n_edge; e++) {
+          u32 label = nd->labels[e];
+          if (g_ftdt_pd) g_atp_pushn_dt_cprobe++;
+          if (label < sc->sym) continue;
+          if (label == sc->sym) {
+            if ((nd->kid_mask[e] & want) != 0u) {
+              // Last exploration step at this node: iterate instead of
+              // recursing (descend2 recursed here and then fell out).
+              if (g_ftdt_pd) dp++;
+              node = nd->kids[e];
+              nd   = &ix->dt_nodes[node];
+              sc   = sc->next;
+              goto next_node;
+            }
+            if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          }
+          break;
+        }
+      }
+    }
+    goto out;
+  next_node:;
+  }
+out:
+  while (un > 0u) bind[ub[--un]] = NULL;
+}
+
 // Order-preserving ascending-u32 sort of a[0..n) -- the byte-identical
 // replacement for `qsort(a, n, sizeof(u32), ftdt_u32_cmp)`.  An ascending
 // sort over distinct-or-not u32 keys has a UNIQUE result, so the dedup that
@@ -1683,13 +1875,18 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
   // impure, so no snapshot/record is ever taken -- the candidate list
   // itself is unchanged either way.
   FtDtDesc d = { ix, p_end, &out, ftdt_bind, want };
-  // Default walk = ftdt_descend2 (prune-hoist + var-chain follow);
-  // THVM_NO_FT_DTV2=1 reverts to the classic ftdt_descend for the
-  // same-binary A/B.  Identical candidate/record SET either way.
+  // Default walk = ftdt_descend3 (descend2 + concrete-edge tail
+  // iteration + parent-side kid_mask prunes); THVM_NO_FT_DTV3=1 falls
+  // back to ftdt_descend2, THVM_NO_FT_DTV2=1 to the classic
+  // ftdt_descend -- same-binary A/B ladder.  Identical candidate /
+  // record SET at every rung.
   static int dtv2_off = -1;
+  static int dtv3_off = -1;
   if (dtv2_off < 0) {
     const char *e = getenv("THVM_NO_FT_DTV2");
     dtv2_off = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+    const char *e3 = getenv("THVM_NO_FT_DTV3");
+    dtv3_off = (e3 != NULL && e3[0] != '0' && e3[0] != '\0') ? 1 : 0;
   }
   // Divergence harness (THVM_FT_DTV2_DIFF=1): run BOTH walks per query
   // and fatal on the first candidate-set difference, dumping the
@@ -1712,7 +1909,8 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
     ix->dtb_rec_n  = 0u;
     u32 out2 = 0u;
     FtDtDesc d2 = { ix, p_end, &out2, ftdt_bind, want };
-    ftdt_descend2(&d2, 0u, p, 0u, 0u);
+    if (dtv3_off) ftdt_descend2(&d2, 0u, p, 0u, 0u);
+    else          ftdt_descend3(&d2, 0u, p, 0u, 0u);
     static u32 c2[65536];
     u32 n2 = (out2 < 65536u) ? out2 : 65536u;
     for (u32 i = 0; i < n2; i++) c2[i] = ix->cand[i];
@@ -1742,8 +1940,9 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
     ix->dtb_snap_n = 0u;
     ix->dtb_rec_n  = 0u;
   }
-  if (dtv2_off) ftdt_descend(&d, 0u, p, 0u, rec_on ? 1u : 0u);
-  else          ftdt_descend2(&d, 0u, p, 0u, rec_on ? 1u : 0u);
+  if (dtv2_off)      ftdt_descend (&d, 0u, p, 0u, rec_on ? 1u : 0u);
+  else if (dtv3_off) ftdt_descend2(&d, 0u, p, 0u, rec_on ? 1u : 0u);
+  else               ftdt_descend3(&d, 0u, p, 0u, rec_on ? 1u : 0u);
   if (out > 1u) {
     ftdt_sort_u32(ix, ix->cand, out);
     u32 w = 1u;

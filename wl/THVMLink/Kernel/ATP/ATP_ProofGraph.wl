@@ -369,6 +369,7 @@ wmSelectionOrderEntries[allEntries_List, entryTi_Association] := Block[
    for first-order variables. *)
 $AtpTagCTR = 20
 $AtpTagFVR = 22
+$AtpTagNUM = 10
 
 (* Original-symbol tables, dynamically scoped by the decode drivers from
    the encoder state (label -> Hold[symbol], varId -> Hold[symbol]).  When
@@ -400,12 +401,22 @@ decodeAtpTerm[raw_Integer, labelToName_, idToName_] := Block[{tag = $termTagFn[r
                     ReleaseHold @ $atpVarObj[id],
                     Symbol @ Lookup[idToName, id, "x" <> ToString[id]]]],
         tag === $AtpTagCTR,
-            Block[{label = $termExtFn[raw], loc = $termValFn[raw], arity, head},
-                arity = $termValFn[$heapReadFn[loc]];
-                head = atpHeadFor[label, Lookup[labelToName, label, "C" <> ToString[label]]];
-                If[ arity === 0,
-                    head,
-                    head @@ Table[decodeAtpTerm[$heapReadFn[loc + k], labelToName, idToName], {k, arity}]
+            Block[{label = $termExtFn[raw], loc = $termValFn[raw], hdr, arity, head},
+                hdr = $heapReadFn[loc];
+                If[ $termTagFn[hdr] =!= $AtpTagNUM,
+                    (* The arity header must be a NUM cell (mirrors the C
+                       side's term_ctr_n guard, term/new_ctr.c).  Anything
+                       else is a corrupted or GC-forwarded cell (tag 0x7E
+                       stub); reading its val as an arity yields ~2^27 and
+                       the child Table kills the kernel.  Degrade to
+                       Missing like any undecodable term. *)
+                    Missing["UndecodableTerm", {tag, $termTagFn[hdr]}],
+                    arity = $termValFn[hdr];
+                    head = atpHeadFor[label, Lookup[labelToName, label, "C" <> ToString[label]]];
+                    If[ arity === 0,
+                        head,
+                        head @@ Table[decodeAtpTerm[$heapReadFn[loc + k], labelToName, idToName], {k, arity}]
+                    ]
                 ]
             ],
         True, Missing["UndecodableTerm", tag]
@@ -578,7 +589,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     useWmCommDropDup_, useWmLeafTiebreak_, useWmRevfaceGroup_,
     useWmPosGroup_, useWmCubeArrival_, useWmFormationFifo_,
     useWmMeredDmgu_, useWmEsetDistdir_, useWmCommDropDupClassGate_,
-    useWmCorankOwnArr_, useWmLeafTiebreakFacegate_] := Block[{
+    useWmCorankOwnArr_, useWmLeafTiebreakFacegate_, useTracePack_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr,
@@ -605,7 +616,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         useWmCommDropDup, useWmLeafTiebreak, useWmRevfaceGroup,
         useWmPosGroup, useWmCubeArrival, useWmFormationFifo,
         useWmMeredDmgu, useWmEsetDistdir, useWmCommDropDupClassGate,
-        useWmCorankOwnArr, useWmLeafTiebreakFacegate];
+        useWmCorankOwnArr, useWmLeafTiebreakFacegate, useTracePack];
     If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
         Print["[split] C solve + trace-gen = ", $atpSplitT,
               " s  (WL reconstruction = total wall - this)"]];
@@ -619,6 +630,11 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
+    If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+        Print["[recon] header: status=", status, " nRules=", nRules,
+            " nTrace=", nTrace, " nSteps=", nSteps, " extNRules=",
+            extNRules, " extNSteps=", extNSteps, " mnfNSteps=", mnfNSteps,
+            " rawLen=", Length[raw]]];
     labelToName = Association[Reverse /@ Normal[enc["State"]["sym"]]];
     idToName = Association[Reverse /@ Normal[enc["State"]["var"]]];
     (* The C runner emits the full output (MAIN rules + trace + steps,
@@ -657,12 +673,20 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
         Print["[recon] trace-offset-pass = ", $decT, " s  (nTrace = ", nTrace, ")"]];
     (* MAIN steps block. *)
-    {mainSteps, cur} = decodeStepsBlock[raw, cur, nSteps, labelToName, idToName];
+    {$decT, {mainSteps, cur}} = AbsoluteTiming @
+        decodeStepsBlock[raw, cur, nSteps, labelToName, idToName];
+    If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+        Print["[recon] main-steps decode = ", $decT, " s  (nSteps = ",
+            nSteps, ")"]];
     (* EXT rules block (2*extNRules) -- skipped, the simple path
        re-derives rules from the axiom list. *)
     cur = cur + 2 extNRules;
     (* EXT steps block. *)
-    {extSteps, cur} = decodeStepsBlock[raw, cur, extNSteps, labelToName, idToName];
+    {$decT, {extSteps, cur}} = AbsoluteTiming @
+        decodeStepsBlock[raw, cur, extNSteps, labelToName, idToName];
+    If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+        Print["[recon] ext-steps decode = ", $decT, " s  (extNSteps = ",
+            extNSteps, ")"]];
     (* MNF steps block: the GREEN/RED front chains for a goal closed
        by the MNF bidirectional search.  Same per-step layout. *)
     {mnfSteps, cur} = decodeStepsBlock[raw, cur, mnfNSteps, labelToName, idToName];

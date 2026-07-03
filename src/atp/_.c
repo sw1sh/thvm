@@ -5689,7 +5689,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
               + 4u * s->n_goals /* multi-goal conjuncts + NFs */
               + s->n_trace + REWRITE_MAX_VAR
               + 1u /* min_const */
-              + 2u * s->n_irv /* buffered IR victims (use_wm_demote) */;
+              + 2u * s->n_irv /* buffered IR victims (use_wm_demote) */
+              + (s->gc_extra_roots != NULL ? s->n_gc_extra_roots : 0u);
 #ifdef ATP_MNF
   // Milestone 10: every MNF coloured node holds a reached Term.  Root
   // them so the collector relocates them; the hash table (structural
@@ -5741,6 +5742,16 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   for (u32 i = 0; i < s->n_irv; i++) {
     roots[w++] = s->irv_lhs[i];
     roots[w++] = s->irv_rhs[i];
+  }
+  // Caller-owned extra roots (see the thvm.h field comment): evacuated
+  // like every other root and written back in place below, so the
+  // caller's handles stay live across the collection.  NULL/0 keeps the
+  // historical root set byte-identical.
+  u32 extra_root_base = w;
+  if (s->gc_extra_roots != NULL) {
+    for (u32 i = 0; i < s->n_gc_extra_roots; i++) {
+      roots[w++] = s->gc_extra_roots[i];
+    }
   }
 #ifdef ATP_MNF
   u32 mnf_node_root = w;
@@ -5796,6 +5807,12 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
     s->irv_lhs[i] = roots[w++];
     s->irv_rhs[i] = roots[w++];
   }
+  if (s->gc_extra_roots != NULL) {
+    for (u32 i = 0; i < s->n_gc_extra_roots; i++) {
+      s->gc_extra_roots[i] = roots[extra_root_base + i];
+    }
+  }
+  (void)extra_root_base;
 #ifdef ATP_MNF
   // Write the relocated reached-Terms back into the MNF nodes.  No
   // hash-table fixup: mnf_hash is structural, so a relocated term

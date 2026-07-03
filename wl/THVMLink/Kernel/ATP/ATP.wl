@@ -69,7 +69,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\", \"TPTP\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved. \"TPTP\" renders the proof as an SZS-wrapped TPTP CNFRefutation string -- the CASC output format -- for File / TPTP-string input.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"CommDefer\", \"CommReage\", \"CommDropDup\", \"LeafTiebreak\", \"RevfaceGroup\", \"PosGroup\", \"CubeArrival\", \"FormationFifo\", \"MeredDmgu\", \"EsetDistdir\", \"CommDropDupClassGate\", \"CorankOwnArr\", \"LeafTiebreakFacegate\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"CommDefer\", \"CommReage\", \"CommDropDup\", \"LeafTiebreak\", \"RevfaceGroup\", \"PosGroup\", \"CubeArrival\", \"FormationFifo\", \"MeredDmgu\", \"EsetDistdir\", \"CommDropDupClassGate\", \"CorankOwnArr\", \"LeafTiebreakFacegate\", \"TracePack\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -434,6 +434,13 @@ $atpRunProofFn := $atpRunProofFn = load[
      (* args[66] = Waldmeister leaf-tiebreak face gate (Method
         "LeafTiebreakFacegate"; auto-on under FormationFifo).  TRI-STATE:
         -1 = Automatic, 0 = off, 1 = on *)
+     Integer,
+     (* args[67] = off-heap packed proof trace (Method "TracePack"; the
+        on-heap trace is ~99.9% of the GC live set on a deep completion,
+        see atpTracePackOpt -- trajectory byte-identical, ON in the
+        "Waldmeister"* presets).  TRI-STATE: -1 = Automatic (engine
+        default: on-heap, or THVM_ATP_TRACE_PACK=1 env), 0 = off,
+        1 = on *)
      Integer},
     "NumericArray"
 ]
@@ -2783,6 +2790,23 @@ atpLeafTiebreakFacegateOpt[o_Association] :=
     Switch[Lookup[o, "LeafTiebreakFacegate", Automatic],
         True, 1, False, 0, _, -1];
 
+(* "TracePack" -> True | False: off-heap packed proof trace.  The
+   on-heap trace's raw CP terms are ~99.9% of the GC live set on a deep
+   completion (WolframAxioms/OrAssociativity: 32.4M of 46.8M live
+   K-nodes; 35 heap-pressure collections = 6.6s, 25% of the bench
+   wall), so packing the (lhs, rhs) pairs off-heap at push -- NUM
+   sentinels on-heap, every search-time reader through
+   atp_trace_eq_load -- collapses the GC tax with the trajectory
+   byte-identical (steps/rules/cps exact on the full alignment
+   battery).  The bridge's post-run thvm_atp_materialize_trace rebuilds
+   live Term entries before extraction, so the WL lift is unaffected.
+   True in the "Waldmeister"* presets (matching the C bench default);
+   False forces the on-heap trace; Automatic = the engine default
+   (on-heap, or THVM_ATP_TRACE_PACK=1 env). *)
+atpTracePackOpt[o_Association] :=
+    Switch[Lookup[o, "TracePack", Automatic],
+        True, 1, False, 0, _, -1];
+
 (* True iff at least one axiom in `axParts` (atpAxiomParts triples
    {vars, lhs, rhs}) has a side whose variables are not a subset of
    the other side -- i.e. a free-on-one-side variable that the
@@ -2939,6 +2963,12 @@ $AtpPresetDefaults = <|
         "CriticalGoalInterreduce" -> False,
         "CriticalGoalWeight" -> False,
         "BackwardGoalArgue" -> False,
+        (* Off-heap packed proof trace: kills the proof-trace GC tax on
+           deep completions (6.6s / 25% of the OrAssociativity bench
+           wall), trajectory byte-identical; the bridge materializes the
+           trace post-run so the WL lift is unaffected.  Matches the C
+           bench default (see atpTracePackOpt). *)
+        "TracePack" -> True,
         (* Stays opt-in: the measured flip costs 2.8x steps, +55%
            wall, +17% peak RSS on mccune and 2.13x peak RSS on
            AndAssoc -- see atpImplicitCpOpt. *)
@@ -2949,7 +2979,7 @@ $AtpPresetDefaults = <|
            OrAssociativity proof; WM saturates at pick 2807) and
            MeredithAxioms OrAssociativity firstdiv 6110.  Every flag is
            set EXPLICITLY True (not left to FormationFifo's C-level
-           auto-on): the WL LibraryFunction passes all 67 args every call,
+           auto-on): the WL LibraryFunction passes all 68 args every call,
            so an unset emission-order arg would pass 0 and could reset what
            FormationFifo turned on -- pinning each True sidesteps that.
            The four base side/subsumption knobs (CPSide / FlatSubsume /
@@ -3007,6 +3037,8 @@ $AtpPresetDefaults = <|
         "CriticalGoalInterreduce" -> False,
         "CriticalGoalWeight" -> False,
         "BackwardGoalArgue" -> False,
+        (* Off-heap packed proof trace (see the "Waldmeister" entry). *)
+        "TracePack" -> True,
         "UnfailingCP" -> True,
         "RHSInterreduce" -> True|>,
     "VampireUEQ" -> <|
@@ -3160,7 +3192,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpCubeArrivalOpt[o], atpFormationFifoOpt[o],
          atpMeredDmguOpt[o], atpEsetDistdirOpt[o],
          atpCommDropDupClassGateOpt[o], atpCorankOwnArrOpt[o],
-         atpLeafTiebreakFacegateOpt[o]}
+         atpLeafTiebreakFacegateOpt[o], atpTracePackOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
