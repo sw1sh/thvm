@@ -1106,20 +1106,22 @@ static int atp_env_off(const char *name) {
   return (e != NULL && e[0] == '0' && e[1] == '\0') ? 0 : 1;
 }
 
-// r_overlap_done compaction fix (THVM_ATP_OVERLAP_DONE_FIX=1, default OFF):
-// shift the per-slot overlap-exhausted flag in lockstep with the other rule
-// arrays during slot compaction.  Without the shift the flags misalign after
-// any rule removal, and the use_overlap_exhaust pair gate in
+// r_overlap_done compaction fix (DEFAULT ON; THVM_ATP_OVERLAP_DONE_FIX=0 is
+// the kill switch back to the pre-fix behavior, kept for one round): shift
+// the per-slot overlap-exhausted flag in lockstep with the other rule arrays
+// during slot compaction.  Without the shift the flags misalign after any
+// rule removal, and the use_overlap_exhaust pair gate in
 // atp_wmo_collect_pair fires on garbage state -- the WolframAxioms
 // walk-vs-batch +12-CP divergence (pick 51667): the batch dropped 4
 // (doubly-unfree eq x commutativity) overlaps WM forms (WM's A/D toplevel
 // sweeps, Unifikation1.c:1595-1648, exclude only the new equation itself via
-// MitAllenAusser :1471).  OPT-IN so the shipped batch trajectory stays
-// byte-identical until the OA gate baselines are re-pinned; under the fix
-// walk==batch is the target (this is the WM-faithful bookkeeping).
+// MitAllenAusser :1471).  This is the WM-faithful bookkeeping; under it the
+// walk and batch formers are full-CPSEL-stream byte-identical on OA.  The
+// OA gate baselines are pinned to the fixed trajectory
+// (steps=278807 rules=753 cps=2642990).
 static int atp_overlap_done_fix_on(void) {
   static int v = -1;
-  if (v < 0) v = atp_env_on("THVM_ATP_OVERLAP_DONE_FIX");
+  if (v < 0) v = atp_env_off("THVM_ATP_OVERLAP_DONE_FIX");
   return v;
 }
 
@@ -14922,11 +14924,11 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
   // state -- the pinned WolframAxioms +12-CP walk-vs-batch divergence at
   // pick 51667 (a NEW doubly-unfree equation read done=1, OLD comm read
   // done=0, so the batch dropped 4 comm overlaps WM forms;
-  // Unifikation1.c:1595-1648 has no such partner skip).  Gated OPT-IN
-  // (THVM_ATP_OVERLAP_DONE_FIX=1) so the shipped batch trajectory stays
-  // byte-identical until the gate baselines are re-pinned; the fixed
-  // trajectory is the WM-faithful one (walk==batch byte-identical under
-  // the fix).
+  // Unifikation1.c:1595-1648 has no such partner skip).  DEFAULT ON
+  // (THVM_ATP_OVERLAP_DONE_FIX=0 is the one-round kill switch back to the
+  // buggy behavior); the gate baselines are pinned to the fixed
+  // trajectory, which is the WM-faithful one (walk==batch byte-identical
+  // under the fix).
   //
   // Factored so both the LHS-collapse drop and the E-RHS-face drop use
   // the BYTE-IDENTICAL 9-array + FT-mirror compaction / trace-dead /
@@ -24632,9 +24634,11 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
 // Single-walk native CP formation -- the FAITHFUL Waldmeister port.
 // Emits critical pairs in WM's U1_KPsBildenZuFaktum order, so cp_seq == WM's
 // cpnr BY CONSTRUCTION: no atp_wmo_rank reconstruct, none of the ~40 per-band
-// re-key corrections, none of the selection-time detectors.  Gated (env
-// THVM_ATP_SINGLE_WALK for the bench, Method knob for users); DEFAULT OFF until
-// proven byte-identical-or-better.  WM order (Unifikation1.c:1486/1561):
+// re-key corrections, none of the selection-time detectors.  DEFAULT ON for
+// emission-order runs (proven full-CPSEL-stream byte-identical to the batch
+// former on OA under the r_overlap_done fix); THVM_ATP_SINGLE_WALK=0 is the
+// one-round kill switch back to the batch former.
+// WM order (Unifikation1.c:1486/1561):
 //   - Vater/toplevel sweep FIRST, POSITION-MAJOR over the new fact's face:
 //     each non-var position p -> old partners (rules tree then equation tree)
 //     in tops-DFS arrival order -> form a CP at p (the old fact rewrites f@p).
@@ -25188,8 +25192,13 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   if (first > last) return 0;
 
   if (s->use_emission_order && s->wmo != NULL) {
+    // The single-walk former is the DEFAULT CP-formation path for every
+    // emission-order (Waldmeister-preset) run; THVM_ATP_SINGLE_WALK=0 is
+    // the one-round kill switch back to the batch former (which stays
+    // in-tree untouched this round).  Both formers are full-CPSEL-stream
+    // byte-identical on OA under the r_overlap_done compaction fix.
     static int sw_gate = -1;
-    if (sw_gate < 0) sw_gate = getenv("THVM_ATP_SINGLE_WALK") ? 1 : 0;
+    if (sw_gate < 0) sw_gate = atp_env_off("THVM_ATP_SINGLE_WALK");
     if (sw_gate) return thvm_atp_generate_cps_singlewalk(s, added);
     return thvm_atp_generate_cps_wm(s, added);
   }
