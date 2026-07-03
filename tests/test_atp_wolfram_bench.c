@@ -1806,6 +1806,14 @@ int main(int argc, char **argv) {
                tot ? 100.0 * (double)g_acp_pack_nodes_treated / (double)tot
                    : 0.0);
       }
+      {
+        extern u64 g_vcp_emit_n_ok, g_vcp_emit_n_fb;
+        if (g_vcp_emit_n_ok + g_vcp_emit_n_fb > 0) {
+          printf("   ft-emit: ok=%llu fallback=%llu\n",
+                 (unsigned long long)g_vcp_emit_n_ok,
+                 (unsigned long long)g_vcp_emit_n_fb);
+        }
+      }
       printf("   push-norm core shape: queries=%llu (var=%llu) cand=%llu "
              "att=%llu hit=%llu\n"
              "     pb=%llu win=%llu rematch=%llu splices=%llu "
