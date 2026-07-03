@@ -933,123 +933,6 @@ int main(int argc, char **argv) {
       // via remove-and-rederive thrash.  THVM_ATP_COMM_SUBSUME opts in.
       thvm_atp_set_use_comm_subsume(
           s, (getenv("THVM_ATP_COMM_SUBSUME") != NULL) ? 1u : 0u);
-      // Commutativity-DEFER overlap gate (DEFAULT OFF): suppresses the single
-      // over-enumerated non-canonical comm-side overlap (soa slot15 sourced
-      // seq564) in an oriented rule's birth batch WITHOUT removing the
-      // equation -- unlike THVM_ATP_COMM_SUBSUME, slot15 stays live so its
-      // uniquely-parented pick-99 COMM copy survives.  THVM_ATP_COMM_DEFER
-      // opts in.  See tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_comm_defer(
-          s, (getenv("THVM_ATP_COMM_DEFER") != NULL) ? 1u : 0u);
-      // Commutativity-REAGE overlap re-rank (DEFAULT OFF, INVERSE of
-      // COMM_DEFER): instead of suppressing thvm's early seq564 copy, promote
-      // thvm's single seq564-sibling CP (`(x.x).y = (x.y).y`, rule13 x eqn-10)
-      // to the head of eqn-10's birth batch so it is selected at WM's faithful
-      // early age (pick-126) rather than buried at the eTT batch tail.  WM
-      // forms cp877 in rule13's own batch from rule13 x eqn-9 (which thvm
-      // absorbed), aged one slot after seq564 -> WM pick-126; this re-ranks
-      // thvm's re-derived analog to the matching age.  THVM_ATP_COMM_REAGE
-      // opts in.  See tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_comm_reage(
-          s, (getenv("THVM_ATP_COMM_REAGE") != NULL) ? 1u : 0u);
-      // Commutativity DROP-DUP re-age (DEFAULT OFF): atop COMM_REAGE, re-ages
-      // the single DUPLICATE re-derivation of slot15's term `x.(y.x) = (y.y).x`
-      // (slot15 is already a LIVE rule since pick-54) one FIFO slot later, past
-      // its in-batch `x.(x.x) = y.(y.y)` successor (= WM's pick-288), so it
-      // lands at WM's faithful pick-289 rather than thvm's over-early pick-288.
-      // slot15 the rule -- and its uniquely-parented pick-99 COMM copy -- stay
-      // intact.  Advances soa firstdiv 288 -> 290.  THVM_ATP_COMM_DROP_DUP
-      // opts in (requires THVM_ATP_COMM_REAGE).  See
-      // tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_comm_drop_dup(
-          s, (getenv("THVM_ATP_COMM_DROP_DUP") != NULL) ? 1u : 0u);
-      // Inner-swap anchor gate for the DROP-DUP re-age (DEFAULT OFF; auto-on
-      // under FORMATION_FIFO): skip the slot15-term re-age when its smallest-
-      // keyed successor is a Meredith-harmful anchor WM emits AFTER the slot15-
-      // term: the permutation class `(x.y).y = (y.x).y` (rule-51) OR the
-      // slot15-ROTATE `x.(y.x) = (x.y).x` (rule-59).  Neither shape occurs as a
-      // soa anchor, so soa stays byte-identical.  Advances Meredith firstdiv
-      // 1175 -> 1374 (class) -> 4190 (rotate, = the COMM_DROP_DUP-OFF ceiling).
-      // THVM_ATP_COMM_DROP_DUP_CLASS_GATE opts in (requires
-      // THVM_ATP_COMM_DROP_DUP).
-      thvm_atp_set_use_comm_drop_dup_class_gate(
-          s, (getenv("THVM_ATP_COMM_DROP_DUP_CLASS_GATE") != NULL) ? 1u : 0u);
-      // Leaf-arrival tiebreak (DEFAULT OFF): when two CPs overlap the new fact
-      // at the same position from a var-differ==1 (WM-oriented) partner and a
-      // var-differ==0 (WM two-faced permutation) partner, thvm keys the
-      // oriented copy exactly one k3 leaf-step (1<<28) ABOVE its sibling (same
-      // overlap geometry) and emits them reversed.  This re-keys the oriented
-      // copy just below the sibling so it sorts FIRST as WM's single oriented
-      // scan emits it.  Clears the soa 290<->292 / 303<->305 / 351<->353
-      // swap-pairs (firstdiv 290 -> trace end).  THVM_ATP_LEAF_TIEBREAK opts
-      // in.  See tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_leaf_tiebreak(
-          s, (getenv("THVM_ATP_LEAF_TIEBREAK") != NULL) ? 1u : 0u);
-      // Leaf-tiebreak FACE GATE (DEFAULT OFF; also on under FORMATION_FIFO):
-      // skip the var-differ==1-first flip when the oriented partner is
-      // overlapped on its WM-distinguished face but the permutation partner on
-      // its WM-reverse face -- thvm's DFS arrival already matches WM's
-      // formation order there.  Advances Meredith OrAssociativity firstdiv
-      // 1040 -> 1047, soa firstdiv 2808 unchanged.  THVM_ATP_LEAF_TIEBREAK_-
-      // FACEGATE opts in.
-      thvm_atp_set_use_leaf_tiebreak_facegate(
-          s, (getenv("THVM_ATP_LEAF_TIEBREAK_FACEGATE") != NULL) ? 1u : 0u);
-      // Reverse-face shape-group tiebreak (DEFAULT OFF): sibling of
-      // THVM_ATP_LEAF_TIEBREAK one weight band up (soa w=209).  Within one
-      // tops overlap-position group, re-keys a var-differ==1 partner's
-      // reverse-face CP to sort immediately after the largest-keyed same-group
-      // CP it ALPHA-matches (same reduced equation), restoring WM's adjacent
-      // same-shape emission -- thvm's independent leaf DFS otherwise scatters
-      // the reverse copy past the group's other-shape CPs (soa f=36 Cshape
-      // arr=6 vs arr=1).  Advances soa firstdiv past 778.
-      // THVM_ATP_REVFACE_GROUP opts in.  See
-      // tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_revface_group(
-          s, (getenv("THVM_ATP_REVFACE_GROUP") != NULL) ? 1u : 0u);
-      // Overlap-position raw-arrival grouping (DEFAULT OFF): sibling of
-      // THVM_ATP_REVFACE_GROUP one weight band down (soa w=120).  At a
-      // single A-phase tops overlap position WM emits every partner-face CP in
-      // raw discrimination-tree arrival order; REVFACE_GROUP over-groups here,
-      // pulling a vd=0 permutation partner's forward face up beside a vd=1
-      // oriented partner's same-shape CP.  This gate un-groups that firing
-      // (restores raw arrival) and defers a vd=0 permutation partner's reverse
-      // face past the higher-arrival same-group cluster, so the batch matches
-      // WM's bracketed emission.  Advances soa firstdiv past 966.
-      // THVM_ATP_POSGROUP opts in.  See
-      // tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_posgroup(
-          s, (getenv("THVM_ATP_POSGROUP") != NULL) ? 1u : 0u);
-      // Cube-arrival tiebreak (DEFAULT OFF): one weight band up from
-      // THVM_ATP_POSGROUP (soa w=224).  The double-cube CP `(x.(x.x)).y =
-      // (z.(z.z)).y` (rule28 x slot8 = WM rule19 x eqn7) and its same-group
-      // predecessor, the slot15-wrapped CP `(x.(y.x)).z = ((y.y).x).z` (rule28
-      // x slot2 = WM rule19 x eqn2), share the A-phase group prefix and differ
-      // only in k3 (partner discrimination-tree arrival); thvm sorts eqn2
-      // first but WM surfaces eqn7 first (`ue (19,-7)` before `ue (19,-2)`).
-      // This gate re-keys the double-cube below its slot15-wrapped predecessor,
-      // swapping the adjacent pair to WM's order.  Advances soa firstdiv past
-      // 1320.  THVM_ATP_CUBE_ARRIVAL opts in.  See
-      // tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_cube_arrival(
-          s, (getenv("THVM_ATP_CUBE_ARRIVAL") != NULL) ? 1u : 0u);
-      // Two-face co-rank correction (DEFAULT OFF; also ON under FORMATION_FIFO
-      // below): re-key a WM-reverse-face overlap of the `(x.(x.x)).y = y.y`
-      // partner (dist_rhs=0) onto its OWN tops-DFS arrival when it is a distinct
-      // (non-double-MGU) surviving CP, matching WM's independent aging.  Advances
-      // Meredith OrAssociativity firstdiv 4190 -> 6078.  THVM_ATP_CORANK_OWN_ARR
-      // opts in.  See tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_corank_own_arr(
-          s, (getenv("THVM_ATP_CORANK_OWN_ARR") != NULL) ? 1u : 0u);
-      // WM rule-36 weight-109 band interleave (DEFAULT OFF): rule-36's tops
-      // batch forms eight band CPs `(x.X).(y.x) = x` of three variants
-      // (A: X=(x.y), B: X=(y.x), C: X=(y.y)) from reverse-face equation
-      // overlaps at L.1; WM emits them round-robin A,B,C,A,B,C,A,B but thvm
-      // sorts by partner-equation arrival, grouping C,C,B,B,B,A,A,A.  This gate
-      // re-keys the band CPs onto a (round, variant) interleave matching WM.
-      // Advances soa firstdiv past 1953.  THVM_ATP_BAND_INTERLEAVE opts in.
-      // See tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_band_interleave(
-          s, (getenv("THVM_ATP_BAND_INTERLEAVE") != NULL) ? 1u : 0u);
       // WM IR-victim drain within-leaf chain tiebreak (DEFAULT OFF): fold a
       // re-derivation victim's chain index within its discrimination-tree leaf
       // into the drain-order key so two victims sharing a leaf re-enter the
@@ -1072,27 +955,6 @@ int main(int argc, char **argv) {
       // (also turned on by FORMATION_FIFO below).  See soa.txt.
       thvm_atp_set_use_drain_revface(
           s, (getenv("THVM_ATP_DRAIN_REVFACE") != NULL) ? 1u : 0u);
-      // Reverse-face cube emission order (DEFAULT OFF).  Within one A-tops
-      // k2=1 equation-partner group at a single overlap position, sorts the
-      // weight-120 FORWARD cube `x.(y.(y.y)) = x.x` CPs before the REVERSE
-      // cube `(x.(x.x)).y = y.y` CPs, matching WM's single-scan
-      // forward-before-reverse emission (soa picks 2538-2542 FWD then 2543+
-      // REV).  Advances soa firstdiv past 2540.  THVM_ATP_REVFACE_CUBEORDER
-      // opts in (also turned on by FORMATION_FIFO below).  See soa.txt.
-      thvm_atp_set_use_revface_cubeorder(
-          s, (getenv("THVM_ATP_REVFACE_CUBEORDER") != NULL) ? 1u : 0u);
-      // Shared-reverse-face double-MGU defer (DEFAULT OFF).  The Meredith
-      // OrAssociativity firstdiv-809 divergence: in a weight-120 tops-A
-      // equation-tree band at pos L.2.2, two var-differ equations WM stores at
-      // distinct distinguished-face leaves share one reverse face, so thvm's
-      // overlap onto that shared face lands both combo=0 CPs at one
-      // discrimination-tree leaf and the chain-head (newest) keys ahead of the
-      // older -- but WM ages the newer content as the older equation's late
-      // SECOND MGU.  Defers that chain-head combo=0 CP to the band's penultimate
-      // slot.  THVM_ATP_MERED_DMGU opts in (also turned on by FORMATION_FIFO
-      // below).  See soa.txt.
-      thvm_atp_set_use_mered_dmgu(
-          s, (getenv("THVM_ATP_MERED_DMGU") != NULL) ? 1u : 0u);
       // WM-faithful distinguished-direction E-set subsumption (DEFAULT OFF).
       // The flat new-equation E-subsumer is 4-way (both pattern AND both subject
       // orientations of the old equation); WM's GMSubsummierenMitGleichung
@@ -1123,121 +985,13 @@ int main(int argc, char **argv) {
       // DEFAULT OFF; THVM_ATP_WMO_INSERT_LR opts in.  See soa.txt.
       thvm_atp_set_use_wmo_insert_lr(
           s, (getenv("THVM_ATP_WMO_INSERT_LR") != NULL) ? 1u : 0u);
-      // L.1 cube-triple group rotation (DEFAULT OFF): rotate the leading C-run
-      // of a C,C,B,B,D,D cube triple at an L.1/combo0/k2==0 tops group to the
-      // end (-> B,B,D,D,C,C), matching WM's CP-formation FIFO age -- the
-      // Meredith OrAssociativity firstdiv-10097 divergence.  THVM_ATP_L1_CUBE_ROTATE
-      // opts in (also turned on by FORMATION_FIFO below).  See soa.txt.
-      thvm_atp_set_use_l1_cube_rotate(
-          s, (getenv("THVM_ATP_L1_CUBE_ROTATE") != NULL) ? 1u : 0u);
-      // L.1 `(x.x).y`-distribution front-age (DEFAULT OFF): pull the A/B
-      // `(x.x).y = y.(x.y)` / `(x.x).y = y.(y.x)` distribution CPs of an
-      // L.1/combo0 tops group to the front (A before B), matching WM's
-      // CP-formation FIFO age -- the Meredith OrAssociativity firstdiv-11539
-      // divergence.  THVM_ATP_L1_XXDIST_FRONT opts in (also turned on by
-      // FORMATION_FIFO below).  See soa.txt.
-      thvm_atp_set_use_l1_xxdist_front(
-          s, (getenv("THVM_ATP_L1_XXDIST_FRONT") != NULL) ? 1u : 0u);
-      // L.2.2 `(x.(y.(y.y))).(x.(z.z))`-distribution duplicate defer (DEFAULT
-      // OFF): defer the re-derived combo=0 j_or=0 L.2.2 CP
-      // `(x.(y.(y.y))).(x.(z.z)) = x` to the end of the batch's weight-209 run,
-      // matching WM's CP-formation FIFO age -- the Meredith OrAssociativity
-      // firstdiv-11791 divergence.  THVM_ATP_L22_XXDIST_DEFER opts in (also
-      // turned on by FORMATION_FIFO below).  See soa.txt.
-      thvm_atp_set_use_l22_xxdist_defer(
-          s, (getenv("THVM_ATP_L22_XXDIST_DEFER") != NULL) ? 1u : 0u);
-      // L.1 `(x.x).x = y.(y.y)` cube defer (DEFAULT OFF): defer the leading E
-      // `(x.x).x = y.(y.y)` CP of an L.1/combo0/k2==0 cube group to the end of
-      // the group's cube run, matching WM's CP-formation FIFO age -- the
-      // Meredith OrAssociativity firstdiv-11839 divergence.
-      // THVM_ATP_L1_XXX_CUBE_DEFER opts in (also turned on by FORMATION_FIFO
-      // below).  See soa.txt.
-      thvm_atp_set_use_l1_xxx_cube_defer(
-          s, (getenv("THVM_ATP_L1_XXX_CUBE_DEFER") != NULL) ? 1u : 0u);
-      // L.2 `x.(x.x) = y.(y.y)` self-cube-equality defer (DEFAULT OFF): defer the
-      // leading self-cube-equality CP of an f=170-signature L.2/combo0/k2==0
-      // cube group (one with a higher-keyed fwd_cube AND posgroup_cube) to the
-      // end of the group's weight-120 run, matching WM's CP-formation FIFO age
-      // -- the Meredith OrAssociativity firstdiv-11847 divergence.
-      // THVM_ATP_L2_SELFCUBE_DEFER opts in (also turned on by FORMATION_FIFO
-      // below).  See soa.txt.
-      thvm_atp_set_use_l2_selfcube_defer(
-          s, (getenv("THVM_ATP_L2_SELFCUBE_DEFER") != NULL) ? 1u : 0u);
-      // L.1.2 weight-155 band interleave (DEFAULT OFF): re-key the f=170
-      // L.1.2/combo1 weight-155 band CPs (variants G/H) onto a round-robin
-      // interleave, matching WM's CP-formation emission -- the Meredith
-      // OrAssociativity firstdiv-11894 divergence.  THVM_ATP_L12_BAND155 opts in
-      // (also turned on by FORMATION_FIFO below).  See soa.txt.
-      thvm_atp_set_use_l12_band155(
-          s, (getenv("THVM_ATP_L12_BAND155") != NULL) ? 1u : 0u);
-      // L.1 self-cube-equality defer (DEFAULT OFF): defer the leading distinct-
-      // var self-cube-equality CP `x.(x.x) = y.(y.y)` of an f=185-signature
-      // L.1/combo0/phase0/k2==0 weight-120 group (a higher-keyed fwd_cube AND
-      // posgroup_cube present) to the end of the group's cube run, matching
-      // WM's CP-formation FIFO age -- the Meredith OrAssociativity firstdiv-13485
-      // divergence.  THVM_ATP_L1_SELFCUBE_DEFER opts in (also turned on by
-      // FORMATION_FIFO below).  See soa.txt.
-      thvm_atp_set_use_l1_selfcube_defer(
-          s, (getenv("THVM_ATP_L1_SELFCUBE_DEFER") != NULL) ? 1u : 0u);
-      // L.2 self-cube-equality defer past the `(x.x).y` distribution shapes
-      // (DEFAULT OFF): defer the leading distinct-var self-cube-equality CP pair
-      // `x.(x.x) = y.(y.y)` of an f=185-signature L.2/combo0/phase0/k1==6
-      // weight-120 group (a higher-keyed xx_y_dist A AND B present) to just past
-      // the distribution anchors, matching WM's CP-formation FIFO age -- the
-      // Meredith OrAssociativity firstdiv-13804 divergence.
-      // THVM_ATP_L2_SELFCUBE_DIST_DEFER opts in (also turned on by FORMATION_FIFO
-      // below).  See soa.txt.
-      thvm_atp_set_use_l2_selfcube_dist_defer(
-          s, (getenv("THVM_ATP_L2_SELFCUBE_DIST_DEFER") != NULL) ? 1u : 0u);
-      // WolframAxioms early eTT collapse-copy defer (DEFAULT OFF): discard at
-      // selection the early eTT/B-phase deep-collapse copy `BIG=v` when its
-      // tops/A-phase twin is still queued at the same priority -- the
-      // WolframAxioms OrAssociativity firstdiv-781 divergence.
-      // THVM_ATP_WOLF_COLLAPSE_DEFER opts in (also turned on by FORMATION_FIFO
-      // below).  Scoped HARD to the WolframAxioms seed.
-      thvm_atp_set_use_wolf_collapse_defer(
-          s, (getenv("THVM_ATP_WOLF_COLLAPSE_DEFER") != NULL) ? 1u : 0u);
-      // WolframAxioms self-root vs axiom-partner formation swap (DEFAULT OFF):
-      // at the weight-1520 firstdiv-862 band re-key the phase-2 root
-      // self-overlap (combo=0, ovPos=L, unoriented inner -- WM aP==oP) just
-      // above its unoriented phase-4 axiom-partner twin (combo=2, ovPos=L --
-      // WM aP=-2 oP=-1) in the SAME batch, so the partner ages first (WM's
-      // pick-862) and the self-root takes WM's later slot (pick-870).
-      // THVM_ATP_WOLF_SELFROOT_DEFER opts in (also turned on by FORMATION_FIFO
-      // below).  Scoped HARD to the WolframAxioms seed.
-      thvm_atp_set_use_wolf_selfroot_defer(
-          s, (getenv("THVM_ATP_WOLF_SELFROOT_DEFER") != NULL) ? 1u : 0u);
-      // WolframAxioms trace-cap orphan recovery (DEFAULT OFF; also turned ON by
-      // FORMATION_FIFO below): stamp the outer parent's trace id into a cp_par_a
-      // side-array so a CP formed past the proof-trace soft cap (cp_trace ==
-      // NONE) can still be orphan-tested against its dead parent rule -- the
-      // firstdiv-926 re-derived `BIG = var` collapse duplicate WM orphan-drops.
-      // THVM_ATP_WOLF_DUP_ORPHAN opts in.  Scoped HARD to the WolframAxioms seed.
-      thvm_atp_set_use_wolf_dup_orphan(
-          s, (getenv("THVM_ATP_WOLF_DUP_ORPHAN") != NULL) ? 1u : 0u);
-      // WolframAxioms firstdiv-936 redundant self-overlap drop (DEFAULT OFF;
-      // also turned ON by FORMATION_FIFO below): a bare-root self-overlap whose
-      // content equals an earlier combo=1 partner of the same batch is a
-      // redundant re-derivation WM does not select in the traced window.  The
-      // formation site stamps cp_form_phase 0xfd; the selection site drops it.
-      // THVM_ATP_WOLF_SELFDUP_DROP opts in.  Scoped HARD to the WolframAxioms seed.
-      thvm_atp_set_use_wolf_selfdup_drop(
-          s, (getenv("THVM_ATP_WOLF_SELFDUP_DROP") != NULL) ? 1u : 0u);
-      // WM CP-formation FIFO lineage (DEFAULT OFF): the SINGLE knob enabling
-      // the faithful WM CP-formation order.  It turns on the four scoped
-      // k3-arrival re-key passes (LEAF_TIEBREAK / REVFACE_GROUP / POSGROUP /
-      // CUBE_ARRIVAL) plus the re-derivation drain within-leaf chain tiebreak
-      // (DRAIN_CHAINPOS) that together reproduce WM's combined-superposition-
-      // scan emission order AND its IR-victim re-queue order: per overlap
-      // position, every RULE-tree partner (discrimination-tree leaf-arrival
-      // order) precedes every EQUATION-tree partner (Unifikation1.c
-      // U1_KPsBildenZuRegel:1527-1547), so the surviving copy of a
-      // multiply-formed term inherits WM's CPNr age (w2 = ++CPNr at insertion,
-      // NewClassification.c C_Classify:325 <- recentCPinsert).  Atop the base
-      // CP_SIDE/FLAT_SUBSUME/COMM_REAGE/COMM_DROP_DUP knobs
-      // THVM_ATP_FORMATION_FIFO reaches soa firstdiv 1558 -- exactly equivalent
-      // to setting the five individual correction flags (the setter runs last,
-      // after the five individual env reads above, so it ORs them on).  See
+      // WM CP-formation FIFO lineage (DEFAULT OFF): the faithful-stack
+      // master knob.  CP formation emits natively in WM's U1 order (the
+      // single-walk former), so this arms only the shared WM order
+      // refinements outside formation: the IR-victim drain-order keys
+      // (DRAIN_CHAINPOS / DRAIN_REVFACE) and the distinguished-direction
+      // E-set subsumption (ESET_DISTDIR).  The setter runs last, after
+      // the individual env reads above, so it ORs them on.  See
       // tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_formation_fifo(
           s, (getenv("THVM_ATP_FORMATION_FIFO") != NULL) ? 1u : 0u);
@@ -1949,9 +1703,6 @@ int main(int argc, char **argv) {
          s->n_eqs_dropped_eset_subsumed,
          s->n_cps_dropped_connected,
          s->n_cps_dropped_orphan, s->n_cps_dropped_lrs);
-  if (s->use_emission_order) {
-    printf("   wm-emission-order: rank-misses=%u\n", s->n_wmo_rank_misses);
-  }
   if (s->use_lrs) {
     printf("   lrs: recomputes=%u  horizon=%u  warmup=%u  period=%u\n",
            s->n_lrs_recomputes, s->lrs_horizon,
@@ -2107,20 +1858,18 @@ int main(int argc, char **argv) {
                100.0 * (double)g_atp_swrn_hit /
                    (double)(g_atp_swrn_hit + g_atp_swrn_miss));
       }
-      // CP-gen non-push split (thvm_atp_generate_cps_wm regions).  The
-      // top-level components (collect/overlap/rank/rekey/sort/pushloop)
-      // tile the cp-gen phase up to loop overhead; the pushloop's own
-      // split (push-norm + varnorm + filters + trace + pack) tiles the
+      // CP-gen non-push split (single-walk former regions).  The
+      // top-level components (collect/overlap/rank/pushloop) tile the
+      // cp-gen phase up to loop overhead; the pushloop's own split
+      // (push-norm + varnorm + filters + trace + pack) tiles the
       // pushloop the same way.  kbo is a sub-slice of pack.
       u64 sumg = g_atp_cpg_us_collect + g_atp_cpg_us_overlap +
-                 g_atp_cpg_us_rank + g_atp_cpg_us_rekey +
-                 g_atp_cpg_us_sort + g_atp_cpg_us_pushloop;
+                 g_atp_cpg_us_rank + g_atp_cpg_us_pushloop;
       u64 sump = g_atp_phase_us_push_normalize + g_atp_cpg_us_varnorm +
                  g_atp_cpg_us_filters + g_atp_cpg_us_trace +
                  g_atp_cpg_us_pack;
       printf("   cp-gen detail: overlap-calls=%llu rank-calls=%llu\n"
-             "     collect=%.2fs overlap=%.2fs rank=%.2fs rekey=%.2fs "
-             "sort=%.2fs pushloop=%.2fs\n"
+             "     collect=%.2fs overlap=%.2fs rank=%.2fs pushloop=%.2fs\n"
              "     sum=%.2fs / cp-gen=%.2fs\n"
              "   pushloop detail: push-norm=%.2fs varnorm=%.2fs "
              "filters=%.2fs trace=%.2fs pack=%.2fs (kbo=%.2fs)\n"
@@ -2128,8 +1877,7 @@ int main(int argc, char **argv) {
              (unsigned long long)g_atp_cpg_overlap_calls,
              (unsigned long long)g_atp_cpg_rank_calls,
              g_atp_cpg_us_collect / 1e6, g_atp_cpg_us_overlap / 1e6,
-             g_atp_cpg_us_rank / 1e6, g_atp_cpg_us_rekey / 1e6,
-             g_atp_cpg_us_sort / 1e6, g_atp_cpg_us_pushloop / 1e6,
+             g_atp_cpg_us_rank / 1e6, g_atp_cpg_us_pushloop / 1e6,
              sumg / 1e6, g_atp_phase_us_cp_gen / 1e6,
              g_atp_phase_us_push_normalize / 1e6,
              g_atp_cpg_us_varnorm / 1e6, g_atp_cpg_us_filters / 1e6,

@@ -585,11 +585,8 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     useReversedCompletion_, useSueManagement_,
     useCriticalGoalInterreduce_, useCriticalGoalWeight_,
     useBackwardGoalArgue_, useCpWmSide_, useWmFlatSubsume_,
-    useWmCommSubsume_, useWmCommDefer_, useWmCommReage_,
-    useWmCommDropDup_, useWmLeafTiebreak_, useWmRevfaceGroup_,
-    useWmPosGroup_, useWmCubeArrival_, useWmFormationFifo_,
-    useWmMeredDmgu_, useWmEsetDistdir_, useWmCommDropDupClassGate_,
-    useWmCorankOwnArr_, useWmLeafTiebreakFacegate_, useTracePack_] := Block[{
+    useWmCommSubsume_, useWmFormationFifo_,
+    useWmEsetDistdir_, useTracePack_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr,
@@ -612,11 +609,8 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         useNoOverlapBelowSkolem, useReclassify, useReversedCompletion,
         useSueManagement, useCriticalGoalInterreduce,
         useCriticalGoalWeight, useBackwardGoalArgue, useCpWmSide,
-        useWmFlatSubsume, useWmCommSubsume, useWmCommDefer, useWmCommReage,
-        useWmCommDropDup, useWmLeafTiebreak, useWmRevfaceGroup,
-        useWmPosGroup, useWmCubeArrival, useWmFormationFifo,
-        useWmMeredDmgu, useWmEsetDistdir, useWmCommDropDupClassGate,
-        useWmCorankOwnArr, useWmLeafTiebreakFacegate, useTracePack];
+        useWmFlatSubsume, useWmCommSubsume, useWmFormationFifo,
+        useWmEsetDistdir, useTracePack];
     If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
         Print["[split] C solve + trace-gen = ", $atpSplitT,
               " s  (WL reconstruction = total wall - this)"]];

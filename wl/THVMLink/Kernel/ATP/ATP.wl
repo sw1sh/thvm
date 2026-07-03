@@ -69,7 +69,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\", \"TPTP\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved. \"TPTP\" renders the proof as an SZS-wrapped TPTP CNFRefutation string -- the CASC output format -- for File / TPTP-string input.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"CommDefer\", \"CommReage\", \"CommDropDup\", \"LeafTiebreak\", \"RevfaceGroup\", \"PosGroup\", \"CubeArrival\", \"FormationFifo\", \"MeredDmgu\", \"EsetDistdir\", \"CommDropDupClassGate\", \"CorankOwnArr\", \"LeafTiebreakFacegate\", \"TracePack\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"FormationFifo\", \"EsetDistdir\", \"TracePack\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -363,85 +363,25 @@ $atpRunProofFn := $atpRunProofFn = load[
         drops the soa slot15 equation but forks firstdiv 125->99 and
         explodes commutative-ring baselines via remove-and-rederive thrash *)
      Integer,
-     (* args[54] = Waldmeister commutativity-DEFER overlap gate (Method
-        "CommDefer"; suppress the over-enumerated non-canonical
-        comm-side overlap without removing the equation).  OFF by
-        default; superseded by CommReage *)
+     (* args[54] = Waldmeister CP-formation FIFO lineage (Method
+        "FormationFifo"; the faithful-stack master knob.  CP formation
+        emits natively in WM's U1 order -- the single-walk former -- so
+        this arms only the shared WM order refinements outside
+        formation: the IR-victim drain-order keys and the
+        distinguished-direction E-set subsumption).  OFF by default *)
      Integer,
-     (* args[55] = Waldmeister commutativity-REAGE overlap re-rank (Method
-        "CommReage"; INVERSE of CommDefer: promote thvm's seq564-sibling
-        CP to the head of eqn-10's birth batch so it is selected at WM's
-        faithful early age).  OFF by default *)
-     Integer,
-     (* args[56] = Waldmeister commutativity DROP-DUP re-age (Method
-        "CommDropDup"; atop CommReage, re-age the duplicate
-        re-derivation of slot15's term one FIFO slot later = WM pick-289).
-        OFF by default; advances soa firstdiv 288->290 *)
-     Integer,
-     (* args[57] = Waldmeister leaf-arrival tiebreak (Method
-        "LeafTiebreak"; re-key an oriented var-differ==1 CP just below
-        its two-faced permutation sibling so it sorts first, as WM's
-        single oriented scan emits it).  OFF by default; clears the soa
-        290<->292 / 303<->305 / 351<->353 swap-pairs *)
-     Integer,
-     (* args[58] = Waldmeister reverse-face shape-group tiebreak (Method
-        "RevfaceGroup"; sibling of LeafTiebreak one weight band up,
-        re-keys a reverse-face CP adjacent to the same-shape CP it
-        ALPHA-matches).  OFF by default; advances soa firstdiv past 778 *)
-     Integer,
-     (* args[59] = Waldmeister overlap-position raw-arrival grouping
-        (Method "PosGroup"; sibling of RevfaceGroup one weight band
-        down, un-groups an over-grouped vd=0 permutation partner so the
-        batch matches WM's bracketed raw discrimination-tree arrival).
-        OFF by default; advances soa firstdiv past 966 *)
-     Integer,
-     (* args[60] = Waldmeister cube-arrival tiebreak (Method
-        "CubeArrival"; sibling of PosGroup one weight band up, re-keys
-        the double-cube CP below its slot15-wrapped same-group
-        predecessor so the adjacent pair emits in WM's `ue (19,-7)`
-        before `ue (19,-2)` order).  OFF by default; advances soa
-        firstdiv past 1320 *)
-     Integer,
-     (* args[61] = Waldmeister CP-formation FIFO lineage (Method
-        "FormationFifo"; the SINGLE knob enabling the faithful WM
-        CP-formation order -- it turns ON the full 13-flag k3-arrival
-        stack: the four emission-order re-key passes LeafTiebreak /
-        RevfaceGroup / PosGroup / CubeArrival plus LeafTiebreakFacegate /
-        CommDropDupClassGate / CorankOwnArr / MeredDmgu / EsetDistdir and
-        the within-leaf drain/cube-order corrections, which reproduce WM's
-        single superposition-scan emission order, tree before equation,
-        stamping cp_seq = WM's w2 = ++CPNr.  Atop the base knobs it reaches
-        the full soa proof, firstdiv 2808 -- WM saturates at 2807).
-        OFF by default *)
-     Integer,
-     (* args[62] = Waldmeister shared-reverse-face double-MGU defer (Method
-        "MeredDmgu"; auto-on under FormationFifo).  TRI-STATE: -1 =
-        Automatic (leave at FormationFifo's value), 0 = off, 1 = on *)
-     Integer,
-     (* args[63] = Waldmeister distinguished-direction E-set subsumption
+     (* args[55] = Waldmeister distinguished-direction E-set subsumption
         (Method "EsetDistdir"; test each old equation only in its stored
         orientation, Interreduktion.c:261; auto-on under FormationFifo).
         TRI-STATE: -1 = Automatic, 0 = off, 1 = on *)
      Integer,
-     (* args[64] = Waldmeister inner-swap anchor gate for the DROP-DUP
-        re-age (Method "CommDropDupClassGate"; auto-on under
-        FormationFifo).  TRI-STATE: -1 = Automatic, 0 = off, 1 = on *)
-     Integer,
-     (* args[65] = Waldmeister two-face co-rank correction (Method
-        "CorankOwnArr"; auto-on under FormationFifo).  TRI-STATE:
-        -1 = Automatic, 0 = off, 1 = on *)
-     Integer,
-     (* args[66] = Waldmeister leaf-tiebreak face gate (Method
-        "LeafTiebreakFacegate"; auto-on under FormationFifo).  TRI-STATE:
-        -1 = Automatic, 0 = off, 1 = on *)
-     Integer,
-     (* args[67] = off-heap packed proof trace (Method "TracePack"; the
+     (* args[56] = off-heap packed proof trace (Method "TracePack"; the
         on-heap trace is ~99.9% of the GC live set on a deep completion,
         see atpTracePackOpt -- trajectory byte-identical, ON in the
         "Waldmeister"* presets).  TRI-STATE: -1 = Automatic (engine
         default: on-heap, or THVM_ATP_TRACE_PACK=1 env), 0 = off,
         1 = on *)
-     Integer},
+          Integer},
     "NumericArray"
 ]
 
@@ -2591,17 +2531,12 @@ atpBackwardGoalArgueOpt[o_Association] :=
     Switch[Lookup[o, "BackwardGoalArgue", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* === Waldmeister CP-emission-order knobs (src/atp/_.c).  Each ports a
-   single Waldmeister selection-order rule that aligns thvm's CP FIFO
-   ages with WM's on the ShefferAxiomsOrAssociativity (soa) proxy.  The
-   binary knobs (CPSide..CubeArrival) default OFF (engine + "Waldmeister"*
-   presets stay byte-identical); the five auto-on knobs (MeredDmgu,
-   EsetDistdir, CommDropDupClassGate, CorankOwnArr, LeafTiebreakFacegate)
-   default Automatic = leave at FormationFifo's value.  The soa-validated
-   faithful set is CPSide + FlatSubsume + CommReage + CommDropDup + the
-   k3-arrival corrections + EsetDistdir (equivalently FormationFifo), which
-   reproduces WM's full selection order (soa firstdiv 2808, WM saturates at
-   2807).  See tools/baselines/wm_align_reports/soa.txt. === *)
+(* === Waldmeister CP-order knobs (src/atp/_.c).  CP formation itself
+   emits natively in WM's U1 order (the single-walk former), so the
+   historical batch re-key corrections are gone; what remains is the
+   side/subsumption geometry (CPSide / FlatSubsume / CommSubsume) and the
+   FormationFifo master knob arming the shared drain-order + EsetDistdir
+   refinements.  See tools/baselines/wm_align_reports/soa.txt. === *)
 
 (* "CPSide" -> True | False: Waldmeister CP-formation side geometry
    swap (Unifikation1.c:916-917).  Store each derived UNORIENTABLE
@@ -2635,120 +2570,24 @@ atpCommSubsumeOpt[o_Association] :=
     Switch[Lookup[o, "CommSubsume", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* "CommDefer" -> True | False: commutativity-DEFER overlap gate.
-   Suppresses the single over-enumerated non-canonical comm-side overlap
-   (soa slot15 sourced seq564) in an oriented rule's birth batch WITHOUT
-   removing the equation, so slot15's uniquely-parented pick-99 COMM copy
-   survives.  SUPERSEDED by CommReage (the inverse re-rank, which keeps
-   the early CP rather than suppressing it).  False/Automatic = off. *)
-atpCommDeferOpt[o_Association] :=
-    Switch[Lookup[o, "CommDefer", Automatic],
-        True, 1, False | Automatic, 0, _, 0];
-
-(* "CommReage" -> True | False: commutativity-REAGE overlap re-rank
-   (INVERSE of CommDefer).  Instead of suppressing thvm's early seq564
-   copy, promote thvm's single seq564-sibling CP (`(x.x).y = (x.y).y`,
-   rule13 x eqn-10) to the head of eqn-10's birth batch so it is selected
-   at WM's faithful early age (pick-126) rather than buried at the eTT
-   batch tail.  False/Automatic = off. *)
-atpCommReageOpt[o_Association] :=
-    Switch[Lookup[o, "CommReage", Automatic],
-        True, 1, False | Automatic, 0, _, 0];
-
-(* "CommDropDup" -> True | False: commutativity DROP-DUP re-age (atop
-   CommReage).  Re-ages the single DUPLICATE re-derivation of slot15's
-   term `x.(y.x) = (y.y).x` one FIFO slot later, past its in-batch
-   successor, so it lands at WM's faithful pick-289 rather than thvm's
-   over-early pick-288.  Advances soa firstdiv 288->290.  Requires
-   CommReage.  False/Automatic = off. *)
-atpCommDropDupOpt[o_Association] :=
-    Switch[Lookup[o, "CommDropDup", Automatic],
-        True, 1, False | Automatic, 0, _, 0];
-
-(* "LeafTiebreak" -> True | False: leaf-arrival tiebreak.  When two CPs
-   overlap the new fact at the same position from a var-differ==1
-   (WM-oriented) partner and a var-differ==0 (WM two-faced permutation)
-   partner, re-key the oriented copy just below its sibling so it sorts
-   FIRST, as WM's single oriented scan emits it.  Clears the soa 290<->292
-   / 303<->305 / 351<->353 swap-pairs.  False/Automatic = off. *)
-atpLeafTiebreakOpt[o_Association] :=
-    Switch[Lookup[o, "LeafTiebreak", Automatic],
-        True, 1, False | Automatic, 0, _, 0];
-
-(* "RevfaceGroup" -> True | False: reverse-face shape-group tiebreak
-   (sibling of LeafTiebreak one weight band up, soa w=209).  Within one
-   tops overlap-position group, re-key a var-differ==1 partner's
-   reverse-face CP to sort immediately after the largest-keyed same-group
-   CP it ALPHA-matches, restoring WM's adjacent same-shape emission that
-   thvm's independent leaf DFS scatters.  Advances soa firstdiv past 778.
-   False/Automatic = off. *)
-atpRevfaceGroupOpt[o_Association] :=
-    Switch[Lookup[o, "RevfaceGroup", Automatic],
-        True, 1, False | Automatic, 0, _, 0];
-
-(* "PosGroup" -> True | False: overlap-position raw-arrival grouping
-   (sibling of RevfaceGroup one weight band down, soa w=120).  At a
-   single A-phase tops overlap position WM emits every partner-face CP in
-   raw discrimination-tree arrival order; this un-groups RevfaceGroup's
-   over-grouping there (defers a vd=0 permutation partner's reverse face
-   past the higher-arrival same-group cluster) so the batch matches WM's
-   bracketed emission.  Advances soa firstdiv past 966.  False/Automatic =
-   off. *)
-atpPosGroupOpt[o_Association] :=
-    Switch[Lookup[o, "PosGroup", Automatic],
-        True, 1, False | Automatic, 0, _, 0];
-
-(* "CubeArrival" -> True | False: cube-arrival tiebreak (sibling of
-   PosGroup one weight band up, soa w=224).  The double-cube CP
-   `(x.(x.x)).y = (z.(z.z)).y` and its same-group predecessor, the
-   slot15-wrapped CP `(x.(y.x)).z = ((y.y).x).z`, share the A-phase tops
-   group prefix and differ only in k3 (partner discrimination-tree
-   arrival); thvm sorts the slot15-wrapped CP first but WM surfaces the
-   cube partner first (`ue (19,-7)` before `ue (19,-2)`).  This re-keys
-   the double-cube below its slot15-wrapped predecessor, swapping the
-   adjacent pair to WM's order.  Advances soa firstdiv past 1320.
-   False/Automatic = off. *)
-atpCubeArrivalOpt[o_Association] :=
-    Switch[Lookup[o, "CubeArrival", Automatic],
-        True, 1, False | Automatic, 0, _, 0];
-
 (* "FormationFifo" -> True | False: Waldmeister CP-formation FIFO lineage.
-   The SINGLE knob enabling the faithful WM CP-formation order: it turns ON
-   the full 13-flag k3-arrival stack -- the four emission-order re-key passes
-   (LeafTiebreak / RevfaceGroup / PosGroup / CubeArrival) plus
-   LeafTiebreakFacegate / CommDropDupClassGate / CorankOwnArr / MeredDmgu /
-   EsetDistdir and the within-leaf drain/cube-order corrections.  Together
-   they reproduce WM's single combined-superposition-scan emission order --
-   WM stamps each surviving critical pair w2 = ++CPNr at insertion
-   (NewClassification.c C_Classify), per overlap position every RULE-tree
-   partner (discrimination-tree leaf-arrival order) precedes every
-   EQUATION-tree partner -- so a multiply-formed term's surviving copy
-   inherits WM's CPNr age.  The five auto-on knobs above stay Automatic by
-   default (leave them at FormationFifo's value); set one to False to
-   override it back off.  Atop the base CPSide/FlatSubsume/CommReage/
-   CommDropDup knobs FormationFifo reaches the full soa proof, firstdiv 2808
-   (WM saturates at 2807).  False/Automatic = off. *)
+   The faithful-stack master knob.  CP formation emits natively in WM's U1
+   order (the single-walk former stamps cp_seq = WM's w2 = ++CPNr by
+   construction), so this arms only the shared WM order refinements outside
+   formation: the IR-victim drain-order keys (drain_chainpos /
+   drain_revface) and the distinguished-direction E-set subsumption
+   (EsetDistdir, Automatic = FormationFifo's value; set False to override).
+   False/Automatic = off. *)
 atpFormationFifoOpt[o_Association] :=
     Switch[Lookup[o, "FormationFifo", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 
-(* The next five knobs are AUTO-ON under FormationFifo (the C setter
-   thvm_atp_set_use_formation_fifo turns them on with the rest of the
-   13-flag faithful stack), so they take a TRI-STATE override rather than
-   the binary OFF-by-default decode the knobs above use: -1 = Automatic
-   (leave at whatever FormationFifo set), 0 = force off, 1 = force on.
-   The C bridge only calls the individual setter on an explicit 0/1, so
-   Automatic preserves FormationFifo's value. *)
-
-(* "MeredDmgu" -> True | False: shared-reverse-face double-MGU defer.  In a
-   weight-120 tops-A equation-tree band, defer the chain-head (newest-
-   equation) combo=0 CP that shares a reverse-face leaf with an older
-   equation's combo=0 CP -- WM ages that content as the older equation's
-   late second MGU, not at the band head.  Auto-on under FormationFifo;
-   Automatic = leave at FormationFifo's value. *)
-atpMeredDmguOpt[o_Association] :=
-    Switch[Lookup[o, "MeredDmgu", Automatic],
-        True, 1, False, 0, _, -1];
+(* EsetDistdir is AUTO-ON under FormationFifo (the C setter turns it on),
+   so it takes a TRI-STATE override rather than the binary OFF-by-default
+   decode the knobs above use: -1 = Automatic (leave at whatever
+   FormationFifo set), 0 = force off, 1 = force on.  The C bridge only
+   calls the individual setter on an explicit 0/1, so Automatic preserves
+   FormationFifo's value. *)
 
 (* "EsetDistdir" -> True | False: WM distinguished-direction E-set
    subsumption (Interreduktion.c:261).  Test each old equation only in its
@@ -2759,35 +2598,6 @@ atpMeredDmguOpt[o_Association] :=
    leave at FormationFifo's value. *)
 atpEsetDistdirOpt[o_Association] :=
     Switch[Lookup[o, "EsetDistdir", Automatic],
-        True, 1, False, 0, _, -1];
-
-(* "CommDropDupClassGate" -> True | False: inner-swap anchor gate for the
-   DROP-DUP re-age.  Skip the slot15-term re-age when its smallest-keyed
-   successor is a Meredith-harmful anchor WM emits AFTER the slot15-term
-   (the permutation class `(x.y).y = (y.x).y` or the slot15-rotate
-   `x.(y.x) = (x.y).x`).  Auto-on under FormationFifo; Automatic = leave at
-   FormationFifo's value. *)
-atpCommDropDupClassGateOpt[o_Association] :=
-    Switch[Lookup[o, "CommDropDupClassGate", Automatic],
-        True, 1, False, 0, _, -1];
-
-(* "CorankOwnArr" -> True | False: two-face co-rank correction.  Re-key a
-   WM-reverse-face overlap of the `(x.(x.x)).y = y.y` partner onto its OWN
-   tops-DFS arrival when it is a distinct (non-double-MGU) surviving CP,
-   matching WM's independent aging.  Auto-on under FormationFifo; Automatic
-   = leave at FormationFifo's value. *)
-atpCorankOwnArrOpt[o_Association] :=
-    Switch[Lookup[o, "CorankOwnArr", Automatic],
-        True, 1, False, 0, _, -1];
-
-(* "LeafTiebreakFacegate" -> True | False: leaf-tiebreak face gate.  Skip
-   the var-differ==1-first flip when the oriented partner is overlapped on
-   its WM-distinguished face but the permutation partner on its WM-reverse
-   face -- thvm's DFS arrival already matches WM's formation order there.
-   Auto-on under FormationFifo; Automatic = leave at FormationFifo's
-   value. *)
-atpLeafTiebreakFacegateOpt[o_Association] :=
-    Switch[Lookup[o, "LeafTiebreakFacegate", Automatic],
         True, 1, False, 0, _, -1];
 
 (* "TracePack" -> True | False: off-heap packed proof trace.  The
@@ -2973,36 +2783,19 @@ $AtpPresetDefaults = <|
            wall, +17% peak RSS on mccune and 2.13x peak RSS on
            AndAssoc -- see atpImplicitCpOpt. *)
         "UseImplicitCp" -> False,
-        (* WM CP-SELECTION-FAITHFUL stack: the validated set that
-           reproduces Waldmeister's exact critical-pair selection
-           sequence -- soa firstdiv 2808 (the FULL ShefferAxioms-
-           OrAssociativity proof; WM saturates at pick 2807) and
-           MeredithAxioms OrAssociativity firstdiv 6110.  Every flag is
-           set EXPLICITLY True (not left to FormationFifo's C-level
-           auto-on): the WL LibraryFunction passes all 68 args every call,
-           so an unset emission-order arg would pass 0 and could reset what
-           FormationFifo turned on -- pinning each True sidesteps that.
-           The four base side/subsumption knobs (CPSide / FlatSubsume /
-           CommReage / CommDropDup) are NOT auto-on'd by FormationFifo and
-           must be set here.  FormationFifo additionally C-auto-ons the
-           four within-leaf drain/cube-order corrections that are not
-           WL-exposed (band_interleave / drain_chainpos / drain_revface /
-           revface_cubeorder).  See atpFormationFifoOpt + the AtpMethods /
+        (* WM CP-SELECTION-FAITHFUL stack.  CP formation emits natively
+           in WM's U1 order (the single-walk former), so the selection
+           sequence needs no per-band corrections; the two base
+           side/subsumption knobs (CPSide / FlatSubsume) are set here and
+           FormationFifo arms the shared drain-order keys (drain_chainpos
+           / drain_revface, not WL-exposed) plus EsetDistdir.  Explicit
+           True on EsetDistdir pins it independent of FormationFifo's
+           C-level auto-on.  See atpFormationFifoOpt + the AtpMethods /
            Waldmeister tutorials. *)
         "CPSide" -> True,
         "FlatSubsume" -> True,
-        "CommReage" -> True,
-        "CommDropDup" -> True,
-        "LeafTiebreak" -> True,
-        "RevfaceGroup" -> True,
-        "PosGroup" -> True,
-        "CubeArrival" -> True,
         "FormationFifo" -> True,
-        "MeredDmgu" -> True,
-        "EsetDistdir" -> True,
-        "CommDropDupClassGate" -> True,
-        "CorankOwnArr" -> True,
-        "LeafTiebreakFacegate" -> True|>,
+        "EsetDistdir" -> True|>,
     "WaldmeisterLazy" -> <|
         "Ordering" -> "LPO",
         "AutoPrecedence" -> True,
@@ -3186,13 +2979,8 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpCriticalGoalInterreduceOpt[o], atpCriticalGoalWeightOpt[o],
          atpBackwardGoalArgueOpt[o], atpCpSideOpt[o],
          atpFlatSubsumeOpt[o], atpCommSubsumeOpt[o],
-         atpCommDeferOpt[o], atpCommReageOpt[o],
-         atpCommDropDupOpt[o], atpLeafTiebreakOpt[o],
-         atpRevfaceGroupOpt[o], atpPosGroupOpt[o],
-         atpCubeArrivalOpt[o], atpFormationFifoOpt[o],
-         atpMeredDmguOpt[o], atpEsetDistdirOpt[o],
-         atpCommDropDupClassGateOpt[o], atpCorankOwnArrOpt[o],
-         atpLeafTiebreakFacegateOpt[o], atpTracePackOpt[o]}
+         atpFormationFifoOpt[o], atpEsetDistdirOpt[o],
+         atpTracePackOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -4501,7 +4289,6 @@ TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _TwoWayRule | Ina
 TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _TwoWayRule | Inactive[Equal][_, _] | Inactive[Unequal][_, _] | Inactive[Rule][_, _] | Inactive[TwoWayRule][_, _] | Rule[Except[MaxSteps | Method | TimeConstraint | PortfolioFrontLoad | _String], _]), returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     TFindProof[conjecture, {axiom}, returnSpec, opts];
 
-
 (* Block-localize the common short variable names a caller's outer
    scope might have bound (e.g. `Do[..., {c, ...}]`).  The C engine's
    term decoder reconstructs symbols via bare `Symbol[name]` from the
@@ -4514,7 +4301,6 @@ TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _TwoWayRule | Ina
    the FuchsPraezedenz / CanonicalizePatterns name table; xN/yN/zN
    cover the engine's "x<id>" FVR-fallback names.  See
    [[project_atp_tfindproof_iter_leak]]. *)
-
 
 (* A LIST of conjectures is a multi-goal CONJUNCTION: the generic
    expression form below threads it whole into atpProveBundle, where

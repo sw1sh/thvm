@@ -963,79 +963,24 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // ON forks soa firstdiv 125->99 and explodes commutative-ring baselines.
   mint wm_comm_subsume = MArgument_getInteger(args[53]);
   thvm_atp_set_use_comm_subsume(atp, (u8)(wm_comm_subsume != 0));
-  // Method -> {... "CommDefer" -> True}: commutativity-DEFER overlap
-  // gate.  args[54]; 0 = off (default).  Superseded by CommReage.
-  mint wm_comm_defer = MArgument_getInteger(args[54]);
-  thvm_atp_set_use_comm_defer(atp, (u8)(wm_comm_defer != 0));
-  // Method -> {... "CommReage" -> True}: commutativity-REAGE overlap
-  // re-rank (inverse of CommDefer; promotes thvm's seq564-sibling CP to
-  // WM's faithful early age).  args[55]; 0 = off (default).
-  mint wm_comm_reage = MArgument_getInteger(args[55]);
-  thvm_atp_set_use_comm_reage(atp, (u8)(wm_comm_reage != 0));
-  // Method -> {... "CommDropDup" -> True}: commutativity DROP-DUP re-age
-  // atop CommReage (lands at WM pick-289).  args[56]; 0 = off (default).
-  // Advances soa firstdiv 288->290; requires CommReage.
-  mint wm_comm_drop_dup = MArgument_getInteger(args[56]);
-  thvm_atp_set_use_comm_drop_dup(atp, (u8)(wm_comm_drop_dup != 0));
-  // Method -> {... "LeafTiebreak" -> True}: leaf-arrival tiebreak --
-  // re-key an oriented var-differ==1 CP just below its two-faced sibling
-  // so it sorts first.  args[57]; 0 = off (default).  Clears the soa
-  // 290<->292 / 303<->305 / 351<->353 swap-pairs.
-  mint wm_leaf_tiebreak = MArgument_getInteger(args[57]);
-  thvm_atp_set_use_leaf_tiebreak(atp, (u8)(wm_leaf_tiebreak != 0));
-  // Method -> {... "RevfaceGroup" -> True}: reverse-face shape-group
-  // tiebreak (sibling of LeafTiebreak one weight band up, soa w=209).
-  // args[58]; 0 = off (default).  Advances soa firstdiv past 778.
-  mint wm_revface_group = MArgument_getInteger(args[58]);
-  thvm_atp_set_use_revface_group(atp, (u8)(wm_revface_group != 0));
-  // Method -> {... "PosGroup" -> True}: overlap-position raw-arrival
-  // grouping (sibling of RevfaceGroup one weight band down, soa w=120).
-  // args[59]; 0 = off (default).  Advances soa firstdiv past 966.
-  mint wm_posgroup = MArgument_getInteger(args[59]);
-  thvm_atp_set_use_posgroup(atp, (u8)(wm_posgroup != 0));
-  // Method -> {... "CubeArrival" -> True}: cube-arrival tiebreak (sibling
-  // of PosGroup one weight band up, soa w=224).  Re-keys the double-cube CP
-  // below its slot15-wrapped same-group predecessor so the adjacent pair
-  // emits in WM's `ue (19,-7)` before `ue (19,-2)` order.  args[60]; 0 =
-  // off (default).  Advances soa firstdiv past 1320.
-  mint wm_cube_arrival = MArgument_getInteger(args[60]);
-  thvm_atp_set_use_cube_arrival(atp, (u8)(wm_cube_arrival != 0));
   // Method -> {... "FormationFifo" -> True}: Waldmeister CP-formation FIFO
-  // lineage -- the SINGLE knob enabling the faithful WM CP-formation order.
-  // It turns ON the four scoped k3-arrival re-key passes (LeafTiebreak /
-  // RevfaceGroup / PosGroup / CubeArrival) that reproduce WM's single
-  // superposition-scan emission order (tree before equation), stamping
-  // cp_seq = WM's w2 = ++CPNr; equivalent to setting those four flags.  Atop
-  // the base CPSide/FlatSubsume/CommReage/CommDropDup knobs it reaches soa
-  // firstdiv 1505.  args[61]; 0 = off (default).
-  mint wm_formation_fifo = MArgument_getInteger(args[61]);
+  // lineage -- the faithful-stack master knob.  CP formation emits natively
+  // in WM's U1 order (the single-walk former), so this arms only the shared
+  // WM order refinements outside formation: the IR-victim drain-order keys
+  // (drain_chainpos / drain_revface) and the distinguished-direction E-set
+  // subsumption (eset_distdir).  args[54]; 0 = off (default).
+  mint wm_formation_fifo = MArgument_getInteger(args[54]);
   thvm_atp_set_use_formation_fifo(atp, (u8)(wm_formation_fifo != 0));
-  // The next five knobs are auto-on under FormationFifo (set above), so they
-  // take a TRI-STATE override: -1 = Automatic (leave at FormationFifo's
-  // value), 0 = force off, 1 = force on.  Only call the setter on an explicit
-  // 0/1 -- the -1 default must run AFTER FormationFifo and leave its flags
+  // EsetDistdir is auto-on under FormationFifo (set above), so it takes a
+  // TRI-STATE override: -1 = Automatic (leave at FormationFifo's value),
+  // 0 = force off, 1 = force on.  Only call the setter on an explicit 0/1
+  // -- the -1 default must run AFTER FormationFifo and leave its flag
   // untouched.
-  // Method -> {... "MeredDmgu" -> True}: shared-reverse-face double-MGU defer.
-  // args[62]; -1 = Automatic.  Advances Meredith OrAssociativity firstdiv.
-  mint wm_mered_dmgu = MArgument_getInteger(args[62]);
-  if (wm_mered_dmgu >= 0) thvm_atp_set_use_mered_dmgu(atp, (u8)(wm_mered_dmgu != 0));
   // Method -> {... "EsetDistdir" -> True}: WM distinguished-direction E-set
   // subsumption (test each old equation only in its stored orientation;
-  // Interreduktion.c:261).  args[63]; -1 = Automatic.
-  mint wm_eset_distdir = MArgument_getInteger(args[63]);
+  // Interreduktion.c:261).  args[55]; -1 = Automatic.
+  mint wm_eset_distdir = MArgument_getInteger(args[55]);
   if (wm_eset_distdir >= 0) thvm_atp_set_use_eset_distdir(atp, (u8)(wm_eset_distdir != 0));
-  // Method -> {... "CommDropDupClassGate" -> True}: inner-swap anchor gate for
-  // the DROP-DUP re-age.  args[64]; -1 = Automatic.
-  mint wm_comm_drop_dup_class_gate = MArgument_getInteger(args[64]);
-  if (wm_comm_drop_dup_class_gate >= 0) thvm_atp_set_use_comm_drop_dup_class_gate(atp, (u8)(wm_comm_drop_dup_class_gate != 0));
-  // Method -> {... "CorankOwnArr" -> True}: two-face co-rank correction.
-  // args[65]; -1 = Automatic.
-  mint wm_corank_own_arr = MArgument_getInteger(args[65]);
-  if (wm_corank_own_arr >= 0) thvm_atp_set_use_corank_own_arr(atp, (u8)(wm_corank_own_arr != 0));
-  // Method -> {... "LeafTiebreakFacegate" -> True}: leaf-tiebreak face gate.
-  // args[66]; -1 = Automatic.
-  mint wm_leaf_tiebreak_facegate = MArgument_getInteger(args[66]);
-  if (wm_leaf_tiebreak_facegate >= 0) thvm_atp_set_use_leaf_tiebreak_facegate(atp, (u8)(wm_leaf_tiebreak_facegate != 0));
   // Method -> {... "TracePack" -> True}: off-heap packed proof trace.
   // The on-heap trace's raw CP terms are ~99.9% of the GC live set on
   // a deep completion (6.6s / 25% of the OrAssociativity bench wall in
@@ -1045,11 +990,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // byte-identical.  thvm_atp_materialize_trace below rebuilds live
   // Term entries post-run, so extraction and the WL lift see a normal
   // Term trace either way.  ON in the "Waldmeister"* presets, matching
-  // the C bench default.  args[67]; TRI-STATE: -1 = Automatic (leave
+  // the C bench default.  args[56]; TRI-STATE: -1 = Automatic (leave
   // thvm_atp_init's default: on-heap, or the THVM_ATP_TRACE_PACK=1
   // env), 0 = force on-heap, 1 = force off-heap.  Applied before any
   // axiom intake / trace push (nothing has run since init).
-  mint trace_pack_in = MArgument_getInteger(args[67]);
+  mint trace_pack_in = MArgument_getInteger(args[56]);
   if (trace_pack_in >= 0) atp->trace_pack = (u8)(trace_pack_in != 0);
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
@@ -1383,28 +1328,6 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
             g_atp_phase_us_pop_normalize / 1e6, g_atp_phase_us_cp_gen / 1e6,
             g_atp_phase_us_push_normalize / 1e6, g_atp_phase_us_interreduce / 1e6,
             g_atp_phase_us_goal_check / 1e6, g_atp_phase_us_cp_set_ir / 1e6);
-    {
-      extern u64 g_atp_canorm_corank, g_atp_canorm_l21, g_atp_canorm_reage,
-                 g_atp_canorm_dropdup, g_atp_canorm_dropdup_full,
-                 g_atp_canorm_classgate, g_atp_canorm_rank,
-                 g_atp_canorm_memo_hits, g_atp_canorm_memo_misses;
-      fprintf(stderr, "[atp-phase] canorm pairs: corank=%llu l21=%llu "
-              "reage=%llu dropdup=%llu (full=%llu) classgate=%llu rank=%llu "
-              "memo=%llu/%llu\n",
-              (unsigned long long)g_atp_canorm_corank,
-              (unsigned long long)g_atp_canorm_l21,
-              (unsigned long long)g_atp_canorm_reage,
-              (unsigned long long)g_atp_canorm_dropdup,
-              (unsigned long long)g_atp_canorm_dropdup_full,
-              (unsigned long long)g_atp_canorm_classgate,
-              (unsigned long long)g_atp_canorm_rank,
-              (unsigned long long)g_atp_canorm_memo_hits,
-              (unsigned long long)g_atp_canorm_memo_misses);
-    }
-    {
-      extern void atp_canorm_dump_sites(void);
-      atp_canorm_dump_sites();
-    }
     _tp0 = _tp1;
   }
   // Post-run Cheney pass: a PROVED saturation leaves the arena full of

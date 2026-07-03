@@ -190,7 +190,6 @@ typedef struct AtpWmOrder {
   WmoTree  tree[2];           // [0] rules, [1] equations
   WmoReg  *reg;
   u32      n_reg, cap_reg;
-  u32      rank_misses;       // CPs the ranker could not place (fallback)
   // Multi-entry arrival-list cache for wmo_tops_rank (struct WmoRankCacheEnt
   // above).  wmo_tops_rank runs a fresh discrimination-tree DFS per CP rank
   // query -- the WM-faithful path's dominant cp-gen self-time.  A new fact's
@@ -206,9 +205,9 @@ typedef struct AtpWmOrder {
   u32      rc_next;           // round-robin eviction cursor
   WmoRankCacheEnt rc[WMO_RC_N];
   // Leaf-list rank memo for wmo_leaflist_rank: (tree, trace, face) ->
-  // (found, ll, ch).  The eTT phase of atp_wmo_rank ranks every CP by
-  // its OLD partner's leaf-list position -- an O(leaves x chain)
-  // linear scan per CP over a list that only mutates between batches.
+  // (found, ll, ch).  The normalize-redex ranking (atp_wmo_eq_leaflist_
+  // rank) queries an O(leaves x chain) linear scan over a list that
+  // only mutates between batches.
   // Direct-mapped, validated per entry against tree_rev (same
   // freeze-window discipline as the tops arrival cache above), so a
   // hit returns exactly what the scan would recompute.  Shares
@@ -222,8 +221,8 @@ typedef struct AtpWmOrder {
   // wmo_trace_dist_rhs memo: trace -> dist_rhs verdict (present or the
   // unregistered-default 0), validated per entry against tree_rev
   // (bumped by every registry mutation -- register / rename / remove --
-  // so a stale entry cannot survive one).  The linear registry scan sat
-  // on the per-CP atp_wmo_rank hot path (2 calls per rank query).
+  // so a stale entry cannot survive one).  The linear registry scan sits
+  // on the walk's per-fact and per-rank-query hot paths.
   // Shares no_rankcache as its disable switch.
   struct WmoDrcEnt {
     u64 rev;
@@ -1660,10 +1659,9 @@ static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
 
 // Whether WM's distinguished (indexed) face for the fact with birth
 // trace id `trace` is thvm's STORED RHS (vs the default LHS).  Recorded
-// at registration; queried by atp_wmo_rank to remap a CP's thvm-face
-// bit (0 = lhs, 1 = rhs) onto WM's face (0 = distinguished, 1 = reverse)
-// before classifying its emission phase and looking up the partner's
-// indexed face.  Returns 0 for an unregistered trace (orientable rules
+// at registration; queried by the single-walk former + the eq-rank
+// wrappers to remap a thvm-face bit (0 = lhs, 1 = rhs) onto WM's face
+// (0 = distinguished, 1 = reverse).  Returns 0 for an unregistered trace (orientable rules
 // and intake equations keep distinguished = lhs).
 static u8 wmo_trace_dist_rhs(AtpWmOrder *w, u32 trace) {
   // Memo probe (see AtpWmOrder.drc): the registry is frozen while
@@ -2050,83 +2048,10 @@ static void atp_wmo_remove_trace(AtpState *s, u32 trace) {
   }
 }
 
-// ---------- batch ranking ----------
+// ---------- order-mirror rank queries ----------
 
-// Phase constants (per-new-fact emission segments, U1_KPsBildenZu*):
-//   rule:     A(0) tops, B(1) eTT
-//   equation: A(0), B(1), F(2), C(3), D(4), E(5), G(6)
-//
-// Sort key, packed descending-significance:
-//   [phase:4][k1:14][k2:2][k3:14][k4:14][k5:14]
-//   A/D: k1 = preorder rank of the overlapped position in the new
-//        fact's query face; k2 = tree consult order (A: R=0,E=1;
-//        D: E=0,R=1); k3 = tops DFS arrival rank of the partner leaf;
-//        k4 = chain rank; k5 = 0.
-//   B/E: k1 = 0; k2 = tree consult order (B: R=0,E=1; E: E=0,R=1);
-//        k3 = leaf-list rank of the partner's outer face leaf;
-//        k4 = chain rank; k5 = preorder rank of the position in the
-//        partner's face.
-//   F/C/G: zeros.
-static u64 wmo_pack_key(u32 phase, u32 k1, u32 k2, u32 k3, u32 k4, u32 k5) {
-  if (k1 > 0x3fffu) k1 = 0x3fffu;
-  if (k3 > 0x3fffu) k3 = 0x3fffu;
-  if (k4 > 0x3fffu) k4 = 0x3fffu;
-  if (k5 > 0x3fffu) k5 = 0x3fffu;
-  return ((u64)phase << 58) | ((u64)k1 << 44) | ((u64)(k2 & 3u) << 42) |
-         ((u64)k3 << 28) | ((u64)k4 << 14) | (u64)k5;
-}
-
-// Capped preorder node count of `t` -- wmo_cells_from_term's return
-// value (cell count, or 0 on cap overflow / non-FVR-non-CTR tag /
-// arity > 255) without materializing the cells: the count is
-// independent of the var numbering, so the flatten was pure overhead
-// on the per-CP wmo_preorder_rank hot path.
-static u32 wmo_subtree_size(Term t, u32 cap) {
-  if (term_tag(t) == TAG_FVR) return (cap < 1u) ? 0u : 1u;
-  if (term_tag(t) != TAG_CTR) return 0u;
-  u32 n = term_ctr_n(t);
-  if (cap < 1u || n > 255u) return 0u;
-  u32 len = 1u;
-  for (u32 i = 0; i < n; i++) {
-    u32 cl = wmo_subtree_size(term_ctr_at(t, i), cap - len);
-    if (cl == 0u) return 0u;
-    len += cl;
-  }
-  return len;
-}
-
-// Preorder rank of position path `pos[0..len)` within term `t`
-// (counting every node, root = 0).
-static u32 wmo_preorder_rank(Term t, const u8 *pos, u32 len) {
-  u32 rank = 0;
-  for (u32 d = 0; d < len; d++) {
-    if (term_tag(t) != TAG_CTR) return rank;
-    u32 n = term_ctr_n(t);
-    u32 idx = pos[d];
-    if (idx >= n) return rank;
-    rank += 1u;
-    for (u32 c = 0; c < idx; c++) {
-      // add the subtree size of each left sibling
-      Term sub = term_ctr_at(t, c);
-      u32 sz = wmo_subtree_size(sub, WMO_MAX_CELLS);
-      rank += (sz == 0u) ? 1u : sz;
-    }
-    t = term_ctr_at(t, idx);
-  }
-  return rank;
-}
-
-// Per-batch rank context: leaf-list ranks per tree and memoized tops
-// DFS results per (tree, query position).
-typedef struct {
-  AtpState *s;
-  AtpWmOrder *w;
-  u32 f;                       // the new fact's slot
-  u32 f_trace;
-  // leaf-list rank lookup: linearized (trace, face) -> rank per tree
-  // (computed lazily by scanning; the lists are short)
-} WmoRankCtx;
-
+// Leaf-list rank of one registered (trace, face) within `tree`: the
+// WM depth-ordered leaf-list position + within-leaf chain index.
 static u8 wmo_leaflist_rank(AtpWmOrder *w, u8 tree, u32 trace, u8 face,
                             u32 *out_ll, u32 *out_chain) {
   // Memo probe (see AtpWmOrder.llr): the leaf list is frozen while
@@ -2338,7 +2263,6 @@ typedef struct { u32 trace; u32 arrival; u8 face; } WmoPartnerHit;
 // count.  Mirrors wmo_tops_rank's partner scan (rule tree: 1 chain entry per
 // leaf; equation tree: all) but collects every partner rather than matching one.
 // For thvm_atp_generate_cps_singlewalk (native CP formation, in progress).
-__attribute__((unused))
 static u32 wmo_tops_enum(AtpWmOrder *w, u8 tree, Term query_sub,
                          WmoPartnerHit *out, u32 max) {
   WmoCell q[WMO_MAX_CELLS];
@@ -2366,7 +2290,6 @@ static u32 wmo_tops_enum(AtpWmOrder *w, u8 tree, Term query_sub,
 // primitive; the single-walk Mutter step still unifies f's whole LHS into each
 // listed face's subterms to decide which actually overlap (the filter) -- that
 // per-leaf overlap test is the walk's job, not this enumerator's.
-__attribute__((unused))
 static u32 wmo_leaflist_enum(AtpWmOrder *w, u8 tree, WmoPartnerHit *out,
                              u32 max) {
   u32 n = 0u;
@@ -2434,10 +2357,11 @@ static void wmo_var_counts(Term t, u16 *cnt) {
 // side introduces or drops occurrences (e.g. soa's `x*x = (y*(y*y))*x`:
 // profile {2} vs {1,3}) returns 1.  Comparing SORTED profiles (not
 // per-id counts) is renaming-invariant, so a pure role swap is correctly
-// classified as a permutation.  Used to gate the two-face co-ranking in
-// atp_wmo_rank to the equations WM stores oriented (whose single scan
-// yields both unifiers) rather than the genuinely two-faced permutation
-// equations WM keeps as distinct indexed leaves.
+// classified as a permutation.  Used to gate the walk's two-face
+// co-rank collapse (sw_vater_visit / sw_corank_suppressed) to the
+// equations WM stores oriented (whose single scan yields both unifiers)
+// rather than the genuinely two-faced permutation equations WM keeps as
+// distinct indexed leaves.
 static u8 wmo_eq_sides_var_differ(Term lhs, Term rhs) {
   u16 cl[WMO_VAR_CNT_CAP] = {0};
   u16 cr[WMO_VAR_CNT_CAP] = {0};
@@ -2448,7 +2372,7 @@ static u8 wmo_eq_sides_var_differ(Term lhs, Term rhs) {
   // equal nonzero multisets + equal zero counts <=> equal nonzero
   // multisets + equal lengths), but sorts the handful of live counts
   // (rules carry ~2-6 distinct vars) instead of qsorting 64 slots
-  // twice -- this helper sits on the per-CP atp_wmo_rank hot path.
+  // twice -- this helper sits on the walk's per-hit hot path.
   u16 nl[WMO_VAR_CNT_CAP], nr[WMO_VAR_CNT_CAP];
   u32 a = 0, b = 0;
   for (u32 v = 0; v < WMO_VAR_CNT_CAP; v++) {
@@ -2472,205 +2396,4 @@ static u8 wmo_eq_sides_var_differ(Term lhs, Term rhs) {
     if (nl[v] != nr[v]) return 1u;
   }
   return 0u;
-}
-
-// Compute the WM emission rank key for one tagged CP of the new fact
-// `f`'s batch.  `i`/`j` are the overlap slots (i = outer, positions in
-// i's face), `combo` = atp_overlap_ij face combo (bit0: j used its
-// reverse face; bit1: i used its reverse face).
-static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
-                        const CriticalPair *cp) {
-  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
-  u8 i_face = (combo >> 1) & 1u;
-  u8 j_face = combo & 1u;
-  // The CP's combo bits name the thvm face (0 = stored lhs, 1 = stored
-  // rhs) each parent used.  WM classifies the emission phase (A/B vs D/E)
-  // and indexes leaves by its OWN distinguished(0)/reverse(1) face; when
-  // a fact's WM-distinguished face is thvm's rhs (CP-derived unorientable
-  // equation, dist_rhs), the two numberings are flipped.  Remap each
-  // parent's face onto WM's before phase/lookup; the OVERLAP TERM stays
-  // the thvm face (that is the term the CP was actually built from).
-  u8 i_dr = wmo_trace_dist_rhs(w, s->r_uid[i]);
-  u8 j_dr = wmo_trace_dist_rhs(w, s->r_uid[j]);
-  u8 i_face_wm = i_face ^ i_dr;
-  u8 j_face_wm = j_face ^ j_dr;
-  Term i_outer = i_face ? s->rhs[i] : s->lhs[i];
-  if (i == f && j == f && cp->pos_len == 0u) {
-    // self roots, classified by WM face (NOT raw thvm combo): F = l =? l
-    // (both WM-distinguished), C = r =? l (mixed, stereo only), G = r =? r
-    // (both WM-reverse).  When dist_rhs flips thvm's stored lhs onto WM's
-    // reverse face, thvm's combo-0 (stored lhs x stored lhs) is WM's G,
-    // and combo-3 (stored rhs x stored rhs) is WM's F -- the two swap.
-    // Keying on i_face_wm/j_face_wm (= thvm face XOR dist_rhs) gives the
-    // WM phase regardless of which thvm face carries the distinguished
-    // side.
-    u32 phase = (!i_face_wm && !j_face_wm) ? 2u           // F: l =? l
-              : (i_face_wm && j_face_wm)   ? 6u           // G: r =? r
-                                          : 3u;           // C: r =? l
-    return wmo_pack_key(phase, 0, 0, 0, 0, 0);
-  }
-  if (i == f && j != f) {
-    // tops phase: A (i WM-distinguished face) or D (i WM-reverse face)
-    u32 phase = i_face_wm ? 4u : 0u;
-    // Re-derived-fact proper-position tops ownership (flat-subsume only).
-    // A fact re-derived after E-set subsumption removed an equation of its
-    // shape must not re-emit, at the early tops age, the PROPER-position
-    // overlaps the subsuming rule's original batch already enumerated
-    // against the removed equation.  The root case is handled in
-    // atp_overlap_ij (r_rederive_cut forces the noroot variant); the
-    // surviving proper overlaps against a pre-cutoff partner reproduce the
-    // subsumed shape, and WM emits the resulting CP at the LATE batch age
-    // (after the new fact's self-overlaps), not in the leading tops phase.
-    // Defer those to a trailing phase so their w2/FIFO age matches WM's late
-    // emission.  A flat-transposition (commutativity) partner is excluded:
-    // it IS the subsumer whose late-derived overlaps WM emits in the new
-    // fact's leading phase (the re-derived equation x commutativity CP is
-    // genuinely new content, not a re-enumeration of the removed original's
-    // batch).  Gated on the cutoff being set (NONE outside flat-subsume).
-    if (cp->pos_len > 0u && s->r_rederive_cut != NULL &&
-        f < s->n_rules && s->r_rederive_cut[f] != ATP_TRACE_NONE &&
-        j < s->n_rules && s->r_trace[j] != ATP_TRACE_NONE &&
-        s->r_trace[j] <= s->r_rederive_cut[f] &&
-        !atp_is_flat_transposition(s->lhs[j], s->rhs[j])) {
-      phase = 7u;
-    }
-    // Re-derived-fact forward-face ROOT overlap with the subsumer.  WM forms
-    // the root overlap of the re-derived equation's distinguished side with the
-    // subsumer (commutativity) -- the C-shape -- right AFTER the leading
-    // proper-position overlap in the same tops phase, not at the head (where
-    // the preorder root rank k1=0 would otherwise place it).  The dist_rhs
-    // label for the re-derived fact stays at its single-parent default, so the
-    // face bits alone classify this in the leading phase; bump k1 to the
-    // preorder rank of the recursive child (position [1] -- the side WM's
-    // commutativity overlap walks into) so the leading proper-position A-shape
-    // (which carries the smaller k2 tiebreak) sorts ahead and the C-shape
-    // follows it, matching WM's batch FIFO age.  Scoped to poslen==0 and the
-    // subsumer trace (the rule that caused the cut); a no-op outside
-    // flat-subsume re-derivations.
-    u8 subsumer_root =
-        (cp->pos_len == 0u && i_face == 0u && s->r_rederive_cut != NULL &&
-         f < s->n_rules && s->r_rederive_cut[f] != ATP_TRACE_NONE &&
-         j < s->n_rules && s->r_trace[j] == s->r_rederive_cut[f]) ? 1u : 0u;
-    u32 k1 = wmo_preorder_rank(i_outer, cp->pos, cp->pos_len);
-    if (subsumer_root) {
-      u8 recursive_child[1] = {1u};
-      k1 = wmo_preorder_rank(i_outer, recursive_child, 1u);
-    }
-    u8 j_is_rule = s->r_orient[j] ? 1u : 0u;
-    u8 tree = j_is_rule ? 0u : 1u;
-    u32 k2 = i_face_wm ? (tree == 1u ? 0u : 1u) : (u32)tree;
-    Term qsub = i_outer;
-    for (u32 d = 0; d < cp->pos_len; d++) {
-      if (term_tag(qsub) != TAG_CTR) break;
-      qsub = term_ctr_at(qsub, cp->pos[d]);
-    }
-    u32 arr = 0, ch = 0;
-    if (!wmo_tops_rank(w, tree, qsub, s->r_uid[j], j_face_wm, &arr, &ch)) {
-      w->rank_misses++;
-      arr = 0x3fffu;
-    }
-    // Tops-phase per-CP rank trace (THVM_WMO_RANKTRACE): partner trace/face,
-    // DFS arrival, chain index + the CP's joined sides.  Env-gated (cached --
-    // this sits on the per-CP rank hot path); used to read the rule-35
-    // @1953 8-partner emission order.
-    static int wmo_ranktrace = -1;
-    if (wmo_ranktrace < 0) wmo_ranktrace = getenv("THVM_WMO_RANKTRACE") != NULL;
-    if (wmo_ranktrace && tree == 1u && phase == 0u) {
-      fprintf(stderr, "WMORANK f=%u j=%u jtr=%u jfwm=%u arr=%u ch=%u k1=%u nreg=%u lhs=",
-              f, j, s->r_uid[j], j_face_wm, arr, ch, k1, w->n_reg);
-      atp_dbg_print_term(stderr, cp->lhs);
-      fprintf(stderr, " rhs=");
-      atp_dbg_print_term(stderr, cp->rhs);
-      fprintf(stderr, "\n");
-    }
-    // Co-rank the two faces of a CP-derived unorientable equation partner
-    // at the SAME overlap position.  WM stores such an equation as an
-    // ORIENTED rule whose single distinguished face, scanned once against
-    // the new fact's subterms (Unifikation1.c U1_KPsBildenZuRegel section
-    // 2: one TermMitDSBaumUnifizieren walk), surfaces EVERY unifier --
-    // including the two most-general unifiers a repeated-variable LHS
-    // admits -- so the resulting CPs land at consecutive FIFO ages.  thvm
-    // cannot orient the same equation; it stores BOTH faces, which index
-    // at DIFFERENT discrimination-tree leaves, so their independent DFS
-    // arrivals scatter the two CPs across the batch.  When both faces reach
-    // this query subterm, key BOTH on the EARLIER face's arrival (the leaf
-    // WM's single scan would reach first) and order the later face right
-    // after it via the chain index -- reproducing WM's adjacent ages.
-    //
-    // Restricted to equations whose two sides carry DIFFERENT variable
-    // multisets.  A variable-permutation equation (commutativity
-    // `f(x,y)=f(y,x)`, associativity-rotation `f(x,f(y,z))=f(z,f(x,y))`)
-    // is genuinely two-faced in WM too -- WM keeps both faces as distinct
-    // indexed leaves and emits their CPs at independent ages -- so
-    // co-ranking those would mis-order them (CommutativeRingAxioms
-    // ZeroIsAbsorbing's `and`/`or` permutation batch).  The asymmetric
-    // equations WM oriented (one side a strict variable-set subset, e.g.
-    // soa's `x*x = (y*(y*y))*x`) are the only ones whose two faces are WM's
-    // single-scan unifier variants.
-    if (tree == 1u && wmo_eq_sides_var_differ(s->lhs[j], s->rhs[j])) {
-      u32 arr_o = 0, ch_o = 0;
-      u8 hit_o = wmo_tops_rank(w, tree, qsub, s->r_uid[j],
-                               (u8)(j_face_wm ^ 1u), &arr_o, &ch_o);
-      // Suppress the forward anchor (arr_o < arr, this face's leaf pulled
-      // up to the earlier sibling face) when the CP merely REPRODUCES a
-      // live equation.  That overlap of the new fact onto the partner's
-      // reverse face plants the reverse side at the root, so the joined CP
-      // reduces back to an already-stored equation (it is popped `...
-      // subsumed`); WM derives that same equation from a DIFFERENT, later
-      // overlap and ages it at the genuine late FIFO slot, NOT co-ranked
-      // beside the partner's distinguished-face CP (soa pick 113: the
-      // jtr-221-reverse root overlap reproduces `x*x = (y*(y*y))*x` and WM
-      // emits it after the new fact's `(x*x)*y = y*(x*y)` CP, not before).
-      // The genuine repeated-variable double-MGU co-rank (arr_o == arr, two
-      // unifiers from one leaf) and a NEW reverse-face CP keep the anchor.
-      //
-      // Skipped under corank_force_own: the suppression's only effect is
-      // hit_o = 0, and the force_own branch below reads hit_o only when
-      // arr_o == arr -- while the suppression fires only when arr_o < arr.
-      // The normalize pair here is the single hottest rank-path cost on
-      // var-differ-partner batches, and the own-arrival second rank call
-      // per entry was paying it for a verdict it can never observe.
-      if (hit_o && arr_o < arr && !s->corank_force_own) {
-        extern u64 g_atp_canorm_rank;
-        g_atp_canorm_rank++;
-        Term nl = atp_canorm_nf(s, cp->lhs);
-        Term nr = atp_canorm_nf(s, cp->rhs);
-        if (!kbo_eq(nl, nr) && atp_pop_eq_subsumed(s, nl, nr)) hit_o = 0u;
-      }
-      if (s->corank_force_own) {
-        // Own-arrival variant (computed alongside the default collapse key by
-        // the batch loop under use_corank_own_arr): never collapse in branch
-        // (c); key this face on its OWN arrival.  The genuine same-leaf
-        // double-MGU (arr_o == arr) still slots via ch*2.  The batch-level
-        // sibling-alpha-eq pass picks between this and the collapse key.
-        if (hit_o && arr_o == arr) ch = ch * 2u;
-      } else
-      if (hit_o && arr_o < arr) {
-        // The other face arrives earlier: anchor on it, this face follows.
-        // Slot the follower at 2*ch_o+1 so it sorts right after the anchor's
-        // 2*ch_o and never collides with another face at the same leaf.
-        arr = arr_o;
-        ch = ch_o * 2u + 1u;
-      } else if (hit_o && arr_o > arr) {
-        // This face is the earlier anchor; keep its arrival, slot at 2*ch so
-        // the later face (queried symmetrically as 2*ch+1) sorts just after.
-        ch = ch * 2u;
-      }
-    }
-    return wmo_pack_key(phase, k1, k2, arr, ch, 0);
-  }
-  // eTT phase: B (j WM-distinguished face) or E (j WM-reverse face);
-  // includes self-proper overlaps (i == j == f, pos_len > 0) at the new
-  // fact's own leaves.
-  u32 phase = j_face_wm ? 5u : 1u;
-  u8 i_is_rule = s->r_orient[i] ? 1u : 0u;
-  u8 tree = i_is_rule ? 0u : 1u;
-  u32 k2 = j_face_wm ? (tree == 1u ? 0u : 1u) : (u32)tree;
-  u32 ll = 0, ch = 0;
-  if (!wmo_leaflist_rank(w, tree, s->r_uid[i], i_face_wm, &ll, &ch)) {
-    w->rank_misses++;
-    ll = 0x3fffu;
-  }
-  u32 k5 = wmo_preorder_rank(i_outer, cp->pos, cp->pos_len);
-  return wmo_pack_key(phase, 0, k2, ll, ch, k5);
 }

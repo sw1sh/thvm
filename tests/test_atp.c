@@ -2275,25 +2275,19 @@ int main(void) {
     thvm_atp_free(s);
   }
 
-  TEST_BEGIN("atp/wm-emission-order-self-root-face-flip");
+  TEST_BEGIN("atp/wm-emission-order-dist-rhs-face-registration");
   {
-    // WM's self-root phases are classified by FACE, not by thvm's raw
-    // combo bits: F = l =? l (both WM-DISTINGUISHED faces), C = r =? l
-    // (mixed, stereo only), G = r =? r (both WM-REVERSE faces), where l/r
-    // are WM's distinguished/reverse sides (U1_KPsBildenZuGleichung
-    // F/C/G).  For a CP-derived unorientable equation whose WM-
-    // distinguished face is thvm's STORED RHS (dist_rhs=1), thvm's combo-0
-    // self-overlap (stored lhs x stored lhs) is WM's reverse self = G, and
-    // its combo-3 self-overlap (stored rhs x stored rhs) is WM's
-    // distinguished self = F -- the two SWAP.  Keying the self-root phase
-    // on raw combo (F=combo0, G=combo3) gives the reverse order and pushes
-    // the distinguished-face self-CP to a LATER FIFO age than the reverse
-    // one; on Boolean Absorption that mis-aged the and/or partner pair at
-    // selection (firstdiv 107).  The rank must instead key on the WM face
-    // (combo XOR dist_rhs).
-    //
-    // eq (asymmetric unorientable): lhs = i(f(a,a)) [reverse], rhs =
-    // f(a,i(a)) [WM-distinguished].
+    // WM's self-root phases run on the WM-DISTINGUISHED face first (F = l
+    // =? l before G = r =? r, U1_KPsBildenZuGleichung); for a CP-derived
+    // unorientable equation whose WM-distinguished face is thvm's STORED
+    // RHS, the single-walk former reads that flip from the wmo mirror's
+    // dist_rhs registration (wmo_trace_dist_rhs) and runs its A/B/F sweeps
+    // on the stored rhs -- mis-registering it mis-ages the and/or partner
+    // pair on Boolean Absorption (the historical firstdiv-107).  Assert
+    // the registration: an asymmetric CP-derived equation stored as
+    // lhs = i(f(a,a)) [WM reverse], rhs = f(a,i(a)) [WM-distinguished]
+    // registers dist_rhs = 1.  (The F-before-G emission order itself is a
+    // walk-construction property, held by the byte-identical e2e gates.)
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     thvm_atp_set_use_emission_order(s, 1u);
     s->lhs[0] = mk_i(mk_f(mk_a(), mk_a()));
@@ -2303,21 +2297,6 @@ int main(void) {
     atp_wmo_insert_fact_ex(s, 0u, /*cp_derived=*/1u);
     AtpWmOrder *w = (AtpWmOrder *)s->wmo;
     CHECK_EQ((u32)wmo_trace_dist_rhs(w, 500u), 1u);
-    // Synthetic self-root CPs (pos_len = 0).  The face-flip means:
-    //   combo 0 (thvm lhs x lhs)  -> WM G (reverse self)
-    //   combo 3 (thvm rhs x rhs)  -> WM F (distinguished self)
-    // so combo-3's key must be SMALLER (F = phase 2 < G = phase 6).
-    CriticalPair cp_self;
-    cp_self.lhs = s->lhs[0];
-    cp_self.rhs = s->rhs[0];
-    cp_self.peak = s->lhs[0];
-    cp_self.pos_len = 0u;
-    u64 key_combo0 = atp_wmo_rank(s, 0u, 0u, 0u, /*combo=*/0u, &cp_self);
-    u64 key_combo3 = atp_wmo_rank(s, 0u, 0u, 0u, /*combo=*/3u, &cp_self);
-    // phase lives in the top nibble (bits 58..61); F = 2, G = 6.
-    CHECK_EQ((u32)((key_combo3 >> 58) & 0xfu), 2u);   // combo 3 -> F
-    CHECK_EQ((u32)((key_combo0 >> 58) & 0xfu), 6u);   // combo 0 -> G
-    CHECK(key_combo3 < key_combo0);                    // F before G
     thvm_atp_free(s);
   }
 
@@ -2478,28 +2457,22 @@ int main(void) {
       atp_wmo_insert_fact(s, k);
     }
     AtpWmOrder *w0 = (AtpWmOrder *)s->wmo;
-    u32 misses_before = w0->rank_misses;
-    // New fact i(f(x, e)) -> x: its proper subterm f(x, e) (VARIABLE first
-    // arg) unifies the shared top of EVERY stored rule f(i^k(a), e), so
-    // the tops DFS arrives at all N_WIDE leaves.  Each generates one tops
-    // CP; every partner leaf must rank (none fall to the 0x3fff miss
-    // fallback) now that the arrival buffer holds all N_WIDE arrivals --
-    // with the old 512 cap the leaves past index 512 were dropped and
-    // their overlaps spiked the rank-miss counter.
-    u32 nf = N_WIDE;
-    s->lhs[nf] = mk_i(mk_f(mk_v(VAR_x), mk_e()));
-    s->rhs[nf] = mk_v(VAR_x);
-    s->r_orient[nf] = 1u;
-    s->r_trace[nf] = 1000u + nf;
-    s->r_uid[nf] = (u32)(1000u + nf);
-    s->n_rules++;
-    atp_wmo_insert_fact(s, nf);
-    AtpAddedRange added = {nf, 1u, 0u};
-    (void)thvm_atp_generate_cps(s, added);
-    AtpWmOrder *w = (AtpWmOrder *)s->wmo;
-    // The wide tree must not produce any new tops rank-miss: every
-    // partner (including those arriving past the old 512 cap) was found.
-    CHECK_EQ(w->rank_misses, misses_before);
+    // A query subterm f(x, e) (VARIABLE first arg) unifies the shared top
+    // of EVERY stored rule f(i^k(a), e), so the tops-DFS partner
+    // enumeration (wmo_tops_enum -- the single-walk former's Vater
+    // primitive) must arrive at all N_WIDE leaves; with the old 512-leaf
+    // arrival buffer the partners past index 512 were silently dropped.
+    static WmoPartnerHit hits[1024];
+    u32 nh = wmo_tops_enum(w0, /*tree=*/0u,
+                           mk_f(mk_v(VAR_x), mk_e()), hits, 1024u);
+    CHECK_EQ(nh, N_WIDE);
+    // The LAST-arriving partner (deepest i-chain, past the old cap) is
+    // present with a real arrival rank.
+    u8 found_late = 0u;
+    for (u32 k = 0; k < nh; k++) {
+      if (hits[k].trace == 1000u + (N_WIDE - 1u)) found_late = 1u;
+    }
+    CHECK_EQ((u32)found_late, 1u);
     thvm_atp_free(s);
   }
 
@@ -2533,20 +2506,17 @@ int main(void) {
     s->r_orient[0] = 1u; s->r_trace[0] = 700u; s->r_uid[0] = (u32)(700u); s->n_rules++;
     atp_wmo_insert_fact(s, 0u);
     AtpWmOrder *w0 = (AtpWmOrder *)s->wmo;
-    u32 misses_before = w0->rank_misses;
-    // New fact: f(f(y,z), w) -> a.  Its LHS at the root unifies with the
-    // stored rule's LHS only by collapsing y=z=w onto the leaf's repeated x.
-    s->lhs[1] = mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u));
-    s->rhs[1] = mk_a();
-    s->r_orient[1] = 1u; s->r_trace[1] = 701u; s->r_uid[1] = (u32)(701u); s->n_rules++;
-    atp_wmo_insert_fact(s, 1u);
-    AtpAddedRange added = {1u, 1u, 0u};
-    (void)thvm_atp_generate_cps(s, added);
-    AtpWmOrder *w = (AtpWmOrder *)s->wmo;
-    // The repeated-variable partner unifies, so the tops DFS must find it
-    // (no rank-miss); the old non-dereferencing unifier spuriously failed
-    // and spiked the miss counter.
-    CHECK_EQ(w->rank_misses, misses_before);
+    // Query f(f(y,z), w) (distinct vars) unifies the stored rule's LHS only
+    // by collapsing y=z=w onto the leaf's repeated x.  The tops-DFS partner
+    // enumeration (wmo_tops_enum) must find the repeated-variable partner
+    // with a real arrival rank; the old non-dereferencing unifier spuriously
+    // failed the chain and dropped the leaf from the arrival list.
+    WmoPartnerHit hits[8];
+    u32 nh = wmo_tops_enum(w0, /*tree=*/0u,
+                           mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                           hits, 8u);
+    CHECK_EQ(nh, 1u);
+    CHECK_EQ(hits[0].trace, 700u);
     thvm_atp_free(s);
   }
 
