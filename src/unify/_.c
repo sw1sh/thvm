@@ -168,11 +168,26 @@ fn Term thvm_rename_vars(Term t, u32 offset) {
   }
 }
 
+// Node/taint tally for thvm_unify_apply: one invocation resolves
+// exactly ONE output node (a bound var resolves to its binding's root
+// and recurses into the binding's children), so an invocation-count
+// delta across a call IS the output term's exact node count -- the
+// same count atp_symbol_count_upto computes by re-walking the result.
+// The ATP CP former brackets its two side-builds with these to hand
+// the KPBehandelt size gate a free exact size (see sw_form_push).
+// `taint` marks the defensive early-returns that under-count a
+// subtree (torn arity header / over-arity): a bracketing consumer
+// must discard the delta when taint moved.  One predictable add per
+// node -- fused into the walk the function already does.
+u64 g_unify_apply_cells = 0;
+u64 g_unify_apply_taint = 0;
+
 // Apply a unifier (which may contain chained FVR -> FVR -> term
 // links) recursively, returning a fully-resolved term.  Differs from
 // thvm_subst_apply in that it follows chains via unify_walk.
 fn Term thvm_unify_apply(Term t, const RewriteSubst *subst) {
   t = unify_walk(t, subst);
+  g_unify_apply_cells++;
   switch (term_tag(t)) {
     case TAG_FVR: return t;  // unbound -- leave as-is
     case TAG_CTR: {
@@ -180,9 +195,9 @@ fn Term thvm_unify_apply(Term t, const RewriteSubst *subst) {
       // would re-fetch the arity cell per call.
       u64 base = term_val(t);
       Term n_cell = heap_read(base);
-      if (term_tag(n_cell) != TAG_NUM) return t;
+      if (term_tag(n_cell) != TAG_NUM) { g_unify_apply_taint++; return t; }
       u32 n = (u32)term_val(n_cell);
-      if (n > REWRITE_MAX_ARITY) return t;
+      if (n > REWRITE_MAX_ARITY) { g_unify_apply_taint++; return t; }
       Term children[REWRITE_MAX_ARITY];
       u8 changed = 0;
       for (u32 i = 0; i < n; i++) {

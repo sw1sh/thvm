@@ -411,6 +411,24 @@ u64 g_atp_pushn_dt_fteq_cell      = 0;
 u64 g_atp_pushn_dt_cprobe         = 0;
 #define ATP_DT_HIST_N 24
 u64 g_atp_pushn_dt_hist[ATP_DT_HIST_N] = {0};
+// Norm-core waste attribution (default v3 walk, same tier + scope).
+// `fteq` above counts repeat-variable consistency ATTEMPTS; the splits:
+//   symfail = attempts decided by the inline first-cell sym compare
+//             (no ft_eq call -- one predicted branch, ~free), so real
+//             ft_eq invocations = fteq - symfail, of which fteq_ok pass;
+//   chain   = attempts fired at the single-var-edge iterative hop (the
+//             remainder fire in the branch-node var-edge loop).
+// vedge = var-region edges summed over branch visits (the var half of
+// the dt_edge total; the concrete half splits into cprobe touched vs
+// early-break skipped).  fan_visit/fan_edge = branch-node visits and
+// summed edges bucketed by the node's edge count (bucket
+// min(n_edge, ATP_DT_FAN_N-1)) -- the per-node fan-out distribution.
+u64 g_atp_pushn_dt_fteq_symfail   = 0;
+u64 g_atp_pushn_dt_fteq_chain     = 0;
+u64 g_atp_pushn_dt_vedge          = 0;
+#define ATP_DT_FAN_N 16
+u64 g_atp_pushn_dt_fan_visit[ATP_DT_FAN_N] = {0};
+u64 g_atp_pushn_dt_fan_edge[ATP_DT_FAN_N]  = {0};
 // Mixmost re-query provenance (same tier + scope): reduce_here calls
 // issued by the local-fixpoint whiles vs the post-reduction ascent
 // loop -- the rest of the queries are the preorder walk's first
@@ -1106,6 +1124,17 @@ static inline int atp_cp_uid_orphan(const AtpState *s, u32 j) {
 // = 1.  A deprioritized CP gets priority ATP_CP_PRI_NEVER (heap sinks it,
 // weight pick never reaches it) yet keeps its real cp_seq (FIFO ages it).
 static u8  g_cp_push_deprio = 0u;
+// Exact combined node count of the CP pair the NEXT (singleton)
+// atp_push_cps_traced call receives, or 0 = unknown.  Set by
+// sw_form_push from the unify-apply node-tally bracket immediately
+// before its push call; consumed AND cleared at atp_push_cps_traced
+// entry, so it can never apply to any other CP (the batch buf paths
+// never set it and see 0 -> the historic counting walk).  Feeds the
+// KPBehandelt size gate: verdict (hint < 50) == (capped re-walk < 50)
+// by exactness.  THVM_NO_CP_SZHINT=1 ignores the hint (same-binary
+// A/B); THVM_ATP_SZHINT_CHECK=1 runs BOTH and fatals on a verdict
+// mismatch (certifier).
+static u32 g_cp_rawsz_hint = 0u;
 // "Never-weight-select" priority (Waldmeister Act_never / maximalWeight).
 // High but far from u32 overflow so cp_pri arithmetic stays safe.
 #define ATP_CP_PRI_NEVER 0x40000000u
@@ -18063,6 +18092,12 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                u32 rule_a, u32 rule_b) {
   u32 pushed = 0;
   u8 fuse = atp_cp_push_fuse_ok(s);
+  // Consume the singleton size hint (see g_cp_rawsz_hint): valid for
+  // exactly the one-CP call the walk former armed immediately before
+  // calling; cleared here unconditionally so it can never leak onto
+  // a later CP (batch buf callers never set it and read 0).
+  u32 rawsz_hint = (ncps == 1u) ? g_cp_rawsz_hint : 0u;
+  g_cp_rawsz_hint = 0u;
 #ifndef ATP_CP_DIAG
   (void)rule_a;
   (void)rule_b;
@@ -18145,10 +18180,36 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       // the walk stops the moment the running total reaches the gate
       // -- identical verdict, and the raw >= 50 giants (the class the
       // gate exists to skip) no longer pay a full O(|CP|) count.
+      // Size verdict: prefer the walk former's exact formation-time
+      // count (rawsz_hint; identical verdict by exactness -- the hint
+      // is the uncapped true total, so hint < 50 iff the capped
+      // re-walk stays < 50).  Hint 0 / kill switch / certifier mode
+      // run the historic capped counting walk.
+      static int szhint_off = -1, szhint_check = -1;
+      if (szhint_off < 0) {
+        const char *e = getenv("THVM_NO_CP_SZHINT");
+        szhint_off = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+        const char *c = getenv("THVM_ATP_SZHINT_CHECK");
+        szhint_check = (c != NULL && c[0] != '0' && c[0] != '\0') ? 1 : 0;
+      }
       u32 raw_sz = 0u;
-      atp_symbol_count_upto(cp_lhs, WM_BEHANDELN_GATE, &raw_sz);
-      if (raw_sz < WM_BEHANDELN_GATE) {
-        atp_symbol_count_upto(cp_rhs, WM_BEHANDELN_GATE, &raw_sz);
+      if (rawsz_hint != 0u && !szhint_off && !szhint_check) {
+        raw_sz = (rawsz_hint < WM_BEHANDELN_GATE) ? rawsz_hint
+                                                  : WM_BEHANDELN_GATE;
+      } else {
+        atp_symbol_count_upto(cp_lhs, WM_BEHANDELN_GATE, &raw_sz);
+        if (raw_sz < WM_BEHANDELN_GATE) {
+          atp_symbol_count_upto(cp_rhs, WM_BEHANDELN_GATE, &raw_sz);
+        }
+        // Certifier: under the cap the walk total is exact, so the
+        // hint must EQUAL it; at/over the cap the hint must be >= it.
+        if (szhint_check && rawsz_hint != 0u &&
+            ((raw_sz < WM_BEHANDELN_GATE) ? (rawsz_hint != raw_sz)
+                                          : (rawsz_hint < raw_sz))) {
+          fprintf(stderr, "[szhint MISMATCH] hint=%u walk=%u\n",
+                  rawsz_hint, raw_sz);
+          thvm_fatal("szhint: size-gate verdict diverges from the walk");
+        }
       }
       if (g_atp_phase_detail) g_atp_pushn_us_gate += atp_now_us() - _dg_t0;
       if (raw_sz < WM_BEHANDELN_GATE) {
@@ -19305,8 +19366,18 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   }
   if (_dl) g_atp_cpg_overlap_calls++;
   CriticalPair cp;
+  // Bracket the two side-builds with the unify-apply node tally: the
+  // delta is the EXACT combined node count of (cp.lhs, cp.rhs) -- the
+  // same count the push-side KPBehandelt size gate re-walks the pair
+  // for (atp_symbol_count_upto x2).  Handed to the gate as
+  // g_cp_rawsz_hint below; a taint move (defensive apply early-return
+  // under-counted a subtree) discards the delta, so a bad count can
+  // never reach the gate -- it degrades to the old counting walk.
+  u64 _szc0 = g_unify_apply_cells;
+  u64 _szt0 = g_unify_apply_taint;
   cp.lhs  = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), &subst);
   cp.rhs  = thvm_unify_apply(ro, &subst);
+  u64 _szc1 = g_unify_apply_cells;   // before the (optional) peak build
   // cp.peak is read only by the connectedness gate, the equation-parent
   // KPAction ordering gate, and the armed nusfu gate -- the batch
   // former's g_cp_need_peak discipline (cp/_.c:137-146, set per pair at
@@ -19345,6 +19416,14 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
     g_atp_cpg_us_overlap += _now - _dov_t0;
     _dpl_t0 = _now;
   }
+  // Size hint for the KPBehandelt gate (consumed-and-cleared at
+  // atp_push_cps_traced entry; only this singleton call site sets it,
+  // immediately before the call, so it can never leak onto another
+  // CP).  The order/einsstern/nusfu/kapur gates above only drop or
+  // SWAP sides -- the combined count is invariant.  0 = no hint.
+  g_cp_rawsz_hint = (g_unify_apply_taint == _szt0 &&
+                     _szc1 - _szc0 < 0xFFFFFFFFull)
+                        ? (u32)(_szc1 - _szc0) : 0u;
   u32 rv = atp_push_cps_traced(s, &cp, 1u, t_out, t_in, i_out, i_in);
   if (_dl) g_atp_cpg_us_pushloop += atp_now_us() - _dpl_t0;
   if (_cptr_sw) g_cptr_active = 0u;

@@ -1842,14 +1842,50 @@ int main(int argc, char **argv) {
                (unsigned long long)g_atp_pushn_mm_fix,
                (unsigned long long)g_atp_pushn_mm_asc,
                (unsigned long long)g_atp_pushn_tr_q);
+        // Norm-core waste attribution (see the g_atp_pushn_dt_fteq_*
+        // block in _.c): repeat-compare decision tiers + walk-site
+        // split, var/concrete edge-iteration split, branch fan-out.
+        u64 fulleq = g_atp_pushn_dt_fteq - g_atp_pushn_dt_fteq_symfail;
+        printf("     dt-fteq-split: chain=%llu branch=%llu | "
+               "symfail=%llu (%.1f%%) fulleq=%llu (ok=%llu fail=%llu)\n",
+               (unsigned long long)g_atp_pushn_dt_fteq_chain,
+               (unsigned long long)(g_atp_pushn_dt_fteq -
+                                    g_atp_pushn_dt_fteq_chain),
+               (unsigned long long)g_atp_pushn_dt_fteq_symfail,
+               g_atp_pushn_dt_fteq
+                   ? 100.0 * (double)g_atp_pushn_dt_fteq_symfail /
+                         (double)g_atp_pushn_dt_fteq
+                   : 0.0,
+               (unsigned long long)fulleq,
+               (unsigned long long)g_atp_pushn_dt_fteq_ok,
+               (unsigned long long)(fulleq - g_atp_pushn_dt_fteq_ok));
+        printf("     dt-edge-iters: var=%llu cprobe=%llu "
+               "skipped=%llu (of dt-edge=%llu)\n",
+               (unsigned long long)g_atp_pushn_dt_vedge,
+               (unsigned long long)g_atp_pushn_dt_cprobe,
+               (unsigned long long)(g_atp_pushn_dt_edge -
+                                    g_atp_pushn_dt_vedge -
+                                    g_atp_pushn_dt_cprobe),
+               (unsigned long long)g_atp_pushn_dt_edge);
+        printf("     dt-branch-fanout (n_edge: visits/edges):");
+        for (int fb = 0; fb < ATP_DT_FAN_N; fb++) {
+          if (g_atp_pushn_dt_fan_visit[fb] == 0) continue;
+          printf(" %d%s:%llu/%llu", fb,
+                 (fb == ATP_DT_FAN_N - 1) ? "+" : "",
+                 (unsigned long long)g_atp_pushn_dt_fan_visit[fb],
+                 (unsigned long long)g_atp_pushn_dt_fan_edge[fb]);
+        }
+        printf("\n");
+        atp_ftdt_hot_dump();
       }
       if (g_atp_ftnfm_probe > 0) {
         printf("   ftnfm subtree-NF-memo: probe=%llu hit=%llu [%.1f%%] "
-               "store=%llu\n",
+               "store=%llu toolong=%llu\n",
                (unsigned long long)g_atp_ftnfm_probe,
                (unsigned long long)g_atp_ftnfm_hit,
                100.0 * (double)g_atp_ftnfm_hit / (double)g_atp_ftnfm_probe,
-               (unsigned long long)g_atp_ftnfm_store);
+               (unsigned long long)g_atp_ftnfm_store,
+               (unsigned long long)g_atp_ftnfm_toolong);
       }
       if (g_atp_swrn_hit + g_atp_swrn_miss > 0) {
         printf("   walk rename cache: hit=%llu miss=%llu [%.1f%%]\n",

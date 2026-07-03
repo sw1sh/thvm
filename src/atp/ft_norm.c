@@ -488,6 +488,14 @@ typedef struct {
   u32         dtb_snap_n, dtb_snap_cap;
   struct FtDtRec_s *dtb_rec;
   u32         dtb_rec_n, dtb_rec_cap;
+  // Per-node branch-visit counters (THVM_ATP_PROFILE=2 attribution
+  // only; NULL otherwise).  Node ids are reused across rebuilds, so a
+  // slot aggregates the structurally-similar role the id plays in each
+  // build (the shared axiom-prefix region keeps stable ids) -- read as
+  // CONCENTRATION, not exact node identity.  Dumped by
+  // atp_ftdt_hot_dump against the FINAL build's shape.
+  u64        *dt_visit;
+  u32         dt_visit_cap;
 } FtPiIndex;
 
 static FtPiIndex g_ftpi = {0};
@@ -507,6 +515,22 @@ static u32 ftdt_prof_cells(const AtpFtCell *c) {
   u32 n = 0u;
   for (; c != NULL && c != e; c = c->next) n++;
   return n;
+}
+
+// Profile-only per-node branch-visit bump (see FtPiIndex.dt_visit).
+// Allocation failure just drops the count (attribution-only data).
+static void ftdt_visit_bump(FtPiIndex *ix, u32 node) {
+  if (node >= ix->dt_visit_cap) {
+    u32 nc = ix->dt_visit_cap ? ix->dt_visit_cap : 1024u;
+    while (nc <= node) nc *= 2u;
+    u64 *nv = (u64 *)realloc(ix->dt_visit, (size_t)nc * sizeof(u64));
+    if (nv == NULL) return;
+    memset(nv + ix->dt_visit_cap, 0,
+           (size_t)(nc - ix->dt_visit_cap) * sizeof(u64));
+    ix->dt_visit     = nv;
+    ix->dt_visit_cap = nc;
+  }
+  ix->dt_visit[node]++;
 }
 
 // Discrimination-tree builder hooks (defined below ftpi_candidates, but
@@ -1643,9 +1667,13 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
         if (bk != NULL) {
           if (g_ftdt_pd) {
             g_atp_pushn_dt_fteq++;
+            g_atp_pushn_dt_fteq_chain++;
             g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(sc);
           }
-          if (bk->sym != sc->sym) goto out;     // first-cell fail-fast
+          if (bk->sym != sc->sym) {             // first-cell fail-fast
+            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
+            goto out;
+          }
           if (!ft_eq(bk, sc)) goto out;
           if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
         }
@@ -1676,6 +1704,12 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
       if (g_ftdt_pd) {
         g_atp_pushn_dt_edge += nd->n_edge;
         g_atp_pushn_dt_branch++;
+        g_atp_pushn_dt_vedge += nv;
+        u32 fb = (nd->n_edge < ATP_DT_FAN_N) ? nd->n_edge
+                                             : ATP_DT_FAN_N - 1u;
+        g_atp_pushn_dt_fan_visit[fb]++;
+        g_atp_pushn_dt_fan_edge[fb] += nd->n_edge;
+        ftdt_visit_bump(ix, node);
       }
       for (u32 e = 0; e < nv; e++) {
         u32 label = nd->labels[e];
@@ -1695,7 +1729,10 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
             g_atp_pushn_dt_fteq++;
             g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(sc);
           }
-          if (bk->sym != sc->sym) continue;     // first-cell fail-fast
+          if (bk->sym != sc->sym) {             // first-cell fail-fast
+            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
+            continue;
+          }
           if (!ft_eq(bk, sc)) continue;
           if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
         }
@@ -1837,6 +1874,70 @@ static void ftdt_shape_dump(void) {
             "leaves=%llu\n",
             d, (unsigned long long)nodes[d], (unsigned long long)edges[d],
             (unsigned long long)vedges[d], (unsigned long long)leaves[d]);
+  }
+  free(bfs); free(depth);
+}
+
+// One-shot per-node visit-concentration dump (bench PROFILE=2 print
+// block): top branch-visit nodes of the FINAL tree build with their
+// depth / edge shape, plus the cumulative share -- answers "a few hot
+// mega-nodes vs uniform" directly.  Per-node branch-edge iterations
+// are visits * n_edge (n_edge is fixed per node per build; approximate
+// across rebuilds, see FtPiIndex.dt_visit).
+void atp_ftdt_hot_dump(void);
+void atp_ftdt_hot_dump(void) {
+  FtPiIndex *ix = &g_ftpi;
+  if (ix->dt_visit == NULL || ix->dt_n_nodes == 0u) return;
+  u32 n = ix->dt_n_nodes;
+  if (n > ix->dt_visit_cap) n = ix->dt_visit_cap;
+  // Depth of each final-build node via BFS (as ftdt_shape_dump).
+  u32 *bfs   = (u32 *)malloc((size_t)ix->dt_n_nodes * sizeof(u32));
+  u32 *depth = (u32 *)calloc(ix->dt_n_nodes, sizeof(u32));
+  if (bfs == NULL || depth == NULL) { free(bfs); free(depth); return; }
+  u32 head = 0u, tail = 0u;
+  bfs[tail++] = 0u;
+  while (head < tail) {
+    u32 nd_i = bfs[head++];
+    const FtDtNode *nd = &ix->dt_nodes[nd_i];
+    for (u32 e = 0; e < nd->n_edge && tail < ix->dt_n_nodes; e++) {
+      bfs[tail] = nd->kids[e];
+      depth[nd->kids[e]] = depth[nd_i] + 1u;
+      tail++;
+    }
+  }
+  u64 tot_v = 0u, tot_e = 0u;
+  for (u32 i = 0; i < n; i++) {
+    tot_v += ix->dt_visit[i];
+    tot_e += ix->dt_visit[i] * (u64)ix->dt_nodes[i].n_edge;
+  }
+  printf("     dt-hot-nodes (branch visits; final build n_nodes=%u "
+         "tot-visits=%llu tot-edge-iters~%llu):\n",
+         ix->dt_n_nodes, (unsigned long long)tot_v,
+         (unsigned long long)tot_e);
+  u64 cum = 0u;
+  u32 pick_idx[16];
+  u32 npick = 0u;
+  for (u32 r = 0; r < 16u && r < n; r++) {
+    u32 best = 0xFFFFFFFFu;
+    u64 bv = 0u;
+    for (u32 i = 0; i < n; i++) {
+      int already = 0;
+      for (u32 t = 0; t < npick; t++) {
+        if (pick_idx[t] == i) { already = 1; break; }
+      }
+      if (already) continue;
+      if (ix->dt_visit[i] > bv) { bv = ix->dt_visit[i]; best = i; }
+    }
+    if (best == 0xFFFFFFFFu || bv == 0u) break;
+    pick_idx[npick++] = best;
+    cum += bv;
+    const FtDtNode *nd = &ix->dt_nodes[best];
+    printf("       #%-2u node=%-5u d=%-2u visits=%-10llu (%.1f%% cum %.1f%%) "
+           "n_edge=%-3u var=%-3u leaves=%u\n",
+           r + 1u, best, depth[best], (unsigned long long)bv,
+           tot_v ? 100.0 * (double)bv / (double)tot_v : 0.0,
+           tot_v ? 100.0 * (double)cum / (double)tot_v : 0.0,
+           nd->n_edge, nd->n_var_edge, nd->leaf_n + nd->leaf_un_n);
   }
   free(bfs); free(depth);
 }
@@ -2654,6 +2755,12 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
 // THVM_ATPFT_NFM_CHECK=1 disables the skip but records each hit and
 // fatals at pop when a splice fired inside a subtree the memo claimed
 // normal.
+// Size ceiling note (later-14, measured): raising FTNFM_MAX_SYMS to 64
+// was REJECTED by counters -- toolong dropped to 4 (so nearly every
+// probed subtree already fits in 32), hit rate stayed 49.1%, dt-node
+// visits moved -0.02%.  The cap is NOT the binding constraint; do not
+// re-try bigger ceilings.  `toolong` counts the probes/stores that
+// bail at the cap (kept as the cheap witness).
 enum { FTNFM_MAX_SYMS = 32, FTNFM_BITS = 16 };
 typedef struct {
   u64 hash;
@@ -2664,13 +2771,14 @@ typedef struct {
 } FtNfmEnt;
 static FtNfmEnt *g_ftnfm = NULL;
 u64 g_atp_ftnfm_probe = 0, g_atp_ftnfm_hit = 0, g_atp_ftnfm_store = 0;
+u64 g_atp_ftnfm_toolong = 0;
 
 static u32 ftnfm_key(const AtpFtCell *c, u32 *syms, u64 *hash_out) {
   const AtpFtCell *e = (c->end != NULL) ? c->end->next : NULL;
   u32 len = 0u;
   u64 h = 1469598103934665603ull;              // FNV-1a 64
   for (; c != e; c = c->next) {
-    if (len == FTNFM_MAX_SYMS) return 0u;
+    if (len == FTNFM_MAX_SYMS) { g_atp_ftnfm_toolong++; return 0u; }
     u32 sy = c->sym;
     syms[len++] = sy;
     h ^= (u64)sy;
@@ -3174,7 +3282,13 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
     slice_count = s->n_rules - slice_first;
   }
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-  // Entry-clear pass.
+  // Entry-clear pass.  NOTE (later-14, measured): the mixmost walk
+  // never reads ATPFT_FLAG_SUBST_FRESH (find_redex_ft is the sole
+  // reader), so skipping this clear on the mixmost path is sound --
+  // but it was A/B'd at <= 0.1-0.2s (treated CPs are < 50 symbols
+  // under the WM_BEHANDELN_GATE, so the walk is short) and REJECTED
+  // under the >0.3s keep bar.  Do not re-try without a bigger-term
+  // call-site profile.
   ft_clear_subst_fresh(t);
   // Stack-allocate an AtpFtSubst.  See AtpFtSubst declaration in
   // ft_match.c; we zero before first use per the Stage 5 contract.
