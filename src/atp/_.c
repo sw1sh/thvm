@@ -1106,6 +1106,23 @@ static int atp_env_off(const char *name) {
   return (e != NULL && e[0] == '0' && e[1] == '\0') ? 0 : 1;
 }
 
+// r_overlap_done compaction fix (THVM_ATP_OVERLAP_DONE_FIX=1, default OFF):
+// shift the per-slot overlap-exhausted flag in lockstep with the other rule
+// arrays during slot compaction.  Without the shift the flags misalign after
+// any rule removal, and the use_overlap_exhaust pair gate in
+// atp_wmo_collect_pair fires on garbage state -- the WolframAxioms
+// walk-vs-batch +12-CP divergence (pick 51667): the batch dropped 4
+// (doubly-unfree eq x commutativity) overlaps WM forms (WM's A/D toplevel
+// sweeps, Unifikation1.c:1595-1648, exclude only the new equation itself via
+// MitAllenAusser :1471).  OPT-IN so the shipped batch trajectory stays
+// byte-identical until the OA gate baselines are re-pinned; under the fix
+// walk==batch is the target (this is the WM-faithful bookkeeping).
+static int atp_overlap_done_fix_on(void) {
+  static int v = -1;
+  if (v < 0) v = atp_env_on("THVM_ATP_OVERLAP_DONE_FIX");
+  return v;
+}
+
 // S-expression-style term print to FILE *.  Variables print as "Vn",
 // constants as "Cs", CTRs as "(s arg1 arg2 ...)".  Used by the env-
 // gated CP-trace dump (THVM_ATP_CP_PICK_TRACE) to compare thvm's
@@ -14898,6 +14915,19 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
   // ===============================================================
   // SHARED ARRAY-COMPACTION + BOOKKEEPING for a dropped slot IDX.
   //
+  // r_overlap_done rides the slot like r_gj_status, so every compaction
+  // must shift it in lockstep (atp_overlap_done_shift below); without the
+  // shift the flags misalign after any rule removal and the
+  // use_overlap_exhaust pair gate (atp_wmo_collect_pair) fires on GARBAGE
+  // state -- the pinned WolframAxioms +12-CP walk-vs-batch divergence at
+  // pick 51667 (a NEW doubly-unfree equation read done=1, OLD comm read
+  // done=0, so the batch dropped 4 comm overlaps WM forms;
+  // Unifikation1.c:1595-1648 has no such partner skip).  Gated OPT-IN
+  // (THVM_ATP_OVERLAP_DONE_FIX=1) so the shipped batch trajectory stays
+  // byte-identical until the gate baselines are re-pinned; the fixed
+  // trajectory is the WM-faithful one (walk==batch byte-identical under
+  // the fix).
+  //
   // Factored so both the LHS-collapse drop and the E-RHS-face drop use
   // the BYTE-IDENTICAL 9-array + FT-mirror compaction / trace-dead /
   // wmo-evict / n_unorient / n_rules / r_revision / index-dirty block
@@ -14925,6 +14955,8 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
       s->r_dead_subsumer_rhs[_j - 1] = s->r_dead_subsumer_rhs[_j];            \
       s->r_rederive_cut[_j - 1]      = s->r_rederive_cut[_j];                 \
       s->r_gj_status[_j - 1]      = s->r_gj_status[_j];                       \
+      if (atp_overlap_done_fix_on())                                          \
+        s->r_overlap_done[_j - 1] = s->r_overlap_done[_j];                    \
       WM_IR_SHIFT_FT(_j)                                                      \
     }                                                                         \
     s->n_rules--;                                                             \
@@ -15389,6 +15421,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         s->r_rederive_cut[j - 1]      = s->r_rederive_cut[j];
         // Ground-joinability status rides the slot (WM: per-object).
         s->r_gj_status[j - 1]      = s->r_gj_status[j];
+        if (atp_overlap_done_fix_on())
+          s->r_overlap_done[j - 1] = s->r_overlap_done[j];
 #ifdef THVM_ATPFT_RULES
         // Stage 4: shift the AtpFt slot pointers in lockstep -- no
         // re-conversion, the cells themselves are address-stable in
@@ -15648,6 +15682,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->r_dead_subsumer_lhs[k - 1] = s->r_dead_subsumer_lhs[k];
           s->r_dead_subsumer_rhs[k - 1] = s->r_dead_subsumer_rhs[k];
           s->r_rederive_cut[k - 1]      = s->r_rederive_cut[k];
+          if (atp_overlap_done_fix_on())
+            s->r_overlap_done[k - 1] = s->r_overlap_done[k];
 #ifdef THVM_ATPFT_RULES
           // Stage 4: shift the parallel AtpFt slot pointers.
           s->lhs_ft[k - 1]              = s->lhs_ft[k];
@@ -15720,6 +15756,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->r_dead_subsumer_lhs[k - 1] = s->r_dead_subsumer_lhs[k];
           s->r_dead_subsumer_rhs[k - 1] = s->r_dead_subsumer_rhs[k];
           s->r_rederive_cut[k - 1]      = s->r_rederive_cut[k];
+          if (atp_overlap_done_fix_on())
+            s->r_overlap_done[k - 1] = s->r_overlap_done[k];
 #ifdef THVM_ATPFT_RULES
           // Stage 4: shift the parallel AtpFt slot pointers.
           s->lhs_ft[k - 1]              = s->lhs_ft[k];
@@ -18555,6 +18593,52 @@ static void atp_bwd_ground_join_walk(AtpState *s, u32 skip_lo, u32 skip_hi) {
 // half the per-CP filter cost.  They run only under -DATP_CP_DIAG;
 // the default hot loop skips them.  Skipping is behavior-identical:
 // same CPs queued, same proof, identical step/rule/cps trajectory.
+// TEMPORARY uid-keyed CP-formation probe (THVM_CP_TRACE_UIDA/UIDB, default
+// OFF): logs, on BOTH formers (batch + single-walk), every formation attempt
+// and every gate decision for the targeted rule PAIR, keyed by the stable
+// r_uid identity (slot indexes are unstable across picks).  Pure stderr
+// diagnostics; zero engine effect when the envs are unset (one cached probe).
+static u32 g_cptr_uida = 0, g_cptr_uidb = 0;
+static u8  g_cptr_active = 0u;   // armed while a matched pair is being formed
+static u8 atp_cptr_enabled(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *a = getenv("THVM_CP_TRACE_UIDA");
+    const char *b = getenv("THVM_CP_TRACE_UIDB");
+    g_cptr_uida = a ? (u32)strtoul(a, NULL, 10) : 0u;
+    g_cptr_uidb = b ? (u32)strtoul(b, NULL, 10) : 0u;
+    on = (g_cptr_uida != 0u && g_cptr_uidb != 0u) ? 1 : 0;
+  }
+  return (u8)on;
+}
+static u8 atp_cptr_pair(const AtpState *s, u32 i, u32 j) {
+  if (!atp_cptr_enabled() || s->r_uid == NULL) return 0u;
+  if (i >= s->n_rules || j >= s->n_rules) return 0u;
+  u32 a = s->r_uid[i], b = s->r_uid[j];
+  return ((a == g_cptr_uida && b == g_cptr_uidb) ||
+          (a == g_cptr_uidb && b == g_cptr_uida)) ? 1u : 0u;
+}
+static void atp_cptr_pos(const u8 *pos, u8 len, char *out, u32 cap) {
+  u32 pn = 0;
+  out[pn++] = 'L';
+  for (u32 d = 0; d < len && pn + 8u < cap; d++)
+    pn += (u32)snprintf(out + pn, cap - pn, ".%u", pos[d] + 1u);
+  out[pn] = '\0';
+}
+static void atp_cptr_cp(const char *tag, const CriticalPair *cp) {
+  char posb[64];
+  atp_cptr_pos(cp->pos, cp->pos_len, posb, sizeof posb);
+  fprintf(stderr, "CPTR %s pos=%s lhs=", tag, posb);
+  atp_dbg_print_term(stderr, cp->lhs);
+  fprintf(stderr, " rhs=");
+  atp_dbg_print_term(stderr, cp->rhs);
+  if (cp->peak != 0) {
+    fprintf(stderr, " peak=");
+    atp_dbg_print_term(stderr, cp->peak);
+  }
+  fputc('\n', stderr);
+}
+
 // May the CP push loop take the fused single-pass pipeline
 // (acp_pack_fused: varnorm + pack + weigh in one walk)?  Requires that
 // NOTHING downstream consumes the renumbered pair as Term cells: every
@@ -18784,6 +18868,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       s->n_cps_dropped_perm_subsumed++;
       if (cpraw_debug)
         fprintf(stderr, "[cpfate] %u: DROP perm-subsumed\n", i);
+      if (g_cptr_active) fprintf(stderr, "CPTR PUSH DROP perm-subsumed\n");
       continue;
     }
     // WM dokgS port: push-time rule-subsumption drop (KPVerwaltung.c:451
@@ -18799,6 +18884,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       s->n_cps_dropped_rule_subsumed++;
       if (cpraw_debug)
         fprintf(stderr, "[cpfate] %u: DROP rule-subsumed\n", i);
+      if (g_cptr_active) fprintf(stderr, "CPTR PUSH DROP rule-subsumed\n");
       continue;
     }
     // thvm-native filter, no WM counterpart (see AtpState.use_queue_
@@ -18853,12 +18939,14 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       s->n_cps_dropped_joinable++;
       if (cpraw_debug)
         fprintf(stderr, "[cpfate] %u: DROP joinable\n", i);
+      if (g_cptr_active) fprintf(stderr, "CPTR PUSH DROP joinable\n");
       continue;
     }
     if (q_subsmd) {
       s->n_cps_dropped_queue_subsumed++;
       if (cpraw_debug)
         fprintf(stderr, "[cpfate] %u: DROP queue-subsumed\n", i);
+      if (g_cptr_active) fprintf(stderr, "CPTR PUSH DROP queue-subsumed\n");
       continue;
     }
 #ifdef THVM_ATP_AC
@@ -19002,6 +19090,9 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     if (g_atp_phase_detail) g_atp_cpg_us_pack += atp_now_us() - _dpk_t0;
     g_cp_par_a = ATP_TRACE_NONE;
     g_cp_uid_a = g_cp_uid_b = 0u;
+    if (g_cptr_active)
+      fprintf(stderr, "CPTR PUSH QUEUED seq=%u deferred=%u\n",
+              s->cp_seq_next - 1u, deferred);
     pushed++;
   }
   return pushed;
@@ -19106,16 +19197,21 @@ static Term atp_cp_pos_subterm(Term t, const u8 *pos, u8 len) {
 // alias -- the dense renumber keeps every id inside the caps.
 static u32 atp_cp_order_gate(AtpState *s, CriticalPair *buf,
                              u32 lo, u32 hi, u8 outer_eq, u8 inner_eq) {
-  if (!outer_eq && !inner_eq) return hi;
+  if (!outer_eq && !inner_eq) {
+    if (g_cptr_active)
+      for (u32 k = lo; k < hi; k++) atp_cptr_cp("ORDGATE pass(no-eq)", &buf[k]);
+    return hi;
+  }
   u32 w = lo;
   for (u32 k = lo; k < hi; k++) {
     Term peak = buf[k].peak;
     u8 drop = 0u;
+    u8 drop_outer = 0u;
     if (peak != 0) {
       if (outer_eq) {
         Term a = buf[k].rhs, b = peak;
         thvm_normalize_vars(&a, &b);
-        if (atp_compare(s, a, b) == KBO_GT) drop = 1u;
+        if (atp_compare(s, a, b) == KBO_GT) drop = drop_outer = 1u;
       }
       if (!drop && inner_eq) {
         Term in_new = atp_cp_pos_subterm(buf[k].lhs,
@@ -19126,6 +19222,13 @@ static u32 atp_cp_order_gate(AtpState *s, CriticalPair *buf,
           if (atp_compare(s, in_new, in_old) == KBO_GT) drop = 1u;
         }
       }
+    }
+    if (g_cptr_active) {
+      char tag[96];
+      snprintf(tag, sizeof tag, "ORDGATE %s(outer_eq=%u inner_eq=%u%s)",
+               drop ? "DROP" : "pass", outer_eq, inner_eq,
+               drop ? (drop_outer ? " by=outer" : " by=inner") : "");
+      atp_cptr_cp(tag, &buf[k]);
     }
     if (!drop) {
       if (w != k) buf[w] = buf[k];
@@ -19420,6 +19523,27 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
     }
   }
 
+  // uid-keyed probe: arm for this pair so the gen gates + push path log.
+  u8 _cptr_here = atp_cptr_pair(s, i, j);
+  if (_cptr_here) {
+    g_cptr_active = 1u;
+    fprintf(stderr,
+            "CPTR OVERLAP i=%u j=%u uid_i=%u uid_j=%u i_or=%u j_or=%u "
+            "i_eq=%u j_eq=%u i_mono=%u j_mono=%u skip=%u%u%u%u pick=%u\n",
+            i, j, s->r_uid[i], s->r_uid[j], s->r_orient[i], s->r_orient[j],
+            i_eq, j_eq, i_mono, j_mono, skip1, skip2, skip3, skip4,
+            s->cp_select_count);
+    fprintf(stderr, "CPTR OVERLAP li=");
+    atp_dbg_print_term(stderr, li);
+    fprintf(stderr, " ri=");
+    atp_dbg_print_term(stderr, ri);
+    fprintf(stderr, " lj=");
+    atp_dbg_print_term(stderr, lj);
+    fprintf(stderr, " rj=");
+    atp_dbg_print_term(stderr, rj);
+    fputc('\n', stderr);
+  }
+
 #ifdef THVM_ATPFT_UNIFY
   // FT-native overlap path: when both rules' FT mirrors are populated,
   // the rename + cp_visit work happens on AtpFt cells directly, only
@@ -19447,6 +19571,7 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
     cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, lj_r, rj_r,
                                       ft_arena_local, need_peak, skip1,
                                       buf, cap, cnt);
+    if (_cptr_here) fprintf(stderr, "CPTR COMBO0 raw=%u\n", cnt - seg);
     cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
     if (combo_end != NULL) combo_end[0] = cnt;
     if (j_un) {
@@ -19455,6 +19580,7 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
       cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, rj_r, lj_r,
                                         ft_arena_local, need_peak, skip2,
                                         buf, cap, cnt);
+      if (_cptr_here) fprintf(stderr, "CPTR COMBO1 raw=%u\n", cnt - seg);
       cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
     }
     if (combo_end != NULL) combo_end[1] = cnt;
@@ -19464,6 +19590,7 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
       cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, lj_r, rj_r,
                                         ft_arena_local, need_peak, skip3,
                                         buf, cap, cnt);
+      if (_cptr_here) fprintf(stderr, "CPTR COMBO2 raw=%u\n", cnt - seg);
       cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
       if (combo_end != NULL) combo_end[2] = cnt;
       if (j_un) {
@@ -19472,6 +19599,7 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
         cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, rj_r, lj_r,
                                           ft_arena_local, need_peak, skip4,
                                           buf, cap, cnt);
+        if (_cptr_here) fprintf(stderr, "CPTR COMBO3 raw=%u\n", cnt - seg);
         cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
       }
     }
@@ -19490,12 +19618,14 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
     u32 seg = cnt;
     // (i-face li) x (j: lj->rj)  -- the standard overlap.
     cnt = pf[skip1](li, ri, lj, rj, buf, cap, cnt);
+    if (_cptr_here) fprintf(stderr, "CPTR COMBO0 raw=%u\n", cnt - seg);
     cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
     if (combo_end != NULL) combo_end[0] = cnt;
     if (j_un) {
       // (i-face li) x (j: rj->lj)
       seg = cnt;
       cnt = pf[skip2](li, ri, rj, lj, buf, cap, cnt);
+      if (_cptr_here) fprintf(stderr, "CPTR COMBO1 raw=%u\n", cnt - seg);
       cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
     }
     if (combo_end != NULL) combo_end[1] = cnt;
@@ -19503,12 +19633,14 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
       // (i-face ri) x (j: lj->rj)
       seg = cnt;
       cnt = pf[skip3](ri, li, lj, rj, buf, cap, cnt);
+      if (_cptr_here) fprintf(stderr, "CPTR COMBO2 raw=%u\n", cnt - seg);
       cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
       if (combo_end != NULL) combo_end[2] = cnt;
       if (j_un) {
         // (i-face ri) x (j: rj->lj)
         seg = cnt;
         cnt = pf[skip4](ri, li, rj, lj, buf, cap, cnt);
+        if (_cptr_here) fprintf(stderr, "CPTR COMBO3 raw=%u\n", cnt - seg);
         cnt = atp_cp_gen_gates(s, buf, seg, cnt, i_eq, j_eq);
       }
     }
@@ -19606,6 +19738,10 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   }
 #endif
 
+  if (_cptr_here) {
+    fprintf(stderr, "CPTR OVERLAP-END i=%u j=%u kept=%u\n", i, j, cnt);
+    g_cptr_active = 0u;
+  }
   return cnt;
 }
 
@@ -21384,8 +21520,17 @@ static u8 atp_rule_is_seq564_producer(AtpState *s, u32 ri) {
 static u32 atp_wmo_collect_pair(AtpState *s, u32 i, u32 j,
                                 AtpWmoCpEnt **big, u32 *n_big, u32 *cap_big,
                                 CriticalPair *buf) {
+  u8 _cptr_coll = atp_cptr_pair(s, i, j);
+  if (_cptr_coll)
+    fprintf(stderr,
+            "CPTR COLLECT i=%u j=%u uid_i=%u uid_j=%u gj_i=%u gj_j=%u "
+            "done_i=%u done_j=%u pick=%u\n",
+            i, j, s->r_uid[i], s->r_uid[j],
+            s->r_gj_status[i], s->r_gj_status[j],
+            s->r_overlap_done[i], s->r_overlap_done[j], s->cp_select_count);
   if (s->r_gj_status[i] == ATP_GJ_ST_JOINABLE ||
       s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) {
+    if (_cptr_coll) fprintf(stderr, "CPTR COLLECT DROP gj-joinable\n");
     return 0;
   }
   // Overlap-exhausted-equation gate (default OFF): when a NEWLY-added
@@ -21401,6 +21546,7 @@ static u32 atp_wmo_collect_pair(AtpState *s, u32 i, u32 j,
          && atp_is_flat_transposition(s->lhs[j], s->rhs[j]))
         || (j_exh && !s->r_overlap_done[i]
             && atp_is_flat_transposition(s->lhs[i], s->rhs[i]))) {
+      if (_cptr_coll) fprintf(stderr, "CPTR COLLECT DROP overlap-exhaust\n");
       return 0;
     }
   }
@@ -21419,6 +21565,7 @@ static u32 atp_wmo_collect_pair(AtpState *s, u32 i, u32 j,
          && atp_eq_is_noncanonical_comm_side(s, s->lhs[j], s->rhs[j]))
         || (j > i && atp_rule_is_seq564_producer(s, j) && !s->r_orient[i]
             && atp_eq_is_noncanonical_comm_side(s, s->lhs[i], s->rhs[i]))) {
+      if (_cptr_coll) fprintf(stderr, "CPTR COLLECT DROP comm-defer\n");
       return 0;
     }
   }
@@ -21432,6 +21579,7 @@ static u32 atp_wmo_collect_pair(AtpState *s, u32 i, u32 j,
   if (g_atp_phase_enabled) {
     if (nbuf == 0u) g_atp_wmcp_zero++; else g_atp_wmcp_nonzero++;
   }
+  if (_cptr_coll) fprintf(stderr, "CPTR COLLECT nbuf=%u\n", nbuf);
   if (nbuf == 0u) return 0;
   if (*n_big + nbuf > *cap_big) {
     u32 cap = *cap_big ? *cap_big : 256u;
@@ -24450,10 +24598,22 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           }
         }
       }
+      // uid-keyed probe: arm across the push so the joinable/dedup drops log.
+      u8 _cptr_push = atp_cptr_pair(s, big[k].i, big[k].j);
+      if (_cptr_push) {
+        g_cptr_active = 1u;
+        fprintf(stderr,
+                "CPTR BATCHPUSH f=%u i=%u j=%u combo=%u key=%llu "
+                "seq_next=%u\n",
+                f, big[k].i, big[k].j, big[k].combo,
+                (unsigned long long)big[k].key, s->cp_seq_next);
+        atp_cptr_cp("BATCHPUSH", &big[k].cp);
+      }
       pushed += atp_push_cps_traced(s, &big[k].cp, 1u,
                                     s->r_trace[big[k].i],
                                     s->r_trace[big[k].j],
                                     big[k].i, big[k].j);
+      if (_cptr_push) g_cptr_active = 0u;
       atp_cpform_geom_clear();
     }
     if (g_atp_phase_detail) g_atp_cpg_us_pushloop += atp_now_us() - _dpl_t0;
@@ -24553,9 +24713,33 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   // "pushloop" (which times push-norm/varnorm/filters/trace/pack inside).
   int _dl = g_atp_phase_detail;
   u64 _dov_t0 = _dl ? atp_now_us() : 0;
+  // uid-keyed probe: arm for this attempt so the gen gates + push path log.
+  u8 _cptr_sw = atp_cptr_pair(s, i_out, i_in);
+  if (_cptr_sw) {
+    g_cptr_active = 1u;
+    fprintf(stderr,
+            "CPTR SW ATTEMPT phase=%u i_out=%u i_in=%u uid_out=%u uid_in=%u "
+            "o_eq=%u in_eq=%u pick=%u pos=L",
+            g_sw_phase, i_out, i_in, s->r_uid[i_out], s->r_uid[i_in],
+            o_eq, in_eq, s->cp_select_count);
+    for (u32 d = 0; d < p_len; d++) fprintf(stderr, ".%u", p[d] + 1u);
+    fprintf(stderr, " lo=");
+    atp_dbg_print_term(stderr, lo);
+    fprintf(stderr, " ro=");
+    atp_dbg_print_term(stderr, ro);
+    fprintf(stderr, " lin=");
+    atp_dbg_print_term(stderr, lin);
+    fprintf(stderr, " rin=");
+    atp_dbg_print_term(stderr, rin);
+    fputc('\n', stderr);
+  }
   Term sub = (sub_pre != 0) ? sub_pre : cp_subterm_at(lo, p, p_len);
   if (sub == 0 || term_tag(sub) == TAG_FVR) {
     if (_dl) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+    if (_cptr_sw) {
+      fprintf(stderr, "CPTR SW SKIP var-or-null-subterm\n");
+      g_cptr_active = 0u;
+    }
     return 0u;
   }
   // Head-symbol pre-filter: two constructors with different head symbols can
@@ -24566,6 +24750,10 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   if (term_tag(sub) == TAG_CTR && term_tag(lin) == TAG_CTR &&
       term_ext(sub) != term_ext(lin)) {
     if (_dl) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+    if (_cptr_sw) {
+      fprintf(stderr, "CPTR SW SKIP head-mismatch\n");
+      g_cptr_active = 0u;
+    }
     return 0u;
   }
   // Persistent all-zero subst + bound-id undo log (unify/_.c): byte-
@@ -24577,6 +24765,10 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   if (!thvm_unify(sub, lin, &subst)) {
     thvm_unify_undo(&subst);
     if (_dl) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+    if (_cptr_sw) {
+      fprintf(stderr, "CPTR SW SKIP unify-fail\n");
+      g_cptr_active = 0u;
+    }
     return 0u;
   }
   if (_dl) g_atp_cpg_overlap_calls++;
@@ -24598,6 +24790,10 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   cp.combo = 0xffu;
   if (atp_cp_gen_gates(s, &cp, 0u, 1u, o_eq, in_eq) == 0u) {
     if (_dl) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+    if (_cptr_sw) {
+      fprintf(stderr, "CPTR SW DROP gen-gates\n");
+      g_cptr_active = 0u;
+    }
     return 0u;
   }
   // Stamp the CP_FORM_TRACE geometry: the per-CP push bypasses the batch loop
@@ -24619,6 +24815,7 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   }
   u32 rv = atp_push_cps_traced(s, &cp, 1u, t_out, t_in, i_out, i_in);
   if (_dl) g_atp_cpg_us_pushloop += atp_now_us() - _dpl_t0;
+  if (_cptr_sw) g_cptr_active = 0u;
   return rv;
 }
 
@@ -24713,8 +24910,16 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
         if (j == c->i_out) continue;
         // WM -gj: a ground-joinable fact gets no CP lane (the batch path's
         // atp_wmo_collect_pair returns 0 for either parent joinable).
-        if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) continue;
-        if (sw_pair_exhaust_skip(s, c->i_out, j, c->f_is_ft)) continue;
+        if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) {
+          if (atp_cptr_pair(s, c->i_out, j))
+            fprintf(stderr, "CPTR SW VATER-SKIP gj (rule tree)\n");
+          continue;
+        }
+        if (sw_pair_exhaust_skip(s, c->i_out, j, c->f_is_ft)) {
+          if (atp_cptr_pair(s, c->i_out, j))
+            fprintf(stderr, "CPTR SW VATER-SKIP exhaust (rule tree)\n");
+          continue;
+        }
         c->pushed += sw_vater_emit_hit(c, p, p_len, sub, &hits[h], j);
       }
       continue;
@@ -24785,8 +24990,16 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
         u32 j = jidx[h];
         if (j == 0xffffffffu) continue;
         if (j == c->i_out) continue;          // self: explicit F/C/G steps
-        if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) continue;  // WM -gj lane cut
-        if (sw_pair_exhaust_skip(s, c->i_out, j, c->f_is_ft)) continue;
+        if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) {
+          if (atp_cptr_pair(s, c->i_out, j))
+            fprintf(stderr, "CPTR SW VATER-SKIP gj (eq tree)\n");
+          continue;
+        }
+        if (sw_pair_exhaust_skip(s, c->i_out, j, c->f_is_ft)) {
+          if (atp_cptr_pair(s, c->i_out, j))
+            fprintf(stderr, "CPTR SW VATER-SKIP exhaust (eq tree)\n");
+          continue;
+        }
         c->pushed += sw_vater_emit_hit(c, p, p_len, sub, &hits[h], j);
       }
     }
@@ -24826,8 +25039,16 @@ static void sw_mutter_phase(AtpState *s, AtpWmOrder *w, u32 f,
     for (u32 h = 0; h < nh; h++) {
       u32 j = sw_uid_to_idx(s, lhits[h].trace);
       if (j == 0xffffffffu) continue;   // INCLUDE self: WM's subterm sweep has no
-      if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) continue;  // WM -gj lane cut
-      if (sw_pair_exhaust_skip(s, f, j, f_is_ft)) continue;
+      if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) {
+        if (atp_cptr_pair(s, f, j))
+          fprintf(stderr, "CPTR SW MUTTER-SKIP gj\n");
+        continue;
+      }
+      if (sw_pair_exhaust_skip(s, f, j, f_is_ft)) {
+        if (atp_cptr_pair(s, f, j))
+          fprintf(stderr, "CPTR SW MUTTER-SKIP exhaust\n");
+        continue;
+      }
       u64 _dov_t0 = g_atp_phase_detail ? atp_now_us() : 0;
       u8 jdr = wmo_trace_dist_rhs(w, lhits[h].trace);  // MitAllenAusser -> l/r =? eTT(self)
       u8 tf  = (u8)(lhits[h].face ^ jdr);
@@ -24927,7 +25148,19 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     }
     if (two_faced) {
       g_sw_phase = 13u;
-      sw_self_phase(s, f, fl, fr, fr, fl, f_eq, 1u, path, &pushed);  // C root l=?r (combo1)
+      // C root self uses the STORED faces (outer = stored l->r, inner =
+      // stored r->l), NOT the dist_rhs-adjusted fl/fr: the batch former's
+      // combo1 self-root is built on stored faces (atp_overlap_ij li x
+      // rj->lj), and for a dist_rhs==1 equation the fl/fr construction
+      // queues the C CP with its sides SWAPPED (the OA pick-274591
+      // walk-vs-batch side swap, self CP seq 2891339).  For the
+      // dist_rhs==1 case the stored order is also WM's: after
+      // Elter1Andersherum the Vater copy is (r', l') and the CP is
+      // (KPLinks, KPRechts) = (sigma(l'), sigma(r)) (Unifikation1.c:
+      // 916-917, 1628-1633), which maps to thvm (cp.lhs, cp.rhs) =
+      // (KPRechts, KPLinks) = the stored-face construction.
+      sw_self_phase(s, f, s->lhs[f], s->rhs[f], s->rhs[f], s->lhs[f],
+                    f_eq, 1u, path, &pushed);  // C root l=?r (combo1)
       SwVaterCtx vd = { s, fr, fl, f, s->r_trace[f], f_eq, f_is_ft, 1u, 0u };
       g_sw_phase = 14u;
       cp_walk_positions(fr, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vd, 0u);
