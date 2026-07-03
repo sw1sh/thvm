@@ -166,6 +166,7 @@ typedef struct {
 #define WMO_TOPS_ARR_CAP 16384u
 #define WMO_RC_N 64u
 #define WMO_LLR_N 4096u
+#define WMO_DRC_N 2048u
 typedef struct {
   u8        valid;
   u8        tree;               // 0 rules / 1 equations
@@ -218,6 +219,17 @@ typedef struct AtpWmOrder {
     u32 ll, ch;
     u8  tree, face, found, valid;
   } llr[WMO_LLR_N];
+  // wmo_trace_dist_rhs memo: trace -> dist_rhs verdict (present or the
+  // unregistered-default 0), validated per entry against tree_rev
+  // (bumped by every registry mutation -- register / rename / remove --
+  // so a stale entry cannot survive one).  The linear registry scan sat
+  // on the per-CP atp_wmo_rank hot path (2 calls per rank query).
+  // Shares no_rankcache as its disable switch.
+  struct WmoDrcEnt {
+    u64 rev;
+    u32 trace;
+    u8  dr, valid;
+  } drc[WMO_DRC_N];
   // WM-faithful AltesBlattPolieren construction (use_wm_trie_faithful): when
   // set, every BlattAufgeteilt parallel jump splices immediately AFTER the
   // surviving model in the start node's outgoing list (DSBaumOperationen.c
@@ -1653,11 +1665,27 @@ static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
 // before classifying its emission phase and looking up the partner's
 // indexed face.  Returns 0 for an unregistered trace (orientable rules
 // and intake equations keep distinguished = lhs).
-static u8 wmo_trace_dist_rhs(const AtpWmOrder *w, u32 trace) {
-  for (u32 r = 0; r < w->n_reg; r++) {
-    if (w->reg[r].trace == trace) return w->reg[r].dist_rhs;
+static u8 wmo_trace_dist_rhs(AtpWmOrder *w, u32 trace) {
+  // Memo probe (see AtpWmOrder.drc): the registry is frozen while
+  // tree_rev holds, so a valid same-rev entry returns exactly what the
+  // scan below would recompute (including the unregistered-default 0).
+  struct WmoDrcEnt *e = NULL;
+  if (!w->no_rankcache) {
+    e = &w->drc[(trace * 2654435761u) & (WMO_DRC_N - 1u)];
+    if (e->valid && e->rev == w->tree_rev && e->trace == trace)
+      return e->dr;
   }
-  return 0u;
+  u8 dr = 0u;
+  for (u32 r = 0; r < w->n_reg; r++) {
+    if (w->reg[r].trace == trace) { dr = w->reg[r].dist_rhs; break; }
+  }
+  if (e != NULL) {
+    e->valid = 1u;
+    e->rev   = w->tree_rev;
+    e->trace = trace;
+    e->dr    = dr;
+  }
+  return dr;
 }
 
 // uid -> WM-distinguished-face label for the engine's face-aware
@@ -2048,6 +2076,25 @@ static u64 wmo_pack_key(u32 phase, u32 k1, u32 k2, u32 k3, u32 k4, u32 k5) {
          ((u64)k3 << 28) | ((u64)k4 << 14) | (u64)k5;
 }
 
+// Capped preorder node count of `t` -- wmo_cells_from_term's return
+// value (cell count, or 0 on cap overflow / non-FVR-non-CTR tag /
+// arity > 255) without materializing the cells: the count is
+// independent of the var numbering, so the flatten was pure overhead
+// on the per-CP wmo_preorder_rank hot path.
+static u32 wmo_subtree_size(Term t, u32 cap) {
+  if (term_tag(t) == TAG_FVR) return (cap < 1u) ? 0u : 1u;
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 n = term_ctr_n(t);
+  if (cap < 1u || n > 255u) return 0u;
+  u32 len = 1u;
+  for (u32 i = 0; i < n; i++) {
+    u32 cl = wmo_subtree_size(term_ctr_at(t, i), cap - len);
+    if (cl == 0u) return 0u;
+    len += cl;
+  }
+  return len;
+}
+
 // Preorder rank of position path `pos[0..len)` within term `t`
 // (counting every node, root = 0).
 static u32 wmo_preorder_rank(Term t, const u8 *pos, u32 len) {
@@ -2061,9 +2108,7 @@ static u32 wmo_preorder_rank(Term t, const u8 *pos, u32 len) {
     for (u32 c = 0; c < idx; c++) {
       // add the subtree size of each left sibling
       Term sub = term_ctr_at(t, c);
-      // subtree size = cell count
-      WmoCell tmp[WMO_MAX_CELLS];
-      u32 sz = wmo_face_cells(sub, tmp, WMO_MAX_CELLS);
+      u32 sz = wmo_subtree_size(sub, WMO_MAX_CELLS);
       rank += (sz == 0u) ? 1u : sz;
     }
     t = term_ctr_at(t, idx);

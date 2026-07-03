@@ -496,12 +496,26 @@ static FtPiIndex g_ftpi = {0};
 // scope) for the descend's per-node shape counters -- one u8 test per
 // visited node instead of two global loads.  Set in ftdt_candidates.
 static u8 g_ftdt_pd = 0;
+// Tree depth of the NEXT ftdt_descend call (edges from the root) --
+// maintained only under g_ftdt_pd for the per-depth visit histogram;
+// the caller sets it before each recursion, so no unwind is needed.
+static u32 g_ftdt_dp = 0;
+
+// Profile-only subject-subtree cell count (the ft_eq cost proxy).
+static u32 ftdt_prof_cells(const AtpFtCell *c) {
+  const AtpFtCell *e = (c->end != NULL) ? c->end->next : NULL;
+  u32 n = 0u;
+  for (; c != NULL && c != e; c = c->next) n++;
+  return n;
+}
 
 // Discrimination-tree builder hooks (defined below ftpi_candidates, but
 // called by ftpi_insert_rule / ftpi_rebuild above their definition).
 static void ftdt_insert_pattern(FtPiIndex *ix, const AtpFtCell *pat, u32 rule,
                                 u8 unor, u8 face);
 static void ftdt_reset(FtPiIndex *ix);
+static void ftdt_shape_dump(void);
+static void ftnfm_bump_gen(void);
 
 // THVM_ATPFT_PRUNE_STATS=1 prints the prune ratio at process exit:
 // candidates-per-query vs the n_rules a linear scan would have visited.
@@ -521,6 +535,7 @@ static void ftpi_stats_atexit(void) {
   fprintf(stderr, "[ftpi] rebuilds=%llu  rebuild_work=%llu rules\n",
           (unsigned long long)ix->n_rebuilds,
           (unsigned long long)ix->rebuild_work);
+  ftdt_shape_dump();
 }
 
 static void ftpi_stats_arm(void) {
@@ -672,6 +687,7 @@ static void ftpi_rebuild(AtpState *s) {
   for (u32 b = 0; b < ix->n_buckets; b++) ix->buckets[b].n = 0u;
   ix->n_var = 0u;
   ftdt_reset(ix);             // tree rebuilt in lockstep with the buckets
+  ftnfm_bump_gen();           // tree content changes: all memo entries die
   ix->rebuild_work += s->n_rules;
   for (u32 i = 0; i < s->n_rules; i++) ftpi_insert_rule(ix, s, i);
   ftpi_finalize(ix, s);
@@ -697,6 +713,7 @@ static int ftpi_try_extend(AtpState *s) {
     return 0;   // an existing rule was revised -> not a clean append
   }
   ix->rebuild_work += (s->n_rules - ix->built_n_rules);
+  ftnfm_bump_gen();           // appended rules can revive a memoized-normal subtree
   for (u32 i = ix->built_n_rules; i < s->n_rules; i++) ftpi_insert_rule(ix, s, i);
   ftpi_finalize(ix, s);
   return 1;
@@ -1284,13 +1301,23 @@ static void ftdt_descend(const FtDtDesc *d, u32 node,
   // REFUTED: runs vs per-node step measured 23.3s vs 23.4s -- on the
   // single-op signatures the walk concentrates in the bushy shared-
   // prefix region, not on chains, so the run machinery was reverted.)
+  u32 dp = 0u;
+  if (g_ftdt_pd) dp = g_ftdt_dp;
   for (;;) {
     // Orientation-class prune: no leaf of a wanted class anywhere at-or-
     // below this node -- nothing this subtree could emit survives the
     // caller's pass guards, so skip it entirely.
-    if ((nd->sub_mask & want) == 0u) return;
-    if (g_ftdt_pd) g_atp_pushn_dt_node++;
+    if ((nd->sub_mask & want) == 0u) {
+      if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+      return;
+    }
+    if (g_ftdt_pd) {
+      g_atp_pushn_dt_node++;
+      g_atp_pushn_dt_hist[(dp < ATP_DT_HIST_N - 1u) ? dp
+                                                    : ATP_DT_HIST_N - 1u]++;
+    }
     if (sc == d->sc_end) {            // subject consumed: emit this node's leaves
+      if (g_ftdt_pd) g_atp_pushn_dt_emit++;
       ftdt_emit_leaf(ix, node, d->out, want, d->bind, nbound, pure);
       return;
     }
@@ -1298,6 +1325,7 @@ static void ftdt_descend(const FtDtDesc *d, u32 node,
     u32 label0 = nd->label0;
     if (label0 >= FTDT_VAR0) break;
     if ((sc->sym & WF_VAR_BIT) != 0u || label0 != sc->sym) return;
+    if (g_ftdt_pd) { g_atp_pushn_dt_chain++; dp++; }
     node = nd->kid0;
     nd   = &ix->dt_nodes[node];
     sc   = sc->next;
@@ -1311,33 +1339,215 @@ static void ftdt_descend(const FtDtDesc *d, u32 node,
   const AtpFtCell *skip = (sc->end != NULL) ? sc->end->next : d->sc_end;
   const AtpFtCell **bind = d->bind;
   u32 nv = nd->n_var_edge;
-  if (g_ftdt_pd) g_atp_pushn_dt_edge += nd->n_edge;
+  if (g_ftdt_pd) {
+    g_atp_pushn_dt_edge += nd->n_edge;
+    g_atp_pushn_dt_branch++;
+  }
   for (u32 e = 0; e < nv; e++) {
     u32 label = nd->labels[e];
     if (label == FTDT_STAR) {
       // Defensive overflow edge (see FTDT_VAR0): unconditional skip.
+      if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
       ftdt_descend(d, nd->kids[e], skip, nbound, 0u);
       continue;
     }
     u32 k = label - FTDT_VAR0;
     if (bind[k] == NULL) {
       bind[k] = sc;
+      if (g_ftdt_pd) { g_atp_pushn_dt_bind1++; g_ftdt_dp = dp + 1u; }
       ftdt_descend(d, nd->kids[e], skip,
                    (k + 1u > nbound) ? k + 1u : nbound, pure);
       bind[k] = NULL;
-    } else if (ft_eq(bind[k], sc)) {
-      ftdt_descend(d, nd->kids[e], skip, nbound, pure);
+    } else {
+      if (g_ftdt_pd) {
+        g_atp_pushn_dt_fteq++;
+        g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(sc);
+      }
+      if (ft_eq(bind[k], sc)) {
+        if (g_ftdt_pd) { g_atp_pushn_dt_fteq_ok++; g_ftdt_dp = dp + 1u; }
+        ftdt_descend(d, nd->kids[e], skip, nbound, pure);
+      }
     }
   }
   if ((sc->sym & WF_VAR_BIT) == 0u) {
     for (u32 e = nv; e < nd->n_edge; e++) {
       u32 label = nd->labels[e];
+      if (g_ftdt_pd) g_atp_pushn_dt_cprobe++;
       if (label < sc->sym) continue;
-      if (label == sc->sym)
+      if (label == sc->sym) {
+        if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
         ftdt_descend(d, nd->kids[e], sc->next, nbound, pure);
+      }
       break;
     }
   }
+}
+
+// Redesigned walk (default; THVM_NO_FT_DTV2=1 reverts to ftdt_descend
+// for the same-binary A/B).  Same visited-pattern acceptance set,
+// records and bindings as ftdt_descend -- the candidate list is sorted
+// + deduped downstream, so exploration order is free and only the SET
+// must match (certified by THVM_ATPFT_DT_CHECK / DTB_CHECK).  Three
+// structural changes, all driven by the 2026-07-03 deep counters
+// (bind1=257M fteq=373M[84.7% fail] prune=99.6M cprobe=117M on
+// OrAssociativity -- the cost is var-edge exploration in the bushy
+// mid-tree, NOT concrete dispatch):
+//   1. CHILD-PRUNE HOIST: the parent tests the child's sub_mask
+//      before binding / ft_eq / recursing, so the ~100M recursions
+//      into want-barren subtrees (25% of all visits) never happen and
+//      their preceding repeat-compares are skipped too.
+//   2. SINGLE-VAR-EDGE CHAIN FOLLOW: a node whose only edge is V_k is
+//      followed iteratively like the concrete chain -- bind (logged in
+//      a local undo list, unwound at every exit) or repeat-compare,
+//      then advance.  The deep pattern tails are almost pure var
+//      chains (shape dump: d>=11 edges are ~100% var), so this kills
+//      the recursion+bind/unbind bracket for the tail region.
+//   3. FIRST-CELL FAIL-FAST: a repeat compare first tests the two root
+//      syms inline (sym mismatch decides 85% of repeats; the average
+//      failing subtree is ~2.5 cells) and only calls ft_eq on a root
+//      match.  Identical verdict: ft_eq's first lockstep step is this
+//      exact compare (same-sym CTR cells always agree on arity).
+static void ftdt_descend2(const FtDtDesc *d, u32 node,
+                          const AtpFtCell *sc, u32 nbound, u8 pure) {
+  FtPiIndex *ix = d->ix;
+  const FtDtNode *nd = &ix->dt_nodes[node];
+  const u8 want = d->want;
+  const AtpFtCell **bind = d->bind;
+  // Local bind undo log: canonical var ids bound by the iterative var
+  // chain (each id binds at most once per path, so <= ATPFT_MAX_VARS).
+  u16 ub[ATPFT_MAX_VARS];
+  u32 un = 0u;
+  u32 dp = 0u;
+  if (g_ftdt_pd) dp = g_ftdt_dp;
+  // Entry prune: only the root call arrives unchecked -- recursions
+  // below pre-check the child mask before calling.
+  if ((nd->sub_mask & want) == 0u) {
+    if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+    return;
+  }
+  for (;;) {
+    if (g_ftdt_pd) {
+      g_atp_pushn_dt_node++;
+      g_atp_pushn_dt_hist[(dp < ATP_DT_HIST_N - 1u) ? dp
+                                                    : ATP_DT_HIST_N - 1u]++;
+    }
+    if (sc == d->sc_end) {            // subject consumed: emit this node's leaves
+      if (g_ftdt_pd) g_atp_pushn_dt_emit++;
+      ftdt_emit_leaf(ix, node, d->out, want, bind, nbound, pure);
+      goto out;
+    }
+    if (nd->n_edge != 1u) break;
+    u32 label0 = nd->label0;
+    if (label0 < FTDT_VAR0) {
+      // Single concrete edge: lockstep hop (as ftdt_descend's chain).
+      if ((sc->sym & WF_VAR_BIT) != 0u || label0 != sc->sym) goto out;
+      const FtDtNode *kd = &ix->dt_nodes[nd->kid0];
+      if ((kd->sub_mask & want) == 0u) {
+        if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+        goto out;
+      }
+      if (g_ftdt_pd) { g_atp_pushn_dt_chain++; dp++; }
+      node = nd->kid0;
+      nd   = kd;
+      sc   = sc->next;
+      continue;
+    }
+    if (label0 == FTDT_STAR) break;   // defensive overflow edge: branch path
+    // Single variable edge V_k: follow iteratively.
+    u32 k = label0 - FTDT_VAR0;
+    const AtpFtCell *bk = bind[k];
+    if (bk != NULL) {
+      if (g_ftdt_pd) {
+        g_atp_pushn_dt_fteq++;
+        g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(sc);
+      }
+      if (bk->sym != sc->sym) goto out;       // first-cell fail-fast
+      if (!ft_eq(bk, sc)) goto out;
+      if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
+    }
+    const FtDtNode *kd = &ix->dt_nodes[nd->kid0];
+    if ((kd->sub_mask & want) == 0u) {
+      if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+      goto out;
+    }
+    if (bk == NULL) {
+      if (g_ftdt_pd) g_atp_pushn_dt_bind1++;
+      bind[k] = sc;
+      ub[un++] = (u16)k;
+      if (k + 1u > nbound) nbound = k + 1u;
+    }
+    if (g_ftdt_pd) { g_atp_pushn_dt_chain++; dp++; }
+    node = nd->kid0;
+    nd   = kd;
+    sc   = (sc->end != NULL) ? sc->end->next : d->sc_end;
+  }
+  // Branch node (or single STAR edge).  Var/star region first, then
+  // the ascending concrete region -- as ftdt_descend, with the child
+  // sub_mask tested BEFORE any bind / ft_eq / recursion.
+  {
+    const AtpFtCell *skip = (sc->end != NULL) ? sc->end->next : d->sc_end;
+    u32 nv = nd->n_var_edge;
+    if (g_ftdt_pd) {
+      g_atp_pushn_dt_edge += nd->n_edge;
+      g_atp_pushn_dt_branch++;
+    }
+    for (u32 e = 0; e < nv; e++) {
+      u32 label = nd->labels[e];
+      if (label == FTDT_STAR) {
+        // Defensive overflow edge (see FTDT_VAR0): unconditional skip.
+        if ((ix->dt_nodes[nd->kids[e]].sub_mask & want) == 0u) {
+          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          continue;
+        }
+        if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
+        ftdt_descend2(d, nd->kids[e], skip, nbound, 0u);
+        continue;
+      }
+      u32 k = label - FTDT_VAR0;
+      const AtpFtCell *bk = bind[k];
+      if (bk != NULL) {
+        if (g_ftdt_pd) {
+          g_atp_pushn_dt_fteq++;
+          g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(sc);
+        }
+        if (bk->sym != sc->sym) continue;     // first-cell fail-fast
+        if (!ft_eq(bk, sc)) continue;
+        if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
+      }
+      if ((ix->dt_nodes[nd->kids[e]].sub_mask & want) == 0u) {
+        if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+        continue;
+      }
+      if (bk == NULL) {
+        if (g_ftdt_pd) { g_atp_pushn_dt_bind1++; g_ftdt_dp = dp + 1u; }
+        bind[k] = sc;
+        ftdt_descend2(d, nd->kids[e], skip,
+                      (k + 1u > nbound) ? k + 1u : nbound, pure);
+        bind[k] = NULL;
+      } else {
+        if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
+        ftdt_descend2(d, nd->kids[e], skip, nbound, pure);
+      }
+    }
+    if ((sc->sym & WF_VAR_BIT) == 0u) {
+      for (u32 e = nv; e < nd->n_edge; e++) {
+        u32 label = nd->labels[e];
+        if (g_ftdt_pd) g_atp_pushn_dt_cprobe++;
+        if (label < sc->sym) continue;
+        if (label == sc->sym) {
+          if ((ix->dt_nodes[nd->kids[e]].sub_mask & want) != 0u) {
+            if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
+            ftdt_descend2(d, nd->kids[e], sc->next, nbound, pure);
+          } else if (g_ftdt_pd) {
+            g_atp_pushn_dt_prune++;
+          }
+        }
+        break;
+      }
+    }
+  }
+out:
+  while (un > 0u) bind[ub[--un]] = NULL;
 }
 
 // Order-preserving ascending-u32 sort of a[0..n) -- the byte-identical
@@ -1390,6 +1600,63 @@ static void ftdt_sort_u32(FtPiIndex *ix, u32 *a, u32 n) {
     for (u32 i = 0u; i < n; i++) a[i] = src[i];
 }
 
+// One-shot static tree-shape dump at process teardown (armed with the
+// THVM_ATPFT_PRUNE_STATS printout): per-depth node / edge / leaf
+// aggregates of the FINAL tree build, so the bushy region is readable
+// next to the per-depth visit histogram the descend collects.
+static void ftdt_shape_dump(void) {
+  FtPiIndex *ix = &g_ftpi;
+  u32 n = ix->dt_n_nodes;
+  if (n == 0u) return;
+  enum { SHN = 24 };
+  u64 nodes[SHN] = {0}, edges[SHN] = {0}, vedges[SHN] = {0};
+  u64 leaves[SHN] = {0};
+  u32 *bfs   = (u32 *)malloc((size_t)n * sizeof(u32));
+  u32 *depth = (u32 *)malloc((size_t)n * sizeof(u32));
+  if (bfs == NULL || depth == NULL) { free(bfs); free(depth); return; }
+  u32 head = 0u, tail = 0u;
+  bfs[tail] = 0u; depth[tail] = 0u; tail++;
+  u64 tot_edges = 0u, tot_leaves = 0u, max_d = 0u;
+  while (head < tail) {
+    u32 nd_i = bfs[head], d = depth[head]; head++;
+    const FtDtNode *nd = &ix->dt_nodes[nd_i];
+    u32 db = (d < SHN - 1u) ? d : SHN - 1u;
+    if (d > max_d) max_d = d;
+    nodes[db]++;
+    edges[db]  += nd->n_edge;
+    vedges[db] += nd->n_var_edge;
+    leaves[db] += nd->leaf_n + nd->leaf_un_n;
+    tot_edges  += nd->n_edge;
+    tot_leaves += nd->leaf_n + nd->leaf_un_n;
+    for (u32 e = 0; e < nd->n_edge && tail < n; e++) {
+      bfs[tail] = nd->kids[e]; depth[tail] = d + 1u; tail++;
+    }
+  }
+  fprintf(stderr,
+          "[ftdt shape] nodes=%u (hi=%u) edges=%llu leaves=%llu maxdepth=%llu "
+          "node-bytes=%zu pool=%.1fKB\n",
+          n, ix->dt_hi_nodes, (unsigned long long)tot_edges,
+          (unsigned long long)tot_leaves, (unsigned long long)max_d,
+          sizeof(FtDtNode), (double)ix->dt_hi_nodes * sizeof(FtDtNode) / 1024.0);
+  for (u32 d = 0; d < SHN; d++) {
+    if (nodes[d] == 0u) continue;
+    fprintf(stderr,
+            "[ftdt shape]   d=%-2u nodes=%-6llu edges=%-6llu var-edges=%-5llu "
+            "leaves=%llu\n",
+            d, (unsigned long long)nodes[d], (unsigned long long)edges[d],
+            (unsigned long long)vedges[d], (unsigned long long)leaves[d]);
+  }
+  free(bfs); free(depth);
+}
+
+// Tree-content generation stamp for the subtree-NF memo below (see
+// FtNfmEnt): bumped on EVERY index rebuild/extend (any rule add/kill/
+// flip changes the "is this subtree normal" verdict function, so all
+// memo entries die with the generation).
+static u64 g_ftnfm_gen = 1u;
+
+static void ftnfm_bump_gen(void) { g_ftnfm_gen++; }
+
 // Fill ix->cand[0..count) with the rule slots whose LHS/RHS preorder is
 // STRUCTURALLY COMPATIBLE with subject cell `p`, in ASCENDING slot order
 // with duplicates removed (a rule appears in two leaves only via the
@@ -1410,12 +1677,73 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
   ix->dtb_snap_n = 0u;      // per-query binding capture (see FtDtRec)
   ix->dtb_rec_n  = 0u;
   g_ftdt_pd = (u8)(g_atp_phase_detail && g_atp_pushn_active);
+  if (g_ftdt_pd) g_ftdt_dp = 0u;
   // `pure` doubles as the recording gate: a caller that will not
   // consume the records (THVM_NO_FT_DTB sweep) starts the descent
   // impure, so no snapshot/record is ever taken -- the candidate list
   // itself is unchanged either way.
   FtDtDesc d = { ix, p_end, &out, ftdt_bind, want };
-  ftdt_descend(&d, 0u, p, 0u, rec_on ? 1u : 0u);
+  // Default walk = ftdt_descend2 (prune-hoist + var-chain follow);
+  // THVM_NO_FT_DTV2=1 reverts to the classic ftdt_descend for the
+  // same-binary A/B.  Identical candidate/record SET either way.
+  static int dtv2_off = -1;
+  if (dtv2_off < 0) {
+    const char *e = getenv("THVM_NO_FT_DTV2");
+    dtv2_off = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  }
+  // Divergence harness (THVM_FT_DTV2_DIFF=1): run BOTH walks per query
+  // and fatal on the first candidate-set difference, dumping the
+  // subject preorder + both sets.  Diagnostic only.
+  static int dtv2_diff = -1;
+  if (dtv2_diff < 0) {
+    const char *e = getenv("THVM_FT_DTV2_DIFF");
+    dtv2_diff = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  }
+  if (dtv2_diff) {
+    u32 out1 = 0u;
+    FtDtDesc d1 = { ix, p_end, &out1, ftdt_bind, want };
+    ftdt_descend(&d1, 0u, p, 0u, 0u);   // classic, impure (no records)
+    static u32 c1[65536];
+    u32 n1 = (out1 < 65536u) ? out1 : 65536u;
+    for (u32 i = 0; i < n1; i++) c1[i] = ix->cand[i];
+    ftdt_sort_u32(ix, c1, n1);
+    out1 = 0u;   // discard; rerun v2 below fills for real
+    ix->dtb_snap_n = 0u;
+    ix->dtb_rec_n  = 0u;
+    u32 out2 = 0u;
+    FtDtDesc d2 = { ix, p_end, &out2, ftdt_bind, want };
+    ftdt_descend2(&d2, 0u, p, 0u, 0u);
+    static u32 c2[65536];
+    u32 n2 = (out2 < 65536u) ? out2 : 65536u;
+    for (u32 i = 0; i < n2; i++) c2[i] = ix->cand[i];
+    ftdt_sort_u32(ix, c2, n2);
+    int bad = (n1 != n2);
+    for (u32 i = 0; !bad && i < n1; i++) bad = (c1[i] != c2[i]);
+    if (bad) {
+      fprintf(stderr, "[dtv2 DIFF] want=%u classic n=%u:", want, n1);
+      for (u32 i = 0; i < n1 && i < 32u; i++) fprintf(stderr, " %u", c1[i]);
+      fprintf(stderr, "\n[dtv2 DIFF] v2 n=%u:", n2);
+      for (u32 i = 0; i < n2 && i < 32u; i++) fprintf(stderr, " %u", c2[i]);
+      fprintf(stderr, "\n[dtv2 DIFF] subject:");
+      for (const AtpFtCell *c = p; c != NULL && c != p_end; c = c->next)
+        fprintf(stderr, " %x/%u", c->sym, (u32)c->arity);
+      fprintf(stderr, "\n");
+      u32 miss = (n1 > 0u) ? c1[0] : ((n2 > 0u) ? c2[0] : 0u);
+      const AtpFtCell *ml = s->lhs_ft[miss];
+      if (ml != NULL) {
+        const AtpFtCell *me = (ml->end != NULL) ? ml->end->next : NULL;
+        fprintf(stderr, "[dtv2 DIFF] rule %u lhs:", miss);
+        for (const AtpFtCell *c = ml; c != NULL && c != me; c = c->next)
+          fprintf(stderr, " %x/%u", c->sym, (u32)c->arity);
+        fprintf(stderr, "\n");
+      }
+      thvm_fatal("dtv2: candidate-set divergence");
+    }
+    ix->dtb_snap_n = 0u;
+    ix->dtb_rec_n  = 0u;
+  }
+  if (dtv2_off) ftdt_descend(&d, 0u, p, 0u, rec_on ? 1u : 0u);
+  else          ftdt_descend2(&d, 0u, p, 0u, rec_on ? 1u : 0u);
   if (out > 1u) {
     ftdt_sort_u32(ix, ix->cand, out);
     u32 w = 1u;
@@ -1975,6 +2303,8 @@ typedef struct {
   AtpFtCell *cell;   // WM Stelle: head cell of this path position
   AtpFtCell *ins;    // WM EinfuegePunkt: cell before the current child
   u32        left;   // WM AnzNochZuBehandelnderTeilterme
+  u64        rw0;    // splice count at push (subtree-NF store witness)
+  u8         nfm_hit;// NFM_CHECK: memo claimed this subtree normal
 } FtNfPathEnt;
 
 static int ft_find_position(AtpFtCell *root, AtpFtCell *target,
@@ -2008,6 +2338,12 @@ typedef struct {
   AtpProofStep *psteps;
   u32          *pn;
   u32           pcap;
+  // Subtree-NF memo state (see FtNfmEnt): splices fired this call,
+  // budget/cap starvation (blocks stores), gate + want-config key.
+  u64           rw_count;
+  u8            starved;
+  u8            nfm_on;
+  u8            nfm_want;
 } FtMixmost;
 
 // WM NFB_RegelOderGleichungAngewendet: one reduction attempt at the
@@ -2018,7 +2354,7 @@ typedef struct {
 // enclosing loop unwinds and the caller returns the partial form (the
 // legacy path's cap semantics).
 static int ft_mixmost_reduce_here(FtMixmost *m) {
-  if (m->budget == 0u) return 0;
+  if (m->budget == 0u) { m->starved = 1u; return 0; }
   FtNfPathEnt *e = &m->st[m->depth];
   // Var-cell early-out hoisted from ft_cell_try_rules (a free var is never
   // a redex): ~half of all preorder positions are variable leaves, and the
@@ -2061,6 +2397,7 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   if (new_root == NULL) return 0;   // defensive: ft_splice returns the root
   if (g_atp_phase_detail && g_atp_pushn_active) g_atp_pushn_rw++;
   m->budget--;
+  m->rw_count++;
   m->root = new_root;
   m->st[0].cell = m->root;
   e->cell = (m->depth == 0u) ? m->root : parent->next;
@@ -2093,6 +2430,111 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   return 1;
 }
 
+// --- Subtree normal-form memo (mixmost walk) --------------------------
+//
+// A raw CP is one overlap step away from two normal-form parents, so
+// most of its subtrees are ALREADY normal (92% of position queries
+// fail), and the same subterm content recurs across the CPs of a
+// batch.  "No rule of R rewrites anywhere inside preorder string S
+// under want-config W" is a pure function of (S, W, tree content), so
+// one content-keyed probe at a subtree head can skip the ENTIRE
+// subtree's positions -- and a hit's output is its input (the subtree
+// is untouched; nothing is materialized).  The subtree granularity is
+// what pays: a finer per-QUERY fail memo at the ftdt_candidates level
+// replaces one descend with a probe of about the same cost (built,
+// measured fully subsumed by this memo -- 0.0s marginal on the OA
+// gate -- and removed 2026-07-03).  Exactness discipline: full
+// preorder memcmp (no hash-only verdicts), want in the key, the
+// g_ftnfm_gen generation stamp (bumped on every index rebuild/extend,
+// which ftpi_ensure syncs to r_revision -- rules cannot change inside
+// one normalize call).  A subtree verdict is STORED when the walk pops
+// a completed position with no splice recorded inside it (rw_count
+// unchanged since push) and no budget/NF-cap starvation (a starved
+// reduce_here reports "no redex" without trying, so completion proves
+// nothing).  Kill switch THVM_NO_FT_NFMEMO=1; certifier
+// THVM_ATPFT_NFM_CHECK=1 disables the skip but records each hit and
+// fatals at pop when a splice fired inside a subtree the memo claimed
+// normal.
+enum { FTNFM_MAX_SYMS = 32, FTNFM_BITS = 16 };
+typedef struct {
+  u64 hash;
+  u64 gen;
+  u32 syms[FTNFM_MAX_SYMS];
+  u8  len;
+  u8  want;
+} FtNfmEnt;
+static FtNfmEnt *g_ftnfm = NULL;
+u64 g_atp_ftnfm_probe = 0, g_atp_ftnfm_hit = 0, g_atp_ftnfm_store = 0;
+
+static u32 ftnfm_key(const AtpFtCell *c, u32 *syms, u64 *hash_out) {
+  const AtpFtCell *e = (c->end != NULL) ? c->end->next : NULL;
+  u32 len = 0u;
+  u64 h = 1469598103934665603ull;              // FNV-1a 64
+  for (; c != e; c = c->next) {
+    if (len == FTNFM_MAX_SYMS) return 0u;
+    u32 sy = c->sym;
+    syms[len++] = sy;
+    h ^= (u64)sy;
+    h *= 1099511628211ull;
+  }
+  *hash_out = h;
+  return len;
+}
+
+static FtNfmEnt *ftnfm_ent(u64 hash) {
+  if (g_ftnfm == NULL) {
+    g_ftnfm = (FtNfmEnt *)calloc((size_t)1u << FTNFM_BITS, sizeof(FtNfmEnt));
+    if (g_ftnfm == NULL) thvm_fatal("ftnfm: memo table OOM");
+  }
+  return &g_ftnfm[hash & (((u64)1u << FTNFM_BITS) - 1u)];
+}
+
+// 1 iff subtree `c` is memoized normal under want-config `wantk` at the
+// current generation.  A single var cell never probes (the walk's var
+// early-out is already cheaper than a probe).
+static int ftnfm_probe(const AtpFtCell *c, u8 wantk) {
+  if ((c->sym & WF_VAR_BIT) != 0u) return 0;
+  u32 syms[FTNFM_MAX_SYMS];
+  u64 h;
+  u32 len = ftnfm_key(c, syms, &h);
+  g_atp_ftnfm_probe++;
+  if (len == 0u) return 0;                     // too big to memo
+  FtNfmEnt *ent = ftnfm_ent(h);
+  if (ent->gen == g_ftnfm_gen && ent->hash == h && ent->want == wantk &&
+      ent->len == (u8)len && memcmp(ent->syms, syms, len * sizeof(u32)) == 0) {
+    g_atp_ftnfm_hit++;
+    return 1;
+  }
+  return 0;
+}
+
+static void ftnfm_store(const AtpFtCell *c, u8 wantk) {
+  if ((c->sym & WF_VAR_BIT) != 0u) return;
+  u32 syms[FTNFM_MAX_SYMS];
+  u64 h;
+  u32 len = ftnfm_key(c, syms, &h);
+  if (len == 0u) return;
+  FtNfmEnt *ent = ftnfm_ent(h);
+  ent->gen  = g_ftnfm_gen;
+  ent->hash = h;
+  ent->want = wantk;
+  ent->len  = (u8)len;
+  memcpy(ent->syms, syms, len * sizeof(u32));
+  g_atp_ftnfm_store++;
+}
+
+// Re-query provenance wrappers (THVM_ATP_PROFILE=2 push scope only):
+// tag reduce_here calls issued by the local-fixpoint whiles vs the
+// post-reduction ascent so the redundant-re-query mass is readable.
+static int ft_mm_here_fix(FtMixmost *m) {
+  if (g_atp_phase_detail && g_atp_pushn_active) g_atp_pushn_mm_fix++;
+  return ft_mixmost_reduce_here(m);
+}
+static int ft_mm_here_asc(FtMixmost *m) {
+  if (g_atp_phase_detail && g_atp_pushn_active) g_atp_pushn_mm_asc++;
+  return ft_mixmost_reduce_here(m);
+}
+
 static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
                                            u32 slice_first, u32 slice_end,
                                            u32 step_cap, u8 doE,
@@ -2115,6 +2557,30 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
   m.st[0].cell = t;
   m.st[0].ins  = NULL;
   m.st[0].left = ft_cell_arity(t);
+  m.st[0].rw0  = 0u;
+  m.st[0].nfm_hit = 0u;
+  // Subtree-NF memo gate (see FtNfmEnt): full-range index-applicable
+  // calls only, index synced FIRST so the generation stamp reflects the
+  // CURRENT rule content (rules cannot change inside one call).
+  static int nfm_off = -1;
+  static int nfm_check = -1;
+  if (nfm_off < 0) {
+    const char *e = getenv("THVM_NO_FT_NFMEMO");
+    nfm_off = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+    const char *c = getenv("THVM_ATPFT_NFM_CHECK");
+    nfm_check = (c != NULL && c[0] != '0' && c[0] != '\0') ? 1 : 0;
+  }
+  u8 nfm_root_hit = 0u;
+  if (!nfm_off && ftpi_applicable(s, slice_first, slice_end)) {
+    ftpi_ensure(s);
+    m.nfm_on   = 1u;
+    m.nfm_want = (u8)(FTDT_WANT_ORIENT |
+                      ((doE && s->n_unorient > 0u) ? FTDT_WANT_UNORIENT : 0u));
+    if (ftnfm_probe(t, m.nfm_want)) {
+      if (!nfm_check) return t;   // whole term memoized normal: identity
+      nfm_root_hit = 1u;          // certifier: walk anyway, verify at exit
+    }
+  }
   // Critical-pair overlaps can normalize to pathologically large terms
   // (variable-multiplication blowup: a small rule's RHS instantiated under
   // a deep unifier -- the goal-directed OrAssociativity heap-blowup, ~650
@@ -2132,18 +2598,31 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
   if (nf_cap < 0) { const char *e = getenv("THVM_ATP_NF_CAP");
     nf_cap = (e && *e) ? (int)strtol(e, NULL, 10) : 0; }
   // Root fixpoint (the loop before WeiterInVO, NFBildung.c:355).
-  while (ft_mixmost_reduce_here(&m)) {
+  while (ft_mm_here_fix(&m)) {
     if (nf_cap > 0 &&
         nf_arena->n_persistent_alive - nf_start > (u64)nf_cap) break;
   }
   for (;;) {
     if (m.budget == 0u) break;
     if (nf_cap > 0 &&
-        nf_arena->n_persistent_alive - nf_start > (u64)nf_cap) break;
+        nf_arena->n_persistent_alive - nf_start > (u64)nf_cap) {
+      m.starved = 1u;   // capped: completion below proves nothing
+      break;
+    }
     // WeiterInVO (:289-300): ascend past exhausted positions, then
     // step to the next unvisited child (PfadEinsWeiterSetzen).
     while (m.st[m.depth].left == 0u) {
       if (m.depth == 0u) goto done;
+      // Pop of a COMPLETED position: no splice inside since its push
+      // and no starvation -> its subtree is proven normal, store it.
+      // NFM_CHECK: a memo-claimed-normal subtree that spliced anyway
+      // is a stale/unsound entry -- fatal.
+      FtNfPathEnt *pe = &m.st[m.depth];
+      if (m.nfm_on && m.rw_count == pe->rw0) {
+        if (!m.starved) ftnfm_store(pe->cell, m.nfm_want);
+      } else if (pe->nfm_hit) {
+        thvm_fatal("ftnfm: memoized-normal subtree was rewritten (stale)");
+      }
       m.depth--;
     }
     if (m.depth + 1u >= m.cap) {
@@ -2162,13 +2641,23 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     // First child starts right after the head cell; each later child
     // right after the previous child's end (:141-211).
     e->ins = (e->ins == NULL) ? e->cell : e->ins->next->end;
+    // Subtree-NF memo: child memoized normal -> skip its ENTIRE
+    // subtree (no push; e->ins already marks it visited).  Certifier
+    // mode walks it anyway and verifies at pop.
+    u8 child_hit = 0u;
+    if (m.nfm_on && ftnfm_probe(e->ins->next, m.nfm_want)) {
+      if (!nfm_check) continue;
+      child_hit = 1u;
+    }
     m.depth++;
     m.st[m.depth].cell = e->ins->next;
     m.st[m.depth].ins  = NULL;
     m.st[m.depth].left = ft_cell_arity(m.st[m.depth].cell);
+    m.st[m.depth].rw0  = m.rw_count;
+    m.st[m.depth].nfm_hit = child_hit;
     if (ft_mixmost_reduce_here(&m)) {
       // Local fixpoint at the reduced position (:367).
-      while (ft_mixmost_reduce_here(&m)) {}
+      while (ft_mm_here_fix(&m)) {}
       u32 last_red = m.depth;   // WM letzteRed
       // Ascent (:370-373): try ancestors deepest-first up to the root;
       // a firing ancestor is fixpointed and the ascent restarts there.
@@ -2177,10 +2666,10 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
         m.depth = last_red;
         while (m.depth > 0u) {
           m.depth--;
-          if (ft_mixmost_reduce_here(&m)) { fired = 1; break; }
+          if (ft_mm_here_asc(&m)) { fired = 1; break; }
         }
         if (!fired) break;
-        while (ft_mixmost_reduce_here(&m)) {}
+        while (ft_mm_here_fix(&m)) {}
         last_red = m.depth;
       }
       // Resume the preorder walk at the last reduced position (:375).
@@ -2188,6 +2677,12 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     }
   }
 done:
+  // Whole-term store / root-hit certify (the depth-0 "pop").
+  if (m.nfm_on && m.rw_count == 0u) {
+    if (!m.starved) ftnfm_store(m.root, m.nfm_want);
+  } else if (nfm_root_hit) {
+    thvm_fatal("ftnfm: memoized-normal root was rewritten (stale)");
+  }
   free(heap_st);
   return m.root;
 }

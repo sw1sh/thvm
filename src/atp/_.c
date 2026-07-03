@@ -392,6 +392,32 @@ u64 g_atp_pushn_rw                = 0;
 // iterations, so the tree-walk cost per query is directly readable.
 u64 g_atp_pushn_dt_node           = 0;
 u64 g_atp_pushn_dt_edge           = 0;
+// Deep descend split (same tier + scope): where inside the walk the
+// visits/edges go.  chain = single-concrete-edge lockstep hops,
+// branch = nodes that reach the edge loops, prune = sub_mask subtree
+// rejects, emit = leaf emissions.  Var-edge exploration splits into
+// first-traversal binds (bind1), repeat ft_eq compares (fteq, of
+// which fteq_ok passed, fteq_cell subject cells walked by the eq).
+// cprobe = concrete-region probe iterations (sorted early-break run).
+// hist[d] = node visits at tree depth d (last bucket = deeper).
+u64 g_atp_pushn_dt_chain          = 0;
+u64 g_atp_pushn_dt_branch         = 0;
+u64 g_atp_pushn_dt_prune          = 0;
+u64 g_atp_pushn_dt_emit           = 0;
+u64 g_atp_pushn_dt_bind1          = 0;
+u64 g_atp_pushn_dt_fteq           = 0;
+u64 g_atp_pushn_dt_fteq_ok        = 0;
+u64 g_atp_pushn_dt_fteq_cell      = 0;
+u64 g_atp_pushn_dt_cprobe         = 0;
+#define ATP_DT_HIST_N 24
+u64 g_atp_pushn_dt_hist[ATP_DT_HIST_N] = {0};
+// Mixmost re-query provenance (same tier + scope): reduce_here calls
+// issued by the local-fixpoint whiles vs the post-reduction ascent
+// loop -- the rest of the queries are the preorder walk's first
+// visits.  Counts CALLS (the failing terminator included), so
+// fix - splices = the redundant fixpoint re-queries.
+u64 g_atp_pushn_mm_fix            = 0;
+u64 g_atp_pushn_mm_asc            = 0;
 // CP-gen non-push detail tier (same THVM_ATP_PROFILE=2 gate): splits
 // the cp-gen phase OUTSIDE push-normalize into its components inside
 // thvm_atp_generate_cps_wm + atp_push_cps_traced --

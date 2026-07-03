@@ -2043,6 +2043,41 @@ int main(int argc, char **argv) {
              (unsigned long long)g_atp_pushn_dt_edge,
              g_atp_pushn_tr_q ? (double)g_atp_pushn_dt_node /
                                 (double)g_atp_pushn_tr_q : 0.0);
+      if (g_atp_pushn_dt_node > 0) {
+        // Deep descend split + per-depth visit histogram + mixmost
+        // re-query provenance (see the g_atp_pushn_dt_* block in _.c).
+        printf("     dt-split: chain=%llu branch=%llu prune=%llu emit=%llu\n"
+               "       bind1=%llu fteq=%llu fteq-ok=%llu fteq-cells=%llu "
+               "cprobe=%llu\n",
+               (unsigned long long)g_atp_pushn_dt_chain,
+               (unsigned long long)g_atp_pushn_dt_branch,
+               (unsigned long long)g_atp_pushn_dt_prune,
+               (unsigned long long)g_atp_pushn_dt_emit,
+               (unsigned long long)g_atp_pushn_dt_bind1,
+               (unsigned long long)g_atp_pushn_dt_fteq,
+               (unsigned long long)g_atp_pushn_dt_fteq_ok,
+               (unsigned long long)g_atp_pushn_dt_fteq_cell,
+               (unsigned long long)g_atp_pushn_dt_cprobe);
+        printf("     dt-depth-visits:");
+        for (int hd = 0; hd < ATP_DT_HIST_N; hd++) {
+          if (g_atp_pushn_dt_hist[hd] == 0) continue;
+          printf(" %d:%llu", hd,
+                 (unsigned long long)g_atp_pushn_dt_hist[hd]);
+        }
+        printf("\n");
+        printf("     mm-requery: fix=%llu asc=%llu (of q=%llu)\n",
+               (unsigned long long)g_atp_pushn_mm_fix,
+               (unsigned long long)g_atp_pushn_mm_asc,
+               (unsigned long long)g_atp_pushn_tr_q);
+      }
+      if (g_atp_ftnfm_probe > 0) {
+        printf("   ftnfm subtree-NF-memo: probe=%llu hit=%llu [%.1f%%] "
+               "store=%llu\n",
+               (unsigned long long)g_atp_ftnfm_probe,
+               (unsigned long long)g_atp_ftnfm_hit,
+               100.0 * (double)g_atp_ftnfm_hit / (double)g_atp_ftnfm_probe,
+               (unsigned long long)g_atp_ftnfm_store);
+      }
       if (g_atp_swrn_hit + g_atp_swrn_miss > 0) {
         printf("   walk rename cache: hit=%llu miss=%llu [%.1f%%]\n",
                (unsigned long long)g_atp_swrn_hit,
