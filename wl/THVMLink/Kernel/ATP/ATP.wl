@@ -242,6 +242,19 @@ $atpRunFn := $atpRunFn = load[
     "NumericArray"
 ]
 
+(* Waldmeister loader canonicalization (SpezNormierung): takes the
+   packed problem wire, returns Int64 NumericArray
+   [n_ax, order_0.., swap_0..] -- the canonical intake permutation
+   (0-based input indices in canonical rank order) and per-axiom LR
+   swap flags.  The Waldmeister preset applies it BEFORE encoding so
+   axiom numbering / sides in the ProofObject match FEQ / the external
+   wmcli protocol (see thvm_wl_atp_wm_intake_order in thvmlink_atp.c). *)
+$atpWmIntakeOrderFn := $atpWmIntakeOrderFn = load[
+    "thvm_wl_atp_wm_intake_order",
+    {{"NumericArray", "Shared"}},
+    "NumericArray"
+]
+
 (* Proof runner: $atpRunFn + proof extraction.  Returns one
    self-describing Int64 NumericArray -- a 5-int header
    [status, n_rules, n_trace, n_cps, n_steps] followed by the
@@ -1775,18 +1788,53 @@ encodeAxiomFold[{terms_, state_, idx_}, axHC_] := Block[{r = encodeEquation[axHC
 SetAttributes[atpEncodeProblem, HoldAll];
 atpEncodeProblem[axioms_, conjecture_] :=
     atpEncodeProblem[axioms, conjecture, False];
-atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
-    axHCsRaw, axHCs, cjHCs, axTermsAndState, axTerms, st, axFlags,
-    goalRes, goalTerms, axPairs, conjPairs, conjPair, n, nGoals
-},
+atpEncodeProblem[axioms_, conjecture_, skolemize_] := (
     If[ ! ListQ[Unevaluated[axioms]],
         Throw[Failure["TATPParseError",
             <|"Reason" -> "axioms must be a List"|>], "TATPError"
         ]
     ];
     ensureInit[];
-    n = Length[Unevaluated[axioms]];
-    axHCsRaw = HoldComplete /@ Unevaluated[axioms];
+    atpEncodeHeld[HoldComplete /@ Unevaluated[axioms],
+        HoldComplete[conjecture], skolemize]
+)
+
+(* LR side swap of one HELD axiom (WM LRSortieren storage form):
+   swap Equal / Inactive[Equal] sides inside the HoldComplete, through
+   an optional ForAll wrapper.  Any other shape is returned as-is. *)
+atpWmSwapHeld[hc_] := Replace[hc, {
+    HoldComplete[(h : Equal | Inactive[Equal])[l_, r_]] :> HoldComplete[h[r, l]],
+    HoldComplete[ForAll[v_, (h : Equal | Inactive[Equal])[l_, r_]]] :> HoldComplete[ForAll[v, h[r, l]]]
+}]
+
+(* True iff the held axiom has a shape atpWmSwapHeld can swap -- the
+   gate for the loader canonicalization pass (pre-oriented Rule-form
+   axioms and anything exotic keep their input order). *)
+atpWmSwappableQ[hc_] := MatchQ[hc,
+    HoldComplete[(Equal | Inactive[Equal])[_, _]] |
+    HoldComplete[ForAll[_, (Equal | Inactive[Equal])[_, _]]]]
+
+(* Encoder core over an ALREADY-HELD axiom list (each element a
+   HoldComplete[axiom]) + the held conjecture.  Split out of
+   atpEncodeProblem so the WM loader canonicalization pass below can
+   re-enter with a permuted held list without ever evaluating an
+   axiom (`a == a` must not collapse to True).
+
+   $atpWmIntakeApply (dynamic, set by the IntakeOrder-preset callers):
+   after the first encode, ask the C SpezNormierung port
+   ($atpWmIntakeOrderFn, src/atp/wm_intake.c) for WM's canonical
+   intake permutation + per-axiom LR swaps on the packed wire, and
+   when non-trivial re-encode ONCE from the permuted+swapped held
+   axioms.  The engine-level intake hook reorders the QUEUE the same
+   way in either case; this pass aligns the WL-visible axiom
+   numbering and statement sides (FEQ / wmcli protocol parity).
+   Applies only when every axiom is a plain (possibly ForAll-wrapped)
+   equation with no pre-oriented Rule (axFlags all 0). *)
+atpEncodeHeld[axHCsRawIn_List, cjHeldWhole_HoldComplete, skolemize_] := Block[{
+    axHCsRaw = axHCsRawIn, axHCs, cjHCs, axTermsAndState, axTerms, st, axFlags,
+    goalRes, goalTerms, axPairs, conjPairs, conjPair, n, nGoals, res
+},
+    n = Length[axHCsRaw];
     (* Orientation flag must be read off the ORIGINAL HoldComplete
        (before ForAll-strip / Rule->Equal conversion) so the syntactic
        Rule head is still visible.  Mapped here, not inside the fold,
@@ -1805,12 +1853,12 @@ atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
        off ONE saturation, FindEquationalProof[{g1, g2}, axioms]
        parity); anything else is the single-conjecture case. *)
     cjHCs = Which[
-        Unevaluated[conjecture] === None,
+        cjHeldWhole === HoldComplete[None],
             {},
-        MatchQ[Unevaluated[conjecture], _List],
-            forAllToPattern /@ (HoldComplete /@ Unevaluated[conjecture]),
+        MatchQ[cjHeldWhole, HoldComplete[_List]],
+            forAllToPattern /@ Thread[cjHeldWhole],
         True,
-            {forAllToPattern[HoldComplete[conjecture]]}
+            {forAllToPattern[cjHeldWhole]}
     ];
     (* Skolemize: a universal conjecture is proved for an arbitrary
        fixed instance, so strip the bound variables' Pattern wrappers
@@ -1862,7 +1910,7 @@ atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
        thvm_atp_install_oriented_rule (flag == 1); total length
        2 + 3*n + 2*n_goals.  n_goals == 0 is completion mode.  See
        [[project_atp_oriented_rules]]. *)
-    <|
+    res = <|
         "Packed" -> NumericArray[
             Join[{nGoals, n}, axTerms, goalTerms, axFlags],
             "Integer64"
@@ -1876,11 +1924,30 @@ atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
         "AxHCsRaw" -> axHCsRaw,
         "ConjHCRaw" -> Which[
             nGoals == 0, HoldComplete[None],
-            ! skolemize, HoldComplete[conjecture],
+            ! skolemize, cjHeldWhole,
             nGoals == 1, First[cjHCs],
             True, cjHCs
         ]
-    |>
+    |>;
+    (* WM loader canonicalization pass (see the header comment).  Runs
+       at most once: the re-entry clears the dynamic flag. *)
+    If[ TrueQ[$atpWmIntakeApply] && n > 0 && VectorQ[axFlags, # === 0 &] &&
+            AllTrue[axHCsRaw, atpWmSwappableQ],
+        Block[{$atpWmIntakeApply = False, wmRaw, order, swaps, permuted},
+            wmRaw = Quiet @ Check[Normal @ $atpWmIntakeOrderFn[res["Packed"]], $Failed];
+            If[ ListQ[wmRaw] && Length[wmRaw] === 1 + 2 n && wmRaw[[1]] === n,
+                order = wmRaw[[2 ;; n + 1]] + 1;
+                swaps = wmRaw[[n + 2 ;;]];
+                If[ order =!= Range[n] || Max[swaps] === 1,
+                    permuted = MapThread[
+                        {hc, sw} |-> If[ sw === 1, atpWmSwapHeld[hc], hc],
+                        {axHCsRaw, swaps}][[order]];
+                    res = atpEncodeHeld[permuted, cjHeldWhole, skolemize]
+                ]
+            ]
+        ]
+    ];
+    res
 ]
 
 (* === TATP[] WL surface ============================================ *)
@@ -3154,26 +3221,17 @@ atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
    StdS closes -- and only adds the MNF front when
    "GoalDirected" -> True is requested for a symmetric goal the
    single-NF check cannot reach. *)
-(* Method -> "Waldmeister": goal-directed FAST default.  The full
-   byte-parity selection stack still lives in
-   $AtpPresetDefaults["Waldmeister"] (and is reachable verbatim as
-   Method -> "WaldmeisterFaithful"), but the user-facing default injects
-   the goal-directed config -- Mix2 CP weight + GoalInterleave -- that
-   produces a valid ProofObject FASTER than FindEquationalProof
-   (MeredithAxioms/OrAssociativity ~0.96s vs FEQ ~0.99s, vs 23.7s for
-   the full faithful saturation).  Injected as LEADING subopts so any
-   explicit user option still wins (e.g. GoalInterleave -> 0 +
-   CriticalPairWeight -> "Mix" recovers the faithful selection). *)
+(* Method -> "Waldmeister": Waldmeister's own default configuration --
+   the config FindEquationalProof (and `wmcli -auto` on an Orkus-class
+   problem) actually runs: kbo(std), MixWeight classification,
+   itl(mi) = 1 FIFO per 50 heuristic picks (SelectionRatio 51), the
+   loader-level SpezNormierung intake, no goal-direction.  This is the
+   byte-parity selection stack validated against `wmcli -a 4`
+   (tools/baselines/wm_align_matrix.tsv).  Subopts override any knob
+   (e.g. CriticalPairWeight -> "Mix2" + GoalInterleave -> 10 gives a
+   goal-directed fast variant). *)
 atpParseMethod["Waldmeister"] := atpParseMethod[{"Waldmeister"}];
 atpParseMethod[{"Waldmeister", subopts___Rule}] :=
-    atpDispatchPreset[$AtpPresetDefaults["Waldmeister"],
-        $AtpPresetGoalDirected["Waldmeister"],
-        Join[{"CriticalPairWeight" -> "Mix2", "GoalInterleave" -> 10}, {subopts}]];
-
-(* Method -> "WaldmeisterFaithful": the exact WM byte-parity selection
-   sequence (no goal-direction) -- the slow parity reference. *)
-atpParseMethod["WaldmeisterFaithful"] := atpParseMethod[{"WaldmeisterFaithful"}];
-atpParseMethod[{"WaldmeisterFaithful", subopts___Rule}] :=
     atpDispatchPreset[$AtpPresetDefaults["Waldmeister"],
         $AtpPresetGoalDirected["Waldmeister"], {subopts}];
 
@@ -3334,7 +3392,7 @@ atpParseMethod[{"ENIGMA", subopts___Rule}] :=
    configs); the rest are single-config presets.  Exposed as
    $AtpMethodPresets so a downstream tool (test sweep, doc generator,
    tuner) can enumerate them without re-encoding the set. *)
-$AtpMethodPresets = {"Waldmeister", "WaldmeisterFaithful",
+$AtpMethodPresets = {"Waldmeister",
     "VampireUEQ", "Twee", "EProver",
     "VampireRandom", "ENIGMA",
     "Portfolio", "VampirePortfolio", "VampirePortfolioCompact",
@@ -4501,6 +4559,19 @@ TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, OptionsPatter
    expressions, so popping its heap is safe.  See thvm_wl_atp_heap_recycle. *)
 atpHeapRecycleOuter[] := If[ ! TrueQ[$atpInRun], $atpHeapRecycleFn[]];
 
+(* True iff the Method spec resolves to a preset with the WM loader
+   intake ("IntakeOrder" -> True after subopt merge).  Gates the
+   loader-level axiom canonicalization below. *)
+atpWmIntakeOrderQ[m_] := Block[{name, subs},
+    {name, subs} = Replace[m, {
+        {n_String, s___Rule} :> {n, {s}},
+        n_String :> {n, {}},
+        _ :> {None, {}}}];
+    name =!= None && KeyExistsQ[$AtpPresetDefaults, name] &&
+        TrueQ @ Lookup[Join[$AtpPresetDefaults[name], Association[subs]],
+            "IntakeOrder", False]
+]
+
 atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
     (* Raise $RecursionLimit for the whole bundle: a deep Sheffer/Wolfram
@@ -4570,7 +4641,15 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
         enc, conjPair, nGoals, axiomKeys, ruleList, cRes, extSteps,
         chain, dataset, varNames, axEq, conjStmt, po, relAx, atpWallTime
     },
-        enc = atpEncodeProblem[axioms, conjecture, True];
+        (* WM loader canonicalization: under an IntakeOrder preset the
+           encoder permutes + LR-swaps the axiom list into WM's
+           canonical intake form (see $atpWmIntakeApply in
+           atpEncodeHeld), so trace ids, Axiom keys, and rendered
+           statements all match FEQ / the wmcli protocol.  (The
+           engine-level hook reorders the QUEUE identically either
+           way; this aligns the WL-visible presentation with it.) *)
+        enc = Block[{$atpWmIntakeApply = atpWmIntakeOrderQ[OptionValue[Method]]},
+            atpEncodeProblem[axioms, conjecture, True]];
         conjPair = enc["ConjPair"];
         nGoals = Length[enc["ConjPairs"]];
         relAx = TRelevantAxioms[conjecture, axioms, Method -> OptionValue[Method]];
@@ -4598,6 +4677,9 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
         (* Preferred path: the no-completion EXT chain cites the
            input axioms directly, so assembleDataset's axiom-cited
            SubstitutionLemma / Conclusion entries verify. *)
+        If[ Environment["THVM_ATP_LIFT_DEBUG"] === "1",
+            Print["LIFTDBG extSteps: ", Head[extSteps],
+                  If[ ListQ[extSteps], Length[extSteps], ""]]];
         dataset = $Failed;
         If[ extSteps =!= $Failed,
             If[ nGoals > 1,
@@ -4629,6 +4711,9 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                 ]
             ]
         ];
+        If[ Environment["THVM_ATP_LIFT_DEBUG"] === "1",
+            Print["LIFTDBG dataset after EXT: ", Head[dataset],
+                  "  chain: ", Head[chain]]];
         (* Fallback: the EXT chain could not close (or could not be
            expressed over the axioms) -- assemble the critical-pair
            lemma DAG from the completion trace.  Two-phase extraction:
@@ -4648,7 +4733,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
         conjStmt = If[ nGoals > 1,
             holdToProofStmt /@ enc["ConjHCRaw"],
             holdToProofStmt[enc["ConjHCRaw"]]];
-        Module[{tryBuild, poA, poB, poFinal},
+        Module[{tryBuild, hasChain, poA, poB, poFinal},
             (* Raise $RecursionLimit: a long completion proof (the deep
                Sheffer/Wolfram theorems run to ~300+ steps) walks a deep
                trace DAG in buildCplDataset and the WL verifier, which can
@@ -4694,10 +4779,12 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                         p["ProofFunction"][p["Theorems"]], $Failed];
                     If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
                         Print["[recon] verify-replay = ", $atpVerifyT, " s"]];
-                    If[ TrueQ[$AtpDebugDataset] && ! MatchQ[v, _Success],
+                    If[ (TrueQ[$AtpDebugDataset] ||
+                            Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed) &&
+                            ! MatchQ[v, _Success],
                         WriteString["stderr", "atp-verify-fail chain=",
                             ToString[chainOn], " v=",
-                            ToString[Short[v, 6], InputForm], "\n"]];
+                            ToString[Short[v, 12], InputForm], "\n"]];
                     (* FVI-gated proofs cite a SubstitutionLemma whose
                        Proof shape (Source -> "fvi") the FindEquational-
                        Proof verifier does not yet teach.  The C engine's
@@ -4716,14 +4803,22 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                     ]
                 ]]
             ];
-            (* When the C engine ran with per-step recording OFF
-               (cRes["RecordNorm"] === 0 -- Method "RecordNorm" -> False,
-               the fast-search path), no TRACE_NORM_STEP entries exist, so
-               the chain-ON extraction has nothing to walk: go straight to
+            (* When the trace carries no TRACE_NORM_STEP entries, the
+               chain-ON extraction has nothing to walk: go straight to
                the chain-OFF emitNorm BFS, which bridges the CP/ORIENT/
                SIMPLIFY trace DAG.  A pre-built axiom-cited EXT dataset
-               (when present) still wins regardless. *)
-            poA = If[ Lookup[cRes, "RecordNorm", 1] === 0 && dataset === $Failed,
+               (when present) still wins regardless.  RecordNorm -> False
+               alone no longer implies an unchained trace: the C wrapper's
+               post-PROVED proof-cone re-derivation
+               (thvm_atp_record_goal_cone) splices NORM_STEP chains behind
+               the goal-run ORIENT / SIMPLIFY bridges, so probe the trace
+               reasons directly (vectorized Part over the offset column,
+               same access buildCplDataset's orientFviIdx uses). *)
+            hasChain = Lookup[cRes, "RecordNorm", 1] =!= 0 ||
+                Block[{offs = Lookup[cRes, "TraceOffsets", {}]},
+                    Length[offs] > 0 &&
+                        MemberQ[Normal[cRes["TraceRaw"][[offs + 1]]], $TraceNormStep]];
+            poA = If[ ! hasChain && dataset === $Failed,
                 tryBuild[False, $Failed],
                 tryBuild[True, dataset]];
             poFinal = If[ MatchQ[poA, _ProofObject],
@@ -4764,8 +4859,12 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
             N[OptionValue[TimeConstraint]], 0.];
         (* Encode with a None conjecture: the packed array carries
            n_goals == 0, which the C runner reads as "no goal ->
-           saturate the axioms". *)
-        enc = atpEncodeProblem[axioms, None, False];
+           saturate the axioms".  Under an IntakeOrder preset the
+           encoder loader-canonicalizes the axiom list (see
+           $atpWmIntakeApply in atpEncodeHeld) so the presentation
+           matches WM's. *)
+        enc = Block[{$atpWmIntakeApply = atpWmIntakeOrderQ[OptionValue[Method]]},
+            atpEncodeProblem[axioms, None, False]];
         atpMethodCfg = atpParseMethod[OptionValue[Method]];
         {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[
             enc, OptionValue[MaxSteps], atpWall,

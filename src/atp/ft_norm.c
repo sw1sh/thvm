@@ -478,13 +478,29 @@ typedef struct {
   u32         dt_n_nodes;        // live nodes this build (<= dt_hi_nodes)
   u32         dt_hi_nodes;       // high-water: nodes ever allocated (buffers kept)
   u32         dt_cap_nodes;      // node array capacity
+  // Insert-time canon->var-id maps, one nvar-long slice per inserted
+  // pattern face (see FtDtRec).  Reset with the tree on rebuild.
+  u16        *dt_idmap;
+  u32         dt_idmap_n, dt_idmap_cap;
+  // Per-query descent-binding capture (reset at each ftdt_candidates):
+  // bind snapshots + acceptance records.
+  const AtpFtCell **dtb_snap;
+  u32         dtb_snap_n, dtb_snap_cap;
+  struct FtDtRec_s *dtb_rec;
+  u32         dtb_rec_n, dtb_rec_cap;
 } FtPiIndex;
 
 static FtPiIndex g_ftpi = {0};
 
+// Per-query snapshot of the detail-tier gate (THVM_ATP_PROFILE=2 push
+// scope) for the descend's per-node shape counters -- one u8 test per
+// visited node instead of two global loads.  Set in ftdt_candidates.
+static u8 g_ftdt_pd = 0;
+
 // Discrimination-tree builder hooks (defined below ftpi_candidates, but
 // called by ftpi_insert_rule / ftpi_rebuild above their definition).
-static void ftdt_insert_pattern(FtPiIndex *ix, const AtpFtCell *pat, u32 rule);
+static void ftdt_insert_pattern(FtPiIndex *ix, const AtpFtCell *pat, u32 rule,
+                                u8 unor, u8 face);
 static void ftdt_reset(FtPiIndex *ix);
 
 // THVM_ATPFT_PRUNE_STATS=1 prints the prune ratio at process exit:
@@ -604,7 +620,10 @@ static void ftpi_insert_rule(FtPiIndex *ix, AtpState *s, u32 i) {
   // Discrimination tree (full-depth) -- same faces as the buckets, so the
   // two indexes return the identical candidate SET; the tree just prunes
   // deeper.  A var-rooted LHS becomes a STAR-root path (matches any cell).
-  ftdt_insert_pattern(ix, lhs, i);
+  // The leaf class is the RULE's orientation (both faces of an
+  // unorientable rule are class UNORIENT -- the pass guards test
+  // r_orient[r], not which face produced the candidate).
+  ftdt_insert_pattern(ix, lhs, i, unor, /*face=*/0u);
   // RHS face (unorientable rules also try backward: subject matched
   // against the RHS).  Bucket the RHS root too; the query dedups by slot
   // so the rule is offered once even when both faces match.
@@ -623,7 +642,7 @@ static void ftpi_insert_rule(FtPiIndex *ix, AtpState *s, u32 i) {
     // Tree RHS face: insert the RHS preorder under the same slot.  When
     // both faces lead to the same leaf the rule lands twice on that leaf;
     // the query's post-sort dedup removes the duplicate.
-    ftdt_insert_pattern(ix, rhs, i);
+    ftdt_insert_pattern(ix, rhs, i, /*unor=*/1u, /*face=*/1u);
   }
 }
 
@@ -859,22 +878,103 @@ static u32 ftpi_candidates(AtpState *s, const AtpFtCell *p) {
 // edges carry the cell's real `sym` (always < WF_VAR_BIT, so distinct).
 #define FTDT_STAR  0xFFFFFFFFu
 
+// Variable edges are labelled FTDT_VAR0 + k, where k is the CANONICAL
+// first-occurrence index of the variable within the inserted pattern
+// face (WM Regelbaum semantics: x1's edge, x2's edge, ...).  The
+// descent binds the subject subterm at V_k's first traversal and
+// ft_eq-compares at every repeat -- enforcing NON-LINEAR variable
+// consistency inside the tree, shared across every pattern in the
+// subtree, instead of deferring it to a per-candidate ft_match that
+// fails 99% of the time on the heavily non-linear Sheffer/Wolfram
+// rule sets (measured 535M attempts / 4.3M hits on OrAssociativity).
+// The candidate set becomes EXACTLY ft_match's acceptance set (the
+// per-candidate ft_match in ft_cell_try_rules remains as the binding
+// producer + final gate), so the downstream winner selection is
+// byte-identical.  FTDT_STAR is retained as the defensive overflow
+// label (pattern var id >= ATPFT_MAX_VARS, which ft_match rejects
+// anyway): an unconditional skip edge, sound-superset like the
+// historic linearized tree.  Concrete syms are < WF_VAR_BIT
+// (0x80000000), so the [FTDT_VAR0, FTDT_STAR] label band is disjoint.
+#define FTDT_VAR0  0xFFFFFF00u
+
 // Sentinel for "no such child edge".
 #define FTDT_NO_NODE 0xFFFFFFFFu
 
 // One trie node.  Children are an unsorted small array of (label, child)
 // edges -- arity here is tiny (<=2 for the indexed operators) and the
 // branching factor is the live signature size, so a linear edge scan is
-// cheaper than a hash.  `leaf` holds the ascending rule slots whose
-// preorder ENDS at this node (a per-node growable run; rules are inserted
-// in ascending slot order so a plain append keeps it sorted).
+// cheaper than a hash.  Leaves (the rule slots whose preorder ENDS at this
+// node) are PARTITIONED BY ORIENTATION CLASS: `leaf` holds oriented rules,
+// `leaf_un` unorientable ones (each ascending; rules are inserted in slot
+// order so plain appends keep them sorted).  `sub_mask` says which classes
+// have a leaf anywhere at-or-below this node (bit 0 = oriented, bit 1 =
+// unorientable), so a query that wants only one class -- the rules-only
+// (doR / WM KPBehandelt) normalize is ~half of all queries and every one
+// of its unorient candidates is a guaranteed pass-1 `!r_orient` skip --
+// prunes whole subtrees at descent time instead of collecting, sorting,
+// deduping and loop-skipping candidates its passes can never fire.  The
+// class is fixed at insert time; any orient-flip / kill bumps r_revision
+// which forces a full rebuild (the same pure-append witness the two-face
+// unorientable insert already relies on), so insert-time class always
+// equals query-time class.  Byte-identity: pass 1 skips unorient slots
+// and pass 2 skips oriented slots BEFORE any subst_buf mutation, so
+// removing them from the candidate list leaves each pass's visited
+// sequence -- and the winner -- unchanged.
 typedef struct FtDtNode_s {
-  u32 *labels;     // edge labels (concrete sym or FTDT_STAR)
+  // Edge arrays are PARTITIONED for the query loop: var/star edges live
+  // in [0, n_var_edge) (insert order), concrete edges in [n_var_edge,
+  // n_edge) sorted ASCENDING by label.  A concrete-subject query then
+  // scans only the var region plus a short early-break run of the
+  // sorted concrete region for its one possible symbol edge; a var
+  // subject skips the concrete region entirely.  Exploration order
+  // across edges is free: the candidate buffer is sorted + deduped
+  // before use and each (rule, face) has exactly one leaf/record, so
+  // any edge order yields byte-identical results.
+  //
+  // Layout: the fields the descend's chain-follow loop touches lead the
+  // struct (one likely-cold load per visited node instead of chasing
+  // the labels/kids allocations), with label0/kid0 mirroring
+  // labels[0]/kids[0] so a single-edge hop never leaves the header.
+  u32  n_edge;
+  u32  label0;     // labels[0] mirror (valid when n_edge >= 1)
+  u32  kid0;       // kids[0] mirror
+  u32  n_var_edge; // var/star edges at the front of labels/kids
+  u32  leaf_n, leaf_un_n;
+  u8   sub_mask;   // classes present in this subtree (1=orient, 2=unorient)
+  u32  cap_edge, leaf_cap, leaf_un_cap;
+  u32 *labels;     // edge labels (concrete sym, FTDT_VAR0+k, or FTDT_STAR)
   u32 *kids;       // child node indices, parallel to labels
-  u32  n_edge, cap_edge;
-  u32 *leaf;       // ascending rule slots whose preorder ENDS at this node
-  u32  leaf_n, leaf_cap;
+  u32 *leaf;       // ascending ORIENTED rule slots ending at this node
+  u32 *leaf_aux;   // parallel: (idmap_ofs << 1) | face  (see FtDtRec)
+  u32 *leaf_un;    // ascending UNORIENTABLE rule slots ending at this node
+  u32 *leaf_un_aux;
 } FtDtNode;
+
+// Per-query descent-binding record: one per (rule, face) the descent
+// accepted this query.  Because the tree enforces full non-linear
+// variable consistency (the FTDT_VAR0 bind/ft_eq discipline), a
+// STAR-free path acceptance IS an ft_match acceptance -- so the caller
+// reconstructs ft_match's substitution from the leaf-time canonical
+// bindings (dtb_snap) + the pattern face's insert-time canon->var-id
+// map (dt_idmap) instead of re-running ft_match per candidate
+// (measured 5.29M re-verify passes per OrAssociativity run).
+// bound_ids fill order = canonical order = pattern-preorder first-
+// occurrence order = exactly ft_match's binding order, so the
+// resulting AtpFtSubst is byte-equal in every observable field
+// (bind[], bound_ids[0..wm), wm).  THVM_ATPFT_DTB_CHECK=1 certifies
+// that per candidate against a real ft_match.
+typedef struct FtDtRec_s {
+  u32 rule;        // rule slot
+  u32 snap_ofs;    // offset into dtb_snap (nvar cells)
+  u32 idmap_ofs;   // offset into dt_idmap (nvar u16 ids)
+  u16 nvar;        // distinct pattern vars (== path var count)
+  u8  face;        // 0 = LHS pattern, 1 = RHS pattern (unorientable bwd)
+} FtDtRec;
+
+// Candidate-class want bits (ftdt_candidates / ftdt_descend).
+#define FTDT_WANT_ORIENT   1u
+#define FTDT_WANT_UNORIENT 2u
+
 
 // Allocate a fresh empty node, returning its index.  Node 0 is the root.
 // Slots below the high-water mark (dt_hi_nodes) are REUSED with their
@@ -886,7 +986,10 @@ static u32 ftdt_node_new(FtPiIndex *ix) {
   if (i < ix->dt_hi_nodes) {              // reuse an already-allocated slot
     FtDtNode *nd = &ix->dt_nodes[i];
     nd->n_edge = 0u;
+    nd->n_var_edge = 0u;
     nd->leaf_n = 0u;
+    nd->leaf_un_n = 0u;
+    nd->sub_mask = 0u;
     ix->dt_n_nodes++;
     return i;
   }
@@ -899,7 +1002,11 @@ static u32 ftdt_node_new(FtPiIndex *ix) {
   }
   FtDtNode *nd = &ix->dt_nodes[i];
   nd->labels = NULL; nd->kids = NULL; nd->n_edge = 0u; nd->cap_edge = 0u;
-  nd->leaf = NULL; nd->leaf_n = 0u; nd->leaf_cap = 0u;
+  nd->n_var_edge = 0u;
+  nd->leaf = NULL; nd->leaf_aux = NULL; nd->leaf_n = 0u; nd->leaf_cap = 0u;
+  nd->leaf_un = NULL; nd->leaf_un_aux = NULL;
+  nd->leaf_un_n = 0u; nd->leaf_un_cap = 0u;
+  nd->sub_mask = 0u;
   ix->dt_n_nodes++;
   ix->dt_hi_nodes = ix->dt_n_nodes;
   return i;
@@ -931,59 +1038,191 @@ static u32 ftdt_edge_get(FtPiIndex *ix, u32 node, u32 label) {
     nd->kids   = nk;
     nd->cap_edge = nc;
   }
-  nd->labels[nd->n_edge] = label;
-  nd->kids[nd->n_edge]   = child;
+  // Keep the query partition (see FtDtNode): a var/star edge appends at
+  // the end of the var region, a concrete edge at its ascending-label
+  // slot within the concrete region.  Insert path only -- cold.
+  u32 pos;
+  if (label >= FTDT_VAR0) {
+    pos = nd->n_var_edge;
+    nd->n_var_edge++;
+  } else {
+    pos = nd->n_var_edge;
+    while (pos < nd->n_edge && nd->labels[pos] < label) pos++;
+  }
+  memmove(&nd->labels[pos + 1u], &nd->labels[pos],
+          (nd->n_edge - pos) * sizeof(u32));
+  memmove(&nd->kids[pos + 1u], &nd->kids[pos],
+          (nd->n_edge - pos) * sizeof(u32));
+  nd->labels[pos] = label;
+  nd->kids[pos]   = child;
   nd->n_edge++;
+  nd->label0 = nd->labels[0];   // keep the header mirror current
+  nd->kid0   = nd->kids[0];
   return child;
 }
 
-// Append rule slot `rule` to node `node`'s ascending leaf list.
-static void ftdt_leaf_push(FtPiIndex *ix, u32 node, u32 rule) {
+// Append rule slot `rule` to node `node`'s ascending leaf list, with
+// its parallel aux word `(idmap_ofs << 1) | face` (see FtDtRec).
+static void ftdt_leaf_push(FtPiIndex *ix, u32 node, u32 rule, u8 unor,
+                           u32 aux) {
   FtDtNode *nd = &ix->dt_nodes[node];
-  if (nd->leaf_n == nd->leaf_cap) {
-    u32 nc = nd->leaf_cap ? nd->leaf_cap * 2u : 4u;
-    u32 *nv = (u32 *)realloc(nd->leaf, nc * sizeof(u32));
-    if (nv == NULL) thvm_fatal("ftdt: leaf list OOM");
-    nd->leaf = nv;
-    nd->leaf_cap = nc;
+  u32 **lp  = unor ? &nd->leaf_un     : &nd->leaf;
+  u32 **ap  = unor ? &nd->leaf_un_aux : &nd->leaf_aux;
+  u32  *np  = unor ? &nd->leaf_un_n   : &nd->leaf_n;
+  u32  *cp  = unor ? &nd->leaf_un_cap : &nd->leaf_cap;
+  if (*np == *cp) {
+    u32 nc = *cp ? *cp * 2u : 4u;
+    u32 *nv = (u32 *)realloc(*lp, nc * sizeof(u32));
+    u32 *na = (u32 *)realloc(*ap, nc * sizeof(u32));
+    if (nv == NULL || na == NULL) thvm_fatal("ftdt: leaf list OOM");
+    *lp = nv;
+    *ap = na;
+    *cp = nc;
   }
-  nd->leaf[nd->leaf_n++] = rule;
+  (*ap)[*np]   = aux;
+  (*lp)[(*np)++] = rule;
+}
+
+// Append var id `id` to the insert-time canon->id map pool.
+static void ftdt_idmap_push(FtPiIndex *ix, u16 id) {
+  if (ix->dt_idmap_n == ix->dt_idmap_cap) {
+    u32 nc = ix->dt_idmap_cap ? ix->dt_idmap_cap * 2u : 256u;
+    u16 *nv = (u16 *)realloc(ix->dt_idmap, nc * sizeof(u16));
+    if (nv == NULL) thvm_fatal("ftdt: idmap pool OOM");
+    ix->dt_idmap = nv;
+    ix->dt_idmap_cap = nc;
+  }
+  ix->dt_idmap[ix->dt_idmap_n++] = id;
 }
 
 // Insert one PATTERN (lhs/rhs flatterm) into the tree under rule slot
 // `rule`.  Walks the pattern preorder via `next`; each cell emits one
-// edge (concrete sym, or FTDT_STAR for a variable).  The terminal node
-// gets `rule` appended to its leaf list.
-static void ftdt_insert_pattern(FtPiIndex *ix, const AtpFtCell *pat, u32 rule) {
+// edge (concrete sym, or FTDT_VAR0 + canonical first-occurrence index
+// for a variable -- see the FTDT_VAR0 header).  The terminal node
+// gets `rule` appended to its leaf list.  `face` (0 = LHS, 1 = RHS)
+// plus the canon->var-id slice appended to dt_idmap here (one id per
+// first occurrence, in canonical order) let the query rebuild
+// ft_match's substitution from the descent bindings (see FtDtRec).
+static void ftdt_insert_pattern(FtPiIndex *ix, const AtpFtCell *pat, u32 rule,
+                                u8 unor, u8 face) {
   const AtpFtCell *end_after = (pat->end != NULL) ? pat->end->next : NULL;
   u32 node = 0u;   // root
+  u8  class_bit = unor ? (u8)FTDT_WANT_UNORIENT : (u8)FTDT_WANT_ORIENT;
+  ix->dt_nodes[0].sub_mask |= class_bit;
+  u32 idmap_ofs = ix->dt_idmap_n;
+  // Per-face canonical variable numbering: pattern var id -> first-
+  // occurrence index.  Faces are canonicalized independently (the
+  // descent's binding array is per-query, keyed by this index).
+  u16 canon[ATPFT_MAX_VARS];
+  memset(canon, 0xff, sizeof canon);
+  u32 nvar = 0u;
   for (const AtpFtCell *p = pat; p != NULL && p != end_after; p = p->next) {
-    u32 label = (p->sym & WF_VAR_BIT) ? FTDT_STAR : p->sym;
+    u32 label;
+    if ((p->sym & WF_VAR_BIT) != 0u) {
+      u32 id = p->sym & ~WF_VAR_BIT;
+      if (id < ATPFT_MAX_VARS) {
+        if (canon[id] == 0xffffu) {
+          canon[id] = (u16)nvar++;
+          ftdt_idmap_push(ix, (u16)id);
+        }
+        label = FTDT_VAR0 + (u32)canon[id];
+      } else {
+        // ft_match rejects ids >= ATPFT_MAX_VARS; a STAR edge keeps the
+        // tree a sound superset for this (never-matching) pattern.  The
+        // descent marks any STAR path impure, so no binding record is
+        // ever produced for it (the caller then treats it as the
+        // non-match ft_match would return).
+        label = FTDT_STAR;
+      }
+    } else {
+      label = p->sym;
+    }
     node = ftdt_edge_get(ix, node, label);   // may realloc; node index stable
+    ix->dt_nodes[node].sub_mask |= class_bit;
   }
-  ftdt_leaf_push(ix, node, rule);
+  ftdt_leaf_push(ix, node, rule, unor, (idmap_ofs << 1) | (u32)face);
 }
 
 // Reset the tree to a single empty root, reusing the node pool +
 // per-node allocations.  Called at the start of a full rebuild.
 static void ftdt_reset(FtPiIndex *ix) {
   ix->dt_n_nodes = 0u;
+  ix->dt_idmap_n = 0u;       // idmap slices are re-appended with the patterns
   (void)ftdt_node_new(ix);   // node 0 = root (reuses slot 0 if present)
 }
 
-// Collect the leaf rule slots of node `node` into the candidate buffer.
-static void ftdt_emit_leaf(FtPiIndex *ix, u32 node, u32 *out) {
-  const FtDtNode *nd = &ix->dt_nodes[node];
-  for (u32 i = 0; i < nd->leaf_n; i++) {
-    if (*out == ix->cand_cap) {
-      u32 nc = ix->cand_cap ? ix->cand_cap * 2u : 64u;
-      u32 *nb = (u32 *)realloc(ix->cand, nc * sizeof(u32));
-      if (nb == NULL) thvm_fatal("ftdt: candidate buffer OOM");
-      ix->cand = nb;
-      ix->cand_cap = nc;
-    }
-    ix->cand[(*out)++] = nd->leaf[i];
+// Snapshot the current canonical bindings bind[0..nbound) into the
+// per-query pool; returns the snapshot offset.
+static u32 ftdt_snap_push(FtPiIndex *ix, const AtpFtCell **bind, u32 nbound) {
+  if (ix->dtb_snap_n + nbound > ix->dtb_snap_cap) {
+    u32 nc = ix->dtb_snap_cap ? ix->dtb_snap_cap : 128u;
+    while (nc < ix->dtb_snap_n + nbound) nc *= 2u;
+    const AtpFtCell **nb =
+        (const AtpFtCell **)realloc(ix->dtb_snap, nc * sizeof(*nb));
+    if (nb == NULL) thvm_fatal("ftdt: binding snapshot pool OOM");
+    ix->dtb_snap = nb;
+    ix->dtb_snap_cap = nc;
   }
+  u32 ofs = ix->dtb_snap_n;
+  for (u32 k = 0; k < nbound; k++) ix->dtb_snap[ofs + k] = bind[k];
+  ix->dtb_snap_n += nbound;
+  return ofs;
+}
+
+// Append one per-query acceptance record (see FtDtRec).
+static void ftdt_rec_push(FtPiIndex *ix, u32 rule, u32 snap_ofs, u32 aux,
+                          u16 nvar) {
+  if (ix->dtb_rec_n == ix->dtb_rec_cap) {
+    u32 nc = ix->dtb_rec_cap ? ix->dtb_rec_cap * 2u : 64u;
+    FtDtRec *nb = (FtDtRec *)realloc(ix->dtb_rec, nc * sizeof(FtDtRec));
+    if (nb == NULL) thvm_fatal("ftdt: binding record pool OOM");
+    ix->dtb_rec = nb;
+    ix->dtb_rec_cap = nc;
+  }
+  FtDtRec *r = &ix->dtb_rec[ix->dtb_rec_n++];
+  r->rule      = rule;
+  r->snap_ofs  = snap_ofs;
+  r->idmap_ofs = aux >> 1;
+  r->nvar      = nvar;
+  r->face      = (u8)(aux & 1u);
+}
+
+// Collect the leaf rule slots of node `node` into the candidate buffer --
+// only the orientation classes in `want` (the emit order across classes is
+// irrelevant: the caller sorts + dedups the whole candidate list).
+static void ftdt_emit_leaf_class(FtPiIndex *ix, const u32 *lf, const u32 *aux,
+                                 u32 n, u32 *out, u32 snap_ofs, u16 nvar,
+                                 u8 rec_on) {
+  if (*out + n > ix->cand_cap) {
+    u32 nc = ix->cand_cap ? ix->cand_cap : 64u;
+    while (nc < *out + n) nc *= 2u;
+    u32 *nb = (u32 *)realloc(ix->cand, nc * sizeof(u32));
+    if (nb == NULL) thvm_fatal("ftdt: candidate buffer OOM");
+    ix->cand = nb;
+    ix->cand_cap = nc;
+  }
+  for (u32 i = 0; i < n; i++) {
+    ix->cand[(*out)++] = lf[i];
+    if (rec_on) ftdt_rec_push(ix, lf[i], snap_ofs, aux[i], nvar);
+  }
+}
+static void ftdt_emit_leaf(FtPiIndex *ix, u32 node, u32 *out, u8 want,
+                           const AtpFtCell **bind, u32 nbound, u8 pure) {
+  const FtDtNode *nd = &ix->dt_nodes[node];
+  u32 n_or = (want & FTDT_WANT_ORIENT)   ? nd->leaf_n    : 0u;
+  u32 n_un = (want & FTDT_WANT_UNORIENT) ? nd->leaf_un_n : 0u;
+  if (n_or + n_un == 0u) return;
+  // One snapshot per leaf emission: every pattern ending here shares the
+  // path, hence the same canonical bindings.  A STAR (impure) path never
+  // records -- ft_match rejects those patterns, and the caller maps
+  // "no record" to "no match".
+  u32 snap_ofs = pure ? ftdt_snap_push(ix, bind, nbound) : 0u;
+  if (n_or)
+    ftdt_emit_leaf_class(ix, nd->leaf, nd->leaf_aux, n_or, out,
+                         snap_ofs, (u16)nbound, pure);
+  if (n_un)
+    ftdt_emit_leaf_class(ix, nd->leaf_un, nd->leaf_un_aux, n_un, out,
+                         snap_ofs, (u16)nbound, pure);
 }
 
 // Recursive descent: match the subject preorder [sc, sc_end) against the
@@ -996,31 +1235,107 @@ static void ftdt_emit_leaf(FtPiIndex *ix, u32 node, u32 *out) {
 //   * sc == sc_end  -> the subject is fully consumed; this node's leaf
 //     list is a candidate set (those patterns whose preorder ended here).
 //   * sc concrete f -> follow the f edge (descend into sc's children, the
-//     preorder continues at sc->next) AND the STAR edge (the pattern var
-//     binds sc's whole subterm; skip to sc->end->next).
-//   * sc a variable -> only the STAR edge (a concrete pattern symbol
+//     preorder continues at sc->next) AND every variable edge V_k: on
+//     V_k's FIRST traversal bind[k] takes sc's whole subterm (skip to
+//     sc->end->next, unbind on backtrack); on a REPEAT traversal descend
+//     only when the bound subterm ft_eq-equals sc's -- the same
+//     consistency test ft_match applies to a repeated pattern variable.
+//   * sc a variable -> only variable edges (a concrete pattern symbol
 //     cannot match a variable subject; ft_match returns 0 there).
-static void ftdt_descend(FtPiIndex *ix, u32 node,
-                         const AtpFtCell *sc, const AtpFtCell *sc_end,
-                         u32 *out) {
-  if (sc == sc_end) {                 // subject consumed: emit this node's leaves
-    ftdt_emit_leaf(ix, node, out);
-    return;
+//
+// `bind[k]` is the subject subterm bound to canonical pattern variable
+// k on the current descent path (NULL = unbound).  The bind/unbind
+// bracket around each V_k first-traversal recursion restores the array
+// to all-NULL by the time the outermost call returns, so the caller's
+// (statically zeroed) array needs no per-query reset.
+// `nbound` counts the distinct canonical vars bound along the current
+// path (first occurrences are numbered 0,1,2,... in path order at
+// insert time, so a first traversal of V_k always has k == nbound and
+// bind[0..nbound) are exactly the path's bindings).  `pure` clears on
+// any STAR (overflow) edge: bindings under it are incomplete, so no
+// acceptance record is emitted for those leaves.
+// Loop-invariant descent state, threaded as ONE pointer so each
+// recursion passes (ctx, node, sc, nbound, pure) instead of nine
+// arguments -- the recursion fires once per visited node (~400M/run).
+typedef struct {
+  FtPiIndex       *ix;
+  const AtpFtCell *sc_end;
+  u32             *out;
+  const AtpFtCell **bind;
+  u8               want;
+} FtDtDesc;
+
+static void ftdt_descend(const FtDtDesc *d, u32 node,
+                         const AtpFtCell *sc, u32 nbound, u8 pure) {
+  FtPiIndex *ix = d->ix;
+  const FtDtNode *nd = &ix->dt_nodes[node];
+  const u8 want = d->want;
+  // Single-concrete-edge chain follow: most tree nodes sit on unshared
+  // pattern tails (one outgoing edge, concrete label).  Following such a
+  // chain needs no backtracking -- either the subject cell carries the
+  // same symbol (advance both in lockstep) or the whole subtree fails.
+  // Iterating here instead of recursing per cell removes the dominant
+  // call/frame cost of the walk (the descend was the top self-sample at
+  // ~3.5s); the visited (node, subject-cell) sequence and every verdict
+  // are unchanged, so candidates/records are byte-identical.  Chain
+  // nodes can still carry leaves (a shorter pattern ending mid-chain):
+  // the sc == sc_end emit check runs per node exactly as before.
+  // (Prefix-compressed label runs were built + A/B'd 2026-07-03 and
+  // REFUTED: runs vs per-node step measured 23.3s vs 23.4s -- on the
+  // single-op signatures the walk concentrates in the bushy shared-
+  // prefix region, not on chains, so the run machinery was reverted.)
+  for (;;) {
+    // Orientation-class prune: no leaf of a wanted class anywhere at-or-
+    // below this node -- nothing this subtree could emit survives the
+    // caller's pass guards, so skip it entirely.
+    if ((nd->sub_mask & want) == 0u) return;
+    if (g_ftdt_pd) g_atp_pushn_dt_node++;
+    if (sc == d->sc_end) {            // subject consumed: emit this node's leaves
+      ftdt_emit_leaf(ix, node, d->out, want, d->bind, nbound, pure);
+      return;
+    }
+    if (nd->n_edge != 1u) break;
+    u32 label0 = nd->label0;
+    if (label0 >= FTDT_VAR0) break;
+    if ((sc->sym & WF_VAR_BIT) != 0u || label0 != sc->sym) return;
+    node = nd->kid0;
+    nd   = &ix->dt_nodes[node];
+    sc   = sc->next;
   }
-  // STAR edge: pattern variable binds sc's whole subterm (skip it).
-  u32 star = ftdt_edge_find(ix, node, FTDT_STAR);
-  if (star != FTDT_NO_NODE) {
-    const AtpFtCell *skip = (sc->end != NULL) ? sc->end->next : sc_end;
-    ftdt_descend(ix, star, skip, sc_end, out);
+  // Branch node.  Var/star edges sit in [0, n_var_edge) and are always
+  // explored; the concrete region [n_var_edge, n_edge) is sorted
+  // ascending, so a concrete subject probes it with an early-break run
+  // for its ONE possible symbol edge and a var subject skips it whole
+  // (a concrete pattern symbol never matches a variable subject --
+  // exactly ft_match's reject, as before).
+  const AtpFtCell *skip = (sc->end != NULL) ? sc->end->next : d->sc_end;
+  const AtpFtCell **bind = d->bind;
+  u32 nv = nd->n_var_edge;
+  if (g_ftdt_pd) g_atp_pushn_dt_edge += nd->n_edge;
+  for (u32 e = 0; e < nv; e++) {
+    u32 label = nd->labels[e];
+    if (label == FTDT_STAR) {
+      // Defensive overflow edge (see FTDT_VAR0): unconditional skip.
+      ftdt_descend(d, nd->kids[e], skip, nbound, 0u);
+      continue;
+    }
+    u32 k = label - FTDT_VAR0;
+    if (bind[k] == NULL) {
+      bind[k] = sc;
+      ftdt_descend(d, nd->kids[e], skip,
+                   (k + 1u > nbound) ? k + 1u : nbound, pure);
+      bind[k] = NULL;
+    } else if (ft_eq(bind[k], sc)) {
+      ftdt_descend(d, nd->kids[e], skip, nbound, pure);
+    }
   }
-  // Concrete edge: only when the subject cell is itself concrete (a
-  // pattern's concrete symbol cannot match a variable subject).  The
-  // preorder continues at sc->next (sc's first child), so the same
-  // sc_end bound carries through -- sc's children sit inside [sc, sc_end).
   if ((sc->sym & WF_VAR_BIT) == 0u) {
-    u32 child = ftdt_edge_find(ix, node, sc->sym);
-    if (child != FTDT_NO_NODE) {
-      ftdt_descend(ix, child, sc->next, sc_end, out);
+    for (u32 e = nv; e < nd->n_edge; e++) {
+      u32 label = nd->labels[e];
+      if (label < sc->sym) continue;
+      if (label == sc->sym)
+        ftdt_descend(d, nd->kids[e], sc->next, nbound, pure);
+      break;
     }
   }
 }
@@ -1082,11 +1397,25 @@ static void ftdt_sort_u32(FtPiIndex *ix, u32 *a, u32 n) {
 // a SOUND SUPERSET of ft_match's matches at `p`, in the same ascending
 // order the linear scan visits -- so the caller's first-match / WM-DFS
 // selection picks the byte-identical winner.
-static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p) {
+static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
+                           u8 rec_on) {
   FtPiIndex *ix = &g_ftpi;
   const AtpFtCell *p_end = (p->end != NULL) ? p->end->next : NULL;
   u32 out = 0u;
-  ftdt_descend(ix, 0u, p, p_end, &out);
+  // Canonical-variable binding array for the consistency-checked descent.
+  // Statically zeroed once; ftdt_descend's bind/unbind bracket restores
+  // every slot to NULL before returning (no early exits), so no per-query
+  // reset is needed.
+  static const AtpFtCell *ftdt_bind[ATPFT_MAX_VARS];
+  ix->dtb_snap_n = 0u;      // per-query binding capture (see FtDtRec)
+  ix->dtb_rec_n  = 0u;
+  g_ftdt_pd = (u8)(g_atp_phase_detail && g_atp_pushn_active);
+  // `pure` doubles as the recording gate: a caller that will not
+  // consume the records (THVM_NO_FT_DTB sweep) starts the descent
+  // impure, so no snapshot/record is ever taken -- the candidate list
+  // itself is unchanged either way.
+  FtDtDesc d = { ix, p_end, &out, ftdt_bind, want };
+  ftdt_descend(&d, 0u, p, 0u, rec_on ? 1u : 0u);
   if (out > 1u) {
     ftdt_sort_u32(ix, ix->cand, out);
     u32 w = 1u;
@@ -1120,16 +1449,84 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p) {
       int m = ft_match(lhs, p, &chk);
       if (!m && unor) { ft_subst_reset(&chk); m = ft_match(rhs, p, &chk); }
       if (!m) continue;
+      // The tree emits only the caller's wanted orientation classes
+      // (FTDT_WANT_*): a matching rule of an un-wanted class is
+      // guaranteed-skipped by the caller's pass guards and is correctly
+      // absent from the candidate set.
+      u8 r_class = unor ? (u8)FTDT_WANT_UNORIENT : (u8)FTDT_WANT_ORIENT;
+      if ((r_class & want) == 0u) continue;
       int found = 0;
       for (u32 k = 0; k < out; k++) if (ix->cand[k] == r) { found = 1; break; }
       if (!found) {
-        fprintf(stderr, "[ftdt SOUNDNESS VIOLATION] rule %u ft_matches p but "
-                "is NOT in the tree candidate set (out=%u)\n", r, out);
+        fprintf(stderr, "[ftdt SOUNDNESS VIOLATION] rule %u (orient=%u) "
+                "ft_matches p but is NOT in the tree candidate set "
+                "(out=%u want=%u)\n", r, (unsigned)s->r_orient[r], out,
+                (unsigned)want);
         thvm_fatal("ftdt: unsound (dropped a real match)");
       }
     }
   }
   return out;
+}
+
+// Find this query's acceptance record for (rule, face), or NULL.  The
+// record list length equals the (tiny) per-query emission count, so a
+// linear scan beats any keyed structure here.
+static const FtDtRec *ftdt_rec_find(const FtPiIndex *ix, u32 rule, u8 face) {
+  for (u32 k = 0; k < ix->dtb_rec_n; k++) {
+    const FtDtRec *r = &ix->dtb_rec[k];
+    if (r->rule == rule && r->face == face) return r;
+  }
+  return NULL;
+}
+
+// Rebuild ft_match's substitution from a descent acceptance record:
+// reset, then bind each pattern var id (insert-time canon->id map) to
+// its snapshotted subject subterm, in canonical order == ft_match's
+// first-occurrence binding order.  The resulting AtpFtSubst is
+// identical in every observable field (bind[], bound_ids[0..wm), wm).
+static void ftdt_fill_subst(const FtPiIndex *ix, const FtDtRec *rec,
+                            AtpFtSubst *out) {
+  ft_subst_reset(out);
+  const AtpFtCell **snap = ix->dtb_snap + rec->snap_ofs;
+  const u16       *ids   = ix->dt_idmap + rec->idmap_ofs;
+  for (u16 k = 0; k < rec->nvar; k++) {
+    u32 id = ids[k];
+    out->bind[id]           = (AtpFtCell *)snap[k];
+    out->bound_ids[out->wm] = id;
+    out->wm                += 1u;
+  }
+}
+
+// THVM_ATPFT_DTB_CHECK=1: certify, per consulted candidate, that the
+// descent record agrees with a REAL ft_match -- presence iff ft_match
+// accepts, and on acceptance the reconstructed substitution is
+// field-identical.  O(|pattern|) per candidate, so gated off by
+// default; run a saturation with it on to certify the fused path.
+static void ftdt_dtb_verify(const FtPiIndex *ix, const FtDtRec *rec,
+                            const AtpFtCell *pat, const AtpFtCell *p) {
+  static AtpFtSubst chk;   // static zero-init satisfies first-use contract
+  ft_subst_reset(&chk);
+  int m = ft_match(pat, p, &chk);
+  if (m != (rec != NULL)) {
+    fprintf(stderr, "[ftdt DTB MISMATCH] ft_match=%d rec=%p\n", m, (void *)rec);
+    thvm_fatal("ftdt: descent-binding acceptance diverges from ft_match");
+  }
+  if (!m) return;
+  static AtpFtSubst fil;
+  ftdt_fill_subst(ix, rec, &fil);
+  if (fil.wm != chk.wm) {
+    fprintf(stderr, "[ftdt DTB MISMATCH] wm fill=%u match=%u\n", fil.wm, chk.wm);
+    thvm_fatal("ftdt: descent-binding count diverges from ft_match");
+  }
+  for (u32 k = 0; k < chk.wm; k++) {
+    if (fil.bound_ids[k] != chk.bound_ids[k] ||
+        fil.bind[chk.bound_ids[k]] != chk.bind[chk.bound_ids[k]]) {
+      fprintf(stderr, "[ftdt DTB MISMATCH] slot %u id fill=%u match=%u\n",
+              k, fil.bound_ids[k], chk.bound_ids[k]);
+      thvm_fatal("ftdt: descent bindings diverge from ft_match");
+    }
+  }
 }
 
 // Per-cell redex attempt -- the body shared by the legacy pre-order
@@ -1158,8 +1555,15 @@ static int ft_cell_try_rules(AtpState   *s,
                              AtpFtSubst *subst_buf,
                              u32        *rule_out,
                              u8         *dir_out) {
+  // Detail-tier shape counters (THVM_ATP_PROFILE=2, push-scope only) --
+  // increments only; no timers in this per-position hot path.
+  int _pd = (g_atp_phase_detail && g_atp_pushn_active);
+  if (_pd) g_atp_pushn_tr_q++;
   // A free var is never a redex on the subject side.
-  if ((p->sym & WF_VAR_BIT) != 0u) return 0;
+  if ((p->sym & WF_VAR_BIT) != 0u) {
+    if (_pd) g_atp_pushn_tr_var++;
+    return 0;
+  }
   u8 have_unorient = (u8)(s->n_unorient > 0u);
   // A/B gate for the orient-pass winner re-match skip (default ON).
   // THVM_NO_FT_REMATCH_SKIP=1 forces the unconditional re-match so an
@@ -1184,6 +1588,24 @@ static int ft_cell_try_rules(AtpState   *s,
   const u32 *pi_cand = NULL;
   u32        pi_ncand = 0u;
   int        use_pi   = 0;
+  // Descent-binding fused acceptance: when the candidates came from the
+  // discrimination tree (exact acceptance + per-candidate FtDtRec), the
+  // per-candidate ft_match re-verify is skipped entirely -- record
+  // presence IS the match verdict and the winner's substitution is
+  // rebuilt from the record (ftdt_fill_subst, field-identical to
+  // ft_match's).  THVM_NO_FT_DTB=1 forces the historic per-candidate
+  // ft_match for an ON-vs-OFF byte-identity sweep;
+  // THVM_ATPFT_DTB_CHECK=1 certifies every consulted record against a
+  // real ft_match.
+  int        use_dtb  = 0;
+  static int dtb_off = -1;
+  static int dtb_check = -1;
+  if (dtb_off < 0) {
+    const char *e = getenv("THVM_NO_FT_DTB");
+    dtb_off = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+    const char *c = getenv("THVM_ATPFT_DTB_CHECK");
+    dtb_check = (c != NULL && c[0] != '0' && c[0] != '\0') ? 1 : 0;
+  }
   if (ftpi_applicable(s, slice_first, slice_end)) {
     ftpi_stats_arm();
     ftpi_ensure(s);
@@ -1206,7 +1628,19 @@ static int ft_cell_try_rules(AtpState   *s,
         no_disctree = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
       }
       use_pi   = 1;
-      pi_ncand = no_disctree ? ftpi_candidates(s, p) : ftdt_candidates(s, p);
+      // Candidate classes this call can actually fire: pass 1 skips every
+      // unorient slot, pass 2 every oriented one, both before touching
+      // subst_buf -- so the tree emits only the wanted classes (the
+      // rules-only doR normalize stops collecting + loop-skipping the
+      // var-general unorientable faces entirely).  The fingerprint
+      // fallback stays an unpartitioned superset; its extra candidates
+      // die at the same guards.
+      u8 want = (u8)((try_orient ? FTDT_WANT_ORIENT : 0u) |
+                     ((try_unorient && have_unorient) ? FTDT_WANT_UNORIENT
+                                                      : 0u));
+      use_dtb  = !no_disctree && !dtb_off;
+      pi_ncand = no_disctree ? ftpi_candidates(s, p)
+                             : ftdt_candidates(s, p, want, (u8)use_dtb);
       pi_cand  = g_ftpi.cand;
     }
   }
@@ -1224,11 +1658,15 @@ static int ft_cell_try_rules(AtpState   *s,
   // under use_mixmost_nf (see ft_wm_pattern_before).
   if (try_orient) {
     u32 best_rule = (u32)-1;
+    const FtDtRec *best_rec = NULL;   // winner's descent record (use_dtb)
     // subst_buf holds best_rule's bindings iff no later attempt has run
     // ft_subst_reset since best_rule's match.  When the winner is the LAST
     // candidate the scan touches, that re-match is redundant -- skip it.
+    // (Match-path only; the use_dtb path never touches subst_buf until
+    // the single winner fill below.)
     u8  best_subst_live = 0u;
     u32 niter = FTPI_NITER;
+    if (_pd) g_atp_pushn_tr_cand += niter;
     for (u32 k = 0; k < niter; k++) {
       u32 r = FTPI_RULE(k);
       // Filter dead (bwd-subsumed) rules first: their lhs_ft/rhs_ft are
@@ -1241,24 +1679,47 @@ static int ft_cell_try_rules(AtpState   *s,
       if (lhs == NULL || s->rhs_ft[r] == NULL) continue;
       if (have_unorient && !s->r_orient[r]) continue;
       // Forward rewrite, no order check needed (oriented).
-      ft_subst_reset(subst_buf);   // clobbers any prior winner's bindings
-      best_subst_live = 0u;
-      if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
+      if (_pd) g_atp_pushn_tr_att++;
+      const FtDtRec *rec = NULL;
+      int matched;
+      if (use_dtb) {
+        rec = ftdt_rec_find(&g_ftpi, r, /*face=*/0u);
+        if (dtb_check) ftdt_dtb_verify(&g_ftpi, rec, lhs, p);
+        matched = (rec != NULL);
+      } else {
+        ft_subst_reset(subst_buf);   // clobbers any prior winner's bindings
+        best_subst_live = 0u;
+        matched = ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf);
+      }
+      if (matched) {
+        if (_pd) g_atp_pushn_tr_hit++;
         if (!s->use_mixmost_nf) {
+          if (use_dtb) ftdt_fill_subst(&g_ftpi, rec, subst_buf);
           *rule_out = r;
           *dir_out  = 0u;
           return 1;
         }
         // Ascending slot scan + "cand wins unless best strictly
         // precedes it" = DFS minimum with newest-slot tie-break.
+        if (_pd && best_rule != (u32)-1) g_atp_pushn_tr_pb++;
         if (best_rule == (u32)-1 ||
             !ft_wm_pattern_before(s->lhs_ft[best_rule], lhs)) {
           best_rule = r;
+          best_rec  = rec;
           best_subst_live = 1u;   // subst_buf now holds best_rule's match
         }
       }
     }
     if (best_rule != (u32)-1) {
+      if (_pd) g_atp_pushn_tr_win++;
+      if (use_dtb) {
+        // Winner substitution rebuilt from its descent record -- the
+        // per-candidate matches AND the winner re-match are all gone.
+        ftdt_fill_subst(&g_ftpi, best_rec, subst_buf);
+        *rule_out = best_rule;
+        *dir_out  = 0u;
+        return 1;
+      }
       // Re-match the winner unless subst_buf still carries its bindings
       // (winner was the last candidate the loop matched + no later reset).
       if (best_subst_live && !no_rematch_skip) {
@@ -1266,6 +1727,7 @@ static int ft_cell_try_rules(AtpState   *s,
         *dir_out  = 0u;
         return 1;
       }
+      if (_pd) g_atp_pushn_tr_rematch++;
       ft_subst_reset(subst_buf);
       if (ft_match_maybe_ac(ft_arena_local, s->lhs_ft[best_rule], p,
                             subst_buf)) {
@@ -1307,8 +1769,26 @@ static int ft_cell_try_rules(AtpState   *s,
       // runs a side-by-side Term-side atp_compare to surface verdict
       // divergences (a probe across the AC bench found zero -- the
       // streaming KBO matches atp_compare on the unorient gate inputs).
-      ft_subst_reset(subst_buf);
-      if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
+      // Under use_dtb each face's match verdict + bindings come from
+      // the descent record (fill resets subst_buf first).
+      const FtDtRec *rec_f = NULL, *rec_b = NULL;
+      if (use_dtb) {
+        rec_f = ftdt_rec_find(&g_ftpi, r, /*face=*/0u);
+        rec_b = ftdt_rec_find(&g_ftpi, r, /*face=*/1u);
+        if (dtb_check) {
+          ftdt_dtb_verify(&g_ftpi, rec_f, lhs, p);
+          ftdt_dtb_verify(&g_ftpi, rec_b, rhs, p);
+        }
+      }
+      int fwd_matched;
+      if (use_dtb) {
+        fwd_matched = (rec_f != NULL);
+        if (fwd_matched) ftdt_fill_subst(&g_ftpi, rec_f, subst_buf);
+      } else {
+        ft_subst_reset(subst_buf);
+        fwd_matched = ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf);
+      }
+      if (fwd_matched) {
         if (ft_subst_ground_extras(s, rhs, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
@@ -1348,8 +1828,15 @@ static int ft_cell_try_rules(AtpState   *s,
         ft_subst_reset(subst_buf);
       }
       // Backward: same gates with l/r swapped.
-      ft_subst_reset(subst_buf);
-      if (ft_match_maybe_ac(ft_arena_local, rhs, p, subst_buf)) {
+      int bwd_matched;
+      if (use_dtb) {
+        bwd_matched = (rec_b != NULL);
+        if (bwd_matched) ftdt_fill_subst(&g_ftpi, rec_b, subst_buf);
+      } else {
+        ft_subst_reset(subst_buf);
+        bwd_matched = ft_match_maybe_ac(ft_arena_local, rhs, p, subst_buf);
+      }
+      if (bwd_matched) {
         if (ft_subst_ground_extras(s, lhs, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
@@ -1373,17 +1860,30 @@ static int ft_cell_try_rules(AtpState   *s,
     }
     if (best_rule != (u32)-1) {
       // Re-derive the winner's substitution (match + grounded extras);
-      // the gate verdict already passed during the scan.
-      AtpFtCell *pat = (best_dir == 0u) ? s->lhs_ft[best_rule]
-                                        : s->rhs_ft[best_rule];
+      // the gate verdict already passed during the scan.  Under use_dtb
+      // the match half comes from the winner's descent record.
       AtpFtCell *tpl = (best_dir == 0u) ? s->rhs_ft[best_rule]
                                         : s->lhs_ft[best_rule];
-      ft_subst_reset(subst_buf);
-      if (ft_match_maybe_ac(ft_arena_local, pat, p, subst_buf) &&
-          ft_subst_ground_extras(s, tpl, subst_buf)) {
-        *rule_out = best_rule;
-        *dir_out  = best_dir;
-        return 1;
+      if (use_dtb) {
+        const FtDtRec *rec = ftdt_rec_find(&g_ftpi, best_rule, best_dir);
+        if (rec != NULL) {
+          ftdt_fill_subst(&g_ftpi, rec, subst_buf);
+          if (ft_subst_ground_extras(s, tpl, subst_buf)) {
+            *rule_out = best_rule;
+            *dir_out  = best_dir;
+            return 1;
+          }
+        }
+      } else {
+        AtpFtCell *pat = (best_dir == 0u) ? s->lhs_ft[best_rule]
+                                          : s->rhs_ft[best_rule];
+        ft_subst_reset(subst_buf);
+        if (ft_match_maybe_ac(ft_arena_local, pat, p, subst_buf) &&
+            ft_subst_ground_extras(s, tpl, subst_buf)) {
+          *rule_out = best_rule;
+          *dir_out  = best_dir;
+          return 1;
+        }
       }
     }
   }
@@ -1520,6 +2020,17 @@ typedef struct {
 static int ft_mixmost_reduce_here(FtMixmost *m) {
   if (m->budget == 0u) return 0;
   FtNfPathEnt *e = &m->st[m->depth];
+  // Var-cell early-out hoisted from ft_cell_try_rules (a free var is never
+  // a redex): ~half of all preorder positions are variable leaves, and the
+  // full call pays frame + gate setup just to test this bit.  The shape
+  // counters still see the query so the detail tier stays comparable.
+  if ((e->cell->sym & WF_VAR_BIT) != 0u) {
+    if (g_atp_phase_detail && g_atp_pushn_active) {
+      g_atp_pushn_tr_q++;
+      g_atp_pushn_tr_var++;
+    }
+    return 0;
+  }
   u32 rule = 0u;
   u8  dir  = 0u;
   if (!ft_cell_try_rules(m->s, e->cell, m->slice_first, m->slice_end,
@@ -1534,6 +2045,12 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   if (m->record || m->psteps != NULL) {
     have_pos = ft_find_position(m->root, e->cell, pos, &pos_len);
   }
+  static int dbg_goal_nf = -1;
+  if (dbg_goal_nf < 0) dbg_goal_nf = getenv("THVM_ATP_GOAL_NF_DEBUG") != NULL;
+  if (dbg_goal_nf) {
+    fprintf(stderr, "[mixstep] depth=%u have_pos=%d pos_len=%u root_eq_cell=%d dir=%u\n",
+            m->depth, have_pos, pos_len, (int)(m->root == e->cell), dir);
+  }
   // AtpProofStep needs the term BEFORE the splice; capture it now.
   Term before_term = (m->psteps != NULL) ? ft_to_term(m->root) : (Term)0;
   AtpFtCell *parent   = (m->depth == 0u) ? NULL : m->st[m->depth - 1u].ins;
@@ -1542,6 +2059,7 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   AtpFtCell *new_root = ft_splice(m->arena, m->root, parent, e->cell,
                                   rhs_tmpl, m->subst);
   if (new_root == NULL) return 0;   // defensive: ft_splice returns the root
+  if (g_atp_phase_detail && g_atp_pushn_active) g_atp_pushn_rw++;
   m->budget--;
   m->root = new_root;
   m->st[0].cell = m->root;
@@ -1757,7 +2275,15 @@ static int find_redex_ft_via_ri(AtpState        *s,
 // completion cap, so the cap is informational).
 static int ft_find_position(AtpFtCell *root, AtpFtCell *target,
                             u8 *pos, u8 *pos_len) {
-  if (root == target) { *pos_len = 0u; return 1; }
+  // NB: do NOT reset *pos_len here.  This is a RECURSIVE DFS: the caller
+  // has already pushed this cell's child index into pos[] and bumped
+  // *pos_len before recursing, so the accumulated prefix IS the path to
+  // `target`.  Zeroing it on a match wiped that prefix, mis-recording
+  // every non-root redex at the ROOT position {} -- the mixmost goal
+  // chain's inner comm step then reconstructed to the wrong term and the
+  // ProofObject failed to verify (commutative_monoid).  The top-level
+  // caller initializes *pos_len = 0, so a root match still yields {}.
+  if (root == target) return 1;
   if (root == NULL || target == NULL) return 0;
   if ((root->sym & WF_VAR_BIT) != 0u) return 0;   // leaves don't host children
   u16 arity = root->arity;
@@ -1907,6 +2433,37 @@ AtpFtCell *atp_rewrite_normalize_ft_slice(AtpState *s, AtpFtCell *t,
   return atp_rewrite_normalize_ft_impl(s, t, slice_first, slice_count,
                                        step_cap, /*doE=*/1u, /*record=*/0,
                                        (Term){0}, 0u, NULL);
+}
+
+// Slice + record variant, for the post-PROVED proof-cone re-derivation
+// (thvm_atp_record_goal_cone in _.c): normalize `t` against ONLY the
+// rule slice [slice_first, slice_first + slice_count) of s->lhs_ft /
+// s->rhs_ft, emitting one TRACE_NORM_STEP per splice chained off
+// `*chain_tail` (the atp_rewrite_normalize_ft_record contract).  `doE`
+// selects which historical WM flag set the replay mirrors: 1 = the
+// pop-normalize doR+doE shape (`-ks "r:e:s:p"`), 0 = the demote-drain
+// rules-only doR shape (`-kg "r"`).  The cone re-derivation installs
+// the HISTORICAL rule set R(ti) as a temporary slot window past the
+// live n_rules and points the slice at it, so the recorded chain cites
+// rules by their historical TRACE_ORIENT / TRACE_FVI ids (r_trace of
+// the window slots).
+AtpFtCell *atp_rewrite_normalize_ft_slice_record(AtpState *s, AtpFtCell *t,
+                                                 u32 slice_first,
+                                                 u32 slice_count,
+                                                 u32 step_cap, u8 doE,
+                                                 Term eq_other, u8 side,
+                                                 u32 *chain_tail);
+AtpFtCell *atp_rewrite_normalize_ft_slice_record(AtpState *s, AtpFtCell *t,
+                                                 u32 slice_first,
+                                                 u32 slice_count,
+                                                 u32 step_cap, u8 doE,
+                                                 Term eq_other, u8 side,
+                                                 u32 *chain_tail) {
+  if (t == NULL) return NULL;
+  if (slice_count == 0u) return t;
+  return atp_rewrite_normalize_ft_impl(s, t, slice_first, slice_count,
+                                       step_cap, doE, /*record=*/1,
+                                       eq_other, side, chain_tail);
 }
 
 static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,

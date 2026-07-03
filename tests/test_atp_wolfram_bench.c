@@ -833,17 +833,16 @@ int main(int argc, char **argv) {
   {
     const char *wm = getenv("THVM_ATP_WALDMEISTER");
     if (wm != NULL && wm[0] != '\0' && wm[0] != '0') {
-      // FIFO interleave OFF (WM's default `-pq` carries no
-      // `interleave=` token -> thresholdCP 0 -> CPdimension never fires;
-      // see atp_cp_fifo_dimension).  selection_ratio sets fifo_modulo for
-      // the THVM_ATP_FIFO_THRESHOLD env-restore path only (a caller that
-      // wants a `-pq interleave=f.h` ratio supplies both knobs); with the
-      // faithful default threshold 0 it is inert.  THVM_ATP_SELECTION_RATIO
-      // env overrides the modulo.
+      // FIFO interleave = `wmcli -auto` itl(mi): `-pq interleave=1.50`
+      // -> moduloCP 51, thresholdCP 1 (see atp_cp_fifo_dimension; the
+      // threshold defaults to 1 under the preset, and
+      // THVM_ATP_FIFO_THRESHOLD=0 restores the plain-wmcli no-FIFO
+      // mode the older matrix rows were recorded against).
+      // THVM_ATP_SELECTION_RATIO env overrides the modulo.
       {
         const char *sr = getenv("THVM_ATP_SELECTION_RATIO");
         u32 ratio = (sr != NULL && sr[0] != '\0')
-                      ? (u32)strtoul(sr, NULL, 10) : 201u;
+                      ? (u32)strtoul(sr, NULL, 10) : 51u;
         thvm_atp_set_selection_ratio(s, ratio);
       }
       thvm_atp_set_use_rhs_interreduce(s, 1u);
@@ -856,6 +855,17 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_orphan_murder(s, 1u);
       thvm_atp_set_use_eager_orphan_sweep(s, 0u);
       thvm_atp_set_use_unorient_index(s, 1u);
+      // WM KPBehandelt semantics (KPVerwaltung.c:435-467): CPs with
+      // combined RAW size < 50 are treated (doR-only normalize) at
+      // push; BIGGER CPs queue RAW and weigh on their RAW sides --
+      // thvm's lazy path implements exactly this gate, so lazy stays
+      // ON for -auto faithfulness.  THVM_ATP_LAZY_NORM=0 gives the
+      // eager A/B (treats ALL CPs; proves OrAssociativity in ~45s but
+      // weighs >=50-size CPs on treated forms, off WM's trajectory).
+      // The faithful config's cost problem is the pop-time normalize
+      // of stored-raw giants at the interreduction avalanche -- an
+      // allocation-profile bug to fix in the engine, not a semantics
+      // knob (see project_atp_wm_speed_profiled 2026-07-02).
       thvm_atp_set_use_lazy_normalize(s, 1u);
       // WM's KPV_KPMengeInterreduzieren (CP-set IR) is NOT enabled: the
       // -ki CLI default carries no period and no checkpoints
@@ -1849,7 +1859,11 @@ int main(int argc, char **argv) {
   // reports the dominant cost slice.
   {
     const char *pr = getenv("THVM_ATP_PROFILE");
-    if (pr != NULL && pr[0] == '1') g_atp_phase_enabled = 1u;
+    if (pr != NULL && (pr[0] == '1' || pr[0] == '2')) g_atp_phase_enabled = 1u;
+    // Tier 2: also split the push-normalize phase into its components
+    // (mirror-ensure / from-term / normalize / eq / to-term / ac /
+    // join-cache hash / raw-size gate).  Implies tier 1.
+    if (pr != NULL && pr[0] == '2') g_atp_phase_detail = 1u;
   }
 
   // Reset CP-cap-hit counters so the per-run totals attribute lost CPs
@@ -1899,6 +1913,16 @@ int main(int argc, char **argv) {
          goal, i, s->n_rules, s->n_cps, max_cps, el);
   printf("   trace: n_trace=%u  t_max=%u  record_norm=%u\n",
          s->n_trace, s->t_max, s->record_norm_steps);
+  // Post-PROVED proof-cone re-derivation (same call the WL wrapper
+  // makes in thvm_wl_atp_run_proof): splice NORM_STEP chains behind
+  // goal-family ORIENT / SIMPLIFY bridges.  On a t_max-capped trace it
+  // no-ops after the scan (no headroom for chains).
+  if (st == ATP_PROVED) {
+    clock_t tc0 = clock();
+    thvm_atp_record_goal_cone(s);
+    printf("   cone: %.2fs  n_trace=%u\n",
+           (double)(clock() - tc0) / CLOCKS_PER_SEC, s->n_trace);
+  }
   printf("   dropped: joinable=%u queue-subsumed=%u "
          "rule-subsumed=%u pop-subsumed=%u perm-subsumed=%u eset-subsumed=%u "
          "connected=%u orphan=%u lrs=%u\n",
@@ -1978,6 +2002,84 @@ int main(int argc, char **argv) {
            g_atp_phase_us_cpir_post / 1e6,
            sumus / 1e6, w,
            100.0 * (sumus / 1e6) / w);
+    if (g_atp_phase_detail) {
+      u64 sumd = g_atp_pushn_us_mirror + g_atp_pushn_us_from +
+                 g_atp_pushn_us_norm + g_atp_pushn_us_eq +
+                 g_atp_pushn_us_to + g_atp_pushn_us_ac +
+                 g_atp_pushn_us_hash + g_atp_pushn_us_gate;
+      double per = (g_atp_pushn_calls > 0)
+          ? (double)sumd / (double)g_atp_pushn_calls : 0.0;
+      printf("   push-norm detail: calls=%llu joined=%llu [%.2fus/call]\n"
+             "     mirror=%.2fs from-term=%.2fs norm=%.2fs eq=%.2fs to-term=%.2fs\n"
+             "     ac=%.2fs hash=%.2fs size-gate=%.2fs  sum=%.2fs / push-norm=%.2fs\n",
+             (unsigned long long)g_atp_pushn_calls,
+             (unsigned long long)g_atp_pushn_joined, per,
+             g_atp_pushn_us_mirror / 1e6, g_atp_pushn_us_from / 1e6,
+             g_atp_pushn_us_norm / 1e6, g_atp_pushn_us_eq / 1e6,
+             g_atp_pushn_us_to / 1e6, g_atp_pushn_us_ac / 1e6,
+             g_atp_pushn_us_hash / 1e6, g_atp_pushn_us_gate / 1e6,
+             sumd / 1e6, g_atp_phase_us_push_normalize / 1e6);
+      printf("   push-norm core shape: queries=%llu (var=%llu) cand=%llu "
+             "att=%llu hit=%llu\n"
+             "     pb=%llu win=%llu rematch=%llu splices=%llu "
+             "[cand/q=%.2f att/q=%.2f hit/att=%.3f]\n"
+             "     dt-nodes=%llu dt-branch-edges=%llu [node/q=%.2f]\n",
+             (unsigned long long)g_atp_pushn_tr_q,
+             (unsigned long long)g_atp_pushn_tr_var,
+             (unsigned long long)g_atp_pushn_tr_cand,
+             (unsigned long long)g_atp_pushn_tr_att,
+             (unsigned long long)g_atp_pushn_tr_hit,
+             (unsigned long long)g_atp_pushn_tr_pb,
+             (unsigned long long)g_atp_pushn_tr_win,
+             (unsigned long long)g_atp_pushn_tr_rematch,
+             (unsigned long long)g_atp_pushn_rw,
+             g_atp_pushn_tr_q ? (double)g_atp_pushn_tr_cand /
+                                (double)g_atp_pushn_tr_q : 0.0,
+             g_atp_pushn_tr_q ? (double)g_atp_pushn_tr_att /
+                                (double)g_atp_pushn_tr_q : 0.0,
+             g_atp_pushn_tr_att ? (double)g_atp_pushn_tr_hit /
+                                  (double)g_atp_pushn_tr_att : 0.0,
+             (unsigned long long)g_atp_pushn_dt_node,
+             (unsigned long long)g_atp_pushn_dt_edge,
+             g_atp_pushn_tr_q ? (double)g_atp_pushn_dt_node /
+                                (double)g_atp_pushn_tr_q : 0.0);
+      if (g_atp_swrn_hit + g_atp_swrn_miss > 0) {
+        printf("   walk rename cache: hit=%llu miss=%llu [%.1f%%]\n",
+               (unsigned long long)g_atp_swrn_hit,
+               (unsigned long long)g_atp_swrn_miss,
+               100.0 * (double)g_atp_swrn_hit /
+                   (double)(g_atp_swrn_hit + g_atp_swrn_miss));
+      }
+      // CP-gen non-push split (thvm_atp_generate_cps_wm regions).  The
+      // top-level components (collect/overlap/rank/rekey/sort/pushloop)
+      // tile the cp-gen phase up to loop overhead; the pushloop's own
+      // split (push-norm + varnorm + filters + trace + pack) tiles the
+      // pushloop the same way.  kbo is a sub-slice of pack.
+      u64 sumg = g_atp_cpg_us_collect + g_atp_cpg_us_overlap +
+                 g_atp_cpg_us_rank + g_atp_cpg_us_rekey +
+                 g_atp_cpg_us_sort + g_atp_cpg_us_pushloop;
+      u64 sump = g_atp_phase_us_push_normalize + g_atp_cpg_us_varnorm +
+                 g_atp_cpg_us_filters + g_atp_cpg_us_trace +
+                 g_atp_cpg_us_pack;
+      printf("   cp-gen detail: overlap-calls=%llu rank-calls=%llu\n"
+             "     collect=%.2fs overlap=%.2fs rank=%.2fs rekey=%.2fs "
+             "sort=%.2fs pushloop=%.2fs\n"
+             "     sum=%.2fs / cp-gen=%.2fs\n"
+             "   pushloop detail: push-norm=%.2fs varnorm=%.2fs "
+             "filters=%.2fs trace=%.2fs pack=%.2fs (kbo=%.2fs)\n"
+             "     sum=%.2fs / pushloop=%.2fs\n",
+             (unsigned long long)g_atp_cpg_overlap_calls,
+             (unsigned long long)g_atp_cpg_rank_calls,
+             g_atp_cpg_us_collect / 1e6, g_atp_cpg_us_overlap / 1e6,
+             g_atp_cpg_us_rank / 1e6, g_atp_cpg_us_rekey / 1e6,
+             g_atp_cpg_us_sort / 1e6, g_atp_cpg_us_pushloop / 1e6,
+             sumg / 1e6, g_atp_phase_us_cp_gen / 1e6,
+             g_atp_phase_us_push_normalize / 1e6,
+             g_atp_cpg_us_varnorm / 1e6, g_atp_cpg_us_filters / 1e6,
+             g_atp_cpg_us_trace / 1e6, g_atp_cpg_us_pack / 1e6,
+             g_atp_cpg_us_kbo / 1e6,
+             sump / 1e6, g_atp_cpg_us_pushloop / 1e6);
+    }
     if (g_atp_unorient_step_calls > 0) {
       printf("   unorient-step: %llu calls  %llu fires  %llu empty (%.0f%% wasted)  %.2fs total\n",
              (unsigned long long)g_atp_unorient_step_calls,
@@ -2053,6 +2155,9 @@ int main(int argc, char **argv) {
   printf("   steps/sec=%.1f  cps/step=%.1f\n",
          (el > 0.0) ? (double)i / el : 0.0,
          (i > 0) ? (double)max_cps / (double)i : 0.0);
+  printf("   gc: passes=%llu  live-after-last=%llu cells\n",
+         (unsigned long long)gc_count(),
+         (unsigned long long)(HEAP_NEXT - gc_from_start()));
   { u32 mn = 0, mx = 0, bins[12];
     double mean = 0.0;
     u32 qlen = thvm_atp_cp_size_stats(s, &mn, &mx, &mean, bins, 12u, 10u);

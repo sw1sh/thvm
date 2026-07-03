@@ -707,9 +707,17 @@ static void kbo_lin_addto_walk(KboLin *st, Term t, int sign,
 // weight*sign into *phidiff, var occurrences*sign into bal[].  A CTR
 // subtree applies its memoized weight in O(1) and its variable profile in
 // O(#distinct vars); only an overflowed profile falls back to a full walk.
+// Per-call memo bypass: set by thvm_kbo_nomemo around the shared
+// decision core.  Unlike the env gates above it is scoped to ONE
+// comparison, so memo-served callers in the same process are
+// unaffected.  The walk is verdict-identical to the memo path (same
+// phidiff sum, same balance -- only the accumulation order differs,
+// and kbo_lin_decide_clear's sign classification is order-invariant).
+static u8 g_kbo_force_linear = 0u;
+
 static void kbo_lin_addto(KboLin *st, Term t, int sign,
                           long long *phidiff) {
-  if (kbo_memo_free_gate()) {
+  if (g_kbo_force_linear || kbo_memo_free_gate()) {
     kbo_lin_addto_walk(st, t, sign, phidiff);
     return;
   }
@@ -968,15 +976,11 @@ static KboLin g_kbo_st;   // bal[]/touched[] zero by static-storage init
 static u8 g_kbo_persist = 0;
 fn void thvm_kbo_set_persist(u8 on) { g_kbo_persist = on ? 1u : 0u; }
 
-fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg) {
-  if (g_kbo_persist) {
-    // Persist across calls; a distinct cfg pointer means distinct weights,
-    // so re-bump the epoch on a config change (the caller handles cell
-    // moves via thvm_kbo_invalidate on GC).
-    if (cfg != g_kbo_last_cfg) { g_kbo_last_cfg = cfg; thvm_kbo_invalidate(); }
-  } else {
-    thvm_kbo_invalidate();   // safe default: fresh memo every call
-  }
+// Shared Loechner decision core (Vortest + Rek).  The two entry points
+// differ only in memo POLICY: thvm_kbo manages the persistent memo's
+// epoch and serves subtree accumulations from it; thvm_kbo_nomemo
+// forces the single-pass walk and never touches the memo state.
+static KboCmp kbo_compare_core(Term s, Term t, const KboConfig *cfg) {
   KboLin *st = &g_kbo_st;
   st->cfg = cfg;
   st->n_touched = 0;
@@ -1007,6 +1011,30 @@ fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg) {
     }
   }
 #endif
+  return erg;
+}
+
+fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg) {
+  if (g_kbo_persist) {
+    // Persist across calls; a distinct cfg pointer means distinct weights,
+    // so re-bump the epoch on a config change (the caller handles cell
+    // moves via thvm_kbo_invalidate on GC).
+    if (cfg != g_kbo_last_cfg) { g_kbo_last_cfg = cfg; thvm_kbo_invalidate(); }
+  } else {
+    thvm_kbo_invalidate();   // safe default: fresh memo every call
+  }
+  return kbo_compare_core(s, t, cfg);
+}
+
+// Memo-free entry (see thvm.h).  Verdict-identical to thvm_kbo: the
+// per-term weight memo is a pure cache over the same accumulation, and
+// the decision core is shared.  Neither reads nor writes the memo /
+// epoch / last-cfg state, so interleaving nomemo calls between
+// memo-served ones cannot perturb their hit pattern.
+fn KboCmp thvm_kbo_nomemo(Term s, Term t, const KboConfig *cfg) {
+  g_kbo_force_linear = 1u;
+  KboCmp erg = kbo_compare_core(s, t, cfg);
+  g_kbo_force_linear = 0u;
   return erg;
 }
 

@@ -176,14 +176,35 @@ static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {
   }
 #endif
 
-  RewriteSubst subst = {{0}};
+  // Head-symbol pre-filter: two constructors with different head
+  // symbols can never unify (thvm_unify fails at its TAG_CTR
+  // `term_ext(s) != term_ext(t)` clash check with no side effects).
+  // Skipping is behaviour-identical -- only true-fail positions are
+  // rejected -- and avoids the subst reset, two unify_walks and the
+  // kbo_eq descent for the majority of subterms that cannot match.
+  // Trace mode keeps the full per-position unify=0 lines.
+  if (!g_cp_visit_trace &&
+      term_tag(sub) == TAG_CTR && term_tag(ctx->lj) == TAG_CTR &&
+      term_ext(sub) != term_ext(ctx->lj)) {
+    return ctx->count;
+  }
+
+  // Persistent all-zero subst + bound-id undo log (unify/_.c): byte-
+  // identical to a fresh 512-byte zero-init per attempt, without the
+  // memset.  The undo runs after the last read of `subst` on every
+  // path out of the armed window.
+  static RewriteSubst subst;  // BSS: all-zero at first use
+  thvm_unify_undo_begin();
   u8 g_uok = thvm_unify(sub, ctx->lj, &subst) ? 1u : 0u;
   if (g_cp_visit_trace) {
     fprintf(stderr, "CPVIS pos[");
     for (u32 d = 0; d < p_len; d++) fprintf(stderr, "%u", p[d]);
     fprintf(stderr, "] unify=%u count=%u\n", g_uok, ctx->count);
   }
-  if (!g_uok) return ctx->count;
+  if (!g_uok) {
+    thvm_unify_undo(&subst);
+    return ctx->count;
+  }
 
   // CP = (σ(l_i[p ← r_j]), σ(r_i)); the peak is σ(l_i) -- both CP
   // sides are one-step reducts of it (rule j rewrites the lhs, rule i
@@ -193,6 +214,7 @@ static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {
   Term cp_lhs   = thvm_unify_apply(replaced, &subst);
   Term cp_rhs   = thvm_unify_apply(ctx->ri,  &subst);
   Term cp_peak  = g_cp_need_peak ? thvm_unify_apply(ctx->li, &subst) : 0;
+  thvm_unify_undo(&subst);
 
   CriticalPair *slot = &ctx->out[ctx->count];
   slot->lhs = cp_lhs;

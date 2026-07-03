@@ -3720,6 +3720,14 @@ typedef struct {
 } KboConfig;
 
 fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg);
+// Memo-free comparator: identical verdict to thvm_kbo (the per-term
+// weight memo is a pure cache -- THVM_KBO_NO_WCACHE is the long-standing
+// A/B witness), but every divergent-subtree accumulation takes the
+// single-pass walk, and the shared memo/epoch state is left untouched.
+// Cheaper when the operands are small FRESH terms (new cells, weighed
+// once): the memo path hashes every cold node just to key the cache.
+// The ATP CP-insert weigh is exactly that regime.
+fn KboCmp thvm_kbo_nomemo(Term s, Term t, const KboConfig *cfg);
 // Invalidate thvm_kbo's persistent per-term weight memo.  Call when term
 // cells move (GC) or the config changes (new run / new weights).
 fn void   thvm_kbo_invalidate(void);
@@ -3974,6 +3982,14 @@ fn Term thvm_rewrite_normalize(Term t, const Term *lhs, const Term *rhs,
 // Reuses RewriteSubst for the result; caller zero-inits before the
 // first call.  Returns 1 on success, 0 if the mgu doesn't exist.
 fn u8   thvm_unify        (Term s, Term t, RewriteSubst *subst);
+// Bound-id undo log: a hot caller keeps one persistent all-zero
+// RewriteSubst and brackets each unify attempt with undo_begin/undo
+// instead of re-zeroing the 512-byte struct per attempt.  While armed,
+// thvm_unify logs every id it binds; thvm_unify_undo re-zeroes exactly
+// those slots (full clear on log overflow).  Byte-identical semantics
+// to a fresh zero-init.
+fn void thvm_unify_undo_begin(void);
+fn void thvm_unify_undo   (RewriteSubst *subst);
 fn Term thvm_rename_vars  (Term t, u32 offset);
 fn Term thvm_unify_apply  (Term t, const RewriteSubst *subst);
 // 7c: canonically renumber a stored equation/rule's variables to a
@@ -3991,7 +4007,12 @@ fn void thvm_normalize_vars(Term *lhs, Term *rhs);
 // unified with.  pos_len == 0 is a top (outermost) overlap.  This is
 // the provenance a Waldmeister-PCL-shaped proof needs to present the
 // CP as a CriticalPairLemma.
-#define CP_MAX_DEPTH 16
+// 64: Waldmeister enumerates EVERY non-variable position with no depth
+// cap; 16 silently skipped 7835 deep-overlap positions on the
+// WolframAxioms DoubleNegation run (250 missing CPs in batch-637 alone
+// -- the @1288 alignment fork vs wmcli -auto).  The pos[] arrays are
+// transient per-CP buffers, so the cost is bytes, not asymptotics.
+#define CP_MAX_DEPTH 64
 typedef struct {
   Term lhs;
   Term rhs;
@@ -4681,6 +4702,21 @@ typedef struct {
   // (cp_trace == ATP_TRACE_NONE) can still be orphan-tested against its dead
   // parent rule -- the firstdiv-926 re-derived-duplicate over-selection.
   u32  *cp_par_a;
+  // Trace-cap-proof orphan identity (WM Waisenmord parity).  The proof
+  // trace soft cap leaves post-cap rules with r_trace == ATP_TRACE_NONE,
+  // making atp_trace_mark_dead a no-op and their queued CPs un-orphanable
+  // -- WM's KPV_KillParent kills by RULE NUMBER with no cap, so late WM
+  // orphans died where thvm's survived (WolframAxioms DoubleNegation
+  // firstdiv 796).  r_uid gives every R/E slot a stable birth identity
+  // (1-based; 0 = none), cp_uid_a/b stamp each queued CP's parent uids at
+  // push, uid_dead is the kill bitmap.  All allocated only under
+  // use_orphan_murder (NULL otherwise, slot-move sites NULL-guarded).
+  u32  *r_uid;
+  u32  *cp_uid_a;
+  u32  *cp_uid_b;
+  u8   *uid_dead;
+  u32   uid_dead_cap;
+  u32   next_rule_uid;
   u8    use_initial_ultimate;
   // Waldmeister `database=ultimate` action (Parameter.c:166 -- the WM
   // default along with initial=ultimate).  Tags CPs derived during
@@ -4875,6 +4911,21 @@ typedef struct {
   // pop so orient_and_add's TRACE_ORIENT entry can record the
   // source CP as its parent.
   u32  last_popped_trace;
+
+  // FIFO live-scan floor: every queued CP with cp_seq < fifo_floor_seq
+  // is PROVEN dead (its scan-time death test failed and death marks --
+  // r_trace_dead / uid_dead -- are set-only) or already extracted, so
+  // the scan skips it with one compare instead of re-running the
+  // orphan tests on the whole dead prefix at every FIFO pick.  Sound
+  // because cp_seq stamps are handed out monotonically (a new push can
+  // never appear below the floor) and the scanned minimum is always
+  // extracted right after the pick (selected or discarded).  The one
+  // NON-permanent death test is the wolf-dup-orphan check, gated on
+  // atp_wolfram_axiom_is_live -- fifo_floor_wolf records the gate value
+  // the floor was proven under and any flip resets the floor (one full
+  // rescan), keeping the skip conservative.
+  u32  fifo_floor_seq;
+  u8   fifo_floor_wolf;
 
   // Transient: set by thvm_atp_orient_and_add's KBO_UN branch to 1 when
   // the CP-formation side geometry swap (use_cp_side) physically fired
@@ -6935,6 +6986,16 @@ fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
 // default DEF block, NewClassification.c).  Off = engine byte-identical.
 fn void      thvm_atp_set_use_initial_ultimate(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_intake_order(AtpState *s, u8 on);
+// SpezNormierung canonical intake order over explicit axiom / goal
+// term arrays (src/atp/wm_intake.c steps 2-5): order_out[r] = input
+// index of the axiom at canonical rank r; swap_out[i] = 1 iff axiom
+// i's canonical LR form swaps its input sides.  swap_out may be NULL.
+// The WL TFindProof encoder calls this (via thvm_wl_atp_wm_intake_order)
+// to present axioms in the same order WM's loader feeds them.
+fn void      thvm_atp_wm_intake_order(const Term *ls, const Term *rs,
+                                      u32 count, const Term *gls,
+                                      const Term *grs, u32 n_goals,
+                                      u32 *order_out, u8 *swap_out);
 // WM normal-form strategy `-nf mixmost` (the CLI default; see
 // AtpState.use_mixmost_nf).  Default OFF = the legacy outermost
 // rescan walk; the "Waldmeister"* presets turn it ON.
@@ -8123,6 +8184,14 @@ fn AtpStatus thvm_atp_run (AtpState *s);
 // Rebuild the off-heap packed proof-trace into live Term entries after a
 // terminated search (definition in src/atp/_.c).
 fn void thvm_atp_materialize_trace(AtpState *s);
+// Post-PROVED proof-cone norm re-derivation: replay the unrecorded
+// engine normalizations behind goal-family TRACE_ORIENT /
+// TRACE_SIMPLIFY entries over the historical rule set R(ti), splicing
+// TRACE_NORM_STEP chains into the trace so the WL lift inherits them
+// instead of BFS-bridging (definition in src/atp/_.c).  Run AFTER the
+// search terminates and BEFORE trace materialization / extraction;
+// entries whose replay misses the recorded equation stay untouched.
+fn void thvm_atp_record_goal_cone(AtpState *s);
 
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction

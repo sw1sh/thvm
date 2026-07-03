@@ -354,6 +354,87 @@ u64 g_atp_wmcp_full               = 0;
 u64 g_atp_wmcp_zero               = 0;
 u64 g_atp_wmcp_nonzero            = 0;
 u8  g_atp_phase_enabled           = 0;
+// Push-normalize detail tier (THVM_ATP_PROFILE=2): splits the per-CP
+// atp_cp_trivially_joinable cost inside atp_push_cps_traced into its
+// components -- FT-mirror ensure, Term->FT conversion, the FT
+// normalize core, the ft_eq verdicts, FT->Term decode of survivors,
+// the AC-eq redundancy check, the (default-off) join-cache hashing,
+// and the raw-size symbol-count gate.  Accumulated ONLY while
+// g_atp_pushn_active is set (the push-loop treatment region), so the
+// components sum to g_atp_phase_us_push_normalize up to loop
+// overhead.  Zero cost when the detail tier is off.
+u64 g_atp_pushn_us_mirror         = 0;   // atp_ft_mirror_ensure
+u64 g_atp_pushn_us_from           = 0;   // ft_from_term x2
+u64 g_atp_pushn_us_norm           = 0;   // atp_rules_only_normalize_ft x2
+u64 g_atp_pushn_us_eq             = 0;   // ft_eq verdict(s)
+u64 g_atp_pushn_us_to             = 0;   // ft_to_term x2 (survivors only)
+u64 g_atp_pushn_us_ac             = 0;   // AC-eq redundancy check
+u64 g_atp_pushn_us_hash           = 0;   // join-cache struct-hash + probe
+u64 g_atp_pushn_us_gate           = 0;   // atp_symbol_count raw-size gate
+u64 g_atp_pushn_calls             = 0;   // trivially_joinable calls (push)
+u64 g_atp_pushn_joined            = 0;   // joined verdicts (push)
+// Normalize-core shape counters (same detail tier + push scope): per
+// ft_cell_try_rules query in the push-normalize path -- queries,
+// var-cell early-outs, candidate-loop iterations, ft_match attempts /
+// hits, ft_wm_pattern_before winner compares, winner re-matches, and
+// splices fired (ft_mixmost_reduce_here successes).
+u64 g_atp_pushn_tr_q              = 0;
+u64 g_atp_pushn_tr_var            = 0;
+u64 g_atp_pushn_tr_cand           = 0;
+u64 g_atp_pushn_tr_att            = 0;
+u64 g_atp_pushn_tr_hit            = 0;
+u64 g_atp_pushn_tr_pb             = 0;
+u64 g_atp_pushn_tr_rematch        = 0;
+u64 g_atp_pushn_tr_win            = 0;
+u64 g_atp_pushn_rw                = 0;
+// Discrimination-tree walk shape (ftdt_descend, same tier + scope):
+// nodes visited (chain-followed + branched) and branch-node edge-loop
+// iterations, so the tree-walk cost per query is directly readable.
+u64 g_atp_pushn_dt_node           = 0;
+u64 g_atp_pushn_dt_edge           = 0;
+// CP-gen non-push detail tier (same THVM_ATP_PROFILE=2 gate): splits
+// the cp-gen phase OUTSIDE push-normalize into its components inside
+// thvm_atp_generate_cps_wm + atp_push_cps_traced --
+//   collect  = atp_cp_index_collect / atp_cp_subindex_collect + the
+//              candidate sorts (the discrimination-tree partner filter)
+//   overlap  = atp_overlap_ij (position walk + unification) per pair
+//   rank     = the atp_wmo_rank batch key loop (tops/leaflist walks)
+//   rekey    = the detector re-key passes between the key loop and the
+//              batch sort (corank/comm/band/... gated corrections)
+//   sort     = atp_wmo_ent_sort (the batch emission-order sort)
+//   pushloop = the whole sorted-batch push loop (INCLUDING push-norm,
+//              which g_atp_phase_us_push_normalize times separately)
+// and inside atp_push_cps_traced (per surviving CP):
+//   varnorm  = thvm_normalize_vars (raw snapshot + treated pair)
+//   filters  = perm-subsume / rule-subsume / queue-subsume probes
+//   trace    = atp_trace_push_cp (proof-trace entry)
+//   pack     = atp_cp_heap_push (acp_pack + weigh + heap insert), of
+//              which kbo = the cp_pri/cp_goal/cp_pri2 weighing inside
+//              atp_cp_heap_insert_packed
+// All accumulate ONLY under g_atp_phase_detail, so PROFILE=1 runs and
+// the default engine pay a single dead branch per site.
+u64 g_atp_cpg_us_collect          = 0;
+u64 g_atp_cpg_us_overlap          = 0;
+u64 g_atp_cpg_us_rank             = 0;
+u64 g_atp_cpg_us_rekey            = 0;
+u64 g_atp_cpg_us_sort             = 0;
+u64 g_atp_cpg_us_pushloop         = 0;
+u64 g_atp_cpg_us_varnorm          = 0;
+u64 g_atp_cpg_us_filters          = 0;
+u64 g_atp_cpg_us_trace            = 0;
+u64 g_atp_cpg_us_pack             = 0;
+u64 g_atp_cpg_us_kbo              = 0;
+u64 g_atp_cpg_overlap_calls       = 0;
+u64 g_atp_cpg_rank_calls          = 0;
+// Walk rename-cache shape (sw_rename_pair; PROFILE=2 printout).
+u64 g_atp_swrn_hit                = 0;
+u64 g_atp_swrn_miss               = 0;
+u8  g_atp_phase_detail            = 0;
+static u8 g_atp_pushn_active      = 0;
+// GC epoch: bumped by every thvm_atp_gc_collect (the only collector
+// that runs during saturation), so a handle-keyed cache can detect
+// cell relocation/reuse.  Cells never move between collections.
+static u64 g_atp_gc_epoch         = 0;
 // Perm-subsume AC-operator mask (WM GZ_ACVerzichtbar / dokgP).  Set by
 // thvm_atp_set_perm_subsume_mask (from thvm_atp_auto_ac's detected AC
 // symbols); a non-zero mask routes atp_cp_perm_subsumed through the
@@ -470,6 +551,7 @@ static void atp_wmo_free(struct AtpWmOrder *w);
 static void atp_wmo_insert_fact(AtpState *s, u32 slot);
 static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived);
 static void atp_wmo_remove_trace(AtpState *s, u32 trace);
+static u8   atp_wmo_dist_rhs_of(AtpState *s, u32 uid);
 static u32  atp_wmo_victim_drain_key(AtpState *s, u32 trace,
                                      u8 reduced_thvm_side);
 static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t);
@@ -769,9 +851,11 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   Term *nsl = (Term *)realloc(s->r_dead_subsumer_lhs, cap * sizeof(Term));
   Term *nsr = (Term *)realloc(s->r_dead_subsumer_rhs, cap * sizeof(Term));
   u32  *nrc = (u32  *)realloc(s->r_rederive_cut,       cap * sizeof(u32));
+  u32  *nru = (u32  *)realloc(s->r_uid,                cap * sizeof(u32));
   if (nl == NULL || nr == NULL || nt == NULL || no == NULL ||
       nd == NULL || nls == NULL || nrs == NULL || ngj == NULL ||
-      nod == NULL || nsl == NULL || nsr == NULL || nrc == NULL) {
+      nod == NULL || nsl == NULL || nsr == NULL || nrc == NULL ||
+      nru == NULL) {
     fprintf(stderr, "atp_ensure_rule_cap: realloc to %u rules failed\n",
             cap);
     exit(1);
@@ -781,7 +865,9 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   s->r_gj_status = ngj; s->r_overlap_done = nod;
   s->r_dead_subsumer_lhs = nsl; s->r_dead_subsumer_rhs = nsr;
   s->r_rederive_cut = nrc;
+  s->r_uid = nru;
   for (u32 i = s->r_cap; i < cap; i++) {
+    s->r_uid[i] = 0u;
     s->r_trace[i] = ATP_TRACE_NONE;
     s->r_dead[i] = 0;
     s->r_dead_lhs_save[i] = 0;
@@ -910,6 +996,65 @@ static u8  g_cp_form_phase = 0xffu;
 // ATP_TRACE_NONE drops the TRACE_CP parents).  ATP_TRACE_NONE = unset.
 static u32 g_cp_par_a = ATP_TRACE_NONE;
 
+// WM Waisenmord rule-identity parenthood (see AtpState.r_uid): the two
+// parent slots' uids of the CP batch currently being pushed, carried from
+// atp_push_cps_traced to the heap/implicit push so they can be stamped
+// into cp_uid_a/b.  0 = none (axiom intake, requeued facts).
+static u32 g_cp_uid_a = 0u;
+static u32 g_cp_uid_b = 0u;
+
+// Mark a rule uid dead (WM KPV_KillParent on RE_RegelEntfernen /
+// RE_GleichungEntfernen).  Grows the bitmap on demand; uid 0 = none.
+static void atp_uid_mark_dead(AtpState *s, u32 uid) {
+  if (uid == 0u || s->r_uid == NULL) return;
+  if (uid >= s->uid_dead_cap) {
+    u32 ncap = s->uid_dead_cap ? s->uid_dead_cap : 1024u;
+    while (ncap <= uid) ncap *= 2u;
+    u8 *nd = (u8 *)realloc(s->uid_dead, ncap);
+    if (nd == NULL) return;   // OOM: skip the mark (orphan stays alive; sound)
+    memset(nd + s->uid_dead_cap, 0, ncap - s->uid_dead_cap);
+    s->uid_dead = nd;
+    s->uid_dead_cap = ncap;
+  }
+  s->uid_dead[uid] = 1u;
+  {
+    static int rt = -1;
+    if (rt < 0) rt = (getenv("THVM_ATP_RULE_TRACE") != NULL) ? 1 : 0;
+    if (rt) fprintf(stderr, "UIDKILL uid=%u\n", uid);
+  }
+}
+
+static inline int atp_uid_is_dead(const AtpState *s, u32 uid) {
+  return uid != 0u && s->uid_dead != NULL && uid < s->uid_dead_cap
+      && s->uid_dead[uid];
+}
+
+// Uid-layer orphan test for queue slot j: either stamped parent uid died.
+// Default ON (THVM_ATP_UID_ORPHAN=0 disables): the KPV_KillParent
+// call-site semantics are pinned from RUndEVerwaltung.c/Interreduktion.c
+// (RE_RegelEntfernen kills unconditionally; the eq one-side retire kills
+// unconditionally too -- the Gegenseite removal always takes the
+// distinguished direction out of E; E-subsume and bwd-ground-join kill
+// whole facts).  Gated validation 2026-07-02: WolframAxioms
+// DoubleNegation 2849/2849 IDENTICAL and OrAssociativity 2977-prefix
+// selection identity vs `wmcli -auto` with the layer on; the historical
+// first-scoping regression (DN 795 -> 120) was the RETIRE-site
+// over-kill, since corrected.
+static int atp_uid_orphan_on(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("THVM_ATP_UID_ORPHAN");
+    on = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
+  return on;
+}
+static inline int atp_cp_uid_orphan(const AtpState *s, u32 j) {
+  return atp_uid_orphan_on()
+      && s->cp_uid_a != NULL
+      && (atp_uid_is_dead(s, s->cp_uid_a[j]) ||
+          atp_uid_is_dead(s, s->cp_uid_b[j]));
+}
+
 // THVM_ATP_GJ_KEEP: set just before atp_cp_heap_push for a ground-joinable
 // CP that is being KEPT (not dropped) so insert_packed stamps cp_deprio[i]
 // = 1.  A deprioritized CP gets priority ATP_CP_PRI_NEVER (heap sinks it,
@@ -924,6 +1069,7 @@ static void atp_cpform_geom_clear(void) {
   g_cpform_combo = g_cpform_i_or = g_cpform_j_or = g_cpform_pos_len = 0xffu;
   g_cp_form_phase = 0xffu;
   g_cp_par_a = ATP_TRACE_NONE;
+  g_cp_uid_a = g_cp_uid_b = 0u;
   g_cpform_ilhs = g_cpform_jlhs = 0;
 }
 
@@ -954,9 +1100,21 @@ static u8 atp_term_is_x_xx_x(Term t, u32 *out_v) {
 static void atp_cp_form_trace(u32 seq, u32 w, Term lhs, Term rhs) {
   static int on = -1;
   static int w367 = -1;
-  if (on < 0) on = (getenv("THVM_ATP_CP_FORM_TRACE") != NULL) ? 1 : 0;
+  static long seq_lo = -1, seq_hi = -1;
+  if (on < 0) {
+    on = (getenv("THVM_ATP_CP_FORM_TRACE") != NULL) ? 1 : 0;
+    // Optional seq window (THVM_ATP_CP_FORM_SEQ_LO/HI): print only CPs whose
+    // cp_seq falls in [lo,hi] so a deep-run batch can be dumped without the
+    // full multi-hundred-MB trace.  Output-only; no engine effect.
+    const char *lo = getenv("THVM_ATP_CP_FORM_SEQ_LO");
+    const char *hi = getenv("THVM_ATP_CP_FORM_SEQ_HI");
+    seq_lo = lo ? atol(lo) : -1;
+    seq_hi = hi ? atol(hi) : -1;
+  }
   if (w367 < 0) w367 = (getenv("THVM_ATP_W367_TRACE") != NULL) ? 1 : 0;
   if (!on && !w367) return;
+  if (seq_lo >= 0 && (long)seq < seq_lo) return;
+  if (seq_hi >= 0 && (long)seq > seq_hi) return;
   if (w367 && !on) {
     u32 v = 0; u8 hit = atp_term_is_x_xx_x(lhs, &v) || atp_term_is_x_xx_x(rhs, &v);
     if (!hit) return;
@@ -1152,6 +1310,23 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
     for (u32 i = was_null ? 0u : s->cp_cap; i < cap; i++)
       s->cp_par_a[i] = ATP_TRACE_NONE;
   }
+  // Lazy-grow the WM Waisenmord uid stamps only under orphan murder
+  // (see AtpState.r_uid); NULL (engine byte-identical) otherwise.
+  if (s->use_orphan_murder) {
+    u8 was_null = (s->cp_uid_a == NULL);
+    u32 *nua = (u32 *)realloc(s->cp_uid_a, cap * sizeof(u32));
+    u32 *nub = (u32 *)realloc(s->cp_uid_b, cap * sizeof(u32));
+    if (nua == NULL || nub == NULL) {
+      fprintf(stderr, "atp_ensure_cp_cap: realloc cp_uid to %u failed\n", cap);
+      exit(1);
+    }
+    s->cp_uid_a = nua;
+    s->cp_uid_b = nub;
+    for (u32 i = was_null ? 0u : s->cp_cap; i < cap; i++) {
+      s->cp_uid_a[i] = 0u;
+      s->cp_uid_b[i] = 0u;
+    }
+  }
   for (u32 i = s->cp_cap; i < cap; i++) {
     s->cp_packed[i] = NULL;
     s->cp_trace[i]  = ATP_TRACE_NONE;
@@ -1270,50 +1445,64 @@ static u64 acp_get_varint(const u8 **pp) {
   return v;
 }
 
-// Worst-case packed bytes for term `t`: 1 discriminator + 2 varints,
-// each varint <= 10 bytes -> 21 bytes per node is a safe bound.
-static u32 acp_packed_bound(Term t) {
-  switch (term_tag(t)) {
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t), c = 21u;
-      for (u32 i = 0; i < n; i++) c += acp_packed_bound(term_ctr_at(t, i));
-      return c;
-    }
-    default: return 21u;
-  }
+// Persistent pack scratch: the pack walk emits into this geometrically
+// grown buffer, then acp_pack copies the EXACT length into the returned
+// malloc.  vs the historical acp_packed_bound pre-walk + 21-bytes/node
+// over-allocation this saves one full tree walk per CP AND right-sizes
+// the queue's resident byte strings (~3 bytes/node typical vs 21 -- the
+// multi-million-CP queue was holding ~7x dead malloc slack).
+// Single-threaded saturation, so the shared scratch is safe.
+static u8 *g_acp_scratch     = NULL;
+static u32 g_acp_scratch_cap = 0u;
+
+// Ensure `extra` more bytes fit at scratch position `pos`.
+static void acp_scratch_ensure(u32 pos, u32 extra) {
+  if (pos + extra <= g_acp_scratch_cap) return;
+  u32 ncap = g_acp_scratch_cap ? g_acp_scratch_cap : 4096u;
+  while (pos + extra > ncap) ncap *= 2u;
+  u8 *nb = (u8 *)realloc(g_acp_scratch, ncap);
+  if (nb == NULL) thvm_fatal("acp_scratch_ensure: OOM");
+  g_acp_scratch = nb;
+  g_acp_scratch_cap = ncap;
 }
 
-// Append `t`'s preorder packing to `*pp`.  CTR: 'C', label, arity,
-// then children; FVR: 'V', var id; NUM: 'N', dtype, raw value;
-// anything else: 'E' (era placeholder -- ATP terms are first-order, so
-// this is unreachable in practice but keeps unpack total).  `*nodes`
-// is bumped once per node visited -- the pack walks every node anyway,
-// so the CP's symbol count (its selection weight) falls out for free,
-// sparing atp_cp_priority a second full traversal.
-static void acp_pack_term(Term t, u8 **pp, u32 *nodes) {
+// Append `t`'s preorder packing to the scratch at `*pos`.  CTR: 'C',
+// label, arity, then children; FVR: 'V', var id; NUM: 'N', dtype, raw
+// value; anything else: 'E' (era placeholder -- ATP terms are
+// first-order, so this is unreachable in practice but keeps unpack
+// total).  Each node reserves its own worst case (1 discriminator + 2
+// varints <= 21 bytes) before writing.  `*nodes` is bumped once per
+// node visited -- the pack walks every node anyway, so the CP's symbol
+// count (its selection weight) falls out for free, sparing
+// atp_cp_priority a second full traversal.
+static void acp_pack_term(Term t, u32 *pos, u32 *nodes) {
   (*nodes)++;
+  acp_scratch_ensure(*pos, 21u);
+  u8 *p = g_acp_scratch + *pos;
   switch (term_tag(t)) {
     case TAG_CTR: {
       u32 n = term_ctr_n(t);
-      *(*pp)++ = (u8)'C';
-      acp_put_varint(pp, term_ext(t));
-      acp_put_varint(pp, n);
-      for (u32 i = 0; i < n; i++) acp_pack_term(term_ctr_at(t, i), pp, nodes);
+      *p++ = (u8)'C';
+      acp_put_varint(&p, term_ext(t));
+      acp_put_varint(&p, n);
+      *pos = (u32)(p - g_acp_scratch);
+      for (u32 i = 0; i < n; i++) acp_pack_term(term_ctr_at(t, i), pos, nodes);
       return;
     }
     case TAG_NUM:
-      *(*pp)++ = (u8)'N';
-      acp_put_varint(pp, term_ext(t));
-      acp_put_varint(pp, term_val(t));
-      return;
+      *p++ = (u8)'N';
+      acp_put_varint(&p, term_ext(t));
+      acp_put_varint(&p, term_val(t));
+      break;
     case TAG_FVR:
-      *(*pp)++ = (u8)'V';
-      acp_put_varint(pp, term_ext(t));
-      return;
+      *p++ = (u8)'V';
+      acp_put_varint(&p, term_ext(t));
+      break;
     default:
-      *(*pp)++ = (u8)'E';
-      return;
+      *p++ = (u8)'E';
+      break;
   }
+  *pos = (u32)(p - g_acp_scratch);
 }
 
 // Rebuild one preorder-packed term, advancing `*pp` past it.
@@ -1345,17 +1534,26 @@ static Term acp_unpack_term(const u8 **pp) {
 // NULL.  The two terms pack back to back -- the preorder records are
 // self-delimiting via arity, so acp_unpack reads lhs then rhs with no
 // separator.
-static u8 *acp_pack(Term lhs, Term rhs, u32 *out_len, u32 *out_nodes) {
-  u32 bound = acp_packed_bound(lhs) + acp_packed_bound(rhs);
-  u8 *buf = (u8 *)malloc(bound);
+// `out_lhs_nodes` (optional) receives the LHS-only node count -- the
+// per-side symbol counts the CP-weight modes (MAX/GT/MIX/MIX2/UNIF)
+// would otherwise re-walk both terms for (identical values: both count
+// one per node).
+static u8 *acp_pack_ex(Term lhs, Term rhs, u32 *out_len, u32 *out_nodes,
+                       u32 *out_lhs_nodes) {
+  u32 pos = 0u, nodes = 0u;
+  acp_pack_term(lhs, &pos, &nodes);
+  if (out_lhs_nodes != NULL) *out_lhs_nodes = nodes;
+  acp_pack_term(rhs, &pos, &nodes);
+  u8 *buf = (u8 *)malloc(pos ? pos : 1u);
   if (buf == NULL) thvm_fatal("acp_pack: OOM");
-  u8 *p = buf;
-  u32 nodes = 0u;
-  acp_pack_term(lhs, &p, &nodes);
-  acp_pack_term(rhs, &p, &nodes);
-  if (out_len   != NULL) *out_len   = (u32)(p - buf);
+  memcpy(buf, g_acp_scratch, pos);
+  if (out_len   != NULL) *out_len   = pos;
   if (out_nodes != NULL) *out_nodes = nodes;
   return buf;
+}
+
+static u8 *acp_pack(Term lhs, Term rhs, u32 *out_len, u32 *out_nodes) {
+  return acp_pack_ex(lhs, rhs, out_len, out_nodes, NULL);
 }
 
 // Inverse of acp_pack: rebuild both heap Terms from the byte string.
@@ -4977,6 +5175,10 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_ultimate);
   free(s->cp_form_phase);
   free(s->cp_par_a);
+  free(s->cp_uid_a);
+  free(s->cp_uid_b);
+  free(s->r_uid);
+  free(s->uid_dead);
   free(s->cp_last_norm_r_revision);
   // Deferred-CP (`implicit_pair`) arc commit 1: the descriptor array and
   // the per-slot tag bitset are plain malloc'd blocks (no per-slot owned
@@ -5161,6 +5363,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
 #endif
 
   gc_collect(roots, w);
+  g_atp_gc_epoch++;   // invalidate handle-keyed caches (cells moved)
 
   // DIAG: post-GC live-set breakdown (NORMLOG).  Sum the trace-term
   // node counts vs the rule-term node counts to see which dominates.
@@ -5275,21 +5478,22 @@ static int atp_trace_ensure(AtpState *s) {
 // stays the "none" sentinel).  acp_pack_term is self-delimiting via arity,
 // so the loader reads lhs then rhs back-to-back.
 static u64 atp_trace_eq_store(AtpState *s, Term lhs, Term rhs) {
-  u32 bound = acp_packed_bound(lhs) + acp_packed_bound(rhs);
-  if (s->trace_eq_len + bound > s->trace_eq_cap) {
+  // Pack into the shared scratch first (acp_pack_term emits there),
+  // then append the exact bytes -- no 21-bytes/node bound pre-walk.
+  u32 pos = 0u, nodes = 0u;
+  acp_pack_term(lhs, &pos, &nodes);
+  acp_pack_term(rhs, &pos, &nodes);
+  if (s->trace_eq_len + pos > s->trace_eq_cap) {
     u64 ncap = s->trace_eq_cap ? s->trace_eq_cap * 2u : (1u << 20);
-    while (s->trace_eq_len + bound > ncap) ncap *= 2u;
+    while (s->trace_eq_len + pos > ncap) ncap *= 2u;
     u8 *nb = (u8 *)realloc(s->trace_eq_buf, (size_t)ncap);
     if (nb == NULL) thvm_fatal("atp_trace_eq_store: OOM");
     s->trace_eq_buf = nb;
     s->trace_eq_cap = ncap;
   }
   u64 off = s->trace_eq_len;
-  u8 *p = s->trace_eq_buf + off;
-  u32 nodes = 0;
-  acp_pack_term(lhs, &p, &nodes);
-  acp_pack_term(rhs, &p, &nodes);
-  s->trace_eq_len = (u64)(p - s->trace_eq_buf);
+  memcpy(s->trace_eq_buf + off, g_acp_scratch, pos);
+  s->trace_eq_len = off + pos;
   return off + 1u;
 }
 
@@ -5749,12 +5953,21 @@ fn AtpAddedRange thvm_atp_install_oriented_rule(AtpState *s, Term lhs,
   return r;
 }
 
+
 // Re-queue a simplified older rule (interreduce path).  Records a
 // TRACE_SIMPLIFY entry whose parent_a is the dropped rule's trace
 // index, so a proof consumer can replay the reduction chain instead
 // of treating the equation as an unjustified axiom.
 static u8 atp_add_equation_simplified(AtpState *s, Term lhs, Term rhs,
                                       u32 parent_trace) {
+  // Goal-connected requeues record their interreduce-time reduction as
+  // NORM_STEP chains threaded between the parent and the TRACE_SIMPLIFY
+  // entry.  With whole-run RecordNorm off this hop is otherwise the only
+  // unrecorded rewrite in a goal chain, and the WL lift cannot re-derive
+  // ordered reductions by search (OrAssociativity goal-CP requeue).  The
+  // re-derivation runs against the CURRENT R -- the same rule set that
+  // just produced (lhs, rhs) -- so the recorded chain lands on the same
+  // pair; on any mismatch fall back to the unchained entry.
   return atp_enqueue_equation(s, lhs, rhs, TRACE_SIMPLIFY, parent_trace);
 }
 
@@ -6607,6 +6820,22 @@ static u32 atp_symbol_count(Term t) {
   }
 }
 
+// Capped variant: accumulate `t`'s node count into *acc, stopping the
+// walk as soon as *acc reaches `cap`.  For a threshold test (is the
+// count < cap?) the verdict is identical to the full count -- a capped
+// result >= cap iff the true count is -- while an over-cap giant pays
+// O(cap) instead of O(|t|).
+static void atp_symbol_count_upto(Term t, u32 cap, u32 *acc) {
+  if (*acc >= cap) return;
+  (*acc)++;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n && *acc < cap; i++) {
+      atp_symbol_count_upto(term_ctr_at(t, i), cap, acc);
+    }
+  }
+}
+
 // Same node count as atp_symbol_count, but with Twee's shared-subterm
 // discount (src/Twee/CP.hs:259-261, cfg_dupcost=1, cfg_dupfactor=0):
 // each unique Term value counts once at full weight; repeat occurrences
@@ -7117,12 +7346,85 @@ static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
 // Forward-decl: atp_cp_priority_sized uses this; the helper is defined
 // next to thvm_atp_set_use_sos.
 static int atp_term_touches_goal(const AtpState *s, Term t);
+// CP-insert weigh comparator: same VERDICT as atp_compare, with the
+// plain-KBO case served memo-free (thvm_kbo_nomemo) below a node-count
+// threshold.  The GT/MIX/MIX2 weigh compares the two faces of a FRESH
+// CP exactly once -- new cells, never re-compared -- so the persistent
+// weight memo's hashing (kbo_leaf_hash / kbo_memo_combine over every
+// cold node) costs more than the single-pass walk it replaces; the
+// runtime profile put the memo machinery at ~70% of the weigh's KBO
+// time.  The memo is a pure cache (THVM_KBO_NO_WCACHE is the standing
+// A/B witness), so the verdict -- and the engine trajectory -- is
+// byte-identical for ANY threshold.  Big CPs (>= the threshold) keep
+// the memo path: their subtrees repeat internally and across the
+// orient gates, where the cache does pay.  Every non-plain-KBO route
+// (AC mask, WPO/RPO/LPO, opt-in flat) falls back to atp_compare.
+// THVM_ATP_KBO_NOMEMO_MAX overrides the threshold (0 = disabled).
+static KboCmp atp_weigh_compare(AtpState *s, Term lhs, Term rhs, u32 nodes) {
+  static i64 nomemo_max = -1;
+  if (nomemo_max < 0) {
+    const char *e = getenv("THVM_ATP_KBO_NOMEMO_MAX");
+    nomemo_max = (e != NULL) ? (i64)strtoul(e, NULL, 10) : (i64)0xffffffffu;
+  }
+  if (s != NULL && (i64)nodes <= nomemo_max &&
+      s->kbo != NULL && s->wpo == NULL && s->rpo == NULL && s->lpo == NULL) {
+#ifdef THVM_ATP_AC
+    if (thvm_atp_get_ac_mask() != 0ull) return atp_compare(s, lhs, rhs);
+#endif
+    return thvm_kbo_nomemo(lhs, rhs, s->kbo);
+  }
+  return atp_compare(s, lhs, rhs);
+}
+
+// Per-side variant of atp_cp_weight_base for the modes that consume
+// the two sides' symbol counts (MAX/GT/MIX/MIX2/UNIF): identical
+// formulas, with the counts supplied by the caller (acp_pack counts
+// exactly one per node, the same value atp_symbol_count returns) so
+// the two per-side re-walks are skipped.  Every other mode falls back
+// to the general path.
+static u32 atp_cp_weight_base_counts(AtpState *s, Term lhs, Term rhs,
+                                     u32 mode, u32 wl, u32 wr) {
+  switch (mode) {
+    case ATP_CP_WEIGHT_MAX:
+      return wl > wr ? wl : wr;
+    case ATP_CP_WEIGHT_GT: {
+      KboCmp c = atp_weigh_compare(s, lhs, rhs, wl + wr);
+      return (c == KBO_GT) ? wl
+           : (c == KBO_LT) ? wr
+           : wl + wr;
+    }
+    case ATP_CP_WEIGHT_MIX: {
+      KboCmp c = atp_weigh_compare(s, lhs, rhs, wl + wr);
+      u32 g = (c == KBO_GT) ? wl
+            : (c == KBO_LT) ? wr
+            : wl + wr;
+      u32 sum = wl + wr;
+      return sum * g + g + sum;
+    }
+    case ATP_CP_WEIGHT_MIX2: {
+      KboCmp c = atp_weigh_compare(s, lhs, rhs, wl + wr);
+      u32 g = (c == KBO_GT) ? wl
+            : (c == KBO_LT) ? wr
+            : wl + wr;
+      return g * 10u + (wl + wr);
+    }
+    case ATP_CP_WEIGHT_UNIF:
+      return (wl + wr) * atp_unif_measure(lhs, rhs);
+    default:
+      return atp_cp_weight_base(s, lhs, rhs, mode);
+  }
+}
+
 // Priority weight for a CP whose symbol-count sum is already known
 // (`base`) -- e.g. counted for free during acp_pack.  Identical
 // verdict to atp_cp_priority; only the redundant size walk is
 // skipped.  The precomputed `base` is the ADD-mode value; a
 // non-default cp_weight_mode recomputes the base from the terms.
-static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
+// `lhs_nodes` (0xffffffff = unknown) is the LHS-only node count from
+// acp_pack_ex; when known, the per-side weight modes reuse it (and
+// base - lhs_nodes) instead of re-walking the two sides.
+static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
+                                    u32 base, u32 lhs_nodes) {
   // Goal-directed mode (Waldmeister CPinGoal): weight by structural
   // match to the goal.  Opt-in via cp_weight_mode so completion-mode
   // and the other weights are unaffected.
@@ -7134,7 +7436,10 @@ static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
   if (mode != ATP_CP_WEIGHT_ADD) {
     // The caller's `base` is the ADD-mode symbol-count sum; for any
     // other mode it must be recomputed from the CP terms.
-    base = atp_cp_weight_base(s, lhs, rhs, mode);
+    base = (lhs_nodes != 0xffffffffu && lhs_nodes <= base)
+             ? atp_cp_weight_base_counts(s, lhs, rhs, mode,
+                                         lhs_nodes, base - lhs_nodes)
+             : atp_cp_weight_base(s, lhs, rhs, mode);
   }
   if (s != NULL && s->use_mix_heuristic) {
     KboCmp c = atp_compare(s, lhs, rhs);
@@ -7155,6 +7460,9 @@ static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
     }
   }
   return base;
+}
+static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
+  return atp_cp_priority_sized_ex(s, lhs, rhs, base, 0xffffffffu);
 }
 // Learned CP-selection scorer (ENIGMA-style).  Logistic-regression
 // weights trained on the labelled corpus exported by THVM_ATP_CP_DATASET
@@ -8030,6 +8338,11 @@ static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
     s->cp_par_a[i] = s->cp_par_a[j];
     s->cp_par_a[j] = ta;
   }
+  if (s->cp_uid_a != NULL) {
+    u32 ua = s->cp_uid_a[i], ub = s->cp_uid_b[i];
+    s->cp_uid_a[i] = s->cp_uid_a[j]; s->cp_uid_b[i] = s->cp_uid_b[j];
+    s->cp_uid_a[j] = ua;             s->cp_uid_b[j] = ub;
+  }
   // Deferred-CP descriptor + tag bit travel with the slot: a fresh
   // implicit push sifts up immediately, so missing this swap would
   // desync the descriptor from its slot on the FIRST sift.
@@ -8156,9 +8469,11 @@ static void atp_kdh_build(AtpState *s) {
 // s->use_initial_ultimate is set; otherwise the bit is recorded but
 // atp_cp_before ignores it.  Shared by atp_cp_heap_push (fresh CP)
 // and the auto-MaxWeight stash drain (re-admitting a deferred CP).
+// `lhs_nodes` is the LHS-only node count from acp_pack_ex (0xffffffff
+// = unknown -> the weight modes re-walk the sides as before).
 static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
                                       Term lhs, Term rhs, u32 trace,
-                                      u8 is_ultimate) {
+                                      u8 is_ultimate, u32 lhs_nodes) {
   atp_ensure_cp_cap(s, s->n_cps + 1);
   u32 i = s->n_cps;
   // Eager packed slot: make sure no stale deferred-CP tag aliases the
@@ -8171,9 +8486,12 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   // normalize this CP at least once before the cookie can short-circuit.
   s->cp_last_norm_r_revision[i] = ATP_CP_NORM_COOKIE_NONE;
   s->cp_deprio[i] = g_cp_push_deprio;
+  u64 _dkb_t0 = g_atp_phase_detail ? atp_now_us() : 0;
   s->cp_pri[i]   = s->cp_deprio[i]
                      ? ATP_CP_PRI_NEVER
-                     : atp_cp_priority_sized(s, lhs, rhs, cp_nodes);
+                     : atp_cp_priority_sized_ex(s, lhs, rhs, cp_nodes,
+                                                lhs_nodes);
+  if (g_atp_phase_detail) g_atp_cpg_us_kbo += atp_now_us() - _dkb_t0;
   if (s->cp_ultimate != NULL) {
     s->cp_ultimate[i] = is_ultimate;
     if (is_ultimate) s->n_cps_ultimate++;
@@ -8190,14 +8508,17 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   // symbol-count walk per CP -- and only filled when w2_modulo > 0.  In
   // GNN coop the GNN owns cp_pri2, so a fresh CP gets the neutral band
   // value until the next re-rank scores it (see ATP_GNN_COOP_NEUTRAL_PRI).
+  _dkb_t0 = g_atp_phase_detail ? atp_now_us() : 0;
   s->cp_pri2[i]  = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
                  : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, lhs, rhs, s->w2_mode)
                  :                        0u;
+  if (g_atp_phase_detail) g_atp_cpg_us_kbo += atp_now_us() - _dkb_t0;
   u32 seq        = s->cp_seq_next++;
   s->cp_seq[i]   = seq;
   if (s->cp_form_phase != NULL)
     s->cp_form_phase[i] = (g_cp_form_phase == 0xffu) ? 0u : g_cp_form_phase;
   if (s->cp_par_a != NULL) s->cp_par_a[i] = g_cp_par_a;
+  if (s->cp_uid_a != NULL) { s->cp_uid_a[i] = g_cp_uid_a; s->cp_uid_b[i] = g_cp_uid_b; }
   atp_cp_form_trace(seq, cp_nodes, lhs, rhs);
   s->n_cps++;
   if (atp_kdheap_on()) atp_kdh_insert(s, i);
@@ -8272,7 +8593,7 @@ static void atp_cp_stash_push(AtpState *s, u8 *packed, u32 cp_nodes,
       Term l = 0, r = 0;
       acp_unpack(packed, &l, &r);
       atp_cp_heap_insert_packed(s, packed, cp_nodes, l, r, trace,
-                                is_ultimate);
+                                is_ultimate, 0xffffffffu);
       return;
     }
     s->cp_stash_packed = np; s->cp_stash_trace = nt; s->cp_stash_nodes = nn;
@@ -8314,7 +8635,7 @@ static void atp_auto_maxw_drain(AtpState *s, u8 force) {
       u8 ult = (s->cp_stash_ultimate != NULL) ? s->cp_stash_ultimate[r] : 0u;
       atp_cp_heap_insert_packed(s, s->cp_stash_packed[r],
                                 s->cp_stash_nodes[r], l, rr,
-                                s->cp_stash_trace[r], ult);
+                                s->cp_stash_trace[r], ult, 0xffffffffu);
     } else {
       s->cp_stash_packed[w]   = s->cp_stash_packed[r];
       s->cp_stash_trace[w]    = s->cp_stash_trace[r];
@@ -8349,9 +8670,11 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     s->n_cps_dropped_qcap++;
     return;
   }
-  // Pack the CP into a byte string outside the managed heap.
+  // Pack the CP into a byte string outside the managed heap.  The pack
+  // walk counts per-side nodes as it goes; the weigh below reuses them.
   u32  cp_nodes  = 0u;
-  u8  *packed    = acp_pack(lhs, rhs, NULL, &cp_nodes);
+  u32  lhs_nodes = 0u;
+  u8  *packed    = acp_pack_ex(lhs, rhs, NULL, &cp_nodes, &lhs_nodes);
   // Waldmeister NEVER weight-caps an ultimate CP -- an initial axiom is
   // the spec (Act_ultimate, w1=INT32_MIN) and must always enter the
   // queue.  Deferring a heavy axiom to the auto-MaxWeight stash (or
@@ -8388,7 +8711,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     }
   }
   atp_cp_heap_insert_packed(s, packed, cp_nodes, lhs, rhs, trace,
-                            is_ultimate);
+                            is_ultimate, lhs_nodes);
 }
 
 // Lazily allocate the deferred-CP descriptor array + tag bitset to the
@@ -8483,6 +8806,7 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   if (s->cp_form_phase != NULL)
     s->cp_form_phase[i] = (g_cp_form_phase == 0xffu) ? 0u : g_cp_form_phase;
   if (s->cp_par_a != NULL) s->cp_par_a[i] = g_cp_par_a;
+  if (s->cp_uid_a != NULL) { s->cp_uid_a[i] = g_cp_uid_a; s->cp_uid_b[i] = g_cp_uid_b; }
   atp_cp_form_trace(s->cp_seq[i], cp_nodes, lhs, rhs);
   // No THVM_ATPFT_CPQ mirror: the FT queue's slot-occupied invariant
   // tracks cp_packed[i], and a deferred slot is exactly the NULL case
@@ -8506,32 +8830,22 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
 // key -- and `CPdimension` returns the FIFO dimension for `thresholdCP`
 // of every `moduloCP` selections, the weight dimension otherwise.
 //
-// CRUCIAL WM fact: the FIFO interleave is OFF in WM's default proof
-// configuration -- the one wmcli runs and the alignment matrix compares
-// against.  WM's `CPdimension()` (INF/KPVerwaltung.c:582-606) returns
-// the FIFO dimension when `AnzAktivierterRE % moduloCP < thresholdCP`,
-// and (moduloCP, thresholdCP) are derived from the `-pq interleave=f.h`
-// token: `moduloCP = f + h`, `thresholdCP = f` (KPVerwaltung.c:1210).
-// WM's default `-pq` is "heap:e1:domain=30:statistics=on"
-// (RUN/Parameter.c:210-211) -- it carries NO `interleave=` token, so
-// `PI_ParseInterleave` returns FALSE (WASIC/ParseInterleave.c:58-86) and
-// the else-branch sets `moduloCP = 1, thresholdCP = 0`
-// (KPVerwaltung.c:1216-1219).  With thresholdCP == 0 the test
-// `AnzAktivierterRE % 1 < 0` is FALSE at every selection: WM NEVER takes
-// a FIFO pick -- the queue is a pure smallest-weight heap.  The analysis
-// ratios {1:10,1:50,1:100,1:200} (YFiles.c `Schrittweiten`) only apply
-// when the spec or a `-pq interleave=` override requests them, which the
-// NotableTheorems corpus does not.
+// WM derives (moduloCP, thresholdCP) from the `-pq interleave=f.h`
+// token: `moduloCP = f + h`, `thresholdCP = f` (KPVerwaltung.c:1484-
+// 1485); CPdimension() (KPVerwaltung.c:846-848) returns the FIFO
+// dimension when `AnzAktivierterRE % moduloCP < thresholdCP`.
 //
-// So the faithful WM preset takes NO FIFO pick (thresholdCP 0).  thvm's
-// hardcoded threshold 1 fired a spurious FIFO pick at `n_activated_re ==
-// 0` (every run) and again at each `n_activated_re == modulo`; on a
-// large-rule-set saturation (CombinatorAxioms SKIToBCKW, ~201 activations
-// by selection 303) that mid-run FIFO grabbed the oldest stale CP and
-// forked the trajectory at selection 303.  On the small-rule-set AC and
-// Wolfram rows the only FIFO pick was at activation 0, which happened to
-// coincide with the weight root, so they stayed identical either way --
-// dropping the pick keeps them identical and advances SKIToBCKW.
+// TWO reference configurations exist and they DIFFER here:
+// - PLAIN `wmcli` (bare `-pq`, no interleave token): thresholdCP 0,
+//   FIFO never fires -- a pure smallest-weight heap.  The historical
+//   wm_align_matrix baseline rows were recorded against this config
+//   (and a hardcoded threshold 1 forked CombinatorAxioms SKIToBCKW at
+//   selection 303, which is why the preset once pinned threshold 0).
+// - `wmcli -auto` (= FindEquationalProof = Method ->
+//   "WaldmeisterProcess"): Automodus Orkus/StdS carries `itl(mi)` =
+//   `-pq interleave=1.50` -> thresholdCP 1, moduloCP 51.  THIS is the
+//   config the Waldmeister preset targets; the default below follows
+//   it.  THVM_ATP_FIFO_THRESHOLD=0 restores the plain-wmcli mode.
 //
 // The legacy (non-WM) path keeps the raw-selection-count end-of-window
 // behaviour the weight-order unit tests pin.
@@ -8539,19 +8853,27 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
 #define ATP_CP_FIFO_THRESHOLD   1u
 
 // WM `CPdimension()` under the faithful WM preset (use_intake_order):
-// thresholdCP is 0 (no `-pq interleave=` in the default config), so the
-// FIFO dimension never fires.  Outside the preset thvm keeps the legacy
-// raw-selection-count interleave the weight-order unit tests rely on.
+// the parity reference is `wmcli -auto` (= FindEquationalProof =
+// Method -> "WaldmeisterProcess"), whose Orkus/StdS strategy carries
+// `itl(mi)` = `-pq interleave=1.50` (ANA/YFiles.c Schrittweiten[mi] =
+// {1, 50}) -> thresholdCP = 1, moduloCP = 51 (KPVerwaltung.c:1484-1485):
+// ONE oldest-CP (FIFO) selection whenever AnzAktivierterRE % 51 < 1,
+// including the run-in at count 0 before the first activation (the
+// pinned WolframAxioms__DoubleNegation divergence: WM sel 117 FIFO-pops
+// the old rule1xrule1 CP while queued 929-weight duplicates wait; a
+// weight pop takes the duplicate instead -> firstdiv 117).
+// THVM_ATP_FIFO_THRESHOLD=0 restores the PLAIN-wmcli behaviour (bare
+// `-pq` carries no interleave token -> thresholdCP 0, FIFO never
+// fires) that the wm_align_matrix baseline rows were recorded against.
+// Outside the preset thvm keeps the legacy raw-selection-count
+// interleave the weight-order unit tests rely on.
 static inline u8 atp_cp_fifo_dimension(const AtpState *s) {
   u32 modulo = s->fifo_modulo ? s->fifo_modulo : ATP_CP_FIFO_MODULO;
   if (s->use_intake_order) {
-    // thresholdCP == 0 in WM's default `-pq`: FIFO dimension off.  The
-    // THVM_ATP_FIFO_THRESHOLD env knob restores a non-zero thresholdCP
-    // for callers that request a `-pq interleave=` ratio.
     static int thr = -2;
     if (thr == -2) {
       const char *e = getenv("THVM_ATP_FIFO_THRESHOLD");
-      thr = (e != NULL && e[0] != '\0') ? (int)strtol(e, NULL, 10) : 0;
+      thr = (e != NULL && e[0] != '\0') ? (int)strtol(e, NULL, 10) : 1;
     }
     if (thr <= 0) return 0u;
     return (s->n_activated_re % modulo) < (u32)thr;
@@ -8691,6 +9013,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
       if (s->cp_ultimate != NULL) s->cp_ultimate[i] = s->cp_ultimate[last];
       if (s->cp_form_phase != NULL) s->cp_form_phase[i] = s->cp_form_phase[last];
       if (s->cp_par_a != NULL) s->cp_par_a[i] = s->cp_par_a[last];
+      if (s->cp_uid_a != NULL) { s->cp_uid_a[i] = s->cp_uid_a[last]; s->cp_uid_b[i] = s->cp_uid_b[last]; }
       atp_cp_implicit_move(s, /*dst=*/i, /*src=*/last);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_move(s, /*dst=*/i, /*src=*/last);
@@ -8930,13 +9253,49 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->rng_state = x;
     j = (u32)(x % (u64)s->n_cps);
   } else if (atp_cp_fifo_dimension(s)) {
-    // FIFO dimension: the oldest queued CP is the lowest cp_seq.
-    // O(n_cps) scan, but only 1 call in `fifo_modulo` takes this branch.
-    u32 best = 0;
-    for (u32 i = 1; i < s->n_cps; i++) {
-      if (s->cp_seq[i] < s->cp_seq[best]) best = i;
+    // FIFO dimension: the oldest queued LIVE CP is the lowest cp_seq
+    // among entries whose parents still live.  Skipping corpses inside
+    // this one O(n_cps) scan replaces the old drain (pop + heap-repair
+    // + slot-compaction per corpse: the OrAssociativity pick-2925
+    // crossing popped ~765k dead entries over minutes) with a single
+    // pass; the selected CP is identical -- the drain's sole outcome
+    // was the first alive oldest.  Corpses stay queued and are
+    // discarded lazily when the weight dimension reaches them, exactly
+    // as before for non-FIFO picks.  Only the CHEAP no-unpack death
+    // tests run here (trace orphan / wolf-dup parent / uid); the
+    // defer/selfdup pop classifications still happen at pop time.
+    u8 wolf_live = s->use_wolf_dup_orphan ? atp_wolfram_axiom_is_live(s) : 0u;
+    // Monotone dead-prefix floor (see AtpState.fifo_floor_seq): the
+    // wolf-dup death test is the only non-permanent one, so a flip of
+    // its liveness gate invalidates the floor and forces one full
+    // rescan; otherwise every entry below the floor was proven dead by
+    // an earlier scan (set-only death marks) or has been extracted.
+    if (wolf_live != s->fifo_floor_wolf) {
+      s->fifo_floor_seq  = 0u;
+      s->fifo_floor_wolf = wolf_live;
     }
-    j = best;
+    const u32 floor_seq = s->fifo_floor_seq;
+    u32 best = 0xffffffffu;
+    for (u32 i = 0; i < s->n_cps; i++) {
+      u32 sq = s->cp_seq[i];
+      if (sq < floor_seq) continue;                 // proven dead prefix
+      if (best != 0xffffffffu && sq >= s->cp_seq[best]) continue;
+      if (s->use_orphan_murder) {
+        if (atp_cp_is_orphan(s, s->cp_trace[i])) continue;
+        if (wolf_live && s->cp_par_a != NULL
+            && s->cp_trace[i] == ATP_TRACE_NONE
+            && s->cp_par_a[i] != ATP_TRACE_NONE
+            && atp_trace_is_dead(s, s->cp_par_a[i])) continue;
+        if (atp_cp_uid_orphan(s, i)) continue;
+      }
+      best = i;
+    }
+    j = (best != 0xffffffffu) ? best : 0u;
+    // The scanned minimum is extracted below on every path (selected,
+    // or discarded as orphan/defer/selfdup and re-picked), and pushes
+    // stamp monotonically growing seqs -- so everything at or below its
+    // seq is dead or gone from here on.
+    if (best != 0xffffffffu) s->fifo_floor_seq = s->cp_seq[best] + 1u;
   }
 
   // Lazy orphan check.  If the chosen CP descends from an interreduced-
@@ -8962,6 +9321,13 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       && atp_wolfram_axiom_is_live(s)) {
     orphan = 1;
     s->n_cps_wolf_dup_orphan++;
+  }
+  // WM Waisenmord uid layer (see AtpState.r_uid): parent-identity death
+  // test that works past the proof-trace soft cap AND for post-cap rules
+  // whose r_trace is ATP_TRACE_NONE (where both tests above are blind) --
+  // the WolframAxioms DoubleNegation firstdiv-796 extra pop.
+  if (!orphan && s->use_orphan_murder && atp_cp_uid_orphan(s, j)) {
+    orphan = 1;
   }
   // WolframAxioms early eTT collapse-copy defer (see use_wolf_collapse_defer):
   // the chosen CP is the eTT/B-phase (cp_form_phase 1) copy of a deep collapse
@@ -9006,7 +9372,18 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // on cp_trace[j], which the push side sets for implicit slots too,
   // so a dead-parent implicit CP is discarded below exactly like an
   // eager one (WM selectNonOrphan covers the implicit passive set).
-  atp_cp_slot_read(s, j, lhs_out, rhs_out);
+  // Orphan pops are discarded without touching the terms (the loop
+  // re-picks), so skip the unpack: a FIFO pop draining a long dead
+  // prefix would otherwise allocate two fresh Terms per corpse and
+  // exhaust the from-space mid-drain (OrAssociativity pick 2925
+  // drains ~194k dead entries).  WM's selectNonOrphan likewise tests
+  // parent liveness without building the termpair.
+  if (orphan) {
+    *lhs_out = 0;
+    *rhs_out = 0;
+  } else {
+    atp_cp_slot_read(s, j, lhs_out, rhs_out);
+  }
   s->last_popped_trace = s->cp_trace[j];
   // Cleared per pop; the KBO_UN orient branch sets it iff the CP-formation
   // side swap physically fires, so the emission mirror never reads a stale
@@ -9023,6 +9400,20 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // terms, the thvm counterpart of Waldmeister WM_HEAPDUMP_AT.  Fires only
   // for the matching non-orphan pick; off (one cached probe) otherwise.
   if (!orphan) {
+    // Pick-gated live-rule-set dump (THVM_ATP_DUMP_RULES_AT_PICK=N): the
+    // rule-count-gated LIVERULE dump can't target a specific step; this one
+    // prints the live set at a chosen selection.  Output-only.
+    static int rd_at = -2;
+    if (rd_at == -2) { const char *e = getenv("THVM_ATP_DUMP_RULES_AT_PICK"); rd_at = e ? atoi(e) : -1; }
+    if (rd_at >= 0 && (u32)rd_at == s->cp_select_count) {
+      for (u32 k = 0; k < s->n_rules; k++) {
+        fprintf(stderr, "PICKRULE[%u] or=%u uid=%u lhs=", k, s->r_orient[k],
+                s->r_uid ? s->r_uid[k] : 0u);
+        atp_dbg_print_term(stderr, s->lhs[k]);
+        fprintf(stderr, " rhs="); atp_dbg_print_term(stderr, s->rhs[k]);
+        fputc('\n', stderr);
+      }
+    }
     static int hd_at = -2;
     if (hd_at == -2) { const char *e = getenv("THVM_ATP_HEAPDUMP_AT"); hd_at = e ? atoi(e) : -1; }
     if (hd_at >= 0 && (u32)hd_at == s->cp_select_count) {
@@ -9046,7 +9437,14 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   {
     static int cp_pick_trace = -1;
     if (cp_pick_trace < 0) cp_pick_trace = atp_env_on("THVM_ATP_CP_PICK_TRACE");
-    if (cp_pick_trace) {
+    if (cp_pick_trace && (orphan || wolf_defer || wolf_selfdup)) {
+      // Discarded pop (orphan/defer/selfdup): the aligner skips these as
+      // non-selections, so spare the term rendering -- a FIFO pop draining
+      // a long dead prefix otherwise prints GBs and dominates the wall.
+      fprintf(stderr, "CPSKIP pick=%u j=%u seq=%u pri=%u%s\n",
+              s->cp_select_count, j, s->cp_seq[j], s->cp_pri[j],
+              wolf_defer ? " WOLFDEFER" : (wolf_selfdup ? " WOLFSELFDUP" : ""));
+    } else if (cp_pick_trace) {
       fprintf(stderr, "CPSEL pick=%u j=%u seq=%u pri=%u rules=%u d=%u actre=%u lhs=",
               s->cp_select_count, j, s->cp_seq[j], s->cp_pri[j], s->n_rules,
               g_kdh_last_d, s->n_activated_re);
@@ -9067,9 +9465,15 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
         // TRACE_CP entry to the proof-trace soft cap, so the parents live in
         // the cp_par_a side-array, not the (absent) trace entry.  Skipped by
         // the aligner exactly like a genuine orphan (no counted selection).
-        fprintf(stderr, " WOLFDUPORPHAN par_a=%u(%s)",
+        fprintf(stderr, " WOLFDUPORPHAN par_a=%u(%s) uid_a=%u(%s) uid_b=%u(%s)",
                 (s->cp_par_a != NULL) ? s->cp_par_a[j] : ATP_TRACE_NONE,
                 (s->cp_par_a != NULL && atp_trace_is_dead(s, s->cp_par_a[j]))
+                    ? "dead" : "live",
+                (s->cp_uid_a != NULL) ? s->cp_uid_a[j] : 0u,
+                (s->cp_uid_a != NULL && atp_uid_is_dead(s, s->cp_uid_a[j]))
+                    ? "dead" : "live",
+                (s->cp_uid_b != NULL) ? s->cp_uid_b[j] : 0u,
+                (s->cp_uid_b != NULL && atp_uid_is_dead(s, s->cp_uid_b[j]))
                     ? "dead" : "live");
       } else if (orphan) {
         Term te = s->trace[s->cp_trace[j]];
@@ -9115,6 +9519,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     if (s->cp_ultimate != NULL) s->cp_ultimate[j] = s->cp_ultimate[last];
     if (s->cp_form_phase != NULL) s->cp_form_phase[j] = s->cp_form_phase[last];
     if (s->cp_par_a != NULL) s->cp_par_a[j] = s->cp_par_a[last];
+    if (s->cp_uid_a != NULL) { s->cp_uid_a[j] = s->cp_uid_a[last]; s->cp_uid_b[j] = s->cp_uid_b[last]; }
     atp_cp_implicit_move(s, /*dst=*/j, /*src=*/last);
 #ifdef THVM_ATPFT_CPQ
     // Move the (still-owned) FT entry from the last slot into j; zero
@@ -9398,6 +9803,22 @@ fn u32 thvm_atp_cp_size_stats(const AtpState *s, u32 *min_out, u32 *max_out,
   u64 sum = 0u;
   for (u32 i = 0; i < s->n_cps; i++) {
     Term l = 0, r = 0;
+    // Transient unpack: a post-saturation queue holds millions of CPs
+    // (OrAssociativity PROVED with 2.64M queued), so reclaim the
+    // just-measured terms between iterations or this diagnostic walk
+    // exhausts the from-space AFTER the proof already succeeded.
+    // Two triggers: the cheap threshold one under trace_pack (small
+    // live set), and the half-full pressure mark for the ON-heap-trace
+    // config -- whose passes are expensive (each copies the whole
+    // proof trace) but whose alternative was heap_alloc's hard fatal:
+    // the walk's ~50 transient cells per queued CP times a multi-
+    // million post-saturation queue overran the remaining from-space
+    // right after the summary prints (exit 1 on a PROVED run).
+    if ((s->trace_pack &&
+         (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes())
+        || atp_heap_under_pressure()) {
+      thvm_atp_gc_collect(s);
+    }
     atp_cp_slot_read(s, i, &l, &r);
     u32 nodes = atp_symbol_count(l) + atp_symbol_count(r);
     if (nodes < mn) mn = nodes;
@@ -9492,6 +9913,10 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   // A compaction may have vacated this slot with a stale GJ status;
   // every fresh fact starts untested (WM: a fresh termpair object).
   s->r_gj_status[s->n_rules] = ATP_GJ_ST_UNKNOWN;
+  // WM Waisenmord identity: every fact entering R/E gets a FRESH uid --
+  // a simplified+requeued victim re-enters as a NEW WM rule number, so
+  // CPs of the old identity die with it (see AtpState.r_uid).
+  s->r_uid[s->n_rules] = ++s->next_rule_uid;
   s->r_overlap_done[s->n_rules] = 0u;
 #ifdef THVM_ATPFT_RULES
   // Stage 4: mirror the Term pair into the parallel AtpFt slots
@@ -9626,7 +10051,7 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
         s->r_revision++;
         s->n_rules_bwd_subsumed++;
         // WM order mirror: the subsumed fact leaves the tree.
-        if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_trace[i]);
+        if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[i]);
 #ifdef THVM_ATPFT_RULES
         // Stage 4: mirror the slot-save on the AtpFt side.  The dead
         // sentinel is a TAG_FVR with var id 255 (out of range); convert
@@ -10720,6 +11145,27 @@ static u8 g_atp_proof_oriented_only;
 // next to thvm_atp_interreduce which fills the buffer it drains.
 static void atp_wm_demote_drain(AtpState *s);
 
+// WM KPV_KillParent face discipline for the uid layer, ONE-SIDE
+// removals only (Interreduktion.c:272 "aber nur diese eine Seite
+// entfernen"): RE_GleichungEntfernen kills children ONLY for the
+// DISTINGUISHED direction (RUndEVerwaltung.c:592-598).  The full-pull
+// sites (equation LHS reducible, Interreduktion.c:293-301) pass the
+// distinguished object itself and kill UNCONDITIONALLY -- those keep
+// the direct atp_uid_mark_dead (face-scoping them regressed
+// DoubleNegation 2849 -> 1005).  removed_side = the thvm side whose
+// reduction fired; WM's distinguished face = thvm side dist_rhs (the
+// wm_order mirror label, read BEFORE atp_wmo_remove_trace evicts the
+// registration).  The @2926 OrAssociativity FIFO victim was a child
+// thvm kept alive because the eq-rhs retire skipped the kill even when
+// dist_rhs = 1 made that face WM's distinguished one.
+static void atp_uid_kill_face(AtpState *s, u32 slot, u8 removed_side) {
+  if (s->r_uid == NULL) return;
+  if (s->r_orient[slot]) { atp_uid_mark_dead(s, s->r_uid[slot]); return; }
+  u8 dr = (s->use_emission_order && s->wmo != NULL)
+        ? atp_wmo_dist_rhs_of(s, s->r_uid[slot]) : 0u;
+  if (removed_side == dr) atp_uid_mark_dead(s, s->r_uid[slot]);
+}
+
 #ifdef ATP_CP_GROUND_JOIN
 // Forward decls: the WM -gj fact-level ground-joinability halves
 // (use_bwd_ground_join), defined with the groundJoin driver.
@@ -11042,6 +11488,17 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   u32 trace_mark = s->n_trace;
   Term l, r;
   u64 _ph_pop_t0 = atp_phase_now(); g_thvm_phase = "pop_normalize";
+  // THVM_ATP_POPALLOC_TRACE: report pops whose normalize allocates more
+  // than ~1M Term cells (the avalanche heap-bomb diagnostic; see
+  // project_atp_wm_speed_profiled 2026-07-02).  Behaviour-neutral.
+  static int _popalloc_trace = -1;
+  if (_popalloc_trace < 0) _popalloc_trace = atp_env_on("THVM_ATP_POPALLOC_TRACE");
+  u64 _popalloc_h0 = _popalloc_trace ? HEAP_NEXT : 0u;
+  if (_popalloc_trace && s->step >= 2800u) {
+    fprintf(stderr, "POPENTER step=%u heap=%llu raw_sz=%u+%u rules=%u\n",
+            s->step, (unsigned long long)_popalloc_h0,
+            atp_symbol_count(cp_lhs), atp_symbol_count(cp_rhs), s->n_rules);
+  }
   if (s->record_norm_steps) {
     // Record each CP-normalize rewrite as a TRACE_NORM_STEP, chained
     // from the CP -- WL walks the chain linearly when extracting the
@@ -11119,6 +11576,14 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     r = atp_rewrite_normalize(s, cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
   }
   if (g_atp_phase_enabled) g_atp_phase_us_pop_normalize += atp_now_us() - _ph_pop_t0;
+  if (_popalloc_trace) {
+    u64 d = HEAP_NEXT - _popalloc_h0;
+    if (d > 1000000u) {
+      fprintf(stderr, "POPALLOC step=%u cells=%llu raw_sz=%u+%u rules=%u\n",
+              s->step, (unsigned long long)d,
+              atp_symbol_count(cp_lhs), atp_symbol_count(cp_rhs), s->n_rules);
+    }
+  }
 
   // Per-pick pop-treatment verdict trace (THVM_ATP_POP_TRACE), mirroring
   // WM's WM_POPDUMP (KPV_Select) so the two engines' keep/drop sequences
@@ -11321,6 +11786,20 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   goal = thvm_atp_goal_check(s);
   if (g_atp_phase_enabled) g_atp_phase_us_goal_check += atp_now_us() - _ph_gc_t0;
   if (goal != ATP_RUNNING) return goal;
+
+  // Step-boundary Cheney pass: the FV-index rebuild was the only
+  // collector call site, so a long saturation accumulated all its
+  // per-step garbage until the arena ran dry (OrAssociativity died in
+  // goal_check at step ~278.8k with 185M cells allocated, live set far
+  // smaller).  Same threshold discipline as the rebuild-loop call.
+  // Gated on trace_pack exactly like that call: with the trace
+  // off-heap the live set is small and the pass is cheap; with the
+  // on-heap trace every pass copies the whole proof trace (~8x
+  // slowdown observed: 5160 -> 642 steps/s) for no reclaim.
+  if (s->trace_pack &&
+      (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
+    thvm_atp_gc_collect(s);
+  }
 
   s->step++;
   return ATP_RUNNING;
@@ -11769,6 +12248,13 @@ fn u32 thvm_atp_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
     nf_rhs = atp_proof_record_side(s, s->goal_rhs, 1u, out, cap, &n);
   }
 
+  if (getenv("THVM_ATP_GOAL_NF_DEBUG")) {
+    char lb[512], rb[512];
+    atp_pretty_term(nf_lhs, lb, sizeof lb);
+    atp_pretty_term(nf_rhs, rb, sizeof rb);
+    fprintf(stderr, "[extract] n_steps=%u n0=%u mixmost=%u nf_lhs=%s nf_rhs=%s kbo_eq=%d\n",
+            n, n0, s->use_mixmost_nf, lb, rb, kbo_eq(nf_lhs, nf_rhs));
+  }
   // Not single-NF provable -- the two sides never meet under R.  A
   // symmetric goal closed only by the MNF search lands here.
   if (!kbo_eq(nf_lhs, nf_rhs)) return 0;
@@ -13061,6 +13547,13 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
     AtpFtCell *fr = atp_rewrite_normalize_ft(s, fr_in, ATP_GOAL_NORM_CAP);
     l = ft_to_term(fl);
     r = ft_to_term(fr);
+    if (getenv("THVM_ATP_GOAL_NF_DEBUG")) {
+      char lb[512], rb[512];
+      atp_pretty_term(l, lb, sizeof lb);
+      atp_pretty_term(r, rb, sizeof rb);
+      fprintf(stderr, "[goalnf] n_rules=%u n_unorient=%u mixmost=%u  L=%s  R=%s  eq=%d\n",
+              s->n_rules, s->n_unorient, s->use_mixmost_nf, lb, rb, ft_eq(fl, fr));
+    }
     if (ft_eq(fl, fr)) {
       *nf_l = l;
       *nf_r = r;
@@ -13452,7 +13945,8 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // at CP-select time -- doing it inside the IR sweep means a single
     // KPV_KPMengeInterreduzieren pass shrinks the queue by the dead-parent
     // set in linear time, instead of waiting for select-side amortization.
-    if (s->use_orphan_murder && atp_cp_is_orphan(s, s->cp_trace[i])) {
+    if (s->use_orphan_murder &&
+        (atp_cp_is_orphan(s, s->cp_trace[i]) || atp_cp_uid_orphan(s, i))) {
       s->n_cps_dropped_orphan++;
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[i]);   // free(NULL) no-op for deferred slots
@@ -13812,12 +14306,14 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
 #define WM_IR_COMPACT_SLOT(IDX)                                               \
   do {                                                                        \
     if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[IDX]);        \
-    if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_trace[IDX]);      \
+    if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[IDX]);                \
+    if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[IDX]);        \
     if (!s->r_orient[IDX]) s->n_unorient--;                                   \
     for (u32 _j = (IDX) + 1; _j < s->n_rules; _j++) {                         \
       s->lhs[_j - 1]      = s->lhs[_j];                                       \
       s->rhs[_j - 1]      = s->rhs[_j];                                       \
       s->r_trace[_j - 1]  = s->r_trace[_j];                                   \
+      s->r_uid[_j - 1]    = s->r_uid[_j];                                     \
       s->r_orient[_j - 1] = s->r_orient[_j];                                  \
       s->r_dead[_j - 1]           = s->r_dead[_j];                            \
       s->r_dead_lhs_save[_j - 1]  = s->r_dead_lhs_save[_j];                   \
@@ -13862,7 +14358,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
       /* the IR_PufferAuslesen drain re-derives ORIGINAL sides).          */  \
       if (s->use_wm_demote) {                                                 \
         u32 _wmo_key = s->use_emission_order                                  \
-            ? atp_wmo_victim_drain_key(s, s->r_trace[IDX], 0u) : 0u;          \
+            ? atp_wmo_victim_drain_key(s, s->r_uid[IDX], 0u) : 0u;            \
         atp_irv_push(s, _old_lhs, _old_rhs, _simplify_parent, _wmo_key);      \
       } else {                                                                \
         atp_add_equation_simplified(s, _reduced, _old_rhs, _simplify_parent); \
@@ -13912,7 +14408,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
         if (s->use_wm_demote) {                                               \
           /* The RHS face (thvm side 1) is the reducible one here. */         \
           u32 _wmo_key = s->use_emission_order                               \
-              ? atp_wmo_victim_drain_key(s, s->r_trace[IDX], 1u) : 0u;        \
+              ? atp_wmo_victim_drain_key(s, s->r_uid[IDX], 1u) : 0u;          \
           atp_irv_push(s, _old_lhs, _old_rhs, _simplify_parent, _wmo_key);    \
         } else {                                                              \
           atp_add_equation_simplified(s, _old_lhs, _reduced,                  \
@@ -14237,16 +14733,17 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         // wmo tree (the atp_wmo_remove_trace below evicts it).  The LHS
         // face (thvm side 0) is the one the new rule reduced here.
         u32 wmo_key = s->use_emission_order
-            ? atp_wmo_victim_drain_key(s, s->r_trace[i], 0u) : 0u;
+            ? atp_wmo_victim_drain_key(s, s->r_uid[i], 0u) : 0u;
         atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
       } else {
         atp_add_equation_simplified(s, reduced, old_rhs, simplify_parent);
       }
       if (atp_rule_trace_on()) {
-        char la[2048];
+        char la[8192], ra[8192];
         atp_pretty_term(s->lhs[i], la, sizeof la);
-        fprintf(stderr, "  RETIRE rule (slot %u, trace %u): LHS %s collapsed; "
-                "re-queued for re-orientation\n", i, s->r_trace[i], la);
+        atp_pretty_term(s->rhs[i], ra, sizeof ra);
+        fprintf(stderr, "  RETIRE rule (slot %u, trace %u): LHS %s = RHS %s collapsed; "
+                "re-queued for re-orientation\n", i, s->r_trace[i], la, ra);
       }
 #ifdef ATP_ORPHAN_KILL
       // Capture the dropped rule's trace id before the shift below
@@ -14259,8 +14756,9 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // dead so its descendant CPs are skipped at pop time (WM
       // selectNonOrphan).  No queue sweep here.
       if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[i]);
+      if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[i]);
       // WM order mirror: the fact left R/E (RE_RegelEntfernen).
-      if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_trace[i]);
+      if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[i]);
       // Keep the unorientable-rule count live: the dropped rule leaves
       // R here (it re-enters as a queued equation, re-counted only if
       // re-oriented unorientable at its next atp_push_rule).
@@ -14269,6 +14767,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         s->lhs[j - 1]      = s->lhs[j];
         s->rhs[j - 1]      = s->rhs[j];
         s->r_trace[j - 1]  = s->r_trace[j];
+        s->r_uid[j - 1]    = s->r_uid[j];
         s->r_orient[j - 1] = s->r_orient[j];
         // Shift the backward-subsumption sentinel state in lockstep:
         // without it, dropping a rule below a soft-deleted slot leaves
@@ -14517,7 +15016,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         if (s->use_wm_demote) {
           // bwd_demod reduced the LHS face (thvm side 0).
           u32 wmo_key = s->use_emission_order
-              ? atp_wmo_victim_drain_key(s, s->r_trace[j], 0u) : 0u;
+              ? atp_wmo_victim_drain_key(s, s->r_uid[j], 0u) : 0u;
           atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
         } else {
           atp_add_equation_simplified(s, reduced_lhs, reduced,
@@ -14529,12 +15028,14 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         }
 #endif
         if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[j]);
-        if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_trace[j]);
+        if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[j]);
+        if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[j]);
         if (!s->r_orient[j]) s->n_unorient--;
         for (u32 k = j + 1; k < s->n_rules; k++) {
           s->lhs[k - 1]              = s->lhs[k];
           s->rhs[k - 1]              = s->rhs[k];
           s->r_trace[k - 1]          = s->r_trace[k];
+          s->r_uid[k - 1]            = s->r_uid[k];
           s->r_orient[k - 1]         = s->r_orient[k];
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
@@ -14572,16 +15073,17 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         if (s->use_wm_demote) {
           // The RHS face (thvm side 1) is the reducible one here.
           u32 wmo_key = s->use_emission_order
-              ? atp_wmo_victim_drain_key(s, s->r_trace[j], 1u) : 0u;
+              ? atp_wmo_victim_drain_key(s, s->r_uid[j], 1u) : 0u;
           atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
         } else {
           atp_add_equation_simplified(s, old_lhs, reduced, simplify_parent);
         }
         if (atp_rule_trace_on()) {
-          char la[2048];
+          char la[8192], ra[8192];
           atp_pretty_term(old_lhs, la, sizeof la);
-          fprintf(stderr, "  RETIRE eq-rhs (slot %u, trace %u): %s\n",
-                  j, s->r_trace[j], la);
+          atp_pretty_term(old_rhs, ra, sizeof ra);
+          fprintf(stderr, "  RETIRE eq-rhs (slot %u, trace %u): %s = %s\n",
+                  j, s->r_trace[j], la, ra);
         }
 #ifdef ATP_ORPHAN_KILL
         if (atp_dead != NULL && s->r_trace[j] != ATP_TRACE_NONE) {
@@ -14589,12 +15091,23 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         }
 #endif
         if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[j]);
-        if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_trace[j]);
+        // Unconditional kill: a one-side interreduction pull in WM is
+        // followed by the REPuffer pass removing the Gegenseite too
+        // ("Gegenseite ggf. aus E entfernen", Interreduktion.c:308),
+        // so the DISTINGUISHED direction always leaves E during the
+        // event and KPV_KillParent fires exactly once regardless of
+        // which thvm face was reduced (verified on OrAssociativity:
+        // eq -1 kill at cp=209784 needs dist_rhs=0 killed, eq -3 kill
+        // at cp=769962 needs dist_rhs=1 killed -- no single polarity
+        // covers both, WM kills both).
+        if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[j]);
+        if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[j]);
         if (!s->r_orient[j]) s->n_unorient--;
         for (u32 k = j + 1; k < s->n_rules; k++) {
           s->lhs[k - 1]              = s->lhs[k];
           s->rhs[k - 1]              = s->rhs[k];
           s->r_trace[k - 1]          = s->r_trace[k];
+          s->r_uid[k - 1]            = s->r_uid[k];
           s->r_orient[k - 1]         = s->r_orient[k];
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
@@ -14769,6 +15282,352 @@ static void atp_wm_demote_drain(AtpState *s) {
   s->n_irv = 0;
 }
 
+// === Post-PROVED proof-cone norm re-derivation ======================
+//
+// With whole-run RecordNorm off (the only memory-viable mode on deep
+// completions), two trace-entry kinds carry an UNRECORDED engine
+// normalization between their parent's equation and their own:
+//   * TRACE_ORIENT whose parent is the popped CP: the pop-time doR+doE
+//     normalize between the raw CP pair and the oriented rule;
+//   * TRACE_SIMPLIFY: the interreduce-victim renormalize (WM demote
+//     drain doR, or the RHS-composition doR+doE) between the dropped
+//     fact and its requeued / composed form.
+// The WL lift bridges such gaps by BFS (emitNorm) over rules alive at
+// extraction -- which fails when the bridge fired a rule retired
+// mid-run or an ordered-equation step whose grounding BFS cannot
+// invert (OrAssociativity ti=356685; project_atp_wm_preset_tuning
+// 2026-07-02).  This pass repairs the goal-connected bridges AFTER the
+// engine terminates (zero engine-loop impact): re-run the engine's own
+// FT normalizer over the HISTORICAL rule set R(ti), recording
+// TRACE_NORM_STEP entries, and re-thread the entry's parent onto the
+// chain tail when the replay lands on the recorded equation.  Entries
+// whose replay misses are left untouched -- the WL BFS fallback sees
+// them exactly as before.
+//
+// Scope: EVERY goal-run ORIENT / SIMPLIFY entry whose stored pair
+// differs from its parent's (up to orientation swap / renaming).
+// The OrAssociativity blocker ti=356685 is a plain VARIABLE rule
+// (the WL debug prints rendered its var ids with the conjecture's
+// names, which mimicked a skolem-constant family) -- there is no
+// goal-symbol discriminator in the C trace, so the pass repairs the
+// whole bridge population (~1.4k entries on OrAssociativity, each a
+// bounded innermost replay).  Runs only when a goal is set (a pure
+// completion run lifts no goal chain).
+//
+// R(ti) is derived from the trace alone, mirroring the WL lift's
+// aliveRulesAt model: births are TRACE_ORIENT / TRACE_FVI entries;
+// a birth dies at the first TRACE_SIMPLIFY entry citing it as
+// parent_a.  Alive at ti = born before ti, not dead before ti.
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Defined in ft_norm.c (included above); slice + record entry used by
+// the cone replay below.
+AtpFtCell *atp_rewrite_normalize_ft_slice_record(AtpState *s, AtpFtCell *t,
+                                                 u32 slice_first,
+                                                 u32 slice_count,
+                                                 u32 step_cap, u8 doE,
+                                                 Term eq_other, u8 side,
+                                                 u32 *chain_tail);
+
+// Load trace entry `idx`'s equation: the off-heap packed pair when
+// trace_pack is on, else the entry's children 2/3.  Returns 0 when the
+// entry carries no real pair (NUM sentinels without a packed record,
+// e.g. a leaned TRACE_CP that never became a rule).
+static int atp_cone_eq(AtpState *s, u32 idx, Term *lhs, Term *rhs) {
+  if (atp_trace_eq_load(s, idx, lhs, rhs)) return 1;
+  Term e = s->trace[idx];
+  if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 4u) return 0;
+  Term l = term_ctr_at(e, 2);
+  Term r = term_ctr_at(e, 3);
+  if (term_tag(l) == TAG_NUM || term_tag(r) == TAG_NUM) return 0;
+  *lhs = l;
+  *rhs = r;
+  return 1;
+}
+
+// Pair equality up to variable renaming: exact structural first, then
+// jointly var-canonicalized.  The replayed chain may re-number
+// variables relative to the stored entry (orient_and_add canonicalizes
+// rule sides); the WL chain consumers compare sides via cplCanonVars,
+// so an alpha-variant landing is a valid re-derivation.
+static int atp_cone_pair_eq(Term al, Term ar, Term bl, Term br) {
+  if (kbo_eq(al, bl) && kbo_eq(ar, br)) return 1;
+  Term xl = al, xr = ar, yl = bl, yr = br;
+  thvm_normalize_vars(&xl, &xr);
+  thvm_normalize_vars(&yl, &yr);
+  return (kbo_eq(xl, yl) && kbo_eq(xr, yr)) ? 1 : 0;
+}
+#endif
+
+fn void thvm_atp_record_goal_cone(AtpState *s) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (s == NULL || s->trace == NULL || s->n_trace == 0u) return;
+  if (s->conj_sym_mask == 0ull) return;
+  static int dbg = -1;
+  if (dbg < 0) dbg = atp_env_on("THVM_ATP_CONE_DEBUG");
+  const u32 n0_trace = s->n_trace;
+
+  // Threshold GC between candidates (trace_pack only, mirroring the
+  // interreduce WM_IR_MAYBE_GC gate).  Safe: no live Term is held in a
+  // C local across candidates -- the FT rule cache is address-stable
+  // across a collection, and the birth/death arrays are plain u32.
+#define ATP_CONE_MAYBE_GC()                                                   \
+  do {                                                                        \
+    if (s->trace_pack && gc_enabled() &&                                      \
+        (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {           \
+      thvm_atp_gc_collect(s);                                                 \
+    }                                                                         \
+  } while (0)
+
+  // Pass 1a: births (TRACE_ORIENT / TRACE_FVI), ascending trace order.
+  u32 n_births = 0u;
+  for (u32 i = 0; i < n0_trace; i++) {
+    Term e = s->trace[i];
+    if (term_tag(e) != TAG_CTR) continue;
+    u32 reason = term_ext(e);
+    if (reason == TRACE_ORIENT || reason == TRACE_FVI) n_births++;
+  }
+  if (n_births == 0u) return;
+  u32 *birth_ti    = (u32 *)malloc((size_t)n_births * sizeof(u32));
+  u32 *birth_dead  = (u32 *)malloc((size_t)n_births * sizeof(u32));
+  u8  *birth_state = (u8  *)calloc(n_births, 1u);   // 0 unloaded / 1 ok / 2 bad
+  u8  *birth_or    = (u8  *)calloc(n_births, 1u);
+  AtpFtCell **birth_lft = (AtpFtCell **)calloc(n_births, sizeof(AtpFtCell *));
+  AtpFtCell **birth_rft = (AtpFtCell **)calloc(n_births, sizeof(AtpFtCell *));
+  u32 *alive = (u32 *)malloc((size_t)n_births * sizeof(u32));
+  if (birth_ti == NULL || birth_dead == NULL || birth_state == NULL ||
+      birth_or == NULL || birth_lft == NULL || birth_rft == NULL ||
+      alive == NULL) {
+    free(birth_ti); free(birth_dead); free(birth_state); free(birth_or);
+    free(birth_lft); free(birth_rft); free(alive);
+    return;
+  }
+  {
+    u32 w = 0u;
+    for (u32 i = 0; i < n0_trace; i++) {
+      Term e = s->trace[i];
+      if (term_tag(e) != TAG_CTR) continue;
+      u32 reason = term_ext(e);
+      if (reason != TRACE_ORIENT && reason != TRACE_FVI) continue;
+      birth_ti[w]   = i;
+      birth_dead[w] = ATP_TRACE_NONE;
+      w++;
+    }
+  }
+
+  // Pass 1b: deaths (first TRACE_SIMPLIFY citing the birth as
+  // parent_a) + bridge candidates (ORIENT / SIMPLIFY entries whose
+  // pair differs from their parent's).  birth_ti is ascending, so a
+  // cited parent resolves by binary search.
+  u32 *cand = (u32 *)malloc((size_t)4096u * sizeof(u32));
+  u32 n_cand = 0u;
+  if (cand == NULL) {
+    free(birth_ti); free(birth_dead); free(birth_state); free(birth_or);
+    free(birth_lft); free(birth_rft); free(alive);
+    return;
+  }
+  u32 n_os = 0u, n_par = 0u, n_eq = 0u, n_sym = 0u;
+  for (u32 i = 0; i < n0_trace; i++) {
+    Term e = s->trace[i];
+    if (term_tag(e) != TAG_CTR) continue;
+    u32 reason = term_ext(e);
+    if (reason != TRACE_ORIENT && reason != TRACE_SIMPLIFY) continue;
+    n_os++;
+    u32 p_a = (u32)term_val(term_ctr_at(e, 0));
+    if (reason == TRACE_SIMPLIFY && p_a != ATP_TRACE_NONE) {
+      // Death mark: first SIMPLIFY citing birth p_a.
+      u32 lo = 0u, hi = n_births;
+      while (lo < hi) {
+        u32 mid = lo + (hi - lo) / 2u;
+        if (birth_ti[mid] < p_a) lo = mid + 1u; else hi = mid;
+      }
+      if (lo < n_births && birth_ti[lo] == p_a &&
+          birth_dead[lo] == ATP_TRACE_NONE) {
+        birth_dead[lo] = i;
+      }
+    }
+    if (p_a == ATP_TRACE_NONE || p_a >= n0_trace) continue;
+    Term pe = s->trace[p_a];
+    if (term_tag(pe) != TAG_CTR) continue;
+    if (term_ext(pe) == TRACE_NORM_STEP) continue;   // already chained
+    n_par++;
+    Term el, er;
+    if (!atp_cone_eq(s, i, &el, &er)) continue;
+    n_eq++;
+    Term pl, pr;
+    if (!atp_cone_eq(s, p_a, &pl, &pr)) continue;
+    // Replay-cost guard: a monster parent pair (a raw CP that later
+    // avalanche phases can produce) makes the innermost replay itself
+    // heavy; such an entry keeps the WL BFS fallback.
+    if (atp_symbol_count(pl) + atp_symbol_count(pr) > 4096u) continue;
+    n_sym++;
+    // A bridge exists only when the entry's pair differs from the
+    // parent's (up to orientation swap / renaming) -- equal pairs
+    // resolve through the WL cplEqSetQ check as before.
+    if (atp_cone_pair_eq(pl, pr, el, er) ||
+        atp_cone_pair_eq(pl, pr, er, el)) continue;
+    if (n_cand < 4096u) cand[n_cand++] = i;
+    if ((i & 0xffffu) == 0u) ATP_CONE_MAYBE_GC();
+  }
+  ATP_CONE_MAYBE_GC();
+  if (dbg) {
+    fprintf(stderr, "[cone] births=%u candidates=%u n_trace=%u t_max=%u "
+            "os=%u par=%u eq=%u sized=%u\n",
+            n_births, n_cand, s->n_trace, s->t_max,
+            n_os, n_par, n_eq, n_sym);
+  }
+
+  // Pass 2: per-candidate re-derivation over R(ti), installed as a
+  // temporary rule-slot window past the live set.  The engine loop is
+  // finished; n_rules / n_unorient are restored before every return
+  // path and before any collection, so extraction below sees the live
+  // R untouched.
+  const u32 n_rules0   = s->n_rules;
+  const u32 n_unor0    = s->n_unorient;
+  AtpFt *arena = (AtpFt *)s->ft_arena_ptr;
+  u32 n_fixed = 0u;
+  for (u32 c = 0; c < n_cand && arena != NULL; c++) {
+    ATP_CONE_MAYBE_GC();
+    // Chain headroom: a repair pushes at most 2 * 64 NORM_STEPs.
+    if (s->n_trace + 160u > s->t_max) break;
+    u32 ti = cand[c];
+    Term e = s->trace[ti];
+    u32 reason = term_ext(e);
+    u32 p_a    = (u32)term_val(term_ctr_at(e, 0));
+    Term pl, pr, el, er;
+    if (!atp_cone_eq(s, ti, &el, &er)) continue;
+    if (!atp_cone_eq(s, p_a, &pl, &pr)) continue;
+
+    // Alive rule window at ti (parent birth excluded for the victim
+    // replay -- the drain normalizes AFTER the victim left R; the
+    // do_lhs=0 composition attempts re-include it below).
+    u32 k_all = 0u;
+    for (u32 b = 0; b < n_births; b++) {
+      if (birth_ti[b] >= ti) break;
+      if (birth_dead[b] != ATP_TRACE_NONE && birth_dead[b] < ti) continue;
+      alive[k_all++] = b;
+    }
+    if (k_all == 0u) continue;
+
+    int success = 0;
+    // Attempt ladder: (do_lhs, doE, incl_parent) triples ordered by
+    // the historical shape most likely to have produced this entry.
+    //   ORIENT   -- pop-normalize (both sides, doR+doE) first;
+    //   SIMPLIFY -- demote-drain (both sides, doR, victim excluded)
+    //               first, then the RHS-composition shape (rhs only,
+    //               doR+doE, victim's own rule still live).
+    u8 att_lhs[4], att_doE[4], att_inc[4];
+    const u32 n_att = 4u;
+    if (reason == TRACE_ORIENT) {
+      att_lhs[0] = 1u; att_doE[0] = 1u; att_inc[0] = 0u;
+      att_lhs[1] = 1u; att_doE[1] = 0u; att_inc[1] = 0u;
+      att_lhs[2] = 0u; att_doE[2] = 1u; att_inc[2] = 1u;
+      att_lhs[3] = 0u; att_doE[3] = 0u; att_inc[3] = 1u;
+    } else {
+      att_lhs[0] = 1u; att_doE[0] = 0u; att_inc[0] = 0u;
+      att_lhs[1] = 1u; att_doE[1] = 1u; att_inc[1] = 0u;
+      att_lhs[2] = 0u; att_doE[2] = 1u; att_inc[2] = 1u;
+      att_lhs[3] = 0u; att_doE[3] = 0u; att_inc[3] = 1u;
+    }
+    for (u32 a_i = 0; a_i < n_att && !success; a_i++) {
+      // Install the window (per attempt: the parent-birth inclusion
+      // differs between shapes).
+      u32 k = 0u;
+      u32 win_unor = 0u;
+      for (u32 j = 0; j < k_all; j++) {
+        u32 b = alive[j];
+        if (!att_inc[a_i] && birth_ti[b] == p_a) continue;
+        if (birth_state[b] == 0u) {
+          Term bl, br;
+          if (!atp_cone_eq(s, birth_ti[b], &bl, &br)) {
+            birth_state[b] = 2u;
+          } else {
+            birth_lft[b]   = ft_from_term(arena, bl, 0);
+            birth_rft[b]   = ft_from_term(arena, br, 0);
+            birth_or[b]    = (atp_compare(s, bl, br) == KBO_GT) ? 1u : 0u;
+            birth_state[b] = 1u;
+          }
+        }
+        if (birth_state[b] != 1u) continue;
+        atp_ensure_rule_cap(s, n_rules0 + k + 1u);
+        u32 w = n_rules0 + k;
+        s->lhs[w]      = 0;   // FT path never reads the Term slots
+        s->rhs[w]      = 0;
+        s->lhs_ft[w]   = birth_lft[b];
+        s->rhs_ft[w]   = birth_rft[b];
+        s->r_orient[w] = birth_or[b];
+        s->r_dead[w]   = 0u;
+        s->r_trace[w]  = birth_ti[b];
+        if (!birth_or[b]) win_unor++;
+        k++;
+      }
+      if (k == 0u) continue;
+      s->n_rules    = n_rules0 + k;
+      s->n_unorient = n_unor0 + win_unor;
+
+      u32 mark  = s->n_trace;
+      u32 chain = p_a;
+      Term l2 = pl, r2 = pr;
+      if (att_lhs[a_i]) {
+        AtpFtCell *lf = atp_rewrite_normalize_ft_slice_record(
+            s, ft_from_term(arena, pl, 0), n_rules0, k, 64u,
+            att_doE[a_i], pr, 0u, &chain);
+        l2 = ft_to_term(lf);
+      }
+      {
+        AtpFtCell *rf = atp_rewrite_normalize_ft_slice_record(
+            s, ft_from_term(arena, pr, 0), n_rules0, k, 64u,
+            att_doE[a_i], l2, 1u, &chain);
+        r2 = ft_to_term(rf);
+      }
+      s->n_rules    = n_rules0;
+      s->n_unorient = n_unor0;
+
+      int hit = atp_cone_pair_eq(l2, r2, el, er) ||
+                atp_cone_pair_eq(l2, r2, er, el);
+      if (hit && chain != p_a && s->n_trace > mark &&
+          s->n_trace < s->t_max) {
+        // Re-thread: the entry's parent becomes the chain tail.  The
+        // WL resolver's ORIENT/SIMPLIFY branch then inherits the
+        // NORM_STEP chain and never BFS-bridges this entry.  Children
+        // 1..3 (parent_b slot / stored pair) stay as-is; nothing cites
+        // this entry's parent slot structurally.
+        u32 n = term_ctr_n(e);
+        if (n >= 4u && n <= 8u) {
+          Term ch[8];
+          for (u32 q = 0; q < n; q++) ch[q] = term_ctr_at(e, q);
+          ch[0] = term_new(0, TAG_NUM, 0, chain);
+          s->trace[ti] = term_new_ctr(reason, ch, n);
+          success = 1;
+          n_fixed++;
+        } else {
+          s->n_trace = mark;
+        }
+      } else {
+        s->n_trace = mark;
+      }
+      if (dbg && (success || a_i + 1u == n_att)) {
+        fprintf(stderr, "[cone] ti=%u reason=%u pa=%u k=%u att=%u "
+                "(lhs=%u doE=%u inclp=%u) %s steps=%u\n",
+                ti, reason, p_a, k, a_i,
+                att_lhs[a_i], att_doE[a_i], att_inc[a_i],
+                success ? "FIXED" : "miss",
+                success ? (s->n_trace - mark) : 0u);
+      }
+    }
+  }
+  if (dbg) {
+    fprintf(stderr, "[cone] fixed=%u/%u n_trace %u -> %u\n",
+            n_fixed, n_cand, n0_trace, s->n_trace);
+  }
+  free(birth_ti); free(birth_dead); free(birth_state); free(birth_or);
+  free(birth_lft); free(birth_rft); free(alive); free(cand);
+#undef ATP_CONE_MAYBE_GC
+#else
+  (void)s;
+#endif
+}
+
 // === DIAGNOSTIC (Step 1) ============================================
 // Measure the interreduction deficit and term-size growth of R.  For
 // each rule i, normalize lhs[i] / rhs[i] against R \ {i} (linear
@@ -14935,7 +15794,20 @@ static inline void atp_ft_mirror_ensure(AtpState *s) {
 // Hence atp_rules_only_normalize_ft, not atp_rewrite_normalize_ft.  The
 // deferred full doR+doE normalize and join verdict happen at selection
 // (thvm_atp_step's pop normalize = WM `KPV_Select`, `-ks` "r:e:s:p").
+// Current batch's NEW fact slot (the fact being activated); the push
+// path's self-rederivation guard compares against THIS slot only --
+// WM blocks only the just-activated fact as a KPBehandeln reducer.
+static u32 g_atp_batch_new_slot = 0xffffffffu;
+
 static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
+  // Detail-tier timing (THVM_ATP_PROFILE=2): live only for push-loop
+  // calls (g_atp_pushn_active).  _dt walks forward through the call;
+  // each PUSHN_TICK charges the elapsed slice to one component.
+  int _dl = (g_atp_phase_detail && g_atp_pushn_active);
+  u64 _dt = _dl ? atp_now_us() : 0;
+#define PUSHN_TICK(counter) \
+  do { if (_dl) { u64 _n = atp_now_us(); (counter) += _n - _dt; _dt = _n; } } while (0)
+  if (_dl) g_atp_pushn_calls++;
   static int dbg_join_cache = -1;
   if (dbg_join_cache < 0) dbg_join_cache = atp_env_on("THVM_ATP_JOIN_CACHE");
   u64 join_key = 0;
@@ -14951,22 +15823,28 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
       // Cached verdict is sound under (epoch + n_rules) gating: any R change
       // bumps one of them.  Short-circuit both branches, not just joined=1.
       g_atp_join_cache_hits++;
+      PUSHN_TICK(g_atp_pushn_us_hash);
       return e->joined;
     }
     join_cache_eligible = 1u;
+    PUSHN_TICK(g_atp_pushn_us_hash);
   }
   u8 joined = 0u;
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
   atp_ft_mirror_ensure(s);
+  PUSHN_TICK(g_atp_pushn_us_mirror);
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
   AtpFtCell *fl = ft_from_term(a, *lhs, 0);
   AtpFtCell *fr = ft_from_term(a, *rhs, 0);
+  PUSHN_TICK(g_atp_pushn_us_from);
 #ifdef THVM_ATPFT_CPQ
   joined = atp_cp_trivially_joinable_ft(s, &fl, &fr);
 #else
   fl = atp_rules_only_normalize_ft(s, fl, 64u);
   fr = atp_rules_only_normalize_ft(s, fr, 64u);
+  PUSHN_TICK(g_atp_pushn_us_norm);
   joined = (u8)ft_eq(fl, fr);
+  PUSHN_TICK(g_atp_pushn_us_eq);
 #endif
   // Decode NFs back to Term only on the NOT-joined branch -- downstream
   // filters (perm_sub, queue_sub, AC-eq) need them; the joined branch
@@ -14976,6 +15854,7 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
     Term r = ft_to_term(fr);
     *lhs = l;
     *rhs = r;
+    PUSHN_TICK(g_atp_pushn_us_to);
 #ifdef THVM_ATP_AC
     // AC-equality redundancy: when an AC bitmask is registered, treat
     // AC-equal NFs as joinable.  Sound iff the AC axioms for every masked
@@ -14985,13 +15864,16 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
       AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
       if (atp_ac_eq(l, r, &ac)) joined = 1u;
     }
+    PUSHN_TICK(g_atp_pushn_us_ac);
 #endif
   }
+  if (_dl && joined) g_atp_pushn_joined++;
 #else
   // No FT compiled in: caller must use a Term-only joinable check.  This
   // function isn't usable, so the cache write is skipped too.
   (void)lhs; (void)rhs;
 #endif
+#undef PUSHN_TICK
   if (join_cache_eligible) {
     g_atp_join_cache_misses++;
     AtpJoinCacheEnt *e = &g_atp_join_cache[(u32)join_key & ATP_JOIN_CACHE_MASK];
@@ -15765,6 +16647,7 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
       fputc('\n', stderr);
     }
     if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[i]);
+    if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[i]);
     // WM order mirror: the subsumed equation's faces leave the tree
     // (RE_GleichungEntfernen via FinaleKillprozSubsumption).
     if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_trace[i]);
@@ -17032,7 +17915,15 @@ static void atp_bwd_ground_join_walk(AtpState *s, u32 skip_lo, u32 skip_hi) {
     s->r_gj_status[i] = st;
     if (st == ATP_GJ_ST_JOINABLE) {
       s->n_facts_bwd_ground_joinable++;
+      if (atp_rule_trace_on()) {
+        char la[8192], ra[8192];
+        atp_pretty_term(s->lhs[i], la, sizeof la);
+        atp_pretty_term(s->rhs[i], ra, sizeof ra);
+        fprintf(stderr, "  RETIRE bwd-gz (slot %u, trace %u): %s = %s\n",
+                i, s->r_trace[i], la, ra);
+      }
       atp_trace_mark_dead(s, s->r_trace[i]);
+      if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[i]);
     }
   }
 }
@@ -17097,9 +17988,12 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // re-derives from the two parent rules at the recorded position.
     Term raw_lhs = cp_lhs;
     Term raw_rhs = cp_rhs;
-#ifdef ATP_VAR_NORM
-    thvm_normalize_vars(&raw_lhs, &raw_rhs);
-#endif
+    // (raw_lhs, raw_rhs) are var-normalized LAZILY -- below, after the
+    // drop gates -- since a dropped CP (joinable / subsumed) never
+    // reaches the trace push that consumes the normalized raw pair.
+    // The snapshot handles stay valid: the treatment writes back only
+    // through cp_lhs/cp_rhs (fresh locals), never into the stored raw
+    // terms.
     // Reduce the CP w.r.t. R before it lands in the queue: standard
     // completion adds the NORMALIZED critical pair.  atp_cp_trivially_-
     // joinable writes the two normal forms back through cp_lhs/cp_rhs
@@ -17112,6 +18006,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // raw pair, bypasses the auto-MaxWeight stash (see below).
     u8 raw_untreated = 0u;
     u64 _ph_push_t0 = atp_phase_now();
+    g_atp_pushn_active = 1u;
     // MNF gate (kept even though lazy defaults to off now): when the WL
     // surface enables lazy via Method "LazyNormalize" -> True on a config
     // that also runs MNF, the gate routes around the front search's
@@ -17138,7 +18033,17 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       // have a high joinable-rate, so joining them at push drops them
       // before the queue/index/subsumption work fires.
       const u32 WM_BEHANDELN_GATE = 50u;   // KPVerwaltung.c:437
-      u32 raw_sz = atp_symbol_count(cp_lhs) + atp_symbol_count(cp_rhs);
+      u64 _dg_t0 = g_atp_phase_detail ? atp_now_us() : 0;
+      // Capped count: the gate consumes only the (< 50) verdict, so
+      // the walk stops the moment the running total reaches the gate
+      // -- identical verdict, and the raw >= 50 giants (the class the
+      // gate exists to skip) no longer pay a full O(|CP|) count.
+      u32 raw_sz = 0u;
+      atp_symbol_count_upto(cp_lhs, WM_BEHANDELN_GATE, &raw_sz);
+      if (raw_sz < WM_BEHANDELN_GATE) {
+        atp_symbol_count_upto(cp_rhs, WM_BEHANDELN_GATE, &raw_sz);
+      }
+      if (g_atp_phase_detail) g_atp_pushn_us_gate += atp_now_us() - _dg_t0;
       if (raw_sz < WM_BEHANDELN_GATE) {
         joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
         s->n_cps_push_normalized++;
@@ -17150,6 +18055,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
       s->n_cps_push_normalized++;
     }
+    g_atp_pushn_active = 0u;
     if (g_atp_phase_enabled) g_atp_phase_us_push_normalize += atp_now_us() - _ph_push_t0;
 #ifdef ATP_VAR_NORM
     // 7c: canonically renumber the CP's variables -- AFTER reduction,
@@ -17159,7 +18065,35 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // REWRITE_MAX_VAR where the matcher goes dead; renumbering keeps
     // every stored var matchable AND makes alpha-equivalent CPs
     // byte-identical so the subsumption filters below actually fire.
-    thvm_normalize_vars(&cp_lhs, &cp_rhs);
+    //
+    // Joinable fast-drop: a treated-and-joined CP is discarded at the
+    // `if (joinable)` gate below before anything consumes the canonical
+    // numbering, so the renumber is skipped -- UNLESS a push-side
+    // filter that reads the treated pair sits between here and that
+    // gate (those rely on the canonical ids to fire; all off in the WM
+    // presets) or the cpraw fate trace prints the treated pair.
+    u8 _nv_need = !joinable
+                || s->use_perm_subsume || s->use_rule_subsume_drop
+                || s->use_queue_subsume || s->use_connectedness
+                || cpraw_debug != 0;
+#ifdef ATP_CP_GROUND_JOIN
+    if (s->use_ground_join) _nv_need = 1u;
+#endif
+#ifdef ATP_CP_DIAG
+    _nv_need = 1u;
+#endif
+    // Pre-treatment handles: when the treatment wrote nothing back
+    // (the raw >= 50 untreated class, or a no-op normalize returning
+    // the same cells), the treated pair IS the raw pair, so the
+    // deferred raw-pair renumber below can reuse this normalize's
+    // result instead of re-walking the giant raw terms.
+    Term _nv_pre_l = cp_lhs, _nv_pre_r = cp_rhs;
+    u8   _nv_ran   = _nv_need;
+    if (_nv_need) {
+      u64 _dvn_t0 = g_atp_phase_detail ? atp_now_us() : 0;
+      thvm_normalize_vars(&cp_lhs, &cp_rhs);
+      if (g_atp_phase_detail) g_atp_cpg_us_varnorm += atp_now_us() - _dvn_t0;
+    }
 #endif
     // Permutation-subsumption (WM GZ_ACVerzichtbar):  drop CPs that
     // are pure commutativity-of-top, since they cascade into an
@@ -17181,8 +18115,11 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // subsume mask carries detected AC operators, the push-time filter
     // stays off (g_atp_perm_subsume_mask != 0 -> skip here).  The legacy
     // binary-only env path (no AC mask) keeps the push-time drop.
-    if (s->use_perm_subsume && g_atp_perm_subsume_mask == 0ull &&
-        atp_cp_perm_subsumed(cp_lhs, cp_rhs)) {
+    u64 _dfl_t0 = g_atp_phase_detail ? atp_now_us() : 0;
+    u8 _drop_perm = (s->use_perm_subsume && g_atp_perm_subsume_mask == 0ull &&
+                     atp_cp_perm_subsumed(cp_lhs, cp_rhs)) ? 1u : 0u;
+    if (g_atp_phase_detail) g_atp_cpg_us_filters += atp_now_us() - _dfl_t0;
+    if (_drop_perm) {
       s->n_cps_dropped_perm_subsumed++;
       if (cpraw_debug)
         fprintf(stderr, "[cpfate] %u: DROP perm-subsumed\n", i);
@@ -17193,7 +18130,11 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // of trivial-join (rule_subsumed -> joinable) so dropping is sound;
     // catches CPs that would normalize away WITHOUT running the full
     // joinability normalize.  Gated by use_rule_subsume_drop.
-    if (s->use_rule_subsume_drop && atp_cp_rule_subsumed(s, cp_lhs, cp_rhs)) {
+    _dfl_t0 = g_atp_phase_detail ? atp_now_us() : 0;
+    u8 _drop_rule = (s->use_rule_subsume_drop &&
+                     atp_cp_rule_subsumed(s, cp_lhs, cp_rhs)) ? 1u : 0u;
+    if (g_atp_phase_detail) g_atp_cpg_us_filters += atp_now_us() - _dfl_t0;
+    if (_drop_rule) {
       s->n_cps_dropped_rule_subsumed++;
       if (cpraw_debug)
         fprintf(stderr, "[cpfate] %u: DROP rule-subsumed\n", i);
@@ -17203,8 +18144,10 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // subsume): WM's recentCPinsert queues every treated survivor and
     // stamps it a fresh w2 = ++CPNr FIFO age; the WM presets run with
     // the gate OFF so queue composition and ages match WM exactly.
+    _dfl_t0 = g_atp_phase_detail ? atp_now_us() : 0;
     u8 q_subsmd    = s->use_queue_subsume
                    ? atp_cp_queue_subsumed(s, cp_lhs, cp_rhs) : 0u;
+    if (g_atp_phase_detail) g_atp_cpg_us_filters += atp_now_us() - _dfl_t0;
 #ifdef ATP_CP_DIAG
     if (atp_cp_source_disjoint_connected(s, cp_lhs, cp_rhs,
                                          rule_a, rule_b)) {
@@ -17288,8 +18231,28 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       }
     }
 #endif
-    if (getenv("THVM_ATP_CPGEN_DEBUG") != NULL) {
-      char la[256], ra[256], la_raw[256], ra_raw[256];
+#ifdef ATP_VAR_NORM
+    // Deferred raw-pair var-normalize (see the snapshot comment above):
+    // runs only for CPs that SURVIVED every drop gate, i.e. exactly the
+    // ones whose normalized raw pair the trace push / debug dump below
+    // consume.  Same alpha-canonical result as normalizing eagerly.
+    {
+      u64 _dvr_t0 = g_atp_phase_detail ? atp_now_us() : 0;
+      if (_nv_ran && raw_lhs == _nv_pre_l && raw_rhs == _nv_pre_r) {
+        // Treatment wrote nothing back: normalize(raw) == the treated
+        // renumber already computed above.  Reuse it.
+        raw_lhs = cp_lhs;
+        raw_rhs = cp_rhs;
+      } else {
+        thvm_normalize_vars(&raw_lhs, &raw_rhs);
+      }
+      if (g_atp_phase_detail) g_atp_cpg_us_varnorm += atp_now_us() - _dvr_t0;
+    }
+#endif
+    static int cpgen_debug = -1;
+    if (cpgen_debug < 0) cpgen_debug = getenv("THVM_ATP_CPGEN_DEBUG") != NULL;
+    if (cpgen_debug) {
+      char la[8192], ra[8192], la_raw[256], ra_raw[256];
       atp_pretty_term(cp_lhs, la, sizeof la);
       atp_pretty_term(cp_rhs, ra, sizeof ra);
       atp_pretty_term(raw_lhs, la_raw, sizeof la_raw);
@@ -17320,8 +18283,10 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                 posb[0] ? posb : "(root)", (unsigned)cps[i].combo);
       }
     }
+    u64 _dtr_t0 = g_atp_phase_detail ? atp_now_us() : 0;
     u32 t = atp_trace_push_cp(s, parent_a, parent_b, raw_lhs, raw_rhs,
                               cps[i].pos, cps[i].pos_len, cps[i].combo);
+    if (g_atp_phase_detail) g_atp_cpg_us_trace += atp_now_us() - _dtr_t0;
     // Derived overlap CP: ultimate iff WM's `database=ultimate` flag is
     // on (NewClassification.c:711; Parameter.c default).  Off-by-default
     // = byte-identical to the pre-port behaviour.  When on, derived CPs
@@ -17339,6 +18304,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // an auto-MaxWeight over-bound CP (the overflow stash is packed-
     // only), which atp_cp_implicit_push signals by returning 0.
     u8 deferred = 0u;
+    u64 _dpk_t0 = g_atp_phase_detail ? atp_now_us() : 0;
     if (s->use_implicit_cp != 0u && t != ATP_TRACE_NONE
         && parent_a != ATP_TRACE_NONE && parent_b != ATP_TRACE_NONE) {
       deferred = atp_cp_implicit_push(s, cp_lhs, cp_rhs,
@@ -17350,9 +18316,19 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // Only consulted when cp_trace == NONE, so a deferred CP (which keeps its
     // real trace) is unaffected; harmless to stamp either way.
     g_cp_par_a = parent_a;
+    // WM Waisenmord identity stamps (see AtpState.r_uid): the parent
+    // slots' uids ride into cp_uid_a/b so the orphan test works past
+    // the proof-trace soft cap.  Guard on live slot indices -- axiom
+    // intake / requeued facts pass sentinels and stamp 0 (= no parent).
+    g_cp_uid_a = (s->r_uid != NULL && rule_a < s->n_rules)
+               ? s->r_uid[rule_a] : 0u;
+    g_cp_uid_b = (s->r_uid != NULL && rule_b < s->n_rules)
+               ? s->r_uid[rule_b] : 0u;
     if (!deferred) atp_cp_heap_push(s, cp_lhs, cp_rhs, t, cp_ult,
                                     raw_untreated);
+    if (g_atp_phase_detail) g_atp_cpg_us_pack += atp_now_us() - _dpk_t0;
     g_cp_par_a = ATP_TRACE_NONE;
+    g_cp_uid_a = g_cp_uid_b = 0u;
     pushed++;
   }
   return pushed;
@@ -17649,8 +18625,8 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
                         ((i == (u32)ti && j == (u32)tj) ||
                          (i == (u32)tj && j == (u32)ti))) ? 1 : 0;
     if (g_cp_visit_trace) {
-      fprintf(stderr, "CPVIS === overlap i=%u j=%u (i_or=%u j_or=%u) ===\n",
-              i, j, s->r_orient[i], s->r_orient[j]);
+      fprintf(stderr, "CPVIS === overlap i=%u j=%u (i_or=%u j_or=%u) pick=%u ===\n",
+              i, j, s->r_orient[i], s->r_orient[j], s->cp_select_count);
       static int dumped = 0;
       if (!dumped) {
         dumped = 1;
@@ -17665,8 +18641,28 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   }
   // Variables of j must be renamed apart from i's -- the SAME offset
   // thvm_critical_pairs_range uses internally (REWRITE_MAX_VAR / 2).
-  Term lj = thvm_rename_vars(s->lhs[j], REWRITE_MAX_VAR / 2);
-  Term rj = thvm_rename_vars(s->rhs[j], REWRITE_MAX_VAR / 2);
+  // One-entry rename cache: the WM batch loop's eTT phase overlaps
+  // every OLD fact against the SAME new fact as j, so consecutive
+  // calls rename identical source terms.  Keyed on the source handles
+  // + the GC epoch (cells neither move nor get reused between
+  // collections; a rule-slot mutation swaps the source handle itself),
+  // so a hit returns exactly what the rename would rebuild.
+  static Term rn_src_l = 0, rn_src_r = 0, rn_lj = 0, rn_rj = 0;
+  static u64  rn_epoch = ~0ull;
+  Term lj, rj;
+  if (rn_epoch == g_atp_gc_epoch && rn_src_l == s->lhs[j] &&
+      rn_src_r == s->rhs[j]) {
+    lj = rn_lj;
+    rj = rn_rj;
+  } else {
+    lj = thvm_rename_vars(s->lhs[j], REWRITE_MAX_VAR / 2);
+    rj = thvm_rename_vars(s->rhs[j], REWRITE_MAX_VAR / 2);
+    rn_src_l = s->lhs[j];
+    rn_src_r = s->rhs[j];
+    rn_lj    = lj;
+    rn_rj    = rj;
+    rn_epoch = g_atp_gc_epoch;
+  }
   Term li = s->lhs[i], ri = s->rhs[i];
 
   // Face combinations.  i_face in {li (always), ri (if i unorientable)};
@@ -19677,7 +20673,12 @@ static u32 atp_wmo_collect_pair(AtpState *s, u32 i, u32 j,
     }
   }
   u32 combo_end[4] = {0, 0, 0, 0};
+  u64 _dov_t0 = g_atp_phase_detail ? atp_now_us() : 0;
   u32 nbuf = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH, combo_end);
+  if (g_atp_phase_detail) {
+    g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+    g_atp_cpg_overlap_calls++;
+  }
   if (g_atp_phase_enabled) {
     if (nbuf == 0u) g_atp_wmcp_zero++; else g_atp_wmcp_nonzero++;
   }
@@ -19753,6 +20754,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
   static int gjfwd = -1;
   if (gjfwd < 0) gjfwd = atp_env_on("THVM_ATP_GJ_FWD");
   for (u32 f = first; f < last; f++) {
+    g_atp_batch_new_slot = f;
     if (gjfwd) {
       if (s->r_gj_status[f] == ATP_GJ_ST_UNKNOWN)
         s->r_gj_status[f] = atp_gj_fact_test(s, f);
@@ -19766,14 +20768,18 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       // whose stored face unifies with a non-var subterm of one of f's
       // faces.  f itself is in the index (whole-LHS at its root), so the
       // self pair is collected.
+      u64 _dco_t0 = g_atp_phase_detail ? atp_now_us() : 0;
       u32 nc = atp_cp_index_collect(s, f);
+      if (g_atp_phase_detail) g_atp_cpg_us_collect += atp_now_us() - _dco_t0;
       if (g_atp_cp_overflow) {
         if (g_atp_phase_enabled) g_atp_wmcp_cand += n;
         for (u32 j = 0; j < n; j++)
           atp_wmo_collect_pair(s, f, j, &big, &n_big, &cap_big, buf);
       } else {
         if (g_atp_phase_enabled) g_atp_wmcp_cand += nc;
+        _dco_t0 = g_atp_phase_detail ? atp_now_us() : 0;
         atp_cp_cand_sort();
+        if (g_atp_phase_detail) g_atp_cpg_us_collect += atp_now_us() - _dco_t0;
         for (u32 c = 0; c < nc; c++)
           atp_wmo_collect_pair(s, f, g_atp_cp_cand[c], &big, &n_big,
                                &cap_big, buf);
@@ -19781,13 +20787,17 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       // eTT: f as the INNER, planted into OLD facts (i < first).  Candidates
       // i (ascending) are OLD rules whose stored face has a non-var subterm
       // unifiable with one of f's faces.
+      _dco_t0 = g_atp_phase_detail ? atp_now_us() : 0;
       nc = atp_cp_subindex_collect(s, f);
+      if (g_atp_phase_detail) g_atp_cpg_us_collect += atp_now_us() - _dco_t0;
       if (g_atp_cp_overflow) {
         if (g_atp_phase_enabled) g_atp_wmcp_cand += first;
         for (u32 i = 0; i < first; i++)
           atp_wmo_collect_pair(s, i, f, &big, &n_big, &cap_big, buf);
       } else {
+        _dco_t0 = g_atp_phase_detail ? atp_now_us() : 0;
         atp_cp_cand_sort();
+        if (g_atp_phase_detail) g_atp_cpg_us_collect += atp_now_us() - _dco_t0;
         for (u32 c = 0; c < nc; c++) {
           u32 i = g_atp_cp_cand[c];
           if (i < first) {
@@ -19809,6 +20819,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       atp_wmo_collect_pair(s, i, f, &big, &n_big, &cap_big, buf);
     }
     }
+    u64 _drk_t0 = g_atp_phase_detail ? atp_now_us() : 0;
     for (u32 k = 0; k < n_big; k++) {
       big[k].key = atp_wmo_rank(s, f, big[k].i, big[k].j, big[k].combo,
                                 &big[k].cp);
@@ -19820,6 +20831,11 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
                                             big[k].combo, &big[k].cp);
         s->corank_force_own = 0u;
       }
+    }
+    if (g_atp_phase_detail) {
+      g_atp_cpg_us_rank += atp_now_us() - _drk_t0;
+      g_atp_cpg_rank_calls += n_big;
+      _drk_t0 = atp_now_us();   // re-key region opens here
     }
     // Two-face co-rank correction (default OFF; auto-ON under FormationFifo;
     // see use_corank_own_arr).  The var-differ reverse-face co-rank in
@@ -19855,7 +20871,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       AtpWmOrder *cw = (AtpWmOrder *)s->wmo;
       for (u32 k = 0; k < n_big; k++) {
         if (big[k].key_owncorank == big[k].key) continue;  // no collapse
-        u8 j_dr = wmo_trace_dist_rhs(cw, s->r_trace[big[k].j]);
+        u8 j_dr = wmo_trace_dist_rhs(cw, s->r_uid[big[k].j]);
         if (j_dr) continue;                  // oriented LHS->RHS partner only
         if (!atp_pair_is_sq_inner_class(s->lhs[big[k].j], s->rhs[big[k].j]))
           continue;
@@ -19927,7 +20943,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           continue;                                        // var-differ partner
         if (!atp_pair_is_fwd_cube(s->lhs[big[k].j], s->rhs[big[k].j]))
           continue;                                        // self-cube partner
-        u8 j_dr = wmo_trace_dist_rhs(cw, s->r_trace[big[k].j]);
+        u8 j_dr = wmo_trace_dist_rhs(cw, s->r_uid[big[k].j]);
         if (!j_dr) continue;                               // oriented dist_rhs==1
         u8 j_face_wm = (big[k].combo & 1u) ^ j_dr;
         if (!j_face_wm) continue;                          // WM-reverse face only
@@ -20195,8 +21211,8 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
                                           : ((big[kb].combo >> 1) & 1u);
             u8 ja_face = (big[ka].i == f) ? (big[ka].combo & 1u)
                                           : ((big[ka].combo >> 1) & 1u);
-            u8 jb_fwm = jb_face ^ wmo_trace_dist_rhs(w, s->r_trace[jb]);
-            u8 ja_fwm = ja_face ^ wmo_trace_dist_rhs(w, s->r_trace[ja]);
+            u8 jb_fwm = jb_face ^ wmo_trace_dist_rhs(w, s->r_uid[jb]);
+            u8 ja_fwm = ja_face ^ wmo_trace_dist_rhs(w, s->r_uid[ja]);
             // WM-faithful unflipped: oriented partner on its distinguished face,
             // permutation partner on its reverse face -- thvm's arrival already
             // matches WM's formation order.
@@ -22509,13 +23525,30 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         }
       }
     }
+    if (g_atp_phase_detail) {
+      g_atp_cpg_us_rekey += atp_now_us() - _drk_t0;
+      _drk_t0 = atp_now_us();
+    }
     atp_wmo_ent_sort(big, n_big);
+    if (g_atp_phase_detail) g_atp_cpg_us_sort += atp_now_us() - _drk_t0;
     // Gated batch-order trace (THVM_ATP_BATCH_TRACE): emit the sorted
     // (outer f, i, j, combo, packed key) in push order so thvm's
     // per-fact CP enumeration order can be diffed against Waldmeister's
     // `critical pair N built with parents X and Y` formation sequence.
-    static int batch_trace = -1;
-    if (batch_trace < 0) batch_trace = (getenv("THVM_ATP_BATCH_TRACE") != NULL) ? 1 : 0;
+    static int batch_trace_env = -1;
+    static long bt_seq_lo = -1, bt_seq_hi = -1;
+    if (batch_trace_env < 0) {
+      batch_trace_env = (getenv("THVM_ATP_BATCH_TRACE") != NULL) ? 1 : 0;
+      // Shares the CPFORM seq-window envs so a deep run's single batch can be
+      // dumped (keyed on the batch's first cp_seq).  Output-only.
+      const char *lo = getenv("THVM_ATP_CP_FORM_SEQ_LO");
+      const char *hi = getenv("THVM_ATP_CP_FORM_SEQ_HI");
+      bt_seq_lo = lo ? atol(lo) : -1;
+      bt_seq_hi = hi ? atol(hi) : -1;
+    }
+    int batch_trace = batch_trace_env &&
+        (bt_seq_lo < 0 || (long)s->cp_seq_next >= bt_seq_lo) &&
+        (bt_seq_hi < 0 || (long)s->cp_seq_next <= bt_seq_hi);
     if (batch_trace) {
       // Outer (new) rule identity per batch: its stored lhs/rhs + WM-face,
       // so a thvm batch can be matched to a WM cpform.out vaterNr/vaterL.
@@ -22527,6 +23560,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
               (unsigned)wmo_trace_dist_rhs((AtpWmOrder *)s->wmo, s->r_trace[f]),
               fla, fra);
     }
+    u64 _dpl_t0 = g_atp_phase_detail ? atp_now_us() : 0;
     for (u32 k = 0; k < n_big; k++) {
       if (batch_trace) {
         char bla[1024], bra[1024];
@@ -22622,6 +23656,7 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
                                     big[k].i, big[k].j);
       atp_cpform_geom_clear();
     }
+    if (g_atp_phase_detail) g_atp_cpg_us_pushloop += atp_now_us() - _dpl_t0;
     free(big);
     // Mark f overlap-exhausted: its full superposition lane is now
     // enumerated, so a later-added fact will not re-superpose against it
@@ -22649,39 +23684,120 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
 //     partners (WM R'=R u {l} trick); the rule root-self overlap is excluded.
 // cpnr is stamped only on SURVIVORS after the joinable/ordering drop, so the
 // gate runs BEFORE the per-CP push/seq.
-static u32 sw_trace_to_idx(AtpState *s, u32 trace) {
-  if (trace == ATP_TRACE_NONE) return 0xffffffffu;
-  for (u32 i = 0; i < s->n_rules; i++)
-    if (s->r_trace[i] == trace) return i;
-  return 0xffffffffu;
+// The wmo mirror registers facts under their r_uid (stable identity; r_trace
+// is NONE past the proof-trace cap -- see atp_wmo_insert_fact_ex), so the
+// walk's partner hits carry UIDs, not trace ids.  Map back via r_uid.
+static u32 sw_uid_to_idx(AtpState *s, u32 uid) {
+  u64 _dco_t0 = g_atp_phase_detail ? atp_now_us() : 0;
+  u32 r = 0xffffffffu;
+  if (uid != 0u && s->r_uid != NULL) {
+    for (u32 i = 0; i < s->n_rules; i++)
+      if (s->r_uid[i] == uid) { r = i; break; }
+  }
+  if (g_atp_phase_detail) g_atp_cpg_us_collect += atp_now_us() - _dco_t0;
+  return r;
+}
+
+// Walk phase tag for the CPFORM trace's combo field (A=10 B=11 F=12 C=13
+// D=14 E=15 G=16); trace-only, no engine effect.
+static u8 g_sw_phase = 0xffu;
+
+// Walk-side rename cache -- the batch former's machinery ported to the
+// single-walk CP formation.  thvm_rename_vars(t, CP_RENAME_OFFSET) is a
+// pure content function of the source handle, and cells neither move nor
+// get reused between collections (g_atp_gc_epoch bumps on every
+// thvm_atp_gc_collect), so a (source pair, epoch)-keyed entry returns
+// exactly what the rename would rebuild -- the same witness as
+// atp_overlap_ij's one-entry cache.  The walk needs a WIDER cache: the
+// batch path renames a partner once per PAIR, but the Vater sweep
+// re-renamed the same old partner at EVERY non-var position of the new
+// fact (two thvm_rename_vars per hit) and the Mutter/self sweeps
+// re-renamed the same new-fact face once per partner hit.  Direct-mapped;
+// a collision just recomputes.  Cached out-terms are not GC roots: any
+// collection bumps the epoch, so a stale handle is never returned.
+typedef struct { Term src_l, src_r, out_l, out_r; u64 epoch; } SwRnEnt;
+enum { SW_RN_SLOTS = 8192 };
+static SwRnEnt g_sw_rn[SW_RN_SLOTS];
+static void sw_rename_pair(Term src_l, Term src_r, Term *lin, Term *rin) {
+  u64 h = ((u64)src_l ^ ((u64)src_r << 1)) * 0x9e3779b97f4a7c15ull;
+  u32 slot = (u32)(h >> 49) & (u32)(SW_RN_SLOTS - 1);
+  SwRnEnt *e = &g_sw_rn[slot];
+  if (e->epoch == g_atp_gc_epoch && e->src_l == src_l && e->src_r == src_r) {
+    if (g_atp_phase_detail) g_atp_swrn_hit++;
+    *lin = e->out_l;
+    *rin = e->out_r;
+    return;
+  }
+  if (g_atp_phase_detail) g_atp_swrn_miss++;
+  e->src_l = src_l;
+  e->src_r = src_r;
+  e->out_l = *lin = thvm_rename_vars(src_l, CP_RENAME_OFFSET);
+  e->out_r = *rin = thvm_rename_vars(src_r, CP_RENAME_OFFSET);
+  e->epoch = g_atp_gc_epoch;
 }
 
 // Form ONE CP: outer face (lo,ro) overlapped at position p by the already-
 // renamed inner face (lin,rin); push it on its own so cp_seq is the next FIFO
 // slot.  atp_cp_gen_gates (joinable/ordering) runs BEFORE the push == WM's
 // "drop before ++CPNr".  Returns 1 if a CP survived and was pushed.
-static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term lin, Term rin,
+// `sub_pre` carries the caller's already-addressed subterm of lo at p
+// (the Vater visitor computes it once per position and shares it across
+// every partner hit there); 0 = address it here.
+static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
+                        Term lin, Term rin,
                         const u32 *p, u32 p_len, u32 t_out, u32 t_in,
                         u32 i_out, u32 i_in, u8 o_eq, u8 in_eq) {
-  Term sub = cp_subterm_at(lo, p, p_len);
-  if (sub == 0 || term_tag(sub) == TAG_FVR) return 0u;
+  // PROFILE=2 detail: everything up to the push (subterm addressing, unify,
+  // apply, the gen gates) is the walk's "overlap" component, matching the
+  // batch path's atp_overlap_ij span; the atp_push_cps_traced call is its
+  // "pushloop" (which times push-norm/varnorm/filters/trace/pack inside).
+  int _dl = g_atp_phase_detail;
+  u64 _dov_t0 = _dl ? atp_now_us() : 0;
+  Term sub = (sub_pre != 0) ? sub_pre : cp_subterm_at(lo, p, p_len);
+  if (sub == 0 || term_tag(sub) == TAG_FVR) {
+    if (_dl) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+    return 0u;
+  }
   // Head-symbol pre-filter: two constructors with different head symbols can
   // never unify (thvm_unify returns 0 at its TAG_CTR `term_ext(s)!=term_ext(t)`
   // check).  Skipping here is behaviour-identical -- only true-fail pairs are
   // rejected -- and avoids the 512-byte RewriteSubst zero-init, two unify_walks
   // and the kbo_eq descent for the majority of subterms that can't match.
   if (term_tag(sub) == TAG_CTR && term_tag(lin) == TAG_CTR &&
-      term_ext(sub) != term_ext(lin)) return 0u;
-  RewriteSubst subst = {{0}};
-  if (!thvm_unify(sub, lin, &subst)) return 0u;
+      term_ext(sub) != term_ext(lin)) {
+    if (_dl) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+    return 0u;
+  }
+  // Persistent all-zero subst + bound-id undo log (unify/_.c): byte-
+  // identical to a fresh 512-byte zero-init per attempt, without the
+  // memset.  The undo runs after the last read of `subst` on every
+  // path out of the armed window.
+  static RewriteSubst subst;  // BSS: all-zero at first use
+  thvm_unify_undo_begin();
+  if (!thvm_unify(sub, lin, &subst)) {
+    thvm_unify_undo(&subst);
+    if (_dl) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+    return 0u;
+  }
+  if (_dl) g_atp_cpg_overlap_calls++;
   CriticalPair cp;
   cp.lhs  = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), &subst);
   cp.rhs  = thvm_unify_apply(ro, &subst);
-  cp.peak = thvm_unify_apply(lo, &subst);
+  // cp.peak is read only by the connectedness gate and the equation-
+  // parent KPAction ordering gate -- the batch former's g_cp_need_peak
+  // discipline (cp/_.c:137-146, set per pair at atp_overlap_ij:18657).
+  // For the dominant rule x rule overlap it is never read; skipping the
+  // third unify_apply build is the same pure allocation cut.
+  cp.peak = ((s->use_connectedness || o_eq || in_eq) || atp_kapur_on())
+                ? thvm_unify_apply(lo, &subst) : 0;
+  thvm_unify_undo(&subst);
   cp.pos_len = (u8)p_len;
   for (u32 d = 0; d < p_len; d++) cp.pos[d] = (u8)p[d];
   cp.combo = 0xffu;
-  if (atp_cp_gen_gates(s, &cp, 0u, 1u, o_eq, in_eq) == 0u) return 0u;
+  if (atp_cp_gen_gates(s, &cp, 0u, 1u, o_eq, in_eq) == 0u) {
+    if (_dl) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+    return 0u;
+  }
   // Stamp the CP_FORM_TRACE geometry: the per-CP push bypasses the batch loop
   // that normally sets g_cpform_*, so the walk's CPFORM lines would show i=-1.
   g_cpform_i = i_out; g_cpform_j = i_in;
@@ -22690,15 +23806,81 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term lin, Term rin,
   g_cpform_jlhs = (i_in  < s->n_rules) ? s->lhs[i_in]  : 0;
   g_cpform_i_or = (i_out < s->n_rules) ? s->r_orient[i_out] : 0xffu;
   g_cpform_j_or = (i_in  < s->n_rules) ? s->r_orient[i_in]  : 0xffu;
-  g_cpform_combo = 0xffu;
+  g_cpform_combo = g_sw_phase;
   g_cpform_pos_len = (u8)p_len;
   for (u32 d = 0; d < p_len && d < CP_MAX_DEPTH; d++) g_cpform_pos[d] = (u8)p[d];
-  return atp_push_cps_traced(s, &cp, 1u, t_out, t_in, i_out, i_in);
+  u64 _dpl_t0 = 0;
+  if (_dl) {
+    u64 _now = atp_now_us();
+    g_atp_cpg_us_overlap += _now - _dov_t0;
+    _dpl_t0 = _now;
+  }
+  u32 rv = atp_push_cps_traced(s, &cp, 1u, t_out, t_in, i_out, i_in);
+  if (_dl) g_atp_cpg_us_pushloop += atp_now_us() - _dpl_t0;
+  return rv;
+}
+
+// Overlap-exhausted-equation pair skip (mirror of atp_wmo_collect_pair's
+// use_overlap_exhaust gate): a flat-transposition NEW fact does not
+// re-superpose against an OLD unorientable equation whose birth batch is
+// already enumerated (r_overlap_done) -- WM overlaps commutativity with the
+// equation's fresh re-derivation, not the stale original.  `f_is_ft` is the
+// new fact's atp_is_flat_transposition, computed once per batch.
+static u8 sw_pair_exhaust_skip(AtpState *s, u32 f, u32 j, u8 f_is_ft) {
+  if (!s->use_overlap_exhaust || j == f) return 0u;
+  u8 j_exh = s->r_overlap_done[j] && !s->r_orient[j];
+  return (j_exh && !s->r_overlap_done[f] && f_is_ft) ? 1u : 0u;
 }
 
 typedef struct {
-  AtpState *s; Term lo, ro; u32 i_out, t_out; u8 o_eq, rev_tree; u32 pushed;
+  AtpState *s; Term lo, ro; u32 i_out, t_out; u8 o_eq, f_is_ft, rev_tree; u32 pushed;
 } SwVaterCtx;
+
+// Emit the CP of one Vater partner hit (outer face at p overlapped by the
+// hit's stored face).  Shared by the in-order emission and the co-rank
+// pull-up below.  `sub` is the caller's per-position subterm of c->lo.
+static u32 sw_vater_emit_hit(SwVaterCtx *c, const u32 *p, u32 p_len, Term sub,
+                             const WmoPartnerHit *hit, u32 j) {
+  AtpState *s = c->s;
+  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+  u64 _dov_t0 = g_atp_phase_detail ? atp_now_us() : 0;
+  u8 jdr = wmo_trace_dist_rhs(w, hit->trace);
+  u8 tf  = (u8)(hit->face ^ jdr);
+  Term lin, rin;
+  sw_rename_pair(tf ? s->rhs[j] : s->lhs[j],
+                 tf ? s->lhs[j] : s->rhs[j], &lin, &rin);
+  if (g_atp_phase_detail) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+  u8 in_eq = s->use_unfailing_cp && !s->r_orient[j];
+  return sw_form_push(s, c->lo, c->ro, sub, lin, rin, p, p_len,
+                      c->t_out, s->r_trace[j], c->i_out, j,
+                      c->o_eq, in_eq);
+}
+
+// Mirror of atp_wmo_rank's two-face co-rank SUPPRESSION (wm_order.c: the
+// soa-pick-113 forward-anchor test): a later-leaf reverse-face CP that merely
+// REPRODUCES a live equation keeps its own arrival instead of being pulled up
+// beside the partner's earlier face.  Forms the candidate CP's raw sides and
+// asks whether their normal forms are an already-stored equation.
+static u8 sw_corank_suppressed(SwVaterCtx *c, const u32 *p, u32 p_len,
+                               Term sub, const WmoPartnerHit *hit, u32 j) {
+  AtpState *s = c->s;
+  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+  u8 jdr = wmo_trace_dist_rhs(w, hit->trace);
+  u8 tf  = (u8)(hit->face ^ jdr);
+  Term lin, rin;
+  sw_rename_pair(tf ? s->rhs[j] : s->lhs[j],
+                 tf ? s->lhs[j] : s->rhs[j], &lin, &rin);
+  if (term_tag(sub) == TAG_CTR && term_tag(lin) == TAG_CTR &&
+      term_ext(sub) != term_ext(lin)) return 0u;   // no CP forms: no-op either way
+  RewriteSubst subst = {{0}};
+  if (!thvm_unify(sub, lin, &subst)) return 0u;
+  Term cl = thvm_unify_apply(cp_replace_at(c->lo, p, p_len, rin), &subst);
+  Term cr = thvm_unify_apply(c->ro, &subst);
+  Term nl = atp_rewrite_normalize_indexed(s, cl, 4096u);
+  Term nr = atp_rewrite_normalize_indexed(s, cr, 4096u);
+  return (!kbo_eq(nl, nr) && atp_pop_eq_subsumed(s, nl, nr)) ? 1u : 0u;
+}
+
 static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
   SwVaterCtx *c = (SwVaterCtx *)raw;
   AtpState *s = c->s;
@@ -22706,27 +23888,105 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
   if (sub == 0 || term_tag(sub) == TAG_FVR) return c->pushed;
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   static WmoPartnerHit hits[4096];
+  static u32 eff_arr[4096], eff_ch[4096], jidx[4096], ord[4096];
   // forward face queries rule tree then equation tree; the reverse face (WM D)
   // queries equations BEFORE rules (Unifikation1.c:1642 vs :1601).
   for (u8 t = 0u; t < 2u; t++) {
     u8 tree = c->rev_tree ? (u8)(1u - t) : t;
+    u64 _drk_t0 = g_atp_phase_detail ? atp_now_us() : 0;
     u32 nh = wmo_tops_enum(w, tree, sub, hits, 4096u);
-    for (u32 h = 0; h < nh; h++) {
-      u32 j = sw_trace_to_idx(s, hits[h].trace);
-      if (j == 0xffffffffu) continue;
-      // Self-overlaps are NEVER formed in the partner Vater sweep: WM (and the
-      // byte-identical rank path) ranks the i==j self-overlaps AFTER the A/B
-      // partner sweeps, emitted by the explicit F/C/G steps below -- for rules
-      // too, not just equations.  Skip self entirely here.
-      if (j == c->i_out) continue;
-      u8 jdr = wmo_trace_dist_rhs(w, hits[h].trace);
-      u8 tf  = (u8)(hits[h].face ^ jdr);
-      Term lin = thvm_rename_vars(tf ? s->rhs[j] : s->lhs[j], CP_RENAME_OFFSET);
-      Term rin = thvm_rename_vars(tf ? s->lhs[j] : s->rhs[j], CP_RENAME_OFFSET);
-      u8 in_eq = s->use_unfailing_cp && !s->r_orient[j];
-      c->pushed += sw_form_push(s, c->lo, c->ro, lin, rin, p, p_len,
-                                c->t_out, hits[h].trace, c->i_out, j,
-                                c->o_eq, in_eq);
+    if (g_atp_phase_detail) {
+      g_atp_cpg_us_rank += atp_now_us() - _drk_t0;
+      g_atp_cpg_rank_calls += nh;
+    }
+    if (tree == 0u) {
+      // Rule tree: one chain entry per leaf, no co-rank -- emit in DFS order.
+      for (u32 h = 0; h < nh; h++) {
+        u32 j = sw_uid_to_idx(s, hits[h].trace);
+        if (j == 0xffffffffu) continue;
+        // Self-overlaps are NEVER formed in the partner Vater sweep: WM (and
+        // the byte-identical rank path) ranks the i==j self-overlaps AFTER the
+        // A/B partner sweeps, emitted by the explicit F/C/G steps -- for rules
+        // too, not just equations.  Skip self entirely here.
+        if (j == c->i_out) continue;
+        // WM -gj: a ground-joinable fact gets no CP lane (the batch path's
+        // atp_wmo_collect_pair returns 0 for either parent joinable).
+        if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) continue;
+        if (sw_pair_exhaust_skip(s, c->i_out, j, c->f_is_ft)) continue;
+        c->pushed += sw_vater_emit_hit(c, p, p_len, sub, &hits[h], j);
+      }
+      continue;
+    }
+    // Equation tree: mirror atp_wmo_rank's tops-phase (arr, ch) key EXACTLY
+    // (wm_order.c two-face co-rank collapse), then emit in that key order.
+    // WM stores an asymmetric (var-differ) equation ORIENTED, so ONE scan of
+    // its distinguished face yields both unifiers at consecutive ages; thvm's
+    // two stored faces index at different leaves.  The rank collapses them:
+    //   - both faces reach, other face at an EARLIER leaf: this face FOLLOWS
+    //     the other at (arr_o, 2*ch_o+1) -- unless its CP merely reproduces a
+    //     live equation (suppression: keeps its own raw slot);
+    //   - other face at a LATER leaf: this face ANCHORS at (arr, 2*ch);
+    //   - same leaf or no other-face hit: raw (arr, ch).
+    // Key ties break by the batch collect order = partner slot index (old
+    // facts ascend), then thvm face.  eff_ch chain index = position within
+    // the hit's arrival group (the leaf's chain order).
+    {
+      static u32 raw_ch[4096];
+      u32 grp_start = 0;
+      for (u32 h = 0; h < nh; h++) {
+        if (h > 0 && hits[h].arrival != hits[h - 1u].arrival) grp_start = h;
+        raw_ch[h]  = h - grp_start;
+        eff_arr[h] = hits[h].arrival;
+        eff_ch[h]  = raw_ch[h];
+        jidx[h]    = sw_uid_to_idx(s, hits[h].trace);
+      }
+      _drk_t0 = g_atp_phase_detail ? atp_now_us() : 0;
+      for (u32 h = 0; h < nh; h++) {
+        u32 j = jidx[h];
+        if (j == 0xffffffffu || j == c->i_out) continue;
+        if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) continue;
+        if (!wmo_eq_sides_var_differ(s->lhs[j], s->rhs[j])) continue;
+        u32 h2 = 0xffffffffu;
+        for (u32 g = 0; g < nh; g++)
+          if (g != h && hits[g].trace == hits[h].trace &&
+              hits[g].face != hits[h].face) { h2 = g; break; }
+        if (h2 == 0xffffffffu) continue;
+        u32 o_arr = hits[h2].arrival;
+        if (o_arr < hits[h].arrival) {
+          if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+            eff_arr[h] = o_arr;
+            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+          }
+        } else if (o_arr > hits[h].arrival) {
+          eff_ch[h] = raw_ch[h] * 2u;
+        }
+      }
+      for (u32 h = 0; h < nh; h++) ord[h] = h;
+      for (u32 a = 1; a < nh; a++) {          // insertion sort, stable
+        u32 v = ord[a];
+        u32 b = a;
+        while (b > 0) {
+          u32 u = ord[b - 1u];
+          u8 gt = (eff_arr[u] > eff_arr[v]) ||
+                  (eff_arr[u] == eff_arr[v] && eff_ch[u] > eff_ch[v]) ||
+                  (eff_arr[u] == eff_arr[v] && eff_ch[u] == eff_ch[v] &&
+                   jidx[u] != 0xffffffffu && jidx[v] != 0xffffffffu &&
+                   jidx[u] > jidx[v]);
+          if (!gt) break;
+          ord[b] = u; b--;
+        }
+        ord[b] = v;
+      }
+      if (g_atp_phase_detail) g_atp_cpg_us_rank += atp_now_us() - _drk_t0;
+      for (u32 a = 0; a < nh; a++) {
+        u32 h = ord[a];
+        u32 j = jidx[h];
+        if (j == 0xffffffffu) continue;
+        if (j == c->i_out) continue;          // self: explicit F/C/G steps
+        if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) continue;  // WM -gj lane cut
+        if (sw_pair_exhaust_skip(s, c->i_out, j, c->f_is_ft)) continue;
+        c->pushed += sw_vater_emit_hit(c, p, p_len, sub, &hits[h], j);
+      }
     }
   }
   return c->pushed;
@@ -22739,7 +23999,7 @@ typedef struct {
 static u32 sw_mutter_visit(const u32 *q, u32 q_len, void *raw) {
   SwMutterCtx *c = (SwMutterCtx *)raw;
   if (q_len == 0u) return c->pushed;                 // eTT: PROPER subterms only
-  c->pushed += sw_form_push(c->s, c->lo, c->ro, c->lin, c->rin, q, q_len,
+  c->pushed += sw_form_push(c->s, c->lo, c->ro, 0, c->lin, c->rin, q, q_len,
                             c->t_out, c->t_in, c->i_out, c->i_in,
                             c->o_eq, c->in_eq);
   return c->pushed;
@@ -22750,23 +24010,32 @@ static u32 sw_mutter_visit(const u32 *q, u32 q_len, void *raw) {
 // order.  rev_tree flips the tree order (forward B: rules then eqns; reverse E:
 // eqns then rules, Unifikation1.c:1654 vs :1613).
 static void sw_mutter_phase(AtpState *s, AtpWmOrder *w, u32 f,
-                            Term f_in_l, Term f_in_r, u8 f_in_eq, u8 rev_tree,
-                            u32 *path, u32 *pushed) {
+                            Term f_in_l, Term f_in_r, u8 f_in_eq, u8 f_is_ft,
+                            u8 rev_tree, u32 *path, u32 *pushed) {
   static WmoPartnerHit lhits[8192];
   for (u8 t = 0u; t < 2u; t++) {
     u8 tree = rev_tree ? (u8)(1u - t) : t;
+    u64 _drk_t0 = g_atp_phase_detail ? atp_now_us() : 0;
     u32 nh = wmo_leaflist_enum(w, tree, lhits, 8192u);
+    if (g_atp_phase_detail) {
+      g_atp_cpg_us_rank += atp_now_us() - _drk_t0;
+      g_atp_cpg_rank_calls += nh;
+    }
     for (u32 h = 0; h < nh; h++) {
-      u32 j = sw_trace_to_idx(s, lhits[h].trace);
+      u32 j = sw_uid_to_idx(s, lhits[h].trace);
       if (j == 0xffffffffu) continue;   // INCLUDE self: WM's subterm sweep has no
+      if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) continue;  // WM -gj lane cut
+      if (sw_pair_exhaust_skip(s, f, j, f_is_ft)) continue;
+      u64 _dov_t0 = g_atp_phase_detail ? atp_now_us() : 0;
       u8 jdr = wmo_trace_dist_rhs(w, lhits[h].trace);  // MitAllenAusser -> l/r =? eTT(self)
       u8 tf  = (u8)(lhits[h].face ^ jdr);
       Term lo = tf ? s->rhs[j] : s->lhs[j];
       Term ro = tf ? s->lhs[j] : s->rhs[j];
       u8 o_eq = s->use_unfailing_cp && !s->r_orient[j];
-      Term lin = thvm_rename_vars(f_in_l, CP_RENAME_OFFSET);
-      Term rin = thvm_rename_vars(f_in_r, CP_RENAME_OFFSET);
-      SwMutterCtx mc = { s, lo, ro, lin, rin, lhits[h].trace, s->r_trace[f],
+      Term lin, rin;
+      sw_rename_pair(f_in_l, f_in_r, &lin, &rin);
+      if (g_atp_phase_detail) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+      SwMutterCtx mc = { s, lo, ro, lin, rin, s->r_trace[j], s->r_trace[f],
                          j, f, o_eq, f_in_eq, 0u };
       cp_walk_positions(lo, path, 0u, CP_MAX_DEPTH, sw_mutter_visit, &mc, 0u);
       *pushed += mc.pushed;
@@ -22786,7 +24055,7 @@ typedef struct {
 } SwSelfCtx;
 static u32 sw_self_visit(const u32 *p, u32 p_len, void *raw) {
   SwSelfCtx *c = (SwSelfCtx *)raw;
-  c->pushed += sw_form_push(c->s, c->lo, c->ro, c->lin, c->rin, p, p_len,
+  c->pushed += sw_form_push(c->s, c->lo, c->ro, 0, c->lin, c->rin, p, p_len,
                             c->t_self, c->t_self, c->i_self, c->i_self,
                             c->f_eq, c->f_eq);
   return c->pushed;
@@ -22794,12 +24063,12 @@ static u32 sw_self_visit(const u32 *p, u32 p_len, void *raw) {
 static void sw_self_phase(AtpState *s, u32 f, Term outer, Term outer_r,
                           Term inner, Term inner_r, u8 f_eq, u8 root_only,
                           u32 *path, u32 *pushed) {
-  SwSelfCtx sc = { s, outer, outer_r,
-                   thvm_rename_vars(inner, CP_RENAME_OFFSET),
-                   thvm_rename_vars(inner_r, CP_RENAME_OFFSET),
+  Term rn_in, rn_in_r;
+  sw_rename_pair(inner, inner_r, &rn_in, &rn_in_r);
+  SwSelfCtx sc = { s, outer, outer_r, rn_in, rn_in_r,
                    s->r_trace[f], f, f_eq, 0u };
   if (root_only)                       // F/C/G are toplevel-only; subterm self
-    sc.pushed += sw_form_push(s, outer, outer_r, sc.lin, sc.rin, path, 0u,
+    sc.pushed += sw_form_push(s, outer, outer_r, 0, sc.lin, sc.rin, path, 0u,
                               s->r_trace[f], s->r_trace[f], f, f, f_eq, f_eq);
   else
     cp_walk_positions(outer, path, 0u, CP_MAX_DEPTH, sw_self_visit, &sc, 0u);
@@ -22815,6 +24084,9 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
   u32 path[CP_MAX_DEPTH];
   u32 pushed = 0u;
   for (u32 f = first; f < last; f++) {
+    // WM -gj: a ground-joinable NEW fact generates no CPs at all (every
+    // batch-path collect_pair with it as a parent returns 0).
+    if (s->r_gj_status[f] == ATP_GJ_ST_JOINABLE) continue;
     u8 f_eq = s->use_unfailing_cp && !s->r_orient[f];
     // A two-faced (non-mono) equation re-runs the toplevel+subterm sweeps on its
     // reverse face; a mono-equation (alpha-equivalent faces) and a rule do not
@@ -22825,30 +24097,49 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     // so the A/B/F forward sweeps must run on `fl` (= rhs there) and D/E/G on `fr`
     // -- otherwise the forward/reverse sweeps swap and same-pri CPs get the wrong
     // age (the Absorption pick-100 L.2-vs-L.2.1 reorder).
-    u8 f_dr = wmo_trace_dist_rhs(w, s->r_trace[f]);
+    u8 f_dr = wmo_trace_dist_rhs(w, s->r_uid[f]);
     Term fl = f_dr ? s->rhs[f] : s->lhs[f];   // WM forward (distinguished) face
     Term fr = f_dr ? s->lhs[f] : s->rhs[f];   // WM reverse face
     // WM U1 per-fact order: A toplevel(l), B subterm(l), F self l=?l, then for a
     // two-faced equation C self r=?l, D toplevel(r), E subterm(r), G self r=?r.
     // The self-overlaps ALWAYS follow the partner sweeps (WM ranks i==j last).
-    SwVaterCtx va = { s, fl, fr, f, s->r_trace[f], f_eq, 0u, 0u };
+    u8 f_is_ft = s->use_overlap_exhaust
+                 ? atp_is_flat_transposition(s->lhs[f], s->rhs[f]) : 0u;
+    SwVaterCtx va = { s, fl, fr, f, s->r_trace[f], f_eq, f_is_ft, 0u, 0u };
+    g_sw_phase = 10u;
     cp_walk_positions(fl, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &va, 0u);
     pushed += va.pushed;                                       // A toplevel(l)
-    sw_mutter_phase(s, w, f, fl, fr, f_eq, 0u, path, &pushed); // B subterm(l)
+    g_sw_phase = 11u;
+    sw_mutter_phase(s, w, f, fl, fr, f_eq, f_is_ft, 0u, path, &pushed); // B subterm(l)
     // F/C/G are ROOT-ONLY toplevel self-steps on the WM-distinguished faces fl/fr
     // (Term1MitTerm2Unifizieren on the Elter1 copy, Unifikation1.c:1620/1631/1661).
     // The SUBTERM self-overlaps come from the B/E Mutter sweeps (which now include
     // self).  C is l=?r (combo1) after Elter1Andersherum, NOT r=?l -- combo2 (r=?l)
     // is produced only by the E Mutter-self, never by an explicit step.
-    sw_self_phase(s, f, fl, fr, fl, fr, f_eq, 1u, path, &pushed);  // F root l=?l (combo0)
+    // EQUATIONS ONLY: a RULE never forms a root self-overlap (WM passes the
+    // rule itself as U1_KPsBildenZuRegel's toplevel Ausschluss; the batch
+    // path's skip1 = i_eq ? 0 : 1).  A mono equation still runs F.
+    if (f_eq) {
+      g_sw_phase = 12u;
+      sw_self_phase(s, f, fl, fr, fl, fr, f_eq, 1u, path, &pushed);  // F root l=?l (combo0)
+    }
     if (two_faced) {
+      g_sw_phase = 13u;
       sw_self_phase(s, f, fl, fr, fr, fl, f_eq, 1u, path, &pushed);  // C root l=?r (combo1)
-      SwVaterCtx vd = { s, fr, fl, f, s->r_trace[f], f_eq, 1u, 0u };
+      SwVaterCtx vd = { s, fr, fl, f, s->r_trace[f], f_eq, f_is_ft, 1u, 0u };
+      g_sw_phase = 14u;
       cp_walk_positions(fr, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vd, 0u);
       pushed += vd.pushed;                                     // D toplevel(r)
-      sw_mutter_phase(s, w, f, fr, fl, f_eq, 1u, path, &pushed); // E subterm(r)
+      g_sw_phase = 15u;
+      sw_mutter_phase(s, w, f, fr, fl, f_eq, f_is_ft, 1u, path, &pushed); // E subterm(r)
+      g_sw_phase = 16u;
       sw_self_phase(s, f, fr, fl, fr, fl, f_eq, 1u, path, &pushed); // G root r=?r (combo3)
     }
+    g_sw_phase = 0xffu;
+    // Mark f overlap-exhausted (mirror of the batch path): its superposition
+    // lane is fully enumerated, so a later flat-transposition fact will not
+    // re-superpose against it.
+    if (s->use_overlap_exhaust && !s->r_orient[f]) s->r_overlap_done[f] = 1u;
     if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
   }
   return pushed;

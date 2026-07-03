@@ -165,6 +165,7 @@ typedef struct {
 // arrival-buffer cap (heap-allocated lazily per slot, ~128KB each).
 #define WMO_TOPS_ARR_CAP 16384u
 #define WMO_RC_N 64u
+#define WMO_LLR_N 4096u
 typedef struct {
   u8        valid;
   u8        tree;               // 0 rules / 1 equations
@@ -203,6 +204,20 @@ typedef struct AtpWmOrder {
   u8       no_rankcache;      // THVM_WMO_NO_RANKCACHE: disable the cache
   u32      rc_next;           // round-robin eviction cursor
   WmoRankCacheEnt rc[WMO_RC_N];
+  // Leaf-list rank memo for wmo_leaflist_rank: (tree, trace, face) ->
+  // (found, ll, ch).  The eTT phase of atp_wmo_rank ranks every CP by
+  // its OLD partner's leaf-list position -- an O(leaves x chain)
+  // linear scan per CP over a list that only mutates between batches.
+  // Direct-mapped, validated per entry against tree_rev (same
+  // freeze-window discipline as the tops arrival cache above), so a
+  // hit returns exactly what the scan would recompute.  Shares
+  // no_rankcache as its disable switch.
+  struct WmoLlrEnt {
+    u64 rev;
+    u32 trace;
+    u32 ll, ch;
+    u8  tree, face, found, valid;
+  } llr[WMO_LLR_N];
   // WM-faithful AltesBlattPolieren construction (use_wm_trie_faithful): when
   // set, every BlattAufgeteilt parallel jump splices immediately AFTER the
   // surviving model in the start node's outgoing list (DSBaumOperationen.c
@@ -870,11 +885,21 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
       // subterms opened FURTHER above (i - start_pos > 1, the MeredithAxioms
       // And/OrAssoc @340 R27 jump start_pos=2 i=4 j=5 + the soa rule-35 @1953
       // batch), which are genuine parallels and go after the survivor.
-      if (start_pos < i && e_new < e_old && i - start_pos == 1u) {
-        wmo_ct("POLIER-PAR-HEAD", sn, leaf, 1u);
-        par->next = sn->exits;
-        sn->exits = par;
-      } else {
+      // Var-var twin branches (both leaves diverge on VARIABLE cells,
+      // e.g. the OrAssociativity 655/658 f(x0,x1)/f(x1,x0) pair) are NOT
+      // the NeuesBlattEinhaengen enclosing-subterm jump -- WM keeps the
+      // older twin's exit first there (@2961) -- so the head-insert is
+      // restricted to branches where at least one side is a function cell.
+      // WM ground truth (WMJUMP dump, rule 658 split on OrAssociativity):
+      // an AltesBlattPolieren parallel ALWAYS splices AFTER the survivor
+      // (DSBaumOperationen.c :527-530); WM's head-inserted jumps come from
+      // the NeuesBlattEinhaengen hang path (RumpfSprungeintragSetzen
+      // macro), not from split parallels.  The former local-predicate
+      // head exception (i-start_pos==1 && e_new<e_old, the @300/@1884
+      // plain-wmcli cases) mis-ordered the OrAssociativity 655/658 twin
+      // exits under -auto; if a case later needs the head jump, port the
+      // hang-pending stack mechanism rather than a local predicate.
+      {
         // WM-faithful (DSBaumOperationen.c :523-526): splice the parallel
         // immediately AFTER the survivor it parallels ("hinter den Eintrag
         // setzen").  Under the historical (non-faithful) construction this
@@ -1203,6 +1228,15 @@ static void wmo_tree_remove(WmoTree *t, const WmoCell *key, u32 key_len,
         }
       }
       WmoReissueCtx ric = { sib, models, n_models, wmo_node_depth(up) };
+      static int wmo_ct_dbg = -1;
+      if (wmo_ct_dbg < 0) wmo_ct_dbg = getenv("THVM_WMO_CT") != NULL;
+      if (wmo_ct_dbg) {
+        fprintf(stderr, "WMOCOLLAPSE sib_uid=%u n_models=%u sib_newest=%u path=%s\n",
+                sib->n_chain ? sib->chain[0].trace : 0xffffffffu,
+                n_models, (unsigned)sib_newest,
+                n_models == 1u ? "single" :
+                (n_models >= 2u && sib_newest) ? "multi" : "NONE");
+      }
       if (n_models == 1u) {
         wmo_walk_entries(t->root, wmo_sprung_reissue_cb, &ric);
       } else if (n_models >= 2u && sib_newest) {
@@ -1626,6 +1660,14 @@ static u8 wmo_trace_dist_rhs(const AtpWmOrder *w, u32 trace) {
   return 0u;
 }
 
+// uid -> WM-distinguished-face label for the engine's face-aware
+// KillParent (atp_uid_kill_face in _.c; forward-declared there).
+static u8 atp_wmo_dist_rhs_of(AtpState *s, u32 uid) {
+  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+  if (w == NULL) return 0u;
+  return wmo_trace_dist_rhs(w, uid);
+}
+
 // Whether `t` contains no free variables (is a ground term).
 static u8 wmo_term_is_ground(Term t) {
   if (t == 0) return 1u;
@@ -1695,7 +1737,7 @@ static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
   if (w == NULL) return;
   w->polier_after = s->use_wm_trie_faithful ? 1u : 0u;
   g_wmo_polier_after = w->polier_after;
-  u32 trace = s->r_trace[slot];
+  u32 trace = s->r_uid[slot];   // stable identity (r_trace is NONE past the proof-trace cap)
   WmoCell cells[WMO_MAX_CELLS];
   if (s->r_orient[slot]) {
     u32 n = wmo_face_cells(s->lhs[slot], cells, WMO_MAX_CELLS);
@@ -1913,9 +1955,58 @@ static u32 atp_wmo_victim_drain_key(AtpState *s, u32 trace, u8 reduced_thvm_side
 }
 
 // Remove every registered face of the fact with birth trace id `trace`.
+// Env-gated (THVM_ATP_WMO_DUMP=1) forensic trie dump: DFS in stored
+// kid order, per node the exit list (consult order), per leaf the
+// chain (trace/face, newest first).  Diffed against the hand-executed
+// WM DSBaum model to pin removal-rewire divergences (the DoubleNegation
+// batch-793 group rotations).
+static void wmo_dump_node(WmoNode *n, int depth, FILE *out) {
+  if (n == NULL) return;
+  fprintf(out, "%*sN %p exits:[", depth * 2, "", (void *)n);
+  for (WmoEntry *e = n->exits; e != NULL; e = e->next) {
+    fprintf(out, " %p->%p%s(sub%u)", (void *)e->start, e->ziel,
+            e->ziel_leaf ? "L" : "N", e->sub_len);
+  }
+  fprintf(out, " ]\n");
+  for (u32 k = 0; k < n->n_kids; k++) {
+    WmoKid *kid = &n->kids[k];
+    if (kid->is_leaf) {
+      WmoLeaf *lf = (WmoLeaf *)kid->child;
+      fprintf(out, "%*s L %p sym=%u%s hang=%u depth=%u chain:[",
+              depth * 2 + 1, "", (void *)lf, kid->sym.sym,
+              kid->sym.is_var ? "v" : "", lf->hang, lf->depth);
+      for (u32 c = 0; c < lf->n_chain; c++)
+        fprintf(out, " %u.%u", lf->chain[c].trace, lf->chain[c].face);
+      fprintf(out, " ]\n");
+    } else {
+      fprintf(out, "%*s k sym=%u%s ->\n", depth * 2 + 1, "",
+              kid->sym.sym, kid->sym.is_var ? "v" : "");
+      wmo_dump_node((WmoNode *)kid->child, depth + 1, out);
+    }
+  }
+}
+
+static void wmo_dump_tree(AtpWmOrder *w, u8 tree, const char *label) {
+  fprintf(stderr, "WMODUMP %s tree=%u\n", label, tree);
+  wmo_dump_node(w->tree[tree].root, 1, stderr);
+  fprintf(stderr, "WMODUMP-LL tree=%u:[", tree);
+  for (WmoLeaf *lf = w->tree[tree].ll_head; lf != NULL; lf = lf->ll_next)
+    fprintf(stderr, " %p(d%u)", (void *)lf, lf->depth);
+  fprintf(stderr, " ]\n");
+}
+
 static void atp_wmo_remove_trace(AtpState *s, u32 trace) {
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   if (w == NULL) return;
+  static int wmo_dump = -1;
+  if (wmo_dump < 0) wmo_dump = getenv("THVM_ATP_WMO_DUMP") != NULL ? 1 : 0;
+  if (wmo_dump) {
+    static u32 rm_n = 0;
+    char lbl[64];
+    snprintf(lbl, sizeof lbl, "pre-remove#%u trace=%u", ++rm_n, trace);
+    wmo_dump_tree(w, 0u, lbl);
+    wmo_dump_tree(w, 1u, lbl);
+  }
   u32 r = 0;
   while (r < w->n_reg) {
     if (w->reg[r].trace == trace) {
@@ -1993,18 +2084,51 @@ typedef struct {
 
 static u8 wmo_leaflist_rank(AtpWmOrder *w, u8 tree, u32 trace, u8 face,
                             u32 *out_ll, u32 *out_chain) {
+  // Memo probe (see AtpWmOrder.llr): the leaf list is frozen while
+  // tree_rev holds, so a valid same-rev entry returns exactly what the
+  // scan below would recompute.
+  struct WmoLlrEnt *e = NULL;
+  if (!w->no_rankcache) {
+    u32 h = ((trace * 2654435761u) ^ ((u32)tree << 1) ^ (u32)face)
+            & (WMO_LLR_N - 1u);
+    e = &w->llr[h];
+    if (e->valid && e->rev == w->tree_rev && e->trace == trace &&
+        e->tree == tree && e->face == face) {
+      if (!e->found) return 0u;
+      *out_ll = e->ll;
+      *out_chain = e->ch;
+      return 1u;
+    }
+  }
   u32 rank = 0;
-  for (WmoLeaf *l = w->tree[tree].ll_head; l != NULL; l = l->ll_next) {
+  u8  found = 0u;
+  u32 ll = 0u, ch = 0u;
+  for (WmoLeaf *l = w->tree[tree].ll_head; l != NULL && !found;
+       l = l->ll_next) {
     for (u32 c = 0; c < l->n_chain; c++) {
       if (l->chain[c].trace == trace && l->chain[c].face == face) {
-        *out_ll = rank;
-        *out_chain = c;
-        return 1u;
+        ll = rank;
+        ch = c;
+        found = 1u;
+        break;
       }
     }
     rank++;
   }
-  return 0u;
+  if (e != NULL) {
+    e->valid = 1u;
+    e->rev   = w->tree_rev;
+    e->trace = trace;
+    e->tree  = tree;
+    e->face  = face;
+    e->found = found;
+    e->ll    = ll;
+    e->ch    = ch;
+  }
+  if (!found) return 0u;
+  *out_ll = ll;
+  *out_chain = ch;
+  return 1u;
 }
 
 // Public wrapper: Gleichungsbaum (tree 1) leaf-list rank for one
@@ -2106,8 +2230,12 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
   // Throttled to one dump per distinct (qn, query-cells) bucket and bounded
   // to the registration-count window THVM_WMO_ARRDUMP_LO/_HI; env-gated, off
   // in every normal run.
-  if ((tree == 1u || getenv("THVM_WMO_ARRDUMP_RULE") != NULL) &&
-      getenv("THVM_WMO_ARRDUMP") != NULL) {
+  static int arrdump = -1, arrdump_rule = -1;
+  if (arrdump < 0) {
+    arrdump      = getenv("THVM_WMO_ARRDUMP") != NULL;
+    arrdump_rule = getenv("THVM_WMO_ARRDUMP_RULE") != NULL;
+  }
+  if ((tree == 1u || arrdump_rule) && arrdump) {
     // Gate to the registration window named by THVM_WMO_ARRDUMP_LO/HI (the
     // rule-35 era is ~64-66 registered faces); dump every distinct query once.
     const char *lo_s = getenv("THVM_WMO_ARRDUMP_LO");
@@ -2252,11 +2380,6 @@ static void wmo_var_counts(Term t, u16 *cnt) {
   }
 }
 
-static int wmo_u16_cmp(const void *a, const void *b) {
-  u16 x = *(const u16 *)a, y = *(const u16 *)b;
-  return (x > y) - (x < y);
-}
-
 // Whether the two sides of an equation are NOT variable permutations of
 // each other -- i.e. their per-variable occurrence-count PROFILES (each
 // side's multiset of counts, sorted) differ.  A variable permutation
@@ -2275,10 +2398,33 @@ static u8 wmo_eq_sides_var_differ(Term lhs, Term rhs) {
   u16 cr[WMO_VAR_CNT_CAP] = {0};
   wmo_var_counts(lhs, cl);
   wmo_var_counts(rhs, cr);
-  qsort(cl, WMO_VAR_CNT_CAP, sizeof(u16), wmo_u16_cmp);
-  qsort(cr, WMO_VAR_CNT_CAP, sizeof(u16), wmo_u16_cmp);
+  // Compare the sorted NONZERO count multisets.  Equivalent to the
+  // full sorted-64-array compare (equal multisets over 64 slots <=>
+  // equal nonzero multisets + equal zero counts <=> equal nonzero
+  // multisets + equal lengths), but sorts the handful of live counts
+  // (rules carry ~2-6 distinct vars) instead of qsorting 64 slots
+  // twice -- this helper sits on the per-CP atp_wmo_rank hot path.
+  u16 nl[WMO_VAR_CNT_CAP], nr[WMO_VAR_CNT_CAP];
+  u32 a = 0, b = 0;
   for (u32 v = 0; v < WMO_VAR_CNT_CAP; v++) {
-    if (cl[v] != cr[v]) return 1u;
+    if (cl[v] != 0u) nl[a++] = cl[v];
+    if (cr[v] != 0u) nr[b++] = cr[v];
+  }
+  if (a != b) return 1u;
+  for (u32 i = 1; i < a; i++) {          // insertion sort (tiny n)
+    u16 x = nl[i];
+    u32 k = i;
+    while (k > 0u && nl[k - 1u] > x) { nl[k] = nl[k - 1u]; k--; }
+    nl[k] = x;
+  }
+  for (u32 i = 1; i < b; i++) {
+    u16 x = nr[i];
+    u32 k = i;
+    while (k > 0u && nr[k - 1u] > x) { nr[k] = nr[k - 1u]; k--; }
+    nr[k] = x;
+  }
+  for (u32 v = 0; v < a; v++) {
+    if (nl[v] != nr[v]) return 1u;
   }
   return 0u;
 }
@@ -2299,8 +2445,8 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
   // equation, dist_rhs), the two numberings are flipped.  Remap each
   // parent's face onto WM's before phase/lookup; the OVERLAP TERM stays
   // the thvm face (that is the term the CP was actually built from).
-  u8 i_dr = wmo_trace_dist_rhs(w, s->r_trace[i]);
-  u8 j_dr = wmo_trace_dist_rhs(w, s->r_trace[j]);
+  u8 i_dr = wmo_trace_dist_rhs(w, s->r_uid[i]);
+  u8 j_dr = wmo_trace_dist_rhs(w, s->r_uid[j]);
   u8 i_face_wm = i_face ^ i_dr;
   u8 j_face_wm = j_face ^ j_dr;
   Term i_outer = i_face ? s->rhs[i] : s->lhs[i];
@@ -2374,16 +2520,19 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
       qsub = term_ctr_at(qsub, cp->pos[d]);
     }
     u32 arr = 0, ch = 0;
-    if (!wmo_tops_rank(w, tree, qsub, s->r_trace[j], j_face_wm, &arr, &ch)) {
+    if (!wmo_tops_rank(w, tree, qsub, s->r_uid[j], j_face_wm, &arr, &ch)) {
       w->rank_misses++;
       arr = 0x3fffu;
     }
     // Tops-phase per-CP rank trace (THVM_WMO_RANKTRACE): partner trace/face,
-    // DFS arrival, chain index + the CP's joined sides.  Env-gated; used to
-    // read the rule-35 @1953 8-partner emission order.
-    if (getenv("THVM_WMO_RANKTRACE") != NULL && tree == 1u && phase == 0u) {
+    // DFS arrival, chain index + the CP's joined sides.  Env-gated (cached --
+    // this sits on the per-CP rank hot path); used to read the rule-35
+    // @1953 8-partner emission order.
+    static int wmo_ranktrace = -1;
+    if (wmo_ranktrace < 0) wmo_ranktrace = getenv("THVM_WMO_RANKTRACE") != NULL;
+    if (wmo_ranktrace && tree == 1u && phase == 0u) {
       fprintf(stderr, "WMORANK f=%u j=%u jtr=%u jfwm=%u arr=%u ch=%u k1=%u nreg=%u lhs=",
-              f, j, s->r_trace[j], j_face_wm, arr, ch, k1, w->n_reg);
+              f, j, s->r_uid[j], j_face_wm, arr, ch, k1, w->n_reg);
       atp_dbg_print_term(stderr, cp->lhs);
       fprintf(stderr, " rhs=");
       atp_dbg_print_term(stderr, cp->rhs);
@@ -2415,7 +2564,7 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
     // single-scan unifier variants.
     if (tree == 1u && wmo_eq_sides_var_differ(s->lhs[j], s->rhs[j])) {
       u32 arr_o = 0, ch_o = 0;
-      u8 hit_o = wmo_tops_rank(w, tree, qsub, s->r_trace[j],
+      u8 hit_o = wmo_tops_rank(w, tree, qsub, s->r_uid[j],
                                (u8)(j_face_wm ^ 1u), &arr_o, &ch_o);
       // Suppress the forward anchor (arr_o < arr, this face's leaf pulled
       // up to the earlier sibling face) when the CP merely REPRODUCES a
@@ -2464,7 +2613,7 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
   u8 tree = i_is_rule ? 0u : 1u;
   u32 k2 = j_face_wm ? (tree == 1u ? 0u : 1u) : (u32)tree;
   u32 ll = 0, ch = 0;
-  if (!wmo_leaflist_rank(w, tree, s->r_trace[i], i_face_wm, &ll, &ch)) {
+  if (!wmo_leaflist_rank(w, tree, s->r_uid[i], i_face_wm, &ll, &ch)) {
     w->rank_misses++;
     ll = 0x3fffu;
   }

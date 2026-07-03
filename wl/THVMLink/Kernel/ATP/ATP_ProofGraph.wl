@@ -293,6 +293,75 @@ pruneUnusedAxioms[entries_List] := Block[{cited, axKeys, keptAx, axRule},
     ] /@ entries) // DeleteCases[Nothing]
 ]
 
+(* Waldmeister protocol-order presentation: stable-sort the completion
+   lemma block (the entries tagged in entryTi) by the trace index that
+   emitted each entry -- the C trace is stamped in formation order, so
+   this reproduces WM's PCL chronology (= FindEquationalProof's step
+   sequence) instead of the goal-backwards discovery order the
+   depth-first resolveTrace emits in.  CriticalPairLemma /
+   SubstitutionLemma keys are renumbered 1..k in the new order and
+   every citation rewritten through the bijection (goal-chain entries
+   keep their positions AND their numbers: the chain shares the slN
+   counter, so its keys sit above the renumbered range).
+
+   Depth-first emission guarantees a citee's trace index never exceeds
+   its citer's, so the sorted block stays verifier-replayable; the
+   fold below re-checks that invariant on the final list and falls
+   back to the untouched input on any violation (never trade a valid
+   proof for presentation parity). *)
+wmSelectionOrderEntries[allEntries_List, entryTi_Association] := Block[
+    {taggedPos, block, sorted, cplOld, slOld, renum, out, defined, ok},
+    If[ Environment["THVM_ATP_NO_WMORDER"] =!= $Failed, Return[allEntries]];
+    If[ Length[entryTi] === 0, Return[allEntries]];
+    taggedPos = Select[Range[Length[allEntries]],
+        KeyExistsQ[entryTi, allEntries[[#, 1]]] &];
+    If[ taggedPos === {}, Return[allEntries]];
+    block = allEntries[[taggedPos]];
+    (* NOT Lookup (the keys are lists, which Lookup threads over) and
+       NOT SortBy (whose canonical-element tiebreak is not stable):
+       bracket access takes the key literally, Ordering keeps equal
+       keys in emission order. *)
+    sorted = block[[Ordering[
+        Replace[entryTi[First[#]], _Missing -> {Infinity, 0}] & /@ block]]];
+    If[ sorted === block, Return[allEntries]];
+    (* Renumber over the FULL per-kind keyspace: the goal-chain
+       entries share the slN counter with the lemma block, so their
+       (untagged) numbers interleave with the tagged ones -- a
+       tagged-only renumber would collide keys.  New order: tagged
+       keys in sorted (chronology) order, then untagged keys in their
+       existing list order (the goal chain stays at the tail, where
+       FEQ puts it). *)
+    cplOld = Join[
+        Cases[First /@ sorted, {"CriticalPairLemma", k_} :> k],
+        Cases[First /@ Delete[allEntries, List /@ taggedPos], {"CriticalPairLemma", k_} :> k]];
+    slOld = Join[
+        Cases[First /@ sorted, {"SubstitutionLemma", k_} :> k],
+        Cases[First /@ Delete[allEntries, List /@ taggedPos], {"SubstitutionLemma", k_} :> k]];
+    renum = DeleteCases[
+        Join[
+            MapIndexed[{"CriticalPairLemma", #1} -> {"CriticalPairLemma", First[#2]} &, cplOld],
+            MapIndexed[{"SubstitutionLemma", #1} -> {"SubstitutionLemma", First[#2]} &, slOld]],
+        r_ /; First[r] === Last[r]];
+    out = ReplacePart[allEntries, Thread[taggedPos -> sorted]] /. renum;
+    If[ Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
+        WriteString["stderr", "[wmorder] tagged=", ToString[Length[taggedPos]],
+            " renumbered=", ToString[Length[renum]], "\n"]];
+    (* Replay-order safety net: every citation must precede its citer. *)
+    defined = <||>; ok = True;
+    Do[ Block[{cites = DeleteDuplicates @ Cases[Last[e],
+                {kind_String, _Integer} /; MemberQ[
+                    {"Axiom", "Hypothesis", "CriticalPairLemma", "SubstitutionLemma"},
+                    kind], {0, Infinity}]},
+        If[ ! AllTrue[cites, KeyExistsQ[defined, #] &],
+            If[ Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
+                WriteString["stderr", "[wmorder] FALLBACK at ", ToString[First[e], InputForm],
+                    " missing=", ToString[Select[cites, ! KeyExistsQ[defined, #] &], InputForm], "\n"]];
+            ok = False; Break[]];
+        defined[First[e]] = True],
+        {e, out}];
+    If[ ok, out, allEntries]
+]
+
 (* === C-engine proof decoder ======================================= *)
 
 (* ATP terms use two tags: TAG_CTR (20) for labelled constructors
@@ -982,7 +1051,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         usingMnf = (Environment["THVM_ATP_PREFER_MAINSTEPS"] === $Failed) && ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {},
         mainSteps = If[(Environment["THVM_ATP_PREFER_MAINSTEPS"] === $Failed) && ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {}, cRes["MnfSteps"], cRes["MainSteps"]],
         axPairs = enc["AxPairs"], varSyms, entries, traceInfo,
-        inProgress, aliveRulesAt, slN, cpN, axiomKeyFor, rewriteOnce,
+        inProgress, aliveRulesAt, slN, cpN, entryTi, entryTag, axiomKeyFor, rewriteOnce,
         prepareRules, runBfs, reverseBfsPath, emitNorm, resolveCp,
         resolveTrace, resolveRule, axiomEntries, canonInfo, canonKeyOf,
         cjp, nGoals, cjps, chainEntries, allEntries,
@@ -1044,6 +1113,25 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         axPairs = axPairs /. Verbatim[Pattern][s_Symbol, _] :> s;
         cjp = conjPair /. Verbatim[Pattern][s_Symbol, _] :> s;
         entries = {};         (* lemma key -> assoc, accumulated *)
+        (* per-entry chronology tag (key -> {major, minor}): the sort
+           key wmSelectionOrderEntries orders the lemma block by, so
+           the emitted CriticalPairLemma / SubstitutionLemma sequence
+           matches Waldmeister's PCL protocol order (= FEQ's step
+           order) instead of the goal-backwards discovery order the
+           depth-first resolveTrace produces.  major = the trace index
+           of the event; minor sequences the SubstitutionLemmas WM
+           records adjacent to it: WM normalizes a fresh CP at PUSH,
+           so a red whose rule PREDATES the CP gets a formation-
+           adjacent PCL id -- entryTag places such an SL right after
+           its parent ({parent major, parent minor + 1}); a red whose
+           rule arrived later really happened at pop and keeps the pop
+           chronology ({own ti, 0}). *)
+        entryTi = <||>;
+        entryTag[parentKey_, ownTi_, ruleTi_] := Block[{pt = entryTi[parentKey]},
+            If[ ListQ[pt] && IntegerQ[ruleTi] && ruleTi < pt[[1]],
+                {pt[[1]], pt[[2]] + 1},
+                {ownTi, 0}]
+        ];
         (* traceInfo / inProgress use DownValues on the Module-renamed
            symbols (not Associations): single-arg DownValues are hashed,
            so cache lookup stays O(1) on large traces.  A Module-renamed
@@ -1192,6 +1280,64 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 found
             ];
 
+        (* Meet-in-the-middle: two FORWARD-only BFS frontiers, one from
+           `start` and one from `target`, meeting at a common
+           (set-canonical) equation.  A bridge whose two endpoints both
+           reduce to a shared join -- e.g. the OrAssociativity
+           ti=356685 goal-side normalize, where BOTH eq sides rewrite
+           toward each other -- is unreachable by any single-direction
+           phase but trivial for the meet: each frontier only ever
+           rewrites DOWNHILL.  The spliced result is start ->* meet
+           (side-1 hist verbatim) followed by meet ->* target
+           (side-2 hist flipped via reverseBfsPath, which shares rule /
+           side / position and negates direction).  Keys canonicalize
+           the unordered eq pair with Sort so the two frontiers meet
+           regardless of side order. *)
+        runBfsMeet[start_, target_, preRules_, cap_, wallSec_] :=
+            Block[{ck = Function[e, Sort[e]], q1, q2, s1, s2,
+                   found = Missing[], explored = 0, t0 = AbsoluteTime[]},
+                q1 = CreateDataStructure["Queue"];
+                q2 = CreateDataStructure["Queue"];
+                q1["Push", {start, {}}]; q2["Push", {target, {}}];
+                s1 = <|ck[start] -> {}|>; s2 = <|ck[target] -> {}|>;
+                While[ (q1["Length"] > 0 || q2["Length"] > 0) &&
+                       MissingQ[found] && explored < cap &&
+                       AbsoluteTime[] - t0 < wallSec,
+                    Do[
+                        If[ MissingQ[found],
+                            Block[{q = If[dirSide == 1, q1, q2], node, eq, hist, key, oth, nbrs},
+                                If[ q["Length"] > 0,
+                                    node = q["Pop"]; explored++;
+                                    {eq, hist} = node;
+                                    key = ck[eq];
+                                    oth = If[dirSide == 1, s2, s1];
+                                    If[ KeyExistsQ[oth, key],
+                                        found = If[ dirSide == 1,
+                                            Join[hist, reverseBfsPath[oth[key], target]],
+                                            Join[oth[key], reverseBfsPath[hist, target]]],
+                                        nbrs = rewriteOnce[eq, preRules, False];
+                                        Do[
+                                            Block[{nk = ck[nb[[1]]],
+                                                   own = If[dirSide == 1, s1, s2]},
+                                                If[ ! KeyExistsQ[own, nk],
+                                                    If[ dirSide == 1,
+                                                        AssociateTo[s1, nk -> Append[hist, nb]];
+                                                        q1["Push", {nb[[1]], Append[hist, nb]}],
+                                                        AssociateTo[s2, nk -> Append[hist, nb]];
+                                                        q2["Push", {nb[[1]], Append[hist, nb]}]]
+                                                ]],
+                                            {nb, nbrs}
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ],
+                        {dirSide, {1, 2}}
+                    ]
+                ];
+                found
+            ];
+
         (* Turn a target ->* start BFS path `rev` (each step
            {resultEq, traceIdx, side, relPos, dir}, the eq sequence
            being target, rev[1].eq, ..., start) into the equivalent
@@ -1241,6 +1387,45 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                    outer two-phase retry / FindEquationalProof fall
                    through. *)
                 found = runBfs[startEq, targetEq, preRules, False, 50000, 2];
+                (* Deep-proof retry: OrAssociativity's ti=356685 bridge
+                   exhausts the 50k/2s forward phase (440 alive rules,
+                   large redexes); a single wider forward pass resolves
+                   it.  Only FAILING entries pay this cost. *)
+                If[MissingQ[found],
+                    found = runBfsMeet[startEq, targetEq, preRules, 200000, 20]];
+                (* ti-context retry: goal-side normalizes (the
+                   reconstructed goal chains) run against END-of-run R,
+                   not the R alive at the entry's trace index -- retry
+                   the forward search with every rule in the trace when
+                   the ti-scoped set cannot bridge (OrAssociativity
+                   ti=356685: alive-at-ti=440 but the rewrite used a
+                   later rule). *)
+                If[MissingQ[found],
+                    Block[{allRules = prepareRules[Table[
+                            {t, {tL[trace[[t + 1]]], tR[trace[[t + 1]]]}},
+                            {t, orientFviIdx}]]},
+                        found = runBfs[startEq, targetEq, allRules, False, 200000, 15];
+                        If[MissingQ[found],
+                            found = runBfsMeet[startEq, targetEq, allRules, 200000, 20]]]];
+                (* Wide REVERSE phase: an orient-time pop-normalize under
+                   the WM preset runs doR+doE -- ordered EQUATION steps
+                   whose net direction can oppose every oriented rule, so
+                   the forward-only phases (and the tight 600-node reverse
+                   probe) cannot replay them.  One wide variable-safe
+                   reverse pass over the ti-scoped rules bridges these
+                   (OrAssociativity ti=356685). *)
+                If[MissingQ[found],
+                    found = runBfs[startEq, targetEq, preRules, True, 100000, 20]];
+                (* Ultimate rung: wide REVERSE over the full no-death
+                   population.  The ti=356685 probe showed pEq IRREDUCIBLE
+                   forward by every rule ever born -- the bridge's first
+                   step must be a reverse / grounded-FVI equation instance,
+                   possibly of a rule dead by ti. *)
+                If[MissingQ[found],
+                    Block[{allRules = prepareRules[Table[
+                            {t, {tL[trace[[t + 1]]], tR[trace[[t + 1]]]}},
+                            {t, orientFviIdx}]]},
+                        found = runBfs[startEq, targetEq, allRules, True, 150000, 30]]];
                 If[MissingQ[found], found = runBfs[startEq, targetEq, preRules, True, 600, 2]];
                 (* Phase 3: bidirectional fallback.  A start ->* target
                    bridge whose net direction INCREASES term size (a CP
@@ -1262,7 +1447,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                     Block[{rev = runBfs[targetEq, startEq, preRules, True, 50000, 3]},
                         If[! MissingQ[rev], found = reverseBfsPath[rev, targetEq]]]];
                 If[ MissingQ[found],
-                    atpDbgFail["emitNorm.no-rewrite-path ti=" <>
+                    atpDbgFail["emitNorm.no-rewrite-path ctx=" <>
+                        ToString[$enCtx] <> " ti=" <>
                         ToString[ti] <> " start=" <>
                         ToString[startEq, InputForm] <> " target=" <>
                         ToString[targetEq, InputForm] <> " alive=" <>
@@ -1286,6 +1472,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                     cInfo = resolveTrace[step[[2]]];
                     rEq = {tL[trace[[step[[2]] + 1]]], tR[trace[[step[[2]] + 1]]]};
                     slN++;
+                    entryTi[{$SubstitutionLemmaSym, slN}] = entryTag[curKey, ti, step[[2]]];
                     st = stmt[step[[1]]];
                     AppendTo[entries, {$SubstitutionLemmaSym, slN} -> <|
                         "Statement" -> st,
@@ -1388,7 +1575,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             If[ cte["ParentA"] === $AtpTraceNone || cte["ParentB"] === $AtpTraceNone,
                 With[{realP = If[cte["ParentA"] === $AtpTraceNone, cte["ParentB"], cte["ParentA"]]},
                     aInfo = resolveTrace[realP];
-                    Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]]];
+                    Return[Block[{$enCtx = "site1556-aParent"}, emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]]]];
             aTe = trace[[cte["ParentA"] + 1]];
             bTe = trace[[cte["ParentB"] + 1]];
             ruleAEq = {tL[aTe], tR[aTe]};
@@ -1412,7 +1599,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                crashes on.  Sound: emitNorm only emits real oriented /
                ordered rewrites that the verifier replays. *)
             If[ cplDegenerateOverlapQ[ruleAEq, ruleBEq, pos, varSyms],
-                Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]];
+                Return[Block[{$enCtx = "site1580-aParent"}, emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]]];
             (* Goal critical pair: one parent's resolved equation IS a
                conjecture conjunct (the skolemized goal fed as an ordinary
                TRACE_AXIOM, whose lineage bottoms out at the skolem-bearing
@@ -1436,9 +1623,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             Block[{gA = FirstPosition[cjps, p_ /; cplEqSetQ[p, aInfo["Eq"], varSyms], Missing[], {1}, Heads -> False],
                    gB = FirstPosition[cjps, p_ /; cplEqSetQ[p, bInfo["Eq"], varSyms], Missing[], {1}, Heads -> False]},
                 If[ ! MissingQ[gA],
-                    Return[emitNorm[{$HypothesisSym, First[gA]}, cjps[[First[gA]]], cpEq, ti]]];
+                    Return[Block[{$enCtx = "site1604-goalA"}, emitNorm[{$HypothesisSym, First[gA]}, cjps[[First[gA]]], cpEq, ti]]]];
                 If[ ! MissingQ[gB],
-                    Return[emitNorm[{$HypothesisSym, First[gB]}, cjps[[First[gB]]], cpEq, ti]]]];
+                    Return[Block[{$enCtx = "site1606-goalB"}, emitNorm[{$HypothesisSym, First[gB]}, cjps[[First[gB]]], cpEq, ti]]]]];
             (* Re-derivation: the stored CP equation IS one of its own
                parents' (up to side swap / alpha) -- a two-parent overlap
                that reproduces an existing fact rather than a new peak.
@@ -1474,14 +1661,15 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                    A, and on failure fall back to parent B before giving up.
                    emitNorm throws BEFORE emitting any step, so the retry is
                    side-effect-free. *)
-                Return[With[{resA = Catch[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]},
+                Return[With[{resA = Catch[Block[{$enCtx = "site1642-redrv"}, emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]]},
                     If[ resA === $Failed,
-                        emitNorm[bInfo["Key"], bInfo["Eq"], cpEq, ti],
+                        Block[{$enCtx = "site1645-bParent"}, emitNorm[bInfo["Key"], bInfo["Eq"], cpEq, ti]],
                         resA]]]];
             cEq = geom["ConstructEq"];
             mEq = geom["MatchingEq"];
             cpN++;
             key = {"CriticalPairLemma", cpN};
+            entryTi[key] = {ti, 0};
             st = stmt[cpEq];
             AppendTo[entries, key -> <|
                 "Statement" -> st,
@@ -1510,6 +1698,10 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            NORM_STEP propagates this through the chain so its Side /
            equation order match the chain root's convention. *)
         resolveTrace[ti_] := Block[{te, ruleEq, pInfo, pEq, info},
+            If[ MemberQ[{355765, 356685}, ti] &&
+                Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
+                WriteString["stderr", "PARENTDBG ti=" <> ToString[ti] <> " te=" <>
+                    ToString[trace[[ti + 1]], InputForm] <> "\n"]];
             If[ ti === $AtpTraceNone,
                 (* A cited parent was never traced -- almost always the
                    proof-trace buffer overflowed (a CP formed past t_max gets
@@ -1582,7 +1774,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                            link, exactly as the chain-off retry path does. *)
                         If[ te["ParentB"] === $AtpTraceNone,
                             pInfo = resolveTrace[te["ParentA"]];
-                            Return[emitNorm[pInfo["Key"], pInfo["Eq"], ruleEq, ti]]];
+                            Return[Block[{$enCtx = "site1752-pRule"}, emitNorm[pInfo["Key"], pInfo["Eq"], ruleEq, ti]]]];
                         pInfo = resolveTrace[te["ParentA"]];
                         rInfo = resolveTrace[te["ParentB"]];
                         rTe = trace[[te["ParentB"] + 1]];
@@ -1663,6 +1855,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         newCSide0WlPos = cSide0WlPos;
                         slN++;
                         sl = {$SubstitutionLemmaSym, slN};
+                        entryTi[sl] = entryTag[pInfo["Key"], ti, te["ParentB"]];
                         st = stmt[wlEq];
                         dir = If[te["Fwd"] === 1, 1, -1];
                         (* The replay rule for the direction the engine
@@ -1732,6 +1925,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         minConstSym = Symbol["cAtp1"];
                         slN++;
                         key = {$SubstitutionLemmaSym, slN};
+                        entryTi[key] = {ti, 0};
                         AppendTo[entries, key -> <|
                             "Statement" -> stmt[ruleEq],
                             "Proof" -> <||>,
@@ -1745,6 +1939,31 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 te["Reason"] === $TraceOrient || te["Reason"] === $TraceSimplify,
                     pInfo = resolveTrace[te["ParentA"]];
                     pEq = pInfo["Eq"];
+                    If[ ti === 356685 && Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
+                        Block[{allPairs, fwd, rev, hits},
+                            allPairs = DeleteCases[Table[
+                                {t, {tL[trace[[t + 1]]], tR[trace[[t + 1]]]}},
+                                {t, 0, Length[trace] - 1}],
+                                {_, {_Missing, _} | {_, _Missing}}];
+                            fwd = cplAsRule[#[[2]], varSyms] & /@ allPairs;
+                            rev = cplAsRule[Reverse[#[[2]]], varSyms] & /@ allPairs;
+                            hits = Select[Join[fwd, rev],
+                                ((pEq /. #) =!= pEq) &, 6];
+                            WriteString["stderr", "VARSYMS " <>
+                                ToString[varSyms, InputForm] <> "\n"];
+                            WriteString["stderr", "RAW355765 " <>
+                                ToString[{tL[trace[[355766]]], tR[trace[[355766]]]}, InputForm] <>
+                                "  RESOLVED pEq=" <> ToString[pEq, InputForm] <> "\n"];
+                            WriteString["stderr", "PROBE2 one-step reducers of pEq (any entry, both dirs): " <>
+                                ToString[Length[hits]] <> " sample=" <>
+                                ToString[Take[hits, UpTo[3]], InputForm] <> "\n"]]];
+                    If[ ti === 356685 && Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
+                        WriteString["stderr", "ORIENTDBG ti=356685 reason=" <>
+                            ToString[te["Reason"]] <> " pA=" <> ToString[te["ParentA"]] <>
+                            " pB=" <> ToString[te["ParentB"]] <>
+                            " teEq=" <> ToString[{te["Lhs"], te["Rhs"]}, InputForm] <>
+                            " pEq=" <> ToString[pEq, InputForm] <>
+                            " ruleEq=" <> ToString[ruleEq, InputForm] <> "\n"]];
                     (* When chain extraction is on AND the parent is a
                        NORM_STEP, the chain already terminates at the
                        equation that gets oriented -- the cplEqSetQ
@@ -1761,7 +1980,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                right side-to-position mapping. *)
                             If[KeyExistsQ[pInfo, "CSide0WlPos"], <|"CSide0WlPos" -> pInfo["CSide0WlPos"]|>, <||>]
                         ],
-                        emitNorm[pInfo["Key"], pEq, ruleEq, ti]
+                        Block[{$enCtx = "site1933-goalchain"}, emitNorm[pInfo["Key"], pEq, ruleEq, ti]]
                     ],
                 True, atpDbgFail["resolveTrace.unknown-reason@" <> ToString[ti]];
                 Throw[$Failed]
@@ -1801,6 +2020,12 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            shape). *)
         nGoals = Length[enc["ConjPairs"]];
         cjps = If[nGoals > 1, cjp, {cjp}];
+
+        If[ Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
+            Print["[buildCpl] mainSteps=", Length[mainSteps],
+                " MainSteps=", Length[cRes["MainSteps"]],
+                " usingMnf=", usingMnf, " conjPair=", conjPair];
+            Do[Print["  step ", si, ": ", mainSteps[[si]]], {si, Length[mainSteps]}]];
 
         (* the goal chains: conjunct g's MainSteps slice rewrites one
            side of that conjunct's running equation, citing its
@@ -1894,8 +2119,10 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            order -- resolveTrace is depth-first, so a lemma is
            always emitted after the entries it cites -- then the
            goal chains.  The verifier replays entries in order and
-           needs every Construct / Input already defined, so this
-           dependency order must NOT be re-sorted. *)
+           needs every Construct / Input already defined; the lemma
+           block is re-sorted ONLY by wmSelectionOrderEntries, whose
+           trace-chronology order preserves that invariant (and which
+           self-checks + falls back if it ever would not). *)
         allEntries = Join[
             axiomEntries,
             Table[
@@ -1907,7 +2134,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             entries,
             chainEntries
         ];
-        pruneUnusedAxioms[allEntries]
+        pruneUnusedAxioms[wmSelectionOrderEntries[allEntries, entryTi]]
     ]]
 ]
 

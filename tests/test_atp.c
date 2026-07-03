@@ -489,18 +489,20 @@ int main(void) {
     thvm_atp_free(s);
   }
 
-  TEST_BEGIN("atp/wm-preset-fifo-dimension-off");
+  TEST_BEGIN("atp/wm-preset-fifo-dimension-auto");
   {
-    // WM's default proof config (the one wmcli runs) carries no
-    // `-pq interleave=` token, so PI_ParseInterleave fails and the
-    // CP-queue uses moduloCP=1, thresholdCP=0 (KPVerwaltung.c:1216-1219):
-    // CPdimension() == AnzAktivierterRE % 1 < 0 is FALSE always -- WM
-    // NEVER takes a FIFO pick.  Under use_intake_order thvm mirrors
-    // this: the queue is a pure smallest-weight heap, so the heavy
-    // oldest CP is deferred to LAST, never surfaced at a modulo window
-    // (contrast atp/select-cp-fifo-interleave, the legacy non-WM path,
-    // which DOES surface it at selection 11).  Same fixture as that
-    // test; here the FIFO dimension stays off for all 12 selections.
+    // The Waldmeister-preset parity reference is `wmcli -auto` (=
+    // FindEquationalProof = Method -> "WaldmeisterProcess"), whose
+    // Automodus StdS strategy carries `itl(mi)` = `-pq interleave=1.50`
+    // -> thresholdCP 1, moduloCP 51 (KPVerwaltung.c:1484-1485).
+    // CPdimension() takes the FIFO dimension when
+    // AnzAktivierterRE % 51 < 1 -- in particular at count 0, BEFORE the
+    // first activation.  This fixture never activates a rule (direct
+    // queue pops), so n_activated_re stays 0 and EVERY selection is a
+    // FIFO pick: CPs pop in insertion (age) order, the heavy oldest CP
+    // FIRST -- the exact opposite of a pure weight heap.
+    // THVM_ATP_FIFO_THRESHOLD=0 restores the plain-wmcli no-FIFO mode
+    // (not exercised here: the gate caches the env once per process).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     thvm_atp_set_use_intake_order(s, 1u);
     Term heavy = mk_f(mk_f(mk_a(), mk_a()), mk_f(mk_a(), mk_a()));
@@ -514,15 +516,15 @@ int main(void) {
     thvm_atp_cp_reheapify(s);
 
     Term lo = 0, ro = 0;
-    // All 11 light CPs pop first (pure weight); the heavy oldest CP is
-    // last -- the FIFO dimension never fires at selection 11.
+    // FIFO at activation-count 0: the heavy oldest CP pops FIRST.
+    CHECK(thvm_atp_select_cp(s, &lo, &ro));
+    CHECK_EQ(term_tag(lo), TAG_CTR);
+    CHECK_EQ(term_ext(lo), LAB_f);
+    // The 11 light CPs follow in insertion (age) order.
     for (u32 i = 0; i < 11; i++) {
       CHECK(thvm_atp_select_cp(s, &lo, &ro));
       CHECK_EQ(term_ext(lo), LAB_a);
     }
-    CHECK(thvm_atp_select_cp(s, &lo, &ro));
-    CHECK_EQ(term_tag(lo), TAG_CTR);
-    CHECK_EQ(term_ext(lo), LAB_f);                 // heavy CP only now
     thvm_atp_free(s);
   }
 
@@ -2036,6 +2038,7 @@ int main(void) {
       s->rhs[k] = mk_a();
       s->r_orient[k] = 1u;
       s->r_trace[k] = 100u + k;
+      s->r_uid[k] = (u32)(100u + k);
       s->n_rules++;
       atp_wmo_insert_fact(s, k);
     }
@@ -2076,18 +2079,18 @@ int main(void) {
     // old0: f(f(i(x), e), e) -> x      (lhs depth 4)
     s->lhs[0] = mk_f(mk_f(mk_i(mk_v(VAR_x)), mk_e()), mk_e());
     s->rhs[0] = mk_v(VAR_x);
-    s->r_orient[0] = 1u; s->r_trace[0] = 200u; s->n_rules++;
+    s->r_orient[0] = 1u; s->r_trace[0] = 200u; s->r_uid[0] = (u32)(200u); s->n_rules++;
     atp_wmo_insert_fact(s, 0u);
     // old1: f(i(y), e) -> y            (lhs depth 3)
     s->lhs[1] = mk_f(mk_i(mk_v(1u)), mk_e());
     s->rhs[1] = mk_v(1u);
-    s->r_orient[1] = 1u; s->r_trace[1] = 201u; s->n_rules++;
+    s->r_orient[1] = 1u; s->r_trace[1] = 201u; s->r_uid[1] = (u32)(201u); s->n_rules++;
     atp_wmo_insert_fact(s, 1u);
     // new:  i(f(a, a)) -> a            (top unifies with both i(.)s;
     // no tops overlaps: f(a,a) clashes with both old tops)
     s->lhs[2] = mk_i(mk_f(mk_a(), mk_a()));
     s->rhs[2] = mk_a();
-    s->r_orient[2] = 1u; s->r_trace[2] = 202u; s->n_rules++;
+    s->r_orient[2] = 1u; s->r_trace[2] = 202u; s->r_uid[2] = (u32)(202u); s->n_rules++;
     atp_wmo_insert_fact(s, 2u);
     AtpAddedRange added = {2u, 1u, 0u};
     u32 pushed = thvm_atp_generate_cps(s, added);
@@ -2130,7 +2133,7 @@ int main(void) {
     Term eq_rhs = mk_f(mk_a(), mk_i(mk_a()));        // KPLinks = WM-dist
     s->lhs[0] = eq_lhs;
     s->rhs[0] = eq_rhs;
-    s->r_orient[0] = 0u; s->r_trace[0] = 402u; s->n_rules++; s->n_unorient++;
+    s->r_orient[0] = 0u; s->r_trace[0] = 402u; s->r_uid[0] = (u32)(402u); s->n_rules++; s->n_unorient++;
     CHECK_EQ((u32)atp_eq_is_mono(s, 0u), 0u);
     atp_wmo_insert_fact_ex(s, 0u, /*cp_derived=*/1u);
     AtpWmOrder *w = (AtpWmOrder *)s->wmo;
@@ -2161,7 +2164,7 @@ int main(void) {
     // distinguished = stored LHS (LRSortieren surface, no flip).
     s->lhs[1] = mk_i(mk_f(mk_a(), mk_a()));
     s->rhs[1] = mk_f(mk_a(), mk_i(mk_a()));
-    s->r_orient[1] = 0u; s->r_trace[1] = 403u; s->n_rules++; s->n_unorient++;
+    s->r_orient[1] = 0u; s->r_trace[1] = 403u; s->r_uid[1] = (u32)(403u); s->n_rules++; s->n_unorient++;
     atp_wmo_insert_fact_ex(s, 1u, /*cp_derived=*/0u);
     CHECK_EQ((u32)wmo_trace_dist_rhs(w, 403u), 0u);
     // Ground-side override: a CP-derived unorientable equation with a
@@ -2176,7 +2179,7 @@ int main(void) {
     // = KPLinks), INF/Unifikation1.c:916.
     s->lhs[2] = mk_f(mk_a(), mk_i(mk_a()));          // ground
     s->rhs[2] = mk_f(mk_a(), mk_v(VAR_x));           // variable-bearing
-    s->r_orient[2] = 0u; s->r_trace[2] = 404u; s->n_rules++; s->n_unorient++;
+    s->r_orient[2] = 0u; s->r_trace[2] = 404u; s->r_uid[2] = (u32)(404u); s->n_rules++; s->n_unorient++;
     CHECK_EQ((u32)atp_eq_is_mono(s, 2u), 0u);
     atp_wmo_insert_fact_ex(s, 2u, /*cp_derived=*/1u);
     CHECK_EQ((u32)wmo_trace_dist_rhs(w, 404u), 0u);
@@ -2184,7 +2187,7 @@ int main(void) {
     // pins dist_rhs = 1 -- the ground side is the stored RHS.
     s->lhs[3] = mk_f(mk_a(), mk_v(VAR_x));           // variable-bearing
     s->rhs[3] = mk_f(mk_a(), mk_i(mk_a()));          // ground
-    s->r_orient[3] = 0u; s->r_trace[3] = 405u; s->n_rules++; s->n_unorient++;
+    s->r_orient[3] = 0u; s->r_trace[3] = 405u; s->r_uid[3] = (u32)(405u); s->n_rules++; s->n_unorient++;
     atp_wmo_insert_fact_ex(s, 3u, /*cp_derived=*/1u);
     CHECK_EQ((u32)wmo_trace_dist_rhs(w, 405u), 1u);
     thvm_atp_free(s);
@@ -2209,11 +2212,11 @@ int main(void) {
       thvm_atp_set_use_wm_trie_faithful(s, (u8)faithful);
       s->lhs[0] = mk_f(mk_a(), mk_f(mk_a(), mk_a()));   // old leaf
       s->rhs[0] = mk_a();
-      s->r_orient[0] = 1u; s->r_trace[0] = 700u; s->n_rules++;
+      s->r_orient[0] = 1u; s->r_trace[0] = 700u; s->r_uid[0] = (u32)(700u); s->n_rules++;
       atp_wmo_insert_fact(s, 0u);
       s->lhs[1] = mk_f(mk_a(), mk_f(mk_a(), mk_e()));   // splits old
       s->rhs[1] = mk_a();
-      s->r_orient[1] = 1u; s->r_trace[1] = 701u; s->n_rules++;
+      s->r_orient[1] = 1u; s->r_trace[1] = 701u; s->r_uid[1] = (u32)(701u); s->n_rules++;
       atp_wmo_insert_fact(s, 1u);
       // Both leaves must be reachable (the tree stays well-formed) and both
       // chains present -- the construction never drops a face.
@@ -2250,12 +2253,12 @@ int main(void) {
     // eq0: i(f(x,a)) = f(a,x)   (distinguished lhs = i(f(x,a)), depth 3)
     s->lhs[0] = mk_i(mk_f(mk_v(VAR_x), mk_a()));
     s->rhs[0] = mk_f(mk_a(), mk_v(VAR_x));
-    s->r_orient[0] = 0u; s->r_trace[0] = 500u; s->n_rules++; s->n_unorient++;
+    s->r_orient[0] = 0u; s->r_trace[0] = 500u; s->r_uid[0] = (u32)(500u); s->n_rules++; s->n_unorient++;
     atp_wmo_insert_fact_ex(s, 0u, /*cp_derived=*/0u);
     // eq1: i(f(a,y)) = f(y,a)   (distinguished lhs = i(f(a,y)), depth 3)
     s->lhs[1] = mk_i(mk_f(mk_a(), mk_v(1u)));
     s->rhs[1] = mk_f(mk_v(1u), mk_a());
-    s->r_orient[1] = 0u; s->r_trace[1] = 501u; s->n_rules++; s->n_unorient++;
+    s->r_orient[1] = 0u; s->r_trace[1] = 501u; s->r_uid[1] = (u32)(501u); s->n_rules++; s->n_unorient++;
     atp_wmo_insert_fact_ex(s, 1u, /*cp_derived=*/0u);
     // Both faces are mono-distinct so dist_rhs = 0; thvm dir 0 (match lhs)
     // = WM-distinguished face 0.  eq0's distinguished face was inserted
@@ -2295,7 +2298,7 @@ int main(void) {
     thvm_atp_set_use_emission_order(s, 1u);
     s->lhs[0] = mk_i(mk_f(mk_a(), mk_a()));
     s->rhs[0] = mk_f(mk_a(), mk_i(mk_a()));
-    s->r_orient[0] = 0u; s->r_trace[0] = 500u; s->n_rules++; s->n_unorient++;
+    s->r_orient[0] = 0u; s->r_trace[0] = 500u; s->r_uid[0] = (u32)(500u); s->n_rules++; s->n_unorient++;
     CHECK_EQ((u32)atp_eq_is_mono(s, 0u), 0u);
     atp_wmo_insert_fact_ex(s, 0u, /*cp_derived=*/1u);
     AtpWmOrder *w = (AtpWmOrder *)s->wmo;
@@ -2329,14 +2332,14 @@ int main(void) {
     // old: f(i(x), e) -> x   (top f(i(x),e); proper subterm i(x))
     s->lhs[0] = mk_f(mk_i(mk_v(VAR_x)), mk_e());
     s->rhs[0] = mk_v(VAR_x);
-    s->r_orient[0] = 1u; s->r_trace[0] = 300u; s->n_rules++;
+    s->r_orient[0] = 1u; s->r_trace[0] = 300u; s->r_uid[0] = (u32)(300u); s->n_rules++;
     atp_wmo_insert_fact(s, 0u);
     // new: i(f(i(a), e)) -> a:
     //   tops: subterm f(i(a),e) unifies the old TOP   -> phase A
     //   eTT:  new top i(...) unifies old's i(x)        -> phase B
     s->lhs[1] = mk_i(mk_f(mk_i(mk_a()), mk_e()));
     s->rhs[1] = mk_a();
-    s->r_orient[1] = 1u; s->r_trace[1] = 301u; s->n_rules++;
+    s->r_orient[1] = 1u; s->r_trace[1] = 301u; s->r_uid[1] = (u32)(301u); s->n_rules++;
     atp_wmo_insert_fact(s, 1u);
     AtpAddedRange added = {1u, 1u, 0u};
     u32 pushed = thvm_atp_generate_cps(s, added);
@@ -2374,11 +2377,11 @@ int main(void) {
     s->use_wm_demote = 1u;
     s->lhs[0] = mk_i(mk_a());                       // d2
     s->rhs[0] = mk_a();
-    s->r_orient[0] = 1u; s->r_trace[0] = 500u; s->n_rules++;
+    s->r_orient[0] = 1u; s->r_trace[0] = 500u; s->r_uid[0] = (u32)(500u); s->n_rules++;
     atp_wmo_insert_fact(s, 0u);
     s->lhs[1] = mk_i(mk_i(mk_i(mk_a())));           // d4
     s->rhs[1] = mk_a();
-    s->r_orient[1] = 1u; s->r_trace[1] = 501u; s->n_rules++;
+    s->r_orient[1] = 1u; s->r_trace[1] = 501u; s->r_uid[1] = (u32)(501u); s->n_rules++;
     atp_wmo_insert_fact(s, 1u);
     // Leaf list: the d2 leaf (500) precedes the d4 leaf (501).  Oriented
     // rules carry only face 0, so the reduced side (LHS = thvm side 0) maps
@@ -2418,12 +2421,12 @@ int main(void) {
     // eq A (trace 700): f(a,a) = i(a)        -- reverse face d1
     s->lhs[0] = mk_f(mk_a(), mk_a());
     s->rhs[0] = mk_i(mk_a());
-    s->r_orient[0] = 0u; s->r_trace[0] = 700u; s->n_rules++; s->n_unorient++;
+    s->r_orient[0] = 0u; s->r_trace[0] = 700u; s->r_uid[0] = (u32)(700u); s->n_rules++; s->n_unorient++;
     atp_wmo_insert_fact(s, 0u);
     // eq B (trace 701): f(a,a) = i(i(i(a)))  -- reverse face d3
     s->lhs[1] = mk_f(mk_a(), mk_a());
     s->rhs[1] = mk_i(mk_i(mk_i(mk_a())));
-    s->r_orient[1] = 0u; s->r_trace[1] = 701u; s->n_rules++; s->n_unorient++;
+    s->r_orient[1] = 0u; s->r_trace[1] = 701u; s->r_uid[1] = (u32)(701u); s->n_rules++; s->n_unorient++;
     atp_wmo_insert_fact(s, 1u);
     // Reduced side = RHS (thvm side 1, the reverse face): the d1 reverse
     // leaf precedes the d3 reverse leaf, so 700 drains before 701 -- even
@@ -2470,6 +2473,7 @@ int main(void) {
       s->rhs[k] = mk_a();
       s->r_orient[k] = 1u;
       s->r_trace[k] = 1000u + k;
+      s->r_uid[k] = (u32)(1000u + k);
       s->n_rules++;
       atp_wmo_insert_fact(s, k);
     }
@@ -2487,6 +2491,7 @@ int main(void) {
     s->rhs[nf] = mk_v(VAR_x);
     s->r_orient[nf] = 1u;
     s->r_trace[nf] = 1000u + nf;
+    s->r_uid[nf] = (u32)(1000u + nf);
     s->n_rules++;
     atp_wmo_insert_fact(s, nf);
     AtpAddedRange added = {nf, 1u, 0u};
@@ -2525,7 +2530,7 @@ int main(void) {
     // Stored rule: f(f(x,x), x) -> a  (the repeated-variable partner leaf).
     s->lhs[0] = mk_f(mk_f(mk_v(VAR_x), mk_v(VAR_x)), mk_v(VAR_x));
     s->rhs[0] = mk_a();
-    s->r_orient[0] = 1u; s->r_trace[0] = 700u; s->n_rules++;
+    s->r_orient[0] = 1u; s->r_trace[0] = 700u; s->r_uid[0] = (u32)(700u); s->n_rules++;
     atp_wmo_insert_fact(s, 0u);
     AtpWmOrder *w0 = (AtpWmOrder *)s->wmo;
     u32 misses_before = w0->rank_misses;
@@ -2533,7 +2538,7 @@ int main(void) {
     // stored rule's LHS only by collapsing y=z=w onto the leaf's repeated x.
     s->lhs[1] = mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u));
     s->rhs[1] = mk_a();
-    s->r_orient[1] = 1u; s->r_trace[1] = 701u; s->n_rules++;
+    s->r_orient[1] = 1u; s->r_trace[1] = 701u; s->r_uid[1] = (u32)(701u); s->n_rules++;
     atp_wmo_insert_fact(s, 1u);
     AtpAddedRange added = {1u, 1u, 0u};
     (void)thvm_atp_generate_cps(s, added);
@@ -2557,13 +2562,13 @@ int main(void) {
     // slot 0: an orientable rule (lives in the rule tree, tree 0).
     s->lhs[0] = mk_i(mk_a());
     s->rhs[0] = mk_a();
-    s->r_orient[0] = 1u; s->r_trace[0] = 600u; s->n_rules++;
+    s->r_orient[0] = 1u; s->r_trace[0] = 600u; s->r_uid[0] = (u32)(600u); s->n_rules++;
     atp_wmo_insert_fact(s, 0u);
     // slot 1: an unorientable equation (lives in the equation tree, tree
     // 1).  Asymmetric so it is non-mono (distinguished face = stored lhs).
     s->lhs[1] = mk_f(mk_i(mk_a()), mk_a());
     s->rhs[1] = mk_f(mk_a(), mk_i(mk_a()));
-    s->r_orient[1] = 0u; s->r_trace[1] = 601u; s->n_rules++; s->n_unorient++;
+    s->r_orient[1] = 0u; s->r_trace[1] = 601u; s->r_uid[1] = (u32)(601u); s->n_rules++; s->n_unorient++;
     atp_wmo_insert_fact(s, 1u);
     u32 key_rule = atp_wmo_victim_drain_key(s, 600u, 0u);
     u32 key_eq   = atp_wmo_victim_drain_key(s, 601u, 0u);
@@ -2573,7 +2578,7 @@ int main(void) {
     thvm_atp_free(s);
   }
 
-  TEST_BEGIN("atp/wm-emission-order-split-enclosing-exit-newer-first");
+  TEST_BEGIN("atp/wm-emission-order-split-enclosing-exit-after-survivor");
   {
     // BooleanAxioms OrAssociativity @300 polarity.  When a SHORTER new
     // leaf splits a LONGER existing leaf at a position whose enclosing
@@ -2606,6 +2611,7 @@ int main(void) {
       s->rhs[k] = mk_v(0u);
       s->r_orient[k] = 1u;
       s->r_trace[k] = traces[k];
+      s->r_uid[k] = (u32)(traces[k]);
       s->n_rules++;
       atp_wmo_insert_fact(s, k);
     }
@@ -2628,8 +2634,14 @@ int main(void) {
       for (u32 c = 0; c < hl->n_chain; c++) {
         if (hl->chain[c].trace == 768u) head_is_t768 = 1u;
       }
-      CHECK_EQ(head_is_t768, 1u);
-      // t768's parallel must be strictly ahead of t274's enclosing jump.
+      // WM ground truth (WM_JUMPDUMP on wmcli -auto, 2026-07-02): an
+      // AltesBlattPolieren split parallel ALWAYS splices AFTER the
+      // survivor entry (DSBaumOperationen.c :527-530); the old
+      // newer-first expectation here encoded the plain `wmcli -a 4`
+      // era's local-predicate head exception, which mis-ordered the
+      // OrAssociativity 655/658 twin exits under -auto.  t768's
+      // parallel therefore sits AFTER t274's enclosing jump.
+      CHECK_EQ(head_is_t768, 0u);
       u32 idx = 0, at_768 = 0xffffffffu, at_274 = 0xffffffffu;
       for (WmoEntry *e = d2->exits; e != NULL; e = e->next, idx++) {
         if (!e->ziel_leaf) continue;
@@ -2641,7 +2653,7 @@ int main(void) {
       }
       CHECK(at_768 != 0xffffffffu);
       CHECK(at_274 != 0xffffffffu);
-      CHECK(at_768 < at_274);   // newer/shorter consulted first
+      CHECK(at_274 < at_768);   // survivor first, parallel after
     }
     thvm_atp_free(s);
   }
@@ -2668,6 +2680,7 @@ int main(void) {
       s->rhs[k] = mk_v(0u);
       s->r_orient[k] = 1u;
       s->r_trace[k] = traces[k];
+      s->r_uid[k] = (u32)(traces[k]);
       s->n_rules++;
       atp_wmo_insert_fact(s, k);
     }
@@ -2739,6 +2752,7 @@ int main(void) {
       s->rhs[k] = mk_v(0u);
       s->r_orient[k] = 1u;
       s->r_trace[k] = traces[k];
+      s->r_uid[k] = (u32)(traces[k]);
       s->n_rules++;
       atp_wmo_insert_fact(s, k);
     }
@@ -2800,6 +2814,7 @@ int main(void) {
       s->rhs[k] = mk_a();
       s->r_orient[k] = 1u;
       s->r_trace[k] = 800u + k;
+      s->r_uid[k] = (u32)(800u + k);
       s->n_rules++;
       atp_wmo_insert_fact(s, k);
     }
@@ -2861,6 +2876,7 @@ int main(void) {
       s->rhs[k] = mk_a();
       s->r_orient[k] = 1u;
       s->r_trace[k] = 810u + k;
+      s->r_uid[k] = (u32)(810u + k);
       s->n_rules++;
       atp_wmo_insert_fact(s, k);
     }
@@ -2918,6 +2934,7 @@ int main(void) {
       s->rhs[k] = mk_a();
       s->r_orient[k] = 1u;
       s->r_trace[k] = 820u + k;
+      s->r_uid[k] = (u32)(820u + k);
       s->n_rules++;
       atp_wmo_insert_fact(s, k);
     }
@@ -2975,7 +2992,8 @@ int main(void) {
       s->lhs[k] = lhss[k];
       s->rhs[k] = mk_a();
       s->r_orient[k] = 1u;
-      s->r_trace[k] = 700u + k;   // S1=700 S2=701 R7=702 R9=703
+      s->r_trace[k] = 700u + k; s->r_uid[k] = (u32)(700u + k);   // S1=700 S2=701 R7=702 R9=703
+      s->r_uid[k] = (u32)(700u + k);
       s->n_rules++;
       atp_wmo_insert_fact(s, k);
     }
@@ -3069,6 +3087,7 @@ int main(void) {
       s->rhs[k] = mk_a();
       s->r_orient[k] = 1u;
       s->r_trace[k] = 700u + k;
+      s->r_uid[k] = (u32)(700u + k);
       s->n_rules++;
       atp_wmo_insert_fact(s, k);
     }
@@ -3587,6 +3606,9 @@ int main(void) {
     s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
                                    ATP_TRACE_NONE, ATP_TRACE_NONE,
                                    s->lhs[0], s->rhs[0]);
+    s->r_uid[0] = (u32)(atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]));
     s->n_rules = 1;
 
     // Orient and add r1: f(x, e) -> a.  orient_and_add itself
@@ -3601,6 +3623,9 @@ int main(void) {
     s->r_trace[1] = atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
                                    ATP_TRACE_NONE,
                                    s->lhs[1], s->rhs[1]);
+    s->r_uid[1] = (u32)(atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
+                                   ATP_TRACE_NONE,
+                                   s->lhs[1], s->rhs[1]));
 
     u32 pushed = thvm_atp_generate_cps(s, added);
     CHECK(pushed >= 1u);
@@ -3646,6 +3671,9 @@ int main(void) {
     s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
                                    ATP_TRACE_NONE, ATP_TRACE_NONE,
                                    s->lhs[0], s->rhs[0]);
+    s->r_uid[0] = (u32)(atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]));
     s->n_rules = 1;
 
     Term lhs1 = mk_f(mk_v(VAR_x), mk_e());
@@ -3655,6 +3683,9 @@ int main(void) {
     s->r_trace[1] = atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
                                    ATP_TRACE_NONE,
                                    s->lhs[1], s->rhs[1]);
+    s->r_uid[1] = (u32)(atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
+                                   ATP_TRACE_NONE,
+                                   s->lhs[1], s->rhs[1]));
 
     u32 pushed = thvm_atp_generate_cps(s, added);
     CHECK(pushed >= 1u);
@@ -3744,11 +3775,17 @@ int main(void) {
     s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
                                    ATP_TRACE_NONE, ATP_TRACE_NONE,
                                    s->lhs[0], s->rhs[0]);
+    s->r_uid[0] = (u32)(atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]));
     s->lhs[1] = mk_f(mk_i(mk_v(VAR_x)), mk_e());
     s->rhs[1] = mk_i(mk_a());
     s->r_trace[1] = atp_trace_push(s, TRACE_AXIOM,
                                    ATP_TRACE_NONE, ATP_TRACE_NONE,
                                    s->lhs[1], s->rhs[1]);
+    s->r_uid[1] = (u32)(atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[1], s->rhs[1]));
     s->n_rules = 2;
 
     AtpAddedRange added = thvm_atp_orient_and_add(
@@ -3756,6 +3793,9 @@ int main(void) {
     s->r_trace[2] = atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
                                    ATP_TRACE_NONE,
                                    s->lhs[2], s->rhs[2]);
+    s->r_uid[2] = (u32)(atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
+                                   ATP_TRACE_NONE,
+                                   s->lhs[2], s->rhs[2]));
     u32 pushed = thvm_atp_generate_cps(s, added);
     CHECK(pushed >= 2u);
     CHECK_EQ(s->n_cps, pushed);            // no queue-subsume drops
@@ -3846,6 +3886,9 @@ int main(void) {
     s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
                                    ATP_TRACE_NONE, ATP_TRACE_NONE,
                                    s->lhs[0], s->rhs[0]);
+    s->r_uid[0] = (u32)(atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]));
     s->n_rules = 1;
 
     Term a_l  = mk_f(mk_e(), mk_a());
@@ -3946,6 +3989,9 @@ int main(void) {
     s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
                                    ATP_TRACE_NONE, ATP_TRACE_NONE,
                                    s->lhs[0], s->rhs[0]);
+    s->r_uid[0] = (u32)(atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]));
     s->n_rules = 1;
     // A second trace entry to play the dead parent (no rule attached;
     // the orphan test only reads trace liveness).
@@ -3998,6 +4044,9 @@ int main(void) {
     s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
                                    ATP_TRACE_NONE, ATP_TRACE_NONE,
                                    s->lhs[0], s->rhs[0]);
+    s->r_uid[0] = (u32)(atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]));
     s->n_rules = 1;
 
     thvm_atp_cp_set(s, 0, mk_f(mk_e(), mk_a()), mk_a());
@@ -4076,6 +4125,9 @@ int main(void) {
     s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
                                    ATP_TRACE_NONE, ATP_TRACE_NONE,
                                    s->lhs[0], s->rhs[0]);
+    s->r_uid[0] = (u32)(atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]));
     s->n_rules = 1;
     // bound = base + slope * deepest-rule-LHS = 1 + 2 * 3 = 7.
     atp_auto_maxw_recompute(s);
@@ -4396,9 +4448,11 @@ int main(void) {
     s->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
     s->rhs[0] = mk_v(VAR_x);
     s->r_trace[0] = ATP_TRACE_NONE;
+    s->r_uid[0] = (u32)(ATP_TRACE_NONE);
     s->lhs[1] = mk_f(mk_e(), mk_v(VAR_x));
     s->rhs[1] = mk_v(VAR_x);
     s->r_trace[1] = ATP_TRACE_NONE;
+    s->r_uid[1] = (u32)(ATP_TRACE_NONE);
     s->n_rules = 2;
 
     AtpAddedRange added = {1, 1, 0};
@@ -4420,9 +4474,11 @@ int main(void) {
     s->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
     s->rhs[0] = mk_v(VAR_x);
     s->r_trace[0] = ATP_TRACE_NONE;
+    s->r_uid[0] = (u32)(ATP_TRACE_NONE);
     s->lhs[1] = mk_f(mk_v(VAR_x), mk_e());
     s->rhs[1] = mk_a();
     s->r_trace[1] = ATP_TRACE_NONE;
+    s->r_uid[1] = (u32)(ATP_TRACE_NONE);
     s->n_rules = 2;
 
     AtpAddedRange added = {1, 1, 0};
@@ -4461,6 +4517,7 @@ int main(void) {
     s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
     s->rhs[0] = mk_v(VAR_x);
     s->r_trace[0] = ATP_TRACE_NONE;
+    s->r_uid[0] = (u32)(ATP_TRACE_NONE);
     s->n_rules = 1;
 
     AtpAddedRange added = {0, 1, 0};
@@ -4484,9 +4541,11 @@ int main(void) {
     s->lhs[0] = mk_f(mk_a(),         mk_v(VAR_x));
     s->rhs[0] = mk_a();
     s->r_trace[0] = ATP_TRACE_NONE;
+    s->r_uid[0] = (u32)(ATP_TRACE_NONE);
     s->lhs[1] = mk_f(mk_v(VAR_x),    mk_e());
     s->rhs[1] = mk_e();
     s->r_trace[1] = ATP_TRACE_NONE;
+    s->r_uid[1] = (u32)(ATP_TRACE_NONE);
     s->n_rules = 2;
 
     // Manually invoke the connectedness check on (a, e) under
@@ -5973,7 +6032,9 @@ int main(void) {
       u32 t1  = atp_trace_push(s, TRACE_ORIENT, ATP_TRACE_NONE,
                                ATP_TRACE_NONE, s->lhs[1], s->rhs[1]);
       s->r_trace[0] = t0;
+      s->r_uid[0] = (u32)(t0);
       s->r_trace[1] = t1;
+      s->r_uid[1] = (u32)(t1);
       u32 tcp = atp_trace_push(s, TRACE_CP, t0, t1, MK_BH(x, y), MK_BH(y, x));
       CHECK_EQ(atp_cp_is_orphan(s, tcp), 0);
       thvm_atp_set_use_bwd_ground_join(s, 1u);
@@ -6005,6 +6066,7 @@ int main(void) {
       u32 t0 = atp_trace_push(s, TRACE_ORIENT, ATP_TRACE_NONE,
                               ATP_TRACE_NONE, s->lhs[0], s->rhs[0]);
       s->r_trace[0] = t0;
+      s->r_uid[0] = (u32)(t0);
       thvm_atp_set_use_bwd_ground_join(s, 1u);
       atp_bwd_ground_join_walk(s, 1u, 2u);
       CHECK_EQ(s->r_gj_status[0], ATP_GJ_ST_FAILED);

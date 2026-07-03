@@ -213,11 +213,23 @@ static void atp_cp_ft_transfer_out(AtpState *s, u32 i,
 static u8 atp_cp_trivially_joinable_ft(AtpState *s,
                                        AtpFtCell **lhs,
                                        AtpFtCell **rhs) {
+  // Detail-tier timing (THVM_ATP_PROFILE=2, push-loop calls only):
+  // charges the fast-path/verdict ft_eq to g_atp_pushn_us_eq and the
+  // two normalize calls to g_atp_pushn_us_norm -- the CPQ sibling of
+  // the split in atp_cp_trivially_joinable (_.c).
+  int _dl = (g_atp_phase_detail && g_atp_pushn_active);
+  u64 _dt = _dl ? atp_now_us() : 0;
+#define PUSHN_TICK(counter) \
+  do { if (_dl) { u64 _n = atp_now_us(); (counter) += _n - _dt; _dt = _n; } } while (0)
   // Syntactic-equality fast-path: degenerate overlaps where the CP's
   // two sides are already equal are trivially joined; skip both
   // normalize calls.  ft_eq early-exits on the first symbol mismatch
   // so the overhead is sub-microsecond when sides differ.
-  if (ft_eq(*lhs, *rhs)) return 1u;
+  if (ft_eq(*lhs, *rhs)) {
+    PUSHN_TICK(g_atp_pushn_us_eq);
+    return 1u;
+  }
+  PUSHN_TICK(g_atp_pushn_us_eq);
   const u32 NORM_CAP = 64u;
   // Generation-time CP treatment = WM KPBehandelt under `-kg "r"`:
   // doR only -- unorientable equations never rewrite here (see the
@@ -226,7 +238,11 @@ static u8 atp_cp_trivially_joinable_ft(AtpState *s,
   AtpFtCell *r = atp_rules_only_normalize_ft(s, *rhs, NORM_CAP);
   *lhs = l;
   *rhs = r;
-  return (u8)ft_eq(l, r);
+  PUSHN_TICK(g_atp_pushn_us_norm);
+  u8 joined = (u8)ft_eq(l, r);
+  PUSHN_TICK(g_atp_pushn_us_eq);
+  return joined;
+#undef PUSHN_TICK
 }
 
 // --- Slot move (backfill) --------------------------------------------

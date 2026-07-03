@@ -269,55 +269,35 @@ static int atp_wmi_eq_term_cmp(const AtpWmiStats *st,
   return c;
 }
 
-// The full SpezNormierung pipeline over the queued axiom set + the
-// registered goal conjuncts, followed by the Initial = Act_ultimate
-// restamp.  Runs once, from thvm_atp_step's first call (gated on
-// use_intake_order); every later enqueue is a derived CP and takes
-// the normal classification.
-static void atp_wm_intake_canonicalize(AtpState *s) {
-  if (s == NULL || s->n_cps == 0u) return;
-
-  // 1. Collect the queued TRACE_AXIOM rows (slot + the var-normalized
-  //    original pair off the trace entry, children 2/3).
-  u32 cap = s->n_cps;
-  u32  *slots = (u32 *)malloc(cap * sizeof(u32));
-  Term *ls    = (Term *)malloc(cap * sizeof(Term));
-  Term *rs    = (Term *)malloc(cap * sizeof(Term));
-  Term *cls   = (Term *)malloc(cap * sizeof(Term));  // canonical (LR-ordered) sides
-  Term *crs   = (Term *)malloc(cap * sizeof(Term));
-  u32 **vmaps = (u32 **)malloc(cap * sizeof(u32 *));
-  u32  *order = (u32 *)malloc(cap * sizeof(u32));
-  u32  *seqs  = (u32 *)malloc(cap * sizeof(u32));
-  if (slots == NULL || ls == NULL || rs == NULL || cls == NULL
-      || crs == NULL || vmaps == NULL || order == NULL || seqs == NULL) {
-    fprintf(stderr, "atp_wm_intake_canonicalize: malloc failed\n");
+// SpezNormierung steps 2-5 as a standalone computation over explicit
+// axiom / goal term arrays: symbol statistics, canonical symbol order,
+// per-equation LR side order, and the equation sort.  Fills
+// order_out[r] = input index of the axiom at canonical rank r, and
+// swap_out[i] = 1 iff axiom i's canonical (LR-sorted) form swaps its
+// input sides.  Shared by the engine-level intake hook below and the
+// WL-exposed loader surface (thvm_wl_atp_wm_intake_order), so the
+// TFindProof encoder canonicalizes with the SAME comparators the
+// engine validates selection parity with.
+fn void thvm_atp_wm_intake_order(const Term *ls, const Term *rs, u32 count,
+                                 const Term *gls, const Term *grs,
+                                 u32 n_goals, u32 *order_out, u8 *swap_out) {
+  if (count == 0u) return;
+  Term *cls   = (Term *)malloc(count * sizeof(Term));  // canonical (LR-ordered) sides
+  Term *crs   = (Term *)malloc(count * sizeof(Term));
+  u32 **vmaps = (u32 **)malloc(count * sizeof(u32 *));
+  AtpWmiStats *st = (AtpWmiStats *)calloc(1u, sizeof(AtpWmiStats));
+  if (cls == NULL || crs == NULL || vmaps == NULL || st == NULL) {
+    fprintf(stderr, "thvm_atp_wm_intake_order: malloc failed\n");
     exit(1);
   }
-  u32 count = 0u;
-  for (u32 i = 0; i < s->n_cps; i++) {
-    u32 tr = s->cp_trace[i];
-    if (tr == ATP_TRACE_NONE || tr >= s->n_trace) continue;
-    Term te = s->trace[tr];
-    if (term_tag(te) != TAG_CTR || term_ext(te) != TRACE_AXIOM) continue;
-    slots[count] = i;
-    ls[count]    = term_ctr_at(te, 2);
-    rs[count]    = term_ctr_at(te, 3);
-    count++;
-  }
-  if (count == 0u) goto done;
 
   // 2. SymboldatenSammeln over equations (= the axioms) + conclusions
   //    (= the goal conjuncts), ORIGINAL sides.
-  AtpWmiStats *st = (AtpWmiStats *)calloc(1u, sizeof(AtpWmiStats));
-  if (st == NULL) {
-    fprintf(stderr, "atp_wm_intake_canonicalize: calloc failed\n");
-    exit(1);
-  }
-  for (u32 g = 0; g < s->n_goals; g++) {
-    atp_wmi_occ(st, s->goals_lhs[g], st->occ_goal);
-    atp_wmi_occ(st, s->goals_rhs[g], st->occ_goal);
-    atp_wmi_pos(st, s->goals_lhs[g], st->pos_goal, 1u, 0u);
-    atp_wmi_pos(st, s->goals_rhs[g], st->pos_goal, 1u, 0u);
+  for (u32 g = 0; g < n_goals; g++) {
+    atp_wmi_occ(st, gls[g], st->occ_goal);
+    atp_wmi_occ(st, grs[g], st->occ_goal);
+    atp_wmi_pos(st, gls[g], st->pos_goal, 1u, 0u);
+    atp_wmi_pos(st, grs[g], st->pos_goal, 1u, 0u);
   }
   for (u32 e = 0; e < count; e++) {
     atp_wmi_occ(st, ls[e], st->occ_eq);
@@ -326,17 +306,17 @@ static void atp_wm_intake_canonicalize(AtpState *s) {
     atp_wmi_pos(st, rs[e], st->pos_eq, 1u, 0u);
   }
   atp_wmi_kombi(st, ls, rs, count, st->kk_eq, st->kk_eq_one, st->kk_eq_opp);
-  if (s->n_goals > 0u) {
-    atp_wmi_kombi(st, s->goals_lhs, s->goals_rhs, s->n_goals,
+  if (n_goals > 0u) {
+    atp_wmi_kombi(st, gls, grs, n_goals,
                   st->kk_goal, st->kk_goal_one, st->kk_goal_opp);
   }
   for (u32 e = 0; e < count; e++) {
     atp_wmi_finale(st, ls[e], 0u);
     atp_wmi_finale(st, rs[e], 0u);
   }
-  for (u32 g = 0; g < s->n_goals; g++) {
-    atp_wmi_finale(st, s->goals_lhs[g], 0u);
-    atp_wmi_finale(st, s->goals_rhs[g], 0u);
+  for (u32 g = 0; g < n_goals; g++) {
+    atp_wmi_finale(st, gls[g], 0u);
+    atp_wmi_finale(st, grs[g], 0u);
   }
 
   // 3. SymbolReihenfolgeFestlegen: stable bubble sort of the present
@@ -364,14 +344,16 @@ static void atp_wm_intake_canonicalize(AtpState *s) {
   //    per-equation variable first-occurrence ranks on the canonical
   //    pair.  Key-side only -- the STORED pair keeps its input sides.
   for (u32 e = 0; e < count; e++) {
-    if (atp_wmi_lr_cmp(st, ls[e], rs[e]) > 0) {
+    u8 sw = atp_wmi_lr_cmp(st, ls[e], rs[e]) > 0 ? 1u : 0u;
+    if (swap_out != NULL) swap_out[e] = sw;
+    if (sw) {
       cls[e] = rs[e]; crs[e] = ls[e];
     } else {
       cls[e] = ls[e]; crs[e] = rs[e];
     }
     vmaps[e] = (u32 *)malloc(ATP_WMI_MAX_VARS * sizeof(u32));
     if (vmaps[e] == NULL) {
-      fprintf(stderr, "atp_wm_intake_canonicalize: malloc failed\n");
+      fprintf(stderr, "thvm_atp_wm_intake_order: malloc failed\n");
       exit(1);
     }
     for (u32 v = 0; v < ATP_WMI_MAX_VARS; v++) vmaps[e][v] = 0xFFFFFFFFu;
@@ -382,17 +364,61 @@ static void atp_wm_intake_canonicalize(AtpState *s) {
 
   // 5. GleichungenSortieren: stable bubble sort by canonical LHS,
   //    ties by canonical RHS (swap on strict Groesser only).
-  for (u32 e = 0; e < count; e++) order[e] = e;
+  for (u32 e = 0; e < count; e++) order_out[e] = e;
   for (u32 i = 1u; i < count; i++) {
     for (u32 j = 0u; j + i < count; j++) {
-      u32 a = order[j], b = order[j + 1u];
+      u32 a = order_out[j], b = order_out[j + 1u];
       int c = atp_wmi_eq_term_cmp(st, cls[a], vmaps[a], cls[b], vmaps[b]);
       if (c == 0) {
         c = atp_wmi_eq_term_cmp(st, crs[a], vmaps[a], crs[b], vmaps[b]);
       }
-      if (c > 0) { order[j] = b; order[j + 1u] = a; }
+      if (c > 0) { order_out[j] = b; order_out[j + 1u] = a; }
     }
   }
+
+  for (u32 e = 0; e < count; e++) free(vmaps[e]);
+  free(cls); free(crs); free(vmaps); free(st);
+}
+
+// The full SpezNormierung pipeline over the queued axiom set + the
+// registered goal conjuncts, followed by the Initial = Act_ultimate
+// restamp.  Runs once, from thvm_atp_step's first call (gated on
+// use_intake_order); every later enqueue is a derived CP and takes
+// the normal classification.
+static void atp_wm_intake_canonicalize(AtpState *s) {
+  if (s == NULL || s->n_cps == 0u) return;
+
+  // 1. Collect the queued TRACE_AXIOM rows (slot + the var-normalized
+  //    original pair off the trace entry, children 2/3).
+  u32 cap = s->n_cps;
+  u32  *slots = (u32 *)malloc(cap * sizeof(u32));
+  Term *ls    = (Term *)malloc(cap * sizeof(Term));
+  Term *rs    = (Term *)malloc(cap * sizeof(Term));
+  u32  *order = (u32 *)malloc(cap * sizeof(u32));
+  u32  *seqs  = (u32 *)malloc(cap * sizeof(u32));
+  if (slots == NULL || ls == NULL || rs == NULL
+      || order == NULL || seqs == NULL) {
+    fprintf(stderr, "atp_wm_intake_canonicalize: malloc failed\n");
+    exit(1);
+  }
+  u32 count = 0u;
+  for (u32 i = 0; i < s->n_cps; i++) {
+    u32 tr = s->cp_trace[i];
+    if (tr == ATP_TRACE_NONE || tr >= s->n_trace) continue;
+    Term te = s->trace[tr];
+    if (term_tag(te) != TAG_CTR || term_ext(te) != TRACE_AXIOM) continue;
+    slots[count] = i;
+    ls[count]    = term_ctr_at(te, 2);
+    rs[count]    = term_ctr_at(te, 3);
+    count++;
+  }
+  if (count == 0u) goto done;
+
+  // 2-5. SpezNormierung order over the collected pairs + the state's
+  //      goal conjuncts (swap flags feed only the sort keys here; the
+  //      stored pairs keep their input sides).
+  thvm_atp_wm_intake_order(ls, rs, count, s->goals_lhs, s->goals_rhs,
+                           s->n_goals, order, NULL);
 
   // 6. Intake restamp: the participating slots' existing cp_seq values
   //    are redistributed in canonical order (rank r gets the r-th
@@ -422,9 +448,6 @@ static void atp_wm_intake_canonicalize(AtpState *s) {
 #endif
   atp_cp_floyd_only(s);
 
-  for (u32 e = 0; e < count; e++) free(vmaps[e]);
-  free(st);
 done:
-  free(slots); free(ls); free(rs); free(cls); free(crs);
-  free(vmaps); free(order); free(seqs);
+  free(slots); free(ls); free(rs); free(order); free(seqs);
 }

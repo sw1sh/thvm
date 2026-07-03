@@ -867,6 +867,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // engine byte-identical).
   mint wm_mixmost = MArgument_getInteger(args[42]);
   thvm_atp_set_use_mixmost_nf(atp, (u8)(wm_mixmost != 0));
+  if (getenv("THVM_ATP_GOAL_NF_DEBUG")) {
+    fprintf(stderr, "[run_proof] entry: mixmost_arg=%lld record_norm_arg=%lld n_goals=%d\n",
+            (long long)wm_mixmost, (long long)MArgument_getInteger(args[18]),
+            (int)atp->n_goals);
+  }
   // === Waldmeister CP-generation filter knobs (KPFilterErgaenzen,
   // INF/Unifikation1.c:1947-2014).  All default OFF (the unconfigured .pr
   // Orkus run), so the engine + the "Waldmeister"* presets stay byte-
@@ -1268,6 +1273,20 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   struct timespec _tp0, _tp1;
   if (g_phase) clock_gettime(CLOCK_MONOTONIC, &_tp0);
   AtpStatus st = thvm_atp_run(atp);
+  // Post-run Cheney pass: a PROVED saturation leaves the arena full of
+  // per-step garbage (OrAssociativity: 268M cells allocated, live set
+  // far smaller with the off-heap trace) and the extraction below
+  // allocates WL-bound Terms -- without a collect it dies at the very
+  // end (the long-standing post-PROVED extraction exhaustion).
+  thvm_atp_gc_collect(atp);
+  // Post-PROVED, wrapper-only proof-cone re-derivation: with RecordNorm
+  // off, goal-family ORIENT / SIMPLIFY entries carry unrecorded engine
+  // normalizations the WL lift cannot BFS-bridge (retired rules,
+  // ordered grounding steps).  Replay them over the historical rule
+  // set R(ti) and splice NORM_STEP chains into the trace BEFORE
+  // materialization, so resolveTrace inherits the chain instead of
+  // failing at emitNorm.no-rewrite-path.  Zero engine-loop impact.
+  if (st == ATP_PROVED) thvm_atp_record_goal_cone(atp);
   if (g_phase) {
     clock_gettime(CLOCK_MONOTONIC, &_tp1);
     double d = (_tp1.tv_sec - _tp0.tv_sec) + (_tp1.tv_nsec - _tp0.tv_nsec)/1e9;
@@ -1295,6 +1314,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
 #endif
   thvm_atp_abort_hook = NULL;
   g_atp_abort_libData = NULL;
+  fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
   if (st == ATP_ABORTED) { thvm_atp_free(atp); return LIBRARY_FUNCTION_ERROR; }
 
   // Rebuild the off-heap packed proof-trace (THVM_ATP_TRACE_PACK) into
@@ -1533,6 +1553,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_all_witnesses(
   const struct st_WolframNumericArrayLibrary_Functions *naf
     = libData->numericarrayLibraryFunctions;
   if (naf->MNumericArray_getType(na) != MNumericArray_Type_Bit64) {
+    fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
     return LIBRARY_FUNCTION_ERROR;
   }
   mint flat_len = naf->MNumericArray_getFlattenedLength(na);
@@ -1541,13 +1562,16 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_all_witnesses(
   // Witness enumeration narrows ONE conjecture pair: n_goals must be 1.
   AtpWire wire;
   if (!atp_wire_parse(data, flat_len, &wire) || wire.n_goals != 1u) {
+    fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
     return LIBRARY_FUNCTION_ERROR;
   }
 
   mint n_witness          = libData->MTensor_getFlattenedLength(witness_t);
   const mint *witness_ids = libData->MTensor_getIntegerData(witness_t);
 
+  fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
   if ((u32)max_label >= ATP_WL_CFG_MAX_LABELS) return LIBRARY_FUNCTION_ERROR;
+  fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
   if (max_witnesses <= 0 || max_witnesses > 64) return LIBRARY_FUNCTION_ERROR;
 
   static u32 wl_weights3[ATP_WL_CFG_MAX_LABELS];
@@ -1563,6 +1587,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_all_witnesses(
   wl_kbo3.var_weight = 1;
 
   AtpState *atp = thvm_atp_init(&wl_kbo3, (u32)max_steps);
+  fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
   if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
 
   if (!atp_wire_install_axioms(atp, &wire)) {
@@ -2095,6 +2120,85 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_cp_graph(WolframLibraryData libData,
   for (u32 i = 0; i < n_nodes; i++) o[at++] = (double)g->node_label[i];
 
   free(g);
+  MArgument_setMNumericArray(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+// === Waldmeister loader canonicalization (SpezNormierung) ===========
+//
+// thvm's analog of WM's spec loader running SN_SpezifikationAuswerten
+// BEFORE completion: given the packed problem (the same wire
+// thvm_wl_atp_run_proof takes), compute the canonical intake
+// permutation + per-axiom LR swap flags via thvm_atp_wm_intake_order
+// (src/atp/wm_intake.c -- the SAME comparators the engine-level
+// intake hook uses).  The TFindProof encoder applies the permutation
+// so the trace, proof lift, and rendered ProofObject present axioms
+// in WM's order -- matching FindEquationalProof / the external
+// Method -> "WaldmeisterProcess" protocol.
+//
+//   args[0] = packed problem NumericArray (Int64, atp wire layout).
+//
+// Output: Int64 NumericArray [n_ax, order_0..order_{n-1},
+// swap_0..swap_{n-1}] with order values 0-based.
+EXTERN_C DLLEXPORT int thvm_wl_atp_wm_intake_order(WolframLibraryData libData,
+                                                   mint argc, MArgument *args,
+                                                   MArgument res) {
+  (void)argc;
+  MNumericArray na = MArgument_getMNumericArray(args[0]);
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+    = libData->numericarrayLibraryFunctions;
+  if (naf->MNumericArray_getType(na) != MNumericArray_Type_Bit64) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  mint flat_len = naf->MNumericArray_getFlattenedLength(na);
+  const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
+
+  AtpWire wire;
+  if (!atp_wire_parse(data, flat_len, &wire)) return LIBRARY_FUNCTION_ERROR;
+
+  u32 n = wire.n_ax;
+  Term *ls    = (Term *)malloc((size_t)(n ? n : 1u) * sizeof(Term));
+  Term *rs    = (Term *)malloc((size_t)(n ? n : 1u) * sizeof(Term));
+  Term *gls   = (Term *)malloc((size_t)(wire.n_goals ? wire.n_goals : 1u) * sizeof(Term));
+  Term *grs   = (Term *)malloc((size_t)(wire.n_goals ? wire.n_goals : 1u) * sizeof(Term));
+  u32  *order = (u32 *)malloc((size_t)(n ? n : 1u) * sizeof(u32));
+  u8   *swaps = (u8 *)malloc((size_t)(n ? n : 1u) * sizeof(u8));
+  if (ls == NULL || rs == NULL || gls == NULL || grs == NULL
+      || order == NULL || swaps == NULL) {
+    free(ls); free(rs); free(gls); free(grs); free(order); free(swaps);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  for (u32 i = 0; i < n; i++) {
+    ls[i] = atp_wire_ax_lhs(&wire, i);
+    rs[i] = atp_wire_ax_rhs(&wire, i);
+  }
+  u32 n_goals = 0u;
+  for (u32 g = 0; g < wire.n_goals; g++) {
+    Term gl = atp_wire_goal_lhs(&wire, g);
+    Term gr = atp_wire_goal_rhs(&wire, g);
+    if (gl == 0u && gr == 0u) continue;   // (0, 0) = completion-mode filler
+    gls[n_goals] = gl;
+    grs[n_goals] = gr;
+    n_goals++;
+  }
+  for (u32 i = 0; i < n; i++) { order[i] = i; swaps[i] = 0u; }
+  if (n > 0u) {
+    thvm_atp_wm_intake_order(ls, rs, n, gls, grs, n_goals, order, swaps);
+  }
+
+  MNumericArray out;
+  mint dims[1] = { 1 + 2 * (mint)n };
+  if (naf->MNumericArray_new(MNumericArray_Type_Bit64, 1, dims, &out) != 0) {
+    free(ls); free(rs); free(gls); free(grs); free(order); free(swaps);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  int64_t *o = (int64_t *)naf->MNumericArray_getData(out);
+  mint at = 0;
+  o[at++] = (int64_t)n;
+  for (u32 i = 0; i < n; i++) o[at++] = (int64_t)order[i];
+  for (u32 i = 0; i < n; i++) o[at++] = (int64_t)swaps[i];
+
+  free(ls); free(rs); free(gls); free(grs); free(order); free(swaps);
   MArgument_setMNumericArray(res, out);
   return LIBRARY_NO_ERROR;
 }

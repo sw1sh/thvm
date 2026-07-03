@@ -14,6 +14,52 @@
 // Differs from one-way matching (thvm_match): both sides may contain
 // variables; bindings flow in either direction.
 
+// === bound-id undo log ==============================================
+//
+// The CP formers call thvm_unify millions of times per saturation and
+// each call needs an all-zero substitution -- but a unifier binds only
+// a handful of ids, so zeroing the full 512-byte RewriteSubst per
+// attempt is almost entirely wasted stores.  A hot caller instead
+// keeps ONE persistent all-zero RewriteSubst and brackets each attempt
+// with thvm_unify_undo_begin() / thvm_unify_undo(): while armed, the
+// two binding sites below log every bound id, and the undo re-zeroes
+// exactly those slots.  The substitution content seen by thvm_unify /
+// thvm_unify_apply is byte-identical to the memset discipline (all-
+// zero at attempt start either way); failed unifications leave partial
+// bindings in both schemes and the undo covers them too.  Overflow
+// (nested thvm_unify calls from another subsystem inside the armed
+// window) falls back to a full clear -- never a stale binding.
+static u32 g_un_log[128];
+static u32 g_un_n     = 0;
+static u8  g_un_armed = 0;
+static u8  g_un_over  = 0;
+
+fn void thvm_unify_undo_begin(void) {
+  g_un_n     = 0;
+  g_un_over  = 0;
+  g_un_armed = 1;
+}
+
+fn void thvm_unify_undo(RewriteSubst *subst) {
+  if (g_un_over) {
+    memset(subst->bindings, 0, sizeof subst->bindings);
+  } else {
+    for (u32 i = 0; i < g_un_n; i++) subst->bindings[g_un_log[i]] = 0;
+  }
+  g_un_n     = 0;
+  g_un_over  = 0;
+  g_un_armed = 0;
+}
+
+static inline void un_log_bind(u32 id) {
+  if (!g_un_armed) return;
+  if (g_un_n < (u32)(sizeof g_un_log / sizeof g_un_log[0])) {
+    g_un_log[g_un_n++] = id;
+  } else {
+    g_un_over = 1;
+  }
+}
+
 // Recursively follow subst chains: while `t` is FVR with a binding,
 // step to the binding.  Returns the final non-bound term.
 static Term unify_walk(Term t, const RewriteSubst *subst) {
@@ -59,6 +105,7 @@ fn u8 thvm_unify(Term s, Term t, RewriteSubst *subst) {
     if (id >= REWRITE_MAX_VAR) return 0;
     if (unify_occurs(id, t, subst)) return 0;
     subst->bindings[id] = t;
+    un_log_bind(id);
     return 1;
   }
   if (term_tag(t) == TAG_FVR) {
@@ -66,6 +113,7 @@ fn u8 thvm_unify(Term s, Term t, RewriteSubst *subst) {
     if (id >= REWRITE_MAX_VAR) return 0;
     if (unify_occurs(id, s, subst)) return 0;
     subst->bindings[id] = s;
+    un_log_bind(id);
     return 1;
   }
   if (term_tag(s) == TAG_CTR && term_tag(t) == TAG_CTR) {
@@ -185,49 +233,33 @@ typedef struct {
   u32 n;
 } NvMap;
 
-// Look up `old`'s dense id, assigning the next free one on first
-// sight.  If the map is full (pathological -- more distinct vars
-// than REWRITE_MAX_VAR), fold onto the last slot rather than
-// overflow; downstream is no worse than the pre-7c behavior.
-static u32 nv_map_index(NvMap *m, u32 old) {
-  for (u32 i = 0; i < m->n; i++) {
-    if (m->old_id[i] == old) return i;
-  }
-  if (m->n >= REWRITE_MAX_VAR) return REWRITE_MAX_VAR - 1u;
-  m->old_id[m->n] = old;
-  return m->n++;
-}
-
-// First pass: walk `t` in preorder, registering each distinct FVR id
-// in `m` (assigning dense ids by first occurrence).
-static void nv_collect(Term t, NvMap *m) {
-  switch (term_tag(t)) {
-    case TAG_FVR: nv_map_index(m, term_ext(t)); break;
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      if (n > REWRITE_MAX_ARITY) return;
-      for (u32 i = 0; i < n; i++) nv_collect(term_ctr_at(t, i), m);
-      break;
-    }
-    default: break;
-  }
-}
-
-// Second pass: rebuild `t` with every FVR id replaced by its dense
-// id from the (already-populated) map.
-static Term nv_rewrite(Term t, const NvMap *m) {
+// Single fused pass: rebuild `t` in preorder, assigning each distinct
+// FVR id its dense id ON FIRST SIGHT and rewriting in the same walk.
+// Because dense ids are handed out by preorder first occurrence, the
+// map state at the moment a variable is rewritten is exactly what a
+// separate collect pass would have produced -- the output is identical
+// to the historical collect-then-rewrite two-pass version, at half the
+// tree walks (the CP push path calls this millions of times per
+// saturation).  Unchanged subtrees are returned as-is (no allocation).
+// A variable past a FULL map keeps its id -- the two-pass version's
+// collect folded it without registering and its rewrite lookup then
+// missed, leaving the term untouched (pathological: more distinct vars
+// than REWRITE_MAX_VAR).
+static Term nv_rewrite(Term t, NvMap *m) {
   switch (term_tag(t)) {
     case TAG_FVR: {
       u32 old = term_ext(t);
       for (u32 i = 0; i < m->n; i++) {
-        // Identity rename optimization: if old id is already its dense
-        // position, return original t without allocating.
         if (m->old_id[i] == old) {
           if (i == old) return t;
           return term_new_fvr(i);
         }
       }
-      return t;  // unreachable: nv_collect registered every id
+      if (m->n >= REWRITE_MAX_VAR) return t;   // full map: keep id
+      u32 i = m->n;
+      m->old_id[m->n++] = old;
+      if (i == old) return t;
+      return term_new_fvr(i);
     }
     case TAG_CTR: {
       // Direct heap_read for arity + children.
@@ -259,8 +291,6 @@ fn void thvm_normalize_vars(Term *lhs, Term *rhs) {
   if (lhs == NULL || rhs == NULL) return;
   NvMap m;
   m.n = 0;
-  nv_collect(*lhs, &m);
-  nv_collect(*rhs, &m);
   *lhs = nv_rewrite(*lhs, &m);
   *rhs = nv_rewrite(*rhs, &m);
 }

@@ -21,6 +21,7 @@
 //
 // Set/cleared via thvm_set_heap_exhaust_handler.
 #include <setjmp.h>
+#include <execinfo.h>
 jmp_buf  *thvm_heap_exhaust_jmp = NULL;
 volatile int thvm_heap_exhausted = 0;
 
@@ -35,6 +36,14 @@ const char *g_thvm_phase = "init";   // DIAG: last ATP phase entered
 __attribute__((noreturn))
 fn void thvm_fatal(const char *msg) {
   fprintf(stderr, "thvm fatal: %s [phase=%s]\n", msg, g_thvm_phase);
+  // THVM_FATAL_BACKTRACE=1: print the C call stack so an allocation
+  // storm's site is attributable without a debugger (the phase tag
+  // only names the enclosing step section).
+  if (getenv("THVM_FATAL_BACKTRACE") != NULL) {
+    void *bt[48];
+    int n = backtrace(bt, 48);
+    backtrace_symbols_fd(bt, n, 2);
+  }
   if (thvm_heap_exhaust_jmp != NULL) {
     thvm_heap_exhausted = 1;
     longjmp(*thvm_heap_exhaust_jmp, 1);
