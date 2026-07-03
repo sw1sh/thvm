@@ -655,7 +655,7 @@ atpDatasetCollect[proveFn_, nProofs_] := Module[{
 ]
 
 TAtpCpDataset[theory_String, opts : OptionsPattern[]] := Module[{
-    thms = AxiomaticTheory[theory, "NotableTheorems"],
+    thms = atpAxiomaticTheory[theory, "NotableTheorems"],
     m = OptionValue[Method],
     tc = OptionValue[TimeConstraint]
 },
@@ -1206,7 +1206,7 @@ TAtpGraphDataset[conjectures_List, axioms_List, opts : OptionsPattern[]] := Modu
 ]
 
 TAtpGraphDataset[theory_String, opts : OptionsPattern[]] := Module[{
-    thms = AxiomaticTheory[theory, "NotableTheorems"],
+    thms = atpAxiomaticTheory[theory, "NotableTheorems"],
     m = OptionValue[Method],
     tc = OptionValue[TimeConstraint],
     results, rows, nProofs
@@ -3955,6 +3955,66 @@ Options[TFindProof] = {
 atpConjList[cj_List] := Catenate[atpConjList /@ cj];
 atpConjList[cj_] := {cj};
 
+(* === AxiomaticTheory snapshot cache ================================ *)
+(* The kernel's FIRST AxiomaticTheory call pays a ~0.4s one-time data
+   load (measured: 0.40s first call, ~1ms every call after, any theory,
+   offline) -- the single largest fixed cost of the bare named-theorem
+   TFindProof call, and one FindEquationalProof never pays (it takes
+   explicit axioms, so its callers resolve the theory before timing).
+   Snapshot every theory's axiom list + NotableTheorems table into a
+   per-machine, per-WL-version cache file under ~/.cache/thvm the first
+   time any named theory resolves on this machine, and serve later
+   kernels from that file (a ~ms MX Import).  Values are identical to
+   the built-in's by construction (the snapshot IS the built-in's
+   output, taken in-session); the file name carries $VersionNumber so a
+   WL upgrade re-snapshots.  Any cache failure (unwritable directory,
+   corrupt file, unknown theory name) falls through to the built-in
+   unchanged.  Kill switch: THVM_ATP_NO_THEORY_CACHE=1 bypasses the
+   cache entirely. *)
+$atpTheoryCacheFile := FileNameJoin[{$HomeDirectory, ".cache", "thvm",
+    "axiomatic_theory_" <> StringDelete[ToString[$VersionNumber],
+        "." ~~ EndOfString] <> ".mx"}];
+$atpTheoryCache = None;
+atpTheoryCacheLoad[] := Block[{f, v},
+    If[ AssociationQ[$atpTheoryCache], Return[$atpTheoryCache]];
+    If[ Environment["THVM_ATP_NO_THEORY_CACHE"] =!= $Failed,
+        Return[$atpTheoryCache = <||>]];
+    f = $atpTheoryCacheFile;
+    v = Quiet @ Check[If[ FileExistsQ[f], Import[f], $Failed], $Failed];
+    If[ AssociationQ[v], Return[$atpTheoryCache = v]];
+    (* First use on this machine / WL version: snapshot the built-in. *)
+    v = Quiet @ Check[
+        Association @ Map[
+            th |-> th -> <|
+                "Axioms" -> AxiomaticTheory[th],
+                "NotableTheorems" -> AxiomaticTheory[th, "NotableTheorems"]
+            |>,
+            AxiomaticTheory[]],
+        $Failed];
+    If[ ! AssociationQ[v], Return[$atpTheoryCache = <||>]];
+    Quiet @ Check[
+        Block[{dir = DirectoryName[f], tmp},
+            If[ ! DirectoryQ[dir],
+                CreateDirectory[dir, CreateIntermediateDirectories -> True]];
+            (* temp-write + rename so a concurrent kernel never reads a
+               half-written file; the loser of a rename race just
+               re-snapshots next session. *)
+            tmp = f <> "." <> ToString[$ProcessID] <> ".tmp";
+            Export[tmp, v, "MX"];
+            Quiet[DeleteFile[f]];
+            RenameFile[tmp, f]],
+        Null];
+    $atpTheoryCache = v
+]
+(* Cache-first resolution of the two AxiomaticTheory forms TFindProof
+   uses; a miss (unknown name, cache off) is the built-in verbatim. *)
+atpAxiomaticTheory[theory_String] := Block[{c = atpTheoryCacheLoad[]},
+    If[ KeyExistsQ[c, theory], c[theory]["Axioms"], AxiomaticTheory[theory]]]
+atpAxiomaticTheory[theory_String, "NotableTheorems"] :=
+    Block[{c = atpTheoryCacheLoad[]},
+        If[ KeyExistsQ[c, theory], c[theory]["NotableTheorems"],
+            AxiomaticTheory[theory, "NotableTheorems"]]]
+
 (* Shared core for the theory-resolved forms: resolve the named theory's
    axioms, drop the ones irrelevant to the conjecture, and prove the
    conjecture via the expression form.  One conjunct returns a single
@@ -3970,7 +4030,7 @@ atpProveFromTheory[cjArg_, theory_String,
 atpProveFromTheory[cjArg_, theory_String, returnSpec_,
         opts : OptionsPattern[TFindProof]] := Catch[
     Block[{axRaw, axioms, cjList = atpConjList[cjArg]},
-        axRaw = AxiomaticTheory[theory];
+        axRaw = atpAxiomaticTheory[theory];
         If[ ! ListQ[axRaw],
             Throw[Failure["TATPParseError",
                 <|"Reason" -> "AxiomaticTheory[\"" <> theory <> "\"] did not resolve to an axiom list"|>],
@@ -4054,7 +4114,7 @@ TFindProof[thm_String, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpe
                     Options[WolframInstitute`THVMLink`ATP`TEproverProofObject]]],
                 "TATPError"]
         ];
-        cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
+        cjRaw = atpAxiomaticTheory[theory, "NotableTheorems"][thm];
         If[ MissingQ[cjRaw],
             Throw[Failure["TATPParseError",
                 <|"Reason" -> "theorem \"" <> thm <> "\" not in AxiomaticTheory[\"" <> theory <> "\", \"NotableTheorems\"]"|>],
@@ -4066,7 +4126,7 @@ TFindProof[thm_String, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpe
 ]
 (* (theorem, theory, returnSpec): prove the named theorem, projected. *)
 TFindProof[thm_String, theory_String, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] := Catch[
-    Block[{cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm]},
+    Block[{cjRaw = atpAxiomaticTheory[theory, "NotableTheorems"][thm]},
         If[ MissingQ[cjRaw],
             Throw[Failure["TATPParseError",
                 <|"Reason" -> "theorem \"" <> thm <> "\" not in AxiomaticTheory[\"" <> theory <> "\", \"NotableTheorems\"]"|>],
@@ -4830,7 +4890,7 @@ TFindProof[axioms_List, returnSpec_ ? atpReturnSpecQ, OptionsPattern[]] :=
 atpTheoryCompletion[theory_String, returnSpec_,
         opts : OptionsPattern[TFindProof]] := Catch[
     Block[{axRaw, axioms},
-        axRaw = AxiomaticTheory[theory];
+        axRaw = atpAxiomaticTheory[theory];
         If[ ! ListQ[axRaw],
             Throw[Failure["TATPParseError",
                 <|"Reason" -> "AxiomaticTheory[\"" <> theory <> "\"] did not resolve to an axiom list"|>],

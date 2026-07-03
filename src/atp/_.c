@@ -373,6 +373,15 @@ u64 g_atp_pushn_us_hash           = 0;   // join-cache struct-hash + probe
 u64 g_atp_pushn_us_gate           = 0;   // atp_symbol_count raw-size gate
 u64 g_atp_pushn_calls             = 0;   // trivially_joinable calls (push)
 u64 g_atp_pushn_joined            = 0;   // joined verdicts (push)
+// Pack-volume class split (same detail tier): node totals + push counts
+// for the raw >= 50 untreated class vs the treated (< 50) survivors.
+// Bounds the FT-direct-pack lever: only the TREATED class could skip
+// the Term intermediate (raw CPs are born as Terms in the walk former),
+// so its share of pack nodes caps that lever's yield.
+u64 g_acp_pack_nodes_raw          = 0;
+u64 g_acp_pack_nodes_treated      = 0;
+u64 g_acp_pack_n_raw              = 0;
+u64 g_acp_pack_n_treated          = 0;
 // Normalize-core shape counters (same detail tier + push scope): per
 // ft_cell_try_rules query in the push-normalize path -- queries,
 // var-cell early-outs, candidate-loop iterations, ft_match attempts /
@@ -6057,23 +6066,100 @@ static int atp_trace_eq_load(AtpState *s, u32 idx, Term *lhs, Term *rhs) {
   return 1;
 }
 
-// Materialize the off-heap packed trace: rebuild every packed entry
-// with its real (lhs,rhs) loaded from the byte store, replacing the
+// Materialize the off-heap packed trace: rebuild packed entries with
+// their real (lhs,rhs) loaded from the byte store, replacing the
 // NUM sentinels in children[2..3].  The trace is kept PACKED during
 // saturation (small live set -> no proof-trace GC-heap blowup, the
 // [[project_atp_wm_trace_memory_blocker]] bottleneck) and materialized
 // exactly ONCE here, after thvm_atp_run terminates, so the C proof
 // extractor + the WL trace reader see live Term entries.
 //
+// CONE-SCOPED (read-set audited against ATP_ProofGraph.wl): the WL
+// lift decodes a trace entry's (lhs, rhs) Term handles in exactly two
+// ways --
+//   (a) population-wide over TRACE_ORIENT / TRACE_FVI entries only
+//       (aliveRulesAt + the two allRules emitNorm retries build rule
+//       tables from every ORIENT/FVI ever born), and
+//   (b) the resolveTrace recursion, whose roots are live-rule birth
+//       entries (resolveRule -> rTrace[k]) and which otherwise only
+//       moves to an already-visited entry's parents (children 0/1;
+//       a NORM_STEP's child 1 is a rule's TRACE_ORIENT index).
+// Reason / parents / pos ship as wire ints and never touch the term
+// handles, so every OTHER entry -- the ~millions of queued-CP
+// TRACE_CP records plus uncited SIMPLIFY entries -- never has its
+// pair decoded, and rebuilding it into live Terms is pure waste
+// (the 0.48s materialize-trace tile on OrAssociativity: 1.98M
+// entries vs a ~thousands-entry read set).  Mark the read set (all
+// ORIENT/FVI + all rule births + the parent closure) and materialize
+// only it; unmarked entries keep their NUM sentinels, which the wire
+// encoder, GC root walk, and orphan scan already handle (they touch
+// only tags/handles, not the pair content).  An MNF-closed goal cites
+// TRACE indices directly from the goal chain (usingMnf), so use_mnf
+// keeps the historical full materialization.
+// Kill switch: THVM_ATP_NO_CONE_MAT=1 -> full materialization.
+//
 // GC-safe: runs OUTSIDE the step loop, so no mid-loop collection moves
 // the children snapshot.  One compaction up front frees dead CPs so the
-// rebuilt full-size trace fits in the from-space alongside the live set;
-// the loop then only bumps (the live set + materialized trace stays well
-// under the semispace, and mid-op heap_alloc never auto-collects).
+// rebuilt trace fits in the from-space alongside the live set; the loop
+// then only bumps (the live set + materialized trace stays well under
+// the semispace, and mid-op heap_alloc never auto-collects).
 fn void thvm_atp_materialize_trace(AtpState *s) {
   if (s == NULL || !s->trace_pack) return;
   if (gc_enabled()) thvm_atp_gc_collect(s);
+  static int no_cone = -1;
+  if (no_cone < 0) {
+    const char *ev = getenv("THVM_ATP_NO_CONE_MAT");
+    no_cone = (ev != NULL && ev[0] == '1') ? 1 : 0;
+  }
+  u8 *mark = NULL;
+  if (!no_cone && !s->use_mnf && s->n_trace > 0u) {
+    mark = (u8 *)calloc(s->n_trace, 1u);
+    u32 *stk = (mark != NULL)
+      ? (u32 *)malloc((size_t)s->n_trace * sizeof(u32)) : NULL;
+    if (stk == NULL) {
+      free(mark);
+      mark = NULL;                      // OOM: degrade to full materialize
+    } else {
+      u32 sp = 0u;
+      // Seed (a): every ORIENT / FVI entry (population-wide WL reads).
+      for (u32 i = 0; i < s->n_trace; i++) {
+        Term e = s->trace[i];
+        if (term_tag(e) != TAG_CTR) continue;
+        u32 reason = term_ext(e);
+        if (reason != TRACE_ORIENT && reason != TRACE_FVI) continue;
+        mark[i] = 1u;
+        stk[sp++] = i;
+      }
+      // Seed (b): live-rule birth entries (resolveRule roots).
+      for (u32 r = 0; r < s->n_rules; r++) {
+        u32 ti = s->r_trace[r];
+        if (ti != ATP_TRACE_NONE && ti < s->n_trace && !mark[ti]) {
+          mark[ti] = 1u;
+          stk[sp++] = ti;
+        }
+      }
+      // Parent closure: children 0/1 of every marked entry are trace
+      // indices for the 4-child reasons; a NORM_STEP's child 1 is a
+      // rule's TRACE_ORIENT trace index (already seeded, followed
+      // anyway -- over-marking is harmless).
+      while (sp > 0u) {
+        u32 ti = stk[--sp];
+        Term e = s->trace[ti];
+        if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 2u) continue;
+        for (u32 k = 0; k < 2u; k++) {
+          u32 p = (u32)term_val(term_ctr_at(e, k));
+          if (p != ATP_TRACE_NONE && p < s->n_trace && !mark[p]) {
+            mark[p] = 1u;
+            stk[sp++] = p;
+          }
+        }
+      }
+      free(stk);
+    }
+  }
+  u32 n_mat = 0u;
   for (u32 i = 0; i < s->n_trace; i++) {
+    if (mark != NULL && !mark[i]) continue;
     Term lhs, rhs;
     if (!atp_trace_eq_load(s, i, &lhs, &rhs)) continue;   // no packed pair
     Term e = s->trace[i];
@@ -6086,7 +6172,14 @@ fn void thvm_atp_materialize_trace(AtpState *s) {
     ch[3] = rhs;
     s->trace[i] = term_new_ctr(reason, ch, n);
     s->trace_eq_off[i] = 0u;                              // now materialized
+    n_mat++;
   }
+  if (getenv("THVM_ATP_TIME_SPLIT") != NULL ||
+      getenv("THVM_ATP_PHASETIME") != NULL) {
+    fprintf(stderr, "[atp-phase] cone-mat: materialized=%u of %u (cone=%s)\n",
+            n_mat, s->n_trace, mark != NULL ? "on" : "off");
+  }
+  free(mark);
   s->trace_pack = 0u;
 }
 
@@ -9294,6 +9387,15 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
         g_acp_fuse.valid = 0u;
         return;
       }
+    }
+  }
+  if (g_atp_phase_detail) {
+    if (raw_untreated) {
+      g_acp_pack_nodes_raw += cp_nodes;
+      g_acp_pack_n_raw++;
+    } else {
+      g_acp_pack_nodes_treated += cp_nodes;
+      g_acp_pack_n_treated++;
     }
   }
   atp_cp_heap_insert_packed(s, packed, cp_nodes, lhs, rhs, trace,

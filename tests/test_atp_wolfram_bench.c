@@ -1792,6 +1792,20 @@ int main(int argc, char **argv) {
              g_atp_pushn_us_to / 1e6, g_atp_pushn_us_ac / 1e6,
              g_atp_pushn_us_hash / 1e6, g_atp_pushn_us_gate / 1e6,
              sumd / 1e6, g_atp_phase_us_push_normalize / 1e6);
+      {
+        extern u64 g_acp_pack_nodes_raw, g_acp_pack_nodes_treated,
+                   g_acp_pack_n_raw, g_acp_pack_n_treated;
+        u64 tot = g_acp_pack_nodes_raw + g_acp_pack_nodes_treated;
+        printf("   pack class split: raw>=50 n=%llu nodes=%llu (%.0f%%) | "
+               "treated n=%llu nodes=%llu (%.0f%%)\n",
+               (unsigned long long)g_acp_pack_n_raw,
+               (unsigned long long)g_acp_pack_nodes_raw,
+               tot ? 100.0 * (double)g_acp_pack_nodes_raw / (double)tot : 0.0,
+               (unsigned long long)g_acp_pack_n_treated,
+               (unsigned long long)g_acp_pack_nodes_treated,
+               tot ? 100.0 * (double)g_acp_pack_nodes_treated / (double)tot
+                   : 0.0);
+      }
       printf("   push-norm core shape: queries=%llu (var=%llu) cand=%llu "
              "att=%llu hit=%llu\n"
              "     pb=%llu win=%llu rematch=%llu splices=%llu "

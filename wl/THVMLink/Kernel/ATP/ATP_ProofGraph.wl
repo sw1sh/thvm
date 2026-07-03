@@ -342,7 +342,10 @@ wmSelectionOrderEntries[allEntries_List, entryTi_Association] := Block[
             MapIndexed[{"CriticalPairLemma", #1} -> {"CriticalPairLemma", First[#2]} &, cplOld],
             MapIndexed[{"SubstitutionLemma", #1} -> {"SubstitutionLemma", First[#2]} &, slOld]],
         r_ /; First[r] === Last[r]];
-    out = ReplacePart[allEntries, Thread[taggedPos -> sorted]] /. renum;
+    (* Dispatch hashes the (potentially hundreds of) renumber rules so
+       the citation rewrite is one hashed lookup per subexpression
+       instead of a linear rule scan -- same replacement semantics. *)
+    out = ReplacePart[allEntries, Thread[taggedPos -> sorted]] /. Dispatch[renum];
     If[ Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
         WriteString["stderr", "[wmorder] tagged=", ToString[Length[taggedPos]],
             " renumbered=", ToString[Length[renum]], "\n"]];
@@ -1054,7 +1057,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
     Block[{$RecursionLimit = 100000, $IterationLimit = 1000000},
     Module[{
         trace, traceRaw, traceOffsets, decodeTraceEntry, traceReasons,
-        traceParentAs, orientFviIdx, deathOf, mainRules = cRes["MainRules"],
+        orientFviIdx, deathOf, mainRules = cRes["MainRules"],
         rTrace = cRes["RTrace"],
         (* Goal chain: the MNF front chain when the goal was closed by
            the bidirectional MNF search (GREEN side-0 + RED side-1
@@ -1076,10 +1079,20 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         resolveTrace, resolveRule, axiomEntries, canonInfo, canonKeyOf,
         cjp, nGoals, cjps, chainEntries, allEntries,
         stmt, l2n, i2n, dterm, tL, tR,
+        (* THVM_ATP_TIME_SPLIT sub-phase marks: cplMark[label] prints the
+           wall since the previous mark as a "[recon] cpl-<label>" line,
+           attributing the buildCplDataset tile the same way the C
+           bridge's [atp-phase] marks attribute the post-run tail. *)
+        cplSplitQ = Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+        cplT0, cplMark,
         (* restore the caller's held originals during this build's decoding *)
         $atpSymObj = Lookup[enc["State"], "symObj", <||>],
         $atpVarObj = Lookup[enc["State"], "varObj", <||>]
     },
+        cplT0 = AbsoluteTime[];
+        cplMark[label_] := If[ cplSplitQ,
+            Print["[recon] cpl-", label, " = ", AbsoluteTime[] - cplT0, " s"];
+            cplT0 = AbsoluteTime[]];
         varSyms = cRes["VarSyms"];
         (* Lazy, memoized trace-term decode: trace entries ship raw Term
            ints (LhsRaw/RhsRaw); decodeAtpTerm walks the C heap per cell,
@@ -1113,19 +1126,33 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 "Fwd" -> If[reason === $TraceNormStep, traceRaw[[c + 6 + posLen + 2]], 1]
             |>];
         trace /: Part[trace, k_Integer] := decodeTraceEntry[k];
-        (* Vectorized reason / parentA columns (packed Part) + a one-pass
-           alive-rule index, so aliveRulesAt[ti] is O(rules) not O(ti) and
-           never forces the per-entry Association decode over the prefix.
-           deathOf[r] = first SIMPLIFY trace index that retired rule r. *)
+        (* Vectorized reason column (packed Part) + a one-pass alive-rule
+           index, so aliveRulesAt[ti] is O(rules) not O(ti) and never
+           forces the per-entry Association decode over the prefix.
+           deathOf[r] = first SIMPLIFY trace index that retired rule r:
+           parentA is gathered only at the SIMPLIFY offsets (not as a
+           full nTrace column), and the first-per-rule semantics come
+           from AssociationThread keeping the LAST binding of a
+           duplicated key -- feed it reversed.  All packed-array ops;
+           the interpreted per-entry Scan this replaces was ~40% of the
+           buildCplDataset tile on a 1.98M-entry OrAssociativity trace. *)
         traceReasons = traceRaw[[traceOffsets + 1]];
-        traceParentAs = traceRaw[[traceOffsets + 2]];
-        With[{nTr = Length[traceOffsets]},
-            orientFviIdx = Pick[Range[0, nTr - 1], Unitize[(traceReasons - $TraceOrient) (traceReasons - $TraceFvi)], 0];
-            deathOf = <||>;
-            Scan[
-                With[{pa = traceParentAs[[# + 1]]},
-                    If[! KeyExistsQ[deathOf, pa], deathOf[pa] = #]] &,
-                Pick[Range[0, nTr - 1], Unitize[traceReasons - $TraceSimplify], 0]]];
+        (* 0-based indices of the mask's zeros, via SparseArray: on this
+           kernel Pick's FIRST above-threshold call pays a ~0.19s
+           one-time initialization (measured: a fresh kernel's first
+           2M-element Pick costs 0.19s, the second 0.004s, while the
+           SparseArray gather is ~0.01s cold AND warm), and the bare
+           TFindProof call lands that first call right here.  The
+           NonzeroPositions of (1 - mask) are exactly the Pick[idx,
+           mask, 0] selections, 1-based. *)
+        Block[{maskZeros, simIdx, simPas},
+            maskZeros = Function[mask, If[ mask === {}, {},
+                Flatten[SparseArray[1 - mask]["NonzeroPositions"]] - 1]];
+            orientFviIdx = maskZeros[Unitize[(traceReasons - $TraceOrient) (traceReasons - $TraceFvi)]];
+            simIdx = maskZeros[Unitize[traceReasons - $TraceSimplify]];
+            simPas = If[simIdx === {}, {}, traceRaw[[traceOffsets[[simIdx + 1]] + 2]]];
+            deathOf = AssociationThread[Reverse[simPas], Reverse[simIdx]]];
+        cplMark["cols"];
         (* the trace-decoded terms carry bare variable symbols;
            atpEncodeProblem's AxPairs / ConjPair carry Pattern[v, _]
            wrappers -- strip them so every comparison is bare-to-bare
@@ -2104,6 +2131,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             ],
             {g, Length[cjps]}
         ];
+        cplMark["chains"];
 
         (* Order is axioms, hypotheses, then `entries` in emission
            order -- resolveTrace is depth-first, so a lemma is
@@ -2124,7 +2152,11 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             entries,
             chainEntries
         ];
-        pruneUnusedAxioms[wmSelectionOrderEntries[allEntries, entryTi]]
+        allEntries = wmSelectionOrderEntries[allEntries, entryTi];
+        cplMark["order"];
+        allEntries = pruneUnusedAxioms[allEntries];
+        cplMark["prune"];
+        allEntries
     ]]
 ]
 
