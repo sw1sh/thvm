@@ -174,7 +174,7 @@ The list-form spec accepts any of the following; defaults match the C engine's d
 | `"LRS"`                         | `True \| False`                                        | Vampire's Limited Resource Strategy: predict whether each CP will be reached within the wall budget, prune the unreachable ones. |
 | `"SOS"`                         | `True \| False`                                        | Set of Support: restrict CP generation to overlaps that touch the conjecture's symbols.  |
 | `"RandomRatio"` / `"RandomSeed"` | integer ratio / `u64` seed                            | Vampire-style random CP selection.  Every n-th selection picks uniformly random from the queue via a seeded xorshift64. |
-| `"RecordNorm"`                  | `True \| False`                                        | Per-step normalisation trace for the `ProofObject` builder.  `False` routes search through the fast indexed normalize for long completions. |
+| `"RecordNorm"`                  | `True \| False`                                        | Per-step normalisation trace for the `ProofObject` builder.  `False` routes search through the fast indexed normalize for long completions; the post-proof goal-cone re-derivation still supplies the chains, so this is the `"Waldmeister"`/`"WaldmeisterLazy"` preset default. |
 | `"SymbolWeights"` / `"VarWeight"` | per-label array / integer                            | Per-symbol KBO weight override; var weight (Waldmeister `-w VAR=N`). |
 
 ### CP-order knobs
@@ -247,7 +247,7 @@ Modes:
 
 Beyond `Method`:
 
-- `MaxSteps -> n` (default 200000) - hard cap on the CP-processing step counter.
+- `MaxSteps -> n` (default `Automatic` = 200000, or 500000 under the `"Waldmeister"`/`"WaldmeisterLazy"` presets) - hard cap on the CP-processing step counter.
 - `TimeConstraint -> seconds` (default `Infinity`; portfolios divide fairly across schedule entries; `TimeConstrained[...]` and `Abort[]` interrupt the running C engine).
 - `PortfolioFrontLoad -> n` (default 1) - widen the slice given to the first n schedule entries (each gets 2x what an unweighted recurrence would assign).  Use when an `Automatic` front genuinely deserves more time than the fair share.
 

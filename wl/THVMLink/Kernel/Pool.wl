@@ -58,7 +58,14 @@ $poolGetThreadsFn := $poolGetThreadsFn = load["thvm_wl_pool_get_threads", {}, In
 $poolStatsPoolFieldFn := $poolStatsPoolFieldFn = load["thvm_wl_pool_stats_pool_field", {Integer}, Integer];
 $poolStatsWorkerFieldFn := $poolStatsWorkerFieldFn = load["thvm_wl_pool_stats_worker_field", {Integer, Integer}, Integer];
 
-ensureInit[]; (* Pool helpers all need the runtime up. *)
+(* No load-time ensureInit[] here: every public Pool entry (TThreads /
+   TPoolStats / TNfProfiled / TPoolStatsBench via those) calls
+   ensureInit[] itself, and eager init at Get time would (a) map the
+   dyn-heap arena + init the default backend for users who never touch
+   the runtime, and (b) freeze the heap size before an entry point can
+   size it (thvm_heap_cells resolves THVM_HEAP_CELLS once at the first
+   init -- the ATP Waldmeister path seeds it run-scoped via
+   atpEnsureWmHeap). *)
 
 (* === Field codes: mirror thvm_wl_pool_stats_*_field switches ===== *)
 

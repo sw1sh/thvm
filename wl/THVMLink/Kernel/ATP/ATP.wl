@@ -30,7 +30,8 @@
 
    Options
      MaxSteps       (TATP)                  -> 64
-     MaxSteps       (TFindProof)            -> 200000
+     MaxSteps       (TFindProof)            -> Automatic (200000;
+                     500000 under the "Waldmeister"* presets)
      Witness        (TATP)                  -> {}    list of x_
      AllWitnesses   (TATP)                  -> False
      MaxDepth       (TATP / AllWitnesses)   -> 8
@@ -208,6 +209,12 @@ If[ Environment["THVM_ATP_TRACE_MAX"] === $Failed || Environment["THVM_ATP_TRACE
    in $atpRunProofFn / $atpRunExistFn / ... resolves to the same
    helper (WolframInstitute`THVMLink`ATP`Private is a separate context). *)
 load = WolframInstitute`THVMLink`Private`load;
+(* Same aliasing for ensureInit: atpEncodeProblem / TAtpBench call it
+   before their first heap-touching library call.  Without the alias the
+   bare name would be a fresh (undefined) WolframInstitute`THVMLink`ATP`Private`
+   symbol and the call a silent no-op -- masked historically by an eager
+   load-time init in Pool.wl; with lazy init it must actually fire. *)
+ensureInit = WolframInstitute`THVMLink`Private`ensureInit;
 
 (* Diagnostic: when True, every Throw[$Failed] inside the ProofObject
    dataset assembly (buildCplDataset / buildCEngineChain / cplOrient)
@@ -2779,6 +2786,15 @@ $AtpPresetDefaults = <|
            trace post-run so the WL lift is unaffected.  Matches the C
            bench default (see atpTracePackOpt). *)
         "TracePack" -> True,
+        (* Fast-trajectory default: skip the per-step normalize-trace
+           recorder and run the search through the indexed/flatterm
+           normalize at the C-bench rate; the post-PROVED proof-cone
+           re-derivation (thvm_atp_record_goal_cone) splices the
+           NORM_STEP chains the WL lift walks, so the ProofObject comes
+           out identical (the recorder trajectory RSS-aborts on the
+           deep WolframAxioms class, e.g. OrAssociativity ~107k steps).
+           Opt back in with "RecordNorm" -> True. *)
+        "RecordNorm" -> False,
         (* Stays opt-in: the measured flip costs 2.8x steps, +55%
            wall, +17% peak RSS on mccune and 2.13x peak RSS on
            AndAssoc -- see atpImplicitCpOpt. *)
@@ -2832,6 +2848,8 @@ $AtpPresetDefaults = <|
         "BackwardGoalArgue" -> False,
         (* Off-heap packed proof trace (see the "Waldmeister" entry). *)
         "TracePack" -> True,
+        (* Fast-trajectory default (see the "Waldmeister" entry). *)
+        "RecordNorm" -> False,
         "UnfailingCP" -> True,
         "RHSInterreduce" -> True|>,
     "VampireUEQ" -> <|
@@ -3902,7 +3920,12 @@ atpProjectReturn[bundle_, spec_List] :=
     Association[# -> atpReturnValue[bundle, #] & /@ spec];
 
 Options[TFindProof] = {
-    MaxSteps -> 200000,
+    (* Automatic resolves per-Method at run time (atpResolveMaxSteps):
+       500000 under the "Waldmeister"/"WaldmeisterLazy" presets -- the
+       validated deep-proof path, sized so the WolframAxioms class fits
+       (OrAssociativity needs 263,551 selections) -- and the historical
+       200000 for every other method.  An explicit number always wins. *)
+    MaxSteps -> Automatic,
     Method -> Automatic,
     TimeConstraint -> Infinity,
     PortfolioFrontLoad -> 1,
@@ -4390,6 +4413,44 @@ atpWmIntakeOrderQ[m_] := Block[{name, subs},
             "IntakeOrder", False]
 ]
 
+(* True iff the Method spec names one of the "Waldmeister"* presets
+   (bare name or {name, subopts...}). *)
+atpWmPresetNameQ[m_] := MatchQ[Replace[m, {n_String, ___} :> n],
+    "Waldmeister" | "WaldmeisterLazy"];
+
+(* MaxSteps -> Automatic resolution (see Options[TFindProof]): the
+   Waldmeister presets get the deep-proof budget, everything else keeps
+   the historical default.  A portfolio schedule forwards Automatic
+   into each slice's recursive atpProveBundle, so the budget resolves
+   per-slice against that slice's Method. *)
+atpResolveMaxSteps[Automatic, m_] := If[ atpWmPresetNameQ[m], 500000, 200000];
+atpResolveMaxSteps[n_, _] := n;
+
+(* Deep "Waldmeister"* completions materialize a multi-million-entry
+   proof trace on the dyn heap; the compile-time default heap (HEAP_CAP
+   = 2^28 cells = 2 GiB, 1 GiB per Cheney semi-space) exhausts
+   mid-materialization on the WolframAxioms class.  The heap size is
+   resolved ONCE per process from THVM_HEAP_CELLS at the first
+   heap-touching call (thvm_heap_cells, src/heap/collect.c) -- the
+   bridge has no run-scoped resize -- so seed the env var BEFORE this
+   run triggers ensureInit[] (atpEncodeProblem), and only when
+     (a) the Method is a Waldmeister preset (tensor-only THVMLink
+         sessions keep the compile-time default),
+     (b) the user has not set THVM_HEAP_CELLS (an explicit env wins),
+     (c) no WL context has initialized the library yet (once a heap is
+         mapped the process value is fixed; a late seed would be dead --
+         such a run proceeds on the existing heap and relies on the
+         heap-exhaust longjmp recovery in thvm_wl_atp_run_proof).
+   536870912 cells = 4 GiB of mmap MAP_ANON, lazily zero-faulted: RSS
+   grows only with cells actually touched.  Known constraint: a kernel
+   that proves under a Waldmeister preset FIRST gives later tensor work
+   in the same kernel the 4 GiB heap too (same lazy-fault economics,
+   but the Cheney semi-space -- the GC trigger horizon -- doubles). *)
+atpEnsureWmHeap[m_] := If[ atpWmPresetNameQ[m] &&
+        ! AnyTrue[Values @ WolframInstitute`THVMLink`Private`$initializedContexts, TrueQ] &&
+        MatchQ[Environment["THVM_HEAP_CELLS"], $Failed | None | ""],
+    SetEnvironment["THVM_HEAP_CELLS" -> "536870912"]];
+
 atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
     (* Raise $RecursionLimit for the whole bundle: a deep Sheffer/Wolfram
@@ -4397,7 +4458,8 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
        buildCplDataset and the WL verifier, any of which can trip the
        default 1024 limit and abort the run (and, in a portfolio sweep,
        terminate the enclosing evaluation). *)
-    (atpHeapRecycleOuter[];
+    (atpEnsureWmHeap[OptionValue[Method]];
+    atpHeapRecycleOuter[];
     Block[{$RecursionLimit = Max[$RecursionLimit, 16384], $atpInRun = True},
     Module[{atpSched = atpScheduleFor[OptionValue[Method], axioms, conjecture],
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
@@ -4475,7 +4537,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
         ruleList = buildRuleList[enc["AxPairs"], axiomKeys];
         Block[{atpMethodCfg = atpParseMethod[OptionValue[Method]]},
             {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[
-                enc, OptionValue[MaxSteps],
+                enc, atpResolveMaxSteps[OptionValue[MaxSteps], OptionValue[Method]],
                 atpWall, Sequence @@ atpMethodCfg]];
         (* status 1 == PROVED.  A non-PROVED run still returns a bundle
            (the ProofObject is $Failed) so the introspectives reflect it. *)
@@ -4673,6 +4735,7 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
     Module[{enc, cRes, atpWall, atpMethodCfg, atpWallTime,
             axEq, varNames, ds, po},
+        atpEnsureWmHeap[OptionValue[Method]];
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
             N[OptionValue[TimeConstraint]], 0.];
         (* Encode with a None conjecture: the packed array carries
@@ -4685,8 +4748,8 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
             atpEncodeProblem[axioms, None, False]];
         atpMethodCfg = atpParseMethod[OptionValue[Method]];
         {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[
-            enc, OptionValue[MaxSteps], atpWall,
-            Sequence @@ atpMethodCfg];
+            enc, atpResolveMaxSteps[OptionValue[MaxSteps], OptionValue[Method]],
+            atpWall, Sequence @@ atpMethodCfg];
         (* Construct a ProofObject with "Theorems" -> None.  Use the
            same buildCplDataset path the goal-directed bundle uses,
            which now recognises the (conjPair == {0, 0}, no main
