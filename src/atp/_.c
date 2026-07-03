@@ -2058,10 +2058,13 @@ static KboCmp acpf_rek(KboLin *st, const AcpFlatNode *a, u32 pa,
 // walk encoded.  Identity = flat memcmp (== Vortest's ident); the
 // top-level phidiff/var balances come pre-accumulated from the pack
 // walk; only a phi tie descends via the flat Rek/Lex mirror above.
-static KboCmp acp_fuse_kbo(const KboConfig *cfg) {
-  const AcpFuse *fz = &g_acp_fuse;
-  const AcpFlatNode *a = g_acpf_pool;
-  const AcpFlatNode *b = g_acpf_pool + fz->fl_n;
+// `_at` takes an explicit fuse state + flat pool base so a caller with
+// a LOCAL encoding (the FT-emit virtual order gate) can weigh without
+// touching the armed global; the bare entry reads the globals.
+static KboCmp acp_fuse_kbo_at(const KboConfig *cfg, const AcpFuse *fz,
+                              const AcpFlatNode *pool) {
+  const AcpFlatNode *a = pool;
+  const AcpFlatNode *b = pool + fz->fl_n;
   if (fz->fl_n == fz->fr_n &&
       memcmp(a, b, (size_t)fz->fl_n * sizeof(AcpFlatNode)) == 0) {
     return KBO_EQ;
@@ -2085,6 +2088,10 @@ static KboCmp acp_fuse_kbo(const KboConfig *cfg) {
   return acpf_rek(st, a, 0u, b, 0u, fz->phidiff, varcmp);
 }
 
+static KboCmp acp_fuse_kbo(const KboConfig *cfg) {
+  return acp_fuse_kbo_at(cfg, &g_acp_fuse, g_acpf_pool);
+}
+
 // Set around atp_trace_push_cp by the fused push loop: the off-heap
 // trace store renumbers the raw pair during its own byte emit.
 static u8 g_trace_eq_nv = 0u;
@@ -2092,7 +2099,7 @@ static u8 g_trace_eq_nv = 0u;
 // takes the fused pack (its caller skipped the treated renumber).
 static u8 g_cp_push_fused = 0u;
 
-// === FT-direct CP emission (THVM_ATP_FT_EMIT, default OFF) ==========
+// === FT-direct CP emission (THVM_ATP_FT_EMIT, DEFAULT ON; =0 kill) ==
 //
 // The walk former's raw >= 50 KPBehandelt class -- ~84% of all packed
 // CP nodes on OrAssociativity -- is queued UNTREATED: the (lhs, rhs)
@@ -2100,11 +2107,13 @@ static u8 g_cp_push_fused = 0u;
 // consumed ONLY by two byte serializers (the off-heap trace store and
 // the fused queue pack) and then abandoned as garbage.  Under the
 // route conditions (see sw_form_push) nothing else ever dereferences
-// them: the order gate is a no-op without eq parents, every push-side
-// filter is off under the fused pipeline, and the packed queue + the
-// packed trace serve every later reader (a surviving CP materializes
-// at pop from cp_packed, a cited trace entry from trace_eq_buf).  So
-// for that class the Term build is pure serialization overhead.
+// them: the eq-parent order gate runs VIRTUALLY (phase 2a), every
+// push-side filter is off under the fused pipeline, and the packed
+// queue + the packed trace serve every later reader (a surviving CP
+// materializes at pop from cp_packed, a cited trace entry from
+// trace_eq_buf).  So for that class the Term build is pure
+// serialization overhead.  The treated < 50 class dies too (phase 2b
+// below): its cells build straight from the composite.
 //
 // This path serializes the formed CP (sigma(lo[p<-rin]), sigma(ro))
 // STRAIGHT from the parent terms + the unifier: one virtual preorder
@@ -2236,7 +2245,9 @@ static u32 vcp_count_pair(Term lo, const u32 *p, u32 p_len, Term rin,
 // One virtual side of the fused emit: acp_fuse_walk_iter's exact byte
 // / flat-node / balance emission, with the node source swapped from
 // materialized Term cells to the resolve-through-subst composite
-// above.  The fused route always weighs, so `fz` is never NULL here.
+// above.  `fz` == NULL emits BYTES ONLY (no flat encode, no balances)
+// -- the acp_trace_pack_fused analogue the treated FT route uses for
+// its raw trace pair.
 static u8 vcp_emit_side(Term root, const u32 *p, u32 p_len, Term rin,
                         const RewriteSubst *subst, const KboConfig *cfg,
                         AcpNvMap *m, u32 *pos, u32 *nodes, AcpFuse *fz,
@@ -2262,13 +2273,16 @@ static u8 vcp_emit_side(Term root, const u32 *p, u32 p_len, Term rin,
         acp_put_varint(&bp, lab);
         acp_put_varint(&bp, n);
         lpos = (u32)(bp - g_acp_scratch);
-        acpf_ensure(lfpos + 1u);
-        u32 here = lfpos++;
-        u32 w = (lab < cfg->n_labels) ? cfg->weights[lab] : 0u;
-        g_acpf_pool[here].sym = (i32)lab;
-        g_acpf_pool[here].w   = w;
-        g_acpf_pool[here].ar  = n;
-        fz->phidiff += (long long)sign * (long long)w;
+        u32 here = 0u;
+        if (fz != NULL) {
+          acpf_ensure(lfpos + 1u);
+          here = lfpos++;
+          u32 w = (lab < cfg->n_labels) ? cfg->weights[lab] : 0u;
+          g_acpf_pool[here].sym = (i32)lab;
+          g_acpf_pool[here].w   = w;
+          g_acpf_pool[here].ar  = n;
+          fz->phidiff += (long long)sign * (long long)w;
+        }
         if (n > 0u) {
           if (sp >= (u32)ACP_FUSE_MAX_DEPTH) return 0;
           g_vcp_stk[sp].base = base;
@@ -2280,7 +2294,7 @@ static u8 vcp_emit_side(Term root, const u32 *p, u32 p_len, Term rin,
           cur = vcp_child(&g_vcp_stk[sp - 1u], 0u, p, p_len, rin, &cur_spd);
           continue;
         }
-        g_acpf_pool[here].sz = 1u;
+        if (fz != NULL) g_acpf_pool[here].sz = 1u;
         break;
       }
       case TAG_FVR: {
@@ -2292,19 +2306,21 @@ static u8 vcp_emit_side(Term root, const u32 *p, u32 p_len, Term rin,
         if (d == m->n) {
           if (m->n >= REWRITE_MAX_VAR) return 0;   // full map; fall back
           m->old_id[m->n++] = old;
-          fz->bal[d] = 0;
+          if (fz != NULL) fz->bal[d] = 0;
         }
         *bp++ = (u8)'V';
         acp_put_varint(&bp, d);
         lpos = (u32)(bp - g_acp_scratch);
-        acpf_ensure(lfpos + 1u);
-        g_acpf_pool[lfpos].sym = -(i32)(d + 1u);
-        g_acpf_pool[lfpos].w   = cfg->var_weight;
-        g_acpf_pool[lfpos].sz  = 1u;
-        g_acpf_pool[lfpos].ar  = 0u;
-        lfpos++;
-        fz->phidiff += (long long)sign * (long long)cfg->var_weight;
-        fz->bal[d]  += sign;
+        if (fz != NULL) {
+          acpf_ensure(lfpos + 1u);
+          g_acpf_pool[lfpos].sym = -(i32)(d + 1u);
+          g_acpf_pool[lfpos].w   = cfg->var_weight;
+          g_acpf_pool[lfpos].sz  = 1u;
+          g_acpf_pool[lfpos].ar  = 0u;
+          lfpos++;
+          fz->phidiff += (long long)sign * (long long)cfg->var_weight;
+          fz->bal[d]  += sign;
+        }
         break;
       }
       default:
@@ -2322,7 +2338,7 @@ static u8 vcp_emit_side(Term root, const u32 *p, u32 p_len, Term rin,
         cur = vcp_child(f, f->i, p, p_len, rin, &cur_spd);
         break;
       }
-      g_acpf_pool[f->here].sz = lfpos - f->here;
+      if (fz != NULL) g_acpf_pool[f->here].sz = lfpos - f->here;
       sp--;
     }
   }
@@ -2360,15 +2376,351 @@ static u8 vcp_emit_fused(const KboConfig *cfg, Term lo, const u32 *p,
   return 1u;
 }
 
-// Route gate for the FT-direct emission: default OFF this round
-// (THVM_ATP_FT_EMIT=1 enables; the CHECK certifier implies it).  The
+// --- Treated (< 50) FT-direct route (phase 2b) ----------------------
+//
+// The treated class flows through the WM KPBehandelt push-norm
+// treatment: classic pipeline = thvm_unify_apply x2 (heap Terms) ->
+// ft_from_term x2 -> FT normalize -> [joined? drop : ft_to_term x2 ->
+// trace pack + queue pack].  Under the same route conditions as the
+// raw class, the ONLY consumers of the built Terms are (a) the
+// ft_from_term boundary into the FT treatment and (b) the two byte
+// serializers on the survivor path.  So: build the FT cells STRAIGHT
+// from the parents + unifier (vcp_ft_build_rec -- the ft_from_term
+// image of the composite, cell-identical by the same resolve
+// argument as the raw emit), serialize the renumbered RAW pair bytes
+// for the trace at formation (vcp_emit_side, bytes-only), treat the
+// cells directly (the atp_cp_trivially_joinable FT core), and pack a
+// survivor's NF cells with ftp_pack_fused below -- the heap Term
+// intermediate dies for the whole class, along with its
+// ft_from_term / ft_to_term boundary walks.
+//
+// Compiled only with the FT stages (the treatment itself needs them);
+// without THVM_ATPFT_NORM a never-armed stub keeps the two byte
+// consumers' guards compiling.
+#ifdef THVM_ATPFT_NORM
+typedef struct {
+  u8         armed;     // stash live for exactly the one armed CP push
+  AtpFtCell *fl, *fr;   // raw pair FT cells; the treatment rewrites
+                        // them to the NF cells in place (same stash)
+  u32        raw_len;   // renumbered raw pair bytes at g_acp_scratch[0,raw_len)
+} VcpTreat;
+#else
+typedef struct {
+  u8  armed;            // never set without the FT stages
+  u32 raw_len;
+} VcpTreat;
+#endif
+static VcpTreat g_vcp_treat;
+
+u64 g_vcp_treat_n_ok   = 0;   // treated CPs formed FT-direct
+u64 g_vcp_treat_n_fb   = 0;   // anomaly fallbacks to the classic build
+u64 g_vcp_treat_n_pkfb = 0;   // NF-pack anomaly fallbacks (heap push)
+u64 g_vcp_gate_n_test  = 0;   // eq-parent CPs whose order gate ran virtually
+u64 g_vcp_gate_n_drop  = 0;   // ... of which dropped at formation
+u64 g_vcp_gate_n_fb    = 0;   // ... anomaly fallbacks to the classic gate
+u64 g_vcp_lb_hit       = 0;   // PROFILE=2 probe: raw CPs the unsubst LB catches
+u64 g_vcp_lb_raw       = 0;   // PROFILE=2 probe: raw CPs total
+
+#ifdef THVM_ATPFT_NORM
+// FT-cell image of one virtual side: ft_from_term's exact recursive
+// construction (children first, then ftnew_ctr stitches -- same arena
+// allocation order, same GROUND fold, same var-id encoding), with the
+// node source swapped to the resolve-through-subst composite.  NULL on
+// an anomaly (NUM/ERA atom, torn arity cell, over-arity); partially
+// built child spans are returned to the free list so a bail leaves the
+// arena exactly as the classic path (which never built cells for the
+// dropped candidate) would.
+static AtpFtCell *vcp_ft_build_rec(AtpFt *a, Term t, u32 spd,
+                                   const u32 *p, u32 p_len, Term rin,
+                                   const RewriteSubst *subst) {
+  t = vcp_resolve(t, subst);
+  switch (term_tag(t)) {
+    case TAG_FVR:
+      return ftnew_var(a, term_ext(t), 0);
+    case TAG_CTR: {
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) return NULL;
+      u32 n = (u32)term_val(n_cell);
+      if (n > REWRITE_MAX_ARITY) return NULL;
+      u32 lab = term_ext(t);
+      if (n == 0u) return ftnew_const(a, lab, 0);
+      AtpFtCell *kids[REWRITE_MAX_ARITY];
+      for (u32 i = 0; i < n; i++) {
+        Term c = heap_read(base + 1u + (u64)i);
+        u32 cspd = VCP_SPD_NONE;
+        if (spd != VCP_SPD_NONE && p[spd] == i) {
+          if (spd + 1u == p_len) c = rin;
+          else cspd = spd + 1u;
+        }
+        kids[i] = vcp_ft_build_rec(a, c, cspd, p, p_len, rin, subst);
+        if (kids[i] == NULL) {
+          for (u32 k = 0; k < i; k++) {
+            ft_free_span(a, kids[k], kids[k]->end);
+          }
+          return NULL;
+        }
+      }
+      return ftnew_ctr(a, lab, (u16)n, kids, 0);
+    }
+    default:
+      return NULL;   // NUM / ERA atom: classic path handles
+  }
+}
+
+static AtpFtCell *vcp_ft_build_side(AtpFt *a, Term root, const u32 *p,
+                                    u32 p_len, Term rin,
+                                    const RewriteSubst *subst) {
+  Term t  = (rin != 0 && p_len == 0u) ? rin : root;
+  u32 spd = (rin != 0 && p_len > 0u) ? 0u : VCP_SPD_NONE;
+  return vcp_ft_build_rec(a, t, spd, p, p_len, rin, subst);
+}
+
+// Renumbered raw pair bytes of the virtual CP (no flat encode, no
+// balances): the acp_trace_pack_fused image of the composite.  Serves
+// the treated route's trace store.  0 on an anomaly.
+static u8 vcp_emit_pair_bytes(Term lo, const u32 *p, u32 p_len, Term rin,
+                              Term ro, const RewriteSubst *subst,
+                              u32 *len) {
+  AcpNvMap m;
+  m.n = 0u;
+  u32 pos = 0u, nodes = 0u, fpos = 0u;
+  if (!vcp_emit_side(lo, p, p_len, rin, subst, NULL, &m,
+                     &pos, &nodes, NULL, +1, &fpos)) {
+    return 0u;
+  }
+  if (!vcp_emit_side(ro, NULL, 0u, 0, subst, NULL, &m,
+                     &pos, &nodes, NULL, -1, &fpos)) {
+    return 0u;
+  }
+  *len = pos;
+  return 1u;
+}
+
+// FT-side fused pack: acp_pack_fused's exact byte / flat-node /
+// balance emission with the node source swapped from Term cells to an
+// AtpFt span -- the treated survivor's NF cells go straight to packed
+// bytes + the armed fused-KBO weigh state, no ft_to_term.  The span's
+// `next` chain IS the preorder, so the walk is a linear scan with an
+// arity-countdown frame stack for the subtree-span fixups.  NULL on an
+// anomaly (converted NUM / foreign-tag marker syms, over-arity, depth
+// cap, > REWRITE_MAX_VAR distinct vars); nothing armed and the caller
+// decodes the cells and runs the classic pipeline.
+static u8 *ftp_pack_fused(const KboConfig *cfg, const AtpFtCell *lhs,
+                          const AtpFtCell *rhs, u32 *out_len,
+                          u32 *out_nodes, u32 *out_lhs_nodes) {
+  AcpFuse *fz = &g_acp_fuse;
+  fz->valid   = 0u;
+  fz->map.n   = 0u;
+  fz->phidiff = 0;
+  u32 pos = 0u, nodes = 0u, fpos = 0u, lhs_nodes = 0u, fl = 0u;
+  static u32 here_stk[ACP_FUSE_MAX_DEPTH];
+  static u32 rem_stk[ACP_FUSE_MAX_DEPTH];
+  for (u32 side = 0u; side < 2u; side++) {
+    const AtpFtCell *c = (side == 0u) ? lhs : rhs;
+    int sign = (side == 0u) ? +1 : -1;
+    u32 sp = 0u;
+    for (;;) {
+      nodes++;
+      acp_scratch_ensure(pos, 21u);
+      u8 *bp = g_acp_scratch + pos;
+      u8 leaf;
+      if (ft_is_var(c)) {
+        u32 old = ft_var_id(c);
+        u32 d = 0u;
+        for (; d < fz->map.n; d++) {
+          if (fz->map.old_id[d] == old) break;
+        }
+        if (d == fz->map.n) {
+          if (fz->map.n >= REWRITE_MAX_VAR) return NULL;
+          fz->map.old_id[fz->map.n++] = old;
+          fz->bal[d] = 0;
+        }
+        *bp++ = (u8)'V';
+        acp_put_varint(&bp, d);
+        pos = (u32)(bp - g_acp_scratch);
+        acpf_ensure(fpos + 1u);
+        g_acpf_pool[fpos].sym = -(i32)(d + 1u);
+        g_acpf_pool[fpos].w   = cfg->var_weight;
+        g_acpf_pool[fpos].sz  = 1u;
+        g_acpf_pool[fpos].ar  = 0u;
+        fpos++;
+        fz->phidiff += (long long)sign * (long long)cfg->var_weight;
+        fz->bal[d]  += sign;
+        leaf = 1u;
+      } else {
+        u32 lab = ft_ctr_sym(c);
+        // Converted-NUM / foreign-tag marker namespace (ft.c): the
+        // classic Term pack would emit 'N' / bail here -- classic path.
+        if (lab >= 0x20000000u) return NULL;
+        u32 n = c->arity;
+        if (n > REWRITE_MAX_ARITY) return NULL;
+        *bp++ = (u8)'C';
+        acp_put_varint(&bp, lab);
+        acp_put_varint(&bp, n);
+        pos = (u32)(bp - g_acp_scratch);
+        acpf_ensure(fpos + 1u);
+        u32 here = fpos++;
+        u32 w = (lab < cfg->n_labels) ? cfg->weights[lab] : 0u;
+        g_acpf_pool[here].sym = (i32)lab;
+        g_acpf_pool[here].w   = w;
+        g_acpf_pool[here].ar  = n;
+        fz->phidiff += (long long)sign * (long long)w;
+        if (n > 0u) {
+          if (sp >= (u32)ACP_FUSE_MAX_DEPTH) return NULL;
+          here_stk[sp] = here;
+          rem_stk[sp]  = n;
+          sp++;
+          leaf = 0u;
+        } else {
+          g_acpf_pool[here].sz = 1u;
+          leaf = 1u;
+        }
+      }
+      if (leaf) {
+        // Complete enclosing subtrees whose last child this was.
+        u8 done = 0u;
+        for (;;) {
+          if (sp == 0u) { done = 1u; break; }
+          if (--rem_stk[sp - 1u] > 0u) break;
+          g_acpf_pool[here_stk[sp - 1u]].sz = fpos - here_stk[sp - 1u];
+          sp--;
+        }
+        if (done) break;
+      }
+      c = c->next;
+      if (c == NULL) return NULL;   // torn span; classic path
+    }
+    if (side == 0u) {
+      lhs_nodes = nodes;
+      fl        = fpos;
+    }
+  }
+  fz->fl_n  = fl;
+  fz->fr_n  = fpos - fl;
+  fz->valid = 1u;
+  u8 *buf = (u8 *)malloc(pos ? pos : 1u);
+  if (buf == NULL) thvm_fatal("ftp_pack_fused: OOM");
+  memcpy(buf, g_acp_scratch, pos);
+  *out_len       = pos;
+  *out_nodes     = nodes;
+  *out_lhs_nodes = lhs_nodes;
+  return buf;
+}
+
+// Treated (< 50) FT-direct formation: emit the renumbered raw pair
+// bytes into the scratch (they sit at g_acp_scratch[0, raw_len) until
+// the trace store consumes them -- audited: nothing between formation
+// and the trace push touches the scratch on the routed path) and
+// build the raw pair's FT cells straight from the composite.  On
+// success the stash holds both, NOT yet armed (the caller arms around
+// the push).  0 on an anomaly: nothing allocated, nothing armed, the
+// caller runs the classic Term build.
+static u8 vcp_treat_form(AtpState *s, Term lo, const u32 *p, u32 p_len,
+                         Term rin, Term ro, const RewriteSubst *subst) {
+  u32 raw_len = 0u;
+  if (!vcp_emit_pair_bytes(lo, p, p_len, rin, ro, subst, &raw_len)) {
+    return 0u;
+  }
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *fl = vcp_ft_build_side(a, lo, p, p_len, rin, subst);
+  if (fl == NULL) return 0u;
+  AtpFtCell *fr = vcp_ft_build_side(a, ro, NULL, 0u, 0, subst);
+  if (fr == NULL) {
+    ft_free_span(a, fl, fl->end);
+    return 0u;
+  }
+  g_vcp_treat.armed   = 0u;
+  g_vcp_treat.fl      = fl;
+  g_vcp_treat.fr      = fr;
+  g_vcp_treat.raw_len = raw_len;
+  return 1u;
+}
+
+// Release a formed-but-unpushed treated stash (a post-formation gate
+// dropped the CP): the classic path never built cells for a dropped
+// candidate, so return the spans to the free list.
+static void vcp_treat_release(AtpState *s) {
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  if (g_vcp_treat.fl != NULL) ft_free_span(a, g_vcp_treat.fl, g_vcp_treat.fl->end);
+  if (g_vcp_treat.fr != NULL) ft_free_span(a, g_vcp_treat.fr, g_vcp_treat.fr->end);
+  g_vcp_treat.fl = g_vcp_treat.fr = NULL;
+  g_vcp_treat.armed = 0u;
+}
+#endif // THVM_ATPFT_NORM
+
+// --- FT-emit virtual order gate (phase 2a) ---------------------------
+//
+// The WM KPAction ordering gate (atp_cp_order_gate) is the only peak
+// consumer on the routed path: for an equation parent it drops the CP
+// at formation when
+//   outer (o_eq):  sigma(ro)  >kbo  sigma(lo)      (cp.rhs vs cp.peak)
+//   inner (in_eq): sigma(rin) >kbo  sigma(sub)     (the overlap-position
+//                                    subterms of cp.lhs / cp.peak)
+// after a joint thvm_normalize_vars.  Every operand is a plain
+// resolve-through-subst composite of a term the walk former already
+// holds, so the verdict is computable without building ANY of the
+// three CP Terms: two bytes+flat walks into a LOCAL fuse state, then
+// the flat-KBO mirror (acp_fuse_kbo_at == thvm_kbo_nomemo on the
+// jointly-renumbered pair == the classic gate's normalize+compare;
+// route conditions pin atp_compare to plain KBO).  Returns 1 with
+// *drop set; 0 on an anomaly (caller falls back to the classic Term
+// build, whose classic gate then decides).
+static u8 vcp_order_gate_virtual(AtpState *s, Term lo, Term rin, Term ro,
+                                 Term sub, const RewriteSubst *subst,
+                                 u8 o_eq, u8 in_eq, u8 *drop) {
+  *drop = 0u;
+  AcpFuse fz;
+  u32 pos, nodes, fpos, fl;
+  if (o_eq) {
+    fz.map.n = 0u; fz.phidiff = 0;
+    pos = nodes = fpos = 0u;
+    if (!vcp_emit_side(ro, NULL, 0u, 0, subst, s->kbo, &fz.map,
+                       &pos, &nodes, &fz, +1, &fpos)) {
+      return 0u;
+    }
+    fl = fpos;
+    if (!vcp_emit_side(lo, NULL, 0u, 0, subst, s->kbo, &fz.map,
+                       &pos, &nodes, &fz, -1, &fpos)) {
+      return 0u;
+    }
+    fz.fl_n = fl;
+    fz.fr_n = fpos - fl;
+    if (acp_fuse_kbo_at(s->kbo, &fz, g_acpf_pool) == KBO_GT) {
+      *drop = 1u;
+      return 1u;
+    }
+  }
+  if (in_eq) {
+    fz.map.n = 0u; fz.phidiff = 0;
+    pos = nodes = fpos = 0u;
+    if (!vcp_emit_side(rin, NULL, 0u, 0, subst, s->kbo, &fz.map,
+                       &pos, &nodes, &fz, +1, &fpos)) {
+      return 0u;
+    }
+    fl = fpos;
+    if (!vcp_emit_side(sub, NULL, 0u, 0, subst, s->kbo, &fz.map,
+                       &pos, &nodes, &fz, -1, &fpos)) {
+      return 0u;
+    }
+    fz.fl_n = fl;
+    fz.fr_n = fpos - fl;
+    if (acp_fuse_kbo_at(s->kbo, &fz, g_acpf_pool) == KBO_GT) *drop = 1u;
+  }
+  return 1u;
+}
+
+// Route gate for the FT-direct emission: DEFAULT ON (phase-2 flip
+// after the OA+DN+17-theorem certifier sweep); THVM_ATP_FT_EMIT=0 is
+// the one-round kill switch (the CHECK certifier overrides it).  The
 // size-hint kill/certifier envs force the historic Term-walk size
 // gate, which needs the Terms -- route off under either.
 static int atp_ft_emit_on(void) {
   static int v = -1;
   if (v < 0) {
-    v = (atp_env_on("THVM_ATP_FT_EMIT") ||
-         atp_env_on("THVM_ATP_FT_EMIT_CHECK")) &&
+    const char *e = getenv("THVM_ATP_FT_EMIT");
+    int killed = (e != NULL && e[0] == '0');
+    v = (!killed || atp_env_on("THVM_ATP_FT_EMIT_CHECK")) &&
         !atp_env_on("THVM_NO_CP_SZHINT") &&
         !atp_env_on("THVM_ATP_SZHINT_CHECK");
   }
@@ -6390,6 +6742,13 @@ static u64 atp_trace_eq_store(AtpState *s, Term lhs, Term rhs) {
       // raw>=50 class stores its raw pair == its queued pair.
       pos = g_vcp_emit.len;
       stored = 1u;
+    } else if (g_vcp_treat.armed) {
+      // Treated FT-direct push: the renumbered RAW pair bytes were
+      // emitted at formation (vcp_treat_form) and still sit at
+      // g_acp_scratch[0, raw_len) -- the trace stores the raw pair,
+      // the queue (below) packs the treated NF cells separately.
+      pos = g_vcp_treat.raw_len;
+      stored = 1u;
     } else {
       // Fused push loop: the raw pair arrives un-renumbered; renumber
       // during the byte emit (bytes identical to normalize-then-pack).
@@ -9647,6 +10006,35 @@ static void atp_auto_maxw_drain(AtpState *s, u8 force) {
   s->n_cp_stash = w;
 }
 
+#ifdef THVM_ATPFT_NORM
+// THVM_ATP_FT_EMIT_CHECK for the treated survivor's queue pack: the
+// FT-side fused pack must byte-match the classic decode-then-pack
+// (ft_to_term x2 -> thvm_normalize_vars -> acp_pack_ex) and the fused
+// weigh must verdict-match the classic memo-free KBO -- the exact
+// FUSE_CHECK discipline, sourced from the NF cells.
+static void vcp_treat_pack_certify(const AtpState *s, const u8 *packed,
+                                   u32 flen, u32 cp_nodes, u32 lhs_nodes) {
+  Term cl = ft_to_term(g_vcp_treat.fl);
+  Term cr = ft_to_term(g_vcp_treat.fr);
+  KboCmp cf = acp_fuse_kbo(s->kbo);
+  thvm_normalize_vars(&cl, &cr);
+  u32 rlen = 0u, rn = 0u, rl = 0u;
+  u8 *ref = acp_pack_ex(cl, cr, &rlen, &rn, &rl);
+  KboCmp cc = thvm_kbo_nomemo(cl, cr, s->kbo);
+  if (rlen != flen || rn != cp_nodes || rl != lhs_nodes ||
+      memcmp(ref, packed, rlen) != 0 || cf != cc) {
+    fprintf(stderr,
+            "ATP_FT_EMIT_CHECK TREATPACK MISMATCH len=%u/%u nodes=%u/%u "
+            "lhs=%u/%u bytes=%s kbo=%d/%d\n",
+            flen, rlen, cp_nodes, rn, lhs_nodes, rl,
+            (rlen == flen && memcmp(ref, packed, rlen) == 0) ? "EQ" : "DIFF",
+            (int)cf, (int)cc);
+    abort();
+  }
+  free(ref);
+}
+#endif // THVM_ATPFT_NORM
+
 // Push one CP onto the heap.  Computes its priority once (the cost
 // the old select_cp paid n times per step) and sifts up.  O(log n).
 // `is_ultimate`=1 propagates the Waldmeister Act_ultimate front-rank
@@ -9691,6 +10079,37 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     cp_nodes  = g_vcp_emit.nodes;
     lhs_nodes = g_vcp_emit.lhs_nodes;
     g_acp_fuse_n_ok++;
+#ifdef THVM_ATPFT_NORM
+  } else if (g_cp_push_fused && g_vcp_treat.armed) {
+    // Treated FT-direct push (THVM_ATP_FT_EMIT phase 2b): pack the
+    // survivor's NF cells straight to bytes + the armed fused weigh
+    // (ftp_pack_fused).  An anomaly (marker syms etc.) decodes the
+    // cells and rejoins the classic fused pipeline below -- exactly
+    // the pair the classic route would have packed.
+    u32 flen = 0u;
+    packed = ftp_pack_fused(s->kbo, g_vcp_treat.fl, g_vcp_treat.fr,
+                            &flen, &cp_nodes, &lhs_nodes);
+    if (packed != NULL) {
+      g_acp_fuse_n_ok++;
+      static int treat_check = -1;
+      if (treat_check < 0) treat_check = atp_env_on("THVM_ATP_FT_EMIT_CHECK");
+      if (treat_check) {
+        vcp_treat_pack_certify(s, packed, flen, cp_nodes, lhs_nodes);
+      }
+    } else {
+      g_vcp_treat_n_pkfb++;
+      lhs = ft_to_term(g_vcp_treat.fl);
+      rhs = ft_to_term(g_vcp_treat.fr);
+      packed = acp_pack_fused(s->kbo, lhs, rhs, &flen, &cp_nodes,
+                              &lhs_nodes);
+      if (packed == NULL) {
+        g_acp_fuse_n_fb++;
+        thvm_normalize_vars(&lhs, &rhs);
+      } else {
+        g_acp_fuse_n_ok++;
+      }
+    }
+#endif
   } else if (g_cp_push_fused) {
     u32 flen = 0u;
     packed = acp_pack_fused(s->kbo, lhs, rhs, &flen, &cp_nodes, &lhs_nodes);
@@ -18566,6 +18985,43 @@ static u8 atp_cp_push_fuse_ok(const AtpState *s) {
 #endif
 }
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Treated FT-direct joinability (phase 2b): the exact inner sequence
+// of atp_cp_trivially_joinable's FT path -- mirror ensure, doR-only
+// normalize x2, ft_eq verdict -- run on the stashed formation-time
+// cells instead of ft_from_term(apply(...)) images.  Cell-identical
+// input (vcp_treat_certify) + the same normalize = the same verdict
+// and the same NF cells; the stash is updated in place so the
+// survivor's trace / pack consumers read the NFs.  The AC-eq and
+// join-cache branches of the Term-side caller are structurally off on
+// this route (fuse gate: ac_mask == 0; route gate: join-cache env
+// unset).
+static u8 vcp_treat_joinable(AtpState *s) {
+  int _dl = (g_atp_phase_detail && g_atp_pushn_active);
+  u64 _dt = _dl ? atp_now_us() : 0;
+  if (_dl) g_atp_pushn_calls++;
+  atp_ft_mirror_ensure(s);
+  if (_dl) {
+    u64 _n = atp_now_us();
+    g_atp_pushn_us_mirror += _n - _dt;
+    _dt = _n;
+  }
+  g_vcp_treat.fl = atp_rules_only_normalize_ft(s, g_vcp_treat.fl, 64u);
+  g_vcp_treat.fr = atp_rules_only_normalize_ft(s, g_vcp_treat.fr, 64u);
+  if (_dl) {
+    u64 _n = atp_now_us();
+    g_atp_pushn_us_norm += _n - _dt;
+    _dt = _n;
+  }
+  u8 joined = (u8)ft_eq(g_vcp_treat.fl, g_vcp_treat.fr);
+  if (_dl) {
+    g_atp_pushn_us_eq += atp_now_us() - _dt;
+    if (joined) g_atp_pushn_joined++;
+  }
+  return joined;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
 static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                u32 ncps, u32 parent_a, u32 parent_b,
                                u32 rule_a, u32 rule_b) {
@@ -18692,14 +19148,35 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       }
       if (g_atp_phase_detail) g_atp_pushn_us_gate += atp_now_us() - _dg_t0;
       if (raw_sz < WM_BEHANDELN_GATE) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        if (g_vcp_treat.armed) {
+          // Treated FT-direct route: the raw pair exists only as the
+          // stashed FT cells (cp_lhs/cp_rhs are 0); treat them
+          // directly.
+          joinable = vcp_treat_joinable(s);
+        } else {
+          joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+        }
+#else
         joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+#endif
         s->n_cps_push_normalized++;
       } else {
         joinable = 0u;
         raw_untreated = 1u;
       }
     } else {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      if (g_vcp_treat.armed) {
+        // Treated FT-direct route, non-lazy stream (every CP treated):
+        // the raw pair exists only as the stashed FT cells.
+        joinable = vcp_treat_joinable(s);
+      } else {
+        joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+      }
+#else
       joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+#endif
       s->n_cps_push_normalized++;
     }
     g_atp_pushn_active = 0u;
@@ -19768,6 +20245,110 @@ static void sw_rename_pair(Term src_l, Term src_r, Term *lin, Term *rin) {
   e->epoch = g_atp_gc_epoch;
 }
 
+// THVM_ATP_FT_EMIT_CHECK for the virtual order gate: rebuild the three
+// CP Terms classically and replicate atp_cp_order_gate's compare
+// verbatim; abort on any verdict divergence.  Runs while the unifier
+// is still armed.
+static void vcp_gate_certify(AtpState *s, Term lo, const u32 *p, u32 p_len,
+                             Term rin, Term ro, const RewriteSubst *subst,
+                             u8 o_eq, u8 in_eq, u8 vdrop) {
+  Term cl   = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), subst);
+  Term cr   = thvm_unify_apply(ro, subst);
+  Term peak = thvm_unify_apply(lo, subst);
+  u8 drop = 0u;
+  if (peak != 0) {
+    if (o_eq) {
+      Term a = cr, b = peak;
+      thvm_normalize_vars(&a, &b);
+      if (atp_compare(s, a, b) == KBO_GT) drop = 1u;
+    }
+    if (!drop && in_eq) {
+      u8 pos8[CP_MAX_DEPTH];
+      for (u32 d = 0; d < p_len && d < (u32)CP_MAX_DEPTH; d++) {
+        pos8[d] = (u8)p[d];
+      }
+      Term in_new = atp_cp_pos_subterm(cl, pos8, (u8)p_len);
+      Term in_old = atp_cp_pos_subterm(peak, pos8, (u8)p_len);
+      if (in_new != 0 && in_old != 0) {
+        thvm_normalize_vars(&in_new, &in_old);
+        if (atp_compare(s, in_new, in_old) == KBO_GT) drop = 1u;
+      }
+    }
+  }
+  if (drop != vdrop) {
+    fprintf(stderr,
+            "ATP_FT_EMIT_CHECK GATE MISMATCH classic=%u virtual=%u "
+            "o_eq=%u in_eq=%u\n", drop, vdrop, o_eq, in_eq);
+    abort();
+  }
+}
+
+#ifdef THVM_ATPFT_NORM
+// Cell-by-cell identity of two FT spans (sym + arity + flags -- ft_eq
+// plus the flag bits the treatment's fast paths read).
+static u8 vcp_ft_cells_identical(const AtpFtCell *x, const AtpFtCell *y) {
+  const AtpFtCell *xe = (x->end != NULL) ? x->end->next : NULL;
+  const AtpFtCell *px = x;
+  const AtpFtCell *py = y;
+  while (px != xe) {
+    if (py == NULL) return 0u;
+    if (px->sym != py->sym || px->arity != py->arity ||
+        px->flags != py->flags) {
+      return 0u;
+    }
+    px = px->next;
+    py = py->next;
+  }
+  return 1u;
+}
+
+// THVM_ATP_FT_EMIT_CHECK for the treated formation: classic rebuild of
+// the raw pair, byte-compare the virtual raw trace bytes, cell-compare
+// the virtual FT image against ft_from_term of the classic pair, and
+// re-affirm the exact size-gate count.  Runs while the unifier is
+// still armed; restores the virtual bytes into the scratch (the trace
+// store reads them later).
+static void vcp_treat_certify(AtpState *s, Term lo, const u32 *p, u32 p_len,
+                              Term rin, Term ro, const RewriteSubst *subst,
+                              u32 vtot) {
+  u32 vlen = g_vcp_treat.raw_len;
+  u8 *vbytes = (u8 *)malloc(vlen ? vlen : 1u);
+  if (vbytes == NULL) thvm_fatal("vcp_treat_certify: OOM");
+  memcpy(vbytes, g_acp_scratch, vlen);
+  u64 c0 = g_unify_apply_cells, t0 = g_unify_apply_taint;
+  Term cl = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), subst);
+  Term cr = thvm_unify_apply(ro, subst);
+  u32 ctot = (g_unify_apply_taint == t0)
+                 ? (u32)(g_unify_apply_cells - c0) : 0u;
+  u8 bad = 0u;
+  // Exact-count agreement: lazy routing only (the non-lazy stream
+  // skips the count walk and passes vtot 0 = no verdict to certify).
+  if (vtot != 0u && ctot != 0u && ctot != vtot) bad = 1u;
+  u32 rpos = 0u;
+  if (!bad && (!acp_trace_pack_fused(cl, cr, &rpos) || rpos != vlen ||
+               memcmp(g_acp_scratch, vbytes, vlen) != 0)) {
+    bad = 2u;
+  }
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *ffl = ft_from_term(a, cl, 0);
+  AtpFtCell *ffr = ft_from_term(a, cr, 0);
+  if (!bad && (!vcp_ft_cells_identical(g_vcp_treat.fl, ffl) ||
+               !vcp_ft_cells_identical(g_vcp_treat.fr, ffr))) {
+    bad = 3u;
+  }
+  ft_free_span(a, ffl, ffl->end);
+  ft_free_span(a, ffr, ffr->end);
+  if (bad) {
+    fprintf(stderr,
+            "ATP_FT_EMIT_CHECK TREAT MISMATCH kind=%u len=%u/%u "
+            "ctot=%u vtot=%u\n", bad, vlen, rpos, ctot, vtot);
+    abort();
+  }
+  memcpy(g_acp_scratch, vbytes, vlen);
+  free(vbytes);
+}
+#endif // THVM_ATPFT_NORM
+
 // Form ONE CP: outer face (lo,ro) overlapped at position p by the already-
 // renamed inner face (lin,rin); push it on its own so cp_seq is the next FIFO
 // slot.  atp_cp_gen_gates (joinable/ordering) runs BEFORE the push == WM's
@@ -19845,28 +20426,86 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   }
   if (_dl) g_atp_cpg_overlap_calls++;
   CriticalPair cp;
-  // FT-direct emission routing (THVM_ATP_FT_EMIT, default OFF): the
-  // raw >= 50 KPBehandelt class under the fused pipeline + packed
-  // trace never has its (lhs, rhs) Terms dereferenced past the two
-  // byte serializers (see the vcp_* block), so serialize it straight
-  // from (lo, p, rin, ro, subst) and skip the Term build.  Route
-  // conditions: no eq parents (order gate no-op, no peak read), no
-  // armed nusfu/kapur (peak readers), the KPBehandelt gate live
-  // (lazy, non-MNF), packed trace, the fused pipeline admissible, and
-  // no per-pair debug probe.  Everything else -- including the
-  // treated < 50 class -- takes the classic build below, unchanged.
-  u8  ft_route      = 0u;
+  // FT-direct emission routing (THVM_ATP_FT_EMIT, default ON): under
+  // the fused pipeline + packed trace the formed CP's (lhs, rhs)
+  // Terms are never dereferenced past (1) the eq-parent order gate --
+  // computed VIRTUALLY here (vcp_order_gate_virtual) -- and (2) the
+  // byte serializers / the FT treatment boundary (see the vcp_*
+  // block).  So serialize / build FT straight from (lo, p, rin, ro,
+  // subst) and skip the Term build: under the lazy KPBehandelt gate
+  // the raw >= 50 class emits its packed pair directly (phase 1) and
+  // the treated < 50 class builds its FT cells directly (phase 2b);
+  // without lazy EVERY CP is treated, so the whole stream takes the
+  // treated arm (the WL "Waldmeister" preset's configuration).  Route
+  // conditions: no armed nusfu/kapur (peak readers the virtual gate
+  // does not cover), non-MNF, packed trace, the fused pipeline
+  // admissible, no per-pair debug probe; the treated arm additionally
+  // requires the FT stages and no Term-keyed join cache.  Anomalies
+  // fall back to the classic build below, unchanged.
+  u8  ft_route      = 0u;   // lazy raw >= 50: serialized straight to bytes
+  u8  ft_treat      = 0u;   // treated: FT cells straight from parents
   u8  ft_considered = 0u;
   u32 vtot          = 0u;
-  if (atp_ft_emit_on() && !_cptr_sw && !o_eq && !in_eq &&
-      s->use_lazy_normalize && !s->use_mnf && s->trace_pack &&
+  if (atp_ft_emit_on() && !_cptr_sw &&
+      !s->use_mnf && s->trace_pack &&
       !atp_kapur_on() &&
       !(s->use_no_overlap_below_skolem && s->n_skolem_labels != 0u) &&
       atp_cp_push_fuse_ok(s)) {
     ft_considered = 1u;
-    vtot = vcp_count_pair(lo, p, p_len, rin, ro, &subst,
-                          (u32)ATP_WM_BEHANDELN_GATE);
-    if (vtot != VCP_COUNT_ANOMALY && vtot >= (u32)ATP_WM_BEHANDELN_GATE) {
+    // The capped size count routes raw-vs-treated ONLY under the lazy
+    // KPBehandelt gate; the non-lazy stream is all-treated and skips
+    // the walk (vtot 0 = no hint, exactly the classic non-lazy hint
+    // consumption: none).
+    vtot = s->use_lazy_normalize
+               ? vcp_count_pair(lo, p, p_len, rin, ro, &subst,
+                                (u32)ATP_WM_BEHANDELN_GATE)
+               : 0u;
+    // PROFILE=2 probe for the phase-2c lower-bound idea: how many raw
+    // (>= gate) CPs would an UNSUBSTITUTED size bound
+    // (|rin| + |ro| + p_len >= gate) already classify, skipping the
+    // capped composite count walk?  Measurement only -- no routing
+    // reads it.
+    if (g_atp_phase_detail && vtot != VCP_COUNT_ANOMALY) {
+      extern u64 g_vcp_lb_hit, g_vcp_lb_raw;
+      if (vtot >= (u32)ATP_WM_BEHANDELN_GATE) {
+        g_vcp_lb_raw++;
+        u32 lb = p_len;
+        atp_symbol_count_upto(rin, (u32)ATP_WM_BEHANDELN_GATE, &lb);
+        if (lb < (u32)ATP_WM_BEHANDELN_GATE) {
+          atp_symbol_count_upto(ro, (u32)ATP_WM_BEHANDELN_GATE, &lb);
+        }
+        if (lb >= (u32)ATP_WM_BEHANDELN_GATE) g_vcp_lb_hit++;
+      }
+    }
+    u8 gate_ok = (vtot != VCP_COUNT_ANOMALY);
+    if (gate_ok && (o_eq || in_eq)) {
+      // Eq-parent KPAction ordering gate, virtual (phase 2a): drop at
+      // formation exactly where the classic gate would, without
+      // building cp.lhs / cp.rhs / cp.peak.
+      u8 vdrop = 0u;
+      if (vcp_order_gate_virtual(s, lo, rin, ro, sub, &subst,
+                                 o_eq, in_eq, &vdrop)) {
+        g_vcp_gate_n_test++;
+        if (atp_ft_emit_check_on()) {
+          vcp_gate_certify(s, lo, p, p_len, rin, ro, &subst,
+                           o_eq, in_eq, vdrop);
+        }
+        if (vdrop) {
+          // The classic order gate's drop: before numbering, weighing
+          // or queueing -- return with no side effects, like the
+          // atp_cp_gen_gates == 0 path below.
+          g_vcp_gate_n_drop++;
+          thvm_unify_undo(&subst);
+          if (_dl) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
+          return 0u;
+        }
+      } else {
+        g_vcp_gate_n_fb++;
+        gate_ok = 0u;   // anomaly: classic build + classic gate decide
+      }
+    }
+    if (gate_ok && s->use_lazy_normalize &&
+        vtot >= (u32)ATP_WM_BEHANDELN_GATE) {
       if (vcp_emit_fused(s->kbo, lo, p, p_len, rin, ro, &subst)) {
         ft_route = 1u;
         g_vcp_emit_n_ok++;
@@ -19876,18 +20515,37 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
       } else {
         g_vcp_emit_n_fb++;
       }
+    } else if (gate_ok) {
+#ifdef THVM_ATPFT_NORM
+      static int join_cache_env = -1;
+      if (join_cache_env < 0) {
+        join_cache_env = atp_env_on("THVM_ATP_JOIN_CACHE");
+      }
+      if (!join_cache_env) {
+        if (vcp_treat_form(s, lo, p, p_len, rin, ro, &subst)) {
+          ft_treat = 1u;
+          g_vcp_treat_n_ok++;
+          if (atp_ft_emit_check_on()) {
+            vcp_treat_certify(s, lo, p, p_len, rin, ro, &subst, vtot);
+          }
+        } else {
+          g_vcp_treat_n_fb++;
+        }
+      }
+#endif
     } else if (vtot == VCP_COUNT_ANOMALY) {
       g_vcp_emit_n_fb++;
     }
   }
   u32 hint_val = 0u;
-  if (ft_route) {
-    // The serialized bytes / counts / weigh state stand in for the
-    // Terms; nothing on this route reads the CP slots.
+  if (ft_route || ft_treat) {
+    // The serialized bytes / counts / FT cells stand in for the Terms;
+    // nothing on this route reads the CP slots (the eq-parent order
+    // gate already ran virtually above, so cp.peak is never needed).
     cp.lhs  = 0;
     cp.rhs  = 0;
     cp.peak = 0;
-    hint_val = vtot;   // >= the gate: the raw-untreated verdict
+    hint_val = vtot;   // exact under the gate; capped == raw verdict over it
     thvm_unify_undo(&subst);
   } else {
     // Bracket the two side-builds with the unify-apply node tally: the
@@ -19918,7 +20576,8 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
     // FT_EMIT_CHECK also certifies the router on the classic side:
     // the capped virtual count must agree with the untainted apply
     // tally (equal under the gate, both capped at it otherwise).
-    if (ft_considered && atp_ft_emit_check_on() &&
+    // vtot 0 = the non-lazy stream, which never counts.
+    if (ft_considered && atp_ft_emit_check_on() && vtot != 0u &&
         vtot != VCP_COUNT_ANOMALY && hint_val != 0u &&
         vtot != ((hint_val < (u32)ATP_WM_BEHANDELN_GATE)
                      ? hint_val : (u32)ATP_WM_BEHANDELN_GATE)) {
@@ -19932,9 +20591,14 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   for (u32 d = 0; d < p_len; d++) cp.pos[d] = (u8)p[d];
   cp.combo = 0xffu;
   if (atp_cp_gen_gates(s, &cp, 0u, 1u, o_eq, in_eq) == 0u) {
-    // Unreachable under ft_route (every dropping gate is routed off),
-    // but never leave the armed weigh state for a later push.
+    // Unreachable under ft_route / ft_treat (the order gate ran
+    // virtually and every other dropping gate is routed off), but
+    // never leave the armed weigh state / stashed cells for a later
+    // push.
     if (ft_route) g_acp_fuse.valid = 0u;
+#ifdef THVM_ATPFT_NORM
+    if (ft_treat) vcp_treat_release(s);
+#endif
     if (_dl) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
     if (_cptr_sw) {
       fprintf(stderr, "CPTR SW DROP gen-gates\n");
@@ -19970,12 +20634,21 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   // Arm the FT-direct stash for exactly this push (the two byte
   // consumers -- trace store + heap pack -- read it); cleared on
   // EVERY exit of the push, including the pre-pack drop paths, so a
-  // stale weigh state can never leak onto a later CP.
+  // stale weigh state can never leak onto a later CP.  The treated
+  // stash arms its own flag: the push loop treats the stashed cells
+  // in place, the trace store takes the raw bytes, the heap push
+  // packs the NF cells; dropped-or-consumed either way, the cells are
+  // abandoned exactly like the classic path's NF cells.
   if (ft_route) g_vcp_emit.armed = 1u;
+  if (ft_treat) g_vcp_treat.armed = 1u;
   u32 rv = atp_push_cps_traced(s, &cp, 1u, t_out, t_in, i_out, i_in);
   if (ft_route) {
     g_vcp_emit.armed = 0u;
     g_acp_fuse.valid = 0u;
+  }
+  if (ft_treat) {
+    g_vcp_treat.armed = 0u;
+    g_acp_fuse.valid  = 0u;
   }
   if (_dl) g_atp_cpg_us_pushloop += atp_now_us() - _dpl_t0;
   if (_cptr_sw) g_cptr_active = 0u;

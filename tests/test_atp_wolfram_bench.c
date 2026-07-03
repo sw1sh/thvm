@@ -1808,10 +1808,27 @@ int main(int argc, char **argv) {
       }
       {
         extern u64 g_vcp_emit_n_ok, g_vcp_emit_n_fb;
-        if (g_vcp_emit_n_ok + g_vcp_emit_n_fb > 0) {
-          printf("   ft-emit: ok=%llu fallback=%llu\n",
+        extern u64 g_vcp_treat_n_ok, g_vcp_treat_n_fb, g_vcp_treat_n_pkfb;
+        extern u64 g_vcp_gate_n_test, g_vcp_gate_n_drop, g_vcp_gate_n_fb;
+        if (g_vcp_emit_n_ok + g_vcp_emit_n_fb +
+            g_vcp_treat_n_ok + g_vcp_treat_n_fb > 0) {
+          printf("   ft-emit: raw ok=%llu fb=%llu | treat ok=%llu fb=%llu "
+                 "pkfb=%llu | gate test=%llu drop=%llu fb=%llu\n",
                  (unsigned long long)g_vcp_emit_n_ok,
-                 (unsigned long long)g_vcp_emit_n_fb);
+                 (unsigned long long)g_vcp_emit_n_fb,
+                 (unsigned long long)g_vcp_treat_n_ok,
+                 (unsigned long long)g_vcp_treat_n_fb,
+                 (unsigned long long)g_vcp_treat_n_pkfb,
+                 (unsigned long long)g_vcp_gate_n_test,
+                 (unsigned long long)g_vcp_gate_n_drop,
+                 (unsigned long long)g_vcp_gate_n_fb);
+        }
+        extern u64 g_vcp_lb_hit, g_vcp_lb_raw;
+        if (g_vcp_lb_raw > 0) {
+          printf("   ft-emit lb probe: hit=%llu of raw=%llu (%.1f%%)\n",
+                 (unsigned long long)g_vcp_lb_hit,
+                 (unsigned long long)g_vcp_lb_raw,
+                 100.0 * (double)g_vcp_lb_hit / (double)g_vcp_lb_raw);
         }
       }
       printf("   push-norm core shape: queries=%llu (var=%llu) cand=%llu "
