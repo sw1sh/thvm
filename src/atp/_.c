@@ -455,6 +455,12 @@ u64 g_atp_cpg_rank_calls          = 0;
 // Walk rename-cache shape (sw_rename_pair; PROFILE=2 printout).
 u64 g_atp_swrn_hit                = 0;
 u64 g_atp_swrn_miss               = 0;
+// Whole-run ATP GC cost (thvm_atp_gc_collect): collections + wall.
+// The heap-pressure collect fires inside thvm_atp_generate_cps_wm, so
+// the phase tiles bury it in cp-gen; these track it explicitly.
+// Unconditional (a saturation runs O(100) collections, timing is noise).
+u64 g_atp_gc_us                   = 0;
+u64 g_atp_gc_n                    = 0;
 u8  g_atp_phase_detail            = 0;
 static u8 g_atp_pushn_active      = 0;
 // GC epoch: bumped by every thvm_atp_gc_collect (the only collector
@@ -5669,6 +5675,7 @@ fn void thvm_atp_heap_reset(u64 checkpoint) {
 // Returns 1 if a collection ran, 0 if GC is disabled / no state.
 fn u8 thvm_atp_gc_collect(AtpState *s) {
   if (s == NULL || !gc_enabled()) return 0;
+  u64 gc_t0 = atp_now_us();
 
   // Count the root slots so we can size the array exactly.
   // 2 per rule for lhs/rhs, plus 2 per rule for dead-save (originals
@@ -5815,6 +5822,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // force-bump the step epoch here: GC is a coarse phase boundary
   // (workload shifts post-GC) and the rare-event cost is negligible.
   atp_unf_memo_invalidate(s->r_revision, 1u);
+  g_atp_gc_us += atp_now_us() - gc_t0;
+  g_atp_gc_n  += 1u;
   return 1;
 }
 
