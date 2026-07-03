@@ -685,8 +685,10 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     {$decT, {extSteps, cur}} = AbsoluteTiming @
         decodeStepsBlock[raw, cur, extNSteps, labelToName, idToName];
     If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
-        Print["[recon] ext-steps decode = ", $decT, " s  (extNSteps = ",
-            extNSteps, ")"]];
+        (* InputForm keeps a tiny AbsoluteTiming value (a*10^-b) on ONE
+           line; OutputForm renders the power stacked across two. *)
+        Print["[recon] ext-steps decode = ", ToString[$decT, InputForm],
+            " s  (extNSteps = ", extNSteps, ")"]];
     (* MNF steps block: the GREEN/RED front chains for a goal closed
        by the MNF bidirectional search.  Same per-step layout. *)
     {mnfSteps, cur} = decodeStepsBlock[raw, cur, mnfNSteps, labelToName, idToName];

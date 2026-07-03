@@ -1331,21 +1331,85 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   }
 #endif
   /* Iter 132 phase timing -- probe per-phase wall to localize the
-   * paclet-vs-bench overhead.  Enable with THVM_ATP_PHASETIME=1. */
+   * paclet-vs-bench overhead.  Enable with THVM_ATP_PHASETIME=1; the
+   * THVM_ATP_TIME_SPLIT umbrella (the WL-side reconstruction split)
+   * turns it on too so one env var covers the whole tail. */
   static int g_phase = -1;
   if (g_phase < 0) {
     const char *evp = getenv("THVM_ATP_PHASETIME");
     g_phase = (evp != NULL && evp[0] == '1') ? 1 : 0;
+    if (!g_phase && getenv("THVM_ATP_TIME_SPLIT") != NULL) g_phase = 1;
   }
   struct timespec _tp0, _tp1;
   if (g_phase) clock_gettime(CLOCK_MONOTONIC, &_tp0);
+  /* Per-phase wall marks: each print is the delta since the previous
+   * mark, so the post-run tail (GC / cone / materialize / extract /
+   * encode) splits into its components. */
+#define ATP_PHASE_MARK(label)                                              \
+  do {                                                                     \
+    if (g_phase) {                                                         \
+      clock_gettime(CLOCK_MONOTONIC, &_tp1);                               \
+      double _d = (_tp1.tv_sec - _tp0.tv_sec)                              \
+                + (_tp1.tv_nsec - _tp0.tv_nsec) / 1e9;                     \
+      fprintf(stderr, "[atp-phase] %s: %.3fs n_trace=%u\n", (label), _d,   \
+              atp->n_trace);                                               \
+      _tp0 = _tp1;                                                         \
+    }                                                                      \
+  } while (0)
+  /* Engine phase tiles (pop-norm / cp-gen / push-norm / interreduce /
+   * goal-check) accumulate only under g_atp_phase_enabled -- flip it on
+   * for the run so the [atp-phase] line can attribute the engine wall
+   * the same way the bench's THVM_ATP_PROFILE=1 printout does. */
+  extern u8  g_atp_phase_enabled;
+  extern u64 g_atp_phase_us_pop_normalize, g_atp_phase_us_cp_gen,
+             g_atp_phase_us_push_normalize, g_atp_phase_us_interreduce,
+             g_atp_phase_us_goal_check, g_atp_phase_us_cp_set_ir;
+  if (g_phase) g_atp_phase_enabled = 1u;
   AtpStatus st = thvm_atp_run(atp);
+  if (g_phase) {
+    extern u64 g_atp_gc_us, g_atp_gc_n;
+    clock_gettime(CLOCK_MONOTONIC, &_tp1);
+    double d = (_tp1.tv_sec - _tp0.tv_sec) + (_tp1.tv_nsec - _tp0.tv_nsec)/1e9;
+    fprintf(stderr, "[atp-phase] thvm_atp_run: %.3fs steps=%u n_rules=%u n_cps=%u n_trace=%u gc=%llu/%.2fs status=%d rt_pin=%d qos_bump=%d\n",
+            d, atp->step, atp->n_rules, atp->n_cps, atp->n_trace,
+            (unsigned long long)g_atp_gc_n, g_atp_gc_us / 1e6, (int)st,
+#ifdef __APPLE__
+            rt_pinned, qos_bumped);
+#else
+            0, 0);
+#endif
+    fprintf(stderr, "[atp-phase] tiles: pop-norm=%.2fs cp-gen=%.2fs "
+            "push-norm=%.2fs interreduce=%.2fs goal-check=%.2fs cp-set-ir=%.2fs\n",
+            g_atp_phase_us_pop_normalize / 1e6, g_atp_phase_us_cp_gen / 1e6,
+            g_atp_phase_us_push_normalize / 1e6, g_atp_phase_us_interreduce / 1e6,
+            g_atp_phase_us_goal_check / 1e6, g_atp_phase_us_cp_set_ir / 1e6);
+    {
+      extern u64 g_atp_canorm_corank, g_atp_canorm_l21, g_atp_canorm_reage,
+                 g_atp_canorm_dropdup, g_atp_canorm_dropdup_full,
+                 g_atp_canorm_classgate, g_atp_canorm_rank,
+                 g_atp_canorm_memo_hits, g_atp_canorm_memo_misses;
+      fprintf(stderr, "[atp-phase] canorm pairs: corank=%llu l21=%llu "
+              "reage=%llu dropdup=%llu (full=%llu) classgate=%llu rank=%llu "
+              "memo=%llu/%llu\n",
+              (unsigned long long)g_atp_canorm_corank,
+              (unsigned long long)g_atp_canorm_l21,
+              (unsigned long long)g_atp_canorm_reage,
+              (unsigned long long)g_atp_canorm_dropdup,
+              (unsigned long long)g_atp_canorm_dropdup_full,
+              (unsigned long long)g_atp_canorm_classgate,
+              (unsigned long long)g_atp_canorm_rank,
+              (unsigned long long)g_atp_canorm_memo_hits,
+              (unsigned long long)g_atp_canorm_memo_misses);
+    }
+    _tp0 = _tp1;
+  }
   // Post-run Cheney pass: a PROVED saturation leaves the arena full of
   // per-step garbage (OrAssociativity: 268M cells allocated, live set
   // far smaller with the off-heap trace) and the extraction below
   // allocates WL-bound Terms -- without a collect it dies at the very
   // end (the long-standing post-PROVED extraction exhaustion).
   thvm_atp_gc_collect(atp);
+  ATP_PHASE_MARK("post-run-gc");
   // Post-PROVED, wrapper-only proof-cone re-derivation: with RecordNorm
   // off, goal-family ORIENT / SIMPLIFY entries carry unrecorded engine
   // normalizations the WL lift cannot BFS-bridge (retired rules,
@@ -1354,17 +1418,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // materialization, so resolveTrace inherits the chain instead of
   // failing at emitNorm.no-rewrite-path.  Zero engine-loop impact.
   if (st == ATP_PROVED) thvm_atp_record_goal_cone(atp);
-  if (g_phase) {
-    clock_gettime(CLOCK_MONOTONIC, &_tp1);
-    double d = (_tp1.tv_sec - _tp0.tv_sec) + (_tp1.tv_nsec - _tp0.tv_nsec)/1e9;
-    fprintf(stderr, "[atp-phase] thvm_atp_run: %.3fs n_rules=%u n_trace=%u status=%d rt_pin=%d qos_bump=%d\n",
-            d, atp->n_rules, atp->n_trace, (int)st,
-#ifdef __APPLE__
-            rt_pinned, qos_bumped);
-#else
-            0, 0);
-#endif
-  }
+  ATP_PHASE_MARK("goal-cone");
 #ifdef __APPLE__
   /* Restore the thread's scheduling policy before returning to the
    * caller; otherwise the WolframKernel's normal evaluation would
@@ -1394,6 +1448,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // saturation to avoid the proof-trace GC-heap blowup, materialized once
   // here so the extractor + WL reader below see a normal Term trace.
   thvm_atp_materialize_trace(atp);
+  ATP_PHASE_MARK("materialize-trace");
 
   // (1) MAIN-state proof extraction: re-normalize both goal sides
   // under the completion-saturated R, recording every forward
@@ -1403,6 +1458,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // in `side` (see atp_extract_goal_chains).
   static AtpProofStep proof[ATP_PROOF_MAX_STEPS];
   u32 n_steps  = atp_extract_goal_chains(atp, proof, ATP_PROOF_MAX_STEPS);
+  ATP_PHASE_MARK("main-extract");
   u32 n_rules  = atp->n_rules;
   u32 n_trace  = atp->n_trace;
 
@@ -1492,6 +1548,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       ext_n_steps = atp_extract_goal_chains(ext, ext_proof,
                                             ATP_PROOF_MAX_STEPS);
       ext_n_rules = ext->n_rules;
+      ATP_PHASE_MARK("ext-extract");
       if (getenv("THVM_ATP_TIME_SPLIT") != NULL) {
         for (u32 i = 0; i < ext_n_steps && i < 8u; i++) {
           fprintf(stderr,
@@ -1522,6 +1579,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   for (u32 i = 0; i < ext_n_steps; i++) out_len += 6 + (mint)ext_proof[i].pos_len;
   for (u32 i = 0; i < mnf_n_steps; i++) out_len += 6 + (mint)mnf_proof[i].pos_len;
 
+  if (g_phase) {
+    fprintf(stderr, "[atp-phase] wire out_len=%lld (%.1f MB)\n",
+            (long long)out_len, (double)out_len * 8.0 / 1048576.0);
+  }
+  ATP_PHASE_MARK("wire-size");
   mint dims[1] = {out_len};
   MNumericArray out;
   naf->MNumericArray_new(MNumericArray_Type_Bit64, 1, dims, &out);
@@ -1612,6 +1674,9 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     odata[w++] = (int64_t)p->before;
     odata[w++] = (int64_t)p->after;
   }
+
+  ATP_PHASE_MARK("wire-encode");
+#undef ATP_PHASE_MARK
 
   if (ext != NULL) thvm_atp_free(ext);
   atp->gc_extra_roots   = NULL;

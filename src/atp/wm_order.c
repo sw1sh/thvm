@@ -2623,9 +2623,18 @@ static u64 atp_wmo_rank(AtpState *s, u32 f, u32 i, u32 j, u8 combo,
       // emits it after the new fact's `(x*x)*y = y*(x*y)` CP, not before).
       // The genuine repeated-variable double-MGU co-rank (arr_o == arr, two
       // unifiers from one leaf) and a NEW reverse-face CP keep the anchor.
-      if (hit_o && arr_o < arr) {
-        Term nl = atp_rewrite_normalize_indexed(s, cp->lhs, 4096u);
-        Term nr = atp_rewrite_normalize_indexed(s, cp->rhs, 4096u);
+      //
+      // Skipped under corank_force_own: the suppression's only effect is
+      // hit_o = 0, and the force_own branch below reads hit_o only when
+      // arr_o == arr -- while the suppression fires only when arr_o < arr.
+      // The normalize pair here is the single hottest rank-path cost on
+      // var-differ-partner batches, and the own-arrival second rank call
+      // per entry was paying it for a verdict it can never observe.
+      if (hit_o && arr_o < arr && !s->corank_force_own) {
+        extern u64 g_atp_canorm_rank;
+        g_atp_canorm_rank++;
+        Term nl = atp_canorm_nf(s, cp->lhs);
+        Term nr = atp_canorm_nf(s, cp->rhs);
         if (!kbo_eq(nl, nr) && atp_pop_eq_subsumed(s, nl, nr)) hit_o = 0u;
       }
       if (s->corank_force_own) {
