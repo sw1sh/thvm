@@ -1401,6 +1401,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
               (unsigned long long)g_atp_canorm_memo_hits,
               (unsigned long long)g_atp_canorm_memo_misses);
     }
+    {
+      extern void atp_canorm_dump_sites(void);
+      atp_canorm_dump_sites();
+    }
     _tp0 = _tp1;
   }
   // Post-run Cheney pass: a PROVED saturation leaves the arena full of

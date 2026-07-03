@@ -800,9 +800,12 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap);
 // normalize repeat heavily inside one formation batch (shared reduct
 // faces), which is where the hits come from -- a revision bump at the
 // next batch invalidates everything, exactly as required.
-#define ATP_CANORM_MEMO_BITS 14
-#define ATP_CANORM_MEMO_SIZE (1u << ATP_CANORM_MEMO_BITS)
-#define ATP_CANORM_MEMO_MASK (ATP_CANORM_MEMO_SIZE - 1u)
+// Table size: 2^THVM_ATP_CANORM_BITS entries (default 18 = 256K x 32B =
+// 8MB, calloc'd on first use).  The old fixed 14-bit table conflicted
+// away ~26% of the misses on OrAssociativity (833784 conflict misses,
+// each a full re-normalize); 18 bits absorbs the per-revision working
+// set.  THVM_ATP_CANORM_BITS=14 is the same-binary kill switch back to
+// the old geometry.
 typedef struct {
   u64  hash;
   u32  rev;
@@ -810,19 +813,85 @@ typedef struct {
   Term subj;
   Term nf;
 } AtpCaNormEnt;
-static AtpCaNormEnt g_atp_canorm_memo[ATP_CANORM_MEMO_SIZE];
+static AtpCaNormEnt *g_atp_canorm_memo = NULL;
+static u32 g_atp_canorm_memo_mask = 0u;
+static void atp_canorm_memo_init(void) {
+  u32 bits = 18u;
+  const char *e = getenv("THVM_ATP_CANORM_BITS");
+  if (e != NULL) {
+    long v = strtol(e, NULL, 10);
+    if (v >= 8 && v <= 24) bits = (u32)v;
+  }
+  g_atp_canorm_memo_mask = (1u << bits) - 1u;
+  g_atp_canorm_memo =
+      (AtpCaNormEnt *)calloc((size_t)1u << bits, sizeof(AtpCaNormEnt));
+  if (g_atp_canorm_memo == NULL) thvm_fatal("canorm: memo table OOM");
+}
 u64 g_atp_canorm_memo_hits   = 0;
 u64 g_atp_canorm_memo_misses = 0;
-static Term atp_canorm_nf(AtpState *s, Term t) {
+// Per-call-site attribution for the memo (keyed on __LINE__ via the
+// atp_canorm_nf macro below): calls / misses / miss-path wall per site,
+// plus a global conflict-vs-stale miss split.  The wall accumulates
+// only under g_atp_phase_enabled (TIME_SPLIT runs); counters are
+// unconditional increment-only noise like the g_atp_canorm_* pairs.
+// The dump (atp_canorm_dump_sites) is called by the WL wrapper next to
+// the existing canorm counter print.
+typedef struct {
+  u32 line;
+  u64 calls;
+  u64 miss;
+  u64 miss_us;
+} AtpCaNormSite;
+enum { ATP_CANORM_SITE_CAP = 256 };
+static AtpCaNormSite g_atp_canorm_sites[ATP_CANORM_SITE_CAP];
+u64 g_atp_canorm_miss_conflict = 0;   // slot valid for rev/epoch, other subj
+u64 g_atp_canorm_miss_stale    = 0;   // slot empty / rev / epoch invalidated
+static AtpCaNormSite *atp_canorm_site(u32 line) {
+  u32 k = (line * 2654435761u) & (ATP_CANORM_SITE_CAP - 1u);
+  while (g_atp_canorm_sites[k].line != line) {
+    if (g_atp_canorm_sites[k].line == 0u) {
+      g_atp_canorm_sites[k].line = line;
+      break;
+    }
+    k = (k + 1u) & (ATP_CANORM_SITE_CAP - 1u);
+  }
+  return &g_atp_canorm_sites[k];
+}
+void atp_canorm_dump_sites(void) {
+  for (u32 i = 0; i < ATP_CANORM_SITE_CAP; i++) {
+    const AtpCaNormSite *e = &g_atp_canorm_sites[i];
+    if (e->line == 0u || e->calls == 0u) continue;
+    fprintf(stderr,
+            "[atp-phase] canorm site L%u: calls=%llu miss=%llu miss_us=%llu\n",
+            e->line, (unsigned long long)e->calls, (unsigned long long)e->miss,
+            (unsigned long long)e->miss_us);
+  }
+  fprintf(stderr, "[atp-phase] canorm miss split: conflict=%llu stale=%llu\n",
+          (unsigned long long)g_atp_canorm_miss_conflict,
+          (unsigned long long)g_atp_canorm_miss_stale);
+}
+static Term atp_canorm_nf_impl(AtpState *s, Term t, u32 site_line) {
+  if (g_atp_canorm_memo == NULL) atp_canorm_memo_init();
+  AtpCaNormSite *site = atp_canorm_site(site_line);
+  site->calls++;
   u64 h = atp_term_struct_hash(t);
-  AtpCaNormEnt *e = &g_atp_canorm_memo[(u32)h & ATP_CANORM_MEMO_MASK];
+  AtpCaNormEnt *e = &g_atp_canorm_memo[(u32)h & g_atp_canorm_memo_mask];
   if (e->hash == h && e->rev == s->r_revision &&
       e->epoch == g_atp_unf_memo_epoch && kbo_eq(e->subj, t)) {
     g_atp_canorm_memo_hits++;
     return e->nf;
   }
   g_atp_canorm_memo_misses++;
+  site->miss++;
+  if (e->subj != 0 && e->rev == s->r_revision &&
+      e->epoch == g_atp_unf_memo_epoch) {
+    g_atp_canorm_miss_conflict++;
+  } else {
+    g_atp_canorm_miss_stale++;
+  }
+  u64 t0 = atp_phase_now();
   Term nf = atp_rewrite_normalize_indexed(s, t, 4096u);
+  if (t0 != 0u) site->miss_us += atp_now_us() - t0;
   // Stamp with the POST-call epoch: the first normalize of a fresh rule
   // revision rebuilds the index and bumps the epoch inside the call, so
   // the pre-call value would let the entry die instantly (safe, useless).
@@ -833,6 +902,10 @@ static Term atp_canorm_nf(AtpState *s, Term t) {
   e->nf    = nf;
   return nf;
 }
+// Every call site routes through this macro so the site table keys on
+// the caller's line (wm_order.c is #included; its line range does not
+// collide with the _.c call sites).
+#define atp_canorm_nf(s, t) atp_canorm_nf_impl((s), (t), (u32)__LINE__)
 // WolframAxioms-seed discriminator (defined with the atp_pair_is_* predicates
 // far below); the select-time collapse-copy defer needs it up here.
 static u8 atp_wolfram_axiom_is_live(AtpState *s);
@@ -19675,6 +19748,21 @@ static u8 atp_pair_alpha_eq(Term la, Term ra, Term lb, Term rb) {
   return 0u;
 }
 
+// Fresh-map single-term alpha match (the deterministic first-seen
+// variable mapping of atp_term_alpha_eq with no incoming seeds).  Sound
+// gate component for atp_pair_alpha_eq: a pair-orientation match binds
+// la's vars first and THEN requires ra ~ rb under that seeded map; the
+// seeded mapping restricted to ra's vars coincides with the fresh
+// first-seen mapping (each var's image is pinned by its first rb
+// position either way), so pair-fire implies the fresh single-term
+// match.  Testing the CHEAP side against both anchor sides therefore
+// rules the pair out without normalizing the expensive side.
+static u8 atp_term_alpha_eq1(Term a, Term b) {
+  int map[ATP_ALPHA_VAR_CAP];
+  for (u32 v = 0; v < ATP_ALPHA_VAR_CAP; v++) map[v] = -1;
+  return atp_term_alpha_eq(a, b, map);
+}
+
 // A flat transposition equation `f(x,y) = f(y,x)` (commutativity): same
 // binary label over two distinct vars, args swapped.
 static u8 atp_is_flat_transposition(Term lhs, Term rhs) {
@@ -19890,6 +19978,44 @@ static u8 atp_term_is_slot15_face(Term t) {
   if (term_tag(t00) != TAG_FVR || term_tag(t01) != TAG_FVR) return 0u;
   if (term_ext(t00) != term_ext(t01)) return 0u;     // squared inner var w
   return (u8)(term_ext(t00) != term_ext(t1));        // v != w
+}
+
+// === Universal single-side face gate for the correction-scan pair-shape
+// detectors (cube / band / dist / slot15 / wrap families). ==============
+// Every fire-shape those detectors test is a pair whose EACH side is
+// either a bare variable or a term over ONE binary constructor with ALL
+// leaves bare variables and at most 13 nodes (the largest sides:
+// fwd_cube_wrap / posgroup_wrap / yyy_zz_dist / cube_zz_dist /
+// l21_selfsq_deep at 13; band155 / l11_sqdist bigs at 11; the rest
+// smaller).  A normalized side failing this cannot be a side of ANY of
+// those fire-shapes, so the OTHER side's (typically far costlier)
+// normalize is skipped -- the pair test is a conjunction of per-side
+// constraints.  Same soundness argument as atp_term_is_slot15_face's
+// landed DROP-DUP gate, generalized across the families.  The
+// THVM_NO_CANORM_GATE kill switch restores the ungated scans (results
+// are identical either way; the gate only prunes provably-failing
+// normalize calls).
+enum { ATP_CANORM_FACE_MAX_NODES = 13u };
+static u8 atp_canorm_gate_enabled(void) {
+  static int g = -1;
+  if (g < 0) g = (getenv("THVM_NO_CANORM_GATE") == NULL) ? 1 : 0;
+  return (u8)g;
+}
+static u8 atp_canorm_face_rec(Term t, u32 op, u32 *budget) {
+  if (*budget == 0u) return 0u;
+  (*budget)--;
+  if (term_tag(t) == TAG_FVR) return 1u;
+  if (term_tag(t) != TAG_CTR || term_ext(t) != op || term_ctr_n(t) != 2u)
+    return 0u;
+  return (u8)(atp_canorm_face_rec(term_ctr_at(t, 0), op, budget) &&
+              atp_canorm_face_rec(term_ctr_at(t, 1), op, budget));
+}
+static u8 atp_canorm_face_candidate(Term t) {
+  if (!atp_canorm_gate_enabled()) return 1u;
+  if (term_tag(t) == TAG_FVR) return 1u;
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0u;
+  u32 budget = ATP_CANORM_FACE_MAX_NODES;
+  return atp_canorm_face_rec(t, term_ext(t), &budget);
 }
 
 // f(f(a, b), c): `(a.b).c` with a, b, c bare vars; binds all three.
@@ -21619,8 +21745,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (i != f || !atp_rule_is_seq564_producer(s, i)) continue;
         if (!atp_eq_is_noncanonical_comm_side(s, s->lhs[j], s->rhs[j])) continue;
         g_atp_canorm_reage++;
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         if (!atp_pair_is_seq564_sibling(nl, nr)) continue;
         sib = k;
         break;
@@ -21910,8 +22037,10 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           if (k == kb || big[k].i != f || big[k].j == f) continue;
           if (big[k].key >= big[kb].key) continue;   // strictly earlier
           if ((big[k].key & grp_mask) != (big[kb].key & grp_mask)) continue;
-          Term nla = atp_canorm_nf(s, big[k].cp.lhs);
           Term nra = atp_canorm_nf(s, big[k].cp.rhs);
+          if (atp_canorm_gate_enabled() && !atp_term_alpha_eq1(nra, nrb) &&
+              !atp_term_alpha_eq1(nra, nlb)) continue;
+          Term nla = atp_canorm_nf(s, big[k].cp.lhs);
           if (!atp_pair_alpha_eq(nla, nra, nlb, nrb)) continue;
           if (ka == 0xffffffffu || big[k].key > big[ka].key) ka = k;
         }
@@ -21961,8 +22090,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (wmo_eq_sides_var_differ(s->lhs[jb], s->rhs[jb])) continue; // perm
         if ((big[kb].combo & 1u) != 0u) continue;      // face 0 (reverse) only
         if ((big[kb].key_raw >> 58) != 0u) continue;   // A phase only
-        Term nlb = atp_canorm_nf(s, big[kb].cp.lhs);
         Term nrb = atp_canorm_nf(s, big[kb].cp.rhs);
+        if (!atp_canorm_face_candidate(nrb)) continue;
+        Term nlb = atp_canorm_nf(s, big[kb].cp.lhs);
         if (!atp_pair_is_seq564_sibling(nlb, nrb)) continue; // `(x.x).y=(x.y).y`
         u32 arr_kb = (u32)((big[kb].key_raw >> 28) & 0x3fffu);
         // Largest raw-arrival key among same-group cube CPs that arrive
@@ -21975,8 +22105,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
             continue;
           u32 arr_k = (u32)((big[k].key_raw >> 28) & 0x3fffu);
           if (arr_k <= arr_kb) continue;               // not a later arrival
-          Term nlk = atp_canorm_nf(s, big[k].cp.lhs);
           Term nrk = atp_canorm_nf(s, big[k].cp.rhs);
+          if (!atp_canorm_face_candidate(nrk)) continue;
+          Term nlk = atp_canorm_nf(s, big[k].cp.lhs);
           if (!atp_pair_is_posgroup_cube(nlk, nrk)) continue; // cube cluster
           if (big[k].key > anchor) anchor = big[k].key;
         }
@@ -22007,16 +22138,18 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       for (u32 kb = 0; kb < n_big; kb++) {
         if (big[kb].i != f || big[kb].j == f) continue;
         if ((big[kb].key_raw >> 58) != 0u) continue;   // A phase only
-        Term nlb = atp_canorm_nf(s, big[kb].cp.lhs);
         Term nrb = atp_canorm_nf(s, big[kb].cp.rhs);
+        if (!atp_canorm_face_candidate(nrb)) continue;
+        Term nlb = atp_canorm_nf(s, big[kb].cp.lhs);
         if (!atp_pair_is_double_cube(nlb, nrb)) continue;
         u32 ka = 0xffffffffu;
         for (u32 k = 0; k < n_big; k++) {
           if (k == kb || big[k].i != f || big[k].j == f) continue;
           if (big[k].key >= big[kb].key) continue;     // strictly earlier
           if ((big[k].key & grp_mask) != (big[kb].key & grp_mask)) continue;
-          Term nlk = atp_canorm_nf(s, big[k].cp.lhs);
           Term nrk = atp_canorm_nf(s, big[k].cp.rhs);
+          if (!atp_canorm_face_candidate(nrk)) continue;
+          Term nlk = atp_canorm_nf(s, big[k].cp.lhs);
           if (!atp_pair_is_slot15_wrapped(nlk, nrk)) continue;
           if (ka == 0xffffffffu || big[k].key > big[ka].key) ka = k;
         }
@@ -22067,8 +22200,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           // variant-bearing child side matches the position: L.1 -> [0,1],
           // L.2 -> [1,1] (the minimal clean-family path set).
           if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != ovp) continue;
-          Term nl = atp_canorm_nf(s, big[k].cp.lhs);
           Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+          if (!atp_canorm_face_candidate(nr)) continue;
+          Term nl = atp_canorm_nf(s, big[k].cp.lhs);
           u8 var = atp_pair_band_variant_side(nl, nr, ovp);
           if (var == 0u) continue;
           band_idx[n_band] = k;
@@ -22139,8 +22273,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         // ovPos L.2.2: 0-indexed pos path [1, 1] of length 2.
         if (big[k].cp.pos_len != 2u) continue;
         if (big[k].cp.pos[0] != 1u || big[k].cp.pos[1] != 1u) continue;
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 var = atp_pair_band_l22_variant(nl, nr);
         if (var == 0u) continue;
         l22_idx[n_l22] = k;
@@ -22195,8 +22330,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       for (u32 k = 0; k < n_big && n_s15 < BAND_CAP; k++) {
         if (big[k].cp.pos_len != 2u) continue;
         if (big[k].cp.pos[0] != 1u || big[k].cp.pos[1] != 1u) continue;
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 var = atp_pair_band_l22_slot15tail(nl, nr);
         if (var == 0u) continue;
         s15_idx[n_s15] = k;
@@ -22361,8 +22497,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (s->r_orient[big[kd].j] != 0u) continue;       // partner oriented r->l
         if (big[kd].cp.pos_len != 2u ||
             big[kd].cp.pos[0] != 1u || big[kd].cp.pos[1] != 1u) continue;  // L.2.2
-        Term ndl = atp_canorm_nf(s, big[kd].cp.lhs);
         Term ndr = atp_canorm_nf(s, big[kd].cp.rhs);
+        if (!atp_canorm_face_candidate(ndr)) continue;
+        Term ndl = atp_canorm_nf(s, big[kd].cp.lhs);
         if (!atp_pair_is_yyy_zz_dist(ndl, ndr)) continue;
         // Defer just past the run's largest same-weight same-(phase|k1|k2) key:
         // band_max + 1 places the re-derived duplicate after every distinct-
@@ -22415,8 +22552,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         // anchor there mis-orders the L.1 cube cluster (soa picks ~965).  Only
         // the L.2 cursor walk surfaces the cube on the early forward leaf.
         if (big[kb].cp.pos_len != 1u || big[kb].cp.pos[0] != 1u) continue;
-        Term nlb = atp_canorm_nf(s, big[kb].cp.lhs);
         Term nrb = atp_canorm_nf(s, big[kb].cp.rhs);
+        if (!atp_canorm_face_candidate(nrb)) continue;
+        Term nlb = atp_canorm_nf(s, big[kb].cp.lhs);
         if (!atp_pair_is_fwd_cube(nlb, nrb)) continue;
         AtpWmOrder *w = (AtpWmOrder *)s->wmo;
         u32 jt = s->r_trace[big[kb].j];
@@ -22494,8 +22632,10 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if ((big[k].key >> 58) != 0u) continue;           // A phase
         if (((big[k].key >> 42) & 3u) != 0u) continue;    // rule-tree k2 == 0
         if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!s->use_l1cube_joinform && !atp_canorm_face_candidate(nr))
+          continue;   // joinform needs kbo_eq(nl,nr) even off-face
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 cls = atp_pair_is_fwd_cube(nl, nr)       ? 1u   // B
                : atp_pair_is_posgroup_cube(nl, nr)  ? 2u   // D
                : atp_pair_is_self_cube_eq(nl, nr)   ? 3u   // C
@@ -22656,8 +22796,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (big[k].combo != 1u) continue;                 // combo 1 only
         if (big[k].cp.pos_len != 2u ||
             big[k].cp.pos[0] != 0u || big[k].cp.pos[1] != 1u) continue;  // L.1.2
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 var = atp_pair_band155_variant(nl, nr);
         if (var == 0u) continue;
         b155_idx[n155] = k;
@@ -22717,8 +22858,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (big[k].combo != 1u) continue;                 // combo 1 only
         if (big[k].cp.pos_len != 2u ||
             big[k].cp.pos[0] != 0u || big[k].cp.pos[1] != 1u) continue;  // L.1.2
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 var = atp_pair_band155_mirror_variant(nl, nr);
         if (var == 0u) continue;
         b155_idx[n155] = k;
@@ -22833,8 +22975,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if ((big[k].key >> 58) != 0u) continue;           // phase 0 (D)
         if (((big[k].key >> 42) & 3u) != 0u) continue;    // rule-tree k2 == 0
         if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 var = atp_pair_l1swap_variant(nl, nr);
         if (var == 1u && big[k].key < g_min) { g_min = big[k].key; g_idx = k; }
         else if (var == 2u && big[k].key < h_min) { h_min = big[k].key; h_idx = k; }
@@ -22877,8 +23020,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if ((big[k].key >> 58) != 0u) continue;          // phase 0 (D)
         if (((big[k].key >> 44) & 0x3fffu) != 6u) continue;  // k1 == 6
         if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 1u) continue;  // L.2
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 face = atp_pair_l2tail_face(nl, nr);
         if (face == 1u) { if (nt < 2u) ti[nt] = k; nt++; }
         else if (face == 2u) { if (ns < 2u) si[ns] = k; ns++; }
@@ -22947,8 +23091,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           if ((big[k].key >> 58) != 0u) continue;          // phase 0
           if (((big[k].key >> 42) & 3u) != 0u) continue;   // rule-tree k2 == 0
           if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != ovp) continue; // L.1/L.2
-          Term nl = atp_canorm_nf(s, big[k].cp.lhs);
           Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+          if (!atp_canorm_face_candidate(nr)) continue;
+          Term nl = atp_canorm_nf(s, big[k].cp.lhs);
           u8 face = atp_pair_l1selfdist_face(nl, nr);
           if (face == 1u) { if (nu < 2u) ui[nu] = k; nu++; }
           else if (face == 2u) { if (nv < 2u) vi[nv] = k; nv++; }
@@ -23094,8 +23239,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
       for (u32 k = 0; k < n_big && n_sd < SD_CAP; k++) {
         if (big[k].cp.pos_len != 2u ||
             big[k].cp.pos[0] != 0u || big[k].cp.pos[1] != 0u) continue;  // L.1.1
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 v = atp_pair_l11_sqdist_variant(nl, nr);
         if (v == 0u) continue;
         sd_idx[n_sd] = k;
@@ -23166,8 +23312,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (big[kf].i != f || big[kf].j == f) continue;    // tops, partner = j
         if (big[kf].combo != 0u) continue;                 // combo 0 only
         if (big[kf].cp.pos_len != 1u || big[kf].cp.pos[0] != 1u) continue; // L.2
-        Term nlf = atp_canorm_nf(s, big[kf].cp.lhs);
         Term nrf = atp_canorm_nf(s, big[kf].cp.rhs);
+        if (!atp_canorm_face_candidate(nrf)) continue;
+        Term nlf = atp_canorm_nf(s, big[kf].cp.lhs);
         if (!atp_pair_is_fwd_cube(nlf, nrf)) continue;     // the fwd-cube Q
         u64 grp = big[kf].key & grp_mask;
         // Find a posgroup-cube P in the same group keyed ABOVE this fwd-cube but
@@ -23180,8 +23327,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           if ((big[kp].key & grp_mask) != grp) continue;
           if (big[kf].key >= big[kp].key) continue;        // fwd must be keyed below P
           if (big[kf].key_raw <= big[kp].key_raw) continue; // but key_raw'd ABOVE P
-          Term nlp = atp_canorm_nf(s, big[kp].cp.lhs);
           Term nrp = atp_canorm_nf(s, big[kp].cp.rhs);
+          if (!atp_canorm_face_candidate(nrp)) continue;
+          Term nlp = atp_canorm_nf(s, big[kp].cp.lhs);
           if (!atp_pair_is_posgroup_cube(nlp, nrp)) continue;
           // Inverted fwd+posgroup pair: swap their key slots so posgroup (lower
           // key_raw) sorts first, restoring WM's raw-arrival order.
@@ -23239,8 +23387,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if ((big[k].key >> 58) != 0u) continue;           // phase 0
         if (((big[k].key >> 42) & 3u) != 0u) continue;    // rule-tree k2 == 0
         if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 cls = (atp_pair_is_fwd_cube(nl, nr) ||
                   atp_pair_is_fwd_cube_wrap(nl, nr))      ? 1u   // B
                : (atp_pair_is_posgroup_cube(nl, nr) ||
@@ -23345,8 +23494,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if ((big[kd].key >> 58) != 0u) continue;          // phase 0
         if (((big[kd].key >> 42) & 3u) != 0u) continue;   // rule-tree k2 == 0
         if (big[kd].cp.pos_len != 1u || big[kd].cp.pos[0] != 1u) continue; // L.2
-        Term ndl = atp_canorm_nf(s, big[kd].cp.lhs);
         Term ndr = atp_canorm_nf(s, big[kd].cp.rhs);
+        if (!atp_canorm_face_candidate(ndr)) continue;
+        Term ndl = atp_canorm_nf(s, big[kd].cp.lhs);
         if (!atp_pair_is_self_cube_eq(ndl, ndr)) continue;
         // Distinct cube vars (`x.(x.x) = y.(y.y)`, x != y): the same-var copy is
         // a tautology dropped at push, so only the genuine distinct-var equality
@@ -23623,8 +23773,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if ((big[kd].key >> 58) != 0u) continue;          // phase 0
         if (((big[kd].key >> 42) & 3u) != 0u) continue;   // rule-tree k2 == 0
         if (big[kd].cp.pos_len != 1u || big[kd].cp.pos[0] != 0u) continue; // L.1
-        Term ndl = atp_canorm_nf(s, big[kd].cp.lhs);
         Term ndr = atp_canorm_nf(s, big[kd].cp.rhs);
+        if (!atp_canorm_face_candidate(ndr)) continue;
+        Term ndl = atp_canorm_nf(s, big[kd].cp.lhs);
         if (!atp_pair_is_xxx_self_cube(ndl, ndr)) continue;
         // Defer E to just past the largest weight-120 same-(phase|k1|k2) key in
         // the group (the group's cube C/D selection members are all weight-120
@@ -23683,8 +23834,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
         if (big[k].combo != 0u) continue;                 // combo 0 only
         if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 cls = atp_pair_is_xx_y_dist(nl, nr);
         if (cls == 0u) continue;
         xx_idx[n_xx] = k;
@@ -23716,8 +23868,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
           if (big[k].combo != 0u) continue;
           if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue;
           if ((big[k].key & grp_mask) != grp) continue;
-          Term nl = atp_canorm_nf(s, big[k].cp.lhs);
           Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+          if (!atp_canorm_face_candidate(nr)) continue;
+          Term nl = atp_canorm_nf(s, big[k].cp.lhs);
           u8 cls = atp_pair_is_xx_y_dist(nl, nr);          // 1 = A, 2 = B
           if (cls == 0u) {
             // Cube C/D members of the same weight-120 block keep relative order.
@@ -23801,8 +23954,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if (big[k].i != f || big[k].j == f) continue;     // tops, partner = j
         if (big[k].combo != 0u) continue;                 // combo 0 only
         if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 var = atp_pair_is_xx_y_dist(nl, nr);
         if (var == 0u) continue;
         xi_idx[n_xi] = k;
@@ -23912,8 +24066,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if ((big[k].key >> 58) != 0u) continue;           // phase 0
         if (((big[k].key >> 42) & 3u) != 0u) continue;    // rule-tree k2 == 0
         if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         u8 cls = atp_pair_is_fwd_cube(nl, nr)       ? 1u   // B
                : atp_pair_is_posgroup_cube(nl, nr)  ? 2u   // D
                                                     : 0u;
@@ -24020,8 +24175,9 @@ static u32 thvm_atp_generate_cps_wm(AtpState *s, AtpAddedRange added) {
         if ((big[k].key >> 58) != 0u) continue;           // phase 0
         if (((big[k].key >> 42) & 3u) != 0u) continue;    // rule-tree k2 == 0
         if (big[k].cp.pos_len != 1u || big[k].cp.pos[0] != 0u) continue; // L.1
-        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         Term nr = atp_canorm_nf(s, big[k].cp.rhs);
+        if (!atp_canorm_face_candidate(nr)) continue;
+        Term nl = atp_canorm_nf(s, big[k].cp.lhs);
         // class B = fwd_cube OR fwd_cube_wrap (the batch precursor whose trailing
         // dots reduce away only by the later partner rule), class D = posgroup_cube
         // OR posgroup_wrap, class E = xxx_self_cube -- the same B/D wrap-inclusive
