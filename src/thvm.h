@@ -4701,6 +4701,15 @@ typedef struct {
   u8   *uid_dead;
   u32   uid_dead_cap;
   u32   next_rule_uid;
+  // uid -> current rule slot reverse map (0xffffffff = none), maintained
+  // at the rule-add site and the three slot-compaction shift loops so the
+  // walk former's sw_uid_to_idx is O(1) instead of an O(n_rules) scan per
+  // partner hit.  Read side verifies r_uid[idx] == uid and falls back to
+  // the scan (then repairs), so a missed maintenance site degrades to the
+  // old cost, never to a wrong answer.  THVM_ATP_NO_UIDIDX=1 bypasses the
+  // probe (kill switch; the scan is the reference behavior).
+  u32  *uid_idx;
+  u32   uid_idx_cap;
   u8    use_initial_ultimate;
   // Waldmeister `database=ultimate` action (Parameter.c:166 -- the WM
   // default along with initial=ultimate).  Tags CPs derived during

@@ -1467,8 +1467,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                     Block[{rev = runBfs[targetEq, startEq, preRules, True, 50000, 3]},
                         If[! MissingQ[rev], found = reverseBfsPath[rev, targetEq]]]];
                 If[ MissingQ[found],
-                    atpDbgFail["emitNorm.no-rewrite-path ctx=" <>
-                        ToString[$enCtx] <> " ti=" <>
+                    atpDbgFail["emitNorm.no-rewrite-path ti=" <>
                         ToString[ti] <> " start=" <>
                         ToString[startEq, InputForm] <> " target=" <>
                         ToString[targetEq, InputForm] <> " alive=" <>
@@ -1595,7 +1594,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             If[ cte["ParentA"] === $AtpTraceNone || cte["ParentB"] === $AtpTraceNone,
                 With[{realP = If[cte["ParentA"] === $AtpTraceNone, cte["ParentB"], cte["ParentA"]]},
                     aInfo = resolveTrace[realP];
-                    Return[Block[{$enCtx = "site1556-aParent"}, emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]]]];
+                    Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]]];
             aTe = trace[[cte["ParentA"] + 1]];
             bTe = trace[[cte["ParentB"] + 1]];
             ruleAEq = {tL[aTe], tR[aTe]};
@@ -1619,7 +1618,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                crashes on.  Sound: emitNorm only emits real oriented /
                ordered rewrites that the verifier replays. *)
             If[ cplDegenerateOverlapQ[ruleAEq, ruleBEq, pos, varSyms],
-                Return[Block[{$enCtx = "site1580-aParent"}, emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]]];
+                Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]];
             (* Goal critical pair: one parent's resolved equation IS a
                conjecture conjunct (the skolemized goal fed as an ordinary
                TRACE_AXIOM, whose lineage bottoms out at the skolem-bearing
@@ -1643,9 +1642,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             Block[{gA = FirstPosition[cjps, p_ /; cplEqSetQ[p, aInfo["Eq"], varSyms], Missing[], {1}, Heads -> False],
                    gB = FirstPosition[cjps, p_ /; cplEqSetQ[p, bInfo["Eq"], varSyms], Missing[], {1}, Heads -> False]},
                 If[ ! MissingQ[gA],
-                    Return[Block[{$enCtx = "site1604-goalA"}, emitNorm[{$HypothesisSym, First[gA]}, cjps[[First[gA]]], cpEq, ti]]]];
+                    Return[emitNorm[{$HypothesisSym, First[gA]}, cjps[[First[gA]]], cpEq, ti]]];
                 If[ ! MissingQ[gB],
-                    Return[Block[{$enCtx = "site1606-goalB"}, emitNorm[{$HypothesisSym, First[gB]}, cjps[[First[gB]]], cpEq, ti]]]]];
+                    Return[emitNorm[{$HypothesisSym, First[gB]}, cjps[[First[gB]]], cpEq, ti]]]];
             (* Re-derivation: the stored CP equation IS one of its own
                parents' (up to side swap / alpha) -- a two-parent overlap
                that reproduces an existing fact rather than a new peak.
@@ -1681,9 +1680,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                    A, and on failure fall back to parent B before giving up.
                    emitNorm throws BEFORE emitting any step, so the retry is
                    side-effect-free. *)
-                Return[With[{resA = Catch[Block[{$enCtx = "site1642-redrv"}, emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]]},
+                Return[With[{resA = Catch[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]},
                     If[ resA === $Failed,
-                        Block[{$enCtx = "site1645-bParent"}, emitNorm[bInfo["Key"], bInfo["Eq"], cpEq, ti]],
+                        emitNorm[bInfo["Key"], bInfo["Eq"], cpEq, ti],
                         resA]]]];
             cEq = geom["ConstructEq"];
             mEq = geom["MatchingEq"];
@@ -1718,10 +1717,6 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            NORM_STEP propagates this through the chain so its Side /
            equation order match the chain root's convention. *)
         resolveTrace[ti_] := Block[{te, ruleEq, pInfo, pEq, info},
-            If[ MemberQ[{355765, 356685}, ti] &&
-                Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
-                WriteString["stderr", "PARENTDBG ti=" <> ToString[ti] <> " te=" <>
-                    ToString[trace[[ti + 1]], InputForm] <> "\n"]];
             If[ ti === $AtpTraceNone,
                 (* A cited parent was never traced -- almost always the
                    proof-trace buffer overflowed (a CP formed past t_max gets
@@ -1794,7 +1789,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                            link, exactly as the chain-off retry path does. *)
                         If[ te["ParentB"] === $AtpTraceNone,
                             pInfo = resolveTrace[te["ParentA"]];
-                            Return[Block[{$enCtx = "site1752-pRule"}, emitNorm[pInfo["Key"], pInfo["Eq"], ruleEq, ti]]]];
+                            Return[emitNorm[pInfo["Key"], pInfo["Eq"], ruleEq, ti]]];
                         pInfo = resolveTrace[te["ParentA"]];
                         rInfo = resolveTrace[te["ParentB"]];
                         rTe = trace[[te["ParentB"] + 1]];
@@ -1959,31 +1954,6 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 te["Reason"] === $TraceOrient || te["Reason"] === $TraceSimplify,
                     pInfo = resolveTrace[te["ParentA"]];
                     pEq = pInfo["Eq"];
-                    If[ ti === 356685 && Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
-                        Block[{allPairs, fwd, rev, hits},
-                            allPairs = DeleteCases[Table[
-                                {t, {tL[trace[[t + 1]]], tR[trace[[t + 1]]]}},
-                                {t, 0, Length[trace] - 1}],
-                                {_, {_Missing, _} | {_, _Missing}}];
-                            fwd = cplAsRule[#[[2]], varSyms] & /@ allPairs;
-                            rev = cplAsRule[Reverse[#[[2]]], varSyms] & /@ allPairs;
-                            hits = Select[Join[fwd, rev],
-                                ((pEq /. #) =!= pEq) &, 6];
-                            WriteString["stderr", "VARSYMS " <>
-                                ToString[varSyms, InputForm] <> "\n"];
-                            WriteString["stderr", "RAW355765 " <>
-                                ToString[{tL[trace[[355766]]], tR[trace[[355766]]]}, InputForm] <>
-                                "  RESOLVED pEq=" <> ToString[pEq, InputForm] <> "\n"];
-                            WriteString["stderr", "PROBE2 one-step reducers of pEq (any entry, both dirs): " <>
-                                ToString[Length[hits]] <> " sample=" <>
-                                ToString[Take[hits, UpTo[3]], InputForm] <> "\n"]]];
-                    If[ ti === 356685 && Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
-                        WriteString["stderr", "ORIENTDBG ti=356685 reason=" <>
-                            ToString[te["Reason"]] <> " pA=" <> ToString[te["ParentA"]] <>
-                            " pB=" <> ToString[te["ParentB"]] <>
-                            " teEq=" <> ToString[{te["Lhs"], te["Rhs"]}, InputForm] <>
-                            " pEq=" <> ToString[pEq, InputForm] <>
-                            " ruleEq=" <> ToString[ruleEq, InputForm] <> "\n"]];
                     (* When chain extraction is on AND the parent is a
                        NORM_STEP, the chain already terminates at the
                        equation that gets oriented -- the cplEqSetQ
@@ -2000,7 +1970,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                right side-to-position mapping. *)
                             If[KeyExistsQ[pInfo, "CSide0WlPos"], <|"CSide0WlPos" -> pInfo["CSide0WlPos"]|>, <||>]
                         ],
-                        Block[{$enCtx = "site1933-goalchain"}, emitNorm[pInfo["Key"], pEq, ruleEq, ti]]
+                        emitNorm[pInfo["Key"], pEq, ruleEq, ti]
                     ],
                 True, atpDbgFail["resolveTrace.unknown-reason@" <> ToString[ti]];
                 Throw[$Failed]

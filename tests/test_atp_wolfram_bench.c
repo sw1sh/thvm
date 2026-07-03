@@ -1858,6 +1858,13 @@ int main(int argc, char **argv) {
                100.0 * (double)g_atp_swrn_hit /
                    (double)(g_atp_swrn_hit + g_atp_swrn_miss));
       }
+      if (g_atp_wmo_rc_hit + g_atp_wmo_rc_miss > 0) {
+        printf("   wmo rank cache: hit=%llu miss=%llu [%.1f%%]\n",
+               (unsigned long long)g_atp_wmo_rc_hit,
+               (unsigned long long)g_atp_wmo_rc_miss,
+               100.0 * (double)g_atp_wmo_rc_hit /
+                   (double)(g_atp_wmo_rc_hit + g_atp_wmo_rc_miss));
+      }
       // CP-gen non-push split (single-walk former regions).  The
       // top-level components (collect/overlap/rank/pushloop) tile the
       // cp-gen phase up to loop overhead; the pushloop's own split

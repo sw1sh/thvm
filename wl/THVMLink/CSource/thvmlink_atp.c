@@ -1649,7 +1649,6 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_all_witnesses(
   const struct st_WolframNumericArrayLibrary_Functions *naf
     = libData->numericarrayLibraryFunctions;
   if (naf->MNumericArray_getType(na) != MNumericArray_Type_Bit64) {
-    fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
     return LIBRARY_FUNCTION_ERROR;
   }
   mint flat_len = naf->MNumericArray_getFlattenedLength(na);
@@ -1658,16 +1657,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_all_witnesses(
   // Witness enumeration narrows ONE conjecture pair: n_goals must be 1.
   AtpWire wire;
   if (!atp_wire_parse(data, flat_len, &wire) || wire.n_goals != 1u) {
-    fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
     return LIBRARY_FUNCTION_ERROR;
   }
 
   mint n_witness          = libData->MTensor_getFlattenedLength(witness_t);
   const mint *witness_ids = libData->MTensor_getIntegerData(witness_t);
 
-  fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
   if ((u32)max_label >= ATP_WL_CFG_MAX_LABELS) return LIBRARY_FUNCTION_ERROR;
-  fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
   if (max_witnesses <= 0 || max_witnesses > 64) return LIBRARY_FUNCTION_ERROR;
 
   static u32 wl_weights3[ATP_WL_CFG_MAX_LABELS];
@@ -1683,7 +1679,6 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_all_witnesses(
   wl_kbo3.var_weight = 1;
 
   AtpState *atp = thvm_atp_init(&wl_kbo3, (u32)max_steps);
-  fprintf(stderr, "wlrp-err line %d\n", __LINE__);  /* wlrp-err */
   if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
 
   if (!atp_wire_install_axioms(atp, &wire)) {

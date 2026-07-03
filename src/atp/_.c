@@ -963,9 +963,9 @@ static int atp_env_off(const char *name) {
   return (e != NULL && e[0] == '0' && e[1] == '\0') ? 0 : 1;
 }
 
-// r_overlap_done compaction fix (DEFAULT ON; THVM_ATP_OVERLAP_DONE_FIX=0 is
-// the kill switch back to the pre-fix behavior, kept for one round): shift
-// the per-slot overlap-exhausted flag in lockstep with the other rule arrays
+// r_overlap_done compaction (unconditional; the one-round
+// THVM_ATP_OVERLAP_DONE_FIX kill switch is retired): the per-slot
+// overlap-exhausted flag shifts in lockstep with the other rule arrays
 // during slot compaction.  Without the shift the flags misalign after any
 // rule removal, and the use_overlap_exhaust pair gate in
 // atp_wmo_collect_pair fires on garbage state -- the WolframAxioms
@@ -976,11 +976,6 @@ static int atp_env_off(const char *name) {
 // walk and batch formers are full-CPSEL-stream byte-identical on OA.  The
 // OA gate baselines are pinned to the fixed trajectory
 // (steps=278807 rules=753 cps=2642990).
-static int atp_overlap_done_fix_on(void) {
-  static int v = -1;
-  if (v < 0) v = atp_env_off("THVM_ATP_OVERLAP_DONE_FIX");
-  return v;
-}
 
 // S-expression-style term print to FILE *.  Variables print as "Vn",
 // constants as "Cs", CTRs as "(s arg1 arg2 ...)".  Used by the env-
@@ -1060,6 +1055,24 @@ static void atp_uid_mark_dead(AtpState *s, u32 uid) {
 static inline int atp_uid_is_dead(const AtpState *s, u32 uid) {
   return uid != 0u && s->uid_dead != NULL && uid < s->uid_dead_cap
       && s->uid_dead[uid];
+}
+
+// uid -> rule-slot reverse map write (see AtpState.uid_idx).  Grows on
+// demand; uid 0 = none.  OOM just skips the write -- the read side's
+// verify + scan fallback keeps the answer exact either way.
+static void atp_uid_idx_set(AtpState *s, u32 uid, u32 idx) {
+  if (uid == 0u || s->r_uid == NULL) return;
+  if (uid >= s->uid_idx_cap) {
+    u32 ncap = s->uid_idx_cap ? s->uid_idx_cap : 1024u;
+    while (ncap <= uid) ncap *= 2u;
+    u32 *ni = (u32 *)realloc(s->uid_idx, (size_t)ncap * sizeof *ni);
+    if (ni == NULL) return;
+    memset(ni + s->uid_idx_cap, 0xff,
+           (size_t)(ncap - s->uid_idx_cap) * sizeof *ni);
+    s->uid_idx = ni;
+    s->uid_idx_cap = ncap;
+  }
+  s->uid_idx[uid] = idx;
 }
 
 // Uid-layer orphan test for queue slot j: either stamped parent uid died.
@@ -1667,9 +1680,15 @@ u64 g_acp_fuse_n_fb = 0;
 // `fz` is non-NULL -- append the flat node at *fpos and accumulate the
 // weight/var balances with `sign` (+1 lhs, -1 rhs).  Returns 0 on an
 // anomaly (see the header comment); the caller falls back whole.
-static u8 acp_fuse_walk(Term t, const KboConfig *cfg, AcpNvMap *m,
-                        u32 *pos, u32 *nodes, AcpFuse *fz, int sign,
-                        u32 *fpos) {
+// Reference recursive form -- the default entry is the explicit-stack
+// iteration below (acp_fuse_walk), which keeps pos/nodes/fpos in
+// registers instead of chasing three out-pointers per node and pays no
+// call bracket per child.  THVM_ATP_NO_FUSE_ITER=1 routes back here
+// (same-binary kill switch); both emit the identical preorder bytes /
+// flat nodes / balances.
+static u8 acp_fuse_walk_rec(Term t, const KboConfig *cfg, AcpNvMap *m,
+                            u32 *pos, u32 *nodes, AcpFuse *fz, int sign,
+                            u32 *fpos) {
   (*nodes)++;
   acp_scratch_ensure(*pos, 21u);
   u8 *p = g_acp_scratch + *pos;
@@ -1699,8 +1718,8 @@ static u8 acp_fuse_walk(Term t, const KboConfig *cfg, AcpNvMap *m,
         fz->phidiff += (long long)sign * (long long)w;
       }
       for (u32 i = 0; i < n; i++) {
-        if (!acp_fuse_walk(heap_read(base + 1u + (u64)i), cfg, m, pos,
-                           nodes, fz, sign, fpos)) return 0;
+        if (!acp_fuse_walk_rec(heap_read(base + 1u + (u64)i), cfg, m, pos,
+                               nodes, fz, sign, fpos)) return 0;
       }
       if (fz != NULL) g_acpf_pool[here].sz = *fpos - here;
       return 1;
@@ -1736,6 +1755,124 @@ static u8 acp_fuse_walk(Term t, const KboConfig *cfg, AcpNvMap *m,
       return 0;   // NUM / ERA atom: the flat compare cannot mirror
                   // thvm_kbo's term_val identity; classic path handles
   }
+}
+
+// Explicit-stack form of the fused walk -- the default entry.  Same
+// preorder, same emissions, same anomaly classes as the recursive
+// reference above; pos/nodes/fpos live in locals across the whole
+// tree (the recursive form dereferences three out-pointers at every
+// node) and a child costs one frame push instead of an 8-argument
+// call bracket.  A tree deeper than the frame stack returns 0 -- the
+// caller's classic fallback emits the identical bytes, so the cap is
+// a performance edge, not a semantic one (OA's deepest CP sides run
+// ~1000 frames; the cap is 4x that).
+enum { ACP_FUSE_MAX_DEPTH = 4096 };
+typedef struct { u64 base; u32 n; u32 i; u32 here; } AcpFuseFrame;
+static AcpFuseFrame g_acp_fuse_stk[ACP_FUSE_MAX_DEPTH];
+static u8 acp_fuse_walk_iter(Term t, const KboConfig *cfg, AcpNvMap *m,
+                             u32 *pos, u32 *nodes, AcpFuse *fz, int sign,
+                             u32 *fpos) {
+  u32 lpos = *pos, lnodes = *nodes, lfpos = *fpos;
+  u32 sp = 0u;
+  Term cur = t;
+  for (;;) {
+    lnodes++;
+    acp_scratch_ensure(lpos, 21u);
+    u8 *p = g_acp_scratch + lpos;
+    switch (term_tag(cur)) {
+      case TAG_CTR: {
+        u64 base = term_val(cur);
+        Term n_cell = heap_read(base);
+        if (term_tag(n_cell) != TAG_NUM) return 0;
+        u32 n = (u32)term_val(n_cell);
+        if (n > REWRITE_MAX_ARITY) return 0;
+        u32 lab = term_ext(cur);
+        *p++ = (u8)'C';
+        acp_put_varint(&p, lab);
+        acp_put_varint(&p, n);
+        lpos = (u32)(p - g_acp_scratch);
+        u32 here = 0u;
+        if (fz != NULL) {
+          acpf_ensure(lfpos + 1u);
+          here = lfpos++;
+          u32 w = (lab < cfg->n_labels) ? cfg->weights[lab] : 0u;
+          g_acpf_pool[here].sym = (i32)lab;
+          g_acpf_pool[here].w   = w;
+          g_acpf_pool[here].ar  = n;
+          fz->phidiff += (long long)sign * (long long)w;
+        }
+        if (n > 0u) {
+          if (sp >= (u32)ACP_FUSE_MAX_DEPTH) return 0;   // classic fallback
+          g_acp_fuse_stk[sp].base = base;
+          g_acp_fuse_stk[sp].n    = n;
+          g_acp_fuse_stk[sp].i    = 0u;
+          g_acp_fuse_stk[sp].here = here;
+          sp++;
+          cur = heap_read(base + 1u);
+          continue;
+        }
+        if (fz != NULL) g_acpf_pool[here].sz = lfpos - here;
+        break;
+      }
+      case TAG_FVR: {
+        u32 old = term_ext(cur);
+        u32 d = 0u;
+        for (; d < m->n; d++) {
+          if (m->old_id[d] == old) break;
+        }
+        if (d == m->n) {
+          if (m->n >= REWRITE_MAX_VAR) return 0;   // full map; fall back
+          m->old_id[m->n++] = old;
+          if (fz != NULL) fz->bal[d] = 0;
+        }
+        *p++ = (u8)'V';
+        acp_put_varint(&p, d);
+        lpos = (u32)(p - g_acp_scratch);
+        if (fz != NULL) {
+          acpf_ensure(lfpos + 1u);
+          g_acpf_pool[lfpos].sym = -(i32)(d + 1u);
+          g_acpf_pool[lfpos].w   = cfg->var_weight;
+          g_acpf_pool[lfpos].sz  = 1u;
+          g_acpf_pool[lfpos].ar  = 0u;
+          lfpos++;
+          fz->phidiff += (long long)sign * (long long)cfg->var_weight;
+          fz->bal[d]  += sign;
+        }
+        break;
+      }
+      default:
+        return 0;   // NUM / ERA atom (see the recursive reference)
+    }
+    // Ascend: advance to the next pending sibling, fixing up each
+    // completed CTR's subtree span on the way out.
+    for (;;) {
+      if (sp == 0u) {
+        *pos = lpos; *nodes = lnodes; *fpos = lfpos;
+        return 1;
+      }
+      AcpFuseFrame *f = &g_acp_fuse_stk[sp - 1u];
+      if (++f->i < f->n) {
+        cur = heap_read(f->base + 1u + (u64)f->i);
+        break;
+      }
+      if (fz != NULL) g_acpf_pool[f->here].sz = lfpos - f->here;
+      sp--;
+    }
+  }
+}
+
+// Default dispatcher: the iterative walk unless THVM_ATP_NO_FUSE_ITER=1
+// pins the recursive reference (kill switch; both are byte-identical).
+static u8 acp_fuse_walk(Term t, const KboConfig *cfg, AcpNvMap *m,
+                        u32 *pos, u32 *nodes, AcpFuse *fz, int sign,
+                        u32 *fpos) {
+  static int no_iter = -1;
+  if (no_iter < 0) {
+    const char *e = getenv("THVM_ATP_NO_FUSE_ITER");
+    no_iter = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
+  if (no_iter) return acp_fuse_walk_rec(t, cfg, m, pos, nodes, fz, sign, fpos);
+  return acp_fuse_walk_iter(t, cfg, m, pos, nodes, fz, sign, fpos);
 }
 
 // Fused renumber+pack of a raw pair into the scratch (no flat encode,
@@ -5528,6 +5665,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_uid_b);
   free(s->r_uid);
   free(s->uid_dead);
+  free(s->uid_idx);
   free(s->cp_last_norm_r_revision);
   // Deferred-CP (`implicit_pair`) arc commit 1: the descriptor array and
   // the per-slot tag bitset are plain malloc'd blocks (no per-slot owned
@@ -10228,6 +10366,7 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   // a simplified+requeued victim re-enters as a NEW WM rule number, so
   // CPs of the old identity die with it (see AtpState.r_uid).
   s->r_uid[s->n_rules] = ++s->next_rule_uid;
+  atp_uid_idx_set(s, s->r_uid[s->n_rules], s->n_rules);
   s->r_overlap_done[s->n_rules] = 0u;
 #ifdef THVM_ATPFT_RULES
   // Stage 4: mirror the Term pair into the parallel AtpFt slots
@@ -14151,11 +14290,10 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
   // state -- the pinned WolframAxioms +12-CP walk-vs-batch divergence at
   // pick 51667 (a NEW doubly-unfree equation read done=1, OLD comm read
   // done=0, so the batch dropped 4 comm overlaps WM forms;
-  // Unifikation1.c:1595-1648 has no such partner skip).  DEFAULT ON
-  // (THVM_ATP_OVERLAP_DONE_FIX=0 is the one-round kill switch back to the
-  // buggy behavior); the gate baselines are pinned to the fixed
-  // trajectory, which is the WM-faithful one (walk==batch byte-identical
-  // under the fix).
+  // Unifikation1.c:1595-1648 has no such partner skip).  Unconditional
+  // (the one-round THVM_ATP_OVERLAP_DONE_FIX kill switch is retired);
+  // the gate baselines are pinned to the fixed trajectory, which is the
+  // WM-faithful one (walk==batch byte-identical under the fix).
   //
   // Factored so both the LHS-collapse drop and the E-RHS-face drop use
   // the BYTE-IDENTICAL 9-array + FT-mirror compaction / trace-dead /
@@ -14176,6 +14314,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
       s->rhs[_j - 1]      = s->rhs[_j];                                       \
       s->r_trace[_j - 1]  = s->r_trace[_j];                                   \
       s->r_uid[_j - 1]    = s->r_uid[_j];                                     \
+      atp_uid_idx_set(s, s->r_uid[_j], _j - 1);                               \
       s->r_orient[_j - 1] = s->r_orient[_j];                                  \
       s->r_dead[_j - 1]           = s->r_dead[_j];                            \
       s->r_dead_lhs_save[_j - 1]  = s->r_dead_lhs_save[_j];                   \
@@ -14184,8 +14323,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
       s->r_dead_subsumer_rhs[_j - 1] = s->r_dead_subsumer_rhs[_j];            \
       s->r_rederive_cut[_j - 1]      = s->r_rederive_cut[_j];                 \
       s->r_gj_status[_j - 1]      = s->r_gj_status[_j];                       \
-      if (atp_overlap_done_fix_on())                                          \
-        s->r_overlap_done[_j - 1] = s->r_overlap_done[_j];                    \
+      s->r_overlap_done[_j - 1] = s->r_overlap_done[_j];                      \
       WM_IR_SHIFT_FT(_j)                                                      \
     }                                                                         \
     s->n_rules--;                                                             \
@@ -14632,6 +14770,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         s->rhs[j - 1]      = s->rhs[j];
         s->r_trace[j - 1]  = s->r_trace[j];
         s->r_uid[j - 1]    = s->r_uid[j];
+        atp_uid_idx_set(s, s->r_uid[j], j - 1);
         s->r_orient[j - 1] = s->r_orient[j];
         // Shift the backward-subsumption sentinel state in lockstep:
         // without it, dropping a rule below a soft-deleted slot leaves
@@ -14650,8 +14789,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         s->r_rederive_cut[j - 1]      = s->r_rederive_cut[j];
         // Ground-joinability status rides the slot (WM: per-object).
         s->r_gj_status[j - 1]      = s->r_gj_status[j];
-        if (atp_overlap_done_fix_on())
-          s->r_overlap_done[j - 1] = s->r_overlap_done[j];
+        s->r_overlap_done[j - 1] = s->r_overlap_done[j];
 #ifdef THVM_ATPFT_RULES
         // Stage 4: shift the AtpFt slot pointers in lockstep -- no
         // re-conversion, the cells themselves are address-stable in
@@ -14902,6 +15040,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->rhs[k - 1]              = s->rhs[k];
           s->r_trace[k - 1]          = s->r_trace[k];
           s->r_uid[k - 1]            = s->r_uid[k];
+          atp_uid_idx_set(s, s->r_uid[k], k - 1);
           s->r_orient[k - 1]         = s->r_orient[k];
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
@@ -14911,8 +15050,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->r_dead_subsumer_lhs[k - 1] = s->r_dead_subsumer_lhs[k];
           s->r_dead_subsumer_rhs[k - 1] = s->r_dead_subsumer_rhs[k];
           s->r_rederive_cut[k - 1]      = s->r_rederive_cut[k];
-          if (atp_overlap_done_fix_on())
-            s->r_overlap_done[k - 1] = s->r_overlap_done[k];
+          s->r_overlap_done[k - 1] = s->r_overlap_done[k];
 #ifdef THVM_ATPFT_RULES
           // Stage 4: shift the parallel AtpFt slot pointers.
           s->lhs_ft[k - 1]              = s->lhs_ft[k];
@@ -14976,6 +15114,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->rhs[k - 1]              = s->rhs[k];
           s->r_trace[k - 1]          = s->r_trace[k];
           s->r_uid[k - 1]            = s->r_uid[k];
+          atp_uid_idx_set(s, s->r_uid[k], k - 1);
           s->r_orient[k - 1]         = s->r_orient[k];
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
@@ -14985,8 +15124,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->r_dead_subsumer_lhs[k - 1] = s->r_dead_subsumer_lhs[k];
           s->r_dead_subsumer_rhs[k - 1] = s->r_dead_subsumer_rhs[k];
           s->r_rederive_cut[k - 1]      = s->r_rederive_cut[k];
-          if (atp_overlap_done_fix_on())
-            s->r_overlap_done[k - 1] = s->r_overlap_done[k];
+          s->r_overlap_done[k - 1] = s->r_overlap_done[k];
 #ifdef THVM_ATPFT_RULES
           // Stage 4: shift the parallel AtpFt slot pointers.
           s->lhs_ft[k - 1]              = s->lhs_ft[k];
@@ -19030,8 +19168,23 @@ static u32 sw_uid_to_idx(AtpState *s, u32 uid) {
   u64 _dco_t0 = g_atp_phase_detail ? atp_now_us() : 0;
   u32 r = 0xffffffffu;
   if (uid != 0u && s->r_uid != NULL) {
-    for (u32 i = 0; i < s->n_rules; i++)
-      if (s->r_uid[i] == uid) { r = i; break; }
+    // O(1) probe via the maintained uid_idx reverse map, verified against
+    // r_uid so the answer is exactly the scan's.  THVM_ATP_NO_UIDIDX=1
+    // forces the reference scan (same-binary kill switch).
+    static int no_map = -1;
+    if (no_map < 0) {
+      const char *e = getenv("THVM_ATP_NO_UIDIDX");
+      no_map = (e != NULL && e[0] == '1') ? 1 : 0;
+    }
+    if (!no_map && uid < s->uid_idx_cap) {
+      u32 h = s->uid_idx[uid];
+      if (h < s->n_rules && s->r_uid[h] == uid) r = h;
+    }
+    if (r == 0xffffffffu) {
+      for (u32 i = 0; i < s->n_rules; i++)
+        if (s->r_uid[i] == uid) { r = i; break; }
+      if (!no_map && r != 0xffffffffu) atp_uid_idx_set(s, uid, r);
+    }
   }
   if (g_atp_phase_detail) g_atp_cpg_us_collect += atp_now_us() - _dco_t0;
   return r;

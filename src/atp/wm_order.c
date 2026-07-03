@@ -186,6 +186,9 @@ typedef struct {
   u32 n_cells;
 } WmoReg;
 
+// One partner emitted by the single-walk Vater/Mutter enumerations.
+typedef struct { u32 trace; u32 arrival; u8 face; } WmoPartnerHit;
+
 typedef struct AtpWmOrder {
   WmoTree  tree[2];           // [0] rules, [1] equations
   WmoReg  *reg;
@@ -2138,6 +2141,8 @@ static u8 atp_wmo_eq_leaflist_rank(AtpState *s, u32 trace, u8 thvm_dir,
 // WMO_MAX_CELLS=768 cells).  An overflowing list (n_out at the cap) is still a
 // valid cache entry: out[] holds the truncated prefix the DFS re-derives
 // identically, and callers only read out[0..n_out).
+u64 g_atp_wmo_rc_hit  = 0;
+u64 g_atp_wmo_rc_miss = 0;
 static u32 wmo_tops_dfs_fill(AtpWmOrder *w, u8 tree, Term query_sub,
                              WmoCell *q, WmoDfs *d) {
   u32 qn = wmo_face_cells(query_sub, q, WMO_MAX_CELLS);
@@ -2154,6 +2159,7 @@ static u32 wmo_tops_dfs_fill(AtpWmOrder *w, u8 tree, Term query_sub,
       }
     }
   }
+  if (rc_hit < WMO_RC_N) g_atp_wmo_rc_hit++; else g_atp_wmo_rc_miss++;
   if (rc_hit < WMO_RC_N) {
     *d = (WmoDfs){ q, qn, w->rc[rc_hit].out, w->rc[rc_hit].n_out, WMO_TOPS_ARR_CAP };
   } else {
@@ -2253,9 +2259,6 @@ static u8 wmo_tops_rank(AtpWmOrder *w, u8 tree, Term query_sub,
   }
   return hit;
 }
-
-// One partner emitted by the single-walk Vater enumeration.
-typedef struct { u32 trace; u32 arrival; u8 face; } WmoPartnerHit;
 
 // Enumerate ALL partners (trace,face) whose stored face unifies with `query_sub`
 // against `tree`, in tops-DFS arrival order -- the WM Vater-phase yield order

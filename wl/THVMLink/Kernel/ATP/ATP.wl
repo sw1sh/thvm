@@ -4528,11 +4528,19 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
            statements all match FEQ / the wmcli protocol.  (The
            engine-level hook reorders the QUEUE identically either
            way; this aligns the WL-visible presentation with it.) *)
-        enc = Block[{$atpWmIntakeApply = atpWmIntakeOrderQ[OptionValue[Method]]},
-            atpEncodeProblem[axioms, conjecture, True]];
+        Module[{$et},
+            {$et, enc} = AbsoluteTiming @ Block[
+                {$atpWmIntakeApply = atpWmIntakeOrderQ[OptionValue[Method]]},
+                atpEncodeProblem[axioms, conjecture, True]];
+            If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+                Print["[recon] encode-problem = ", $et, " s"]]];
         conjPair = enc["ConjPair"];
         nGoals = Length[enc["ConjPairs"]];
-        relAx = TRelevantAxioms[conjecture, axioms, Method -> OptionValue[Method]];
+        Module[{$et},
+            {$et, relAx} = AbsoluteTiming @ TRelevantAxioms[conjecture, axioms,
+                Method -> OptionValue[Method]];
+            If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+                Print["[recon] relevant-axioms = ", $et, " s"]]];
         axiomKeys = Table[{$AxiomSym, k}, {k, Length[enc["AxPairs"]]}];
         ruleList = buildRuleList[enc["AxPairs"], axiomKeys];
         Block[{atpMethodCfg = atpParseMethod[OptionValue[Method]]},
@@ -4557,9 +4565,6 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
         (* Preferred path: the no-completion EXT chain cites the
            input axioms directly, so assembleDataset's axiom-cited
            SubstitutionLemma / Conclusion entries verify. *)
-        If[ Environment["THVM_ATP_LIFT_DEBUG"] === "1",
-            Print["LIFTDBG extSteps: ", Head[extSteps],
-                  If[ ListQ[extSteps], Length[extSteps], ""]]];
         dataset = $Failed;
         If[ extSteps =!= $Failed,
             If[ nGoals > 1,
@@ -4591,9 +4596,6 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                 ]
             ]
         ];
-        If[ Environment["THVM_ATP_LIFT_DEBUG"] === "1",
-            Print["LIFTDBG dataset after EXT: ", Head[dataset],
-                  "  chain: ", Head[chain]]];
         (* Fallback: the EXT chain could not close (or could not be
            expressed over the axioms) -- assemble the critical-pair
            lemma DAG from the completion trace.  Two-phase extraction:
@@ -4648,13 +4650,17 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                        there too.  Sound: cAtp1 is fresh w.r.t. the
                        signature, so its universal generalization is
                        equivalent. *)
-                    p = ProofObject["EquationalLogic", conjStmt, axEq,
-                        <|"Variables" -> Union[varNames,
-                            Cases[ds, s_Symbol /; atpXVarQ[s], {0, Infinity}]],
-                          "Constants" -> Union @ Cases[ds,
-                            s_Symbol /; MemberQ[{"cAtp1", "cAtp2"},
-                                SymbolName[s]], {0, Infinity}],
-                          "Proof" -> ds|>];
+                    Module[{$pt},
+                        {$pt, p} = AbsoluteTiming @
+                            ProofObject["EquationalLogic", conjStmt, axEq,
+                                <|"Variables" -> Union[varNames,
+                                    Cases[ds, s_Symbol /; atpXVarQ[s], {0, Infinity}]],
+                                  "Constants" -> Union @ Cases[ds,
+                                    s_Symbol /; MemberQ[{"cAtp1", "cAtp2"},
+                                        SymbolName[s]], {0, Infinity}],
+                                  "Proof" -> ds|>];
+                        If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+                            Print["[recon] proofobject-build = ", $pt, " s"]]];
                     {$atpVerifyT, v} = AbsoluteTiming @ Quiet @ Check[
                         p["ProofFunction"][p["Theorems"]], $Failed];
                     If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
