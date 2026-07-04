@@ -122,6 +122,12 @@ void       ft_destroy        (AtpFt *a);
 AtpFtCell *ft_alloc_persistent(AtpFt *a);
 AtpFtCell *ft_alloc_scratch   (AtpFt *a);
 
+// Raw (non-zeroing) variants -- THVM_ATP_FT_RAW_ALLOC fast path.  Return an
+// UNINITIALISED cell (except the free-list pop / bump bookkeeping); the
+// ftnew_* constructors overwrite every field they read.  See ft_alloc.c.
+AtpFtCell *ft_alloc_persistent_raw(AtpFt *a);
+AtpFtCell *ft_alloc_scratch_raw   (AtpFt *a);
+
 // Push a pre-linked span [first..last] back onto the persistent free
 // list.  Cells must already be threaded via `next` (so the caller
 // either keeps the original next pointers or stitches a span on the

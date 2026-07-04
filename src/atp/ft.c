@@ -52,8 +52,59 @@ static inline u32  ft_ctr_sym(const AtpFtCell *c) {
 // (ft_alloc.c:103-108, 164-169), so ftnew_* only has to fill in the
 // fields it owns (next/end/sym/arity + GROUND).  SUBST_FRESH and
 // LPO_RANK_VALID stay clear by construction.
+//
+// THVM_ATP_FT_RAW_ALLOC (default OFF): route to the raw (non-zeroing)
+// allocator -- the zeroing is redundant because ftnew_* overwrite every
+// read field and `_pad` is never read (ft_alloc.c).  This is the first
+// increment of the in-place rewrite's allocation phase (native SV_Alloc
+// hands raw memory); default-OFF, same-binary kill switch, byte-identical
+// trajectory (pins gate it).  THVM_ATP_FT_RAW_ALLOC_CHECK forces the raw
+// route AND poisons the scalar fields so a constructor that fails to
+// overwrite a read field trips ft_raw_check below -- proven to fire on a
+// deliberate constructor-field skip.  See docs/plans/atp_inplace_rewrite.md.
+static int g_ft_raw_alloc       = -1;   // -1 unresolved, 0 off, 1 on
+static int g_ft_raw_alloc_check = -1;
+static void ft_raw_alloc_resolve(void) {
+  const char *e = getenv("THVM_ATP_FT_RAW_ALLOC");
+  g_ft_raw_alloc = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  const char *c = getenv("THVM_ATP_FT_RAW_ALLOC_CHECK");
+  g_ft_raw_alloc_check = (c != NULL && c[0] != '\0' && c[0] != '0') ? 1 : 0;
+  if (g_ft_raw_alloc_check) g_ft_raw_alloc = 1;   // CHECK forces the raw route
+}
+#define FT_RAW_POISON_SYM   0xFFFFFFFFu
+#define FT_RAW_POISON_ARITY 0xFFFFu
+#define FT_RAW_POISON_FLAGS 0xFFu
+
 static inline AtpFtCell *ft_alloc_one(AtpFt *a, int scratch) {
+  if (g_ft_raw_alloc < 0) ft_raw_alloc_resolve();
+  if (g_ft_raw_alloc) {
+    AtpFtCell *c = scratch ? ft_alloc_scratch_raw(a) : ft_alloc_persistent_raw(a);
+    if (g_ft_raw_alloc_check) {
+      c->sym   = FT_RAW_POISON_SYM;
+      c->arity = FT_RAW_POISON_ARITY;
+      c->flags = FT_RAW_POISON_FLAGS;
+      c->_pad  = 0xFFu;
+    }
+    return c;
+  }
   return scratch ? ft_alloc_scratch(a) : ft_alloc_persistent(a);
+}
+
+// Certifier: assert the constructor overwrote every READ scalar field
+// (sym/arity/flags).  `_pad` is exempt -- it is never read (static audit),
+// and next/end are pointers the three constructors always set (verified in
+// ft_alloc.c's raw-alloc note).  A no-op unless CHECK is engaged.
+static inline void ft_raw_check(const AtpFtCell *c) {
+  if (g_ft_raw_alloc_check) {
+    if (c->sym == FT_RAW_POISON_SYM || c->arity == FT_RAW_POISON_ARITY
+        || c->flags == FT_RAW_POISON_FLAGS) {
+      fprintf(stderr,
+              "ft_raw_alloc: constructor left a READ field poisoned "
+              "(sym=%u arity=%u flags=%u)\n",
+              c->sym, (u32)c->arity, (u32)c->flags);
+      exit(1);
+    }
+  }
 }
 
 // --- Construction ------------------------------------------------------
@@ -70,6 +121,7 @@ AtpFtCell *ftnew_var(AtpFt *a, u32 var_id, int scratch) {
   c->sym   = WF_VAR_BIT | (var_id & ~WF_VAR_BIT);
   c->arity = 0;
   c->flags = 0;           // SUBST_FRESH=0, GROUND=0, LPO_RANK_VALID=0.
+  ft_raw_check(c);
   return c;
 }
 
@@ -86,6 +138,7 @@ AtpFtCell *ftnew_const(AtpFt *a, u32 sym, int scratch) {
   c->sym   = sym & ~WF_VAR_BIT;
   c->arity = 0;
   c->flags = ATPFT_FLAG_GROUND;
+  ft_raw_check(c);
   return c;
 }
 
@@ -118,6 +171,7 @@ AtpFtCell *ftnew_ctr(AtpFt *a, u32 sym, u16 arity,
   if (arity == 0u) {
     c->next = NULL;
     c->end  = c;
+    ft_raw_check(c);
     return c;
   }
   // Stitch first child.
@@ -133,6 +187,7 @@ AtpFtCell *ftnew_ctr(AtpFt *a, u32 sym, u16 arity,
   }
   c->end           = prev_end;
   prev_end->next   = NULL;
+  ft_raw_check(c);
   return c;
 }
 

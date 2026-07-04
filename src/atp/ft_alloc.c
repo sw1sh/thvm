@@ -260,6 +260,47 @@ void ft_scratch_reset(AtpFt *a) {
   a->n_scratch_alive = 0;
 }
 
+// --- Raw (non-zeroing) allocation --------------------------------------
+//
+// THVM_ATP_FT_RAW_ALLOC (default OFF, resolved in ft.c): hand out a cell
+// WITHOUT the 6-field zeroing above.  The three ftnew_* constructors
+// (ft.c) overwrite next/end/sym/arity/flags on every allocation, and
+// `_pad` is never read (static audit 2026-07-04: no _pad reader anywhere
+// in src/atp, no whole-cell memcmp/hash over AtpFtCell), so the per-alloc
+// zeroing is pure redundant store traffic on the hot path.  Native's
+// SV_Alloc (SpeicherVerwaltung.h) likewise returns raw memory; the
+// caller fills every field.  ft_free_span already reuses `next` as the
+// free-list link and the pop reads it BEFORE the caller overwrites it,
+// so a raw hand-out is safe.  The differential certifier
+// THVM_ATP_FT_RAW_ALLOC_CHECK (ft.c) poisons the scalar fields on
+// hand-out and asserts every READ field was overwritten by the
+// constructor -- so a constructor that skips a read field is caught.
+AtpFtCell *ft_alloc_persistent_raw(AtpFt *a) {
+  if (a->free_head == NULL) {
+    AtpFtBlock *b = ft_block_new();
+    a->free_head  = ft_block_threaded(b, NULL);
+    b->next_block = a->blocks;
+    a->blocks     = b;
+    a->n_blocks  += 1u;
+  }
+  AtpFtCell *cell = a->free_head;
+  a->free_head    = cell->next;
+  a->n_persistent_alive += 1u;
+  g_ft_persist_alloc_total += 1u;
+  return cell;
+}
+
+AtpFtCell *ft_alloc_scratch_raw(AtpFt *a) {
+  if (a->scratch_top == a->scratch_end) {
+    u32 want = a->scratch_end ? (u32)(a->scratch_end - a->scratch_base) + 1u
+                              : (ATPFT_SCRATCH_INIT_BYTES / sizeof(AtpFtCell));
+    ft_scratch_grow(a, want);
+  }
+  AtpFtCell *cell = a->scratch_top++;
+  a->n_scratch_alive += 1u;
+  return cell;
+}
+
 // --- ft_walk_persistent ------------------------------------------------
 //
 // Persistent cells live in `blocks`; the free list threads through a
