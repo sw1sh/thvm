@@ -1,7 +1,60 @@
 # ATP cross-run state leak: a heavy TFindProof run poisons the next run
 
-Status: OPEN, root cause identified (leading hypothesis, one confirmation check
-left). Filed 2026-07-04.
+Status: OPEN. Root cause REVISED 2026-07-04 (the original stale-KBO-memo
+hypothesis below is DISPROVED by measurement). Filed 2026-07-04.
+
+## CORRECTION (2026-07-04): the stale-KBO-memo hypothesis is wrong; it is the persisted GC semi-space swap
+
+The "Root cause (leading hypothesis)" section further down is disproved:
+
+- `thvm_atp_heap_reset`'s out-of-range no-op branch is UNREACHABLE on a fresh
+  kernel: the first recycle captures `g_atp_heap_base = HEAP_NEXT` when
+  `HEAP_NEXT = 0`, so `base = 0` and `base > HEAP_NEXT` never holds
+  (instrumented `THVM_ATP_RECYCLE_DEBUG`: run1 `branch=init` then `branch=pop`;
+  run2 does not call recycle at all -- a separate `$atpInRun`/bundle anomaly,
+  ATP.wl:4461/4522).
+- `thvm_atp_init` ALREADY invalidates the KBO weight memo (`_.c:6306`), plus
+  LPO/orient/unf, so a stale KBO memo cannot survive into run2 regardless.
+- Adding FtNfm invalidation to init (the one ordering memo it missed) does NOT
+  fix the hang either (landed 3622b82a as a latent-gap fix, not this one).
+
+MEASURED root cause:
+
+1. `TReset[]` fixes it (run2 proves in 0.011 s); `init` alone does not.
+2. run2 runs a DIVERGENT completion: `[atp_run] step=27466 n_rules=410
+   n_cps=139118` and climbing, vs 13 steps fresh -- eventually `$Failed` on
+   budget at ~143 s. So the poison corrupts the REDUCTION ORDER (rules stop
+   simplifying -> critical-pair explosion), it is not GC thrashing.
+3. `thvm_reset`'s ONLY ATP-relevant action is `gc_init` (heap/collect.c:91),
+   which resets `GC_FROM_START = 0` and `HEAP_NEXT = 0` -- the canonical
+   semi-space layout. `init` and the heap-recycle only ever MOVE `HEAP_NEXT`;
+   neither re-inits the collector.
+4. The ATP in-loop GC (`thvm_atp_gc_collect`, `_.c:6679`) SWAPS the two
+   semi-spaces on every collect (heap/collect.c:436-440), and fires on its own
+   `THVM_ATP_GC_MB` threshold regardless of total heap size (so a 4 GiB heap
+   still hangs -- consistent with the doc's own observation). After an odd
+   number of Automatic-run collects the active from-space is the UPPER half,
+   and that state persists into run2 because nothing resets it.
+
+Leading mechanism: run2 inherits Automatic's swapped/inconsistent semi-space,
+so its allocations and its own GC operate against a from/to layout that no
+longer matches where terms live -> corrupted term relocation/reads -> wrong KBO
+verdicts -> the divergent search. `gc_init` restores the canonical layout,
+which is why only `TReset` fixes it.
+
+REMAINING FIX (open): a semi-space-consistent reset at each OUTERMOST ATP run
+that is mixed-session safe (the recycle must still preserve non-ATP heap below
+`g_atp_heap_base` -- a bare `gc_init` would nuke tensors). Candidates: compact
+live sub-base heap into the canonical from-space; or make `g_atp_heap_base` a
+GC-relocatable root (doc "option 3" below) AND reset the swap; or the arena
+refactor (which subsumes the whole class -- see the end). Also fix the run2
+recycle-skip. NOTE: the confirming semi-space probe must be added to
+`thvm_wl_atp_run_proof` (the `wire_live` path TFindProof actually uses), NOT the
+legacy `wl_kbo2` entry.
+
+---
+## Original hypothesis (DISPROVED -- retained for the reasoning trail)
+
 
 Running two `TFindProof` proofs in one kernel session should be correct and, if
 anything, faster than a fresh kernel per proof (warm library, reusable state).

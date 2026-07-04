@@ -6315,6 +6315,19 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // unorient_index is keyed in -- s is fresh, r_revision == 0 isn't
   // proof the unorient_index hasn't changed since the last invalidate.
   atp_unf_memo_invalidate(s->r_revision, 1u);
+#ifdef THVM_ATPFT_NORM
+  // Persistent FT normal-form memo (g_ftnfm): structure-keyed and reduction-
+  // ordering INDEPENDENT, only gen-bumped on FT-tree rebuild -- so a fresh
+  // AtpState inherits a prior run's cached NFs.  Across runs with different
+  // orderings (a portfolio's LPO configs vs a following Waldmeister KBO run)
+  // the same structural key denotes a DIFFERENT true normal form, so a
+  // survivor hands the new run a WRONG NF -> a non-decreasing order-gated
+  // rewrite that never joins -> the cross-run hang in
+  // docs/plans/atp_heap_leak.md (init already drops LPO/KBO/orient/unf above;
+  // this closes the one loc/structure-keyed memo it missed).  Byte-neutral on
+  // a single run (the memo starts empty; only the gen's starting value moves).
+  ftnfm_bump_gen();
+#endif
   s->kbo      = cfg;
   s->step_cap = step_cap;
   // CP-priority weight: the ordering-directed GT heuristic is the

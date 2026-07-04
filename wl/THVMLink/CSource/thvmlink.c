@@ -302,12 +302,36 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_heap_recycle(WolframLibraryData libData,
                                                 mint argc, MArgument *args,
                                                 MArgument res) {
   (void)libData; (void)argc; (void)args;
+  const char *branch;
+  uint64_t base_before = g_atp_heap_base, hn = (uint64_t)HEAP_NEXT;
   if (!g_atp_heap_base_set) {
-    g_atp_heap_base     = (uint64_t)HEAP_NEXT;
+    g_atp_heap_base     = hn;
     g_atp_heap_base_set = 1;
-  } else {
+    branch = "init";
+  } else if (g_atp_heap_base <= hn) {
+    // In range: pop the previous run's terms; thvm_atp_heap_reset bumps the
+    // KBO weight-memo epoch on the pop so no recycled loc survives.
     thvm_atp_heap_reset(g_atp_heap_base);
+    branch = "pop";
+  } else {
+    // Stale base: a Cheney GC during a prior run relocated cells and moved
+    // HEAP_NEXT BELOW the saved base, so thvm_atp_heap_reset(g_atp_heap_base)
+    // would take its out-of-range no-op branch and SKIP thvm_kbo_invalidate().
+    // The (epoch, Term loc) KBO weight memo would then survive into the next
+    // run and return a prior run's weight for a loc now holding a different
+    // term -- a wrong KBO verdict that flips an order-gated rewrite into a
+    // non-decreasing step, so completion never terminates (the cross-run hang
+    // in docs/plans/atp_heap_leak.md; thvm_atp_init re-invalidates
+    // LPO/orient/unf but NOT this memo).  Invalidate unconditionally, and
+    // re-anchor the base to the post-GC layout so recycling resumes on later
+    // runs instead of no-op'ing forever.
+    thvm_kbo_invalidate();
+    g_atp_heap_base = hn;
+    branch = "stale";
   }
+  if (getenv("THVM_ATP_RECYCLE_DEBUG"))
+    fprintf(stderr, "[atp-recycle] base=%llu HEAP_NEXT=%llu branch=%s\n",
+            (unsigned long long)base_before, (unsigned long long)hn, branch);
   MArgument_setInteger(res, (mint)HEAP_NEXT);
   return LIBRARY_NO_ERROR;
 }
