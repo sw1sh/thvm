@@ -396,6 +396,17 @@ u64 g_atp_pushn_tr_pb             = 0;
 u64 g_atp_pushn_tr_rematch        = 0;
 u64 g_atp_pushn_tr_win            = 0;
 u64 g_atp_pushn_rw                = 0;
+// PHASE-0 allocs-per-rewrite (THVM_ATP_PROFILE=2, push scope only):
+// gross persistent cells allocated / freed by push-scope splices, and
+// the count of ALLOCATING (regime-c) splices vs in-place ones.  Native
+// WM rewrites the flatterm in place (~0 alloc/rewrite); this brackets
+// g_ft_persist_alloc_total / g_ft_free_span_total around ft_splice in
+// ft_mixmost_reduce_here so the norm-core alloc traffic is isolated
+// from formation / unpack allocation.
+u64 g_atp_pushn_alloc_cells       = 0;
+u64 g_atp_pushn_free_cells        = 0;
+u64 g_atp_pushn_splice_c          = 0;   // allocating splices (regime c)
+u64 g_atp_pushn_splice_a          = 0;   // in-place splices (regime a)
 // Discrimination-tree walk shape (ftdt_descend, same tier + scope):
 // nodes visited (chain-followed + branched) and branch-node edge-loop
 // iterations, so the tree-walk cost per query is directly readable.

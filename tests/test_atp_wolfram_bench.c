@@ -1855,6 +1855,27 @@ int main(int argc, char **argv) {
              (unsigned long long)g_atp_pushn_dt_edge,
              g_atp_pushn_tr_q ? (double)g_atp_pushn_dt_node /
                                 (double)g_atp_pushn_tr_q : 0.0);
+      {
+        // PHASE-0 allocs-per-rewrite (push scope): gross persistent
+        // cells allocated / freed by norm-core splices, split into
+        // regime-c (allocating) vs regime-a (in-place) rewrites.  Native
+        // WM rewrites the flatterm in place at ~0 alloc/rewrite; this is
+        // the direct thvm-vs-native ALLOCATION-axis measurement.
+        extern u64 g_atp_pushn_alloc_cells, g_atp_pushn_free_cells;
+        extern u64 g_atp_pushn_splice_c, g_atp_pushn_splice_a;
+        u64 spl = g_atp_pushn_splice_c + g_atp_pushn_splice_a;
+        printf("   push-norm alloc: splices=%llu (regC=%llu regA=%llu) "
+               "alloc-cells=%llu free-cells=%llu\n"
+               "     [alloc/rw=%.3f free/rw=%.3f regC-frac=%.3f]\n",
+               (unsigned long long)spl,
+               (unsigned long long)g_atp_pushn_splice_c,
+               (unsigned long long)g_atp_pushn_splice_a,
+               (unsigned long long)g_atp_pushn_alloc_cells,
+               (unsigned long long)g_atp_pushn_free_cells,
+               spl ? (double)g_atp_pushn_alloc_cells / (double)spl : 0.0,
+               spl ? (double)g_atp_pushn_free_cells / (double)spl : 0.0,
+               spl ? (double)g_atp_pushn_splice_c / (double)spl : 0.0);
+      }
       if (g_atp_pushn_dt_node > 0) {
         // Deep descend split + per-depth visit histogram + mixmost
         // re-query provenance (see the g_atp_pushn_dt_* block in _.c).

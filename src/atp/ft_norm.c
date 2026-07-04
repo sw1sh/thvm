@@ -2692,9 +2692,21 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   AtpFtCell *parent   = (m->depth == 0u) ? NULL : m->st[m->depth - 1u].ins;
   AtpFtCell *rhs_tmpl = (dir == 0u) ? m->s->rhs_ft[rule]
                                     : m->s->lhs_ft[rule];
+  // PHASE-0: bracket the persistent-arena traffic of THIS rewrite so the
+  // norm-core allocs/rewrite is isolated from formation/unpack allocs.
+  int _pd_alloc = (g_atp_phase_detail && g_atp_pushn_active);
+  u64 _a0 = _pd_alloc ? g_ft_persist_alloc_total : 0u;
+  u64 _f0 = _pd_alloc ? g_ft_free_span_total : 0u;
   AtpFtCell *new_root = ft_splice(m->arena, m->root, parent, e->cell,
                                   rhs_tmpl, m->subst);
   if (new_root == NULL) return 0;   // defensive: ft_splice returns the root
+  if (_pd_alloc) {
+    u64 da = g_ft_persist_alloc_total - _a0;
+    u64 df = g_ft_free_span_total - _f0;
+    g_atp_pushn_alloc_cells += da;
+    g_atp_pushn_free_cells  += df;
+    if (da > 0u) g_atp_pushn_splice_c++; else g_atp_pushn_splice_a++;
+  }
   if (g_atp_phase_detail && g_atp_pushn_active) g_atp_pushn_rw++;
   m->budget--;
   m->rw_count++;

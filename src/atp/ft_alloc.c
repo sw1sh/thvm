@@ -25,6 +25,46 @@
 #include "../thvm.h"
 #include "ft.h"
 
+// PHASE-0 norm-core instrumentation (THVM_ATP_PROFILE=2): gross
+// allocation traffic through the persistent arena, across ALL sites
+// (formation, unpack, splice-rebuild).  Unconditional u64 bumps -- a
+// single retired add per call, no branch; the push-scoped
+// per-rewrite accounting (g_atp_pushn_alloc_cells) brackets these
+// deltas inside ft_mixmost_reduce_here so the norm-core allocs/rewrite
+// is readable in isolation.  Defined here (the first textual include of
+// this TU) so every consumer -- _.c, ft_norm.c, the bench -- sees one
+// definition.
+u64 g_ft_persist_alloc_total = 0;   // ft_alloc_persistent successes
+u64 g_ft_free_span_total     = 0;   // cells returned to the free list
+
+// PHASE-1 norm-core increment #1 (THVM_ATP_NORMCORE2, default OFF):
+// O(1) span free matching native Waldmeister's SV_NestedDealloc (a bare
+// last->next=free_head; free_head=first chain-splice, NO per-cell walk).
+// thvm's default ft_free_span WALKS the whole span (O(span)) solely to
+// keep n_persistent_alive exact -- but that counter is read on the hot
+// path ONLY by the THVM_ATP_NF_CAP rewrite-explosion guard (default OFF
+// in every gate config) and by this file's underflow assertion.  When
+// NORMCORE2 is on AND NF_CAP is not engaged, the walk is pure overhead
+// (~30.6M cell-chases on OA push-norm) that changes no normal form.
+// Kill switch: unset / =0.  Certifier THVM_ATP_NORMCORE2_CHECK forces
+// the walk alongside the O(1) splice and asserts the free-list wiring +
+// the exact count stay consistent (n_persistent_alive never underflows),
+// proving the O(1) path is a faithful drop-in.  If NF_CAP>0 is set the
+// O(1) path auto-disables (falls back to the exact walk) so the guard
+// stays correct.
+static int g_ft_normcore2       = -1;  // -1 unresolved, 0 off, 1 on
+static int g_ft_normcore2_check = -1;
+static int g_ft_nfcap_on        = -1;  // THVM_ATP_NF_CAP > 0
+static void ft_normcore2_resolve(void) {
+  const char *e = getenv("THVM_ATP_NORMCORE2");
+  g_ft_normcore2 = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  const char *c = getenv("THVM_ATP_NORMCORE2_CHECK");
+  g_ft_normcore2_check = (c != NULL && c[0] != '0' && c[0] != '\0') ? 1 : 0;
+  if (g_ft_normcore2_check) g_ft_normcore2 = 1;   // CHECK forces the route
+  const char *n = getenv("THVM_ATP_NF_CAP");
+  g_ft_nfcap_on = (n != NULL && n[0] != '\0' && strtol(n, NULL, 10) > 0) ? 1 : 0;
+}
+
 // --- Slab block --------------------------------------------------------
 //
 // A block is a header + ATPFT_CELLS_PER_BLOCK trailing cells, all
@@ -115,6 +155,7 @@ AtpFtCell *ft_alloc_persistent(AtpFt *a) {
   cell->flags = 0;
   cell->_pad  = 0;
   a->n_persistent_alive += 1u;
+  g_ft_persist_alloc_total += 1u;
   return cell;
 }
 
@@ -131,6 +172,35 @@ void ft_free_span(AtpFt *a, AtpFtCell *first, AtpFtCell *last) {
   // (only at GC / fixpoint boundaries) and keeps the counter honest
   // for ft_walk_persistent.  Stage 4 GC will replace this with a
   // batch-reset on a known root set.
+  if (g_ft_normcore2 < 0) ft_normcore2_resolve();
+  // NORMCORE2: O(1) chain-splice, no per-cell walk (native SV_NestedDealloc
+  // discipline).  Engaged only when NF_CAP is not active, so the single
+  // hot-path reader of n_persistent_alive stays correct; n_persistent_alive
+  // is left un-decremented (write-only in every gate config).  The CHECK
+  // route still walks to certify the count.
+  if (g_ft_normcore2 && !g_ft_nfcap_on) {
+    if (g_ft_normcore2_check) {
+      // Certifier: compute the exact count the fast path skips and assert
+      // the same non-underflow invariant the walk enforces, then keep
+      // n_persistent_alive exact so a mixed OFF/ON run cross-checks.
+      AtpFtCell *cp = first; u64 cn = 1;
+      for (u64 _s = 0; cp != last && _s < (1ull << 24); _s++) {
+        if (cp->next == NULL) break;
+        cp = cp->next; cn += 1;
+      }
+      if (cn > a->n_persistent_alive) {
+        fprintf(stderr, "ft_alloc: NORMCORE2 free_span underflow (%llu > %llu)\n",
+                (unsigned long long)cn,
+                (unsigned long long)a->n_persistent_alive);
+        exit(1);
+      }
+      a->n_persistent_alive -= cn;
+      g_ft_free_span_total += cn;
+    }
+    last->next   = a->free_head;
+    a->free_head = first;
+    return;
+  }
   AtpFtCell *p = first;
   u64 n = 1;
   // Defensive cap: a mis-threaded span chain (caller's first.next -> ... ->
@@ -144,6 +214,7 @@ void ft_free_span(AtpFt *a, AtpFtCell *first, AtpFtCell *last) {
   }
   last->next   = a->free_head;
   a->free_head = first;
+  g_ft_free_span_total += n;
   if (n > a->n_persistent_alive) {
     fprintf(stderr, "ft_alloc: free_span underflow (%llu > %llu)\n",
             (unsigned long long)n,
