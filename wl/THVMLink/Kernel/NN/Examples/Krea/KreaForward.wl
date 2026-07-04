@@ -236,7 +236,7 @@ krRopeTable[pos_List, axesDims_List, theta_, dev_] := Module[{angRows, cosT, sin
     (* cos/sin ride the activation dtype (bf16 on GPU): a f32 rope table would
        upcast q/k at TRoPEInterleaved and cascade f32 through the whole DiT stream
        -- doubling both the captured-intermediate footprint and matmul bandwidth. *)
-    With[{wdt = If[dev === "cpu", "f32", "bf16"]},
+    With[{wdt = If[dev === "cpu", "f32", $tisActDtype]},
         cosT = TToDevice[TUOpCast[ArrayReshape[TTensorCreate[N[Cos[angRows]]], {Length[pos], 1, hd}], wdt], dev];
         sinT = TToDevice[TUOpCast[ArrayReshape[TTensorCreate[N[Sin[angRows]]], {Length[pos], 1, hd}], wdt], dev]
     ];
@@ -252,7 +252,7 @@ krRopeTable[pos_List, axesDims_List, theta_, dev_] := Module[{angRows, cosT, sin
 
 krTimeEmbed[sigma_, wf_, cfg_, dev_] := Module[{tdim, sinus, t, tvec},
     tdim = cfg["tDim"];
-    sinus = TToDevice[TUOpCast[TTensorCreate[{Normal @ TSinusoidalEmbedding[N[sigma*1000.], tdim]}], If[dev === "cpu", "f32", "bf16"]], dev];
+    sinus = TToDevice[TUOpCast[TTensorCreate[{Normal @ TSinusoidalEmbedding[N[sigma*1000.], tdim]}], If[dev === "cpu", "f32", $tisActDtype]], dev];
     t = krLinearBias[TGELU @ krLinearBias[sinus, wf["tmlp.0.weight"], wf["tmlp.0.bias"]], wf["tmlp.2.weight"], wf["tmlp.2.bias"]];          (* {1, F} *)
     tvec = krLinearBias[TGELU[t], wf["tproj.1.weight"], wf["tproj.1.bias"]];  (* {1, 6F} *)
     <|"t" -> t, "tvec" -> tvec|>
@@ -332,7 +332,7 @@ krAddMask[mask_, s_, dev_] := If[ mask === None,
            onto the CPU interpreter -- a 122s scalar walk); cast to the activation
            dtype so the additive mask does not upcast the attention scores.  -1e9
            is representable in bf16 (f32-width exponent) and still masks to -inf. *)
-        TToDevice[TUOpCast[TTensorCreate[N @ Table[If[mask[[j]] == 1 || mask[[j]] == 1., 0., neg], {i, s}, {j, s}]], If[dev === "cpu", "f32", "bf16"]], dev]
+        TToDevice[TUOpCast[TTensorCreate[N @ Table[If[mask[[j]] == 1 || mask[[j]] == 1., 0., neg], {i, s}, {j, s}]], If[dev === "cpu", "f32", $tisActDtype]], dev]
     ]
 ]
 

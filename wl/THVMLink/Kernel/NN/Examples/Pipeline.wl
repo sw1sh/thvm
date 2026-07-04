@@ -29,6 +29,12 @@ tisRegisterComponent::usage = "tisRegisterComponent[class$, impl$] registers a t
 
 Begin["`Private`"];
 
+(* The on-device activation dtype the host-built inputs (latent, RoPE, time
+   embedding, mask) cast to on a GPU; the generator (e.g. KreaGenerate's "Q8"
+   option) sets it per run.  "bf16" (default) gives fast bf16 x bf16 matmuls;
+   "f32" is full precision.  The cpu path always stays f32 regardless. *)
+$tisActDtype = "bf16";
+
 (* ============================================================
    tisModelSpec -- read a diffusers config directory into a spec.
    ============================================================ *)
@@ -267,7 +273,7 @@ tisInitialLatent[initLat_, simg_, cfg_, seed_, dev_] := Module[{ch, patch, packD
     (* Upload the latent in the activation dtype (bf16 on GPU): a f32 latent makes
        the patch-embed and every downstream matmul a slow MIXED f32(act) x bf16(W)
        and doubles the captured-intermediate footprint under JIT. *)
-    TToDevice[TUOpCast[TTensorCreate[NumericArray[z, "Real32"]], If[dev === "cpu", "f32", "bf16"]], dev]
+    TToDevice[TUOpCast[TTensorCreate[NumericArray[z, "Real32"]], If[dev === "cpu", "f32", $tisActDtype]], dev]
 ]
 
 (* Euler flow-match loop: z <- z + (sigmaNext - sigma) * velocity, over the

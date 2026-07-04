@@ -292,6 +292,7 @@ Options[KreaGenerate] = {
     "NegativePrompt" -> None,
     "ShowSteps" -> False,
     "Device" -> "metal",
+    "Q8" -> Automatic,
     ProgressReporting -> Automatic,
     "ModelDir" -> Automatic
 };
@@ -306,6 +307,12 @@ KreaGenerate[prompt_, opts : OptionsPattern[]] := Module[{modelDir, dev, steps, 
         Return[$Failed]
     ];
     dev = OptionValue["Device"];
+    (* "Q8" controls the on-device ACTIVATION precision (weights stay fp8-resident
+       either way): Automatic/True -> bf16 activations (fast bf16 x bf16 matmuls,
+       half the activation footprint), False -> f32 activations (full precision, the
+       slower MIXED f32(act) x bf16(W) path).  Set the shared activation dtype the
+       host-built latent/rope/time/mask casts read; cpu always stays f32. *)
+    $tisActDtype = If[OptionValue["Q8"] === False, "f32", "bf16"];
     (* 8 = the Krea 2 Turbo distilled step count (the fixed-mu 1.15 schedule,
        krSigmas). *)
     steps = Replace[OptionValue["Steps"], Automatic -> 8];
