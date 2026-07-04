@@ -5,5 +5,5 @@ AbelianGroupAxioms	ImpliesMcCuneAxioms	28	33	+5	vampire portfolio takes longer p
 AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	20	18	-2	preset slightly longer; was 146 -- now -2 only
 BooleanAxioms	DoubleNegation	20	27	+7	different decomposition; was +12
 GroupAxioms	InverseOfInverse	14	18	+4	vampire externalizes more steps; was +6
-HillmanAxioms	Commutativity	-	20	-	preset FAIL (design tension; Mix2+SR=2+AMW=20 cracks at 27)
-MeredithAxioms	Commutativity	-	10	-	preset FAIL (design tension; Add+AMW=20 cracks at 11)
+HillmanAxioms	Commutativity	18	20	+2	Method->Automatic PROVES (ProofObject PL=18, verify=Success, 0.55s): the Sheffer-class autotune front-loads Mix2+SR=2 which cracks it; even plain Method->"Waldmeister" PROVES (PL=37, 0.08s) via the always-on lazy grounded-instance rewriting.  DEFAULT coverage == Vampire.  [supersedes stale 'preset FAIL (design tension)'; verified 2026-07-05]
+MeredithAxioms	Commutativity	16	10	-6	Method->Automatic PROVES (ProofObject PL=16, verify=Success, 0.05s): the Sheffer-class autotune slot Add+AMW=20 also PROVES (PL=10); plain Method->"Waldmeister" PROVES PL=10 (0.04s).  DEFAULT coverage == Vampire.  [supersedes stale 'preset FAIL (design tension)'; verified 2026-07-05]
