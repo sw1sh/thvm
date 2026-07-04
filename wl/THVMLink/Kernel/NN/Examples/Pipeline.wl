@@ -134,7 +134,13 @@ tisPipeline::nocomp = "The diffusers class `1` (role `2`) has no thvm component 
 
 (* resolve a role's built component, erroring if its class is unregistered. *)
 
-tisBuildComponent[spec_, role_String, dev_] := Module[{comp, class, impl},
+(* Built components are cached for the session (keyed modelDir + role + device),
+   like FLUX's model session: a repeat call reuses the loaded device-resident
+   weights instead of re-reading + re-pinning them (a cold transformer load alone
+   is ~24 GB and tens of seconds). *)
+$tisBuilt = <||>;
+
+tisBuildComponent[spec_, role_String, dev_] := Module[{comp, class, impl, key},
     comp = spec["components"][role];
     If[ MissingQ[comp], Return[Missing["NoRole", role]]];
     class = comp["class"];
@@ -143,7 +149,10 @@ tisBuildComponent[spec_, role_String, dev_] := Module[{comp, class, impl},
         Message[tisPipeline::nocomp, class, role];
         Return[$Failed]
     ];
-    <|"impl" -> impl, "comp" -> comp, "built" -> impl["loader"][comp, dev]|>
+    key = {spec["modelDir"], role, dev};
+    Lookup[$tisBuilt, Key[key],
+        $tisBuilt[key] = <|"impl" -> impl, "comp" -> comp, "built" -> impl["loader"][comp, dev]|>
+    ]
 ]
 
 (* the shared flow.  opts carries the run knobs (seq lengths, steps, image grid,
@@ -255,7 +264,10 @@ tisInitialLatent[initLat_, simg_, cfg_, seed_, dev_] := Module[{ch, patch, packD
             RandomVariate[NormalDistribution[], {simg, packDim}]
         )
     ];
-    TToDevice[TTensorCreate[NumericArray[z, "Real32"]], dev]
+    (* Upload the latent in the activation dtype (bf16 on GPU): a f32 latent makes
+       the patch-embed and every downstream matmul a slow MIXED f32(act) x bf16(W)
+       and doubles the captured-intermediate footprint under JIT. *)
+    TToDevice[TUOpCast[TTensorCreate[NumericArray[z, "Real32"]], If[dev === "cpu", "f32", "bf16"]], dev]
 ]
 
 (* Euler flow-match loop: z <- z + (sigmaNext - sigma) * velocity, over the
@@ -279,11 +291,8 @@ tisEulerSample[stepFn_Function, z0_, sigmas_] := Module[{z = z0, n = Length[sigm
 ]
 
 tisEulerSample[tfOut_Association, z0_, sigmas_] := Module[{z = z0, vn = tfOut["velNet"], cf = tfOut["condFn"], n = Length[sigmas] - 1, k, dt, v},
-    (* The velocity net realizes each block eagerly to bound fp8-transient memory
-       (a fully-lazy capture would pin the whole transformer as bf16 on top of the
-       fp8 resident, ~36 GB), so it is called directly each step rather than
-       TJit-captured.  The O(N) scheduler (rc_memo) keeps the per-step re-schedule
-       cheap, so direct calls cost no speed vs a JIT replay. *)
+    (* Baseline: call the velocity net directly each step (per-block-realized).  The
+       TJit-capture-once/replay speedup is a follow-up on top of this. *)
     Do[ tisReport["Denoising (step " <> IntegerString[k] <> "/" <> IntegerString[n] <> ")...", 0.35 + 0.55 (k - 1)/n];
         dt = sigmas[[k + 1]] - sigmas[[k]];
         v = vn[z, Sequence @@ cf[sigmas[[k]]]];

@@ -233,8 +233,13 @@ krRopeTable[pos_List, axesDims_List, theta_, dev_] := Module[{angRows, cosT, sin
         ],
         pos
     ];                                                       (* {S, head_dim} *)
-    cosT = TToDevice[ArrayReshape[TTensorCreate[N[Cos[angRows]]], {Length[pos], 1, hd}], dev];
-    sinT = TToDevice[ArrayReshape[TTensorCreate[N[Sin[angRows]]], {Length[pos], 1, hd}], dev];
+    (* cos/sin ride the activation dtype (bf16 on GPU): a f32 rope table would
+       upcast q/k at TRoPEInterleaved and cascade f32 through the whole DiT stream
+       -- doubling both the captured-intermediate footprint and matmul bandwidth. *)
+    With[{wdt = If[dev === "cpu", "f32", "bf16"]},
+        cosT = TToDevice[TUOpCast[ArrayReshape[TTensorCreate[N[Cos[angRows]]], {Length[pos], 1, hd}], wdt], dev];
+        sinT = TToDevice[TUOpCast[ArrayReshape[TTensorCreate[N[Sin[angRows]]], {Length[pos], 1, hd}], wdt], dev]
+    ];
     <|"cos" -> cosT, "sin" -> sinT|>
 ]
 
@@ -247,7 +252,7 @@ krRopeTable[pos_List, axesDims_List, theta_, dev_] := Module[{angRows, cosT, sin
 
 krTimeEmbed[sigma_, wf_, cfg_, dev_] := Module[{tdim, sinus, t, tvec},
     tdim = cfg["tDim"];
-    sinus = TToDevice[TTensorCreate[{Normal @ TSinusoidalEmbedding[N[sigma*1000.], tdim]}], dev];
+    sinus = TToDevice[TUOpCast[TTensorCreate[{Normal @ TSinusoidalEmbedding[N[sigma*1000.], tdim]}], If[dev === "cpu", "f32", "bf16"]], dev];
     t = krLinearBias[TGELU @ krLinearBias[sinus, wf["tmlp.0.weight"], wf["tmlp.0.bias"]], wf["tmlp.2.weight"], wf["tmlp.2.bias"]];          (* {1, F} *)
     tvec = krLinearBias[TGELU[t], wf["tproj.1.weight"], wf["tproj.1.bias"]];  (* {1, 6F} *)
     <|"t" -> t, "tvec" -> tvec|>
@@ -283,22 +288,17 @@ krTransformerPre[context_, stxt_, simg_, pos_, mask_, wf_, cfg_] := Module[{addM
 ]
 
 (* the velocity net: PURE device ops over (img, t, tvec) with the precomputed
-   ctx/rope/addMask + the weights closed over.  patch-embed img, prepend the fixed
-   text context, run the 28 blocks (per-block realized to bound fp8-transient
-   memory), drop the text prefix, final layer.  The sampler calls it directly each
-   step; the O(N) scheduler keeps the per-step re-schedule cheap. *)
+   ctx/rope/addMask + the fp8-resident weights closed over.  patch-embed img,
+   prepend the fixed text context, run the 28 blocks (per-block realized), drop the
+   text prefix, final layer.  The sampler calls it directly each step. *)
 krTransformerBlocks[img_, ctx_, t_, tvec_, rope_, addMask_, stxt_, simg_, wf_, cfg_] := Module[{hidden, combined, i, out},
     hidden = krLinearBias[img, wf["first.weight"], wf["first.bias"]];   (* {Simg, F} *)
     combined = Join[ctx, hidden, 1];                                   (* {Stxt+Simg, F} *)
-    (* Realize each block eagerly.  The fp8 weights decode to a transient bf16 per
-       matmul (bufferize_fp8_cast_feeds_matmul -- resident only for that matmul);
-       a fully-lazy 28-block graph references ALL blocks' transients at once, so a
-       cold capture pins the whole transformer as bf16 (~24 GB) on top of the 12 GB
-       fp8 resident (~36 GB peak).  Per-block TRealize frees each block's transients
-       before the next, bounding the DiT working set to ~one block (~14 GB).  The
-       O(N) scheduler (rc_memo) makes per-step re-scheduling cheap, so this costs no
-       speed vs a JIT capture.  (The historical ~80 GB was the text-fusion Join
-       blowup, since fixed -- not the DiT stack.) *)
+    (* Realize each block: the fp8 weights decode to a per-matmul bf16 transient
+       (bufferize_fp8_cast_feeds_matmul) freed at end-of-realize, so per-block
+       TRealize bounds the DiT working set to ~one block instead of pinning the
+       whole 28-block activation set at once.  (A TJit-captured lazy stack is the
+       speed follow-up; per-block is the correct-and-simple baseline.) *)
     Do[ combined = TRealize @ krBlock[combined, stxt + simg, tvec, rope, addMask, wf, i, cfg], {i, 0, cfg["layers"] - 1}];
     out = combined[[stxt + 1 ;; stxt + simg]];                         (* {Simg, F} *)
     krLast[out, simg, t, wf, cfg]
@@ -327,10 +327,12 @@ krAddMask[mask_, s_, dev_] := If[ mask === None,
     None
     ,
     With[{neg = -1.*^9},
-        (* TToDevice the host-built mask onto the compute device: otherwise it stays
+        (* TToDevice the host-built mask onto the compute device (else it stays
            CPU-resident and term_device_in routes the whole masked-attention output
-           (and its wo matmul) onto the CPU interpreter -- a 122s scalar walk. *)
-        TToDevice[TTensorCreate[N @ Table[If[mask[[j]] == 1 || mask[[j]] == 1., 0., neg], {i, s}, {j, s}]], dev]
+           onto the CPU interpreter -- a 122s scalar walk); cast to the activation
+           dtype so the additive mask does not upcast the attention scores.  -1e9
+           is representable in bf16 (f32-width exponent) and still masks to -inf. *)
+        TToDevice[TUOpCast[TTensorCreate[N @ Table[If[mask[[j]] == 1 || mask[[j]] == 1., 0., neg], {i, s}, {j, s}]], If[dev === "cpu", "f32", "bf16"]], dev]
     ]
 ]
 

@@ -83,15 +83,18 @@ krImageConfig[overrides_Association] := Join[$kreaConfig, overrides]
 
 krFp8Q[t_] := TTensorDType[t] === "fp8e4m3"
 
+(* Keep each weight RESIDENT ON-DEVICE in its stored fp8 (~12 GB total) with a LAZY
+   dequant cast to the working dtype: bufferize_fp8_cast_feeds_matmul materializes
+   the bf16 decode as a per-matmul transient (freed at end-of-realize), so a full
+   bf16 copy (~24 GB) is never resident.  A per-block TRealize keeps only one
+   block's transients live at a time. *)
 krLoadFp8[t_, dev_] := With[{wdt = If[dev === "cpu", "f32", "bf16"]},
     TUOpCast[TRealize @ TToDevice[t, dev], wdt]
 ]
 
-(* a name->TTerm transformer loader.  Keep each weight RESIDENT ON-DEVICE in its
-   stored fp8 (~12 GB total) and fuse the dequant cast into the consuming matmul
-   (decode-on-load); realizing the full bf16 here instead would double resident
-   memory to ~24 GB.  Cache per name; 1-D scales/biases/modulation are stored
-   high-precision in the FP8 file and pass through with the same lazy cast. *)
+(* a name->TTerm transformer loader: fp8-resident weights (~12 GB), lazy bf16
+   dequant cast per use.  Cache per name; 1-D scales/biases/modulation are stored
+   high-precision in the FP8 file and pass through with the same cast. *)
 krTransformerLoader[wt_, dev_] := Module[{cache = <||>},
     n |-> Lookup[cache, n, cache[n] = krLoadFp8[wt[n], dev]]
 ]
