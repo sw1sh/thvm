@@ -1569,6 +1569,7 @@ static void acp_pack_term(Term t, u32 *pos, u32 *nodes) {
 
 // Rebuild one preorder-packed term, advancing `*pp` past it.
 static Term acp_unpack_term(const u8 **pp) {
+  if (g_atp_phase_detail) { extern u64 g_acp_unterm_nodes; g_acp_unterm_nodes++; }
   u8 disc = *(*pp)++;
   switch (disc) {
     case 'C': {
@@ -2213,8 +2214,10 @@ static u32 vcp_count_side(Term root, const u32 *p, u32 p_len, Term rin,
   u32 sp = 0u;
   Term cur     = (rin != 0 && p_len == 0u) ? rin : root;
   u32  cur_spd = (rin != 0 && p_len > 0u) ? 0u : VCP_SPD_NONE;
+  if (g_atp_phase_detail) { extern u64 g_vcp_cnt_calls; g_vcp_cnt_calls++; }
   for (;;) {
     cur = vcp_resolve(cur, subst);
+    if (g_atp_phase_detail) { extern u64 g_vcp_cnt_nodes; g_vcp_cnt_nodes++; }
     if (++acc >= cap) return cap;
     if (term_tag(cur) == TAG_CTR) {
       u64 base = term_val(cur);
@@ -2267,9 +2270,11 @@ static u8 vcp_emit_side(Term root, const u32 *p, u32 p_len, Term rin,
   u32 sp = 0u;
   Term cur     = (rin != 0 && p_len == 0u) ? rin : root;
   u32  cur_spd = (rin != 0 && p_len > 0u) ? 0u : VCP_SPD_NONE;
+  if (g_atp_phase_detail) { extern u64 g_vcp_emt_calls; g_vcp_emt_calls++; }
   for (;;) {
     cur = vcp_resolve(cur, subst);
     lnodes++;
+    if (g_atp_phase_detail) { extern u64 g_vcp_emt_nodes; g_vcp_emt_nodes++; }
     acp_scratch_ensure(lpos, 21u);
     u8 *bp = g_acp_scratch + lpos;
     switch (term_tag(cur)) {
@@ -2432,6 +2437,26 @@ u64 g_vcp_gate_n_fb    = 0;   // ... anomaly fallbacks to the classic gate
 u64 g_vcp_lb_hit       = 0;   // PROFILE=2 probe: raw CPs the unsubst LB catches
 u64 g_vcp_lb_raw       = 0;   // PROFILE=2 probe: raw CPs total
 
+// later-25 per-CP walk-count attribution (PROFILE=2 only; g_atp_phase_detail
+// gated so timed runs are unperturbed).  Decompose CP formation into its
+// separate composite traversals: the KPBehandelt size-gate count walk
+// (vcp_count_side, capped at the gate), the raw-class emit walk
+// (vcp_emit_side, bytes + flat-KBO), and the treated-class fused build+emit
+// walk (vcp_ft_build_emit_rec, bytes + FT cells).  `_calls` = walk
+// invocations (one per side), `_nodes` = node-visits summed across all walks.
+u64 g_vcp_cnt_calls = 0, g_vcp_cnt_nodes = 0;   // count-side walk (size gate)
+u64 g_vcp_emt_calls = 0, g_vcp_emt_nodes = 0;   // raw emit-side walk
+u64 g_vcp_bem_calls = 0, g_vcp_bem_nodes = 0;   // treated build+emit walk
+
+// later-25 heap-Term interchange counters (PROFILE=2 only): the dual-rep
+// round-trips.  ft_from_term (Term -> FT) + ft_to_term (FT -> Term) +
+// acp_unpack_term (packed bytes -> Term) invocations and node-visits, so the
+// steady-state Term<->FT<->packed interchange volume can be sized against the
+// tiles.  Defined here, incremented from ft.c (extern) + acp_unpack_term.
+u64 g_ft_from_calls = 0, g_ft_from_nodes = 0;
+u64 g_ft_to_calls   = 0, g_ft_to_nodes   = 0;
+u64 g_acp_unterm_calls = 0, g_acp_unterm_nodes = 0;
+
 #ifdef THVM_ATPFT_NORM
 // FT-cell image of one virtual side: ft_from_term's exact recursive
 // construction (children first, then ftnew_ctr stitches -- same arena
@@ -2506,6 +2531,7 @@ static AtpFtCell *vcp_ft_build_emit_rec(AtpFt *a, Term t, u32 spd,
                                         const RewriteSubst *subst,
                                         AcpNvMap *m, u32 *pos, u32 depth) {
   t = vcp_resolve(t, subst);
+  if (g_atp_phase_detail) { extern u64 g_vcp_bem_nodes; g_vcp_bem_nodes++; }
   acp_scratch_ensure(*pos, 21u);
   u8 *bp = g_acp_scratch + *pos;
   switch (term_tag(t)) {
@@ -2567,6 +2593,7 @@ static AtpFtCell *vcp_ft_build_emit_side(AtpFt *a, Term root, const u32 *p,
                                          AcpNvMap *m, u32 *pos) {
   Term t  = (rin != 0 && p_len == 0u) ? rin : root;
   u32 spd = (rin != 0 && p_len > 0u) ? 0u : VCP_SPD_NONE;
+  if (g_atp_phase_detail) { extern u64 g_vcp_bem_calls; g_vcp_bem_calls++; }
   return vcp_ft_build_emit_rec(a, t, spd, p, p_len, rin, subst, m, pos, 0u);
 }
 

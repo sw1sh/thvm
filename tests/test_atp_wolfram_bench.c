@@ -1830,6 +1830,41 @@ int main(int argc, char **argv) {
                  (unsigned long long)g_vcp_lb_raw,
                  100.0 * (double)g_vcp_lb_hit / (double)g_vcp_lb_raw);
         }
+        // later-25 per-CP walk-count attribution: node-visits and walk
+        // invocations for the three composite traversals CP formation runs.
+        extern u64 g_vcp_cnt_calls, g_vcp_cnt_nodes;
+        extern u64 g_vcp_emt_calls, g_vcp_emt_nodes;
+        extern u64 g_vcp_bem_calls, g_vcp_bem_nodes;
+        if (g_vcp_cnt_calls + g_vcp_emt_calls + g_vcp_bem_calls > 0) {
+          printf("   ft-emit walks: count calls=%llu nodes=%llu (%.1f/call) | "
+                 "raw-emit calls=%llu nodes=%llu (%.1f/call) | "
+                 "treat-bemit calls=%llu nodes=%llu (%.1f/call)\n",
+                 (unsigned long long)g_vcp_cnt_calls,
+                 (unsigned long long)g_vcp_cnt_nodes,
+                 g_vcp_cnt_calls ? (double)g_vcp_cnt_nodes / (double)g_vcp_cnt_calls : 0.0,
+                 (unsigned long long)g_vcp_emt_calls,
+                 (unsigned long long)g_vcp_emt_nodes,
+                 g_vcp_emt_calls ? (double)g_vcp_emt_nodes / (double)g_vcp_emt_calls : 0.0,
+                 (unsigned long long)g_vcp_bem_calls,
+                 (unsigned long long)g_vcp_bem_nodes,
+                 g_vcp_bem_calls ? (double)g_vcp_bem_nodes / (double)g_vcp_bem_calls : 0.0);
+        }
+        // later-25 heap-Term interchange volume (dual-rep round-trips).
+        extern u64 g_ft_from_calls, g_ft_from_nodes;
+        extern u64 g_ft_to_calls, g_ft_to_nodes;
+        extern u64 g_acp_unterm_nodes;
+        if (g_ft_from_calls + g_ft_to_calls + g_acp_unterm_nodes > 0) {
+          printf("   interchange: ft_from_term calls=%llu nodes=%llu (%.1f/call) | "
+                 "ft_to_term calls=%llu nodes=%llu (%.1f/call) | "
+                 "acp_unpack_term nodes=%llu\n",
+                 (unsigned long long)g_ft_from_calls,
+                 (unsigned long long)g_ft_from_nodes,
+                 g_ft_from_calls ? (double)g_ft_from_nodes / (double)g_ft_from_calls : 0.0,
+                 (unsigned long long)g_ft_to_calls,
+                 (unsigned long long)g_ft_to_nodes,
+                 g_ft_to_calls ? (double)g_ft_to_nodes / (double)g_ft_to_calls : 0.0,
+                 (unsigned long long)g_acp_unterm_nodes);
+        }
       }
       printf("   push-norm core shape: queries=%llu (var=%llu) cand=%llu "
              "att=%llu hit=%llu\n"
