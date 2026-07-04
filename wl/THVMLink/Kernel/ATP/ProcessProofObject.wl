@@ -656,17 +656,30 @@ liftToProofObject[assoc_Association] := Block[{goalRaw, axiomsRaw, dsRaw, goalLi
        Conclusion reconstructs against the right rule and the now-orphan
        reflexive lemma drops below. *)
     prfList = With[{prfAssoc = Association[prfList]},
-        Module[{reflSLs = Select[Keys[prfAssoc],
-                First[#] === "SubstitutionLemma" && reflexiveStmtQ[prfAssoc[#]["Statement"]] &]},
-            Map[Function[kv, Block[{k = First[kv], e = Last[kv], cst},
-                cst = Lookup[e["Proof"], "Construct", Null];
-                If[ First[k] === "Conclusion" && MemberQ[reflSLs, cst],
-                    With[{slProof = prfAssoc[cst]["Proof"]},
-                        k -> Association[e, "Proof" -> <|
-                            "Input" -> Lookup[slProof, "Input", Missing[]],
-                            "Construct" -> Lookup[slProof, "Construct", Missing[]]|>]],
-                    kv]]],
-                prfList]]];
+        Module[
+            {reflSLs = Select[
+                Keys[prfAssoc],
+                First[#] === "SubstitutionLemma" && reflexiveStmtQ[prfAssoc[#]["Statement"]] &
+            ]},
+            Map[
+                Function[kv,
+                    Block[{k = First[kv], e = Last[kv], cst},
+                        cst = Lookup[e["Proof"], "Construct", Null];
+                        If[ First[k] === "Conclusion" && MemberQ[reflSLs, cst],
+                            With[{slProof = prfAssoc[cst]["Proof"]},
+                                k -> Association[e, "Proof" -> <|
+                                    "Input" -> Lookup[slProof, "Input", Missing[]],
+                                    "Construct" -> Lookup[slProof, "Construct", Missing[]]
+                                |>]
+                            ],
+                            kv
+                        ]
+                    ]
+                ],
+                prfList
+            ]
+        ]
+    ];
     (* Second pass: for SubstitutionLemma + Conclusion entries (which
        have a single-rewrite shape: Input parent + Construct parent),
        reconstruct the rewrite metadata the verifier needs.  Walks

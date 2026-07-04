@@ -100,16 +100,20 @@ parseProofLine[line_String] := Block[{parts, name, kind, body, source, sourceCle
        digit is NOT a parent.  Scanning every digit run (the old
        approach) grabbed that position digit AND any un-stripped `###R
        K` suffix, and the spurious entry displaced the real second
-       parent -- e.g. `cp(11,L.2,35,L)` parsed to {11,2,35} instead of
-       {11,35}, collapsing a superposition's two parents onto one and
-       breaking CriticalPairLemma reconstruction.  Split the function's
-       arg list on commas and keep only the pure-integer args; a
-       bare-number source (no parens) is itself the single parent. *)
+       parent: `cp(11,L.2,35,L)` parsed to {11,2,35} instead of {11,35},
+       collapsing a superposition's two parents onto one and breaking
+       CriticalPairLemma reconstruction.  Split the function's arg list
+       on commas and keep only the pure-integer args; a bare-number
+       source (no parens) is itself the single parent. *)
     parents = With[{args = StringCases[sourceClean, "(" ~~ a__ ~~ ")" :> a]},
         If[ args === {},
             ToExpression /@ StringCases[sourceClean, n : DigitCharacter .. :> n],
-            ToExpression /@ Select[StringTrim /@ StringSplit[First[args], ","],
-                StringMatchQ[#, DigitCharacter ..] &]]];
+            ToExpression /@ Select[
+                StringTrim /@ StringSplit[First[args], ","],
+                StringMatchQ[#, DigitCharacter ..] &
+            ]
+        ]
+    ];
     <|
         "Head" -> "wm",
         "Name" -> name,

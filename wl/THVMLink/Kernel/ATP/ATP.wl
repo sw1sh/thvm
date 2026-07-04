@@ -4344,18 +4344,23 @@ TFindProof[conjecture_, axioms_List, opts : OptionsPattern[]] /;
     If[ atpWaldmeisterProcessQ[{opts}],
         atpWaldmeisterPredicateProof[conjecture, axioms, opts],
         With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-            atpReconstructPredicateProof[
-                TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]]];
+            atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]
+        ]
+    ];
 TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] /;
         atpPredicateProblemQ[conjecture, axioms] :=
-    If[ MatchQ[returnSpec, "ProofObject"],
-        If[ atpWaldmeisterProcessQ[{opts}],
-            atpWaldmeisterPredicateProof[conjecture, axioms, opts],
+    Which[
+        ! MatchQ[returnSpec, "ProofObject"],
             With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-                atpReconstructPredicateProof[
-                    TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]]],
-        With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-            TFindProof[eq[[1]], eq[[2]], returnSpec, opts]]];
+                TFindProof[eq[[1]], eq[[2]], returnSpec, opts]
+            ],
+        atpWaldmeisterProcessQ[{opts}],
+            atpWaldmeisterPredicateProof[conjecture, axioms, opts],
+        True,
+            With[{eq = atpEquationalizeGoal[conjecture, axioms]},
+                atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]
+            ]
+    ];
 (* Already-equational problem under Method -> "WaldmeisterProcess" (the
    `(conjecture, axioms_List)` form the named-theory string clause above
    never reached): generate the .pr and lift the real binary's proof. *)

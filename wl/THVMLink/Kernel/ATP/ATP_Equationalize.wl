@@ -83,8 +83,7 @@ eqzGetExistentiallyQuantifiedVariables[formula_] := Flatten[Cases[formula, HoldP
 
 eqzNestVariables[formula_] := Flatten[Reverse[Cases[formula, HoldPattern[_[q_, _]] :> q, {0, Infinity}]]];
 
-eqzInitialStep[formula_] := If[
-    FreeQ[formula, ForAll],
+eqzInitialStep[formula_] := If[ FreeQ[formula, ForAll],
     formula /. Thread[
         eqzGetExistentiallyQuantifiedVariables[formula] ->
         Table[
@@ -140,24 +139,28 @@ eqzEliminateImplication[formula_] := Block[{Implies = EquationalProof`or[Equatio
 eqzStandardizeVariables[And[formula1_, formula2_], n_, fixed_] := Module[{standardizedFormula1, standardizedFormula2},
     standardizedFormula1 = eqzStandardizeVariables[formula1, n, fixed];
     standardizedFormula2 = eqzStandardizeVariables[formula2, standardizedFormula1[[2]], fixed];
-    {And[standardizedFormula1[[1]], standardizedFormula2[[1]]], standardizedFormula2[[2]] + 1, fixed}];
+    {And[standardizedFormula1[[1]], standardizedFormula2[[1]]], standardizedFormula2[[2]] + 1, fixed}
+];
 
 eqzStandardizeVariables[Or[formula1_, formula2_], n_, fixed_] := Module[{standardizedFormula1, standardizedFormula2},
     standardizedFormula1 = eqzStandardizeVariables[formula1, n, fixed];
     standardizedFormula2 = eqzStandardizeVariables[formula2, standardizedFormula1[[2]], fixed];
-    {Or[standardizedFormula1[[1]], standardizedFormula2[[1]]], standardizedFormula2[[2]] + 1, fixed}];
+    {Or[standardizedFormula1[[1]], standardizedFormula2[[1]]], standardizedFormula2[[2]] + 1, fixed}
+];
 
-eqzStandardizeVariables[HoldPattern[ForAll[x_, formula_]], n_, fixed_] := If[MemberQ[fixed, x],
+eqzStandardizeVariables[HoldPattern[ForAll[x_, formula_]], n_, fixed_] := If[ MemberQ[fixed, x],
     {ForAll[x, (eqzStandardizeVariables[formula, n, fixed])[[1]]], n, fixed},
-    With[{standardizedFormula = eqzStandardizeVariables[formula /. {x -> Subscript[x, n]}, n + 1,
-        Append[fixed, Subscript[x, n]]]}, {ForAll[Subscript[x, n], standardizedFormula[[1]]],
-            standardizedFormula[[2]], fixed}]];
+    With[{standardizedFormula = eqzStandardizeVariables[formula /. {x -> Subscript[x, n]}, n + 1, Append[fixed, Subscript[x, n]]]},
+        {ForAll[Subscript[x, n], standardizedFormula[[1]]], standardizedFormula[[2]], fixed}
+    ]
+];
 
-eqzStandardizeVariables[HoldPattern[Exists[x_, formula_]], n_, fixed_] := If[MemberQ[fixed, x],
+eqzStandardizeVariables[HoldPattern[Exists[x_, formula_]], n_, fixed_] := If[ MemberQ[fixed, x],
     {Exists[x, (eqzStandardizeVariables[formula, n, fixed])[[1]]], n, fixed},
-    With[{standardizedFormula = eqzStandardizeVariables[formula /. {x -> Subscript[x, n]}, n + 1,
-        Append[fixed, Subscript[x, n]]]}, {Exists[Subscript[x, n], standardizedFormula[[1]]],
-            standardizedFormula[[2]], fixed}]];
+    With[{standardizedFormula = eqzStandardizeVariables[formula /. {x -> Subscript[x, n]}, n + 1, Append[fixed, Subscript[x, n]]]},
+        {Exists[Subscript[x, n], standardizedFormula[[1]]], standardizedFormula[[2]], fixed}
+    ]
+];
 
 eqzStandardizeVariables[formula_, n_, fixed_] := {formula, n, fixed};
 
@@ -166,8 +169,7 @@ eqzShiftQuantifiers[formula_] := Function[{expression, variables}, Fold[#2[[1]][
         expression_] :> (Sow[{Inactive[h], variable}, "unwrap"];
         expression), {0, Infinity}], "unwrap"] // Activate;
 
-eqzFindPrenexNormalForm[formula_] := eqzShiftQuantifiers[(eqzStandardizeVariables[eqzEliminateImplication[eqzEliminateEquivalence[
-    formula]], 0, {}])[[1]]];
+eqzFindPrenexNormalForm[formula_] := eqzShiftQuantifiers[(eqzStandardizeVariables[eqzEliminateImplication[eqzEliminateEquivalence[formula]], 0, {}])[[1]]];
 
 eqzSkolemizeTop[formula_] := eqzSkolemize[eqzFindPrenexNormalForm[formula]] /; ! FreeQ[formula, ForAll | Exists];
 
@@ -211,12 +213,8 @@ eqzBaseAxioms = {
     ForAll[{\[FormalA], \[FormalB]}, EquationalProof`or[\[FormalA], \[FormalB]] == EquationalProof`or[\[FormalB], \[FormalA]]],
     ForAll[{\[FormalA], \[FormalB]}, EquationalProof`and[\[FormalA], EquationalProof`or[\[FormalB], EquationalProof`not[\[FormalB]]]] == \[FormalA]],
     ForAll[{\[FormalA], \[FormalB]}, EquationalProof`or[\[FormalA], EquationalProof`and[\[FormalB], EquationalProof`not[\[FormalB]]]] == \[FormalA]],
-    ForAll[{\[FormalA], \[FormalB], \[FormalC]},
-        EquationalProof`and[\[FormalA], EquationalProof`or[\[FormalB], \[FormalC]]] ==
-            EquationalProof`or[EquationalProof`and[\[FormalA], \[FormalB]], EquationalProof`and[\[FormalA], \[FormalC]]]],
-    ForAll[{\[FormalA], \[FormalB], \[FormalC]},
-        EquationalProof`or[\[FormalA], EquationalProof`and[\[FormalB], \[FormalC]]] ==
-            EquationalProof`and[EquationalProof`or[\[FormalA], \[FormalB]], EquationalProof`or[\[FormalA], \[FormalC]]]]
+    ForAll[{\[FormalA], \[FormalB], \[FormalC]}, EquationalProof`and[\[FormalA], EquationalProof`or[\[FormalB], \[FormalC]]] == EquationalProof`or[EquationalProof`and[\[FormalA], \[FormalB]], EquationalProof`and[\[FormalA], \[FormalC]]]],
+    ForAll[{\[FormalA], \[FormalB], \[FormalC]}, EquationalProof`or[\[FormalA], EquationalProof`and[\[FormalB], \[FormalC]]] == EquationalProof`and[EquationalProof`or[\[FormalA], \[FormalB]], EquationalProof`or[\[FormalA], \[FormalC]]]]
 };
 
 (* defineNand/Nor/Xor (verbatim, renamed): add the connective's
@@ -252,8 +250,7 @@ eqzDeForAll[expr_] := Module[{bv = {}, body = expr, rules},
         HoldPattern[ForAll[v_, b_]] :> (AppendTo[bv, v]; b)
     };
     bv = DeleteDuplicates[Select[Flatten[{bv}], eqzVariableQ]];
-    rules = Function[{v, s}, v -> Pattern[s, Blank[]]] @@@
-        Transpose[{bv, Table[Unique["eqzv$"], {Length[bv]}]}];
+    rules = Function[{v, s}, v -> Pattern[s, Blank[]]] @@@ Transpose[{bv, Table[Unique["eqzv$"], {Length[bv]}]}];
     body /. rules
 ];
 
@@ -294,7 +291,7 @@ eqzEquationalizationReplacement[step_, proofList_List] := Append[proofList, step
     (eqzGetPredicateStepType[step] === "EquationalizedAxiom" || eqzGetPredicateStepType[step] === "EquationalizedHypothesis");
 eqzEquationalizationReplacement[step_, proofList_List] := Append[proofList, step /.
     {"Axiom" -> "EquationalizedAxiom", "Hypothesis" -> "EquationalizedHypothesis"}] /;
-    !(eqzGetPredicateStepType[step] === "EquationalizedAxiom" || eqzGetPredicateStepType[step] === "EquationalizedHypothesis");
+    ! (eqzGetPredicateStepType[step] === "EquationalizedAxiom" || eqzGetPredicateStepType[step] === "EquationalizedHypothesis");
 
 eqzAddToPredicateProofList[step_, proofList_List, axiomList_List, hypothesisList_List] :=
     Append[proofList, {"EquationalizedAxiom", eqzGetPredicateStepNumber[step]} ->
@@ -330,13 +327,16 @@ atpReconstructPredicateProof[P_, propositions_, axioms_] /; atpReconstructableQ[
     proofListNew = Fold[eqzEquationalizationReplacement[#2, #1] &, {}, proofList];
     proofListNew = Join[axiomList, hypothesisList, proofListNew];
 
-    ProofObject[<|
-        "Logic" -> "Predicate/EquationalLogic",
-        "Theorems" -> propositions,
-        "Axioms" -> axioms,
-        "Variables" -> P["Variables"],
-        "Constants" -> P["Constants"],
-        "Proof" -> proofListNew|> /. eqzBooleanInverseReplacements]
+    ProofObject[
+        <|
+            "Logic" -> "Predicate/EquationalLogic",
+            "Theorems" -> propositions,
+            "Axioms" -> axioms,
+            "Variables" -> P["Variables"],
+            "Constants" -> P["Constants"],
+            "Proof" -> proofListNew
+        |> /. eqzBooleanInverseReplacements
+    ]
 ];
 
 (* === top-level: equationalize a predicate problem for thvm's engine ===
@@ -372,7 +372,8 @@ atpEquationalizeProblemForAll[propositions_, axioms_] := Module[{
 
 atpEquationalizeProblem[propositions_, axioms_] :=
     With[{eq = atpEquationalizeProblemForAll[propositions, axioms]},
-        {eqzDeForAll /@ eq[[1]], eqzDeForAll /@ eq[[2]]}];
+        {eqzDeForAll /@ eq[[1]], eqzDeForAll /@ eq[[2]]}
+    ];
 
 (* === WaldmeisterProcess (real Waldmeister binary) predicate path =====
    Rather than thvm's completion engine, discharge the equationalized
@@ -406,37 +407,42 @@ eqzWmUnmangle[expr_, propositions_, axioms_] := Module[{
     predSyms, boolHeadRules, skfRules, predHeadRules, predConstRules
 },
     boolHeadRules = {
-        "opwmand"[a___] :> EquationalProof`and[a], "opwmor"[a___] :> EquationalProof`or[a],
-        "opwmnot"[a___] :> EquationalProof`not[a], "opwmeq"[a___] :> EquationalProof`eq[a],
-        "opwmnand"[a___] :> EquationalProof`nand[a], "opwmnor"[a___] :> EquationalProof`nor[a],
-        "opwmxor"[a___] :> EquationalProof`xor[a]};
+        "opwmand"[a___] :> EquationalProof`and[a],
+        "opwmor"[a___] :> EquationalProof`or[a],
+        "opwmnot"[a___] :> EquationalProof`not[a],
+        "opwmeq"[a___] :> EquationalProof`eq[a],
+        "opwmnand"[a___] :> EquationalProof`nand[a],
+        "opwmnor"[a___] :> EquationalProof`nor[a],
+        "opwmxor"[a___] :> EquationalProof`xor[a]
+    };
     (* The excluded-middle / skolem CONSTANTS come back as clean Global`
-       atoms (emwit<k>, skc<n>) already, so leave them as-is - keeping
+       atoms (emwit<k>, skc<n>) already, so leave them as-is: keeping
        them atomic (rather than Subscript[\[FormalA], k]) is what lets
        ProofObject dispatch on the reconstructed proof.  Only the skolem
        FUNCTION heads arrive "op"-prefixed; map those to clean Global`
        heads. *)
-    skfRules = (With[{sym = Symbol["Global`skf" <> StringDrop[#, 5]]}, #[a___] :> sym[a]] &) /@
-        DeleteDuplicates @ Cases[expr, h_String /; StringMatchQ[h, "opskf" ~~ DigitCharacter ..], {0, Infinity}, Heads -> True];
-    predSyms = DeleteDuplicates @ Cases[{propositions, axioms},
-        s_Symbol /; Context[s] =!= "System`" && ! MemberQ[
-            {ForAll, Exists, Implies, And, Or, Not, Equivalent, Xor, Nand, Nor, Equal, Unequal, List, True, False, Rule, TwoWayRule}, s],
-        {0, Infinity}, Heads -> True];
+    skfRules = (With[{sym = Symbol["Global`skf" <> StringDrop[#, 5]]}, #[a___] :> sym[a]] &) /@ DeleteDuplicates @ Cases[expr, h_String /; StringMatchQ[h, "opskf" ~~ DigitCharacter ..], {0, Infinity}, Heads -> True];
+    predSyms = DeleteDuplicates @ Cases[
+        {propositions, axioms},
+        s_Symbol /; Context[s] =!= "System`" && ! MemberQ[{ForAll, Exists, Implies, And, Or, Not, Equivalent, Xor, Nand, Nor, Equal, Unequal, List, True, False, Rule, TwoWayRule}, s],
+        {0, Infinity},
+        Heads -> True
+    ];
     (* Keep only NON-identity predicate renames (a symbol whose lowercase
        already equals its own name, e.g. `man`, maps to itself). *)
     predHeadRules = DeleteCases[
         Function[sym, With[{mn = "op" <> ToLowerCase[SymbolName[sym]]}, mn[a___] :> sym[a]]] /@ predSyms,
-        Verbatim[RuleDelayed][h_[__], h_[__]]];
+        Verbatim[RuleDelayed][h_[__], h_[__]]
+    ];
     predConstRules = DeleteCases[
         Function[sym, Symbol["Global`" <> ToLowerCase[SymbolName[sym]]] -> sym] /@ predSyms,
-        Verbatim[Rule][x_, x_]];
+        Verbatim[Rule][x_, x_]
+    ];
     (* A head-rewrite `h[a___] :> ...` does not descend into the matched
        arguments, so nested boolean ops (or[..., and[..., not[...]]])
        need re-scanning; FixedPoint (bounded) re-applies until stable
        without ReplaceRepeated's runaway-iteration risk. *)
-    FixedPoint[
-        # /. Join[boolHeadRules, skfRules, predHeadRules, predConstRules] &,
-        expr, 30]
+    FixedPoint[# /. Join[boolHeadRules, skfRules, predHeadRules, predConstRules] &, expr, 30]
 ];
 
 atpWaldmeisterPredicateProof[propositions_, axioms_, opts___] := Module[{
@@ -457,22 +463,22 @@ atpWaldmeisterPredicateProof[propositions_, axioms_, opts___] := Module[{
     tc = Replace[OptionValue[TFindProof, {opts}, TimeConstraint], Except[_ ? NumericQ] -> 60];
     TimeConstrained[
         Module[{lifted, unmangled},
-            lifted = WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[tmp,
-                "LiftToProofObject" -> True, FilterRules[{opts}, {TimeConstraint}]];
-            If[ Head[lifted] =!= ProofObject, $Failed,
+            lifted = WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[tmp, "LiftToProofObject" -> True, FilterRules[{opts}, {TimeConstraint}]];
+            If[ Head[lifted] =!= ProofObject,
+                $Failed,
                 (* Un-mangle the extracted PARTS (rewriting the ProofObject
                    wrapper re-runs its validation), then rename the lift's
                    Global`x<n> universal variables to fresh symbols
                    (ProofObject's property dispatch rejects Global-context
                    universal variables). *)
-                unmangled = eqzWmUnmangle[
-                    <|"Proof" -> lifted["Proof"], "Variables" -> lifted["Variables"], "Constants" -> lifted["Constants"]|>,
-                    propositions, axioms];
-                unmangled = With[{
-                    vmap = # -> Unique["eqzWmVar"] & /@ Cases[unmangled["Variables"], _Symbol]},
-                    unmangled /. vmap];
-                atpReconstructPredicateProof[unmangled, propositions, axioms]]],
-        tc, $Failed]
+                unmangled = eqzWmUnmangle[<|"Proof" -> lifted["Proof"], "Variables" -> lifted["Variables"], "Constants" -> lifted["Constants"]|>, propositions, axioms];
+                unmangled = With[{vmap = # -> Unique["eqzWmVar"] & /@ Cases[unmangled["Variables"], _Symbol]}, unmangled /. vmap];
+                atpReconstructPredicateProof[unmangled, propositions, axioms]
+            ]
+        ],
+        tc,
+        $Failed
+    ]
 ];
 
 (* Already-equational problem under Method -> "WaldmeisterProcess": no
@@ -483,8 +489,7 @@ atpWaldmeisterEquationalProof[conjecture_, axioms_, opts___] := Module[{pr, tmp}
     If[ FailureQ[pr], Return[$Failed]];
     tmp = FileNameJoin[{$TemporaryDirectory, "thvm_equational_wm.pr"}];
     Export[tmp, pr, "Text"];
-    WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[tmp,
-        "LiftToProofObject" -> True, Sequence @@ FilterRules[{opts}, {TimeConstraint}]]
+    WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[tmp, "LiftToProofObject" -> True, FilterRules[{opts}, {TimeConstraint}]]
 ];
 
 End[];
