@@ -623,7 +623,9 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
        so an aborted run returns a clean Failure association instead of
        crashing the kernel via Part[][[k]] on a Failure expression. *)
     If[MatchQ[raw, _LibraryFunctionError], Return[<|"Status" -> "Aborted", "Reason" -> raw|>]];
-    raw = Normal @ raw;
+    {$decT, raw} = AbsoluteTiming[Normal @ raw];
+    If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+        Print["[recon] normal-raw = ", ToString[$decT, InputForm], " s"]];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
@@ -642,13 +644,16 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
        $Failed below for the non-PROVED case. *)
     (* MAIN rules block: 2*nRules packed Terms. *)
     cur = 8;
-    mainRules = Table[
+    {$decT, mainRules} = AbsoluteTiming @ Table[
         Block[{l = raw[[cur + 1]], r = raw[[cur + 2]]},
             cur = cur + 2;
             {decodeAtpTerm[l, labelToName, idToName], decodeAtpTerm[r, labelToName, idToName]}
         ],
         {nRules}
     ];
+    If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+        Print["[recon] main-rules decode = ", ToString[$decT, InputForm],
+            " s  (nRules = ", nRules, ")"]];
     (* MAIN r_trace block: nRules ints. *)
     rTrace = raw[[cur + 1 ;; cur + nRules]];
     cur = cur + nRules;
@@ -689,6 +694,32 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     (* MNF steps block: the GREEN/RED front chains for a goal closed
        by the MNF bidirectional search.  Same per-step layout. *)
     {mnfSteps, cur} = decodeStepsBlock[raw, cur, mnfNSteps, labelToName, idToName];
+    {$decT, $atpVarSymsTmp} = AbsoluteTiming @ Quiet[Block[{
+                Global`a, Global`b, Global`c, Global`d, Global`e,
+                Global`f, Global`g, Global`h, Global`i, Global`j,
+                Global`k, Global`l, Global`m, Global`n, Global`o,
+                Global`p, Global`q, Global`r, Global`s, Global`t,
+                Global`u, Global`v, Global`w, Global`x, Global`y, Global`z,
+                Global`x1, Global`x2, Global`x3, Global`x4, Global`x5,
+                Global`x6, Global`x7, Global`x8, Global`x9, Global`x10,
+                Global`x11, Global`x12,
+                Global`y1, Global`y2, Global`y3,
+                Global`z1, Global`z2, Global`z3},
+            Union[
+                (* Held originals (decodeAtpTerm's $atpVarObj) so the
+                   verifier patterns the SAME symbols the decoded statements
+                   carry; only engine-introduced ids without a capture fall
+                   back to Symbol[name] in this Global` block. *)
+                (If[ KeyExistsQ[$atpVarObj, #],
+                    ReleaseHold @ $atpVarObj[#],
+                    Symbol @ idToName[#]] &) /@ Keys[idToName],
+                Cases[{mainRules, mainSteps, extSteps, mnfSteps},
+                    s_Symbol /; StringMatchQ[SymbolName[s],
+                        "x" ~~ DigitCharacter ..],
+                    {0, Infinity}]
+            ]], {General::shdw}];
+    If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
+        Print["[recon] var-syms = ", ToString[$decT, InputForm], " s"]];
     <|
         "Status" -> status,
         "ExtSteps" -> If[extNSteps === 0, {}, extSteps],
@@ -715,31 +746,9 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
            CanonicalizePatterns escapes axiom-side names upstream
            (atpFreshGlobalSymbol -> c$Atp1), but the encoder's idToName
            still carries the original short labels, so a Block here is
-           the right boundary. *)
-        "VarSyms" -> Quiet[Block[{
-                Global`a, Global`b, Global`c, Global`d, Global`e,
-                Global`f, Global`g, Global`h, Global`i, Global`j,
-                Global`k, Global`l, Global`m, Global`n, Global`o,
-                Global`p, Global`q, Global`r, Global`s, Global`t,
-                Global`u, Global`v, Global`w, Global`x, Global`y, Global`z,
-                Global`x1, Global`x2, Global`x3, Global`x4, Global`x5,
-                Global`x6, Global`x7, Global`x8, Global`x9, Global`x10,
-                Global`x11, Global`x12,
-                Global`y1, Global`y2, Global`y3,
-                Global`z1, Global`z2, Global`z3},
-            Union[
-                (* Held originals (decodeAtpTerm's $atpVarObj) so the
-                   verifier patterns the SAME symbols the decoded statements
-                   carry; only engine-introduced ids without a capture fall
-                   back to Symbol[name] in this Global` block. *)
-                (If[ KeyExistsQ[$atpVarObj, #],
-                    ReleaseHold @ $atpVarObj[#],
-                    Symbol @ idToName[#]] &) /@ Keys[idToName],
-                Cases[{mainRules, mainSteps, extSteps, mnfSteps},
-                    s_Symbol /; StringMatchQ[SymbolName[s],
-                        "x" ~~ DigitCharacter ..],
-                    {0, Infinity}]
-            ]], {General::shdw}]
+           the right boundary.  (Computed above so the TIME_SPLIT
+           [recon] var-syms mark brackets it.) *)
+        "VarSyms" -> $atpVarSymsTmp
     |>
 ]
 

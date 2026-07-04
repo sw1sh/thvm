@@ -108,6 +108,16 @@ typedef struct {
   u32 sym;       // ctr label, or var index (1-based, canonical per face)
   u8  is_var;
   u8  arity;
+  // NOTE (2026-07-04, measured): a u16 `skip` cache in the 2 padding
+  // bytes here (subterm end = i + skip, filled in wmo_cells_from_term,
+  // wmo_sub_end reads it) was REJECTED by wall-clock A/B x5 alternating
+  // pairs: 13.42s vs 13.56s mean on the OA C bench (~-0.15s, below the
+  // 0.3s bar) -- the arity-chain scans are short and well-predicted.
+  // Do not re-try.  Side finding kept for the record: the rank-cache
+  // key memcmp (wmo_tops_rank) compares these 2 uninitialised padding
+  // bytes, causing ~600 false misses/run on OA (hit rate 24.8% vs 26.6%
+  // with deterministic padding) -- benign (a miss recomputes the
+  // identical list), just a known noise source in the hit counters.
 } WmoCell;
 
 struct WmoNode;
