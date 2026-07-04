@@ -65,12 +65,51 @@ static void ft_normcore2_resolve(void) {
   g_ft_nfcap_on = (n != NULL && n[0] != '\0' && strtol(n, NULL, 10) > 0) ? 1 : 0;
 }
 
+// --- Cell-size sensitivity amplifier (de-risk experiment) --------------
+//
+// THVM_ATP_FT_CELL_PAD=N (default 0): add N bytes (rounded up to the cell's
+// 8-byte alignment) of UNUSED padding to the per-cell allocation STRIDE in
+// BOTH arenas.  The AtpFtCell struct itself stays 24 bytes and every field
+// is read at its original offset -- PAD changes ONLY the spatial footprint
+// (consecutive cells spaced `stride` bytes apart, so fewer per cache line),
+// never a value the trajectory reads.  ftnfm is content-addressed (FNV over
+// the pre-order symbol sequence, ft_norm.c:2788), so cell addresses/spacing
+// never enter a normal form: PAD is byte-identity-preserving by
+// construction, and PAD=0 restores the exact 24-byte contiguous layout (the
+// shipping path -- ft_cell_at(base,i) == &base[i], scratch bump == ++,
+// block malloc == sizeof(AtpFtBlock)).
+//
+// This is the amplifier for the cell-shrink question (docs/plans/
+// atp_normcell_shrink.md): if normalize wall scales UP with the stride, the
+// normalizer is footprint/cache-bound and a 24->16->12 byte shrink is a
+// real lever; if wall is FLAT under padding, normalize is compute-bound and
+// a shrink will NOT close the FEQ gap.
+static size_t g_ft_cell_stride = 0;   // 0 = unresolved
+static void ft_cell_stride_resolve(void) {
+  size_t pad = 0;
+  const char *e = getenv("THVM_ATP_FT_CELL_PAD");
+  if (e != NULL && e[0] != '\0') {
+    long v = strtol(e, NULL, 10);
+    if (v > 0) pad = ((size_t)v + 7u) & ~(size_t)7u;   // keep 8B alignment
+  }
+  g_ft_cell_stride = sizeof(AtpFtCell) + pad;
+}
+static inline size_t ft_stride(void) {
+  if (g_ft_cell_stride == 0) ft_cell_stride_resolve();
+  return g_ft_cell_stride;
+}
+// i-th cell in a stride-spaced region rooted at `base`.  With PAD=0 this is
+// exactly &((AtpFtCell*)base)[i].
+static inline AtpFtCell *ft_cell_at(void *base, size_t i) {
+  return (AtpFtCell *)((char *)base + i * ft_stride());
+}
+
 // --- Slab block --------------------------------------------------------
 //
-// A block is a header + ATPFT_CELLS_PER_BLOCK trailing cells, all
-// allocated in a single malloc so the cells fit in one cache-aligned
-// region and the block free-list spans contiguous memory.  Blocks
-// are linked into AtpFt.blocks; the list is walked on ft_destroy and
+// A block is a header + ATPFT_CELLS_PER_BLOCK trailing cells (spaced at
+// ft_stride()), all allocated in a single malloc so the cells fit in one
+// cache-aligned region and the block free-list spans contiguous memory.
+// Blocks are linked into AtpFt.blocks; the list is walked on ft_destroy and
 // ft_walk_persistent.
 
 struct AtpFtBlock {
@@ -88,7 +127,12 @@ struct AtpFtBlock {
 // the .c.
 
 static AtpFtBlock *ft_block_new(void) {
-  AtpFtBlock *b = (AtpFtBlock *)malloc(sizeof(AtpFtBlock));
+  // sizeof(AtpFtBlock) already covers CELLS_PER_BLOCK cells at the natural
+  // 24B stride; add the per-cell surplus when THVM_ATP_FT_CELL_PAD widens
+  // the stride.  PAD=0 -> surplus 0 -> exactly sizeof(AtpFtBlock).
+  size_t sz = sizeof(AtpFtBlock)
+            + (size_t)ATPFT_CELLS_PER_BLOCK * (ft_stride() - sizeof(AtpFtCell));
+  AtpFtBlock *b = (AtpFtBlock *)malloc(sz);
   if (b == NULL) { fprintf(stderr, "ft_alloc: block pool OOM\n"); exit(1); }
   b->next_block = NULL;
   return b;
@@ -100,15 +144,16 @@ static AtpFtBlock *ft_block_new(void) {
 // existing free-list head in one pass.
 static AtpFtCell *ft_block_threaded(AtpFtBlock *b, AtpFtCell *tail_link) {
   for (u32 i = 0; i + 1 < ATPFT_CELLS_PER_BLOCK; i++) {
-    b->cells[i].next = &b->cells[i + 1];
+    ft_cell_at(b->cells, i)->next = ft_cell_at(b->cells, i + 1);
   }
-  b->cells[ATPFT_CELLS_PER_BLOCK - 1].next = tail_link;
-  return &b->cells[0];
+  ft_cell_at(b->cells, ATPFT_CELLS_PER_BLOCK - 1)->next = tail_link;
+  return ft_cell_at(b->cells, 0);
 }
 
 // --- Public API --------------------------------------------------------
 
 void ft_init(AtpFt *a) {
+  if (g_ft_cell_stride == 0) ft_cell_stride_resolve();
   a->blocks             = NULL;
   a->free_head          = NULL;
   a->scratch_base       = NULL;
@@ -226,25 +271,33 @@ void ft_free_span(AtpFt *a, AtpFtCell *first, AtpFtCell *last) {
 
 // --- Scratch arena -----------------------------------------------------
 
+// Scratch bookkeeping is byte-based under a widened stride: cell COUNT is
+// (top-base)/stride, and the bump advances by stride bytes.  With PAD=0
+// (stride == sizeof(AtpFtCell)) every expression below reduces to the
+// original AtpFtCell-pointer arithmetic.
 static void ft_scratch_grow(AtpFt *a, u32 want_cells) {
-  u32 cur_cells = (u32)(a->scratch_end - a->scratch_base);
-  u32 new_cells = cur_cells ? cur_cells : (ATPFT_SCRATCH_INIT_BYTES / sizeof(AtpFtCell));
+  size_t stride = ft_stride();
+  u32 cur_cells = (u32)((size_t)((char *)a->scratch_end - (char *)a->scratch_base) / stride);
+  u32 new_cells = cur_cells ? cur_cells : (ATPFT_SCRATCH_INIT_BYTES / (u32)sizeof(AtpFtCell));
   while (new_cells < want_cells) new_cells *= 2u;
-  AtpFtCell *p = (AtpFtCell *)realloc(a->scratch_base, (size_t)new_cells * sizeof(AtpFtCell));
+  AtpFtCell *p = (AtpFtCell *)realloc(a->scratch_base, (size_t)new_cells * stride);
   if (p == NULL) { fprintf(stderr, "ft_alloc: scratch arena OOM\n"); exit(1); }
-  u64 used = (u64)(a->scratch_top - a->scratch_base);
+  size_t used_bytes = (size_t)((char *)a->scratch_top - (char *)a->scratch_base);
   a->scratch_base = p;
-  a->scratch_top  = p + used;
-  a->scratch_end  = p + new_cells;
+  a->scratch_top  = (AtpFtCell *)((char *)p + used_bytes);
+  a->scratch_end  = (AtpFtCell *)((char *)p + (size_t)new_cells * stride);
 }
 
 AtpFtCell *ft_alloc_scratch(AtpFt *a) {
   if (a->scratch_top == a->scratch_end) {
-    u32 want = a->scratch_end ? (u32)(a->scratch_end - a->scratch_base) + 1u
-                              : (ATPFT_SCRATCH_INIT_BYTES / sizeof(AtpFtCell));
+    size_t stride = ft_stride();
+    u32 want = a->scratch_end
+             ? (u32)((size_t)((char *)a->scratch_end - (char *)a->scratch_base) / stride) + 1u
+             : (ATPFT_SCRATCH_INIT_BYTES / (u32)sizeof(AtpFtCell));
     ft_scratch_grow(a, want);
   }
-  AtpFtCell *cell = a->scratch_top++;
+  AtpFtCell *cell = a->scratch_top;
+  a->scratch_top  = (AtpFtCell *)((char *)a->scratch_top + ft_stride());
   cell->next  = NULL;
   cell->end   = cell;
   cell->sym   = 0;
@@ -292,11 +345,14 @@ AtpFtCell *ft_alloc_persistent_raw(AtpFt *a) {
 
 AtpFtCell *ft_alloc_scratch_raw(AtpFt *a) {
   if (a->scratch_top == a->scratch_end) {
-    u32 want = a->scratch_end ? (u32)(a->scratch_end - a->scratch_base) + 1u
-                              : (ATPFT_SCRATCH_INIT_BYTES / sizeof(AtpFtCell));
+    size_t stride = ft_stride();
+    u32 want = a->scratch_end
+             ? (u32)((size_t)((char *)a->scratch_end - (char *)a->scratch_base) / stride) + 1u
+             : (ATPFT_SCRATCH_INIT_BYTES / (u32)sizeof(AtpFtCell));
     ft_scratch_grow(a, want);
   }
-  AtpFtCell *cell = a->scratch_top++;
+  AtpFtCell *cell = a->scratch_top;
+  a->scratch_top  = (AtpFtCell *)((char *)a->scratch_top + ft_stride());
   a->n_scratch_alive += 1u;
   return cell;
 }
@@ -328,8 +384,10 @@ static u8 *ft_walk_build_freemap(AtpFt *a, size_t *out_total_cells_p) {
     AtpFtBlock *b = a->blocks;
     int found = 0;
     while (b != NULL) {
-      if (fp >= &b->cells[0] && fp < &b->cells[ATPFT_CELLS_PER_BLOCK]) {
-        size_t off = (size_t)(fp - &b->cells[0]);
+      AtpFtCell *c0 = ft_cell_at(b->cells, 0);
+      AtpFtCell *cN = ft_cell_at(b->cells, ATPFT_CELLS_PER_BLOCK);
+      if (fp >= c0 && fp < cN) {
+        size_t off = (size_t)((char *)fp - (char *)c0) / ft_stride();
         map[ord * ATPFT_CELLS_PER_BLOCK + off] = 1;
         found = 1;
         break;
@@ -355,7 +413,7 @@ void ft_walk_persistent(AtpFt *a, AtpFtVisitFn visit, void *ctx) {
   for (AtpFtBlock *b = a->blocks; b != NULL; b = b->next_block) {
     for (u32 i = 0; i < ATPFT_CELLS_PER_BLOCK; i++) {
       if (freemap == NULL || !freemap[ord * ATPFT_CELLS_PER_BLOCK + i]) {
-        visit(&b->cells[i], ctx);
+        visit(ft_cell_at(b->cells, i), ctx);
       }
     }
     ord += 1;
