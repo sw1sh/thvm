@@ -167,6 +167,104 @@ the aligned prefix past 2923. Steps:
    orphan-pop chew, RSS) that binds thvm's wall on the endgame. That is a
    separate (implicit-pair storage / orphan-pop throughput) arc.
 
+## 4b. Dedicated round (2026-07-05): pick 2923 PINNED to a jump-exit-order corner; naive port DISPROVEN; fundamental tension with OA -> SCOPED
+
+A dedicated round instrumented thvm's walk-former emit order (CPFORM seq
+trace, THVM_ATP_CP_FORM_TRACE + SEQ_LO/HI) for the pick-2923 batch AND
+recovered WM's `-a4` formation ages (`critical pair N built with parents R
+and S` / `added to SUE: w, age`) for the same batch. The divergence is now
+pinned exactly; **no fix landed** (the faithful fix conflicts with OA -- see
+below). All mission gates re-verified EXACT (no code changed).
+
+### The pinned rule + the two overlaps
+
+- **New fact = thvm rule 15 = WM rule 654** = `nand(nand(nand(x1,x2),x3),
+  nand(x2,x3)) -> x3`. Its **Vater toplevel sweep (phase A)** at **position
+  L.1.1** (subterm `nand(x1,x2)`, two fresh vars = fully general) forms the
+  divergent equal-weight (w=109 raw / pri=109) band: A = `x1 #
+  nand(nand(x2,x1),nand(nand(x2,x2),x1))` (inner `nand(x2,x2)`), B =
+  `...nand(nand(x3,x2),x1)`, C = `...nand(nand(x2,x3),x1)`.
+- Partner map (thvm slot j -> WM rule): j1->640, j2->641, j3->642, j4->643,
+  **j13->652**, j14->653; the arg1=VARIABLE partners j10->649, j5->644,
+  j12->651, j8->647.
+- At L.1.1 both engines emit the **arg1=variable** partners (var-kids 649,
+  644, 651, 647) FIRST, byte-identically. The divergence is entirely in the
+  **arg1=function** partners, reached via the node's **jump exits**
+  (`n->exits`, wm_order.c `wmo_dfs` else-branch):
+  - **WM order:  652, 641, 643, 653, 640, 642**  (= tryFct, tryNVar, tryOVar)
+  - **thvm order: 641, 643, 653, 652, 640, 642**  (= tryNVar, tryFct, tryOVar)
+- **Only WM652 / thvm-j13** (`nand(nand(nand(x1,x2),x3),nand(x1,x3))`) is
+  misplaced: WM emits it FIRST because its arg1 = `nand(nand(x1,x2),x3)` is
+  FUNCTION-headed at arg1.arg1; thvm emits it THIRD, after the new-var-headed
+  exits {641,643,653}. This flips the w2/cp_seq formation-age tiebreak ->
+  the intra-band selection flip at pick 2923 (WM ages: B@733334 before
+  A@733336; thvm seqs: A@733343 before B@733346).
+
+### Why OA/DN coincide but andassoc diverges (mission hypothesis CONFIRMED)
+
+The mission's "the two overlaps are at positions WM's DFS visits in an order
+thvm's walk reverses only when the subterm shapes are X" is confirmed: X =
+**one partner's arg1 is a DEEPER function-headed subterm (`nand(nand,.)`),
+the others' arg1 are shallower (`nand(x,y)` / `nand(x,x)`)**, all coexisting
+as jump exits at the SAME discrimination-tree node (root-nand, arg1
+position). OA/DN's rule-completion histories never build a node carrying a
+deeper function-headed jump-exit beside shallower variable-headed ones in
+this exposing configuration; andassoc's specific completion (652, the deeper
+`nand(nand(x1,x2),x3)` arg1, inserted AFTER 641/643/653/640/642 and splitting
+their shared arg1-prefix leaf) creates exactly that node.
+
+### Root + the naive port DISPROVEN
+
+Root = the **jump-exit list order** (`n->exits`) at that node, built by
+`wmo_tree_insert` (RumpfSprungeintragSetzen head-insert + BlattAufgeteilt /
+`wmo_altes_blatt_polieren` splice). WM's BlattAufgeteilt places 652's deeper
+function-headed exit at the head; thvm's places it after the shallower
+new-var exits.
+
+A traversal-time **discrimination-order sort of the jump exits** (Fct <
+NewVar < OldVar, in `wmo_dfs`'s query-variable else-branch), gated behind an
+env, was built and measured: it **REGRESSED andassoc firstdiv 2922 -> 17**
+(content-delta wm-only=214, thvm-only=13). This DISPROVES the naive port:
+WM's exit order is genuinely **insertion-history-dependent, NOT a pure
+structural disc-order** -- forcing disc-order globally destroys the early
+trajectory. The change was reverted (net-zero code; tree byte-identical).
+
+### Fundamental tension with the OA crown jewel -> SCOPED
+
+The faithful fix is a **surgical BlattAufgeteilt exit-placement correction
+for the 652-insertion event** in `wmo_altes_blatt_polieren` /
+`wmo_tree_insert`. The in-code comment (wm_order.c:921-934) records that a
+head-insert exception for this exact placement was **REMOVED** because it
+"mis-ordered the OrAssociativity 655/658 twin exits under -auto" -- and **OA
+is the crown jewel of this track** (must stay byte-identical). So 652's
+head-vs-after-model placement is the SAME `wmo_altes_blatt_polieren` decision
+OA's exit order depends on, in the OPPOSITE direction: the documented "no
+local discriminator / fundamental tension" of the trie-exit-placement class
+([[project_atp_wm_orassoc_enclosing_jump]] DEFINITIVE WALL).
+
+- **Candidate discriminator for a future dedicated round:** the andassoc 652
+  case is a **FUNCTION-vs-VARIABLE** split branch (652's arg1.arg1 = nand vs
+  641's arg1.arg1 = x), whereas OA 655/658 is a **VAR-VAR twin** (f(x0,x1) /
+  f(x1,x0), both branch cells variables). The existing fresh-head guard
+  already restricts to `(new_fun != old_fun)` (mixed function/variable,
+  breakthrough #8 f0317c76). A BlattAufgeteilt refinement that head-places a
+  function-headed split exit -- but NOT a var-var twin -- MIGHT close 652
+  without perturbing OA. But it is in the highest-risk-to-OA/DN code, and
+  validating it requires the FULL 66-theorem matrix sweep + OA/DN + Wolfram
+  prefix (the orassoc memory: "the sweep is MANDATORY; regressions there are
+  invisible to the standard gates"), which is out of scope under this
+  session's safety constraints (serialize, no corpus sweeps). Deferred.
+
+### Gates (all EXACT, no code landed)
+
+- OA `WolframAxioms__OrAssociativity.pr 500000 280`: PROVED
+  steps=278807 rules=753 cps=2642990 max_cps=2642990 (14.4s) EXACT.
+- DN `WolframAxioms__DoubleNegation.pr`: PROVED 2848/254/768876 EXACT.
+- non-lazy FEQ (OA.pr, THVM_ATP_LAZY_NORM=0): PROVED 263550/771/1654086 EXACT.
+- bin/test_atp: 136241/136241; make && make wl green.
+- andassoc baseline (KBO, FIFO off): prefix=2922 firstdiv=2923
+  content-delta wm-only=0 (UNCHANGED). NEW firstdiv NOT advanced (no fix).
+
 ## 5. Why no fix landed in this dissection
 
 - The pick-117 divergence is a config/reference-mode match, not an engine
