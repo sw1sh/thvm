@@ -314,7 +314,16 @@ static u32 wmo_face_cells(Term face, WmoCell *out, u32 cap) {
 }
 
 static u8 wmo_cell_eq(const WmoCell *a, const WmoCell *b) {
-  return a->sym == b->sym && a->is_var == b->is_var;
+  // Cell identity is the full discrimination-tree edge symbol.  WM keys every
+  // edge by a symbol CODE whose arity is fixed (SO_Stelligkeit); its splits
+  // compare codes (SO_SymbGleich, DSBaumOperationen.c :631).  thvm stores the
+  // constructor label in `sym` and the arity separately, and an AC-flattened
+  // operator reuses one label across arities (e.g. f/0 vs f/2), so a faithful
+  // code comparison MUST include `arity` -- otherwise the split loop conflates
+  // f/0 with f/2, over-runs past a real difference, and builds a leaf hung one
+  // cell past its key (hang == key_len), which segfaults on later removal.
+  // For fixed-arity theories (sym => arity) this is a no-op: byte-identical.
+  return a->sym == b->sym && a->is_var == b->is_var && a->arity == b->arity;
 }
 
 // ---------- node / leaf helpers ----------

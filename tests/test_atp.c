@@ -2628,6 +2628,56 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-order-ac-mixed-arity-split-no-corrupt-hang");
+  {
+    // Regression for the deterministic andassoc SIGSEGV (bin/test_atp_wolfram
+    // _bench andassoc 500000 55, crash @ step ~86750).  The AC theory reuses
+    // ONE operator label across arities after flattening (f/0 vs f/2), so two
+    // discrimination-tree keys can agree on `sym` at every shared cell yet
+    // differ in `arity`.  WM keys every edge by an arity-fixed symbol CODE
+    // (SO_Stelligkeit) and its BlattAufgeteilt split compares codes
+    // (DSBaumOperationen.c :631); the faithful analog therefore has to compare
+    // `arity` in wmo_cell_eq.  Without it, the split loop conflates f/0 with
+    // f/2, over-runs past the real difference to key_len, and hangs the new
+    // leaf one cell past its key (hang == key_len).  That orphaned corrupt
+    // leaf later segfaults on removal (leaf->key[leaf->hang] OOB +
+    // wmo_kid_del on a freed parent).  Here we drive wmo_tree_insert /
+    // wmo_tree_remove directly with the exact colliding cell pair from the
+    // andassoc trace (they share sym at cells 0..4 but differ in arity at
+    // cell 3: NEW f/0 vs OLD f/2).
+    WmoTree t;
+    memset(&t, 0, sizeof(t));
+    // {sym, is_var, arity} in WmoCell declaration order.  sym=1 = the AC
+    // operator, appearing at BOTH arity 2 and arity 0; sym 1/2 with is_var=1
+    // are variables.
+    WmoCell oldk[13] = {
+      {1u, 0u, 2u}, {1u, 0u, 2u}, {1u, 0u, 0u}, {1u, 0u, 2u}, {1u, 0u, 0u},
+      {1u, 0u, 0u}, {1u, 0u, 2u}, {1u, 0u, 2u}, {1u, 1u, 0u}, {2u, 1u, 0u},
+      {1u, 0u, 2u}, {2u, 1u, 0u}, {1u, 1u, 0u}
+    };
+    WmoCell newk[5] = {
+      {1u, 0u, 2u}, {1u, 0u, 2u}, {1u, 0u, 0u}, {1u, 0u, 0u}, {1u, 0u, 0u}
+    };
+    wmo_tree_insert(&t, oldk, 13u, 6u, 1u, 0u, 0u);
+    wmo_tree_insert(&t, newk, 5u, 3u, 2u, 0u, 0u);
+    // Every leaf must hang strictly inside its own key: hang is the index of
+    // the edge cell reaching the leaf, so 0 <= hang < key_len always.  Pre-fix
+    // the split leaf has hang == key_len == 5 here (the corrupt state).
+    WmoLeaf *nl = wmo_find_leaf(&t, newk, 5u, 2u, 0u);
+    CHECK(nl != NULL);
+    CHECK(nl->hang < nl->key_len);
+    WmoLeaf *ol = wmo_find_leaf(&t, oldk, 13u, 1u, 0u);
+    CHECK(ol != NULL);
+    CHECK(ol->hang < ol->key_len);
+    // Removing the split leaf, then the survivor, must run cleanly and leave
+    // no reachable leaf (the crash path is exactly this removal on the
+    // corrupt leaf).
+    wmo_tree_remove(&t, newk, 5u, 2u, 0u);
+    CHECK(wmo_find_leaf(&t, newk, 5u, 2u, 0u) == NULL);
+    wmo_tree_remove(&t, oldk, 13u, 1u, 0u);
+    CHECK(wmo_find_leaf(&t, oldk, 13u, 1u, 0u) == NULL);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-split-enclosing-exit-older-first");
   {
     // Opposite polarity (HigmanNeumann @61 family): a LONGER new leaf that
