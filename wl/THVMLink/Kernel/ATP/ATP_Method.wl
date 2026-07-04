@@ -519,15 +519,22 @@ atpAutoTuneForClass["Boolean"] := {
     (* BooleanAxioms has both asymmetric (DeMorgan / Absorption /
        OrAssociativity / Distributivity) and symmetric (ExcludedMiddle /
        Noncontradiction / DoubleNegation) NotableTheorems.  The
-       symmetric tautology cases (ExcludedMiddle, Noncontradiction)
-       are FVI-gated: Method->{"Waldmeister", "FreeVarInstance" -> True}
-       closes both via the
-       Waldmeister RechtsUnfreiErzeugen primitive; the lifter teaches
-       the resulting $TraceFvi sibling to produce a real ProofObject.
-       VampireUEQ stays at the front of the schedule as the parallel
-       parity bridge -- AUTO-FVI on plain Waldmeister was measured to
-       shift Boolean-tautology trajectories outside the 2x baseline
-       budget, so the autotuner does not enable it. *)
+       symmetric-tautology cases (ExcludedMiddle, Noncontradiction) were
+       once FVI-gated, but plain Method->"Waldmeister" now closes them via
+       the always-on lazy grounded-instance rewriting (atp_unorient_template
+       / atp_grounded_instance against the reserved minimal constant
+       s->min_const -- the faithful mirror of Waldmeister's e->r2, used only
+       to reduce with the unorientable equation, never installed as an
+       independent rule).  ExcludedMiddle / Noncontradiction each prove
+       Status=Proved with a verifying ProofObject in <0.03s under plain
+       Waldmeister (McCuneAxioms/EqualityOfInverses likewise).  The EAGER
+       Waldmeister RechtsUnfreiErzeugen rule emission stays opt-in behind
+       Method->{"Waldmeister", "FreeVarInstance" -> True}: it pushes the
+       grounded sibling as a persistent rule, which shifts short
+       trajectories outside budget (e.g. McCuneAxioms/InverseOfComposite
+       0.23s -> 0.90s and its ProofObject reconstruction breaks), so the
+       autotuner does not enable it.  VampireUEQ stays at the front of the
+       schedule as a parallel parity bridge. *)
     "VampireUEQ",
     "GoalDirected",
     {"Completion", "CriticalPairWeight" -> "Mix2"}
