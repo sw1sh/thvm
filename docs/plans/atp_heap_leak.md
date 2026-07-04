@@ -1,8 +1,63 @@
 # ATP cross-run state leak: a heavy TFindProof run poisons the next run
 
-Status: OPEN. Root cause REVISED 2026-07-04 (the original stale-KBO-memo
-hypothesis below is DISPROVED by measurement). Filed 2026-07-04.
+Status: FIXED 2026-07-04. Root cause CONFIRMED by measurement (the persisted
+GC semi-space swap, per the CORRECTION section), fixed by making the outermost
+recycle reclaim via a full Cheney collection instead of an absolute-HEAP_NEXT
+pop. Multi-method-per-kernel benchmarking is now safe (verified: every ordering
+proves; see the matrix below). Filed 2026-07-04.
 
+## FIX (2026-07-04): recycle via gc_collect, not an absolute-HEAP_NEXT pop
+
+CONFIRMED root cause (measured with a GC-state probe at `thvm_wl_atp_run_proof`
+entry + a per-collect swap probe in `thvm_atp_gc_collect`, both gated on
+`THVM_ATP_RECYCLE_DEBUG`):
+
+1. Automatic proves `InverseOfInverse` with ONE in-loop Cheney collect, which
+   SWAPS the semi-spaces, leaving the active from-space in the UPPER half
+   (`gc_from_start() = space_words`, an ODD swap count).
+2. The following Waldmeister run's outermost recycle took the `pop` branch:
+   `thvm_atp_heap_reset(g_atp_heap_base = 0)` popped `HEAP_NEXT` to the absolute
+   value `0`. But `0` is only the "empty heap" position when from-space is the
+   LOWER half. With from-space UPPER, `HEAP_NEXT = 0 < gc_from_start()`, so the
+   run's terms landed OUTSIDE from-space and the heap-pressure check
+   `HEAP_NEXT - gc_from_start()` UNDERFLOWED (unsigned) to a huge value -> a
+   spurious collect at step 0 that evacuated nothing and stranded the new run's
+   live rule/goal cells ABOVE `HEAP_NEXT`. Subsequent allocations overwrote
+   them -> corrupted reduction order -> the divergent, non-terminating search.
+   The probe showed run2 entering `run_proof` with `from_start=134217728
+   HEAP_NEXT=64 from_upper=1` -- exactly the swapped/inconsistent state.
+
+   (The earlier "run2 does not call recycle" note was a stderr/stdout buffering
+   artifact: with a cached-`getenv` probe, run2 DOES recycle, branch `pop`.)
+
+THE FIX (`wl/THVMLink/CSource/thvmlink.c`, `thvm_wl_atp_heap_recycle`): on every
+non-first outermost run, reclaim the previous run's leaked ATP terms with a full
+`gc_collect(NULL, 0)` (the same collection `thvm_wl_gc_collect` / `thvm_realize`
+run) instead of the absolute pop. A collection is semi-space-consistent BY
+CONSTRUCTION -- it always leaves `HEAP_NEXT` correct relative to
+`gc_from_start()` regardless of swap parity -- and mixed-session safe: live
+tensors evacuate as roots while the prior run's now-unreachable ATP terms (their
+ProofObject is fully decoded by the next recycle) are freed. The first outermost
+run still takes the untouched `init` branch, so any SINGLE-run trajectory is
+byte-identical. GC-disabled sessions keep the absolute-pop fallback.
+
+VERIFIED:
+- Repro (heapleak_repro2.wls): run2 now proves 13 steps in 0.011 s (was $Failed
+  at ~143 s). Recycle line: `branch=collect`, run2 `run_proof` entry
+  `from_start=0 HEAP_NEXT=64 from_upper=0` (canonical restored).
+- Ordering matrix (all in ONE kernel, no reset between the runs of a group):
+  Auto->WM {13,13}; WM->WM {13,13}; Auto->Auto {13,13}; WM,WM,Auto,WM
+  {13,13,13,13}; WM/Auto/WM lengths {13,13,13} (stable -- the doc's 8-vs-13
+  FindEquationalProof corruption is gone); TReset then WM = 13.
+- Mixed-session smoke: a tensor allocated BEFORE two Waldmeister runs computes
+  `t+t = {2.,4.,6.,8.}` afterwards (recycle gc_collect preserved non-ATP heap).
+- Byte-identity gates: `bin/test_atp` 136235/136235; DN bare = 29 / ProofObject;
+  `test_atp_wolfram_bench` (thm/mccune, THVM_ATP_WALDMEISTER=1) byte-identical
+  between a clean `_.c` and the instrumented build (the only bench-path change,
+  a `THVM_ATP_RECYCLE_DEBUG`-gated probe, is inert when unset); `make && make wl`
+  green.
+
+---
 ## CORRECTION (2026-07-04): the stale-KBO-memo hypothesis is wrong; it is the persisted GC semi-space swap
 
 The "Root cause (leading hypothesis)" section further down is disproved:
@@ -42,15 +97,14 @@ longer matches where terms live -> corrupted term relocation/reads -> wrong KBO
 verdicts -> the divergent search. `gc_init` restores the canonical layout,
 which is why only `TReset` fixes it.
 
-REMAINING FIX (open): a semi-space-consistent reset at each OUTERMOST ATP run
-that is mixed-session safe (the recycle must still preserve non-ATP heap below
-`g_atp_heap_base` -- a bare `gc_init` would nuke tensors). Candidates: compact
-live sub-base heap into the canonical from-space; or make `g_atp_heap_base` a
-GC-relocatable root (doc "option 3" below) AND reset the swap; or the arena
-refactor (which subsumes the whole class -- see the end). Also fix the run2
-recycle-skip. NOTE: the confirming semi-space probe must be added to
-`thvm_wl_atp_run_proof` (the `wire_live` path TFindProof actually uses), NOT the
-legacy `wl_kbo2` entry.
+FIX (landed 2026-07-04, see the FIX section at the top): a semi-space-consistent
+reclaim at each OUTERMOST ATP run via a full `gc_collect(NULL, 0)` -- which
+compacts the live sub-base heap (tensors) into a canonical from-space, frees the
+prior run's unreachable ATP terms, and needs no absolute checkpoint. This is
+option (b) "compact live sub-base heap" from the fix directions, generalized to
+cover base==0 too. The "run2 recycle-skip" turned out to be a buffering artifact
+(run2 does recycle). The confirming semi-space probe was added to
+`thvm_wl_atp_run_proof` (the `wire_live` path TFindProof uses).
 
 ---
 ## Original hypothesis (DISPROVED -- retained for the reasoning trail)

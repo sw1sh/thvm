@@ -6764,6 +6764,20 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   gc_collect(roots, w);
   g_atp_gc_epoch++;   // invalidate handle-keyed caches (cells moved)
 
+  // Per-collect swap probe (THVM_ATP_RECYCLE_DEBUG): each gc_collect
+  // swaps the Cheney semi-spaces, so after this call from_start
+  // toggles between 0 (lower) and space_words (upper).  Confirms the
+  // odd-swap parity a following ATP run inherits.
+  { static int sw = -1;
+    if (sw < 0) sw = (getenv("THVM_ATP_RECYCLE_DEBUG") != NULL) ? 1 : 0;
+    if (sw)
+      fprintf(stderr, "[atp-gccollect] gc_count=%llu from_start=%llu "
+                      "HEAP_NEXT=%llu s=%p step=%u n_rules=%u n_cps=%u\n",
+        (unsigned long long)gc_count(),
+        (unsigned long long)gc_from_start(),
+        (unsigned long long)HEAP_NEXT, (void *)s, s->step, s->n_rules,
+        s->n_cps); fflush(stderr); }
+
   // DIAG: post-GC live-set breakdown (NORMLOG).  Sum the trace-term
   // node counts vs the rule-term node counts to see which dominates.
   { static int dl = -1;

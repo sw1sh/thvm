@@ -286,16 +286,32 @@ EXTERN_C DLLEXPORT int thvm_wl_heap_pos(WolframLibraryData libData, mint argc,
 // heap whose ATP terms are reachable only by raw loc (not in any root
 // set), relocating cells out from under the loc integers a persistent
 // KBO/LPO/FV index still holds -> SIGSEGV.  Fix: the WL ATP entry calls
-// this BEFORE encoding each run.  The FIRST call captures the heap base
-// (the position before any ATP term was ever allocated); every later
-// call pops HEAP_NEXT back to that base, reclaiming the PREVIOUS run's
-// terms once the next run begins (by which point the prior run's
-// ProofObject + every requested return-spec are fully decoded into
-// loc-free WL expressions).  thvm_atp_heap_reset bumps the KBO weight-
-// memo epoch so no entry keyed to a recycled loc survives; the next
-// run's thvm_atp_init re-invalidates the LPO/orient/unf memos + NULLs the
-// rule/CP indexes, so nothing reads a stale loc.  Returns the new
-// HEAP_NEXT.
+// this BEFORE encoding each run.  The FIRST call is a no-op (nothing
+// prior to reclaim); every later call reclaims the PREVIOUS run's terms
+// once the next run begins (by which point the prior run's ProofObject +
+// every requested return-spec are fully decoded into loc-free WL
+// expressions).  Reclaiming with a full Cheney collection
+// (gc_collect) instead of a raw HEAP_NEXT pop is semi-space-consistent by
+// construction: the prior run's ATP terms are unreachable once its
+// ProofObject is decoded, so the collector frees them, while live tensors
+// survive as roots (mixed-session safe).  The next run's thvm_atp_init
+// re-invalidates the LPO/orient/unf/KBO memos + NULLs the rule/CP indexes,
+// so nothing reads a stale loc.  Returns the new HEAP_NEXT.
+//
+// Why NOT a raw absolute-HEAP_NEXT pop (the historical design): the pop
+// popped HEAP_NEXT back to a base captured under the ORIGINAL semi-space
+// layout (from-space = lower half).  The in-loop ATP GC (thvm_atp_gc_collect)
+// SWAPS the Cheney semi-spaces on every collection, so after an ODD number of
+// a prior run's collects the active from-space is the UPPER half.  Popping
+// HEAP_NEXT to a lower-half base then left HEAP_NEXT BELOW gc_from_start(),
+// the heap-pressure check `HEAP_NEXT - gc_from_start()` underflowed (unsigned)
+// to a huge value, forcing a spurious collection that evacuated nothing (the
+// new run's terms sat outside from-space) and stranded them ABOVE HEAP_NEXT
+// -- subsequent allocations overwrote live rule/goal cells, corrupting the
+// reduction order into a non-terminating search (the cross-run hang in
+// docs/plans/atp_heap_leak.md).  A collection sidesteps the absolute
+// checkpoint entirely: it always leaves HEAP_NEXT correct relative to
+// gc_from_start() regardless of swap parity.
 static int      g_atp_heap_base_set = 0;
 static uint64_t g_atp_heap_base     = 0;
 EXTERN_C DLLEXPORT int thvm_wl_atp_heap_recycle(WolframLibraryData libData,
@@ -305,33 +321,37 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_heap_recycle(WolframLibraryData libData,
   const char *branch;
   uint64_t base_before = g_atp_heap_base, hn = (uint64_t)HEAP_NEXT;
   if (!g_atp_heap_base_set) {
+    // First outermost run: nothing prior to reclaim, so leave the heap
+    // untouched (keeps a single-run trajectory byte-identical).  Record
+    // the checkpoint for the debug line only.
     g_atp_heap_base     = hn;
     g_atp_heap_base_set = 1;
     branch = "init";
-  } else if (g_atp_heap_base <= hn) {
-    // In range: pop the previous run's terms; thvm_atp_heap_reset bumps the
-    // KBO weight-memo epoch on the pop so no recycled loc survives.
-    thvm_atp_heap_reset(g_atp_heap_base);
-    branch = "pop";
-  } else {
-    // Stale base: a Cheney GC during a prior run relocated cells and moved
-    // HEAP_NEXT BELOW the saved base, so thvm_atp_heap_reset(g_atp_heap_base)
-    // would take its out-of-range no-op branch and SKIP thvm_kbo_invalidate().
-    // The (epoch, Term loc) KBO weight memo would then survive into the next
-    // run and return a prior run's weight for a loc now holding a different
-    // term -- a wrong KBO verdict that flips an order-gated rewrite into a
-    // non-decreasing step, so completion never terminates (the cross-run hang
-    // in docs/plans/atp_heap_leak.md; thvm_atp_init re-invalidates
-    // LPO/orient/unf but NOT this memo).  Invalidate unconditionally, and
-    // re-anchor the base to the post-GC layout so recycling resumes on later
-    // runs instead of no-op'ing forever.
+  } else if (gc_enabled()) {
+    // Reclaim the previous run's leaked ATP terms with a full collection.
+    // Semi-space-consistent by construction and mixed-session safe (live
+    // tensors evacuate as roots; the prior run's now-unreachable ATP terms
+    // are freed).  See the header comment for why the old absolute pop
+    // diverged after an odd-parity swap.
+    gc_collect(NULL, 0);
+    // Cells moved: drop the (epoch, loc)-keyed KBO weight memo so no entry
+    // survives to a relocated loc.  (thvm_atp_init also invalidates it; keep
+    // this local so the invariant holds even if init's set changes.)
     thvm_kbo_invalidate();
-    g_atp_heap_base = hn;
-    branch = "stale";
+    g_atp_heap_base = (uint64_t)HEAP_NEXT;
+    branch = "collect";
+  } else {
+    // GC disabled (single-region heap, no semi-space swaps): the absolute
+    // pop is correct.  In range pops the prior run's terms; the reset bumps
+    // the KBO memo epoch on a real pop.
+    if (g_atp_heap_base <= hn) thvm_atp_heap_reset(g_atp_heap_base);
+    else { thvm_kbo_invalidate(); g_atp_heap_base = hn; }
+    branch = "pop";
   }
   if (getenv("THVM_ATP_RECYCLE_DEBUG"))
-    fprintf(stderr, "[atp-recycle] base=%llu HEAP_NEXT=%llu branch=%s\n",
-            (unsigned long long)base_before, (unsigned long long)hn, branch);
+    fprintf(stderr, "[atp-recycle] base=%llu HEAP_NEXT=%llu -> %llu branch=%s\n",
+            (unsigned long long)base_before, (unsigned long long)hn,
+            (unsigned long long)HEAP_NEXT, branch);
   MArgument_setInteger(res, (mint)HEAP_NEXT);
   return LIBRARY_NO_ERROR;
 }

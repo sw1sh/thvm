@@ -566,6 +566,23 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
                     "LIBRARY_FUNCTION_ERROR (kernel preserved)\n");
     return LIBRARY_FUNCTION_ERROR;
   }
+  // GC-state probe (THVM_ATP_RECYCLE_DEBUG): confirm the cross-run
+  // semi-space state a following run inherits.  from_upper=1 means an
+  // odd number of Cheney collects have swapped the active from-space
+  // into the UPPER half (the canonical layout has from_start=0).  A
+  // divergent post-Automatic run is expected to enter here with
+  // from_upper=1 (docs/plans/atp_heap_leak.md).
+  { static int dbg = -1; if (dbg < 0) dbg = getenv("THVM_ATP_RECYCLE_DEBUG") ? 1 : 0;
+  if (dbg) {
+    u64 fs = gc_enabled() ? gc_from_start() : 0;
+    fprintf(stderr,
+            "[atp-gcstate] enter run_proof: gc_enabled=%d gc_count=%llu "
+            "from_start=%llu HEAP_NEXT=%llu from_upper=%d\n",
+            gc_enabled(), (unsigned long long)gc_count(),
+            (unsigned long long)fs, (unsigned long long)HEAP_NEXT,
+            (gc_enabled() && fs != 0) ? 1 : 0);
+    fflush(stderr);
+  } }
   MNumericArray na = MArgument_getMNumericArray(args[0]);
   mint max_steps   = MArgument_getInteger(args[1]);
   mint max_label   = MArgument_getInteger(args[2]);
