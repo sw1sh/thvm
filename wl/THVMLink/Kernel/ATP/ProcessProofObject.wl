@@ -153,15 +153,25 @@ parseFormulaBody[other_] := other
    reverseEncodeFormula -- byte-identical output to parseFormulaBody
    (verified) at a fraction of the cost.  Falls back to parseFormulaBody on
    anything that isn't a plain equation or fails ToExpression. *)
-fastParseFormula[body_String] := Block[{op, parts, tx, l, r},
+fastParseFormula[body_String] := Block[{op, parts, tx, l, r, sep},
     (* Pure-equation fast path only.  Non-equational SZS clauses (Eprover/
        Vampire connectives / quantifiers) share this builder; splitting them
        on `=` would be wrong, so hand those to parseFormulaBody. *)
     If[ StringContainsQ[body, Alternatives["|", "&", "~", "=>", "<=>", "<~>", "![", "?["]],
         Return[parseFormulaBody[body]]];
-    {op, parts} = If[ StringContainsQ[body, "!="],
-        {Unequal, StringSplit[body, "!=", 2]},
-        {Equal, StringSplit[body, "=", 2]}];
+    (* Waldmeister emits ORIENTED rewrite rules `lhs -> rhs` (tes-rule
+       lines) alongside equations `lhs = rhs`.  A rule is an oriented
+       equation; parse it to the SAME Equal head as an equation (the
+       orientation lives in the reconstructed per-step metadata, not the
+       Statement) so it verifies uniformly AND equalSides can read its
+       two sides when it is a superposition parent -- else the body stays
+       a raw string and CriticalPairLemma reconstruction over it fails.
+       Check `->` before `=` (a rule has no `=`). *)
+    {op, sep} = Which[
+        StringContainsQ[body, "->"], {Equal, "->"},
+        StringContainsQ[body, "!="], {Unequal, "!="},
+        True, {Equal, "="}];
+    parts = StringSplit[body, sep, 2];
     If[ Length[parts] =!= 2, Return[parseFormulaBody[body]]];
     tx[side_] := Block[{s2},
         s2 = StringReplace[StringTrim[side],
@@ -173,7 +183,14 @@ fastParseFormula[body_String] := Block[{op, parts, tx, l, r},
         Quiet @ Check[ToExpression[s2], $Failed]];
     l = tx[parts[[1]]]; r = tx[parts[[2]]];
     If[ l === $Failed || r === $Failed,
-        parseFormulaBody[body],
+        Return[parseFormulaBody[body]]];
+    (* A reflexive `x = x` (Waldmeister's tes-final closing step) would
+       collapse `Equal[x, x]` to True and lose the statement.  Emit it as
+       Inactive[Equal] so it stays inert; holdEqual rewraps it as
+       HoldForm[x == x] downstream (matching FindEquationalProof's
+       Conclusion). *)
+    If[ op === Equal && l === r,
+        reverseEncodeFormula[Inactive[Equal][l, r]],
         reverseEncodeFormula[op[l, r]]]
 ]
 fastParseFormula[other_] := other
@@ -289,6 +306,11 @@ proofFieldFor[step_Association, nameToKey_Association] := Block[{parents, parent
    superposition reconstruction is deferred. *)
 equalSides[Inactive[Equal][a_, b_]] := {a, b}
 equalSides[Equal[a_, b_]] := {a, b}
+(* A rewrite-rule statement (Waldmeister tes-rule / a demodulator) is an
+   oriented equation: read its two sides so a rule-valued superposition
+   parent still reconstructs. *)
+equalSides[Rule[a_, b_]] := {a, b}
+equalSides[Inactive[Rule][a_, b_]] := {a, b}
 equalSides[h_HoldForm] := equalSides[ReleaseHold[h]]
 equalSides[_] := $Failed
 
@@ -308,13 +330,23 @@ mkRewriteRule[lhsBase_, rhsBase_, vars_List : {}] := With[{lh = withVariablePatt
     RuleDelayed @@ {lh, rh}
 ]
 
-reconstructSingleRewrite[inputEq_, constructEq_, stepEq_, varSet_List : {}] := Block[{iSides, cSides, sSides, candidates, hit, closureMode},
+reconstructSingleRewrite[inputEq_, constructEq_, stepEq_, varSet_List : {}] := Block[{iSides, cSides, sSides, candidates, hit, closureMode, closureTarget},
     iSides = equalSides[inputEq];
     cSides = equalSides[constructEq];
-    (* True closure: Step.Statement collapses to `True` because the
-       rewrite makes both sides of Input syntactically equal.
-       Accept candidates whose rewritten equation has lhs === rhs. *)
-    closureMode = stepEq === True;
+    (* True closure: the closing rewrite makes both sides of Input
+       syntactically equal.  The step reads as `True` (Equal collapsed)
+       or, once fastParseFormula keeps reflexive equations inert, as a
+       held reflexive `HoldForm[t == t]`.  Either way accept candidates
+       whose rewritten equation has lhs === rhs (equalSides on a held
+       reflexive would ReleaseHold and re-collapse it to True -> $Failed,
+       so this must gate BEFORE sSides is taken). *)
+    closureMode = stepEq === True || reflexiveStmtQ[stepEq];
+    (* When the closing statement is a KNOWN reflexive `HoldForm[t == t]`
+       (not a bare True), the rewrite must reproduce exactly `t == t` --
+       a plain lhs===rhs test would also accept the other reflexive the
+       enumeration reaches first (rewriting Input's OTHER side), yielding
+       metadata whose replay disagrees with the stored statement. *)
+    closureTarget = Replace[stepEq, {HoldForm[Equal[a_, b_]] /; a === b :> a, _ :> Missing[]}];
     sSides = If[ closureMode, Missing[], equalSides[stepEq]];
     If[ iSides === $Failed || cSides === $Failed || (! closureMode && sSides === $Failed), Return[$Failed]];
     (* Statements are stored with BARE variables in the dataset; we
@@ -336,7 +368,9 @@ reconstructSingleRewrite[inputEq_, constructEq_, stepEq_, varSet_List : {}] := B
                         newSubterm = Replace[subterm, rule];
                         newSide = If[ pos === {}, newSubterm, ReplacePart[iSides[[s]], pos -> newSubterm]];
                         rewrittenEq = ReplacePart[iSides, s -> newSide];
-                        If[ If[ closureMode, rewrittenEq[[1]] === rewrittenEq[[2]], (Sort @ rewrittenEq) === (Sort @ sSides)],
+                        If[ If[ closureMode,
+                                rewrittenEq[[1]] === rewrittenEq[[2]] && (MissingQ[closureTarget] || rewrittenEq[[1]] === closureTarget),
+                                (Sort @ rewrittenEq) === (Sort @ sSides)],
                             Throw[{s, cs, pos, rewrittenEq}]]],
                     {pos, allPositions}]],
             {s, 2}, {cs, 2}];
@@ -562,7 +596,23 @@ inactivateEqual[Equal[a_, b_]] := Inactive[Equal][a, b]
 inactivateEqual[other_] := other
 
 holdEqual[Equal[a_, b_]] := With[{x = a, y = b}, HoldForm[x == y]]
+(* A reflexive equation reaches here as Inactive[Equal] (fastParseFormula
+   kept it inert so it would not collapse to True); rewrap it as the same
+   HoldForm[x == y] a non-reflexive equation gets. *)
+holdEqual[Inactive[Equal][a_, b_]] := With[{x = a, y = b}, HoldForm[x == y]]
 holdEqual[other_] := other
+
+(* A statement is reflexive (its two sides are identical) whether it is
+   a raw True (Equal collapsed), a held HoldForm[a == a], or an inert
+   Inactive[Equal][a, a].  Used to fold the degenerate goal-closure
+   SubstitutionLemmas -- fastParseFormula now keeps reflexive equations
+   inert (as HoldForm[a == a]) so the closing step's statement survives,
+   which means the fold can no longer test bare TrueQ. *)
+reflexiveStmtQ[True] := True
+reflexiveStmtQ[HoldForm[Equal[a_, b_]]] := a === b
+reflexiveStmtQ[Inactive[Equal][a_, b_]] := a === b
+reflexiveStmtQ[Equal[a_, b_]] := a === b
+reflexiveStmtQ[_] := False
 
 liftToProofObject[assoc_Association] := Block[{goalRaw, axiomsRaw, dsRaw, goalLifted, axiomsLifted, varSyms, allSyms, constSyms, axList, prfList},
     goalRaw = assoc["Goal"];
@@ -594,6 +644,29 @@ liftToProofObject[assoc_Association] := Block[{goalRaw, axiomsRaw, dsRaw, goalLi
                 ]],
             "Proof" -> Lookup[#2, "Proof", <||>]] &,
         dsRaw];
+    (* Fold a reflexive goal-closure step into the Conclusion BEFORE
+       reconstruction.  Waldmeister closes the goal via `hyp -> ... ->
+       (t = t)`, emitting the penultimate reflexive rewrite as its own
+       tes-goal step and letting the tes-final Conclusion merely cite it.
+       FindEquationalProof folds both into ONE Conclusion that performs
+       the closing rewrite directly.  When the Conclusion's only parent
+       (its Construct) is a reflexive SubstitutionLemma, inherit THAT
+       lemma's Input + Construct (the actual closing rewrite: Input = the
+       last non-reflexive lemma, Construct = the closing rule), so the
+       Conclusion reconstructs against the right rule and the now-orphan
+       reflexive lemma drops below. *)
+    prfList = With[{prfAssoc = Association[prfList]},
+        Module[{reflSLs = Select[Keys[prfAssoc],
+                First[#] === "SubstitutionLemma" && reflexiveStmtQ[prfAssoc[#]["Statement"]] &]},
+            Map[Function[kv, Block[{k = First[kv], e = Last[kv], cst},
+                cst = Lookup[e["Proof"], "Construct", Null];
+                If[ First[k] === "Conclusion" && MemberQ[reflSLs, cst],
+                    With[{slProof = prfAssoc[cst]["Proof"]},
+                        k -> Association[e, "Proof" -> <|
+                            "Input" -> Lookup[slProof, "Input", Missing[]],
+                            "Construct" -> Lookup[slProof, "Construct", Missing[]]|>]],
+                    kv]]],
+                prfList]]];
     (* Second pass: for SubstitutionLemma + Conclusion entries (which
        have a single-rewrite shape: Input parent + Construct parent),
        reconstruct the rewrite metadata the verifier needs.  Walks
@@ -612,7 +685,7 @@ liftToProofObject[assoc_Association] := Block[{goalRaw, axiomsRaw, dsRaw, goalLi
        length while keeping the proof DAG well-formed. *)
     Module[{relinkAssoc, trueSLs, predOf, resolve, relink},
         trueSLs = Cases[prfList,
-            (k_ -> e_) /; First[k] === "SubstitutionLemma" && TrueQ[e["Statement"]] :> k];
+            (k_ -> e_) /; First[k] === "SubstitutionLemma" && reflexiveStmtQ[e["Statement"]] :> k];
         If[ trueSLs =!= {},
             relinkAssoc = Association[prfList];
             predOf[k_] := With[{pr = Lookup[relinkAssoc[k], "Proof", <||>]},

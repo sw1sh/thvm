@@ -4296,10 +4296,72 @@ atpSmtProject[r_, _] := r;
    without an explicit Method -> "SMT". *)
 atpBooleanGoalQ[goal_] :=
     MatchQ[Head[goal], And | Or | Not | Implies | Equivalent | Xor | Nand | Nor | Xnor] && FreeQ[goal, _Pattern | _Blank | _BlankSequence | _BlankNullSequence | ForAll | Exists];
-TFindProof[goal_ /; atpBooleanGoalQ[goal], axioms_List, opts : OptionsPattern[]] :=
+(* SMT (DPLL(T)+CongruenceClosure) is a GROUND decision procedure: it
+   applies only when the whole problem is quantifier-free -- a Boolean
+   goal AND ground axioms.  With universally-quantified axioms (e.g. the
+   Knights-and-Knaves puzzle, whose goal is a ground `And` but whose
+   axioms are ForAll-quantified) the FindEquationalProof-faithful route
+   is equationalization below, which yields a verifiable ProofObject. *)
+atpGroundBooleanProblemQ[goal_, axioms_List] :=
+    atpBooleanGoalQ[goal] && FreeQ[axioms, ForAll | Exists];
+TFindProof[goal_, axioms_List, opts : OptionsPattern[]] /; atpGroundBooleanProblemQ[goal, axioms] :=
     atpSmtEntail[goal, atpFlattenAxioms[axioms]];
-TFindProof[goal_ /; atpBooleanGoalQ[goal], axioms_List, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
+TFindProof[goal_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] /; atpGroundBooleanProblemQ[goal, axioms] :=
     atpSmtProject[atpSmtEntail[goal, atpFlattenAxioms[axioms]], returnSpec];
+
+(* A first-order / predicate-logic problem (predicate atoms, logical
+   connectives, or quantifiers -- e.g. the Socrates syllogism, or
+   {ForAll[x, p[x] => p[f[x]]], p[a]} |- p[f[f[a]]]) is NOT unit-
+   equational, so the completion engine cannot consume it directly.
+   Equationalize it exactly as FindEquationalProof does -- encode each
+   proposition as `<boolean-form> == or[a, not[a]]` over the boolean-
+   algebra base axioms -- then prove the resulting equational problem
+   with the same engine.  Purely GROUND Boolean problems
+   (atpGroundBooleanProblemQ) still go to the SMT decider above; only
+   genuinely quantified / predicate input lands here.  See
+   ATP_Equationalize.wl. *)
+atpPredicateProblemQ[conjecture_, axioms_List] :=
+    ! eqzEquationalProblemQ[conjecture, axioms] && ! atpGroundBooleanProblemQ[conjecture, axioms];
+atpEquationalizeGoal[conjecture_, axioms_List] :=
+    With[{eq = atpEquationalizeProblem[conjecture, axioms]},
+        {If[Length[eq[[1]]] === 1, First[eq[[1]]], eq[[1]]], eq[[2]]}];
+(* Method -> "WaldmeisterProcess" (bare or a {"WaldmeisterProcess", ...}
+   suboption list) routes to the real Waldmeister binary instead of the
+   internal completion engine. *)
+atpMethodName[optsList_List] := Replace[OptionValue[TFindProof, optsList, Method], {name_, ___} :> name];
+atpWaldmeisterProcessQ[optsList_List] := atpMethodName[optsList] === "WaldmeisterProcess";
+(* Prove the equationalized problem, then rebuild the equational
+   ProofObject into a "Predicate/EquationalLogic" ProofObject displaying
+   the ORIGINAL predicate goal/axioms (FindEquationalProof parity); it
+   verifies through the System ProofObject's predicate ProofFunction.
+   Method -> "WaldmeisterProcess" discharges the equationalized problem
+   with the real Waldmeister binary (atpWaldmeisterPredicateProof); the
+   default uses thvm's completion engine.  Only the ProofObject-returning
+   specs reconstruct; internal specs ("Lemmas", "RawTrace", ...) project
+   from the equational result unchanged. *)
+TFindProof[conjecture_, axioms_List, opts : OptionsPattern[]] /;
+        atpPredicateProblemQ[conjecture, axioms] :=
+    If[ atpWaldmeisterProcessQ[{opts}],
+        atpWaldmeisterPredicateProof[conjecture, axioms, opts],
+        With[{eq = atpEquationalizeGoal[conjecture, axioms]},
+            atpReconstructPredicateProof[
+                TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]]];
+TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] /;
+        atpPredicateProblemQ[conjecture, axioms] :=
+    If[ MatchQ[returnSpec, "ProofObject"],
+        If[ atpWaldmeisterProcessQ[{opts}],
+            atpWaldmeisterPredicateProof[conjecture, axioms, opts],
+            With[{eq = atpEquationalizeGoal[conjecture, axioms]},
+                atpReconstructPredicateProof[
+                    TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]]],
+        With[{eq = atpEquationalizeGoal[conjecture, axioms]},
+            TFindProof[eq[[1]], eq[[2]], returnSpec, opts]]];
+(* Already-equational problem under Method -> "WaldmeisterProcess" (the
+   `(conjecture, axioms_List)` form the named-theory string clause above
+   never reached): generate the .pr and lift the real binary's proof. *)
+TFindProof[conjecture_, axioms_List, opts : OptionsPattern[]] /;
+        atpWaldmeisterProcessQ[{opts}] && ! atpPredicateProblemQ[conjecture, axioms] :=
+    atpWaldmeisterEquationalProof[conjecture, axioms, opts];
 
 (* Pass Inactive[Equal] / Inactive[Unequal] THROUGH unchanged --
    stripping them here with `Inactive[Equal][a_, b_] :> a == b`

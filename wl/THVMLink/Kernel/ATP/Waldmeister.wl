@@ -91,18 +91,25 @@ parseProofLine[line_String] := Block[{parts, name, kind, body, source, sourceCle
             If[kind === "tes-final", "trivial_inequality_removal", "equation_copy"],
         True, "rewrite"
     ];
-    (* Extract integer ARGS of the inference function:
+    (* Extract the equation-number ARGS of the inference function:
        orient(K, x) -> {K}
        cp(I, side, J, side) -> {I, J}
        tes-red(I, side, J, side) -> {I, J}
        <number> -> {<number>}
-       After ###R/E strip, the only digit groups left are inside
-       the function-arg parens (or as a bare reference). *)
-    parents = ToExpression /@ StringCases[sourceClean, n : DigitCharacter .. :> n];
-    (* cp/tes-red emit (side, side) string args interleaved; they
-       have no digit groups, so the digit-extracted list is already
-       {I, J} for these.  orient(K, x) yields {K} since "x" isn't a
-       digit. *)
+       A `side` can carry a subterm-POSITION index (`L.2`, `R.3`); its
+       digit is NOT a parent.  Scanning every digit run (the old
+       approach) grabbed that position digit AND any un-stripped `###R
+       K` suffix, and the spurious entry displaced the real second
+       parent -- e.g. `cp(11,L.2,35,L)` parsed to {11,2,35} instead of
+       {11,35}, collapsing a superposition's two parents onto one and
+       breaking CriticalPairLemma reconstruction.  Split the function's
+       arg list on commas and keep only the pure-integer args; a
+       bare-number source (no parens) is itself the single parent. *)
+    parents = With[{args = StringCases[sourceClean, "(" ~~ a__ ~~ ")" :> a]},
+        If[ args === {},
+            ToExpression /@ StringCases[sourceClean, n : DigitCharacter .. :> n],
+            ToExpression /@ Select[StringTrim /@ StringSplit[First[args], ","],
+                StringMatchQ[#, DigitCharacter ..] &]]];
     <|
         "Head" -> "wm",
         "Name" -> name,

@@ -28,6 +28,8 @@ RelatedGuides: [THVMLink]
   - A fully **ground** problem is decided by congruence closure (a complete decision procedure); the quotient is returned as a finite model in [FindFiniteModels]() structure - `co["Model"]` is an Association `op -> Cayley table` (0-indexed nested list) for each operator and `const -> element` for each constant, over the domain `{0, ..., k-1}`.
   - A **quantified** problem is refuted by the saturated completion: when the completion saturates into a convergent term-rewriting system (Status `"Saturated"`, no unorientable equations) whose normal forms separate the goal's two sides, `co["NormalForms"]` are those normal forms and `co["Model"]` is a finite model in FindFiniteModels structure when the initial term algebra closes (else the convergent rules). It declines (`$Failed`) on a commutative/AC-saturated theory whose unorientable equations would need ordered rewriting.
 - For a ground problem, `Method -> "SMT"` decides the entailment by congruence closure directly (returning a `"Proved"` decision Association, or a `CounterexampleObject` on refute) and also accepts a TPTP `File` / `cnf`-`fof` string. Mirrors how [FindEquationalProof]() itself returns a countermodel-bearing `Failure` on a non-theorem.
+- **First-order / predicate-logic input** (predicate atoms, logical connectives `And` / `Or` / `Not` / `Implies` / `Equivalent` / `Xor` / `Nand` / `Nor`, and `ForAll` / `Exists` quantifiers) is proved by automatic *equationalization*: each proposition is Skolemized and encoded as `<boolean-form> == or[a, not[a]]` over a boolean-algebra base, then the resulting equational problem is discharged by the same completion engine - the exact construction [FindEquationalProof]() uses. The equational proof is then reconstructed into a `"Predicate/EquationalLogic"` `ProofObject` whose `"Theorems"` and `"Axioms"` are the *original* predicate statements and whose steps read in predicate form (`Inactive[And]` / `Inactive[Or]` / `Inactive[Not]`), matching what [FindEquationalProof]() returns; it verifies via `p["ProofFunction"][p["Theorems"]]`. The documented predicate examples (the Socrates syllogism, existential quantification, Lewis Carroll's crocodile puzzle, Knights and Knaves) all prove and verify this way. A purely ground Boolean problem still routes to the `"SMT"` decider above; only genuinely quantified / predicate input is equationalized.
+- `Method -> "WaldmeisterProcess"` discharges the equationalized problem with the actual Waldmeister binary (`wmcli`, the same engine [FindEquationalProof]() drives) instead of thvm's completion engine, then reconstructs the same predicate `ProofObject`. It verifies on the simpler examples (the Socrates syllogism, existential quantification); reconstructing a *verifiable* proof from the binary's SZS derivation is bounded by the critical-pair-lemma metadata reconstruction, so on more complex proofs the returned `ProofObject` may not verify (use the default engine there). Requires the `wmcli` binary on `$PATH` / `$WMCLI`.
 - Options:
   - `MaxSteps` - CP-processing cap (default `Automatic`: 200000, raised to 500000 under the `"Waldmeister"`/`"WaldmeisterLazy"` presets so the deep `"WolframAxioms"` proofs fit; an explicit number always wins).
   - `TimeConstraint` - wall-clock seconds (default `Infinity`; bounds non-terminating recursive-axiom saturations; `TimeConstrained[]` and `Abort[]` also interrupt the running C engine).
@@ -57,6 +59,19 @@ Single-argument completion saturates the axioms and returns the derived lemmas:
 TFindProof[ "AbelianGroupAxioms", TimeConstraint -> 5 ]
 ```
 <!-- => {Inactive[Equal][...], ...} - the saturated rule set within 5s -->
+
+---
+
+Predicate-logic input is equationalized automatically, so the Socrates syllogism proves the same way an equation does:
+
+```wl
+TFindProof[
+    mortal[socrates],
+    {ForAll[x, Implies[man[x], mortal[x]]], man[socrates]},
+    TimeConstraint -> 60
+]
+```
+<!-- => ProofObject[<|"Status" -> "Proved", ...|>] - the same head FindEquationalProof returns -->
 
 ---
 
