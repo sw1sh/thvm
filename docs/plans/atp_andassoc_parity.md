@@ -265,6 +265,128 @@ local discriminator / fundamental tension" of the trie-exit-placement class
 - andassoc baseline (KBO, FIFO off): prefix=2922 firstdiv=2923
   content-delta wm-only=0 (UNCHANGED). NEW firstdiv NOT advanced (no fix).
 
+## 4c. Final parity push (2026-07-05): WMJUMP GROUND TRUTH refutes the §4b head-place hypothesis; WM after-splices 652; residual = leaf-vs-node exit-order wall -> BACKED OUT byte-clean
+
+The user authorized the final parity push (close pick-2923, accepting the risk to
+the OA/DN crown jewel). This round did the DECISIVE step the earlier rounds
+deferred: it dumped WM's ACTUAL exit-placement decision for the andassoc-652
+insertion with the WMJUMP-instrumented ELProver, and it EMPIRICALLY tested the §4b
+candidate against the parity battery. Both refute the §4b hypothesis. **No fix
+landed; src/atp reverted byte-clean; the full battery re-verified EXACT.**
+
+### WM GROUND TRUTH (WMJUMP dump, andassoc_kbo rule 652 insertion, cited)
+
+The WM ELProver at `/Users/swish/src/wolfram/waldmeister/ELProver` (instrumented,
+`WM_JUMPDUMP` in DSBaumOperationen.c: `WMJUMP HEAD` at the RumpfSprungeintragSetzen
+head-insert :296-306; `WMJUMP AFTER` at the AltesBlattPolieren parallel splice
+:539-560) was run `WM_NO_AUTO=1 WM_JUMPDUMP=1 ./ELProver -a 4 andassoc_kbo.pr`
+(WM_NO_AUTO drops the -auto override => plain KBO, matching thvm FIFO-off). The
+busiest depth-1 node (root-nand child, `start=0xcbac50098`, the L.1.1-query node)
+at rule-652 insertion emitted EXACTLY:
+
+```
+WMJUMP AFTER start=0xcbac50098 ziel=<652-leaf> pos=7 anchor_ziel=<rule-650-leaf>
+       chain=[ 650/7 652/7 648/7 <node>/5 <node>/5 ]
+```
+
+So **WM places 652's exit via an AltesBlattPolieren AFTER-splice** (parallel spliced
+immediately after the survivor `anchor_ziel` = rule-650's in-jump, DSBaumOperationen.c
+:527-530 `NaechsterZieleintrag` "hinter den Eintrag setzen"). **WM does NOT
+head-place it.** This is confirmed by the WM source: RumpfSprungeintragSetzen
+(:296-306) head-inserts ONLY own-insertion jumps (NeuesBlattEinhaengen hang,
+BlattAufgeteilt chain pops, NeueSpruengeInsAlteBlatt); AltesBlattPolieren parallels
+ALWAYS splice after. There is **NO function-vs-variable head-placement rule in WM.**
+
+=> The §4b candidate discriminator ("head-place a function-headed split exit but NOT
+a var-var twin") is **REFUTED**: it is NOT WM's rule -- WM after-splices the
+function-headed 652 exactly as it does everything else. Head-placing 652 would be a
+thvm-invented heuristic (the mission's forbidden class). thvm's existing mechanism
+already after-splices 652 (`POLIER-PAR-AFTER`, wm_order.c wmo_altes_blatt_polieren
+if-branch) -- **faithful to WM.**
+
+### Empirical confirmation (THVM_ATP_JUMPFIX kill switch)
+
+The §4b candidate was implemented behind `THVM_ATP_JUMPFIX` (default OFF): in the
+AltesBlattPolieren if-branch, head-insert the immediate-ancestor
+(`i-start_pos==1 && e_new<e_old`) enclosing-subterm parallel when the split branch
+is NOT a var-var twin (>=1 function branch cell). Measured vs the banked WM key
+stream (align.py, andassoc_kbo, FIFO off):
+
+- JUMPFIX **OFF** (default): `prefix=2922 firstdiv=2923` (baseline EXACT -- the
+  instrumentation is byte-neutral).
+- JUMPFIX **ON**: `prefix=2906 firstdiv=2907` -- **REGRESSED** (2923 -> 2907).
+
+Head-placing 652 diverges the trajectory EARLIER, empirically confirming the WMJUMP
+ground truth (WM after-splices, so head-placing is unfaithful). The §4b candidate is
+dead both ways.
+
+### The residual pinned: accumulated leaf-vs-node exit-ORDER, not a placement rule
+
+With 652's placement mechanism now proven faithful (both engines after-splice), the
+residual formation-order flip is in the ACCUMULATED exit-list ORDER at the divergent
+node, dumped via a mirrored chain trace (`WMOCHAIN`, pos = node_depth+sub_len; WM
+`pos` = thvm `land`+1):
+
+```
+  WM  chain after rule 652:  [ L/6 L/6 L/6 n/4 n/4 ]   (all leaf-exits, then node-exits)
+  thvm chain after 652 ins:  [ L/6 n/4 L/6 L/6 n/4 n/4 ] (a node-exit interleaved 2nd; +1 entry)
+```
+
+WM keeps all LEAF exits before the NODE exits; thvm interleaves a node-exit (a
+jump-to-inner-node, from a chain-pop / NeueSpruengeInsAlteBlatt / fresh-head) at
+position 2, pushing the leaf-exits (incl. 652) later in the DFS -> 652 arrives 4th in
+thvm's Vater sweep vs 1st-among-matches in WM -> the pick-2923 age flip. This
+leaf-vs-node ORDER is set by the accumulated jump-construction history at the node
+(which anchor each after-splice lands on, and the head/after interleave of ~200
+inserts), NOT by any single local exit-placement predicate. It is the documented
+"insertion-history-dependent, NOT a pure structural disc-order" wall (§4b): the naive
+disc-order sort regressed firstdiv to 17; the local head predicate regressed OA; and
+now the function-headed head-place regresses andassoc itself. **CONFIRMED WALL.**
+
+### CONCLUSION / DECISION
+
+The mission's proposed fix (head-place the function-headed split exit) is **disproven**
+by WM ground truth (WMJUMP AFTER) and by direct measurement (JUMPFIX regresses
+2923->2907). WM's ACTUAL rule (after-splice) is already faithfully implemented in
+thvm. The residual is a deeper leaf-vs-node exit-order divergence accumulated over the
+full insertion history at the divergent node -- reproducing it faithfully needs
+byte-exact fidelity of WM's entire jump-construction history (anchor selection +
+head/after interleave) at that node, i.e. a structural fidelity thvm's walk-former
+lacks at this specific configuration, in the exact code (`wmo_altes_blatt_polieren` /
+`wmo_tree_insert`) that OA's byte-identity depends on. **No faithful LOCAL rule closes
+2923.** Per the mission's stop condition ("if WM's behavior is genuinely
+insertion-history-dependent in a way thvm's walk-former can't reproduce without a
+deeper structural change, report THAT and stop"): backed out byte-clean.
+
+### Gates (all EXACT/green after the byte-clean revert; serial, C-direct, RSS-watched 5300MB)
+
+- andassoc_kbo firstdiv: `prefix=2922 firstdiv=2923` content-delta wm-only=0 (UNCHANGED).
+- OA `WolframAxioms__OrAssociativity.pr 500000 280`: PROVED steps=278807 rules=753
+  cps=2642990 max_cps=2642990 (14.3s) EXACT.
+- DN `WolframAxioms__DoubleNegation.pr`: PROVED 2848/254/768876 (4.9s) EXACT.
+- non-lazy FEQ (OA.pr, THVM_ATP_LAZY_NORM=0): PROVED 263550/771/1654086 (9.5s) EXACT.
+- bin/test_atp: ok 136241/136241; make && make wl green.
+- 17-matrix: guaranteed byte-identical (src/atp == HEAD, git diff empty); spot-checks
+  WolframAxioms__Commutativity 2988/17/792648 + BooleanAxioms__AndCommutativity PROVE.
+
+### Reproduce the WMJUMP ground truth
+
+```
+cd /Users/swish/src/wolfram/waldmeister
+export DYLD_FRAMEWORK_PATH="/Applications/Wolfram 15.0.app/Contents/Frameworks"
+WM_NO_AUTO=1 WM_JUMPDUMP=1 timeout 120 ./ELProver -a 4 andassoc_kbo.pr 2>&1 \
+  | grep --line-buffered -E 'WMJUMP|added as new rule' \
+  | awk '/added as new rule 66[0-9]/{print; exit} {print}' > wm_jump660.txt
+# divergent node = most-frequent start ptr among long-chain lines; read the two
+# WMJUMP lines between "added as new rule 652" and "...653" -> both WMJUMP AFTER.
+```
+
+thvm-side chain trace (byte-neutral, gated THVM_WMO_CT): enrich `wmo_ct` to print
+`start=%p` + target leaf key, add a `wmo_chain_dump(mech, node)` printing the exit
+chain as `L|n / (depth+sub_len)` after each PREPEND/PAR-AFTER/FRESH-HEAD insert; run
+the andassoc_kbo bench with THVM_ATP_FIFO_THRESHOLD=0 THVM_WMO_CT=1. (Instrumentation
+NOT committed -- re-add as above.)
+
 ## 5. Why no fix landed in this dissection
 
 - The pick-117 divergence is a config/reference-mode match, not an engine
