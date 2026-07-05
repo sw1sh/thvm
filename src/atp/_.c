@@ -21152,13 +21152,17 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
         {
           static int ct = -1;
           if (ct < 0) ct = getenv("THVM_ATP_CORANK_TRACE") != NULL ? 1 : 0;
-          if (ct)
+          if (ct) {
             fprintf(stderr,
-                    "CORANK trace=%u face=%u arr=%u o_arr=%u dist_rhs=%u "
-                    "raw_ch=%u o_raw_ch=%u\n",
-                    hits[h].trace, hits[h].face, hits[h].arrival, o_arr,
-                    wmo_trace_dist_rhs(w, hits[h].trace), raw_ch[h],
-                    raw_ch[h2]);
+                    "CORANK i=%u trace=%u face=%u arr=%u o_arr=%u dist_rhs=%u "
+                    "raw_ch=%u o_raw_ch=%u supp=%u sub=",
+                    c->i_out, hits[h].trace, hits[h].face, hits[h].arrival,
+                    o_arr, wmo_trace_dist_rhs(w, hits[h].trace), raw_ch[h],
+                    raw_ch[h2], sw_corank_suppressed(c, p, p_len, sub,
+                                                     &hits[h], j));
+            atp_dbg_print_term(stderr, sub);
+            fputc('\n', stderr);
+          }
         }
         // EXPERIMENTAL, OPT-IN (THVM_ATP_CORANK_DIST=1), default OFF.
         // Hypothesis: WM stores a var-differ equation ORIENTED and indexes ONE
