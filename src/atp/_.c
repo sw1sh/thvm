@@ -7085,22 +7085,25 @@ fn void thvm_atp_materialize_trace(AtpState *s) {
 static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
                           Term lhs, Term rhs) {
   if (s == NULL || !atp_trace_ensure(s)) return ATP_TRACE_NONE;
-  Term c_lhs = lhs, c_rhs = rhs;
-  u64 eq_off = 0u;
-  if (s->trace_pack) {
-    eq_off = atp_trace_eq_store(s, lhs, rhs);
-    c_lhs = term_new(0, TAG_NUM, 0, 0);   // sentinel; real pair off-heap
-    c_rhs = c_lhs;
-  }
+  // Rule/axiom/ORIENT/SIMPLIFY entries stay MATERIALIZED (real pair on
+  // heap) even under trace_pack.  These are only ~n_rules entries (the
+  // millions that drive the GC live set are the CP pushes, packed in
+  // atp_trace_push_cp), so keeping them real costs no meaningful RSS --
+  // and it MUST be real: off-heap-packing the axioms plants NUM
+  // sentinels for the pre-first-CP trace, which shifts the heap layout
+  // the CP former reads and perturbs CP FORMATION ORDER from seq=0 (the
+  // whole BooleanAxioms theory diverged from wmcli at the first pick
+  // once TracePack became the default).  This mirrors the cp_trace_lean
+  // split (rules materialized, CPs leaned), which is selection-faithful.
   Term children[4] = {
     term_new(0, TAG_NUM, 0, p_a),
     term_new(0, TAG_NUM, 0, p_b),
-    c_lhs,
-    c_rhs,
+    lhs,
+    rhs,
   };
   s->trace[s->n_trace] = term_new_ctr(reason, children, 4);
   u32 idx = s->n_trace;
-  if (s->trace_pack) s->trace_eq_off[idx] = eq_off;
+  if (s->trace_pack) s->trace_eq_off[idx] = 0u;   // real pair on heap
   s->n_trace++;
   return idx;
 }
