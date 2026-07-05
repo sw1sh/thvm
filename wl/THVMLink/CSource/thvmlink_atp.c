@@ -142,6 +142,17 @@ static Term atp_wire_goal_rhs(const AtpWire *w, u32 g) {
   return (Term)w->data[2 + 2 * w->n_ax + 2 * g + 1];
 }
 
+// Record each constructor label's arity into `ar` (indexed by label,
+// value = arity + 1; 0 = label unseen).  Used to find the minimal-precedence
+// 0-arity signature constant for WM -auto FVI grounding parity.
+static void wl_collect_arity(Term t, u32 *ar, u32 max_lab) {
+  if (t == 0u || term_tag(t) != TAG_CTR) return;
+  u32 lab = term_ext(t);
+  u32 n   = term_ctr_n(t);
+  if (lab <= max_lab) ar[lab] = n + 1u;
+  for (u32 i = 0; i < n; i++) wl_collect_arity(term_ctr_at(t, i), ar, max_lab);
+}
+
 // Install the wire's goals on `atp`.  n_goals == 0 leaves the state in
 // completion mode.  The single-goal case keeps the historical bridge
 // semantics byte-identical: a (0, 0) pair is tolerated as "no goal"
@@ -875,6 +886,45 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // args[40]; 0 = off (default, engine byte-identical).
   mint wm_emission = MArgument_getInteger(args[40]);
   thvm_atp_set_use_emission_order(atp, (u8)(wm_emission != 0));
+  // WM -auto minimal-constant FVI grounding (parity with the .pr bench,
+  // test_atp_wolfram_bench.c:1173, and WM's SO_minimaleKonstante
+  // re-resolution): under the -auto/Waldmeister preset (EmissionOrder on),
+  // ground free-variable instances with the problem's own minimal-precedence
+  // 0-arity SIGNATURE constant, NOT the reserved default (const2 analog).
+  // Scan the axiom+goal signature for 0-arity user constructors (labels >= 3;
+  // labels 1/2 are the engine's reserved FVI constants) and pick the smallest
+  // precedence.  If the problem has no 0-arity signature constant the setter
+  // is never called, so the reserved default stands (engine byte-identical).
+  // Env kill switch THVM_WL_MINCONST=0 restores the reserved default.
+  if (wm_emission != 0) {
+    static int wl_mc = -1;
+    if (wl_mc < 0) {
+      const char *e = getenv("THVM_WL_MINCONST");
+      wl_mc = (e != NULL && e[0] == '0') ? 0 : 1;
+    }
+    if (wl_mc) {
+      static u32 wl_arity[ATP_WL_CFG_MAX_LABELS];
+      for (u32 i = 0; i <= (u32)max_label; i++) wl_arity[i] = 0u;
+      for (u32 i = 0; i < n_ax; i++) {
+        wl_collect_arity(atp_wire_ax_lhs(&wire, i), wl_arity, (u32)max_label);
+        wl_collect_arity(atp_wire_ax_rhs(&wire, i), wl_arity, (u32)max_label);
+      }
+      for (u32 g = 0; g < wire.n_goals; g++) {
+        wl_collect_arity(atp_wire_goal_lhs(&wire, g), wl_arity, (u32)max_label);
+        wl_collect_arity(atp_wire_goal_rhs(&wire, g), wl_arity, (u32)max_label);
+      }
+      u32 mc = 0u, n0 = 0u;
+      for (u32 lab = 3u; lab <= (u32)max_label; lab++) {
+        if (wl_arity[lab] != 1u) continue;   // arity+1==1 -> 0-arity constant
+        n0++;
+        if (mc == 0u || wl_precedence_p[lab] < wl_precedence_p[mc]) mc = lab;
+      }
+      if (getenv("THVM_WL_MINCONST_DBG"))
+        fprintf(stderr, "WLMINCONST mc=%u prec=%u n0=%u max_label=%ld\n",
+                mc, mc ? wl_precedence_p[mc] : 0u, n0, (long)max_label);
+      if (mc != 0u) thvm_atp_set_min_const_label(atp, mc);
+    }
+  }
   // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
   // overlaps an equation's fresh re-derivation, not the stale exhausted
   // original).  Verified faithful: preserves all 73 byte-identical
