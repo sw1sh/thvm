@@ -64,15 +64,22 @@ wmMathlinkPath[Automatic] := FileNameJoin[{$InstallationDirectory, "Frameworks"}
 wmMathlinkPath[s_String] := s
 
 (* Parse a single proof-protocol line of the form
-       N : <kind> : <body> : <source> [###R K|###E K]
+       N : <kind> : <body> : <source> [###R K|###E K] [## FIFO ##]
    into an Association.  The trailing `###R K` / `###E K` is the
-   rule-or-equation number WM assigns post-orient, NOT a parent, so
-   strip it before parent-extraction. *)
+   rule-or-equation number WM assigns post-orient, and `## FIFO ##`
+   marks a FIFO-dimension selection (the -auto interleave) -- neither
+   is a parent.  A real source token (`initial`, `hypothesis`,
+   `orient(...)`, `cp(...)`, `tes-red(...)`, a bare step number) never
+   contains `#`, so strip everything from the first `#` on.  An
+   end-anchored `###[RE] K$` strip alone left `1784 ###E 9 ## FIFO ##`
+   intact, misclassifying the equation-copy as a 2-parent "rewrite"
+   with phantom parent 9 (McCuneAxioms/Associativity step 1785) -- one
+   spurious dangling SubstitutionLemma vs FindEquationalProof. *)
 parseProofLine[line_String] := Block[{parts, name, kind, body, source, sourceClean, sourceRule, parents},
     parts = StringSplit[line, " : ", 4];
     If[Length[parts] < 4, Return[Nothing]];
     {name, kind, body, source} = StringTrim /@ parts;
-    sourceClean = StringTrim @ StringReplace[source, RegularExpression["\\s*###[RE]\\s*\\d+\\s*$"] -> ""];
+    sourceClean = StringTrim @ StringReplace[source, RegularExpression["\\s*#.*$"] -> ""];
     sourceRule = Which[
         StringStartsQ[sourceClean, "initial"], "file",
         StringStartsQ[sourceClean, "hypothesis"], "file",
