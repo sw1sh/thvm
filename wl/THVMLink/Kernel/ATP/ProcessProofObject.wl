@@ -184,11 +184,16 @@ parseSZSTerm[input_String] := Block[{s = StringTrim[input]},
         StringMatchQ[s, RegularExpression["[A-Za-z0-9_]+\\(.*\\)"]],
             With[{nm = First @ StringCases[s,
                 StartOfString ~~ id : RegularExpression["[A-Za-z0-9_]+"] :> id]},
-                With[{parsed = parseSZSTerm /@
-                    szsSplitArgs[StringTake[s, {StringLength[nm] + 2, -2}]]},
-                    If[ AnyTrue[parsed, FailureQ],
-                        szsTermFailure[input],
-                        ToLowerCase[nm] @@ parsed
+                With[{inner = StringDrop[StringDrop[s, StringLength[nm] + 1], -1]},
+                    (* empty functor `name()` is a nullary constant *)
+                    If[ StringTrim[inner] === "",
+                        ToLowerCase[nm][],
+                        With[{parsed = parseSZSTerm /@ szsSplitArgs[inner]},
+                            If[ AnyTrue[parsed, FailureQ],
+                                szsTermFailure[input],
+                                ToLowerCase[nm] @@ parsed
+                            ]
+                        ]
                     ]
                 ]
             ]
@@ -227,16 +232,8 @@ fastParseFormula[body_String] := Block[{op, parts, l, r, sep},
     ];
     parts = StringSplit[body, sep, 2];
     If[ Length[parts] =!= 2, Return[parseFormulaBody[body]]];
-    tx[side_] := Block[{s2},
-        s2 = StringReplace[StringTrim[side],
-            x : RegularExpression["[A-Za-z0-9_]+\\(?"] :>
-                If[ StringEndsQ[x, "("],
-                    "\"" <> ToLowerCase[StringDrop[x, -1]] <> "\"[",
-                    "\"" <> ToLowerCase[x] <> "\"[]"]];
-        s2 = StringReplace[s2, ")" -> "]"];
-        Quiet @ Check[ToExpression[s2], $Failed]];
-    l = tx[parts[[1]]]; r = tx[parts[[2]]];
-    If[ l === $Failed || r === $Failed,
+    l = parseSZSTerm[parts[[1]]]; r = parseSZSTerm[parts[[2]]];
+    If[ FailureQ[l] || FailureQ[r],
         Return[parseFormulaBody[body]]
     ];
     (* A reflexive `x = x` (Waldmeister's tes-final closing step) would
