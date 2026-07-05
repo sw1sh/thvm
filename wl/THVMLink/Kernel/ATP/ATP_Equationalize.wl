@@ -379,8 +379,31 @@ atpEquationalizeProblemForAll[propositions_, axioms_] := Module[{
     {eqProps, eqAxioms}
 ];
 
+(* Witness/skolem ATOMIZATION for the engine form.  The equationalizer
+   emits the excluded-middle witness Subscript[\[FormalA], k] and the
+   skolem terms Subscript[c, n] / Subscript[\[FormalF], n] as COMPOUND
+   terms (Subscript + formal + index = 3 symbols each).  The .pr writer
+   below renames them to ATOMIC symbols, so the real Waldmeister binary
+   sees e.g. or[emwit0, not[emwit0]] at term size 4 -- while the
+   compound witness makes it size 8, flipping equationalized axioms
+   like `or[not[man[x]], mortal[x]] == or[wit, not[wit]]` from
+   ORIENTABLE (6 > 4) to UNORIENTABLE (6 < 8).  That single weight flip
+   sent the internal engine down a different completion trajectory than
+   the binary on the same problem (Socrates: 14 CriticalPairLemmas vs
+   4, plus the FVI grounding constant cAtp1 leaking into the proof from
+   the unorientable axiom's reversed grounded instance).  Atomize with
+   the SAME names the .pr writer uses so Method -> "Waldmeister"
+   (internal engine) receives the same term structure Method ->
+   "WaldmeisterProcess" encodes, and both proofs display the same
+   emwit$k$/skc$n$/skf$n$ constants. *)
+eqzAtomRules = {
+    Subscript[\[FormalA], k_] :> Symbol["Global`emwit" <> ToString[k]],
+    Subscript[EquationalProof`c, n_] :> Symbol["Global`skc" <> ToString[n]],
+    Subscript[\[FormalF], n_] :> Symbol["Global`skf" <> ToString[n]]
+};
+
 atpEquationalizeProblem[propositions_, axioms_] :=
-    With[{eq = atpEquationalizeProblemForAll[propositions, axioms]},
+    With[{eq = atpEquationalizeProblemForAll[propositions, axioms] /. eqzAtomRules},
         {eqzDeForAll /@ eq[[1]], eqzDeForAll /@ eq[[2]]}
     ];
 
@@ -394,15 +417,13 @@ atpEquationalizeProblem[propositions_, axioms_] :=
    symbols, then un-mangled after the lift. *)
 
 (* Forward: EquationalProof` ops -> clean heads; Subscript constants /
-   skolem functions -> clean atoms/heads.  ForAll is preserved. *)
-eqzWmSymRules = {
+   skolem functions -> clean atoms/heads (eqzAtomRules, shared with the
+   engine form above).  ForAll is preserved. *)
+eqzWmSymRules = Join[{
     EquationalProof`and -> Global`wmand, EquationalProof`or -> Global`wmor, EquationalProof`not -> Global`wmnot,
     EquationalProof`eq -> Global`wmeq, EquationalProof`nand -> Global`wmnand, EquationalProof`nor -> Global`wmnor,
-    EquationalProof`xor -> Global`wmxor, EquationalProof`true -> Global`wmtrue, EquationalProof`false -> Global`wmfalse,
-    Subscript[\[FormalA], k_] :> Symbol["Global`emwit" <> ToString[k]],
-    Subscript[EquationalProof`c, n_] :> Symbol["Global`skc" <> ToString[n]],
-    Subscript[\[FormalF], n_] :> Symbol["Global`skf" <> ToString[n]]
-};
+    EquationalProof`xor -> Global`wmxor, EquationalProof`true -> Global`wmtrue, EquationalProof`false -> Global`wmfalse
+}, eqzAtomRules];
 
 (* Reverse the wmGenerateProblem + reparse mangling on the lifted
    equational ProofObject.  wmGenerateProblem renders a head `h` as

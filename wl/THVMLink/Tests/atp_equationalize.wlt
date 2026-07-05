@@ -150,3 +150,54 @@ VerificationTest[
     True,
     TestID -> "ATP/eqz/faithful-to-source"
 ]
+
+(* ===== engine-form witness atomization: the internal engine must see
+   the SAME term structure the .pr writer hands the real Waldmeister
+   binary. ===== *)
+
+VerificationTest[
+    (* The excluded-middle witness Subscript[\[FormalA], 0] is a
+       3-symbol compound; unatomized it flips the equationalized
+       implication axiom `or[not[man[x]], mortal[x]] == or[wit, not[wit]]`
+       from orientable (KBO 6 > 4) to unorientable (6 < 8), sending the
+       internal engine down a different completion trajectory than the
+       binary and leaking the FVI grounding constant cAtp1 into the
+       proof.  eqzAtomRules must rename it to the atomic Global`emwit0
+       (matching eqzWmSymRules in the .pr writer), leaving no Subscript
+       in the engine form. *)
+    FreeQ[WolframInstitute`THVMLink`ATP`Private`atpEquationalizeGoal[
+        mortal[socrates], {ForAll[x, Implies[man[x], mortal[x]]], man[socrates]}], Subscript],
+    True,
+    TestID -> "ATP/eqz/engine-witness-atomized"
+]
+
+VerificationTest[
+    (* Socrates under the internal engine (Method -> "Waldmeister"):
+       with the atomized witness the selection trajectory matches the
+       real binary on the same problem (13 selections), so the proof is
+       cAtp1-free and lands at PL 19.  The WaldmeisterProcess reference
+       is 18: the remaining +1 CriticalPairLemma is the post-hoc goal-
+       chain replay citing the live-at-end general rule
+       `or[x, not[x]] -> man[socrates]` where Waldmeister's protocol
+       keeps the historical instance reduction (proof-extract replays
+       against the final rule set instead of recording goal reductions
+       as they fire). *)
+    Module[{prf = TFindProof[mortal[socrates],
+        {ForAll[x, Implies[man[x], mortal[x]]], man[socrates]},
+        Method -> "Waldmeister", TimeConstraint -> 60]["Proof"]},
+        {FreeQ[prf, s_Symbol /; SymbolName[Unevaluated[s]] === "cAtp1"], Length[prf]}],
+    {True, 19},
+    TestID -> "ATP/eqz/socrates-emu-catp1-free"
+]
+
+VerificationTest[
+    (* Load-order regression probe: the Kernel loader parses
+       ATP_Equationalize.wl BEFORE ATP.wl, so without its TFindProof
+       forward declaration the `OptionValue[TFindProof, ...]` there
+       binds a fresh Private-context symbol -- OptionValue::nodef on
+       every WaldmeisterProcess predicate call, with the user's
+       TimeConstraint silently ignored. *)
+    Names["WolframInstitute`THVMLink`ATP`Private`TFindProof"],
+    {},
+    TestID -> "ATP/eqz/tfindproof-not-private"
+]
