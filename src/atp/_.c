@@ -21200,6 +21200,12 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
           eff_ch[h] = raw_ch[h] * 2u;
         }
       }
+      // Same-arrival tie order = (eff_arr, eff_ch, jidx).  eff_ch is
+      // leaf-chain-derived; jidx (partner slot age) breaks only exact eff_ch
+      // ties.  A THVM_ATP_CORANK_AGE experiment promoting jidx above eff_ch
+      // was CATASTROPHIC (OA -auto prefix 26387 -> 1140 + spurious CPs),
+      // proving WM orders same-arrival ties by leaf CHAIN order, not age --
+      // so firstdiv 26388 is a narrow exception, not a general age effect.
       for (u32 h = 0; h < nh; h++) ord[h] = h;
       for (u32 a = 1; a < nh; a++) {          // insertion sort, stable
         u32 v = ord[a];
