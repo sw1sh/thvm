@@ -2119,6 +2119,30 @@ static u32 atp_wmo_victim_drain_key(AtpState *s, u32 trace, u8 reduced_thvm_side
     rank = wmo_face_leafrank(w, tree, trace, 0u, &chain);
     if (rank == 0xffffffffu) return 0x7fffffffu;
   }
+  // Forensic key dump: THVM_ATP_IRV_KEY_DUMP=1 prints the victim's key
+  // face + the FULL chain of the leaf it ranked in (uid.face entries,
+  // head first), so a mirror-vs-WM chain-order divergence is visible.
+  {
+    static int key_dump = -1;
+    if (key_dump < 0)
+      key_dump = getenv("THVM_ATP_IRV_KEY_DUMP") != NULL ? 1 : 0;
+    if (key_dump) {
+      fprintf(stderr,
+              "IRVKEY uid=%u side=%u tree=%u key_face=%u dist_rhs=%u "
+              "rank=%u chain=%u leaf:[",
+              trace, reduced_thvm_side, tree, key_face,
+              wmo_trace_dist_rhs(w, trace), rank, chain);
+      u32 rr = 0;
+      for (WmoLeaf *l = w->tree[tree].ll_head; l != NULL;
+           l = l->ll_next, rr++) {
+        if (rr != rank) continue;
+        for (u32 c = 0; c < l->n_chain; c++)
+          fprintf(stderr, " %u.%u", l->chain[c].trace, l->chain[c].face);
+        break;
+      }
+      fprintf(stderr, " ]\n");
+    }
+  }
   if (s->use_drain_chainpos) {
     // Fold the within-leaf chain index below the leaf-list rank, so two
     // victims sharing a leaf drain head-first (BK_Regeln -> TP_Nachf,

@@ -15375,8 +15375,76 @@ fn void thvm_atp_set_use_incr_ir(AtpState *s, u8 on) {
 // a different surviving rule set and CP stream (the root cause of
 // WolframAxioms/OrAssoc saturation).  Returns the number of rules dropped
 // (Phase A + Phase B), matching the existing function's contract.
+// === WM drain-key SNAPSHOT (pass-start leaf-list ranks) =============
+//
+// WM discovers ALL of an activation's IR victims in single walks over
+// the PASS-START discrimination-tree leaf lists: GMInterred =
+// BK_ReferenzDurchlauf over the Gleichungsbaum, then RMLinksInterred =
+// BK_forRegelnRobust over the Regelbaum (Interreduktion.c:380-392;
+// DSBaumKnoten.h:482-514).  A walk's yield order is the leaf-list order
+// at walk time -- pulls only remove already-visited entries -- so every
+// victim's REPuffer position is a rank in the SAME snapshot.
+//
+// thvm captures each victim's (leafrank, chainpos) key one drop at a
+// time.  If earlier victims' wmo evictions run eagerly, later captures
+// rank against a SHRUNKEN leaf list, and cross-victim order inverts on
+// dense passes (OA -auto @8597: a 96-victim avalanche where thvm's
+// rank baselines skewed the rule-victim segment ordering, interleaving
+// the heavy re-adds among WM's early small ones).  Defer the eviction
+// of victim faces to the END of the interreduce pass so all keys rank
+// against the pass-start tree.  CP generation runs after interreduce,
+// so the flush still precedes every tops/overlap walk.
+//
+// Active only where the keys matter (use_wm_demote && use_emission_
+// order); THVM_ATP_DRAIN_SNAPSHOT=0 is the kill switch (restores the
+// eager per-drop eviction).
+typedef struct {
+  u32 *uids;
+  u32  n, cap;
+  u8   active;
+} AtpWmoDefer;
+
+static u8 atp_drain_snapshot_on(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("THVM_ATP_DRAIN_SNAPSHOT");
+    on = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
+  return (u8)on;
+}
+
+static void atp_wmo_defer_or_remove(AtpState *s, AtpWmoDefer *d, u32 uid) {
+  if (!s->use_emission_order) return;
+  if (!d->active) {
+    atp_wmo_remove_trace(s, uid);
+    return;
+  }
+  if (d->n == d->cap) {
+    u32 cap = d->cap ? d->cap * 2u : 32u;
+    u32 *nu = (u32 *)realloc(d->uids, cap * sizeof(u32));
+    if (nu == NULL) {
+      fprintf(stderr, "atp_wmo_defer: realloc to %u failed\n", cap);
+      exit(1);
+    }
+    d->uids = nu;
+    d->cap  = cap;
+  }
+  d->uids[d->n++] = uid;
+}
+
+static void atp_wmo_defer_flush(AtpState *s, AtpWmoDefer *d) {
+  for (u32 k = 0; k < d->n; k++) atp_wmo_remove_trace(s, d->uids[k]);
+  free(d->uids);
+  d->uids = NULL;
+  d->n = d->cap = 0;
+  d->active = 0;
+}
+
 static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0 || added.first == 0) return 0;
+  AtpWmoDefer wd = {0};
+  wd.active = (s->use_wm_demote && s->use_emission_order &&
+               atp_drain_snapshot_on()) ? 1u : 0u;
 #ifdef ATP_ORPHAN_KILL
   // 9b orphan collection (same as the legacy fn): gather dropped rules'
   // trace ids across BOTH drop phases, kill descendant CPs once after
@@ -15438,7 +15506,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
   do {                                                                        \
     if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[IDX]);        \
     if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[IDX]);                \
-    if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[IDX]);        \
+    atp_wmo_defer_or_remove(s, &wd, s->r_uid[IDX]);                           \
     if (!s->r_orient[IDX]) s->n_unorient--;                                   \
     for (u32 _j = (IDX) + 1; _j < s->n_rules; _j++) {                         \
       s->lhs[_j - 1]      = s->lhs[_j];                                       \
@@ -15759,6 +15827,10 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
     }
   }
 
+  // Snapshot flush: evict the buffered victims' wmo faces now that every
+  // drain key was ranked against the pass-start tree (see AtpWmoDefer).
+  atp_wmo_defer_flush(s, &wd);
+
 #ifdef ATP_ORPHAN_KILL
   g_thvm_phase = "ir_wm_orphan";
   if (atp_dead != NULL) {
@@ -15780,6 +15852,10 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0 || added.first == 0) return 0;
   if (s->use_wm_interred) return thvm_atp_interreduce_wm(s, added);
+  // Pass-start drain-key snapshot (see AtpWmoDefer above the _wm fn).
+  AtpWmoDefer wd = {0};
+  wd.active = (s->use_wm_demote && s->use_emission_order &&
+               atp_drain_snapshot_on()) ? 1u : 0u;
 #ifdef ATP_ORPHAN_KILL
   // 9b: collect the trace ids of rules dropped below, then kill the
   // queued CPs descended from them once the compaction loop is done.
@@ -15901,7 +15977,9 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[i]);
       if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[i]);
       // WM order mirror: the fact left R/E (RE_RegelEntfernen).
-      if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[i]);
+      // Snapshot-deferred so later victims' drain keys rank against the
+      // pass-start leaf list (see AtpWmoDefer).
+      atp_wmo_defer_or_remove(s, &wd, s->r_uid[i]);
       // Keep the unorientable-rule count live: the dropped rule leaves
       // R here (it re-enters as a queued equation, re-counted only if
       // re-oriented unorientable at its next atp_push_rule).
@@ -16173,7 +16251,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 #endif
         if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[j]);
         if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[j]);
-        if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[j]);
+        atp_wmo_defer_or_remove(s, &wd, s->r_uid[j]);
         if (!s->r_orient[j]) s->n_unorient--;
         for (u32 k = j + 1; k < s->n_rules; k++) {
           s->lhs[k - 1]              = s->lhs[k];
@@ -16247,7 +16325,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         // at cp=769962 needs dist_rhs=1 killed -- no single polarity
         // covers both, WM kills both).
         if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[j]);
-        if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[j]);
+        atp_wmo_defer_or_remove(s, &wd, s->r_uid[j]);
         if (!s->r_orient[j]) s->n_unorient--;
         for (u32 k = j + 1; k < s->n_rules; k++) {
           s->lhs[k - 1]              = s->lhs[k];
@@ -16285,6 +16363,11 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       }
     }
   }
+
+  // Snapshot flush (see AtpWmoDefer): evict the buffered victims' wmo
+  // faces now that every drain key was ranked against the pass-start
+  // tree.  Runs before CP generation (the caller's next step).
+  atp_wmo_defer_flush(s, &wd);
 
 #ifdef ATP_ORPHAN_KILL
   g_thvm_phase = "ir_orphan";
@@ -16387,6 +16470,38 @@ static void atp_wm_demote_drain(AtpState *s) {
   // (equation victims before rule victims), not thvm's slot-scan order;
   // reorder to match before stamping fresh FIFO ages.
   if (s->use_emission_order) atp_irv_sort_wm_order(s);
+  // Forensic drain dump: THVM_ATP_IRV_DUMP=<seqlo>:<seqhi> prints every
+  // buffered victim (post-sort key + original sides) for drains whose
+  // next FIFO age falls in the window.  Diagnostic only; zero cost unset.
+  {
+    static long irv_lo = -2, irv_hi = -2;
+    if (irv_lo == -2) {
+      const char *e = getenv("THVM_ATP_IRV_DUMP");
+      if (e != NULL && e[0] != '\0') {
+        irv_lo = strtol(e, NULL, 10);
+        const char *c = strchr(e, ':');
+        irv_hi = (c != NULL) ? strtol(c + 1, NULL, 10) : irv_lo + 64;
+      } else {
+        irv_lo = -1;
+        irv_hi = -1;
+      }
+    }
+    if (irv_lo >= 0 && (long)s->cp_seq_next >= irv_lo &&
+        (long)s->cp_seq_next <= irv_hi) {
+      for (u32 v = 0; v < s->n_irv; v++) {
+        char la[2048], ra[2048];
+        atp_pretty_term(s->irv_lhs[v], la, sizeof la);
+        atp_pretty_term(s->irv_rhs[v], ra, sizeof ra);
+        fprintf(stderr,
+                "IRVDUMP seq_next=%u v=%u key=%08x (tree=%u leafrank=%u "
+                "chain=%u) parent=%u %s = %s\n",
+                s->cp_seq_next, v, s->irv_wmo_key[v],
+                (u32)(s->irv_wmo_key[v] >> 31),
+                (s->irv_wmo_key[v] >> 8) & 0x7fffffu,
+                s->irv_wmo_key[v] & 0xffu, s->irv_parent[v], la, ra);
+      }
+    }
+  }
   for (u32 v = 0; v < s->n_irv; v++) {
     Term l      = s->irv_lhs[v];
     Term r      = s->irv_rhs[v];

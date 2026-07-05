@@ -933,7 +933,7 @@ int main(int argc, char **argv) {
       // via remove-and-rederive thrash.  THVM_ATP_COMM_SUBSUME opts in.
       thvm_atp_set_use_comm_subsume(
           s, (getenv("THVM_ATP_COMM_SUBSUME") != NULL) ? 1u : 0u);
-      // WM IR-victim drain within-leaf chain tiebreak (DEFAULT OFF): fold a
+      // WM IR-victim drain within-leaf chain tiebreak (DEFAULT ON): fold a
       // re-derivation victim's chain index within its discrimination-tree leaf
       // into the drain-order key so two victims sharing a leaf re-enter the
       // queue in WM's BK_Regeln -> TP_Nachf head-first chain order
@@ -941,20 +941,32 @@ int main(int argc, char **argv) {
       // nested cube-mirror pair at soa pick 1505 (traces 2570 at chainpos 2,
       // 2817 at chainpos 1 in equation leaf rank 1) collided on one leaf-rank
       // key; this tiebreak orders them head-first like WM.  Advances soa
-      // firstdiv past 1505.  THVM_ATP_DRAIN_CHAINPOS opts in (also turned on by
-      // FORMATION_FIFO below).  See tools/baselines/wm_align_reports/soa.txt.
-      thvm_atp_set_use_drain_chainpos(
-          s, (getenv("THVM_ATP_DRAIN_CHAINPOS") != NULL) ? 1u : 0u);
-      // WM GMInterred reducible-face drain order (DEFAULT OFF).  GMInterred
+      // firstdiv past 1505, and (with DRAIN_REVFACE + the drain-key snapshot)
+      // fixes the OA -auto @8582 age-lane transposition: the three x3-template
+      // equation victims of the rule-627 avalanche share ONE Gleichungsbaum
+      // leaf, and only the chain tiebreak reproduces WM's newest-first pull
+      // order (eqn -7 before -6 before -5 = re-add weights 624, 1088, 528).
+      // THVM_ATP_DRAIN_CHAINPOS=0 restores the pre-fix rank-only key.
+      {
+        const char *dc = getenv("THVM_ATP_DRAIN_CHAINPOS");
+        thvm_atp_set_use_drain_chainpos(
+            s, (dc != NULL && dc[0] == '0') ? 0u : 1u);
+      }
+      // WM GMInterred reducible-face drain order (DEFAULT ON).  GMInterred
       // (RE_forGMReferenzen = BK_ReferenzDurchlauf, DSBaumKnoten.h:499-514)
       // pulls each IR-victim through the face the new rule REDUCES, so a
       // cube-mirror pair whose distinguished faces coincide (`x.x = cube`,
       // soa pick 1558: traces 2092/-14 and 3089/-18) drains by the distinct
       // reducible cube faces' leaf order, not the colliding `x.x` leaf.
-      // Advances soa firstdiv past 1558.  THVM_ATP_DRAIN_REVFACE opts in
-      // (also turned on by FORMATION_FIFO below).  See soa.txt.
-      thvm_atp_set_use_drain_revface(
-          s, (getenv("THVM_ATP_DRAIN_REVFACE") != NULL) ? 1u : 0u);
+      // Advances soa firstdiv past 1558; part of the OA -auto @8582 fix
+      // (the x3-template victims key at their REDUCIBLE template face's
+      // shared leaf, matching WM's pull).  THVM_ATP_DRAIN_REVFACE=0
+      // restores the distinguished-face-only key.
+      {
+        const char *dr = getenv("THVM_ATP_DRAIN_REVFACE");
+        thvm_atp_set_use_drain_revface(
+            s, (dr != NULL && dr[0] == '0') ? 0u : 1u);
+      }
       // WM-faithful distinguished-direction E-set subsumption (DEFAULT OFF).
       // The flat new-equation E-subsumer is 4-way (both pattern AND both subject
       // orientations of the old equation); WM's GMSubsummierenMitGleichung

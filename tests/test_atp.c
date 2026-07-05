@@ -2302,6 +2302,76 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/wm-drain-key-snapshot-pass-start-ranks");
+  {
+    // WM discovers ALL of an activation's IR victims in single walks over
+    // the PASS-START discrimination-tree leaf lists (GMInterred /
+    // RMLinksInterred, Interreduktion.c:380-392; BK_ReferenzDurchlauf,
+    // DSBaumKnoten.h:499-514), so every victim's REPuffer position is a
+    // rank in the SAME snapshot.  thvm captures drain keys one drop at a
+    // time; before the AtpWmoDefer snapshot fix the earlier victims' wmo
+    // evictions shrank the leaf list under later captures and cross-victim
+    // order inverted on dense passes (the OA -auto @8597 insertion class).
+    //
+    // Two unorientable equation victims of one interreduce pass, with
+    // distinct-depth faces so the leaf-list ranks are fixed by depth
+    // (ascending classes):
+    //   rank 0 (d2): E1 reverse face  f(e,e)        -- not reducible
+    //   rank 1 (d3): E0 stored lhs    i(f(e,e))     -- not reducible
+    //   rank 2 (d4): E1 stored lhs    i(i(f(a,a)))  -- reducible -> key(E1)
+    //   rank 3 (d5): E0 stored rhs    i(i(i(f(a,a)))) reducible -> key(E0)
+    // E1 drops in the LHS pass (side 0), E0 in the RHS pass (side 1), so
+    // E1's key is captured first.  Eager eviction of E1's two leaves would
+    // shift E0's key leaf 3 -> 1 and invert the drain (E0 before E1);
+    // WM's pass-start walk reaches E1's rank-2 leaf before E0's rank-3
+    // leaf.  Pin the snapshot keys exactly.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_emission_order(s, 1u);
+    thvm_atp_set_use_wm_demote(s, 1u);
+    thvm_atp_set_use_rhs_interreduce(s, 1u);
+    thvm_atp_set_use_drain_chainpos(s, 1u);
+    thvm_atp_set_use_drain_revface(s, 1u);
+
+    // E0 (slot 0): i(f(e,e)) = i(i(i(f(a,a))))
+    s->lhs[0] = mk_i(mk_f(mk_e(), mk_e()));
+    s->rhs[0] = mk_i(mk_i(mk_i(mk_f(mk_a(), mk_a()))));
+    s->r_orient[0] = 0u; s->r_trace[0] = 800u; s->r_uid[0] = 800u;
+    s->n_rules++; s->n_unorient++;
+    atp_wmo_insert_fact(s, 0u);
+    // E1 (slot 1): i(i(f(a,a))) = f(e,e)
+    s->lhs[1] = mk_i(mk_i(mk_f(mk_a(), mk_a())));
+    s->rhs[1] = mk_f(mk_e(), mk_e());
+    s->r_orient[1] = 0u; s->r_trace[1] = 801u; s->r_uid[1] = 801u;
+    s->n_rules++; s->n_unorient++;
+    atp_wmo_insert_fact(s, 1u);
+
+    // New rule N: f(a,a) -> a reduces E1's stored lhs and E0's stored rhs.
+    AtpAddedRange added = thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()),
+                                                  mk_a());
+    CHECK_EQ(added.count, 1u);
+    u32 dropped = thvm_atp_interreduce(s, added);
+    CHECK_EQ(dropped, 2u);
+
+    // Both victims buffered (drain runs later, after CP generation);
+    // capture order = pass order (E1 in the LHS pass, E0 in the RHS pass).
+    CHECK_EQ(s->n_irv, 2u);
+    CHECK(kbo_eq(s->irv_lhs[0], mk_i(mk_i(mk_f(mk_a(), mk_a())))));  // E1
+    CHECK(kbo_eq(s->irv_lhs[1], mk_i(mk_f(mk_e(), mk_e()))));        // E0
+    // THE PIN: both keys rank against the PASS-START leaf list --
+    // E1 at its stored-lhs leaf (rank 2), E0 at its stored-rhs leaf
+    // (rank 3); chain index 0 in both (single-entry leaves).  The eager
+    // (pre-snapshot) capture gave E0 rank 1 (< E1's 2), inverting WM's
+    // drain order.
+    CHECK_EQ(s->irv_wmo_key[0], (2u << 8));
+    CHECK_EQ(s->irv_wmo_key[1], (3u << 8));
+    // The deferred evictions flushed at pass end: no victim face remains.
+    AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+    u32 chain = 0u;
+    CHECK_EQ(wmo_face_leafrank(w, 1u, 800u, 0u, &chain), 0xffffffffu);
+    CHECK_EQ(wmo_face_leafrank(w, 1u, 801u, 0u, &chain), 0xffffffffu);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-unorient-equation-leaflist-rank");
   {
     // The NORMALIZE-redex selection (atp_unorient_step_indexed ->
