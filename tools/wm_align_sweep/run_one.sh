@@ -63,7 +63,14 @@ elif ! DYLD_FRAMEWORK_PATH="${WMCLI_DYLD:-}" timeout 30 \
 fi
 
 # 3. thvm WM-preset run on the byte-same .pr (bench pr-mode).
-THVM_ATP_WALDMEISTER=1 THVM_ATP_CP_PICK_TRACE=1 timeout 60 \
+#    THVM_ATP_FIFO_THRESHOLD=0: the reference above is PLAIN `wmcli -a 4`,
+#    so the thvm side must run plain too -- the default preset is
+#    -auto-faithful (formation-FIFO ON), and that config mismatch alone
+#    used to explain 10 divergent rows.  For an -auto-vs-auto comparison
+#    instead, use a `wmcli -auto -a 4` reference and drop this override
+#    (thvm default); no second mode is wired here -- do that run by hand.
+THVM_ATP_WALDMEISTER=1 THVM_ATP_CP_PICK_TRACE=1 THVM_ATP_FIFO_THRESHOLD=0 \
+    timeout 60 \
     "$BENCH" "$PR" 200000 20 > "$WORK/thvm_out.txt" 2> "$WORK/thvm_err.txt"
 ST="$(sed -n 's/^=> \([A-Z_]*\).*/\1/p' "$WORK/thvm_out.txt" | head -1)"
 [ -n "$ST" ] || ST=CRASHED
