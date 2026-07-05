@@ -118,3 +118,25 @@ VerificationTest[
     {ProofObject, Function},
     TestID -> "Lift/builder-Vampire/AbelianGroup_InverseOfInverse"
 ]
+
+(* === Multi-conjunct notable theorem: ONE multi-goal wmcli run === *)
+
+VerificationTest[
+    (* A List-valued NotableTheorem (HuntingtonAxioms -> the three
+       Robbins axioms) must prove EVERY conjunct in one multi-goal .pr
+       (Waldmeister "All goals proved"), not silently prove only the
+       first: the lifted ProofObject carries the full List-valued
+       Theorem and one Conclusion per conjunct, mirroring
+       FindEquationalProof's multi-conjunct shape. *)
+    If[ ! wmcliAvailable, {ProofObject, 3, 3},
+        Module[
+            {po = TWaldmeisterProofObject[
+                "HuntingtonAxioms", "ImpliesRobbinsAxioms",
+                TimeConstraint -> 12,
+                "LiftToProofObject" -> True]},
+            {Head[po],
+                Length[po["Theorem"]],
+                Count[Keys @ Lookup[po[[4]], "Proof", {}], {"Conclusion", _}]}]],
+    {ProofObject, 3, 3},
+    TestID -> "Lift/multi-conjunct/Huntington_ImpliesRobbins"
+]

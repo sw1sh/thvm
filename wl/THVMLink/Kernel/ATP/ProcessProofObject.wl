@@ -158,7 +158,8 @@ fastParseFormula[body_String] := Block[{op, parts, tx, l, r, sep},
        Vampire connectives / quantifiers) share this builder; splitting them
        on `=` would be wrong, so hand those to parseFormulaBody. *)
     If[ StringContainsQ[body, Alternatives["|", "&", "~", "=>", "<=>", "<~>", "![", "?["]],
-        Return[parseFormulaBody[body]]];
+        Return[parseFormulaBody[body]]
+    ];
     (* Waldmeister emits ORIENTED rewrite rules `lhs -> rhs` (tes-rule
        lines) alongside equations `lhs = rhs`.  A rule is an oriented
        equation; parse it to the SAME Equal head as an equation (the
@@ -170,7 +171,8 @@ fastParseFormula[body_String] := Block[{op, parts, tx, l, r, sep},
     {op, sep} = Which[
         StringContainsQ[body, "->"], {Equal, "->"},
         StringContainsQ[body, "!="], {Unequal, "!="},
-        True, {Equal, "="}];
+        True, {Equal, "="}
+    ];
     parts = StringSplit[body, sep, 2];
     If[ Length[parts] =!= 2, Return[parseFormulaBody[body]]];
     tx[side_] := Block[{s2},
@@ -183,7 +185,8 @@ fastParseFormula[body_String] := Block[{op, parts, tx, l, r, sep},
         Quiet @ Check[ToExpression[s2], $Failed]];
     l = tx[parts[[1]]]; r = tx[parts[[2]]];
     If[ l === $Failed || r === $Failed,
-        Return[parseFormulaBody[body]]];
+        Return[parseFormulaBody[body]]
+    ];
     (* A reflexive `x = x` (Waldmeister's tes-final closing step) would
        collapse `Equal[x, x]` to True and lose the statement.  Emit it as
        Inactive[Equal] so it stays inert; holdEqual rewraps it as
@@ -191,7 +194,8 @@ fastParseFormula[body_String] := Block[{op, parts, tx, l, r, sep},
        Conclusion). *)
     If[ op === Equal && l === r,
         reverseEncodeFormula[Inactive[Equal][l, r]],
-        reverseEncodeFormula[op[l, r]]]
+        reverseEncodeFormula[op[l, r]]
+    ]
 ]
 fastParseFormula[other_] := other
 
@@ -253,7 +257,7 @@ foldBookkeeping[derivation_List] := Block[{aliases, resolve},
             Append[s, "Parents" -> Map[resolve, Lookup[s, "Parents", {}]]]
         ],
         derivation
-    ] /. Nothing -> Sequence[]
+    ]
 ]
 
 isNegatedConjectureQ[step_Association] := step["Rule"] === "file" && step["Role"] === "negated_conjecture"
@@ -710,7 +714,13 @@ liftToProofObject[assoc_Association] := Block[{goalRaw, axiomsRaw, dsRaw, goalLi
         ]];
     ProofObject[
         "EquationalLogic",
-        inactivateEqual @ withVariablePatterns[goalLifted, varSyms],
+        (* A multi-goal lift carries the List of goal statements --
+           the same List-valued theorem argument FindEquationalProof
+           produces for a multi-conjunct proposition. *)
+        If[ ListQ[goalLifted],
+            Map[inactivateEqual @ withVariablePatterns[#, varSyms] &, goalLifted],
+            inactivateEqual @ withVariablePatterns[goalLifted, varSyms]
+        ],
         axList,
         <|
             "Variables" -> varSyms,
@@ -878,8 +888,17 @@ wmCollectVars[term_String] := DeleteDuplicates @ StringCases[term, RegularExpres
    nameRaw is the problem NAME (e.g. "WolframAxioms__Commutativity"),
    sanitized for the NAME field.  Construction is byte-identical to
    tools/baselines/tptp_to_pr.wls. *)
-wmBuildPr[nameRaw_String, axBodies_List, goalBody_String] := Module[{allTerms, sigByName, sig, vars, precList, sigBlock, varBlock, precBlock, weightBlock, eqBlock, conclusion},
-    allTerms = Join[axBodies, {goalBody}];
+(* Multiple goal bodies render as one multi-goal CONCLUSION block --
+   Waldmeister's parser keeps a list_of_conclusions (RUN/parser.c) and
+   `-auto` proves every goal in ONE run ("All goals proved"), which is
+   exactly how FindEquationalProof discharges a multi-conjunct
+   proposition (EquationalProof.m: proposition = And @@ Flatten[{...}],
+   one EquationalLogic`FindProof call). *)
+wmBuildPr[nameRaw_String, axBodies_List, goalBody_String] :=
+    wmBuildPr[nameRaw, axBodies, {goalBody}];
+
+wmBuildPr[nameRaw_String, axBodies_List, goalBodies : {__String}] := Module[{allTerms, sigByName, sig, vars, precList, sigBlock, varBlock, precBlock, weightBlock, eqBlock, conclusion},
+    allTerms = Join[axBodies, goalBodies];
     (* split each "lhs = rhs" body into its two term-strings for sig/var
        collection (the bodies are unsanitized TPTP, " = " separated). *)
     allTerms = Flatten[StringTrim /@ StringSplit[#, " = ", 2] & /@ allTerms];
@@ -897,7 +916,7 @@ wmBuildPr[nameRaw_String, axBodies_List, goalBody_String] := Module[{allTerms, s
     precBlock = StringRiffle[precList, " > "];
     weightBlock = StringRiffle[Replace[#, (nm_ -> _Integer) :> nm <> "=1"] & /@ sig, ", "];
     eqBlock = StringRiffle[wmSanitizeBody /@ axBodies, "\n              "];
-    conclusion = wmSanitizeBody[goalBody];
+    conclusion = StringRiffle[wmSanitizeBody /@ goalBodies, "\n              "];
     StringJoin[
         "NAME          ", wmSanitize[nameRaw], "\n",
         "MODE          PROOF\n",
@@ -912,25 +931,34 @@ wmBuildPr[nameRaw_String, axBodies_List, goalBody_String] := Module[{allTerms, s
 
 (* Top-level: (axioms, conjecture) -> .pr string.  axioms is a list of
    ForAll/Equal forms (as AxiomaticTheory[theory] returns), conjecture
-   a single ForAll/Equal/Unequal.  nameRaw labels the problem.  The
-   AxiomaticTheory formal variables (\[FormalA] etc.) are inert symbols,
-   so no Hold is needed: wmRenderTerm's own HoldFirst protects subterm
-   capture during the walk. *)
-wmGenerateProblem[nameRaw_String, axioms_List, conjecture_] := Block[{axBodies, goalBody},
+   a single ForAll/Equal/Unequal, a List of them, or an And of them --
+   a multi-conjunct conjecture becomes a multi-goal CONCLUSION block,
+   proved in ONE wmcli run, mirroring FindEquationalProof's
+   `And @@ Flatten[{proposition}]` (EquationalProof.m).  nameRaw labels
+   the problem.  The AxiomaticTheory formal variables (\[FormalA] etc.)
+   are inert symbols, so no Hold is needed: wmRenderTerm's own HoldFirst
+   protects subterm capture during the walk. *)
+wmGenerateProblem[nameRaw_String, axioms_List, conjecture_] := Block[{axBodies, conjuncts, goalBodies},
     axBodies = DeleteCases[wmAxBody /@ axioms, $Failed];
-    goalBody = wmGoalBody[conjecture];
-    If[ axBodies === {} || goalBody === $Failed,
+    conjuncts = Replace[conjecture, {l_List :> l, a_And :> List @@ a, c_ :> {c}}];
+    goalBodies = wmGoalBody /@ conjuncts;
+    If[ axBodies === {} || conjuncts === {} || MemberQ[goalBodies, $Failed],
         Return[Failure["WmGenerate", <|"Reason" -> "no equational axioms or non-equational goal", "Name" -> nameRaw|>]]];
-    wmBuildPr[nameRaw, axBodies, goalBody]];
+    wmBuildPr[nameRaw, axBodies, goalBodies]];
 
 (* (theory, thm) -> .pr string, resolving axioms + the NotableTheorem
    the SAME way TFindProof's atpProveFromTheory does: axioms from
    AxiomaticTheory[theory], the conjecture from
-   AxiomaticTheory[theory, "NotableTheorems"][thm].  A multi-conjunct
-   theorem keys each conjunct under a trailing "__c<i>" name (mirrors
-   the banked-file convention); takeConjunct picks one (1-based, the
-   default 1).  Returns the .pr string or a Failure. *)
-wmGenerateProblemFor[theory_String, thm_String, takeConjunct_Integer : 1] := Block[{axioms, nt, cjRaw, conjuncts, idx, nm},
+   AxiomaticTheory[theory, "NotableTheorems"][thm].  The default (All)
+   puts EVERY conjunct of a multi-conjunct theorem into one multi-goal
+   .pr, matching FindEquationalProof (one prover run, "All goals
+   proved") -- the old take-one default silently proved ONLY the first
+   conjunct of DeMorgan / ImpliesHuntingtonAxioms / ImpliesRobbinsAxioms
+   while reporting success.  An explicit integer takeConjunct still
+   picks a single conjunct, keyed under the banked-file "__c<i>" name
+   convention, for the per-conjunct baseline tooling.  Returns the .pr
+   string or a Failure. *)
+wmGenerateProblemFor[theory_String, thm_String, takeConjunct : (_Integer | All) : All] := Block[{axioms, nt, cjRaw, conjuncts, idx, nm},
     axioms = AxiomaticTheory[theory];
     If[ ! ListQ[axioms],
         Return[Failure["WmGenerate", <|"Reason" -> "AxiomaticTheory[\"" <> theory <> "\"] did not resolve to an axiom list"|>]]];
@@ -939,9 +967,13 @@ wmGenerateProblemFor[theory_String, thm_String, takeConjunct_Integer : 1] := Blo
     If[ MissingQ[cjRaw],
         Return[Failure["WmGenerate", <|"Reason" -> "theorem \"" <> thm <> "\" not in AxiomaticTheory[\"" <> theory <> "\", \"NotableTheorems\"]"|>]]];
     conjuncts = If[ MatchQ[cjRaw, _List], cjRaw, {cjRaw}];
-    idx = Clip[takeConjunct, {1, Length[conjuncts]}];
-    nm = theory <> "__" <> thm <> If[ Length[conjuncts] > 1, "__c" <> ToString[idx], ""];
-    wmGenerateProblem[nm, axioms, conjuncts[[idx]]]];
+    If[ takeConjunct === All,
+        nm = theory <> "__" <> thm;
+        wmGenerateProblem[nm, axioms, conjuncts],
+        idx = Clip[takeConjunct, {1, Length[conjuncts]}];
+        nm = theory <> "__" <> thm <> If[ Length[conjuncts] > 1, "__c" <> ToString[idx], ""];
+        wmGenerateProblem[nm, axioms, conjuncts[[idx]]]
+    ]];
 
 (* ----------------------------------------------------------------- *)
 
@@ -982,10 +1014,18 @@ TSZSDerivationToProofObject[derivation_List, opts : OptionsPattern[]] := Block[{
     axiomEntries = KeySelect[ds, MatchQ[#, {"Axiom", _}] &];
     hypothesisEntries = KeySelect[ds, MatchQ[#, {"Hypothesis", _}] &];
     axioms = Values @ axiomEntries /. e_Association :> e["Statement"];
-    goal = If[
-        Length[hypothesisEntries] > 0,
-        First[Values @ hypothesisEntries]["Statement"],
-        Missing["NoHypothesis"]
+    (* One hypothesis stays a bare statement (the long-standing shape);
+       a multi-goal derivation (Waldmeister multi-goal CONCLUSION, one
+       tes-goal hypothesis per conjunct) carries the LIST of goal
+       statements, mirroring FindEqualProof's List-valued Theorem on a
+       multi-conjunct proposition. *)
+    goal = Which[
+        Length[hypothesisEntries] === 1,
+            First[Values @ hypothesisEntries]["Statement"],
+        Length[hypothesisEntries] > 1,
+            Values[hypothesisEntries] /. e_Association :> e["Statement"],
+        True,
+            Missing["NoHypothesis"]
     ];
     hist = KeySort @ Counts[Cases[
         derivation,
