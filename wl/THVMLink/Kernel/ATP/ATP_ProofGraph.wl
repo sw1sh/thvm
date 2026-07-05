@@ -1676,10 +1676,28 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                conjunct pairs.  Only fires for a genuine goal parent, so the
                two-rule path below is untouched. *)
             Block[{gA = FirstPosition[cjps, p_ /; cplEqSetQ[p, aInfo["Eq"], varSyms], Missing[], {1}, Heads -> False],
-                   gB = FirstPosition[cjps, p_ /; cplEqSetQ[p, bInfo["Eq"], varSyms], Missing[], {1}, Heads -> False]},
-                If[ ! MissingQ[gA],
+                   gB = FirstPosition[cjps, p_ /; cplEqSetQ[p, bInfo["Eq"], varSyms], Missing[], {1}, Heads -> False],
+                   goalOneStep},
+                (* A conjunct of a multi-goal conjunction can DUPLICATE a
+                   real axiom up to alpha (BooleanAxioms or-commutativity
+                   == conjunct 1 of the Implies*Axioms families): the
+                   content match alone then hijacks an ordinary
+                   axiom-parent CP into this goal bridge, whose emitNorm
+                   cannot reach cpEq and burns the full BFS wall-budget
+                   ladder (~75 s) before failing the whole lift.  This
+                   bridge's own invariant is that cpEq is ONE ordered
+                   rewrite of the conjunct -- probe exactly that against
+                   the rules alive at ti before committing; on a failed
+                   probe fall through to the ordinary rule-vs-rule
+                   geometry (sound: the parent's equation is
+                   alpha-identical to the axiom, so the geometry
+                   reconstructs identically). *)
+                goalOneStep[conjEq_] := AnyTrue[
+                    rewriteOnce[conjEq, prepareRules[aliveRulesAt[ti]], True],
+                    cplEqSetQ[#[[1]], cpEq, varSyms] &];
+                If[ ! MissingQ[gA] && goalOneStep[cjps[[First[gA]]]],
                     Return[emitNorm[{$HypothesisSym, First[gA]}, cjps[[First[gA]]], cpEq, ti]]];
-                If[ ! MissingQ[gB],
+                If[ ! MissingQ[gB] && goalOneStep[cjps[[First[gB]]]],
                     Return[emitNorm[{$HypothesisSym, First[gB]}, cjps[[First[gB]]], cpEq, ti]]]];
             (* Re-derivation: the stored CP equation IS one of its own
                parents' (up to side swap / alpha) -- a two-parent overlap
