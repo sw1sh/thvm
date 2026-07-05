@@ -40,6 +40,15 @@
 
 BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`"}];
 
+(* Forward declaration (ATP_EquationalPath.wl / ATP_Strings.wl do the
+   same): the recursive Kernel loader sorts `atp_equationalize.wl`
+   BEFORE `atp.wl` (WL string sort compares alphanumerics ahead of
+   punctuation), so without this the `OptionValue[TFindProof, ...]`
+   below would parse against a fresh Private-context TFindProof with no
+   Options -- OptionValue::nodef on every WaldmeisterProcess predicate
+   call, and the user's TimeConstraint silently ignored. *)
+TFindProof;
+
 Begin["`Private`"];
 
 (* === isEquationQ: EquationalProof.m routing test ===
