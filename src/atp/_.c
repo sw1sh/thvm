@@ -11799,6 +11799,29 @@ fn void thvm_atp_set_use_fvi(AtpState *s, u8 on) {
   s->use_fvi = on ? 1u : 0u;
 }
 
+// Re-point the FVI / unorientable-instance grounding constant
+// (`s->min_const`, WM `SO_minimaleKonstante`) at an arbitrary 0-arity
+// label.  WM resolves SO_minimaleKonstante as the bottom-most CONSTANT
+// of the total precedence chain (`minimaleKonstanteBestimmen`,
+// WASIC/SymbolOperationen.c:112-126).  In the INITIAL precedence the
+// chain carries `f > const1 > const2` for every signature symbol f
+// (`NeueFunktionenEinbauen`, :210-216), so plain wmcli always grounds
+// with the extra constant const2 -- thvm's reserved
+// ATP_RESERVED_LABEL_MIN_CONST is that mirror and stays the default.
+// `wmcli -auto` (= FindEquationalProof), however, installs its chosen
+// precedence as a NEW chain (`PraezedenzAnalyse`, :456-517, which per
+// the :464-466 comment does NOT re-run NeueFunktionenEinbauen) and
+// re-resolves SO_minimaleKonstante over it (:515), so grounding uses
+// the problem's own minimal signature constant instead (observed:
+// zero const1/const2 tokens in the `wmcli -auto -a 4`
+// OrAssociativity reference; its grounded instances carry skC3).
+// label 0 restores the reserved default.
+fn void thvm_atp_set_min_const_label(AtpState *s, u32 label) {
+  if (s == NULL) return;
+  if (label == 0u) label = ATP_RESERVED_LABEL_MIN_CONST;
+  s->min_const = term_new_ctr(label, NULL, 0);
+}
+
 // Vampire-style Limited Resource Strategy (Riazanov & Voronkov, JSC 36,
 // 2003).  See AtpState.use_lrs / thvm_atp_select_cp / atp_lrs_recompute_
 // horizon for the algorithm.  Resets the per-run horizon state so a

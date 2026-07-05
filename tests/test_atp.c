@@ -675,6 +675,52 @@ int main(void) {
     #undef FVI_F
   }
 
+  TEST_BEGIN("atp/min-const-label-follows-wm-auto-reresolution");
+  {
+    // WM -auto re-resolves SO_minimaleKonstante over its newly installed
+    // precedence (PraezedenzAnalyse, WASIC/SymbolOperationen.c:456-517 +
+    // minimaleKonstanteBestimmen :112-126), so `wmcli -auto` grounds
+    // free-variable instances with the problem's own minimal signature
+    // constant (OrAssociativity: skC3), not the extra const2.
+    // thvm_atp_set_min_const_label is that mirror: after the setter, the
+    // ordered-rewrite grounded instance must carry the signature label,
+    // and label 0 must restore the reserved default (plain-wmcli const2).
+    static u32 fviw[4] = {0u, 1u, 1u, 1u};
+    static u32 fvip[4] = {0u, 1u, 2u, 3u};
+    static const KboConfig FVI_CFG = {
+      .weights = fviw, .precedence = fvip, .n_labels = 4u, .var_weight = 1u,
+    };
+    #define FVI_F(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(1u, _c, 2); })
+    AtpState *s = thvm_atp_init(&FVI_CFG, 64u);
+    thvm_atp_set_min_const_label(s, 3u);       // "skC3": signature constant
+    CHECK_EQ(term_ext(s->min_const), 3u);
+    CHECK_EQ(term_ctr_n(s->min_const), 0u);
+    {
+      Term x = mk_v(0u), y = mk_v(1u);
+      atp_push_rule(s, FVI_F(x, x), FVI_F(y, y));   // unorientable
+    }
+    CHECK_EQ(s->n_unorient, 1u);
+    Term v    = mk_v(0u);
+    Term subj = FVI_F(FVI_F(v, v), FVI_F(v, v));
+    Term sk   = term_new_ctr(3u, NULL, 0);
+    Term want = FVI_F(sk, sk);
+    Term nf_tree = atp_rewrite_normalize(s, subj, s->lhs, s->rhs,
+                                         s->n_rules, 64u);
+    CHECK(kbo_eq(nf_tree, want));               // grounded with label 3
+    s->use_flatterm = 1u;
+    Term nf_flat = atp_rewrite_normalize(s, subj, s->lhs, s->rhs,
+                                         s->n_rules, 64u);
+    s->use_flatterm = 0u;
+    CHECK(kbo_eq(nf_flat, want));               // FT mirror agrees
+    thvm_atp_set_min_const_label(s, 0u);        // kill switch: reserved
+    CHECK_EQ(term_ext(s->min_const), ATP_RESERVED_LABEL_MIN_CONST);
+    Term nf_res = atp_rewrite_normalize(s, subj, s->lhs, s->rhs,
+                                        s->n_rules, 64u);
+    CHECK(kbo_eq(nf_res, FVI_F(s->min_const, s->min_const)));
+    thvm_atp_free(s);
+    #undef FVI_F
+  }
+
   TEST_BEGIN("atp/unorient-index-and-nofire-memo-invalidate-on-revision");
   {
     // The unorientable-faces index (unorient_index) and the per-position

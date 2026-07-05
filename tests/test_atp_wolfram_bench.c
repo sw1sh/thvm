@@ -1152,6 +1152,44 @@ int main(int argc, char **argv) {
       // unchanged.  Wolfram trajectory shifts (fewer rules per second
       // but different exploration).  Safe to enable.
       thvm_atp_set_use_cp_index(s, 1u);
+      // WM -auto minimal-constant re-resolution (SO_minimaleKonstante).
+      // `wmcli -auto` installs its chosen precedence as a NEW chain
+      // (PraezedenzAnalyse, WASIC/SymbolOperationen.c:456-517) WITHOUT
+      // re-running NeueFunktionenEinbauen (:210, initial-precedence-only
+      // per the :464 comment), then re-resolves SO_minimaleKonstante over
+      // that chain (:515 -> minimaleKonstanteBestimmen :112-126, bottom-up
+      // scan for the first CONSTANT) -- so -auto grounds free-variable
+      // instances with the problem's own minimal-precedence signature
+      // constant (OrAssociativity -auto: skC3; zero const1/const2 tokens
+      // in the -auto -a 4 OA reference trace), NOT the extra const2.
+      // Plain wmcli keeps the initial chain, where NeueFunktionenEinbauen
+      // pinned `f > const1 > const2` for every signature symbol f, so
+      // plain grounds with const2 <=> thvm's reserved
+      // ATP_RESERVED_LABEL_MIN_CONST; the plain-emulation alignment rows
+      // (THVM_ATP_FIFO_THRESHOLD=0, run_one.sh) therefore keep the
+      // reserved default.  THVM_ATP_MINCONST_SIG=1/0 forces ON/OFF (the
+      // OFF form is the kill switch restoring the pre-fix trajectory).
+      {
+        const char *mcs = getenv("THVM_ATP_MINCONST_SIG");
+        const char *fth = getenv("THVM_ATP_FIFO_THRESHOLD");
+        u8 plain_emu = (fth != NULL && fth[0] != '\0' &&
+                        strtol(fth, NULL, 10) <= 0);
+        u8 want = (mcs != NULL && mcs[0] != '\0')
+                      ? (u8)(mcs[0] != '0')
+                      : (u8)(pr_mode && !plain_emu);
+        if (want && pr_mode) {
+          u32 mc_lab = 0u;
+          for (u32 k = 0; k < prp.n_syms; k++) {
+            u32 lab = k + PR_LABEL_BASE;
+            if (prp.syms[k].arity != 0u) continue;
+            if (mc_lab == 0u ||
+                prp.precedence[lab] < prp.precedence[mc_lab]) {
+              mc_lab = lab;
+            }
+          }
+          if (mc_lab != 0u) thvm_atp_set_min_const_label(s, mc_lab);
+        }
+      }
     }
   }
   // THVM_ATP_INITIAL_ULTIMATE=1: port of WM's `initial = ultimate` DEF
