@@ -144,16 +144,68 @@ parseFormulaBody[other_] := other
    minutes (parseFormulaBody per step) to seconds.  Falls back to the
    per-formula path if the batch doesn't round-trip the clause count (a
    parse error in any clause), keeping behaviour identical. *)
+(* A malformed SZS functor term. *)
+szsTermFailure[input_String] := Failure["szsTerm", <|
+    "MessageTemplate" -> "malformed SZS functor term: `1`",
+    "MessageParameters" -> {input}
+|>]
+
+(* Split an SZS argument list on its top-level commas (paren-depth aware),
+   so a nested functor arg like `g(a,b)` in `f(g(a,b),c)` stays intact. *)
+szsSplitArgs[s_String] := Block[{r},
+    r = Fold[
+        {st, ch} |-> Which[
+            ch === "(", {st[[1]] + 1, st[[2]], st[[3]] <> ch},
+            ch === ")", {st[[1]] - 1, st[[2]], st[[3]] <> ch},
+            ch === "," && st[[1]] === 0, {st[[1]], Append[st[[2]], st[[3]]], ""},
+            True, {st[[1]], st[[2]], st[[3]] <> ch}
+        ],
+        {0, {}, ""},
+        Characters[s]
+    ];
+    Append[r[[2]], r[[3]]]
+]
+
+(* Structural recursive-descent parse of an SZS functor term into the
+   string-headed form (`opMortal(socrates)` -> `"opmortal"["socrates"[]]`),
+   lower-casing names exactly as TPTPImport folds them.  Replaces the former
+   string-transform + `Quiet@Check[ToExpression[...], $Failed]` fast path:
+   no ToExpression (no code injection, no silent failure), byte-identical
+   output (verified).  A malformed side returns a Failure so fastParseFormula
+   falls back to the full parseFormulaBody. *)
+parseSZSTerm[input_String] := Block[{s = StringTrim[input]},
+    Which[
+        s === "",
+            szsTermFailure[input]
+        ,
+        StringMatchQ[s, RegularExpression["[A-Za-z0-9_]+"]],
+            ToLowerCase[s][]
+        ,
+        StringMatchQ[s, RegularExpression["[A-Za-z0-9_]+\\(.*\\)"]],
+            With[{nm = First @ StringCases[s,
+                StartOfString ~~ id : RegularExpression["[A-Za-z0-9_]+"] :> id]},
+                With[{parsed = parseSZSTerm /@
+                    szsSplitArgs[StringTake[s, {StringLength[nm] + 2, -2}]]},
+                    If[ AnyTrue[parsed, FailureQ],
+                        szsTermFailure[input],
+                        ToLowerCase[nm] @@ parsed
+                    ]
+                ]
+            ]
+        ,
+        True,
+            szsTermFailure[input]
+    ]
+]
+
 (* Fast direct parser: an SZS equation body is just `f(a,b) = c` term
-   syntax -- functor calls, atoms, and a single top-level = / != .  The
+   syntax (functor calls, atoms, and a single top-level = / != / ->).  The
    full TPTPImport EBNF parser is ~0.3s/formula (minutes on the 274-step
-   WolframAxioms proof); this string-transforms each side to WL syntax
-   (`f(` -> "f"[ , bare atom -> "a"[] , ) -> ] , names lower-cased exactly
-   as TPTPImport folds them) and ToExpression's it, then maps op heads via
-   reverseEncodeFormula -- byte-identical output to parseFormulaBody
-   (verified) at a fraction of the cost.  Falls back to parseFormulaBody on
-   anything that isn't a plain equation or fails ToExpression. *)
-fastParseFormula[body_String] := Block[{op, parts, tx, l, r, sep},
+   WolframAxioms proof); parseSZSTerm structurally parses each side, then
+   maps op heads via reverseEncodeFormula, byte-identical to parseFormulaBody
+   at a fraction of the cost.  Falls back to parseFormulaBody on anything
+   that isn't a plain equation or fails to parse. *)
+fastParseFormula[body_String] := Block[{op, parts, l, r, sep},
     (* Pure-equation fast path only.  Non-equational SZS clauses (Eprover/
        Vampire connectives / quantifiers) share this builder; splitting them
        on `=` would be wrong, so hand those to parseFormulaBody. *)
