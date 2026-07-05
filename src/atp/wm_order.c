@@ -450,6 +450,8 @@ static void wmo_kill_entries_to(WmoTree *t, void *target) {
 
 typedef struct { void *from; void *to; u8 to_leaf; WmoNode *up; } WmoRewireCtx;
 
+static void wmo_dup_note(const char *mech, WmoNode *start);
+
 // Rewire every exit that targeted a freed node onto the surviving sibling.
 // At the collapse-target node `up` (where the sibling re-hangs,
 // BO_ObjektEntfernen :1083) the short jump reaching the sibling is re-issued
@@ -466,6 +468,7 @@ static void wmo_rewire_cb(WmoNode *n, void *raw) {
     if (e->ziel == c->from) {
       e->ziel = c->to;
       e->ziel_leaf = c->to_leaf;
+      wmo_dup_note("REWIRE", n);
       if (n == c->up && e != n->exits) {
         // move e to the head of n's exit list
         *slot = e->next;
@@ -706,11 +709,62 @@ static WmoEntry *wmo_jump_find(const WmoNode *start, const WmoCell *sub,
   return NULL;
 }
 
+
+// Env-gated duplicate-exit reporter (THVM_WMO_DUPNOTE): after a mutation that
+// creates or retargets a jump, report when the start node now holds two
+// exits with identical (sub, ziel) -- a structure WM's overlay never holds.
+static void wmo_dup_note(const char *mech, WmoNode *start) {
+  static int on = -1;
+  if (on < 0) on = (getenv("THVM_WMO_DUPNOTE") != NULL) ? 1 : 0;
+  if (!on) return;
+  for (WmoEntry *a = start->exits; a != NULL; a = a->next) {
+    u32 nn = 0;
+    for (WmoEntry *b = start->exits; b != NULL; b = b->next) {
+      if (b->ziel == a->ziel && b->ziel_leaf == a->ziel_leaf &&
+          b->sub_len == a->sub_len &&
+          memcmp(b->sub, a->sub, (size_t)a->sub_len * sizeof(WmoCell)) == 0)
+        nn++;
+    }
+    if (nn >= 2u) {
+      fprintf(stderr, "WMODUP mech=%s depth=%u n=%u sub=[", mech,
+              wmo_node_depth(start), nn);
+      for (u32 cc = 0; cc < a->sub_len; cc++)
+        fprintf(stderr, "%s%d", cc ? "," : "",
+                a->sub[cc].is_var ? -(int)a->sub[cc].sym : (int)a->sub[cc].sym);
+      fprintf(stderr, "] tgt=%p\n", (void *)a->ziel);
+      return;
+    }
+  }
+}
+
 static u8 g_wmo_polier_after = 0u;
+
+// WM-faithful jump dedup on the DEFAULT construction path (kill switch
+// THVM_ATP_WMO_JUMP_DEDUP=0 restores the historical dup-creating prepend).
+// WM's discrimination-tree overlay never holds two jumps with the same
+// (start node, skipped subterm, target): RumpfSprungeintragSetzen fires once
+// per construction event, and the WM-validated trie mirror
+// (tools/baselines/wm_order_sim/wm_trie_mirror.py _add_entry) returns the
+// existing entry on an exact (sub, ziel) match.  thvm's approximated
+// deep-hang / rewire paths CAN re-issue an existing jump; without the dedup
+// the fresh copy head-prepends and drags its whole target subtree to the
+// FRONT of the var-query DFS -- the WolframAxioms OrAssociativity -auto
+// firstdiv-9059 mechanism (an equal-w1=120 band whose intra-band w2 order
+// exposed dup exits [x*(x*x)] / [x*(y*y)] / [x*x] at the depth-1 rule-tree
+// node, treedump-verified against the mirror replay of the wmcli -a 4
+// event stream: WM 15 exits, thvm 18 with 3 exact (start,sub,ziel) dups).
+static u8 wmo_jump_dedup_on(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("THVM_ATP_WMO_JUMP_DEDUP");
+    on = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
+  return (u8)on;
+}
 
 static WmoEntry *wmo_jump_prepend(WmoNode *start, const WmoCell *sub,
                                   u32 sub_len, void *ziel, u8 ziel_leaf) {
-  if (g_wmo_polier_after) {
+  if (g_wmo_polier_after || wmo_jump_dedup_on()) {
     WmoEntry *dup = wmo_jump_find(start, sub, sub_len, ziel, ziel_leaf);
     if (dup != NULL) return dup;
   }
@@ -892,6 +946,22 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
       // carrying the NEW leaf's subterm at this start (its own length,
       // walking TermIndexNeu to its end :517-520).
       u32 e_new = wmo_sub_end(leaf->key, start_pos);
+      // WM-faithful parallel dedup (same kill switch as the prepend dedup,
+      // THVM_ATP_WMO_JUMP_DEDUP=0):
+      // when the OLD leaf holds several in-jumps from the SAME start node,
+      // every survivor would spawn an IDENTICAL (sub = new-leaf extent at
+      // start_pos, ziel = new leaf) parallel here.  The WM-validated trie
+      // mirror routes parallel creation through _add_entry
+      // (wm_trie_mirror.py :88-90), which returns the existing entry on an
+      // exact (sub, ziel) match -- only the FIRST survivor's parallel is
+      // materialized.  The historical path created one per survivor; the
+      // duplicate head-splices dragged the new leaf's subtree ahead in the
+      // var-query DFS (the WolframAxioms OA -auto @9059 dup-exit family).
+      if (wmo_jump_dedup_on() &&
+          wmo_jump_find(sn, leaf->key + start_pos, e_new - start_pos,
+                        leaf, 1u) != NULL) {
+        continue;
+      }
       WmoEntry *par = (WmoEntry *)calloc(1, sizeof(WmoEntry));
       par->start = sn;
       par->sub = (WmoCell *)malloc((e_new - start_pos) * sizeof(WmoCell));
@@ -941,6 +1011,7 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
         wmo_ct("POLIER-PAR-AFTER", sn, leaf, 1u);
         par->next = surv->next;
         surv->next = par;
+        wmo_dup_note("POLIER-PAR-AFTER", sn);
       }
     } else {
       // else-branch (:534-560): re-target the survivor in place onto the
@@ -949,6 +1020,7 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
       WmoNode *chain_node = node_at[e_old - (i + 1u)];
       surv->ziel = chain_node;
       surv->ziel_leaf = 0u;
+      wmo_dup_note("POLIER-ELSE-RETARGET", sn);
       // A STRICT-ANCESTOR subterm closing at the FIRST chain node (e_old ==
       // i+1; its last cell is the leaf-found branch key[i], shared by both
       // leaves) additionally gets a FRESH jump to that chain node, head-
@@ -996,6 +1068,7 @@ static void wmo_altes_blatt_polieren(WmoTree *t, WmoLeaf *old, WmoLeaf *leaf,
         fresh->ziel_leaf = 0u;
         fresh->next = sn->exits;
         sn->exits = fresh;
+        wmo_dup_note("POLIER-FRESH-HEAD", sn);
       }
     }
   }
@@ -1564,6 +1637,30 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
       }
     }
     for (WmoEntry *e = n->exits; e != NULL; e = e->next) {
+      // WM-faithful duplicate-jump shadow skip (kill switch
+      // THVM_ATP_WMO_JUMP_DEDUP=0): the historical deep-hang construction
+      // leaves jumps that a later collapse retargets onto a node another
+      // jump with the SAME skipped subterm already reaches -- a
+      // (start, sub, ziel) pair WM's overlay never holds twice.  The EARLY
+      // copy is the thvm-only artifact (a fresh head-prepend/rewire); the
+      // LATE copy sits at the position WM's single jump occupies (verified
+      // against the wm_trie_mirror replay of the OA -auto rule-807 batch:
+      // skipping to the last occurrence reproduces WM's exit order at the
+      // depth-1 rule-tree node, the firstdiv-9059 w1=120 band).  Consult
+      // only the LAST identical copy.
+      if (wmo_jump_dedup_on()) {
+        u8 shadowed = 0u;
+        for (WmoEntry *e2 = e->next; e2 != NULL; e2 = e2->next) {
+          if (e2->ziel == e->ziel && e2->ziel_leaf == e->ziel_leaf &&
+              e2->sub_len == e->sub_len &&
+              memcmp(e2->sub, e->sub,
+                     (size_t)e->sub_len * sizeof(WmoCell)) == 0) {
+            shadowed = 1u;
+            break;
+          }
+        }
+        if (shadowed) continue;
+      }
       WmoUnif u2;
       wmo_unif_copy(&u2, u);
       if (wmo_unify_var(0u, qc->sym, e->sub, e->sub_len, 1u, &u2,
@@ -1613,7 +1710,7 @@ static void wmo_treedump_node(FILE *fp, WmoNode *n, u32 depth) {
   u32 ei = 0;
   for (WmoEntry *e = n->exits; e != NULL; e = e->next, ei++) {
     for (u32 d = 0; d < depth; d++) fputc(' ', fp);
-    fprintf(fp, "exit[%u] sub=[", ei);
+    fprintf(fp, "exit[%u] tgt=%p sub=[", ei, (void *)e->ziel);
     for (u32 cc = 0; cc < e->sub_len; cc++)
       fprintf(fp, "%s%d", cc ? "," : "",
               e->sub[cc].is_var ? -(int)e->sub[cc].sym : (int)e->sub[cc].sym);
@@ -1631,25 +1728,42 @@ static void wmo_treedump_node(FILE *fp, WmoNode *n, u32 depth) {
   for (u32 k = 0; k < n->n_kids; k++) {
     if (!n->kids[k].is_leaf) {
       for (u32 d = 0; d < depth; d++) fputc(' ', fp);
-      fprintf(fp, "node[edge=%d]:\n",
+      fprintf(fp, "node[edge=%d] id=%p:\n",
               n->kids[k].sym.is_var ? -(int)n->kids[k].sym.sym
-                                    : (int)n->kids[k].sym.sym);
+                                    : (int)n->kids[k].sym.sym,
+              (void *)n->kids[k].child);
       wmo_treedump_node(fp, (WmoNode *)n->kids[k].child, depth + 1u);
     }
   }
 }
 
-static void wmo_maybe_treedump(AtpWmOrder *w) {
+static void wmo_maybe_treedump(AtpWmOrder *w, u32 trace) {
   static int on = -1;
   if (on < 0) on = getenv("THVM_WMO_TREEDUMP") != NULL ? 1 : 0;
   if (!on) return;
-  const char *at = getenv("THVM_WMO_TREEDUMP_AT");
-  u32 target = at ? (u32)atoi(at) : 71u;
-  static u32 dumped = 0u;
-  if (w->n_reg != target || dumped == target) return;
-  dumped = target;
-  fprintf(stderr, "WMOTREE tree=1 nreg=%u\n", w->n_reg);
-  if (w->tree[1].root != NULL) wmo_treedump_node(stderr, w->tree[1].root, 0u);
+  // THVM_WMO_TREEDUMP_TRACE: dump right after the fact with this birth
+  // trace id registers (a monotone anchor; n_reg fluctuates with removals).
+  const char *at_tr = getenv("THVM_WMO_TREEDUMP_TRACE");
+  if (at_tr != NULL) {
+    static u32 tr_dumped = 0xffffffffu;
+    u32 tr_target = (u32)atoi(at_tr);
+    if (trace != tr_target || tr_dumped == tr_target) return;
+    tr_dumped = tr_target;
+  } else {
+    const char *at = getenv("THVM_WMO_TREEDUMP_AT");
+    u32 target = at ? (u32)atoi(at) : 71u;
+    static u32 dumped = 0u;
+    if (w->n_reg != target || dumped == target) return;
+    dumped = target;
+  }
+  // THVM_WMO_TREEDUMP_TREE: 0 = rule tree, 1 = eq tree (default), 2 = both.
+  const char *tsel_s = getenv("THVM_WMO_TREEDUMP_TREE");
+  u32 tsel = tsel_s ? (u32)atoi(tsel_s) : 1u;
+  for (u32 t = 0; t < 2u; t++) {
+    if (tsel != 2u && tsel != t) continue;
+    fprintf(stderr, "WMOTREE tree=%u nreg=%u\n", t, w->n_reg);
+    if (w->tree[t].root != NULL) wmo_treedump_node(stderr, w->tree[t].root, 0u);
+  }
 }
 
 static void wmo_free_subtree(void *n_raw, u8 is_leaf) {
@@ -1793,8 +1907,14 @@ static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
   {
     static int ct = -1;
     if (ct < 0) ct = (getenv("THVM_WMO_CT") != NULL) ? 1 : 0;
-    if (ct) fprintf(stderr, "WMOREG trace=%u tree=%u face=%u n_cells=%u\n",
-                    trace, tree, face, n_cells);
+    if (ct) {
+      fprintf(stderr, "WMOREG trace=%u tree=%u face=%u n_cells=%u nreg=%u cells=[",
+              trace, tree, face, n_cells, w->n_reg);
+      for (u32 cc = 0; cc < n_cells; cc++)
+        fprintf(stderr, "%s%d", cc ? "," : "",
+                cells[cc].is_var ? -(int)cells[cc].sym : (int)cells[cc].sym);
+      fprintf(stderr, "]\n");
+    }
   }
   wmo_tree_insert(&w->tree[tree], cells, n_cells, depth, trace, face,
                   w->polier_after);
@@ -1811,7 +1931,7 @@ static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
   memcpy(r->cells, cells, n_cells * sizeof(WmoCell));
   r->n_cells = n_cells;
   w->tree_rev++;             // invalidate the wmo_tops_rank arrival memo
-  wmo_maybe_treedump(w);
+  wmo_maybe_treedump(w, trace);
   {
     char lbl[64];
     snprintf(lbl, sizeof lbl, "post-register trace=%u face=%u", trace, face);
@@ -2210,6 +2330,19 @@ static void atp_wmo_remove_trace(AtpState *s, u32 trace) {
   u32 r = 0;
   while (r < w->n_reg) {
     if (w->reg[r].trace == trace) {
+      {
+        static int ct = -1;
+        if (ct < 0) ct = (getenv("THVM_WMO_CT") != NULL) ? 1 : 0;
+        if (ct) {
+          fprintf(stderr, "WMORM trace=%u tree=%u face=%u n_cells=%u cells=[",
+                  trace, w->reg[r].tree, w->reg[r].face, w->reg[r].n_cells);
+          for (u32 cc = 0; cc < w->reg[r].n_cells; cc++)
+            fprintf(stderr, "%s%d", cc ? "," : "",
+                    w->reg[r].cells[cc].is_var ? -(int)w->reg[r].cells[cc].sym
+                                               : (int)w->reg[r].cells[cc].sym);
+          fprintf(stderr, "]\n");
+        }
+      }
       wmo_tree_remove(&w->tree[w->reg[r].tree], w->reg[r].cells,
                       w->reg[r].n_cells, trace, w->reg[r].face);
       free(w->reg[r].cells);
@@ -2448,6 +2581,47 @@ static u32 wmo_tops_enum(AtpWmOrder *w, u8 tree, Term query_sub,
   WmoDfs d;
   u32 qn = wmo_tops_dfs_fill(w, tree, query_sub, q, &d);
   if (qn == 0u) return 0u;
+  // Arrival-dump probe (THVM_WMO_ARRDUMP): single-walk twin of the
+  // wmo_tops_rank dump -- same envs, same line format, so the native
+  // former's DFS arrival order can be diffed leaf-by-leaf against the
+  // WM trace / python trie mirror.  Env-gated, zero output when unset.
+  static int arrdump = -1, arrdump_rule = -1;
+  if (arrdump < 0) {
+    arrdump      = getenv("THVM_WMO_ARRDUMP") != NULL;
+    arrdump_rule = getenv("THVM_WMO_ARRDUMP_RULE") != NULL;
+  }
+  if ((tree == 1u || arrdump_rule) && arrdump) {
+    const char *lo_s = getenv("THVM_WMO_ARRDUMP_LO");
+    const char *hi_s = getenv("THVM_WMO_ARRDUMP_HI");
+    u32 lo = lo_s ? (u32)atoi(lo_s) : 0u;
+    u32 hi = hi_s ? (u32)atoi(hi_s) : 0xffffffffu;
+    static u8 dumped[8192];
+    u32 h = qn;
+    for (u32 c = 0; c < qn; c++)
+      h = h * 131u + (q[c].is_var ? (9000u + q[c].sym) : q[c].sym);
+    u32 bucket = h & 8191u;
+    if (w->n_reg >= lo && w->n_reg <= hi && !dumped[bucket]) {
+      dumped[bucket] = 1u;
+      fprintf(stderr, "WMOARR nreg=%u tree=%u qn=%u n_out=%u q=[", w->n_reg,
+              tree, qn, d.n_out);
+      for (u32 c = 0; c < qn; c++)
+        fprintf(stderr, "%s%d", c ? "," : "",
+                q[c].is_var ? -(int)q[c].sym : (int)q[c].sym);
+      fprintf(stderr, "]\n");
+      for (u32 a = 0; a < d.n_out; a++) {
+        WmoLeaf *l = d.out[a];
+        fprintf(stderr, "  arr=%u leaf_key=[", a);
+        for (u32 c = 0; c < l->key_len; c++)
+          fprintf(stderr, "%s%d", c ? "," : "",
+                  l->key[c].is_var ? -(int)l->key[c].sym : (int)l->key[c].sym);
+        fprintf(stderr, "] chain=");
+        for (u32 c = 0; c < l->n_chain; c++)
+          fprintf(stderr, "%s(t=%u,f=%u)", c ? "," : "",
+                  l->chain[c].trace, l->chain[c].face);
+        fprintf(stderr, "\n");
+      }
+    }
+  }
   u32 n = 0u;
   for (u32 a = 0; a < d.n_out && n < max; a++) {
     WmoLeaf *l = d.out[a];
