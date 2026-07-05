@@ -21149,7 +21149,45 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
               hits[g].face != hits[h].face) { h2 = g; break; }
         if (h2 == 0xffffffffu) continue;
         u32 o_arr = hits[h2].arrival;
-        if (o_arr < hits[h].arrival) {
+        {
+          static int ct = -1;
+          if (ct < 0) ct = getenv("THVM_ATP_CORANK_TRACE") != NULL ? 1 : 0;
+          if (ct)
+            fprintf(stderr,
+                    "CORANK trace=%u face=%u arr=%u o_arr=%u dist_rhs=%u "
+                    "raw_ch=%u o_raw_ch=%u\n",
+                    hits[h].trace, hits[h].face, hits[h].arrival, o_arr,
+                    wmo_trace_dist_rhs(w, hits[h].trace), raw_ch[h],
+                    raw_ch[h2]);
+        }
+        // EXPERIMENTAL, OPT-IN (THVM_ATP_CORANK_DIST=1), default OFF.
+        // Hypothesis: WM stores a var-differ equation ORIENTED and indexes ONE
+        // (distinguished) face; a single scan yields both unifiers at
+        // consecutive ages, so the co-rank collapse should anchor the pair at
+        // the DISTINGUISHED face's arrival, not the earlier-arriving face.
+        // This is bit-identical to the old min-arrival heuristic whenever the
+        // distinguished face arrives first; it changes only the "distinguished
+        // arrives LATER" cases.  It DOES fix WolframAxioms OrAssociativity
+        // firstdiv 26388 (eq 787's distinguished LHS at leaf C arr=8 vs its
+        // reverse y*y face at leaf A arr=1, which min-anchoring mis-ranked
+        // ahead of eq 784).  But it REGRESSES an earlier w=209 co-rank case
+        // (@24820), so the true anchor condition is more nuanced than
+        // "distinguished vs earlier" -- both are within the rules=263 dense
+        // band.  Left opt-in for refinement; default keeps the 26387 baseline.
+        // Same-leaf (o_arr==arr) stays raw.
+        static int cdist = -1;
+        if (cdist < 0) {
+          const char *e = getenv("THVM_ATP_CORANK_DIST");
+          cdist = (e != NULL && e[0] == '1') ? 1 : 0;
+        }
+        if (cdist && o_arr != hits[h].arrival) {
+          if (hits[h].face == wmo_trace_dist_rhs(w, hits[h].trace)) {
+            eff_ch[h] = raw_ch[h] * 2u;             // distinguished: anchor
+          } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+            eff_arr[h] = o_arr;                      // reverse: follow dist
+            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+          }
+        } else if (o_arr < hits[h].arrival) {
           if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
             eff_arr[h] = o_arr;
             eff_ch[h]  = raw_ch[h2] * 2u + 1u;
