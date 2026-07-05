@@ -6444,6 +6444,17 @@ extern volatile int thvm_heap_exhausted;
 // mark_gc_preserve) captured buffer to the release pool (see jit/capture.c).
 extern void (*thvm_metal_caprelease_hook)(u32 buf_id);
 void thvm_metal_buf_park_unpreserved_pinned(void);
+// Two-phase capture alloc-note callback (same extern fn-pointer pattern): the
+// Metal allocator re-tenants buf ids (freelist pop returns the donor id;
+// fresh allocs / external wraps reuse vacated slots), so every id-issuing
+// site invalidates the id's stale logical-map binding.  Set by
+// jit_capture_begin; no-ops while no two-phase capture map is live.
+extern void (*thvm_metal_allocnote_hook)(u32 buf_id);
+// fp8-in-tile eligibility accept/decline census (defined in
+// bufferize_classify.c; called from the Metal ceiling-trip census so a
+// real-gen OOM names which pre-lift matmul shapes fell back to the bf16
+// transient path).
+void thvm_fp8_elig_dump(void);
 // Unified fatal-condition recovery: longjmp via thvm_heap_exhaust_jmp
 // when set, exit(1) otherwise.  Replaces ad-hoc exit(1) calls in OOM
 // paths so a LibraryLink entry can recover and return

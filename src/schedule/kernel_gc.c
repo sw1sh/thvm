@@ -75,6 +75,16 @@ fn u32 kernel_gc_sweep(Term result) {
     if (b != &CPU_BACKEND) {
       continue;
     }
+    // A kid recorded by a live two-phase JIT capture is HELD: its output
+    // buffer dying is the two-phase design (the finalize planner hands the
+    // replay a planned slot to write instead), but the replay re-dispatches
+    // this very KernelEntry -- stripping it would turn that dispatch into a
+    // silent no-op (n_inputs=0, lift declined) and the replay computes on
+    // the slot's zero fill.  tinygrad parity: the jit_cache owns its
+    // CompiledRunners for the capture's lifetime (engine/jit.py).
+    if (jit_capture_kid_held(kid)) {
+      continue;
+    }
     // Buffer is dead.  Strip the input arrays; leave output_tid
     // pointing at the (now-empty) TenDesc so existing kid
     // references on the heap can resolve without faulting.

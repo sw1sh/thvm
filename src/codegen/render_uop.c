@@ -71,6 +71,14 @@ static int RMU_CUDA_SM = 0;
 fn int cuda_device_sm(void);
 #endif
 
+// Matmul store classifier (defined in uop/dag_scan.c, included after this
+// file in the unity build).  The CUDA __launch_bounds__ probe uses it to
+// read the A/B INDEX_E operands so its dtype gate mirrors the tiled-WMMA
+// emit exactly.
+static int udg_classify_matmul_store(Term store, u32 *out_k_extent,
+                                     Term *out_a_idx, Term *out_b_idx,
+                                     u32 *out_unit_axis);
+
 // Forward decl: defined below.
 static int rmu_dag_has_group_reduce(Term t);
 // The OPT_GROUP_REDUCE FACTOR (e.g. 8 -- the cooperative thread count, NOT the
@@ -177,7 +185,15 @@ static void rmu_emit_unroll_pragma(FILE *fp, u32 factor) {
 // rmu_buf_name's `buf<term_val>` fallback and the JIT'd C source
 // references undeclared identifiers (build fails, dispatch falls to
 // the walker, walker doesn't terminate at BS=2 on MNIST).
-#define RMU_BUF_MAX 64
+//
+// 64 EXACTLY was still off by one: slot 0 is the OUTPUT, so 64 slots
+// hold only 63 inputs, while the lift admits n_inputs == 64
+// (KERNEL_LIFT_MAX_INPUT).  An at-cap fusion (the Krea DiT combined-
+// stream concat + modulations, 64 inputs) then dropped instance 64 from
+// the signature while the body still referenced it -- nvrtc "identifier
+// in63 is undefined", the dispatch failed, and the output buffer stayed
+// silently zero.  66 = output + the lift's 64 + slack.
+#define RMU_BUF_MAX 66
 static struct { Term term; char name[16]; } RMU_BUF_NAMES[RMU_BUF_MAX];
 static u32 RMU_BUF_NAMES_N;
 
@@ -857,9 +873,36 @@ static void rmu_emit_term(Term t, FILE *fp) {
       // matches), so softmax/LayerNorm/etc. are byte-identical.
       u32 red_dt = DT_FP32;
       char const *cast_open = "", *cast_close = "";
-      if (term_dtype_in(tred, 0, &red_dt)) {
-        if (red_dt == DT_BF16) { cast_open = "((bfloat)("; cast_close = "))"; }
-        else if (red_dt == DT_FP16) { cast_open = "((half)("; cast_close = "))"; }
+      if (term_dtype_in(tred, 0, &red_dt)
+          && (red_dt == DT_BF16 || red_dt == DT_FP16)) {
+        switch (RMU_TARGET) {
+          case CG_TARGET_METAL:
+            // Native bfloat/half scalars round on conversion and
+            // auto-promote back to float in arithmetic.
+            cast_open  = (red_dt == DT_BF16) ? "((bfloat)(" : "((half)(";
+            cast_close = "))";
+            break;
+          case CG_TARGET_CUDA:
+            // CUDA bf16/fp16 are storage-only here (rmu_gpu_alu_type_name:
+            // their cuda_bf16.h/fp16.h operators collide with float
+            // operands), and MSL's `bfloat` does not exist -- the raw MSL
+            // cast was the Krea-on-H100 "identifier bfloat is undefined"
+            // nvrtc failure (177 kernels).  Round through the 2-byte type
+            // and come back to float: value-identical to the un-fused
+            // store->bf16 buffer->reload path, and the expression stays
+            // float-typed for the surrounding arithmetic.
+            cast_open  = (red_dt == DT_BF16)
+                       ? "__bfloat162float(__float2bfloat16("
+                       : "__half2float(__float2half(";
+            cast_close = "))";
+            break;
+          default:
+            // C JIT: bf16/fp16 kernels are promoted to float throughout
+            // (rmu_c_type_name); the fused-epilogue narrow round has no
+            // native scalar to round through, and the C JIT declines
+            // narrow-float kernels anyway -- keep the accumulator as-is.
+            break;
+        }
       }
       fprintf(fp, "%s_acc%u%s%s", cast_open, axis0, RMU_ACC_LANE_SUFFIX,
               cast_close);
@@ -2817,6 +2860,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
                                      RmuTcTile t, int c_is_bf, int stage_bf,
                                      int b_trans, i64 b_nstride,
                                      FILE *fp, u32 depth, int b_is_int8,
+                                     int b_is_fp8, int b_fp8_e5m2,
                                      Term a_val, u32 a_m_axis, u32 a_k_axis,
                                      Term epilogue_value, Term opt_tc_term,
                                      Term m_range_term, Term n_range_term,
@@ -2838,6 +2882,10 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
   // widens on the cooperative load).  Halving the threadgroup-staging bytes
   // also eases shared-memory pressure.
   const char *sel = stage_bf ? "bfloat" : "float";
+  // fp8 B-staging decoder (the prologue emits both helpers when any input is
+  // fp8; rmu_emit_kernel's has_fp8 scan sees buf_b).  e4m3 for Krea's weights.
+  const char *b_fp8_dec = b_fp8_e5m2 ? "thvm_fp8e5m2_decode"
+                                     : "thvm_fp8e4m3_decode";
   u32 tile_m = t.local_m * t.rm * 8u;     // output rows per threadgroup
   u32 tile_n = t.local_n * t.rn * 8u;     // output cols per threadgroup
   u32 n_tiles_n = n_extent / tile_n;      // tg columns in the grid
@@ -3007,6 +3055,45 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
           IND(depth + 2); fprintf(fp,                                         \
             "(_Bsm + %s)[_j] = (%s)%s[((%s) + _j / %uu) * %uu + _tn + _j %% %uu];\n",\
             BUFOFF, sel, b_name, KK0, tile_n, n_extent, tile_n);             \
+        }                                                                     \
+        IND(depth + 1); fputs("}\n", fp);                                     \
+      } else if (b_is_fp8 && b_tvec) {                                        \
+        /* fp8 weight (Transpose[Cast[W_fp8, bf16]]): read 4 consecutive K of  \
+           the fp8 weight (W's contiguous axis) as a uchar4 (coalesced, 1      \
+           byte/elem like int8), DECODE each byte fp8 -> float, cast to sel,   \
+           scatter to the strided _Bsm slots.  Mirror of the b_is_int8 tvec    \
+           branch with a decode in place of the char cast. */                  \
+        IND(depth + 1); fprintf(fp,                                           \
+          "for (uint _j = _lid; _j < %uu; _j += %uu) {\n", b_elems / 4u, nthreads);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "uint _n = _j / %uu, _k4 = (_j %% %uu) * 4u;\n", t.kb / 4u, t.kb / 4u);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "uchar4 _bv = *(device const uchar4*)(%s + (_tn + _n) * %lluu + (%s) + _k4);\n",\
+          b_name, (unsigned long long)b_nstride, KK0);                        \
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[_k4 * %uu + _n] = (%s)%s(_bv.x);\n", BUFOFF, tile_n, sel, b_fp8_dec);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[(_k4 + 1u) * %uu + _n] = (%s)%s(_bv.y);\n", BUFOFF, tile_n, sel, b_fp8_dec);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[(_k4 + 2u) * %uu + _n] = (%s)%s(_bv.z);\n", BUFOFF, tile_n, sel, b_fp8_dec);\
+        IND(depth + 2); fprintf(fp,                                           \
+          "(_Bsm + %s)[(_k4 + 3u) * %uu + _n] = (%s)%s(_bv.w);\n", BUFOFF, tile_n, sel, b_fp8_dec);\
+        IND(depth + 1); fputs("}\n", fp);                                     \
+      } else if (b_is_fp8) {                                                  \
+        /* fp8 scalar coalesced fallback (kb or W stride not 4-aligned, OR a   \
+           row-major B): read each fp8 weight byte, DECODE fp8 -> sel. */       \
+        IND(depth + 1); fprintf(fp,                                           \
+          "for (uint _j = _lid; _j < %uu; _j += %uu) {\n", b_elems, nthreads);\
+        if (b_trans) {                                                        \
+          IND(depth + 2); fprintf(fp,                                         \
+            "uint _n = _j / %uu, _k = _j %% %uu;\n", t.kb, t.kb);             \
+          IND(depth + 2); fprintf(fp,                                         \
+            "(_Bsm + %s)[_k * %uu + _n] = (%s)%s(%s[(_tn + _n) * %lluu + (%s) + _k]);\n",\
+            BUFOFF, tile_n, sel, b_fp8_dec, b_name, (unsigned long long)b_nstride, KK0);\
+        } else {                                                             \
+          IND(depth + 2); fprintf(fp,                                         \
+            "(_Bsm + %s)[_j] = (%s)%s(%s[((%s) + _j / %uu) * %uu + _tn + _j %% %uu]);\n",\
+            BUFOFF, sel, b_fp8_dec, b_name, KK0, tile_n, n_extent, tile_n);   \
         }                                                                     \
         IND(depth + 1); fputs("}\n", fp);                                     \
       } else if (b_tvec) {                                                    \
@@ -3265,6 +3352,17 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // cooperative B-staging (half the weight bandwidth, full TC rate); the
   // per-output-channel scale is applied OUTSIDE the matmul by the caller.
   int b_is_int8 = (rmu_slot_dtype(buf_b) == DT_INT8);
+  // fp8 weight-only-quantized matmul: B = CAST(fp8 -> bf16) over the fp8 weight
+  // buffer (TMatMul[x, Transpose[Cast[w_fp8, bf16]]]).  rmu_peel_cast stripped
+  // the cast so buf_b is the raw fp8 buffer; the tiled emitter reads it as
+  // `uchar` and decodes uchar -> bfloat via thvm_fp8e4m3_decode in the
+  // cooperative B-staging (1 byte/element like int8, full TC rate) instead of
+  // the scalar per-element decode.  Krea's DiT weights are e4m3; e5m2 rides the
+  // same staging with the e5m2 decoder.
+  u32 b_slot_dt = rmu_slot_dtype(buf_b);
+  int b_is_fp8      = (b_slot_dt == DT_FP8E4M3 || b_slot_dt == DT_FP8E5M2)
+                      && rmu_fp8_in_tile_enabled();
+  int b_fp8_e5m2    = (b_slot_dt == DT_FP8E5M2);
 
   // Find the K-axis extent by scanning addr_a and addr_b for the
   // RANGE leaf with axis_id == red_axis.
@@ -3625,12 +3723,12 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     // tiled path stages through `float` threadgroup memory (bfloat->float on
     // the cooperative load), and the parallel_tc path declares each fragment
     // as simdgroup_matrix<bfloat> matching its buffer, accumulating in f32.
-    // An INT8 B operand (the q8 weight) is also handled, but ONLY by the
-    // register-blocked tiled path, which reads it as `char` and casts
-    // char -> bfloat in the cooperative B-staging.  Anything else (fp16,
-    // fp8, int8 on A) still falls back to the scalar path.
+    // An INT8 or fp8 B operand (the weight-only-quantized weight) is also
+    // handled, but ONLY by the register-blocked tiled path, which reads it as
+    // `char`/`uchar` and casts/decodes to bfloat in the cooperative B-staging.
+    // Anything else (fp16, int8/fp8 on A) still falls back to the scalar path.
     if (dt_a != DT_FP32 && dt_a != DT_BF16) return 0;
-    if (dt_b != DT_FP32 && dt_b != DT_BF16 && !b_is_int8) return 0;
+    if (dt_b != DT_FP32 && dt_b != DT_BF16 && !b_is_int8 && !b_is_fp8) return 0;
   }
 
   // Parallel-TC selector.  If the M and N axes carry GLOBAL axis_type
@@ -3676,13 +3774,15 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // A bf16 B -> stage bfloat (native TC rate); an f32 B -> stage float.  For a
   // plain buffer A, the staging follows A's buffer dtype as before.
   u32 _dtb = uop_buffer_dtype(buf_b);
-  u32 _dta = (a_val != 0) ? ((_dtb == DT_BF16 || b_is_int8) ? DT_BF16 : DT_FP32)
-                          : uop_buffer_dtype(buf_a);
-  // INT8 B (the q8 weight) is eligible for the tiled path only: it stages
-  // char -> bfloat in the cooperative B-load (see rmu_emit_matmul_tc_tiled's
-  // b_is_int8 branch).  A is never int8 here (gated above).
+  u32 _dta = (a_val != 0)
+      ? ((_dtb == DT_BF16 || b_is_int8 || b_is_fp8) ? DT_BF16 : DT_FP32)
+      : uop_buffer_dtype(buf_a);
+  // INT8 / fp8 B (the weight-only-quantized weight) is eligible for the tiled
+  // path only: it stages char/uchar -> bfloat in the cooperative B-load (see
+  // rmu_emit_matmul_tc_tiled's b_is_int8 / b_is_fp8 branches).  A is never
+  // quantized here (gated above).
   int _tc_dtype_ok = (_dta == DT_FP32 || _dta == DT_BF16)
-                  && (_dtb == DT_FP32 || _dtb == DT_BF16 || b_is_int8);
+                  && (_dtb == DT_FP32 || _dtb == DT_BF16 || b_is_int8 || b_is_fp8);
   // The register-blocked tiled emitter assumes a row-major A[m*K+k] and
   // either a row-major B[k*N+n] OR a transposed B = Transpose[W] (W {N,K}
   // contiguous: B[k][n] = W[n][k], staged via b_nstride -- the contiguous
@@ -3695,7 +3795,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   if (getenv("THVM_MATMUL_TRACE") != NULL) {
     RmuTcTile _dt; int _tiled = ((!is_batched || rmu_tc_batched_on()) && !a_trans
         && m_par && n_par && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok
-        && !(is_batched && (a_val != 0 || b_is_int8))
+        && !(is_batched && (a_val != 0 || b_is_int8 || b_is_fp8))
         && rmu_tc_pick_tile(m_extent, n_extent, k_extent,
                             is_batched ? batch_extent : 0u, &_dt));
     fprintf(stderr, "[mm] M=%u N=%u K=%u batch=%u dtA=%u dtB=%u dtC=%u%s path=%s%s\n",
@@ -3708,8 +3808,9 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   if ((!is_batched || rmu_tc_batched_on()) && !a_trans && m_par && n_par
       && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok
       // batched-tiled handles only the plain bf16 attention GEMM for now:
-      // no fused-A producer, no int8 weight, no epilogue (all 0 for attention).
-      && !(is_batched && (a_val != 0 || b_is_int8 || epilogue_value != 0))) {
+      // no fused-A producer, no quantized weight, no epilogue (all 0 for attn).
+      && !(is_batched && (a_val != 0 || b_is_int8 || b_is_fp8
+                          || epilogue_value != 0))) {
     RmuTcTile tile;
     if (rmu_tc_pick_tile(m_extent, n_extent, k_extent,
                          is_batched ? batch_extent : 0u, &tile)) {
@@ -3726,12 +3827,13 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       // BEAM search instead of getenv.  Invalid/absent -> heuristic unchanged.
       rmu_tc_apply_opt_config(tc_opt_factor, m_extent, n_extent, k_extent,
                               8u, /*is_cuda=*/0, c_is_bf, &tile);
-      // Stage as bfloat when A is bf16 and B is bf16 OR an int8 weight (the
-      // q8 path casts char -> bfloat into the bfloat staging buffer, so the
-      // MMA runs at the native bf16 tensor-core rate).  A bf16-A / int8-B
-      // matmul (the FLUX q8 case) therefore stages bfloat; an f32-A / int8-B
-      // matmul stages float (B casts char -> float).
-      int stage_bf = (_dta == DT_BF16) && (_dtb == DT_BF16 || b_is_int8);
+      // Stage as bfloat when A is bf16 and B is bf16 OR a quantized weight (the
+      // int8/fp8 path casts/decodes to bfloat into the bfloat staging buffer,
+      // so the MMA runs at the native bf16 tensor-core rate).  A bf16-A /
+      // quantized-B matmul (the FLUX q8 / Krea fp8 case) therefore stages
+      // bfloat; an f32-A / quantized-B matmul stages float.
+      int stage_bf = (_dta == DT_BF16)
+                     && (_dtb == DT_BF16 || b_is_int8 || b_is_fp8);
       // Epilogue fusion is implemented only for the bf16 staging store (the FLUX
       // target).  An f32-output matmul with an epilogue bails to the generic
       // accumulator path, which applies the epilogue via the store-value-over-
@@ -3759,10 +3861,12 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       // A fused-A producer has no plain buffer (a_vec is never taken for it), so
       // report it as matching `sel` (it stages via the scalar producer path).
       int a_buf_bf = (a_val != 0) ? stage_bf : (uop_buffer_dtype(buf_a) == DT_BF16);
-      int b_buf_bf = b_is_int8 ? stage_bf : (uop_buffer_dtype(buf_b) == DT_BF16);
+      int b_buf_bf = (b_is_int8 || b_is_fp8)
+                       ? stage_bf : (uop_buffer_dtype(buf_b) == DT_BF16);
       rmu_emit_matmul_tc_tiled(a_nm, b_nm, c_nm, n_extent,
                                k_extent, tile, c_is_bf, stage_bf,
                                b_trans, ldb, fp, depth, b_is_int8,
+                               b_is_fp8, b_fp8_e5m2,
                                a_val, m_axis_id, red_axis,
                                epilogue_value, opt_tc_term,
                                m_range_term, n_range_term,
@@ -6057,8 +6161,9 @@ static void rmu_emit_after(Term after, FILE *fp, u32 depth) {
 // helper -- they go through the explicit cg_render_uop_kernel(root,
 // out_buf, in_bufs[]) entry instead.
 //
-// Capacity matches RMU_BUF_MAX (32 slots: 1 output + up to 31 inputs,
-// matching the Metal buffer-attribute cap).
+// Capacity matches RMU_BUF_MAX (1 output + up to KERNEL_LIFT_MAX_INPUT
+// inputs; Metal's 31-buffer attribute cap is gated separately by the
+// Metal renderer's own n_inputs decline).
 #define RMU_DISCOVER_MAX RMU_BUF_MAX
 static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
   // TAG_TEN: bare tensor leaves the unified pass / kernel_lift left in
@@ -6943,7 +7048,29 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
           u32 mE = 0, nE = 0, kE = 0, ua = 0;
           u32 dtc = uop_buffer_dtype(heap_read(term_val(root) + 0));
           int cbf = (dtc == DT_BF16 || dtc == DT_FP16);
-          if (uop_matmul_mn_axes(bare, NULL, &mE, NULL, &nE)
+          // OPERAND dtype gate -- MUST mirror the tiled-WMMA emit
+          // (rmu_emit_reduce's CUDA branch): fragments need 16-bit A and B
+          // (fp16 anywhere; bf16 on sm>=80).  An f32-operand OPT_TC matmul
+          // renders the SCALAR body and dispatches FLAT (block 256), so a
+          // tile-derived __launch_bounds__ smaller than 256 makes every
+          // launch fail CUDA_ERROR_INVALID_VALUE -- silently zeroing the
+          // output (the H100 Euler-sampler corruption; pre-existing at
+          // HEAD, exposed by any recognized f32 matmul on CUDA).
+          Term ab_a = 0, ab_b = 0;
+          u32  ab_k = 0, ab_unit = 0;
+          int  ab16 = 0;
+          if (udg_classify_matmul_store(bare, &ab_k, &ab_a, &ab_b, &ab_unit)
+              && ab_a != 0 && ab_b != 0) {
+            u32 dt_a = uop_buffer_dtype(heap_read(term_val(ab_a) + 0));
+            u32 dt_b = uop_buffer_dtype(heap_read(term_val(ab_b) + 0));
+            int a16 = (dt_a == DT_FP16)
+                   || (dt_a == DT_BF16 && RMU_CUDA_SM >= 80);
+            int b16 = (dt_b == DT_FP16)
+                   || (dt_b == DT_BF16 && RMU_CUDA_SM >= 80);
+            ab16 = a16 && b16;
+          }
+          if (ab16
+              && uop_matmul_mn_axes(bare, NULL, &mE, NULL, &nE)
               && uop_classify_matmul(bare, &kE, &ua) && ua == 0
               && mE && nE && kE) {
             RmuTcTile tl;

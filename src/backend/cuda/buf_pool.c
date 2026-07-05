@@ -115,6 +115,53 @@ fn void cuda_buf_clear_preserved(u32 wm) {
   for (u64 i = wm; i < CUDA_BUFS_NEXT; i++) CUDA_BUFS[i].preserved = 0;
 }
 
+// Free EVERY live CUDA buffer not marked `preserved` and not jit-pinned,
+// across the WHOLE table (NOT bounded by a per-realize watermark) -- the
+// CUDA mirror of thvm_metal_buf_free_unpreserved_all, wired into the same
+// realize-boundary forward reclaim (thvm_realize_fwd_reclaim).  Without it a
+// buffer that survived an earlier realize's watermark rollback but is now
+// unreachable stays stranded BELOW every later watermark forever: the Krea
+// 256px gen accumulated ~all of call-1's activations and call 2 exhausted
+// the H100 (262k failed cuMemAllocs).  The caller must run a correct mark
+// pass first (mark_gc_preserve + mark_heap_rooted_preserve); an
+// unmarked-but-live buffer here WILL be freed.  Arena views (owns_data == 0)
+// are skipped like Metal's borrowed wraps -- their storage dies through the
+// parent's own entry / rollback.  Returns bytes freed.
+fn u64 cuda_buf_free_unpreserved_all(void) {
+  if (!CUDA_READY) return 0;
+  // Cheap pre-scan: only pay the device sync when something is freeable.
+  u32 candidates = 0;
+  for (u32 i = 1; i < CUDA_BUFS_NEXT; i++) {
+    CudaBuf const *b = &CUDA_BUFS[i];
+    if (b->dptr == 0 || b->refcount == 0) continue;
+    if (b->preserved || b->jit_pinned || !b->owns_data) continue;
+    candidates++;
+  }
+  if (candidates == 0) return 0;
+  // A freed buffer must not still be read by in-flight kernels (the Metal
+  // sweep's flush+drain analog).
+  cuCtxSynchronize();
+  u64 freed = 0;
+  for (u32 i = 1; i < CUDA_BUFS_NEXT; i++) {
+    CudaBuf *b = &CUDA_BUFS[i];
+    if (b->dptr == 0 || b->refcount == 0) continue;
+    if (b->preserved || b->jit_pinned || !b->owns_data) continue;
+    freed += b->nbytes;
+    // The arena ALLOCATION (skip_freelist) is freed wholesale, never parked
+    // (a later best-fit pop would hand its giant block to a small alloc).
+    if (b->skip_freelist) {
+      cuda_buf_free(i);
+      continue;
+    }
+    // Park on the recycle freelist when accepted (push zeroes refcount);
+    // hard-free when refused (saturated) -- mirror of the Metal sweep's
+    // push-else-free.
+    cuda_buf_freelist_push(i);
+    if (b->refcount != 0) cuda_buf_free(i);
+  }
+  return freed;
+}
+
 // Cross-realize arena-view release: same role as
 // backend/cpu/buf_pool.c::cpu_buf_clear_preserved_arena_views.  Arena
 // views are by construction internal forward intermediates

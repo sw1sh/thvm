@@ -102,6 +102,97 @@ int main(void) {
     free(cu);
   }
 
+  // === at-cap fan-in: 64 inputs must ALL be declared ====================
+  TEST_BEGIN("render-uop-cuda/64-input-fusion-declares-in63");
+  {
+    // KERNEL_LIFT_MAX_INPUT admits 64 inputs; the renderer's slot table
+    // must hold output + all 64 (RMU_BUF_MAX).  At 64 slots exactly, the
+    // 64th input (instance 64 -> `in63`) was silently dropped from the
+    // signature while the body referenced it -- nvrtc "identifier in63 is
+    // undefined" and a silently-zero output (the Krea DiT modulation
+    // fusion on H100).
+    u32 dims[1] = { 32 };
+    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 0);
+    Term r0  = uop_range(0, KAX_LOOP, 32);
+    Term acc = 0;
+    for (u32 i = 1; i <= 64; i++) {
+      Term in = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, i);
+      Term ld = uop_index_e(in, r0);
+      acc = (acc == 0) ? ld : uop_binary(UOP_ADD, acc, ld);
+    }
+    Term st = uop_store(out, r0, acc);
+    char *cu = render_cuda(st, "k_fan64");
+    CHECK(cu != NULL);
+    CHECK(contains(cu, "const float *in62"));
+    CHECK(contains(cu, "const float *in63"));
+    CHECK(contains(cu, "in63["));
+    free(cu);
+  }
+
+  // === f32 TC matmul must NOT get a tile-derived __launch_bounds__ ======
+  TEST_BEGIN("render-uop-cuda/f32-tc-matmul-no-launch-bounds");
+  {
+    // A recognized f32 matmul renders the SCALAR body (WMMA fragments need
+    // 16-bit A/B) and dispatches FLAT (block 256).  The signature probe
+    // must therefore NOT stamp a tile-derived __launch_bounds__ -- a bound
+    // below 256 makes every flat launch fail CUDA_ERROR_INVALID_VALUE and
+    // silently zeroes the output (the H100 Euler-sampler corruption).
+    u32 dA[2] = { 64, 64 };
+    u32 dB[2] = { 64, 64 };
+    u32 dC[2] = { 64, 64 };
+    Term a  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dA, 1);
+    Term b  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dB, 2);
+    Term cbuf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dC, 0);
+    Term rm = uop_range(0, KAX_LOOP, 64);
+    Term rn = uop_range(1, KAX_LOOP, 64);
+    Term rk = uop_range(2, KAX_REDUCE, 64);
+    // addr(A[m,k]) = m*64 + k; addr(B[k,n]) = k*64 + n; C[m,n] = m*64 + n.
+    Term aAddr = uop_int_binary(UOP_IADD,
+        uop_int_binary(UOP_IMUL, rm, uop_const(DT_INT32, 64)), rk);
+    Term bAddr = uop_int_binary(UOP_IADD,
+        uop_int_binary(UOP_IMUL, rk, uop_const(DT_INT32, 64)), rn);
+    Term cAddr = uop_int_binary(UOP_IADD,
+        uop_int_binary(UOP_IMUL, rm, uop_const(DT_INT32, 64)), rn);
+    Term mul = uop_binary(UOP_MUL, uop_index_e(a, aAddr),
+                          uop_index_e(b, bAddr));
+    Term red = uop_reduce(REDUCE_SUM, /*axis=*/2, mul);
+    Term st  = uop_store(cbuf, cAddr, red);
+    Term rec = uop_recognise_tc_parallel(st);
+    char *cu = render_cuda(rec, "k_f32mm");
+    CHECK(cu != NULL);
+    CHECK(contains(cu, "extern \"C\" __global__ void k_f32mm"));
+    CHECK(!contains(cu, "__launch_bounds__"));
+    free(cu);
+  }
+
+  // === bf16 reduce in EXPRESSION context (fused matmul/norm epilogue) ===
+  TEST_BEGIN("render-uop-cuda/bf16-reduce-epilogue-no-msl-bfloat");
+  {
+    // STORE(out[0], ADD(REDUCE(SUM, in0_bf16[k], k), 1.0f)) -- the REDUCE
+    // feeds an elementwise expression, so rmu_emit_term's UOP_REDUCE case
+    // emits the narrow-float rounding of the f32 accumulator.  On CUDA
+    // that rounding must be the float-valued round-trip
+    // __bfloat162float(__float2bfloat16(_acc)) -- the raw MSL `(bfloat)`
+    // cast was the Krea-on-H100 nvrtc failure ("identifier bfloat is
+    // undefined", 177 kernels -> flat-gray gen).
+    u32 dimsIn[1]  = { 64 };
+    u32 dimsOut[1] = { 1 };
+    Term in0 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_BF16, 1, dimsIn,  1);
+    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_BF16, 1, dimsOut, 0);
+    Term r_k = uop_range(0, KAX_REDUCE, 64);
+    Term ld  = uop_index_e(in0, r_k);
+    Term red = uop_reduce(REDUCE_SUM, /*axis=*/0, ld);
+    Term one = uop_const(DT_FP32, 0x3F800000u);
+    Term val = uop_binary(UOP_ADD, red, one);
+    Term st  = uop_store(out, uop_const(DT_INT32, 0), val);
+    char *cu = render_cuda(st, "k_bf16ep");
+    CHECK(cu != NULL);
+    CHECK(contains(cu, "__bfloat162float(__float2bfloat16(_acc0"));
+    CHECK(!contains(cu, "(bfloat)"));
+    CHECK(!contains(cu, "(half)("));
+    free(cu);
+  }
+
   // === signed integer subtraction =================================
   TEST_BEGIN("render-uop-cuda/isub-is-signed");
   {

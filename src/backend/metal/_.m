@@ -594,6 +594,44 @@ static void metal_record_memory_peak(void) {
         (unsigned long long)retained, (unsigned long long)ceiling,
         (unsigned long long)live, (unsigned long long)METAL_DEFER_DECREF_BYTES,
         (unsigned long long)metal_freelist_bytes());
+      // Death census: aggregate the live set by buffer size so the culprit
+      // class (weights vs a specific intermediate shape) is visible in the
+      // abort log.  Top size-classes by total bytes; pinned split shows how
+      // much a JIT capture holds.  One-shot on the fatal path -- no env gate.
+      {
+        enum { CENSUS_CAP = 64 };
+        u64 sz[CENSUS_CAP]; u64 tot[CENSUS_CAP]; u32 cnt[CENSUS_CAP];
+        u32 pin[CENSUS_CAP]; u32 nclass = 0;
+        for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+          if (METAL_BUFS[i].buf == nil || METAL_BUFS[i].borrowed) continue;
+          u64 nb = METAL_BUFS[i].nbytes;
+          u32 c = nclass;
+          for (u32 k = 0; k < nclass; k++) if (sz[k] == nb) { c = k; break; }
+          if (c == nclass) {
+            if (nclass >= CENSUS_CAP) continue;
+            sz[nclass] = nb; tot[nclass] = 0; cnt[nclass] = 0; pin[nclass] = 0;
+            nclass++;
+          }
+          tot[c] += nb; cnt[c]++;
+          if (METAL_BUFS[i].jit_pinned) pin[c]++;
+        }
+        // simple selection of the top 12 classes by total bytes
+        for (u32 r = 0; r < 12 && r < nclass; r++) {
+          u32 best = r;
+          for (u32 k = r + 1; k < nclass; k++) if (tot[k] > tot[best]) best = k;
+          u64 tsz = sz[r]; sz[r] = sz[best]; sz[best] = tsz;
+          u64 ttot = tot[r]; tot[r] = tot[best]; tot[best] = ttot;
+          u32 tcnt = cnt[r]; cnt[r] = cnt[best]; cnt[best] = tcnt;
+          u32 tpin = pin[r]; pin[r] = pin[best]; pin[best] = tpin;
+          fprintf(stderr,
+            "metal-census: size=%.2fMB x%u (pinned %u) total=%.2fGB\n",
+            sz[r] / 1.0e6, cnt[r], pin[r], tot[r] / 1.0e9);
+        }
+      }
+      // fp8-in-tile eligibility census: names how many fp8 matmuls kept the
+      // cast lazy (in-tile, no transient) vs fell back to the transient, and
+      // WHY -- so a real-gen OOM shows whether the transients are the filler.
+      thvm_fp8_elig_dump();
       // Recoverable: when a LibraryLink entry has armed thvm_heap_exhaust_jmp,
       // longjmp back so it returns LIBRARY_FUNCTION_ERROR (the WolframKernel
       // survives); only a bare run (no setjmp armed) exit(1)s.  Inlined rather
@@ -694,6 +732,9 @@ static u32 metal_buf_freelist_try_pop(u64 nbytes) {
     METAL_BUFS[bid].refcount = 1;
     METAL_BUFS[bid].preserved = 0;
     metal_record_memory_peak();
+    // Two-phase capture: this id gets a NEW tenant -- invalidate any stale
+    // logical-map binding (see thvm_metal_allocnote_hook in thvm.h).
+    if (thvm_metal_allocnote_hook != NULL) thvm_metal_allocnote_hook(bid);
     return bid;
   }
   return 0;   // miss
@@ -773,6 +814,9 @@ static u32 metal_buf_alloc(u64 nbytes) {
     return 0;
   }
   metal_record_memory_peak();
+  // Two-phase capture: a fresh alloc may reuse a vacated slot id -- invalidate
+  // any stale logical-map binding.
+  if (thvm_metal_allocnote_hook != NULL) thvm_metal_allocnote_hook(id);
   return id;
 }
 
@@ -781,7 +825,11 @@ static u32 metal_buf_alloc(u64 nbytes) {
 // is full.
 static u32 metal_buf_grab_slot(void) {
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
-    if (METAL_BUFS[i].buf == nil && METAL_BUFS[i].refcount == 0) return i;
+    if (METAL_BUFS[i].buf == nil && METAL_BUFS[i].refcount == 0) {
+      // Two-phase capture: slot id re-tenanted -- invalidate stale binding.
+      if (thvm_metal_allocnote_hook != NULL) thvm_metal_allocnote_hook(i);
+      return i;
+    }
   }
   if (METAL_BUFS_NEXT >= METAL_BUFS_CAP) {
     fprintf(stderr, "thvm: metal_buf_grab_slot -- buffer table full\n");
@@ -1068,6 +1116,8 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
     if (METAL_BUFS[i].buf == nil && METAL_BUFS[i].refcount == 0) {
       slot = i;
+      // Two-phase capture: slot id re-tenanted -- invalidate stale binding.
+      if (thvm_metal_allocnote_hook != NULL) thvm_metal_allocnote_hook(i);
       break;
     }
   }
@@ -1236,9 +1286,43 @@ static void metal_buf_decref(u32 buf_id) {
     metal_dispatch_flush();
     metal_drain_pending();   // about to free: the GPU must be done reading it
   }
-  if (--METAL_BUFS[buf_id].refcount != 0) return;
+  if (--METAL_BUFS[buf_id].refcount != 0) {
+    // Online refcount-death recycling (THVM_JIT_STATIC_PACK): a jit_pinned
+    // buffer whose refcount just fell to 1 has only the active capture's own
+    // retain left -- its last live TenDesc is gone, so no future record op can
+    // read it.  Offer it to the capture-recycle pool for same-size reuse by a
+    // later output; the hook re-checks the static-pack gate + retained-by-
+    // active-slot + rewritten-by-a-recorded-dispatch before parking, and no-ops
+    // outside a capture.  Bounds the COLD capture peak to max-live.
+    if (METAL_BUFS[buf_id].refcount == 1 && METAL_BUFS[buf_id].jit_pinned
+        && thvm_metal_caprelease_hook != NULL) {
+      thvm_metal_caprelease_hook(buf_id);
+    }
+    return;
+  }
   if (!metal_buf_freelist_push_impl(buf_id)) {
     metal_buf_free(buf_id);
+  }
+}
+
+// Capture-time mark-park sweep (called from thvm_realize's normal exit, after
+// mark_gc_preserve marked TRUE reachability and BEFORE jit_capture_mark_
+// preserved blankets every retained buffer): a jit_pinned buffer that is
+// still unpreserved is a dead captured intermediate -- unreachable from the
+// result, every WL-held wrapper, DEFS, and the heap TAG_TEN overlay -- by the
+// same proof thvm_realize_fwd_reclaim uses to HARD-FREE such buffers when not
+// capturing.  Offer each to the capture-recycle release pool (an extern fn
+// pointer into the core TU; its guards re-check retained-by-active-slot and
+// rewritten-by-a-recorded-dispatch before parking).  The buffer is never
+// freed here -- the replay still rewrites it in place.
+void thvm_metal_buf_park_unpreserved_pinned(void) {
+  if (thvm_metal_caprelease_hook == NULL) return;
+  for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    MetalBuf const *mb = &METAL_BUFS[i];
+    if (mb->buf == nil || mb->refcount == 0) continue;
+    if (!mb->jit_pinned || mb->preserved)    continue;
+    if (!mb->owns_data || mb->borrowed || mb->skip_freelist) continue;
+    thvm_metal_caprelease_hook(i);
   }
 }
 

@@ -39,6 +39,14 @@ void thvm_metal_buf_gpu_zero(u32 buf_id)                     { (void)buf_id; }
 void thvm_metal_buf_clear_preserved(u32 wm)                  { (void)wm; }
 u64  thvm_metal_buf_free_unpreserved_all(void)               { return 0; }
 void thvm_metal_buf_decref_one(u32 buf_id)                   { (void)buf_id; }
+void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out) {
+  (void)i;
+  if (nbytes_out)   *nbytes_out = 0;
+  if (refcount_out) *refcount_out = 0;
+}
+u32  thvm_metal_buf_meta(u32 buf_id)                          { (void)buf_id; return 0; }
+int  thvm_metal_buf_is_borrowed(u32 buf_id)                   { (void)buf_id; return 0; }
+void thvm_metal_buf_park_unpreserved_pinned(void)             {}
 u64  thvm_metal_live_bytes(void)                            { return 0; }
 void thvm_metal_precompile_range(u32 kid_lo, u32 kid_hi)     { (void)kid_lo; (void)kid_hi; }
 u32  thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) { (void)page_base; (void)maplen; (void)minor; return 0; }

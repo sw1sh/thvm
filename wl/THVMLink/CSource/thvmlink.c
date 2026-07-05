@@ -2686,6 +2686,33 @@ EXTERN_C DLLEXPORT int thvm_wl_tens_count(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// {cpu_live, cpu_peak, dev_live, dev_peak}: allocator-storage accounting
+// (CPU_MEM_LIVE / CPU_MEM_PEAK, backend/cpu/buf_alloc.c; the CUDA mirror on
+// a CUDA build, zeros otherwise).  Unlike thvm_wl_total_buf_bytes this
+// includes freelist-PARKED storage (refcount 0 but never freed), so it is
+// the true recording high-water probe the two-phase JIT gate tests read.
+// args[0] != 0 resets the peaks to live before sampling.
+EXTERN_C DLLEXPORT int thvm_wl_cpu_mem_peak(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  mint reset = argc >= 1 ? MArgument_getInteger(args[0]) : 0;
+  if (reset != 0) cpu_buf_peak_reset();
+  mint dims[1] = {4};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  dst[0] = (mint)cpu_buf_live_bytes();
+  dst[1] = (mint)cpu_buf_peak_bytes();
+  dst[2] = 0;
+  dst[3] = 0;
+#ifdef THVM_HAS_CUDA
+  if (reset != 0) cuda_buf_peak_reset();
+  dst[2] = (mint)cuda_buf_live_bytes();
+  dst[3] = (mint)cuda_buf_peak_bytes();
+#endif
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_total_buf_bytes(WolframLibraryData libData, mint argc,
                                                MArgument *args, MArgument res) {
   (void)libData; (void)argc; (void)args;

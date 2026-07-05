@@ -291,17 +291,25 @@ krTransformerPre[context_, stxt_, simg_, pos_, mask_, wf_, cfg_] := Module[{addM
    ctx/rope/addMask + the fp8-resident weights closed over.  patch-embed img,
    prepend the fixed text context, run the 28 blocks (per-block realized), drop the
    text prefix, final layer.  The sampler calls it directly each step. *)
-krTransformerBlocks[img_, ctx_, t_, tvec_, rope_, addMask_, stxt_, simg_, wf_, cfg_] := Module[{hidden, combined, i, out},
+krTransformerBlocks[img_, ctx_, t_, tvec_, rope_, addMask_, stxt_, simg_, wf_, cfg_] := Module[{hidden, combined, real, i, out},
     hidden = krLinearBias[img, wf["first.weight"], wf["first.bias"]];   (* {Simg, F} *)
     combined = Join[ctx, hidden, 1];                                   (* {Stxt+Simg, F} *)
-    (* Realize each block: the fp8 weights decode to a per-matmul bf16 transient
-       (bufferize_fp8_cast_feeds_matmul) freed at end-of-realize, so per-block
-       TRealize bounds the DiT working set to ~one block instead of pinning the
-       whole 28-block activation set at once.  (A TJit-captured lazy stack is the
-       speed follow-up; per-block is the correct-and-simple baseline.) *)
-    Do[ combined = TRealize @ krBlock[combined, stxt + simg, tvec, rope, addMask, wf, i, cfg], {i, 0, cfg["layers"] - 1}];
+    (* Default: realize each block -- the fp8 weights decode to a per-matmul bf16
+       transient (bufferize_fp8_cast_feeds_matmul) freed at end-of-realize, so
+       per-block TRealize bounds the DiT working set to ~one block instead of
+       pinning the whole 28-block activation set at once.  Under the two-phase JIT
+       (THVM_JIT_TWO_PHASE=1) the stack stays LAZY so the sampler's TJit captures
+       one whole-velNet schedule -- safe there because two-phase recording does not
+       pin (recording peak == eager peak) and the finalize planner interval-packs
+       the record onto capture-owned slots. *)
+    real = If[Environment["THVM_JIT_TWO_PHASE"] === "1", Identity, TRealize];
+    Do[ combined = real @ krBlock[combined, stxt + simg, tvec, rope, addMask, wf, i, cfg], {i, 0, cfg["layers"] - 1}];
     out = combined[[stxt + 1 ;; stxt + simg]];                         (* {Simg, F} *)
-    krLast[out, simg, t, wf, cfg]
+    (* realize the returned velocity: a TJit-captured closure must return REALIZED
+       tensors (a lazy tail closing over the closure's arguments re-reads its
+       capture-time bindings on replay -- the lazy-return shape is broken by
+       contract); one {Simg, ch*patch^2} realize is trivial for the eager path too. *)
+    TRealize @ krLast[out, simg, t, wf, cfg]
 ]
 
 (* core = precompute + blocks (the non-JIT path, e.g. the tiny CPU validation). *)

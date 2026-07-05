@@ -71,8 +71,27 @@ fn Term thvm_realize_many(Term ctr_term);
 // drops; thvm approximates that with a mark-sweep at the realize boundary
 // that owns the WL root set.  Call site invariant: mark_gc_preserve(res) has
 // run and thvm_metal_buf_clear_preserved has NOT yet.
+
+// Opt-in CUDA realize-boundary sweep gate (THVM_CUDA_FWD_RECLAIM=1) --
+// shared by thvm_realize_fwd_reclaim's sweep call and the post-rollback
+// table-wide preserve clear below (without the clear, a buffer preserved
+// once stays preserved at every later sweep and the reclaim frees nothing).
+static int cuda_fwd_reclaim_enabled(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *ce = getenv("THVM_CUDA_FWD_RECLAIM");
+    on = (ce != NULL && ce[0] == '1') ? 1 : 0;
+  }
+  return on;
+}
+
 fn void thvm_realize_fwd_reclaim(void) {
-  if (jit_is_capturing()) return;
+  // Two-phase capture (THVM_JIT_TWO_PHASE) keeps recording lifetime EXACTLY
+  // eager -- the reclaim must run so dead intermediates die during the
+  // recording pass (the finalize planner then plans replay slots for them).
+  // Only the pin path (recorded buffers jit_pinned, per-realize rollback
+  // suffices) skips it.
+  if (jit_is_capturing() && !jit_capture_two_phase_active()) return;
   // Default ON: this is the faithful realize-boundary GC (free a buffer when its
   // last WL refcount drops), correct since the heap-rooted preserve scan below
   // fixed the cross-realize free bug, free on the hot loop (the table-wide free
@@ -101,11 +120,29 @@ fn void thvm_realize_fwd_reclaim(void) {
   // already pays, so it adds no cost to the hot training/replay loop.
   mark_heap_rooted_preserve();
   thvm_metal_buf_free_unpreserved_all();
+#ifdef THVM_HAS_CUDA
+  // CUDA mirror: without it, buffers stranded below later watermarks
+  // accumulate across realizes/calls until the device OOMs (the Krea 256px
+  // CALL2 cuMemAlloc-failure storm on the H100).  Same mark pass, same
+  // sweep contract (see cuda_buf_free_unpreserved_all).  OPT-IN
+  // (THVM_CUDA_FWD_RECLAIM=1) until the CUDA mark coverage is hardened the
+  // way Metal's was: enabling it by default corrupted the Euler-sampler
+  // repro (cold diff 0.296 pin / 1.036 two-phase -- a live buffer the mark
+  // pass misses gets freed), so the default path stays byte-identical.
+  if (cuda_fwd_reclaim_enabled()) cuda_buf_free_unpreserved_all();
+#endif
   // Drop the preserve bits the scan set table-wide.  thvm_realize's
   // thvm_metal_buf_clear_preserved(metal_wm) only clears [metal_wm, NEXT); a
   // cross-realize buffer below the watermark would otherwise carry a stale
   // preserved=1 into the next realize's rollback and never be reclaimed.
   thvm_metal_buf_clear_preserved(1);
+  // NOTE: no cuda_buf_clear_preserved(1) here -- unlike Metal, the CUDA pool
+  // rollback runs AFTER this function in thvm_realize and still needs the
+  // mark bits; a table-wide clear here wiped them and the rollback freed the
+  // live result (Euler-sampler corruption).  The post-rollback
+  // cuda_buf_clear_preserved(cuda_wm) handles the clearing; the opt-in CUDA
+  // sweep (THVM_CUDA_FWD_RECLAIM) must solve the stale-below-watermark bit
+  // problem as part of its hardening.
 }
 
 // Auto-trigger a Cheney collection at a realize boundary on EITHER heap-cell
@@ -152,6 +189,13 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
     if (dev > gc_device_baseline + (u64)gc_device_mb_env * (1ull << 20))
       device_pressure = 1;
   }
+  // NOTE: the device-pressure term deliberately does NOT include CUDA live
+  // bytes.  Counting them made the Cheney fire ~48x during the Krea 24GB
+  // weight upload -- a Cheney-under-CUDA-load path never exercised before --
+  // and the device context poisoned with an async CUDA_ERROR_ILLEGAL_ADDRESS
+  // in the upload phase (gen5/7/8; gen3 without the term was clean).  Wire
+  // CUDA into the trigger only together with hardening Cheney's root set for
+  // the CUDA upload path (part of the opt-in THVM_CUDA_FWD_RECLAIM arc).
   if (heap_pressure || device_pressure) {
     Term roots[1] = { *res_io };
     gc_collect(roots, 1);
@@ -185,6 +229,11 @@ static u32 REALIZE_ABORT_SAVED_DEVICE = 0;
 fn void thvm_realize_ceiling_cleanup(void) {
   if (!REALIZE_ABORT_ACTIVE) return;
   REALIZE_ABORT_ACTIVE = 0;
+  // Mid-pass death diagnostics: the OOM'd emit never reaches the drain, so
+  // dump the mem-plan admission/push counters (which gate the capture-recycle
+  // pool) and the pool's own adoption stats here (both env-gated no-ops).
+  mem_plan_debug_dump("ceiling");
+  jit_caprecycle_stats_dump();
   // The longjmp interrupted dispatch mid-flight; drain/flush so a freed buffer
   // is not still referenced by an in-flight GPU command, then hard-roll the
   // pools (no "preserve" -- the realize FAILED, its buffers are orphaned).
@@ -360,6 +409,42 @@ fn Term thvm_realize(Term expr) {
   // to cover pending UOP cells the root-set walk misses (e.g. forward
   // intermediates a future TGrad realize will need).
   SCHED_PROF_BLOCK(SCHED_PROF_GC_PRESERVE, mark_gc_preserve(res));
+  // Capture-time mark-park: the fwd_reclaim analogue for the capture path
+  // (which skips fwd_reclaim -- recorded buffers are jit_pinned and exempt
+  // from every free).  A captured intermediate is safe to PARK (recycle its
+  // storage for a later captured output) only if it is genuinely DEAD -- no
+  // later realize in this capture will read it.  mark_gc_preserve(res) marks
+  // the root set (result + WNF stack + DEFS + EXTERN_PINNED WL wrappers), but
+  // that is NOT sufficient: a per-projection velocity net carries its block
+  // residual as a LAZY UOP fragment (the Fold accumulator `x + a + m`), and
+  // the realized lin-output buffers that fragment references live in the dyn
+  // heap as TAG_TEN cells that NO root-set wrapper reaches (WL's lazy GC may
+  // have dropped the intermediate accumulator's wrapper, or it was never
+  // pinned).  Overlaying mark_heap_rooted_preserve -- the exact scan
+  // fwd_reclaim uses -- preserves every buffer a pending heap fragment still
+  // references, so only buffers with NO future eager read are left unpreserved
+  // and parked.  Without this overlay the sweep parks a still-live residual
+  // input; a later lin-output adoption then zero-fills + overwrites it, and
+  // the capture pass itself computes garbage (maxdiff ~3e5 vs eager on a
+  // 12-block synthetic).  The overlay is conservative (it also preserves any
+  // not-yet-collected dead heap cell's buffer -> that buffer isn't parked,
+  // costing some recycling) but that is a memory-vs-correctness trade, and the
+  // maybe_gc at the realize boundary compacts the heap so dead cells don't
+  // accumulate across the capture's realizes.  Requires the capture-gated
+  // clear_preserved(1) below: mark_gc_preserve + this overlay mark
+  // below-watermark buffers too, and without a table-wide clear each realize's
+  // marks accrete -- a buffer preserved ONCE would stay "preserved" (stale) at
+  // every later sweep and never park.
+  // THVM_JIT_STATIC_PACK replaces this realize-end reachability sweep with
+  // online refcount-death recycling from metal_buf_decref (a buffer is parked
+  // the instant its last live TenDesc drops -- definitive static death, no heap
+  // walk).  So skip the mark_heap_rooted_preserve overlay + the sweep under the
+  // gate; the decref hook has already parked every dead intermediate.
+  if (jit_is_capturing() && !jit_static_pack_enabled()
+      && !jit_capture_two_phase_active()) {
+    mark_heap_rooted_preserve();
+    thvm_metal_buf_park_unpreserved_pinned();
+  }
   jit_capture_mark_preserved();
 
   // Reached the normal exit: disarm the ceiling-abort cleanup (the rollback
@@ -393,10 +478,20 @@ fn Term thvm_realize(Term expr) {
   cpu_buf_clear_preserved(cpu_wm);
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);
+  // mark_gc_preserve marks below-watermark buffers too; under capture the
+  // mark-park sweep consumes those bits, so clear table-wide (mirror of
+  // fwd_reclaim's clear_preserved(1)) or a buffer preserved once stays
+  // "preserved" (stale) at every later sweep and never parks.
+  if (jit_is_capturing()) thvm_metal_buf_clear_preserved(1);
 #ifdef THVM_HAS_CUDA
   cuda_buf_clear_preserved_arena_views(cuda_wm);
   cuda_buf_pool_rollback_with_preserve(cuda_wm);
   cuda_buf_clear_preserved(cuda_wm);
+  // Opt-in sweep: drop the preserve bits TABLE-WIDE now that the CUDA
+  // rollback has consumed them, so the next realize's sweep sees fresh
+  // marks (mirror of the Metal flow's clear_preserved(1) after its sweep;
+  // doing this before the rollback wiped live marks and corrupted results).
+  if (cuda_fwd_reclaim_enabled()) cuda_buf_clear_preserved(1);
 #endif
 
   // Auto-trigger Cheney collection once the dyn heap crosses a
@@ -521,6 +616,20 @@ fn Term thvm_realize_many(Term ctr_term) {
   // the result CTR so each root's producer chain is preserved.
   u32 cn = term_ctr_n(res);
   for (u32 i = 0; i < cn && i < 256; i++) mark_gc_preserve(term_ctr_at(res, i));
+  // Capture-time mark-park sweep, same as thvm_realize (see the rationale
+  // there: the mark_heap_rooted_preserve overlay is REQUIRED for correctness --
+  // it preserves buffers a pending lazy fragment still references, so only
+  // truly-dead intermediates are parked).
+  // THVM_JIT_STATIC_PACK replaces this realize-end reachability sweep with
+  // online refcount-death recycling from metal_buf_decref (a buffer is parked
+  // the instant its last live TenDesc drops -- definitive static death, no heap
+  // walk).  So skip the mark_heap_rooted_preserve overlay + the sweep under the
+  // gate; the decref hook has already parked every dead intermediate.
+  if (jit_is_capturing() && !jit_static_pack_enabled()
+      && !jit_capture_two_phase_active()) {
+    mark_heap_rooted_preserve();
+    thvm_metal_buf_park_unpreserved_pinned();
+  }
   jit_capture_mark_preserved();
 
   // Arena planner cross-step leak fix (see thvm_realize for full
@@ -539,10 +648,20 @@ fn Term thvm_realize_many(Term ctr_term) {
   cpu_buf_clear_preserved(cpu_wm);
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);
+  // mark_gc_preserve marks below-watermark buffers too; under capture the
+  // mark-park sweep consumes those bits, so clear table-wide (mirror of
+  // fwd_reclaim's clear_preserved(1)) or a buffer preserved once stays
+  // "preserved" (stale) at every later sweep and never parks.
+  if (jit_is_capturing()) thvm_metal_buf_clear_preserved(1);
 #ifdef THVM_HAS_CUDA
   cuda_buf_clear_preserved_arena_views(cuda_wm);
   cuda_buf_pool_rollback_with_preserve(cuda_wm);
   cuda_buf_clear_preserved(cuda_wm);
+  // Opt-in sweep: drop the preserve bits TABLE-WIDE now that the CUDA
+  // rollback has consumed them, so the next realize's sweep sees fresh
+  // marks (mirror of the Metal flow's clear_preserved(1) after its sweep;
+  // doing this before the rollback wiped live marks and corrupted results).
+  if (cuda_fwd_reclaim_enabled()) cuda_buf_clear_preserved(1);
 #endif
 
   thvm_realize_maybe_gc(&res);

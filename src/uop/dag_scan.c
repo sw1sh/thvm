@@ -674,22 +674,28 @@ int uop_dag_classify_matmul_shape(Term root,
   // admitted for the Metal simdgroup tensor-core path (the threadgroup
   // staging load upconverts bfloat->float); CPU BLAS re-rejects it (blas.c).
   //
-  // q8 weight-only quant is the ONE non-uniform case: B (the weight) may be
-  // INT8 while A and the output share the compute dtype (bf16/f32).
+  // Weight-only quant is the non-uniform case: B (the weight) may be INT8 or
+  // fp8 (e4m3/e5m2) while A and the output share the compute dtype (bf16/f32).
   // rec_tc_peel_cast (in udg_classify_matmul_store) already stripped the
-  // int8->compute dequant CAST so buf_b is the raw int8 buffer.  Accepting
+  // quant->compute dequant CAST so buf_b is the raw quant buffer.  Accepting
   // it here keeps the kernel on the matmul fast path: hand_opts Section 1
   // applies KOP_TC + KOP_GLOBAL on the WHOLE M/N/K axes (no generic
   // UPCAST/LOCAL split), so recognise_tc later stamps OPT(TC) and
   // rmu_emit_matmul_tc takes the tiled simdgroup path (its b_is_int8 branch
-  // stages char->bfloat in-kernel -- half the weight bandwidth at TC rate).
-  // out->dtype stays the COMPUTE dtype, so the CPU BLAS dispatch still
-  // re-rejects (blas.c gates FP32/FP64 only) -- no int8 GEMM hits Accelerate.
+  // stages char->bfloat, its b_is_fp8 branch decodes uchar->bfloat, both
+  // in-kernel at TC rate).  WITHOUT accepting fp8 here the fp8-weight matmul
+  // falls to the generic elementwise UPCAST, which tile-splits M/N/K and
+  // 3-range-decomposes the operands -- mn_axes then sees n_a/n_b=3, OPT(TC) is
+  // never stamped, and the matmul renders as the scalar per-element decode
+  // accumulator (~20x slower).  out->dtype stays the COMPUTE dtype, so the CPU
+  // BLAS dispatch still re-rejects (blas.c gates FP32/FP64 only) -- no quant
+  // GEMM hits Accelerate.
   u32 dt = uop_buffer_dtype(buf_out);
   if (dt != DT_FP32 && dt != DT_FP64 && dt != DT_BF16) return 0;
   if (uop_buffer_dtype(buf_a) != dt) return 0;
   u32 dt_b = uop_buffer_dtype(buf_b);
-  if (dt_b != dt && dt_b != DT_INT8) return 0;
+  if (dt_b != dt && dt_b != DT_INT8
+      && dt_b != DT_FP8E4M3 && dt_b != DT_FP8E5M2) return 0;
 
   out->dtype   = dt;
   out->M       = M;

@@ -296,9 +296,12 @@ tisEulerSample[stepFn_Function, z0_, sigmas_] := Module[{z = z0, n = Length[sigm
     z
 ]
 
-tisEulerSample[tfOut_Association, z0_, sigmas_] := Module[{z = z0, vn = tfOut["velNet"], cf = tfOut["condFn"], n = Length[sigmas] - 1, k, dt, v},
-    (* Baseline: call the velocity net directly each step (per-block-realized).  The
-       TJit-capture-once/replay speedup is a follow-up on top of this. *)
+tisEulerSample[tfOut_Association, z0_, sigmas_] := Module[{z = z0, vn, cf = tfOut["condFn"], n = Length[sigmas] - 1, k, dt, v},
+    (* Default: call the velocity net directly each step (per-block-realized).
+       Under the two-phase JIT (THVM_JIT_TWO_PHASE=1) TJit captures the lazy
+       whole-velNet schedule once (recording does not pin; the finalize planner
+       packs the record) and replays it per step, rebinding (z, t, tvec). *)
+    vn = If[Environment["THVM_JIT_TWO_PHASE"] === "1", TJit[tfOut["velNet"]], tfOut["velNet"]];
     Do[ tisReport["Denoising (step " <> IntegerString[k] <> "/" <> IntegerString[n] <> ")...", 0.35 + 0.55 (k - 1)/n];
         dt = sigmas[[k + 1]] - sigmas[[k]];
         v = vn[z, Sequence @@ cf[sigmas[[k]]]];

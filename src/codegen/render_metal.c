@@ -19,6 +19,23 @@ typedef struct {
 static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
                             u32 batch_extent, RmuTcTile *out);
 
+// fp8-weight-in-tile staging (default ON).  When ON, a weight-only-quantized
+// fp8 matmul (TMatMul[x, Transpose[Cast[w_fp8, bf16]]]) reads the fp8 weight
+// directly into the tiled tensor-core B-staging (uchar -> decode -> bfloat,
+// decoded once per tile element) instead of falling to the scalar per-element
+// decode.  THVM_NO_FP8_IN_TILE=1 opts out (forces the scalar path) for the A/B
+// speed measurement.  Gates BOTH the renderer's b_is_fp8 branch AND this file's
+// dispatch-grid sizing so render + dispatch always agree on the path.
+static int rmu_fp8_in_tile_enabled(void) {
+  static int known = 0, on = 1;
+  if (!known) {
+    char const *e = getenv("THVM_NO_FP8_IN_TILE");
+    on = !(e != NULL && e[0] == '1');
+    known = 1;
+  }
+  return on;
+}
+
 
 static int rmt_collect_conv2d_info(KernelEntry const *ke,
                                    TileConv2DInfo *out) {
@@ -246,15 +263,16 @@ static int rmt_epilogue_tc_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K)
   return 1;
 }
 
-// q8 weight-only-quantized matmul detection for dispatch-grid sizing.
-// The B operand is a CAST(int8 -> bf16) over the INT8 weight buffer
-// (TMatMul[x, Transpose[Cast[w_int8, bf16]]]); uop_dag_classify_matmul_shape
-// declines it (its uniform-dtype gate rejects the int8 vs bf16 mismatch, so
+// Weight-only-quantized matmul detection for dispatch-grid sizing.
+// The B operand is a CAST(int8/fp8 -> bf16) over the quantized weight buffer
+// (TMatMul[x, Transpose[Cast[w_q, bf16]]]); uop_dag_classify_matmul_shape
+// declines it (its uniform-dtype gate rejects the int8/fp8 vs bf16 mismatch, so
 // BLAS / MPS never run it) -- but the renderer's rmu_emit_matmul_tc DOES emit
-// the tiled simdgroup kernel for it (b_is_int8 char->bfloat staging), so the
-// grid must still be sized to the tile.  Reads M/N/K off the (OPT-wrapped)
-// matmul shape via the same recognisers the renderer uses.  Returns 1 +
-// M/N/K when the store_root is an int8-B matmul; 0 otherwise.
+// the tiled simdgroup kernel for it (b_is_int8 char->bfloat staging, or
+// b_is_fp8 uchar->decode->bfloat staging), so the grid must still be sized to
+// the tile.  Reads M/N/K off the (OPT-wrapped) matmul shape via the same
+// recognisers the renderer uses.  Returns 1 + M/N/K when the store_root is a
+// quantized-B (int8 or fp8) matmul; 0 otherwise.
 static int rmt_q8_matmul_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K) {
   if (sroot == 0 || term_tag(sroot) != TAG_UOP
       || term_ext(sroot) != UOP_STORE) return 0;
@@ -275,7 +293,13 @@ static int rmt_q8_matmul_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K) {
   if (term_tag(idx) != TAG_UOP || term_ext(idx) != UOP_INDEX_E) return 0;
   Term buf = heap_read(term_val(idx) + 0);
   if (term_tag(buf) != TAG_UOP || term_ext(buf) != UOP_BUFFER) return 0;
-  if (uop_buffer_dtype(buf) != DT_INT8) return 0;
+  u32 bdt = uop_buffer_dtype(buf);
+  int is_fp8 = (bdt == DT_FP8E4M3 || bdt == DT_FP8E5M2);
+  if (bdt != DT_INT8 && !is_fp8) return 0;
+  // fp8 rides the tiled grid only when fp8-in-tile is enabled; with the opt-out
+  // the renderer declines fp8 (scalar path) so this must too, or the tiled grid
+  // would mis-size the scalar kernel's launch.
+  if (is_fp8 && !rmu_fp8_in_tile_enabled()) return 0;
   // Recover M/N (+ extents) and K from the recognisers (cast-aware).
   u32 m_axis, m_ext, n_axis, n_ext, k_ext = 0;
   if (!uop_matmul_mn_axes(sroot, &m_axis, &m_ext, &n_axis, &n_ext)) return 0;

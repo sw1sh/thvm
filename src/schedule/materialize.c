@@ -18,6 +18,17 @@
 // one-shot host gather re-runs off the live source on every replay.
 fn int  jit_is_capturing(void);
 fn void jit_capture_record_gather(u32 src_tid, u32 dst_buf);
+// Capture-time recycle pool (the JIT memory planner's capture side; see the
+// pool block in jit/capture.c).  push parks a dead captured intermediate for
+// same-size reuse; pop adopts one for a captured kernel-output alloc; drain
+// forgets survivors at each pass end (mirror of mem_plan_drain_freelist's
+// pull-back).  All three are cheap no-ops when no capture is active.
+fn int  jit_caprecycle_push(Backend *b, u32 buf_id);
+fn u32  jit_caprecycle_pop(Backend *b, u64 nbytes);
+fn void jit_caprecycle_drain(void);
+// Two-phase capture (THVM_JIT_TWO_PHASE): recording keeps eager lifetime
+// rules, so capture-time free suppressions must not engage on that path.
+fn int  jit_capture_two_phase_active(void);
 
 #define BOUNDARY_ORDER_CAP 16384
 static u64  BOUNDARY_ORDER[BOUNDARY_ORDER_CAP];
@@ -691,7 +702,13 @@ fn void materialized_loc_clear(void) {
 // capture).  result_tid is never freed (defensive: it is the matmul output,
 // not a cast transient, but guard anyway).
 fn void thvm_free_fp8_transients(u32 result_tid) {
-  if (jit_is_capturing()) { FP8_TRANSIENT_LEN = 0; return; }
+  // Two-phase capture: the transients die eagerly (the cast kernel that
+  // produced each is a recorded dispatch, so the finalize planner assigns its
+  // replay a planned slot); only the pin path defers to the capture pins.
+  if (jit_is_capturing() && !jit_capture_two_phase_active()) {
+    FP8_TRANSIENT_LEN = 0;
+    return;
+  }
   for (u32 i = 0; i < FP8_TRANSIENT_LEN; i++) {
     u32 tid  = FP8_TRANSIENT_TIDS[i];
     u64 kloc = FP8_TRANSIENT_KLOCS[i];
@@ -1326,6 +1343,41 @@ static void mem_plan_reset(void) { MEM_PLAN_LEN = 0; }
 // read.  Drain at end-of-pass so the planner's free-list scope stays
 // strictly per-pass; within-pass reuse (alloc-then-pop within the same
 // emit loop) still works.
+// THVM_MEMPLAN_DEBUG: per-pass outcome counters for the dead-buffer push
+// (printed at mem_plan_drain_freelist) PLUS record-site admission counters --
+// a boundary only enters MEM_PLAN when last_use>0 AND consumer_count==1, so
+// when a real graph's intermediates never recycle, the rec_* counters say
+// which admission gate rejected them.  Dumpable mid-pass from the ceiling
+// death path (mem_plan_debug_dump) since an OOM'd emit never reaches drain.
+static u64 MEM_PLAN_DBG_SKIP_SINK = 0, MEM_PLAN_DBG_SKIP_NOTDEAD = 0,
+           MEM_PLAN_DBG_SKIP_REFC = 0, MEM_PLAN_DBG_PARKED = 0,
+           MEM_PLAN_DBG_PUSHED = 0;
+static u64 MEM_PLAN_DBG_REC_OK = 0, MEM_PLAN_DBG_REC_SINK = 0,
+           MEM_PLAN_DBG_REC_MULTI = 0;
+static int mem_plan_debug_enabled(void) {
+  static int known = 0, on = 0;
+  if (!known) { on = getenv("THVM_MEMPLAN_DEBUG") != NULL; known = 1; }
+  return on;
+}
+fn void mem_plan_debug_dump(char const *tag) {
+  if (!mem_plan_debug_enabled()) return;
+  fprintf(stderr,
+    "[mem_plan %s] entries=%u rec_ok=%llu rec_sink=%llu rec_multi=%llu | "
+    "sink=%llu notdead=%llu refc=%llu parked=%llu freelist=%llu "
+    "capturing=%d backend=%d\n",
+    tag, MEM_PLAN_LEN,
+    (unsigned long long)MEM_PLAN_DBG_REC_OK,
+    (unsigned long long)MEM_PLAN_DBG_REC_SINK,
+    (unsigned long long)MEM_PLAN_DBG_REC_MULTI,
+    (unsigned long long)MEM_PLAN_DBG_SKIP_SINK,
+    (unsigned long long)MEM_PLAN_DBG_SKIP_NOTDEAD,
+    (unsigned long long)MEM_PLAN_DBG_SKIP_REFC,
+    (unsigned long long)MEM_PLAN_DBG_PARKED,
+    (unsigned long long)MEM_PLAN_DBG_PUSHED,
+    jit_is_capturing(),
+    CURRENT_BACKEND != NULL ? (int)CURRENT_BACKEND->id : -1);
+}
+
 static void mem_plan_drain_freelist(void) {
   for (u32 i = 0; i < MEM_PLAN_LEN; i++) {
     MemPlanEntry *e = &MEM_PLAN[i];
@@ -1338,6 +1390,18 @@ static void mem_plan_drain_freelist(void) {
     if (b == NULL || b->buf_freelist_remove == NULL) continue;
     if (!mem_plan_backend_enabled(b))     continue;
     b->buf_freelist_remove(e->buf_id);
+  }
+  // Mirror the pull-back for capture-recycle pool survivors: an entry not
+  // adopted within this pass is forgotten (stays pinned + allocated for the
+  // replay), so the next pass's allocs can't adopt a buf whose TenDesc the
+  // fixpoint chain rule may still reference.
+  jit_caprecycle_drain();
+  if (mem_plan_debug_enabled()
+      && (MEM_PLAN_LEN > 0 || MEM_PLAN_DBG_REC_SINK + MEM_PLAN_DBG_REC_MULTI > 0)) {
+    mem_plan_debug_dump("drain");
+    MEM_PLAN_DBG_SKIP_SINK = MEM_PLAN_DBG_SKIP_NOTDEAD = 0;
+    MEM_PLAN_DBG_SKIP_REFC = MEM_PLAN_DBG_PARKED = MEM_PLAN_DBG_PUSHED = 0;
+    MEM_PLAN_DBG_REC_OK = MEM_PLAN_DBG_REC_SINK = MEM_PLAN_DBG_REC_MULTI = 0;
   }
 }
 
@@ -1383,6 +1447,18 @@ static void mem_plan_push_shared_dead(u32 buf_id, Backend *b) {
   if (b->buf_freelist_push == NULL)          return;
   if (!mem_plan_backend_enabled(b))          return;
   if (b->buf_refcount != NULL && b->buf_refcount(buf_id) > 1) return;
+  // Captured (jit_pinned) buffer: the freelist push below is refused; park on
+  // the capture-recycle pool instead (see mem_plan_push_dead).
+  if (jit_caprecycle_push(b, buf_id)) {
+    if (MEM_PLAN_LEN >= MEM_PLAN_CAP)        return;
+    MemPlanEntry *pe = &MEM_PLAN[MEM_PLAN_LEN++];
+    pe->buf_id         = buf_id;
+    pe->last_use_depth = MEM_PLAN_LAST_USE_NEVER;
+    pe->backend        = b;
+    pe->pushed         = 1;
+    pe->shared_free    = 1;
+    return;
+  }
   b->buf_freelist_push(buf_id);
   if (MEM_PLAN_LEN >= MEM_PLAN_CAP)          return;
   MemPlanEntry *e = &MEM_PLAN[MEM_PLAN_LEN++];
@@ -1394,6 +1470,7 @@ static void mem_plan_push_shared_dead(u32 buf_id, Backend *b) {
 }
 
 static void mem_plan_push_dead(u32 current_depth) {
+  int dbg = mem_plan_debug_enabled();
   for (u32 i = 0; i < MEM_PLAN_LEN; i++) {
     MemPlanEntry *e = &MEM_PLAN[i];
     if (e->pushed)                              continue;
@@ -1409,8 +1486,8 @@ static void mem_plan_push_dead(u32 current_depth) {
     // opt-step realize call).  CPU was unaffected because the TLSF arena
     // planner skips sinks via its arena-plannability gate, but the
     // legacy freelist push path here applied to ALL backends.
-    if (e->last_use_depth == 0)                 continue;
-    if (e->last_use_depth >= current_depth)     continue;
+    if (e->last_use_depth == 0)                 { if (dbg) MEM_PLAN_DBG_SKIP_SINK++; continue; }
+    if (e->last_use_depth >= current_depth)     { if (dbg) MEM_PLAN_DBG_SKIP_NOTDEAD++; continue; }
     if (e->buf_id == 0)                         continue;
     Backend *b = e->backend;
     if (b == NULL || b->buf_freelist_push == NULL || !mem_plan_backend_enabled(b)) {
@@ -1422,6 +1499,18 @@ static void mem_plan_push_dead(u32 current_depth) {
     // bytes from the alias too, so skip -- the post-realize preserve
     // walk + rollback releases these via the refcount-driven path.
     if (b->buf_refcount != NULL && b->buf_refcount(e->buf_id) > 1) {
+      if (dbg) MEM_PLAN_DBG_SKIP_REFC++;
+      e->pushed = 1;
+      continue;
+    }
+    // Under an active JIT capture the buffer is jit_pinned (record-time
+    // retain), so the backend freelist push below is a refused no-op and the
+    // whole capture would accumulate every intermediate (~8.4GB for the 128px
+    // Krea DiT).  Park it on the capture-recycle pool instead: the next
+    // same-size captured output alloc adopts it, recording the reuse in the
+    // stream (the JIT memory planner, tinygrad engine/jit.py:72).
+    if (jit_caprecycle_push(b, e->buf_id)) {
+      if (dbg) MEM_PLAN_DBG_PARKED++;
       e->pushed = 1;
       continue;
     }
@@ -1429,6 +1518,7 @@ static void mem_plan_push_dead(u32 current_depth) {
     // storage; cpu_buf_freelist_push self-guards (owns_data check), so
     // an unconditional push here is safe for both backends.
     b->buf_freelist_push(e->buf_id);
+    if (dbg) MEM_PLAN_DBG_PUSHED++;
     e->pushed = 1;
   }
 }
@@ -6126,6 +6216,18 @@ static Term emit_kernel_for_boundary(u32 bi) {
   }
   u32 out_tid = (op_backend == CURRENT_BACKEND)
                   ? arena_tensor_alloc(bi, out_shape, out_dtype) : 0;
+  // Capture-recycle adoption (the JIT memory planner's pop side): under an
+  // active capture, a dead same-size captured intermediate parked by
+  // mem_plan_push_dead is adopted for this output instead of growing the
+  // pinned set -- the freelist recycle's captured twin (its push was refused
+  // by the jit_pin).  Pop is a no-op when no capture is active.
+  if (out_tid == 0) {
+    u32 rbid = jit_caprecycle_pop(
+        op_backend, dtype_storage_bytes(out_dtype, (u64)shape_numel(out_shape)));
+    if (rbid != 0) {
+      out_tid = tensor_alloc_adopt(op_backend, out_shape, out_dtype, rbid);
+    }
+  }
   if (out_tid == 0) {
     out_tid = tensor_alloc(op_backend, out_shape, out_dtype);
     if (out_tid != 0 && op_backend == &CPU_BACKEND) ARENA_ALLOCS_LEGACY++;
@@ -6535,6 +6637,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // reader, not pinned to the end.
   if (BOUNDARY_LAST_USE[idx] > 0
       && BUFFERIZE_NODES[idx].consumer_count == 1) {
+    if (mem_plan_debug_enabled()) MEM_PLAN_DBG_REC_OK++;
     if (xpass_is_shared(boundary_loc)) {
       mem_plan_record(TENS[out_tid].buf_id, MEM_PLAN_LAST_USE_NEVER,
                       CURRENT_BACKEND);
@@ -6543,6 +6646,9 @@ static Term emit_kernel_for_boundary(u32 bi) {
       mem_plan_record(TENS[out_tid].buf_id, BOUNDARY_LAST_USE[idx],
                       CURRENT_BACKEND);
     }
+  } else if (mem_plan_debug_enabled()) {
+    if (BOUNDARY_LAST_USE[idx] == 0) MEM_PLAN_DBG_REC_SINK++;
+    else                             MEM_PLAN_DBG_REC_MULTI++;
   }
 
   if (getenv("THVM_DUMP_KERNEL_SHAPE")) {

@@ -26,6 +26,7 @@ Backend CUDA_BACKEND = {
   .buf_refcount        = cuda_buf_refcount,
   .buf_freelist_push   = cuda_buf_freelist_push,
   .buf_freelist_remove = cuda_buf_freelist_remove,
+  .buf_zero            = cuda_buf_zero,
   .buf_storage_root    = cuda_buf_storage_root,
   .buf_addr            = cuda_buf_addr,
   .dispatch_begin  = NULL,

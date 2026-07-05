@@ -642,6 +642,18 @@ static int bufferize_is_scalar_preserving_epilogue(u64 loc, u64 reduce_loc) {
 // Iterates until either the boundary fits under cap or no eligible
 // child remains.
 static int bufferize_metal_tile_fanin_cap_enabled(void) {
+#ifdef THVM_HAS_CUDA
+  // Opt-in on CUDA (THVM_CUDA_FANIN_CAP=1): splitting wide fan-ins is a
+  // perf/pressure knob there, NOT a correctness requirement -- the renderer
+  // declares up to KERNEL_LIFT_MAX_INPUT inputs (RMU_BUF_MAX covers
+  // output + 64).  The always-on experiment regressed the Krea gen with an
+  // async CUDA_ERROR_ILLEGAL_ADDRESS from a split boundary, so it stays
+  // off until the split is hardened for CUDA shapes.
+  if (CUDA_READY) {
+    char const *ce = getenv("THVM_CUDA_FANIN_CAP");
+    return ce != NULL && ce[0] == '1';
+  }
+#endif
   char const *tile = getenv("THVM_TILE");
   return thvm_dev_name_is(getenv("DEV"), "metal")
       && tile != NULL && tile[0] == '1';
@@ -1352,6 +1364,97 @@ static int bufferize_node_is_maxpool_mask_norm(u64 loc, u8 op) {
 // True iff: info is a CAST/BITCAST, its source dtype is fp8, AND its value
 // reaches a matmul MUL through pure movement/cast hops (the weight read of
 // TMatMul[x, Transpose[Cast[w_fp8, bf16]]]).
+// True iff the matmul whose REDUCE sits at `reduce_loc` would take the tiled
+// tensor-core path (rmu_emit_matmul_tc) with an fp8 B staged in-tile: Metal
+// target, a non-batched 2-D GEMM with M/N/K all divisible by 8 (the tile
+// granularity), and the tile picker accepts the shape.  Used to keep the
+// fp8->bf16 weight CAST lazy for such matmuls (the tile decodes fp8 directly;
+// no bf16 transient).  At classify time the STORE value is a BARE REDUCE (the
+// OPT_TC wrap is applied later, at render), so the recognisers read it plain.
+//
+// DEFAULT ON (THVM_FP8_IN_TILE_LAZY=0 opts out to the transient path).  Now
+// that uop_dag_classify_matmul_shape accepts the fp8 weight (dag_scan.c), the
+// lazy fp8->bf16 cast keeps the matmul on the hand_opts KOP_TC path -- it
+// stays 2-range, recognise_tc stamps OPT(TC), and rmu_emit_matmul_tc's b_is_fp8
+// branch decodes the fp8 weight in-kernel at TC rate (~9.6 ms, bit-identical to
+// the transient path).  Keeping the cast lazy means NO bf16 transient is
+// materialized -- the ~24 GB of fp8->bf16 weight transients that OOM'd the
+// single-realize Krea capture never exist.  A shape the tiled path declines
+// (ragged M/N/K, collapsed-unit, non-Metal) still realizes the transient below.
+// Eligibility accept/decline census (THVM_FP8_ELIG_DBG / dumped at ceiling
+// trip via thvm_fp8_elig_dump).  Diagnoses "the transient came back in the real
+// gen": each DECLINE reason names which pre-lift shape the recovery missed.
+static u64 FP8_ELIG_ACCEPT      = 0;   // eligible -> lazy in-tile (no transient)
+static u64 FP8_ELIG_DECL_NAXES  = 0;   // reduce n_axes != 1
+static u64 FP8_ELIG_DECL_NOTMUL = 0;   // reduce src not MUL
+static u64 FP8_ELIG_DECL_NOTEXP = 0;   // MUL operand 0 not a bare EXPAND
+static u64 FP8_ELIG_DECL_NDIM   = 0;   // EXPAND ndim != 3 (reshapes/bias EXPAND)
+static u64 FP8_ELIG_DECL_RAGGED = 0;   // M/N/K not all %8
+static u64 FP8_ELIG_DECL_PICK   = 0;   // tile picker declined
+static u32 FP8_ELIG_LAST_NDIM   = 0;   // last-seen EXPAND ndim (for a decline)
+static u32 FP8_ELIG_LAST_OP     = 0;   // last-seen non-EXPAND operand op
+
+void thvm_fp8_elig_dump(void) {
+  fprintf(stderr,
+    "[fp8elig] ACCEPT(lazy)=%llu | DECLINE(transient): naxes=%llu notmul=%llu "
+    "notexpand=%llu(lastop=%u) ndim!=3=%llu(lastndim=%u) ragged=%llu pick=%llu\n",
+    (unsigned long long)FP8_ELIG_ACCEPT, (unsigned long long)FP8_ELIG_DECL_NAXES,
+    (unsigned long long)FP8_ELIG_DECL_NOTMUL,
+    (unsigned long long)FP8_ELIG_DECL_NOTEXP, FP8_ELIG_LAST_OP,
+    (unsigned long long)FP8_ELIG_DECL_NDIM, FP8_ELIG_LAST_NDIM,
+    (unsigned long long)FP8_ELIG_DECL_RAGGED, (unsigned long long)FP8_ELIG_DECL_PICK);
+}
+
+static int bufferize_fp8_matmul_tiled_eligible(u64 reduce_loc) {
+  if (CURRENT_BACKEND != &METAL_BACKEND) return 0;
+  if (!rmu_fp8_in_tile_enabled()) return 0;
+  {
+    static int known = 0, on = 1;
+    if (!known) {
+      char const *e = getenv("THVM_FP8_IN_TILE_LAZY");
+      on = !(e != NULL && e[0] == '0');   // default ON; =0 reverts to transient
+      known = 1;
+    }
+    if (!on) return 0;
+  }
+  // Recover M/N/K from the matmul REDUCE.  The STORE sink is not registered as
+  // a consumer in the bufferize CMAP, so a consumer walk to it finds nothing;
+  // and at bufferize time (pre-lift) the operands are EXPANDs to the matmul
+  // iteration space, not INDEX_Es.  The MUL is over the {M,N,K} broadcast space
+  // and the REDUCE contracts K; the EXPAND target dims ARE that space, and the
+  // (positional) reduce axis selects K -- the remaining two dims are M and N.
+  Term reduce = term_new(0, TAG_UOP, UOP_REDUCE, reduce_loc);
+  if (uop_reduce_n_axes(reduce) != 1) { FP8_ELIG_DECL_NAXES++; return 0; }
+  u32 red_axis = uop_reduce_axis(reduce, 0);
+  Term mul = uop_reduce_src(reduce);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) {
+    FP8_ELIG_DECL_NOTMUL++; return 0;
+  }
+  Term opnd = heap_read(term_val(mul) + 0);
+  if (term_tag(opnd) != TAG_UOP || term_ext(opnd) != UOP_EXPAND) {
+    FP8_ELIG_LAST_OP = (term_tag(opnd) == TAG_UOP) ? term_ext(opnd) : 999;
+    FP8_ELIG_DECL_NOTEXP++; return 0;
+  }
+  u32 ndim = (u32)term_val(heap_read(term_val(opnd) + 1));
+  if (ndim != 3 || red_axis >= ndim) {   // batched/collapsed: transient
+    FP8_ELIG_LAST_NDIM = ndim; FP8_ELIG_DECL_NDIM++; return 0;
+  }
+  u32 dims[3];
+  for (u32 d = 0; d < 3; d++) dims[d] = (u32)term_val(heap_read(term_val(opnd) + 2 + d));
+  u32 k_ext = dims[red_axis];
+  u32 mn[2], mni = 0;
+  for (u32 d = 0; d < 3; d++) if (d != red_axis) mn[mni++] = dims[d];
+  u32 m_ext = mn[0], n_ext = mn[1];
+  if (m_ext == 0 || n_ext == 0 || k_ext == 0) { FP8_ELIG_DECL_RAGGED++; return 0; }
+  if ((m_ext % 8u) != 0 || (n_ext % 8u) != 0 || (k_ext % 8u) != 0) {
+    FP8_ELIG_DECL_RAGGED++; return 0;
+  }
+  RmuTcTile tile;
+  if (rmu_tc_pick_tile(m_ext, n_ext, k_ext, 0u, &tile)) { FP8_ELIG_ACCEPT++; return 1; }
+  FP8_ELIG_DECL_PICK++;
+  return 0;
+}
+
 static int bufferize_fp8_cast_feeds_matmul(UOpInfo const *info) {
   static int known = 0, enabled = 1;
   if (!known) {
@@ -1391,8 +1494,20 @@ static int bufferize_fp8_cast_feeds_matmul(UOpInfo const *info) {
         for (u32 m = 0; m < mnc; m++) {
           u32 midx = bufferize_info_find(mcons[m]);
           if (midx != 0xFFFFFFFFu && BUFFERIZE_NODES[midx].op == UOP_REDUCE
-              && bufferize_uop_is_matmul(mcons[m]))
+              && bufferize_uop_is_matmul(mcons[m])) {
+            // The fp8 weight feeds a matmul.  On Metal, if that matmul is
+            // tiled-tensor-core eligible, the tiled kernel decodes the fp8
+            // weight ONCE into the shared-memory B-tile (rmu_emit_matmul_tc's
+            // b_is_fp8 staging), reused across the tile's M rows -- so there is
+            // no M-fold decode redundancy and NO reason to spend a bf16
+            // transient (which is exactly the resident weight-transient the
+            // cold JIT capture was pinning).  Keep the CAST lazy so the tile
+            // reads fp8 directly.  Only the non-tiled fallback (CPU/CUDA, or a
+            // shape the tiled path declines) still realizes the transient to
+            // avoid the scalar per-element M-fold decode.
+            if (bufferize_fp8_matmul_tiled_eligible(mcons[m])) return 0;
             return 1;
+          }
         }
         continue;
       }

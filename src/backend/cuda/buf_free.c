@@ -16,7 +16,19 @@ fn void cuda_buf_free(u32 buf_id) {
   if (b->dptr != 0 && b->owns_data) {
     extern u64 CUDA_MEM_LIVE;
     if (CUDA_MEM_LIVE >= b->nbytes) CUDA_MEM_LIVE -= b->nbytes; else CUDA_MEM_LIVE = 0;
-    cuMemFree(b->dptr);
+    // STREAM-ORDERED free: a plain cuMemFree can release storage while
+    // launches still queued on the (legacy) stream read or write it -- the
+    // async CUDA_ERROR_ILLEGAL_ADDRESS that killed the Krea 256px gen once
+    // the slow 64-input fusion kernels deepened the launch pipeline (the
+    // per-launch-sync THVM_CUDA_SYNC=1 run completes cleanly, proving the
+    // race).  Metal orders frees behind the GPU via its deferred-decref +
+    // drain machinery; the CUDA analog is cuMemFreeAsync on the legacy
+    // stream (0), which queues the release AFTER all prior default-stream
+    // work touching the allocation.  Fallback to the synchronous free on
+    // drivers without stream-ordered memory (pre-11.2).
+    if (cuMemFreeAsync(b->dptr, 0) != CUDA_SUCCESS) {
+      cuMemFree(b->dptr);
+    }
   }
   b->dptr          = 0;
   b->nbytes        = 0;

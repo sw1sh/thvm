@@ -10,8 +10,17 @@
 // over-preserving until the next thvm_init / thvm_free is
 // safe; dropping a real pin is not.  Linear-scan unpin keeps
 // the implementation trivial; a hash table would be premature.
-
-#define EXTERN_PINNED_TERMS_CAP 2048
+//
+// Raised 2048 -> 65536: a cold JIT capture of the Krea DiT holds a WL TTerm
+// wrapper per cached weight (~500) PLUS per realized velocity-net intermediate
+// (~800), well past 2048.  Beyond the old cap extern_pin_term SILENTLY DROPPED
+// the excess, so mark_gc_preserve never reached those buffers -- the
+// capture-recycle mark-park sweep then parked a still-live weight/intermediate
+// and the replay read a recycled buffer (wrong image).  The capture-sweep's
+// mark_heap_rooted_preserve overlay now backstops correctness regardless of
+// this cap, but an uncapped pin table keeps every other preserve path (Cheney
+// re-root, fwd_reclaim) exact too.  65536 Terms = 512 KB static, negligible.
+#define EXTERN_PINNED_TERMS_CAP 65536
 
 static Term EXTERN_PINNED_TERMS    [EXTERN_PINNED_TERMS_CAP];
 static u32  EXTERN_PINNED_TERMS_LEN = 0;

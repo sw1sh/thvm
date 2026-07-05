@@ -68,8 +68,17 @@ static int cpu_premat_chained_input(KernelEntry *ke, u32 slot,
   if (dtype_is_packed(td->dtype)) return 0;      // packed nibbles: out of scope
   u32 esz = dtype_itemsize(td->dtype);
   if (esz == 0) return 0;
-  u32 src_buf = (td->buf_id != 0 && td->buf_id < CPU_BUFS_NEXT) ? td->buf_id : 0;
-  if (src_buf == 0) src_buf = in_buf_ids[slot];
+  // Byte source: the DISPATCH-PROVIDED buffer id, not the TenDesc's live
+  // buf_id.  At eager fire they agree; at JIT replay in_buf_ids[slot] is the
+  // substituted buffer (input_replace / the two-phase planner's slot), while
+  // td->buf_id still names the capture-time buffer -- freed under two-phase
+  // recording, so reading it replays stale bytes.  td supplies only the
+  // stride/offset METADATA for the gather, which persists on the KernelEntry.
+  u32 src_buf = in_buf_ids[slot];
+  if (src_buf == 0 || src_buf >= CPU_BUFS_NEXT
+      || CPU_BUFS[src_buf].data == NULL) {
+    src_buf = (td->buf_id != 0 && td->buf_id < CPU_BUFS_NEXT) ? td->buf_id : 0;
+  }
   if (src_buf == 0 || src_buf >= CPU_BUFS_NEXT) return 0;
   if (CPU_BUFS[src_buf].data == NULL) return 0;
   u32 numel = td->view.numel;

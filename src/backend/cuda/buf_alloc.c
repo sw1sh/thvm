@@ -17,6 +17,13 @@ fn u64 cuda_buf_peak_bytes(void) { return CUDA_MEM_PEAK; }
 fn u64 cuda_buf_live_bytes(void) { return CUDA_MEM_LIVE; }
 fn void cuda_buf_peak_reset(void) { CUDA_MEM_PEAK = CUDA_MEM_LIVE; }
 
+// Forward decl into jit/capture.c (included after this file in the unity
+// build).  Two-phase capture invalidates a re-issued buf id's logical-map
+// binding at every id-issuing site.  On CUDA the freelist mints a FRESH slot
+// id (donor swap), so this is a uniformity formality like the CPU's; it
+// early-outs when no two-phase map is live.
+fn void jit_twophase_note_alloc(Backend *b, u32 buf_id);
+
 fn u32 cuda_buf_alloc(u64 nbytes) {
   if (!CUDA_READY) {
     fprintf(stderr, "cuda_buf_alloc: backend not initialised\n");
@@ -43,6 +50,7 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
               (unsigned long long)CUDA_BUFS[recycled].nbytes,
               (void*)CUDA_BUFS[recycled].dptr);
     }
+    jit_twophase_note_alloc(&CUDA_BACKEND, recycled);
     return recycled;
   }
 
@@ -74,7 +82,22 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
     fprintf(stderr, "[alloc] req=%llu -> fresh buf_id=%u dptr=%p\n",
             (unsigned long long)nbytes, id, (void*)dptr);
   }
+  jit_twophase_note_alloc(&CUDA_BACKEND, id);
   return id;
+}
+
+// Zero a buffer's full extent on-device (Backend.buf_zero).  The JIT replay
+// calls this before a planned/recycled slot's producer fires so a
+// partial-write kernel sees fresh-alloc semantics (cuda_buf_alloc's
+// cuMemsetD8 zero).  Async on CUDA_CUR_STREAM -- same pattern as
+// cuda_buf_copy's cuMemcpyDtoDAsync -- so during a cuGraph stream capture the
+// memset is RECORDED as a graph node (warm graph launches re-zero the slot);
+// on the NULL stream it matches the plain sync memset ordering.
+fn void cuda_buf_zero(u32 buf_id) {
+  if (!CUDA_READY || buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return;
+  CudaBuf *b = &CUDA_BUFS[buf_id];
+  if (b->dptr == 0 || b->nbytes == 0) return;
+  cuMemsetD8Async(b->dptr, 0, (size_t)b->nbytes, CUDA_CUR_STREAM);
 }
 
 // Borrow an existing device pointer for the lifetime of the returned

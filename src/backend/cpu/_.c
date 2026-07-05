@@ -23,6 +23,7 @@ Backend CPU_BACKEND = {
   .buf_refcount        = cpu_buf_refcount,
   .buf_freelist_push   = cpu_buf_freelist_push,
   .buf_freelist_remove = cpu_buf_freelist_remove,
+  .buf_zero            = cpu_buf_zero,
   .dispatch_begin  = NULL,
   .dispatch_flush  = NULL,
   .dispatch_end    = NULL,
