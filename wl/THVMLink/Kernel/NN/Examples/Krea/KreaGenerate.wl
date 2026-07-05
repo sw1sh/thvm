@@ -105,11 +105,68 @@ krTransformerLoader[wt_, dev_] := Module[{cache = <||>},
    is (0, h, w).  Returns a {Stxt+Simg, 3} host list. *)
 krPositionIds[stxt_, gridH_, gridW_] := Join[ConstantArray[{0, 0, 0}, stxt], Flatten[Table[{0, h, w}, {h, 0, gridH - 1}, {w, 0, gridW - 1}], 1]]
 
+(* === Krea captioner prompt template ==============================
+   Krea 2's conditioner (krea-ai/krea-2 encoder.py Qwen3VLConditioner) does NOT
+   use the generic Qwen chat template: the prompt is wrapped in a FIXED
+   image-captioner template the model was trained against --
+     <|im_start|>system\n<describe-instruction><|im_end|>\n<|im_start|>user\n
+     {prompt} ... right-pad to (512 + 34 - 5) ... <|im_end|>\n<|im_start|>assistant\n
+   -- the encoder runs the full 546-token sequence, and the tapped hidden states
+   AND the mask are then sliced [34:] (dropping the fixed 34-token prefix), giving
+   the {512, L, txtDim} conditioning.  Conditioning with any other token stream
+   (e.g. the FLUX chat template) produces semantically empty "generic texture"
+   generations. *)
+
+$kreaTxtPrefixIdx = 34;   (* encoder.py prompt_template_encode_start_idx *)
+$kreaTxtSuffixLen = 5;    (* encoder.py prompt_template_encode_suffix_start_idx *)
+
+$kreaSysText = "Describe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:";
+
+(* prefix ++ user prompt, BPE'd with the special tokens atomic (matching the HF
+   fast tokenizer's split-on-specials): the "user\n" segment concatenates with
+   the prompt exactly as HF tokenizes prefix+prompt as one string. *)
+kreaPromptIds[prompt_String, td_] := With[{sp = td["special"]},
+    Join[
+        {sp["im_start"]}, qwEncodeText["system\n" <> $kreaSysText, td], {sp["im_end"]},
+        qwEncodeText["\n", td],
+        {sp["im_start"]}, qwEncodeText["user\n" <> prompt, td]
+    ]
+]
+
+kreaSuffixIds[td_] := With[{sp = td["special"]},
+    Join[{sp["im_end"]}, qwEncodeText["\n", td], {sp["im_start"]}, qwEncodeText["assistant\n", td]]
+]
+
+(* the Krea tokenize: body (prefix+prompt) truncated/right-padded to
+   seqLen + prefixIdx - suffixLen (= 541 for 512), then the assistant suffix
+   appended UNPADDED and mask-1 (encoder.py concatenates suffix ids after the
+   padded body).  Returns {ids, mask} of length seqLen + prefixIdx (546). *)
+kreaTokenize[prompt_String, td_, seqLen_ : 512] := Module[{body, sfx, bodyLen, pad, n, ids, mask},
+    body = kreaPromptIds[prompt, td];
+    sfx = kreaSuffixIds[td];
+    bodyLen = seqLen + $kreaTxtPrefixIdx - $kreaTxtSuffixLen;
+    pad = td["special"]["pad"];
+    n = Length[body];
+    {ids, mask} = If[ n >= bodyLen,
+        {Take[body, bodyLen], ConstantArray[1, bodyLen]}
+        ,
+        {Join[body, ConstantArray[pad, bodyLen - n]], Join[ConstantArray[1, n], ConstantArray[0, bodyLen - n]]}
+    ];
+    {Join[ids, sfx], Join[mask, ConstantArray[1, Length[sfx]]]}
+]
+
 (* === component registration ======================================
    Register the Krea transformer + VAE (and the Qwen3 text encoder) into the
    shared $tisComponents registry.  Done at load time so tisPipeline can resolve
-   the Krea spec's class names.  The shared scheduler / Qwen2 tokenizer are
-   registered in Pipeline.wl. *)
+   the Krea spec's class names.  The shared scheduler is registered in
+   Pipeline.wl; the Qwen2Tokenizer entry is OVERRIDDEN here with the Krea
+   captioner template (tisPipeline currently drives only Krea; a FLUX migration
+   will need per-model template selection). *)
+
+krRegisterTokenizer[] := tisRegisterComponent["Qwen2Tokenizer", <|
+    "loader" -> Function[{compSpec, dev}, qwTokenizerData[compSpec["dir"]]],
+    "forward" -> Function[{built, prompt, seqLen}, kreaTokenize[prompt, built, seqLen]]
+|>]
 
 (* transformer: the loader builds the FP8 weight lookup + the config; the forward
    returns a velocity step closure (zPacked, sigma) |-> velocity, closing over
@@ -122,7 +179,10 @@ krRegisterTransformer[] := tisRegisterComponent["Krea2Transformer2DModel", <|
         Module[{wf = built["wf"], cfg = built["cfg"], dev = built["dev"], stxt, simg, pos, mask, pre},
             stxt = Dimensions[textEmb][[1]];  simg = run["simg"];
             pos = krPositionIds[stxt, run["gridH"], run["gridW"]];
-            mask = attMask;
+            (* attMask covers the FULL captioner sequence (prefix + 512); the DiT
+               conditions on the prefix-sliced states, so slice the mask the same
+               way (encoder.py: mask[:, prefix_idx:]). *)
+            mask = Drop[attMask, $kreaTxtPrefixIdx];
             (* precompute the FIXED ctx/rope/addMask ONCE (host->device builds kept
                OUTSIDE the capture); the JIT-capturable velNet is then pure device
                ops over (img, t, tvec).  The sampler TJit-captures velNet once and
@@ -176,7 +236,10 @@ krQwenEncoderImpl[] := <|
         ]
     ],
     "forward" -> Function[{built, ids, attMask},
-        krQwenEncodeStack[ids, attMask, built["wf"], built["cfg"]]
+        (* run the FULL captioner sequence (512 + 34-token prefix), then drop the
+           prefix rows from the tapped states (encoder.py: hiddens[:, prefix_idx:])
+           -> {512, L, txtDim}. *)
+        krQwenEncodeStack[ids, attMask, built["wf"], built["cfg"]][[$kreaTxtPrefixIdx + 1 ;;]]
     ]
 |>
 
@@ -237,6 +300,7 @@ krEnsureRegistered[] := (
     krRegisterTransformer[];
     krRegisterVae[];
     krRegisterEncoder[];
+    krRegisterTokenizer[];
     krEnsureRegistered[] = Null
 )
 
