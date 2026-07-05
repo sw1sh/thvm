@@ -389,7 +389,7 @@ $atpVarObj = <||>;
    that name. *)
 atpHeadFor[label_, name_] := If[ KeyExistsQ[$atpSymObj, label],
     ReleaseHold @ $atpSymObj[label],
-    If[StringMatchQ[name, NumberString], ToExpression[name], Symbol[name]]]
+    If[ StringMatchQ[name, NumberString], Interpreter["Number"][name], Symbol[name]]]
 
 (* Decode a raw packed ATP Term back to a WL expression.  CTR ->
    head[children...] (arity 0 -> bare symbol); FVR -> the bound
