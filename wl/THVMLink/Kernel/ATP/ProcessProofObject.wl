@@ -712,6 +712,56 @@ liftToProofObject[assoc_Association] := Block[{goalRaw, axiomsRaw, dsRaw, goalLi
             prfList = DeleteCases[prfList, (k_ -> _) /; MemberQ[trueSLs, k]];
             prfList = prfList /. relink
         ]];
+    (* Fold instantiation-only SubstitutionLemmas: Waldmeister emits a
+       single-parent `rewrite : eq : N` protocol step that merely
+       INSTANTIATES lemma N (no position is rewritten -- e.g. the
+       penultimate goal-closure step grounds the general lemma's free
+       variables to the goal skolems).  Such a step lands here as a
+       SubstitutionLemma whose Proof carries ONLY a Construct (no
+       Input) and whose Statement is a substitution instance of that
+       Construct's Statement.  FindEquationalProof folds these: its
+       consumer (the Conclusion) cites the GENERAL lemma directly while
+       keeping the instantiated Rule.  The consumers here were already
+       augmented against the instance statement (their Rule is
+       recorded), so re-pointing their references onto the instance's
+       own Construct reproduces FEQ's exact shape. *)
+    Module[{prfAssoc, strip, instSLs, aliasOf, resolveInst, relinkInst},
+        prfAssoc = Association[prfList];
+        strip[HoldForm[x_]] := x;
+        strip[x_] := x;
+        instSLs = Select[
+            Keys[prfAssoc],
+            Function[k,
+                First[k] === "SubstitutionLemma" &&
+                Sort @ Keys @ Lookup[prfAssoc[k], "Proof", <||>] === {"Construct"} &&
+                With[{ck = prfAssoc[k]["Proof"]["Construct"]},
+                    KeyExistsQ[prfAssoc, ck] &&
+                    MatchQ[
+                        strip @ prfAssoc[k]["Statement"],
+                        withVariablePatterns[strip @ prfAssoc[ck]["Statement"], varSyms]
+                    ]
+                ]
+            ]];
+        If[ instSLs =!= {},
+            aliasOf = Association[(# -> prfAssoc[#]["Proof"]["Construct"]) & /@ instSLs];
+            resolveInst[k_] := FixedPoint[Lookup[aliasOf, Key[#], #] &, k, 32];
+            relinkInst = (# -> resolveInst[#]) & /@ instSLs;
+            prfList = DeleteCases[prfList, (k_ -> _) /; MemberQ[instSLs, k]];
+            prfList = prfList /. relinkInst;
+            (* Renumber each construct type contiguously (in proof
+               order) so the fold leaves no key gaps -- FEQ numbers its
+               constructs contiguously. *)
+            Module[{keys = First /@ prfList, keyMap},
+                keyMap = Flatten @ Map[
+                    Function[type,
+                        MapIndexed[
+                            #1 -> {type, First[#2]} &,
+                            Select[keys, First[#] === type &]]],
+                    DeleteDuplicates[First /@ keys]];
+                keyMap = Select[keyMap, First[#] =!= Last[#] &];
+                If[ keyMap =!= {}, prfList = prfList /. keyMap]
+            ]
+        ]];
     ProofObject[
         "EquationalLogic",
         (* A multi-goal lift carries the List of goal statements --
