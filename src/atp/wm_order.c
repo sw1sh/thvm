@@ -2585,10 +2585,13 @@ static u32 wmo_tops_enum(AtpWmOrder *w, u8 tree, Term query_sub,
   // wmo_tops_rank dump -- same envs, same line format, so the native
   // former's DFS arrival order can be diffed leaf-by-leaf against the
   // WM trace / python trie mirror.  Env-gated, zero output when unset.
-  static int arrdump = -1, arrdump_rule = -1;
+  static int arrdump = -1, arrdump_rule = -1, arrdump_all = -1;
   if (arrdump < 0) {
     arrdump      = getenv("THVM_WMO_ARRDUMP") != NULL;
     arrdump_rule = getenv("THVM_WMO_ARRDUMP_RULE") != NULL;
+    // THVM_WMO_ARRDUMP_ALL: bypass the per-query dedup so every occurrence
+    // in [lo,hi] prints -- lets a specific activation be isolated by nreg.
+    arrdump_all  = getenv("THVM_WMO_ARRDUMP_ALL") != NULL;
   }
   if ((tree == 1u || arrdump_rule) && arrdump) {
     const char *lo_s = getenv("THVM_WMO_ARRDUMP_LO");
@@ -2600,7 +2603,7 @@ static u32 wmo_tops_enum(AtpWmOrder *w, u8 tree, Term query_sub,
     for (u32 c = 0; c < qn; c++)
       h = h * 131u + (q[c].is_var ? (9000u + q[c].sym) : q[c].sym);
     u32 bucket = h & 8191u;
-    if (w->n_reg >= lo && w->n_reg <= hi && !dumped[bucket]) {
+    if (w->n_reg >= lo && w->n_reg <= hi && (arrdump_all || !dumped[bucket])) {
       dumped[bucket] = 1u;
       fprintf(stderr, "WMOARR nreg=%u tree=%u qn=%u n_out=%u q=[", w->n_reg,
               tree, qn, d.n_out);
