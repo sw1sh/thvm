@@ -2228,6 +2228,80 @@ int main(void) {
     }
   }
 
+  TEST_BEGIN("atp/wm-emission-order-compose-keeps-uid-identity");
+  {
+    // Root cause of the BooleanAxioms twin-leaf loss (OrAssociativity
+    // @300, fixed 2026-07-05): the wmo mirror keys every fact by its
+    // BIRTH UID (r_uid); r_trace ids live in a DIFFERENT id space
+    // (proof-trace indices).  The RHS compose (right-reduction)
+    // repoints r_trace[i] to a fresh TRACE_ORIENT entry; a former
+    // atp_wmo_rename_trace(s, r_trace[i], new_t) walked the uid-keyed
+    // chains/registry with that TRACE-space id and, on numeric
+    // collision, hijacked a LIVE rule's mirror identity
+    // (r_trace[slot10] == 51 collided with uid 51 = WM rule 45 =
+    // or(x,and(x,y)) -> x, whose partner-CP family then never formed).
+    // WM ground truth: RMRechtsInterred right-reduces the rule IN
+    // PLACE (Interreduktion.c:343-374) -- no DSBaum touch, no identity
+    // change -- so the compose must leave the mirror alone.
+    //
+    // Construct the collision deterministically: victim V has uid 51;
+    // composable rule X carries r_trace == 51; a new rule reduces X's
+    // RHS so the compose fires.  Pin: V's mirror registration stays
+    // intact and no chain entry carries a non-uid id.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_emission_order(s, 1u);
+
+    // Victim V (slot 0, uid 51): i(i(a)) -> a.
+    s->lhs[0] = mk_i(mk_i(mk_a()));
+    s->rhs[0] = mk_a();
+    s->r_orient[0] = 1u;
+    s->r_trace[0] = 300u;
+    s->r_uid[0]   = 51u;
+    s->n_rules = 1u;
+    atp_wmo_insert_fact(s, 0u);
+
+    // Composable X (slot 1): f(i(e), e) -> i(f(a, a)); r_trace 51
+    // numerically collides with V's uid.  Neither side is reducible
+    // by the new rule's LHS except the RHS subterm f(a, a).
+    s->lhs[1] = mk_f(mk_i(mk_e()), mk_e());
+    s->rhs[1] = mk_i(mk_f(mk_a(), mk_a()));
+    s->r_orient[1] = 1u;
+    s->r_trace[1] = 51u;               // the trace/uid collision
+    s->r_uid[1]   = 7u;
+    s->n_rules = 2u;
+    atp_wmo_insert_fact(s, 1u);
+
+    // New rule N: f(a, a) -> a fires the RHS compose on X.
+    AtpAddedRange added = thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()),
+                                                  mk_a());
+    CHECK_EQ(added.count, 1u);
+    u32 dropped = thvm_atp_interreduce(s, added);
+    CHECK_EQ(dropped, 0u);
+
+    // The compose fired: X's RHS is i(a) now, its r_trace moved on.
+    CHECK(kbo_eq(s->rhs[1], mk_i(mk_a())));
+    CHECK(s->r_trace[1] != 51u);
+
+    // THE PIN: V (uid 51) keeps its mirror identity -- its face is
+    // still registered and rankable in the rule tree...
+    AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+    u32 chain = 0u;
+    CHECK(wmo_face_leafrank(w, 0u, 51u, 0u, &chain) != 0xffffffffu);
+    // ...and every chain entry in BOTH trees carries a live uid (the
+    // hijack rewrote 51 into the fresh TRACE_ORIENT id, a value from
+    // the wrong id space).
+    u32 n_uid = s->r_uid[added.first];
+    for (u32 tr = 0; tr < 2u; tr++) {
+      for (WmoLeaf *l = w->tree[tr].ll_head; l != NULL; l = l->ll_next) {
+        for (u32 c = 0; c < l->n_chain; c++) {
+          u32 id = l->chain[c].trace;
+          CHECK(id == 51u || id == 7u || id == n_uid);
+        }
+      }
+    }
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/wm-emission-order-unorient-equation-leaflist-rank");
   {
     // The NORMALIZE-redex selection (atp_unorient_step_indexed ->

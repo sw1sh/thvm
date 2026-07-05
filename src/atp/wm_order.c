@@ -210,9 +210,9 @@ typedef struct AtpWmOrder {
   // positions, so caching the N most-recent distinct queries' arrival lists
   // turns nearly every per-CP DFS into a skip (the old single entry caught
   // only an immediately-repeated query, ~58%).  tree_rev is bumped by every
-  // tree/chain mutation (wmo_register / atp_wmo_remove_trace /
-  // atp_wmo_rename_trace); each entry gates rev==tree_rev, so a mutation
-  // invalidates the whole cache -- byte-identical to recomputing.
+  // tree/chain mutation (wmo_register / atp_wmo_remove_trace); each entry
+  // gates rev==tree_rev, so a mutation invalidates the whole cache --
+  // byte-identical to recomputing.
   u64      tree_rev;          // ++ on every tree/chain mutation
   u8       no_rankcache;      // THVM_WMO_NO_RANKCACHE: disable the cache
   u32      rc_next;           // round-robin eviction cursor
@@ -233,7 +233,7 @@ typedef struct AtpWmOrder {
   } llr[WMO_LLR_N];
   // wmo_trace_dist_rhs memo: trace -> dist_rhs verdict (present or the
   // unregistered-default 0), validated per entry against tree_rev
-  // (bumped by every registry mutation -- register / rename / remove --
+  // (bumped by every registry mutation -- register / remove --
   // so a stale entry cannot survive one).  The linear registry scan sits
   // on the walk's per-fact and per-rank-query hot paths.
   // Shares no_rankcache as its disable switch.
@@ -1107,6 +1107,19 @@ static void wmo_tree_insert(WmoTree *t, const WmoCell *key, u32 key_len,
       // Hang the new leaf: drain the chain pendings (down to anc_base) via
       // the new key's suffix (:658, EintragUngueltig but bounded by the
       // ancestor frontier; the strict ancestors are AltesBlattPolieren's).
+      // NOTE (2026-07-05, measured): WM's split hang drains UNBOUNDED
+      // (Stapeluntergrenze = EintragUngueltig, DSBaumOperationen.c:680),
+      // popping strict-ancestor pendings into head-inserted new-leaf
+      // jumps.  Porting that here (untergrenze 0) was A/B-refuted: it
+      // reorders the initial-axiom CP batches of the split-heavy
+      // combinator/Ring trees (CombinatorAxioms BCKWToSKI c2 firstdiv
+      // 109->1, Ring family ~110, BooleanAxioms AndAssociativity
+      // 605-identity lost) because thvm's descent counters differ from
+      // WM's around the skipped leaf-found cell.  The BooleanAxioms @300
+      // twin order needs no split-hang change: with the WM-faithful
+      // IR-Links-before-FaktumEinfuegen registration order (_.c
+      // activation site) the new fact plain-hangs into the retired
+      // victim's slot and the MAIN-WALK hang emits the head jump.
       WmoLeaf *leaf = wmo_leaf_new(t, key, key_len, j, depth, last,
                                    trace, face);
       if (j < key_len) wmo_kid_set(last, &key[j], leaf, 1u);
@@ -1658,9 +1671,131 @@ static void atp_wmo_free(AtpWmOrder *w) {
   free(w);
 }
 
+// Env-gated (THVM_WMO_CHECK=1) full structural verifier, run after every
+// mirror mutation (register / remove).  Validates the invariants
+// the collapse machinery depends on -- every tree leaf's parent/hang/edge
+// cell agree, leaf-list membership equals tree membership, every chain
+// entry has a registry row and vice versa -- and aborts at the FIRST
+// violation, so a silent corruption is caught at its write site instead
+// of a later garbage read.
+#define WMO_CHK_MAX_LEAVES 8192u
+
+static u32 wmo_chk_node(WmoNode *n, u32 depth, WmoLeaf **out, u32 *n_out,
+                        const char *what, u8 tree) {
+  u32 bad = 0;
+  for (u32 k = 0; k < n->n_kids; k++) {
+    WmoKid *kid = &n->kids[k];
+    if (kid->is_leaf) {
+      WmoLeaf *l = (WmoLeaf *)kid->child;
+      if (l->parent != n) {
+        fprintf(stderr, "WMOCHK %s tree=%u leaf %p parent %p != node %p\n",
+                what, tree, (void *)l, (void *)l->parent, (void *)n);
+        bad++;
+      }
+      if (l->hang != depth) {
+        fprintf(stderr, "WMOCHK %s tree=%u leaf %p hang=%u != depth=%u\n",
+                what, tree, (void *)l, l->hang, depth);
+        bad++;
+      }
+      if (l->hang >= l->key_len ||
+          !wmo_cell_eq(&l->key[l->hang], &kid->sym)) {
+        fprintf(stderr, "WMOCHK %s tree=%u leaf %p edge cell mismatch\n",
+                what, tree, (void *)l);
+        bad++;
+      }
+      if (*n_out < WMO_CHK_MAX_LEAVES) out[(*n_out)++] = l;
+    } else {
+      WmoNode *c = (WmoNode *)kid->child;
+      if (c->parent != n) {
+        fprintf(stderr, "WMOCHK %s tree=%u node %p parent %p != %p\n",
+                what, tree, (void *)c, (void *)c->parent, (void *)n);
+        bad++;
+      }
+      bad += wmo_chk_node(c, depth + 1u, out, n_out, what, tree);
+    }
+  }
+  return bad;
+}
+
+static void wmo_check(AtpWmOrder *w, const char *what) {
+  static int on = -1;
+  if (on < 0) on = (getenv("THVM_WMO_CHECK") != NULL) ? 1 : 0;
+  if (!on) return;
+  static WmoLeaf *tl[WMO_CHK_MAX_LEAVES];
+  u32 bad = 0;
+  for (u8 t = 0; t < 2u; t++) {
+    u32 ntl = 0;
+    if (w->tree[t].root != NULL)
+      bad += wmo_chk_node(w->tree[t].root, 0u, tl, &ntl, what, t);
+    for (WmoLeaf *l = w->tree[t].ll_head; l != NULL; l = l->ll_next) {
+      u8 found = 0;
+      for (u32 k = 0; k < ntl; k++) if (tl[k] == l) { found = 1u; break; }
+      if (!found) {
+        fprintf(stderr, "WMOCHK %s tree=%u ll leaf %p (chain0=%u) DETACHED "
+                "from tree\n", what, t, (void *)l,
+                l->n_chain ? l->chain[0].trace : 0xffffffffu);
+        bad++;
+      }
+    }
+    for (u32 k = 0; k < ntl; k++) {
+      u8 found = 0;
+      for (WmoLeaf *l = w->tree[t].ll_head; l != NULL; l = l->ll_next)
+        if (l == tl[k]) { found = 1u; break; }
+      if (!found) {
+        fprintf(stderr, "WMOCHK %s tree=%u tree leaf %p (chain0=%u) NOT in "
+                "leaf list\n", what, t, (void *)tl[k],
+                tl[k]->n_chain ? tl[k]->chain[0].trace : 0xffffffffu);
+        bad++;
+      }
+      for (u32 c = 0; c < tl[k]->n_chain; c++) {
+        u8 reg = 0;
+        for (u32 r = 0; r < w->n_reg; r++) {
+          if (w->reg[r].trace == tl[k]->chain[c].trace &&
+              w->reg[r].tree == t && w->reg[r].face == tl[k]->chain[c].face) {
+            reg = 1u;
+            break;
+          }
+        }
+        if (!reg) {
+          fprintf(stderr, "WMOCHK %s tree=%u leaf %p chain[%u]=%u.%u has NO "
+                  "registry row (garbage?)\n", what, t, (void *)tl[k], c,
+                  tl[k]->chain[c].trace, (unsigned)tl[k]->chain[c].face);
+          bad++;
+        }
+      }
+    }
+    for (u32 r = 0; r < w->n_reg; r++) {
+      if (w->reg[r].tree != t) continue;
+      u8 found = 0;
+      for (u32 k = 0; k < ntl && !found; k++) {
+        for (u32 c = 0; c < tl[k]->n_chain; c++) {
+          if (tl[k]->chain[c].trace == w->reg[r].trace &&
+              tl[k]->chain[c].face == w->reg[r].face) { found = 1u; break; }
+        }
+      }
+      if (!found) {
+        fprintf(stderr, "WMOCHK %s tree=%u reg trace=%u face=%u LOST from "
+                "tree\n", what, t, w->reg[r].trace, (unsigned)w->reg[r].face);
+        bad++;
+      }
+    }
+  }
+  if (bad != 0u) {
+    fprintf(stderr, "WMOCHK %s FAILED (%u violations)\n", what, bad);
+    fflush(stderr);
+    abort();
+  }
+}
+
 static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
                          const WmoCell *cells, u32 n_cells, u32 depth,
                          u8 dist_rhs) {
+  {
+    static int ct = -1;
+    if (ct < 0) ct = (getenv("THVM_WMO_CT") != NULL) ? 1 : 0;
+    if (ct) fprintf(stderr, "WMOREG trace=%u tree=%u face=%u n_cells=%u\n",
+                    trace, tree, face, n_cells);
+  }
   wmo_tree_insert(&w->tree[tree], cells, n_cells, depth, trace, face,
                   w->polier_after);
   if (w->n_reg == w->cap_reg) {
@@ -1677,6 +1812,11 @@ static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
   r->n_cells = n_cells;
   w->tree_rev++;             // invalidate the wmo_tops_rank arrival memo
   wmo_maybe_treedump(w);
+  {
+    char lbl[64];
+    snprintf(lbl, sizeof lbl, "post-register trace=%u face=%u", trace, face);
+    wmo_check(w, lbl);
+  }
 }
 
 // Whether WM's distinguished (indexed) face for the fact with birth
@@ -1879,26 +2019,14 @@ static void atp_wmo_insert_fact(AtpState *s, u32 slot) {
   atp_wmo_insert_fact_ex(s, slot, 0u);
 }
 
-// In-place identity rename (RHS compose repoints r_trace to a fresh
-// TRACE_ORIENT entry while the fact keeps its tree position -- WM's
-// RMRechtsInterred modifies the rule in place, Interreduktion.c
-// :329-360).  Chains and registry follow the new id; leaf positions
-// unchanged.
-static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t) {
-  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
-  if (w == NULL || old_t == new_t) return;
-  for (u32 r = 0; r < w->n_reg; r++) {
-    if (w->reg[r].trace == old_t) w->reg[r].trace = new_t;
-  }
-  for (u32 t = 0; t < 2u; t++) {
-    for (WmoLeaf *l = w->tree[t].ll_head; l != NULL; l = l->ll_next) {
-      for (u32 c = 0; c < l->n_chain; c++) {
-        if (l->chain[c].trace == old_t) l->chain[c].trace = new_t;
-      }
-    }
-  }
-  w->tree_rev++;             // chain trace ids changed: invalidate the memo
-}
+// NOTE: there is deliberately NO identity-rename operation.  The mirror
+// keys every fact by its birth uid (r_uid, stable across slot compaction
+// AND across the RHS compose -- WM's RMRechtsInterred, Interreduktion.c
+// :329-360, right-reduces the rule in place without touching the
+// DSBaum).  A former atp_wmo_rename_trace here was called with r_trace
+// ids: renaming in TRACE space over uid-keyed chains hijacked any LIVE
+// uid the trace id numerically collided with (BooleanAxioms
+// OrAssociativity @300, uid 51).
 
 // WM IR-victim drain-order key for the fact with birth trace id `trace`,
 // captured BEFORE the victim is removed from the wmo tree.
@@ -2064,6 +2192,11 @@ static void atp_wmo_remove_trace(AtpState *s, u32 trace) {
       w->reg[r] = w->reg[w->n_reg - 1u];
       w->n_reg--;
       w->tree_rev++;         // invalidate the wmo_tops_rank arrival memo
+      {
+        char lbl[64];
+        snprintf(lbl, sizeof lbl, "post-remove trace=%u", trace);
+        wmo_check(w, lbl);
+      }
     } else {
       r++;
     }

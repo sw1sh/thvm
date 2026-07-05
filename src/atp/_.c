@@ -621,7 +621,6 @@ static void atp_wmo_remove_trace(AtpState *s, u32 trace);
 static u8   atp_wmo_dist_rhs_of(AtpState *s, u32 uid);
 static u32  atp_wmo_victim_drain_key(AtpState *s, u32 trace,
                                      u8 reduced_thvm_side);
-static void atp_wmo_rename_trace(AtpState *s, u32 old_t, u32 new_t);
 // Gleichungsbaum (equation-tree) leaf-list rank for the unorientable
 // equation with trace id `trace`, queried on the rewrite direction
 // `thvm_dir` (0 = match stored LHS, 1 = match stored RHS; the WM face is
@@ -5642,6 +5641,16 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
         // function-prefix pattern fires before a more-general
         // variable-prefix pattern that also matches the redex.  The
         // depth-ordered leaf list inverts that for competing positions.
+        //
+        // ID-SPACE NOTE (2026-07-05): r_trace[rule] is a TRACE id, but
+        // the wmo chains key on BIRTH UIDS (r_uid) -- this lookup has
+        // been an effective always-miss (slot-order fallback) since the
+        // mirror switched to uid keying, and the full gate battery
+        // (16/16 plain byte-identity + OA -auto prefix 8581) is pinned
+        // to that fallback.  Switching to s->r_uid[rule] ACTIVATES the
+        // dormant arrival ranking and changes normalize-redex choices;
+        // do that only with a fresh wmcli parity study, not as a
+        // drive-by (see project_atp_boolean_twin_leaf_miss).
         if (atp_wmo_eq_tops_rank(s, s->r_trace[rule], rl, sub, &ll, &ch)) {
           if (ll > 0x1fffu) ll = 0x1fffu;
           if (ch > 0xffu)   ch = 0xffu;
@@ -11451,7 +11460,8 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
     static int rt = -1;
     if (rt < 0) rt = (getenv("THVM_ATP_RULE_TRACE") != NULL) ? 1 : 0;
     if (rt) {
-      fprintf(stderr, "RULEADD slot=%u lhs=", s->n_rules);
+      fprintf(stderr, "RULEADD slot=%u uid=%u lhs=", s->n_rules,
+              s->next_rule_uid + 1u);
       atp_dbg_print_term(stderr, lhs);
       fprintf(stderr, " rhs=");
       atp_dbg_print_term(stderr, rhs);
@@ -12796,19 +12806,6 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     u32  t  = atp_trace_push(s, reason, chain_tail,
                              ATP_TRACE_NONE, rl, rr);
     s->r_trace[rid] = t;
-    // WM order mirror: the fact is now in R/E with its identity --
-    // register its tree faces (RE_RegelEinfuegen / GleichungEinfuegen).
-    // The WM-distinguished face is `selRec.lhs = KPLinks`: a genuine
-    // two-parent superposition lands KPLinks on thvm's stored RHS
-    // (dist_rhs=1, the default); a CP that re-derives an existing fact
-    // through a single parent keeps the natural left side on thvm's
-    // stored LHS (dist_rhs=0).  atp_wmo_eq_dist_rhs returns that flag
-    // from the selected CP's parents; insert_fact_ex's cp_derived arg
-    // carries dist_rhs directly (1 -> use stored RHS as distinguished).
-    if (s->use_emission_order) {
-      u8 dist_rhs = atp_wmo_eq_dist_rhs(s, src_trace);
-      atp_wmo_insert_fact_ex(s, rid, dist_rhs);
-    }
   }
 
 #ifdef ATP_CP_GROUND_JOIN
@@ -12825,6 +12822,41 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   if (g_atp_phase_enabled) g_atp_phase_us_interreduce += atp_now_us() - _ph_ir_t0;
   AtpAddedRange post = added;
   post.first = (dropped > post.first) ? 0 : (post.first - dropped);
+
+  // WM order mirror: register the new fact's tree faces
+  // (RE_RegelEinfuegen / GleichungEinfuegen) only NOW -- after the
+  // lhs-interreduction retires evicted their victims' faces.  WM's
+  // pipeline is IR_InterreduktionLinks THEN RE_FaktumEinfuegen THEN
+  // IR_InterreduktionRechts (Hauptkomponenten.c:311-313), so a new fact
+  // whose face shares a leaf-path with a victim plain-hangs into the
+  // just-vacated slot and its enclosing-subterm jump HEAD-inserts via
+  // the NeuesBlattEinhaengen pending pop (RumpfSprungeintragSetzen).
+  // Registering at activation (before the interreduce) instead SPLIT
+  // the still-live victim leaf, leaving the new leaf's jump spliced
+  // after the survivor -- ranked too late (BooleanAxioms
+  // OrAssociativity @300: WM rule 45 must plain-hang into retired rule
+  // 36's slot so its depth-2 jump heads the exit list ahead of twin 44;
+  // WMJUMP ground truth shows exactly one HEAD event, no AFTER splice).
+  // The interreduce phases themselves only EVICT victim faces and rank
+  // victims among themselves (drain keys) -- relative victim order is
+  // insensitive to the new fact's presence, matching WM's
+  // pre-FaktumEinfuegen state.  IR_InterreduktionRechts (the RHS
+  // compose) performs no mirror operation, so post-interreduce
+  // registration is WM-order equivalent.
+  //
+  // The WM-distinguished face is `selRec.lhs = KPLinks`: a genuine
+  // two-parent superposition lands KPLinks on thvm's stored RHS
+  // (dist_rhs=1, the default); a CP that re-derives an existing fact
+  // through a single parent keeps the natural left side on thvm's
+  // stored LHS (dist_rhs=0).  atp_wmo_eq_dist_rhs returns that flag
+  // from the selected CP's parents; insert_fact_ex's cp_derived arg
+  // carries dist_rhs directly (1 -> use stored RHS as distinguished).
+  if (s->use_emission_order) {
+    u8 dist_rhs = atp_wmo_eq_dist_rhs(s, src_trace);
+    for (u32 k = 0; k < post.count; k++) {
+      atp_wmo_insert_fact_ex(s, post.first + k, dist_rhs);
+    }
+  }
 
   // Auto-MaxWeight: refresh the bound against the now-current rule set
   // before this step's CPs are generated/pushed (the just-oriented rule
@@ -15692,9 +15724,19 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
           atp_trace_push(s, TRACE_SIMPLIFY, s->r_trace[i],
                          ATP_TRACE_NONE, old_lhs, r_reduced);
           s->rhs[i] = r_reduced;
-          if (s->use_emission_order) {
-            atp_wmo_rename_trace(s, s->r_trace[i], new_t);
-          }
+          // WM order mirror: NO update.  The mirror keys facts by birth
+          // uid (r_uid, stable across the RHS compose) and indexes the
+          // rule's LHS face only, so the in-place RHS edit leaves its
+          // tree identity untouched -- exactly WM's RMRechtsInterred
+          // (Interreduktion.c:329-360), which right-reduces the rule in
+          // place without touching the DSBaum.  A former
+          // atp_wmo_rename_trace(s, s->r_trace[i], new_t) here renamed
+          // in TRACE space over the uid-keyed chains: whenever
+          // r_trace[i] numerically collided with a LIVE rule's uid it
+          // hijacked that rule's mirror identity, silently dropping it
+          // from the CP-partner index (BooleanAxioms OrAssociativity
+          // @300: r_trace[slot10]=51 collided with uid 51 = WM rule 45,
+          // whose or(x,and(x,y)) CP family then never formed).
           s->r_trace[i] = new_t;
           s->n_right_reduced++;
           if (atp_rule_trace_on()) {
@@ -16013,11 +16055,10 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             atp_trace_push(s, TRACE_SIMPLIFY, s->r_trace[i],
                            ATP_TRACE_NONE, old_lhs, r_reduced);
             s->rhs[i]     = r_reduced;
-            // WM order mirror: the rule keeps its tree position; only
-            // its identity tag moves (RMRechtsInterred in-place modify).
-            if (s->use_emission_order) {
-              atp_wmo_rename_trace(s, s->r_trace[i], new_t);
-            }
+            // WM order mirror: NO update -- the mirror keys facts by
+            // birth uid (stable across the compose) and indexes the LHS
+            // face only; see the WM-path compose above for the trace-
+            // space rename hazard this used to carry.
             s->r_trace[i] = new_t;
             s->n_right_reduced++;
             if (atp_rule_trace_on()) {
@@ -17756,8 +17797,11 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
     if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[i]);
     if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[i]);
     // WM order mirror: the subsumed equation's faces leave the tree
-    // (RE_GleichungEntfernen via FinaleKillprozSubsumption).
-    if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_trace[i]);
+    // (RE_GleichungEntfernen via FinaleKillprozSubsumption).  Keyed by
+    // birth uid like every other remove site -- the mirror never sees
+    // trace-space ids (a former r_trace[i] here left the dead faces in
+    // the tree and, on numeric collision, evicted a live uid instead).
+    if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[i]);
     // The active E set changed: invalidate the IR-normalize cookie
     // and force the rule/unorient index rebuild (a revision delta
     // that exceeds the rule-count delta is never pure-append).
