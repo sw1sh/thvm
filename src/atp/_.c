@@ -21184,7 +21184,31 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
           const char *e = getenv("THVM_ATP_CORANK_DIST");
           cdist = (e != NULL && e[0] == '1') ? 1 : 0;
         }
-        if (cdist && o_arr != hits[h].arrival) {
+        // THVM_ATP_CORANK_MAX=1: EXPERIMENTAL, REFUTED, default OFF.
+        // Anchors a var-differ equation's CP-age pair at the LATER-arriving
+        // face (max) instead of the earlier (the historical min-anchor).
+        // It matched 3 ground-truth cases (OA 26388/24820, SKI @547) but
+        // REGRESSED SKI @269 (prefix 546->268): min-anchor is right there,
+        // max is wrong -- so the anchor is CASE-DEPENDENT, not min/max.
+        // Root: the true anchor is WM's DISTINGUISHED (indexed) face's
+        // arrival, but dist_rhs + the face bit do NOT encode it consistently
+        // (787 wants face1@8, uid18 wants face0@15 -- both dist_rhs=1,
+        // opposite bits).  Matching needs WM's canonical-direction choice for
+        // unorientable equations, not a face heuristic.  Kept opt-in as a
+        // documented negative.
+        static int cmax = -1;
+        if (cmax < 0) {
+          const char *e = getenv("THVM_ATP_CORANK_MAX");
+          cmax = (e != NULL && e[0] == '1') ? 1 : 0;
+        }
+        if (cmax && o_arr != hits[h].arrival) {
+          if (o_arr < hits[h].arrival) {
+            eff_ch[h] = raw_ch[h] * 2u;              // later face: anchor
+          } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+            eff_arr[h] = o_arr;                       // earlier face: follow later
+            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+          }
+        } else if (cdist && o_arr != hits[h].arrival) {
           if (hits[h].face == wmo_trace_dist_rhs(w, hits[h].trace)) {
             eff_ch[h] = raw_ch[h] * 2u;             // distinguished: anchor
           } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
