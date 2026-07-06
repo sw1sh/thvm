@@ -43,7 +43,7 @@ for ln in open(sys.argv[1], errors='ignore'):
         a, b = ln.strip().split('->'); auto.append(rc(parse_auto(a), parse_auto(b)))
 thvm = []
 for ln in sys.stdin:
-    mm = re.search(r'RULEADD slot=\d+ lhs=(.*) rhs=(.*)', ln)
+    mm = re.search(r'RULEADD slot=\d+ (?:uid=\d+ )?lhs=(.*) rhs=(.*)', ln)
     if mm: thvm.append(rc(parse_thvm(mm.group(1)), parse_thvm(mm.group(2))))
 n = min(len(auto), len(thvm))
 fd = next((k + 1 for k in range(n) if auto[k] != thvm[k]), -1)
