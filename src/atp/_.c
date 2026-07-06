@@ -19562,7 +19562,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // surface enables lazy via Method "LazyNormalize" -> True on a config
     // that also runs MNF, the gate routes around the front search's
     // direct-cell-reference Bus error.
-    if (s->use_lazy_normalize && !s->use_mnf) {
+    if (s->use_lazy_normalize) {   // MNF coupling removed (probe)
       // Lazy push = WM `KPBehandelt` (KPVerwaltung.c:439-467) under the
       // `lohntSichBehandlung` gate (:435-438, combined RAW size < 50).
       // BELOW the gate the CP is treated: doR-only full-R normalize
@@ -20921,7 +20921,7 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   u8  ft_considered = 0u;
   u32 vtot          = 0u;
   if (atp_ft_emit_on() && !_cptr_sw &&
-      !s->use_mnf && s->trace_pack &&
+      s->trace_pack &&   // MNF coupling removed (probe)
       !atp_kapur_on() &&
       !(s->use_no_overlap_below_skolem && s->n_skolem_labels != 0u) &&
       atp_cp_push_fuse_ok(s)) {
