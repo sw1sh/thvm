@@ -388,6 +388,17 @@ $atpRunProofFn := $atpRunProofFn = load[
         "Waldmeister"* presets).  TRI-STATE: -1 = Automatic (engine
         default: on-heap, or THVM_ATP_TRACE_PACK=1 env), 0 = off,
         1 = on *)
+     Integer,
+     (* args[57] = force-orient combinator definitions (Method
+        "ForceCombinatorOrient"; orient a KBO-unorientable, var-safe,
+        terminating combinator def S x y z = (xz)(yz) as a directed rule so
+        goal normalization applies it unconditionally, as WM -auto's
+        orient(7,x) does.  The redex is detected on EITHER side (the WL wire
+        stores it RHS-first vs the .pr's LHS-first), closing the BCKWToSKI
+        combinator -auto byte-parity gap.  Criterion excludes symmetric/nand
+        axioms + Y fixpoints, so non-combinator theorems are byte-identical.
+        -1 = off (default), 0 = off, 1 = on.  ON in the "Waldmeister"*
+        presets) *)
           Integer},
     "NumericArray"
 ]
@@ -2624,6 +2635,21 @@ atpTracePackOpt[o_Association] :=
     Switch[Lookup[o, "TracePack", Automatic],
         True, 1, False, 0, _, -1];
 
+(* "ForceCombinatorOrient" -> True | False | Automatic: force-orient a
+   KBO-unorientable, var-safe, terminating combinator definition
+   (S x y z = (xz)(yz)) as a directed rule so goal normalization applies it
+   unconditionally, matching WM -auto's orient(7,x).  The redex side is
+   detected on either LHS or RHS, so it fires through the WL wire's flipped
+   SpezNormierung orientation too -- closing the BCKWToSKI combinator -auto
+   byte-parity gap on the WL/FEQ path.  The src/atp/_.c criterion
+   (thvm_atp_orient_and_add) fires only on combinator definitions --
+   symmetric axioms (nand on both sides) and Y fixpoints are excluded -- so
+   non-combinator theorems are byte-identical.  ON in the "Waldmeister"*
+   presets. *)
+atpForceCombinatorOrientOpt[o_Association] :=
+    Switch[Lookup[o, "ForceCombinatorOrient", Automatic],
+        True, 1, False, 0, _, -1];
+
 (* True iff at least one axiom in `axParts` (atpAxiomParts triples
    {vars, lhs, rhs}) has a side whose variables are not a subset of
    the other side -- i.e. a free-on-one-side variable that the
@@ -2811,7 +2837,17 @@ $AtpPresetDefaults = <|
         "CPSide" -> True,
         "FlatSubsume" -> True,
         "FormationFifo" -> True,
-        "EsetDistdir" -> True|>,
+        "EsetDistdir" -> True,
+        (* WM -auto orients a variable-duplicating combinator definition
+           (S x y z = (xz)(yz)) as a directed rule (orient(7,x)) and applies
+           it unconditionally during goal normalization, closing BCKWToSKI__c2
+           et al. to byte-parity (thvm = wmcli -auto).  The src/atp/_.c
+           criterion detects the redex on either side (the WL wire flips the
+           .pr's redex-on-LHS to redex-on-RHS) and fires ONLY on combinator
+           definitions -- symmetric/nand axioms and Y fixpoints are excluded
+           -- so every non-combinator theorem is byte-identical (see
+           atpForceCombinatorOrientOpt). *)
+        "ForceCombinatorOrient" -> True|>,
     "WaldmeisterLazy" -> <|
         "Ordering" -> "LPO",
         "AutoPrecedence" -> True,
@@ -2998,7 +3034,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpBackwardGoalArgueOpt[o], atpCpSideOpt[o],
          atpFlatSubsumeOpt[o], atpCommSubsumeOpt[o],
          atpFormationFifoOpt[o], atpEsetDistdirOpt[o],
-         atpTracePackOpt[o]}
+         atpTracePackOpt[o], atpForceCombinatorOrientOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];

@@ -589,7 +589,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     useCriticalGoalInterreduce_, useCriticalGoalWeight_,
     useBackwardGoalArgue_, useCpWmSide_, useWmFlatSubsume_,
     useWmCommSubsume_, useWmFormationFifo_,
-    useWmEsetDistdir_, useTracePack_] := Block[{
+    useWmEsetDistdir_, useTracePack_, useForceCombinatorOrient_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr,
@@ -613,7 +613,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         useSueManagement, useCriticalGoalInterreduce,
         useCriticalGoalWeight, useBackwardGoalArgue, useCpWmSide,
         useWmFlatSubsume, useWmCommSubsume, useWmFormationFifo,
-        useWmEsetDistdir, useTracePack];
+        useWmEsetDistdir, useTracePack, useForceCombinatorOrient];
     If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
         Print["[split] C solve + trace-gen = ", $atpSplitT,
               " s  (WL reconstruction = total wall - this)"]];

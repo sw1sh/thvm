@@ -5722,6 +5722,19 @@ typedef struct {
   u8   use_lazy_normalize;
   u64  n_cps_push_normalized;     // diagnostics: full-R normalizes at push
 
+  // -auto combinator-definition force-orientation.  WM -auto orients a
+  // variable-duplicating combinator definition (S x y z = (xz)(yz)) as a
+  // DIRECTED rule and applies it unconditionally, which no reduction order
+  // can (multiset var-condition fails).  When set, thvm_atp_orient_and_add
+  // detects the combinator redex on either side (bench .pr keeps it on the
+  // LHS; the WL wire SpezNormierung flips it to the RHS) and force-orients
+  // redex -> reduct with r_orient=1 so goal normalization applies it.
+  // Default OFF (engine byte-identical); on for the WM -auto preset +
+  // THVM_ATP_FORCE_DEF_ORIENT env.  The criterion excludes symmetric axioms
+  // (nand on both sides) and self-referential fixpoints, so non-combinator
+  // theorems are untouched.
+  u8   use_force_def_orient;
+
   // FVI rule emission (Waldmeister `RechtsUnfreiErzeugen`,
   // RUndEVerwaltung.c:366-397): when an unorientable equation is added
   // to R, also push a grounded sibling that substitutes
@@ -6369,6 +6382,7 @@ fn void      thvm_atp_set_use_backward_goal_argue(AtpState *s, u8 on);
 fn void      thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_force_def_orient(AtpState *s, u8 on);
 // Waldmeister `RechtsUnfreiErzeugen` FVI rule emission
 // (RUndEVerwaltung.c:366-397).  Default OFF; ON makes
 // thvm_atp_orient_and_add emit a grounded sibling rule for every

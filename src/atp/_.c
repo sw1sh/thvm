@@ -11801,6 +11801,11 @@ fn void thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on) {
   s->use_lazy_normalize = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_use_force_def_orient(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_force_def_orient = on ? 1u : 0u;
+}
+
 // Waldmeister `RechtsUnfreiErzeugen` FVI rule emission (RUndEVerwaltung.c:
 // 366-397).  When ON, an unorientable equation also generates a
 // grounded sibling rule substituting ATP_RESERVED_LABEL_MIN_CONST for
@@ -21945,6 +21950,21 @@ static u8 atp_term_has_ctr(Term t, u32 ext) {
   return 0u;
 }
 
+// True iff `a` is a combinator REDEX relative to reduct `b`: descend a's
+// leftmost application spine to a 0-ary constructor (the combinator
+// constant) that is ABSENT from `b`, and `b` introduces no fresh variable
+// (vars(b) subset vars(a)).  The directed rule a -> b is then a terminating
+// combinator reduction.  Used by the force-orient site to detect the redex
+// side regardless of which way the equation is stored (bench .pr keeps the
+// redex on the LHS; the WL wire SpezNormierung flips it to the RHS).
+static u8 atp_comb_redex_side(Term a, Term b) {
+  Term head = a;
+  while (term_tag(head) == TAG_CTR && term_ctr_n(head) > 0u)
+    head = term_ctr_at(head, 0);
+  return (u8)(term_tag(head) == TAG_CTR && term_ctr_n(head) == 0u &&
+              gj_vars_subset(b, a) && !atp_term_has_ctr(b, term_ext(head)));
+}
+
 // Orient via KBO and push the rule(s).  See header comment for the
 // dispatch table.  Atomic: if the unfailing fallback can't fit both
 // orientations, neither is added.
@@ -21967,27 +21987,30 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
   //       op appears on BOTH sides) is untouched, keeping OA -auto 26387 etc.
   // Off by default; the combinator -auto bench path opts in.
   {
-    static int fdo = -1;
-    if (fdo < 0) fdo = getenv("THVM_ATP_FORCE_DEF_ORIENT") ? 1 : 0;
-    if (fdo) {
-      Term head = lhs;
-      while (term_tag(head) == TAG_CTR && term_ctr_n(head) > 0u)
-        head = term_ctr_at(head, 0);
-      if (term_tag(head) == TAG_CTR && term_ctr_n(head) == 0u &&
-          gj_vars_subset(rhs, lhs) &&
-          !atp_term_has_ctr(rhs, term_ext(head)) &&
-          atp_compare(s, lhs, rhs) == KBO_UN) {
+    static int fdo_env = -1;
+    if (fdo_env < 0) fdo_env = getenv("THVM_ATP_FORCE_DEF_ORIENT") ? 1 : 0;
+    if ((fdo_env || s->use_force_def_orient)
+        && atp_compare(s, lhs, rhs) == KBO_UN) {
+      // Orientation-agnostic: the combinator REDEX may be on either side --
+      // the bench/.pr stores `S x y z = (xz)(yz)` (redex LHS) but the WL
+      // wire SpezNormierung stores it flipped `(xz)(yz) = S x y z` (redex
+      // RHS).  Detect which side is the redex (leftmost-spine leading is a
+      // 0-ary constant ABSENT from the other side, var-safe) and orient
+      // redex -> reduct.
+      Term rl = 0, rr = 0;
+      if (atp_comb_redex_side(lhs, rhs)) { rl = lhs; rr = rhs; }
+      else if (atp_comb_redex_side(rhs, lhs)) { rl = rhs; rr = lhs; }
+      if (rl != 0) {
         u32 idx = s->n_rules;
-        if (atp_push_rule(s, lhs, rhs)) {
+        if (atp_push_rule(s, rl, rr)) {
           r.first = idx; r.count = 1;
-          // atp_push_rule recomputes r_orient via atp_compare, which is
-          // KBO_UN here -> it would store this as an unoriented E-equation
-          // (applied only on order-DECREASING ground instances).  But WM
-          // -auto orients the combinator definition as a DIRECTED rule
-          // ("orient(7,x)") and applies it unconditionally L->R -- so the
-          // heavy variable-duplicating S-redex reduces during goal
-          // normalization instead of being left unreduced (which forces
-          // thvm to over-complete).  Force the unconditional orientation.
+          // atp_push_rule recomputes r_orient via atp_compare (KBO_UN here)
+          // -> it would store this as an unoriented E-equation (applied only
+          // on order-DECREASING ground instances).  But WM -auto orients the
+          // combinator definition as a DIRECTED rule ("orient(7,x)") and
+          // applies it unconditionally -- so the heavy variable-duplicating
+          // S-redex reduces during goal normalization instead of being left
+          // unreduced (which forces thvm to over-complete).  Force it.
           if (!s->r_orient[idx]) { s->r_orient[idx] = 1u; s->n_unorient--; }
         }
         return r;

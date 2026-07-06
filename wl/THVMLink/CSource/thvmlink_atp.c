@@ -1063,6 +1063,18 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // axiom intake / trace push (nothing has run since init).
   mint trace_pack_in = MArgument_getInteger(args[56]);
   if (trace_pack_in >= 0) atp->trace_pack = (u8)(trace_pack_in != 0);
+  // Method -> {... "ForceCombinatorOrient" -> True}: force-orient a KBO-
+  // unorientable, var-safe, terminating combinator definition (the redex
+  // side is detected on either LHS or RHS -- the WL wire SpezNormierung
+  // flips the .pr's redex-on-LHS to redex-on-RHS) so goal normalization
+  // applies S x y z -> (xz)(yz) unconditionally, as WM -auto's orient(7,x)
+  // does.  Closes the BCKWToSKI combinator -auto byte-parity gap through the
+  // WL/FEQ path.  Criterion excludes symmetric (nand) axioms + Y fixpoints,
+  // so non-combinator theorems are byte-identical.  ON in the "Waldmeister"*
+  // presets.  args[57]; -1 = leave default (off), 0 = off, 1 = on.
+  mint force_orient_in = MArgument_getInteger(args[57]);
+  if (force_orient_in >= 0)
+    thvm_atp_set_use_force_def_orient(atp, (u8)(force_orient_in != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[18] gates it: the default (any
