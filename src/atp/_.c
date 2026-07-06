@@ -7353,8 +7353,18 @@ static u8 atp_wmo_eq_dist_rhs(const AtpState *s, u32 src_trace) {
 // the dropped rule's trace index so the proof DAG stays connected.
 static u8 atp_cp_perm_subsumed(Term lhs, Term rhs);
 
+// Consume-once flag: the next atp_enqueue_equation push is the WM raw
+// (untreated, size >= KPBehandeln gate) class -- bypasses the auto-
+// MaxWeight stash exactly like the overlap raw class.  Set only by
+// atp_wm_demote_drain; cleared on every enqueue.
+static u8 g_enq_raw_untreated = 0u;
+
 static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
                                u32 reason, u32 parent_a) {
+  // Consume the raw-untreated hint at ENTRY (the drop gates below early-
+  // return; a leaked hint would mis-tag an unrelated later push).
+  u8 enq_raw = g_enq_raw_untreated;
+  g_enq_raw_untreated = 0u;
   if (s == NULL) return 0;
   if (getenv("THVM_ATP_ENQ_DEBUG") != NULL) {
     fprintf(stderr,
@@ -7437,7 +7447,14 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   // only when s->use_initial_ultimate is set; off by default.
   u8 is_ultimate = (reason == TRACE_AXIOM && parent_a == ATP_TRACE_NONE)
                      ? 1u : 0u;
-  atp_cp_heap_push(s, lhs, rhs, trace_idx, is_ultimate, 0u);
+  // enq_raw: set only by the IR-victim drain for victims whose pair size
+  // >= the KPBehandeln gate, i.e. WM's raw class (KPV_IROpferBehandeln's
+  // lohntSichBehandlung skips treatment for them and recentCPinsert keeps
+  // them in the SUE heap at raw weight -- WM never defers a KilledRE
+  // victim, so the auto-MaxWeight stash must not swallow them here either;
+  // the OA -auto fact-1378 class: the w1=2141 rule-487 victim sat in
+  // thvm's stash while WM's FIFO popped it).
+  atp_cp_heap_push(s, lhs, rhs, trace_idx, is_ultimate, enq_raw);
   return 1;
 }
 
@@ -16548,7 +16565,9 @@ static void atp_wm_demote_drain(AtpState *s) {
     Term r      = s->irv_rhs[v];
     u32  parent = s->irv_parent[v];
     u32  trace_mark = s->n_trace;
+    u8   treated = 0u;
     if (atp_symbol_count(l) + atp_symbol_count(r) < WM_BEHANDELN_GATE) {
+      treated = 1u;
       if (s->record_norm_steps) {
         // Record the oriented-only renormalize as a NORM_STEP chain
         // off the dropped rule's trace so the TRACE_SIMPLIFY below
@@ -16574,6 +16593,13 @@ static void atp_wm_demote_drain(AtpState *s) {
         continue;
       }
     }
+    // A victim too big for the KPBehandeln gate is WM's RAW (untreated)
+    // class: KPV_IROpferBehandeln keeps it at its raw sides and weight in
+    // the SUE heap -- WM never defers a KilledRE victim, so mark the push
+    // raw so the auto-MaxWeight stash cannot swallow it (the OA -auto
+    // fact-1378 divergence: thvm stashed the heavy w1=2141/1937/2437
+    // victims that WM's FIFO lane later popped).
+    if (!treated) g_enq_raw_untreated = 1u;
     atp_add_equation_simplified(s, l, r, parent);
     s->n_wm_demote_requeued++;
     if (atp_rule_trace_on()) {
