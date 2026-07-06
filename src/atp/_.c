@@ -21347,7 +21347,32 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
             const char *e = getenv("THVM_ATP_CORANK_GATE");
             cgate = (e != NULL && e[0] == '0') ? 0 : 1;
           }
-          if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j) &&
+          // DEFAULT: NO pull-up at all -- every face-entry emits at its raw
+          // (leaf-arrival, chain) position.  RESOLVED ground truth from the
+          // instrumented `wmcli -auto` WM_CPFORMDUMP on the WolframAxioms
+          // OrAssociativity E19 activation batch (fact 1088): WM's twelve
+          // w1=224 eTT keepers emit in plain leaf order -- eq 787's x*x face
+          // at the arr=1 leaf (chain [787, 784] newest-first) and its
+          // (y.(y.y)).x face at the LAST leaf (arr=11), with NO pairing
+          // collapse; thvm's raw (arr, ch) match WM's leaf order exactly,
+          // and the min-anchor pull-up is what displaced the 787 keeper
+          // (thvm fact 1088 vs WM 1097).  WM has no face-pairing mechanism
+          // AT ALL (U1_KPsBildenZuGleichung emits one CP per tree entry in
+          // leaf-list + chain order; each equation simply has two directed
+          // entries) -- the whole min/max/dist/kbo anchor zoo above was an
+          // approximation of raw emission.  Measured with raw emission:
+          // OA -auto fact-prefix 1087 -> 1377, plain SKIToBCKW c1 prefix
+          // 3516 -> 6840+ (the @3517 frontier was collapse-caused too),
+          // combinator -auto 6/6 identical, test_atp 136264.
+          // THVM_ATP_CORANK_COLLAPSE=1 restores the historical min-anchor
+          // pull-up (with the @547 gate) as a bisection kill switch.
+          static int ccollapse = -1;
+          if (ccollapse < 0) {
+            const char *e = getenv("THVM_ATP_CORANK_COLLAPSE");
+            ccollapse = (e != NULL && e[0] == '1') ? 1 : 0;
+          }
+          if (ccollapse &&
+              !sw_corank_suppressed(c, p, p_len, sub, &hits[h], j) &&
               !(cgate && sw_corank_h2_gate_drops(c, p, p_len, sub,
                                                  &hits[h2], j))) {
             eff_arr[h] = o_arr;
