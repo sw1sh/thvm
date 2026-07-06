@@ -391,6 +391,21 @@ static void pr_die(const PrProblem *pr, const char *msg, const char *at) {
   exit(2);
 }
 
+// Mark every 0-ary constructor label occurring in `t` (an axiom side).  Used by
+// the -auto weight heuristic to tell "defined operator" constants (which appear
+// in the axioms and are consumed by their reductions) from goal-only skolems.
+static void pr_mark_axiom_consts(Term t, u8 *is_ax_const, u32 cap) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 n = term_ctr_n(t);
+  if (n == 0u) {
+    u32 e = term_ext(t);
+    if (e < cap) is_ax_const[e] = 1u;
+    return;
+  }
+  for (u32 i = 0; i < n; i++)
+    pr_mark_axiom_consts(term_ctr_at(t, i), is_ax_const, cap);
+}
+
 // Label of `name[0..n)`, or 0 when unknown.
 static u32 pr_sym_find(const PrProblem *pr, const char *s, size_t n) {
   for (u32 i = 0; i < pr->n_syms; i++) {
@@ -625,6 +640,10 @@ int main(int argc, char **argv) {
   static PrProblem prp;
   int pr_mode = (strstr(goal, ".pr") != NULL);
   if (pr_mode) pr_load_header(goal, &prp);
+  // Load the equation/goal terms up front too (they only need thvm_init, done
+  // above) so the -auto weight heuristic below can inspect the axioms before
+  // the KBO config is finalised.  The later pr_load_terms call is guarded.
+  if (pr_mode) pr_load_terms(&prp);
 
   // Reduction ordering.  Default KBO (one binary symbol `nand`,
   // weight 1, var weight 1 -- KBO weight is plain symbol count, so a
@@ -678,6 +697,29 @@ int main(int argc, char **argv) {
     cfg.var_weight = 1u;
     use_lpo  = 0;
     use_kbo0 = 0;
+    // -auto weight heuristic (ATP_BENCH_AUTO_WEIGHTS=1): mirror WM's Automodus,
+    // which self-selects the reduction order (PhilMarlow) and IGNORES the .pr's
+    // declared ORDERING -- so the .pr's uniform weight-1 is NOT what `wmcli
+    // -auto` uses.  A defined-operator constant (0-ary, occurring in an axiom,
+    // consumed by its own reduction e.g. W in (Wx)y=(xy)y) must weigh MORE than
+    // the goal-only skolems it duplicates, else the reduction runs uphill and
+    // the goal never normalises (thvm then saturates 549 CPs where wmcli -auto
+    // proves in 7).  Give such constants weight 2; skolems + application stay 1.
+    // Byte-identical to `wmcli -auto` on SKIToBCKW c1/c2/c3.  Off by default so
+    // the plain `-a 4` matrix track (which DOES use the .pr weights) is unchanged.
+    if (getenv("ATP_BENCH_AUTO_WEIGHTS") != NULL) {
+      u32 cap = prp.n_syms + PR_LABEL_BASE;
+      static u8 ax_const[PR_MAX_SYMS + PR_LABEL_BASE];
+      memset(ax_const, 0, sizeof ax_const);
+      for (u32 e = 0; e < prp.n_eqns; e++) {
+        pr_mark_axiom_consts(prp.eq_l[e], ax_const, cap);
+        pr_mark_axiom_consts(prp.eq_r[e], ax_const, cap);
+      }
+      const char *wv = getenv("ATP_BENCH_AUTO_WT");
+      u32 aw = (wv != NULL) ? (u32)atoi(wv) : 2u;
+      for (u32 lab = PR_LABEL_BASE; lab < cap; lab++)
+        if (ax_const[lab]) prp.weights[lab] = aw;
+    }
   }
 
   // cpgen mode: generate the critical pairs of the axiom with
@@ -1494,7 +1536,7 @@ int main(int argc, char **argv) {
   }
 
   if (pr_mode) {
-    pr_load_terms(&prp);
+    if (prp.n_eqns == 0u) pr_load_terms(&prp);
     for (u32 e = 0; e < prp.n_eqns; e++) {
       thvm_atp_add_equation(s, prp.eq_l[e], prp.eq_r[e]);
     }
