@@ -10967,9 +10967,28 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   {
     static int otr = -1;
     if (otr < 0) otr = getenv("THVM_ATP_ORPHAN_TRACE") != NULL ? 1 : 0;
-    if (otr && orphan)
-      fprintf(stderr, "ORPHDROP seq=%u pri=%u trace=%u\n",
-              s->cp_seq[j], s->cp_pri[j], s->cp_trace[j]);
+    if (otr && orphan) {
+      // Decompose the verdict: which parent trace id is marked dead, and
+      // whether the uid layer (not the trace layer) fired instead.
+      u32 pa = 0xffffffffu, pb = 0xffffffffu;
+      u8 pa_dead = 0u, pb_dead = 0u;
+      u32 ct = s->cp_trace[j];
+      if (ct != ATP_TRACE_NONE && ct < s->n_trace) {
+        Term te = s->trace[ct];
+        if (term_tag(te) == TAG_CTR && term_ext(te) == TRACE_CP) {
+          pa = (u32)term_val(term_ctr_at(te, 0));
+          pb = (u32)term_val(term_ctr_at(te, 1));
+          pa_dead = (u8)atp_trace_is_dead(s, pa);
+          pb_dead = (u8)atp_trace_is_dead(s, pb);
+        }
+      }
+      fprintf(stderr,
+              "ORPHDROP seq=%u pri=%u trace=%u pa=%u(dead=%u) pb=%u(dead=%u) "
+              "uid_orphan=%u\n",
+              s->cp_seq[j], s->cp_pri[j], s->cp_trace[j],
+              pa, pa_dead, pb, pb_dead,
+              (u8)atp_cp_uid_orphan(s, j));
+    }
   }
   if (!orphan) s->cp_select_count++;
 
