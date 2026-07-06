@@ -10961,6 +10961,16 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (!orphan && s->use_orphan_murder && atp_cp_uid_orphan(s, j)) {
     orphan = 1;
   }
+  // Gated forensic print for the silent at-pop orphan discard (the only
+  // queue-removal path with no CPSEL line): seq/pri identify the victim
+  // against CPFORM records.  Diagnostic only; zero cost unset.
+  {
+    static int otr = -1;
+    if (otr < 0) otr = getenv("THVM_ATP_ORPHAN_TRACE") != NULL ? 1 : 0;
+    if (otr && orphan)
+      fprintf(stderr, "ORPHDROP seq=%u pri=%u trace=%u\n",
+              s->cp_seq[j], s->cp_pri[j], s->cp_trace[j]);
+  }
   if (!orphan) s->cp_select_count++;
 
   // Unpack the chosen CP from its byte string into two fresh heap
