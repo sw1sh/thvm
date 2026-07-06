@@ -21935,12 +21935,65 @@ static int atp_lr_sortieren_rec(Term lhs, Term rhs) {
   return 0;
 }
 
+// True iff term `t` contains a constructor with external id `ext` anywhere.
+static u8 atp_term_has_ctr(Term t, u32 ext) {
+  if (term_tag(t) != TAG_CTR) return 0u;
+  if (term_ext(t) == ext) return 1u;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++)
+    if (atp_term_has_ctr(term_ctr_at(t, i), ext)) return 1u;
+  return 0u;
+}
+
 // Orient via KBO and push the rule(s).  See header comment for the
 // dispatch table.  Atomic: if the unfailing fallback can't fit both
 // orientations, neither is added.
 fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
   AtpAddedRange r = {0, 0, 0};
   if (s == NULL) return r;
+
+  // -auto combinator-definition force-orientation (THVM_ATP_FORCE_DEF_ORIENT=1).
+  // WM -auto orients a variable-DUPLICATING combinator definition
+  // ((Sx)y z = (xz)(yz), (Wx)y = (xy)y) as a directed rule L->R, which no
+  // reduction order can (the leading CONSTANT is order-incomparable with the
+  // duplicated VARIABLE, and the multiset var-condition fails).  It is
+  // equationally SOUND (lhs->rhs is a valid consequence; see
+  // thvm_atp_install_oriented_rule).  Restricted to a TERMINATING reduction:
+  //   (1) genuinely KBO-unorientable (never overrides an orientable eq),
+  //   (2) var-safe: vars(rhs) subset vars(lhs) (no fresh vars), and
+  //   (3) the LHS's leading operator constant is ABSENT from the RHS -- so a
+  //       self-referential fixpoint (Y = x(Yx)) stays an equation (rewriter
+  //       cannot loop) and a symmetric axiom (Wolfram/Sheffer/Boolean, whose
+  //       op appears on BOTH sides) is untouched, keeping OA -auto 26387 etc.
+  // Off by default; the combinator -auto bench path opts in.
+  {
+    static int fdo = -1;
+    if (fdo < 0) fdo = getenv("THVM_ATP_FORCE_DEF_ORIENT") ? 1 : 0;
+    if (fdo) {
+      Term head = lhs;
+      while (term_tag(head) == TAG_CTR && term_ctr_n(head) > 0u)
+        head = term_ctr_at(head, 0);
+      if (term_tag(head) == TAG_CTR && term_ctr_n(head) == 0u &&
+          gj_vars_subset(rhs, lhs) &&
+          !atp_term_has_ctr(rhs, term_ext(head)) &&
+          atp_compare(s, lhs, rhs) == KBO_UN) {
+        u32 idx = s->n_rules;
+        if (atp_push_rule(s, lhs, rhs)) {
+          r.first = idx; r.count = 1;
+          // atp_push_rule recomputes r_orient via atp_compare, which is
+          // KBO_UN here -> it would store this as an unoriented E-equation
+          // (applied only on order-DECREASING ground instances).  But WM
+          // -auto orients the combinator definition as a DIRECTED rule
+          // ("orient(7,x)") and applies it unconditionally L->R -- so the
+          // heavy variable-duplicating S-redex reduces during goal
+          // normalization instead of being left unreduced (which forces
+          // thvm to over-complete).  Force the unconditional orientation.
+          if (!s->r_orient[idx]) { s->r_orient[idx] = 1u; s->n_unorient--; }
+        }
+        return r;
+      }
+    }
+  }
 
   // Permutation-subsumption: drop AC-equal-at-top equations before
   // they become rules.  This catches the post-normalize simple-
