@@ -17806,6 +17806,28 @@ static u8 atp_wm_flat_subsumes_pair(Term p_lhs, Term p_rhs, Term lhs, Term rhs) 
 // content `a.((a.b).c) = a.(c.(b.a))` (and its sibling) that the 3-var-swap
 // `x.(y.z) = (z.y).x` subsumes only in eqn-12's reversed orientation -- WM keeps
 // both, so thvm now keeps them too, with NO content gate.
+// WM SS_TermpaarSubsummiertTermpaar, DIRECT tries only (no SubsumptionBody
+// descent): the two pattern orientations of the NEW equation against the
+// OLD equation's WM-distinguished stored direction.  Behavioral ground
+// truth (instrumented wmcli, WM_SUBDUMP/WM_SUBDUMP3):
+//   * Sheffer OrAssociativity: commutativity's E-add subsumes E1 and E4 --
+//     BOTH are DIRECT slot-semantics matches (the MO-ENTRY trace shows the
+//     top-level pair accepted within two EsFolgt calls, no descent).
+//   * Meredith OrAssociativity: 37M probe calls, ZERO subsumptions in the
+//     whole run -- in particular uid-139 `x0.(x1.x2)=(x2.x1).x0` must NOT
+//     subsume E11/E12 (whose descent-peeled pair WOULD match; thvm's
+//     descent-bearing variants over-killed them, orphaning the kept
+//     #178/#179 CPs -- the fact-178 divergence).
+// So the faithful E-set sweep test = direct-only.  The descent-bearing
+// variants above remain for the pop-time -ks "s" stage (SS_Termpaar-
+// SubsummiertVonGM), which is a different WM call site.
+static u8 atp_wm_flat_subsumes_pair_direct(Term p_lhs, Term p_rhs,
+                                           Term lhs, Term rhs) {
+  if (atp_wmflat_mo(p_lhs, p_rhs, lhs, rhs)) return 1;
+  if (atp_wmflat_mo(p_rhs, p_lhs, lhs, rhs)) return 1;
+  return 0;
+}
+
 static u8 atp_wm_flat_subsumes_pair_distdir(Term p_lhs, Term p_rhs,
                                             Term lhs, Term rhs) {
   for (;;) {
@@ -17957,13 +17979,38 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
   for (u32 i = 0; i < new_i; i++) {
     if (s->r_orient[i]) continue;   // E only (RE_forGleichungenRobust)
     if (s->r_dead[i]) continue;
-    u8 subsumed = s->use_flat_subsume
-        ? (s->use_eset_distdir
-               ? atp_wm_flat_subsumes_pair_distdir(new_lhs, new_rhs,
-                                                   s->lhs[i], s->rhs[i])
-               : atp_wm_flat_subsumes_pair(new_lhs, new_rhs,
-                                           s->lhs[i], s->rhs[i]))
-        : atp_eq_subsumes_pair(new_lhs, new_rhs, s->lhs[i], s->rhs[i]);
+    u8 subsumed;
+    if (s->use_flat_subsume) {
+      // WM GMSubsummierenMitGleichung: DIRECT slot-semantics tries only
+      // (see atp_wm_flat_subsumes_pair_direct), against the OLD equation's
+      // WM-DISTINGUISHED direction (TP_RichtungAusgezeichnet -- thvm's
+      // storage may be flipped; dist-correct via the wmo dist flag).
+      // THVM_ATP_ESET_DESCENT=1 restores the descent-bearing variants
+      // (the historical port) as a bisection kill switch.
+      static int eset_descent = -1;
+      if (eset_descent < 0)
+        eset_descent = getenv("THVM_ATP_ESET_DESCENT") != NULL ? 1 : 0;
+      if (eset_descent) {
+        subsumed = s->use_eset_distdir
+            ? atp_wm_flat_subsumes_pair_distdir(new_lhs, new_rhs,
+                                                s->lhs[i], s->rhs[i])
+            : atp_wm_flat_subsumes_pair(new_lhs, new_rhs,
+                                        s->lhs[i], s->rhs[i]);
+      } else {
+        // Both subject orientations (thvm's stored side order does not
+        // reliably encode WM's Ausgezeichnet direction); still DIRECT-only.
+        // The Meredith over-accept needed the DESCENT on top of the swap;
+        // direct tries reject it in both orientations (hand-verified),
+        // while OA's two genuine kills and Sheffer's E1/E4 all accept
+        // directly in one of the four tries.
+        subsumed = atp_wm_flat_subsumes_pair_direct(new_lhs, new_rhs,
+                                                    s->lhs[i], s->rhs[i])
+                || atp_wm_flat_subsumes_pair_direct(new_lhs, new_rhs,
+                                                    s->rhs[i], s->lhs[i]);
+      }
+    } else {
+      subsumed = atp_eq_subsumes_pair(new_lhs, new_rhs, s->lhs[i], s->rhs[i]);
+    }
     // Commutativity-aware widening (THVM_ATP_COMM_SUBSUME, DEFAULT OFF):
     // after the plain test, also drop the candidate when the new equation
     // subsumes it modulo ONE top-comm swap under a live commutativity axiom.
