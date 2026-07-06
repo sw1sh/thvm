@@ -21201,7 +21201,42 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
           const char *e = getenv("THVM_ATP_CORANK_MAX");
           cmax = (e != NULL && e[0] == '1') ? 1 : 0;
         }
-        if (cmax && o_arr != hits[h].arrival) {
+        // THVM_ATP_CORANK_DINV=1: anchor at the DISTINGUISHED (WM-indexed)
+        // face, using the INVERTED face-bit map (face != dist_rhs).  Ground
+        // truth: uid18's distinguished (WI)x side is at face!=dist_rhs; the
+        // CORANK_DIST (face==dist_rhs) map is inverted (it reproduced the
+        // min-anchor).  The distinguished face is neither always-earlier nor
+        // always-later -- it is WM's canonical/heavier side -- so this should
+        // unify @547 (distinguished later) and @269 (distinguished earlier).
+        static int cdinv = -1;
+        if (cdinv < 0) {
+          const char *e = getenv("THVM_ATP_CORANK_DINV");
+          cdinv = (e != NULL && e[0] == '1') ? 1 : 0;
+        }
+        static int cwmf = -1;
+        if (cwmf < 0) {
+          const char *e = getenv("THVM_ATP_CORANK_WMFACE");
+          cwmf = (e != NULL && e[0] == '1') ? 1 : 0;
+        }
+        if (cdinv && o_arr != hits[h].arrival) {
+          if (hits[h].face != wmo_trace_dist_rhs(w, hits[h].trace)) {
+            eff_ch[h] = raw_ch[h] * 2u;              // distinguished (inv map): anchor
+          } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+            eff_arr[h] = o_arr;
+            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+          }
+        } else if (cwmf && o_arr != hits[h].arrival) {
+          // hits[h].face IS the WM-face already (0 = distinguished, 1 =
+          // reverse; see atp_wmo_insert_fact_ex: lhs leaf carries dist_rhs,
+          // rhs carries !dist_rhs).  Anchor at the DISTINGUISHED (face==0)
+          // face -- per-equation earlier or later, unlike min/max/dinv.
+          if (hits[h].face == 0u) {
+            eff_ch[h] = raw_ch[h] * 2u;              // distinguished: anchor
+          } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+            eff_arr[h] = o_arr;                       // reverse: follow distinguished
+            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+          }
+        } else if (cmax && o_arr != hits[h].arrival) {
           if (o_arr < hits[h].arrival) {
             eff_ch[h] = raw_ch[h] * 2u;              // later face: anchor
           } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
