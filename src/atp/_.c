@@ -21218,7 +21218,32 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
           const char *e = getenv("THVM_ATP_CORANK_WMFACE");
           cwmf = (e != NULL && e[0] == '1') ? 1 : 0;
         }
-        if (cdinv && o_arr != hits[h].arrival) {
+        // THVM_ATP_CORANK_KBO=1: anchor the var-differ pair at the REDUCIBLE
+        // (KBO-larger = WM's indexed) face, computed directly from the
+        // equation sides via thvm_kbo -- NOT the dist_rhs heuristic.  WM
+        // indexes an equation at its reducible LHS; for uid18 (x*x=(WI)x)
+        // that is (WI)x (KBO-larger, @arr15) which is what SKI @547 needs.
+        // Unlike wmface (which trusts dist_rhs and mis-marks some equations,
+        // regressing @269), this recomputes the indexed face per equation.
+        static int ckbo = -1;
+        if (ckbo < 0) {
+          const char *e = getenv("THVM_ATP_CORANK_KBO");
+          ckbo = (e != NULL && e[0] == '1') ? 1 : 0;
+        }
+        if (ckbo && o_arr != hits[h].arrival) {
+          KboCmp kc = thvm_kbo(s->lhs[j], s->rhs[j], s->kbo);
+          u8 dr = wmo_trace_dist_rhs(w, hits[h].trace);
+          u8 want_rhs = (kc == KBO_GT) ? 0u
+                      : (kc == KBO_LT) ? 1u
+                      : dr;                       // incomparable: keep dist_rhs
+          u8 anchor_face = (want_rhs == dr) ? 0u : 1u;
+          if (hits[h].face == anchor_face) {
+            eff_ch[h] = raw_ch[h] * 2u;           // reducible (indexed): anchor
+          } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+            eff_arr[h] = o_arr;                    // other face: follow indexed
+            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+          }
+        } else if (cdinv && o_arr != hits[h].arrival) {
           if (hits[h].face != wmo_trace_dist_rhs(w, hits[h].trace)) {
             eff_ch[h] = raw_ch[h] * 2u;              // distinguished (inv map): anchor
           } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
