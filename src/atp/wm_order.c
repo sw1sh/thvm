@@ -469,7 +469,19 @@ static void wmo_rewire_cb(WmoNode *n, void *raw) {
       e->ziel = c->to;
       e->ziel_leaf = c->to_leaf;
       wmo_dup_note("REWIRE", n);
-      if (n == c->up && e != n->exits) {
+      // A rewired SINGLE-CELL const-leaf jump ([W] reaching a sibling leaf) is
+      // NOT the short jump to the re-hung sib -- it is a plain leaf edge whose
+      // prepend position already encodes WM's newest-first order among the
+      // sibling const-leaf jumps ([Y,W,S] at the depth-3 SKIToBCKW @1730 node).
+      // Re-heading it to the absolute front reorders that group (W jumps ahead
+      // of the newer Y), which WM never does.  Keep it in place; only re-head
+      // the genuine short (multi-cell / node-target) jumps.  Kill switch
+      // THVM_WMO_REHEAD_KEEP=0.
+      static int keepc = -1;
+      if (keepc < 0) keepc = (getenv("THVM_WMO_REHEAD_KEEP") &&
+                              getenv("THVM_WMO_REHEAD_KEEP")[0] == '0') ? 0 : 1;
+      u8 leafconst = (u8)(e->ziel_leaf && e->sub_len == 1u && !e->sub[0].is_var);
+      if (n == c->up && e != n->exits && !(keepc && leafconst)) {
         // move e to the head of n's exit list
         *slot = e->next;
         e->next = n->exits;

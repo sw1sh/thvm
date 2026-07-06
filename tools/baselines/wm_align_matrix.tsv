@@ -40,8 +40,8 @@ BooleanAxioms__Transposition	36	36	36	Y	-	thvm=PROVED weights-exact
 CombinatorAxioms__BCKWToSKI__c1	7	7	7	Y	-	thvm=PROVED weights-exact
 CombinatorAxioms__BCKWToSKI__c2	109	109	109	Y	-	thvm=PROVED weights-exact
 CombinatorAxioms__BCKWToSKI__c3	7	7	7	Y	-	thvm=PROVED weights-exact
-CombinatorAxioms__SKIToBCKW__c1	44823	19177	1729	N	1730	thvm=RUNNING content-delta_wm-only=25646_thvm-only=0;post-axiom_nonax-wm=44816_nonax-thvm=19170_nonax-prefix=1722;weights-exact
-CombinatorAxioms__SKIToBCKW__c2	32700	19223	1729	N	1730	thvm=RUNNING content-delta_wm-only=13477_thvm-only=0;post-axiom_nonax-wm=32693_nonax-thvm=19216_nonax-prefix=1722;weights-exact
+CombinatorAxioms__SKIToBCKW__c1	44823	19297	3516	N	3517	thvm=RUNNING content-delta_wm-only=25526_thvm-only=0;post-axiom_nonax-wm=44816_nonax-thvm=19290_nonax-prefix=3509;weights-exact
+CombinatorAxioms__SKIToBCKW__c2	32700	19267	3516	N	3517	thvm=RUNNING content-delta_wm-only=13433_thvm-only=0;post-axiom_nonax-wm=32693_nonax-thvm=19260_nonax-prefix=3509;weights-exact
 CombinatorAxioms__SKIToBCKW__c3	9	9	9	Y	-	thvm=PROVED weights-exact
 CommutativeRingAxioms__ZeroIsAbsorbing	547	547	547	Y	-	thvm=PROVED weights-exact
 CommutativeRingWithIdentityAxioms__MinusOneYieldsInverse	576	576	576	Y	-	thvm=PROVED weights-exact
