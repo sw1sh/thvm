@@ -21230,12 +21230,17 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
           const char *e = getenv("THVM_ATP_CORANK_KBO");
           ckbo = (e != NULL && e[0] == '1') ? 1 : 0;
         }
-        if (ckbo && o_arr != hits[h].arrival) {
-          KboCmp kc = thvm_kbo(s->lhs[j], s->rhs[j], s->kbo);
+        KboCmp ckbo_kc = ckbo ? thvm_kbo(s->lhs[j], s->rhs[j], s->kbo) : KBO_EQ;
+        if (ckbo && o_arr != hits[h].arrival &&
+            (ckbo_kc == KBO_GT || ckbo_kc == KBO_LT)) {
+          // ORIENTABLE var-differ: WM indexes ONE face (the reducible LHS =
+          // KBO-larger) -> collapse both faces onto it.  UNORIENTABLE
+          // (KBO_UN/EQ) is indexed at BOTH faces by WM (like thvm), so it
+          // falls through to the default (no collapse) -- this is the
+          // orientability discriminator (@547 orientable -> anchor larger;
+          // @269 unorientable -> keep raw/min).
           u8 dr = wmo_trace_dist_rhs(w, hits[h].trace);
-          u8 want_rhs = (kc == KBO_GT) ? 0u
-                      : (kc == KBO_LT) ? 1u
-                      : dr;                       // incomparable: keep dist_rhs
+          u8 want_rhs = (ckbo_kc == KBO_LT) ? 1u : 0u;   // rhs larger iff LT
           u8 anchor_face = (want_rhs == dr) ? 0u : 1u;
           if (hits[h].face == anchor_face) {
             eff_ch[h] = raw_ch[h] * 2u;           // reducible (indexed): anchor
