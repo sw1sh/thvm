@@ -960,11 +960,20 @@ int main(int argc, char **argv) {
       // matcher is faithful and removes axiom2 correctly, BUT removing it then
       // orphan-murders its queued CPs more broadly than WM's KPV_KillParent --
       // WM re-derives axiom2 and reselects it at pick 16, thvm kills that CP --
-      // so the standalone matcher regresses soa firstdiv 19->16.  OFF by
-      // default until the orphan-handling matches WM; THVM_ATP_FLAT_SUBSUME
-      // opts in for experimentation.
-      thvm_atp_set_use_flat_subsume(
-          s, (getenv("THVM_ATP_FLAT_SUBSUME") != NULL) ? 1u : 0u);
+      // so the standalone matcher regresses PLAIN soa firstdiv 19->16 (the
+      // committed plain-matrix row keeps that honest residual).  DEFAULT ON
+      // (matching the WL "Waldmeister" preset's FlatSubsume->True): the
+      // WM_SUBDUMP ground truth on Sheffer -auto shows commutativity's E-add
+      // MUST GM-subsume E1/E4 out of the E-set (GMSubsummierenMitGleichung +
+      // the MO_TermpaarSubsummiertZweites cursor quirk) or the re-derived
+      // duplicate at fact 10 never re-enters -- arming this moved the Sheffer
+      // -auto fact prefix 9 -> 51 and holds OA 1500 / Meredith 177 /
+      // combinators 6/6 exactly.  THVM_ATP_FLAT_SUBSUME=0 opts out.
+      {
+        const char *fs = getenv("THVM_ATP_FLAT_SUBSUME");
+        thvm_atp_set_use_flat_subsume(
+            s, (fs != NULL && fs[0] == '0') ? 0u : 1u);
+      }
       // Commutativity-aware E-set subsumption widening (DEFAULT OFF):
       // drops a redundant equation whose RHS is one top-`.`-swap from the
       // new equation's RHS under a live commutativity axiom -- WM's
