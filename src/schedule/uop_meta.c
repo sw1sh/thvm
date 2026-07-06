@@ -197,6 +197,24 @@ static int term_shape_in_inner(Term t, u32 env_id, Shape *out) {
   return ok;
 }
 
+// Spec broadcast (tinyspec.tex "Derived Properties": "right-align shapes,
+// element-wise max; each axis must be equal or 1").  Replaces the old
+// largest-total-numel rule that returned one operand's shape VERBATIM -- which
+// mis-sizes when operands broadcast in different axes (e.g. {4,1} op {1,8} ->
+// spec {4,8}, old rule -> {1,8}), a latent OOB masked today only because the WL
+// frontend pre-EXPANDs both operands to identical shapes.
+static void shape_broadcast2(Shape const *a, Shape const *b, Shape *out) {
+  u32 nd = a->ndim > b->ndim ? a->ndim : b->ndim;
+  for (u32 i = 0; i < MAX_DIM; i++) out->dims[i] = 0;
+  out->ndim = nd;
+  for (u32 i = 0; i < nd; i++) {
+    // right-aligned: the i-th axis from the trailing end; absent axes are 1.
+    u32 da = (i < a->ndim) ? a->dims[a->ndim - 1 - i] : 1;
+    u32 db = (i < b->ndim) ? b->dims[b->ndim - 1 - i] : 1;
+    out->dims[nd - 1 - i] = da >= db ? da : db;   // element-wise max (max(1,x)=x)
+  }
+}
+
 static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
   (void)env_id;
   // Bound-var shape: a TLam can carry a shape annotation for its
@@ -253,23 +271,18 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
     if (!la_ok && !lb_ok) return 0;
     if (!la_ok) { *out = lb; return 1; }
     if (!lb_ok) { *out = la; return 1; }
-    u32 na = 1, nb = 1;
-    for (u32 i = 0; i < la.ndim; i++) na *= la.dims[i];
-    for (u32 i = 0; i < lb.ndim; i++) nb *= lb.dims[i];
-    *out = (na >= nb) ? la : lb; return 1;
+    shape_broadcast2(&la, &lb, out); return 1;
   }
   if (uop_is_ternary_elementwise(op)) {
-    // Output shape = broadcast (largest-numel) of cond/then/else.
-    Shape best; int have = 0; u32 best_n = 0;
+    // Output shape = spec broadcast of cond/then/else (right-align, per-dim max).
+    Shape acc; int have = 0;
     for (u32 k = 0; k < 3; k++) {
       Shape s;
       if (!term_shape_in(heap_read(loc + k), 0, &s)) continue;
-      u32 n = 1;
-      for (u32 i = 0; i < s.ndim; i++) n *= s.dims[i];
-      if (!have || n > best_n) { best = s; best_n = n; have = 1; }
+      if (!have) { acc = s; have = 1; } else { Shape t2 = acc; shape_broadcast2(&t2, &s, &acc); }
     }
     if (!have) return 0;
-    *out = best; return 1;
+    *out = acc; return 1;
   }
   if (op == UOP_CONST) {
     out->ndim = 1; out->dims[0] = 1;
