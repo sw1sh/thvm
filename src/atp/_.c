@@ -1060,6 +1060,14 @@ static u8  g_cpform_pos[CP_MAX_DEPTH];
 // unset.  Read only by atp_cp_form_trace (early-returns when the trace is off).
 static Term g_cpform_ilhs = 0;
 static Term g_cpform_jlhs = 0;
+// Actual overlap direction (lin = mother FROM face, rin = mother TO face) + the
+// Vater subterm the walk unified, so a CPFORM line reveals which mother
+// FACE/direction formed the CP.  jpar prints only the partner's stored lhs[j],
+// which does NOT distinguish the l->r from the r->l overlap of an unorientable
+// equation -- these fields do.  0 = unset (batch/axiom push path).
+static Term g_cpform_lin = 0;
+static Term g_cpform_rin = 0;
+static Term g_cpform_sub = 0;
 
 // WM Waisenmord rule-identity parenthood (see AtpState.r_uid): the two
 // parent slots' uids of the CP batch currently being pushed, carried from
@@ -1240,6 +1248,11 @@ static void atp_cp_form_trace(u32 seq, u32 w, Term lhs, Term rhs) {
   if (g_cpform_jlhs != 0) {
     fprintf(stderr, " jpar=");
     atp_dbg_print_term(stderr, g_cpform_jlhs);
+  }
+  if (g_cpform_lin != 0) {   // actual mother direction (lin->rin) + Vater subterm
+    fprintf(stderr, " lin="); atp_dbg_print_term(stderr, g_cpform_lin);
+    fprintf(stderr, " rin="); atp_dbg_print_term(stderr, g_cpform_rin);
+    fprintf(stderr, " sub="); atp_dbg_print_term(stderr, g_cpform_sub);
   }
   fputc('\n', stderr);
 }
@@ -20963,6 +20976,7 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
   // Stamp the CP_FORM_TRACE geometry: the per-CP push bypasses the batch loop
   // that normally sets g_cpform_*, so the walk's CPFORM lines would show i=-1.
   g_cpform_i = i_out; g_cpform_j = i_in;
+  g_cpform_lin = lin; g_cpform_rin = rin; g_cpform_sub = sub;
   g_cpform_itr = t_out; g_cpform_jtr = t_in;
   g_cpform_ilhs = (i_out < s->n_rules) ? s->lhs[i_out] : 0;
   g_cpform_jlhs = (i_in  < s->n_rules) ? s->lhs[i_in]  : 0;
@@ -21068,6 +21082,40 @@ static u8 sw_corank_suppressed(SwVaterCtx *c, const u32 *p, u32 p_len,
   Term nl = atp_rewrite_normalize_indexed(s, cl, 4096u);
   Term nr = atp_rewrite_normalize_indexed(s, cr, 4096u);
   return (!kbo_eq(nl, nr) && atp_pop_eq_subsumed(s, nl, nr)) ? 1u : 0u;
+}
+
+// Co-rank collapse discriminator (WM KPActionRG/GR/GG order test, applied to the
+// SIBLING face).  The min-anchor collapse pulls a var-differ equation's later
+// face up to sit beside its earlier face, modelling WM's "one scan yields both
+// unifiers at consecutive ages".  But if the earlier face's CP is DROPPED by the
+// per-sigma reduction-order gate (its instantiated rewrite is uphill --
+// sigma(rin) > sigma(lin)), no CP forms there, so there is nothing for the later
+// face to collapse onto: WM numbers the surviving face at its OWN scan age.  This
+// returns 1 iff the sibling hit's CP would be order-gate-dropped -- exactly the
+// case where the pull-up must be suppressed.  Reuses the identical atp_cp_order_gate
+// so the verdict matches the real formation-time drop bit-for-bit.
+static u8 sw_corank_h2_gate_drops(SwVaterCtx *c, const u32 *p, u32 p_len,
+                                  Term sub, const WmoPartnerHit *hit, u32 j) {
+  AtpState *s = c->s;
+  AtpWmOrder *w = (AtpWmOrder *)s->wmo;
+  u8 jdr = wmo_trace_dist_rhs(w, hit->trace);
+  u8 tf  = (u8)(hit->face ^ jdr);
+  Term lin, rin;
+  sw_rename_pair(tf ? s->rhs[j] : s->lhs[j],
+                 tf ? s->lhs[j] : s->rhs[j], &lin, &rin);
+  if (term_tag(sub) == TAG_CTR && term_tag(lin) == TAG_CTR &&
+      term_ext(sub) != term_ext(lin)) return 0u;   // no CP forms: not a drop
+  RewriteSubst subst = {{0}};
+  if (!thvm_unify(sub, lin, &subst)) return 0u;     // no CP forms: not a drop
+  CriticalPair cp;
+  cp.lhs  = thvm_unify_apply(cp_replace_at(c->lo, p, p_len, rin), &subst);
+  cp.rhs  = thvm_unify_apply(c->ro, &subst);
+  cp.peak = thvm_unify_apply(c->lo, &subst);
+  cp.pos_len = (u8)p_len;
+  for (u32 d = 0; d < p_len && d < CP_MAX_DEPTH; d++) cp.pos[d] = (u8)p[d];
+  cp.combo = 0xffu;
+  u8 in_eq = s->use_unfailing_cp && !s->r_orient[j];
+  return (atp_cp_order_gate(s, &cp, 0u, 1u, c->o_eq, in_eq) == 0u) ? 1u : 0u;
 }
 
 static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
@@ -21281,7 +21329,22 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
             eff_ch[h]  = raw_ch[h2] * 2u + 1u;
           }
         } else if (o_arr < hits[h].arrival) {
-          if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+          // Suppress the pull-up when the EARLIER sibling face's CP is
+          // order-gate-dropped (its instantiated rewrite is uphill --
+          // sigma(rin) > sigma(lin)), so nothing forms at o_arr for this face to
+          // sit beside: the surviving face keeps its own (later) arrival, matching
+          // WM's scan-age numbering.  Grounded in the per-sigma KPActionRG test
+          // (Unifikation1.c:1407): SKI @547 uid18's (WI)x@15 must stay late
+          // because its x*x@0 sibling is uphill.  Default ON; THVM_ATP_CORANK_GATE=0
+          // restores the unconditional min-anchor collapse (same-binary kill switch).
+          static int cgate = -1;
+          if (cgate < 0) {
+            const char *e = getenv("THVM_ATP_CORANK_GATE");
+            cgate = (e != NULL && e[0] == '0') ? 0 : 1;
+          }
+          if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j) &&
+              !(cgate && sw_corank_h2_gate_drops(c, p, p_len, sub,
+                                                 &hits[h2], j))) {
             eff_arr[h] = o_arr;
             eff_ch[h]  = raw_ch[h2] * 2u + 1u;
           }
