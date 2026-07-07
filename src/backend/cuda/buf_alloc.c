@@ -62,6 +62,21 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
   CUresult r = cuMemAlloc(&dptr, (size_t)nbytes);
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuMemAlloc", r);
+    // A poisoned context is UNRECOVERABLE: once a kernel does an out-of-bounds
+    // access, every subsequent CUDA call returns CUDA_ERROR_ILLEGAL_ADDRESS, so
+    // returning 0 here just lets the caller retry the alloc forever (a 100%-CPU
+    // wedge that never releases the process/JIT-license).  Fail fast: flush and
+    // self-exit so the run terminates cleanly (releasing its resources) instead
+    // of spinning.  (Distinct from CUDA_ERROR_OUT_OF_MEMORY, which is
+    // recoverable via reclaim + retry and must NOT exit.)
+    if (r == CUDA_ERROR_ILLEGAL_ADDRESS) {
+      fprintf(stderr,
+        "cuda_buf_alloc: FATAL CUDA_ERROR_ILLEGAL_ADDRESS (%llu bytes) -- the "
+        "CUDA context is poisoned by a prior out-of-bounds kernel and cannot "
+        "recover; exiting.\n", (unsigned long long)nbytes);
+      fflush(stderr);
+      exit(1);
+    }
     // One-shot pool-breakdown dump: on the FIRST OOM, walk CUDA_BUFS and
     // classify where the resident device bytes actually live, so the leak's
     // holder (freelist / preserved / jit_pinned / plain refcount>0 owner) is
