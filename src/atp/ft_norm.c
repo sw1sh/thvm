@@ -2653,6 +2653,12 @@ typedef struct {
 // exactly :226-231.  Budget-exhausted calls report "no redex" so every
 // enclosing loop unwinds and the caller returns the partial form (the
 // legacy path's cap semantics).
+// THVM_ATP_GOAL_NF_DEBUG scoping: the goal check sets this around its
+// two normalize calls so the [mixstep] tracer prints goal-walk steps
+// only (CP-intake normalizes share this code path and would drown the
+// signal).  Debug-only; no engine effect.
+int g_goalnf_active = 0;
+
 static int ft_mixmost_reduce_here(FtMixmost *m) {
   if (m->budget == 0u) { m->starved = 1u; return 0; }
   FtNfPathEnt *e = &m->st[m->depth];
@@ -2678,14 +2684,20 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   u8  pos[ATP_PROOF_MAX_DEPTH];
   u8  pos_len  = 0u;
   int have_pos = 0;
-  if (m->record || m->psteps != NULL) {
-    have_pos = ft_find_position(m->root, e->cell, pos, &pos_len);
-  }
   static int dbg_goal_nf = -1;
   if (dbg_goal_nf < 0) dbg_goal_nf = getenv("THVM_ATP_GOAL_NF_DEBUG") != NULL;
-  if (dbg_goal_nf) {
-    fprintf(stderr, "[mixstep] depth=%u have_pos=%d pos_len=%u root_eq_cell=%d dir=%u\n",
-            m->depth, have_pos, pos_len, (int)(m->root == e->cell), dir);
+  if (m->record || m->psteps != NULL || dbg_goal_nf) {
+    have_pos = ft_find_position(m->root, e->cell, pos, &pos_len);
+  }
+  if (dbg_goal_nf && g_goalnf_active) {
+    fprintf(stderr, "[mixstep] side=%d depth=%u rule_slot=%u "
+            "rule_uid=%u orient=%u dir=%u pos=L",
+            g_goalnf_active, m->depth, rule,
+            (m->s->r_uid != NULL && rule < m->s->n_rules)
+              ? m->s->r_uid[rule] : 0u,
+            (rule < m->s->n_rules) ? m->s->r_orient[rule] : 0u, dir);
+    for (u8 d = 0; d < pos_len; d++) fprintf(stderr, ".%u", pos[d] + 1u);
+    fputc('\n', stderr);
   }
   // AtpProofStep needs the term BEFORE the splice; capture it now.
   Term before_term = (m->psteps != NULL) ? ft_to_term(m->root) : (Term)0;

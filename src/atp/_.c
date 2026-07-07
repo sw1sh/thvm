@@ -14747,6 +14747,8 @@ fn u32 thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
 // every case; returns 1 iff the pair joins.  Shared by the single-goal
 // path and the multi-goal conjunct loop -- the MNF front search is NOT
 // part of this check (it is per-alias-goal and stateful).
+extern int g_goalnf_active;   // ft_norm.c: [mixstep] tracer scope tag
+
 static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
                                Term *nf_l, Term *nf_r) {
   // FT path for AC-mask=0; Term path otherwise.  Earlier commit
@@ -14770,8 +14772,14 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
     AtpFt *gft = (AtpFt *)s->ft_arena_ptr;
     AtpFtCell *fl_in = ft_from_term(gft, gl, 0);
     AtpFtCell *fr_in = ft_from_term(gft, gr, 0);
+    // THVM_ATP_GOAL_NF_DEBUG scoping (see ft_norm.c g_goalnf_active):
+    // tag the two goal walks 1/2 so the [mixstep] tracer separates the
+    // L and R reduction sequences.
+    g_goalnf_active = 1;
     AtpFtCell *fl = atp_rewrite_normalize_ft(s, fl_in, ATP_GOAL_NORM_CAP);
+    g_goalnf_active = 2;
     AtpFtCell *fr = atp_rewrite_normalize_ft(s, fr_in, ATP_GOAL_NORM_CAP);
+    g_goalnf_active = 0;
     l = ft_to_term(fl);
     r = ft_to_term(fr);
     if (getenv("THVM_ATP_GOAL_NF_DEBUG")) {
