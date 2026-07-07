@@ -888,9 +888,27 @@ static CopyUploadSlot WEIGHT_MOVE_CACHE[COPY_UPLOAD_CACHE_CAP];
 // 12B) -- the matmuls never touch it again.
 static u32 WEIGHT_MOVE_SRC[COPY_UPLOAD_CACHE_CAP];
 
+// Persistent source IDENTITY (same index as the cache): unlike
+// WEIGHT_MOVE_SRC (zeroed by the trim as its "not yet trimmed" marker), this
+// survives the trim.  The chase must keep recognizing a TRIMMED upload's tid
+// as a weight identity -- the trim purges the COPY_UPLOAD_CACHE entry (so a
+// genuine re-materialize re-uploads) and frees the buffer, but the WL-cached
+// weight term still references the tid, and a boundary over it must HIT the
+// cached transposed leaf rather than re-emit (a re-emit would need the dead
+// upload: the re-upload OOM storm + gray output of the first durable-key run).
+static u32 WEIGHT_MOVE_SRCID[COPY_UPLOAD_CACHE_CAP];
+
+static int weight_move_srcid_has(u32 tid) {
+  if (tid == 0) return 0;
+  for (u32 i = 0; i < COPY_UPLOAD_CACHE_CAP; i++)
+    if (WEIGHT_MOVE_SRCID[i] == tid) return 1;
+  return 0;
+}
+
 fn void weight_move_cache_reset(void) {
   memset(WEIGHT_MOVE_CACHE, 0, sizeof(WEIGHT_MOVE_CACHE));
   memset(WEIGHT_MOVE_SRC,   0, sizeof(WEIGHT_MOVE_SRC));
+  memset(WEIGHT_MOVE_SRCID, 0, sizeof(WEIGHT_MOVE_SRCID));
 }
 
 static u32 weight_move_lookup(u64 loc, u32 backend_id) {
@@ -923,6 +941,7 @@ static void weight_move_insert(u64 loc, u32 backend_id, u32 tid, u32 src_tid) {
       WEIGHT_MOVE_CACHE[i].backend_id = backend_id;
       WEIGHT_MOVE_CACHE[i].tid        = tid;
       WEIGHT_MOVE_SRC[i]              = src_tid;
+      if (src_tid != 0) WEIGHT_MOVE_SRCID[i] = src_tid;
       return;
     }
   }
@@ -942,6 +961,7 @@ static void weight_move_purge_from(u32 tens_wm) {
       WEIGHT_MOVE_CACHE[i].loc = WEIGHT_MOVE_TOMBSTONE;
       WEIGHT_MOVE_CACHE[i].tid = 0;
       WEIGHT_MOVE_SRC[i]       = 0;
+      WEIGHT_MOVE_SRCID[i]     = 0;  // entry invalid: drop the identity too
     }
   }
 }
@@ -1058,7 +1078,11 @@ static u32 weight_move_chase_upload(Term t) {
   for (u32 hops = 0; hops < 12; hops++) {
     if (term_tag(t) == TAG_TEN) {
       u32 tid = (u32)term_val(t);
-      return copy_upload_has_tid(tid) ? tid : 0;
+      // Accept a LIVE upload (the pin path's gate) or a TRIMMED one whose
+      // identity is registered (WEIGHT_MOVE_SRCID): the trim purges the
+      // upload cache and frees the buffer, but boundaries over the WL-cached
+      // weight term still chase to this tid and must HIT the transposed leaf.
+      return (copy_upload_has_tid(tid) || weight_move_srcid_has(tid)) ? tid : 0;
     }
     if (term_tag(t) != TAG_UOP) return 0;
     u8 op = term_ext(t);
