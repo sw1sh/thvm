@@ -633,6 +633,67 @@ static void pr_wm_derive_precedence(PrProblem *pr) {
   free(st);
 }
 
+// === WM "Verband" (lattice) classification =============================
+// `wmcli -auto`'s PhilMarlow classifier detects the Verband structure
+// (Sinai.h:364 -- Zuordnung "OU" with premises Assoziativitaet(O),
+// Kommutativitaet(O), Assoziativitaet(U), Kommutativitaet(U)) and then
+// runs a DIFFERENT strategy than the StdS default: `kbo,cph(gt),gj()` =
+// gtweight CP selection (CH_GtWeight, not the default mixweight),
+// ground-joinability ON, and NO MNF / NO -pq interleave.  A problem
+// matches when its signature carries TWO distinct binary operators, each
+// with BOTH an associativity and a commutativity axiom.  This is what
+// distinguishes CommutativeRing (or+and both assoc+comm -> Verband) from
+// Boolean (comm only, no assoc axiom -> Orkus/StdS) and non-commutative
+// Ring (* has no commutativity -> Orkus).  Validated against every
+// notable theorem's actual `wmcli -auto` structure: fires on EXACTLY the
+// 3 CommutativeRing files and nothing else (Robbins classifies as the
+// separate RobbinsAlgebra structure, not handled here).
+static u8 pr_v_binop(Term t, u32 lab) {
+  return term_tag(t) == TAG_CTR && term_ext(t) == lab && term_ctr_n(t) == 2u;
+}
+// op(x,y) = op(y,x): both sides op-rooted over two distinct swapped vars.
+static u8 pr_eq_is_comm(Term l, Term r, u32 lab) {
+  if (!pr_v_binop(l, lab) || !pr_v_binop(r, lab)) return 0u;
+  Term l0 = term_ctr_at(l, 0), l1 = term_ctr_at(l, 1),
+       r0 = term_ctr_at(r, 0), r1 = term_ctr_at(r, 1);
+  if (term_tag(l0) != TAG_FVR || term_tag(l1) != TAG_FVR ||
+      term_tag(r0) != TAG_FVR || term_tag(r1) != TAG_FVR) return 0u;
+  u32 a = term_ext(l0), b = term_ext(l1);
+  return a != b && a == term_ext(r1) && b == term_ext(r0);
+}
+static u8 pr_v_assoc_left(Term t, u32 lab) {   // op(op(v,v),v)
+  if (!pr_v_binop(t, lab)) return 0u;
+  Term a = term_ctr_at(t, 0), b = term_ctr_at(t, 1);
+  return pr_v_binop(a, lab) && term_tag(term_ctr_at(a, 0)) == TAG_FVR &&
+         term_tag(term_ctr_at(a, 1)) == TAG_FVR && term_tag(b) == TAG_FVR;
+}
+static u8 pr_v_assoc_right(Term t, u32 lab) {  // op(v,op(v,v))
+  if (!pr_v_binop(t, lab)) return 0u;
+  Term a = term_ctr_at(t, 0), b = term_ctr_at(t, 1);
+  return term_tag(a) == TAG_FVR && pr_v_binop(b, lab) &&
+         term_tag(term_ctr_at(b, 0)) == TAG_FVR &&
+         term_tag(term_ctr_at(b, 1)) == TAG_FVR;
+}
+// op(op(x,y),z) = op(x,op(y,z))  (either orientation).
+static u8 pr_eq_is_assoc(Term l, Term r, u32 lab) {
+  return (pr_v_assoc_left(l, lab) && pr_v_assoc_right(r, lab)) ||
+         (pr_v_assoc_left(r, lab) && pr_v_assoc_right(l, lab));
+}
+static u8 pr_is_verband(const PrProblem *pr) {
+  u32 n_good = 0;
+  for (u32 i = 0; i < pr->n_syms; i++) {
+    if (pr->syms[i].arity != 2u) continue;
+    u32 lab = i + PR_LABEL_BASE;
+    u8 has_a = 0, has_c = 0;
+    for (u32 e = 0; e < pr->n_eqns; e++) {
+      if (!has_c && pr_eq_is_comm(pr->eq_l[e], pr->eq_r[e], lab)) has_c = 1;
+      if (!has_a && pr_eq_is_assoc(pr->eq_l[e], pr->eq_r[e], lab)) has_a = 1;
+    }
+    if (has_a && has_c) n_good++;
+  }
+  return n_good >= 2u;
+}
+
 // Label of `name[0..n)`, or 0 when unknown.
 static u32 pr_sym_find(const PrProblem *pr, const char *s, size_t n) {
   for (u32 i = 0; i < pr->n_syms; i++) {
@@ -942,8 +1003,15 @@ int main(int argc, char **argv) {
         pr_mark_axiom_consts(prp.eq_l[e], ax_const, cap);
         pr_mark_axiom_consts(prp.eq_r[e], ax_const, cap);
       }
+      // WM's Automodus classifies the ring-lattice files as "Verband" and
+      // runs gtweight+gj instead of the StdS mixweight+mnf default (see
+      // pr_is_verband / the Verband override below).  Under that strategy
+      // WM uses DEF=1 (every symbol weight 1), so the defined-operator
+      // heuristic must NOT inflate the ring zero constant -- else the CP
+      // weights shift off WM's stream.  Force weight 1 for Verband.
+      u8 verband = !atp_env_on("THVM_ATP_NO_VERBAND") && pr_is_verband(&prp);
       const char *wv = getenv("ATP_BENCH_AUTO_WT");
-      u32 aw = (wv != NULL) ? (u32)atoi(wv) : 2u;
+      u32 aw = verband ? 1u : ((wv != NULL) ? (u32)atoi(wv) : 2u);
       for (u32 lab = PR_LABEL_BASE; lab < cap; lab++)
         if (ax_const[lab]) prp.weights[lab] = aw;
 
@@ -956,6 +1024,19 @@ int main(int argc, char **argv) {
       // chain (the pre-derivation behaviour).
       if (!atp_env_on("THVM_ATP_NO_AUTO_PREC"))
         pr_wm_derive_precedence(&prp);
+
+      // Verband strategy: `wmcli -auto` runs `kbo,cph(gt),gj()` for the
+      // lattice files -- gtweight CP selection (ATP_CP_WEIGHT_GT, not the
+      // preset's mixweight), ground-joinability ON, NO MNF, NO -pq
+      // interleave.  Arm those knobs by seeding the env the preset/engine
+      // read below, with overwrite=0 so an explicit user override still
+      // wins.  Byte-identical to `wmcli -auto` on all 3 CommutativeRing.
+      if (verband) {
+        setenv("THVM_ATP_CP_WEIGHT", "3", 0);       // ATP_CP_WEIGHT_GT
+        setenv("THVM_ATP_GROUND_JOIN", "1", 0);     // -gj
+        setenv("THVM_ATP_MNF", "0", 0);             // no MNF goal front
+        setenv("THVM_ATP_FIFO_THRESHOLD", "0", 0);  // no -pq interleave
+      }
     }
   }
 
