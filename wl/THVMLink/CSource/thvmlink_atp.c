@@ -925,14 +925,17 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       if (mc != 0u) thvm_atp_set_min_const_label(atp, mc);
     }
   }
-  // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
-  // overlaps an equation's fresh re-derivation, not the stale exhausted
-  // original).  Verified faithful: preserves all 73 byte-identical
-  // baselines and advances ShefferAxioms__OrAssociativity firstdiv 14->19;
-  // no WL-path regression (TFindProof status identical with vs without).
-  // Keyed off EmissionOrder (ON in every Waldmeister* preset) as an
-  // interim until a dedicated "OverlapExhaust" arg slot is plumbed.
-  thvm_atp_set_use_overlap_exhaust(atp, (u8)(wm_emission != 0));
+  // Overlap-exhausted-equation gate: OFF.  The pre-single-walk heuristic
+  // (once advanced Sheffer OrAssoc firstdiv 14->19) is fully superseded by
+  // the WM-faithful formation mechanisms AND it SUPPRESSES a real WM
+  // overlap: on HillmanAxioms ImpliesSheffer c3 the derived commutativity
+  // must overlap equation fact 3 at its activation (WM parents E6 x E2,
+  // kept CP pops at fact 441); with the gate on, that CP never forms and
+  // the equation arrives 14 selections late with swapped sides.  The full
+  // golden battery is byte-identical without the gate (bench flip
+  // committed alongside; THVM_ATP_OVERLAP_EXHAUST=1 re-arms in the bench
+  // for archaeology).
+  thvm_atp_set_use_overlap_exhaust(atp, 0u);
   // Method -> {... "IntakeOrder" -> True}: Waldmeister loader-level
   // axiom canonicalization + intake semantics (src/atp/wm_intake.c):
   // the first step permutes the queued axiom set into WM's canonical

@@ -1377,13 +1377,18 @@ int main(int argc, char **argv) {
       // tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_formation_fifo(
           s, (getenv("THVM_ATP_FORMATION_FIFO") != NULL) ? 1u : 0u);
-      // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
-      // overlaps an equation's FRESH re-derivation, not the stale exhausted
-      // original).  Verified to preserve all 73 byte-identical baselines and
-      // advance ShefferAxioms__OrAssociativity firstdiv 14->19.  ON in the
-      // faithful preset; THVM_ATP_NO_OVERLAP_EXHAUST env disables.
+      // Overlap-exhausted-equation gate: OFF.  A pre-single-walk-era
+      // heuristic (once advanced Sheffer OrAssoc firstdiv 14->19) that is
+      // fully superseded by the WM-faithful formation mechanisms -- the
+      // full golden battery is byte-identical without it, and ON it
+      // SUPPRESSES a real WM overlap: on HillmanAxioms ImpliesSheffer c3
+      // the derived commutativity (fact 39) must overlap equation fact 3
+      // at its activation (WM parents E6 x E2, kept CP pops at fact 441);
+      // the gate killed that formation and the equation arrived 14
+      // selections late with swapped sides (firstdiv 441 -> NONE with the
+      // gate off).  THVM_ATP_OVERLAP_EXHAUST=1 re-arms it for archaeology.
       s->use_overlap_exhaust =
-          (getenv("THVM_ATP_NO_OVERLAP_EXHAUST") == NULL) ? 1u : 0u;
+          (getenv("THVM_ATP_OVERLAP_EXHAUST") != NULL) ? 1u : 0u;
       // WM LRSortieren side-canonicalisation (SpezNormierung.c:517-534):
       // store each derived unorientable equation with WM's canonical side
       // order (variable < non-variable, preorder).  DEFAULT OFF: a
@@ -2414,6 +2419,14 @@ int main(int argc, char **argv) {
         }
         printf("\n");
         atp_ftdt_hot_dump();
+      }
+      {
+        extern u64 g_vcp_lb_hit, g_vcp_lb_raw;
+        if (g_vcp_lb_raw > 0)
+          printf("   vcp raw-class lower-bound probe: lb-catches=%llu / raw=%llu [%.1f%%]\n",
+                 (unsigned long long)g_vcp_lb_hit,
+                 (unsigned long long)g_vcp_lb_raw,
+                 100.0 * (double)g_vcp_lb_hit / (double)g_vcp_lb_raw);
       }
       if (g_atp_ftnfm_probe > 0) {
         printf("   ftnfm subtree-NF-memo: probe=%llu hit=%llu [%.1f%%] "
