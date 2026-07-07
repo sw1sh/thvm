@@ -1165,13 +1165,18 @@ int main(int argc, char **argv) {
       // diverts the saturator's trajectory on mccune (49s -> 60s+ with
       // MNF on, 28s with MNF off) and slows thm (1.9s vs 0.4s).  THVM_ATP
       // _MNF=1 still opts in for problems where MNF helps.
-      // Auto-MaxWeight base=20: tightened from 30 after the goal_check FT
-      // migration (49caf001) + SR=181 (a737cc4f).  Cuts mccune 25.0s ->
-      // 16.0s PROVED (-36%) by capping the CP queue tighter so heavy CPs
-      // get stashed early; thm/wolfram/andassoc/robbins unchanged at
-      // their current crack/timeout points.  THVM_ATP_AUTO_MAXW env
-      // (parsed below the preset block) still overrides.
-      thvm_atp_set_auto_max_cp_weight(s, 20u);
+      // Auto-MaxWeight -- DROPPED from the preset (base=0).  The overflow
+      // stash is a pure thvm perf heuristic with NO WM analog: WM SUEs
+      // every classified CP at its formation age (CPNr), so deferring a
+      // heavy treated CP to the stash re-stamps it on re-admission and
+      // forks the FIFO/age lane.  Ground truth: ShefferAxioms
+      // OrAssociativity -auto, where the age lane pops the eq -2
+      // self-overlap CPs (WM cpnr 31/33, w1=2208, ~23 syms/side) that the
+      // base-20 stash deferred -- fact stream 204 -> 694/694 firstdiv=NONE
+      // with the stash off; OA/Meredith were stash-insensitive (their
+      // deferred CPs never surfaced before the proof point).  The old
+      // base=20 cut mccune 25.0s -> 16.0s; when chasing that perf point,
+      // THVM_ATP_AUTO_MAXW=20 (parsed below the preset block) restores it.
       // CP-weight = CH_MaxWeight = max(|lhs|,|rhs|) symbol count.
       // PORTFOLIO TRADE-OFF: MaxWeight (mode=1) cracks mccune in 11.3s
       // where the engine-default GT does not crack at 60s; but on the
