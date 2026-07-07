@@ -40,7 +40,19 @@ Begin["`Private`"];
        bf16-native: w stays bf16, so the matmul is bf16(act) x bf16(W) on the
        simdgroup tensor cores (no bf16->f32 cast).  RMSNorm/LayerNorm gains are
        1-D and never reach fxLinear, so the loader leaves them as-is. --- *)
-fxLinear[x_, w_TTerm] := TRealize[TMatMul[TRealize[x], Transpose[w]]]
+(* THVM_TC_TRANSPOSE=1 (CUDA speed lever): REALIZE the transpose so the matmul's
+   B operand is a contiguous LOAD instead of a Transpose-VIEW.  On CUDA the
+   parallel-TC recogniser (uop_recognise_tc_parallel) rejects a matmul whose
+   operand is a transpose-view (NOT-TC-TEMPLATE) and falls to the naive
+   one-warp-per-16x16 path (~5 TFLOPS on H100); a contiguous bf16 B is recognised
+   and fires the tiled WMMA GEMM (Krea velNet cold denoise 94.5s -> 26.6s).  The
+   default (no env) keeps the runtime Transpose-view -- Metal's simdgroup TC path
+   handles it directly, so this is a CUDA-only lever.  TRADEOFF: the per-call
+   TRealize@Transpose materialises a contiguous {in,out} bf16 weight the capture
+   retains (~24GB across the velNet), so a served warm gen needs the ~3GB
+   memory-shave to fit an 80GB H100 (see [[project_krea2_port]]). *)
+fxLinear[x_, w_TTerm] := TRealize[TMatMul[TRealize[x],
+    If[Environment["THVM_TC_TRANSPOSE"] === "1", TRealize @ Transpose[w], Transpose[w]]]]
 
 (* --- fxLinearFused: a matmul whose output is NOT separately realized, so its
        SINGLE-consumer elementwise epilogue (a gated residual `x + gate*mm`)

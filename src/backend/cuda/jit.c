@@ -833,24 +833,29 @@ fn int cuda_tc_tile_dispatch_shape(struct KernelEntry *ke, u32 *grid_x,
   // Re-apply the (idempotent) parallel TC recogniser to the STORED
   // (unwrapped) root -- exactly what cg_render_uop_kernel_cuda_root does
   // before emitting -- so M/N carry KAX_GLOBAL here too.
+  int TT = getenv("THVM_TC_TILE_TRACE") != NULL;
   Term sroot = uop_recognise_tc_parallel(ke->cached_lift.store_root);
   // Must be a TC template (matmul recognised).
   if (term_tag(sroot) != TAG_UOP || term_ext(sroot) != UOP_STORE) return 0;
   Term value = heap_read(term_val(sroot) + 2);
   if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_OPT
-      || uop_opt_kind(value) != UOP_OPT_TC) return 0;
+      || uop_opt_kind(value) != UOP_OPT_TC) {
+    if (TT) fprintf(stderr, "[tc-tile] kid=%u NOT-TC-TEMPLATE (naive)\n", 0u);
+    return 0;
+  }
   // Both M and N must be GLOBAL (>= 2 GLOBAL axes) for the tiled emit.
   u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
   u32 na = uop_dag_collect_axes(sroot, ids, types, exts, MAX_AXES);
   u32 n_global = 0;
   for (u32 i = 0; i < na; i++) if (types[i] == KAX_GLOBAL) n_global++;
-  if (n_global < 2) return 0;
+  if (n_global < 2) { if (TT) fprintf(stderr, "[tc-tile] kid=%u <2 GLOBAL (naive)\n", 0u); return 0; }
   // Classify M/N/K + dtype + transA.  The tiled CUDA emit only fires for
   // a bf16/fp16 operand matmul with M/N/K all multiples of 16, transA==0.
   UopDagGemmShape gemm = {0};
-  if (!uop_dag_classify_matmul_shape(sroot, ke, &gemm)) return 0;
+  if (!uop_dag_classify_matmul_shape(sroot, ke, &gemm)) { if (TT) fprintf(stderr, "[tc-tile] kid=%u classify-FAIL (naive)\n", 0u); return 0; }
   if (gemm.M == 0 || gemm.N == 0 || gemm.K == 0) return 0;
-  if ((gemm.flags & 1u) != 0) return 0;                 // transposed A: naive path
+  if (TT) fprintf(stderr, "[tc-tile] kid=%u M=%u N=%u K=%u flags=%u dtype=%d\n", 0u, gemm.M, gemm.N, gemm.K, gemm.flags, (int)gemm.dtype);
+  if ((gemm.flags & 1u) != 0) { if (TT) fprintf(stderr, "[tc-tile] kid=%u transA (naive)\n", 0u); return 0; }  // transposed A: naive path
   // bf16 WMMA fragments need Ampere (sm>=80); fp16 works on any WMMA arch.
   // Mirror the renderer's gate so the launch geometry never disagrees with
   // the emitted kernel on a pre-Ampere device (there the bf16 matmul takes
@@ -860,7 +865,7 @@ fn int cuda_tc_tile_dispatch_shape(struct KernelEntry *ke, u32 *grid_x,
   } else if (gemm.dtype != DT_FP16) {
     return 0;
   }
-  if ((gemm.M % 16u) || (gemm.N % 16u) || (gemm.K % 16u)) return 0;
+  if ((gemm.M % 16u) || (gemm.N % 16u) || (gemm.K % 16u)) { if (TT) fprintf(stderr, "[tc-tile] kid=%u not-mult16 (naive)\n", 0u); return 0; }
   RmuTcTile tile;
   // The bf16-scratch budget depends on the OUTPUT (C) dtype, not the operand
   // dtype (gemm.dtype is A/B): a bf16/fp16 C needs the nwarps*256 convert
@@ -873,7 +878,8 @@ fn int cuda_tc_tile_dispatch_shape(struct KernelEntry *ke, u32 *grid_x,
   // set it explicitly anyway so this re-pick can NEVER disagree with the
   // renderer's tile (a divergent tile would mis-size the launch grid/block).
   RMU_CUDA_SM = cuda_device_sm();
-  if (!rmu_tc_pick_tile_cuda(gemm.M, gemm.N, gemm.K, c_is_bf, &tile)) return 0;
+  if (!rmu_tc_pick_tile_cuda(gemm.M, gemm.N, gemm.K, c_is_bf, &tile)) { if (TT) fprintf(stderr, "[tc-tile] kid=%u pick-FAIL (naive)\n", 0u); return 0; }
+  if (TT) fprintf(stderr, "[tc-tile] kid=%u TILED M=%u N=%u K=%u\n", 0u, gemm.M, gemm.N, gemm.K);
   u32 tile_m = tile.local_m * tile.rm * 16u;
   u32 tile_n = tile.local_n * tile.rn * 16u;
   u64 ntg = (u64)(gemm.M / tile_m) * (u64)(gemm.N / tile_n);
