@@ -968,9 +968,13 @@ $(BIN)/test_atp_ac_abelian_repro: tests/test_atp_ac_abelian_repro.c $(SRC) | $(B
 # (GZ_ACVerzichtbar) which needs the AC machinery (src/atp/ac.c).  The
 # mask is 0 unless thvm_atp_auto_ac detects an AC operator, so the
 # non-AC trajectory stays byte-identical.
+# -DATP_MNF: always compile the MNF goal-directed front in (like the
+# paclet dylib); it stays runtime-gated on AtpState.use_mnf, which the
+# WALDMEISTER preset arms for GROUND goals to match `wmcli -auto`'s
+# zb=mnf goal treatment.  Completion-only goals leave it inert.
 $(BIN)/test_atp_wolfram_bench: tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
-	  -DTHVM_ATP_AC \
+	  -DTHVM_ATP_AC -DATP_MNF \
 	  -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)

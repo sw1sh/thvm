@@ -50,6 +50,18 @@ static Term fv(u32 id) { return term_new_fvr(id); }
 #define L_AND 5u
 #define L_NOT 6u
 static Term konst(u32 label) { return term_new_ctr(label, NULL, 0); }
+// A goal is GROUND iff neither side contains a free variable.  WM's
+// -auto arms zb=mnf only for ground goals (PM_Existenzziele false); a
+// goal variable makes the conjecture existential and keeps rnf.
+static u8 atp_bench_term_ground(Term t) {
+  if (term_tag(t) == TAG_FVR) return 0u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++)
+      if (!atp_bench_term_ground(term_ctr_at(t, i))) return 0u;
+  }
+  return 1u;
+}
 static Term and_op(Term x, Term y) {
   Term c[2] = { x, y };
   return term_new_ctr(L_AND, c, 2);
@@ -885,9 +897,10 @@ int main(int argc, char **argv) {
   // UnfailingCP) so a profiling run follows the same trajectory the
   // proof harness does.  AutoPrecedence on the single nand symbol is
   // the identity precedence already in `cfg`, so it needs no setter.
+  const char *wm = getenv("THVM_ATP_WALDMEISTER");
+  u8 wm_preset = (wm != NULL && wm[0] != '\0' && wm[0] != '0');
   {
-    const char *wm = getenv("THVM_ATP_WALDMEISTER");
-    if (wm != NULL && wm[0] != '\0' && wm[0] != '0') {
+    if (wm_preset) {
       // FIFO interleave = `wmcli -auto` itl(mi): `-pq interleave=1.50`
       // -> moduloCP 51, thresholdCP 1 (see atp_cp_fifo_dimension; the
       // threshold defaults to 1 under the preset, and
@@ -1651,14 +1664,23 @@ int main(int argc, char **argv) {
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
-  // THVM_ATP_MNF=1 activates the MNF goal-directed (two-coloured front)
-  // search -- the only path that closes a symmetric goal like wolfram
-  // commutativity.  Requires the binary be built with `make ATP_MNF=1`
-  // (otherwise the setter is a no-op).
+  // MNF goal-directed (two-coloured front) search.  Waldmeister's -auto
+  // arms zb=mnf goal treatment for GROUND goals (the Automodus structure
+  // strategies + rose() all select the mnf parametrisation when
+  // PM_Existenzziele is false, i.e. no goal variable; only Boolean/
+  // group/lattice/ring classes keep rnf, and their goals close by the
+  // single-NF check anyway).  A goal variable makes the conjecture
+  // existential (WM keeps rnf + paramodulation), so leave MNF off there.
+  // The WALDMEISTER preset mirrors this: arm MNF exactly when the goal
+  // is ground.  THVM_ATP_MNF=1/0 still overrides for measurement.  (The
+  // bench binary always compiles ATP_MNF in -- see the Makefile target.)
   {
+    u8 goal_ground = !saturate && gl != 0
+                   && atp_bench_term_ground(gl) && atp_bench_term_ground(gr);
     const char *mnf = getenv("THVM_ATP_MNF");
     if (mnf != NULL && *mnf == '1') thvm_atp_set_use_mnf(s, 1u);
     else if (mnf != NULL && *mnf == '0') thvm_atp_set_use_mnf(s, 0u);
+    else if (wm_preset && goal_ground) thvm_atp_set_use_mnf(s, 1u);
   }
 
   // Optional automatic growing CP-weight bound (Waldmeister MaxWeight).
