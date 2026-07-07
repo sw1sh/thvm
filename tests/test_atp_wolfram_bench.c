@@ -2417,12 +2417,14 @@ int main(int argc, char **argv) {
       }
       if (g_atp_ftnfm_probe > 0) {
         printf("   ftnfm subtree-NF-memo: probe=%llu hit=%llu [%.1f%%] "
-               "store=%llu toolong=%llu\n",
+               "store=%llu toolong=%llu reval=%llu reval-ok=%llu\n",
                (unsigned long long)g_atp_ftnfm_probe,
                (unsigned long long)g_atp_ftnfm_hit,
                100.0 * (double)g_atp_ftnfm_hit / (double)g_atp_ftnfm_probe,
                (unsigned long long)g_atp_ftnfm_store,
-               (unsigned long long)g_atp_ftnfm_toolong);
+               (unsigned long long)g_atp_ftnfm_toolong,
+               (unsigned long long)g_atp_ftnfm_reval,
+               (unsigned long long)g_atp_ftnfm_reval_ok);
       }
       if (g_atp_swrn_hit + g_atp_swrn_miss > 0) {
         printf("   walk rename cache: hit=%llu miss=%llu [%.1f%%]\n",

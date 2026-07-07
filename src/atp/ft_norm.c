@@ -465,6 +465,7 @@ typedef struct {
   u64         q_candidates;   // candidates returned (summed over queries)
   u64         q_rules_seen;   // n_rules summed over queries (the no-index cost)
   u64         n_rebuilds;     // full index rebuilds (revision/count changes)
+  u64         n_extends;      // incremental pure-append extends
   u64         rebuild_work;   // rules processed across all rebuilds
   // Root-symbol CONCENTRATION at the last rebuild: largest bucket size /
   // indexed rule count.  When it's high the rule set is dominated by one
@@ -564,8 +565,9 @@ static void ftpi_stats_atexit(void) {
                            : 0.0,
           ix->q_candidates ? (double)ix->q_rules_seen / (double)ix->q_candidates
                            : 0.0);
-  fprintf(stderr, "[ftpi] rebuilds=%llu  rebuild_work=%llu rules\n",
+  fprintf(stderr, "[ftpi] rebuilds=%llu  extends=%llu  rebuild_work=%llu rules\n",
           (unsigned long long)ix->n_rebuilds,
+          (unsigned long long)ix->n_extends,
           (unsigned long long)ix->rebuild_work);
   ftdt_shape_dump();
 }
@@ -745,7 +747,12 @@ static int ftpi_try_extend(AtpState *s) {
     return 0;   // an existing rule was revised -> not a clean append
   }
   ix->rebuild_work += (s->n_rules - ix->built_n_rules);
-  ftnfm_bump_gen();           // appended rules can revive a memoized-normal subtree
+  ix->n_extends++;
+  // No ftnfm generation bump: an appended rule can revive a
+  // memoized-normal subtree, but each entry carries the rule watermark
+  // it was validated at and ftnfm_probe re-validates it against just
+  // the appended slots (ftnfm_delta_fires).  Only ftpi_rebuild -- where
+  // content changed arbitrarily -- kills the memo wholesale.
   for (u32 i = ix->built_n_rules; i < s->n_rules; i++) ftpi_insert_rule(ix, s, i);
   ftpi_finalize(ix, s);
   return 1;
@@ -2796,7 +2803,8 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
 enum { FTNFM_MAX_SYMS = 32, FTNFM_BITS = 16 };
 typedef struct {
   u64 hash;
-  u64 gen;
+  u64 gen;         // ftpi REBUILD epoch (content changed arbitrarily)
+  u32 rule_wm;     // s->n_rules when last validated (pure-append chain)
   u32 syms[FTNFM_MAX_SYMS];
   u8  len;
   u8  want;
@@ -2828,10 +2836,45 @@ static FtNfmEnt *ftnfm_ent(u64 hash) {
   return &g_ftnfm[hash & (((u64)1u << FTNFM_BITS) - 1u)];
 }
 
+// Can any face of the delta rules [wm, s->n_rules) rewrite anywhere
+// inside subtree `c`?  Mirrors the THVM_ATPFT_DT_CHECK certifier's
+// per-rule test (ft_match on lhs_ft, plus rhs_ft for an unorientable
+// rule) at every preorder position -- a strict SUPERSET of the walk's
+// ft_cell_try_rules firing condition, so "no delta face matches"
+// proves a stored subtree-normal verdict still holds after the appends.
+// Under a live generation the index history since the entry's stamp is
+// pure appends (a drop / orient-flip / soft-delete forces ftpi_rebuild,
+// which bumps the generation and kills the entry), so slots
+// [wm, n_rules) are exactly the appended rules.
+static int ftnfm_delta_fires(AtpState *s, const AtpFtCell *c, u32 wm) {
+  const AtpFtCell *e = (c->end != NULL) ? c->end->next : NULL;
+  AtpFtSubst chk = {0};
+  for (u32 r = wm; r < s->n_rules; r++) {
+    if (s->r_dead != NULL && s->r_dead[r]) continue;
+    AtpFtCell *lhs = s->lhs_ft[r], *rhs = s->rhs_ft[r];
+    if (lhs == NULL || rhs == NULL) continue;
+    u8 unor = (u8)(s->n_unorient > 0u && !s->r_orient[r]);
+    for (const AtpFtCell *p = c; p != e; p = p->next) {
+      ft_subst_reset(&chk);
+      if (ft_match(lhs, p, &chk)) return 1;
+      if (unor) {
+        ft_subst_reset(&chk);
+        if (ft_match(rhs, p, &chk)) return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+u64 g_atp_ftnfm_reval = 0, g_atp_ftnfm_reval_ok = 0;
+
 // 1 iff subtree `c` is memoized normal under want-config `wantk` at the
 // current generation.  A single var cell never probes (the walk's var
-// early-out is already cheaper than a probe).
-static int ftnfm_probe(const AtpFtCell *c, u8 wantk) {
+// early-out is already cheaper than a probe).  An entry stamped at an
+// older rule watermark is RE-VALIDATED against just the appended rules
+// (ftnfm_delta_fires) instead of dying with the generation -- the
+// incremental analogue of Waldmeister's always-current term indexes.
+static int ftnfm_probe(AtpState *s, const AtpFtCell *c, u8 wantk) {
   if ((c->sym & WF_VAR_BIT) != 0u) return 0;
   u32 syms[FTNFM_MAX_SYMS];
   u64 h;
@@ -2841,20 +2884,27 @@ static int ftnfm_probe(const AtpFtCell *c, u8 wantk) {
   FtNfmEnt *ent = ftnfm_ent(h);
   if (ent->gen == g_ftnfm_gen && ent->hash == h && ent->want == wantk &&
       ent->len == (u8)len && memcmp(ent->syms, syms, len * sizeof(u32)) == 0) {
+    if (ent->rule_wm != s->n_rules) {
+      g_atp_ftnfm_reval++;
+      if (ftnfm_delta_fires(s, c, ent->rule_wm)) return 0;
+      g_atp_ftnfm_reval_ok++;
+      ent->rule_wm = s->n_rules;
+    }
     g_atp_ftnfm_hit++;
     return 1;
   }
   return 0;
 }
 
-static void ftnfm_store(const AtpFtCell *c, u8 wantk) {
+static void ftnfm_store(AtpState *s, const AtpFtCell *c, u8 wantk) {
   if ((c->sym & WF_VAR_BIT) != 0u) return;
   u32 syms[FTNFM_MAX_SYMS];
   u64 h;
   u32 len = ftnfm_key(c, syms, &h);
   if (len == 0u) return;
   FtNfmEnt *ent = ftnfm_ent(h);
-  ent->gen  = g_ftnfm_gen;
+  ent->gen     = g_ftnfm_gen;
+  ent->rule_wm = s->n_rules;
   ent->hash = h;
   ent->want = wantk;
   ent->len  = (u8)len;
@@ -2915,7 +2965,7 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     m.nfm_on   = 1u;
     m.nfm_want = (u8)(FTDT_WANT_ORIENT |
                       ((doE && s->n_unorient > 0u) ? FTDT_WANT_UNORIENT : 0u));
-    if (ftnfm_probe(t, m.nfm_want)) {
+    if (ftnfm_probe(s, t, m.nfm_want)) {
       if (!nfm_check) return t;   // whole term memoized normal: identity
       nfm_root_hit = 1u;          // certifier: walk anyway, verify at exit
     }
@@ -2958,7 +3008,7 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
       // is a stale/unsound entry -- fatal.
       FtNfPathEnt *pe = &m.st[m.depth];
       if (m.nfm_on && m.rw_count == pe->rw0) {
-        if (!m.starved) ftnfm_store(pe->cell, m.nfm_want);
+        if (!m.starved) ftnfm_store(m.s, pe->cell, m.nfm_want);
       } else if (pe->nfm_hit) {
         thvm_fatal("ftnfm: memoized-normal subtree was rewritten (stale)");
       }
@@ -2984,7 +3034,7 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     // subtree (no push; e->ins already marks it visited).  Certifier
     // mode walks it anyway and verifies at pop.
     u8 child_hit = 0u;
-    if (m.nfm_on && ftnfm_probe(e->ins->next, m.nfm_want)) {
+    if (m.nfm_on && ftnfm_probe(m.s, e->ins->next, m.nfm_want)) {
       if (!nfm_check) continue;
       child_hit = 1u;
     }
@@ -3018,7 +3068,7 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
 done:
   // Whole-term store / root-hit certify (the depth-0 "pop").
   if (m.nfm_on && m.rw_count == 0u) {
-    if (!m.starved) ftnfm_store(m.root, m.nfm_want);
+    if (!m.starved) ftnfm_store(m.s, m.root, m.nfm_want);
   } else if (nfm_root_hit) {
     thvm_fatal("ftnfm: memoized-normal root was rewritten (stale)");
   }
