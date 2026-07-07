@@ -2385,12 +2385,13 @@ static u8 vcp_emit_fused(const KboConfig *cfg, Term lo, const u32 *p,
   fz->map.n   = 0u;
   fz->phidiff = 0;
   u32 pos = 0u, nodes = 0u, fpos = 0u;
-  if (!vcp_emit_side(lo, p, p_len, rin, subst, cfg, &fz->map,
+  // WM side order: sigma(ro) is the pair's LHS (see the classic arm).
+  if (!vcp_emit_side(ro, NULL, 0u, 0, subst, cfg, &fz->map,
                      &pos, &nodes, fz, +1, &fpos)) {
     return 0u;
   }
   u32 lhs_nodes = nodes, fl = fpos;
-  if (!vcp_emit_side(ro, NULL, 0u, 0, subst, cfg, &fz->map,
+  if (!vcp_emit_side(lo, p, p_len, rin, subst, cfg, &fz->map,
                      &pos, &nodes, fz, -1, &fpos)) {
     return 0u;
   }
@@ -2618,11 +2619,12 @@ static u8 vcp_emit_pair_bytes(Term lo, const u32 *p, u32 p_len, Term rin,
   AcpNvMap m;
   m.n = 0u;
   u32 pos = 0u, nodes = 0u, fpos = 0u;
-  if (!vcp_emit_side(lo, p, p_len, rin, subst, NULL, &m,
+  // WM side order: sigma(ro) first (see the classic arm).
+  if (!vcp_emit_side(ro, NULL, 0u, 0, subst, NULL, &m,
                      &pos, &nodes, NULL, +1, &fpos)) {
     return 0u;
   }
-  if (!vcp_emit_side(ro, NULL, 0u, 0, subst, NULL, &m,
+  if (!vcp_emit_side(lo, p, p_len, rin, subst, NULL, &m,
                      &pos, &nodes, NULL, -1, &fpos)) {
     return 0u;
   }
@@ -2762,9 +2764,10 @@ static u8 vcp_treat_form(AtpState *s, Term lo, const u32 *p, u32 p_len,
   if (!no_fusewalk) {
     AcpNvMap m;
     m.n = 0u;
-    fl = vcp_ft_build_emit_side(a, lo, p, p_len, rin, subst, &m, &raw_len);
+    // WM side order: sigma(ro) is the pair's LHS (see the classic arm).
+    fl = vcp_ft_build_emit_side(a, ro, NULL, 0u, 0, subst, &m, &raw_len);
     if (fl == NULL) return 0u;
-    fr = vcp_ft_build_emit_side(a, ro, NULL, 0u, 0, subst, &m, &raw_len);
+    fr = vcp_ft_build_emit_side(a, lo, p, p_len, rin, subst, &m, &raw_len);
     if (fr == NULL) {
       ft_free_span(a, fl, fl->end);
       return 0u;
@@ -2773,9 +2776,9 @@ static u8 vcp_treat_form(AtpState *s, Term lo, const u32 *p, u32 p_len,
     if (!vcp_emit_pair_bytes(lo, p, p_len, rin, ro, subst, &raw_len)) {
       return 0u;
     }
-    fl = vcp_ft_build_side(a, lo, p, p_len, rin, subst);
+    fl = vcp_ft_build_side(a, ro, NULL, 0u, 0, subst);
     if (fl == NULL) return 0u;
-    fr = vcp_ft_build_side(a, ro, NULL, 0u, 0, subst);
+    fr = vcp_ft_build_side(a, lo, p, p_len, rin, subst);
     if (fr == NULL) {
       ft_free_span(a, fl, fl->end);
       return 0u;
@@ -20264,7 +20267,10 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // branch test otherwise, free for the default/shipped path.  When
     // opted in, a ground-joinable CP is counted and dropped; deletion is
     // sound (a ground-joinable CP is redundant -- Martin-Nipkow / Twee).
-    if (s->use_ground_join && atp_cp_ground_joinable(s, cp_lhs, cp_rhs)) {
+    // NOTE: the emission-order fix (WM side rule) swapped cp_lhs/cp_rhs;
+    // this verdict was corpus-validated consuming (reduct, other), so feed
+    // it the pre-fix order (experiment: localizing side-consumers).
+    if (s->use_ground_join && atp_cp_ground_joinable(s, cp_rhs, cp_lhs)) {
       s->n_cps_ground_joinable++;
       // THVM_ATP_GJ_KEEP: instead of DROPPING the ground-joinable CP, KEEP
       // it but mark it never-weight-selectable (Waldmeister keeps its 168k
@@ -21525,8 +21531,14 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
     // never reach the gate -- it degrades to the old counting walk.
     u64 _szc0 = g_unify_apply_cells;
     u64 _szt0 = g_unify_apply_taint;
-    cp.lhs  = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), &subst);
-    cp.rhs  = thvm_unify_apply(ro, &subst);
+    // WM CP side order (Unifikation1.c:916-917): KPLinks = sigma(host.RHS)
+    // -- the UNREWRITTEN side -- and KPRechts = sigma(host.LHS[p <- rin]),
+    // the reduct.  thvm emitted (reduct, other) historically; for ORIENTED
+    // keeps the orientation hides it, but an UNORIENTABLE keep stores the
+    // emission order verbatim, and 42/56 OA + 539/823 Hillman kept E's
+    // were side-swapped vs WM (side-sensitive audit 2026-07-07).
+    cp.lhs  = thvm_unify_apply(ro, &subst);
+    cp.rhs  = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), &subst);
     u64 _szc1 = g_unify_apply_cells;   // before the (optional) peak build
     // cp.peak is read only by the connectedness gate, the equation-parent
     // KPAction ordering gate, and the armed nusfu gate -- the batch
