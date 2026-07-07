@@ -1755,12 +1755,20 @@ static void wmo_maybe_treedump(AtpWmOrder *w, u32 trace) {
   if (!on) return;
   // THVM_WMO_TREEDUMP_TRACE: dump right after the fact with this birth
   // trace id registers (a monotone anchor; n_reg fluctuates with removals).
+  // Accepts a single trace ("1497") or an inclusive range ("1497-1505"):
+  // the range form dumps once per registration whose trace falls inside,
+  // so a chain's evolution across the facts leading into a CP batch can be
+  // captured in one run.
   const char *at_tr = getenv("THVM_WMO_TREEDUMP_TRACE");
   if (at_tr != NULL) {
     static u32 tr_dumped = 0xffffffffu;
-    u32 tr_target = (u32)atoi(at_tr);
-    if (trace != tr_target || tr_dumped == tr_target) return;
-    tr_dumped = tr_target;
+    u32 tr_lo = (u32)atoi(at_tr);
+    u32 tr_hi = tr_lo;
+    const char *dash = strchr(at_tr, '-');
+    if (dash != NULL) tr_hi = (u32)atoi(dash + 1);
+    if (trace < tr_lo || trace > tr_hi || tr_dumped == trace) return;
+    tr_dumped = trace;
+    fprintf(stderr, "WMOTREE at_trace=%u\n", trace);
   } else {
     const char *at = getenv("THVM_WMO_TREEDUMP_AT");
     u32 target = at ? (u32)atoi(at) : 71u;

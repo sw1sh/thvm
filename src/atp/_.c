@@ -21225,6 +21225,19 @@ static u8 sw_corank_h2_gate_drops(SwVaterCtx *c, const u32 *p, u32 p_len,
   return (atp_cp_order_gate(s, &cp, 0u, 1u, c->o_eq, in_eq) == 0u) ? 1u : 0u;
 }
 
+// Historical min-anchor collapse kill switch (THVM_ATP_CORANK_COLLAPSE=1).
+// Default OFF = raw emission: every face-entry emits at its raw
+// (leaf-arrival, chain) position, matching WM's U1_KPsBildenZuGleichung
+// (one CP per tree entry in leaf-list + chain order, no face pairing).
+static int sw_corank_collapse_on(void) {
+  static int ccollapse = -1;
+  if (ccollapse < 0) {
+    const char *e = getenv("THVM_ATP_CORANK_COLLAPSE");
+    ccollapse = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
+  return ccollapse;
+}
+
 static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
   SwVaterCtx *c = (SwVaterCtx *)raw;
   AtpState *s = c->s;
@@ -21468,12 +21481,7 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
           // combinator -auto 6/6 identical, test_atp 136264.
           // THVM_ATP_CORANK_COLLAPSE=1 restores the historical min-anchor
           // pull-up (with the @547 gate) as a bisection kill switch.
-          static int ccollapse = -1;
-          if (ccollapse < 0) {
-            const char *e = getenv("THVM_ATP_CORANK_COLLAPSE");
-            ccollapse = (e != NULL && e[0] == '1') ? 1 : 0;
-          }
-          if (ccollapse &&
+          if (sw_corank_collapse_on() &&
               !sw_corank_suppressed(c, p, p_len, sub, &hits[h], j) &&
               !(cgate && sw_corank_h2_gate_drops(c, p, p_len, sub,
                                                  &hits[h2], j))) {
@@ -21481,7 +21489,19 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
             eff_ch[h]  = raw_ch[h2] * 2u + 1u;
           }
         } else if (o_arr > hits[h].arrival) {
-          eff_ch[h] = raw_ch[h] * 2u;
+          // Anchor-side doubling belongs to the collapse pairing (it opens
+          // odd slots 2*ch_o+1 for pulled-up follow entries).  Under raw
+          // emission (collapse OFF, the default) it must NOT fire: doubling
+          // both-face anchors while o_arr<arr and single-face entries keep
+          // raw eff_ch creates spurious (arr, eff_ch) collisions that break
+          // ties by partner slot age instead of WM's leaf CHAIN order --
+          // the WolframAxioms OrAssociativity fact-1501 batch (owner rule
+          // 1050, sub x3.(x3.x1)): the shared x1.(x1.x2) leaf's chain
+          // [-26,-24,-21,-18,-13,-11] emitted as [-26,-21,-24,-13,-11,-18]
+          // (eq -24 doubled 1->2 collided with eq -21's raw 2; eq -18
+          // doubled 3->6 fell behind the single-face -13/-11 at raw 4/5),
+          // where WM's WM_CPFORMDUMP shows plain chain order.
+          if (sw_corank_collapse_on()) eff_ch[h] = raw_ch[h] * 2u;
         }
       }
       // Same-arrival tie order = (eff_arr, eff_ch, jidx).  eff_ch is
