@@ -33,6 +33,7 @@ BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`
 
 (* Public so the validation test can drive the decoder on a tiny CPU config. *)
 krVaeDecode::usage = "krVaeDecode[z, W, wsub, cfg] decodes a packed Krea 2 image latent z {z_dim, gH, gW} into an RGB image {3, H, W} in [0,1]; W is a name->TTerm VAE-decoder loader, wsub[prefix] slices a sub-Association, cfg has eps/latentsMean/latentsStd.";
+krVaeEncode::usage = "krVaeEncode[img, W, wsub, cfg] encodes an RGB image {3, H, W} in [0,1] into the normalized Krea 2 image latent {z_dim, H/8, W/8} (the distribution MODE: the mean channels of quant_conv, normalized by latentsMean/latentsStd -- the deterministic re-encode the staged low-to-high-resolution sampler needs); W is a name->TTerm VAE loader, wsub[prefix] slices a sub-Association, cfg has eps/zDim/dimMult/numResBlocks/latentsMean/latentsStd.";
 
 Begin["`Private`"];
 
@@ -169,6 +170,92 @@ krVaeDecode[z_, W_, wsub_, cfg_] := Module[{eps, dimMult, nRes, nUp, z2, h, i, u
     h = TSiLU @ krVaeNorm[h, W["decoder.norm_out.gamma"], eps];
     h = krVaeConv[h, W["decoder.conv_out.weight"], W["decoder.conv_out.bias"], 1];  (* ->3 *)
     TUOpMul[TUOpAdd[TClip[h, -1., 1.], TUOpConst[1.]], TUOpConst[0.5]]
+]
+
+(* === encoder ========================================================
+   The AutoencoderKLQwenImage ENCODER, single frame (T=1): the mirror of the
+   decoder above, needed for the staged low-to-high-resolution sampler (MrFlow,
+   github.com/Xingyu-Zheng/MrFlow, Apache-2.0: sample low-res -> decode ->
+   pixel upsample -> RE-ENCODE -> scheduler-consistent renoise -> brief
+   high-res refinement).  Same T=1 collapses as the decoder: causal Conv3d ->
+   Conv2d with the last temporal kernel slice; the temporal halves of the
+   downsamplers (time_conv at flat blocks 5/8) never run on a single frame.
+
+   Structure (WanEncoder3d flat down_blocks, dim_mult {1,2,4,4}, base 96,
+   num_res_blocks 2 -- ResBlock pairs at flat {0,1} {3,4} {6,7} {9,10} with
+   channel-raising conv_shortcut blocks at 3 and 6, spatial downsamplers at
+   {2,5,8}):
+     img {3, H, W} in [0,1]
+       -> x = 2*img - 1
+       -> encoder.conv_in (3x3 pad1, 3->96)
+       -> 4 stages of numResBlocks ResBlocks; stages 0..2 then downsample 2x
+          (asymmetric ZeroPad2d (0,1,0,1) + 3x3 stride-2 conv, resample.1)
+       -> mid: ResBlock(384) + self-attn + ResBlock(384)
+       -> norm_out (L2-channel) -> SiLU -> conv_out (3x3 pad1, ->2*z_dim)
+       -> quant_conv (1x1, 32->32) -> mean = first z_dim channels (the MODE)
+       -> z = (mean - latents_mean) / latents_std  (per channel; the inverse
+          of krVaeDenorm, matching the diffusers pipeline's pre-decode denorm)
+       -> {z_dim, H/8, W/8} *)
+
+(* stride-2 3x3 conv via the stride-1 lowerings: asymmetric pad (right/bottom
+   only, the WanResample ZeroPad2d (0,1,0,1)), full stride-1 conv, then keep
+   every 2nd output pixel.  The subsample is movement-only: pad the odd-sized
+   conv output back to even, reshape {C, H/2, 2, W/2, 2}, take index 1 of the
+   stride axes (the padded row/col lands on dropped indices).  ~4x the minimal
+   downsample-conv FLOPs, but only 3 of these run per encode. *)
+krVaeDownsample[x_, W_] := Module[{y, c, hh, ww},
+    y = TConv2DIm2ColPool[TUOpPad[x, {{0, 0}, {0, 1}, {0, 1}}], W["resample.1.weight"], W["resample.1.bias"]];
+    {c, hh, ww} = Dimensions[y];                                       (* odd: H-1, W-1 *)
+    y = TUOpPad[y, {{0, 0}, {0, 1}, {0, 1}}];                          (* even: H, W *)
+    y = TUOpReshape[y, {c, (hh + 1)/2, 2, (ww + 1)/2, 2}];
+    (* explicit reshape after the axis-dropping Part (the krVaeLastSlice idiom). *)
+    TUOpReshape[y[[All, All, 1, All, 1]], {c, (hh + 1)/2, (ww + 1)/2}]
+]
+
+(* latent normalize: the INVERSE of krVaeDenorm -- z = (mean - latents_mean) /
+   latents_std per channel (the diffusers pipeline normalizes after encode). *)
+krVaeLatentNorm[z_, mean_List, std_List] := Module[{c, hh, ww, m, s},
+    {c, hh, ww} = Dimensions[z];
+    m = TUOpReshape[TTensorCreate[N[mean]], {c, 1, 1}];
+    s = TUOpReshape[TTensorCreate[N[std]], {c, 1, 1}];
+    TUOpMul[TUOpAdd[z, TUOpMul[TUOpExpand[m, {c, hh, ww}], TUOpConst[-1.]]],
+        TUOpRecip @ TUOpExpand[s, {c, hh, ww}]]
+]
+
+krVaeEncode[img_, W_, wsub_, cfg_] := Module[{eps, dimMult, nRes, nStage, zDim, x, h, i, m, bi, resB},
+    eps = cfg["eps"];
+    dimMult = cfg["dimMult"];
+    (* cfg values may arrive as reals (a JSON-derived config); the flat
+       down_blocks indexing builds KEY STRINGS from bi + nRes, and
+       ToString[2.] = "2." silently misses every weight -- force integers. *)
+    nRes = Round[cfg["numResBlocks"]];
+    nStage = Length[dimMult];
+    zDim = Round[cfg["zDim"]];
+    (* [0,1] image -> [-1,1] (the diffusers image preprocessing) + conv_in. *)
+    x = TUOpAdd[TUOpMul[img, TUOpConst[2.]], TUOpConst[-1.]];
+    h = krVaeConv[x, W["encoder.conv_in.weight"], W["encoder.conv_in.bias"], 1];
+    (* stages over the FLAT down_blocks numbering: nRes ResBlocks each, then a
+       downsampler for all but the last stage. *)
+    bi = 0;
+    Do[ resB = Table[wsub["encoder.down_blocks." <> ToString[bi + m] <> "."], {m, 0, nRes - 1}];
+        bi = bi + nRes;
+        h = Fold[krVaeResBlock[#1, #2, eps] &, h, resB];
+        If[ i < nStage - 1,
+            h = krVaeDownsample[h, wsub["encoder.down_blocks." <> ToString[bi] <> "."]];
+            bi = bi + 1
+        ];
+        h = TRealize[h],
+        {i, 0, nStage - 1}];
+    (* mid block: ResBlock -> self-attn -> ResBlock (decoder's mirror). *)
+    h = krVaeResBlock[h, wsub["encoder.mid_block.resnets.0."], eps];
+    h = krVaeAttn[h, wsub["encoder.mid_block.attentions.0."], eps];
+    h = krVaeResBlock[h, wsub["encoder.mid_block.resnets.1."], eps];
+    (* head: norm_out -> SiLU -> conv_out (->2*z_dim) -> quant_conv (1x1) ->
+       MODE (mean channels) -> latent normalize. *)
+    h = TSiLU @ krVaeNorm[h, W["encoder.norm_out.gamma"], eps];
+    h = krVaeConv[h, W["encoder.conv_out.weight"], W["encoder.conv_out.bias"], 1];
+    h = krVaeConv[h, W["quant_conv.weight"], W["quant_conv.bias"], 0];
+    krVaeLatentNorm[h[[1 ;; zDim]], cfg["latentsMean"], cfg["latentsStd"]]
 ]
 
 End[];
