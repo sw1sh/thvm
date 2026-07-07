@@ -7257,7 +7257,11 @@ static u8 atp_wmo_eq_dist_rhs_base(const AtpState *s, u32 src_trace) {
   // the natural left side as the distinguished face -> dist_rhs=0.  A
   // genuine two-parent superposition takes the dist_rhs=1 default.
   if (reason == TRACE_SIMPLIFY) {
-    return (p_a != ATP_TRACE_NONE) ? 0u : 1u;
+    // An IR-victim re-derivation: WM's IR_PufferAuslesen re-queues the
+    // victim pair with its faces in the ORIGINAL rule order, and the
+    // kept equation's WM-distinguished face lands on thvm's stored RHS
+    // (the OA fact-318 tie: WM sweeps the reverse face first).
+    return 1u;
   }
   if (reason == TRACE_CP) {
     // Post-4df4f2ab the stored raw pair is WM's (KPLinks, KPRechts): the
@@ -7348,6 +7352,21 @@ static u8 atp_cp_wm_side_swaps(const AtpState *s, u32 src_trace,
   return 1u;
 }
 
+static u8 atp_wmo_eq_dist_rhs_dbg(const AtpState *s, u32 src_trace, u8 verdict) {
+  static int on = -1;
+  if (on < 0) on = getenv("THVM_ATP_DIST_TRACE") ? 1 : 0;
+  if (on) {
+    u32 reason = 999u;
+    if (src_trace != ATP_TRACE_NONE && src_trace < s->n_trace) {
+      Term e = s->trace[src_trace];
+      if (term_tag(e) == TAG_CTR) reason = term_ext(e);
+    }
+    fprintf(stderr, "DISTREG trace=%u reason=%u dist=%u n_rules=%u\n",
+            src_trace, reason, verdict, s->n_rules);
+  }
+  return verdict;
+}
+
 static u8 atp_wmo_eq_dist_rhs(const AtpState *s, u32 src_trace) {
   // The flag answers: is WM's distinguished face (KPLinks) thvm's stored
   // RHS?  The physical CP_WM_SIDE swap reorders an unorientable equation
@@ -7358,8 +7377,10 @@ static u8 atp_wmo_eq_dist_rhs(const AtpState *s, u32 src_trace) {
   // case's decision depends on the pre-swap term order, not recoverable
   // here from the stored sides), so read it back rather than recompute.
   u8 base = atp_wmo_eq_dist_rhs_base(s, src_trace);
-  if (s != NULL && s->last_cp_wm_side_swapped) return (u8)(1u - base);
-  return base;
+  if (s != NULL && s->last_cp_wm_side_swapped) {
+    return atp_wmo_eq_dist_rhs_dbg(s, src_trace, (u8)(1u - base));
+  }
+  return atp_wmo_eq_dist_rhs_dbg(s, src_trace, base);
 }
 
 // Push an axiom / pending equation onto the CP queue.  The
