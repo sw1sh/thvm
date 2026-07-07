@@ -1151,6 +1151,11 @@ static inline int atp_cp_uid_orphan(const AtpState *s, u32 j) {
 // = 1.  A deprioritized CP gets priority ATP_CP_PRI_NEVER (heap sinks it,
 // weight pick never reaches it) yet keeps its real cp_seq (FIFO ages it).
 static u8  g_cp_push_deprio = 0u;
+// Origin class the next CP push stamps into cp_kind (see the AtpState
+// field).  CP-generation pushes leave it at the TRACE_CP default;
+// atp_enqueue_equation arms it with its reason (TRACE_AXIOM /
+// TRACE_SIMPLIFY) around its push and restores the default after.
+static u8  g_cp_push_kind = (u8)TRACE_CP;
 // Exact combined node count of the CP pair the NEXT (singleton)
 // atp_push_cps_traced call receives, or 0 = unknown.  Set by
 // sw_form_push from the unify-apply node-tally bracket immediately
@@ -1324,8 +1329,9 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   u32  *nlnr = (u32 *)realloc(s->cp_last_norm_r_revision,
                               cap * sizeof(u32));
   u8   *ndp = (u8  *)realloc(s->cp_deprio, cap * sizeof(u8));
+  u8   *nk  = (u8  *)realloc(s->cp_kind,   cap * sizeof(u8));
   if (nc == NULL || nt == NULL || np == NULL || nq == NULL || ng == NULL
-      || np2 == NULL || nlnr == NULL || ndp == NULL) {
+      || np2 == NULL || nlnr == NULL || ndp == NULL || nk == NULL) {
     fprintf(stderr, "atp_ensure_cp_cap: realloc to %u CPs failed\n", cap);
     exit(1);
   }
@@ -1333,7 +1339,9 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   s->cp_pri = np; s->cp_seq = nq; s->cp_goal = ng; s->cp_pri2 = np2;
   s->cp_last_norm_r_revision = nlnr;
   s->cp_deprio = ndp;
+  s->cp_kind = nk;
   memset(s->cp_deprio + old_cap, 0, (size_t)(cap - old_cap) * sizeof(u8));
+  memset(s->cp_kind + old_cap, TRACE_CP, (size_t)(cap - old_cap) * sizeof(u8));
   // Deferred-CP (`implicit_pair`) arc: lazy-grow the parallel
   // AtpCpImplicit descriptor array + the per-slot tag bitset only when
   // already allocated (atp_cp_implicit_push allocates both on the first
@@ -6582,6 +6590,7 @@ fn void thvm_atp_free(AtpState *s) {
     free(s->cp_packed);
   }
   free(s->cp_trace);
+  free(s->cp_kind);
   free(s->cp_pri);
   free(s->cp_goal);
   free(s->cp_seq);
@@ -6608,6 +6617,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_stash_trace);
   free(s->cp_stash_nodes);
   free(s->cp_stash_ultimate);
+  free(s->cp_stash_kind);
   // IR-victim buffer (use_wm_demote; NULL when the flag never fired).
   free(s->irv_lhs);
   free(s->irv_rhs);
@@ -7242,8 +7252,19 @@ static void atp_trace_cp_rematerialize(AtpState *s, u32 tid, Term lhs, Term rhs)
 static int atp_lr_sortieren_rec(Term lhs, Term rhs);
 
 static u8 atp_wmo_eq_dist_rhs_base(const AtpState *s, u32 src_trace) {
-  if (s == NULL || src_trace == ATP_TRACE_NONE || src_trace >= s->n_trace) {
-    return 1u;
+  if (s == NULL) return 1u;
+  if (src_trace == ATP_TRACE_NONE || src_trace >= s->n_trace) {
+    // Past the proof-trace soft cap the trace entry is gone, but the
+    // popped CP's origin class survives on the queue (cp_kind ->
+    // last_popped_kind).  Apply the same class rule as the tagged
+    // branches below: a superposition CP stores WM's (KPLinks,
+    // KPRechts), distinguished face = stored LHS (0); a SIMPLIFY
+    // re-derivation keeps the stored RHS (1).  An axiom never outlives
+    // the cap (pushed at init); it keeps the historical default.
+    // (WolframAxioms OrAssociativity fact 318: n_trace crosses the
+    // 131072 cap near fact 300, so the trace-less default walked the
+    // B/E sweep faces reversed and flipped the fact-533 weight tie.)
+    return (s->last_popped_kind == (u8)TRACE_CP) ? 0u : 1u;
   }
   Term e = s->trace[src_trace];
   if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 2u) return 1u;
@@ -7498,7 +7519,12 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   // victim, so the auto-MaxWeight stash must not swallow them here either;
   // the OA -auto fact-1378 class: the w1=2141 rule-487 victim sat in
   // thvm's stash while WM's FIFO popped it).
+  // Stamp the origin class onto the queued CP (survives the proof-trace
+  // soft cap; see cp_kind).  All other push sites are superposition CPs
+  // and keep the TRACE_CP default.
+  g_cp_push_kind = (u8)reason;
   atp_cp_heap_push(s, lhs, rhs, trace_idx, is_ultimate, enq_raw);
+  g_cp_push_kind = (u8)TRACE_CP;
   return 1;
 }
 
@@ -9939,6 +9965,7 @@ static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr);
 static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
   u8  *tc = s->cp_packed[i];s->cp_packed[i]= s->cp_packed[j];s->cp_packed[j]= tc;
   u32  tt = s->cp_trace[i]; s->cp_trace[i] = s->cp_trace[j]; s->cp_trace[j] = tt;
+  u8   tk = s->cp_kind[i];  s->cp_kind[i]  = s->cp_kind[j];  s->cp_kind[j]  = tk;
   u32  tp = s->cp_pri[i];   s->cp_pri[i]   = s->cp_pri[j];   s->cp_pri[j]   = tp;
   u32  tq = s->cp_seq[i];   s->cp_seq[i]   = s->cp_seq[j];   s->cp_seq[j]   = tq;
   u32  tg = s->cp_goal[i];  s->cp_goal[i]  = s->cp_goal[j];  s->cp_goal[j]  = tg;
@@ -10088,7 +10115,8 @@ static void atp_kdh_build(AtpState *s) {
 // = unknown -> the weight modes re-walk the sides as before).
 static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
                                       Term lhs, Term rhs, u32 trace,
-                                      u8 is_ultimate, u32 lhs_nodes) {
+                                      u8 is_ultimate, u32 lhs_nodes,
+                                      u8 kind) {
   atp_ensure_cp_cap(s, s->n_cps + 1);
   u32 i = s->n_cps;
   // Eager packed slot: make sure no stale deferred-CP tag aliases the
@@ -10097,6 +10125,7 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   atp_cp_implicit_clear(s, i);
   s->cp_packed[i]= packed;
   s->cp_trace[i] = trace;
+  s->cp_kind[i]  = kind;
   // Fresh CP: no IR-side normalize witness yet -- force the IR sweep to
   // normalize this CP at least once before the cookie can short-circuit.
   s->cp_last_norm_r_revision[i] = ATP_CP_NORM_COOKIE_NONE;
@@ -10186,35 +10215,38 @@ static u32 atp_auto_maxw_bound(AtpState *s) {
 // atp_auto_maxw_drain once the bound grows past its weight, so the CP
 // is deferred, NEVER discarded -- completeness preserved.
 static void atp_cp_stash_push(AtpState *s, u8 *packed, u32 cp_nodes,
-                              u32 trace, u8 is_ultimate) {
+                              u32 trace, u8 is_ultimate, u8 kind) {
   if (s->n_cp_stash >= s->cp_stash_cap) {
     u32 ncap = s->cp_stash_cap ? s->cp_stash_cap * 2u : 256u;
     u8 **np  = (u8 **)realloc(s->cp_stash_packed, ncap * sizeof(u8 *));
     u32 *nt  = (u32 *)realloc(s->cp_stash_trace,  ncap * sizeof(u32));
     u32 *nn  = (u32 *)realloc(s->cp_stash_nodes,  ncap * sizeof(u32));
+    u8  *nk  = (u8  *)realloc(s->cp_stash_kind,   ncap * sizeof(u8));
     // Lazy-grow cp_stash_ultimate only when the flag is on; engine
     // byte-identical when off.
     u8  *nu  = s->use_initial_ultimate
                  ? (u8 *)realloc(s->cp_stash_ultimate, ncap * sizeof(u8))
                  : NULL;
-    if (np == NULL || nt == NULL || nn == NULL
+    if (np == NULL || nt == NULL || nn == NULL || nk == NULL
         || (s->use_initial_ultimate && nu == NULL)) {
       // Allocation failure: rather than leak or lose the CP, admit it
       // directly (slow path, but sound -- never drops a proof CP).
-      free(np); free(nt); free(nn); free(nu);
+      free(np); free(nt); free(nn); free(nk); free(nu);
       Term l = 0, r = 0;
       acp_unpack(packed, &l, &r);
       atp_cp_heap_insert_packed(s, packed, cp_nodes, l, r, trace,
-                                is_ultimate, 0xffffffffu);
+                                is_ultimate, 0xffffffffu, kind);
       return;
     }
     s->cp_stash_packed = np; s->cp_stash_trace = nt; s->cp_stash_nodes = nn;
+    s->cp_stash_kind = nk;
     if (s->use_initial_ultimate) s->cp_stash_ultimate = nu;
     s->cp_stash_cap = ncap;
   }
   s->cp_stash_packed[s->n_cp_stash]  = packed;
   s->cp_stash_trace[s->n_cp_stash]   = trace;
   s->cp_stash_nodes[s->n_cp_stash]   = cp_nodes;
+  s->cp_stash_kind[s->n_cp_stash]    = kind;
   if (s->cp_stash_ultimate != NULL) {
     s->cp_stash_ultimate[s->n_cp_stash] = is_ultimate;
   }
@@ -10247,11 +10279,13 @@ static void atp_auto_maxw_drain(AtpState *s, u8 force) {
       u8 ult = (s->cp_stash_ultimate != NULL) ? s->cp_stash_ultimate[r] : 0u;
       atp_cp_heap_insert_packed(s, s->cp_stash_packed[r],
                                 s->cp_stash_nodes[r], l, rr,
-                                s->cp_stash_trace[r], ult, 0xffffffffu);
+                                s->cp_stash_trace[r], ult, 0xffffffffu,
+                                s->cp_stash_kind[r]);
     } else {
       s->cp_stash_packed[w]   = s->cp_stash_packed[r];
       s->cp_stash_trace[w]    = s->cp_stash_trace[r];
       s->cp_stash_nodes[w]    = s->cp_stash_nodes[r];
+      s->cp_stash_kind[w]     = s->cp_stash_kind[r];
       if (s->cp_stash_ultimate != NULL) {
         s->cp_stash_ultimate[w] = s->cp_stash_ultimate[r];
       }
@@ -10434,7 +10468,8 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     if (s->auto_max_cp_weight_base > 0u && (!raw_untreated || stash_raw)) {
       u32 bound = atp_auto_maxw_bound(s);
       if (bound > 0u && cp_nodes > bound) {
-        atp_cp_stash_push(s, packed, cp_nodes, trace, is_ultimate);
+        atp_cp_stash_push(s, packed, cp_nodes, trace, is_ultimate,
+                          g_cp_push_kind);
         g_acp_fuse.valid = 0u;
         return;
       }
@@ -10450,7 +10485,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     }
   }
   atp_cp_heap_insert_packed(s, packed, cp_nodes, lhs, rhs, trace,
-                            is_ultimate, lhs_nodes);
+                            is_ultimate, lhs_nodes, g_cp_push_kind);
   g_acp_fuse.valid = 0u;   // the fused weigh state is consume-once
 }
 
@@ -10527,6 +10562,7 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   u32 i = s->n_cps;
   s->cp_packed[i] = NULL;          // deferred slot marker
   s->cp_trace[i]  = cp_trace_id;
+  s->cp_kind[i]   = g_cp_push_kind;
   s->cp_last_norm_r_revision[i] = ATP_CP_NORM_COOKIE_NONE;
   s->cp_deprio[i] = g_cp_push_deprio;
   s->cp_pri[i]    = s->cp_deprio[i]
@@ -10742,6 +10778,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
       s->cp_packed[i] = s->cp_packed[last];
       s->cp_packed[last] = NULL;
       s->cp_trace[i] = s->cp_trace[last];
+      s->cp_kind[i]  = s->cp_kind[last];
       s->cp_pri[i]   = s->cp_pri[last];
       s->cp_seq[i]   = s->cp_seq[last];
       s->cp_goal[i]  = s->cp_goal[last];
@@ -11057,6 +11094,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     atp_cp_slot_read(s, j, lhs_out, rhs_out);
   }
   s->last_popped_trace = s->cp_trace[j];
+  s->last_popped_kind  = s->cp_kind[j];
   // Cleared per pop; the KBO_UN orient branch sets it iff the CP-formation
   // side swap physically fires, so the emission mirror never reads a stale
   // verdict from an earlier (e.g. orientable) selection.
@@ -11173,6 +11211,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_packed[j]    = s->cp_packed[last];
     s->cp_packed[last] = NULL;          // vacated slot: leave it empty
     s->cp_trace[j] = s->cp_trace[last];
+    s->cp_kind[j]  = s->cp_kind[last];
     s->cp_pri[j]   = s->cp_pri[last];
     s->cp_seq[j]   = s->cp_seq[last];
     s->cp_goal[j]  = s->cp_goal[last];
@@ -15549,6 +15588,7 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
       s->cp_packed[w] = s->cp_packed[i];
       s->cp_packed[i] = NULL;
       s->cp_trace[w]  = s->cp_trace[i];
+      s->cp_kind[w]   = s->cp_kind[i];
       s->cp_pri[w]    = s->cp_pri[i];
       s->cp_seq[w]    = s->cp_seq[i];
       s->cp_goal[w]   = s->cp_goal[i];
@@ -15751,6 +15791,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
           s->cp_packed[i] = NULL;
         }
         s->cp_trace[w] = s->cp_trace[i];
+        s->cp_kind[w] = s->cp_kind[i];
         s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
         if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
           if (is_impl) {
@@ -15794,6 +15835,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
         s->cp_packed[i] = NULL;
       }
       s->cp_trace[w] = s->cp_trace[i];
+      s->cp_kind[w] = s->cp_kind[i];
       s->cp_last_norm_r_revision[w] = r_rev_snap;
       if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
       if (is_impl) {
@@ -15903,6 +15945,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->cp_packed[i] = NULL;
     }
     s->cp_trace[w] = s->cp_trace[i];
+    s->cp_kind[w] = s->cp_kind[i];
     s->cp_last_norm_r_revision[w] = nf_witness ? r_rev_snap
                                             : ATP_CP_NORM_COOKIE_NONE;
     // Preserve Act_ultimate across the WM AP_generic reweight: an
