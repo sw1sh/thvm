@@ -28,13 +28,23 @@ def parse_auto(s):
     s = s.strip()
     def p(i):
         m = re.match(r'[A-Za-z]\w*', s[i:]); name = m.group(0); i += m.end()
+        # WM IO_DruckeFlex compresses n iterated applications of a unary
+        # operator as `f^n(arg)` (e.g. not^3(x1) = not(not(not(x1)))).
+        rep = 1
+        rm = re.match(r'\^(\d+)', s[i:])
+        if rm:
+            rep = int(rm.group(1)); i += rm.end()
         if i < len(s) and s[i] == '(':
             i += 1; args = []
             while True:
                 a, i = p(i); args.append(a)
                 if s[i] == ',': i += 1
                 elif s[i] == ')': i += 1; break
-            return ('o', tuple(args)), i
+            node = ('o', tuple(args))
+            # unfold f^rep(arg) into rep nested single-arg applications
+            for _ in range(rep - 1):
+                node = ('o', (node,))
+            return node, i
         return (('v', name) if re.fullmatch(r'x\d+', name) else ('k', name)), i
     return p(0)[0]
 
