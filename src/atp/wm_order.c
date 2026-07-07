@@ -2336,6 +2336,14 @@ static void wmo_dump_tree(AtpWmOrder *w, u8 tree, const char *label) {
 }
 
 static void atp_wmo_remove_trace(AtpState *s, u32 trace) {
+  // Env-gated eviction trace (THVM_ATP_WMO_DEL_TRACE): one line per
+  // tree eviction with the victim uid and the live rule count, so a
+  // divergent parent-liveness timeline vs WM can be read directly.
+  {
+    static int dt = -1;
+    if (dt < 0) dt = (getenv("THVM_ATP_WMO_DEL_TRACE") != NULL) ? 1 : 0;
+    if (dt) fprintf(stderr, "WMODEL uid=%u n_rules=%u\n", trace, s->n_rules);
+  }
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   if (w == NULL) return;
   static int wmo_dump = -1;
