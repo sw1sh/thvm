@@ -20559,13 +20559,19 @@ static u32 atp_cp_order_gate(AtpState *s, CriticalPair *buf,
     u8 drop = 0u;
     u8 drop_outer = 0u;
     if (peak != 0) {
+      // Since the CP-emission side fix (4df4f2ab) the built pair is WM's
+      // (KPLinks, KPRechts) = (sigma(host.rhs), reduct): the outer
+      // KPActionGR test TermGroesserUnif(KPLinks, Ueberlappung) reads
+      // cp.LHS, and the inner KPActionRG test's KPRechtsInnen -- the
+      // spliced sigma(rin) at the overlap position -- lives inside
+      // cp.RHS (the reduct carries the position coordinates).
       if (outer_eq) {
-        Term a = buf[k].rhs, b = peak;
+        Term a = buf[k].lhs, b = peak;
         thvm_normalize_vars(&a, &b);
         if (atp_compare(s, a, b) == KBO_GT) drop = drop_outer = 1u;
       }
       if (!drop && inner_eq) {
-        Term in_new = atp_cp_pos_subterm(buf[k].lhs,
+        Term in_new = atp_cp_pos_subterm(buf[k].rhs,
                                          buf[k].pos, buf[k].pos_len);
         Term in_old = atp_cp_pos_subterm(peak, buf[k].pos, buf[k].pos_len);
         if (in_new != 0 && in_old != 0) {
