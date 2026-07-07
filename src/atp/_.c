@@ -14751,27 +14751,6 @@ static Term mnf_norm_steps(AtpState *s, Term t, u32 step_cap) {
 #endif
 }
 
-// Materialize the R+E normalization chain of member `par` as MNF nodes,
-// one rewrite per node, so the proof extractor's single-step edge
-// replay covers ExpandRewrite joins.  Called only once a join via this
-// member's NF is already established -- the chain's final insert then
-// records the join witness (or an intermediate collides first, which is
-// an equally valid meet).
-static void mnf_materialize_nf_chain(AtpState *s, AtpMnf *m, u32 par) {
-  u8 col = m->nodes[par].colour;
-  u8 gl  = m->nodes[par].gl_steps;
-  u8 ar  = m->nodes[par].antir_steps;
-  for (u32 g = 0; g < 256u && !m->joined; g++) {
-    Term cur = m->nodes[par].term;
-    Term nxt = mnf_norm_steps(s, cur, 1u);
-    if (kbo_eq(nxt, cur)) break;         // normal form reached
-    u32 idx = MNF_MAX_NODES;
-    if (mnf_insert(m, nxt, col, gl, ar, par, &idx)) return;   // JOIN
-    if (idx == MNF_MAX_NODES) break;     // table full
-    par = idx;
-  }
-}
-
 static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
   (void)budget;   // WM's expansion loop has no per-check budget
   if (m->joined) return 1;
@@ -14835,17 +14814,44 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
       u32 par = m->interest[k];
       u8  col = m->nodes[par].colour;
       Term nf = mnf_norm_steps(s, m->nodes[par].term, 4096u);
-      // (a) main-table collision on the NF.
+      {
+        static int mt = -1;
+        if (mt < 0) mt = getenv("THVM_ATP_MNF_NF_TRACE") != NULL ? 1 : 0;
+        if (mt) {
+          fprintf(stderr, "MNFNF id=%u col=%d nf=", par + 1u,
+                  (col == MNF_GREEN) ? 2 : 1);
+          atp_dbg_print_term(stderr, nf);
+          fputc('\n', stderr);
+        }
+      }
+      // (a) main-table collision on the NF.  Record the join by
+      // inserting the NF as a node under `par` (ONE normalize edge):
+      // the insert collides with the opposite-colour member and latches
+      // the witness.  Do NOT re-derive the chain stepwise -- a
+      // restart-from-root single-step walk can reach a DIFFERENT normal
+      // form than the one-shot mixmost normalize (which continues from
+      // the splice position), silently losing the join (MeredithAxioms
+      // AndAssociativity joined 3 checks late).  The normalize edge is
+      // multi-step, so the proof extractor's single-step replay skips
+      // it (extraction degrades, the verdict does not).
       u32 idx = mnf_lookup(m, nf, mnf_hash(nf));
       if (idx != MNF_MAX_NODES && m->nodes[idx].colour != col) {
-        mnf_materialize_nf_chain(s, m, par);
+        mnf_insert(m, nf, col, m->nodes[par].gl_steps,
+                   m->nodes[par].antir_steps, par, NULL);
         break;
       }
-      // (b) this round's opposite-colour NFs (the side hash).
+      // (b) this round's opposite-colour NFs (the side hash): insert
+      // the earlier member's NF as its node first, then ours -- the
+      // second insert collides cross-colour and latches the join.
       for (u32 j = 0; j < n_nf; j++) {
         if (nf_col[j] != col && kbo_eq(nf_term[j], nf)) {
-          mnf_materialize_nf_chain(s, m, nf_from[j]);
-          if (!m->joined) mnf_materialize_nf_chain(s, m, par);
+          u32 fidx = MNF_MAX_NODES;
+          mnf_insert(m, nf_term[j], nf_col[j],
+                     m->nodes[nf_from[j]].gl_steps,
+                     m->nodes[nf_from[j]].antir_steps, nf_from[j], &fidx);
+          if (!m->joined)
+            mnf_insert(m, nf, col, m->nodes[par].gl_steps,
+                       m->nodes[par].antir_steps, par, NULL);
           break;
         }
       }
