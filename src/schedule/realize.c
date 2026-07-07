@@ -165,7 +165,9 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
   static int gc_disabled_env  = -1;
   static int gc_kb_env        = -1;
   static int gc_device_mb_env = -1;
+  static int gc_cuda_floor_gb = -1;
   static u64 gc_device_baseline = 0;
+  static u64 gc_cuda_baseline   = 0;
   if (gc_disabled_env == -1) {
     const char *e = getenv("THVM_GC");
     gc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
@@ -178,6 +180,10 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
     const char *e = getenv("THVM_GC_DEVICE_MB");
     gc_device_mb_env = (e != NULL) ? atoi(e) : 512;
   }
+  if (gc_cuda_floor_gb == -1) {
+    const char *e = getenv("THVM_CUDA_GC_FLOOR_GB");
+    gc_cuda_floor_gb = (e != NULL) ? atoi(e) : 0;   // 0 = CUDA device-pressure GC OFF
+  }
   if (gc_disabled_env) return;
   u64 trigger_words = (gc_kb_env > 0)
                         ? (u64)gc_kb_env * 128
@@ -189,18 +195,34 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
     if (dev > gc_device_baseline + (u64)gc_device_mb_env * (1ull << 20))
       device_pressure = 1;
   }
-  // NOTE: the device-pressure term deliberately does NOT include CUDA live
-  // bytes.  Counting them made the Cheney fire ~48x during the Krea 24GB
-  // weight upload -- a Cheney-under-CUDA-load path never exercised before --
-  // and the device context poisoned with an async CUDA_ERROR_ILLEGAL_ADDRESS
-  // in the upload phase (gen5/7/8; gen3 without the term was clean).  Wire
-  // CUDA into the trigger only together with hardening Cheney's root set for
-  // the CUDA upload path (part of the opt-in THVM_CUDA_FWD_RECLAIM arc).
+  // CUDA device-pressure trigger (opt-in via THVM_CUDA_GC_FLOOR_GB).  Counting
+  // CUDA bytes unconditionally made the Cheney fire ~48x during the Krea 24GB
+  // weight upload and poisoned the context with an async ILLEGAL_ADDRESS -- the
+  // upload phase roots weights through EXTERN_PINNED only AFTER each TToDevice
+  // returns, so a mid-upload collect drops an in-flight weight.  Gating on a
+  // FLOOR (well above the ~22GB resident weight set) sidesteps that: the GC only
+  // fires once the DENOISE loop's intermediate leak grows past the floor, by
+  // which point every weight is rooted and the collect is safe.  Pairs with the
+  // THVM_CUDA_FWD_RECLAIM sweep: Cheney compacts the WL-finalized wrappers'
+  // dead heap cells so the next realize's heap-rooted mark stops preserving
+  // their buffers, and the sweep then reclaims them (the Metal denoise-loop
+  // flow, now reachable on CUDA).
+#ifdef THVM_HAS_CUDA
+  if (gc_cuda_floor_gb > 0) {
+    u64 cdev = cuda_buf_live_bytes();
+    u64 floor = (u64)gc_cuda_floor_gb * (1ull << 30);
+    if (cdev > floor && cdev > gc_cuda_baseline + (u64)gc_device_mb_env * (1ull << 20))
+      device_pressure = 1;
+  }
+#endif
   if (heap_pressure || device_pressure) {
     Term roots[1] = { *res_io };
     gc_collect(roots, 1);
     *res_io = roots[0];
     gc_device_baseline = thvm_metal_live_bytes();
+#ifdef THVM_HAS_CUDA
+    gc_cuda_baseline = cuda_buf_live_bytes();
+#endif
   }
 }
 

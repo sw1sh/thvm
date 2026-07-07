@@ -9,6 +9,23 @@
 // run path without the KernelEntry machinery, the way test_metal_real
 // drives the Metal backend through thvm_metal_* helpers.
 
+fn int jit_is_capturing(void);   // defined in jit/capture.c (unity build)
+
+// Realize-boundary GPU drain.  Kernels launch ASYNC on CUDA_CUR_STREAM (the
+// per-launch cuCtxSynchronize was removed for pipelining, jit.c:481).  Without
+// draining at the realize boundary, realize N's still-in-flight kernels race
+// the pool rollback's cuMemFreeAsync + realize N+1's arena reuse + freelist
+// cuMemsetD8 recycle, so a later realize reads a buffer a prior kernel had not
+// finished writing -- the Krea velocity froze at a bias-only constant on the
+// 2nd+ velNet realize (THVM_CUDA_SYNC=1 masked it per-launch).  One sync per
+// realize keeps intra-realize pipelining but orders cross-realize buffer reuse.
+// Skip under capture: the capture/replay stream drains at its own boundaries.
+static void cuda_dispatch_end(void) {
+  if (!CUDA_READY) return;
+  if (jit_is_capturing()) return;
+  cuCtxSynchronize();
+}
+
 Backend CUDA_BACKEND = {
   .id              = 3,
   .view_aware      = 0,   // CUDA kernels read buffers flat (like Metal)
@@ -31,7 +48,7 @@ Backend CUDA_BACKEND = {
   .buf_addr            = cuda_buf_addr,
   .dispatch_begin  = NULL,
   .dispatch_flush  = NULL,
-  .dispatch_end    = NULL,
+  .dispatch_end    = cuda_dispatch_end,
   .dispatch_kernel = cuda_dispatch_kernel,
 };
 

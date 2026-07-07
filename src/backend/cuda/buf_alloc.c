@@ -62,6 +62,52 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
   CUresult r = cuMemAlloc(&dptr, (size_t)nbytes);
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuMemAlloc", r);
+    // One-shot pool-breakdown dump: on the FIRST OOM, walk CUDA_BUFS and
+    // classify where the resident device bytes actually live, so the leak's
+    // holder (freelist / preserved / jit_pinned / plain refcount>0 owner) is
+    // identified instead of guessed.  THVM_CUDA_OOM_DUMP=0 suppresses.
+    static int oom_dumped = 0;
+    if (r == CUDA_ERROR_OUT_OF_MEMORY && !oom_dumped
+        && !(getenv("THVM_CUDA_OOM_DUMP") && getenv("THVM_CUDA_OOM_DUMP")[0] == '0')) {
+      oom_dumped = 1;
+      u8 on_fl[1u << 16] = {0};  // freelist membership (stack, zero-init)
+      for (u32 i = 0; i < CUDA_FREELIST_LEN; i++)
+        if (CUDA_FREELIST[i] < (1u << 16)) on_fl[CUDA_FREELIST[i]] = 1;
+      u64 n_own = 0, b_own = 0, b_pres = 0, b_pin = 0, b_fl = 0,
+          b_live_unpres = 0, b_dead = 0, n_view = 0, b_view = 0;
+      u64 n_pres = 0, n_pin = 0, n_fl = 0, n_dead = 0, n_live_unpres = 0;
+      for (u64 i = 1; i < CUDA_BUFS_NEXT; i++) {
+        CudaBuf *c = &CUDA_BUFS[i];
+        if (c->dptr == 0) continue;
+        if (!c->owns_data) { n_view++; b_view += c->nbytes; continue; }
+        n_own++; b_own += c->nbytes;
+        if (on_fl[i])            { n_fl++;   b_fl   += c->nbytes; }
+        else if (c->jit_pinned)  { n_pin++;  b_pin  += c->nbytes; }
+        else if (c->preserved)   { n_pres++; b_pres += c->nbytes; }
+        else if (c->refcount > 0){ n_live_unpres++; b_live_unpres += c->nbytes; }
+        else                     { n_dead++; b_dead += c->nbytes; }
+      }
+      fprintf(stderr,
+        "=== CUDA OOM DUMP (req %llu B) ===\n"
+        "MEM_LIVE=%.2f GB  PEAK=%.2f GB  bufs_next=%llu  freelist_len=%u\n"
+        "owners: n=%llu bytes=%.2f GB | views: n=%llu bytes=%.2f GB\n"
+        "  freelist-parked : n=%llu  %.2f GB\n"
+        "  jit_pinned      : n=%llu  %.2f GB\n"
+        "  preserved       : n=%llu  %.2f GB\n"
+        "  refcount>0 unpre: n=%llu  %.2f GB\n"
+        "  refcount==0 dead: n=%llu  %.2f GB\n"
+        "=== END OOM DUMP ===\n",
+        (unsigned long long)nbytes,
+        CUDA_MEM_LIVE / 1e9, CUDA_MEM_PEAK / 1e9,
+        (unsigned long long)CUDA_BUFS_NEXT, CUDA_FREELIST_LEN,
+        (unsigned long long)n_own, b_own / 1e9,
+        (unsigned long long)n_view, b_view / 1e9,
+        (unsigned long long)n_fl, b_fl / 1e9,
+        (unsigned long long)n_pin, b_pin / 1e9,
+        (unsigned long long)n_pres, b_pres / 1e9,
+        (unsigned long long)n_live_unpres, b_live_unpres / 1e9,
+        (unsigned long long)n_dead, b_dead / 1e9);
+    }
     fprintf(stderr, "cuda_buf_alloc: %s (%llu bytes)\n",
             CUDA_LAST_ERROR, (unsigned long long)nbytes);
     return 0;

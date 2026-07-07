@@ -178,6 +178,15 @@ fn void cuda_buf_clear_preserved_arena_views(u32 wm) {
     u32 parent = CUDA_BUFS[i].parent_buf_id;
     if (parent == 0) continue;
     CUDA_BUFS[i].preserved = 0;
-    if (parent < CUDA_BUFS_NEXT) CUDA_BUFS[parent].preserved = 0;
+    // Only clear the PARENT when it is itself in THIS realize's arena cohort
+    // [wm, NEXT).  A parent BELOW the watermark is a cross-realize buffer --
+    // e.g. a WL-held weight the tracing GC deliberately preserved, whose
+    // storage a matmul view (Transpose[w]) references via parent_buf_id.
+    // Clearing that weight's preserve bit let the rollback/recycle free a
+    // live weight out from under the WL cache (the Krea denoise-loop
+    // weight-zeroing: the 2nd velNet realize recycled block matmul weights ->
+    // bias-only velocity).  The arena this function targets is always
+    // allocated in the current realize, so >= wm holds for genuine arenas.
+    if (parent >= wm && parent < CUDA_BUFS_NEXT) CUDA_BUFS[parent].preserved = 0;
   }
 }
