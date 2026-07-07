@@ -14263,8 +14263,20 @@ static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
   }
   for (u32 k = 0; k < n && !m->joined; k++) {
     if (mnf_succ_anti[k] == 0u) m->nodes[ni].irred = 0u;   // forward redex
-    Term st = ins_nf ? atp_rules_only_normalize(s, mnf_succ_buf[k], 4096u)
-                     : mnf_succ_buf[k];
+    Term st = mnf_succ_buf[k];
+    if (ins_nf) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      // FT rules-only normalize: dt-indexed matching + the ftnfm subtree
+      // memo make the per-successor NF affordable (the Term-side walk
+      // blew Meredith past 10min).
+      atp_ft_mirror_ensure(s);
+      AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+      st = ft_to_term(atp_rules_only_normalize_ft(s, ft_from_term(a, st, 0),
+                                                  4096u));
+#else
+      st = atp_rules_only_normalize(s, st, 4096u);
+#endif
+    }
     mnf_insert(m, st, col, (u8)(anti + mnf_succ_anti[k]), ni);
   }
 }
