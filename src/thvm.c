@@ -705,6 +705,7 @@ void thvm_init(void) {
                              // stale entries point into a freed heap.
   uop_mov_cache_reset();     // movement-op cache, same lifecycle.
   copy_upload_cache_reset(); // UOP_COPY device-upload cache, same lifecycle.
+  weight_move_cache_reset(); // TC_TRANSPOSE resident weight-movement cache.
   kernel_input_upload_reset(); // cross-backend kernel-input upload cache.
   lam_shape_reset();         // LAM-bound-var shape table; stale
                              // entries reference invalid lam_loc.
@@ -793,6 +794,7 @@ void thvm_free(void) {
   uop_const_cache_reset();
   uop_mov_cache_reset();
   copy_upload_cache_reset();
+  weight_move_cache_reset();
   kernel_input_upload_reset();
   lam_shape_reset();
   extern_pin_clear();
@@ -869,6 +871,7 @@ void thvm_reset(void) {
   uop_const_cache_reset();
   uop_mov_cache_reset();
   copy_upload_cache_reset();
+  weight_move_cache_reset();
   kernel_input_upload_reset();
   lam_shape_reset();
   materialized_loc_clear();

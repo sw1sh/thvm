@@ -863,6 +863,80 @@ static void copy_upload_insert(u64 loc, u32 backend_id, u32 tid) {
   }
 }
 
+// === resident weight-movement cache (THVM_TC_TRANSPOSE) =============
+// Generalizes COPY_UPLOAD_CACHE to a REALIZED movement of a resident weight.
+// Under THVM_TC_TRANSPOSE, fxLinear feeds the matmul `TRealize@Transpose[w]`
+// so the operand is a contiguous {in,out} buffer and the CUDA tiled-WMMA GEMM
+// fires (a Transpose-VIEW would take the naive ~5 TFLOPS path).  That realized
+// permute is, like an upload, STATIC (immutable weight, fixed permutation) and
+// re-bound across every JIT-replay step -- so it must be realized ONCE,
+// jit-pinned (survive the per-realize pool rollback), and read as a stable
+// pre-capture LEAF.  Without this the anonymous permute output is an unpinned
+// compute buffer that the two-phase memory planner classifies as a dead
+// intermediate and interval-packs/frees while replayed matmuls still read it
+// (CUDA_ERROR_ILLEGAL_ADDRESS -- the resident-transpose UAF).  Keyed by the
+// hash-consed transpose node loc (stable: Transpose over the cached weight
+// term) + target backend, so a warmup realize populates it and the capture
+// reuses the same pinned buffer instead of re-emitting a recorded dispatch.
+static CopyUploadSlot WEIGHT_MOVE_CACHE[COPY_UPLOAD_CACHE_CAP];
+
+fn void weight_move_cache_reset(void) {
+  memset(WEIGHT_MOVE_CACHE, 0, sizeof(WEIGHT_MOVE_CACHE));
+}
+
+static u32 weight_move_lookup(u64 loc, u32 backend_id) {
+  backend_id = copy_upload_ctx_backend(backend_id);
+  u32 h = copy_upload_hash(loc, backend_id);
+  for (u32 probe = 0; probe < COPY_UPLOAD_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (COPY_UPLOAD_CACHE_CAP - 1);
+    if (WEIGHT_MOVE_CACHE[i].loc == 0) return 0;
+    if (WEIGHT_MOVE_CACHE[i].loc == loc
+        && WEIGHT_MOVE_CACHE[i].backend_id == backend_id)
+      return WEIGHT_MOVE_CACHE[i].tid;
+  }
+  return 0;
+}
+
+static void weight_move_insert(u64 loc, u32 backend_id, u32 tid) {
+  if (loc == 0 || tid == 0) return;
+  backend_id = copy_upload_ctx_backend(backend_id);
+  u32 h = copy_upload_hash(loc, backend_id);
+  for (u32 probe = 0; probe < COPY_UPLOAD_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (COPY_UPLOAD_CACHE_CAP - 1);
+    if (WEIGHT_MOVE_CACHE[i].loc == 0
+        || (WEIGHT_MOVE_CACHE[i].loc == loc
+            && WEIGHT_MOVE_CACHE[i].backend_id == backend_id)) {
+      WEIGHT_MOVE_CACHE[i].loc        = loc;
+      WEIGHT_MOVE_CACHE[i].backend_id = backend_id;
+      WEIGHT_MOVE_CACHE[i].tid        = tid;
+      return;
+    }
+  }
+}
+
+// THVM_TC_TRANSPOSE feature gate (cached).  The weight-movement pin only makes
+// sense under TC (fxLinear realizes the weight transpose only when this is set);
+// gating the pin on the same env keeps ordinary realized weight-movements in
+// other models planner-managed and makes the resident-weight behavior explicit.
+static int tc_weight_pin_enabled(void) {
+  static int v = -1;
+  if (v < 0) { char const *e = getenv("THVM_TC_TRANSPOSE"); v = (e && e[0] == '1') ? 1 : 0; }
+  return v;
+}
+
+// True iff `tid` is a resident weight upload (a live COPY_UPLOAD_CACHE entry).
+// Gates the weight-movement pin: a realized movement boundary whose kernel
+// input is a cached weight upload is a weight-derived buffer (a transposed
+// weight), not a per-step activation -- so pinning it is the intended resident
+// weight, not an accumulating leak.
+static int copy_upload_has_tid(u32 tid) {
+  if (tid == 0) return 0;
+  for (u32 i = 0; i < COPY_UPLOAD_CACHE_CAP; i++)
+    if (COPY_UPLOAD_CACHE[i].loc != 0 && COPY_UPLOAD_CACHE[i].tid == tid)
+      return 1;
+  return 0;
+}
+
 // Materialize a UOP_COPY[src] node onto the realize backend
 // (CURRENT_BACKEND).  Returns a TAG_TEN resident on that backend.
 //
@@ -6223,6 +6297,25 @@ static Term emit_kernel_for_boundary(u32 bi) {
               (unsigned long long)boundary_loc, (unsigned)op, sv_op,
               op_dev, bn, (unsigned long long)onum, out_dtype);
   }
+  // Resident weight-movement cache hit (cross-realize): a TRealize@Transpose
+  // of a resident weight was already realized+pinned (by a warmup pass or an
+  // earlier replay), so reuse that stable pinned buffer as a pre-capture LEAF
+  // rather than re-emitting the permute as a recorded dispatch the two-phase
+  // planner would free.  Mirrors the MATERIALIZED_LOC / COPY_UPLOAD_CACHE hits;
+  // the buf_refcount>0 guard makes a reclaimed entry a safe miss (re-emit).
+  if (tc_weight_pin_enabled() && uop_is_movement(op)) {
+    u32 wm_tid = weight_move_lookup(boundary_loc, op_backend->id);
+    // No refcount guard (unlike MATERIALIZED_LOC): the cached buffer is
+    // jit-pinned, so it is alive even at refcount 0 (the warmup's matmul
+    // consumers released it) and the next consumer re-increfs the live buffer.
+    // Mirrors copy_upload_lookup, which trusts the pin for the same reason.
+    if (wm_tid != 0 && wm_tid < TENS_NEXT && TENS[wm_tid].buf_id != 0) {
+      Term ten = term_new(0, TAG_TEN, TENS[wm_tid].dtype, wm_tid);
+      BOUNDARY_TID [bi] = wm_tid;
+      BOUNDARY_TERM[bi] = ten;
+      return ten;
+    }
+  }
   u32 out_tid = (op_backend == CURRENT_BACKEND)
                   ? arena_tensor_alloc(bi, out_shape, out_dtype) : 0;
   // Capture-recycle adoption (the JIT memory planner's pop side): under an
@@ -6673,6 +6766,33 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // grad targets) substitutes to a TAG_TEN leaf instead of
   // re-emitting an identical kernel.  See MATERIALIZED_LOC_TABLE
   // comment above for full rationale.
+  // Pin + cross-realize-cache a realized movement (transpose) whose source is
+  // a resident weight upload, so the two-phase capture treats it as a stable
+  // pre-capture leaf (see WEIGHT_MOVE_CACHE).  Gated to a JIT capture + a
+  // weight-derived input so ordinary activation permutes stay planner-managed
+  // (an unpinned, per-step-reclaimed intermediate) and only weights go resident.
+  if (tc_weight_pin_enabled() && uop_is_movement(op)
+      && op_backend->buf_jit_pin != NULL && ke->n_inputs > 0) {
+    // Require EVERY input to be a resident weight upload: a PURE Transpose[w]
+    // (fxLinear's realized weight transpose) reads ONLY the weight, whereas an
+    // attention movement (e.g. Transpose[attn @ Wv]) fuses a matmul and so also
+    // reads per-step ACTIVATIONS -- pinning/caching that would freeze a stale
+    // activation buffer and corrupt the next step (poisoned CUDA context).
+    int all_weight = 1;
+    for (u32 j = 0; j < ke->n_inputs; j++)
+      if (!copy_upload_has_tid(ke->input_tids[j])) { all_weight = 0; break; }
+    if (all_weight) {
+      op_backend->buf_jit_pin(TENS[out_tid].buf_id);
+      // Hold a TenDesc reference so the tid is not recycled once the warmup's
+      // matmul consumer releases it (the buffer is pinned, but a refcount-0
+      // TenDesc slot could be reallocated to a different tensor, dangling the
+      // cache).  Uploads avoid this by being WL-referenced weights; a realized
+      // transpose is an anonymous intermediate, so the cache holds its ref.
+      TENS[out_tid].refcount++;
+      weight_move_insert(boundary_loc, op_backend->id, out_tid);
+    }
+  }
+
   materialized_loc_insert(boundary_loc, out_tid);
 
   return kernel_term;
