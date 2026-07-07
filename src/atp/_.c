@@ -7235,6 +7235,8 @@ static void atp_trace_cp_rematerialize(AtpState *s, u32 tid, Term lhs, Term rhs)
 // distinguished face (KPLinks) thvm's natural stored RHS?  1 = KPLinks
 // = sigma(r_i) on thvm's cp.rhs (two-parent superposition / axiom);
 // 0 = KPLinks on thvm's cp.lhs (single-parent re-derivation).
+static int atp_lr_sortieren_rec(Term lhs, Term rhs);
+
 static u8 atp_wmo_eq_dist_rhs_base(const AtpState *s, u32 src_trace) {
   if (s == NULL || src_trace == ATP_TRACE_NONE || src_trace >= s->n_trace) {
     return 1u;
@@ -7249,13 +7251,28 @@ static u8 atp_wmo_eq_dist_rhs_base(const AtpState *s, u32 src_trace) {
   // real parent (the dropped fact); a TRACE_CP with the otherParent
   // absent is the same shape from the superposition lane.  Both keep
   // the natural left side as the distinguished face -> dist_rhs=0.  A
-  // genuine two-parent superposition and an initial axiom (TRACE_AXIOM,
-  // both parents absent) take the dist_rhs=1 default.
+  // genuine two-parent superposition takes the dist_rhs=1 default.
   if (reason == TRACE_SIMPLIFY) {
     return (p_a != ATP_TRACE_NONE) ? 0u : 1u;
   }
   if (reason == TRACE_CP) {
     return (p_a != ATP_TRACE_NONE && p_b == ATP_TRACE_NONE) ? 0u : 1u;
+  }
+  // INITIAL AXIOM: WM stores an input equation LRSortieren-canonicalised
+  // (SpezNormierung.c :517-534) and U1_KPsBildenZuGleichung sweeps its
+  // stored LinkeSeite first (A/B on l, then D/E on r -- no per-face
+  // adjustment; Unifikation1.c :1596/:1637).  So WM's distinguished face
+  // is thvm's stored RHS exactly when LRSortieren would SWAP thvm's
+  // stored pair.  The former blanket dist_rhs=1 walked the wrong face
+  // first whenever thvm's stored orientation already matched WM's
+  // canonical one: ShefferAxioms OrAssociativity eq -2 (axiom 3,
+  // (x1.(x2.x3))^2 # ((x2.x2).x1).((x3.x3).x1), stored A#B by BOTH
+  // engines) had its activation sweep B-side subterms {L.1.1, L.2.1}
+  // where WM's WM_CPFORMDUMP walks A-side {L.1.2, L.2.2} -- the CPNr/
+  // FIFO-age fork behind the fact-52 divergence.
+  if (reason == TRACE_AXIOM && term_ctr_n(e) >= 4u) {
+    Term al = term_ctr_at(e, 2), ar = term_ctr_at(e, 3);
+    return (atp_lr_sortieren_rec(al, ar) > 0) ? 1u : 0u;
   }
   return 1u;
 }
