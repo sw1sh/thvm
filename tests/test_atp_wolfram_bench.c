@@ -2124,10 +2124,18 @@ int main(int argc, char **argv) {
     printf("   cone: %.2fs  n_trace=%u\n",
            (double)(clock() - tc0) / CLOCKS_PER_SEC, s->n_trace);
   }
-  // Mirror the WL bridge (thvmlink_atp.c): cone on the packed trace,
-  // THEN materialize, so every later trace consumer (proof extraction,
-  // dump modes) sees live Term entries.  No-op unless trace_pack.
-  thvm_atp_materialize_trace(s);
+  // The WL bridge (thvmlink_atp.c) cones the packed trace then
+  // materializes it into live Terms for atp_extract_goal_chains.  The
+  // BENCH has no proof extraction and reads nothing off the live trace,
+  // so that population-wide rebuild (all ORIENT/FVI + every live-rule
+  // birth + closure -- far more than the goal-cone proof) is DEAD WORK
+  // here: it added ~6.3s to OA's wall (22s -> 16s) with zero effect on
+  // the PROVED verdict or the R+E parity stream (both produced during
+  // search).  Skip it by default so the bench wall is the fair
+  // search-only time for a thvm-vs-FEQ speed comparison; THVM_ATP_MATERIALIZE=1
+  // restores the mirror for any trace-reading dump mode.
+  if (atp_env_on("THVM_ATP_MATERIALIZE"))
+    thvm_atp_materialize_trace(s);
   printf("   dropped: joinable=%u queue-subsumed=%u "
          "rule-subsumed=%u pop-subsumed=%u perm-subsumed=%u eset-subsumed=%u "
          "connected=%u orphan=%u lrs=%u\n",
