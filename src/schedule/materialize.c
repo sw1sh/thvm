@@ -906,6 +906,10 @@ static u32 weight_move_lookup(u64 loc, u32 backend_id) {
   return 0;
 }
 
+// Tombstone for purged entries (preserves linear-probe chains a hard loc=0
+// clear would break).  Defined before the first use (purge/trim below).
+#define WEIGHT_MOVE_TOMBSTONE (~0ULL)
+
 static void weight_move_insert(u64 loc, u32 backend_id, u32 tid, u32 src_tid) {
   if (loc == 0 || tid == 0) return;
   backend_id = copy_upload_ctx_backend(backend_id);
@@ -1049,7 +1053,6 @@ static int copy_upload_has_tid(u32 tid) {
 // the upload as a replay input, making the upload untrimmable).  The upload
 // tid is stable (UOP_COPY nodes are hash-consed by src), so (upload, shape,
 // dtype) is the durable identity of a transposed weight.
-#define WEIGHT_MOVE_TOMBSTONE (~0ULL)
 static u8 op_is_view_movement(u8 op);     // forward decl (defined below)
 static u32 weight_move_chase_upload(Term t) {
   for (u32 hops = 0; hops < 12; hops++) {
