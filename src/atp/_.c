@@ -7260,7 +7260,9 @@ static u8 atp_wmo_eq_dist_rhs_base(const AtpState *s, u32 src_trace) {
     return (p_a != ATP_TRACE_NONE) ? 0u : 1u;
   }
   if (reason == TRACE_CP) {
-    return (p_a != ATP_TRACE_NONE && p_b == ATP_TRACE_NONE) ? 0u : 1u;
+    // Post-4df4f2ab the stored raw pair is WM's (KPLinks, KPRechts): the
+    // distinguished face is the stored LHS for every superposition CP.
+    return 0u;
   }
   // INITIAL AXIOM: WM stores an input equation LRSortieren-canonicalised
   // (SpezNormierung.c :517-534) and U1_KPsBildenZuGleichung sweeps its
