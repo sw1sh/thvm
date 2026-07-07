@@ -610,7 +610,16 @@ static int MATERIALIZE_JIT_DEDUP_ENABLED(void) {
   // the dedup (verified: faithful+dedup converges on the JIT replay, faithful
   // alone diverges).  A maxpool grad implies it for the same reason (see
   // MAXPOOL_GRAD_SEEN).
-  return on || ru_faithful_seed_on() || MAXPOOL_GRAD_SEEN;
+  // Two-phase capture (THVM_JIT_TWO_PHASE) IMPLIES the dedup: the span's
+  // loc->tid cache is what makes the closure body READ a lazy declared
+  // input's realized buffer (one kernel, one recorded read the input-rebind
+  // sites can match) instead of re-inlining its producer graph -- without it
+  // the record contains no read of the declared input and every replay
+  // recomputes the capture-time value (the Krea stale-velocity bug).  Safe
+  // without pins: materialized_loc_lookup's dead-buffer guard re-emits when
+  // an entry's eagerly-freed buffer is gone.
+  return on || ru_faithful_seed_on() || MAXPOOL_GRAD_SEEN
+      || jit_capture_two_phase_active();
 }
 static int materialized_loc_span_holds(void) {
   // The cross-realize dedup keeps one realize's materialized boundary so a

@@ -1188,7 +1188,16 @@ fn u32 jit_capture_begin(void) {
       // realize re-emits then record as extra ops, which the logical
       // indirection replays faithfully (the pin-era stale-buf_id divergence
       // the span worked around cannot occur: a re-realloc is a new logical).
-      if (!JIT_CAPTURES[i].two_phase) materialized_loc_jit_span_begin();
+      // Two-phase NEEDS the span too: without the cross-realize loc->tid
+      // cache, the closure BODY re-inlines a lazy declared input's producer
+      // graph instead of reading the buffer jitArgTids just realized -- the
+      // record then contains NO read of the declared input (zero rebind
+      // sites) and every replay recomputes the capture-time value (the Krea
+      // stale-velocity bug: steps 2..8 returned step-1's v bit-exactly).
+      // The span is pin-free-safe: its lookup's dead-buffer guard re-emits
+      // when an entry's buffer was eagerly freed, so recording lifetime
+      // stays eager; only the CACHE persists across the capture's realizes.
+      materialized_loc_jit_span_begin();
       return i;
     }
   }
@@ -1222,13 +1231,9 @@ fn u32 jit_capture_begin(void) {
 // does not depend on a cross-capture cache-load).
 static void jit_capture_end_common(u32 done_slot, const Term *roots,
                                    u32 n_roots) {
-  int two_phase = done_slot != 0 && done_slot < JIT_CAPTURE_NSLOTS
-               && JIT_CAPTURES[done_slot].in_use
-               && JIT_CAPTURES[done_slot].two_phase;
   // Close the span (reverts the substitution journal, wipes loc->tid) BEFORE
   // the drain, which only inspects the recorded op list + KernelEntry metadata.
-  // Two-phase never opened it (recording ran span-free, eager-identical).
-  if (!two_phase) materialized_loc_jit_span_end();
+  materialized_loc_jit_span_end();
   // Clear the active slot BEFORE the drain: kernel_autotune's bench gate is
   // jit_is_capturing() (== JIT_ACTIVE_SLOT != 0).  The drain runs no-op when
   // the queue is empty (JITBEAM off / no MISS), so this is cheap on warm calls.
@@ -3720,6 +3725,27 @@ static void jit_capture_build_input_sites(JitCapture *c) {
       // rebinding so the fresh call writes the fresh buffer.
       for (u32 k = 0; k < c->n_inputs_decl; k++) {
         if (op->out_buf_id != c->input_buf_ids[k]) continue;
+        // Two-phase: an op that PRODUCES a declared input (writes it
+        // without reading it) is the caller-side realize of the argument,
+        // recorded because jitCaptureOnce realizes args inside the capture
+        // scope.  Replaying it would recompute the CAPTURE-time value into
+        // the freshly rebound input buffer, clobbering the caller's new
+        // argument (the Krea sampler replayed stale z/t/tvec forever).
+        // The fresh input IS the value: skip the op on replay.  A genuine
+        // in-place use (the op also READS the declared input) keeps the
+        // OUT-site rebind.
+        if (c->two_phase) {
+          int reads_it = 0;
+          u32 const *rids = op->heap_in_buf_ids != NULL
+                          ? op->heap_in_buf_ids : op->in_buf_ids;
+          for (u32 j = 0; j < op->n_inputs && !reads_it; j++) {
+            if (rids[j] == c->input_buf_ids[k]) reads_it = 1;
+          }
+          if (!reads_it) {
+            c->ops[i].replay_skip = 1;
+            break;
+          }
+        }
         if (pass == 1) {
           c->sites[count].op_index   = i;
           c->sites[count].pos        = JIT_INPUT_OUT_POS;

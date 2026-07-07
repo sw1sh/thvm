@@ -308,6 +308,15 @@ tisEulerSample[tfOut_Association, z0_, sigmas_] := Module[{z = z0, vn, cf = tfOu
         z = TRealize @ TUOpAdd[z, TUOpMul[v, TUOpConst[N[dt]]]],
         {k, 1, n}
     ];
+    (* Release this generation's capture BEFORE returning: TJit mints a fresh
+       per-gen closure (a new Unique id / slot) every call, and without the drop
+       each gen leaks its slot + re-pinned ~24GB weights + ~8.4GB two-phase
+       planned working set + held kernels -- so a served process washes out by
+       gen 2 (stale pinned buf_ids re-tenanted) and OOMs by gen 3 (65536-op
+       overflow).  The warm speedup is the $tisBuilt WEIGHT cache, NOT the
+       capture, and the intra-gen 8-step replay reuse already happened above, so
+       dropping here loses nothing.  Guard keeps the non-JIT path untouched. *)
+    If[Head[vn] === TJitClosure, TJitDrop[vn]];
     z
 ]
 
