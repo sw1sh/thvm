@@ -863,6 +863,220 @@ static void copy_upload_insert(u64 loc, u32 backend_id, u32 tid) {
   }
 }
 
+// === resident weight-movement cache (THVM_TC_TRANSPOSE) =============
+// Generalizes COPY_UPLOAD_CACHE to a REALIZED movement of a resident weight.
+// Under THVM_TC_TRANSPOSE, fxLinear feeds the matmul `TRealize@Transpose[w]`
+// so the operand is a contiguous {in,out} buffer and the CUDA tiled-WMMA GEMM
+// fires (a Transpose-VIEW would take the naive ~5 TFLOPS path).  That realized
+// permute is, like an upload, STATIC (immutable weight, fixed permutation) and
+// re-bound across every JIT-replay step -- so it must be realized ONCE,
+// jit-pinned (survive the per-realize pool rollback), and read as a stable
+// pre-capture LEAF.  Without this the anonymous permute output is an unpinned
+// compute buffer that the two-phase memory planner classifies as a dead
+// intermediate and interval-packs/frees while replayed matmuls still read it
+// (CUDA_ERROR_ILLEGAL_ADDRESS -- the resident-transpose UAF).  Keyed by the
+// hash-consed transpose node loc (stable: Transpose over the cached weight
+// term) + target backend, so a warmup realize populates it and the capture
+// reuses the same pinned buffer instead of re-emitting a recorded dispatch.
+static CopyUploadSlot WEIGHT_MOVE_CACHE[COPY_UPLOAD_CACHE_CAP];
+
+// Parallel to WEIGHT_MOVE_CACHE (same index): the SOURCE upload tid each
+// cached transpose was derived from (0 = none/unknown).  Recorded at pin time
+// so weight_move_trim_sources can free the now-redundant source uploads: once
+// the transposed bf16 copy is resident and the captured kernels read it as a
+// leaf, the 2-D fp8/bf16 source upload is dead weight (~11.5 GB on the Krea
+// 12B) -- the matmuls never touch it again.
+static u32 WEIGHT_MOVE_SRC[COPY_UPLOAD_CACHE_CAP];
+
+fn void weight_move_cache_reset(void) {
+  memset(WEIGHT_MOVE_CACHE, 0, sizeof(WEIGHT_MOVE_CACHE));
+  memset(WEIGHT_MOVE_SRC,   0, sizeof(WEIGHT_MOVE_SRC));
+}
+
+static u32 weight_move_lookup(u64 loc, u32 backend_id) {
+  backend_id = copy_upload_ctx_backend(backend_id);
+  u32 h = copy_upload_hash(loc, backend_id);
+  for (u32 probe = 0; probe < COPY_UPLOAD_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (COPY_UPLOAD_CACHE_CAP - 1);
+    if (WEIGHT_MOVE_CACHE[i].loc == 0) return 0;
+    if (WEIGHT_MOVE_CACHE[i].loc == loc
+        && WEIGHT_MOVE_CACHE[i].backend_id == backend_id)
+      return WEIGHT_MOVE_CACHE[i].tid;
+  }
+  return 0;
+}
+
+static void weight_move_insert(u64 loc, u32 backend_id, u32 tid, u32 src_tid) {
+  if (loc == 0 || tid == 0) return;
+  backend_id = copy_upload_ctx_backend(backend_id);
+  u32 h = copy_upload_hash(loc, backend_id);
+  for (u32 probe = 0; probe < COPY_UPLOAD_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (COPY_UPLOAD_CACHE_CAP - 1);
+    if (WEIGHT_MOVE_CACHE[i].loc == 0
+        || (WEIGHT_MOVE_CACHE[i].loc == loc
+            && WEIGHT_MOVE_CACHE[i].backend_id == backend_id)) {
+      WEIGHT_MOVE_CACHE[i].loc        = loc;
+      WEIGHT_MOVE_CACHE[i].backend_id = backend_id;
+      WEIGHT_MOVE_CACHE[i].tid        = tid;
+      WEIGHT_MOVE_SRC[i]              = src_tid;
+      return;
+    }
+  }
+}
+
+// Purge entries whose tid was invalidated by an emission-bail TENS_NEXT
+// rewind (materialize's all-or-nothing rewind).  The rewound tid slot is
+// re-issued to a DIFFERENT tensor by the retry pass's tensor_alloc bump, so a
+// stale cache hit would hand a consumer the wrong tensor (wrong buf/shape ->
+// out-of-bounds addressing).  Tombstoning (loc=~0) preserves the linear-probe
+// chains that a hard loc=0 clear would break.
+static void weight_move_purge_from(u32 tens_wm) {
+  for (u32 i = 0; i < COPY_UPLOAD_CACHE_CAP; i++) {
+    if (WEIGHT_MOVE_CACHE[i].loc != 0
+        && WEIGHT_MOVE_CACHE[i].loc != WEIGHT_MOVE_TOMBSTONE
+        && WEIGHT_MOVE_CACHE[i].tid >= tens_wm) {
+      WEIGHT_MOVE_CACHE[i].loc = WEIGHT_MOVE_TOMBSTONE;
+      WEIGHT_MOVE_CACHE[i].tid = 0;
+      WEIGHT_MOVE_SRC[i]       = 0;
+    }
+  }
+}
+
+// Remove `tid` from COPY_UPLOAD_CACHE so a later realize that reaches the
+// same copy node re-uploads instead of returning a trimmed (freed) tensor.
+static void copy_upload_purge_tid(u32 tid) {
+  if (tid == 0) return;
+  for (u32 i = 0; i < COPY_UPLOAD_CACHE_CAP; i++)
+    if (COPY_UPLOAD_CACHE[i].loc != 0 && COPY_UPLOAD_CACHE[i].tid == tid)
+      COPY_UPLOAD_CACHE[i].tid = 0;   // hit path treats tid 0 as a miss
+}
+
+// Free the source uploads behind every cached transposed weight.  Call AFTER
+// the warmup + captures: at that point the captured kernels read ONLY the
+// pinned transposed leaves (a cache HIT returns a leaf, so the transpose
+// kernels -- the sole readers of the 2-D source uploads -- are not in any
+// capture), making the sources unreachable dead residency.  Frees the device
+// buffer (unpin + decref), marks the TenDesc dead (buf_id=0) so every cache
+// guard treats it as a miss, and purges the upload-cache entry so a later
+// cache-miss re-realize re-uploads from the host/disk source.  Returns the
+// bytes freed.
+fn u64 weight_move_trim_sources(void) {
+  u64      freed   = 0;
+  Backend *drained = NULL;
+  for (u32 i = 0; i < COPY_UPLOAD_CACHE_CAP; i++) {
+    u32 src = WEIGHT_MOVE_SRC[i];
+    if (src == 0 || WEIGHT_MOVE_CACHE[i].loc == 0
+        || WEIGHT_MOVE_CACHE[i].loc == WEIGHT_MOVE_TOMBSTONE) continue;
+    WEIGHT_MOVE_SRC[i] = 0;
+    if (src >= TENS_NEXT) continue;
+    Backend *b   = TENS[src].backend;
+    u32      bid = TENS[src].buf_id;
+    if (b == NULL || bid == 0) continue;
+    // Capture-referenced sources are NOT trimmable: a recorded dispatch that
+    // reads this upload (a transpose re-derived at a fresh heap loc during
+    // the capture missed the loc-keyed cache and was recorded with the upload
+    // as an input) leaf-retained it -- jit_capture_retain_buf increfs -- so
+    // buf_refcount > 1 marks "a capture replays reads of this buffer".
+    // Freeing it would make every replay re-alloc a dead zeroed input (the
+    // weight-sized OOM storm).  refcount==1 = only the alloc ref: safe.
+    if (b->buf_refcount != NULL && b->buf_refcount(bid) > 1) continue;
+    u64 nbytes = dtype_storage_bytes(TENS[src].dtype, (u64)TENS[src].view.numel);
+    if (b->buf_jit_unpin != NULL) b->buf_jit_unpin(bid);
+    if (b->buf_decref   != NULL) b->buf_decref(bid);
+    TENS[src].buf_id = 0;              // dead: guards miss, re-upload on demand
+    copy_upload_purge_tid(src);
+    freed  += nbytes;
+    drained = b;
+  }
+  // CUDA frees are STREAM-ORDERED (cuMemFreeAsync on the legacy stream); the
+  // device does not physically release the trimmed bytes until the stream
+  // drains.  Without this the next generation's cuMemAllocs (which are
+  // immediate) still see a full device and OOM even though MEM_LIVE says the
+  // bytes are gone.  dispatch_end is the backend's drain hook
+  // (cuCtxSynchronize on CUDA; no-op elsewhere).
+  if (freed != 0 && drained != NULL && drained->dispatch_end != NULL)
+    drained->dispatch_end();
+  return freed;
+}
+
+// THVM_WM_TRACE=1: one stderr line per weight-move pin / hit, so a failing
+// run names the exact boundary + buffer instead of guessing free paths.
+static int wm_trace_enabled(void) {
+  static int v = -1;
+  if (v < 0) { char const *e = getenv("THVM_WM_TRACE"); v = (e && e[0] == '1') ? 1 : 0; }
+  return v;
+}
+
+// THVM_TC_TRANSPOSE feature gate.  The weight-movement pin only makes sense
+// under TC (fxLinear realizes the weight transpose only when this is set);
+// gating the pin on the same env keeps ordinary realized weight-movements in
+// other models planner-managed and makes the resident-weight behavior
+// explicit.  Read PER CALL (no static latch): the WL side legitimately scopes
+// the env per component (SetEnvironment off around the once-per-prompt
+// encoder to skip its ~7 GB of resident transposes, on for the DiT), and a
+// latched read during the encoder would silently disable the DiT pins.
+static int tc_weight_pin_enabled(void) {
+  char const *e = getenv("THVM_TC_TRANSPOSE");
+  return (e != NULL && e[0] == '1');
+}
+
+// True iff `tid` is a resident weight upload (a live COPY_UPLOAD_CACHE entry).
+// Gates the weight-movement pin: a realized movement boundary whose kernel
+// input is a cached weight upload is a weight-derived buffer (a transposed
+// weight), not a per-step activation -- so pinning it is the intended resident
+// weight, not an accumulating leak.
+static int copy_upload_has_tid(u32 tid) {
+  if (tid == 0) return 0;
+  for (u32 i = 0; i < COPY_UPLOAD_CACHE_CAP; i++)
+    if (COPY_UPLOAD_CACHE[i].loc != 0 && COPY_UPLOAD_CACHE[i].tid == tid)
+      return 1;
+  return 0;
+}
+
+// Chase a movement boundary's UOp tree to the resident weight upload it is a
+// pure movement/cast of, or 0.  Walks src cells (loc+0) through movement ops
+// and CAST; a TAG_TEN leaf that is a live COPY_UPLOAD_CACHE entry is the
+// weight (fxLinear's Transpose[TUOpCast[upload]] under THVM_TC_TRANSPOSE).
+// Anything else (a compute UOp = a fused activation movement like
+// Transpose[attn @ Wv], an unknown leaf) returns 0 -- the chase doubles as
+// the purity gate, replacing the post-visit all-inputs check.  Chasing the
+// TREE (not the kernel inputs) matters twice over: it works BEFORE visit()
+// runs (so a cache hit can skip emission entirely), and it is stable across
+// WL re-derivations -- the WL side rebuilds the movement/cast expressions
+// with FRESH heap locs per call/step, so a loc-keyed cache misses on every
+// re-derivation (each miss re-emits + re-pins a fresh transposed copy: a
+// per-step resident leak, and a capture-time miss records the transpose with
+// the upload as a replay input, making the upload untrimmable).  The upload
+// tid is stable (UOP_COPY nodes are hash-consed by src), so (upload, shape,
+// dtype) is the durable identity of a transposed weight.
+#define WEIGHT_MOVE_TOMBSTONE (~0ULL)
+static u8 op_is_view_movement(u8 op);     // forward decl (defined below)
+static u32 weight_move_chase_upload(Term t) {
+  for (u32 hops = 0; hops < 12; hops++) {
+    if (term_tag(t) == TAG_TEN) {
+      u32 tid = (u32)term_val(t);
+      return copy_upload_has_tid(tid) ? tid : 0;
+    }
+    if (term_tag(t) != TAG_UOP) return 0;
+    u8 op = term_ext(t);
+    if (!op_is_view_movement(op) && op != UOP_CAST && op != UOP_PAD
+        && op != UOP_FLIP) return 0;
+    t = heap_read(term_val(t));           // src is the first heap cell
+  }
+  return 0;
+}
+
+// Durable cache key for a transposed weight: the stable upload tid + the
+// movement's output shape + dtype (two different movements of one weight,
+// e.g. a transpose and a reshape, must not collide).
+static u64 weight_move_key(u32 src_tid, Shape const *shape, u32 dtype) {
+  u64 k = ((u64)src_tid << 20) ^ ((u64)dtype << 1);
+  for (u32 i = 0; i < shape->ndim; i++)
+    k = k * 0x100000001b3ULL + shape->dims[i];
+  if (k == 0 || k == WEIGHT_MOVE_TOMBSTONE) k = 1;
+  return k;
+}
+
 // Materialize a UOP_COPY[src] node onto the realize backend
 // (CURRENT_BACKEND).  Returns a TAG_TEN resident on that backend.
 //
@@ -6223,6 +6437,34 @@ static Term emit_kernel_for_boundary(u32 bi) {
               (unsigned long long)boundary_loc, (unsigned)op, sv_op,
               op_dev, bn, (unsigned long long)onum, out_dtype);
   }
+  // Resident weight-movement cache hit (cross-realize): a TRealize@Transpose
+  // of a resident weight was already realized+pinned (by a warmup pass or an
+  // earlier replay), so reuse that stable pinned buffer as a pre-capture LEAF
+  // rather than re-emitting the permute as a recorded dispatch the two-phase
+  // planner would free.  Mirrors the MATERIALIZED_LOC / COPY_UPLOAD_CACHE hits;
+  // the buf_refcount>0 guard makes a reclaimed entry a safe miss (re-emit).
+  u32 wm_src = 0;
+  if (tc_weight_pin_enabled() && uop_is_movement(op)) {
+    wm_src = weight_move_chase_upload(root_term);
+    if (wm_src != 0) {
+      u64 wm_k    = weight_move_key(wm_src, &out_shape, out_dtype);
+      u32 wm_tid  = weight_move_lookup(wm_k, op_backend->id);
+      // No refcount guard (unlike MATERIALIZED_LOC): the cached buffer is
+      // jit-pinned, so it is alive even at refcount 0 (the warmup's matmul
+      // consumers released it) and the next consumer re-increfs the live
+      // buffer.  Mirrors copy_upload_lookup, which trusts the pin.
+      if (wm_tid != 0 && wm_tid < TENS_NEXT && TENS[wm_tid].buf_id != 0) {
+        if (wm_trace_enabled()) {
+          fprintf(stderr, "[wm] HIT  src=%u tid=%u buf=%u\n",
+                  wm_src, wm_tid, TENS[wm_tid].buf_id);
+        }
+        Term ten = term_new(0, TAG_TEN, TENS[wm_tid].dtype, wm_tid);
+        BOUNDARY_TID [bi] = wm_tid;
+        BOUNDARY_TERM[bi] = ten;
+        return ten;
+      }
+    }
+  }
   u32 out_tid = (op_backend == CURRENT_BACKEND)
                   ? arena_tensor_alloc(bi, out_shape, out_dtype) : 0;
   // Capture-recycle adoption (the JIT memory planner's pop side): under an
@@ -6673,6 +6915,76 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // grad targets) substitutes to a TAG_TEN leaf instead of
   // re-emitting an identical kernel.  See MATERIALIZED_LOC_TABLE
   // comment above for full rationale.
+  // Pin + cross-realize-cache a realized movement (transpose) whose source is
+  // a resident weight upload, so the two-phase capture treats it as a stable
+  // pre-capture leaf (see WEIGHT_MOVE_CACHE).  Gated to a JIT capture + a
+  // weight-derived input so ordinary activation permutes stay planner-managed
+  // (an unpinned, per-step-reclaimed intermediate) and only weights go resident.
+  if (wm_src != 0 && op_backend->buf_jit_pin != NULL) {
+    // The chase (wm_src) already proved this boundary is a PURE movement/cast
+    // of a resident weight upload -- an activation-fused movement (e.g.
+    // Transpose[attn @ Wv]) fails the chase at its compute UOp, so per-step
+    // activation movements stay planner-managed.
+    {
+      // The arena planner may have handed this output a VIEW into the shared
+      // per-realize arena (arena_tensor_alloc -> owns_data=0, parent=arena).
+      // A pin on the view does NOT protect the arena PARENT, which pool
+      // rollback real-frees at end-of-realize (CudaBuf.skip_freelist ->
+      // immediate cuda_buf_free) -- the pinned view then dangles into freed
+      // arena memory and the NEXT realize's cache hit reads it (the eager-
+      // encoder CUDA_ERROR_ILLEGAL_ADDRESS, reproduced under THVM_CUDA_SYNC=1
+      // so it is not the async-free race).  The kernel has not fired yet at
+      // emit time and the dispatch re-resolves TENS[out_tid].buf_id at fire
+      // time (kernel_fire_by_id), so swap the view for a fresh OWNED buffer
+      // the pin actually protects.
+      u32 wm_bid  = TENS[out_tid].buf_id;
+      u32 wm_root = (op_backend->buf_storage_root != NULL)
+                      ? op_backend->buf_storage_root(wm_bid) : wm_bid;
+      int wm_ok = 1;
+      if (wm_root != wm_bid) {
+        u64 wm_nbytes = dtype_storage_bytes(out_dtype,
+                                            (u64)shape_numel(out_shape));
+        u32 nb = op_backend->buf_alloc(wm_nbytes);
+        if (nb != 0) {
+          if (op_backend->buf_decref != NULL) op_backend->buf_decref(wm_bid);
+          TENS[out_tid].buf_id = nb;
+        } else {
+          wm_ok = 0;                       // OOM: stay planner-managed
+        }
+      }
+      if (wm_ok) {
+        op_backend->buf_jit_pin(TENS[out_tid].buf_id);
+        // Hold a TenDesc reference so the tid is not recycled once the
+        // warmup's matmul consumer releases it (the buffer is pinned, but a
+        // refcount-0 TenDesc slot could be reallocated to a different tensor,
+        // dangling the cache).  Uploads avoid this by being WL-referenced
+        // weights; a realized transpose is an anonymous intermediate, so the
+        // cache holds its ref.
+        TENS[out_tid].refcount++;
+        // Record the source upload so weight_move_trim_sources can free it:
+        // with the durable (upload, shape, dtype) key, every re-derivation of
+        // this transpose HITs the cache -- including inside a TJit capture --
+        // so no recorded dispatch ever binds the upload and trimming it is
+        // safe.  NEVER for a capture-time pin (belt and suspenders: a first
+        // derivation DURING a capture is a recorded dispatch whose replay
+        // re-fires with the upload as an input).
+        weight_move_insert(weight_move_key(wm_src, &out_shape, out_dtype),
+                           op_backend->id, out_tid,
+                           jit_is_capturing() ? 0 : wm_src);
+        if (wm_trace_enabled()) {
+          fprintf(stderr,
+              "[wm] PIN  src=%u tid=%u buf=%u swap=%d nbytes=%llu ndim=%u d0=%u d1=%u cap=%d\n",
+              wm_src, out_tid, TENS[out_tid].buf_id,
+              (wm_root != wm_bid),
+              (unsigned long long)dtype_storage_bytes(out_dtype, (u64)shape_numel(out_shape)),
+              out_shape.ndim, out_shape.ndim > 0 ? out_shape.dims[0] : 0,
+              out_shape.ndim > 1 ? out_shape.dims[1] : 0,
+              jit_is_capturing());
+        }
+      }
+    }
+  }
+
   materialized_loc_insert(boundary_loc, out_tid);
 
   return kernel_term;
@@ -7069,6 +7381,10 @@ fn Term thvm_materialize_impl(Term term) {
         kernel_free_arrays(&KERNELS[r]);
       KERNELS_NEXT = kernels_at_start;
       TENS_NEXT    = tens_at_start;
+      // The rewind invalidates any weight-move cache entry minted during this
+      // failed attempt: the retry pass re-issues those tid slots to different
+      // tensors, so a stale hit would hand a consumer the wrong buffer.
+      weight_move_purge_from(tens_at_start);
       mem_plan_drain_freelist();
       // Arena views allocated during the partial emit are dropped by
       // the TENS_NEXT rewind; the arena CpuBuf itself (allocated

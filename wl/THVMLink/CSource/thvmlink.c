@@ -2686,6 +2686,19 @@ EXTERN_C DLLEXPORT int thvm_wl_tens_count(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Free the source uploads behind the resident transposed weights
+// (THVM_TC_TRANSPOSE weight-move cache; schedule/materialize.c
+// weight_move_trim_sources).  Call after the warmup + JIT captures: the
+// captured kernels read only the pinned transposed leaves, so the 2-D
+// fp8/bf16 source uploads are dead residency (~11.5 GB on the Krea 12B).
+// Returns the device bytes freed.
+EXTERN_C DLLEXPORT int thvm_wl_wm_trim(WolframLibraryData libData, mint argc,
+                                       MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)weight_move_trim_sources());
+  return LIBRARY_NO_ERROR;
+}
+
 // {cpu_live, cpu_peak, dev_live, dev_peak}: allocator-storage accounting
 // (CPU_MEM_LIVE / CPU_MEM_PEAK, backend/cpu/buf_alloc.c; the CUDA mirror on
 // a CUDA build, zeros otherwise).  Unlike thvm_wl_total_buf_bytes this

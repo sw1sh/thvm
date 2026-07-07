@@ -2195,6 +2195,8 @@ fn void thvm_free_fp8_transients      (u32 result_tid);
 // UOP_COPY persistent device-upload cache (schedule/materialize.c).
 // Reset on GC compaction / thvm reset / free (its keys are heap locs).
 fn void copy_upload_cache_reset       (void);
+fn void weight_move_cache_reset       (void);
+fn u64  weight_move_trim_sources      (void);
 fn void kernel_input_upload_reset     (void);
 fn void materialized_loc_scope_enter  (void);
 fn void materialized_loc_scope_leave  (void);
