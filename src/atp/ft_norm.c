@@ -247,6 +247,10 @@ static inline int ft_match_maybe_ac(AtpFt *a,
 // Alpha-identical patterns return 0 both ways; the caller's tie-break
 // (newest slot wins) mirrors the leaf chain order (DSBaumOperationen
 // insert-at-head, newest first).
+// Non-static export for the MNF front (mnf_exp_visit orders each
+// position's matching faces in Regelbaum/Gleichungsbaum DFS order).
+int atp_ft_wm_pattern_before(const AtpFtCell *a, const AtpFtCell *b);
+
 static int ft_wm_pattern_before(const AtpFtCell *a, const AtpFtCell *b) {
   u16 map_a[ATPFT_MAX_VARS], map_b[ATPFT_MAX_VARS];
   memset(map_a, 0xff, sizeof(map_a));
@@ -284,6 +288,10 @@ static int ft_wm_pattern_before(const AtpFtCell *a, const AtpFtCell *b) {
     pb = pb->next;
   }
   return 0;
+}
+
+int atp_ft_wm_pattern_before(const AtpFtCell *a, const AtpFtCell *b) {
+  return ft_wm_pattern_before(a, b);
 }
 
 // --- Candidate-pruning fingerprint index over rule LHS flatterms -----

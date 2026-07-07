@@ -6517,6 +6517,7 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
 
 #ifdef ATP_MNF
 static void mnf_destroy(struct AtpMnf *m);   // defined with the MNF module below
+static void mnf_notify_fact(struct AtpMnf *m, Term l, Term r, u8 orient);
 // GC support: the MNF coloured nodes hold reached Terms on the heap, so
 // they are collector roots.  Defined with the MNF module; declared here
 // for thvm_atp_gc_collect (which precedes the module).
@@ -11629,6 +11630,14 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
       }
     }
   }
+#ifdef ATP_MNF
+  // WM ArbeitsAufnahme notifies open goals with THE KEPT FACT
+  // (Z_ZieleErledigtMitNeuemFaktum); queue it for the next mnf_step --
+  // a slot-range diff misses facts re-slotted by interreduction churn
+  // between the keep and the goal check.
+  if (s->use_mnf && s->mnf != NULL)
+    mnf_notify_fact(s->mnf, lhs, rhs, s->r_orient[s->n_rules]);
+#endif
   s->n_rules++;
   // Env-gated live-rule-set dump (THVM_ATP_DUMP_RULES_AT=N): when the rule
   // count first reaches N, print every live rule so the live set can be diffed
@@ -13993,32 +14002,42 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 // to breadth-first (oldest node) the moment the last node expanded was
 // irreducible -- a normal form, a dead end (see mnf_pop / mnf_step).
 //
-// Backward "anti" steps (r->l): see MNF_MAX_ANTI.
-
 #define MNF_RED        0u
 #define MNF_GREEN      1u
-// Backward "anti" steps (r->l) -- a port of Waldmeister's antiWOVar:
-// variable-safe backward rewriting through unorientable equations,
-// capped at MNF_MAX_ANTI per lineage.  Forward-only fronts (anti=0)
-// cannot close a symmetric goal and rely on completion alone, which
-// for NAND commutativity from the single Wolfram axiom diverges.
-// anti=2 is the minimum that closes wolfram.pr (anti=1 does not;
-// anti>=2 does), and is the default.  Overridable with
-// -DMNF_MAX_ANTI=N.
-#ifndef MNF_MAX_ANTI
-#define MNF_MAX_ANTI   2u
-#endif
+// WM zb=mnf preset knobs (the ONLY parametrisation Waldmeister's -auto
+// ever arms: `mnf=re.0:s:mnfanalysis=1000.2000.10:mnfantiWOVar:
+// mnfantir=5:mnfup=5`, YFiles.c:83/:155; index 0 "rnf" and index 1
+// "small" are dead code in the Automodus tables):
+//   mnfup=5     -- at most 5 order-INCREASING equation steps per
+//                  derivation path (MNF.c:609, counter anzGlSchritte).
+//   mnfantir=5  -- at most 5 reversed-RULE steps per path (MNF.c:726/
+//                  :755, anzAntiRSchritte), and only for GROUND rules
+//                  (antiWOVar, MNF_ConvertRegelToAntiRegel :1419-1430);
+//                  tried only in the new-fact sweep, never in the PQ
+//                  expansion.
+//   mnf=re.0    -- expand with rules AND equations; ".0" = the hard
+//                  set-size cap is DISABLED (MNF.c:1137).
+//   mnfanalysis=1000.2000.10 -- at 1000 members the new-fact sweep
+//                  visits only irreducible-or-origin members
+//                  (MNF_AddTryAllElements=FALSE, MNF.c:849-851); at
+//                  2000 the set switches to ExpandRewrite mode: prune
+//                  to origins + the first 10 irreducible members per
+//                  colour, and from then on each check fully
+//                  normalizes those members (NF_NormalformRE) hunting
+//                  a cross-colour NF collision (MNF.c:844-848,
+//                  :1657-1704, :1822-1910).
+#define MNF_UP_MAX       5u
+#define MNF_ANTIR_MAX    5u
+#define MNF_SWITCH_IRRED 1000u
+#define MNF_SWITCH_NF    2000u
+#define MNF_COUNT_NF     10u
 #define MNF_MAX_NODES  400000u
 #define MNF_SUCC_CAP   2048u
-// First-expansion nodes per goal_check.  The collision step is gated
-// by completion (the fronts cannot join before completion derives the
-// enabling rule), NOT by this budget: an A/B sweep 8..384 on wolfram
-// moved the proving step only 363..377 while wall time scaled
-// linearly with the budget.  A large budget is therefore pure wasted
-// MNF work -- it just grows the front (and the cost of re-expanding
-// it against every new rule) faster than completion can use it.  16
-// keeps the front growth proportional to completion's pace; wolfram
-// 15.2 s -> 1.8 s.
+// mnf_step's budget parameter is IGNORED: WM's MNF_ExpandNM runs the
+// expansion loop until join, queue exhaustion, or the mnfanalysis
+// switch (MNF.c:858-906) -- no per-check budget.  The cost is bounded
+// by the order gates (Groesser steps always, up-steps capped) plus the
+// 2000-member switch to the pruned full-normalize mode.
 #define MNF_BUDGET     16u
 #define MNF_N_BUCKETS  (1u << 21)        // 2097152, power of two
 #define MNF_ROOT_PARENT 0xFFFFFFFFu      // mnf_insert: this term is a seed
@@ -14028,24 +14047,26 @@ typedef struct {
   u32  hash;
   u32  parent;     // node this term was first reached from (root: self)
   u8   colour;     // MNF_RED / MNF_GREEN
-  u8   anti;       // backward steps used on the path to this term
+  u8   gl_steps;   // order-increasing EQUATION steps on the path (mnfup)
+  u8   antir_steps;// reversed-RULE steps on the path (mnfantir)
   u8   expanded;   // successors already generated against [0, n_rules_seen)
-  u8   irred;      // 1 until a forward (size-reducing) successor is found
+  u8   irred;      // 1 until an order-decreasing successor is found
+  u16  tot_steps;  // total steps on the path (WM anzGesSchritte)
 } MnfNode;
 
 typedef struct AtpMnf {
   MnfNode *nodes;
   u32      n_nodes;
   u32      cap_nodes;
-  // Each front is a deque of pending node indices.  Successors are
-  // pushed on the left; mnf_pop takes the left (newest, depth-first)
-  // or right (oldest, breadth-first) end per the irred-adaptive policy.
+  // Each front is a per-colour STACK of pending node indices (WM's PQ
+  // default discipline, MNF.c:1094): successors push left, pops take
+  // the left (newest) end.
   u32     *qred;
   u32     *qgreen;
-  u32      qred_head, qred_tail;       // live deque span is q[head, tail)
+  u32      qred_head, qred_tail;       // live span is q[head, tail)
   u32      qgreen_head, qgreen_tail;
   u32      q_cap;
-  u8       red_last_irred;             // last RED node expanded was a NF
+  u8       red_last_irred;             // diag only (stack pops ignore it)
   u8       green_last_irred;
   u32     *buckets;          // open addressing: bucket -> node_idx + 1
   u32      n_buckets;
@@ -14053,11 +14074,31 @@ typedef struct AtpMnf {
   Term     seed_red;         // goal_rhs -- the RED front's origin
   Term     seed_green;       // goal_lhs -- the GREEN front's origin
   u32      n_red, n_green;   // nodes reached per colour
-  u32      n_anti;           // nodes reached via a backward (r->l) step
+  u32      n_anti;           // nodes reached via an up (order-inc) step
   u32      n_dup;            // same-colour duplicate terms (dropped)
   u32      n_trunc;          // node expansions that hit MNF_SUCC_CAP
   u8       full;             // node table reached MNF_MAX_NODES
   u8       joined;
+  // WM mnfanalysis state: try_all mirrors MNF_AddTryAllElements (the
+  // new-fact sweep visits all members vs irred-or-origin only); mode 1
+  // = ExpandRewrite (post-2000 switch); interest[] holds the pruned
+  // member set the ExpandRewrite checks normalize (origins + first
+  // MNF_COUNT_NF irreducibles per colour, insertion order).
+  u8       try_all;
+  u8       mode;             // 0 = normal expansion, 1 = ExpandRewrite
+  u32      interest[2u + 2u * MNF_COUNT_NF];
+  u32      n_interest;
+  // Pending new-fact notifications (WM Z_ZieleErledigtMitNeuemFaktum
+  // passes THE FACT; a slot-range diff misses facts that are kept and
+  // then re-slotted/retired by interreduction churn between checks --
+  // MeredithAxioms comm landed in slot 5 at fact 6 and slot 5 held a
+  // different rule by the next goal check).  Terms here are GC roots
+  // (see mnf_gc_*).
+  Term     pend_l[256];
+  Term     pend_r[256];
+  u8       pend_or[256];
+  u32      n_pend;
+  u8       pend_of;          // overflow: fall back to a full re-sweep
   // The join witness (also used by the proof extractor, so always
   // present, not behind ATP_MNF_DIAG).  Side A is the existing table
   // node a fresh reduct collided with; side B is that fresh reduct --
@@ -14068,6 +14109,19 @@ typedef struct AtpMnf {
   Term     meet_term;        // the term both fronts reached
   u8       meet_b_col;       // colour of the colliding (uncreated) node
 } AtpMnf;
+
+// Groundness (no free variables) -- the antiWOVar eligibility test for
+// reversed-rule steps (WM MNF_ConvertRegelToAntiRegel, MNF.c:1419-1430).
+static u8 mnf_term_is_ground(Term t) {
+  if (term_tag(t) == TAG_FVR) return 0u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      if (!mnf_term_is_ground(term_ctr_at(t, i))) return 0u;
+    }
+  }
+  return 1u;
+}
 
 // Structural hash of a term (FNV-ish mix over the preorder).
 static u32 mnf_hash(Term t) {
@@ -14100,13 +14154,26 @@ static u32 mnf_lookup(const AtpMnf *m, Term t, u32 h) {
   }
 }
 
-// Insert `t` (colour `col`, lineage anti-count `anti`, reached from node
-// `parent` -- MNF_ROOT_PARENT for a seed).  Returns 1 if this insertion
-// JOINED the fronts (an opposite-colour node already held `t`).  Same-
-// colour duplicate -> dropped.  Fresh term -> added, indexed, enqueued.
-static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 anti, u32 parent) {
+// THVM_ATP_MNF_TRACE side-band: the creating step's fact slot, face
+// (0 = lhs->rhs), and redex position, set by mnf_exp_visit right
+// before each insert.  Debug-only.
+static int  g_mnf_trace_slot = -1;
+static int  g_mnf_trace_face = -1;
+static char g_mnf_trace_pos[64] = "-";
+
+// Insert `t` (colour `col`, lineage step counters `gl`/`antir`, reached
+// from node `parent` -- MNF_ROOT_PARENT for a seed).  Returns 1 if this
+// insertion JOINED the fronts (an opposite-colour node already held
+// `t`).  Same-colour duplicate -> dropped.  Fresh term -> added,
+// indexed, enqueued.  `out_idx` (optional) receives the node index of
+// the term -- the fresh node, or the existing same-colour duplicate.
+static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 gl, u8 antir,
+                      u32 parent, u32 *out_idx) {
   u32 h   = mnf_hash(t);
   u32 idx = mnf_lookup(m, t, h);
+  u16 tot = (parent == MNF_ROOT_PARENT)
+          ? 0u : (u16)(m->nodes[parent].tot_steps + 1u);
+  if (out_idx != NULL) *out_idx = idx;
   if (idx != MNF_MAX_NODES) {
     if (m->nodes[idx].colour != col) {
       m->meet_a        = idx;
@@ -14116,71 +14183,123 @@ static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 anti, u32 parent) {
       m->joined = 1u;
       return 1;
     }
+    // WM AddData duplicate merge (MNF.c:254-287): a strictly SHORTER
+    // re-derivation replaces the existing member's step counters and
+    // lineage -- the up-step budgets of future expansions then follow
+    // the shorter path, exactly like WM's anzGesSchritte adoption.
+    if (tot < m->nodes[idx].tot_steps) {
+      m->nodes[idx].tot_steps   = tot;
+      m->nodes[idx].gl_steps    = gl;
+      m->nodes[idx].antir_steps = antir;
+      m->nodes[idx].parent      = parent;
+    }
     m->n_dup++;
     return 0;
   }
   if (m->n_nodes >= MNF_MAX_NODES) { m->full = 1u; return 0; }   // set full
   u32 ni = m->n_nodes++;
-  m->nodes[ni].term     = t;
-  m->nodes[ni].hash     = h;
-  m->nodes[ni].parent   = (parent == MNF_ROOT_PARENT) ? ni : parent;
-  m->nodes[ni].colour   = col;
-  m->nodes[ni].anti     = anti;
-  m->nodes[ni].expanded = 0u;
-  m->nodes[ni].irred    = 1u;   // until a forward successor proves otherwise
+  if (out_idx != NULL) *out_idx = ni;
+  m->nodes[ni].term        = t;
+  m->nodes[ni].hash        = h;
+  m->nodes[ni].parent      = (parent == MNF_ROOT_PARENT) ? ni : parent;
+  m->nodes[ni].colour      = col;
+  m->nodes[ni].gl_steps    = gl;
+  m->nodes[ni].antir_steps = antir;
+  m->nodes[ni].expanded    = 0u;
+  m->nodes[ni].irred       = 1u;  // until an order-decreasing successor
+  m->nodes[ni].tot_steps   = tot;
   if (col == MNF_RED) m->n_red++; else m->n_green++;
-  if (anti > 0u) m->n_anti++;
+  if (gl > 0u || antir > 0u) m->n_anti++;
   u32 mask = m->n_buckets - 1u;
   u32 probe = h & mask;
   while (m->buckets[probe] != 0u) probe = (probe + 1u) & mask;
   m->buckets[probe] = ni + 1u;
-  // Push left onto the colour's deque (each node enqueued exactly once).
+  // Push left onto the colour's stack (each node enqueued exactly once).
   if (col == MNF_RED) m->qred[--m->qred_head]     = ni;
   else                m->qgreen[--m->qgreen_head] = ni;
+  // THVM_ATP_MNF_TRACE: one line per fresh front member, format-aligned
+  // with the instrumented Waldmeister MNF_BearbeiteInsertElem dump
+  // (==MNFINS, WM colour code 2=green 1=red, ids counting from 1) so
+  // the two member streams diff directly.  slot/face/pos describe the
+  // creating step (set by mnf_exp_visit; -1 = seed or NF chain).
+  {
+    static int mt = -1;
+    if (mt < 0) mt = getenv("THVM_ATP_MNF_TRACE") != NULL ? 1 : 0;
+    if (mt) {
+      fprintf(stderr, "MNFINS id=%u col=%d gl=%u antir=%u slot=%d "
+              "face=%d pos=%s t=",
+              ni + 1u, (col == MNF_GREEN) ? 2 : 1, gl, antir,
+              g_mnf_trace_slot, g_mnf_trace_face, g_mnf_trace_pos);
+      atp_dbg_print_term(stderr, t);
+      fputc('\n', stderr);
+    }
+  }
   return 0;
 }
 
 // Per-rule caches, refreshed once per mnf_step over the whole rule
 // set so the successor recursion reads them instead of recomputing:
-//   g_mnf_vc   -- vars(lhs) subset of vars(rhs) (variable-safe backward)
-//   g_mnf_ln   -- nodes(lhs[j]) -- the forward-match size pre-filter
-//   g_mnf_rn   -- nodes(rhs[j]) -- the backward-match size pre-filter
+//   g_mnf_vc     -- vars(lhs) subset of vars(rhs) (rhs->lhs face safe)
+//   g_mnf_vfwd   -- vars(rhs) subset of vars(lhs) (lhs->rhs face safe)
+//   g_mnf_ground -- lhs is ground (antiWOVar: reversed-rule eligible)
+//   g_mnf_ln     -- nodes(lhs[j]) -- the forward-match size pre-filter
+//   g_mnf_rn     -- nodes(rhs[j]) -- the backward-match size pre-filter
 // A one-way match needs nodes(pattern) <= nodes(subject), so a rule
 // whose matched side outsizes the term cannot fire -- the integer
 // compare skips the thvm_match entirely.
 static u8  *g_mnf_vc     = NULL;
+static u8  *g_mnf_vfwd   = NULL;
+static u8  *g_mnf_ground = NULL;
 static u32 *g_mnf_ln     = NULL;
 static u32 *g_mnf_rn     = NULL;
 static u32  g_mnf_vc_cap = 0u;
 
 // One-step rewrites of `t` (all positions, rules [rule_lo, rule_hi),
 // forward + -- when allow_anti -- variable-safe backward) collected
-// into mnf_succ_buf / mnf_succ_anti.
-static Term mnf_succ_buf[MNF_SUCC_CAP];
-static u8   mnf_succ_anti[MNF_SUCC_CAP];
+// (retired: the buffer-based mnf_successors; expansion now inserts
+// inline during two preorder position walks, matching WM's
+// BearbeiteR-then-BearbeiteE pass structure.)
 
-// Returns nodes(t).  Children are expanded first so the size is known
-// when rules are tried at t -- the size pre-filter then skips a rule
-// whose matched side has more nodes than t (a one-way match needs
-// nodes(pattern) <= nodes(subject), so such a rule provably fails).
-// Successor order in the buffer differs from a rules-first walk, but
-// every successor is still inserted, so the MNF set is unchanged.
-static u32 mnf_successors(AtpState *s, Term t, u8 allow_anti,
-                          u32 rule_lo, u32 rule_hi, u32 *n) {
-  // Throttled wall-deadline + host-abort poll.  mnf_successors recurses
-  // into subterms and iterates n_rules per subterm; a single call can
-  // run for seconds on a deep term against a large rule set, well past
-  // any mnf_step / mnf_loop_guard polling cadence.  Cap call count via
-  // a static tick (every 1024th call probes the clock so the poll is
-  // sub-microsecond amortized) and short-circuit on deadline by
-  // returning the current count -- the caller treats truncated
-  // successors as a terminal expansion, so the front search bails and
-  // thvm_atp_step returns ATP_TIMEOUT on the next outer iteration.
-  // Without this, the engine ignores TimeConstraint on hard Sheffer
-  // cross-axiom Implies-X goals where MNF expands a degenerate front.
+// Expansion visitor context: node `ni`'s term is rewritten at every
+// non-variable position (preorder -- WM's TO_Schwanz prefix walk) in
+// TWO passes, rules first then equations (WM MNF_BearbeiteRE,
+// MNF.c:703-710), each successor inserted inline.
+//
+// Step classes (WM's per-step Vergleich tag, MNF.c:341-422):
+//   pass 0, fwd rule       -> Groesser a priori (class "down").
+//   pass 0, reversed rule  -> Kleiner; only in the new-fact sweep, only
+//                             GROUND rules (antiWOVar), mnfantir-gated.
+//   pass 1, eq either face -> per-instance order on the redex pair
+//                             (context-compatible == WM's whole-term
+//                             ORD_VergleicheTerme, MNF.c:605): Groesser
+//                             admitted; Kleiner mnfup-gated;
+//                             Gleich/Unvergleichbar DISCARDED (:623).
+typedef struct {
+  AtpState *s;
+  AtpMnf   *m;
+  u32       ni;
+  Term      root;
+  u32       rule_lo, rule_hi;
+  u8        in_sweep;
+  u8        pass;            // 0 = rules, 1 = equations
+  // Explicit single-fact sweep (WM BearbeiteEineR/EineGl): when
+  // use_fact, the visitor tries THIS pair instead of the slot range --
+  // immune to slot reuse between the keep and the goal check.
+  u8        use_fact;
+  Term      fl, fr;
+  u8        f_orient;
+} MnfExpCtx;
+
+static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
+  MnfExpCtx *c = (MnfExpCtx *)raw;
+  AtpState  *s = c->s;
+  AtpMnf    *m = c->m;
+  if (m->joined) return 0u;
+  // Throttled wall-deadline / abort poll (a deep front over a large
+  // rule set can spend seconds inside one expansion).
   {
-    static u32 mnf_succ_tick = 0u;
-    if ((++mnf_succ_tick & 0x3FFu) == 0u) {
+    static u32 tick = 0u;
+    if ((++tick & 0x3FFu) == 0u) {
       if (s->wall_deadline_us != 0u) {
         u64 now = atp_now_us();
         if (now != 0u && now >= s->wall_deadline_us) return 0u;
@@ -14188,97 +14307,208 @@ static u32 mnf_successors(AtpState *s, Term t, u8 allow_anti,
       if (thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) return 0u;
     }
   }
-  u32 size = 1u;
-  if (term_tag(t) == TAG_CTR) {
-    u32 m = term_ctr_n(t);
-    if (m > REWRITE_MAX_ARITY) return 0xFFFFFFu;  // unreachable; disable filter
-    for (u32 i = 0; i < m; i++) {
-      u32 base = *n;
-      size += mnf_successors(s, term_ctr_at(t, i), allow_anti,
-                             rule_lo, rule_hi, n);
-      for (u32 k = base; k < *n; k++) {
-        Term ch[REWRITE_MAX_ARITY];
-        for (u32 c = 0; c < m; c++) {
-          ch[c] = (c == i) ? mnf_succ_buf[k] : term_ctr_at(t, c);
+  Term t = cp_subterm_at(c->root, p, p_len);
+  if (t == 0 || term_tag(t) == TAG_FVR) return 0u;
+  u32 size     = atp_symbol_count(t);
+  u8  col      = m->nodes[c->ni].colour;
+  u8  gl       = m->nodes[c->ni].gl_steps;
+  u8  antir    = m->nodes[c->ni].antir_steps;
+  u8  gl_ok    = (u8)(gl < MNF_UP_MAX);
+  u8  antir_ok = (u8)(antir < MNF_ANTIR_MAX);
+  {
+    u32 pn = 0;
+    g_mnf_trace_pos[pn++] = 'L';
+    for (u32 d = 0; d < p_len && pn < 60u; d++)
+      pn += (u32)snprintf(g_mnf_trace_pos + pn,
+                          sizeof g_mnf_trace_pos - pn, ".%u", p[d] + 1u);
+    g_mnf_trace_pos[pn] = '\0';
+  }
+  // Per-position candidate buffer: WM enumerates the matching faces at
+  // a position in Gleichungsbaum/Regelbaum DFS order (MO_AllRegelMatch/
+  // MO_AllGleichungMatch); thvm's slot scan collects then sorts by the
+  // same pattern order (atp_ft_wm_pattern_before), newest fact first on
+  // alpha-identical patterns (leaf chains are newest-first).
+  enum { MNF_POS_CAND_CAP = 96 };
+  struct MnfPosCand {
+    Term whole;
+    u8   gl_inc, antir_inc, down;
+    u32  uid;
+    int  slot, face;
+    const AtpFtCell *pat;
+  } cand[MNF_POS_CAND_CAP];
+  u32 n_cand = 0u;
+  u32 n_iter = c->use_fact ? 1u : (c->rule_hi - c->rule_lo);
+  for (u32 it = 0; it < n_iter && !m->joined; it++) {
+    Term fl, fr;
+    u8   orient, vfwd, vc, ground;
+    u32  ln, rn;
+    int  slot;
+    if (c->use_fact) {
+      fl = c->fl; fr = c->fr; orient = c->f_orient;
+      vc     = (u8)atp_vars_contained(fl, fr);
+      vfwd   = (u8)atp_vars_contained(fr, fl);
+      ground = mnf_term_is_ground(fl);
+      ln     = atp_symbol_count(fl);
+      rn     = atp_symbol_count(fr);
+      slot   = -2;
+    } else {
+      u32 j = c->rule_lo + it;
+      if (s->r_dead != NULL && s->r_dead[j]) continue;
+      fl = s->lhs[j]; fr = s->rhs[j]; orient = s->r_orient[j];
+      vc = g_mnf_vc[j]; vfwd = g_mnf_vfwd[j]; ground = g_mnf_ground[j];
+      ln = g_mnf_ln[j]; rn = g_mnf_rn[j];
+      slot = (int)j;
+    }
+    if (c->pass == 0u) {
+      if (!orient) continue;
+      if (ln <= size && n_cand < MNF_POS_CAND_CAP) {
+        RewriteSubst sub = {{0}};
+        if (thvm_match(fl, t, &sub)) {
+          struct MnfPosCand *k = &cand[n_cand++];
+          k->whole = cp_replace_at(c->root, p, p_len,
+                                   thvm_subst_apply(fr, &sub));
+          k->gl_inc = 0u; k->antir_inc = 0u; k->down = 1u;
+          k->slot = slot; k->face = 0;
+          k->uid = (slot >= 0) ? s->r_uid[slot] : 0xFFFFFFFFu;
+#ifdef THVM_ATPFT_RULES
+          k->pat = (slot >= 0) ? s->lhs_ft[slot] : NULL;
+#else
+          k->pat = NULL;
+#endif
         }
-        mnf_succ_buf[k] = term_new_ctr(term_ext(t), ch, m);
+      }
+      if (c->in_sweep && antir_ok && ground && rn <= size &&
+          n_cand < MNF_POS_CAND_CAP) {
+        RewriteSubst sb = {{0}};
+        if (thvm_match(fr, t, &sb)) {
+          struct MnfPosCand *k = &cand[n_cand++];
+          k->whole = cp_replace_at(c->root, p, p_len,
+                                   thvm_subst_apply(fl, &sb));
+          k->gl_inc = 0u; k->antir_inc = 1u; k->down = 0u;
+          k->slot = slot; k->face = 1;
+          k->uid = (slot >= 0) ? s->r_uid[slot] : 0xFFFFFFFFu;
+#ifdef THVM_ATPFT_RULES
+          k->pat = (slot >= 0) ? s->rhs_ft[slot] : NULL;
+#else
+          k->pat = NULL;
+#endif
+        }
+      }
+    } else {
+      if (orient) continue;
+      for (u8 face = 0u; face < 2u && !m->joined; face++) {
+        Term pat = face ? fr : fl;
+        Term rep = face ? fl : fr;
+        u8   ok  = face ? vc : vfwd;
+        u32  psz = face ? rn : ln;
+        if (psz > size) continue;
+        // WM r2 (RechtsUnfreiErzeugen, RUndEVerwaltung.c:391-430): a
+        // face whose replacement has variables outside the matched side
+        // is applied with those variables GROUNDED to the minimal
+        // SIGNATURE constant (ground-total precedence only) -- this is
+        // how skC3-grounded material enters the front (MeredithAxioms
+        // member id 17, eq -4's l->r2 face).  Skipping the face instead
+        // starves the front of every grounded lineage.
+        Term rep_use = rep;
+        if (!ok) {
+          rep_use = atp_unorient_template(s, pat, rep);
+          if (rep_use == 0) continue;   // no ground-total order: no r2
+        }
+        RewriteSubst sub = {{0}};
+        if (!thvm_match(pat, t, &sub)) continue;
+        Term out = thvm_subst_apply(rep_use, &sub);
+        KboCmp cmp = thvm_kbo(t, out, s->kbo);
+        u8 up;
+        if (cmp == KBO_GT) up = 0u;
+        else if (cmp == KBO_LT && gl_ok) up = 1u;
+        else continue;                 // Gleich/Unvergleichbar/over-budget
+        if (n_cand >= MNF_POS_CAND_CAP) break;
+        struct MnfPosCand *k = &cand[n_cand++];
+        k->whole = cp_replace_at(c->root, p, p_len, out);
+        k->gl_inc = up; k->antir_inc = 0u; k->down = (u8)!up;
+        k->slot = slot; k->face = (int)face;
+        k->uid = (slot >= 0) ? s->r_uid[slot] : 0xFFFFFFFFu;
+#ifdef THVM_ATPFT_RULES
+        k->pat = (slot >= 0)
+               ? (face ? s->rhs_ft[slot] : s->lhs_ft[slot]) : NULL;
+#else
+        k->pat = NULL;
+#endif
       }
     }
   }
-  // `size` is now nodes(t) -- try every rule at t, size-filtered.
-  for (u32 j = rule_lo; j < rule_hi && *n < MNF_SUCC_CAP; j++) {
-    if (g_mnf_ln[j] <= size) {
-      RewriteSubst sub = {{0}};
-      if (thvm_match(s->lhs[j], t, &sub)) {
-        mnf_succ_buf[*n]  = thvm_subst_apply(s->rhs[j], &sub);
-        mnf_succ_anti[*n] = 0u;
-        (*n)++;
-        if (*n >= MNF_SUCC_CAP) return size;
+  // Stable insertion-sort into WM tree order: pattern DFS-minimum
+  // first; alpha-identical patterns newest-fact-first.
+  for (u32 a = 1; a < n_cand; a++) {
+    struct MnfPosCand key = cand[a];
+    u32 b = a;
+    while (b > 0) {
+      struct MnfPosCand *pr = &cand[b - 1];
+      int key_first;
+      if (key.pat != NULL && pr->pat != NULL) {
+        if (atp_ft_wm_pattern_before(key.pat, pr->pat)) key_first = 1;
+        else if (atp_ft_wm_pattern_before(pr->pat, key.pat)) key_first = 0;
+        else key_first = (key.uid > pr->uid);
+      } else {
+        key_first = 0;                 // no FT patterns: keep scan order
       }
+      if (!key_first) break;
+      cand[b] = *pr;
+      b--;
     }
-    if (allow_anti && g_mnf_vc[j] && g_mnf_rn[j] <= size) {
-      RewriteSubst sb = {{0}};
-      if (thvm_match(s->rhs[j], t, &sb)) {
-        mnf_succ_buf[*n]  = thvm_subst_apply(s->lhs[j], &sb);
-        mnf_succ_anti[*n] = 1u;
-        (*n)++;
-      }
-    }
+    cand[b] = key;
   }
-  return size;
+  for (u32 a = 0; a < n_cand && !m->joined; a++) {
+    if (cand[a].down) m->nodes[c->ni].irred = 0u;
+    g_mnf_trace_slot = cand[a].slot; g_mnf_trace_face = cand[a].face;
+    mnf_insert(m, cand[a].whole, col,
+               (u8)(gl + cand[a].gl_inc),
+               (u8)(antir + cand[a].antir_inc), c->ni, NULL);
+  }
+  return 0u;
 }
 
-// Generate node `ni`'s successors against rules [rule_lo, rule_hi) and
-// insert each (same colour, anti-count bumped for a backward step).  A
-// node that yields at least one forward (size-reducing) rewrite is
-// reducible -- its `irred` flag is cleared; one that yields none is a
-// normal form and stays irreducible.
-static Term atp_rules_only_normalize(AtpState *s, Term t, u32 cap);
-
+// Generate node `ni`'s successors against facts [rule_lo, rule_hi):
+// pass 0 = rule steps at every position, pass 1 = equation steps at
+// every position (WM MNF_BearbeiteRE order).  `in_sweep` distinguishes
+// the new-fact sweep (reversed-rule steps allowed) from the PQ
+// expansion, per WM MNF_BearbeiteEineR vs MNF_BearbeiteR.
 static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
-                            u32 rule_lo, u32 rule_hi) {
-  u8   col  = m->nodes[ni].colour;
-  u8   anti = m->nodes[ni].anti;
-  Term t    = m->nodes[ni].term;
-  u32  n    = 0u;
-  (void)mnf_successors(s, t, (u8)(anti < MNF_MAX_ANTI), rule_lo, rule_hi, &n);
-  if (n >= MNF_SUCC_CAP) m->n_trunc++;   // successor buffer overflowed
-  // WM MNF set semantics (MNF.c nfMenge): every member is kept at its
-  // rules-NORMAL FORM -- an insert fully rules-normalizes first (the
-  // lineage's "with equation 0" steps), and equation variants are
-  // normalized again after the eq step.  thvm's raw one-step graph
-  // leaves the join dependent on the budgeted walk grinding the whole
-  // rewrite chain node-by-node: the MeredithAxioms OrAssociativity join
-  // (WM front node 17 = R-initial + eq -4 @arg1, then rules-NF ->
-  // collision at fact 436) arrives 18 kept facts late.  EXPERIMENTAL,
-  // OPT-IN (THVM_ATP_MNF_INSERT_NF=1): normalizing every successor over
-  // thvm's UNCAPPED front is too slow as-is (Meredith 2min -> >10min);
-  // the faithful port also needs WM's front cap + NF-dedup
-  // (mnfanalysis=1000.2000.10 caps the set at ~2001 members) before the
-  // insert-NF cost is bounded.  Default OFF = historical raw inserts.
-  static int ins_nf = -1;
-  if (ins_nf < 0) {
-    const char *e = getenv("THVM_ATP_MNF_INSERT_NF");
-    ins_nf = (e != NULL && e[0] == '1') ? 1 : 0;
-  }
-  for (u32 k = 0; k < n && !m->joined; k++) {
-    if (mnf_succ_anti[k] == 0u) m->nodes[ni].irred = 0u;   // forward redex
-    Term st = mnf_succ_buf[k];
-    if (ins_nf) {
-#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-      // FT rules-only normalize: dt-indexed matching + the ftnfm subtree
-      // memo make the per-successor NF affordable (the Term-side walk
-      // blew Meredith past 10min).
-      atp_ft_mirror_ensure(s);
-      AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-      st = ft_to_term(atp_rules_only_normalize_ft(s, ft_from_term(a, st, 0),
-                                                  4096u));
-#else
-      st = atp_rules_only_normalize(s, st, 4096u);
-#endif
-    }
-    mnf_insert(m, st, col, (u8)(anti + mnf_succ_anti[k]), ni);
-  }
+                            u32 rule_lo, u32 rule_hi, u8 in_sweep) {
+  u32 path[CP_MAX_DEPTH];
+  MnfExpCtx c = { s, m, ni, m->nodes[ni].term, rule_lo, rule_hi,
+                  in_sweep, 0u, 0u, 0, 0, 0u };
+  cp_walk_positions(c.root, path, 0u, CP_MAX_DEPTH, mnf_exp_visit, &c, 0u);
+  if (m->joined) return;
+  c.pass = 1u;
+  cp_walk_positions(c.root, path, 0u, CP_MAX_DEPTH, mnf_exp_visit, &c, 0u);
+}
+
+// Sweep node `ni` against ONE explicit fact (WM MNF_BearbeiteEineR /
+// MNF_BearbeiteEineGl): rule pass then equation pass, reversed-rule
+// steps admitted (in_sweep semantics).
+static void mnf_expand_node_fact(AtpState *s, AtpMnf *m, u32 ni,
+                                 Term fl, Term fr, u8 orient) {
+  u32 path[CP_MAX_DEPTH];
+  MnfExpCtx c = { s, m, ni, m->nodes[ni].term, 0u, 0u,
+                  /*in_sweep=*/1u, 0u, /*use_fact=*/1u, fl, fr, orient };
+  cp_walk_positions(c.root, path, 0u, CP_MAX_DEPTH, mnf_exp_visit, &c, 0u);
+  if (m->joined) return;
+  c.pass = 1u;
+  cp_walk_positions(c.root, path, 0u, CP_MAX_DEPTH, mnf_exp_visit, &c, 0u);
+}
+
+// Keep-site notification (WM ArbeitsAufnahme -> Z_ZieleErledigtMitNeuemFaktum
+// passes the kept fact itself).  Queued here, drained by the next
+// mnf_step -- immune to interreduction re-slotting between the keep and
+// the goal check.
+static void mnf_notify_fact(struct AtpMnf *m, Term l, Term r, u8 orient) {
+  if (m == NULL) return;
+  if (m->n_pend >= 256u) { m->pend_of = 1u; return; }
+  m->pend_l [m->n_pend] = l;
+  m->pend_r [m->n_pend] = r;
+  m->pend_or[m->n_pend] = orient;
+  m->n_pend++;
 }
 
 // Create the MNF set for the current goal: goal_lhs -> GREEN front,
@@ -14300,13 +14530,28 @@ static AtpMnf *mnf_create(AtpState *s) {
     free(m->buckets); free(m);
     return NULL;
   }
-  // Deques start empty at the right end -- mnf_insert pushes left.
+  // Stacks start empty at the right end -- mnf_insert pushes left.
   m->qred_head   = m->qred_tail   = m->q_cap;
   m->qgreen_head = m->qgreen_tail = m->q_cap;
-  m->seed_green = s->goal_lhs;     // the GREEN front's origin
-  m->seed_red   = s->goal_rhs;     // the RED front's origin
-  mnf_insert(m, s->goal_lhs, MNF_GREEN, 0u, MNF_ROOT_PARENT);
-  mnf_insert(m, s->goal_rhs, MNF_RED,   0u, MNF_ROOT_PARENT);
+  // WM canonicalizes the GOAL pair with LRSortieren like every stored
+  // pair (the MeredithAxioms OrAssociativity goal prints with the .pr
+  // sides swapped: orginalLinks = the structurally-smaller side).  The
+  // GREEN front seeds from the stored links; mirror the sort here so
+  // the two engines' colour/side assignment -- and with it the
+  // red-first expansion order and the whole member stream -- line up.
+  Term gl_seed = s->goal_lhs, gr_seed = s->goal_rhs;
+  if (atp_lr_sortieren_rec(gl_seed, gr_seed) > 0) {
+    Term tmp = gl_seed; gl_seed = gr_seed; gr_seed = tmp;
+  }
+  m->seed_green = gl_seed;         // the GREEN front's origin
+  m->seed_red   = gr_seed;         // the RED front's origin
+  m->try_all    = 1u;              // MNF_AddTryAllElements initial state
+  m->mode       = 0u;
+  m->n_interest = 0u;
+  m->n_pend     = 0u;
+  m->pend_of    = 0u;
+  mnf_insert(m, gl_seed, MNF_GREEN, 0u, 0u, MNF_ROOT_PARENT, NULL);
+  mnf_insert(m, gr_seed, MNF_RED,   0u, 0u, MNF_ROOT_PARENT, NULL);
   return m;
 }
 
@@ -14319,24 +14564,31 @@ static void mnf_destroy(struct AtpMnf *m) {
 // them for thvm_atp_gc_collect and write the relocated terms back; the
 // hash table (structural hashes, node indices) is GC-invariant.
 static u32 mnf_gc_count(struct AtpMnf *m) {
-  return (m == NULL) ? 0u : m->n_nodes;
+  return (m == NULL) ? 0u : (m->n_nodes + 2u * m->n_pend);
 }
 static void mnf_gc_gather(struct AtpMnf *m, Term *roots, u32 *w) {
   if (m == NULL) return;
   for (u32 i = 0; i < m->n_nodes; i++) roots[(*w)++] = m->nodes[i].term;
+  for (u32 i = 0; i < m->n_pend; i++) {
+    roots[(*w)++] = m->pend_l[i];
+    roots[(*w)++] = m->pend_r[i];
+  }
 }
 static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base) {
   if (m == NULL) return;
   for (u32 i = 0; i < m->n_nodes; i++) m->nodes[i].term = roots[base + i];
+  u32 w = base + m->n_nodes;
+  for (u32 i = 0; i < m->n_pend; i++) {
+    m->pend_l[i] = roots[w++];
+    m->pend_r[i] = roots[w++];
+  }
 }
 
-// Take a node from a colour's deque.  Waldmeister's irreducible-
-// adaptive policy: if the last node expanded for this colour was
-// irreducible (a normal form -- a dead end), pop the OLDEST node
-// (right end, breadth-first -- go try elsewhere); otherwise pop the
-// NEWEST (left end, depth-first -- keep driving the reduction down).
+// Take a node from a colour's worklist.  WM's PQ default discipline is
+// a plain STACK (MNF.c:1094: stack unless the -zb string says deque or
+// fifo; the -auto preset says neither) -- always pop the NEWEST.
 static u32 mnf_pop(u32 *q, u32 *head, u32 *tail, u8 last_irred) {
-  if (last_irred) return q[--(*tail)];   // FIFO end: oldest
+  (void)tail; (void)last_irred;
   return q[(*head)++];                   // LIFO end: newest
 }
 
@@ -14350,16 +14602,20 @@ static u32 mnf_pop(u32 *q, u32 *head, u32 *tail, u8 last_irred) {
 // taken with a rule that interreduction has since retired will not replay
 // (still equationally valid -- just no longer in R); `*replayed` counts
 // the ones that do.  Returns the root node index.
+static int mnf_edge_step(Term before, Term after,
+                         const Term *rl, const Term *rr, u32 nr,
+                         u8 *pos, u8 depth,
+                         u32 *out_rule, u8 *out_pos_len, u8 *out_fwd);
+
 static u32 mnf_verify_chain(AtpState *s, AtpMnf *m, u32 ni,
                             u32 *len, u32 *replayed) {
   u32 guard = 0u;
   while (m->nodes[ni].parent != ni && guard++ < m->n_nodes) {
     u32 p = m->nodes[ni].parent;
-    u32 n = 0u;
-    mnf_successors(s, m->nodes[p].term, 1u, 0u, s->n_rules, &n);
-    for (u32 k = 0; k < n; k++) {
-      if (kbo_eq(mnf_succ_buf[k], m->nodes[ni].term)) { (*replayed)++; break; }
-    }
+    u8 pos[ATP_PROOF_MAX_DEPTH]; u32 er; u8 epl, efw;
+    if (mnf_edge_step(m->nodes[p].term, m->nodes[ni].term,
+                      s->lhs, s->rhs, s->n_rules, pos, 0u,
+                      &er, &epl, &efw)) (*replayed)++;
     (*len)++;
     ni = p;
   }
@@ -14372,10 +14628,12 @@ static void mnf_verify(AtpState *s, AtpMnf *m) {
   u32 rootA = mnf_verify_chain(s, m, m->meet_a, &lenA, &repA);
   // Side B's node was never created -- meet_term is a one-step rewrite of
   // meet_b_parent; verify that link, then walk meet_b_parent to its root.
-  u32 nB = 0u, lenB = 1u, repB = 0u;
-  mnf_successors(s, m->nodes[m->meet_b_parent].term, 1u, 0u, s->n_rules, &nB);
-  for (u32 k = 0; k < nB; k++) {
-    if (kbo_eq(mnf_succ_buf[k], m->meet_term)) { repB++; break; }
+  u32 lenB = 1u, repB = 0u;
+  {
+    u8 pos[ATP_PROOF_MAX_DEPTH]; u32 er; u8 epl, efw;
+    if (mnf_edge_step(m->nodes[m->meet_b_parent].term, m->meet_term,
+                      s->lhs, s->rhs, s->n_rules, pos, 0u,
+                      &er, &epl, &efw)) repB++;
   }
   u32 rootB = mnf_verify_chain(s, m, m->meet_b_parent, &lenB, &repB);
   u8   colA      = m->nodes[m->meet_a].colour;
@@ -14436,59 +14694,223 @@ static int mnf_loop_guard(AtpState *s, AtpMnf *m) {
   return 0;
 }
 
+// The mnfanalysis=1000.2000.10 switch (WM MNF_AnalyseNM MNF.c:841-854 +
+// MNF_SearchInteresting :1678-1704): enter ExpandRewrite mode and prune
+// the working set to the origins plus the FIRST MNF_COUNT_NF
+// irreducible members per colour, in insertion order.  (WM's hash keeps
+// every member for dedup/join -- so does thvm's table; only the set of
+// members the per-check normalize visits shrinks.)
+static void mnf_switch_rewrite_mode(AtpMnf *m) {
+  m->mode = 1u;
+  m->n_interest = 0u;
+  // WM MNF_SearchInteresting (MNF.c:1692-1699): the per-colour counters
+  // START AT 1 (the origins are pre-counted), so only CountNF-1 = 9
+  // additional irreducibles per colour survive the prune.
+  u32 kept_red = 1u, kept_green = 1u;
+  for (u32 i = 0; i < m->n_nodes; i++) {
+    if (m->n_interest >= 2u + 2u * MNF_COUNT_NF) break;
+    u8 origin = (m->nodes[i].parent == i);
+    if (origin) { m->interest[m->n_interest++] = i; continue; }
+    // WM MNF_FilterInteresting (MNF.c:1682) tests the raw `irred` FLAG,
+    // NOT the MNF_tirred macro (irred && expanded): an unexpanded member
+    // keeps its default irred=1 and qualifies; the flag is cleared only
+    // when the member is expanded and yields a strictly smaller child.
+    // Requiring `expanded` here dropped the not-yet-popped grounded
+    // members the join needs, delaying it one check.
+    if (!m->nodes[i].irred) continue;
+    if (m->nodes[i].colour == MNF_RED) {
+      if (kept_red   < MNF_COUNT_NF) { m->interest[m->n_interest++] = i; kept_red++; }
+    } else {
+      if (kept_green < MNF_COUNT_NF) { m->interest[m->n_interest++] = i; kept_green++; }
+    }
+  }
+  {
+    static int mt = -1;
+    if (mt < 0) mt = getenv("THVM_ATP_MNF_TRACE") != NULL ? 1 : 0;
+    if (mt) {
+      fprintf(stderr, "MNFSWITCH nodes=%u interest=[", m->n_nodes);
+      for (u32 k = 0; k < m->n_interest; k++)
+        fprintf(stderr, "%s%u/%c", k ? "," : "", m->interest[k] + 1u,
+                m->nodes[m->interest[k]].colour == MNF_GREEN ? 'g' : 'r');
+      fprintf(stderr, "]\n");
+    }
+  }
+}
+
+// One R+E-ordered rewrite step of `t` (the same mixmost strategy the
+// goal check normalizes with; step_cap caps the splice budget).
+// Returns `t` itself when no redex fires.
+static Term mnf_norm_steps(AtpState *s, Term t, u32 step_cap) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  atp_ft_mirror_ensure(s);
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  return ft_to_term(atp_rewrite_normalize_ft(s, ft_from_term(a, t, 0),
+                                             step_cap));
+#else
+  return atp_rewrite_normalize(s, t, s->lhs, s->rhs, s->n_rules, step_cap);
+#endif
+}
+
+// Materialize the R+E normalization chain of member `par` as MNF nodes,
+// one rewrite per node, so the proof extractor's single-step edge
+// replay covers ExpandRewrite joins.  Called only once a join via this
+// member's NF is already established -- the chain's final insert then
+// records the join witness (or an intermediate collides first, which is
+// an equally valid meet).
+static void mnf_materialize_nf_chain(AtpState *s, AtpMnf *m, u32 par) {
+  u8 col = m->nodes[par].colour;
+  u8 gl  = m->nodes[par].gl_steps;
+  u8 ar  = m->nodes[par].antir_steps;
+  for (u32 g = 0; g < 256u && !m->joined; g++) {
+    Term cur = m->nodes[par].term;
+    Term nxt = mnf_norm_steps(s, cur, 1u);
+    if (kbo_eq(nxt, cur)) break;         // normal form reached
+    u32 idx = MNF_MAX_NODES;
+    if (mnf_insert(m, nxt, col, gl, ar, par, &idx)) return;   // JOIN
+    if (idx == MNF_MAX_NODES) break;     // table full
+    par = idx;
+  }
+}
+
 static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
+  (void)budget;   // WM's expansion loop has no per-check budget
   if (m->joined) return 1;
-  // Refresh the per-rule caches (vars-contained flag + lhs/rhs node
+  // Refresh the per-rule caches (face var-safety, groundness, node
   // counts) for the whole current rule set -- mnf_successors reads
   // them instead of recomputing at every node it expands this call.
   if (s->n_rules > g_mnf_vc_cap) {
     u32 cap = g_mnf_vc_cap ? g_mnf_vc_cap : 256u;
     while (cap < s->n_rules) cap *= 2u;
     u8  *nv = (u8  *)realloc(g_mnf_vc, cap);
+    u8  *nf = (u8  *)realloc(g_mnf_vfwd, cap);
+    u8  *ng = (u8  *)realloc(g_mnf_ground, cap);
     u32 *nl = (u32 *)realloc(g_mnf_ln, cap * sizeof(u32));
     u32 *nr = (u32 *)realloc(g_mnf_rn, cap * sizeof(u32));
-    if (nv == NULL || nl == NULL || nr == NULL) thvm_fatal("mnf_step: rule cache OOM");
-    g_mnf_vc = nv; g_mnf_ln = nl; g_mnf_rn = nr; g_mnf_vc_cap = cap;
+    if (nv == NULL || nf == NULL || ng == NULL || nl == NULL || nr == NULL)
+      thvm_fatal("mnf_step: rule cache OOM");
+    g_mnf_vc = nv; g_mnf_vfwd = nf; g_mnf_ground = ng;
+    g_mnf_ln = nl; g_mnf_rn = nr; g_mnf_vc_cap = cap;
   }
   for (u32 j = 0; j < s->n_rules; j++) {
-    g_mnf_vc[j] = (u8)atp_vars_contained(s->lhs[j], s->rhs[j]);
-    g_mnf_ln[j] = atp_symbol_count(s->lhs[j]);
-    g_mnf_rn[j] = atp_symbol_count(s->rhs[j]);
+    g_mnf_vc[j]     = (u8)atp_vars_contained(s->lhs[j], s->rhs[j]);
+    g_mnf_vfwd[j]   = (u8)atp_vars_contained(s->rhs[j], s->lhs[j]);
+    g_mnf_ground[j] = mnf_term_is_ground(s->lhs[j]);
+    g_mnf_ln[j]     = atp_symbol_count(s->lhs[j]);
+    g_mnf_rn[j]     = atp_symbol_count(s->rhs[j]);
   }
 #ifdef ATP_MNF_DIAG
   { static u32 c = 0;
     if (c++ % 16u == 0u) {
       fprintf(stderr,
-        "[mnf] call=%-6u nodes=%-7u red=%-7u green=%-7u "
+        "[mnf] call=%-6u mode=%u nodes=%-7u red=%-7u green=%-7u "
         "queue(r=%u g=%u) anti=%u dup=%u trunc=%u full=%u rules=%u/%u\n",
-        c, m->n_nodes, m->n_red, m->n_green,
+        c, m->mode, m->n_nodes, m->n_red, m->n_green,
         m->qred_tail - m->qred_head, m->qgreen_tail - m->qgreen_head,
         m->n_anti, m->n_dup, m->n_trunc, m->full,
         m->n_rules_seen, s->n_rules);
     } }
 #endif
-  if (s->n_rules > m->n_rules_seen) {
-    u32 lo = m->n_rules_seen, hi = s->n_rules, upto = m->n_nodes;
-    for (u32 ni = 0; ni < upto && !m->joined; ni++) {
-      if (m->nodes[ni].expanded) {
+  if (m->mode == 1u) {
+    // ExpandRewrite (WM MNF_PseudoExpand, MNF.c:1822-1910): per check,
+    // fully normalize each interesting member under the CURRENT rule
+    // set and test ONLY the final NF -- against the main table (an
+    // opposite-colour member = join, MNF.c:1887-1897) and against this
+    // round's other NFs (WM's per-round side hash, :1866-1878).
+    // Intermediates are NOT tested and nothing enters the main table
+    // here (WM's round NFs live in the side hash only) -- testing the
+    // whole chain over-joined 190 kept facts early on MeredithAxioms
+    // OrAssociativity.  Only once a join is established is the winning
+    // chain materialized node-by-node for the proof extractor.  New
+    // facts need no separate sweep -- WM's AddRegelNM/AddGleichungNM
+    // are no-ops in this mode; the fresh normalize sees the new rules.
+    m->n_rules_seen = s->n_rules;
+    m->n_pend  = 0u;
+    m->pend_of = 0u;
+    Term nf_term[2u + 2u * MNF_COUNT_NF];
+    u8   nf_col [2u + 2u * MNF_COUNT_NF];
+    u32  nf_from[2u + 2u * MNF_COUNT_NF];
+    u32  n_nf = 0u;
+    if (mnf_loop_guard(s, m)) return m->joined;
+    for (u32 k = 0; k < m->n_interest && !m->joined; k++) {
+      u32 par = m->interest[k];
+      u8  col = m->nodes[par].colour;
+      Term nf = mnf_norm_steps(s, m->nodes[par].term, 4096u);
+      // (a) main-table collision on the NF.
+      u32 idx = mnf_lookup(m, nf, mnf_hash(nf));
+      if (idx != MNF_MAX_NODES && m->nodes[idx].colour != col) {
+        mnf_materialize_nf_chain(s, m, par);
+        break;
+      }
+      // (b) this round's opposite-colour NFs (the side hash).
+      for (u32 j = 0; j < n_nf; j++) {
+        if (nf_col[j] != col && kbo_eq(nf_term[j], nf)) {
+          mnf_materialize_nf_chain(s, m, nf_from[j]);
+          if (!m->joined) mnf_materialize_nf_chain(s, m, par);
+          break;
+        }
+      }
+      if (m->joined) break;
+      nf_term[n_nf] = nf;
+      nf_col [n_nf] = col;
+      nf_from[n_nf] = par;
+      n_nf++;
+    }
+#ifdef ATP_MNF_DIAG
+    if (m->joined) mnf_verify(s, m);
+#endif
+    return m->joined;
+  }
+  // (a) New-fact sweep (WM MNF_AddRENM, MNF.c:1554-1609): feed the
+  // facts completion derived since the last call to every already-
+  // expanded member -- under try_all==0 (past the SwitchIrred count)
+  // only irreducible-or-origin members.  Reversed-rule steps are
+  // admitted here (in_sweep=1), never in the PQ expansion below.
+  {
+    // Pending-fact overflow: re-sweep everything (rare; 256 keeps
+    // between two goal checks).
+    if (m->pend_of) {
+      m->pend_of = 0u;
+      m->n_pend  = 0u;
+      u32 upto = m->n_nodes;
+      for (u32 ni = 0; ni < upto && !m->joined; ni++) {
+        if (!m->nodes[ni].expanded) continue;
+        if (!m->try_all &&
+            !(m->nodes[ni].irred || m->nodes[ni].parent == ni)) continue;
         if (mnf_loop_guard(s, m)) break;
-        mnf_expand_node(s, m, ni, lo, hi);
+        mnf_expand_node(s, m, ni, 0u, s->n_rules, /*in_sweep=*/1u);
       }
     }
-    m->n_rules_seen = hi;
+    u32 upto = m->n_nodes;
+    {
+      static int mt = -1;
+      if (mt < 0) mt = getenv("THVM_ATP_MNF_TRACE") != NULL ? 1 : 0;
+      if (mt)
+        fprintf(stderr, "MNFCHK nodes=%u pend=%u\n", m->n_nodes, m->n_pend);
+    }
+    for (u32 f = 0; f < m->n_pend && !m->joined; f++) {
+      for (u32 ni = 0; ni < upto && !m->joined; ni++) {
+        if (!m->nodes[ni].expanded) continue;
+        if (!m->try_all &&
+            !(m->nodes[ni].irred || m->nodes[ni].parent == ni)) continue;
+        if (mnf_loop_guard(s, m)) break;
+        mnf_expand_node_fact(s, m, ni, m->pend_l[f], m->pend_r[f],
+                             m->pend_or[f]);
+      }
+    }
+    m->n_pend = 0u;
+    m->n_rules_seen = s->n_rules;
   }
-  // (b) expand the two fronts in alternation -- one node each per
-  // round -- taking each colour's node by the irred-adaptive deque
-  // policy (mnf_pop).  A node's `irred` is settled by mnf_expand_node;
-  // it feeds the next pop of the same colour.
-  for (u32 b = 0; b < budget && !m->joined; b++) {
+  // (b) WM MNF_ExpandNM (MNF.c:858-906): strict red/green alternation,
+  // one pop per colour per round, run until join, exhaustion, or the
+  // mnfanalysis switch.
+  while (!m->joined) {
     if (mnf_loop_guard(s, m)) break;
     int did = 0;
     if (m->qred_head < m->qred_tail) {
       u32 ni = mnf_pop(m->qred, &m->qred_head, &m->qred_tail,
                        m->red_last_irred);
       if (!m->nodes[ni].expanded) {
-        mnf_expand_node(s, m, ni, 0u, s->n_rules);
+        mnf_expand_node(s, m, ni, 0u, s->n_rules, /*in_sweep=*/0u);
         m->nodes[ni].expanded = 1u;
       }
       m->red_last_irred = m->nodes[ni].irred;
@@ -14498,12 +14920,17 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
       u32 ni = mnf_pop(m->qgreen, &m->qgreen_head, &m->qgreen_tail,
                        m->green_last_irred);
       if (!m->nodes[ni].expanded) {
-        mnf_expand_node(s, m, ni, 0u, s->n_rules);
+        mnf_expand_node(s, m, ni, 0u, s->n_rules, /*in_sweep=*/0u);
         m->nodes[ni].expanded = 1u;
       }
       m->green_last_irred = m->nodes[ni].irred;
       did = 1;
     }
+    // WM iteration-boundary order (MNF_ExpandNM :894-901): the
+    // mnfanalysis check runs BEFORE the empty-queue break -- a front
+    // that crosses 2000 on its final pops still switches THIS check.
+    if (m->n_nodes > MNF_SWITCH_NF) { mnf_switch_rewrite_mode(m); break; }
+    if (m->n_nodes > MNF_SWITCH_IRRED) m->try_all = 0u;
     if (!did) break;
   }
 #ifdef ATP_MNF_DIAG
@@ -14782,6 +15209,8 @@ fn u32 thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
 // path and the multi-goal conjunct loop -- the MNF front search is NOT
 // part of this check (it is per-alias-goal and stateful).
 extern int g_goalnf_active;   // ft_norm.c: [mixstep] tracer scope tag
+extern int atp_ft_wm_pattern_before(const AtpFtCell *a,
+                                    const AtpFtCell *b);   // ft_norm.c
 
 static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
                                Term *nf_l, Term *nf_r) {
