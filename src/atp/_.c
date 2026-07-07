@@ -14233,6 +14233,8 @@ static u32 mnf_successors(AtpState *s, Term t, u8 allow_anti,
 // node that yields at least one forward (size-reducing) rewrite is
 // reducible -- its `irred` flag is cleared; one that yields none is a
 // normal form and stays irreducible.
+static Term atp_rules_only_normalize(AtpState *s, Term t, u32 cap);
+
 static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
                             u32 rule_lo, u32 rule_hi) {
   u8   col  = m->nodes[ni].colour;
@@ -14241,9 +14243,29 @@ static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
   u32  n    = 0u;
   (void)mnf_successors(s, t, (u8)(anti < MNF_MAX_ANTI), rule_lo, rule_hi, &n);
   if (n >= MNF_SUCC_CAP) m->n_trunc++;   // successor buffer overflowed
+  // WM MNF set semantics (MNF.c nfMenge): every member is kept at its
+  // rules-NORMAL FORM -- an insert fully rules-normalizes first (the
+  // lineage's "with equation 0" steps), and equation variants are
+  // normalized again after the eq step.  thvm's raw one-step graph
+  // leaves the join dependent on the budgeted walk grinding the whole
+  // rewrite chain node-by-node: the MeredithAxioms OrAssociativity join
+  // (WM front node 17 = R-initial + eq -4 @arg1, then rules-NF ->
+  // collision at fact 436) arrives 18 kept facts late.  EXPERIMENTAL,
+  // OPT-IN (THVM_ATP_MNF_INSERT_NF=1): normalizing every successor over
+  // thvm's UNCAPPED front is too slow as-is (Meredith 2min -> >10min);
+  // the faithful port also needs WM's front cap + NF-dedup
+  // (mnfanalysis=1000.2000.10 caps the set at ~2001 members) before the
+  // insert-NF cost is bounded.  Default OFF = historical raw inserts.
+  static int ins_nf = -1;
+  if (ins_nf < 0) {
+    const char *e = getenv("THVM_ATP_MNF_INSERT_NF");
+    ins_nf = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
   for (u32 k = 0; k < n && !m->joined; k++) {
     if (mnf_succ_anti[k] == 0u) m->nodes[ni].irred = 0u;   // forward redex
-    mnf_insert(m, mnf_succ_buf[k], col, (u8)(anti + mnf_succ_anti[k]), ni);
+    Term st = ins_nf ? atp_rules_only_normalize(s, mnf_succ_buf[k], 4096u)
+                     : mnf_succ_buf[k];
+    mnf_insert(m, st, col, (u8)(anti + mnf_succ_anti[k]), ni);
   }
 }
 
