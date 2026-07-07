@@ -418,6 +418,221 @@ static void pr_mark_axiom_consts(Term t, u8 *is_ax_const, u32 cap) {
     pr_mark_axiom_consts(term_ctr_at(t, i), is_ax_const, cap);
 }
 
+// === WM -auto precedence derivation ==================================
+// `wmcli -auto` IGNORES the .pr ORDERING section and self-derives the
+// reduction precedence.  Two source stages compose:
+//
+//   1. WASIC/SpezNormierung.c renumbers the signature symbols by the
+//      lexicographic key SymbolVergleich (SpezNormierung.c:375):
+//        AnzVorkGleichungen  (occurrences in EQUATIONS)   -- fewer => later
+//        Stelligkeit         (arity)                      -- larger => later
+//        PositionenGleichungen / PositionenZiele          -- prime-power
+//        KombiKontext{Gleichungen,Ziele}{Einzeln,Gegenueber,-} contexts
+//        FinaleBewertung                                  -- final tally
+//      via a stable bubble sort (swap when the left is "Groesser"); the
+//      resulting position IS the internal symbol id.  Symbol positions
+//      are the prime-power weights of PositionsDatenAusTermSammeln
+//      (SpezNormierung.c:136): the j-th (1-based) argument at depth d
+//      multiplies the parent weight by Primzahlen[d]^j, uint32 wrapping.
+//   2. ANA/Praezedenzgenerator.c FuchsPraezedenz (line 292) ranks the
+//      EQUATION symbols by the arity ladder unary>binary>...>constants
+//      (the i%(N+1) trick), then the CONCLUSION-only symbols by ascending
+//      arity, each band ordered by the id above -- first = highest prec.
+//
+// This function reproduces both stages over the parsed .pr, writing the
+// derived total precedence into pr->precedence[] for the user labels.
+// Validated byte-identical to `wmcli -auto`'s emitted prec= string on
+// every KBO-ordered notable theorem (the combinator files use -ord col3
+// and never reach this path).  The two engine FVI constants (reserved
+// labels 1/2) stay precedence-minimal -- WM ranks its const1/const2 as
+// arity-0 equation symbols just above the goal skolems, but that band
+// sits below every operator and does not reorder any kept rule (verified
+// on the Boolean/Ring/HigmanNeumann corpora).
+static const double PR_PRIMES[15] =
+  {2,3,5,7,11,13,17,19,23,29,31,37,41,43,47};
+
+static void pr_occ_collect(Term t, u32 *field, u32 cap) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 e = term_ext(t);
+  if (e < cap) field[e]++;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) pr_occ_collect(term_ctr_at(t, i), field, cap);
+}
+
+static void pr_pos_collect(Term t, u32 *field, u32 cap, u32 position, u32 depth) {
+  if (depth >= 15u) return;
+  if (term_tag(t) != TAG_CTR) return;
+  u32 n = term_ctr_n(t);
+  for (u32 i = n; i > 0; i--) {
+    u32 w = (u32)((double)position * pow(PR_PRIMES[depth], (double)i));
+    pr_pos_collect(term_ctr_at(t, i - 1), field, cap, w, depth + 1);
+  }
+  u32 e = term_ext(t);
+  if (e < cap) field[e] += position;
+}
+
+// TermKontext (SpezNormierung.c:155): context threads through the term,
+// each function symbol adding its AnzVork*+Pos* tallies; `combi` selects
+// pass-2 (AnzVork+Pos) vs pass-3 (KombiKontext) inputs.
+typedef struct {
+  u32 anzG[PR_MAX_SYMS + PR_LABEL_BASE], anzZ[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 posG[PR_MAX_SYMS + PR_LABEL_BASE], posZ[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 kkGe[PR_MAX_SYMS + PR_LABEL_BASE], kkGeg[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 kkG[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 kkZe[PR_MAX_SYMS + PR_LABEL_BASE], kkZeg[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 kkZ[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 fin[PR_MAX_SYMS + PR_LABEL_BASE];
+} PrSymStats;
+
+static u32 pr_termkontext(Term t, u32 context, const PrSymStats *st, u32 cap) {
+  if (term_tag(t) != TAG_CTR) return context + 1u;
+  u32 e = term_ext(t);
+  if (e < cap) context += st->anzG[e] + st->anzZ[e] + st->posG[e] + st->posZ[e];
+  u32 n = term_ctr_n(t);
+  for (u32 i = n; i > 0; i--)
+    context += pr_termkontext(term_ctr_at(t, i - 1), context, st, cap);
+  return context;
+}
+
+static u32 pr_termkontext2(Term t, u32 context, const PrSymStats *st, u32 cap) {
+  if (term_tag(t) != TAG_CTR) return context + 1u;
+  u32 e = term_ext(t);
+  if (e < cap) context += st->kkG[e] + st->kkZ[e];
+  u32 n = term_ctr_n(t);
+  for (u32 i = n; i > 0; i--)
+    context += pr_termkontext2(term_ctr_at(t, i - 1), context, st, cap);
+  return context;
+}
+
+static void pr_finalesym(Term t, u32 vater, PrSymStats *st, u32 cap) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 e = term_ext(t);
+  if (e < cap) st->fin[e] += vater;
+  u32 v2 = pr_termkontext2(t, 0u, st, cap);
+  u32 n = term_ctr_n(t);
+  for (u32 i = n; i > 0; i--) pr_finalesym(term_ctr_at(t, i - 1), v2, st, cap);
+}
+
+// SymbolVergleich: +1 if label `a` is "Groesser" (sinks later in the sort
+// => higher id), -1 if "Kleiner", 0 if equal.  arity[] indexed by label.
+static int pr_sym_vergleich(u32 a, u32 b, const PrSymStats *st, const u32 *arity) {
+  if (st->anzG[a] != st->anzG[b]) return st->anzG[a] < st->anzG[b] ? 1 : -1; // Max
+  if (arity[a]  != arity[b])      return arity[a]  > arity[b]  ? 1 : -1;      // Min
+  const u32 *keys_a[9] = { st->posG, st->posZ, st->kkGe, st->kkGeg, st->kkG,
+                           st->kkZe, st->kkZeg, st->kkZ, st->fin };
+  for (u32 k = 0; k < 9; k++)
+    if (keys_a[k][a] != keys_a[k][b]) return keys_a[k][a] > keys_a[k][b] ? 1 : -1;
+  return 0;
+}
+
+static void pr_wm_derive_precedence(PrProblem *pr) {
+  u32 cap = pr->n_syms + PR_LABEL_BASE;
+  PrSymStats *st = calloc(1, sizeof *st);
+  u32 arity[PR_MAX_SYMS + PR_LABEL_BASE];
+  u8  in_eqns[PR_MAX_SYMS + PR_LABEL_BASE];
+  memset(arity, 0, sizeof arity);
+  memset(in_eqns, 0, sizeof in_eqns);
+  for (u32 i = 0; i < pr->n_syms; i++) arity[i + PR_LABEL_BASE] = pr->syms[i].arity;
+
+  u32 L[PR_MAX_SYMS + PR_LABEL_BASE], R[PR_MAX_SYMS + PR_LABEL_BASE];
+  // Pass 1: occurrence + prime-power position tallies (goals then eqns,
+  // matching SpezNormierung's conclusions-first loop order).
+  if (term_tag(pr->goal_l) == TAG_CTR || term_tag(pr->goal_r) == TAG_CTR) {
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_occ_collect(pr->goal_l, L, cap); pr_occ_collect(pr->goal_r, R, cap);
+    for (u32 l = 0; l < cap; l++) st->anzZ[l] += R[l] + L[l];
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_pos_collect(pr->goal_l, L, cap, 1u, 0u);
+    pr_pos_collect(pr->goal_r, R, cap, 1u, 0u);
+    for (u32 l = 0; l < cap; l++) st->posZ[l] += R[l] + L[l];
+  }
+  for (u32 e = 0; e < pr->n_eqns; e++) {
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_occ_collect(pr->eq_l[e], L, cap); pr_occ_collect(pr->eq_r[e], R, cap);
+    for (u32 l = 0; l < cap; l++) { st->anzG[l] += R[l] + L[l]; if (R[l] + L[l]) in_eqns[l] = 1u; }
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_pos_collect(pr->eq_l[e], L, cap, 1u, 0u);
+    pr_pos_collect(pr->eq_r[e], R, cap, 1u, 0u);
+    for (u32 l = 0; l < cap; l++) st->posG[l] += R[l] + L[l];
+  }
+  // Pass 2: KombiKontext (equations -> *G, conclusions -> *Z).
+  for (u32 e = 0; e < pr->n_eqns; e++) {
+    u32 gL = pr_termkontext(pr->eq_l[e], 0u, st, cap);
+    u32 gR = pr_termkontext(pr->eq_r[e], 0u, st, cap);
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_occ_collect(pr->eq_l[e], L, cap); pr_occ_collect(pr->eq_r[e], R, cap);
+    for (u32 l = 0; l < cap; l++) {
+      if (R[l] > 0) { st->kkG[l] += gR + gL; st->kkGe[l] += gR; }
+      if (L[l] > 0) { st->kkG[l] += gR + gL; st->kkGe[l] += gL; }
+      if (R[l] > 0 && L[l] == 0) st->kkGeg[l] += gL;
+      if (L[l] > 0 && R[l] == 0) st->kkGeg[l] += gR;
+    }
+  }
+  {
+    u32 gL = pr_termkontext(pr->goal_l, 0u, st, cap);
+    u32 gR = pr_termkontext(pr->goal_r, 0u, st, cap);
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_occ_collect(pr->goal_l, L, cap); pr_occ_collect(pr->goal_r, R, cap);
+    for (u32 l = 0; l < cap; l++) {
+      if (R[l] > 0) { st->kkZ[l] += gR + gL; st->kkZe[l] += gR; }
+      if (L[l] > 0) { st->kkZ[l] += gR + gL; st->kkZe[l] += gL; }
+      if (R[l] > 0 && L[l] == 0) st->kkZeg[l] += gL;
+      if (L[l] > 0 && R[l] == 0) st->kkZeg[l] += gR;
+    }
+  }
+  // Pass 3: FinaleBewertung.
+  for (u32 e = 0; e < pr->n_eqns; e++) {
+    pr_finalesym(pr->eq_l[e], 0u, st, cap);
+    pr_finalesym(pr->eq_r[e], 0u, st, cap);
+  }
+  pr_finalesym(pr->goal_l, 0u, st, cap);
+  pr_finalesym(pr->goal_r, 0u, st, cap);
+
+  // Bubble sort user labels (init = declaration order) by SymbolVergleich;
+  // final position = internal id.
+  u32 ord[PR_MAX_SYMS], nord = pr->n_syms;
+  for (u32 i = 0; i < nord; i++) ord[i] = i + PR_LABEL_BASE;
+  for (u32 i = 1; i < nord; i++)
+    for (u32 j = 0; j + i < nord; j++)
+      if (pr_sym_vergleich(ord[j], ord[j + 1], st, arity) == 1) {
+        u32 tmp = ord[j]; ord[j] = ord[j + 1]; ord[j + 1] = tmp;
+      }
+  u32 id_of[PR_MAX_SYMS + PR_LABEL_BASE];
+  memset(id_of, 0, sizeof id_of);
+  for (u32 k = 0; k < nord; k++) id_of[ord[k]] = k;
+
+  // FuchsPraezedenz: build the descending-precedence list.
+  u32 N = 0;
+  for (u32 l = PR_LABEL_BASE; l < cap; l++) if (arity[l] > N) N = arity[l];
+  u32 seq[PR_MAX_SYMS], nseq = 0;
+  // (2A) equation symbols by arity ladder 1..N then 0, within arity by id asc.
+  for (u32 ii = 1; ii <= N + 1u; ii++) {
+    u32 a = ii % (N + 1u);
+    for (u32 want_id = 0; want_id < nord; want_id++)
+      for (u32 l = PR_LABEL_BASE; l < cap; l++)
+        if (in_eqns[l] && arity[l] == a && id_of[l] == want_id) seq[nseq++] = l;
+  }
+  // (3A) conclusion-only symbols by ascending arity, within arity by id asc.
+  for (u32 a = 0; a <= N; a++)
+    for (u32 want_id = 0; want_id < nord; want_id++)
+      for (u32 l = PR_LABEL_BASE; l < cap; l++)
+        if (!in_eqns[l] && arity[l] == a && id_of[l] == want_id) seq[nseq++] = l;
+
+  // Assign ranks: first in seq = highest.  Reserved 1/2 stay at 1/2.
+  for (u32 l = 0; l < cap; l++) pr->precedence[l] = 0u;
+  pr->precedence[1] = 1u;
+  pr->precedence[2] = 2u;
+  for (u32 k = 0; k < nseq; k++) pr->precedence[seq[k]] = (nseq - k) + PR_LABEL_BASE - 1u;
+
+  if (getenv("THVM_ATP_DEBUG_PREC") != NULL) {
+    fprintf(stderr, "WM-DERIVED-PREC:");
+    for (u32 k = 0; k < nseq; k++)
+      fprintf(stderr, " %s", pr->syms[seq[k] - PR_LABEL_BASE].name);
+    fprintf(stderr, "\n");
+  }
+  free(st);
+}
+
 // Label of `name[0..n)`, or 0 when unknown.
 static u32 pr_sym_find(const PrProblem *pr, const char *s, size_t n) {
   for (u32 i = 0; i < pr->n_syms; i++) {
@@ -731,6 +946,16 @@ int main(int argc, char **argv) {
       u32 aw = (wv != NULL) ? (u32)atoi(wv) : 2u;
       for (u32 lab = PR_LABEL_BASE; lab < cap; lab++)
         if (ax_const[lab]) prp.weights[lab] = aw;
+
+      // ...and self-derive the precedence exactly as `wmcli -auto` does
+      // (PhilMarlow/SpezNormierung), REPLACING the .pr ORDERING chain --
+      // the WL encoder's precedence is NOT what Automodus picks, and on
+      // multi-operator signatures (Boolean and/or, ring +/*) the two
+      // disagree, flipping the KBO orientation of a symmetric law and
+      // diverging the trajectory.  THVM_ATP_NO_AUTO_PREC=1 keeps the .pr
+      // chain (the pre-derivation behaviour).
+      if (!atp_env_on("THVM_ATP_NO_AUTO_PREC"))
+        pr_wm_derive_precedence(&prp);
     }
   }
 
