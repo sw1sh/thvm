@@ -671,7 +671,15 @@ static const SchedSlice SCHEDULE[] = {
   // Twee simplifyPassive).  A genuinely different selection regime from the
   // three WM/MNF slices above -- the portfolio's Twee-native angle.
   {"twee",   "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --cp-set-interreduce", 0.0},
-  // Backups -- only launch if one of the first four exits early.
+  // (5) PURE bare completion (bare engine defaults, GT weight, NO WM preset
+  // heuristics, NO ground-join/connectedness).  The WM preset's selection +
+  // MaxWeight actively DIVERGES on some CASC UEQ problems -- notably the
+  // ifeq-encoded Boolean/relation families (BOO014-10: WM preset + WM-emu
+  // fail even @150s, but pure bare PROVES it in 6.0s; ground-join or
+  // connectedness on top of bare break it again).  This slice is the
+  // portfolio's bare-completion angle for the WM-preset-divergent set.
+  {"bare",   "--preset=none", 0.0},
+  // Backups -- only launch if one of the first five exits early.
   {"wm-gj",   "--ground-join --connectedness",             0.0},
   {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.0},
   {"bare-gj", "--preset=none --ground-join --connectedness", 0.0},
@@ -681,10 +689,12 @@ static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
 // Per-slice RSS cap (MB) when running slices concurrently, so K parallel
 // engines stay well under the machine ceiling.  Each child inherits it as
 // THVM_ATP_RSS_ABORT_MB unless the caller already set a (lower) value.
-#define SCHED_SLICE_RSS_MB 5000
+#define SCHED_SLICE_RSS_MB 4500
 // Max slices resident at once.  K concurrent engines * SCHED_SLICE_RSS_MB
-// bounds peak memory (4 * 5GB = 20GB, under a 24GB ceiling on 48GB).
-#define SCHED_MAX_PAR 4
+// bounds peak memory (5 * 4.5GB = 22.5GB, under a 24GB ceiling on 48GB;
+// measured practical peak is far lower -- ~7GB for 4 slices on GRP721-1 --
+// since slices rarely approach their cap).
+#define SCHED_MAX_PAR 5
 
 // CONCURRENT portfolio: run the slices in a bounded pool (SCHED_MAX_PAR at
 // a time), EACH with the FULL wall -- not wall/N as the old sequential
