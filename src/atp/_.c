@@ -7256,15 +7256,19 @@ static u8 atp_wmo_eq_dist_rhs_base(const AtpState *s, u32 src_trace) {
   if (src_trace == ATP_TRACE_NONE || src_trace >= s->n_trace) {
     // Past the proof-trace soft cap the trace entry is gone, but the
     // popped CP's origin class survives on the queue (cp_kind ->
-    // last_popped_kind).  Apply the same class rule as the tagged
+    // last_popped_kind).  Apply the SAME class rule as the tagged
     // branches below: a superposition CP stores WM's (KPLinks,
-    // KPRechts), distinguished face = stored LHS (0); a SIMPLIFY
-    // re-derivation keeps the stored RHS (1).  An axiom never outlives
-    // the cap (pushed at init); it keeps the historical default.
-    // (WolframAxioms OrAssociativity fact 318: n_trace crosses the
-    // 131072 cap near fact 300, so the trace-less default walked the
-    // B/E sweep faces reversed and flipped the fact-533 weight tie.)
-    return (s->last_popped_kind == (u8)TRACE_CP) ? 0u : 1u;
+    // KPRechts) AND a SIMPLIFY re-derivation keeps the natural left
+    // side -- distinguished face = stored LHS (0) for both.  An axiom
+    // never outlives the cap (pushed at init); it keeps the historical
+    // default.  (WolframAxioms OrAssociativity fact 318: n_trace
+    // crosses the 131072 cap near fact 300, so the trace-less default
+    // walked the B/E sweep faces reversed and flipped the fact-533
+    // weight tie; fact 1531, a trace-less SIMPLIFY, needed the same
+    // stored-LHS verdict as the traced branch -- the A-vs-D root-twin
+    // formation-order flip behind the fact-1549 kept-E side swap.)
+    return (s->last_popped_kind == (u8)TRACE_CP ||
+            s->last_popped_kind == (u8)TRACE_SIMPLIFY) ? 0u : 1u;
   }
   Term e = s->trace[src_trace];
   if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 2u) return 1u;
