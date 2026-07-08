@@ -7278,11 +7278,14 @@ static u8 atp_wmo_eq_dist_rhs_base(const AtpState *s, u32 src_trace) {
   // the natural left side as the distinguished face -> dist_rhs=0.  A
   // genuine two-parent superposition takes the dist_rhs=1 default.
   if (reason == TRACE_SIMPLIFY) {
-    // An IR-victim re-derivation: WM's IR_PufferAuslesen re-queues the
-    // victim pair with its faces in the ORIGINAL rule order, and the
-    // kept equation's WM-distinguished face lands on thvm's stored RHS
-    // (the OA fact-318 tie: WM sweeps the reverse face first).
-    return 1u;
+    // An IR-victim re-derivation keeps the natural left side as the
+    // distinguished face, same as the header comment's single-parent
+    // rule (MeredithAxioms AndAssociativity fact 31, a SIMPLIFY-kept E:
+    // WM forms the fact-34 tie CP from the stored-LHS pattern first;
+    // dist=1 walked thvm's B-phase on the stored RHS and flipped the
+    // 34/36 weight tie).  A briefly-live dist=1 variant here was gated
+    // only by the loose pre-RULEADD-anchored checker -- a phantom.
+    return 0u;
   }
   if (reason == TRACE_CP) {
     // Post-4df4f2ab the stored raw pair is WM's (KPLinks, KPRechts): the
