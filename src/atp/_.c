@@ -21928,6 +21928,34 @@ static int sw_corank_collapse_on(void) {
   return ccollapse;
 }
 
+// True iff ANY corank experiment env is armed -- the guard for the
+// equation-tree face-pairing override block in sw_vater_visit.  In the
+// default config (nothing armed) that block computes overrides that no
+// branch consumes (raw emission is the resolved ground truth), yet pays
+// one wmo_eq_sides_var_differ walk plus an O(nh) sibling scan per hit;
+// the guard skips it wholesale.  THVM_ATP_CORANK_GATE is deliberately
+// NOT probed: it only modulates behavior inside the collapse-on branch,
+// so it is irrelevant while the collapse itself is off.  getenv is
+// probed once and cached (never in the hot loop).
+static int sw_corank_active(void) {
+  static int cactive = -1;
+  if (cactive < 0) {
+    int on = sw_corank_collapse_on();
+    static const char *const names[] = {
+      "THVM_ATP_CORANK_DIST", "THVM_ATP_CORANK_MAX",
+      "THVM_ATP_CORANK_DINV", "THVM_ATP_CORANK_WMFACE",
+      "THVM_ATP_CORANK_KBO",
+    };
+    for (u32 i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+      const char *e = getenv(names[i]);
+      if (e != NULL && e[0] == '1') on = 1;
+    }
+    if (getenv("THVM_ATP_CORANK_TRACE") != NULL) on = 1;
+    cactive = on;
+  }
+  return cactive;
+}
+
 static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
   SwVaterCtx *c = (SwVaterCtx *)raw;
   AtpState *s = c->s;
@@ -21996,202 +22024,211 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
         jidx[h]    = sw_uid_to_idx(s, hits[h].trace);
       }
       _drk_t0 = g_atp_phase_detail ? atp_now_us() : 0;
-      for (u32 h = 0; h < nh; h++) {
-        u32 j = jidx[h];
-        if (j == 0xffffffffu || j == c->i_out) continue;
-        if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) continue;
-        if (!wmo_eq_sides_var_differ(s->lhs[j], s->rhs[j])) continue;
-        u32 h2 = 0xffffffffu;
-        for (u32 g = 0; g < nh; g++)
-          if (g != h && hits[g].trace == hits[h].trace &&
-              hits[g].face != hits[h].face) { h2 = g; break; }
-        if (h2 == 0xffffffffu) continue;
-        u32 o_arr = hits[h2].arrival;
-        {
-          static int ct = -1;
-          if (ct < 0) ct = getenv("THVM_ATP_CORANK_TRACE") != NULL ? 1 : 0;
-          if (ct) {
-            fprintf(stderr,
-                    "CORANK i=%u trace=%u face=%u arr=%u o_arr=%u dist_rhs=%u "
-                    "raw_ch=%u o_raw_ch=%u supp=%u sub=",
-                    c->i_out, hits[h].trace, hits[h].face, hits[h].arrival,
-                    o_arr, wmo_trace_dist_rhs(w, hits[h].trace), raw_ch[h],
-                    raw_ch[h2], sw_corank_suppressed(c, p, p_len, sub,
-                                                     &hits[h], j));
-            atp_dbg_print_term(stderr, sub);
-            fputc('\n', stderr);
+      // Face-pairing override block for the historical corank-collapse
+      // experiments (min/max/dist/dinv/wmface/kbo anchor zoo).  Raw
+      // emission is the resolved ground truth (see the collapse-off
+      // comment inside), so with no THVM_ATP_CORANK_* env armed the
+      // block writes nothing -- eff_arr/eff_ch keep their raw (leaf-
+      // arrival, chain) values -- and is skipped entirely, saving the
+      // per-hit wmo_eq_sides_var_differ walk + O(nh) sibling scan.
+      if (sw_corank_active()) {
+        for (u32 h = 0; h < nh; h++) {
+          u32 j = jidx[h];
+          if (j == 0xffffffffu || j == c->i_out) continue;
+          if (s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) continue;
+          if (!wmo_eq_sides_var_differ(s->lhs[j], s->rhs[j])) continue;
+          u32 h2 = 0xffffffffu;
+          for (u32 g = 0; g < nh; g++)
+            if (g != h && hits[g].trace == hits[h].trace &&
+                hits[g].face != hits[h].face) { h2 = g; break; }
+          if (h2 == 0xffffffffu) continue;
+          u32 o_arr = hits[h2].arrival;
+          {
+            static int ct = -1;
+            if (ct < 0) ct = getenv("THVM_ATP_CORANK_TRACE") != NULL ? 1 : 0;
+            if (ct) {
+              fprintf(stderr,
+                      "CORANK i=%u trace=%u face=%u arr=%u o_arr=%u dist_rhs=%u "
+                      "raw_ch=%u o_raw_ch=%u supp=%u sub=",
+                      c->i_out, hits[h].trace, hits[h].face, hits[h].arrival,
+                      o_arr, wmo_trace_dist_rhs(w, hits[h].trace), raw_ch[h],
+                      raw_ch[h2], sw_corank_suppressed(c, p, p_len, sub,
+                                                       &hits[h], j));
+              atp_dbg_print_term(stderr, sub);
+              fputc('\n', stderr);
+            }
           }
-        }
-        // EXPERIMENTAL, OPT-IN (THVM_ATP_CORANK_DIST=1), default OFF.
-        // Hypothesis: WM stores a var-differ equation ORIENTED and indexes ONE
-        // (distinguished) face; a single scan yields both unifiers at
-        // consecutive ages, so the co-rank collapse should anchor the pair at
-        // the DISTINGUISHED face's arrival, not the earlier-arriving face.
-        // This is bit-identical to the old min-arrival heuristic whenever the
-        // distinguished face arrives first; it changes only the "distinguished
-        // arrives LATER" cases.  It DOES fix WolframAxioms OrAssociativity
-        // firstdiv 26388 (eq 787's distinguished LHS at leaf C arr=8 vs its
-        // reverse y*y face at leaf A arr=1, which min-anchoring mis-ranked
-        // ahead of eq 784).  But it REGRESSES an earlier w=209 co-rank case
-        // (@24820), so the true anchor condition is more nuanced than
-        // "distinguished vs earlier" -- both are within the rules=263 dense
-        // band.  Left opt-in for refinement; default keeps the 26387 baseline.
-        // Same-leaf (o_arr==arr) stays raw.
-        static int cdist = -1;
-        if (cdist < 0) {
-          const char *e = getenv("THVM_ATP_CORANK_DIST");
-          cdist = (e != NULL && e[0] == '1') ? 1 : 0;
-        }
-        // THVM_ATP_CORANK_MAX=1: EXPERIMENTAL, REFUTED, default OFF.
-        // Anchors a var-differ equation's CP-age pair at the LATER-arriving
-        // face (max) instead of the earlier (the historical min-anchor).
-        // It matched 3 ground-truth cases (OA 26388/24820, SKI @547) but
-        // REGRESSED SKI @269 (prefix 546->268): min-anchor is right there,
-        // max is wrong -- so the anchor is CASE-DEPENDENT, not min/max.
-        // Root: the true anchor is WM's DISTINGUISHED (indexed) face's
-        // arrival, but dist_rhs + the face bit do NOT encode it consistently
-        // (787 wants face1@8, uid18 wants face0@15 -- both dist_rhs=1,
-        // opposite bits).  Matching needs WM's canonical-direction choice for
-        // unorientable equations, not a face heuristic.  Kept opt-in as a
-        // documented negative.
-        static int cmax = -1;
-        if (cmax < 0) {
-          const char *e = getenv("THVM_ATP_CORANK_MAX");
-          cmax = (e != NULL && e[0] == '1') ? 1 : 0;
-        }
-        // THVM_ATP_CORANK_DINV=1: anchor at the DISTINGUISHED (WM-indexed)
-        // face, using the INVERTED face-bit map (face != dist_rhs).  Ground
-        // truth: uid18's distinguished (WI)x side is at face!=dist_rhs; the
-        // CORANK_DIST (face==dist_rhs) map is inverted (it reproduced the
-        // min-anchor).  The distinguished face is neither always-earlier nor
-        // always-later -- it is WM's canonical/heavier side -- so this should
-        // unify @547 (distinguished later) and @269 (distinguished earlier).
-        static int cdinv = -1;
-        if (cdinv < 0) {
-          const char *e = getenv("THVM_ATP_CORANK_DINV");
-          cdinv = (e != NULL && e[0] == '1') ? 1 : 0;
-        }
-        static int cwmf = -1;
-        if (cwmf < 0) {
-          const char *e = getenv("THVM_ATP_CORANK_WMFACE");
-          cwmf = (e != NULL && e[0] == '1') ? 1 : 0;
-        }
-        // THVM_ATP_CORANK_KBO=1: anchor the var-differ pair at the REDUCIBLE
-        // (KBO-larger = WM's indexed) face, computed directly from the
-        // equation sides via thvm_kbo -- NOT the dist_rhs heuristic.  WM
-        // indexes an equation at its reducible LHS; for uid18 (x*x=(WI)x)
-        // that is (WI)x (KBO-larger, @arr15) which is what SKI @547 needs.
-        // Unlike wmface (which trusts dist_rhs and mis-marks some equations,
-        // regressing @269), this recomputes the indexed face per equation.
-        static int ckbo = -1;
-        if (ckbo < 0) {
-          const char *e = getenv("THVM_ATP_CORANK_KBO");
-          ckbo = (e != NULL && e[0] == '1') ? 1 : 0;
-        }
-        KboCmp ckbo_kc = ckbo ? thvm_kbo(s->lhs[j], s->rhs[j], s->kbo) : KBO_EQ;
-        if (ckbo && o_arr != hits[h].arrival &&
-            (ckbo_kc == KBO_GT || ckbo_kc == KBO_LT)) {
-          // ORIENTABLE var-differ: WM indexes ONE face (the reducible LHS =
-          // KBO-larger) -> collapse both faces onto it.  UNORIENTABLE
-          // (KBO_UN/EQ) is indexed at BOTH faces by WM (like thvm), so it
-          // falls through to the default (no collapse) -- this is the
-          // orientability discriminator (@547 orientable -> anchor larger;
-          // @269 unorientable -> keep raw/min).
-          u8 dr = wmo_trace_dist_rhs(w, hits[h].trace);
-          u8 want_rhs = (ckbo_kc == KBO_LT) ? 1u : 0u;   // rhs larger iff LT
-          u8 anchor_face = (want_rhs == dr) ? 0u : 1u;
-          if (hits[h].face == anchor_face) {
-            eff_ch[h] = raw_ch[h] * 2u;           // reducible (indexed): anchor
-          } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
-            eff_arr[h] = o_arr;                    // other face: follow indexed
-            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+          // EXPERIMENTAL, OPT-IN (THVM_ATP_CORANK_DIST=1), default OFF.
+          // Hypothesis: WM stores a var-differ equation ORIENTED and indexes ONE
+          // (distinguished) face; a single scan yields both unifiers at
+          // consecutive ages, so the co-rank collapse should anchor the pair at
+          // the DISTINGUISHED face's arrival, not the earlier-arriving face.
+          // This is bit-identical to the old min-arrival heuristic whenever the
+          // distinguished face arrives first; it changes only the "distinguished
+          // arrives LATER" cases.  It DOES fix WolframAxioms OrAssociativity
+          // firstdiv 26388 (eq 787's distinguished LHS at leaf C arr=8 vs its
+          // reverse y*y face at leaf A arr=1, which min-anchoring mis-ranked
+          // ahead of eq 784).  But it REGRESSES an earlier w=209 co-rank case
+          // (@24820), so the true anchor condition is more nuanced than
+          // "distinguished vs earlier" -- both are within the rules=263 dense
+          // band.  Left opt-in for refinement; default keeps the 26387 baseline.
+          // Same-leaf (o_arr==arr) stays raw.
+          static int cdist = -1;
+          if (cdist < 0) {
+            const char *e = getenv("THVM_ATP_CORANK_DIST");
+            cdist = (e != NULL && e[0] == '1') ? 1 : 0;
           }
-        } else if (cdinv && o_arr != hits[h].arrival) {
-          if (hits[h].face != wmo_trace_dist_rhs(w, hits[h].trace)) {
-            eff_ch[h] = raw_ch[h] * 2u;              // distinguished (inv map): anchor
-          } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
-            eff_arr[h] = o_arr;
-            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+          // THVM_ATP_CORANK_MAX=1: EXPERIMENTAL, REFUTED, default OFF.
+          // Anchors a var-differ equation's CP-age pair at the LATER-arriving
+          // face (max) instead of the earlier (the historical min-anchor).
+          // It matched 3 ground-truth cases (OA 26388/24820, SKI @547) but
+          // REGRESSED SKI @269 (prefix 546->268): min-anchor is right there,
+          // max is wrong -- so the anchor is CASE-DEPENDENT, not min/max.
+          // Root: the true anchor is WM's DISTINGUISHED (indexed) face's
+          // arrival, but dist_rhs + the face bit do NOT encode it consistently
+          // (787 wants face1@8, uid18 wants face0@15 -- both dist_rhs=1,
+          // opposite bits).  Matching needs WM's canonical-direction choice for
+          // unorientable equations, not a face heuristic.  Kept opt-in as a
+          // documented negative.
+          static int cmax = -1;
+          if (cmax < 0) {
+            const char *e = getenv("THVM_ATP_CORANK_MAX");
+            cmax = (e != NULL && e[0] == '1') ? 1 : 0;
           }
-        } else if (cwmf && o_arr != hits[h].arrival) {
-          // hits[h].face IS the WM-face already (0 = distinguished, 1 =
-          // reverse; see atp_wmo_insert_fact_ex: lhs leaf carries dist_rhs,
-          // rhs carries !dist_rhs).  Anchor at the DISTINGUISHED (face==0)
-          // face -- per-equation earlier or later, unlike min/max/dinv.
-          if (hits[h].face == 0u) {
-            eff_ch[h] = raw_ch[h] * 2u;              // distinguished: anchor
-          } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
-            eff_arr[h] = o_arr;                       // reverse: follow distinguished
-            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+          // THVM_ATP_CORANK_DINV=1: anchor at the DISTINGUISHED (WM-indexed)
+          // face, using the INVERTED face-bit map (face != dist_rhs).  Ground
+          // truth: uid18's distinguished (WI)x side is at face!=dist_rhs; the
+          // CORANK_DIST (face==dist_rhs) map is inverted (it reproduced the
+          // min-anchor).  The distinguished face is neither always-earlier nor
+          // always-later -- it is WM's canonical/heavier side -- so this should
+          // unify @547 (distinguished later) and @269 (distinguished earlier).
+          static int cdinv = -1;
+          if (cdinv < 0) {
+            const char *e = getenv("THVM_ATP_CORANK_DINV");
+            cdinv = (e != NULL && e[0] == '1') ? 1 : 0;
           }
-        } else if (cmax && o_arr != hits[h].arrival) {
-          if (o_arr < hits[h].arrival) {
-            eff_ch[h] = raw_ch[h] * 2u;              // later face: anchor
-          } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
-            eff_arr[h] = o_arr;                       // earlier face: follow later
-            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+          static int cwmf = -1;
+          if (cwmf < 0) {
+            const char *e = getenv("THVM_ATP_CORANK_WMFACE");
+            cwmf = (e != NULL && e[0] == '1') ? 1 : 0;
           }
-        } else if (cdist && o_arr != hits[h].arrival) {
-          if (hits[h].face == wmo_trace_dist_rhs(w, hits[h].trace)) {
-            eff_ch[h] = raw_ch[h] * 2u;             // distinguished: anchor
-          } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
-            eff_arr[h] = o_arr;                      // reverse: follow dist
-            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+          // THVM_ATP_CORANK_KBO=1: anchor the var-differ pair at the REDUCIBLE
+          // (KBO-larger = WM's indexed) face, computed directly from the
+          // equation sides via thvm_kbo -- NOT the dist_rhs heuristic.  WM
+          // indexes an equation at its reducible LHS; for uid18 (x*x=(WI)x)
+          // that is (WI)x (KBO-larger, @arr15) which is what SKI @547 needs.
+          // Unlike wmface (which trusts dist_rhs and mis-marks some equations,
+          // regressing @269), this recomputes the indexed face per equation.
+          static int ckbo = -1;
+          if (ckbo < 0) {
+            const char *e = getenv("THVM_ATP_CORANK_KBO");
+            ckbo = (e != NULL && e[0] == '1') ? 1 : 0;
           }
-        } else if (o_arr < hits[h].arrival) {
-          // Suppress the pull-up when the EARLIER sibling face's CP is
-          // order-gate-dropped (its instantiated rewrite is uphill --
-          // sigma(rin) > sigma(lin)), so nothing forms at o_arr for this face to
-          // sit beside: the surviving face keeps its own (later) arrival, matching
-          // WM's scan-age numbering.  Grounded in the per-sigma KPActionRG test
-          // (Unifikation1.c:1407): SKI @547 uid18's (WI)x@15 must stay late
-          // because its x*x@0 sibling is uphill.  Default ON; THVM_ATP_CORANK_GATE=0
-          // restores the unconditional min-anchor collapse (same-binary kill switch).
-          static int cgate = -1;
-          if (cgate < 0) {
-            const char *e = getenv("THVM_ATP_CORANK_GATE");
-            cgate = (e != NULL && e[0] == '0') ? 0 : 1;
+          KboCmp ckbo_kc = ckbo ? thvm_kbo(s->lhs[j], s->rhs[j], s->kbo) : KBO_EQ;
+          if (ckbo && o_arr != hits[h].arrival &&
+              (ckbo_kc == KBO_GT || ckbo_kc == KBO_LT)) {
+            // ORIENTABLE var-differ: WM indexes ONE face (the reducible LHS =
+            // KBO-larger) -> collapse both faces onto it.  UNORIENTABLE
+            // (KBO_UN/EQ) is indexed at BOTH faces by WM (like thvm), so it
+            // falls through to the default (no collapse) -- this is the
+            // orientability discriminator (@547 orientable -> anchor larger;
+            // @269 unorientable -> keep raw/min).
+            u8 dr = wmo_trace_dist_rhs(w, hits[h].trace);
+            u8 want_rhs = (ckbo_kc == KBO_LT) ? 1u : 0u;   // rhs larger iff LT
+            u8 anchor_face = (want_rhs == dr) ? 0u : 1u;
+            if (hits[h].face == anchor_face) {
+              eff_ch[h] = raw_ch[h] * 2u;           // reducible (indexed): anchor
+            } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+              eff_arr[h] = o_arr;                    // other face: follow indexed
+              eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+            }
+          } else if (cdinv && o_arr != hits[h].arrival) {
+            if (hits[h].face != wmo_trace_dist_rhs(w, hits[h].trace)) {
+              eff_ch[h] = raw_ch[h] * 2u;              // distinguished (inv map): anchor
+            } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+              eff_arr[h] = o_arr;
+              eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+            }
+          } else if (cwmf && o_arr != hits[h].arrival) {
+            // hits[h].face IS the WM-face already (0 = distinguished, 1 =
+            // reverse; see atp_wmo_insert_fact_ex: lhs leaf carries dist_rhs,
+            // rhs carries !dist_rhs).  Anchor at the DISTINGUISHED (face==0)
+            // face -- per-equation earlier or later, unlike min/max/dinv.
+            if (hits[h].face == 0u) {
+              eff_ch[h] = raw_ch[h] * 2u;              // distinguished: anchor
+            } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+              eff_arr[h] = o_arr;                       // reverse: follow distinguished
+              eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+            }
+          } else if (cmax && o_arr != hits[h].arrival) {
+            if (o_arr < hits[h].arrival) {
+              eff_ch[h] = raw_ch[h] * 2u;              // later face: anchor
+            } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+              eff_arr[h] = o_arr;                       // earlier face: follow later
+              eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+            }
+          } else if (cdist && o_arr != hits[h].arrival) {
+            if (hits[h].face == wmo_trace_dist_rhs(w, hits[h].trace)) {
+              eff_ch[h] = raw_ch[h] * 2u;             // distinguished: anchor
+            } else if (!sw_corank_suppressed(c, p, p_len, sub, &hits[h], j)) {
+              eff_arr[h] = o_arr;                      // reverse: follow dist
+              eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+            }
+          } else if (o_arr < hits[h].arrival) {
+            // Suppress the pull-up when the EARLIER sibling face's CP is
+            // order-gate-dropped (its instantiated rewrite is uphill --
+            // sigma(rin) > sigma(lin)), so nothing forms at o_arr for this face to
+            // sit beside: the surviving face keeps its own (later) arrival, matching
+            // WM's scan-age numbering.  Grounded in the per-sigma KPActionRG test
+            // (Unifikation1.c:1407): SKI @547 uid18's (WI)x@15 must stay late
+            // because its x*x@0 sibling is uphill.  Default ON; THVM_ATP_CORANK_GATE=0
+            // restores the unconditional min-anchor collapse (same-binary kill switch).
+            static int cgate = -1;
+            if (cgate < 0) {
+              const char *e = getenv("THVM_ATP_CORANK_GATE");
+              cgate = (e != NULL && e[0] == '0') ? 0 : 1;
+            }
+            // DEFAULT: NO pull-up at all -- every face-entry emits at its raw
+            // (leaf-arrival, chain) position.  RESOLVED ground truth from the
+            // instrumented `wmcli -auto` WM_CPFORMDUMP on the WolframAxioms
+            // OrAssociativity E19 activation batch (fact 1088): WM's twelve
+            // w1=224 eTT keepers emit in plain leaf order -- eq 787's x*x face
+            // at the arr=1 leaf (chain [787, 784] newest-first) and its
+            // (y.(y.y)).x face at the LAST leaf (arr=11), with NO pairing
+            // collapse; thvm's raw (arr, ch) match WM's leaf order exactly,
+            // and the min-anchor pull-up is what displaced the 787 keeper
+            // (thvm fact 1088 vs WM 1097).  WM has no face-pairing mechanism
+            // AT ALL (U1_KPsBildenZuGleichung emits one CP per tree entry in
+            // leaf-list + chain order; each equation simply has two directed
+            // entries) -- the whole min/max/dist/kbo anchor zoo above was an
+            // approximation of raw emission.  Measured with raw emission:
+            // OA -auto fact-prefix 1087 -> 1377, plain SKIToBCKW c1 prefix
+            // 3516 -> 6840+ (the @3517 frontier was collapse-caused too),
+            // combinator -auto 6/6 identical, test_atp 136264.
+            // THVM_ATP_CORANK_COLLAPSE=1 restores the historical min-anchor
+            // pull-up (with the @547 gate) as a bisection kill switch.
+            if (sw_corank_collapse_on() &&
+                !sw_corank_suppressed(c, p, p_len, sub, &hits[h], j) &&
+                !(cgate && sw_corank_h2_gate_drops(c, p, p_len, sub,
+                                                   &hits[h2], j))) {
+              eff_arr[h] = o_arr;
+              eff_ch[h]  = raw_ch[h2] * 2u + 1u;
+            }
+          } else if (o_arr > hits[h].arrival) {
+            // Anchor-side doubling belongs to the collapse pairing (it opens
+            // odd slots 2*ch_o+1 for pulled-up follow entries).  Under raw
+            // emission (collapse OFF, the default) it must NOT fire: doubling
+            // both-face anchors while o_arr<arr and single-face entries keep
+            // raw eff_ch creates spurious (arr, eff_ch) collisions that break
+            // ties by partner slot age instead of WM's leaf CHAIN order --
+            // the WolframAxioms OrAssociativity fact-1501 batch (owner rule
+            // 1050, sub x3.(x3.x1)): the shared x1.(x1.x2) leaf's chain
+            // [-26,-24,-21,-18,-13,-11] emitted as [-26,-21,-24,-13,-11,-18]
+            // (eq -24 doubled 1->2 collided with eq -21's raw 2; eq -18
+            // doubled 3->6 fell behind the single-face -13/-11 at raw 4/5),
+            // where WM's WM_CPFORMDUMP shows plain chain order.
+            if (sw_corank_collapse_on()) eff_ch[h] = raw_ch[h] * 2u;
           }
-          // DEFAULT: NO pull-up at all -- every face-entry emits at its raw
-          // (leaf-arrival, chain) position.  RESOLVED ground truth from the
-          // instrumented `wmcli -auto` WM_CPFORMDUMP on the WolframAxioms
-          // OrAssociativity E19 activation batch (fact 1088): WM's twelve
-          // w1=224 eTT keepers emit in plain leaf order -- eq 787's x*x face
-          // at the arr=1 leaf (chain [787, 784] newest-first) and its
-          // (y.(y.y)).x face at the LAST leaf (arr=11), with NO pairing
-          // collapse; thvm's raw (arr, ch) match WM's leaf order exactly,
-          // and the min-anchor pull-up is what displaced the 787 keeper
-          // (thvm fact 1088 vs WM 1097).  WM has no face-pairing mechanism
-          // AT ALL (U1_KPsBildenZuGleichung emits one CP per tree entry in
-          // leaf-list + chain order; each equation simply has two directed
-          // entries) -- the whole min/max/dist/kbo anchor zoo above was an
-          // approximation of raw emission.  Measured with raw emission:
-          // OA -auto fact-prefix 1087 -> 1377, plain SKIToBCKW c1 prefix
-          // 3516 -> 6840+ (the @3517 frontier was collapse-caused too),
-          // combinator -auto 6/6 identical, test_atp 136264.
-          // THVM_ATP_CORANK_COLLAPSE=1 restores the historical min-anchor
-          // pull-up (with the @547 gate) as a bisection kill switch.
-          if (sw_corank_collapse_on() &&
-              !sw_corank_suppressed(c, p, p_len, sub, &hits[h], j) &&
-              !(cgate && sw_corank_h2_gate_drops(c, p, p_len, sub,
-                                                 &hits[h2], j))) {
-            eff_arr[h] = o_arr;
-            eff_ch[h]  = raw_ch[h2] * 2u + 1u;
-          }
-        } else if (o_arr > hits[h].arrival) {
-          // Anchor-side doubling belongs to the collapse pairing (it opens
-          // odd slots 2*ch_o+1 for pulled-up follow entries).  Under raw
-          // emission (collapse OFF, the default) it must NOT fire: doubling
-          // both-face anchors while o_arr<arr and single-face entries keep
-          // raw eff_ch creates spurious (arr, eff_ch) collisions that break
-          // ties by partner slot age instead of WM's leaf CHAIN order --
-          // the WolframAxioms OrAssociativity fact-1501 batch (owner rule
-          // 1050, sub x3.(x3.x1)): the shared x1.(x1.x2) leaf's chain
-          // [-26,-24,-21,-18,-13,-11] emitted as [-26,-21,-24,-13,-11,-18]
-          // (eq -24 doubled 1->2 collided with eq -21's raw 2; eq -18
-          // doubled 3->6 fell behind the single-face -13/-11 at raw 4/5),
-          // where WM's WM_CPFORMDUMP shows plain chain order.
-          if (sw_corank_collapse_on()) eff_ch[h] = raw_ch[h] * 2u;
         }
       }
       // Same-arrival tie order = (eff_arr, eff_ch, jidx).  eff_ch is
