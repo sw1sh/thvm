@@ -657,11 +657,16 @@ static const SchedSlice SCHEDULE[] = {
   // plain completion stalls on (measured: COL060-1, GRP167-4 on the
   // CASC-30 UEQ set).  Uses LAZY ground-join (Twee's selection-time
   // redundancy discipline): GJ runs on the SELECTED CP (~11x fewer calls)
-  // instead of per generated CP -- measured 7.6x faster here (GRP167-4
-  // 26.0s -> 3.4s), both cracks preserved.  The two big weights (wm,
-  // flatten) split the budget: wm sweeps the WM-easy set fast, flatten
-  // carries the deep-goal UEQ set the bare preset stalls on.
-  {"flatten",  "--flatten-goal --lazy-ground-join --connectedness --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.28},
+  // instead of per generated CP.  Connectedness is DROPPED here: unlike
+  // GJ it needs the overlap peak (per generated CP, not lazy-able) and
+  // measured a NET COST -- its push tax outweighs its pruning under
+  // auto-max-weight (GRP167-4 3.3s -> 1.8s without it, COL060-1 still
+  // 0.01s, GRP766 reaches more rules with a bounded queue).  Net effect
+  // vs the pre-lazy flatten slice: GRP167-4 26.0s -> 1.8s = ~14x.  The
+  // two big weights (wm, flatten) split the budget: wm sweeps the WM-easy
+  // set fast, flatten carries the deep-goal UEQ set the bare preset
+  // stalls on.
+  {"flatten",  "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.28},
   {"bare-gj", "--preset=none --ground-join --connectedness", 0.10},
 };
 static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
