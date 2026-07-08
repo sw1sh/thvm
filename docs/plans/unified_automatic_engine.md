@@ -207,6 +207,31 @@ preorder-streaming, indexed backward simplification) is ON the critical
 path -- it turns the lean-but-30-steps/s search into a fast one, which
 is half of why Twee wins. Speed and coverage are the same lever here.
 
+## TERMINAL DIAGNOSTIC VERDICT (config space exhausted)
+
+Two campaign premises were CORRECTED by direct measurement (details in
+Measured Findings): McCune is not a gate (proves 0.09s), and thvm
+ALREADY HAS Twee's multi-ordering ground joinability (gj_cover, "exactly
+as Twee's groundJoin"). Every existing lever was then tested on the real
+gates (Hillman/Meredith c3) and NONE crack them:
+- WM preset: CP explosion (5.26M -> 5.3GB abort).
+- +redundancy (GJ+bwd-sub+bwd-demod): lean 18K CPs, no converge @240s.
+- +AutoMaxWeight: bounded, Timeout (no crash, no proof).
+- LPO / goal-weight (mode 7) / CP-set-IR / FindProof --schedule: all fail.
+- GJ_BUDGET=16 (17x throughput, 520 steps/s, 386 rules @60s): STILL no
+  crack. THROUGHPUT IS NOT THE GATE-LEVER.
+=> The gate gap is DEFINITIVELY goal-directed SELECTION QUALITY: thvm
+derives hundreds of rules but not the ~17 goal-relevant lemmas Twee
+targets. No configuration of existing mechanisms closes it. Speed
+(FT-representation P1) remains the lever for the ~1.6x WM-EMULATION gap
+and helps throughput, but the GATE crack requires genuinely better
+goal-directed CP selection than any thvm mode provides -- a real Phase-2
+build (the core of what makes Twee good; uncertain, research-grade).
+thvm's existing CP_WEIGHT_GOAL (mode 7) and MNF front are the seeds but
+are demonstrably insufficient. This is the honest terminal state: the
+config space is mapped and exhausted; the remaining work is a selection-
+heuristic build, not a knob.
+
 ## The revised proving-power thesis (post-diagnostic)
 
 The first GENUINE-new-power win is **matching Twee on
