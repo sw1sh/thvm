@@ -32,6 +32,11 @@
 #include "../tests/test_atp_wolfram_bench.c"
 #undef main
 
+// Concurrent-portfolio process management (run_schedule).
+#include <sys/wait.h>
+#include <signal.h>
+#include <fcntl.h>
+
 // --check mode: validate a first-order TSTP proof (the ProoVer task).
 // Reuses the src/fol saturation engine already linked into this binary.
 #include "proof_check.c"
@@ -641,52 +646,115 @@ static void cli_proof_hook(AtpState *s) {
 // slice a fresh engine.  Slice fractions are provisional until the
 // CASC-30 coverage matrix tunes them.
 typedef struct { const char *name; const char *flags; double frac; } SchedSlice;
+// Ordered by value: run_schedule runs slices CONCURRENTLY in a pool of
+// SCHED_MAX_PAR, EACH with the FULL wall, so the first SCHED_MAX_PAR
+// entries are the ones that run to completion -- strongest + most
+// complementary first.  frac is now vestigial (each slice gets the full
+// wall, not frac*wall); kept so the struct/consumers are unchanged.
 static const SchedSlice SCHEDULE[] = {
-  {"wm",      "",                                          0.22},
-  {"wm-gj",   "--ground-join --connectedness",             0.15},
-  {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.08},
-  {"wm-mnf",  "--mnf",                                     0.05},
-  // Goal-direction (the EXISTING MNF front) COMBINED with the pruning
-  // that keeps its front lean -- ground-join + a growing MaxWeight
-  // bound.  The bare wm-mnf slice above explodes (no pruning) and the
-  // pruning slices carry no goal-direction; this slice is the missing
-  // intersection, assembled from existing knobs only.
-  {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1", 0.12},
-  // Goal FLATTENING (Twee/Vampire naming port) + the lean pruning that
-  // exploits the shallow definitions.  Cracks deep-goal UEQ problems
-  // plain completion stalls on (measured: COL060-1, GRP167-4 on the
-  // CASC-30 UEQ set).  Uses LAZY ground-join (Twee's selection-time
-  // redundancy discipline): GJ runs on the SELECTED CP (~11x fewer calls)
-  // instead of per generated CP.  Connectedness is DROPPED here: unlike
-  // GJ it needs the overlap peak (per generated CP, not lazy-able) and
-  // measured a NET COST -- its push tax outweighs its pruning under
-  // auto-max-weight (GRP167-4 3.3s -> 1.8s without it, COL060-1 still
-  // 0.01s, GRP766 reaches more rules with a bounded queue).  Net effect
-  // vs the pre-lazy flatten slice: GRP167-4 26.0s -> 1.8s = ~14x.  The
-  // two big weights (wm, flatten) split the budget: wm sweeps the WM-easy
-  // set fast, flatten carries the deep-goal UEQ set the bare preset
-  // stalls on.
-  {"flatten",  "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.28},
-  {"bare-gj", "--preset=none --ground-join --connectedness", 0.10},
+  // (1) The WM preset -- the strongest general UEQ solver.  Needs the FULL
+  // wall for its slower proofs (LCL113-10 23s, REL028-2 15s), which the old
+  // sequential 0.22 slice (6.6s at a 30s wall) starved.
+  {"wm",      "",                                          0.34},
+  // (2) Goal FLATTENING (Twee/Vampire naming port) + LAZY ground-join
+  // (Twee selection-time redundancy) + backward-simplify + auto-max-weight.
+  // Cracks deep-goal UEQ that completion stalls on (COL060-1, GRP167-4);
+  // connectedness dropped (net cost under lazy-GJ; GRP167-4 26s->1.8s).
+  {"flatten",  "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.33},
+  // (3) Goal-directed MNF front + ground-join + a growing MaxWeight bound
+  // -- complementary to both (goal-direction the WM preset lacks, pruning
+  // the bare MNF front lacks).
+  {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1", 0.33},
+  // Backups -- only launch if one of the first three exits early.
+  {"wm-gj",   "--ground-join --connectedness",             0.0},
+  {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.0},
+  {"bare-gj", "--preset=none --ground-join --connectedness", 0.0},
 };
 static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
 
+// Per-slice RSS cap (MB) when running slices concurrently, so K parallel
+// engines stay well under the machine ceiling.  Each child inherits it as
+// THVM_ATP_RSS_ABORT_MB unless the caller already set a (lower) value.
+#define SCHED_SLICE_RSS_MB 5000
+// Max slices resident at once.  K concurrent engines * SCHED_SLICE_RSS_MB
+// bounds peak memory (3 * 5GB = 15GB, under a 24GB ceiling on 48GB).
+#define SCHED_MAX_PAR 3
+
+// CONCURRENT portfolio: run the slices in a bounded pool (SCHED_MAX_PAR at
+// a time), EACH with the FULL wall -- not wall/N as the old sequential
+// scheme did.  Sequential slicing starved every strategy (a problem
+// needing >frac*wall of one config failed even though that config solves
+// it within the full wall -- e.g. LCL113-10 needs 23s of the WM preset but
+// the 0.22 slice gave it 6.6s).  First slice to exit 0 (proof found) wins;
+// the rest are killed.  Each child writes its stdout to a temp file; only
+// the winner's is replayed, so SZS/proof output never interleaves.
 static int run_schedule(const char *self, const char *file, double wall,
                         int szs, int want_proof) {
-  for (int i = 0; i < N_SCHED; i++) {
-    double slice = wall * SCHEDULE[i].frac;
-    if (slice < 1.0) slice = 1.0;
-    char cmd[4096];
-    snprintf(cmd, sizeof cmd, "FINDPROOF_SLICE=1 '%s' %s --wall=%.0f%s%s '%s'",
-             self, SCHEDULE[i].flags, slice,
-             szs ? " --szs" : "", want_proof ? " --proof" : "", file);
-    fprintf(stderr, "%% FindProof schedule slice %s (%.0fs)\n",
-            SCHEDULE[i].name, slice);
-    int rc = system(cmd);
-    if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0) return 0;
+  // Bound each child's RSS unless the caller set a tighter cap already.
+  if (getenv("THVM_ATP_RSS_ABORT_MB") == NULL) {
+    char capbuf[16];
+    snprintf(capbuf, sizeof capbuf, "%d", SCHED_SLICE_RSS_MB);
+    setenv("THVM_ATP_RSS_ABORT_MB", capbuf, 1);
   }
-  if (szs) printf("%% SZS status GaveUp for %s\n", file);
-  return 1;
+  pid_t pids[N_SCHED];
+  char  outs[N_SCHED][64];
+  int   done[N_SCHED];
+  for (int i = 0; i < N_SCHED; i++) { pids[i] = -1; done[i] = 0; outs[i][0] = 0; }
+  int launched = 0, next = 0, winner = -1;
+  // Launch up to SCHED_MAX_PAR, then refill as children exit.
+  while (winner < 0 && (next < N_SCHED || launched > 0)) {
+    while (winner < 0 && launched < SCHED_MAX_PAR && next < N_SCHED) {
+      int i = next++;
+      snprintf(outs[i], sizeof outs[i], "/tmp/thvm_sched_%d_%d.out",
+               (int)getpid(), i);
+      fprintf(stderr, "%% FindProof schedule slice %s (%.0fs, concurrent)\n",
+              SCHEDULE[i].name, wall);
+      pid_t pid = fork();
+      if (pid == 0) {
+        // Child: redirect stdout to the slice temp file, exec the slice.
+        int fd = open(outs[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) { dup2(fd, 1); close(fd); }
+        char cmd[4096];
+        snprintf(cmd, sizeof cmd, "FINDPROOF_SLICE=1 '%s' %s --wall=%.0f%s%s '%s'",
+                 self, SCHEDULE[i].flags, wall,
+                 szs ? " --szs" : "", want_proof ? " --proof" : "", file);
+        _exit(system(cmd) == 0 ? 0 : 1);
+      }
+      pids[i] = pid;
+      launched++;
+    }
+    if (launched == 0) break;
+    int status = 0;
+    pid_t w = wait(&status);
+    if (w <= 0) break;
+    for (int i = 0; i < N_SCHED; i++) {
+      if (pids[i] == w) {
+        done[i] = 1; launched--;
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) winner = i;
+        break;
+      }
+    }
+  }
+  // Kill + reap any still-running slices (the winner made them redundant).
+  for (int i = 0; i < N_SCHED; i++)
+    if (pids[i] > 0 && !done[i]) kill(pids[i], SIGKILL);
+  for (int i = 0; i < N_SCHED; i++)
+    if (pids[i] > 0 && !done[i]) { int st; waitpid(pids[i], &st, 0); }
+  int rc = 1;
+  if (winner >= 0) {
+    // Replay only the winning slice's captured output.
+    FILE *fp = fopen(outs[winner], "r");
+    if (fp != NULL) {
+      char buf[4096]; size_t n;
+      while ((n = fread(buf, 1, sizeof buf, fp)) > 0) fwrite(buf, 1, n, stdout);
+      fclose(fp);
+    }
+    rc = 0;
+  } else if (szs) {
+    printf("%% SZS status GaveUp for %s\n", file);
+  }
+  for (int i = 0; i < N_SCHED; i++) if (outs[i][0]) unlink(outs[i]);
+  return rc;
 }
 
 static void usage(FILE *fp) {
