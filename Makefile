@@ -977,13 +977,18 @@ $(BIN)/test_atp_wolfram_bench: tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
 	  -DTHVM_ATP_AC -DATP_MNF \
 	  -o $@ $< $(TEST_LDFLAGS)
 
-# WL-independent ATP CLI: TFindProof-Method-style knobs over the same
-# engine + configuration path as the bench (includes its TU, so a CLI
-# run with equal knobs is byte-identical to a bench run).
-$(BIN)/thvm-atp: tools/thvm_atp_cli.c tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
+# FindProof: WL-independent ATP CLI (the CASC UEQ entry) with the
+# TFindProof-Method knob surface over the same engine + configuration
+# path as the bench (includes its TU, so a CLI run with equal knobs is
+# byte-identical to a bench run).  bin/thvm-atp is a compatibility
+# alias for existing harnesses.
+$(BIN)/FindProof: tools/thvm_atp_cli.c tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATP_AC -DATP_MNF \
 	  -o $@ $< $(TEST_LDFLAGS)
+
+$(BIN)/thvm-atp: $(BIN)/FindProof
+	cp $< $@
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)

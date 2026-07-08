@@ -1,4 +1,6 @@
-// thvm-atp: WL-independent CLI for thvm's ATP completion engine.
+// FindProof: thvm's ATP completion engine as a standalone CLI --
+// the CASC UEQ entry.  (Former name: thvm-atp; bin/thvm-atp remains an
+// alias.)
 //
 // Exposes the same knob surface as TFindProof's Method option, mapped
 // onto the engine's env-var toggles, and runs the exact code path of
@@ -193,7 +195,7 @@ static char *tp_preprocess(const char *problem_path, const char *raw) {
         inc[n] = '\0';
         char *body = tp_resolve_include(problem_path, inc);
         if (body == NULL) {
-          fprintf(stderr, "thvm-atp: cannot resolve include('%s')\n", inc);
+          fprintf(stderr, "FindProof: cannot resolve include('%s')\n", inc);
           exit(2);
         }
         // strip comments in the included body too (no nested includes)
@@ -229,14 +231,14 @@ static void tp_sym_note(TpProblem *tp, const char *name, size_t n, int arity) {
   for (int i = 0; i < tp->n_syms; i++) {
     if (strlen(tp->syms[i].name) == n && memcmp(tp->syms[i].name, name, n) == 0) {
       if (tp->syms[i].arity != arity) {
-        fprintf(stderr, "thvm-atp: symbol %.*s used with arities %d and %d\n",
+        fprintf(stderr, "FindProof: symbol %.*s used with arities %d and %d\n",
                 (int)n, name, tp->syms[i].arity, arity);
         exit(2);
       }
       return;
     }
   }
-  if (tp->n_syms >= TP_MAX_SYMS) { fprintf(stderr, "thvm-atp: too many symbols\n"); exit(2); }
+  if (tp->n_syms >= TP_MAX_SYMS) { fprintf(stderr, "FindProof: too many symbols\n"); exit(2); }
   memcpy(tp->syms[tp->n_syms].name, name, n);
   tp->syms[tp->n_syms].name[n] = '\0';
   tp->syms[tp->n_syms].arity = arity;
@@ -248,7 +250,7 @@ static void tp_var_note(TpProblem *tp, const char *name, size_t n) {
   for (int i = 0; i < tp->n_vars; i++) {
     if (strlen(tp->vars[i]) == n && memcmp(tp->vars[i], name, n) == 0) return;
   }
-  if (tp->n_vars >= TP_MAX_VARS) { fprintf(stderr, "thvm-atp: too many variables\n"); exit(2); }
+  if (tp->n_vars >= TP_MAX_VARS) { fprintf(stderr, "FindProof: too many variables\n"); exit(2); }
   memcpy(tp->vars[tp->n_vars], name, n);
   tp->vars[tp->n_vars][n] = '\0';
   tp->n_vars++;
@@ -340,14 +342,14 @@ static void tp_parse(TpProblem *tp, const char *text) {
       else if (d2 == 0 && lit[i] == '!' && i + 1 < llen && lit[i + 1] == '=') { neg = 1; oppos = i; break; }
       else if (d2 == 0 && lit[i] == '=' && (i == 0 || lit[i - 1] != '!')) { oppos = i; break; }
     }
-    if (oppos == (size_t)-1) { fprintf(stderr, "thvm-atp: non-equational clause\n"); exit(2); }
-    if (tp->n_cls >= TP_MAX_CLAUSES) { fprintf(stderr, "thvm-atp: too many clauses\n"); exit(2); }
+    if (oppos == (size_t)-1) { fprintf(stderr, "FindProof: non-equational clause\n"); exit(2); }
+    if (tp->n_cls >= TP_MAX_CLAUSES) { fprintf(stderr, "FindProof: too many clauses\n"); exit(2); }
     TpClause *cl = &tp->cls[tp->n_cls++];
     size_t ln = oppos, rs = oppos + (neg ? 2u : 1u);
     while (ln > 0 && isspace((unsigned char)lit[ln - 1])) ln--;
     while (rs < llen && isspace((unsigned char)lit[rs])) rs++;
     size_t rn = llen - rs;
-    if (ln >= sizeof cl->lhs || rn >= sizeof cl->rhs) { fprintf(stderr, "thvm-atp: clause too large\n"); exit(2); }
+    if (ln >= sizeof cl->lhs || rn >= sizeof cl->rhs) { fprintf(stderr, "FindProof: clause too large\n"); exit(2); }
     memcpy(cl->lhs, lit, ln); cl->lhs[ln] = '\0';
     memcpy(cl->rhs, lit + rs, rn); cl->rhs[rn] = '\0';
     cl->neg = neg;
@@ -592,9 +594,43 @@ static void cli_proof_hook(AtpState *s) {
 // main
 // ===================================================================
 
+// --schedule: run a fixed sequence of configurations, each in a child
+// process (fork/exec of argv[0] with the config's flags and a slice of
+// the wall budget), stopping at the first proof -- the standard CASC
+// portfolio-wrapper shape, with process isolation guaranteeing each
+// slice a fresh engine.  Slice fractions are provisional until the
+// CASC-30 coverage matrix tunes them.
+typedef struct { const char *name; const char *flags; double frac; } SchedSlice;
+static const SchedSlice SCHEDULE[] = {
+  {"wm",      "",                                          0.40},
+  {"wm-gj",   "--ground-join --connectedness",             0.25},
+  {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.15},
+  {"wm-mnf",  "--mnf",                                     0.10},
+  {"bare-gj", "--preset=none --ground-join --connectedness", 0.10},
+};
+static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
+
+static int run_schedule(const char *self, const char *file, double wall,
+                        int szs, int want_proof) {
+  for (int i = 0; i < N_SCHED; i++) {
+    double slice = wall * SCHEDULE[i].frac;
+    if (slice < 1.0) slice = 1.0;
+    char cmd[4096];
+    snprintf(cmd, sizeof cmd, "FINDPROOF_SLICE=1 '%s' %s --wall=%.0f%s%s '%s'",
+             self, SCHEDULE[i].flags, slice,
+             szs ? " --szs" : "", want_proof ? " --proof" : "", file);
+    fprintf(stderr, "%% FindProof schedule slice %s (%.0fs)\n",
+            SCHEDULE[i].name, slice);
+    int rc = system(cmd);
+    if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0) return 0;
+  }
+  if (szs) printf("%% SZS status GaveUp for %s\n", file);
+  return 1;
+}
+
 static void usage(FILE *fp) {
   fprintf(fp,
-    "usage: thvm-atp [options] problem.pr | problem.p\n"
+    "usage: FindProof [options] problem.pr | problem.p\n"
     "  --preset=waldmeister        TFindProof Method -> \"Waldmeister\" stack\n"
     "  --preset=waldmeister-lazy   Method -> \"WaldmeisterLazy\" stack\n"
     "  --preset=none               bare engine defaults\n"
@@ -603,6 +639,8 @@ static void usage(FILE *fp) {
     "  --max-steps=N               CP-processing cap        (default 500000)\n"
     "  --wall=SEC                  wall-clock cap           (default 120)\n"
     "  --szs                       print an SZS status line (CNF ontology for TPTP input)\n"
+    "  --schedule                  time-sliced portfolio of configurations (child\n"
+    "                              process per slice; first proof wins)\n"
     "  --proof                     print an SZS CNFRefutation block on success\n"
     "  --keep-pr                   keep (and name) the .pr generated from TPTP input\n"
     "  --list-knobs                print the knob table and exit\n"
@@ -615,12 +653,12 @@ int main(int argc, char **argv) {
   const char *file = NULL;
   const char *max_steps = "500000";
   const char *wall = "120";
-  int szs = 0, keep_pr = 0;
+  int szs = 0, keep_pr = 0, want_schedule = 0;
 
   for (int i = 1; i < argc; i++) {
     char *a = argv[i];
     if (strncmp(a, "--", 2) != 0) {
-      if (file != NULL) { fprintf(stderr, "thvm-atp: one problem file only\n"); return 2; }
+      if (file != NULL) { fprintf(stderr, "FindProof: one problem file only\n"); return 2; }
       file = a;
       continue;
     }
@@ -635,6 +673,7 @@ int main(int argc, char **argv) {
       return 0;
     }
     if (nlen == 3 && strncmp(name, "szs", 3) == 0) { szs = 1; continue; }
+    if (nlen == 8 && strncmp(name, "schedule", 8) == 0) { want_schedule = 1; continue; }
     if (nlen == 5 && strncmp(name, "proof", 5) == 0) { g_cli_want_proof = 1; continue; }
     if (nlen == 7 && strncmp(name, "keep-pr", 7) == 0) { keep_pr = 1; continue; }
     if (nlen == 12 && strncmp(name, "convert-only", 12) == 0) { keep_pr = 2; continue; }
@@ -645,7 +684,7 @@ int main(int argc, char **argv) {
     for (int k = 0; k < N_KNOBS; k++) {
       if (strlen(KNOBS[k].flag) == nlen && strncmp(name, KNOBS[k].flag, nlen) == 0) {
         if (KNOBS[k].has_value && val == NULL) {
-          fprintf(stderr, "thvm-atp: --%s needs a value\n", KNOBS[k].flag);
+          fprintf(stderr, "FindProof: --%s needs a value\n", KNOBS[k].flag);
           return 2;
         }
         setenv(KNOBS[k].env, (val != NULL) ? val : "1", 1);
@@ -653,9 +692,13 @@ int main(int argc, char **argv) {
         break;
       }
     }
-    if (!hit) { fprintf(stderr, "thvm-atp: unknown option --%.*s\n", (int)nlen, name); usage(stderr); return 2; }
+    if (!hit) { fprintf(stderr, "FindProof: unknown option --%.*s\n", (int)nlen, name); usage(stderr); return 2; }
   }
   if (file == NULL) { usage(stderr); return 2; }
+
+  if (want_schedule) {
+    return run_schedule(argv[0], file, atof(wall), szs, g_cli_want_proof);
+  }
 
   // Presets replicate the WL $AtpPresetDefaults stacks; setenv(...,0)
   // never overwrites an explicit knob flag, so flags override the
@@ -670,7 +713,7 @@ int main(int argc, char **argv) {
   } else if (strcmp(preset, "none") == 0) {
     // bare engine defaults
   } else {
-    fprintf(stderr, "thvm-atp: unknown preset %s\n", preset);
+    fprintf(stderr, "FindProof: unknown preset %s\n", preset);
     return 2;
   }
 
@@ -681,7 +724,7 @@ int main(int argc, char **argv) {
   {
     size_t rl = 0;
     char *raw = tp_read_file(file, &rl);
-    if (raw == NULL) { fprintf(stderr, "thvm-atp: cannot open %s\n", file); return 2; }
+    if (raw == NULL) { fprintf(stderr, "FindProof: cannot open %s\n", file); return 2; }
     if (strstr(raw, "cnf(") != NULL) {
       g_cli_tptp_mode = 1;
       char *pre = tp_preprocess(file, raw);
@@ -691,7 +734,7 @@ int main(int argc, char **argv) {
       int n_neg = 0;
       for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
       if (n_neg == 0 || tp.n_cls == n_neg) {
-        fprintf(stderr, "thvm-atp: need at least one positive and one negative unit\n");
+        fprintf(stderr, "FindProof: need at least one positive and one negative unit\n");
         return 2;
       }
       const char *base = strrchr(file, '/');
@@ -705,7 +748,7 @@ int main(int argc, char **argv) {
         snprintf(tmp_pr, sizeof tmp_pr, "/tmp/thvm_atp_%d.pr", (int)getpid());
       }
       FILE *fp = fopen(tmp_pr, "w");
-      if (fp == NULL) { fprintf(stderr, "thvm-atp: cannot write %s\n", tmp_pr); return 2; }
+      if (fp == NULL) { fprintf(stderr, "FindProof: cannot write %s\n", tmp_pr); return 2; }
       fputs(pr_text, fp);
       fclose(fp);
       free(pr_text);
@@ -718,13 +761,17 @@ int main(int argc, char **argv) {
   if (g_cli_want_proof) g_atp_bench_pre_free_hook = cli_proof_hook;
 
   char *bench_argv[5];
-  bench_argv[0] = (char *)"thvm-atp";
+  bench_argv[0] = (char *)"FindProof";
   bench_argv[1] = (char *)run_file;
   bench_argv[2] = (char *)max_steps;
   bench_argv[3] = (char *)wall;
   bench_argv[4] = NULL;
   int rc = atp_bench_main(4, bench_argv);
 
+  // Inside a schedule slice, only a SUCCESS prints its SZS line -- the
+  // schedule wrapper owns the single final status otherwise.
+  if (szs && getenv("FINDPROOF_SLICE") != NULL
+      && g_atp_bench_status != (int)ATP_PROVED) szs = 0;
   if (szs) {
     const char *tag;
     if (g_cli_tptp_mode) {
