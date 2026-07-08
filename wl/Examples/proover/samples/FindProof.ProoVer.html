@@ -18,36 +18,58 @@ far more heavily than abstaining.</p>
 
 <h3>Implementation</h3>
 
-<p>The checker is implemented in the Wolfram Language. Formulae are parsed from
-the TSTP source by the WolframParser paclet, which yields symbolic expressions
-on which the per-rule obligations are discharged. For an instantiate step the
-conclusion is required to be a substitution instance of a parent, checked by
-pattern matching. For a negated_conjecture step the conclusion is required to be
-the logical negation of the parent: the negation of the parent is re-parsed
-through the same front end and compared with the stated conclusion up to
-variable renaming and negation-normal form, so that a wrong quantifier dual is
-caught. For a skolemize step a genuinely fresh Skolem symbol must be introduced
-and must actually occur in the resulting formula, a structural and
+<p>FindProof is a single self-contained C binary with no external dependencies.
+The same binary is the FindProof equational prover; proof checking is its
+<code>--check</code> mode. There is no Wolfram kernel and no external prover.
+Formulae are read from the TSTP source by a hand-written recursive-descent
+parser, covering the full first-order form syntax, the quantifiers, the
+connectives, and equality, directly into the first-order term representation of
+the reasoning core. The per-rule obligations are then discharged against that
+core, which is the same clausal saturation prover, resolution together with
+superposition and paramodulation for equality, that the equational engine is
+built on, so entailment questions are answered by the prover itself rather than
+by a separate decision procedure.</p>
+
+<p>For an instantiate step the conclusion must be a substitution instance of a
+parent, checked by first-order matching and, failing that, by entailment. For a
+negated_conjecture step the conclusion must be the logical negation of the
+parent: the two are required to entail each other, each direction decided by the
+saturation prover, so that a wrong quantifier dual, a universal negated as a
+universal rather than an existential, is caught soundly rather than by syntactic
+comparison alone. For a skolemize step a genuinely fresh Skolem symbol must be
+introduced and must occur in the resulting formula, a structural
 equisatisfiability check, since Skolemisation is not a logical consequence. For
-a consequence, horn, or deduction step the conclusion is required to be entailed
-by the parents, which is decided by bounded Herbrand instantiation of the
-universally quantified premises followed by a propositional tautology test over
-the resulting ground atoms. The refutation is required to close with the empty
-clause, $false. Steps that use inference rules outside this repertoire cause the
-proof to be reported as NotVerified. The checker is run as a single command per
-proof through the Wolfram Engine.</p>
+a consequence, horn, or deduction step the conclusion must be entailed by the
+parents: the parents and the negated conclusion are clausified together and the
+prover is run to saturation. A derived empty clause certifies the entailment and
+the step is accepted; a saturated clause set with no empty clause exhibits a
+counter-model and the step is rejected as unsound; a search that does not settle
+within the resource bound leaves the step undecided. The refutation as a whole
+must close with $false.</p>
+
+<p>A verdict of FailedVerified is emitted only when a step is certainly unsound,
+and the offending step is named. Any step that cannot be settled, an inference
+rule outside the repertoire or an entailment the bounded saturation neither
+proves nor refutes, yields NotVerified for the whole proof. The entire checking
+pass is resource-bounded, so a saturation whose equality reasoning outgrows the
+term store unwinds to a clean NotVerified: every proof receives exactly one SZS
+verdict, and the conservative fallback is always to abstain, never to accept a
+proof that has not been confirmed.</p>
 
 <h3>Expected Competition Performance</h3>
 
-<p>On the provided examples the checker classifies every proof correctly, the
-three valid proofs as Verified and the four buggy proofs as FailedVerified, and
-in each buggy case it localises the faulty step: a universal conjecture negated
-as a universal rather than an existential, a single disjunct drawn from a
-disjunction, the reuse of an already-introduced Skolem symbol, and a declared
-Skolem symbol that is absent from the resulting formula. On the hidden set the
-checker is expected to be sound by construction, never accepting an unsound
-proof, and to abstain with NotVerified on proofs that use inference rules
-outside the implemented repertoire.</p>
+<p>On the provided examples the checker classifies the three valid proofs as
+Verified. Of the four buggy proofs it confirms and localises three: a universal
+conjecture negated as a universal rather than an existential, the reuse of an
+already-introduced Skolem symbol, and a declared Skolem symbol that is absent
+from the resulting formula. The fourth buggy proof draws a single disjunct from
+an equational disjunction by deduction; establishing that this is not entailed
+requires more than the bounded saturation certifies, so the checker reports
+NotVerified and abstains rather than guess. On the hidden set the checker is
+sound by construction, it never accepts an unsound proof and never reports a
+valid proof as buggy, and it abstains on proofs whose steps it cannot settle, in
+keeping with the scoring, which penalises a wrong verdict far more heavily than
+abstaining.</p>
 
 <h3>References</h3>
 
@@ -56,3 +78,9 @@ outside the implemented repertoire.</p>
 <p>Sutcliffe G. (2008), <strong>The SZS Ontologies for Automated Reasoning
 Software</strong>, Rudnicki P., Sutcliffe G. (eds), <em>Proceedings of the LPAR
 Workshops</em>, pp.38-49, CEUR Workshop Proceedings 418.</p>
+
+<p><strong>Lib1</strong></p>
+
+<p>Bachmair L., Ganzinger H. (1994), <strong>Rewrite-based Equational Theorem
+Proving with Selection and Simplification</strong>, <em>Journal of Logic and
+Computation</em> 4(3), pp.217-247, Oxford University Press.</p>

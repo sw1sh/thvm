@@ -1,10 +1,21 @@
 % ProoVer 2026 -- FindProof sample solutions
-% Output of: wolframscript -f szs.wls <proof.p>   (one SZS status line per proof)
+% Output of: FindProof --check --szs <proof.p>
+% One SZS status line per proof; a localised faulty step, when found, is
+% printed as a following comment.
 %
+% --- valid proofs (gold: Verified) ---
 % SZS status Verified for example1_proof.p
 % SZS status Verified for example2_proof.p
 % SZS status Verified for example3_proof.p
+%
+% --- buggy proofs (gold: FailedVerified) ---
 % SZS status FailedVerified for example1_e_proof.p
-% SZS status FailedVerified for example2_e_proof.p
+%   bad step: s1 (not the negation of the conjecture)
 % SZS status FailedVerified for example3_e_proof.p
+%   bad step: groom (Skolem symbol is not fresh (reused))
 % SZS status FailedVerified for example4_e_proof.p
+%   bad step: groom (declared Skolem symbol absent from the result)
+% SZS status NotVerified for example2_e_proof.p
+%   deduction draws one disjunct from an equational disjunction; the
+%   step's non-entailment is not certified within the saturation bound,
+%   so the checker abstains rather than risk an unsound verdict.
