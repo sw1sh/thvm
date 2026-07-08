@@ -941,6 +941,67 @@ static void pr_load_terms(PrProblem *pr) {
   if (pr->goal_l == 0)  pr_die(pr, "no CONCLUSION", NULL);
 }
 
+// --- Twee/Vampire-style GOAL FLATTENING (THVM_ATP_FLATTEN_GOAL) -------
+//
+// Name every distinct COMPOUND subterm of the goal sides with a fresh
+// MINIMAL constant, adding `fresh = subterm` as an axiom.  KBO orients
+// each as `subterm -> fresh` (fresh weight 1 < any compound's weight),
+// so the deep goal reduces to shallow named pieces and the completion
+// derives relations between the SHALLOW definitions.  This is the
+// technique BOTH Twee (--flatten-goal, default ON) and Vampire
+// (function_definition / naming) use to crack deep-goal UEQ problems
+// (distributivity, the Sheffer entailments) that plain completion
+// stalls on -- verified: twee proves ALG212-10 WITH flatten-goal, FAILS
+// with --no-flatten-goal.  SOUND: the fresh constants are new symbols,
+// so each definition is a conservative definitional extension; the goal
+// L=R holds in E iff it holds in E + {these definitions}.  Default OFF
+// so the byte-exact WM emulation is physically unchanged.
+static int pr_flat_term_eq(Term a, Term b) {
+  u8 ta = term_tag(a), tb = term_tag(b);
+  if (ta != tb) return 0;
+  if (ta == TAG_CTR) {
+    if (term_ext(a) != term_ext(b)) return 0;
+    u32 n = term_ctr_n(a);
+    if (n != term_ctr_n(b)) return 0;
+    for (u32 i = 0; i < n; i++)
+      if (!pr_flat_term_eq(term_ctr_at(a, i), term_ctr_at(b, i))) return 0;
+    return 1;
+  }
+  if (ta == TAG_FVR) return term_ext(a) == term_ext(b);
+  return term_val(a) == term_val(b);
+}
+static void pr_flatten_collect(Term t, Term *subs, u32 *nsub, u32 cap) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 n = term_ctr_n(t);
+  if (n == 0u) return;                       // constant: not compound
+  for (u32 i = 0; i < n; i++)
+    pr_flatten_collect(term_ctr_at(t, i), subs, nsub, cap);   // inner first
+  for (u32 i = 0; i < *nsub; i++)
+    if (pr_flat_term_eq(subs[i], t)) return; // already named
+  if (*nsub < cap) subs[(*nsub)++] = t;
+}
+static void pr_flatten_goal(PrProblem *pr) {
+  if (pr->goal_l == 0) return;
+  Term subs[128];
+  u32  nsub = 0;
+  pr_flatten_collect(pr->goal_l, subs, &nsub, 128u);
+  pr_flatten_collect(pr->goal_r, subs, &nsub, 128u);
+  for (u32 i = 0; i < nsub; i++) {
+    if (pr->n_syms >= PR_MAX_SYMS) break;
+    if (pr->n_eqns >= PR_MAX_EQNS) break;
+    u32 lbl = PR_LABEL_BASE + pr->n_syms;
+    snprintf(pr->syms[pr->n_syms].name, PR_NAME_LEN, "sFlat%u", i);
+    pr->syms[pr->n_syms].arity = 0u;
+    pr->weights[lbl]    = 1u;   // minimal weight -> subterm > fresh
+    pr->precedence[lbl] = 0u;   // minimal precedence (constants low)
+    pr->n_syms++;
+    Term fresh = term_new_ctr(lbl, NULL, 0);
+    pr->eq_l[pr->n_eqns] = fresh;   // fresh = subterm  (orients subterm -> fresh)
+    pr->eq_r[pr->n_eqns] = subs[i];
+    pr->n_eqns++;
+  }
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -958,6 +1019,14 @@ int main(int argc, char **argv) {
   // above) so the -auto weight heuristic below can inspect the axioms before
   // the KBO config is finalised.  The later pr_load_terms call is guarded.
   if (pr_mode) pr_load_terms(&prp);
+  // Goal flattening (Twee/Vampire naming port): extend the signature +
+  // axioms with fresh minimal names for the goal's compound subterms
+  // BEFORE the KboConfig is finalised below (so it picks up the new
+  // labels/weights).  Opt-in; default OFF keeps the emulation byte-exact.
+  if (pr_mode && getenv("THVM_ATP_FLATTEN_GOAL") != NULL
+      && getenv("THVM_ATP_FLATTEN_GOAL")[0] != '0') {
+    pr_flatten_goal(&prp);
+  }
 
   // Reduction ordering.  Default KBO (one binary symbol `nand`,
   // weight 1, var weight 1 -- KBO weight is plain symbol count, so a
