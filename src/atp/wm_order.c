@@ -600,15 +600,25 @@ static void wmo_sprung_reissue_multi_cb(WmoNode *n, void *raw) {
 // is neither its smallest nor its largest symbol (BO_ObjektEntfernen
 // :1043-1046, SprunglistenBereinigenEinfach with NachbarBlatt = the node's
 // smallest-symbol child), no path shrinks, but the surviving smallest-symbol
-// leaf `minc` (the most-recently-introduced variable child = a fresh hang
-// whose ancestor jumps were head-prepended) must restore the
-// AltesBlattPolieren parallel order against the OTHER surviving leaf siblings:
-// in WM that fresh leaf arose as a split of a sibling's Sprung-compressed
-// leaf, so each ancestor jump was spliced AFTER the sibling's own jump
-// (DSBaumOperationen.c :521-525, "hinter den Eintrag setzen").  At every node
-// a single jump to `minc` that precedes a later sibling-leaf jump from the
-// same enclosing subterm (sharing the leading function cell) moves to just
-// after the last such later sibling jump.
+// leaf `minc` -- WHEN it is the most-recently-born surviving leaf child (a
+// fresh hang whose ancestor jumps were head-prepended over the older
+// siblings') -- must restore the AltesBlattPolieren parallel order against
+// the OTHER surviving leaf siblings: in WM that fresh leaf arose as a split
+// of a sibling's Sprung-compressed leaf, so each ancestor jump was spliced
+// AFTER the sibling's own jump (DSBaumOperationen.c :521-525, "hinter den
+// Eintrag setzen").  At every node a single jump to `minc` that precedes a
+// later sibling-leaf jump from the same enclosing subterm (sharing the
+// leading function cell) moves to just after the last such later sibling
+// jump.  The caller gates on minc being the newest-born leaf kid (the same
+// chain[0].trace birth-order discipline as the collapse multi-model
+// re-issue): WM's SprunglistenBereinigenEinfach itself never reorders
+// surviving Sprungausgaenge, so an OLDER minc ahead of a newer sibling is
+// already in WM's construction order -- the sibling's jump was an
+// AltesBlattPolieren parallel spliced after minc's when the sibling split
+// minc's leaf -- and moving it would flip a WM-stable pair
+// (WolframCommutativeAxioms ImpliesShefferAxioms c3 @reg762: survivors
+// uid136 < uid137 keep [136,137]; the same-wave split of uid136 then
+// splices uid762's parallel after the survivor, giving WM's [136,762,137]).
 typedef struct {
   WmoLeaf  *minc;
   WmoLeaf **sibs;
@@ -1386,7 +1396,17 @@ static void wmo_tree_remove(WmoTree *t, const WmoCell *key, u32 key_len,
     // largest surviving ids (neither min nor max symbol).  The surviving
     // smallest-symbol leaf `minc` (largest first-occurrence id = most
     // negative WM code) is the fresh-hang child whose head-prepended
-    // ancestor jumps must move AFTER its variable siblings' jumps.
+    // ancestor jumps must move AFTER its variable siblings' jumps -- but
+    // ONLY when minc really is that fresh hang, i.e. the newest-born
+    // surviving leaf kid (chain[0].trace above every sibling's, the same
+    // birth-order gate as the collapse multi-model re-issue below).  An
+    // OLDER minc preceding a newer sibling is WM's after-splice order
+    // (the sibling's jump was the AltesBlattPolieren parallel spliced
+    // after minc's own) and must stay put: WM's cleanup never reorders
+    // surviving Sprungausgaenge (MeredithAxioms And/OrAssoc @2010 fires
+    // the move, minc=68 newest over sib 31; WolframCommutativeAxioms
+    // ImpliesShefferAxioms c3 @reg762 must not, minc=136 oldest under
+    // sib 137).
     WmoLeaf *minc = NULL;
     u32      minc_sym = 0;      // largest surviving id (smallest WM symbol)
     u32      lo_sym   = 0;      // smallest surviving id (largest WM symbol)
@@ -1409,15 +1429,21 @@ static void wmo_tree_remove(WmoTree *t, const WmoCell *key, u32 key_len,
     }
     if (all_var && n_leaf_kids >= 2u && minc != NULL &&
         removed_sym > lo_sym && removed_sym < minc_sym) {
+      u32 minc_trace = minc->n_chain ? minc->chain[0].trace : 0u;
+      u8  minc_newest = 1u;     // minc born after every sibling leaf kid
       for (u32 k = 0; k < parent->n_kids; k++) {
         if (parent->kids[k].is_leaf &&
             parent->kids[k].child != (void *)minc &&
             n_sibs < WMO_MAX_VARS + 2u) {
-          sibs[n_sibs++] = (WmoLeaf *)parent->kids[k].child;
+          WmoLeaf *m = (WmoLeaf *)parent->kids[k].child;
+          sibs[n_sibs++] = m;
+          if (m->n_chain && m->chain[0].trace > minc_trace) minc_newest = 0u;
         }
       }
-      WmoMiddleCtx mc = { minc, sibs, n_sibs };
-      wmo_walk_entries(t->root, wmo_middle_reissue_cb, &mc);
+      if (minc_newest) {
+        WmoMiddleCtx mc = { minc, sibs, n_sibs };
+        wmo_walk_entries(t->root, wmo_middle_reissue_cb, &mc);
+      }
     }
   }
   wmo_leaf_free(leaf);
