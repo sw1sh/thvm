@@ -39,7 +39,6 @@ static void atp_cp_ft_ensure_cap(AtpState *s, u32 need, u32 old_cap);
 static u32  atp_cp_ft_set       (AtpState *s, u32 i, Term lhs, Term rhs,
                                  u32 priority_hint, u32 origin_rule);
 static void atp_cp_ft_clear     (AtpState *s, u32 i);
-static void atp_cp_ft_swap      (AtpState *s, u32 i, u32 j);
 static void atp_cp_ft_move      (AtpState *s, u32 dst, u32 src);
 #endif
 
@@ -1330,8 +1329,14 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
                               cap * sizeof(u32));
   u8   *ndp = (u8  *)realloc(s->cp_deprio, cap * sizeof(u8));
   u8   *nk  = (u8  *)realloc(s->cp_kind,   cap * sizeof(u8));
+  // Heap-position mirror (cp_heap: pos -> row, cp_pos: row -> pos).
+  // No tail init required: only [0, n_cps) is ever read, and every
+  // append / direct set stamps its own entry.
+  u32  *nh  = (u32 *)realloc(s->cp_heap,   cap * sizeof(u32));
+  u32  *npo = (u32 *)realloc(s->cp_pos,    cap * sizeof(u32));
   if (nc == NULL || nt == NULL || np == NULL || nq == NULL || ng == NULL
-      || np2 == NULL || nlnr == NULL || ndp == NULL || nk == NULL) {
+      || np2 == NULL || nlnr == NULL || ndp == NULL || nk == NULL
+      || nh == NULL || npo == NULL) {
     fprintf(stderr, "atp_ensure_cp_cap: realloc to %u CPs failed\n", cap);
     exit(1);
   }
@@ -1340,6 +1345,8 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   s->cp_last_norm_r_revision = nlnr;
   s->cp_deprio = ndp;
   s->cp_kind = nk;
+  s->cp_heap = nh;
+  s->cp_pos = npo;
   memset(s->cp_deprio + old_cap, 0, (size_t)(cap - old_cap) * sizeof(u8));
   memset(s->cp_kind + old_cap, TRACE_CP, (size_t)(cap - old_cap) * sizeof(u8));
   // Deferred-CP (`implicit_pair`) arc: lazy-grow the parallel
@@ -1461,19 +1468,9 @@ static inline void atp_cp_implicit_move(AtpState *s, u32 dst, u32 src) {
   atp_cp_implicit_clear(s, src);
 }
 
-// Swap the descriptors + tag bits at slots i, j (heap sift).
-static inline void atp_cp_implicit_swap(AtpState *s, u32 i, u32 j) {
-  if (s->cp_is_implicit == NULL) return;
-  if (s->cp_implicit != NULL) {
-    AtpCpImplicit t = s->cp_implicit[i];
-    s->cp_implicit[i] = s->cp_implicit[j];
-    s->cp_implicit[j] = t;
-  }
-  u8 bi = atp_cp_slot_implicit(s, i);
-  u8 bj = atp_cp_slot_implicit(s, j);
-  if (bj) atp_cp_implicit_set(s, i); else atp_cp_implicit_clear(s, i);
-  if (bi) atp_cp_implicit_set(s, j); else atp_cp_implicit_clear(s, j);
-}
+// (A heap sift no longer touches the descriptors: sifts swap only the
+// cp_heap/cp_pos position mirror, so a slot's descriptor + tag bit stay
+// put with its stationary payload row.)
 
 // 7c': push one CP onto the binary min-heap CP queue.  Defined
 // below (after atp_cp_priority); forward-declared here so the
@@ -3084,34 +3081,48 @@ static void acp_selftest(void) {
 fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
   if (s == NULL) return;
   atp_ensure_cp_cap(s, i + 1u);
-  free(s->cp_packed[i]);                 // free(NULL) is a no-op
+  // Position-indirection mapping: overwriting a LIVE queue slot means
+  // "replace the CP at heap position i" (the historical position ==
+  // payload-index semantics); a fresh build slot beyond n_cps stamps
+  // the identity mapping -- callers populate [0, k) then set n_cps and
+  // reheapify, and identity reproduces the historical fresh layout.
+  u32 row;
+  if (i < s->n_cps) {
+    row = s->cp_heap[i];
+  } else {
+    s->cp_heap[i] = i;
+    s->cp_pos[i]  = i;
+    row = i;
+  }
+  free(s->cp_packed[row]);               // free(NULL) is a no-op
   // The slot now holds packed bytes -- drop any deferred-CP tag so the
   // `cp_is_implicit[i] <=> cp_packed[i] == NULL` invariant holds.
-  atp_cp_implicit_clear(s, i);
-  s->cp_packed[i] = acp_pack(lhs, rhs, NULL, NULL);
+  atp_cp_implicit_clear(s, row);
+  s->cp_packed[row] = acp_pack(lhs, rhs, NULL, NULL);
   // Insertion age, stamped once here (mirroring the heap-push path) and
   // preserved across every later sweep / reheapify -- WM keeps the w2
   // FIFO key untouched on reweight (C_ReClassify, CLAS/
   // NewClassification.c:399-406 "w2 wird nicht geaendert").
-  s->cp_seq[i] = s->cp_seq_next++;
+  s->cp_seq[row] = s->cp_seq_next++;
 #ifdef THVM_ATPFT_CPQ
   // Stage 7: mirror the slot into the parallel FT queue.  Test
   // harnesses populate the queue via thvm_atp_cp_set + reheapify;
-  // keep the two views in lockstep so the heap swap routines stay
-  // sound (they swap entries on both arrays unconditionally).
-  atp_cp_ft_clear(s, i);
-  atp_cp_ft_set(s, i, lhs, rhs, /*priority_hint=*/0u, /*origin=*/0xffffu);
+  // keep the two views in lockstep (entries live at the same
+  // stationary rows as the legacy arrays).
+  atp_cp_ft_clear(s, row);
+  atp_cp_ft_set(s, row, lhs, rhs, /*priority_hint=*/0u, /*origin=*/0xffffu);
 #endif
 }
 
 // Read CP queue slot i back into two Terms -- the read counterpart of
 // thvm_atp_cp_set.  A packed slot unpacks fresh transient heap Terms;
 // a deferred (implicit) slot returns its trace-resident raw pair
-// zero-copy.  Read-only either way.
+// zero-copy.  Read-only either way.  `i` is a heap POSITION (the
+// public queue-slot notion); the payload row is mapped internally.
 static void atp_cp_slot_read(const AtpState *s, u32 i,
                              Term *lhs, Term *rhs);
 fn void thvm_atp_cp_get(const AtpState *s, u32 i, Term *lhs, Term *rhs) {
-  atp_cp_slot_read(s, i, lhs, rhs);
+  atp_cp_slot_read(s, s->cp_heap[i], lhs, rhs);
 }
 
 
@@ -3599,11 +3610,14 @@ static void atp_fv_index_rebuild(AtpState *s) {
   ix->root    = atp_dt_node_new(ix, ATP_DTREE_NIL);
   for (u32 i = 0; i < ix->seqmap_cap; i++) ix->seqmap[i].seq = ATP_DTREE_NIL;
   for (u32 i = 0; i < s->n_cps; i++) {
+    // Heap-position walk (row mapped per slot) -- the historical
+    // payload-index iteration visited CPs in position order.
+    u32 vv = s->cp_heap[i];
     // Deferred-CP slots are never indexed: there are no packed bytes to
     // borrow, and queue-subsumption deliberately skips the implicit
     // passive set (WM has no queue-vs-queue subsumption at all --
     // SS_TermpaarSubsummiertVonGM matches only the ACTIVE rule set).
-    if (atp_cp_slot_implicit(s, i)) continue;
+    if (atp_cp_slot_implicit(s, vv)) continue;
     // Bound the transient unpack (see atp_cp_rebuild_priorities): l,r are
     // consumed by the feature insert and not kept by the index, so a Cheney
     // pass between iterations reclaims them without touching the live index.
@@ -3611,8 +3625,8 @@ static void atp_fv_index_rebuild(AtpState *s) {
       thvm_atp_gc_collect(s);
     }
     Term l = 0, r = 0;
-    acp_unpack(s->cp_packed[i], &l, &r);
-    atp_fv_index_insert(ix, l, r, s->cp_packed[i], s->cp_seq[i]);
+    acp_unpack(s->cp_packed[vv], &l, &r);
+    atp_fv_index_insert(ix, l, r, s->cp_packed[vv], s->cp_seq[vv]);
   }
 }
 
@@ -6603,6 +6617,8 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_goal);
   free(s->cp_seq);
   free(s->cp_pri2);
+  free(s->cp_heap);
+  free(s->cp_pos);
   free(s->cp_ultimate);
   free(s->cp_uid_a);
   free(s->cp_uid_b);
@@ -10031,8 +10047,12 @@ static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
 // ties by queue index) but at O(log n) per push/pop instead of
 // rebuilding an n-leaf INC-SUP tree + collapse on every step.
 
-// Ordering predicate: does queue slot i sort strictly before j?
+// Ordering predicate: does the CP at heap POSITION i sort strictly
+// before the one at position j?  Payload lives at the stationary rows
+// cp_heap[i] / cp_heap[j]; the mapping is hoisted once so every key
+// read below sees exactly the CP the position-i/j slot holds.
 static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
+  const u32 a = s->cp_heap[i], b = s->cp_heap[j];
   // Waldmeister history-driven Act_ultimate: a CP tagged "ultimate"
   // ranks strictly before every non-ultimate CP, regardless of
   // heuristic weight (NewClassification.c sets w1 = minimalWeight()
@@ -10041,7 +10061,7 @@ static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
   // flag is OFF by default -- engine byte-identical.
   if ((s->use_initial_ultimate || s->use_database_ultimate)
       && s->cp_ultimate != NULL) {
-    u8 ui = s->cp_ultimate[i], uj = s->cp_ultimate[j];
+    u8 ui = s->cp_ultimate[a], uj = s->cp_ultimate[b];
     if (ui != uj) return ui > uj;
     // Both ultimate: WM stamps EVERY Act_ultimate CP w1 =
     // minimalWeight() = INT32_MIN (NewClassification.c:330), so the
@@ -10049,7 +10069,7 @@ static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
     // the ultimate class.  The computed cp_pri is deliberately
     // ignored here; for axioms the FIFO stamps carry the canonical
     // loader-sort order (atp_wm_intake_canonicalize).
-    if (ui) return s->cp_seq[i] < s->cp_seq[j];
+    if (ui) return s->cp_seq[a] < s->cp_seq[b];
   }
   // Collapser deferral (opt-in, THVM_ATP_COLLAPSE_DEFER=<penalty>): add a
   // priority penalty to bare-variable-rhs CPs (collapsers), deferring their
@@ -10064,13 +10084,13 @@ static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
     cdef = e ? (int)strtoul(e, NULL, 10) : -1;
   }
   if (cdef >= 0) {
-    u32 pi = s->cp_pri[i]
-             + (acp_rhs_nodes(s->cp_packed[i]) == 1u ? (u32)cdef : 0u);
-    u32 pj = s->cp_pri[j]
-             + (acp_rhs_nodes(s->cp_packed[j]) == 1u ? (u32)cdef : 0u);
+    u32 pi = s->cp_pri[a]
+             + (acp_rhs_nodes(s->cp_packed[a]) == 1u ? (u32)cdef : 0u);
+    u32 pj = s->cp_pri[b]
+             + (acp_rhs_nodes(s->cp_packed[b]) == 1u ? (u32)cdef : 0u);
     if (pi != pj) return pi < pj;
   } else {
-    if (s->cp_pri[i] != s->cp_pri[j]) return s->cp_pri[i] < s->cp_pri[j];
+    if (s->cp_pri[a] != s->cp_pri[b]) return s->cp_pri[a] < s->cp_pri[b];
   }
   // Weight-tie tiebreak (opt-in, THVM_ATP_TIE_RHS): among CPs sharing the
   // WMQ weight bucket (S*S+S-1 depends only on total size, so a compound
@@ -10084,51 +10104,89 @@ static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
   static int tie_rhs = -1;
   if (tie_rhs < 0) tie_rhs = getenv("THVM_ATP_TIE_RHS") ? 1 : 0;
   if (tie_rhs) {
-    u32 ri = acp_rhs_nodes(s->cp_packed[i]);
-    u32 rj = acp_rhs_nodes(s->cp_packed[j]);
+    u32 ri = acp_rhs_nodes(s->cp_packed[a]);
+    u32 rj = acp_rhs_nodes(s->cp_packed[b]);
     if (ri != rj) return ri > rj;   // larger rhs (compound) selected first
   }
-  return s->cp_seq[i] < s->cp_seq[j];
+  return s->cp_seq[a] < s->cp_seq[b];
 }
 
-// Swap all four parallel CP arrays at slots i, j.  cp_packed swaps the
-// pointer only -- the byte string itself does not move, so a
-// subsumption-index record still borrows a valid buffer after a sift.
+// Swap the CPs at heap positions i, j.  Only the position mirror moves
+// (cp_heap: pos -> row, cp_pos: row -> pos); the ~14 parallel payload
+// arrays stay stationary at their rows -- the historical whole-payload
+// swap sifted every array on every hop, ~14 scattered stores per swap.
+// A subsumption-index record borrowing cp_packed bytes stays valid a
+// fortiori (the pointer no longer even moves between slots).
 static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr);
 
 static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
-  u8  *tc = s->cp_packed[i];s->cp_packed[i]= s->cp_packed[j];s->cp_packed[j]= tc;
-  u32  tt = s->cp_trace[i]; s->cp_trace[i] = s->cp_trace[j]; s->cp_trace[j] = tt;
-  u8   tk = s->cp_kind[i];  s->cp_kind[i]  = s->cp_kind[j];  s->cp_kind[j]  = tk;
-  u32  tp = s->cp_pri[i];   s->cp_pri[i]   = s->cp_pri[j];   s->cp_pri[j]   = tp;
-  u32  tq = s->cp_seq[i];   s->cp_seq[i]   = s->cp_seq[j];   s->cp_seq[j]   = tq;
-  u32  tg = s->cp_goal[i];  s->cp_goal[i]  = s->cp_goal[j];  s->cp_goal[j]  = tg;
-  u32  t2 = s->cp_pri2[i];  s->cp_pri2[i]  = s->cp_pri2[j];  s->cp_pri2[j]  = t2;
-  // The IR-normalize cookie is per-CP, not per-slot: a sift moves the
-  // CP wholesale, so its NF-witness travels with it.
-  u32  tn = s->cp_last_norm_r_revision[i];
-  s->cp_last_norm_r_revision[i] = s->cp_last_norm_r_revision[j];
-  s->cp_last_norm_r_revision[j] = tn;
-  if (s->cp_ultimate != NULL) {
-    u8 tu = s->cp_ultimate[i];
-    s->cp_ultimate[i] = s->cp_ultimate[j];
-    s->cp_ultimate[j] = tu;
-  }
+  u32 si = s->cp_heap[i], sj = s->cp_heap[j];
+  s->cp_heap[i] = sj;
+  s->cp_heap[j] = si;
+  s->cp_pos[si] = j;
+  s->cp_pos[sj] = i;
+}
+
+// Move payload row `src` into (vacated) row `dst`: the pop-backfill /
+// sweep-densify companion of the stationary-row discipline.  Copies
+// every per-CP array the historical backfill copied -- cp_deprio is
+// deliberately NOT moved (the historical backfill never moved it
+// either: it is a position-stamped array, see thvm.h).  The caller
+// rewires cp_heap/cp_pos for the moved row.
+static inline void atp_cp_row_move(AtpState *s, u32 dst, u32 src) {
+  s->cp_packed[dst] = s->cp_packed[src];
+  s->cp_packed[src] = NULL;           // vacated row: leave it empty
+  s->cp_trace[dst]  = s->cp_trace[src];
+  s->cp_kind[dst]   = s->cp_kind[src];
+  s->cp_pri[dst]    = s->cp_pri[src];
+  s->cp_seq[dst]    = s->cp_seq[src];
+  s->cp_goal[dst]   = s->cp_goal[src];
+  s->cp_pri2[dst]   = s->cp_pri2[src];
+  s->cp_last_norm_r_revision[dst] = s->cp_last_norm_r_revision[src];
+  if (s->cp_ultimate != NULL) s->cp_ultimate[dst] = s->cp_ultimate[src];
   if (s->cp_uid_a != NULL) {
-    u32 ua = s->cp_uid_a[i], ub = s->cp_uid_b[i];
-    s->cp_uid_a[i] = s->cp_uid_a[j]; s->cp_uid_b[i] = s->cp_uid_b[j];
-    s->cp_uid_a[j] = ua;             s->cp_uid_b[j] = ub;
+    s->cp_uid_a[dst] = s->cp_uid_a[src];
+    s->cp_uid_b[dst] = s->cp_uid_b[src];
   }
-  // Deferred-CP descriptor + tag bit travel with the slot: a fresh
-  // implicit push sifts up immediately, so missing this swap would
-  // desync the descriptor from its slot on the FIRST sift.
-  atp_cp_implicit_swap(s, i, j);
+  atp_cp_implicit_move(s, dst, src);
 #ifdef THVM_ATPFT_CPQ
-  // Stage 7: the parallel FT queue indexes identically; swap entries
-  // alongside the legacy arrays so heap sift keeps both views in
-  // lockstep.
-  atp_cp_ft_swap(s, i, j);
+  // Move the (still-owned) FT entry alongside; zeroes the vacated src
+  // so a later destroy / clear does not double-free the spans.
+  atp_cp_ft_move(s, dst, src);
 #endif
+}
+
+// After a position-order sweep compaction (cp_heap[0..w) holds the
+// survivor rows in the sweep's visit order; s->n_cps is still the
+// pre-sweep count), densify the payload rows to [0, w): every survivor
+// row >= w moves into a freed row < w and the mirror rewires.  Which
+// freed row a survivor lands in is NOT observable -- every consumer
+// reads payload through cp_heap/cp_pos, positions are untouched here,
+// and cp_deprio (the one position-raw array) never moves anyway.
+// Rebuilds cp_pos for the surviving positions and commits n_cps = w.
+static void atp_cp_rows_densify(AtpState *s, u32 w) {
+  u32 old_n = s->n_cps;
+  if (w != old_n) {
+    u8 *live = (u8 *)calloc((size_t)(old_n ? old_n : 1u), 1u);
+    if (live == NULL) {
+      fprintf(stderr, "atp_cp_rows_densify: calloc %u failed\n", old_n);
+      exit(1);
+    }
+    for (u32 q = 0; q < w; q++) live[s->cp_heap[q]] = 1u;
+    u32 f = 0;   // next freed row < w (ascending; enough exist: |live| == w)
+    for (u32 q = 0; q < w; q++) {
+      u32 r = s->cp_heap[q];
+      if (r < w) continue;
+      while (live[f]) f++;
+      atp_cp_row_move(s, /*dst=*/f, /*src=*/r);
+      live[f] = 1u;
+      s->cp_heap[q] = f;
+      f++;
+    }
+    free(live);
+  }
+  for (u32 q = 0; q < w; q++) s->cp_pos[s->cp_heap[q]] = q;
+  s->n_cps = w;
 }
 
 static void atp_cp_sift_up(AtpState *s, u32 i) {
@@ -10166,8 +10224,9 @@ static int atp_kdheap_on(void) {
 // (0 = weight root, 1 = FIFO/age jump); surfaced in the CPSEL trace.
 static u32 g_kdh_last_d = 99u;
 // EL_GREATER(d): d==0 -> (w1,then w2); d==1 -> w2 alone (KDHeapElements.h:63).
+// na/nb are 1-indexed heap NODES; payload sits at the mapped rows.
 static int atp_kdh_gt(const AtpState *s, unsigned d, u32 na, u32 nb) {
-  u32 a = na - 1u, b = nb - 1u;
+  u32 a = s->cp_heap[na - 1u], b = s->cp_heap[nb - 1u];
   if (d == 0u) {
     if (s->cp_pri[a] != s->cp_pri[b]) return s->cp_pri[a] > s->cp_pri[b];
     return s->cp_seq[a] > s->cp_seq[b];
@@ -10253,6 +10312,11 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
                                       u8 kind) {
   atp_ensure_cp_cap(s, s->n_cps + 1);
   u32 i = s->n_cps;
+  // Fresh CP appends at row i == heap position i (identical placement
+  // to the historical layout; the sift below then moves only the
+  // position mirror).
+  s->cp_heap[i] = i;
+  s->cp_pos[i]  = i;
   // Eager packed slot: make sure no stale deferred-CP tag aliases the
   // packed bytes as a descriptor (every drop/move site clears its bit,
   // so this is a backstop that keeps the invariant local).
@@ -10694,6 +10758,9 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   atp_ensure_cp_cap(s, s->n_cps + 1);
   atp_cp_implicit_arrays_ensure(s);
   u32 i = s->n_cps;
+  // Append at row i == heap position i (see atp_cp_heap_insert_packed).
+  s->cp_heap[i] = i;
+  s->cp_pos[i]  = i;
   s->cp_packed[i] = NULL;          // deferred slot marker
   s->cp_trace[i]  = cp_trace_id;
   s->cp_kind[i]   = g_cp_push_kind;
@@ -10866,7 +10933,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
   u32 n = s->n_cps;
   u32 *scratch = (u32 *)malloc((size_t)n * sizeof(u32));
   if (scratch == NULL) return;  // out of memory: skip the recompute (sound)
-  for (u32 i = 0; i < n; i++) scratch[i] = s->cp_pri[i];
+  for (u32 i = 0; i < n; i++) scratch[i] = s->cp_pri[s->cp_heap[i]];
   u32 k = (u32)predicted - 1u;  // 0-indexed k-th smallest
   // Hoare partition / quickselect loop.
   u32 lo = 0, hi = n - 1u;
@@ -10896,36 +10963,37 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
   u32 i = s->n_cps;
   while (i > 0u) {
     i--;
-    if (s->cp_pri[i] <= horizon) continue;
-    free(s->cp_packed[i]);
-    s->cp_packed[i] = NULL;
-    atp_cp_implicit_clear(s, i);
+    // i is a heap POSITION; the CP's payload row is vv.
+    u32 vv = s->cp_heap[i];
+    if (s->cp_pri[vv] <= horizon) continue;
+    free(s->cp_packed[vv]);
+    s->cp_packed[vv] = NULL;
+    atp_cp_implicit_clear(s, vv);
 #ifdef THVM_ATPFT_CPQ
-    atp_cp_ft_clear(s, i);
+    atp_cp_ft_clear(s, vv);
 #endif
 #ifdef ATP_FV_INDEX
     // No-op for deferred slots: their seq was never inserted.
-    atp_fv_index_remove(s->fv_index, s->cp_seq[i]);
+    atp_fv_index_remove(s->fv_index, s->cp_seq[vv]);
 #endif
+    // Heap-entry backfill from the last position, then row densify
+    // (move the last row into the vacated row vv).  The heap shrink
+    // MUST precede the cp_pos[last-row] read: the last row may be the
+    // very CP that sat at the popped last position.
     u32 last = s->n_cps - 1u;
     if (i != last) {
-      s->cp_packed[i] = s->cp_packed[last];
-      s->cp_packed[last] = NULL;
-      s->cp_trace[i] = s->cp_trace[last];
-      s->cp_kind[i]  = s->cp_kind[last];
-      s->cp_pri[i]   = s->cp_pri[last];
-      s->cp_seq[i]   = s->cp_seq[last];
-      s->cp_goal[i]  = s->cp_goal[last];
-      s->cp_pri2[i]  = s->cp_pri2[last];
-      s->cp_last_norm_r_revision[i] = s->cp_last_norm_r_revision[last];
-      if (s->cp_ultimate != NULL) s->cp_ultimate[i] = s->cp_ultimate[last];
-      if (s->cp_uid_a != NULL) { s->cp_uid_a[i] = s->cp_uid_a[last]; s->cp_uid_b[i] = s->cp_uid_b[last]; }
-      atp_cp_implicit_move(s, /*dst=*/i, /*src=*/last);
-#ifdef THVM_ATPFT_CPQ
-      atp_cp_ft_move(s, /*dst=*/i, /*src=*/last);
-#endif
+      u32 moved = s->cp_heap[last];
+      s->cp_heap[i] = moved;
+      s->cp_pos[moved] = i;
     }
     s->n_cps--;
+    u32 lr = s->n_cps;             // last (to-densify) payload row
+    if (vv != lr) {
+      atp_cp_row_move(s, /*dst=*/vv, /*src=*/lr);
+      u32 p = s->cp_pos[lr];
+      s->cp_heap[p] = vv;
+      s->cp_pos[vv] = p;
+    }
     s->n_cps_dropped_lrs++;
     // The backfilled element at slot i might itself be above horizon;
     // re-check it on the next iteration (compensate the i-- at the
@@ -11091,7 +11159,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     u32 top = (topcap == 0u || topcap > s->n_cps) ? s->n_cps : topcap;
     u32 best = 0;
     for (u32 i = 1; i < top; i++) {
-      if (s->cp_seq[i] < s->cp_seq[best]) best = i;
+      if (s->cp_seq[s->cp_heap[i]] < s->cp_seq[s->cp_heap[best]]) best = i;
     }
     j = best;
     s->n_cps_w2_picks++;
@@ -11099,13 +11167,18 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       (s->cp_select_count % s->w2_modulo) == 0u) {
     // K-D Heap secondary dimension (WM CPdimension d=1): every
     // w2_modulo-th selection picks the min-cp_pri2 entry instead of
-    // the primary heap root.  O(n_cps) scan; the period gates cost.
-    // Surfaces structurally simple CPs buried under primary weight.
+    // the primary heap root.  O(n_cps) scan over heap positions; the
+    // period gates cost.  Surfaces structurally simple CPs buried
+    // under primary weight.
     u32 best = 0;
+    u32 bp2 = s->cp_pri2[s->cp_heap[0]], bsq = s->cp_seq[s->cp_heap[0]];
     for (u32 i = 1; i < s->n_cps; i++) {
-      if (s->cp_pri2[i] < s->cp_pri2[best]
-          || (s->cp_pri2[i] == s->cp_pri2[best] && s->cp_seq[i] < s->cp_seq[best])) {
+      u32 vv = s->cp_heap[i];
+      if (s->cp_pri2[vv] < bp2
+          || (s->cp_pri2[vv] == bp2 && s->cp_seq[vv] < bsq)) {
         best = i;
+        bp2 = s->cp_pri2[vv];
+        bsq = s->cp_seq[vv];
       }
     }
     j = best;
@@ -11114,10 +11187,11 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       (s->cp_select_count % s->use_goal_interleave) == 0u) {
     // Goal-directed pick: the most goal-relevant queued CP (min
     // cp_goal).  E-style ratio -- the other picks are weight-based,
-    // building the system; this steers toward the goal.
+    // building the system; this steers toward the goal.  Ties keep the
+    // LOWEST heap position (strict <), so the scan must walk positions.
     u32 best = 0;
     for (u32 i = 1; i < s->n_cps; i++) {
-      if (s->cp_goal[i] < s->cp_goal[best]) best = i;
+      if (s->cp_goal[s->cp_heap[i]] < s->cp_goal[s->cp_heap[best]]) best = i;
     }
     j = best;
   } else if (s->random_modulo > 0u &&
@@ -11147,33 +11221,41 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     // been extracted.
     const u32 floor_seq = s->fifo_floor_seq;
     u32 best = 0xffffffffu;
+    u32 best_sq = 0xffffffffu;
     for (u32 i = 0; i < s->n_cps; i++) {
-      u32 sq = s->cp_seq[i];
+      u32 vv = s->cp_heap[i];
+      u32 sq = s->cp_seq[vv];
       if (sq < floor_seq) continue;                 // proven dead prefix
-      if (best != 0xffffffffu && sq >= s->cp_seq[best]) continue;
+      if (best != 0xffffffffu && sq >= best_sq) continue;
       if (s->use_orphan_murder) {
-        if (atp_cp_is_orphan(s, s->cp_trace[i])) continue;
-        if (atp_cp_uid_orphan(s, i)) continue;
+        if (atp_cp_is_orphan(s, s->cp_trace[vv])) continue;
+        if (atp_cp_uid_orphan(s, vv)) continue;
       }
       best = i;
+      best_sq = sq;
     }
     j = (best != 0xffffffffu) ? best : 0u;
     // The scanned minimum is extracted below on every path (selected,
     // or discarded as orphan and re-picked), and pushes
     // stamp monotonically growing seqs -- so everything at or below its
     // seq is dead or gone from here on.
-    if (best != 0xffffffffu) s->fifo_floor_seq = s->cp_seq[best] + 1u;
+    if (best != 0xffffffffu) s->fifo_floor_seq = best_sq + 1u;
   }
+
+  // The chosen CP: j is its heap POSITION, v its stationary payload
+  // row.  Every payload read/write below routes through v; j survives
+  // only as the position (printed in the trace lines + heap repair).
+  const u32 v = s->cp_heap[j];
 
   // Lazy orphan check.  If the chosen CP descends from an interreduced-
   // away rule, extract+discard it without counting a selection and
   // re-pick.  WM IncAnzKPEntfernt ticks per discard (KPVerwaltung.c:539).
-  int orphan = s->use_orphan_murder && atp_cp_is_orphan(s, s->cp_trace[j]);
+  int orphan = s->use_orphan_murder && atp_cp_is_orphan(s, s->cp_trace[v]);
   // WM Waisenmord uid layer (see AtpState.r_uid): parent-identity death
   // test that works past the proof-trace soft cap AND for post-cap rules
   // whose r_trace is ATP_TRACE_NONE (where both tests above are blind) --
   // the WolframAxioms DoubleNegation firstdiv-796 extra pop.
-  if (!orphan && s->use_orphan_murder && atp_cp_uid_orphan(s, j)) {
+  if (!orphan && s->use_orphan_murder && atp_cp_uid_orphan(s, v)) {
     orphan = 1;
   }
   // Gated forensic print for the silent at-pop orphan discard (the only
@@ -11187,7 +11269,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       // whether the uid layer (not the trace layer) fired instead.
       u32 pa = 0xffffffffu, pb = 0xffffffffu;
       u8 pa_dead = 0u, pb_dead = 0u;
-      u32 ct = s->cp_trace[j];
+      u32 ct = s->cp_trace[v];
       if (ct != ATP_TRACE_NONE && ct < s->n_trace) {
         Term te = s->trace[ct];
         if (term_tag(te) == TAG_CTR && term_ext(te) == TRACE_CP) {
@@ -11200,9 +11282,9 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       fprintf(stderr,
               "ORPHDROP seq=%u pri=%u trace=%u pa=%u(dead=%u) pb=%u(dead=%u) "
               "uid_orphan=%u\n",
-              s->cp_seq[j], s->cp_pri[j], s->cp_trace[j],
+              s->cp_seq[v], s->cp_pri[v], s->cp_trace[v],
               pa, pa_dead, pb, pb_dead,
-              (u8)atp_cp_uid_orphan(s, j));
+              (u8)atp_cp_uid_orphan(s, v));
     }
   }
   if (!orphan) s->cp_select_count++;
@@ -11212,7 +11294,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // string -- it materializes the raw pair off its TRACE_CP entry
   // instead (zero-copy; see atp_cp_implicit_materialize for the
   // liveness/aliasing argument).  The orphan check above already ran
-  // on cp_trace[j], which the push side sets for implicit slots too,
+  // on cp_trace[v], which the push side sets for implicit slots too,
   // so a dead-parent implicit CP is discarded below exactly like an
   // eager one (WM selectNonOrphan covers the implicit passive set).
   // Orphan pops are discarded without touching the terms (the loop
@@ -11225,10 +11307,10 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     *lhs_out = 0;
     *rhs_out = 0;
   } else {
-    atp_cp_slot_read(s, j, lhs_out, rhs_out);
+    atp_cp_slot_read(s, v, lhs_out, rhs_out);
   }
-  s->last_popped_trace = s->cp_trace[j];
-  s->last_popped_kind  = s->cp_kind[j];
+  s->last_popped_trace = s->cp_trace[v];
+  s->last_popped_kind  = s->cp_kind[v];
   // Cleared per pop; the KBO_UN orient branch sets it iff the CP-formation
   // side swap physically fires, so the emission mirror never reads a stale
   // verdict from an earlier (e.g. orientable) selection.
@@ -11261,13 +11343,14 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     static int hd_at = -2;
     if (hd_at == -2) { const char *e = getenv("THVM_ATP_HEAPDUMP_AT"); hd_at = e ? atoi(e) : -1; }
     if (hd_at >= 0 && (u32)hd_at == s->cp_select_count) {
-      u32 band = s->cp_pri[j], n_band = 0;
+      u32 band = s->cp_pri[v], n_band = 0;
       fprintf(stderr, "==THVMHEAP pick=%u band_pri=%u n_cps=%u==\n", s->cp_select_count, band, s->n_cps);
       for (u32 q = 0; q < s->n_cps; q++) {
-        if (s->cp_pri[q] != band) continue;
+        u32 qv = s->cp_heap[q];   // heap-position order, exactly as before
+        if (s->cp_pri[qv] != band) continue;
         Term ql = 0, qr = 0;
-        atp_cp_slot_read(s, q, &ql, &qr);
-        fprintf(stderr, "  HCP seq=%u pri=%u lhs=", s->cp_seq[q], s->cp_pri[q]);
+        atp_cp_slot_read(s, qv, &ql, &qr);
+        fprintf(stderr, "  HCP seq=%u pri=%u lhs=", s->cp_seq[qv], s->cp_pri[qv]);
         atp_dbg_print_term(stderr, ql);
         fprintf(stderr, " rhs=");
         atp_dbg_print_term(stderr, qr);
@@ -11285,16 +11368,17 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       // Discarded pop (orphan): the aligner skips these as
       // non-selections, so spare the term rendering -- a FIFO pop draining
       // a long dead prefix otherwise prints GBs and dominates the wall.
+      // j stays the heap POSITION -- trace format byte-identical.
       fprintf(stderr, "CPSKIP pick=%u j=%u seq=%u pri=%u\n",
-              s->cp_select_count, j, s->cp_seq[j], s->cp_pri[j]);
+              s->cp_select_count, j, s->cp_seq[v], s->cp_pri[v]);
     } else if (cp_pick_trace) {
       fprintf(stderr, "CPSEL pick=%u j=%u seq=%u pri=%u rules=%u d=%u actre=%u lhs=",
-              s->cp_select_count, j, s->cp_seq[j], s->cp_pri[j], s->n_rules,
+              s->cp_select_count, j, s->cp_seq[v], s->cp_pri[v], s->n_rules,
               g_kdh_last_d, s->n_activated_re);
       atp_dbg_print_term(stderr, *lhs_out);
       fputs(" rhs=", stderr);
       atp_dbg_print_term(stderr, *rhs_out);
-      if (orphan && s->cp_trace[j] == ATP_TRACE_NONE) {
+      if (orphan && s->cp_trace[v] == ATP_TRACE_NONE) {
         // Uid-layer orphan past the proof-trace soft cap: the parents live
         // in the uid stamps, not the (absent) trace entry.  Skipped by the
         // aligner exactly like a genuine orphan (no counted selection).
@@ -11303,14 +11387,14 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
         // the canonical config it was always absent here.)
         fprintf(stderr, " WOLFDUPORPHAN par_a=%u(%s) uid_a=%u(%s) uid_b=%u(%s)",
                 ATP_TRACE_NONE, "live",
-                (s->cp_uid_a != NULL) ? s->cp_uid_a[j] : 0u,
-                (s->cp_uid_a != NULL && atp_uid_is_dead(s, s->cp_uid_a[j]))
+                (s->cp_uid_a != NULL) ? s->cp_uid_a[v] : 0u,
+                (s->cp_uid_a != NULL && atp_uid_is_dead(s, s->cp_uid_a[v]))
                     ? "dead" : "live",
-                (s->cp_uid_b != NULL) ? s->cp_uid_b[j] : 0u,
-                (s->cp_uid_b != NULL && atp_uid_is_dead(s, s->cp_uid_b[j]))
+                (s->cp_uid_b != NULL) ? s->cp_uid_b[v] : 0u,
+                (s->cp_uid_b != NULL && atp_uid_is_dead(s, s->cp_uid_b[v]))
                     ? "dead" : "live");
       } else if (orphan) {
-        Term te = s->trace[s->cp_trace[j]];
+        Term te = s->trace[s->cp_trace[v]];
         u32 pa = (u32)term_val(term_ctr_at(te, 0));
         u32 pb = (u32)term_val(term_ctr_at(te, 1));
         fprintf(stderr, " ORPHAN pa=%u(%s) pb=%u(%s)",
@@ -11326,40 +11410,40 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // CP.  Mark the record dead BEFORE freeing the byte string it
   // borrows: a dead record is never dereferenced, so the borrow stays
   // sound.
-  atp_fv_index_remove(s->fv_index, s->cp_seq[j]);
+  atp_fv_index_remove(s->fv_index, s->cp_seq[v]);
 #endif
-  free(s->cp_packed[j]);
-  s->cp_packed[j] = NULL;
-  atp_cp_implicit_clear(s, j);
+  free(s->cp_packed[v]);
+  s->cp_packed[v] = NULL;
+  atp_cp_implicit_clear(s, v);
 #ifdef THVM_ATPFT_CPQ
-  // Stage 7: the popped slot's FT spans return to Arena A's free list
-  // BEFORE backfill -- the slot is about to be overwritten with the
-  // last slot's entry (still owned).  No-op when the entry was never
-  // populated (NULL slots are idempotent on clear).
-  atp_cp_ft_clear(s, j);
+  // Stage 7: the popped row's FT spans return to Arena A's free list
+  // BEFORE the row densify -- the row is about to be overwritten with
+  // the last row's entry (still owned).  No-op when the entry was
+  // never populated (NULL slots are idempotent on clear).
+  atp_cp_ft_clear(s, v);
 #endif
+  // Extraction at heap position j + payload row v, two independent
+  // backfills (the position-level one reproduces the historical
+  // move-the-last-slot-into-j layout evolution byte-for-byte; the
+  // row-level one keeps the payload rows dense in [0, n_cps)).  The
+  // heap shrink MUST run before the cp_pos[last-row] read: the last
+  // row may be the very CP that sat at the popped last position.
   s->n_cps--;
-  if (j != s->n_cps) {
-    // Backfill slot j from the (ex-)last slot, then repair the heap.
-    u32 last = s->n_cps;
-    s->cp_packed[j]    = s->cp_packed[last];
-    s->cp_packed[last] = NULL;          // vacated slot: leave it empty
-    s->cp_trace[j] = s->cp_trace[last];
-    s->cp_kind[j]  = s->cp_kind[last];
-    s->cp_pri[j]   = s->cp_pri[last];
-    s->cp_seq[j]   = s->cp_seq[last];
-    s->cp_goal[j]  = s->cp_goal[last];
-    s->cp_pri2[j]  = s->cp_pri2[last];
-    s->cp_last_norm_r_revision[j] = s->cp_last_norm_r_revision[last];
-    if (s->cp_ultimate != NULL) s->cp_ultimate[j] = s->cp_ultimate[last];
-    if (s->cp_uid_a != NULL) { s->cp_uid_a[j] = s->cp_uid_a[last]; s->cp_uid_b[j] = s->cp_uid_b[last]; }
-    atp_cp_implicit_move(s, /*dst=*/j, /*src=*/last);
-#ifdef THVM_ATPFT_CPQ
-    // Move the (still-owned) FT entry from the last slot into j; zero
-    // the now-vacated tail so a later destroy / clear does not
-    // double-free the transferred spans.
-    atp_cp_ft_move(s, /*dst=*/j, /*src=*/last);
-#endif
+  u32 last_pos = s->n_cps;
+  u8 need_repair = (j != last_pos);
+  if (need_repair) {
+    u32 moved = s->cp_heap[last_pos];
+    s->cp_heap[j] = moved;
+    s->cp_pos[moved] = j;
+  }
+  u32 lr = s->n_cps;               // last (to-densify) payload row
+  if (v != lr) {
+    atp_cp_row_move(s, /*dst=*/v, /*src=*/lr);
+    u32 p = s->cp_pos[lr];
+    s->cp_heap[p] = v;
+    s->cp_pos[v] = p;
+  }
+  if (need_repair) {
     if (atp_kdheap_on()) atp_kdh_delete_repair(s, j);
     else { atp_cp_sift_up(s, j); atp_cp_sift_down(s, j); }
   }
@@ -11399,6 +11483,8 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
   if (s == NULL || s->n_cps == 0) return;
   atp_ensure_cp_cap(s, s->n_cps);
   for (u32 i = 0; i < s->n_cps; i++) {
+    // i is a heap POSITION; vv the CP's payload row.
+    u32 vv = s->cp_heap[i];
     // Each packed CP unpacks two transient heap Terms below; on a deep
     // queue (~10^5 CPs) those overrun the from-space before the next
     // step-top GC.  Reclaim them in-loop: the unpacked Terms are consumed
@@ -11407,21 +11493,25 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
     if (s->trace_pack && (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
       thvm_atp_gc_collect(s);
     }
-    if (atp_cp_slot_implicit(s, i)) {
+    if (atp_cp_slot_implicit(s, vv)) {
       // Deferred slot: no packed bytes to unpack.  Reuse the push-time
       // cached priority (this is what the descriptor caches it for);
-      // cp_goal / cp_pri2 keep their push-time values, which travel
-      // with every slot move.
-      s->cp_pri[i] = s->cp_implicit[i].priority;
+      // cp_goal / cp_pri2 keep their push-time values, which stay put
+      // on the stationary row.
+      s->cp_pri[vv] = s->cp_implicit[vv].priority;
       continue;
     }
     Term l = 0, r = 0;
-    acp_unpack(s->cp_packed[i], &l, &r);
-    s->cp_pri[i] = s->cp_deprio[i] ? ATP_CP_PRI_NEVER
-                                   : atp_cp_priority(s, l, r);
-    s->cp_goal[i] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
+    acp_unpack(s->cp_packed[vv], &l, &r);
+    // cp_deprio stays POSITION-indexed (raw i): the historical sift /
+    // backfill never moved it, so its byte at position i -- stamped by
+    // whichever append last landed there -- is what the historical
+    // rebuild read.  Preserves that quirk bit-exactly (GJ-keep configs).
+    s->cp_pri[vv] = s->cp_deprio[i] ? ATP_CP_PRI_NEVER
+                                    : atp_cp_priority(s, l, r);
+    s->cp_goal[vv] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                       ? atp_goal_weight(s, l, r) : 0u;
-    s->cp_pri2[i] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
+    s->cp_pri2[vv] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
                   : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, l, r, s->w2_mode)
                   :                        0u;
     // cp_seq is NOT touched: insertion age is stamped once (heap push /
@@ -11449,22 +11539,24 @@ static void atp_cp_floyd_only(AtpState *s) {
 }
 
 // Per-survivor priority commit used by atp_cp_set_interreduce: at each
-// w-slot commit site the IR sweep already has (l, r) in scope (either
+// w-commit site the IR sweep already has (l, r) in scope (either
 // the pre-normalize (ol, orr) on the fast-path skip branches or the
 // post-normalize (l, r) on the reweight branch).  Inlined here so the
 // post-loop reheapify only has to do the FULL-array work (Floyd + FV).
 // Soundness: the three weight functions are pure in (s, l, r) + state
 // fields immutable during the IR sweep (cp_weight_mode, w2_*, gnn_coop,
-// use_*, goal_*, sym_level[], conj_sym_mask, s->lhs/rhs); evaluating at
-// slot w inside the loop yields bit-identical values to evaluating
-// post-loop in atp_cp_rebuild_priorities.
-static inline void atp_cp_commit_priorities(AtpState *s, u32 w,
+// use_*, goal_*, sym_level[], conj_sym_mask, s->lhs/rhs); evaluating
+// inside the loop yields bit-identical values to evaluating post-loop
+// in atp_cp_rebuild_priorities.  `w` is the survivor's post-compaction
+// heap POSITION (the raw cp_deprio index, matching the rebuild's
+// position-quirk); `slot` its stationary payload row.
+static inline void atp_cp_commit_priorities(AtpState *s, u32 w, u32 slot,
                                             Term l, Term r) {
-  s->cp_pri[w]  = s->cp_deprio[w] ? ATP_CP_PRI_NEVER
-                                  : atp_cp_priority(s, l, r);
-  s->cp_goal[w] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
+  s->cp_pri[slot]  = s->cp_deprio[w] ? ATP_CP_PRI_NEVER
+                                     : atp_cp_priority(s, l, r);
+  s->cp_goal[slot] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                     ? atp_goal_weight(s, l, r) : 0u;
-  s->cp_pri2[w] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
+  s->cp_pri2[slot] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
                 : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, l, r, s->w2_mode)
                 :                        0u;
 }
@@ -11494,11 +11586,13 @@ fn u32 thvm_atp_queued_cps(const AtpState *s, Term *lhs_out, Term *rhs_out,
   if (s == NULL) return 0u;
   u32 n = s->n_cps < cap ? s->n_cps : cap;
   for (u32 i = 0; i < n; i++) {
+    // Snapshot in heap-POSITION order (the historical slot order).
+    u32 vv = s->cp_heap[i];
     Term l = 0, r = 0;
-    atp_cp_slot_read(s, i, &l, &r);
+    atp_cp_slot_read(s, vv, &l, &r);
     if (lhs_out != NULL) lhs_out[i] = l;
     if (rhs_out != NULL) rhs_out[i] = r;
-    if (seq_out != NULL) seq_out[i] = s->cp_seq[i];
+    if (seq_out != NULL) seq_out[i] = s->cp_seq[vv];
   }
   return n;
 }
@@ -11541,17 +11635,21 @@ fn void thvm_atp_set_cp_pri_by_seq(AtpState *s, const u32 *seq,
     free(map_seq); free(map_slot);
     for (u32 j = 0; j < n; j++) {
       for (u32 i = 0; i < s->n_cps; i++) {
-        if (s->cp_seq[i] == seq[j]) { s->cp_pri[i] = pri[j]; break; }
+        u32 vv = s->cp_heap[i];
+        if (s->cp_seq[vv] == seq[j]) { s->cp_pri[vv] = pri[j]; break; }
       }
     }
     for (u32 i = s->n_cps / 2u; i > 0; ) { i--; atp_cp_sift_down(s, i); }
     return;
   }
+  // Key the map on the stationary payload ROW (cp_seq is per-CP; the
+  // write below targets the same CP wherever its heap position is).
   for (u32 i = 0; i < s->n_cps; i++) {
-    u32 h = (s->cp_seq[i] * 2654435761u) & mask;
+    u32 vv = s->cp_heap[i];
+    u32 h = (s->cp_seq[vv] * 2654435761u) & mask;
     while (map_seq[h] != 0u) h = (h + 1u) & mask;
-    map_seq[h]  = s->cp_seq[i] + 1u;
-    map_slot[h] = i;
+    map_seq[h]  = s->cp_seq[vv] + 1u;
+    map_slot[h] = vv;
   }
   for (u32 j = 0; j < n; j++) {
     u32 h = (seq[j] * 2654435761u) & mask;
@@ -11591,16 +11689,19 @@ fn void thvm_atp_set_cp_pri2_by_seq(AtpState *s, const u32 *seq,
     free(map_seq); free(map_slot);
     for (u32 j = 0; j < n; j++) {
       for (u32 i = 0; i < s->n_cps; i++) {
-        if (s->cp_seq[i] == seq[j]) { s->cp_pri2[i] = pri[j]; break; }
+        u32 vv = s->cp_heap[i];
+        if (s->cp_seq[vv] == seq[j]) { s->cp_pri2[vv] = pri[j]; break; }
       }
     }
     return;
   }
+  // Row-keyed like thvm_atp_set_cp_pri_by_seq (see there).
   for (u32 i = 0; i < s->n_cps; i++) {
-    u32 h = (s->cp_seq[i] * 2654435761u) & mask;
+    u32 vv = s->cp_heap[i];
+    u32 h = (s->cp_seq[vv] * 2654435761u) & mask;
     while (map_seq[h] != 0u) h = (h + 1u) & mask;
-    map_seq[h]  = s->cp_seq[i] + 1u;
-    map_slot[h] = i;
+    map_seq[h]  = s->cp_seq[vv] + 1u;
+    map_slot[h] = vv;
   }
   for (u32 j = 0; j < n; j++) {
     u32 h = (seq[j] * 2654435761u) & mask;
@@ -11652,7 +11753,7 @@ fn u32 thvm_atp_cp_size_stats(const AtpState *s, u32 *min_out, u32 *max_out,
         || atp_heap_under_pressure()) {
       thvm_atp_gc_collect(s);
     }
-    atp_cp_slot_read(s, i, &l, &r);
+    atp_cp_slot_read(s, s->cp_heap[i], &l, &r);
     u32 nodes = atp_symbol_count(l) + atp_symbol_count(r);
     if (nodes < mn) mn = nodes;
     if (nodes > mx) mx = nodes;
@@ -15696,10 +15797,16 @@ fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
 // / FV index rebuilt via thvm_atp_cp_reheapify.
 static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
   if (s == NULL || n_dead == 0 || s->n_cps == 0) return;
+  // Position-order walk: survivors compact to heap positions [0, w) in
+  // visit order (the historical payload compaction order -- the Floyd
+  // input inside the trailing reheapify depends on it).  Payload rows
+  // stay put; only cp_heap entries compact, then the row densify slides
+  // survivor rows >= w into the freed rows.
   u32 w = 0;
   for (u32 i = 0; i < s->n_cps; i++) {
+    u32 vv = s->cp_heap[i];
     int orphan = 0;
-    u32 ti = s->cp_trace[i];
+    u32 ti = s->cp_trace[vv];
     if (ti != ATP_TRACE_NONE && ti < s->n_trace) {
       Term te = s->trace[ti];
       if (term_tag(te) == TAG_CTR && term_ext(te) == TRACE_CP) {
@@ -15713,31 +15820,16 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
     if (orphan) {
       // Drop the orphan -- free its byte string (the queue owns it).
       // free(NULL) no-op for deferred slots; their tag bit drops too.
-      free(s->cp_packed[i]);
-      s->cp_packed[i] = NULL;
-      atp_cp_implicit_clear(s, i);
+      free(s->cp_packed[vv]);
+      s->cp_packed[vv] = NULL;
+      atp_cp_implicit_clear(s, vv);
       continue;
     }
-    if (w != i) {
-      s->cp_packed[w] = s->cp_packed[i];
-      s->cp_packed[i] = NULL;
-      s->cp_trace[w]  = s->cp_trace[i];
-      s->cp_kind[w]   = s->cp_kind[i];
-      s->cp_pri[w]    = s->cp_pri[i];
-      s->cp_seq[w]    = s->cp_seq[i];
-      s->cp_goal[w]   = s->cp_goal[i];
-      // cp_pri2 must travel too: the trailing reheapify recomputes it
-      // for packed slots but keeps the carried value for deferred ones.
-      s->cp_pri2[w]   = s->cp_pri2[i];
-      // The NF-witness cookie travels with the CP (per-CP, not per-slot).
-      s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
-      if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
-      atp_cp_implicit_move(s, /*dst=*/w, /*src=*/i);
-    }
+    s->cp_heap[w] = vv;   // w <= i: never overtakes the read cursor
     w++;
   }
   if (w != s->n_cps) {
-    s->n_cps = w;
+    atp_cp_rows_densify(s, w);
     thvm_atp_cp_reheapify(s);   // rebuilds heap + FV index
   }
 }
@@ -15841,6 +15933,11 @@ static void atp_cp_set_interreduce(AtpState *s) {
   atp_ft_mirror_ensure(s);
 #endif
   for (u32 i = 0; i < s->n_cps; i++) {
+    // i is the sweep's heap POSITION cursor; vv the CP's payload row.
+    // Survivors compact to positions [0, w) in visit order (w <= i, so
+    // the cp_heap[w] writes never overtake this read); rows stay put
+    // until the post-loop densify.
+    u32 vv = s->cp_heap[i];
     u64 _cpir_unpack_t0 = atp_phase_now();
     // Eager Waisenmord (WM AP_generic head): a CP whose parent rule has
     // been retired is redundant under the surviving R, so we can drop it
@@ -15849,12 +15946,12 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // KPV_KPMengeInterreduzieren pass shrinks the queue by the dead-parent
     // set in linear time, instead of waiting for select-side amortization.
     if (s->use_orphan_murder &&
-        (atp_cp_is_orphan(s, s->cp_trace[i]) || atp_cp_uid_orphan(s, i))) {
+        (atp_cp_is_orphan(s, s->cp_trace[vv]) || atp_cp_uid_orphan(s, vv))) {
       s->n_cps_dropped_orphan++;
       s->n_cp_set_ir_deleted++;
-      free(s->cp_packed[i]);   // free(NULL) no-op for deferred slots
-      s->cp_packed[i] = NULL;
-      atp_cp_implicit_clear(s, i);
+      free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
+      s->cp_packed[vv] = NULL;
+      atp_cp_implicit_clear(s, vv);
       touched = 1;
       if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
       continue;
@@ -15867,7 +15964,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // incremental-IR bitmap skip below is gated off for it (old rules
     // can still fire); the NF-witness cookie stays valid (set only by
     // a prior full normalize of this exact pair under this exact R).
-    u8 is_impl = atp_cp_slot_implicit(s, i);
+    u8 is_impl = atp_cp_slot_implicit(s, vv);
     // Per-CP heap checkpoint: the normalize allocates scratch cells; the
     // reduced terms are copied out by acp_pack, so the scratch is dead
     // after the (re)pack.  Reset each iteration so a long queue cannot
@@ -15876,7 +15973,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // pop it.)
     u64 hcp = thvm_atp_heap_checkpoint();
     Term ol = 0, orr = 0;
-    atp_cp_slot_read(s, i, &ol, &orr);
+    atp_cp_slot_read(s, vv, &ol, &orr);
     // WM `dokgS` (KPV `AP_generic` `SS_TermpaarSubsummiertVonGM` branch):
     // a CP whose two sides are directly subsumed by an existing rule's
     // pattern is one-step-joinable via that rule.  The trivial-join
@@ -15889,9 +15986,9 @@ static void atp_cp_set_interreduce(AtpState *s) {
     if (s->use_rule_subsume_drop && atp_cp_rule_subsumed(s, ol, orr)) {
       s->n_cps_dropped_rule_subsumed++;
       s->n_cp_set_ir_deleted++;
-      free(s->cp_packed[i]);   // free(NULL) no-op for deferred slots
-      s->cp_packed[i] = NULL;
-      atp_cp_implicit_clear(s, i);
+      free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
+      s->cp_packed[vv] = NULL;
+      atp_cp_implicit_clear(s, vv);
       touched = 1;
       thvm_atp_heap_reset(hcp);
       if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
@@ -15915,36 +16012,25 @@ static void atp_cp_set_interreduce(AtpState *s) {
     if (s->use_incr_ir && new_top_syms != 0u
         && s->ir_rule_watermark > 0u
         && (!is_impl
-            || s->cp_last_norm_r_revision[i] != ATP_CP_NORM_COOKIE_NONE)) {
+            || s->cp_last_norm_r_revision[vv] != ATP_CP_NORM_COOKIE_NONE)) {
       u64 cp_syms = atp_term_sym_bitmap(ol) | atp_term_sym_bitmap(orr);
       if ((cp_syms & new_top_syms) == 0u) {
-        // No new rule can fire on this CP -- skip the normalize.  Repack
-        // unchanged (just move the slot, no reweight).
-        if (w != i) {
-          s->cp_packed[w] = s->cp_packed[i];   // NULL deferred-slot marker
-          s->cp_packed[i] = NULL;
-        }
-        s->cp_trace[w] = s->cp_trace[i];
-        s->cp_kind[w] = s->cp_kind[i];
-        s->cp_last_norm_r_revision[w] = s->cp_last_norm_r_revision[i];
-        if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
-          if (is_impl) {
-          // Deferred survivor: carry the push-time heap keys (see the
-          // cookie path below for why recomputing on the raw pair
-          // would flip-flop the key against the descriptor cache).
-          s->cp_pri[w]  = s->cp_pri[i];
-          s->cp_goal[w] = s->cp_goal[i];
-          s->cp_pri2[w] = s->cp_pri2[i];
-          atp_cp_implicit_move(s, /*dst=*/w, /*src=*/i);
-        } else {
+        // No new rule can fire on this CP -- skip the normalize.
+        // Survive unchanged: the payload (packed bytes / descriptor /
+        // trace / kind / cookie / seq / push-time keys) stays on the
+        // stationary row; only the heap entry compacts.
+        s->cp_heap[w] = vv;
+        if (!is_impl) {
           // Fold the per-survivor priority recompute into the IR walk
           // so the post-loop reheapify only has to do Floyd + FV.
           // Sides are byte-preserved (no normalize), so (ol, orr) is
           // still the packed payload; priority is pure in (s, l, r)
-          // (see header).
-          atp_cp_commit_priorities(s, w, ol, orr);
+          // (see header).  Deferred survivors instead keep the
+          // push-time keys already on the row (see the cookie path
+          // below for why recomputing on the raw pair would flip-flop
+          // the key against the descriptor cache).
+          atp_cp_commit_priorities(s, w, vv, ol, orr);
         }
-        s->cp_seq[w] = s->cp_seq[i];
         w++;
         s->n_cp_set_ir_skipped++;
         thvm_atp_heap_reset(hcp);
@@ -15963,31 +16049,20 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // pass might rewrite further) NEVER gets cached.  Soundness follows
     // from `atp_rewrite_normalize`'s purity in (subject, R, step_cap):
     // identical inputs return bytewise-identical outputs.
-    if (s->cp_last_norm_r_revision[i] == r_rev_snap) {
-      if (w != i) {
-        s->cp_packed[w] = s->cp_packed[i];   // NULL deferred-slot marker
-        s->cp_packed[i] = NULL;
-      }
-      s->cp_trace[w] = s->cp_trace[i];
-      s->cp_kind[w] = s->cp_kind[i];
-      s->cp_last_norm_r_revision[w] = r_rev_snap;
-      if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
-      if (is_impl) {
-        // Implicit NF-confirmed survivor: stay deferred, carry the
-        // push-time heap keys (the descriptor design -- the cached
-        // priority was computed on the push-time reduced form and a
-        // reheapify restores it from the descriptor, so recomputing on
-        // the raw pair here would just flip-flop the key).
-        s->cp_pri[w]  = s->cp_pri[i];
-        s->cp_goal[w] = s->cp_goal[i];
-        s->cp_pri2[w] = s->cp_pri2[i];
-        atp_cp_implicit_move(s, /*dst=*/w, /*src=*/i);
-      } else {
+    if (s->cp_last_norm_r_revision[vv] == r_rev_snap) {
+      // NF-confirmed survivor: everything (cookie included -- it
+      // already equals r_rev_snap) stays on the stationary row; only
+      // the heap entry compacts.  Implicit slots keep the push-time
+      // keys (the descriptor design -- the cached priority was
+      // computed on the push-time reduced form and a reheapify
+      // restores it from the descriptor, so recomputing on the raw
+      // pair here would just flip-flop the key).
+      s->cp_heap[w] = vv;
+      if (!is_impl) {
         // Fold the per-survivor priority recompute (NF-witness cookie
         // path: sides are bit-preserved, no normalize was needed).
-        atp_cp_commit_priorities(s, w, ol, orr);
+        atp_cp_commit_priorities(s, w, vv, ol, orr);
       }
-      s->cp_seq[w] = s->cp_seq[i];
       w++;
       s->n_cp_set_ir_skipped++;
       thvm_atp_heap_reset(hcp);
@@ -16038,9 +16113,9 @@ static void atp_cp_set_interreduce(AtpState *s) {
       // is a GC root and may back other diagnostics).
       s->n_cps_dropped_joinable++;
       s->n_cp_set_ir_deleted++;
-      free(s->cp_packed[i]);   // free(NULL) no-op for deferred slots
-      s->cp_packed[i] = NULL;
-      atp_cp_implicit_clear(s, i);
+      free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
+      s->cp_packed[vv] = NULL;
+      atp_cp_implicit_clear(s, vv);
       touched = 1;
       thvm_atp_heap_reset(hcp);
       if (g_atp_phase_enabled) acc_pack += atp_now_us() - _cpir_pack_t0;
@@ -16068,57 +16143,41 @@ static void atp_cp_set_interreduce(AtpState *s) {
       // the reduced pair and drop the tag bit -- from now on the slot
       // is an ordinary packed CP (FV-indexed again by the trailing
       // atp_fv_index_rebuild, reweighted below like every survivor).
-      free(s->cp_packed[i]);   // free(NULL) no-op for deferred slots
-      s->cp_packed[i] = NULL;
-      s->cp_packed[w] = acp_pack(l, r, NULL, NULL);
-      atp_cp_implicit_clear(s, i);
+      free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
+      s->cp_packed[vv] = acp_pack(l, r, NULL, NULL);
+      atp_cp_implicit_clear(s, vv);
       s->n_cp_set_ir_reweighted++;
       touched = 1;
-    } else if (w != i) {
-      s->cp_packed[w] = s->cp_packed[i];   // NULL deferred-slot marker
-      s->cp_packed[i] = NULL;
     }
-    s->cp_trace[w] = s->cp_trace[i];
-    s->cp_kind[w] = s->cp_kind[i];
-    s->cp_last_norm_r_revision[w] = nf_witness ? r_rev_snap
+    // Survivor bookkeeping on the stationary row (trace / kind /
+    // ultimate / seq stay put -- WM AP_generic reweight preserves the
+    // FIFO age: C_ReClassify only recomputes w1, "w2 wird nicht
+    // geaendert" / w2 is not changed, CLAS/NewClassification.c:399-406;
+    // Act_ultimate's front-rank likewise rides the row untouched).
+    s->cp_last_norm_r_revision[vv] = nf_witness ? r_rev_snap
                                             : ATP_CP_NORM_COOKIE_NONE;
-    // Preserve Act_ultimate across the WM AP_generic reweight: an
-    // axiom whose normalized form is still non-trivial must keep its
-    // front-rank (WM's `C_ReClassify` short-circuits on the original
-    // history tag, never re-applying the heuristic to an `initial`
-    // CP).  Without this carry-over the next reheapify resorts the
-    // axiom by Mix weight and loses the ultimate front.
-    if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
-    if (is_impl && nf_witness) {
-      // Implicit survivor confirmed in NF under the full current R:
-      // stay deferred (the raw trace pair is still the slot's exact
-      // payload).  Carry the push-time heap keys -- the descriptor
-      // caches the priority of the push-time reduced form, and
-      // atp_cp_rebuild_priorities restores from that cache, so the
-      // cached value is the one coherent key.
-      s->cp_pri[w]  = s->cp_pri[i];
-      s->cp_goal[w] = s->cp_goal[i];
-      s->cp_pri2[w] = s->cp_pri2[i];
-      atp_cp_implicit_move(s, /*dst=*/w, /*src=*/i);
-    } else {
+    if (!(is_impl && nf_witness)) {
       // Fold the per-survivor priority recompute into the IR walk.  On
       // the reweight branch (l, r) is the post-normalize pair we just
       // packed (for a freshly-eagerified slot too); on the packed
       // no-rewrite branch it's the original pair -- either way, the
-      // right input to the priority functions.
-      atp_cp_commit_priorities(s, w, l, r);
+      // right input to the priority functions.  An implicit survivor
+      // confirmed in NF instead keeps the push-time keys already on
+      // the row (the descriptor caches the priority of the push-time
+      // reduced form; atp_cp_rebuild_priorities restores from that
+      // cache, so the cached value is the one coherent key).
+      atp_cp_commit_priorities(s, w, vv, l, r);
     }
-    // WM AP_generic reweight preserves the FIFO age: C_ReClassify only
-    // recomputes w1 ("w2 wird nicht geaendert" / w2 is not changed,
-    // CLAS/NewClassification.c:399-406).  cp_seq is the w2 analog, so
-    // every survivor keeps its insertion age across the sweep.
-    s->cp_seq[w] = s->cp_seq[i];
+    s->cp_heap[w] = vv;
     w++;
     thvm_atp_heap_reset(hcp);
     if (g_atp_phase_enabled) acc_pack += atp_now_us() - _cpir_pack_t0;
   }
   u64 _cpir_post_t0 = atp_phase_now();
-  s->n_cps = w;
+  // Commit the compaction: densify the payload rows into [0, w) and
+  // set n_cps = w (the heap prefix cp_heap[0..w) already holds the
+  // survivors in the historical compaction order).
+  atp_cp_rows_densify(s, w);
   if (touched) {
     s->n_cp_set_ir_passes++;
     // Per-survivor priorities + cp_seq were folded into the IR walk at
@@ -23125,9 +23184,12 @@ fn u32 thvm_atp_peek_top_k(AtpState *s, u32 k,
   AtpPeekEnt *ent = (AtpPeekEnt *)malloc((size_t)s->n_cps * sizeof(AtpPeekEnt));
   if (ent == NULL) return 0;
   for (u32 i = 0; i < s->n_cps; i++) {
-    ent[i].pri = s->cp_pri[i];
-    ent[i].seq = s->cp_seq[i];
-    ent[i].idx = i;
+    // idx stores the payload ROW (slot_read target below); the qsort
+    // key (pri, seq) is total, so the fill order is immaterial.
+    u32 vv = s->cp_heap[i];
+    ent[i].pri = s->cp_pri[vv];
+    ent[i].seq = s->cp_seq[vv];
+    ent[i].idx = vv;
   }
   qsort(ent, s->n_cps, sizeof(AtpPeekEnt), atp_peek_cmp);
   for (u32 i = 0; i < k; i++) {

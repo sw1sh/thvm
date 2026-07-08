@@ -19,10 +19,11 @@
 //       was cleared (lhs == NULL / rhs == NULL) and any backfilled
 //       slot still owns its FT spans (lhs != NULL).
 //
-//   T3: heap-swap reach -- push enough CPs to drive sift_up /
-//       sift_down through several levels, then verify each live slot's
+//   T3: heap-sift reach -- push enough CPs to drive sift_up /
+//       sift_down through several levels, then verify each live CP's
 //       FT view still matches its cp_packed[] view (lockstep
-//       invariant under arbitrary swaps).
+//       invariant: both live at the same stationary payload row,
+//       reached from a heap position through s->cp_heap).
 //
 //   T4: trivially-joinable FT verdict (atp_cp_trivially_joinable_ft)
 //       matches the Term-path verdict on a hand-built CP that's
@@ -105,14 +106,17 @@ int main(void) {
     CHECK(s->cp_packed_ft != NULL);
     AtpCpEntryMirror *arr = cpq_arr(s);
     for (u32 i = 0; i < s->n_cps; i++) {
-      // Each live slot owns its FT spans + reproduces the legacy pair
-      // exactly under ft_to_term.
-      CHECK(arr[i].lhs != NULL);
-      CHECK(arr[i].rhs != NULL);
+      // Each live CP owns its FT spans + reproduces the legacy pair
+      // exactly under ft_to_term.  thvm_atp_cp_get(i) reads heap
+      // POSITION i; the FT entry lives at the same stationary payload
+      // row, mapped through cp_heap.
+      u32 row = s->cp_heap[i];
+      CHECK(arr[row].lhs != NULL);
+      CHECK(arr[row].rhs != NULL);
       Term ul = 0, ur = 0;
       thvm_atp_cp_get(s, i, &ul, &ur);
-      Term tl = ft_to_term(arr[i].lhs);
-      Term tr = ft_to_term(arr[i].rhs);
+      Term tl = ft_to_term(arr[row].lhs);
+      Term tr = ft_to_term(arr[row].rhs);
       CHECK(kbo_eq(tl, ul));
       CHECK(kbo_eq(tr, ur));
     }
@@ -179,10 +183,14 @@ int main(void) {
 
     AtpCpEntryMirror *arr = cpq_arr(s);
     for (u32 i = 0; i < s->n_cps; i++) {
+      // Sifts move only the cp_heap/cp_pos position mirror; both the
+      // legacy payload and the FT entry stay at the same stationary
+      // row, so the views stay in lockstep row-for-row.
+      u32 row = s->cp_heap[i];
       Term ul = 0, ur = 0;
       thvm_atp_cp_get(s, i, &ul, &ur);
-      Term tl = ft_to_term(arr[i].lhs);
-      Term tr = ft_to_term(arr[i].rhs);
+      Term tl = ft_to_term(arr[row].lhs);
+      Term tr = ft_to_term(arr[row].rhs);
       CHECK(kbo_eq(tl, ul));
       CHECK(kbo_eq(tr, ur));
     }

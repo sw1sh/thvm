@@ -4642,6 +4642,21 @@ typedef struct {
   u32   n_cps_w2_picks;  // diagnostic counter
   u32   cp_seq_next;
   u32   cp_cap;
+  // Heap-position indirection: the binary/KD heap orders POSITIONS
+  // [0, n_cps) while the ~14 payload arrays above are indexed by
+  // stationary ROWS.  cp_heap[pos] names the row at heap position pos;
+  // cp_pos[row] its position (invariant: cp_pos[cp_heap[p]] == p for
+  // every p < n_cps, and cp_heap[0..n_cps) is a permutation of the live
+  // rows [0..n_cps)).  A sift swaps only these two u32 mirrors; payload
+  // rows move only on pop-backfill / sweep densification (keeping the
+  // live rows dense in [0, n_cps)).  Layout-neutral by construction:
+  // every comparator input and every position-observing consumer maps
+  // positions through cp_heap, so the position-level heap evolution is
+  // byte-identical to the historical whole-payload-swapping heap.
+  // cp_deprio deliberately stays POSITION-indexed (the historical swap
+  // and backfill never moved it); see atp_cp_rebuild_priorities.
+  u32  *cp_heap;
+  u32  *cp_pos;
 
   // Deferred-CP (`implicit_pair`) arc: parallel array of compact
   // 20-byte trace-backed descriptors (parent trace ids + cached
