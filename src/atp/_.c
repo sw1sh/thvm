@@ -2920,10 +2920,10 @@ static void vcp_emit_certify(const KboConfig *kbo, Term lo, const u32 *p,
   if (vflat == NULL) thvm_fatal("vcp_emit_certify: OOM");
   memcpy(vflat, g_acpf_pool, (size_t)vfn * sizeof *vflat);
   KboCmp vk = acp_fuse_kbo(kbo);
-  // Classic rebuild on the same armed subst.
+  // Classic rebuild on the same armed subst (WM order: sigma(ro) left).
   u64 c0 = g_unify_apply_cells, t0 = g_unify_apply_taint;
-  Term cl = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), subst);
-  Term cr = thvm_unify_apply(ro, subst);
+  Term cl = thvm_unify_apply(ro, subst);
+  Term cr = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), subst);
   u32 ctot = (g_unify_apply_taint == t0)
                  ? (u32)(g_unify_apply_cells - c0) : 0u;
   u32 rlen = 0u, rn = 0u, rl = 0u;
@@ -21368,8 +21368,9 @@ static void vcp_treat_certify(AtpState *s, Term lo, const u32 *p, u32 p_len,
   if (vbytes == NULL) thvm_fatal("vcp_treat_certify: OOM");
   memcpy(vbytes, g_acp_scratch, vlen);
   u64 c0 = g_unify_apply_cells, t0 = g_unify_apply_taint;
-  Term cl = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), subst);
-  Term cr = thvm_unify_apply(ro, subst);
+  // WM order: sigma(ro) is the pair's LHS (see the classic arm).
+  Term cl = thvm_unify_apply(ro, subst);
+  Term cr = thvm_unify_apply(cp_replace_at(lo, p, p_len, rin), subst);
   u32 ctot = (g_unify_apply_taint == t0)
                  ? (u32)(g_unify_apply_cells - c0) : 0u;
   u8 bad = 0u;
@@ -21799,8 +21800,8 @@ static u8 sw_corank_h2_gate_drops(SwVaterCtx *c, const u32 *p, u32 p_len,
   RewriteSubst subst = {{0}};
   if (!thvm_unify(sub, lin, &subst)) return 0u;     // no CP forms: not a drop
   CriticalPair cp;
-  cp.lhs  = thvm_unify_apply(cp_replace_at(c->lo, p, p_len, rin), &subst);
-  cp.rhs  = thvm_unify_apply(c->ro, &subst);
+  cp.lhs  = thvm_unify_apply(c->ro, &subst);
+  cp.rhs  = thvm_unify_apply(cp_replace_at(c->lo, p, p_len, rin), &subst);
   cp.peak = thvm_unify_apply(c->lo, &subst);
   cp.pos_len = (u8)p_len;
   for (u32 d = 0; d < p_len && d < CP_MAX_DEPTH; d++) cp.pos[d] = (u8)p[d];

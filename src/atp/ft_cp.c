@@ -301,12 +301,13 @@ static u32 ft_cp_visit(const u32 *p, u32 p_len, void *raw) {
     return ctx->count;
   }
 
-  // Fused: build cp_lhs = subst(li[p<-rj]) in ONE walk (saves the
-  // separate ft_cp_replace_at + ft_unify_apply over the spliced
-  // tree).  cp_rhs and cp_peak each still need their own walk.
-  AtpFtCell *cp_lhs_ft  = ft_cp_replace_subst(ctx->arena, ctx->li_ft, p, p_len,
+  // WM CP side order (Unifikation1.c:916-917): KPLinks = sigma(host.rhs)
+  // lands on cp_lhs, the reduct sigma(li[p<-rj]) on cp_rhs.  The reduct
+  // build stays fused: ONE walk (saves the separate ft_cp_replace_at +
+  // ft_unify_apply over the spliced tree).
+  AtpFtCell *cp_rhs_ft  = ft_cp_replace_subst(ctx->arena, ctx->li_ft, p, p_len,
                                               ctx->rj_ft_renamed, &subst, 1);
-  AtpFtCell *cp_rhs_ft  = ft_unify_apply(ctx->arena, ctx->ri_ft, &subst, 1);
+  AtpFtCell *cp_lhs_ft  = ft_unify_apply(ctx->arena, ctx->ri_ft, &subst, 1);
   AtpFtCell *cp_peak_ft = NULL;
   if (ctx->need_peak) {
     cp_peak_ft = ft_unify_apply(ctx->arena, ctx->li_ft, &subst, 1);
