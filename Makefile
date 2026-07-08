@@ -1147,3 +1147,34 @@ $(BIN)/bench_flatcore: tools/bench_flatcore.c $(SRC) | $(BIN)
 # |R| sizes.  Asserts identical normal form on every subject. Additive.
 $(BIN)/bench_wmfpa: tools/bench_wmfpa.c src/wmfpa/wmfpa.h $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
+
+# === ATP PGO build =================================================
+# Profile-guided WALDMEISTER-preset bench: instrument -> train on three
+# representative -auto theorems -> rebuild with the merged profile +
+# thin-LTO.  Measured 2026-07-08 (Apple M3 Max): WolframAxioms
+# OrAssociativity 17.4s (-O2) -> 14.1s (-19%), RULEADD stream
+# byte-identical (side_check 0 div / 0 swaps on the parity battery).
+# The profile is machine-local (.pgo/, untracked); re-run after any
+# engine change that shifts hot paths.
+ATP_PGO_FLAGS := -std=c11 -O3 -mcpu=apple-m1 -Wall -Wextra -Wpedantic \
+                 -Wno-unused-function
+ATP_PGO_TRAIN := WolframAxioms__OrAssociativity \
+                 ShefferAxioms__OrAssociativity \
+                 MeredithAxioms__AndAssociativity
+.PHONY: atp-pgo
+atp-pgo:
+	mkdir -p .pgo
+	CFLAGS="$(ATP_PGO_FLAGS) -fprofile-instr-generate" \
+	  $(MAKE) -B bin/test_atp_wolfram_bench
+	for T in $(ATP_PGO_TRAIN); do \
+	  LLVM_PROFILE_FILE=.pgo/$$T.profraw \
+	  THVM_ATP_RSS_ABORT_MB=5300 THVM_ATP_WALDMEISTER=1 \
+	  ATP_BENCH_AUTO_WEIGHTS=1 \
+	    timeout 400 bin/test_atp_wolfram_bench \
+	      tools/baselines/wm_pr/$$T.pr 2000000 300 >/dev/null 2>&1; \
+	done
+	xcrun llvm-profdata merge -output=.pgo/atp.profdata .pgo/*.profraw
+	CFLAGS="$(ATP_PGO_FLAGS) -flto=thin \
+	        -fprofile-instr-use=$(CURDIR)/.pgo/atp.profdata \
+	        -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date" \
+	  $(MAKE) -B bin/test_atp_wolfram_bench
