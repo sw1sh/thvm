@@ -1855,6 +1855,11 @@ int main(int argc, char **argv) {
     if (ss != NULL && ss[0] != '\0')
       thvm_atp_set_use_sos(s, (ss[0] != '0') ? 1u : 0u);
   }
+  {
+    const char *gs = getenv("THVM_ATP_GOAL_SUBTERM");
+    if (gs != NULL && gs[0] != '\0')
+      thvm_atp_set_use_goal_subterm(s, (gs[0] != '0') ? 1u : 0u);
+  }
   // THVM_ATP_UNFAILING=0/1: independent override of unfailing CP
   // generation (WM standard; in preset by default).
   {

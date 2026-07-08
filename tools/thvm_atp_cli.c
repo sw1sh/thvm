@@ -84,6 +84,7 @@ static const AtpKnob KNOBS[] = {
   {"reclassify",             "THVM_ATP_RECLASSIFY",      0, "Reclassify"},
   {"reversed-completion",    "THVM_ATP_REVERSED",        0, "ReversedCompletion"},
   {"sue-management",         "THVM_ATP_SOS",             0, "SUEManagement"},
+  {"goal-subterm",           "THVM_ATP_GOAL_SUBTERM",    0, "GoalSubtermRelevance"},
   {"backward-ground-join",   "THVM_ATP_BWD_GROUND_JOIN", 0, "BackwardGroundJoin"},
   {"cp-side",                "THVM_ATP_CP_SIDE",         0, "CPSide"},
   {"wm-trie-faithful",       "THVM_ATP_WM_TRIE_FAITHFUL",0, "(faithful trie)"},

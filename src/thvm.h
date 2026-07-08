@@ -5825,6 +5825,19 @@ typedef struct {
   u32  goal_sym_mask[8];          // bit-set of goal symbols (CTR ext labels)
                                   // -- 8 * 32 = 256 distinct labels indexable;
                                   // cap with mod for larger.
+  // Structural goal-relevance CP selection (THVM_ATP_GOAL_SUBTERM,
+  // default OFF): a genuinely different metric from SOS (symbol-level,
+  // useless on a single-operator signature) and CPinGoal
+  // (whole-side match, slow) -- discount a CP's priority by the size of
+  // the LARGEST ground SUBTERM it shares with the goal's normal forms,
+  // surfacing CPs that operate on the goal's specific substructure.
+  // Cheap (a subterm-set scan, no unification).  Sound: only heap
+  // ordering changes, nothing dropped.
+  u8   use_goal_subterm;
+  u8   goal_sub_ready;            // goal-subterm set collected for this goal
+  u16  goal_sub_n;               // number of distinct ground goal subterms
+  u64  goal_sub_hash[128];        // structural hashes of the goal's ground subterms
+  u16  goal_sub_size[128];        // parallel: symbol count of each
 
   // Forward subsumption pruning (analog of Vampire's --forward_subsumption
   // flag, restricted to unit equations -- which all our equations are).
@@ -6489,6 +6502,7 @@ fn void      thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period);
 // ratio 0 disables coop (GNN overwrites the primary heap, GT-mode).
 fn void      thvm_atp_set_gnn_coop(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_goal_subterm(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_demod(AtpState *s, u8 on);

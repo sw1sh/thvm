@@ -9128,6 +9128,60 @@ static u32 atp_goal_doppel(Term cl, Term cr, Term sx, Term gy,
 
 // CPinGoal weight of CP (cl, cr) against the conjecture.  No goal
 // (completion mode) -> 0.  See the block comment above.
+// --- Structural goal-relevance selection (use_goal_subterm) ----------
+//
+// A genuinely distinct goal-directed CP metric from SOS (symbol-level:
+// on a single-operator Sheffer signature EVERY CP touches the one
+// operator, so SOS is a no-op) and from CPinGoal/atp_goal_weight
+// (whole-side match coverage, an expensive per-CP unify).  Here we
+// reward a CP by the SIZE of the largest GROUND subterm it shares
+// (structurally) with the goal's ground terms -- i.e. CPs that operate
+// on the goal's own substructure surface first, biasing lemma
+// derivation toward the goal without a match/unify per CP.  Sound: only
+// the heap key changes; no CP is dropped, completeness preserved.
+#define ATP_GOAL_SUBTERM_FACTOR 4u
+static void atp_goal_sub_collect_rec(AtpState *s, Term t) {
+  if (term_tag(t) != TAG_CTR) return;
+  if (atp_term_is_ground(t)) {
+    u32 sz = atp_symbol_count(t);
+    if (sz >= 2u && s->goal_sub_n < 128u) {   // skip bare constants
+      u64 h = atp_term_struct_hash(t);
+      u8 dup = 0u;
+      for (u32 i = 0; i < s->goal_sub_n; i++)
+        if (s->goal_sub_hash[i] == h) { dup = 1u; break; }
+      if (!dup) {
+        s->goal_sub_hash[s->goal_sub_n] = h;
+        s->goal_sub_size[s->goal_sub_n] = (u16)(sz > 0xffffu ? 0xffffu : sz);
+        s->goal_sub_n++;
+      }
+    }
+  }
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) atp_goal_sub_collect_rec(s, term_ctr_at(t, i));
+}
+static void atp_goal_sub_ensure(AtpState *s) {
+  if (s->goal_sub_ready || s->goal_lhs == 0) return;
+  s->goal_sub_n = 0u;
+  atp_goal_sub_collect_rec(s, s->goal_lhs);
+  atp_goal_sub_collect_rec(s, s->goal_rhs);
+  s->goal_sub_ready = 1u;
+}
+static u32 atp_goal_subterm_overlap_rec(const AtpState *s, Term t, u32 best) {
+  if (term_tag(t) != TAG_CTR) return best;
+  if (atp_term_is_ground(t)) {
+    u32 sz = atp_symbol_count(t);
+    if (sz > best) {
+      u64 h = atp_term_struct_hash(t);
+      for (u32 i = 0; i < s->goal_sub_n; i++)
+        if (s->goal_sub_hash[i] == h) { best = sz; break; }
+    }
+  }
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++)
+    best = atp_goal_subterm_overlap_rec(s, term_ctr_at(t, i), best);
+  return best;
+}
+
 static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
   if (s == NULL || s->goal_lhs == 0) return 0u;
   Term gl = s->goal_lhs_nf ? s->goal_lhs_nf : s->goal_lhs;
@@ -9288,6 +9342,17 @@ static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
   if (s != NULL && s->use_sos && s->goal_lhs != 0) {
     if (atp_term_touches_goal(s, lhs) || atp_term_touches_goal(s, rhs)) {
       base = base >> 1;   // halve -> sort earlier
+    }
+  }
+  // Structural goal-relevance: discount by the largest ground subterm
+  // shared with the goal (see atp_goal_subterm_overlap_rec).
+  if (s != NULL && s->use_goal_subterm && s->goal_lhs != 0) {
+    atp_goal_sub_ensure(s);
+    u32 ov = atp_goal_subterm_overlap_rec(s, lhs, 0u);
+    ov = atp_goal_subterm_overlap_rec(s, rhs, ov);
+    if (ov > 0u) {
+      u32 disc = ov * ATP_GOAL_SUBTERM_FACTOR;
+      base = (disc < base) ? (base - disc) : 1u;
     }
   }
   return base;
@@ -12375,6 +12440,13 @@ fn void thvm_atp_set_use_sos(AtpState *s, u8 on) {
       if (s->goal_rhs) atp_sym_mask_collect(s->goal_rhs, s->goal_sym_mask);
     }
   }
+}
+
+fn void thvm_atp_set_use_goal_subterm(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_goal_subterm = on ? 1u : 0u;
+  s->goal_sub_ready = 0u;   // recollected lazily against the current goal
+  s->goal_sub_n = 0u;
 }
 
 // Forward subsumption: when adding a new rule, drop it if some existing
