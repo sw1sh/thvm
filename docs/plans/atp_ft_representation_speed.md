@@ -173,6 +173,32 @@ NEXT speed lever to try: P3 (ftdt node packing -- one cache-line query
 header + interleaved edge pool), which attacks the confirmed
 ftdt_descend3 hot loop and is construction-order-independent.
 
+## VERIFIED TERMINAL STATE (2026-07-08): all scout levers exhausted
+
+Read the code to verify each remaining lever before building:
+- P1 (construction order): DEAD -- persistent free-list scrambles
+  addresses (above).
+- P3 (ftdt node packing): LARGELY ALREADY IMPLEMENTED. FtDtNode
+  (ft_norm.c:979) already has label0/kid0 header mirrors (single-edge
+  hop stays in the header, no side-array load) AND kid_mask as the
+  parent-side sequential prune mirror -- the exact things the scout
+  proposed ("reads this sequential byte array instead of fetching each
+  child's ~90B line"). The only un-done bit (interleave labels/kids/
+  kid_mask into one edge-record pool) helps only MULTI-edge nodes,
+  uncertain payoff on OA's low-fanout single-operator Sheffer trie.
+- ftnfm root-store: built, byte-safe, NFM_CHECK-green, but +52% stores
+  -> 0 extra hits (misses compulsory) -> reverted.
+
+=> The engine is ALREADY deeply optimized (the kid_mask mirror, header
+packing, heap indirection+packing, PGO, rank cache, single-walk former
+all landed). The residual ~1.6x vs fair WM is the FUNDAMENTAL per-node
+cost of GC'd tagged Terms + IC traversal vs WM's flatterm, NOT a missing
+incremental optimization. Closing it requires replacing thvm's term
+representation with a compacting flatterm arena (WM's SV model) -- a
+major engine rewrite whose payoff must be weighed against the fact that
+the emulation is ALREADY byte-perfect and, on a fair (getenv-uncrippled)
+comparison, within ~1.6x. This is a scope decision, not a grind.
+
 ## Sequencing note
 P1 first (it changes the memory layout every other walk observes, so its
 win partly SUBSUMES P3/P4's locality argument -- re-profile after P1
