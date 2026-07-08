@@ -632,10 +632,17 @@ static void cli_proof_hook(AtpState *s) {
 // CASC-30 coverage matrix tunes them.
 typedef struct { const char *name; const char *flags; double frac; } SchedSlice;
 static const SchedSlice SCHEDULE[] = {
-  {"wm",      "",                                          0.40},
-  {"wm-gj",   "--ground-join --connectedness",             0.25},
-  {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.15},
-  {"wm-mnf",  "--mnf",                                     0.10},
+  {"wm",      "",                                          0.35},
+  {"wm-gj",   "--ground-join --connectedness",             0.22},
+  {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.13},
+  {"wm-mnf",  "--mnf",                                     0.08},
+  // Goal-direction (the EXISTING MNF front) COMBINED with the pruning
+  // that keeps its front lean -- ground-join + a growing MaxWeight
+  // bound.  The bare wm-mnf slice above explodes (no pruning) and the
+  // pruning slices carry no goal-direction; this slice is the missing
+  // intersection, assembled from existing knobs only (no new engine
+  // code -- MNF is the WM-faithful front already in the engine).
+  {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1", 0.12},
   {"bare-gj", "--preset=none --ground-join --connectedness", 0.10},
 };
 static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
