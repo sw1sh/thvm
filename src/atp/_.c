@@ -22834,6 +22834,22 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       // (THVM_ATP_CP_SIDE opts in).
       s->last_cp_wm_side_swapped =
           atp_cp_wm_side_swaps(s, s->last_popped_trace, lhs, rhs);
+      // WM SpezNormierung intake canonicalisation (SpezNormierung.c:
+      // 517-534), AXIOM class only: WM STORES an initial unorientable
+      // equation LRSortieren-swapped (structurally smaller side left),
+      // so thvm's kept-E byte order must follow (Sheffer
+      // OrAssociativity fact 2 stored reversed vs WM).  Superposition /
+      // SIMPLIFY kept-Es keep the emission order -- WM never re-sorts
+      // those.  The physical swap trips last_cp_wm_side_swapped, and
+      // the dist wrapper's XOR then lands the distinguished face on
+      // the (now canonical) stored LHS: sweep geometry is unchanged,
+      // only the stored bytes and what store-order readers (order
+      // gates, face registration) see.
+      if (!s->last_cp_wm_side_swapped && !s->use_lr_sortieren
+          && s->last_popped_kind == (u8)TRACE_AXIOM
+          && atp_lr_sortieren_rec(lhs, rhs) > 0) {
+        s->last_cp_wm_side_swapped = 1u;
+      }
       if (s->last_cp_wm_side_swapped) {
         Term tmp = lhs; lhs = rhs; rhs = tmp;
       }
