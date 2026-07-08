@@ -1,22 +1,38 @@
-FindProof -- equational theorem prover (CASC UEQ entry)
+FindProof -- one binary, two roles: equational prover (CASC UEQ) and
+first-order proof checker (ProoVer).
 
 BUILD
   make                 # produces bin/FindProof  (needs a C11 compiler + libm)
   ./starexec_build     # equivalent, for StarExec
 
-RUN (competition)
+The whole engine is one self-contained translation unit; no external
+dependencies beyond the C standard library and libm.
+
+STAREXEC CONFIGURATIONS (both drive the same bin/FindProof)
   bin/starexec_run_default PROBLEM.p
-      Reads the wall-clock limit from $STAREXEC_WALLCLOCK_LIMIT (default 120s),
-      runs a time-sliced portfolio, and writes SZS output to stdout.
+      CASC UEQ proving.  Reads the wall-clock limit from
+      $STAREXEC_WALLCLOCK_LIMIT (default 120s), runs a time-sliced
+      portfolio, and writes an SZS status line plus, on success, an SZS
+      CNFRefutation.
+  bin/starexec_run_proover PROOF.p
+      ProoVer proof checking.  Validates every derived step of a
+      first-order TSTP proof and writes one SZS verdict
+      (Verified / FailedVerified / NotVerified).  Wall-clock limit from
+      $STAREXEC_WALLCLOCK_LIMIT (default 30s).
 
 RUN (manual)
-  bin/FindProof --schedule --szs --proof --wall=120 PROBLEM.p
-  bin/FindProof --szs PROBLEM.p                      # single default config
-  bin/FindProof --list-knobs                         # the full strategy surface
+  bin/FindProof --schedule --szs --proof --wall=120 PROBLEM.p   # prove (CASC)
+  bin/FindProof --szs PROBLEM.p                                 # prove, single config
+  bin/FindProof --check --szs PROOF.p                           # check (ProoVer)
+  bin/FindProof --list-knobs                                    # strategy surface
 
-INPUT   TPTP CNF unit-equality problems.  include('Axioms/*.ax') directives
-        resolve against the problem directory and $TPTP.
-OUTPUT  SZS ontology status (Unsatisfiable / Satisfiable / GaveUp / ResourceOut)
-        and, with --proof, an SZS CNFRefutation block.
-
-No external dependencies beyond the C standard library and libm.
+INPUT
+  Proving  : TPTP CNF unit-equality problems.  include('Axioms/*.ax')
+             directives resolve against the problem directory and $TPTP.
+  Checking : first-order TSTP proofs (fof/cnf records with inference
+             annotations), by refutation, closing with $false.
+OUTPUT
+  Proving  : SZS status (Unsatisfiable / Satisfiable / GaveUp /
+             ResourceOut / Timeout) and, with --proof, a CNFRefutation.
+  Checking : SZS verdict (Verified / FailedVerified / NotVerified); a
+             localised faulty step is printed as a comment.

@@ -40,20 +40,38 @@ list of admissible rules will be provided later").
 
 ## The checker
 
-[proover.wl](proover.wl) is a generalized `ProofObject["ProofFunction"]` for
-TSTP: it walks the steps and validates each, dispatching on the rule. The
-backend is **internal** -- it reuses thvm's `Wolfram`Parser`TPTPImport` FOF
-parser and decides each step in the Wolfram kernel. No external prover is called.
+The competition entry is **`FindProof --check`**, a single self-contained C
+binary -- the same `bin/FindProof` as the CASC UEQ prover (see `tools/casc/`) --
+with no Wolfram kernel and no external prover. A first-order TSTP proof is read
+by a hand-written recursive-descent parser into the engine's term
+representation, and each derived step is validated by dispatching on its
+inference rule. Every entailment obligation is discharged by the engine's own
+clausal saturation prover (resolution with superposition and paramodulation for
+equality), the same core the equational prover is built on, so the checker
+reasons with full equality rather than treating `=` atoms opaquely.
 
 | rule                  | obligation                                                              | method |
 | --------------------- | ----------------------------------------------------------------------- | ------ |
-| `instantiate` (thm)   | conclusion is a substitution instance of a parent                       | `MatchQ` (TPTPImport renders `![X]` as pattern `X_`, so instances match) |
-| `negated_conjecture` (cth) | conclusion is the logical negation of the parent                   | re-parse `~(parent)` through the same parser and compare canonically |
+| `instantiate` (thm)   | conclusion is a substitution instance of a parent                       | first-order matching, backed by entailment |
+| `negated_conjecture` (cth) | conclusion is the logical negation of the parent                   | each side entails the other (mutual entailment), so a wrong quantifier dual is caught soundly |
 | `skolemize` (esa)     | a *fresh* Skolem symbol is introduced and used in the result            | structural: freshness against all prior steps + occurs in conclusion |
-| `consequence` / `horn` / `deduction` (thm) | conclusion is entailed by the parents              | bounded Herbrand grounding + propositional `TautologyQ` |
-| (final step)          | must be `$false`                                                        | `=== False` |
+| `consequence` / `horn` / `deduction` (thm) | conclusion is entailed by the parents              | clausify parents + negated conclusion, saturate to the empty clause |
+| (final step)          | must be `$false`                                                        | refute the parents |
 
-Unknown rules fall back to `NotVerified` (conservative, given the -10).
+A step is accepted when the saturation derives the empty clause; rejected as
+unsound (`FailedVerified`, with the step named) only when a completed saturation
+exhibits a counter-model; and left undecided otherwise. Undecided steps -- an
+unknown rule, or an entailment the bounded saturation neither proves nor refutes
+-- yield `NotVerified`. A `FailedVerified` verdict is emitted only when a step
+is certainly unsound, honouring the -10 scoring. The whole pass is
+resource-bounded: a saturation whose equality reasoning outgrows the term store
+abstains to a clean `NotVerified` rather than crashing, so every proof gets
+exactly one verdict.
+
+[proover.wl](proover.wl) is the Wolfram Language prototype of the same design:
+it reuses thvm's `Wolfram`Parser`TPTPImport` FOF parser and decides each step in
+the kernel (bounded Herbrand grounding + `TautologyQ` for entailment). The C
+binary supersedes it as the standalone competition entry.
 
 ### Why a per-step checker, not a single entailment check
 
@@ -75,29 +93,59 @@ is only equisatisfiable (esa), not a logical consequence.
 | example3_e   | skolemizes Groom by reusing Bride's symbol `sK0`                | Skolem symbol not fresh |
 | example4_e   | annotation says `sK1` but the formula uses the bound var `Marriage` | declared Skolem symbol absent from result |
 
+The C entry confirms three of these outright (the negation shape, and both
+Skolem checks). For example2_e it abstains: establishing that a single disjunct
+is *not* entailed by the equational disjunction needs more than the bounded
+saturation certifies, so it reports `NotVerified` rather than risk a wrong
+verdict. The WL prototype decides it via bounded grounding.
+
 ## Running it
+
+The competition path is the standalone C binary, one proof per invocation:
+
+```
+FindProof --check --szs proof.p            # -> % SZS status <verdict> for proof.p
+```
+
+On the bundled 7-example corpus it scores **+9** with no -10 exposure: the three
+valid proofs `Verified` (+3), and three of the four buggy proofs
+`FailedVerified` with the faulty step localised (+6). The fourth
+(example2_e) sound-abstains to `NotVerified`.
+
+```
+example1_proof.p    Verified
+example2_proof.p    Verified
+example3_proof.p    Verified
+example1_e_proof.p  FailedVerified   bad step: s1 (not the negation of the conjecture)
+example3_e_proof.p  FailedVerified   bad step: groom (Skolem symbol is not fresh)
+example4_e_proof.p  FailedVerified   bad step: groom (declared Skolem symbol absent from result)
+example2_e_proof.p  NotVerified      (deduction over an equational disjunction -- sound abstain)
+```
+
+The Wolfram Language prototype runs the same corpus and additionally
+`FailedVerifies` example2_e via bounded grounding, for +11, trading the
+soundness margin the C entry keeps:
 
 ```
 wolframscript -f wl/Examples/proover/check.wls            # bundled corpus
 wolframscript -f wl/Examples/proover/check.wls <dir>      # any corpus dir
 ```
 
-On the bundled 7-example corpus the checker scores a perfect +11 (three valid
-proofs at +1, four buggy proofs at +2, no penalties):
-
-```
-example1_proof.p   valid  Verified        +1
-example2_proof.p   valid  Verified        +1
-example3_proof.p   valid  Verified        +1
-example1_e_proof.p buggy  FailedVerified  +2   bad step: s1 (not the negation of the conjecture)
-example2_e_proof.p buggy  FailedVerified  +2   bad step: s2 (conclusion is NOT entailed by the parents)
-example3_e_proof.p buggy  FailedVerified  +2   bad step: groom (Skolem symbol is not fresh)
-example4_e_proof.p buggy  FailedVerified  +2   bad step: groom (declared Skolem symbol absent from result)
-```
-
 `corpus/` holds the official `proover.zip` examples (correct/ and incorrect/);
-the `correct/` vs `incorrect/` subtree is the gold label `check.wls` scores
+the `correct/` vs `incorrect/` subtree is the gold label both checkers score
 against.
+
+## One StarExec tarball, two competitions
+
+`tools/casc/mk_tarball.sh` produces a single self-contained submission
+(`FindProof.tgz`) that serves both competitions from the same `bin/FindProof`,
+selected by the StarExec configuration:
+
+- `bin/starexec_run_default` -- CASC UEQ proving (`--schedule --szs --proof`)
+- `bin/starexec_run_proover` -- ProoVer proof checking (`--check --szs`)
+
+`starexec_build` compiles the one binary; no external dependencies beyond the C
+standard library and libm. See `tools/casc/README`.
 
 ## The validation-workflow demo
 
