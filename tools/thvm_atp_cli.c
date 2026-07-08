@@ -111,14 +111,28 @@ static const int N_KNOBS = (int)(sizeof(KNOBS) / sizeof(KNOBS[0]));
 // Set during TPTP parsing when any negative unit carries a variable
 // (the re-negated goal is existential); gates the Satisfiable claim.
 static int g_cli_goal_existential = 0;
+// Set in main before conversion so the over-bound handler can emit a
+// competition-valid SZS line instead of crashing.
+static int g_cli_szs_wanted = 0;
+static const char *g_cli_probpath = "";
+
+static void tp_giveup(const char *why) {
+  // Under a schedule slice the wrapper owns the single final status, so
+  // stay silent on stdout and let the non-zero exit advance the slice.
+  if (g_cli_szs_wanted && getenv("FINDPROOF_SLICE") == NULL)
+    printf("%% SZS status GaveUp for %s\n", g_cli_probpath);
+  fprintf(stderr, "FindProof: %s\n", why);
+  exit(1);
+}
 
 #define TP_MAX_CLAUSES  512
-#define TP_MAX_SYMS     512
+#define TP_MAX_SYMS     2048
 #define TP_MAX_VARS     256
 #define TP_NAME_LEN     64
+#define TP_SIDE_LEN     2048
 
 typedef struct {
-  char lhs[4096], rhs[4096];
+  char lhs[TP_SIDE_LEN], rhs[TP_SIDE_LEN];
   int  neg;
 } TpClause;
 
@@ -238,7 +252,7 @@ static void tp_sym_note(TpProblem *tp, const char *name, size_t n, int arity) {
       return;
     }
   }
-  if (tp->n_syms >= TP_MAX_SYMS) { fprintf(stderr, "FindProof: too many symbols\n"); exit(2); }
+  if (tp->n_syms >= TP_MAX_SYMS) tp_giveup("problem exceeds symbol bound");
   memcpy(tp->syms[tp->n_syms].name, name, n);
   tp->syms[tp->n_syms].name[n] = '\0';
   tp->syms[tp->n_syms].arity = arity;
@@ -250,7 +264,7 @@ static void tp_var_note(TpProblem *tp, const char *name, size_t n) {
   for (int i = 0; i < tp->n_vars; i++) {
     if (strlen(tp->vars[i]) == n && memcmp(tp->vars[i], name, n) == 0) return;
   }
-  if (tp->n_vars >= TP_MAX_VARS) { fprintf(stderr, "FindProof: too many variables\n"); exit(2); }
+  if (tp->n_vars >= TP_MAX_VARS) tp_giveup("problem exceeds variable bound");
   memcpy(tp->vars[tp->n_vars], name, n);
   tp->vars[tp->n_vars][n] = '\0';
   tp->n_vars++;
@@ -343,13 +357,13 @@ static void tp_parse(TpProblem *tp, const char *text) {
       else if (d2 == 0 && lit[i] == '=' && (i == 0 || lit[i - 1] != '!')) { oppos = i; break; }
     }
     if (oppos == (size_t)-1) { fprintf(stderr, "FindProof: non-equational clause\n"); exit(2); }
-    if (tp->n_cls >= TP_MAX_CLAUSES) { fprintf(stderr, "FindProof: too many clauses\n"); exit(2); }
+    if (tp->n_cls >= TP_MAX_CLAUSES) tp_giveup("problem exceeds clause bound");
     TpClause *cl = &tp->cls[tp->n_cls++];
     size_t ln = oppos, rs = oppos + (neg ? 2u : 1u);
     while (ln > 0 && isspace((unsigned char)lit[ln - 1])) ln--;
     while (rs < llen && isspace((unsigned char)lit[rs])) rs++;
     size_t rn = llen - rs;
-    if (ln >= sizeof cl->lhs || rn >= sizeof cl->rhs) { fprintf(stderr, "FindProof: clause too large\n"); exit(2); }
+    if (ln >= sizeof cl->lhs || rn >= sizeof cl->rhs) tp_giveup("term exceeds side-length bound");
     memcpy(cl->lhs, lit, ln); cl->lhs[ln] = '\0';
     memcpy(cl->rhs, lit + rs, rn); cl->rhs[rn] = '\0';
     cl->neg = neg;
@@ -386,7 +400,7 @@ static char *tp_emit_pr(TpProblem *tp, const char *name) {
   EMIT("MODE          PROOF\n");
   EMIT("SORTS         ANY\n");
   // SIGNATURE: alphabetical (wmBuildPr sorts the sig listing by name)
-  TpSym alpha[TP_MAX_SYMS];
+  TpSym *alpha = (TpSym *)malloc(sizeof(TpSym) * (size_t)(tp->n_syms + 1));
   memcpy(alpha, tp->syms, sizeof(TpSym) * (size_t)tp->n_syms);
   for (int i = 0; i < tp->n_syms; i++)
     for (int j = i + 1; j < tp->n_syms; j++)
@@ -402,7 +416,7 @@ static char *tp_emit_pr(TpProblem *tp, const char *name) {
   EMIT("              ");
   for (int i = 0; i < tp->n_syms; i++) EMIT("%s%s=1", (i > 0) ? ", " : "", alpha[i].name);
   EMIT("\n");
-  TpSym prec[TP_MAX_SYMS];
+  TpSym *prec = (TpSym *)malloc(sizeof(TpSym) * (size_t)(tp->n_syms + 1));
   memcpy(prec, tp->syms, sizeof(TpSym) * (size_t)tp->n_syms);
   qsort(prec, (size_t)tp->n_syms, sizeof(TpSym), tp_sym_cmp);
   EMIT("              ");
@@ -431,6 +445,7 @@ static char *tp_emit_pr(TpProblem *tp, const char *name) {
     first = 0;
   }
 #undef EMIT
+  free(alpha); free(prec);
   return out;
 }
 
@@ -742,8 +757,12 @@ int main(int argc, char **argv) {
     if (raw == NULL) { fprintf(stderr, "FindProof: cannot open %s\n", file); return 2; }
     if (strstr(raw, "cnf(") != NULL) {
       g_cli_tptp_mode = 1;
+      g_cli_szs_wanted = szs;
+      g_cli_probpath = file;
       char *pre = tp_preprocess(file, raw);
-      static TpProblem tp;
+      TpProblem *tpp = (TpProblem *)calloc(1, sizeof(TpProblem));
+      if (tpp == NULL) { fprintf(stderr, "FindProof: OOM\n"); return 2; }
+#define tp (*tpp)
       tp_parse(&tp, pre);
       free(pre);
       int n_neg = 0;
@@ -752,6 +771,18 @@ int main(int argc, char **argv) {
         fprintf(stderr, "FindProof: need at least one positive and one negative unit\n");
         return 2;
       }
+      // Never hand the .pr reader more than it can hold: an oversized
+      // problem (the CSR knowledge bases run to thousands of equations)
+      // exits cleanly as GaveUp rather than aborting downstream with no
+      // SZS line.  PR_MAX_* come from the included bench translation unit.
+      if ((tp.n_cls - n_neg) > (int)PR_MAX_EQNS) tp_giveup("problem exceeds equation capacity");
+      if (tp.n_syms          > (int)PR_MAX_SYMS) tp_giveup("problem exceeds symbol capacity");
+      if (tp.n_vars          > (int)PR_MAX_VARS) tp_giveup("problem exceeds variable capacity");
+      // The flatterm term reader holds at most 8 arguments per node; a
+      // higher-arity functor (e.g. TOP052's tuple/16) is beyond the term
+      // representation, so give up cleanly instead of aborting the reader.
+      for (int i = 0; i < tp.n_syms; i++)
+        if (tp.syms[i].arity > 8) tp_giveup("functor arity exceeds 8");
       const char *base = strrchr(file, '/');
       base = (base != NULL) ? base + 1 : file;
       char pname[256];
@@ -767,7 +798,9 @@ int main(int argc, char **argv) {
       fputs(pr_text, fp);
       fclose(fp);
       free(pr_text);
-      if (keep_pr == 2) { printf("%s\n", tmp_pr); return 0; }
+      if (keep_pr == 2) { printf("%s\n", tmp_pr); free(tpp); return 0; }
+#undef tp
+      free(tpp);
       run_file = tmp_pr;
     }
     free(raw);

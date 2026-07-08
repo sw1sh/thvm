@@ -381,9 +381,9 @@ static void goal_hn_leftid(Term *l, Term *r) {
 
 #include <ctype.h>
 
-#define PR_MAX_SYMS 128u
-#define PR_MAX_VARS 64u
-#define PR_MAX_EQNS 64u
+#define PR_MAX_SYMS 512u
+#define PR_MAX_VARS 128u
+#define PR_MAX_EQNS 256u
 #define PR_NAME_LEN 64u
 
 typedef struct {
