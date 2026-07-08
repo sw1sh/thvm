@@ -199,6 +199,33 @@ major engine rewrite whose payoff must be weighed against the fact that
 the emulation is ALREADY byte-perfect and, on a fair (getenv-uncrippled)
 comparison, within ~1.6x. This is a scope decision, not a grind.
 
+## SPEED AXIS CLOSED at the architectural floor (2026-07-08, verified)
+
+Two fresh experiments + one prior de-risk converge:
+- No-recycle+preorder (force sequential bump allocation, perfect
+  construction locality): OA step-rate IDENTICAL to baseline (240.5K vs
+  239.5K steps/12s). Construction locality is NOT the lever -- the
+  default is already block-local (30000-cell contiguous slabs).
+- Cell padding: PAD=512 (22x footprint) costs -60%, but that is far
+  outside any achievable layout. The prior careful de-risk
+  (atp_normcell_shrink.md) measured the REALISTIC range: doubling the
+  cell = +3.4%, shrink = flat/sub-bar; AND no shrink exists (24B = two
+  8-byte pointers + fields, byte-identical to WM's TermzellenT).
+- VERDICT (confirming atp_normcell_shrink.md NO-GO): normalize is
+  COMPUTE-bound on the traversal/compares, not footprint/cache/locality
+  bound. Every representational lever (construction order, compaction,
+  cell shrink) is refuted. The residual ~1.25x vs FEQ / ~1.6x vs fair
+  WM is the architectural floor of an IC engine that already ties WM on
+  cell size and matcher pruning. Closing it further would require a
+  different ENGINE (a hand-specialized flatterm core), not a lever --
+  and the de-risk judged that NOT worth a multi-week rewrite for a
+  sub-bar projected win.
+
+CONCLUSION: the WM-preset emulation is byte-PERFECT (143/148 corpus)
+and FAST at the architectural floor. The two gated THVM_ATP_FT_PREORDER
+conversions stay as a byte-safe foundation (harmless, ~0%). No
+incremental OR representational speed grind remains.
+
 ## Sequencing note
 P1 first (it changes the memory layout every other walk observes, so its
 win partly SUBSUMES P3/P4's locality argument -- re-profile after P1
