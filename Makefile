@@ -1178,3 +1178,10 @@ atp-pgo:
 	        -fprofile-instr-use=$(CURDIR)/.pgo/atp.profdata \
 	        -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date" \
 	  $(MAKE) -B bin/test_atp_wolfram_bench
+	# The profile is engine-wide (same TU/functions), so it applies to the
+	# shipped CASC entry too -- rebuild FindProof with it (measured ~15% on
+	# M1: WolframAxioms OrAssociativity 15.3s -> 13.0s, RULEADD byte-identical).
+	CFLAGS="$(ATP_PGO_FLAGS) -flto=thin \
+	        -fprofile-instr-use=$(CURDIR)/.pgo/atp.profdata \
+	        -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date" \
+	  $(MAKE) -B bin/FindProof
