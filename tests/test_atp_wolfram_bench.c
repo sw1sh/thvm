@@ -2145,6 +2145,16 @@ int main(int argc, char **argv) {
   // proof needs (completeness preserved).  0 / unset = unbounded (the
   // historical default).
   {
+    // Hard lossy CP-queue cap (THVM_ATP_MAX_CP_QUEUE): bound memory by
+    // dropping OLD queued CPs when the queue is full, INSTEAD of capping
+    // by weight (auto-max-weight).  Lets heavy proof-rules form (Twee
+    // churns thousands) while keeping RSS bounded -- the deep-goal UEQ
+    // problems need heavy rules that auto-max-weight defers forever.
+    const char *mcq = getenv("THVM_ATP_MAX_CP_QUEUE");
+    if (mcq != NULL && *mcq != 0)
+      thvm_atp_set_max_cp_queue(s, (u32)strtoul(mcq, NULL, 10));
+  }
+  {
     const char *amw = getenv("THVM_ATP_AUTO_MAXW");
     if (amw != NULL && *amw != 0) {
       thvm_atp_set_auto_max_cp_weight(s, (u32)strtoul(amw, NULL, 10));

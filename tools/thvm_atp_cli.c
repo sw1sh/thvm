@@ -32,6 +32,10 @@
 #include "../tests/test_atp_wolfram_bench.c"
 #undef main
 
+// --check mode: validate a first-order TSTP proof (the ProoVer task).
+// Reuses the src/fol saturation engine already linked into this binary.
+#include "proof_check.c"
+
 // ===================================================================
 // knob table
 // ===================================================================
@@ -50,6 +54,7 @@ static const AtpKnob KNOBS[] = {
   {"cp-weight",              "THVM_ATP_CP_WEIGHT",       1, "CriticalPairWeight"},
   {"max-weight",             "THVM_ATP_MAXW",            1, "MaxWeight"},
   {"auto-max-weight",        "THVM_ATP_AUTO_MAXW",       1, "AutoMaxWeight"},
+  {"max-cp-queue",           "THVM_ATP_MAX_CP_QUEUE",    1, "MaxCpQueue"},
   {"max-weight-slope",       "THVM_ATP_MAXW_SLOPE",      1, "AutoMaxWeight slope"},
   {"selection-ratio",        "THVM_ATP_SELECTION_RATIO", 1, "SelectionRatio"},
   {"goal-interleave",        "THVM_ATP_GOAL_INTERLEAVE", 1, "GoalInterleave"},
@@ -701,7 +706,7 @@ int main(int argc, char **argv) {
   const char *file = NULL;
   const char *max_steps = "500000";
   const char *wall = "120";
-  int szs = 0, keep_pr = 0, want_schedule = 0;
+  int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0;
 
   for (int i = 1; i < argc; i++) {
     char *a = argv[i];
@@ -722,6 +727,7 @@ int main(int argc, char **argv) {
     }
     if (nlen == 3 && strncmp(name, "szs", 3) == 0) { szs = 1; continue; }
     if (nlen == 8 && strncmp(name, "schedule", 8) == 0) { want_schedule = 1; continue; }
+    if (nlen == 5 && strncmp(name, "check", 5) == 0) { want_check = 1; continue; }
     if (nlen == 5 && strncmp(name, "proof", 5) == 0) { g_cli_want_proof = 1; continue; }
     if (nlen == 7 && strncmp(name, "keep-pr", 7) == 0) { keep_pr = 1; continue; }
     if (nlen == 12 && strncmp(name, "convert-only", 12) == 0) { keep_pr = 2; continue; }
@@ -743,6 +749,8 @@ int main(int argc, char **argv) {
     if (!hit) { fprintf(stderr, "FindProof: unknown option --%.*s\n", (int)nlen, name); usage(stderr); return 2; }
   }
   if (file == NULL) { usage(stderr); return 2; }
+
+  if (want_check) return proof_check_main(file, szs);
 
   if (want_schedule) {
     return run_schedule(argv[0], file, atof(wall), szs, g_cli_want_proof);
