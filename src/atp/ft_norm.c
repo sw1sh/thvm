@@ -3076,6 +3076,354 @@ done:
   return m.root;
 }
 
+// --- WM-FPA flat mirror for the doR-only push-normalize (opt-in) -----
+//
+// THVM_ATP_WMFPA=1 (s->use_wmfpa, default OFF) routes the treated-CP
+// push normalize -- atp_rules_only_normalize_ft's full-range doE=0
+// record=0 shape, WM KPBehandelt's `-kg "r"` strength -- through the
+// wmfpa flat substrate (src/wmfpa/wmfpa.h) running the ENGINE's exact
+// policies: the wf_normalize_mixmost walk (this file's
+// atp_normalize_mixmost_ft, offset-stack port) and the wf_descend_wm
+// Regelbaum-DFS winner (ft_wm_pattern_before + newest-slot alpha tie).
+// Byte-identical NFs by construction; every condition the flat path
+// cannot decide exactly falls back to the engine walk on the ORIGINAL
+// input (never a partial).  All other normalize shapes -- record/
+// proofsteps/slice/doE=1 -- stay on the engine path via the hook gate.
+//
+// The mirror is a WfTree over WfNode COPIES of s->lhs_ft/s->rhs_ft,
+// slot indices == engine rule slots (MANDATORY: the newest-slot alpha
+// tie makes slot order semantic).  Maintenance follows ftpi_ensure's
+// lazy watermark: current iff (owner, r_revision, n_rules) match;
+// pure-append witness (revision delta == count delta) extends by
+// encoding + inserting only the new slots; anything else rebuilds.
+// The ONE mutation r_revision does not cover -- the interreduction
+// RHS compose editing s->rhs_ft[i] in place (_.c RMRechtsInterred
+// sites) -- re-encodes the flat RHS via atp_wf_mm_note_rhs_edit
+// (the wf_eng_cache_update_rhs pattern), else marks the mirror dirty.
+// Slot eligibility mirrors the engine's pass-1 filter (ft_cell_try_
+// rules): r_dead / NULL-mirror slots and unorientable slots when
+// n_unorient > 0 are absent from the tree.  A pattern var id outside
+// the subst address space is EXACTLY absent (ft_match rejects it); a
+// side too long for the fixed per-rule stride makes the whole mirror
+// UNUSABLE (the rule could fire on the engine path) until a rebuild.
+
+#define WF_MM_RULE_NODES 1024u   // per-side flat cap (rule sides are small)
+#define WF_MM_SUBJ_CAP   8192u   // subject cap (treated CPs are < 50 syms)
+
+typedef struct {
+  const AtpState *owner;
+  u32     built_revision;
+  u32     built_n_rules;
+  u8      unusable;   // a live slot the flat store cannot represent
+  u8      dirty;      // an in-place RHS edit the mirror could not absorb
+  WfTree  tree;
+  WfNode *lhs_buf;    // cap_rules * WF_MM_RULE_NODES, fixed stride
+  WfNode *rhs_buf;
+  WfRule *rules;
+  u32     cap_rules;
+  // Instrumentation (THVM_ATP_WMFPA_STATS=1 prints at process exit).
+  u64     q_calls;      // hook entries
+  u64     q_decided;    // flat path returned an exact NF
+  u64     q_fired;      // decided calls with >= 1 splice
+  u64     q_caphit;     // decided calls that exhausted the step budget
+  u64     q_fallback;   // in-walk fallback (engine rerun)
+  u64     n_rebuilds, n_extends;
+} WfMmCache;
+
+static WfMmCache g_wfmm = {0};
+
+static void wf_mm_stats_atexit(void) {
+  if (g_wfmm.q_calls == 0u) return;
+  fprintf(stderr,
+          "[wfmm] calls=%llu decided=%llu (fired=%llu identity=%llu "
+          "caphit=%llu) fallback=%llu rebuilds=%llu extends=%llu\n",
+          (unsigned long long)g_wfmm.q_calls,
+          (unsigned long long)g_wfmm.q_decided,
+          (unsigned long long)g_wfmm.q_fired,
+          (unsigned long long)(g_wfmm.q_decided - g_wfmm.q_fired),
+          (unsigned long long)g_wfmm.q_caphit,
+          (unsigned long long)g_wfmm.q_fallback,
+          (unsigned long long)g_wfmm.n_rebuilds,
+          (unsigned long long)g_wfmm.n_extends);
+  const WfTree *ix = &g_wfmm.tree;
+  if (ix->q_queries == 0u) return;
+  fprintf(stderr,
+          "[wfmm] descents=%llu  nodevisits/descent=%.2f  "
+          "confirms/descent=%.2f\n",
+          (unsigned long long)ix->q_queries,
+          (double)ix->q_nodevisits / (double)ix->q_queries,
+          (double)ix->q_matchcalls / (double)ix->q_queries);
+}
+
+static void wf_mm_stats_arm(void) {
+  static int armed = -1;
+  if (armed >= 0) return;
+  const char *e = getenv("THVM_ATP_WMFPA_STATS");
+  armed = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  if (armed) atexit(wf_mm_stats_atexit);
+}
+
+// Encode an AtpFtCell chain into a flat WfNode preorder: one linear
+// `next` walk copying (sym, arity), then the wf_fixup back-patch for
+// subtree sizes (children sit at higher offsets, so the backward pass
+// sees them finished).  Returns the node count, 0 on overflow.  The
+// sym encoding is SHARED (WF_VAR_BIT | id on both representations),
+// so the copy is bit-faithful.
+static u32 wf_mm_encode_cells(const AtpFtCell *root, WfNode *out, u32 cap) {
+  const AtpFtCell *end_after = (root->end != NULL) ? root->end->next : NULL;
+  u32 len = 0u;
+  for (const AtpFtCell *p = root; p != NULL && p != end_after; p = p->next) {
+    if (len >= cap) return 0u;
+    out[len].sym   = p->sym;
+    out[len].size  = 1u;
+    out[len].arity = (u16)(((p->sym & WF_VAR_BIT) != 0u) ? 0u : p->arity);
+    out[len]._pad  = 0u;
+    len++;
+  }
+  if (len > 0u) wf_fixup(out, 0u, len);
+  return len;
+}
+
+// Encode rule slot `i` into the mirror (both sides), applying the
+// engine's pass-1 eligibility (ft_cell_try_rules:2320-2323).  An
+// ineligible / never-matching slot stays llen=0 (absent from the
+// tree); an eligible slot the store cannot hold sets `unusable`.
+static void wf_mm_encode_slot(AtpState *s, u32 i) {
+  WfNode *lb = g_wfmm.lhs_buf + (size_t)i * WF_MM_RULE_NODES;
+  WfNode *rb = g_wfmm.rhs_buf + (size_t)i * WF_MM_RULE_NODES;
+  g_wfmm.rules[i].lhs = lb; g_wfmm.rules[i].llen = 0u;
+  g_wfmm.rules[i].rhs = rb; g_wfmm.rules[i].rlen = 0u;
+  if (s->r_dead != NULL && s->r_dead[i]) return;
+  if (s->lhs_ft[i] == NULL || s->rhs_ft[i] == NULL) return;
+  if (s->n_unorient > 0u && !s->r_orient[i]) return;
+  u32 ll = wf_mm_encode_cells(s->lhs_ft[i], lb, WF_MM_RULE_NODES);
+  if (ll == 0u) { g_wfmm.unusable = 1u; return; }   // over-long: could match
+  for (u32 k = 0; k < ll; k++) {
+    // Pattern var id outside the subst address space: ft_match rejects
+    // the pattern outright (ft_match.c), so the slot is EXACTLY absent.
+    if (WF_IS_VAR(lb[k].sym) && WF_VAR_ID(lb[k].sym) >= WF_MAX_VARS) return;
+  }
+  u32 rl = wf_mm_encode_cells(s->rhs_ft[i], rb, WF_MM_RULE_NODES);
+  if (rl == 0u) { g_wfmm.unusable = 1u; return; }
+  for (u32 k = 0; k < rl; k++) {
+    if (WF_IS_VAR(rb[k].sym) && WF_VAR_ID(rb[k].sym) >= WF_MAX_VARS) {
+      g_wfmm.unusable = 1u;   // template var outside the bind space
+      return;
+    }
+  }
+  g_wfmm.rules[i].llen = ll;
+  g_wfmm.rules[i].rlen = rl;
+}
+
+static void wf_mm_cache_rebuild(AtpState *s) {
+  u32 nr = s->n_rules;
+  if (nr > g_wfmm.cap_rules) {
+    u32 nc = g_wfmm.cap_rules ? g_wfmm.cap_rules : 64u;
+    while (nc < nr) nc *= 2u;
+    WfRule *rr = (WfRule *)realloc(g_wfmm.rules, (size_t)nc * sizeof(WfRule));
+    WfNode *lb = (WfNode *)realloc(g_wfmm.lhs_buf,
+                                   (size_t)nc * WF_MM_RULE_NODES * sizeof(WfNode));
+    WfNode *rb = (WfNode *)realloc(g_wfmm.rhs_buf,
+                                   (size_t)nc * WF_MM_RULE_NODES * sizeof(WfNode));
+    if (rr == NULL || lb == NULL || rb == NULL) thvm_fatal("wfmm: rule store OOM");
+    g_wfmm.rules   = rr;
+    g_wfmm.lhs_buf = lb;
+    g_wfmm.rhs_buf = rb;
+    g_wfmm.cap_rules = nc;
+  }
+  g_wfmm.unusable = 0u;
+  g_wfmm.dirty    = 0u;
+  for (u32 i = 0; i < nr; i++) wf_mm_encode_slot(s, i);
+  // Retrieval counters are cumulative across rebuilds (wf_tree_init
+  // zeroes the whole struct); carry them over for the stats dump.
+  u64 qq = g_wfmm.tree.q_queries, qc = g_wfmm.tree.q_candidates;
+  u64 qn = g_wfmm.tree.q_nodevisits, qm = g_wfmm.tree.q_matchcalls;
+  wf_tree_free(&g_wfmm.tree);
+  wf_tree_init(&g_wfmm.tree);
+  wf_tree_build(&g_wfmm.tree, g_wfmm.rules, nr);
+  g_wfmm.tree.q_queries    = qq;
+  g_wfmm.tree.q_candidates = qc;
+  g_wfmm.tree.q_nodevisits = qn;
+  g_wfmm.tree.q_matchcalls = qm;
+  g_wfmm.owner          = s;
+  g_wfmm.built_revision = s->r_revision;
+  g_wfmm.built_n_rules  = nr;
+  g_wfmm.n_rebuilds++;
+}
+
+// Pure-append extend: encode + BO_ObjektEinfuegen only the new slots.
+// Returns 0 when the fixed-stride store would have to move (rebuild
+// re-points every WfRule).
+static int wf_mm_cache_extend(AtpState *s) {
+  u32 nr = s->n_rules;
+  if (nr > g_wfmm.cap_rules) return 0;
+  for (u32 r = g_wfmm.built_n_rules; r < nr; r++) {
+    wf_mm_encode_slot(s, r);
+    g_wfmm.tree.rules   = g_wfmm.rules;
+    g_wfmm.tree.n_rules = r + 1u;
+    wf_tree_insert(&g_wfmm.tree, r);   // llen==0 slots stay absent
+  }
+  g_wfmm.built_revision = s->r_revision;
+  g_wfmm.built_n_rules  = nr;
+  g_wfmm.n_extends++;
+  return 1;
+}
+
+// Bring the mirror in sync (ftpi_ensure discipline).  Returns 1 when
+// the mirror is usable for queries.
+static int wf_mm_cache_ensure(AtpState *s) {
+  if (g_wfmm.owner != s || g_wfmm.dirty ||
+      g_wfmm.built_n_rules > s->n_rules) {
+    wf_mm_cache_rebuild(s);
+  } else if (g_wfmm.built_n_rules == s->n_rules) {
+    if (g_wfmm.built_revision != s->r_revision) wf_mm_cache_rebuild(s);
+  } else if (s->r_revision - g_wfmm.built_revision !=
+             s->n_rules - g_wfmm.built_n_rules) {
+    wf_mm_cache_rebuild(s);   // an existing slot changed: not a clean append
+  } else if (!wf_mm_cache_extend(s)) {
+    wf_mm_cache_rebuild(s);
+  }
+  return !g_wfmm.unusable;
+}
+
+// Teardown hook (thvm_atp_free): forget a dying owner so a future
+// AtpState reallocated at the same address can never validate the
+// stale mirror.  Buffers stay allocated for reuse (the g_ftpi shape).
+static void atp_wf_mm_disown(const AtpState *s) {
+  if (g_wfmm.owner == s) g_wfmm.owner = NULL;
+}
+
+// In-place RHS compose (interreduction right-reduction) edited
+// s->rhs_ft[r] without an r_revision bump: the tree spine keys only on
+// the LHS, so re-encode the flat RHS in place; on any condition the
+// in-place update cannot absorb, mark dirty (rebuild precedes the next
+// query).  Called from the two RMRechtsInterred sites in _.c.
+static void atp_wf_mm_note_rhs_edit(AtpState *s, u32 r) {
+  if (g_wfmm.owner != s || r >= g_wfmm.built_n_rules) return;
+  if (g_wfmm.rules[r].llen == 0u) return;   // absent: template never read
+  WfNode *rb = g_wfmm.rhs_buf + (size_t)r * WF_MM_RULE_NODES;
+  u32 rl = wf_mm_encode_cells(s->rhs_ft[r], rb, WF_MM_RULE_NODES);
+  if (rl == 0u) { g_wfmm.dirty = 1u; return; }
+  for (u32 k = 0; k < rl; k++) {
+    if (WF_IS_VAR(rb[k].sym) && WF_VAR_ID(rb[k].sym) >= WF_MAX_VARS) {
+      g_wfmm.dirty = 1u;
+      return;
+    }
+  }
+  g_wfmm.rules[r].rlen = rl;
+}
+
+// Decode the flat NF back into a fresh Arena A cell chain, so every
+// downstream consumer (vcp stash, ft_eq verdict, pack/weigh,
+// ft_to_term) is untouched.  Sequential cells: next threads the
+// preorder, end = the subtree's last cell via the size field.
+static AtpFtCell *wf_mm_decode_cells(AtpState *s, const WfNode *a, u32 len) {
+  static AtpFtCell *cells[WF_MM_SUBJ_CAP];
+  AtpFt *arena = (AtpFt *)s->ft_arena_ptr;
+  for (u32 i = 0; i < len; i++) cells[i] = ft_alloc_persistent_raw(arena);
+  for (u32 i = 0; i < len; i++) {
+    AtpFtCell *c = cells[i];
+    c->next  = (i + 1u < len) ? cells[i + 1u] : NULL;
+    c->end   = cells[i + a[i].size - 1u];
+    c->sym   = a[i].sym;
+    c->arity = (u16)(WF_IS_VAR(a[i].sym) ? 0u : a[i].arity);
+    c->flags = 0u;
+    c->_pad  = 0u;
+  }
+  return cells[0];
+}
+
+// The gated flat-path entry.  Returns the NF cells (Arena A) when the
+// flat path decided the call exactly, NULL when the caller must run
+// the engine walk on the ORIGINAL input: mirror unusable, subject
+// over-cap, or any in-walk fallback (inexact descent, arena/scratch/
+// candidate overflow).  The input chain is mutated ONLY on the decided
+// fired>0 path (it is freed and replaced by the decoded NF); every
+// NULL return leaves it pristine.
+//
+// THVM_ATP_WMFPA_CHECK (s->wmfpa_check) live differential: after a
+// decided flat run, ALSO run the engine mixmost on the original cells
+// and require the two NF preorders byte-equal ((sym, arity) stream,
+// cap-hit partials included), aborting on the first divergence; the
+// engine result is returned so a CHECK run is engine-exact by
+// construction while certifying the flat path on every call.
+static AtpFtCell *atp_rules_only_normalize_wf(AtpState *s, AtpFtCell *t,
+                                              u32 step_cap) {
+  // THVM_ATP_NF_CAP counts Arena A live cells inside the engine walk;
+  // the flat path never allocates there mid-walk, so it cannot honor
+  // the cap -- stay on the engine path when it is armed (default off).
+  static int nf_cap_armed = -1;
+  if (nf_cap_armed < 0) {
+    const char *e = getenv("THVM_ATP_NF_CAP");
+    nf_cap_armed = (e != NULL && *e != '\0' && strtol(e, NULL, 10) > 0) ? 1 : 0;
+  }
+  if (nf_cap_armed) return NULL;
+#if defined(THVM_ATP_AC) && defined(THVM_ATPFT_MATCH)
+  if (thvm_atp_get_ac_mask() != 0ull) return NULL;   // AC matches modulo AC
+#endif
+  wf_mm_stats_arm();
+  g_wfmm.q_calls++;
+  if (!wf_mm_cache_ensure(s)) return NULL;
+  static WfNode  wf_subj[WF_MM_SUBJ_CAP];
+  static WfNode  wf_scr [WF_MM_SUBJ_CAP];
+  static WfMmEnt wf_st  [WF_MM_SUBJ_CAP + 1u];
+  u32 alen = wf_mm_encode_cells(t, wf_subj, WF_MM_SUBJ_CAP);
+  if (alen == 0u) return NULL;                       // over-cap subject
+  WfMm m = {
+    .ix = &g_wfmm.tree, .a = wf_subj, .alen = alen, .acap = WF_MM_SUBJ_CAP,
+    .scratch = wf_scr, .scratch_cap = WF_MM_SUBJ_CAP,
+    .st = wf_st, .depth = 0u, .budget = step_cap, .fired = 0u, .fallback = 0,
+  };
+  u32 nlen = wf_normalize_mixmost(&m);
+  if (m.fallback) { g_wfmm.q_fallback++; return NULL; }
+  g_wfmm.q_decided++;
+  if (m.fired > 0u) g_wfmm.q_fired++;
+  if (m.budget == 0u) g_wfmm.q_caphit++;   // cap-hit partial: parity-bearing
+  if (s->wmfpa_check) {
+    AtpFtSubst chk;
+    memset(&chk, 0, sizeof(chk));
+    AtpFtCell *eng = atp_normalize_mixmost_ft(s, t, 0u, s->n_rules,
+                                              step_cap, /*doE=*/0u,
+                                              /*record=*/0, /*eq_other=*/0,
+                                              0u, NULL, &chk,
+                                              NULL, NULL, 0u);
+    const AtpFtCell *ee = (eng->end != NULL) ? eng->end->next : NULL;
+    u32 i = 0u;
+    int ok = 1;
+    for (const AtpFtCell *p = eng; p != NULL && p != ee; p = p->next, i++) {
+      u32 pa = ((p->sym & WF_VAR_BIT) != 0u) ? 0u : (u32)p->arity;
+      if (i >= nlen || p->sym != wf_subj[i].sym ||
+          pa != (u32)wf_subj[i].arity) {
+        ok = 0;
+        break;
+      }
+    }
+    if (ok && i != nlen) ok = 0;
+    if (!ok) {
+      fprintf(stderr, "[wfmm CHECK] NF divergence (n_rules=%u fired=%u "
+              "budget_left=%u)\n[wfmm CHECK] flat:", s->n_rules, m.fired,
+              m.budget);
+      for (u32 k = 0; k < nlen && k < 128u; k++)
+        fprintf(stderr, " %x/%u", wf_subj[k].sym, (u32)wf_subj[k].arity);
+      fprintf(stderr, "\n[wfmm CHECK] engine:");
+      u32 k = 0u;
+      for (const AtpFtCell *p = eng; p != NULL && p != ee && k < 128u;
+           p = p->next, k++)
+        fprintf(stderr, " %x/%u", p->sym, (u32)p->arity);
+      fprintf(stderr, "\n");
+      thvm_fatal("wfmm: WM-policy flat NF diverges from engine mixmost");
+    }
+    return eng;
+  }
+  if (m.fired == 0u) return t;   // untouched input IS the NF (engine identity)
+  AtpFtCell *nf = wf_mm_decode_cells(s, wf_subj, nlen);
+  // The engine walk rewrites in place, returning displaced spans to the
+  // free list as it goes; the flat path abandons the whole input chain,
+  // so return it in one span to keep Arena A liveness bounded.
+  if (t->end != NULL) ft_free_span((AtpFt *)s->ft_arena_ptr, t, t->end);
+  return nf;
+}
+
 // --- Fixpoint --------------------------------------------------------
 //
 // Public entry: normalize `t` against the AtpFt rule mirror in
@@ -3385,6 +3733,16 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   if (s->use_mixmost_nf) {
     u32 mslice_end = slice_first + slice_count;
     if (mslice_end > s->n_rules) mslice_end = s->n_rules;
+    // Opt-in WM-FPA flat path (THVM_ATP_WMFPA=1): exactly the doR-only
+    // full-range non-record shape -- the treated-CP push normalize (WM
+    // KPBehandelt `-kg "r"`).  Record / proofsteps / slice / doE=1
+    // shapes never engage; a NULL return means "not decided here" and
+    // the engine walk below runs on the untouched input.
+    if (s->use_wmfpa && doE == 0u && !record &&
+        slice_first == 0u && slice_count == s->n_rules) {
+      AtpFtCell *wf_nf = atp_rules_only_normalize_wf(s, t, step_cap);
+      if (wf_nf != NULL) return wf_nf;
+    }
     return atp_normalize_mixmost_ft(s, t, slice_first, mslice_end,
                                     step_cap, doE, record, eq_other,
                                     side, chain_tail, &subst,

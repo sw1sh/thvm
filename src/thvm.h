@@ -4864,29 +4864,35 @@ typedef struct {
   // = the existing pass runs byte-identical.  Faithful only when
   // keep_lhs_reducible==0 and use_eager_orphan_sweep==0 (the WM Method layout).
   u8                   use_wm_interred;
-  // Opt-in faithful Waldmeister-FPA normalize path (src/wmfpa/wmfpa.h:
-  // flatterm rep + DSBaum discrimination tree + NormalformInnermost).
-  // OFF by default (THVM_ATP_WMFPA=1 to enable); when set, the orientable
-  // normalize fixpoint encodes the subject to a flatterm once, retrieves
-  // redexes by descending a discrimination tree built from s->lhs[], and
-  // decodes back -- byte-identical normal form to the IC path (asserted
-  // by the bench differential and the in-engine self-check).
+  // Opt-in WM-FPA flat normalize path (src/wmfpa/wmfpa.h flatterm rep +
+  // DSBaum), OFF by default (THVM_ATP_WMFPA=1 to enable).  Arms the
+  // WM-POLICY FT hook (ft_norm.c atp_rules_only_normalize_wf): under the
+  // Waldmeister preset (use_mixmost_nf) the doR-only full-range treated-CP
+  // push normalize runs on the flat substrate with the engine's exact
+  // mixmost walk + Regelbaum-DFS winner -- byte-identical NFs, engine
+  // fallback on anything the flat path cannot decide.  The historic
+  // Term-side binding of this flag (atp_rewrite_normalize_wmfpa:
+  // leftmost-outermost, lowest-slot -- a DIFFERENT redex policy) is
+  // re-gated behind THVM_ATP_WMFPA_TERM so one flag never arms two
+  // policies.
   u8                   use_wmfpa;
-  // Cached WM-FPA discrimination tree (opaque; void* to keep wmfpa.h out
-  // of the public header) and the R size it reflects.  Rebuilt lazily
-  // when n_rules changes, like rule_index.  Only touched on the gated
-  // path (use_wmfpa); NULL otherwise.
+  // Cached WM-FPA discrimination tree of the TERM-side path (opaque;
+  // void* to keep wmfpa.h out of the public header) and the R size it
+  // reflects.  Rebuilt lazily when n_rules changes, like rule_index.
+  // Only touched on the THVM_ATP_WMFPA_TERM path; NULL otherwise.
   void                *wmfpa_tree;
   u32                  wmfpa_built;
-  // Private staleness bit for the WM-FPA tree, set at the same sites that
-  // set rule_index_dirty (an in-place rule edit that need not change
-  // n_rules).  A private bit avoids fighting the indexed path over the
-  // shared rule_index_dirty clear.
+  // Private staleness bit for the Term-side WM-FPA tree, set at the same
+  // sites that set rule_index_dirty (an in-place rule edit that need not
+  // change n_rules).  A private bit avoids fighting the indexed path over
+  // the shared rule_index_dirty clear.  (The WM-policy FT mirror keys on
+  // r_revision instead and hooks the RHS compose directly.)
   u8                   wmfpa_dirty;
-  // Gated correctness probe: when set (THVM_ATP_WMFPA_CHECK!=0) every
-  // gated normalize first asserts the incrementally-maintained tree returns
-  // the same lowest-index rule at every subject position as a tree freshly
-  // rebuilt from the current rule set, aborting on the first divergence.
+  // Live differential for the WM-policy FT hook: when set
+  // (THVM_ATP_WMFPA_CHECK!=0) every flat-decided push normalize ALSO runs
+  // the engine mixmost walk and aborts on the first NF-byte divergence
+  // (cap-hit partials included); the engine result is returned.  The
+  // Term-side path's historic probes moved to THVM_ATP_WMFPA_TERM_CHECK.
   u8                   wmfpa_check;
   // Incremental-resume watermark for the flatterm unorientable preorder
   // scan (atp_ft_unorient_step).  ON by default: the scan resumes past the

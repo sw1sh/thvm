@@ -5239,6 +5239,14 @@ static void wf_eng_check_incremental(AtpState *s, const WfNode *a, u32 alen) {
 }
 
 static Term atp_rewrite_normalize_wmfpa(AtpState *s, Term t, u32 step_cap) {
+  // Correctness probes for THIS (Term-side) path, re-bound from
+  // s->wmfpa_check to THVM_ATP_WMFPA_TERM_CHECK alongside the
+  // THVM_ATP_WMFPA_TERM re-gate: s->wmfpa_check now arms the WM-policy
+  // FT hook's live differential (ft_norm.c atp_rules_only_normalize_wf).
+  static int wmfpa_term_check = -1;
+  if (wmfpa_term_check < 0) {
+    wmfpa_term_check = atp_env_on("THVM_ATP_WMFPA_TERM_CHECK");
+  }
   // Bring the cached tree in sync with the current rule set.  The common
   // completion mutation is a single rule APPEND (atp_push_rule); maintain
   // the tree incrementally for that -- encode + BO_ObjektEinfuegen the new
@@ -5266,7 +5274,7 @@ static Term atp_rewrite_normalize_wmfpa(AtpState *s, Term t, u32 step_cap) {
     // over-deep subject: fall back to the indexed path (correctness > speed).
     return atp_rewrite_normalize_indexed(s, t, step_cap);
   }
-  if (s->wmfpa_check) wf_eng_check_incremental(s, a, alen);
+  if (wmfpa_term_check) wf_eng_check_incremental(s, a, alen);
   WfNode *nfp = NULL;
   int overflow = 0;
   wf_normalize(&wc->tree, a, alen, b, WF_ENG_SUBJ_CAP, step_cap, &nfp,
@@ -5281,7 +5289,7 @@ static Term atp_rewrite_normalize_wmfpa(AtpState *s, Term t, u32 step_cap) {
   }
   u32 p = 0u;
   Term got = wf_eng_decode_rec(nfp, &p);
-  if (s->wmfpa_check) {
+  if (wmfpa_term_check) {
     // Live NF differential against the ground-truth linear normalizer
     // (repeated thvm_rewrite_step -- leftmost-outermost, lowest-index rule,
     // the definition of the IC normal form).  The WM-FPA path is also
@@ -6643,6 +6651,13 @@ fn void thvm_atp_free(AtpState *s) {
     free(wc);
     s->wmfpa_tree = NULL;
   }
+#endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // WM-policy FT mirror: drop the dying state's ownership so a future
+  // AtpState reallocated at the same address (with a coincidentally
+  // matching revision/count) can never validate against stale content.
+  // Buffers are reused across states, exactly like g_ftpi.
+  atp_wf_mm_disown(s);
 #endif
 #ifdef ATP_MNF
   mnf_destroy(s->mnf);
@@ -8452,9 +8467,17 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
       // per-call tree-flatten + rebuild round-trip.
       if (s->use_flatterm)
         return atp_rewrite_normalize_flatterm_mixed(s, t, step_cap);
-      // Gated faithful WM-FPA path (flatterm + DSBaum + NormalformInner-
-      // most).  Byte-identical NF to the indexed path; OFF by default.
-      if (s->use_wmfpa) return atp_rewrite_normalize_wmfpa(s, t, step_cap);
+      // Dormant Term-side WM-FPA path (leftmost-outermost, lowest-slot
+      // policy: wf_normalize / wf_descend).  Re-gated from
+      // THVM_ATP_WMFPA to THVM_ATP_WMFPA_TERM when that flag was
+      // repointed at the WM-policy FT hook (ft_norm.c
+      // atp_rules_only_normalize_wf) -- one flag must never arm two
+      // different redex policies.
+      {
+        static int wmfpa_term = -1;
+        if (wmfpa_term < 0) wmfpa_term = atp_env_on("THVM_ATP_WMFPA_TERM");
+        if (wmfpa_term) return atp_rewrite_normalize_wmfpa(s, t, step_cap);
+      }
       return atp_rewrite_normalize_indexed(s, t, step_cap);
     }
     // Opt-in flatterm fast-path: keep the subject flat across both the
@@ -16580,6 +16603,12 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
                                       r_reduced, 0);
           atp_ft_rules_verify_push(s, i);
 #endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+          // WM-policy FT mirror: the RHS compose is the one rule-set
+          // mutation without an r_revision bump, so the flat splice
+          // template must be re-encoded here (see atp_wf_mm_note_rhs_edit).
+          atp_wf_mm_note_rhs_edit(s, i);
+#endif
 #ifdef ATP_RULE_INDEX
           if (!wf_eng_cache_update_rhs(s, i)) s->wmfpa_dirty = 1u;
 #endif
@@ -16918,6 +16947,12 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 #endif
             // RHS does not feed the LHS discrimination tree, so the
             // rule-LHS index stays valid; no dirty flag needed.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+            // WM-policy FT mirror: re-encode its flat splice template
+            // (the compose does not bump r_revision, so the lazy
+            // watermark alone would miss this edit).
+            atp_wf_mm_note_rhs_edit(s, i);
+#endif
 #ifdef ATP_RULE_INDEX
             // The WM-FPA cache, by contrast, holds a flat COPY of each
             // rule's RHS (wf_step reads it for the splice), so an in-place
