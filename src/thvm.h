@@ -4642,6 +4642,15 @@ typedef struct {
   // rebuild-an-INC-SUP-tree-every-step O(n) scan.
   u32  *cp_pri;
   u32  *cp_seq;
+  // CP FORMATION DEPTH (Twee getDepth): how many overlap generations deep
+  // this CP was derived -- max(parent rule depths) + 1.  Twee's CP score
+  // adds depthweight*depth (src/Twee/CP.hs), penalizing deeply-derived CPs
+  // so completion stays focused on shallow derivations.  Used only by the
+  // ATP_CP_WEIGHT_TWEE (mode 8) score in place of the syntactic term depth
+  // (which stays ~1-2 for flattened flat-names and gives NO derivation
+  // penalty -> thvm explores the deep-derivation space Twee prunes).  The
+  // parallel r_depth[] carries the same counter on active rules.
+  u32  *cp_depth;
   // THVM_ATP_GJ_KEEP: ground-joinable CPs are KEPT (so they age the FIFO
   // dimension faithfully, as Waldmeister keeps them in its 168k unselected
   // set) but forced to never-weight-selectable priority (WM Act_never) --
@@ -4755,6 +4764,9 @@ typedef struct {
   // push, uid_dead is the kill bitmap.  All allocated only under
   // use_orphan_murder (NULL otherwise, slot-move sites NULL-guarded).
   u32  *r_uid;
+  // Per-rule FORMATION DEPTH (Twee getDepth): axioms = 0; a rule oriented
+  // from a selected CP inherits that CP's cp_depth.  See cp_depth above.
+  u32  *r_depth;
   u32  *cp_uid_a;
   u32  *cp_uid_b;
   u8   *uid_dead;
@@ -4974,6 +4986,10 @@ typedef struct {
   // cap.  Consumed by the WM-order mirror's distinguished-face rule
   // (atp_wmo_eq_dist_rhs) when the trace id is ATP_TRACE_NONE.
   u8   last_popped_kind;
+  // Formation depth (cp_depth) of the popped CP -- a rule oriented from it
+  // inherits this as its r_depth (Twee getDepth).  0 before the first pop,
+  // so initial axioms added via orient_and_add get depth 0.
+  u32  last_popped_depth;
 
   // FIFO live-scan floor: every queued CP with cp_seq < fifo_floor_seq
   // is PROVEN dead (its scan-time death test failed and death marks --

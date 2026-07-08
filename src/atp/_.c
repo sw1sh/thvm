@@ -912,10 +912,11 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   Term *nsr = (Term *)realloc(s->r_dead_subsumer_rhs, cap * sizeof(Term));
   u32  *nrc = (u32  *)realloc(s->r_rederive_cut,       cap * sizeof(u32));
   u32  *nru = (u32  *)realloc(s->r_uid,                cap * sizeof(u32));
+  u32  *nrd = (u32  *)realloc(s->r_depth,              cap * sizeof(u32));
   if (nl == NULL || nr == NULL || nt == NULL || no == NULL ||
       nd == NULL || nls == NULL || nrs == NULL || ngj == NULL ||
       nod == NULL || nsl == NULL || nsr == NULL || nrc == NULL ||
-      nru == NULL) {
+      nru == NULL || nrd == NULL) {
     fprintf(stderr, "atp_ensure_rule_cap: realloc to %u rules failed\n",
             cap);
     exit(1);
@@ -926,8 +927,10 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   s->r_dead_subsumer_lhs = nsl; s->r_dead_subsumer_rhs = nsr;
   s->r_rederive_cut = nrc;
   s->r_uid = nru;
+  s->r_depth = nrd;
   for (u32 i = s->r_cap; i < cap; i++) {
     s->r_uid[i] = 0u;
+    s->r_depth[i] = 0u;
     s->r_trace[i] = ATP_TRACE_NONE;
     s->r_dead[i] = 0;
     s->r_dead_lhs_save[i] = 0;
@@ -1166,6 +1169,12 @@ static u8  g_cp_push_kind = (u8)TRACE_CP;
 // A/B); THVM_ATP_SZHINT_CHECK=1 runs BOTH and fatals on a verdict
 // mismatch (certifier).
 static u32 g_cp_rawsz_hint = 0u;
+// CP FORMATION DEPTH for the CP currently being pushed (Twee getDepth):
+// max(parent rule depths) + 1, set by atp_push_cps_traced from its
+// rule_a/rule_b before the heap insert, consumed by (1) the insert to
+// stamp cp_depth[i] and (2) the ATP_CP_WEIGHT_TWEE score in place of the
+// syntactic term depth.  0 = no parents / unknown (an initial/axiom CP).
+static u32 g_cp_formation_depth = 0u;
 // "Never-weight-select" priority (Waldmeister Act_never / maximalWeight).
 // High but far from u32 overflow so cp_pri arithmetic stays safe.
 #define ATP_CP_PRI_NEVER 0x40000000u
@@ -1323,6 +1332,7 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   u32  *nt = (u32  *)realloc(s->cp_trace, cap * sizeof(u32));
   u32  *np = (u32  *)realloc(s->cp_pri,   cap * sizeof(u32));
   u32  *nq = (u32  *)realloc(s->cp_seq,   cap * sizeof(u32));
+  u32  *ncd = (u32 *)realloc(s->cp_depth, cap * sizeof(u32));
   u32  *ng = (u32  *)realloc(s->cp_goal,  cap * sizeof(u32));
   u32  *np2 = (u32 *)realloc(s->cp_pri2,  cap * sizeof(u32));
   u32  *nlnr = (u32 *)realloc(s->cp_last_norm_r_revision,
@@ -1338,12 +1348,13 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   u32  *npo = (u32 *)realloc(s->cp_pos,    cap * sizeof(u32));
   if (nc == NULL || nt == NULL || np == NULL || nq == NULL || ng == NULL
       || np2 == NULL || nlnr == NULL || ndp == NULL || nk == NULL
-      || nh == NULL || npo == NULL) {
+      || nh == NULL || npo == NULL || ncd == NULL) {
     fprintf(stderr, "atp_ensure_cp_cap: realloc to %u CPs failed\n", cap);
     exit(1);
   }
   s->cp_packed = nc; s->cp_trace = nt;
   s->cp_pri = np; s->cp_seq = nq; s->cp_goal = ng; s->cp_pri2 = np2;
+  s->cp_depth = ncd;
   s->cp_last_norm_r_revision = nlnr;
   s->cp_deprio = ndp;
   s->cp_kind = nk;
@@ -6646,6 +6657,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_pri);
   free(s->cp_goal);
   free(s->cp_seq);
+  free(s->cp_depth);
   free(s->cp_pri2);
   free(s->cp_heap);
   free(s->cp_pos);
@@ -6653,6 +6665,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_uid_a);
   free(s->cp_uid_b);
   free(s->r_uid);
+  free(s->r_depth);
   free(s->uid_dead);
   free(s->uid_idx);
   free(s->cp_last_norm_r_revision);
@@ -8894,9 +8907,13 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       u32 n = atp_symbol_count_dedup(rhs);
       u32 large = m > n ? m : n;
       u32 small = m + n - large;
-      u32 d = atp_term_depth(lhs);
-      u32 dr = atp_term_depth(rhs);
-      if (dr > d) d = dr;
+      // Twee's `depth` is the CP FORMATION depth (getDepth), NOT the
+      // syntactic term depth.  On flattened problems the flat-names keep
+      // terms shallow (term-depth ~1-2, a useless constant), so the old
+      // atp_term_depth gave no derivation penalty and thvm explored the
+      // deep-derivation space Twee prunes.  g_cp_formation_depth carries
+      // max(parent rule depths)+1, set by atp_push_cps_traced.
+      u32 d = g_cp_formation_depth;
       return 4u * large + 1u * small + 2u * d;
     }
     case ATP_CP_WEIGHT_STAGGERED: {
@@ -10261,6 +10278,7 @@ static inline void atp_cp_row_move(AtpState *s, u32 dst, u32 src) {
   s->cp_kind[dst]   = s->cp_kind[src];
   s->cp_pri[dst]    = s->cp_pri[src];
   s->cp_seq[dst]    = s->cp_seq[src];
+  if (s->cp_depth != NULL) s->cp_depth[dst] = s->cp_depth[src];
   s->cp_goal[dst]   = s->cp_goal[src];
   s->cp_pri2[dst]   = s->cp_pri2[src];
   s->cp_last_norm_r_revision[dst] = s->cp_last_norm_r_revision[src];
@@ -10459,6 +10477,7 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
                      ? ATP_CP_PRI_NEVER
                      : atp_cp_priority_sized_ex(s, lhs, rhs, cp_nodes,
                                                 lhs_nodes);
+  s->cp_depth[i] = g_cp_formation_depth;   // Twee getDepth (see g_cp_formation_depth)
   if (g_atp_phase_detail) g_atp_cpg_us_kbo += atp_now_us() - _dkb_t0;
   if (s->cp_ultimate != NULL) {
     s->cp_ultimate[i] = is_ultimate;
@@ -10898,6 +10917,7 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   s->cp_pri[i]    = s->cp_deprio[i]
                       ? ATP_CP_PRI_NEVER
                       : atp_cp_priority_sized(s, lhs, rhs, cp_nodes);
+  s->cp_depth[i] = g_cp_formation_depth;   // Twee getDepth (see g_cp_formation_depth)
   if (s->cp_ultimate != NULL) {
     s->cp_ultimate[i] = is_ultimate;
     if (is_ultimate) s->n_cps_ultimate++;
@@ -11458,6 +11478,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   }
   s->last_popped_trace = s->cp_trace[v];
   s->last_popped_kind  = s->cp_kind[v];
+  s->last_popped_depth = (s->cp_depth != NULL) ? s->cp_depth[v] : 0u;
   // Cleared per pop; the KBO_UN orient branch sets it iff the CP-formation
   // side swap physically fires, so the emission mirror never reads a stale
   // verdict from an earlier (e.g. orientable) selection.
@@ -12029,6 +12050,10 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   // CPs of the old identity die with it (see AtpState.r_uid).
   s->r_uid[s->n_rules] = ++s->next_rule_uid;
   atp_uid_idx_set(s, s->r_uid[s->n_rules], s->n_rules);
+  // Twee getDepth: a rule oriented from the selected CP inherits that CP's
+  // formation depth (captured at pop as last_popped_depth; 0 for the
+  // initial axioms, which are added before any pop).
+  s->r_depth[s->n_rules] = s->last_popped_depth;
   s->r_overlap_done[s->n_rules] = 0u;
 #ifdef THVM_ATPFT_RULES
   // Stage 4: mirror the Term pair into the parallel AtpFt slots
@@ -20489,6 +20514,15 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
   // a later CP (batch buf callers never set it and read 0).
   u32 rawsz_hint = (ncps == 1u) ? g_cp_rawsz_hint : 0u;
   g_cp_rawsz_hint = 0u;
+  // Twee getDepth: this CP's formation depth = max(parent rule depths) + 1
+  // (axioms are depth 0).  Consumed by the heap insert (stamps cp_depth[i])
+  // and the ATP_CP_WEIGHT_TWEE score.  Guarded on r_depth so any pre-init
+  // path is depth 0.  Set once per call (parents are fixed for the batch).
+  {
+    u32 da = (s->r_depth != NULL && rule_a < s->n_rules) ? s->r_depth[rule_a] : 0u;
+    u32 db = (s->r_depth != NULL && rule_b < s->n_rules) ? s->r_depth[rule_b] : 0u;
+    g_cp_formation_depth = ((da > db) ? da : db) + 1u;
+  }
 #ifndef ATP_CP_DIAG
   (void)rule_a;
   (void)rule_b;
