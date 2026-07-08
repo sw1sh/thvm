@@ -11734,6 +11734,12 @@ static void atp_cp_floyd_only(AtpState *s) {
 // refresh invariant is re-established before the post-loop Floyd.
 static inline void atp_cp_commit_priorities(AtpState *s, u32 w, u32 slot,
                                             Term l, Term r) {
+  // Re-score with THIS CP's formation depth (Twee getDepth), not the last
+  // push's stale g_cp_formation_depth -- the ATP_CP_WEIGHT_TWEE score reads
+  // the global, so a dynamic re-score (cp_set_interreduce) must restore it
+  // from the stored cp_depth or the depth term would be wrong.  A no-op for
+  // the WM preset (mode 4 ignores the global).
+  if (s->cp_depth != NULL) g_cp_formation_depth = s->cp_depth[slot];
   s->cp_pri[slot]  = s->cp_deprio[w] ? ATP_CP_PRI_NEVER
                                      : atp_cp_priority(s, l, r);
   s->cp_goal[slot] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
