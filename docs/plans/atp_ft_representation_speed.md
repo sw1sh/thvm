@@ -113,6 +113,33 @@ re-encode, subst inlined via `ft_subst_lookup`), replacing
 traffic. Verdict-only parity; certifier `THVM_ATPFT_KBO_DIFF` exists;
 blast radius small (ft_order.c + a comparator beside kbo_flat_slice).
 
+## MEASURED CORRECTION (2026-07-08, P1 partially built)
+
+P1's builder pattern is BUILT + byte-certified for two sites behind
+THVM_ATP_FT_PREORDER (commits cfab3cf8, d98b3a18): ft_from_term and
+ft_subst_apply/ft_deep_copy. Both are byte-identical (full RULEADD
+streams vs baseline on the McCune/Sheffer/Meredith/WolframOA battery,
+suite green) -- BUT both measured **~0-1% on OA**, because they are NOT
+the hot construction path:
+- ft_from_term is the goal-join / FT-mirror BOUNDARY (called O(goals),
+  not O(CPs)).
+- ft_subst_apply is the zero-copy ft_splice's differential-test
+  BASELINE -- cold on the hot normalize path (which splices in place).
+The ACTUAL hot construction on the OA WM-preset path is the FUSED vcp
+pipeline: vcp_ft_build_emit_side / vcp_ft_build_rec (src/atp/_.c ~2506),
+which builds FT cells + emits bytes + accumulates the KBO weight in ONE
+walk. That is the site P1 must convert for the OA emulation win -- and
+it is the most complex (fused), so the preorder discipline must thread
+through the byte-emit + weight accumulation too, or be applied only to
+the cell-build half. Separately, the GATE bottleneck (Hillman/Meredith
+c3) is the TERM-SIDE ground-join normalize (gj_rewrite_step ->
+thvm_subst_apply, not the FT path at all) -- a different builder again.
+So: the two landed conversions are a validated, byte-safe FOUNDATION;
+the real wins need (a) the fused vcp builder [OA speed] and (b) the
+Term-side GJ subst-apply [gate throughput]. Re-profile each target
+before converting; the ~1.6x may be less locality-bound than the
+original scout estimated (two real conversions bought ~0%).
+
 ## Sequencing note
 P1 first (it changes the memory layout every other walk observes, so its
 win partly SUBSUMES P3/P4's locality argument -- re-profile after P1
