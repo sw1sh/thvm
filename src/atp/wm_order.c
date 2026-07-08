@@ -1617,6 +1617,21 @@ static int wmo_kid_cmp_vardesc(const void *pa, const void *pb) {
   // ascending symbol code = DESCENDING var index (vars are negative in WM)
   return (a->sym.sym < b->sym.sym) ? 1 : (a->sym.sym > b->sym.sym ? -1 : 0);
 }
+// Insertion-sort of the var-children by DESCENDING sym.sym -- byte-identical
+// to the qsort above (a node's var children have DISTINCT symbols, so there
+// are no ties and the ordering is unique), but with no function-pointer
+// indirection.  This is the wmo_dfs hot path: on deep ifeq queries the var-
+// child sort ran per visited node (rank phase ~30% of cp-gen; the qsort
+// comparator was a top sampled leaf, same pattern prior work replaced in
+// the flatterm discrimination tree).  nv <= 32 so insertion sort wins.
+static inline void wmo_sort_vkids_vardesc(WmoKid *v, u32 n) {
+  for (u32 i = 1u; i < n; i++) {
+    WmoKid key = v[i];
+    u32 j = i;
+    while (j > 0u && v[j - 1u].sym.sym < key.sym.sym) { v[j] = v[j - 1u]; j--; }
+    v[j] = key;
+  }
+}
 
 static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
                     const WmoUnif *u, u32 depth_guard) {
@@ -1646,7 +1661,7 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
     for (u32 k = 0; k < n->n_kids && nv < 32u; k++) {
       if (n->kids[k].sym.is_var) vkids[nv++] = n->kids[k];
     }
-    if (nv > 1u) qsort(vkids, nv, sizeof(WmoKid), wmo_kid_cmp_vardesc);
+    if (nv > 1u) wmo_sort_vkids_vardesc(vkids, nv);
     u32 qe = wmo_sub_end(d->q, qi);
     for (u32 k = 0; k < nv; k++) {
       WmoUnif u2;
@@ -1664,7 +1679,7 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
     for (u32 k = 0; k < n->n_kids && nv < 32u; k++) {
       if (n->kids[k].sym.is_var) vkids[nv++] = n->kids[k];
     }
-    if (nv > 1u) qsort(vkids, nv, sizeof(WmoKid), wmo_kid_cmp_vardesc);
+    if (nv > 1u) wmo_sort_vkids_vardesc(vkids, nv);
     for (u32 k = 0; k < nv; k++) {
       WmoUnif u2;
       wmo_unif_copy(&u2, u);
