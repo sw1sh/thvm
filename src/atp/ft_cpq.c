@@ -15,8 +15,10 @@
 //   - atp_cp_ft_set                 -- write a fresh entry (allocates
 //                                      the two FT spans from Arena A)
 //   - atp_cp_ft_clear               -- free a slot's FT spans
-//   - atp_cp_ft_swap                -- pointer swap, matches the heap
-//                                      swap on the legacy arrays
+//   - atp_cp_ft_move                -- row backfill / densify move
+//                                      (heap sifts swap only the
+//                                      cp_heap/cp_pos position mirror
+//                                      in _.c, so entries never swap)
 //   - atp_cp_ft_transfer            -- ownership move (queue -> rule)
 //   - atp_cp_trivially_joinable_ft  -- ft_eq verdict on FT cells
 //                                      (NORM-fixpoint via existing
@@ -163,17 +165,9 @@ static void atp_cp_ft_clear(AtpState *s, u32 i) {
   e->origin_rule = 0xffffu;
 }
 
-// --- Slot swap (heap sift) -------------------------------------------
-//
-// Pointer swap; the entry's FT spans do not move so any borrow into
-// them (none today, but Stages 8-9 will index off the cells) stays
-// valid.
-static void atp_cp_ft_swap(AtpState *s, u32 i, u32 j) {
-  AtpCpEntry *arr = (AtpCpEntry *)s->cp_packed_ft;
-  AtpCpEntry t = arr[i];
-  arr[i] = arr[j];
-  arr[j] = t;
-}
+// (No slot-swap helper: heap sifts swap only the cp_heap/cp_pos
+// position mirror in _.c, so FT entries stay on their stationary rows
+// and any borrow into their spans stays valid a fortiori.)
 
 // --- Slot transfer (queue -> rule) -----------------------------------
 //

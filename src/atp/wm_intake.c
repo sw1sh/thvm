@@ -403,11 +403,16 @@ static void atp_wm_intake_canonicalize(AtpState *s) {
   }
   u32 count = 0u;
   for (u32 i = 0; i < s->n_cps; i++) {
-    u32 tr = s->cp_trace[i];
+    // Heap-position walk (payload row mapped per slot): the collected
+    // pair order feeds the intake sort, so it must match the
+    // historical position-order visit.  `slots` stores the ROW -- the
+    // cp_seq / cp_ultimate restamp below targets the payload.
+    u32 vv = s->cp_heap[i];
+    u32 tr = s->cp_trace[vv];
     if (tr == ATP_TRACE_NONE || tr >= s->n_trace) continue;
     Term te = s->trace[tr];
     if (term_tag(te) != TAG_CTR || term_ext(te) != TRACE_AXIOM) continue;
-    slots[count] = i;
+    slots[count] = vv;
     ls[count]    = term_ctr_at(te, 2);
     rs[count]    = term_ctr_at(te, 3);
     count++;
