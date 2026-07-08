@@ -7382,8 +7382,11 @@ static u8 atp_wmo_eq_dist_rhs_dbg(const AtpState *s, u32 src_trace, u8 verdict) 
       Term e = s->trace[src_trace];
       if (term_tag(e) == TAG_CTR) reason = term_ext(e);
     }
-    fprintf(stderr, "DISTREG trace=%u reason=%u dist=%u n_rules=%u\n",
-            src_trace, reason, verdict, s->n_rules);
+    fprintf(stderr,
+            "DISTREG trace=%u reason=%u kind=%u dist=%u n_rules=%u "
+            "n_trace=%u swapped=%u\n",
+            src_trace, reason, s->last_popped_kind, verdict, s->n_rules,
+            s->n_trace, s->last_cp_wm_side_swapped);
   }
   return verdict;
 }
