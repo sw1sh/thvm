@@ -22845,7 +22845,8 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       // the (now canonical) stored LHS: sweep geometry is unchanged,
       // only the stored bytes and what store-order readers (order
       // gates, face registration) see.
-      if (!s->last_cp_wm_side_swapped && !s->use_lr_sortieren
+      if (s->use_emission_order
+          && !s->last_cp_wm_side_swapped && !s->use_lr_sortieren
           && s->last_popped_kind == (u8)TRACE_AXIOM
           && atp_lr_sortieren_rec(lhs, rhs) > 0) {
         s->last_cp_wm_side_swapped = 1u;
