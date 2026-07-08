@@ -59,6 +59,7 @@ static const AtpKnob KNOBS[] = {
   {"selection-ratio",        "THVM_ATP_SELECTION_RATIO", 1, "SelectionRatio"},
   {"goal-interleave",        "THVM_ATP_GOAL_INTERLEAVE", 1, "GoalInterleave"},
   {"ground-join",            "THVM_ATP_GROUND_JOIN",     0, "GroundJoin"},
+  {"lazy-ground-join",       "THVM_ATP_LAZY_GJ",         0, "LazyGroundJoin"},
   {"connectedness",          "THVM_ATP_CONNECT",         0, "Connectedness"},
   {"rhs-interreduce",        "THVM_ATP_RHS_IR",          0, "RHSInterreduce"},
   {"unfailing-cp",           "THVM_ATP_UNFAILING",       0, "UnfailingCP"},
@@ -654,11 +655,13 @@ static const SchedSlice SCHEDULE[] = {
   // Goal FLATTENING (Twee/Vampire naming port) + the lean pruning that
   // exploits the shallow definitions.  Cracks deep-goal UEQ problems
   // plain completion stalls on (measured: COL060-1, GRP167-4 on the
-  // CASC-30 UEQ set -- GRP167-4 needs ~18s, so this slice is weighted to
-  // get real time even at moderate walls).  The two big weights (wm,
+  // CASC-30 UEQ set).  Uses LAZY ground-join (Twee's selection-time
+  // redundancy discipline): GJ runs on the SELECTED CP (~11x fewer calls)
+  // instead of per generated CP -- measured 7.6x faster here (GRP167-4
+  // 26.0s -> 3.4s), both cracks preserved.  The two big weights (wm,
   // flatten) split the budget: wm sweeps the WM-easy set fast, flatten
   // carries the deep-goal UEQ set the bare preset stalls on.
-  {"flatten",  "--flatten-goal --ground-join --connectedness --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.28},
+  {"flatten",  "--flatten-goal --lazy-ground-join --connectedness --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.28},
   {"bare-gj", "--preset=none --ground-join --connectedness", 0.10},
 };
 static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));

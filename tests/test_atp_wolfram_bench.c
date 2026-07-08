@@ -1969,6 +1969,16 @@ int main(int argc, char **argv) {
     const char *cn = getenv("THVM_ATP_CONNECT");
     if (cn != NULL && cn[0] != '\0')
       thvm_atp_set_use_connectedness(s, (cn[0] != '0') ? 1u : 0u);
+    // THVM_ATP_LAZY_GJ=1: run ground-joinability at SELECTION (pop) time
+    // instead of per-generated-CP at push (Twee's lazy redundancy).  Turns
+    // the push-side gate OFF so GJ is paid once, at pop -- the caller need
+    // not also set THVM_ATP_GROUND_JOIN.
+    const char *lgj = getenv("THVM_ATP_LAZY_GJ");
+    if (lgj != NULL && lgj[0] != '\0') {
+      u8 on = (lgj[0] != '0') ? 1u : 0u;
+      thvm_atp_set_use_lazy_ground_join(s, on);
+      if (on) thvm_atp_set_use_ground_join(s, 0u);
+    }
   }
 
   // THVM_ATP_RECORD_NORM=1 turns on per-step normalize-trace recording

@@ -5175,6 +5175,16 @@ typedef struct {
   // criterion only counts; 1 = drop ground-joinable CPs.  Set via
   // thvm_atp_set_use_ground_join (Method -> {... "GroundJoin" -> True}).
   u8   use_ground_join;
+  // Runtime gate for LAZY (selection-time) ground-joinability.  When set,
+  // the expensive ordered-set-partition GJ check runs on the SELECTED,
+  // R+E-normalized CP (~1 per pick) instead of on every generated CP at
+  // push time.  Twee's redundancy discipline: push-side GJ is O(generated
+  // CPs) and dominated GRP766 cp-gen at 8.6s/92%; lazy GJ pays it once at
+  // pop.  Sound (a ground-joinable CP is redundant; dropping before
+  // orientation preserves completeness).  Set via
+  // thvm_atp_set_use_lazy_ground_join; push-side use_ground_join should be
+  // off under this mode so GJ is paid once.
+  u8   use_lazy_ground_join;
 
   // Runtime gate for Bachmair-Dershowitz connectedness DELETION (Twee
   // section 6.2).  0 (default) = off; 1 = drop a CP whose two sides
@@ -6242,6 +6252,7 @@ fn void      thvm_atp_set_use_cp_index(AtpState *s, u8 on);
 // is built with ATP_CP_GROUND_JOIN).  Sound: ground-joinable CPs are
 // redundant.  Off by default (the criterion only counts).
 fn void      thvm_atp_set_use_ground_join(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_lazy_ground_join(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_connectedness(AtpState *s, u8 on);
 // Waldmeister CPdimension fairness ratio: 1 FIFO (oldest) pick per
 // `modulo` CP selections.  0 = default (11).  Larger = more weight-

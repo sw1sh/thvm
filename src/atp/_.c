@@ -7877,6 +7877,17 @@ fn void thvm_atp_set_use_ground_join(AtpState *s, u8 on) {
   s->use_ground_join = on ? 1u : 0u;
 }
 
+// Lazy (selection-time) ground-joinability.  Runs the expensive GJ check
+// on the SELECTED, R+E-normalized CP instead of on every generated CP at
+// push time -- Twee's redundancy discipline.  Default OFF (byte-identical
+// engine); armed via the bench THVM_ATP_LAZY_GJ / FindProof
+// --lazy-ground-join.  The push-side use_ground_join should stay off under
+// this mode so ground-joinability is paid exactly once, at pop.
+fn void thvm_atp_set_use_lazy_ground_join(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_lazy_ground_join = on ? 1u : 0u;
+}
+
 // Bachmair-Dershowitz connectedness CP deletion (Twee section 6.2).
 // Default OFF -> the engine is byte-identical; the WL surface flips it
 // for Method -> {... "Connectedness" -> True} and the Waldmeister preset.
@@ -8447,6 +8458,10 @@ static Term atp_ordered_rewrite_step(AtpState *s, Term t,
 // here so the use_mixmost_nf reroute can repopulate the FT mirror on demand.
 static inline void atp_ft_mirror_ensure(AtpState *s);
 #endif
+// Forward decl: defined far below.  Needed here so the lazy (pop-time)
+// ground-joinability drop in thvm_atp_step can call it before its
+// definition (the push-side caller sits after it).
+static int atp_cp_ground_joinable(AtpState *s, Term lhs, Term rhs);
 static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
                                           const Term *lhs, const Term *rhs,
                                           u32 n_rules, u32 step_cap) {
@@ -13169,6 +13184,29 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // points past hcp_norm), keeping recording memory-bounded.
   u32 trace_mark = s->n_trace;
   Term l, r;
+#ifdef ATP_CP_GROUND_JOIN
+  // Lazy (selection-time) ground-joinability -- Twee's redundancy
+  // discipline.  The expensive ordered-set-partition GJ check runs on the
+  // SELECTED, RAW popped CP (cp_lhs/cp_rhs == the push-normalized form
+  // stored in the queue -- the SAME input push-side GJ consumes) BEFORE
+  // the pop R+E normalize, so a ground-joinable pick is dropped without
+  // paying its normalize AND without the per-generated-CP push tax (push
+  // GJ was O(generated CPs) and dominated GRP766 cp-gen at 8.6s/92%).
+  // Sound: a ground-joinable CP is redundant (Martin-Nipkow / Twee), so
+  // dropping before orientation preserves completeness.  Side order
+  // (cp_rhs, cp_lhs) mirrors the push-side call, corpus-validated.  Skips
+  // the normalize entirely, so no trace/heap chain was recorded yet --
+  // just bump the step and continue.  Gated by use_lazy_ground_join
+  // (default off -> byte-identical); push-side use_ground_join is off in
+  // this mode so GJ is paid once, at pop.
+  if (s->use_lazy_ground_join &&
+      atp_cp_ground_joinable(s, cp_rhs, cp_lhs)) {
+    s->n_cps_ground_joinable++;
+    thvm_atp_heap_reset(hcp_norm);
+    s->step++;
+    return ATP_RUNNING;
+  }
+#endif
   u64 _ph_pop_t0 = atp_phase_now(); g_thvm_phase = "pop_normalize";
   // THVM_ATP_POPALLOC_TRACE: report pops whose normalize allocates more
   // than ~1M Term cells (the avalanche heap-bomb diagnostic; see
