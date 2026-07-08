@@ -118,7 +118,7 @@ int main(void) {
     // The heap root (position 0; payload row cp_heap[0]) is the CP the
     // next select_cp would pop on the default weight branch.  Capture
     // its seq.
-    u32 default_seq = s->cp_seq[s->cp_heap[0]];
+    u32 default_seq = s->cp_seq[s->cp_heap[0].row];
 
     // Pick a DIFFERENT queued CP (the live slot whose seq != default).
     u32 target_seq = default_seq;
@@ -139,9 +139,9 @@ int main(void) {
     // Re-rank must not add or drop CPs.
     CHECK_EQ(thvm_atp_queued_cp_count(s), n);
     // The promoted CP is now the heap root.
-    CHECK_EQ(s->cp_seq[s->cp_heap[0]], target_seq);
+    CHECK_EQ(s->cp_seq[s->cp_heap[0].row], target_seq);
     // The trace id of the CP the next select WILL pop (the root).
-    u32 expect_trace = s->cp_trace[s->cp_heap[0]];
+    u32 expect_trace = s->cp_trace[s->cp_heap[0].row];
 
     // Force the deterministic weight branch (heap root) for this assert:
     // the periodic FIFO pick fires at cp_select_count % 11 == 10, which
@@ -179,15 +179,15 @@ int main(void) {
       seq[i] = s->cp_seq[i];
       pri[i] = s->cp_pri[i];
     }
-    u32 root_seq_before = s->cp_seq[s->cp_heap[0]];
+    u32 root_seq_before = s->cp_seq[s->cp_heap[0].row];
 
     thvm_atp_set_cp_pri_by_seq(s, seq, pri, n);
 
     CHECK_EQ(thvm_atp_queued_cp_count(s), n);
-    CHECK_EQ(s->cp_seq[s->cp_heap[0]], root_seq_before);
+    CHECK_EQ(s->cp_seq[s->cp_heap[0].row], root_seq_before);
     // Force the weight branch so "next selection unchanged" compares the
     // heap root, not the periodic FIFO oldest-CP pick.
-    u32 expect_trace = s->cp_trace[s->cp_heap[0]];
+    u32 expect_trace = s->cp_trace[s->cp_heap[0].row];
     s->cp_select_count = 0u;
     // The next selected CP is the same one as before the no-op re-key.
     Term pl = 0, pr = 0;
@@ -209,7 +209,7 @@ int main(void) {
 
     u32 n = thvm_atp_queued_cp_count(s);
     CHECK(n > 1u);
-    u32 root_seq_before = s->cp_seq[s->cp_heap[0]];
+    u32 root_seq_before = s->cp_seq[s->cp_heap[0].row];
 
     // A seq guaranteed not to be live (cp_seq_next is the next-to-assign
     // id, so it is larger than any live seq).
@@ -218,7 +218,7 @@ int main(void) {
     thvm_atp_set_cp_pri_by_seq(s, &bogus_seq, &bogus_pri, 1u);
 
     CHECK_EQ(thvm_atp_queued_cp_count(s), n);
-    CHECK_EQ(s->cp_seq[s->cp_heap[0]], root_seq_before);
+    CHECK_EQ(s->cp_seq[s->cp_heap[0].row], root_seq_before);
     thvm_atp_free(s);
   }
 

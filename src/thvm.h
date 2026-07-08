@@ -4547,6 +4547,32 @@ typedef struct {
 } AtpCpImplicit;
 _Static_assert(sizeof(AtpCpImplicit) == 20, "AtpCpImplicit must stay 20 bytes");
 
+// CP-heap node: one heap POSITION of the CP priority queue.  `row`
+// names the stationary payload row (the phase-1 indirection); pri/seq/
+// aux are CACHES of the sift-hot comparator keys so one compare touches
+// ONE cache line instead of taking a dependent random payload load per
+// key (cp_heap[pos] -> cp_pri[row] / cp_seq[row] / cp_ultimate[row]).
+//
+// Refresh invariant: at every point where a comparator (atp_cp_before /
+// atp_kdh_gt) can run,
+//   pri == cp_pri[row]
+//   seq == cp_seq[row]
+//   aux == (cp_ultimate == NULL ? 0 : cp_ultimate[row])
+// for every live position.  Every site that writes cp_pri / cp_seq /
+// cp_ultimate for a QUEUED row restamps the caches via atp_cp_heap_set
+// (see each mutation site); row moves (atp_cp_row_move callers) rewire
+// only `row` -- the move copies the keys verbatim, so the caches stay
+// exact.  The mode-gated extra comparator keys (cp_goal / cp_pri2 /
+// cp_packed rhs-node counts, all read only under non-default modes)
+// stay row loads -- they are NOT cached here; 16 bytes is the cap.
+typedef struct {
+  u32 pri;   // cache of cp_pri[row]
+  u32 seq;   // cache of cp_seq[row]
+  u32 row;   // stationary payload row at this heap position
+  u32 aux;   // cache of cp_ultimate[row] (0 while cp_ultimate == NULL)
+} AtpCpHeapNode;
+_Static_assert(sizeof(AtpCpHeapNode) == 16, "AtpCpHeapNode must stay 16 bytes");
+
 typedef struct {
   // Rule set R: growable parallel arrays sized for
   // thvm_rewrite_normalize / thvm_critical_pairs to consume
@@ -4644,18 +4670,22 @@ typedef struct {
   u32   cp_cap;
   // Heap-position indirection: the binary/KD heap orders POSITIONS
   // [0, n_cps) while the ~14 payload arrays above are indexed by
-  // stationary ROWS.  cp_heap[pos] names the row at heap position pos;
-  // cp_pos[row] its position (invariant: cp_pos[cp_heap[p]] == p for
-  // every p < n_cps, and cp_heap[0..n_cps) is a permutation of the live
-  // rows [0..n_cps)).  A sift swaps only these two u32 mirrors; payload
-  // rows move only on pop-backfill / sweep densification (keeping the
-  // live rows dense in [0, n_cps)).  Layout-neutral by construction:
-  // every comparator input and every position-observing consumer maps
-  // positions through cp_heap, so the position-level heap evolution is
-  // byte-identical to the historical whole-payload-swapping heap.
-  // cp_deprio deliberately stays POSITION-indexed (the historical swap
-  // and backfill never moved it); see atp_cp_rebuild_priorities.
-  u32  *cp_heap;
+  // stationary ROWS.  cp_heap[pos] is a 16-byte AtpCpHeapNode: .row
+  // names the row at heap position pos and .pri/.seq/.aux cache that
+  // row's sift-hot comparator keys (see the AtpCpHeapNode refresh
+  // invariant); cp_pos[row] is the position (invariant:
+  // cp_pos[cp_heap[p].row] == p for every p < n_cps, and
+  // cp_heap[0..n_cps).row is a permutation of the live rows
+  // [0..n_cps)).  A sift swaps only whole nodes + the cp_pos mirror;
+  // payload rows move only on pop-backfill / sweep densification
+  // (keeping the live rows dense in [0, n_cps)).  Layout-neutral by
+  // construction: the cached keys are exact copies of the payload keys
+  // at every compare, so every comparator verdict -- hence every sift
+  // swap, hence the position-level heap evolution -- is byte-identical
+  // to the historical row-load heap.  cp_deprio deliberately stays
+  // POSITION-indexed (the historical swap and backfill never moved
+  // it); see atp_cp_rebuild_priorities.
+  AtpCpHeapNode *cp_heap;
   u32  *cp_pos;
 
   // Deferred-CP (`implicit_pair`) arc: parallel array of compact

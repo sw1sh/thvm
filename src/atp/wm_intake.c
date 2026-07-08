@@ -407,7 +407,7 @@ static void atp_wm_intake_canonicalize(AtpState *s) {
     // pair order feeds the intake sort, so it must match the
     // historical position-order visit.  `slots` stores the ROW -- the
     // cp_seq / cp_ultimate restamp below targets the payload.
-    u32 vv = s->cp_heap[i];
+    u32 vv = s->cp_heap[i].row;
     u32 tr = s->cp_trace[vv];
     if (tr == ATP_TRACE_NONE || tr >= s->n_trace) continue;
     Term te = s->trace[tr];
@@ -446,6 +446,10 @@ static void atp_wm_intake_canonicalize(AtpState *s) {
       s->cp_ultimate[slot] = 1u;
       s->n_cps_ultimate++;
     }
+    // cp_seq / cp_ultimate restamped for a QUEUED row: refresh the
+    // packed node caches at the row's position (refresh invariant)
+    // before the trailing Floyd compares against them.
+    atp_cp_heap_set(s, s->cp_pos[slot], slot);
   }
 #ifdef ATP_FV_INDEX
   // FV-index records key on cp_seq; rebuild after the permutation.
