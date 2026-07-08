@@ -1460,6 +1460,39 @@ int main(int argc, char **argv) {
       s->use_cp_side =
           (getenv("THVM_ATP_CP_SIDE") != NULL
            && getenv("THVM_ATP_NO_CP_WM_SIDE") == NULL) ? 1u : 0u;
+      // WM Automodus Kombinatorlogik class (Sinai.h Tafel2: the
+      // KombinatorlogikQ/B/O/S rows run KombS = rose(), which emits
+      // `-ord col3`).  Detection mirror: an applicative signature
+      // (exactly one function symbol, binary -- the apply operator;
+      // everything else constants) with at least one axiom that is a
+      // strict combinator-definition equation (one side `C x1..xn`
+      // over pairwise-distinct variables, the other built ONLY from
+      // apply + those variables) -- the Sinai per-axiom detectors
+      // (SKombinator "_S" etc.).  A fixpoint axiom like Y (contractum
+      // carries Y itself) is NOT a definition and does not classify,
+      // matching WM keeping it as an E.  Under col3 the duplicating
+      // definitions ((W x) y -> (x y) y) orient as WM's rules do; KBO
+      // keeps them unorientable and the kept-E store order forks from
+      // WM (the 6 Combinator corpus rows, swaps at facts 6/7).
+      // THVM_ATP_NO_COL3=1 restores the KBO-only behavior.
+      if (pr_mode && getenv("ATP_BENCH_AUTO_WEIGHTS") != NULL
+          && getenv("THVM_ATP_NO_COL3") == NULL && prp.n_eqns > 0u) {
+        u32 apply = 0u, n_fn = 0u;
+        for (u32 k = 0; k < prp.n_syms; k++) {
+          if (prp.syms[k].arity > 0u) {
+            n_fn++;
+            if (prp.syms[k].arity == 2u) apply = PR_LABEL_BASE + k;
+          }
+        }
+        if (n_fn == 1u && apply != 0u) {
+          for (u32 e = 0; e < prp.n_eqns; e++) {
+            if (thvm_atp_col3_pair(prp.eq_l[e], prp.eq_r[e], apply)) {
+              s->col3_apply = apply;
+              break;
+            }
+          }
+        }
+      }
       // Push-time queue-vs-queue subsumption OFF: thvm-native filter
       // with no WM counterpart (recentCPinsert queues every treated
       // survivor; SS_TermpaarSubsummiertTermpaar's only set-level

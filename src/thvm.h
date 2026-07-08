@@ -5986,6 +5986,17 @@ typedef struct {
   // CP-formation side order for most derived E-members; only intake
   // axioms run LRSortieren).  Opt-in only.  See atp_lr_sortieren_rec.
   u8    use_lr_sortieren;
+  // Waldmeister col3 combinator ordering (Ordnungen.c:101-117 +
+  // TermOperationen.c IstKombinatorTupel; Automodus strategy KombS =
+  // rose() for the Kombinatorlogik classes): s > t iff s is a
+  // combinator redex `C x1 .. xn` on the apply spine (C a constant,
+  // x1..xn pairwise-distinct variables) and t is built only from the
+  // apply operator plus symbols occurring in s, OR s is a bare
+  // constant and t is ground.  Orients the duplicating combinator
+  // definition axioms ((W x) y -> (x y) y) no simplification order
+  // can.  col3_apply = the applicative binary label (WM
+  // TO_ApplyOperator).  0 = off (default).
+  u32   col3_apply;
   // Waldmeister CP-formation side geometry (Unifikation1.c:916-917, env
   // THVM_ATP_CP_SIDE, default OFF): store each derived UNORIENTABLE
   // equation with WM's geometric side order -- KPLinks = sigma(r_i) (the
@@ -6120,6 +6131,7 @@ typedef struct {
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);
 fn void      thvm_atp_free        (AtpState *s);
 fn u8        thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs);
+fn u8        thvm_atp_col3_pair   (Term a, Term b, u32 apply);
 fn u8        thvm_atp_set_goal    (AtpState *s, Term lhs, Term rhs);
 // Multi-goal conjunction: set n conjecture pairs (lhs[g], rhs[g]) to
 // be proved off one saturation.  n == 0 clears the goal (completion

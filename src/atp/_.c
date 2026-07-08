@@ -7917,10 +7917,111 @@ fn void thvm_atp_set_goal_interleave(AtpState *s, u32 ratio) {
 //
 // Stage 8: a `THVM_ATP_LPO_ORIENT_CACHE` wrapper sits on top of this
 // body (see below) and memoises the verdict by structural-hash pair.
+// WM Col3 combinator ordering (Ordnungen.c:101-117 Col3Test /
+// Col3Vergleich + TermOperationen.c:1284-1315 IstKombinatorTupel).
+// s > t iff
+//   (a) s is a combinator redex `C x1 .. xn` on the apply spine:
+//       peeling `apply` off s's LEFT spine reaches a constant head C,
+//       and the spine arguments x1..xn are pairwise-DISTINCT
+//       variables; and t is built ONLY from the apply operator plus
+//       variables occurring in s -- NO constants at all
+//       (SO_SymbIstFkt covers arity-0 symbols, so WM's t-walk rejects
+//       any constant != apply: the Y fixpoint contractum x(Yx)
+//       carries Y and stays UNORIENTABLE, kept as E); or
+//   (b) s is a bare constant and t is ground (WM guards TRUE/FALSE
+//       under existential goals; the equational bench has none).
+// Not a simplification order: combinator reduction duplicates
+// variables.  Completion under it relies on the same step caps WM's
+// KombS strategy does.
+static int atp_col3_tuple(Term s, Term t, u32 apply) {
+  Term args[64];
+  u32 n = 0;
+  if (!(term_tag(s) == TAG_CTR && term_ext(s) == apply &&
+        term_ctr_n(s) == 2u)) {
+    return 0;
+  }
+  Term cur = s;
+  while (term_tag(cur) == TAG_CTR && term_ext(cur) == apply &&
+         term_ctr_n(cur) == 2u) {
+    if (n >= 64u) return 0;
+    args[n++] = term_ctr_at(cur, 1);
+    cur = term_ctr_at(cur, 0);
+  }
+  if (!(term_tag(cur) == TAG_CTR && term_ctr_n(cur) == 0u)) return 0;
+  for (u32 i = 0; i < n; i++) {
+    if (term_tag(args[i]) != TAG_FVR) return 0;
+    for (u32 j = i + 1u; j < n; j++) {
+      if (term_ext(args[i]) == term_ext(args[j])) return 0;
+    }
+  }
+  // t's preorder: every function symbol (constants included) must be
+  // the apply operator; variables must be among the spine args.
+  Term stk[256];
+  u32 sp = 0u;
+  stk[sp++] = t;
+  while (sp > 0u) {
+    Term c = stk[--sp];
+    if (term_tag(c) == TAG_FVR) {
+      u32 id = term_ext(c);
+      u32 ok = 0u;
+      for (u32 i = 0; i < n; i++) {
+        if (term_ext(args[i]) == id) { ok = 1u; break; }
+      }
+      if (!ok) return 0;
+      continue;
+    }
+    if (term_tag(c) != TAG_CTR) return 0;
+    if (term_ext(c) != apply || term_ctr_n(c) == 0u) return 0;
+    u32 cn = term_ctr_n(c);
+    if (sp + cn > 256u) return 0;
+    for (u32 i = 0; i < cn; i++) stk[sp++] = term_ctr_at(c, i);
+  }
+  return 1;
+}
+
+static int atp_term_is_ground(Term t) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return 0;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (!atp_term_is_ground(term_ctr_at(t, i))) return 0;
+      }
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+static int atp_col3_test(Term s, Term t, u32 apply) {
+  if (atp_col3_tuple(s, t, apply)) return 1;
+  if (term_tag(s) == TAG_CTR && term_ctr_n(s) == 0u &&
+      atp_term_is_ground(t)) {
+    return 1;
+  }
+  return 0;
+}
+
+static KboCmp atp_col3(Term lhs, Term rhs, u32 apply) {
+  if (kbo_eq(lhs, rhs)) return KBO_EQ;
+  if (atp_col3_test(lhs, rhs, apply)) return KBO_GT;
+  if (atp_col3_test(rhs, lhs, apply)) return KBO_LT;
+  return KBO_UN;
+}
+
+// Classification probe for the -auto mirror (the bench's
+// Kombinatorlogik detection): is (a, b) a combinator-definition
+// equation in either direction under `apply`?
+fn u8 thvm_atp_col3_pair(Term a, Term b, u32 apply) {
+  return (atp_col3_tuple(a, b, apply) || atp_col3_tuple(b, a, apply))
+             ? 1u : 0u;
+}
+
 // With the flag off, the macro alias below collapses back to this
 // function and the default build is byte-identical.
 static KboCmp atp_compare_uncached(AtpState *s, Term lhs, Term rhs) {
   if (s == NULL) return KBO_UN;
+  if (s->col3_apply != 0u) return atp_col3(lhs, rhs, s->col3_apply);
 #ifdef THVM_ATP_AC
   // AC-aware ordering: when an AC mask is registered, route through
   // atp_kbo_ac / atp_lpo_ac.  They canonicalize both terms modulo
