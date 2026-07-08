@@ -110,7 +110,7 @@ int main(void) {
       // exactly under ft_to_term.  thvm_atp_cp_get(i) reads heap
       // POSITION i; the FT entry lives at the same stationary payload
       // row, mapped through cp_heap.
-      u32 row = s->cp_heap[i];
+      u32 row = s->cp_heap[i].row;
       CHECK(arr[row].lhs != NULL);
       CHECK(arr[row].rhs != NULL);
       Term ul = 0, ur = 0;
@@ -186,7 +186,7 @@ int main(void) {
       // Sifts move only the cp_heap/cp_pos position mirror; both the
       // legacy payload and the FT entry stay at the same stationary
       // row, so the views stay in lockstep row-for-row.
-      u32 row = s->cp_heap[i];
+      u32 row = s->cp_heap[i].row;
       Term ul = 0, ur = 0;
       thvm_atp_cp_get(s, i, &ul, &ur);
       Term tl = ft_to_term(arr[row].lhs);
