@@ -13,6 +13,7 @@ mkdir -p "$D/src" "$D/tests" "$D/tools" "$D/bin"
 ( cd "$REPO/src" && tar cf - $(find . \( -name '*.c' -o -name '*.h' \)) ) | ( cd "$D/src" && tar xf - )
 cp "$REPO/tests/test_atp_wolfram_bench.c" "$D/tests/"
 cp "$REPO/tools/thvm_atp_cli.c"            "$D/tools/"
+cp "$REPO/tools/proof_check.c"             "$D/tools/"
 cp "$REPO/tools/casc/Makefile"             "$D/Makefile"
 cp "$REPO/tools/casc/starexec_build"       "$D/starexec_build"
 cp "$REPO/tools/casc/starexec_run_default" "$D/bin/starexec_run_default"
