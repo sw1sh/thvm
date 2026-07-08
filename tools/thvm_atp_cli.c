@@ -711,7 +711,13 @@ static int run_schedule(const char *self, const char *file, double wall,
               SCHEDULE[i].name, wall);
       pid_t pid = fork();
       if (pid == 0) {
-        // Child: redirect stdout to the slice temp file, exec the slice.
+        // Child: own process group so the parent can kill the WHOLE
+        // subtree (this child + the shell system() forks + its FindProof
+        // grandchild) with one killpg -- otherwise killing the child
+        // blocked in system() would orphan the grandchild engine, which
+        // keeps running to its wall and could overlap the next problem.
+        setpgid(0, 0);
+        // Redirect stdout to the slice temp file, run the slice.
         int fd = open(outs[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd >= 0) { dup2(fd, 1); close(fd); }
         char cmd[4096];
@@ -720,6 +726,9 @@ static int run_schedule(const char *self, const char *file, double wall,
                  szs ? " --szs" : "", want_proof ? " --proof" : "", file);
         _exit(system(cmd) == 0 ? 0 : 1);
       }
+      // Set the child's pgid parent-side too (race-free: whichever of
+      // parent/child wins, the group id equals the child pid).
+      if (pid > 0) setpgid(pid, pid);
       pids[i] = pid;
       launched++;
     }
@@ -736,8 +745,10 @@ static int run_schedule(const char *self, const char *file, double wall,
     }
   }
   // Kill + reap any still-running slices (the winner made them redundant).
+  // killpg on the child's group takes down the shell + FindProof grandchild
+  // too, so no engine is left orphaned to run to its wall.
   for (int i = 0; i < N_SCHED; i++)
-    if (pids[i] > 0 && !done[i]) kill(pids[i], SIGKILL);
+    if (pids[i] > 0 && !done[i]) { killpg(pids[i], SIGKILL); kill(pids[i], SIGKILL); }
   for (int i = 0; i < N_SCHED; i++)
     if (pids[i] > 0 && !done[i]) { int st; waitpid(pids[i], &st, 0); }
   int rc = 1;
