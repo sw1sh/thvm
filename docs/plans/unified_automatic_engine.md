@@ -162,6 +162,51 @@ WolframAxioms/ImpliesSheffer c3 may stay hard (banked Vampire times
 out on both; Twee gets the latter in 9.78s -- so it IS a target, via
 selection quality, not out of reach).
 
+## MEASURED FINDINGS (2026-07-08, direct thvm runs -- correct the agents)
+
+The design + critique agents' gate claims were not independently
+verified and are partly WRONG. Measured truth:
+
+1. **McCune/EqualityOfInverses is NOT a gate.** thvm-WM PROVES it in
+   **0.09s** (177 steps, 16 rules; goal joins at n_rules=16, matching
+   Twee's ~15 lemmas). The "600s stall" was false. Remove it as a gate.
+2. **The 3 real gates (Hillman/Meredith/WolframAxioms ImpliesSheffer
+   c3) fail thvm-WM via CP-QUEUE EXPLOSION** -- 5.26M CPs -> 5.3GB RSS
+   abort in ~24s. Failure mode = REDUNDANCY, not stall.
+3. thvm's EXISTING aggressive-redundancy knobs (THVM_ATP_GROUND_JOIN=1
+   BWD_SUB=1 BWD_DEMOD=1) cut Hillman c3 CPs **5.26M -> 18.6K (283x)**,
+   kill the memory abort -- BUT the pruned search grinds at ~30 steps/s
+   (vs 2131 baseline; backward ops are O(rules), unindexed) and **does
+   NOT converge in 240s** (133 -> 181 rules, CPs still growing). NOT a
+   pure-speed problem. LPO instead of KBO: same. Goal-weighted CP
+   selection (mode 7): even slower (4.5 steps/s), no crack. CP-set-IR:
+   no crack. **NO existing-knob combination proves any gate.**
+4. **=> Phase 1 (portfolio wiring of existing presets) will NOT crack
+   these three** -- confirmed by measurement, not just the critique's
+   suspicion. Phase 1 is honestly "arm redundancy so we stop CRASHING
+   and stay lean," a prerequisite, not a crack.
+5. **Twee proves Hillman c3 with 17 TARGETED lemmas in 0.2s** (goal
+   joins via a 111-step rewrite chain); thvm wanders to 181
+   mostly-irrelevant rules and never assembles the join. The goal is
+   ground (skC1/2/3), MNF is armed (mixmost=1), yet the goal NF sides
+   stay stuck at different forms -- the goal-RELEVANT lemmas are never
+   derived/selected in budget.
+6. **Twee's edge, concretely:** (a) goal-directed selection deriving
+   FEW goal-relevant lemmas; (b) MULTI-ORDERING ground joinability
+   (Twee tries several orderings per gj test; thvm's gj_less_in is
+   single-ordering) -- a NEW lever not in the plan; (c) cheap
+   (indexed) backward simplification (thvm's is the ~30-steps/s
+   bottleneck -> the FT-representation P1 speed work is directly on the
+   critical path here, not a separate track).
+
+REVISED PHASING CONSEQUENCE: the FIRST genuine crack is a real Phase-2
+build (goal-directed lemma selection) + likely multi-ordering GJ, on
+Hillman or Meredith c3 (NOT McCune). Redundancy knobs (Phase 1) are
+necessary scaffolding. The FT-representation speed roadmap (P1
+preorder-streaming, indexed backward simplification) is ON the critical
+path -- it turns the lean-but-30-steps/s search into a fast one, which
+is half of why Twee wins. Speed and coverage are the same lever here.
+
 ## The revised proving-power thesis (post-diagnostic)
 
 The first GENUINE-new-power win is **matching Twee on
