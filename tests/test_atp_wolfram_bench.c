@@ -33,6 +33,14 @@
 // include this translation unit (tools/thvm_atp_cli.c) and need the
 // machine-readable result alongside the printed report.
 int g_atp_bench_status = -1;
+// Pre-teardown hook + context for wrappers: called (when set) right
+// before thvm_atp_free with the final state, while rules/trace/heap
+// are still live -- proof extraction happens here.  g_atp_bench_pr
+// points at the parsed .pr (symbol/variable names for term printing)
+// when the run was pr-mode.
+struct PrProblem_;
+void (*g_atp_bench_pre_free_hook)(AtpState *s) = NULL;
+void *g_atp_bench_pr = NULL;
 
 // nand is the single binary function symbol (CTR label 1).
 #define L_NAND 1u
@@ -943,6 +951,7 @@ int main(int argc, char **argv) {
   // .pr file mode (see PrProblem above): parse the header now so the
   // KboConfig below carries the file's signature + ordering.
   static PrProblem prp;
+  g_atp_bench_pr = (void *)&prp;
   int pr_mode = (strstr(goal, ".pr") != NULL);
   if (pr_mode) pr_load_header(goal, &prp);
   // Load the equation/goal terms up front too (they only need thvm_init, done
@@ -2667,6 +2676,7 @@ int main(int argc, char **argv) {
   }
 #endif
 
+  if (g_atp_bench_pre_free_hook != NULL) g_atp_bench_pre_free_hook(s);
   thvm_atp_free(s);
   return (st == ATP_PROVED) ? 0 : 1;
 }
