@@ -268,9 +268,101 @@ static AtpFtCell *ft_from_term_rec(AtpFt *a, Term t, int scratch) {
   return ftnew_const(a, 0x20000000u | (u32)tag, scratch);
 }
 
+// Preorder-streaming term builder (FT-representation P1): allocate the
+// PARENT cell BEFORE its children so the pre-order chain (parent->next
+// == child0, child->end->next == next sibling) threads through
+// PHYSICALLY-CONSECUTIVE cells on the bump/adjacency-preserving arena --
+// Waldmeister's SigmaRGanzNeu discipline (MatchOperationen.c:1397),
+// where a term is materialised straight down the free list so a
+// pre-order walk is a near-sequential memory scan.  ft_from_term_rec
+// (the default) builds BOTTOM-UP (children before parent), so a
+// pre-order walk hops backward in memory and every ->next is a
+// dependent random load; this walk removes that on freshly-built terms.
+//
+// Byte-identical RESULT to ft_from_term_rec: same sym/arity/flags/next/
+// end on every cell (the GROUND flag is OR-folded identically -- cleared
+// as soon as a non-ground child is seen).  Only the cell ADDRESSES
+// differ, and no normal form / hash / KBO verdict observes an address
+// (ftnfm is content-keyed over the pre-order SYMBOL sequence, not cell
+// pointers), so the emitted RULEADD/proof stream is bit-for-bit
+// unchanged.  Gated by THVM_ATP_FT_PREORDER (resolved once); default OFF
+// = the bottom-up path, physically unchanged.
+static int g_ft_preorder = -1;
+static AtpFtCell *ft_from_term_pre(AtpFt *a, Term t, int scratch) {
+  extern unsigned char g_atp_phase_detail;
+  if (g_atp_phase_detail) { extern u64 g_ft_from_nodes; g_ft_from_nodes++; }
+  u8 tag = term_tag(t);
+  if (tag == TAG_FVR) {
+    AtpFtCell *c = ft_alloc_one(a, scratch);
+    c->next  = NULL;
+    c->end   = c;
+    c->sym   = WF_VAR_BIT | (term_ext(t) & ~WF_VAR_BIT);
+    c->arity = 0;
+    c->flags = 0;
+    ft_raw_check(c);
+    return c;
+  }
+  if (tag == TAG_CTR) {
+    u32 label = term_ext(t);
+    u32 n     = term_ctr_n(t);
+    AtpFtCell *c = ft_alloc_one(a, scratch);   // PARENT FIRST (pre-order)
+    c->sym   = label & ~WF_VAR_BIT;
+    c->arity = (u16)n;
+    c->flags = ATPFT_FLAG_GROUND;              // OR-folded below
+    if (n == 0u) { c->next = NULL; c->end = c; ft_raw_check(c); return c; }
+    AtpFtCell *prev_end = NULL;
+    for (u32 i = 0; i < n; i++) {
+      AtpFtCell *kid = ft_from_term_pre(a, term_ctr_at(t, i), scratch);
+      if (i == 0u) c->next = kid;              // kid is the physically next cell
+      else         prev_end->next = kid;
+      if ((kid->flags & ATPFT_FLAG_GROUND) == 0u) c->flags = 0;
+      prev_end = kid->end;
+    }
+    c->end         = prev_end;
+    c->end->next   = NULL;
+    ft_raw_check(c);
+    return c;
+  }
+  if (tag == TAG_NUM) {
+    // Marker parent, then the two field constants, pre-order.
+    u32 dtype = term_ext(t);
+    u32 raw   = (u32)term_val(t);
+    AtpFtCell *c = ft_alloc_one(a, scratch);
+    c->sym   = ATPFT_NUM_MARKER;
+    c->arity = 2u;
+    c->flags = ATPFT_FLAG_GROUND;
+    AtpFtCell *dt_cell = ft_alloc_one(a, scratch);
+    dt_cell->next = NULL; dt_cell->end = dt_cell;
+    dt_cell->sym = dtype & ~WF_VAR_BIT; dt_cell->arity = 0;
+    dt_cell->flags = ATPFT_FLAG_GROUND;
+    ft_raw_check(dt_cell);
+    AtpFtCell *raw_cell = ft_alloc_one(a, scratch);
+    raw_cell->next = NULL; raw_cell->end = raw_cell;
+    raw_cell->sym = raw & ~WF_VAR_BIT; raw_cell->arity = 0;
+    raw_cell->flags = ATPFT_FLAG_GROUND;
+    ft_raw_check(raw_cell);
+    c->next        = dt_cell;
+    dt_cell->next  = raw_cell;
+    c->end         = raw_cell;
+    raw_cell->next = NULL;
+    ft_raw_check(c);
+    return c;
+  }
+  AtpFtCell *c = ft_alloc_one(a, scratch);
+  c->next  = NULL;
+  c->end   = c;
+  c->sym   = 0x20000000u | (u32)tag;
+  c->arity = 0;
+  c->flags = ATPFT_FLAG_GROUND;
+  ft_raw_check(c);
+  return c;
+}
+
 AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
   extern unsigned char g_atp_phase_detail;
   if (g_atp_phase_detail) { extern u64 g_ft_from_calls; g_ft_from_calls++; }
+  if (g_ft_preorder < 0) g_ft_preorder = getenv("THVM_ATP_FT_PREORDER") ? 1 : 0;
+  if (g_ft_preorder) return ft_from_term_pre(a, t, scratch);
   return ft_from_term_rec(a, t, scratch);
 }
 
