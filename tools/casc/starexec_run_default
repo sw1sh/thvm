@@ -1,0 +1,8 @@
+#!/bin/sh
+# CASC / StarExec run script.  $1 = problem file (TPTP CNF UEQ).
+# The wall-clock limit is taken from the StarExec environment; the
+# system self-slices it across a portfolio of configurations, prints
+# an SZS status line, and (on success) an SZS CNFRefutation.
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+LIMIT=${STAREXEC_WALLCLOCK_LIMIT:-120}
+exec "$HERE/bin/FindProof" --schedule --szs --proof --wall="$LIMIT" "$1"

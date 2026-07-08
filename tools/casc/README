@@ -1,0 +1,22 @@
+FindProof -- equational theorem prover (CASC UEQ entry)
+
+BUILD
+  make                 # produces bin/FindProof  (needs a C11 compiler + libm)
+  ./starexec_build     # equivalent, for StarExec
+
+RUN (competition)
+  bin/starexec_run_default PROBLEM.p
+      Reads the wall-clock limit from $STAREXEC_WALLCLOCK_LIMIT (default 120s),
+      runs a time-sliced portfolio, and writes SZS output to stdout.
+
+RUN (manual)
+  bin/FindProof --schedule --szs --proof --wall=120 PROBLEM.p
+  bin/FindProof --szs PROBLEM.p                      # single default config
+  bin/FindProof --list-knobs                         # the full strategy surface
+
+INPUT   TPTP CNF unit-equality problems.  include('Axioms/*.ax') directives
+        resolve against the problem directory and $TPTP.
+OUTPUT  SZS ontology status (Unsatisfiable / Satisfiable / GaveUp / ResourceOut)
+        and, with --proof, an SZS CNFRefutation block.
+
+No external dependencies beyond the C standard library and libm.
