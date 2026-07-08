@@ -665,7 +665,13 @@ static const SchedSlice SCHEDULE[] = {
   // -- complementary to both (goal-direction the WM preset lacks, pruning
   // the bare MNF front lacks).
   {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1", 0.33},
-  // Backups -- only launch if one of the first three exits early.
+  // (4) TWEE-SCORED completion: flatten + Twee's CP score (mode 8, now with
+  // the faithful formation-depth term) + pure best-first (w2-modulo=0, no
+  // WM age interleave) + dynamic passive re-scoring (cp-set-interreduce =
+  // Twee simplifyPassive).  A genuinely different selection regime from the
+  // three WM/MNF slices above -- the portfolio's Twee-native angle.
+  {"twee",   "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --cp-set-interreduce", 0.0},
+  // Backups -- only launch if one of the first four exits early.
   {"wm-gj",   "--ground-join --connectedness",             0.0},
   {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.0},
   {"bare-gj", "--preset=none --ground-join --connectedness", 0.0},
@@ -677,8 +683,8 @@ static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
 // THVM_ATP_RSS_ABORT_MB unless the caller already set a (lower) value.
 #define SCHED_SLICE_RSS_MB 5000
 // Max slices resident at once.  K concurrent engines * SCHED_SLICE_RSS_MB
-// bounds peak memory (3 * 5GB = 15GB, under a 24GB ceiling on 48GB).
-#define SCHED_MAX_PAR 3
+// bounds peak memory (4 * 5GB = 20GB, under a 24GB ceiling on 48GB).
+#define SCHED_MAX_PAR 4
 
 // CONCURRENT portfolio: run the slices in a bounded pool (SCHED_MAX_PAR at
 // a time), EACH with the FULL wall -- not wall/N as the old sequential
