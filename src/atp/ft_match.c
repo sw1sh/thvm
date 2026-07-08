@@ -303,8 +303,82 @@ static AtpFtCell *ft_subst_apply_rec(AtpFt *a, const AtpFtCell *tmpl,
   return out;
 }
 
+// Preorder-streaming twins of the two builders above (FT-representation
+// P1): allocate the PARENT cell before its children so the reduct /
+// bound-subterm copy threads through physically-consecutive arena cells
+// (WM SigmaRGanzNeu), instead of bottom-up ftnew_ctr where every ->next
+// is a backward load.  These are the HOT construction sites (the reduct
+// built on every rewrite step, the bound subterm deep-copied at each var
+// occurrence).  Byte-identical RESULT to the *_rec twins: same sym (the
+// masked value ftnew_const/ftnew_ctr would store), arity, GROUND flag
+// (OR-folded), next/end -- only addresses differ, invisible to every
+// verdict.  Gated by ft.c's g_ft_preorder (same TU).  On an unbound-var
+// NULL, bubble NULL exactly like *_rec; the half-built parent is arena
+// garbage on an error path that cannot arise for well-formed rules.
+static AtpFtCell *ft_deep_copy_pre(AtpFt *a, const AtpFtCell *src, int scratch) {
+  if (src == NULL) return NULL;
+  if (ft_m_is_var(src)) {
+    AtpFtCell *c = ft_alloc_one(a, scratch);
+    c->next = NULL; c->end = c;
+    c->sym = WF_VAR_BIT | (ft_m_var_id(src) & ~WF_VAR_BIT);
+    c->arity = 0; c->flags = 0;
+    ft_raw_check(c);
+    return c;
+  }
+  u16 arity = src->arity;
+  AtpFtCell *c = ft_alloc_one(a, scratch);          // parent first
+  c->sym = src->sym & ~WF_VAR_BIT;
+  c->arity = arity;
+  c->flags = ATPFT_FLAG_GROUND;
+  if (arity == 0u) { c->next = NULL; c->end = c; ft_raw_check(c); return c; }
+  const AtpFtCell *child = src->next;
+  AtpFtCell *prev_end = NULL;
+  for (u16 i = 0; i < arity; i++) {
+    AtpFtCell *kid = ft_deep_copy_pre(a, child, scratch);
+    if (kid == NULL) return NULL;
+    if (i == 0u) c->next = kid; else prev_end->next = kid;
+    if ((kid->flags & ATPFT_FLAG_GROUND) == 0u) c->flags = 0;
+    prev_end = kid->end;
+    child = child->end->next;
+  }
+  c->end = prev_end; c->end->next = NULL;
+  ft_raw_check(c);
+  return c;
+}
+static AtpFtCell *ft_subst_apply_pre(AtpFt *a, const AtpFtCell *tmpl,
+                                     const AtpFtSubst *s, int scratch) {
+  if (tmpl == NULL) return NULL;
+  if (ft_m_is_var(tmpl)) {
+    u32 id = ft_m_var_id(tmpl);
+    if (id >= ATPFT_MAX_VARS) return NULL;
+    AtpFtCell *binding = s->bind[id];
+    if (binding == NULL) return NULL;
+    return ft_deep_copy_pre(a, binding, scratch);
+  }
+  u16 arity = tmpl->arity;
+  AtpFtCell *c = ft_alloc_one(a, scratch);          // parent first
+  c->sym = tmpl->sym & ~WF_VAR_BIT;
+  c->arity = arity;
+  c->flags = ATPFT_FLAG_GROUND;
+  if (arity == 0u) { c->next = NULL; c->end = c; ft_raw_check(c); return c; }
+  const AtpFtCell *child = tmpl->next;
+  AtpFtCell *prev_end = NULL;
+  for (u16 i = 0; i < arity; i++) {
+    AtpFtCell *kid = ft_subst_apply_pre(a, child, s, scratch);
+    if (kid == NULL) return NULL;
+    if (i == 0u) c->next = kid; else prev_end->next = kid;
+    if ((kid->flags & ATPFT_FLAG_GROUND) == 0u) c->flags = 0;
+    prev_end = kid->end;
+    child = child->end->next;
+  }
+  c->end = prev_end; c->end->next = NULL;
+  ft_raw_check(c);
+  return c;
+}
+
 AtpFtCell *ft_subst_apply(AtpFt *a, const AtpFtCell *tmpl,
                           const AtpFtSubst *s, int scratch) {
+  if (ft_preorder_on()) return ft_subst_apply_pre(a, tmpl, s, scratch);
   return ft_subst_apply_rec(a, tmpl, s, scratch);
 }
 

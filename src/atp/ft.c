@@ -287,7 +287,11 @@ static AtpFtCell *ft_from_term_rec(AtpFt *a, Term t, int scratch) {
 // pointers), so the emitted RULEADD/proof stream is bit-for-bit
 // unchanged.  Gated by THVM_ATP_FT_PREORDER (resolved once); default OFF
 // = the bottom-up path, physically unchanged.
-static int g_ft_preorder = -1;
+int g_ft_preorder = -1;
+static inline int ft_preorder_on(void) {
+  if (g_ft_preorder < 0) g_ft_preorder = getenv("THVM_ATP_FT_PREORDER") ? 1 : 0;
+  return g_ft_preorder;
+}
 static AtpFtCell *ft_from_term_pre(AtpFt *a, Term t, int scratch) {
   extern unsigned char g_atp_phase_detail;
   if (g_atp_phase_detail) { extern u64 g_ft_from_nodes; g_ft_from_nodes++; }
@@ -361,8 +365,7 @@ static AtpFtCell *ft_from_term_pre(AtpFt *a, Term t, int scratch) {
 AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
   extern unsigned char g_atp_phase_detail;
   if (g_atp_phase_detail) { extern u64 g_ft_from_calls; g_ft_from_calls++; }
-  if (g_ft_preorder < 0) g_ft_preorder = getenv("THVM_ATP_FT_PREORDER") ? 1 : 0;
-  if (g_ft_preorder) return ft_from_term_pre(a, t, scratch);
+  if (ft_preorder_on()) return ft_from_term_pre(a, t, scratch);
   return ft_from_term_rec(a, t, scratch);
 }
 
