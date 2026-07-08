@@ -85,6 +85,9 @@ static const AtpKnob KNOBS[] = {
   {"reversed-completion",    "THVM_ATP_REVERSED",        0, "ReversedCompletion"},
   {"sue-management",         "THVM_ATP_SOS",             0, "SUEManagement"},
   {"goal-subterm",           "THVM_ATP_GOAL_SUBTERM",    0, "GoalSubtermRelevance"},
+  {"flatten-goal",           "THVM_ATP_FLATTEN_GOAL",    0, "FlattenGoal"},
+  {"backward-subsume",       "THVM_ATP_BWD_SUB",         0, "BackwardSubsume"},
+  {"backward-demod",         "THVM_ATP_BWD_DEMOD",       0, "BackwardDemod"},
   {"backward-ground-join",   "THVM_ATP_BWD_GROUND_JOIN", 0, "BackwardGroundJoin"},
   {"cp-side",                "THVM_ATP_CP_SIDE",         0, "CPSide"},
   {"wm-trie-faithful",       "THVM_ATP_WM_TRIE_FAITHFUL",0, "(faithful trie)"},
@@ -633,17 +636,21 @@ static void cli_proof_hook(AtpState *s) {
 // CASC-30 coverage matrix tunes them.
 typedef struct { const char *name; const char *flags; double frac; } SchedSlice;
 static const SchedSlice SCHEDULE[] = {
-  {"wm",      "",                                          0.35},
-  {"wm-gj",   "--ground-join --connectedness",             0.22},
-  {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.13},
-  {"wm-mnf",  "--mnf",                                     0.08},
+  {"wm",      "",                                          0.30},
+  {"wm-gj",   "--ground-join --connectedness",             0.18},
+  {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.10},
+  {"wm-mnf",  "--mnf",                                     0.07},
   // Goal-direction (the EXISTING MNF front) COMBINED with the pruning
   // that keeps its front lean -- ground-join + a growing MaxWeight
   // bound.  The bare wm-mnf slice above explodes (no pruning) and the
   // pruning slices carry no goal-direction; this slice is the missing
-  // intersection, assembled from existing knobs only (no new engine
-  // code -- MNF is the WM-faithful front already in the engine).
-  {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1", 0.12},
+  // intersection, assembled from existing knobs only.
+  {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1", 0.10},
+  // Goal FLATTENING (Twee/Vampire naming port) + the lean pruning that
+  // exploits the shallow definitions.  Cracks deep-goal UEQ problems
+  // plain completion stalls on (measured: COL060-1, GRP167-4, ... on the
+  // CASC-30 UEQ set).
+  {"flatten",  "--flatten-goal --ground-join --connectedness --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.15},
   {"bare-gj", "--preset=none --ground-join --connectedness", 0.10},
 };
 static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
