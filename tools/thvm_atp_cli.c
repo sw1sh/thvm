@@ -438,8 +438,14 @@ static char *tp_emit_pr(TpProblem *tp, const char *name) {
 // SZS + proof output
 // ===================================================================
 
+// Competition-clean output: in --szs/--proof mode the bench TU's
+// diagnostic chatter is rerouted to stderr and the SZS lines go to the
+// preserved real stdout via this stream.
+static FILE *g_cli_out = NULL;
 static int  g_cli_tptp_mode = 0;
 static int  g_cli_want_proof = 0;
+static int  g_cli_want_szs = 0;
+static int  g_cli_szs_printed = 0;
 static const char *g_cli_problem = NULL;
 
 // 1 when no completeness-breaking pruning is active AND the goal is
@@ -572,7 +578,15 @@ static void cli_proof_hook(AtpState *s) {
   static AtpProofStep steps[ATP_PROOF_MAX_STEPS];
   u8 *printed = (u8 *)calloc(s->n_trace, 1u);
   if (printed == NULL) return;
-  printf("%% SZS output start CNFRefutation for %s\n", g_cli_problem);
+  // The bench's stdout is rerouted to stderr in competition mode; the
+  // SZS stream goes to the preserved real stdout (g_cli_out).
+  FILE *out = (g_cli_out != NULL) ? g_cli_out : stdout;
+  if (g_cli_want_szs && !g_cli_szs_printed) {
+    fprintf(out, "%% SZS status %s for %s\n",
+            g_cli_tptp_mode ? "Unsatisfiable" : "Theorem", g_cli_problem);
+    g_cli_szs_printed = 1;
+  }
+  fprintf(out, "%% SZS output start CNFRefutation for %s\n", g_cli_problem);
   u32 n_goals = (pr->n_goals > 0u) ? pr->n_goals : 1u;
   for (u32 g = 0; g < n_goals; g++) {
     Term gl = (pr->n_goals > 0u) ? pr->goals_l[g] : pr->goal_l;
@@ -581,12 +595,13 @@ static void cli_proof_hook(AtpState *s) {
     u32 n = thvm_atp_proof_extract(s, steps, ATP_PROOF_MAX_STEPS);
     if (n == 0u) n = thvm_atp_mnf_proof_extract(s, steps, ATP_PROOF_MAX_STEPS);
     if (n == 0u && !(term_tag(gl) == term_tag(gr) && gl == gr)) {
-      printf("%% goal %u: no single-NF chain extractable\n", g);
+      fprintf(out, "%% goal %u: no single-NF chain extractable\n", g);
       continue;
     }
-    cli_emit_goal_chain(stdout, s, pr, gl, gr, g, steps, n, printed);
+    cli_emit_goal_chain(out, s, pr, gl, gr, g, steps, n, printed);
   }
-  printf("%% SZS output end CNFRefutation for %s\n", g_cli_problem);
+  fprintf(out, "%% SZS output end CNFRefutation for %s\n", g_cli_problem);
+  fflush(out);
   free(printed);
 }
 
@@ -758,7 +773,17 @@ int main(int argc, char **argv) {
     free(raw);
   }
 
+  g_cli_want_szs = szs;
   if (g_cli_want_proof) g_atp_bench_pre_free_hook = cli_proof_hook;
+  // Competition-clean stdout: reroute the bench TU's diagnostic chatter
+  // to stderr; the SZS lines go to the preserved real stdout.
+  int real_stdout = -1;
+  if (szs || g_cli_want_proof) {
+    real_stdout = dup(1);
+    g_cli_out = fdopen(dup(real_stdout), "w");
+    fflush(stdout);
+    dup2(2, 1);
+  }
 
   char *bench_argv[5];
   bench_argv[0] = (char *)"FindProof";
@@ -768,10 +793,16 @@ int main(int argc, char **argv) {
   bench_argv[4] = NULL;
   int rc = atp_bench_main(4, bench_argv);
 
+  if (real_stdout >= 0) {
+    fflush(stdout);
+    dup2(real_stdout, 1);   // restore the real stdout for the SZS line
+    close(real_stdout);
+  }
   // Inside a schedule slice, only a SUCCESS prints its SZS line -- the
   // schedule wrapper owns the single final status otherwise.
   if (szs && getenv("FINDPROOF_SLICE") != NULL
       && g_atp_bench_status != (int)ATP_PROVED) szs = 0;
+  if (g_cli_szs_printed) szs = 0;
   if (szs) {
     const char *tag;
     if (g_cli_tptp_mode) {

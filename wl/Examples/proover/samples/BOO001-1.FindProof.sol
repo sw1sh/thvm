@@ -1,15 +1,25 @@
 % SZS status Unsatisfiable for BOO001-1.p
 % SZS output start CNFRefutation for BOO001-1.p
-cnf(ax1, axiom, multiply(multiply(V,W,X),Y,multiply(V,W,Z)) = multiply(V,W,multiply(X,Y,Z))).
-cnf(ax2, axiom, multiply(Y,X,X) = X).
-cnf(ax3, axiom, multiply(X,X,Y) = X).
-cnf(ax4, axiom, multiply(inverse(Y),Y,X) = X).
-cnf(ax5, axiom, multiply(X,Y,inverse(Y)) = X).
-cnf(negated_conjecture, negated_conjecture, inverse(inverse(a)) != a).
-cnf(cpl1, plain, multiply(V,W,multiply(X,Y,W)) = multiply(multiply(V,W,X),Y,W), inference(sup, [status(thm)], [ax1, ax2])).
-cnf(cpl2, plain, multiply(V,X,multiply(inverse(X),W,X)) = multiply(V,W,X), inference(sup, [status(thm)], [cpl1, ax5])).
-cnf(cpl3, plain, multiply(V,inverse(W),W) = multiply(V,W,inverse(W)), inference(sup, [status(thm)], [cpl2, ax3])).
-cnf(sl1, plain, multiply(V,inverse(W),W) = V, inference(rw, [status(thm)], [cpl3, ax5])).
-cnf(cpl4, plain, inverse(inverse(V)) = V, inference(sup, [status(thm)], [sl1, ax4])).
-cnf(contradiction, plain, $false, inference(rw, [status(thm)], [negated_conjecture, cpl4])).
+cnf(t0, axiom, multiply(multiply(V,W,X),Y,multiply(V,W,Z)) = multiply(V,W,multiply(X,Y,Z))).
+cnf(t9, plain, multiply(multiply(V,W,X),Y,multiply(V,W,Z)) = multiply(V,W,multiply(X,Y,Z)), inference(orient, [status(thm)], [t0])).
+cnf(t1, axiom, multiply(V,W,W) = W).
+cnf(t5, plain, multiply(V,W,W) = W, inference(orient, [status(thm)], [t1])).
+cnf(t15, plain, multiply(V,W,multiply(X,Y,W)) = multiply(multiply(V,W,X),Y,W), inference(cp, [status(thm)], [t9, t5])).
+cnf(t23, plain, multiply(multiply(V,W,X),Y,W) = multiply(V,W,multiply(X,Y,W)), inference(orient, [status(thm)], [t15])).
+cnf(t4, axiom, multiply(V,W,inverse(W)) = V).
+cnf(t6, plain, multiply(V,W,inverse(W)) = V, inference(orient, [status(thm)], [t4])).
+cnf(t26, plain, multiply(V,W,multiply(inverse(W),X,W)) = multiply(V,X,W), inference(cp, [status(thm)], [t23, t6])).
+cnf(t36, plain, multiply(V,W,multiply(inverse(W),X,W)) = multiply(V,X,W), inference(orient, [status(thm)], [t26])).
+cnf(t2, axiom, multiply(V,V,W) = V).
+cnf(t7, plain, multiply(V,V,W) = V, inference(orient, [status(thm)], [t2])).
+cnf(t40, plain, multiply(V,inverse(W),W) = multiply(V,W,inverse(W)), inference(cp, [status(thm)], [t36, t7])).
+cnf(t57, plain, multiply(V,inverse(W),W) = V, inference(step, [status(thm)], [t40, t6])).
+cnf(t46, plain, multiply(V,inverse(W),W) = V, inference(orient, [status(thm)], [t57])).
+cnf(t3, axiom, multiply(inverse(V),V,W) = W).
+cnf(t8, plain, multiply(inverse(V),V,W) = W, inference(orient, [status(thm)], [t3])).
+cnf(t48, plain, inverse(inverse(V)) = V, inference(cp, [status(thm)], [t46, t8])).
+cnf(t52, plain, inverse(inverse(V)) = V, inference(orient, [status(thm)], [t48])).
+cnf(goal_0, negated_conjecture, inverse(inverse(a)) != a).
+cnf(g0_0, plain, a != a, inference(rw, [status(thm)], [goal_0, t52])).
+cnf(contradiction_0, plain, $false, inference(trivial_inequality_removal, [status(thm)], [g0_0])).
 % SZS output end CNFRefutation for BOO001-1.p
