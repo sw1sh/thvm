@@ -106,6 +106,10 @@ static const int N_KNOBS = (int)(sizeof(KNOBS) / sizeof(KNOBS[0]));
 // TPTP CNF UEQ -> .pr conversion
 // ===================================================================
 
+// Set during TPTP parsing when any negative unit carries a variable
+// (the re-negated goal is existential); gates the Satisfiable claim.
+static int g_cli_goal_existential = 0;
+
 #define TP_MAX_CLAUSES  512
 #define TP_MAX_SYMS     512
 #define TP_MAX_VARS     256
@@ -347,6 +351,16 @@ static void tp_parse(TpProblem *tp, const char *text) {
     memcpy(cl->lhs, lit, ln); cl->lhs[ln] = '\0';
     memcpy(cl->rhs, lit + rs, rn); cl->rhs[rn] = '\0';
     cl->neg = neg;
+    if (neg) {
+      // uppercase-initial token anywhere in the goal = goal variable
+      for (const char *q = lit; *q != '\0' && q < lit + llen; q++) {
+        if (isupper((unsigned char)*q) &&
+            (q == lit || !(isalnum((unsigned char)q[-1]) || q[-1] == '_'))) {
+          g_cli_goal_existential = 1;
+          break;
+        }
+      }
+    }
     tp_scan_term(tp, cl->lhs);
     tp_scan_term(tp, cl->rhs);
   }
@@ -426,13 +440,17 @@ static int  g_cli_tptp_mode = 0;
 static int  g_cli_want_proof = 0;
 static const char *g_cli_problem = NULL;
 
-// 1 when no completeness-breaking pruning is active, so a saturation
-// (QUEUE_EMPTY) soundly reports Satisfiable; else GaveUp.
+// 1 when no completeness-breaking pruning is active AND the goal is
+// ground, so a saturation (QUEUE_EMPTY) soundly reports Satisfiable;
+// else GaveUp.  An existential goal (variables in the negative unit)
+// is decided by BUDGETED narrowing, so its saturation witnesses
+// nothing.
 static int cli_strategy_complete(void) {
   const char *mw = getenv("THVM_ATP_MAXW");
   const char *am = getenv("THVM_ATP_AUTO_MAXW");
   const char *rr = getenv("THVM_ATP_RANDOM_RATIO");
-  return (mw == NULL || *mw == '0') && (am == NULL || *am == '0')
+  return !g_cli_goal_existential
+      && (mw == NULL || *mw == '0') && (am == NULL || *am == '0')
       && (rr == NULL || *rr == '0');
 }
 
@@ -619,6 +637,7 @@ int main(int argc, char **argv) {
     if (nlen == 3 && strncmp(name, "szs", 3) == 0) { szs = 1; continue; }
     if (nlen == 5 && strncmp(name, "proof", 5) == 0) { g_cli_want_proof = 1; continue; }
     if (nlen == 7 && strncmp(name, "keep-pr", 7) == 0) { keep_pr = 1; continue; }
+    if (nlen == 12 && strncmp(name, "convert-only", 12) == 0) { keep_pr = 2; continue; }
     if (nlen == 6 && strncmp(name, "preset", 6) == 0) { preset = (val != NULL) ? val : "waldmeister"; continue; }
     if (nlen == 9 && strncmp(name, "max-steps", 9) == 0 && val != NULL) { max_steps = val; continue; }
     if (nlen == 4 && strncmp(name, "wall", 4) == 0 && val != NULL) { wall = val; continue; }
@@ -681,7 +700,7 @@ int main(int argc, char **argv) {
       snprintf(pname, sizeof pname, "%.*s",
                (int)strcspn(base, "."), base);
       char *pr_text = tp_emit_pr(&tp, pname);
-      if (keep_pr) snprintf(tmp_pr, sizeof tmp_pr, "%s.pr", file);
+      if (keep_pr != 0) snprintf(tmp_pr, sizeof tmp_pr, "%s.pr", file);
       else {
         snprintf(tmp_pr, sizeof tmp_pr, "/tmp/thvm_atp_%d.pr", (int)getpid());
       }
@@ -690,6 +709,7 @@ int main(int argc, char **argv) {
       fputs(pr_text, fp);
       fclose(fp);
       free(pr_text);
+      if (keep_pr == 2) { printf("%s\n", tmp_pr); return 0; }
       run_file = tmp_pr;
     }
     free(raw);
