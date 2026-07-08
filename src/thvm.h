@@ -4596,6 +4596,18 @@ typedef struct {
   // push, freed on pop / drop.
   u8  **cp_packed;
   u32  *cp_trace;
+  // Per-CP origin class (TRACE_AXIOM / TRACE_CP / TRACE_SIMPLIFY),
+  // stamped at push and riding the slot through sifts/backfills exactly
+  // like cp_trace.  The proof-trace soft cap turns cp_trace into
+  // ATP_TRACE_NONE for late pushes, but the WM-order mirror still needs
+  // the popped equation's ORIGIN to place its distinguished face
+  // (atp_wmo_eq_dist_rhs): a superposition CP stores WM's (KPLinks,
+  // KPRechts) so the distinguished face is the stored LHS, while a
+  // SIMPLIFY re-derivation keeps it on the stored RHS.  One byte per CP
+  // keeps that decision exact past the cap (WolframAxioms
+  // OrAssociativity fact 318: the trace-less registration mis-walked
+  // the B/E sweep faces and flipped a weight tie at fact 533).
+  u8   *cp_kind;
   u32   n_cps;
   // 7c': the CP queue is a binary min-heap keyed on
   // (cp_pri, cp_seq) -- cp_pri is atp_cp_priority computed once at
@@ -4906,6 +4918,11 @@ typedef struct {
   // pop so orient_and_add's TRACE_ORIENT entry can record the
   // source CP as its parent.
   u32  last_popped_trace;
+  // Origin class (cp_kind) of the popped CP -- valid alongside
+  // last_popped_trace and, unlike it, immune to the proof-trace soft
+  // cap.  Consumed by the WM-order mirror's distinguished-face rule
+  // (atp_wmo_eq_dist_rhs) when the trace id is ATP_TRACE_NONE.
+  u8   last_popped_kind;
 
   // FIFO live-scan floor: every queued CP with cp_seq < fifo_floor_seq
   // is PROVEN dead (its scan-time death test failed and death marks --
@@ -5224,6 +5241,7 @@ typedef struct {
   u32 *cp_stash_trace;
   u32 *cp_stash_nodes;
   u8  *cp_stash_ultimate;  // parallel u8 flag: WM Act_ultimate carry-over
+  u8  *cp_stash_kind;      // parallel origin class (see cp_kind)
   u32  n_cp_stash;
   u32  cp_stash_cap;
 

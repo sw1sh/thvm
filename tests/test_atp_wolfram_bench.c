@@ -29,6 +29,19 @@
 #include "../src/thvm.c"
 #include <time.h>
 
+// Final AtpStatus of the last run, exposed for thin wrappers that
+// include this translation unit (tools/thvm_atp_cli.c) and need the
+// machine-readable result alongside the printed report.
+int g_atp_bench_status = -1;
+// Pre-teardown hook + context for wrappers: called (when set) right
+// before thvm_atp_free with the final state, while rules/trace/heap
+// are still live -- proof extraction happens here.  g_atp_bench_pr
+// points at the parsed .pr (symbol/variable names for term printing)
+// when the run was pr-mode.
+struct PrProblem_;
+void (*g_atp_bench_pre_free_hook)(AtpState *s) = NULL;
+void *g_atp_bench_pr = NULL;
+
 // nand is the single binary function symbol (CTR label 1).
 #define L_NAND 1u
 
@@ -394,6 +407,13 @@ typedef struct {
   u32   precedence[PR_MAX_SYMS + PR_LABEL_BASE];  // by label; higher = greater
   Term  eq_l[PR_MAX_EQNS], eq_r[PR_MAX_EQNS];
   u32   n_eqns;
+  // Multi-goal CONCLUSION block (Waldmeister's parser keeps a
+  // list_of_conclusions; -auto proves every goal in one run).
+  // goal_l/goal_r stay the FIRST goal so all single-goal code paths
+  // (signature walk, MNF gate, alignment tooling) read exactly what
+  // they always read.
+  Term  goals_l[64], goals_r[64];
+  u32   n_goals;
   Term  goal_l, goal_r;
 } PrProblem;
 
@@ -904,8 +924,13 @@ static void pr_terms_line(PrProblem *pr, PrSec sec, const char *body) {
     pr_eq_line(pr, body, &pr->eq_l[pr->n_eqns], &pr->eq_r[pr->n_eqns]);
     pr->n_eqns++;
   } else if (sec == PR_SEC_CONCL) {
-    if (pr->goal_l != 0) pr_die(pr, "multiple CONCLUSION lines", body);
-    pr_eq_line(pr, body, &pr->goal_l, &pr->goal_r);
+    if (pr->n_goals >= 64u) pr_die(pr, "too many CONCLUSION lines", body);
+    pr_eq_line(pr, body, &pr->goals_l[pr->n_goals], &pr->goals_r[pr->n_goals]);
+    if (pr->n_goals == 0u) {
+      pr->goal_l = pr->goals_l[0];
+      pr->goal_r = pr->goals_r[0];
+    }
+    pr->n_goals++;
   }
 }
 
@@ -926,6 +951,7 @@ int main(int argc, char **argv) {
   // .pr file mode (see PrProblem above): parse the header now so the
   // KboConfig below carries the file's signature + ordering.
   static PrProblem prp;
+  g_atp_bench_pr = (void *)&prp;
   int pr_mode = (strstr(goal, ".pr") != NULL);
   if (pr_mode) pr_load_header(goal, &prp);
   // Load the equation/goal terms up front too (they only need thvm_init, done
@@ -1973,7 +1999,13 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "mc_assoc") == 0) goal_mc_assoc(&gl, &gr);
   else if (strcmp(goal, "hn_leftid") == 0) goal_hn_leftid(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
-  if (!saturate) thvm_atp_set_goal(s, gl, gr);
+  if (!saturate) {
+    if (pr_mode && prp.n_goals > 1u) {
+      thvm_atp_set_goals(s, prp.goals_l, prp.goals_r, prp.n_goals);
+    } else {
+      thvm_atp_set_goal(s, gl, gr);
+    }
+  }
 
   // MNF goal-directed (two-coloured front) search.  Waldmeister's -auto
   // arms zb=mnf goal treatment for GROUND goals (the Automodus structure
@@ -1988,6 +2020,12 @@ int main(int argc, char **argv) {
   {
     u8 goal_ground = !saturate && gl != 0
                    && atp_bench_term_ground(gl) && atp_bench_term_ground(gr);
+    if (pr_mode && prp.n_goals > 1u) {
+      for (u32 g = 0; g < prp.n_goals; g++) {
+        if (!atp_bench_term_ground(prp.goals_l[g])
+            || !atp_bench_term_ground(prp.goals_r[g])) { goal_ground = 0u; break; }
+      }
+    }
     const char *mnf = getenv("THVM_ATP_MNF");
     if (mnf != NULL && *mnf == '1') thvm_atp_set_use_mnf(s, 1u);
     else if (mnf != NULL && *mnf == '0') thvm_atp_set_use_mnf(s, 0u);
@@ -2108,6 +2146,7 @@ int main(int argc, char **argv) {
   }
   double el = (double)(clock() - t0) / CLOCKS_PER_SEC;
 
+  g_atp_bench_status = (int)st;
   const char *sn =
       (st == ATP_PROVED)      ? "PROVED" :
       (st == ATP_REFUTED)     ? "REFUTED" :
@@ -2637,6 +2676,7 @@ int main(int argc, char **argv) {
   }
 #endif
 
+  if (g_atp_bench_pre_free_hook != NULL) g_atp_bench_pre_free_hook(s);
   thvm_atp_free(s);
   return (st == ATP_PROVED) ? 0 : 1;
 }
