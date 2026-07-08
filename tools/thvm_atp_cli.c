@@ -636,21 +636,24 @@ static void cli_proof_hook(AtpState *s) {
 // CASC-30 coverage matrix tunes them.
 typedef struct { const char *name; const char *flags; double frac; } SchedSlice;
 static const SchedSlice SCHEDULE[] = {
-  {"wm",      "",                                          0.30},
-  {"wm-gj",   "--ground-join --connectedness",             0.18},
-  {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.10},
-  {"wm-mnf",  "--mnf",                                     0.07},
+  {"wm",      "",                                          0.22},
+  {"wm-gj",   "--ground-join --connectedness",             0.15},
+  {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.08},
+  {"wm-mnf",  "--mnf",                                     0.05},
   // Goal-direction (the EXISTING MNF front) COMBINED with the pruning
   // that keeps its front lean -- ground-join + a growing MaxWeight
   // bound.  The bare wm-mnf slice above explodes (no pruning) and the
   // pruning slices carry no goal-direction; this slice is the missing
   // intersection, assembled from existing knobs only.
-  {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1", 0.10},
+  {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1", 0.12},
   // Goal FLATTENING (Twee/Vampire naming port) + the lean pruning that
   // exploits the shallow definitions.  Cracks deep-goal UEQ problems
-  // plain completion stalls on (measured: COL060-1, GRP167-4, ... on the
-  // CASC-30 UEQ set).
-  {"flatten",  "--flatten-goal --ground-join --connectedness --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.15},
+  // plain completion stalls on (measured: COL060-1, GRP167-4 on the
+  // CASC-30 UEQ set -- GRP167-4 needs ~18s, so this slice is weighted to
+  // get real time even at moderate walls).  The two big weights (wm,
+  // flatten) split the budget: wm sweeps the WM-easy set fast, flatten
+  // carries the deep-goal UEQ set the bare preset stalls on.
+  {"flatten",  "--flatten-goal --ground-join --connectedness --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.28},
   {"bare-gj", "--preset=none --ground-join --connectedness", 0.10},
 };
 static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
