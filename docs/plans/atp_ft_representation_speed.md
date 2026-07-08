@@ -140,6 +140,39 @@ Term-side GJ subst-apply [gate throughput]. Re-profile each target
 before converting; the ~1.6x may be less locality-bound than the
 original scout estimated (two real conversions bought ~0%).
 
+## ROOT CAUSE of the ~0% (2026-07-08, decisive -- P1 is a DEAD END as scoped)
+
+Built + measured the preorder discipline; root-caused why it gives ~0%.
+The hot builders (ft_subst_apply, vcp_ft_build_emit_rec) allocate on the
+PERSISTENT arena (scratch=0), which is a FREE-LIST (ft_alloc_persistent_
+raw: `cell = free_head; free_head = cell->next`). After a long run's
+alloc/free churn the free-list order is SCRAMBLED, so "allocate parent
+before children" does NOT yield physically-consecutive cells -- the
+->next loads stay random. The scout's premise ("ft_free_span preserves
+chain adjacency") holds for a single freed span but NOT across many
+generations of interleaved alloc/free. So parent-first construction is
+locality-neutral on the persistent arena; P1 as scoped (reorder
+construction only) CANNOT deliver the win. Confirmed by ft_from_term
+(~1%) AND ft_subst_apply (~0%): two correct conversions, ~0 speedup.
+
+CONSEQUENCE -- roadmap re-derived:
+- The ftdt_descend3 cost (22% of samples, the "random loads" the scout
+  saw) is therefore NOT the subject term's construction -- it is the
+  RULE-INDEX dt nodes (the 104B FtDtNode + 3 side arrays per branch),
+  i.e. P3 (node packing), which does not depend on construction order.
+  RE-ATTRIBUTE: P3 is the likely real ftdt lever, not P1.
+- The genuine P1-style win requires ARENA LOCALITY: a bump or COMPACTING
+  persistent arena (like WM's SV, which hands out sequential cells), NOT
+  just construction order. That is a much larger change (a compacting
+  collector over the FT arena) with its own risks.
+- The two landed conversions (THVM_ATP_FT_PREORDER, byte-certified) stay
+  as a validated foundation and are correct if a bump/compacting arena
+  ever lands, but are ~0% today. Do NOT convert more sites (vcp builder)
+  expecting a win -- same free-list, same ~0%.
+NEXT speed lever to try: P3 (ftdt node packing -- one cache-line query
+header + interleaved edge pool), which attacks the confirmed
+ftdt_descend3 hot loop and is construction-order-independent.
+
 ## Sequencing note
 P1 first (it changes the memory layout every other walk observes, so its
 win partly SUBSUMES P3/P4's locality argument -- re-profile after P1
