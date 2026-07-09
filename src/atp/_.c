@@ -1666,6 +1666,20 @@ static u8 *acp_pack(Term lhs, Term rhs, u32 *out_len, u32 *out_nodes) {
   return acp_pack_ex(lhs, rhs, out_len, out_nodes, NULL);
 }
 
+// Preorder node count of one term -- the exact tally acp_pack_term
+// accrues (one ++ per node: CTR head + every child, NUM, FVR), but
+// without touching the scratch buffer.  Used by the byte-queue-
+// retirement push path to recover cp_nodes / lhs_nodes when the byte
+// pack is skipped (nothing reads cp_packed under that config).
+static u32 acp_count_term(Term t) {
+  u32 n = 1u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 k = term_ctr_n(t);
+    for (u32 i = 0; i < k; i++) n += acp_count_term(term_ctr_at(t, i));
+  }
+  return n;
+}
+
 // Inverse of acp_pack: rebuild both heap Terms from the byte string.
 static void acp_unpack(const u8 *buf, Term *lhs, Term *rhs) {
   const u8 *p = buf;
@@ -10854,7 +10868,27 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     }
   }
   if (packed == NULL) {
-    packed = acp_pack_ex(lhs, rhs, NULL, &cp_nodes, &lhs_nodes);
+    u8 skip_pack = 0u;
+#ifdef THVM_ATPFT_CPQ
+#if !defined(THVM_ATP_COLLAPSE_DEFER) && !defined(THVM_ATP_TIE_RHS)
+    // Byte-queue retirement: when subsumption is off (the WM presets set
+    // use_queue_subsume=0, so neither the FV index nor the non-FV scan
+    // is built) and no packed-byte heap-compare is compiled in, NOTHING
+    // reads cp_packed -- slot_read, the peeks, and the priority rebuild
+    // all source the FT queue (atp_cp_ft_set stores the pair at insert).
+    // Skip the malloc+pack; recover the node counts it would have
+    // returned via the identical preorder tally.  cp_packed[i] stays
+    // NULL on a non-implicit slot, inert here (the cp_packed==NULL <=>
+    // implicit reliance also sits behind use_queue_subsume).
+    if (!s->use_queue_subsume) {
+      lhs_nodes = acp_count_term(lhs);
+      cp_nodes  = lhs_nodes + acp_count_term(rhs);
+      skip_pack = 1u;
+    }
+#endif
+#endif
+    if (!skip_pack)
+      packed = acp_pack_ex(lhs, rhs, NULL, &cp_nodes, &lhs_nodes);
   }
   // Waldmeister NEVER weight-caps an ultimate CP -- an initial axiom is
   // the spec (Act_ultimate, w1=INT32_MIN) and must always enter the
