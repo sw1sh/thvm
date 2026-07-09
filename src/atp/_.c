@@ -11760,7 +11760,15 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
       continue;
     }
     Term l = 0, r = 0;
+#ifdef THVM_ATPFT_CPQ
+    // Byte-queue retirement: source the term pair from the FT image
+    // (packed slot, implicit already handled above).  Same terms
+    // acp_unpack would rebuild -> same recomputed priority.
+    { AtpFtCell *fl, *fr; atp_cp_ft_slot_get(s, vv, &fl, &fr);
+      l = ft_to_term(fl); r = ft_to_term(fr); }
+#else
     acp_unpack(s->cp_packed[vv], &l, &r);
+#endif
     // cp_deprio stays POSITION-indexed (raw i): the historical sift /
     // backfill never moved it, so its byte at position i -- stamped by
     // whichever append last landed there -- is what the historical
