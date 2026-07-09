@@ -1734,6 +1734,16 @@ static AtpFtCell *acp_unpack_term_ft(AtpFt *a, const u8 **pp, int scratch) {
 // reset) by exactly the next pop treatment.
 static AtpFtCell *g_pop_ft_l = NULL;
 static AtpFtCell *g_pop_ft_r = NULL;
+
+// Survivor NF spans: the step function parks the popped CP's flat
+// normal forms here around the thvm_atp_orient_and_add call so
+// atp_push_rule can ADOPT them (clone, after an exact ft_eq_term
+// proof) as the new rule's FT mirror instead of re-encoding the
+// canonical Terms via ft_from_term.  NULL outside that bracket --
+// every other rule-add path (axiom intake, interreduce requeue)
+// falls back to the conversion.
+static AtpFtCell *g_rule_ft_l = NULL;
+static AtpFtCell *g_rule_ft_r = NULL;
 #endif // THVM_ATPFT_RULES
 
 // Inverse of acp_pack: rebuild both heap Terms from the byte string.
@@ -12287,9 +12297,28 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   // live as long as the rule slot does -- ft_destroy at thvm_atp_free
   // releases them all.  thvm_normalize_vars already settled the
   // variable canonicalization above, so the ft image is built from the
-  // canonical form.  VERIFY probe runs after both writes are committed.
-  s->lhs_ft[s->n_rules] = ft_from_term((AtpFt *)s->ft_arena_ptr, lhs, 0);
-  s->rhs_ft[s->n_rules] = ft_from_term((AtpFt *)s->ft_arena_ptr, rhs, 0);
+  // canonical form.  When the step function bracketed this add with the
+  // popped CP's NF spans (g_rule_ft_l/r) and one of them IS this side's
+  // exact image (ft_eq_term proof -- covers both the straight and the
+  // orient-swapped pairing), clone it instead of re-encoding the Term;
+  // the clone is bit-identical to the conversion by construction.  A
+  // var-renumbered or reduced side fails the proof and falls back.
+  // VERIFY probe runs after both writes are committed.
+  {
+    AtpFt *ra = (AtpFt *)s->ft_arena_ptr;
+    if (g_rule_ft_l != NULL && g_rule_ft_r != NULL &&
+        ft_eq_term(g_rule_ft_l, lhs) && ft_eq_term(g_rule_ft_r, rhs)) {
+      s->lhs_ft[s->n_rules] = ft_clone_span(ra, g_rule_ft_l, 0);
+      s->rhs_ft[s->n_rules] = ft_clone_span(ra, g_rule_ft_r, 0);
+    } else if (g_rule_ft_l != NULL && g_rule_ft_r != NULL &&
+               ft_eq_term(g_rule_ft_r, lhs) && ft_eq_term(g_rule_ft_l, rhs)) {
+      s->lhs_ft[s->n_rules] = ft_clone_span(ra, g_rule_ft_r, 0);
+      s->rhs_ft[s->n_rules] = ft_clone_span(ra, g_rule_ft_l, 0);
+    } else {
+      s->lhs_ft[s->n_rules] = ft_from_term(ra, lhs, 0);
+      s->rhs_ft[s->n_rules] = ft_from_term(ra, rhs, 0);
+    }
+  }
   atp_ft_rules_verify_push(s, s->n_rules);
 #endif
   // Remove-and-re-derive detection (flat-subsume only).  If this fresh
@@ -13442,6 +13471,13 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // points past hcp_norm), keeping recording memory-bounded.
   u32 trace_mark = s->n_trace;
   Term l, r;
+#ifdef THVM_ATPFT_RULES
+  // Survivor NF spans from the FT-direct pop treatment (set only on the
+  // mixmost non-record path); bracket thvm_atp_orient_and_add below so
+  // atp_push_rule can adopt them as the new rule's mirror.
+  AtpFtCell *pop_nf_l = NULL;
+  AtpFtCell *pop_nf_r = NULL;
+#endif
 #ifdef ATP_CP_GROUND_JOIN
   // Lazy (selection-time) ground-joinability -- Twee's redundancy
   // discipline.  The expensive ordered-set-partition GJ check runs on the
@@ -13602,6 +13638,8 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
       } else {
         l = ft_to_term(lf);
         r = ft_to_term(rf);
+        pop_nf_l = lf;               // survivor NFs: rule-mirror adoption
+        pop_nf_r = rf;
       }
     } else
 #endif
@@ -13693,7 +13731,15 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     return ATP_RUNNING;
   }
 
+#ifdef THVM_ATPFT_RULES
+  g_rule_ft_l = pop_nf_l;   // NULL unless the FT-direct pop produced NFs
+  g_rule_ft_r = pop_nf_r;
+#endif
   AtpAddedRange added = thvm_atp_orient_and_add(s, l, r);
+#ifdef THVM_ATPFT_RULES
+  g_rule_ft_l = NULL;
+  g_rule_ft_r = NULL;
+#endif
   if (added.count == 0) {
     ATP_POPV("REFUSED");
     s->step++;

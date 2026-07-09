@@ -466,6 +466,39 @@ Term ft_to_term(const AtpFtCell *x) {
   return ft_to_term_rec(x);
 }
 
+// Exact FT-vs-Term structural compare -- 1 iff `c` is the span
+// ft_from_term(a, t) would build (same encoding contract: FVR <-> var
+// cell by id, CTR <-> ctr cell by sym/arity/children, TAG_NUM <-> the
+// ATPFT_NUM_MARKER pair).  Read-only, allocation-free, early-exit; the
+// adoption gates use it to prove a candidate span IS a Term's image
+// before adopting it in place of a fresh conversion.
+int ft_eq_term(const AtpFtCell *c, Term t) {
+  u8 tag = term_tag(t);
+  if (tag == TAG_FVR) {
+    return ft_is_var(c) && ft_var_id(c) == (term_ext(t) & ~WF_VAR_BIT);
+  }
+  if (ft_is_var(c)) return 0;
+  if (tag == TAG_CTR) {
+    if (ft_ctr_sym(c) != (term_ext(t) & ~WF_VAR_BIT)) return 0;
+    u32 n = term_ctr_n(t);
+    if ((u32)c->arity != n) return 0;
+    const AtpFtCell *child = c->next;
+    for (u32 i = 0; i < n; i++) {
+      if (!ft_eq_term(child, term_ctr_at(t, i))) return 0;
+      child = child->end->next;
+    }
+    return 1;
+  }
+  if (tag == TAG_NUM) {
+    if (ft_ctr_sym(c) != ATPFT_NUM_MARKER || c->arity != 2u) return 0;
+    const AtpFtCell *dt_cell  = c->next;
+    const AtpFtCell *raw_cell = dt_cell->end->next;
+    return ft_ctr_sym(dt_cell)  == (term_ext(t) & ~WF_VAR_BIT)
+        && ft_ctr_sym(raw_cell) == (((u32)term_val(t)) & ~WF_VAR_BIT);
+  }
+  return 0;
+}
+
 // --- Structural equality ----------------------------------------------
 //
 // Recursive: same shape, same sym at every cell (which also captures
