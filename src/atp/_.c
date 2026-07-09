@@ -11221,6 +11221,20 @@ static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs);
 // WM -ks "s" pop-time E-subsumption test; defined next to
 // atp_cp_rule_subsumed.
 static u8 atp_pop_eq_subsumed(AtpState *s, Term lhs, Term rhs);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// FT siblings (defined next to the Term versions): the pop treatment
+// decides the -ks "s" drop on the flat NFs so a subsumed pop never
+// materializes heap Terms.  Returns 0/1 verdict; 2 = cannot decide
+// (missing rule mirror) -- caller falls back to the Term route.
+static int atp_pop_eq_subsumed_ft(AtpState *s, const AtpFtCell *lhs,
+                                  const AtpFtCell *rhs);
+static u8 atp_order_is_plain_kbo(const AtpState *s);
+static u8 ft_sym_multiset_eq(const AtpFtCell *a, const AtpFtCell *b);
+#ifdef THVM_ATP_AC
+static u8 atp_cp_perm_subsumed_ft(const AtpFtCell *lhs,
+                                  const AtpFtCell *rhs);
+#endif
+#endif
 // On-demand FT-mirror population for any caller of atp_rewrite_normalize_ft
 // (definition with atp_cp_trivially_joinable, far below).
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
@@ -13636,6 +13650,76 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
           r = cp_lhs;                // only kbo_eq(l, r) == 1 is observed
         }
       } else {
+        // FT-native -ks "p"/"s" drop gates, run in the legacy order
+        // (perm THEN pop-subsume) on the flat NFs so a dropped pop
+        // never materializes heap Terms.  Negative verdicts fall
+        // through to the decode + legacy gates, which re-check
+        // Term-side -- only an FT false POSITIVE could diverge, and
+        // THVM_ATP_POPSUB_FT_DIFF certifies every FT drop against the
+        // full Term verdict chain.  Non-plain order configs skip the
+        // pop-subsume half (its KBO_UN test has a certified FT sibling
+        // only for plain KBO); non-AC builds skip the perm half (the
+        // legacy env-mask path stays Term-side).
+        static int psdiff = -1;
+        if (psdiff < 0) psdiff = atp_env_on("THVM_ATP_POPSUB_FT_DIFF");
+        u8 ft_drop = 0u;              // 1 = PERMSUB, 2 = SUBSUMED
+#ifdef THVM_ATP_AC
+        if (s->use_perm_subsume && g_atp_perm_subsume_mask != 0ull &&
+            atp_cp_perm_subsumed_ft(lf, rf)) {
+          ft_drop = 1u;
+        }
+#endif
+        if (ft_drop == 0u &&
+            s->use_pop_subsume && s->n_unorient > 0u &&
+            atp_order_is_plain_kbo(s) &&
+            !(s->use_perm_subsume && g_atp_perm_subsume_mask != 0ull
+#ifdef THVM_ATP_AC
+              && 0  /* perm verdict decided above */
+#endif
+              ) &&
+            thvm_kbo_ft(lf, rf, s->kbo) == KBO_UN &&
+            atp_pop_eq_subsumed_ft(s, lf, rf) == 1) {
+          ft_drop = 2u;
+        }
+        if (ft_drop != 0u) {
+          if (psdiff || pop_trace) {
+            Term pl = ft_to_term(lf);
+            Term pr = ft_to_term(rf);
+            if (psdiff) {
+              u8 term_perm = (u8)(s->use_perm_subsume &&
+                                  g_atp_perm_subsume_mask != 0ull &&
+                                  atp_cp_perm_subsumed(pl, pr));
+              u8 ok = (ft_drop == 1u)
+                        ? term_perm
+                        : (u8)(!term_perm &&
+                               atp_compare(s, pl, pr) == KBO_UN &&
+                               atp_pop_eq_subsumed(s, pl, pr));
+              if (!ok) {
+                fprintf(stderr,
+                        "POPSUB_FT DIFF: FT drop kind=%u, Term disagrees\n",
+                        ft_drop);
+                abort();
+              }
+            }
+            if (pop_trace) {
+              fprintf(stderr, "POPV pick=%u verdict=%s lhs=",
+                      s->cp_select_count,
+                      ft_drop == 1u ? "PERMSUB" : "SUBSUMED");
+              atp_dbg_print_term(stderr, pl);
+              fputs(" rhs=", stderr);
+              atp_dbg_print_term(stderr, pr);
+              fputc('\n', stderr);
+            }
+          }
+          if (ft_drop == 1u) s->n_cps_dropped_perm_subsumed++;
+          else               s->n_cps_dropped_pop_subsumed++;
+          g_ft_region = 0u;
+          if (g_atp_phase_enabled)
+            g_atp_phase_us_pop_normalize += atp_now_us() - _ph_pop_t0;
+          thvm_atp_heap_reset(hcp_norm);
+          s->step++;
+          return ATP_RUNNING;
+        }
         l = ft_to_term(lf);
         r = ft_to_term(rf);
         pop_nf_l = lf;               // survivor NFs: rule-mirror adoption
@@ -19465,6 +19549,197 @@ static u8 atp_pop_eq_subsumed(AtpState *s, Term lhs, Term rhs) {
   }
   return 0;
 }
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// The pop-subsume FT route is exact only for the plain-KBO order
+// config -- atp_compare dispatches col3 / AC / WPO / RPO / LPO first,
+// and only the final thvm_kbo has the certified FT sibling
+// (thvm_kbo_ft = the identical Loechner decision over the flat
+// encode, the same verdict the FT normalize order gates rely on).
+static u8 atp_order_is_plain_kbo(const AtpState *s) {
+  if (s->col3_apply != 0u) return 0;
+#ifdef THVM_ATP_AC
+  if (thvm_atp_get_ac_mask() != 0ull) return 0;
+#endif
+  if (s->wpo != NULL || s->rpo != NULL || s->lpo != NULL) return 0;
+  return 1;
+}
+
+// Order-independent node-symbol fingerprint equality -- a NECESSARY
+// condition for every atp_cp_perm_subsumed positive (both the
+// AC-dispensable route, whose atp_ac_eq gate preserves the symbol
+// multiset by construction, and the mask-0 binary-swap recursion,
+// which only permutes children).  The pop treatment uses a MISMATCH
+// as proof the perm gate returns 0, unlocking the FT pop-subsume
+// verdict without materializing Terms.  Commutative accumulators
+// (count / keyed sum / keyed xor) so any permutation fingerprints
+// identically.
+static u8 ft_sym_multiset_eq(const AtpFtCell *a, const AtpFtCell *b) {
+  u64 acc[2][3] = {{0, 0, 0}, {0, 0, 0}};
+  const AtpFtCell *span[2] = { a, b };
+  for (u32 t = 0; t < 2u; t++) {
+    const AtpFtCell *e = (span[t]->end != NULL) ? span[t]->end->next : NULL;
+    for (const AtpFtCell *p = span[t]; p != e; p = p->next) {
+      u64 h = (u64)p->sym * 0x9E3779B97F4A7C15ull;
+      acc[t][0]++;
+      acc[t][1] += h;
+      acc[t][2] ^= h * ((h >> 32) | 1ull);
+    }
+  }
+  return acc[0][0] == acc[1][0] && acc[0][1] == acc[1][1] &&
+         acc[0][2] == acc[1][2];
+}
+
+// FT sibling of atp_eq_subsumes_pair: the identical SubsumptionBody
+// walk on cells.  ft_match threads bindings across the two side
+// matches exactly like thvm_match's RewriteSubst (Stage-5 verdict
+// parity), ft_eq stands in for kbo_eq, and the unique-differing-child
+// descent follows the span sibling chain.  A TAG_NUM pair maps to
+// marker cells; the Term walk stops at non-CTR tags, so the marker
+// sym stops the descent here identically.
+static u8 atp_eq_subsumes_pair_ft(const AtpFtCell *p_lhs,
+                                  const AtpFtCell *p_rhs,
+                                  const AtpFtCell *lhs,
+                                  const AtpFtCell *rhs) {
+  AtpFtSubst subst;
+  for (;;) {
+    memset(&subst, 0, sizeof(subst));
+    if (ft_match(p_lhs, lhs, &subst) && ft_match(p_rhs, rhs, &subst)) {
+      return 1;
+    }
+    memset(&subst, 0, sizeof(subst));
+    if (ft_match(p_lhs, rhs, &subst) && ft_match(p_rhs, lhs, &subst)) {
+      return 1;
+    }
+    if (ft_is_var(lhs) || ft_is_var(rhs)) return 0;
+    if (ft_ctr_sym(lhs) != ft_ctr_sym(rhs)) return 0;
+    if (ft_ctr_sym(lhs) == ATPFT_NUM_MARKER) return 0;  // TAG_NUM stop
+    u32 n = (u32)lhs->arity;
+    if ((u32)rhs->arity != n) return 0;
+    const AtpFtCell *cl = lhs->next, *cr = rhs->next;
+    const AtpFtCell *dl = NULL, *dr = NULL;
+    u32 ndiff = 0u;
+    for (u32 i = 0; i < n; i++) {
+      if (!ft_eq(cl, cr)) {
+        if (ndiff != 0u) return 0;        // a second differing child
+        ndiff = 1u;
+        dl = cl;
+        dr = cr;
+      }
+      cl = cl->end->next;
+      cr = cr->end->next;
+    }
+    if (ndiff == 0u) return 0;            // identical pair: unreachable
+    lhs = dl;
+    rhs = dr;
+  }
+}
+
+#ifdef THVM_ATP_AC
+// FT transliteration of the atp_gj_perm_valuable shape tests (WM
+// PROTECT_3_PERMS): var ids read off cells, binary decompose via the
+// span sibling chain.  Same shapes, same id equalities.
+static u8 ft_gj_var_id(const AtpFtCell *t, u32 *id) {
+  if (!ft_is_var(t)) return 0;
+  *id = ft_var_id(t);
+  return 1;
+}
+static u8 ft_gj_bin(const AtpFtCell *t, u32 f,
+                    const AtpFtCell **a, const AtpFtCell **b) {
+  if (ft_is_var(t) || ft_ctr_sym(t) != f || t->arity != 2u) return 0;
+  *a = t->next;
+  *b = (*a)->end->next;
+  return 1;
+}
+static u8 ft_gj_shape_rr(const AtpFtCell *t, u32 f, u32 *x, u32 *y, u32 *z) {
+  const AtpFtCell *a, *b, *c, *d;
+  if (!ft_gj_bin(t, f, &a, &b) || !ft_gj_bin(b, f, &c, &d)) return 0;
+  return ft_gj_var_id(a, x) && ft_gj_var_id(c, y) && ft_gj_var_id(d, z);
+}
+static u8 ft_gj_shape_ll(const AtpFtCell *t, u32 f, u32 *x, u32 *y, u32 *z) {
+  const AtpFtCell *a, *b, *c, *d;
+  if (!ft_gj_bin(t, f, &a, &b) || !ft_gj_bin(a, f, &c, &d)) return 0;
+  return ft_gj_var_id(c, x) && ft_gj_var_id(d, y) && ft_gj_var_id(b, z);
+}
+static u8 atp_gj_perm_valuable_ft(const AtpFtCell *l, const AtpFtCell *r) {
+  if (ft_is_var(l) || l->arity != 2u) return 0;
+  u32 f = ft_ctr_sym(l);
+  const AtpFtCell *p, *q, *p2, *q2;
+  u32 a, b, c, d, x, y, z, u, v, w;
+  // C: f(x1, x2) = f(x2, x1)
+  if (ft_gj_bin(l, f, &p, &q) && ft_gj_bin(r, f, &p2, &q2) &&
+      ft_gj_var_id(p, &a) && ft_gj_var_id(q, &b) &&
+      ft_gj_var_id(p2, &c) && ft_gj_var_id(q2, &d) &&
+      a != b && c == b && d == a) {
+    return 1;
+  }
+  // A: f(f(x1,x2),x3) = f(x1,f(x2,x3)), either nesting on either side.
+  if (ft_gj_shape_ll(l, f, &x, &y, &z) && ft_gj_shape_rr(r, f, &u, &v, &w) &&
+      x == u && y == v && z == w && x != y && y != z && x != z) {
+    return 1;
+  }
+  if (ft_gj_shape_rr(l, f, &x, &y, &z) && ft_gj_shape_ll(r, f, &u, &v, &w) &&
+      x == u && y == v && z == w && x != y && y != z && x != z) {
+    return 1;
+  }
+  // C': f(x1,f(x2,x3)) = one of the four rotated right-nested perms.
+  if (ft_gj_shape_rr(l, f, &x, &y, &z) && ft_gj_shape_rr(r, f, &u, &v, &w) &&
+      x != y && y != z && x != z) {
+    if ((u == z && v == x && w == y) ||
+        (u == y && v == x && w == z) ||
+        (u == z && v == y && w == x) ||
+        (u == y && v == z && w == x)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// FT sibling of atp_cp_ac_dispensable + the pop perm gate dispatch
+// (mask != 0 is the caller's condition, mirroring the legacy gate):
+// ft_eq for the t=t upstream guard, ft_ac_eq for TO_ACGleich, the
+// mask test for SO_IstACSymbol, and the shape port above for
+// GZ_wertvoll.
+static u8 atp_cp_perm_subsumed_ft(const AtpFtCell *lhs,
+                                  const AtpFtCell *rhs) {
+  AtpAcInfo ac = { .ac_mask = g_atp_perm_subsume_mask };
+  if (ft_eq(lhs, rhs)) return 0;
+  if (!ft_ac_eq(lhs, rhs, &ac)) return 0;
+  if (ft_is_var(lhs) || !ft_ac_eq_is_ac_label(&ac, ft_ctr_sym(lhs))) return 1;
+  return !atp_gj_perm_valuable_ft(lhs, rhs);
+}
+#endif // THVM_ATP_AC
+
+// FT sibling of atp_pop_eq_subsumed: the E-set sweep over the live
+// rule MIRRORS (lockstep with the Term sides).  2 = a live equation
+// has no mirror (defensive; post-mirror-ensure this cannot happen) --
+// the caller falls back to the Term route rather than mis-verdict.
+static int atp_pop_eq_subsumed_ft(AtpState *s, const AtpFtCell *lhs,
+                                  const AtpFtCell *rhs) {
+  if (s->n_unorient == 0u) return 0;       // RE_GleichungsmengeLeer
+  for (u32 k = 0; k < s->n_rules; k++) {
+    if (s->r_orient[k]) continue;                    // E only, never R
+    if (s->r_dead != NULL && s->r_dead[k]) continue;
+    if (s->lhs_ft[k] == NULL || s->rhs_ft[k] == NULL) return 2;
+    if (atp_eq_subsumes_pair_ft(s->lhs_ft[k], s->rhs_ft[k], lhs, rhs)) {
+      static int sub_trace = -1;
+      if (sub_trace < 0) sub_trace = atp_env_on("THVM_ATP_POP_TRACE");
+      if (sub_trace) {
+        Term ql = ft_to_term(lhs), qr = ft_to_term(rhs);
+        fprintf(stderr, "POPSUBR pick=%u subsumer_slot=%u orient=%u lhs=",
+                s->cp_select_count, k, s->r_orient[k]);
+        atp_dbg_print_term(stderr, s->lhs[k]); fputs(" rhs=", stderr);
+        atp_dbg_print_term(stderr, s->rhs[k]);
+        fputs(" query_lhs=", stderr); atp_dbg_print_term(stderr, ql);
+        fputs(" query_rhs=", stderr); atp_dbg_print_term(stderr, qr);
+        fputc('\n', stderr);
+      }
+      return 1;
+    }
+  }
+  return 0;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
 
 // --- WM commutativity-aware E-set subsumption (THVM_ATP_COMM_SUBSUME) ---
 // Two terms are equal modulo ONE top-level commutativity swap: either they
