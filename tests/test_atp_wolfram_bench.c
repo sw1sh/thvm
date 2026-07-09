@@ -2084,6 +2084,13 @@ int main(int argc, char **argv) {
           thvm_atp_set_use_perm_subsume(s, 1u);
         }
       }
+      // FULL AC-completion (THVM_ATP_FULL_AC=1): detect AC operators and
+      // LEAVE the engine ac_mask set so completion runs AC-matching /
+      // AC-unification.  Used to reproduce + fix the AC segfault.
+      if (getenv("THVM_ATP_FULL_AC") != NULL
+          && getenv("THVM_ATP_FULL_AC")[0] != '0') {
+        thvm_atp_auto_ac(prp.eq_l, prp.eq_r, prp.n_eqns);   // mask stays set
+      }
     }
   } else if (strcmp(goal, "mccune") == 0) {
     thvm_atp_add_equation(s, mccune_axiom_lhs(), fv(3));

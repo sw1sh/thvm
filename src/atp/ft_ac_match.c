@@ -130,12 +130,22 @@ static u8 ft_ac_flatten(const AtpFtCell *t, const AtpAcInfo *ac,
 // (no allocation -- saves a chain wrap on the common case).
 static AtpFtCell *ft_ac_build_chain(AtpFt *a, u32 label,
                                     const AtpFtCell **leaves, u32 n) {
-  if (n == 1u) return (AtpFtCell *)leaves[0];
+  // DEEP-COPY every leaf before stitching.  ftnew_ctr (ft.c) mutates its
+  // kids' next/end chain pointers to splice them into the new node -- but
+  // `leaves[]` point into the SUBJECT / pattern (shared cells).  Stitching
+  // them in place corrupts those originals (a shared cell's end->next gets
+  // rewritten / NULLed), so a later ft_to_term of the subject walks a
+  // 2-ary op/ld cell whose second child is now NULL and segfaults.  A
+  // var binding built here escapes into the rewrite result, so it must
+  // own fresh cells.  Copies land in the scratch arena (chain lifetime =
+  // the match attempt / the splice that consumes the binding).
+  if (n == 1u) return ft_deep_copy_pre(a, leaves[0], /*scratch=*/1);
   // Fold right-to-left: acc starts as the tail, then we prepend each
   // earlier leaf as the left child of a fresh f-node.
-  AtpFtCell *acc = (AtpFtCell *)leaves[n - 1u];
+  AtpFtCell *acc = ft_deep_copy_pre(a, leaves[n - 1u], /*scratch=*/1);
   for (i32 i = (i32)n - 2; i >= 0; i--) {
-    AtpFtCell *kids[2] = { (AtpFtCell *)leaves[(u32)i], acc };
+    AtpFtCell *lc = ft_deep_copy_pre(a, leaves[(u32)i], /*scratch=*/1);
+    AtpFtCell *kids[2] = { lc, acc };
     acc = ftnew_ctr(a, label, 2u, kids, /*scratch=*/1);
     if (acc == NULL) return NULL;
   }
