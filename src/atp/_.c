@@ -8735,6 +8735,53 @@ static u32 atp_symbol_count_dedup(Term t) {
   return count;
 }
 
+// Twee's exact per-term size (Twee.CP.termScore, src/Twee/CP.hs:249).
+// Differs from atp_symbol_count_dedup in TWO ways that matter for the
+// Twee CP score's selection order:
+//   1. varweight = 6/7 (a variable is cheaper than a function symbol),
+//      not 1.  We scale the whole score by 7 to stay integer: a variable
+//      contributes 6, a function symbol / constant 7.
+//   2. the shared-subterm discount (cfg_dupcost=1) fires ONLY for
+//      COMPOUND subterms (Twee's `len t > 1`), NEVER for a repeated
+//      variable or constant -- those are counted in full every time.
+//      atp_symbol_count_dedup deduped every repeat, underweighting terms
+//      with repeated constants (e.g. the median goal's skolem u/w x3).
+// Caller multiplies the depth term by 7 to keep 2*depth's proportion.
+static u32 atp_twee_term_score(Term t) {
+  Term stack[256];
+  Term seen[512];
+  for (u32 i = 0; i < 512; i++) seen[i] = 0;
+  u32 sp = 0;
+  if (sp < 256) stack[sp++] = t;
+  u32 score = 0;
+  while (sp > 0) {
+    Term cur = stack[--sp];
+    if (term_tag(cur) != TAG_CTR || term_ctr_n(cur) == 0u) {
+      // Variable (FVR) -> varweight 6; constant / atom -> weight 7.
+      // Neither is ever deduped (Twee dedups only `len t > 1`).
+      score += (term_tag(cur) == TAG_FVR) ? 6u : 7u;
+      continue;
+    }
+    // Compound subterm: dupcost=1 (scaled 7) if seen before, no recurse.
+    u64 x = (u64)cur;
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    u32 h = (u32)x & 511u;
+    u8 dup = 0;
+    for (u32 step = 0; step < 512u; step++) {
+      u32 idx = (h + step) & 511u;
+      if (seen[idx] == 0) { seen[idx] = cur; break; }
+      if (seen[idx] == cur) { dup = 1; break; }
+    }
+    if (dup) { score += 7u; continue; }   // cfg_dupcost=1 *7, no recurse
+    score += 7u;                          // the function symbol (weight 1)
+    u32 n = term_ctr_n(cur);
+    for (u32 i = 0; i < n && sp < 256; i++) stack[sp++] = term_ctr_at(cur, i);
+  }
+  return score;
+}
+
 // (atp_term_depth defined below at line ~4653.)
 
 // === ClasHeuristics: advanced CP-weight term measures ===============
@@ -8903,8 +8950,11 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       // size and do not recurse.  atp_symbol_count_dedup mirrors
       // that with a per-call Term-id hash set.  Integer-arithmetic
       // version (we approximate Twee's varweight 6/7 == 1).
-      u32 m = atp_symbol_count_dedup(lhs);
-      u32 n = atp_symbol_count_dedup(rhs);
+      // Twee-exact per-term size (varweight 6/7, compound-only dedup),
+      // scaled *7 so it stays integer; the depth term below is *14
+      // (= 2 * 7) to preserve Twee's 2*depth proportion.
+      u32 m = atp_twee_term_score(lhs);
+      u32 n = atp_twee_term_score(rhs);
       u32 large = m > n ? m : n;
       u32 small = m + n - large;
       // Twee's `depth` is the CP FORMATION depth (getDepth), NOT the
@@ -8914,7 +8964,7 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       // deep-derivation space Twee prunes.  g_cp_formation_depth carries
       // max(parent rule depths)+1, set by atp_push_cps_traced.
       u32 d = g_cp_formation_depth;
-      return 4u * large + 1u * small + 2u * d;
+      return 4u * large + 1u * small + 14u * d;
     }
     case ATP_CP_WEIGHT_STAGGERED: {
       // E StaggeredWeight (HEURISTICS/che_varweights.c::
