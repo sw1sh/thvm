@@ -986,14 +986,29 @@ static void pr_flatten_goal(PrProblem *pr) {
   u32  nsub = 0;
   pr_flatten_collect(pr->goal_l, subs, &nsub, 128u);
   pr_flatten_collect(pr->goal_r, subs, &nsub, 128u);
+  if (nsub == 0u) return;
+  // Open a strictly-minimal precedence BAND for the fresh names.  twee
+  // ranks every symbol by a total occurrence-count key (SequentialMain
+  // funOccs) -- there are NO precedence ties.  Giving all fresh constants
+  // the same precedence (0) leaves every fresh<->fresh and fresh<->skolem
+  // equation KBO-incomparable, so the distributivity / median completions
+  // (ALG212-10 etc.) drown in unorientable pairs instead of orienting the
+  // named definitions.  Shift every existing symbol whose precedence is in
+  // the real band (>= PR_LABEL_BASE) up by nsub, then hand the fresh
+  // constants DISTINCT precedences PR_LABEL_BASE .. PR_LABEL_BASE+nsub-1
+  // (inner subterms, collected first, lowest) so they stay below every
+  // original function yet remain mutually comparable.
+  u32 ncap = PR_MAX_SYMS + PR_LABEL_BASE;
+  for (u32 l = PR_LABEL_BASE; l < ncap; l++)
+    if (pr->precedence[l] >= PR_LABEL_BASE) pr->precedence[l] += nsub;
   for (u32 i = 0; i < nsub; i++) {
     if (pr->n_syms >= PR_MAX_SYMS) break;
     if (pr->n_eqns >= PR_MAX_EQNS) break;
     u32 lbl = PR_LABEL_BASE + pr->n_syms;
     snprintf(pr->syms[pr->n_syms].name, PR_NAME_LEN, "sFlat%u", i);
     pr->syms[pr->n_syms].arity = 0u;
-    pr->weights[lbl]    = 1u;   // minimal weight -> subterm > fresh
-    pr->precedence[lbl] = 0u;   // minimal precedence (constants low)
+    pr->weights[lbl]    = 1u;                  // minimal weight -> subterm > fresh
+    pr->precedence[lbl] = PR_LABEL_BASE + i;   // distinct, minimal band
     pr->n_syms++;
     Term fresh = term_new_ctr(lbl, NULL, 0);
     pr->eq_l[pr->n_eqns] = fresh;   // fresh = subterm  (orients subterm -> fresh)
