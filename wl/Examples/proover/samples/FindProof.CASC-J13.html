@@ -1,101 +1,89 @@
+<hr>
+
 <h2>FindProof 0.1</h2>
 
-<p>Nik Murzin<br>
+<p>N. Murzin<br>
 Wolfram Institute, USA</p>
 
 <h3>Architecture</h3>
 
-<p>FindProof is an equational theorem prover built on unfailing (ordered)
-Knuth-Bendix completion [Lib1], and a deliberate continuation of the
-Waldmeister line of provers [Lib3], which won the CASC unit-equality
-division at every competition in which it was ranked between 1997 and 2014
-and whose development ended in the early 2000s. The completion loop,
-critical-pair selection, queue management, and normalisation strategy
-reimplement the Waldmeister design faithfully enough that, on classical
-algebraic problems, the default configuration reproduces Waldmeister's
-critical-pair selection sequence exactly; the intention is that the design
-should not be lost with the original implementation, and should have a
-maintained successor that can continue to evolve.</p>
+<p>FindProof [Sys1] is an equational theorem prover for unit-equality problems,
+based on unfailing (ordered) Knuth-Bendix completion [Lib1]. It continues the
+Waldmeister line of provers [Lib3], which won the CASC unit-equality division at
+every competition in which it was ranked between 1997 and 2014; the completion
+loop, critical-pair selection, queue management, and normalisation reproduce the
+Waldmeister design, and on classical algebraic problems the default configuration
+reproduces Waldmeister's critical-pair selection sequence exactly.</p>
 
-<p>The axioms are saturated towards a convergent rewrite system while the
-goals are kept normalised, and a proof is reported when the two sides of
-every goal are joined; a conjecture given as several negative units is
-proved as a multi-goal conjunction against one saturation. Equations that
-cannot be oriented by the reduction ordering are used unfailingly, so both
-faces are superposed, which preserves refutational completeness. Two
-reduction orderings are supported, the Knuth-Bendix ordering and the
-lexicographic path ordering, with symbol precedences generated
+<p>The axioms are saturated towards a convergent rewrite system while the goals
+are kept normalised, and a proof is reported when the two sides of every goal are
+joined; a conjecture given as several negative units is proved as a multi-goal
+conjunction against one saturation. Equations that cannot be oriented by the
+reduction ordering are used unfailingly, so that both faces are superposed, which
+preserves refutational completeness. The Knuth-Bendix ordering and the
+lexicographic path ordering are supported, with symbol precedences generated
 automatically. Redundant critical pairs are discarded by ground-joinability
-testing, the Bachmair-Dershowitz connectedness criterion, forward and
-backward subsumption and demodulation, and right-hand-side interreduction.
-Proofs are reconstructed from the recorded completion trace, with the
-closing rewrite chain re-derived against the final rule set, and are
-rendered as a TPTP CNFRefutation.</p>
+testing, the connectedness criterion, forward and backward subsumption and
+demodulation, and right-hand-side interreduction. Proofs are reconstructed from
+the recorded completion trace, the closing rewrite chain re-derived against the
+final rule set, and rendered as a TPTP CNFRefutation.</p>
 
-<p>The system is not limited to unit equality by design: full first-order
-input is handled by equationalization, in which propositions are Skolemized
-and encoded as equations over a Boolean-algebra axiomatisation, proved by
-the same completion core, and decoded back into a predicate-logic proof.
-The equationalization layer currently lives in the optional Wolfram
-Language surface and is being moved into the core; the present entry
-competes in UEQ.</p>
+<p>The system is not restricted to unit equality. Full first-order input is
+handled by equationalization, in which propositions are Skolemized and encoded as
+equations over a Boolean-algebra axiomatisation, proved by the same completion
+core, and decoded back into a predicate-logic proof. The present entry competes
+in the UEQ division.</p>
 
 <h3>Strategies</h3>
 
-<p>The search is ordered by a weighted critical-pair selection heuristic over
-a priority queue, with a Waldmeister-style selection ratio that interleaves a
-first-in-first-out pick at a fixed cadence so that fairness, and hence
-completeness, is retained. The default configuration is the faithful
-Waldmeister strategy stack. The full strategy surface, comprising some
-fifty-five switches covering the reduction ordering, critical-pair weighting,
-weight limits, redundancy criteria, goal treatment, and queue management, is
-exposed as command-line options, and named configurations modelled on the
-published defaults of Waldmeister, Twee, and Vampire-UEQ are provided. In
-competition the system runs a fixed schedule of such configurations, each in
-its own child process under a slice of the wall-clock limit, stopping at the
-first proof. The schedule and its slice allocation are derived from coverage
-measurements on the problem sets of previous competitions; strategy selection
-is not tuned to individual competition problems.</p>
+<p>The search is ordered by a weighted critical-pair selection heuristic over a
+priority queue, with a Waldmeister-style selection ratio that interleaves a
+first-in-first-out pick at a fixed cadence, so that fairness, and hence
+completeness, is retained. The default configuration is the Waldmeister strategy
+stack. The full strategy surface, some fifty-five switches covering the reduction
+ordering, critical-pair weighting, weight limits, redundancy criteria, goal
+treatment, and queue management, is exposed as command-line options, and named
+configurations modelled on the published defaults of Waldmeister, Twee, and
+Vampire are provided. In competition a fixed schedule of such configurations is
+run, each in its own child process under a slice of the wall-clock limit, stopping
+at the first proof. The schedule and its slice allocation are derived from
+coverage measurements on the problem sets of previous competitions; strategy
+selection is not tuned to individual problems.</p>
 
 <h3>Implementation</h3>
 
-<p>FindProof is a single self-contained C binary with no external
-dependencies. Terms are represented as flatterms over a term bank, rewriting
-and subsumption retrieval use perfect discrimination trees with Waldmeister's
-refinements, the critical-pair queue is a binary heap over a compact
-twelve-byte critical-pair encoding, and the proof trace is kept off-heap in a
-packed store from which proof objects are reconstructed on demand. Problems
-in TPTP CNF syntax are read directly, with include directives resolved
-against the problem directory and the TPTP environment variable; positive
-units are taken as axioms and negative units as goals, so the encoded
-problem variants that place ground facts under the negated-conjecture role
-are handled uniformly. Result lines follow the SZS ontology, with
-Satisfiable claimed only under a strategy with no completeness-breaking
-pruning and a ground goal.</p>
-
-<p>An optional Wolfram Language layer drives the same engine in-process and
-adds proof objects verified by internal replay, the predicate-logic
-equationalization, and notebook-based proof exploration; it is a design
-feature of the system, not a dependency, and the competition binary is the
-standalone C build.</p>
+<p>FindProof is a single self-contained C program with no external dependencies.
+Terms are represented as flatterms over a term bank; rewriting and subsumption
+retrieval use perfect discrimination trees; the critical-pair queue is a binary
+heap over a compact twelve-byte critical-pair encoding; and the completion trace
+is kept off-heap in a packed store from which proof objects are reconstructed on
+demand. Problems in TPTP CNF syntax [Lib2] are read directly, with include
+directives resolved against the problem directory and the TPTP environment
+variable, and positive units taken as axioms and negative units as goals. Result
+lines follow the SZS ontology, with Satisfiable claimed only under a strategy
+with no completeness-breaking pruning and a ground goal. An optional Wolfram
+Language layer drives the same engine and adds proof objects verified by internal
+replay and the predicate-logic equationalization; it is a design feature, not a
+dependency, and the competition binary is the standalone C build. The system is
+available from the author.</p>
 
 <h3>Expected Competition Performance</h3>
 
-<p>FindProof is entered in the UEQ division. The faithful Waldmeister default
-solves the standard equational classes, including Boolean and ternary Boolean
-algebra, group and ring theory, lattice theory, and combinatory logic, and
-the schedule adds coverage from ground-joinability and connectedness
-configurations on the associative-commutative classes where pure completion
-saturates slowly. It is expected to trail the leading portfolio systems,
-whose unit-equality schedules have benefited from years of tuning, and a
-mid-field placement is anticipated.</p>
+<p>FindProof is entered in the UEQ division. The Waldmeister default solves the
+standard equational classes, including Boolean and ternary Boolean algebra, group
+and ring theory, lattice theory, and combinatory logic, and the schedule adds
+coverage from ground-joinability and connectedness configurations on the
+associative-commutative classes where pure completion saturates slowly. The
+system is expected to trail the leading portfolio provers, whose unit-equality
+schedules have benefited from years of tuning, and a mid-field placement is
+anticipated.</p>
 
 <h3>References</h3>
 
 <p><strong>Sys1</strong></p>
 
-<p>Murzin N. (2026), <strong>FindProof: Equational Theorem Proving in the
-Wolfram Language</strong>, Wolfram Institute Technical Note.</p>
+<p>Murzin N. (2026), <strong>FindProof: Equational Theorem Proving in the Wolfram
+Language</strong>, <em>Wolfram Institute Technical Note</em>.</p>
 
 <p><strong>Lib1</strong></p>
 
@@ -112,5 +100,6 @@ Reasoning</em> 59(4), pp.483-502, Springer.</p>
 <p><strong>Lib3</strong></p>
 
 <p>Hillenbrand T., L&ouml;chner B. (2002), <strong>The Next Waldmeister
-Loop</strong>, <em>Proceedings of the 18th International Conference on
-Automated Deduction</em>, pp.486-500, Springer.</p>
+Loop</strong>, <em>Proceedings of the 18th International Conference on Automated
+Deduction</em> (Copenhagen, Denmark), pp.486-500, Lecture Notes in Computer
+Science 2392, Springer.</p>
