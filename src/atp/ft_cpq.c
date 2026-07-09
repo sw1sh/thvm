@@ -258,6 +258,21 @@ static void atp_cp_ft_move(AtpState *s, u32 dst, u32 src) {
   arr[src]._pad = 0u;
 }
 
+// --- Slot read (borrow FT spans) -------------------------------------
+//
+// Hand back the two Arena-A FT spans a populated packed slot owns.
+// The pointers BORROW the entry's spans -- valid until the slot is
+// cleared / popped / moved.  This is the sole read path for the
+// byte-queue-retirement re-key: atp_cp_slot_read converts them to
+// heap Terms (ft_to_term), and the pop-norm fast path can normalize
+// them FT-directly (no ft_from_term round-trip).
+static void atp_cp_ft_slot_get(const AtpState *s, u32 i,
+                               AtpFtCell **lhs, AtpFtCell **rhs) {
+  const AtpCpEntry *e = &((const AtpCpEntry *)s->cp_packed_ft)[i];
+  if (lhs) *lhs = e->lhs;
+  if (rhs) *rhs = e->rhs;
+}
+
 // --- API surface (cross-TU within _.c) -------------------------------
 //
 // Static-by-default; the symbols are reachable from _.c because

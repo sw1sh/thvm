@@ -11304,7 +11304,18 @@ static void atp_cp_slot_read(const AtpState *s, u32 i,
   if (atp_cp_slot_implicit(s, i)) {
     atp_cp_implicit_materialize(s, i, lhs, rhs);
   } else {
+#ifdef THVM_ATPFT_CPQ
+    // Byte-queue retirement: a packed slot sources its term pair from
+    // the Arena-A FT image (cp_packed_ft), not the legacy byte string.
+    // ft_to_term rebuilds the identical heap Terms acp_unpack would --
+    // test_ft_cpq T1 pins the round-trip byte-for-byte on every slot.
+    AtpFtCell *fl, *fr;
+    atp_cp_ft_slot_get(s, i, &fl, &fr);
+    *lhs = ft_to_term(fl);
+    *rhs = ft_to_term(fr);
+#else
     acp_unpack(s->cp_packed[i], lhs, rhs);
+#endif
   }
 }
 
@@ -16175,6 +16186,9 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
       free(s->cp_packed[vv]);
       s->cp_packed[vv] = NULL;
       atp_cp_implicit_clear(s, vv);
+#ifdef THVM_ATPFT_CPQ
+      atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
+#endif
       continue;
     }
     // w <= i: never overtakes the read cursor.  Keys untouched on this
@@ -16306,6 +16320,9 @@ static void atp_cp_set_interreduce(AtpState *s) {
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = NULL;
       atp_cp_implicit_clear(s, vv);
+#ifdef THVM_ATPFT_CPQ
+      atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
+#endif
       touched = 1;
       if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
       continue;
@@ -16343,6 +16360,9 @@ static void atp_cp_set_interreduce(AtpState *s) {
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = NULL;
       atp_cp_implicit_clear(s, vv);
+#ifdef THVM_ATPFT_CPQ
+      atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
+#endif
       touched = 1;
       thvm_atp_heap_reset(hcp);
       if (g_atp_phase_enabled) acc_unpack += atp_now_us() - _cpir_unpack_t0;
@@ -16474,6 +16494,9 @@ static void atp_cp_set_interreduce(AtpState *s) {
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = NULL;
       atp_cp_implicit_clear(s, vv);
+#ifdef THVM_ATPFT_CPQ
+      atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
+#endif
       touched = 1;
       thvm_atp_heap_reset(hcp);
       if (g_atp_phase_enabled) acc_pack += atp_now_us() - _cpir_pack_t0;
@@ -16504,6 +16527,12 @@ static void atp_cp_set_interreduce(AtpState *s) {
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = acp_pack(l, r, NULL, NULL);
       atp_cp_implicit_clear(s, vv);
+#ifdef THVM_ATPFT_CPQ
+      // Reduced pair re-images into the FT queue too: the slot becomes an
+      // ordinary packed CP, so cp_packed_ft[vv] must hold (l, r) as well.
+      atp_cp_ft_clear(s, vv);
+      atp_cp_ft_set(s, vv, l, r, s->cp_pri[vv], /*origin=*/0xffffu);
+#endif
       s->n_cp_set_ir_reweighted++;
       touched = 1;
     }
