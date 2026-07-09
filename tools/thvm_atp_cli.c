@@ -696,6 +696,26 @@ static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
 // since slices rarely approach their cap).
 #define SCHED_MAX_PAR 5
 
+// Signal-safe teardown of the concurrent schedule's slice children: an
+// external SIGTERM/SIGINT to THIS process (e.g. a wrapping `timeout`) would
+// otherwise kill the parent while its slice subtrees (child -> shell ->
+// FindProof engine) keep running orphaned and accumulate across problems.
+// The handler killpg's every launched child group before exiting.  pids are
+// stored by slice index; a reaped slot is set back to -1.
+#define SCHED_PID_MAX 32
+static pid_t g_sched_pids[SCHED_PID_MAX];
+static volatile sig_atomic_t g_sched_active = 0;
+static void sched_sig_teardown(int sig) {
+  if (g_sched_active) {
+    for (int i = 0; i < SCHED_PID_MAX; i++)
+      if (g_sched_pids[i] > 0) {
+        killpg(g_sched_pids[i], SIGKILL);
+        kill(g_sched_pids[i], SIGKILL);
+      }
+  }
+  _exit(128 + sig);
+}
+
 // CONCURRENT portfolio: run the slices in a bounded pool (SCHED_MAX_PAR at
 // a time), EACH with the FULL wall -- not wall/N as the old sequential
 // scheme did.  Sequential slicing starved every strategy (a problem
@@ -706,6 +726,16 @@ static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
 // the winner's is replayed, so SZS/proof output never interleaves.
 static int run_schedule(const char *self, const char *file, double wall,
                         int szs, int want_proof) {
+  // Install the teardown handler + register the (initially empty) pid slots
+  // so an external timeout can't orphan the slice subtrees.
+  for (int i = 0; i < SCHED_PID_MAX; i++) g_sched_pids[i] = -1;
+  struct sigaction sa, old_term, old_int;
+  sa.sa_handler = sched_sig_teardown;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  sigaction(SIGTERM, &sa, &old_term);
+  sigaction(SIGINT,  &sa, &old_int);
+  g_sched_active = 1;
   // Bound each child's RSS unless the caller set a tighter cap already.
   if (getenv("THVM_ATP_RSS_ABORT_MB") == NULL) {
     char capbuf[16];
@@ -746,6 +776,7 @@ static int run_schedule(const char *self, const char *file, double wall,
       // parent/child wins, the group id equals the child pid).
       if (pid > 0) setpgid(pid, pid);
       pids[i] = pid;
+      if (i < SCHED_PID_MAX) g_sched_pids[i] = pid;   // for the signal handler
       launched++;
     }
     if (launched == 0) break;
@@ -755,6 +786,7 @@ static int run_schedule(const char *self, const char *file, double wall,
     for (int i = 0; i < N_SCHED; i++) {
       if (pids[i] == w) {
         done[i] = 1; launched--;
+        if (i < SCHED_PID_MAX) g_sched_pids[i] = -1;   // reaped: clear
         if (WIFEXITED(status) && WEXITSTATUS(status) == 0) winner = i;
         break;
       }
@@ -766,7 +798,12 @@ static int run_schedule(const char *self, const char *file, double wall,
   for (int i = 0; i < N_SCHED; i++)
     if (pids[i] > 0 && !done[i]) { killpg(pids[i], SIGKILL); kill(pids[i], SIGKILL); }
   for (int i = 0; i < N_SCHED; i++)
-    if (pids[i] > 0 && !done[i]) { int st; waitpid(pids[i], &st, 0); }
+    if (pids[i] > 0 && !done[i]) { int st; waitpid(pids[i], &st, 0);
+      if (i < SCHED_PID_MAX) g_sched_pids[i] = -1; }
+  // Teardown handler no longer needed: restore the previous dispositions.
+  g_sched_active = 0;
+  sigaction(SIGTERM, &old_term, NULL);
+  sigaction(SIGINT,  &old_int,  NULL);
   int rc = 1;
   if (winner >= 0) {
     // Replay only the winning slice's captured output.
