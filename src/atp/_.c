@@ -23586,11 +23586,16 @@ static const AtpFtCell *sw_face_ft(const AtpState *s, u32 i, Term t) {
 #endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
 
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-// THVM_ATP_SW_FT: the walk former's FT arm (default OFF; certify with
-// the full parity suite under the env before any default flip).
+// THVM_ATP_SW_FT: the walk former's FT arm.  Default ON -- certified
+// byte-complete (the full parity suite passes with the arm active,
+// coverage total on the WM preset, and it is faster than the Term
+// walk).  "0" is the one-round kill switch.
 static int sw_ft_on(void) {
   static int on = -1;
-  if (on < 0) on = atp_env_on("THVM_ATP_SW_FT");
+  if (on < 0) {
+    const char *e = getenv("THVM_ATP_SW_FT");
+    on = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
   return on;
 }
 
