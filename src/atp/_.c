@@ -1780,6 +1780,67 @@ static u32 ft_distinct_var_count(const AtpFtCell *l, const AtpFtCell *r) {
   return n;
 }
 
+// Composite-size count on spans: the node count of `root` with the
+// subterm at cell `at` replaced by `rin` and every variable resolved
+// through `subst` (chains followed) -- the FT sibling of
+// vcp_count_side/vcp_count_pair.  Iterative over span segments; an
+// unbound variable counts 1.  Returns the accumulated count, saturated
+// at `cap` (callers only compare against the KPBehandeln gate).  The
+// CP-walk port's size classifier; no caller yet.
+#if defined(THVM_ATPFT_NORM)
+enum { VCP_FT_STK = 96 };
+static u32 vcp_ft_count_side(const AtpFtCell *root, const AtpFtCell *at,
+                             const AtpFtCell *rin, const AtpFtSubst *subst,
+                             u32 cap, u32 acc) {
+  struct { const AtpFtCell *c, *e; } stk[VCP_FT_STK];
+  u32 sp = 0u;
+  const AtpFtCell *c = root;
+  const AtpFtCell *e = (root->end != NULL) ? root->end->next : NULL;
+  for (;;) {
+    while (c == NULL || c == e) {
+      if (sp == 0u) return acc;
+      sp--;
+      c = stk[sp].c;
+      e = stk[sp].e;
+    }
+    if (c == at) {
+      // Splice point: count rin's composite instead of this subtree,
+      // then resume after the replaced subtree.
+      if (sp >= (u32)VCP_FT_STK) return cap;      // depth cliff: saturate
+      stk[sp].c = c->end->next;
+      stk[sp].e = e;
+      sp++;
+      at = NULL;                                  // single occurrence
+      c = rin;
+      e = (rin->end != NULL) ? rin->end->next : NULL;
+      continue;
+    }
+    if ((c->sym & WF_VAR_BIT) != 0u) {
+      u32 id = c->sym & ~WF_VAR_BIT;
+      const AtpFtCell *b =
+          (subst != NULL && id < ATPFT_MAX_VARS) ? subst->bind[id] : NULL;
+      if (b != NULL) {
+        // Resolve through the binding (its own vars resolve on the way).
+        if (sp >= (u32)VCP_FT_STK) return cap;
+        stk[sp].c = c->next;
+        stk[sp].e = e;
+        sp++;
+        c = b;
+        e = (b->end != NULL) ? b->end->next : NULL;
+        continue;
+      }
+      acc++;                                      // unbound var: one node
+      if (acc >= cap) return acc;
+      c = c->next;
+      continue;
+    }
+    acc++;                                        // constructor cell
+    if (acc >= cap) return acc;
+    c = c->next;
+  }
+}
+#endif // THVM_ATPFT_NORM
+
 // Pop-time FT stash: thvm_atp_select_cp decodes the selected packed
 // CP's byte string into two fresh FT spans (bytes -> cells, no Term
 // hop) and parks them here for the step function's mixmost pop
