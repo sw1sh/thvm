@@ -23393,6 +23393,16 @@ static u8 g_sw_phase = 0xffu;
 // re-renamed the same new-fact face once per partner hit.  Direct-mapped;
 // a collision just recomputes.  Cached out-terms are not GC roots: any
 // collection bumps the epoch, so a stale handle is never returned.
+// Rename provenance stash: sw_rename_pair records its last call's
+// (sources, outputs) so the walk former can recover the SPAN twins of
+// the renamed pair -- the consumer proves the pairing by comparing the
+// output handles before trusting the sources (every sweep renames
+// immediately before forming, and the Mutter/Self walks reuse one
+// rename across many positions, so "last rename" always corresponds
+// to the (lin, rin) in flight; the handle proof makes that exact
+// rather than assumed).
+static Term g_sw_rn_src_l = 0, g_sw_rn_src_r = 0;
+static Term g_sw_rn_out_l = 0, g_sw_rn_out_r = 0;
 typedef struct { Term src_l, src_r, out_l, out_r; u64 epoch; } SwRnEnt;
 enum { SW_RN_SLOTS = 8192 };
 static SwRnEnt g_sw_rn[SW_RN_SLOTS];
@@ -23404,6 +23414,10 @@ static void sw_rename_pair(Term src_l, Term src_r, Term *lin, Term *rin) {
     if (g_atp_phase_detail) g_atp_swrn_hit++;
     *lin = e->out_l;
     *rin = e->out_r;
+    g_sw_rn_src_l = src_l;
+    g_sw_rn_src_r = src_r;
+    g_sw_rn_out_l = *lin;
+    g_sw_rn_out_r = *rin;
     return;
   }
   if (g_atp_phase_detail) g_atp_swrn_miss++;
@@ -23412,6 +23426,10 @@ static void sw_rename_pair(Term src_l, Term src_r, Term *lin, Term *rin) {
   e->out_l = *lin = thvm_rename_vars(src_l, CP_RENAME_OFFSET);
   e->out_r = *rin = thvm_rename_vars(src_r, CP_RENAME_OFFSET);
   e->epoch = g_atp_gc_epoch;
+  g_sw_rn_src_l = src_l;
+  g_sw_rn_src_r = src_r;
+  g_sw_rn_out_l = *lin;
+  g_sw_rn_out_r = *rin;
 }
 
 // THVM_ATP_FT_EMIT_CHECK for the virtual order gate: rebuild the three
@@ -23526,10 +23544,202 @@ static void vcp_treat_certify(AtpState *s, Term lo, const u32 *p, u32 p_len,
 // `sub_pre` carries the caller's already-addressed subterm of lo at p
 // (the Vater visitor computes it once per position and shares it across
 // every partner hit there); 0 = address it here.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// FT rename cache: (mirror span, CP_RENAME_OFFSET) -> renamed clone.
+// Keyed by the span pointer + r_revision: mirror spans are never
+// returned to the free list (drops transfer them to the dead-save
+// slots; composes leak the old span into the arena), so a pointer key
+// cannot alias recycled content within a revision, and any rule-set
+// mutation bumps the revision and refreshes the entry.  Renamed
+// clones are persistent arena cells -- never freed, so a cached span
+// is always safe to hand out.
+typedef struct {
+  const AtpFtCell *src;
+  AtpFtCell *out;
+  u64 rev;
+} SwRnFtEnt;
+enum { SW_RN_FT_SLOTS = 8192 };
+static SwRnFtEnt g_sw_rn_ft[SW_RN_FT_SLOTS];
+static AtpFtCell *sw_rename_ft(AtpState *s, const AtpFtCell *src) {
+  u64 h = ((u64)(uintptr_t)src) * 0x9e3779b97f4a7c15ull;
+  u32 slot = (u32)(h >> 51) & (u32)(SW_RN_FT_SLOTS - 1);
+  SwRnFtEnt *e = &g_sw_rn_ft[slot];
+  if (e->src == src && e->rev == (u64)s->r_revision) return e->out;
+  AtpFtCell *out = ft_rename_span((AtpFt *)s->ft_arena_ptr, src,
+                                  CP_RENAME_OFFSET, 0);
+  e->src = src;
+  e->out = out;
+  e->rev = (u64)s->r_revision;
+  return out;
+}
+
+// Recover the mirror span of a stored rule FACE by handle identity --
+// exact: `t` is one of the two stored Terms of row `i`, so the
+// lockstep invariant pins its mirror.  NULL when the handle matches
+// neither face (caller falls back to the Term arm).
+static const AtpFtCell *sw_face_ft(const AtpState *s, u32 i, Term t) {
+  if (i >= s->n_rules) return NULL;
+  if (t == s->lhs[i]) return s->lhs_ft[i];
+  if (t == s->rhs[i]) return s->rhs_ft[i];
+  return NULL;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// THVM_ATP_SW_FT: the walk former's FT arm (default OFF; certify with
+// the full parity suite under the env before any default flip).
+static int sw_ft_on(void) {
+  static int on = -1;
+  if (on < 0) on = atp_env_on("THVM_ATP_SW_FT");
+  return on;
+}
+
+// The walk former's FT arm: subterm addressing, head pre-filter,
+// unification, size classification, the eq-parent order gate and the
+// CP serialization all run on the SPAN twins of the Term faces --
+// recovered by handle identity (sw_face_ft / the rename provenance
+// stash), so every twin is either exact or the arm DECLINES (returns
+// 0, Term arm untouched, nothing armed).  Verdict-for-verdict mirror
+// of the Term flow's routed path; returns 1 with *rv set when the
+// attempt was fully handled (dropped or pushed).
+static u8 sw_form_push_ft_try(AtpState *s, Term lo, Term ro, Term sub_pre,
+                              Term lin, Term rin, const u32 *p, u32 p_len,
+                              u32 t_out, u32 t_in, u32 i_out, u32 i_in,
+                              u8 o_eq, u8 in_eq, u32 *rv) {
+  if (!sw_ft_on()) return 0u;
+  // The exact ft_considered route conditions -- off-route attempts
+  // need the classic Term build (cp.lhs/rhs/peak dereferenced).
+  if (!atp_ft_emit_on() || !s->trace_pack || atp_kapur_on() ||
+      (s->use_no_overlap_below_skolem && s->n_skolem_labels != 0u) ||
+      !atp_cp_push_fuse_ok(s)) {
+    return 0u;
+  }
+  if (atp_cptr_pair(s, i_out, i_in)) return 0u;  // per-pair debug probe
+  // Twin recovery, handle-proven.
+  const AtpFtCell *lo_ft = sw_face_ft(s, i_out, lo);
+  const AtpFtCell *ro_ft = sw_face_ft(s, i_out, ro);
+  if (lo_ft == NULL || ro_ft == NULL) return 0u;
+  if (lin != g_sw_rn_out_l || rin != g_sw_rn_out_r) return 0u;
+  const AtpFtCell *lin_src = sw_face_ft(s, i_in, g_sw_rn_src_l);
+  const AtpFtCell *rin_src = sw_face_ft(s, i_in, g_sw_rn_src_r);
+  if (lin_src == NULL || rin_src == NULL) return 0u;
+  AtpFtCell *lin_ft = sw_rename_ft(s, lin_src);
+  AtpFtCell *rin_ft = sw_rename_ft(s, rin_src);
+  // Subterm + pre-filter, the Term arm's exact verdicts.  sub_pre, when
+  // the Vater sweep passes it, IS the subterm of lo at p (its contract),
+  // so the span twin is always addressable from the path.
+  (void)sub_pre;
+  const AtpFtCell *sub_ft = ft_subterm_at(lo_ft, p, p_len);
+  if (sub_ft == NULL || ft_is_var(sub_ft)) {
+    *rv = 0u;
+    return 1u;
+  }
+  if (ft_ctr_sym(sub_ft) == ATPFT_NUM_MARKER ||
+      (!ft_is_var(lin_ft) && ft_ctr_sym(lin_ft) == ATPFT_NUM_MARKER)) {
+    return 0u;   // TAG_NUM face: the Term filter's tag semantics differ
+  }
+  if (!ft_is_var(lin_ft) && ft_ctr_sym(sub_ft) != ft_ctr_sym(lin_ft)) {
+    *rv = 0u;    // head mismatch: thvm_unify would fail identically
+    return 1u;
+  }
+  static AtpFtSubst fsubst;   // BSS zero; watermark-reset per attempt
+  ft_subst_reset(&fsubst);
+  if (!ft_unify(sub_ft, lin_ft, &fsubst)) {
+    *rv = 0u;
+    return 1u;
+  }
+  if (g_atp_phase_detail) g_atp_cpg_overlap_calls++;
+  u32 vtot = s->use_lazy_normalize
+                 ? vcp_ft_count_pair(lo_ft, sub_ft, rin_ft, ro_ft, &fsubst,
+                                     (u32)ATP_WM_BEHANDELN_GATE)
+                 : 0u;
+  if (vtot == VCP_COUNT_ANOMALY) return 0u;   // classic build decides
+  if (o_eq || in_eq) {
+    u8 vdrop = 0u;
+    if (!vcp_ft_order_gate(s, lo_ft, rin_ft, ro_ft, sub_ft, &fsubst,
+                           o_eq, in_eq, &vdrop)) {
+      return 0u;                              // anomaly: classic gate decides
+    }
+    g_vcp_gate_n_test++;
+    if (vdrop) {
+      g_vcp_gate_n_drop++;
+      *rv = 0u;
+      return 1u;
+    }
+  }
+  u8 ft_route = 0u, ft_treat = 0u;
+  if (s->use_lazy_normalize && vtot >= (u32)ATP_WM_BEHANDELN_GATE) {
+    if (!vcp_ft_emit_fused(s->kbo, lo_ft, sub_ft, rin_ft, ro_ft, &fsubst)) {
+      return 0u;
+    }
+    ft_route = 1u;
+    g_vcp_emit_n_ok++;
+  } else {
+    static int join_cache_env = -1;
+    if (join_cache_env < 0) join_cache_env = atp_env_on("THVM_ATP_JOIN_CACHE");
+    if (join_cache_env) return 0u;
+    if (!vcp_ft_treat_form(s, lo_ft, sub_ft, rin_ft, ro_ft, &fsubst)) {
+      return 0u;
+    }
+    ft_treat = 1u;
+    g_vcp_treat_n_ok++;
+  }
+  // --- the routed push tail, verbatim from the Term arm ---
+  CriticalPair cp;
+  cp.lhs  = 0;
+  cp.rhs  = 0;
+  cp.peak = 0;
+  cp.pos_len = (u8)p_len;
+  for (u32 d = 0; d < p_len; d++) cp.pos[d] = (u8)p[d];
+  cp.combo = 0xffu;
+  if (atp_cp_gen_gates(s, &cp, 0u, 1u, o_eq, in_eq) == 0u) {
+    if (ft_route) g_acp_fuse.valid = 0u;
+    if (ft_treat) vcp_treat_release(s);
+    *rv = 0u;
+    return 1u;
+  }
+  g_cpform_i = i_out; g_cpform_j = i_in;
+  g_cpform_lin = lin; g_cpform_rin = rin; g_cpform_sub = sub_pre;
+  g_cpform_itr = t_out; g_cpform_jtr = t_in;
+  g_cpform_ilhs = (i_out < s->n_rules) ? s->lhs[i_out] : 0;
+  g_cpform_jlhs = (i_in  < s->n_rules) ? s->lhs[i_in]  : 0;
+  g_cpform_i_or = (i_out < s->n_rules) ? s->r_orient[i_out] : 0xffu;
+  g_cpform_j_or = (i_in  < s->n_rules) ? s->r_orient[i_in]  : 0xffu;
+  g_cpform_combo = g_sw_phase;
+  g_cpform_pos_len = (u8)p_len;
+  for (u32 d = 0; d < p_len && d < CP_MAX_DEPTH; d++) {
+    g_cpform_pos[d] = (u8)p[d];
+  }
+  g_cp_rawsz_hint = vtot;
+  if (ft_route) g_vcp_emit.armed = 1u;
+  if (ft_treat) g_vcp_treat.armed = 1u;
+  *rv = atp_push_cps_traced(s, &cp, 1u, t_out, t_in, i_out, i_in);
+  if (ft_route) {
+    g_vcp_emit.armed = 0u;
+    g_acp_fuse.valid = 0u;
+  }
+  if (ft_treat) {
+    g_vcp_treat.armed = 0u;
+    g_acp_fuse.valid  = 0u;
+  }
+  return 1u;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
 static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
                         Term lin, Term rin,
                         const u32 *p, u32 p_len, u32 t_out, u32 t_in,
                         u32 i_out, u32 i_in, u8 o_eq, u8 in_eq) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  {
+    u32 _ft_rv = 0u;
+    if (sw_form_push_ft_try(s, lo, ro, sub_pre, lin, rin, p, p_len,
+                            t_out, t_in, i_out, i_in, o_eq, in_eq,
+                            &_ft_rv)) {
+      return _ft_rv;
+    }
+  }
+#endif
   // PROFILE=2 detail: everything up to the push (subterm addressing, unify,
   // apply, the gen gates) is the walk's "overlap" component, matching the
   // batch path's atp_overlap_ij span; the atp_push_cps_traced call is its
