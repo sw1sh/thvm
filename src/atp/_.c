@@ -3207,6 +3207,59 @@ static u8 vcp_ft_emit_side(const AtpFtCell *root, const AtpFtCell *at,
 }
 #endif // THVM_ATPFT_NORM
 
+// FT sibling of vcp_order_gate_virtual: the WM KPAction eq-parent
+// ordering gate decided entirely on span composites -- two
+// vcp_ft_emit_side walks into a LOCAL fuse state, then the flat-KBO
+// mirror, per active parent face.  Returns 1 with *drop set; 0 on an
+// anomaly (caller falls back to the Term route).  The CP-walk port's
+// gate; no caller yet.
+#if defined(THVM_ATPFT_NORM)
+static u8 vcp_ft_order_gate(AtpState *s, const AtpFtCell *lo,
+                            const AtpFtCell *rin, const AtpFtCell *ro,
+                            const AtpFtCell *sub, const AtpFtSubst *subst,
+                            u8 o_eq, u8 in_eq, u8 *drop) {
+  *drop = 0u;
+  AcpFuse fz;
+  u32 pos, nodes, fpos, fl;
+  if (o_eq) {
+    fz.map.n = 0u; fz.phidiff = 0;
+    pos = nodes = fpos = 0u;
+    if (!vcp_ft_emit_side(ro, NULL, NULL, subst, s->kbo, &fz.map,
+                          &pos, &nodes, &fz, +1, &fpos)) {
+      return 0u;
+    }
+    fl = fpos;
+    if (!vcp_ft_emit_side(lo, NULL, NULL, subst, s->kbo, &fz.map,
+                          &pos, &nodes, &fz, -1, &fpos)) {
+      return 0u;
+    }
+    fz.fl_n = fl;
+    fz.fr_n = fpos - fl;
+    if (acp_fuse_kbo_at(s->kbo, &fz, g_acpf_pool) == KBO_GT) {
+      *drop = 1u;
+      return 1u;
+    }
+  }
+  if (in_eq) {
+    fz.map.n = 0u; fz.phidiff = 0;
+    pos = nodes = fpos = 0u;
+    if (!vcp_ft_emit_side(rin, NULL, NULL, subst, s->kbo, &fz.map,
+                          &pos, &nodes, &fz, +1, &fpos)) {
+      return 0u;
+    }
+    fl = fpos;
+    if (!vcp_ft_emit_side(sub, NULL, NULL, subst, s->kbo, &fz.map,
+                          &pos, &nodes, &fz, -1, &fpos)) {
+      return 0u;
+    }
+    fz.fl_n = fl;
+    fz.fr_n = fpos - fl;
+    if (acp_fuse_kbo_at(s->kbo, &fz, g_acpf_pool) == KBO_GT) *drop = 1u;
+  }
+  return 1u;
+}
+#endif // THVM_ATPFT_NORM
+
 // Route gate for the FT-direct emission: ALWAYS ON where the route
 // conditions admit it (the THVM_ATP_FT_EMIT=0 one-round kill switch
 // was retired 2026-07-04 after the bake round -- corpus certifier
