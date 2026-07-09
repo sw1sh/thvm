@@ -1132,8 +1132,27 @@ int main(int argc, char **argv) {
       // disagree, flipping the KBO orientation of a symmetric law and
       // diverging the trajectory.  THVM_ATP_NO_AUTO_PREC=1 keeps the .pr
       // chain (the pre-derivation behaviour).
-      if (!atp_env_on("THVM_ATP_NO_AUTO_PREC"))
-        pr_wm_derive_precedence(&prp);
+      if (!atp_env_on("THVM_ATP_NO_AUTO_PREC")) {
+        // Symbol-precedence scheme selector (Vampire-port slice).  Default
+        // = WM/Fuchs -auto (pr_wm_derive_precedence).  THVM_ATP_SYM_PREC
+        // selects a Vampire precedence port from src/atp/precedence.c:
+        //   reverse-frequency = Vampire `sp=reverse_frequency` (its most
+        //     common UEQ-winning precedence, 122 wins -- common symbols
+        //     outrank rare ones), frequency = Vampire `sp=frequency` /
+        //     E InvFreqRank.  Both are pure ORDERING ports over thvm's own
+        //     completion engine -- alternate schedule slices that orient a
+        //     symmetric law the way Vampire's winning strategies do, for
+        //     the problems the WM auto precedence mis-orients.
+        const char *symprec = getenv("THVM_ATP_SYM_PREC");
+        if (symprec != NULL && strcmp(symprec, "reverse-frequency") == 0)
+          atp_reverse_frequency_precedence(prp.eq_l, prp.eq_r, prp.n_eqns,
+                                           cap, prp.precedence);
+        else if (symprec != NULL && strcmp(symprec, "frequency") == 0)
+          atp_occurrence_precedence(prp.eq_l, prp.eq_r, prp.n_eqns,
+                                    cap, prp.precedence);
+        else
+          pr_wm_derive_precedence(&prp);
+      }
 
       // Verband strategy: `wmcli -auto` runs `kbo,cph(gt),gj()` for the
       // lattice files -- gtweight CP selection (ATP_CP_WEIGHT_GT, not the
