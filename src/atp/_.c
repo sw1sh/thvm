@@ -16950,8 +16950,19 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // `-ki` strength "re"; the sweep itself is opt-in (CpSetInterreduce
     // / the WM preset), mirroring `-ki`'s default-off trigger.
     AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-    AtpFtCell *fl = ft_from_term(a, ol,  0);
-    AtpFtCell *fr = ft_from_term(a, orr, 0);
+    // Packed slot: decode the byte string STRAIGHT to cells (the same
+    // bit-identical spans ft_from_term of the just-unpacked Terms
+    // would build -- the pop-stash decoder).  Implicit slots keep the
+    // Term re-encode.
+    AtpFtCell *fl, *fr;
+    if (!atp_cp_slot_implicit(s, vv) && s->cp_packed[vv] != NULL) {
+      const u8 *pp = s->cp_packed[vv];
+      fl = acp_unpack_term_ft(a, &pp, 0);
+      fr = acp_unpack_term_ft(a, &pp, 0);
+    } else {
+      fl = ft_from_term(a, ol,  0);
+      fr = ft_from_term(a, orr, 0);
+    }
     u8 joined_pre = (u8)ft_eq(fl, fr);
     if (!joined_pre) {
       fl = atp_rewrite_normalize_ft(s, fl, NORM_CAP);
@@ -18113,11 +18124,19 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             }
 #ifdef THVM_ATPFT_RULES
             // Stage 4: the in-place RHS edit replaces the Term; the
-            // AtpFt mirror must re-convert (the old AtpFt RHS cells
-            // become unreachable in the arena, freed wholesale at
-            // ft_destroy time).  LHS unchanged so lhs_ft[i] stays.
-            s->rhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
-                                        r_reduced, 0);
+            // AtpFt mirror adopts the FT composition pipeline's NF
+            // span when armed (ft_eq_term-proven), else re-converts.
+            // (Old AtpFt RHS cells become unreachable in the arena,
+            // freed wholesale at ft_destroy time.  LHS unchanged so
+            // lhs_ft[i] stays.)
+            if (g_ir_rhs_nf_ft != NULL &&
+                ft_eq_term(g_ir_rhs_nf_ft, r_reduced)) {
+              s->rhs_ft[i] = g_ir_rhs_nf_ft;
+            } else {
+              s->rhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
+                                          r_reduced, 0);
+            }
+            g_ir_rhs_nf_ft = NULL;
             atp_ft_rules_verify_push(s, i);
 #endif
             // RHS does not feed the LHS discrimination tree, so the
@@ -18528,14 +18547,6 @@ static void atp_wm_demote_drain(AtpState *s) {
                     s->use_mixmost_nf, vfl != NULL, vfr != NULL,
                     vfl != NULL ? ft_eq_term(vfl, l) : -1,
                     vfr != NULL ? ft_eq_term(vfr, r) : -1);
-            if (vfl != NULL && !ft_eq_term(vfl, l)) {
-              char tb[1024];
-              atp_pretty_term(l, tb, sizeof tb);
-              fprintf(stderr, "  DRAINDBG term_l=%s\n  DRAINDBG span_l=", tb);
-              Term sl = ft_to_term(vfl);
-              atp_pretty_term(sl, tb, sizeof tb);
-              fprintf(stderr, "%s\n", tb);
-            }
           }
         }
         if (s->use_mixmost_nf && vfl != NULL && vfr != NULL &&

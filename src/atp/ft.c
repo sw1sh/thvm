@@ -362,12 +362,17 @@ static AtpFtCell *ft_from_term_pre(AtpFt *a, Term t, int scratch) {
   return c;
 }
 
+__attribute__((noinline)) void ft_region2_from_hook(void) {
+  // lldb anchor: region-2 ft_from_term (interchange residue hunt).
+  __asm__ volatile("");
+}
 AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
   extern unsigned char g_atp_phase_detail;
   if (g_atp_phase_detail) {
     extern u64 g_ft_from_calls; g_ft_from_calls++;
     extern u8 g_ft_region; extern u64 g_ft_from_by_region[8];
     g_ft_from_by_region[g_ft_region & 7u]++;
+    if (g_ft_region == 2u) ft_region2_from_hook();
   }
   if (ft_preorder_on()) return ft_from_term_pre(a, t, scratch);
   return ft_from_term_rec(a, t, scratch);

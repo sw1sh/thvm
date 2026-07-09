@@ -95,7 +95,15 @@ static int ft_subst_ground_extras(AtpState *s, const AtpFtCell *tmpl,
     if (subst->bind[id] != NULL) continue;
     if (s->wpo != NULL || s->rpo != NULL) return 0;  // not ground-total
     if (mc == NULL) {
-      mc = ft_from_term((AtpFt *)s->ft_arena_ptr, s->min_const, 0);
+      // Per-state cache: the grounding constant is a read-only
+      // single-cell span; re-encode only when the Term handle moved
+      // (GC forward) or the min const itself changed.
+      if (s->min_const_ft == NULL || s->min_const_ft_src != s->min_const) {
+        s->min_const_ft     = ft_from_term((AtpFt *)s->ft_arena_ptr,
+                                           s->min_const, 0);
+        s->min_const_ft_src = s->min_const;
+      }
+      mc = s->min_const_ft;
       if (mc == NULL) return 0;
     }
     subst->bind[id] = mc;

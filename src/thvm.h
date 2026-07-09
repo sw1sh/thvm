@@ -6247,6 +6247,14 @@ typedef struct {
   // goal_rhs_nf (above) are the paired decoded values.
   struct AtpFtCell  *goal_nf_ft_l;
   struct AtpFtCell  *goal_nf_ft_r;
+  // Cached FT image of s->min_const for the unfailing-instantiation
+  // grounding (ft_norm's ftn_ground_subst encoded it fresh per call).
+  // Keyed by the Term handle: a GC forward or a min-const change
+  // invalidates and re-encodes (rare, safe either way -- the cell is
+  // a read-only single-cell constant that substitution application
+  // copies).
+  struct AtpFtCell  *min_const_ft;
+  Term               min_const_ft_src;
 #endif
 
 #ifdef THVM_ATPFT_CPQ
