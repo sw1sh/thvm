@@ -20774,8 +20774,7 @@ static u8 atp_cp_push_fuse_ok(const AtpState *s) {
     return 0u;
   }
   if (s->w2_modulo > 0u || s->gnn_coop) return 0u;
-  if (s->use_perm_subsume || s->use_rule_subsume_drop ||
-      s->use_queue_subsume || s->use_connectedness || s->use_implicit_cp) {
+  if (s->use_connectedness) {
     return 0u;
   }
 #ifdef ATP_CP_GROUND_JOIN
