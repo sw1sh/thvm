@@ -16099,8 +16099,17 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
   {
     atp_ft_mirror_ensure(s);
     AtpFt *gft = (AtpFt *)s->ft_arena_ptr;
-    AtpFtCell *fl_in = ft_from_term(gft, gl, 0);
-    AtpFtCell *fr_in = ft_from_term(gft, gr, 0);
+    // The aliased goal keeps a live FT mirror (goal_lhs_ft/goal_rhs_ft,
+    // maintained at set_goal / alias moves).  The normalize below is
+    // destructive, so hand it a CLONE of the mirror -- bit-identical to
+    // the ft_from_term re-encode it replaces, with no Term hop.  A
+    // non-aliased conjunct (multi-goal loop) has no mirror: re-encode.
+    u8 gl_mir = (u8)(gl == s->goal_lhs && gr == s->goal_rhs &&
+                     s->goal_lhs_ft != NULL && s->goal_rhs_ft != NULL);
+    AtpFtCell *fl_in = gl_mir ? ft_clone_span(gft, s->goal_lhs_ft, 0)
+                              : ft_from_term(gft, gl, 0);
+    AtpFtCell *fr_in = gl_mir ? ft_clone_span(gft, s->goal_rhs_ft, 0)
+                              : ft_from_term(gft, gr, 0);
     // THVM_ATP_GOAL_NF_DEBUG scoping (see ft_norm.c g_goalnf_active):
     // tag the two goal walks 1/2 so the [mixstep] tracer separates the
     // L and R reduction sequences.
@@ -17315,7 +17324,12 @@ static Term atp_ir_normalize_ft_slice(AtpState *s, Term subj,
     return subj;
   }
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-  AtpFtCell *sub = ft_from_term(a, subj, 0);
+  // Probe hit (a real reduction): the destructive normalize gets a
+  // CLONE of the row's mirror -- bit-identical to the ft_from_term
+  // re-encode, no Term hop.  ft_to_term of the reduced NF is the
+  // genuine Term-spine boundary (the reduct enters R as a Term).
+  AtpFtCell *sub = (subj_ft != NULL) ? ft_clone_span(a, subj_ft, 0)
+                                     : ft_from_term(a, subj, 0);
   AtpFtCell *nf  = atp_rewrite_normalize_ft_slice(s, sub, slice_first,
                                                   slice_count, step_cap);
   return ft_to_term(nf);

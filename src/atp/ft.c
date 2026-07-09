@@ -373,6 +373,41 @@ AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
   return ft_from_term_rec(a, t, scratch);
 }
 
+// Structural clone of a cell span through the same ftnew_* constructors
+// ft_from_term_rec uses -- the output is bit-identical to
+// ft_from_term(a, ft_to_term(x), scratch) with both Term hops removed
+// (sym / arity / next / end threading and the GROUND fold all come from
+// ftnew_ctr, exactly as a fresh conversion would).  Runtime-only flag
+// bits the source may carry (SUBST_FRESH, LPO_RANK_VALID) are NOT
+// copied, matching what a fresh conversion produces.  Used to hand a
+// DESTRUCTIVE normalize a private copy of a live mirror span (rule or
+// goal) without re-encoding the Term side.
+AtpFtCell *ft_clone_span(AtpFt *a, const AtpFtCell *x, int scratch) {
+  if (ft_is_var(x)) {
+    return ftnew_var(a, ft_var_id(x), scratch);
+  }
+  u32 sym   = ft_ctr_sym(x);
+  u16 arity = x->arity;
+  if (arity == 0u) return ftnew_const(a, sym, scratch);
+  enum { KIDS_STACK = 16 };
+  AtpFtCell *kids_stack[KIDS_STACK];
+  AtpFtCell **kids      = kids_stack;
+  AtpFtCell **kids_heap = NULL;
+  if (arity > KIDS_STACK) {
+    kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
+    if (kids_heap == NULL) { fprintf(stderr, "ft_clone_span: kids OOM\n"); exit(1); }
+    kids = kids_heap;
+  }
+  const AtpFtCell *child = x->next;
+  for (u16 i = 0; i < arity; i++) {
+    kids[i] = ft_clone_span(a, child, scratch);
+    child = child->end->next;
+  }
+  AtpFtCell *c = ftnew_ctr(a, sym, arity, kids, scratch);
+  free(kids_heap);
+  return c;
+}
+
 // --- Boundary: AtpFt -> Term -----------------------------------------
 //
 // Mirror of the above: a var cell becomes term_new_fvr; a 0-arity
