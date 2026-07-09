@@ -1756,6 +1756,30 @@ static void ft_normalize_vars_pair(AtpFtCell *l, AtpFtCell *r) {
   }
 }
 
+// Distinct-variable count across a span pair (capped at
+// REWRITE_MAX_VAR -- callers only test the cliff).
+static u32 ft_distinct_var_count(const AtpFtCell *l, const AtpFtCell *r) {
+  u32 ids[REWRITE_MAX_VAR];
+  u32 n = 0u;
+  const AtpFtCell *span[2] = { l, r };
+  for (u32 t = 0; t < 2u; t++) {
+    const AtpFtCell *e = (span[t]->end != NULL) ? span[t]->end->next : NULL;
+    for (const AtpFtCell *p = span[t]; p != e; p = p->next) {
+      if ((p->sym & WF_VAR_BIT) == 0u) continue;
+      u32 id = p->sym & ~WF_VAR_BIT;
+      u32 k = 0u;
+      for (; k < n; k++) {
+        if (ids[k] == id) break;
+      }
+      if (k == n) {
+        if (n >= REWRITE_MAX_VAR) return REWRITE_MAX_VAR;
+        ids[n++] = id;
+      }
+    }
+  }
+  return n;
+}
+
 // Pop-time FT stash: thvm_atp_select_cp decodes the selected packed
 // CP's byte string into two fresh FT spans (bytes -> cells, no Term
 // hop) and parks them here for the step function's mixmost pop
@@ -13839,6 +13863,67 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
           thvm_atp_heap_reset(hcp_norm);
           s->step++;
           return ATP_RUNNING;
+        }
+        // FT-first orient refusal: a survivor atp_push_rule would REFUSE
+        // as a var-normalized duplicate decodes nothing.  Decided only
+        // for the plain-KBO orientable cases with every special orient
+        // mode off (force-def, legacy mask-0 perm, fwd-subsume) and only
+        // when the canonical renumber is exact (distinct-var count under
+        // the REWRITE_MAX_VAR cliff, where the FT and Term renumbers
+        // coincide by construction); everything else falls through to
+        // the decode + full Term orient.  An ACCEPTED rule also falls
+        // through -- push_rule re-verifies Term-side, so only the
+        // refusal is decided here.
+        {
+          static int fdo_env2 = -1;
+          if (fdo_env2 < 0)
+            fdo_env2 = getenv("THVM_ATP_FORCE_DEF_ORIENT") ? 1 : 0;
+          if (atp_order_is_plain_kbo(s) && !fdo_env2 &&
+              !s->use_force_def_orient && !s->use_fwd_subsume &&
+              !(s->use_perm_subsume && g_atp_perm_subsume_mask == 0ull)) {
+            KboCmp oc = thvm_kbo_ft(lf, rf, s->kbo);
+            if (oc == KBO_GT || oc == KBO_LT) {
+              AtpFt *da = (AtpFt *)s->ft_arena_ptr;
+              AtpFtCell *dl = ft_clone_span(da, oc == KBO_GT ? lf : rf, 0);
+              AtpFtCell *dr = ft_clone_span(da, oc == KBO_GT ? rf : lf, 0);
+              u32 nv_l = ft_distinct_var_count(dl, dr);
+              if (nv_l < REWRITE_MAX_VAR) {
+                ft_normalize_vars_pair(dl, dr);
+                u8 dup = 0u, unknown = 0u;
+                for (u32 k = 0; k < s->n_rules; k++) {
+                  if (s->lhs_ft[k] == NULL || s->rhs_ft[k] == NULL) {
+                    unknown = 1u;
+                    break;
+                  }
+                  if (ft_eq(s->lhs_ft[k], dl) && ft_eq(s->rhs_ft[k], dr)) {
+                    dup = 1u;
+                    break;
+                  }
+                }
+                if (!unknown && dup) {
+                  if (pop_trace) {
+                    Term pl = ft_to_term(lf);
+                    Term pr = ft_to_term(rf);
+                    fprintf(stderr, "POPV pick=%u verdict=%s lhs=",
+                            s->cp_select_count, "REFUSED");
+                    atp_dbg_print_term(stderr, pl);
+                    fputs(" rhs=", stderr);
+                    atp_dbg_print_term(stderr, pr);
+                    fputc('\n', stderr);
+                  }
+                  ft_free_span(da, dl, dl->end);
+                  ft_free_span(da, dr, dr->end);
+                  g_ft_region = 0u;
+                  if (g_atp_phase_enabled)
+                    g_atp_phase_us_pop_normalize += atp_now_us() - _ph_pop_t0;
+                  s->step++;
+                  return ATP_RUNNING;
+                }
+              }
+              ft_free_span(da, dl, dl->end);
+              ft_free_span(da, dr, dr->end);
+            }
+          }
         }
         l = ft_to_term(lf);
         r = ft_to_term(rf);
