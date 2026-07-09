@@ -6224,6 +6224,18 @@ typedef struct {
   struct AtpFtCell **r_dead_rhs_save_ft;
   struct AtpFtCell  *goal_lhs_ft;
   struct AtpFtCell  *goal_rhs_ft;
+  // Goal-NF decode cache: the flat NFs + their decoded Terms from the
+  // previous goal check.  The goal's normal form is content-stable
+  // across most checks (it changes only when a new rule reduces it),
+  // so when the fresh NF span ft_eq-matches the cached one the check
+  // reuses the cached Term instead of ft_to_term -- the last per-step
+  // interchange conversion class.  Arena-A cells are never freed once
+  // allocated (only fuse/CPQ/stash spans are explicitly returned), so
+  // the retained spans stay valid; the cache is invalidated wherever
+  // goal_lhs_ft/goal_rhs_ft are (re)assigned.  Terms goal_lhs_nf /
+  // goal_rhs_nf (above) are the paired decoded values.
+  struct AtpFtCell  *goal_nf_ft_l;
+  struct AtpFtCell  *goal_nf_ft_r;
 #endif
 
 #ifdef THVM_ATPFT_CPQ

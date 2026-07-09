@@ -7851,6 +7851,8 @@ fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
 #ifdef THVM_ATPFT_RULES
     s->goal_lhs_ft = NULL;
     s->goal_rhs_ft = NULL;
+    s->goal_nf_ft_l = NULL;
+    s->goal_nf_ft_r = NULL;
 #endif
     atp_goals_release(s);
     return 1;
@@ -7894,6 +7896,8 @@ fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
   // freed wholesale at thvm_atp_free.
   s->goal_lhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, lhs[0], 0);
   s->goal_rhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, rhs[0], 0);
+  s->goal_nf_ft_l = NULL;
+  s->goal_nf_ft_r = NULL;
 #endif
   // Recompute the conjecture symbol mask for ATP_CP_WEIGHT_CONJSYM --
   // the union over every conjunct's symbols.
@@ -16248,8 +16252,27 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
     g_goalnf_active = 2;
     AtpFtCell *fr = atp_rewrite_normalize_ft(s, fr_in, ATP_GOAL_NORM_CAP);
     g_goalnf_active = 0;
-    l = ft_to_term(fl);
-    r = ft_to_term(fr);
+    // NF decode cache (goal_nf_ft_l/r, see thvm.h): the goal's NF is
+    // content-stable across most checks, so when the fresh span
+    // ft_eq-matches the previous one, reuse the previously decoded
+    // Term (the caller stored it in goal_lhs_nf/goal_rhs_nf right
+    // after the last call -- the pairing invariant).  Scoped to the
+    // aliased goal (gl_mir); conjunct-loop calls neither read nor
+    // refresh it.
+    if (gl_mir && s->goal_nf_ft_l != NULL && s->goal_lhs_nf != 0 &&
+        ft_eq(fl, s->goal_nf_ft_l)) {
+      l = s->goal_lhs_nf;
+    } else {
+      l = ft_to_term(fl);
+      if (gl_mir) s->goal_nf_ft_l = fl;
+    }
+    if (gl_mir && s->goal_nf_ft_r != NULL && s->goal_rhs_nf != 0 &&
+        ft_eq(fr, s->goal_nf_ft_r)) {
+      r = s->goal_rhs_nf;
+    } else {
+      r = ft_to_term(fr);
+      if (gl_mir) s->goal_nf_ft_r = fr;
+    }
     if (getenv("THVM_ATP_GOAL_NF_DEBUG")) {
       char lb[512], rb[512];
       atp_pretty_term(l, lb, sizeof lb);
@@ -16291,6 +16314,8 @@ static void atp_goals_alias(AtpState *s, u32 g) {
 #ifdef THVM_ATPFT_RULES
   s->goal_lhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, s->goal_lhs, 0);
   s->goal_rhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, s->goal_rhs, 0);
+  s->goal_nf_ft_l = NULL;
+  s->goal_nf_ft_r = NULL;
 #endif
 #ifdef ATP_MNF
   if (s->mnf != NULL) {
@@ -16450,6 +16475,8 @@ fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
 #ifdef THVM_ATPFT_RULES
     s->goal_lhs_ft = NULL;
     s->goal_rhs_ft = NULL;
+    s->goal_nf_ft_l = NULL;
+    s->goal_nf_ft_r = NULL;
 #endif
     return 1;
   }
@@ -16472,6 +16499,8 @@ fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
   // arena story as thvm_atp_set_goal).
   s->goal_lhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, lhs, 0);
   s->goal_rhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, rhs, 0);
+  s->goal_nf_ft_l = NULL;
+  s->goal_nf_ft_r = NULL;
 #endif
   return 1;
 }
