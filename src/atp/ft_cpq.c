@@ -146,6 +146,33 @@ static u32 atp_cp_ft_set(AtpState *s, u32 i, Term lhs, Term rhs,
   return e->size;
 }
 
+// --- Slot adopt (transfer already-built FT spans) --------------------
+//
+// Sibling of atp_cp_ft_set that ADOPTS two ready FT spans instead of
+// rebuilding them from Terms via ft_from_term.  The generation-time
+// fuse (vcp treat) already normalized the CP's two sides to their NF
+// cells for the joinability verdict; on survival those very cells ARE
+// the queued CP (lhs/rhs passed to the classic path are ft_to_term of
+// them by construction).  Adopting them skips the ft_from_term rebuild
+// -- the push-side half of the byte-queue-retirement speedup.  The
+// caller must relinquish ownership (NULL its handles) so the spans are
+// not double-freed by the fuse cleanup.
+static u32 atp_cp_ft_adopt(AtpState *s, u32 i, AtpFtCell *fl, AtpFtCell *fr,
+                           u32 priority_hint, u32 origin_rule) {
+  (void)s;
+  u32 ln = ft_node_count(fl);
+  u32 rn = ft_node_count(fr);
+  AtpCpEntry *e = &((AtpCpEntry *)s->cp_packed_ft)[i];
+  e->lhs = fl;
+  e->rhs = fr;
+  e->size = ln + rn;
+  e->weight = e->size;
+  e->priority = (u16)(priority_hint > 0xffffu ? 0xffffu : priority_hint);
+  e->origin_rule = (u16)(origin_rule > 0xffffu ? 0xffffu : origin_rule);
+  e->_pad = 0u;
+  return e->size;
+}
+
 // --- Slot clear (free FT spans) -------------------------------------
 //
 // Returns both FT spans to Arena A's free list and zeros the entry so

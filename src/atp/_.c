@@ -10573,9 +10573,20 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   s->cp_goal[i]  = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                      ? atp_goal_weight(s, lhs, rhs) : 0u;
 #ifdef THVM_ATPFT_CPQ
-  // Stage 7: dual-store -- mirror the CP into Arena-A FT cells.  The
-  // FT spans live until the slot is freed (pop / drop / destroy).
-  atp_cp_ft_set(s, i, lhs, rhs, s->cp_pri[i], /*origin=*/0xffffu);
+  // Mirror the CP into Arena-A FT cells.  When the generation-time fuse
+  // is armed, its NF spans ARE this CP (lhs/rhs are ft_to_term of them),
+  // so ADOPT them and skip the ft_from_term rebuild -- ownership moves
+  // to the slot, and we NULL the fuse handles so the treat cleanup
+  // (which runs after this push) does not double-free.  Otherwise
+  // (emit-class or non-fused push) rebuild from the Terms.
+  if (g_vcp_treat.armed && g_vcp_treat.fl != NULL && g_vcp_treat.fr != NULL) {
+    atp_cp_ft_adopt(s, i, g_vcp_treat.fl, g_vcp_treat.fr,
+                    s->cp_pri[i], /*origin=*/0xffffu);
+    g_vcp_treat.fl = NULL;
+    g_vcp_treat.fr = NULL;
+  } else {
+    atp_cp_ft_set(s, i, lhs, rhs, s->cp_pri[i], /*origin=*/0xffffu);
+  }
 #endif
   // K-D Heap secondary dimension: compute cp_pri2 with the alternate
   // weight mode (w2_mode, set via thvm_atp_set_w2).  Cheap -- ~one
