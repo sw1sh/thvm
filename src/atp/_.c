@@ -1680,6 +1680,62 @@ static u32 acp_count_term(Term t) {
   return n;
 }
 
+#ifdef THVM_ATPFT_RULES
+// Decode one packed preorder term STRAIGHT into AtpFt cells -- the
+// byte-side sibling of ft_from_term(acp_unpack_term(pp)) with the
+// heap-Term intermediate removed.  Builds through the same ftnew_*
+// constructors ft_from_term_rec uses, so every cell (sym / arity /
+// flags / next / end threading, NUM-marker encoding, GROUND folding)
+// is bit-identical to the two-hop route; only the heap Terms are
+// never materialised.  The pop-time treatment uses this to source
+// the mixmost normalize input from the queue's byte string with zero
+// ft_from_term.
+static AtpFtCell *acp_unpack_term_ft(AtpFt *a, const u8 **pp, int scratch) {
+  u8 disc = *(*pp)++;
+  switch (disc) {
+    case 'C': {
+      u32 label = (u32)acp_get_varint(pp);
+      u32 n     = (u32)acp_get_varint(pp);
+      if (n == 0u) return ftnew_const(a, label, scratch);
+      enum { KIDS_STACK = 16 };
+      AtpFtCell *kids_stack[KIDS_STACK];
+      AtpFtCell **kids      = kids_stack;
+      AtpFtCell **kids_heap = NULL;
+      if (n > KIDS_STACK) {
+        kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)n);
+        if (kids_heap == NULL) thvm_fatal("acp_unpack_term_ft: kids OOM");
+        kids = kids_heap;
+      }
+      for (u32 i = 0; i < n; i++) kids[i] = acp_unpack_term_ft(a, pp, scratch);
+      AtpFtCell *c = ftnew_ctr(a, label, (u16)n, kids, scratch);
+      free(kids_heap);
+      return c;
+    }
+    case 'N': {
+      u32 dtype = (u32)acp_get_varint(pp);
+      u64 val   = acp_get_varint(pp);
+      AtpFtCell *dt_cell  = ftnew_const(a, dtype & ~WF_VAR_BIT, scratch);
+      AtpFtCell *raw_cell = ftnew_const(a, ((u32)val) & ~WF_VAR_BIT, scratch);
+      AtpFtCell *kids[2]  = { dt_cell, raw_cell };
+      return ftnew_ctr(a, ATPFT_NUM_MARKER, 2u, kids, scratch);
+    }
+    case 'V':
+    default:
+      return ftnew_var(a, (u32)acp_get_varint(pp), scratch);
+  }
+}
+
+// Pop-time FT stash: thvm_atp_select_cp decodes the selected packed
+// CP's byte string into two fresh FT spans (bytes -> cells, no Term
+// hop) and parks them here for the step function's mixmost pop
+// treatment.  NULL when the pop had no byte string (implicit slot,
+// orphan, CPQ skip-pack) -- the consumer falls back to ft_from_term
+// of the unpacked Terms.  Single-threaded engine; consumed (and
+// reset) by exactly the next pop treatment.
+static AtpFtCell *g_pop_ft_l = NULL;
+static AtpFtCell *g_pop_ft_r = NULL;
+#endif // THVM_ATPFT_RULES
+
 // Inverse of acp_pack: rebuild both heap Terms from the byte string.
 static void acp_unpack(const u8 *buf, Term *lhs, Term *rhs) {
   const u8 *p = buf;
@@ -11612,6 +11668,23 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     *rhs_out = 0;
   } else {
     atp_cp_slot_read(s, v, lhs_out, rhs_out);
+#ifdef THVM_ATPFT_RULES
+    // Byte->FT pop stash: decode the selected packed CP's byte string
+    // straight into FT spans for the mixmost pop treatment (which
+    // otherwise re-encodes the just-unpacked Terms via ft_from_term).
+    // Only for eager packed slots on the mixmost/non-record path; the
+    // consumer falls back to ft_from_term when the stash is empty
+    // (implicit slot, non-mixmost preset, record_norm_steps replay).
+    g_pop_ft_l = NULL;
+    g_pop_ft_r = NULL;
+    if (s->use_mixmost_nf && !s->record_norm_steps &&
+        !atp_cp_slot_implicit(s, v) && s->cp_packed[v] != NULL) {
+      AtpFt *pa = (AtpFt *)s->ft_arena_ptr;
+      const u8 *pp = s->cp_packed[v];
+      g_pop_ft_l = acp_unpack_term_ft(pa, &pp, 0);
+      g_pop_ft_r = acp_unpack_term_ft(pa, &pp, 0);
+    }
+#endif
   }
   s->last_popped_trace = s->cp_trace[v];
   s->last_popped_kind  = s->cp_kind[v];
@@ -13387,6 +13460,18 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   if (s->use_lazy_ground_join &&
       atp_cp_ground_joinable(s, cp_rhs, cp_lhs)) {
     s->n_cps_ground_joinable++;
+#ifdef THVM_ATPFT_RULES
+    // The select-time byte->FT stash was decoded for the pop treatment
+    // this drop skips -- return the spans so they don't leak.
+    if (g_pop_ft_l != NULL) {
+      ft_free_span((AtpFt *)s->ft_arena_ptr, g_pop_ft_l, g_pop_ft_l->end);
+      g_pop_ft_l = NULL;
+    }
+    if (g_pop_ft_r != NULL) {
+      ft_free_span((AtpFt *)s->ft_arena_ptr, g_pop_ft_r, g_pop_ft_r->end);
+      g_pop_ft_r = NULL;
+    }
+#endif
     thvm_atp_heap_reset(hcp_norm);
     s->step++;
     return ATP_RUNNING;
@@ -13399,6 +13484,7 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // project_atp_wm_speed_profiled 2026-07-02).  Behaviour-neutral.
   static int _popalloc_trace = -1;
   if (_popalloc_trace < 0) _popalloc_trace = atp_env_on("THVM_ATP_POPALLOC_TRACE");
+  static int pop_trace = -1;
   u64 _popalloc_h0 = _popalloc_trace ? HEAP_NEXT : 0u;
   if (_popalloc_trace && s->step >= 2800u) {
     fprintf(stderr, "POPENTER step=%u heap=%llu raw_sz=%u+%u rules=%u\n",
@@ -13475,11 +13561,57 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
                                      &chain_tail, NORM_CAP);
     }
   } else {
+    // Per-pick pop-treatment verdict trace (THVM_ATP_POP_TRACE), mirroring
+    // WM's WM_POPDUMP (KPV_Select) so the two engines' keep/drop sequences
+    // can be aligned programmatically.  Default-off, behaviour-neutral.
+    // (Probed here, before the normalize, so the FT-direct joined path
+    // below knows whether the POPV print needs real NF Terms.)
+    if (pop_trace < 0) pop_trace = atp_env_on("THVM_ATP_POP_TRACE");
+#if defined(ATP_ORDERED_REWRITE) && defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (s->use_mixmost_nf) {
+      // FT-direct pop treatment (KPV_Select R+E normalize): the input
+      // spans come from the select-time byte->FT stash (zero Term hop;
+      // ft_from_term only on the implicit-slot fallback), the join
+      // verdict is taken on the FLAT NFs, and heap Terms materialise
+      // only for survivors.  A joined pop -- the dominant outcome of a
+      // deep completion -- aliases l/r to cp_lhs purely to satisfy the
+      // kbo_eq(l, r) joined gate below (nothing else reads them on that
+      // path: the branch rewinds trace + heap and returns), so it costs
+      // ZERO interchange conversions.  Byte-identical: ft_eq on NF spans
+      // is the Term-side kbo_eq verdict (structural iso, the
+      // atp_cp_trivially_joinable_ft precedent), and the POPV trace
+      // still prints the true NF pair when enabled.
+      atp_ft_mirror_ensure(s);
+      AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+      AtpFtCell *lf = atp_rewrite_normalize_ft(
+          s, g_pop_ft_l != NULL ? g_pop_ft_l : ft_from_term(a, cp_lhs, 0),
+          NORM_CAP);
+      AtpFtCell *rf = atp_rewrite_normalize_ft(
+          s, g_pop_ft_r != NULL ? g_pop_ft_r : ft_from_term(a, cp_rhs, 0),
+          NORM_CAP);
+      g_pop_ft_l = NULL;
+      g_pop_ft_r = NULL;
+      if (ft_eq(lf, rf)) {
+        if (pop_trace) {
+          l = ft_to_term(lf);
+          r = l;                     // NF pair is equal; print it twice
+        } else {
+          l = cp_lhs;
+          r = cp_lhs;                // only kbo_eq(l, r) == 1 is observed
+        }
+      } else {
+        l = ft_to_term(lf);
+        r = ft_to_term(rf);
+      }
+    } else
+#endif
+    {
     // Live-rule-set call: atp_rewrite_normalize -> atp_rewrite_normalize_
     // ordered, which routes through the FT mixmost (WM innermost) when
     // use_mixmost_nf is set -- so the pop-time join verdict matches WM.
     l = atp_rewrite_normalize(s, cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
     r = atp_rewrite_normalize(s, cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    }
   }
   g_ft_region = 0u;
   if (g_atp_phase_enabled) g_atp_phase_us_pop_normalize += atp_now_us() - _ph_pop_t0;
@@ -13492,10 +13624,6 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     }
   }
 
-  // Per-pick pop-treatment verdict trace (THVM_ATP_POP_TRACE), mirroring
-  // WM's WM_POPDUMP (KPV_Select) so the two engines' keep/drop sequences
-  // can be aligned programmatically.  Default-off, behaviour-neutral.
-  static int pop_trace = -1;
   if (pop_trace < 0) pop_trace = atp_env_on("THVM_ATP_POP_TRACE");
 #define ATP_POPV(verdict) do { \
     if (pop_trace) { \
