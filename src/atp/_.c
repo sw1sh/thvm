@@ -3103,6 +3103,110 @@ static u8 vcp_order_gate_virtual(AtpState *s, Term lo, Term rin, Term ro,
   return 1u;
 }
 
+// Composite fused emit on spans: the FT sibling of vcp_emit_side --
+// walk `c`'s composite (splice `rin` at cell `*at_io`, resolve vars
+// through `subst`, chains followed) emitting the same 'C'/'V' byte
+// stream into g_acp_scratch and the same flat-KBO pool entries /
+// balances into `fz` (joint appearance-order renumber via `m`).  A
+// TAG_NUM marker or a full var map returns 0 -- the same anomaly
+// cliffs that send the Term emitter to the classic build.  Recursive
+// (composite depth); the Term version's frame cap plays the same
+// role.  The CP-walk port's serializer; no caller yet.
+#if defined(THVM_ATPFT_NORM)
+static u8 vcp_ft_emit_cell(const AtpFtCell *c, const AtpFtCell **at_io,
+                           const AtpFtCell *rin, const AtpFtSubst *subst,
+                           const KboConfig *cfg, AcpNvMap *m,
+                           u32 *pos, u32 *nodes, AcpFuse *fz, int sign,
+                           u32 *fpos, u32 depth) {
+  if (depth >= (u32)ACP_FUSE_MAX_DEPTH) return 0;
+  if (at_io != NULL && *at_io == c) {
+    *at_io = NULL;                       // single splice point
+    return vcp_ft_emit_cell(rin, NULL, NULL, subst, cfg, m, pos, nodes,
+                            fz, sign, fpos, depth);
+  }
+  if ((c->sym & WF_VAR_BIT) != 0u) {
+    u32 id = c->sym & ~WF_VAR_BIT;
+    const AtpFtCell *b =
+        (subst != NULL && id < ATPFT_MAX_VARS) ? subst->bind[id] : NULL;
+    if (b != NULL) {
+      return vcp_ft_emit_cell(b, NULL, NULL, subst, cfg, m, pos, nodes,
+                              fz, sign, fpos, depth);
+    }
+    u32 d = 0u;
+    for (; d < m->n; d++) {
+      if (m->old_id[d] == id) break;
+    }
+    if (d == m->n) {
+      if (m->n >= REWRITE_MAX_VAR) return 0;   // full map; fall back
+      m->old_id[m->n++] = id;
+      if (fz != NULL) fz->bal[d] = 0;
+    }
+    (*nodes)++;
+    acp_scratch_ensure(*pos, 21u);
+    u8 *bp = g_acp_scratch + *pos;
+    *bp++ = (u8)'V';
+    acp_put_varint(&bp, d);
+    *pos = (u32)(bp - g_acp_scratch);
+    if (fz != NULL) {
+      acpf_ensure(*fpos + 1u);
+      g_acpf_pool[*fpos].sym = -(i32)(d + 1u);
+      g_acpf_pool[*fpos].w   = cfg->var_weight;
+      g_acpf_pool[*fpos].sz  = 1u;
+      g_acpf_pool[*fpos].ar  = 0u;
+      (*fpos)++;
+      fz->phidiff += (long long)sign * (long long)cfg->var_weight;
+      fz->bal[d]  += sign;
+    }
+    return 1;
+  }
+  if (ft_ctr_sym(c) == ATPFT_NUM_MARKER) return 0;  // NUM: classic path
+  u32 lab = ft_ctr_sym(c);
+  u32 n   = (u32)c->arity;
+  if (n > REWRITE_MAX_ARITY) return 0;
+  (*nodes)++;
+  acp_scratch_ensure(*pos, 21u);
+  u8 *bp = g_acp_scratch + *pos;
+  *bp++ = (u8)'C';
+  acp_put_varint(&bp, lab);
+  acp_put_varint(&bp, n);
+  *pos = (u32)(bp - g_acp_scratch);
+  u32 here = 0u;
+  if (fz != NULL) {
+    acpf_ensure(*fpos + 1u);
+    here = *fpos;
+    (*fpos)++;
+    u32 w = (lab < cfg->n_labels) ? cfg->weights[lab] : 0u;
+    g_acpf_pool[here].sym = (i32)lab;
+    g_acpf_pool[here].w   = w;
+    g_acpf_pool[here].ar  = n;
+    fz->phidiff += (long long)sign * (long long)w;
+  }
+  const AtpFtCell *kid = c->next;
+  for (u32 i = 0; i < n; i++) {
+    if (!vcp_ft_emit_cell(kid, at_io, rin, subst, cfg, m, pos, nodes,
+                          fz, sign, fpos, depth + 1u)) {
+      return 0;
+    }
+    kid = kid->end->next;
+  }
+  if (fz != NULL) g_acpf_pool[here].sz = *fpos - here;
+  return 1;
+}
+
+static u8 vcp_ft_emit_side(const AtpFtCell *root, const AtpFtCell *at,
+                           const AtpFtCell *rin, const AtpFtSubst *subst,
+                           const KboConfig *cfg, AcpNvMap *m,
+                           u32 *pos, u32 *nodes, AcpFuse *fz, int sign,
+                           u32 *fpos) {
+  const AtpFtCell *at_local = at;
+  // Top-level splice (p_len == 0): the whole side IS the inner face.
+  const AtpFtCell *start = (at != NULL && at == root) ? rin : root;
+  const AtpFtCell **aio  = (at != NULL && at == root) ? NULL : &at_local;
+  return vcp_ft_emit_cell(start, aio, rin, subst, cfg, m, pos, nodes,
+                          fz, sign, fpos, 0u);
+}
+#endif // THVM_ATPFT_NORM
+
 // Route gate for the FT-direct emission: ALWAYS ON where the route
 // conditions admit it (the THVM_ATP_FT_EMIT=0 one-round kill switch
 // was retired 2026-07-04 after the bake round -- corpus certifier
