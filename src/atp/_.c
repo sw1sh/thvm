@@ -59,8 +59,10 @@ static void atp_cp_ft_move      (AtpState *s, u32 dst, u32 src);
 #  include "ft_ac_match.c"
 #  include "ft_ac_eq.c"
 # endif
+# include "ft_unify.c"   // span unifier: the CP-walk port consumes it
+                          // directly; the BATCH-path rerouting stays
+                          // gated on THVM_ATPFT_UNIFY (ft_cp.c below).
 # ifdef THVM_ATPFT_UNIFY
-#  include "ft_unify.c"
 #  include "ft_cp.c"
 # endif
 # include "ft_splice.c"
