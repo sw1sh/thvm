@@ -3260,6 +3260,71 @@ static u8 vcp_ft_order_gate(AtpState *s, const AtpFtCell *lo,
 }
 #endif // THVM_ATPFT_NORM
 
+// Composite CELL builder on spans: the FT sibling of
+// vcp_ft_build_emit_rec -- build the formed CP side's AtpFt cells
+// straight from the span composite (splice `rin` at the overlap cell,
+// resolve vars through the AtpFtSubst, chains followed), applying the
+// same joint appearance-order renumber the byte emit uses (shared
+// AcpNvMap), through the same ftnew_* constructors.  NULL on an
+// anomaly (TAG_NUM marker / full var map / arity cliff) -- caller
+// falls back to the Term build.  The CP-walk port's treated-class
+// builder; no caller yet.
+#if defined(THVM_ATPFT_NORM)
+static AtpFtCell *vcp_ft_build_cell(AtpFt *a, const AtpFtCell *c,
+                                    const AtpFtCell **at_io,
+                                    const AtpFtCell *rin,
+                                    const AtpFtSubst *subst,
+                                    AcpNvMap *m, u32 depth) {
+  if (depth >= (u32)ACP_FUSE_MAX_DEPTH) return NULL;
+  if (at_io != NULL && *at_io == c) {
+    *at_io = NULL;
+    return vcp_ft_build_cell(a, rin, NULL, NULL, subst, m, depth);
+  }
+  if ((c->sym & WF_VAR_BIT) != 0u) {
+    u32 id = c->sym & ~WF_VAR_BIT;
+    const AtpFtCell *b =
+        (subst != NULL && id < ATPFT_MAX_VARS) ? subst->bind[id] : NULL;
+    if (b != NULL) {
+      return vcp_ft_build_cell(a, b, NULL, NULL, subst, m, depth);
+    }
+    u32 d = 0u;
+    for (; d < m->n; d++) {
+      if (m->old_id[d] == id) break;
+    }
+    if (d == m->n) {
+      if (m->n >= REWRITE_MAX_VAR) return NULL;
+      m->old_id[m->n++] = id;
+    }
+    return ftnew_var(a, d, 0);
+  }
+  if (ft_ctr_sym(c) == ATPFT_NUM_MARKER) return NULL;
+  u32 lab = ft_ctr_sym(c);
+  u32 n   = (u32)c->arity;
+  if (n > REWRITE_MAX_ARITY) return NULL;
+  if (n == 0u) return ftnew_const(a, lab, 0);
+  AtpFtCell *kids_stack[16];
+  AtpFtCell **kids      = kids_stack;
+  AtpFtCell **kids_heap = NULL;
+  if (n > 16u) {
+    kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)n);
+    if (kids_heap == NULL) thvm_fatal("vcp_ft_build_cell: kids OOM");
+    kids = kids_heap;
+  }
+  const AtpFtCell *kid = c->next;
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = vcp_ft_build_cell(a, kid, at_io, rin, subst, m, depth + 1u);
+    if (kids[i] == NULL) {
+      free(kids_heap);
+      return NULL;      // partial kids leak into the arena (anomaly path)
+    }
+    kid = kid->end->next;
+  }
+  AtpFtCell *out = ftnew_ctr(a, lab, (u16)n, kids, 0);
+  free(kids_heap);
+  return out;
+}
+#endif // THVM_ATPFT_NORM
+
 // Route gate for the FT-direct emission: ALWAYS ON where the route
 // conditions admit it (the THVM_ATP_FT_EMIT=0 one-round kill switch
 // was retired 2026-07-04 after the bake round -- corpus certifier
