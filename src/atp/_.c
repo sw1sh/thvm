@@ -7581,6 +7581,42 @@ static u64 atp_trace_eq_store(AtpState *s, Term lhs, Term rhs) {
   return off + 1u;
 }
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Span-sourced sibling of atp_trace_eq_store: pack the pair's acp bytes
+// straight from spans (vcp_ft_emit_side with a fresh shared map -- on
+// var-normed spans the appearance-order renumber is the identity, so
+// the bytes equal acp_pack_term of the canonical pair; on raw spans it
+// equals the renumber-during-emit walk atp_trace_eq_store itself uses
+// for the fused push).  0 on an emit anomaly -- caller falls back to a
+// Term-sourced store.
+static u64 atp_trace_eq_store_ft(AtpState *s, const AtpFtCell *lhs,
+                                 const AtpFtCell *rhs) {
+  AcpNvMap m;
+  m.n = 0u;
+  u32 pos = 0u, nodes = 0u, fpos = 0u;
+  if (!vcp_ft_emit_side(lhs, NULL, NULL, NULL, s->kbo, &m,
+                        &pos, &nodes, NULL, +1, &fpos)) {
+    return 0u;
+  }
+  if (!vcp_ft_emit_side(rhs, NULL, NULL, NULL, s->kbo, &m,
+                        &pos, &nodes, NULL, +1, &fpos)) {
+    return 0u;
+  }
+  if (s->trace_eq_len + pos > s->trace_eq_cap) {
+    u64 ncap = s->trace_eq_cap ? s->trace_eq_cap * 2u : (1u << 20);
+    while (s->trace_eq_len + pos > ncap) ncap *= 2u;
+    u8 *nb = (u8 *)realloc(s->trace_eq_buf, (size_t)ncap);
+    if (nb == NULL) thvm_fatal("atp_trace_eq_store_ft: OOM");
+    s->trace_eq_buf = nb;
+    s->trace_eq_cap = ncap;
+  }
+  u64 off = s->trace_eq_len;
+  memcpy(s->trace_eq_buf + off, g_acp_scratch, pos);
+  s->trace_eq_len = off + pos;
+  return off + 1u;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
 // Reconstruct entry `idx`'s (lhs,rhs) from the off-heap store as live IC
 // Terms.  Returns 0 if the entry has no packed pair (sentinel 0).
 static int atp_trace_eq_load(AtpState *s, u32 idx, Term *lhs, Term *rhs) {
