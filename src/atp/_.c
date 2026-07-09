@@ -12952,6 +12952,9 @@ static void atp_uid_kill_face(AtpState *s, u32 slot, u8 removed_side) {
 // Forward decl: Twee full-R interreduction pass (defined with the
 // interreduce machinery below); called from the step tail above it.
 static void thvm_atp_interreduce_full(AtpState *s);
+// Forward decl: the joinability oracle (defined ~_.c:18422); the full-R
+// interreduction re-uses it under an r_dead[i] self-exclusion.
+static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs);
 #endif
 
 #ifdef ATP_CP_GROUND_JOIN
@@ -17076,50 +17079,51 @@ static int atp_ir_ft_diff(void) {
 #endif
 
 // ── Twee full-R interreduction (Twee.hs:774 interreduce/interreduce1) ──
-// Re-normalize each live oriented rule's LHS against the WHOLE current
-// rule set EXCLUDING itself; if the LHS is reducible (by a combination of
-// the other rules that arrived across many steps -- which the incremental
-// thvm_atp_interreduce never re-checks), the rule is not left-reduced, so
-// collapse it: soft-delete (dead-sentinel recipe) and requeue the reduced
-// equation for re-orientation.  Self-exclusion uses the FT-slice normalize
-// (linear over s->lhs_ft[0..n_rules), NOT the discrimination index whose
-// cache would ignore a bare sentinel): sentinel s->lhs_ft[i]/rhs_ft[i]
-// (out-of-range var 255 -> ft_match returns 0 -> rule i cannot fire) for
-// the one normalize, then restore.  Opt-in (use_full_interreduce); the WM
-// preset never sets it, so test_atp byte-parity is preserved.
+// Re-test each live oriented rule for JOINABILITY against the whole current
+// rule set EXCLUDING itself: if the rule's two sides both normalize to the
+// SAME term under R\{i}, its equation is a consequence of the other rules
+// (which arrived across many steps -- the incremental thvm_atp_interreduce
+// never re-checks this), so the rule is redundant and gets DELETED (Twee's
+// interreduce1 `Right` branch -> deleteActive).  thvm ALREADY keeps LHSs
+// left-reduced, so a plain "is the LHS reducible" test is a no-op; the
+// useful redundancy is full-sides-join.  Uses the TESTED joinability oracle
+// atp_cp_trivially_joinable (the same one the push loop uses to drop
+// joinable CPs -- it handles the shared-variable namespace correctly, so
+// the earlier hand-rolled two-normalize + var-255 exclusion, which produced
+// a spurious universal `X=Y`, is gone).  Self-exclusion is r_dead[i]=1 (the
+// FT normalize skips r_dead rules, ft_norm.c:655/...).  Deletion is a pure
+// soft-delete (no requeue: the equation is already derivable from R\{i}).
+// Opt-in (use_full_interreduce); the WM preset never sets it, so test_atp
+// byte-parity is preserved.  Requires THVM_ATP_JOIN_CACHE off (default) --
+// the cache is keyed on n_rules, which the r_dead toggle does not change.
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
 static void thvm_atp_interreduce_full(AtpState *s) {
   if (s == NULL || s->n_rules < 2u) return;
-  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-  atp_ft_mirror_ensure(s);
   Term dead_sentinel = term_new(0, TAG_FVR, 255u, 0);
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
   AtpFtCell *sent_ft = ft_from_term(a, dead_sentinel, 0);
-  const u32 CAP = 64u;
-  u32 n = s->n_rules;   // snapshot: requeues enqueue CPs, never grow R here
+  u32 n = s->n_rules;   // snapshot
   for (u32 i = 0; i < n; i++) {
     if (s->r_dead[i]) continue;
-    if (!s->r_orient[i]) continue;     // oriented rules only (equations skip)
+    if (!s->r_orient[i]) continue;     // oriented rules only
     Term old_lhs = s->lhs[i];
     Term old_rhs = s->rhs[i];
-    // Exclude rule i from the rewrite system for this one normalize.  Both
-    // faces are sentineled (IC + FT) so a mid-call mirror probe stays
-    // consistent; r_revision is NOT bumped, so no rebuild fires and the
-    // restore below is exact.
-    Term save_l = s->lhs[i], save_r = s->rhs[i];
+    // Copies: atp_cp_trivially_joinable mutates its args to the NFs on the
+    // not-joined branch; keep the rule's stored faces untouched.
+    Term l = old_lhs, r = old_rhs;
     AtpFtCell *save_lft = s->lhs_ft[i], *save_rft = s->rhs_ft[i];
-    s->lhs[i] = dead_sentinel;  s->rhs[i] = dead_sentinel;
-    s->lhs_ft[i] = sent_ft;     s->rhs_ft[i] = sent_ft;
-    Term reduced = atp_ir_normalize_ft_slice(s, old_lhs, 0u, s->n_rules, CAP);
-    s->lhs[i] = save_l;  s->rhs[i] = save_r;
-    s->lhs_ft[i] = save_lft;  s->rhs_ft[i] = save_rft;
-    if (kbo_eq(reduced, old_lhs)) continue;   // LHS already left-reduced
-    // LHS reducible by R\{i}: rule i is redundant in its current form.
-    // Collapse it (permanent soft-delete) and requeue reduced=old_rhs.
+    s->r_dead[i] = 1;                              // exclude rule i
+    u8 joined = atp_cp_trivially_joinable(s, &l, &r);
+    s->r_dead[i] = 0;
+    if (!joined) continue;                         // still an essential rule
+    // Sides join under R\{i} => the equation is derivable from the others
+    // => rule i is redundant.  Delete it (soft-delete, dead-sentinel recipe).
     if (atp_rule_trace_on()) {
       char la[8192], ra[8192];
       atp_pretty_term(old_lhs, la, sizeof la);
-      atp_pretty_term(reduced, ra, sizeof ra);
-      fprintf(stderr, "  FULL-IR collapse (slot %u): %s ->* %s\n", i, la, ra);
+      atp_pretty_term(old_rhs, ra, sizeof ra);
+      fprintf(stderr, "  FULL-IR delete (slot %u, joinable): %s = %s\n",
+              i, la, ra);
     }
     s->r_dead_lhs_save[i] = old_lhs;
     s->r_dead_rhs_save[i] = old_rhs;
@@ -17136,7 +17140,6 @@ static void thvm_atp_interreduce_full(AtpState *s) {
 #ifdef ATP_RULE_INDEX
     s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
 #endif
-    atp_add_equation_simplified(s, reduced, old_rhs, s->r_trace[i]);
   }
 }
 #endif
