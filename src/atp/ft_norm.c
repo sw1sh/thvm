@@ -801,9 +801,22 @@ static void ftpi_ensure(AtpState *s) {
 // max_bucket is a small fraction, so we keep the dense scan and pay zero
 // index overhead.  The threshold is a PERFORMANCE heuristic only --
 // soundness + order are guaranteed independently of which path runs.
+//
+// DOMINANT-OPERATOR extension: on a LARGE multi-operator rule set where one
+// operator still dominates in ABSOLUTE terms (group completions -- mult
+// dominates ld/rd/f/unit), the largest bucket is < half of R yet holds
+// hundreds of rules.  The subjects being normalised are mostly that same
+// dominant root, so ft_match's top-symbol fast-fail prunes nothing and the
+// dense scan issues O(max_bucket) ft_match calls per position -- the ~65x
+// slowdown that makes byte-parity WM emulation time out at 30s on GRP667-4
+// (proves at 90s).  Engage the deep discrimination tree there too: it
+// returns the byte-identical candidate SET in the same slot order, so the
+// winner below is unchanged -- purely a speed lever.
 static int ftpi_pruning_worthwhile(void) {
   FtPiIndex *ix = &g_ftpi;
-  return ix->max_bucket >= 48u && ix->max_bucket * 2u >= ix->n_indexed;
+  if (ix->max_bucket < 48u) return 0;
+  if (ix->max_bucket * 2u >= ix->n_indexed) return 1;         // dominant root
+  return ix->n_indexed >= 200u && ix->max_bucket >= 128u;     // large + big bucket
 }
 
 // Fill the scratch candidate buffer with the rule slots compatible with
