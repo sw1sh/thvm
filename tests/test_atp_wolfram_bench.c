@@ -2518,6 +2518,16 @@ int main(int argc, char **argv) {
                  (unsigned long long)g_ft_to_nodes,
                  g_ft_to_calls ? (double)g_ft_to_nodes / (double)g_ft_to_calls : 0.0,
                  (unsigned long long)g_acp_unterm_nodes);
+          extern u64 g_ft_from_by_region[8], g_ft_to_by_region[8];
+          static const char *reg_name[5] =
+              { "other", "pop-norm", "interreduce", "cp-gen", "goal" };
+          printf("   interchange by region:");
+          for (int rg = 0; rg < 5; rg++) {
+            printf(" %s=%llu/%llu", reg_name[rg],
+                   (unsigned long long)g_ft_from_by_region[rg],
+                   (unsigned long long)g_ft_to_by_region[rg]);
+          }
+          printf("  [from/to]\n");
         }
       }
       printf("   push-norm core shape: queries=%llu (var=%llu) cand=%llu "

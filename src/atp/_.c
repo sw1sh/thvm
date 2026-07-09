@@ -2517,6 +2517,14 @@ u64 g_vcp_bem_calls = 0, g_vcp_bem_nodes = 0;   // treated build+emit walk
 // tiles.  Defined here, incremented from ft.c (extern) + acp_unpack_term.
 u64 g_ft_from_calls = 0, g_ft_from_nodes = 0;
 u64 g_ft_to_calls   = 0, g_ft_to_nodes   = 0;
+// Region-tagged attribution of the two interchange counters: the step
+// loop stamps g_ft_region at each phase bracket (same spots as the
+// phase timers) so the PROFILE=2 dump can say WHERE the conversions
+// happen, not just how many.  0=other 1=pop-norm 2=interreduce
+// 3=cp-gen/push 4=goal-check.
+u8  g_ft_region = 0u;
+u64 g_ft_from_by_region[8] = {0};
+u64 g_ft_to_by_region[8]   = {0};
 u64 g_acp_unterm_calls = 0, g_acp_unterm_nodes = 0;
 
 #ifdef THVM_ATPFT_NORM
@@ -13385,6 +13393,7 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   }
 #endif
   u64 _ph_pop_t0 = atp_phase_now(); g_thvm_phase = "pop_normalize";
+  g_ft_region = 1u;
   // THVM_ATP_POPALLOC_TRACE: report pops whose normalize allocates more
   // than ~1M Term cells (the avalanche heap-bomb diagnostic; see
   // project_atp_wm_speed_profiled 2026-07-02).  Behaviour-neutral.
@@ -13472,6 +13481,7 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     l = atp_rewrite_normalize(s, cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
     r = atp_rewrite_normalize(s, cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
   }
+  g_ft_region = 0u;
   if (g_atp_phase_enabled) g_atp_phase_us_pop_normalize += atp_now_us() - _ph_pop_t0;
   if (_popalloc_trace) {
     u64 d = HEAP_NEXT - _popalloc_h0;
@@ -13614,7 +13624,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
 
   // Interreduce shifts new-rule indices down by `dropped`.
   u64 _ph_ir_t0 = atp_phase_now(); g_thvm_phase = "interreduce";
+  g_ft_region = 2u;
   u32 dropped = thvm_atp_interreduce(s, added);
+  g_ft_region = 0u;
   if (g_atp_phase_enabled) g_atp_phase_us_interreduce += atp_now_us() - _ph_ir_t0;
   AtpAddedRange post = added;
   post.first = (dropped > post.first) ? 0 : (post.first - dropped);
@@ -13660,7 +13672,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   if (s->auto_max_cp_weight_base > 0u) atp_auto_maxw_recompute(s);
 
   u64 _ph_gen_t0 = atp_phase_now(); g_thvm_phase = "cp_gen";
+  g_ft_region = 3u;
   thvm_atp_generate_cps(s, post);
+  g_ft_region = 0u;
   if (g_atp_phase_enabled) g_atp_phase_us_cp_gen += atp_now_us() - _ph_gen_t0;
 
   // Re-admit any stashed CP now within the refreshed bound.
@@ -13735,7 +13749,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
 #endif
 
   u64 _ph_gc_t0 = atp_phase_now(); g_thvm_phase = "goal_check";
+  g_ft_region = 4u;
   goal = thvm_atp_goal_check(s);
+  g_ft_region = 0u;
   if (g_atp_phase_enabled) g_atp_phase_us_goal_check += atp_now_us() - _ph_gc_t0;
   if (goal != ATP_RUNNING) return goal;
 
@@ -17155,8 +17171,21 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
 // compaction (RE_RegelEntfernen), and the new-rule slice is never
 // modified in-loop, so the mirror stays valid across the pass.
 static Term atp_ir_normalize_ft_slice(AtpState *s, Term subj,
+                                      const AtpFtCell *subj_ft,
                                       u32 slice_first, u32 slice_count,
                                       u32 step_cap) {
+  // Fast path: the caller passes the row's live FT mirror (lockstep
+  // with subj by the THVM_ATPFT_RULES invariant).  A read-only probe
+  // proving no slice face matches anywhere in the mirror proves the
+  // slice normalize is the identity -- return subj itself, ZERO
+  // ft_from_term/ft_to_term.  In interreduce the overwhelming majority
+  // of rows are untouched by the new-rule slice, so the conversion
+  // round-trip below runs only for actual reductions (plus the rare
+  // order-gated false positive, which normalizes to an equal NF).
+  if (subj_ft != NULL &&
+      !atp_ft_slice_fires(s, subj_ft, slice_first, slice_count)) {
+    return subj;
+  }
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
   AtpFtCell *sub = ft_from_term(a, subj, 0);
   AtpFtCell *nf  = atp_rewrite_normalize_ft_slice(s, sub, slice_first,
@@ -17338,7 +17367,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // the drain records its own oriented-only chain.
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
       if (atp_ir_ft_on()) {
-        Term red_ft = atp_ir_normalize_ft_slice(s, old_lhs,
+        Term red_ft = atp_ir_normalize_ft_slice(s, old_lhs, s->lhs_ft[i],
                                                 added.first - dropped,
                                                 n_new, 16);
         if (atp_ir_ft_diff()) {
@@ -17522,7 +17551,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
         } else if (atp_ir_ft_on()) {
           // FT-native RHS composition (same slice as the LHS reduction).
-          r_reduced = atp_ir_normalize_ft_slice(s, old_rhs,
+          r_reduced = atp_ir_normalize_ft_slice(s, old_rhs, s->rhs_ft[i],
                                                 added.first - dropped,
                                                 n_new, 16);
           if (atp_ir_ft_diff()) {

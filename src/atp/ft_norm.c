@@ -2879,6 +2879,38 @@ static int ftnfm_delta_fires(AtpState *s, const AtpFtCell *c, u32 wm) {
   return 0;
 }
 
+// Slice-bounded sibling of ftnfm_delta_fires: can any face of the rule
+// slice [first, first+count) rewrite anywhere inside subtree `c`?
+// Read-only on `c` (ft_match writes only the scratch subst), so it is
+// safe to run on a rule's LIVE FT mirror -- the interreduce fast path
+// uses it to prove "this row is untouched by the new-rule slice"
+// without re-encoding the row via ft_from_term.  Same face coverage as
+// the slice normalizer's linear scan (lhs always; rhs when the rule is
+// unorientable), minus the order gates -- a strict SUPERSET of firing,
+// so a 0 verdict proves the slice normalize is the identity on `c`.
+static int atp_ft_slice_fires(AtpState *s, const AtpFtCell *c,
+                              u32 first, u32 count) {
+  const AtpFtCell *e = (c->end != NULL) ? c->end->next : NULL;
+  u32 last = first + count;
+  if (last > s->n_rules) last = s->n_rules;
+  AtpFtSubst chk = {0};
+  for (u32 r = first; r < last; r++) {
+    if (s->r_dead != NULL && s->r_dead[r]) continue;
+    AtpFtCell *lhs = s->lhs_ft[r], *rhs = s->rhs_ft[r];
+    if (lhs == NULL || rhs == NULL) continue;
+    u8 unor = (u8)(s->n_unorient > 0u && !s->r_orient[r]);
+    for (const AtpFtCell *p = c; p != e; p = p->next) {
+      ft_subst_reset(&chk);
+      if (ft_match(lhs, p, &chk)) return 1;
+      if (unor) {
+        ft_subst_reset(&chk);
+        if (ft_match(rhs, p, &chk)) return 1;
+      }
+    }
+  }
+  return 0;
+}
+
 u64 g_atp_ftnfm_reval = 0, g_atp_ftnfm_reval_ok = 0;
 
 // 1 iff subtree `c` is memoized normal under want-config `wantk` at the

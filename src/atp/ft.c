@@ -364,7 +364,11 @@ static AtpFtCell *ft_from_term_pre(AtpFt *a, Term t, int scratch) {
 
 AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
   extern unsigned char g_atp_phase_detail;
-  if (g_atp_phase_detail) { extern u64 g_ft_from_calls; g_ft_from_calls++; }
+  if (g_atp_phase_detail) {
+    extern u64 g_ft_from_calls; g_ft_from_calls++;
+    extern u8 g_ft_region; extern u64 g_ft_from_by_region[8];
+    g_ft_from_by_region[g_ft_region & 7u]++;
+  }
   if (ft_preorder_on()) return ft_from_term_pre(a, t, scratch);
   return ft_from_term_rec(a, t, scratch);
 }
@@ -419,7 +423,11 @@ static Term ft_to_term_rec(const AtpFtCell *x) {
 
 Term ft_to_term(const AtpFtCell *x) {
   extern unsigned char g_atp_phase_detail;
-  if (g_atp_phase_detail) { extern u64 g_ft_to_calls; g_ft_to_calls++; }
+  if (g_atp_phase_detail) {
+    extern u64 g_ft_to_calls; g_ft_to_calls++;
+    extern u8 g_ft_region; extern u64 g_ft_to_by_region[8];
+    g_ft_to_by_region[g_ft_region & 7u]++;
+  }
   return ft_to_term_rec(x);
 }
 
