@@ -21535,8 +21535,14 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
     AtpFtCell *li_ft = s->lhs_ft[i];
     AtpFtCell *ri_ft = s->rhs_ft[i];
     // The KPAction ordering gate reads cp.peak, so equation-parent
-    // overlaps need it even when connectedness is off.
-    u8 need_peak = (s->use_connectedness || i_eq || j_eq) || atp_kapur_on() ? 1u : 0u;
+    // overlaps need it even when connectedness is off.  The nusfu gate
+    // (atp_cp_gen_gates -> atp_nusfu_gate) also reads cp.peak to walk the
+    // overlap path for a skolem symbol above it; mirror the Term-side
+    // g_cp_need_peak condition (:21430) so an armed nusfu registry still
+    // gets a peak here -- else the FT path drops zero and diverges.
+    u8 need_peak = (s->use_connectedness || i_eq || j_eq) || atp_kapur_on() ||
+                   (s->use_no_overlap_below_skolem && s->n_skolem_labels != 0u)
+                       ? 1u : 0u;
     u32 seg = cnt;
     g_kapur_face = s->lhs[i];
     cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, lj_r, rj_r,
