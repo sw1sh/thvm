@@ -10298,6 +10298,25 @@ static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
     u32 rj = acp_rhs_nodes(s->cp_packed[nb->row]);
     if (ri != rj) return ri > rj;   // larger rhs (compound) selected first
   }
+  // Twee-faithful passive tie-break (opt-in, THVM_ATP_TWEE_TIEBREAK):
+  // Twee's `instance Ord Passive` (Twee.hs:260-266) breaks a score tie by
+  // (max parent-rule-id, min parent-rule-id) on the two overlap rules --
+  // preferring the CP whose later-born parent is earliest.  thvm's default
+  // is cp_seq (FIFO formation order); the two diverge, cascading (via the
+  // completion) into different rule sets, so thvm reaches Twee's goal-joining
+  // configuration on a different -- and, on the twee-only cluster, later --
+  // schedule.  Sound: a passive tie-break only reorders selection, never
+  // the equational theory.  Off by default -> byte-identical (WM preset).
+  static int twee_tb = -1;
+  if (twee_tb < 0) twee_tb = getenv("THVM_ATP_TWEE_TIEBREAK") ? 1 : 0;
+  if (twee_tb && s->cp_uid_a != NULL && s->cp_uid_b != NULL) {
+    u32 ai = s->cp_uid_a[na->row], bi = s->cp_uid_b[na->row];
+    u32 aj = s->cp_uid_a[nb->row], bj = s->cp_uid_b[nb->row];
+    u32 mxi = ai > bi ? ai : bi, mni = ai < bi ? ai : bi;
+    u32 mxj = aj > bj ? aj : bj, mnj = aj < bj ? aj : bj;
+    if (mxi != mxj) return mxi < mxj;
+    if (mni != mnj) return mni < mnj;
+  }
   return na->seq < nb->seq;
 }
 
