@@ -1725,6 +1725,37 @@ static AtpFtCell *acp_unpack_term_ft(AtpFt *a, const u8 **pp, int scratch) {
   }
 }
 
+// FT sibling of thvm_normalize_vars: canonically renumber the pair's
+// variables IN PLACE to a dense [0, k) set shared across both sides,
+// first-occurrence order over the lhs-then-rhs preorder -- which on a
+// flatterm is simply the linear span order, so one pass over each span
+// suffices.  Callers own the spans (clones); adoption proves the
+// result against the Term-side canonical pair with ft_eq_term, so an
+// edge divergence (e.g. > REWRITE_MAX_VAR distinct vars, where the
+// Term side keeps original ids) can only cause a fallback, never a
+// wrong mirror.
+static void ft_normalize_vars_pair(AtpFtCell *l, AtpFtCell *r) {
+  u32 old_id[REWRITE_MAX_VAR];
+  u32 n = 0u;
+  AtpFtCell *span[2] = { l, r };
+  for (u32 t = 0; t < 2u; t++) {
+    AtpFtCell *e = (span[t]->end != NULL) ? span[t]->end->next : NULL;
+    for (AtpFtCell *p = span[t]; p != e; p = p->next) {
+      if ((p->sym & WF_VAR_BIT) == 0u) continue;
+      u32 id = p->sym & ~WF_VAR_BIT;
+      u32 k = 0u;
+      for (; k < n; k++) {
+        if (old_id[k] == id) break;
+      }
+      if (k == n) {
+        if (n >= REWRITE_MAX_VAR) return;   // overflow: leave the rest
+        old_id[n++] = id;
+      }
+      p->sym = WF_VAR_BIT | k;
+    }
+  }
+}
+
 // Pop-time FT stash: thvm_atp_select_cp decodes the selected packed
 // CP's byte string into two fresh FT spans (bytes -> cells, no Term
 // hop) and parks them here for the step function's mixmost pop
@@ -6782,6 +6813,11 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->irv_rhs);
   free(s->irv_parent);
   free(s->irv_wmo_key);
+#ifdef THVM_ATPFT_RULES
+  // Victim span slots (cells themselves are arena-owned).
+  free(s->irv_lhs_ft);
+  free(s->irv_rhs_ft);
+#endif
   // ENIGMA training-data arrays (NULL unless recording was enabled).
   free(s->cp_feat_rows);
   free(s->cp_feat_trace);
@@ -12324,15 +12360,32 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   // VERIFY probe runs after both writes are committed.
   {
     AtpFt *ra = (AtpFt *)s->ft_arena_ptr;
-    if (g_rule_ft_l != NULL && g_rule_ft_r != NULL &&
-        ft_eq_term(g_rule_ft_l, lhs) && ft_eq_term(g_rule_ft_r, rhs)) {
-      s->lhs_ft[s->n_rules] = ft_clone_span(ra, g_rule_ft_l, 0);
-      s->rhs_ft[s->n_rules] = ft_clone_span(ra, g_rule_ft_r, 0);
-    } else if (g_rule_ft_l != NULL && g_rule_ft_r != NULL &&
-               ft_eq_term(g_rule_ft_r, lhs) && ft_eq_term(g_rule_ft_l, rhs)) {
-      s->lhs_ft[s->n_rules] = ft_clone_span(ra, g_rule_ft_r, 0);
-      s->rhs_ft[s->n_rules] = ft_clone_span(ra, g_rule_ft_l, 0);
-    } else {
+    u8 adopted = 0u;
+    if (g_rule_ft_l != NULL && g_rule_ft_r != NULL) {
+      // Try both pairings; each candidate clone is renumbered to the
+      // canonical dense var set (the FT sibling of the
+      // thvm_normalize_vars run above) and PROVEN against the stored
+      // Terms before adoption -- a failed proof frees the clones and
+      // falls through (the fvi grounded variants land here).
+      const AtpFtCell *cand[2][2] = {
+        { g_rule_ft_l, g_rule_ft_r },
+        { g_rule_ft_r, g_rule_ft_l },
+      };
+      for (u32 o = 0; o < 2u && !adopted; o++) {
+        AtpFtCell *cl = ft_clone_span(ra, cand[o][0], 0);
+        AtpFtCell *cr = ft_clone_span(ra, cand[o][1], 0);
+        ft_normalize_vars_pair(cl, cr);
+        if (ft_eq_term(cl, lhs) && ft_eq_term(cr, rhs)) {
+          s->lhs_ft[s->n_rules] = cl;
+          s->rhs_ft[s->n_rules] = cr;
+          adopted = 1u;
+        } else {
+          ft_free_span(ra, cl, cl->end);
+          ft_free_span(ra, cr, cr->end);
+        }
+      }
+    }
+    if (!adopted) {
       s->lhs_ft[s->n_rules] = ft_from_term(ra, lhs, 0);
       s->rhs_ft[s->n_rules] = ft_from_term(ra, rhs, 0);
     }
@@ -13016,6 +13069,30 @@ fn void thvm_atp_set_use_emission_order(AtpState *s, u8 on) {
   }
 }
 
+// Victim FT spans staged by atp_irv_stage_ft just before atp_irv_push
+// (clones of the row's still-live mirrors); consumed into the irv span
+// slots by the push.  NULL when the pushing site had no mirror.
+#ifdef THVM_ATPFT_RULES
+static AtpFtCell *g_irv_ft_l = NULL;
+static AtpFtCell *g_irv_ft_r = NULL;
+#endif
+
+// Both-build helper so the shared WM_IR_DROP_SLOT macro (and the plain
+// interreduce site) can stage the victim row's FT mirrors without
+// preprocessor forks at the call sites.  No-op off the flag.
+static void atp_irv_stage_ft(AtpState *s, u32 idx) {
+#ifdef THVM_ATPFT_RULES
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  g_irv_ft_l = (s->lhs_ft[idx] != NULL)
+                 ? ft_clone_span(a, s->lhs_ft[idx], 0) : NULL;
+  g_irv_ft_r = (s->rhs_ft[idx] != NULL)
+                 ? ft_clone_span(a, s->rhs_ft[idx], 0) : NULL;
+#else
+  (void)s;
+  (void)idx;
+#endif
+}
+
 // Buffer one interreduction victim's ORIGINAL sides + the TRACE_SIMPLIFY
 // parent captured at drop time -- the analog of WM's IR buffer that
 // `GMInterred` / `RMLinksInterred` fill per victim (Interreduktion.c:
@@ -13036,11 +13113,29 @@ static void atp_irv_push(AtpState *s, Term lhs, Term rhs, u32 parent,
     s->irv_lhs = nl; s->irv_rhs = nr; s->irv_parent = np;
     s->irv_wmo_key = nk;
     s->irv_cap = cap;
+#ifdef THVM_ATPFT_RULES
+    AtpFtCell **nfl = (AtpFtCell **)realloc(s->irv_lhs_ft,
+                                            cap * sizeof(AtpFtCell *));
+    AtpFtCell **nfr = (AtpFtCell **)realloc(s->irv_rhs_ft,
+                                            cap * sizeof(AtpFtCell *));
+    if (nfl == NULL || nfr == NULL) {
+      fprintf(stderr, "atp_irv_push: span realloc to %u failed\n", cap);
+      exit(1);
+    }
+    s->irv_lhs_ft = nfl;
+    s->irv_rhs_ft = nfr;
+#endif
   }
   s->irv_lhs[s->n_irv]     = lhs;
   s->irv_rhs[s->n_irv]     = rhs;
   s->irv_parent[s->n_irv]  = parent;
   s->irv_wmo_key[s->n_irv] = wmo_key;
+#ifdef THVM_ATPFT_RULES
+  s->irv_lhs_ft[s->n_irv] = g_irv_ft_l;   // staged clone (or NULL)
+  s->irv_rhs_ft[s->n_irv] = g_irv_ft_r;
+  g_irv_ft_l = NULL;
+  g_irv_ft_r = NULL;
+#endif
   s->n_irv++;
 }
 
@@ -13823,7 +13918,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   g_rule_ft_l = pop_nf_l;   // NULL unless the FT-direct pop produced NFs
   g_rule_ft_r = pop_nf_r;
 #endif
+  g_ft_region = 5u;
   AtpAddedRange added = thvm_atp_orient_and_add(s, l, r);
+  g_ft_region = 0u;
 #ifdef THVM_ATPFT_RULES
   g_rule_ft_l = NULL;
   g_rule_ft_r = NULL;
@@ -13964,7 +14061,11 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // each victim's FIFO age is younger than every CP the new fact
   // produced (WM's ArbeitsAufnahme work order, Hauptkomponenten.c:
   // 308-331; McCune-II's `ues 32` carries age 32, after CPs 14-31).
-  if (s->n_irv > 0u) atp_wm_demote_drain(s);
+  if (s->n_irv > 0u) {
+    g_ft_region = 6u;
+    atp_wm_demote_drain(s);
+    g_ft_region = 0u;
+  }
 
 #ifdef ATP_CP_GROUND_JOIN
   // WM RueckwaertsGrundzusammenfuehrbarkeit (ArbeitsAufnahme,
@@ -17157,6 +17258,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
       if (s->use_wm_demote) {                                                 \
         u32 _wmo_key = s->use_emission_order                                  \
             ? atp_wmo_victim_drain_key(s, s->r_uid[IDX], 0u) : 0u;            \
+        atp_irv_stage_ft(s, (IDX));                                           \
         atp_irv_push(s, _old_lhs, _old_rhs, _simplify_parent, _wmo_key);      \
       } else {                                                                \
         atp_add_equation_simplified(s, _reduced, _old_rhs, _simplify_parent); \
@@ -17207,6 +17309,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
           /* The RHS face (thvm side 1) is the reducible one here. */         \
           u32 _wmo_key = s->use_emission_order                               \
               ? atp_wmo_victim_drain_key(s, s->r_uid[IDX], 1u) : 0u;          \
+          atp_irv_stage_ft(s, (IDX));                                         \
           atp_irv_push(s, _old_lhs, _old_rhs, _simplify_parent, _wmo_key);    \
         } else {                                                              \
           atp_add_equation_simplified(s, _old_lhs, _reduced,                  \
@@ -17491,6 +17594,11 @@ static Term atp_ir_normalize_ft_slice(AtpState *s, Term subj,
                                      : ft_from_term(a, subj, 0);
   AtpFtCell *nf  = atp_rewrite_normalize_ft_slice(s, sub, slice_first,
                                                   slice_count, step_cap);
+  // Order-gated probe false positive: the normalize made no step (NF
+  // equals the pristine mirror) -- the callers' kbo_eq(reduced, subj)
+  // sees equality either way, so return subj itself and skip the
+  // decode.  Only a REAL reduction pays ft_to_term.
+  if (subj_ft != NULL && ft_eq(nf, subj_ft)) return subj;
   return ft_to_term(nf);
 }
 // THVM_ATP_IR_FT=0 forces the legacy IC interreduce normalize; default ON.
@@ -17708,6 +17816,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         // face (thvm side 0) is the one the new rule reduced here.
         u32 wmo_key = s->use_emission_order
             ? atp_wmo_victim_drain_key(s, s->r_uid[i], 0u) : 0u;
+        atp_irv_stage_ft(s, i);
         atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
       } else {
         atp_add_equation_simplified(s, reduced, old_rhs, simplify_parent);
@@ -18021,6 +18130,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           // bwd_demod reduced the LHS face (thvm side 0).
           u32 wmo_key = s->use_emission_order
               ? atp_wmo_victim_drain_key(s, s->r_uid[j], 0u) : 0u;
+          atp_irv_stage_ft(s, j);
           atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
         } else {
           atp_add_equation_simplified(s, reduced_lhs, reduced,
@@ -18080,6 +18190,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           // The RHS face (thvm side 1) is the reducible one here.
           u32 wmo_key = s->use_emission_order
               ? atp_wmo_victim_drain_key(s, s->r_uid[j], 1u) : 0u;
+          atp_irv_stage_ft(s, j);
           atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
         } else {
           atp_add_equation_simplified(s, old_lhs, reduced, simplify_parent);
@@ -18306,8 +18417,55 @@ static void atp_wm_demote_drain(AtpState *s) {
         l = l2;
         r = r2;
       } else {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        AtpFtCell *vfl = s->irv_lhs_ft[v];
+        AtpFtCell *vfr = s->irv_rhs_ft[v];
+        // FT doR treatment on the victim's captured spans -- exactness
+        // is proven per victim (ft_eq_term against the buffered Terms
+        // guards any capture-site staleness); a proven pair normalizes
+        // FT-native, joins via ft_eq (no decode), and reuses the
+        // buffered Terms when the NF is the identity.
+        {
+          static int ddbg = -1;
+          if (ddbg < 0) ddbg = atp_env_on("THVM_ATP_DRAIN_DBG");
+          if (ddbg) {
+            fprintf(stderr,
+                    "DRAINDBG v=%u mix=%u vfl=%d vfr=%d eq_l=%d eq_r=%d\n",
+                    v, s->use_mixmost_nf, vfl != NULL, vfr != NULL,
+                    vfl != NULL ? ft_eq_term(vfl, l) : -1,
+                    vfr != NULL ? ft_eq_term(vfr, r) : -1);
+          }
+        }
+        if (s->use_mixmost_nf && vfl != NULL && vfr != NULL &&
+            ft_eq_term(vfl, l) && ft_eq_term(vfr, r)) {
+          atp_ft_mirror_ensure(s);
+          AtpFtCell *lf = atp_rules_only_normalize_ft(s, vfl, NORM_CAP);
+          AtpFtCell *rf = atp_rules_only_normalize_ft(s, vfr, NORM_CAP);
+          s->irv_lhs_ft[v] = NULL;   // consumed (spliced in place)
+          s->irv_rhs_ft[v] = NULL;
+          if (ft_eq(lf, rf)) {
+            s->n_trace = trace_mark;
+            s->n_wm_demote_joined++;
+            continue;
+          }
+          l = ft_eq_term(lf, l) ? l : ft_to_term(lf);
+          r = ft_eq_term(rf, r) ? r : ft_to_term(rf);
+        } else {
+          if (vfl != NULL) {
+            ft_free_span((AtpFt *)s->ft_arena_ptr, vfl, vfl->end);
+            s->irv_lhs_ft[v] = NULL;
+          }
+          if (vfr != NULL) {
+            ft_free_span((AtpFt *)s->ft_arena_ptr, vfr, vfr->end);
+            s->irv_rhs_ft[v] = NULL;
+          }
+          l = atp_rules_only_normalize(s, l, NORM_CAP);
+          r = atp_rules_only_normalize(s, r, NORM_CAP);
+        }
+#else
         l = atp_rules_only_normalize(s, l, NORM_CAP);
         r = atp_rules_only_normalize(s, r, NORM_CAP);
+#endif
       }
       if (kbo_eq(l, r)) {
         // Joined: the victim is redundant.  Rewind any NORM_STEPs just
@@ -18317,6 +18475,20 @@ static void atp_wm_demote_drain(AtpState *s) {
         continue;
       }
     }
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // Raw-class / record-path victims never touched their captured
+    // spans -- return them so the arena free list gets them back.
+    if (s->irv_lhs_ft[v] != NULL) {
+      ft_free_span((AtpFt *)s->ft_arena_ptr, s->irv_lhs_ft[v],
+                   s->irv_lhs_ft[v]->end);
+      s->irv_lhs_ft[v] = NULL;
+    }
+    if (s->irv_rhs_ft[v] != NULL) {
+      ft_free_span((AtpFt *)s->ft_arena_ptr, s->irv_rhs_ft[v],
+                   s->irv_rhs_ft[v]->end);
+      s->irv_rhs_ft[v] = NULL;
+    }
+#endif
     // A victim too big for the KPBehandeln gate is WM's RAW (untreated)
     // class: KPV_IROpferBehandeln keeps it at its raw sides and weight in
     // the SUE heap -- WM never defers a KilledRE victim, so mark the push

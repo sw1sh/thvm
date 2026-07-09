@@ -6130,6 +6130,17 @@ typedef struct {
   Term *irv_lhs;
   Term *irv_rhs;
   u32  *irv_parent;
+#ifdef THVM_ATPFT_RULES
+  // Victim FT spans (clones of the row's live mirrors, captured at
+  // push time) so the drain's doR treatment runs FT-native -- no
+  // ft_from_term re-encode, and a joined victim decodes nothing.
+  // NULL when the push site had no mirror; the drain then falls back
+  // to the Term route.  Cells live in Arena A (address-stable, freed
+  // wholesale at thvm_atp_free); slots are consumed or explicitly
+  // returned by the drain.
+  struct AtpFtCell **irv_lhs_ft;
+  struct AtpFtCell **irv_rhs_ft;
+#endif
   // WM drain-order key per victim (use_emission_order only), captured
   // at push time BEFORE the victim leaves the wmo tree: WM's
   // IR_PufferAuslesen drains GMInterred (equation victims) before
