@@ -7864,6 +7864,10 @@ static void atp_trace_cp_rematerialize(AtpState *s, u32 tid, Term lhs, Term rhs)
 // = sigma(r_i) on thvm's cp.rhs (two-parent superposition / axiom);
 // 0 = KPLinks on thvm's cp.lhs (single-parent re-derivation).
 static int atp_lr_sortieren_rec(Term lhs, Term rhs);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+static int atp_lr_sortieren_rec_ft(const struct AtpFtCell *lhs,
+                                   const struct AtpFtCell *rhs);
+#endif
 
 static u8 atp_wmo_eq_dist_rhs_base(const AtpState *s, u32 src_trace) {
   if (s == NULL) return 1u;
@@ -22689,6 +22693,24 @@ static u8 atp_eq_is_mono(const AtpState *s, u32 i);
 
 static u8 atp_eq_is_mono(const AtpState *s, u32 i) {
 #ifdef ATP_VAR_NORM
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Mirror-sourced variant test: renumber the SWAPPED pair on span
+  // clones and compare against the mirrors -- bit-identical verdict by
+  // the lockstep invariant (guarded by the var cliff where the FT and
+  // Term renumbers coincide); no rule-Term content read.
+  if (s->lhs_ft[i] != NULL && s->rhs_ft[i] != NULL &&
+      ft_distinct_var_count(s->lhs_ft[i], s->rhs_ft[i]) <
+          REWRITE_MAX_VAR) {
+    AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *cl = ft_clone_span(a, s->rhs_ft[i], 0);
+    AtpFtCell *cr = ft_clone_span(a, s->lhs_ft[i], 0);
+    ft_normalize_vars_pair(cl, cr);
+    u8 mono = (u8)(ft_eq(cl, s->lhs_ft[i]) && ft_eq(cr, s->rhs_ft[i]));
+    ft_free_span(a, cl, cl->end);
+    ft_free_span(a, cr, cr->end);
+    return mono;
+  }
+#endif
   Term rl = s->rhs[i];
   Term rr = s->lhs[i];
   thvm_normalize_vars(&rl, &rr);
@@ -25055,6 +25077,31 @@ static int atp_lr_sortieren_rec(Term lhs, Term rhs) {
   }
   return 0;
 }
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Span sibling of atp_lr_sortieren_rec: identical verdicts off the
+// mirror cells (var < non-var, label code, arity, argument-wise).
+static int atp_lr_sortieren_rec_ft(const AtpFtCell *lhs,
+                                   const AtpFtCell *rhs) {
+  u8 lv = (u8)((lhs->sym & WF_VAR_BIT) != 0u);
+  u8 rv = (u8)((rhs->sym & WF_VAR_BIT) != 0u);
+  if (lv && rv) return 0;
+  if (lv) return -1;
+  if (rv) return 1;
+  u32 lf = lhs->sym, rf = rhs->sym;
+  if (lf != rf) return (lf < rf) ? -1 : 1;
+  u32 ln = (u32)lhs->arity, rn = (u32)rhs->arity;
+  if (ln != rn) return (ln < rn) ? -1 : 1;
+  const AtpFtCell *lk = lhs->next, *rk = rhs->next;
+  for (u32 i = 0; i < ln; i++) {
+    int c = atp_lr_sortieren_rec_ft(lk, rk);
+    if (c != 0) return c;
+    lk = lk->end->next;
+    rk = rk->end->next;
+  }
+  return 0;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
 
 // True iff term `t` contains a constructor with external id `ext` anywhere.
 static u8 atp_term_has_ctr(Term t, u32 ext) {

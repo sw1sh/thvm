@@ -313,6 +313,64 @@ static u32 wmo_face_cells(Term face, WmoCell *out, u32 cap) {
   return wmo_cells_from_term(face, out, cap, vmap, &nv);
 }
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Span siblings of the face flatteners: the mirror is lockstep with the
+// stored Term, and a span's preorder IS its linear cell order, so these
+// produce bit-identical WmoCells / depth / ground verdicts -- letting
+// the tree insert run without touching the rule-Term slots.
+static u32 wmo_cells_from_ft(const struct AtpFtCell *c, WmoCell *out,
+                             u32 cap, u32 *vmap, u32 *n_vars) {
+  if ((c->sym & WF_VAR_BIT) != 0u) {
+    u32 v = c->sym & ~WF_VAR_BIT;
+    u32 id = 0;
+    if (v < REWRITE_MAX_VAR && vmap[v] != 0u) {
+      id = vmap[v];
+    } else {
+      id = ++(*n_vars);
+      if (v < REWRITE_MAX_VAR) vmap[v] = id;
+    }
+    if (cap < 1u) return 0;
+    out[0].sym = id;
+    out[0].is_var = 1u;
+    out[0].arity = 0u;
+    return 1u;
+  }
+  u32 n = (u32)c->arity;
+  if (cap < 1u || n > 255u) return 0;
+  out[0].sym = c->sym;
+  out[0].is_var = 0u;
+  out[0].arity = (u8)n;
+  u32 len = 1u;
+  const struct AtpFtCell *kid = c->next;
+  for (u32 i = 0; i < n; i++) {
+    u32 cl = wmo_cells_from_ft(kid, out + len, cap - len, vmap, n_vars);
+    if (cl == 0u) return 0;
+    len += cl;
+    kid = kid->end->next;
+  }
+  return len;
+}
+
+static u32 wmo_face_cells_ft(const struct AtpFtCell *face, WmoCell *out,
+                             u32 cap) {
+  u32 vmap[REWRITE_MAX_VAR] = {0};
+  u32 nv = 0;
+  return wmo_cells_from_ft(face, out, cap, vmap, &nv);
+}
+
+static u32 wmo_term_depth_ft(const struct AtpFtCell *c) {
+  if ((c->sym & WF_VAR_BIT) != 0u || c->arity == 0u) return 1;
+  u32 d = 0;
+  const struct AtpFtCell *kid = c->next;
+  for (u32 i = 0; i < (u32)c->arity; i++) {
+    u32 cd = wmo_term_depth_ft(kid);
+    if (cd > d) d = cd;
+    kid = kid->end->next;
+  }
+  return d + 1;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
 static u8 wmo_cell_eq(const WmoCell *a, const WmoCell *b) {
   // Cell identity is the full discrimination-tree edge symbol.  WM keys every
   // edge by a symbol CODE whose arity is fixed (SO_Stelligkeit); its splits
@@ -2108,11 +2166,31 @@ static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
   g_wmo_polier_after = w->polier_after;
   u32 trace = s->r_uid[slot];   // stable identity (r_trace is NONE past the proof-trace cap)
   WmoCell cells[WMO_MAX_CELLS];
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Mirror-sourced faces: bit-identical cells/depth/ground verdicts by
+  // the lockstep invariant, no rule-Term content read.  NULL mirrors
+  // (test harnesses writing s->lhs[] directly) keep the Term walk.
+  const struct AtpFtCell *lft = s->lhs_ft[slot];
+  const struct AtpFtCell *rft = s->rhs_ft[slot];
+#else
+  const void *lft = NULL;
+  const void *rft = NULL;
+#endif
   if (s->r_orient[slot]) {
-    u32 n = wmo_face_cells(s->lhs[slot], cells, WMO_MAX_CELLS);
+    u32 n;
+    u32 dep;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (lft != NULL) {
+      n   = wmo_face_cells_ft(lft, cells, WMO_MAX_CELLS);
+      dep = wmo_term_depth_ft(lft);
+    } else
+#endif
+    {
+      n   = wmo_face_cells(s->lhs[slot], cells, WMO_MAX_CELLS);
+      dep = wmo_term_depth(s->lhs[slot]);
+    }
     if (n == 0u) return;
-    wmo_register(w, trace, 0u, 0u, cells, n, wmo_term_depth(s->lhs[slot]),
-                 0u);
+    wmo_register(w, trace, 0u, 0u, cells, n, dep, 0u);
     return;
   }
   u8 mono = atp_eq_is_mono(s, slot);
@@ -2120,8 +2198,19 @@ static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
   if (cp_derived && !mono) {
     // Ground-side override (see header): exactly one side ground -> WM's
     // distinguished face is the ground side.
-    u8 lhs_ground = wmo_term_is_ground(s->lhs[slot]);
-    u8 rhs_ground = wmo_term_is_ground(s->rhs[slot]);
+    u8 lhs_ground, rhs_ground;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (lft != NULL && rft != NULL) {
+      lhs_ground = (u8)((((const struct AtpFtCell *)lft)->flags &
+                         ATPFT_FLAG_GROUND) != 0u);
+      rhs_ground = (u8)((((const struct AtpFtCell *)rft)->flags &
+                         ATPFT_FLAG_GROUND) != 0u);
+    } else
+#endif
+    {
+      lhs_ground = wmo_term_is_ground(s->lhs[slot]);
+      rhs_ground = wmo_term_is_ground(s->rhs[slot]);
+    }
     if (lhs_ground != rhs_ground) {
       dist_rhs = rhs_ground ? 1u : 0u;
     }
@@ -2154,6 +2243,30 @@ static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
     // lookup keys on WM-face = thvm-dir XOR dist_rhs), so the rank is
     // byte-identical to the prior dist-first registration; only the physical
     // tree exit order moves to WM's.  See AtpState.use_wmo_insert_lr.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (lft != NULL && rft != NULL) {
+      // Mirror-sourced equation faces (verdicts and cells bit-identical
+      // to the Term walks by the lockstep invariant).
+      u8 lhs_is_l =
+          (atp_lr_sortieren_rec_ft(lft, rft) <= 0) ? 1u : 0u;
+      const struct AtpFtCell *first_ft  = lhs_is_l ? lft : rft;
+      const struct AtpFtCell *second_ft = lhs_is_l ? rft : lft;
+      u8 first_face  = lhs_is_l ? dist_rhs : (u8)(dist_rhs ^ 1u);
+      u8 second_face = (u8)(first_face ^ 1u);
+      u32 n = wmo_face_cells_ft(first_ft, cells, WMO_MAX_CELLS);
+      if (n == 0u) return;
+      wmo_register(w, trace, 1u, first_face, cells, n,
+                   wmo_term_depth_ft(first_ft), dist_rhs);
+      if (!mono) {
+        u32 n2 = wmo_face_cells_ft(second_ft, cells, WMO_MAX_CELLS);
+        if (n2 != 0u) {
+          wmo_register(w, trace, 1u, second_face, cells, n2,
+                       wmo_term_depth_ft(second_ft), dist_rhs);
+        }
+      }
+      return;
+    }
+#endif
     Term lhs_face = s->lhs[slot];
     Term rhs_face = s->rhs[slot];
     // atp_lr_sortieren_rec(a,b) > 0 means a is Groesser (should be the rhs);
@@ -2181,6 +2294,24 @@ static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
     }
     return;
   }
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (lft != NULL && rft != NULL) {
+    const struct AtpFtCell *dist_ft = dist_rhs ? rft : lft;
+    const struct AtpFtCell *rev_ft  = dist_rhs ? lft : rft;
+    u32 nf = wmo_face_cells_ft(dist_ft, cells, WMO_MAX_CELLS);
+    if (nf == 0u) return;
+    wmo_register(w, trace, 1u, 0u, cells, nf, wmo_term_depth_ft(dist_ft),
+                 dist_rhs);
+    if (!mono) {
+      u32 nf2 = wmo_face_cells_ft(rev_ft, cells, WMO_MAX_CELLS);
+      if (nf2 != 0u) {
+        wmo_register(w, trace, 1u, 1u, cells, nf2,
+                     wmo_term_depth_ft(rev_ft), dist_rhs);
+      }
+    }
+    return;
+  }
+#endif
   Term dist = dist_rhs ? s->rhs[slot] : s->lhs[slot];
   Term rev  = dist_rhs ? s->lhs[slot] : s->rhs[slot];
   u32 n = wmo_face_cells(dist, cells, WMO_MAX_CELLS);
