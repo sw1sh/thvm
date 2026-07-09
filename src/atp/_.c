@@ -7730,15 +7730,30 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
   // whole BooleanAxioms theory diverged from wmcli at the first pick
   // once TracePack became the default).  This mirrors the cp_trace_lean
   // split (rules materialized, CPs leaned), which is selection-faithful.
+  u64 eq_off = 0u;
+  Term c_lhs = lhs, c_rhs = rhs;
+  // THVM_ATP_TRACE_LEAN_RULES=1 (experiment): pack the rule-birth pair
+  // off-heap like the CP entries, sentinels in the children.  The
+  // historical reason these stay materialized -- the TERM CP former
+  // read the heap layout, and leaning the axioms perturbed formation
+  // order from seq=0 -- may have dissolved now that formation runs on
+  // spans (the FT arm); the parity suite under this env is the test.
+  static int lean_rules = -1;
+  if (lean_rules < 0) lean_rules = atp_env_on("THVM_ATP_TRACE_LEAN_RULES");
+  if (s->trace_pack && lean_rules) {
+    eq_off = atp_trace_eq_store(s, lhs, rhs);
+    c_lhs = term_new(0, TAG_NUM, 0, 0);   // sentinel; real pair off-heap
+    c_rhs = c_lhs;
+  }
   Term children[4] = {
     term_new(0, TAG_NUM, 0, p_a),
     term_new(0, TAG_NUM, 0, p_b),
-    lhs,
-    rhs,
+    c_lhs,
+    c_rhs,
   };
   s->trace[s->n_trace] = term_new_ctr(reason, children, 4);
   u32 idx = s->n_trace;
-  if (s->trace_pack) s->trace_eq_off[idx] = 0u;   // real pair on heap
+  if (s->trace_pack) s->trace_eq_off[idx] = eq_off;   // 0 = real pair on heap
   s->n_trace++;
   return idx;
 }
