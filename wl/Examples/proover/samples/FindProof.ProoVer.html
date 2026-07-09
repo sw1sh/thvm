@@ -3,73 +3,44 @@
 <p>Nik Murzin<br>
 Wolfram Institute, USA</p>
 
-<h3>Overview</h3>
+<h3>Architecture</h3>
 
-<p>FindProof 0.1 is a checker for TSTP first-order proofs, entered in ProoVer
-2026. Checking is treated as proof replay: a proof is parsed into its sequence
-of annotated formulae, and each derived step is validated independently by
-dispatching on the inference rule that introduced it. A single SZS verdict is
-then reported for the whole proof, one of Verified, FailedVerified, or
-NotVerified. The checker is deliberately conservative. A step whose validity
-cannot be established is reported as NotVerified rather than guessed, so that an
-unsound proof is never accepted; soundness of the checker is favoured over
-coverage, in keeping with the scoring, which penalises accepting a buggy proof
-far more heavily than abstaining.</p>
+<p>FindProof is an equational theorem prover based on unfailing completion; the
+same binary is entered in the CASC unit-equality division. As a proof checker it
+validates a first-order TSTP proof by replay, discharging each derived step
+independently by dispatching on the inference rule that introduced it and
+reporting one SZS status for the whole proof [Sys1]. An instantiate step is
+required to be a substitution instance of a parent; a negated_conjecture step to
+be the negation of its parent, checked by entailment in both directions so that
+a wrong quantifier dual is caught; a skolemize step to introduce a fresh Skolem
+symbol that occurs in the result; and a consequence, horn, or deduction step to
+be entailed by its parents. Entailment is decided by the system's clausal
+saturation calculus, resolution with superposition and paramodulation for
+equality [Lib1]: the parents and the negated conclusion are clausified and
+saturated, and a derived empty clause certifies the step. The proof as a whole
+must close with the empty clause.</p>
+
+<h3>Strategies</h3>
+
+<p>Checking is conservative, following the scoring, under which a wrong verdict
+costs more than abstention. A step is reported unsound only when a completed
+saturation exhibits a counter-model; a step whose inference rule lies outside the
+implemented set, or whose entailment the bounded saturation neither proves nor
+refutes, leaves the proof unverified rather than guessed.</p>
 
 <h3>Implementation</h3>
 
 <p>FindProof is a single self-contained C binary with no external dependencies.
-The same binary is the FindProof equational prover; proof checking is its
-<code>--check</code> mode. There is no Wolfram kernel and no external prover.
-Formulae are read from the TSTP source by a hand-written recursive-descent
-parser, covering the full first-order form syntax, the quantifiers, the
-connectives, and equality, directly into the first-order term representation of
-the reasoning core. The per-rule obligations are then discharged against that
-core, which is the same clausal saturation prover, resolution together with
-superposition and paramodulation for equality, that the equational engine is
-built on, so entailment questions are answered by the prover itself rather than
-by a separate decision procedure.</p>
-
-<p>For an instantiate step the conclusion must be a substitution instance of a
-parent, checked by first-order matching and, failing that, by entailment. For a
-negated_conjecture step the conclusion must be the logical negation of the
-parent: the two are required to entail each other, each direction decided by the
-saturation prover, so that a wrong quantifier dual, a universal negated as a
-universal rather than an existential, is caught soundly rather than by syntactic
-comparison alone. For a skolemize step a genuinely fresh Skolem symbol must be
-introduced and must occur in the resulting formula, a structural
-equisatisfiability check, since Skolemisation is not a logical consequence. For
-a consequence, horn, or deduction step the conclusion must be entailed by the
-parents: the parents and the negated conclusion are clausified together and the
-prover is run to saturation. A derived empty clause certifies the entailment and
-the step is accepted; a saturated clause set with no empty clause exhibits a
-counter-model and the step is rejected as unsound; a search that does not settle
-within the resource bound leaves the step undecided. The refutation as a whole
-must close with $false.</p>
-
-<p>A verdict of FailedVerified is emitted only when a step is certainly unsound,
-and the offending step is named. Any step that cannot be settled, an inference
-rule outside the repertoire or an entailment the bounded saturation neither
-proves nor refutes, yields NotVerified for the whole proof. The entire checking
-pass is resource-bounded, so a saturation whose equality reasoning outgrows the
-term store unwinds to a clean NotVerified: every proof receives exactly one SZS
-verdict, and the conservative fallback is always to abstain, never to accept a
-proof that has not been confirmed.</p>
+Proofs in TSTP syntax are read directly by a recursive-descent parser into the
+term representation of the reasoning core, which is the same clausal saturation
+engine used for equational proof search, so the checker reasons with full
+equality rather than treating equational atoms as opaque.</p>
 
 <h3>Expected Competition Performance</h3>
 
-<p>On the provided examples the checker classifies the three valid proofs as
-Verified. Of the four buggy proofs it confirms and localises three: a universal
-conjecture negated as a universal rather than an existential, the reuse of an
-already-introduced Skolem symbol, and a declared Skolem symbol that is absent
-from the resulting formula. The fourth buggy proof draws a single disjunct from
-an equational disjunction by deduction; establishing that this is not entailed
-requires more than the bounded saturation certifies, so the checker reports
-NotVerified and abstains rather than guess. On the hidden set the checker is
-sound by construction, it never accepts an unsound proof and never reports a
-valid proof as buggy, and it abstains on proofs whose steps it cannot settle, in
-keeping with the scoring, which penalises a wrong verdict far more heavily than
-abstaining.</p>
+<p>FindProof is entered in ProoVer 2026. It is expected to be sound, accepting no
+invalid proof and rejecting no valid one, and to abstain on proofs that use
+inference rules outside its repertoire.</p>
 
 <h3>References</h3>
 
