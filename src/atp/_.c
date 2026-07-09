@@ -6476,6 +6476,10 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // THVM_ATP_BWD_GROUND_JOIN=1 for CLI runs; WL side calls
   // thvm_atp_set_use_bwd_ground_join on Method "BackwardGroundJoin".
   s->use_bwd_ground_join = (u8)atp_env_on("THVM_ATP_BWD_GROUND_JOIN");
+  // Twee interreduce1 rule-delete port (opt-in; diverges from WM).
+  s->use_gj_delete_rule = (u8)atp_env_on("THVM_ATP_GJ_DELETE_RULE");
+  // Twee full-R interreduction port (opt-in; diverges from WM).
+  s->use_full_interreduce = (u8)atp_env_on("THVM_ATP_FULL_INTERREDUCE");
   // firstdiv-11 probe (THVM_ATP_KEEP_LHS_REDUCIBLE): keep an LHS-reducible
   // oriented rule live instead of dropping it at the always-on interreduce
   // site (_.c:13066), to test whether thvm dropping -auto rule 3 is what
@@ -12944,6 +12948,12 @@ static void atp_uid_kill_face(AtpState *s, u32 slot, u8 removed_side) {
   if (removed_side == dr) atp_uid_mark_dead(s, s->r_uid[slot]);
 }
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Forward decl: Twee full-R interreduction pass (defined with the
+// interreduce machinery below); called from the step tail above it.
+static void thvm_atp_interreduce_full(AtpState *s);
+#endif
+
 #ifdef ATP_CP_GROUND_JOIN
 // Forward decls: the WM -gj fact-level ground-joinability halves
 // (use_bwd_ground_join), defined with the groundJoin driver.
@@ -13601,7 +13611,40 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // extended system and sterilize those that became ground-joinable.
   // Skips the just-added range (Faktum != Neues, :266/:286).
   if (s->use_bwd_ground_join) {
-    atp_bwd_ground_join_walk(s, post.first, post.first + post.count);
+    // WM re-tests every step (RueckwaertsGrundzusammenfuehrbarkeit runs
+    // each ArbeitsAufnahme).  In the twee rule-delete mode the fact test is
+    // UNPROTECTED (see atp_gj_fact_test) and thus far more expensive, and it
+    // re-tests every still-FAILED rule against the growing system on every
+    // step -- O(n_rules * gj_cover) per step, the dominant cost.  Twee's
+    // interreduce is periodic, not every-step, so under the delete flag run
+    // the walk every THVM_ATP_GJ_DELETE_PERIOD-th step (default 16).  The
+    // WM path (delete off) keeps the every-step cadence for byte-parity.
+    u8 do_walk = 1u;
+    if (s->use_gj_delete_rule) {
+      static int gjd_period = -1;
+      if (gjd_period < 0) {
+        const char *e = getenv("THVM_ATP_GJ_DELETE_PERIOD");
+        gjd_period = (e != NULL && e[0] != '\0') ? (int)strtol(e, NULL, 10) : 16;
+        if (gjd_period < 1) gjd_period = 1;
+      }
+      do_walk = (s->step % (u32)gjd_period == 0u) ? 1u : 0u;
+    }
+    if (do_walk) atp_bwd_ground_join_walk(s, post.first, post.first + post.count);
+  }
+#endif
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Twee full-R interreduction (opt-in): periodic whole-set re-normalize +
+  // collapse of no-longer-left-reduced rules.  O(n_rules^2) per pass, so
+  // run every THVM_ATP_FULL_INTERREDUCE_PERIOD-th step (default 16).
+  if (s->use_full_interreduce) {
+    static int fir_period = -1;
+    if (fir_period < 0) {
+      const char *e = getenv("THVM_ATP_FULL_INTERREDUCE_PERIOD");
+      fir_period = (e != NULL && e[0] != '\0') ? (int)strtol(e, NULL, 10) : 16;
+      if (fir_period < 1) fir_period = 1;
+    }
+    if (s->step % (u32)fir_period == 0u) thvm_atp_interreduce_full(s);
   }
 #endif
 
@@ -17032,6 +17075,72 @@ static int atp_ir_ft_diff(void) {
 }
 #endif
 
+// ── Twee full-R interreduction (Twee.hs:774 interreduce/interreduce1) ──
+// Re-normalize each live oriented rule's LHS against the WHOLE current
+// rule set EXCLUDING itself; if the LHS is reducible (by a combination of
+// the other rules that arrived across many steps -- which the incremental
+// thvm_atp_interreduce never re-checks), the rule is not left-reduced, so
+// collapse it: soft-delete (dead-sentinel recipe) and requeue the reduced
+// equation for re-orientation.  Self-exclusion uses the FT-slice normalize
+// (linear over s->lhs_ft[0..n_rules), NOT the discrimination index whose
+// cache would ignore a bare sentinel): sentinel s->lhs_ft[i]/rhs_ft[i]
+// (out-of-range var 255 -> ft_match returns 0 -> rule i cannot fire) for
+// the one normalize, then restore.  Opt-in (use_full_interreduce); the WM
+// preset never sets it, so test_atp byte-parity is preserved.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+static void thvm_atp_interreduce_full(AtpState *s) {
+  if (s == NULL || s->n_rules < 2u) return;
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  atp_ft_mirror_ensure(s);
+  Term dead_sentinel = term_new(0, TAG_FVR, 255u, 0);
+  AtpFtCell *sent_ft = ft_from_term(a, dead_sentinel, 0);
+  const u32 CAP = 64u;
+  u32 n = s->n_rules;   // snapshot: requeues enqueue CPs, never grow R here
+  for (u32 i = 0; i < n; i++) {
+    if (s->r_dead[i]) continue;
+    if (!s->r_orient[i]) continue;     // oriented rules only (equations skip)
+    Term old_lhs = s->lhs[i];
+    Term old_rhs = s->rhs[i];
+    // Exclude rule i from the rewrite system for this one normalize.  Both
+    // faces are sentineled (IC + FT) so a mid-call mirror probe stays
+    // consistent; r_revision is NOT bumped, so no rebuild fires and the
+    // restore below is exact.
+    Term save_l = s->lhs[i], save_r = s->rhs[i];
+    AtpFtCell *save_lft = s->lhs_ft[i], *save_rft = s->rhs_ft[i];
+    s->lhs[i] = dead_sentinel;  s->rhs[i] = dead_sentinel;
+    s->lhs_ft[i] = sent_ft;     s->rhs_ft[i] = sent_ft;
+    Term reduced = atp_ir_normalize_ft_slice(s, old_lhs, 0u, s->n_rules, CAP);
+    s->lhs[i] = save_l;  s->rhs[i] = save_r;
+    s->lhs_ft[i] = save_lft;  s->rhs_ft[i] = save_rft;
+    if (kbo_eq(reduced, old_lhs)) continue;   // LHS already left-reduced
+    // LHS reducible by R\{i}: rule i is redundant in its current form.
+    // Collapse it (permanent soft-delete) and requeue reduced=old_rhs.
+    if (atp_rule_trace_on()) {
+      char la[8192], ra[8192];
+      atp_pretty_term(old_lhs, la, sizeof la);
+      atp_pretty_term(reduced, ra, sizeof ra);
+      fprintf(stderr, "  FULL-IR collapse (slot %u): %s ->* %s\n", i, la, ra);
+    }
+    s->r_dead_lhs_save[i] = old_lhs;
+    s->r_dead_rhs_save[i] = old_rhs;
+    s->lhs[i] = dead_sentinel;  s->rhs[i] = dead_sentinel;
+    s->r_dead[i] = 1;
+    s->r_dead_lhs_save_ft[i] = save_lft;
+    s->r_dead_rhs_save_ft[i] = save_rft;
+    s->lhs_ft[i] = sent_ft;  s->rhs_ft[i] = sent_ft;
+    s->r_revision++;
+    s->n_full_ir_collapsed++;
+    if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[i]);
+    if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[i]);
+    if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[i]);
+#ifdef ATP_RULE_INDEX
+    s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
+#endif
+    atp_add_equation_simplified(s, reduced, old_rhs, s->r_trace[i]);
+  }
+}
+#endif
+
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0 || added.first == 0) return 0;
   if (s->use_wm_interred) return thvm_atp_interreduce_wm(s, added);
@@ -20412,8 +20521,22 @@ static u8 atp_gj_fact_test(AtpState *s, u32 i) {
   if (atp_gj_perm_valuable(l, r)) return ATP_GJ_ST_VALUABLE;
   if (var_overflow) return ATP_GJ_ST_FAILED;
   s->gj_exclude   = i;
-  s->gj_protect_l = l;
-  s->gj_protect_r = s->r_orient[i] ? 0 : r;
+  // Twee interreduce1 (Twee.hs:787) tests joinability against R\{i} with
+  // NO root protection -- it has no analog of WM's MO_schuetzeTerm
+  // Dreieck root gate.  That gate makes the WM-faithful fact test far more
+  // conservative (on the AC/idempotent GRP721/MVA009 signatures it proves
+  // ZERO rules joinable, so the rule-delete port would never fire).  Under
+  // the opt-in twee-delete flag drop the protection to recover twee's
+  // (sound: joinable against R\{i} => the equation is a consequence of the
+  // other rules => rule i is redundant).  Default path keeps WM protection
+  // for byte-parity.
+  if (s->use_gj_delete_rule) {
+    s->gj_protect_l = 0;
+    s->gj_protect_r = 0;
+  } else {
+    s->gj_protect_l = l;
+    s->gj_protect_r = s->r_orient[i] ? 0 : r;
+  }
   int joinable = atp_cp_ground_joinable(s, l, r);
   s->gj_exclude   = ATP_GJ_NO_EXCLUDE;
   s->gj_protect_l = 0;
@@ -20485,6 +20608,35 @@ static void atp_bwd_ground_join_walk(AtpState *s, u32 skip_lo, u32 skip_hi) {
       }
       atp_trace_mark_dead(s, s->r_trace[i]);
       if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[i]);
+      // Twee interreduce1 deleteActive (opt-in): WM keeps the fact live as
+      // a rewriter; twee DELETES a ground-joinable active rule from R (its
+      // rewrite is recoverable via the rules that witness joinability, so
+      // completeness holds).  Soft-delete via the bwd-subsume dead-sentinel
+      // recipe (_.c:12237-12264): sentinel faces make thvm_match/thvm_unify
+      // return 0, so every rewrite / CP-generation site skips the slot;
+      // originals go to r_dead_*_save[] for proof reconstruction.  n_unorient
+      // is NOT decremented -- matching the bwd-subsume convention (dead slots
+      // are skipped via r_dead/sentinel; the count stays an upper bound).
+      if (s->use_gj_delete_rule && !s->r_dead[i]) {
+        Term dead_sentinel = term_new(0, TAG_FVR, 255u, 0);
+        s->r_dead_lhs_save[i] = s->lhs[i];
+        s->r_dead_rhs_save[i] = s->rhs[i];
+        s->lhs[i] = dead_sentinel;
+        s->rhs[i] = dead_sentinel;
+        s->r_dead[i] = 1;
+        s->r_revision++;
+        s->n_facts_gj_deleted++;
+        if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[i]);
+#ifdef ATP_RULE_INDEX
+        s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
+#endif
+#ifdef THVM_ATPFT_RULES
+        s->r_dead_lhs_save_ft[i] = s->lhs_ft[i];
+        s->r_dead_rhs_save_ft[i] = s->rhs_ft[i];
+        s->lhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr, dead_sentinel, 0);
+        s->rhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr, dead_sentinel, 0);
+#endif
+      }
     }
   }
 }

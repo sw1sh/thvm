@@ -100,6 +100,8 @@ static const AtpKnob KNOBS[] = {
   {"backward-subsume",       "THVM_ATP_BWD_SUB",         0, "BackwardSubsume"},
   {"backward-demod",         "THVM_ATP_BWD_DEMOD",       0, "BackwardDemod"},
   {"backward-ground-join",   "THVM_ATP_BWD_GROUND_JOIN", 0, "BackwardGroundJoin"},
+  {"gj-delete-rule",         "THVM_ATP_GJ_DELETE_RULE",  0, "GjDeleteRule"},
+  {"full-interreduce",       "THVM_ATP_FULL_INTERREDUCE",0, "FullInterreduce"},
   {"cp-side",                "THVM_ATP_CP_SIDE",         0, "CPSide"},
   {"wm-trie-faithful",       "THVM_ATP_WM_TRIE_FAITHFUL",0, "(faithful trie)"},
   {"initial-ultimate",       "THVM_ATP_INITIAL_ULTIMATE",0, "IntakeOrder initial stamp"},
@@ -669,9 +671,15 @@ static const SchedSlice SCHEDULE[] = {
   // (4) TWEE-SCORED completion: flatten + Twee's CP score (mode 8, now with
   // the faithful formation-depth term) + pure best-first (w2-modulo=0, no
   // WM age interleave) + dynamic passive re-scoring (cp-set-interreduce =
-  // Twee simplifyPassive).  A genuinely different selection regime from the
-  // three WM/MNF slices above -- the portfolio's Twee-native angle.
-  {"twee",   "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --cp-set-interreduce", 0.0},
+  // Twee simplifyPassive) + FULL-R INTERREDUCTION (Twee interreduce1: each
+  // pass re-normalizes every rule's LHS against the whole set and collapses
+  // no-longer-left-reduced rules).  full-interreduce is the decisive lever:
+  // it keeps the rule set at Twee's ~44 (vs thvm's 500-880) and CRACKS the
+  // completion-provable residual the portfolio previously missed -- MVA009
+  // 0.5s, GRP721 0.2s, GRP766 1.2s, GRP725 5.6s, REL040 0.9s, REL044 1.2s
+  // (all <= Twee's own time).  A genuinely different selection regime from
+  // the three WM/MNF slices above -- the portfolio's Twee-native angle.
+  {"twee",   "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --cp-set-interreduce --full-interreduce", 0.0},
   // (5) PURE bare completion (bare engine defaults, GT weight, NO WM preset
   // heuristics, NO ground-join/connectedness).  The WM preset's selection +
   // MaxWeight actively DIVERGES on some CASC UEQ problems -- notably the

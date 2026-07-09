@@ -5596,8 +5596,31 @@ typedef struct {
   // Grundzusammenfuehrung.c:828-840) is not cached -- FAILED facts
   // are simply retested per new fact (pure perf, same verdicts).
   u8   use_bwd_ground_join;
+  // Twee interreduce1 port (Twee.hs:787 deleteActive): when a backward
+  // fact-test finds a rule ground-joinable, DELETE it from R (soft-delete,
+  // dead-sentinel recipe) instead of only sterilizing its CP formation.
+  // WM KEEPS ground-joinable facts as live rewriters (GZ_ZSFB_BEHALTEN,
+  // _.c:20456-20463), so this DIVERGES from WM -- strictly opt-in, default
+  // OFF, so the WM preset (test_atp byte-parity) is untouched.  Requires
+  // use_bwd_ground_join to run the walk that reaches the delete site.
+  u8   use_gj_delete_rule;
+  // Twee interreduce/interreduce1 port (Twee.hs:774): re-normalize EVERY
+  // live rule's LHS against the WHOLE current rule set (excluding itself)
+  // each periodic pass, and collapse (drop+requeue the reduced equation)
+  // any rule whose LHS is reducible by a COMBINATION of the others.  thvm's
+  // thvm_atp_interreduce is INCREMENTAL (reduces old rules only against the
+  // newest 1-2), so rules that become reducible by a later combination
+  // persist -- the dominant source of the CASC AC/loop rule-set bloat
+  // (MVA009/GRP721 keep 500-880 rules where twee keeps ~44).  Opt-in,
+  // default OFF (diverges from WM's incremental interreduce), so the WM
+  // preset (test_atp byte-parity) is untouched.
+  u8   use_full_interreduce;
   // Count of facts sterilized by the backward walk (bench stats line).
   u32  n_facts_bwd_ground_joinable;
+  // Count of rules DELETED from R by the use_gj_delete_rule port.
+  u32  n_facts_gj_deleted;
+  // Count of rules collapsed by use_full_interreduce (drop+requeue).
+  u32  n_full_ir_collapsed;
   // Per-rule-slot WM gzfbStatus cache (general.h:94-95 GZ_statusT,
   // "Reihenfolge wichtig" -- order matters: backward skips
   // status <= GZ_aussichtslos = {joinable, valuable, hopeless}).
