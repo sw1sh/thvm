@@ -16943,6 +16943,45 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
   return dropped;
 }
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// FT-native interreduction reduct: re-encode `subj` to a fresh flat tree
+// and normalize it against ONLY the live rule slice
+// [slice_first, slice_first + slice_count) via the outermost-leftmost FT
+// loop -- the byte-for-byte equivalent of the Term-side
+// atp_rewrite_normalize (atp_ordered_try_top order) the legacy IC
+// interreduce used, but with the order gate applied on the FLAT subject
+// (thvm_kbo_ft) instead of a per-redex IC atp_compare over a re-
+// materialised deep Term.  On the ifeq / deeply-nested workloads that
+// path was ~90% of the completion wall (interreduce -> IC normalize ->
+// atp_ordered_try_top -> atp_compare).  The slice's FT patterns live in
+// s->lhs_ft / s->rhs_ft, shifted in lockstep with R through interreduce
+// compaction (RE_RegelEntfernen), and the new-rule slice is never
+// modified in-loop, so the mirror stays valid across the pass.
+static Term atp_ir_normalize_ft_slice(AtpState *s, Term subj,
+                                      u32 slice_first, u32 slice_count,
+                                      u32 step_cap) {
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *sub = ft_from_term(a, subj, 0);
+  AtpFtCell *nf  = atp_rewrite_normalize_ft_slice(s, sub, slice_first,
+                                                  slice_count, step_cap);
+  return ft_to_term(nf);
+}
+// THVM_ATP_IR_FT=0 forces the legacy IC interreduce normalize; default ON.
+static int atp_ir_ft_on(void) {
+  static int c = -1;
+  if (c < 0) { const char *e = getenv("THVM_ATP_IR_FT");
+    c = (e != NULL && e[0] == '0') ? 0 : 1; }
+  return c;
+}
+// THVM_ATP_IR_FT_DIFF=1 runs BOTH normalizers and aborts on any NF
+// divergence -- the byte-parity self-check that certifies the FT path.
+static int atp_ir_ft_diff(void) {
+  static int c = -1;
+  if (c < 0) c = (getenv("THVM_ATP_IR_FT_DIFF") != NULL) ? 1 : 0;
+  return c;
+}
+#endif
+
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0 || added.first == 0) return 0;
   if (s->use_wm_interred) return thvm_atp_interreduce_wm(s, added);
@@ -16979,6 +17018,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 
   u32 dropped = 0;
   u32 i       = 0;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // FT interreduce reads the new-rule slice's flat patterns (s->lhs_ft /
+  // s->rhs_ft); make sure the mirror is materialised before the pass.
+  // A no-op when already current; the in-loop compaction keeps it valid
+  // (lockstep slot shift), so this single ensure suffices.
+  if (atp_ir_ft_on()) atp_ft_mirror_ensure(s);
+#endif
   while (i < added.first - dropped) {
     // Bound the interreduce transient: this loop runs O(n_rules) normalizes
     // whose scratch is not reclaimed until step end, so on deep completions
@@ -17027,6 +17073,28 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // test; the reduct is discarded and the victim re-enters with
       // its original sides), so no NORM_STEPs are recorded here --
       // the drain records its own oriented-only chain.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      if (atp_ir_ft_on()) {
+        Term red_ft = atp_ir_normalize_ft_slice(s, old_lhs,
+                                                added.first - dropped,
+                                                n_new, 16);
+        if (atp_ir_ft_diff()) {
+          Term red_ic = atp_rewrite_normalize(s, old_lhs, new_lhs, new_rhs,
+                                              n_new, 16);
+          if (!kbo_eq(red_ft, red_ic)) {
+            char sb[4096], fb[4096], ib[4096];
+            atp_pretty_term(old_lhs, sb, sizeof sb);
+            atp_pretty_term(red_ft,  fb, sizeof fb);
+            atp_pretty_term(red_ic,  ib, sizeof ib);
+            fprintf(stderr, "[IR_FT DIFF lhs] slice=[%u,%u)\n subj=%s\n"
+                    " ft=%s\n ic=%s\n", added.first - dropped, n_new,
+                    sb, fb, ib);
+            abort();
+          }
+        }
+        reduced = red_ft;
+      } else
+#endif
       reduced = atp_rewrite_normalize(s, old_lhs, new_lhs, new_rhs,
                                       n_new, 16);
     }
@@ -17188,6 +17256,27 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           r_reduced = atp_rewrite_normalize_slice_record(
               s, old_rhs, new_lhs, new_rhs, new_traces, n_new, 16,
               &rr_parent, 1u, old_lhs);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        } else if (atp_ir_ft_on()) {
+          // FT-native RHS composition (same slice as the LHS reduction).
+          r_reduced = atp_ir_normalize_ft_slice(s, old_rhs,
+                                                added.first - dropped,
+                                                n_new, 16);
+          if (atp_ir_ft_diff()) {
+            Term r_ic = atp_rewrite_normalize(s, old_rhs, new_lhs, new_rhs,
+                                              n_new, 16);
+            if (!kbo_eq(r_reduced, r_ic)) {
+              char sb[4096], fb[4096], ib[4096];
+              atp_pretty_term(old_rhs,   sb, sizeof sb);
+              atp_pretty_term(r_reduced, fb, sizeof fb);
+              atp_pretty_term(r_ic,      ib, sizeof ib);
+              fprintf(stderr, "[IR_FT DIFF rhs] slice=[%u,%u)\n subj=%s\n"
+                      " ft=%s\n ic=%s\n", added.first - dropped, n_new,
+                      sb, fb, ib);
+              abort();
+            }
+          }
+#endif
         } else {
           r_reduced = atp_rewrite_normalize(s, old_rhs, new_lhs, new_rhs,
                                             n_new, 16);
