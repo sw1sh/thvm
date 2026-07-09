@@ -1782,67 +1782,6 @@ static u32 ft_distinct_var_count(const AtpFtCell *l, const AtpFtCell *r) {
   return n;
 }
 
-// Composite-size count on spans: the node count of `root` with the
-// subterm at cell `at` replaced by `rin` and every variable resolved
-// through `subst` (chains followed) -- the FT sibling of
-// vcp_count_side/vcp_count_pair.  Iterative over span segments; an
-// unbound variable counts 1.  Returns the accumulated count, saturated
-// at `cap` (callers only compare against the KPBehandeln gate).  The
-// CP-walk port's size classifier; no caller yet.
-#if defined(THVM_ATPFT_NORM)
-enum { VCP_FT_STK = 96 };
-static u32 vcp_ft_count_side(const AtpFtCell *root, const AtpFtCell *at,
-                             const AtpFtCell *rin, const AtpFtSubst *subst,
-                             u32 cap, u32 acc) {
-  struct { const AtpFtCell *c, *e; } stk[VCP_FT_STK];
-  u32 sp = 0u;
-  const AtpFtCell *c = root;
-  const AtpFtCell *e = (root->end != NULL) ? root->end->next : NULL;
-  for (;;) {
-    while (c == NULL || c == e) {
-      if (sp == 0u) return acc;
-      sp--;
-      c = stk[sp].c;
-      e = stk[sp].e;
-    }
-    if (c == at) {
-      // Splice point: count rin's composite instead of this subtree,
-      // then resume after the replaced subtree.
-      if (sp >= (u32)VCP_FT_STK) return cap;      // depth cliff: saturate
-      stk[sp].c = c->end->next;
-      stk[sp].e = e;
-      sp++;
-      at = NULL;                                  // single occurrence
-      c = rin;
-      e = (rin->end != NULL) ? rin->end->next : NULL;
-      continue;
-    }
-    if ((c->sym & WF_VAR_BIT) != 0u) {
-      u32 id = c->sym & ~WF_VAR_BIT;
-      const AtpFtCell *b =
-          (subst != NULL && id < ATPFT_MAX_VARS) ? subst->bind[id] : NULL;
-      if (b != NULL) {
-        // Resolve through the binding (its own vars resolve on the way).
-        if (sp >= (u32)VCP_FT_STK) return cap;
-        stk[sp].c = c->next;
-        stk[sp].e = e;
-        sp++;
-        c = b;
-        e = (b->end != NULL) ? b->end->next : NULL;
-        continue;
-      }
-      acc++;                                      // unbound var: one node
-      if (acc >= cap) return acc;
-      c = c->next;
-      continue;
-    }
-    acc++;                                        // constructor cell
-    if (acc >= cap) return acc;
-    c = c->next;
-  }
-}
-#endif // THVM_ATPFT_NORM
-
 // Pop-time FT stash: thvm_atp_select_cp decodes the selected packed
 // CP's byte string into two fresh FT spans (bytes -> cells, no Term
 // hop) and parks them here for the step function's mixmost pop
@@ -3324,6 +3263,155 @@ static AtpFtCell *vcp_ft_build_cell(AtpFt *a, const AtpFtCell *c,
   AtpFtCell *out = ftnew_ctr(a, lab, (u16)n, kids, 0);
   free(kids_heap);
   return out;
+}
+#endif // THVM_ATPFT_NORM
+
+// Composite-size count on spans: the node count of `root` with the
+// subterm at cell `at` replaced by `rin` and every variable resolved
+// through `subst` (chains followed) -- the FT sibling of
+// vcp_count_side/vcp_count_pair.  Iterative over span segments; an
+// unbound variable counts 1.  Returns the accumulated count, saturated
+// at `cap` (callers only compare against the KPBehandeln gate).  The
+// CP-walk port's size classifier; no caller yet.
+#if defined(THVM_ATPFT_NORM)
+enum { VCP_FT_STK = 96 };
+static u32 vcp_ft_count_side(const AtpFtCell *root, const AtpFtCell *at,
+                             const AtpFtCell *rin, const AtpFtSubst *subst,
+                             u32 cap, u32 acc) {
+  struct { const AtpFtCell *c, *e; } stk[VCP_FT_STK];
+  u32 sp = 0u;
+  const AtpFtCell *c = root;
+  const AtpFtCell *e = (root->end != NULL) ? root->end->next : NULL;
+  for (;;) {
+    while (c == NULL || c == e) {
+      if (sp == 0u) return acc;
+      sp--;
+      c = stk[sp].c;
+      e = stk[sp].e;
+    }
+    if (c == at) {
+      // Splice point: count rin's composite instead of this subtree,
+      // then resume after the replaced subtree.
+      if (sp >= (u32)VCP_FT_STK) return VCP_COUNT_ANOMALY;
+      stk[sp].c = c->end->next;
+      stk[sp].e = e;
+      sp++;
+      at = NULL;                                  // single occurrence
+      c = rin;
+      e = (rin->end != NULL) ? rin->end->next : NULL;
+      continue;
+    }
+    if ((c->sym & WF_VAR_BIT) != 0u) {
+      u32 id = c->sym & ~WF_VAR_BIT;
+      const AtpFtCell *b =
+          (subst != NULL && id < ATPFT_MAX_VARS) ? subst->bind[id] : NULL;
+      if (b != NULL) {
+        // Resolve through the binding (its own vars resolve on the way).
+        if (sp >= (u32)VCP_FT_STK) return VCP_COUNT_ANOMALY;
+        stk[sp].c = c->next;
+        stk[sp].e = e;
+        sp++;
+        c = b;
+        e = (b->end != NULL) ? b->end->next : NULL;
+        continue;
+      }
+      acc++;                                      // unbound var: one node
+      if (acc >= cap) return acc;
+      c = c->next;
+      continue;
+    }
+    if (ft_ctr_sym(c) == ATPFT_NUM_MARKER) {
+      return VCP_COUNT_ANOMALY;   // TAG_NUM counts 1 Term-side: fall back
+    }
+    acc++;                                        // constructor cell
+    if (acc >= cap) return acc;
+    c = c->next;
+  }
+}
+
+// Pair wrapper -- the FT sibling of vcp_count_pair (same early-outs,
+// same anomaly propagation).
+static u32 vcp_ft_count_pair(const AtpFtCell *lo_ft, const AtpFtCell *sub_ft,
+                             const AtpFtCell *rin_ft, const AtpFtCell *ro_ft,
+                             const AtpFtSubst *subst, u32 cap) {
+  u32 acc = vcp_ft_count_side(lo_ft, sub_ft, rin_ft, subst, cap, 0u);
+  if (acc == VCP_COUNT_ANOMALY || acc >= cap) return acc;
+  return vcp_ft_count_side(ro_ft, NULL, NULL, subst, cap, acc);
+}
+#endif // THVM_ATPFT_NORM
+
+// FT sibling of vcp_emit_fused: arm g_vcp_emit / g_acp_fuse from span
+// composites (same side order, same signs).  0 on an anomaly -- caller
+// falls back to the Term route.
+#if defined(THVM_ATPFT_NORM)
+static u8 vcp_ft_emit_fused(const KboConfig *cfg, const AtpFtCell *lo_ft,
+                            const AtpFtCell *sub_ft,
+                            const AtpFtCell *rin_ft,
+                            const AtpFtCell *ro_ft,
+                            const AtpFtSubst *subst) {
+  AcpFuse *fz = &g_acp_fuse;
+  fz->valid   = 0u;
+  fz->map.n   = 0u;
+  fz->phidiff = 0;
+  u32 pos = 0u, nodes = 0u, fpos = 0u;
+  // WM side order: sigma(ro) is the pair's LHS (see the classic arm).
+  if (!vcp_ft_emit_side(ro_ft, NULL, NULL, subst, cfg, &fz->map,
+                        &pos, &nodes, fz, +1, &fpos)) {
+    return 0u;
+  }
+  u32 lhs_nodes = nodes, fl = fpos;
+  if (!vcp_ft_emit_side(lo_ft, sub_ft, rin_ft, subst, cfg, &fz->map,
+                        &pos, &nodes, fz, -1, &fpos)) {
+    return 0u;
+  }
+  fz->fl_n  = fl;
+  fz->fr_n  = fpos - fl;
+  fz->valid = 1u;
+  g_vcp_emit.armed     = 0u;
+  g_vcp_emit.len       = pos;
+  g_vcp_emit.nodes     = nodes;
+  g_vcp_emit.lhs_nodes = lhs_nodes;
+  return 1u;
+}
+
+// FT sibling of vcp_treat_form: the treated raw pair's bytes (into
+// g_acp_scratch[0, raw_len), fz == NULL walk) and cells, one shared
+// appearance-order map across both sides -- identical map content to
+// the Term fused walk (the byte walk of a side appends; the cell walk
+// of the same composite only looks up).  Arms the g_vcp_treat stash on
+// success; 0 on an anomaly with any built span returned.
+static u8 vcp_ft_treat_form(AtpState *s, const AtpFtCell *lo_ft,
+                            const AtpFtCell *sub_ft,
+                            const AtpFtCell *rin_ft,
+                            const AtpFtCell *ro_ft,
+                            const AtpFtSubst *subst) {
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AcpNvMap m;
+  m.n = 0u;
+  u32 raw_len = 0u, nodes = 0u, fpos = 0u;
+  // WM side order: sigma(ro) is the pair's LHS (see the classic arm).
+  if (!vcp_ft_emit_side(ro_ft, NULL, NULL, subst, s->kbo, &m,
+                        &raw_len, &nodes, NULL, +1, &fpos)) {
+    return 0u;
+  }
+  AtpFtCell *fl = vcp_ft_build_cell(a, ro_ft, NULL, NULL, subst, &m, 0u);
+  if (fl == NULL) return 0u;
+  if (!vcp_ft_emit_side(lo_ft, sub_ft, rin_ft, subst, s->kbo, &m,
+                        &raw_len, &nodes, NULL, -1, &fpos)) {
+    ft_free_span(a, fl, fl->end);
+    return 0u;
+  }
+  const AtpFtCell *at2 = sub_ft;
+  AtpFtCell *fr = vcp_ft_build_cell(a, lo_ft, &at2, rin_ft, subst, &m, 0u);
+  if (fr == NULL) {
+    ft_free_span(a, fl, fl->end);
+    return 0u;
+  }
+  g_vcp_treat.armed   = 0u;
+  g_vcp_treat.fl      = fl;
+  g_vcp_treat.fr      = fr;
+  g_vcp_treat.raw_len = raw_len;
+  return 1u;
 }
 #endif // THVM_ATPFT_NORM
 
