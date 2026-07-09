@@ -413,6 +413,56 @@ AtpFtCell *ft_clone_span(AtpFt *a, const AtpFtCell *x, int scratch) {
   return c;
 }
 
+// Subterm addressing on a span: the cell at child-index path
+// p[0..p_len) -- the FT sibling of cp_subterm_at.  Each step descends
+// to the first child (parent->next) and advances end->next per index.
+// Returns NULL on an out-of-range index (the Term walker's 0), and the
+// addressed cell is the subterm's span head (its own end delimits it).
+const AtpFtCell *ft_subterm_at(const AtpFtCell *c, const u32 *p,
+                               u32 p_len) {
+  for (u32 d = 0; d < p_len; d++) {
+    if (c == NULL || ft_is_var(c) || c->arity == 0u) return NULL;
+    u32 idx = p[d];
+    if (idx >= (u32)c->arity) return NULL;
+    const AtpFtCell *k = c->next;
+    for (u32 i = 0; i < idx; i++) k = k->end->next;
+    c = k;
+  }
+  return c;
+}
+
+// Rename-clone: a fresh span with every var id shifted by `offset` --
+// the FT sibling of thvm_rename_vars(t, offset).  Built through the
+// same ftnew_* constructors, so the output is bit-identical to
+// ft_from_term(a, thvm_rename_vars(ft_to_term(x), offset)) with the
+// Term hops removed.
+AtpFtCell *ft_rename_span(AtpFt *a, const AtpFtCell *x, u32 offset,
+                          int scratch) {
+  if (ft_is_var(x)) {
+    return ftnew_var(a, ft_var_id(x) + offset, scratch);
+  }
+  u32 sym   = ft_ctr_sym(x);
+  u16 arity = x->arity;
+  if (arity == 0u) return ftnew_const(a, sym, scratch);
+  enum { KIDS_STACK = 16 };
+  AtpFtCell *kids_stack[KIDS_STACK];
+  AtpFtCell **kids      = kids_stack;
+  AtpFtCell **kids_heap = NULL;
+  if (arity > KIDS_STACK) {
+    kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
+    if (kids_heap == NULL) { fprintf(stderr, "ft_rename_span: kids OOM\n"); exit(1); }
+    kids = kids_heap;
+  }
+  const AtpFtCell *child = x->next;
+  for (u16 i = 0; i < arity; i++) {
+    kids[i] = ft_rename_span(a, child, offset, scratch);
+    child = child->end->next;
+  }
+  AtpFtCell *c = ftnew_ctr(a, sym, arity, kids, scratch);
+  free(kids_heap);
+  return c;
+}
+
 // --- Boundary: AtpFt -> Term -----------------------------------------
 //
 // Mirror of the above: a var cell becomes term_new_fvr; a 0-arity
