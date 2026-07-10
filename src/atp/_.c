@@ -21019,6 +21019,12 @@ static u8 atp_eq_subsumes_pair(Term p_lhs, Term p_rhs, Term lhs, Term rhs) {
 typedef struct {
   Term node[ATP_WMFLAT_MAX];
   u32  end[ATP_WMFLAT_MAX];        // exclusive preorder end of subtree at i
+  // Representation-neutral columns (filled by BOTH flatteners): the
+  // phase's symbol tests and the EsFolgt subtree equality run on
+  // these, so a span row and a Term row of the same content are
+  // indistinguishable to the matcher.
+  u32  sym[ATP_WMFLAT_MAX];        // ctr label, or var id when is_var
+  u8   is_var[ATP_WMFLAT_MAX];
   u32  n;
   u8   overflow;
 } AtpWmFlat;
@@ -21027,41 +21033,111 @@ static void atp_wmflat_preorder(Term t, AtpWmFlat *f) {
   if (f->n >= ATP_WMFLAT_MAX) { f->overflow = 1u; return; }
   u32 self = f->n++;
   f->node[self] = t;
-  if (term_tag(t) == TAG_CTR) {
+  if (term_tag(t) == TAG_FVR) {
+    f->sym[self]    = term_ext(t);
+    f->is_var[self] = 1u;
+  } else if (term_tag(t) == TAG_CTR) {
+    f->sym[self]    = term_ext(t);
+    f->is_var[self] = 0u;
     u32 k = term_ctr_n(t);
     for (u32 c = 0; c < k; c++) atp_wmflat_preorder(term_ctr_at(t, c), f);
+  } else {
+    // TAG_NUM etc.: a leaf with a namespaced code (never collides with
+    // ctr labels or var ids in the same column semantics as before --
+    // the old node-Term kbo_eq treated distinct NUMs as unequal, and
+    // the symbol test compared ext/arity of CTRs only).
+    f->sym[self]    = 0x40000000u ^ (u32)term_val(t);
+    f->is_var[self] = 0u;
   }
   f->end[self] = f->n;
+}
+
+// Span sibling: identical columns off the mirror cells (a span's
+// preorder IS its cell order); node[] carries 0 -- nothing reads it
+// once the phase runs on the neutral columns.
+static void atp_wmflat_preorder_ft(const AtpFtCell *c, AtpWmFlat *f) {
+  if (f->n >= ATP_WMFLAT_MAX) { f->overflow = 1u; return; }
+  u32 self = f->n++;
+  f->node[self] = 0;
+  if ((c->sym & WF_VAR_BIT) != 0u) {
+    f->sym[self]    = c->sym & ~WF_VAR_BIT;
+    f->is_var[self] = 1u;
+  } else if (c->sym == ATPFT_NUM_MARKER && c->arity == 2u) {
+    const AtpFtCell *dt_cell  = c->next;
+    const AtpFtCell *raw_cell = dt_cell->end->next;
+    (void)dt_cell;
+    f->sym[self]    = 0x40000000u ^ ft_ctr_sym(raw_cell);
+    f->is_var[self] = 0u;
+  } else {
+    f->sym[self]    = c->sym;
+    f->is_var[self] = 0u;
+    const AtpFtCell *kid = c->next;
+    for (u32 i = 0; i < (u32)c->arity; i++) {
+      atp_wmflat_preorder_ft(kid, f);
+      kid = kid->end->next;
+    }
+  }
+  f->end[self] = f->n;
+}
+
+// Neutral subtree equality: the (sym, is_var) sequences of two flat
+// ranges -- exactly the verdict kbo_eq gave on the old node Terms.
+static u8 atp_wmflat_range_eq(const AtpWmFlat *a, u32 ai,
+                              const AtpWmFlat *b, u32 bi) {
+  u32 an = a->end[ai] - ai;
+  u32 bn = b->end[bi] - bi;
+  if (an != bn) return 0u;
+  for (u32 k = 0; k < an; k++) {
+    if (a->sym[ai + k] != b->sym[bi + k] ||
+        a->is_var[ai + k] != b->is_var[bi + k])
+      return 0u;
+  }
+  return 1u;
 }
 
 // One side of MO_TermpaarSubsummiertZweites: walk pattern preorder against the
 // subject preorder.  `subst`/`setf` (indexed 0..maxslot) and `*counter` PERSIST
 // across the left and right calls (WM resets only once, at MO entry).
+// Bindings are (flat, index) pairs into the SUBJECT flats -- with the
+// EsFolgt equality decided on the representation-neutral (sym, is_var)
+// columns, a Term subject and a span subject match identically.
+typedef struct {
+  const AtpWmFlat *f;
+  u32 i;
+} WmfBind;
 static u8 atp_wmflat_phase(const AtpWmFlat *pat, const AtpWmFlat *sub,
-                           Term *subst, u8 *setf, u32 *counter, u32 maxslot) {
+                           WmfBind *subst, u8 *setf, u32 *counter,
+                           u32 maxslot) {
   u32 i = 0, j = 0;
   while (i < pat->n) {
     if (j >= sub->n) return 0;           // subject exhausted, pattern not
-    Term pn = pat->node[i];
-    if (term_tag(pn) == TAG_FVR) {
-      u32 v = (u32)term_ext(pn);         // READ slot = variable's own symbol
+    if (pat->is_var[i]) {
+      u32 v = pat->sym[i];               // READ slot = variable's own symbol
       if (v >= maxslot) return 0;
       if (!setf[v]) {                    // VarUngebunden(v)
         u32 slot = *counter;             // WRITE slot = appearance counter
         if (slot >= maxslot) return 0;
         (*counter)++;
-        subst[slot] = sub->node[j];
+        subst[slot].f = sub;
+        subst[slot].i = j;
         setf[slot] = 1u;                 // the counter-vs-symbol CROSS
-      } else if (!kbo_eq(subst[v], sub->node[j])) {
+      } else if (!atp_wmflat_range_eq(subst[v].f, subst[v].i, sub, j)) {
         return 0;                        // EsFolgt == structural equality
       }
       i = pat->end[i];                   // pattern var leaf -> next symbol
       j = sub->end[j];                   // subject -> skip whole subterm
     } else {                             // function symbol: must agree
-      Term sn = sub->node[j];
-      if (term_tag(sn) != TAG_CTR ||
-          term_ext(sn) != term_ext(pn) ||
-          term_ctr_n(sn) != term_ctr_n(pn)) return 0;
+      if (sub->is_var[j] || sub->sym[j] != pat->sym[i]) return 0;
+      // Arity must agree (the old walk compared term_ctr_n).  On the
+      // flat, arity = number of DIRECT children; equal (sym, extent)
+      // prefixes guarantee it only if extents match at every level --
+      // compare direct-child counts explicitly.
+      {
+        u32 pc = 0, sc = 0;
+        for (u32 k = i + 1u; k < pat->end[i]; k = pat->end[k]) pc++;
+        for (u32 k = j + 1u; k < sub->end[j]; k = sub->end[k]) sc++;
+        if (pc != sc) return 0;
+      }
       i++;                               // descend (advance one symbol each)
       j++;
     }
@@ -21069,18 +21145,28 @@ static u8 atp_wmflat_phase(const AtpWmFlat *pat, const AtpWmFlat *sub,
   return 1;
 }
 
-static u8 atp_wmflat_mo(Term pl, Term pr, Term sl, Term sr) {
+// Flatten one operand from whichever representation the caller holds:
+// the span when given (mirrors, lazy pairs), else the Term.
+static void atp_wmflat_fill(Term t, const AtpFtCell *span, AtpWmFlat *f) {
+  f->n = 0u;
+  f->overflow = 0u;
+  if (span != NULL) atp_wmflat_preorder_ft(span, f);
+  else              atp_wmflat_preorder(t, f);
+}
+
+static u8 atp_wmflat_mo_x(Term pl, const AtpFtCell *pl_ft,
+                          Term pr, const AtpFtCell *pr_ft,
+                          Term sl, const AtpFtCell *sl_ft,
+                          Term sr, const AtpFtCell *sr_ft) {
   AtpWmFlat fpl, fpr, fsl, fsr;
-  fpl.n = fpr.n = fsl.n = fsr.n = 0u;
-  fpl.overflow = fpr.overflow = fsl.overflow = fsr.overflow = 0u;
-  atp_wmflat_preorder(pl, &fpl);
-  atp_wmflat_preorder(pr, &fpr);
-  atp_wmflat_preorder(sl, &fsl);
-  atp_wmflat_preorder(sr, &fsr);
+  atp_wmflat_fill(pl, pl_ft, &fpl);
+  atp_wmflat_fill(pr, pr_ft, &fpr);
+  atp_wmflat_fill(sl, sl_ft, &fsl);
+  atp_wmflat_fill(sr, sr_ft, &fsr);
   if (fpl.overflow || fpr.overflow || fsl.overflow || fsr.overflow) return 0;
   enum { WMFLAT_SLOTS = 64u };
-  Term subst[WMFLAT_SLOTS];
-  u8   setf[WMFLAT_SLOTS];
+  WmfBind subst[WMFLAT_SLOTS];
+  u8      setf[WMFLAT_SLOTS];
   for (u32 t = 0; t < WMFLAT_SLOTS; t++) setf[t] = 0u;
   u32 counter = 0u;
   if (!atp_wmflat_phase(&fpl, &fsl, subst, setf, &counter, WMFLAT_SLOTS))
@@ -21088,6 +21174,10 @@ static u8 atp_wmflat_mo(Term pl, Term pr, Term sl, Term sr) {
   if (!atp_wmflat_phase(&fpr, &fsr, subst, setf, &counter, WMFLAT_SLOTS))
     return 0;
   return 1;
+}
+
+static u8 atp_wmflat_mo(Term pl, Term pr, Term sl, Term sr) {
+  return atp_wmflat_mo_x(pl, NULL, pr, NULL, sl, NULL, sr, NULL);
 }
 
 // WM SubsumptionBody (Subsumption.c:67) over the counter-cross matcher.  Tries
@@ -21153,6 +21243,21 @@ static u8 atp_wm_flat_subsumes_pair_direct(Term p_lhs, Term p_rhs,
                                            Term lhs, Term rhs) {
   if (atp_wmflat_mo(p_lhs, p_rhs, lhs, rhs)) return 1;
   if (atp_wmflat_mo(p_rhs, p_lhs, lhs, rhs)) return 1;
+  return 0;
+}
+
+// Span-capable sibling: any operand may arrive as a span (mirrors for
+// the subjects, the lazy pair for the patterns); the neutral flats
+// make the verdict representation-blind.
+static u8 atp_wm_flat_subsumes_pair_direct_x(
+    Term p_lhs, const AtpFtCell *p_lhs_ft,
+    Term p_rhs, const AtpFtCell *p_rhs_ft,
+    Term lhs, const AtpFtCell *lhs_ft,
+    Term rhs, const AtpFtCell *rhs_ft) {
+  if (atp_wmflat_mo_x(p_lhs, p_lhs_ft, p_rhs, p_rhs_ft,
+                      lhs, lhs_ft, rhs, rhs_ft)) return 1;
+  if (atp_wmflat_mo_x(p_rhs, p_rhs_ft, p_lhs, p_lhs_ft,
+                      lhs, lhs_ft, rhs, rhs_ft)) return 1;
   return 0;
 }
 
@@ -21504,14 +21609,6 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
   for (u32 i = 0; i < new_i; i++) {
     if (s->r_orient[i]) continue;   // E only (RE_forGleichungenRobust)
     if (s->r_dead[i]) continue;
-#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-    // The wmflat MO walks the subject's Term structure: a lazy slot
-    // materializes here (bounded by the live E-set, which is small)
-    // so a subsumable equation is never silently missed behind its
-    // sentinel.
-    (void)atp_rule_term(s, i, 0u);
-    (void)atp_rule_term(s, i, 1u);
-#endif
     u8 subsumed;
     if (s->use_flat_subsume) {
       // WM GMSubsummierenMitGleichung: DIRECT slot-semantics tries only
@@ -21536,10 +21633,21 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
         // direct tries reject it in both orientations (hand-verified),
         // while OA's two genuine kills and Sheffer's E1/E4 all accept
         // directly in one of the four tries.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        // Subjects flatten from the MIRRORS -- exact for real rows and
+        // the only valid read for lazy sentinels.
+        subsumed = atp_wm_flat_subsumes_pair_direct_x(
+                       new_lhs, NULL, new_rhs, NULL,
+                       s->lhs[i], s->lhs_ft[i], s->rhs[i], s->rhs_ft[i])
+                || atp_wm_flat_subsumes_pair_direct_x(
+                       new_lhs, NULL, new_rhs, NULL,
+                       s->rhs[i], s->rhs_ft[i], s->lhs[i], s->lhs_ft[i]);
+#else
         subsumed = atp_wm_flat_subsumes_pair_direct(new_lhs, new_rhs,
                                                     s->lhs[i], s->rhs[i])
                 || atp_wm_flat_subsumes_pair_direct(new_lhs, new_rhs,
                                                     s->rhs[i], s->lhs[i]);
+#endif
       }
     } else {
       subsumed = atp_eq_subsumes_pair(new_lhs, new_rhs, s->lhs[i], s->rhs[i]);
