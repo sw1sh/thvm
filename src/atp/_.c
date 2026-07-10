@@ -959,18 +959,26 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
       s->r_dead_lhs_save_ft,  cap * sizeof(struct AtpFtCell *));
   struct AtpFtCell **nrsf = (struct AtpFtCell **)realloc(
       s->r_dead_rhs_save_ft,  cap * sizeof(struct AtpFtCell *));
-  if (nlf == NULL || nrf == NULL || nlsf == NULL || nrsf == NULL) {
+  struct AtpFtCell **nsuf = (struct AtpFtCell **)realloc(
+      s->r_dead_subsumer_lhs_ft, cap * sizeof(struct AtpFtCell *));
+  struct AtpFtCell **nsvf = (struct AtpFtCell **)realloc(
+      s->r_dead_subsumer_rhs_ft, cap * sizeof(struct AtpFtCell *));
+  if (nlf == NULL || nrf == NULL || nlsf == NULL || nrsf == NULL ||
+      nsuf == NULL || nsvf == NULL) {
     fprintf(stderr, "atp_ensure_rule_cap: ft realloc to %u rules failed\n",
             cap);
     exit(1);
   }
   s->lhs_ft = nlf; s->rhs_ft = nrf;
   s->r_dead_lhs_save_ft = nlsf; s->r_dead_rhs_save_ft = nrsf;
+  s->r_dead_subsumer_lhs_ft = nsuf; s->r_dead_subsumer_rhs_ft = nsvf;
   for (u32 i = s->r_cap; i < cap; i++) {
     s->lhs_ft[i]             = NULL;
     s->rhs_ft[i]             = NULL;
     s->r_dead_lhs_save_ft[i] = NULL;
     s->r_dead_rhs_save_ft[i] = NULL;
+    s->r_dead_subsumer_lhs_ft[i] = NULL;
+    s->r_dead_subsumer_rhs_ft[i] = NULL;
   }
 #endif
   s->r_cap = cap;
@@ -7316,6 +7324,8 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->rhs_ft);
   free(s->r_dead_lhs_save_ft);
   free(s->r_dead_rhs_save_ft);
+  free(s->r_dead_subsumer_lhs_ft);
+  free(s->r_dead_subsumer_rhs_ft);
 # ifdef THVM_ATPFT_CPQ
   // Stage 7: drop the parallel CP queue array.  The FT spans inside
   // each entry are slab-backed -- ft_destroy below releases the whole
@@ -13249,10 +13259,27 @@ lazy_skip_varnorm: ;
       // (the subsumer is unorientable, stored in one face).
       Term sub_l = s->r_dead_subsumer_lhs[k];
       Term sub_r = s->r_dead_subsumer_rhs[k];
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      const AtpFtCell *sub_lf = s->r_dead_subsumer_lhs_ft[k];
+      const AtpFtCell *sub_rf = s->r_dead_subsumer_rhs_ft[k];
+#endif
       u32 cutoff = ATP_TRACE_NONE;
       for (u32 m = 0; m < s->n_rules; m++) {
         if (s->r_dead[m]) continue;
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        if (sub_lf != NULL && sub_rf != NULL) {
+          // Span-vs-span shape compare (both canonical); the only
+          // valid read when the subsumer was a lazy commit.
+          if (s->lhs_ft[m] != NULL && s->rhs_ft[m] != NULL &&
+              ((ft_eq(s->lhs_ft[m], sub_lf) &&
+                ft_eq(s->rhs_ft[m], sub_rf)) ||
+               (ft_eq(s->lhs_ft[m], sub_rf) &&
+                ft_eq(s->rhs_ft[m], sub_lf)))) {
+            cutoff = s->r_trace[m];
+            break;
+          }
+          continue;
+        }
         if (s->lhs_ft[m] != NULL && s->rhs_ft[m] != NULL) {
           // Exact FT-vs-Term compare -- immune to lazy sentinels in
           // the live slots (subsumer shapes are real Terms).
@@ -13410,10 +13437,8 @@ lazy_skip_varnorm: ;
         // sentinel-check on the ft path matches the Term path.
         s->r_dead_lhs_save_ft[i] = s->lhs_ft[i];
         s->r_dead_rhs_save_ft[i] = s->rhs_ft[i];
-        s->lhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
-                                    dead_sentinel, 0);
-        s->rhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
-                                    dead_sentinel, 0);
+        s->lhs_ft[i] = ftnew_var((AtpFt *)s->ft_arena_ptr, 255u, 0);
+        s->rhs_ft[i] = ftnew_var((AtpFt *)s->ft_arena_ptr, 255u, 0);
 #endif
       }
     }
@@ -14671,6 +14696,7 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
         // legacy env-mask path stays Term-side).
         static int psdiff = -1;
         if (psdiff < 0) psdiff = atp_env_on("THVM_ATP_POPSUB_FT_DIFF");
+        int popsub_ft = -1;           // -1 = gate not evaluated
         u8 ft_drop = 0u;              // 1 = PERMSUB, 2 = SUBSUMED
 #ifdef THVM_ATP_AC
         if (s->use_perm_subsume && g_atp_perm_subsume_mask != 0ull &&
@@ -14687,7 +14713,7 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
 #endif
               ) &&
             thvm_kbo_ft(lf, rf, s->kbo) == KBO_UN &&
-            atp_pop_eq_subsumed_ft(s, lf, rf) == 1) {
+            (popsub_ft = atp_pop_eq_subsumed_ft(s, lf, rf)) == 1) {
           ft_drop = 2u;
         }
         if (ft_drop != 0u) {
@@ -14812,7 +14838,34 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
             getenv("THVM_ATP_FORCE_DEF_ORIENT") == NULL &&
             ft_distinct_var_count(lf, rf) < REWRITE_MAX_VAR) {
           KboCmp loc = thvm_kbo_ft(lf, rf, s->kbo);
-          if (loc == KBO_GT || loc == KBO_LT) {
+          u8 un_lazy = 0u;
+          if (loc == KBO_UN) {
+            // UN (unfailing) lazy ride: every Term reader in the UN
+            // orient arm has a span sibling (lr_sortieren dispatches,
+            // push_rule verdicts off the mirrors, eset patterns +
+            // subjects + subsumer shapes read spans, fvi grounds
+            // spans).  Decline the modes whose readers stay Term-side
+            // (cp-side geometry, comm widening, descent/non-flat
+            // eset) and require the FT pop-subsume gate to have
+            // decided cleanly: verdict 0 (2 = a NULL mirror made it
+            // undecidable; -1 with live E-members = gate skipped).
+            static int eset_descent2 = -1;
+            if (eset_descent2 < 0)
+              eset_descent2 =
+                  getenv("THVM_ATP_ESET_DESCENT") != NULL ? 1 : 0;
+            un_lazy = (u8)(!s->use_cp_side && !s->use_comm_subsume &&
+                           (!s->use_eset_subsume ||
+                            (s->use_flat_subsume && !eset_descent2)) &&
+                           (!s->use_pop_subsume ||
+                            s->n_unorient == 0u || popsub_ft == 0));
+#ifndef THVM_ATP_AC
+            // Non-AC build: a nonzero perm mask keeps the perm gate
+            // Term-side (the FT sibling is compiled out).
+            if (s->use_perm_subsume && g_atp_perm_subsume_mask != 0ull)
+              un_lazy = 0u;
+#endif
+          }
+          if (loc == KBO_GT || loc == KBO_LT || un_lazy) {
             l = term_new(0, TAG_NUM, 0, 0xFA151u);
             r = term_new(0, TAG_NUM, 0, 0xFA152u);
             g_lazy_rule.span_l = lf;
@@ -18653,7 +18706,9 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
       s->lhs_ft[(J) - 1] = s->lhs_ft[(J)];                                    \
       s->rhs_ft[(J) - 1] = s->rhs_ft[(J)];                                    \
       s->r_dead_lhs_save_ft[(J) - 1] = s->r_dead_lhs_save_ft[(J)];            \
-      s->r_dead_rhs_save_ft[(J) - 1] = s->r_dead_rhs_save_ft[(J)];
+      s->r_dead_rhs_save_ft[(J) - 1] = s->r_dead_rhs_save_ft[(J)];            \
+      s->r_dead_subsumer_lhs_ft[(J) - 1] = s->r_dead_subsumer_lhs_ft[(J)];    \
+      s->r_dead_subsumer_rhs_ft[(J) - 1] = s->r_dead_subsumer_rhs_ft[(J)];
 #else
 #  define WM_IR_SHIFT_FT(J) /* no AtpFt mirror */
 #endif
@@ -18995,7 +19050,7 @@ static void thvm_atp_interreduce_full(AtpState *s) {
   if (s == NULL || s->n_rules < 2u) return;
   Term dead_sentinel = term_new(0, TAG_FVR, 255u, 0);
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-  AtpFtCell *sent_ft = ft_from_term(a, dead_sentinel, 0);
+  AtpFtCell *sent_ft = ftnew_var(a, 255u, 0);
   u32 n = s->n_rules;   // snapshot
   for (u32 i = 0; i < n; i++) {
     if (s->r_dead[i]) continue;
@@ -19247,6 +19302,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         s->rhs_ft[j - 1] = s->rhs_ft[j];
         s->r_dead_lhs_save_ft[j - 1] = s->r_dead_lhs_save_ft[j];
         s->r_dead_rhs_save_ft[j - 1] = s->r_dead_rhs_save_ft[j];
+        s->r_dead_subsumer_lhs_ft[j - 1] = s->r_dead_subsumer_lhs_ft[j];
+        s->r_dead_subsumer_rhs_ft[j - 1] = s->r_dead_subsumer_rhs_ft[j];
 #endif
       }
       s->n_rules--;
@@ -19581,6 +19638,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->rhs_ft[k - 1]              = s->rhs_ft[k];
           s->r_dead_lhs_save_ft[k - 1]  = s->r_dead_lhs_save_ft[k];
           s->r_dead_rhs_save_ft[k - 1]  = s->r_dead_rhs_save_ft[k];
+          s->r_dead_subsumer_lhs_ft[k - 1] = s->r_dead_subsumer_lhs_ft[k];
+          s->r_dead_subsumer_rhs_ft[k - 1] = s->r_dead_subsumer_rhs_ft[k];
 #endif
         }
         s->n_rules--;
@@ -19656,6 +19715,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->rhs_ft[k - 1]              = s->rhs_ft[k];
           s->r_dead_lhs_save_ft[k - 1]  = s->r_dead_lhs_save_ft[k];
           s->r_dead_rhs_save_ft[k - 1]  = s->r_dead_rhs_save_ft[k];
+          s->r_dead_subsumer_lhs_ft[k - 1] = s->r_dead_subsumer_lhs_ft[k];
+          s->r_dead_subsumer_rhs_ft[k - 1] = s->r_dead_subsumer_rhs_ft[k];
 #endif
         }
         s->n_rules--;
@@ -21637,10 +21698,10 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
         // Subjects flatten from the MIRRORS -- exact for real rows and
         // the only valid read for lazy sentinels.
         subsumed = atp_wm_flat_subsumes_pair_direct_x(
-                       new_lhs, NULL, new_rhs, NULL,
+                       new_lhs, s->lhs_ft[new_i], new_rhs, s->rhs_ft[new_i],
                        s->lhs[i], s->lhs_ft[i], s->rhs[i], s->rhs_ft[i])
                 || atp_wm_flat_subsumes_pair_direct_x(
-                       new_lhs, NULL, new_rhs, NULL,
+                       new_lhs, s->lhs_ft[new_i], new_rhs, s->rhs_ft[new_i],
                        s->rhs[i], s->rhs_ft[i], s->lhs[i], s->lhs_ft[i]);
 #else
         subsumed = atp_wm_flat_subsumes_pair_direct(new_lhs, new_rhs,
@@ -21677,6 +21738,18 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
     // original batch against this (now-removed) equation.
     s->r_dead_subsumer_lhs[i] = new_lhs;
     s->r_dead_subsumer_rhs[i] = new_rhs;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // Subsumer shape as spans: clones of the new row's mirrors (the
+    // Term pair above may be lazy sentinels; the locate in
+    // atp_push_rule prefers these when present).
+    if (s->lhs_ft[new_i] != NULL && s->rhs_ft[new_i] != NULL) {
+      AtpFt *sra = (AtpFt *)s->ft_arena_ptr;
+      s->r_dead_subsumer_lhs_ft[i] =
+          ft_clone_span(sra, s->lhs_ft[new_i], 0);
+      s->r_dead_subsumer_rhs_ft[i] =
+          ft_clone_span(sra, s->rhs_ft[new_i], 0);
+    }
+#endif
     s->lhs[i] = dead_sentinel;
     s->rhs[i] = dead_sentinel;
     s->r_dead[i] = 1;
@@ -21710,10 +21783,8 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
 #ifdef THVM_ATPFT_RULES
     s->r_dead_lhs_save_ft[i] = s->lhs_ft[i];
     s->r_dead_rhs_save_ft[i] = s->rhs_ft[i];
-    s->lhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
-                                dead_sentinel, 0);
-    s->rhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
-                                dead_sentinel, 0);
+    s->lhs_ft[i] = ftnew_var((AtpFt *)s->ft_arena_ptr, 255u, 0);
+    s->rhs_ft[i] = ftnew_var((AtpFt *)s->ft_arena_ptr, 255u, 0);
 #endif
 #ifdef ATP_RULE_INDEX
     s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
@@ -23013,8 +23084,8 @@ static void atp_bwd_ground_join_walk(AtpState *s, u32 skip_lo, u32 skip_hi) {
 #ifdef THVM_ATPFT_RULES
         s->r_dead_lhs_save_ft[i] = s->lhs_ft[i];
         s->r_dead_rhs_save_ft[i] = s->rhs_ft[i];
-        s->lhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr, dead_sentinel, 0);
-        s->rhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr, dead_sentinel, 0);
+        s->lhs_ft[i] = ftnew_var((AtpFt *)s->ft_arena_ptr, 255u, 0);
+        s->rhs_ft[i] = ftnew_var((AtpFt *)s->ft_arena_ptr, 255u, 0);
 #endif
       }
     }
@@ -26123,6 +26194,68 @@ static Term atp_grounded_instance(AtpState *s, Term t, Term lhs,
 // trace stamp loop at `thvm_atp_step`).
 //
 // Returns 1 when a new rule was pushed, 0 otherwise.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Span grounder: rebuild `t` with every var ABSENT from `keep` swapped
+// for the minimal constant -- through ftnew_* so the GROUND flags fold
+// correctly (an in-place var->const swap would leave stale ancestor
+// flags).  Sets *changed when any swap happened.
+static AtpFtCell *ft_ground_absent_vars(AtpFt *a, const AtpFtCell *t,
+                                        const AtpFtCell *keep, u32 mc,
+                                        u8 *changed) {
+  if ((t->sym & WF_VAR_BIT) != 0u) {
+    u32 id = t->sym & ~WF_VAR_BIT;
+    if (!ft_span_has_var(keep, id)) {
+      *changed = 1u;
+      return ftnew_const(a, mc, 0);
+    }
+    return ftnew_var(a, id, 0);
+  }
+  u32 n = (u32)t->arity;
+  if (n == 0u) return ftnew_const(a, ft_ctr_sym(t), 0);
+  // Term sibling returns the subtree UNCHANGED above REWRITE_MAX_ARITY
+  // (atp_grounded_instance's stack-children cap): clone verbatim, no
+  // grounding below it, no changed mark.
+  if (n > REWRITE_MAX_ARITY) return ft_clone_span(a, t, 0);
+  AtpFtCell *kids[REWRITE_MAX_ARITY];
+  const AtpFtCell *kid = t->next;
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = ft_ground_absent_vars(a, kid, keep, mc, changed);
+    kid = kid->end->next;
+  }
+  return ftnew_ctr(a, ft_ctr_sym(t), (u16)n, kids, 0);
+}
+
+// Span sibling of atp_try_ground_and_push: verdicts off the spans, the
+// commit through a nested lazy bracket (fresh per-push sentinels).
+static u8 atp_try_ground_and_push_ft(AtpState *s, const AtpFtCell *lhs_ft,
+                                     const AtpFtCell *rhs_ft,
+                                     AtpAddedRange *r) {
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  u8 changed = 0u;
+  u32 mc = (u32)term_ext(s->min_const);
+  AtpFtCell *g_rhs = ft_ground_absent_vars(a, rhs_ft, lhs_ft, mc, &changed);
+  if (!changed || thvm_kbo_ft(lhs_ft, g_rhs, s->kbo) != KBO_GT) {
+    ft_free_span(a, g_rhs, g_rhs->end);
+    return 0;
+  }
+  Term sl = term_new(0, TAG_NUM, 0, 0xFA151u);
+  Term sr = term_new(0, TAG_NUM, 0, 0xFA152u);
+  AtpLazyRule saved = g_lazy_rule;
+  g_lazy_rule.span_l = lhs_ft;
+  g_lazy_rule.span_r = g_rhs;
+  g_lazy_rule.sent_l = sl;
+  g_lazy_rule.sent_r = sr;
+  g_lazy_rule.armed  = 1u;
+  u8 pushed = atp_push_rule(s, sl, sr);
+  g_lazy_rule = saved;
+  ft_free_span(a, g_rhs, g_rhs->end);   // mirror adoption cloned it
+  if (!pushed) return 0;
+  r->count++;
+  r->fvi_count++;
+  return 1;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
 static u8 atp_try_ground_and_push(AtpState *s, Term lhs, Term rhs,
                                   AtpAddedRange *r) {
   Term g_rhs = atp_grounded_instance(s, rhs, lhs, s->min_const);
@@ -26149,6 +26282,18 @@ static u8 atp_try_ground_and_push(AtpState *s, Term lhs, Term rhs,
 // slots as TRACE_FVI.
 static void atp_emit_fvi_pair(AtpState *s, Term lhs, Term rhs,
                               AtpAddedRange *r) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  {
+    const AtpFtCell *bl = atp_lazy_span_of(lhs);
+    const AtpFtCell *br = atp_lazy_span_of(rhs);
+    if (bl != NULL && br != NULL) {
+      // Lazy UN commit: both grounded legs off the spans.
+      atp_try_ground_and_push_ft(s, bl, br, r);
+      atp_try_ground_and_push_ft(s, br, bl, r);
+      return;
+    }
+  }
+#endif
   // Principal direction: ground free vars of rhs absent from lhs,
   // emit (lhs -> g_rhs).
   atp_try_ground_and_push(s, lhs, rhs, r);
@@ -26217,6 +26362,17 @@ static int atp_lr_sortieren_rec_ft(const AtpFtCell *lhs,
     rk = rk->end->next;
   }
   return 0;
+}
+
+// Bracket dispatch: verdict off the spans when the operands are lazy
+// sentinels (the orient arm under an armed g_lazy_rule), else the Term
+// recursion.  Handle-identity mapping, so it stays correct after the
+// LRSortieren swap exchanges the two locals.
+static int atp_lr_sortieren_disp(Term lhs, Term rhs) {
+  const AtpFtCell *bl = atp_lazy_span_of(lhs);
+  const AtpFtCell *br = atp_lazy_span_of(rhs);
+  if (bl != NULL && br != NULL) return atp_lr_sortieren_rec_ft(bl, br);
+  return atp_lr_sortieren_rec(lhs, rhs);
 }
 #endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
 
@@ -26358,7 +26514,11 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       // OWN CP batch overlap a different set of redexes, forking the
       // selection sequence.  Canonicalise to WM's side order so the
       // stored E-member -- and its batch -- match.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      if (s->use_lr_sortieren && atp_lr_sortieren_disp(lhs, rhs) > 0) {
+#else
       if (s->use_lr_sortieren && atp_lr_sortieren_rec(lhs, rhs) > 0) {
+#endif
         Term tmp = lhs; lhs = rhs; rhs = tmp;
       }
       // Waldmeister CP-formation side geometry (Unifikation1.c:916-917):
@@ -26412,7 +26572,11 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       if (s->use_emission_order
           && !s->last_cp_wm_side_swapped && !s->use_lr_sortieren
           && s->last_popped_kind == (u8)TRACE_AXIOM
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+          && atp_lr_sortieren_disp(lhs, rhs) > 0) {
+#else
           && atp_lr_sortieren_rec(lhs, rhs) > 0) {
+#endif
         s->last_cp_wm_side_swapped = 1u;
       }
       if (s->last_cp_wm_side_swapped) {

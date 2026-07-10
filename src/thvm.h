@@ -6241,6 +6241,13 @@ typedef struct {
                                      // ft.h at the .c boundary).
   struct AtpFtCell **lhs_ft;
   struct AtpFtCell **rhs_ft;
+  // Subsumer SHAPE spans for the remove-and-re-derive locate: exact
+  // clones of the subsuming equation's mirrors at kill time (a lazy
+  // subsumer's Term slots are sentinels, so the span is the only
+  // faithful shape record; real subsumers store them too, keeping the
+  // locate on one compare path).
+  struct AtpFtCell **r_dead_subsumer_lhs_ft;
+  struct AtpFtCell **r_dead_subsumer_rhs_ft;
   struct AtpFtCell **r_dead_lhs_save_ft;
   struct AtpFtCell **r_dead_rhs_save_ft;
   struct AtpFtCell  *goal_lhs_ft;
