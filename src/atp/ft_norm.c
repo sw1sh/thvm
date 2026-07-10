@@ -1032,6 +1032,16 @@ typedef struct FtDtNode_s {
   u32  n_var_edge; // var/star edges at the front of labels/kids
   u32  leaf_n, leaf_un_n;
   u8   sub_mask;   // classes present in this subtree (1=orient, 2=unorient)
+  // Inline edge mirror (98% of branch visits hit fanout <= 4): when
+  // n_inline != 0 the first n_edge entries of labels4/kids4/kmask4
+  // duplicate the heap arrays, so the query walk never leaves the
+  // node's cache lines.  Refreshed at BOTH mutation sites
+  // (ftdt_edge_get insert, ftdt_edge_mask_or); heap arrays stay the
+  // source of truth.
+  u8   n_inline;
+  u8   kmask4[4];
+  u32  labels4[4];
+  u32  kids4[4];
   u32  cap_edge, leaf_cap, leaf_un_cap;
   u32 *labels;     // edge labels (concrete sym, FTDT_VAR0+k, or FTDT_STAR)
   u32 *kids;       // child node indices, parallel to labels
@@ -1123,10 +1133,29 @@ static u32 ftdt_edge_find(const FtPiIndex *ix, u32 node, u32 label) {
 // OR `bit` into node's parent-side kid_mask mirror for the edge
 // labelled `label` (insert path only -- cold; the query loop reads the
 // mirror instead of the child's node struct).
+// Refresh a node's inline edge mirror from the heap arrays (or clear
+// it past the fanout-4 window).  Insert-path only -- cold.
+static void ftdt_node_pack(FtDtNode *nd) {
+  if (nd->n_edge > 4u) {
+    nd->n_inline = 0u;
+    return;
+  }
+  for (u32 e = 0; e < nd->n_edge; e++) {
+    nd->labels4[e] = nd->labels[e];
+    nd->kids4[e]   = nd->kids[e];
+    nd->kmask4[e]  = nd->kid_mask[e];
+  }
+  nd->n_inline = 1u;
+}
+
 static void ftdt_edge_mask_or(FtPiIndex *ix, u32 node, u32 label, u8 bit) {
   FtDtNode *nd = &ix->dt_nodes[node];
   for (u32 e = 0; e < nd->n_edge; e++) {
-    if (nd->labels[e] == label) { nd->kid_mask[e] |= bit; return; }
+    if (nd->labels[e] == label) {
+      nd->kid_mask[e] |= bit;
+      ftdt_node_pack(nd);
+      return;
+    }
   }
 }
 
@@ -1174,6 +1203,7 @@ static u32 ftdt_edge_get(FtPiIndex *ix, u32 node, u32 label) {
   nd->n_edge++;
   nd->label0 = nd->labels[0];   // keep the header mirror current
   nd->kid0   = nd->kids[0];
+  ftdt_node_pack(nd);
   return child;
 }
 
@@ -1700,7 +1730,7 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
       if (label0 < FTDT_VAR0) {
         // Single concrete edge: lockstep hop (as descend2's chain).
         if ((sc->sym & WF_VAR_BIT) != 0u || label0 != sc->sym) goto out;
-        if ((nd->kid_mask[0] & want) == 0u) {
+        if (((nd->n_inline ? nd->kmask4[0] : nd->kid_mask[0]) & want) == 0u) {
           if (g_ftdt_pd) g_atp_pushn_dt_prune++;
           goto out;
         }
@@ -1718,7 +1748,7 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
         // same edges survive, same candidates in the same order.
         u32 k = label0 - FTDT_VAR0;
         const AtpFtCell *bk = bind[k];
-        if ((nd->kid_mask[0] & want) == 0u) {
+        if (((nd->n_inline ? nd->kmask4[0] : nd->kid_mask[0]) & want) == 0u) {
           if (g_ftdt_pd) g_atp_pushn_dt_prune++;
           goto out;
         }
@@ -1760,6 +1790,9 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
     {
       const AtpFtCell *skip = (sc->end != NULL) ? sc->end->next : d->sc_end;
       u32 nv = nd->n_var_edge;
+      const u32 *lbl = nd->n_inline ? nd->labels4 : nd->labels;
+      const u32 *kds = nd->n_inline ? nd->kids4   : nd->kids;
+      const u8  *kmk = nd->n_inline ? nd->kmask4  : nd->kid_mask;
       if (g_ftdt_pd) {
         g_atp_pushn_dt_edge += nd->n_edge;
         g_atp_pushn_dt_branch++;
@@ -1771,19 +1804,19 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
         ftdt_visit_bump(ix, node);
       }
       for (u32 e = 0; e < nv; e++) {
-        u32 label = nd->labels[e];
+        u32 label = lbl[e];
         if (label == FTDT_STAR) {
-          if ((nd->kid_mask[e] & want) == 0u) {
+          if ((kmk[e] & want) == 0u) {
             if (g_ftdt_pd) g_atp_pushn_dt_prune++;
             continue;
           }
           if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
-          ftdt_descend3(d, nd->kids[e], skip, nbound, 0u);
+          ftdt_descend3(d, kds[e], skip, nbound, 0u);
           continue;
         }
         u32 k = label - FTDT_VAR0;
         const AtpFtCell *bk = bind[k];
-        if ((nd->kid_mask[e] & want) == 0u) {
+        if ((kmk[e] & want) == 0u) {
           if (g_ftdt_pd) g_atp_pushn_dt_prune++;
           continue;
         }
@@ -1807,25 +1840,25 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
         if (bk == NULL) {
           if (g_ftdt_pd) { g_atp_pushn_dt_bind1++; g_ftdt_dp = dp + 1u; }
           bind[k] = sc;
-          ftdt_descend3(d, nd->kids[e], skip,
+          ftdt_descend3(d, kds[e], skip,
                         (k + 1u > nbound) ? k + 1u : nbound, pure);
           bind[k] = NULL;
         } else {
           if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
-          ftdt_descend3(d, nd->kids[e], skip, nbound, pure);
+          ftdt_descend3(d, kds[e], skip, nbound, pure);
         }
       }
       if ((sc->sym & WF_VAR_BIT) == 0u) {
         for (u32 e = nv; e < nd->n_edge; e++) {
-          u32 label = nd->labels[e];
+          u32 label = lbl[e];
           if (g_ftdt_pd) g_atp_pushn_dt_cprobe++;
           if (label < sc->sym) continue;
           if (label == sc->sym) {
-            if ((nd->kid_mask[e] & want) != 0u) {
+            if ((kmk[e] & want) != 0u) {
               // Last exploration step at this node: iterate instead of
               // recursing (descend2 recursed here and then fell out).
               if (g_ftdt_pd) dp++;
-              node = nd->kids[e];
+              node = kds[e];
               nd   = &ix->dt_nodes[node];
               sc   = sc->next;
               goto next_node;
