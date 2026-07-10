@@ -2812,6 +2812,15 @@ typedef struct {
   AtpFtCell *fl, *fr;   // raw pair FT cells; the treatment rewrites
                         // them to the NF cells in place (same stash)
   u32        raw_len;   // renumbered raw pair bytes at g_acp_scratch[0,raw_len)
+                        // (0 = not emitted yet: the raw-pair emit is
+                        // LAZY, run by the trace store for survivors
+                        // only -- a joined CP never pays it)
+  // Lazy-emit operands: the formation faces + the walk subst, all
+  // stable through the one armed push (the subst is the former's
+  // static, reset per attempt; the spans are rule mirrors / the
+  // subject, untouched by the CP's own treatment).
+  const AtpFtCell   *lo, *sub, *rin, *ro;
+  const AtpFtSubst  *subst;
 } VcpTreat;
 #else
 typedef struct {
@@ -3596,19 +3605,14 @@ static u8 vcp_ft_treat_form(AtpState *s, const AtpFtCell *lo_ft,
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
   AcpNvMap m;
   m.n = 0u;
-  u32 raw_len = 0u, nodes = 0u, fpos = 0u;
   // WM side order: sigma(ro) is the pair's LHS (see the classic arm).
-  if (!vcp_ft_emit_side(ro_ft, NULL, NULL, subst, s->kbo, &m,
-                        &raw_len, &nodes, NULL, +1, &fpos)) {
-    return 0u;
-  }
+  // The raw-pair BYTE emit is deferred to the trace store (see
+  // vcp_ft_treat_emit_raw): ~a third of treated CPs join at push and
+  // never consume the bytes.  The builder shares the same appearance-
+  // order var map the emit would use, so the deferred bytes are
+  // byte-identical to the formation-time emit they replace.
   AtpFtCell *fl = vcp_ft_build_cell(a, ro_ft, NULL, NULL, subst, &m, 0u);
   if (fl == NULL) return 0u;
-  if (!vcp_ft_emit_side(lo_ft, sub_ft, rin_ft, subst, s->kbo, &m,
-                        &raw_len, &nodes, NULL, -1, &fpos)) {
-    ft_free_span(a, fl, fl->end);
-    return 0u;
-  }
   const AtpFtCell *at2 = sub_ft;
   AtpFtCell *fr = vcp_ft_build_cell(a, lo_ft, &at2, rin_ft, subst, &m, 0u);
   if (fr == NULL) {
@@ -3618,8 +3622,34 @@ static u8 vcp_ft_treat_form(AtpState *s, const AtpFtCell *lo_ft,
   g_vcp_treat.armed   = 0u;
   g_vcp_treat.fl      = fl;
   g_vcp_treat.fr      = fr;
-  g_vcp_treat.raw_len = raw_len;
+  g_vcp_treat.raw_len = 0u;
+  g_vcp_treat.lo      = lo_ft;
+  g_vcp_treat.sub     = sub_ft;
+  g_vcp_treat.rin     = rin_ft;
+  g_vcp_treat.ro      = ro_ft;
+  g_vcp_treat.subst   = subst;
   return 1u;
+}
+
+// The deferred raw-pair emit: exactly the two vcp_ft_emit_side calls
+// treat_form ran at formation, from the stashed operands + the still-
+// armed walk subst.  Returns the byte length at g_acp_scratch[0,len)
+// or 0 on an emit anomaly (the caller stores the no-pair sentinel;
+// never observed -- the count walk screens the same cliffs).
+static u32 vcp_ft_treat_emit_raw(AtpState *s) {
+  AcpNvMap m;
+  m.n = 0u;
+  u32 raw_len = 0u, nodes = 0u, fpos = 0u;
+  if (!vcp_ft_emit_side(g_vcp_treat.ro, NULL, NULL, g_vcp_treat.subst,
+                        s->kbo, &m, &raw_len, &nodes, NULL, +1, &fpos)) {
+    return 0u;
+  }
+  if (!vcp_ft_emit_side(g_vcp_treat.lo, g_vcp_treat.sub, g_vcp_treat.rin,
+                        g_vcp_treat.subst, s->kbo, &m, &raw_len, &nodes,
+                        NULL, -1, &fpos)) {
+    return 0u;
+  }
+  return raw_len;
 }
 #endif // THVM_ATPFT_NORM
 
@@ -7758,11 +7788,13 @@ static u64 atp_trace_eq_store(AtpState *s, Term lhs, Term rhs) {
       pos = g_vcp_emit.len;
       stored = 1u;
     } else if (g_vcp_treat.armed) {
-      // Treated FT-direct push: the renumbered RAW pair bytes were
-      // emitted at formation (vcp_treat_form) and still sit at
-      // g_acp_scratch[0, raw_len) -- the trace stores the raw pair,
-      // the queue (below) packs the treated NF cells separately.
-      pos = g_vcp_treat.raw_len;
+      // Treated FT-direct push: emit the renumbered RAW pair bytes NOW
+      // (deferred from formation -- only survivors reach this store;
+      // the joined third never pays the emit).  Byte-identical to the
+      // formation-time emit: same operands, same still-armed subst.
+      pos = vcp_ft_treat_emit_raw(s);
+      if (pos == 0u) return 0u;   // emit anomaly: no-pair sentinel
+      g_vcp_treat.raw_len = pos;
       stored = 1u;
     } else {
       // Fused push loop: the raw pair arrives un-renumbered; renumber
