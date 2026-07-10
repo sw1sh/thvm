@@ -22311,9 +22311,22 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
   Term new_lhs = s->lhs[new_i];
   Term new_rhs = s->rhs[new_i];
   Term dead_sentinel = term_new(0, TAG_FVR, 255u, 0);
+  static int eset_mdiff = -1;
+  if (eset_mdiff < 0) eset_mdiff = atp_env_on("THVM_ATP_ESET_MIRROR_DIFF");
   for (u32 i = 0; i < new_i; i++) {
     if (s->r_orient[i]) continue;   // E only (RE_forGleichungenRobust)
     if (s->r_dead[i]) continue;
+    if (eset_mdiff && s->lhs_ft[i] != NULL && s->rhs_ft[i] != NULL) {
+      // Mirror-integrity differ: the subject mirror must still be the
+      // exact image of the (materialized) rule Terms -- a mismatch
+      // means a span-lifetime alias corrupted it (the CPQ hunt).
+      Term dl = atp_rule_term(s, i, 0u);
+      Term dr = atp_rule_term(s, i, 1u);
+      if (!ft_eq_term(s->lhs_ft[i], dl) || !ft_eq_term(s->rhs_ft[i], dr)) {
+        fprintf(stderr, "ESET_MIRROR_DIFF: slot %u mirror != Terms\n", i);
+        abort();
+      }
+    }
     u8 subsumed;
     if (s->use_flat_subsume) {
       // WM GMSubsummierenMitGleichung: DIRECT slot-semantics tries only
