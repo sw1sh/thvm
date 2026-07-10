@@ -16290,6 +16290,11 @@ typedef struct AtpMnf {
   AtpFtCell **nf_span;
   u64   *nf_gen;
   u32   *nf_wm;
+  // Per-node span twin (first MNF_SPAN_NODE_CAP nodes; see
+  // g_mnf_ins_span).  The mode-1 intake aliases these, so the front
+  // search never converts a member.
+  const AtpFtCell **node_span;
+  void  *ft;                 // the owning state's AtpFt arena (frees)
 #endif
   u32      n_pend;
   u8       pend_of;          // overflow: fall back to a full re-sweep
@@ -16379,6 +16384,52 @@ static u32 mnf_lookup_span(const AtpMnf *m, const AtpFtCell *c, u32 h) {
   }
 }
 
+// Node span twins ride only the EARLY nodes -- the interest set is
+// drawn from the members alive at the mode switch (MNF_SWITCH_NF), so
+// spans past this index would never be read and 400k of them would
+// cost real memory.
+#define MNF_SPAN_NODE_CAP 4096u
+
+// Rebuild `c` with the subterm at child-index path p[0..p_len)
+// replaced by `rep` (adopted verbatim) -- the FT sibling of
+// cp_replace_at, through ftnew_* so the GROUND fold and preorder
+// threading come out exactly as a fresh conversion would.
+static AtpFtCell *ft_replace_at_span(AtpFt *a, const AtpFtCell *c,
+                                     const u32 *p, u32 p_len,
+                                     AtpFtCell *rep) {
+  if (p_len == 0u) return rep;
+  u32 n = (u32)c->arity;
+  if (p[0] >= n) return NULL;
+  AtpFtCell *kids_stack[16];
+  AtpFtCell **kids = kids_stack;
+  AtpFtCell **kids_heap = NULL;
+  if (n > 16u) {
+    kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)n);
+    if (kids_heap == NULL) thvm_fatal("ft_replace_at_span: OOM");
+    kids = kids_heap;
+  }
+  const AtpFtCell *k = c->next;
+  u8 fail = 0u;
+  for (u32 i = 0; i < n; i++) {
+    if (i == p[0]) {
+      kids[i] = ft_replace_at_span(a, k, p + 1, p_len - 1, rep);
+      if (kids[i] == NULL) fail = 1u;
+    } else {
+      kids[i] = ft_clone_span(a, k, 0);
+    }
+    k = k->end->next;
+  }
+  AtpFtCell *out = fail ? NULL : ftnew_ctr(a, ft_ctr_sym(c), (u16)n, kids, 0);
+  free(kids_heap);
+  return out;
+}
+
+// Consume-once side-band into mnf_insert (the g_mnf_trace_slot
+// precedent): the candidate's span twin.  Ownership passes to the
+// insert -- adopted by a fresh node under MNF_SPAN_NODE_CAP, freed on
+// every other outcome.
+static const AtpFtCell *g_mnf_ins_span = NULL;
+
 // Mode-1 member INPUT span intake.  A seed member IS one goal side:
 // adopt a clone of its mirror (ft_eq_term-proven, bit-identical to a
 // fresh conversion by the clone contract) instead of converting; the
@@ -16386,6 +16437,10 @@ static u32 mnf_lookup_span(const AtpMnf *m, const AtpFtCell *c, u32 h) {
 static const AtpFtCell *mnf_member_in_span(AtpState *s, const AtpMnf *m,
                                            u32 par) {
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  // Expansion-born members carry a span twin from birth: alias it
+  // (read-only input; the per-check normalize clones it anyway).
+  if (m->node_span != NULL && m->node_span[par] != NULL)
+    return m->node_span[par];
   Term t = m->nodes[par].term;
   const AtpFtCell *cand[2] = { s->goal_lhs_ft, s->goal_rhs_ft };
   for (u32 i = 0; i < 2u; i++) {
@@ -16411,6 +16466,11 @@ static char g_mnf_trace_pos[64] = "-";
 // the term -- the fresh node, or the existing same-colour duplicate.
 static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 gl, u8 antir,
                       u32 parent, u32 *out_idx) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Consume the span side-band exactly once per call.
+  const AtpFtCell *ins_span = g_mnf_ins_span;
+  g_mnf_ins_span = NULL;
+#endif
   u32 h   = mnf_hash(t);
   u32 idx = mnf_lookup(m, t, h);
   u16 tot = (parent == MNF_ROOT_PARENT)
@@ -16418,6 +16478,11 @@ static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 gl, u8 antir,
   if (out_idx != NULL) *out_idx = idx;
   if (idx != MNF_MAX_NODES) {
     if (m->nodes[idx].colour != col) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      if (ins_span != NULL && m->ft != NULL)
+        ft_free_span((AtpFt *)m->ft, (AtpFtCell *)ins_span,
+                     (AtpFtCell *)ins_span->end);
+#endif
       m->meet_a        = idx;
       m->meet_b_parent = parent;
       m->meet_term     = t;
@@ -16436,11 +16501,35 @@ static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 gl, u8 antir,
       m->nodes[idx].parent      = parent;
     }
     m->n_dup++;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (ins_span != NULL && m->ft != NULL)
+      ft_free_span((AtpFt *)m->ft, (AtpFtCell *)ins_span,
+                   (AtpFtCell *)ins_span->end);
+#endif
     return 0;
   }
-  if (m->n_nodes >= MNF_MAX_NODES) { m->full = 1u; return 0; }   // set full
+  if (m->n_nodes >= MNF_MAX_NODES) {
+    m->full = 1u;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (ins_span != NULL && m->ft != NULL)
+      ft_free_span((AtpFt *)m->ft, (AtpFtCell *)ins_span,
+                   (AtpFtCell *)ins_span->end);
+#endif
+    return 0;
+  }
   u32 ni = m->n_nodes++;
   if (out_idx != NULL) *out_idx = ni;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (m->node_span != NULL) {
+    if (ins_span != NULL && ni >= MNF_SPAN_NODE_CAP) {
+      if (m->ft != NULL)
+        ft_free_span((AtpFt *)m->ft, (AtpFtCell *)ins_span,
+                     (AtpFtCell *)ins_span->end);
+      ins_span = NULL;
+    }
+    if (ni < MNF_SPAN_NODE_CAP) m->node_span[ni] = ins_span;
+  }
+#endif
   m->nodes[ni].term        = t;
   m->nodes[ni].hash        = h;
   m->nodes[ni].parent      = (parent == MNF_ROOT_PARENT) ? ni : parent;
@@ -16534,6 +16623,9 @@ typedef struct {
   // Span twins of the fact pair (the pend queue stores mirror
   // pointers; a NULL keeps the Term route).
   const AtpFtCell *fl_ft, *fr_ft;
+  // The expanded node's span twin (NULL past MNF_SPAN_NODE_CAP or on
+  // a twin-less member): candidates then splice their own twins.
+  const AtpFtCell *root_ft;
 #endif
 } MnfExpCtx;
 
@@ -16554,6 +16646,34 @@ static u8 mnf_subst_ground_extras_term(AtpState *s, const AtpFtCell *tmpl,
     if (sub->bindings[id] == 0) sub->bindings[id] = s->min_const;
   }
   return 1u;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Build a candidate's span twin: match the pattern span against the
+// subject cell of the node's twin, instantiate the replacement span
+// under the span bindings (grounding r2 extras when asked), splice at
+// the position.  Every step goes through the ftnew_* constructors, so
+// the twin is bit-identical to converting the candidate Term.  NULL
+// (twin-less) on any missing input -- the intake then falls back.
+static const AtpFtCell *mnf_cand_span(AtpState *s,
+                                      const AtpFtCell *root_ft,
+                                      const u32 *p, u32 p_len,
+                                      const AtpFtCell *pat_ft,
+                                      const AtpFtCell *rep_ft,
+                                      u8 ground_extras) {
+  if (root_ft == NULL || pat_ft == NULL || rep_ft == NULL) return NULL;
+  const AtpFtCell *t_ft = ft_subterm_at(root_ft, p, p_len);
+  if (t_ft == NULL) return NULL;
+  AtpFtSubst fs = {0};
+  if (!ft_match(pat_ft, t_ft, &fs)) return NULL;
+  if (ground_extras && !ft_subst_ground_extras(s, rep_ft, &fs)) return NULL;
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *out = ft_subst_apply(a, rep_ft, &fs, 0);
+  if (out == NULL) return NULL;
+  AtpFtCell *whole = ft_replace_at_span(a, root_ft, p, p_len, out);
+  if (whole == NULL) ft_free_span(a, out, out->end);
+  return whole;
 }
 #endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
 
@@ -16602,6 +16722,9 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
     u32  uid;
     int  slot, face;
     const AtpFtCell *pat;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    const AtpFtCell *whole_ft;   // the candidate's span twin (or NULL)
+#endif
   } cand[MNF_POS_CAND_CAP];
   u32 n_cand = 0u;
   u32 n_iter = c->use_fact ? 1u : (c->rule_hi - c->rule_lo);
@@ -16675,6 +16798,10 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
 #else
           k->pat = NULL;
 #endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+          k->whole_ft =
+              mnf_cand_span(s, c->root_ft, p, p_len, fl_ft, fr_ft, 0u);
+#endif
         }
       }
       if (c->in_sweep && antir_ok && ground && rn <= size &&
@@ -16702,6 +16829,10 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
           k->pat = (slot >= 0) ? s->rhs_ft[slot] : NULL;
 #else
           k->pat = NULL;
+#endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+          k->whole_ft =
+              mnf_cand_span(s, c->root_ft, p, p_len, fr_ft, fl_ft, 0u);
 #endif
         }
       }
@@ -16747,6 +16878,8 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
           k->slot = slot; k->face = (int)face;
           k->uid = (slot >= 0) ? s->r_uid[slot] : 0xFFFFFFFFu;
           k->pat = (slot >= 0) ? pat_ft : NULL;
+          k->whole_ft = mnf_cand_span(s, c->root_ft, p, p_len,
+                                      pat_ft, rep_ft, (u8)!ok);
           continue;
         }
 #endif
@@ -16782,6 +16915,9 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
 #else
         k->pat = NULL;
 #endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        k->whole_ft = NULL;          // mirror-less Term arm: no twin
+#endif
       }
     }
   }
@@ -16809,6 +16945,9 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
   for (u32 a = 0; a < n_cand && !m->joined; a++) {
     if (cand[a].down) m->nodes[c->ni].irred = 0u;
     g_mnf_trace_slot = cand[a].slot; g_mnf_trace_face = cand[a].face;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    g_mnf_ins_span = cand[a].whole_ft;
+#endif
     mnf_insert(m, cand[a].whole, col,
                (u8)(gl + cand[a].gl_inc),
                (u8)(antir + cand[a].antir_inc), c->ni, NULL);
@@ -16826,6 +16965,10 @@ static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
   u32 path[CP_MAX_DEPTH];
   MnfExpCtx c = { s, m, ni, m->nodes[ni].term, rule_lo, rule_hi,
                   in_sweep, 0u, 0u, 0, 0, 0u };
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  c.root_ft = (m->node_span != NULL && ni < MNF_SPAN_NODE_CAP)
+                  ? m->node_span[ni] : NULL;
+#endif
   cp_walk_positions(c.root, path, 0u, CP_MAX_DEPTH, mnf_exp_visit, &c, 0u);
   if (m->joined) return;
   c.pass = 1u;
@@ -16843,6 +16986,8 @@ static void mnf_expand_node_fact(AtpState *s, AtpMnf *m, u32 ni,
   MnfExpCtx c = { s, m, ni, m->nodes[ni].term, 0u, 0u,
                   /*in_sweep=*/1u, 0u, /*use_fact=*/1u, fl, fr, orient };
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  c.root_ft = (m->node_span != NULL && ni < MNF_SPAN_NODE_CAP)
+                  ? m->node_span[ni] : NULL;
   c.fl_ft = fl_ft;
   c.fr_ft = fr_ft;
 #else
@@ -16896,6 +17041,9 @@ static AtpMnf *mnf_create(AtpState *s) {
 
   m->nf_gen     = (u64 *)calloc(m->cap_nodes, sizeof(u64));
   m->nf_wm      = (u32 *)calloc(m->cap_nodes, sizeof(u32));
+  m->node_span  = (const AtpFtCell **)calloc(MNF_SPAN_NODE_CAP,
+                                             sizeof(void *));
+  m->ft         = s->ft_arena_ptr;
 #endif
   m->qred    = (u32 *)calloc(m->q_cap, sizeof(u32));
   m->qgreen  = (u32 *)calloc(m->q_cap, sizeof(u32));
@@ -16926,8 +17074,33 @@ static AtpMnf *mnf_create(AtpState *s) {
   m->n_interest = 0u;
   m->n_pend     = 0u;
   m->pend_of    = 0u;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Seed span twins: adopt goal-mirror clones (ft_eq_term-proven; the
+  // LRSortieren swap above may have crossed the pairing, so each seed
+  // tries both mirrors).  A missing/stale mirror leaves the twin NULL
+  // -- the mode-1 intake then falls back to its own proof-or-convert.
+  {
+    AtpFt *sfa = (AtpFt *)s->ft_arena_ptr;
+    const AtpFtCell *mc[2] = { s->goal_lhs_ft, s->goal_rhs_ft };
+    Term seeds[2] = { gl_seed, gr_seed };
+    const AtpFtCell *seed_ft[2] = { NULL, NULL };
+    for (u32 si = 0; si < 2u; si++) {
+      for (u32 ci = 0; ci < 2u; ci++) {
+        if (mc[ci] != NULL && ft_eq_term(mc[ci], seeds[si])) {
+          seed_ft[si] = ft_clone_span(sfa, mc[ci], 0);
+          break;
+        }
+      }
+    }
+    g_mnf_ins_span = seed_ft[0];
+    mnf_insert(m, gl_seed, MNF_GREEN, 0u, 0u, MNF_ROOT_PARENT, NULL);
+    g_mnf_ins_span = seed_ft[1];
+    mnf_insert(m, gr_seed, MNF_RED,   0u, 0u, MNF_ROOT_PARENT, NULL);
+  }
+#else
   mnf_insert(m, gl_seed, MNF_GREEN, 0u, 0u, MNF_ROOT_PARENT, NULL);
   mnf_insert(m, gr_seed, MNF_RED,   0u, 0u, MNF_ROOT_PARENT, NULL);
+#endif
   return m;
 }
 
@@ -16939,6 +17112,7 @@ static void mnf_destroy(struct AtpMnf *m) {
 
   free(m->nf_gen);
   free(m->nf_wm);
+  free(m->node_span);
 #endif
   free(m->nodes); free(m->qred); free(m->qgreen); free(m->buckets); free(m);
 }
@@ -17266,6 +17440,7 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
       // it (extraction degrades, the verdict does not).
       u32 idx = mnf_lookup_span(m, nfsp, mnf_hash_span(nfsp));
       if (idx != MNF_MAX_NODES && m->nodes[idx].colour != col) {
+        g_mnf_ins_span = ft_clone_span(nfa, nfsp, 0);
         mnf_insert(m, ft_to_term(nfsp), col, m->nodes[par].gl_steps,
                    m->nodes[par].antir_steps, par, NULL);
         break;
@@ -17276,12 +17451,15 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
       for (u32 j = 0; j < n_nf; j++) {
         if (nf_col[j] != col && ft_eq(nf_spanr[j], nfsp)) {
           u32 fidx = MNF_MAX_NODES;
+          g_mnf_ins_span = ft_clone_span(nfa, nf_spanr[j], 0);
           mnf_insert(m, ft_to_term(nf_spanr[j]), nf_col[j],
                      m->nodes[nf_from[j]].gl_steps,
                      m->nodes[nf_from[j]].antir_steps, nf_from[j], &fidx);
-          if (!m->joined)
+          if (!m->joined) {
+            g_mnf_ins_span = ft_clone_span(nfa, nfsp, 0);
             mnf_insert(m, ft_to_term(nfsp), col, m->nodes[par].gl_steps,
                        m->nodes[par].antir_steps, par, NULL);
+          }
           break;
         }
       }
