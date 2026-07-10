@@ -1821,8 +1821,16 @@ static AtpLazyRule g_lazy_rule = {NULL, NULL, 0, 0, 0u};
 static int atp_lazy_rules_on(void) {
   static int on = -1;
   if (on < 0) {
-    on = atp_env_on("THVM_ATP_LAZY_RULE_TERMS") &&
-         atp_env_on("THVM_ATP_TRACE_LEAN_RULES");
+    // Default ON (with the lean rule traces below) -- certified: the
+    // full parity suites pass and the solve trajectories are
+    // byte-identical with the pair active.  "0" on either env is the
+    // one-round kill switch; lazy additionally requires lean (the
+    // sentinel commit needs the off-heap trace pack).
+    const char *lz = getenv("THVM_ATP_LAZY_RULE_TERMS");
+    const char *ln = getenv("THVM_ATP_TRACE_LEAN_RULES");
+    int lazy_ok = (lz == NULL || lz[0] != '0');
+    int lean_ok = (ln == NULL || ln[0] != '0');
+    on = lazy_ok && lean_ok;
   }
   return on;
 }
@@ -7921,7 +7929,11 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
   // order from seq=0 -- may have dissolved now that formation runs on
   // spans (the FT arm); the parity suite under this env is the test.
   static int lean_rules = -1;
-  if (lean_rules < 0) lean_rules = atp_env_on("THVM_ATP_TRACE_LEAN_RULES");
+  if (lean_rules < 0) {
+    // Default ON (see atp_lazy_rules_on); "0" is the kill switch.
+    const char *ln = getenv("THVM_ATP_TRACE_LEAN_RULES");
+    lean_rules = (ln == NULL || ln[0] != '0');
+  }
   if (s->trace_pack && lean_rules) {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
     if (g_trace_eq_ft_l != NULL && g_trace_eq_ft_r != NULL) {
@@ -14702,9 +14714,14 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   if (pop_trace < 0) pop_trace = atp_env_on("THVM_ATP_POP_TRACE");
 #define ATP_POPV(verdict) do { \
     if (pop_trace) { \
+      Term _pl = l, _pr = r; \
+      if (term_tag(_pl) == TAG_NUM && lazy_commit) \
+        _pl = ft_to_term(g_lazy_rule.span_l); \
+      if (term_tag(_pr) == TAG_NUM && lazy_commit) \
+        _pr = ft_to_term(g_lazy_rule.span_r); \
       fprintf(stderr, "POPV pick=%u verdict=%s lhs=", s->cp_select_count, (verdict)); \
-      atp_dbg_print_term(stderr, l); fputs(" rhs=", stderr); \
-      atp_dbg_print_term(stderr, r); fputc('\n', stderr); \
+      atp_dbg_print_term(stderr, _pl); fputs(" rhs=", stderr); \
+      atp_dbg_print_term(stderr, _pr); fputc('\n', stderr); \
     } } while (0)
 
   if (kbo_eq(l, r)) {
