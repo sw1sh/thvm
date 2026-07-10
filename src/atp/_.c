@@ -1948,6 +1948,18 @@ static u32 atp_rule_symbol_count(AtpState *s, u32 i, u8 side) {
 static const AtpFtCell *g_mnf_pend_ft_l = NULL;
 static const AtpFtCell *g_mnf_pend_ft_r = NULL;
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+static u8 atp_order_is_plain_kbo(const AtpState *s);
+#endif
+
+// Requeue bracket: the demote drain parks the victim's (possibly NF)
+// spans here around atp_add_equation_simplified so the enqueue can
+// canonicalize / trace / fused-pack straight from them -- the queued
+// CP is bytes + trace, so no Term ever materializes on the requeue.
+// Read-only for the enqueue (it clones internally); cleared by it.
+static const AtpFtCell *g_enq_ft_l = NULL;
+static const AtpFtCell *g_enq_ft_r = NULL;
+
 // Trace-pack span bracket: the ORIENT/FVI trace loop arms this with
 // the new rule's mirrors so atp_trace_push's lean arm packs the pair
 // from spans (atp_trace_eq_store_ft) instead of walking the (possibly
@@ -8348,6 +8360,90 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
       return 0;
     }
   }
+#endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Span-native requeue (the drain's bracket): canonicalize CLONES of
+  // the parked spans, lean-trace and fused-pack straight from them --
+  // the queued CP is bytes + trace + the armed weigh state, so no Term
+  // materializes.  Conditions mirror the classic path's active gates:
+  // the mask-0 perm drop and the AC soundness gate (both Term-side)
+  // must be off-route, the trace must be packing (lean children), and
+  // the var cliff guards the renumber.  Anything else falls through to
+  // the classic Term arm (the caller decoded real Terms then).
+  const AtpFtCell *enq_l = g_enq_ft_l;
+  const AtpFtCell *enq_r = g_enq_ft_r;
+  g_enq_ft_l = NULL;
+  g_enq_ft_r = NULL;
+  if (enq_l != NULL && enq_r != NULL && atp_lazy_rules_on() &&
+      s->trace_pack && atp_order_is_plain_kbo(s) &&
+      !(s->use_perm_subsume && g_atp_perm_subsume_mask == 0ull &&
+        parent_a != ATP_TRACE_NONE) &&
+      ft_distinct_var_count(enq_l, enq_r) < REWRITE_MAX_VAR) {
+    AtpFt *ea = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *cl = ft_clone_span(ea, enq_l, 0);
+    AtpFtCell *cr = ft_clone_span(ea, enq_r, 0);
+    ft_normalize_vars_pair(cl, cr);
+    // Lean trace: sentinel children; the eq pair packs off the
+    // canonical spans.
+    g_trace_eq_ft_l = cl;
+    g_trace_eq_ft_r = cr;
+    u32 t_idx = atp_trace_push(s, reason, parent_a,
+                               ATP_TRACE_NONE, lhs, rhs);
+    // Fused pack + weigh state from the canonical spans (identity
+    // renumber -- the emit's appearance order IS the canonical order),
+    // then the push's fused arm consumes bytes/counts/weigh with no
+    // Term reads, exactly like the walk former's routed pushes.
+    AcpFuse *fz = &g_acp_fuse;
+    fz->valid   = 0u;
+    fz->map.n   = 0u;
+    fz->phidiff = 0;
+    u32 pos = 0u, nodes = 0u, fpos = 0u;
+    u8 ok = vcp_ft_emit_side(cl, NULL, NULL, NULL, s->kbo, &fz->map,
+                             &pos, &nodes, fz, +1, &fpos);
+    u32 lhs_nodes_ft = nodes, flh = fpos;
+    if (ok) {
+      ok = vcp_ft_emit_side(cr, NULL, NULL, NULL, s->kbo, &fz->map,
+                            &pos, &nodes, fz, -1, &fpos);
+    }
+    if (ok) {
+      fz->fl_n  = flh;
+      fz->fr_n  = fpos - flh;
+      fz->valid = 1u;
+      g_vcp_emit.len       = pos;
+      g_vcp_emit.nodes     = nodes;
+      g_vcp_emit.lhs_nodes = lhs_nodes_ft;
+      g_vcp_emit.armed     = 1u;
+      u8 saved_fused = g_cp_push_fused;
+      g_cp_push_fused = 1u;
+      u8 is_ult = (reason == TRACE_AXIOM && parent_a == ATP_TRACE_NONE)
+                      ? 1u : 0u;
+      g_cp_push_kind = (u8)reason;
+      atp_cp_heap_push(s, 0, 0, t_idx, is_ult, enq_raw);
+      g_cp_push_kind  = (u8)TRACE_CP;
+      g_cp_push_fused = saved_fused;
+      g_vcp_emit.armed = 0u;
+      g_acp_fuse.valid = 0u;
+      return 1;
+    }
+    // Emit anomaly: fall through to the classic arm with REAL Terms --
+    // decode from the parked spans (the caller may have sent
+    // sentinels).
+    g_acp_fuse.valid = 0u;
+    if (term_tag(lhs) == TAG_NUM) lhs = ft_to_term(enq_l);
+    if (term_tag(rhs) == TAG_NUM) rhs = ft_to_term(enq_r);
+#ifdef ATP_VAR_NORM
+    thvm_normalize_vars(&lhs, &rhs);
+#endif
+    // trace already pushed (t_idx) -- reuse it for the classic push.
+    u8 is_ult2 = (reason == TRACE_AXIOM && parent_a == ATP_TRACE_NONE)
+                     ? 1u : 0u;
+    g_cp_push_kind = (u8)reason;
+    atp_cp_heap_push(s, lhs, rhs, t_idx, is_ult2, enq_raw);
+    g_cp_push_kind = (u8)TRACE_CP;
+    return 1;
+  }
+  if (enq_l != NULL && term_tag(lhs) == TAG_NUM) lhs = ft_to_term(enq_l);
+  if (enq_r != NULL && term_tag(rhs) == TAG_NUM) rhs = ft_to_term(enq_r);
 #endif
   u32 trace_idx = atp_trace_push(s, reason, parent_a,
                                  ATP_TRACE_NONE, lhs, rhs);
@@ -19705,15 +19801,12 @@ static void atp_wm_demote_drain(AtpState *s) {
             s->n_wm_demote_joined++;
             continue;
           }
-          // Requeue: an NF-unchanged side reuses the buffered Term when
-          // real, else decodes the pristine clone; a changed side
-          // decodes the NF.
-          l = ft_eq(lf, vfl)
-                  ? ((term_tag(l) == TAG_NUM) ? ft_to_term(vfl) : l)
-                  : ft_to_term(lf);
-          r = ft_eq(rf, vfr)
-                  ? ((term_tag(r) == TAG_NUM) ? ft_to_term(vfr) : r)
-                  : ft_to_term(rf);
+          // Requeue: park the NF spans for the span-native enqueue --
+          // no decode here; the enqueue's fallback decodes from the
+          // parked spans if its fused arm declines.  The buffered
+          // Terms ride as-is (possibly sentinels).
+          g_enq_ft_l = lf;
+          g_enq_ft_r = rf;
           ft_free_span(va_, vfl, vfl->end);
           ft_free_span(va_, vfr, vfr->end);
           s->irv_lhs_ft[v] = NULL;
@@ -19744,20 +19837,13 @@ static void atp_wm_demote_drain(AtpState *s) {
       }
     }
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-    // Raw-class / record-path victims never touched their captured
-    // spans: a sentinel victim decodes its requeue pair from the
-    // pristine clones first (the enqueue below packs the Terms), then
-    // the spans go back to the free list.
-    if (s->irv_lhs_ft[v] != NULL) {
-      if (term_tag(l) == TAG_NUM) l = ft_to_term(s->irv_lhs_ft[v]);
-      ft_free_span((AtpFt *)s->ft_arena_ptr, s->irv_lhs_ft[v],
-                   s->irv_lhs_ft[v]->end);
+    // Raw-class / record-path victims: park the pristine clones for
+    // the span-native enqueue (ownership transfers; the enqueue's
+    // fallback decodes from them when its fused arm declines).
+    if (s->irv_lhs_ft[v] != NULL && s->irv_rhs_ft[v] != NULL) {
+      g_enq_ft_l = s->irv_lhs_ft[v];
+      g_enq_ft_r = s->irv_rhs_ft[v];
       s->irv_lhs_ft[v] = NULL;
-    }
-    if (s->irv_rhs_ft[v] != NULL) {
-      if (term_tag(r) == TAG_NUM) r = ft_to_term(s->irv_rhs_ft[v]);
-      ft_free_span((AtpFt *)s->ft_arena_ptr, s->irv_rhs_ft[v],
-                   s->irv_rhs_ft[v]->end);
       s->irv_rhs_ft[v] = NULL;
     }
 #endif
