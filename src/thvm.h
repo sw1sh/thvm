@@ -5045,6 +5045,16 @@ typedef struct {
   // heuristics never affect soundness, so steering by one goal at a
   // time is sound.
   Term *goals_lhs;
+#ifdef THVM_ATPFT_RULES
+  // Per-conjunct FT mirrors + NF decode caches (the multi-goal twin of
+  // goal_lhs_ft / goal_nf_ft_l): the conjunct loop's checks clone the
+  // mirror instead of re-encoding the pair per check, and reuse the
+  // previous NF Term when the span content is unchanged.
+  struct AtpFtCell **goals_lhs_ft;
+  struct AtpFtCell **goals_rhs_ft;
+  struct AtpFtCell **goals_nf_ft_l;
+  struct AtpFtCell **goals_nf_ft_r;
+#endif
   Term *goals_rhs;
   Term *goals_lhs_nf;
   Term *goals_rhs_nf;

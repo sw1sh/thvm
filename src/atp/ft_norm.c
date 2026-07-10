@@ -1983,6 +1983,9 @@ void atp_ftdt_hot_dump(void) {
 // flip changes the "is this subtree normal" verdict function, so all
 // memo entries die with the generation).
 static u64 g_ftnfm_gen = 1u;
+// Public read for the incremental-NF caches outside this TU section
+// (the MNF member-NF cache keys its validity on it).
+static u64 atp_ftnfm_gen(void) { return g_ftnfm_gen; }
 
 static void ftnfm_bump_gen(void) { g_ftnfm_gen++; }
 

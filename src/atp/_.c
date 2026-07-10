@@ -8487,6 +8487,12 @@ static void atp_goals_release(AtpState *s) {
   free(s->goals_rhs);    s->goals_rhs    = NULL;
   free(s->goals_lhs_nf); s->goals_lhs_nf = NULL;
   free(s->goals_rhs_nf); s->goals_rhs_nf = NULL;
+#ifdef THVM_ATPFT_RULES
+  free(s->goals_lhs_ft);  s->goals_lhs_ft  = NULL;
+  free(s->goals_rhs_ft);  s->goals_rhs_ft  = NULL;
+  free(s->goals_nf_ft_l); s->goals_nf_ft_l = NULL;
+  free(s->goals_nf_ft_r); s->goals_nf_ft_r = NULL;
+#endif
   s->n_goals = 0;
   s->goals_joined_mask = 0;
 }
@@ -8542,6 +8548,12 @@ fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
   s->goals_rhs    = (Term *)malloc((size_t)n * sizeof(Term));
   s->goals_lhs_nf = (Term *)calloc(n, sizeof(Term));
   s->goals_rhs_nf = (Term *)calloc(n, sizeof(Term));
+#ifdef THVM_ATPFT_RULES
+  s->goals_lhs_ft  = (struct AtpFtCell **)calloc(n, sizeof(void *));
+  s->goals_rhs_ft  = (struct AtpFtCell **)calloc(n, sizeof(void *));
+  s->goals_nf_ft_l = (struct AtpFtCell **)calloc(n, sizeof(void *));
+  s->goals_nf_ft_r = (struct AtpFtCell **)calloc(n, sizeof(void *));
+#endif
   if (s->goals_lhs == NULL || s->goals_rhs == NULL ||
       s->goals_lhs_nf == NULL || s->goals_rhs_nf == NULL) {
     atp_goals_release(s);
@@ -8549,6 +8561,14 @@ fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
   }
   for (u32 g = 0; g < n; g++) {
     s->goals_lhs[g] = lhs[g];
+#ifdef THVM_ATPFT_RULES
+    if (s->goals_lhs_ft != NULL && s->ft_arena_ptr != NULL) {
+      s->goals_lhs_ft[g] =
+          ft_from_term((AtpFt *)s->ft_arena_ptr, lhs[g], 0);
+      s->goals_rhs_ft[g] =
+          ft_from_term((AtpFt *)s->ft_arena_ptr, rhs[g], 0);
+    }
+#endif
     s->goals_rhs[g] = rhs[g];
   }
   s->n_goals = n;
@@ -16088,6 +16108,17 @@ typedef struct AtpMnf {
   // sentinels (never walked).
   const AtpFtCell *pend_l_ft[256];
   const AtpFtCell *pend_r_ft[256];
+  // Mode-1 incremental member-NF cache: per interesting node, the
+  // INPUT span (built once), the last NF span + Term, and the
+  // (generation, rule watermark) it was computed at.  A check reuses
+  // the NF while the ftnfm generation is unchanged and no delta rule
+  // [wm, n_rules) fires on the NF span (the interreduce-probe trick);
+  // only a real NF change renormalizes and decodes.
+  const AtpFtCell **nf_in_span;
+  AtpFtCell **nf_span;
+  Term  *nf_term;
+  u64   *nf_gen;
+  u32   *nf_wm;
 #endif
   u32      n_pend;
   u8       pend_of;          // overflow: fall back to a full re-sweep
@@ -16594,6 +16625,13 @@ static AtpMnf *mnf_create(AtpState *s) {
   m->q_cap     = MNF_MAX_NODES;
   m->n_buckets = MNF_N_BUCKETS;
   m->nodes   = (MnfNode *)calloc(m->cap_nodes, sizeof(MnfNode));
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  m->nf_in_span = (const AtpFtCell **)calloc(m->cap_nodes, sizeof(void *));
+  m->nf_span    = (AtpFtCell **)calloc(m->cap_nodes, sizeof(void *));
+  m->nf_term    = (Term *)calloc(m->cap_nodes, sizeof(Term));
+  m->nf_gen     = (u64 *)calloc(m->cap_nodes, sizeof(u64));
+  m->nf_wm      = (u32 *)calloc(m->cap_nodes, sizeof(u32));
+#endif
   m->qred    = (u32 *)calloc(m->q_cap, sizeof(u32));
   m->qgreen  = (u32 *)calloc(m->q_cap, sizeof(u32));
   m->buckets = (u32 *)calloc(m->n_buckets, sizeof(u32));
@@ -16630,6 +16668,13 @@ static AtpMnf *mnf_create(AtpState *s) {
 
 static void mnf_destroy(struct AtpMnf *m) {
   if (m == NULL) return;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  free(m->nf_in_span);
+  free(m->nf_span);
+  free(m->nf_term);
+  free(m->nf_gen);
+  free(m->nf_wm);
+#endif
   free(m->nodes); free(m->qred); free(m->qgreen); free(m->buckets); free(m);
 }
 
@@ -16637,7 +16682,12 @@ static void mnf_destroy(struct AtpMnf *m) {
 // them for thvm_atp_gc_collect and write the relocated terms back; the
 // hash table (structural hashes, node indices) is GC-invariant.
 static u32 mnf_gc_count(struct AtpMnf *m) {
-  return (m == NULL) ? 0u : (m->n_nodes + 2u * m->n_pend);
+  if (m == NULL) return 0u;
+  u32 n = m->n_nodes + 2u * m->n_pend;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (m->nf_term != NULL) n += m->n_nodes;   // the member-NF cache
+#endif
+  return n;
 }
 static void mnf_gc_gather(struct AtpMnf *m, Term *roots, u32 *w) {
   if (m == NULL) return;
@@ -16646,6 +16696,12 @@ static void mnf_gc_gather(struct AtpMnf *m, Term *roots, u32 *w) {
     roots[(*w)++] = m->pend_l[i];
     roots[(*w)++] = m->pend_r[i];
   }
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // The member-NF cache's decoded Terms are live across checks.
+  if (m->nf_term != NULL) {
+    for (u32 i = 0; i < m->n_nodes; i++) roots[(*w)++] = m->nf_term[i];
+  }
+#endif
 }
 static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base) {
   if (m == NULL) return;
@@ -16655,6 +16711,11 @@ static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base) {
     m->pend_l[i] = roots[w++];
     m->pend_r[i] = roots[w++];
   }
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (m->nf_term != NULL) {
+    for (u32 i = 0; i < m->n_nodes; i++) m->nf_term[i] = roots[w++];
+  }
+#endif
 }
 
 // Take a node from a colour's worklist.  WM's PQ default discipline is
@@ -16901,7 +16962,42 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
     for (u32 k = 0; k < m->n_interest && !m->joined; k++) {
       u32 par = m->interest[k];
       u8  col = m->nodes[par].colour;
-      Term nf = mnf_norm_steps(s, m->nodes[par].term, 4096u);
+      Term nf;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      // Incremental member NF: reuse while the ftnfm generation holds
+      // and no delta rule fires on the cached NF span; renormalize the
+      // cached INPUT span (built once per member) only on a hit, and
+      // decode only when the NF genuinely changed.
+      atp_ft_mirror_ensure(s);
+      AtpFt *nfa = (AtpFt *)s->ft_arena_ptr;
+      if (m->nf_term[par] != 0 && m->nf_span[par] != NULL &&
+          m->nf_gen[par] == atp_ftnfm_gen() &&
+          (m->nf_wm[par] == s->n_rules ||
+           !atp_ft_slice_fires(s, m->nf_span[par], m->nf_wm[par],
+                               s->n_rules - m->nf_wm[par]))) {
+        m->nf_wm[par] = s->n_rules;
+        nf = m->nf_term[par];
+      } else {
+        if (m->nf_in_span[par] == NULL) {
+          m->nf_in_span[par] =
+              ft_from_term(nfa, m->nodes[par].term, 0);
+        }
+        AtpFtCell *nfs = atp_rewrite_normalize_ft(
+            s, ft_clone_span(nfa, m->nf_in_span[par], 0), 4096u);
+        if (m->nf_span[par] != NULL && ft_eq(nfs, m->nf_span[par]) &&
+            m->nf_term[par] != 0) {
+          nf = m->nf_term[par];       // same NF content: reuse the Term
+        } else {
+          nf = ft_to_term(nfs);
+        }
+        m->nf_span[par] = nfs;
+        m->nf_term[par] = nf;
+        m->nf_gen[par]  = atp_ftnfm_gen();
+        m->nf_wm[par]   = s->n_rules;
+      }
+#else
+      nf = mnf_norm_steps(s, m->nodes[par].term, 4096u);
+#endif
       {
         static int mt = -1;
         if (mt < 0) mt = getenv("THVM_ATP_MNF_NF_TRACE") != NULL ? 1 : 0;
@@ -17338,16 +17434,40 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
   {
     atp_ft_mirror_ensure(s);
     AtpFt *gft = (AtpFt *)s->ft_arena_ptr;
-    // The aliased goal keeps a live FT mirror (goal_lhs_ft/goal_rhs_ft,
-    // maintained at set_goal / alias moves).  The normalize below is
-    // destructive, so hand it a CLONE of the mirror -- bit-identical to
-    // the ft_from_term re-encode it replaces, with no Term hop.  A
-    // non-aliased conjunct (multi-goal loop) has no mirror: re-encode.
-    u8 gl_mir = (u8)(gl == s->goal_lhs && gr == s->goal_rhs &&
-                     s->goal_lhs_ft != NULL && s->goal_rhs_ft != NULL);
-    AtpFtCell *fl_in = gl_mir ? ft_clone_span(gft, s->goal_lhs_ft, 0)
+    // Locate the pair's mirror + NF-cache slots: the aliased goal or a
+    // conjunct (both keep live FT mirrors; the normalize below is
+    // destructive, so it gets a CLONE -- bit-identical to the
+    // ft_from_term re-encode it replaces).  An unmirrored pair
+    // re-encodes.
+    const AtpFtCell *mir_l = NULL, *mir_r = NULL;
+    struct AtpFtCell **cache_l = NULL, **cache_r = NULL;
+    Term prev_nf_l = 0, prev_nf_r = 0;
+    if (gl == s->goal_lhs && gr == s->goal_rhs &&
+        s->goal_lhs_ft != NULL && s->goal_rhs_ft != NULL) {
+      mir_l = s->goal_lhs_ft;
+      mir_r = s->goal_rhs_ft;
+      cache_l = (struct AtpFtCell **)&s->goal_nf_ft_l;
+      cache_r = (struct AtpFtCell **)&s->goal_nf_ft_r;
+      prev_nf_l = s->goal_lhs_nf;
+      prev_nf_r = s->goal_rhs_nf;
+    } else if (s->goals_lhs_ft != NULL) {
+      for (u32 gi = 0; gi < s->n_goals; gi++) {
+        if (gl == s->goals_lhs[gi] && gr == s->goals_rhs[gi] &&
+            s->goals_lhs_ft[gi] != NULL && s->goals_rhs_ft[gi] != NULL) {
+          mir_l = s->goals_lhs_ft[gi];
+          mir_r = s->goals_rhs_ft[gi];
+          cache_l = (struct AtpFtCell **)&s->goals_nf_ft_l[gi];
+          cache_r = (struct AtpFtCell **)&s->goals_nf_ft_r[gi];
+          prev_nf_l = s->goals_lhs_nf[gi];
+          prev_nf_r = s->goals_rhs_nf[gi];
+          break;
+        }
+      }
+    }
+    u8 gl_mir = (u8)(mir_l != NULL && mir_r != NULL);
+    AtpFtCell *fl_in = gl_mir ? ft_clone_span(gft, mir_l, 0)
                               : ft_from_term(gft, gl, 0);
-    AtpFtCell *fr_in = gl_mir ? ft_clone_span(gft, s->goal_rhs_ft, 0)
+    AtpFtCell *fr_in = gl_mir ? ft_clone_span(gft, mir_r, 0)
                               : ft_from_term(gft, gr, 0);
     // THVM_ATP_GOAL_NF_DEBUG scoping (see ft_norm.c g_goalnf_active):
     // tag the two goal walks 1/2 so the [mixstep] tracer separates the
@@ -17364,19 +17484,19 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
     // after the last call -- the pairing invariant).  Scoped to the
     // aliased goal (gl_mir); conjunct-loop calls neither read nor
     // refresh it.
-    if (gl_mir && s->goal_nf_ft_l != NULL && s->goal_lhs_nf != 0 &&
-        ft_eq(fl, s->goal_nf_ft_l)) {
-      l = s->goal_lhs_nf;
+    if (gl_mir && *cache_l != NULL && prev_nf_l != 0 &&
+        ft_eq(fl, *cache_l)) {
+      l = prev_nf_l;
     } else {
       l = ft_to_term(fl);
-      if (gl_mir) s->goal_nf_ft_l = fl;
+      if (gl_mir) *cache_l = fl;
     }
-    if (gl_mir && s->goal_nf_ft_r != NULL && s->goal_rhs_nf != 0 &&
-        ft_eq(fr, s->goal_nf_ft_r)) {
-      r = s->goal_rhs_nf;
+    if (gl_mir && *cache_r != NULL && prev_nf_r != 0 &&
+        ft_eq(fr, *cache_r)) {
+      r = prev_nf_r;
     } else {
       r = ft_to_term(fr);
-      if (gl_mir) s->goal_nf_ft_r = fr;
+      if (gl_mir) *cache_r = fr;
     }
     if (getenv("THVM_ATP_GOAL_NF_DEBUG")) {
       char lb[512], rb[512];
@@ -17417,8 +17537,14 @@ static void atp_goals_alias(AtpState *s, u32 g) {
   s->goal_rhs_nf = s->goals_rhs_nf[g];
   if (!moved) return;
 #ifdef THVM_ATPFT_RULES
-  s->goal_lhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, s->goal_lhs, 0);
-  s->goal_rhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, s->goal_rhs, 0);
+  // Alias the conjunct's mirror (built at set_goals) -- no re-encode.
+  if (s->goals_lhs_ft != NULL && s->goals_lhs_ft[g] != NULL) {
+    s->goal_lhs_ft = (struct AtpFtCell *)s->goals_lhs_ft[g];
+    s->goal_rhs_ft = (struct AtpFtCell *)s->goals_rhs_ft[g];
+  } else {
+    s->goal_lhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, s->goal_lhs, 0);
+    s->goal_rhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, s->goal_rhs, 0);
+  }
   s->goal_nf_ft_l = NULL;
   s->goal_nf_ft_r = NULL;
 #endif
