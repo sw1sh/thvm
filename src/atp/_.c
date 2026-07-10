@@ -16288,7 +16288,6 @@ typedef struct AtpMnf {
   // only a real NF change renormalizes and decodes.
   const AtpFtCell **nf_in_span;
   AtpFtCell **nf_span;
-  Term  *nf_term;
   u64   *nf_gen;
   u32   *nf_wm;
 #endif
@@ -16348,6 +16347,54 @@ static u32 mnf_lookup(const AtpMnf *m, Term t, u32 h) {
     if (m->nodes[idx].hash == h && kbo_eq(m->nodes[idx].term, t)) return idx;
   }
 }
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Span sibling of mnf_hash: IDENTICAL values for equal content (the
+// span-keyed mode-1 lookup depends on it; CTR sym == term_ext, var id
+// == term_ext, arity == term_ctr_n by the ft encoding contract; NUM
+// markers never appear in member NFs).
+static u32 mnf_hash_span(const AtpFtCell *c) {
+  if ((c->sym & WF_VAR_BIT) != 0u)
+    return (0x2545f491u ^ (c->sym & ~WF_VAR_BIT)) * 0x01000193u;
+  u32 h = 0x811c9dc5u ^ (ft_ctr_sym(c) * 0x01000193u);
+  u32 n = (u32)c->arity;
+  const AtpFtCell *k = c->next;
+  for (u32 i = 0; i < n; i++) {
+    h = (h ^ mnf_hash_span(k)) * 0x01000193u;
+    k = k->end->next;
+  }
+  return h ^ (n + 0x9e3779b9u);
+}
+
+// Span-subject lookup: same probe sequence as mnf_lookup, the exact
+// FT-vs-Term compare against the node terms.
+static u32 mnf_lookup_span(const AtpMnf *m, const AtpFtCell *c, u32 h) {
+  u32 mask = m->n_buckets - 1u;
+  for (u32 probe = h & mask; ; probe = (probe + 1u) & mask) {
+    u32 slot = m->buckets[probe];
+    if (slot == 0u) return MNF_MAX_NODES;
+    u32 idx = slot - 1u;
+    if (m->nodes[idx].hash == h && ft_eq_term(c, m->nodes[idx].term))
+      return idx;
+  }
+}
+
+// Mode-1 member INPUT span intake.  A seed member IS one goal side:
+// adopt a clone of its mirror (ft_eq_term-proven, bit-identical to a
+// fresh conversion by the clone contract) instead of converting; the
+// mid-front irreducibles fall back to the one-time conversion.
+static const AtpFtCell *mnf_member_in_span(AtpState *s, const AtpMnf *m,
+                                           u32 par) {
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  Term t = m->nodes[par].term;
+  const AtpFtCell *cand[2] = { s->goal_lhs_ft, s->goal_rhs_ft };
+  for (u32 i = 0; i < 2u; i++) {
+    if (cand[i] != NULL && ft_eq_term(cand[i], t))
+      return ft_clone_span(a, cand[i], 0);
+  }
+  return ft_from_term(a, t, 0);
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
 
 // THVM_ATP_MNF_TRACE side-band: the creating step's fact slot, face
 // (0 = lhs->rhs), and redex position, set by mnf_exp_visit right
@@ -16489,6 +16536,26 @@ typedef struct {
   const AtpFtCell *fl_ft, *fr_ft;
 #endif
 } MnfExpCtx;
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Term-side extras grounding for the unorientable r2 face: bind every
+// template variable the match left unbound to the minimal constant.
+// Applying the subst to the template is then exactly applying
+// atp_unorient_template's grounded template -- without materializing
+// it.  Returns 0 when a template var is outside the subst address
+// space (mirrors ft_subst_ground_extras's ATPFT_MAX_VARS guard).
+static u8 mnf_subst_ground_extras_term(AtpState *s, const AtpFtCell *tmpl,
+                                       RewriteSubst *sub) {
+  const AtpFtCell *e = (tmpl->end != NULL) ? tmpl->end->next : NULL;
+  for (const AtpFtCell *q = tmpl; q != e; q = q->next) {
+    if ((q->sym & WF_VAR_BIT) == 0u) continue;
+    u32 id = q->sym & ~WF_VAR_BIT;
+    if (id >= REWRITE_MAX_VAR) return 0u;
+    if (sub->bindings[id] == 0) sub->bindings[id] = s->min_const;
+  }
+  return 1u;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
 
 static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
   MnfExpCtx *c = (MnfExpCtx *)raw;
@@ -16641,11 +16708,11 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
     } else {
       if (orient) continue;
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-      // The grounded-template machinery (atp_unorient_template) stays
-      // Term-side: a lazy unorientable slot materializes here (rare --
-      // the lazy commit declines KBO_UN, so these rows arrive only via
-      // the classic path or later composition).
-      if (slot >= 0 &&
+      // A lazy unorientable slot stays a sentinel: the span arm below
+      // matches and instantiates off the mirrors, grounding the r2
+      // extras through the subst.  Materialize only when a mirror is
+      // missing (harness rows), where the Term arm still runs.
+      if (slot >= 0 && (fl_ft == NULL || fr_ft == NULL) &&
           (term_tag(fl) == TAG_NUM || term_tag(fr) == TAG_NUM)) {
         fl = atp_rule_term(s, (u32)slot, 0u);
         fr = atp_rule_term(s, (u32)slot, 1u);
@@ -16657,6 +16724,32 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
         u8   ok  = face ? vc : vfwd;
         u32  psz = face ? rn : ln;
         if (psz > size) continue;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        if (fl_ft != NULL && fr_ft != NULL) {
+          const AtpFtCell *pat_ft = face ? fr_ft : fl_ft;
+          const AtpFtCell *rep_ft = face ? fl_ft : fr_ft;
+          if (!ok && (s->wpo != NULL || s->rpo != NULL))
+            continue;                  // no ground-total order: no r2
+          RewriteSubst sub = {{0}};
+          if (!ft_match_term(pat_ft, t, &sub)) continue;
+          if (!ok && !mnf_subst_ground_extras_term(s, rep_ft, &sub))
+            continue;
+          Term out = ft_subst_apply_term(rep_ft, &sub);
+          KboCmp cmp = thvm_kbo(t, out, s->kbo);
+          u8 up;
+          if (cmp == KBO_GT) up = 0u;
+          else if (cmp == KBO_LT && gl_ok) up = 1u;
+          else continue;               // Gleich/Unvergleichbar/over-budget
+          if (n_cand >= MNF_POS_CAND_CAP) break;
+          struct MnfPosCand *k = &cand[n_cand++];
+          k->whole = cp_replace_at(c->root, p, p_len, out);
+          k->gl_inc = up; k->antir_inc = 0u; k->down = (u8)!up;
+          k->slot = slot; k->face = (int)face;
+          k->uid = (slot >= 0) ? s->r_uid[slot] : 0xFFFFFFFFu;
+          k->pat = (slot >= 0) ? pat_ft : NULL;
+          continue;
+        }
+#endif
         // WM r2 (RechtsUnfreiErzeugen, RUndEVerwaltung.c:391-430): a
         // face whose replacement has variables outside the matched side
         // is applied with those variables GROUNDED to the minimal
@@ -16800,7 +16893,7 @@ static AtpMnf *mnf_create(AtpState *s) {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
   m->nf_in_span = (const AtpFtCell **)calloc(m->cap_nodes, sizeof(void *));
   m->nf_span    = (AtpFtCell **)calloc(m->cap_nodes, sizeof(void *));
-  m->nf_term    = (Term *)calloc(m->cap_nodes, sizeof(Term));
+
   m->nf_gen     = (u64 *)calloc(m->cap_nodes, sizeof(u64));
   m->nf_wm      = (u32 *)calloc(m->cap_nodes, sizeof(u32));
 #endif
@@ -16843,7 +16936,7 @@ static void mnf_destroy(struct AtpMnf *m) {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
   free(m->nf_in_span);
   free(m->nf_span);
-  free(m->nf_term);
+
   free(m->nf_gen);
   free(m->nf_wm);
 #endif
@@ -16855,11 +16948,7 @@ static void mnf_destroy(struct AtpMnf *m) {
 // hash table (structural hashes, node indices) is GC-invariant.
 static u32 mnf_gc_count(struct AtpMnf *m) {
   if (m == NULL) return 0u;
-  u32 n = m->n_nodes + 2u * m->n_pend;
-#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-  if (m->nf_term != NULL) n += m->n_nodes;   // the member-NF cache
-#endif
-  return n;
+  return m->n_nodes + 2u * m->n_pend;
 }
 static void mnf_gc_gather(struct AtpMnf *m, Term *roots, u32 *w) {
   if (m == NULL) return;
@@ -16868,12 +16957,6 @@ static void mnf_gc_gather(struct AtpMnf *m, Term *roots, u32 *w) {
     roots[(*w)++] = m->pend_l[i];
     roots[(*w)++] = m->pend_r[i];
   }
-#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-  // The member-NF cache's decoded Terms are live across checks.
-  if (m->nf_term != NULL) {
-    for (u32 i = 0; i < m->n_nodes; i++) roots[(*w)++] = m->nf_term[i];
-  }
-#endif
 }
 static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base) {
   if (m == NULL) return;
@@ -16883,11 +16966,6 @@ static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base) {
     m->pend_l[i] = roots[w++];
     m->pend_r[i] = roots[w++];
   }
-#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-  if (m->nf_term != NULL) {
-    for (u32 i = 0; i < m->n_nodes; i++) m->nf_term[i] = roots[w++];
-  }
-#endif
 }
 
 // Take a node from a colour's worklist.  WM's PQ default discipline is
@@ -17126,7 +17204,11 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
     m->n_rules_seen = s->n_rules;
     m->n_pend  = 0u;
     m->pend_of = 0u;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    const AtpFtCell *nf_spanr[2u + 2u * MNF_COUNT_NF];
+#else
     Term nf_term[2u + 2u * MNF_COUNT_NF];
+#endif
     u8   nf_col [2u + 2u * MNF_COUNT_NF];
     u32  nf_from[2u + 2u * MNF_COUNT_NF];
     u32  n_nf = 0u;
@@ -17134,49 +17216,41 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
     for (u32 k = 0; k < m->n_interest && !m->joined; k++) {
       u32 par = m->interest[k];
       u8  col = m->nodes[par].colour;
-      Term nf;
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-      // Incremental member NF: reuse while the ftnfm generation holds
-      // and no delta rule fires on the cached NF span; renormalize the
-      // cached INPUT span (built once per member) only on a hit, and
-      // decode only when the NF genuinely changed.
+      // Incremental member NF, span-authoritative: reuse while the
+      // ftnfm generation holds and no delta rule fires on the cached
+      // NF span; renormalize the cached INPUT span (built once per
+      // member) only on a hit.  No Term is decoded in this loop --
+      // the table lookup and the round side hash both run on the
+      // span; only a latched JOIN materializes the witness Terms.
+      const AtpFtCell *nfsp;
       atp_ft_mirror_ensure(s);
       AtpFt *nfa = (AtpFt *)s->ft_arena_ptr;
-      if (m->nf_term[par] != 0 && m->nf_span[par] != NULL &&
+      if (m->nf_span[par] != NULL &&
           m->nf_gen[par] == atp_ftnfm_gen() &&
           (m->nf_wm[par] == s->n_rules ||
            !atp_ft_slice_fires(s, m->nf_span[par], m->nf_wm[par],
                                s->n_rules - m->nf_wm[par]))) {
         m->nf_wm[par] = s->n_rules;
-        nf = m->nf_term[par];
+        nfsp = m->nf_span[par];
       } else {
         if (m->nf_in_span[par] == NULL) {
-          m->nf_in_span[par] =
-              ft_from_term(nfa, m->nodes[par].term, 0);
+          m->nf_in_span[par] = mnf_member_in_span(s, m, par);
         }
         AtpFtCell *nfs = atp_rewrite_normalize_ft(
             s, ft_clone_span(nfa, m->nf_in_span[par], 0), 4096u);
-        if (m->nf_span[par] != NULL && ft_eq(nfs, m->nf_span[par]) &&
-            m->nf_term[par] != 0) {
-          nf = m->nf_term[par];       // same NF content: reuse the Term
-        } else {
-          nf = ft_to_term(nfs);
-        }
         m->nf_span[par] = nfs;
-        m->nf_term[par] = nf;
         m->nf_gen[par]  = atp_ftnfm_gen();
         m->nf_wm[par]   = s->n_rules;
+        nfsp = nfs;
       }
-#else
-      nf = mnf_norm_steps(s, m->nodes[par].term, 4096u);
-#endif
       {
         static int mt = -1;
         if (mt < 0) mt = getenv("THVM_ATP_MNF_NF_TRACE") != NULL ? 1 : 0;
         if (mt) {
           fprintf(stderr, "MNFNF id=%u col=%d nf=", par + 1u,
                   (col == MNF_GREEN) ? 2 : 1);
-          atp_dbg_print_term(stderr, nf);
+          atp_dbg_print_term(stderr, ft_to_term(nfsp));
           fputc('\n', stderr);
         }
       }
@@ -17190,15 +17264,50 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
       // AndAssociativity joined 3 checks late).  The normalize edge is
       // multi-step, so the proof extractor's single-step replay skips
       // it (extraction degrades, the verdict does not).
-      u32 idx = mnf_lookup(m, nf, mnf_hash(nf));
+      u32 idx = mnf_lookup_span(m, nfsp, mnf_hash_span(nfsp));
       if (idx != MNF_MAX_NODES && m->nodes[idx].colour != col) {
-        mnf_insert(m, nf, col, m->nodes[par].gl_steps,
+        mnf_insert(m, ft_to_term(nfsp), col, m->nodes[par].gl_steps,
                    m->nodes[par].antir_steps, par, NULL);
         break;
       }
       // (b) this round's opposite-colour NFs (the side hash): insert
       // the earlier member's NF as its node first, then ours -- the
       // second insert collides cross-colour and latches the join.
+      for (u32 j = 0; j < n_nf; j++) {
+        if (nf_col[j] != col && ft_eq(nf_spanr[j], nfsp)) {
+          u32 fidx = MNF_MAX_NODES;
+          mnf_insert(m, ft_to_term(nf_spanr[j]), nf_col[j],
+                     m->nodes[nf_from[j]].gl_steps,
+                     m->nodes[nf_from[j]].antir_steps, nf_from[j], &fidx);
+          if (!m->joined)
+            mnf_insert(m, ft_to_term(nfsp), col, m->nodes[par].gl_steps,
+                       m->nodes[par].antir_steps, par, NULL);
+          break;
+        }
+      }
+      if (m->joined) break;
+      nf_spanr[n_nf] = nfsp;
+      nf_col [n_nf] = col;
+      nf_from[n_nf] = par;
+      n_nf++;
+#else
+      Term nf = mnf_norm_steps(s, m->nodes[par].term, 4096u);
+      {
+        static int mt = -1;
+        if (mt < 0) mt = getenv("THVM_ATP_MNF_NF_TRACE") != NULL ? 1 : 0;
+        if (mt) {
+          fprintf(stderr, "MNFNF id=%u col=%d nf=", par + 1u,
+                  (col == MNF_GREEN) ? 2 : 1);
+          atp_dbg_print_term(stderr, nf);
+          fputc('\n', stderr);
+        }
+      }
+      u32 idx = mnf_lookup(m, nf, mnf_hash(nf));
+      if (idx != MNF_MAX_NODES && m->nodes[idx].colour != col) {
+        mnf_insert(m, nf, col, m->nodes[par].gl_steps,
+                   m->nodes[par].antir_steps, par, NULL);
+        break;
+      }
       for (u32 j = 0; j < n_nf; j++) {
         if (nf_col[j] != col && kbo_eq(nf_term[j], nf)) {
           u32 fidx = MNF_MAX_NODES;
@@ -17216,6 +17325,7 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
       nf_col [n_nf] = col;
       nf_from[n_nf] = par;
       n_nf++;
+#endif
     }
 #ifdef ATP_MNF_DIAG
     if (m->joined) mnf_verify(s, m);
