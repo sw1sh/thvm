@@ -3481,58 +3481,125 @@ static u8 vcp_ft_order_gate(AtpState *s, const AtpFtCell *lo,
 // falls back to the Term build.  The CP-walk port's treated-class
 // builder; no caller yet.
 #if defined(THVM_ATPFT_NORM)
+// Preorder-STREAMING build: cells allocate in visit order (the slab
+// bump makes the fresh CP span physically adjacent -- WM's
+// SigmaRGanzNeu discipline; every downstream walk on it gets the
+// cache locality), next-threaded as emitted, end pointers + the
+// GROUND fold patched by a completion cascade.  Field-identical to
+// the recursive ftnew_* build it replaces; addresses differ only in
+// adjacency.  Splice test scoped to subject frames (a binding can BE
+// the splice cell).  NULL on the same anomaly set (NUM marker, full
+// map, arity cliff, frame cliff); partials leak into the arena.
 static AtpFtCell *vcp_ft_build_cell(AtpFt *a, const AtpFtCell *c,
                                     const AtpFtCell **at_io,
                                     const AtpFtCell *rin,
                                     const AtpFtSubst *subst,
-                                    AcpNvMap *m, u32 depth) {
-  if (depth >= (u32)ACP_FUSE_MAX_DEPTH) return NULL;
-  if (at_io != NULL && *at_io == c) {
-    *at_io = NULL;
-    return vcp_ft_build_cell(a, rin, NULL, NULL, subst, m, depth);
-  }
-  if ((c->sym & WF_VAR_BIT) != 0u) {
-    u32 id = c->sym & ~WF_VAR_BIT;
-    const AtpFtCell *b =
-        (subst != NULL && id < ATPFT_MAX_VARS) ? subst->bind[id] : NULL;
-    if (b != NULL) {
-      return vcp_ft_build_cell(a, b, NULL, NULL, subst, m, depth);
+                                    AcpNvMap *m) {
+  static struct { const AtpFtCell *next, *stop; u8 subj; }
+      rs[ACP_FUSE_MAX_DEPTH];
+  static struct { AtpFtCell *cell; u32 kids; } open[ACP_FUSE_MAX_DEPTH];
+  u32 sp = 0u, on = 0u;
+  AtpFtCell *root_out = NULL, *prev = NULL;
+  const AtpFtCell *cur = c;
+  const AtpFtCell *stop = (c->end != NULL) ? c->end->next : NULL;
+  u8 subj = 1u;
+  for (;;) {
+    while (cur == stop) {
+      if (sp == 0u) goto done;
+      --sp;
+      cur  = rs[sp].next;
+      stop = rs[sp].stop;
+      subj = rs[sp].subj;
     }
-    u32 d = 0u;
-    for (; d < m->n; d++) {
-      if (m->old_id[d] == id) break;
+    if (subj && at_io != NULL && *at_io == cur) {
+      *at_io = NULL;
+      if (sp >= (u32)ACP_FUSE_MAX_DEPTH) return NULL;
+      rs[sp].next = (cur->end != NULL) ? cur->end->next : stop;
+      rs[sp].stop = stop;
+      rs[sp].subj = 1u;
+      sp++;
+      cur  = rin;
+      stop = (rin->end != NULL) ? rin->end->next : NULL;
+      subj = 0u;
+      continue;
     }
-    if (d == m->n) {
-      if (m->n >= REWRITE_MAX_VAR) return NULL;
-      m->old_id[m->n++] = id;
+    AtpFtCell *nc;
+    u8 leaf_flags;
+    if ((cur->sym & WF_VAR_BIT) != 0u) {
+      u32 id = cur->sym & ~WF_VAR_BIT;
+      const AtpFtCell *b =
+          (subst != NULL && id < ATPFT_MAX_VARS) ? subst->bind[id] : NULL;
+      if (b != NULL) {
+        if (sp >= (u32)ACP_FUSE_MAX_DEPTH) return NULL;
+        rs[sp].next = cur->next;
+        rs[sp].stop = stop;
+        rs[sp].subj = subj;
+        sp++;
+        cur  = b;
+        stop = (b->end != NULL) ? b->end->next : NULL;
+        subj = 0u;
+        continue;
+      }
+      u32 d = 0u;
+      for (; d < m->n; d++) {
+        if (m->old_id[d] == id) break;
+      }
+      if (d == m->n) {
+        if (m->n >= REWRITE_MAX_VAR) return NULL;
+        m->old_id[m->n++] = id;
+      }
+      nc = ft_alloc_one(a, 0);
+      nc->sym   = WF_VAR_BIT | d;
+      nc->arity = 0;
+      nc->flags = 0;
+      nc->next  = NULL;
+      nc->end   = nc;
+      ft_raw_check(nc);
+      leaf_flags = 0u;
+      cur = cur->next;
+    } else {
+      if (ft_ctr_sym(cur) == ATPFT_NUM_MARKER) return NULL;
+      u32 lab = ft_ctr_sym(cur);
+      u32 n   = (u32)cur->arity;
+      if (n > REWRITE_MAX_ARITY) return NULL;
+      nc = ft_alloc_one(a, 0);
+      nc->sym   = lab & ~WF_VAR_BIT;
+      nc->arity = (u16)n;
+      nc->flags = ATPFT_FLAG_GROUND;   // fold clears on a var below
+      nc->next  = NULL;
+      nc->end   = nc;
+      ft_raw_check(nc);
+      if (n > 0u) {
+        if (on >= (u32)ACP_FUSE_MAX_DEPTH) return NULL;
+        if (prev != NULL) prev->next = nc;
+        else              root_out = nc;
+        prev = nc;
+        open[on].cell = nc;
+        open[on].kids = n;
+        on++;
+        cur = cur->next;               // preorder: first kid
+        continue;
+      }
+      leaf_flags = ATPFT_FLAG_GROUND;
+      cur = cur->next;
     }
-    return ftnew_var(a, d, 0);
-  }
-  if (ft_ctr_sym(c) == ATPFT_NUM_MARKER) return NULL;
-  u32 lab = ft_ctr_sym(c);
-  u32 n   = (u32)c->arity;
-  if (n > REWRITE_MAX_ARITY) return NULL;
-  if (n == 0u) return ftnew_const(a, lab, 0);
-  AtpFtCell *kids_stack[16];
-  AtpFtCell **kids      = kids_stack;
-  AtpFtCell **kids_heap = NULL;
-  if (n > 16u) {
-    kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)n);
-    if (kids_heap == NULL) thvm_fatal("vcp_ft_build_cell: kids OOM");
-    kids = kids_heap;
-  }
-  const AtpFtCell *kid = c->next;
-  for (u32 i = 0; i < n; i++) {
-    kids[i] = vcp_ft_build_cell(a, kid, at_io, rin, subst, m, depth + 1u);
-    if (kids[i] == NULL) {
-      free(kids_heap);
-      return NULL;      // partial kids leak into the arena (anomaly path)
+    // Leaf emitted: thread + cascade completions upward.
+    if (prev != NULL) prev->next = nc;
+    else              root_out = nc;
+    prev = nc;
+    u8 child_flags = leaf_flags;
+    while (on > 0u) {
+      AtpFtCell *pc = open[on - 1u].cell;
+      if ((child_flags & ATPFT_FLAG_GROUND) == 0u)
+        pc->flags &= (u8)~ATPFT_FLAG_GROUND;
+      if (--open[on - 1u].kids != 0u) break;
+      on--;
+      pc->end = nc;                    // subtree's last preorder cell
+      child_flags = pc->flags;
     }
-    kid = kid->end->next;
   }
-  AtpFtCell *out = ftnew_ctr(a, lab, (u16)n, kids, 0);
-  free(kids_heap);
-  return out;
+done:
+  return root_out;
 }
 #endif // THVM_ATPFT_NORM
 
@@ -3664,10 +3731,10 @@ static u8 vcp_ft_treat_form(AtpState *s, const AtpFtCell *lo_ft,
   // never consume the bytes.  The builder shares the same appearance-
   // order var map the emit would use, so the deferred bytes are
   // byte-identical to the formation-time emit they replace.
-  AtpFtCell *fl = vcp_ft_build_cell(a, ro_ft, NULL, NULL, subst, &m, 0u);
+  AtpFtCell *fl = vcp_ft_build_cell(a, ro_ft, NULL, NULL, subst, &m);
   if (fl == NULL) return 0u;
   const AtpFtCell *at2 = sub_ft;
-  AtpFtCell *fr = vcp_ft_build_cell(a, lo_ft, &at2, rin_ft, subst, &m, 0u);
+  AtpFtCell *fr = vcp_ft_build_cell(a, lo_ft, &at2, rin_ft, subst, &m);
   if (fr == NULL) {
     ft_free_span(a, fl, fl->end);
     return 0u;
