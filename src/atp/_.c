@@ -17695,6 +17695,24 @@ extern int g_goalnf_active;   // ft_norm.c: [mixstep] tracer scope tag
 extern int atp_ft_wm_pattern_before(const AtpFtCell *a,
                                     const AtpFtCell *b);   // ft_norm.c
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Do any live consumers read the DECODED goal NF Terms?  The span
+// verdict decides the join; the Terms feed only the goal-similarity
+// heuristics (goal interleave / CPinGoal / learned features), the
+// feature recorder, and the AC-equality fallback.  With all of them
+// off, the goal check never decodes.
+static u8 atp_goal_nf_consumers_on(const AtpState *s) {
+  if (s->use_goal_interleave > 0u) return 1u;
+  if (s->cp_weight_mode == ATP_CP_WEIGHT_GOAL) return 1u;
+  if (s->cp_weight_mode == ATP_CP_WEIGHT_LEARNED) return 1u;
+  if (s->record_cp_features) return 1u;
+#ifdef THVM_ATP_AC
+  if (thvm_atp_get_ac_mask() != 0ull) return 1u;
+#endif
+  return 0u;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
 static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
                                Term *nf_l, Term *nf_r) {
   // FT path for AC-mask=0; Term path otherwise.  Earlier commit
@@ -17825,28 +17843,40 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
     // after the last call -- the pairing invariant).  Scoped to the
     // aliased goal (gl_mir); conjunct-loop calls neither read nor
     // refresh it.
-    if (gl_mir && *cache_l != NULL && prev_nf_l != 0 &&
-        ft_eq(fl, *cache_l)) {
-      l = prev_nf_l;
+    u8 joined_ft = (u8)ft_eq(fl, fr);
+    static int goalnf_dbg = -1;
+    if (goalnf_dbg < 0)
+      goalnf_dbg = getenv("THVM_ATP_GOAL_NF_DEBUG") != NULL ? 1 : 0;
+    if (joined_ft || goalnf_dbg || atp_goal_nf_consumers_on(s)) {
+      if (gl_mir && *cache_l != NULL && prev_nf_l != 0 &&
+          ft_eq(fl, *cache_l)) {
+        l = prev_nf_l;
+      } else {
+        l = ft_to_term(fl);
+        if (gl_mir) *cache_l = fl;
+      }
+      if (gl_mir && *cache_r != NULL && prev_nf_r != 0 &&
+          ft_eq(fr, *cache_r)) {
+        r = prev_nf_r;
+      } else {
+        r = ft_to_term(fr);
+        if (gl_mir) *cache_r = fr;
+      }
     } else {
-      l = ft_to_term(fl);
-      if (gl_mir) *cache_l = fl;
+      // Consumer-free run: the span verdict is the whole story; the
+      // Terms stay unmaterialized (callers' ?:-fallbacks read the raw
+      // goal, which none of them do with the consumers off).
+      l = 0;
+      r = 0;
     }
-    if (gl_mir && *cache_r != NULL && prev_nf_r != 0 &&
-        ft_eq(fr, *cache_r)) {
-      r = prev_nf_r;
-    } else {
-      r = ft_to_term(fr);
-      if (gl_mir) *cache_r = fr;
-    }
-    if (getenv("THVM_ATP_GOAL_NF_DEBUG")) {
+    if (goalnf_dbg) {
       char lb[512], rb[512];
       atp_pretty_term(l, lb, sizeof lb);
       atp_pretty_term(r, rb, sizeof rb);
       fprintf(stderr, "[goalnf] n_rules=%u n_unorient=%u mixmost=%u  L=%s  R=%s  eq=%d\n",
               s->n_rules, s->n_unorient, s->use_mixmost_nf, lb, rb, ft_eq(fl, fr));
     }
-    if (ft_eq(fl, fr)) {
+    if (joined_ft) {
       *nf_l = l;
       *nf_r = r;
       return 1;
@@ -17854,7 +17884,7 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
   }
   *nf_l = l;
   *nf_r = r;
-  if (kbo_eq(l, r)) return 1;
+  if (l != 0 && kbo_eq(l, r)) return 1;
 #ifdef THVM_ATP_AC
   if (thvm_atp_get_ac_mask() != 0ull) {
     AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
