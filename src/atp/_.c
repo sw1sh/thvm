@@ -1801,6 +1801,98 @@ static AtpFtCell *g_pop_ft_r = NULL;
 // falls back to the conversion.
 static AtpFtCell *g_rule_ft_l = NULL;
 static AtpFtCell *g_rule_ft_r = NULL;
+
+// THVM_ATP_LAZY_RULE_TERMS (requires THVM_ATP_TRACE_LEAN_RULES): the
+// pop survivor is committed WITHOUT decoding its NF spans -- orient
+// runs on per-side NUM sentinel handles with this bracket carrying the
+// spans; atp_compare / normalize_vars / the dup scan / the mirror
+// build / the trace pack all intercept on it.  The Term slots hold the
+// sentinels; any residual content reader walking a NUM where a CTR
+// was expected is a divergence the parity suite flushes out (the
+// certification grind).  Armed only across one orient call.
+typedef struct {
+  const AtpFtCell *span_l;   // pop NF spans, pre-var-norm, (l, r) order
+  const AtpFtCell *span_r;
+  Term sent_l;               // the sentinel handles orient receives
+  Term sent_r;
+  u8   armed;
+} AtpLazyRule;
+static AtpLazyRule g_lazy_rule = {NULL, NULL, 0, 0, 0u};
+static int atp_lazy_rules_on(void) {
+  static int on = -1;
+  if (on < 0) {
+    on = atp_env_on("THVM_ATP_LAZY_RULE_TERMS") &&
+         atp_env_on("THVM_ATP_TRACE_LEAN_RULES");
+  }
+  return on;
+}
+// Map one of the two armed sentinels to its span (NULL = not a
+// sentinel of the current bracket).
+static const AtpFtCell *atp_lazy_span_of(Term t) {
+  if (!g_lazy_rule.armed) return NULL;
+  if (t == g_lazy_rule.sent_l) return g_lazy_rule.span_l;
+  if (t == g_lazy_rule.sent_r) return g_lazy_rule.span_r;
+  return NULL;
+}
+
+// Span sibling of wald_term_sort: identical sort inference off the
+// mirror cells (vars by id from the spec table; constructors by label
+// with arity + argument-sort checks; the TAG_NUM marker maps to the
+// non-FOL-tag verdict).
+static u32 wald_term_sort_ft(const WaldSpec *spec, const AtpFtCell *c) {
+  if (spec == NULL || spec->n_sorts == 0) return 0;
+  if ((c->sym & WF_VAR_BIT) != 0u) {
+    u32 id = c->sym & ~WF_VAR_BIT;
+    for (u32 i = 0; i < spec->n_vars; i++) {
+      if (spec->vars[i].var_id == id) return spec->vars[i].sort;
+    }
+    return WALD_MAX_SORTS;
+  }
+  u32 lab = c->sym;
+  if (lab == ATPFT_NUM_MARKER) return WALD_MAX_SORTS;   // non-FOL tag
+  u32 n = (u32)c->arity;
+  const WaldSym *sym = NULL;
+  for (u32 i = 0; i < spec->n_symbols; i++) {
+    if (spec->symbols[i].label == lab) {
+      sym = &spec->symbols[i];
+      break;
+    }
+  }
+  if (sym == NULL)     return WALD_MAX_SORTS;
+  if (sym->arity != n) return WALD_MAX_SORTS;
+  const AtpFtCell *kid = c->next;
+  for (u32 i = 0; i < n; i++) {
+    u32 child_sort = wald_term_sort_ft(spec, kid);
+    if (child_sort != sym->arg_sorts[i]) return WALD_MAX_SORTS;
+    kid = kid->end->next;
+  }
+  return sym->result_sort;
+}
+
+// Decode-on-demand for a lazy rule slot: a TAG_NUM handle in a rule
+// slot is always a lazy sentinel (rule terms are CTR/FVR only), so
+// materialize the Term from the mirror ONCE, replace the slot, and
+// return it.  Every site that PERSISTS rule-Term values into
+// Term-typed storage (r_dead saves, subsumer shapes, the irv victim
+// buffer, the MNF pending queue) calls this so no sentinel ever
+// escapes the slot arrays.
+static Term atp_rule_term(AtpState *s, u32 i, u8 side) {
+  Term t = side ? s->rhs[i] : s->lhs[i];
+  if (term_tag(t) != TAG_NUM) return t;
+  const AtpFtCell *m = side ? s->rhs_ft[i] : s->lhs_ft[i];
+  if (m == NULL) return t;   // defensive: nothing to decode from
+  Term real = ft_to_term(m);
+  if (side) s->rhs[i] = real;
+  else      s->lhs[i] = real;
+  return real;
+}
+
+// Trace-pack span bracket: the ORIENT/FVI trace loop arms this with
+// the new rule's mirrors so atp_trace_push's lean arm packs the pair
+// from spans (atp_trace_eq_store_ft) instead of walking the (possibly
+// sentinel) Terms.  Cleared by the push.
+static const AtpFtCell *g_trace_eq_ft_l = NULL;
+static const AtpFtCell *g_trace_eq_ft_r = NULL;
 #endif // THVM_ATPFT_RULES
 
 // Inverse of acp_pack: rebuild both heap Terms from the byte string.
@@ -7112,6 +7204,7 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
 #ifdef ATP_MNF
 static void mnf_destroy(struct AtpMnf *m);   // defined with the MNF module below
 static void mnf_notify_fact(struct AtpMnf *m, Term l, Term r, u8 orient);
+static u8   mnf_in_sweep_mode(struct AtpMnf *m);
 // GC support: the MNF coloured nodes hold reached Terms on the heap, so
 // they are collector roots.  Defined with the MNF module; declared here
 // for thvm_atp_gc_collect (which precedes the module).
@@ -7777,10 +7870,22 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
   static int lean_rules = -1;
   if (lean_rules < 0) lean_rules = atp_env_on("THVM_ATP_TRACE_LEAN_RULES");
   if (s->trace_pack && lean_rules) {
-    eq_off = atp_trace_eq_store(s, lhs, rhs);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (g_trace_eq_ft_l != NULL && g_trace_eq_ft_r != NULL) {
+      eq_off = atp_trace_eq_store_ft(s, g_trace_eq_ft_l, g_trace_eq_ft_r);
+    }
+    if (eq_off == 0u)
+#endif
+    {
+      eq_off = atp_trace_eq_store(s, lhs, rhs);
+    }
     c_lhs = term_new(0, TAG_NUM, 0, 0);   // sentinel; real pair off-heap
     c_rhs = c_lhs;
   }
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  g_trace_eq_ft_l = NULL;
+  g_trace_eq_ft_r = NULL;
+#endif
   Term children[4] = {
     term_new(0, TAG_NUM, 0, p_a),
     term_new(0, TAG_NUM, 0, p_b),
@@ -8126,8 +8231,19 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   // Homogeneous-mode (NULL spec or n_sorts == 0) returns sort 0
   // from wald_term_sort unconditionally so the gate is a no-op.
   if (s->spec != NULL) {
-    u32 sl = wald_term_sort(s->spec, lhs);
-    u32 sr = wald_term_sort(s->spec, rhs);
+    u32 sl, sr;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    const AtpFtCell *bsl = atp_lazy_span_of(lhs);
+    const AtpFtCell *bsr = atp_lazy_span_of(rhs);
+    if (bsl != NULL && bsr != NULL) {
+      sl = wald_term_sort_ft(s->spec, bsl);
+      sr = wald_term_sort_ft(s->spec, bsr);
+    } else
+#endif
+    {
+      sl = wald_term_sort(s->spec, lhs);
+      sr = wald_term_sort(s->spec, rhs);
+    }
     if (sl == WALD_MAX_SORTS || sr == WALD_MAX_SORTS || sl != sr) {
       return 0;
     }
@@ -12742,6 +12858,32 @@ static u8 atp_rule_subsumes_unit(Term l_i, Term r_i, Term lhs, Term rhs) {
 
 static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   if (s == NULL) return 0;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Lazy commit: canonicalize + dup-scan on span clones; the sentinel
+  // handles pass through untouched and become the stored Term slots.
+  AtpFtCell *lazy_canon_l = NULL;
+  AtpFtCell *lazy_canon_r = NULL;
+  {
+    const AtpFtCell *bl = atp_lazy_span_of(lhs);
+    const AtpFtCell *br = atp_lazy_span_of(rhs);
+    if (bl != NULL && br != NULL) {
+      AtpFt *ra = (AtpFt *)s->ft_arena_ptr;
+      lazy_canon_l = ft_clone_span(ra, bl, 0);
+      lazy_canon_r = ft_clone_span(ra, br, 0);
+      ft_normalize_vars_pair(lazy_canon_l, lazy_canon_r);
+      for (u32 i = 0; i < s->n_rules; i++) {
+        if (s->lhs_ft[i] != NULL && s->rhs_ft[i] != NULL &&
+            ft_eq(s->lhs_ft[i], lazy_canon_l) &&
+            ft_eq(s->rhs_ft[i], lazy_canon_r)) {
+          ft_free_span(ra, lazy_canon_l, lazy_canon_l->end);
+          ft_free_span(ra, lazy_canon_r, lazy_canon_r->end);
+          return 0;  // duplicate rule -- already in R
+        }
+      }
+      goto lazy_skip_varnorm;
+    }
+  }
+#endif
 #ifdef ATP_VAR_NORM
   thvm_normalize_vars(&lhs, &rhs);
   for (u32 i = 0; i < s->n_rules; i++) {
@@ -12749,6 +12891,9 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
       return 0;  // duplicate rule -- already in R
     }
   }
+#endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+lazy_skip_varnorm: ;
 #endif
   // Forward subsumption pruning (Vampire --forward_subsumption analog,
   // unit-only): drop the rule if some already-stored rule generalizes
@@ -12813,7 +12958,13 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   {
     AtpFt *ra = (AtpFt *)s->ft_arena_ptr;
     u8 adopted = 0u;
-    if (g_rule_ft_l != NULL && g_rule_ft_r != NULL) {
+    if (lazy_canon_l != NULL && lazy_canon_r != NULL) {
+      // Lazy commit: the canonical clones ARE the mirror (ownership
+      // moves to the rule slot); the Term slots keep the sentinels.
+      s->lhs_ft[s->n_rules] = lazy_canon_l;
+      s->rhs_ft[s->n_rules] = lazy_canon_r;
+      adopted = 1u;
+    } else if (g_rule_ft_l != NULL && g_rule_ft_r != NULL) {
       // Try both pairings; each candidate clone is renumbered to the
       // canonical dense var set (the FT sibling of the
       // thvm_normalize_vars run above) and PROVEN against the stored
@@ -12856,6 +13007,17 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
     for (u32 k = 0; k < s->n_rules; k++) {
       if (!s->r_dead[k]) continue;
       if (s->r_dead_subsumer_lhs[k] == 0) continue;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      // Lazy commit: the candidate is the canonical span pair; the
+      // saves are real Terms (persist sites materialize sentinels),
+      // so the exact FT-vs-Term compare decides.  Live-rule faces in
+      // the resolution loop below go through the mirrors the same way.
+      if (lazy_canon_l != NULL) {
+        if (!ft_eq_term(lazy_canon_l, s->r_dead_lhs_save[k]) ||
+            !ft_eq_term(lazy_canon_r, s->r_dead_rhs_save[k]))
+          continue;
+      } else
+#endif
       if (!kbo_eq(s->r_dead_lhs_save[k], lhs) ||
           !kbo_eq(s->r_dead_rhs_save[k], rhs))
         continue;
@@ -12867,6 +13029,20 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
       u32 cutoff = ATP_TRACE_NONE;
       for (u32 m = 0; m < s->n_rules; m++) {
         if (s->r_dead[m]) continue;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        if (s->lhs_ft[m] != NULL && s->rhs_ft[m] != NULL) {
+          // Exact FT-vs-Term compare -- immune to lazy sentinels in
+          // the live slots (subsumer shapes are real Terms).
+          if ((ft_eq_term(s->lhs_ft[m], sub_l) &&
+               ft_eq_term(s->rhs_ft[m], sub_r)) ||
+              (ft_eq_term(s->lhs_ft[m], sub_r) &&
+               ft_eq_term(s->rhs_ft[m], sub_l))) {
+            cutoff = s->r_trace[m];
+            break;
+          }
+          continue;
+        }
+#endif
         if ((kbo_eq(s->lhs[m], sub_l) && kbo_eq(s->rhs[m], sub_r)) ||
             (kbo_eq(s->lhs[m], sub_r) && kbo_eq(s->rhs[m], sub_l))) {
           cutoff = s->r_trace[m];
@@ -12884,6 +13060,17 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   }
   // Cache the rule's orientation once -- atp_ordered_try_top reads this
   // instead of recomputing a full KBO compare per rewrite position.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (lazy_canon_l != NULL) {
+    // Lazy commit: the verdict off the just-stored mirrors (the pop
+    // pre-checked GT on the pre-canonical spans; renumbering is
+    // KBO-invariant, so this is the same verdict the Term compare
+    // would cache).
+    s->r_orient[s->n_rules] =
+        (u8)(thvm_kbo_ft(s->lhs_ft[s->n_rules], s->rhs_ft[s->n_rules],
+                         s->kbo) == KBO_GT);
+  } else
+#endif
   s->r_orient[s->n_rules] = (u8)(atp_compare(s, lhs, rhs) == KBO_GT);
   if (!s->r_orient[s->n_rules]) s->n_unorient++;
   // KBO self-consistency probe (THVM_ATP_ORIENT_KBO_CHECK=1): if we
@@ -12912,8 +13099,19 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   // (Z_ZieleErledigtMitNeuemFaktum); queue it for the next mnf_step --
   // a slot-range diff misses facts re-slotted by interreduction churn
   // between the keep and the goal check.
-  if (s->use_mnf && s->mnf != NULL)
+  if (s->use_mnf && s->mnf != NULL) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // MNF fronts are Term-based: a lazy commit materializes the pair
+    // ONLY while the front search is in sweep mode (mode 0 consumes
+    // the pending pairs; the ExpandRewrite switch discards them unread
+    // and never switches back, so sentinels queued after it are inert).
+    if (lazy_canon_l != NULL && mnf_in_sweep_mode(s->mnf)) {
+      lhs = atp_rule_term(s, s->n_rules, 0u);
+      rhs = atp_rule_term(s, s->n_rules, 1u);
+    }
+#endif
     mnf_notify_fact(s->mnf, lhs, rhs, s->r_orient[s->n_rules]);
+  }
 #endif
   s->n_rules++;
   // Env-gated live-rule-set dump (THVM_ATP_DUMP_RULES_AT=N): when the rule
@@ -12962,8 +13160,8 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
     for (u32 i = 0; i < new_i; i++) {
       if (s->r_dead[i]) continue;
       if (atp_rule_subsumes_unit(new_lhs, new_rhs, s->lhs[i], s->rhs[i])) {
-        s->r_dead_lhs_save[i] = s->lhs[i];
-        s->r_dead_rhs_save[i] = s->rhs[i];
+        s->r_dead_lhs_save[i] = atp_rule_term(s, i, 0u);
+        s->r_dead_rhs_save[i] = atp_rule_term(s, i, 1u);
         s->lhs[i] = dead_sentinel;
         s->rhs[i] = dead_sentinel;
         s->r_dead[i] = 1;
@@ -13547,6 +13745,11 @@ static AtpFtCell *g_ir_rhs_nf_ft = NULL;
 static void atp_irv_stage_ft(AtpState *s, u32 idx, u8 site) {
 #ifdef THVM_ATPFT_RULES
   g_irv_site = site;
+  // Lazy slots: the victim buffer persists Term VALUES (the drain's
+  // enqueue and Term fallbacks walk them), so materialize sentinels
+  // before the caller captures/pushes.
+  (void)atp_rule_term(s, idx, 0u);
+  (void)atp_rule_term(s, idx, 1u);
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
   g_irv_ft_l = (s->lhs_ft[idx] != NULL)
                  ? ft_clone_span(a, s->lhs_ft[idx], 0) : NULL;
@@ -13601,6 +13804,17 @@ static void atp_irv_push(AtpState *s, Term lhs, Term rhs, u32 parent,
   s->irv_parent[s->n_irv]  = parent;
   s->irv_wmo_key[s->n_irv] = wmo_key;
 #ifdef THVM_ATPFT_RULES
+  // Lazy slots: the caller's captured locals may still hold sentinels
+  // (the stage-side materialization refreshed the SLOT, not the local)
+  // -- decode from the staged clones so the buffer holds real Terms.
+  if (term_tag(lhs) == TAG_NUM && g_irv_ft_l != NULL) {
+    lhs = ft_to_term(g_irv_ft_l);
+  }
+  if (term_tag(rhs) == TAG_NUM && g_irv_ft_r != NULL) {
+    rhs = ft_to_term(g_irv_ft_r);
+  }
+  s->irv_lhs[s->n_irv] = lhs;
+  s->irv_rhs[s->n_irv] = rhs;
   s->irv_lhs_ft[s->n_irv] = g_irv_ft_l;   // staged clone (or NULL)
   s->irv_rhs_ft[s->n_irv] = g_irv_ft_r;
   { extern u8 *g_irv_site_dbg; extern u32 g_irv_site_dbg_cap;
@@ -14063,6 +14277,7 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // atp_push_rule can adopt them as the new rule's mirror.
   AtpFtCell *pop_nf_l = NULL;
   AtpFtCell *pop_nf_r = NULL;
+  u8 lazy_commit = 0u;   // survivor committed via sentinels (no decode)
 #endif
 #ifdef ATP_CP_GROUND_JOIN
   // Lazy (selection-time) ground-joinability -- Twee's redundancy
@@ -14353,10 +14568,44 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
             }
           }
         }
-        l = ft_to_term(lf);
-        r = ft_to_term(rf);
-        pop_nf_l = lf;               // survivor NFs: rule-mirror adoption
-        pop_nf_r = rf;
+        // Lazy commit (THVM_ATP_LAZY_RULE_TERMS + TRACE_LEAN_RULES):
+        // the survivor's rule is born from the spans -- orient receives
+        // per-side NUM sentinel handles and every content step
+        // intercepts on the bracket; nothing is decoded.  Any special
+        // orient mode falls back to the decode below.
+        if (getenv("THVM_ATP_LAZY_DBG") != NULL) {
+          fprintf(stderr,
+                  "LAZYDBG on=%d plain=%d fdo=%u fwd=%u flat=%u mnf=%u "
+                  "rec=%u permz=%d nv=%u\n",
+                  atp_lazy_rules_on(), atp_order_is_plain_kbo(s),
+                  s->use_force_def_orient, s->use_fwd_subsume,
+                  s->use_flat_subsume, s->use_mnf, s->record_norm_steps,
+                  (s->use_perm_subsume && g_atp_perm_subsume_mask == 0ull),
+                  ft_distinct_var_count(lf, rf));
+        }
+        if (atp_lazy_rules_on() && atp_order_is_plain_kbo(s) &&
+            !s->use_force_def_orient &&
+            !s->use_fwd_subsume && !s->record_norm_steps &&
+            !(s->use_perm_subsume && g_atp_perm_subsume_mask == 0ull) &&
+            getenv("THVM_ATP_FORCE_DEF_ORIENT") == NULL &&
+            ft_distinct_var_count(lf, rf) < REWRITE_MAX_VAR) {
+          KboCmp loc = thvm_kbo_ft(lf, rf, s->kbo);
+          if (loc == KBO_GT || loc == KBO_LT) {
+            l = term_new(0, TAG_NUM, 0, 0xFA151u);
+            r = term_new(0, TAG_NUM, 0, 0xFA152u);
+            g_lazy_rule.span_l = lf;
+            g_lazy_rule.span_r = rf;
+            g_lazy_rule.sent_l = l;
+            g_lazy_rule.sent_r = r;
+            lazy_commit = 1u;
+          }
+        }
+        if (!lazy_commit) {
+          l = ft_to_term(lf);
+          r = ft_to_term(rf);
+          pop_nf_l = lf;             // survivor NFs: rule-mirror adoption
+          pop_nf_r = rf;
+        }
       }
     } else
 #endif
@@ -14419,6 +14668,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // detected AC operators (thvm_atp_auto_ac).  Same dead-CP cleanup as
   // the joined / pop-subsume branches.
   if (s->use_perm_subsume && g_atp_perm_subsume_mask != 0ull &&
+#ifdef THVM_ATPFT_RULES
+      !lazy_commit &&   // FT gates already decided; l/r are sentinels
+#endif
       atp_cp_perm_subsumed(l, r)) {
     ATP_POPV("PERMSUB");
     s->n_cps_dropped_perm_subsumed++;
@@ -14436,7 +14688,11 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // (KPV_IncAnzKPspaeterSubsummiert).  Same cleanup as the joined
   // branch: the pair feeds no rule, so its NORM_STEP chain and scratch
   // Terms are dead.
-  if (s->use_pop_subsume && atp_compare(s, l, r) == KBO_UN &&
+  if (s->use_pop_subsume &&
+#ifdef THVM_ATPFT_RULES
+      !lazy_commit &&   // FT gates already decided; l/r are sentinels
+#endif
+      atp_compare(s, l, r) == KBO_UN &&
       atp_pop_eq_subsumed(s, l, r)) {
     ATP_POPV("SUBSUMED");
     s->n_cps_dropped_pop_subsumed++;
@@ -14451,11 +14707,13 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
 #ifdef THVM_ATPFT_RULES
   g_rule_ft_l = pop_nf_l;   // NULL unless the FT-direct pop produced NFs
   g_rule_ft_r = pop_nf_r;
+  if (lazy_commit) g_lazy_rule.armed = 1u;
 #endif
   g_ft_region = 5u;
   AtpAddedRange added = thvm_atp_orient_and_add(s, l, r);
   g_ft_region = 0u;
 #ifdef THVM_ATPFT_RULES
+  g_lazy_rule.armed = 0u;
   g_rule_ft_l = NULL;
   g_rule_ft_r = NULL;
 #endif
@@ -14502,6 +14760,15 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     Term rl = s->lhs[rid];
     Term rr = s->rhs[rid];
     u32  reason = (rid >= fvi_lo) ? TRACE_FVI : TRACE_ORIENT;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // Lean-rules eq pack from the rule's mirrors (bit-identical bytes;
+    // under the lazy commit rl/rr are sentinels and the mirror is the
+    // only real pair).
+    if (s->lhs_ft[rid] != NULL && s->rhs_ft[rid] != NULL) {
+      g_trace_eq_ft_l = s->lhs_ft[rid];
+      g_trace_eq_ft_r = s->rhs_ft[rid];
+    }
+#endif
     u32  t  = atp_trace_push(s, reason, chain_tail,
                              ATP_TRACE_NONE, rl, rr);
     s->r_trace[rid] = t;
@@ -16131,6 +16398,12 @@ static void mnf_expand_node_fact(AtpState *s, AtpMnf *m, u32 ni,
 // passes the kept fact itself).  Queued here, drained by the next
 // mnf_step -- immune to interreduction re-slotting between the keep and
 // the goal check.
+// 1 while the front search still consumes the pending fact pairs
+// (sweep mode); the ExpandRewrite switch discards them unread.
+static u8 mnf_in_sweep_mode(struct AtpMnf *m) {
+  return (u8)(m != NULL && m->mode == 0u);
+}
+
 static void mnf_notify_fact(struct AtpMnf *m, Term l, Term r, u8 orient) {
   if (m == NULL) return;
   if (m->n_pend >= 256u) { m->pend_of = 1u; return; }
@@ -16400,6 +16673,13 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
     g_mnf_ln = nl; g_mnf_rn = nr; g_mnf_vc_cap = cap;
   }
   for (u32 j = 0; j < s->n_rules; j++) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // The MNF expansion matches rule Terms directly, so a lazy slot
+    // materializes here (once per rule) -- the front search's floor
+    // until MNF goes span-native.
+    (void)atp_rule_term(s, j, 0u);
+    (void)atp_rule_term(s, j, 1u);
+#endif
     g_mnf_vc[j]     = (u8)atp_vars_contained(s->lhs[j], s->rhs[j]);
     g_mnf_vfwd[j]   = (u8)atp_vars_contained(s->rhs[j], s->lhs[j]);
     g_mnf_ground[j] = mnf_term_is_ground(s->lhs[j]);
@@ -16656,7 +16936,12 @@ static u32 mnf_historical_rules(AtpState *s, Term *out_l, Term *out_r,
                                 u32 *out_trace, u32 cap) {
   u32 n = 0u;
   for (u32 i = 0; i < s->n_rules && n < cap; i++) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    out_l[n] = atp_rule_term(s, i, 0u);
+    out_r[n] = atp_rule_term(s, i, 1u);
+#else
     out_l[n] = s->lhs[i]; out_r[n] = s->rhs[i];
+#endif
     out_trace[n] = s->r_trace[i];
     n++;
   }
@@ -18229,8 +18514,10 @@ static void thvm_atp_interreduce_full(AtpState *s) {
       fprintf(stderr, "  FULL-IR delete (slot %u, joinable): %s = %s\n",
               i, la, ra);
     }
-    s->r_dead_lhs_save[i] = old_lhs;
-    s->r_dead_rhs_save[i] = old_rhs;
+    s->r_dead_lhs_save[i] = (term_tag(old_lhs) == TAG_NUM)
+                                ? atp_rule_term(s, i, 0u) : old_lhs;
+    s->r_dead_rhs_save[i] = (term_tag(old_rhs) == TAG_NUM)
+                                ? atp_rule_term(s, i, 1u) : old_rhs;
     s->lhs[i] = dead_sentinel;  s->rhs[i] = dead_sentinel;
     s->r_dead[i] = 1;
     s->r_dead_lhs_save_ft[i] = save_lft;
@@ -20707,8 +20994,8 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
     }
     if (!subsumed)
       continue;
-    s->r_dead_lhs_save[i] = s->lhs[i];
-    s->r_dead_rhs_save[i] = s->rhs[i];
+    s->r_dead_lhs_save[i] = atp_rule_term(s, i, 0u);
+    s->r_dead_rhs_save[i] = atp_rule_term(s, i, 1u);
     // Remove-and-re-derive root-overlap ownership: save the subsuming
     // equation's SHAPE on this slot.  Its final birth trace is not yet
     // stamped here (the step loop stamps r_trace after orient_and_add
@@ -22042,8 +22329,8 @@ static void atp_bwd_ground_join_walk(AtpState *s, u32 skip_lo, u32 skip_hi) {
       // are skipped via r_dead/sentinel; the count stays an upper bound).
       if (s->use_gj_delete_rule && !s->r_dead[i]) {
         Term dead_sentinel = term_new(0, TAG_FVR, 255u, 0);
-        s->r_dead_lhs_save[i] = s->lhs[i];
-        s->r_dead_rhs_save[i] = s->rhs[i];
+        s->r_dead_lhs_save[i] = atp_rule_term(s, i, 0u);
+        s->r_dead_rhs_save[i] = atp_rule_term(s, i, 1u);
         s->lhs[i] = dead_sentinel;
         s->rhs[i] = dead_sentinel;
         s->r_dead[i] = 1;
@@ -25233,7 +25520,22 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
 
   // 8.5c: dispatch between KBO and LPO based on which config is
   // attached.  See `atp_compare`.
-  KboCmp c = atp_compare(s, lhs, rhs);
+  KboCmp c;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  {
+    const AtpFtCell *bl = atp_lazy_span_of(lhs);
+    const AtpFtCell *br = atp_lazy_span_of(rhs);
+    if (bl != NULL && br != NULL) {
+      // Lazy commit: the verdict off the spans (the pop already
+      // pre-checked GT/LT admissibility; plain KBO by the arm gate).
+      c = thvm_kbo_ft(bl, br, s->kbo);
+    } else {
+      c = atp_compare(s, lhs, rhs);
+    }
+  }
+#else
+  c = atp_compare(s, lhs, rhs);
+#endif
   switch (c) {
     case KBO_GT: {
       u32 idx = s->n_rules;
