@@ -370,6 +370,14 @@ __attribute__((noinline)) void ft_region2_from_hook(void) {
   // lldb anchor: region-2 ft_from_term (interchange residue hunt).
   __asm__ volatile("");
 }
+__attribute__((noinline)) void ft_region0_from_hook(void) {
+  // lldb anchor: region-0 (untagged) ft_from_term.
+  __asm__ volatile("");
+}
+__attribute__((noinline)) void ft_region0_to_hook(void) {
+  // lldb anchor: region-0 (untagged) ft_to_term.
+  __asm__ volatile("");
+}
 AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
   extern unsigned char g_atp_phase_detail;
   if (g_atp_phase_detail) {
@@ -377,10 +385,12 @@ AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
     extern u8 g_ft_region; extern u64 g_ft_from_by_region[8];
     g_ft_from_by_region[g_ft_region & 7u]++;
     if (g_ft_region == 2u) ft_region2_from_hook();
-    if (g_ft_region == 4u && getenv("THVM_ATP_FT2DBG") != NULL) {
+    if (g_ft_region == 0u) ft_region0_from_hook();
+    if (getenv("THVM_ATP_FT2DBG") != NULL) {
       extern const char *g_thvm_phase;
-      fprintf(stderr, "FT4 from phase=%s tag=%u ext=%u n=%u\n",
-              g_thvm_phase, (u32)term_tag(t), (u32)term_ext(t),
+      fprintf(stderr, "FT%uFROM phase=%s tag=%u ext=%u n=%u\n",
+              (u32)g_ft_region, g_thvm_phase, (u32)term_tag(t),
+              (u32)term_ext(t),
               term_tag(t) == TAG_CTR ? term_ctr_n(t) : 0u);
     }
   }
@@ -533,6 +543,7 @@ Term ft_to_term(const AtpFtCell *x) {
               (u32)g_ft_region, g_thvm_phase, x->sym, (u32)x->arity);
     }
     if (g_ft_region == 2u) ft_region2_to_hook();
+    if (g_ft_region == 0u) ft_region0_to_hook();
   }
   return ft_to_term_rec(x);
 }

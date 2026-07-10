@@ -63,6 +63,18 @@ extern int  atp_ri_find_redex_ft_pub(AtpState *s, AtpFtCell *root,
 extern void atp_ri_ft_sync(AtpState *s);
 #endif
 
+// Cone-replay bracket: when set (with trace_pack on), the NORM_STEP
+// recorder packs each step pair straight from spans -- m->root plus
+// this unchanged other side -- instead of decoding a Term per step.
+// Set/cleared around the cone's slice_record calls only.
+static const AtpFtCell *g_rec_eq_other_ft = NULL;
+// Defined later in the same TU (_.c includes this file first).
+static u64 atp_trace_eq_store_ft(AtpState *s, const AtpFtCell *lhs,
+                                 const AtpFtCell *rhs);
+static u32 atp_trace_push_norm_step_off(AtpState *s, u32 p_a, u32 rule_idx,
+                                        u64 eq_off, u8 side, u8 fwd,
+                                        const u8 *pos, u8 pos_len);
+
 // --- Extension-variable grounding for unorientable equations --------
 //
 // Mirrors `atp_unorient_template` in src/atp/_.c (the Term-side WM
@@ -99,8 +111,10 @@ static int ft_subst_ground_extras(AtpState *s, const AtpFtCell *tmpl,
       // single-cell span; re-encode only when the Term handle moved
       // (GC forward) or the min const itself changed.
       if (s->min_const_ft == NULL || s->min_const_ft_src != s->min_const) {
-        s->min_const_ft     = ft_from_term((AtpFt *)s->ft_arena_ptr,
-                                           s->min_const, 0);
+        // min_const is a 0-ary constructor: build its single cell
+        // directly (exactly what ft_from_term would emit).
+        s->min_const_ft     = ftnew_const((AtpFt *)s->ft_arena_ptr,
+                                          term_ext(s->min_const), 0);
         s->min_const_ft_src = s->min_const;
       }
       mc = s->min_const_ft;
@@ -2778,16 +2792,32 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
     (*m->pn)++;
   }
   if (m->record) {
-    Term step_term = ft_to_term(m->root);
     u8  fwd        = (dir == 0u) ? 1u : 0u;
     u32 rule_trace = (rule < m->s->n_rules) ? m->s->r_trace[rule]
                                             : ATP_TRACE_NONE;
-    Term step_lhs = (m->side == 0u) ? step_term : m->eq_other;
-    Term step_rhs = (m->side == 0u) ? m->eq_other : step_term;
     if (!have_pos) pos_len = 0u;
-    u32 ti = atp_trace_push_norm_step(m->s, *m->chain_tail, rule_trace,
-                                      step_lhs, step_rhs, m->side, fwd,
-                                      pos, pos_len);
+    u32 ti = ATP_TRACE_NONE;
+    if (g_rec_eq_other_ft != NULL && m->s->trace_pack) {
+      // Span-sourced record (the cone bracket): pack the step pair
+      // straight from the live span + the unchanged other side --
+      // no per-step Term decode.
+      u64 off = (m->side == 0u)
+          ? atp_trace_eq_store_ft(m->s, m->root, g_rec_eq_other_ft)
+          : atp_trace_eq_store_ft(m->s, g_rec_eq_other_ft, m->root);
+      if (off != 0u) {
+        ti = atp_trace_push_norm_step_off(m->s, *m->chain_tail,
+                                          rule_trace, off, m->side, fwd,
+                                          pos, pos_len);
+      }
+    }
+    if (ti == ATP_TRACE_NONE) {
+      Term step_term = ft_to_term(m->root);
+      Term step_lhs = (m->side == 0u) ? step_term : m->eq_other;
+      Term step_rhs = (m->side == 0u) ? m->eq_other : step_term;
+      ti = atp_trace_push_norm_step(m->s, *m->chain_tail, rule_trace,
+                                    step_lhs, step_rhs, m->side, fwd,
+                                    pos, pos_len);
+    }
     if (ti != ATP_TRACE_NONE) *m->chain_tail = ti;
   }
   return 1;

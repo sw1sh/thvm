@@ -1648,6 +1648,41 @@ static Term acp_unpack_term(const u8 **pp) {
   }
 }
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Span sibling of acp_unpack_term: build the packed preorder record
+// directly as ftnew_* cells -- no Term hop, so reading a packed trace
+// pair into the span world costs zero interchange.  Total: the NUM
+// case builds the ATPFT_NUM_MARKER pair exactly as ft_from_term
+// would (never present in a rule pair, but the format allows it).
+static AtpFtCell *acp_unpack_ft(AtpFt *a, const u8 **pp);
+static AtpFtCell *acp_unpack_ft(AtpFt *a, const u8 **pp) {
+  u8 disc = *(*pp)++;
+  switch (disc) {
+    case 'C': {
+      u32 label = (u32)acp_get_varint(pp);
+      u32 n     = (u32)acp_get_varint(pp);
+      if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
+      if (n == 0u) return ftnew_const(a, label, 0);
+      AtpFtCell *kids[REWRITE_MAX_ARITY];
+      for (u32 i = 0; i < n; i++) kids[i] = acp_unpack_ft(a, pp);
+      return ftnew_ctr(a, label, (u16)n, kids, 0);
+    }
+    case 'N': {
+      u32 dtype = (u32)acp_get_varint(pp);
+      u64 val   = acp_get_varint(pp);
+      AtpFtCell *kids[2] = {
+        ftnew_const(a, dtype & ~WF_VAR_BIT, 0),
+        ftnew_const(a, (u32)val & ~WF_VAR_BIT, 0),
+      };
+      return ftnew_ctr(a, ATPFT_NUM_MARKER, 2u, kids, 0);
+    }
+    case 'V':
+    default:
+      return ftnew_var(a, (u32)acp_get_varint(pp), 0);
+  }
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
 // Pack a critical pair (lhs, rhs) into a fresh malloc'd byte string;
 // `*out_len` receives its length, `*out_nodes` the total symbol count
 // of lhs+rhs (the CP's selection weight).  Either out-param may be
@@ -14255,6 +14290,34 @@ static u32 atp_trace_push_norm_step(AtpState *s, u32 p_a, u32 rule_idx,
   return idx;
 }
 
+// Packed-offset sibling of atp_trace_push_norm_step: the pair is
+// already in the off-heap store (span-sourced pack); the entry's
+// children carry the usual sentinels.  trace_pack-only by contract.
+static u32 atp_trace_push_norm_step_off(AtpState *s, u32 p_a, u32 rule_idx,
+                                        u64 eq_off, u8 side, u8 fwd,
+                                        const u8 *pos, u8 pos_len) {
+  if (s == NULL || !s->trace_pack || eq_off == 0u) return ATP_TRACE_NONE;
+  if (!atp_trace_ensure(s)) return ATP_TRACE_NONE;
+  Term sent = term_new(0, TAG_NUM, 0, 0);
+  Term children[7 + ATP_PROOF_MAX_DEPTH];
+  children[0] = term_new(0, TAG_NUM, 0, p_a);
+  children[1] = term_new(0, TAG_NUM, 0, rule_idx);
+  children[2] = sent;
+  children[3] = sent;
+  children[4] = term_new(0, TAG_NUM, 0, pos_len);
+  for (u8 k = 0; k < pos_len; k++) {
+    children[5u + k] = term_new(0, TAG_NUM, 0, pos[k]);
+  }
+  children[5u + pos_len]      = term_new(0, TAG_NUM, 0, side);
+  children[5u + pos_len + 1u] = term_new(0, TAG_NUM, 0, fwd);
+  s->trace[s->n_trace] = term_new_ctr(TRACE_NORM_STEP, children,
+                                      7u + pos_len);
+  u32 idx = s->n_trace;
+  s->trace_eq_off[idx] = eq_off;
+  s->n_trace++;
+  return idx;
+}
+
 // CP-normalize chain recorder: iterate one rewrite step at a time
 // via the proof-extracter (atp_proof_rewrite_step), pushing a
 // TRACE_NORM_STEP per fire so the WL extractor walks the chain
@@ -17884,9 +17947,6 @@ static u8 atp_goal_nf_consumers_on(const AtpState *s) {
   if (s->cp_weight_mode == ATP_CP_WEIGHT_GOAL) return 1u;
   if (s->cp_weight_mode == ATP_CP_WEIGHT_LEARNED) return 1u;
   if (s->record_cp_features) return 1u;
-#ifdef THVM_ATP_AC
-  if (thvm_atp_get_ac_mask() != 0ull) return 1u;
-#endif
   return 0u;
 }
 #endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
@@ -18059,10 +18119,31 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
       *nf_r = r;
       return 1;
     }
+    // FT arm ending: the span verdicts are complete (kbo_eq of the
+    // decoded pair IS ft_eq of the spans); the AC fallback runs off
+    // the spans too, materializing the witness pair only on an
+    // AC-join (once per proof).
+#ifdef THVM_ATP_AC
+    if (thvm_atp_get_ac_mask() != 0ull) {
+      AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
+      if (ft_ac_eq(fl, fr, &ac)) {
+        if (l == 0) {
+          l = ft_to_term(fl);
+          r = ft_to_term(fr);
+        }
+        *nf_l = l;
+        *nf_r = r;
+        return 1;
+      }
+    }
+#endif
+    *nf_l = l;
+    *nf_r = r;
+    return 0;
   }
   *nf_l = l;
   *nf_r = r;
-  if (l != 0 && kbo_eq(l, r)) return 1;
+  if (kbo_eq(l, r)) return 1;
 #ifdef THVM_ATP_AC
   if (thvm_atp_get_ac_mask() != 0ull) {
     AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
@@ -20418,6 +20499,66 @@ static int atp_cone_pair_eq(Term al, Term ar, Term bl, Term br) {
   thvm_normalize_vars(&yl, &yr);
   return (kbo_eq(xl, yl) && kbo_eq(xr, yr)) ? 1 : 0;
 }
+
+// Span sibling of atp_cone_eq: the packed pair loads DIRECTLY as
+// spans (acp_unpack_ft, zero interchange).  Unpacked traces fall
+// back to the entry children through ft_from_term -- only the
+// non-trace-pack configs pay that.  Caller owns both spans.
+static int atp_cone_eq_ft(AtpState *s, u32 idx,
+                          AtpFtCell **lhs, AtpFtCell **rhs) {
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  if (s->trace_pack && s->trace_eq_off != NULL) {
+    u64 o = s->trace_eq_off[idx];
+    if (o != 0u) {
+      const u8 *pp = s->trace_eq_buf + (o - 1u);
+      *lhs = acp_unpack_ft(a, &pp);
+      *rhs = acp_unpack_ft(a, &pp);
+      return 1;
+    }
+  }
+  Term e = s->trace[idx];
+  if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 4u) return 0;
+  Term l = term_ctr_at(e, 2);
+  Term r = term_ctr_at(e, 3);
+  if (term_tag(l) == TAG_NUM || term_tag(r) == TAG_NUM) return 0;
+  *lhs = ft_from_term(a, l, 0);
+  *rhs = ft_from_term(a, r, 0);
+  return 1;
+}
+
+static void atp_cone_free_pair(AtpFt *a, AtpFtCell *l, AtpFtCell *r) {
+  if (l != NULL) ft_free_span(a, l, l->end);
+  if (r != NULL) ft_free_span(a, r, r->end);
+}
+
+// Span sibling of atp_cone_pair_eq: ft_eq first, then a jointly
+// var-canonicalized compare on throwaway clones.
+static int atp_cone_pair_eq_ft(AtpFt *a,
+                               const AtpFtCell *al, const AtpFtCell *ar,
+                               const AtpFtCell *bl, const AtpFtCell *br) {
+  if (ft_eq(al, bl) && ft_eq(ar, br)) return 1;
+  AtpFtCell *xl = ft_clone_span(a, al, 0), *xr = ft_clone_span(a, ar, 0);
+  AtpFtCell *yl = ft_clone_span(a, bl, 0), *yr = ft_clone_span(a, br, 0);
+  ft_normalize_vars_pair(xl, xr);
+  ft_normalize_vars_pair(yl, yr);
+  int eq = (ft_eq(xl, yl) && ft_eq(xr, yr)) ? 1 : 0;
+  atp_cone_free_pair(a, xl, xr);
+  atp_cone_free_pair(a, yl, yr);
+  return eq;
+}
+
+// Span-side orientation verdict for a replayed birth: the plain-KBO /
+// LPO streaming compares; any other order materializes the pair once
+// (non-default configs only).
+static u8 atp_cone_orient_gt_ft(AtpState *s, const AtpFtCell *bl,
+                                const AtpFtCell *br) {
+  if (atp_order_is_plain_kbo(s))
+    return (u8)(thvm_kbo_ft(bl, br, s->kbo) == KBO_GT);
+  if (s->lpo != NULL && s->wpo == NULL && s->rpo == NULL)
+    return (u8)(thvm_lpo_ft(bl, br, s->lpo) == LPO_GT);
+  Term l = ft_to_term(bl), r = ft_to_term(br);
+  return (u8)(atp_compare(s, l, r) == KBO_GT);
+}
 #endif
 
 fn void thvm_atp_record_goal_cone(AtpState *s) {
@@ -20512,22 +20653,31 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
     if (term_tag(pe) != TAG_CTR) continue;
     if (term_ext(pe) == TRACE_NORM_STEP) continue;   // already chained
     n_par++;
-    Term el, er;
-    if (!atp_cone_eq(s, i, &el, &er)) continue;
+    AtpFt *fa = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *el = NULL, *er = NULL, *pl = NULL, *pr = NULL;
+    if (!atp_cone_eq_ft(s, i, &el, &er)) continue;
     n_eq++;
-    Term pl, pr;
-    if (!atp_cone_eq(s, p_a, &pl, &pr)) continue;
+    if (!atp_cone_eq_ft(s, p_a, &pl, &pr)) {
+      atp_cone_free_pair(fa, el, er);
+      continue;
+    }
     // Replay-cost guard: a monster parent pair (a raw CP that later
     // avalanche phases can produce) makes the innermost replay itself
     // heavy; such an entry keeps the WL BFS fallback.
-    if (atp_symbol_count(pl) + atp_symbol_count(pr) > 4096u) continue;
-    n_sym++;
-    // A bridge exists only when the entry's pair differs from the
-    // parent's (up to orientation swap / renaming) -- equal pairs
-    // resolve through the WL cplEqSetQ check as before.
-    if (atp_cone_pair_eq(pl, pr, el, er) ||
-        atp_cone_pair_eq(pl, pr, er, el)) continue;
-    if (n_cand < 4096u) cand[n_cand++] = i;
+    u8 keep = 0u;
+    if (ft_symbol_count_span(pl) + ft_symbol_count_span(pr) <= 4096u) {
+      n_sym++;
+      // A bridge exists only when the entry's pair differs from the
+      // parent's (up to orientation swap / renaming) -- equal pairs
+      // resolve through the WL cplEqSetQ check as before.
+      if (!atp_cone_pair_eq_ft(fa, pl, pr, el, er) &&
+          !atp_cone_pair_eq_ft(fa, pl, pr, er, el)) {
+        keep = 1u;
+      }
+    }
+    atp_cone_free_pair(fa, el, er);
+    atp_cone_free_pair(fa, pl, pr);
+    if (keep && n_cand < 4096u) cand[n_cand++] = i;
     if ((i & 0xffffu) == 0u) ATP_CONE_MAYBE_GC();
   }
   ATP_CONE_MAYBE_GC();
@@ -20555,9 +20705,12 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
     Term e = s->trace[ti];
     u32 reason = term_ext(e);
     u32 p_a    = (u32)term_val(term_ctr_at(e, 0));
-    Term pl, pr, el, er;
-    if (!atp_cone_eq(s, ti, &el, &er)) continue;
-    if (!atp_cone_eq(s, p_a, &pl, &pr)) continue;
+    AtpFtCell *pl = NULL, *pr = NULL, *el = NULL, *er = NULL;
+    if (!atp_cone_eq_ft(s, ti, &el, &er)) continue;
+    if (!atp_cone_eq_ft(s, p_a, &pl, &pr)) {
+      atp_cone_free_pair(arena, el, er);
+      continue;
+    }
 
     // Alive rule window at ti (parent birth excluded for the victim
     // replay -- the drain normalizes AFTER the victim left R; the
@@ -20599,13 +20752,13 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
         u32 b = alive[j];
         if (!att_inc[a_i] && birth_ti[b] == p_a) continue;
         if (birth_state[b] == 0u) {
-          Term bl, br;
-          if (!atp_cone_eq(s, birth_ti[b], &bl, &br)) {
+          AtpFtCell *bl = NULL, *br = NULL;
+          if (!atp_cone_eq_ft(s, birth_ti[b], &bl, &br)) {
             birth_state[b] = 2u;
           } else {
-            birth_lft[b]   = ft_from_term(arena, bl, 0);
-            birth_rft[b]   = ft_from_term(arena, br, 0);
-            birth_or[b]    = (atp_compare(s, bl, br) == KBO_GT) ? 1u : 0u;
+            birth_lft[b]   = bl;
+            birth_rft[b]   = br;
+            birth_or[b]    = atp_cone_orient_gt_ft(s, bl, br);
             birth_state[b] = 1u;
           }
         }
@@ -20628,24 +20781,35 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
 
       u32 mark  = s->n_trace;
       u32 chain = p_a;
-      Term l2 = pl, r2 = pr;
+      // Non-pack configs record Term pairs: hand the recorder real
+      // eq_other Terms (decoded once per attempt).  Pack configs (the
+      // default) ride the span bracket -- zero decodes.
+      AtpFtCell *l2 = pl, *r2 = pr;
+      AtpFtCell *l2_own = NULL, *r2_own = NULL;
+      Term eq_other_l = s->trace_pack ? 0 : ft_to_term(pr);
       if (att_lhs[a_i]) {
+        g_rec_eq_other_ft = pr;
         AtpFtCell *lf = atp_rewrite_normalize_ft_slice_record(
-            s, ft_from_term(arena, pl, 0), n_rules0, k, 64u,
-            att_doE[a_i], pr, 0u, &chain);
-        l2 = ft_to_term(lf);
+            s, ft_clone_span(arena, pl, 0), n_rules0, k, 64u,
+            att_doE[a_i], eq_other_l, 0u, &chain);
+        g_rec_eq_other_ft = NULL;
+        l2 = lf;
+        l2_own = lf;
       }
       {
+        g_rec_eq_other_ft = l2;
         AtpFtCell *rf = atp_rewrite_normalize_ft_slice_record(
-            s, ft_from_term(arena, pr, 0), n_rules0, k, 64u,
-            att_doE[a_i], l2, 1u, &chain);
-        r2 = ft_to_term(rf);
+            s, ft_clone_span(arena, pr, 0), n_rules0, k, 64u,
+            att_doE[a_i], s->trace_pack ? 0 : ft_to_term(l2), 1u, &chain);
+        g_rec_eq_other_ft = NULL;
+        r2 = rf;
+        r2_own = rf;
       }
       s->n_rules    = n_rules0;
       s->n_unorient = n_unor0;
 
-      int hit = atp_cone_pair_eq(l2, r2, el, er) ||
-                atp_cone_pair_eq(l2, r2, er, el);
+      int hit = atp_cone_pair_eq_ft(arena, l2, r2, el, er) ||
+                atp_cone_pair_eq_ft(arena, l2, r2, er, el);
       if (hit && chain != p_a && s->n_trace > mark &&
           s->n_trace < s->t_max) {
         // Re-thread: the entry's parent becomes the chain tail.  The
@@ -20675,11 +20839,21 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
                 success ? "FIXED" : "miss",
                 success ? (s->n_trace - mark) : 0u);
       }
+      if (l2_own != NULL) ft_free_span(arena, l2_own, l2_own->end);
+      if (r2_own != NULL) ft_free_span(arena, r2_own, r2_own->end);
     }
+    atp_cone_free_pair(arena, el, er);
+    atp_cone_free_pair(arena, pl, pr);
   }
   if (dbg) {
     fprintf(stderr, "[cone] fixed=%u/%u n_trace %u -> %u\n",
             n_fixed, n_cand, n0_trace, s->n_trace);
+  }
+  if (arena != NULL) {
+    for (u32 b = 0; b < n_births; b++) {
+      if (birth_state[b] == 1u)
+        atp_cone_free_pair(arena, birth_lft[b], birth_rft[b]);
+    }
   }
   free(birth_ti); free(birth_dead); free(birth_state); free(birth_or);
   free(birth_lft); free(birth_rft); free(alive); free(cand);
