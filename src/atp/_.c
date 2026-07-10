@@ -11649,6 +11649,17 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
                     s->cp_pri[i], /*origin=*/0xffffu);
     g_vcp_treat.fl = NULL;
     g_vcp_treat.fr = NULL;
+  } else if (s->cp_packed[i] != NULL) {
+    // Routed/fused push: the Term args are zeros or ride-along
+    // sentinels by the routed-push contract -- the slot's packed
+    // bytes are the authoritative content.  Decode the mirror from
+    // them (byte->FT); converting the Term args fabricated degenerate
+    // spans.
+    const u8 *pp = s->cp_packed[i];
+    AtpFt *fa = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *dfl = acp_unpack_term_ft(fa, &pp, 0);
+    AtpFtCell *dfr = acp_unpack_term_ft(fa, &pp, 0);
+    atp_cp_ft_adopt(s, i, dfl, dfr, s->cp_pri[i], /*origin=*/0xffffu);
   } else {
     atp_cp_ft_set(s, i, lhs, rhs, s->cp_pri[i], /*origin=*/0xffffu);
   }
@@ -23827,9 +23838,14 @@ static void atp_cptr_cp(const char *tag, const CriticalPair *cp) {
 // Term-printing debug env.  The env/compile legs are cached; the
 // AtpState legs are re-checked per push batch (cheap flag reads).
 static u8 atp_cp_push_fuse_ok(const AtpState *s) {
-#if !defined(ATP_VAR_NORM) || defined(ATP_CP_DIAG) || defined(THVM_ATPFT_CPQ)
-  // Without the renumber the classic pack IS the raw pack; the DIAG /
-  // FT-queue builds consume the renumbered Terms unconditionally.
+#if !defined(ATP_VAR_NORM) || defined(ATP_CP_DIAG)
+  // Without the renumber the classic pack IS the raw pack; the DIAG
+  // build consumes the renumbered Terms unconditionally.  (The CPQ
+  // build used to sit in this disable too -- which silently kept the
+  // certified FT-direct formation arm OFF under THVM_ATPFT_CPQ,
+  // running the classic trajectory instead; its slot mirror now
+  // decodes routed pushes from the authoritative packed bytes, so the
+  // fused route is CPQ-safe.)
   (void)s;
   return 0u;
 #else
