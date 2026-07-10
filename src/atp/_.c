@@ -1887,6 +1887,32 @@ static Term atp_rule_term(AtpState *s, u32 i, u8 side) {
   return real;
 }
 
+// Mirror-aware rule-side symbol count: a span's cell count equals the
+// Term's node count (the TAG_NUM marker subtree counts as the ONE
+// node its Term is).  Reads the mirror for lazy slots so weight scans
+// never see sentinel sizes.
+static u32 ft_symbol_count_span(const AtpFtCell *c) {
+  u32 n = 0u;
+  const AtpFtCell *e = (c->end != NULL) ? c->end->next : NULL;
+  for (const AtpFtCell *p = c; p != e; p = p->next) {
+    if ((p->sym & WF_VAR_BIT) == 0u && p->sym == ATPFT_NUM_MARKER) {
+      n++;
+      p = p->end;   // marker + 2 field kids = one Term node
+      continue;
+    }
+    n++;
+  }
+  return n;
+}
+static u32 atp_rule_symbol_count(AtpState *s, u32 i, u8 side) {
+  Term t = side ? s->rhs[i] : s->lhs[i];
+  if (term_tag(t) == TAG_NUM) {
+    const AtpFtCell *m = side ? s->rhs_ft[i] : s->lhs_ft[i];
+    if (m != NULL) return ft_symbol_count_span(m);
+  }
+  return atp_symbol_count(t);
+}
+
 // Trace-pack span bracket: the ORIENT/FVI trace loop arms this with
 // the new rule's mirrors so atp_trace_push's lean arm packs the pair
 // from spans (atp_trace_eq_store_ft) instead of walking the (possibly
@@ -9675,7 +9701,12 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       u32 base = atp_symbol_count(lhs) + atp_symbol_count(rhs);
       u32 max_aw = 0;
       for (u32 i = 0; i < s->n_rules; i++) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        u32 wi = atp_rule_symbol_count(s, i, 0u) +
+                 atp_rule_symbol_count(s, i, 1u);
+#else
         u32 wi = atp_symbol_count(s->lhs[i]) + atp_symbol_count(s->rhs[i]);
+#endif
         if (wi > max_aw) max_aw = wi;
       }
       u32 stagger_limit = (max_aw / 2u);
@@ -11321,7 +11352,11 @@ static void atp_auto_maxw_recompute(AtpState *s) {
   if (s->auto_maxw_rev == s->r_revision + 1u) return;
   u32 deepest = 0u;
   for (u32 k = 0; k < s->n_rules; k++) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    u32 w = atp_rule_symbol_count(s, k, 0u);
+#else
     u32 w = atp_symbol_count(s->lhs[k]);
+#endif
     if (w > deepest) deepest = w;
   }
   s->auto_maxw_rev = s->r_revision + 1u;
@@ -13123,8 +13158,14 @@ lazy_skip_varnorm: ;
     if (dump_at > 0 && (int)s->n_rules == dump_at) {
       for (u32 k = 0; k < s->n_rules; k++) {
         fprintf(stderr, "LIVERULE[%u] lhs=", k);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        atp_dbg_print_term(stderr, atp_rule_term(s, k, 0u));
+        fprintf(stderr, " rhs=");
+        atp_dbg_print_term(stderr, atp_rule_term(s, k, 1u));
+#else
         atp_dbg_print_term(stderr, s->lhs[k]);
         fprintf(stderr, " rhs="); atp_dbg_print_term(stderr, s->rhs[k]);
+#endif
         fputc('\n', stderr);
       }
     }
@@ -19789,8 +19830,13 @@ fn void thvm_atp_interreduce_deficit(AtpState *s,
   Term *tr = (Term *)malloc((size_t)n * sizeof(Term));
   if (tl == NULL || tr == NULL) { free(tl); free(tr); goto done; }
   for (u32 i = 0; i < n; i++) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    u32 ls = atp_rule_symbol_count(s, i, 0u);
+    u32 rs = atp_rule_symbol_count(s, i, 1u);
+#else
     u32 ls = atp_symbol_count(s->lhs[i]);
     u32 rs = atp_symbol_count(s->rhs[i]);
+#endif
     if (ls > maxside) maxside = ls;
     if (rs > maxside) maxside = rs;
     total += (u64)ls + (u64)rs;
@@ -24104,6 +24150,32 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
       return _ft_rv;
     }
   }
+  // FT-arm decline with lazy sentinel operands: resolve each face's
+  // SIDE from the sentinel's value tag (0xFA151 = lhs, 0xFA152 = rhs;
+  // stale-proof -- a mid-sweep materialization by an earlier position
+  // leaves the ctx holding old handles), materialize the two rules,
+  // and rebuild the operands so the classic Term arm below sees real
+  // faces.
+  if (term_tag(lo) == TAG_NUM || term_tag(ro) == TAG_NUM ||
+      term_tag(lin) == TAG_NUM || term_tag(rin) == TAG_NUM) {
+    u8 lo_is_l = (term_tag(lo) == TAG_NUM)
+                     ? (u8)(term_val(lo) == 0xFA151u)
+                     : (u8)(lo == s->lhs[i_out]);
+    u8 lin_src_is_l =
+        (term_tag(g_sw_rn_src_l) == TAG_NUM)
+            ? (u8)(term_val(g_sw_rn_src_l) == 0xFA151u)
+            : (u8)(g_sw_rn_src_l == s->lhs[i_in]);
+    (void)atp_rule_term(s, i_out, 0u);
+    (void)atp_rule_term(s, i_out, 1u);
+    (void)atp_rule_term(s, i_in, 0u);
+    (void)atp_rule_term(s, i_in, 1u);
+    lo = lo_is_l ? s->lhs[i_out] : s->rhs[i_out];
+    ro = lo_is_l ? s->rhs[i_out] : s->lhs[i_out];
+    sw_rename_pair(lin_src_is_l ? s->lhs[i_in] : s->rhs[i_in],
+                   lin_src_is_l ? s->rhs[i_in] : s->lhs[i_in],
+                   &lin, &rin);
+    sub_pre = 0;   // re-address from the real face below
+  }
 #endif
   // PROFILE=2 detail: everything up to the push (subterm addressing, unify,
   // apply, the gen gates) is the walk's "overlap" component, matching the
@@ -24419,8 +24491,50 @@ static u8 sw_pair_exhaust_skip(AtpState *s, u32 f, u32 j, u8 f_is_ft) {
   return (j_exh && !s->r_overlap_done[f] && f_is_ft) ? 1u : 0u;
 }
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Span sibling of cp_walk_positions: identical preorder position
+// enumeration (visit the root CTR, then children left-to-right;
+// variables skipped; the TAG_NUM marker maps to the Term walk's
+// non-CTR skip), including the depth-cap diagnostic.
+static u32 ft_walk_positions(const AtpFtCell *c, u32 *path, u32 depth,
+                             u32 max_depth, CpVisitor visit, void *ctx,
+                             u32 count) {
+  if ((c->sym & WF_VAR_BIT) != 0u) return count;
+  if (c->sym == ATPFT_NUM_MARKER) return count;
+  count = visit(path, depth, ctx);
+  if (depth >= max_depth) {
+    if (c->arity > 0u) g_cp_positions_depth_capped++;
+    return count;
+  }
+  u32 n = (u32)c->arity;
+  const AtpFtCell *kid = c->next;
+  for (u32 i = 0; i < n; i++) {
+    path[depth] = i;
+    count = ft_walk_positions(kid, path, depth + 1u, max_depth, visit,
+                              ctx, count);
+    kid = kid->end->next;
+  }
+  return count;
+}
+
+// Face-walk dispatch: walk the mirror span whenever the caller has it
+// (identical positions for real faces; the ONLY valid walk for a lazy
+// sentinel face).
+static u32 sw_walk_face(Term face, const AtpFtCell *face_ft, u32 *path,
+                        CpVisitor visit, void *ctx) {
+  if (face_ft != NULL) {
+    return ft_walk_positions(face_ft, path, 0u, CP_MAX_DEPTH, visit, ctx,
+                             0u);
+  }
+  return cp_walk_positions(face, path, 0u, CP_MAX_DEPTH, visit, ctx, 0u);
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
 typedef struct {
   AtpState *s; Term lo, ro; u32 i_out, t_out; u8 o_eq, f_is_ft, rev_tree; u32 pushed;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  const AtpFtCell *lo_ft;   // mirror of lo (the walked face)
+#endif
 } SwVaterCtx;
 
 // Emit the CP of one Vater partner hit (outer face at p overlapped by the
@@ -24454,6 +24568,24 @@ static u8 sw_corank_suppressed(SwVaterCtx *c, const u32 *p, u32 p_len,
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   u8 jdr = wmo_trace_dist_rhs(w, hit->trace);
   u8 tf  = (u8)(hit->face ^ jdr);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // The suppression test runs Term-side: materialize lazy faces first
+  // (sides resolved from the sentinel value tag, stale-proof), and
+  // re-address `sub` off the real outer face.
+  if (term_tag(c->lo) == TAG_NUM) {
+    u8 lo_is_l = (u8)(term_val(c->lo) == 0xFA151u);
+    (void)atp_rule_term(s, c->i_out, 0u);
+    (void)atp_rule_term(s, c->i_out, 1u);
+    c->lo = lo_is_l ? s->lhs[c->i_out] : s->rhs[c->i_out];
+    c->ro = lo_is_l ? s->rhs[c->i_out] : s->lhs[c->i_out];
+  }
+  (void)atp_rule_term(s, j, 0u);
+  (void)atp_rule_term(s, j, 1u);
+  if (sub == 0 || term_tag(sub) == TAG_NUM) {
+    sub = cp_subterm_at(c->lo, p, p_len);
+    if (sub == 0) return 0u;
+  }
+#endif
   Term lin, rin;
   sw_rename_pair(tf ? s->rhs[j] : s->lhs[j],
                  tf ? s->lhs[j] : s->rhs[j], &lin, &rin);
@@ -24547,6 +24679,15 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
   SwVaterCtx *c = (SwVaterCtx *)raw;
   AtpState *s = c->s;
   Term sub = cp_subterm_at(c->lo, p, p_len);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  const AtpFtCell *sub_ft = (c->lo_ft != NULL)
+                                ? ft_subterm_at(c->lo_ft, p, p_len) : NULL;
+  if (sub_ft != NULL) {
+    // Span verdicts (identical to the Term checks; valid for lazy
+    // sentinel faces where `sub` is 0 or a NUM).
+    if (ft_is_var(sub_ft)) return c->pushed;
+  } else
+#endif
   if (sub == 0 || term_tag(sub) == TAG_FVR) return c->pushed;
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   static WmoPartnerHit hits[4096];
@@ -24556,6 +24697,9 @@ static u32 sw_vater_visit(const u32 *p, u32 p_len, void *raw) {
   for (u8 t = 0u; t < 2u; t++) {
     u8 tree = c->rev_tree ? (u8)(1u - t) : t;
     u64 _drk_t0 = g_atp_phase_detail ? atp_now_us() : 0;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    g_wmo_query_ft = sub_ft;   // consumed by the DFS fill (NULL = Term)
+#endif
     u32 nh = wmo_tops_enum(w, tree, sub, hits, 4096u);
     if (g_atp_phase_detail) {
       g_atp_cpg_us_rank += atp_now_us() - _drk_t0;
@@ -24916,7 +25060,12 @@ static void sw_mutter_phase(AtpState *s, AtpWmOrder *w, u32 f,
       if (g_atp_phase_detail) g_atp_cpg_us_overlap += atp_now_us() - _dov_t0;
       SwMutterCtx mc = { s, lo, ro, lin, rin, s->r_trace[j], s->r_trace[f],
                          j, f, o_eq, f_in_eq, 0u };
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      sw_walk_face(lo, tf ? s->rhs_ft[j] : s->lhs_ft[j], path,
+                   sw_mutter_visit, &mc);
+#else
       cp_walk_positions(lo, path, 0u, CP_MAX_DEPTH, sw_mutter_visit, &mc, 0u);
+#endif
       *pushed += mc.pushed;
     }
   }
@@ -24949,8 +25098,15 @@ static void sw_self_phase(AtpState *s, u32 f, Term outer, Term outer_r,
   if (root_only)                       // F/C/G are toplevel-only; subterm self
     sc.pushed += sw_form_push(s, outer, outer_r, 0, sc.lin, sc.rin, path, 0u,
                               s->r_trace[f], s->r_trace[f], f, f, f_eq, f_eq);
-  else
+  else {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // Resolve the walked face's mirror by handle (outer is one of the
+    // two stored faces of f, sentinel or real).
+    sw_walk_face(outer, sw_face_ft(s, f, outer), path, sw_self_visit, &sc);
+#else
     cp_walk_positions(outer, path, 0u, CP_MAX_DEPTH, sw_self_visit, &sc, 0u);
+#endif
+  }
   *pushed += sc.pushed;
 }
 
@@ -24985,8 +25141,15 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     u8 f_is_ft = s->use_overlap_exhaust
                  ? atp_is_flat_transposition(s->lhs[f], s->rhs[f]) : 0u;
     SwVaterCtx va = { s, fl, fr, f, s->r_trace[f], f_eq, f_is_ft, 0u, 0u };
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    va.lo_ft = f_dr ? s->rhs_ft[f] : s->lhs_ft[f];
+#endif
     g_sw_phase = 10u;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    sw_walk_face(fl, va.lo_ft, path, sw_vater_visit, &va);
+#else
     cp_walk_positions(fl, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &va, 0u);
+#endif
     pushed += va.pushed;                                       // A toplevel(l)
     g_sw_phase = 11u;
     sw_mutter_phase(s, w, f, fl, fr, f_eq, f_is_ft, 0u, path, &pushed); // B subterm(l)
@@ -25018,8 +25181,15 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
       sw_self_phase(s, f, s->lhs[f], s->rhs[f], s->rhs[f], s->lhs[f],
                     f_eq, 1u, path, &pushed);  // C root l=?r (combo1)
       SwVaterCtx vd = { s, fr, fl, f, s->r_trace[f], f_eq, f_is_ft, 1u, 0u };
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      vd.lo_ft = f_dr ? s->lhs_ft[f] : s->rhs_ft[f];
+#endif
       g_sw_phase = 14u;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      sw_walk_face(fr, vd.lo_ft, path, sw_vater_visit, &vd);
+#else
       cp_walk_positions(fr, path, 0u, CP_MAX_DEPTH, sw_vater_visit, &vd, 0u);
+#endif
       pushed += vd.pushed;                                     // D toplevel(r)
       g_sw_phase = 15u;
       sw_mutter_phase(s, w, f, fr, fl, f_eq, f_is_ft, 1u, path, &pushed); // E subterm(r)

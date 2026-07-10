@@ -2652,9 +2652,23 @@ static u8 atp_wmo_eq_leaflist_rank(AtpState *s, u32 trace, u8 thvm_dir,
 // identically, and callers only read out[0..n_out).
 u64 g_atp_wmo_rc_hit  = 0;
 u64 g_atp_wmo_rc_miss = 0;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Span-query override: when set, the DFS fill takes its query cells
+// from this span instead of the Term (bit-identical cells, same rank
+// cache, same DFS) -- the sweep visitors use it so a lazy rule's
+// sentinel Term never has to materialize for partner retrieval.
+static const struct AtpFtCell *g_wmo_query_ft = NULL;
+#endif
 static u32 wmo_tops_dfs_fill(AtpWmOrder *w, u8 tree, Term query_sub,
                              WmoCell *q, WmoDfs *d) {
-  u32 qn = wmo_face_cells(query_sub, q, WMO_MAX_CELLS);
+  u32 qn;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (g_wmo_query_ft != NULL) {
+    qn = wmo_face_cells_ft(g_wmo_query_ft, q, WMO_MAX_CELLS);
+    g_wmo_query_ft = NULL;   // consume-once: other fills stay Term-keyed
+  } else
+#endif
+  qn = wmo_face_cells(query_sub, q, WMO_MAX_CELLS);
   if (qn == 0u) return 0u;
   u32 rc_hit = WMO_RC_N;
   if (!w->no_rankcache) {
