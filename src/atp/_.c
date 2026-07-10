@@ -1904,6 +1904,28 @@ static u32 ft_symbol_count_span(const AtpFtCell *c) {
   }
   return n;
 }
+// Span var-containment: every var of `a` occurs in `b` (the exact
+// sibling of atp_vars_contained on mirror cells).
+static u8 ft_span_has_var(const AtpFtCell *b, u32 id) {
+  const AtpFtCell *e = (b->end != NULL) ? b->end->next : NULL;
+  for (const AtpFtCell *q = b; q != e; q = q->next) {
+    if ((q->sym & WF_VAR_BIT) != 0u && (q->sym & ~WF_VAR_BIT) == id) {
+      return 1u;
+    }
+  }
+  return 0u;
+}
+static u8 ft_vars_contained_span(const AtpFtCell *a, const AtpFtCell *b) {
+  const AtpFtCell *e = (a->end != NULL) ? a->end->next : NULL;
+  for (const AtpFtCell *q = a; q != e; q = q->next) {
+    if ((q->sym & WF_VAR_BIT) != 0u &&
+        !ft_span_has_var(b, q->sym & ~WF_VAR_BIT)) {
+      return 0u;
+    }
+  }
+  return 1u;
+}
+
 static u32 atp_rule_symbol_count(AtpState *s, u32 i, u8 side) {
   Term t = side ? s->rhs[i] : s->lhs[i];
   if (term_tag(t) == TAG_NUM) {
@@ -1912,6 +1934,11 @@ static u32 atp_rule_symbol_count(AtpState *s, u32 i, u8 side) {
   }
   return atp_symbol_count(t);
 }
+
+// Keep-site staging for the MNF pend spans (set right before
+// mnf_notify_fact; consumed by it).
+static const AtpFtCell *g_mnf_pend_ft_l = NULL;
+static const AtpFtCell *g_mnf_pend_ft_r = NULL;
 
 // Trace-pack span bracket: the ORIENT/FVI trace loop arms this with
 // the new rule's mirrors so atp_trace_push's lean arm packs the pair
@@ -13136,12 +13163,15 @@ lazy_skip_varnorm: ;
   // between the keep and the goal check.
   if (s->use_mnf && s->mnf != NULL) {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-    // MNF fronts are Term-based: a lazy commit materializes the pair
-    // ONLY while the front search is in sweep mode (mode 0 consumes
-    // the pending pairs; the ExpandRewrite switch discards them unread
-    // and never switches back, so sentinels queued after it are inert).
-    if (lazy_canon_l != NULL && mnf_in_sweep_mode(s->mnf)) {
-      lhs = atp_rule_term(s, s->n_rules, 0u);
+    // The front search consumes the pend pair through its SPANS now
+    // (match + instantiate off the mirrors); the Term slots ride along
+    // for the mirror-less fallback and may be sentinels (never walked
+    // when the spans are staged).
+    g_mnf_pend_ft_l = s->lhs_ft[s->n_rules];
+    g_mnf_pend_ft_r = s->rhs_ft[s->n_rules];
+    if ((g_mnf_pend_ft_l == NULL || g_mnf_pend_ft_r == NULL) &&
+        lazy_canon_l != NULL) {
+      lhs = atp_rule_term(s, s->n_rules, 0u);   // defensive: no mirror
       rhs = atp_rule_term(s, s->n_rules, 1u);
     }
 #endif
@@ -16034,6 +16064,14 @@ typedef struct AtpMnf {
   Term     pend_l[256];
   Term     pend_r[256];
   u8       pend_or[256];
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Mirror pointers of the pending pair (stable across GC/compaction;
+  // rules never free their mirror cells).  When set, the fact sweep
+  // matches/instantiates off the spans and the Term slots may hold
+  // sentinels (never walked).
+  const AtpFtCell *pend_l_ft[256];
+  const AtpFtCell *pend_r_ft[256];
+#endif
   u32      n_pend;
   u8       pend_of;          // overflow: fall back to a full re-sweep
   // The join witness (also used by the proof extractor, so always
@@ -16225,6 +16263,11 @@ typedef struct {
   u8        use_fact;
   Term      fl, fr;
   u8        f_orient;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Span twins of the fact pair (the pend queue stores mirror
+  // pointers; a NULL keeps the Term route).
+  const AtpFtCell *fl_ft, *fr_ft;
+#endif
 } MnfExpCtx;
 
 static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
@@ -16282,11 +16325,22 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
     int  slot;
     if (c->use_fact) {
       fl = c->fl; fr = c->fr; orient = c->f_orient;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      if (c->fl_ft != NULL && c->fr_ft != NULL) {
+        vc     = ft_vars_contained_span(c->fl_ft, c->fr_ft);
+        vfwd   = ft_vars_contained_span(c->fr_ft, c->fl_ft);
+        ground = (u8)((c->fl_ft->flags & ATPFT_FLAG_GROUND) != 0u);
+        ln     = ft_symbol_count_span(c->fl_ft);
+        rn     = ft_symbol_count_span(c->fr_ft);
+      } else
+#endif
+      {
       vc     = (u8)atp_vars_contained(fl, fr);
       vfwd   = (u8)atp_vars_contained(fr, fl);
       ground = mnf_term_is_ground(fl);
       ln     = atp_symbol_count(fl);
       rn     = atp_symbol_count(fr);
+      }
       slot   = -2;
     } else {
       u32 j = c->rule_lo + it;
@@ -16296,14 +16350,36 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
       ln = g_mnf_ln[j]; rn = g_mnf_rn[j];
       slot = (int)j;
     }
+    // Mirror patterns for the rule arm (NULL on the fact arm or when a
+    // harness left a slot unmirrored) -- matching/instantiating off the
+    // spans keeps lazy slots un-materialized.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    const AtpFtCell *fl_ft =
+        (slot >= 0) ? s->lhs_ft[slot]
+                    : (c->use_fact ? c->fl_ft : NULL);
+    const AtpFtCell *fr_ft =
+        (slot >= 0) ? s->rhs_ft[slot]
+                    : (c->use_fact ? c->fr_ft : NULL);
+#endif
     if (c->pass == 0u) {
       if (!orient) continue;
       if (ln <= size && n_cand < MNF_POS_CAND_CAP) {
         RewriteSubst sub = {{0}};
-        if (thvm_match(fl, t, &sub)) {
+        u8 hit0;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        if (fl_ft != NULL) hit0 = (u8)ft_match_term(fl_ft, t, &sub);
+        else
+#endif
+        hit0 = thvm_match(fl, t, &sub);
+        if (hit0) {
           struct MnfPosCand *k = &cand[n_cand++];
-          k->whole = cp_replace_at(c->root, p, p_len,
-                                   thvm_subst_apply(fr, &sub));
+          Term red0;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+          if (fr_ft != NULL) red0 = ft_subst_apply_term(fr_ft, &sub);
+          else
+#endif
+          red0 = thvm_subst_apply(fr, &sub);
+          k->whole = cp_replace_at(c->root, p, p_len, red0);
           k->gl_inc = 0u; k->antir_inc = 0u; k->down = 1u;
           k->slot = slot; k->face = 0;
           k->uid = (slot >= 0) ? s->r_uid[slot] : 0xFFFFFFFFu;
@@ -16317,10 +16393,21 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
       if (c->in_sweep && antir_ok && ground && rn <= size &&
           n_cand < MNF_POS_CAND_CAP) {
         RewriteSubst sb = {{0}};
-        if (thvm_match(fr, t, &sb)) {
+        u8 hit1;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        if (fr_ft != NULL) hit1 = (u8)ft_match_term(fr_ft, t, &sb);
+        else
+#endif
+        hit1 = thvm_match(fr, t, &sb);
+        if (hit1) {
           struct MnfPosCand *k = &cand[n_cand++];
-          k->whole = cp_replace_at(c->root, p, p_len,
-                                   thvm_subst_apply(fl, &sb));
+          Term red1;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+          if (fl_ft != NULL) red1 = ft_subst_apply_term(fl_ft, &sb);
+          else
+#endif
+          red1 = thvm_subst_apply(fl, &sb);
+          k->whole = cp_replace_at(c->root, p, p_len, red1);
           k->gl_inc = 0u; k->antir_inc = 1u; k->down = 0u;
           k->slot = slot; k->face = 1;
           k->uid = (slot >= 0) ? s->r_uid[slot] : 0xFFFFFFFFu;
@@ -16333,6 +16420,17 @@ static u32 mnf_exp_visit(const u32 *p, u32 p_len, void *raw) {
       }
     } else {
       if (orient) continue;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      // The grounded-template machinery (atp_unorient_template) stays
+      // Term-side: a lazy unorientable slot materializes here (rare --
+      // the lazy commit declines KBO_UN, so these rows arrive only via
+      // the classic path or later composition).
+      if (slot >= 0 &&
+          (term_tag(fl) == TAG_NUM || term_tag(fr) == TAG_NUM)) {
+        fl = atp_rule_term(s, (u32)slot, 0u);
+        fr = atp_rule_term(s, (u32)slot, 1u);
+      }
+#endif
       for (u8 face = 0u; face < 2u && !m->joined; face++) {
         Term pat = face ? fr : fl;
         Term rep = face ? fl : fr;
@@ -16425,10 +16523,19 @@ static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
 // MNF_BearbeiteEineGl): rule pass then equation pass, reversed-rule
 // steps admitted (in_sweep semantics).
 static void mnf_expand_node_fact(AtpState *s, AtpMnf *m, u32 ni,
-                                 Term fl, Term fr, u8 orient) {
+                                 Term fl, Term fr, u8 orient,
+                                 const AtpFtCell *fl_ft,
+                                 const AtpFtCell *fr_ft) {
   u32 path[CP_MAX_DEPTH];
   MnfExpCtx c = { s, m, ni, m->nodes[ni].term, 0u, 0u,
                   /*in_sweep=*/1u, 0u, /*use_fact=*/1u, fl, fr, orient };
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  c.fl_ft = fl_ft;
+  c.fr_ft = fr_ft;
+#else
+  (void)fl_ft;
+  (void)fr_ft;
+#endif
   cp_walk_positions(c.root, path, 0u, CP_MAX_DEPTH, mnf_exp_visit, &c, 0u);
   if (m->joined) return;
   c.pass = 1u;
@@ -16451,6 +16558,12 @@ static void mnf_notify_fact(struct AtpMnf *m, Term l, Term r, u8 orient) {
   m->pend_l [m->n_pend] = l;
   m->pend_r [m->n_pend] = r;
   m->pend_or[m->n_pend] = orient;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  m->pend_l_ft[m->n_pend] = g_mnf_pend_ft_l;   // staged by the keep site
+  m->pend_r_ft[m->n_pend] = g_mnf_pend_ft_r;
+  g_mnf_pend_ft_l = NULL;
+  g_mnf_pend_ft_r = NULL;
+#endif
   m->n_pend++;
 }
 
@@ -16715,11 +16828,19 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
   }
   for (u32 j = 0; j < s->n_rules; j++) {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-    // The MNF expansion matches rule Terms directly, so a lazy slot
-    // materializes here (once per rule) -- the front search's floor
-    // until MNF goes span-native.
-    (void)atp_rule_term(s, j, 0u);
-    (void)atp_rule_term(s, j, 1u);
+    // Lazy slots: every cache entry computes off the mirrors (the
+    // expansion itself matches span patterns now), so no rule ever
+    // materializes for the front search.
+    if (term_tag(s->lhs[j]) == TAG_NUM &&
+        s->lhs_ft[j] != NULL && s->rhs_ft[j] != NULL) {
+      g_mnf_vc[j]     = ft_vars_contained_span(s->lhs_ft[j], s->rhs_ft[j]);
+      g_mnf_vfwd[j]   = ft_vars_contained_span(s->rhs_ft[j], s->lhs_ft[j]);
+      g_mnf_ground[j] =
+          (u8)((s->lhs_ft[j]->flags & ATPFT_FLAG_GROUND) != 0u);
+      g_mnf_ln[j]     = ft_symbol_count_span(s->lhs_ft[j]);
+      g_mnf_rn[j]     = ft_symbol_count_span(s->rhs_ft[j]);
+      continue;
+    }
 #endif
     g_mnf_vc[j]     = (u8)atp_vars_contained(s->lhs[j], s->rhs[j]);
     g_mnf_vfwd[j]   = (u8)atp_vars_contained(s->rhs[j], s->lhs[j]);
@@ -16850,7 +16971,13 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
             !(m->nodes[ni].irred || m->nodes[ni].parent == ni)) continue;
         if (mnf_loop_guard(s, m)) break;
         mnf_expand_node_fact(s, m, ni, m->pend_l[f], m->pend_r[f],
-                             m->pend_or[f]);
+                             m->pend_or[f],
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+                             m->pend_l_ft[f], m->pend_r_ft[f]
+#else
+                             NULL, NULL
+#endif
+        );
       }
     }
     m->n_pend = 0u;

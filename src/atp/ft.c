@@ -554,6 +554,68 @@ int ft_eq_term(const AtpFtCell *c, Term t) {
   return 0;
 }
 
+// Span-pattern one-way match against a HEAP-TERM subject -- the exact
+// sibling of thvm_match with the pattern read off mirror cells:
+// pattern var binds the subject SUBTREE (repeated var re-checks with
+// kbo_eq), constructor cells compare label + arity + children, and a
+// TAG_NUM-marker pattern never matches (thvm_match's default arm).
+// Bindings land in the same RewriteSubst (Term-typed), so the caller's
+// substitution application is unchanged.
+int ft_match_term(const AtpFtCell *pat, Term term, RewriteSubst *subst) {
+  if (ft_is_var(pat)) {
+    u32 id = ft_var_id(pat);
+    if (id >= REWRITE_MAX_VAR) return 0;
+    if (subst->bindings[id] == 0) {
+      subst->bindings[id] = term;
+      return 1;
+    }
+    return kbo_eq(subst->bindings[id], term);
+  }
+  u32 sym = ft_ctr_sym(pat);
+  if (sym == ATPFT_NUM_MARKER) return 0;   // thvm_match default: no match
+  if (term_tag(term) != TAG_CTR) return 0;
+  if (sym != term_ext(term)) return 0;
+  u32 n = (u32)pat->arity;
+  if (term_ctr_n(term) != n) return 0;
+  const AtpFtCell *kid = pat->next;
+  for (u32 i = 0; i < n; i++) {
+    if (!ft_match_term(kid, term_ctr_at(term, i), subst)) return 0;
+    kid = kid->end->next;
+  }
+  return 1;
+}
+
+// Instantiate a span TEMPLATE under a Term-typed substitution,
+// producing a fresh heap Term -- the exact sibling of
+// thvm_subst_apply(template_term, subst) minus the hash-cons reuse of
+// unchanged subtrees (there is no original Term to reuse; downstream
+// reads are content-based).  Unbound vars pass through as fresh FVRs;
+// the TAG_NUM marker round-trips to its NUM.
+Term ft_subst_apply_term(const AtpFtCell *tmpl, const RewriteSubst *subst) {
+  if (ft_is_var(tmpl)) {
+    u32 id = ft_var_id(tmpl);
+    if (id < REWRITE_MAX_VAR && subst->bindings[id] != 0) {
+      return subst->bindings[id];
+    }
+    return term_new_fvr(id);
+  }
+  u32 sym = ft_ctr_sym(tmpl);
+  u32 n   = (u32)tmpl->arity;
+  if (sym == ATPFT_NUM_MARKER && n == 2u) {
+    const AtpFtCell *dt_cell  = tmpl->next;
+    const AtpFtCell *raw_cell = dt_cell->end->next;
+    return term_new(0, TAG_NUM, ft_ctr_sym(dt_cell), ft_ctr_sym(raw_cell));
+  }
+  if (n > REWRITE_MAX_ARITY) return 0;
+  Term children[REWRITE_MAX_ARITY];
+  const AtpFtCell *kid = tmpl->next;
+  for (u32 i = 0; i < n; i++) {
+    children[i] = ft_subst_apply_term(kid, subst);
+    kid = kid->end->next;
+  }
+  return term_new_ctr(sym, children, n);
+}
+
 // --- Structural equality ----------------------------------------------
 //
 // Recursive: same shape, same sym at every cell (which also captures
