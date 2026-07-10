@@ -362,6 +362,10 @@ static AtpFtCell *ft_from_term_pre(AtpFt *a, Term t, int scratch) {
   return c;
 }
 
+__attribute__((noinline)) void ft_region2_to_hook(void) {
+  // lldb anchor: region-2 ft_to_term (interchange residue hunt).
+  __asm__ volatile("");
+}
 __attribute__((noinline)) void ft_region2_from_hook(void) {
   // lldb anchor: region-2 ft_from_term (interchange residue hunt).
   __asm__ volatile("");
@@ -521,6 +525,7 @@ Term ft_to_term(const AtpFtCell *x) {
       extern const char *g_thvm_phase;
       fprintf(stderr, "FT2TO phase=%s\n", g_thvm_phase);
     }
+    if (g_ft_region == 2u) ft_region2_to_hook();
   }
   return ft_to_term_rec(x);
 }

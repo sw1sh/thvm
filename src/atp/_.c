@@ -13107,8 +13107,30 @@ lazy_skip_varnorm: ;
       // so the exact FT-vs-Term compare decides.  Live-rule faces in
       // the resolution loop below go through the mirrors the same way.
       if (lazy_canon_l != NULL) {
-        if (!ft_eq_term(lazy_canon_l, s->r_dead_lhs_save[k]) ||
-            !ft_eq_term(lazy_canon_r, s->r_dead_rhs_save[k]))
+        if (s->r_dead_lhs_save_ft[k] != NULL &&
+            s->r_dead_rhs_save_ft[k] != NULL) {
+          if (!ft_eq(s->r_dead_lhs_save_ft[k], lazy_canon_l) ||
+              !ft_eq(s->r_dead_rhs_save_ft[k], lazy_canon_r))
+            continue;
+        } else if (term_tag(s->r_dead_lhs_save[k]) == TAG_NUM ||
+                   term_tag(s->r_dead_rhs_save[k]) == TAG_NUM) {
+          continue;   // sentinel save without a span: cannot match
+        } else if (!ft_eq_term(lazy_canon_l, s->r_dead_lhs_save[k]) ||
+                   !ft_eq_term(lazy_canon_r, s->r_dead_rhs_save[k])) {
+          continue;
+        }
+      } else
+#endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      // A lazily-dropped row's save may be a sentinel: compare through
+      // its span (exact FT-vs-Term).
+      if (term_tag(s->r_dead_lhs_save[k]) == TAG_NUM ||
+          term_tag(s->r_dead_rhs_save[k]) == TAG_NUM) {
+        if (s->r_dead_lhs_save_ft[k] == NULL ||
+            s->r_dead_rhs_save_ft[k] == NULL)
+          continue;
+        if (!ft_eq_term(s->r_dead_lhs_save_ft[k], lhs) ||
+            !ft_eq_term(s->r_dead_rhs_save_ft[k], rhs))
           continue;
       } else
 #endif
@@ -13263,8 +13285,8 @@ lazy_skip_varnorm: ;
     for (u32 i = 0; i < new_i; i++) {
       if (s->r_dead[i]) continue;
       if (atp_rule_subsumes_unit(new_lhs, new_rhs, s->lhs[i], s->rhs[i])) {
-        s->r_dead_lhs_save[i] = atp_rule_term(s, i, 0u);
-        s->r_dead_rhs_save[i] = atp_rule_term(s, i, 1u);
+        s->r_dead_lhs_save[i] = s->lhs[i];   // sentinel rides; save_ft is authoritative
+        s->r_dead_rhs_save[i] = s->rhs[i];
         s->lhs[i] = dead_sentinel;
         s->rhs[i] = dead_sentinel;
         s->r_dead[i] = 1;
@@ -13848,11 +13870,10 @@ static AtpFtCell *g_ir_rhs_nf_ft = NULL;
 static void atp_irv_stage_ft(AtpState *s, u32 idx, u8 site) {
 #ifdef THVM_ATPFT_RULES
   g_irv_site = site;
-  // Lazy slots: the victim buffer persists Term VALUES (the drain's
-  // enqueue and Term fallbacks walk them), so materialize sentinels
-  // before the caller captures/pushes.
-  (void)atp_rule_term(s, idx, 0u);
-  (void)atp_rule_term(s, idx, 1u);
+  // Lazy slots ride as sentinels: the staged clones are authoritative
+  // for them (cloned in lockstep at the push; the drain treats working
+  // copies and decodes only what a requeue actually needs -- a joined
+  // victim costs nothing).
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
   g_irv_ft_l = (s->lhs_ft[idx] != NULL)
                  ? ft_clone_span(a, s->lhs_ft[idx], 0) : NULL;
@@ -13907,17 +13928,8 @@ static void atp_irv_push(AtpState *s, Term lhs, Term rhs, u32 parent,
   s->irv_parent[s->n_irv]  = parent;
   s->irv_wmo_key[s->n_irv] = wmo_key;
 #ifdef THVM_ATPFT_RULES
-  // Lazy slots: the caller's captured locals may still hold sentinels
-  // (the stage-side materialization refreshed the SLOT, not the local)
-  // -- decode from the staged clones so the buffer holds real Terms.
-  if (term_tag(lhs) == TAG_NUM && g_irv_ft_l != NULL) {
-    lhs = ft_to_term(g_irv_ft_l);
-  }
-  if (term_tag(rhs) == TAG_NUM && g_irv_ft_r != NULL) {
-    rhs = ft_to_term(g_irv_ft_r);
-  }
-  s->irv_lhs[s->n_irv] = lhs;
-  s->irv_rhs[s->n_irv] = rhs;
+  s->irv_lhs[s->n_irv] = lhs;             // may be a lazy sentinel: the
+  s->irv_rhs[s->n_irv] = rhs;             // staged clones are authoritative
   s->irv_lhs_ft[s->n_irv] = g_irv_ft_l;   // staged clone (or NULL)
   s->irv_rhs_ft[s->n_irv] = g_irv_ft_r;
   { extern u8 *g_irv_site_dbg; extern u32 g_irv_site_dbg_cap;
@@ -18825,10 +18837,8 @@ static void thvm_atp_interreduce_full(AtpState *s) {
       fprintf(stderr, "  FULL-IR delete (slot %u, joinable): %s = %s\n",
               i, la, ra);
     }
-    s->r_dead_lhs_save[i] = (term_tag(old_lhs) == TAG_NUM)
-                                ? atp_rule_term(s, i, 0u) : old_lhs;
-    s->r_dead_rhs_save[i] = (term_tag(old_rhs) == TAG_NUM)
-                                ? atp_rule_term(s, i, 1u) : old_rhs;
+    s->r_dead_lhs_save[i] = old_lhs;   // sentinel rides; save_ft authoritative
+    s->r_dead_rhs_save[i] = old_rhs;
     s->lhs[i] = dead_sentinel;  s->rhs[i] = dead_sentinel;
     s->r_dead[i] = 1;
     s->r_dead_lhs_save_ft[i] = save_lft;
@@ -21348,8 +21358,8 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
     }
     if (!subsumed)
       continue;
-    s->r_dead_lhs_save[i] = atp_rule_term(s, i, 0u);
-    s->r_dead_rhs_save[i] = atp_rule_term(s, i, 1u);
+    s->r_dead_lhs_save[i] = s->lhs[i];   // sentinel rides; save_ft is authoritative
+    s->r_dead_rhs_save[i] = s->rhs[i];
     // Remove-and-re-derive root-overlap ownership: save the subsuming
     // equation's SHAPE on this slot.  Its final birth trace is not yet
     // stamped here (the step loop stamps r_trace after orient_and_add
@@ -22683,8 +22693,8 @@ static void atp_bwd_ground_join_walk(AtpState *s, u32 skip_lo, u32 skip_hi) {
       // are skipped via r_dead/sentinel; the count stays an upper bound).
       if (s->use_gj_delete_rule && !s->r_dead[i]) {
         Term dead_sentinel = term_new(0, TAG_FVR, 255u, 0);
-        s->r_dead_lhs_save[i] = atp_rule_term(s, i, 0u);
-        s->r_dead_rhs_save[i] = atp_rule_term(s, i, 1u);
+        s->r_dead_lhs_save[i] = s->lhs[i];   // sentinel rides; save_ft is authoritative
+        s->r_dead_rhs_save[i] = s->rhs[i];
         s->lhs[i] = dead_sentinel;
         s->rhs[i] = dead_sentinel;
         s->r_dead[i] = 1;
