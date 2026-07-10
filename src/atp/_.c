@@ -13403,6 +13403,19 @@ lazy_skip_varnorm: ;
     }
   }
   atp_ft_rules_verify_push(s, s->n_rules);
+  {
+    // Content-true rule dump (THVM_ATP_RULE_TRACE2): decodes the just-
+    // stored MIRRORS, so lazy sentinels / packed-trace placeholders in
+    // the Term slots never blind the print.
+    static int rt2 = -1;
+    if (rt2 < 0) rt2 = atp_env_on("THVM_ATP_RULE_TRACE2");
+    if (rt2 && s->lhs_ft[s->n_rules] != NULL) {
+      char lb[512], rb[512];
+      atp_pretty_term(ft_to_term(s->lhs_ft[s->n_rules]), lb, sizeof lb);
+      atp_pretty_term(ft_to_term(s->rhs_ft[s->n_rules]), rb, sizeof rb);
+      fprintf(stderr, "RULEADD2 slot=%u %s -> %s\n", s->n_rules, lb, rb);
+    }
+  }
 #endif
   // Remove-and-re-derive detection (flat-subsume only).  If this fresh
   // fact has the exact shape of an equation that E-set subsumption
