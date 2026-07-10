@@ -3271,83 +3271,136 @@ static u8 vcp_order_gate_virtual(AtpState *s, Term lo, Term rin, Term ro,
 // (composite depth); the Term version's frame cap plays the same
 // role.  The CP-walk port's serializer; no caller yet.
 #if defined(THVM_ATPFT_NORM)
+// Iterative emit core: the preorder chain IS the recursive visit
+// order, so CTR descent needs no calls at all -- only a bound-var
+// jump (emit the binding's span, resume after the var) and the one
+// splice point push a resume frame.  Byte- and pool-identical to the
+// recursive walk it replaces (same appearance-order var map, same
+// scratch bytes, same fuse entries; the CTR sz backfill runs as a
+// linear post-pass over the new flat entries).  The splice test is
+// scoped to SUBJECT frames only, exactly like the recursion's
+// at_io=NULL hand-off into bindings (a binding can BE the splice
+// cell when the inner lhs is a bare variable).
 static u8 vcp_ft_emit_cell(const AtpFtCell *c, const AtpFtCell **at_io,
                            const AtpFtCell *rin, const AtpFtSubst *subst,
                            const KboConfig *cfg, AcpNvMap *m,
                            u32 *pos, u32 *nodes, AcpFuse *fz, int sign,
-                           u32 *fpos, u32 depth) {
-  if (depth >= (u32)ACP_FUSE_MAX_DEPTH) return 0;
-  if (at_io != NULL && *at_io == c) {
-    *at_io = NULL;                       // single splice point
-    return vcp_ft_emit_cell(rin, NULL, NULL, subst, cfg, m, pos, nodes,
-                            fz, sign, fpos, depth);
-  }
-  if ((c->sym & WF_VAR_BIT) != 0u) {
-    u32 id = c->sym & ~WF_VAR_BIT;
-    const AtpFtCell *b =
-        (subst != NULL && id < ATPFT_MAX_VARS) ? subst->bind[id] : NULL;
-    if (b != NULL) {
-      return vcp_ft_emit_cell(b, NULL, NULL, subst, cfg, m, pos, nodes,
-                              fz, sign, fpos, depth);
+                           u32 *fpos) {
+  static struct { const AtpFtCell *next, *stop; u8 subj; }
+      rs[ACP_FUSE_MAX_DEPTH];   // single-threaded engine: static, not stack
+  u32 sp = 0u;
+  const u32 f0 = (fz != NULL) ? *fpos : 0u;
+  const AtpFtCell *cur  = c;
+  const AtpFtCell *stop = (c->end != NULL) ? c->end->next : NULL;
+  u8 subj = 1u;
+  for (;;) {
+    while (cur == stop) {
+      if (sp == 0u) goto done;
+      --sp;
+      cur  = rs[sp].next;
+      stop = rs[sp].stop;
+      subj = rs[sp].subj;
     }
-    u32 d = 0u;
-    for (; d < m->n; d++) {
-      if (m->old_id[d] == id) break;
+    if (subj && at_io != NULL && *at_io == cur) {
+      *at_io = NULL;                     // single splice point
+      if (sp >= (u32)ACP_FUSE_MAX_DEPTH) return 0;
+      rs[sp].next = (cur->end != NULL) ? cur->end->next : stop;
+      rs[sp].stop = stop;
+      rs[sp].subj = 1u;
+      sp++;
+      cur  = rin;
+      stop = (rin->end != NULL) ? rin->end->next : NULL;
+      subj = 0u;
+      continue;
     }
-    if (d == m->n) {
-      if (m->n >= REWRITE_MAX_VAR) return 0;   // full map; fall back
-      m->old_id[m->n++] = id;
-      if (fz != NULL) fz->bal[d] = 0;
+    if ((cur->sym & WF_VAR_BIT) != 0u) {
+      u32 id = cur->sym & ~WF_VAR_BIT;
+      const AtpFtCell *b =
+          (subst != NULL && id < ATPFT_MAX_VARS) ? subst->bind[id] : NULL;
+      if (b != NULL) {
+        if (sp >= (u32)ACP_FUSE_MAX_DEPTH) return 0;
+        rs[sp].next = cur->next;         // var is a leaf: end == self
+        rs[sp].stop = stop;
+        rs[sp].subj = subj;
+        sp++;
+        cur  = b;
+        stop = (b->end != NULL) ? b->end->next : NULL;
+        subj = 0u;
+        continue;
+      }
+      u32 d = 0u;
+      for (; d < m->n; d++) {
+        if (m->old_id[d] == id) break;
+      }
+      if (d == m->n) {
+        if (m->n >= REWRITE_MAX_VAR) return 0;   // full map; fall back
+        m->old_id[m->n++] = id;
+        if (fz != NULL) fz->bal[d] = 0;
+      }
+      (*nodes)++;
+      acp_scratch_ensure(*pos, 21u);
+      u8 *bp = g_acp_scratch + *pos;
+      *bp++ = (u8)'V';
+      acp_put_varint(&bp, d);
+      *pos = (u32)(bp - g_acp_scratch);
+      if (fz != NULL) {
+        acpf_ensure(*fpos + 1u);
+        g_acpf_pool[*fpos].sym = -(i32)(d + 1u);
+        g_acpf_pool[*fpos].w   = cfg->var_weight;
+        g_acpf_pool[*fpos].sz  = 1u;
+        g_acpf_pool[*fpos].ar  = 0u;
+        (*fpos)++;
+        fz->phidiff += (long long)sign * (long long)cfg->var_weight;
+        fz->bal[d]  += sign;
+      }
+      cur = cur->next;
+      continue;
     }
+    if (ft_ctr_sym(cur) == ATPFT_NUM_MARKER) return 0;  // NUM: classic path
+    u32 lab = ft_ctr_sym(cur);
+    u32 n   = (u32)cur->arity;
+    if (n > REWRITE_MAX_ARITY) return 0;
     (*nodes)++;
     acp_scratch_ensure(*pos, 21u);
     u8 *bp = g_acp_scratch + *pos;
-    *bp++ = (u8)'V';
-    acp_put_varint(&bp, d);
+    *bp++ = (u8)'C';
+    acp_put_varint(&bp, lab);
+    acp_put_varint(&bp, n);
     *pos = (u32)(bp - g_acp_scratch);
     if (fz != NULL) {
       acpf_ensure(*fpos + 1u);
-      g_acpf_pool[*fpos].sym = -(i32)(d + 1u);
-      g_acpf_pool[*fpos].w   = cfg->var_weight;
-      g_acpf_pool[*fpos].sz  = 1u;
-      g_acpf_pool[*fpos].ar  = 0u;
+      u32 w = (lab < cfg->n_labels) ? cfg->weights[lab] : 0u;
+      g_acpf_pool[*fpos].sym = (i32)lab;
+      g_acpf_pool[*fpos].w   = w;
+      g_acpf_pool[*fpos].ar  = n;
       (*fpos)++;
-      fz->phidiff += (long long)sign * (long long)cfg->var_weight;
-      fz->bal[d]  += sign;
+      fz->phidiff += (long long)sign * (long long)w;
     }
-    return 1;
+    cur = cur->next;                     // preorder: first kid (or next)
   }
-  if (ft_ctr_sym(c) == ATPFT_NUM_MARKER) return 0;  // NUM: classic path
-  u32 lab = ft_ctr_sym(c);
-  u32 n   = (u32)c->arity;
-  if (n > REWRITE_MAX_ARITY) return 0;
-  (*nodes)++;
-  acp_scratch_ensure(*pos, 21u);
-  u8 *bp = g_acp_scratch + *pos;
-  *bp++ = (u8)'C';
-  acp_put_varint(&bp, lab);
-  acp_put_varint(&bp, n);
-  *pos = (u32)(bp - g_acp_scratch);
-  u32 here = 0u;
+done:
   if (fz != NULL) {
-    acpf_ensure(*fpos + 1u);
-    here = *fpos;
-    (*fpos)++;
-    u32 w = (lab < cfg->n_labels) ? cfg->weights[lab] : 0u;
-    g_acpf_pool[here].sym = (i32)lab;
-    g_acpf_pool[here].w   = w;
-    g_acpf_pool[here].ar  = n;
-    fz->phidiff += (long long)sign * (long long)w;
-  }
-  const AtpFtCell *kid = c->next;
-  for (u32 i = 0; i < n; i++) {
-    if (!vcp_ft_emit_cell(kid, at_io, rin, subst, cfg, m, pos, nodes,
-                          fz, sign, fpos, depth + 1u)) {
-      return 0;
+    // sz backfill: preorder + arity determine every CTR's flat-subtree
+    // length (identical to the recursion's *fpos - here).
+    static struct { u32 idx; u32 kids; } open[ACP_FUSE_MAX_DEPTH];
+    u32 on = 0u;
+    for (u32 i = f0; i < *fpos; i++) {
+      u32 ar = g_acpf_pool[i].ar;
+      if (ar > 0u) {
+        if (on >= (u32)ACP_FUSE_MAX_DEPTH) return 0;
+        open[on].idx = i;
+        open[on].kids = ar;
+        on++;
+        continue;
+      }
+      // Leaf (var or 0-ary CTR): sz = 1, then cascade completions.
+      g_acpf_pool[i].sz = 1u;
+      while (on > 0u && --open[on - 1u].kids == 0u) {
+        on--;
+        g_acpf_pool[open[on].idx].sz = i + 1u - open[on].idx;
+      }
     }
-    kid = kid->end->next;
   }
-  if (fz != NULL) g_acpf_pool[here].sz = *fpos - here;
   return 1;
 }
 
@@ -3361,7 +3414,7 @@ static u8 vcp_ft_emit_side(const AtpFtCell *root, const AtpFtCell *at,
   const AtpFtCell *start = (at != NULL && at == root) ? rin : root;
   const AtpFtCell **aio  = (at != NULL && at == root) ? NULL : &at_local;
   return vcp_ft_emit_cell(start, aio, rin, subst, cfg, m, pos, nodes,
-                          fz, sign, fpos, 0u);
+                          fz, sign, fpos);
 }
 #endif // THVM_ATPFT_NORM
 
