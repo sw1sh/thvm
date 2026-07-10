@@ -19495,7 +19495,19 @@ static void atp_wm_demote_drain(AtpState *s) {
     u32  parent = s->irv_parent[v];
     u32  trace_mark = s->n_trace;
     u8   treated = 0u;
-    if (atp_symbol_count(l) + atp_symbol_count(r) < WM_BEHANDELN_GATE) {
+    u32 vsz;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if ((term_tag(l) == TAG_NUM || term_tag(r) == TAG_NUM) &&
+        s->irv_lhs_ft[v] != NULL && s->irv_rhs_ft[v] != NULL) {
+      // Sentinel victim: the KPBehandeln size gate reads the staged
+      // clones (a sentinel would count as one node and misroute the
+      // raw class into treatment).
+      vsz = ft_symbol_count_span(s->irv_lhs_ft[v]) +
+            ft_symbol_count_span(s->irv_rhs_ft[v]);
+    } else
+#endif
+    vsz = atp_symbol_count(l) + atp_symbol_count(r);
+    if (vsz < WM_BEHANDELN_GATE) {
       treated = 1u;
       if (s->record_norm_steps) {
         // Record the oriented-only renormalize as a NORM_STEP chain
@@ -19534,20 +19546,42 @@ static void atp_wm_demote_drain(AtpState *s) {
                     vfr != NULL ? ft_eq_term(vfr, r) : -1);
           }
         }
+        u8 v_lazy = (u8)(term_tag(l) == TAG_NUM || term_tag(r) == TAG_NUM);
         if (s->use_mixmost_nf && vfl != NULL && vfr != NULL &&
-            ft_eq_term(vfl, l) && ft_eq_term(vfr, r)) {
+            (v_lazy || (ft_eq_term(vfl, l) && ft_eq_term(vfr, r)))) {
+          // A SENTINEL victim's staged clones are authoritative by the
+          // lockstep-at-push invariant (the ft_eq_term guard protects
+          // only real-Term captures).  Normalize WORKING COPIES so the
+          // pristine clones survive for the requeue decode; a joined
+          // victim decodes nothing.
           atp_ft_mirror_ensure(s);
-          AtpFtCell *lf = atp_rules_only_normalize_ft(s, vfl, NORM_CAP);
-          AtpFtCell *rf = atp_rules_only_normalize_ft(s, vfr, NORM_CAP);
-          s->irv_lhs_ft[v] = NULL;   // consumed (spliced in place)
-          s->irv_rhs_ft[v] = NULL;
+          AtpFt *va_ = (AtpFt *)s->ft_arena_ptr;
+          AtpFtCell *lf = atp_rules_only_normalize_ft(
+              s, ft_clone_span(va_, vfl, 0), NORM_CAP);
+          AtpFtCell *rf = atp_rules_only_normalize_ft(
+              s, ft_clone_span(va_, vfr, 0), NORM_CAP);
           if (ft_eq(lf, rf)) {
+            ft_free_span(va_, vfl, vfl->end);
+            ft_free_span(va_, vfr, vfr->end);
+            s->irv_lhs_ft[v] = NULL;
+            s->irv_rhs_ft[v] = NULL;
             s->n_trace = trace_mark;
             s->n_wm_demote_joined++;
             continue;
           }
-          l = ft_eq_term(lf, l) ? l : ft_to_term(lf);
-          r = ft_eq_term(rf, r) ? r : ft_to_term(rf);
+          // Requeue: an NF-unchanged side reuses the buffered Term when
+          // real, else decodes the pristine clone; a changed side
+          // decodes the NF.
+          l = ft_eq(lf, vfl)
+                  ? ((term_tag(l) == TAG_NUM) ? ft_to_term(vfl) : l)
+                  : ft_to_term(lf);
+          r = ft_eq(rf, vfr)
+                  ? ((term_tag(r) == TAG_NUM) ? ft_to_term(vfr) : r)
+                  : ft_to_term(rf);
+          ft_free_span(va_, vfl, vfl->end);
+          ft_free_span(va_, vfr, vfr->end);
+          s->irv_lhs_ft[v] = NULL;
+          s->irv_rhs_ft[v] = NULL;
         } else {
           if (vfl != NULL) {
             ft_free_span((AtpFt *)s->ft_arena_ptr, vfl, vfl->end);
@@ -19575,13 +19609,17 @@ static void atp_wm_demote_drain(AtpState *s) {
     }
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
     // Raw-class / record-path victims never touched their captured
-    // spans -- return them so the arena free list gets them back.
+    // spans: a sentinel victim decodes its requeue pair from the
+    // pristine clones first (the enqueue below packs the Terms), then
+    // the spans go back to the free list.
     if (s->irv_lhs_ft[v] != NULL) {
+      if (term_tag(l) == TAG_NUM) l = ft_to_term(s->irv_lhs_ft[v]);
       ft_free_span((AtpFt *)s->ft_arena_ptr, s->irv_lhs_ft[v],
                    s->irv_lhs_ft[v]->end);
       s->irv_lhs_ft[v] = NULL;
     }
     if (s->irv_rhs_ft[v] != NULL) {
+      if (term_tag(r) == TAG_NUM) r = ft_to_term(s->irv_rhs_ft[v]);
       ft_free_span((AtpFt *)s->ft_arena_ptr, s->irv_rhs_ft[v],
                    s->irv_rhs_ft[v]->end);
       s->irv_rhs_ft[v] = NULL;

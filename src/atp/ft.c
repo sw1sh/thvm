@@ -517,6 +517,10 @@ Term ft_to_term(const AtpFtCell *x) {
     extern u64 g_ft_to_calls; g_ft_to_calls++;
     extern u8 g_ft_region; extern u64 g_ft_to_by_region[8];
     g_ft_to_by_region[g_ft_region & 7u]++;
+    if (g_ft_region == 2u && getenv("THVM_ATP_FT2DBG") != NULL) {
+      extern const char *g_thvm_phase;
+      fprintf(stderr, "FT2TO phase=%s\n", g_thvm_phase);
+    }
   }
   return ft_to_term_rec(x);
 }
