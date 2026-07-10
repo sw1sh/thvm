@@ -55,7 +55,31 @@ fn u8 thvm_match(Term pattern, Term term, RewriteSubst *subst) {
       }
       return 1;
     }
-    default: return 0;
+    default:
+      // ATP lazy-rule sentinel tripwire (THVM_ATP_SENTINEL_STRICT=1):
+      // a TAG_NUM pattern with the lazy-store value tags reaching the
+      // matcher means some consumer read a rule slot raw instead of
+      // materializing through atp_rule_term/the mirrors -- the silent
+      // never-matches failure class behind the lazy+classic formation
+      // collapse (e798dba8).  Abort loudly so the blind site can be
+      // enumerated empirically instead of by code audit.  Zero cost
+      // unset (one cached getenv).
+      if (term_tag(pattern) == TAG_NUM &&
+          (term_val(pattern) == 0xFA151u || term_val(pattern) == 0xFA152u)) {
+        static int strict = -1;
+        if (strict < 0) {
+          const char *e = getenv("THVM_ATP_SENTINEL_STRICT");
+          strict = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+        }
+        if (strict) {
+          fprintf(stderr,
+                  "SENTINEL-STRICT: lazy rule sentinel 0x%llX reached "
+                  "thvm_match as a pattern\n",
+                  (unsigned long long)term_val(pattern));
+          abort();
+        }
+      }
+      return 0;
   }
 }
 

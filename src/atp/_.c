@@ -13429,6 +13429,25 @@ lazy_skip_varnorm: ;
       fprintf(stderr, "RULEADD2 slot=%u %s -> %s\n", s->n_rules, lb, rb);
     }
   }
+  // Materialize-at-birth: decode the just-adopted mirrors into the Term
+  // slots so NO consumer outside the birth bracket ever sees a NUM
+  // sentinel.  The 2026-07-11 sentinel-consumer audit confirmed 15 raw
+  // slot-read sites (batch former false SATURATION under
+  // --preset=none --mixmost-nf, ground-join drops 22014 -> 0, blind
+  // interreduce victims, MNF scan, WM -gj fact test, TFindProof rule
+  // exports, ...) -- a whack-a-mole surface.  The span-native fast
+  // paths all read the MIRRORS and keep their wins; the slots' laziness
+  // only ever saved these two decodes per rule birth (~microseconds),
+  // which is noise against the correctness surface.  The sentinel
+  // machinery INSIDE the bracket (orient verdicts off spans) is
+  // untouched, and lazy == eager everywhere else by construction --
+  // exactly the kill-switch representation the suites certify.
+  if (term_tag(s->lhs[s->n_rules]) == TAG_NUM && s->lhs_ft[s->n_rules] != NULL) {
+    s->lhs[s->n_rules] = ft_to_term(s->lhs_ft[s->n_rules]);
+  }
+  if (term_tag(s->rhs[s->n_rules]) == TAG_NUM && s->rhs_ft[s->n_rules] != NULL) {
+    s->rhs[s->n_rules] = ft_to_term(s->rhs_ft[s->n_rules]);
+  }
 #endif
   // Remove-and-re-derive detection (flat-subsume only).  If this fresh
   // fact has the exact shape of an equation that E-set subsumption
@@ -19683,6 +19702,25 @@ static void thvm_atp_interreduce_full(AtpState *s) {
 
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0 || added.first == 0) return 0;
+  // SENTINEL_STRICT localization: report any rule slot still holding a
+  // lazy sentinel at interreduce entry (post materialize-at-birth this
+  // must be empty; a hit names the bypassing store path).
+  {
+    static int sst = -1;
+    if (sst < 0) {
+      const char *e = getenv("THVM_ATP_SENTINEL_STRICT");
+      sst = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+    }
+    if (sst) {
+      for (u32 q = 0; q < s->n_rules; q++) {
+        if (term_tag(s->lhs[q]) == TAG_NUM || term_tag(s->rhs[q]) == TAG_NUM) {
+          fprintf(stderr, "SENTINEL-STRICT: slot %u holds sentinel at "
+                          "interreduce entry (lhs=%u rhs=%u)\n",
+                  q, term_tag(s->lhs[q]), term_tag(s->rhs[q]));
+        }
+      }
+    }
+  }
   if (s->use_wm_interred) return thvm_atp_interreduce_wm(s, added);
   // Pass-start drain-key snapshot (see AtpWmoDefer above the _wm fn).
   AtpWmoDefer wd = {0};
@@ -19976,12 +20014,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
                     g_thvm_phase = "ir_rhs64_all";
                     atp_ft_mirror_ensure(s);
                     AtpFtCell *nf = atp_rewrite_normalize_ft(s, st, 64u);
-                    // Lazy mode: the composed RHS commits as a fresh
-                    // side sentinel; the NF span becomes the mirror and
-                    // the SIMPLIFY trace's eq pair packs off the spans.
-                    r_reduced = atp_lazy_rules_on()
-                                    ? term_new(0, TAG_NUM, 0, 0xFA152u)
-                                    : ft_to_term(nf);
+                    // The composed RHS commits DECODED: a sentinel here
+                    // lands in the victim's rhs slot outside any birth
+                    // bracket -- one of the 15 audited raw-read hazards
+                    // (materialize-at-birth policy, 2026-07-11).  The
+                    // SIMPLIFY trace's eq pair still packs off the NF
+                    // span, which the commit adopts as the mirror.
+                    r_reduced = ft_to_term(nf);
                     g_ir_rhs_nf_ft = nf;   // commit adopts as the mirror
                   }
                 }
@@ -23956,8 +23995,13 @@ static u8 atp_gj_perm_valuable(Term l, Term r) {
 // unprotect the smaller instance face is skipped -- conservative,
 // see gj_normalize).
 static u8 atp_gj_fact_test(AtpState *s, u32 i) {
-  Term l = s->lhs[i];
-  Term r = s->rhs[i];
+  // Lazy slots: this test runs at rule-push time, BEFORE the sweep-entry
+  // materializer -- a NUM sentinel here collects 0 variables and the
+  // n_vars <= 1 gate misclassifies every lazy-born fact HOPELESS
+  // (sentinel-consumer audit, 2026-07-11).  Materialize side-exact from
+  // the mirrors first; no-op on eager slots.
+  Term l = atp_rule_term(s, i, 0u);
+  Term r = atp_rule_term(s, i, 1u);
   u32 var_ids[ATP_GJ_MAX_VARS];
   u32 n_vars = 0;
   u8 var_overflow =
@@ -25029,6 +25073,20 @@ extern int g_cp_visit_trace;
 static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
                           CriticalPair *buf, u32 cap, u32 *combo_end) {
   u32 cnt = 0;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Lazy slots: the Term-side branch below (the only batch former when
+  // THVM_ATPFT_UNIFY is not compiled) reads s->lhs/s->rhs raw -- a NUM
+  // sentinel renames to a leaf, unifies with nothing, and the pair
+  // silently forms zero CPs (sentinel-consumer audit, 2026-07-11; the
+  // batch sibling of the single-walk sweep-entry fix).  Materialize the
+  // two rules side-exactly from the mirrors; no-op on eager slots.
+  if (atp_lazy_rules_on()) {
+    (void)atp_rule_term(s, i, 0u);
+    (void)atp_rule_term(s, i, 1u);
+    (void)atp_rule_term(s, j, 0u);
+    (void)atp_rule_term(s, j, 1u);
+  }
+#endif
   // Gated CP-overlap trace for a target rule pair (THVM_CP_TRACE_I/J): pins a
   // missed superposition by logging per-position thvm_unify pass/fail.
   {
