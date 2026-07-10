@@ -11677,6 +11677,19 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   u32 seq        = s->cp_seq_next++;
   s->cp_seq[i]   = seq;
   if (s->cp_uid_a != NULL) { s->cp_uid_a[i] = g_cp_uid_a; s->cp_uid_b[i] = g_cp_uid_b; }
+  // Fuse-neutral insert stream (THVM_ATP_INSERT_TRACE): one line per
+  // engine insert with the comparator keys.  Both formation arms funnel
+  // through this function, and the env is NOT in atp_cp_push_fuse_ok's
+  // list, so the streams are directly diffable across arms -- the probe
+  // that pins arm-divergence bugs (the lazy+classic collapse).
+  {
+    static int instr = -1;
+    if (instr < 0) instr = atp_env_on("THVM_ATP_INSERT_TRACE");
+    if (instr) {
+      fprintf(stderr, "INSTR seq=%u pri=%u nodes=%u kind=%u\n",
+              seq, s->cp_pri[i], cp_nodes, kind);
+    }
+  }
   atp_cp_form_trace(seq, cp_nodes, lhs, rhs);
   // All comparator keys for row i are final -- stamp the packed node
   // (refresh invariant) before the sift compares against it.
@@ -26798,6 +26811,28 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
   if (first > last) return 0u;
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   if (w == NULL) return 0u;   // dispatch guarantees s->wmo != NULL
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Classic (fuse-off) arm: the sweeps and their per-position Term arm
+  // consume rule faces as TERMS (the fl/fr capture, sw_rename_pair
+  // sources, cp_subterm_at).  Under the lazy rule store those slots
+  // hold NUM sentinels whose value tags (0xFA151 = lhs) LIE for
+  // orient-swapped births -- push_rule stores the pair swapped, the
+  // born-lhs sentinel lands in the rhs slot -- so the per-position
+  // sentinel resolution picked the wrong face (a bare variable), the
+  // walk positions found no subterms, and the sweeps formed almost
+  // nothing: the lazy+classic collapse (OA classic 79 steps/5 rules vs
+  // the certified 200/86, bisected to the lazy default flip 3f8b3952).
+  // Materialize every rule's Terms from the mirrors (side-exact by
+  // construction) BEFORE any face capture: the sentinel block never
+  // fires and no value-tag guessing happens.  Fused arm untouched;
+  // eager kill-config a no-op (slots already real).
+  if (atp_lazy_rules_on() && !atp_cp_push_fuse_ok(s)) {
+    for (u32 mi = 0; mi < s->n_rules; mi++) {
+      (void)atp_rule_term(s, mi, 0u);
+      (void)atp_rule_term(s, mi, 1u);
+    }
+  }
+#endif
   u32 path[CP_MAX_DEPTH];
   u32 pushed = 0u;
   for (u32 f = first; f < last; f++) {
