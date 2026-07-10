@@ -143,15 +143,17 @@ static void tp_giveup(const char *why) {
   exit(1);
 }
 
-#define TP_MAX_CLAUSES  512
-#define TP_MAX_SYMS     2048
-#define TP_MAX_VARS     256
+#define TP_MAX_CLAUSES  65536
+#define TP_MAX_SYMS     262144
+#define TP_MAX_VARS     4096
 #define TP_NAME_LEN     64
 #define TP_SIDE_LEN     2048
 
 typedef struct {
   char lhs[TP_SIDE_LEN], rhs[TP_SIDE_LEN];
   int  neg;
+  int  conj;   // TPTP role negated_conjecture (a positive '=' unit may
+               // carry it: the refutation encoding's hypothesis parts)
 } TpClause;
 
 typedef struct {
@@ -258,23 +260,54 @@ static char *tp_preprocess(const char *problem_path, const char *raw) {
   return out;
 }
 
-static void tp_sym_note(TpProblem *tp, const char *name, size_t n, int arity) {
+// Open-addressing name hash over the symbol table: the linear lookup is
+// O(n_syms) per token, unusable on the CSR-class 8k-clause / 10k-symbol
+// problems.  Key = name only (the arity-clash check still runs on hit).
+#define TP_SYM_HASH_SLOTS (TP_MAX_SYMS * 2)
+static int g_tp_sym_hash[TP_SYM_HASH_SLOTS];
+static u8  g_tp_sym_hash_init = 0;
+static u64 tp_name_hash(const char *name, size_t n) {
+  u64 h = 1469598103934665603ull;
+  for (size_t i = 0; i < n; i++) h = (h ^ (u8)name[i]) * 1099511628211ull;
+  return h;
+}
+static int tp_sym_note_ix(TpProblem *tp, const char *name, size_t n, int arity) {
   if (n >= TP_NAME_LEN) n = TP_NAME_LEN - 1;
-  for (int i = 0; i < tp->n_syms; i++) {
-    if (strlen(tp->syms[i].name) == n && memcmp(tp->syms[i].name, name, n) == 0) {
-      if (tp->syms[i].arity != arity) {
+  if (!g_tp_sym_hash_init) {
+    for (int i = 0; i < TP_SYM_HASH_SLOTS; i++) g_tp_sym_hash[i] = -1;
+    g_tp_sym_hash_init = 1;
+  }
+  u64 h = tp_name_hash(name, n);
+  u32 slot = (u32)(h % (u64)TP_SYM_HASH_SLOTS);
+  for (;;) {
+    int ix = g_tp_sym_hash[slot];
+    if (ix < 0) break;
+    if (strlen(tp->syms[ix].name) == n &&
+        memcmp(tp->syms[ix].name, name, n) == 0) {
+      if (tp->syms[ix].arity != arity) {
         fprintf(stderr, "FindProof: symbol %.*s used with arities %d and %d\n",
-                (int)n, name, tp->syms[i].arity, arity);
+                (int)n, name, tp->syms[ix].arity, arity);
         exit(2);
       }
-      return;
+      return ix;
     }
+    slot = (slot + 1u) % (u32)TP_SYM_HASH_SLOTS;
   }
   if (tp->n_syms >= TP_MAX_SYMS) tp_giveup("problem exceeds symbol bound");
   memcpy(tp->syms[tp->n_syms].name, name, n);
   tp->syms[tp->n_syms].name[n] = '\0';
   tp->syms[tp->n_syms].arity = arity;
-  tp->n_syms++;
+  g_tp_sym_hash[slot] = tp->n_syms;
+  return tp->n_syms++;
+}
+static void tp_sym_note(TpProblem *tp, const char *name, size_t n, int arity) {
+  (void)tp_sym_note_ix(tp, name, n, arity);
+}
+// Reset the symbol table + hash (the post-SInE signature rebuild).
+static void tp_syms_reset(TpProblem *tp) {
+  tp->n_syms = 0;
+  tp->n_vars = 0;
+  for (int i = 0; i < TP_SYM_HASH_SLOTS; i++) g_tp_sym_hash[i] = -1;
 }
 
 static void tp_var_note(TpProblem *tp, const char *name, size_t n) {
@@ -338,16 +371,23 @@ static void tp_parse(TpProblem *tp, const char *text) {
     // split off name and role at the first two top-level commas
     int d = 0, commas = 0;
     const char *lit = NULL;
+    const char *role = NULL;
     for (size_t i = 0; i < blen; i++) {
       char c = body[i];
       if (c == '(') d++;
       else if (c == ')') d--;
       else if (c == ',' && d == 0) {
         commas++;
+        if (commas == 1) role = body + i + 1;
         if (commas == 2) { lit = body + i + 1; break; }
       }
     }
     if (lit == NULL) continue;
+    int is_conj = 0;
+    if (role != NULL) {
+      size_t rl = (size_t)(lit - 1 - role);
+      is_conj = (memmem(role, rl, "negated_conjecture", 18) != NULL);
+    }
     size_t llen = blen - (size_t)(lit - body);
     // trim spaces and one level of ( )
     while (llen > 0 && isspace((unsigned char)*lit)) { lit++; llen--; }
@@ -385,6 +425,7 @@ static void tp_parse(TpProblem *tp, const char *text) {
     memcpy(cl->lhs, lit, ln); cl->lhs[ln] = '\0';
     memcpy(cl->rhs, lit + rs, rn); cl->rhs[rn] = '\0';
     cl->neg = neg;
+    cl->conj = is_conj;
     if (neg) {
       // uppercase-initial token anywhere in the goal = goal variable
       for (const char *q = lit; *q != '\0' && q < lit + llen; q++) {
@@ -404,6 +445,144 @@ static int tp_sym_cmp(const void *a, const void *b) {
   const TpSym *x = (const TpSym *)a, *y = (const TpSym *)b;
   if (x->arity != y->arity) return x->arity - y->arity;
   return strcmp(x->name, y->name);
+}
+
+// ── SInE-style goal-directed axiom selection (Hoder-Voronkov shape) ──
+// The CSR-class UEQ problems are 8k-clause knowledge bases; completion
+// drowns before touching the goal.  Select the goal-relevant slice:
+//   gen(s)   = number of clauses containing symbol s (generality);
+//   trigger  = clause C is triggered by symbol s in C iff
+//              gen(s) <= tol * min_gen(C)  (s is near-least-general in C);
+//   reach    = start from the negative units' symbols; a triggered
+//              clause joins the selection and its symbols become
+//              reached; iterate to fixpoint (or `rounds` levels).
+// The encoding glue (ifeq4/true, generality in the thousands) never
+// triggers, exactly as SInE intends.  Negative units are always kept.
+// Returns the kept count; compacts tp->cls in place.
+static int tp_sine_pass(TpProblem *tp, double tol, int rounds) {
+  int n = tp->n_cls;
+  enum { SINE_CS = 48 };
+  int (*csym)[SINE_CS] = malloc((size_t)n * sizeof *csym);
+  int *csym_n = calloc((size_t)n, sizeof(int));
+  u32 *gen    = calloc((size_t)tp->n_syms, sizeof(u32));
+  u8  *reach  = calloc((size_t)tp->n_syms, 1);
+  u8  *keep   = calloc((size_t)n, 1);
+  if (csym == NULL || csym_n == NULL || gen == NULL || reach == NULL ||
+      keep == NULL) tp_giveup("OOM in axiom selection");
+  // Per-clause dedup'd symbol-id lists (functors + constants, no vars).
+  for (int c = 0; c < n; c++) {
+    const char *sides[2] = { tp->cls[c].lhs, tp->cls[c].rhs };
+    for (int sd = 0; sd < 2; sd++) {
+      const char *pp = sides[sd];
+      while (*pp != '\0') {
+        if (isalnum((unsigned char)*pp) || *pp == '_') {
+          const char *name = pp;
+          size_t ln = 0;
+          while (isalnum((unsigned char)pp[ln]) || pp[ln] == '_') ln++;
+          if (!isupper((unsigned char)*name)) {
+            const char *q = pp + ln;
+            while (isspace((unsigned char)*q)) q++;
+            int arity = 0;
+            if (*q == '(') {
+              int depth = 1; arity = 1;
+              const char *r = q + 1;
+              while (*r != '\0' && depth > 0) {
+                if (*r == '(') depth++;
+                else if (*r == ')') depth--;
+                else if (*r == ',' && depth == 1) arity++;
+                r++;
+              }
+            }
+            int ix = tp_sym_note_ix(tp, name, ln, arity);
+            u8 seen = 0;
+            for (int k = 0; k < csym_n[c]; k++)
+              if (csym[c][k] == ix) { seen = 1; break; }
+            if (!seen && csym_n[c] < SINE_CS) csym[c][csym_n[c]++] = ix;
+          }
+          pp += ln;
+        } else pp++;
+      }
+    }
+    for (int k = 0; k < csym_n[c]; k++) gen[csym[c][k]]++;
+  }
+  // Seed: every conjecture-role unit (the refutation encoding splits
+  // the query into a '!=' goal plus positive '=' hypothesis units, all
+  // carrying negated_conjecture) -- kept unconditionally, symbols
+  // reached.
+  for (int c = 0; c < n; c++) {
+    if (!tp->cls[c].neg && !tp->cls[c].conj) continue;
+    keep[c] = 1;
+    for (int k = 0; k < csym_n[c]; k++) reach[csym[c][k]] = 1;
+  }
+  // Levels to fixpoint (or the round cap).
+  for (int rd = 0; rd < rounds; rd++) {
+    u8 grew = 0;
+    for (int c = 0; c < n; c++) {
+      if (keep[c]) continue;
+      u32 mingen = 0xffffffffu;
+      for (int k = 0; k < csym_n[c]; k++)
+        if (gen[csym[c][k]] < mingen) mingen = gen[csym[c][k]];
+      u8 hit = 0;
+      for (int k = 0; k < csym_n[c] && !hit; k++) {
+        int s = csym[c][k];
+        if (reach[s] && (double)gen[s] <= tol * (double)mingen) hit = 1;
+      }
+      if (hit) {
+        keep[c] = 1;
+        grew = 1;
+        for (int k = 0; k < csym_n[c]; k++) reach[csym[c][k]] = 1;
+      }
+    }
+    if (!grew) break;
+  }
+  int w = 0;
+  for (int c = 0; c < n; c++) {
+    if (!keep[c]) continue;
+    if (w != c) tp->cls[w] = tp->cls[c];
+    w++;
+  }
+  free(csym); free(csym_n); free(gen); free(reach); free(keep);
+  return w;
+}
+
+// Driver: progressively tighten until the selection fits the engine
+// caps.  On success rebuilds the signature from the kept clauses (the
+// dropped ones own most of the 10k-symbol table).  THVM_ATP_SINE=0
+// disables; THVM_ATP_SINE_TOL overrides the first tolerance.
+static void tp_sine_select(TpProblem *tp) {
+  double tol0 = 1.5;
+  {
+    const char *e = getenv("THVM_ATP_SINE_TOL");
+    if (e != NULL && e[0] != '\0') tol0 = atof(e);
+    if (tol0 < 1.0) tol0 = 1.0;
+  }
+  const double tols[4]  = { tol0, 1.5, 1.0, 1.0 };
+  const int    rnds[4]  = { 64,   3,   2,   1  };
+  int n0 = tp->n_cls;
+  for (int a = 0; a < 4; a++) {
+    tp->n_cls = n0;   // each attempt filters the (previously kept) set
+    int kept = tp_sine_pass(tp, tols[a], rnds[a]);
+    int n_neg = 0;
+    for (int i = 0; i < kept; i++) n_neg += tp->cls[i].neg;
+    if ((kept - n_neg) <= (int)PR_MAX_EQNS) {
+      tp->n_cls = kept;
+      tp_syms_reset(tp);
+      for (int i = 0; i < kept; i++) {
+        tp_scan_term(tp, tp->cls[i].lhs);
+        tp_scan_term(tp, tp->cls[i].rhs);
+      }
+      fprintf(stderr, "FindProof: SInE selected %d/%d clauses (tol=%.2f)\n",
+              kept, n0, tols[a]);
+      return;
+    }
+    // over the cap: the pass already compacted keep-first, but a
+    // tighter re-run must see the ORIGINAL clause set -- it does not
+    // (dropped clauses were overwritten).  Tighten on the KEPT set
+    // instead: strictly narrower each attempt, so this converges.
+    tp->n_cls = kept;
+    n0 = kept;
+  }
+  tp_giveup("axiom selection cannot fit the engine caps");
 }
 
 // Emit the .pr text, following the WL wmGenerateProblem conventions:
@@ -940,10 +1119,22 @@ int main(int argc, char **argv) {
         fprintf(stderr, "FindProof: need at least one positive and one negative unit\n");
         return 2;
       }
+      // Oversized problems (the CSR knowledge bases run to 8k clauses):
+      // goal-directed SInE selection cuts them to the relevant slice
+      // BEFORE the capacity checks.  THVM_ATP_SINE=0 restores the old
+      // clean give-up.
+      {
+        const char *se = getenv("THVM_ATP_SINE");
+        u8 sine_on = (se == NULL || se[0] != '0');
+        if (sine_on && (tp.n_cls - n_neg) > (int)PR_MAX_EQNS) {
+          tp_sine_select(&tp);
+          n_neg = 0;
+          for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
+        }
+      }
       // Never hand the .pr reader more than it can hold: an oversized
-      // problem (the CSR knowledge bases run to thousands of equations)
-      // exits cleanly as GaveUp rather than aborting downstream with no
-      // SZS line.  PR_MAX_* come from the included bench translation unit.
+      // problem exits cleanly as GaveUp rather than aborting downstream
+      // with no SZS line.  PR_MAX_* come from the included bench TU.
       if ((tp.n_cls - n_neg) > (int)PR_MAX_EQNS) tp_giveup("problem exceeds equation capacity");
       if (tp.n_syms          > (int)PR_MAX_SYMS) tp_giveup("problem exceeds symbol capacity");
       if (tp.n_vars          > (int)PR_MAX_VARS) tp_giveup("problem exceeds variable capacity");
