@@ -23028,6 +23028,15 @@ static u8 atp_gj_strictly_more_general(Term rule_lhs, Term anchor) {
 // werden nur Regeln/Gleichungen verwendet, die in der Dreiecksordnung
 // kleiner sind").  Child recursion clears it: only root steps are
 // gated.  The forward CP-drop path always passes 0.
+// When set (demand-driven driver only), globally ORIENTED rules fire
+// without the per-step gj_less_in gate: an oriented instance strictly
+// decreases under every ground order (KBO substitution stability), so
+// the step is valid under every extension of the partial model.  The
+// partial-model lex cannot see this (it reasons from atom relations
+// alone), which otherwise blocks precedence-oriented rules until the
+// variables are ordered.
+static u8 g_gj_orient_free = 0;
+
 // Indexed twin of gj_rewrite_step's top-of-`t` rule scan.  Returns
 //   1 -> a rule fired (*out = reduct)
 //   0 -> NO rule fires at the top of t (index is authoritative)
@@ -23084,6 +23093,7 @@ static u8 gj_try_top_indexed(AtpState *s, const GjModel *m, Term t,
     Term reduct = thvm_subst_apply(s->rhs[i], &subst);
     if (!gj_vars_subset(reduct, t)) continue;
     if (kbo_eq(reduct, t)) continue;
+    if (g_gj_orient_free && s->r_orient[i]) { *out = reduct; return 1u; }
     int r = gj_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0);
     if (r == GJ_STRICT || r == GJ_NONSTRICT) { *out = reduct; return 1u; }
   }
@@ -23130,6 +23140,10 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
       // `t` (the term we are rewriting).  No-op for well-formed rules.
       if (!gj_vars_subset(reduct, t)) continue;
       if (kbo_eq(reduct, t)) continue;     // no-op image
+      if (g_gj_orient_free && s->r_orient[i]) {
+        *fired = 1;
+        return reduct;
+      }
       // fire iff t (=l-image) >=_C reduct (=r-image), i.e.
       // gj_less_in(reduct, t) is defined (reduct <= t under C).
       int r = gj_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0);
@@ -23589,6 +23603,152 @@ static u8 gj_cover(AtpState *s, Term lhs, Term rhs,
   }
 }
 
+// ── Demand-driven coverage driver (Twee Join.groundJoin shape) ──────
+// gj_cover enumerates every ordered set partition of the atoms UP
+// FRONT (75 leaf models for 4 variables), re-joining under each.  Twee
+// refines the order lazily instead: normalize under a PARTIAL preorder
+// -- gj_less_in is conservative for atoms it cannot relate, so only
+// steps valid under EVERY total extension fire -- and the moment the
+// two normal forms meet, the WHOLE subtree of extensions is proved
+// joinable by those same (monotone) steps.  Branching inserts one atom
+// placement at a time, and only when the partial-order normalize is
+// stuck; most joinable CPs settle after 0-2 placements, which is what
+// collapses the ~Bell(n) leaf count to a handful of nodes.
+//
+// Coverage: a node's placement loop inserts atom x at every position
+// of the current K-level chain -- strictly below/between/above every
+// level (even slots) and tied with every level (odd slots) -- so the
+// sub-branches partition all total preorders refining the node's model
+// by x's relation to the placed atoms.  Atoms no longer OCCURRING in
+// the normalized pair are never placed: their order cannot influence
+// further steps on this pair, and every extension over them joins via
+// the same steps.  Unsatisfiable const placements (contradicting the
+// fixed weight order) are skipped exactly as gj_build_model rejects
+// them: no ground sigma realises such a preorder.  A tie between two
+// VARIABLES unifies to the placed representative and recurses on the
+// substituted pair (the `=`-case treatment gj_cover uses).  Soundness
+// rests on the same primitives (gj_normalize / gj_less_in, P2); every
+// stuck / overflow / budget case returns 0 = KEEP.
+static int gj_has_const(Term t, u32 lab) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      if (n == 0) return term_ext(t) == lab;
+      for (u32 i = 0; i < n; i++)
+        if (gj_has_const(term_ctr_at(t, i), lab)) return 1;
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
+// Incremental gj_build_model consistency: would const x (weight wx) at
+// new major mx contradict the fixed weight order against the model's
+// placed constants?  `shift_from` is the level index an even placement
+// opens (existing majors >= shift_from read +1); pass 0xffffffff for a
+// tie placement (no shift).
+static u8 gj_dd_const_ok(const GjModel *m, const KboConfig *cfg,
+                         u32 wx, u32 mx, u32 shift_from) {
+  for (u32 i = 0; i < m->n; i++) {
+    if (!m->atom[i].is_const) continue;
+    u32 mi = m->major[i] + ((m->major[i] >= shift_from) ? 1u : 0u);
+    u32 wi = gj_const_size(cfg, m->atom[i].id);
+    if (mx < mi && wx > wi) return 0;
+    if (mx > mi && wx < wi) return 0;
+    if (mx == mi && wx != wi) return 0;
+  }
+  return 1;
+}
+
+static u8 gj_join_dd(AtpState *s, Term lhs, Term rhs, const GjModel *m,
+                     const GjAtom *pend, u32 n_pend, u32 *budget,
+                     u32 depth) {
+  if (depth > ATP_GJ_MAX_ATOMS) return 0;
+  if (*budget == 0) return 0;
+  (*budget)--;
+
+  u32 cp_vars[ATP_GJ_MAX_VARS];
+  u32 n_cp = 0;
+  if (!atp_gj_collect_vars(lhs, cp_vars, &n_cp, ATP_GJ_MAX_VARS)) return 0;
+  if (!atp_gj_collect_vars(rhs, cp_vars, &n_cp, ATP_GJ_MAX_VARS)) return 0;
+  g_gj_orient_free = 1;
+  Term nl = gj_normalize(s, m, lhs, cp_vars, n_cp, ATP_GJ_NORM_CAP, 0);
+  Term nr = gj_normalize(s, m, rhs, cp_vars, n_cp, ATP_GJ_NORM_CAP, 0);
+  g_gj_orient_free = 0;
+  if (kbo_eq(nl, nr)) return 1;
+
+  // Branches recurse on the RAW (post-substitution) pair, not on this
+  // node's normal forms: mid-completion R is not confluent, so a step
+  // valid under the partial model can commit to a path the refined
+  // leaf normalize would not take, losing joins gj_cover's from-raw
+  // leaf test finds.  The NFs above serve only the early exit.  The
+  // occurrence filter accordingly tests the raw pair.
+  u32 px = n_pend;
+  for (u32 i = 0; i < n_pend; i++) {
+    u8 occurs = pend[i].is_const
+        ? (u8)(gj_has_const(lhs, pend[i].id) || gj_has_const(rhs, pend[i].id))
+        : (u8)(gj_has_var(lhs, pend[i].id) || gj_has_var(rhs, pend[i].id));
+    if (occurs) { px = i; break; }
+  }
+  if (px == n_pend) return 0;  // order fully decided for this pair, yet unequal
+  GjAtom x = pend[px];
+  GjAtom rest[ATP_GJ_MAX_ATOMS];
+  u32 n_rest = 0;
+  for (u32 i = 0; i < n_pend; i++) if (i != px) rest[n_rest++] = pend[i];
+
+  const KboConfig *cfg = s->kbo;
+  u32 wx = x.is_const ? gj_const_size(cfg, x.id) : 0u;
+  u32 K = 0;
+  for (u32 i = 0; i < m->n; i++) if (m->major[i] + 1u > K) K = m->major[i] + 1u;
+
+  for (u32 p = 0; p <= 2u * K; p++) {
+    u32 k = p >> 1;
+    if (p & 1u) {
+      // Tie with level k.
+      if (!x.is_const) {
+        u32 v_id = 0; u8 v_found = 0;
+        for (u32 i = 0; i < m->n; i++) {
+          if (m->major[i] != k || m->atom[i].is_const) continue;
+          v_found = 1; v_id = m->atom[i].id; break;
+        }
+        if (v_found) {
+          if (x.id >= REWRITE_MAX_VAR) return 0;
+          RewriteSubst sub = {{0}};
+          sub.bindings[x.id] = term_new_fvr(v_id);
+          Term sl = thvm_subst_apply(lhs, &sub);
+          Term sr = thvm_subst_apply(rhs, &sub);
+          if (!gj_join_dd(s, sl, sr, m, rest, n_rest, budget, depth + 1))
+            return 0;
+          continue;
+        }
+        // Const-only level: a variable's ground image can genuinely
+        // share the constants' size -- tie in the model.
+      } else if (!gj_dd_const_ok(m, cfg, wx, k, 0xffffffffu)) {
+        continue;                       // unsatisfiable -> vacuously joins
+      }
+      GjModel m2 = *m;
+      if (m2.n >= ATP_GJ_MAX_ATOMS) return 0;
+      m2.atom[m2.n] = x; m2.major[m2.n] = k; m2.n++;
+      if (!gj_join_dd(s, lhs, rhs, &m2, rest, n_rest, budget, depth + 1))
+        return 0;
+      continue;
+    }
+    // Strictly below level k (p == 2K: above all levels).
+    if (x.is_const && !gj_dd_const_ok(m, cfg, wx, k, k)) continue;
+    GjModel m2;
+    m2.n = m->n;
+    if (m2.n >= ATP_GJ_MAX_ATOMS) return 0;
+    for (u32 i = 0; i < m->n; i++) {
+      m2.atom[i]  = m->atom[i];
+      m2.major[i] = m->major[i] + ((m->major[i] >= k) ? 1u : 0u);
+    }
+    m2.atom[m2.n] = x; m2.major[m2.n] = k; m2.n++;
+    if (!gj_join_dd(s, lhs, rhs, &m2, rest, n_rest, budget, depth + 1))
+      return 0;
+  }
+  return 1;
+}
+
 // Top-level: return 1 iff (lhs, rhs) is PROVABLY ground-joinable
 // (would-DELETE), 0 otherwise (would-KEEP).  Sound (no false DELETE):
 // gj_less_in never over-approximates >=_C (P2), the recursion + strict-
@@ -23618,6 +23778,50 @@ static int atp_cp_ground_joinable(AtpState *s, Term lhs, Term rhs) {
     if (gjb < 1) gjb = ATP_GJ_BRANCH_CAP;
   }
   u32 budget = (u32)gjb;
+  // Demand-driven driver (gj_join_dd) on the forward CP path; the
+  // fact-level WM -gj test (protect/exclude anchors active) keeps the
+  // WM-pinned exhaustive gj_cover.  THVM_ATP_GJ_DD=0 is the A/B kill.
+  static int gj_dd = -1;
+  if (gj_dd < 0) {
+    const char *e = getenv("THVM_ATP_GJ_DD");
+    gj_dd = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
+  if (gj_dd && s->gj_protect_l == 0 && s->gj_protect_r == 0 &&
+      s->gj_exclude == ATP_GJ_NO_EXCLUDE) {
+    GjAtom pend[ATP_GJ_MAX_ATOMS];
+    u32 n_pend = 0;
+    for (u32 i = 0; i < n_vars; i++) {
+      pend[n_pend].is_const = 0; pend[n_pend].id = var_ids[i]; n_pend++;
+    }
+    u32 clabs[ATP_GJ_MAX_ATOMS];
+    u32 nc = 0;
+    if (!gj_collect_consts(lhs, clabs, &nc, ATP_GJ_MAX_ATOMS)) return 0;
+    if (!gj_collect_consts(rhs, clabs, &nc, ATP_GJ_MAX_ATOMS)) return 0;
+    for (u32 i = 0; i < nc; i++) {
+      if (n_pend >= ATP_GJ_MAX_ATOMS) return 0;
+      pend[n_pend].is_const = 1; pend[n_pend].id = clabs[i]; n_pend++;
+    }
+    GjModel m0;
+    m0.n = 0;
+    // THVM_ATP_GJ_XCHECK: forensic A/B -- run BOTH drivers, report
+    // disagreements, let the exhaustive verdict drive the trajectory.
+    static int gj_xchk = -1;
+    if (gj_xchk < 0) gj_xchk = atp_env_on("THVM_ATP_GJ_XCHECK");
+    if (gj_xchk) {
+      u32 b2 = budget;
+      int vdd = gj_join_dd(s, lhs, rhs, &m0, pend, n_pend, &budget, 0) ? 1 : 0;
+      int vcv = gj_cover(s, lhs, rhs, var_ids, n_vars, &b2) ? 1 : 0;
+      if (vdd != vcv) {
+        char lb[512], rb[512];
+        atp_pretty_term(lhs, lb, sizeof lb);
+        atp_pretty_term(rhs, rb, sizeof rb);
+        fprintf(stderr, "GJXCHK dd=%d cover=%d bleft_dd=%u bleft_cv=%u %s = %s\n",
+                vdd, vcv, budget, b2, lb, rb);
+      }
+      return vcv;
+    }
+    return gj_join_dd(s, lhs, rhs, &m0, pend, n_pend, &budget, 0) ? 1 : 0;
+  }
   return gj_cover(s, lhs, rhs, var_ids, n_vars, &budget) ? 1 : 0;
 }
 
