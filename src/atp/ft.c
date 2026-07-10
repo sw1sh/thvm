@@ -377,6 +377,12 @@ AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
     extern u8 g_ft_region; extern u64 g_ft_from_by_region[8];
     g_ft_from_by_region[g_ft_region & 7u]++;
     if (g_ft_region == 2u) ft_region2_from_hook();
+    if (g_ft_region == 4u && getenv("THVM_ATP_FT2DBG") != NULL) {
+      extern const char *g_thvm_phase;
+      fprintf(stderr, "FT4 from phase=%s tag=%u ext=%u n=%u\n",
+              g_thvm_phase, (u32)term_tag(t), (u32)term_ext(t),
+              term_tag(t) == TAG_CTR ? term_ctr_n(t) : 0u);
+    }
   }
   if (ft_preorder_on()) return ft_from_term_pre(a, t, scratch);
   return ft_from_term_rec(a, t, scratch);

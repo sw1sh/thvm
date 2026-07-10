@@ -17583,11 +17583,70 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
         }
       }
     }
+    // Verify the located mirror against the live pair (a rewrite of
+    // the goal Terms after set_goals would leave it stale) and
+    // SELF-REPAIR on any miss: rebuild the spans once and store them
+    // back into the located slots, so each unique pair encodes at
+    // most once.
+    if (mir_l != NULL &&
+        (!ft_eq_term(mir_l, gl) || !ft_eq_term(mir_r, gr))) {
+      mir_l = NULL;
+      mir_r = NULL;
+    }
+
     u8 gl_mir = (u8)(mir_l != NULL && mir_r != NULL);
-    AtpFtCell *fl_in = gl_mir ? ft_clone_span(gft, mir_l, 0)
-                              : ft_from_term(gft, gl, 0);
-    AtpFtCell *fr_in = gl_mir ? ft_clone_span(gft, mir_r, 0)
-                              : ft_from_term(gft, gr, 0);
+    AtpFtCell *fl_in;
+    AtpFtCell *fr_in;
+    if (gl_mir) {
+      fl_in = ft_clone_span(gft, mir_l, 0);
+      fr_in = ft_clone_span(gft, mir_r, 0);
+    } else {
+      AtpFtCell *nl = ft_from_term(gft, gl, 0);
+      AtpFtCell *nr = ft_from_term(gft, gr, 0);
+      // Store the repaired mirrors: the aliased slots when the pair is
+      // the alias, else the matching conjunct's slots.
+      if (gl == s->goal_lhs && gr == s->goal_rhs) {
+        s->goal_lhs_ft = nl;
+        s->goal_rhs_ft = nr;
+        s->goal_nf_ft_l = NULL;
+        s->goal_nf_ft_r = NULL;
+        cache_l = (struct AtpFtCell **)&s->goal_nf_ft_l;
+        cache_r = (struct AtpFtCell **)&s->goal_nf_ft_r;
+        prev_nf_l = s->goal_lhs_nf;
+        prev_nf_r = s->goal_rhs_nf;
+        gl_mir = 1u;
+        // The alias POINTS AT a conjunct's mirror: repair that source
+        // slot too, or every alias move re-points at the stale spans.
+        if (s->goals_lhs_ft != NULL) {
+          for (u32 gi = 0; gi < s->n_goals; gi++) {
+            if (gl == s->goals_lhs[gi] && gr == s->goals_rhs[gi]) {
+              s->goals_lhs_ft[gi] = nl;
+              s->goals_rhs_ft[gi] = nr;
+              s->goals_nf_ft_l[gi] = NULL;
+              s->goals_nf_ft_r[gi] = NULL;
+              break;
+            }
+          }
+        }
+      } else if (s->goals_lhs_ft != NULL) {
+        for (u32 gi = 0; gi < s->n_goals; gi++) {
+          if (gl == s->goals_lhs[gi] && gr == s->goals_rhs[gi]) {
+            s->goals_lhs_ft[gi] = nl;
+            s->goals_rhs_ft[gi] = nr;
+            s->goals_nf_ft_l[gi] = NULL;
+            s->goals_nf_ft_r[gi] = NULL;
+            cache_l = (struct AtpFtCell **)&s->goals_nf_ft_l[gi];
+            cache_r = (struct AtpFtCell **)&s->goals_nf_ft_r[gi];
+            prev_nf_l = s->goals_lhs_nf[gi];
+            prev_nf_r = s->goals_rhs_nf[gi];
+            gl_mir = 1u;
+            break;
+          }
+        }
+      }
+      fl_in = gl_mir ? ft_clone_span(gft, nl, 0) : nl;
+      fr_in = gl_mir ? ft_clone_span(gft, nr, 0) : nr;
+    }
     // THVM_ATP_GOAL_NF_DEBUG scoping (see ft_norm.c g_goalnf_active):
     // tag the two goal walks 1/2 so the [mixstep] tracer separates the
     // L and R reduction sequences.
