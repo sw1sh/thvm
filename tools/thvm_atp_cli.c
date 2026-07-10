@@ -128,7 +128,11 @@ static const int N_KNOBS = (int)(sizeof(KNOBS) / sizeof(KNOBS[0]));
 
 // Set during TPTP parsing when any negative unit carries a variable
 // (the re-negated goal is existential); gates the Satisfiable claim.
+// g_cli_sine_applied: SInE dropped axioms, so the engine saturated an
+// INCOMPLETE subset -- a saturation then proves nothing about the full
+// problem and must report GaveUp, never Satisfiable.
 static int g_cli_goal_existential = 0;
+static int g_cli_sine_applied     = 0;
 // Set in main before conversion so the over-bound handler can emit a
 // competition-valid SZS line instead of crashing.
 static int g_cli_szs_wanted = 0;
@@ -573,6 +577,7 @@ static void tp_sine_select(TpProblem *tp) {
       }
       fprintf(stderr, "FindProof: SInE selected %d/%d clauses (tol=%.2f)\n",
               kept, n0, tols[a]);
+      g_cli_sine_applied = 1;
       return;
     }
     // over the cap: the pass already compacted keep-first, but a
@@ -669,7 +674,7 @@ static int cli_strategy_complete(void) {
   const char *mw = getenv("THVM_ATP_MAXW");
   const char *am = getenv("THVM_ATP_AUTO_MAXW");
   const char *rr = getenv("THVM_ATP_RANDOM_RATIO");
-  return !g_cli_goal_existential
+  return !g_cli_goal_existential && !g_cli_sine_applied
       && (mw == NULL || *mw == '0') && (am == NULL || *am == '0')
       && (rr == NULL || *rr == '0');
 }
