@@ -13077,6 +13077,17 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
 #ifdef ATP_VAR_NORM
   thvm_normalize_vars(&lhs, &rhs);
   for (u32 i = 0; i < s->n_rules; i++) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // A lazy row's slot is a sentinel: compare through its mirror
+    // (exact FT-vs-Term) so duplicates are never missed behind it.
+    if (term_tag(s->lhs[i]) == TAG_NUM || term_tag(s->rhs[i]) == TAG_NUM) {
+      if (s->lhs_ft[i] != NULL && s->rhs_ft[i] != NULL &&
+          ft_eq_term(s->lhs_ft[i], lhs) && ft_eq_term(s->rhs_ft[i], rhs)) {
+        return 0;  // duplicate rule -- already in R
+      }
+      continue;
+    }
+#endif
     if (kbo_eq(s->lhs[i], lhs) && kbo_eq(s->rhs[i], rhs)) {
       return 0;  // duplicate rule -- already in R
     }
@@ -21124,6 +21135,12 @@ static u8 atp_pop_eq_subsumed(AtpState *s, Term lhs, Term rhs) {
   for (u32 k = 0; k < s->n_rules; k++) {
     if (s->r_orient[k]) continue;                    // E only, never R
     if (s->r_dead != NULL && s->r_dead[k]) continue;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // Sentinel pattern rows materialize (bounded by the live E-set)
+    // so a subsumption is never missed behind a lazy slot.
+    (void)atp_rule_term(s, k, 0u);
+    (void)atp_rule_term(s, k, 1u);
+#endif
     if (atp_eq_subsumes_pair(s->lhs[k], s->rhs[k], lhs, rhs)) {
       static int sub_trace = -1;
       if (sub_trace < 0) sub_trace = atp_env_on("THVM_ATP_POP_TRACE");
@@ -21428,6 +21445,14 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
   for (u32 i = 0; i < new_i; i++) {
     if (s->r_orient[i]) continue;   // E only (RE_forGleichungenRobust)
     if (s->r_dead[i]) continue;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // The wmflat MO walks the subject's Term structure: a lazy slot
+    // materializes here (bounded by the live E-set, which is small)
+    // so a subsumable equation is never silently missed behind its
+    // sentinel.
+    (void)atp_rule_term(s, i, 0u);
+    (void)atp_rule_term(s, i, 1u);
+#endif
     u8 subsumed;
     if (s->use_flat_subsume) {
       // WM GMSubsummierenMitGleichung: DIRECT slot-semantics tries only
