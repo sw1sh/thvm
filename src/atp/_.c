@@ -23177,6 +23177,60 @@ static Term gj_normalize(AtpState *s, const GjModel *m, Term t,
   return t;
 }
 
+// ── Model-independent GJ pre-normalization ─────────────────────────
+// A rewrite step by an ORIENTED rule (r_orient[i]: lhs > rhs in KBO on
+// open terms) strictly decreases EVERY ground instance -- KBO is stable
+// under substitution -- so it is sound under every branch model C.
+// gj_cover can therefore normalize both CP sides ONCE with the oriented
+// subset of R and share the result across all ordered-set-partition
+// branches; only unorientable-equation steps stay model-dependent.
+// Most joinable CPs exit at the post-pass kbo_eq without touching the
+// branch enumeration at all -- this is what makes the forward CP-drop
+// GJ (THVM_ATP_GROUND_JOIN) affordable (the raw form re-normalized the
+// raw pair under each of the ~B(n_vars) models).  Applied ONLY on the
+// forward CP path (no protect anchors, no exclude): the fact-level WM
+// -gj test keeps its exact WM-faithful evaluation order.
+static Term gj_prenorm_step(AtpState *s, Term t, u8 *fired) {
+  for (u32 i = 0; i < s->n_rules; i++) {
+    if (!s->r_orient[i]) continue;
+    if (term_tag(s->lhs[i]) == TAG_FVR) continue;
+    RewriteSubst subst = {{0}};
+    if (thvm_match(s->lhs[i], t, &subst)) {
+      Term reduct = thvm_subst_apply(s->rhs[i], &subst);
+      if (!gj_vars_subset(reduct, t)) continue;
+      *fired = 1;
+      return reduct;
+    }
+  }
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) { *fired = 0; return t; }
+    Term children[REWRITE_MAX_ARITY];
+    for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
+    for (u32 i = 0; i < n; i++) {
+      u8 sub_fired = 0;
+      Term rc = gj_prenorm_step(s, children[i], &sub_fired);
+      if (sub_fired) {
+        children[i] = rc;
+        *fired = 1;
+        return term_new_ctr(term_ext(t), children, n);
+      }
+    }
+  }
+  *fired = 0;
+  return t;
+}
+
+static Term gj_prenorm(AtpState *s, Term t) {
+  for (u32 k = 0; k < ATP_GJ_NORM_CAP; k++) {
+    u8 fired = 0;
+    Term t2 = gj_prenorm_step(s, t, &fired);
+    if (!fired) return t;
+    t = t2;
+  }
+  return t;
+}
+
 // Join the two CP sides under model C: normalise both and compare.
 // The per-side protection anchors live on AtpState (constant for one
 // fact-level GZ test; 0 on the forward CP-drop path): the recursion in
@@ -23385,6 +23439,32 @@ static u8 gj_cover_consts(AtpState *s, Term lhs, Term rhs,
 // Returns 1 iff every case joins.
 static u8 gj_cover(AtpState *s, Term lhs, Term rhs,
                    const u32 *var_ids, u32 n_vars, u32 *budget) {
+  // Shared model-independent pre-pass (see gj_prenorm): forward CP path
+  // only -- the fact-level test's protect/exclude anchors are active
+  // there and its evaluation order is WM-pinned.  Runs at every
+  // recursion level (the unify case substitutes and re-enters), so tie
+  // branches also normalize before enumerating their sub-orders.
+  // THVM_ATP_GJ_PRENORM=0 is the A/B kill.
+  static int gj_pre = -1;
+  if (gj_pre < 0) {
+    const char *e = getenv("THVM_ATP_GJ_PRENORM");
+    gj_pre = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
+  u32 pre_vars[ATP_GJ_MAX_VARS];
+  if (gj_pre && s->gj_protect_l == 0 && s->gj_protect_r == 0 &&
+      s->gj_exclude == ATP_GJ_NO_EXCLUDE) {
+    lhs = gj_prenorm(s, lhs);
+    rhs = gj_prenorm(s, rhs);
+    if (kbo_eq(lhs, rhs)) return 1;
+    // The pre-pass can only erase variables; re-collect from the
+    // reduced pair so the partition enumeration ranges over what
+    // actually remains.
+    u32 n_pre = 0;
+    if (!atp_gj_collect_vars(lhs, pre_vars, &n_pre, ATP_GJ_MAX_VARS)) return 0;
+    if (!atp_gj_collect_vars(rhs, pre_vars, &n_pre, ATP_GJ_MAX_VARS)) return 0;
+    var_ids = pre_vars;
+    n_vars = n_pre;
+  }
   // Re-collect the constants of the (current, possibly substituted) CP.
   u32 const_labs[ATP_GJ_MAX_ATOMS];
   u32 n_consts = 0;
