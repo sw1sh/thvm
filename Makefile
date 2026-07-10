@@ -919,6 +919,26 @@ $(BIN)/test_atp_ft_cpq: tests/test_atp.c $(SRC) | $(BIN)
 	  -DTHVM_ATPFT_CPQ \
 	  -o $@ $< $(TEST_LDFLAGS)
 
+# CPQ wolfram bench: the WM-preset .pr arm under the Stage-7 FT queue
+# (the config the plain ft_cpq suite does NOT exercise -- its blind
+# spot hid the fuse-gate wrong-engine bug fixed in 1b7ac915).
+$(BIN)/test_atp_wolfram_bench_cpq: tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC -DATP_MNF -DTHVM_ATPFT_CPQ \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# Regression gate for the CPQ .pr arm: the WM preset on a real .pr must
+# PROVE with the byte-exact trajectory (QUEUE_EMPTY here = the fused
+# formation route is off or the slot mirror is fabricating content).
+.PHONY: test-cpq-pr
+test-cpq-pr: $(BIN)/test_atp_wolfram_bench_cpq
+	@THVM_ATP_RSS_ABORT_MB=6000 THVM_ATP_WALDMEISTER=1 \
+	  $(BIN)/test_atp_wolfram_bench_cpq \
+	  tools/baselines/wm_pr/McCuneAxioms__Associativity.pr 200000 30 \
+	  | grep -q "^=> PROVED" \
+	  && echo "test-cpq-pr: ok (PROVED)" \
+	  || { echo "test-cpq-pr: FAIL (expected PROVED)"; exit 1; }
+
 # LPO/KBO orientability cache (src/atp/lpo_cache.c).  Gated by
 # THVM_ATP_LPO_ORIENT_CACHE -- the default build is byte-identical,
 # but the test binary turns it on so the cache APIs are live.
