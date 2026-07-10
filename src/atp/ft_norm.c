@@ -1711,9 +1711,17 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
         continue;
       }
       if (label0 != FTDT_STAR) {
-        // Single variable edge V_k: follow iteratively.
+        // Single variable edge V_k: follow iteratively.  Filter order:
+        // the one-byte child mask first, then the two O(1) cell
+        // fail-fasts (first + last cell of the spans -- equal spans
+        // end in equal cells), the full walk last.  Pure conjunction:
+        // same edges survive, same candidates in the same order.
         u32 k = label0 - FTDT_VAR0;
         const AtpFtCell *bk = bind[k];
+        if ((nd->kid_mask[0] & want) == 0u) {
+          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          goto out;
+        }
         if (bk != NULL) {
           if (g_ftdt_pd) {
             g_atp_pushn_dt_fteq++;
@@ -1724,12 +1732,13 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
             if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
             goto out;
           }
+          if (bk->end != NULL && sc->end != NULL &&
+              bk->end->sym != sc->end->sym) {   // last-cell fail-fast
+            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
+            goto out;
+          }
           if (!ft_eq(bk, sc)) goto out;
           if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
-        }
-        if ((nd->kid_mask[0] & want) == 0u) {
-          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
-          goto out;
         }
         if (bk == NULL) {
           if (g_ftdt_pd) g_atp_pushn_dt_bind1++;
@@ -1774,6 +1783,10 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
         }
         u32 k = label - FTDT_VAR0;
         const AtpFtCell *bk = bind[k];
+        if ((nd->kid_mask[e] & want) == 0u) {
+          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          continue;
+        }
         if (bk != NULL) {
           if (g_ftdt_pd) {
             g_atp_pushn_dt_fteq++;
@@ -1783,12 +1796,13 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
             if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
             continue;
           }
+          if (bk->end != NULL && sc->end != NULL &&
+              bk->end->sym != sc->end->sym) {   // last-cell fail-fast
+            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
+            continue;
+          }
           if (!ft_eq(bk, sc)) continue;
           if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
-        }
-        if ((nd->kid_mask[e] & want) == 0u) {
-          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
-          continue;
         }
         if (bk == NULL) {
           if (g_ftdt_pd) { g_atp_pushn_dt_bind1++; g_ftdt_dp = dp + 1u; }
