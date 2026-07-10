@@ -18736,8 +18736,22 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
         if (atp_compare(s, old_lhs, r_reduced) == KBO_GT &&
             (s->use_rhs_interreduce ||
              atp_symbol_count(r_reduced) <= atp_symbol_count(old_rhs))) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+          // Sentinel compose: both records' eq pairs pack off the spans
+          // (the bracket is consume-once -- arm per push).
+          if (g_ir_rhs_nf_ft != NULL && s->lhs_ft[i] != NULL) {
+            g_trace_eq_ft_l = s->lhs_ft[i];
+            g_trace_eq_ft_r = g_ir_rhs_nf_ft;
+          }
+#endif
           u32 new_t = atp_trace_push(s, TRACE_ORIENT, rr_parent,
                                      ATP_TRACE_NONE, old_lhs, r_reduced);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+          if (g_ir_rhs_nf_ft != NULL && s->lhs_ft[i] != NULL) {
+            g_trace_eq_ft_l = s->lhs_ft[i];
+            g_trace_eq_ft_r = g_ir_rhs_nf_ft;
+          }
+#endif
           atp_trace_push(s, TRACE_SIMPLIFY, s->r_trace[i],
                          ATP_TRACE_NONE, old_lhs, r_reduced);
           s->rhs[i] = r_reduced;
@@ -18764,7 +18778,9 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
                     i, la, ra);
           }
 #ifdef THVM_ATPFT_RULES
-          if (g_ir_rhs_nf_ft != NULL && ft_eq_term(g_ir_rhs_nf_ft, r_reduced)) {
+          if (g_ir_rhs_nf_ft != NULL &&
+              (term_tag(r_reduced) == TAG_NUM ||
+               ft_eq_term(g_ir_rhs_nf_ft, r_reduced))) {
             s->rhs_ft[i] = g_ir_rhs_nf_ft;   // adopt the composed NF span
           } else {
             s->rhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
@@ -19245,7 +19261,12 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
                     g_thvm_phase = "ir_rhs64_all";
                     atp_ft_mirror_ensure(s);
                     AtpFtCell *nf = atp_rewrite_normalize_ft(s, st, 64u);
-                    r_reduced = ft_to_term(nf);
+                    // Lazy mode: the composed RHS commits as a fresh
+                    // side sentinel; the NF span becomes the mirror and
+                    // the SIMPLIFY trace's eq pair packs off the spans.
+                    r_reduced = atp_lazy_rules_on()
+                                    ? term_new(0, TAG_NUM, 0, 0xFA152u)
+                                    : ft_to_term(nf);
                     g_ir_rhs_nf_ft = nf;   // commit adopts as the mirror
                   }
                 }
@@ -19323,6 +19344,12 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             // straight onto the trace (NOT atp_add_equation_simplified,
             // which would also enqueue a redundant CP -- the rule is
             // already live in R as l -> r').
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+            if (g_ir_rhs_nf_ft != NULL && s->lhs_ft[i] != NULL) {
+              g_trace_eq_ft_l = s->lhs_ft[i];
+              g_trace_eq_ft_r = g_ir_rhs_nf_ft;
+            }
+#endif
             atp_trace_push(s, TRACE_SIMPLIFY, s->r_trace[i],
                            ATP_TRACE_NONE, old_lhs, r_reduced);
             s->rhs[i]     = r_reduced;
@@ -19347,7 +19374,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             // freed wholesale at ft_destroy time.  LHS unchanged so
             // lhs_ft[i] stays.)
             if (g_ir_rhs_nf_ft != NULL &&
-                ft_eq_term(g_ir_rhs_nf_ft, r_reduced)) {
+                (term_tag(r_reduced) == TAG_NUM ||
+                 ft_eq_term(g_ir_rhs_nf_ft, r_reduced))) {
               s->rhs_ft[i] = g_ir_rhs_nf_ft;
             } else {
               s->rhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
