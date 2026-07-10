@@ -21551,27 +21551,41 @@ static u32 atp_conn_successors(AtpState *s, Term t, Term peak,
     RewriteSubst sub = {{0}};
     if (thvm_match(s->lhs[j], t, &sub)) {                 // l -> r
       Term repl = thvm_subst_apply(s->rhs[j], &sub);
-      if (atp_compare(s, peak, repl) == KBO_GT) out_buf[(*n)++] = repl;
+      out_buf[(*n)++] = repl;
     }
     if (*n >= cap) break;
     if (atp_vars_contained(s->lhs[j], s->rhs[j])) {       // r -> l (var-safe)
       RewriteSubst sb = {{0}};
       if (thvm_match(s->rhs[j], t, &sb)) {
         Term repl = thvm_subst_apply(s->lhs[j], &sb);
-        if (atp_compare(s, peak, repl) == KBO_GT) out_buf[(*n)++] = repl;
+        out_buf[(*n)++] = repl;
       }
     }
   }
+  // NOTE: no peak gate here.  Inner-position steps are wrapped back
+  // into the parent by the recursion above, so a bare-reduct compare
+  // gates the WRONG term -- the criterion constrains the FULL rewritten
+  // term, which only the BFS caller sees (it filters every successor
+  // against the peak before insertion).  The earlier per-reduct gate
+  // admitted >=-peak intermediates and over-dropped: McCune
+  // Associativity falsely SATURATED under THVM_ATP_CONNECT=1.
   return size;
 }
 
 static u8 atp_cp_connected_below_peak(AtpState *s, Term lhs, Term rhs,
                                       Term peak) {
   if (s == NULL || peak == 0) return 0;
-  // The ordered normal forms of both sides are proper reducts of the
-  // peak, hence strictly below it; they are the natural seeds.
-  Term l = atp_rewrite_normalize(s, lhs, s->lhs, s->rhs, s->n_rules, 64u);
-  Term r = atp_rewrite_normalize(s, rhs, s->lhs, s->rhs, s->n_rules, 64u);
+  // Seeds = the treated CP sides as handed in.  They are already
+  // engine-normalized by strictly DECREASING steps from one-step
+  // reducts of the peak, hence below it.  (An earlier version
+  // re-normalized here with atp_rewrite_normalize, which applies
+  // UNORIENTED equations unconditionally -- steps that can pass
+  // through terms at or above the peak and even fabricate the seed
+  // join, over-dropping true CPs: McCuneAxioms__Associativity
+  // falsely SATURATED under THVM_ATP_CONNECT=1.  Connectedness
+  // demands every intermediate term strictly below the peak.)
+  Term l = lhs;
+  Term r = rhs;
   if (kbo_eq(l, r)) return 1;                 // trivially joined below peak
   // A seed equal to the peak (no decreasing step taken) cannot stay
   // strictly below it -- bail (KEEP) to preserve soundness.
@@ -21590,6 +21604,9 @@ static u8 atp_cp_connected_below_peak(AtpState *s, Term lhs, Term rhs,
     (void)atp_conn_successors(s, terms[cur], peak, succ, &ns, 64u);
     for (u32 k = 0; k < ns; k++) {
       Term u  = succ[k];
+      // The criterion's load-bearing gate: every term on the
+      // connecting chain must sit STRICTLY below the peak.
+      if (atp_compare(s, peak, u) != KBO_GT) continue;
       u32  hu = atp_struct_hash(u);
       u32  found = ATP_CONN_MAX_NODES;
       for (u32 i = 0; i < n; i++) {
