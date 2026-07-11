@@ -2339,9 +2339,14 @@ static int cli_strategy_complete(void) {
   const char *mw = getenv("THVM_ATP_MAXW");
   const char *am = getenv("THVM_ATP_AUTO_MAXW");
   const char *rr = getenv("THVM_ATP_RANDOM_RATIO");
+  // Encompassment demodulation drops CPs joined via skolem-ground steps
+  // without Twee's simplerThan redundancy discipline, so a saturation
+  // under it certifies nothing about the full problem: GaveUp, never
+  // Satisfiable.
+  const char *en = getenv("THVM_ATP_ENCOMPASS");
   return !g_cli_goal_existential && !g_cli_sine_applied && !g_cli_horn_applied
       && (mw == NULL || *mw == '0') && (am == NULL || *am == '0')
-      && (rr == NULL || *rr == '0');
+      && (rr == NULL || *rr == '0') && (en == NULL || *en == '0');
 }
 
 // --- term printing (names from the parsed .pr) ---------------------
@@ -2528,11 +2533,23 @@ static const SchedSlice SCHEDULE[] = {
   // -- complementary to both (goal-direction the WM preset lacks, pruning
   // the bare MNF front lacks).
   {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1", 0.33},
-  // (4) TWEE-SCORED completion: flatten + Twee's CP score (mode 8, now with
+  // (4) ENCOMPASSMENT DEMODULATION (Twee reducesSkolem): the WM preset
+  // with the skolem-ground unorient gate -- variable-permuted variants
+  // canonicalize, keeping R lean on the AC/comm-heavy families where
+  // completion otherwise drowns in variants.  Cracks 6 of the 23
+  // twee-residual CASC-30 UEQ targets standalone in <=30s (MVA003-1
+  // 7.2s, MVA009-1 7.1s, NUN134-1 0.3s, LAT163-1 5.6s, LAT174-1 21.3s,
+  // GRP721-1 1.0s -- all Twee-oracle-confirmed), each unreachable by
+  // every prior slice.  --max-steps raised: the canonical search runs
+  // 30k+ steps/s and hits the 500k default mid-wall.
+  {"encompass", "--encompass-demod --max-steps=5000000", 0.0},
+  // (5) TWEE-SCORED completion: flatten + Twee's CP score (mode 8, now with
   // the faithful formation-depth term) + pure best-first (w2-modulo=0, no
   // WM age interleave) + dynamic passive re-scoring (cp-set-interreduce =
   // Twee simplifyPassive).  A genuinely different selection regime from the
-  // three WM/MNF slices above -- the portfolio's Twee-native angle.
+  // WM/MNF slices above -- the portfolio's Twee-native angle.  Displaced
+  // from the top-5 concurrent pool by the encompass slice (its flatten +
+  // lazy-GJ core overlaps slice 2); launches as a pool slot frees.
   {"twee",   "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --cp-set-interreduce", 0.0},
   // (5) PURE bare completion (bare engine defaults, GT weight, NO WM preset
   // heuristics, NO ground-join/connectedness).  The WM preset's selection +
