@@ -77,6 +77,7 @@ static const AtpKnob KNOBS[] = {
   {"unfailing-cp",           "THVM_ATP_UNFAILING",       0, "UnfailingCP"},
   {"cp-set-interreduce",     "THVM_ATP_CP_SET_IR",       0, "CPSetInterreduce"},
   {"cp-set-ir-period",       "THVM_ATP_CP_SET_IR_PERIOD",1, "CPSetInterreduce period"},
+  {"cp-set-ir-budget",       "THVM_ATP_CP_SET_IR_BUDGET",1, "CPSetInterreduce budget % (Twee task discipline)"},
   {"lazy-normalize",         "THVM_ATP_LAZY_NORM",       0, "LazyNormalize"},
   {"demote-on-lhs-simplify", "THVM_ATP_WM_DEMOTE",       0, "DemoteOnLhsSimplify"},
   {"orphan-murder",          "THVM_ATP_ORPHAN",          0, "OrphanMurder"},

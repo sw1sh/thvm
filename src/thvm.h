@@ -5364,6 +5364,19 @@ typedef struct {
   // via thvm_atp_set_cp_set_interreduce.
   u8   cp_set_interreduce;
   u32  cp_set_ir_period;          // 0 -> default period at run time
+  // Twee task discipline for the CP-set sweep (Twee.hs:978 newTask +
+  // Task.hs taskDue + shouldSimplifyQueue).  When cp_set_ir_budget > 0
+  // it REPLACES the rule-count period gate above: the sweep runs at
+  // most once per ATP_CP_SET_IR_FREQ_US, only while the cumulative
+  // sweep time stays under budget% of the elapsed run (Twee
+  // cfg_renormalise_percent, default 5), and only when >= 20% of a
+  // 100-CP random sample of the queue is dead -- joinable under the
+  // current R or orphaned (Twee cfg_renormalise_threshold = 20 over
+  // cfg_cp_sample_size = 100).  0 = legacy every-period-rules sweep.
+  u32  cp_set_ir_budget;          // percent; 0 -> period discipline
+  u64  cp_set_ir_spent_us;        // cumulative sweep + sample-check time
+  u64  cp_set_ir_last_us;         // last discipline check (freq gate)
+  u64  cp_set_ir_start_us;        // discipline epoch (first check)
   u32  n_cp_set_ir_passes;        // diagnostics: passes run
   u32  n_cp_set_ir_deleted;       // diagnostics: CPs deleted (joinable)
   u32  n_cp_set_ir_reweighted;    // diagnostics: CPs reweighted

@@ -1272,6 +1272,16 @@ int main(int argc, char **argv) {
       s->cp_set_ir_period = (u32)strtoul(pr, NULL, 10);
     }
   }
+  // THVM_ATP_CP_SET_IR_BUDGET: percent of the run the sweep may consume.
+  // Non-zero swaps the rule-count period gate for Twee's renormalise
+  // task discipline (freq 10s + budget% + 20%-dead sample trigger,
+  // Twee.hs:978 / Task.hs).  Twee's default share is 5.
+  {
+    const char *bd = getenv("THVM_ATP_CP_SET_IR_BUDGET");
+    if (bd != NULL && bd[0] != '\0') {
+      s->cp_set_ir_budget = (u32)strtoul(bd, NULL, 10);
+    }
+  }
   // THVM_ATP_PERM_SUB=1: port of WM `GZ_ACVerzichtbar`.  Drops a CP at
   // push time when its two sides are equal as multisets at the top
   // (commutativity-shaped, e.g. nand(x,y) = nand(y,x)).  On AndAssoc

@@ -1529,6 +1529,14 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
 // can name it.
 #define ATP_CP_SET_IR_PERIOD 16u
 static void atp_cp_set_interreduce(AtpState *s);
+// Twee task discipline for the sweep (cp_set_ir_budget > 0): frequency,
+// budget and sampled-dead-fraction gates (Twee Task.hs taskDue +
+// Twee.hs:978 newTask 10 / shouldSimplifyQueue).  Defined next to the
+// sweep; forward-declared for the thvm_atp_step call site.
+#define ATP_CP_SET_IR_FREQ_US    10000000ull  // Twee newTask freq = 10 s
+#define ATP_CP_SET_IR_THRESHOLD  20u  // Twee cfg_renormalise_threshold %
+#define ATP_CP_SET_IR_SAMPLE     100u // Twee cfg_cp_sample_size
+static u8 atp_cp_set_ir_due(AtpState *s);
 
 // === Waldmeister Stringterms: packed byte-string critical pairs =====
 //
@@ -15449,13 +15457,31 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // every cp_set_ir_period-th rule addition so the per-CP full-R sweep's
   // cost is amortized.  Default off -> the call is skipped and the engine
   // is byte-identical.
+  //
+  // cp_set_ir_budget > 0 swaps the rule-count period for Twee's task
+  // discipline (atp_cp_set_ir_due): the every-16-rules full sweep costs
+  // 80%+ of the wall on hard UEQ targets (LAT138-1: 24.5s of 30s), where
+  // Twee holds the same renormalisation to ~5% of the run and still
+  // reaches the proofs -- the budget buys back the completion time.
   if (s->cp_set_interreduce && added.count > 0u) {
-    u32 period = s->cp_set_ir_period ? s->cp_set_ir_period
-                                     : ATP_CP_SET_IR_PERIOD;
-    if (s->n_rules % period == 0u) {
-      u64 _ph_cpir_t0 = atp_phase_now(); g_thvm_phase = "cp_set_ir";
-      atp_cp_set_interreduce(s);
-      if (g_atp_phase_enabled) g_atp_phase_us_cp_set_ir += atp_now_us() - _ph_cpir_t0;
+    if (s->cp_set_ir_budget > 0u) {
+      if (atp_cp_set_ir_due(s)) {
+        u64 t0 = atp_now_us();
+        u64 _ph_cpir_t0 = atp_phase_now(); g_thvm_phase = "cp_set_ir";
+        atp_cp_set_interreduce(s);
+        if (g_atp_phase_enabled) g_atp_phase_us_cp_set_ir += atp_now_us() - _ph_cpir_t0;
+        u64 t1 = atp_now_us();
+        s->cp_set_ir_spent_us += t1 - t0;
+        s->cp_set_ir_last_us = t1;
+      }
+    } else {
+      u32 period = s->cp_set_ir_period ? s->cp_set_ir_period
+                                       : ATP_CP_SET_IR_PERIOD;
+      if (s->n_rules % period == 0u) {
+        u64 _ph_cpir_t0 = atp_phase_now(); g_thvm_phase = "cp_set_ir";
+        atp_cp_set_interreduce(s);
+        if (g_atp_phase_enabled) g_atp_phase_us_cp_set_ir += atp_now_us() - _ph_cpir_t0;
+      }
     }
   }
 
@@ -18721,6 +18747,77 @@ static u64 atp_term_sym_bitmap(Term t) {
     }
     default: return 0u;
   }
+}
+
+// Should the budget-disciplined CP-set sweep run now?  A faithful port
+// of Twee's renormalise task (Twee.hs:978 `newTask 10 0.05` wrapping
+// `shouldSimplifyQueue`; Task.hs `taskDue`):
+//   1. frequency  -- at most once per ATP_CP_SET_IR_FREQ_US (Twee: the
+//      task runs at most every 10 s);
+//   2. budget     -- only while cumulative sweep time is under
+//      cp_set_ir_budget% of the elapsed run (Twee task_budget, from
+//      cfg_renormalise_percent; strict `>` so a zero budget never runs);
+//   3. threshold  -- only when >= ATP_CP_SET_IR_THRESHOLD % of an
+//      ATP_CP_SET_IR_SAMPLE-sized random sample of the queue is DEAD:
+//      joinable under the current R (the sweep's delete criterion,
+//      tested with the same atp_cp_trivially_joinable the push path
+//      uses) or orphaned (gated on use_orphan_murder exactly like the
+//      sweep's own orphan branch).  Twee keeps a reservoir sample of
+//      live overlaps and re-simplifies it after each interreduction
+//      (st_cp_sample / simplifySample); sampling at check time observes
+//      the same statistic without the persistent mirror.
+// The sample cost is charged to the budget (Twee's task_spent accrues
+// the body, cheap checks included).  Deterministic: the sample indices
+// come from a splitmix64 stream seeded by run-state counters, so a
+// fixed trajectory re-samples identically.
+static u8 atp_cp_set_ir_due(AtpState *s) {
+  if (s->n_cps == 0u || s->n_rules == 0u) return 0;
+  u64 now = atp_now_us();
+  if (s->cp_set_ir_start_us == 0u) {
+    // Discipline epoch: first check after the queue came alive.  Twee
+    // stamps task_start/task_last at task creation (prover start).
+    s->cp_set_ir_start_us = now;
+    s->cp_set_ir_last_us  = now;
+    return 0;
+  }
+  // 1. frequency gate.
+  if (now - s->cp_set_ir_last_us < ATP_CP_SET_IR_FREQ_US) return 0;
+  // 2. budget gate (strict >, Twee taskDue).
+  if ((now - s->cp_set_ir_start_us) * (u64)s->cp_set_ir_budget
+      <= s->cp_set_ir_spent_us * 100ull) {
+    return 0;
+  }
+  // 3. sampled dead-fraction threshold.
+  u32 n = s->n_cps;
+  u32 sample = n < ATP_CP_SET_IR_SAMPLE ? n : ATP_CP_SET_IR_SAMPLE;
+  u64 seed = ((u64)s->cp_select_count << 32) ^ ((u64)s->r_revision << 16)
+           ^ (u64)n;
+  u32 dead = 0;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  atp_ft_mirror_ensure(s);
+#endif
+  for (u32 k = 0; k < sample; k++) {
+    seed += 0x9e3779b97f4a7c15ull;
+    u64 x = seed;
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ull;
+    x ^= x >> 27; x *= 0x94d049bb133111ebull;
+    x ^= x >> 31;
+    u32 vv = s->cp_heap[(u32)(x % (u64)n)].row;
+    if (s->use_orphan_murder &&
+        (atp_cp_is_orphan(s, s->cp_trace[vv]) || atp_cp_uid_orphan(s, vv))) {
+      dead++;
+      continue;
+    }
+    u64 hcp = thvm_atp_heap_checkpoint();
+    Term l = 0, r = 0;
+    atp_cp_slot_read(s, vv, &l, &r);
+    if (atp_cp_trivially_joinable(s, &l, &r)) dead++;
+    thvm_atp_heap_reset(hcp);
+  }
+  u64 after = atp_now_us();
+  s->cp_set_ir_spent_us += after - now;
+  s->cp_set_ir_last_us   = after;
+  return dead * 100u >= ATP_CP_SET_IR_THRESHOLD * sample;
 }
 
 static void atp_cp_set_interreduce(AtpState *s) {
