@@ -1218,9 +1218,14 @@ static void dt_insert(int t, int fact, int orient) {
     int cur = stack[--sp];
     int key = (g_hn[cur].head < 0) ? -1 : g_hn[cur].head;
     node = dt_child(node, key, 1);
-    if (key >= 0)
-      for (int i = g_hn[cur].nargs - 1; i >= 0 && sp < 500; i--)
+    if (key >= 0) {
+      // A truncated walk would file the fact under a WRONG (shorter)
+      // path and let it subsume non-instances: skip oversized patterns
+      // entirely (they are also beyond the query flattener's bound).
+      if (sp + g_hn[cur].nargs > 500) return;
+      for (int i = g_hn[cur].nargs - 1; i >= 0; i--)
         stack[sp++] = HARG(cur, i);
+    }
   }
   if (g_dtl_n >= g_dtl_cap) {
     g_dtl_cap = (g_dtl_cap == 0) ? (1 << 12) : g_dtl_cap * 2;
