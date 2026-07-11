@@ -483,6 +483,17 @@ static u8 pc_pair_alpha_eq(Term a1, Term b1, Term a2, Term b2) {
 // is exactly the completion engine's reading.  Sound: PROVED means the
 // goal joins under a completion of the parents.  Anything else falls
 // through to the FO route.
+// Master GC-root buffer for the per-step engine sessions: every parsed
+// formula plus the current step's derived pair handles.  Registered as
+// gc_extra_roots on each session so a mid-session collection relocates
+// them IN PLACE; pc_steps and the locals are refreshed from it after.
+static Term g_pc_roots[PC_MAX_STEPS + 2 * PC_MAX_PARENTS + 2];
+static u8   g_pc_eq_gc_refreshed = 0;   // an eq session gc'd + refreshed
+// Defined after the PcStep section (they touch pc_steps/pc_nstep).
+static u32  pc_fill_roots(Term *buf, u32 cap);
+static void pc_refresh_formulas(const Term *buf);
+static u32  pc_axiom_pairs(Term *pl, Term *pr, u32 cap);
+
 static int pc_entails_eq(Term *parents, int np, Term concl) {
   Term gl = 0, gr = 0;
   Term pl[PC_MAX_PARENTS], pr[PC_MAX_PARENTS];
@@ -587,6 +598,16 @@ static int pc_entails_eq(Term *parents, int np, Term concl) {
   if (w == NULL || pr_ == NULL) { free(w); free(pr_); return PC_UNKNOWN; }
   for (u32 i = 0; i < nl; i++) { w[i] = 1u; pr_[i] = i; }
   KboConfig cfg = { w, pr_, nl, 1u };
+  // Root set: all parsed formulas + this step's pair handles.
+  u32 nb = pc_fill_roots(g_pc_roots, PC_MAX_STEPS);
+  u32 base_pl = nb;
+  for (int i = 0; i < npl; i++) {
+    g_pc_roots[nb++] = pl[i];
+    g_pc_roots[nb++] = pr[i];
+  }
+  u32 base_g = nb;
+  g_pc_roots[nb++] = gl;
+  g_pc_roots[nb++] = gr;
   // Deep mode (THVM_PROOFCHECK_DEEP=1): 10x budgets for validation
   // runs; the default stays wall-friendly.
   static int pc_deep = -1;
@@ -594,15 +615,29 @@ static int pc_entails_eq(Term *parents, int np, Term concl) {
     const char *e = getenv("THVM_PROOFCHECK_DEEP");
     pc_deep = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
   }
-  u32 sel_cap = pc_deep ? 4000u : 400u;
+  u32 sel_cap = pc_deep ? 40000u : 400u;
   AtpState *s = thvm_atp_init(&cfg, sel_cap);
   int v = PC_UNKNOWN;
+  u64 gc0 = gc_count();
   if (s != NULL) {
+    s->gc_extra_roots = g_pc_roots;
+    s->n_gc_extra_roots = nb;
+    // Unfailing completion: the step theories are comm-heavy (lattice
+    // equations); without E-face CPs an unorientable parent can never
+    // participate and the entailment is undecidable for the session.
+    thvm_atp_set_use_unfailing_cp(s, 1u);
+    // Mixmost NF: goal joining must rewrite THROUGH the unorientable
+    // equations (ordered E-steps), not only the oriented rules.
+    thvm_atp_set_use_mixmost_nf(s, 1u);
     u8 ok = 1;
     for (int i = 0; i < npl && ok; i++) {
-      ok = thvm_atp_add_equation(s, pl[i], pr[i]);
+      // Read through the root slots: a collection during an earlier add
+      // relocates them in place.
+      ok = thvm_atp_add_equation(s, g_pc_roots[base_pl + 2u * (u32)i],
+                                 g_pc_roots[base_pl + 2u * (u32)i + 1u]);
     }
-    if (ok && thvm_atp_set_goal(s, gl, gr)) {
+    if (ok && thvm_atp_set_goal(s, g_pc_roots[base_g],
+                                g_pc_roots[base_g + 1u])) {
       // A cp/orient/simp step's conclusion joins within a handful of
       // selections when the parents really derive it; a tight budget
       // keeps the whole-proof check inside the wall.  Heap bail: these
@@ -610,8 +645,11 @@ static int pc_entails_eq(Term *parents, int np, Term concl) {
       u64 h0 = thvm_atp_heap_checkpoint();
       clock_t c0 = clock();
       AtpStatus st = ATP_RUNNING;
-      long cl_cap = (pc_deep ? 8 : 2) * CLOCKS_PER_SEC;
-      u64 hp_cap = pc_deep ? (64u << 20) : (32u << 20);
+      long cl_cap = (pc_deep ? 30 : 2) * CLOCKS_PER_SEC;
+      // Deep sessions are GC-rooted now: let collections run instead of
+      // bailing on growth (the 64MB bail was starving the budget --
+      // lattice completions allocate that in under a second).
+      u64 hp_cap = pc_deep ? ~0ull : (32u << 20);
       for (u32 k = 0; k < sel_cap && st == ATP_RUNNING; k++) {
         st = thvm_atp_step(s);
         if ((thvm_atp_heap_checkpoint() - h0) > hp_cap) break;
@@ -620,6 +658,12 @@ static int pc_entails_eq(Term *parents, int np, Term concl) {
       if (st == ATP_PROVED) v = PC_VALID;
     }
     thvm_atp_free(s);
+  }
+  if (gc_count() != gc0) {
+    // The session collected: the root slots hold the relocated
+    // formulas -- write them back so every later step reads live Terms.
+    pc_refresh_formulas(g_pc_roots);
+    g_pc_eq_gc_refreshed = 1;
   }
   free(w);
   free(pr_);
@@ -649,7 +693,29 @@ static int pc_entails(Term *parents, int np, Term concl) {
       }
       alleq = 0;
     }
-    if (alleq) return pc_entails_eq(parents, np, concl);
+    if (alleq) {
+      int v = pc_entails_eq(parents, np, concl);
+      if (v != PC_UNKNOWN || concl == 0) return v;
+      // Axiom-augmented fallback (sound, weaker provenance): treatment
+      // rewrites inside orient records are not separately recorded.
+      Term apl[PC_MAX_PARENTS], apr[PC_MAX_PARENTS];
+      u32 na = pc_axiom_pairs(apl, apr, PC_MAX_PARENTS);
+      if (na > 0) {
+        // pc_entails_eq's pair arrays are PC_MAX_PARENTS-sized: cap the
+        // augmented list there (parents first, axioms fill the rest).
+        Term aug[PC_MAX_PARENTS];
+        int n2 = 0;
+        for (int i = 0; i < np && n2 < PC_MAX_PARENTS; i++) {
+          aug[n2++] = parents[i];
+        }
+        for (u32 i = 0; i < na && n2 < PC_MAX_PARENTS; i++) {
+          Term k[2] = { apl[i], apr[i] };
+          aug[n2++] = term_new_ctr(PC_LAB_EQ, k, 2);
+        }
+        v = pc_entails_eq(aug, n2, concl);
+      }
+      return v;
+    }
   }
   Term fs[PC_MAX_PARENTS + 1];
   int n = 0;
@@ -679,6 +745,40 @@ typedef struct {
 
 static PcStep pc_steps[PC_MAX_STEPS];
 static int pc_nstep = 0;
+
+// Collect the axiom (R_INPUT, plain-equation) pairs for the fallback
+// entailment: an `orient` trace record's conclusion embodies push-side
+// TREATMENT rewrites that are not separately recorded, so parents-only
+// entailment can be genuinely insufficient; axioms + parent is still a
+// sound (weaker-provenance) verification.
+static u32 pc_axiom_pairs(Term *pl, Term *pr, u32 cap) {
+  u32 n = 0;
+  for (int i = 0; i < pc_nstep && n < cap; i++) {
+    if (pc_steps[i].rule != R_INPUT) continue;
+    Term l, r;
+    if (term_tag(pc_steps[i].formula) == TAG_CTR &&
+        term_ext(pc_steps[i].formula) == PC_LAB_EQ &&
+        term_ctr_n(pc_steps[i].formula) == 2) {
+      pl[n] = term_ctr_at(pc_steps[i].formula, 0);
+      pr[n] = term_ctr_at(pc_steps[i].formula, 1);
+      n++;
+    }
+  }
+  return n;
+}
+
+static u32 pc_fill_roots(Term *buf, u32 cap) {
+  u32 nb = 0;
+  for (int i = 0; i < pc_nstep && nb < cap; i++) {
+    buf[nb++] = pc_steps[i].formula;
+  }
+  return nb;
+}
+static void pc_refresh_formulas(const Term *buf) {
+  for (int i = 0; i < pc_nstep && i < PC_MAX_STEPS; i++) {
+    pc_steps[i].formula = buf[i];
+  }
+}
 
 static int pc_rule_of(const char *r) {
   if (strcmp(r, "instantiate") == 0)        return R_INSTANTIATE;
@@ -1070,9 +1170,14 @@ static int proof_check_worker(const char *file, int szs) {
         // be garbage -- including a WRONG FailedVerified (observed on
         // LAT171-1 deep mode: the \$false closure step read a relocated
         // parent and 'refuted' it).  Abstain for the whole proof.
-        pc_any_unknown = 1;
-        pc_bad = -1;
-        break;
+        if (g_pc_eq_gc_refreshed) {
+          // Rooted eq-session collection: formulas already refreshed.
+          g_pc_eq_gc_refreshed = 0;
+        } else {
+          pc_any_unknown = 1;
+          pc_bad = -1;
+          break;
+        }
       }
       {
         static int pcdbg = -1;
