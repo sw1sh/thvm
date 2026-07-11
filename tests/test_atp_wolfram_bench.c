@@ -2363,9 +2363,9 @@ int main(int argc, char **argv) {
            s->lrs_warmup_selections, s->lrs_recompute_period);
   }
   printf("   dropped: ground-joinable=%u connected-below-peak=%u "
-         "facts-gj-sterilized=%u\n",
+         "facts-gj-sterilized=%u simpler-join=%u\n",
          s->n_cps_ground_joinable, s->n_cps_dropped_connected_below_peak,
-         s->n_facts_bwd_ground_joinable);
+         s->n_facts_bwd_ground_joinable, s->n_cps_dropped_simpler_join);
   {
     u64 cp_capped = 0, depth_capped = 0;
     thvm_cp_caps_get(&cp_capped, &depth_capped);

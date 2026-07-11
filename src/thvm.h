@@ -5638,6 +5638,30 @@ typedef struct {
   // reduction order, so every normalize terminates.  Opt-in, default
   // OFF (byte-identical): env THVM_ATP_ENCOMPASS / --encompass-demod.
   u8   use_encompass_demod;
+  // Simpler-join CP discipline (Twee Join.hs:55 joinCriticalPair,
+  // allSteps = step1 >=> step2 >=> step3; plan
+  // docs/plans/unified_automatic_engine.md): when the standard join
+  // normalize leaves a CP's sides distinct, re-normalize both sides
+  // admitting oriented rules AND unorientable equations, with every
+  // step gated on the rewriting equation being strictly SIMPLER than
+  // the CP equation (Twee simplerThan over lessEqSkolem -- the
+  // skolem-ground lex compare in ft_order.c), and unorientable
+  // instances admitted when strictly decreasing under the skolem-ground
+  // KBO (Twee reducesSkolem) even where the open-term compare is
+  // incomparable.  Joins far more CPs than plain doR/doE joinability,
+  // keeping the queue and R lean on the AC/loop CASC families.
+  // VERDICT-ONLY: kept CPs queue their standard NFs, so trace/replay
+  // are untouched.  Runs at generation-time treatment
+  // (atp_cp_trivially_joinable[_ft], vcp_treat_joinable) and at
+  // selection (the pop joined gate).  Opt-in, default OFF
+  // (byte-identical): env THVM_ATP_SIMPLER_JOIN / --simpler-join.
+  // Completeness caveat mirrors use_encompass_demod: the skolem steps
+  // carry no below-peak connectedness constraint, so a saturation
+  // under this mode reports GaveUp, never Satisfiable
+  // (cli_strategy_complete).
+  u8   use_simpler_join;
+  // CPs dropped by the simpler-join pass (push treat + pop select).
+  u32  n_cps_dropped_simpler_join;
   // Count of facts sterilized by the backward walk (bench stats line).
   u32  n_facts_bwd_ground_joinable;
   // Count of rules DELETED from R by the use_gj_delete_rule port.

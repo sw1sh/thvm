@@ -7356,6 +7356,8 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   s->use_full_interreduce = (u8)atp_env_on("THVM_ATP_FULL_INTERREDUCE");
   // Encompassment demodulation (Twee reducesSkolem; see thvm.h).
   s->use_encompass_demod = (u8)atp_env_on("THVM_ATP_ENCOMPASS");
+  // Simpler-join CP discipline (Twee Join.hs allSteps; see thvm.h).
+  s->use_simpler_join = (u8)atp_env_on("THVM_ATP_SIMPLER_JOIN");
   // firstdiv-11 probe (THVM_ATP_KEEP_LHS_REDUCIBLE): keep an LHS-reducible
   // oriented rule live instead of dropping it at the always-on interreduce
   // site (_.c:13066), to test whether thvm dropping -auto rule 3 is what
@@ -14442,6 +14444,12 @@ static void thvm_atp_interreduce_full(AtpState *s);
 static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs);
 #endif
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Forward decl: Term-side simpler-join wrapper for the pop path
+// (defined next to atp_cp_trivially_joinable below).
+static u8 atp_cp_sj_joinable_term(AtpState *s, Term l, Term r);
+#endif
+
 #ifdef ATP_CP_GROUND_JOIN
 // Forward decls: the WM -gj fact-level ground-joinability halves
 // (use_bwd_ground_join), defined with the groundJoin driver.
@@ -14791,6 +14799,11 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // points past hcp_norm), keeping recording memory-bounded.
   u32 trace_mark = s->n_trace;
   Term l, r;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Pop simpler-join verdict already decided on the FT-direct branch
+  // (skip the Term-side re-check at the common joined gate below).
+  u8 sj_checked = 0u;
+#endif
 #ifdef THVM_ATPFT_RULES
   // Survivor NF spans from the FT-direct pop treatment (set only on the
   // mixmost non-record path); bracket thvm_atp_orient_and_add below so
@@ -14948,10 +14961,19 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
           NORM_CAP);
       g_pop_ft_l = NULL;
       g_pop_ft_r = NULL;
-      if (ft_eq(lf, rf)) {
+      u8 pop_ft_joined = (u8)ft_eq(lf, rf);
+      // Simpler-join at selection (opt-in --simpler-join): a popped CP
+      // whose R+E NFs stay distinct gets the Twee-discipline gated join
+      // pass -- the same redundancy verdict as the ft_eq drop.
+      if (!pop_ft_joined && s->use_simpler_join) {
+        sj_checked = 1u;
+        pop_ft_joined = atp_cp_sj_joinable_ft(s, lf, rf);
+        if (pop_ft_joined) s->n_cps_dropped_simpler_join++;
+      }
+      if (pop_ft_joined) {
         if (pop_trace) {
           l = ft_to_term(lf);
-          r = l;                     // NF pair is equal; print it twice
+          r = l;                     // NF pair joins; print the lhs twice
         } else {
           l = cp_lhs;
           r = cp_lhs;                // only kbo_eq(l, r) == 1 is observed
@@ -15206,6 +15228,26 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     s->step++;
     return ATP_RUNNING;
   }
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Simpler-join at selection, Term-side arm (opt-in --simpler-join):
+  // covers the record and legacy pop-normalize paths (the FT-direct
+  // branch above decided already -- sj_checked).  A join is the same
+  // redundancy verdict as the kbo_eq drop above: the CP feeds no rule,
+  // its NORM_STEP chain and scratch Terms are dead.  lazy_commit pops
+  // keep sentinel l/r and were decided on the FT branch.
+  if (s->use_simpler_join && !sj_checked && !lazy_commit &&
+      atp_cp_sj_joinable_term(s, l, r)) {
+    s->n_cps_dropped_simpler_join++;
+    ATP_POPV("SJJOINED");
+    if (s->record_norm_steps) {
+      s->n_trace = trace_mark;
+    }
+    thvm_atp_heap_reset(hcp_norm);
+    s->step++;
+    return ATP_RUNNING;
+  }
+#endif
 
   // WM -ks "p" stage (KPV_Select, INF/KPVerwaltung.c:663): after the
   // selection-time R+E normalize and the joined drop, a popped CP that
@@ -21245,6 +21287,22 @@ static inline void atp_ft_mirror_ensure(AtpState *s) {
   s->ft_mirror_full = 1u;
   s->ft_mirror_probed_n_rules = s->n_rules;
 }
+
+// Term-side simpler-join wrapper (pop path, record/legacy arms):
+// convert the two NF Terms, run the FT pass (which clones internally,
+// so fl/fr stay intact), free the conversions.  See
+// atp_cp_sj_joinable_ft (ft_norm.c) for the discipline.
+static u8 atp_cp_sj_joinable_term(AtpState *s, Term l, Term r) {
+  if (l == 0 || r == 0) return 0u;
+  atp_ft_mirror_ensure(s);
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *fl = ft_from_term(a, l, 0);
+  AtpFtCell *fr = ft_from_term(a, r, 0);
+  u8 joined = atp_cp_sj_joinable_ft(s, fl, fr);
+  ft_free_span(a, fl, fl->end);
+  ft_free_span(a, fr, fr->end);
+  return joined;
+}
 #endif
 
 // FT-only trivial-joinable check.  Term cells in (*lhs / *rhs), the work
@@ -21315,6 +21373,11 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   PUSHN_TICK(g_atp_pushn_us_norm);
   joined = (u8)ft_eq(fl, fr);
   PUSHN_TICK(g_atp_pushn_us_eq);
+  // Simpler-join second chance (see atp_cp_trivially_joinable_ft).
+  if (!joined && s->use_simpler_join) {
+    joined = atp_cp_sj_joinable_ft(s, fl, fr);
+    if (joined) s->n_cps_dropped_simpler_join++;
+  }
 #endif
   // Decode NFs back to Term only on the NOT-joined branch -- downstream
   // filters (perm_sub, queue_sub, AC-eq) need them; the joined branch
@@ -24387,6 +24450,13 @@ static u8 vcp_treat_joinable(AtpState *s) {
     _dt = _n;
   }
   u8 joined = (u8)ft_eq(g_vcp_treat.fl, g_vcp_treat.fr);
+  // Simpler-join second chance (opt-in --simpler-join): verdict-only
+  // gated R+E pass on the doR NFs -- the stash keeps the engine NFs.
+  // Mirrors the hook in atp_cp_trivially_joinable_ft (ft_cpq.c).
+  if (!joined && s->use_simpler_join) {
+    joined = atp_cp_sj_joinable_ft(s, g_vcp_treat.fl, g_vcp_treat.fr);
+    if (joined) s->n_cps_dropped_simpler_join++;
+  }
   if (_dl) {
     g_atp_pushn_us_eq += atp_now_us() - _dt;
     if (joined) g_atp_pushn_joined++;

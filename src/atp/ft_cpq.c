@@ -262,6 +262,15 @@ static u8 atp_cp_trivially_joinable_ft(AtpState *s,
   PUSHN_TICK(g_atp_pushn_us_norm);
   u8 joined = (u8)ft_eq(l, r);
   PUSHN_TICK(g_atp_pushn_us_eq);
+  // Simpler-join second chance (opt-in --simpler-join): distinct doR
+  // NFs get the Twee-discipline gated R+E join pass
+  // (atp_cp_sj_joinable_ft, ft_norm.c).  Verdict-only: *lhs/*rhs keep
+  // the doR NFs, so a kept CP queues exactly what the default queues.
+  if (!joined && s->use_simpler_join) {
+    joined = atp_cp_sj_joinable_ft(s, l, r);
+    if (joined) s->n_cps_dropped_simpler_join++;
+    PUSHN_TICK(g_atp_pushn_us_norm);
+  }
   return joined;
 #undef PUSHN_TICK
 }

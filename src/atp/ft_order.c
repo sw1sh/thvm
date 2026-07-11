@@ -331,6 +331,80 @@ fn KboCmp thvm_kbo_ft_skolem_with_prepared(u32 na,
                               g_atpft_kbo_flat_b, 0u, cfg);
 }
 
+// === Simpler-join equation compare (Twee Equation.hs simplerThan) ====
+//
+// The CP-join discipline (AtpState.use_simpler_join) gates every
+// rewrite step on the rule's equation being strictly SIMPLER than the
+// CP equation under a ground-total order on equations: order each
+// equation by its skolem-ground-larger side, then compare
+// lexicographically (larger side first, smaller side on a tie) with
+// atpft_kbo_skolem_cmp.  This is Twee's orderedSimplerThan
+// (Equation.hs:46-48) over lessEqSkolem, minus the variable
+// canonicalisation inside Twee's `order` (canonicalise renames
+// variables before comparing; here variants tie-break on raw var ids
+// -- still a strict total order on concrete terms, which is what the
+// well-foundedness of the join induction needs).
+//
+// Dedicated buffers: the join pass interleaves these compares with
+// find_redex_ft's unorient gate, whose prepared redex lives in
+// g_atpft_kbo_flat_a -- sharing buffers would clobber it mid-scan.
+
+static KboFlatNode g_ftsj_cp_hi[ATPFT_KBO_FLAT_CAP];   // CP eq, larger side
+static KboFlatNode g_ftsj_cp_lo[ATPFT_KBO_FLAT_CAP];   // CP eq, smaller side
+static u32 g_ftsj_cp_hi_n = 0u;
+static KboFlatNode g_ftsj_scr_a[ATPFT_KBO_FLAT_CAP];   // rule-side scratch
+static KboFlatNode g_ftsj_scr_b[ATPFT_KBO_FLAT_CAP];
+
+// Encode the CP equation (l, r) into the prepared hi/lo buffers.
+// Returns 0 on encode overflow (caller skips the join pass).
+fn int thvm_ftsj_prepare_eq(const AtpFtCell *l, const AtpFtCell *r,
+                            const KboConfig *cfg) {
+  u32 nl = 0u, nr = 0u;
+  g_ftsj_cp_hi_n = 0u;
+  if (!atpft_kbo_flat_encode(l, cfg, g_ftsj_scr_a, &nl) ||
+      !atpft_kbo_flat_encode(r, cfg, g_ftsj_scr_b, &nr)) {
+    return 0;
+  }
+  KboCmp c = atpft_kbo_skolem_cmp(g_ftsj_scr_a, 0u, g_ftsj_scr_b, 0u, cfg);
+  const KboFlatNode *hi = (c == KBO_LT) ? g_ftsj_scr_b : g_ftsj_scr_a;
+  const KboFlatNode *lo = (c == KBO_LT) ? g_ftsj_scr_a : g_ftsj_scr_b;
+  u32 nhi = (c == KBO_LT) ? nr : nl;
+  u32 nlo = (c == KBO_LT) ? nl : nr;
+  memcpy(g_ftsj_cp_hi, hi, (size_t)nhi * sizeof(KboFlatNode));
+  memcpy(g_ftsj_cp_lo, lo, (size_t)nlo * sizeof(KboFlatNode));
+  g_ftsj_cp_hi_n = nhi;
+  return 1;
+}
+
+// Is the rule/equation (rl, rr) strictly simpler than the prepared CP
+// equation?  `oriented` rules have rl skolem-greater by construction
+// (open-term KBO GT is stable under the skolem grounding);
+// unorientable equations pick the larger side via the total skolem
+// compare.  Returns 0 when no CP equation is prepared or on encode
+// overflow (fail-closed: the step does not fire).
+fn int thvm_ftsj_rule_simpler(const AtpFtCell *rl, const AtpFtCell *rr,
+                              u8 oriented, const KboConfig *cfg) {
+  if (g_ftsj_cp_hi_n == 0u) return 0;
+  u32 na = 0u, nb = 0u;
+  if (!atpft_kbo_flat_encode(rl, cfg, g_ftsj_scr_a, &na) ||
+      !atpft_kbo_flat_encode(rr, cfg, g_ftsj_scr_b, &nb)) {
+    return 0;
+  }
+  const KboFlatNode *hi = g_ftsj_scr_a;
+  const KboFlatNode *lo = g_ftsj_scr_b;
+  if (!oriented &&
+      atpft_kbo_skolem_cmp(g_ftsj_scr_a, 0u, g_ftsj_scr_b, 0u, cfg)
+          == KBO_LT) {
+    hi = g_ftsj_scr_b;
+    lo = g_ftsj_scr_a;
+  }
+  // Twee orderedSimplerThan: (hi < HI) or (hi == HI and lo < LO).
+  KboCmp ch = atpft_kbo_skolem_cmp(hi, 0u, g_ftsj_cp_hi, 0u, cfg);
+  if (ch == KBO_LT) return 1;
+  if (ch != KBO_EQ) return 0;
+  return atpft_kbo_skolem_cmp(lo, 0u, g_ftsj_cp_lo, 0u, cfg) == KBO_LT;
+}
+
 // === LPO public entry ================================================
 //
 // Mirrors the dispatcher in thvm_lpo (src/lpo/_.c:680-748): encode

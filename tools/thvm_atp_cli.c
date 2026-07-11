@@ -110,6 +110,7 @@ static const AtpKnob KNOBS[] = {
   {"gj-delete-rule",         "THVM_ATP_GJ_DELETE_RULE",  0, "GjDeleteRule"},
   {"gj-index",               "THVM_ATP_GJ_INDEX",        1, "(GJ indexed top scan; default 1)"},
   {"encompass-demod",        "THVM_ATP_ENCOMPASS",       0, "(skolem-ground unorient demodulation)"},
+  {"simpler-join",           "THVM_ATP_SIMPLER_JOIN",    0, "(Twee simplerThan-gated CP join)"},
   {"gj-budget",              "THVM_ATP_GJ_BUDGET",       1, "(GJ branch budget; small = early-KEEP)"},
   {"full-interreduce",       "THVM_ATP_FULL_INTERREDUCE",0, "FullInterreduce"},
   {"cp-side",                "THVM_ATP_CP_SIDE",         0, "CPSide"},
@@ -2344,9 +2345,15 @@ static int cli_strategy_complete(void) {
   // under it certifies nothing about the full problem: GaveUp, never
   // Satisfiable.
   const char *en = getenv("THVM_ATP_ENCOMPASS");
+  // Simpler-join carries the simplerThan discipline but not the
+  // below-peak connectedness side condition of Twee's step3, so its
+  // CP drops are not exactly completeness-preserving either: GaveUp,
+  // never Satisfiable.
+  const char *sj = getenv("THVM_ATP_SIMPLER_JOIN");
   return !g_cli_goal_existential && !g_cli_sine_applied && !g_cli_horn_applied
       && (mw == NULL || *mw == '0') && (am == NULL || *am == '0')
-      && (rr == NULL || *rr == '0') && (en == NULL || *en == '0');
+      && (rr == NULL || *rr == '0') && (en == NULL || *en == '0')
+      && (sj == NULL || *sj == '0');
 }
 
 // --- term printing (names from the parsed .pr) ---------------------

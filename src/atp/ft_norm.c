@@ -155,6 +155,42 @@ extern KboCmp thvm_kbo_ft_skolem_with_prepared(u32 na,
                                                const AtpFtCell *tmpl,
                                                const void      *subst,
                                                const KboConfig *cfg);
+// Simpler-join equation compares (Twee simplerThan; ft_order.c).
+extern int thvm_ftsj_prepare_eq(const AtpFtCell *l, const AtpFtCell *r,
+                                const KboConfig *cfg);
+extern int thvm_ftsj_rule_simpler(const AtpFtCell *rl, const AtpFtCell *rr,
+                                  u8 oriented, const KboConfig *cfg);
+
+// --- Simpler-join session (AtpState.use_simpler_join) ----------------
+//
+// Armed by atp_cp_sj_joinable_ft (defined after the normalize entry
+// points below) around a gated R+E re-normalize of a CP's two sides.
+// While armed, ft_cell_try_rules applies Twee's Join.hs allSteps
+// discipline: EVERY candidate rule/equation must be strictly simpler
+// than the CP equation (thvm_ftsj_rule_simpler), and an unorientable
+// instance may additionally fire when strictly decreasing under the
+// skolem-ground KBO (Rule.hs:425 reducesSkolem) even though the
+// open-term instance compare is incomparable.  g_ftsj_memo caches the
+// per-rule simplerThan verdict for the pass (the gate is instance-
+// independent): 0 = unknown, 1 = simpler, 2 = not.
+static u8   g_ftsj_active   = 0u;
+static u8  *g_ftsj_memo     = NULL;
+static u32  g_ftsj_memo_cap = 0u;
+
+static u8 ftsj_rule_ok(AtpState *s, u32 r) {
+  if (g_ftsj_memo != NULL && r < g_ftsj_memo_cap && g_ftsj_memo[r] != 0u) {
+    return (u8)(g_ftsj_memo[r] == 1u);
+  }
+  u8 ok = 0u;
+  if (s->lhs_ft[r] != NULL && s->rhs_ft[r] != NULL) {
+    ok = (u8)(thvm_ftsj_rule_simpler(s->lhs_ft[r], s->rhs_ft[r],
+                                     s->r_orient[r], s->kbo) != 0);
+  }
+  if (g_ftsj_memo != NULL && r < g_ftsj_memo_cap) {
+    g_ftsj_memo[r] = ok ? 1u : 2u;
+  }
+  return ok;
+}
 
 // --- SUBST_FRESH entry-clear ----------------------------------------
 //
@@ -2411,6 +2447,11 @@ static int ft_cell_try_rules(AtpState   *s,
       AtpFtCell *lhs = s->lhs_ft[r];
       if (lhs == NULL || s->rhs_ft[r] == NULL) continue;
       if (have_unorient && !s->r_orient[r]) continue;
+      // Simpler-join gate (Twee Join.hs step1/step2, `unorient rule
+      // \`simplerThan\` (t :=: u)`): with the SJ session armed, a rule
+      // fires only when its equation is strictly simpler than the CP
+      // equation under the skolem-ground lex compare.
+      if (g_ftsj_active && !ftsj_rule_ok(s, r)) continue;
       // Forward rewrite, no order check needed (oriented).
       if (_pd) g_atp_pushn_tr_att++;
       const FtDtRec *rec = NULL;
@@ -2493,6 +2534,8 @@ static int ft_cell_try_rules(AtpState   *s,
       AtpFtCell *rhs = s->rhs_ft[r];
       if (lhs == NULL || rhs == NULL) continue;
       if (s->r_orient[r]) continue;
+      // Simpler-join gate (Twee Join.hs step2/step3): see pass 1.
+      if (g_ftsj_active && !ftsj_rule_ok(s, r)) continue;
       // Unorientable equation: try forward (l -> r) then backward (r -> l).
       // Forward: lhs matches p; rhs vars NOT bound by the lhs match
       // (extension variables) are grounded to the minimal constant --
@@ -2532,7 +2575,10 @@ static int ft_cell_try_rules(AtpState   *s,
           // this port does not check proper encompassment of the redex
           // over the equation, so CP-drop completeness follows Twee's
           // practical discipline rather than the strict AHL condition.
-          if (ft_v != KBO_GT && s->use_encompass_demod &&
+          // The armed simpler-join session admits the same relaxation
+          // (Twee step3's reducesSkolem) -- there the simplerThan gate
+          // above supplies the redundancy discipline.
+          if (ft_v != KBO_GT && (s->use_encompass_demod || g_ftsj_active) &&
               thvm_kbo_ft_skolem_with_prepared(redex_na, rhs, subst_buf,
                                                s->kbo) == KBO_GT) {
             ft_v = KBO_GT;
@@ -2586,7 +2632,7 @@ static int ft_cell_try_rules(AtpState   *s,
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
           // Encompassment demodulation, backward face (see fwd branch).
-          if (ft_v != KBO_GT && s->use_encompass_demod &&
+          if (ft_v != KBO_GT && (s->use_encompass_demod || g_ftsj_active) &&
               thvm_kbo_ft_skolem_with_prepared(redex_na, lhs, subst_buf,
                                                s->kbo) == KBO_GT) {
             ft_v = KBO_GT;
@@ -3053,6 +3099,12 @@ static int ftnfm_probe(AtpState *s, const AtpFtCell *c, u8 wantk) {
 }
 
 static void ftnfm_store(AtpState *s, const AtpFtCell *c, u8 wantk) {
+  // Simpler-join sessions rewrite with a GATED rule subset: "no redex
+  // here" under the gates proves nothing for ungated probes of the
+  // same (content, want) key, so armed walks never store.  (Probing
+  // stays sound the other way: an ungated no-redex verdict holds a
+  // fortiori for the stricter gated scan.)
+  if (g_ftsj_active) return;
   if ((c->sym & WF_VAR_BIT) != 0u) return;
   u32 syms[FTNFM_MAX_SYMS];
   u64 h;
@@ -3740,6 +3792,72 @@ AtpFtCell *atp_rules_only_normalize_ft(AtpState *s, AtpFtCell *t,
                                        (Term){0}, 0u, NULL);
 }
 
+// --- Simpler-join joinability (AtpState.use_simpler_join) ------------
+//
+// Second-chance join verdict for a CP whose sides l/r survived the
+// engine's standard normalize with DISTINCT NFs.  Port of the
+// discipline behind Twee's joinCriticalPair (Join.hs:55, allSteps =
+// step1 >=> step2 >=> checkOrder >=> step3): re-normalize both sides
+// admitting oriented rules AND unorientable equations, where every
+// step is gated on the rewriting equation being strictly simpler than
+// the CP equation (Equation.hs:59 simplerThan over lessEqSkolem), and
+// an unorientable instance fires when strictly decreasing under the
+// skolem-ground KBO (Rule.hs:425 reducesSkolem) even where the
+// open-term compare is incomparable.  Divergences from Twee, accepted
+// under the opt-in + GaveUp-never-Satisfiable envelope (over-dropping
+// can lose completeness, never soundness -- proofs are built only from
+// recorded engine steps):
+//   * no step3 below-peak constraint (normaliseWith (`lessThan` top))
+//     and no checkOrder peak test -- the peak is not threaded here;
+//   * no variable canonicalisation inside simplerThan (ft_order.c);
+//   * VERDICT-ONLY: the caller's l/r keep the engine NFs, so a kept
+//     CP queues/records exactly what the default path queues -- the
+//     gated steps live and die inside this call.
+//
+// Termination: oriented steps decrease the open-KBO instance, hence
+// its skolem image; gated unorientable steps decrease the skolem image
+// directly; the skolem-ground order is total, well-founded and closed
+// under contexts, so the gated normalize terminates (64-step cap as
+// backstop).
+//
+// The pass can out-join the ungated doR/doE normalize that already
+// failed ONLY through the unorientable-equation leg, so it is skipped
+// when no unorientable equation is live.  Plain-KBO configs only (the
+// skolem compare reads s->kbo).
+u8 atp_cp_sj_joinable_ft(AtpState *s, AtpFtCell *l, AtpFtCell *r);
+u8 atp_cp_sj_joinable_ft(AtpState *s, AtpFtCell *l, AtpFtCell *r) {
+  if (l == NULL || r == NULL || s->n_rules == 0u) return 0u;
+  if (s->n_unorient == 0u) return 0u;
+  if (s->kbo == NULL || s->lpo != NULL || s->rpo != NULL || s->wpo != NULL) {
+    return 0u;
+  }
+  if (g_ftsj_active) return 0u;   // defensive: no reentry
+  if (!thvm_ftsj_prepare_eq(l, r, s->kbo)) return 0u;
+  // Arm the per-rule simplerThan memo for this pass.
+  if (g_ftsj_memo_cap < s->n_rules) {
+    u32 cap = s->n_rules + 256u;
+    u8 *m = (u8 *)realloc(g_ftsj_memo, cap);
+    if (m == NULL) return 0u;
+    g_ftsj_memo = m;
+    g_ftsj_memo_cap = cap;
+  }
+  memset(g_ftsj_memo, 0, s->n_rules);
+  // Normalize CLONES: the gated walk splices/frees spans in place, and
+  // the caller's l/r must stay the engine NFs (verdict-only contract).
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *lc = ft_clone_span(a, l, 0);
+  AtpFtCell *rc = ft_clone_span(a, r, 0);
+  if (lc == NULL || rc == NULL) return 0u;
+  g_ftsj_active = 1u;
+  lc = atp_rewrite_normalize_ft(s, lc, 64u);
+  rc = atp_rewrite_normalize_ft(s, rc, 64u);
+  g_ftsj_active = 0u;
+  u8 joined = (u8)ft_eq(lc, rc);
+  ft_free_span(a, lc, lc->end);
+  ft_free_span(a, rc, rc->end);
+  return joined;
+}
+
 // Record-mode entry.  Mirrors atp_rewrite_normalize_record's contract
 // on the term side: each FT splice emits one TRACE_NORM_STEP chained
 // off `*chain_tail`, advancing the tail.  `eq_other` is the unchanged
@@ -3918,6 +4036,10 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
     ri_env_cached = (env != NULL && env[0] != '0') ? 1 : 0;
   }
   int use_ri = ri_env_cached && use_full_range;
+  // Simpler-join sessions must not take the RI descent: it fires
+  // oriented rules without consulting the ftsj gates.  Fall through to
+  // find_redex_ft, whose ft_cell_try_rules applies them.
+  if (g_ftsj_active) use_ri = 0;
   if (use_ri) {
     // Ensure the Term-side rule index is current; rebuild on dirty.
     if (s->rule_index == NULL || s->rule_index_dirty ||
