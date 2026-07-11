@@ -129,6 +129,7 @@ static const AtpKnob KNOBS[] = {
   {"random-ratio",           "THVM_ATP_RANDOM_RATIO",    1, "(random CP ratio)"},
   {"random-seed",            "THVM_ATP_RANDOM_SEED",     1, "(random seed)"},
   {"sym-prec",               "THVM_ATP_SYM_PREC",        1, "(Vampire symbol precedence: reverse-frequency|frequency)"},
+  {"equals-goal",            "THVM_ATP_EQUALS_GOAL",     1, "(existential-goal equals encoding; 2 = give up if inapplicable)"},
   {"horn",                   "THVM_ATP_HORN",            1, "(encoded-Horn release: 0 disables)"},
   {"horn-ratio",             "THVM_ATP_HORN_RATIO",      1, "(Horn pick-given size:age ratio, 0..4)"},
   {"horn-keep",              "THVM_ATP_HORN_KEEP",       1, "(Horn kept-release cap)"},
@@ -693,6 +694,136 @@ static void tp_sine_select(TpProblem *tp) {
     n0 = kept;
   }
   tp_giveup("axiom selection cannot fit the engine caps");
+}
+
+// ===================================================================
+// Existential-goal equals encoding (Twee addNarrowing port)
+// ===================================================================
+//
+// Twee never narrows a non-ground goal directly: addNarrowing
+// (twee executable/SequentialMain.hs:721) encodes each existential
+// goal  s != t  (a variable in the re-negated conjecture is
+// existentially quantified) equationally --
+//     eq(X,X) = true          (reflexivity)
+//     eq(s,t) = false         (one per non-ground goal; the goal's
+//                              variables turn universally quantified)
+//     true   != false         (the single GROUND replacement goal)
+// -- and completion narrows the eq(s,t) axiom at its argument
+// positions until the two arguments unify, at which point the root
+// overlap with reflexivity yields true = false: the refutation closes
+// through an ordinary ground-goal join, no narrowing lane involved.
+//
+// Conservativity (Twee tags the step "esa" -- equisatisfiable): with
+// eq/true/false FRESH symbols,
+//   (=>) if S u { s != t } is unsatisfiable, some instance s@ = t@ is
+//        S-derivable (Birkhoff), so eq(s@,t@) rewrites to true via
+//        reflexivity AND to false via the goal axiom: true = false,
+//        contradicting the new goal -- the encoding is unsatisfiable.
+//   (<=) a model M of S u { forall X. s != t } extends to the
+//        encoding: the goal instances give two distinct elements
+//        a != b; set true^M = a, false^M = b, eq^M(u,v) = a if u = v
+//        else b.  Reflexivity holds, each eq(s,t) = false holds
+//        (every instance of s,t differs in M), true != false holds --
+//        the encoding is satisfiable.
+// Unsatisfiable therefore transfers both ways.  A saturation under
+// the encoding still reports GaveUp, never Satisfiable
+// (g_cli_equals_applied, the g_cli_*_applied gate pattern) -- belt
+// and suspenders on top of the g_cli_goal_existential gate.
+//
+// OPT-IN (--equals-goal=1), not the default: the engine's narrowing
+// lane decides most of the corpus's existential goals instantly
+// (COL004-1 proves at 0.0s narrowing but TIMES OUT encoded), while
+// the encoding cracks the goals narrowing starves on (COL009-1
+// proves at 0.1s encoded but times out narrowing) -- complementary
+// lanes, so the schedule runs the encoding as its own slice.
+// --equals-goal=2 additionally EXITS (give-up) when the encoding
+// does not apply, so the slice never duplicates the WM preset on
+// ground-goal (or .pr) problems.
+
+static int g_cli_equals_applied = 0;
+
+// Does a clause side contain a variable (uppercase-initial token)?
+static int tp_side_has_var(const char *s) {
+  for (const char *q = s; *q != '\0'; q++) {
+    if (isupper((unsigned char)*q) &&
+        (q == s || !(isalnum((unsigned char)q[-1]) || q[-1] == '_')))
+      return 1;
+  }
+  return 0;
+}
+
+// A fresh function-symbol name: `base`, suffixed with 'q's until it
+// matches nothing in the symbol table (any arity).
+static void tp_fresh_sym(const TpProblem *tp, const char *base,
+                         char *out, size_t cap) {
+  snprintf(out, cap, "%s", base);
+  for (;;) {
+    int clash = 0;
+    for (int i = 0; i < tp->n_syms && !clash; i++)
+      clash = (strcmp(tp->syms[i].name, out) == 0);
+    if (!clash) return;
+    size_t l = strlen(out);
+    if (l + 2 >= cap) tp_giveup("cannot make a fresh symbol name");
+    out[l] = 'q'; out[l + 1] = '\0';
+  }
+}
+
+static void tp_equals_goal(TpProblem *tp) {
+  int n_nonground = 0;
+  for (int i = 0; i < tp->n_cls; i++)
+    if (tp->cls[i].neg && (tp_side_has_var(tp->cls[i].lhs) ||
+                           tp_side_has_var(tp->cls[i].rhs)))
+      n_nonground++;
+  if (n_nonground == 0) return;
+  // Fall back to the narrowing lane if the encoding cannot fit.
+  if (tp->n_cls + 2 > TP_MAX_CLAUSES) return;
+  char eqn[TP_NAME_LEN], tru[TP_NAME_LEN], fls[TP_NAME_LEN];
+  tp_fresh_sym(tp, "eq",     eqn, sizeof eqn);
+  tp_fresh_sym(tp, "etrue",  tru, sizeof tru);
+  tp_fresh_sym(tp, "efalse", fls, sizeof fls);
+  for (int i = 0; i < tp->n_cls; i++) {
+    TpClause *cl = &tp->cls[i];
+    if (!cl->neg || (!tp_side_has_var(cl->lhs) && !tp_side_has_var(cl->rhs)))
+      continue;
+    if (strlen(eqn) + strlen(cl->lhs) + strlen(cl->rhs) + 4 >= TP_SIDE_LEN)
+      return;
+  }
+  // Rewrite each non-ground goal in place:  eq(s,t) = false.
+  for (int i = 0; i < tp->n_cls; i++) {
+    TpClause *cl = &tp->cls[i];
+    if (!cl->neg || (!tp_side_has_var(cl->lhs) && !tp_side_has_var(cl->rhs)))
+      continue;
+    char enc[TP_SIDE_LEN];
+    snprintf(enc, sizeof enc, "%s(%s,%s)", eqn, cl->lhs, cl->rhs);
+    memcpy(cl->lhs, enc, strlen(enc) + 1u);
+    snprintf(cl->rhs, sizeof cl->rhs, "%s", fls);
+    cl->neg  = 0;
+    cl->conj = 1;   // conjecture-derived: SInE keeps it unconditionally
+    tp_scan_term(tp, cl->lhs);
+    tp_scan_term(tp, cl->rhs);
+  }
+  // Reflexivity:  eq(V,V) = true  (any declared variable serves; a
+  // non-ground goal guarantees at least one).
+  TpClause *rfl = &tp->cls[tp->n_cls++];
+  snprintf(rfl->lhs, sizeof rfl->lhs, "%s(%s,%s)",
+           eqn, tp->vars[0], tp->vars[0]);
+  snprintf(rfl->rhs, sizeof rfl->rhs, "%s", tru);
+  rfl->neg  = 0;
+  rfl->conj = 1;
+  tp_scan_term(tp, rfl->lhs);
+  tp_scan_term(tp, rfl->rhs);
+  // The replacement goal:  true != false.
+  TpClause *gl = &tp->cls[tp->n_cls++];
+  snprintf(gl->lhs, sizeof gl->lhs, "%s", tru);
+  snprintf(gl->rhs, sizeof gl->rhs, "%s", fls);
+  gl->neg  = 1;
+  gl->conj = 1;
+  tp_scan_term(tp, gl->lhs);
+  tp_scan_term(tp, gl->rhs);
+  g_cli_equals_applied = 1;
+  fprintf(stderr,
+          "FindProof: equals-encoded %d existential goal(s) (%s/%s/%s)\n",
+          n_nonground, eqn, tru, fls);
 }
 
 // ===================================================================
@@ -2353,6 +2484,7 @@ static int cli_strategy_complete(void) {
   // never Satisfiable.
   const char *sj = getenv("THVM_ATP_SIMPLER_JOIN");
   return !g_cli_goal_existential && !g_cli_sine_applied && !g_cli_horn_applied
+      && !g_cli_equals_applied
       && (mw == NULL || *mw == '0') && (am == NULL || *am == '0')
       && (rr == NULL || *rr == '0') && (en == NULL || *en == '0')
       && (sj == NULL || *sj == '0');
@@ -2684,6 +2816,14 @@ static const SchedSlice SCHEDULE[] = {
   // wall for its slower proofs (LCL113-10 23s, REL028-2 15s), which the old
   // sequential 0.22 slice (6.6s at a 30s wall) starved.
   {"wm",      "",                                          0.34},
+  // (1b) EXISTENTIAL-GOAL EQUALS ENCODING (Twee addNarrowing port):
+  // the WM preset over the eq/true/false-encoded problem.
+  // Complementary to the narrowing lane every other slice uses on a
+  // non-ground goal: COL009-1 proves in 0.1s encoded (schedule-wide
+  // Timeout narrowing); COL004-1 is the exact reverse.  =2 makes the
+  // slice exit immediately on ground-goal problems, so it only ever
+  // spends a pool slot on the existential family.
+  {"equals",  "--equals-goal=2",                           0.0},
   // (2) Goal FLATTENING (Twee/Vampire naming port) + LAZY ground-join
   // (Twee selection-time redundancy) + backward-simplify + auto-max-weight.
   // Cracks deep-goal UEQ that completion stalls on (COL060-1, GRP167-4);
@@ -3019,6 +3159,16 @@ int main(int argc, char **argv) {
         fflush(stdout);
         return 0;
       }
+      // Existential (non-ground) goals, opt-in: encode them
+      // equationally the way Twee's addNarrowing does, BEFORE SInE
+      // (the encoding's clauses carry the conjecture role and seed
+      // the selection).
+      {
+        const char *ee = getenv("THVM_ATP_EQUALS_GOAL");
+        if (ee != NULL && ee[0] != '0') tp_equals_goal(&tp);
+        n_neg = 0;
+        for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
+      }
       // Oversized problems (the CSR knowledge bases run to 8k clauses):
       // goal-directed SInE selection cuts them to the relevant slice
       // BEFORE the capacity checks.  THVM_ATP_SINE=0 restores the old
@@ -3064,6 +3214,16 @@ int main(int argc, char **argv) {
       run_file = tmp_pr;
     }
     free(raw);
+  }
+
+  // --equals-goal=2 (the schedule's equals slice): exit cleanly when
+  // the encoding did not apply (ground goal, over-bound goal, or
+  // non-TPTP input), freeing the pool slot immediately instead of
+  // duplicating the WM lane for a whole wall.
+  {
+    const char *ee = getenv("THVM_ATP_EQUALS_GOAL");
+    if (ee != NULL && atoi(ee) >= 2 && !g_cli_equals_applied)
+      tp_giveup("equals-goal slice: no existential goal to encode");
   }
 
   g_cli_want_szs = szs;
