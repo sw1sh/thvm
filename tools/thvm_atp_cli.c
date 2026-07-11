@@ -129,6 +129,12 @@ static const AtpKnob KNOBS[] = {
   {"horn-wall",              "THVM_ATP_HORN_WALL",       1, "(Horn chaining wall, seconds)"},
   {"horn-max",               "THVM_ATP_HORN_MAX",        1, "(Horn release-pool cap)"},
   {"horn-ground",            "THVM_ATP_HORN_GROUND",     1, "(Horn rank: ground tier)"},
+  {"horn-bwd",               "THVM_ATP_HORN_BWD",        1, "(Horn backward subgoal cone: 0 disables)"},
+  {"horn-bwd-depth",         "THVM_ATP_HORN_BWD_DEPTH",  1, "(Horn backward cone depth cap)"},
+  {"horn-bwd-max",           "THVM_ATP_HORN_BWD_MAX",    1, "(Horn backward cone subgoal cap)"},
+  {"horn-goal-stop",         "THVM_ATP_HORN_GOAL_STOP",  1, "(stop chaining on a goal-subsuming release: 0 disables)"},
+  {"horn-rel",               "THVM_ATP_HORN_REL",        1, "(Horn relevance gate on oversized KBs: 0 disables)"},
+  {"horn-rel-tol",           "THVM_ATP_HORN_REL_TOL",    1, "(Horn relevance-gate SInE tolerance)"},
   {"heap-cells",             "THVM_HEAP_CELLS",          1, "(heap size, cells)"},
   {"profile",                "THVM_ATP_PROFILE",         1, "(profiling level)"},
   {"diag",                   "THVM_ATP_DIAG",            1, "(diagnostics)"},
@@ -378,6 +384,56 @@ static void tp_scan_term(TpProblem *tp, const char *s) {
 // identifier IN PLACE to prefix + "_h" + 16-hex-FNV(full name) -- 58
 // chars, deterministic, collision-safe in practice, case of the first
 // character (variable-ness) preserved.
+// TPTP quoted atoms ('+', '>=', ...) survive preprocessing as-is, but
+// no downstream identifier grammar (.pr emission, the engine reader,
+// the Horn parser) admits them -- LCL890-10 died on a pr parse error.
+// Rewrite every DISTINCT quoted atom to a fresh plain name (qtd0,
+// qtd1, ...): an isomorphic renaming, so provability is untouched.
+// Candidate names are collision-guarded against the input text.
+static char *tp_unquote_names(char *text) {
+  if (strchr(text, '\'') == NULL) return text;
+#define TP_MAX_QUOTED 512
+  char *qname[TP_MAX_QUOTED];
+  char  qrepl[TP_MAX_QUOTED][24];
+  int nq = 0;
+  size_t cap = strlen(text) + 4096;
+  char *out = (char *)malloc(cap);
+  size_t o = 0;
+  if (out == NULL) tp_giveup("OOM in quoted-atom rename");
+  for (const char *r = text; *r != '\0'; ) {
+    if (o + 32 >= cap) {
+      cap *= 2;
+      out = (char *)realloc(out, cap);
+      if (out == NULL) tp_giveup("OOM in quoted-atom rename");
+    }
+    if (*r != '\'') { out[o++] = *r++; continue; }
+    const char *q2 = r + 1;
+    while (*q2 != '\0' && *q2 != '\'')
+      q2 += (q2[0] == '\\' && q2[1] != '\0') ? 2 : 1;
+    if (*q2 == '\0' || q2 == r + 1) { out[o++] = *r++; continue; }
+    size_t n = (size_t)(q2 - (r + 1));
+    int ix = -1;
+    for (int i = 0; i < nq; i++)
+      if (strlen(qname[i]) == n && memcmp(qname[i], r + 1, n) == 0) { ix = i; break; }
+    if (ix < 0 && nq < TP_MAX_QUOTED) {
+      qname[nq] = strndup(r + 1, n);
+      snprintf(qrepl[nq], sizeof qrepl[nq], "qtd%d", nq);
+      while (strstr(text, qrepl[nq]) != NULL &&
+             strlen(qrepl[nq]) + 2 < sizeof qrepl[nq])
+        strcat(qrepl[nq], "x");
+      ix = nq++;
+    }
+    if (ix < 0) { out[o++] = *r++; continue; }   // table full: leave as-is
+    size_t rl = strlen(qrepl[ix]);
+    memcpy(out + o, qrepl[ix], rl); o += rl;
+    r = q2 + 1;
+  }
+  out[o] = '\0';
+  for (int i = 0; i < nq; i++) free(qname[i]);
+  free(text);
+  return out;
+}
+
 static void tp_shorten_names(char *text) {
   char *r = text, *w = text;
   while (*r != '\0') {
@@ -663,7 +719,13 @@ static int g_cli_horn_applied = 0;
 // into condition i's space at offset (i+1)*HORN_VSPACE.
 #define HORN_MAX_COND   8
 #define HORN_VSPACE     64
-#define HORN_NSLOTS     ((HORN_MAX_COND + 1) * HORN_VSPACE)
+// Var spaces: rule 0, condition facts 1..HORN_MAX_COND, subgoal
+// patterns HORN_SG_OFF, probe side HORN_PROBE_OFF (a clean space for
+// unifying a canonical release against a subgoal while a join's
+// bindings are still live in spaces 0..HORN_MAX_COND).
+#define HORN_SG_OFF     ((HORN_MAX_COND + 1) * HORN_VSPACE)
+#define HORN_PROBE_OFF  ((HORN_MAX_COND + 2) * HORN_VSPACE)
+#define HORN_NSLOTS     ((HORN_MAX_COND + 3) * HORN_VSPACE)
 #define HORN_MAX_RELEASES 400000
 #define HORN_MAX_ATTEMPTS 10000000L
 #define HORN_WALL_SEC   2.5
@@ -892,7 +954,10 @@ static int horn_dedup_add(const char *key) {   // 1 = new
 }
 
 // --- facts, rules, head index ------------------------------------------
-typedef struct { int l, r, nv, size; u8 processed; } HFact;
+typedef struct {
+  int l, r, nv, size;
+  u8 processed, sghit, rel, conj, given;
+} HFact;
 static HFact *g_hf = NULL; static int g_hf_n = 0, g_hf_cap = 0;
 
 static int horn_size(int t) {
@@ -901,39 +966,43 @@ static int horn_size(int t) {
   return s;
 }
 
-// Min-heap over unprocessed fact indices, keyed by term size: the
-// given-fact agenda (smallest first, ties by insertion order).
-static int *g_hheap = NULL; static int g_hheap_n = 0, g_hheap_cap = 0;
+// Min-heaps over unprocessed fact indices, keyed by term size
+// (smallest first, ties by insertion order).  g_hheap is the main
+// given-fact agenda; g_hpheap is the goal-directed priority agenda
+// (facts that unify with a backward-cone subgoal), popped first.
+typedef struct { int *a; int n, cap; } HHeap;
+static HHeap g_hheap  = {NULL, 0, 0};
+static HHeap g_hpheap = {NULL, 0, 0};
 static int horn_heap_lt(int a, int b) {
   if (g_hf[a].size != g_hf[b].size) return g_hf[a].size < g_hf[b].size;
   return a < b;
 }
-static void horn_heap_push(int f) {
-  if (g_hheap_n >= g_hheap_cap) {
-    g_hheap_cap = (g_hheap_cap == 0) ? (1 << 12) : g_hheap_cap * 2;
-    g_hheap = (int *)realloc(g_hheap, (size_t)g_hheap_cap * sizeof(int));
-    if (g_hheap == NULL) tp_giveup("OOM in Horn release");
+static void horn_heap_push(HHeap *h, int f) {
+  if (h->n >= h->cap) {
+    h->cap = (h->cap == 0) ? (1 << 12) : h->cap * 2;
+    h->a = (int *)realloc(h->a, (size_t)h->cap * sizeof(int));
+    if (h->a == NULL) tp_giveup("OOM in Horn release");
   }
-  int i = g_hheap_n++;
-  g_hheap[i] = f;
+  int i = h->n++;
+  h->a[i] = f;
   while (i > 0) {
     int p = (i - 1) / 2;
-    if (!horn_heap_lt(g_hheap[i], g_hheap[p])) break;
-    int t = g_hheap[i]; g_hheap[i] = g_hheap[p]; g_hheap[p] = t;
+    if (!horn_heap_lt(h->a[i], h->a[p])) break;
+    int t = h->a[i]; h->a[i] = h->a[p]; h->a[p] = t;
     i = p;
   }
 }
-static int horn_heap_pop(void) {
-  if (g_hheap_n == 0) return -1;
-  int top = g_hheap[0];
-  g_hheap[0] = g_hheap[--g_hheap_n];
+static int horn_heap_pop(HHeap *h) {
+  if (h->n == 0) return -1;
+  int top = h->a[0];
+  h->a[0] = h->a[--h->n];
   int i = 0;
   for (;;) {
     int l = 2 * i + 1, r = l + 1, m = i;
-    if (l < g_hheap_n && horn_heap_lt(g_hheap[l], g_hheap[m])) m = l;
-    if (r < g_hheap_n && horn_heap_lt(g_hheap[r], g_hheap[m])) m = r;
+    if (l < h->n && horn_heap_lt(h->a[l], h->a[m])) m = l;
+    if (r < h->n && horn_heap_lt(h->a[r], h->a[m])) m = r;
     if (m == i) break;
-    int t = g_hheap[i]; g_hheap[i] = g_hheap[m]; g_hheap[m] = t;
+    int t = h->a[i]; h->a[i] = h->a[m]; h->a[m] = t;
     i = m;
   }
   return top;
@@ -970,15 +1039,20 @@ static void horn_fact_add(int l, int r, int nv) {
   g_hf[g_hf_n].l = l; g_hf[g_hf_n].r = r; g_hf[g_hf_n].nv = nv;
   g_hf[g_hf_n].size = horn_size(l) + horn_size(r);
   g_hf[g_hf_n].processed = 0;
+  g_hf[g_hf_n].sghit = 0;
+  g_hf[g_hf_n].rel = 1;
+  g_hf[g_hf_n].conj = 0;
+  g_hf[g_hf_n].given = 0;
   horn_index_entry(g_hn[l].head, g_hf_n, 0);
   horn_index_entry(g_hn[r].head, g_hf_n, 1);
-  horn_heap_push(g_hf_n);
+  horn_heap_push(&g_hheap, g_hf_n);
   g_hf_n++;
 }
 
 typedef struct {
   int cl[HORN_MAX_COND], ct[HORN_MAX_COND];
   int nc, concl_l, concl_r, nv;
+  u8 rel, conj;
 } HRule;
 static HRule *g_hr = NULL; static int g_hr_n = 0, g_hr_cap = 0;
 
@@ -1011,7 +1085,7 @@ static void horn_rule_index(int rule, int cpos, int head) {
 typedef struct {
   char *l, *r;
   int tl, tr;
-  int goal_hit, goal_syms, ground, n_weak, size, order;
+  int goal_hit, sg_hit, goal_syms, ground, n_weak, size, order;
   int grp, w;   // head-symbol group + within-group rank (diversity quota)
 } HRel;
 static HRel *g_hrel = NULL; static int g_hrel_n = 0, g_hrel_cap = 0;
@@ -1125,6 +1199,28 @@ static int horn_disp_check(int s, int other) {
   return 1;
 }
 
+// Push condition (cl, ct), splitting PAIRED conditions first: the CSR
+// consistency KBs pack conjunctions as tuple2(p,q) = tuple2(true,true),
+// which no unit fact can ever unify.  When both sides carry the same
+// rigid head and arity, the argument equations are pushed instead --
+// they IMPLY the packed equation by congruence (then the dispatcher
+// fires), so the decoded rule stays a sound consequence.  Returns 0 on
+// condition-count overflow.
+static int horn_cond_push(HRule *ru, int *nc, int cl, int ct, int depth) {
+  if (depth < 8 && g_hn[cl].head >= 0 && g_hn[cl].head == g_hn[ct].head &&
+      g_hn[cl].nargs == g_hn[ct].nargs && g_hn[cl].nargs > 0) {
+    for (int i = 0; i < g_hn[cl].nargs; i++)
+      if (!horn_cond_push(ru, nc, HARG(cl, i), HARG(ct, i), depth + 1))
+        return 0;
+    return 1;
+  }
+  if (*nc >= HORN_MAX_COND) return 0;
+  ru->cl[*nc] = cl;
+  ru->ct[*nc] = ct;
+  (*nc)++;
+  return 1;
+}
+
 // Unwrap ifeqN(c, t, then, e) = e (else side must equal the clause's
 // other side for arity 4; arity 3 has no else).  Nesting in the
 // then-position accumulates conditions; a partial unwrap is still a
@@ -1136,10 +1232,7 @@ static int horn_decode_side(int s, int other, HRule *ru) {
     int na = g_hn[cur].nargs;
     if (na != 3 && na != 4) break;
     if (na == 4 && !horn_eq(HARG(cur, 3), other)) break;
-    if (nc >= HORN_MAX_COND) return 0;
-    ru->cl[nc] = HARG(cur, 0);
-    ru->ct[nc] = HARG(cur, 1);
-    nc++;
+    if (!horn_cond_push(ru, &nc, HARG(cur, 0), HARG(cur, 1), 0)) return 0;
     cur = HARG(cur, 2);
   }
   if (nc == 0) return 0;
@@ -1155,6 +1248,400 @@ static int g_horn_max_rel = HORN_MAX_RELEASES;  // THVM_ATP_HORN_MAX
 static double horn_now(void) {
   struct timeval tv; gettimeofday(&tv, NULL);
   return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
+}
+
+// --- goal-directed backward subgoal cone (v2) ---------------------------
+// SLD/UR-style regression from the negated goals through the decoded
+// rules, bounded by depth, count and a wall slice.  A subgoal is an
+// equation PATTERN: any released fact that unifies with one is a
+// candidate step of a goal-closing chain, so it is (a) popped from the
+// agenda with priority -- its forward joins produce the parent
+// subgoal's instance next -- and (b) ranked into the kept window.
+// Subgoals are relevance markers only, never released as equations, so
+// soundness is untouched.
+//
+// Regression steps, for a subgoal G and rule C1..Ck -> L=R with the
+// conclusion unified against G (either orientation):
+//   - abstract:  each condition Ci becomes a subgoal under the
+//     conclusion bindings alone (SLD with the siblings postponed);
+//     rejected unless enough rigid structure survives to discriminate.
+//   - UR-style:  all conditions but one are satisfied against the
+//     CURRENT fact set (input units; the cone runs before the loop),
+//     and the open condition becomes the subgoal -- the classic
+//     unit-resulting negative-unit step, fully constrained.
+typedef struct { int l, r, depth, hl, hr, hits; } HGoalPat;
+static HGoalPat *g_hsg = NULL; static int g_hsg_n = 0, g_hsg_cap = 0;
+static int g_hsg_depth_cap = 6;             // THVM_ATP_HORN_BWD_DEPTH
+static int g_hsg_max = 512;                 // THVM_ATP_HORN_BWD_MAX
+static int g_hsg_stop = 0;
+static double g_hsg_deadline = 0.0;
+static long g_hsg_checks = 0;               // release-vs-subgoal unify budget
+#define HORN_SG_BUDGET 20000000L
+#define HORN_SG_MIN_RIGID 3
+// Steering is AUTO-GATED (g_horn_steer): priority pops run only when
+// the goal is existential (a reachability/planning query -- PUZ
+// states, PLA plans -- where only regression can carve a path through
+// an astronomical forward space) or the relevance gate is active (CSR
+// KBs).  For ground saturation-style goals (the LCL condensed-
+// detachment family) the baseline agenda already reaches goals on a
+// razor-thin trajectory, and ANY dilution of its pop order loses them
+// (LCL192/LCL211 measured); there the cone is skipped entirely and
+// only the direct goal probe runs.  THVM_ATP_HORN_BWD: 0=off, 2=force
+// steering, default auto.
+static int g_horn_steer = 0;
+static int g_horn_goal_stop = 1;            // THVM_ATP_HORN_GOAL_STOP
+static int g_horn_goal_reached = 0;
+
+static int horn_rigid_count(int t) {
+  int n = (g_hn[t].head >= 0);
+  for (int i = 0; i < g_hn[t].nargs; i++) n += horn_rigid_count(HARG(t, i));
+  return n;
+}
+
+static int horn_has_var(int t) {
+  if (g_hn[t].head < 0) return 1;
+  for (int i = 0; i < g_hn[t].nargs; i++)
+    if (horn_has_var(HARG(t, i))) return 1;
+  return 0;
+}
+
+// Canonicalize (cl, ct) under the live bindings into a new subgoal;
+// dedup ("?"-prefixed keys share the release dedup set), reject
+// under-constrained patterns (too little rigid structure to steer).
+static void horn_bwd_emit(const TpProblem *tp, int cl, int ct, int depth) {
+  if (g_hsg_n >= g_hsg_max) { g_hsg_stop = 1; return; }
+  int hn_mark = g_hn_n, ha_mark = g_ha_n;
+  horn_can_reset();
+  int budget = HORN_APPLY_MAX;
+  int l2 = horn_apply(cl, 0, &budget);
+  int r2 = (l2 >= 0) ? horn_apply(ct, 0, &budget) : -1;
+  if (l2 < 0 || r2 < 0) goto reject;
+  // Specificity guard: a pattern needs enough rigid structure to
+  // discriminate -- except a GROUND pattern, which is maximally
+  // specific however small (a CSR goal is a bare `a = b`).
+  if (g_can_nv > 0 &&
+      horn_rigid_count(l2) + horn_rigid_count(r2) < HORN_SG_MIN_RIGID)
+    goto reject;
+  {
+    static char lb[TP_SIDE_LEN], rb[TP_SIDE_LEN], key[2 * TP_SIDE_LEN + 3];
+    size_t lo = 0, ro = 0;
+    int remap[HORN_REL_VARS], nv = 0;
+    for (int i = 0; i < HORN_REL_VARS; i++) remap[i] = -1;
+    if (!horn_print(tp, lb, HORN_SIDE_MAX, &lo, l2, remap, &nv)) goto reject;
+    if (!horn_print(tp, rb, HORN_SIDE_MAX, &ro, r2, remap, &nv)) goto reject;
+    snprintf(key, sizeof key, "?%s=%s", lb, rb);
+    if (!horn_dedup_add(key)) goto reject;
+    size_t fo = 0, go = 0;
+    int remap2[HORN_REL_VARS], nv2 = 0;
+    for (int i = 0; i < HORN_REL_VARS; i++) remap2[i] = -1;
+    if (horn_print(tp, rb, HORN_SIDE_MAX, &fo, r2, remap2, &nv2) &&
+        horn_print(tp, lb, HORN_SIDE_MAX, &go, l2, remap2, &nv2)) {
+      snprintf(key, sizeof key, "?%s=%s", rb, lb);
+      horn_dedup_add(key);
+    }
+  }
+  if (g_hsg_n >= g_hsg_cap) {
+    g_hsg_cap = (g_hsg_cap == 0) ? (1 << 9) : g_hsg_cap * 2;
+    g_hsg = (HGoalPat *)realloc(g_hsg, (size_t)g_hsg_cap * sizeof(HGoalPat));
+    if (g_hsg == NULL) tp_giveup("OOM in Horn release");
+  }
+  g_hsg[g_hsg_n].l = l2; g_hsg[g_hsg_n].r = r2;
+  g_hsg[g_hsg_n].depth = depth;
+  g_hsg[g_hsg_n].hl = g_hn[l2].head; g_hsg[g_hsg_n].hr = g_hn[r2].head;
+  g_hsg[g_hsg_n].hits = 0;
+  g_hsg_n++;
+  {
+    static int diag = -1;
+    if (diag < 0) { const char *d = getenv("THVM_ATP_HORN_DIAG"); diag = (d != NULL && d[0] != '0' && d[0] != '\0'); }
+    if (diag && g_hsg_n <= 64) {
+      static char lb[TP_SIDE_LEN], rb[TP_SIDE_LEN];
+      size_t lo = 0, ro = 0;
+      int remap[HORN_REL_VARS], nv = 0;
+      for (int i = 0; i < HORN_REL_VARS; i++) remap[i] = -1;
+      if (horn_print(tp, lb, HORN_SIDE_MAX, &lo, l2, remap, &nv) &&
+          horn_print(tp, rb, HORN_SIDE_MAX, &ro, r2, remap, &nv))
+        fprintf(stderr, "[horn-sg %d d%d] %s = %s\n", g_hsg_n - 1, depth, lb, rb);
+    }
+  }
+  return;
+reject:
+  g_hn_n = hn_mark; g_ha_n = ha_mark;
+}
+
+// UR fill: satisfy every condition except `open` from the current fact
+// set (no processed filter -- the cone runs before the loop), then emit
+// the open condition as a subgoal under the accumulated bindings.
+static void horn_bwd_fill(const TpProblem *tp, const HRule *ru, int ci,
+                          int open, int depth) {
+  if (g_hsg_stop) return;
+  while (ci == open) ci++;
+  if (ci >= ru->nc) { horn_bwd_emit(tp, ru->cl[open], ru->ct[open], depth); return; }
+  if ((g_horn_attempts & 0xfff) == 0 &&
+      (g_horn_attempts > HORN_MAX_ATTEMPTS || horn_now() > g_hsg_deadline ||
+       g_hn_n > (1 << 22))) { g_hsg_stop = 1; return; }
+  int c = ru->cl[ci], coff = 0;
+  horn_deref(&c, &coff);
+  int off = (ci + 1) * HORN_VSPACE;
+  for (int pass = 0; pass < 2 && !g_hsg_stop; pass++) {
+    int e;
+    if (pass == 0) e = (g_hn[c].head >= 0) ? g_hix_head[g_hn[c].head] : -2;
+    else           e = g_hix_varhead;
+    if (e == -2) {
+      for (int f = 0; f < g_hf_n && !g_hsg_stop; f++) {
+        if (!g_hf[f].rel) continue;   // cone fills stay in the relevant cone
+        for (int orient = 0; orient < 2; orient++) {
+          int fl = orient ? g_hf[f].r : g_hf[f].l;
+          int fr = orient ? g_hf[f].l : g_hf[f].r;
+          int mark = g_htrail_n;
+          g_horn_attempts++;
+          if (horn_unify(ru->cl[ci], 0, fl, off, 0) &&
+              horn_unify(ru->ct[ci], 0, fr, off, 0))
+            horn_bwd_fill(tp, ru, ci + 1, open, depth);
+          horn_undo(mark);
+        }
+      }
+      continue;
+    }
+    for (; e >= 0 && !g_hsg_stop; e = g_hix[e].next) {
+      int f = g_hix[e].fact;
+      if (!g_hf[f].rel) continue;     // cone fills stay in the relevant cone
+      int fl = g_hix[e].orient ? g_hf[f].r : g_hf[f].l;
+      int fr = g_hix[e].orient ? g_hf[f].l : g_hf[f].r;
+      int mark = g_htrail_n;
+      g_horn_attempts++;
+      if (horn_unify(ru->cl[ci], 0, fl, off, 0) &&
+          horn_unify(ru->ct[ci], 0, fr, off, 0))
+        horn_bwd_fill(tp, ru, ci + 1, open, depth);
+      horn_undo(mark);
+    }
+  }
+}
+
+// Breadth-first cone: seed from the parsed negative units, regress
+// through every rule whose conclusion unifies (either orientation).
+static void horn_backward_cone(const TpProblem *tp) {
+  for (int g = 0; g < g_hg_n && !g_hsg_stop; g++)
+    horn_bwd_emit(tp, g_hg_l[g], g_hg_r[g], 0);
+  for (int qi = 0; qi < g_hsg_n && !g_hsg_stop; qi++) {
+    if (g_hsg[qi].depth >= g_hsg_depth_cap) continue;
+    int sgl = g_hsg[qi].l, sgr = g_hsg[qi].r, d1 = g_hsg[qi].depth + 1;
+    for (int r = 0; r < g_hr_n && !g_hsg_stop; r++) {
+      const HRule *ru = &g_hr[r];
+      if (!ru->rel) continue;   // relevance-gated (oversized KBs)
+      int chl = g_hn[ru->concl_l].head, chr = g_hn[ru->concl_r].head;
+      for (int orient = 0; orient < 2 && !g_hsg_stop; orient++) {
+        int gl = orient ? sgr : sgl, gr = orient ? sgl : sgr;
+        if (chl >= 0 && g_hn[gl].head >= 0 && chl != g_hn[gl].head) continue;
+        if (chr >= 0 && g_hn[gr].head >= 0 && chr != g_hn[gr].head) continue;
+        int mark = g_htrail_n;
+        g_horn_attempts++;
+        if (horn_unify(ru->concl_l, 0, gl, HORN_SG_OFF, 0) &&
+            horn_unify(ru->concl_r, 0, gr, HORN_SG_OFF, 0)) {
+          for (int j = 0; j < ru->nc && !g_hsg_stop; j++) {
+            horn_bwd_emit(tp, ru->cl[j], ru->ct[j], d1);
+            if (ru->nc >= 2) horn_bwd_fill(tp, ru, 0, j, d1);
+          }
+        }
+        horn_undo(mark);
+        if ((g_horn_attempts & 0xfff) == 0 && horn_now() > g_hsg_deadline)
+          g_hsg_stop = 1;
+      }
+    }
+  }
+}
+
+// Does the fact (l, r) unify with some subgoal?  l/r live in a var
+// space of their own (canonical release vars, or an input fact's
+// clause-local vars): probe space vs subgoal space, both clean even
+// while a join's bindings are live in spaces 0..HORN_MAX_COND.
+static int horn_sg_probe(int l, int r) {
+  if (g_hsg_n == 0 || g_hsg_checks > HORN_SG_BUDGET) return 0;
+  if (g_hpheap.n > 4096) return 0;    // steering saturated: stop paying
+  int hl = g_hn[l].head, hr = g_hn[r].head;
+  for (int s = 0; s < g_hsg_n; s++) {
+    for (int orient = 0; orient < 2; orient++) {
+      int a = orient ? r : l, b = orient ? l : r;
+      int ha = orient ? hr : hl, hb = orient ? hl : hr;
+      if (ha >= 0 && g_hsg[s].hl >= 0 && ha != g_hsg[s].hl) continue;
+      if (hb >= 0 && g_hsg[s].hr >= 0 && hb != g_hsg[s].hr) continue;
+      int mark = g_htrail_n;
+      g_hsg_checks++;
+      int hit = horn_unify(a, HORN_PROBE_OFF, g_hsg[s].l, HORN_SG_OFF, 0) &&
+                horn_unify(b, HORN_PROBE_OFF, g_hsg[s].r, HORN_SG_OFF, 0);
+      horn_undo(mark);
+      if (hit) { g_hsg[s].hits++; return 1; }   // hits: diagnostics only
+    }
+  }
+  return 0;
+}
+
+// --- SInE-lite relevance gate for oversized KBs (v2) --------------------
+// The CSR knowledge bases carry 20-40k clauses; a blind given-fact loop
+// burns the whole attempt budget on ontology noise and never touches
+// the conjecture's neighborhood.  Compute Hoder-Voronkov relevance over
+// the DECODED universe (facts + rules), seeded from the conjecture
+// clauses: an unreached fact is pre-marked processed -- it stays a
+// passive join partner but is never popped as given -- and an
+// unreached rule neither joins givens nor hosts cone regressions.
+// Purely a search-order device: no clause is dropped, releases stay
+// sound consequences.
+static u32 horn_syms_count(int t, u32 *gen, u32 *stamp, u32 tag) {
+  u32 n = 0;
+  if (g_hn[t].head >= 0) {
+    if (stamp[g_hn[t].head] != tag) { stamp[g_hn[t].head] = tag; gen[g_hn[t].head]++; n++; }
+    for (int i = 0; i < g_hn[t].nargs; i++)
+      n += horn_syms_count(HARG(t, i), gen, stamp, tag);
+  }
+  return n;
+}
+static u32 horn_syms_min(int t, const u32 *gen) {
+  u32 m = 0xffffffffu;
+  if (g_hn[t].head >= 0) {
+    m = gen[g_hn[t].head];
+    for (int i = 0; i < g_hn[t].nargs; i++) {
+      u32 c = horn_syms_min(HARG(t, i), gen);
+      if (c < m) m = c;
+    }
+  }
+  return m;
+}
+static int horn_syms_trig(int t, const u32 *gen, const u8 *reach, double lim) {
+  if (g_hn[t].head < 0) return 0;
+  if (reach[g_hn[t].head] && (double)gen[g_hn[t].head] <= lim) return 1;
+  for (int i = 0; i < g_hn[t].nargs; i++)
+    if (horn_syms_trig(HARG(t, i), gen, reach, lim)) return 1;
+  return 0;
+}
+static void horn_syms_reach(int t, u8 *reach) {
+  if (g_hn[t].head < 0) return;
+  reach[g_hn[t].head] = 1;
+  for (int i = 0; i < g_hn[t].nargs; i++) horn_syms_reach(HARG(t, i), reach);
+}
+
+static double g_horn_gate_tol = 1.5;
+static int    g_horn_gate_on  = 0;
+static int    g_horn_input_nf = 0;   // facts below this index are input units
+
+// Recomputable: a WIDER tol yields a superset of relevant clauses, so
+// the fixpoint loop can relax the gate iteratively.  Facts that become
+// relevant after being parked as passive re-enter the agenda.
+static void horn_relevance_gate(double tol) {
+  u32 *gen   = (u32 *)calloc((size_t)TP_MAX_SYMS, sizeof(u32));
+  u32 *stamp = (u32 *)calloc((size_t)TP_MAX_SYMS, sizeof(u32));
+  u8  *reach = (u8 *)calloc((size_t)TP_MAX_SYMS, 1);
+  if (gen == NULL || stamp == NULL || reach == NULL)
+    tp_giveup("OOM in Horn release");
+  u32 tag = 0;
+  for (int f = 0; f < g_hf_n; f++) {
+    tag++;
+    horn_syms_count(g_hf[f].l, gen, stamp, tag);
+    horn_syms_count(g_hf[f].r, gen, stamp, tag);
+    // Releases (f >= the input-fact watermark) descend from relevant
+    // chains: always active.
+    g_hf[f].rel = (f >= g_horn_input_nf) ? 1 : g_hf[f].conj;
+  }
+  for (int r = 0; r < g_hr_n; r++) {
+    tag++;
+    for (int j = 0; j < g_hr[r].nc; j++) {
+      horn_syms_count(g_hr[r].cl[j], gen, stamp, tag);
+      horn_syms_count(g_hr[r].ct[j], gen, stamp, tag);
+    }
+    horn_syms_count(g_hr[r].concl_l, gen, stamp, tag);
+    horn_syms_count(g_hr[r].concl_r, gen, stamp, tag);
+    g_hr[r].rel = g_hr[r].conj;
+  }
+  for (int g = 0; g < g_hg_n; g++) {
+    horn_syms_reach(g_hg_l[g], reach);
+    horn_syms_reach(g_hg_r[g], reach);
+  }
+  for (int f = 0; f < g_hf_n; f++)
+    if (g_hf[f].conj) { horn_syms_reach(g_hf[f].l, reach); horn_syms_reach(g_hf[f].r, reach); }
+  for (int r = 0; r < g_hr_n; r++)
+    if (g_hr[r].conj) {
+      for (int j = 0; j < g_hr[r].nc; j++) {
+        horn_syms_reach(g_hr[r].cl[j], reach);
+        horn_syms_reach(g_hr[r].ct[j], reach);
+      }
+      horn_syms_reach(g_hr[r].concl_l, reach);
+      horn_syms_reach(g_hr[r].concl_r, reach);
+    }
+  for (int rd = 0; rd < 24; rd++) {
+    int grew = 0;
+    for (int f = 0; f < g_hf_n; f++) {
+      if (g_hf[f].rel) continue;
+      u32 m = horn_syms_min(g_hf[f].l, gen);
+      u32 m2 = horn_syms_min(g_hf[f].r, gen);
+      if (m2 < m) m = m2;
+      double lim = tol * (double)m;
+      if (horn_syms_trig(g_hf[f].l, gen, reach, lim) ||
+          horn_syms_trig(g_hf[f].r, gen, reach, lim)) {
+        g_hf[f].rel = 1; grew = 1;
+        horn_syms_reach(g_hf[f].l, reach);
+        horn_syms_reach(g_hf[f].r, reach);
+      }
+    }
+    for (int r = 0; r < g_hr_n; r++) {
+      if (g_hr[r].rel) continue;
+      u32 m = horn_syms_min(g_hr[r].concl_l, gen);
+      u32 m2 = horn_syms_min(g_hr[r].concl_r, gen);
+      if (m2 < m) m = m2;
+      for (int j = 0; j < g_hr[r].nc; j++) {
+        u32 c = horn_syms_min(g_hr[r].cl[j], gen);  if (c < m) m = c;
+        u32 d = horn_syms_min(g_hr[r].ct[j], gen);  if (d < m) m = d;
+      }
+      double lim = tol * (double)m;
+      int hit = horn_syms_trig(g_hr[r].concl_l, gen, reach, lim) ||
+                horn_syms_trig(g_hr[r].concl_r, gen, reach, lim);
+      for (int j = 0; j < g_hr[r].nc && !hit; j++)
+        hit = horn_syms_trig(g_hr[r].cl[j], gen, reach, lim) ||
+              horn_syms_trig(g_hr[r].ct[j], gen, reach, lim);
+      if (hit) {
+        g_hr[r].rel = 1; grew = 1;
+        for (int j = 0; j < g_hr[r].nc; j++) {
+          horn_syms_reach(g_hr[r].cl[j], reach);
+          horn_syms_reach(g_hr[r].ct[j], reach);
+        }
+        horn_syms_reach(g_hr[r].concl_l, reach);
+        horn_syms_reach(g_hr[r].concl_r, reach);
+      }
+    }
+    if (!grew) break;
+  }
+  int nf = 0, nr = 0;
+  for (int f = 0; f < g_hf_n; f++) {
+    if (g_hf[f].rel) {
+      nf++;
+      if (g_hf[f].processed && !g_hf[f].given) {
+        // Parked passive by a tighter gate: back onto the agenda.
+        g_hf[f].processed = 0;
+        horn_heap_push(&g_hheap, f);
+        if (g_hf[f].sghit) horn_heap_push(&g_hpheap, f);
+      }
+    } else if (!g_hf[f].given) {
+      g_hf[f].processed = 1;      // passive: join partner, never given
+    }
+  }
+  for (int r = 0; r < g_hr_n; r++) nr += g_hr[r].rel;
+  fprintf(stderr, "FindProof: Horn relevance gate: %d/%d fact(s), "
+          "%d/%d rule(s) active (tol=%.2f)\n", nf, g_hf_n, nr, g_hr_n, tol);
+  free(gen); free(stamp); free(reach);
+}
+
+// Does the fact (l, r) unify with an ORIGINAL goal?  Any common
+// instance refutes that negative unit, so the chaining can stop: the
+// goal-subsuming release is kept first and the engine closes at once.
+static int horn_goal_probe(int l, int r) {
+  for (int g = 0; g < g_hg_n; g++) {
+    for (int orient = 0; orient < 2; orient++) {
+      int a = orient ? r : l, b = orient ? l : r;
+      int mark = g_htrail_n;
+      int hit = horn_unify(a, HORN_PROBE_OFF, g_hg_l[g], HORN_SG_OFF, 0) &&
+                horn_unify(b, HORN_PROBE_OFF, g_hg_r[g], HORN_SG_OFF, 0);
+      horn_undo(mark);
+      if (hit) return 1;
+    }
+  }
+  return 0;
 }
 
 static void horn_emit_release(TpProblem *tp, const HRule *ru) {
@@ -1208,7 +1695,19 @@ static void horn_emit_release(TpProblem *tp, const HRule *ru) {
   // New unit: joins the fact set immediately (chains within the round
   // are picked up next round via the semi-naive base) and the pending
   // release list for the final append.
+  int sgh = horn_sg_probe(l2, r2);
   horn_fact_add(l2, r2, g_can_nv);
+  if (sgh) {
+    g_hf[g_hf_n - 1].sghit = 1;
+    horn_heap_push(&g_hpheap, g_hf_n - 1);
+  }
+  if (g_horn_goal_stop && !g_horn_goal_reached && g_hg_n > 0 &&
+      horn_goal_probe(l2, r2)) {
+    g_horn_goal_reached = 1;
+    g_horn_stop = 1;
+    fprintf(stderr, "FindProof: Horn release: goal-subsuming unit %s = %s\n",
+            lb, rb);
+  }
   if (g_hrel_n >= g_hrel_cap) {
     g_hrel_cap = (g_hrel_cap == 0) ? (1 << 12) : g_hrel_cap * 2;
     g_hrel = (HRel *)realloc(g_hrel, (size_t)g_hrel_cap * sizeof(HRel));
@@ -1218,6 +1717,7 @@ static void horn_emit_release(TpProblem *tp, const HRule *ru) {
   re->l = strdup(lb); re->r = strdup(rb);
   re->tl = l2; re->tr = r2;
   re->ground = (g_can_nv == 0);
+  re->sg_hit = sgh;
   re->goal_syms = 0;   // filled at ranking time
   re->n_weak = 0;
   {
@@ -1321,14 +1821,18 @@ static void horn_given_dispatch(TpProblem *tp, int given) {
     int fr = orient ? g_hf[given].l : g_hf[given].r;
     int h = g_hn[fl].head;
     if (h < 0) {   // var-headed side: any condition could bind it
-      for (int e = 0; e < g_hrix_n && !g_horn_stop; e++)
+      for (int e = 0; e < g_hrix_n && !g_horn_stop; e++) {
+        if (!g_hr[g_hrix[e].rule].rel) continue;
         horn_given_try(tp, &g_hr[g_hrix[e].rule], g_hrix[e].cpos, fl, fr);
+      }
       continue;
     }
     for (int pass = 0; pass < 2 && !g_horn_stop; pass++) {
       int e = (pass == 0) ? g_hrix_head[h] : g_hrix_varhead;
-      for (; e >= 0 && !g_horn_stop; e = g_hrix[e].next)
+      for (; e >= 0 && !g_horn_stop; e = g_hrix[e].next) {
+        if (!g_hr[g_hrix[e].rule].rel) continue;
         horn_given_try(tp, &g_hr[g_hrix[e].rule], g_hrix[e].cpos, fl, fr);
+      }
     }
   }
 }
@@ -1338,6 +1842,7 @@ static int g_horn_rank_ground = 0;   // THVM_ATP_HORN_GROUND: ground tier on
 static int horn_rel_cmp(const void *a, const void *b) {
   const HRel *x = (const HRel *)a, *y = (const HRel *)b;
   if (x->goal_hit != y->goal_hit) return y->goal_hit - x->goal_hit;
+  if (x->sg_hit != y->sg_hit) return y->sg_hit - x->sg_hit;   // goal-cone step
   if (g_horn_rank_ground && x->ground != y->ground) return y->ground - x->ground;
   if (x->goal_syms != y->goal_syms) return y->goal_syms - x->goal_syms;
   if (x->n_weak != y->n_weak) return x->n_weak - y->n_weak;   // no weakening vars
@@ -1353,6 +1858,7 @@ static int horn_rel_cmp(const void *a, const void *b) {
 static int horn_rel_cmp_rr(const void *a, const void *b) {
   const HRel *x = (const HRel *)a, *y = (const HRel *)b;
   if (x->goal_hit != y->goal_hit) return y->goal_hit - x->goal_hit;
+  if (x->sg_hit != y->sg_hit) return y->sg_hit - x->sg_hit;
   if (x->w != y->w) return x->w - y->w;
   return horn_rel_cmp(a, b);
 }
@@ -1423,6 +1929,8 @@ static void tp_horn_release(TpProblem *tp) {
     if (horn_decode_side(pl[c], prr[c], &ru) ||
         horn_decode_side(prr[c], pl[c], &ru)) {
       ru.nv = pnv[c];
+      ru.rel = 1;
+      ru.conj = tp->cls[c].conj;
       for (int i = 0; i < ru.nc; i++) {
         ru.cl[i] = horn_norm(ru.cl[i]);
         ru.ct[i] = horn_norm(ru.ct[i]);
@@ -1438,8 +1946,10 @@ static void tp_horn_release(TpProblem *tp) {
       n_rules++;
     } else {
       int fl = horn_norm(pl[c]), fr = horn_norm(prr[c]);
-      if (!horn_eq(fl, fr))            // definitions trivialize themselves
+      if (!horn_eq(fl, fr)) {          // definitions trivialize themselves
         horn_fact_add(fl, fr, pnv[c]);
+        g_hf[g_hf_n - 1].conj = tp->cls[c].conj;
+      }
     }
     // dedup seed: canonical print of both orientations
     static char lb[TP_SIDE_LEN], rb[TP_SIDE_LEN], key[2 * TP_SIDE_LEN + 2];
@@ -1481,6 +1991,55 @@ static void tp_horn_release(TpProblem *tp) {
   for (int i = 0; i < g_hr_n; i++)
     for (int j = 0; j < g_hr[i].nc; j++)
       horn_rule_index(i, j, g_hn[g_hr[i].cl[j]].head);
+  // Goals normalize into the releases' (expanded) alphabet BEFORE the
+  // loop: the backward cone regresses from them and the emit-time goal
+  // probe unifies releases against them.
+  for (int g = 0; g < g_hg_n; g++) {
+    g_hg_l[g] = horn_norm(g_hg_l[g]);
+    g_hg_r[g] = horn_norm(g_hg_r[g]);
+  }
+  // Oversized KBs: focus the loop on the conjecture's relevance cone.
+  // THVM_ATP_HORN_REL=0 disables.
+  g_horn_input_nf = g_hf_n;
+  {
+    const char *rl = getenv("THVM_ATP_HORN_REL");
+    const char *te = getenv("THVM_ATP_HORN_REL_TOL");
+    if (te != NULL && atof(te) > 0.0) g_horn_gate_tol = atof(te);
+    if (!(rl != NULL && rl[0] == '0') && tp->n_cls > 4000) {
+      g_horn_gate_on = 1;
+      horn_relevance_gate(g_horn_gate_tol);
+    }
+  }
+  // Backward subgoal cone (v2): bounded regression from the goals, a
+  // wall slice ahead of the forward loop.  Auto-gated (see
+  // g_horn_steer); THVM_ATP_HORN_BWD: 0 disables, 2 forces.
+  {
+    const char *be = getenv("THVM_ATP_HORN_BWD");
+    const char *bd = getenv("THVM_ATP_HORN_BWD_DEPTH");
+    const char *bm = getenv("THVM_ATP_HORN_BWD_MAX");
+    const char *gs = getenv("THVM_ATP_HORN_GOAL_STOP");
+    if (bd != NULL && atoi(bd) > 0) g_hsg_depth_cap = atoi(bd);
+    if (bm != NULL && atoi(bm) > 0) g_hsg_max = atoi(bm);
+    g_horn_goal_stop = !(gs != NULL && gs[0] == '0');
+    g_hsg_stop = 0; g_hsg_checks = 0; g_horn_goal_reached = 0;
+    int existential = 0;
+    for (int g = 0; g < g_hg_n && !existential; g++)
+      existential = horn_has_var(g_hg_l[g]) || horn_has_var(g_hg_r[g]);
+    g_horn_steer = (be != NULL && be[0] == '2')
+                     ? 1 : (g_horn_gate_on || existential);
+    if (be != NULL && be[0] == '0') g_horn_steer = 0;
+    if (g_horn_steer && g_hg_n > 0) {
+      double cw = 0.25 * g_horn_wall;
+      g_hsg_deadline = g_horn_t0 + ((cw < 0.6) ? cw : 0.6);
+      horn_backward_cone(tp);
+      // Input facts already on a subgoal join the priority agenda too.
+      for (int f = 0; f < g_hf_n && g_hsg_n > 0; f++)
+        if (horn_sg_probe(g_hf[f].l, g_hf[f].r)) {
+          g_hf[f].sghit = 1;
+          horn_heap_push(&g_hpheap, f);
+        }
+    }
+  }
   // Pick-given ratio (Otter shape): of every 4 pops, HORN_RATIO come
   // from the size heap and the rest by age (FIFO = delta-driven
   // breadth-first).  Pure smallest-first starves any fragment whose
@@ -1496,23 +2055,51 @@ static void tp_horn_release(TpProblem *tp) {
     if (ratio > 4) ratio = 4;
     int age_cursor = 0;
     long n_pops = 0;
-    while (!g_horn_stop) {
-      int given = -1;
-      if ((n_pops++ & 3) >= ratio) {
-        while (age_cursor < g_hf_n && g_hf[age_cursor].processed) age_cursor++;
-        if (age_cursor < g_hf_n) given = age_cursor;
-      }
-      if (given < 0) {
-        do { given = horn_heap_pop(); }
+    for (;;) {
+      while (!g_horn_stop) {
+        int given = -1;
+        // Goal-directed pops preempt the ratio scheme: a fact that
+        // unifies with a backward subgoal is a candidate step of a
+        // goal-closing chain -- joining it first produces the parent
+        // subgoal's instance next, walking the cone up to the goal.
+        // g_horn_steer keeps this honest: the queue is only ever fed
+        // for existential/relevance-gated goals, so the baseline
+        // agenda that reaches ground goals on its own (LCL192) stays
+        // undiluted.
+        do { given = horn_heap_pop(&g_hpheap); }
         while (given >= 0 && g_hf[given].processed);
+        if (given < 0 && (n_pops++ & 3) >= ratio) {
+          while (age_cursor < g_hf_n && g_hf[age_cursor].processed) age_cursor++;
+          if (age_cursor < g_hf_n) given = age_cursor;
+        }
+        if (given < 0) {
+          do { given = horn_heap_pop(&g_hheap); }
+          while (given >= 0 && g_hf[given].processed);
+        }
+        if (given < 0) {
+          while (age_cursor < g_hf_n && g_hf[age_cursor].processed) age_cursor++;
+          if (age_cursor >= g_hf_n) break;   // fixpoint: agenda exhausted
+          given = age_cursor;
+        }
+        g_hf[given].processed = 1;
+        g_hf[given].given = 1;
+        horn_given_dispatch(tp, given);
       }
-      if (given < 0) {
-        while (age_cursor < g_hf_n && g_hf[age_cursor].processed) age_cursor++;
-        if (age_cursor >= g_hf_n) break;   // fixpoint: agenda exhausted
-        given = age_cursor;
+      // Iterative widening: the RELEVANT closure saturated without the
+      // goal and budget remains -- relax the gate, re-run the cone over
+      // the newly admitted rules, and continue the loop.
+      if (g_horn_stop || !g_horn_gate_on || g_horn_goal_reached) break;
+      if (g_horn_gate_tol > 100.0) break;
+      g_horn_gate_tol *= 3.0;
+      horn_relevance_gate(g_horn_gate_tol);
+      if (g_horn_steer && g_hg_n > 0 && g_hsg_n < g_hsg_max) {
+        g_hsg_stop = 0;
+        double cd = horn_now() + 0.25 * g_horn_wall;
+        g_hsg_deadline = (cd < g_horn_t0 + g_horn_wall)
+                           ? cd : g_horn_t0 + g_horn_wall;
+        horn_backward_cone(tp);
       }
-      g_hf[given].processed = 1;
-      horn_given_dispatch(tp, given);
+      age_cursor = 0;   // rescan: parked facts may have re-entered
     }
   }
   // Rank + append.  Under the engine cap keep everything that fits;
@@ -1522,12 +2109,9 @@ static void tp_horn_release(TpProblem *tp) {
     // equation closes the refutation in one rewrite -- rank it first.
     // The join's bindings are all undone here, so slot spaces 0
     // (release canonical vars) and HORN_VSPACE (goal vars) are clean.
-    // Goals normalize into the releases' (expanded) alphabet.
+    // Goals were already normalized into the releases' (expanded)
+    // alphabet before the loop.
     int n_goal_hit = 0;
-    for (int g = 0; g < g_hg_n; g++) {
-      g_hg_l[g] = horn_norm(g_hg_l[g]);
-      g_hg_r[g] = horn_norm(g_hg_r[g]);
-    }
     // Goal-symbol relevance (SInE flavor): the DISCRIMINATING goal
     // symbols are those NOT ubiquitous across the input (frequency
     // <= max(2, n/4) clauses) -- a release mentioning them speaks
@@ -1634,9 +2218,16 @@ static void tp_horn_release(TpProblem *tp) {
     }
   }
   if (released_kept > 0) g_cli_horn_applied = 1;
-  fprintf(stderr, "FindProof: Horn release: %d dispatcher(s), %d rule(s), "
-          "%d fact(s), %d definition(s), %d released, %d kept\n",
-          n_disp, n_rules, g_hf_n - g_hrel_n, n_defs, g_hrel_n, released_kept);
+  {
+    int n_sg_hit = 0;
+    for (int i = 0; i < g_hrel_n; i++) n_sg_hit += g_hrel[i].sg_hit;
+    fprintf(stderr, "FindProof: Horn release: %d dispatcher(s), %d rule(s), "
+            "%d fact(s), %d definition(s), %d subgoal(s), %d released "
+            "(%d sg-hit%s), %d kept\n",
+            n_disp, n_rules, g_hf_n - g_hrel_n, n_defs, g_hsg_n, g_hrel_n,
+            n_sg_hit, g_horn_goal_reached ? ", goal reached" : "",
+            released_kept);
+  }
 done:
   free(pl); free(prr); free(pnv); free(is_disp); free(ps);
   free(g_horn_disp); g_horn_disp = NULL;
@@ -1646,7 +2237,9 @@ done:
   free(g_hix); g_hix = NULL; g_hix_n = g_hix_cap = 0;
   free(g_hix_head); g_hix_head = NULL; g_hix_varhead = -1;
   free(g_hr); g_hr = NULL; g_hr_n = g_hr_cap = 0;
-  free(g_hheap); g_hheap = NULL; g_hheap_n = g_hheap_cap = 0;
+  free(g_hheap.a);  g_hheap.a = NULL;  g_hheap.n = g_hheap.cap = 0;
+  free(g_hpheap.a); g_hpheap.a = NULL; g_hpheap.n = g_hpheap.cap = 0;
+  free(g_hsg); g_hsg = NULL; g_hsg_n = g_hsg_cap = 0;
   free(g_hdef_l); g_hdef_l = NULL;
   free(g_hdef_r); g_hdef_r = NULL;
   free(g_hrix); g_hrix = NULL; g_hrix_n = g_hrix_cap = 0;
@@ -2193,6 +2786,7 @@ int main(int argc, char **argv) {
       g_cli_szs_wanted = szs;
       g_cli_probpath = file;
       char *pre = tp_preprocess(file, raw);
+      pre = tp_unquote_names(pre);
       tp_shorten_names(pre);
       TpProblem *tpp = (TpProblem *)calloc(1, sizeof(TpProblem));
       if (tpp == NULL) { fprintf(stderr, "FindProof: OOM\n"); return 2; }
@@ -2211,6 +2805,18 @@ int main(int argc, char **argv) {
       {
         const char *he = getenv("THVM_ATP_HORN");
         if (he == NULL || he[0] != '0') tp_horn_release(&tp);
+      }
+      // Goal reached by the chaining itself: some released unit (a
+      // logical consequence, by the modus-ponens-only invariant)
+      // unifies with a negative clause, i.e. the axioms entail an
+      // instance of the negated equation -- a refutation with no
+      // engine run.  Decisive for problems the engine cannot even
+      // load (PUZ039's state/12 exceeds the term reader's arity cap).
+      // --proof runs stay on the engine path for the CNFRefutation.
+      if (g_horn_goal_reached && szs && !g_cli_want_proof) {
+        printf("%% SZS status Unsatisfiable for %s\n", file);
+        fflush(stdout);
+        return 0;
       }
       // Oversized problems (the CSR knowledge bases run to 8k clauses):
       // goal-directed SInE selection cuts them to the relevant slice
