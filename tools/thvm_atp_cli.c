@@ -736,7 +736,10 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
   fputs(" = ", fp);
   cli_print_term(fp, pr, rhs);
   if (reason == TRACE_AXIOM) {
-    fputs(").\n", fp);
+    // Leaf clause: cite the problem file so GDV can match it against the
+    // problem's axioms (includes are resolved by GDV) and complete leaf
+    // verification.
+    fprintf(fp, ", file('%s')).\n", g_cli_problem);
   } else {
     const char *rule =
         (reason == TRACE_CP)      ? "cp" :
@@ -765,7 +768,7 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
   cli_print_term(fp, pr, gl);
   fputs(" != ", fp);
   cli_print_term(fp, pr, gr);
-  fputs(").\n", fp);
+  fprintf(fp, ", file('%s')).\n", g_cli_problem);
   Term cur_l = gl, cur_r = gr;
   char prev[32];
   snprintf(prev, sizeof prev, "goal_%u", goal_id);
