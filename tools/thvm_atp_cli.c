@@ -2507,17 +2507,18 @@ static void tp_horn_release(TpProblem *tp) {
     g_hg_l[g] = horn_norm(g_hg_l[g]);
     g_hg_r[g] = horn_norm(g_hg_r[g]);
   }
-  // CD lane: the initial weight cap.  Auto = the largest input fact or
-  // (normalized) goal plus slack -- every axiom schema and the goal
-  // itself must be admissible; the deepening rounds grow it from there.
+  // CD lane: the initial weight cap.  Auto = the largest INPUT fact
+  // plus slack; the goal deliberately does NOT enter the max -- the
+  // and/equivalent PM goals expand to 25-50 symbols and a goal-sized
+  // initial cap admits a space no wall can saturate, so the deepening
+  // discipline never engages.  The goal probe is by unification (a
+  // small general schema closes a big ground goal) and a goal-sized
+  // final conclusion strictly matches a goal resonator, which is
+  // cap-exempt.
   if (g_horn_cd) {
     int cap = 0;
     for (int f = 0; f < g_hf_n; f++)
       if (g_hf[f].size > cap) cap = g_hf[f].size;
-    for (int g = 0; g < g_hg_n; g++) {
-      int s = horn_size(g_hg_l[g]) + horn_size(g_hg_r[g]);
-      if (s > cap) cap = s;
-    }
     g_cd_cap = cap + 2;
     const char *cc = getenv("THVM_ATP_HORN_CD_CAP");
     const char *cs = getenv("THVM_ATP_HORN_CD_STEP");
