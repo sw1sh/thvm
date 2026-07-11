@@ -1537,6 +1537,9 @@ static void atp_cp_set_interreduce(AtpState *s);
 #define ATP_CP_SET_IR_THRESHOLD  20u  // Twee cfg_renormalise_threshold %
 #define ATP_CP_SET_IR_SAMPLE     100u // Twee cfg_cp_sample_size
 static u8 atp_cp_set_ir_due(AtpState *s);
+// WM doR-only Term-side normalize (defined with the interreduce block
+// far below); forward-declared for the use_pop_rules_only pop arm.
+static Term atp_rules_only_normalize(AtpState *s, Term t, u32 cap);
 
 // === Waldmeister Stringterms: packed byte-string critical pairs =====
 //
@@ -7375,6 +7378,23 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
       s->use_simpler_join = (e[0] == '2') ? 2u : 1u;
     }
   }
+  // Twee pop-join base discipline (opt-in; diverges from WM).  Twee has
+  // NO ungated R+E join anywhere on the CP path: dequeue simplification
+  // is oriented-rules-only (Rule.hs `simplify` via simplifyOverlap) and
+  // every unorientable-equation rewrite in the join verdict runs behind
+  // the `simplerThan` gate (Join.hs step1/step2 `ok`).  WM's pop
+  // treatment (`-ks "r:e:..."`) instead joins with the UNGATED doR+doE
+  // normalize -- on comm-heavy theories that deletes proof-critical
+  // lemmas Twee keeps as rules: RNG021-6's L25
+  //   add(associator(X,Y,Z), m(X,m(Y,Z))) = m(m(X,Y),Z)
+  // AC-joins under the fixed KBO through the (larger) associator
+  // definition, which Twee's gate excludes (def !simplerThan L25).
+  // With the flag set the pop-time BASE normalize is rules-only; the
+  // unorientable tree participates only through the gated simpler-join
+  // pass (atp_cp_sj_joinable_ft) -- compose with --simpler-join for the
+  // full Twee verdict.  The CP-set-ir sweep follows the same discipline
+  // (Twee simplifyPassive is oriented-only).
+  s->use_pop_rules_only = (u8)atp_env_on("THVM_ATP_POP_RULES_ONLY");
   // firstdiv-11 probe (THVM_ATP_KEEP_LHS_REDUCIBLE): keep an LHS-reducible
   // oriented rule live instead of dropping it at the always-on interreduce
   // site (_.c:13066), to test whether thvm dropping -auto rule 3 is what
@@ -14924,11 +14944,17 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
       // selection-time `-ks "r:e:s:p"` flag set.
       atp_ft_mirror_ensure(s);
       AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-      AtpFtCell *lf = atp_rewrite_normalize_ft_record(
+      // use_pop_rules_only: Twee base discipline in record mode too --
+      // search and proof replay must walk the same trajectory.
+      AtpFtCell *(*pop_nf_rec)(AtpState *, AtpFtCell *, u32, Term, u8,
+                               u32 *) =
+          s->use_pop_rules_only ? atp_rules_only_normalize_ft_record
+                                : atp_rewrite_normalize_ft_record;
+      AtpFtCell *lf = pop_nf_rec(
           s, ft_from_term(a, raw_lhs, 0), NORM_CAP, raw_rhs, 0u,
           &chain_tail);
       l = ft_to_term(lf);
-      AtpFtCell *rf = atp_rewrite_normalize_ft_record(
+      AtpFtCell *rf = pop_nf_rec(
           s, ft_from_term(a, raw_rhs, 0), NORM_CAP, l, 1u, &chain_tail);
       r = ft_to_term(rf);
     } else
@@ -14938,14 +14964,20 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     Term l_r = atp_rewrite_normalize_record(s, raw_lhs, raw_rhs, 0u,
                                             &chain_tail, NORM_CAP);
     g_atp_proof_oriented_only = 0u;
-    l = atp_rewrite_normalize_record(s, l_r, raw_rhs, 0u,
-                                     &chain_tail, NORM_CAP);
+    // use_pop_rules_only skips the doE stage (Twee base discipline):
+    // the oriented pass above is the whole normalize.
+    l = s->use_pop_rules_only
+        ? l_r
+        : atp_rewrite_normalize_record(s, l_r, raw_rhs, 0u,
+                                       &chain_tail, NORM_CAP);
     g_atp_proof_oriented_only = 1u;
     Term r_r = atp_rewrite_normalize_record(s, raw_rhs, l, 1u,
                                             &chain_tail, NORM_CAP);
     g_atp_proof_oriented_only = 0u;
-    r = atp_rewrite_normalize_record(s, r_r, l, 1u,
-                                     &chain_tail, NORM_CAP);
+    r = s->use_pop_rules_only
+        ? r_r
+        : atp_rewrite_normalize_record(s, r_r, l, 1u,
+                                       &chain_tail, NORM_CAP);
     }
   } else {
     // Per-pick pop-treatment verdict trace (THVM_ATP_POP_TRACE), mirroring
@@ -14970,10 +15002,15 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
       // still prints the true NF pair when enabled.
       atp_ft_mirror_ensure(s);
       AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-      AtpFtCell *lf = atp_rewrite_normalize_ft(
+      // Twee base discipline (use_pop_rules_only): oriented rules only;
+      // the unorientable tree joins only via the gated sj pass below.
+      AtpFtCell *(*pop_nf)(AtpState *, AtpFtCell *, u32) =
+          s->use_pop_rules_only ? atp_rules_only_normalize_ft
+                                : atp_rewrite_normalize_ft;
+      AtpFtCell *lf = pop_nf(
           s, g_pop_ft_l != NULL ? g_pop_ft_l : ft_from_term(a, cp_lhs, 0),
           NORM_CAP);
-      AtpFtCell *rf = atp_rewrite_normalize_ft(
+      AtpFtCell *rf = pop_nf(
           s, g_pop_ft_r != NULL ? g_pop_ft_r : ft_from_term(a, cp_rhs, 0),
           NORM_CAP);
       g_pop_ft_l = NULL;
@@ -15200,8 +15237,15 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     // Live-rule-set call: atp_rewrite_normalize -> atp_rewrite_normalize_
     // ordered, which routes through the FT mixmost (WM innermost) when
     // use_mixmost_nf is set -- so the pop-time join verdict matches WM.
-    l = atp_rewrite_normalize(s, cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
-    r = atp_rewrite_normalize(s, cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    // use_pop_rules_only: Twee base discipline -- oriented rules only,
+    // the unorientable tree joins only via the gated sj pass below.
+    if (s->use_pop_rules_only) {
+      l = atp_rules_only_normalize(s, cp_lhs, NORM_CAP);
+      r = atp_rules_only_normalize(s, cp_rhs, NORM_CAP);
+    } else {
+      l = atp_rewrite_normalize(s, cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+      r = atp_rewrite_normalize(s, cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    }
     }
   }
   g_ft_region = 0u;
@@ -19062,8 +19106,15 @@ static void atp_cp_set_interreduce(AtpState *s) {
     }
     u8 joined_pre = (u8)ft_eq(fl, fr);
     if (!joined_pre) {
-      fl = atp_rewrite_normalize_ft(s, fl, NORM_CAP);
-      fr = atp_rewrite_normalize_ft(s, fr, NORM_CAP);
+      // use_pop_rules_only: Twee simplifyPassive is oriented-only --
+      // the sweep's delete criterion follows the pop discipline.
+      if (s->use_pop_rules_only) {
+        fl = atp_rules_only_normalize_ft(s, fl, NORM_CAP);
+        fr = atp_rules_only_normalize_ft(s, fr, NORM_CAP);
+      } else {
+        fl = atp_rewrite_normalize_ft(s, fl, NORM_CAP);
+        fr = atp_rewrite_normalize_ft(s, fr, NORM_CAP);
+      }
     }
     u8 joined_ft = joined_pre ? 1u : (u8)ft_eq(fl, fr);
     // Decode back to Term: the joined branch only needs ol/orr for the
@@ -19072,8 +19123,13 @@ static void atp_cp_set_interreduce(AtpState *s) {
     l = joined_ft ? ol  : ft_to_term(fl);
     r = joined_ft ? orr : ft_to_term(fr);
 #else
-    l = atp_rewrite_normalize(s, ol,  s->lhs, s->rhs, s->n_rules, NORM_CAP);
-    r = atp_rewrite_normalize(s, orr, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    if (s->use_pop_rules_only) {
+      l = atp_rules_only_normalize(s, ol,  NORM_CAP);
+      r = atp_rules_only_normalize(s, orr, NORM_CAP);
+    } else {
+      l = atp_rewrite_normalize(s, ol,  s->lhs, s->rhs, s->n_rules, NORM_CAP);
+      r = atp_rewrite_normalize(s, orr, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    }
     u8 joined_ft = (u8)kbo_eq(l, r);
 #endif
     if (g_atp_phase_enabled) acc_norm += atp_now_us() - _cpir_norm_t0;

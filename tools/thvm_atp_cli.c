@@ -112,6 +112,7 @@ static const AtpKnob KNOBS[] = {
   {"gj-index",               "THVM_ATP_GJ_INDEX",        1, "(GJ indexed top scan; default 1)"},
   {"encompass-demod",        "THVM_ATP_ENCOMPASS",       0, "(skolem-ground unorient demodulation)"},
   {"simpler-join",           "THVM_ATP_SIMPLER_JOIN",    0, "(Twee simplerThan-gated CP join)"},
+  {"pop-rules-only",         "THVM_ATP_POP_RULES_ONLY",  0, "(Twee pop-join base: oriented rules only, no ungated doE)"},
   {"gj-budget",              "THVM_ATP_GJ_BUDGET",       1, "(GJ branch budget; small = early-KEEP)"},
   {"full-interreduce",       "THVM_ATP_FULL_INTERREDUCE",0, "FullInterreduce"},
   {"cp-side",                "THVM_ATP_CP_SIDE",         0, "CPSide"},
@@ -2723,7 +2724,14 @@ static const SchedSlice SCHEDULE[] = {
   // the portfolio's Twee-native angle.  Displaced from the top-5
   // concurrent pool by the encompass slice (its flatten + lazy-GJ core
   // overlaps slice 2); launches as a pool slot frees.
-  {"twee",   "--simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --cp-set-interreduce", 0.0},
+  // --cp-set-ir-budget=5 puts the passive re-scoring on Twee's OWN task
+  // discipline (freq 10s + 5% budget + 20%-dead sample trigger) instead
+  // of the every-16-rules full sweep, which ate 82% of the wall on the
+  // lattice/group residuals (LAT138-1 @30s: 24.5s in the sweep) -- 3x
+  // the completion throughput at the same score function.  Flips
+  // LAT149-1 (17.7s), GRP177-1 (14.9s), GRP753-1 (2.7s), GRP766-1
+  // (11.9s) standalone at 30s, each a prior schedule-wide Timeout.
+  {"twee",   "--simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --cp-set-interreduce --cp-set-ir-budget=5", 0.0},
   // (5) PURE bare completion (bare engine defaults, GT weight, NO WM preset
   // heuristics, NO ground-join/connectedness).  The WM preset's selection +
   // MaxWeight actively DIVERGES on some CASC UEQ problems -- notably the

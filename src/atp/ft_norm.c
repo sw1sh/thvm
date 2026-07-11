@@ -3881,6 +3881,23 @@ AtpFtCell *atp_rewrite_normalize_ft_record(AtpState *s, AtpFtCell *t,
                                        eq_other, side, chain_tail);
 }
 
+// doR-only record sibling: the use_pop_rules_only pop arm's Twee base
+// discipline (oriented rules only; Rule.hs `simplify`) with the same
+// TRACE_NORM_STEP recording contract as the doE entry above.
+AtpFtCell *atp_rules_only_normalize_ft_record(AtpState *s, AtpFtCell *t,
+                                              u32 step_cap, Term eq_other,
+                                              u8 side, u32 *chain_tail);
+AtpFtCell *atp_rules_only_normalize_ft_record(AtpState *s, AtpFtCell *t,
+                                              u32 step_cap, Term eq_other,
+                                              u8 side, u32 *chain_tail) {
+  if (t == NULL) return NULL;
+  if (s->n_rules == 0u) return t;
+  return atp_rewrite_normalize_ft_impl(s, t, /*slice_first=*/0u,
+                                       /*slice_count=*/s->n_rules,
+                                       step_cap, /*doE=*/0u, /*record=*/1,
+                                       eq_other, side, chain_tail);
+}
+
 // FT-mixmost (WM innermost) normalize that records each rewrite as an
 // AtpProofStep into out[*n .. cap).  The ORDER-FAITHFUL goal-chain
 // extractor: it reproduces goal_check's FT-mixmost join so the closing

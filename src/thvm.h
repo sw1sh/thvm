@@ -5675,6 +5675,14 @@ typedef struct {
   // under this mode reports GaveUp, never Satisfiable
   // (cli_strategy_complete).
   u8   use_simpler_join;
+  // Twee pop-join base discipline (THVM_ATP_POP_RULES_ONLY): the
+  // pop-time join verdict's base normalize runs ORIENTED RULES ONLY
+  // (Twee Rule.hs `simplify` / simplifyOverlap; no ungated doE) and the
+  // CP-set-ir sweep's per-CP re-normalize does the same (Twee
+  // simplifyPassive).  Unorientable equations still join CPs, but only
+  // through the simplerThan-gated pass (use_simpler_join).  Default
+  // OFF: WM's ungated doR+doE pop treatment, byte-identical.
+  u8   use_pop_rules_only;
   // CPs dropped by the simpler-join pass (push treat + pop select).
   u32  n_cps_dropped_simpler_join;
   // Count of facts sterilized by the backward walk (bench stats line).
