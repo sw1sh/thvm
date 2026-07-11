@@ -378,7 +378,12 @@ static int kautotune_cache_base_dir(char *out, size_t cap) {
     return 0;
   }
   char const *custom = getenv("AUTOTUNE_CACHE_DIR");
-  if (custom != NULL && custom[0] != '\0') {
+  // Absolute paths only: a whitespace/garbage value (e.g. a WL test
+  // session leaking a stray env) otherwise lands cache records as
+  // weirdly-named files in whatever the process CWD is -- a literal
+  // "\t"-named file appeared in the repo root this way.  Fall through
+  // to the XDG/HOME defaults instead.
+  if (custom != NULL && custom[0] == '/') {
     int n = snprintf(out, cap, "%s", custom);
     return n > 0 && (size_t)n < cap;
   }
