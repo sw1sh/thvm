@@ -5651,10 +5651,12 @@ typedef struct {
   // incomparable.  Joins far more CPs than plain doR/doE joinability,
   // keeping the queue and R lean on the AC/loop CASC families.
   // VERDICT-ONLY: kept CPs queue their standard NFs, so trace/replay
-  // are untouched.  Runs at generation-time treatment
-  // (atp_cp_trivially_joinable[_ft], vcp_treat_joinable) and at
-  // selection (the pop joined gate).  Opt-in, default OFF
-  // (byte-identical): env THVM_ATP_SIMPLER_JOIN / --simpler-join.
+  // are untouched.  Value 1: runs at generation-time treatment
+  // (atp_cp_trivially_joinable[_ft], vcp_treat_joinable) AND at
+  // selection (the pop joined gate).  Value 2: selection only --
+  // Twee's own placement (consider runs at dequeue), skipping the
+  // per-generated-CP push tax.  Opt-in, default OFF (byte-identical):
+  // env THVM_ATP_SIMPLER_JOIN / --simpler-join[=2].
   // Completeness caveat mirrors use_encompass_demod: the skolem steps
   // carry no below-peak connectedness constraint, so a saturation
   // under this mode reports GaveUp, never Satisfiable

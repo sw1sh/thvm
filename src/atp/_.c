@@ -7357,7 +7357,16 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // Encompassment demodulation (Twee reducesSkolem; see thvm.h).
   s->use_encompass_demod = (u8)atp_env_on("THVM_ATP_ENCOMPASS");
   // Simpler-join CP discipline (Twee Join.hs allSteps; see thvm.h).
-  s->use_simpler_join = (u8)atp_env_on("THVM_ATP_SIMPLER_JOIN");
+  // Value 1 (--simpler-join): generation-time treatment AND selection.
+  // Value 2 (--simpler-join=2): selection only -- Twee's own placement
+  // (consider runs at dequeue), skipping the per-generated-CP push tax.
+  {
+    const char *e = getenv("THVM_ATP_SIMPLER_JOIN");
+    s->use_simpler_join = 0u;
+    if (e != NULL && e[0] != '\0' && e[0] != '0') {
+      s->use_simpler_join = (e[0] == '2') ? 2u : 1u;
+    }
+  }
   // firstdiv-11 probe (THVM_ATP_KEEP_LHS_REDUCIBLE): keep an LHS-reducible
   // oriented rule live instead of dropping it at the always-on interreduce
   // site (_.c:13066), to test whether thvm dropping -auto rule 3 is what
@@ -21373,8 +21382,9 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   PUSHN_TICK(g_atp_pushn_us_norm);
   joined = (u8)ft_eq(fl, fr);
   PUSHN_TICK(g_atp_pushn_us_eq);
-  // Simpler-join second chance (see atp_cp_trivially_joinable_ft).
-  if (!joined && s->use_simpler_join) {
+  // Simpler-join second chance (see atp_cp_trivially_joinable_ft);
+  // mode 2 (pop-only) skips the generation-time arm.
+  if (!joined && s->use_simpler_join == 1u) {
     joined = atp_cp_sj_joinable_ft(s, fl, fr);
     if (joined) s->n_cps_dropped_simpler_join++;
   }
@@ -24453,7 +24463,8 @@ static u8 vcp_treat_joinable(AtpState *s) {
   // Simpler-join second chance (opt-in --simpler-join): verdict-only
   // gated R+E pass on the doR NFs -- the stash keeps the engine NFs.
   // Mirrors the hook in atp_cp_trivially_joinable_ft (ft_cpq.c).
-  if (!joined && s->use_simpler_join) {
+  // Mode 2 (pop-only) skips the generation-time arm.
+  if (!joined && s->use_simpler_join == 1u) {
     joined = atp_cp_sj_joinable_ft(s, g_vcp_treat.fl, g_vcp_treat.fr);
     if (joined) s->n_cps_dropped_simpler_join++;
   }

@@ -2712,11 +2712,17 @@ static const SchedSlice SCHEDULE[] = {
   // (5) TWEE-SCORED completion: flatten + Twee's CP score (mode 8, now with
   // the faithful formation-depth term) + pure best-first (w2-modulo=0, no
   // WM age interleave) + dynamic passive re-scoring (cp-set-interreduce =
-  // Twee simplifyPassive).  A genuinely different selection regime from the
-  // WM/MNF slices above -- the portfolio's Twee-native angle.  Displaced
-  // from the top-5 concurrent pool by the encompass slice (its flatten +
-  // lazy-GJ core overlaps slice 2); launches as a pool slot frees.
-  {"twee",   "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --cp-set-interreduce", 0.0},
+  // Twee simplifyPassive) + the simplerThan-gated join discipline
+  // (--simpler-join, Twee Join.hs allSteps): the join pass culls CPs the
+  // plain doR/doE joinability keeps, which on the lattice family turns a
+  // wall-starved backup lane into a sprint -- LAT159-1 proves in 1.8s
+  // with the gate vs 20.3s without (the 20.3s run never fit the backup
+  // slot's leftover wall, so the problem TIMED OUT schedule-wide).  A
+  // genuinely different selection regime from the WM/MNF slices above --
+  // the portfolio's Twee-native angle.  Displaced from the top-5
+  // concurrent pool by the encompass slice (its flatten + lazy-GJ core
+  // overlaps slice 2); launches as a pool slot frees.
+  {"twee",   "--simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --cp-set-interreduce", 0.0},
   // (5) PURE bare completion (bare engine defaults, GT weight, NO WM preset
   // heuristics, NO ground-join/connectedness).  The WM preset's selection +
   // MaxWeight actively DIVERGES on some CASC UEQ problems -- notably the

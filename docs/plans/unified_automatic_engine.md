@@ -256,3 +256,32 @@ tools/baselines/vampire_raw/, not re-run), (4) Twee (the new pure-UEQ
 oracle, ~/.cabal/bin/twee --tstp on tools/baselines/vampire_tptp/*.p).
 First target: McCuneAxioms/EqualityOfInverses. Rotating CASC-30 UEQ
 pick from ~/.cache/thvm/casc/Problems30/UEQ (300 problems).
+
+## Simpler-join port (2026-07-11): Twee's join discipline, measured
+
+`--simpler-join` / `THVM_ATP_SIMPLER_JOIN` ports the redundancy
+discipline behind Twee `joinCriticalPair` (Join.hs:55, allSteps =
+step1 >=> step2 >=> step3): when the standard join normalize leaves a
+CP's sides distinct, a second gated R+E pass may still join them --
+every step requires the rewriting equation strictly simpler than the
+CP equation (Equation.hs:59 `simplerThan` over `lessEqSkolem`, the
+skolem-ground lex compare in src/atp/ft_order.c), and unorientable
+instances additionally fire when strictly decreasing under the
+skolem-ground KBO (Rule.hs:425 `reducesSkolem`).  Verdict-only (kept
+CPs queue their engine NFs; trace/replay untouched); value 2 =
+selection-time only (Twee's own placement).  Known divergences: no
+step3 below-peak constraint, no checkOrder, no variable
+canonicalisation in the compare; hence the mode gates
+cli_strategy_complete (GaveUp, never Satisfiable).
+
+Measured on the 14 remaining twee-residual UEQ timeouts (30s wall,
+single-strategy): bare SJ 0/14; SJ+encompass 0/14; SJ+flatten 0/14;
+SJ+mnf-gj 0/14; SJ+twee-score 1/14 -- LAT159-1 proves in 1.8s vs
+20.3s for the identical config WITHOUT the gate (11x; the 20.3s
+variant never fit the backup slot's leftover wall, so schedule-wide
+the problem timed out).  The join pass culls heavily where it engages
+(LAT138-1: 154K of 497K push-joinable drops from the gate at 12s) but
+pruning volume alone flips nothing -- the win appears only combined
+with Twee-native SELECTION (cp-weight=8 best-first), consistent with
+the terminal diagnostic above.  Composed by adding --simpler-join to
+the schedule's twee slice.
