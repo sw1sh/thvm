@@ -848,6 +848,12 @@ static const SchedSlice SCHEDULE[] = {
   // Cracks deep-goal UEQ that completion stalls on (COL060-1, GRP167-4);
   // connectedness dropped (net cost under lazy-GJ; GRP167-4 26s->1.8s).
   {"flatten",  "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.33},
+  // (2b) BARE flattening: the dressed flatten slice's extras (lazy-GJ,
+  // backward-simplify, auto-max-weight) each independently push the
+  // wall-edge flatten proofs past the limit (ALG212-10 proves in 27.5s
+  // bare, TIMES OUT with ANY of them added) -- the unadorned transform
+  // needs its own lane.
+  {"flatten-bare", "--flatten-goal", 0.0},
   // (3) Goal-directed MNF front + ground-join + a growing MaxWeight bound
   // -- complementary to both (goal-direction the WM preset lacks, pruning
   // the bare MNF front lacks).
