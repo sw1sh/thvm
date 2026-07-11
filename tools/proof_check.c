@@ -422,8 +422,83 @@ static AtpStatus pc_refute(Term *fs, int n) {
 
 enum { PC_VALID, PC_INVALID, PC_UNKNOWN };
 
+// Plain (unquantified) equation atom PC_LAB_EQ(l, r)?
+static u8 pc_plain_eq(Term f, Term *l, Term *r) {
+  if (term_tag(f) == TAG_CTR && term_ext(f) == PC_LAB_EQ &&
+      term_ctr_n(f) == 2) {
+    *l = term_ctr_at(f, 0);
+    *r = term_ctr_at(f, 1);
+    return 1;
+  }
+  return 0;
+}
+
+// Equational fast path: a unit-equality step (the equational engine's
+// own cp / orient / simp records) is settled by COMPLETION on the
+// parent equations with the conclusion as the goal -- orders of
+// magnitude cheaper than the blind FO refutation below, and it returns
+// a POSITIVE verdict where the FO route churns until the wall or the
+// heap.  Free variables are implicitly universal on both sides, which
+// is exactly the completion engine's reading.  Sound: PROVED means the
+// goal joins under a completion of the parents.  Anything else falls
+// through to the FO route.
+static int pc_entails_eq(Term *parents, int np, Term concl) {
+  Term gl, gr;
+  if (concl == 0 || !pc_plain_eq(concl, &gl, &gr)) return PC_UNKNOWN;
+  Term pl[PC_MAX_PARENTS], pr[PC_MAX_PARENTS];
+  for (int i = 0; i < np; i++) {
+    if (!pc_plain_eq(parents[i], &pl[i], &pr[i])) return PC_UNKNOWN;
+  }
+  // KBO over the checker's label space: weight 1 everywhere, precedence
+  // by label id (an arbitrary total order is admissible).
+  u32 nl = PC_LAB_BASE + (u32)pc_nsyms + 1u;
+  u32 *w  = (u32 *)malloc((size_t)nl * sizeof(u32));
+  u32 *pr_ = (u32 *)malloc((size_t)nl * sizeof(u32));
+  if (w == NULL || pr_ == NULL) { free(w); free(pr_); return PC_UNKNOWN; }
+  for (u32 i = 0; i < nl; i++) { w[i] = 1u; pr_[i] = i; }
+  KboConfig cfg = { w, pr_, nl, 1u };
+  AtpState *s = thvm_atp_init(&cfg, 400u);
+  int v = PC_UNKNOWN;
+  if (s != NULL) {
+    u8 ok = 1;
+    for (int i = 0; i < np && ok; i++) {
+      ok = thvm_atp_add_equation(s, pl[i], pr[i]);
+    }
+    if (ok && thvm_atp_set_goal(s, gl, gr)) {
+      // A cp/orient/simp step's conclusion joins within a handful of
+      // selections when the parents really derive it; a tight budget
+      // keeps the whole-proof check inside the wall.  Heap bail: these
+      // sessions share the global heap with the outer checker.
+      u64 h0 = thvm_atp_heap_checkpoint();
+      clock_t c0 = clock();
+      AtpStatus st = ATP_RUNNING;
+      for (u32 k = 0; k < 400u && st == ATP_RUNNING; k++) {
+        st = thvm_atp_step(s);
+        if ((thvm_atp_heap_checkpoint() - h0) > (32u << 20)) break;
+        if ((clock() - c0) > 2 * CLOCKS_PER_SEC) break;   // 2s per step check
+      }
+      if (st == ATP_PROVED) v = PC_VALID;
+    }
+    thvm_atp_free(s);
+  }
+  free(w);
+  free(pr_);
+  return v;
+}
+
 // parents |= concl  (concl==0 means the conclusion is $false).
 static int pc_entails(Term *parents, int np, Term concl) {
+  // All-equational steps: settle by completion or abstain -- the FO
+  // route on a pure-equation step burns seconds to heap-exhaustion per
+  // step and never answers (the LAT171-1 whole-proof wall blowout).
+  {
+    Term l, r;
+    u8 alleq = (concl != 0) && pc_plain_eq(concl, &l, &r);
+    for (int i = 0; alleq && i < np; i++) {
+      alleq = pc_plain_eq(parents[i], &l, &r);
+    }
+    if (alleq) return pc_entails_eq(parents, np, concl);
+  }
   Term fs[PC_MAX_PARENTS + 1];
   int n = 0;
   for (int i = 0; i < np && n < PC_MAX_PARENTS; i++) fs[n++] = parents[i];
