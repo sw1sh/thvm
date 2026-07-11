@@ -2423,16 +2423,123 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
   }
 }
 
+// Resolve a chain step's rule citation by REPLAY: the recorded index is
+// wrong for unorientable-equation steps (the FT normalize hands the
+// proofsteps fill an ESET-internal index, which the emitter would map
+// through RULE slots -- the LAT171-1 mislabeled-citation bug).  Try the
+// recorded slot first, then scan every slot for the equation that
+// actually reproduces before -> after in one application (either
+// direction, any position).  Returns the resolved slot or n_rules.
+// Returns the resolved TRACE id (dead rules live only in the trace --
+// an interreduced-away equation is absent from the final slots but its
+// derivation record remains), or ATP_TRACE_NONE.
+static u8 cli_trace_pair(AtpState *s, u32 ti, Term *l, Term *r) {
+  if (ti == ATP_TRACE_NONE || ti >= s->n_trace) return 0;
+  Term e = s->trace[ti];
+  if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 4u) return 0;
+  *l = term_ctr_at(e, 2);
+  *r = term_ctr_at(e, 3);
+  if (term_tag(*l) == TAG_NUM && term_tag(*r) == TAG_NUM) {
+    Term ll = 0, rr = 0;
+    if (!atp_trace_eq_load(s, ti, &ll, &rr)) return 0;
+    *l = ll;
+    *r = rr;
+  }
+  return (*l != 0 && *r != 0);
+}
+static u8 cli_step_replays(AtpState *s, const AtpProofStep *st,
+                           Term l, Term r) {
+  PcRwSet acc;
+  acc.n = 0;
+  pc_rewrite_all(st->before, l, r, &acc);
+  pc_rewrite_all(st->before, r, l, &acc);
+  for (int k = 0; k < acc.n; k++) {
+    if (kbo_eq(acc.out[k], st->after)) return 1;
+  }
+  return 0;
+}
+static u32 cli_resolve_step_trace(AtpState *s, const AtpProofStep *st) {
+  if (st->before == 0 || st->after == 0) return ATP_TRACE_NONE;
+  // Recorded slot first (correct for oriented-rule steps).
+  if (st->rule < s->n_rules && s->r_trace != NULL) {
+    Term l = s->lhs[st->rule], r = s->rhs[st->rule];
+    if (term_tag(l) != TAG_NUM && term_tag(r) != TAG_NUM &&
+        cli_step_replays(s, st, l, r)) {
+      return s->r_trace[st->rule];
+    }
+  }
+  // Live slots next (cheap; covers mis-indexed eset steps whose
+  // equation is still alive).
+  for (u32 rr = 0; rr < s->n_rules; rr++) {
+    Term l = s->lhs[rr], r = s->rhs[rr];
+    if (term_tag(l) == TAG_NUM || term_tag(r) == TAG_NUM) continue;
+    if (cli_step_replays(s, st, l, r)) {
+      return (s->r_trace != NULL) ? s->r_trace[rr] : ATP_TRACE_NONE;
+    }
+  }
+  // Full trace scan: the applied equation was interreduced away.
+  // Costly (replay per trace entry) -- opt-in, the deep resolve pass.
+  static int deep = -1;
+  if (deep < 0) {
+    const char *e = getenv("THVM_ATP_PROOF_RESOLVE_DEEP");
+    deep = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  }
+  if (!deep) return ATP_TRACE_NONE;
+  for (u32 ti = 0; ti < s->n_trace; ti++) {
+    Term l = 0, r = 0;
+    if (!cli_trace_pair(s, ti, &l, &r)) continue;
+    if (cli_step_replays(s, st, l, r)) return ti;
+  }
+  return ATP_TRACE_NONE;
+}
+
 // Emit one goal's closing rewrite chain (steps from
 // thvm_atp_proof_extract) plus the derivations of every rule cited.
 static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
                                 Term gl, Term gr, u32 goal_id,
                                 const AtpProofStep *steps, u32 n_steps,
                                 u8 *printed) {
+  static u32 resolved[ATP_PROOF_MAX_STEPS];
+  static u32 resolved2[ATP_PROOF_MAX_STEPS];   // 2nd id of a split step
+  static Term midpoint[ATP_PROOF_MAX_STEPS];   // its intermediate term
   for (u32 k = 0; k < n_steps; k++) {
-    u32 r = steps[k].rule;
-    if (r < s->n_rules && s->r_trace != NULL && s->r_trace[r] != ATP_TRACE_NONE)
-      cli_emit_trace(fp, s, pr, s->r_trace[r], printed);
+    resolved[k]  = cli_resolve_step_trace(s, &steps[k]);
+    resolved2[k] = ATP_TRACE_NONE;
+    midpoint[k]  = 0;
+    static int deep2 = -1;
+    if (deep2 < 0) {
+      const char *e = getenv("THVM_ATP_PROOF_RESOLVE_DEEP");
+      deep2 = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+    }
+    if (deep2 && resolved[k] == ATP_TRACE_NONE) {
+      // No single recorded equation reproduces before -> after: the
+      // recorder coalesced two rewrites into one step.  Find a 2-step
+      // decomposition through any midpoint and SPLIT the record at
+      // emission so the checker sees single-step inferences.
+      const AtpProofStep *st = &steps[k];
+      for (u32 ta = 0; ta < s->n_trace && midpoint[k] == 0; ta++) {
+        Term la = 0, ra = 0;
+        if (!cli_trace_pair(s, ta, &la, &ra)) continue;
+        PcRwSet acc;
+        acc.n = 0;
+        pc_rewrite_all(st->before, la, ra, &acc);
+        pc_rewrite_all(st->before, ra, la, &acc);
+        for (int m = 0; m < acc.n && midpoint[k] == 0; m++) {
+          AtpProofStep half = *st;
+          half.before = acc.out[m];
+          u32 tb = cli_resolve_step_trace(s, &half);
+          if (tb != ATP_TRACE_NONE) {
+            resolved[k]  = ta;
+            resolved2[k] = tb;
+            midpoint[k]  = acc.out[m];
+          }
+        }
+      }
+    }
+    if (resolved[k] != ATP_TRACE_NONE)
+      cli_emit_trace(fp, s, pr, resolved[k], printed);
+    if (resolved2[k] != ATP_TRACE_NONE)
+      cli_emit_trace(fp, s, pr, resolved2[k], printed);
   }
   fprintf(fp, "cnf(goal_%u, negated_conjecture, ", goal_id);
   cli_print_term(fp, pr, gl);
@@ -2444,13 +2551,25 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
   snprintf(prev, sizeof prev, "goal_%u", goal_id);
   for (u32 k = 0; k < n_steps; k++) {
     const AtpProofStep *st = &steps[k];
+    if (midpoint[k] != 0) {
+      // Split record: emit the intermediate disequation first (one
+      // application of resolved[k]), then the target via resolved2[k].
+      Term mid_l = (st->side == 0u) ? midpoint[k] : cur_l;
+      Term mid_r = (st->side == 0u) ? cur_r : midpoint[k];
+      fprintf(fp, "cnf(g%u_%um, plain, ", goal_id, k);
+      cli_print_term(fp, pr, mid_l);
+      fputs(" != ", fp);
+      cli_print_term(fp, pr, mid_r);
+      fprintf(fp, ", inference(rw, [status(thm)], [%s, t%u])).\n",
+              prev, resolved[k]);
+      snprintf(prev, sizeof prev, "g%u_%um", goal_id, k);
+    }
     if (st->side == 0u) cur_l = st->after; else cur_r = st->after;
     fprintf(fp, "cnf(g%u_%u, plain, ", goal_id, k);
     cli_print_term(fp, pr, cur_l);
     fputs(" != ", fp);
     cli_print_term(fp, pr, cur_r);
-    u32 rt = (st->rule < s->n_rules && s->r_trace != NULL)
-           ? s->r_trace[st->rule] : ATP_TRACE_NONE;
+    u32 rt = (midpoint[k] != 0) ? resolved2[k] : resolved[k];
     fprintf(fp, ", inference(rw, [status(thm)], [%s", prev);
     if (rt != ATP_TRACE_NONE) fprintf(fp, ", t%u", rt);
     fputs("])).\n", fp);
