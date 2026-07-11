@@ -142,6 +142,10 @@ static const AtpKnob KNOBS[] = {
   {"horn-goal-stop",         "THVM_ATP_HORN_GOAL_STOP",  1, "(stop chaining on a goal-subsuming release: 0 disables)"},
   {"horn-rel",               "THVM_ATP_HORN_REL",        1, "(Horn relevance gate on oversized KBs: 0 disables)"},
   {"horn-rel-tol",           "THVM_ATP_HORN_REL_TOL",    1, "(Horn relevance-gate SInE tolerance)"},
+  {"horn-cd",                "THVM_ATP_HORN_CD",         1, "(condensed-detachment lane: subsumption + size-cap deepening; 2 = give up if inapplicable)"},
+  {"horn-cd-cap",            "THVM_ATP_HORN_CD_CAP",     1, "(CD initial released-size cap; default auto)"},
+  {"horn-cd-step",           "THVM_ATP_HORN_CD_STEP",    1, "(CD deepening cap increment)"},
+  {"horn-cd-vars",           "THVM_ATP_HORN_CD_VARS",    1, "(CD max distinct variables per conclusion)"},
   {"heap-cells",             "THVM_HEAP_CELLS",          1, "(heap size, cells)"},
   {"profile",                "THVM_ATP_PROFILE",         1, "(profiling level)"},
   {"diag",                   "THVM_ATP_DIAG",            1, "(diagnostics)"},
@@ -1071,19 +1075,23 @@ static int horn_print(const TpProblem *tp, char *buf, size_t cap, size_t *o,
 
 // --- dedup set over canonical "lhs=rhs" strings ------------------------
 // Sized 2x the release cap (two keys per release: itself + mirror) so
-// the open-addressing probe never wraps a full table.
+// the open-addressing probe never wraps a full table.  The CD lane
+// allocates 4x that: its wall-long runs push several million accepts,
+// and a saturated table silently rejects every later candidate as a
+// duplicate.
 #define HORN_DEDUP_SLOTS (1 << 21)
 static char **g_hdup = NULL;
 static int g_hdup_n = 0;
+static u32 g_hdup_slots = HORN_DEDUP_SLOTS;
 
 static int horn_dedup_add(const char *key) {   // 1 = new
-  if (g_hdup_n >= HORN_DEDUP_SLOTS - (HORN_DEDUP_SLOTS >> 2)) return 0;
+  if ((u32)g_hdup_n >= g_hdup_slots - (g_hdup_slots >> 2)) return 0;
   u64 h = tp_name_hash(key, strlen(key));
-  u32 slot = (u32)(h % (u64)HORN_DEDUP_SLOTS);
+  u32 slot = (u32)(h % (u64)g_hdup_slots);
   for (;;) {
     if (g_hdup[slot] == NULL) break;
     if (strcmp(g_hdup[slot], key) == 0) return 0;
-    slot = (slot + 1u) % (u32)HORN_DEDUP_SLOTS;
+    slot = (slot + 1u) % g_hdup_slots;
   }
   g_hdup[slot] = strdup(key);
   g_hdup_n++;
@@ -1093,7 +1101,7 @@ static int horn_dedup_add(const char *key) {   // 1 = new
 // --- facts, rules, head index ------------------------------------------
 typedef struct {
   int l, r, nv, size;
-  u8 processed, sghit, rel, conj, given;
+  u8 processed, sghit, rel, conj, given, dead;
 } HFact;
 static HFact *g_hf = NULL; static int g_hf_n = 0, g_hf_cap = 0;
 
@@ -1101,6 +1109,271 @@ static int horn_size(int t) {
   int s = 1;
   for (int i = 0; i < g_hn[t].nargs; i++) s += horn_size(HARG(t, i));
   return s;
+}
+
+// --- condensed-detachment lane (--horn-cd) ----------------------------
+// The LCL condensed-detachment family regresses the blind v1 chaining
+// into promiscuous major-premise towers (weakening instances or(V, t)
+// growing without bound) and an instance flood no exact dedup catches.
+// The classic CD prover discipline (Otter on the LCL corpus) is:
+//   - a WEIGHT CAP on released conclusions, raised by ITERATIVE
+//     DEEPENING when the capped space saturates without the goal
+//     (kills the towers);
+//   - GENERALIZATION SUBSUMPTION: a released theorem(t) is redundant
+//     if a kept theorem(s) matches onto it (forward), and a kept
+//     instance is dead weight once a more general release arrives
+//     (backward, done lazily at pop time here);
+//   - pure smallest-first given selection.
+// All of it is gated on g_horn_cd so every other flavor's trajectory
+// stays byte-identical.
+static int  g_horn_cd = 0;             // THVM_ATP_HORN_CD (2 = slice mode)
+static double g_cli_wall_sec = 120.0;  // engine wall, for the CD lane budget
+// Parsed negative units (the goals), for the subsumption rank check
+// and the CD resonators.
+static int g_hg_l[64], g_hg_r[64]; static int g_hg_n = 0;
+static int  g_cd_cap = 0;              // live released-size cap
+static int  g_cd_step = 4;             // THVM_ATP_HORN_CD_STEP
+static int  g_cd_maxvars = 5;          // THVM_ATP_HORN_CD_VARS
+static int  g_cd_overcap = 0;          // some conclusion exceeded the cap
+static int  g_cd_rounds = 0;
+static long g_cd_fsub = 0, g_cd_bsub = 0, g_cd_reso_hits = 0;
+
+// One-way match: pattern variables live in the HORN_SG_OFF slot space
+// and bind to canonical (offset-free) instance subterms; instance
+// variables are rigid constants.  Bindings ride the shared trail (the
+// caller undoes to its mark).  A bound pattern variable re-encountered
+// recurses with po = 0, where this reduces to structural equality of
+// two canonical instance terms -- instance slots are never bound.
+static int horn_cd_match(int p, int po, int t, int depth) {
+  if (depth > 400) return 0;
+  if (g_hn[p].head < 0) {
+    if (po == HORN_SG_OFF) {
+      int slot = po + (-g_hn[p].head - 1);
+      if (g_hb[slot].t >= 0)
+        return horn_cd_match(g_hb[slot].t, g_hb[slot].off, t, depth + 1);
+      g_hb[slot].t = t; g_hb[slot].off = 0;
+      g_htrail[g_htrail_n++] = slot;
+      return 1;
+    }
+    return g_hn[t].head == g_hn[p].head;   // instance var vs instance var
+  }
+  if (g_hn[t].head != g_hn[p].head || g_hn[t].nargs != g_hn[p].nargs) return 0;
+  for (int i = 0; i < g_hn[p].nargs; i++)
+    if (!horn_cd_match(HARG(p, i), po, HARG(t, i), depth + 1)) return 0;
+  return 1;
+}
+
+// --- discrimination tree over pattern sides (generalization retrieval)
+// The subsumers of a candidate are found by walking its l side in
+// preorder against a tree of pattern sides: a pattern variable keys as
+// STAR (-1) and consumes one whole candidate subterm on lookup, so the
+// visit cost is bounded by the shared-prefix structure instead of the
+// fact count (a flat scan spent 89% of the wall here on LCL195-10 --
+// every CD fact shares the theorem(..) = true shape, so no root filter
+// discriminates).  BOTH sides of every pattern fact are inserted
+// (orient 0 = l, 1 = r): one query on the candidate's l covers both
+// subsumption pairings, and the leaf match validates the full equation
+// with variable consistency.  Fully ground facts are never inserted --
+// after dedup they cannot strictly subsume anything.
+typedef struct { int key, child, next; } DtEdge;
+typedef struct { int edge0, leaf0; } DtNode;
+typedef struct { int fact, orient, next; } DtLeaf;
+static DtNode *g_dtn = NULL; static int g_dtn_n = 0, g_dtn_cap = 0;
+static DtEdge *g_dte = NULL; static int g_dte_n = 0, g_dte_cap = 0;
+static DtLeaf *g_dtl = NULL; static int g_dtl_n = 0, g_dtl_cap = 0;
+
+static int dt_node_new(void) {
+  if (g_dtn_n >= g_dtn_cap) {
+    g_dtn_cap = (g_dtn_cap == 0) ? (1 << 12) : g_dtn_cap * 2;
+    g_dtn = (DtNode *)realloc(g_dtn, (size_t)g_dtn_cap * sizeof(DtNode));
+    if (g_dtn == NULL) tp_giveup("OOM in Horn release");
+  }
+  g_dtn[g_dtn_n].edge0 = -1;
+  g_dtn[g_dtn_n].leaf0 = -1;
+  return g_dtn_n++;
+}
+
+static int dt_child(int node, int key, int create) {
+  for (int e = g_dtn[node].edge0; e >= 0; e = g_dte[e].next)
+    if (g_dte[e].key == key) return g_dte[e].child;
+  if (!create) return -1;
+  int c = dt_node_new();
+  if (g_dte_n >= g_dte_cap) {
+    g_dte_cap = (g_dte_cap == 0) ? (1 << 12) : g_dte_cap * 2;
+    g_dte = (DtEdge *)realloc(g_dte, (size_t)g_dte_cap * sizeof(DtEdge));
+    if (g_dte == NULL) tp_giveup("OOM in Horn release");
+  }
+  g_dte[g_dte_n].key = key;
+  g_dte[g_dte_n].child = c;
+  g_dte[g_dte_n].next = g_dtn[node].edge0;
+  g_dtn[node].edge0 = g_dte_n++;
+  return c;
+}
+
+static void dt_insert(int t, int fact, int orient) {
+  if (g_dtn_n == 0) dt_node_new();   // root
+  int stack[512], sp = 0, node = 0;
+  stack[sp++] = t;
+  while (sp > 0) {
+    int cur = stack[--sp];
+    int key = (g_hn[cur].head < 0) ? -1 : g_hn[cur].head;
+    node = dt_child(node, key, 1);
+    if (key >= 0)
+      for (int i = g_hn[cur].nargs - 1; i >= 0 && sp < 500; i--)
+        stack[sp++] = HARG(cur, i);
+  }
+  if (g_dtl_n >= g_dtl_cap) {
+    g_dtl_cap = (g_dtl_cap == 0) ? (1 << 12) : g_dtl_cap * 2;
+    g_dtl = (DtLeaf *)realloc(g_dtl, (size_t)g_dtl_cap * sizeof(DtLeaf));
+    if (g_dtl == NULL) tp_giveup("OOM in Horn release");
+  }
+  g_dtl[g_dtl_n].fact = fact;
+  g_dtl[g_dtl_n].orient = orient;
+  g_dtl[g_dtl_n].next = g_dtn[node].leaf0;
+  g_dtn[node].leaf0 = g_dtl_n++;
+}
+
+// Query state: the candidate's l side, flattened to preorder with
+// per-position subterm extents (STAR skips).
+static int g_dt_flat[512], g_dt_skipn[512], g_dt_flat_n = 0, g_dt_over = 0;
+static void dt_flatten(int t) {
+  int start = g_dt_flat_n;
+  if (g_dt_flat_n >= 500) { g_dt_over = 1; return; }
+  g_dt_flat[g_dt_flat_n++] = t;
+  if (g_hn[t].head >= 0)
+    for (int i = 0; i < g_hn[t].nargs && !g_dt_over; i++)
+      dt_flatten(HARG(t, i));
+  g_dt_skipn[start] = g_dt_flat_n - start;
+}
+
+// Walk the tree along the flattened candidate: exact-symbol edge, or a
+// STAR edge that swallows the subterm.  Complete terms are prefix-free
+// in preorder (fixed arities), so leaves are only ever checked when
+// the candidate is fully consumed.  A leaf hit still runs the full
+// two-sided match (variable consistency, the r side, orientation).
+static int dt_probe(int node, int pos, int cl, int cr, int sz_max,
+                    int min_idx) {
+  if (pos >= g_dt_flat_n) {
+    for (int L = g_dtn[node].leaf0; L >= 0; L = g_dtl[L].next) {
+      int f = g_dtl[L].fact;
+      if (g_hf[f].dead || g_hf[f].size > sz_max || f < min_idx) continue;
+      int pl = g_dtl[L].orient ? g_hf[f].r : g_hf[f].l;
+      int pr = g_dtl[L].orient ? g_hf[f].l : g_hf[f].r;
+      int mark = g_htrail_n;
+      int hit = horn_cd_match(pl, HORN_SG_OFF, cl, 0) &&
+                horn_cd_match(pr, HORN_SG_OFF, cr, 0);
+      horn_undo(mark);
+      if (hit) return 1;
+    }
+    return 0;
+  }
+  int t = g_dt_flat[pos], c;
+  if (g_hn[t].head >= 0 && (c = dt_child(node, g_hn[t].head, 0)) >= 0 &&
+      dt_probe(c, pos + 1, cl, cr, sz_max, min_idx)) return 1;
+  if ((c = dt_child(node, -1, 0)) >= 0 &&
+      dt_probe(c, pos + g_dt_skipn[pos], cl, cr, sz_max, min_idx)) return 1;
+  return 0;
+}
+
+// Forward subsumption: is the candidate (l, r) an instance of a live
+// fact?  Every indexed fact predates the candidate, so no age filter.
+static int horn_cd_fwd_subsumed(int l, int r, int sz) {
+  if (g_dtn_n == 0) return 0;
+  g_dt_flat_n = 0; g_dt_over = 0;
+  dt_flatten(l);
+  if (g_dt_over) return 0;
+  return dt_probe(0, 0, l, r, sz, 0);
+}
+
+// --- resonance (Wos): goal-shape steering by skeleton MATCH ------------
+// The backward cone on a CD goal regresses only into the promiscuous
+// major-premise tower theorem(or(not(V0), .. G)), and probing releases
+// by UNIFICATION lets every var-tailed weakening hit it (measured: 11k
+// of 19k releases "sg-hit" on LCL195-10).  What is selective is the
+// goal's SHAPE: each deep-enough goal subterm, with its leaves
+// wildcarded to fresh pattern variables, becomes a one-way MATCH
+// pattern.  A release that matches structurally refines the goal
+// (Wos's resonators, generated from the goal instead of known proofs):
+//   - the weakening tower or(V, ..) fails at the pattern's rigid
+//     not(*) position;
+//   - the deep PM intermediates (a hypothetical-syllogism instance is
+//     itself goal-shaped) match, earning the cap exemption and the
+//     priority pop that pure smallest-first would never grant them.
+#define CD_RESO_MAX       32
+#define CD_RESO_MIN_RIGID 5
+static int g_cd_reso[CD_RESO_MAX]; static int g_cd_reso_n = 0;
+
+static int horn_cd_skel_rigids(int t) {   // non-nullary heads
+  if (g_hn[t].head < 0 || g_hn[t].nargs == 0) return 0;
+  int n = 1;
+  for (int i = 0; i < g_hn[t].nargs; i++)
+    n += horn_cd_skel_rigids(HARG(t, i));
+  return n;
+}
+
+// Copy t with every leaf (variable or nullary symbol) replaced by a
+// fresh pattern variable; -1 when the variable space is exhausted.
+static int horn_cd_skel(int t, int *nv) {
+  if (g_hn[t].head < 0 || g_hn[t].nargs == 0) {
+    if (*nv >= HORN_VSPACE) return -1;
+    return horn_node(-(++*nv), 0, NULL);
+  }
+  int args[16];
+  for (int i = 0; i < g_hn[t].nargs; i++) {
+    args[i] = horn_cd_skel(HARG(t, i), nv);
+    if (args[i] < 0) return -1;
+  }
+  return horn_node(g_hn[t].head, g_hn[t].nargs, args);
+}
+
+static void horn_cd_reso_build(void) {
+  g_cd_reso_n = 0;
+  for (int g = 0; g < g_hg_n; g++) {
+    int stack[512], sp = 0;
+    stack[sp++] = g_hg_l[g]; stack[sp++] = g_hg_r[g];
+    while (sp > 0 && g_cd_reso_n < CD_RESO_MAX) {
+      int t = stack[--sp];
+      if (g_hn[t].head >= 0)
+        for (int i = 0; i < g_hn[t].nargs && sp < 500; i++)
+          stack[sp++] = HARG(t, i);
+      if (horn_cd_skel_rigids(t) < CD_RESO_MIN_RIGID) continue;
+      int nv = 0;
+      int p = horn_cd_skel(t, &nv);
+      if (p < 0) continue;
+      int dup = 0;
+      for (int i = 0; i < g_cd_reso_n && !dup; i++)
+        dup = horn_eq(g_cd_reso[i], p);
+      if (!dup) g_cd_reso[g_cd_reso_n++] = p;
+    }
+  }
+}
+
+// Does either side of the release structurally refine a goal skeleton?
+// (Strict one-way match: pattern wildcards are only the skeleton's own
+// leaf variables.  A linked-instance-variable tolerance was tried and
+// measured to flood -- 395k of 400k releases "resonant" on LCL195-10,
+// whose 1.6-family goal shape saturates the whole detachment space.)
+static int horn_cd_resonant(int l, int r) {
+  int hit = 0;
+  for (int i = 0; i < g_cd_reso_n && !hit; i++) {
+    for (int side = 0; side < 2 && !hit; side++) {
+      int t = side ? r : l;
+      int mark = g_htrail_n;
+      hit = horn_cd_match(g_cd_reso[i], HORN_SG_OFF, t, 0);
+      horn_undo(mark);
+    }
+  }
+  return hit;
+}
+
+// Lazy back subsumption at pop time: only facts added AFTER f can
+// subsume it (older generals rejected f at its own emit).
+static int horn_cd_pop_subsumed(int f) {
+  if (g_dtn_n == 0) return 0;
+  g_dt_flat_n = 0; g_dt_over = 0;
+  dt_flatten(g_hf[f].l);
+  if (g_dt_over) return 0;
+  return dt_probe(0, 0, g_hf[f].l, g_hf[f].r, g_hf[f].size, f + 1);
 }
 
 // Min-heaps over unprocessed fact indices, keyed by term size
@@ -1173,6 +1446,11 @@ static void horn_fact_add(int l, int r, int nv) {
     g_hf = (HFact *)realloc(g_hf, (size_t)g_hf_cap * sizeof(HFact));
     if (g_hf == NULL) tp_giveup("OOM in Horn release");
   }
+  // CD lane: index the new fact as a subsumption pattern (both sides).
+  if (g_horn_cd && nv > 0) {
+    dt_insert(l, g_hf_n, 0);
+    dt_insert(r, g_hf_n, 1);
+  }
   g_hf[g_hf_n].l = l; g_hf[g_hf_n].r = r; g_hf[g_hf_n].nv = nv;
   g_hf[g_hf_n].size = horn_size(l) + horn_size(r);
   g_hf[g_hf_n].processed = 0;
@@ -1180,6 +1458,7 @@ static void horn_fact_add(int l, int r, int nv) {
   g_hf[g_hf_n].rel = 1;
   g_hf[g_hf_n].conj = 0;
   g_hf[g_hf_n].given = 0;
+  g_hf[g_hf_n].dead = 0;
   horn_index_entry(g_hn[l].head, g_hf_n, 0);
   horn_index_entry(g_hn[r].head, g_hf_n, 1);
   horn_heap_push(&g_hheap, g_hf_n);
@@ -1224,11 +1503,9 @@ typedef struct {
   int tl, tr;
   int goal_hit, sg_hit, goal_syms, ground, n_weak, size, order;
   int grp, w;   // head-symbol group + within-group rank (diversity quota)
+  int dead;     // back-subsumed (CD lane): never appended to the engine
 } HRel;
 static HRel *g_hrel = NULL; static int g_hrel_n = 0, g_hrel_cap = 0;
-
-// Parsed negative units (the goals), for the subsumption rank check.
-static int g_hg_l[64], g_hg_r[64]; static int g_hg_n = 0;
 
 static u8 *g_horn_disp = NULL;   // per symbol id: 1 = dispatcher functor
 
@@ -1382,6 +1659,12 @@ static int g_horn_stop = 0;
 static double g_horn_t0 = 0.0;
 static double g_horn_wall = HORN_WALL_SEC;      // THVM_ATP_HORN_WALL
 static int g_horn_max_rel = HORN_MAX_RELEASES;  // THVM_ATP_HORN_MAX
+// Attempt budget: the CD lane runs wall-governed (its subsumed space
+// stays small), every other flavor keeps the fixed v1 cap.  Same for
+// the arena-node ceiling: a wall-long CD run holds millions of
+// accepted facts live.
+static long g_horn_max_attempts = HORN_MAX_ATTEMPTS;
+static int  g_horn_max_nodes = (1 << 22);
 static double horn_now(void) {
   struct timeval tv; gettimeofday(&tv, NULL);
   return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
@@ -1806,6 +2089,34 @@ static void horn_emit_release(TpProblem *tp, const HRule *ru) {
     }
     if (!hit) goto reject;
   }
+  // CD lane: the weight cap.  Over-cap conclusions are rejected BEFORE
+  // the dedup add, so a later deepening round re-derives and admits
+  // them; g_cd_overcap records that the cap (not saturation) pruned.
+  // Emissions are wall-checked directly: the subsumption machinery
+  // below runs between the join loops' attempt-counter checks, and an
+  // emit-heavy stretch must not outrun the budget.
+  // CONE EXEMPTION (the resonance idea, with the backward cone as the
+  // hint generator): a conclusion that unifies a goal-regression
+  // subgoal is a candidate step of a goal-closing chain -- it is kept
+  // WHATEVER its size.  The deep PM intermediates (hypothetical
+  // syllogism instances run ~25 symbols) sit above any cap the
+  // forward space can saturate, but they lie ON the regression cone.
+  {
+    int cd_size = 0, cd_reso = 0;
+    if (g_horn_cd) {
+      static int cd_emits = 0;
+      if ((++cd_emits & 0xff) == 0 && horn_now() - g_horn_t0 > g_horn_wall) {
+        g_horn_stop = 1;
+        goto reject;
+      }
+      // Otter's max_distinct_vars: the classic CD branching cut.  A
+      // conclusion sprouting many distinct variables is a promiscuous
+      // joiner whatever its size.
+      if (g_can_nv > g_cd_maxvars) goto reject;
+      cd_size = horn_size(l2) + horn_size(r2);
+      cd_reso = horn_cd_resonant(l2, r2);
+      if (cd_size > g_cd_cap && !cd_reso) { g_cd_overcap = 1; goto reject; }
+    }
   {
   static char lb[TP_SIDE_LEN], rb[TP_SIDE_LEN], key[2 * TP_SIDE_LEN + 2];
   size_t lo = 0, ro = 0;
@@ -1829,10 +2140,33 @@ static void horn_emit_release(TpProblem *tp, const HRule *ru) {
       horn_dedup_add(key);
     }
   }
+  // CD lane: generalization subsumption -- an instance of a live fact
+  // (input schema or earlier release) is redundant.  The dedup entry
+  // above stays claimed: the candidate is redundant forever (whatever
+  // subsumes its subsumer subsumes it).
+  if (g_horn_cd && horn_cd_fwd_subsumed(l2, r2, cd_size)) {
+    g_cd_fsub++;
+    goto reject;
+  }
   // New unit: joins the fact set immediately (chains within the round
   // are picked up next round via the semi-naive base) and the pending
-  // release list for the final append.
-  int sgh = horn_sg_probe(l2, r2);
+  // release list for the final append.  In the CD lane the resonance
+  // hit plays the sg-hit role: priority pop + kept-window tier.
+  int sgh = g_horn_cd ? cd_reso : horn_sg_probe(l2, r2);
+  if (g_horn_cd && cd_reso) {
+    g_cd_reso_hits++;
+    // A resonator most of the space matches carries no signal -- the
+    // goal is shaped like a generic lemma of its calculus (measured:
+    // 252k of 255k releases on LCL054-10, whose Frege goal is the
+    // generic implication-composition shape).  Drop the resonators and
+    // let the pure weight discipline run.
+    if (g_cd_reso_hits > 2000 && g_cd_reso_hits * 2 > (long)g_hrel_n) {
+      g_cd_reso_n = 0;
+      fprintf(stderr, "FindProof: Horn CD: resonators flooded "
+              "(%ld of %d released) -- disabled\n",
+              g_cd_reso_hits, g_hrel_n);
+    }
+  }
   horn_fact_add(l2, r2, g_can_nv);
   if (sgh) {
     g_hf[g_hf_n - 1].sghit = 1;
@@ -1873,9 +2207,11 @@ static void horn_emit_release(TpProblem *tp, const HRule *ru) {
   re->size = (int)(lo + ro);
   re->order = g_hrel_n;
   re->goal_hit = 0;   // filled at ranking time, once bindings are clean
+  re->dead = 0;
   g_hrel_n++;
   if (g_hrel_n >= g_horn_max_rel) g_horn_stop = 1;
   return;
+  }
   }
 reject:
   g_hn_n = hn_mark; g_ha_n = ha_mark;
@@ -1890,8 +2226,8 @@ static void horn_fill(TpProblem *tp, const HRule *ru, int ci, int skip_pos) {
   while (ci == skip_pos) ci++;
   if (ci >= ru->nc) { horn_emit_release(tp, ru); return; }
   if ((g_horn_attempts & 0xfff) == 0 &&
-      (g_horn_attempts > HORN_MAX_ATTEMPTS || horn_now() - g_horn_t0 > g_horn_wall ||
-       g_hn_n > (1 << 22))) { g_horn_stop = 1; return; }
+      (g_horn_attempts > g_horn_max_attempts || horn_now() - g_horn_t0 > g_horn_wall ||
+       g_hn_n > g_horn_max_nodes)) { g_horn_stop = 1; return; }
   int c = ru->cl[ci], coff = 0;
   horn_deref(&c, &coff);
   int off = (ci + 1) * HORN_VSPACE;
@@ -1903,7 +2239,7 @@ static void horn_fill(TpProblem *tp, const HRule *ru, int ci, int skip_pos) {
     else           e = g_hix_varhead;
     if (e == -2) {  // unbound condition head: scan all facts directly
       for (int f = 0; f < g_hf_n && !g_horn_stop; f++) {
-        if (!g_hf[f].processed) continue;
+        if (!g_hf[f].processed || g_hf[f].dead) continue;
         for (int orient = 0; orient < 2; orient++) {
           int fl = orient ? g_hf[f].r : g_hf[f].l;
           int fr = orient ? g_hf[f].l : g_hf[f].r;
@@ -1919,7 +2255,7 @@ static void horn_fill(TpProblem *tp, const HRule *ru, int ci, int skip_pos) {
     }
     for (; e >= 0 && !g_horn_stop; e = g_hix[e].next) {
       int f = g_hix[e].fact;
-      if (!g_hf[f].processed) continue;
+      if (!g_hf[f].processed || g_hf[f].dead) continue;
       int fl = g_hix[e].orient ? g_hf[f].r : g_hf[f].l;
       int fr = g_hix[e].orient ? g_hf[f].l : g_hf[f].r;
       int mark = g_htrail_n;
@@ -1941,8 +2277,8 @@ static void horn_given_try(TpProblem *tp, const HRule *ru, int cpos,
   int mark = g_htrail_n;
   g_horn_attempts++;
   if ((g_horn_attempts & 0xfff) == 0 &&
-      (g_horn_attempts > HORN_MAX_ATTEMPTS || horn_now() - g_horn_t0 > g_horn_wall ||
-       g_hn_n > (1 << 22))) { g_horn_stop = 1; return; }
+      (g_horn_attempts > g_horn_max_attempts || horn_now() - g_horn_t0 > g_horn_wall ||
+       g_hn_n > g_horn_max_nodes)) { g_horn_stop = 1; return; }
   if (horn_unify(ru->cl[cpos], 0, fl, off, 0) &&
       horn_unify(ru->ct[cpos], 0, fr, off, 0))
     horn_fill(tp, ru, 0, cpos);
@@ -2004,6 +2340,13 @@ static int horn_rel_cmp_rr(const void *a, const void *b) {
 // BEFORE SInE so released facts participate in axiom selection.
 static void tp_horn_release(TpProblem *tp) {
   int n = tp->n_cls;
+  // CD lane flag before any fact is added: fingerprints ride the adds.
+  {
+    const char *ce = getenv("THVM_ATP_HORN_CD");
+    g_horn_cd = (ce != NULL && ce[0] != '0') ? atoi(ce) : 0;
+    g_cd_fsub = g_cd_bsub = g_cd_reso_hits = 0;
+    g_cd_rounds = 0; g_cd_overcap = 0; g_cd_reso_n = 0;
+  }
   // Parse every positive clause; remember each clause's term pair.
   int *pl = (int *)malloc((size_t)n * sizeof(int));
   int *prr = (int *)malloc((size_t)n * sizeof(int));
@@ -2034,9 +2377,25 @@ static void tp_horn_release(TpProblem *tp) {
     }
   }
   int released_kept = 0;
-  if (n_disp == 0) goto done;   // not an encoded-Horn problem
+  if (n_disp == 0) {
+    // Slice mode: free the pool slot at once on a non-CD problem.
+    if (g_horn_cd >= 2)
+      tp_giveup("horn-cd slice: no encoded-Horn dispatcher");
+    goto done;   // not an encoded-Horn problem
+  }
+  if (g_horn_cd >= 2) {
+    // The CD discipline targets ground saturation-style goals; the
+    // existential (planning) and oversized-KB families already crack
+    // via the v2 steered lane in the wm slice.
+    int ex = 0;
+    for (int g = 0; g < g_hg_n && !ex; g++)
+      ex = horn_has_var(g_hg_l[g]) || horn_has_var(g_hg_r[g]);
+    if (ex) tp_giveup("horn-cd slice: existential goal (v2 lane covers it)");
+    if (tp->n_cls > 4000) tp_giveup("horn-cd slice: oversized KB");
+  }
   g_hix_head = (int *)malloc((size_t)TP_MAX_SYMS * sizeof(int));
-  g_hdup = (char **)calloc(HORN_DEDUP_SLOTS, sizeof(char *));
+  g_hdup_slots = g_horn_cd ? (HORN_DEDUP_SLOTS << 2) : HORN_DEDUP_SLOTS;
+  g_hdup = (char **)calloc(g_hdup_slots, sizeof(char *));
   if (g_hix_head == NULL || g_hdup == NULL) tp_giveup("OOM in Horn release");
   for (int i = 0; i < TP_MAX_SYMS; i++) g_hix_head[i] = -1;
   for (int i = 0; i < HORN_NSLOTS; i++) { g_hb[i].t = -1; g_can_map[i] = -1; }
@@ -2116,6 +2475,19 @@ static void tp_horn_release(TpProblem *tp) {
   // instantiations, exactly like a weight-ordered given-clause loop.
   g_horn_t0 = horn_now();
   g_horn_stop = 0; g_horn_attempts = 0;
+  // CD lane defaults: wall-governed chaining (the deep detachment
+  // chains ARE the proof search here, not a preprocessing garnish), so
+  // most of the run budget goes to the lane and the attempt cap steps
+  // aside.  An explicit --horn-wall still overrides below.
+  if (g_horn_cd) {
+    double w = 0.8 * g_cli_wall_sec;
+    g_horn_wall = (w > HORN_WALL_SEC) ? w : HORN_WALL_SEC;
+    g_horn_max_attempts = (long)4e18;
+    // Post-subsumption accepts ARE the CD search space: the v1 pool
+    // cap ended a healthy cap-18 run mid-wall (400k accepts at 14s).
+    g_horn_max_rel = 4000000;
+    g_horn_max_nodes = (1 << 24);
+  }
   {
     const char *we = getenv("THVM_ATP_HORN_WALL");
     const char *me = getenv("THVM_ATP_HORN_MAX");
@@ -2134,6 +2506,37 @@ static void tp_horn_release(TpProblem *tp) {
   for (int g = 0; g < g_hg_n; g++) {
     g_hg_l[g] = horn_norm(g_hg_l[g]);
     g_hg_r[g] = horn_norm(g_hg_r[g]);
+  }
+  // CD lane: the initial weight cap.  Auto = the largest input fact or
+  // (normalized) goal plus slack -- every axiom schema and the goal
+  // itself must be admissible; the deepening rounds grow it from there.
+  if (g_horn_cd) {
+    int cap = 0;
+    for (int f = 0; f < g_hf_n; f++)
+      if (g_hf[f].size > cap) cap = g_hf[f].size;
+    for (int g = 0; g < g_hg_n; g++) {
+      int s = horn_size(g_hg_l[g]) + horn_size(g_hg_r[g]);
+      if (s > cap) cap = s;
+    }
+    g_cd_cap = cap + 2;
+    const char *cc = getenv("THVM_ATP_HORN_CD_CAP");
+    const char *cs = getenv("THVM_ATP_HORN_CD_STEP");
+    const char *cv = getenv("THVM_ATP_HORN_CD_VARS");
+    if (cc != NULL && atoi(cc) > 0) g_cd_cap = atoi(cc);
+    if (cs != NULL && atoi(cs) > 0) g_cd_step = atoi(cs);
+    if (cv != NULL && atoi(cv) > 0) g_cd_maxvars = atoi(cv);
+    // Goal-shape resonators from the normalized goals; input facts
+    // already goal-shaped (an axiom the goal instantiates) join the
+    // priority agenda immediately.
+    horn_cd_reso_build();
+    for (int f = 0; f < g_hf_n; f++)
+      if (horn_cd_resonant(g_hf[f].l, g_hf[f].r)) {
+        g_hf[f].sghit = 1;
+        horn_heap_push(&g_hpheap, f);
+      }
+    fprintf(stderr, "FindProof: Horn CD lane: cap %d (step %d, wall %.1fs, "
+            "%d resonator(s))\n",
+            g_cd_cap, g_cd_step, g_horn_wall, g_cd_reso_n);
   }
   // Oversized KBs: focus the loop on the conjecture's relevance cone.
   // THVM_ATP_HORN_REL=0 disables.
@@ -2185,7 +2588,10 @@ static void tp_horn_release(TpProblem *tp) {
   // fair and reach the DEEP releases (x*0 = 0 needs the 4-condition
   // distributivity joins).  THVM_ATP_HORN_RATIO overrides (0..4).
   {
-    int ratio = 1;
+    // The CD lane is pure smallest-first: its size cap already bounds
+    // every fragment, so the age pops that keep v1's frontier fair
+    // would only dilute the small-lemma order Otter's CD runs rely on.
+    int ratio = g_horn_cd ? 4 : 1;
     const char *re = getenv("THVM_ATP_HORN_RATIO");
     if (re != NULL && re[0] != '\0') ratio = atoi(re);
     if (ratio < 0) ratio = 0;
@@ -2204,23 +2610,58 @@ static void tp_horn_release(TpProblem *tp) {
         // agenda that reaches ground goals on its own (LCL192) stays
         // undiluted.
         do { given = horn_heap_pop(&g_hpheap); }
-        while (given >= 0 && g_hf[given].processed);
+        while (given >= 0 && (g_hf[given].processed || g_hf[given].dead));
         if (given < 0 && (n_pops++ & 3) >= ratio) {
-          while (age_cursor < g_hf_n && g_hf[age_cursor].processed) age_cursor++;
+          while (age_cursor < g_hf_n &&
+                 (g_hf[age_cursor].processed || g_hf[age_cursor].dead))
+            age_cursor++;
           if (age_cursor < g_hf_n) given = age_cursor;
         }
         if (given < 0) {
           do { given = horn_heap_pop(&g_hheap); }
-          while (given >= 0 && g_hf[given].processed);
+          while (given >= 0 && (g_hf[given].processed || g_hf[given].dead));
         }
         if (given < 0) {
-          while (age_cursor < g_hf_n && g_hf[age_cursor].processed) age_cursor++;
+          while (age_cursor < g_hf_n &&
+                 (g_hf[age_cursor].processed || g_hf[age_cursor].dead))
+            age_cursor++;
           if (age_cursor >= g_hf_n) break;   // fixpoint: agenda exhausted
           given = age_cursor;
+        }
+        // CD lane, lazy back subsumption: a fact a LATER release
+        // generalizes is dead weight -- its joins only re-derive
+        // instances the subsumer covers.  Checked at pop (the only
+        // point it would cost anything), tail-scanned (older facts
+        // were checked forward at this fact's emit).
+        if (g_horn_cd && horn_cd_pop_subsumed(given)) {
+          g_hf[given].dead = 1;
+          if (given >= g_horn_input_nf)
+            g_hrel[given - g_horn_input_nf].dead = 1;
+          g_cd_bsub++;
+          continue;
         }
         g_hf[given].processed = 1;
         g_hf[given].given = 1;
         horn_given_dispatch(tp, given);
+      }
+      // CD lane, iterative deepening: the capped space saturated
+      // without the goal and the cap (not true saturation) pruned --
+      // raise it and re-run every live fact as given again.  The
+      // dedup set short-circuits the replayed joins; only conclusions
+      // the old cap rejected are new.
+      if (g_horn_cd && !g_horn_stop && !g_horn_goal_reached && g_cd_overcap &&
+          horn_now() - g_horn_t0 < g_horn_wall) {
+        g_cd_cap += g_cd_step;
+        g_cd_overcap = 0;
+        g_cd_rounds++;
+        for (int f = 0; f < g_hf_n; f++)
+          if (!g_hf[f].dead && g_hf[f].processed) {
+            g_hf[f].processed = 0;
+            g_hf[f].given = 0;
+            horn_heap_push(&g_hheap, f);
+          }
+        age_cursor = 0;
+        continue;
       }
       // Iterative widening: the RELEVANT closure saturated without the
       // goal and budget remains -- relax the gate, re-run the cone over
@@ -2343,7 +2784,8 @@ static void tp_horn_release(TpProblem *tp) {
       free(taken);
       qsort(g_hrel, (size_t)g_hrel_n, sizeof(HRel), horn_rel_cmp_rr);
     }
-    for (int i = 0; i < g_hrel_n && i < room; i++) {
+    for (int i = 0, kept = 0; i < g_hrel_n && kept < room; i++) {
+      if (g_hrel[i].dead) continue;   // back-subsumed (CD lane)
       if (tp->n_cls >= TP_MAX_CLAUSES) break;
       TpClause *cl = &tp->cls[tp->n_cls++];
       snprintf(cl->lhs, sizeof cl->lhs, "%s", g_hrel[i].l);
@@ -2352,6 +2794,7 @@ static void tp_horn_release(TpProblem *tp) {
       tp_scan_term(tp, cl->lhs);
       tp_scan_term(tp, cl->rhs);
       released_kept++;
+      kept++;
     }
   }
   if (released_kept > 0) g_cli_horn_applied = 1;
@@ -2364,6 +2807,12 @@ static void tp_horn_release(TpProblem *tp) {
             n_disp, n_rules, g_hf_n - g_hrel_n, n_defs, g_hsg_n, g_hrel_n,
             n_sg_hit, g_horn_goal_reached ? ", goal reached" : "",
             released_kept);
+    if (g_horn_cd)
+      fprintf(stderr, "FindProof: Horn CD: cap %d after %d deepening "
+              "round(s), %ld fwd-subsumed, %ld back-subsumed, %ld "
+              "resonant, %.1fs\n",
+              g_cd_cap, g_cd_rounds, g_cd_fsub, g_cd_bsub, g_cd_reso_hits,
+              horn_now() - g_horn_t0);
   }
 done:
   free(pl); free(prr); free(pnv); free(is_disp); free(ps);
@@ -2371,6 +2820,9 @@ done:
   free(g_hn); g_hn = NULL; g_hn_n = g_hn_cap = 0;
   free(g_ha); g_ha = NULL; g_ha_n = g_ha_cap = 0;
   free(g_hf); g_hf = NULL; g_hf_n = g_hf_cap = 0;
+  free(g_dtn); g_dtn = NULL; g_dtn_n = g_dtn_cap = 0;
+  free(g_dte); g_dte = NULL; g_dte_n = g_dte_cap = 0;
+  free(g_dtl); g_dtl = NULL; g_dtl_n = g_dtl_cap = 0;
   free(g_hix); g_hix = NULL; g_hix_n = g_hix_cap = 0;
   free(g_hix_head); g_hix_head = NULL; g_hix_varhead = -1;
   free(g_hr); g_hr = NULL; g_hr_n = g_hr_cap = 0;
@@ -2382,7 +2834,7 @@ done:
   free(g_hrix); g_hrix = NULL; g_hrix_n = g_hrix_cap = 0;
   free(g_hrix_head); g_hrix_head = NULL; g_hrix_varhead = -1;
   if (g_hdup != NULL) {
-    for (int i = 0; i < HORN_DEDUP_SLOTS; i++) free(g_hdup[i]);
+    for (u32 i = 0; i < g_hdup_slots; i++) free(g_hdup[i]);
     free(g_hdup); g_hdup = NULL; g_hdup_n = 0;
   }
   for (int i = 0; i < g_hrel_n; i++) { free(g_hrel[i].l); free(g_hrel[i].r); }
@@ -2824,6 +3276,18 @@ static const SchedSlice SCHEDULE[] = {
   // slice exit immediately on ground-goal problems, so it only ever
   // spends a pool slot on the existential family.
   {"equals",  "--equals-goal=2",                           0.0},
+  // (1c) CONDENSED-DETACHMENT lane: the encoded-Horn chaining under
+  // the classic CD prover discipline (Otter's max_weight + subsumption
+  // on the LCL corpus) -- a formula-size cap with iterative deepening
+  // kills the promiscuous major-premise towers, generalization
+  // subsumption collapses the instance flood, pure smallest-first
+  // given selection, and ~80% of the wall on the chaining itself.
+  // The blind v1 agenda saturates its 400k-release budget on these
+  // without ever nearing the goal (and Vampire's whole casc schedule
+  // times out on LCL195-10 too).  =2: exits immediately unless a
+  // dispatcher + ground goal is detected, freeing the pool slot on
+  // every non-CD problem exactly like the equals slice.
+  {"horn-cd", "--horn-cd=2",                               0.0},
   // (2) Goal FLATTENING (Twee/Vampire naming port) + LAZY ground-join
   // (Twee selection-time redundancy) + backward-simplify + auto-max-weight.
   // Cracks deep-goal UEQ that completion stalls on (COL060-1, GRP167-4);
@@ -3048,6 +3512,7 @@ int main(int argc, char **argv) {
   const char *max_steps = "500000";
   const char *wall = "120";
   int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0;
+  double main_t0 = horn_now();
 
   for (int i = 1; i < argc; i++) {
     char *a = argv[i];
@@ -3145,6 +3610,7 @@ int main(int argc, char **argv) {
       // participate in axiom selection.  THVM_ATP_HORN=0 disables.
       {
         const char *he = getenv("THVM_ATP_HORN");
+        g_cli_wall_sec = (atof(wall) > 0.0) ? atof(wall) : 120.0;
         if (he == NULL || he[0] != '0') tp_horn_release(&tp);
       }
       // Goal reached by the chaining itself: some released unit (a
@@ -3236,6 +3702,18 @@ int main(int argc, char **argv) {
     g_cli_out = fdopen(dup(real_stdout), "w");
     fflush(stdout);
     dup2(2, 1);
+  }
+
+  // The CD lane spends most of the wall chaining before the engine
+  // even starts; hand the engine only what remains so the process
+  // respects its overall budget.  Other flavors keep the full wall
+  // (the 2.5s v1 chaining slice was always inside their slack).
+  char wall_left[32];
+  if (g_horn_cd) {
+    double left = atof(wall) - (horn_now() - main_t0);
+    if (left < 1.0) left = 1.0;
+    snprintf(wall_left, sizeof wall_left, "%.1f", left);
+    wall = wall_left;
   }
 
   char *bench_argv[5];
