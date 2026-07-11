@@ -27,6 +27,12 @@
 // units that is sound for Unsatisfiable but stricter than refutation
 // requires (any single one suffices); CASC UEQ problems carry exactly
 // one.
+//
+// Encoded-Horn preprocessing: problems that encode Horn logic through
+// a dispatcher axiom ifeqN(X,X,Y,Z) = Y (TPTP's -10 UEQ class) are
+// decoded and a budgeted forward-chaining release loop adds the
+// modus-ponens consequences as extra unit equations before the engine
+// runs -- see tp_horn_release.  --horn=0 disables.
 
 #define main atp_bench_main
 #include "../tests/test_atp_wolfram_bench.c"
@@ -34,6 +40,7 @@
 
 // Concurrent-portfolio process management (run_schedule).
 #include <sys/wait.h>
+#include <sys/time.h>
 #include <signal.h>
 #include <fcntl.h>
 
@@ -116,6 +123,12 @@ static const AtpKnob KNOBS[] = {
   {"random-ratio",           "THVM_ATP_RANDOM_RATIO",    1, "(random CP ratio)"},
   {"random-seed",            "THVM_ATP_RANDOM_SEED",     1, "(random seed)"},
   {"sym-prec",               "THVM_ATP_SYM_PREC",        1, "(Vampire symbol precedence: reverse-frequency|frequency)"},
+  {"horn",                   "THVM_ATP_HORN",            1, "(encoded-Horn release: 0 disables)"},
+  {"horn-ratio",             "THVM_ATP_HORN_RATIO",      1, "(Horn pick-given size:age ratio, 0..4)"},
+  {"horn-keep",              "THVM_ATP_HORN_KEEP",       1, "(Horn kept-release cap)"},
+  {"horn-wall",              "THVM_ATP_HORN_WALL",       1, "(Horn chaining wall, seconds)"},
+  {"horn-max",               "THVM_ATP_HORN_MAX",        1, "(Horn release-pool cap)"},
+  {"horn-ground",            "THVM_ATP_HORN_GROUND",     1, "(Horn rank: ground tier)"},
   {"heap-cells",             "THVM_HEAP_CELLS",          1, "(heap size, cells)"},
   {"profile",                "THVM_ATP_PROFILE",         1, "(profiling level)"},
   {"diag",                   "THVM_ATP_DIAG",            1, "(diagnostics)"},
@@ -358,6 +371,36 @@ static void tp_scan_term(TpProblem *tp, const char *s) {
   }
 }
 
+// The CSR knowledge bases carry symbol names up to 224 chars; both the
+// TpSym table and the engine's .pr reader cap names at 64, and silent
+// truncation would conflate distinct symbols (and desync the SIGNATURE
+// from the verbatim equation text).  Shorten every over-long
+// identifier IN PLACE to prefix + "_h" + 16-hex-FNV(full name) -- 58
+// chars, deterministic, collision-safe in practice, case of the first
+// character (variable-ness) preserved.
+static void tp_shorten_names(char *text) {
+  char *r = text, *w = text;
+  while (*r != '\0') {
+    if (isalnum((unsigned char)*r) || *r == '_') {
+      size_t n = 0;
+      while (isalnum((unsigned char)r[n]) || r[n] == '_') n++;
+      if (n >= TP_NAME_LEN) {
+        u64 h = tp_name_hash(r, n);
+        memmove(w, r, 40);
+        w += 40;
+        w += snprintf(w, 20, "_h%016llx", (unsigned long long)h);
+      } else {
+        memmove(w, r, n);
+        w += n;
+      }
+      r += n;
+    } else {
+      *w++ = *r++;
+    }
+  }
+  *w = '\0';
+}
+
 // Parse the preprocessed text into clauses + signature.
 static void tp_parse(TpProblem *tp, const char *text) {
   const char *p = text;
@@ -590,6 +633,1032 @@ static void tp_sine_select(TpProblem *tp) {
   tp_giveup("axiom selection cannot fit the engine caps");
 }
 
+// ===================================================================
+// Encoded-Horn (ifeq) decode + forward-chaining release
+// ===================================================================
+//
+// TPTP's -10 UEQ problems encode Horn logic as unit equations: a
+// dispatcher axiom ifeqN(X,X,Y,Z) = Y (several functor names may
+// coexist: ifeq, ifeq2, ...; arity-3 variants ifeq(X,X,Y) = Y too)
+// plus conditional clauses ifeqN(c, t, then, e) = e -- "if c = t
+// then then = e" -- nesting in the then-position for multiple
+// conditions, with propositions as terms equated to the constant
+// true.  Pure completion drowns re-deriving the conditional
+// machinery, so this pass decodes the encoding and runs a budgeted
+// forward-chaining release loop (positive hyper-resolution): whenever
+// every condition of a decoded clause simultaneously unifies with
+// known unit facts (each fact renamed apart), the instantiated
+// conclusion is released as a new unit equation.  Released units are
+// logical consequences of the input, so Unsatisfiable stays valid;
+// g_cli_horn_applied gates the Satisfiable claim exactly like
+// g_cli_sine_applied does.  THVM_ATP_HORN=0 disables; otherwise the
+// pass is a no-op unless a dispatcher axiom is detected.
+
+static int g_cli_horn_applied = 0;
+
+// Terms live in a growable node/arg arena.  head >= 0 is an index
+// into the TpProblem symbol table; head < 0 is variable -(v+1) with v
+// local to the owning clause.  Unification runs over (node, var-space
+// offset) pairs: the rule's variables are offset 0, the fact renamed
+// into condition i's space at offset (i+1)*HORN_VSPACE.
+#define HORN_MAX_COND   8
+#define HORN_VSPACE     64
+#define HORN_NSLOTS     ((HORN_MAX_COND + 1) * HORN_VSPACE)
+#define HORN_MAX_RELEASES 400000
+#define HORN_MAX_ATTEMPTS 10000000L
+#define HORN_WALL_SEC   2.5
+#define HORN_SIDE_MAX   900     // printed chars per released side
+#define HORN_APPLY_MAX  400     // nodes per released side
+#define HORN_REL_VARS   12      // distinct vars per released unit
+
+typedef struct { int head, nargs, argp; } HNode;
+static HNode *g_hn = NULL; static int g_hn_n = 0, g_hn_cap = 0;
+static int   *g_ha = NULL; static int g_ha_n = 0, g_ha_cap = 0;
+
+static int horn_node(int head, int nargs, const int *args) {
+  if (g_hn_n >= g_hn_cap) {
+    g_hn_cap = (g_hn_cap == 0) ? (1 << 16) : g_hn_cap * 2;
+    g_hn = (HNode *)realloc(g_hn, (size_t)g_hn_cap * sizeof(HNode));
+  }
+  if (nargs > 0 && g_ha_n + nargs > g_ha_cap) {
+    g_ha_cap = (g_ha_cap == 0) ? (1 << 16) : g_ha_cap * 2 + nargs;
+    g_ha = (int *)realloc(g_ha, (size_t)g_ha_cap * sizeof(int));
+  }
+  if (g_hn == NULL || (nargs > 0 && g_ha == NULL)) tp_giveup("OOM in Horn release");
+  HNode *nd = &g_hn[g_hn_n];
+  nd->head = head; nd->nargs = nargs; nd->argp = g_ha_n;
+  for (int i = 0; i < nargs; i++) g_ha[g_ha_n + i] = args[i];
+  g_ha_n += nargs;
+  return g_hn_n++;
+}
+#define HARG(t, i) (g_ha[g_hn[(t)].argp + (i)])
+
+// --- per-clause recursive-descent parser ----------------------------
+typedef struct {
+  const char *p;
+  int  nv;
+  char vnames[HORN_VSPACE][TP_NAME_LEN];
+  int  fail;
+} HParse;
+
+static int horn_parse_term(HParse *ps, TpProblem *tp, int depth) {
+  if (ps->fail || depth > 200) { ps->fail = 1; return -1; }
+  while (isspace((unsigned char)*ps->p)) ps->p++;
+  const char *name = ps->p;
+  size_t n = 0;
+  while (isalnum((unsigned char)name[n]) || name[n] == '_') n++;
+  if (n == 0) { ps->fail = 1; return -1; }
+  ps->p += n;
+  while (isspace((unsigned char)*ps->p)) ps->p++;
+  if (*ps->p == '(') {
+    ps->p++;
+    int args[16], na = 0;
+    for (;;) {
+      if (na >= 16) { ps->fail = 1; return -1; }
+      args[na++] = horn_parse_term(ps, tp, depth + 1);
+      if (ps->fail) return -1;
+      while (isspace((unsigned char)*ps->p)) ps->p++;
+      if (*ps->p == ',') { ps->p++; continue; }
+      if (*ps->p == ')') { ps->p++; break; }
+      ps->fail = 1; return -1;
+    }
+    return horn_node(tp_sym_note_ix(tp, name, n, na), na, args);
+  }
+  if (isupper((unsigned char)*name)) {
+    if (n >= TP_NAME_LEN) n = TP_NAME_LEN - 1;
+    for (int i = 0; i < ps->nv; i++)
+      if (strlen(ps->vnames[i]) == n && memcmp(ps->vnames[i], name, n) == 0)
+        return horn_node(-(i + 1), 0, NULL);
+    if (ps->nv >= HORN_VSPACE) { ps->fail = 1; return -1; }
+    memcpy(ps->vnames[ps->nv], name, n);
+    ps->vnames[ps->nv][n] = '\0';
+    return horn_node(-(++ps->nv), 0, NULL);
+  }
+  return horn_node(tp_sym_note_ix(tp, name, n, 0), 0, NULL);
+}
+
+// Parse one clause side into the arena; vars are clause-local via ps.
+static int horn_parse_side(TpProblem *tp, HParse *ps, const char *s) {
+  ps->p = s; ps->fail = 0;
+  int t = horn_parse_term(ps, tp, 0);
+  if (ps->fail) return -1;
+  while (isspace((unsigned char)*ps->p)) ps->p++;
+  return (*ps->p == '\0') ? t : -1;
+}
+
+// --- structural equality (same var space) ---------------------------
+static int horn_eq(int a, int b) {
+  if (g_hn[a].head != g_hn[b].head || g_hn[a].nargs != g_hn[b].nargs) return 0;
+  for (int i = 0; i < g_hn[a].nargs; i++)
+    if (!horn_eq(HARG(a, i), HARG(b, i))) return 0;
+  return 1;
+}
+
+// --- unification with trail ------------------------------------------
+typedef struct { int t, off; } HBind;
+static HBind g_hb[HORN_NSLOTS];
+static int g_htrail[HORN_NSLOTS]; static int g_htrail_n = 0;
+static long g_horn_attempts = 0;
+
+static void horn_deref(int *t, int *off) {
+  while (g_hn[*t].head < 0) {
+    int slot = *off + (-g_hn[*t].head - 1);
+    if (g_hb[slot].t < 0) return;
+    int nt = g_hb[slot].t, noff = g_hb[slot].off;
+    *t = nt; *off = noff;
+  }
+}
+
+static int horn_occurs(int slot, int t, int off, int depth) {
+  if (depth > 400) return 1;   // treat overdeep as occurs: fail the bind
+  horn_deref(&t, &off);
+  if (g_hn[t].head < 0) return off + (-g_hn[t].head - 1) == slot;
+  for (int i = 0; i < g_hn[t].nargs; i++)
+    if (horn_occurs(slot, HARG(t, i), off, depth + 1)) return 1;
+  return 0;
+}
+
+static int horn_unify(int t1, int o1, int t2, int o2, int depth) {
+  if (depth > 400) return 0;
+  horn_deref(&t1, &o1); horn_deref(&t2, &o2);
+  if (g_hn[t1].head < 0 && g_hn[t2].head < 0 &&
+      o1 + (-g_hn[t1].head - 1) == o2 + (-g_hn[t2].head - 1)) return 1;
+  if (g_hn[t1].head < 0) {
+    int slot = o1 + (-g_hn[t1].head - 1);
+    if (horn_occurs(slot, t2, o2, 0)) return 0;
+    g_hb[slot].t = t2; g_hb[slot].off = o2;
+    g_htrail[g_htrail_n++] = slot;
+    return 1;
+  }
+  if (g_hn[t2].head < 0) {
+    int slot = o2 + (-g_hn[t2].head - 1);
+    if (horn_occurs(slot, t1, o1, 0)) return 0;
+    g_hb[slot].t = t1; g_hb[slot].off = o1;
+    g_htrail[g_htrail_n++] = slot;
+    return 1;
+  }
+  if (g_hn[t1].head != g_hn[t2].head || g_hn[t1].nargs != g_hn[t2].nargs) return 0;
+  for (int i = 0; i < g_hn[t1].nargs; i++)
+    if (!horn_unify(HARG(t1, i), o1, HARG(t2, i), o2, depth + 1)) return 0;
+  return 1;
+}
+
+static void horn_undo(int mark) {
+  while (g_htrail_n > mark) g_hb[g_htrail[--g_htrail_n]].t = -1;
+}
+
+// --- substitution application with canonical var renaming ------------
+// Unbound slots map to fresh canonical vars V0, V1, ... in traversal
+// order; the map is reset per release via the touched list.
+static int g_can_map[HORN_NSLOTS];
+static int g_can_touch[HORN_NSLOTS]; static int g_can_touch_n = 0, g_can_nv = 0;
+
+static void horn_can_reset(void) {
+  while (g_can_touch_n > 0) g_can_map[g_can_touch[--g_can_touch_n]] = -1;
+  g_can_nv = 0;
+}
+
+static int horn_apply(int t, int off, int *budget) {
+  if (--*budget < 0) return -1;
+  horn_deref(&t, &off);
+  if (g_hn[t].head < 0) {
+    int slot = off + (-g_hn[t].head - 1);
+    if (g_can_map[slot] < 0) {
+      if (g_can_nv >= HORN_REL_VARS) return -1;
+      g_can_map[slot] = g_can_nv++;
+      g_can_touch[g_can_touch_n++] = slot;
+    }
+    return horn_node(-(g_can_map[slot] + 1), 0, NULL);
+  }
+  int args[16];
+  for (int i = 0; i < g_hn[t].nargs; i++) {
+    args[i] = horn_apply(HARG(t, i), off, budget);
+    if (args[i] < 0) return -1;
+  }
+  return horn_node(g_hn[t].head, g_hn[t].nargs, args);
+}
+
+// --- printing (canonical, offset-free terms) --------------------------
+// Variables are renumbered by first occurrence in the printed order via
+// remap (size HORN_REL_VARS, -1-initialized, shared across the sides of
+// one equation) -- so an equation and its mirror print to comparable
+// dedup keys.
+static int horn_print(const TpProblem *tp, char *buf, size_t cap, size_t *o,
+                      int t, int *remap, int *nv) {
+  if (g_hn[t].head < 0) {
+    int v = -g_hn[t].head - 1;
+    if (v >= HORN_REL_VARS) return 0;
+    if (remap[v] < 0) remap[v] = (*nv)++;
+    if (*o + 8 >= cap) return 0;
+    *o += (size_t)snprintf(buf + *o, cap - *o, "V%d", remap[v]);
+    return 1;
+  }
+  const char *name = tp->syms[g_hn[t].head].name;
+  size_t nl = strlen(name);
+  if (*o + nl + 2 >= cap) return 0;
+  memcpy(buf + *o, name, nl); *o += nl;
+  if (g_hn[t].nargs > 0) {
+    buf[(*o)++] = '(';
+    for (int i = 0; i < g_hn[t].nargs; i++) {
+      if (i > 0) { if (*o + 1 >= cap) return 0; buf[(*o)++] = ','; }
+      if (!horn_print(tp, buf, cap, o, HARG(t, i), remap, nv)) return 0;
+    }
+    if (*o + 1 >= cap) return 0;
+    buf[(*o)++] = ')';
+  }
+  buf[*o] = '\0';
+  return 1;
+}
+
+// --- dedup set over canonical "lhs=rhs" strings ------------------------
+// Sized 2x the release cap (two keys per release: itself + mirror) so
+// the open-addressing probe never wraps a full table.
+#define HORN_DEDUP_SLOTS (1 << 21)
+static char **g_hdup = NULL;
+static int g_hdup_n = 0;
+
+static int horn_dedup_add(const char *key) {   // 1 = new
+  if (g_hdup_n >= HORN_DEDUP_SLOTS - (HORN_DEDUP_SLOTS >> 2)) return 0;
+  u64 h = tp_name_hash(key, strlen(key));
+  u32 slot = (u32)(h % (u64)HORN_DEDUP_SLOTS);
+  for (;;) {
+    if (g_hdup[slot] == NULL) break;
+    if (strcmp(g_hdup[slot], key) == 0) return 0;
+    slot = (slot + 1u) % (u32)HORN_DEDUP_SLOTS;
+  }
+  g_hdup[slot] = strdup(key);
+  g_hdup_n++;
+  return 1;
+}
+
+// --- facts, rules, head index ------------------------------------------
+typedef struct { int l, r, nv, size; u8 processed; } HFact;
+static HFact *g_hf = NULL; static int g_hf_n = 0, g_hf_cap = 0;
+
+static int horn_size(int t) {
+  int s = 1;
+  for (int i = 0; i < g_hn[t].nargs; i++) s += horn_size(HARG(t, i));
+  return s;
+}
+
+// Min-heap over unprocessed fact indices, keyed by term size: the
+// given-fact agenda (smallest first, ties by insertion order).
+static int *g_hheap = NULL; static int g_hheap_n = 0, g_hheap_cap = 0;
+static int horn_heap_lt(int a, int b) {
+  if (g_hf[a].size != g_hf[b].size) return g_hf[a].size < g_hf[b].size;
+  return a < b;
+}
+static void horn_heap_push(int f) {
+  if (g_hheap_n >= g_hheap_cap) {
+    g_hheap_cap = (g_hheap_cap == 0) ? (1 << 12) : g_hheap_cap * 2;
+    g_hheap = (int *)realloc(g_hheap, (size_t)g_hheap_cap * sizeof(int));
+    if (g_hheap == NULL) tp_giveup("OOM in Horn release");
+  }
+  int i = g_hheap_n++;
+  g_hheap[i] = f;
+  while (i > 0) {
+    int p = (i - 1) / 2;
+    if (!horn_heap_lt(g_hheap[i], g_hheap[p])) break;
+    int t = g_hheap[i]; g_hheap[i] = g_hheap[p]; g_hheap[p] = t;
+    i = p;
+  }
+}
+static int horn_heap_pop(void) {
+  if (g_hheap_n == 0) return -1;
+  int top = g_hheap[0];
+  g_hheap[0] = g_hheap[--g_hheap_n];
+  int i = 0;
+  for (;;) {
+    int l = 2 * i + 1, r = l + 1, m = i;
+    if (l < g_hheap_n && horn_heap_lt(g_hheap[l], g_hheap[m])) m = l;
+    if (r < g_hheap_n && horn_heap_lt(g_hheap[r], g_hheap[m])) m = r;
+    if (m == i) break;
+    int t = g_hheap[i]; g_hheap[i] = g_hheap[m]; g_hheap[m] = t;
+    i = m;
+  }
+  return top;
+}
+
+// Head index: per symbol, a chain of (fact, orient) entries; orient 0
+// matches conditions against (l, r), orient 1 against (r, l).  A fact
+// side headed by a variable goes on the var-head chain (matches any
+// condition head).
+typedef struct { int fact, orient, next; } HIdxE;
+static HIdxE *g_hix = NULL; static int g_hix_n = 0, g_hix_cap = 0;
+static int *g_hix_head = NULL;   // per symbol id
+static int g_hix_varhead = -1;
+
+static void horn_index_entry(int head, int fact, int orient) {
+  if (g_hix_n >= g_hix_cap) {
+    g_hix_cap = (g_hix_cap == 0) ? (1 << 14) : g_hix_cap * 2;
+    g_hix = (HIdxE *)realloc(g_hix, (size_t)g_hix_cap * sizeof(HIdxE));
+    if (g_hix == NULL) tp_giveup("OOM in Horn release");
+  }
+  HIdxE *e = &g_hix[g_hix_n];
+  e->fact = fact; e->orient = orient;
+  if (head < 0) { e->next = g_hix_varhead; g_hix_varhead = g_hix_n; }
+  else          { e->next = g_hix_head[head]; g_hix_head[head] = g_hix_n; }
+  g_hix_n++;
+}
+
+static void horn_fact_add(int l, int r, int nv) {
+  if (g_hf_n >= g_hf_cap) {
+    g_hf_cap = (g_hf_cap == 0) ? (1 << 12) : g_hf_cap * 2;
+    g_hf = (HFact *)realloc(g_hf, (size_t)g_hf_cap * sizeof(HFact));
+    if (g_hf == NULL) tp_giveup("OOM in Horn release");
+  }
+  g_hf[g_hf_n].l = l; g_hf[g_hf_n].r = r; g_hf[g_hf_n].nv = nv;
+  g_hf[g_hf_n].size = horn_size(l) + horn_size(r);
+  g_hf[g_hf_n].processed = 0;
+  horn_index_entry(g_hn[l].head, g_hf_n, 0);
+  horn_index_entry(g_hn[r].head, g_hf_n, 1);
+  horn_heap_push(g_hf_n);
+  g_hf_n++;
+}
+
+typedef struct {
+  int cl[HORN_MAX_COND], ct[HORN_MAX_COND];
+  int nc, concl_l, concl_r, nv;
+} HRule;
+static HRule *g_hr = NULL; static int g_hr_n = 0, g_hr_cap = 0;
+
+// Rule-condition index: (rule, condition position) entries bucketed by
+// the condition's head symbol, so a given fact only visits the rules
+// that can bind it (the CSR knowledge bases carry ~5k rules; scanning
+// them all per given burns the whole budget before the goal chain).
+typedef struct { int rule, cpos, next; } HRIdxE;
+static HRIdxE *g_hrix = NULL; static int g_hrix_n = 0, g_hrix_cap = 0;
+static int *g_hrix_head = NULL;   // per symbol id
+static int g_hrix_varhead = -1;
+
+static void horn_rule_index(int rule, int cpos, int head) {
+  if (g_hrix_n >= g_hrix_cap) {
+    g_hrix_cap = (g_hrix_cap == 0) ? (1 << 12) : g_hrix_cap * 2;
+    g_hrix = (HRIdxE *)realloc(g_hrix, (size_t)g_hrix_cap * sizeof(HRIdxE));
+    if (g_hrix == NULL) tp_giveup("OOM in Horn release");
+  }
+  HRIdxE *e = &g_hrix[g_hrix_n];
+  e->rule = rule; e->cpos = cpos;
+  if (head < 0) { e->next = g_hrix_varhead; g_hrix_varhead = g_hrix_n; }
+  else          { e->next = g_hrix_head[head]; g_hrix_head[head] = g_hrix_n; }
+  g_hrix_n++;
+}
+
+// Pending releases (kept as strings for ranking + TpClause append;
+// tl/tr keep the arena terms for the goal-subsumption rank check;
+// n_weak counts single-occurrence variables -- weakening instances
+// like or(V, lemma) rank below their workhorse cores).
+typedef struct {
+  char *l, *r;
+  int tl, tr;
+  int goal_hit, goal_syms, ground, n_weak, size, order;
+  int grp, w;   // head-symbol group + within-group rank (diversity quota)
+} HRel;
+static HRel *g_hrel = NULL; static int g_hrel_n = 0, g_hrel_cap = 0;
+
+// Parsed negative units (the goals), for the subsumption rank check.
+static int g_hg_l[64], g_hg_r[64]; static int g_hg_n = 0;
+
+static u8 *g_horn_disp = NULL;   // per symbol id: 1 = dispatcher functor
+
+// --- definitional expansion --------------------------------------------
+// A unit fact f(X1..Xk) = r (k >= 1, pairwise-distinct variable
+// arguments, f absent from r, every variable of r among the arguments)
+// DEFINES f.  The chaining universe is normalized by expanding every
+// defined symbol, so unification sees a single alphabet -- e.g. the
+// LCL encodings state detachment over implies(..) but their axioms
+// interleave it with or/not through implies(X,Y) = or(not(X),Y).
+// Expansion preserves equational consequence, so releases stay sound.
+static int *g_hdef_l = NULL, *g_hdef_r = NULL;   // per symbol: node or -1
+static int g_hexp_fail = 0, g_hexp_limit = 0;
+
+static int horn_sym_occurs(int f, int t) {
+  if (g_hn[t].head == f) return 1;
+  for (int i = 0; i < g_hn[t].nargs; i++)
+    if (horn_sym_occurs(f, HARG(t, i))) return 1;
+  return 0;
+}
+
+static int horn_vars_within(int t, const u8 *allowed) {
+  if (g_hn[t].head < 0) return allowed[-g_hn[t].head - 1];
+  for (int i = 0; i < g_hn[t].nargs; i++)
+    if (!horn_vars_within(HARG(t, i), allowed)) return 0;
+  return 1;
+}
+
+static void horn_def_note(int l, int r) {
+  if (g_hn[l].head < 0 || g_hn[l].nargs < 1) return;
+  int f = g_hn[l].head;
+  if (g_horn_disp[f] || g_hdef_r[f] >= 0) return;
+  u8 seen[HORN_VSPACE];
+  memset(seen, 0, sizeof seen);
+  for (int i = 0; i < g_hn[l].nargs; i++) {
+    int a = HARG(l, i);
+    if (g_hn[a].head >= 0) return;
+    int v = -g_hn[a].head - 1;
+    if (seen[v]) return;
+    seen[v] = 1;
+  }
+  if (horn_sym_occurs(f, r)) return;
+  if (!horn_vars_within(r, seen)) return;
+  g_hdef_l[f] = l; g_hdef_r[f] = r;
+}
+
+static int horn_subst_build(int t, const int *m, int depth) {
+  if (depth > 200 || g_hexp_fail || g_hn_n > g_hexp_limit) { g_hexp_fail = 1; return t; }
+  if (g_hn[t].head < 0) return m[-g_hn[t].head - 1];
+  int args[16];
+  for (int i = 0; i < g_hn[t].nargs; i++)
+    args[i] = horn_subst_build(HARG(t, i), m, depth + 1);
+  if (g_hexp_fail) return t;
+  return horn_node(g_hn[t].head, g_hn[t].nargs, args);
+}
+
+static int horn_expand(int t, int depth) {
+  if (depth > 64 || g_hexp_fail || g_hn_n > g_hexp_limit) { g_hexp_fail = 1; return t; }
+  if (g_hn[t].head < 0) return t;
+  int args[16], changed = 0;
+  for (int i = 0; i < g_hn[t].nargs; i++) {
+    args[i] = horn_expand(HARG(t, i), depth + 1);
+    changed |= (args[i] != HARG(t, i));
+  }
+  if (g_hexp_fail) return t;
+  int f = g_hn[t].head;
+  if (g_hdef_r != NULL && g_hdef_r[f] >= 0) {
+    int m[HORN_VSPACE];
+    int L = g_hdef_l[f];
+    for (int i = 0; i < g_hn[L].nargs; i++)
+      m[-g_hn[HARG(L, i)].head - 1] = args[i];
+    int e = horn_subst_build(g_hdef_r[f], m, depth + 1);
+    if (g_hexp_fail) return t;
+    return horn_expand(e, depth + 1);   // chained definitions
+  }
+  if (!changed) return t;
+  return horn_node(f, g_hn[t].nargs, args);
+}
+
+// Normalize with fallback: an expansion failure (cyclic definitions,
+// blow-up) rolls the arena back and keeps the original term -- either
+// form is sound.
+static int horn_norm(int t) {
+  if (g_hdef_r == NULL) return t;
+  g_hexp_fail = 0;
+  int mark_n = g_hn_n, mark_a = g_ha_n;
+  g_hexp_limit = g_hn_n + 4000;
+  int e = horn_expand(t, 0);
+  if (g_hexp_fail) { g_hn_n = mark_n; g_ha_n = mark_a; return t; }
+  return e;
+}
+
+// --- dispatcher / conditional-clause shape checks -----------------------
+// ifeqN(X,X,Y[,Z]) = Y with every argument a variable and the other
+// side the bare variable Y (either clause orientation).
+static int horn_disp_check(int s, int other) {
+  if (g_hn[s].head < 0 || g_hn[other].head >= 0) return 0;
+  int na = g_hn[s].nargs;
+  if (na != 3 && na != 4) return 0;
+  for (int i = 0; i < na; i++)
+    if (g_hn[HARG(s, i)].head >= 0) return 0;
+  int a0 = g_hn[HARG(s, 0)].head, a1 = g_hn[HARG(s, 1)].head;
+  int a2 = g_hn[HARG(s, 2)].head, ov = g_hn[other].head;
+  if (a0 != a1 || a2 != ov || a2 == a0) return 0;
+  return 1;
+}
+
+// Unwrap ifeqN(c, t, then, e) = e (else side must equal the clause's
+// other side for arity 4; arity 3 has no else).  Nesting in the
+// then-position accumulates conditions; a partial unwrap is still a
+// sound rule (the residual term is the conclusion).
+static int horn_decode_side(int s, int other, HRule *ru) {
+  int nc = 0, cur = s;
+  for (;;) {
+    if (g_hn[cur].head < 0 || !g_horn_disp[g_hn[cur].head]) break;
+    int na = g_hn[cur].nargs;
+    if (na != 3 && na != 4) break;
+    if (na == 4 && !horn_eq(HARG(cur, 3), other)) break;
+    if (nc >= HORN_MAX_COND) return 0;
+    ru->cl[nc] = HARG(cur, 0);
+    ru->ct[nc] = HARG(cur, 1);
+    nc++;
+    cur = HARG(cur, 2);
+  }
+  if (nc == 0) return 0;
+  ru->nc = nc; ru->concl_l = cur; ru->concl_r = other;
+  return 1;
+}
+
+// --- the forward-chaining join ------------------------------------------
+static int g_horn_stop = 0;
+static double g_horn_t0 = 0.0;
+static double g_horn_wall = HORN_WALL_SEC;      // THVM_ATP_HORN_WALL
+static int g_horn_max_rel = HORN_MAX_RELEASES;  // THVM_ATP_HORN_MAX
+static double horn_now(void) {
+  struct timeval tv; gettimeofday(&tv, NULL);
+  return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
+}
+
+static void horn_emit_release(TpProblem *tp, const HRule *ru) {
+  // Rejected releases (dedup hits, guards) roll their applied terms
+  // back out of the arena -- only accepted facts persist.
+  int hn_mark = g_hn_n, ha_mark = g_ha_n;
+  horn_can_reset();
+  int budget = HORN_APPLY_MAX;
+  int l2 = horn_apply(ru->concl_l, 0, &budget);
+  int r2 = (l2 >= 0) ? horn_apply(ru->concl_r, 0, &budget) : -1;
+  if (l2 < 0 || r2 < 0) goto reject;
+  if (horn_eq(l2, r2)) goto reject;                  // trivial
+  // Collapse guards: a bare-variable side whose variable does not
+  // occur in the other side releases a near-degenerate equation.
+  if (g_hn[l2].head < 0 || g_hn[r2].head < 0) {
+    int v = (g_hn[l2].head < 0) ? l2 : r2, w = (g_hn[l2].head < 0) ? r2 : l2;
+    if (g_hn[w].head < 0) goto reject;               // X = Y
+    int slot = -g_hn[v].head - 1, hit = 0;
+    // canonical terms are offset-free: reuse occurs via a tiny scan
+    int stack[512], sp = 0; stack[sp++] = w;
+    while (sp > 0 && !hit) {
+      int t = stack[--sp];
+      if (g_hn[t].head < 0) { if (-g_hn[t].head - 1 == slot) hit = 1; }
+      else for (int i = 0; i < g_hn[t].nargs && sp < 512; i++) stack[sp++] = HARG(t, i);
+    }
+    if (!hit) goto reject;
+  }
+  {
+  static char lb[TP_SIDE_LEN], rb[TP_SIDE_LEN], key[2 * TP_SIDE_LEN + 2];
+  size_t lo = 0, ro = 0;
+  int remap[HORN_REL_VARS], nv = 0;
+  for (int i = 0; i < HORN_REL_VARS; i++) remap[i] = -1;
+  if (!horn_print(tp, lb, HORN_SIDE_MAX, &lo, l2, remap, &nv)) goto reject;
+  if (!horn_print(tp, rb, HORN_SIDE_MAX, &ro, r2, remap, &nv)) goto reject;
+  snprintf(key, sizeof key, "%s=%s", lb, rb);
+  if (!horn_dedup_add(key)) goto reject;
+  // Suppress the mirror too: print r-then-l under a fresh renumbering
+  // and pre-claim that key, so the flipped orientation is never
+  // released as a separate unit.
+  {
+    static char fl[TP_SIDE_LEN], fr[TP_SIDE_LEN];
+    size_t fo = 0, go = 0;
+    int remap2[HORN_REL_VARS], nv2 = 0;
+    for (int i = 0; i < HORN_REL_VARS; i++) remap2[i] = -1;
+    if (horn_print(tp, fr, HORN_SIDE_MAX, &fo, r2, remap2, &nv2) &&
+        horn_print(tp, fl, HORN_SIDE_MAX, &go, l2, remap2, &nv2)) {
+      snprintf(key, sizeof key, "%s=%s", fr, fl);
+      horn_dedup_add(key);
+    }
+  }
+  // New unit: joins the fact set immediately (chains within the round
+  // are picked up next round via the semi-naive base) and the pending
+  // release list for the final append.
+  horn_fact_add(l2, r2, g_can_nv);
+  if (g_hrel_n >= g_hrel_cap) {
+    g_hrel_cap = (g_hrel_cap == 0) ? (1 << 12) : g_hrel_cap * 2;
+    g_hrel = (HRel *)realloc(g_hrel, (size_t)g_hrel_cap * sizeof(HRel));
+    if (g_hrel == NULL) tp_giveup("OOM in Horn release");
+  }
+  HRel *re = &g_hrel[g_hrel_n];
+  re->l = strdup(lb); re->r = strdup(rb);
+  re->tl = l2; re->tr = r2;
+  re->ground = (g_can_nv == 0);
+  re->goal_syms = 0;   // filled at ranking time
+  re->n_weak = 0;
+  {
+    int cnt[HORN_REL_VARS];
+    memset(cnt, 0, sizeof cnt);
+    int stack[512], sp = 0;
+    stack[sp++] = l2; stack[sp++] = r2;
+    while (sp > 0) {
+      int t = stack[--sp];
+      if (g_hn[t].head < 0) cnt[-g_hn[t].head - 1]++;
+      else for (int i = 0; i < g_hn[t].nargs && sp < 512; i++)
+        stack[sp++] = HARG(t, i);
+    }
+    for (int i = 0; i < g_can_nv; i++) re->n_weak += (cnt[i] == 1);
+  }
+  re->size = (int)(lo + ro);
+  re->order = g_hrel_n;
+  re->goal_hit = 0;   // filled at ranking time, once bindings are clean
+  g_hrel_n++;
+  if (g_hrel_n >= g_horn_max_rel) g_horn_stop = 1;
+  return;
+  }
+reject:
+  g_hn_n = hn_mark; g_ha_n = ha_mark;
+}
+
+// Backtracking fill: satisfy every condition except skip_pos (already
+// bound to the given fact) from PROCESSED facts, under the current
+// bindings.  The given-fact discipline enumerates each fact
+// combination once -- when its last-processed member is the given.
+static void horn_fill(TpProblem *tp, const HRule *ru, int ci, int skip_pos) {
+  if (g_horn_stop) return;
+  while (ci == skip_pos) ci++;
+  if (ci >= ru->nc) { horn_emit_release(tp, ru); return; }
+  if ((g_horn_attempts & 0xfff) == 0 &&
+      (g_horn_attempts > HORN_MAX_ATTEMPTS || horn_now() - g_horn_t0 > g_horn_wall ||
+       g_hn_n > (1 << 22))) { g_horn_stop = 1; return; }
+  int c = ru->cl[ci], coff = 0;
+  horn_deref(&c, &coff);
+  int off = (ci + 1) * HORN_VSPACE;
+  // candidate chains: the condition head's bucket (or every bucket for
+  // a still-unbound condition head) plus the var-headed facts.
+  for (int pass = 0; pass < 2 && !g_horn_stop; pass++) {
+    int e;
+    if (pass == 0) e = (g_hn[c].head >= 0) ? g_hix_head[g_hn[c].head] : -2;
+    else           e = g_hix_varhead;
+    if (e == -2) {  // unbound condition head: scan all facts directly
+      for (int f = 0; f < g_hf_n && !g_horn_stop; f++) {
+        if (!g_hf[f].processed) continue;
+        for (int orient = 0; orient < 2; orient++) {
+          int fl = orient ? g_hf[f].r : g_hf[f].l;
+          int fr = orient ? g_hf[f].l : g_hf[f].r;
+          int mark = g_htrail_n;
+          g_horn_attempts++;
+          if (horn_unify(ru->cl[ci], 0, fl, off, 0) &&
+              horn_unify(ru->ct[ci], 0, fr, off, 0))
+            horn_fill(tp, ru, ci + 1, skip_pos);
+          horn_undo(mark);
+        }
+      }
+      continue;
+    }
+    for (; e >= 0 && !g_horn_stop; e = g_hix[e].next) {
+      int f = g_hix[e].fact;
+      if (!g_hf[f].processed) continue;
+      int fl = g_hix[e].orient ? g_hf[f].r : g_hf[f].l;
+      int fr = g_hix[e].orient ? g_hf[f].l : g_hf[f].r;
+      int mark = g_htrail_n;
+      g_horn_attempts++;
+      if (horn_unify(ru->cl[ci], 0, fl, off, 0) &&
+          horn_unify(ru->ct[ci], 0, fr, off, 0))
+        horn_fill(tp, ru, ci + 1, skip_pos);
+      horn_undo(mark);
+    }
+  }
+}
+
+// One given step: bind condition cpos of ru with the given fact
+// (orientation fixed), then fill the remaining conditions from
+// processed facts.
+static void horn_given_try(TpProblem *tp, const HRule *ru, int cpos,
+                           int fl, int fr) {
+  int off = (cpos + 1) * HORN_VSPACE;
+  int mark = g_htrail_n;
+  g_horn_attempts++;
+  if ((g_horn_attempts & 0xfff) == 0 &&
+      (g_horn_attempts > HORN_MAX_ATTEMPTS || horn_now() - g_horn_t0 > g_horn_wall ||
+       g_hn_n > (1 << 22))) { g_horn_stop = 1; return; }
+  if (horn_unify(ru->cl[cpos], 0, fl, off, 0) &&
+      horn_unify(ru->ct[cpos], 0, fr, off, 0))
+    horn_fill(tp, ru, 0, cpos);
+  horn_undo(mark);
+}
+
+// Dispatch a given fact through the rule-condition index: only the
+// rules whose condition head matches (plus var-headed conditions, and
+// every entry when the fact side itself is a bare variable) join.
+static void horn_given_dispatch(TpProblem *tp, int given) {
+  for (int orient = 0; orient < 2 && !g_horn_stop; orient++) {
+    int fl = orient ? g_hf[given].r : g_hf[given].l;
+    int fr = orient ? g_hf[given].l : g_hf[given].r;
+    int h = g_hn[fl].head;
+    if (h < 0) {   // var-headed side: any condition could bind it
+      for (int e = 0; e < g_hrix_n && !g_horn_stop; e++)
+        horn_given_try(tp, &g_hr[g_hrix[e].rule], g_hrix[e].cpos, fl, fr);
+      continue;
+    }
+    for (int pass = 0; pass < 2 && !g_horn_stop; pass++) {
+      int e = (pass == 0) ? g_hrix_head[h] : g_hrix_varhead;
+      for (; e >= 0 && !g_horn_stop; e = g_hrix[e].next)
+        horn_given_try(tp, &g_hr[g_hrix[e].rule], g_hrix[e].cpos, fl, fr);
+    }
+  }
+}
+
+static int g_horn_rank_ground = 0;   // THVM_ATP_HORN_GROUND: ground tier on
+
+static int horn_rel_cmp(const void *a, const void *b) {
+  const HRel *x = (const HRel *)a, *y = (const HRel *)b;
+  if (x->goal_hit != y->goal_hit) return y->goal_hit - x->goal_hit;
+  if (g_horn_rank_ground && x->ground != y->ground) return y->ground - x->ground;
+  if (x->goal_syms != y->goal_syms) return y->goal_syms - x->goal_syms;
+  if (x->n_weak != y->n_weak) return x->n_weak - y->n_weak;   // no weakening vars
+  if (x->size != y->size) return x->size - y->size;           // smaller first
+  return x->order - y->order;                                 // earlier first
+}
+
+// Final selection order: within-group rank FIRST (a round-robin over
+// the head-symbol groups), then the quality tiers.  One prolific
+// fragment (a ring's additive lemmas) can no longer crowd every other
+// signature group out of the kept window; single-group problems are
+// unaffected (w then equals the global rank).
+static int horn_rel_cmp_rr(const void *a, const void *b) {
+  const HRel *x = (const HRel *)a, *y = (const HRel *)b;
+  if (x->goal_hit != y->goal_hit) return y->goal_hit - x->goal_hit;
+  if (x->w != y->w) return x->w - y->w;
+  return horn_rel_cmp(a, b);
+}
+
+// The pass: decode, chain, rank, append.  Runs after tp_parse and
+// BEFORE SInE so released facts participate in axiom selection.
+static void tp_horn_release(TpProblem *tp) {
+  int n = tp->n_cls;
+  // Parse every positive clause; remember each clause's term pair.
+  int *pl = (int *)malloc((size_t)n * sizeof(int));
+  int *prr = (int *)malloc((size_t)n * sizeof(int));
+  int *pnv = (int *)malloc((size_t)n * sizeof(int));
+  u8  *is_disp = (u8 *)calloc((size_t)n, 1);
+  HParse *ps = (HParse *)malloc(sizeof(HParse));
+  if (pl == NULL || prr == NULL || pnv == NULL || is_disp == NULL || ps == NULL)
+    tp_giveup("OOM in Horn release");
+  g_horn_disp = (u8 *)calloc((size_t)TP_MAX_SYMS, 1);
+  if (g_horn_disp == NULL) tp_giveup("OOM in Horn release");
+  int n_disp = 0;
+  g_hg_n = 0;
+  for (int c = 0; c < n; c++) {
+    pl[c] = prr[c] = -1;
+    ps->nv = 0;
+    int l = horn_parse_side(tp, ps, tp->cls[c].lhs);
+    int r = (l >= 0) ? horn_parse_side(tp, ps, tp->cls[c].rhs) : -1;
+    if (l < 0 || r < 0) continue;
+    if (tp->cls[c].neg) {
+      if (g_hg_n < 64) { g_hg_l[g_hg_n] = l; g_hg_r[g_hg_n] = r; g_hg_n++; }
+      continue;
+    }
+    pl[c] = l; prr[c] = r; pnv[c] = ps->nv;
+    if (horn_disp_check(l, r) || horn_disp_check(r, l)) {
+      is_disp[c] = 1;
+      int f = (g_hn[l].head >= 0) ? g_hn[l].head : g_hn[r].head;
+      if (!g_horn_disp[f]) { g_horn_disp[f] = 1; n_disp++; }
+    }
+  }
+  int released_kept = 0;
+  if (n_disp == 0) goto done;   // not an encoded-Horn problem
+  g_hix_head = (int *)malloc((size_t)TP_MAX_SYMS * sizeof(int));
+  g_hdup = (char **)calloc(HORN_DEDUP_SLOTS, sizeof(char *));
+  if (g_hix_head == NULL || g_hdup == NULL) tp_giveup("OOM in Horn release");
+  for (int i = 0; i < TP_MAX_SYMS; i++) g_hix_head[i] = -1;
+  for (int i = 0; i < HORN_NSLOTS; i++) { g_hb[i].t = -1; g_can_map[i] = -1; }
+  // Definition pass: collect the definitional unit facts first, so
+  // every fact, rule and goal below normalizes into one alphabet.
+  g_hdef_l = (int *)malloc((size_t)TP_MAX_SYMS * sizeof(int));
+  g_hdef_r = (int *)malloc((size_t)TP_MAX_SYMS * sizeof(int));
+  if (g_hdef_l == NULL || g_hdef_r == NULL) tp_giveup("OOM in Horn release");
+  for (int i = 0; i < TP_MAX_SYMS; i++) { g_hdef_l[i] = g_hdef_r[i] = -1; }
+  int n_defs = 0;
+  for (int c = 0; c < n; c++) {
+    if (pl[c] < 0 || is_disp[c] || tp->cls[c].neg) continue;
+    HRule ru;
+    if (horn_decode_side(pl[c], prr[c], &ru) ||
+        horn_decode_side(prr[c], pl[c], &ru)) continue;
+    horn_def_note(pl[c], prr[c]);
+    horn_def_note(prr[c], pl[c]);
+  }
+  for (int i = 0; i < TP_MAX_SYMS; i++) n_defs += (g_hdef_r[i] >= 0);
+  // Split parsed positives into rules and facts; seed the dedup set
+  // with every original unit (both orientations) so releases never
+  // re-add an input equation.
+  int n_rules = 0;
+  for (int c = 0; c < n; c++) {
+    if (pl[c] < 0 || is_disp[c]) continue;
+    HRule ru;
+    if (horn_decode_side(pl[c], prr[c], &ru) ||
+        horn_decode_side(prr[c], pl[c], &ru)) {
+      ru.nv = pnv[c];
+      for (int i = 0; i < ru.nc; i++) {
+        ru.cl[i] = horn_norm(ru.cl[i]);
+        ru.ct[i] = horn_norm(ru.ct[i]);
+      }
+      ru.concl_l = horn_norm(ru.concl_l);
+      ru.concl_r = horn_norm(ru.concl_r);
+      if (g_hr_n >= g_hr_cap) {
+        g_hr_cap = (g_hr_cap == 0) ? (1 << 10) : g_hr_cap * 2;
+        g_hr = (HRule *)realloc(g_hr, (size_t)g_hr_cap * sizeof(HRule));
+        if (g_hr == NULL) tp_giveup("OOM in Horn release");
+      }
+      g_hr[g_hr_n++] = ru;
+      n_rules++;
+    } else {
+      int fl = horn_norm(pl[c]), fr = horn_norm(prr[c]);
+      if (!horn_eq(fl, fr))            // definitions trivialize themselves
+        horn_fact_add(fl, fr, pnv[c]);
+    }
+    // dedup seed: canonical print of both orientations
+    static char lb[TP_SIDE_LEN], rb[TP_SIDE_LEN], key[2 * TP_SIDE_LEN + 2];
+    for (int orient = 0; orient < 2; orient++) {
+      horn_can_reset();
+      int hn_mark = g_hn_n, ha_mark = g_ha_n;
+      int budget = 1 << 16;
+      int a = horn_apply(orient ? prr[c] : pl[c], 0, &budget);
+      int b = (a >= 0) ? horn_apply(orient ? pl[c] : prr[c], 0, &budget) : -1;
+      size_t lo = 0, ro = 0;
+      int remap[HORN_REL_VARS], nv = 0;
+      for (int i = 0; i < HORN_REL_VARS; i++) remap[i] = -1;
+      if (a >= 0 && b >= 0 &&
+          horn_print(tp, lb, sizeof lb, &lo, a, remap, &nv) &&
+          horn_print(tp, rb, sizeof rb, &ro, b, remap, &nv)) {
+        snprintf(key, sizeof key, "%s=%s", lb, rb);
+        horn_dedup_add(key);
+      }
+      g_hn_n = hn_mark; g_ha_n = ha_mark;   // seed applies are temporary
+    }
+  }
+  if (n_rules == 0 || g_hf_n == 0) goto done;
+  // Given-fact agenda loop (UR-resolution shape): pop the smallest
+  // unprocessed fact, mark it processed, and join it into every rule
+  // position against the already-processed facts.  Smallest-first
+  // keeps the chaining on small lemmas instead of drowning in deep
+  // instantiations, exactly like a weight-ordered given-clause loop.
+  g_horn_t0 = horn_now();
+  g_horn_stop = 0; g_horn_attempts = 0;
+  {
+    const char *we = getenv("THVM_ATP_HORN_WALL");
+    const char *me = getenv("THVM_ATP_HORN_MAX");
+    if (we != NULL && atof(we) > 0.0) g_horn_wall = atof(we);
+    if (me != NULL && atoi(me) > 0) g_horn_max_rel = atoi(me);
+  }
+  g_hrix_head = (int *)malloc((size_t)TP_MAX_SYMS * sizeof(int));
+  if (g_hrix_head == NULL) tp_giveup("OOM in Horn release");
+  for (int i = 0; i < TP_MAX_SYMS; i++) g_hrix_head[i] = -1;
+  for (int i = 0; i < g_hr_n; i++)
+    for (int j = 0; j < g_hr[i].nc; j++)
+      horn_rule_index(i, j, g_hn[g_hr[i].cl[j]].head);
+  // Pick-given ratio (Otter shape): of every 4 pops, HORN_RATIO come
+  // from the size heap and the rest by age (FIFO = delta-driven
+  // breadth-first).  Pure smallest-first starves any fragment whose
+  // small lemmas are unbounded (a ring's additive permutations bury
+  // every multiplicative fact), while the age pops keep the frontier
+  // fair and reach the DEEP releases (x*0 = 0 needs the 4-condition
+  // distributivity joins).  THVM_ATP_HORN_RATIO overrides (0..4).
+  {
+    int ratio = 1;
+    const char *re = getenv("THVM_ATP_HORN_RATIO");
+    if (re != NULL && re[0] != '\0') ratio = atoi(re);
+    if (ratio < 0) ratio = 0;
+    if (ratio > 4) ratio = 4;
+    int age_cursor = 0;
+    long n_pops = 0;
+    while (!g_horn_stop) {
+      int given = -1;
+      if ((n_pops++ & 3) >= ratio) {
+        while (age_cursor < g_hf_n && g_hf[age_cursor].processed) age_cursor++;
+        if (age_cursor < g_hf_n) given = age_cursor;
+      }
+      if (given < 0) {
+        do { given = horn_heap_pop(); }
+        while (given >= 0 && g_hf[given].processed);
+      }
+      if (given < 0) {
+        while (age_cursor < g_hf_n && g_hf[age_cursor].processed) age_cursor++;
+        if (age_cursor >= g_hf_n) break;   // fixpoint: agenda exhausted
+        given = age_cursor;
+      }
+      g_hf[given].processed = 1;
+      horn_given_dispatch(tp, given);
+    }
+  }
+  // Rank + append.  Under the engine cap keep everything that fits;
+  // over it (SInE will run) hand selection up to 256 ranked releases.
+  {
+    // Goal subsumption: a release some instance of which IS a goal
+    // equation closes the refutation in one rewrite -- rank it first.
+    // The join's bindings are all undone here, so slot spaces 0
+    // (release canonical vars) and HORN_VSPACE (goal vars) are clean.
+    // Goals normalize into the releases' (expanded) alphabet.
+    int n_goal_hit = 0;
+    for (int g = 0; g < g_hg_n; g++) {
+      g_hg_l[g] = horn_norm(g_hg_l[g]);
+      g_hg_r[g] = horn_norm(g_hg_r[g]);
+    }
+    // Goal-symbol relevance (SInE flavor): the DISCRIMINATING goal
+    // symbols are those NOT ubiquitous across the input (frequency
+    // <= max(2, n/4) clauses) -- a release mentioning them speaks
+    // about the goal's constants and outranks the anonymous
+    // variable-lemma flood.
+    u32 *gen = (u32 *)calloc((size_t)TP_MAX_SYMS, sizeof(u32));
+    u32 *stamp = (u32 *)calloc((size_t)TP_MAX_SYMS, sizeof(u32));
+    u8  *gsym = (u8 *)calloc((size_t)TP_MAX_SYMS, 1);
+    if (gen == NULL || stamp == NULL || gsym == NULL) tp_giveup("OOM in Horn release");
+    for (int c = 0; c < n; c++) {
+      if (pl[c] < 0) continue;
+      int st[512], sp = 0;
+      st[sp++] = pl[c]; st[sp++] = prr[c];
+      while (sp > 0) {
+        int t = st[--sp];
+        if (g_hn[t].head >= 0) {
+          if (stamp[g_hn[t].head] != (u32)(c + 1)) {
+            stamp[g_hn[t].head] = (u32)(c + 1);
+            gen[g_hn[t].head]++;
+          }
+          for (int k = 0; k < g_hn[t].nargs && sp < 512; k++)
+            st[sp++] = HARG(t, k);
+        }
+      }
+    }
+    u32 ubiq = (u32)((n > 8) ? n / 4 : 2);
+    for (int g = 0; g < g_hg_n; g++) {
+      int st[512], sp = 0;
+      st[sp++] = g_hg_l[g]; st[sp++] = g_hg_r[g];
+      while (sp > 0) {
+        int t = st[--sp];
+        if (g_hn[t].head >= 0) {
+          if (gen[g_hn[t].head] <= ubiq) gsym[g_hn[t].head] = 1;
+          for (int k = 0; k < g_hn[t].nargs && sp < 512; k++)
+            st[sp++] = HARG(t, k);
+        }
+      }
+    }
+    for (int i = 0; i < g_hrel_n; i++) {
+      HRel *re = &g_hrel[i];
+      int st[512], sp = 0, seen_n = 0;
+      int seen[64];
+      st[sp++] = re->tl; st[sp++] = re->tr;
+      while (sp > 0) {
+        int t = st[--sp];
+        if (g_hn[t].head >= 0) {
+          if (gsym[g_hn[t].head]) {
+            int dup = 0;
+            for (int k = 0; k < seen_n; k++) dup |= (seen[k] == g_hn[t].head);
+            if (!dup && seen_n < 64) seen[seen_n++] = g_hn[t].head;
+          }
+          for (int k = 0; k < g_hn[t].nargs && sp < 512; k++)
+            st[sp++] = HARG(t, k);
+        }
+      }
+      re->goal_syms = seen_n;
+      re->grp = (g_hn[re->tl].head >= 0) ? g_hn[re->tl].head
+                                         : g_hn[re->tr].head;
+      if (re->grp < 0) re->grp = 0;
+      for (int g = 0; g < g_hg_n && !re->goal_hit; g++) {
+        for (int orient = 0; orient < 2 && !re->goal_hit; orient++) {
+          int gl = orient ? g_hg_r[g] : g_hg_l[g];
+          int gr = orient ? g_hg_l[g] : g_hg_r[g];
+          int mark = g_htrail_n;
+          if (horn_unify(re->tl, 0, gl, HORN_VSPACE, 0) &&
+              horn_unify(re->tr, 0, gr, HORN_VSPACE, 0)) re->goal_hit = 1;
+          horn_undo(mark);
+        }
+      }
+      n_goal_hit += re->goal_hit;
+    }
+    free(gen); free(stamp); free(gsym);
+    if (n_goal_hit > 0)
+      fprintf(stderr, "FindProof: Horn release: %d goal-subsuming unit(s)\n",
+              n_goal_hit);
+    int n_pos = 0;
+    for (int c = 0; c < tp->n_cls; c++) n_pos += !tp->cls[c].neg;
+    int room = (n_pos < (int)PR_MAX_EQNS) ? (int)PR_MAX_EQNS - n_pos
+                                          : (int)PR_MAX_EQNS;
+    {
+      const char *ke = getenv("THVM_ATP_HORN_KEEP");
+      const char *ge = getenv("THVM_ATP_HORN_GROUND");
+      if (ke != NULL && atoi(ke) > 0 && atoi(ke) < room) room = atoi(ke);
+      g_horn_rank_ground = (ge != NULL && ge[0] != '\0' && ge[0] != '0');
+    }
+    if (g_hrel_n > room) {
+      qsort(g_hrel, (size_t)g_hrel_n, sizeof(HRel), horn_rel_cmp);
+      u32 *taken = (u32 *)calloc((size_t)TP_MAX_SYMS, sizeof(u32));
+      if (taken == NULL) tp_giveup("OOM in Horn release");
+      for (int i = 0; i < g_hrel_n; i++)
+        g_hrel[i].w = (int)taken[g_hrel[i].grp]++;
+      free(taken);
+      qsort(g_hrel, (size_t)g_hrel_n, sizeof(HRel), horn_rel_cmp_rr);
+    }
+    for (int i = 0; i < g_hrel_n && i < room; i++) {
+      if (tp->n_cls >= TP_MAX_CLAUSES) break;
+      TpClause *cl = &tp->cls[tp->n_cls++];
+      snprintf(cl->lhs, sizeof cl->lhs, "%s", g_hrel[i].l);
+      snprintf(cl->rhs, sizeof cl->rhs, "%s", g_hrel[i].r);
+      cl->neg = 0; cl->conj = 0;
+      tp_scan_term(tp, cl->lhs);
+      tp_scan_term(tp, cl->rhs);
+      released_kept++;
+    }
+  }
+  if (released_kept > 0) g_cli_horn_applied = 1;
+  fprintf(stderr, "FindProof: Horn release: %d dispatcher(s), %d rule(s), "
+          "%d fact(s), %d definition(s), %d released, %d kept\n",
+          n_disp, n_rules, g_hf_n - g_hrel_n, n_defs, g_hrel_n, released_kept);
+done:
+  free(pl); free(prr); free(pnv); free(is_disp); free(ps);
+  free(g_horn_disp); g_horn_disp = NULL;
+  free(g_hn); g_hn = NULL; g_hn_n = g_hn_cap = 0;
+  free(g_ha); g_ha = NULL; g_ha_n = g_ha_cap = 0;
+  free(g_hf); g_hf = NULL; g_hf_n = g_hf_cap = 0;
+  free(g_hix); g_hix = NULL; g_hix_n = g_hix_cap = 0;
+  free(g_hix_head); g_hix_head = NULL; g_hix_varhead = -1;
+  free(g_hr); g_hr = NULL; g_hr_n = g_hr_cap = 0;
+  free(g_hheap); g_hheap = NULL; g_hheap_n = g_hheap_cap = 0;
+  free(g_hdef_l); g_hdef_l = NULL;
+  free(g_hdef_r); g_hdef_r = NULL;
+  free(g_hrix); g_hrix = NULL; g_hrix_n = g_hrix_cap = 0;
+  free(g_hrix_head); g_hrix_head = NULL; g_hrix_varhead = -1;
+  if (g_hdup != NULL) {
+    for (int i = 0; i < HORN_DEDUP_SLOTS; i++) free(g_hdup[i]);
+    free(g_hdup); g_hdup = NULL; g_hdup_n = 0;
+  }
+  for (int i = 0; i < g_hrel_n; i++) { free(g_hrel[i].l); free(g_hrel[i].r); }
+  free(g_hrel); g_hrel = NULL; g_hrel_n = g_hrel_cap = 0;
+}
+
 // Emit the .pr text, following the WL wmGenerateProblem conventions:
 // KBO, every weight 1, precedence sorted by (arity ascending, name
 // ascending) with the FIRST symbol highest.
@@ -674,7 +1743,7 @@ static int cli_strategy_complete(void) {
   const char *mw = getenv("THVM_ATP_MAXW");
   const char *am = getenv("THVM_ATP_AUTO_MAXW");
   const char *rr = getenv("THVM_ATP_RANDOM_RATIO");
-  return !g_cli_goal_existential && !g_cli_sine_applied
+  return !g_cli_goal_existential && !g_cli_sine_applied && !g_cli_horn_applied
       && (mw == NULL || *mw == '0') && (am == NULL || *am == '0')
       && (rr == NULL || *rr == '0');
 }
@@ -855,8 +1924,10 @@ static const SchedSlice SCHEDULE[] = {
   // backward-simplify, auto-max-weight) each independently push the
   // wall-edge flatten proofs past the limit (ALG212-10 proves in 27.5s
   // bare, TIMES OUT with ANY of them added) -- the unadorned transform
-  // needs its own lane.
-  {"flatten-bare", "--flatten-goal", 0.0},
+  // needs its own lane.  Horn-free: with (6) it keeps a released-unit-
+  // free lane for problems whose baseline proof the Horn releases
+  // perturb (BOO017-10).
+  {"flatten-bare", "--flatten-goal --horn=0", 0.0},
   // (3) Goal-directed MNF front + ground-join + a growing MaxWeight bound
   // -- complementary to both (goal-direction the WM preset lacks, pruning
   // the bare MNF front lacks).
@@ -874,7 +1945,7 @@ static const SchedSlice SCHEDULE[] = {
   // fail even @150s, but pure bare PROVES it in 6.0s; ground-join or
   // connectedness on top of bare break it again).  This slice is the
   // portfolio's bare-completion angle for the WM-preset-divergent set.
-  {"bare",   "--preset=none", 0.0},
+  {"bare",   "--preset=none --horn=0", 0.0},   // horn-free (see flatten-bare)
   // Backups -- only launch if one of the first five exits early.
   {"wm-gj",   "--ground-join --connectedness",             0.0},
   {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.0},
@@ -1122,6 +2193,7 @@ int main(int argc, char **argv) {
       g_cli_szs_wanted = szs;
       g_cli_probpath = file;
       char *pre = tp_preprocess(file, raw);
+      tp_shorten_names(pre);
       TpProblem *tpp = (TpProblem *)calloc(1, sizeof(TpProblem));
       if (tpp == NULL) { fprintf(stderr, "FindProof: OOM\n"); return 2; }
 #define tp (*tpp)
@@ -1132,6 +2204,13 @@ int main(int argc, char **argv) {
       if (n_neg == 0 || tp.n_cls == n_neg) {
         fprintf(stderr, "FindProof: need at least one positive and one negative unit\n");
         return 2;
+      }
+      // Encoded-Horn (ifeq) problems: decode the dispatcher encoding
+      // and forward-chain released units BEFORE SInE, so the releases
+      // participate in axiom selection.  THVM_ATP_HORN=0 disables.
+      {
+        const char *he = getenv("THVM_ATP_HORN");
+        if (he == NULL || he[0] != '0') tp_horn_release(&tp);
       }
       // Oversized problems (the CSR knowledge bases run to 8k clauses):
       // goal-directed SInE selection cuts them to the relevant slice
