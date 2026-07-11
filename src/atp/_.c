@@ -2120,6 +2120,16 @@ typedef struct {
   int       bal[REWRITE_MAX_VAR];    // count(lhs,v) - count(rhs,v), dense v
   u32       fl_n, fr_n;              // per-side flat node counts
   u8        valid;
+  // ATP_CP_WEIGHT_TWEE per-side scores, accumulated by ftp_pack_fused
+  // for the treated FT-direct push.  Exact because the treated
+  // survivor's classic Term image is ft_to_term(NF) -- fresh unshared
+  // cells, so atp_twee_term_score's Term-identity dedup can never fire
+  // and the score is the plain weighted count 7*|side| - #vars(side),
+  // provided the side stays under the classic walk's 256-node stack
+  // cap (twee_valid=0 above it; the consumer then materializes and
+  // scores classically).  Consumed by atp_cp_priority_sized_ex.
+  u32       twee_l, twee_r;
+  u8        twee_valid;
 } AcpFuse;
 static AcpFuse g_acp_fuse;
 
@@ -2350,6 +2360,7 @@ static u8 *acp_pack_fused(const KboConfig *cfg, Term lhs, Term rhs,
                           u32 *out_lhs_nodes) {
   AcpFuse *fz = &g_acp_fuse;
   fz->valid   = 0u;
+  fz->twee_valid = 0u;
   fz->map.n   = 0u;
   fz->phidiff = 0;
   u32 pos = 0u, nodes = 0u, fpos = 0u;
@@ -2773,6 +2784,7 @@ static u8 vcp_emit_fused(const KboConfig *cfg, Term lo, const u32 *p,
                          const RewriteSubst *subst) {
   AcpFuse *fz = &g_acp_fuse;
   fz->valid   = 0u;
+  fz->twee_valid = 0u;
   fz->map.n   = 0u;
   fz->phidiff = 0;
   u32 pos = 0u, nodes = 0u, fpos = 0u;
@@ -3048,15 +3060,22 @@ static u8 vcp_emit_pair_bytes(Term lo, const u32 *p, u32 p_len, Term rin,
 // arity-countdown frame stack for the subtree-span fixups.  NULL on an
 // anomaly (converted NUM / foreign-tag marker syms, over-arity, depth
 // cap, > REWRITE_MAX_VAR distinct vars); nothing armed and the caller
-// decodes the cells and runs the classic pipeline.
+// decodes the cells and runs the classic pipeline.  want_buf == 0
+// skips the byte-string malloc (bytes stay in the scratch) and returns
+// the scratch pointer as a NOT-owned success sentinel -- the mode-8
+// byte-queue-retirement caller stores NULL and the adopted FT spans
+// carry the queue payload.
 static u8 *ftp_pack_fused(const KboConfig *cfg, const AtpFtCell *lhs,
                           const AtpFtCell *rhs, u32 *out_len,
-                          u32 *out_nodes, u32 *out_lhs_nodes) {
+                          u32 *out_nodes, u32 *out_lhs_nodes,
+                          u8 want_buf) {
   AcpFuse *fz = &g_acp_fuse;
   fz->valid   = 0u;
+  fz->twee_valid = 0u;
   fz->map.n   = 0u;
   fz->phidiff = 0;
   u32 pos = 0u, nodes = 0u, fpos = 0u, lhs_nodes = 0u, fl = 0u;
+  u32 nvar = 0u, nvar_l = 0u;   // var occurrences (total / lhs), twee score
   static u32 here_stk[ACP_FUSE_MAX_DEPTH];
   static u32 rem_stk[ACP_FUSE_MAX_DEPTH];
   for (u32 side = 0u; side < 2u; side++) {
@@ -3090,6 +3109,7 @@ static u8 *ftp_pack_fused(const KboConfig *cfg, const AtpFtCell *lhs,
         fpos++;
         fz->phidiff += (long long)sign * (long long)cfg->var_weight;
         fz->bal[d]  += sign;
+        nvar++;
         leaf = 1u;
       } else {
         u32 lab = ft_ctr_sym(c);
@@ -3137,17 +3157,28 @@ static u8 *ftp_pack_fused(const KboConfig *cfg, const AtpFtCell *lhs,
     if (side == 0u) {
       lhs_nodes = nodes;
       fl        = fpos;
+      nvar_l    = nvar;
     }
   }
   fz->fl_n  = fl;
   fz->fr_n  = fpos - fl;
   fz->valid = 1u;
-  u8 *buf = (u8 *)malloc(pos ? pos : 1u);
-  if (buf == NULL) thvm_fatal("ftp_pack_fused: OOM");
-  memcpy(buf, g_acp_scratch, pos);
+  // ATP_CP_WEIGHT_TWEE per-side scores (see the AcpFuse field comment):
+  // plain weighted count over the unshared treated NF -- 7 per function
+  // symbol / constant, 6 per variable occurrence.  Exact vs the classic
+  // atp_twee_term_score(nv(ft_to_term(side))) whenever the side stays
+  // under the classic walk's 256-entry stack (a <=256-node side can
+  // never overflow it, nor saturate the 512-slot seen table).
+  fz->twee_l     = 7u * fz->fl_n - (nvar_l);
+  fz->twee_r     = 7u * fz->fr_n - (nvar - nvar_l);
+  fz->twee_valid = (fz->fl_n <= 256u && fz->fr_n <= 256u) ? 1u : 0u;
   *out_len       = pos;
   *out_nodes     = nodes;
   *out_lhs_nodes = lhs_nodes;
+  if (!want_buf) return g_acp_scratch;   // success sentinel, not owned
+  u8 *buf = (u8 *)malloc(pos ? pos : 1u);
+  if (buf == NULL) thvm_fatal("ftp_pack_fused: OOM");
+  memcpy(buf, g_acp_scratch, pos);
   return buf;
 }
 
@@ -3699,6 +3730,7 @@ static u8 vcp_ft_emit_fused(const KboConfig *cfg, const AtpFtCell *lo_ft,
                             const AtpFtSubst *subst) {
   AcpFuse *fz = &g_acp_fuse;
   fz->valid   = 0u;
+  fz->twee_valid = 0u;
   fz->map.n   = 0u;
   fz->phidiff = 0;
   u32 pos = 0u, nodes = 0u, fpos = 0u;
@@ -8633,6 +8665,7 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
     // Term reads, exactly like the walk former's routed pushes.
     AcpFuse *fz = &g_acp_fuse;
     fz->valid   = 0u;
+    fz->twee_valid = 0u;
     fz->map.n   = 0u;
     fz->phidiff = 0;
     u32 pos = 0u, nodes = 0u, fpos = 0u;
@@ -9866,7 +9899,29 @@ static u32 atp_symbol_count_dedup(Term t) {
 //      atp_symbol_count_dedup deduped every repeat, underweighting terms
 //      with repeated constants (e.g. the median goal's skolem u/w x3).
 // Caller multiplies the depth term by 7 to keep 2*depth's proportion.
+static u64 g_twee_dbg_calls = 0, g_twee_dbg_dups = 0, g_twee_dbg_drops = 0;
+static u8  g_twee_dbg_ctx = 0;   // 0=other 1=insert-treated 2=insert-raw 3=rebuild/IR
+static u64 g_twee_dbg_ctx_calls[4], g_twee_dbg_ctx_dups[4];
+static void atp_twee_dbg_report(void) {
+  fprintf(stderr, "[twee-score] calls=%llu dups=%llu stack-drops=%llu\n",
+          (unsigned long long)g_twee_dbg_calls,
+          (unsigned long long)g_twee_dbg_dups,
+          (unsigned long long)g_twee_dbg_drops);
+  static const char *nm[4] = {"other", "insert-treated", "insert-raw",
+                              "rebuild"};
+  for (u32 i = 0; i < 4; i++) {
+    fprintf(stderr, "[twee-score]   %-14s calls=%llu dups=%llu\n", nm[i],
+            (unsigned long long)g_twee_dbg_ctx_calls[i],
+            (unsigned long long)g_twee_dbg_ctx_dups[i]);
+  }
+}
 static u32 atp_twee_term_score(Term t) {
+  static int dbg = -1;
+  if (dbg < 0) {
+    dbg = atp_env_on("THVM_TWEE_SCORE_STATS");
+    if (dbg) atexit(atp_twee_dbg_report);
+  }
+  if (dbg) { g_twee_dbg_calls++; g_twee_dbg_ctx_calls[g_twee_dbg_ctx]++; }
   Term stack[256];
   Term seen[512];
   for (u32 i = 0; i < 512; i++) seen[i] = 0;
@@ -9893,10 +9948,17 @@ static u32 atp_twee_term_score(Term t) {
       if (seen[idx] == 0) { seen[idx] = cur; break; }
       if (seen[idx] == cur) { dup = 1; break; }
     }
-    if (dup) { score += 7u; continue; }   // cfg_dupcost=1 *7, no recurse
+    if (dup) {
+      score += 7u;   // cfg_dupcost=1 *7, no recurse
+      if (dbg) { g_twee_dbg_dups++; g_twee_dbg_ctx_dups[g_twee_dbg_ctx]++; }
+      continue;
+    }
     score += 7u;                          // the function symbol (weight 1)
     u32 n = term_ctr_n(cur);
-    for (u32 i = 0; i < n && sp < 256; i++) stack[sp++] = term_ctr_at(cur, i);
+    for (u32 i = 0; i < n; i++) {
+      if (sp >= 256) { if (dbg) g_twee_dbg_drops++; break; }
+      stack[sp++] = term_ctr_at(cur, i);
+    }
   }
   return score;
 }
@@ -10506,6 +10568,73 @@ static u32 atp_cp_weight_base_counts(AtpState *s, Term lhs, Term rhs,
   }
 }
 
+// ATP_CP_WEIGHT_TWEE base for a FUSED push (g_acp_fuse.valid): the
+// per-side scores come from the fuse state when the pack walk stashed
+// them (ftp_pack_fused, the treated FT-direct route), from a
+// materialize-and-score of the treated stash when the pack's size
+// guard declined (twee_valid == 0 on an over-256-node side), and from
+// the classic renumber+score of the REAL Term pair otherwise (the
+// acp_pack_fused Term route arrives un-renumbered here -- the clone
+// renumber reproduces the classic pipeline's nv-then-score exactly,
+// including the Term-identity shared-subterm discounts of the raw
+// >= 50 class, whose images this route still builds as Terms).
+// THVM_ATP_TWEE_FUSE_CHECK=1 certifies the stashed-score arm per push
+// against the materialized classic computation and aborts on any
+// mismatch.
+static u32 atp_cp_twee_fused_base(Term lhs, Term rhs) {
+  u32 m, n;
+  u8 have = 0u;
+  if (g_acp_fuse.twee_valid) {
+    m = g_acp_fuse.twee_l;
+    n = g_acp_fuse.twee_r;
+    have = 1u;
+#ifdef THVM_ATPFT_NORM
+    static int twee_check = -1;
+    if (twee_check < 0) twee_check = atp_env_on("THVM_ATP_TWEE_FUSE_CHECK");
+    if (twee_check && g_vcp_treat.armed &&
+        g_vcp_treat.fl != NULL && g_vcp_treat.fr != NULL) {
+      Term cl = ft_to_term(g_vcp_treat.fl);
+      Term cr = ft_to_term(g_vcp_treat.fr);
+      thvm_normalize_vars(&cl, &cr);
+      u32 rm = atp_twee_term_score(cl);
+      u32 rn = atp_twee_term_score(cr);
+      if (rm != m || rn != n) {
+        fprintf(stderr,
+                "ATP_TWEE_FUSE_CHECK MISMATCH lhs=%u/%u rhs=%u/%u "
+                "(fl_n=%u fr_n=%u)\n",
+                m, rm, n, rn, g_acp_fuse.fl_n, g_acp_fuse.fr_n);
+        abort();
+      }
+    }
+#endif
+  }
+#ifdef THVM_ATPFT_NORM
+  if (!have && g_vcp_treat.armed &&
+      g_vcp_treat.fl != NULL && g_vcp_treat.fr != NULL) {
+    // Treated FT-direct push whose pack declined the plain count (size
+    // guard): the Terms here are routed-push sentinels, so materialize
+    // the stash and score classically -- ft_to_term is fresh/unshared,
+    // exactly the classic write-back image.
+    m = atp_twee_term_score(ft_to_term(g_vcp_treat.fl));
+    n = atp_twee_term_score(ft_to_term(g_vcp_treat.fr));
+    have = 1u;
+  }
+#endif
+  if (!have) {
+    // Term-route fused push (raw >= 50 class + anomaly fallbacks): the
+    // pair is REAL but un-renumbered.  Clone-renumber and score -- the
+    // exact classic computation (nv output is isomorphic, and the
+    // score is deterministic on the shared-DAG shape).
+    Term cl = lhs, cr = rhs;
+    thvm_normalize_vars(&cl, &cr);
+    m = atp_twee_term_score(cl);
+    n = atp_twee_term_score(cr);
+  }
+  u32 large = m > n ? m : n;
+  u32 small = m + n - large;
+  return 4u * large + 1u * small + 14u * g_cp_formation_depth;
+}
+
 // Priority weight for a CP whose symbol-count sum is already known
 // (`base`) -- e.g. counted for free during acp_pack.  Identical
 // verdict to atp_cp_priority; only the redundant size walk is
@@ -10524,7 +10653,12 @@ static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
     return atp_goal_weight(s, lhs, rhs);
   }
   u32 mode = (s != NULL) ? s->cp_weight_mode : ATP_CP_WEIGHT_ADD;
-  if (mode != ATP_CP_WEIGHT_ADD) {
+  if (mode == ATP_CP_WEIGHT_TWEE && g_acp_fuse.valid) {
+    // Fused push: consume the pack walk's stashed per-side scores (or
+    // their exact fallbacks) -- the routed FT pushes carry sentinel
+    // Terms, so the generic recompute below would score garbage.
+    base = atp_cp_twee_fused_base(lhs, rhs);
+  } else if (mode != ATP_CP_WEIGHT_ADD) {
     // The caller's `base` is the ADD-mode symbol-count sum; for any
     // other mode it must be recomputed from the CP terms.
     base = (lhs_nodes != 0xffffffffu && lhs_nodes <= base)
@@ -11916,6 +12050,7 @@ static void vcp_treat_pack_certify(const AtpState *s, const u8 *packed,
 // WM's hard cap would.
 static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
                              u8 is_ultimate, u8 raw_untreated) {
+  g_twee_dbg_ctx = raw_untreated ? 2u : 1u;
   // Hard queue-size cap (memory leash): drop before packing (saves the
   // acp_pack malloc) once the live queue is full.  Lossy; the periodic
   // FIFO/priority selection still fires over the kept CPs.
@@ -11953,14 +12088,35 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     // (ftp_pack_fused).  An anomaly (marker syms etc.) decodes the
     // cells and rejoins the classic fused pipeline below -- exactly
     // the pair the classic route would have packed.
+    static int treat_check = -1;
+    if (treat_check < 0) treat_check = atp_env_on("THVM_ATP_FT_EMIT_CHECK");
+    // Twee-score byte-queue retirement: under the exact conditions of
+    // the classic skip-pack below (CPQ mirror live, subsumption off, no
+    // packed-byte consumer compiled in) plus no weight-cap/stash reader
+    // of the bytes, the adopted FT spans ARE the queue payload and the
+    // malloc'd byte string is write-only -- classic mode 8 never
+    // allocated it (its pushes took the skip-pack), so skipping keeps
+    // the fused arm's RSS at the classic arm's level (the 3M-CP-queue
+    // regime runs against the memory leash).  Confined to mode 8: the
+    // long-certified default arms keep their byte behavior.
+    u8 twee_skip_buf = 0u;
+#ifdef THVM_ATPFT_CPQ
+#if !defined(THVM_ATP_COLLAPSE_DEFER) && !defined(THVM_ATP_TIE_RHS)
+    twee_skip_buf = (s->cp_weight_mode == ATP_CP_WEIGHT_TWEE &&
+                     !s->use_queue_subsume &&
+                     s->auto_max_cp_weight_base == 0u &&
+                     s->max_cp_weight == 0u && !treat_check) ? 1u : 0u;
+#endif
+#endif
     u32 flen = 0u;
     packed = ftp_pack_fused(s->kbo, g_vcp_treat.fl, g_vcp_treat.fr,
-                            &flen, &cp_nodes, &lhs_nodes);
+                            &flen, &cp_nodes, &lhs_nodes,
+                            (u8)!twee_skip_buf);
     if (packed != NULL) {
       g_acp_fuse_n_ok++;
-      static int treat_check = -1;
-      if (treat_check < 0) treat_check = atp_env_on("THVM_ATP_FT_EMIT_CHECK");
-      if (treat_check) {
+      if (twee_skip_buf) {
+        packed = NULL;   // scratch sentinel -- not owned, nothing reads it
+      } else if (treat_check) {
         vcp_treat_pack_certify(s, packed, flen, cp_nodes, lhs_nodes);
       }
     } else {
@@ -12085,6 +12241,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
   atp_cp_heap_insert_packed(s, packed, cp_nodes, lhs, rhs, trace,
                             is_ultimate, lhs_nodes, g_cp_push_kind);
   g_acp_fuse.valid = 0u;   // the fused weigh state is consume-once
+  g_twee_dbg_ctx = 0u;
 }
 
 // Lazily allocate the deferred-CP descriptor array + tag bitset to the
@@ -12983,8 +13140,10 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
     // backfill never moved it, so its byte at position i -- stamped by
     // whichever append last landed there -- is what the historical
     // rebuild read.  Preserves that quirk bit-exactly (GJ-keep configs).
+    g_twee_dbg_ctx = 3u;
     s->cp_pri[vv] = s->cp_deprio[i] ? ATP_CP_PRI_NEVER
                                     : atp_cp_priority(s, l, r);
+    g_twee_dbg_ctx = 0u;
     s->cp_goal[vv] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                       ? atp_goal_weight(s, l, r) : 0u;
     s->cp_pri2[vv] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
@@ -13042,6 +13201,7 @@ static inline void atp_cp_commit_priorities(AtpState *s, u32 w, u32 slot,
   // from the stored cp_depth or the depth term would be wrong.  A no-op for
   // the WM preset (mode 4 ignores the global).
   if (s->cp_depth != NULL) g_cp_formation_depth = s->cp_depth[slot];
+  g_twee_dbg_ctx = 3u;
   s->cp_pri[slot]  = s->cp_deprio[w] ? ATP_CP_PRI_NEVER
                                      : atp_cp_priority(s, l, r);
   s->cp_goal[slot] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
@@ -13049,6 +13209,7 @@ static inline void atp_cp_commit_priorities(AtpState *s, u32 w, u32 slot,
   s->cp_pri2[slot] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
                 : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, l, r, s->w2_mode)
                 :                        0u;
+  g_twee_dbg_ctx = 0u;
 }
 
 fn void thvm_atp_cp_reheapify(AtpState *s) {
@@ -24567,7 +24728,18 @@ static u8 atp_cp_push_fuse_ok(const AtpState *s) {
   if (mode != ATP_CP_WEIGHT_ADD && mode != ATP_CP_WEIGHT_MAX &&
       mode != ATP_CP_WEIGHT_GT  && mode != ATP_CP_WEIGHT_MIX &&
       mode != ATP_CP_WEIGHT_MIX2) {
-    return 0u;
+    // Twee-score mode rides the fused pipeline too: the treated class
+    // consumes ftp_pack_fused's stashed per-side scores and the raw
+    // >= 50 class keeps its classic Term build (the emit arms decline
+    // it -- see sw_form_push), scored via atp_cp_twee_fused_base.
+    // THVM_ATP_TWEE_FUSE=0 is the same-binary kill switch back to the
+    // classic (unfused) mode-8 pipeline.
+    static int twee_fuse = -1;
+    if (twee_fuse < 0) {
+      const char *e = getenv("THVM_ATP_TWEE_FUSE");
+      twee_fuse = (e != NULL && e[0] == '0') ? 0 : 1;
+    }
+    if (!(mode == ATP_CP_WEIGHT_TWEE && twee_fuse)) return 0u;
   }
   if (s->use_mix_heuristic) return 0u;
   if (s->goal_lhs != 0 && (s->use_sos || s->use_goal_interleave > 0u)) {
@@ -26168,6 +26340,12 @@ static u8 sw_form_push_ft_try(AtpState *s, Term lo, Term ro, Term sub_pre,
   }
   u8 ft_route = 0u, ft_treat = 0u;
   if (s->use_lazy_normalize && vtot >= (u32)ATP_WM_BEHANDELN_GATE) {
+    // Twee-score mode: the raw >= 50 class's classic Term image carries
+    // subst-shared subterms whose Term-identity discounts the score
+    // (atp_twee_term_score dedup) -- an FT emit has no cells to replay
+    // that against, so route the class to the classic Term build (its
+    // push still takes the fused pack + atp_cp_twee_fused_base).
+    if (s->cp_weight_mode == ATP_CP_WEIGHT_TWEE) return 0u;
     if (!vcp_ft_emit_fused(s->kbo, lo_ft, sub_ft, rin_ft, ro_ft, &fsubst)) {
       return 0u;
     }
@@ -26409,7 +26587,13 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
         gate_ok = 0u;   // anomaly: classic build + classic gate decide
       }
     }
-    if (gate_ok && s->use_lazy_normalize &&
+    // Twee-score mode routes the raw >= 50 class to the classic Term
+    // build (see the sw_form_push_ft_try emit decline): neither the
+    // emit nor the treat arm may take it.
+    u8 twee_raw = (s->cp_weight_mode == ATP_CP_WEIGHT_TWEE &&
+                   s->use_lazy_normalize &&
+                   vtot >= (u32)ATP_WM_BEHANDELN_GATE) ? 1u : 0u;
+    if (gate_ok && !twee_raw && s->use_lazy_normalize &&
         vtot >= (u32)ATP_WM_BEHANDELN_GATE) {
       if (vcp_emit_fused(s->kbo, lo, p, p_len, rin, ro, &subst)) {
         ft_route = 1u;
@@ -26420,7 +26604,7 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
       } else {
         g_vcp_emit_n_fb++;
       }
-    } else if (gate_ok) {
+    } else if (gate_ok && !twee_raw) {
 #ifdef THVM_ATPFT_NORM
       static int join_cache_env = -1;
       if (join_cache_env < 0) {
