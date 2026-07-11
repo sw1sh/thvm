@@ -587,7 +587,15 @@ static int pc_entails_eq(Term *parents, int np, Term concl) {
   if (w == NULL || pr_ == NULL) { free(w); free(pr_); return PC_UNKNOWN; }
   for (u32 i = 0; i < nl; i++) { w[i] = 1u; pr_[i] = i; }
   KboConfig cfg = { w, pr_, nl, 1u };
-  AtpState *s = thvm_atp_init(&cfg, 400u);
+  // Deep mode (THVM_PROOFCHECK_DEEP=1): 10x budgets for validation
+  // runs; the default stays wall-friendly.
+  static int pc_deep = -1;
+  if (pc_deep < 0) {
+    const char *e = getenv("THVM_PROOFCHECK_DEEP");
+    pc_deep = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  }
+  u32 sel_cap = pc_deep ? 4000u : 400u;
+  AtpState *s = thvm_atp_init(&cfg, sel_cap);
   int v = PC_UNKNOWN;
   if (s != NULL) {
     u8 ok = 1;
@@ -602,10 +610,12 @@ static int pc_entails_eq(Term *parents, int np, Term concl) {
       u64 h0 = thvm_atp_heap_checkpoint();
       clock_t c0 = clock();
       AtpStatus st = ATP_RUNNING;
-      for (u32 k = 0; k < 400u && st == ATP_RUNNING; k++) {
+      long cl_cap = (pc_deep ? 8 : 2) * CLOCKS_PER_SEC;
+      u64 hp_cap = pc_deep ? (64u << 20) : (32u << 20);
+      for (u32 k = 0; k < sel_cap && st == ATP_RUNNING; k++) {
         st = thvm_atp_step(s);
-        if ((thvm_atp_heap_checkpoint() - h0) > (32u << 20)) break;
-        if ((clock() - c0) > 2 * CLOCKS_PER_SEC) break;   // 2s per step check
+        if ((thvm_atp_heap_checkpoint() - h0) > hp_cap) break;
+        if ((clock() - c0) > cl_cap) break;
       }
       if (st == ATP_PROVED) v = PC_VALID;
     }
@@ -1051,7 +1061,19 @@ static int proof_check_worker(const char *file, int szs) {
         v = pc_check_step(i, &why);
       }
       thvm_heap_exhaust_jmp = _pc_saved;
-      if (gc_count() == _pc_gc) thvm_atp_heap_reset(_pc_hp);
+      if (gc_count() == _pc_gc) {
+        thvm_atp_heap_reset(_pc_hp);
+      } else {
+        // A collection moved the heap: every parsed formula Term in
+        // pc_steps now dangles (they are not GC roots of the per-step
+        // engine sessions).  Any verdict computed after this point could
+        // be garbage -- including a WRONG FailedVerified (observed on
+        // LAT171-1 deep mode: the \$false closure step read a relocated
+        // parent and 'refuted' it).  Abstain for the whole proof.
+        pc_any_unknown = 1;
+        pc_bad = -1;
+        break;
+      }
       {
         static int pcdbg = -1;
         if (pcdbg < 0) pcdbg = getenv("THVM_PROOFCHECK_DBG") != NULL ? 1 : 0;

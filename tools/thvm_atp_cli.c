@@ -2458,6 +2458,34 @@ static u8 cli_step_replays(AtpState *s, const AtpProofStep *st,
   }
   return 0;
 }
+// Trace-pair cache: decode each trace entry's equation at most once per
+// emission (the deep resolver's midpoint search was re-loading and
+// re-scanning per candidate -- the quadratic blowout that truncated
+// emission under the prove timeout).
+#define CLI_TP_CACHE_MAX 4096
+static struct { Term l, r; u8 ok, loaded; } g_cli_tp[CLI_TP_CACHE_MAX];
+static u32 g_cli_tp_n = 0;
+static void cli_tp_cache_reset(AtpState *s) {
+  g_cli_tp_n = (s->n_trace < CLI_TP_CACHE_MAX) ? s->n_trace : CLI_TP_CACHE_MAX;
+  // Eager load: the deep resolver's heap rollbacks must never reclaim a
+  // cached pair's Terms, so decode everything BEFORE any checkpoint.
+  for (u32 i = 0; i < g_cli_tp_n; i++) {
+    g_cli_tp[i].ok = cli_trace_pair(s, i, &g_cli_tp[i].l, &g_cli_tp[i].r);
+    g_cli_tp[i].loaded = 1;
+  }
+}
+static u8 cli_tp_cached(AtpState *s, u32 ti, Term *l, Term *r) {
+  if (ti >= g_cli_tp_n) return cli_trace_pair(s, ti, l, r);
+  if (!g_cli_tp[ti].loaded) {
+    g_cli_tp[ti].ok = cli_trace_pair(s, ti, &g_cli_tp[ti].l, &g_cli_tp[ti].r);
+    g_cli_tp[ti].loaded = 1;
+  }
+  if (!g_cli_tp[ti].ok) return 0;
+  *l = g_cli_tp[ti].l;
+  *r = g_cli_tp[ti].r;
+  return 1;
+}
+
 static u32 cli_resolve_step_trace(AtpState *s, const AtpProofStep *st) {
   if (st->before == 0 || st->after == 0) return ATP_TRACE_NONE;
   // Recorded slot first (correct for oriented-rule steps).
@@ -2487,7 +2515,7 @@ static u32 cli_resolve_step_trace(AtpState *s, const AtpProofStep *st) {
   if (!deep) return ATP_TRACE_NONE;
   for (u32 ti = 0; ti < s->n_trace; ti++) {
     Term l = 0, r = 0;
-    if (!cli_trace_pair(s, ti, &l, &r)) continue;
+    if (!cli_tp_cached(s, ti, &l, &r)) continue;
     if (cli_step_replays(s, st, l, r)) return ti;
   }
   return ATP_TRACE_NONE;
@@ -2502,6 +2530,7 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
   static u32 resolved[ATP_PROOF_MAX_STEPS];
   static u32 resolved2[ATP_PROOF_MAX_STEPS];   // 2nd id of a split step
   static Term midpoint[ATP_PROOF_MAX_STEPS];   // its intermediate term
+  cli_tp_cache_reset(s);
   for (u32 k = 0; k < n_steps; k++) {
     resolved[k]  = cli_resolve_step_trace(s, &steps[k]);
     resolved2[k] = ATP_TRACE_NONE;
@@ -2519,7 +2548,14 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
       const AtpProofStep *st = &steps[k];
       for (u32 ta = 0; ta < s->n_trace && midpoint[k] == 0; ta++) {
         Term la = 0, ra = 0;
-        if (!cli_trace_pair(s, ta, &la, &ra)) continue;
+        if (!cli_tp_cached(s, ta, &la, &ra)) continue;
+        // The candidate replays allocate heavily (fanout x trace Term
+        // builds); without rollback the emission child exhausts
+        // from-space and dies mid-write (the 4-record stub).  Nothing
+        // survives a failed candidate; a found midpoint skips the
+        // rollback so its Term stays live.
+        u64 _hp = thvm_atp_heap_checkpoint();
+        u64 _gc = gc_count();
         PcRwSet acc;
         acc.n = 0;
         pc_rewrite_all(st->before, la, ra, &acc);
@@ -2527,13 +2563,17 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
         for (int m = 0; m < acc.n && midpoint[k] == 0; m++) {
           AtpProofStep half = *st;
           half.before = acc.out[m];
-          u32 tb = cli_resolve_step_trace(s, &half);
-          if (tb != ATP_TRACE_NONE) {
-            resolved[k]  = ta;
-            resolved2[k] = tb;
-            midpoint[k]  = acc.out[m];
+          for (u32 tb = 0; tb < s->n_trace && midpoint[k] == 0; tb++) {
+            Term lb = 0, rb = 0;
+            if (!cli_tp_cached(s, tb, &lb, &rb)) continue;
+            if (cli_step_replays(s, &half, lb, rb)) {
+              resolved[k]  = ta;
+              resolved2[k] = tb;
+              midpoint[k]  = acc.out[m];
+            }
           }
         }
+        if (midpoint[k] == 0 && gc_count() == _gc) thvm_atp_heap_reset(_hp);
       }
     }
     if (resolved[k] != ATP_TRACE_NONE)
