@@ -433,6 +433,47 @@ static u8 pc_plain_eq(Term f, Term *l, Term *r) {
   return 0;
 }
 
+// One-step rewrites of `t` by l->r at every position (both the term
+// itself and its subterms); calls `emit` per reduct.  Bounded fanout.
+#define PC_RW_MAX 512
+typedef struct { Term out[PC_RW_MAX]; int n; } PcRwSet;
+static void pc_rw_add(PcRwSet *s, Term t) {
+  if (s->n < PC_RW_MAX) s->out[s->n++] = t;
+}
+static void pc_rewrite_all(Term t, Term l, Term r, PcRwSet *acc) {
+  RewriteSubst sub = {{0}};
+  if (thvm_match(l, t, &sub)) pc_rw_add(acc, thvm_subst_apply(r, &sub));
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    if (n > 8u) return;
+    Term kids[8];
+    for (u32 i = 0; i < n; i++) kids[i] = term_ctr_at(t, i);
+    for (u32 i = 0; i < n; i++) {
+      PcRwSet inner;
+      inner.n = 0;
+      pc_rewrite_all(kids[i], l, r, &inner);
+      for (int k = 0; k < inner.n; k++) {
+        Term save = kids[i];
+        kids[i] = inner.out[k];
+        pc_rw_add(acc, term_new_ctr(term_ext(t), kids, n));
+        kids[i] = save;
+      }
+    }
+  }
+}
+
+// Modulo-renaming pair equality: (a1,b1) == (a2,b2) up to one variable
+// bijection, tried in both side orders.
+static u8 pc_pair_alpha_eq(Term a1, Term b1, Term a2, Term b2) {
+  Term x1 = a1, y1 = b1, x2 = a2, y2 = b2;
+  thvm_normalize_vars(&x1, &y1);
+  thvm_normalize_vars(&x2, &y2);
+  if (kbo_eq(x1, x2) && kbo_eq(y1, y2)) return 1;
+  Term s2 = b2, t2 = a2;
+  thvm_normalize_vars(&s2, &t2);
+  return (kbo_eq(x1, s2) && kbo_eq(y1, t2)) ? 1u : 0u;
+}
+
 // Equational fast path: a unit-equality step (the equational engine's
 // own cp / orient / simp records) is settled by COMPLETION on the
 // parent equations with the conclusion as the goal -- orders of
@@ -443,11 +484,100 @@ static u8 pc_plain_eq(Term f, Term *l, Term *r) {
 // goal joins under a completion of the parents.  Anything else falls
 // through to the FO route.
 static int pc_entails_eq(Term *parents, int np, Term concl) {
-  Term gl, gr;
-  if (concl == 0 || !pc_plain_eq(concl, &gl, &gr)) return PC_UNKNOWN;
+  Term gl = 0, gr = 0;
   Term pl[PC_MAX_PARENTS], pr[PC_MAX_PARENTS];
-  for (int i = 0; i < np; i++) {
-    if (!pc_plain_eq(parents[i], &pl[i], &pr[i])) return PC_UNKNOWN;
+  int npl = 0;
+  if (concl == 0) {
+    // Refutation step ($false): admissible shape is equations plus
+    // EXACTLY ONE disequation ~(l = r); the step is valid iff l and r
+    // join under completion of the equations.  The one-parent
+    // trivial-inequality case (l identical to r) settles immediately.
+    int nneg = 0;
+    for (int i = 0; i < np; i++) {
+      Term f = parents[i];
+      if (term_tag(f) == TAG_CTR && term_ext(f) == PC_LAB_NOT &&
+          term_ctr_n(f) == 1 &&
+          pc_plain_eq(term_ctr_at(f, 0), &gl, &gr)) {
+        nneg++;
+        continue;
+      }
+      if (!pc_plain_eq(f, &pl[npl], &pr[npl])) return PC_UNKNOWN;
+      npl++;
+    }
+    if (nneg != 1) return PC_UNKNOWN;
+    if (kbo_eq(gl, gr)) return PC_VALID;      // x != x: contradiction
+  } else if (term_tag(concl) == TAG_CTR && term_ext(concl) == PC_LAB_NOT &&
+             term_ctr_n(concl) == 1) {
+    // Disequation conclusion (the goal-rewriting chain: from parent
+    // disequation a != b derive c != d under the equation parents).
+    // Contraposition: {eqs, a != b} |= c != d  iff  {eqs, c = d} |= a = b
+    // -- so add the CONCLUSION's pair as an equation and prove the
+    // parent disequation's pair as the goal.
+    Term cl, cr;
+    if (!pc_plain_eq(term_ctr_at(concl, 0), &cl, &cr)) return PC_UNKNOWN;
+    int nneg = 0;
+    for (int i = 0; i < np; i++) {
+      Term f = parents[i];
+      if (term_tag(f) == TAG_CTR && term_ext(f) == PC_LAB_NOT &&
+          term_ctr_n(f) == 1 &&
+          pc_plain_eq(term_ctr_at(f, 0), &gl, &gr)) {
+        nneg++;
+        continue;
+      }
+      if (!pc_plain_eq(f, &pl[npl], &pr[npl])) return PC_UNKNOWN;
+      npl++;
+    }
+    if (nneg != 1) return PC_UNKNOWN;
+    if (npl >= PC_MAX_PARENTS) return PC_UNKNOWN;
+    pl[npl] = cl;
+    pr[npl] = cr;
+    npl++;
+    if (kbo_eq(gl, gr)) return PC_VALID;
+  } else {
+    if (!pc_plain_eq(concl, &gl, &gr)) return PC_UNKNOWN;
+    for (int i = 0; i < np; i++) {
+      if (!pc_plain_eq(parents[i], &pl[i], &pr[i])) return PC_UNKNOWN;
+    }
+    npl = np;
+  }
+  // Syntactic settles first (cheap, exact):
+  //   * orient / symmetry / renaming: conclusion pair == some parent
+  //     pair modulo side order + variable bijection;
+  //   * single rewrite: conclusion pair reachable from a parent pair by
+  //     ONE application of ONE parent equation (either direction) at
+  //     any position of either side -- the rw goal-chain records.
+  for (int i = 0; i < npl; i++) {
+    if (pc_pair_alpha_eq(gl, gr, pl[i], pr[i])) return PC_VALID;
+  }
+  {
+    Term base_l = 0, base_r = 0;
+    u8 have_base = 0;
+    if (concl == 0 || (term_tag(concl) == TAG_CTR &&
+                       term_ext(concl) == PC_LAB_NOT)) {
+      // goal-chain shape: base pair = the parent disequation (gl, gr)
+      // was set from it above only for concl==0; for the diseq
+      // conclusion the roles are already (gl, gr) = parent diseq and
+      // the conclusion pair rode in as an equation parent -- the
+      // one-step check below still applies to every parent pair.
+    }
+    (void)base_l; (void)base_r; (void)have_base;
+    for (int i = 0; i < npl; i++) {          // pair being transformed
+      for (int j = 0; j < npl; j++) {        // equation applied
+        if (j == i) continue;
+        PcRwSet ls, rs;
+        ls.n = rs.n = 0;
+        pc_rewrite_all(pl[i], pl[j], pr[j], &ls);
+        pc_rewrite_all(pl[i], pr[j], pl[j], &ls);
+        pc_rewrite_all(pr[i], pl[j], pr[j], &rs);
+        pc_rewrite_all(pr[i], pr[j], pl[j], &rs);
+        for (int k = 0; k < ls.n; k++) {
+          if (pc_pair_alpha_eq(gl, gr, ls.out[k], pr[i])) return PC_VALID;
+        }
+        for (int k = 0; k < rs.n; k++) {
+          if (pc_pair_alpha_eq(gl, gr, pl[i], rs.out[k])) return PC_VALID;
+        }
+      }
+    }
   }
   // KBO over the checker's label space: weight 1 everywhere, precedence
   // by label id (an arbitrary total order is admissible).
@@ -461,7 +591,7 @@ static int pc_entails_eq(Term *parents, int np, Term concl) {
   int v = PC_UNKNOWN;
   if (s != NULL) {
     u8 ok = 1;
-    for (int i = 0; i < np && ok; i++) {
+    for (int i = 0; i < npl && ok; i++) {
       ok = thvm_atp_add_equation(s, pl[i], pr[i]);
     }
     if (ok && thvm_atp_set_goal(s, gl, gr)) {
@@ -493,9 +623,21 @@ static int pc_entails(Term *parents, int np, Term concl) {
   // step and never answers (the LAT171-1 whole-proof wall blowout).
   {
     Term l, r;
-    u8 alleq = (concl != 0) && pc_plain_eq(concl, &l, &r);
+    u8 alleq = 1;
+    if (concl != 0 && !pc_plain_eq(concl, &l, &r) &&
+        !(term_tag(concl) == TAG_CTR && term_ext(concl) == PC_LAB_NOT &&
+          term_ctr_n(concl) == 1 &&
+          pc_plain_eq(term_ctr_at(concl, 0), &l, &r))) {
+      alleq = 0;
+    }
     for (int i = 0; alleq && i < np; i++) {
-      alleq = pc_plain_eq(parents[i], &l, &r);
+      Term f = parents[i];
+      if (pc_plain_eq(f, &l, &r)) continue;
+      if (term_tag(f) == TAG_CTR && term_ext(f) == PC_LAB_NOT &&
+          term_ctr_n(f) == 1 && pc_plain_eq(term_ctr_at(f, 0), &l, &r)) {
+        continue;                    // disequation parent: still equational
+      }
+      alleq = 0;
     }
     if (alleq) return pc_entails_eq(parents, np, concl);
   }
