@@ -1002,7 +1002,7 @@ $(BIN)/test_atp_wolfram_bench: tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
 # path as the bench (includes its TU, so a CLI run with equal knobs is
 # byte-identical to a bench run).  bin/thvm-atp is a compatibility
 # alias for existing harnesses.
-$(BIN)/FindProof: tools/thvm_atp_cli.c tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
+$(BIN)/FindProof: tools/thvm_atp_cli.c tools/proof_check.c tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATP_AC -DATP_MNF \
 	  -o $@ $< $(TEST_LDFLAGS)

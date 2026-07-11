@@ -569,10 +569,17 @@ static int pc_parse_record(const char *rec) {
   static char args[8][8192];
   int na = pc_split_args(inner, args, 8);
   if (na < 3) return 0;
-  // strip the trailing ')' left on the last argument
+  // Strip the ONE record-closing ')' left on the last argument.  The
+  // old greedy loop ate every trailing paren, mangling any formula that
+  // ends in a nested application -- exactly the shape of FindProof's
+  // own axiom records (no file() source, so the formula IS the last
+  // argument): 'multiply(V,W,multiply(X,Y,Z))' lost both inner parens
+  // and the whole step silently failed to parse ('parent missing').
   char *last = args[na - 1];
   int ll = (int)strlen(last);
-  while (ll > 0 && (isspace((unsigned char)last[ll - 1]) || last[ll - 1] == ')')) last[--ll] = '\0';
+  while (ll > 0 && isspace((unsigned char)last[ll - 1])) last[--ll] = '\0';
+  if (ll > 0 && last[ll - 1] == ')') last[--ll] = '\0';
+  while (ll > 0 && isspace((unsigned char)last[ll - 1])) last[--ll] = '\0';
 
   if (pc_nstep >= PC_MAX_STEPS) return 0;
   PcStep *st = &pc_steps[pc_nstep];
@@ -582,7 +589,13 @@ static int pc_parse_record(const char *rec) {
 
   PcParse scope;
   Term f = pc_parse_formula(args[2], &scope);
-  if (f == 0) return 0;                   // unparseable formula -> skip
+  if (f == 0) {
+    if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
+      fprintf(stderr, "PCDBG parse-skip name=%s formula=[%.120s]\n",
+              args[0], args[2]);
+    }
+    return 0;                             // unparseable formula -> skip
+  }
   st->formula = f;
 
   if (na >= 4) pc_parse_source(args[3], st);
@@ -682,7 +695,15 @@ static int pc_check_step(int idx, const char **why) {
     case R_CONSEQUENCE:
     case R_DEDUCTION:
     case R_HORN:        return pc_check_entail(st, why);
-    default:            *why = "unsupported inference rule"; return PC_UNKNOWN;
+    default:
+      // Unknown inference names (the equational engine's own cp /
+      // orient / simp records, other provers' rule vocabularies): try
+      // the semantic route -- parents |= conclusion via the engine --
+      // instead of abstaining outright.  Every equationally-derived
+      // step is an entailment, so FindProof's own CNFRefutations now
+      // verify end-to-end; an unsettled entailment still returns
+      // PC_UNKNOWN (NotVerified abstain), never a false Verified.
+      return pc_check_entail(st, why);
   }
 }
 
@@ -752,6 +773,9 @@ static int proof_check_worker(const char *file, int szs) {
   pc_strip_comments(text);
 
   pc_bad = -1; pc_any_unknown = 0; pc_saw_false = 0; pc_bad_why = "";
+  if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
+    fprintf(stderr, "PCDBG loaded steps=%d\n", pc_nstep);
+  }
   const char *verdict;
 
   thvm_heap_exhausted = 0;
@@ -785,7 +809,41 @@ static int proof_check_worker(const char *file, int szs) {
     for (int i = 0; i < pc_nstep; i++) {
       if (pc_steps[i].rule == R_INPUT) continue;   // axioms / given clauses
       const char *why = "";
-      int v = pc_check_step(i, &why);
+      // Per-step arena discipline: pc_entails replays a whole engine
+      // refutation per step on the global heap; without reclamation a
+      // ~30-step equational proof exhausts from-space mid-check (LAT171-1)
+      // and the isolation child dies -> blanket NotVerified.  Nothing a
+      // step check allocates outlives it (verdicts are ints; pc_steps'
+      // formulas predate the loop), so pop the watermark -- unless a GC
+      // pass moved the heap under us, where the checkpoint is stale.
+      u64 _pc_hp = thvm_atp_heap_checkpoint();
+      u64 _pc_gc = gc_count();
+      // Per-step OOM containment: one hard entailment replay can exhaust
+      // from-space on its own (LAT171-1's lattice steps).  Catch the
+      // exhaustion HERE, roll the heap back, and abstain on that step
+      // only -- the rest of the proof still gets checked.
+      jmp_buf _pc_step_jb;
+      jmp_buf *_pc_saved = thvm_heap_exhaust_jmp;
+      int v;
+      thvm_heap_exhaust_jmp = &_pc_step_jb;
+      if (setjmp(_pc_step_jb) != 0) {
+        v = PC_UNKNOWN;
+        why = "step check exhausted the term heap";
+        thvm_heap_exhausted = 0;
+      } else {
+        v = pc_check_step(i, &why);
+      }
+      thvm_heap_exhaust_jmp = _pc_saved;
+      if (gc_count() == _pc_gc) thvm_atp_heap_reset(_pc_hp);
+      {
+        static int pcdbg = -1;
+        if (pcdbg < 0) pcdbg = getenv("THVM_PROOFCHECK_DBG") != NULL ? 1 : 0;
+        if (pcdbg) {
+          fprintf(stderr, "PCDBG step=%s rule=%d verdict=%s why=%s\n",
+                  pc_steps[i].name, pc_steps[i].rule,
+                  v == 0 ? "VALID" : v == 1 ? "INVALID" : "UNKNOWN", why);
+        }
+      }
       if (v == PC_VALID && pc_is_false(pc_steps[i].formula)) pc_saw_false = 1;
       if (v == PC_INVALID) { pc_bad = i; pc_bad_why = why; break; }
       if (v == PC_UNKNOWN) pc_any_unknown = 1;
@@ -820,6 +878,9 @@ static int proof_check_main(const char *file, int szs) {
   if (w != NULL) { long v = atol(w); if (v > 0 && v < 100000) wall = (unsigned)v; }
 
   fflush(stdout);
+  if (getenv("THVM_PROOFCHECK_INLINE") != NULL) {
+    return proof_check_worker(file, szs);              // debug: no isolation
+  }
   pid_t pid = fork();
   if (pid < 0) return proof_check_worker(file, szs);   // no fork: run inline
   if (pid == 0) _exit(proof_check_worker(file, szs));  // child prints on success
