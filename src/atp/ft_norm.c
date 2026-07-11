@@ -150,6 +150,11 @@ extern KboCmp thvm_kbo_ft_subst_with_prepared(u32 na,
                                               const AtpFtCell *tmpl,
                                               const void      *subst,
                                               const KboConfig *cfg);
+// Skolem-ground variant (encompassment demodulation gate; ft_order.c).
+extern KboCmp thvm_kbo_ft_skolem_with_prepared(u32 na,
+                                               const AtpFtCell *tmpl,
+                                               const void      *subst,
+                                               const KboConfig *cfg);
 
 // --- SUBST_FRESH entry-clear ----------------------------------------
 //
@@ -2520,6 +2525,18 @@ static int ft_cell_try_rules(AtpState   *s,
         if (ft_subst_ground_extras(s, rhs, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
+          // Encompassment demodulation (opt-in, Twee reducesSkolem):
+          // an instance the open-term KBO calls incomparable still
+          // fires when strictly decreasing under the skolem-ground
+          // order (see thvm.h use_encompass_demod).  Redundancy caveat:
+          // this port does not check proper encompassment of the redex
+          // over the equation, so CP-drop completeness follows Twee's
+          // practical discipline rather than the strict AHL condition.
+          if (ft_v != KBO_GT && s->use_encompass_demod &&
+              thvm_kbo_ft_skolem_with_prepared(redex_na, rhs, subst_buf,
+                                               s->kbo) == KBO_GT) {
+            ft_v = KBO_GT;
+          }
           static int dbg_diff = -1;
           if (dbg_diff < 0) dbg_diff = getenv("THVM_ATPFT_KBO_DIFF") != NULL ? 1 : 0;
           if (dbg_diff) {
@@ -2568,6 +2585,12 @@ static int ft_cell_try_rules(AtpState   *s,
         if (ft_subst_ground_extras(s, lhs, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
+          // Encompassment demodulation, backward face (see fwd branch).
+          if (ft_v != KBO_GT && s->use_encompass_demod &&
+              thvm_kbo_ft_skolem_with_prepared(redex_na, lhs, subst_buf,
+                                               s->kbo) == KBO_GT) {
+            ft_v = KBO_GT;
+          }
           if (ft_v == KBO_GT) {
             if (!s->use_mixmost_nf) {
               *rule_out = r;

@@ -5625,6 +5625,19 @@ typedef struct {
   // default OFF (diverges from WM's incremental interreduce), so the WM
   // preset (test_atp byte-parity) is untouched.
   u8   use_full_interreduce;
+  // Encompassment demodulation (Twee reducesSkolem, Rule.hs:425; plan
+  // docs/plans/unified_automatic_engine.md Phase 3): permit an
+  // UNORIENTABLE equation to rewrite when its instance is strictly
+  // decreasing under the SKOLEM-GROUND KBO (variables read as fresh
+  // constants: weight var_weight, precedence below every function
+  // symbol, ordered by id) even though the open-term instance
+  // comparison is incomparable.  Canonicalizes variable-permuted
+  // variants (commutativity et al), which is what keeps Twee's rule
+  // set lean on the AC-heavy CASC families.  Each step strictly
+  // decreases the subject's skolem image in a total well-founded
+  // reduction order, so every normalize terminates.  Opt-in, default
+  // OFF (byte-identical): env THVM_ATP_ENCOMPASS / --encompass-demod.
+  u8   use_encompass_demod;
   // Count of facts sterilized by the backward walk (bench stats line).
   u32  n_facts_bwd_ground_joinable;
   // Count of rules DELETED from R by the use_gj_delete_rule port.

@@ -7354,6 +7354,8 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   s->use_gj_delete_rule = (u8)atp_env_on("THVM_ATP_GJ_DELETE_RULE");
   // Twee full-R interreduction port (opt-in; diverges from WM).
   s->use_full_interreduce = (u8)atp_env_on("THVM_ATP_FULL_INTERREDUCE");
+  // Encompassment demodulation (Twee reducesSkolem; see thvm.h).
+  s->use_encompass_demod = (u8)atp_env_on("THVM_ATP_ENCOMPASS");
   // firstdiv-11 probe (THVM_ATP_KEEP_LHS_REDUCIBLE): keep an LHS-reducible
   // oriented rule live instead of dropping it at the always-on interreduce
   // site (_.c:13066), to test whether thvm dropping -auto rule 3 is what

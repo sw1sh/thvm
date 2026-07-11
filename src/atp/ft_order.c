@@ -267,6 +267,70 @@ fn KboCmp thvm_kbo_ft_subst_with_prepared(u32 na,
                              g_atpft_kbo_flat_b, nb, cfg);
 }
 
+// === Skolem-ground KBO (encompassment demodulation) =================
+//
+// Ground KBO over the skolemised pair: every variable reads as a fresh
+// CONSTANT (weight = cfg->var_weight, precedence below every function
+// symbol, ordered among themselves by id).  Twee's lessEqSkolem
+// (Constraints.hs:309) -- the comparison behind reducesSkolem.  On the
+// skolemised (ground) pair the order is TOTAL: weight sum, then head
+// (var < function symbol; vars by id; function symbols by precedence
+// with a label tie-break), then lexicographic children.  Closed under
+// contexts and well-founded (plain ground KBO with a refined total
+// precedence), so a rewrite pass gated on "instance strictly greater"
+// terminates even for steps the open-term KBO calls incomparable
+// (variable-permuted instances of commutativity et al).
+static KboCmp atpft_kbo_skolem_cmp(const KboFlatNode *a, u32 pa,
+                                   const KboFlatNode *b, u32 pb,
+                                   const KboConfig *cfg) {
+  u32 ea = pa + a[pa].sz, eb = pb + b[pb].sz;
+  long long wa = 0, wb = 0;
+  for (u32 i = pa; i < ea; i++) wa += a[i].w;
+  for (u32 i = pb; i < eb; i++) wb += b[i].w;
+  if (wa != wb) return (wa > wb) ? KBO_GT : KBO_LT;
+  i32 sa = a[pa].sym, sb = b[pb].sym;
+  u8 va = (sa < 0), vb = (sb < 0);
+  if (va != vb) return va ? KBO_LT : KBO_GT;   // skolem const < any fn sym
+  if (va) {
+    if (sa == sb) return KBO_EQ;               // same variable
+    return (sa < sb) ? KBO_GT : KBO_LT;        // by id (total, arbitrary)
+  }
+  u32 la = (u32)sa, lb = (u32)sb;
+  if (la != lb) {
+    u32 ps = (la < cfg->n_labels) ? cfg->precedence[la] : 0;
+    u32 pt = (lb < cfg->n_labels) ? cfg->precedence[lb] : 0;
+    if (ps != pt) return (ps > pt) ? KBO_GT : KBO_LT;
+    return (la > lb) ? KBO_GT : KBO_LT;        // label tie-break (total)
+  }
+  u32 ca = pa + 1u, cb = pb + 1u;
+  while (ca < ea && cb < eb) {
+    KboCmp c = atpft_kbo_skolem_cmp(a, ca, b, cb, cfg);
+    if (c != KBO_EQ) return c;
+    ca += a[ca].sz;
+    cb += b[cb].sz;
+  }
+  return KBO_EQ;
+}
+
+// Prepared-redex entry mirroring thvm_kbo_ft_subst_with_prepared: the
+// redex is already encoded in g_atpft_kbo_flat_a (from
+// thvm_kbo_ft_subst_prepare_redex); encode (tmpl, subst) into the b
+// buffer and run the skolem-ground compare.  KBO_UN only on encode
+// overflow (caller treats it as "no fire").
+fn KboCmp thvm_kbo_ft_skolem_with_prepared(u32 na,
+                                           const AtpFtCell *tmpl,
+                                           const void      *subst,
+                                           const KboConfig *cfg) {
+  if (na == 0u) return KBO_UN;
+  u32 nb = 0u;
+  if (!atpft_kbo_flat_encode_subst(tmpl, cfg, subst,
+                                   g_atpft_kbo_flat_b, &nb)) {
+    return KBO_UN;
+  }
+  return atpft_kbo_skolem_cmp(g_atpft_kbo_flat_a, 0u,
+                              g_atpft_kbo_flat_b, 0u, cfg);
+}
+
 // === LPO public entry ================================================
 //
 // Mirrors the dispatcher in thvm_lpo (src/lpo/_.c:680-748): encode
