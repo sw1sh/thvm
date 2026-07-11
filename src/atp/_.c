@@ -23106,6 +23106,81 @@ static u8 atp_gj_strictly_more_general(Term rule_lhs, Term anchor) {
 // variables are ordered.
 static u8 g_gj_orient_free = 0;
 
+// ── Per-rule GJ gate flags (pure-speed, verdict-identical) ──────────
+// Two rule-shape facts the per-step gates re-derive on every candidate:
+//   VARSOK:   vars(rhs) ⊆ vars(lhs) -- the well-formedness invariant.
+//     When it holds, vars(rhsσ) ⊆ vars(lhsσ) = vars(redex) for EVERY
+//     match σ, so the per-step gj_vars_subset(reduct, t) walk (it was
+//     ~8% of a LAT GJ profile) is provably true and skippable.
+//   SIZENEUT: the KBO weight form of lhs minus rhs is identically zero
+//     (c0 diff 0, every var coefficient 0 -- e.g. commutativity).
+//     Then gj_size_less_in returns 0 ("sizes forced equal") for every
+//     instance and model, so the gate can jump straight to
+//     gj_lex_less_in, skipping the two gj_form_addto full-term walks
+//     that dominate comm-heavy GJ profiles (LAT: 1053/5008 samples).
+// Cache keyed exactly like the GJ rule index (owner state, n_rules,
+// r_revision -- the established validity key for per-slot rule data).
+#define GJ_RF_COMPUTED   1u
+#define GJ_RF_VARSOK     2u
+#define GJ_RF_SIZENEUT   4u
+static u8        *g_gj_rflags       = NULL;
+static u32        g_gj_rflags_cap   = 0;
+static u32        g_gj_rflags_n     = 0;
+static u32        g_gj_rflags_rev   = 0;
+static const AtpState *g_gj_rflags_owner = NULL;
+
+// Does `t` contain a variable with id >= KBO_MAX_VAR (outside the
+// gj_form_addto coefficient table)?  Such rules are excluded from the
+// SIZENEUT shortcut (the form is not fully representable).
+static u8 gj_has_big_var(Term t) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) >= KBO_MAX_VAR ? 1u : 0u;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++)
+        if (gj_has_big_var(term_ctr_at(t, i))) return 1u;
+      return 0u;
+    }
+    default: return 0u;
+  }
+}
+
+static u8 gj_rule_flags(AtpState *s, u32 i) {
+  if (g_gj_rflags_owner != s || g_gj_rflags_n != s->n_rules ||
+      g_gj_rflags_rev != s->r_revision) {
+    if (s->n_rules > g_gj_rflags_cap) {
+      u32 cap = g_gj_rflags_cap ? g_gj_rflags_cap : 256u;
+      while (cap < s->n_rules) cap *= 2u;
+      u8 *nf = (u8 *)realloc(g_gj_rflags, cap);
+      if (nf == NULL) return 0u;      // OOM: no flags -> full gates run
+      g_gj_rflags = nf;
+      g_gj_rflags_cap = cap;
+    }
+    memset(g_gj_rflags, 0, s->n_rules);
+    g_gj_rflags_owner = s;
+    g_gj_rflags_n     = s->n_rules;
+    g_gj_rflags_rev   = s->r_revision;
+  }
+  u8 f = g_gj_rflags[i];
+  if (f & GJ_RF_COMPUTED) return f;
+  f = GJ_RF_COMPUTED;
+  Term l = s->lhs[i], r = s->rhs[i];
+  if (gj_vars_subset(r, l)) f |= GJ_RF_VARSOK;
+  if (!gj_has_big_var(l) && !gj_has_big_var(r)) {
+    long long c0 = 0;
+    long long var_coeff[KBO_MAX_VAR];
+    for (u32 k = 0; k < KBO_MAX_VAR; k++) var_coeff[k] = 0;
+    gj_form_addto(l, +1, s->kbo, &c0, var_coeff);
+    gj_form_addto(r, -1, s->kbo, &c0, var_coeff);
+    u8 neutral = (c0 == 0);
+    for (u32 k = 0; neutral && k < KBO_MAX_VAR; k++)
+      if (var_coeff[k] != 0) neutral = 0;
+    if (neutral) f |= GJ_RF_SIZENEUT;
+  }
+  g_gj_rflags[i] = f;
+  return f;
+}
+
 // Indexed twin of gj_rewrite_step's top-of-`t` rule scan.  Returns
 //   1 -> a rule fired (*out = reduct)
 //   0 -> NO rule fires at the top of t (index is authoritative)
@@ -23160,10 +23235,20 @@ static u8 gj_try_top_indexed(AtpState *s, const GjModel *m, Term t,
     RewriteSubst subst = {{0}};
     if (!thvm_match(s->lhs[i], t, &subst)) continue;   // index over-approx
     Term reduct = thvm_subst_apply(s->rhs[i], &subst);
-    if (!gj_vars_subset(reduct, t)) continue;
-    if (kbo_eq(reduct, t)) continue;
+    // Verdict-identical gate reordering (see gj_rule_flags):
+    //   * VARSOK proves gj_vars_subset for every match -- skip the walk.
+    //   * An ORIENTED rule has lσ > rσ strictly (KBO substitution
+    //     stability), so reduct != t is guaranteed -- the orient-free
+    //     fire can precede the kbo_eq no-op check.
+    //   * SIZENEUT proves gj_size_less_in == 0 (sizes forced equal) for
+    //     every instance/model -- jump straight to the lex walk.
+    u8 rf = gj_rule_flags(s, i);
+    if (!(rf & GJ_RF_VARSOK) && !gj_vars_subset(reduct, t)) continue;
     if (g_gj_orient_free && s->r_orient[i]) { *out = reduct; return 1u; }
-    int r = gj_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0);
+    if (kbo_eq(reduct, t)) continue;
+    int r = (rf & GJ_RF_SIZENEUT)
+        ? gj_lex_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0)
+        : gj_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0);
     if (r == GJ_STRICT || r == GJ_NONSTRICT) { *out = reduct; return 1u; }
   }
   return 0u;
@@ -23173,8 +23258,17 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
                             const u32 *cp_vars, u32 n_cp_vars, u8 *fired,
                             Term protect) {
   const KboConfig *cfg = s->kbo;
+  // Discrimination-tree top scan: byte-parity with the linear scan by
+  // construction (candidates gated in ascending rule order), measured
+  // trajectory-identical on GRP753-1/LAT138-1 tickers and 3.6-10x
+  // faster on push-GJ (2026-07-11).  Default ON; THVM_ATP_GJ_INDEX=0
+  // is the kill switch.  The default WM-parity path never runs GJ, so
+  // this only affects the opt-in GroundJoin/BackwardGroundJoin modes.
   static int gjidx = -1;
-  if (gjidx < 0) gjidx = atp_env_on("THVM_ATP_GJ_INDEX");
+  if (gjidx < 0) {
+    const char *e = getenv("THVM_ATP_GJ_INDEX");
+    gjidx = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
   u8 did_top = 0u;
   if (gjidx) {
     Term red = 0;
@@ -23207,15 +23301,20 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
       // would carry an unbound variable and corrupt the join comparison.
       // Skip such a step: every variable of `reduct` must also occur in
       // `t` (the term we are rewriting).  No-op for well-formed rules.
-      if (!gj_vars_subset(reduct, t)) continue;
-      if (kbo_eq(reduct, t)) continue;     // no-op image
+      // Gate order + flag shortcuts mirror gj_try_top_indexed exactly
+      // (verdict-identical; see gj_rule_flags).
+      u8 rf = gj_rule_flags(s, i);
+      if (!(rf & GJ_RF_VARSOK) && !gj_vars_subset(reduct, t)) continue;
       if (g_gj_orient_free && s->r_orient[i]) {
         *fired = 1;
         return reduct;
       }
+      if (kbo_eq(reduct, t)) continue;     // no-op image
       // fire iff t (=l-image) >=_C reduct (=r-image), i.e.
       // gj_less_in(reduct, t) is defined (reduct <= t under C).
-      int r = gj_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0);
+      int r = (rf & GJ_RF_SIZENEUT)
+          ? gj_lex_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0)
+          : gj_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0);
       if (r == GJ_STRICT || r == GJ_NONSTRICT) {
         *fired = 1;
         return reduct;
