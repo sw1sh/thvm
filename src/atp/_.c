@@ -8778,11 +8778,13 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
       return 1;
     }
     // Emit anomaly: fall through to the classic arm with REAL Terms --
-    // decode from the parked spans (the caller may have sent
-    // sentinels).
+    // decode from the parked spans.  The spans are the AUTHORITATIVE
+    // content (the drain's NF); the buffered Term may be a sentinel OR
+    // the stale pre-normalization pair, so decode whenever the span's
+    // content differs (ft_eq_term is read-only and rejects sentinels).
     g_acp_fuse.valid = 0u;
-    if (term_tag(lhs) == TAG_NUM) lhs = ft_to_term(enq_l);
-    if (term_tag(rhs) == TAG_NUM) rhs = ft_to_term(enq_r);
+    if (!ft_eq_term(enq_l, lhs)) lhs = ft_to_term(enq_l);
+    if (!ft_eq_term(enq_r, rhs)) rhs = ft_to_term(enq_r);
 #ifdef ATP_VAR_NORM
     thvm_normalize_vars(&lhs, &rhs);
 #endif
@@ -8794,8 +8796,17 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
     g_cp_push_kind = (u8)TRACE_CP;
     return 1;
   }
-  if (enq_l != NULL && term_tag(lhs) == TAG_NUM) lhs = ft_to_term(enq_l);
-  if (enq_r != NULL && term_tag(rhs) == TAG_NUM) rhs = ft_to_term(enq_r);
+  // Fused arm declined (route conditions, e.g. the eager kill switch
+  // atp_lazy_rules_on()==0): the parked spans are still the drain's
+  // AUTHORITATIVE NF content.  The buffered Terms may be the stale
+  // pre-normalization pair (real Terms on the eager path -- decoding
+  // only TAG_NUM sentinels here requeued the UN-normalized victim and
+  // drifted the eager trajectory from the lazy default: OA
+  // WolframAxioms firstdiv=635, 1680 vs 1671 rules), so decode
+  // whenever the span content differs -- byte-equal to the
+  // pre-span-native drain, which decoded changed sides itself.
+  if (enq_l != NULL && !ft_eq_term(enq_l, lhs)) lhs = ft_to_term(enq_l);
+  if (enq_r != NULL && !ft_eq_term(enq_r, rhs)) rhs = ft_to_term(enq_r);
 #endif
   u32 trace_idx = atp_trace_push(s, reason, parent_a,
                                  ATP_TRACE_NONE, lhs, rhs);
