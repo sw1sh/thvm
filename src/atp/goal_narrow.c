@@ -120,6 +120,10 @@ typedef struct AtpGoalNarrow {
   // Budgets.
   u32   max_nodes, max_inst, max_subjects, subj_size, inst_size,
         up_slack, iters, stride, inst_sweep;
+  u8    cone_only;  // 1: subjects gated on goal-reachability; 0: any
+                    // small node (vampire-style: superpose among ALL
+                    // derived ground-lane facts)
+  u64   t0_us;      // first-check clock, for the endgame burst
   u32   n_inst;     // e-match-created nodes so far
   // Stats.
   u64   st_eqs, st_merges, st_hits, st_sweeps;
@@ -144,6 +148,10 @@ static AtpGoalNarrow *gn_create(void) {
   g->iters        = gn_env_u32("THVM_ATP_GN_ITERS",     GN_DEF_ITERS);
   g->stride       = gn_env_u32("THVM_ATP_GN_STRIDE",    GN_DEF_STRIDE);
   g->inst_sweep   = gn_env_u32("THVM_ATP_GN_INST_SWEEP", GN_DEF_INST_SWEEP);
+  {
+    const char *e = getenv("THVM_ATP_GN_CONE");
+    g->cone_only = (e != NULL && e[0] == '0') ? 0u : 1u;
+  }
   g->sig_cap = 1u << 16;
   g->sig_tab = (u32 *)calloc(g->sig_cap, sizeof(u32));
   if (g->sig_tab == NULL) { free(g); return NULL; }
@@ -526,11 +534,12 @@ static void gn_ingest_rules(AtpState *s, AtpGoalNarrow *g) {
 // cascades (an instance created in pass k is a fresh subject in pass
 // k+1); the pass loop exits early once no node did work.
 static u8 gn_ematch_sweep(AtpState *s, AtpGoalNarrow *g,
-                          u32 goal_a, u32 goal_b) {
+                          u32 goal_a, u32 goal_b, u8 endgame) {
   g->st_sweeps++;
   u32 rules_hi = s->n_rules;
   u32 inst_cap_sweep = g->n_inst + g->inst_sweep;   // per-sweep quota
   if (inst_cap_sweep > g->max_inst) inst_cap_sweep = g->max_inst;
+  if (endgame) inst_cap_sweep = g->max_inst;        // burst: spend it all
   for (u32 pass = 0; pass < g->iters && !g->give_up; pass++) {
     u32 n_subj = 0u;
     u8  progress = 0u;
@@ -538,7 +547,7 @@ static u8 gn_ematch_sweep(AtpState *s, AtpGoalNarrow *g,
     for (u32 id = 0; id < nodes_at_pass && n_subj < g->max_subjects; id++) {
       if (g->size[id] > g->subj_size) continue;
       if (g->swept_hi[id] >= rules_hi) continue;
-      if (!g->cone[gn_find(g, id)]) continue;
+      if (g->cone_only && !g->cone[gn_find(g, id)]) continue;
       u32 ri_lo = g->swept_hi[id];
       n_subj++;
       progress = 1u;
@@ -552,7 +561,8 @@ static u8 gn_ematch_sweep(AtpState *s, AtpGoalNarrow *g,
         // consumed without its create-arm -- the next sweep resumes
         // exactly where this one stopped.  (Discovery-only mode is
         // reserved for the GLOBAL max_inst exhaustion.)
-        if (g->n_inst >= inst_cap_sweep && g->n_inst < g->max_inst) {
+        if (!endgame &&
+            g->n_inst >= inst_cap_sweep && g->n_inst < g->max_inst) {
           aborted = 1u;
           break;
         }
@@ -645,14 +655,28 @@ static u8 atp_goal_narrow_joined(AtpState *s, Term gl, Term gr) {
   u32 b = gn_add_term(g, gr, 1u);
   if (a == GN_NONE || b == GN_NONE) return 0u;   // non-ground goal
   gn_ingest_rules(s, g);
+  // Endgame burst: past 85% of the wall the interleave pacing has
+  // nothing left to protect -- lift the stride and the per-sweep
+  // quota so the remaining instance budget converts a near-miss CC
+  // before the deadline (the mission's post-saturation endgame).
+  u8 endgame = 0u;
+  {
+    u64 now = atp_now_us();
+    if (g->t0_us == 0ull && now != 0ull) g->t0_us = now;
+    if (s->wall_deadline_us != 0ull && g->t0_us != 0ull &&
+        now != 0ull && s->wall_deadline_us > g->t0_us) {
+      u64 span = s->wall_deadline_us - g->t0_us;
+      if (now >= g->t0_us + (span * 85ull) / 100ull) endgame = 1u;
+    }
+  }
   u8 joined = (u8)(gn_find(g, a) == gn_find(g, b));
   if (!joined && !g->give_up) {
     // Stride-gated e-match sweep (the expensive part).
-    if (!g->swept_once ||
+    if (!g->swept_once || endgame ||
         (u64)s->r_revision >= g->last_sweep_rev + g->stride) {
       g->swept_once = 1u;
       g->last_sweep_rev = (u64)s->r_revision;
-      joined = gn_ematch_sweep(s, g, a, b);
+      joined = gn_ematch_sweep(s, g, a, b, endgame);
     }
   }
   if (joined) g->joined = 1u;
