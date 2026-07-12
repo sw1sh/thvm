@@ -64,20 +64,20 @@
 #define GN_NONE 0xFFFFFFFFu
 
 // Budget defaults (each env-tunable; resolved once at creation).
-#define GN_DEF_MAX_NODES   524288u  // hash-consed DAG nodes (hard cap)
-#define GN_DEF_MAX_INST    98304u   // e-match-created nodes (soft cap:
+#define GN_DEF_MAX_NODES   262144u  // hash-consed DAG nodes (hard cap)
+#define GN_DEF_MAX_INST    32768u   // e-match-created nodes (soft cap:
                                     // beyond it sweeps stop growing the
                                     // graph and only DISCOVER equalities
                                     // between existing nodes)
-#define GN_DEF_SUBJECTS    4096u    // e-match subjects per pass
-#define GN_DEF_SUBJ_SIZE   20u      // max subject symbol count
-#define GN_DEF_INST_SIZE   24u      // absolute created-instance ceiling
-#define GN_DEF_UP_SLACK    6u       // expansion slack: an instance may
+#define GN_DEF_SUBJECTS    2048u    // e-match subjects per pass
+#define GN_DEF_SUBJ_SIZE   16u      // max subject symbol count
+#define GN_DEF_INST_SIZE   20u      // absolute created-instance ceiling
+#define GN_DEF_UP_SLACK    4u       // expansion slack: an instance may
                                     // outgrow its subject by this many
                                     // symbols (WM mnfup-style bound)
 #define GN_DEF_ITERS       4u       // e-match passes per sweep
-#define GN_DEF_STRIDE      16u      // rule revisions between sweeps
-#define GN_DEF_INST_SWEEP  2048u    // instance-node quota per sweep, so
+#define GN_DEF_STRIDE      32u      // rule revisions between sweeps
+#define GN_DEF_INST_SWEEP  1024u    // instance-node quota per sweep, so
                                     // the max_inst budget spreads across
                                     // the run instead of burning out on
                                     // the (uninformed) first seconds
@@ -378,6 +378,27 @@ static u32 gn_add_term(AtpGoalNarrow *g, Term t, u8 mark_cone) {
   return id;
 }
 
+// Symbol count of the INSTANCE rep*sub without building it: CTR nodes
+// count 1 + kids; a variable counts its binding's size.  Lets the size
+// gates run before thvm_subst_apply, so rejected instances allocate
+// nothing (the sweep's dominant allocation otherwise).
+static u32 gn_inst_size_of(Term rep, const RewriteSubst *sub) {
+  switch (term_tag(rep)) {
+    case TAG_FVR: {
+      Term b = sub->bindings[term_ext(rep)];
+      return (b == 0) ? 1u : atp_symbol_count(b);
+    }
+    case TAG_CTR: {
+      u32 n = term_ctr_n(rep);
+      u32 s = 1u;
+      for (u32 i = 0; i < n; i++)
+        s += gn_inst_size_of(term_ctr_at(rep, i), sub);
+      return s;
+    }
+    default: return 1u;
+  }
+}
+
 // Lookup-only twin of gn_add_term: the node id of ground term `t` if
 // t (hash-consed) is ALREADY in the DAG, else GN_NONE.  No mutation.
 static u32 gn_lookup_term(AtpGoalNarrow *g, Term t) {
@@ -550,13 +571,13 @@ static u8 gn_ematch_sweep(AtpState *s, AtpGoalNarrow *g,
           if (!atp_vars_contained(rep, pat)) continue;
           RewriteSubst sub = {{0}};
           if (!thvm_match(pat, g->term[id], &sub)) continue;
-          Term out = thvm_subst_apply(rep, &sub);
-          // Size discipline (the WM mnfup analog): an instance may
-          // outgrow its subject by up_slack symbols, under an absolute
-          // ceiling.  Shrinking steps are always in.
-          u32 osz = atp_symbol_count(out);
+          // Size discipline (the WM mnfup analog), BEFORE building the
+          // instance: it may outgrow its subject by up_slack symbols,
+          // under an absolute ceiling.  Shrinking steps are always in.
+          u32 osz = gn_inst_size_of(rep, &sub);
           if (osz > g->inst_size) continue;
           if (osz > (u32)g->size[id] + g->up_slack) continue;
+          Term out = thvm_subst_apply(rep, &sub);
           u32 nid;
           if (g->n_inst < g->max_inst) {
             u32 before = g->n_nodes;
