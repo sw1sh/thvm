@@ -3352,7 +3352,19 @@ static const SchedSlice SCHEDULE[] = {
   // the completion throughput at the same score function.  Flips
   // LAT149-1 (17.7s), GRP177-1 (14.9s), GRP753-1 (2.7s), GRP766-1
   // (11.9s) standalone at 30s, each a prior schedule-wide Timeout.
-  {"twee",   "--simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --cp-set-interreduce --cp-set-ir-budget=5", 0.0},
+  // --orphan-murder=0: Twee has NO Waisenmord -- passive CPs survive
+  // parent-rule collapse (Twee re-scores them; WM deletes them).  The
+  // GRP706-1 dissection showed the lane's missing content is exactly a
+  // buried CP class whose parents collapse before selection: the
+  // ld(X,X)-chain CP (twee lemma 100 generalization) forms at pick ~750
+  // (pri 839 vs a MixWeight frontier that never passes 265), then its
+  // mother (twee lemma 98's rule) is collapsed by the late lemma-96 rule
+  // -- under Waisenmord the class must re-derive from scratch each time.
+  // With the flag the slice matches Twee's passive-set semantics and
+  // GRP706-1 proves (102s dressed; 12.8s with the lean core
+  // --cp-weight=8 --w2-modulo=0 --orphan-murder=0 --simpler-join),
+  // a prior Timeout at every wall tried.
+  {"twee",   "--simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --orphan-murder=0 --cp-set-interreduce --cp-set-ir-budget=5", 0.0},
   // (5) PURE bare completion (bare engine defaults, GT weight, NO WM preset
   // heuristics, NO ground-join/connectedness).  The WM preset's selection +
   // MaxWeight actively DIVERGES on some CASC UEQ problems -- notably the
