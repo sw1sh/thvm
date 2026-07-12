@@ -697,6 +697,47 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       }
     }
   }
+  // Method "FlattenGoal" fresh-constant precedence BAND (port of
+  // pr_flatten_goal in tests/test_atp_wolfram_bench.c, the CLI's
+  // --flatten-goal / Twee --flatten-goal / Vampire naming transform).
+  // The WL problem builder (atpFlattenGoalTransform in ATP.wl) appended
+  // `fresh == subterm` definitional axioms naming the goal's compound
+  // subterms; args[65] lists the fresh constants' labels in inner-first
+  // collection order.  Open a strictly-minimal precedence band for
+  // them: shift every OTHER label's precedence up by nsub, then hand
+  // the fresh constants DISTINCT ranks 1..nsub (inner subterms lowest)
+  // so they stay below every original symbol yet remain mutually
+  // comparable (twee's funOccs key has no precedence ties -- equal
+  // fresh precedences would leave fresh<->fresh equations KBO-
+  // incomparable and drown the completion in unorientable pairs).  KBO
+  // weight stays the uniform 1, so each definition orients
+  // subterm -> fresh by weight alone.  A 0-length list leaves the
+  // chosen precedence untouched (engine byte-identical).  Applied
+  // after identity / auto_prec / explicit "Precedence" so the band
+  // shifts whichever ordering is in effect, mirroring the CLI's shift
+  // of the .pr header precedence.
+  {
+    MTensor fl_t = MArgument_getMTensor(args[65]);
+    if (fl_t != NULL) {
+      mint fl_len = libData->MTensor_getFlattenedLength(fl_t);
+      if (fl_len > 0) {
+        const mint *fl = libData->MTensor_getIntegerData(fl_t);
+        static u8 fl_is_fresh[ATP_WL_CFG_MAX_LABELS];
+        memset(fl_is_fresh, 0, (size_t)max_label + 1);
+        for (mint j = 0; j < fl_len; j++) {
+          if (fl[j] >= 0 && fl[j] <= max_label) fl_is_fresh[fl[j]] = 1u;
+        }
+        for (u32 l = 0; l <= (u32)max_label; l++) {
+          if (!fl_is_fresh[l]) wl_precedence_p[l] += (u32)fl_len;
+        }
+        for (mint j = 0; j < fl_len; j++) {
+          if (fl[j] >= 0 && fl[j] <= max_label) {
+            wl_precedence_p[fl[j]] = 1u + (u32)j;
+          }
+        }
+      }
+    }
+  }
   // Method "SymbolWeights": an explicit per-label KBO weight array
   // overrides the uniform-1 default initialized above.  Waldmeister
   // SymbolGewichte port (CLAS/SymbolGewichte.c::SG_SymbGewichteEintragen).
