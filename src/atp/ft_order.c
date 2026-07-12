@@ -82,6 +82,90 @@ static KboFlatNode g_atpft_kbo_flat_b[ATPFT_KBO_FLAT_CAP];
 // emitted byte-for-byte the same nodes).
 static u32 g_atpft_b_subst_ok = 0u;
 
+// --- Redex-slice reuse for the subst encode -------------------------
+//
+// Every binding a (non-AC) match produces is a SUBTERM OF THE REDEX by
+// pointer identity, and the redex's flat encode already sits in
+// g_atpft_kbo_flat_a (thvm_kbo_ft_subst_prepare_redex runs once per
+// cell, the gate queries many rules against it).  Because AtpFtCell's
+// next chain IS the preorder sequence, flat_a position i corresponds
+// exactly to the i-th cell of that chain -- so the bare re-encode of a
+// bound subterm inside atpft_kbo_flat_encode_subst (the dominant KBO
+// cost on the RNG021-6 twee lane: each occurrence re-walked the
+// pointer chain and rewrote 12 B per cell) is byte-for-byte the slice
+// g_atpft_kbo_flat_a[pos(b) .. pos(b)+sz).  Map the redex's cells to
+// their positions at prepare time and memcpy the slice per occurrence.
+// Misses (ground-extras' minimal constant, AC-chain scratch cells,
+// oversized redexes) fall back to the recursive encode -- identical
+// bytes either way.
+#define ATPFT_RDX_MAP_BITS 10u
+#define ATPFT_RDX_MAP_CAP  (1u << ATPFT_RDX_MAP_BITS)
+#define ATPFT_RDX_MAP_MAXN 512u
+typedef struct {
+  const AtpFtCell *cell;
+  u32 pos;
+  u32 gen;
+} AtpftRdxSlot;
+static AtpftRdxSlot g_rdx_map[ATPFT_RDX_MAP_CAP];
+static u32 g_rdx_gen = 0u;   // slot valid iff slot.gen == g_rdx_gen
+static u32 g_rdx_na  = 0u;   // 0 = map absent (flat_a not a mapped redex)
+
+static inline u32 atpft_rdx_hash(const AtpFtCell *c) {
+  return (u32)(((uintptr_t)c >> 3) * 2654435761u) &
+         (ATPFT_RDX_MAP_CAP - 1u);
+}
+
+static void atpft_rdx_map_fill(const AtpFtCell *redex, u32 na) {
+  if (na > ATPFT_RDX_MAP_MAXN) { g_rdx_na = 0u; return; }
+  if (++g_rdx_gen == 0u) {     // u32 wrap: stamp space restarts
+    memset(g_rdx_map, 0, sizeof(g_rdx_map));
+    g_rdx_gen = 1u;
+  }
+  const AtpFtCell *c = redex;
+  for (u32 i = 0; i < na; i++, c = c->next) {
+    u32 h = atpft_rdx_hash(c);
+    while (g_rdx_map[h].gen == g_rdx_gen)
+      h = (h + 1u) & (ATPFT_RDX_MAP_CAP - 1u);
+    g_rdx_map[h].cell = c;
+    g_rdx_map[h].pos  = i;
+    g_rdx_map[h].gen  = g_rdx_gen;
+  }
+  g_rdx_na = na;
+}
+
+// Position of `c` in the mapped redex encode, or 0xFFFFFFFF on miss.
+static inline u32 atpft_rdx_map_find(const AtpFtCell *c) {
+  u32 h = atpft_rdx_hash(c);
+  while (g_rdx_map[h].gen == g_rdx_gen) {
+    if (g_rdx_map[h].cell == c) return g_rdx_map[h].pos;
+    h = (h + 1u) & (ATPFT_RDX_MAP_CAP - 1u);
+  }
+  return 0xFFFFFFFFu;
+}
+
+// --- Prefix weights for the skolem-ground compare -------------------
+//
+// atpft_kbo_skolem_cmp's weight key loops over both spans at EVERY
+// recursion level, and the unorient gate's dominant clients are
+// permutative (weight-equal) instances that always recurse past the
+// root key.  Prefix sums over the two flat buffers make every level's
+// key two subtractions.  pw[i] = sum of node[0..i).w; span weight of
+// [p, e) = pw[e] - pw[p].  flat_a's prefix is filled lazily on the
+// first skolem query after a prepare (armed sessions only pay when
+// the gate actually runs); flat_b's is filled right after its encode.
+static long long g_pw_a[ATPFT_KBO_FLAT_CAP + 1u];
+static long long g_pw_b[ATPFT_KBO_FLAT_CAP + 1u];
+static u32 g_pw_a_valid = 0u;
+
+static void atpft_pw_fill(const KboFlatNode *v, u32 n, long long *pw) {
+  long long acc = 0;
+  pw[0] = 0;
+  for (u32 i = 0; i < n; i++) {
+    acc += v[i].w;
+    pw[i + 1u] = acc;
+  }
+}
+
 // === KBO encode ======================================================
 //
 // Walk the AtpFt subterm in pre-order, writing one KboFlatNode per
@@ -177,9 +261,31 @@ static u8 atpft_kbo_flat_encode_subst(const AtpFtCell *c,
     u32 vid = c->sym & ~WF_VAR_BIT;
     AtpFtCell *bound = ft_subst_lookup(subst, vid);
     if (bound != NULL) {
-      // Inline subst(vid): recurse into the bound subterm using the
-      // bare encoder (no further substitution -- bound subterms are
-      // already concrete, never contain rule-template vars).
+      // Inline subst(vid): the bound subterm is a redex subterm in the
+      // (dominant) mapped case -- its encode is the flat_a slice at its
+      // preorder position, memcpy'd instead of re-walked.  Miss or no
+      // map: recurse with the bare encoder (identical bytes; bound
+      // subterms are already concrete, never contain rule-template
+      // vars).  Fail verdict parity: the recursive encode fails iff the
+      // remaining capacity is under the subterm's node count, exactly
+      // the slice-fit test.
+      if (g_rdx_na != 0u) {
+        u32 q = atpft_rdx_map_find(bound);
+        if (q != 0xFFFFFFFFu) {
+          u32 sz = g_atpft_kbo_flat_a[q].sz;
+          u32 here = *pos;
+          if (here + sz > ATPFT_KBO_FLAT_CAP) return 0;
+          if (sz <= 8u) {          // tiny slice: dodge the memcpy call
+            for (u32 i = 0; i < sz; i++)
+              out[here + i] = g_atpft_kbo_flat_a[q + i];
+          } else {
+            memcpy(out + here, g_atpft_kbo_flat_a + q,
+                   (size_t)sz * sizeof(KboFlatNode));
+          }
+          *pos = here + sz;
+          return 1;
+        }
+      }
       return atpft_kbo_flat_encode(bound, cfg, out, pos);
     }
     // Unbound: emit the variable as itself.
@@ -217,6 +323,8 @@ static u8 atpft_kbo_flat_encode_subst(const AtpFtCell *c,
 fn KboCmp thvm_kbo_ft(const AtpFtCell *a, const AtpFtCell *b,
                       const KboConfig *cfg) {
   g_atpft_b_subst_ok = 0u;
+  g_rdx_na = 0u;         // flat_a overwritten: redex map + prefix die
+  g_pw_a_valid = 0u;
   u32 na = 0u, nb = 0u;
   if (!atpft_kbo_flat_encode(a, cfg, g_atpft_kbo_flat_a, &na) ||
       !atpft_kbo_flat_encode(b, cfg, g_atpft_kbo_flat_b, &nb)) {
@@ -235,6 +343,8 @@ fn KboCmp thvm_kbo_ft_subst(const AtpFtCell *redex,
                             const void      *subst,
                             const KboConfig *cfg) {
   g_atpft_b_subst_ok = 0u;
+  g_rdx_na = 0u;         // flat_a overwritten: redex map + prefix die
+  g_pw_a_valid = 0u;
   u32 na = 0u, nb = 0u;
   if (!atpft_kbo_flat_encode(redex, cfg, g_atpft_kbo_flat_a, &na) ||
       !atpft_kbo_flat_encode_subst(tmpl, cfg, subst,
@@ -257,7 +367,10 @@ fn KboCmp thvm_kbo_ft_subst(const AtpFtCell *redex,
 fn u32 thvm_kbo_ft_subst_prepare_redex(const AtpFtCell *redex,
                                        const KboConfig *cfg) {
   u32 na = 0u;
+  g_rdx_na = 0u;
+  g_pw_a_valid = 0u;
   if (!atpft_kbo_flat_encode(redex, cfg, g_atpft_kbo_flat_a, &na)) return 0u;
+  atpft_rdx_map_fill(redex, na);   // binding-slice reuse (see above)
   return na;
 }
 
@@ -294,6 +407,9 @@ fn KboCmp thvm_kbo_ft_subst_with_prepared(u32 na,
 static KboCmp atpft_kbo_skolem_cmp(const KboFlatNode *a, u32 pa,
                                    const KboFlatNode *b, u32 pb,
                                    const KboConfig *cfg);
+static KboCmp atpft_kbo_skolem_cmp_pw(const KboFlatNode *a, u32 pa,
+                                      const KboFlatNode *b, u32 pb,
+                                      const KboConfig *cfg);
 fn KboCmp thvm_kbo_ft_skolem_subst_with_prepared(u32 na,
                                                  const AtpFtCell *tmpl,
                                                  const void      *subst,
@@ -306,8 +422,18 @@ fn KboCmp thvm_kbo_ft_skolem_subst_with_prepared(u32 na,
     return KBO_UN;
   }
   g_atpft_b_subst_ok = nb;
-  return atpft_kbo_skolem_cmp(g_atpft_kbo_flat_a, 0u,
-                              g_atpft_kbo_flat_b, 0u, cfg);
+  // Prefix-weight compare: flat_a's prefix persists across the many
+  // gate queries against one prepared redex (lazy fill), flat_b's is
+  // one sequential pass over the encode just written -- the cost of
+  // the historical root-level weight loop, paid once, and every
+  // recursion level's weight key drops to two subtractions.
+  if (!g_pw_a_valid) {
+    atpft_pw_fill(g_atpft_kbo_flat_a, na, g_pw_a);
+    g_pw_a_valid = 1u;
+  }
+  atpft_pw_fill(g_atpft_kbo_flat_b, nb, g_pw_b);
+  return atpft_kbo_skolem_cmp_pw(g_atpft_kbo_flat_a, 0u,
+                                 g_atpft_kbo_flat_b, 0u, cfg);
 }
 
 // === Skolem-ground KBO (encompassment demodulation) =================
@@ -348,6 +474,43 @@ static KboCmp atpft_kbo_skolem_cmp(const KboFlatNode *a, u32 pa,
   u32 ca = pa + 1u, cb = pb + 1u;
   while (ca < ea && cb < eb) {
     KboCmp c = atpft_kbo_skolem_cmp(a, ca, b, cb, cfg);
+    if (c != KBO_EQ) return c;
+    ca += a[ca].sz;
+    cb += b[cb].sz;
+  }
+  return KBO_EQ;
+}
+
+// atpft_kbo_skolem_cmp with the weight key read from the g_pw_a/g_pw_b
+// prefix arrays (two subtractions per level instead of two span loops;
+// see their comment).  a/b MUST be g_atpft_kbo_flat_a/g_atpft_kbo_flat_b
+// with the prefixes filled -- the only caller is
+// thvm_kbo_ft_skolem_subst_with_prepared.  Verdict-identical: pw[e]-pw[p]
+// is exactly the span's .w sum, every other key is unchanged.
+static KboCmp atpft_kbo_skolem_cmp_pw(const KboFlatNode *a, u32 pa,
+                                      const KboFlatNode *b, u32 pb,
+                                      const KboConfig *cfg) {
+  u32 ea = pa + a[pa].sz, eb = pb + b[pb].sz;
+  long long wa = g_pw_a[ea] - g_pw_a[pa];
+  long long wb = g_pw_b[eb] - g_pw_b[pb];
+  if (wa != wb) return (wa > wb) ? KBO_GT : KBO_LT;
+  i32 sa = a[pa].sym, sb = b[pb].sym;
+  u8 va = (sa < 0), vb = (sb < 0);
+  if (va != vb) return va ? KBO_LT : KBO_GT;   // skolem const < any fn sym
+  if (va) {
+    if (sa == sb) return KBO_EQ;               // same variable
+    return (sa < sb) ? KBO_GT : KBO_LT;        // by id (total, arbitrary)
+  }
+  u32 la = (u32)sa, lb = (u32)sb;
+  if (la != lb) {
+    u32 ps = (la < cfg->n_labels) ? cfg->precedence[la] : 0;
+    u32 pt = (lb < cfg->n_labels) ? cfg->precedence[lb] : 0;
+    if (ps != pt) return (ps > pt) ? KBO_GT : KBO_LT;
+    return (la > lb) ? KBO_GT : KBO_LT;        // label tie-break (total)
+  }
+  u32 ca = pa + 1u, cb = pb + 1u;
+  while (ca < ea && cb < eb) {
+    KboCmp c = atpft_kbo_skolem_cmp_pw(a, ca, b, cb, cfg);
     if (c != KBO_EQ) return c;
     ca += a[ca].sz;
     cb += b[cb].sz;
