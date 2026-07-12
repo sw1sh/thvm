@@ -3359,11 +3359,33 @@ static void cli_proof_hook(AtpState *s) {
     g_cli_szs_printed = 1;
   }
   fprintf(out, "%% SZS output start CNFRefutation for %s\n", g_cli_problem);
-  u32 n_goals = (pr->n_goals > 0u) ? pr->n_goals : 1u;
+  // Source the goal terms from the ENGINE's GC-rooted slots, NOT the
+  // bench PrProblem's parse-time handles.  The PrProblem is not a GC
+  // root, so pr->goals_l[]/pr->goal_l dangle after any mid-search GC:
+  // they read back as garbage (typically a nullary cell) whose two
+  // sides then look trivially "joined" at zero steps, which is exactly
+  // why the extractor returned an empty chain and the hook printed
+  // "no single-NF chain extractable" for GC-triggering proofs.
+  // s->goals_lhs[]/s->goal_lhs relocate with the heap and are the only
+  // valid goal terms at emit time.  A single goal is already the live
+  // alias (goal_lhs == goals_lhs[0], MNF join state intact) so it is
+  // used directly -- re-setting it would rebuild the goals array and
+  // destroy the MNF front the extractor needs.  Multi-goal re-points
+  // the alias per conjunct with atp_goals_alias (no array rebuild).
+  u32 n_goals = (s->n_goals > 0u) ? s->n_goals
+              : ((pr->n_goals > 0u) ? pr->n_goals : 1u);
   for (u32 g = 0; g < n_goals; g++) {
-    Term gl = (pr->n_goals > 0u) ? pr->goals_l[g] : pr->goal_l;
-    Term gr = (pr->n_goals > 0u) ? pr->goals_r[g] : pr->goal_r;
-    if (thvm_atp_set_goal(s, gl, gr) == 0u) continue;
+    Term gl, gr;
+    if (s->n_goals > 1u) {
+      atp_goals_alias(s, g);
+      gl = s->goal_lhs; gr = s->goal_rhs;
+    } else if (s->n_goals == 1u) {
+      gl = s->goal_lhs; gr = s->goal_rhs;
+    } else {
+      gl = (pr->n_goals > 0u) ? pr->goals_l[g] : pr->goal_l;
+      gr = (pr->n_goals > 0u) ? pr->goals_r[g] : pr->goal_r;
+      if (thvm_atp_set_goal(s, gl, gr) == 0u) continue;
+    }
     u32 n = thvm_atp_proof_extract(s, steps, ATP_PROOF_MAX_STEPS);
     if (n == 0u) n = thvm_atp_mnf_proof_extract(s, steps, ATP_PROOF_MAX_STEPS);
     if (n == 0u && !(term_tag(gl) == term_tag(gr) && gl == gr)) {
@@ -3677,7 +3699,23 @@ int main(int argc, char **argv) {
     if (nlen == 3 && strncmp(name, "szs", 3) == 0) { szs = 1; continue; }
     if (nlen == 8 && strncmp(name, "schedule", 8) == 0) { want_schedule = 1; continue; }
     if (nlen == 5 && strncmp(name, "check", 5) == 0) { want_check = 1; continue; }
-    if (nlen == 5 && strncmp(name, "proof", 5) == 0) { g_cli_want_proof = 1; continue; }
+    if (nlen == 5 && strncmp(name, "proof", 5) == 0) {
+      g_cli_want_proof = 1;
+      // The proof extractor cites each goal-closing rule through its
+      // completion-trace lineage; the default 128K trace soft cap drops
+      // the derivations of rules formed late in a deep completion, so
+      // those citations resolve to nothing and the checker cannot bridge
+      // the step.  Raise the cap for --proof runs so every proof-critical
+      // lineage survives.  Trajectory-neutral: the CP formation stream is
+      // BYTE-IDENTICAL with the cap raised (INSERT_TRACE on LAT171-1, a
+      // WM/orphan-murder problem that hits the default cap) because CP
+      // selection reads the uid-stamp layer, not r_trace.  setenv with
+      // overwrite=0 keeps any explicit user THVM_ATP_TRACE_MAX.  Applies
+      // in the schedule too: run_schedule re-execs each child with
+      // --proof, so the child sets this before its engine init.
+      setenv("THVM_ATP_TRACE_MAX", "16777216", 0);
+      continue;
+    }
     if (nlen == 7 && strncmp(name, "keep-pr", 7) == 0) { keep_pr = 1; continue; }
     if (nlen == 12 && strncmp(name, "convert-only", 12) == 0) { keep_pr = 2; continue; }
     if (nlen == 6 && strncmp(name, "preset", 6) == 0) { preset = (val != NULL) ? val : "waldmeister"; continue; }
