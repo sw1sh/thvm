@@ -2376,6 +2376,19 @@ int main(int argc, char **argv) {
          "facts-gj-sterilized=%u simpler-join=%u\n",
          s->n_cps_ground_joinable, s->n_cps_dropped_connected_below_peak,
          s->n_facts_bwd_ground_joinable, s->n_cps_dropped_simpler_join);
+  if (g_atp_gjp_top_q > 0) {
+    printf("   gj-lane: top-q=%llu cand=%llu match=%llu "
+           "(noop=%llu gate=%llu pass=%llu) models=%llu norms=%llu steps=%llu\n",
+           (unsigned long long)g_atp_gjp_top_q,
+           (unsigned long long)g_atp_gjp_cand,
+           (unsigned long long)g_atp_gjp_match,
+           (unsigned long long)g_atp_gjp_noop,
+           (unsigned long long)g_atp_gjp_gate,
+           (unsigned long long)g_atp_gjp_gate_pass,
+           (unsigned long long)g_atp_gjp_models,
+           (unsigned long long)g_atp_gjp_norms,
+           (unsigned long long)g_atp_gjp_norm_steps);
+  }
   {
     u64 cp_capped = 0, depth_capped = 0;
     thvm_cp_caps_get(&cp_capped, &depth_capped);

@@ -450,6 +450,26 @@ u64 g_atp_pushn_dt_vedge          = 0;
 #define ATP_DT_FAN_N 16
 u64 g_atp_pushn_dt_fan_visit[ATP_DT_FAN_N] = {0};
 u64 g_atp_pushn_dt_fan_edge[ATP_DT_FAN_N]  = {0};
+// Ground-join lane shape counters (bench print block; unconditional --
+// each counted event does a thvm_match / full normalize, so a u64
+// increment is invisible next to it):
+//   top_q  = gj_try_top_indexed calls (one per considered position)
+//   cand   = index candidates enumerated across those calls
+//   match  = candidates whose thvm_match accepted (reduct materialized)
+//   noop   = matched candidates skipped as kbo_eq no-op images
+//   gate   = matched candidates that reached the gj_less_in/lex gate
+//   pass   = gate calls that returned STRICT/NONSTRICT (rule fired)
+//   models = per-model symbolic-join attempts (gj_joins_under calls)
+//   steps  = fired rewrite steps across all GJ normalizes
+u64 g_atp_gjp_top_q      = 0;
+u64 g_atp_gjp_cand       = 0;
+u64 g_atp_gjp_match      = 0;
+u64 g_atp_gjp_noop       = 0;
+u64 g_atp_gjp_gate       = 0;
+u64 g_atp_gjp_gate_pass  = 0;
+u64 g_atp_gjp_models     = 0;
+u64 g_atp_gjp_norm_steps = 0;
+u64 g_atp_gjp_norms      = 0;
 // Mixmost re-query provenance (same tier + scope): reduce_here calls
 // issued by the local-fixpoint whiles vs the post-reduction ascent
 // loop -- the rest of the queries are the preorder walk's first
@@ -23283,6 +23303,137 @@ static long long gj_minimum_in(const GjModel *m, const KboConfig *cfg,
   return total;
 }
 
+// ── Per-normalize gate session ──────────────────────────────────────
+// Every gj_less_in issued under ONE gj_normalize call shares the same
+// (model, cp_vars) pair, but gj_minimum_in re-derived three loop-
+// invariant structures per call (measured 47% of gj_less_in self time
+// on LAT138-1): the size-order sort of the model atoms, the group
+// decomposition (variable runs between constant pivots with their
+// lo/hi bounds), and the orphan classification of the CP's variables.
+// The session precomputes all three ONCE at gj_normalize entry;
+// gj_minimum_in_sess then reads only var_coeff.  Pure arithmetic
+// identity: the sort is the same stable insertion sort over the same
+// fixed keys, the group walk replays the same traversal, and the
+// orphan set is pointer-stable for the whole normalize -- so every
+// verdict is byte-identical to the unarmed path (which remains as the
+// fallback for any caller outside an armed normalize).
+typedef struct {
+  const GjModel *m;
+  const u32     *cp_vars;
+  u32            n_cp_vars;
+  u32  orphan_ids[ATP_GJ_MAX_VARS];   // cp_vars absent from the model
+  u32  n_orphans;
+  u32  n_grp;
+  struct {
+    long long lo;                     // group lower pivot (const size / w0)
+    long long hi;                     // upper pivot (valid when has_hi)
+    u8        has_hi;
+    u32       nv;                     // vars in the group, size order
+    u32       vids[ATP_GJ_MAX_ATOMS];
+  } grp[ATP_GJ_MAX_ATOMS + 1u];
+} GjSess;
+
+static GjSess g_gj_sess;
+static u8     g_gj_sess_live = 0;
+
+static void gj_sess_arm(const GjModel *m, const KboConfig *cfg,
+                        const u32 *cp_vars, u32 n_cp_vars) {
+  GjSess *ss = &g_gj_sess;
+  ss->m         = m;
+  ss->cp_vars   = cp_vars;
+  ss->n_cp_vars = n_cp_vars;
+  ss->n_orphans = 0u;
+  ss->n_grp     = 0u;
+  for (u32 v = 0; v < n_cp_vars; v++) {
+    GjAtom va = { .is_const = 0, .id = cp_vars[v] };
+    if (gj_model_find(m, va) < 0) ss->orphan_ids[ss->n_orphans++] = cp_vars[v];
+  }
+  // Stable insertion sort by major -- the exact per-call sort of
+  // gj_minimum_in, done once.
+  u32 order[ATP_GJ_MAX_ATOMS];
+  for (u32 v = 0; v < m->n; v++) order[v] = v;
+  for (u32 v = 1; v < m->n; v++) {
+    u32 key = order[v];
+    u32 km = m->major[key];
+    int j = (int)v - 1;
+    while (j >= 0 && m->major[order[j]] > km) { order[j + 1] = order[j]; j--; }
+    order[j + 1] = key;
+  }
+  // Replay gj_minimum_in's group walk, recording (lo, hi, vids) per
+  // variable group.
+  long long w0 = (long long)gj_min_size(cfg);
+  u32 i = 0;
+  long long cur_lo = w0;
+  while (i < m->n) {
+    u32 ai = order[i];
+    if (m->atom[ai].is_const) {
+      cur_lo = (long long)gj_const_size(cfg, m->atom[ai].id);
+      i++;
+      continue;
+    }
+    u32 g = ss->n_grp;
+    ss->grp[g].lo = cur_lo;
+    ss->grp[g].nv = 0u;
+    while (i < m->n && !m->atom[order[i]].is_const) {
+      ss->grp[g].vids[ss->grp[g].nv++] = m->atom[order[i]].id;
+      i++;
+    }
+    ss->grp[g].has_hi = 0u;
+    ss->grp[g].hi     = 0;
+    if (i < m->n && m->atom[order[i]].is_const) {
+      ss->grp[g].has_hi = 1u;
+      ss->grp[g].hi = (long long)gj_const_size(cfg, m->atom[order[i]].id);
+    }
+    ss->n_grp++;
+    cur_lo = ss->grp[g].has_hi ? ss->grp[g].hi : cur_lo;
+  }
+  g_gj_sess_live = 1u;
+}
+
+static void gj_sess_disarm(void) { g_gj_sess_live = 0u; }
+
+// gj_minimum_in over the armed session: identical arithmetic on the
+// precomputed orphan list + group structure.
+static long long gj_minimum_in_sess(const GjSess *ss, const KboConfig *cfg,
+                                    const long long *var_coeff,
+                                    long long c0, u8 *finite) {
+  *finite = 1;
+  long long total = c0;
+  long long w0 = (long long)gj_min_size(cfg);
+  for (u32 i = 0; i < ss->n_orphans; i++) {
+    u32 id = ss->orphan_ids[i];
+    long long k = (id < KBO_MAX_VAR) ? var_coeff[id] : 0;
+    if (k < 0) { *finite = 0; return 0; }
+    total += k * w0;
+  }
+  for (u32 g = 0; g < ss->n_grp; g++) {
+    u32 ng = ss->grp[g].nv;
+    if (ng == 0u) continue;
+    long long sum = 0;
+    long long min_suffix = 0;
+    u8 have_min = 0;
+    long long acc = 0;
+    // The suffix-sum minimum accumulates back-to-front, exactly as the
+    // unarmed path's suff[] pass.
+    for (int v = (int)ng - 1; v >= 0; v--) {
+      u32 vid = ss->grp[g].vids[v];
+      long long k = (vid < KBO_MAX_VAR) ? var_coeff[vid] : 0;
+      acc += k;
+      sum += k;
+      if (!have_min || acc < min_suffix) { min_suffix = acc; have_min = 1; }
+    }
+    if (min_suffix >= 0) {
+      total += sum * ss->grp[g].lo;
+    } else if (!ss->grp[g].has_hi) {
+      *finite = 0; return 0;
+    } else {
+      total += sum * ss->grp[g].lo +
+               (-min_suffix) * (ss->grp[g].lo - ss->grp[g].hi);
+    }
+  }
+  return total;
+}
+
 // sizeLessIn: decide size(t) vs size(u) under C.
 //   returns  -1 : size(t) <  size(u) for all sigma  (Strict on size)
 //             0 : size(t) == size(u) for all sigma  (fall through to lex)
@@ -23299,8 +23450,13 @@ static int gj_size_less_in(const GjModel *m, const KboConfig *cfg,
   gj_form_addto(u, +1, cfg, &c0, var_coeff);
   gj_form_addto(t, -1, cfg, &c0, var_coeff);
   u8 finite = 0;
-  long long L = gj_minimum_in(m, cfg, var_coeff, cp_vars, n_cp_vars, c0,
-                              &finite);
+  // The gate session serves every call whose (model, cp_vars) match the
+  // armed normalize -- including the whole lex recursion, which passes
+  // both pointers down unchanged.
+  long long L = (g_gj_sess_live && g_gj_sess.m == m &&
+                 g_gj_sess.cp_vars == cp_vars)
+      ? gj_minimum_in_sess(&g_gj_sess, cfg, var_coeff, c0, &finite)
+      : gj_minimum_in(m, cfg, var_coeff, cp_vars, n_cp_vars, c0, &finite);
   if (!finite) return 1;            // unbounded below -> Incomparable
   if (L > 0) return -1;             // size(t) < size(u) always
   if (L == 0) return 0;             // equal size for all sigma -> lex
@@ -23584,6 +23740,7 @@ static u8 gj_try_top_indexed(AtpState *s, const GjModel *m, Term t,
                              const u32 *cp_vars, u32 n_cp_vars,
                              Term protect, Term *out) {
   const KboConfig *cfg = s->kbo;
+  g_atp_gjp_top_q++;
   if (s->gj_rule_index == NULL) s->gj_rule_index = atp_ri_new();
   if (s->gj_rule_index->n_rules_built != s->n_rules
       || s->gj_rule_index->built_revision != s->r_revision) {
@@ -23615,6 +23772,7 @@ static u8 gj_try_top_indexed(AtpState *s, const GjModel *m, Term t,
     }
     g_atp_ri_cand[b] = v;
   }
+  g_atp_gjp_cand += ncand;
   for (u32 c = 0; c < ncand; c++) {
     u32 i = g_atp_ri_cand[c];
     if (term_tag(s->lhs[i]) == TAG_FVR) continue;
@@ -23623,6 +23781,7 @@ static u8 gj_try_top_indexed(AtpState *s, const GjModel *m, Term t,
       continue;
     RewriteSubst subst = {{0}};
     if (!thvm_match(s->lhs[i], t, &subst)) continue;   // index over-approx
+    g_atp_gjp_match++;
     Term reduct = thvm_subst_apply(s->rhs[i], &subst);
     // Verdict-identical gate reordering (see gj_rule_flags):
     //   * VARSOK proves gj_vars_subset for every match -- skip the walk.
@@ -23634,11 +23793,16 @@ static u8 gj_try_top_indexed(AtpState *s, const GjModel *m, Term t,
     u8 rf = gj_rule_flags(s, i);
     if (!(rf & GJ_RF_VARSOK) && !gj_vars_subset(reduct, t)) continue;
     if (g_gj_orient_free && s->r_orient[i]) { *out = reduct; return 1u; }
-    if (kbo_eq(reduct, t)) continue;
+    if (kbo_eq(reduct, t)) { g_atp_gjp_noop++; continue; }
+    g_atp_gjp_gate++;
     int r = (rf & GJ_RF_SIZENEUT)
         ? gj_lex_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0)
         : gj_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0);
-    if (r == GJ_STRICT || r == GJ_NONSTRICT) { *out = reduct; return 1u; }
+    if (r == GJ_STRICT || r == GJ_NONSTRICT) {
+      g_atp_gjp_gate_pass++;
+      *out = reduct;
+      return 1u;
+    }
   }
   return 0u;
 }
@@ -23739,12 +23903,16 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
 static Term gj_normalize(AtpState *s, const GjModel *m, Term t,
                          const u32 *cp_vars, u32 n_cp_vars, u32 step_cap,
                          Term protect) {
+  g_atp_gjp_norms++;
+  gj_sess_arm(m, s->kbo, cp_vars, n_cp_vars);
   for (u32 k = 0; k < step_cap; k++) {
     u8 fired = 0;
     Term t2 = gj_rewrite_step(s, m, t, cp_vars, n_cp_vars, &fired, protect);
-    if (!fired) return t;
+    if (!fired) { gj_sess_disarm(); return t; }
+    g_atp_gjp_norm_steps++;
     t = t2;
   }
+  gj_sess_disarm();
   return t;
 }
 
@@ -23809,6 +23977,7 @@ static Term gj_prenorm(AtpState *s, Term t) {
 // face and side 1 the victim-RHS face.
 static u8 gj_joins_under(AtpState *s, const GjModel *m, Term lhs, Term rhs,
                          const u32 *cp_vars, u32 n_cp_vars) {
+  g_atp_gjp_models++;
   Term nl = gj_normalize(s, m, lhs, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP,
                          s->gj_protect_l);
   Term nr = gj_normalize(s, m, rhs, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP,
