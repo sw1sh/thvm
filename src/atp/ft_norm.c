@@ -1032,6 +1032,9 @@ static u32 ftpi_candidates(AtpState *s, const AtpFtCell *p) {
 // Sentinel for "no such child edge".
 #define FTDT_NO_NODE 0xFFFFFFFFu
 
+// Inline edge-mirror width (FtDtNode.labels8/kids8/kmask8).
+#define FTDT_INLINE_EDGES 8u
+
 // One trie node.  Children are an unsorted small array of (label, child)
 // edges -- arity here is tiny (<=2 for the indexed operators) and the
 // branching factor is the live signature size, so a linear edge scan is
@@ -1073,16 +1076,17 @@ typedef struct FtDtNode_s {
   u32  n_var_edge; // var/star edges at the front of labels/kids
   u32  leaf_n, leaf_un_n;
   u8   sub_mask;   // classes present in this subtree (1=orient, 2=unorient)
-  // Inline edge mirror (98% of branch visits hit fanout <= 4): when
-  // n_inline != 0 the first n_edge entries of labels4/kids4/kmask4
-  // duplicate the heap arrays, so the query walk never leaves the
-  // node's cache lines.  Refreshed at BOTH mutation sites
-  // (ftdt_edge_get insert, ftdt_edge_mask_or); heap arrays stay the
-  // source of truth.
+  // Inline edge mirror (FTDT_INLINE_EDGES-wide; RNG/LAT rule sets put
+  // ~62% of branch visits at fanout 5-7, so the window covers
+  // essentially every visit): when n_inline != 0 the first n_edge
+  // entries of labels8/kids8/kmask8 duplicate the heap arrays, so the
+  // query walk never leaves the node's cache lines.  Refreshed at BOTH
+  // mutation sites (ftdt_edge_get insert, ftdt_edge_mask_or); heap
+  // arrays stay the source of truth.
   u8   n_inline;
-  u8   kmask4[4];
-  u32  labels4[4];
-  u32  kids4[4];
+  u8   kmask8[FTDT_INLINE_EDGES];
+  u32  labels8[FTDT_INLINE_EDGES];
+  u32  kids8[FTDT_INLINE_EDGES];
   u32  cap_edge, leaf_cap, leaf_un_cap;
   u32 *labels;     // edge labels (concrete sym, FTDT_VAR0+k, or FTDT_STAR)
   u32 *kids;       // child node indices, parallel to labels
@@ -1175,16 +1179,16 @@ static u32 ftdt_edge_find(const FtPiIndex *ix, u32 node, u32 label) {
 // labelled `label` (insert path only -- cold; the query loop reads the
 // mirror instead of the child's node struct).
 // Refresh a node's inline edge mirror from the heap arrays (or clear
-// it past the fanout-4 window).  Insert-path only -- cold.
+// it past the FTDT_INLINE_EDGES window).  Insert-path only -- cold.
 static void ftdt_node_pack(FtDtNode *nd) {
-  if (nd->n_edge > 4u) {
+  if (nd->n_edge > FTDT_INLINE_EDGES) {
     nd->n_inline = 0u;
     return;
   }
   for (u32 e = 0; e < nd->n_edge; e++) {
-    nd->labels4[e] = nd->labels[e];
-    nd->kids4[e]   = nd->kids[e];
-    nd->kmask4[e]  = nd->kid_mask[e];
+    nd->labels8[e] = nd->labels[e];
+    nd->kids8[e]   = nd->kids[e];
+    nd->kmask8[e]  = nd->kid_mask[e];
   }
   nd->n_inline = 1u;
 }
@@ -1771,7 +1775,7 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
       if (label0 < FTDT_VAR0) {
         // Single concrete edge: lockstep hop (as descend2's chain).
         if ((sc->sym & WF_VAR_BIT) != 0u || label0 != sc->sym) goto out;
-        if (((nd->n_inline ? nd->kmask4[0] : nd->kid_mask[0]) & want) == 0u) {
+        if (((nd->n_inline ? nd->kmask8[0] : nd->kid_mask[0]) & want) == 0u) {
           if (g_ftdt_pd) g_atp_pushn_dt_prune++;
           goto out;
         }
@@ -1789,7 +1793,7 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
         // same edges survive, same candidates in the same order.
         u32 k = label0 - FTDT_VAR0;
         const AtpFtCell *bk = bind[k];
-        if (((nd->n_inline ? nd->kmask4[0] : nd->kid_mask[0]) & want) == 0u) {
+        if (((nd->n_inline ? nd->kmask8[0] : nd->kid_mask[0]) & want) == 0u) {
           if (g_ftdt_pd) g_atp_pushn_dt_prune++;
           goto out;
         }
@@ -1831,9 +1835,9 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
     {
       const AtpFtCell *skip = (sc->end != NULL) ? sc->end->next : d->sc_end;
       u32 nv = nd->n_var_edge;
-      const u32 *lbl = nd->n_inline ? nd->labels4 : nd->labels;
-      const u32 *kds = nd->n_inline ? nd->kids4   : nd->kids;
-      const u8  *kmk = nd->n_inline ? nd->kmask4  : nd->kid_mask;
+      const u32 *lbl = nd->n_inline ? nd->labels8 : nd->labels;
+      const u32 *kds = nd->n_inline ? nd->kids8   : nd->kids;
+      const u8  *kmk = nd->n_inline ? nd->kmask8  : nd->kid_mask;
       if (g_ftdt_pd) {
         g_atp_pushn_dt_edge += nd->n_edge;
         g_atp_pushn_dt_branch++;
