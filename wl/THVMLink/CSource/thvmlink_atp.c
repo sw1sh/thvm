@@ -1297,6 +1297,74 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   thvm_atp_set_random_seed(atp, (u64)random_seed_in);
   thvm_atp_set_random_modulo(atp, random_ratio_in > 0 ? (u32)random_ratio_in : 0u);
 
+  // === CLI-parity engine knobs (the FindProof KNOBS[] rows that were
+  // env-only): each is TRI-STATE -- -1 = Automatic (leave
+  // thvm_atp_init's default, which already honors the matching
+  // THVM_ATP_* env), 0 = force off, positive = force on -- so an unset
+  // Method suboption keeps the engine byte-identical AND env-driven
+  // CLI parity runs keep working through the WL bridge. ===
+
+  // Method -> {... "SimplerJoin" -> True | 2}: Twee's simplerThan-gated
+  // CP join discipline (Join.hs allSteps; CLI --simpler-join / env
+  // THVM_ATP_SIMPLER_JOIN).  1 = generation-time treatment AND
+  // selection; 2 = selection-only (Twee's own placement -- consider
+  // runs at dequeue), skipping the per-generated-CP push tax.
+  // args[58].
+  mint simpler_join_in = MArgument_getInteger(args[58]);
+  if (simpler_join_in >= 0) {
+    atp->use_simpler_join =
+        (simpler_join_in == 2) ? 2u : (u8)(simpler_join_in != 0);
+  }
+  // Method -> {... "EncompassDemod" -> True}: Twee reducesSkolem
+  // encompassment demodulation -- an unorientable skolem-ground
+  // equation may rewrite left-to-right at positions where the redex
+  // STRICTLY ENCOMPASSES the LHS (CLI --encompass-demod / env
+  // THVM_ATP_ENCOMPASS; see thvm.h use_encompass_demod).  args[59].
+  mint encompass_in = MArgument_getInteger(args[59]);
+  if (encompass_in >= 0) atp->use_encompass_demod = (u8)(encompass_in != 0);
+  // Method -> {... "GoalNarrow" -> True}: ground-congruence-closure +
+  // goal-cone e-matching endgame (src/atp/goal_narrow.c; CLI
+  // --goal-narrow / env THVM_ATP_GOAL_NARROW).  The gn-* tuning caps
+  // (stride / iters / node caps) stay env-only -- their defaults are
+  // the tuned CLI values.  args[60].
+  mint goal_narrow_in = MArgument_getInteger(args[60]);
+  if (goal_narrow_in >= 0)
+    thvm_atp_set_use_goal_narrow(atp, (u8)(goal_narrow_in != 0));
+  // Method -> {... "CPSetIRBudget" -> percent}: Twee's renormalise task
+  // discipline for the CP-set interreduction sweep (freq 10s +
+  // budget% + 20%-dead sample trigger, Twee.hs:978 / Task.hs; Twee's
+  // default share is 5).  Non-zero swaps the rule-count period gate;
+  // pair with "CPSetInterreduce" -> True (the sweep master).  CLI
+  // --cp-set-ir-budget / env THVM_ATP_CP_SET_IR_BUDGET.  args[61];
+  // <= 0 leaves the period discipline.
+  mint cp_set_ir_budget_in = MArgument_getInteger(args[61]);
+  if (cp_set_ir_budget_in > 0) atp->cp_set_ir_budget = (u32)cp_set_ir_budget_in;
+  // Method -> {... "PopRulesOnly" -> True}: Twee pop-join base
+  // discipline -- the pop-time BASE normalize is oriented-rules-only
+  // (no ungated doE), so proof-critical unorientable lemmas are not
+  // joined away; the unorientable tree participates only through the
+  // gated simpler-join pass.  Compose with "SimplerJoin" for the full
+  // Twee verdict.  CLI --pop-rules-only / env THVM_ATP_POP_RULES_ONLY.
+  // args[62].
+  mint pop_rules_only_in = MArgument_getInteger(args[62]);
+  if (pop_rules_only_in >= 0)
+    atp->use_pop_rules_only = (u8)(pop_rules_only_in != 0);
+  // Method -> {... "GjDeleteRule" -> True}: Twee interreduce1
+  // rule-delete port (a ground-joinable rule is DELETED rather than
+  // sterilized; diverges from WM).  CLI --gj-delete-rule / env
+  // THVM_ATP_GJ_DELETE_RULE.  The gj-budget / gj-index caps stay
+  // env-only.  args[63].
+  mint gj_delete_rule_in = MArgument_getInteger(args[63]);
+  if (gj_delete_rule_in >= 0)
+    atp->use_gj_delete_rule = (u8)(gj_delete_rule_in != 0);
+  // Method -> {... "FullInterreduce" -> True}: Twee full-R
+  // interreduction port (every rule re-reduced against the whole
+  // system after each addition; diverges from WM's incremental
+  // discipline).  CLI --full-interreduce / env
+  // THVM_ATP_FULL_INTERREDUCE.  args[64].
+  mint full_ir_in = MArgument_getInteger(args[64]);
+  if (full_ir_in >= 0) atp->use_full_interreduce = (u8)(full_ir_in != 0);
+
   g_atp_abort_libData = libData;
   thvm_atp_abort_hook = atp_abort_cb;
   /* Iter 133 (workflow plan step 1): bypass the parent-process QoS

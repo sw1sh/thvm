@@ -589,16 +589,26 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     useCriticalGoalInterreduce_, useCriticalGoalWeight_,
     useBackwardGoalArgue_, useCpWmSide_, useWmFlatSubsume_,
     useWmCommSubsume_, useWmFormationFifo_,
-    useWmEsetDistdir_, useTracePack_, useForceCombinatorOrient_] := Block[{
+    useWmEsetDistdir_, useTracePack_, useForceCombinatorOrient_,
+    useSimplerJoin_, useEncompassDemod_, useGoalNarrow_,
+    cpSetIrBudget_, usePopRulesOnly_, useGjDeleteRule_,
+    useFullInterreduce_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr,
+    flattenLabels,
     (* restore the caller's held originals during this build's decoding *)
     $atpSymObj = Lookup[enc["State"], "symObj", <||>],
     $atpVarObj = Lookup[enc["State"], "varObj", <||>]
 },
     precArray = atpPrecedenceArray[precedenceSpec, enc];
     symbolWeightsArr = atpSymbolWeightsArray[symbolWeightsSpec, enc];
+    (* "FlattenGoal" fresh-constant labels (inner-first) for the C
+       bridge's minimal precedence band (args[65]); the problem
+       transform (atpFlattenGoalTransform) stamps them on the enc.
+       Empty = inert. *)
+    flattenLabels = Replace[Lookup[enc, "FlattenFreshLabels", {}],
+        Except[{___Integer}] -> {}];
     {$atpSplitT, raw} = AbsoluteTiming @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
@@ -613,7 +623,10 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         useSueManagement, useCriticalGoalInterreduce,
         useCriticalGoalWeight, useBackwardGoalArgue, useCpWmSide,
         useWmFlatSubsume, useWmCommSubsume, useWmFormationFifo,
-        useWmEsetDistdir, useTracePack, useForceCombinatorOrient];
+        useWmEsetDistdir, useTracePack, useForceCombinatorOrient,
+        useSimplerJoin, useEncompassDemod, useGoalNarrow,
+        cpSetIrBudget, usePopRulesOnly, useGjDeleteRule,
+        useFullInterreduce, flattenLabels];
     If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
         Print["[split] C solve + trace-gen = ", $atpSplitT,
               " s  (WL reconstruction = total wall - this)"]];

@@ -399,7 +399,39 @@ $atpRunProofFn := $atpRunProofFn = load[
         axioms + Y fixpoints, so non-combinator theorems are byte-identical.
         -1 = off (default), 0 = off, 1 = on.  ON in the "Waldmeister"*
         presets) *)
-          Integer},
+          Integer,
+     (* args[58..64] = CLI-parity engine knobs (the FindProof KNOBS[]
+        rows that were env-only).  Each is TRI-STATE: -1 = Automatic
+        (leave thvm_atp_init's default, which already honors the
+        matching THVM_ATP_* env), 0 = force off, positive = force on.
+        args[58] = Twee simplerThan-gated CP join (Method "SimplerJoin";
+        1 = generation + selection, 2 = selection-only) *)
+     Integer,
+     (* args[59] = Twee reducesSkolem encompassment demodulation
+        (Method "EncompassDemod") *)
+     Integer,
+     (* args[60] = ground-CC + goal-cone e-match endgame (Method
+        "GoalNarrow"; src/atp/goal_narrow.c) *)
+     Integer,
+     (* args[61] = Twee renormalise task budget %, swaps the CP-set IR
+        sweep's rule-count period for the time-budget discipline
+        (Method "CPSetIRBudget"; pair with "CPSetInterreduce" -> True) *)
+     Integer,
+     (* args[62] = Twee pop-join base discipline: pop-time normalize is
+        oriented-rules-only, no ungated doE (Method "PopRulesOnly") *)
+     Integer,
+     (* args[63] = Twee interreduce1 rule-delete port (Method
+        "GjDeleteRule") *)
+     Integer,
+     (* args[64] = Twee full-R interreduction port (Method
+        "FullInterreduce") *)
+     Integer,
+     (* args[65] = "FlattenGoal" fresh-constant labels (inner-first
+        collection order) for the minimal precedence band -- the WL
+        problem transform (atpFlattenGoalTransform) appends the
+        definitional axioms and cEngineProof resolves the fresh names
+        to labels here; empty = inert *)
+     {Integer, 1}},
     "NumericArray"
 ]
 
@@ -2726,6 +2758,71 @@ atpBwdSubsumeOpt[o_Association] :=
 atpBwdDemodOpt[o_Association] :=
     Switch[Lookup[o, "BackwardDemod", Automatic],
         True, 1, False | Automatic, 0, _, 0];
+
+(* === CLI-parity engine knobs ======================================
+   The FindProof CLI's KNOBS[] rows that were env-only until 2026-07:
+   each decodes TRI-STATE (-1 = Automatic = leave the engine default,
+   which already honors the matching THVM_ATP_* env var; 0 = force
+   off; positive = force on) so an unset suboption keeps the engine
+   byte-identical AND env-driven CLI-parity runs keep working through
+   the WL bridge.  args[58..64] of $atpRunProofFn. === *)
+
+(* "SimplerJoin" -> True | 2 | False: Twee's simplerThan-gated CP join
+   discipline (Twee Join.hs allSteps; CLI --simpler-join / env
+   THVM_ATP_SIMPLER_JOIN).  True = generation-time treatment AND
+   selection; 2 = selection-only (Twee's own placement -- consider
+   runs at dequeue), skipping the per-generated-CP push tax.  Every
+   unorientable-equation rewrite in the join verdict runs behind the
+   simplerThan gate, so proof-critical lemmas a comm-heavy ungated
+   doE join would delete stay live.  Compose with "PopRulesOnly" for
+   the full Twee verdict. *)
+atpSimplerJoinOpt[o_Association] := Switch[Lookup[o, "SimplerJoin", Automatic],
+    True | 1, 1, 2, 2, False, 0, _, -1];
+(* "EncompassDemod" -> True: Twee's reducesSkolem encompassment
+   demodulation -- an unorientable skolem-ground equation may rewrite
+   left-to-right at positions where the redex STRICTLY ENCOMPASSES the
+   LHS (CLI --encompass-demod / env THVM_ATP_ENCOMPASS; thvm.h
+   use_encompass_demod). *)
+atpEncompassDemodOpt[o_Association] := Switch[Lookup[o, "EncompassDemod", Automatic],
+    True, 1, False, 0, _, -1];
+(* "GoalNarrow" -> True: ground-congruence-closure + goal-cone
+   e-matching endgame (src/atp/goal_narrow.c; CLI --goal-narrow / env
+   THVM_ATP_GOAL_NARROW).  Periodically builds an E-graph of the goal
+   cone over the current R and e-matches rule instances into it -- the
+   closer for goals whose join needs an instantiation completion's
+   NF check never reaches.  The gn-* tuning caps (stride / iters /
+   node caps) stay env-only; their defaults are the tuned CLI values. *)
+atpGoalNarrowOpt[o_Association] := Switch[Lookup[o, "GoalNarrow", Automatic],
+    True, 1, False, 0, _, -1];
+(* "CPSetIRBudget" -> percent: Twee's renormalise task discipline for
+   the CP-set interreduction sweep (freq 10s + budget% + 20%-dead
+   sample trigger, Twee.hs:978 / Task.hs; Twee's default share is 5).
+   Non-zero swaps the sweep's rule-count period gate for the time
+   budget; inert unless "CPSetInterreduce" -> True arms the sweep.
+   CLI --cp-set-ir-budget / env THVM_ATP_CP_SET_IR_BUDGET. *)
+atpCPSetIRBudgetOpt[o_Association] := With[{n = Lookup[o, "CPSetIRBudget", 0]},
+    If[ IntegerQ[n] && n > 0, n, 0]];
+(* "PopRulesOnly" -> True: Twee pop-join base discipline -- the
+   pop-time BASE normalize is oriented-rules-only (Twee Rule.hs
+   simplify), never the ungated doR+doE join that deletes
+   proof-critical unorientable lemmas on comm-heavy theories (the
+   RNG021-6 L25 class); the unorientable tree participates only
+   through the gated simpler-join pass.  CLI --pop-rules-only / env
+   THVM_ATP_POP_RULES_ONLY. *)
+atpPopRulesOnlyOpt[o_Association] := Switch[Lookup[o, "PopRulesOnly", Automatic],
+    True, 1, False, 0, _, -1];
+(* "GjDeleteRule" -> True: Twee interreduce1 rule-delete port -- a
+   ground-joinable rule is DELETED rather than WM-sterilized (diverges
+   from WM).  CLI --gj-delete-rule / env THVM_ATP_GJ_DELETE_RULE; the
+   gj-budget / gj-index caps stay env-only. *)
+atpGjDeleteRuleOpt[o_Association] := Switch[Lookup[o, "GjDeleteRule", Automatic],
+    True, 1, False, 0, _, -1];
+(* "FullInterreduce" -> True: Twee full-R interreduction port -- every
+   rule re-reduced against the whole system after each addition
+   (diverges from WM's incremental discipline).  CLI
+   --full-interreduce / env THVM_ATP_FULL_INTERREDUCE. *)
+atpFullInterreduceOpt[o_Association] := Switch[Lookup[o, "FullInterreduce", Automatic],
+    True, 1, False, 0, _, -1];
 atpParseMethod[Automatic] := atpParseCompletionOpts[{}, 0];
 (* Accept the string form "Automatic" as a synonym for the symbol --
    users typing Method -> "Automatic" alongside the other string-named
@@ -3034,7 +3131,11 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpBackwardGoalArgueOpt[o], atpCpSideOpt[o],
          atpFlatSubsumeOpt[o], atpCommSubsumeOpt[o],
          atpFormationFifoOpt[o], atpEsetDistdirOpt[o],
-         atpTracePackOpt[o], atpForceCombinatorOrientOpt[o]}
+         atpTracePackOpt[o], atpForceCombinatorOrientOpt[o],
+         atpSimplerJoinOpt[o], atpEncompassDemodOpt[o],
+         atpGoalNarrowOpt[o], atpCPSetIRBudgetOpt[o],
+         atpPopRulesOnlyOpt[o], atpGjDeleteRuleOpt[o],
+         atpFullInterreduceOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
