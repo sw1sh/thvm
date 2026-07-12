@@ -113,11 +113,9 @@ typedef struct {
   // wmo_sub_end reads it) was REJECTED by wall-clock A/B x5 alternating
   // pairs: 13.42s vs 13.56s mean on the OA C bench (~-0.15s, below the
   // 0.3s bar) -- the arity-chain scans are short and well-predicted.
-  // Do not re-try.  Side finding kept for the record: the rank-cache
-  // key memcmp (wmo_tops_rank) compares these 2 uninitialised padding
-  // bytes, causing ~600 false misses/run on OA (hit rate 24.8% vs 26.6%
-  // with deterministic padding) -- benign (a miss recomputes the
-  // identical list), just a known noise source in the hit counters.
+  // Do not re-try.  The 2 padding bytes stay uninitialised at every fill
+  // site, so NO cell-array compare may memcmp: use wmo_cells_eq (see its
+  // comment for the measured binary-layout landmine the padding caused).
 } WmoCell;
 
 struct WmoNode;
@@ -383,6 +381,25 @@ static u8 wmo_cell_eq(const WmoCell *a, const WmoCell *b) {
   // cell past its key (hang == key_len), which segfaults on later removal.
   // For fixed-arity theories (sym => arity) this is a no-op: byte-identical.
   return a->sym == b->sym && a->is_var == b->is_var && a->arity == b->arity;
+}
+
+// Content equality over a cell RUN -- the total-order twin of wmo_cell_eq
+// for every duplicate-jump / cache-key compare.  NEVER memcmp WmoCell
+// arrays: the struct carries 2 padding bytes that every fill site leaves
+// uninitialised (stack garbage frozen into leaf->key / WmoEntry.sub by the
+// registration-time memcpys), so a byte compare's verdict depends on the
+// BINARY LAYOUT of unrelated code (whatever frames previously occupied the
+// stack under the fill buffer).  Measured: a semantically inert edit in
+// ft_norm.c flipped the wmo_dfs duplicate-jump shadow skip's memcmp on the
+// Sheffer AndAssociativity WM-preset run -- same trie (construction traces
+// byte-identical), permuted DFS leaf arrival order, INSERT_TRACE fork at
+// seq 2170 (898498 vs 897217 events) -- making cross-binary
+// byte-certification unsound until content-only compares replaced the
+// memcmps.
+static u8 wmo_cells_eq(const WmoCell *a, const WmoCell *b, u32 n) {
+  for (u32 k = 0; k < n; k++)
+    if (!wmo_cell_eq(&a[k], &b[k])) return 0u;
+  return 1u;
 }
 
 // ---------- node / leaf helpers ----------
@@ -784,7 +801,7 @@ static WmoEntry *wmo_jump_find(const WmoNode *start, const WmoCell *sub,
   for (WmoEntry *e = start->exits; e != NULL; e = e->next) {
     if (e->ziel == ziel && e->ziel_leaf == ziel_leaf &&
         e->sub_len == sub_len &&
-        memcmp(e->sub, sub, (size_t)sub_len * sizeof(WmoCell)) == 0)
+        wmo_cells_eq(e->sub, sub, sub_len))
       return e;
   }
   return NULL;
@@ -803,7 +820,7 @@ static void wmo_dup_note(const char *mech, WmoNode *start) {
     for (WmoEntry *b = start->exits; b != NULL; b = b->next) {
       if (b->ziel == a->ziel && b->ziel_leaf == a->ziel_leaf &&
           b->sub_len == a->sub_len &&
-          memcmp(b->sub, a->sub, (size_t)a->sub_len * sizeof(WmoCell)) == 0)
+          wmo_cells_eq(b->sub, a->sub, a->sub_len))
         nn++;
     }
     if (nn >= 2u) {
@@ -1765,8 +1782,7 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
         for (WmoEntry *e2 = e->next; e2 != NULL; e2 = e2->next) {
           if (e2->ziel == e->ziel && e2->ziel_leaf == e->ziel_leaf &&
               e2->sub_len == e->sub_len &&
-              memcmp(e2->sub, e->sub,
-                     (size_t)e->sub_len * sizeof(WmoCell)) == 0) {
+              wmo_cells_eq(e2->sub, e->sub, e->sub_len)) {
             shadowed = 1u;
             break;
           }
@@ -2680,7 +2696,7 @@ static u32 wmo_tops_dfs_fill(AtpWmOrder *w, u8 tree, Term query_sub,
       WmoRankCacheEnt *re = &w->rc[e];
       if (re->valid && re->rev == w->tree_rev && re->tree == tree &&
           re->qn == qn &&
-          memcmp(re->q, q, (size_t)qn * sizeof(WmoCell)) == 0) {
+          wmo_cells_eq(re->q, q, qn)) {
         rc_hit = e;
         break;
       }
