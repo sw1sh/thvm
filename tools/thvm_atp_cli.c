@@ -3747,6 +3747,9 @@ int main(int argc, char **argv) {
             (g_atp_bench_status == (int)ATP_QUEUE_EMPTY) ?
                 (cli_strategy_complete() ? "Satisfiable" : "GaveUp") :
             (g_atp_bench_status == (int)ATP_TIMEOUT)     ? "ResourceOut" :
+            // Memory-guard aborts are ResourceOut in the SZS ontology
+            // (Timeout is time only; the guard pops fire mid-wall).
+            (g_atp_bench_status == (int)ATP_ABORTED)     ? "ResourceOut" :
                                                            "Timeout";
     } else {
       tag = (g_atp_bench_status == (int)ATP_PROVED)      ? "Theorem" :

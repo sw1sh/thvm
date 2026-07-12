@@ -2330,6 +2330,11 @@ int main(int argc, char **argv) {
       (st == ATP_REFUTED)     ? "REFUTED" :
       (st == ATP_QUEUE_EMPTY) ? "QUEUE_EMPTY (saturated, no proof)" :
       (st == ATP_TIMEOUT)     ? "TIMEOUT (step cap)" :
+      // The heap-frac / RSS guards in thvm_atp_step return ATP_ABORTED;
+      // labeling those pops "RUNNING (wall cap)" hid every memory-bound
+      // abort behind a fake wall report (a 240s-wall run "hitting the
+      // wall" at 55s -- the GRP661-706 dissection trap).
+      (st == ATP_ABORTED)     ? "ABORTED (memory guard / abort hook)" :
                                 "RUNNING (wall cap)";
   printf("=> %s\n", sn);
   printf("   goal=%s  steps=%u  rules=%u  cps=%u  max_cps=%u  %.1fs\n",
