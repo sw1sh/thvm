@@ -489,10 +489,20 @@ static u8 pc_pair_alpha_eq(Term a1, Term b1, Term a2, Term b2) {
 // them IN PLACE; pc_steps and the locals are refreshed from it after.
 static Term g_pc_roots[PC_MAX_STEPS + 2 * PC_MAX_PARENTS + 2];
 static u8   g_pc_eq_gc_refreshed = 0;   // an eq session gc'd + refreshed
+// Prior-context window for the per-step cp-cone check (see pc_entails_eq
+// / pc_check_cp): the index of the record currently under check, so a
+// `cp` step's superposition is normalised only by records STRICTLY
+// BEFORE it -- the demodulators that existed when the CP formed.  Sound
+// + non-circular: cli_emit_trace prints parents before an entry, so the
+// trace is topological, and Verified still requires every record to pass
+// its own (earlier-context) check, so a bogus demodulator cannot yield a
+// false Verified -- it fails its own step first.
+static int  g_pc_cur_idx   = -1;
 // Defined after the PcStep section (they touch pc_steps/pc_nstep).
 static u32  pc_fill_roots(Term *buf, u32 cap);
 static void pc_refresh_formulas(const Term *buf);
 static u32  pc_axiom_pairs(Term *pl, Term *pr, u32 cap);
+static int  pc_check_cp(Term *parents, int np, Term concl);
 
 static int pc_entails_eq(Term *parents, int np, Term concl) {
   Term gl = 0, gr = 0;
@@ -714,6 +724,14 @@ static int pc_entails(Term *parents, int np, Term concl) {
         }
         v = pc_entails_eq(aug, n2, concl);
       }
+      // Focused critical-pair route (the cp-cone check): the 2-parent
+      // completion under-derives a recorded `cp` because the pair is
+      // R-NORMALISED -- the demodulators that normalise are OTHER rules.
+      // Reproduce it directly (superpose the 2 parents, normalise with
+      // the prior records) instead of re-deriving the whole theory.
+      if (v == PC_UNKNOWN && concl != 0 && g_pc_cur_idx >= 0) {
+        v = pc_check_cp(parents, np, concl);
+      }
       return v;
     }
   }
@@ -765,6 +783,105 @@ static u32 pc_axiom_pairs(Term *pl, Term *pr, u32 cap) {
     }
   }
   return n;
+}
+
+// Focused critical-pair check (the cp-cone route).  A recorded `cp`
+// conclusion cl=cr is the SUPERPOSITION of its two cited equation
+// parents, then R-NORMALISED -- so the 2-parent completion (pc_entails_eq)
+// under-derives it: the demodulators that reduce the raw CP to the
+// recorded (already-R-normal) sides are OTHER, lower-id rules.  Instead
+// of re-completing the whole theory per step, reproduce the inference
+// directly: overlap the two parents in BOTH faces, normalise each raw CP
+// side with the prior proof equations (+ the two parents) KBO-oriented,
+// and compare to the (also normalised) recorded pair.  Sound: a raw CP is
+// a genuine equational consequence of the two parents; the demodulators
+// are consequences of the axioms (each passes its own earlier-context
+// check, so a bogus one fails first and blocks a false Verified); and a
+// no-match is a plain abstain (PC_UNKNOWN), never a refutation.
+#define PC_CP_CAP        512u
+#define PC_NORM_RULES    8192u
+#define PC_NORM_STEPCAP  4096u
+static Term        pc_nrl[PC_NORM_RULES], pc_nrr[PC_NORM_RULES];
+static CriticalPair pc_cp_buf[PC_CP_CAP];
+
+// Record the largest arity seen for each CTR label into ar[label] (the
+// KBO precedence in pc_check_cp ranks lower-arity symbols higher).
+static void pc_scan_arity(Term t, u8 *ar, u32 nl) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 lab = term_ext(t), n = term_ctr_n(t);
+  if (lab < nl && n > ar[lab]) ar[lab] = (u8)(n > 255u ? 255u : n);
+  for (u32 i = 0; i < n; i++) pc_scan_arity(term_ctr_at(t, i), ar, nl);
+}
+static int pc_check_cp(Term *parents, int np, Term concl) {
+  if (concl == 0 || np < 1) return PC_UNKNOWN;
+  Term cl, cr;
+  if (!pc_plain_eq(concl, &cl, &cr)) return PC_UNKNOWN;
+  // KBO over the checker label space.  Weight 1 everywhere (as the WM
+  // presets), precedence ARITY-FIRST: lower arity ranks higher, matching
+  // the engine's constants-over-functions precedence (the .pr's
+  // a>...>op_c>f>...>rd), then label id as an arbitrary tie-break.  A
+  // label-id-only precedence re-orients some group rules opposite to the
+  // engine, giving normal forms the engine never reaches; the arity-first
+  // order reproduces the recorded (R-normal) sides far more often.
+  u32 nl = PC_LAB_BASE + (u32)pc_nsyms + 1u;
+  u32 *w  = (u32 *)malloc((size_t)nl * sizeof(u32));
+  u32 *pc = (u32 *)malloc((size_t)nl * sizeof(u32));
+  u8  *ar = (u8 *)calloc((size_t)nl, 1u);
+  if (w == NULL || pc == NULL || ar == NULL) {
+    free(w); free(pc); free(ar); return PC_UNKNOWN; }
+  for (int i = 0; i < pc_nstep; i++) pc_scan_arity(pc_steps[i].formula, ar, nl);
+  for (u32 i = 0; i < nl; i++) {
+    w[i] = 1u;
+    // higher precedence value == bigger symbol; lower arity -> bigger.
+    pc[i] = ((u32)(255u - ar[i]) << 16) | (i & 0xffffu);
+  }
+  KboConfig cfg = { w, pc, nl, 1u };
+  // Demodulator set: the cited parents, then every prior plain-equation
+  // record, each oriented larger->smaller (skip KBO-incomparable so the
+  // rewrite terminates).  The first two plain-equation parents are also
+  // kept for the superposition route.
+  u32 nn = 0;
+  Term sl[2] = { 0, 0 }, sr[2] = { 0, 0 };
+  int nsup = 0;
+  for (int e = 0; e < np && nn < PC_NORM_RULES; e++) {
+    Term a, b;
+    if (!pc_plain_eq(parents[e], &a, &b)) continue;
+    if (nsup < 2) { sl[nsup] = a; sr[nsup] = b; nsup++; }
+    KboCmp c = thvm_kbo(a, b, &cfg);
+    if      (c == KBO_GT) { pc_nrl[nn] = a; pc_nrr[nn] = b; nn++; }
+    else if (c == KBO_LT) { pc_nrl[nn] = b; pc_nrr[nn] = a; nn++; }
+  }
+  for (int i = 0; i < g_pc_cur_idx && i < pc_nstep && nn < PC_NORM_RULES; i++) {
+    Term a, b;
+    if (!pc_plain_eq(g_pc_roots[i], &a, &b)) continue;   // rooted formula
+    KboCmp c = thvm_kbo(a, b, &cfg);
+    if      (c == KBO_GT) { pc_nrl[nn] = a; pc_nrr[nn] = b; nn++; }
+    else if (c == KBO_LT) { pc_nrl[nn] = b; pc_nrr[nn] = a; nn++; }
+  }
+  // Recorded pair, normalised into the checker's rewrite system.
+  Term ncl = thvm_rewrite_normalize(cl, pc_nrl, pc_nrr, nn, PC_NORM_STEPCAP);
+  Term ncr = thvm_rewrite_normalize(cr, pc_nrl, pc_nrr, nn, PC_NORM_STEPCAP);
+  int v = PC_UNKNOWN;
+  // (a) Demodulation route (orient / simp / norm-step records + any cp
+  // whose sides already join): the conclusion sides reduce to one common
+  // form under the parents + prior equations.
+  if (kbo_eq(ncl, ncr)) v = PC_VALID;
+  // (b) Superposition route (cp records): overlap the two parents in both
+  // faces and match a normalised raw CP against the recorded pair.
+  if (v == PC_UNKNOWN && nsup == 2) {
+    Term rl4[4] = { sl[0], sr[0], sl[1], sr[1] };
+    Term rr4[4] = { sr[0], sl[0], sr[1], sl[1] };
+    u32 ncp = thvm_critical_pairs(rl4, rr4, 4u, pc_cp_buf, PC_CP_CAP);
+    for (u32 k = 0; k < ncp; k++) {
+      Term a = thvm_rewrite_normalize(pc_cp_buf[k].lhs, pc_nrl, pc_nrr, nn,
+                                      PC_NORM_STEPCAP);
+      Term b = thvm_rewrite_normalize(pc_cp_buf[k].rhs, pc_nrl, pc_nrr, nn,
+                                      PC_NORM_STEPCAP);
+      if (pc_pair_alpha_eq(ncl, ncr, a, b)) { v = PC_VALID; break; }
+    }
+  }
+  free(w); free(pc); free(ar);
+  return v;
 }
 
 static u32 pc_fill_roots(Term *buf, u32 cap) {
@@ -1158,7 +1275,9 @@ static int proof_check_worker(const char *file, int szs) {
         why = "step check exhausted the term heap";
         thvm_heap_exhausted = 0;
       } else {
+        g_pc_cur_idx = i;
         v = pc_check_step(i, &why);
+        g_pc_cur_idx = -1;
       }
       thvm_heap_exhaust_jmp = _pc_saved;
       if (gc_count() == _pc_gc) {
