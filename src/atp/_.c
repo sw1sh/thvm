@@ -13658,21 +13658,6 @@ lazy_skip_varnorm: ;
   atp_ensure_rule_cap(s, s->n_rules + 1);
   s->lhs[s->n_rules] = lhs;
   s->rhs[s->n_rules] = rhs;
-  // Gated rule-add trace (THVM_ATP_RULE_TRACE): slot + S-expr LHS/RHS, so a
-  // rule can be matched by term to Waldmeister's rule set (sidesteps WM's
-  // ElternNr/w2 counter confusion -- correlate by term, not number).
-  {
-    static int rt = -1;
-    if (rt < 0) rt = (getenv("THVM_ATP_RULE_TRACE") != NULL) ? 1 : 0;
-    if (rt) {
-      fprintf(stderr, "RULEADD slot=%u uid=%u lhs=", s->n_rules,
-              s->next_rule_uid + 1u);
-      atp_dbg_print_term(stderr, lhs);
-      fprintf(stderr, " rhs=");
-      atp_dbg_print_term(stderr, rhs);
-      fputc('\n', stderr);
-    }
-  }
   // A compaction may have vacated this slot with a stale GJ status;
   // every fresh fact starts untested (WM: a fresh termpair object).
   s->r_gj_status[s->n_rules] = ATP_GJ_ST_UNKNOWN;
@@ -13773,6 +13758,25 @@ lazy_skip_varnorm: ;
     s->rhs[s->n_rules] = ft_to_term(s->rhs_ft[s->n_rules]);
   }
 #endif
+  // Gated rule-add trace (THVM_ATP_RULE_TRACE): slot + S-expr LHS/RHS, so a
+  // rule can be matched by term to Waldmeister's rule set (sidesteps WM's
+  // ElternNr/w2 counter confusion -- correlate by term, not number).
+  // Emitted AFTER materialize-at-birth so the slots hold real Terms on
+  // the lazy path -- the pre-materialize args are NUM sentinels there,
+  // and printing them blinded the recorded WM-parity comparison method
+  // (every RULEADD read "lhs=#0 rhs=#0").
+  {
+    static int rt = -1;
+    if (rt < 0) rt = (getenv("THVM_ATP_RULE_TRACE") != NULL) ? 1 : 0;
+    if (rt) {
+      fprintf(stderr, "RULEADD slot=%u uid=%u lhs=", s->n_rules,
+              s->r_uid[s->n_rules]);
+      atp_dbg_print_term(stderr, s->lhs[s->n_rules]);
+      fprintf(stderr, " rhs=");
+      atp_dbg_print_term(stderr, s->rhs[s->n_rules]);
+      fputc('\n', stderr);
+    }
+  }
   // Remove-and-re-derive detection (flat-subsume only).  If this fresh
   // fact has the exact shape of an equation that E-set subsumption
   // removed, it is a RE-DERIVATION: resolve the subsumer's current birth
