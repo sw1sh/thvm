@@ -176,7 +176,6 @@ typedef struct {
 #define WMO_TOPS_ARR_CAP 16384u
 #define WMO_RC_N 64u
 #define WMO_LLR_N 4096u
-#define WMO_DRC_N 2048u
 typedef struct {
   u8        valid;
   u8        tree;               // 0 rules / 1 equations
@@ -231,17 +230,17 @@ typedef struct AtpWmOrder {
     u32 ll, ch;
     u8  tree, face, found, valid;
   } llr[WMO_LLR_N];
-  // wmo_trace_dist_rhs memo: trace -> dist_rhs verdict (present or the
-  // unregistered-default 0), validated per entry against tree_rev
-  // (bumped by every registry mutation -- register / remove --
-  // so a stale entry cannot survive one).  The linear registry scan sits
-  // on the walk's per-fact and per-rank-query hot paths.
-  // Shares no_rankcache as its disable switch.
-  struct WmoDrcEnt {
-    u64 rev;
-    u32 trace;
-    u8  dr, valid;
-  } drc[WMO_DRC_N];
+  // wmo_trace_dist_rhs exact map: drx[trace] = presence bit | dr << 1.
+  // Maintained incrementally -- wmo_register records the FIRST
+  // registration's dist_rhs (every same-trace face registered under one
+  // insert shares the value by construction), atp_wmo_remove_trace
+  // always evicts ALL entries of a trace and clears the byte back to
+  // absent.  So "present -> recorded dr, absent -> the unregistered
+  // default 0" is at all times exactly what the historical registry
+  // linear scan recomputed -- O(1) with no rev invalidation (the former
+  // rev-stamped memo missed wholesale after every registration, and the
+  // scan behind it was the single-walk sweeps' dominant self-time on
+  // LAT138-1: one full-registry walk per partner hit).
   // WM-faithful AltesBlattPolieren construction (use_wm_trie_faithful): when
   // set, every BlattAufgeteilt parallel jump splices immediately AFTER the
   // surviving model in the start node's outgoing list (DSBaumOperationen.c
@@ -250,6 +249,8 @@ typedef struct AtpWmOrder {
   // rank.  Set from AtpState.use_wm_trie_faithful at tree creation; default 0
   // keeps the historical head-insert special case (byte-identical OFF).
   u8       polier_after;
+  u8      *drx;               // trace -> (present | dist_rhs << 1), see above
+  u32      drx_cap;
 } AtpWmOrder;
 
 // ---------- cells ----------
@@ -1900,6 +1901,7 @@ static void atp_wmo_free(AtpWmOrder *w) {
   for (u32 t = 0; t < 2u; t++) wmo_free_subtree(w->tree[t].root, 0u);
   for (u32 r = 0; r < w->n_reg; r++) free(w->reg[r].cells);
   free(w->reg);
+  free(w->drx);
   for (u32 e = 0; e < WMO_RC_N; e++) free(w->rc[e].out);
   free(w);
 }
@@ -2046,6 +2048,17 @@ static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
   r->tree = tree;
   r->face = face;
   r->dist_rhs = dist_rhs;
+  if (trace >= w->drx_cap) {
+    u32 nc = w->drx_cap ? w->drx_cap : 4096u;
+    while (nc <= trace) nc *= 2u;
+    w->drx = (u8 *)realloc(w->drx, nc);
+    if (w->drx == NULL) thvm_fatal("wmo_register: drx OOM");
+    memset(w->drx + w->drx_cap, 0, nc - w->drx_cap);
+    w->drx_cap = nc;
+  }
+  if ((w->drx[trace] & 1u) == 0u) {
+    w->drx[trace] = (u8)(1u | ((dist_rhs & 1u) << 1));
+  }
   r->cells = (WmoCell *)malloc(n_cells * sizeof(WmoCell));
   memcpy(r->cells, cells, n_cells * sizeof(WmoCell));
   r->n_cells = n_cells;
@@ -2065,26 +2078,14 @@ static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
 // (0 = distinguished, 1 = reverse).  Returns 0 for an unregistered trace (orientable rules
 // and intake equations keep distinguished = lhs).
 static u8 wmo_trace_dist_rhs(AtpWmOrder *w, u32 trace) {
-  // Memo probe (see AtpWmOrder.drc): the registry is frozen while
-  // tree_rev holds, so a valid same-rev entry returns exactly what the
-  // scan below would recompute (including the unregistered-default 0).
-  struct WmoDrcEnt *e = NULL;
-  if (!w->no_rankcache) {
-    e = &w->drc[(trace * 2654435761u) & (WMO_DRC_N - 1u)];
-    if (e->valid && e->rev == w->tree_rev && e->trace == trace)
-      return e->dr;
+  // Exact map probe (see AtpWmOrder.drx): present -> the recorded first
+  // registration's dist_rhs, absent -> the unregistered default 0 --
+  // byte-for-byte the verdict of the historical registry scan.
+  if (trace < w->drx_cap) {
+    u8 b = w->drx[trace];
+    if (b & 1u) return (u8)(b >> 1);
   }
-  u8 dr = 0u;
-  for (u32 r = 0; r < w->n_reg; r++) {
-    if (w->reg[r].trace == trace) { dr = w->reg[r].dist_rhs; break; }
-  }
-  if (e != NULL) {
-    e->valid = 1u;
-    e->rev   = w->tree_rev;
-    e->trace = trace;
-    e->dr    = dr;
-  }
-  return dr;
+  return 0u;
 }
 
 // uid -> WM-distinguished-face label for the engine's face-aware
@@ -2558,6 +2559,9 @@ static void atp_wmo_remove_trace(AtpState *s, u32 trace) {
       r++;
     }
   }
+  // The loop above evicted EVERY entry of `trace` -- return the exact
+  // dist_rhs map to absent (the unregistered default 0).
+  if (trace < w->drx_cap) w->drx[trace] = 0u;
 }
 
 // ---------- order-mirror rank queries ----------
