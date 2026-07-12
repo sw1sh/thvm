@@ -23392,6 +23392,60 @@ static void gj_sess_arm(const GjModel *m, const KboConfig *cfg,
 
 static void gj_sess_disarm(void) { g_gj_sess_live = 0u; }
 
+// ── Normalize-scoped NF memo ────────────────────────────────────────
+// gj_normalize restarts its scan from the ROOT after every fired step
+// (measured 2.55 steps / 3.55 root scans per normalize on LAT138-1),
+// so every position that precedes the redex is re-queried -- ri query,
+// thvm_match, subst_apply, and the gj_less_in gate all re-run with
+// unchanged inputs.  Within ONE gj_normalize the verdict function is
+// FIXED (rule set, model, cp_vars, g_gj_orient_free, s->gj_exclude are
+// all constant, and GC never runs mid-normalize -- heap_alloc never
+// auto-collects -- so Term values are stable), which makes "no
+// position of t fires" (fired == 0) a pure function of the Term value.
+// The memo records exactly those no-fire verdicts and answers repeat
+// scans without re-deriving them; a memo hit returns the identical
+// (t, fired=0) the rescan would compute, so the first firing position
+// of every scan -- and the whole trajectory -- is byte-identical.
+// Protected roots (protect != 0: the Dreieck gate changes the verdict
+// function at that call only) bypass the memo both ways; their child
+// recursion (protect == 0) participates as usual.
+// Generation-stamped: gj_normalize bumps the generation instead of
+// clearing.  Insertions stop when the table saturates (lookups then
+// miss -- pure slowdown, never a wrong verdict).
+#define GJ_NF_BITS 12u
+#define GJ_NF_SIZE (1u << GJ_NF_BITS)
+static Term g_gj_nf_key[GJ_NF_SIZE];
+static u32  g_gj_nf_gen[GJ_NF_SIZE];
+static u32  g_gj_nf_cur = 0u;
+static u32  g_gj_nf_n   = 0u;
+
+static inline u32 gj_nf_slot(Term t) {
+  u64 h = (u64)t;
+  h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33;
+  return (u32)h & (GJ_NF_SIZE - 1u);
+}
+
+static inline u8 gj_nf_hit(Term t) {
+  u32 i = gj_nf_slot(t);
+  while (g_gj_nf_gen[i] == g_gj_nf_cur) {
+    if (g_gj_nf_key[i] == t) return 1u;
+    i = (i + 1u) & (GJ_NF_SIZE - 1u);
+  }
+  return 0u;
+}
+
+static inline void gj_nf_add(Term t) {
+  if (g_gj_nf_n >= (GJ_NF_SIZE / 2u)) return;   // saturated: stop inserting
+  u32 i = gj_nf_slot(t);
+  while (g_gj_nf_gen[i] == g_gj_nf_cur) {
+    if (g_gj_nf_key[i] == t) return;
+    i = (i + 1u) & (GJ_NF_SIZE - 1u);
+  }
+  g_gj_nf_key[i] = t;
+  g_gj_nf_gen[i] = g_gj_nf_cur;
+  g_gj_nf_n++;
+}
+
 // gj_minimum_in over the armed session: identical arithmetic on the
 // precomputed orphan list + group structure.
 static long long gj_minimum_in_sess(const GjSess *ss, const KboConfig *cfg,
@@ -23811,6 +23865,7 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
                             const u32 *cp_vars, u32 n_cp_vars, u8 *fired,
                             Term protect) {
   const KboConfig *cfg = s->kbo;
+  if (protect == 0 && gj_nf_hit(t)) { *fired = 0; return t; }
   // Discrimination-tree top scan: byte-parity with the linear scan by
   // construction (candidates gated in ascending rule order), measured
   // trajectory-identical on GRP753-1/LAT138-1 tickers and 3.6-10x
@@ -23876,7 +23931,11 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
   }
   if (term_tag(t) == TAG_CTR) {
     u32 n = term_ctr_n(t);
-    if (n > REWRITE_MAX_ARITY) { *fired = 0; return t; }
+    if (n > REWRITE_MAX_ARITY) {
+      if (protect == 0) gj_nf_add(t);
+      *fired = 0;
+      return t;
+    }
     Term children[REWRITE_MAX_ARITY];
     for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
     for (u32 i = 0; i < n; i++) {
@@ -23890,6 +23949,7 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
       }
     }
   }
+  if (protect == 0) gj_nf_add(t);
   *fired = 0;
   return t;
 }
@@ -23905,6 +23965,14 @@ static Term gj_normalize(AtpState *s, const GjModel *m, Term t,
                          Term protect) {
   g_atp_gjp_norms++;
   gj_sess_arm(m, s->kbo, cp_vars, n_cp_vars);
+  // Fresh NF-memo generation (see gj_nf_hit): the verdict function is
+  // fixed only within this normalize.  On u32 wrap, clear the stamp
+  // table so ancient generations cannot alias the new one.
+  if (++g_gj_nf_cur == 0u) {
+    memset(g_gj_nf_gen, 0, sizeof g_gj_nf_gen);
+    g_gj_nf_cur = 1u;
+  }
+  g_gj_nf_n = 0u;
   for (u32 k = 0; k < step_cap; k++) {
     u8 fired = 0;
     Term t2 = gj_rewrite_step(s, m, t, cp_vars, n_cp_vars, &fired, protect);
