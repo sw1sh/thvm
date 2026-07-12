@@ -4841,6 +4841,19 @@ typedef struct {
   // consults it inside the `#ifdef ATP_MNF` block.
   u8 use_mnf;
 
+  // GOAL-NARROW: the ground goal-narrowing endgame (opaque pointer +
+  // runtime gate).  A budgeted congruence closure over the ground
+  // slice of R -- extended by bounded two-way e-matching over the
+  // goal cone -- that closes goals whose joining chain needs
+  // EXPANDING (R->L) ground rewrites the ordered goal normalize can
+  // never take (the twee/vampire flatten-lane endgame the CASC GRP
+  // dissection isolated: GRP725-1/678-1/690-1).  Created lazily on
+  // the first gated goal_check; env THVM_ATP_GOAL_NARROW / CLI
+  // --goal-narrow / thvm_atp_set_use_goal_narrow.  Default OFF:
+  // byte-identical trajectories.  See src/atp/goal_narrow.c.
+  struct AtpGoalNarrow *gnarrow;
+  u8 use_goal_narrow;
+
   // Waldmeister-faithful RHS interreduction (IR_InterreduktionRechts /
   // RMRechtsInterred, INF/Interreduktion.c:329-360) in the -irrp CLI
   // default mode FALSE = "modify rule" (RUN/Parameter.c:334-343).  When
@@ -6385,6 +6398,7 @@ fn void      thvm_atp_set_wpo     (AtpState *s, const WpoConfig *wpo);
 // check runs alone.  Lets one dylib carry MNF without paying for it
 // on completion-only goals.
 fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
+fn void      thvm_atp_set_use_goal_narrow(AtpState *s, u8 on);
 // Opt in to the flatterm fast-path for the mixed normalize loop (no
 // effect unless the dylib is built with ATP_RULE_INDEX).  Same normal
 // forms as the default tree mixed loop; a per-step speedup on rule sets

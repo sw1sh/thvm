@@ -7430,6 +7430,11 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
       s->use_simpler_join = (e[0] == '2') ? 2u : 1u;
     }
   }
+  // Goal-narrow endgame (ground CC + goal-cone e-matching; opt-in,
+  // see src/atp/goal_narrow.c).  THVM_ATP_GOAL_NARROW=1 for CLI runs;
+  // WL callers use thvm_atp_set_use_goal_narrow.
+  s->use_goal_narrow = (u8)atp_env_on("THVM_ATP_GOAL_NARROW");
+  s->gnarrow = NULL;
   // Twee pop-join base discipline (opt-in; diverges from WM).  Twee has
   // NO ungated R+E join anywhere on the CP path: dequeue simplification
   // is oriented-rules-only (Rule.hs `simplify` via simplifyOverlap) and
@@ -7572,6 +7577,17 @@ static void mnf_gc_gather(struct AtpMnf *m, Term *roots, u32 *w);
 static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base);
 #endif
 
+#ifdef ATP_ORDERED_REWRITE
+// Goal-narrow endgame (src/atp/goal_narrow.c, included before
+// thvm_atp_goal_check).  Its node table holds heap Terms -- collector
+// roots, same discipline as the MNF nodes above.
+static void gn_free(struct AtpGoalNarrow *g);
+static u32  gn_gc_count(struct AtpGoalNarrow *g);
+static void gn_gc_gather(struct AtpGoalNarrow *g, Term *roots, u32 *w);
+static void gn_gc_writeback(struct AtpGoalNarrow *g, const Term *roots,
+                            u32 base);
+#endif
+
 fn void thvm_atp_free(AtpState *s) {
   if (s == NULL) return;
   atp_wmo_free((struct AtpWmOrder *)s->wmo);
@@ -7700,6 +7716,9 @@ fn void thvm_atp_free(AtpState *s) {
 #ifdef ATP_MNF
   mnf_destroy(s->mnf);
 #endif
+#ifdef ATP_ORDERED_REWRITE
+  gn_free(s->gnarrow);
+#endif
   free(s);
 }
 
@@ -7789,6 +7808,12 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // hashes, node indices) is GC-invariant and needs no fixup.
   n_roots += mnf_gc_count(s->mnf);
 #endif
+#ifdef ATP_ORDERED_REWRITE
+  // Goal-narrow E-graph nodes each hold a representative Term.  The
+  // congruence machinery (labels, kid ids, union-find, signature
+  // hashes over class ids) is GC-invariant and needs no fixup.
+  n_roots += gn_gc_count(s->gnarrow);
+#endif
   Term *roots = (Term *)malloc((size_t)n_roots * sizeof(Term));
   if (roots == NULL) return 0;
 
@@ -7848,6 +7873,10 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
 #ifdef ATP_MNF
   u32 mnf_node_root = w;
   mnf_gc_gather(s->mnf, roots, &w);
+#endif
+#ifdef ATP_ORDERED_REWRITE
+  u32 gn_node_root = w;
+  gn_gc_gather(s->gnarrow, roots, &w);
 #endif
 
   gc_collect(roots, w);
@@ -7924,6 +7953,9 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // hash-table fixup: mnf_hash is structural, so a relocated term
   // keeps its hash and stays in its bucket.
   mnf_gc_writeback(s->mnf, roots, mnf_node_root);
+#endif
+#ifdef ATP_ORDERED_REWRITE
+  gn_gc_writeback(s->gnarrow, roots, gn_node_root);
 #endif
 
   free(roots);
@@ -9055,6 +9087,14 @@ fn void thvm_atp_set_wpo(AtpState *s, const WpoConfig *wpo) {
 fn void thvm_atp_set_use_mnf(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_mnf = on ? 1u : 0u;
+}
+
+// Runtime gate for the goal-narrow endgame (src/atp/goal_narrow.c).
+// Effective only in ATP_ORDERED_REWRITE builds -- the field is always
+// present, but goal_check consults it inside that guard.
+fn void thvm_atp_set_use_goal_narrow(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_goal_narrow = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_ground_join(AtpState *s, u8 on) {
@@ -18698,6 +18738,12 @@ static void atp_goals_alias(AtpState *s, u32 g) {
 #endif
 }
 
+#ifdef ATP_ORDERED_REWRITE
+// The ground goal-narrowing endgame (opt-in --goal-narrow): ground
+// congruence closure + bounded two-way e-matching over the goal cone.
+#include "goal_narrow.c"
+#endif
+
 // First conjunct whose goals_joined_mask bit is still clear.  Callers
 // guarantee at least one unjoined goal (mask != all-set).
 static u32 atp_goals_first_unjoined(const AtpState *s) {
@@ -18763,6 +18809,13 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
                                &s->goals_lhs_nf[g], &s->goals_rhs_nf[g])) {
         s->goals_joined_mask |= (u64)1 << g;
       }
+#ifdef ATP_ORDERED_REWRITE
+      else if (s->use_goal_narrow &&
+               atp_goal_narrow_joined(s, s->goals_lhs[g],
+                                      s->goals_rhs[g])) {
+        s->goals_joined_mask |= (u64)1 << g;
+      }
+#endif
     }
     if (s->goals_joined_mask == all_mask) return ATP_PROVED;
     // Re-point the alias at the first unjoined conjunct so every
@@ -18804,6 +18857,17 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     }
     return ATP_PROVED;
   }
+#ifdef ATP_ORDERED_REWRITE
+  // Goal-narrow endgame (opt-in): a join here is one the reductive
+  // single-NF check above structurally cannot see -- the closing
+  // chain needs expanding ground steps.  Runs before the MNF front
+  // (its incremental part is a few hash probes per check).
+  if (s->use_goal_narrow &&
+      atp_goal_narrow_joined(s, s->goal_lhs, s->goal_rhs)) {
+    if (s->n_goals == 1u) s->goals_joined_mask = 1ull;
+    return ATP_PROVED;
+  }
+#endif
 #ifdef ATP_MNF
   // Milestone 10: the MNF bidirectional search AUGMENTS the single-NF
   // check -- it does not replace it.  goal_lhs seeds a GREEN front,
