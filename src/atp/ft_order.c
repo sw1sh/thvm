@@ -362,6 +362,9 @@ fn KboCmp thvm_kbo_ft_skolem_after_subst(u32 na, const KboConfig *cfg) {
 static KboFlatNode g_ftsj_cp_hi[ATPFT_KBO_FLAT_CAP];   // CP eq, larger side
 static KboFlatNode g_ftsj_cp_lo[ATPFT_KBO_FLAT_CAP];   // CP eq, smaller side
 static u32 g_ftsj_cp_hi_n = 0u;
+// CP-side total hi weight, latched by thvm_ftsj_prepare_eq (consumed
+// by the rule-encode cache's weight fast key below).
+static long long g_ftsj_cp_whi = 0;
 static KboFlatNode g_ftsj_scr_a[ATPFT_KBO_FLAT_CAP];   // rule-side scratch
 static KboFlatNode g_ftsj_scr_b[ATPFT_KBO_FLAT_CAP];
 
@@ -383,6 +386,13 @@ fn int thvm_ftsj_prepare_eq(const AtpFtCell *l, const AtpFtCell *r,
   memcpy(g_ftsj_cp_hi, hi, (size_t)nhi * sizeof(KboFlatNode));
   memcpy(g_ftsj_cp_lo, lo, (size_t)nlo * sizeof(KboFlatNode));
   g_ftsj_cp_hi_n = nhi;
+  // Latch hi's total skolem weight for the rule-cache weight fast key
+  // (see thvm_ftsj_rule_simpler_cached).
+  {
+    long long w = 0;
+    for (u32 i = 0; i < nhi; i++) w += g_ftsj_cp_hi[i].w;
+    g_ftsj_cp_whi = w;
+  }
   return 1;
 }
 
@@ -413,6 +423,159 @@ fn int thvm_ftsj_rule_simpler(const AtpFtCell *rl, const AtpFtCell *rr,
   if (ch == KBO_LT) return 1;
   if (ch != KBO_EQ) return 0;
   return atpft_kbo_skolem_cmp(lo, 0u, g_ftsj_cp_lo, 0u, cfg) == KBO_LT;
+}
+
+// --- Per-rule-slot encode cache for the simpler-join gate -----------
+//
+// thvm_ftsj_rule_simpler re-encoded BOTH rule sides and re-ran the
+// hi/lo orientation pick on EVERY (rule, CP) gate query -- 13.2M
+// re-encodes per 12k steps on RNG021-6 under --simpler-join, all
+// recomputing a value that depends only on the rule's content.  Cache
+// per rule slot: the oriented (hi, lo) flat encodes plus hi's total
+// skolem weight (atpft_kbo_skolem_cmp's first key over the full span).
+// The cached bytes are exactly what the uncached path would encode, so
+// every verdict is byte-identical.
+//
+// Invalidation contract (drivers live in ft_norm.c / _.c):
+//   * thvm_ftsj_rulecache_sync(owner, r_revision, n_rules) runs once
+//     per join pass: same owner + unchanged (rev, n) keeps everything;
+//     a pure-append witness (rev delta == count delta, n grew) keeps
+//     existing slots (their content is untouched by pushes); any other
+//     movement -- drop, orient-flip, bwd-subsume, slot backfill --
+//     bumps rev without the append witness and drops the whole cache.
+//   * thvm_ftsj_rulecache_note_edit(slot) covers the ONE mutation
+//     r_revision does not: interreduction's in-place RHS compose
+//     (the two atp_wf_mm_note_rhs_edit sites in _.c).
+//   * thvm_ftsj_rulecache_invalidate_all() runs from thvm_atp_init
+//     (new engine, possibly new ordering config).
+typedef struct {
+  KboFlatNode *hi;     // oriented larger side (post hi/lo pick)
+  KboFlatNode *lo;
+  u32 cap_hi, cap_lo;  // allocated node capacity
+  u32 nhi, nlo;
+  long long whi;       // total skolem weight of hi (sum of node .w)
+  u8 valid;            // 1 = hi/lo/whi live
+  u8 overflow;         // 1 = encode overflowed (gate always answers 0)
+} FtsjRuleEnc;
+static FtsjRuleEnc *g_ftsj_renc       = NULL;
+static u32          g_ftsj_renc_cap   = 0u;
+static const void  *g_ftsj_renc_owner = NULL;
+static u32          g_ftsj_renc_rev   = 0u;
+static u32          g_ftsj_renc_n     = 0u;
+
+static void ftsj_renc_drop_all(void) {
+  for (u32 i = 0; i < g_ftsj_renc_cap; i++) {
+    g_ftsj_renc[i].valid = 0u;
+    g_ftsj_renc[i].overflow = 0u;
+  }
+}
+
+fn void thvm_ftsj_rulecache_invalidate_all(void) {
+  ftsj_renc_drop_all();
+  g_ftsj_renc_owner = NULL;
+}
+
+fn void thvm_ftsj_rulecache_note_edit(u32 slot) {
+  if (slot < g_ftsj_renc_cap) {
+    g_ftsj_renc[slot].valid = 0u;
+    g_ftsj_renc[slot].overflow = 0u;
+  }
+}
+
+fn void thvm_ftsj_rulecache_sync(const void *owner, u32 r_revision,
+                                 u32 n_rules) {
+  if (owner == g_ftsj_renc_owner && r_revision == g_ftsj_renc_rev &&
+      n_rules == g_ftsj_renc_n) {
+    return;
+  }
+  // Pure-append witness: only pushes since the last sync -- existing
+  // slots' content is unchanged, new slots are invalid by construction.
+  if (owner == g_ftsj_renc_owner && n_rules >= g_ftsj_renc_n &&
+      r_revision - g_ftsj_renc_rev == n_rules - g_ftsj_renc_n) {
+    g_ftsj_renc_rev = r_revision;
+    g_ftsj_renc_n   = n_rules;
+    return;
+  }
+  ftsj_renc_drop_all();
+  g_ftsj_renc_owner = owner;
+  g_ftsj_renc_rev   = r_revision;
+  g_ftsj_renc_n     = n_rules;
+}
+
+// Slot-cached variant of thvm_ftsj_rule_simpler: same verdicts, the
+// rule-side encode + orientation pick amortized across join passes.
+fn int thvm_ftsj_rule_simpler_cached(u32 slot, const AtpFtCell *rl,
+                                     const AtpFtCell *rr, u8 oriented,
+                                     const KboConfig *cfg) {
+  if (g_ftsj_cp_hi_n == 0u) return 0;
+  if (slot >= g_ftsj_renc_cap) {
+    u32 cap = slot + 257u;
+    FtsjRuleEnc *n = (FtsjRuleEnc *)realloc(g_ftsj_renc,
+                                            (size_t)cap * sizeof(FtsjRuleEnc));
+    if (n == NULL) return thvm_ftsj_rule_simpler(rl, rr, oriented, cfg);
+    memset(n + g_ftsj_renc_cap, 0,
+           (size_t)(cap - g_ftsj_renc_cap) * sizeof(FtsjRuleEnc));
+    g_ftsj_renc     = n;
+    g_ftsj_renc_cap = cap;
+  }
+  FtsjRuleEnc *e = &g_ftsj_renc[slot];
+  if (e->overflow) return 0;
+  if (!e->valid) {
+    u32 na = 0u, nb = 0u;
+    if (!atpft_kbo_flat_encode(rl, cfg, g_ftsj_scr_a, &na) ||
+        !atpft_kbo_flat_encode(rr, cfg, g_ftsj_scr_b, &nb)) {
+      // Fail-closed exactly like the uncached path -- and the overflow
+      // is content-pure, so the "always 0" verdict is cacheable too.
+      e->overflow = 1u;
+      return 0;
+    }
+    const KboFlatNode *hi = g_ftsj_scr_a;
+    const KboFlatNode *lo = g_ftsj_scr_b;
+    u32 nhi = na, nlo = nb;
+    if (!oriented &&
+        atpft_kbo_skolem_cmp(g_ftsj_scr_a, 0u, g_ftsj_scr_b, 0u, cfg)
+            == KBO_LT) {
+      hi = g_ftsj_scr_b;
+      lo = g_ftsj_scr_a;
+      nhi = nb;
+      nlo = na;
+    }
+    if (e->cap_hi < nhi) {
+      KboFlatNode *p = (KboFlatNode *)realloc(e->hi,
+                                              (size_t)nhi * sizeof(KboFlatNode));
+      if (p == NULL) return thvm_ftsj_rule_simpler(rl, rr, oriented, cfg);
+      e->hi = p;
+      e->cap_hi = nhi;
+    }
+    if (e->cap_lo < nlo) {
+      KboFlatNode *p = (KboFlatNode *)realloc(e->lo,
+                                              (size_t)nlo * sizeof(KboFlatNode));
+      if (p == NULL) return thvm_ftsj_rule_simpler(rl, rr, oriented, cfg);
+      e->lo = p;
+      e->cap_lo = nlo;
+    }
+    memcpy(e->hi, hi, (size_t)nhi * sizeof(KboFlatNode));
+    memcpy(e->lo, lo, (size_t)nlo * sizeof(KboFlatNode));
+    e->nhi = nhi;
+    e->nlo = nlo;
+    e->whi = 0;
+    for (u32 i = 0; i < nhi; i++) e->whi += e->hi[i].w;
+    e->valid = 1u;
+  }
+  // Twee orderedSimplerThan: (hi < HI) or (hi == HI and lo < LO).
+  // Weight fast key: atpft_kbo_skolem_cmp's FIRST decision over the
+  // full spans is the total-weight compare; both sums are precomputed
+  // (rule side cached, CP side latched by prepare_eq), so an unequal
+  // weight resolves the hi compare without touching the nodes.
+  KboCmp ch;
+  if (e->whi != g_ftsj_cp_whi) {
+    ch = (e->whi > g_ftsj_cp_whi) ? KBO_GT : KBO_LT;
+  } else {
+    ch = atpft_kbo_skolem_cmp(e->hi, 0u, g_ftsj_cp_hi, 0u, cfg);
+  }
+  if (ch == KBO_LT) return 1;
+  if (ch != KBO_EQ) return 0;
+  return atpft_kbo_skolem_cmp(e->lo, 0u, g_ftsj_cp_lo, 0u, cfg) == KBO_LT;
 }
 
 // === LPO public entry ================================================

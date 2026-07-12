@@ -159,6 +159,14 @@ extern int thvm_ftsj_prepare_eq(const AtpFtCell *l, const AtpFtCell *r,
                                 const KboConfig *cfg);
 extern int thvm_ftsj_rule_simpler(const AtpFtCell *rl, const AtpFtCell *rr,
                                   u8 oriented, const KboConfig *cfg);
+// Slot-cached variant + its invalidation drivers (ft_order.c): the
+// rule-side encode is content-pure, cached per slot under the
+// (owner, r_revision, n_rules) watermark synced once per join pass.
+extern int  thvm_ftsj_rule_simpler_cached(u32 slot, const AtpFtCell *rl,
+                                          const AtpFtCell *rr, u8 oriented,
+                                          const KboConfig *cfg);
+extern void thvm_ftsj_rulecache_sync(const void *owner, u32 r_revision,
+                                     u32 n_rules);
 
 // --- Simpler-join session (AtpState.use_simpler_join) ----------------
 //
@@ -166,27 +174,33 @@ extern int thvm_ftsj_rule_simpler(const AtpFtCell *rl, const AtpFtCell *rr,
 // points below) around a gated R+E re-normalize of a CP's two sides.
 // While armed, ft_cell_try_rules applies Twee's Join.hs allSteps
 // discipline: EVERY candidate rule/equation must be strictly simpler
-// than the CP equation (thvm_ftsj_rule_simpler), and an unorientable
-// instance may additionally fire when strictly decreasing under the
-// skolem-ground KBO (Rule.hs:425 reducesSkolem) even though the
-// open-term instance compare is incomparable.  g_ftsj_memo caches the
-// per-rule simplerThan verdict for the pass (the gate is instance-
-// independent): 0 = unknown, 1 = simpler, 2 = not.
-static u8   g_ftsj_active   = 0u;
-static u8  *g_ftsj_memo     = NULL;
-static u32  g_ftsj_memo_cap = 0u;
+// than the CP equation (thvm_ftsj_rule_simpler_cached), and an
+// unorientable instance may additionally fire when strictly decreasing
+// under the skolem-ground KBO (Rule.hs:425 reducesSkolem) even though
+// the open-term instance compare is incomparable.  The per-rule
+// simplerThan verdict is instance-independent, so it is memoized for
+// the pass -- stamp-validated (g_ftsj_pass_id) instead of memset per
+// pass: a slot's cached verdict is live iff its stamp matches the
+// current pass id.
+static u8   g_ftsj_active     = 0u;
+static u32 *g_ftsj_memo_stamp = NULL;
+static u8  *g_ftsj_memo_val   = NULL;
+static u32  g_ftsj_memo_cap   = 0u;
+static u32  g_ftsj_pass_id    = 0u;
 
 static u8 ftsj_rule_ok(AtpState *s, u32 r) {
-  if (g_ftsj_memo != NULL && r < g_ftsj_memo_cap && g_ftsj_memo[r] != 0u) {
-    return (u8)(g_ftsj_memo[r] == 1u);
+  if (g_ftsj_memo_stamp != NULL && r < g_ftsj_memo_cap &&
+      g_ftsj_memo_stamp[r] == g_ftsj_pass_id) {
+    return g_ftsj_memo_val[r];
   }
   u8 ok = 0u;
   if (s->lhs_ft[r] != NULL && s->rhs_ft[r] != NULL) {
-    ok = (u8)(thvm_ftsj_rule_simpler(s->lhs_ft[r], s->rhs_ft[r],
-                                     s->r_orient[r], s->kbo) != 0);
+    ok = (u8)(thvm_ftsj_rule_simpler_cached(r, s->lhs_ft[r], s->rhs_ft[r],
+                                            s->r_orient[r], s->kbo) != 0);
   }
-  if (g_ftsj_memo != NULL && r < g_ftsj_memo_cap) {
-    g_ftsj_memo[r] = ok ? 1u : 2u;
+  if (g_ftsj_memo_stamp != NULL && r < g_ftsj_memo_cap) {
+    g_ftsj_memo_stamp[r] = g_ftsj_pass_id;
+    g_ftsj_memo_val[r]   = ok;
   }
   return ok;
 }
@@ -3834,15 +3848,26 @@ u8 atp_cp_sj_joinable_ft(AtpState *s, AtpFtCell *l, AtpFtCell *r) {
   }
   if (g_ftsj_active) return 0u;   // defensive: no reentry
   if (!thvm_ftsj_prepare_eq(l, r, s->kbo)) return 0u;
-  // Arm the per-rule simplerThan memo for this pass.
+  // Sync the rule-encode cache watermark (ft_order.c) for this pass.
+  thvm_ftsj_rulecache_sync(s, s->r_revision, s->n_rules);
+  // Arm the per-rule simplerThan memo: bump the pass id -- a stale
+  // slot simply fails the stamp check, no per-pass memset.
   if (g_ftsj_memo_cap < s->n_rules) {
     u32 cap = s->n_rules + 256u;
-    u8 *m = (u8 *)realloc(g_ftsj_memo, cap);
-    if (m == NULL) return 0u;
-    g_ftsj_memo = m;
+    u32 *st = (u32 *)realloc(g_ftsj_memo_stamp, (size_t)cap * sizeof(u32));
+    if (st == NULL) return 0u;
+    memset(st + g_ftsj_memo_cap, 0,
+           (size_t)(cap - g_ftsj_memo_cap) * sizeof(u32));
+    g_ftsj_memo_stamp = st;
+    u8 *vl = (u8 *)realloc(g_ftsj_memo_val, cap);
+    if (vl == NULL) return 0u;
+    g_ftsj_memo_val = vl;
     g_ftsj_memo_cap = cap;
   }
-  memset(g_ftsj_memo, 0, s->n_rules);
+  if (++g_ftsj_pass_id == 0u) {   // stamp wrap: retire every stale slot
+    memset(g_ftsj_memo_stamp, 0, (size_t)g_ftsj_memo_cap * sizeof(u32));
+    g_ftsj_pass_id = 1u;
+  }
   // Normalize CLONES: the gated walk splices/frees spans in place, and
   // the caller's l/r must stay the engine NFs (verdict-only contract).
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;

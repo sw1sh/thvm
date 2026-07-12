@@ -7317,8 +7317,15 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
   // A new engine may carry a different ordering config: retire every
-  // snapshot-orientation memo entry (atp_orient_memo_gt).
+  // snapshot-orientation memo entry (atp_orient_memo_gt) and the
+  // simpler-join rule-encode cache (ft_order.c).
   g_atp_orient_memo_gen++;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  {
+    extern void thvm_ftsj_rulecache_invalidate_all(void);
+    thvm_ftsj_rulecache_invalidate_all();
+  }
+#endif
   // Cross-call hygiene: a prior thvm_atp_free released the previous
   // atp's rule_index / cp_index, but the globals g_atp_ri_ix /
   // g_atp_cp_ix still point at the freed memory.  Reading them before
@@ -20044,8 +20051,13 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
           // WM-policy FT mirror: the RHS compose is the one rule-set
           // mutation without an r_revision bump, so the flat splice
-          // template must be re-encoded here (see atp_wf_mm_note_rhs_edit).
+          // template must be re-encoded here (see atp_wf_mm_note_rhs_edit)
+          // and the simpler-join rule-encode cache slot retired.
           atp_wf_mm_note_rhs_edit(s, i);
+          {
+            extern void thvm_ftsj_rulecache_note_edit(u32 slot);
+            thvm_ftsj_rulecache_note_edit(i);
+          }
 #endif
 #ifdef ATP_RULE_INDEX
           if (!wf_eng_cache_update_rhs(s, i)) s->wmfpa_dirty = 1u;
@@ -20663,8 +20675,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
             // WM-policy FT mirror: re-encode its flat splice template
             // (the compose does not bump r_revision, so the lazy
-            // watermark alone would miss this edit).
+            // watermark alone would miss this edit); retire the
+            // simpler-join rule-encode cache slot for the same reason.
             atp_wf_mm_note_rhs_edit(s, i);
+            {
+              extern void thvm_ftsj_rulecache_note_edit(u32 slot);
+              thvm_ftsj_rulecache_note_edit(i);
+            }
 #endif
 #ifdef ATP_RULE_INDEX
             // The WM-FPA cache, by contrast, holds a flat COPY of each
