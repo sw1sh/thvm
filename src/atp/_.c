@@ -23550,10 +23550,15 @@ static int gj_lex_less_in(const GjModel *m, const KboConfig *cfg,
 //   GJ_STRICT    : tσ <  uσ for ALL σ |= C
 //   GJ_NONSTRICT : tσ <= uσ for ALL σ |= C
 //   GJ_INCOMP    : not provable
+// PRECONDITION (both functions): the caller has already established
+// kbo_eq(t, u) == 0.  Every call site pre-checks -- the candidate
+// loops' no-op skip, the lex arg loop's kbo_eq filter, and
+// gj_less_in's own dispatch into the lex -- so the historical entry
+// re-compares were pure waste (one full kbo_eq per gate call, twice
+// on the size-neutral path) and dropping them is verdict-identical.
 static int gj_less_in(const GjModel *m, const KboConfig *cfg,
                       Term t, Term u, const u32 *cp_vars, u32 n_cp_vars,
                       u32 depth) {
-  if (kbo_eq(t, u)) return GJ_NONSTRICT;
   int sz = gj_size_less_in(m, cfg, t, u, cp_vars, n_cp_vars);
   if (sz == -1) return GJ_STRICT;     // size(t) < size(u) strictly
   if (sz == 1)  return GJ_INCOMP;     // size not provably <=
@@ -23565,7 +23570,6 @@ static int gj_lex_less_in(const GjModel *m, const KboConfig *cfg,
                           Term t, Term u,
                           const u32 *cp_vars, u32 n_cp_vars, u32 depth) {
   if (depth > 64) return GJ_INCOMP;   // recursion guard -> KEEP-safe
-  if (kbo_eq(t, u)) return GJ_NONSTRICT;
 
   u8 t_atom = 0, u_atom = 0;
   GjAtom at = gj_term_atom(t, &t_atom);
