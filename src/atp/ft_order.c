@@ -280,6 +280,36 @@ fn KboCmp thvm_kbo_ft_subst_with_prepared(u32 na,
                              g_atpft_kbo_flat_b, nb, cfg);
 }
 
+// Skolem-only sibling of thvm_kbo_ft_subst_with_prepared: encode
+// subst(tmpl) into flat_b exactly as the open-compare entry does (same
+// bytes, same success marker), then run ONLY the skolem-ground
+// compare.  For a gate that fires on (open GT) OR (skolem GT) the open
+// verdict is redundant -- open-term KBO GT is stable under the skolem
+// grounding (each variable maps to a constant of the same weight, so
+// weights are preserved and the balance conditions transfer), hence
+// open GT implies skolem GT and the fire condition collapses to the
+// skolem compare alone (Twee Join.hs step3 gates on reducesSkolem
+// only, for the same reason).  Caller: ft_cell_try_rules' unorient
+// gate in ARMED sessions (g_ftsj_active / use_encompass_demod).
+static KboCmp atpft_kbo_skolem_cmp(const KboFlatNode *a, u32 pa,
+                                   const KboFlatNode *b, u32 pb,
+                                   const KboConfig *cfg);
+fn KboCmp thvm_kbo_ft_skolem_subst_with_prepared(u32 na,
+                                                 const AtpFtCell *tmpl,
+                                                 const void      *subst,
+                                                 const KboConfig *cfg) {
+  g_atpft_b_subst_ok = 0u;
+  if (na == 0u) return KBO_UN;
+  u32 nb = 0u;
+  if (!atpft_kbo_flat_encode_subst(tmpl, cfg, subst,
+                                   g_atpft_kbo_flat_b, &nb)) {
+    return KBO_UN;
+  }
+  g_atpft_b_subst_ok = nb;
+  return atpft_kbo_skolem_cmp(g_atpft_kbo_flat_a, 0u,
+                              g_atpft_kbo_flat_b, 0u, cfg);
+}
+
 // === Skolem-ground KBO (encompassment demodulation) =================
 //
 // Ground KBO over the skolemised pair: every variable reads as a fresh

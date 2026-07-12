@@ -154,6 +154,13 @@ extern KboCmp thvm_kbo_ft_subst_with_prepared(u32 na,
 // Reuses the flat_b bytes of the immediately preceding
 // thvm_kbo_ft_subst_with_prepared call -- call ONLY in that adjacency.
 extern KboCmp thvm_kbo_ft_skolem_after_subst(u32 na, const KboConfig *cfg);
+// Skolem-only sibling of thvm_kbo_ft_subst_with_prepared (ft_order.c):
+// same (tmpl, subst) encode into flat_b, skolem-ground compare only --
+// the armed-session gate where open GT is subsumed by skolem GT.
+extern KboCmp thvm_kbo_ft_skolem_subst_with_prepared(u32 na,
+                                                     const AtpFtCell *tmpl,
+                                                     const void      *subst,
+                                                     const KboConfig *cfg);
 // Simpler-join equation compares (Twee simplerThan; ft_order.c).
 extern int thvm_ftsj_prepare_eq(const AtpFtCell *l, const AtpFtCell *r,
                                 const KboConfig *cfg);
@@ -2537,6 +2544,26 @@ static int ft_cell_try_rules(AtpState   *s,
   if (try_unorient && have_unorient) {
     u32 best_rule = (u32)-1;
     u8  best_dir  = 0u;
+    // Armed-session (encompass / simpler-join) skolem-only gate: the
+    // arm fires on (open GT) OR (skolem GT), and open-term KBO GT is
+    // stable under the skolem grounding (vars map to same-weight
+    // constants: weights are preserved and the balance conditions
+    // transfer), so open GT implies skolem GT and the fire condition
+    // collapses to the skolem compare alone -- Twee Join.hs step3
+    // gates on reducesSkolem only, for the same reason.  The open
+    // compare is skipped entirely; the (tmpl, subst) encode still runs
+    // (same flat_b bytes, same success marker).
+    // THVM_NO_FT_SKOLEM_ONLY=1 forces the historic two-compare chain
+    // for an ON-vs-OFF byte-identity sweep; the THVM_ATPFT_KBO_DIFF
+    // probe also forces it (its side-by-side Term compare reads the
+    // OPEN verdict).
+    static int skolem_only = -1;
+    if (skolem_only < 0) {
+      const char *e = getenv("THVM_NO_FT_SKOLEM_ONLY");
+      skolem_only = (e != NULL && e[0] != '0' && e[0] != '\0') ? 0 : 1;
+      if (getenv("THVM_ATPFT_KBO_DIFF") != NULL) skolem_only = 0;
+    }
+    u8 gate_armed = (u8)(s->use_encompass_demod || g_ftsj_active);
     // Lazy redex pre-encode: thvm_kbo_ft_subst encodes both sides on
     // every call; we attempt up to `slice_count` equations at this
     // cell, each running the unorient gate with the SAME redex `p`.
@@ -2584,7 +2611,6 @@ static int ft_cell_try_rules(AtpState   *s,
       if (fwd_matched) {
         if (ft_subst_ground_extras(s, rhs, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
-          KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
           // Encompassment demodulation (opt-in, Twee reducesSkolem):
           // an instance the open-term KBO calls incomparable still
           // fires when strictly decreasing under the skolem-ground
@@ -2594,10 +2620,18 @@ static int ft_cell_try_rules(AtpState   *s,
           // practical discipline rather than the strict AHL condition.
           // The armed simpler-join session admits the same relaxation
           // (Twee step3's reducesSkolem) -- there the simplerThan gate
-          // above supplies the redundancy discipline.
-          if (ft_v != KBO_GT && (s->use_encompass_demod || g_ftsj_active) &&
-              thvm_kbo_ft_skolem_after_subst(redex_na, s->kbo) == KBO_GT) {
-            ft_v = KBO_GT;
+          // above supplies the redundancy discipline.  Armed + default:
+          // skolem-only (see the gate comment at pass-2 entry).
+          KboCmp ft_v;
+          if (gate_armed && skolem_only) {
+            ft_v = thvm_kbo_ft_skolem_subst_with_prepared(redex_na, rhs,
+                                                          subst_buf, s->kbo);
+          } else {
+            ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
+            if (ft_v != KBO_GT && gate_armed &&
+                thvm_kbo_ft_skolem_after_subst(redex_na, s->kbo) == KBO_GT) {
+              ft_v = KBO_GT;
+            }
           }
           static int dbg_diff = -1;
           if (dbg_diff < 0) dbg_diff = getenv("THVM_ATPFT_KBO_DIFF") != NULL ? 1 : 0;
@@ -2646,11 +2680,17 @@ static int ft_cell_try_rules(AtpState   *s,
       if (bwd_matched) {
         if (ft_subst_ground_extras(s, lhs, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
-          KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
           // Encompassment demodulation, backward face (see fwd branch).
-          if (ft_v != KBO_GT && (s->use_encompass_demod || g_ftsj_active) &&
-              thvm_kbo_ft_skolem_after_subst(redex_na, s->kbo) == KBO_GT) {
-            ft_v = KBO_GT;
+          KboCmp ft_v;
+          if (gate_armed && skolem_only) {
+            ft_v = thvm_kbo_ft_skolem_subst_with_prepared(redex_na, lhs,
+                                                          subst_buf, s->kbo);
+          } else {
+            ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
+            if (ft_v != KBO_GT && gate_armed &&
+                thvm_kbo_ft_skolem_after_subst(redex_na, s->kbo) == KBO_GT) {
+              ft_v = KBO_GT;
+            }
           }
           if (ft_v == KBO_GT) {
             if (!s->use_mixmost_nf) {
