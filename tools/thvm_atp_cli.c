@@ -158,6 +158,9 @@ static const AtpKnob KNOBS[] = {
   {"horn-cd-cap",            "THVM_ATP_HORN_CD_CAP",     1, "(CD initial released-size cap; default auto)"},
   {"horn-cd-step",           "THVM_ATP_HORN_CD_STEP",    1, "(CD deepening cap increment)"},
   {"horn-cd-vars",           "THVM_ATP_HORN_CD_VARS",    1, "(CD max distinct variables per conclusion)"},
+  {"horn-back",              "THVM_ATP_HORN_BACK",       1, "(backward goal-directed CD lane: iterative-deepening goal regression; 2 = give up if inapplicable)"},
+  {"horn-back-depth",        "THVM_ATP_HORN_BACK_DEPTH", 1, "(backward CD max iterative-deepening depth)"},
+  {"horn-back-size",         "THVM_ATP_HORN_BACK_SIZE",  1, "(backward CD subgoal term-size cap)"},
   {"heap-cells",             "THVM_HEAP_CELLS",          1, "(heap size, cells)"},
   {"profile",                "THVM_ATP_PROFILE",         1, "(profiling level)"},
   {"diag",                   "THVM_ATP_DIAG",            1, "(diagnostics)"},
@@ -2465,6 +2468,433 @@ static int horn_rel_cmp_rr(const void *a, const void *b) {
   return horn_rel_cmp(a, b);
 }
 
+// ===================================================================
+// Backward goal-directed condensed detachment (--horn-back)
+// ===================================================================
+// The LCL condensed-detachment family encodes modus ponens over one
+// binary connective as a dispatcher rule
+//   theorem(implies(Y,X)) & theorem(Y) -> theorem(X)
+// plus axiom schemas (axiom(A_k) & rule_1 theorem-ify them) and a
+// GROUND goal theorem(G).  Forward chaining floods: it releases ever
+// more general theorem SCHEMAS while the goal is one specific ground
+// formula, so the schema space explodes before the ground instance is
+// reached (231k-1.46M releases, 0 resonance).  This lane regresses the
+// goal instead -- an iterative-deepening DFS over the decoded rules
+// with the ground goal as the root, so the ground goal anchors every
+// subgoal's structure (the major-premise unification is constrained by
+// the goal, not generative as in forward chaining).
+//
+// Soundness: each closure is a real unifier of a subgoal with an axiom
+// instance (base) or a rule conclusion (a modus-ponens step); a proved
+// GROUND goal is a genuine theorem, memoized and reusable anywhere.  On
+// success theorem(G)=true is released as a unit (a real consequence),
+// which refutes the negated goal true != theorem(G); g_cli_horn_applied
+// gates the Satisfiable claim.  THVM_ATP_HORN_BACK unset/0 disables and
+// the whole lane is a no-op (default build byte-identical).
+
+static int    g_bk_on = 0;                 // THVM_ATP_HORN_BACK
+static int   *g_bk_bind = NULL;            // per global var id: node or -1
+static int    g_bk_bind_cap = 0;
+static int   *g_bk_trail = NULL;
+static int    g_bk_trail_n = 0, g_bk_trail_cap = 0;
+static int    g_bk_nv = 0;                 // next fresh global var id
+static int    g_bk_over = 0;               // terminal budget exhaustion
+static long   g_bk_nodes = 0, g_bk_node_cap = 0;
+static double g_bk_deadline = 0.0;
+static int    g_bk_size_cap = 0;
+#define BK_MAXOPEN   256
+#define BK_KEYLEN    (2 * TP_SIDE_LEN + 2)
+#define BK_DEPTH_MAX 200
+
+typedef struct { int l, r, d; } BkGoal;
+
+static void bk_bind_ensure(int v) {
+  if (v < g_bk_bind_cap) return;
+  int nc = (g_bk_bind_cap == 0) ? (1 << 14) : g_bk_bind_cap;
+  while (nc <= v) nc *= 2;
+  g_bk_bind = (int *)realloc(g_bk_bind, (size_t)nc * sizeof(int));
+  if (g_bk_bind == NULL) tp_giveup("OOM in Horn back");
+  for (int i = g_bk_bind_cap; i < nc; i++) g_bk_bind[i] = -1;
+  g_bk_bind_cap = nc;
+}
+static void bk_trail_push(int v) {
+  if (g_bk_trail_n >= g_bk_trail_cap) {
+    g_bk_trail_cap = (g_bk_trail_cap == 0) ? (1 << 14) : g_bk_trail_cap * 2;
+    g_bk_trail = (int *)realloc(g_bk_trail, (size_t)g_bk_trail_cap * sizeof(int));
+    if (g_bk_trail == NULL) tp_giveup("OOM in Horn back");
+  }
+  g_bk_trail[g_bk_trail_n++] = v;
+}
+static void bk_undo(int mark) {
+  while (g_bk_trail_n > mark) g_bk_bind[g_bk_trail[--g_bk_trail_n]] = -1;
+}
+
+// All backward-prover variables are globally unique (standardized apart
+// at rule/fact instantiation), so unification runs in one flat space --
+// no per-clause offsets.
+static int bk_deref(int t) {
+  while (g_hn[t].head < 0) {
+    int v = -g_hn[t].head - 1;
+    if (v >= g_bk_bind_cap || g_bk_bind[v] < 0) break;
+    t = g_bk_bind[v];
+  }
+  return t;
+}
+static int bk_occurs(int v, int t, int depth) {
+  if (depth > 400) return 1;
+  t = bk_deref(t);
+  if (g_hn[t].head < 0) return (-g_hn[t].head - 1) == v;
+  for (int i = 0; i < g_hn[t].nargs; i++)
+    if (bk_occurs(v, HARG(t, i), depth + 1)) return 1;
+  return 0;
+}
+static int bk_unify(int a, int b, int depth) {
+  if (depth > 400) return 0;
+  a = bk_deref(a); b = bk_deref(b);
+  if (a == b) return 1;
+  if (g_hn[a].head < 0) {
+    int v = -g_hn[a].head - 1;
+    if (bk_occurs(v, b, 0)) return 0;
+    bk_bind_ensure(v); g_bk_bind[v] = b; bk_trail_push(v); return 1;
+  }
+  if (g_hn[b].head < 0) {
+    int v = -g_hn[b].head - 1;
+    if (bk_occurs(v, a, 0)) return 0;
+    bk_bind_ensure(v); g_bk_bind[v] = a; bk_trail_push(v); return 1;
+  }
+  if (g_hn[a].head != g_hn[b].head || g_hn[a].nargs != g_hn[b].nargs) return 0;
+  for (int i = 0; i < g_hn[a].nargs; i++)
+    if (!bk_unify(HARG(a, i), HARG(b, i), depth + 1)) return 0;
+  return 1;
+}
+
+// Standardize a clause term apart: its clause-local variables (head
+// -(loc+1), loc < HORN_VSPACE) map to fresh global ids via `map`, which
+// the caller shares across the clause's conclusion and conditions so
+// their variables link.
+static int bk_rename(int t, int *map) {
+  if (g_hn[t].head < 0) {
+    int loc = -g_hn[t].head - 1;
+    if (loc >= HORN_VSPACE) { g_bk_over = 1; return t; }
+    if (map[loc] < 0) {
+      int fv = g_bk_nv++;
+      bk_bind_ensure(fv); g_bk_bind[fv] = -1;
+      map[loc] = fv;
+    }
+    return horn_node(-(map[loc] + 1), 0, NULL);
+  }
+  int na = g_hn[t].nargs;
+  if (na > 16) { g_bk_over = 1; return t; }
+  int args[16];
+  for (int i = 0; i < na; i++) args[i] = bk_rename(HARG(t, i), map);
+  return horn_node(g_hn[t].head, na, args);
+}
+
+static int bk_size(int t, int depth) {
+  if (depth > 400) return 1 << 20;
+  t = bk_deref(t);
+  if (g_hn[t].head < 0) return 1;
+  int s = 1;
+  for (int i = 0; i < g_hn[t].nargs; i++) s += bk_size(HARG(t, i), depth + 1);
+  return s;
+}
+static int bk_is_ground(int t, int depth) {
+  if (depth > 400) return 0;
+  t = bk_deref(t);
+  if (g_hn[t].head < 0) return 0;
+  for (int i = 0; i < g_hn[t].nargs; i++)
+    if (!bk_is_ground(HARG(t, i), depth + 1)) return 0;
+  return 1;
+}
+// Print a ground (deref'd) term canonically into buf; 0 on overflow.
+static int bk_print(const TpProblem *tp, char *buf, size_t cap, size_t *o, int t) {
+  t = bk_deref(t);
+  if (g_hn[t].head < 0) return 0;   // caller guarantees ground
+  const char *name = tp->syms[g_hn[t].head].name;
+  size_t nl = strlen(name);
+  if (*o + nl + 2 >= cap) return 0;
+  memcpy(buf + *o, name, nl); *o += nl;
+  if (g_hn[t].nargs > 0) {
+    buf[(*o)++] = '(';
+    for (int i = 0; i < g_hn[t].nargs; i++) {
+      if (i > 0) { if (*o + 1 >= cap) return 0; buf[(*o)++] = ','; }
+      if (!bk_print(tp, buf, cap, o, HARG(t, i))) return 0;
+    }
+    if (*o + 1 >= cap) return 0;
+    buf[(*o)++] = ')';
+  }
+  buf[*o] = '\0';
+  return 1;
+}
+
+// --- ground-goal memo -------------------------------------------------
+// success: a set of ground goal keys proved (a real lemma, reusable at
+// any depth).  failure: per key, the largest remaining-depth at which
+// the goal was fully explored and failed (a true exhaustion -- never a
+// budget cutoff), so any query with <= that depth prunes.
+#define BK_MEMO_SLOTS (1 << 20)
+// faildepth<0 (=-1): proved.  onpath: this ground goal is an open
+// ancestor on the current DFS branch (regularity: re-deriving it is a
+// loop -- prune).
+typedef struct { char *key; int faildepth; u8 onpath; } BkMemo;
+static BkMemo *g_bk_memo = NULL;
+static int     g_bk_memo_n = 0;
+
+static BkMemo *bk_memo_find(const char *key, int create) {
+  if (g_bk_memo == NULL) return NULL;
+  u64 h = tp_name_hash(key, strlen(key));
+  u32 slot = (u32)(h % (u64)BK_MEMO_SLOTS);
+  for (;;) {
+    if (g_bk_memo[slot].key == NULL) {
+      if (!create) return NULL;
+      if ((u32)g_bk_memo_n >= BK_MEMO_SLOTS - (BK_MEMO_SLOTS >> 3)) return NULL;
+      g_bk_memo[slot].key = strdup(key);
+      g_bk_memo[slot].faildepth = -2;   // fresh, unset
+      g_bk_memo[slot].onpath = 0;
+      g_bk_memo_n++;
+      return &g_bk_memo[slot];
+    }
+    if (strcmp(g_bk_memo[slot].key, key) == 0) return &g_bk_memo[slot];
+    slot = (slot + 1u) % BK_MEMO_SLOTS;
+  }
+}
+
+// Build the ground key for goal (l,r); 0 if either side is non-ground or
+// oversize.
+static int bk_key(const TpProblem *tp, int l, int r, char *key) {
+  size_t o = 0;
+  if (!bk_is_ground(l, 0) || !bk_is_ground(r, 0)) return 0;
+  if (!bk_print(tp, key, BK_KEYLEN - 2, &o, l)) return 0;
+  key[o++] = '=';
+  if (!bk_print(tp, key, BK_KEYLEN, &o, r)) return 0;
+  return 1;
+}
+
+static int bk_budget_ok(void) {
+  if (g_bk_over) return 0;
+  if ((++g_bk_nodes & 0x3fff) == 0) {
+    if (horn_now() > g_bk_deadline) { g_bk_over = 1; return 0; }
+  }
+  if (g_bk_node_cap > 0 && g_bk_nodes > g_bk_node_cap) { g_bk_over = 1; return 0; }
+  if (g_hn_n > (1 << 24)) { g_bk_over = 1; return 0; }   // arena ceiling
+  return 1;
+}
+
+static int bk_prove_seq(const TpProblem *tp, BkGoal *gs, int n);
+
+// Try every way to close goal (gl,gr) at remaining depth d, then prove
+// the pending tail: BASE = a unit fact (an axiom instance); STEP = a
+// rule conclusion (a modus-ponens regression), spawning the rule's
+// conditions ahead of the tail (major condition first).
+static int bk_prove_choices(const TpProblem *tp, int gl, int gr, int d,
+                            BkGoal *tail, int tn) {
+  // BASE: match a unit fact.  Input clauses arrive in either orientation
+  // (true = atom OR atom = true), so try both pairings.
+  for (int f = 0; f < g_hf_n && !g_bk_over; f++) {
+    for (int orient = 0; orient < 2 && !g_bk_over; orient++) {
+      int mark = g_bk_trail_n, an = g_hn_n, aa = g_ha_n, nvm = g_bk_nv;
+      int map[HORN_VSPACE];
+      for (int i = 0; i < HORN_VSPACE; i++) map[i] = -1;
+      int fl = bk_rename(orient ? g_hf[f].r : g_hf[f].l, map);
+      int fr = bk_rename(orient ? g_hf[f].l : g_hf[f].r, map);
+      if (!g_bk_over && bk_unify(gl, fl, 0) && bk_unify(gr, fr, 0)) {
+        if (bk_prove_seq(tp, tail, tn)) return 1;
+      }
+      bk_undo(mark); g_hn_n = an; g_ha_n = aa; g_bk_nv = nvm;
+      if (horn_eq(g_hf[f].l, g_hf[f].r)) break;  // symmetric: 2nd orient redundant
+    }
+  }
+  if (g_bk_over) return 0;
+  // STEP: regress through a rule conclusion (either orientation).
+  if (d > 0) {
+    for (int r = 0; r < g_hr_n && !g_bk_over; r++) {
+      const HRule *ru = &g_hr[r];
+      for (int orient = 0; orient < 2 && !g_bk_over; orient++) {
+        int mark = g_bk_trail_n, an = g_hn_n, aa = g_ha_n, nvm = g_bk_nv;
+        int map[HORN_VSPACE];
+        for (int i = 0; i < HORN_VSPACE; i++) map[i] = -1;
+        int cl0 = bk_rename(orient ? ru->concl_r : ru->concl_l, map);
+        int cr0 = bk_rename(orient ? ru->concl_l : ru->concl_r, map);
+        if (!g_bk_over && bk_unify(gl, cl0, 0) && bk_unify(gr, cr0, 0)) {
+          BkGoal ng[BK_MAXOPEN];
+          int m = 0, ok = 1;
+          for (int c = 0; c < ru->nc && ok; c++) {
+            if (m >= BK_MAXOPEN - tn) { ok = 0; break; }
+            ng[m].l = bk_rename(ru->cl[c], map);
+            ng[m].r = bk_rename(ru->ct[c], map);
+            ng[m].d = d - 1;
+            m++;
+          }
+          for (int c = 0; c < tn && ok; c++) {
+            if (m >= BK_MAXOPEN) { ok = 0; break; }
+            ng[m++] = tail[c];
+          }
+          if (ok && !g_bk_over && bk_prove_seq(tp, ng, m)) return 1;
+        }
+        bk_undo(mark); g_hn_n = an; g_ha_n = aa; g_bk_nv = nvm;
+        if (horn_eq(ru->concl_l, ru->concl_r)) break;  // symmetric
+      }
+    }
+  }
+  return 0;
+}
+
+// Selection score for the pending subgoal: prefer GROUND (memoizable,
+// committed) then the most rigidly-constrained (most non-variable
+// structure, fewest variable occurrences).  Decisive for the CD rule
+// families whose conditions include a still-free premise theorem(Y)
+// alongside a highly-constrained axiom lookup axiom(imp(Y,X)): solving
+// the constrained one first binds Y instead of "prove SOME theorem".
+static int bk_rigid_score(int t, int depth, int *vars) {
+  if (depth > 400) return 0;
+  t = bk_deref(t);
+  if (g_hn[t].head < 0) { (*vars)++; return 0; }
+  int n = 1;
+  for (int i = 0; i < g_hn[t].nargs; i++) n += bk_rigid_score(HARG(t, i), depth + 1, vars);
+  return n;
+}
+static int bk_score(int gl) {
+  int vars = 0;
+  int rigid = bk_rigid_score(gl, 0, &vars);
+  if (vars == 0) return 1 << 20;            // ground: pick first
+  return rigid * 8 - vars;
+}
+
+// Prove the conjunction gs[0..n): select the most-constrained pending
+// subgoal, solve it, then the rest.  A conjunction is order-independent
+// for correctness, so selection is a pure efficiency lever.  A GROUND
+// subgoal is solved in isolation and committed (its proof binds only its
+// own fresh variables, none shared with the rest), with memoization; a
+// non-ground subgoal backtracks over its solutions against the rest.
+static int bk_prove_seq(const TpProblem *tp, BkGoal *gs, int n) {
+  if (n == 0) return 1;
+  if (!bk_budget_ok()) return 0;
+  // Select the best subgoal; move the rest into a contiguous tail.
+  int b = 0, best = -(1 << 30);
+  for (int i = 0; i < n; i++) {
+    int sc = bk_score(bk_deref(gs[i].l));
+    if (sc > best) { best = sc; b = i; }
+  }
+  BkGoal g = gs[b];
+  BkGoal tail[BK_MAXOPEN];
+  int tn = 0;
+  for (int i = 0; i < n; i++) if (i != b) tail[tn++] = gs[i];
+  int gl = bk_deref(g.l), gr = bk_deref(g.r);
+  int d = (g.d > BK_DEPTH_MAX) ? BK_DEPTH_MAX : g.d;
+  if (bk_size(gl, 0) + bk_size(gr, 0) > g_bk_size_cap) return 0;
+  if (bk_is_ground(gl, 0) && bk_is_ground(gr, 0)) {
+    char key[BK_KEYLEN];
+    int have = bk_key(tp, gl, gr, key);
+    if (have) {
+      BkMemo *mm = bk_memo_find(key, 0);
+      if (mm != NULL) {
+        if (mm->faildepth == -1) return bk_prove_seq(tp, tail, tn);
+        if (mm->onpath) return 0;             // regularity: ancestor loop
+        if (mm->faildepth >= d) return 0;
+      }
+    }
+    BkMemo *pm = have ? bk_memo_find(key, 1) : NULL;
+    if (pm != NULL) pm->onpath = 1;
+    int mark = g_bk_trail_n, an = g_hn_n, aa = g_ha_n, nvm = g_bk_nv;
+    int ok = bk_prove_choices(tp, gl, gr, d, NULL, 0);
+    bk_undo(mark); g_hn_n = an; g_ha_n = aa; g_bk_nv = nvm;
+    if (pm != NULL) pm->onpath = 0;
+    if (!ok) {
+      if (pm != NULL && !g_bk_over && pm->faildepth != -1 && d > pm->faildepth)
+        pm->faildepth = d;
+      return 0;
+    }
+    if (pm != NULL) pm->faildepth = -1;       // proved: reusable at any depth
+    return bk_prove_seq(tp, tail, tn);
+  }
+  return bk_prove_choices(tp, gl, gr, d, tail, tn);
+}
+
+// Identify the goal equation to derive: the negated unit true != theorem(G).
+// Returns 1 and sets (*tl,*tr) to (theorem(G), true) oriented for the rule
+// conclusions; requires theorem(G) ground.
+static int bk_goal_pick(const TpProblem *tp, int gi, int *tl, int *tr) {
+  int a = g_hg_l[gi], b = g_hg_r[gi];
+  // The `true` side is a nullary constant; the other is the derived atom.
+  int atom = -1, tru = -1;
+  for (int s = 0; s < 2; s++) {
+    int x = s ? b : a, y = s ? a : b;
+    if (g_hn[x].head >= 0 && g_hn[x].nargs > 0 && g_hn[y].head >= 0 &&
+        g_hn[y].nargs == 0) { atom = x; tru = y; break; }
+  }
+  if (atom < 0) return 0;
+  if (!bk_is_ground(atom, 0)) return 0;   // existential goal: not this lane
+  *tl = atom; *tr = tru;
+  return 1;
+}
+
+// Entry: iterative-deepening backward regression of every ground goal.
+// Returns 1 iff some goal is proved (a refutation).
+static int horn_backward_prove(const TpProblem *tp) {
+  if (g_hr_n == 0 || g_hf_n == 0 || g_hg_n == 0) return 0;
+  int depth_max = 40, size_cap = 0;
+  {
+    const char *de = getenv("THVM_ATP_HORN_BACK_DEPTH");
+    const char *se = getenv("THVM_ATP_HORN_BACK_SIZE");
+    if (de != NULL && atoi(de) > 0) depth_max = atoi(de);
+    if (se != NULL && atoi(se) > 0) size_cap = atoi(se);
+  }
+  // Default term-size cap: the goal's own size plus generous slack (deep
+  // detachment intermediates can exceed the goal, but not without bound).
+  int gmax = 0, any = 0;
+  for (int gi = 0; gi < g_hg_n; gi++) {
+    int tl, tr;
+    if (bk_goal_pick(tp, gi, &tl, &tr)) {
+      any = 1;
+      int s = bk_size(tl, 0) + bk_size(tr, 0);
+      if (s > gmax) gmax = s;
+    }
+  }
+  if (!any) return 0;
+  if (size_cap == 0) size_cap = gmax + 24;
+  g_bk_memo = (BkMemo *)calloc(BK_MEMO_SLOTS, sizeof(BkMemo));
+  if (g_bk_memo == NULL) tp_giveup("OOM in Horn back");
+  g_bk_memo_n = 0;
+  double wall = 0.85 * g_horn_wall;
+  g_bk_deadline = g_horn_t0 + wall;
+  g_bk_node_cap = 0;   // wall-governed
+  int proved = 0;
+  fprintf(stderr, "FindProof: Horn backward CD: %d goal(s), size-cap %d, "
+          "depth<=%d, wall %.1fs\n", g_hg_n, size_cap, depth_max, wall);
+  for (int D = 1; D <= depth_max && !proved; D++) {
+    g_bk_over = 0;
+    g_bk_size_cap = size_cap;
+    for (int gi = 0; gi < g_hg_n && !proved; gi++) {
+      int tl, tr;
+      if (!bk_goal_pick(tp, gi, &tl, &tr)) continue;
+      // Re-instantiate the goal into a fresh proof space each iteration.
+      int an = g_hn_n, aa = g_ha_n, nvm = g_bk_nv, mark = g_bk_trail_n;
+      int map[HORN_VSPACE];
+      for (int i = 0; i < HORN_VSPACE; i++) map[i] = -1;
+      // Goal is ground, so rename is a copy (no vars); keeps the search
+      // arena separable from the parsed goal terms.
+      BkGoal root;
+      root.l = bk_rename(tl, map);
+      root.r = bk_rename(tr, map);
+      root.d = D;
+      if (!g_bk_over && bk_prove_seq(tp, &root, 1)) proved = 1;
+      bk_undo(mark); g_hn_n = an; g_ha_n = aa; g_bk_nv = nvm;
+    }
+    if (g_bk_over && horn_now() > g_bk_deadline) break;   // out of wall
+  }
+  fprintf(stderr, "FindProof: Horn backward CD: %s (%ld nodes, %d memo, %.1fs)\n",
+          proved ? "goal PROVED" : "no proof", g_bk_nodes, g_bk_memo_n,
+          horn_now() - g_horn_t0);
+  if (g_bk_memo != NULL) {
+    for (int i = 0; i < BK_MEMO_SLOTS; i++) free(g_bk_memo[i].key);
+    free(g_bk_memo); g_bk_memo = NULL; g_bk_memo_n = 0;
+  }
+  free(g_bk_bind); g_bk_bind = NULL; g_bk_bind_cap = 0;
+  free(g_bk_trail); g_bk_trail = NULL; g_bk_trail_n = g_bk_trail_cap = 0;
+  g_bk_nv = 0;
+  return proved;
+}
+
 // The pass: decode, chain, rank, append.  Runs after tp_parse and
 // BEFORE SInE so released facts participate in axiom selection.
 static void tp_horn_release(TpProblem *tp) {
@@ -2475,6 +2905,9 @@ static void tp_horn_release(TpProblem *tp) {
     g_horn_cd = (ce != NULL && ce[0] != '0') ? atoi(ce) : 0;
     g_cd_fsub = g_cd_bsub = g_cd_reso_hits = 0;
     g_cd_rounds = 0; g_cd_overcap = 0; g_cd_reso_n = 0;
+    const char *be = getenv("THVM_ATP_HORN_BACK");
+    g_bk_on = (be != NULL && be[0] != '0') ? atoi(be) : 0;
+    g_bk_nodes = 0; g_bk_over = 0;
   }
   // Parse every positive clause; remember each clause's term pair.
   int *pl = (int *)malloc((size_t)n * sizeof(int));
@@ -2510,7 +2943,19 @@ static void tp_horn_release(TpProblem *tp) {
     // Slice mode: free the pool slot at once on a non-CD problem.
     if (g_horn_cd >= 2)
       tp_giveup("horn-cd slice: no encoded-Horn dispatcher");
+    if (g_bk_on >= 2)
+      tp_giveup("horn-back slice: no encoded-Horn dispatcher");
     goto done;   // not an encoded-Horn problem
+  }
+  if (g_bk_on >= 2) {
+    // The backward lane targets ground condensed-detachment goals; the
+    // existential (planning) and oversized-KB families crack via the v2
+    // steered forward lane in the wm slice.
+    int ex = 0;
+    for (int g = 0; g < g_hg_n && !ex; g++)
+      ex = horn_has_var(g_hg_l[g]) || horn_has_var(g_hg_r[g]);
+    if (ex) tp_giveup("horn-back slice: existential goal (v2 lane covers it)");
+    if (tp->n_cls > 4000) tp_giveup("horn-back slice: oversized KB");
   }
   if (g_horn_cd >= 2) {
     // The CD discipline targets ground saturation-style goals; the
@@ -2617,6 +3062,11 @@ static void tp_horn_release(TpProblem *tp) {
     g_horn_max_rel = 4000000;
     g_horn_max_nodes = (1 << 24);
   }
+  if (g_bk_on) {
+    // The backward regression IS the proof search here: give it the wall.
+    double w = 0.9 * g_cli_wall_sec;
+    g_horn_wall = (w > HORN_WALL_SEC) ? w : HORN_WALL_SEC;
+  }
   {
     const char *we = getenv("THVM_ATP_HORN_WALL");
     const char *me = getenv("THVM_ATP_HORN_MAX");
@@ -2636,6 +3086,34 @@ static void tp_horn_release(TpProblem *tp) {
     g_hg_l[g] = horn_norm(g_hg_l[g]);
     g_hg_r[g] = horn_norm(g_hg_r[g]);
   }
+  // Backward goal-directed CD lane: regress the ground goal to axiom
+  // instances instead of flooding forward.  On success theorem(G)=true
+  // is a proved consequence -- release it as a unit (refutes the negated
+  // goal true != theorem(G)) and claim the direct SZS route.
+  if (g_bk_on && horn_backward_prove(tp)) {
+    g_horn_goal_reached = 1;
+    g_cli_horn_applied = 1;
+    // Emit the proved theorem unit so --proof / the engine reconstruct a
+    // refutation (the direct SZS route skips the engine when no proof is
+    // requested; the unit is a real consequence either way).
+    for (int gi = 0; gi < g_hg_n && tp->n_cls < TP_MAX_CLAUSES; gi++) {
+      int tl, tr;
+      if (!bk_goal_pick(tp, gi, &tl, &tr)) continue;
+      static char lb[TP_SIDE_LEN], rb[TP_SIDE_LEN];
+      size_t lo = 0, ro = 0;
+      if (bk_print(tp, lb, sizeof lb, &lo, tl) &&
+          bk_print(tp, rb, sizeof rb, &ro, tr)) {
+        TpClause *cl = &tp->cls[tp->n_cls++];
+        snprintf(cl->lhs, sizeof cl->lhs, "%s", lb);
+        snprintf(cl->rhs, sizeof cl->rhs, "%s", rb);
+        cl->neg = 0; cl->conj = 0;
+        tp_scan_term(tp, cl->lhs);
+        tp_scan_term(tp, cl->rhs);
+      }
+    }
+    goto done;
+  }
+  if (g_bk_on >= 2) tp_giveup("horn-back slice: no proof within budget");
   // CD lane: the initial weight cap.  Auto = the largest INPUT fact
   // plus slack; the goal deliberately does NOT enter the max -- the
   // and/equivalent PM goals expand to 25-50 symbols and a goal-sized
@@ -3440,6 +3918,15 @@ static const SchedSlice SCHEDULE[] = {
   // dispatcher + ground goal is detected, freeing the pool slot on
   // every non-CD problem exactly like the equals slice.
   {"horn-cd", "--horn-cd=2",                               0.0},
+  // (1d) BACKWARD goal-directed condensed detachment: regress the ground
+  // goal to axiom instances by iterative-deepening DFS over the decoded
+  // modus-ponens rule, so the ground goal anchors every subgoal instead
+  // of flooding forward with ever-more-general theorem schemas (the
+  // forward CD flaw that times out thvm, Twee's 20k-rule cap AND Vampire
+  // on the deep LCL family).  =2: exits immediately unless a dispatcher +
+  // ground goal is detected, freeing the pool slot on every non-CD
+  // problem exactly like the horn-cd slice.
+  {"horn-back", "--horn-back=2",                            0.0},
   // (2) Goal FLATTENING (Twee/Vampire naming port) + LAZY ground-join
   // (Twee selection-time redundancy) + backward-simplify + auto-max-weight.
   // Cracks deep-goal UEQ that completion stalls on (COL060-1, GRP167-4);
