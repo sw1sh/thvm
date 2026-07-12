@@ -7,7 +7,9 @@ can test before uploading. One tarball serves two competitions from one binary:
 - CASC (CADE ATP System Competition) unit-equality proving
 - ProoVer first-order proof checking
 
-Last verified 2026-07-08 on Ubuntu 22.04 / gcc 11.4 and macOS.
+Last verified 2026-07-08 on Ubuntu 22.04 / gcc 11.4; re-verified 2026-07-12 on
+macOS (tarball -> extract -> `starexec_build` -> `starexec_run_default` proves
+LCL192-10 and LAT159-1 at a 30 s wall).
 
 ---
 
@@ -240,14 +242,26 @@ bin/FindProof --schedule --szs --proof --wall=<limit> PROBLEM.p
 
 - INPUT: a TPTP CNF unit-equality problem. `include('Axioms/*.ax')` directives
   resolve against the problem directory and the `TPTP` environment variable.
-- `--schedule` runs a time-sliced portfolio of configurations, each in a child
-  process under a slice of the wall limit, and stops at the first proof.
+- `--schedule` runs a CONCURRENT portfolio: the configuration slices launch as
+  child processes in a bounded pool (5 at once, each with the FULL wall limit
+  and a per-child RSS cap), and the first proof wins -- the losers are killed
+  and reaped. The slice set (see `SCHEDULE[]` in `tools/thvm_atp_cli.c`): the
+  Waldmeister preset, the existential equals-goal encoding, the forward and
+  backward condensed-detachment lanes (`--horn-cd` / `--horn-back`, which exit
+  immediately on non-CD problems and free their pool slot), goal flattening
+  (dressed and bare), the Twee-scored completion lane (`--simpler-join` +
+  passive re-scoring), the MNF goal-directed front, encompassment demodulation,
+  bare completion, and three ground-join backups.
 - OUTPUT: one `% SZS status` line using the CNF ontology
   (`Unsatisfiable` / `Satisfiable` / `GaveUp` / `ResourceOut` / `Timeout`) and,
   on success, an SZS `CNFRefutation` block.
-- Problems the engine cannot represent (a functor of arity above eight, or a
-  knowledge base of thousands of clauses) degrade to a clean `GaveUp` rather
-  than crashing, so every problem gets a valid status line.
+- Problem transforms widen what the engine represents: a functor of arity
+  above eight is curried into nested binary `ap2` applications (`--curry`,
+  default on), and a knowledge base of thousands of clauses is cut to the
+  goal-relevant slice by SInE selection before the capacity checks
+  (`THVM_ATP_SINE=0` restores the old clean give-up). A problem that still
+  cannot be represented degrades to a clean `GaveUp` rather than crashing, so
+  every problem gets a valid status line.
 
 ### proover -- first-order proof checking
 
@@ -279,11 +293,17 @@ bin/FindProof --check --szs PROOF.p
 - Separate `-D` flags. Pass each engine feature define as its own argument (the
   Makefile already does). Collapsing them into one unquoted shell variable
   silently breaks the build.
-- Wall vs CPU. `--schedule` slices the WALL-clock limit. On a busy StarExec node
-  the CPU limit can bite first; keep the schedule slices modest.
-- Memory. Proof checking bounds its own term store and abstains (`NotVerified`)
-  rather than exhausting memory, but still set a sane `STAREXEC_MAX_MEM` on the
-  job.
+- Wall vs CPU. `--schedule` runs up to 5 slices CONCURRENTLY, each against the
+  full WALL-clock limit, so total CPU consumption can approach 5x the wall. If
+  the job's `STAREXEC_CPU_LIMIT` equals the wall limit, the CPU limit bites
+  first on a saturating problem -- give the job a CPU limit of at least 5x the
+  wall (CASC's standard config does).
+- Memory. Each schedule child inherits a per-slice RSS abort cap
+  (`SCHED_SLICE_RSS_MB`, 4500 MB) unless the caller exported a lower
+  `THVM_ATP_RSS_ABORT_MB`; measured practical peak is ~7 GB for 4 concurrent
+  slices. Proof checking bounds its own term store and abstains
+  (`NotVerified`) rather than exhausting memory. Still set a sane
+  `STAREXEC_MAX_MEM` on the job.
 - Regenerate the tarball after any source change. `mk_tarball.sh` copies the
   live sources; the Makefile depends on both `tools/thvm_atp_cli.c` and the
   `#include`d `tools/proof_check.c`, so a checker-only edit does trigger a

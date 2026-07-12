@@ -11,9 +11,10 @@ dependencies beyond the C standard library and libm.
 STAREXEC CONFIGURATIONS (both drive the same bin/FindProof)
   bin/starexec_run_default PROBLEM.p
       CASC UEQ proving.  Reads the wall-clock limit from
-      $STAREXEC_WALLCLOCK_LIMIT (default 120s), runs a time-sliced
-      portfolio, and writes an SZS status line plus, on success, an SZS
-      CNFRefutation.
+      $STAREXEC_WALLCLOCK_LIMIT (default 120s), runs a CONCURRENT
+      portfolio (a pool of 5 configuration slices, each with the full
+      wall; first proof wins), and writes an SZS status line plus, on
+      success, an SZS CNFRefutation.
   bin/starexec_run_proover PROOF.p
       ProoVer proof checking.  Validates every derived step of a
       first-order TSTP proof and writes one SZS verdict
