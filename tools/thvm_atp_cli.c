@@ -4063,7 +4063,7 @@ static int run_schedule(const char *self, const char *file, double wall,
   char  outs[N_SCHED][64];
   int   done[N_SCHED];
   for (int i = 0; i < N_SCHED; i++) { pids[i] = -1; done[i] = 0; outs[i][0] = 0; }
-  int launched = 0, next = 0, winner = -1;
+  int launched = 0, next = 0, winner = -1, n_inerr = 0;
   // Launch up to SCHED_MAX_PAR, then refill as children exit.
   while (winner < 0 && (next < N_SCHED || launched > 0)) {
     while (winner < 0 && launched < SCHED_MAX_PAR && next < N_SCHED) {
@@ -4087,7 +4087,12 @@ static int run_schedule(const char *self, const char *file, double wall,
         snprintf(cmd, sizeof cmd, "FINDPROOF_SLICE=1 '%s' %s --wall=%.0f%s%s '%s'",
                  self, SCHEDULE[i].flags, wall,
                  szs ? " --szs" : "", want_proof ? " --proof" : "", file);
-        _exit(system(cmd) == 0 ? 0 : 1);
+        // Forward the slice's real exit code: 2 (input/environment error,
+        // e.g. an unresolvable include) must stay distinguishable from 1
+        // (searched and gave up) so the parent doesn't mask a broken
+        // input as an honest GaveUp.
+        int st = system(cmd);
+        _exit((st != -1 && WIFEXITED(st)) ? WEXITSTATUS(st) : 1);
       }
       // Set the child's pgid parent-side too (race-free: whichever of
       // parent/child wins, the group id equals the child pid).
@@ -4105,6 +4110,7 @@ static int run_schedule(const char *self, const char *file, double wall,
         done[i] = 1; launched--;
         if (i < SCHED_PID_MAX) g_sched_pids[i] = -1;   // reaped: clear
         if (WIFEXITED(status) && WEXITSTATUS(status) == 0) winner = i;
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 2) n_inerr++;
         break;
       }
     }
@@ -4131,6 +4137,13 @@ static int run_schedule(const char *self, const char *file, double wall,
       fclose(fp);
     }
     rc = 0;
+  } else if (n_inerr == N_SCHED) {
+    // Every slice failed before searching (the input error precedes the
+    // per-slice transforms, so it hits all of them identically): this is
+    // a broken input or environment, not a give-up.
+    fprintf(stderr, "FindProof: all schedule slices reported an input error\n");
+    if (szs) printf("%% SZS status Error for %s\n", file);
+    rc = 2;
   } else if (szs) {
     printf("%% SZS status GaveUp for %s\n", file);
   }
