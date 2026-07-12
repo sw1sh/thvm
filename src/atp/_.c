@@ -26572,16 +26572,55 @@ typedef struct {
 } SwRnFtEnt;
 enum { SW_RN_FT_SLOTS = 8192 };
 static SwRnFtEnt g_sw_rn_ft[SW_RN_FT_SLOTS];
+// Renamed-clone epoch reclamation: every clone handed out in the
+// CURRENT r_revision epoch is parked here, and the first rename of the
+// NEXT revision returns the whole prior epoch to Arena A's free list.
+// Sound because a clone is referenced only across formations of one
+// revision epoch: a cache hit requires rev equality, no formation is
+// in flight across a rule-set mutation, and the r_revision bump is
+// exactly the moment every cached entry goes permanently stale.
+// Abandoning the clones instead ("never freed") retained ~10 Arena-A
+// cells per QUEUED CP -- with the treated-span abandonment fixed, THE
+// remaining per-CP Arena share of the 6GB RSS aborts on deep GRP/RNG
+// twee-slice runs.  Parked pointers are valid only for the arena that
+// allocated them: on an arena change (fresh AtpState) the list RESETS
+// without freeing (ft_destroy already dropped the old slab pool).
+static AtpFtCell **g_sw_rn_park       = NULL;
+static u32         g_sw_rn_park_n     = 0;
+static u32         g_sw_rn_park_cap   = 0;
+static u64         g_sw_rn_park_rev   = ~0ull;
+static const void *g_sw_rn_park_arena = NULL;
 static AtpFtCell *sw_rename_ft(AtpState *s, const AtpFtCell *src) {
+  AtpFt *a  = (AtpFt *)s->ft_arena_ptr;
+  u64   rev = (u64)s->r_revision;
+  if ((const void *)a != g_sw_rn_park_arena) {
+    g_sw_rn_park_n     = 0;   // stale arena: pointers already released
+    g_sw_rn_park_arena = (const void *)a;
+    g_sw_rn_park_rev   = rev;
+  } else if (rev != g_sw_rn_park_rev) {
+    for (u32 k = 0; k < g_sw_rn_park_n; k++) {
+      ft_free_span(a, g_sw_rn_park[k], g_sw_rn_park[k]->end);
+    }
+    g_sw_rn_park_n   = 0;
+    g_sw_rn_park_rev = rev;
+  }
   u64 h = ((u64)(uintptr_t)src) * 0x9e3779b97f4a7c15ull;
   u32 slot = (u32)(h >> 51) & (u32)(SW_RN_FT_SLOTS - 1);
   SwRnFtEnt *e = &g_sw_rn_ft[slot];
-  if (e->src == src && e->rev == (u64)s->r_revision) return e->out;
-  AtpFtCell *out = ft_rename_span((AtpFt *)s->ft_arena_ptr, src,
-                                  CP_RENAME_OFFSET, 0);
+  if (e->src == src && e->rev == rev) return e->out;
+  AtpFtCell *out = ft_rename_span(a, src, CP_RENAME_OFFSET, 0);
+  if (g_sw_rn_park_n == g_sw_rn_park_cap) {
+    u32 ncap = g_sw_rn_park_cap ? g_sw_rn_park_cap * 2u : 256u;
+    AtpFtCell **np = (AtpFtCell **)realloc(g_sw_rn_park,
+                                           (size_t)ncap * sizeof *np);
+    if (np == NULL) thvm_fatal("sw_rename_ft: park list OOM");
+    g_sw_rn_park     = np;
+    g_sw_rn_park_cap = ncap;
+  }
+  g_sw_rn_park[g_sw_rn_park_n++] = out;
   e->src = src;
   e->out = out;
-  e->rev = (u64)s->r_revision;
+  e->rev = rev;
   return out;
 }
 
@@ -26743,17 +26782,48 @@ static u8 sw_form_push_ft_try(AtpState *s, Term lo, Term ro, Term sub_pre,
     g_acp_fuse.valid = 0u;
   }
   if (ft_treat) {
-    g_vcp_treat.armed = 0u;
+    // Return the treated spans to Arena A's free list.  On a CPQ build
+    // the queue-insert ADOPTED them (fl/fr are NULL -> pure disarm);
+    // everywhere else -- queued via the packed-byte pipeline, joined,
+    // or dropped by a push gate -- the stash still owns them, and
+    // abandoning them retained ~31 Arena-A cells per FORMED CP (the
+    // 4.2GB / 68%-of-RSS flood that aborted deep GRP/RNG runs at ~57s
+    // under the 6GB guard).  Content-untouched: only the allocator's
+    // free list changes, so the trajectory stays byte-identical.
+    i64 _rb = ftnet_now();
+    vcp_treat_release(s);
+    g_ftnet_release += ftnet_now() - _rb;
     g_acp_fuse.valid  = 0u;
   }
   return 1u;
 }
 #endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
 
+static u32 sw_form_push_impl(AtpState *s, Term lo, Term ro, Term sub_pre,
+                             Term lin, Term rin,
+                             const u32 *p, u32 p_len, u32 t_out, u32 t_in,
+                             u32 i_out, u32 i_in, u8 o_eq, u8 in_eq);
+
+// Mem-census bracket around one formation+treat+push (see g_ftnet_form).
 static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
                         Term lin, Term rin,
                         const u32 *p, u32 p_len, u32 t_out, u32 t_in,
                         u32 i_out, u32 i_in, u8 o_eq, u8 in_eq) {
+#ifdef THVM_ATPFT_ALLOC
+  i64 _fb = ftnet_now();
+#endif
+  u32 rv = sw_form_push_impl(s, lo, ro, sub_pre, lin, rin, p, p_len,
+                             t_out, t_in, i_out, i_in, o_eq, in_eq);
+#ifdef THVM_ATPFT_ALLOC
+  g_ftnet_form += ftnet_now() - _fb;
+#endif
+  return rv;
+}
+
+static u32 sw_form_push_impl(AtpState *s, Term lo, Term ro, Term sub_pre,
+                             Term lin, Term rin,
+                             const u32 *p, u32 p_len, u32 t_out, u32 t_in,
+                             u32 i_out, u32 i_in, u8 o_eq, u8 in_eq) {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
   {
     u32 _ft_rv = 0u;
@@ -27090,6 +27160,12 @@ static u32 sw_form_push(AtpState *s, Term lo, Term ro, Term sub_pre,
     g_acp_fuse.valid = 0u;
   }
   if (ft_treat) {
+    // Free un-adopted treated spans (see the sw_form_push_ft_try tail:
+    // the Arena-A per-formed-CP retention flood); no-op disarm when a
+    // CPQ insert took ownership.
+#ifdef THVM_ATPFT_NORM
+    vcp_treat_release(s);
+#endif
     g_vcp_treat.armed = 0u;
     g_acp_fuse.valid  = 0u;
   }
