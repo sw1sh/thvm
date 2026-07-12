@@ -547,6 +547,36 @@ these at once to match Waldmeister's typical run: SelectionRatio
 141, CH_MixWeight, RHSInterreduce, UnfailingCP, AutoPrecedence on
 the AtpFt-internal nand symbol.
 
+### WL Method reach vs CLI-only transforms
+
+The FindProof CLI's `KNOBS[]` table (`tools/thvm_atp_cli.c`) maps every
+`--flag` to its `THVM_ATP_*` env and, where one exists, its `TFindProof`
+Method suboption name.  Engine knobs are WL-reachable: the Method
+options `"SimplerJoin"`, `"EncompassDemod"`, `"GoalNarrow"`,
+`"CPSetIRBudget"`, `"PopRulesOnly"`, `"GjDeleteRule"`, and
+`"FullInterreduce"` drive the same `AtpState` fields the CLI flags set
+(tri-state: unset = the engine default, which honors the env), and the
+`"FlattenGoal"` Method option runs the WL port of the CLI's
+goal-flattening transform (fresh-constant naming + minimal precedence
+band) in `atpProveBundle`'s problem-build path.  The fine-tuning caps
+(`--gn-*`, `--gj-budget`, `--gj-index`) stay env-only -- in-process WL
+callers can still set them via `SetEnvironment` before the run since
+the engine reads them at `thvm_atp_init` / use-site.
+
+CLI-ONLY (honest scoping): the transforms that operate on the TPTP
+CLAUSE SET inside the CLI's problem constructor -- the encoded-Horn
+release + condensed-detachment lanes (`--horn*`, incl. `--horn-cd` /
+`--horn-back`), the existential equals-goal encoding (`--equals-goal`),
+wide-functor currying (`--curry`), and SInE axiom pruning on oversized
+knowledge bases -- run BEFORE the unit-equational encoding, on
+structures (`ifeq` dispatchers, negative non-ground units, arity-9+
+functors, 8k-clause KBs) that the WL `TFindProof` surface never
+produces: its problem builder consumes already-unit-equational WL
+axioms, and `TFindProof[File["problem.p"]]` routes through
+`TPTPImport`, not the CLI's reader.  Reaching them from WL would mean
+porting the CLI's whole TPTP clause pipeline into the encoder; use the
+`bin/FindProof` binary for those problem classes instead.
+
 ## Soundness probes
 
 ### Live differential VERIFY
