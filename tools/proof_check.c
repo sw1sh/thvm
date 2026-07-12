@@ -474,6 +474,22 @@ static u8 pc_pair_alpha_eq(Term a1, Term b1, Term a2, Term b2) {
   return (kbo_eq(x1, s2) && kbo_eq(y1, t2)) ? 1u : 0u;
 }
 
+// Instance check: the goal pair (gl, gr) is a substitution instance of
+// the derived pair (a, b) under ONE shared match, tried in both side
+// orders.  Sound: a derived equation is universally quantified, so
+// every instance is entailed -- including the engine's EXTENSION-
+// variable records, where a rewrite introduced a fresh rhs-only
+// variable and the recorded conclusion pins it to a concrete term
+// (GRP706-1 t1017296: transitivity through a shared lhs binds C to
+// op_c).  Requires (a, b)'s variable ids < REWRITE_MAX_VAR.
+static u8 pc_pair_instance(Term gl, Term gr, Term a, Term b) {
+  RewriteSubst sub;
+  memset(&sub, 0, sizeof sub);
+  if (thvm_match(a, gl, &sub) && thvm_match(b, gr, &sub)) return 1;
+  memset(&sub, 0, sizeof sub);
+  return (thvm_match(a, gr, &sub) && thvm_match(b, gl, &sub)) ? 1u : 0u;
+}
+
 // Equational fast path: a unit-equality step (the equational engine's
 // own cp / orient / simp records) is settled by COMPLETION on the
 // parent equations with the conclusion as the goal -- orders of
@@ -489,6 +505,15 @@ static u8 pc_pair_alpha_eq(Term a1, Term b1, Term a2, Term b2) {
 // them IN PLACE; pc_steps and the locals are refreshed from it after.
 static Term g_pc_roots[PC_MAX_STEPS + 2 * PC_MAX_PARENTS + 2];
 static u8   g_pc_eq_gc_refreshed = 0;   // an eq session gc'd + refreshed
+// 1 while an eq session holds g_pc_roots as its gc_extra_roots: filled
+// at session start, cleared on NORMAL session exit.  If a session
+// heap-exhausts (longjmp to the driver's per-step handler), the exit
+// refresh is skipped -- but the collector relocated the root slots IN
+// PLACE, so the driver can still pc_refresh_formulas(g_pc_roots) and
+// keep checking the remaining steps instead of abstaining on the whole
+// proof (the check14 failure mode: one blown deep session at record ~66
+// silently ended the pass).
+static u8   g_pc_roots_armed = 0;
 // Prior-context window for the per-step cp-cone check (see pc_entails_eq
 // / pc_check_cp): the index of the record currently under check, so a
 // `cp` step's superposition is normalised only by records STRICTLY
@@ -498,13 +523,40 @@ static u8   g_pc_eq_gc_refreshed = 0;   // an eq session gc'd + refreshed
 // its own (earlier-context) check, so a bogus demodulator cannot yield a
 // false Verified -- it fails its own step first.
 static int  g_pc_cur_idx   = -1;
+// Last-resort budget boost for the axiom-augmented completion retry: a
+// treatment-compressed record can depend on a demodulator OUTSIDE the
+// proof cone (GRP706-1 t769119's f/ld swap), so no syntactic route over
+// prior records reproduces it -- only re-deriving from the axioms does.
+// The deep session's 30s clock bail cuts that completion at a machine-
+// load-dependent selection count (the run-to-run VALID/UNKNOWN flap);
+// the boosted retry raises the clock cap so the DETERMINISTIC selection
+// cap is the binding budget.
+static u8   g_pc_eq_boost  = 0;
 // Defined after the PcStep section (they touch pc_steps/pc_nstep).
 static u32  pc_fill_roots(Term *buf, u32 cap);
 static void pc_refresh_formulas(const Term *buf);
 static u32  pc_axiom_pairs(Term *pl, Term *pr, u32 cap);
 static int  pc_check_cp(Term *parents, int np, Term concl);
+static int  pc_refresh_step_handles(Term *out, int np, Term *concl);
 
-static int pc_entails_eq(Term *parents, int np, Term concl) {
+// Deep validation mode (THVM_PROOFCHECK_DEEP=1): 10x budgets; the
+// default stays wall-friendly.
+static int pc_deep_mode(void) {
+  static int deep = -1;
+  if (deep < 0) {
+    const char *e = getenv("THVM_PROOFCHECK_DEEP");
+    deep = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  }
+  return deep;
+}
+
+// do_session == 0 runs only the syntactic settles (pair alpha/instance,
+// one-step rewrite): cheap, deterministic, no heap growth.  1 adds the
+// completion session.  The caller runs the syntactic pass and the
+// cp-cone routes BEFORE any session: a session on a hard step can grow
+// the heap to exhaustion (longjmp past the caller), which used to rob
+// the deterministic routes of steps they settle instantly.
+static int pc_entails_eq(Term *parents, int np, Term concl, int do_session) {
   Term gl = 0, gr = 0;
   Term pl[PC_MAX_PARENTS], pr[PC_MAX_PARENTS];
   int npl = 0;
@@ -584,22 +636,33 @@ static int pc_entails_eq(Term *parents, int np, Term concl) {
     (void)base_l; (void)base_r; (void)have_base;
     for (int i = 0; i < npl; i++) {          // pair being transformed
       for (int j = 0; j < npl; j++) {        // equation applied
-        if (j == i) continue;
+        // j == i is admissible: a `step` record can rewrite one side
+        // of a pair by the pair's OWN equation (the extension-variable
+        // transitivity shape, GRP706-1 t1017294: b -> a where a has a
+        // variable b lacks).  The applied faces are renamed apart
+        // first, so equation variables not shared with the rewritten
+        // side come out FRESH (extension variables) instead of being
+        // captured by same-id variables of the subject pair.
+        Term lj = thvm_rename_vars(pl[j], REWRITE_MAX_VAR / 2);
+        Term rj = thvm_rename_vars(pr[j], REWRITE_MAX_VAR / 2);
         PcRwSet ls, rs;
         ls.n = rs.n = 0;
-        pc_rewrite_all(pl[i], pl[j], pr[j], &ls);
-        pc_rewrite_all(pl[i], pr[j], pl[j], &ls);
-        pc_rewrite_all(pr[i], pl[j], pr[j], &rs);
-        pc_rewrite_all(pr[i], pr[j], pl[j], &rs);
+        pc_rewrite_all(pl[i], lj, rj, &ls);
+        pc_rewrite_all(pl[i], rj, lj, &ls);
+        pc_rewrite_all(pr[i], lj, rj, &rs);
+        pc_rewrite_all(pr[i], rj, lj, &rs);
         for (int k = 0; k < ls.n; k++) {
           if (pc_pair_alpha_eq(gl, gr, ls.out[k], pr[i])) return PC_VALID;
+          if (pc_pair_instance(gl, gr, ls.out[k], pr[i])) return PC_VALID;
         }
         for (int k = 0; k < rs.n; k++) {
           if (pc_pair_alpha_eq(gl, gr, pl[i], rs.out[k])) return PC_VALID;
+          if (pc_pair_instance(gl, gr, pl[i], rs.out[k])) return PC_VALID;
         }
       }
     }
   }
+  if (!do_session) return PC_UNKNOWN;
   // KBO over the checker's label space: weight 1 everywhere, precedence
   // by label id (an arbitrary total order is admissible).
   u32 nl = PC_LAB_BASE + (u32)pc_nsyms + 1u;
@@ -618,13 +681,7 @@ static int pc_entails_eq(Term *parents, int np, Term concl) {
   u32 base_g = nb;
   g_pc_roots[nb++] = gl;
   g_pc_roots[nb++] = gr;
-  // Deep mode (THVM_PROOFCHECK_DEEP=1): 10x budgets for validation
-  // runs; the default stays wall-friendly.
-  static int pc_deep = -1;
-  if (pc_deep < 0) {
-    const char *e = getenv("THVM_PROOFCHECK_DEEP");
-    pc_deep = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
-  }
+  int pc_deep = pc_deep_mode();
   u32 sel_cap = pc_deep ? 40000u : 400u;
   AtpState *s = thvm_atp_init(&cfg, sel_cap);
   int v = PC_UNKNOWN;
@@ -632,6 +689,7 @@ static int pc_entails_eq(Term *parents, int np, Term concl) {
   if (s != NULL) {
     s->gc_extra_roots = g_pc_roots;
     s->n_gc_extra_roots = nb;
+    g_pc_roots_armed = 1;
     // Unfailing completion: the step theories are comm-heavy (lattice
     // equations); without E-face CPs an unorientable parent can never
     // participate and the entailment is undecidable for the session.
@@ -655,19 +713,27 @@ static int pc_entails_eq(Term *parents, int np, Term concl) {
       u64 h0 = thvm_atp_heap_checkpoint();
       clock_t c0 = clock();
       AtpStatus st = ATP_RUNNING;
-      long cl_cap = (pc_deep ? 30 : 2) * CLOCKS_PER_SEC;
+      long cl_cap = (pc_deep ? (g_pc_eq_boost ? 120 : 30) : 2) * CLOCKS_PER_SEC;
       // Deep sessions are GC-rooted now: let collections run instead of
       // bailing on growth (the 64MB bail was starving the budget --
       // lattice completions allocate that in under a second).
       u64 hp_cap = pc_deep ? ~0ull : (32u << 20);
-      for (u32 k = 0; k < sel_cap && st == ATP_RUNNING; k++) {
+      u32 k = 0;
+      for (; k < sel_cap && st == ATP_RUNNING; k++) {
         st = thvm_atp_step(s);
         if ((thvm_atp_heap_checkpoint() - h0) > hp_cap) break;
         if ((clock() - c0) > cl_cap) break;
       }
+      if (g_pc_eq_boost && getenv("THVM_PROOFCHECK_DBG") != NULL) {
+        fprintf(stderr,
+                "PCDBG boost session idx=%d npl=%d st=%d sels=%u secs=%.1f\n",
+                g_pc_cur_idx, npl, (int)st, k,
+                (double)(clock() - c0) / CLOCKS_PER_SEC);
+      }
       if (st == ATP_PROVED) v = PC_VALID;
     }
     thvm_atp_free(s);
+    g_pc_roots_armed = 0;
   }
   if (gc_count() != gc0) {
     // The session collected: the root slots hold the relocated
@@ -704,10 +770,47 @@ static int pc_entails(Term *parents, int np, Term concl) {
       alleq = 0;
     }
     if (alleq) {
-      int v = pc_entails_eq(parents, np, concl);
+      // 1. Syntactic settles (pair alpha/instance, one-step rewrite):
+      // cheap, deterministic, allocation-light.
+      int v = pc_entails_eq(parents, np, concl, 0);
+      if (v != PC_UNKNOWN) return v;
+      // 2. Focused cp-cone routes: the 2-parent completion under-derives
+      // a recorded `cp` because the pair is R-NORMALISED -- the
+      // demodulators that normalise are OTHER rules.  Reproduce the
+      // inference directly (superpose the 2 parents / fold treatment
+      // into the parent pair, normalise with the prior records) instead
+      // of re-deriving the whole theory.  These run BEFORE any engine
+      // session: a session on a hard step can blow the heap
+      // (longjmp past this frame) and rob them of steps they settle
+      // instantly.
+      if (concl != 0 && g_pc_cur_idx >= 0) {
+        v = pc_check_cp(parents, np, concl);
+        if (v != PC_UNKNOWN) return v;
+      }
+      // 3. Two-parent completion session.
+      u64 eq_gc0 = gc_count();
+      v = pc_entails_eq(parents, np, concl, 1);
       if (v != PC_UNKNOWN || concl == 0) return v;
-      // Axiom-augmented fallback (sound, weaker provenance): treatment
-      // rewrites inside orient records are not separately recorded.
+      // A rooted eq-session collection relocated the heap: pc_steps was
+      // refreshed through g_pc_roots (pc_refresh_formulas), but THIS
+      // frame's parents/concl handles are stale from-space Terms -- the
+      // axiom-augmented fallback below would read garbage (the 3
+      // residual GRP706-1 abstains: every one a deep 30s/40k-selection
+      // session that collected).  Re-fetch the live handles from
+      // pc_steps before any further route touches them.
+      Term rp[PC_MAX_PARENTS];
+      if (gc_count() != eq_gc0) {
+        if (!pc_refresh_step_handles(rp, np, &concl)) {
+          return PC_UNKNOWN;   // cannot refresh: abstain, don't read garbage
+        }
+        parents = rp;
+        eq_gc0  = gc_count();
+      }
+      // 4. Axiom-augmented fallback (sound, weaker provenance):
+      // treatment rewrites inside orient records are not separately
+      // recorded, and their demodulators can live OUTSIDE the proof
+      // cone entirely (GRP706-1 t769119's f/ld swap) -- only
+      // re-deriving from the axioms reaches those.
       Term apl[PC_MAX_PARENTS], apr[PC_MAX_PARENTS];
       u32 na = pc_axiom_pairs(apl, apr, PC_MAX_PARENTS);
       if (na > 0) {
@@ -722,15 +825,36 @@ static int pc_entails(Term *parents, int np, Term concl) {
           Term k[2] = { apl[i], apr[i] };
           aug[n2++] = term_new_ctr(PC_LAB_EQ, k, 2);
         }
-        v = pc_entails_eq(aug, n2, concl);
+        v = pc_entails_eq(aug, n2, concl, 1);
+        // Same staleness hazard after the second session.
+        if (gc_count() != eq_gc0) {
+          if (!pc_refresh_step_handles(rp, np, &concl)) {
+            return v == PC_VALID ? v : PC_UNKNOWN;
+          }
+          parents = rp;
+        }
       }
-      // Focused critical-pair route (the cp-cone check): the 2-parent
-      // completion under-derives a recorded `cp` because the pair is
-      // R-NORMALISED -- the demodulators that normalise are OTHER rules.
-      // Reproduce it directly (superpose the 2 parents, normalise with
-      // the prior records) instead of re-deriving the whole theory.
-      if (v == PC_UNKNOWN && concl != 0 && g_pc_cur_idx >= 0) {
-        v = pc_check_cp(parents, np, concl);
+      // 5. Last resort (deep mode): the axiom-augmented completion
+      // again with a raised CLOCK cap, so the deterministic selection
+      // cap is the binding budget -- the plain 30s clock bail cuts the
+      // t769119-class re-derivation off at a machine-load-dependent
+      // selection count (the run-to-run VALID/UNKNOWN flap).
+      if (v == PC_UNKNOWN && concl != 0 && pc_deep_mode()) {
+        na = pc_axiom_pairs(apl, apr, PC_MAX_PARENTS);   // fresh handles
+        if (na > 0) {
+          Term aug[PC_MAX_PARENTS];
+          int n2 = 0;
+          for (int i = 0; i < np && n2 < PC_MAX_PARENTS; i++) {
+            aug[n2++] = parents[i];
+          }
+          for (u32 i = 0; i < na && n2 < PC_MAX_PARENTS; i++) {
+            Term k[2] = { apl[i], apr[i] };
+            aug[n2++] = term_new_ctr(PC_LAB_EQ, k, 2);
+          }
+          g_pc_eq_boost = 1;
+          v = pc_entails_eq(aug, n2, concl, 1);
+          g_pc_eq_boost = 0;
+        }
       }
       return v;
     }
@@ -802,7 +926,30 @@ static u32 pc_axiom_pairs(Term *pl, Term *pr, u32 cap) {
 #define PC_NORM_RULES    8192u
 #define PC_NORM_STEPCAP  4096u
 static Term        pc_nrl[PC_NORM_RULES], pc_nrr[PC_NORM_RULES];
+// Unoriented prior-equation faces for the one-E-step route (a3): every
+// plain-equation parent + prior record, both sides as stored --
+// including the KBO-incomparable ones the demodulator set skips.
+static Term        pc_nel[PC_NORM_RULES], pc_ner[PC_NORM_RULES];
 static CriticalPair pc_cp_buf[PC_CP_CAP];
+
+// Debug term printer (THVM_PROOFCHECK_DBG diagnostics): symbol names
+// from the intern table, variables as V<id>.
+static void pc_dbg_term(FILE *fp, Term t) {
+  if (term_tag(t) == TAG_FVR) { fprintf(fp, "V%u", (unsigned)term_ext(t)); return; }
+  if (term_tag(t) != TAG_CTR) { fputc('?', fp); return; }
+  u32 lab = term_ext(t);
+  if (lab >= PC_LAB_BASE && lab < PC_LAB_BASE + (u32)pc_nsyms)
+    fprintf(fp, "%s", pc_sym[lab - PC_LAB_BASE]);
+  else fprintf(fp, "L%u", (unsigned)lab);
+  u32 n = term_ctr_n(t);
+  if (n == 0) return;
+  fputc('(', fp);
+  for (u32 i = 0; i < n; i++) {
+    if (i) fputc(',', fp);
+    pc_dbg_term(fp, term_ctr_at(t, i));
+  }
+  fputc(')', fp);
+}
 
 // Record the largest arity seen for each CTR label into ar[label] (the
 // KBO precedence in pc_check_cp ranks lower-arity symbols higher).
@@ -812,17 +959,16 @@ static void pc_scan_arity(Term t, u8 *ar, u32 nl) {
   if (lab < nl && n > ar[lab]) ar[lab] = (u8)(n > 255u ? 255u : n);
   for (u32 i = 0; i < n; i++) pc_scan_arity(term_ctr_at(t, i), ar, nl);
 }
-static int pc_check_cp(Term *parents, int np, Term concl) {
-  if (concl == 0 || np < 1) return PC_UNKNOWN;
-  Term cl, cr;
-  if (!pc_plain_eq(concl, &cl, &cr)) return PC_UNKNOWN;
-  // KBO over the checker label space.  Weight 1 everywhere (as the WM
-  // presets), precedence ARITY-FIRST: lower arity ranks higher, matching
-  // the engine's constants-over-functions precedence (the .pr's
-  // a>...>op_c>f>...>rd), then label id as an arbitrary tie-break.  A
-  // label-id-only precedence re-orients some group rules opposite to the
-  // engine, giving normal forms the engine never reaches; the arity-first
-  // order reproduces the recorded (R-normal) sides far more often.
+// One full route battery under ONE KBO precedence.  engine_prec == 1
+// mirrors the ENGINE's term order exactly -- tp_emit_pr's convention,
+// weight 1 everywhere, precedence sorted by (arity ascending, name
+// ascending) with the first symbol HIGHEST (GRP706-1:
+// a>b>c>op_c>f>ld>mult>rd) -- so prior records orient as the engine
+// oriented them and normal forms reproduce the recorded (R-normal)
+// sides.  engine_prec == 0 is the arity-first / intern-order tie-break
+// (a second, independent admissible order; some joins land only here).
+static int pc_check_cp_cfg(Term *parents, int np, Term cl, Term cr,
+                           int engine_prec) {
   u32 nl = PC_LAB_BASE + (u32)pc_nsyms + 1u;
   u32 *w  = (u32 *)malloc((size_t)nl * sizeof(u32));
   u32 *pc = (u32 *)malloc((size_t)nl * sizeof(u32));
@@ -830,23 +976,41 @@ static int pc_check_cp(Term *parents, int np, Term concl) {
   if (w == NULL || pc == NULL || ar == NULL) {
     free(w); free(pc); free(ar); return PC_UNKNOWN; }
   for (int i = 0; i < pc_nstep; i++) pc_scan_arity(pc_steps[i].formula, ar, nl);
-  for (u32 i = 0; i < nl; i++) {
-    w[i] = 1u;
-    // higher precedence value == bigger symbol; lower arity -> bigger.
-    pc[i] = ((u32)(255u - ar[i]) << 16) | (i & 0xffffu);
+  for (u32 i = 0; i < nl; i++) w[i] = 1u;
+  if (engine_prec) {
+    // rank[i] = how many user symbols sort strictly before symbol i in
+    // (arity asc, name asc); first-sorted = HIGHEST precedence.
+    for (u32 i = 0; i < nl; i++) pc[i] = 0u;   // non-user labels: lowest
+    for (int i = 0; i < pc_nsyms; i++) {
+      u32 li = PC_LAB_BASE + (u32)i;
+      u32 rank = 0;
+      for (int j = 0; j < pc_nsyms; j++) {
+        if (j == i) continue;
+        u32 lj = PC_LAB_BASE + (u32)j;
+        if (ar[lj] != ar[li] ? ar[lj] < ar[li]
+                             : strcmp(pc_sym[j], pc_sym[i]) < 0) rank++;
+      }
+      pc[li] = (u32)pc_nsyms - rank;           // earlier sort = bigger
+    }
+  } else {
+    for (u32 i = 0; i < nl; i++) {
+      // higher precedence value == bigger symbol; lower arity -> bigger.
+      pc[i] = ((u32)(255u - ar[i]) << 16) | (i & 0xffffu);
+    }
   }
   KboConfig cfg = { w, pc, nl, 1u };
   // Demodulator set: the cited parents, then every prior plain-equation
   // record, each oriented larger->smaller (skip KBO-incomparable so the
   // rewrite terminates).  The first two plain-equation parents are also
   // kept for the superposition route.
-  u32 nn = 0;
+  u32 nn = 0, ne = 0;
   Term sl[2] = { 0, 0 }, sr[2] = { 0, 0 };
   int nsup = 0;
   for (int e = 0; e < np && nn < PC_NORM_RULES; e++) {
     Term a, b;
     if (!pc_plain_eq(parents[e], &a, &b)) continue;
     if (nsup < 2) { sl[nsup] = a; sr[nsup] = b; nsup++; }
+    if (ne < PC_NORM_RULES) { pc_nel[ne] = a; pc_ner[ne] = b; ne++; }
     KboCmp c = thvm_kbo(a, b, &cfg);
     if      (c == KBO_GT) { pc_nrl[nn] = a; pc_nrr[nn] = b; nn++; }
     else if (c == KBO_LT) { pc_nrl[nn] = b; pc_nrr[nn] = a; nn++; }
@@ -854,6 +1018,7 @@ static int pc_check_cp(Term *parents, int np, Term concl) {
   for (int i = 0; i < g_pc_cur_idx && i < pc_nstep && nn < PC_NORM_RULES; i++) {
     Term a, b;
     if (!pc_plain_eq(g_pc_roots[i], &a, &b)) continue;   // rooted formula
+    if (ne < PC_NORM_RULES) { pc_nel[ne] = a; pc_ner[ne] = b; ne++; }
     KboCmp c = thvm_kbo(a, b, &cfg);
     if      (c == KBO_GT) { pc_nrl[nn] = a; pc_nrr[nn] = b; nn++; }
     else if (c == KBO_LT) { pc_nrl[nn] = b; pc_nrr[nn] = a; nn++; }
@@ -866,8 +1031,53 @@ static int pc_check_cp(Term *parents, int np, Term concl) {
   // whose sides already join): the conclusion sides reduce to one common
   // form under the parents + prior equations.
   if (kbo_eq(ncl, ncr)) v = PC_VALID;
+  // (a2) Treated orient / step route: the record's pair is its parent
+  // pair with TREATMENT rewrites folded into either side (the engine
+  // normalises a new rule against R before storing it; those
+  // demodulation steps cite no separate records -- GRP706-1 t21951's
+  // lhs is its parent's lhs pushed through the prior t142 equation).
+  // Normalise the parent pair into the same system and compare:
+  // alpha for the plain case, instance for extension variables.
+  if (v == PC_UNKNOWN) {
+    static int dbgcp = -1;
+    if (dbgcp < 0) dbgcp = getenv("THVM_PROOFCHECK_DBGCP") != NULL ? 1 : 0;
+    for (int e = 0; e < np; e++) {
+      Term a, b;
+      if (!pc_plain_eq(parents[e], &a, &b)) continue;
+      Term na_ = thvm_rewrite_normalize(a, pc_nrl, pc_nrr, nn, PC_NORM_STEPCAP);
+      Term nb_ = thvm_rewrite_normalize(b, pc_nrl, pc_nrr, nn, PC_NORM_STEPCAP);
+      if (dbgcp) {
+        fprintf(stderr, "PCDBGCP idx=%d eng=%d nn=%u parent=%d\n  ncl=",
+                g_pc_cur_idx, engine_prec, nn, e);
+        pc_dbg_term(stderr, ncl); fprintf(stderr, "\n  ncr=");
+        pc_dbg_term(stderr, ncr); fprintf(stderr, "\n  na =");
+        pc_dbg_term(stderr, na_); fprintf(stderr, "\n  nb =");
+        pc_dbg_term(stderr, nb_); fprintf(stderr, "\n");
+        const char *only = getenv("THVM_PROOFCHECK_DBGCP_RULES");
+        if (only != NULL && atoi(only) == g_pc_cur_idx && e == 0) {
+          fprintf(stderr, "PCDBGCP syms nl=%u:", nl);
+          for (int q = 0; q < pc_nsyms && q < 12; q++)
+            fprintf(stderr, " %s(lab=%u,ar=%u,pc=%u)", pc_sym[q],
+                    PC_LAB_BASE + (u32)q, ar[PC_LAB_BASE + q],
+                    pc[PC_LAB_BASE + q]);
+          fprintf(stderr, "\n");
+          for (u32 q = 0; q < nn; q++) {
+            fprintf(stderr, "PCDBGCP rule %u: ", q);
+            pc_dbg_term(stderr, pc_nrl[q]); fprintf(stderr, " -> ");
+            pc_dbg_term(stderr, pc_nrr[q]); fprintf(stderr, "\n");
+          }
+        }
+      }
+      if (pc_pair_alpha_eq(ncl, ncr, na_, nb_) ||
+          pc_pair_instance(ncl, ncr, na_, nb_)) {
+        v = PC_VALID;
+        break;
+      }
+    }
+  }
   // (b) Superposition route (cp records): overlap the two parents in both
-  // faces and match a normalised raw CP against the recorded pair.
+  // faces and match a normalised raw CP against the recorded pair --
+  // alpha, or instance when the engine pinned an extension variable.
   if (v == PC_UNKNOWN && nsup == 2) {
     Term rl4[4] = { sl[0], sr[0], sl[1], sr[1] };
     Term rr4[4] = { sr[0], sl[0], sr[1], sl[1] };
@@ -877,10 +1087,97 @@ static int pc_check_cp(Term *parents, int np, Term concl) {
                                       PC_NORM_STEPCAP);
       Term b = thvm_rewrite_normalize(pc_cp_buf[k].rhs, pc_nrl, pc_nrr, nn,
                                       PC_NORM_STEPCAP);
-      if (pc_pair_alpha_eq(ncl, ncr, a, b)) { v = PC_VALID; break; }
+      if (pc_pair_alpha_eq(ncl, ncr, a, b) ||
+          pc_pair_instance(ncl, ncr, a, b)) { v = PC_VALID; break; }
+    }
+  }
+  // (a3) E-step beam + join (LAST -- the widest and costliest route): a
+  // treated side can be STUCK as a checker normal form when the engine's
+  // rewrite ran a prior equation in the direction this KBO orients the
+  // other way (GRP706-1 t21951: t142's engine face is irreducible under
+  // the intern-order tie-break).  From each conclusion side, apply prior
+  // equations -- both faces, every position, bare-variable patterns
+  // excluded -- one at a time, re-normalising after each; two rounds of
+  // a small deduplicated beam.  The sides join when the beams meet.
+  // Sound: every beam member is reached from a recorded conclusion side
+  // by equational replacements with PRIOR records (each independently
+  // checked) plus R-normalisation -- pure congruence.
+  if (v == PC_UNKNOWN) {
+#define PC_EBEAM 48
+    Term seta[PC_EBEAM], setb[PC_EBEAM];
+    u32 nA = 0, nB = 0;
+    seta[nA++] = ncl;
+    setb[nB++] = ncr;
+    u32 expA = 0, expB = 0;              // expansion watermarks
+    for (int round = 0; round < 2 && v == PC_UNKNOWN; round++) {
+      u32 topA = nA, topB = nB;
+      for (u32 s = expA; s < topA && v == PC_UNKNOWN; s++) {
+        for (u32 q = 0; q < ne && v == PC_UNKNOWN; q++) {
+          for (int face = 0; face < 2 && v == PC_UNKNOWN; face++) {
+            Term fl = face == 0 ? pc_nel[q] : pc_ner[q];
+            Term fr = face == 0 ? pc_ner[q] : pc_nel[q];
+            if (term_tag(fl) != TAG_CTR) continue;  // bare-var: skip
+            PcRwSet es;
+            es.n = 0;
+            pc_rewrite_all(seta[s], fl, fr, &es);
+            for (int k = 0; k < es.n && v == PC_UNKNOWN; k++) {
+              Term nf = thvm_rewrite_normalize(es.out[k], pc_nrl, pc_nrr,
+                                               nn, PC_NORM_STEPCAP);
+              u8 dup = 0;
+              for (u32 d = 0; d < nA && !dup; d++) dup = kbo_eq(nf, seta[d]);
+              if (dup) continue;
+              for (u32 d = 0; d < nB; d++) {
+                if (kbo_eq(nf, setb[d])) { v = PC_VALID; break; }
+              }
+              if (nA < PC_EBEAM) seta[nA++] = nf;
+            }
+          }
+        }
+      }
+      for (u32 s = expB; s < topB && v == PC_UNKNOWN; s++) {
+        for (u32 q = 0; q < ne && v == PC_UNKNOWN; q++) {
+          for (int face = 0; face < 2 && v == PC_UNKNOWN; face++) {
+            Term fl = face == 0 ? pc_nel[q] : pc_ner[q];
+            Term fr = face == 0 ? pc_ner[q] : pc_nel[q];
+            if (term_tag(fl) != TAG_CTR) continue;  // bare-var: skip
+            PcRwSet es;
+            es.n = 0;
+            pc_rewrite_all(setb[s], fl, fr, &es);
+            for (int k = 0; k < es.n && v == PC_UNKNOWN; k++) {
+              Term nf = thvm_rewrite_normalize(es.out[k], pc_nrl, pc_nrr,
+                                               nn, PC_NORM_STEPCAP);
+              u8 dup = 0;
+              for (u32 d = 0; d < nB && !dup; d++) dup = kbo_eq(nf, setb[d]);
+              if (dup) continue;
+              for (u32 d = 0; d < nA; d++) {
+                if (kbo_eq(nf, seta[d])) { v = PC_VALID; break; }
+              }
+              if (nB < PC_EBEAM) setb[nB++] = nf;
+            }
+          }
+        }
+      }
+      expA = topA;
+      expB = topB;
     }
   }
   free(w); free(pc); free(ar);
+  return v;
+}
+
+// Focused critical-pair check dispatcher: run the route battery under
+// the ENGINE-mirror precedence first (most records are engine-R-normal,
+// so their normal forms reproduce there), then under the arity-first /
+// intern-order precedence (an independent admissible order that closes
+// some joins the mirror misses).  Both orders are sound -- every route
+// only ever certifies "recorded conclusion follows equationally from
+// the cited parents + PRIOR records".
+static int pc_check_cp(Term *parents, int np, Term concl) {
+  if (concl == 0 || np < 1) return PC_UNKNOWN;
+  Term cl, cr;
+  if (!pc_plain_eq(concl, &cl, &cr)) return PC_UNKNOWN;
+  int v = pc_check_cp_cfg(parents, np, cl, cr, 1);
+  if (v == PC_UNKNOWN) v = pc_check_cp_cfg(parents, np, cl, cr, 0);
   return v;
 }
 
@@ -1061,6 +1358,21 @@ static int pc_parent_formulas(const PcStep *st, Term *out, int *nout) {
     if (n < PC_MAX_PARENTS) out[n++] = pc_steps[idx].formula;
   }
   *nout = n;
+  return 1;
+}
+
+// Re-fetch the current step's parent/conclusion handles from pc_steps
+// after a rooted eq-session collection: pc_refresh_formulas already
+// rewrote pc_steps with the relocated Terms, but the pc_entails frame's
+// handles are stale from-space Terms.  Fills out[0..np) and *concl;
+// returns 0 (caller abstains) if the step context is missing or the
+// parent count changed.
+static int pc_refresh_step_handles(Term *out, int np, Term *concl) {
+  if (g_pc_cur_idx < 0 || g_pc_cur_idx >= pc_nstep) return 0;
+  int rnp = 0;
+  if (!pc_parent_formulas(&pc_steps[g_pc_cur_idx], out, &rnp)) return 0;
+  if (rnp != np) return 0;
+  *concl = pc_steps[g_pc_cur_idx].formula;
   return 1;
 }
 
@@ -1288,16 +1600,35 @@ static int proof_check_worker(const char *file, int szs) {
         // engine sessions).  Any verdict computed after this point could
         // be garbage -- including a WRONG FailedVerified (observed on
         // LAT171-1 deep mode: the \$false closure step read a relocated
-        // parent and 'refuted' it).  Abstain for the whole proof.
+        // parent and 'refuted' it).  Abstain for the whole proof --
+        // unless the collection ran inside a ROOTED eq session, whose
+        // root slots hold the live formulas.
         if (g_pc_eq_gc_refreshed) {
-          // Rooted eq-session collection: formulas already refreshed.
+          // Rooted eq-session collection, normal exit: formulas already
+          // refreshed.
           g_pc_eq_gc_refreshed = 0;
+        } else if (g_pc_roots_armed) {
+          // Rooted eq session ended by a heap-exhaustion longjmp (the
+          // per-step handler above): its exit refresh was skipped, but
+          // the collector relocated g_pc_roots in place -- write the
+          // live formulas back.  The abandoned session's litter still
+          // fills from-space, so collect again with the formulas as the
+          // ONLY roots (everything engine-internal is unreachable now)
+          // and drop the address-keyed order memos; the remaining steps
+          // then check on a clean heap instead of OOM-abstaining one by
+          // one.
+          u32 nr = (u32)(pc_nstep < PC_MAX_STEPS ? pc_nstep : PC_MAX_STEPS);
+          gc_collect(g_pc_roots, nr);
+          thvm_lpo_invalidate();
+          thvm_kbo_invalidate();
+          pc_refresh_formulas(g_pc_roots);
         } else {
           pc_any_unknown = 1;
           pc_bad = -1;
           break;
         }
       }
+      g_pc_roots_armed = 0;
       {
         static int pcdbg = -1;
         if (pcdbg < 0) pcdbg = getenv("THVM_PROOFCHECK_DBG") != NULL ? 1 : 0;
