@@ -519,12 +519,22 @@ static u8 gn_ematch_sweep(AtpState *s, AtpGoalNarrow *g,
       if (g->swept_hi[id] >= rules_hi) continue;
       if (!g->cone[gn_find(g, id)]) continue;
       u32 ri_lo = g->swept_hi[id];
-      g->swept_hi[id] = rules_hi;
       n_subj++;
       progress = 1u;
-      for (u32 ri = ri_lo; ri < rules_hi; ri++) {
+      u32 ri = ri_lo;
+      u8  aborted = 0u;
+      for (; ri < rules_hi; ri++) {
         if (s->r_dead != NULL && s->r_dead[ri]) continue;
-        if (gn_loop_guard(s, g)) return 0u;
+        if (gn_loop_guard(s, g)) { aborted = 1u; break; }
+        // Per-sweep instance quota reached: suspend the sweep HERE.
+        // The watermark below stays at ri, so no (node, rule) pair is
+        // consumed without its create-arm -- the next sweep resumes
+        // exactly where this one stopped.  (Discovery-only mode is
+        // reserved for the GLOBAL max_inst exhaustion.)
+        if (g->n_inst >= inst_cap_sweep && g->n_inst < g->max_inst) {
+          aborted = 1u;
+          break;
+        }
         Term fl = atp_rule_term(s, ri, 0u);
         Term fr = atp_rule_term(s, ri, 1u);
         if (term_tag(fl) == TAG_NUM || term_tag(fr) == TAG_NUM) continue;
@@ -548,27 +558,35 @@ static u8 gn_ematch_sweep(AtpState *s, AtpGoalNarrow *g,
           if (osz > g->inst_size) continue;
           if (osz > (u32)g->size[id] + g->up_slack) continue;
           u32 nid;
-          if (g->n_inst < inst_cap_sweep) {
+          if (g->n_inst < g->max_inst) {
             u32 before = g->n_nodes;
             nid = gn_add_term(g, out, 1u);
             if (nid == GN_NONE) {
-              if (g->give_up) return 0u;
+              if (g->give_up) { aborted = 1u; break; }
               continue;
             }
             g->n_inst += g->n_nodes - before;
           } else {
-            // Instance budget exhausted: discovery-only -- the sweep
-            // may still MERGE existing nodes, never create new ones.
+            // Global instance budget exhausted: discovery-only -- the
+            // sweep may still MERGE existing nodes, never create.
             nid = gn_lookup_term(g, out);
             if (nid == GN_NONE) continue;
           }
           if (gn_find(g, nid) != gn_find(g, id)) {
             g->st_hits++;
             gn_merge(g, id, nid);
-            if (gn_find(g, goal_a) == gn_find(g, goal_b)) return 1u;
+            if (gn_find(g, goal_a) == gn_find(g, goal_b)) {
+              g->swept_hi[id] = ri;    // conservative: pair set resumes
+              return 1u;
+            }
           }
         }
+        if (aborted) break;
       }
+      // Watermark exactly what was processed: [ri_lo, ri) on abort,
+      // the full [ri_lo, rules_hi) otherwise.
+      g->swept_hi[id] = aborted ? ri : rules_hi;
+      if (aborted) return (u8)(gn_find(g, goal_a) == gn_find(g, goal_b));
     }
     if (!progress) break;
   }
