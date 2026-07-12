@@ -523,6 +523,9 @@ static u8 g_atp_pushn_active      = 0;
 // that runs during saturation), so a handle-keyed cache can detect
 // cell relocation/reuse.  Cells never move between collections.
 static u64 g_atp_gc_epoch         = 0;
+// Init generation for the snapshot-orientation memo (atp_orient_memo_gt,
+// defined with atp_ordered_try_top below); thvm_atp_init bumps it.
+static u64 g_atp_orient_memo_gen  = 0;
 // Perm-subsume AC-operator mask (WM GZ_ACVerzichtbar / dokgP).  Set by
 // thvm_atp_set_perm_subsume_mask (from thvm_atp_auto_ac's detected AC
 // symbols); a non-zero mask routes atp_cp_perm_subsumed through the
@@ -7313,6 +7316,9 @@ fn u32 thvm_atp_trace_cap(void) {
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
+  // A new engine may carry a different ordering config: retire every
+  // snapshot-orientation memo entry (atp_orient_memo_gt).
+  g_atp_orient_memo_gen++;
   // Cross-call hygiene: a prior thvm_atp_free released the previous
   // atp's rule_index / cp_index, but the globals g_atp_ri_ix /
   // g_atp_cp_ix still point at the freed memory.  Reading them before
@@ -9533,6 +9539,39 @@ static Term atp_unorient_template(AtpState *s, Term from, Term to) {
   return atp_grounded_instance(s, to, from, s->min_const);
 }
 
+// Snapshot-array orientation memo: a normalize against a rule array
+// OTHER than the live set (interreduce's new-rule slice, backward
+// demodulation's snapshot) has no r_orient cache, so
+// atp_ordered_try_top recomputed atp_compare(lhs[i], rhs[i]) at EVERY
+// position of every subject -- the entire kbo_compare_core presence in
+// the LAT138-1 / RNG021-6 profiles.  The verdict is a pure function of
+// the two term VALUES under the run's fixed ordering, so memoize it on
+// the (lhs, rhs) handle pair.  Direct-mapped; entries are stamped by
+// the gc epoch (a collection can recycle handles) and by an init
+// generation (one process can build many engines with different
+// orderings -- test harnesses do), so a stale hit is impossible and
+// every returned verdict is exactly the atp_compare the scan ran.
+enum { ATP_ORIENT_MEMO_N = 2048 };
+typedef struct { Term l, r; u64 epoch; u64 gen; u8 gt; u8 valid; } AtpOrientMemoEnt;
+static AtpOrientMemoEnt g_atp_orient_memo[ATP_ORIENT_MEMO_N];
+
+static u8 atp_orient_memo_gt(AtpState *s, Term l, Term r) {
+  u64 h = ((u64)l * 0x9e3779b97f4a7c15ull) ^ ((u64)r * 0xff51afd7ed558ccdull);
+  AtpOrientMemoEnt *e = &g_atp_orient_memo[(u32)(h >> 48) & (ATP_ORIENT_MEMO_N - 1u)];
+  if (e->valid && e->epoch == g_atp_gc_epoch &&
+      e->gen == g_atp_orient_memo_gen && e->l == l && e->r == r) {
+    return e->gt;
+  }
+  u8 gt = (u8)(atp_compare(s, l, r) == KBO_GT);
+  e->l = l;
+  e->r = r;
+  e->epoch = g_atp_gc_epoch;
+  e->gen   = g_atp_orient_memo_gen;
+  e->gt = gt;
+  e->valid = 1u;
+  return gt;
+}
+
 static Term atp_ordered_try_top(AtpState *s, Term t,
                                 const Term *lhs, const Term *rhs,
                                 u32 n_rules, u8 *fired) {
@@ -9556,7 +9595,7 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
   if (!g_atp_skip_oriented) {   // skip flag: already at indexed fixpoint
     for (u32 i = 0; i < n_rules; i++) {
       u8 oriented = orient ? orient[i]
-                           : (u8)(atp_compare(s, lhs[i], rhs[i]) == KBO_GT);
+                           : atp_orient_memo_gt(s, lhs[i], rhs[i]);
       if (!oriented) continue;
       // Top-symbol pre-filter: rule lhs must agree on tag, label, arity
       // for thvm_match to succeed.  FVR pattern can match anything --
@@ -9609,7 +9648,7 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
   // rule matched at this position.
   for (u32 i = 0; i < n_rules; i++) {
     u8 oriented = orient ? orient[i]
-                         : (u8)(atp_compare(s, lhs[i], rhs[i]) == KBO_GT);
+                         : atp_orient_memo_gt(s, lhs[i], rhs[i]);
     if (oriented) continue;
     // Unorientable equation -- both directions, order-gated.  Match
     // FIRST, then pick the replacement template: at most positions the
@@ -16077,7 +16116,7 @@ static Term atp_proof_rewrite_step_slice(AtpState *s, Term t,
   // the slice normalizers' redex picks exactly.
   for (u32 i = 0; i < n; i++) {
 #ifdef ATP_ORDERED_REWRITE
-    if (atp_compare(s, lhs_arr[i], rhs_arr[i]) != KBO_GT) continue;
+    if (!atp_orient_memo_gt(s, lhs_arr[i], rhs_arr[i])) continue;
 #endif
     RewriteSubst sub = {{0}};
     if (thvm_match(lhs_arr[i], t, &sub)) {
@@ -16087,7 +16126,7 @@ static Term atp_proof_rewrite_step_slice(AtpState *s, Term t,
   }
 #ifdef ATP_ORDERED_REWRITE
   for (u32 i = 0; i < n; i++) {
-    if (atp_compare(s, lhs_arr[i], rhs_arr[i]) == KBO_GT) continue;
+    if (atp_orient_memo_gt(s, lhs_arr[i], rhs_arr[i])) continue;
     {                                                         // l -> r
       RewriteSubst sub = {{0}};
       if (thvm_match(lhs_arr[i], t, &sub)) {
