@@ -73,6 +73,15 @@
 static KboFlatNode g_atpft_kbo_flat_a[ATPFT_KBO_FLAT_CAP];
 static KboFlatNode g_atpft_kbo_flat_b[ATPFT_KBO_FLAT_CAP];
 
+// Success marker for the LAST (tmpl, subst) encode that
+// thvm_kbo_ft_subst_with_prepared left in flat_b (0 = failed or
+// absent).  Every other writer of flat_b clears it.
+// thvm_kbo_ft_skolem_after_subst keys on it to run the skolem-ground
+// compare directly on those bytes instead of re-encoding the identical
+// pair (the encode is deterministic, so the historical re-encode
+// emitted byte-for-byte the same nodes).
+static u32 g_atpft_b_subst_ok = 0u;
+
 // === KBO encode ======================================================
 //
 // Walk the AtpFt subterm in pre-order, writing one KboFlatNode per
@@ -207,6 +216,7 @@ static u8 atpft_kbo_flat_encode_subst(const AtpFtCell *c,
 // corpora never approach that.
 fn KboCmp thvm_kbo_ft(const AtpFtCell *a, const AtpFtCell *b,
                       const KboConfig *cfg) {
+  g_atpft_b_subst_ok = 0u;
   u32 na = 0u, nb = 0u;
   if (!atpft_kbo_flat_encode(a, cfg, g_atpft_kbo_flat_a, &na) ||
       !atpft_kbo_flat_encode(b, cfg, g_atpft_kbo_flat_b, &nb)) {
@@ -224,6 +234,7 @@ fn KboCmp thvm_kbo_ft_subst(const AtpFtCell *redex,
                             const AtpFtCell *tmpl,
                             const void      *subst,
                             const KboConfig *cfg) {
+  g_atpft_b_subst_ok = 0u;
   u32 na = 0u, nb = 0u;
   if (!atpft_kbo_flat_encode(redex, cfg, g_atpft_kbo_flat_a, &na) ||
       !atpft_kbo_flat_encode_subst(tmpl, cfg, subst,
@@ -257,12 +268,14 @@ fn KboCmp thvm_kbo_ft_subst_with_prepared(u32 na,
                                           const AtpFtCell *tmpl,
                                           const void      *subst,
                                           const KboConfig *cfg) {
+  g_atpft_b_subst_ok = 0u;
   if (na == 0u) return KBO_UN;
   u32 nb = 0u;
   if (!atpft_kbo_flat_encode_subst(tmpl, cfg, subst,
                                    g_atpft_kbo_flat_b, &nb)) {
     return KBO_UN;
   }
+  g_atpft_b_subst_ok = nb;
   return thvm_kbo_flat_slice(g_atpft_kbo_flat_a, na,
                              g_atpft_kbo_flat_b, nb, cfg);
 }
@@ -312,21 +325,18 @@ static KboCmp atpft_kbo_skolem_cmp(const KboFlatNode *a, u32 pa,
   return KBO_EQ;
 }
 
-// Prepared-redex entry mirroring thvm_kbo_ft_subst_with_prepared: the
-// redex is already encoded in g_atpft_kbo_flat_a (from
-// thvm_kbo_ft_subst_prepare_redex); encode (tmpl, subst) into the b
-// buffer and run the skolem-ground compare.  KBO_UN only on encode
-// overflow (caller treats it as "no fire").
-fn KboCmp thvm_kbo_ft_skolem_with_prepared(u32 na,
-                                           const AtpFtCell *tmpl,
-                                           const void      *subst,
-                                           const KboConfig *cfg) {
-  if (na == 0u) return KBO_UN;
-  u32 nb = 0u;
-  if (!atpft_kbo_flat_encode_subst(tmpl, cfg, subst,
-                                   g_atpft_kbo_flat_b, &nb)) {
-    return KBO_UN;
-  }
+// Skolem-ground compare against the (tmpl, subst) encode the
+// immediately preceding thvm_kbo_ft_subst_with_prepared call left in
+// flat_b.  The historical entry re-encoded the SAME pair into the SAME
+// buffer -- deterministic, so byte-for-byte what already sits there --
+// on every encompassment probe; this one just runs the compare.
+// Caller contract: invoked with the same `na` directly after
+// thvm_kbo_ft_subst_with_prepared, with no flat-buffer call between
+// (ft_cell_try_rules' unorient gate -- the only caller -- satisfies
+// this by adjacency).  KBO_UN when the preceding encode failed or was
+// skipped: the re-encode would have overflowed identically.
+fn KboCmp thvm_kbo_ft_skolem_after_subst(u32 na, const KboConfig *cfg) {
+  if (na == 0u || g_atpft_b_subst_ok == 0u) return KBO_UN;
   return atpft_kbo_skolem_cmp(g_atpft_kbo_flat_a, 0u,
                               g_atpft_kbo_flat_b, 0u, cfg);
 }

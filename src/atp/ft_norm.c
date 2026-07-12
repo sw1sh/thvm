@@ -151,10 +151,9 @@ extern KboCmp thvm_kbo_ft_subst_with_prepared(u32 na,
                                               const void      *subst,
                                               const KboConfig *cfg);
 // Skolem-ground variant (encompassment demodulation gate; ft_order.c).
-extern KboCmp thvm_kbo_ft_skolem_with_prepared(u32 na,
-                                               const AtpFtCell *tmpl,
-                                               const void      *subst,
-                                               const KboConfig *cfg);
+// Reuses the flat_b bytes of the immediately preceding
+// thvm_kbo_ft_subst_with_prepared call -- call ONLY in that adjacency.
+extern KboCmp thvm_kbo_ft_skolem_after_subst(u32 na, const KboConfig *cfg);
 // Simpler-join equation compares (Twee simplerThan; ft_order.c).
 extern int thvm_ftsj_prepare_eq(const AtpFtCell *l, const AtpFtCell *r,
                                 const KboConfig *cfg);
@@ -2583,8 +2582,7 @@ static int ft_cell_try_rules(AtpState   *s,
           // (Twee step3's reducesSkolem) -- there the simplerThan gate
           // above supplies the redundancy discipline.
           if (ft_v != KBO_GT && (s->use_encompass_demod || g_ftsj_active) &&
-              thvm_kbo_ft_skolem_with_prepared(redex_na, rhs, subst_buf,
-                                               s->kbo) == KBO_GT) {
+              thvm_kbo_ft_skolem_after_subst(redex_na, s->kbo) == KBO_GT) {
             ft_v = KBO_GT;
           }
           static int dbg_diff = -1;
@@ -2637,8 +2635,7 @@ static int ft_cell_try_rules(AtpState   *s,
           KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
           // Encompassment demodulation, backward face (see fwd branch).
           if (ft_v != KBO_GT && (s->use_encompass_demod || g_ftsj_active) &&
-              thvm_kbo_ft_skolem_with_prepared(redex_na, lhs, subst_buf,
-                                               s->kbo) == KBO_GT) {
+              thvm_kbo_ft_skolem_after_subst(redex_na, s->kbo) == KBO_GT) {
             ft_v = KBO_GT;
           }
           if (ft_v == KBO_GT) {
