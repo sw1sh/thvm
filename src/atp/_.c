@@ -2873,6 +2873,22 @@ typedef struct {
 #endif
 static VcpTreat g_vcp_treat;
 
+// Arena-A net-retention attribution (mem-census): net persistent-cell
+// growth (allocs - frees) bracketed by phase.  Unconditional i64
+// arithmetic on existing counters -- no branch, no behavior change.
+// Consumed by the bench's THVM_ATP_MEM_CENSUS report.
+#ifdef THVM_ATPFT_ALLOC
+i64 g_ftnet_form = 0;   // sw_form_push (formation + treat + queue push)
+i64 g_ftnet_step = 0;   // whole thvm_atp_step
+i64 g_ftnet_treatform = 0;   // vcp_ft_treat_form / vcp_treat_form / emit
+i64 g_ftnet_join      = 0;   // vcp_treat_joinable (treat normalize + SJ)
+i64 g_ftnet_push      = 0;   // atp_cp_heap_push
+i64 g_ftnet_release   = 0;   // tail vcp_treat_release
+static inline i64 ftnet_now(void) {
+  return (i64)(g_ft_persist_alloc_total - g_ft_free_span_total);
+}
+#endif
+
 u64 g_vcp_treat_n_ok   = 0;   // treated CPs formed FT-direct
 u64 g_vcp_treat_n_fb   = 0;   // anomaly fallbacks to the classic build
 u64 g_vcp_treat_n_pkfb = 0;   // NF-pack anomaly fallbacks (heap push)
@@ -14887,7 +14903,21 @@ static Term atp_rewrite_normalize_slice_record(AtpState *s, Term t,
 #else
 #include <unistd.h>
 #endif
+static AtpStatus thvm_atp_step_impl(AtpState *s);
+
+// Mem-census bracket around one whole step (see g_ftnet_step).
 fn AtpStatus thvm_atp_step(AtpState *s) {
+#ifdef THVM_ATPFT_ALLOC
+  i64 _sb = ftnet_now();
+#endif
+  AtpStatus rv = thvm_atp_step_impl(s);
+#ifdef THVM_ATPFT_ALLOC
+  g_ftnet_step += ftnet_now() - _sb;
+#endif
+  return rv;
+}
+
+static AtpStatus thvm_atp_step_impl(AtpState *s) {
   if (s == NULL) return ATP_QUEUE_EMPTY;
 
   // WM loader intake: before the first pop, permute the queued axiom
@@ -25246,7 +25276,9 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
           // Treated FT-direct route: the raw pair exists only as the
           // stashed FT cells (cp_lhs/cp_rhs are 0); treat them
           // directly.
+          i64 _jb = ftnet_now();
           joinable = vcp_treat_joinable(s);
+          g_ftnet_join += ftnet_now() - _jb;
         } else {
           joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
         }
@@ -25263,7 +25295,9 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       if (g_vcp_treat.armed) {
         // Treated FT-direct route, non-lazy stream (every CP treated):
         // the raw pair exists only as the stashed FT cells.
+        i64 _jb = ftnet_now();
         joinable = vcp_treat_joinable(s);
+        g_ftnet_join += ftnet_now() - _jb;
       } else {
         joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
       }
@@ -25558,8 +25592,15 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     g_cp_uid_b = (s->r_uid != NULL && rule_b < s->n_rules)
                ? s->r_uid[rule_b] : 0u;
     g_cp_push_fused = fuse;
-    if (!deferred) atp_cp_heap_push(s, cp_lhs, cp_rhs, t, cp_ult,
-                                    raw_untreated);
+    if (!deferred) {
+#ifdef THVM_ATPFT_ALLOC
+      i64 _hb = ftnet_now();
+#endif
+      atp_cp_heap_push(s, cp_lhs, cp_rhs, t, cp_ult, raw_untreated);
+#ifdef THVM_ATPFT_ALLOC
+      g_ftnet_push += ftnet_now() - _hb;
+#endif
+    }
     g_cp_push_fused = 0u;
     if (g_atp_phase_detail) g_atp_cpg_us_pack += atp_now_us() - _dpk_t0;
     g_cp_uid_a = g_cp_uid_b = 0u;
@@ -26660,9 +26701,10 @@ static u8 sw_form_push_ft_try(AtpState *s, Term lo, Term ro, Term sub_pre,
     static int join_cache_env = -1;
     if (join_cache_env < 0) join_cache_env = atp_env_on("THVM_ATP_JOIN_CACHE");
     if (join_cache_env) return 0u;
-    if (!vcp_ft_treat_form(s, lo_ft, sub_ft, rin_ft, ro_ft, &fsubst)) {
-      return 0u;
-    }
+    i64 _tb = ftnet_now();
+    u8 _tf = vcp_ft_treat_form(s, lo_ft, sub_ft, rin_ft, ro_ft, &fsubst);
+    g_ftnet_treatform += ftnet_now() - _tb;
+    if (!_tf) return 0u;
     ft_treat = 1u;
     g_vcp_treat_n_ok++;
   }

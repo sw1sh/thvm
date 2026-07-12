@@ -29,6 +29,191 @@
 #include "../src/thvm.c"
 #include <time.h>
 
+// === Memory census (THVM_ATP_MEM_CENSUS=1) ==========================
+//
+// Itemized byte accounting of every store a deep completion grows,
+// printed to stderr at end-of-run (which includes RSS-guard aborts:
+// the state is still live at the report).  Diagnosis-only -- reads
+// the state, mutates nothing, and is behind an env gate so the
+// default run's output is byte-identical.
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+static u64 census_alloc_size(const void *p) {
+  return (p != NULL) ? (u64)malloc_size(p) : 0u;
+}
+static u64 census_malloc_used(void) {
+  vm_address_t *zones = NULL;
+  unsigned cnt = 0;
+  u64 used = 0;
+  if (malloc_get_all_zones(mach_task_self(), NULL, &zones, &cnt)
+      == KERN_SUCCESS) {
+    for (unsigned zi = 0; zi < cnt; zi++) {
+      malloc_statistics_t st;
+      memset(&st, 0, sizeof st);
+      malloc_zone_statistics((malloc_zone_t *)zones[zi], &st);
+      used += (u64)st.size_in_use;
+    }
+  }
+  return used;
+}
+static u64 census_rss(void) {
+  struct mach_task_basic_info info;
+  mach_msg_type_number_t cnt = MACH_TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                (task_info_t)&info, &cnt) == KERN_SUCCESS) {
+    return (u64)info.resident_size;
+  }
+  return 0u;
+}
+#else
+#include <malloc.h>
+static u64 census_alloc_size(const void *p) {
+  return (p != NULL) ? (u64)malloc_usable_size((void *)p) : 0u;
+}
+static u64 census_malloc_used(void) { return 0u; }
+static u64 census_rss(void) {
+  FILE *fp = fopen("/proc/self/statm", "r");
+  u64 rss = 0;
+  if (fp != NULL) {
+    long pages_total = 0, pages_resident = 0;
+    if (fscanf(fp, "%ld %ld", &pages_total, &pages_resident) == 2) {
+      long pgsz = sysconf(_SC_PAGESIZE);
+      if (pgsz > 0) rss = (u64)pages_resident * (u64)pgsz;
+    }
+    fclose(fp);
+  }
+  return rss;
+}
+#endif
+
+#define CENSUS_MB(b) ((double)(b) / (1024.0 * 1024.0))
+
+static void atp_mem_census(const AtpState *s) {
+  const char *e = getenv("THVM_ATP_MEM_CENSUS");
+  if (e == NULL || e[0] == '0' || s == NULL) return;
+  u64 itemized = 0;
+  fprintf(stderr, "[mem-census] rss=%.0fMB malloc-zones-used=%.0fMB\n",
+          CENSUS_MB(census_rss()), CENSUS_MB(census_malloc_used()));
+  // GC heap (the Term semi-spaces; RSS cost = pages ever touched).
+  {
+    u64 lo   = gc_enabled() ? gc_from_start() : 0u;
+    u64 semi = gc_enabled() ? (gc_from_end() - lo) : thvm_heap_cells();
+    fprintf(stderr,
+            "[mem-census]   gc-heap: semi=%.0fMB x2  used-now=%.0fMB  "
+            "passes=%llu  gc=%s\n",
+            CENSUS_MB(semi * sizeof(Term)),
+            CENSUS_MB((HEAP_NEXT - lo) * sizeof(Term)),
+            (unsigned long long)gc_count(), gc_enabled() ? "on" : "off");
+  }
+  // Proof trace: spine array + off-heap packed-equation store.
+  {
+    u64 spine   = (u64)s->t_cap * sizeof(Term);
+    u64 off_arr = (s->trace_eq_off != NULL) ? (u64)s->t_cap * sizeof(u64) : 0u;
+    u64 eq_cap  = s->trace_eq_cap;
+    itemized += spine + off_arr + eq_cap;
+    fprintf(stderr,
+            "[mem-census]   trace: n=%u cap=%u max=%u  spine-arr=%.0fMB  "
+            "eq_off=%.0fMB  eq_buf=%.0fMB used (%.0fMB cap)\n",
+            s->n_trace, s->t_cap, s->t_max, CENSUS_MB(spine),
+            CENSUS_MB(off_arr), CENSUS_MB(s->trace_eq_len),
+            CENSUS_MB(eq_cap));
+  }
+  // CP queue: the ~12 always-on parallel arrays + optional ones +
+  // the per-CP malloc'd packed byte strings.
+  {
+    u64 fixed = (u64)s->cp_cap
+              * (sizeof(u8 *)            // cp_packed
+                 + 6u * sizeof(u32)      // cp_trace pri seq depth goal pri2
+                 + sizeof(u32)           // cp_last_norm_r_revision
+                 + 2u * sizeof(u8)       // cp_deprio cp_kind
+                 + sizeof(AtpCpHeapNode) // cp_heap
+                 + sizeof(u32));         // cp_pos
+    u64 opt = 0;
+    if (s->cp_ultimate != NULL)  opt += (u64)s->cp_cap;
+    if (s->cp_uid_a != NULL)     opt += (u64)s->cp_cap * sizeof(u32) * 2u;
+    if (s->cp_implicit != NULL)  opt += (u64)s->cp_cap * sizeof(AtpCpImplicit);
+    if (s->cp_is_implicit != NULL) opt += ((u64)s->cp_cap + 7u) / 8u;
+    u64 packed = 0, pmax = 0;
+    u32 n_packed = 0;
+    for (u32 k = 0; k < s->n_cps; k++) {
+      u64 b = census_alloc_size(s->cp_packed[k]);
+      if (b > 0) { packed += b; n_packed++; if (b > pmax) pmax = b; }
+    }
+    itemized += fixed + opt + packed;
+    fprintf(stderr,
+            "[mem-census]   cpq: n=%u cap=%u  arrays=%.0fMB (+opt %.0fMB)  "
+            "packed=%.0fMB over %u strs (mean=%.0fB max=%lluB)\n",
+            s->n_cps, s->cp_cap, CENSUS_MB(fixed), CENSUS_MB(opt),
+            CENSUS_MB(packed), n_packed,
+            (n_packed > 0) ? (double)packed / (double)n_packed : 0.0,
+            (unsigned long long)pmax);
+  }
+  // Auto-MaxWeight deferred stash.
+  if (s->cp_stash_cap > 0 || s->n_cp_stash > 0) {
+    u64 arrays = (u64)s->cp_stash_cap
+               * (sizeof(u8 *) + 2u * sizeof(u32) + 2u * sizeof(u8));
+    u64 packed = 0;
+    for (u32 k = 0; k < s->n_cp_stash; k++) {
+      packed += census_alloc_size(s->cp_stash_packed[k]);
+    }
+    itemized += arrays + packed;
+    fprintf(stderr,
+            "[mem-census]   amw-stash: n=%u cap=%u  arrays=%.0fMB  "
+            "packed=%.0fMB\n",
+            s->n_cp_stash, s->cp_stash_cap, CENSUS_MB(arrays),
+            CENSUS_MB(packed));
+  }
+#ifdef THVM_ATPFT_ALLOC
+  // FT arena: persistent slab blocks + scratch bump region.
+  if (s->ft_arena_ptr != NULL) {
+    const AtpFt *a = s->ft_arena_ptr;
+    u64 blk_bytes = 0;
+    u32 n_blk = 0;
+    for (const AtpFtBlock *b = a->blocks; b != NULL; b = b->next_block) {
+      blk_bytes += census_alloc_size(b);
+      n_blk++;
+    }
+    u64 scratch = census_alloc_size(a->scratch_base);
+    itemized += blk_bytes + scratch;
+    fprintf(stderr,
+            "[mem-census]   ft-arena: blocks=%u (%.0fMB)  alive=%llu cells "
+            "(%.0fMB)  freelist~%.0fMB  scratch=%.0fMB\n",
+            n_blk, CENSUS_MB(blk_bytes),
+            (unsigned long long)a->n_persistent_alive,
+            CENSUS_MB(a->n_persistent_alive * sizeof(AtpFtCell)),
+            CENSUS_MB(((u64)n_blk * ATPFT_CELLS_PER_BLOCK
+                       - a->n_persistent_alive) * sizeof(AtpFtCell)),
+            CENSUS_MB(scratch));
+    fprintf(stderr,
+            "[mem-census]   ft-net: step=%lld cells (%.0fMB)  "
+            "form+push=%lld cells (%.0fMB)  other=%lld cells\n",
+            (long long)g_ftnet_step,
+            CENSUS_MB((double)g_ftnet_step * (double)sizeof(AtpFtCell)),
+            (long long)g_ftnet_form,
+            CENSUS_MB((double)g_ftnet_form * (double)sizeof(AtpFtCell)),
+            (long long)(g_ftnet_step - g_ftnet_form));
+    fprintf(stderr,
+            "[mem-census]   ft-net form split: treatform=%lld  join=%lld  "
+            "heappush=%lld  release=%lld  rest=%lld cells\n",
+            (long long)g_ftnet_treatform, (long long)g_ftnet_join,
+            (long long)g_ftnet_push, (long long)g_ftnet_release,
+            (long long)(g_ftnet_form - g_ftnet_treatform - g_ftnet_join
+                        - g_ftnet_push - g_ftnet_release));
+  }
+#endif
+  // Rule arrays (small; printed for completeness).
+  {
+    u64 rules = (u64)s->r_cap
+              * (2u * sizeof(Term) + sizeof(u32) + sizeof(u8));
+    itemized += rules;
+    fprintf(stderr, "[mem-census]   rules: n=%u cap=%u arrays=%.1fMB\n",
+            s->n_rules, s->r_cap, CENSUS_MB(rules));
+  }
+  fprintf(stderr, "[mem-census]   itemized-total=%.0fMB "
+          "(vs malloc-zones %.0fMB; gap = indices/caches/parser/frag)\n",
+          CENSUS_MB(itemized), CENSUS_MB(census_malloc_used()));
+}
+
 // Final AtpStatus of the last run, exposed for thin wrappers that
 // include this translation unit (tools/thvm_atp_cli.c) and need the
 // machine-readable result alongside the printed report.
@@ -2817,6 +3002,7 @@ int main(int argc, char **argv) {
     printf("   cp-size histogram (bucket=10 symbols):\n     ");
     for (u32 b = 0; b < 12u; b++) printf("[%u-%u)=%u ", b*10u, (b+1u)*10u, bins[b]);
     printf("\n"); }
+  atp_mem_census(s);
 
 #ifdef ATP_FV_INDEX
   // 7d: subsumption-index retrieval stats.  candidates / query is the
