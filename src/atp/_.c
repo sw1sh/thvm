@@ -21339,6 +21339,54 @@ static u8 atp_cone_orient_gt_ft(AtpState *s, const AtpFtCell *bl,
   Term l = ft_to_term(bl), r = ft_to_term(br);
   return (u8)(atp_compare(s, l, r) == KBO_GT);
 }
+
+// Install the historical rule window "R alive at trace time tw" into
+// the temporary slots past n_rules0: born (TRACE_ORIENT / TRACE_FVI)
+// before tw, not dead (first citing TRACE_SIMPLIFY) before tw.  Birth
+// pairs load lazily into the caller's caches; incl_parent == 0 skips
+// the birth at p_a (the SIMPLIFY victim's own rule).  Returns the
+// installed slot count; *win_unor_out gets the window's unorientable
+// count.  Caller owns setting/restoring s->n_rules / s->n_unorient.
+static u32 atp_cone_install_window(AtpState *s, u32 n_rules0,
+                                   const u32 *birth_ti,
+                                   const u32 *birth_dead,
+                                   u8 *birth_state, u8 *birth_or,
+                                   AtpFtCell **birth_lft,
+                                   AtpFtCell **birth_rft,
+                                   u32 n_births, u32 tw, u8 incl_parent,
+                                   u32 p_a, u32 *win_unor_out) {
+  u32 k = 0u, win_unor = 0u;
+  for (u32 b = 0; b < n_births; b++) {
+    if (birth_ti[b] >= tw) break;
+    if (birth_dead[b] != ATP_TRACE_NONE && birth_dead[b] < tw) continue;
+    if (!incl_parent && birth_ti[b] == p_a) continue;
+    if (birth_state[b] == 0u) {
+      AtpFtCell *bl = NULL, *br = NULL;
+      if (!atp_cone_eq_ft(s, birth_ti[b], &bl, &br)) {
+        birth_state[b] = 2u;
+      } else {
+        birth_lft[b]   = bl;
+        birth_rft[b]   = br;
+        birth_or[b]    = atp_cone_orient_gt_ft(s, bl, br);
+        birth_state[b] = 1u;
+      }
+    }
+    if (birth_state[b] != 1u) continue;
+    atp_ensure_rule_cap(s, n_rules0 + k + 1u);
+    u32 w = n_rules0 + k;
+    s->lhs[w]      = 0;   // FT path never reads the Term slots
+    s->rhs[w]      = 0;
+    s->lhs_ft[w]   = birth_lft[b];
+    s->rhs_ft[w]   = birth_rft[b];
+    s->r_orient[w] = birth_or[b];
+    s->r_dead[w]   = 0u;
+    s->r_trace[w]  = birth_ti[b];
+    if (!birth_or[b]) win_unor++;
+    k++;
+  }
+  *win_unor_out = win_unor;
+  return k;
+}
 #endif
 
 fn void thvm_atp_record_goal_cone(AtpState *s) {
@@ -21347,6 +21395,12 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
   if (s->conj_sym_mask == 0ull) return;
   static int dbg = -1;
   if (dbg < 0) dbg = atp_env_on("THVM_ATP_CONE_DEBUG");
+  // Treatment-at-emission (the ORIENT two-phase rungs + their extra
+  // chain headroom).  THVM_ATP_EMIT_TREAT=0 is the kill switch: the
+  // 4-rung ladder and 160-step headroom, byte-identical to the
+  // pre-two-phase emission.
+  static int emit_treat = -1;
+  if (emit_treat < 0) emit_treat = atp_env_off("THVM_ATP_EMIT_TREAT");
   const u32 n0_trace = s->n_trace;
 
   // Threshold GC between candidates (trace_pack only, mirroring the
@@ -21376,12 +21430,10 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
   u8  *birth_or    = (u8  *)calloc(n_births, 1u);
   AtpFtCell **birth_lft = (AtpFtCell **)calloc(n_births, sizeof(AtpFtCell *));
   AtpFtCell **birth_rft = (AtpFtCell **)calloc(n_births, sizeof(AtpFtCell *));
-  u32 *alive = (u32 *)malloc((size_t)n_births * sizeof(u32));
   if (birth_ti == NULL || birth_dead == NULL || birth_state == NULL ||
-      birth_or == NULL || birth_lft == NULL || birth_rft == NULL ||
-      alive == NULL) {
+      birth_or == NULL || birth_lft == NULL || birth_rft == NULL) {
     free(birth_ti); free(birth_dead); free(birth_state); free(birth_or);
-    free(birth_lft); free(birth_rft); free(alive);
+    free(birth_lft); free(birth_rft);
     return;
   }
   {
@@ -21405,7 +21457,7 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
   u32 n_cand = 0u;
   if (cand == NULL) {
     free(birth_ti); free(birth_dead); free(birth_state); free(birth_or);
-    free(birth_lft); free(birth_rft); free(alive);
+    free(birth_lft); free(birth_rft);
     return;
   }
   u32 n_os = 0u, n_par = 0u, n_eq = 0u, n_sym = 0u;
@@ -21479,8 +21531,10 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
   u32 n_fixed = 0u;
   for (u32 c = 0; c < n_cand && arena != NULL; c++) {
     ATP_CONE_MAYBE_GC();
-    // Chain headroom: a repair pushes at most 2 * 64 NORM_STEPs.
-    if (s->n_trace + 160u > s->t_max) break;
+    // Chain headroom: a repair pushes at most 4 * 64 NORM_STEPs (the
+    // two-phase rungs run two windows, each normalizing both sides;
+    // 2 * 64 with the two-phase rungs switched off).
+    if (s->n_trace + (emit_treat ? 320u : 160u) > s->t_max) break;
     u32 ti = cand[c];
     Term e = s->trace[ti];
     u32 reason = term_ext(e);
@@ -21492,69 +21546,48 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
       continue;
     }
 
-    // Alive rule window at ti (parent birth excluded for the victim
-    // replay -- the drain normalizes AFTER the victim left R; the
-    // do_lhs=0 composition attempts re-include it below).
-    u32 k_all = 0u;
-    for (u32 b = 0; b < n_births; b++) {
-      if (birth_ti[b] >= ti) break;
-      if (birth_dead[b] != ATP_TRACE_NONE && birth_dead[b] < ti) continue;
-      alive[k_all++] = b;
-    }
-    if (k_all == 0u) continue;
-
     int success = 0;
-    // Attempt ladder: (do_lhs, doE, incl_parent) triples ordered by
-    // the historical shape most likely to have produced this entry.
+    // Attempt ladder: (do_lhs, doE, incl_parent, two_phase) tuples
+    // ordered by the historical shape most likely to have produced
+    // this entry.
     //   ORIENT   -- pop-normalize (both sides, doR+doE) first;
     //   SIMPLIFY -- demote-drain (both sides, doR, victim excluded)
     //               first, then the RHS-composition shape (rhs only,
     //               doR+doE, victim's own rule still live).
-    u8 att_lhs[4], att_doE[4], att_inc[4];
-    const u32 n_att = 4u;
+    //   ORIENT two-phase (rungs 4/5) -- the recorded rule composes the
+    //     FORMATION-time treatment (KPBehandelt: doR over R(p_a), the
+    //     parent TRACE_CP's window) with the POP-time normalize
+    //     (doR/doE over R(ti)).  A treatment demodulator interreduced
+    //     away between formation and pop is invisible to the
+    //     single-window rungs (GRP706-1 t765068's f/ld swap) -- replay
+    //     both windows in sequence, threading ONE chain across them.
+    u8 att_lhs[6], att_doE[6], att_inc[6], att_2ph[6];
+    u32 n_att;
     if (reason == TRACE_ORIENT) {
-      att_lhs[0] = 1u; att_doE[0] = 1u; att_inc[0] = 0u;
-      att_lhs[1] = 1u; att_doE[1] = 0u; att_inc[1] = 0u;
-      att_lhs[2] = 0u; att_doE[2] = 1u; att_inc[2] = 1u;
-      att_lhs[3] = 0u; att_doE[3] = 0u; att_inc[3] = 1u;
+      att_lhs[0] = 1u; att_doE[0] = 1u; att_inc[0] = 0u; att_2ph[0] = 0u;
+      att_lhs[1] = 1u; att_doE[1] = 0u; att_inc[1] = 0u; att_2ph[1] = 0u;
+      att_lhs[2] = 0u; att_doE[2] = 1u; att_inc[2] = 1u; att_2ph[2] = 0u;
+      att_lhs[3] = 0u; att_doE[3] = 0u; att_inc[3] = 1u; att_2ph[3] = 0u;
+      att_lhs[4] = 1u; att_doE[4] = 1u; att_inc[4] = 1u; att_2ph[4] = 1u;
+      att_lhs[5] = 1u; att_doE[5] = 0u; att_inc[5] = 1u; att_2ph[5] = 1u;
+      n_att = emit_treat ? 6u : 4u;
     } else {
-      att_lhs[0] = 1u; att_doE[0] = 0u; att_inc[0] = 0u;
-      att_lhs[1] = 1u; att_doE[1] = 1u; att_inc[1] = 0u;
-      att_lhs[2] = 0u; att_doE[2] = 1u; att_inc[2] = 1u;
-      att_lhs[3] = 0u; att_doE[3] = 0u; att_inc[3] = 1u;
+      att_lhs[0] = 1u; att_doE[0] = 0u; att_inc[0] = 0u; att_2ph[0] = 0u;
+      att_lhs[1] = 1u; att_doE[1] = 1u; att_inc[1] = 0u; att_2ph[1] = 0u;
+      att_lhs[2] = 0u; att_doE[2] = 1u; att_inc[2] = 1u; att_2ph[2] = 0u;
+      att_lhs[3] = 0u; att_doE[3] = 0u; att_inc[3] = 1u; att_2ph[3] = 0u;
+      n_att = 4u;
     }
     for (u32 a_i = 0; a_i < n_att && !success; a_i++) {
       // Install the window (per attempt: the parent-birth inclusion
-      // differs between shapes).
-      u32 k = 0u;
+      // and the window time differ between shapes -- a two-phase rung
+      // starts in the FORMATION window R(p_a)).
       u32 win_unor = 0u;
-      for (u32 j = 0; j < k_all; j++) {
-        u32 b = alive[j];
-        if (!att_inc[a_i] && birth_ti[b] == p_a) continue;
-        if (birth_state[b] == 0u) {
-          AtpFtCell *bl = NULL, *br = NULL;
-          if (!atp_cone_eq_ft(s, birth_ti[b], &bl, &br)) {
-            birth_state[b] = 2u;
-          } else {
-            birth_lft[b]   = bl;
-            birth_rft[b]   = br;
-            birth_or[b]    = atp_cone_orient_gt_ft(s, bl, br);
-            birth_state[b] = 1u;
-          }
-        }
-        if (birth_state[b] != 1u) continue;
-        atp_ensure_rule_cap(s, n_rules0 + k + 1u);
-        u32 w = n_rules0 + k;
-        s->lhs[w]      = 0;   // FT path never reads the Term slots
-        s->rhs[w]      = 0;
-        s->lhs_ft[w]   = birth_lft[b];
-        s->rhs_ft[w]   = birth_rft[b];
-        s->r_orient[w] = birth_or[b];
-        s->r_dead[w]   = 0u;
-        s->r_trace[w]  = birth_ti[b];
-        if (!birth_or[b]) win_unor++;
-        k++;
-      }
+      u32 k = atp_cone_install_window(s, n_rules0, birth_ti, birth_dead,
+                                      birth_state, birth_or,
+                                      birth_lft, birth_rft, n_births,
+                                      att_2ph[a_i] ? p_a : ti,
+                                      att_inc[a_i], p_a, &win_unor);
       if (k == 0u) continue;
       s->n_rules    = n_rules0 + k;
       s->n_unorient = n_unor0 + win_unor;
@@ -21567,11 +21600,15 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
       AtpFtCell *l2 = pl, *r2 = pr;
       AtpFtCell *l2_own = NULL, *r2_own = NULL;
       Term eq_other_l = s->trace_pack ? 0 : ft_to_term(pr);
+      // Phase-1 doE: a two-phase rung's first window replays the
+      // formation-time treatment, which is doR-only by definition
+      // (KPBehandelt `-kg "r"`); att_doE applies to its phase 2.
+      u8 doE1 = att_2ph[a_i] ? 0u : att_doE[a_i];
       if (att_lhs[a_i]) {
         g_rec_eq_other_ft = pr;
         AtpFtCell *lf = atp_rewrite_normalize_ft_slice_record(
             s, ft_clone_span(arena, pl, 0), n_rules0, k, 64u,
-            att_doE[a_i], eq_other_l, 0u, &chain);
+            doE1, eq_other_l, 0u, &chain);
         g_rec_eq_other_ft = NULL;
         l2 = lf;
         l2_own = lf;
@@ -21580,10 +21617,40 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
         g_rec_eq_other_ft = l2;
         AtpFtCell *rf = atp_rewrite_normalize_ft_slice_record(
             s, ft_clone_span(arena, pr, 0), n_rules0, k, 64u,
-            att_doE[a_i], s->trace_pack ? 0 : ft_to_term(l2), 1u, &chain);
+            doE1, s->trace_pack ? 0 : ft_to_term(l2), 1u, &chain);
         g_rec_eq_other_ft = NULL;
         r2 = rf;
         r2_own = rf;
+      }
+      if (att_2ph[a_i]) {
+        // Phase 2: swap in the ENTRY-time window R(ti) and run the
+        // pop-normalize shape on the treated pair, continuing the SAME
+        // chain -- the emitted record chain crosses both windows as a
+        // seamless sequence of single rewrites.
+        s->n_rules    = n_rules0;
+        s->n_unorient = n_unor0;
+        k = atp_cone_install_window(s, n_rules0, birth_ti, birth_dead,
+                                    birth_state, birth_or,
+                                    birth_lft, birth_rft, n_births,
+                                    ti, att_inc[a_i], p_a, &win_unor);
+        if (k > 0u) {
+          s->n_rules    = n_rules0 + k;
+          s->n_unorient = n_unor0 + win_unor;
+          g_rec_eq_other_ft = r2;
+          AtpFtCell *lf2 = atp_rewrite_normalize_ft_slice_record(
+              s, l2, n_rules0, k, 64u, att_doE[a_i],
+              s->trace_pack ? 0 : ft_to_term(r2), 0u, &chain);
+          g_rec_eq_other_ft = NULL;
+          l2 = lf2;
+          l2_own = lf2;
+          g_rec_eq_other_ft = l2;
+          AtpFtCell *rf2 = atp_rewrite_normalize_ft_slice_record(
+              s, r2, n_rules0, k, 64u, att_doE[a_i],
+              s->trace_pack ? 0 : ft_to_term(l2), 1u, &chain);
+          g_rec_eq_other_ft = NULL;
+          r2 = rf2;
+          r2_own = rf2;
+        }
       }
       s->n_rules    = n_rules0;
       s->n_unorient = n_unor0;
@@ -21636,7 +21703,7 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
     }
   }
   free(birth_ti); free(birth_dead); free(birth_state); free(birth_or);
-  free(birth_lft); free(birth_rft); free(alive); free(cand);
+  free(birth_lft); free(birth_rft); free(cand);
 #undef ATP_CONE_MAYBE_GC
 #else
   (void)s;
