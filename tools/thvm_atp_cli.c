@@ -4326,9 +4326,22 @@ static int run_schedule(const char *self, const char *file, double wall,
   int   done[N_SCHED];
   for (int i = 0; i < N_SCHED; i++) { pids[i] = -1; done[i] = 0; outs[i][0] = 0; }
   int launched = 0, next = 0, winner = -1, n_inerr = 0;
-  // Launch up to SCHED_MAX_PAR, then refill as children exit.
+  // Concurrency width: SCHED_MAX_PAR by default (a laptop can only run a
+  // few slices at once), env-overridable so a many-core box runs the
+  // WHOLE portfolio in one concurrent wave -- the fair CASC condition is
+  // one wall budget with every strategy racing, not sequential waves that
+  // multiply the wall.  Clamped to [1, N_SCHED].
+  int max_par = SCHED_MAX_PAR;
+  {
+    const char *mp = getenv("THVM_ATP_SCHED_MAX_PAR");
+    if (mp != NULL && mp[0] != '\0') {
+      int v = atoi(mp);
+      if (v >= 1 && v <= N_SCHED) max_par = v;
+    }
+  }
+  // Launch up to max_par, then refill as children exit.
   while (winner < 0 && (next < N_SCHED || launched > 0)) {
-    while (winner < 0 && launched < SCHED_MAX_PAR && next < N_SCHED) {
+    while (winner < 0 && launched < max_par && next < N_SCHED) {
       int i = next++;
       snprintf(outs[i], sizeof outs[i], "/tmp/thvm_sched_%d_%d.out",
                (int)getpid(), i);
