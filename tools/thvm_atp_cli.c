@@ -3790,6 +3790,22 @@ static const char *cli_var_prefix(const PrProblem *pr) {
   return cached_prefix;
 }
 
+// Does the term mention a goal-flattening definitional constant (the
+// sFlat* fresh names)?  Such an axiom leaf is an introduced definition,
+// not a problem clause, and must be sourced as introduced(definition)
+// so a derivation verifier (GDV) does not try to match it against the
+// problem's formulae.
+static int cli_term_has_flat_sym(const PrProblem *pr, Term t) {
+  if (t == 0 || term_tag(t) != TAG_CTR) return 0;
+  u32 l = term_ext(t);
+  if (pr != NULL && l >= PR_LABEL_BASE && l < PR_LABEL_BASE + pr->n_syms
+      && strncmp(pr->syms[l - PR_LABEL_BASE].name, "sFlat", 5) == 0) return 1;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++)
+    if (cli_term_has_flat_sym(pr, term_ctr_at(t, i))) return 1;
+  return 0;
+}
+
 static void cli_print_term(FILE *fp, const PrProblem *pr, Term t) {
   if (t == 0) { fputs("_", fp); return; }
   u32 tag = term_tag(t);
@@ -3846,10 +3862,15 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
   fputs(" = ", fp);
   cli_print_term(fp, pr, rhs);
   if (reason == TRACE_AXIOM) {
-    // Leaf clause: cite the problem file so GDV can match it against the
-    // problem's axioms (includes are resolved by GDV) and complete leaf
-    // verification.
-    fprintf(fp, ", file('%s')).\n", g_cli_problem);
+    // Leaf clause: a problem axiom cites the problem file so GDV can
+    // match it and complete leaf verification; a goal-flattening
+    // definition (fresh sFlat constant = subterm) is an introduced
+    // definitional extension, not a problem clause, and is sourced as
+    // such.
+    if (cli_term_has_flat_sym(pr, lhs) || cli_term_has_flat_sym(pr, rhs))
+      fputs(", introduced(definition)).\n", fp);
+    else
+      fprintf(fp, ", file('%s')).\n", g_cli_problem);
   } else {
     const char *rule =
         (reason == TRACE_CP)      ? "cp" :
