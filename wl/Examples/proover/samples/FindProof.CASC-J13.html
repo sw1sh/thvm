@@ -31,8 +31,7 @@ final rule set, and rendered as a TPTP CNFRefutation.</p>
 <p>The system is not restricted to unit equality. Full first-order input is
 handled by equationalization, in which propositions are Skolemized and encoded as
 equations over a Boolean-algebra axiomatisation, proved by the same completion
-core, and decoded back into a predicate-logic proof. The present entry competes
-in the UEQ division.</p>
+core, and decoded back into a predicate-logic proof.</p>
 
 <h3>Strategies</h3>
 
@@ -69,14 +68,16 @@ available from the author.</p>
 
 <h3>Expected Competition Performance</h3>
 
-<p>FindProof is entered in the UEQ division. The Waldmeister default solves the
-standard equational classes, including Boolean and ternary Boolean algebra, group
-and ring theory, lattice theory, and combinatory logic, and the schedule adds
-coverage from ground-joinability and connectedness configurations on the
-associative-commutative classes where pure completion saturates slowly. The
-system is expected to trail the leading portfolio provers, whose unit-equality
-schedules have benefited from years of tuning, and a mid-field placement is
-anticipated.</p>
+<p>FindProof is entered in the UEQ and FOF divisions. In UEQ the Waldmeister
+default solves the standard equational classes, including Boolean and ternary
+Boolean algebra, group and ring theory, lattice theory, and combinatory logic,
+and the schedule adds coverage from ground-joinability and connectedness
+configurations on the associative-commutative classes where pure completion
+saturates slowly. The system is expected to trail the leading portfolio provers,
+whose unit-equality schedules have benefited from years of tuning, and a
+mid-field placement is anticipated. In FOF, where full first-order input is
+proved through the equationalization encoding, the entry is exploratory and
+modest performance is expected.</p>
 
 <h3>References</h3>
 
