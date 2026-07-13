@@ -45,8 +45,8 @@ scores the maximum and makes **zero catastrophic errors** (never rejects a valid
 proof, never accepts a buggy one):
 
 ```
-valid  -> Verified         22
-buggy  -> FailedVerified   58     (neg 18, sk_absent 12, sk_reuse 6, unentail 22)
+valid  -> VerifiedGood         22
+buggy  -> VerifiedBad   58     (neg 18, sk_absent 12, sk_reuse 6, unentail 22)
 ProoVer score: 138 (max 138)   catastrophic errors: 0
 ```
 

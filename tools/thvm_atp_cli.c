@@ -4455,6 +4455,14 @@ int main(int argc, char **argv) {
   int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0;
   double main_t0 = horn_now();
 
+  // Invoked as CheckProof (the ProoVer entry binary), the checker is the
+  // default mode; FindProof stays the prover.
+  {
+    const char *self = strrchr(argv[0], '/');
+    self = (self != NULL) ? self + 1 : argv[0];
+    if (strncmp(self, "CheckProof", 10) == 0) want_check = 1;
+  }
+
   for (int i = 1; i < argc; i++) {
     char *a = argv[i];
     if (strncmp(a, "--", 2) != 0) {

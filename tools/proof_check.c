@@ -13,15 +13,15 @@
 // independently by dispatching on its rule, and one SZS verdict is
 // reported for the whole proof:
 //
-//   Verified        every derived step independently confirmed  (+1)
-//   FailedVerified  a step is provably unsound                   (+2)
-//   NotVerified     a step could not be settled -- abstain       ( 0)
+//   VerifiedGood        every derived step independently confirmed  (+1)
+//   VerifiedBad  a step is provably unsound                   (+2)
+//   Unknown     a step could not be settled -- abstain       ( 0)
 //
 // The scoring penalises accepting a bad proof far more than abstaining,
 // so the checker is conservative: an INVALID verdict is emitted only when
 // a step is CERTAIN to be unsound (a completed saturation exhibits a
 // counter-model, a Skolem symbol is demonstrably not fresh), and anything
-// undecided within the resource bound falls back to NotVerified.
+// undecided within the resource bound falls back to Unknown.
 //
 // Obligations, all discharged through the saturation engine except the
 // structural Skolem check:
@@ -519,9 +519,9 @@ static u8   g_pc_roots_armed = 0;
 // `cp` step's superposition is normalised only by records STRICTLY
 // BEFORE it -- the demodulators that existed when the CP formed.  Sound
 // + non-circular: cli_emit_trace prints parents before an entry, so the
-// trace is topological, and Verified still requires every record to pass
+// trace is topological, and VerifiedGood still requires every record to pass
 // its own (earlier-context) check, so a bogus demodulator cannot yield a
-// false Verified -- it fails its own step first.
+// false VerifiedGood -- it fails its own step first.
 static int  g_pc_cur_idx   = -1;
 // Last-resort budget boost for the axiom-augmented completion retry: a
 // treatment-compressed record can depend on a demodulator OUTSIDE the
@@ -920,7 +920,7 @@ static u32 pc_axiom_pairs(Term *pl, Term *pr, u32 cap) {
 // and compare to the (also normalised) recorded pair.  Sound: a raw CP is
 // a genuine equational consequence of the two parents; the demodulators
 // are consequences of the axioms (each passes its own earlier-context
-// check, so a bogus one fails first and blocks a false Verified); and a
+// check, so a bogus one fails first and blocks a false VerifiedGood); and a
 // no-match is a plain abstain (PC_UNKNOWN), never a refutation.
 #define PC_CP_CAP        512u
 #define PC_NORM_RULES    8192u
@@ -1458,7 +1458,7 @@ static int pc_check_step(int idx, const char **why) {
       // instead of abstaining outright.  Every equationally-derived
       // step is an entailment, so FindProof's own CNFRefutations now
       // verify end-to-end; an unsettled entailment still returns
-      // PC_UNKNOWN (NotVerified abstain), never a false Verified.
+      // PC_UNKNOWN (Unknown abstain), never a false VerifiedGood.
       return pc_check_entail(st, why);
   }
 }
@@ -1510,7 +1510,7 @@ static const char * volatile pc_bad_why;
 // The actual checking pass; prints the SZS verdict on clean completion.
 // The whole pass runs under a setjmp on thvm's heap-exhaustion hook: an
 // entailment whose saturation (or clausification) blows the term heap
-// unwinds here and the proof abstains -- NotVerified -- rather than the
+// unwinds here and the proof abstains -- Unknown -- rather than the
 // process dying with no verdict.  Because ProoVer runs one proof per
 // process, a whole-proof abstain on exhaustion is the sound response.
 static int proof_check_worker(const char *file, int szs) {
@@ -1540,7 +1540,7 @@ static int proof_check_worker(const char *file, int szs) {
     // Heap exhausted mid-check.  A step already confirmed unsound stays
     // a bug; otherwise abstain.
     thvm_heap_exhaust_jmp = NULL;
-    verdict = (pc_bad >= 0) ? "FailedVerified" : "NotVerified";
+    verdict = (pc_bad >= 0) ? "VerifiedBad" : "Unknown";
   } else {
     // Split into '.'-terminated records (respecting quotes / brackets).
     pc_nstep = 0; pc_nsyms = 0;
@@ -1568,7 +1568,7 @@ static int proof_check_worker(const char *file, int szs) {
       // Per-step arena discipline: pc_entails replays a whole engine
       // refutation per step on the global heap; without reclamation a
       // ~30-step equational proof exhausts from-space mid-check (LAT171-1)
-      // and the isolation child dies -> blanket NotVerified.  Nothing a
+      // and the isolation child dies -> blanket Unknown.  Nothing a
       // step check allocates outlives it (verdicts are ints; pc_steps'
       // formulas predate the loop), so pop the watermark -- unless a GC
       // pass moved the heap under us, where the checkpoint is stale.
@@ -1598,7 +1598,7 @@ static int proof_check_worker(const char *file, int szs) {
         // A collection moved the heap: every parsed formula Term in
         // pc_steps now dangles (they are not GC roots of the per-step
         // engine sessions).  Any verdict computed after this point could
-        // be garbage -- including a WRONG FailedVerified (observed on
+        // be garbage -- including a WRONG VerifiedBad (observed on
         // LAT171-1 deep mode: the \$false closure step read a relocated
         // parent and 'refuted' it).  Abstain for the whole proof --
         // unless the collection ran inside a ROOTED eq session, whose
@@ -1643,10 +1643,10 @@ static int proof_check_worker(const char *file, int szs) {
       if (v == PC_UNKNOWN) pc_any_unknown = 1;
     }
     thvm_heap_exhaust_jmp = NULL;
-    if (pc_bad >= 0)          verdict = "FailedVerified";
-    else if (pc_any_unknown)  verdict = "NotVerified";
-    else if (!pc_saw_false)   verdict = "NotVerified";  // no refutation closure
-    else                      verdict = "Verified";
+    if (pc_bad >= 0)          verdict = "VerifiedBad";
+    else if (pc_any_unknown)  verdict = "Unknown";
+    else if (!pc_saw_false)   verdict = "Unknown";  // no refutation closure
+    else                      verdict = "VerifiedGood";
   }
 
   if (szs) printf("%% SZS status %s for %s\n", verdict, base);
@@ -1661,8 +1661,8 @@ static void pc_alarm(int sig) { (void)sig; }   // interrupt waitpid only
 // FindProof --check entry point.  Isolates the checking pass in a child
 // process: whatever happens to it -- a clean verdict, a heap-exhaustion
 // fatal, or a saturation that outlives the wall bound -- the proof still
-// gets exactly one SZS line.  The conservative fallback is NotVerified
-// (0 points), never a wrong FailedVerified (-10).
+// gets exactly one SZS line.  The conservative fallback is Unknown
+// (0 points), never a wrong VerifiedBad (-10).
 static int proof_check_main(const char *file, int szs) {
   const char *base = strrchr(file, '/');
   base = (base != NULL) ? base + 1 : file;
@@ -1689,8 +1689,8 @@ static int proof_check_main(const char *file, int szs) {
     kill(pid, SIGKILL);
     waitpid(pid, &status, 0);
     // The worker crashed or timed out before printing: abstain cleanly.
-    if (szs) printf("%% SZS status NotVerified for %s\n", base);
-    else     printf("NotVerified\t%s\n", base);
+    if (szs) printf("%% SZS status Unknown for %s\n", base);
+    else     printf("Unknown\t%s\n", base);
     fflush(stdout);
   }
   return 0;

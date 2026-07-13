@@ -2,7 +2,7 @@
 
 How to compile and run the FindProof submission the way the competition
 infrastructure (StarExec) does, and how to reproduce every step manually so you
-can test before uploading. One tarball serves two competitions from one binary:
+can test before uploading. Two tarballs, one code base: FindProof.tgz (CASC proving) and CheckProof.tgz (ProoVer checking; binary CheckProof, built by tools/proover/mk_tarball.sh with the same layout). This doc walks the FindProof one; the CheckProof tarball is identical in shape with bin/CheckProof and a single checking configuration:
 
 - CASC (CADE ATP System Competition) unit-equality proving
 - ProoVer first-order proof checking
@@ -57,7 +57,6 @@ FindProof/
   README                         # short usage note (both roles)
   bin/
     starexec_run_default         # CONFIG "default": CASC UEQ proving
-    starexec_run_proover         # CONFIG "proover": ProoVer proof checking
     FindProof                    # the compiled binary (created by the build)
   tools/
     thvm_atp_cli.c               # the CLI translation unit (the whole build)
@@ -183,8 +182,8 @@ STAREXEC_WALLCLOCK_LIMIT=120 sh bin/starexec_run_default /path/to/GRP014-1.p
 #       % SZS output start CNFRefutation ... % SZS output end CNFRefutation
 
 # 4b. run the ProoVer configuration on a real TSTP proof
-STAREXEC_WALLCLOCK_LIMIT=30 sh bin/starexec_run_proover /path/to/proof.p
-#    -> % SZS status Verified|FailedVerified|NotVerified for proof.p
+STAREXEC_WALLCLOCK_LIMIT=30 sh CheckProof/bin/starexec_run_default /path/to/proof.p
+#    -> % SZS status VerifiedGood|VerifiedBad|Unknown for proof.p
 #       (a localised faulty step is printed as a % comment)
 ```
 
@@ -273,11 +272,11 @@ bin/FindProof --check --szs PROOF.p
   annotations), by refutation, closing with `$false`.
 - Each derived step is validated by dispatching on its inference rule; every
   entailment obligation is discharged by the engine's own saturation prover.
-- OUTPUT: one `% SZS status` verdict, `Verified` / `FailedVerified` /
-  `NotVerified`, plus, when a step is rejected, a `% bad step:` comment naming
+- OUTPUT: one `% SZS status` verdict, `VerifiedGood` / `VerifiedBad` /
+  `Unknown`, plus, when a step is rejected, a `% bad step:` comment naming
   it.
-- The checker is conservative: it emits `FailedVerified` only when a step is
-  certainly unsound, and abstains with `NotVerified` otherwise, because the
+- The checker is conservative: it emits `VerifiedBad` only when a step is
+  certainly unsound, and abstains with `Unknown` otherwise, because the
   competition scoring penalises a wrong verdict far more than abstaining.
 
 ---
@@ -302,7 +301,7 @@ bin/FindProof --check --szs PROOF.p
   (`SCHED_SLICE_RSS_MB`, 4500 MB) unless the caller exported a lower
   `THVM_ATP_RSS_ABORT_MB`; measured practical peak is ~7 GB for 4 concurrent
   slices. Proof checking bounds its own term store and abstains
-  (`NotVerified`) rather than exhausting memory. Still set a sane
+  (`Unknown`) rather than exhausting memory. Still set a sane
   `STAREXEC_MAX_MEM` on the job.
 - Regenerate the tarball after any source change. `mk_tarball.sh` copies the
   live sources; the Makefile depends on both `tools/thvm_atp_cli.c` and the
@@ -321,7 +320,7 @@ sh tools/casc/mk_tarball.sh ~/.cache/thvm/casc/FindProof.tgz
 tar xzf ~/.cache/thvm/casc/FindProof.tgz -C /tmp/se && cd /tmp/se/FindProof
 sh starexec_build
 STAREXEC_WALLCLOCK_LIMIT=120 sh bin/starexec_run_default  problem.p   # CASC
-STAREXEC_WALLCLOCK_LIMIT=30  sh bin/starexec_run_proover  proof.p     # ProoVer
+STAREXEC_WALLCLOCK_LIMIT=30  sh CheckProof/bin/starexec_run_default  proof.p     # ProoVer
 
 # direct binary use (no run scripts)
 bin/FindProof --schedule --szs --proof --wall=120 problem.p           # prove

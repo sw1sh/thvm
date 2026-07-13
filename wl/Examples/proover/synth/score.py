@@ -7,7 +7,7 @@ corpus_dir defaults to this directory (run generate.py first); the binary
 defaults to the repo's bin/FindProof.  Reports the confusion matrix, the
 per-bug-class catch rate, the ProoVer competition score, and -- the number
 that matters -- the count of catastrophic errors (a valid proof rejected as
-FailedVerified, or a buggy proof accepted as Verified).
+VerifiedBad, or a buggy proof accepted as VerifiedGood).
 """
 import os, sys, subprocess, collections
 
@@ -36,10 +36,10 @@ def main():
         conf[(gold, v)] += 1
         if gold == "buggy":
             bug[(cls, v)] += 1
-        if gold == "valid" and v == "FailedVerified":
-            bad.append((fn, "valid -> FailedVerified (-10)"))
-        if gold == "buggy" and v == "Verified":
-            bad.append((fn, "buggy -> Verified (-10)"))
+        if gold == "valid" and v == "VerifiedBad":
+            bad.append((fn, "valid -> VerifiedBad (-10)"))
+        if gold == "buggy" and v == "VerifiedGood":
+            bad.append((fn, "buggy -> VerifiedGood (-10)"))
 
     print("== confusion (gold -> verdict) ==")
     for (g, v), n in sorted(conf.items()):
@@ -53,9 +53,9 @@ def main():
     score = 0
     for (g, v), n in conf.items():
         if g == "valid":
-            score += n * (1 if v == "Verified" else -1 if v == "FailedVerified" else 0)
+            score += n * (1 if v == "VerifiedGood" else -1 if v == "VerifiedBad" else 0)
         else:
-            score += (2 * n if v == "FailedVerified" else -10 * n if v == "Verified" else 0)
+            score += (2 * n if v == "VerifiedBad" else -10 * n if v == "VerifiedGood" else 0)
     print(f"\n== {nv} valid + {nb} buggy = {nv + nb} proofs ==")
     print(f"== ProoVer score: {score} (max {nv + 2 * nb}) ==")
     print(f"== catastrophic errors: {len(bad)} ==")

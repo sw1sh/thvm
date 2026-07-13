@@ -1,0 +1,26 @@
+CheckProof -- first-order TSTP proof checker (ProoVer entry).
+
+BUILD
+  make                 # produces bin/CheckProof  (needs a C11 compiler + libm)
+  ./starexec_build     # equivalent, for StarExec
+
+The whole engine is one self-contained translation unit; no external
+dependencies beyond the C standard library and libm.  CheckProof is
+built from the same sources as the FindProof equational prover (the
+CASC UEQ entry); the binary name selects the checking mode.
+
+STAREXEC CONFIGURATION
+  bin/starexec_run_default PROOF.p
+      Validates every derived step of a first-order TSTP proof and
+      writes one SZS verdict (VerifiedGood / VerifiedBad / Unknown).
+      Wall-clock limit from $STAREXEC_WALLCLOCK_LIMIT (default 30s).
+
+RUN (manual)
+  bin/CheckProof --szs PROOF.p
+
+INPUT   First-order TSTP proofs (fof/cnf records with inference
+        annotations), by refutation, closing with $false.
+OUTPUT  One SZS verdict line; when a step is rejected, the faulty step
+        is named in a following comment.  VerifiedBad is claimed only
+        when a step is certainly unsound; anything undecided within the
+        resource bound yields Unknown.

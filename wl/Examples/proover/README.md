@@ -14,13 +14,13 @@ verdict per proof:
 
 | verdict          | meaning            | score if right | score if wrong |
 | ---------------- | ------------------ | -------------- | -------------- |
-| `FailedVerified` | proof is invalid   | +2             | **-10**        |
-| `Verified`       | proof is valid     | +1             | -1             |
-| `NotVerified`    | cannot decide      | 0              | 0              |
+| `VerifiedBad` | proof is invalid   | +2             | **-10**        |
+| `VerifiedGood`       | proof is valid     | +1             | -1             |
+| `Unknown`    | cannot decide      | 0              | 0              |
 
 The asymmetry is the whole game: calling a buggy proof good costs **-10**, while
-abstaining costs 0. The optimal checker is conservative: stamp `Verified` only
-when every step is independently confirmed, and fall back to `NotVerified` the
+abstaining costs 0. The optimal checker is conservative: stamp `VerifiedGood` only
+when every step is independently confirmed, and fall back to `Unknown` the
 instant a step cannot be settled. 30 second wall-clock per proof, no CPU-time
 limit (multicore encouraged).
 
@@ -40,8 +40,8 @@ list of admissible rules will be provided later").
 
 ## The checker
 
-The competition entry is **`FindProof --check`**, a single self-contained C
-binary -- the same `bin/FindProof` as the CASC UEQ prover (see `tools/casc/`) --
+The competition entry is **`CheckProof`**, a single self-contained C
+binary -- built from the same sources as the FindProof CASC UEQ prover (see `tools/proover/`) --
 with no Wolfram kernel and no external prover. A first-order TSTP proof is read
 by a hand-written recursive-descent parser into the engine's term
 representation, and each derived step is validated by dispatching on its
@@ -59,13 +59,13 @@ reasons with full equality rather than treating `=` atoms opaquely.
 | (final step)          | must be `$false`                                                        | refute the parents |
 
 A step is accepted when the saturation derives the empty clause; rejected as
-unsound (`FailedVerified`, with the step named) only when a completed saturation
+unsound (`VerifiedBad`, with the step named) only when a completed saturation
 exhibits a counter-model; and left undecided otherwise. Undecided steps -- an
 unknown rule, or an entailment the bounded saturation neither proves nor refutes
--- yield `NotVerified`. A `FailedVerified` verdict is emitted only when a step
+-- yield `Unknown`. A `VerifiedBad` verdict is emitted only when a step
 is certainly unsound, honouring the -10 scoring. The whole pass is
 resource-bounded: a saturation whose equality reasoning outgrows the term store
-abstains to a clean `NotVerified` rather than crashing, so every proof gets
+abstains to a clean `Unknown` rather than crashing, so every proof gets
 exactly one verdict.
 
 [proover.wl](proover.wl) is the Wolfram Language prototype of the same design:
@@ -96,7 +96,7 @@ is only equisatisfiable (esa), not a logical consequence.
 The C entry confirms three of these outright (the negation shape, and both
 Skolem checks). For example2_e it abstains: establishing that a single disjunct
 is *not* entailed by the equational disjunction needs more than the bounded
-saturation certifies, so it reports `NotVerified` rather than risk a wrong
+saturation certifies, so it reports `Unknown` rather than risk a wrong
 verdict. The WL prototype decides it via bounded grounding.
 
 ## Running it
@@ -104,27 +104,27 @@ verdict. The WL prototype decides it via bounded grounding.
 The competition path is the standalone C binary, one proof per invocation:
 
 ```
-FindProof --check --szs proof.p            # -> % SZS status <verdict> for proof.p
+CheckProof --szs proof.p            # -> % SZS status <verdict> for proof.p
 ```
 
 On the bundled 7-example corpus it scores **+9** with no -10 exposure: the three
-valid proofs `Verified` (+3), and three of the four buggy proofs
-`FailedVerified` with the faulty step localised (+6). The fourth
-(example2_e) sound-abstains to `NotVerified`.
+valid proofs `VerifiedGood` (+3), and three of the four buggy proofs
+`VerifiedBad` with the faulty step localised (+6). The fourth
+(example2_e) sound-abstains to `Unknown`.
 
 ```
-example1_proof.p    Verified
-example2_proof.p    Verified
-example3_proof.p    Verified
-example1_e_proof.p  FailedVerified   bad step: s1 (not the negation of the conjecture)
-example3_e_proof.p  FailedVerified   bad step: groom (Skolem symbol is not fresh)
-example4_e_proof.p  FailedVerified   bad step: groom (declared Skolem symbol absent from result)
-example2_e_proof.p  NotVerified      (deduction over an equational disjunction -- sound abstain)
+example1_proof.p    VerifiedGood
+example2_proof.p    VerifiedGood
+example3_proof.p    VerifiedGood
+example1_e_proof.p  VerifiedBad   bad step: s1 (not the negation of the conjecture)
+example3_e_proof.p  VerifiedBad   bad step: groom (Skolem symbol is not fresh)
+example4_e_proof.p  VerifiedBad   bad step: groom (declared Skolem symbol absent from result)
+example2_e_proof.p  Unknown      (deduction over an equational disjunction -- sound abstain)
 ```
 
-The Wolfram Language prototype runs the same corpus and additionally
-`FailedVerifies` example2_e via bounded grounding, for +11, trading the
-soundness margin the C entry keeps:
+The Wolfram Language prototype runs the same corpus and additionally rejects
+example2_e via bounded grounding, for +11, trading the soundness margin the C
+entry keeps:
 
 ```
 wolframscript -f wl/Examples/proover/check.wls            # bundled corpus
@@ -135,17 +135,20 @@ wolframscript -f wl/Examples/proover/check.wls <dir>      # any corpus dir
 the `correct/` vs `incorrect/` subtree is the gold label both checkers score
 against.
 
-## One StarExec tarball, two competitions
+## Two StarExec tarballs, one code base
 
-`tools/casc/mk_tarball.sh` produces a single self-contained submission
-(`FindProof.tgz`) that serves both competitions from the same `bin/FindProof`,
-selected by the StarExec configuration:
+Each competition gets its own self-contained submission, both built from the
+same unity-build sources:
 
-- `bin/starexec_run_default` -- CASC UEQ proving (`--schedule --szs --proof`)
-- `bin/starexec_run_proover` -- ProoVer proof checking (`--check --szs`)
+- `tools/casc/mk_tarball.sh` -> `FindProof.tgz` (CASC UEQ proving;
+  `bin/starexec_run_default` runs the portfolio with `--schedule --szs --proof`)
+- `tools/proover/mk_tarball.sh` -> `CheckProof.tgz` (ProoVer checking;
+  `bin/starexec_run_default` runs `CheckProof --szs`; the binary name selects
+  the checking mode)
 
-`starexec_build` compiles the one binary; no external dependencies beyond the C
-standard library and libm. See `tools/casc/README`.
+Each `starexec_build` compiles its one binary; no external dependencies beyond
+the C standard library and libm. See `tools/casc/README` and
+`tools/proover/README`.
 
 ## The validation-workflow demo
 
@@ -186,9 +189,9 @@ checker do not use `LeanImportString`, so this does not affect them.
 
 - Congruence handling for equality atoms (the entailment check currently treats
   `=` atoms as opaque booleans; sound for the examples, but a step that needs
-  `f(a)=f(b)` from `a=b` would land in `NotVerified` rather than `Verified`).
+  `f(a)=f(b)` from `a=b` would land in `Unknown` rather than `VerifiedGood`).
 - Handle the additional inference rules once the organizers publish them; until
   then unknown rules abstain.
 - Optional: a LeanLink external cross-check on the `thm`-status entailment steps
-  for proofs the internal backend marks `NotVerified`, to convert abstentions
+  for proofs the internal backend marks `Unknown`, to convert abstentions
   into decisions without risking the -10.

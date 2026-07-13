@@ -1,13 +1,13 @@
 <hr>
 
-<h2>FindProof 0.1</h2>
+<h2>CheckProof 0.1</h2>
 
 <p>N. Murzin<br>
 Wolfram Institute, USA</p>
 
 <h3>Overview</h3>
 
-<p>FindProof 0.1 [Sys1] is a checker for first-order TSTP proofs. A proof is
+<p>CheckProof 0.1 [Sys1] is a checker for first-order TSTP proofs. A proof is
 validated by replay: it is parsed into its sequence of annotated formulae, and
 each derived step is validated independently by dispatching on the inference
 rule that introduced it, so that one SZS status is reported for the whole proof
@@ -28,19 +28,19 @@ resource bound, leaves the proof unverified rather than guessed.</p>
 
 <h3>Implementation</h3>
 
-<p>FindProof is implemented as a single self-contained C program, with no
+<p>CheckProof is implemented as a single self-contained C program, with no
 external dependencies beyond the C standard library. Proofs in TSTP syntax are
 read directly by a recursive-descent parser into the first-order term
-representation of the reasoning core. The obligations are discharged by
-FindProof's own clausal saturation engine, the same system entered in the CASC
-unit-equality division [Sys1]; no external prover is called, so equational atoms
-are reasoned about with superposition rather than treated as opaque. The checker
-is built from source by a single compiler invocation and is available from the
-author.</p>
+representation of the reasoning core. The obligations are discharged by the
+clausal saturation engine of the FindProof equational prover [Sys1], the same
+code base from which CheckProof is built; no external prover is called, so
+equational atoms are reasoned about with superposition rather than treated as
+opaque. The checker is built from source by a single compiler invocation and is
+available from the author.</p>
 
 <h3>Expected Competition Performance</h3>
 
-<p>FindProof is entered in ProoVer 2026. It is expected to be sound, accepting no
+<p>CheckProof is entered in ProoVer 2026. It is expected to be sound, accepting no
 invalid proof and rejecting no valid one, and to report a proof unverified when
 its steps use inference rules outside the implemented set or when an entailment
 cannot be settled within the time limit.</p>
