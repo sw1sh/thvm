@@ -21,7 +21,13 @@
 //
 // Set/cleared via thvm_set_heap_exhaust_handler.
 #include <setjmp.h>
+// execinfo (backtrace) is a glibc/Darwin extension; musl and other
+// minimal libcs lack it, so the THVM_FATAL_BACKTRACE diagnostic is
+// compiled out there.
+#if defined(__GLIBC__) || defined(__APPLE__)
+#define THVM_HAVE_EXECINFO 1
 #include <execinfo.h>
+#endif
 jmp_buf  *thvm_heap_exhaust_jmp = NULL;
 volatile int thvm_heap_exhausted = 0;
 
@@ -39,11 +45,13 @@ fn void thvm_fatal(const char *msg) {
   // THVM_FATAL_BACKTRACE=1: print the C call stack so an allocation
   // storm's site is attributable without a debugger (the phase tag
   // only names the enclosing step section).
+#ifdef THVM_HAVE_EXECINFO
   if (getenv("THVM_FATAL_BACKTRACE") != NULL) {
     void *bt[48];
     int n = backtrace(bt, 48);
     backtrace_symbols_fd(bt, n, 2);
   }
+#endif
   if (thvm_heap_exhaust_jmp != NULL) {
     thvm_heap_exhausted = 1;
     longjmp(*thvm_heap_exhaust_jmp, 1);
