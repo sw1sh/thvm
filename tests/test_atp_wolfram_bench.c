@@ -1289,14 +1289,47 @@ static void pr_tgt_collect(Term t, int ground_only) {
   }
 }
 
-static void pr_tgt_transform(PrProblem *pr, int ground_only) {
+// Render a pr-layer term with signature names (X<k> for variables),
+// e.g. mult(X0,ld(X0,X1)) -- diagnostics only (the tgt debug dump).
+static void pr_print_term(FILE *fp, const PrProblem *pr, Term t) {
+  u8 tg = term_tag(t);
+  if (tg == TAG_FVR) { fprintf(fp, "X%u", term_ext(t)); return; }
+  if (tg != TAG_CTR) { fprintf(fp, "?%u/%u", tg, term_ext(t)); return; }
+  u32 lbl = term_ext(t);
+  if (lbl >= PR_LABEL_BASE && lbl < PR_LABEL_BASE + pr->n_syms)
+    fputs(pr->syms[lbl - PR_LABEL_BASE].name, fp);
+  else
+    fprintf(fp, "C%u", lbl);
+  u32 n = term_ctr_n(t);
+  if (n == 0u) return;
+  fputc('(', fp);
+  for (u32 i = 0; i < n; i++) {
+    if (i > 0u) fputc(',', fp);
+    pr_print_term(fp, pr, term_ctr_at(t, i));
+  }
+  fputc(')', fp);
+}
+
+static void pr_tgt_transform(PrProblem *pr, int ground_only, int all_eqns) {
   if (pr->goal_l == 0) return;
   pr_tgt_nsubs = 0u;
   // Conjecture-role equations (emitted indices from the CLI), then the
   // CONCLUSION goal sides.  Bottom-up + cached, so the numbering is
   // inner-first like pr_flatten_goal's.
+  // all_eqns (Vampire gtg=all analog): EVERY input equation gets the
+  // goal role, so every axiom's compound subterms are named too -- the
+  // whole problem folds onto definitional layers (the shape of the
+  // tgt=full:gtg=all strategy that wins Vampire's GRP loop-theory
+  // family: its proofs introduce sF* definitions for AXIOM subterms
+  // like mult(X0,mult(X1,X2)), not just the conjecture cone).
+  if (all_eqns) {
+    for (u32 i = 0; i < pr->n_eqns; i++) {
+      pr_tgt_collect(pr->eq_l[i], ground_only);
+      pr_tgt_collect(pr->eq_r[i], ground_only);
+    }
+  }
   const char *el = getenv("THVM_ATP_TGT_EQNS");
-  if (el != NULL) {
+  if (el != NULL && !all_eqns) {
     const char *p = el;
     while (*p != '\0') {
       while (*p != '\0' && !isdigit((unsigned char)*p)) p++;
@@ -1350,8 +1383,18 @@ static void pr_tgt_transform(PrProblem *pr, int ground_only) {
   }
   pr->n_fresh_syms = pr->n_syms - pr->fresh_sym_base;
   if (getenv("THVM_ATP_TGT_DEBUG") != NULL) {
-    fprintf(stderr, "[tgt] %u definitions introduced (%s)\n",
-            nsub, ground_only ? "ground" : "full");
+    fprintf(stderr, "[tgt] %u definitions introduced (%s%s)\n",
+            nsub, ground_only ? "ground" : "full",
+            all_eqns ? ", all axioms" : "");
+    // One line per definition: name, label, arity, body (name(...) form)
+    // -- feeds the oracle-proof lemma aligner.
+    for (u32 i = 0; i < pr->n_fresh_syms; i++) {
+      u32 si = pr->fresh_sym_base + i;
+      fprintf(stderr, "[tgt] def %s/%u label=%u body=",
+              pr->syms[si].name, pr->syms[si].arity, PR_LABEL_BASE + si);
+      pr_print_term(stderr, pr, pr->eq_r[pr->n_eqns - pr->n_fresh_syms + i]);
+      fputc('\n', stderr);
+    }
   }
 }
 
@@ -1509,13 +1552,15 @@ int main(int argc, char **argv) {
   // BEFORE the KboConfig is finalised below (so it picks up the new
   // labels/weights).  Opt-in; default OFF keeps the emulation byte-exact.
   // THVM_ATP_TGT >= 1 selects the conjecture-wide generalization
-  // (Vampire tgt: 1 = full, 2 = ground) which subsumes the goal-only
-  // flatten, so it takes precedence when both are set.
+  // (Vampire tgt: 1 = full, 2 = ground; 3 = full over EVERY axiom,
+  // the gtg=all analog) which subsumes the goal-only flatten, so it
+  // takes precedence when both are set.
   {
     const char *tg = pr_mode ? getenv("THVM_ATP_TGT") : NULL;
     int tgt_mode = (tg != NULL) ? atoi(tg) : 0;
     if (tgt_mode >= 1) {
-      pr_tgt_transform(&prp, /*ground_only=*/tgt_mode >= 2);
+      pr_tgt_transform(&prp, /*ground_only=*/tgt_mode == 2,
+                       /*all_eqns=*/tgt_mode >= 3);
     } else if (pr_mode && getenv("THVM_ATP_FLATTEN_GOAL") != NULL
                && getenv("THVM_ATP_FLATTEN_GOAL")[0] != '0') {
       pr_flatten_goal(&prp);

@@ -1243,6 +1243,27 @@ static u8 atp_term_is_x_xx_x(Term t, u32 *out_v) {
 // batch push loop (g_cpform_*) so a thvm CPFORM line can be diffed against a
 // WM WM_CPFORMDUMP line by (combo, position, parents) on the same rawCP.  Off
 // by default; one cached env probe.
+// Targeted CP-fate watch (THVM_ATP_CP_WATCH_SEQ="131,220,..."): print a
+// line whenever a watched cp_seq is silently deleted (IR-sweep drop
+// branches), so a formed-but-never-popped CP's fate is attributable
+// without a full queue dump.  Output-only; one cached env probe.
+static void atp_cp_watch_seq(u32 seq, const char *what) {
+  static long watch[16];
+  static int n_watch = -1;
+  if (n_watch < 0) {
+    n_watch = 0;
+    const char *e = getenv("THVM_ATP_CP_WATCH_SEQ");
+    while (e != NULL && *e != '\0' && n_watch < 16) {
+      while (*e != '\0' && (*e < '0' || *e > '9')) e++;
+      if (*e == '\0') break;
+      watch[n_watch++] = strtol(e, (char **)&e, 10);
+    }
+  }
+  for (int i = 0; i < n_watch; i++)
+    if ((long)seq == watch[i])
+      fprintf(stderr, "CPWATCH seq=%u %s\n", seq, what);
+}
+
 static void atp_cp_form_trace(u32 seq, u32 w, Term lhs, Term rhs) {
   static int on = -1;
   static int w367 = -1;
@@ -13571,13 +13592,20 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       }
     }
     static int hd_at = -2;
-    if (hd_at == -2) { const char *e = getenv("THVM_ATP_HEAPDUMP_AT"); hd_at = e ? atoi(e) : -1; }
+    static int hd_all = 0;
+    if (hd_at == -2) {
+      const char *e = getenv("THVM_ATP_HEAPDUMP_AT"); hd_at = e ? atoi(e) : -1;
+      // THVM_ATP_HEAPDUMP_ALL: dump EVERY queued CP at the chosen pick,
+      // not just the picked band -- localizes where a known-needed CP
+      // (matched by seq or content) sits in the flood.  Output-only.
+      hd_all = atp_env_on("THVM_ATP_HEAPDUMP_ALL");
+    }
     if (hd_at >= 0 && (u32)hd_at == s->cp_select_count) {
       u32 band = s->cp_pri[v], n_band = 0;
       fprintf(stderr, "==THVMHEAP pick=%u band_pri=%u n_cps=%u==\n", s->cp_select_count, band, s->n_cps);
       for (u32 q = 0; q < s->n_cps; q++) {
         u32 qv = s->cp_heap[q].row;   // heap-position order, exactly as before
-        if (s->cp_pri[qv] != band) continue;
+        if (!hd_all && s->cp_pri[qv] != band) continue;
         Term ql = 0, qr = 0;
         atp_cp_slot_read(s, qv, &ql, &qr);
         fprintf(stderr, "  HCP seq=%u pri=%u lhs=", s->cp_seq[qv], s->cp_pri[qv]);
@@ -19758,6 +19786,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // set in linear time, instead of waiting for select-side amortization.
     if (s->use_orphan_murder &&
         (atp_cp_is_orphan(s, s->cp_trace[vv]) || atp_cp_uid_orphan(s, vv))) {
+      atp_cp_watch_seq(s->cp_seq[vv], "IR-DROP orphan");
       s->n_cps_dropped_orphan++;
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
@@ -19955,6 +19984,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       // it (WM AP_generic returns WTI_Delete).  Deferred slot: nothing
       // packed to free; the tag bit drops and the trace entry stays (it
       // is a GC root and may back other diagnostics).
+      atp_cp_watch_seq(s->cp_seq[vv], "IR-DROP joinable");
       s->n_cps_dropped_joinable++;
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
