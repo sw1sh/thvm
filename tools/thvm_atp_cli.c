@@ -167,6 +167,7 @@ static const AtpKnob KNOBS[] = {
   {"ifeq-guard",             "THVM_ATP_IFEQ_GUARD",      1, "(guard-aware CP selection on ifeq-encoded problems; 2 = give up if inapplicable)"},
   {"ifeq-penalty",           "THVM_ATP_IFEQ_PENALTY",    1, "(ifeq-guard per-undecided-guard weight factor, default 8)"},
   {"tgt",                    "THVM_ATP_TGT",             1, "(Vampire tgt / twee goal transformation: name conjecture subterms; 1 full, 2 ground)"},
+  {"distrib",                "THVM_ATP_DISTRIB",         0, "(Twee distributivity heuristic: fresh f_g(X,Y,Z)=g(f(X,Y),Z) definition per distributivity-shaped axiom)"},
   {"tgt-sel",                "THVM_ATP_TGT_SEL",         1, "(goal-targeted CP-selection weight scale: 1 full, 2 ground)"},
   {"tgt-nongoal",            "THVM_ATP_TGT_NONGOAL",     1, "(tgt-sel non-goal symbol weight factor, default 2)"},
   {"heap-cells",             "THVM_HEAP_CELLS",          1, "(heap size, cells)"},

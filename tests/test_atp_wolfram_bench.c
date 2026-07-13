@@ -1355,6 +1355,138 @@ static void pr_tgt_transform(PrProblem *pr, int ground_only) {
   }
 }
 
+// --- Twee --distributivity-heuristic port ------------------------------
+//
+// Twee's flag (SequentialMain.hs:159-162) is an intake-time DEFINITIONAL
+// EXTENSION, not a CP-scoring adjustment: addDistributivityHeuristic
+// (SequentialMain.hs:688-728) scans every positive unit equation for the
+// two distributivity shapes (checkDistributivity, :705-721; either
+// orientation, variable leaves only, at most one hit per axiom)
+//
+//   A:  f(x, g(y,z)) = g(f(x,y), f(x,z))
+//   B:  f(g(x,y), z) = g(f(x,z), f(y,z))
+//
+// and for each hit adds ONE fresh 3-ary definition
+//
+//   f_g(X,Y,Z) = g(f(X,Y), Z)
+//
+// as a plain axiom (kind Definition, eliminated again from the presented
+// proof).  KBO orients it g(f(X,Y),Z) -> f_g(X,Y,Z) (the fresh symbol
+// weighs less than g+f over the same variable multiset), so every
+// derived equation containing a distributed pattern is COMPRESSED by
+// plain normalization -- that is the entire size-penalty relief; twee's
+// CP score function (Twee/CP.hs:239) is untouched by the flag.
+// Divergences from twee: the fresh symbol joins the pr layer's minimal
+// fresh precedence band (pr_flatten_goal discipline) instead of twee's
+// occurrence-count rank (orientation is weight-decided either way), and
+// name clashes freshen with a numeric suffix instead of newName's tick.
+// Duplicate (f,g) pairs across axioms each add their own definition,
+// exactly like twee's per-axiom newName.  Soundness: conservative
+// definitional extension (pr_flatten_goal's argument).  Default OFF
+// (THVM_ATP_DISTRIB unset) keeps intake byte-identical.
+static int pr_distrib_var(Term t, u32 *v) {
+  if (term_tag(t) != TAG_FVR) return 0;
+  *v = term_ext(t);
+  return 1;
+}
+static int pr_distrib_bin(Term t, u32 *f, Term *a0, Term *a1) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0;
+  *f = term_ext(t);
+  *a0 = term_ctr_at(t, 0);
+  *a1 = term_ctr_at(t, 1);
+  return 1;
+}
+// twee checkDistributivity, one orientation; writes the (f, g) pair.
+static int pr_distrib_check(Term t, Term u, u32 *f_out, u32 *g_out) {
+  u32 f1, g1, g2, f2, f3, p0v, p1v, q0v, q1v, tv, gav, gbv;
+  Term ta, tb, u0, u1, p0, p1, q0, q1, ga, gb;
+  if (!pr_distrib_bin(t, &f1, &ta, &tb)) return 0;
+  if (!pr_distrib_bin(u, &g2, &u0, &u1)) return 0;
+  if (!pr_distrib_bin(u0, &f2, &p0, &p1)) return 0;
+  if (!pr_distrib_bin(u1, &f3, &q0, &q1)) return 0;
+  if (f1 != f2 || f2 != f3) return 0;
+  if (!pr_distrib_var(p0, &p0v) || !pr_distrib_var(p1, &p1v)) return 0;
+  if (!pr_distrib_var(q0, &q0v) || !pr_distrib_var(q1, &q1v)) return 0;
+  // pattern A: t = f(x, g(y,z)), u = g(f(x,y), f(x,z))
+  if (pr_distrib_var(ta, &tv) && pr_distrib_bin(tb, &g1, &ga, &gb) &&
+      g1 == g2 && pr_distrib_var(ga, &gav) && pr_distrib_var(gb, &gbv) &&
+      tv == p0v && p0v == q0v && gav == p1v && gbv == q1v) {
+    *f_out = f1;
+    *g_out = g1;
+    return 1;
+  }
+  // pattern B: t = f(g(x,y), z), u = g(f(x,z), f(y,z))
+  if (pr_distrib_bin(ta, &g1, &ga, &gb) && pr_distrib_var(tb, &tv) &&
+      g1 == g2 && pr_distrib_var(ga, &gav) && pr_distrib_var(gb, &gbv) &&
+      gav == p0v && gbv == q0v && tv == p1v && p1v == q1v) {
+    *f_out = f1;
+    *g_out = g1;
+    return 1;
+  }
+  return 0;
+}
+#define PR_DISTRIB_MAX_DEFS 32u
+static void pr_distrib_transform(PrProblem *pr) {
+  u32 n_ax = pr->n_eqns;         // snapshot: added defs are not rescanned
+  u32 hit_f[PR_DISTRIB_MAX_DEFS], hit_g[PR_DISTRIB_MAX_DEFS];
+  u32 nhit = 0u;
+  for (u32 i = 0; i < n_ax && nhit < PR_DISTRIB_MAX_DEFS; i++) {
+    u32 f, g;
+    if (pr_distrib_check(pr->eq_l[i], pr->eq_r[i], &f, &g) ||
+        pr_distrib_check(pr->eq_r[i], pr->eq_l[i], &f, &g)) {
+      hit_f[nhit] = f;
+      hit_g[nhit] = g;
+      nhit++;
+    }
+  }
+  if (nhit == 0u) {
+    if (getenv("THVM_ATP_DISTRIB_DEBUG") != NULL)
+      fprintf(stderr, "[distrib] 0 definitions introduced\n");
+    return;
+  }
+  // Minimal-band precedence for the fresh names -- same discipline as
+  // pr_tgt_transform; when tgt/flatten already opened a fresh band the
+  // new labels extend it (labels stay contiguous from fresh_sym_base).
+  u32 ncap = PR_MAX_SYMS + PR_LABEL_BASE;
+  for (u32 l = PR_LABEL_BASE; l < ncap; l++)
+    if (pr->precedence[l] >= PR_LABEL_BASE) pr->precedence[l] += nhit;
+  if (pr->n_fresh_syms == 0u) pr->fresh_sym_base = pr->n_syms;
+  u32 added = 0u;
+  for (u32 i = 0; i < nhit; i++) {
+    if (pr->n_syms >= PR_MAX_SYMS) break;
+    if (pr->n_eqns >= PR_MAX_EQNS) break;
+    u32 lbl = PR_LABEL_BASE + pr->n_syms;
+    // twee names the definition `base f ++ "_" ++ base g` and lets
+    // newName freshen clashes; mirror with a numeric suffix.
+    char nm[PR_NAME_LEN];
+    const char *fname = pr->syms[hit_f[i] - PR_LABEL_BASE].name;
+    const char *gname = pr->syms[hit_g[i] - PR_LABEL_BASE].name;
+    snprintf(nm, sizeof nm, "%s_%s", fname, gname);
+    for (u32 sfx = 2u; pr_sym_find(pr, nm, strlen(nm)) != 0u; sfx++)
+      snprintf(nm, sizeof nm, "%s_%s%u", fname, gname, sfx);
+    snprintf(pr->syms[pr->n_syms].name, PR_NAME_LEN, "%s", nm);
+    pr->syms[pr->n_syms].arity = 3u;
+    pr->weights[lbl]    = 1u;                  // minimal weight
+    pr->precedence[lbl] = PR_LABEL_BASE + i;   // distinct, minimal band
+    pr->n_syms++;
+    Term x = term_new_fvr(0), y = term_new_fvr(1), z = term_new_fvr(2);
+    Term fxy_args[2] = {x, y};
+    Term fxy = term_new_ctr(hit_f[i], fxy_args, 2);
+    Term rhs_args[2] = {fxy, z};
+    Term dvars[3] = {x, y, z};
+    pr->eq_l[pr->n_eqns] = term_new_ctr(lbl, dvars, 3);
+    pr->eq_r[pr->n_eqns] = term_new_ctr(hit_g[i], rhs_args, 2);
+    pr->n_eqns++;
+    pr->n_fresh_syms++;
+    added++;
+    if (getenv("THVM_ATP_DISTRIB_DEBUG") != NULL)
+      fprintf(stderr, "[distrib] def %s(X,Y,Z) = %s(%s(X,Y),Z)\n",
+              nm, gname, fname);
+  }
+  if (getenv("THVM_ATP_DISTRIB_DEBUG") != NULL)
+    fprintf(stderr, "[distrib] %u definitions introduced\n", added);
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -1388,6 +1520,12 @@ int main(int argc, char **argv) {
                && getenv("THVM_ATP_FLATTEN_GOAL")[0] != '0') {
       pr_flatten_goal(&prp);
     }
+    // Twee --distributivity-heuristic (pr_distrib_transform above):
+    // runs AFTER tgt/flatten so the fresh label bands stack.  Opt-in,
+    // default OFF.
+    if (pr_mode && getenv("THVM_ATP_DISTRIB") != NULL
+        && getenv("THVM_ATP_DISTRIB")[0] != '0')
+      pr_distrib_transform(&prp);
   }
 
   // Reduction ordering.  Default KBO (one binary symbol `nand`,
