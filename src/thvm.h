@@ -4651,6 +4651,16 @@ typedef struct {
   // penalty -> thvm explores the deep-derivation space Twee prunes).  The
   // parallel r_depth[] carries the same counter on active rules.
   u32  *cp_depth;
+  // GOAL-DERIVED bit (Vampire spb=goal / nwc analog, derivation-level):
+  // 1 iff this CP descends from a conjecture-derived input equation --
+  // seeded by thvm_atp_mark_gd_next on the goal-cone tgt definitions
+  // (and conjecture-role units), then propagated max-parent-wise like
+  // cp_depth.  Consumed only when THVM_ATP_SPB_GOAL is armed: the CP
+  // priority of NON-goal-derived CPs is scaled by THVM_ATP_NWC
+  // (default 2.0), Vampire's nongoal_weight_coefficient applied at the
+  // derivation level.  The parallel r_gd[] carries the bit on active
+  // rules (a rule inherits its birth CP's bit).
+  u8   *cp_gd;
   // THVM_ATP_GJ_KEEP: ground-joinable CPs are KEPT (so they age the FIFO
   // dimension faithfully, as Waldmeister keeps them in its 168k unselected
   // set) but forced to never-weight-selectable priority (WM Act_never) --
@@ -4767,6 +4777,9 @@ typedef struct {
   // Per-rule FORMATION DEPTH (Twee getDepth): axioms = 0; a rule oriented
   // from a selected CP inherits that CP's cp_depth.  See cp_depth above.
   u32  *r_depth;
+  // Per-rule GOAL-DERIVED bit (see cp_gd above): a rule inherits its
+  // birth CP's bit; CP formation ORs the two parents' bits.
+  u8   *r_gd;
   u32  *cp_uid_a;
   u32  *cp_uid_b;
   u8   *uid_dead;
@@ -5003,6 +5016,23 @@ typedef struct {
   // inherits this as its r_depth (Twee getDepth).  0 before the first pop,
   // so initial axioms added via orient_and_add get depth 0.
   u32  last_popped_depth;
+  // Goal-derived bit (cp_gd) of the popped CP -- a rule oriented from it
+  // inherits this as its r_gd (spb=goal derivation tracking).
+  u8   last_popped_gd;
+  // Folded-signature label band [fold_lo, fold_hi): the fresh
+  // definitional symbols (sF*/sFlat*/f_g*) the pr-layer transformations
+  // introduced, registered via thvm_atp_set_fold_band.  Consumed by the
+  // drc=off analog (THVM_ATP_DRC_OFF): a CP whose sides carry a folded
+  // symbol is NOT discarded when its sides join -- it is kept as a
+  // rule/equation (Vampire drc=off keeps demodulation-redundant clauses;
+  // the GRP loop-theory oracle proofs pass through such folded lemmas).
+  // fold_hi == 0 (default) disarms every check.
+  u32  fold_lo;
+  u32  fold_hi;
+  // drc=off keep counters (diagnostic): CPs kept at the push-time join
+  // gate / at the pop-time join gate that classic completion discards.
+  u32  n_cps_drc_kept_push;
+  u32  n_cps_drc_kept_pop;
 
   // FIFO live-scan floor: every queued CP with cp_seq < fifo_floor_seq
   // is PROVEN dead (its scan-time death test failed and death marks --
@@ -6728,6 +6758,14 @@ fn void      thvm_atp_set_gnn_coop(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_goal_subterm(AtpState *s, u8 on);
 fn void      thvm_atp_tgt_add_sym(AtpState *s, u32 label);
+// spb=goal derivation seeding: the NEXT equation added via
+// thvm_atp_add_equation is conjecture-derived (goal-cone tgt definition
+// or conjecture-role unit).  Inert unless THVM_ATP_SPB_GOAL arms the
+// selection bias.  See AtpState.cp_gd.
+fn void      thvm_atp_mark_gd_next(AtpState *s);
+// Register the folded-signature fresh-symbol label band [lo, hi) for
+// the drc=off analog (THVM_ATP_DRC_OFF).  See AtpState.fold_lo.
+fn void      thvm_atp_set_fold_band(AtpState *s, u32 lo, u32 hi);
 fn void      thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_demod(AtpState *s, u8 on);

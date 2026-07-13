@@ -592,6 +592,12 @@ typedef struct {
   u32   precedence[PR_MAX_SYMS + PR_LABEL_BASE];  // by label; higher = greater
   Term  eq_l[PR_MAX_EQNS], eq_r[PR_MAX_EQNS];
   u32   n_eqns;
+  // Goal-derived seed per equation (spb=goal derivation tracking):
+  // 1 on the tgt definitions naming CONJECTURE subterms and on the
+  // conjecture-role units themselves (THVM_ATP_TGT_EQNS indices).  The
+  // engine feed marks these via thvm_atp_mark_gd_next; zero-init (the
+  // struct is a static) keeps everything else unseeded.
+  u8    eq_gd[PR_MAX_EQNS];
   // Fresh definitional symbols introduced by pr_flatten_goal /
   // pr_tgt_transform: syms[fresh_sym_base .. fresh_sym_base +
   // n_fresh_syms).  The proof emitter sources axioms mentioning them
@@ -1245,6 +1251,7 @@ static void pr_flatten_goal(PrProblem *pr) {
 #define PR_TGT_MAX_SUBS 512u
 static Term pr_tgt_subs[PR_TGT_MAX_SUBS];    // normalized keys, inner-first
 static u32  pr_tgt_sub_nv[PR_TGT_MAX_SUBS];  // distinct vars per key
+static u8   pr_tgt_sub_goal[PR_TGT_MAX_SUBS];// key seen in the CONJECTURE cone
 static u32  pr_tgt_nsubs;
 
 // Renumber-clone: variables mapped to 0..k-1 by first occurrence;
@@ -1267,12 +1274,15 @@ static Term pr_tgt_norm_rec(Term t, u32 *map, u32 *nv, u32 *nodes) {
   return term_new_ctr(term_ext(t), (n > 0u) ? kids : NULL, n);
 }
 
-static void pr_tgt_collect(Term t, int ground_only) {
+// goal_mark = 1 when collecting from the CONJECTURE cone (goal sides /
+// conjecture-role units): sets the key's goal flag -- on the dedup hit
+// too, so a subterm shared with an axiom still counts as goal-cone.
+static void pr_tgt_collect(Term t, int ground_only, int goal_mark) {
   if (term_tag(t) != TAG_CTR) return;
   u32 n = term_ctr_n(t);
   if (n == 0u) return;                        // constant: not compound
   for (u32 i = 0; i < n; i++)
-    pr_tgt_collect(term_ctr_at(t, i), ground_only);   // inner first
+    pr_tgt_collect(term_ctr_at(t, i), ground_only, goal_mark); // inner first
   u32 map[PR_MAX_VARS];
   u32 nv = 0u, nodes = 0u;
   Term key = pr_tgt_norm_rec(t, map, &nv, &nodes);
@@ -1280,11 +1290,14 @@ static void pr_tgt_collect(Term t, int ground_only) {
   if (nodes <= nv + 1u) return;   // linear guard (folding not decreasing)
   if (nv > 8u) return;            // fresh functor beyond the arity-8 reader
   for (u32 i = 0; i < pr_tgt_nsubs; i++)
-    if (pr_tgt_sub_nv[i] == nv && pr_flat_term_eq(pr_tgt_subs[i], key))
+    if (pr_tgt_sub_nv[i] == nv && pr_flat_term_eq(pr_tgt_subs[i], key)) {
+      if (goal_mark) pr_tgt_sub_goal[i] = 1u;
       return;                     // already named (modulo renaming)
+    }
   if (pr_tgt_nsubs < PR_TGT_MAX_SUBS) {
-    pr_tgt_subs[pr_tgt_nsubs]   = key;
-    pr_tgt_sub_nv[pr_tgt_nsubs] = nv;
+    pr_tgt_subs[pr_tgt_nsubs]     = key;
+    pr_tgt_sub_nv[pr_tgt_nsubs]   = nv;
+    pr_tgt_sub_goal[pr_tgt_nsubs] = (u8)(goal_mark != 0);
     pr_tgt_nsubs++;
   }
 }
@@ -1324,27 +1337,31 @@ static void pr_tgt_transform(PrProblem *pr, int ground_only, int all_eqns) {
   // like mult(X0,mult(X1,X2)), not just the conjecture cone).
   if (all_eqns) {
     for (u32 i = 0; i < pr->n_eqns; i++) {
-      pr_tgt_collect(pr->eq_l[i], ground_only);
-      pr_tgt_collect(pr->eq_r[i], ground_only);
+      pr_tgt_collect(pr->eq_l[i], ground_only, 0);
+      pr_tgt_collect(pr->eq_r[i], ground_only, 0);
     }
   }
+  // Conjecture-role units: collected with the goal mark (under all_eqns
+  // this pass only re-marks already-collected keys), and the units
+  // themselves are goal-derived seeds for the spb=goal derivation bit.
   const char *el = getenv("THVM_ATP_TGT_EQNS");
-  if (el != NULL && !all_eqns) {
+  if (el != NULL) {
     const char *p = el;
     while (*p != '\0') {
       while (*p != '\0' && !isdigit((unsigned char)*p)) p++;
       if (*p == '\0') break;
       u32 idx = (u32)strtoul(p, (char **)&p, 10);
       if (idx < pr->n_eqns) {
-        pr_tgt_collect(pr->eq_l[idx], ground_only);
-        pr_tgt_collect(pr->eq_r[idx], ground_only);
+        pr_tgt_collect(pr->eq_l[idx], ground_only, 1);
+        pr_tgt_collect(pr->eq_r[idx], ground_only, 1);
+        pr->eq_gd[idx] = 1u;
       }
     }
   }
   u32 ng = (pr->n_goals > 0u) ? pr->n_goals : 0u;
   for (u32 g = 0; g < ng; g++) {
-    pr_tgt_collect(pr->goals_l[g], ground_only);
-    pr_tgt_collect(pr->goals_r[g], ground_only);
+    pr_tgt_collect(pr->goals_l[g], ground_only, 1);
+    pr_tgt_collect(pr->goals_r[g], ground_only, 1);
   }
   if (pr_tgt_nsubs == 0u) return;
   // Minimal-band precedence for the fresh names -- same discipline as
@@ -1379,6 +1396,8 @@ static void pr_tgt_transform(PrProblem *pr, int ground_only, int all_eqns) {
     Term fresh = term_new_ctr(lbl, (nv > 0u) ? vars : NULL, nv);
     pr->eq_l[pr->n_eqns] = fresh;   // fresh(vars) = subterm
     pr->eq_r[pr->n_eqns] = pr_tgt_subs[i];
+    // Goal-cone definitions seed the spb=goal derivation bit.
+    pr->eq_gd[pr->n_eqns] = pr_tgt_sub_goal[i];
     pr->n_eqns++;
   }
   pr->n_fresh_syms = pr->n_syms - pr->fresh_sym_base;
@@ -1390,8 +1409,9 @@ static void pr_tgt_transform(PrProblem *pr, int ground_only, int all_eqns) {
     // -- feeds the oracle-proof lemma aligner.
     for (u32 i = 0; i < pr->n_fresh_syms; i++) {
       u32 si = pr->fresh_sym_base + i;
-      fprintf(stderr, "[tgt] def %s/%u label=%u body=",
-              pr->syms[si].name, pr->syms[si].arity, PR_LABEL_BASE + si);
+      fprintf(stderr, "[tgt] def %s/%u label=%u gd=%u body=",
+              pr->syms[si].name, pr->syms[si].arity, PR_LABEL_BASE + si,
+              pr->eq_gd[pr->n_eqns - pr->n_fresh_syms + i]);
       pr_print_term(stderr, pr, pr->eq_r[pr->n_eqns - pr->n_fresh_syms + i]);
       fputc('\n', stderr);
     }
@@ -2617,7 +2637,19 @@ int main(int argc, char **argv) {
 
   if (pr_mode) {
     if (prp.n_eqns == 0u) pr_load_terms(&prp);
+    // Folded-signature band for the drc=off analog: the fresh
+    // definitional symbols (pr_flatten_goal / pr_tgt_transform /
+    // pr_distrib_transform) occupy the contiguous label range starting
+    // at fresh_sym_base.  Inert unless THVM_ATP_DRC_OFF arms the lane.
+    if (prp.n_fresh_syms > 0u) {
+      thvm_atp_set_fold_band(s, PR_LABEL_BASE + prp.fresh_sym_base,
+                             PR_LABEL_BASE + prp.fresh_sym_base +
+                                 prp.n_fresh_syms);
+    }
     for (u32 e = 0; e < prp.n_eqns; e++) {
+      // spb=goal derivation seed (goal-cone definitions + conjecture
+      // units); inert unless THVM_ATP_SPB_GOAL arms the bias.
+      if (prp.eq_gd[e]) thvm_atp_mark_gd_next(s);
       thvm_atp_add_equation(s, prp.eq_l[e], prp.eq_r[e]);
     }
     // WM ACSymboleSuchen (ANA/PhilMarlow.c:111): a symbol is AC iff the
@@ -2931,6 +2963,21 @@ int main(int argc, char **argv) {
          goal, i, s->n_rules, s->n_cps, max_cps, el);
   printf("   trace: n_trace=%u  t_max=%u  record_norm=%u\n",
          s->n_trace, s->t_max, s->record_norm_steps);
+  // drc=off keep diagnostics (nonzero only when the lane is armed).
+  if (s->n_cps_drc_kept_push != 0u || s->n_cps_drc_kept_pop != 0u) {
+    printf("   drc-off: kept_push=%u  kept_pop=%u\n",
+           s->n_cps_drc_kept_push, s->n_cps_drc_kept_pop);
+  }
+  // spb=goal diagnostics: live goal-derived rule share.
+  {
+    const char *sg = getenv("THVM_ATP_SPB_GOAL");
+    if (sg != NULL && sg[0] != '\0' && sg[0] != '0' && s->r_gd != NULL) {
+      u32 ngd = 0u;
+      for (u32 k = 0; k < s->n_rules; k++)
+        if (s->r_gd[k]) ngd++;
+      printf("   spb-goal: gd_rules=%u/%u\n", ngd, s->n_rules);
+    }
+  }
   // Post-PROVED proof-cone re-derivation (same call the WL wrapper
   // makes in thvm_wl_atp_run_proof): splice NORM_STEP chains behind
   // goal-family ORIENT / SIMPLIFY bridges.  On a t_max-capped trace it

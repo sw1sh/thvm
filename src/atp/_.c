@@ -938,10 +938,11 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   u32  *nrc = (u32  *)realloc(s->r_rederive_cut,       cap * sizeof(u32));
   u32  *nru = (u32  *)realloc(s->r_uid,                cap * sizeof(u32));
   u32  *nrd = (u32  *)realloc(s->r_depth,              cap * sizeof(u32));
+  u8   *ngd = (u8   *)realloc(s->r_gd,                 cap * sizeof(u8));
   if (nl == NULL || nr == NULL || nt == NULL || no == NULL ||
       nd == NULL || nls == NULL || nrs == NULL || ngj == NULL ||
       nod == NULL || nsl == NULL || nsr == NULL || nrc == NULL ||
-      nru == NULL || nrd == NULL) {
+      nru == NULL || nrd == NULL || ngd == NULL) {
     fprintf(stderr, "atp_ensure_rule_cap: realloc to %u rules failed\n",
             cap);
     exit(1);
@@ -953,9 +954,11 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   s->r_rederive_cut = nrc;
   s->r_uid = nru;
   s->r_depth = nrd;
+  s->r_gd = ngd;
   for (u32 i = s->r_cap; i < cap; i++) {
     s->r_uid[i] = 0u;
     s->r_depth[i] = 0u;
+    s->r_gd[i] = 0u;
     s->r_trace[i] = ATP_TRACE_NONE;
     s->r_dead[i] = 0;
     s->r_dead_lhs_save[i] = 0;
@@ -1208,6 +1211,13 @@ static u32 g_cp_rawsz_hint = 0u;
 // stamp cp_depth[i] and (2) the ATP_CP_WEIGHT_TWEE score in place of the
 // syntactic term depth.  0 = no parents / unknown (an initial/axiom CP).
 static u32 g_cp_formation_depth = 0u;
+// GOAL-DERIVED bit for the CP currently being pushed (spb=goal
+// derivation tracking, see AtpState.cp_gd): OR of the parent rules'
+// r_gd, set by atp_push_cps_traced exactly like g_cp_formation_depth;
+// axiom/requeue enqueues consume g_enq_gd_pending instead (seeded by
+// thvm_atp_mark_gd_next / the interreduce victim's r_gd).
+static u8 g_cp_gd = 0u;
+static u8 g_enq_gd_pending = 0u;
 // "Never-weight-select" priority (Waldmeister Act_never / maximalWeight).
 // High but far from u32 overflow so cp_pri arithmetic stays safe.
 #define ATP_CP_PRI_NEVER 0x40000000u
@@ -1387,6 +1397,7 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   u32  *np = (u32  *)realloc(s->cp_pri,   cap * sizeof(u32));
   u32  *nq = (u32  *)realloc(s->cp_seq,   cap * sizeof(u32));
   u32  *ncd = (u32 *)realloc(s->cp_depth, cap * sizeof(u32));
+  u8   *ngd = (u8  *)realloc(s->cp_gd,    cap * sizeof(u8));
   u32  *ng = (u32  *)realloc(s->cp_goal,  cap * sizeof(u32));
   u32  *np2 = (u32 *)realloc(s->cp_pri2,  cap * sizeof(u32));
   u32  *nlnr = (u32 *)realloc(s->cp_last_norm_r_revision,
@@ -1402,13 +1413,15 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   u32  *npo = (u32 *)realloc(s->cp_pos,    cap * sizeof(u32));
   if (nc == NULL || nt == NULL || np == NULL || nq == NULL || ng == NULL
       || np2 == NULL || nlnr == NULL || ndp == NULL || nk == NULL
-      || nh == NULL || npo == NULL || ncd == NULL) {
+      || nh == NULL || npo == NULL || ncd == NULL || ngd == NULL) {
     fprintf(stderr, "atp_ensure_cp_cap: realloc to %u CPs failed\n", cap);
     exit(1);
   }
   s->cp_packed = nc; s->cp_trace = nt;
   s->cp_pri = np; s->cp_seq = nq; s->cp_goal = ng; s->cp_pri2 = np2;
   s->cp_depth = ncd;
+  s->cp_gd = ngd;
+  memset(s->cp_gd + old_cap, 0, (size_t)(cap - old_cap) * sizeof(u8));
   s->cp_last_norm_r_revision = nlnr;
   s->cp_deprio = ndp;
   s->cp_kind = nk;
@@ -7698,6 +7711,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_goal);
   free(s->cp_seq);
   free(s->cp_depth);
+  free(s->cp_gd);
   free(s->cp_pri2);
   free(s->cp_heap);
   free(s->cp_pos);
@@ -7706,6 +7720,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_uid_b);
   free(s->r_uid);
   free(s->r_depth);
+  free(s->r_gd);
   free(s->uid_dead);
   free(s->uid_idx);
   free(s->cp_last_norm_r_revision);
@@ -8648,6 +8663,11 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   // return; a leaked hint would mis-tag an unrelated later push).
   u8 enq_raw = g_enq_raw_untreated;
   g_enq_raw_untreated = 0u;
+  // Consume the goal-derived seed the same way: the heap insert below
+  // stamps cp_gd from g_cp_gd (a stale overlap-push value must not
+  // leak onto an axiom/requeued equation, and vice versa).
+  g_cp_gd = g_enq_gd_pending;
+  g_enq_gd_pending = 0u;
   if (s == NULL) return 0;
   if (getenv("THVM_ATP_ENQ_DEBUG") != NULL) {
     fprintf(stderr,
@@ -9252,6 +9272,233 @@ static u32 atp_tgt_weight_scale_ft(const AtpState *s, const AtpFtCell *fl,
   return atp_tgt_scale_counts(base, gc, oc, vc);
 }
 #endif
+
+// --- spb=goal / nwc: derivation-level goal bias ------------------------
+//
+// Vampire's shared GRP loop-theory winner carries spb=goal (goal-derived
+// clauses get selection priority) and nwc=2 (non-goal clauses' selection
+// weight doubled).  The symbol-level twin (--tgt-sel) is landed above;
+// this is the DERIVATION-level analog: a per-CP bit (cp_gd) seeded on
+// the conjecture-derived input equations (goal-cone tgt definitions +
+// conjecture-role units, via thvm_atp_mark_gd_next), propagated
+// parent-OR-wise through CP formation (g_cp_gd, the g_cp_formation_depth
+// discipline) and rule birth (r_gd).  When THVM_ATP_SPB_GOAL is armed,
+// every NON-goal-derived CP's priority is scaled by THVM_ATP_NWC
+// (float, default 2.0) -- goal-derived CPs float, everything else sinks
+// proportionally.  Selection bias only: nothing is dropped, ordering
+// untouched, byte-identical when unarmed.
+
+// THVM_ATP_SPB_GOAL: 0 off (default), 1 armed.
+static u8 atp_spb_goal_on(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_SPB_GOAL");
+    v = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  return (u8)v;
+}
+// THVM_ATP_NWC (default 2.0): non-goal-derived CP weight multiplier,
+// parsed once to fixed-point x16 (clamped to [1.0, 64.0]).
+static u32 atp_nwc_x16(void) {
+  static u32 v = 0u;
+  if (v == 0u) {
+    const char *e = getenv("THVM_ATP_NWC");
+    double d = (e != NULL && e[0] != '\0') ? strtod(e, NULL) : 2.0;
+    if (d < 1.0) d = 1.0;
+    if (d > 64.0) d = 64.0;
+    v = (u32)(d * 16.0 + 0.5);
+    if (v < 16u) v = 16u;
+  }
+  return v;
+}
+// Priority scale: goal-derived (gd=1) CPs keep their base; everything
+// else is multiplied by NWC.  Saturates below the never-select
+// sentinel; NEVER-class priorities pass through untouched.
+static u32 atp_spb_scale(u32 base, u8 gd) {
+  if (gd || !atp_spb_goal_on() || base >= ATP_CP_PRI_NEVER) return base;
+  u64 b = (u64)base * atp_nwc_x16() / 16u;
+  if (b >= (u64)ATP_CP_PRI_NEVER) return ATP_CP_PRI_NEVER - 1u;
+  return (u32)b;
+}
+
+// --- drc=off analog: keep demod-redundant folded lemmas ----------------
+//
+// Vampire's winner also runs drc=off (demodulation_redundancy_check):
+// clauses that demodulation would discard as redundant are KEPT -- 25
+// of its GRP678-1 proof steps unfold to x=x and 56 to axiom instances,
+// i.e. the proof passes THROUGH lemmas completion join-discards.  Our
+// discard sites are the push-time triviality/join gate and the pop-time
+// join gate.  Cheapest faithful approximation: when THVM_ATP_DRC_OFF is
+// armed and the fold band is registered (thvm_atp_set_fold_band, the
+// sF*/sFlat* definitional symbols), a CP whose sides CARRY a folded
+// symbol and differ syntactically is NOT dropped on a join verdict --
+// the RAW (pre-normalize) pair is queued / oriented instead, so the
+// folded-coherence rewrite content becomes rules.  Default off,
+// byte-identical when unarmed.
+
+// THVM_ATP_DRC_OFF: 0 off (default), 1 armed.
+static u8 atp_drc_off_on(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_DRC_OFF");
+    v = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  return (u8)v;
+}
+// THVM_ATP_DRC_GD (default 1): restrict the drc keep to GOAL-DERIVED
+// CPs (the spb=goal derivation bit).  Under tgt=3 every CP carries a
+// folded symbol -- the bare fold test is vacuous and the keep lane
+// floods (GRP678-1: 3.0M keeps/60s); the conjecture-descended cone is
+// the discriminating signal.  =0 reverts to the pure fold test.
+static u8 atp_drc_gd_gate(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_DRC_GD");
+    v = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
+  return (u8)v;
+}
+// THVM_ATP_DRC_PUSH (default 1): also keep at the push-time join gate.
+// =0 keeps only at the pop (selection) gate -- the site closest to
+// Vampire's activation-time forward-demodulation retention.
+static u8 atp_drc_push_on(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_DRC_PUSH");
+    v = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
+  return (u8)v;
+}
+// THVM_ATP_DRC_MAXW (default 16, 0 = uncapped): raw-pair node cap on
+// the keep.  Even deduped, the folded-redundant class is huge (GRP678:
+// 1.1M distinct keeps/60s); the oracle proof's pass-through lemmas are
+// TINY folded identities (sF-layer compositions), so the keep targets
+// that shape.
+static u32 atp_drc_maxw(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_DRC_MAXW");
+    v = (e != NULL && e[0] != '\0') ? atoi(e) : 16;
+    if (v < 0) v = 0;
+  }
+  return (u32)v;
+}
+static void atp_symbol_count_upto(Term t, u32 cap, u32 *acc);
+static u8 atp_drc_size_ok_term(Term l, Term r) {
+  u32 cap = atp_drc_maxw();
+  if (cap == 0u) return 1u;
+  u32 n = 0u;
+  atp_symbol_count_upto(l, cap + 1u, &n);
+  if (n <= cap) atp_symbol_count_upto(r, cap + 1u, &n);
+  return (u8)(n <= cap);
+}
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+static u8 atp_drc_size_ok_ft(const AtpFtCell *l, const AtpFtCell *r) {
+  u32 cap = atp_drc_maxw();
+  if (cap == 0u) return 1u;
+  u32 n = 0u;
+  for (int side = 0; side < 2; side++) {
+    const AtpFtCell *t = side ? r : l;
+    if (t == NULL) continue;
+    const AtpFtCell *stop = t->end;
+    for (const AtpFtCell *x = t; ; x = x->next) {
+      if (++n > cap) return 0u;
+      if (x == stop) break;
+    }
+  }
+  return 1u;
+}
+#endif
+static u8 atp_drc_armed(const AtpState *s) {
+  return (u8)(s != NULL && s->fold_hi > s->fold_lo && atp_drc_off_on());
+}
+// Does the Term carry a folded-band symbol?
+static u8 atp_term_has_fold(const AtpState *s, Term t) {
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 lbl = term_ext(t);
+  if (lbl >= s->fold_lo && lbl < s->fold_hi) return 1u;
+  u32 n = term_ctr_n(t);
+  if (n > REWRITE_MAX_ARITY) return 0u;
+  for (u32 i = 0; i < n; i++)
+    if (atp_term_has_fold(s, term_ctr_at(t, i))) return 1u;
+  return 0u;
+}
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// FT-span twin (prefix walk, the atp_tgt_weight_scale_ft shape).
+static u8 atp_ft_has_fold(const AtpState *s, const AtpFtCell *t) {
+  if (t == NULL) return 0u;
+  const AtpFtCell *stop = t->end;
+  for (const AtpFtCell *x = t; ; x = x->next) {
+    if (!ft_is_var(x)) {
+      u32 lbl = ft_ctr_sym(x);
+      if (lbl >= s->fold_lo && lbl < s->fold_hi) return 1u;
+    }
+    if (x == stop) break;
+  }
+  return 0u;
+}
+// drc keep stash for the FT-routed treated class: vcp_treat_joinable
+// normalizes the raw stash cells IN PLACE, so a drc candidate's raw
+// pair is cloned here BEFORE the normalize; the push gate swaps the
+// clones back into the stash on a keep (or frees them on a survivor).
+static AtpFtCell *g_drc_raw_l = NULL;
+static AtpFtCell *g_drc_raw_r = NULL;
+#endif
+
+// Keep-lane dedup: without it the keep floods with RE-DERIVATIONS of
+// the same folded lemma (GRP678-1: 1.9M keeps / <5k distinct rules in
+// 60s).  Each unique raw-pair structural hash is kept at most once per
+// problem (thvm_atp_set_fold_band resets the table); collisions and
+// probe overflow err on the ALLOW side.  Hashes are NOT var-canonical
+// -- alpha-variant re-derivations may slip through, which only costs a
+// duplicate keep.  THVM_ATP_DRC_DEDUP=0 disables (the flood A/B).
+#define ATP_DRC_SEEN_BITS 20u
+static u64 g_drc_seen[1u << ATP_DRC_SEEN_BITS];
+static u8 atp_drc_dedup_on(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_DRC_DEDUP");
+    v = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
+  return (u8)v;
+}
+// 1 = this lemma hash was already kept (suppress); 0 = fresh (insert).
+static u8 atp_drc_seen_probe(u64 h) {
+  if (!atp_drc_dedup_on()) return 0u;
+  if (h == 0ull) h = 1ull;
+  u32 m = (1u << ATP_DRC_SEEN_BITS) - 1u;
+  u32 i = (u32)(h ^ (h >> 32)) & m;
+  for (u32 k = 0; k < 64u; k++, i = (i + 1u) & m) {
+    if (g_drc_seen[i] == h) return 1u;
+    if (g_drc_seen[i] == 0ull) {
+      g_drc_seen[i] = h;
+      return 0u;
+    }
+  }
+  return 0u;   // probe overflow: allow the keep
+}
+static u64 atp_drc_pair_hash_term(Term l, Term r) {
+  return atp_term_struct_hash(l) * 0x9e3779b97f4a7c15ull
+       ^ atp_term_struct_hash(r);
+}
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+static u64 atp_drc_pair_hash_ft(const AtpFtCell *l, const AtpFtCell *r) {
+  return ft_hash(l) * 0x9e3779b97f4a7c15ull ^ ft_hash(r);
+}
+#endif
+
+fn void thvm_atp_mark_gd_next(AtpState *s) {
+  (void)s;
+  g_enq_gd_pending = 1u;
+}
+
+fn void thvm_atp_set_fold_band(AtpState *s, u32 lo, u32 hi) {
+  if (s == NULL) return;
+  s->fold_lo = lo;
+  s->fold_hi = hi;
+  // Fresh problem intake: reset the drc keep-lane dedup table.
+  memset(g_drc_seen, 0, sizeof g_drc_seen);
+}
 
 fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
   atp_ifeq_detect(s, lhs, rhs);
@@ -12213,6 +12460,7 @@ static inline void atp_cp_row_move(AtpState *s, u32 dst, u32 src) {
   s->cp_pri[dst]    = s->cp_pri[src];
   s->cp_seq[dst]    = s->cp_seq[src];
   if (s->cp_depth != NULL) s->cp_depth[dst] = s->cp_depth[src];
+  if (s->cp_gd != NULL) s->cp_gd[dst] = s->cp_gd[src];
   s->cp_goal[dst]   = s->cp_goal[src];
   s->cp_pri2[dst]   = s->cp_pri2[src];
   s->cp_last_norm_r_revision[dst] = s->cp_last_norm_r_revision[src];
@@ -12436,6 +12684,11 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
     }
   }
 #endif
+  // spb=goal / nwc derivation-level bias (route-independent: reads only
+  // the formation-time bit, never the term content).  Before the FT
+  // mirror adopt below so both queues see the same priority.
+  s->cp_pri[i] = atp_spb_scale(s->cp_pri[i], g_cp_gd);
+  s->cp_gd[i] = g_cp_gd;
   s->cp_depth[i] = g_cp_formation_depth;   // Twee getDepth (see g_cp_formation_depth)
   if (g_atp_phase_detail) g_atp_cpg_us_kbo += atp_now_us() - _dkb_t0;
   if (s->cp_ultimate != NULL) {
@@ -12958,6 +13211,8 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   s->cp_pri[i]    = s->cp_deprio[i]
                       ? ATP_CP_PRI_NEVER
                       : atp_cp_priority_sized(s, lhs, rhs, cp_nodes);
+  s->cp_pri[i]    = atp_spb_scale(s->cp_pri[i], g_cp_gd);
+  s->cp_gd[i]     = g_cp_gd;
   s->cp_depth[i] = g_cp_formation_depth;   // Twee getDepth (see g_cp_formation_depth)
   if (s->cp_ultimate != NULL) {
     s->cp_ultimate[i] = is_ultimate;
@@ -13562,6 +13817,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   s->last_popped_trace = s->cp_trace[v];
   s->last_popped_kind  = s->cp_kind[v];
   s->last_popped_depth = (s->cp_depth != NULL) ? s->cp_depth[v] : 0u;
+  s->last_popped_gd    = (s->cp_gd != NULL) ? s->cp_gd[v] : 0u;
   // Cleared per pop; the KBO_UN orient branch sets it iff the CP-formation
   // side swap physically fires, so the emission mirror never reads a stale
   // verdict from an earlier (e.g. orientable) selection.
@@ -13783,6 +14039,10 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
     s->cp_pri[vv] = s->cp_deprio[i] ? ATP_CP_PRI_NEVER
                                     : atp_cp_priority(s, l, r);
     g_twee_dbg_ctx = 0u;
+    // spb=goal re-score from the row's stored derivation bit (the
+    // commit_priorities discipline).
+    if (s->cp_gd != NULL)
+      s->cp_pri[vv] = atp_spb_scale(s->cp_pri[vv], s->cp_gd[vv]);
     s->cp_goal[vv] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                       ? atp_goal_weight(s, l, r) : 0u;
     s->cp_pri2[vv] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
@@ -13843,6 +14103,10 @@ static inline void atp_cp_commit_priorities(AtpState *s, u32 w, u32 slot,
   g_twee_dbg_ctx = 3u;
   s->cp_pri[slot]  = s->cp_deprio[w] ? ATP_CP_PRI_NEVER
                                      : atp_cp_priority(s, l, r);
+  // spb=goal re-score: re-apply the derivation-bit scale from THIS
+  // CP's stored bit (the g_cp_formation_depth restore discipline).
+  if (s->cp_gd != NULL)
+    s->cp_pri[slot] = atp_spb_scale(s->cp_pri[slot], s->cp_gd[slot]);
   s->cp_goal[slot] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                     ? atp_goal_weight(s, l, r) : 0u;
   s->cp_pri2[slot] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
@@ -14187,6 +14451,8 @@ lazy_skip_varnorm: ;
   // formation depth (captured at pop as last_popped_depth; 0 for the
   // initial axioms, which are added before any pop).
   s->r_depth[s->n_rules] = s->last_popped_depth;
+  // spb=goal: the rule inherits the popped CP's goal-derived bit.
+  s->r_gd[s->n_rules] = s->last_popped_gd;
   s->r_overlap_done[s->n_rules] = 0u;
 #ifdef THVM_ATPFT_RULES
   // Stage 4: mirror the Term pair into the parallel AtpFt slots
@@ -15654,6 +15920,12 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   // points past hcp_norm), keeping recording memory-bounded.
   u32 trace_mark = s->n_trace;
   Term l, r;
+  // drc=off keep lane, selection-time content: the pair the kept CP
+  // re-enters R/E with when its pop normalize joins.  Non-record: the
+  // queued (push-treated) sides; record mode: the trace RAW pair (the
+  // recorded chain is rewound on a keep, so the rule content must be
+  // the chain start -- no dangling NORM_STEPs).
+  Term drc_pop_l = cp_lhs, drc_pop_r = cp_rhs;
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
   // Pop simpler-join verdict already decided on the FT-direct branch
   // (skip the Term-side re-check at the common joined gate below).
@@ -15741,6 +16013,8 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
         }
       }
     }
+    drc_pop_l = raw_lhs;
+    drc_pop_r = raw_rhs;
     // The replay phases the two WM flag sets exactly as the engine
     // applied them: first the generation-time treatment (KPBehandelt,
     // `-kg "r"` -> doR only -- atp_cp_trivially_joinable's rules-only
@@ -16090,7 +16364,33 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
       atp_dbg_print_term(stderr, _pr); fputc('\n', stderr); \
     } } while (0)
 
-  if (kbo_eq(l, r)) {
+  u8 pop_joined = kbo_eq(l, r);
+  // drc=off keep lane at selection: a folded-class CP whose pop
+  // normalize joins re-enters R/E with its pre-normalize content
+  // instead of being discarded (Vampire drc=off keeps the
+  // demodulation-redundant clause).  The recorded NORM_STEP chain (if
+  // any) is rewound exactly like the joined drop -- the kept content
+  // IS the chain start, so nothing dangles.
+  if (pop_joined && atp_drc_armed(s) &&
+      (!atp_drc_gd_gate() || s->last_popped_gd) &&
+      drc_pop_l != 0 && drc_pop_r != 0 &&
+      term_tag(drc_pop_l) != TAG_NUM && term_tag(drc_pop_r) != TAG_NUM &&
+      !kbo_eq(drc_pop_l, drc_pop_r) &&
+      atp_drc_size_ok_term(drc_pop_l, drc_pop_r) &&
+      (atp_term_has_fold(s, drc_pop_l) || atp_term_has_fold(s, drc_pop_r))) {
+    if (s->record_norm_steps) s->n_trace = trace_mark;
+    l = drc_pop_l;
+    r = drc_pop_r;
+#ifdef THVM_ATPFT_RULES
+    // The (equal) NF spans are not the kept content -- no mirror adoption.
+    pop_nf_l = NULL;
+    pop_nf_r = NULL;
+#endif
+    pop_joined = 0u;
+    s->n_cps_drc_kept_pop++;
+    ATP_POPV("DRCKEEP");
+  }
+  if (pop_joined) {
     ATP_POPV("JOINED");
     // Trivially joined: this CP adds no rule.  Drop the NORM_STEP
     // entries just recorded for it (rewind the trace to trace_mark) so
@@ -20291,6 +20591,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
         atp_irv_stage_ft(s, (IDX), 1u);                                       \
         atp_irv_push(s, _old_lhs, _old_rhs, _simplify_parent, _wmo_key);      \
       } else {                                                                \
+        g_enq_gd_pending = (s->r_gd != NULL) ? s->r_gd[IDX] : 0u;             \
         atp_add_equation_simplified(s, _reduced, _old_rhs, _simplify_parent); \
       }                                                                       \
       if (atp_rule_trace_on()) {                                             \
@@ -20342,6 +20643,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
           atp_irv_stage_ft(s, (IDX), 2u);                                     \
           atp_irv_push(s, _old_lhs, _old_rhs, _simplify_parent, _wmo_key);    \
         } else {                                                              \
+          g_enq_gd_pending = (s->r_gd != NULL) ? s->r_gd[IDX] : 0u;           \
           atp_add_equation_simplified(s, _old_lhs, _reduced,                  \
                                       _simplify_parent);                      \
         }                                                                     \
@@ -20922,6 +21224,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         atp_irv_stage_ft(s, i, 3u);
         atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
       } else {
+        g_enq_gd_pending = (s->r_gd != NULL) ? s->r_gd[i] : 0u;
         atp_add_equation_simplified(s, reduced, old_rhs, simplify_parent);
       }
       if (atp_rule_trace_on()) {
@@ -20958,6 +21261,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         s->r_uid[j - 1]    = s->r_uid[j];
         atp_uid_idx_set(s, s->r_uid[j], j - 1);
         s->r_orient[j - 1] = s->r_orient[j];
+        s->r_gd[j - 1]     = s->r_gd[j];
         // Shift the backward-subsumption sentinel state in lockstep:
         // without it, dropping a rule below a soft-deleted slot leaves
         // r_dead[] marking the WRONG slot (the dead bit stays at the
@@ -21292,6 +21596,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           atp_irv_stage_ft(s, j, 4u);
           atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
         } else {
+          g_enq_gd_pending = (s->r_gd != NULL) ? s->r_gd[j] : 0u;
           atp_add_equation_simplified(s, reduced_lhs, reduced,
                                       simplify_parent);
         }
@@ -21311,6 +21616,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->r_uid[k - 1]            = s->r_uid[k];
           atp_uid_idx_set(s, s->r_uid[k], k - 1);
           s->r_orient[k - 1]         = s->r_orient[k];
+          s->r_gd[k - 1]             = s->r_gd[k];
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
           s->r_dead_rhs_save[k - 1]  = s->r_dead_rhs_save[k];
@@ -21388,6 +21694,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->r_uid[k - 1]            = s->r_uid[k];
           atp_uid_idx_set(s, s->r_uid[k], k - 1);
           s->r_orient[k - 1]         = s->r_orient[k];
+          s->r_gd[k - 1]             = s->r_gd[k];
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
           s->r_dead_rhs_save[k - 1]  = s->r_dead_rhs_save[k];
@@ -25753,6 +26060,26 @@ static u8 vcp_treat_joinable(AtpState *s) {
   int _dl = (g_atp_phase_detail && g_atp_pushn_active);
   u64 _dt = _dl ? atp_now_us() : 0;
   if (_dl) g_atp_pushn_calls++;
+  // drc=off keep lane: the normalize below rewrites the raw stash cells
+  // IN PLACE, so a folded-class candidate's raw pair is cloned first --
+  // the push gate swaps the clones back into the stash when the join
+  // verdict would otherwise drop the CP (see atp_push_cps_traced).
+  if (atp_drc_armed(s) && atp_drc_push_on() && g_drc_raw_l == NULL &&
+      (!atp_drc_gd_gate() || g_cp_gd) &&
+      atp_drc_size_ok_ft(g_vcp_treat.fl, g_vcp_treat.fr) &&
+      !ft_eq(g_vcp_treat.fl, g_vcp_treat.fr) &&
+      (atp_ft_has_fold(s, g_vcp_treat.fl) ||
+       atp_ft_has_fold(s, g_vcp_treat.fr)) &&
+      ft_distinct_var_count(g_vcp_treat.fl, g_vcp_treat.fr) <
+          REWRITE_MAX_VAR) {
+    AtpFt *da = (AtpFt *)s->ft_arena_ptr;
+    g_drc_raw_l = ft_clone_span(da, g_vcp_treat.fl, 0);
+    g_drc_raw_r = ft_clone_span(da, g_vcp_treat.fr, 0);
+    // Var-canonical clones: the dedup hash must identify alpha-variant
+    // re-derivations (the raw formation ids are arbitrary), and the
+    // kept CP is the same equation modulo renaming.
+    ft_normalize_vars_pair(g_drc_raw_l, g_drc_raw_r);
+  }
   atp_ft_mirror_ensure(s);
   if (_dl) {
     u64 _n = atp_now_us();
@@ -25802,6 +26129,10 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     u32 da = (s->r_depth != NULL && rule_a < s->n_rules) ? s->r_depth[rule_a] : 0u;
     u32 db = (s->r_depth != NULL && rule_b < s->n_rules) ? s->r_depth[rule_b] : 0u;
     g_cp_formation_depth = ((da > db) ? da : db) + 1u;
+    // spb=goal: derived CP is goal-derived iff EITHER parent is.
+    u8 ga = (s->r_gd != NULL && rule_a < s->n_rules) ? s->r_gd[rule_a] : 0u;
+    u8 gb = (s->r_gd != NULL && rule_b < s->n_rules) ? s->r_gd[rule_b] : 0u;
+    g_cp_gd = (u8)(ga | gb);
   }
 #ifndef ATP_CP_DIAG
   (void)rule_a;
@@ -25955,6 +26286,55 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     }
     g_atp_pushn_active = 0u;
     if (g_atp_phase_enabled) g_atp_phase_us_push_normalize += atp_now_us() - _ph_push_t0;
+    // drc=off keep lane (see atp_drc_off_on): a folded-class CP whose
+    // sides JOIN is not dropped -- its RAW pair becomes the queued
+    // content, so the demod-redundant folded lemma can become a rule.
+    if (joinable && atp_drc_armed(s) && atp_drc_push_on()) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+      if (g_vcp_treat.armed) {
+        if (g_drc_raw_l != NULL &&
+            !atp_drc_seen_probe(atp_drc_pair_hash_ft(g_drc_raw_l,
+                                                     g_drc_raw_r))) {
+          // Swap the raw clones back into the stash (the treatment
+          // normalized fl/fr to the -- now equal -- NF cells in place).
+          AtpFt *da = (AtpFt *)s->ft_arena_ptr;
+          if (g_vcp_treat.fl != NULL)
+            ft_free_span(da, g_vcp_treat.fl, g_vcp_treat.fl->end);
+          if (g_vcp_treat.fr != NULL)
+            ft_free_span(da, g_vcp_treat.fr, g_vcp_treat.fr->end);
+          g_vcp_treat.fl = g_drc_raw_l;
+          g_vcp_treat.fr = g_drc_raw_r;
+          g_drc_raw_l = g_drc_raw_r = NULL;
+          joinable = 0u;
+          s->n_cps_drc_kept_push++;
+        }
+      } else
+#endif
+      if ((!atp_drc_gd_gate() || g_cp_gd) &&
+          raw_lhs != 0 && !kbo_eq(raw_lhs, raw_rhs) &&
+          atp_drc_size_ok_term(raw_lhs, raw_rhs) &&
+          (atp_term_has_fold(s, raw_lhs) || atp_term_has_fold(s, raw_rhs))) {
+        // Var-canonical dedup key (alpha-variant re-derivations must
+        // collide); the kept content is the renumbered pair too.
+        Term hl = raw_lhs, hr = raw_rhs;
+        thvm_normalize_vars(&hl, &hr);
+        if (!atp_drc_seen_probe(atp_drc_pair_hash_term(hl, hr))) {
+          cp_lhs = hl;
+          cp_rhs = hr;
+          joinable = 0u;
+          s->n_cps_drc_kept_push++;
+        }
+      }
+    }
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // Survivor / non-kept candidate: drop the unused raw clones.
+    if (g_drc_raw_l != NULL) {
+      AtpFt *da = (AtpFt *)s->ft_arena_ptr;
+      ft_free_span(da, g_drc_raw_l, g_drc_raw_l->end);
+      ft_free_span(da, g_drc_raw_r, g_drc_raw_r->end);
+      g_drc_raw_l = g_drc_raw_r = NULL;
+    }
+#endif
 #ifdef ATP_VAR_NORM
     // 7c: canonically renumber the CP's variables -- AFTER reduction,
     // since rewriting can drop variables, so the dense [0, k) set is
