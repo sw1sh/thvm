@@ -2234,6 +2234,15 @@ int main(int argc, char **argv) {
     if (rn != NULL && rn[0] == '1') thvm_atp_set_record_norm_steps(s, 1u);
   }
 
+  // THVM_ATP_ENIGMA_EXPORT=<path.tsv> records the features of every
+  // processed CP so that, on PROVED, the run can label them by proof-DAG
+  // reachability and append a labelled row per CP to the dataset TSV --
+  // the ENIGMA training corpus (positives = CPs on the proof, negatives =
+  // processed-but-off-proof).  Recording only; the label+append happens
+  // post-run (below) while the engine trace is still live.
+  if (getenv("THVM_ATP_ENIGMA_EXPORT") != NULL)
+    thvm_atp_set_record_cp_features(s, 1u);
+
   // THVM_ATP_LRS=1 turns on the Vampire Limited Resource Strategy.  Also
   // wires the user-loop `wall_cap` into thvm_atp_set_wall_deadline so the
   // LRS horizon has a budget to plan against -- the engine's saturation
@@ -3084,6 +3093,21 @@ int main(int argc, char **argv) {
     }
   }
 #endif
+
+  // ENIGMA dataset export: on PROVED, label the recorded processed-CP
+  // features by proof-DAG reachability and append them to the TSV.  Runs
+  // before the pre-free hook so the engine trace (used by the labeller)
+  // is still live.  Off-PROVED runs contribute nothing (no proof set to
+  // label against).
+  {
+    const char *ds = getenv("THVM_ATP_ENIGMA_EXPORT");
+    if (ds != NULL && ds[0] != '\0' && st == ATP_PROVED && s->record_cp_features) {
+      u32 n_pos = thvm_atp_cp_label(s);
+      u32 n_rows = thvm_atp_cp_dataset_append(s, ds, 1u);
+      fprintf(stderr, "%% ENIGMA export: %u rows (%u proof-relevant) -> %s\n",
+              n_rows, n_pos, ds);
+    }
+  }
 
   if (g_atp_bench_pre_free_hook != NULL) g_atp_bench_pre_free_hook(s);
   thvm_atp_free(s);
