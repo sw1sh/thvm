@@ -3754,13 +3754,47 @@ static int cli_strategy_complete(void) {
 }
 
 // --- term printing (names from the parsed .pr) ---------------------
+
+// Collision-free name prefix for variable ids past the .pr's declared
+// set.  Derived equations regularly hold MORE distinct variables than
+// the input declares, and the old fallback ("X%u") collided with the
+// declared X1..Xn names: id n printed "Xn" -- the DECLARED name of id
+// n-1 -- so two distinct variables emitted as one, the record claimed
+// a strictly stronger equation, and every later step citing it failed
+// syntactic replay (GRP706-1's 23-abstain class; the checker's deep
+// sessions were re-deriving what the citation would have settled).
+// Scan the declared names once per problem and pick the first prefix
+// no declared "<prefix><digits>" name uses.
+static const char *cli_var_prefix(const PrProblem *pr) {
+  static const PrProblem *cached_pr = NULL;
+  static const char *cached_prefix = "X";
+  if (pr == cached_pr) return cached_prefix;
+  static const char *cands[] = { "X", "Y", "Z", "U", "V", "W", "XV" };
+  cached_pr = pr;
+  cached_prefix = "XV";
+  for (u32 c = 0; c < sizeof cands / sizeof cands[0]; c++) {
+    u8 clash = 0u;
+    size_t plen = strlen(cands[c]);
+    for (u32 v = 0; pr != NULL && v < pr->n_vars && !clash; v++) {
+      const char *nm = pr->vars[v];
+      if (strncmp(nm, cands[c], plen) != 0) continue;
+      const char *d = nm + plen;
+      if (*d == '\0') continue;
+      while (*d >= '0' && *d <= '9') d++;
+      if (*d == '\0') clash = 1u;        // declared "<prefix><digits>"
+    }
+    if (!clash) { cached_prefix = cands[c]; break; }
+  }
+  return cached_prefix;
+}
+
 static void cli_print_term(FILE *fp, const PrProblem *pr, Term t) {
   if (t == 0) { fputs("_", fp); return; }
   u32 tag = term_tag(t);
   if (tag == TAG_FVR) {
     u32 v = term_ext(t);
     if (pr != NULL && v < pr->n_vars) fputs(pr->vars[v], fp);
-    else fprintf(fp, "X%u", v);
+    else fprintf(fp, "%s%u", cli_var_prefix(pr), v);
     return;
   }
   if (tag == TAG_CTR) {
