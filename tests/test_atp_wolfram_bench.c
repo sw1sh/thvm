@@ -1352,6 +1352,22 @@ int main(int argc, char **argv) {
         setenv("THVM_ATP_FIFO_THRESHOLD", "0", 0);  // no -pq interleave
       }
     }
+    // LPO-ordering slice (Vampire-port).  Vampire's UEQ schedule is
+    // dominated by `to=lpo` (65+ of ~400 strategies) -- lexicographic
+    // path ordering orients some symmetric/permutative laws the way KBO
+    // cannot, cracking problems the completion drowns on under KBO.
+    // THVM_ATP_ORD=lpo reuses the frequency-derived precedence above
+    // (mirrors Vampire's dominant `to=lpo:sp=reverse_frequency` combo)
+    // instead of the hardcoded 7-label WM-demo precedence.  Opt-in
+    // schedule slice; the KBO default path is untouched.
+    {
+      const char *pr_ord = getenv("THVM_ATP_ORD");
+      if (pr_ord != NULL && strcmp(pr_ord, "lpo") == 0) {
+        lpo.precedence = prp.precedence;
+        lpo.n_labels   = prp.n_syms + PR_LABEL_BASE;
+        use_lpo = 1;
+      }
+    }
   }
 
   // cpgen mode: generate the critical pairs of the axiom with

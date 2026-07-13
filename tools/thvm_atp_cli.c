@@ -141,6 +141,7 @@ static const AtpKnob KNOBS[] = {
   {"random-ratio",           "THVM_ATP_RANDOM_RATIO",    1, "(random CP ratio)"},
   {"random-seed",            "THVM_ATP_RANDOM_SEED",     1, "(random seed)"},
   {"sym-prec",               "THVM_ATP_SYM_PREC",        1, "(Vampire symbol precedence: reverse-frequency|frequency)"},
+  {"ord",                    "THVM_ATP_ORD",             1, "(reduction ordering: lpo selects LPO over the default KBO)"},
   {"equals-goal",            "THVM_ATP_EQUALS_GOAL",     1, "(existential-goal equals encoding; 2 = give up if inapplicable)"},
   {"curry",                  "THVM_ATP_CURRY",           1, "(wide-functor n-ary->binary ap2 decomposition; 0 disables)"},
   {"canon-input",            "THVM_ATP_CANON_INPUT",     1, "(canonical input presentation: greater side left + sorted clauses; 0 disables)"},
