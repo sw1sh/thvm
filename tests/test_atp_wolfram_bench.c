@@ -592,6 +592,13 @@ typedef struct {
   u32   precedence[PR_MAX_SYMS + PR_LABEL_BASE];  // by label; higher = greater
   Term  eq_l[PR_MAX_EQNS], eq_r[PR_MAX_EQNS];
   u32   n_eqns;
+  // Fresh definitional symbols introduced by pr_flatten_goal /
+  // pr_tgt_transform: syms[fresh_sym_base .. fresh_sym_base +
+  // n_fresh_syms).  The proof emitter sources axioms mentioning them
+  // as introduced(definition) rather than file(...) -- a label-range
+  // test, immune to user symbols that happen to spell sF*/sFlat*.
+  u32   fresh_sym_base;
+  u32   n_fresh_syms;
   // Multi-goal CONCLUSION block (Waldmeister's parser keeps a
   // list_of_conclusions; -auto proves every goal in one run).
   // goal_l/goal_r stay the FIRST goal so all single-goal code paths
@@ -1186,6 +1193,7 @@ static void pr_flatten_goal(PrProblem *pr) {
   u32 ncap = PR_MAX_SYMS + PR_LABEL_BASE;
   for (u32 l = PR_LABEL_BASE; l < ncap; l++)
     if (pr->precedence[l] >= PR_LABEL_BASE) pr->precedence[l] += nsub;
+  pr->fresh_sym_base = pr->n_syms;
   for (u32 i = 0; i < nsub; i++) {
     if (pr->n_syms >= PR_MAX_SYMS) break;
     if (pr->n_eqns >= PR_MAX_EQNS) break;
@@ -1199,6 +1207,151 @@ static void pr_flatten_goal(PrProblem *pr) {
     pr->eq_l[pr->n_eqns] = fresh;   // fresh = subterm  (orients subterm -> fresh)
     pr->eq_r[pr->n_eqns] = subs[i];
     pr->n_eqns++;
+  }
+  pr->n_fresh_syms = pr->n_syms - pr->fresh_sym_base;
+}
+
+// --- Vampire tgt (twee_goal_transformation) port ----------------------
+//
+// Vampire's `tgt=ground|full` (Shell/TweeGoalTransformation.cpp, used
+// by 191 of ~400 UEQ-schedule strategies) is Twee's goal-directed
+// preprocessing applied to EVERY goal-derived unit: name each compound
+// subterm of the negated conjecture bottom-up with a fresh minimal
+// symbol.  pr_flatten_goal above is the goal-equation-only, ground-only
+// special case; on the machine-equationalized '-10' class the final
+// goal equation is a bare `a != b` while the conjecture's content
+// lives in its sibling negated_conjecture units, so the goal-only
+// flatten is a no-op exactly where the transformation matters.
+//
+// pr_tgt_transform generalizes it:
+//   * scope: the CONCLUSION goal sides AND every conjecture-role
+//     EQUATION -- the FindProof CLI exports their emitted indices via
+//     THVM_ATP_TGT_EQNS (the .pr format has no role field).
+//   * full mode (ground_only=0): non-ground subterms are named too,
+//     with a fresh FUNCTION over the subterm's distinct variables --
+//     skipped when folding would not decrease constant-weight KBO
+//     (nodes <= nvars + 1: Vampire's linear-term guard, e.g. f(X,Y)),
+//     and when the fresh functor would exceed the term reader's
+//     arity-8 bound.
+//   * dedup modulo variable renaming (Vampire's Renaming::normalize):
+//     keys are first-occurrence renumbered clones, so alpha-equivalent
+//     subterms across clauses share one definition.
+// Definitions `fresh(vars) = subterm` are ADDED as axioms and nothing
+// is replaced in-place -- intake interreduction folds the conjecture
+// cone onto the fresh names (Vampire makes the same observation:
+// "Simplification will rewrite the first axiom to f(sF1,b) = sF0").
+// Soundness: conservative definitional extension, exactly
+// pr_flatten_goal's argument.  Default OFF (THVM_ATP_TGT unset).
+#define PR_TGT_MAX_SUBS 512u
+static Term pr_tgt_subs[PR_TGT_MAX_SUBS];    // normalized keys, inner-first
+static u32  pr_tgt_sub_nv[PR_TGT_MAX_SUBS];  // distinct vars per key
+static u32  pr_tgt_nsubs;
+
+// Renumber-clone: variables mapped to 0..k-1 by first occurrence;
+// counts nodes (symbols + variable occurrences, Vampire t->weight()).
+static Term pr_tgt_norm_rec(Term t, u32 *map, u32 *nv, u32 *nodes) {
+  (*nodes)++;
+  u8 tg = term_tag(t);
+  if (tg == TAG_FVR) {
+    u32 id = term_ext(t);
+    u32 j;
+    for (j = 0; j < *nv; j++) if (map[j] == id) break;
+    if (j == *nv) { map[*nv] = id; (*nv)++; }
+    return term_new_fvr(j);
+  }
+  if (tg != TAG_CTR) return t;
+  Term kids[8];
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++)
+    kids[i] = pr_tgt_norm_rec(term_ctr_at(t, i), map, nv, nodes);
+  return term_new_ctr(term_ext(t), (n > 0u) ? kids : NULL, n);
+}
+
+static void pr_tgt_collect(Term t, int ground_only) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 n = term_ctr_n(t);
+  if (n == 0u) return;                        // constant: not compound
+  for (u32 i = 0; i < n; i++)
+    pr_tgt_collect(term_ctr_at(t, i), ground_only);   // inner first
+  u32 map[PR_MAX_VARS];
+  u32 nv = 0u, nodes = 0u;
+  Term key = pr_tgt_norm_rec(t, map, &nv, &nodes);
+  if (ground_only && nv > 0u) return;
+  if (nodes <= nv + 1u) return;   // linear guard (folding not decreasing)
+  if (nv > 8u) return;            // fresh functor beyond the arity-8 reader
+  for (u32 i = 0; i < pr_tgt_nsubs; i++)
+    if (pr_tgt_sub_nv[i] == nv && pr_flat_term_eq(pr_tgt_subs[i], key))
+      return;                     // already named (modulo renaming)
+  if (pr_tgt_nsubs < PR_TGT_MAX_SUBS) {
+    pr_tgt_subs[pr_tgt_nsubs]   = key;
+    pr_tgt_sub_nv[pr_tgt_nsubs] = nv;
+    pr_tgt_nsubs++;
+  }
+}
+
+static void pr_tgt_transform(PrProblem *pr, int ground_only) {
+  if (pr->goal_l == 0) return;
+  pr_tgt_nsubs = 0u;
+  // Conjecture-role equations (emitted indices from the CLI), then the
+  // CONCLUSION goal sides.  Bottom-up + cached, so the numbering is
+  // inner-first like pr_flatten_goal's.
+  const char *el = getenv("THVM_ATP_TGT_EQNS");
+  if (el != NULL) {
+    const char *p = el;
+    while (*p != '\0') {
+      while (*p != '\0' && !isdigit((unsigned char)*p)) p++;
+      if (*p == '\0') break;
+      u32 idx = (u32)strtoul(p, (char **)&p, 10);
+      if (idx < pr->n_eqns) {
+        pr_tgt_collect(pr->eq_l[idx], ground_only);
+        pr_tgt_collect(pr->eq_r[idx], ground_only);
+      }
+    }
+  }
+  u32 ng = (pr->n_goals > 0u) ? pr->n_goals : 0u;
+  for (u32 g = 0; g < ng; g++) {
+    pr_tgt_collect(pr->goals_l[g], ground_only);
+    pr_tgt_collect(pr->goals_r[g], ground_only);
+  }
+  if (pr_tgt_nsubs == 0u) return;
+  // Minimal-band precedence for the fresh names -- same discipline as
+  // pr_flatten_goal (distinct precedences, below every original
+  // symbol, inner subterms lowest).
+  u32 nsub = pr_tgt_nsubs;
+  u32 ncap = PR_MAX_SYMS + PR_LABEL_BASE;
+  for (u32 l = PR_LABEL_BASE; l < ncap; l++)
+    if (pr->precedence[l] >= PR_LABEL_BASE) pr->precedence[l] += nsub;
+  pr->fresh_sym_base = pr->n_syms;
+  for (u32 i = 0; i < nsub; i++) {
+    if (pr->n_syms >= PR_MAX_SYMS) break;
+    if (pr->n_eqns >= PR_MAX_EQNS) break;
+    u32 lbl = PR_LABEL_BASE + pr->n_syms;
+    // Fresh name; skip over any user symbol that already spells sF<k>.
+    static u32 sfx = 0u;
+    for (;;) {
+      char nm[PR_NAME_LEN];
+      snprintf(nm, sizeof nm, "sF%u", sfx);
+      if (pr_sym_find(pr, nm, strlen(nm)) == 0u) break;
+      sfx++;
+    }
+    snprintf(pr->syms[pr->n_syms].name, PR_NAME_LEN, "sF%u", sfx);
+    sfx++;
+    u32 nv = pr_tgt_sub_nv[i];
+    pr->syms[pr->n_syms].arity = nv;
+    pr->weights[lbl]    = 1u;                  // minimal weight
+    pr->precedence[lbl] = PR_LABEL_BASE + i;   // distinct, minimal band
+    pr->n_syms++;
+    Term vars[8];
+    for (u32 v = 0; v < nv; v++) vars[v] = term_new_fvr(v);
+    Term fresh = term_new_ctr(lbl, (nv > 0u) ? vars : NULL, nv);
+    pr->eq_l[pr->n_eqns] = fresh;   // fresh(vars) = subterm
+    pr->eq_r[pr->n_eqns] = pr_tgt_subs[i];
+    pr->n_eqns++;
+  }
+  pr->n_fresh_syms = pr->n_syms - pr->fresh_sym_base;
+  if (getenv("THVM_ATP_TGT_DEBUG") != NULL) {
+    fprintf(stderr, "[tgt] %u definitions introduced (%s)\n",
+            nsub, ground_only ? "ground" : "full");
   }
 }
 
@@ -1223,9 +1376,18 @@ int main(int argc, char **argv) {
   // axioms with fresh minimal names for the goal's compound subterms
   // BEFORE the KboConfig is finalised below (so it picks up the new
   // labels/weights).  Opt-in; default OFF keeps the emulation byte-exact.
-  if (pr_mode && getenv("THVM_ATP_FLATTEN_GOAL") != NULL
-      && getenv("THVM_ATP_FLATTEN_GOAL")[0] != '0') {
-    pr_flatten_goal(&prp);
+  // THVM_ATP_TGT >= 1 selects the conjecture-wide generalization
+  // (Vampire tgt: 1 = full, 2 = ground) which subsumes the goal-only
+  // flatten, so it takes precedence when both are set.
+  {
+    const char *tg = pr_mode ? getenv("THVM_ATP_TGT") : NULL;
+    int tgt_mode = (tg != NULL) ? atoi(tg) : 0;
+    if (tgt_mode >= 1) {
+      pr_tgt_transform(&prp, /*ground_only=*/tgt_mode >= 2);
+    } else if (pr_mode && getenv("THVM_ATP_FLATTEN_GOAL") != NULL
+               && getenv("THVM_ATP_FLATTEN_GOAL")[0] != '0') {
+      pr_flatten_goal(&prp);
+    }
   }
 
   // Reduction ordering.  Default KBO (one binary symbol `nand`,
@@ -2394,6 +2556,29 @@ int main(int argc, char **argv) {
       thvm_atp_set_goals(s, prp.goals_l, prp.goals_r, prp.n_goals);
     } else {
       thvm_atp_set_goal(s, gl, gr);
+    }
+  }
+
+  // tgt goal-cone intake: THVM_ATP_TGT_SYMS lists signature symbol
+  // NAMES (whitespace-separated) occurring in the problem's
+  // conjecture-role clauses (set by the FindProof CLI -- Vampire's tgt
+  // derives weights from the whole negated conjecture, not just the
+  // final goal equation).  Map them through the .pr symbol table and
+  // hand the labels to the tgt weight scheme.  Inert unless
+  // THVM_ATP_TGT arms the scheme.
+  if (pr_mode && !saturate) {
+    const char *ts = getenv("THVM_ATP_TGT_SYMS");
+    if (ts != NULL) {
+      const char *p = ts;
+      while (*p != '\0') {
+        while (*p != '\0' && !(isalnum((unsigned char)*p) || *p == '_')) p++;
+        if (*p == '\0') break;
+        size_t n = 0;
+        while (isalnum((unsigned char)p[n]) || p[n] == '_') n++;
+        u32 lab = pr_sym_find(&prp, p, n);
+        if (lab != 0u) thvm_atp_tgt_add_sym(s, lab);
+        p += n;
+      }
     }
   }
 

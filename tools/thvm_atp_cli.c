@@ -166,6 +166,9 @@ static const AtpKnob KNOBS[] = {
   {"horn-back-size",         "THVM_ATP_HORN_BACK_SIZE",  1, "(backward CD subgoal term-size cap)"},
   {"ifeq-guard",             "THVM_ATP_IFEQ_GUARD",      1, "(guard-aware CP selection on ifeq-encoded problems; 2 = give up if inapplicable)"},
   {"ifeq-penalty",           "THVM_ATP_IFEQ_PENALTY",    1, "(ifeq-guard per-undecided-guard weight factor, default 8)"},
+  {"tgt",                    "THVM_ATP_TGT",             1, "(Vampire tgt / twee goal transformation: name conjecture subterms; 1 full, 2 ground)"},
+  {"tgt-sel",                "THVM_ATP_TGT_SEL",         1, "(goal-targeted CP-selection weight scale: 1 full, 2 ground)"},
+  {"tgt-nongoal",            "THVM_ATP_TGT_NONGOAL",     1, "(tgt-sel non-goal symbol weight factor, default 2)"},
   {"heap-cells",             "THVM_HEAP_CELLS",          1, "(heap size, cells)"},
   {"profile",                "THVM_ATP_PROFILE",         1, "(profiling level)"},
   {"diag",                   "THVM_ATP_DIAG",            1, "(diagnostics)"},
@@ -3814,16 +3817,21 @@ static const char *cli_var_prefix(const PrProblem *pr) {
   return cached_prefix;
 }
 
-// Does the term mention a goal-flattening definitional constant (the
-// sFlat* fresh names)?  Such an axiom leaf is an introduced definition,
-// not a problem clause, and must be sourced as introduced(definition)
-// so a derivation verifier (GDV) does not try to match it against the
-// problem's formulae.
+// Does the term mention a definitional fresh symbol (pr_flatten_goal's
+// sFlat* constants or pr_tgt_transform's sF* functions)?  Such an
+// axiom leaf is an introduced definition, not a problem clause, and
+// must be sourced as introduced(definition) so a derivation verifier
+// (GDV) does not try to match it against the problem's formulae.
+// Decided by the recorded fresh-label RANGE, immune to user symbols
+// that happen to spell sF*/sFlat*.
 static int cli_term_has_flat_sym(const PrProblem *pr, Term t) {
   if (t == 0 || term_tag(t) != TAG_CTR) return 0;
   u32 l = term_ext(t);
-  if (pr != NULL && l >= PR_LABEL_BASE && l < PR_LABEL_BASE + pr->n_syms
-      && strncmp(pr->syms[l - PR_LABEL_BASE].name, "sFlat", 5) == 0) return 1;
+  if (pr != NULL && pr->n_fresh_syms > 0u && l >= PR_LABEL_BASE) {
+    u32 si = l - PR_LABEL_BASE;
+    if (si >= pr->fresh_sym_base &&
+        si < pr->fresh_sym_base + pr->n_fresh_syms) return 1;
+  }
   u32 n = term_ctr_n(t);
   for (u32 i = 0; i < n; i++)
     if (cli_term_has_flat_sym(pr, term_ctr_at(t, i))) return 1;
@@ -4297,6 +4305,21 @@ static const SchedSlice SCHEDULE[] = {
   // like the equals/horn-cd slices.  Horn-free: keeps the full wall
   // for the engine.
   {"ifeq",   "--ifeq-guard=2 --flatten-goal --goal-subterm --preset=none --horn=0", 0.0},
+  // (5c) VAMPIRE tgt (twee_goal_transformation, --tgt=1 'full'):
+  // pr_tgt_transform names every compound subterm of the negated
+  // conjecture bottom-up with a fresh minimal symbol (full mode also
+  // names non-ground subterms behind the linear-term guard), so the
+  // conjecture cone folds onto small definitions and goal-directed CPs
+  // dominate selection -- the option Vampire's UEQ schedule leans on
+  // hardest (tgt in 191 of ~400 strategies).  Flips SYN615-10
+  // standalone at 30s (11.6s bare; every prior slice, ifeq-guard
+  // included, Timeout; Vampire 1.7s).  Measured WORSE composed with
+  // --ifeq-guard on SYN615-10 (the guard penalty buries the folded
+  // fact tier: Timeout at 30s), so the lane runs bare.  On a problem
+  // whose conjecture has no compound subterms the transformation is
+  // empty and the lane duplicates 'bare' -- kept below the proven
+  // slices with the other leftover-pool lanes.
+  {"tgt",    "--tgt=1 --preset=none --horn=0", 0.0},
   // FULL AC-COMPLETION: auto-detect AC operators (add/meet/join/mult from
   // their commutativity+associativity axioms) and run AC-matching +
   // Stickel AC-unification.  The WM preset only uses AC to FILTER CPs
@@ -4712,6 +4735,77 @@ int main(int argc, char **argv) {
       {
         const char *cn = getenv("THVM_ATP_CANON_INPUT");
         if (cn == NULL || cn[0] != '0') tp_canon_input(&tp);
+      }
+      // tgt conjecture-role export: the .pr format has no clause-role
+      // field, and BOTH tgt ports need the conjecture cone -- Vampire
+      // works from the WHOLE negated conjecture; on the '-10'
+      // encodings the final goal equation is a bare `a != b` while
+      // the conjecture content lives in its sibling
+      // negated_conjecture units.
+      //   * THVM_ATP_TGT (--tgt, the preprocessing port): export the
+      //     conjecture-role EQUATION indices, in emitted order, via
+      //     THVM_ATP_TGT_EQNS (consumed by pr_tgt_transform).
+      //   * THVM_ATP_TGT_SEL (--tgt-sel, the CP-selection scale):
+      //     export the signature symbols occurring in a
+      //     conjecture-role clause (word-boundary match on the clause
+      //     strings) via THVM_ATP_TGT_SYMS (pr-side name -> label
+      //     mapping feeds thvm_atp_tgt_add_sym).
+      {
+        const char *tg = getenv("THVM_ATP_TGT");
+        if (tg != NULL && tg[0] != '\0' && tg[0] != '0') {
+          size_t ecap = (size_t)tp.n_cls * 8 + 2;
+          char *ebuf = (char *)malloc(ecap);
+          size_t elen = 0;
+          ebuf[0] = '\0';
+          int ei = 0;
+          for (int c = 0; c < tp.n_cls; c++) {
+            if (tp.cls[c].neg) continue;
+            if (tp.cls[c].conj) {
+              elen += (size_t)snprintf(ebuf + elen, ecap - elen, "%s%d",
+                                       (elen > 0) ? " " : "", ei);
+            }
+            ei++;
+          }
+          if (elen > 0) setenv("THVM_ATP_TGT_EQNS", ebuf, 1);
+          free(ebuf);
+        }
+      }
+      {
+        const char *tg = getenv("THVM_ATP_TGT_SEL");
+        if (tg != NULL && tg[0] != '\0' && tg[0] != '0') {
+          size_t cap = 1;
+          for (int i = 0; i < tp.n_syms; i++)
+            cap += strlen(tp.syms[i].name) + 1;
+          char *buf = (char *)malloc(cap);
+          size_t len = 0;
+          buf[0] = '\0';
+          for (int i = 0; i < tp.n_syms; i++) {
+            const char *nm = tp.syms[i].name;
+            size_t nl = strlen(nm);
+            int hit = 0;
+            for (int c = 0; c < tp.n_cls && !hit; c++) {
+              if (!tp.cls[c].conj) continue;
+              for (int side = 0; side < 2 && !hit; side++) {
+                const char *hay = side ? tp.cls[c].rhs : tp.cls[c].lhs;
+                for (const char *p = strstr(hay, nm); p != NULL;
+                     p = strstr(p + 1, nm)) {
+                  int lb = (p == hay) ||
+                           !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
+                  int rb = !(isalnum((unsigned char)p[nl]) || p[nl] == '_');
+                  if (lb && rb) { hit = 1; break; }
+                }
+              }
+            }
+            if (hit) {
+              if (len > 0) buf[len++] = ' ';
+              memcpy(buf + len, nm, nl);
+              len += nl;
+              buf[len] = '\0';
+            }
+          }
+          if (len > 0) setenv("THVM_ATP_TGT_SYMS", buf, 1);
+          free(buf);
+        }
       }
       const char *base = strrchr(file, '/');
       base = (base != NULL) ? base + 1 : file;

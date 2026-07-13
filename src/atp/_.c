@@ -9081,6 +9081,157 @@ static u32 atp_ifeq_weight_scale_ft(const AtpState *s, const AtpFtCell *fl,
 }
 #endif
 
+// --- tgt-sel: goal-targeted CP-selection weights ----------------------
+//
+// A SELECTION-side companion to the tgt preprocessing port (Vampire's
+// tgt=full/ground is a preprocessing transformation -- see
+// pr_tgt_transform in tests/test_atp_wolfram_bench.c): per-symbol
+// CP-selection weights derived from the GOAL, so goal-flavored terms
+// are systematically lighter and their CPs float to the queue front.
+// Symbols occurring in the conjecture (goal equation + the labels fed
+// through thvm_atp_tgt_add_sym) weigh 1; every other symbol weighs
+// THVM_ATP_TGT_NONGOAL (default 2).  Mode 2 ('ground') additionally
+// raises variables to the non-goal weight, so ground goal-copies
+// outrank general terms.  Applied as a multiplier on the CP priority:
+//   base' = base * weighted_count / plain_count
+// which IS the weighted symbol-count for the ADD weight mode and a
+// proportional bias for every other mode (GT/TWEE/...).  The
+// reduction-ordering KBO is untouched -- orientation stays
+// soundness-clean; this is selection bias only, nothing is dropped,
+// completeness untouched.  See AtpState.tgt_sym_mask (thvm.h).
+// Applied in atp_cp_priority_sized_ex (Term route: every re-score
+// path) and atp_cp_heap_insert_packed (FT-routed pushes whose Term
+// args are sentinels), exactly like the ifeq guard scale above.
+
+// THVM_ATP_TGT_SEL: 0 off (default), 1 'full', 2 'ground'.
+static u32 atp_tgt_env(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_TGT_SEL");
+    v = (e != NULL) ? atoi(e) : 0;
+    if (v < 0) v = 0;
+    if (v > 2) v = 2;
+  }
+  return (u32)v;
+}
+// THVM_ATP_TGT_NONGOAL (default 2): the non-goal symbol weight.
+static u32 atp_tgt_nongoal(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_TGT_NONGOAL");
+    v = (e != NULL) ? atoi(e) : 2;
+    if (v < 2) v = 2;
+  }
+  return (u32)v;
+}
+
+#define ATP_TGT_MASK_WORDS 64u    // 4096 buckets; labels alias mod 4096
+static u8 atp_tgt_sym_hit(const AtpState *s, u32 lbl) {
+  return (u8)((s->tgt_sym_mask[(lbl >> 6) & (ATP_TGT_MASK_WORDS - 1u)]
+               >> (lbl & 63u)) & 1ull);
+}
+static void atp_tgt_mask_collect(AtpState *s, Term t) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 lbl = term_ext(t);
+  s->tgt_sym_mask[(lbl >> 6) & (ATP_TGT_MASK_WORDS - 1u)] |=
+      1ull << (lbl & 63u);
+  u32 n = term_ctr_n(t);
+  if (n > REWRITE_MAX_ARITY) return;
+  for (u32 i = 0; i < n; i++) atp_tgt_mask_collect(s, term_ctr_at(t, i));
+}
+// Collect the goal-symbol bitset lazily (union over every conjunct,
+// like SOS's goal_sym_mask, plus the externally-declared goal-cone
+// labels); thvm_atp_set_goals resets tgt_ready.
+static void atp_tgt_ensure(AtpState *s) {
+  if (s->tgt_ready) return;
+  memset(s->tgt_sym_mask, 0, sizeof s->tgt_sym_mask);
+  if (s->n_goals > 1u) {
+    for (u32 g = 0; g < s->n_goals; g++) {
+      atp_tgt_mask_collect(s, s->goals_lhs[g]);
+      atp_tgt_mask_collect(s, s->goals_rhs[g]);
+    }
+  } else {
+    if (s->goal_lhs) atp_tgt_mask_collect(s, s->goal_lhs);
+    if (s->goal_rhs) atp_tgt_mask_collect(s, s->goal_rhs);
+  }
+  for (u32 i = 0; i < ATP_TGT_MASK_WORDS; i++)
+    s->tgt_sym_mask[i] |= s->tgt_ext_mask[i];
+  s->tgt_ready = 1u;
+}
+static u8 atp_tgt_armed(AtpState *s) {
+  if (s == NULL || s->goal_lhs == 0 || atp_tgt_env() == 0u) return 0u;
+  atp_tgt_ensure(s);
+  return 1u;
+}
+
+// Externally declare a goal-cone symbol label for the tgt scheme.  The
+// FindProof CLI feeds the TPTP negated-conjecture units' symbols here:
+// Vampire derives its tgt weights from the WHOLE negated conjecture,
+// and on the machine-equationalized '-10' class the final goal
+// equation is a bare `a != b` while the conjecture's content lives in
+// its sibling hypothesis units (without this the multiplier is nearly
+// uniform across CPs -- no reordering).  ORed into the live mask at
+// the next lazy collection; inert while THVM_ATP_TGT_SEL is off.
+fn void thvm_atp_tgt_add_sym(AtpState *s, u32 label) {
+  if (s == NULL) return;
+  s->tgt_ext_mask[(label >> 6) & (ATP_TGT_MASK_WORDS - 1u)] |=
+      1ull << (label & 63u);
+  s->tgt_ready = 0u;
+}
+
+// Weighted/plain counts -> multiplicative bias on `base`, saturating
+// below the ATP_CP_PRI_NEVER sentinel like the ifeq scale.  plain == 0
+// (sentinel/empty Term args, the FT-routed pushes) leaves the base
+// unchanged; the FT twin below applies the exact span counts instead.
+static u32 atp_tgt_scale_counts(u32 base, u32 gc, u32 oc, u32 vc) {
+  u64 plain = (u64)gc + oc + vc;
+  if (plain == 0ull) return base;
+  u64 w = (u64)atp_tgt_nongoal();
+  u64 scaled = (u64)gc + w * oc + ((atp_tgt_env() >= 2u) ? w * vc : (u64)vc);
+  u64 b = (u64)(base == 0u ? 1u : base) * scaled / plain;
+  if (b >= (u64)ATP_CP_PRI_NEVER) return ATP_CP_PRI_NEVER - 1u;
+  return (u32)b;
+}
+static void atp_tgt_count_rec(const AtpState *s, Term t,
+                              u32 *gc, u32 *oc, u32 *vc) {
+  u8 tg = term_tag(t);
+  if (tg == TAG_FVR) { (*vc)++; return; }
+  if (tg != TAG_CTR) return;
+  if (atp_tgt_sym_hit(s, term_ext(t))) (*gc)++; else (*oc)++;
+  u32 n = term_ctr_n(t);
+  if (n > REWRITE_MAX_ARITY) return;
+  for (u32 i = 0; i < n; i++)
+    atp_tgt_count_rec(s, term_ctr_at(t, i), gc, oc, vc);
+}
+static u32 atp_tgt_weight_scale(const AtpState *s, Term lhs, Term rhs,
+                                u32 base) {
+  u32 gc = 0u, oc = 0u, vc = 0u;
+  atp_tgt_count_rec(s, lhs, &gc, &oc, &vc);
+  atp_tgt_count_rec(s, rhs, &gc, &oc, &vc);
+  return atp_tgt_scale_counts(base, gc, oc, vc);
+}
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// FT-span twin of atp_tgt_weight_scale, for the routed pushes whose
+// Term args are sentinels (the real content lives in the g_vcp_treat
+// NF spans).  Same walk shape as atp_ifeq_weight_scale_ft's.
+static u32 atp_tgt_weight_scale_ft(const AtpState *s, const AtpFtCell *fl,
+                                   const AtpFtCell *fr, u32 base) {
+  u32 gc = 0u, oc = 0u, vc = 0u;
+  for (int side = 0; side < 2; side++) {
+    const AtpFtCell *t = side ? fr : fl;
+    if (t == NULL) continue;
+    const AtpFtCell *stop = t->end;
+    for (const AtpFtCell *x = t; ; x = x->next) {
+      if (ft_is_var(x)) vc++;
+      else if (atp_tgt_sym_hit(s, ft_ctr_sym(x))) gc++;
+      else oc++;
+      if (x == stop) break;
+    }
+  }
+  return atp_tgt_scale_counts(base, gc, oc, vc);
+}
+#endif
+
 fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
   atp_ifeq_detect(s, lhs, rhs);
   return atp_enqueue_equation(s, lhs, rhs, TRACE_AXIOM, ATP_TRACE_NONE);
@@ -9232,6 +9383,7 @@ fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
     s->goal_rhs = 0;
     s->conj_sym_mask = 0;
     s->rel_lvl1_mask = 0;
+    s->tgt_ready = 0;
 #ifdef THVM_ATPFT_RULES
     s->goal_lhs_ft = NULL;
     s->goal_rhs_ft = NULL;
@@ -9297,6 +9449,8 @@ fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
   s->goal_nf_ft_l = NULL;
   s->goal_nf_ft_r = NULL;
 #endif
+  // Goal changed: the tgt goal-symbol bitset is recollected lazily.
+  s->tgt_ready = 0;
   // Recompute the conjecture symbol mask for ATP_CP_WEIGHT_CONJSYM --
   // the union over every conjunct's symbols.
   s->conj_sym_mask = 0;
@@ -11059,13 +11213,23 @@ static u32 atp_cp_twee_fused_base(Term lhs, Term rhs) {
 static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
                                     u32 base, u32 lhs_nodes) {
   // ifeq guard discipline (see AtpState.ifeq_syms): scale by
-  // penalty^(undecided guards) when armed.  Applied on every path out
-  // of this function via the wrapper below; sentinel/zero Term args
-  // (the FT-routed pushes) count 0 guards here and get their exact
-  // FT-span count in atp_cp_heap_insert_packed instead.
+  // penalty^(undecided guards) when armed.  tgt goal-targeted scale
+  // (see atp_tgt_weight_scale): multiplicative goal-symbol bias when
+  // armed, applied BEFORE the ifeq scale (both multiplicative, so the
+  // order only matters at the saturation ceiling).  Applied on every
+  // path out of this function via the wrapper below; sentinel/zero
+  // Term args (the FT-routed pushes) count 0 guards / 0 symbols here
+  // and get their exact FT-span counts in atp_cp_heap_insert_packed
+  // instead.
   u8 ifeq_arm = (s != NULL && s->use_ifeq_guard) ? 1u : 0u;
+  u8 tgt_arm  = atp_tgt_armed(s);
 #define ATP_IFEQ_RET(w)                                                   \
-    return ifeq_arm ? atp_ifeq_weight_scale(s, lhs, rhs, (w)) : (w)
+    do {                                                                  \
+      u32 w_ret_ = (w);                                                   \
+      if (tgt_arm) w_ret_ = atp_tgt_weight_scale(s, lhs, rhs, w_ret_);    \
+      return ifeq_arm ? atp_ifeq_weight_scale(s, lhs, rhs, w_ret_)        \
+                      : w_ret_;                                           \
+    } while (0)
   // Goal-directed mode (Waldmeister CPinGoal): weight by structural
   // match to the goal.  Opt-in via cp_weight_mode so completion-mode
   // and the other weights are unaffected.
@@ -12227,20 +12391,28 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
                      : atp_cp_priority_sized_ex(s, lhs, rhs, cp_nodes,
                                                 lhs_nodes);
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-  // ifeq guard discipline, FT-routed-push arm: the treated route's
-  // Term args are zero sentinels, so the in-priority Term count above
-  // saw 0 guards -- count on the treatment's NF spans instead (the
-  // exact content this slot stores).  The raw >= 50 emit route (lazy
-  // mode only) has no live spans here and stays unscaled: its giant
-  // raw weight already buries it, and the mechanism is selection bias,
-  // not a gate.
-  if (s->use_ifeq_guard && s->cp_pri[i] < ATP_CP_PRI_NEVER &&
+  // ifeq guard + tgt goal-targeted disciplines, FT-routed-push arm:
+  // the treated route's Term args are zero sentinels, so the
+  // in-priority Term counts above saw 0 guards / 0 symbols -- count on
+  // the treatment's NF spans instead (the exact content this slot
+  // stores).  tgt first, then ifeq, matching the Term-route order in
+  // atp_cp_priority_sized_ex.  The raw >= 50 emit route (lazy mode
+  // only) has no live spans here and stays unscaled: its giant raw
+  // weight already buries it, and the mechanisms are selection bias,
+  // not gates.
+  if (s->cp_pri[i] < ATP_CP_PRI_NEVER &&
       g_vcp_treat.armed && g_vcp_treat.fl != NULL &&
       g_vcp_treat.fr != NULL &&
       (lhs == 0 || term_tag(lhs) == TAG_NUM ||
        rhs == 0 || term_tag(rhs) == TAG_NUM)) {
-    s->cp_pri[i] = atp_ifeq_weight_scale_ft(s, g_vcp_treat.fl,
-                                            g_vcp_treat.fr, s->cp_pri[i]);
+    if (atp_tgt_armed(s)) {
+      s->cp_pri[i] = atp_tgt_weight_scale_ft(s, g_vcp_treat.fl,
+                                             g_vcp_treat.fr, s->cp_pri[i]);
+    }
+    if (s->use_ifeq_guard) {
+      s->cp_pri[i] = atp_ifeq_weight_scale_ft(s, g_vcp_treat.fl,
+                                              g_vcp_treat.fr, s->cp_pri[i]);
+    }
   }
 #endif
   s->cp_depth[i] = g_cp_formation_depth;   // Twee getDepth (see g_cp_formation_depth)
@@ -19324,6 +19496,7 @@ fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
   s->goal_lhs = lhs;
   s->goal_rhs = rhs;
   s->goal_existential = 1;
+  s->tgt_ready = 0;   // tgt goal-symbol bitset recollected lazily
   // Existential goals are single-conjecture only: drop any multi-goal
   // state a prior thvm_atp_set_goals left behind so goal_check takes
   // the narrow path, not the conjunct loop.

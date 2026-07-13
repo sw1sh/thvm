@@ -6371,6 +6371,34 @@ typedef struct {
   u32  n_ifeq_syms;
   u8   use_ifeq_guard;
 
+  // tgt: goal-targeted CP-SELECTION weights (the selection essence of
+  // Vampire's goal-targeted KBO weight scheme, tgt=full / tgt=ground).
+  // Symbols occurring in the conjecture weigh 1, every other symbol
+  // weighs THVM_ATP_TGT_NONGOAL (default 2); tgt=ground additionally
+  // raises variables to the non-goal weight.  Applied in
+  // atp_cp_priority_sized_ex as a multiplicative bias on the CP
+  // priority (base * weighted_count / plain_count), so it composes
+  // with every weight mode and with the ifeq guard scale.  The
+  // reduction-ordering KBO is untouched; selection bias only.
+  // Arming: THVM_ATP_TGT_SEL >= 1 and a goal is set.  Off (the
+  // default) the engine is byte-identical.  (THVM_ATP_TGT proper
+  // selects the tgt PREPROCESSING port, pr_tgt_transform -- a .pr
+  // intake transformation, no engine involvement.)
+  // tgt_sym_mask is a 4096-bucket
+  // bitset of the goal's CTR labels (union over conjuncts; larger
+  // labels alias mod 4096 -- a sound over-approximation, a goal
+  // symbol is never mis-penalized); collected lazily, invalidated by
+  // thvm_atp_set_goals.  tgt_ext_mask holds externally-declared
+  // goal-cone labels (thvm_atp_tgt_add_sym: the CLI feeds the TPTP
+  // negated-conjecture units' symbols -- Vampire derives tgt weights
+  // from the WHOLE negated conjecture, and on the '-10' encodings the
+  // final goal equation is a bare `a != b` while the conjecture's
+  // content lives in its sibling hypothesis units); the lazy
+  // collection ORs it into tgt_sym_mask.
+  u64  tgt_sym_mask[64];
+  u64  tgt_ext_mask[64];
+  u8   tgt_ready;
+
 #ifdef THVM_ATPFT_CPQ
   // Parallel native AtpFt CP queue; see docs/atp/engineering.md.
   // Each populated slot owns its two FT spans in Arena A; the legacy
@@ -6699,6 +6727,7 @@ fn void      thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period);
 fn void      thvm_atp_set_gnn_coop(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_goal_subterm(AtpState *s, u8 on);
+fn void      thvm_atp_tgt_add_sym(AtpState *s, u32 label);
 fn void      thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_demod(AtpState *s, u8 on);
