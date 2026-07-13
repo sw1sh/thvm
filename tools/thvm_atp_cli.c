@@ -4233,6 +4233,17 @@ static const SchedSlice SCHEDULE[] = {
   // connectedness on top of bare break it again).  This slice is the
   // portfolio's bare-completion angle for the WM-preset-divergent set.
   {"bare",   "--preset=none --horn=0", 0.0},   // horn-free (see flatten-bare)
+  // RAW-PRESENTATION recovery lanes: canonical input (default ON) is
+  // score-neutral in aggregate but systematically flips individual
+  // problems BOTH ways (pod A/B, identical hardware: ON-only gains
+  // KLE110-10/MVA003-1/GRP706-1/LAT139-1; OFF-only keeps LAT149-1 +
+  // LAT159-1 [twee lane, 2 corpora] and BOO015-10/ALG212-10 [bare /
+  // flatten-bare lane]).  The union beats either choice: these variants
+  // re-run the exact slices that carried the OFF-only solves with the
+  // original presentation.
+  {"twee-raw", "--canon-input=0 --simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --orphan-murder=0 --cp-set-interreduce --cp-set-ir-budget=5", 0.0},
+  {"bare-raw", "--canon-input=0 --preset=none --horn=0", 0.0},
+  {"flatten-bare-raw", "--canon-input=0 --flatten-goal --horn=0", 0.0},
   // Backups -- only launch if one of the first five exits early.
   {"wm-gj",   "--ground-join --connectedness",             0.0},
   {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.0},
