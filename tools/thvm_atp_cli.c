@@ -122,6 +122,7 @@ static const AtpKnob KNOBS[] = {
   {"gj-delete-rule",         "THVM_ATP_GJ_DELETE_RULE",  0, "GjDeleteRule"},
   {"gj-index",               "THVM_ATP_GJ_INDEX",        1, "(GJ indexed top scan; default 1)"},
   {"encompass-demod",        "THVM_ATP_ENCOMPASS",       0, "(skolem-ground unorient demodulation)"},
+  {"full-ac",                "THVM_ATP_FULL_AC",         0, "(auto-detect AC operators + run AC-matching/AC-unification completion)"},
   {"simpler-join",           "THVM_ATP_SIMPLER_JOIN",    0, "(Twee simplerThan-gated CP join)"},
   {"pop-rules-only",         "THVM_ATP_POP_RULES_ONLY",  0, "(Twee pop-join base: oriented rules only, no ungated doE)"},
   {"gj-budget",              "THVM_ATP_GJ_BUDGET",       1, "(GJ branch budget; small = early-KEEP)"},
@@ -4233,6 +4234,19 @@ static const SchedSlice SCHEDULE[] = {
   // connectedness on top of bare break it again).  This slice is the
   // portfolio's bare-completion angle for the WM-preset-divergent set.
   {"bare",   "--preset=none --horn=0", 0.0},   // horn-free (see flatten-bare)
+  // FULL AC-COMPLETION: auto-detect AC operators (add/meet/join/mult from
+  // their commutativity+associativity axioms) and run AC-matching +
+  // Stickel AC-unification.  The WM preset only uses AC to FILTER CPs
+  // (perm-subsume); leaving the engine mask set activates the full
+  // AC-saturation path, which on the ring/lattice families finds the
+  // SHORT proof the plain KB completion drowns in commutativity-CP
+  // explosion trying to reach (RNG021-6/021-7/025-5/027-7 prove in 1-3s
+  // where every non-AC slice Times Out -- competitors solve these in
+  // 0.3s BECAUSE they reason modulo AC).  The mechanism existed
+  // (src/atp/ac.c, built into the CLI) but was inert: nothing set the
+  // engine ac_mask.  No-AC problems detect an empty mask and fall
+  // straight through to plain completion, so this is a near-free lane.
+  {"full-ac", "--full-ac", 0.0},
   // RAW-PRESENTATION recovery lanes: canonical input (default ON) is
   // score-neutral in aggregate but systematically flips individual
   // problems BOTH ways (pod A/B, identical hardware: ON-only gains
