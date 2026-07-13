@@ -164,6 +164,8 @@ static const AtpKnob KNOBS[] = {
   {"horn-back",              "THVM_ATP_HORN_BACK",       1, "(backward goal-directed CD lane: iterative-deepening goal regression; 2 = give up if inapplicable)"},
   {"horn-back-depth",        "THVM_ATP_HORN_BACK_DEPTH", 1, "(backward CD max iterative-deepening depth)"},
   {"horn-back-size",         "THVM_ATP_HORN_BACK_SIZE",  1, "(backward CD subgoal term-size cap)"},
+  {"ifeq-guard",             "THVM_ATP_IFEQ_GUARD",      1, "(guard-aware CP selection on ifeq-encoded problems; 2 = give up if inapplicable)"},
+  {"ifeq-penalty",           "THVM_ATP_IFEQ_PENALTY",    1, "(ifeq-guard per-undecided-guard weight factor, default 8)"},
   {"heap-cells",             "THVM_HEAP_CELLS",          1, "(heap size, cells)"},
   {"profile",                "THVM_ATP_PROFILE",         1, "(profiling level)"},
   {"diag",                   "THVM_ATP_DIAG",            1, "(diagnostics)"},
@@ -3102,6 +3104,28 @@ static int horn_backward_prove(const TpProblem *tp) {
 
 // The pass: decode, chain, rank, append.  Runs after tp_parse and
 // BEFORE SInE so released facts participate in axiom selection.
+// Standalone dispatcher probe for the --ifeq-guard=2 give-up: does any
+// positive clause have the ifeqN(X,X,Y[,Z]) = Y dispatcher shape?
+// Reuses the Horn parser (its node arena self-grows) without any of
+// tp_horn_release's release machinery, so it works under --horn=0 too.
+static int tp_has_ifeq_dispatcher(TpProblem *tp) {
+  HParse *ps = (HParse *)malloc(sizeof(HParse));
+  if (ps == NULL) return 0;
+  int mark_n = g_hn_n, mark_a = g_ha_n, found = 0;
+  for (int c = 0; c < tp->n_cls && !found; c++) {
+    if (tp->cls[c].neg) continue;
+    ps->nv = 0;
+    int l = horn_parse_side(tp, ps, tp->cls[c].lhs);
+    int r = (l >= 0) ? horn_parse_side(tp, ps, tp->cls[c].rhs) : -1;
+    if (l < 0 || r < 0) continue;
+    if (horn_disp_check(l, r) || horn_disp_check(r, l)) found = 1;
+  }
+  g_hn_n = mark_n;   // release the probe's arena nodes
+  g_ha_n = mark_a;
+  free(ps);
+  return found;
+}
+
 static void tp_horn_release(TpProblem *tp) {
   int n = tp->n_cls;
   // CD lane flag before any fact is added: fingerprints ride the adds.
@@ -4256,6 +4280,23 @@ static const SchedSlice SCHEDULE[] = {
   // connectedness on top of bare break it again).  This slice is the
   // portfolio's bare-completion angle for the WM-preset-divergent set.
   {"bare",   "--preset=none --horn=0", 0.0},   // horn-free (see flatten-bare)
+  // (5b) IFEQ GUARD DISCIPLINE: bare completion + goal flattening with
+  // the CP selection weight scaled by THVM_ATP_IFEQ_PENALTY per
+  // undecided ifeq guard a CP's conclusion retains beyond the free
+  // budget, plus a step for two-compound-sides CPs (theory-algebra
+  // churn) and per distinct variable over THVM_ATP_IFEQ_VARCAP (the
+  // ever-more-general theorem-schema towers) -- the equational port of
+  // Vampire's guard-resolving selection on the machine-equationalized
+  // '-10' family.  On LCL306-10 it reshapes the search visibly (the
+  // oracle's ground guard-chain lemmas surface; or/not algebra and the
+  // 4-5-var towers sink) but does not yet prove any of the 7 gap
+  // targets standalone at 30s -- kept BELOW the proven slices so it
+  // only consumes leftover pool slots on ifeq problems.  =2: exits
+  // immediately when no dispatcher axiom ifeqN(X,X,Y[,Z]) = Y is
+  // present, freeing the pool slot on every non-ifeq problem exactly
+  // like the equals/horn-cd slices.  Horn-free: keeps the full wall
+  // for the engine.
+  {"ifeq",   "--ifeq-guard=2 --flatten-goal --goal-subterm --preset=none --horn=0", 0.0},
   // FULL AC-COMPLETION: auto-detect AC operators (add/meet/join/mult from
   // their commutativity+associativity axioms) and run AC-matching +
   // Stickel AC-unification.  The WM preset only uses AC to FILTER CPs
@@ -4590,6 +4631,15 @@ int main(int argc, char **argv) {
       if (n_neg == 0 || tp.n_cls == n_neg) {
         fprintf(stderr, "FindProof: need at least one positive and one negative unit\n");
         return 2;
+      }
+      // --ifeq-guard=2 (the schedule's ifeq slice): exit cleanly when
+      // the problem carries no ifeq dispatcher axiom, freeing the pool
+      // slot immediately (the equals/horn-cd =2 pattern).  Checked
+      // BEFORE the Horn release so the give-up costs no chaining wall.
+      {
+        const char *ig = getenv("THVM_ATP_IFEQ_GUARD");
+        if (ig != NULL && atoi(ig) >= 2 && !tp_has_ifeq_dispatcher(&tp))
+          tp_giveup("ifeq-guard slice: no ifeq dispatcher axiom");
       }
       // Encoded-Horn (ifeq) problems: decode the dispatcher encoding
       // and forward-chain released units BEFORE SInE, so the releases

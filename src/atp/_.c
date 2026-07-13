@@ -8832,7 +8832,257 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   return 1;
 }
 
+// --- ifeq (encoded-clause dispatcher) guard-aware CP selection --------
+//
+// See the AtpState.ifeq_syms doc block (thvm.h) for the mechanism.
+// Detection runs here at axiom intake; the weight scale itself is
+// applied in atp_cp_priority_sized_ex (Term route: every re-score
+// path) and atp_cp_heap_insert_packed (FT-routed pushes whose Term
+// args are sentinels).
+
+// THVM_ATP_IFEQ (default on): the detector kill switch.
+static int atp_ifeq_env_on(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("THVM_ATP_IFEQ");
+    on = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
+  return on;
+}
+// THVM_ATP_IFEQ_GUARD (default 0 = mechanism disarmed).
+static int atp_ifeq_guard_env(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_IFEQ_GUARD");
+    v = (e != NULL) ? atoi(e) : 0;
+    if (v < 0) v = 0;
+  }
+  return v;
+}
+// THVM_ATP_IFEQ_PENALTY (default 8): per-undecided-guard weight factor.
+static u32 atp_ifeq_penalty(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_IFEQ_PENALTY");
+    v = (e != NULL) ? atoi(e) : 8;
+    if (v < 2) v = 2;
+  }
+  return (u32)v;
+}
+
+// Dispatcher axiom shape: l = f(A,A,B[,C]) with every argument a
+// variable, args 1,2 the SAME variable, B (and C) distinct from it,
+// and r the bare variable B.
+static u8 atp_ifeq_axiom_shape(Term l, Term r) {
+  if (term_tag(l) != TAG_CTR || term_tag(r) != TAG_FVR) return 0;
+  u32 n = term_ctr_n(l);
+  if (n != 3u && n != 4u) return 0;
+  Term a0 = term_ctr_at(l, 0), a1 = term_ctr_at(l, 1);
+  Term a2 = term_ctr_at(l, 2);
+  if (term_tag(a0) != TAG_FVR || term_tag(a1) != TAG_FVR ||
+      term_tag(a2) != TAG_FVR) return 0;
+  if (term_ext(a0) != term_ext(a1)) return 0;
+  if (term_ext(a2) == term_ext(a0) || term_ext(a2) != term_ext(r)) return 0;
+  if (n == 4u) {
+    Term a3 = term_ctr_at(l, 3);
+    if (term_tag(a3) != TAG_FVR) return 0;
+    if (term_ext(a3) == term_ext(a0) || term_ext(a3) == term_ext(a2))
+      return 0;
+  }
+  return 1;
+}
+
+static void atp_ifeq_detect(AtpState *s, Term lhs, Term rhs) {
+  if (s == NULL || !atp_ifeq_env_on()) return;
+  Term f = 0;
+  if      (atp_ifeq_axiom_shape(lhs, rhs)) f = lhs;
+  else if (atp_ifeq_axiom_shape(rhs, lhs)) f = rhs;
+  if (f == 0) return;
+  u32 sym = term_ext(f);
+  u32 cap = (u32)(sizeof s->ifeq_syms / sizeof s->ifeq_syms[0]);
+  for (u32 i = 0; i < s->n_ifeq_syms; i++)
+    if (s->ifeq_syms[i] == sym) return;
+  if (s->n_ifeq_syms >= cap) return;
+  s->ifeq_syms[s->n_ifeq_syms++] = sym;
+  if (atp_ifeq_guard_env() >= 1) s->use_ifeq_guard = 1u;
+  if (getenv("THVM_ATP_IFEQ_DEBUG") != NULL) {
+    fprintf(stderr, "[ifeq] dispatcher sym=%u detected (n=%u armed=%u)\n",
+            sym, s->n_ifeq_syms, (u32)s->use_ifeq_guard);
+  }
+}
+
+static u8 atp_ifeq_sym_is(const AtpState *s, u32 sym) {
+  for (u32 i = 0; i < s->n_ifeq_syms; i++)
+    if (s->ifeq_syms[i] == sym) return 1u;
+  return 0u;
+}
+
+// Syntactic Term equality (vars by id, constructors by label + kids).
+// Used only for the arg1-vs-arg2 decidedness test on detected ifeq
+// nodes; early-exits on the first mismatch (guards differ at the head
+// in practice: theorem(...) vs true).
+static u8 atp_ifeq_term_eq(Term a, Term b) {
+  u8 ta = term_tag(a), tb = term_tag(b);
+  if (ta != tb) return 0;
+  if (ta == TAG_FVR) return term_ext(a) == term_ext(b);
+  if (ta != TAG_CTR) return a == b;
+  if (term_ext(a) != term_ext(b)) return 0;
+  u32 n = term_ctr_n(a);
+  if (n != term_ctr_n(b)) return 0;
+  for (u32 i = 0; i < n; i++)
+    if (!atp_ifeq_term_eq(term_ctr_at(a, i), term_ctr_at(b, i))) return 0;
+  return 1;
+}
+
+// Count UNDECIDED guards: detected ifeq nodes whose args 1,2 are not
+// syntactically equal (a decided one collapses at the next normalize
+// via the dispatcher rule itself, so it must NOT be penalized).
+static u32 atp_ifeq_guard_count(const AtpState *s, Term t) {
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 n = term_ctr_n(t);
+  u32 c = 0u;
+  if ((n == 3u || n == 4u) && atp_ifeq_sym_is(s, term_ext(t)) &&
+      !atp_ifeq_term_eq(term_ctr_at(t, 0), term_ctr_at(t, 1))) c = 1u;
+  for (u32 i = 0; i < n; i++)
+    c += atp_ifeq_guard_count(s, term_ctr_at(t, i));
+  return c;
+}
+
+// Fact test: in the ifeq encoding every semantically loaded derived
+// equation has an ATOMIC side (`g = true`, a definitional fold to a
+// constant, or a collapse residue that is a bare variable).  A CP with
+// two compound sides is theory algebra (or/not identity churn on
+// LCL306-10) that can never decide a guard -- it takes one extra
+// penalty step (the mission's guard-deciding BONUS, expressed
+// order-independently so re-scores agree).
+static u8 atp_ifeq_side_atomic(Term t) {
+  u8 tg = term_tag(t);
+  if (tg == TAG_FVR) return 1u;
+  return (tg == TAG_CTR && term_ctr_n(t) == 0u) ? 1u : 0u;
+}
+
+// Scale a CP priority by penalty^guards, saturating below the
+// ATP_CP_PRI_NEVER sentinel (a penalized CP still outranks a
+// deprioritized-never one).
+static u32 atp_ifeq_scale_pri(u32 base, u32 guards) {
+  if (guards == 0u) return base;
+  if (guards > 8u) guards = 8u;
+  u64 b = (base == 0u) ? 1u : (u64)base;
+  u64 p = (u64)atp_ifeq_penalty();
+  for (u32 i = 0; i < guards; i++) {
+    b *= p;
+    if (b >= (u64)ATP_CP_PRI_NEVER) return ATP_CP_PRI_NEVER - 1u;
+  }
+  return (u32)b;
+}
+
+// Distinct-variable bitmask (var ids mod 64 -- an over-approximation
+// dedupe, exact for the engine's REWRITE_MAX_VAR-bounded rule space).
+static void atp_ifeq_var_mask(Term t, u64 *mask) {
+  u8 tg = term_tag(t);
+  if (tg == TAG_FVR) { *mask |= 1ull << (term_ext(t) & 63u); return; }
+  if (tg != TAG_CTR) return;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) atp_ifeq_var_mask(term_ctr_at(t, i), mask);
+}
+// THVM_ATP_IFEQ_VARCAP (default 3): distinct-variable budget; every
+// variable beyond it costs one penalty step.  The oracle proofs'
+// general lemmas carry <= 3 distinct variables -- the ever-more-general
+// 4-5-var theorem-schema towers (the classic LCL forward-chaining
+// flood, cf. the horn-cd lane's --horn-cd-vars) are pure churn.
+static u32 atp_ifeq_varcap(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_IFEQ_VARCAP");
+    v = (e != NULL) ? atoi(e) : 3;
+    if (v < 1) v = 1;
+  }
+  return (u32)v;
+}
+
+// THVM_ATP_IFEQ_FREE (default 1): guards within this budget are not
+// penalized.  The oracle derivations run on facts AND one-guard
+// conditional lemmas (partially discharged modus ponens: f14631/f105383
+// and a dozen siblings in LCL306-10's refutation) -- penalizing the
+// first guard buries that whole lemma class behind the fact churn.
+static u32 atp_ifeq_guard_free(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_IFEQ_FREE");
+    v = (e != NULL) ? atoi(e) : 1;
+    if (v < 0) v = 0;
+  }
+  return (u32)v;
+}
+
+// Combined exponent for one CP: undecided guards on both sides beyond
+// the free budget, plus one extra step when NEITHER side is atomic
+// (see atp_ifeq_side_atomic), plus one step per distinct variable
+// beyond the var budget.
+static u32 atp_ifeq_weight_scale(const AtpState *s, Term lhs, Term rhs,
+                                 u32 base) {
+  u32 g = atp_ifeq_guard_count(s, lhs) + atp_ifeq_guard_count(s, rhs);
+  u32 fr = atp_ifeq_guard_free();
+  g = (g > fr) ? g - fr : 0u;
+  if (!atp_ifeq_side_atomic(lhs) && !atp_ifeq_side_atomic(rhs)) g += 1u;
+  u64 vm = 0ull;
+  atp_ifeq_var_mask(lhs, &vm);
+  atp_ifeq_var_mask(rhs, &vm);
+  u32 nv = (u32)__builtin_popcountll(vm);
+  u32 cap = atp_ifeq_varcap();
+  if (nv > cap) g += nv - cap;
+  return atp_ifeq_scale_pri(base, g);
+}
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// FT-span twin of atp_ifeq_guard_count, for the walk former's routed
+// pushes whose Term args are sentinels (the real content lives in the
+// g_vcp_treat NF spans).  Same verdict: prefix walk, one tick per
+// detected ifeq cell whose arg-1/arg-2 spans differ (ft_eq).
+static u32 atp_ifeq_guard_count_ft(const AtpState *s, const AtpFtCell *t) {
+  if (t == NULL) return 0u;
+  u32 c = 0u;
+  const AtpFtCell *stop = t->end;
+  for (const AtpFtCell *x = t; ; x = x->next) {
+    if (!ft_is_var(x) && (x->arity == 3u || x->arity == 4u) &&
+        atp_ifeq_sym_is(s, ft_ctr_sym(x))) {
+      const AtpFtCell *a0 = x->next;
+      const AtpFtCell *a1 = a0->end->next;
+      if (!ft_eq(a0, a1)) c++;
+    }
+    if (x == stop) break;
+  }
+  return c;
+}
+// FT-span twin of atp_ifeq_weight_scale (guards + non-fact step +
+// var-budget steps), for the routed pushes.
+static u32 atp_ifeq_weight_scale_ft(const AtpState *s, const AtpFtCell *fl,
+                                    const AtpFtCell *fr, u32 base) {
+  u32 g = atp_ifeq_guard_count_ft(s, fl) + atp_ifeq_guard_count_ft(s, fr);
+  u32 fr_budget = atp_ifeq_guard_free();
+  g = (g > fr_budget) ? g - fr_budget : 0u;
+  u8 fl_atomic = ft_is_var(fl) || fl->arity == 0u;
+  u8 fr_atomic = ft_is_var(fr) || fr->arity == 0u;
+  if (!fl_atomic && !fr_atomic) g += 1u;
+  u64 vm = 0ull;
+  for (int side = 0; side < 2; side++) {
+    const AtpFtCell *t = side ? fr : fl;
+    if (t == NULL) continue;
+    const AtpFtCell *stop = t->end;
+    for (const AtpFtCell *x = t; ; x = x->next) {
+      if (ft_is_var(x)) vm |= 1ull << (ft_var_id(x) & 63u);
+      if (x == stop) break;
+    }
+  }
+  u32 nv = (u32)__builtin_popcountll(vm);
+  u32 cap = atp_ifeq_varcap();
+  if (nv > cap) g += nv - cap;
+  return atp_ifeq_scale_pri(base, g);
+}
+#endif
+
 fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
+  atp_ifeq_detect(s, lhs, rhs);
   return atp_enqueue_equation(s, lhs, rhs, TRACE_AXIOM, ATP_TRACE_NONE);
 }
 
@@ -10808,12 +11058,20 @@ static u32 atp_cp_twee_fused_base(Term lhs, Term rhs) {
 // base - lhs_nodes) instead of re-walking the two sides.
 static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
                                     u32 base, u32 lhs_nodes) {
+  // ifeq guard discipline (see AtpState.ifeq_syms): scale by
+  // penalty^(undecided guards) when armed.  Applied on every path out
+  // of this function via the wrapper below; sentinel/zero Term args
+  // (the FT-routed pushes) count 0 guards here and get their exact
+  // FT-span count in atp_cp_heap_insert_packed instead.
+  u8 ifeq_arm = (s != NULL && s->use_ifeq_guard) ? 1u : 0u;
+#define ATP_IFEQ_RET(w)                                                   \
+    return ifeq_arm ? atp_ifeq_weight_scale(s, lhs, rhs, (w)) : (w)
   // Goal-directed mode (Waldmeister CPinGoal): weight by structural
   // match to the goal.  Opt-in via cp_weight_mode so completion-mode
   // and the other weights are unaffected.
   if (s != NULL && s->cp_weight_mode == ATP_CP_WEIGHT_GOAL &&
       s->goal_lhs != 0) {
-    return atp_goal_weight(s, lhs, rhs);
+    ATP_IFEQ_RET(atp_goal_weight(s, lhs, rhs));
   }
   u32 mode = (s != NULL) ? s->cp_weight_mode : ATP_CP_WEIGHT_ADD;
   if (mode == ATP_CP_WEIGHT_TWEE && g_acp_fuse.valid) {
@@ -10858,7 +11116,8 @@ static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
       base = (disc < base) ? (base - disc) : 1u;
     }
   }
-  return base;
+  ATP_IFEQ_RET(base);
+#undef ATP_IFEQ_RET
 }
 static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
   return atp_cp_priority_sized_ex(s, lhs, rhs, base, 0xffffffffu);
@@ -11967,6 +12226,23 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
                      ? ATP_CP_PRI_NEVER
                      : atp_cp_priority_sized_ex(s, lhs, rhs, cp_nodes,
                                                 lhs_nodes);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // ifeq guard discipline, FT-routed-push arm: the treated route's
+  // Term args are zero sentinels, so the in-priority Term count above
+  // saw 0 guards -- count on the treatment's NF spans instead (the
+  // exact content this slot stores).  The raw >= 50 emit route (lazy
+  // mode only) has no live spans here and stays unscaled: its giant
+  // raw weight already buries it, and the mechanism is selection bias,
+  // not a gate.
+  if (s->use_ifeq_guard && s->cp_pri[i] < ATP_CP_PRI_NEVER &&
+      g_vcp_treat.armed && g_vcp_treat.fl != NULL &&
+      g_vcp_treat.fr != NULL &&
+      (lhs == 0 || term_tag(lhs) == TAG_NUM ||
+       rhs == 0 || term_tag(rhs) == TAG_NUM)) {
+    s->cp_pri[i] = atp_ifeq_weight_scale_ft(s, g_vcp_treat.fl,
+                                            g_vcp_treat.fr, s->cp_pri[i]);
+  }
+#endif
   s->cp_depth[i] = g_cp_formation_depth;   // Twee getDepth (see g_cp_formation_depth)
   if (g_atp_phase_detail) g_atp_cpg_us_kbo += atp_now_us() - _dkb_t0;
   if (s->cp_ultimate != NULL) {

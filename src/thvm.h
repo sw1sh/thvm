@@ -6347,6 +6347,30 @@ typedef struct {
   Term               min_const_ft_src;
 #endif
 
+  // ifeq-encoded clause guards (TPTP's '-10' machine-equationalized FOF
+  // class): dispatcher symbols detected at axiom intake -- a symbol f
+  // whose axiom is f(A,A,B[,C]) = B with A, B (, C) distinct variables.
+  // Encoded clauses look like ifeq(guard, true, then, true) = true;
+  // plain completion floods on them because superpositions INTO
+  // subterms buried under undecided guards dominate the CP queue while
+  // only guard-DECIDING inferences make progress (Vampire cracks the
+  // family through literal selection: it effectively only resolves the
+  // guard).  The equational analog lives in atp_cp_priority_sized_ex:
+  // when armed (use_ifeq_guard), a CP's selection weight is scaled by
+  // THVM_ATP_IFEQ_PENALTY (default 8) once per UNDECIDED guard its
+  // conclusion retains -- a pure function of the CP's terms, so every
+  // re-score path (push, interreduce commit, rebuild) recomputes it
+  // identically.  A guard-deciding CP drops one guard relative to its
+  // parent, surfacing a penalty-factor earlier than its stuck siblings;
+  // facts are unscaled.  Selection bias only: nothing is dropped,
+  // completeness is untouched.
+  // Arming: n_ifeq_syms > 0 (detector fired) AND THVM_ATP_IFEQ_GUARD
+  // >= 1.  THVM_ATP_IFEQ=0 kills the detector.  Off (the default) the
+  // engine is byte-identical.
+  u32  ifeq_syms[8];              // detected dispatcher CTR labels
+  u32  n_ifeq_syms;
+  u8   use_ifeq_guard;
+
 #ifdef THVM_ATPFT_CPQ
   // Parallel native AtpFt CP queue; see docs/atp/engineering.md.
   // Each populated slot owns its two FT spans in Arena A; the legacy
