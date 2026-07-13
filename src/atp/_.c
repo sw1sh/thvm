@@ -10096,6 +10096,36 @@ static u32 atp_twee_term_score(Term t) {
   return score;
 }
 
+// Combine the two per-side Twee term scores and the CP formation depth
+// into the final Twee.CP priority (Twee.CP.score, src/Twee/CP.hs:240):
+//   lhsweight * size(larger) + rhsweight * size(smaller) + depthweight * depth
+// Twee's built-in defaults are lhsweight=4, rhsweight=1, depthweight=2.
+// `large`/`small` arrive already *7-scaled (atp_twee_term_score's varweight
+// 6/7); the depth coefficient is likewise scaled *7 so depthweight*depth
+// stays in the same units, exactly as the historical hardcoded
+// `4*large + 1*small + 14*depth`.  Twee's parallel portfolio auto-selects
+// per-problem weight configs (LAT138-1 solves under `--lhs-weight 1
+// --depth-weight 60`, a much steeper depth penalty that keeps the KB
+// derivation shallow and reaches the goal before the ACI CP explosion);
+// the env knobs expose the same tuning.  Defaults reproduce the prior
+// hardcoded formula byte-for-byte, so the WM-parity path is unchanged.
+static u32 atp_twee_score_combine(u32 large, u32 small, u32 depth) {
+  static int lhs_w = -1, rhs_w = -1, depth_w = -1;
+  if (lhs_w < 0) {
+    const char *e;
+    e = getenv("THVM_ATP_TWEE_LHS_W");
+    lhs_w   = (e != NULL && e[0] != '\0') ? (int)strtol(e, NULL, 10) : 4;
+    e = getenv("THVM_ATP_TWEE_RHS_W");
+    rhs_w   = (e != NULL && e[0] != '\0') ? (int)strtol(e, NULL, 10) : 1;
+    e = getenv("THVM_ATP_TWEE_DEPTH_W");
+    depth_w = (e != NULL && e[0] != '\0') ? (int)strtol(e, NULL, 10) : 2;
+    if (lhs_w < 0)   lhs_w   = 4;
+    if (rhs_w < 0)   rhs_w   = 1;
+    if (depth_w < 0) depth_w = 2;
+  }
+  return (u32)lhs_w * large + (u32)rhs_w * small + (u32)depth_w * 7u * depth;
+}
+
 // (atp_term_depth defined below at line ~4653.)
 
 // === ClasHeuristics: advanced CP-weight term measures ===============
@@ -10278,7 +10308,7 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       // deep-derivation space Twee prunes.  g_cp_formation_depth carries
       // max(parent rule depths)+1, set by atp_push_cps_traced.
       u32 d = g_cp_formation_depth;
-      return 4u * large + 1u * small + 14u * d;
+      return atp_twee_score_combine(large, small, d);
     }
     case ATP_CP_WEIGHT_STAGGERED: {
       // E StaggeredWeight (HEURISTICS/che_varweights.c::
@@ -10765,7 +10795,7 @@ static u32 atp_cp_twee_fused_base(Term lhs, Term rhs) {
   }
   u32 large = m > n ? m : n;
   u32 small = m + n - large;
-  return 4u * large + 1u * small + 14u * g_cp_formation_depth;
+  return atp_twee_score_combine(large, small, g_cp_formation_depth);
 }
 
 // Priority weight for a CP whose symbol-count sum is already known

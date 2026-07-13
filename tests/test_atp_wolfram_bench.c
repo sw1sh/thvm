@@ -2287,9 +2287,21 @@ int main(int argc, char **argv) {
     {
       const char *wm_ac = getenv("THVM_ATP_WALDMEISTER");
       const char *no_ac = getenv("THVM_ATP_PERM_SUB");   // "0" opts out
+      // THVM_ATP_AC_PERMSUB=1 arms the same GZ_ACVerzichtbar AC-equal CP
+      // filter in the NON-WM completion lanes (the Twee-style slice).
+      // Lattice / ACI problems (e.g. LAT138-1) flood the passive set with
+      // AC-permutation CPs that the full ordered-set-partition ground-join
+      // catches only at ~10 normalizes/CP; the flattened AC-equality test
+      // (atp_cp_ac_dispensable) discards the same class in O(term size),
+      // keeping the queue small AND the completion fast.  The engine
+      // ac_mask is RESET to 0 afterwards (plain KB completion, no
+      // AC-unification), exactly as the WM path -- only the perm-subsume
+      // filter mask is retained.  Default off => WM-parity path unchanged.
+      const char *ac_ps = getenv("THVM_ATP_AC_PERMSUB");
       u8 wm_on = (wm_ac != NULL && wm_ac[0] != '\0' && wm_ac[0] != '0');
+      u8 ac_ps_on = (ac_ps != NULL && ac_ps[0] != '\0' && ac_ps[0] != '0');
       u8 ps_off = (no_ac != NULL && no_ac[0] == '0');
-      if (wm_on && !ps_off) {
+      if ((wm_on || ac_ps_on) && !ps_off) {
         // auto_ac populates the engine AC mask; capture it for the
         // perm-subsume filter, then RESET the engine mask to 0.  WM
         // runs plain KB completion (no AC-unification/AC-matching) and
