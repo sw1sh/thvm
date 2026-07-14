@@ -4865,6 +4865,44 @@ static void sched_sig_teardown(int sig) {
   _exit(128 + sig);
 }
 
+// --- hard wall enforcement -----------------------------------------
+// The engine's wall check lives between completion steps, and a single
+// step can starve it for hours: COL-class term blowup drives
+// interreduction into GC thrash (gc_evacuate over gigabytes of live
+// cells, re-entered immediately), so the step loop never regains
+// control.  alarm(2) fires regardless of where the process is stuck.
+// The handler is async-signal-safe: it writes a pre-built SZS line to
+// the preserved stdout, tears down any schedule slices, and exits.
+// The grace above the soft wall lets the engine's own graceful path
+// (status line + proof) win whenever it is able to run.
+static char g_alarm_szs[1200];
+static int  g_alarm_fd = -1;
+static void cli_alarm_fire(int sig) {
+  (void)sig;
+  if (g_alarm_fd >= 0 && g_alarm_szs[0] != '\0') {
+    size_t n = 0;
+    while (g_alarm_szs[n] != '\0') n++;
+    ssize_t w = write(g_alarm_fd, g_alarm_szs, n);
+    (void)w;
+  }
+  if (g_sched_active) sched_sig_teardown(SIGALRM);
+  _exit(6);
+}
+static void cli_arm_wall_alarm(double wall, int grace, int fd,
+                               const char *szs_line) {
+  if (szs_line != NULL)
+    snprintf(g_alarm_szs, sizeof g_alarm_szs, "%s", szs_line);
+  else
+    g_alarm_szs[0] = '\0';
+  g_alarm_fd = fd;
+  struct sigaction sa;
+  sa.sa_handler = cli_alarm_fire;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  sigaction(SIGALRM, &sa, NULL);
+  alarm((unsigned)(wall + grace + 0.999));
+}
+
 // CONCURRENT portfolio: run the slices in a bounded pool (SCHED_MAX_PAR at
 // a time), EACH with the FULL wall -- not wall/N as the old sequential
 // scheme did.  Sequential slicing starved every strategy (a problem
@@ -4885,6 +4923,14 @@ static int run_schedule(const char *self, const char *file, double wall,
   sigaction(SIGTERM, &sa, &old_term);
   sigaction(SIGINT,  &sa, &old_int);
   g_sched_active = 1;
+  // Belt-and-braces: if every slice wedges past its own hard wall, the
+  // parent still emits one status line and reaps the subtrees.
+  {
+    char line[1100];
+    line[0] = '\0';
+    if (szs) snprintf(line, sizeof line, "%% SZS status Timeout for %s\n", file);
+    cli_arm_wall_alarm(wall, 60, 1, line[0] ? line : NULL);
+  }
   // Bound each child's RSS unless the caller set a tighter cap already.
   if (getenv("THVM_ATP_RSS_ABORT_MB") == NULL) {
     char capbuf[16];
@@ -4969,6 +5015,7 @@ static int run_schedule(const char *self, const char *file, double wall,
     if (pids[i] > 0 && !done[i]) { int st; waitpid(pids[i], &st, 0);
       if (i < SCHED_PID_MAX) g_sched_pids[i] = -1; }
   // Teardown handler no longer needed: restore the previous dispositions.
+  alarm(0);
   g_sched_active = 0;
   sigaction(SIGTERM, &old_term, NULL);
   sigaction(SIGINT,  &old_int,  NULL);
@@ -5356,6 +5403,21 @@ int main(int argc, char **argv) {
     wall = wall_left;
   }
 
+  // Hard wall: the alarm covers the whole engine run INCLUDING proof
+  // emission (cli_proof_hook runs inside atp_bench_main).  A schedule
+  // slice stays silent on fire (the wrapper owns the single status);
+  // a direct run emits the Timeout/ResourceOut line itself.
+  {
+    int slice = getenv("FINDPROOF_SLICE") != NULL;
+    int outfd = (real_stdout >= 0) ? real_stdout : 1;
+    char line[1100];
+    line[0] = '\0';
+    if (szs && !slice)
+      snprintf(line, sizeof line, "%% SZS status %s for %s\n",
+               g_cli_tptp_mode ? "Timeout" : "ResourceOut", file);
+    cli_arm_wall_alarm(atof(wall), 30, outfd, line[0] ? line : NULL);
+  }
+
   char *bench_argv[5];
   bench_argv[0] = (char *)"FindProof";
   bench_argv[1] = (char *)run_file;
@@ -5363,6 +5425,7 @@ int main(int argc, char **argv) {
   bench_argv[3] = (char *)wall;
   bench_argv[4] = NULL;
   int rc = atp_bench_main(4, bench_argv);
+  alarm(0);
 
   if (real_stdout >= 0) {
     fflush(stdout);
