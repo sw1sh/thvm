@@ -2794,8 +2794,21 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "hn_leftid") == 0) goal_hn_leftid(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) {
+    // A goal VARIABLE makes the conjecture existential (WM
+    // PM_Existenzziele).  The default path still sets it universally
+    // (joining then proves the STRONGER forall statement -- sound,
+    // and the historical behavior); with THVM_ATP_NARROW_QUEUE armed
+    // a single non-ground goal instead enters the engine's
+    // existential narrowing mode, where the critical-goal queue can
+    // close it by instantiation (COL011-1: no universal treatment
+    // can, `apply(combinator,Y) = Y` only holds for a CONSTRUCTED Y).
+    const char *nq = getenv("THVM_ATP_NARROW_QUEUE");
+    u8 nq_on = (u8)(nq != NULL && nq[0] != '\0' && nq[0] != '0');
     if (pr_mode && prp.n_goals > 1u) {
       thvm_atp_set_goals(s, prp.goals_l, prp.goals_r, prp.n_goals);
+    } else if (nq_on && gl != 0 &&
+               (!atp_bench_term_ground(gl) || !atp_bench_term_ground(gr))) {
+      thvm_atp_set_goal_existential(s, gl, gr);
     } else {
       thvm_atp_set_goal(s, gl, gr);
     }

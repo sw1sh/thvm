@@ -153,6 +153,7 @@ static const AtpKnob KNOBS[] = {
   {"sym-prec",               "THVM_ATP_SYM_PREC",        1, "(Vampire symbol precedence: reverse-frequency|frequency)"},
   {"ord",                    "THVM_ATP_ORD",             1, "(reduction ordering: lpo selects LPO over the default KBO)"},
   {"equals-goal",            "THVM_ATP_EQUALS_GOAL",     1, "(existential-goal equals encoding; 2 = give up if inapplicable)"},
+  {"narrow-queue",           "THVM_ATP_NARROW_QUEUE",    1, "(existential-goal critical-goal queue narrowing; 2 = give up if the goal is ground)"},
   {"def-unfold",             "THVM_ATP_DEF_UNFOLD",      1, "(function-definition unfolding: replace f(X..)=t everywhere + drop the axiom; 2 = give up if inapplicable)"},
   {"curry",                  "THVM_ATP_CURRY",           1, "(wide-functor n-ary->binary ap2 decomposition; 0 disables)"},
   {"fof",                    "THVM_ATP_FOF",             1, "(FOF/clausal front-end: clausify + Horn ifeq encoding; 0 disables)"},
@@ -5366,6 +5367,18 @@ static const SchedSlice SCHEDULE[] = {
   // slice exit immediately on ground-goal problems, so it only ever
   // spends a pool slot on the existential family.
   {"equals",  "--equals-goal=2",                           0.0},
+  // (1b') CRITICAL-GOAL QUEUE narrowing: best-first goal-descendant
+  // search (WM PM_Existenzziele / GKC query_preference=1 -- GKC's
+  // winning COL011-1 strategy, 0.54s where every completion-side
+  // treatment is structurally blind: a goal variable closes only by
+  // INSTANTIATION, and the oracle derivations are 5 narrow steps with
+  // the o-definition's unorientable RHS face opening the chain).
+  // Complementary to the equals encoding on the same existential
+  // family (encoding drowns the eq-chain in the CP flood; the queue
+  // keeps goal descendants in their own selection lane).  =2 exits
+  // immediately on ground-goal problems, exactly like the equals
+  // slice.
+  {"narrowq", "--narrow-queue=2",                          0.0},
   // (1c) CONDENSED-DETACHMENT lane: the encoded-Horn chaining under
   // the classic CD prover discipline (Otter's max_weight + subsumption
   // on the LCL corpus) -- a formula-size cap with iterative deepening
@@ -6111,6 +6124,14 @@ int main(int argc, char **argv) {
     const char *ee = getenv("THVM_ATP_EQUALS_GOAL");
     if (ee != NULL && atoi(ee) >= 2 && !g_cli_equals_applied)
       tp_giveup("equals-goal slice: no existential goal to encode");
+  }
+  // --narrow-queue=2 (the schedule's narrowq slice): same exit-fast
+  // discipline -- the critical-goal queue lane only differs from the
+  // WM lane on an existential (non-ground) conjecture.
+  {
+    const char *nqe = getenv("THVM_ATP_NARROW_QUEUE");
+    if (nqe != NULL && atoi(nqe) >= 2 && !g_cli_goal_existential)
+      tp_giveup("narrow-queue slice: goal is ground");
   }
 
   g_cli_want_szs = szs;

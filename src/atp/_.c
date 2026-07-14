@@ -42,6 +42,21 @@ static void atp_cp_ft_clear     (AtpState *s, u32 i);
 static void atp_cp_ft_move      (AtpState *s, u32 dst, u32 src);
 #endif
 
+// Critical-goal queue (narrow-queue lane) forward decls: the
+// implementation sits at the end of this file (it uses the narrowing
+// primitives + atp_rewrite_normalize); goal_check / init / free /
+// set_goal_existential reference it earlier.
+struct AtpCgq;
+static AtpStatus atp_cgq_check(AtpState *s);
+static void      atp_cgq_free(struct AtpCgq *q);
+// GC rooting: every stored critical goal holds two live Terms; the
+// dedup hash is structural (content-keyed), so relocation needs no
+// fixup beyond the write-back -- same discipline as the MNF nodes.
+static u32       cgq_gc_count(struct AtpCgq *q);
+static void      cgq_gc_gather(struct AtpCgq *q, Term *roots, u32 *w);
+static void      cgq_gc_writeback(struct AtpCgq *q, const Term *roots,
+                                  u32 base);
+
 // Stage 6: AtpFt-native normalize fixpoint (push-norm joinable check).
 // Requires Stage 4's parallel rule mirror (THVM_ATPFT_RULES) and
 // Stage 5's matcher (THVM_ATPFT_MATCH).  Off the flag the splice +
@@ -7498,6 +7513,11 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // WL callers use thvm_atp_set_use_goal_narrow.
   s->use_goal_narrow = (u8)atp_env_on("THVM_ATP_GOAL_NARROW");
   s->gnarrow = NULL;
+  // Critical-goal queue (best-first existential narrowing; opt-in,
+  // see the lane at the end of this file).  THVM_ATP_NARROW_QUEUE for
+  // CLI runs; WL callers use thvm_atp_set_use_narrow_queue.
+  s->use_narrow_queue = (u8)atp_env_on("THVM_ATP_NARROW_QUEUE");
+  s->cgq = NULL;
   // Twee pop-join base discipline (opt-in; diverges from WM).  Twee has
   // NO ungated R+E join anywhere on the CP path: dequeue simplification
   // is oriented-rules-only (Rule.hs `simplify` via simplifyOverlap) and
@@ -7784,6 +7804,7 @@ fn void thvm_atp_free(AtpState *s) {
 #ifdef ATP_ORDERED_REWRITE
   gn_free(s->gnarrow);
 #endif
+  atp_cgq_free(s->cgq);
   free(s);
 }
 
@@ -7879,6 +7900,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // hashes over class ids) is GC-invariant and needs no fixup.
   n_roots += gn_gc_count(s->gnarrow);
 #endif
+  // Critical-goal queue: two Terms per stored CG.
+  n_roots += cgq_gc_count(s->cgq);
   Term *roots = (Term *)malloc((size_t)n_roots * sizeof(Term));
   if (roots == NULL) return 0;
 
@@ -7943,6 +7966,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   u32 gn_node_root = w;
   gn_gc_gather(s->gnarrow, roots, &w);
 #endif
+  u32 cgq_node_root = w;
+  cgq_gc_gather(s->cgq, roots, &w);
 
   gc_collect(roots, w);
   g_atp_gc_epoch++;   // invalidate handle-keyed caches (cells moved)
@@ -8022,6 +8047,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
 #ifdef ATP_ORDERED_REWRITE
   gn_gc_writeback(s->gnarrow, roots, gn_node_root);
 #endif
+  cgq_gc_writeback(s->cgq, roots, cgq_node_root);
 
   free(roots);
 
@@ -19666,6 +19692,10 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
   // 8.9c: existential goals use narrowing; universal goals stay
   // on the rewrite-and-compare path.
   if (s->goal_existential) {
+    // Opt-in critical-goal queue (best-first narrowing, WM
+    // PM_Existenzziele / GKC query_preference shape -- see the lane at
+    // the end of this file).  The greedy walk below stays the default.
+    if (s->use_narrow_queue) return atp_cgq_check(s);
     Term lhs = s->goal_lhs;
     Term rhs = s->goal_rhs;
     if (kbo_eq(lhs, rhs)) return ATP_PROVED;
@@ -19801,6 +19831,12 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
 // goal_check.
 fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
   if (s == NULL) return 0;
+  // A goal change invalidates the critical-goal queue (its CGs are
+  // narrowed variants of the PREVIOUS conjecture).
+  if (s->cgq != NULL) {
+    atp_cgq_free(s->cgq);
+    s->cgq = NULL;
+  }
   if (lhs == 0) {
     s->goal_lhs = 0;
     s->goal_rhs = 0;
@@ -29931,4 +29967,515 @@ fn u32 thvm_atp_narrow_all(AtpState *s,
   RewriteSubst empty = {{0}};
   narrow_all_dfs(&ctx, lhs, rhs, &empty, 0);
   return ctx.found;
+}
+
+// === Critical-goal queue: best-first existential-goal narrowing ====
+//
+// The missing WM existential lane (PM_Existenzziele + Rueckwaertige
+// Ueberlappung: the CG set the -cg/-cgclas/-back stubs above gate) in
+// the shape GKC's winning COL011-1 strategy demonstrates
+// ({"strategy":["unit"],"query_preference":1}: goal-descendant
+// preference, 0.54s where thvm timed out at 240s).  An existential
+// conjecture  exists X.. s = t  is refuted by NARROWING: unify a rule
+// side into a goal subterm, instantiate both sides, repeat until the
+// two sides UNIFY (equality resolution).  COL011-1's derivation is 5
+// such steps (Twee's proof: q1_definition x4 + o_definition x1); every
+// completion-side lane treats the goal variable universally and
+// structurally cannot close it, and the greedy walk in
+// thvm_atp_narrow_step cannot either -- it commits the FIRST
+// (position, rule) hit, rewrites the goal pair DESTRUCTIVELY (one
+// wrong branch loses the goal forever), only ever uses the L->R face
+// (COL011-1's opening narrow needs the unorientable o-definition's
+// RHS face: no L->R axiom face unifies with apply(combinator,Y) at
+// all), and closes on syntactic equality only (the oracle's last step
+// is a unification, not an identity).
+//
+// This lane keeps a STORE of critical goals (narrowed goal variants),
+// selected best-first by symbol size with a 1-in-16 FIFO injection
+// (GKC weight_select_ratio).  A popped CG narrows against rule faces
+// [watermark, n_rules) -- oriented rules contribute their LHS,
+// unorientable equations BOTH faces -- in budgeted chunks; a CG that
+// has seen every current rule parks in a processed list, and newly
+// added rules sweep the processed list incrementally (the backward
+// overlap: WM RueckwartigeUeberlappung, GKC's paramodulation of
+// derived two-sided lemmas into the goal).  Every derived CG is
+// R-normalized, var-canonicalized, deduped, and close-checked by
+// UNIFYING its sides.
+//
+// Soundness: narrowing steps are instance-preserving (if sigma solves
+// the child, the accumulated unifier composed with sigma solves the
+// parent -- standard narrowing soundness), R-normalization rewrites
+// with equational consequences of E, and the close step's mgu makes
+// both sides syntactically equal, i.e. a 0-step join of an instance:
+// each PROVED verdict witnesses an instance of the original
+// existential conjecture derivable from E.  No witness substitution
+// is materialized (proof extraction already skips existential goals,
+// _.c "Single-NF extraction only"); the greedy lane below remains the
+// default so thvm_atp_get_witness consumers are unchanged.
+//
+// Opt-in: THVM_ATP_NARROW_QUEUE / --narrow-queue /
+// thvm_atp_set_use_narrow_queue.  Default OFF: byte-identical
+// trajectories everywhere.
+
+#define ATP_CGQ_MAX_CGS      (1u << 18)  // CG store cap
+#define ATP_CGQ_MAX_SIZE     120u        // symbols per CG (lhs+rhs)
+#define ATP_CGQ_BUDGET       4096u       // unify attempts per goal_check
+#define ATP_CGQ_FIFO_MOD     16u         // 1-in-N pops from the FIFO lane
+#define ATP_CGQ_HASH_INIT    (1u << 14)
+
+typedef struct AtpCgq {
+  // CG store (append-only; index = creation order = FIFO lane order).
+  Term *lhs;
+  Term *rhs;
+  u32  *wm;        // rule watermark: faces [0, wm) already narrowed
+  u32  *weight;    // symbol count lhs+rhs (selection key)
+  u8   *state;     // 0 = queued (in heap), 1 = processed (parked)
+  u32   n, cap;
+  // Min-heap of queued CG indices by (weight, index).
+  u32  *heap;
+  u32   heap_n;
+  // Processed list in park order (watermarks non-decreasing), swept
+  // by the backward rule cursor.
+  u32  *done;
+  u32   done_n;
+  // Backward sweep cursor: next (rule, done-position) pair.
+  u32   bw_rule;
+  u32   bw_pos;
+  // FIFO lane cursor (next store index to consider for the 1-in-N pop).
+  u32   fifo;
+  // Dedup: open-addressing hash of var-canonical pairs.
+  u64  *hkey;
+  u32  *hidx;
+  u32   hcap;      // power of two
+  u32   hn;
+  u64   pops;      // statistics + FIFO-mod counter
+  u8    full;      // store cap hit: keep processing, stop enqueuing
+  u8    proved;    // latched PROVED verdict
+} AtpCgq;
+
+static u32 cgq_term_size(Term t) {
+  if (term_tag(t) != TAG_CTR) return 1u;
+  u32 n = term_ctr_n(t);
+  u32 sz = 1u;
+  for (u32 i = 0; i < n; i++) sz += cgq_term_size(term_ctr_at(t, i));
+  return sz;
+}
+
+static u32 cgq_term_max_var(Term t) {
+  if (term_tag(t) == TAG_FVR) return term_ext(t) + 1u;
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 n = term_ctr_n(t);
+  u32 m = 0u;
+  for (u32 i = 0; i < n; i++) {
+    u32 v = cgq_term_max_var(term_ctr_at(t, i));
+    if (v > m) m = v;
+  }
+  return m;
+}
+
+static u64 cgq_term_hash(Term t, u64 h) {
+  h = (h ^ ((u64)term_tag(t) << 32 ^ (u64)term_ext(t)))
+      * 0x100000001B3ull;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    h = (h ^ n) * 0x100000001B3ull;
+    for (u32 i = 0; i < n; i++) h = cgq_term_hash(term_ctr_at(t, i), h);
+  }
+  return h;
+}
+
+static AtpCgq *cgq_create(void) {
+  AtpCgq *q = (AtpCgq *)calloc(1u, sizeof(AtpCgq));
+  if (q == NULL) return NULL;
+  q->cap  = 1024u;
+  q->lhs    = (Term *)malloc((size_t)q->cap * sizeof(Term));
+  q->rhs    = (Term *)malloc((size_t)q->cap * sizeof(Term));
+  q->wm     = (u32 *)malloc((size_t)q->cap * sizeof(u32));
+  q->weight = (u32 *)malloc((size_t)q->cap * sizeof(u32));
+  q->state  = (u8 *)malloc(q->cap);
+  q->heap   = (u32 *)malloc((size_t)q->cap * sizeof(u32));
+  q->done   = (u32 *)malloc((size_t)q->cap * sizeof(u32));
+  q->hcap   = ATP_CGQ_HASH_INIT;
+  q->hkey   = (u64 *)calloc(q->hcap, sizeof(u64));
+  q->hidx   = (u32 *)malloc((size_t)q->hcap * sizeof(u32));
+  if (q->lhs == NULL || q->rhs == NULL || q->wm == NULL ||
+      q->weight == NULL || q->state == NULL || q->heap == NULL ||
+      q->done == NULL || q->hkey == NULL || q->hidx == NULL) {
+    atp_cgq_free(q);
+    return NULL;
+  }
+  return q;
+}
+
+static void atp_cgq_free(struct AtpCgq *q) {
+  if (q == NULL) return;
+  free(q->lhs); free(q->rhs); free(q->wm); free(q->weight);
+  free(q->state); free(q->heap); free(q->done);
+  free(q->hkey); free(q->hidx);
+  free(q);
+}
+
+// Heap ops: min by (weight, index).
+static u8 cgq_heap_less(const AtpCgq *q, u32 a, u32 b) {
+  if (q->weight[a] != q->weight[b]) return q->weight[a] < q->weight[b];
+  return a < b;
+}
+static void cgq_heap_push(AtpCgq *q, u32 idx) {
+  u32 i = q->heap_n++;
+  q->heap[i] = idx;
+  while (i > 0u) {
+    u32 p = (i - 1u) / 2u;
+    if (!cgq_heap_less(q, q->heap[i], q->heap[p])) break;
+    u32 t = q->heap[i]; q->heap[i] = q->heap[p]; q->heap[p] = t;
+    i = p;
+  }
+}
+static u32 cgq_heap_pop(AtpCgq *q) {
+  u32 top = q->heap[0];
+  q->heap[0] = q->heap[--q->heap_n];
+  u32 i = 0u;
+  for (;;) {
+    u32 l = 2u * i + 1u, r = l + 1u, m = i;
+    if (l < q->heap_n && cgq_heap_less(q, q->heap[l], q->heap[m])) m = l;
+    if (r < q->heap_n && cgq_heap_less(q, q->heap[r], q->heap[m])) m = r;
+    if (m == i) break;
+    u32 t = q->heap[i]; q->heap[i] = q->heap[m]; q->heap[m] = t;
+    i = m;
+  }
+  return top;
+}
+
+// Dedup probe: 1 if the var-canonical pair (l, r) is new (and record
+// it under store index idx), 0 if an equal pair is already present.
+static u8 cgq_seen_add(AtpCgq *q, Term l, Term r, u32 idx) {
+  if (q->hn * 2u >= q->hcap) {   // grow at 50% load
+    u32 ncap = q->hcap * 2u;
+    u64 *nk = (u64 *)calloc(ncap, sizeof(u64));
+    u32 *ni = (u32 *)malloc((size_t)ncap * sizeof(u32));
+    if (nk == NULL || ni == NULL) { free(nk); free(ni); return 0u; }
+    for (u32 i = 0; i < q->hcap; i++) {
+      if (q->hkey[i] == 0ull) continue;
+      u32 s2 = (u32)q->hkey[i] & (ncap - 1u);
+      while (nk[s2] != 0ull) s2 = (s2 + 1u) & (ncap - 1u);
+      nk[s2] = q->hkey[i];
+      ni[s2] = q->hidx[i];
+    }
+    free(q->hkey); free(q->hidx);
+    q->hkey = nk; q->hidx = ni; q->hcap = ncap;
+  }
+  u64 h = cgq_term_hash(r, cgq_term_hash(l, 0xCBF29CE484222325ull));
+  if (h == 0ull) h = 1ull;   // 0 marks an empty slot
+  u32 s2 = (u32)h & (q->hcap - 1u);
+  while (q->hkey[s2] != 0ull) {
+    if (q->hkey[s2] == h) {
+      u32 j = q->hidx[s2];
+      if (kbo_eq(q->lhs[j], l) && kbo_eq(q->rhs[j], r)) return 0u;
+    }
+    s2 = (s2 + 1u) & (q->hcap - 1u);
+  }
+  q->hkey[s2] = h;
+  q->hidx[s2] = idx;
+  q->hn++;
+  return 1u;
+}
+
+// Normalize + canonicalize + dedup + close-check + enqueue one derived
+// CG.  Returns ATP_PROVED when the pair's sides unify (equality
+// resolution), ATP_RUNNING otherwise.
+static AtpStatus cgq_admit(AtpState *s, AtpCgq *q, Term l, Term r) {
+  // R-normalize both sides (equational consequences only: sound).
+  l = atp_rewrite_normalize(s, l, s->lhs, s->rhs, s->n_rules,
+                            ATP_GOAL_NORM_CAP);
+  r = atp_rewrite_normalize(s, r, s->lhs, s->rhs, s->n_rules,
+                            ATP_GOAL_NORM_CAP);
+  // Close: the two sides unify -> an instance is a syntactic identity.
+  {
+    RewriteSubst mg = {{0}};
+    if (thvm_unify(l, r, &mg)) {
+      s->goal_lhs = thvm_unify_apply(l, &mg);
+      s->goal_rhs = thvm_unify_apply(r, &mg);
+      q->proved = 1u;
+      return ATP_PROVED;
+    }
+  }
+  if (q->full) return ATP_RUNNING;
+  thvm_normalize_vars(&l, &r);
+  // Guards: size cap; var ids must stay below CP_RENAME_OFFSET so the
+  // per-step rename-apart never crosses the REWRITE_MAX_VAR cliff.
+  u32 w = cgq_term_size(l) + cgq_term_size(r);
+  if (w > ATP_CGQ_MAX_SIZE) return ATP_RUNNING;
+  u32 mv = cgq_term_max_var(l);
+  u32 mv2 = cgq_term_max_var(r);
+  if (mv2 > mv) mv = mv2;
+  if (mv >= CP_RENAME_OFFSET) return ATP_RUNNING;
+  if (q->n == q->cap) {
+    u32 ncap = q->cap * 2u;
+    Term *nl = (Term *)realloc(q->lhs, (size_t)ncap * sizeof(Term));
+    Term *nr = (Term *)realloc(q->rhs, (size_t)ncap * sizeof(Term));
+    u32 *nw  = (u32 *)realloc(q->wm, (size_t)ncap * sizeof(u32));
+    u32 *nwt = (u32 *)realloc(q->weight, (size_t)ncap * sizeof(u32));
+    u8  *ns  = (u8 *)realloc(q->state, ncap);
+    u32 *nh  = (u32 *)realloc(q->heap, (size_t)ncap * sizeof(u32));
+    u32 *nd  = (u32 *)realloc(q->done, (size_t)ncap * sizeof(u32));
+    if (nl) q->lhs = nl;
+    if (nr) q->rhs = nr;
+    if (nw) q->wm = nw;
+    if (nwt) q->weight = nwt;
+    if (ns) q->state = ns;
+    if (nh) q->heap = nh;
+    if (nd) q->done = nd;
+    if (!nl || !nr || !nw || !nwt || !ns || !nh || !nd) {
+      q->full = 1u;
+      return ATP_RUNNING;
+    }
+    q->cap = ncap;
+  }
+  if (!cgq_seen_add(q, l, r, q->n)) return ATP_RUNNING;   // duplicate
+  u32 idx = q->n++;
+  q->lhs[idx] = l;
+  q->rhs[idx] = r;
+  q->wm[idx] = 0u;
+  q->weight[idx] = w;
+  q->state[idx] = 0u;
+  cgq_heap_push(q, idx);
+  if (q->n >= ATP_CGQ_MAX_CGS) q->full = 1u;
+  return ATP_RUNNING;
+}
+
+// One CG x one rule face: try every non-var position of both sides.
+// `face_l -> face_r` is the narrowing direction (face_l already
+// renamed apart); `face_oriented` = 1 when the face is an oriented
+// rule's LHS (its instances are always maximal, so the ordered-
+// paramodulation gate below is free).  Charges one budget unit per
+// unification attempt.
+//
+// Ordered-narrowing restrictions (GKC prohibit_unordered_para /
+// standard superposition-into-goal):
+//   (a) skip the CG side that is strictly KBO-smaller than its
+//       partner -- superposition rewrites only maximal sides;
+//   (b) skip a narrow whose USED face instance is strictly smaller
+//       than its partner face instance -- paramodulation only FROM a
+//       maximal side.
+// Both preserve refutational completeness of ordered narrowing and
+// cut the branching the unordered walk drowns in.
+static AtpStatus cgq_narrow_face(AtpState *s, AtpCgq *q, u32 idx,
+                                 Term face_l, Term face_r,
+                                 u8 face_oriented, u32 *budget) {
+  for (u32 side = 0u; side < 2u; side++) {
+    Term me    = side == 0u ? q->lhs[idx] : q->rhs[idx];
+    Term other = side == 0u ? q->rhs[idx] : q->lhs[idx];
+    if (atp_compare(s, me, other) == KBO_LT) continue;   // (a)
+    // Iterative preorder over positions (the cp_walk_positions walker
+    // is callback-based; an explicit stack keeps this loop flat and
+    // lets a budget exhaust return cleanly mid-walk).
+    typedef struct { Term t; u32 next; } CgqFrame;
+    CgqFrame st[CP_MAX_DEPTH];
+    u32 sp = 0u;
+    st[0].t = me; st[0].next = 0u;
+    for (;;) {
+      Term sub = st[sp].t;
+      if (st[sp].next == 0u && term_tag(sub) == TAG_CTR) {
+        if (*budget == 0u) return ATP_RUNNING;
+        (*budget)--;
+        RewriteSubst mg = {{0}};
+        if (thvm_unify(sub, face_l, &mg)) {
+          // (b) ordered-paramodulation gate on the face instance.
+          u8 ok = 1u;
+          if (!face_oriented) {
+            Term fl = thvm_unify_apply(face_l, &mg);
+            Term fr = thvm_unify_apply(face_r, &mg);
+            if (atp_compare(s, fl, fr) == KBO_LT) ok = 0u;
+          }
+          if (ok) {
+            // Rebuild `me` with the subterm replaced, bottom-up along
+            // the stack spine, then instantiate both sides.
+            Term repl = face_r;
+            for (u32 d = sp; d > 0u; d--) {
+              Term parent = st[d - 1u].t;
+              u32 n = term_ctr_n(parent);
+              if (n > REWRITE_MAX_ARITY) { ok = 0u; break; }
+              Term kids[REWRITE_MAX_ARITY];
+              for (u32 i = 0; i < n; i++) kids[i] = term_ctr_at(parent, i);
+              kids[st[d - 1u].next - 1u] = repl;
+              repl = term_new_ctr(term_ext(parent), kids, n);
+            }
+            if (ok) {
+              Term nl = thvm_unify_apply(repl, &mg);
+              Term nr = thvm_unify_apply(other, &mg);
+              if (cgq_admit(s, q, side == 0u ? nl : nr,
+                            side == 0u ? nr : nl) == ATP_PROVED)
+                return ATP_PROVED;
+            }
+          }
+        }
+      }
+      // Advance: descend into the next child, else pop.
+      if (term_tag(sub) == TAG_CTR && st[sp].next < term_ctr_n(sub)
+          && sp + 1u < CP_MAX_DEPTH) {
+        Term child = term_ctr_at(sub, st[sp].next);
+        st[sp].next++;
+        sp++;
+        st[sp].t = child;
+        st[sp].next = 0u;
+      } else if (sp > 0u) {
+        sp--;
+      } else {
+        break;
+      }
+    }
+  }
+  return ATP_RUNNING;
+}
+
+// One CG x rule k, both admissible faces.
+static AtpStatus cgq_narrow_rule(AtpState *s, AtpCgq *q, u32 idx,
+                                 u32 k, u32 *budget) {
+  if (s->lhs[k] == 0) return ATP_RUNNING;   // deleted rule slot
+  u8 oriented = (u8)(s->r_orient != NULL && s->r_orient[k]);
+  Term lj = thvm_rename_vars(s->lhs[k], CP_RENAME_OFFSET);
+  Term rj = thvm_rename_vars(s->rhs[k], CP_RENAME_OFFSET);
+  if (cgq_narrow_face(s, q, idx, lj, rj, oriented, budget) == ATP_PROVED)
+    return ATP_PROVED;
+  if (!oriented) {
+    // Unorientable equation: the reversed face narrows too (COL011-1's
+    // opening step is o_definition's RHS face).
+    if (cgq_narrow_face(s, q, idx, rj, lj, 0u, budget) == ATP_PROVED)
+      return ATP_PROVED;
+  }
+  return ATP_RUNNING;
+}
+
+static AtpStatus atp_cgq_check(AtpState *s) {
+  AtpCgq *q = (AtpCgq *)s->cgq;
+  if (q == NULL) {
+    q = cgq_create();
+    if (q == NULL) return ATP_RUNNING;
+    s->cgq = (struct AtpCgq *)q;
+    // Seed CG0 = the original goal pair (kept immutable in the goal
+    // slots -- unlike the greedy lane, the queue never rewrites them).
+    if (cgq_admit(s, q, s->goal_lhs, s->goal_rhs) == ATP_PROVED)
+      return ATP_PROVED;
+  }
+  if (q->proved) return ATP_PROVED;
+
+  // THVM_ATP_CGQ_DEBUG: periodic lane telemetry on stderr.
+  { static int dl = -1; static u64 last = 0; static u64 calls = 0;
+    if (dl < 0) dl = (getenv("THVM_ATP_CGQ_DEBUG") != NULL) ? 1 : 0;
+    calls++;
+    if (dl && (last == 0u || q->pops - last >= 1024u ||
+               calls % 4096u == 0u)) {
+      last = q->pops ? q->pops : 1u;
+      fprintf(stderr, "[cgq] calls=%llu pops=%llu cgs=%u heap=%u "
+                      "done=%u bw_rule=%u/%u top_w=%u full=%u\n",
+              (unsigned long long)calls,
+              (unsigned long long)q->pops, q->n, q->heap_n, q->done_n,
+              q->bw_rule, s->n_rules,
+              q->heap_n > 0u ? q->weight[q->heap[0]] : 0u, q->full);
+    }
+  }
+
+  u32 budget = ATP_CGQ_BUDGET;
+
+  // (1) Backward sweep FIRST, on a reserved half of the budget: rules
+  // the parked CGs have not seen narrow into them incrementally
+  // (RueckwartigeUeberlappung).  This is the lane's lemma route --
+  // GKC's COL011-1 refutation narrows the ORIGINAL goal with a
+  // derived two-sided lemma (its clause 4), i.e. exactly parked-CG0 x
+  // late-rule -- and a pops-first ordering starves it (measured stuck
+  // at bw_rule=2/431: pops always exhaust the budget).  done[] is in
+  // park order, watermarks non-decreasing: for rule bw_rule the
+  // eligible CGs are the prefix with wm <= bw_rule; the cursor pair
+  // resumes across calls.
+  {
+    u32 bw_budget = ATP_CGQ_BUDGET / 2u;
+    while (bw_budget > 0u && q->bw_rule < s->n_rules) {
+      if (q->bw_pos >= q->done_n) { q->bw_rule++; q->bw_pos = 0u; continue; }
+      u32 idx = q->done[q->bw_pos];
+      if (q->wm[idx] > q->bw_rule) {
+        // This CG (and every later parked one) already covers bw_rule.
+        q->bw_rule++;
+        q->bw_pos = 0u;
+        continue;
+      }
+      if (cgq_narrow_rule(s, q, idx, q->bw_rule, &bw_budget) == ATP_PROVED)
+        return ATP_PROVED;
+      if (bw_budget == 0u) break;   // resume this (rule, pos) next call
+      q->bw_pos++;
+    }
+    budget -= ATP_CGQ_BUDGET / 2u - bw_budget;
+  }
+
+  // (2) Best-first pops: narrow the lightest queued CG against rule
+  // faces [wm, n_rules); a CG that exhausts the budget mid-sweep goes
+  // back on the heap with its watermark advanced.
+  while (budget > 0u && q->heap_n > 0u) {
+    u32 idx;
+    q->pops++;
+    if (q->pops % ATP_CGQ_FIFO_MOD == 0u) {
+      // FIFO lane: oldest still-queued CG (GKC weight_select_ratio).
+      while (q->fifo < q->n && q->state[q->fifo] != 0u) q->fifo++;
+      if (q->fifo < q->n) {
+        idx = q->fifo;
+        // Leave it in the heap; mark processed only when complete.
+      } else {
+        idx = q->heap[0];
+      }
+    } else {
+      idx = q->heap[0];
+    }
+    u32 before = q->wm[idx];
+    while (q->wm[idx] < s->n_rules && budget > 0u) {
+      u32 k = q->wm[idx];
+      if (cgq_narrow_rule(s, q, idx, k, &budget) == ATP_PROVED)
+        return ATP_PROVED;
+      if (budget == 0u &&
+          q->wm[idx] == k) break;      // suspended mid-rule: retry k
+      q->wm[idx] = k + 1u;
+    }
+    if (q->wm[idx] >= s->n_rules) {
+      // Fully swept: park it.
+      q->state[idx] = 1u;
+      if (idx == q->heap[0]) (void)cgq_heap_pop(q);
+      else {
+        // FIFO pick that wasn't the heap top: lazily skipped when it
+        // surfaces (state==1 check below).
+      }
+      q->done[q->done_n++] = idx;
+    }
+    // Drop already-parked entries that surface at the heap top (lazy
+    // deletion for FIFO picks).
+    while (q->heap_n > 0u && q->state[q->heap[0]] != 0u)
+      (void)cgq_heap_pop(q);
+    if (before == q->wm[idx] && budget == 0u) break;   // no progress
+  }
+
+  return ATP_RUNNING;
+}
+
+// GC rooting (see thvm_atp_gc_collect): the CG store's Terms are the
+// lane's only live heap references.  The dedup hash keys are
+// STRUCTURAL (content over tags/labels/arity), so relocated cells
+// keep their hashes and stay in their buckets -- no table fixup.
+static u32 cgq_gc_count(struct AtpCgq *q) {
+  return q == NULL ? 0u : 2u * q->n;
+}
+static void cgq_gc_gather(struct AtpCgq *q, Term *roots, u32 *w) {
+  if (q == NULL) return;
+  for (u32 i = 0; i < q->n; i++) {
+    roots[(*w)++] = q->lhs[i];
+    roots[(*w)++] = q->rhs[i];
+  }
+}
+static void cgq_gc_writeback(struct AtpCgq *q, const Term *roots,
+                             u32 base) {
+  if (q == NULL) return;
+  for (u32 i = 0; i < q->n; i++) {
+    q->lhs[i] = roots[base + 2u * i];
+    q->rhs[i] = roots[base + 2u * i + 1u];
+  }
+}
+
+fn void thvm_atp_set_use_narrow_queue(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_narrow_queue = on ? 1u : 0u;
 }

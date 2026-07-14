@@ -4935,6 +4935,21 @@ typedef struct {
   struct AtpGoalNarrow *gnarrow;
   u8 use_goal_narrow;
 
+  // NARROW-QUEUE: critical-goal best-first existential narrowing (the
+  // WM PM_Existenzziele / GKC query_preference=1 lane; section at the
+  // end of src/atp/_.c).  A store of narrowed goal variants
+  // ("critical goals") selected lightest-first, each narrowed against
+  // every rule face (unorientable equations contribute BOTH faces),
+  // with new rules sweeping the already-processed set incrementally
+  // (WM RueckwartigeUeberlappung); a CG whose two sides UNIFY closes
+  // the conjecture.  Replaces the greedy destructive walk in
+  // goal_check's existential branch when armed.  Created lazily on
+  // the first gated existential goal_check; env THVM_ATP_NARROW_QUEUE
+  // / CLI --narrow-queue / thvm_atp_set_use_narrow_queue.  Default
+  // OFF: byte-identical trajectories.
+  struct AtpCgq *cgq;
+  u8 use_narrow_queue;
+
   // Waldmeister-faithful RHS interreduction (IR_InterreduktionRechts /
   // RMRechtsInterred, INF/Interreduktion.c:329-360) in the -irrp CLI
   // default mode FALSE = "modify rule" (RUN/Parameter.c:334-343).  When
@@ -6549,6 +6564,7 @@ fn void      thvm_atp_set_wpo     (AtpState *s, const WpoConfig *wpo);
 // on completion-only goals.
 fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
 fn void      thvm_atp_set_use_goal_narrow(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_narrow_queue(AtpState *s, u8 on);
 // Opt in to the flatterm fast-path for the mixed normalize loop (no
 // effect unless the dylib is built with ATP_RULE_INDEX).  Same normal
 // forms as the default tree mixed loop; a per-step speedup on rule sets
