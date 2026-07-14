@@ -3887,6 +3887,11 @@ typedef struct {
 
 fn FolClause *fol_clause_new (u32 n_lits);
 fn void       fol_clause_free(FolClause *c);
+// Renumber the clause's variables to a dense [0, k), all literals
+// sharing one numbering.  Alpha-renaming; keeps stored ids clear of
+// the REWRITE_MAX_VAR matcher cliff after repeated rename-apart
+// inferences.
+fn void       fol_clause_canon_vars(FolClause *c);
 fn u8         fol_clause_eq  (const FolClause *a, const FolClause *b);
 fn u8         fol_clause_is_empty(const FolClause *c);
 fn FolClause *fol_resolve    (const FolClause *c1, u32 i,
@@ -3933,6 +3938,17 @@ fn u8         fol_atom_is_eq(Term atom);
 // they can't be bound by the matcher.  Worst-case |c1|! backtracking
 // match; bounded by FOL_MAX_LITS = 64.
 fn u8         fol_subsumes(const FolClause *c1, const FolClause *c2);
+// Subsumption against pre-frozen target literals (vars already
+// renamed apart); freeze once via fol_freeze_lits and test many
+// patterns without re-renaming.
+fn u8         fol_subsumes_frozen(const FolClause *c1,
+                                  const FolLit *frozen, u32 n2);
+fn u8         fol_subsumes_frozen_nv(const FolClause *c1,
+                                     const FolLit *frozen, u32 n2, u32 nvars);
+fn void       fol_freeze_lits(const FolClause *c, FolLit *out);
+// Max variable id + 1 across the clause (== distinct-var count for
+// canon clauses); the snapshot width for subsumption backtracking.
+fn u32        fol_clause_nvars(const FolClause *c);
 
 // Tautology check: a clause is a tautology iff
 //   (a) it contains both ±A for some atom A, or
@@ -4108,7 +4124,56 @@ typedef struct {
   u32        *passive;
   u32         n_passive;
   u32         cap_passive;
-  u32         passive_head;   // FIFO dequeue index
+  u32         passive_head;   // FIFO (age-lane) dequeue index
+  // Pick-best given-clause selection: a binary min-heap of passive
+  // clause ids keyed by (symbol-count weight, id).  The append-only
+  // passive[] log doubles as the age lane -- every age_ratio-th pick
+  // takes the oldest surviving passive clause instead (fairness /
+  // completeness).  A clause picked from either lane is stamped in
+  // cpicked[] and skipped lazily by the other.
+  u32        *pheap;
+  u32         n_pheap;
+  u32         cap_pheap;
+  u32        *cweight;        // per-clause symbol-count weight (parallel to clauses)
+  u32        *cpri;           // pick-best heap key: weight, plus a large
+                              // penalty for clauses with NO conjecture
+                              // ancestry -- goal descendants always pop
+                              // first (their cone is small; the FIFO age
+                              // lane keeps everything else fair)
+  u64        *cmask;          // per-clause (root label, sign) bloom mask --
+                              // subsumption prefilter: a can subsume c only
+                              // if cmask[a] & ~cmask[c] == 0
+  u8         *cpicked;        // 1 once taken as the given clause
+  // Per-clause inference-eligibility cache (lazy; invalidated by the
+  // cnf_set_* config calls): selected literal index (or ~0u) and the
+  // bitmask of ordering-maximal literals.  Both are static per clause
+  // for a fixed ordering + selection config, so the O(lits^2) KBO
+  // scan runs once per clause instead of once per candidate pair.
+  u32        *csel;
+  u64        *cmaxlits;
+  u8         *celig_valid;
+  // Goal-direction: 1 when the clause descends from a conjecture
+  // (negated-conjecture inputs marked by the caller; inference
+  // conclusions inherit from either parent).  Goal-related clauses
+  // get a pick-best weight bonus -- the coarse analog of E's
+  // conjecture-symbol weighting.
+  u8         *cgoal;
+  // Frozen (rename-apart) literal copies, built once at store time --
+  // the reusable TARGET side of subsumption.  malloc'd FolLit arrays,
+  // freed by cnf_free.
+  FolLit    **cfrozen;
+  // Per-clause variable-slot count (fol_clause_nvars), the snapshot
+  // width for subsumption backtracking.
+  u32        *cnvars;
+  u32         pick_count;
+  u32         age_ratio;      // K: every K-th pick is FIFO (1 = pure FIFO,
+                              // 0 = pure best-first); THVM_FOL_AGE_RATIO
+  // Active unit positive equalities (the demod rule list): ids append
+  // when such a clause moves to active; slots NULLed by backward
+  // subsumption are skipped lazily.
+  u32        *ueq;
+  u32         n_ueq;
+  u32         cap_ueq;
   // Deferred-free queue for backward subsumption: when a derived
   // clause subsumes an older one, the slot in clauses[] is NULLed
   // immediately but the FolClause* gets pushed here and freed at
@@ -4144,6 +4209,9 @@ typedef struct {
 fn CnfState *cnf_init        (u32 step_cap);
 fn void      cnf_free        (CnfState *s);
 fn i32       cnf_add_clause  (CnfState *s, FolClause *c);  // takes ownership
+// As cnf_add_clause, additionally marking the input goal-related
+// (conjecture-descended) for the pick-best weight bonus.
+fn i32       cnf_add_clause_goal(CnfState *s, FolClause *c, u8 goal_related);
 fn AtpStatus cnf_step        (CnfState *s);
 fn AtpStatus cnf_run         (CnfState *s);
 

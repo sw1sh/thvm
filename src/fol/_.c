@@ -69,6 +69,31 @@ static Term fol_rename_term(Term t, u32 offset) {
   return thvm_rename_vars(t, offset);
 }
 
+// Canonically renumber a clause's variables to a dense [0, k), all
+// literals SHARING one numbering (a variable spanning literals stays
+// one variable).  Alpha-renaming via the same nv_rewrite walk the
+// equational layer uses (src/unify/_.c).
+//
+// Every binary inference renames its second premise's variables up
+// by FOL_RENAME_OFFSET; unbound renamed variables SURVIVE into the
+// conclusion.  Without canonization a stored clause carries ids in
+// [OFFSET, 2*OFFSET), the NEXT inference renames those past
+// REWRITE_MAX_VAR where the matcher treats them as unmatchable
+// constants -- and unification against an id that happens to equal a
+// freshly-renamed premise variable CAPTURES it.  Both silently lose
+// inferences the calculus needs (PUZ001+1 spuriously saturated).
+// Canonizing every clause at store time keeps all ids far below the
+// cliff and makes alpha-equivalent clauses byte-comparable for
+// subsumption.
+fn void fol_clause_canon_vars(FolClause *c) {
+  if (c == NULL) return;
+  NvMap m;
+  m.n = 0;
+  for (u32 i = 0; i < c->n_lits; i++) {
+    c->lits[i].atom = nv_rewrite(c->lits[i].atom, &m);
+  }
+}
+
 // Binary resolution:
 //   Given clauses C1 and C2 with literals L_i in C1 and L_j in C2 of
 //   opposite signs, and atoms that unify with mgu σ, the resolvent is
@@ -247,26 +272,94 @@ fn FolClause *fol_paramodulate(const FolClause *eq_clause, u32 eq_idx,
 // Complexity is |C1|! worst case; bounded by FOL_MAX_LITS = 64 but
 // in practice clauses subsumed in saturation are small.
 
+// `nvars` = number of binding slots the PATTERN can touch (its max
+// variable id + 1; canon clauses have dense ids).  Snapshot/restore
+// only that prefix -- a full RewriteSubst copy per literal trial is
+// 512 bytes, and ground patterns (fact-heavy problems) need no copy
+// at all.
 static u8 fol_subsume_rec(const FolClause *c1, u32 c1_idx,
                           const FolLit *c2_lits, u32 n2,
                           u8 *used,
-                          RewriteSubst *subst) {
+                          RewriteSubst *subst, u32 nvars) {
   if (c1_idx >= c1->n_lits) return 1u;
   const FolLit *l1 = &c1->lits[c1_idx];
   for (u32 j = 0; j < n2; j++) {
     if (used[j]) continue;
     if (c2_lits[j].sign != l1->sign) continue;
-    RewriteSubst snap = *subst;
+    Term snap[REWRITE_MAX_VAR];
+    if (nvars > 0u) memcpy(snap, subst->bindings, nvars * sizeof(Term));
     if (thvm_match(l1->atom, c2_lits[j].atom, subst)) {
       used[j] = 1u;
-      if (fol_subsume_rec(c1, c1_idx + 1u, c2_lits, n2, used, subst)) {
+      if (fol_subsume_rec(c1, c1_idx + 1u, c2_lits, n2, used, subst, nvars)) {
         return 1u;
       }
       used[j] = 0u;
     }
-    *subst = snap;
+    if (nvars > 0u) memcpy(subst->bindings, snap, nvars * sizeof(Term));
   }
   return 0u;
+}
+
+// Max variable id + 1 across the clause (clamped to REWRITE_MAX_VAR).
+// Canon clauses have dense ids, so this equals the distinct-variable
+// count.
+static u32 fol_term_nvars(Term t) {
+  if (term_tag(t) == TAG_FVR) {
+    u32 id = term_ext(t);
+    return (id >= REWRITE_MAX_VAR) ? REWRITE_MAX_VAR : id + 1u;
+  }
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 m = 0u;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) {
+    u32 v = fol_term_nvars(term_ctr_at(t, i));
+    if (v > m) m = v;
+  }
+  return m;
+}
+
+fn u32 fol_clause_nvars(const FolClause *c) {
+  if (c == NULL) return 0u;
+  u32 m = 0u;
+  for (u32 i = 0; i < c->n_lits; i++) {
+    u32 v = fol_term_nvars(c->lits[i].atom);
+    if (v > m) m = v;
+  }
+  return m;
+}
+
+// Core entry against PRE-FROZEN target literals (variables already
+// renamed apart so the matcher can't bind them).  Callers that test
+// one target against MANY patterns freeze once and reuse -- the
+// per-call rename otherwise dominates saturation profiles.
+// `nvars` variant: caller supplies the pattern's variable-slot count
+// (fol_clause_nvars, cacheable per stored clause).
+fn u8 fol_subsumes_frozen_nv(const FolClause *c1, const FolLit *frozen,
+                             u32 n2, u32 nvars) {
+  if (c1 == NULL || frozen == NULL) return 0u;
+  if (c1->n_lits > n2) return 0u;
+  if (c1->n_lits == 0u) return 1u;   // empty subsumes everything
+  if (n2 > FOL_MAX_LITS) return 0u;
+  u8 used[FOL_MAX_LITS] = {0};
+  RewriteSubst subst;
+  if (nvars > REWRITE_MAX_VAR) nvars = REWRITE_MAX_VAR;
+  if (nvars > 0u) memset(subst.bindings, 0, nvars * sizeof(Term));
+  return fol_subsume_rec(c1, 0u, frozen, n2, used, &subst, nvars);
+}
+
+fn u8 fol_subsumes_frozen(const FolClause *c1, const FolLit *frozen, u32 n2) {
+  if (c1 == NULL) return 0u;
+  return fol_subsumes_frozen_nv(c1, frozen, n2, fol_clause_nvars(c1));
+}
+
+// Freeze `c`'s literals into `out` (size >= c->n_lits): variables
+// renamed apart by FOL_RENAME_OFFSET so a matcher treats them as
+// constants.
+fn void fol_freeze_lits(const FolClause *c, FolLit *out) {
+  for (u32 k = 0; k < c->n_lits; k++) {
+    out[k].atom = thvm_rename_vars(c->lits[k].atom, FOL_RENAME_OFFSET);
+    out[k].sign = c->lits[k].sign;
+  }
 }
 
 fn u8 fol_subsumes(const FolClause *c1, const FolClause *c2) {
@@ -277,13 +370,8 @@ fn u8 fol_subsumes(const FolClause *c1, const FolClause *c2) {
 
   // Rename C2's variables apart so the matcher can't bind them.
   FolLit renamed[FOL_MAX_LITS];
-  for (u32 k = 0; k < c2->n_lits; k++) {
-    renamed[k].atom = thvm_rename_vars(c2->lits[k].atom, FOL_RENAME_OFFSET);
-    renamed[k].sign = c2->lits[k].sign;
-  }
-  u8 used[FOL_MAX_LITS] = {0};
-  RewriteSubst subst = {{0}};
-  return fol_subsume_rec(c1, 0u, renamed, c2->n_lits, used, &subst);
+  fol_freeze_lits(c2, renamed);
+  return fol_subsumes_frozen(c1, renamed, c2->n_lits);
 }
 
 // Tautology check: a clause is a tautology iff it contains both a
