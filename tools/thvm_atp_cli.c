@@ -160,6 +160,10 @@ static const AtpKnob KNOBS[] = {
   {"fof-or",                 "THVM_ATP_FOF_OR",          1, "(non-Horn or/eq lane: 0 restores the Horn-only give-up, 2 eq-reifies predicate atoms too)"},
   {"fof-distrib",            "THVM_ATP_FOF_DISTRIB",     1, "(per-record CNF distribution bound; past it the record clausifies via Tseitin)"},
   {"fof-sat",                "THVM_ATP_FOF_SAT",         1, "(non-Horn clausal-saturation pre-pass step budget; 0 disables)"},
+  {"fof-sine",               "THVM_ATP_FOF_SINE",        1, "(clausal pre-pass SInE cone above N clausified clauses; 0 off, 1 = default threshold 512, N>1 = threshold N)"},
+  {"fof-slice",              "THVM_ATP_FOF_SLICE",       1, "(FOF-portfolio slice gate: 2 = give up unless the input carries a fof() record)"},
+  {"fol-age-ratio",          "THVM_FOL_AGE_RATIO",       1, "(clausal pre-pass pick-given interleave: every Nth pick FIFO; 1 pure FIFO, 0 pure best-first, default 5)"},
+  {"fol-goal-tier",          "THVM_FOL_GOAL_TIER",       1, "(clausal pre-pass goal tier: 0 drops the non-conjecture-ancestry pick-best penalty)"},
   {"canon-input",            "THVM_ATP_CANON_INPUT",     1, "(canonical input presentation: greater side left + sorted clauses; 0 disables)"},
   {"horn",                   "THVM_ATP_HORN",            1, "(encoded-Horn release: 0 disables)"},
   {"horn-ratio",             "THVM_ATP_HORN_RATIO",      1, "(Horn pick-given size:age ratio, 0..4)"},
@@ -850,7 +854,46 @@ static void tp_sine_select(TpProblem *tp) {
     tp->n_cls = kept;
     n0 = kept;
   }
-  tp_giveup("axiom selection cannot fit the engine caps");
+  // Even the tightest ladder rung is over the cap (the AGT-class agent
+  // KBs hold a goal cone wider than the engine's equation capacity:
+  // 26 of 29 schedule lanes died HERE on AGT011+2, spending the whole
+  // wall on nothing).  Truncate deterministically instead of dying:
+  // negatives + conjecture units all stay, then the kept axioms in
+  // selection order up to the cap.  A subset is sound for Theorem;
+  // saturation already reports GaveUp under g_cli_sine_applied.
+  {
+    int n = tp->n_cls;
+    int w = 0, n_ax = 0, ax_cap = (int)PR_MAX_EQNS;
+    for (int pass = 0; pass < 2; pass++)
+      for (int c = 0; c < n; c++) {
+        int is_goal = tp->cls[c].neg || tp->cls[c].conj;
+        if ((pass == 0) != (is_goal != 0)) continue;
+        if (pass == 1 && n_ax >= ax_cap) continue;
+        if (pass == 1) n_ax++;
+        else if (!tp->cls[c].neg) ax_cap--;   // positive conjecture units
+                                              // count against the eqn cap
+        if (w != c) {
+          TpClause tmp = tp->cls[w];
+          tp->cls[w] = tp->cls[c];
+          if (pass == 0) tp->cls[c] = tmp;   // pass 1 discards, no swap-back
+        }
+        w++;
+      }
+    int n_neg = 0;
+    for (int i = 0; i < w; i++) n_neg += tp->cls[i].neg;
+    if ((w - n_neg) > (int)PR_MAX_EQNS)
+      tp_giveup("axiom selection cannot fit the engine caps");
+    tp->n_cls = w;
+    tp_syms_reset(tp);
+    for (int i = 0; i < w; i++) {
+      tp_scan_term(tp, tp->cls[i].lhs);
+      tp_scan_term(tp, tp->cls[i].rhs);
+    }
+    fprintf(stderr, "FindProof: SInE over cap at every tolerance; "
+            "truncated to %d/%d clauses\n", w, n);
+    if (dump != NULL && dump[0] != '\0') tp_sine_dump(tp, dump, w);
+    g_cli_sine_applied = 1;
+  }
 }
 
 // ===================================================================
@@ -4790,6 +4833,17 @@ static int tp_needs_clausal(const char *text) {
   return 0;
 }
 
+// A genuine fof( record (word-boundary) in the raw problem text: the
+// --fof-slice=2 exit-fast probe.  Same detection as tp_needs_clausal's
+// fof( branch, but on the UNpreprocessed text so the schedule's FOF
+// slices can free their pool slot before any include resolution or
+// front-end work (the tp_has_ifeq_dispatcher cheap-probe shape).
+static int tp_input_is_fof(const char *text) {
+  for (const char *p = text; (p = strstr(p, "fof(")) != NULL; p += 4)
+    if (p == text || !(isalnum((unsigned char)p[-1]) || p[-1] == '_')) return 1;
+  return 0;
+}
+
 // --- fresh symbol names against the pc_intern table ------------------
 static char g_fof_true_name[TP_NAME_LEN]  = "true";
 static char g_fof_false_name[TP_NAME_LEN] = "false";
@@ -4834,9 +4888,28 @@ typedef struct {
   int n;
 } FofVarScope;
 
+// Oversize discipline: inside the axiom-side emitters
+// (g_fof_soft_oversize) an encoding that overflows the serializer
+// buffer or the .pr side bound DROPS that clause instead of giving up
+// the run.  Dropping an input clause only shrinks the set -- a subset
+// refutation is still a refutation, and the FOF path never reports
+// Satisfiable -- so the cost is completeness the run never had, where
+// the hard give-up cost the WHOLE problem (the Mizar SET007 families
+// carry a handful of giant definition clauses whose ifeq towers blow
+// the 2048-char side bound; every slice died on the first one).  The
+// goal-side pushes (direct goal, or-lane helpers, dispatcher) keep
+// the hard give-up: an unrepresentable goal has no honest Theorem.
+static int g_fof_soft_oversize = 0;   // 1 inside axiom-side emitters
+static int g_fof_ser_overflow  = 0;   // current clause overflowed: junk
+static int g_fof_dropped_n     = 0;   // oversized clauses dropped
+
 static void fof_ser_emit(char *buf, size_t cap, size_t *o, const char *s) {
+  if (g_fof_ser_overflow) return;
   size_t l = strlen(s);
-  if (*o + l + 1 >= cap) tp_giveup("FOF-encoded clause exceeds side-length bound");
+  if (*o + l + 1 >= cap) {
+    if (g_fof_soft_oversize) { g_fof_ser_overflow = 1; return; }
+    tp_giveup("FOF-encoded clause exceeds side-length bound");
+  }
   memcpy(buf + *o, s, l + 1);
   *o += l;
 }
@@ -4920,8 +4993,15 @@ static int g_cur_prov_ix   = 0;
 
 static void tp_fof_push(TpProblem *tp, const char *lhs, const char *rhs,
                         int neg, int conj) {
-  if (strlen(lhs) >= TP_SIDE_LEN || strlen(rhs) >= TP_SIDE_LEN)
+  if (g_fof_ser_overflow ||
+      strlen(lhs) >= TP_SIDE_LEN || strlen(rhs) >= TP_SIDE_LEN) {
+    if (g_fof_soft_oversize) {   // axiom-side: drop, don't die (see
+      g_fof_ser_overflow = 0;    // fof_ser_emit's oversize discipline)
+      g_fof_dropped_n++;
+      return;
+    }
     tp_giveup("FOF-encoded clause exceeds side-length bound");
+  }
   if (tp->n_cls >= TP_MAX_CLAUSES) tp_giveup("problem exceeds clause bound");
   TpClause *cl = &tp->cls[tp->n_cls++];
   snprintf(cl->lhs, sizeof cl->lhs, "%s", lhs);
@@ -5958,6 +6038,140 @@ static u32 fof_distrib_bound(void) {
 }
 static int g_fof_tseitin_recs = 0;   // records clausified definitionally
 
+// --- clausal pre-pass SInE cone -------------------------------------------
+// Large non-Horn knowledge bases (the AGT/CSR/MED FOF families run to
+// thousands of clauses) swamp the bounded saturation before it ever
+// touches the conjecture.  This is tp_sine_pass's trigger discipline
+// (generality threshold gt=1 with the rare-cap rc=64 fresh-constant
+// fix, tolerance ladder at full trigger depth) replayed at the
+// FolClause level over the CLAUSIFIED set, so the pre-pass saturates
+// the goal-relevant cone instead of the whole KB.  gen(lab) = number
+// of clauses whose literals contain symbol label lab (predicates and
+// functions alike; the equality label and the encoding glue are hubs
+// and never trigger, exactly as SInE intends).  Conjecture-descended
+// clauses (ccnj) plus all-negative clauses (the negated-conjecture
+// shape when no role survived) seed the reached set; a clause joins
+// when some reached symbol triggers it.  Dropping clauses only
+// SHRINKS the saturation input -- a subset refutation is still a
+// refutation, and the pre-pass never reports saturation as a result,
+// so a cone miss just means giving up the pre-pass wall sooner and
+// falling through to the equational lanes (an honest GaveUp).
+// Returns a keep[] mask, or NULL for "keep everything" (off, OOM, or
+// no seed).
+enum { FSINE_CS = 48 };   // per-clause dedup'd symbol-list cap
+
+static void fof_sine_clause_syms(Term t, u32 *lst, int *n) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 lab = term_ext(t);
+  u8 seen = 0;
+  for (int k = 0; k < *n; k++)
+    if (lst[k] == lab) { seen = 1; break; }
+  if (!seen && *n < (int)FSINE_CS) lst[(*n)++] = lab;
+  u32 nn = term_ctr_n(t);
+  for (u32 i = 0; i < nn; i++) fof_sine_clause_syms(term_ctr_at(t, i), lst, n);
+}
+
+static u8 *fof_sine_cone(FolClause **cls, const u8 *ccnj, int ncl, int thr) {
+  u32 n_labels = FOL_LAB_SKOLEM_BASE + g_fol_skolem_next + 1u;
+  u32 (*csym)[FSINE_CS] = malloc((size_t)ncl * sizeof *csym);
+  int *csym_n = calloc((size_t)ncl, sizeof(int));
+  u32 *gen    = calloc((size_t)n_labels, sizeof(u32));
+  u8  *reach  = malloc((size_t)n_labels);
+  u8  *keep   = malloc((size_t)ncl);
+  u8  *seed   = calloc((size_t)ncl, 1u);
+  if (csym == NULL || csym_n == NULL || gen == NULL || reach == NULL ||
+      keep == NULL || seed == NULL) {
+    free(csym); free(csym_n); free(gen); free(reach); free(keep); free(seed);
+    return NULL;
+  }
+  int n_seed = 0;
+  for (int c = 0; c < ncl; c++) {
+    for (u32 i = 0; i < cls[c]->n_lits; i++)
+      fof_sine_clause_syms(cls[c]->lits[i].atom, csym[c], &csym_n[c]);
+    for (int k = 0; k < csym_n[c]; k++) gen[csym[c][k]]++;
+    u8 sd = ccnj[c];
+    if (!sd && cls[c]->n_lits > 0u) {
+      sd = 1u;
+      for (u32 i = 0; i < cls[c]->n_lits && sd; i++)
+        if (!cls[c]->lits[i].sign) sd = 0u;
+    }
+    seed[c] = sd;
+    n_seed += sd;
+  }
+  if (n_seed == 0) {   // nothing goal-shaped to grow from: keep everything
+    free(csym); free(csym_n); free(gen); free(reach); free(keep); free(seed);
+    return NULL;
+  }
+  // Tolerance-first ladder at full trigger depth (no rounds cuts: the
+  // pre-pass has no hard capacity cap, and depth amputation is what
+  // loses the 15+-trigger CSR-style chains).  First cone at or under
+  // the threshold wins; when even tol=1.0 stays over, the LOOSEST cone
+  // (tol=1.5) stands -- the pre-pass has no capacity cap to fit, so
+  // past the threshold the only cost of width is speed, while
+  // over-tightening PROVABLY loses refutations (CSR201's tol=1.0 cone
+  // saturates in half the wall guard: the miss is then certain for
+  // that lane, where the wider cone keeps the search alive).
+  const u32 gt = 1u, rc = 64u;
+  const double tols[3] = { 1.5, 1.2, 1.0 };
+  u8 *keep15 = NULL;   // the tol=1.5 cone, kept as the no-fit fallback
+  int kept = ncl;
+  double tol_used = tols[0];
+  for (int a = 0; a < 3; a++) {
+    double tol = tols[a];
+    memset(keep, 0, (size_t)ncl);
+    memset(reach, 0, (size_t)n_labels);
+    for (int c = 0; c < ncl; c++) {
+      if (!seed[c]) continue;
+      keep[c] = 1u;
+      for (int k = 0; k < csym_n[c]; k++) reach[csym[c][k]] = 1u;
+    }
+    for (int rd = 0; rd < 64; rd++) {
+      u8 grew = 0;
+      for (int c = 0; c < ncl; c++) {
+        if (keep[c]) continue;
+        u32 min_all = 0xffffffffu, min_ex = 0xffffffffu;
+        for (int k = 0; k < csym_n[c]; k++) {
+          u32 g = gen[csym[c][k]];
+          if (g < min_all) min_all = g;
+          if (g > gt && g < min_ex) min_ex = g;
+        }
+        u32 mingen = (min_ex <= rc) ? min_ex : min_all;
+        u8 hit = 0;
+        for (int k = 0; k < csym_n[c] && !hit; k++) {
+          u32 sy = csym[c][k];
+          if (!reach[sy]) continue;
+          if (gen[sy] <= gt || (double)gen[sy] <= tol * (double)mingen) hit = 1;
+        }
+        if (hit) {
+          keep[c] = 1u;
+          grew = 1u;
+          for (int k = 0; k < csym_n[c]; k++) reach[csym[c][k]] = 1u;
+        }
+      }
+      if (!grew) break;
+    }
+    kept = 0;
+    for (int c = 0; c < ncl; c++) kept += keep[c];
+    tol_used = tol;
+    if (kept <= thr) break;
+    if (a == 0) {
+      keep15 = malloc((size_t)ncl);
+      if (keep15 != NULL) memcpy(keep15, keep, (size_t)ncl);
+    }
+  }
+  if (kept > thr && keep15 != NULL) {   // no fit: the loosest cone stands
+    memcpy(keep, keep15, (size_t)ncl);
+    kept = 0;
+    for (int c = 0; c < ncl; c++) kept += keep[c];
+    tol_used = tols[0];
+  }
+  free(keep15);
+  fprintf(stderr, "FindProof: FOF pre-pass SInE: %d/%d clause(s) "
+          "(tol=%.2f gt=%u rc=%u)\n", kept, ncl, tol_used, gt, rc);
+  free(csym); free(csym_n); free(gen); free(reach); free(seed);
+  return keep;
+}
+
 // --- clausal-saturation pre-pass ------------------------------------------
 // Non-Horn refutations regularly need case analysis (paramodulation
 // from equality literals inside multi-literal clauses; PUZ001+1's
@@ -5977,16 +6191,9 @@ static int g_fof_tseitin_recs = 0;   // records clausified definitionally
 // `ccnj` marks conjecture-descended records: those clauses (and their
 // inference descendants, tracked inside the engine) get the pick-best
 // goal bonus.
-static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
-  u32 budget = 20000u;
-  {
-    const char *e = getenv("THVM_ATP_FOF_SAT");
-    if (e != NULL) {
-      long v = atol(e);
-      if (v <= 0) return 0;
-      budget = (u32)v;
-    }
-  }
+static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
+                                    const u8 *sine_keep, u32 budget,
+                                    AtpStatus *st_out) {
   CnfState *s = cnf_init(budget);
   if (s == NULL) return 0;
   cnf_set_select(s, CNF_SELECT_NEGATIVE);
@@ -6013,6 +6220,7 @@ static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
     cnf_set_kbo(s, &kbo);
   }
   for (int i = 0; i < ncl; i++) {
+    if (sine_keep != NULL && !sine_keep[i]) continue;   // outside the cone
     FolClause *c = fol_clause_new(cls[i]->n_lits);
     if (c == NULL) { cnf_free(s); free(id2cnf); return 0; }
     for (u32 j = 0; j < cls[i]->n_lits; j++) c->lits[j] = cls[i]->lits[j];
@@ -6069,6 +6277,7 @@ static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
   cnf_free(s);
   free(kbo_w); free(kbo_p);
   HEAP_NEXT = heap_mark;
+  if (st_out != NULL) *st_out = st;
   if (st == ATP_PROVED || st == ATP_REFUTED) {
     fprintf(stderr, "FindProof: FOF clausal pre-pass: refuted in %u "
             "step(s), %.1fs\n", steps, horn_now() - t0);
@@ -6081,6 +6290,48 @@ static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
           "(%u step(s), %u clause(s), %.1fs, %s-bounded, guard %.1fs)\n",
           steps, nstore, horn_now() - t0, tripped, wall_guard);
   return 0;
+}
+
+static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
+  u32 budget = 20000u;
+  {
+    const char *e = getenv("THVM_ATP_FOF_SAT");
+    if (e != NULL) {
+      long v = atol(e);
+      if (v <= 0) return 0;
+      budget = (u32)v;
+    }
+  }
+  // SInE cone over the clausified set (THVM_ATP_FOF_SINE): default ON
+  // above 512 clauses, =0 off, N>1 sets the threshold.  Only the
+  // pre-pass input shrinks; the equational lanes downstream still see
+  // the full clause set.
+  u8 *sine_keep = NULL;
+  {
+    const char *e = getenv("THVM_ATP_FOF_SINE");
+    long thr = 512;
+    if (e != NULL && e[0] != '\0') {
+      long v = atol(e);
+      if (v == 0) thr = -1;
+      else if (v > 1) thr = v;
+    }
+    if (thr >= 0 && ncl > thr)
+      sine_keep = fof_sine_cone(cls, ccnj, ncl, (int)thr);
+  }
+  AtpStatus st = ATP_RUNNING;
+  int r = fof_clausal_prepass_once(cls, ccnj, ncl, sine_keep, budget, &st);
+  // A SATURATED cone is a PROVEN miss for that subset (no refutation
+  // exists from it) with wall to spare -- the one outcome where more
+  // axioms are known to be the fix.  Retry once on the full set under
+  // whatever 60%-of-remaining guard is left; every other undecided
+  // outcome (steps/wall/heap) falls through as before.
+  if (r == 0 && sine_keep != NULL && st == ATP_QUEUE_EMPTY) {
+    fprintf(stderr, "FindProof: FOF pre-pass SInE cone saturated; "
+            "retrying on the full clause set\n");
+    r = fof_clausal_prepass_once(cls, ccnj, ncl, NULL, budget, &st);
+  }
+  free(sine_keep);
+  return r;
 }
 
 // --- the front-end ------------------------------------------------------
@@ -6253,6 +6504,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   int any_ifeq = 0;
   int neg_unit = 0;              // the (single) negative clause is a unit
   Term neg_unit_l = 0, neg_unit_r = 0;
+  g_fof_soft_oversize = 1;       // axiom-side: oversized encodings drop
   for (int c = 0; c < ncl; c++) {
     FolClause *cl = cls[c];
     if (fol_is_tautology(cl)) continue;
@@ -6296,6 +6548,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     if (nneg > 0) any_ifeq = 1;
     fof_emit_horn(tp, cond_l, cond_r, nneg, pos_l[0], pos_r[0], 0, ccnj[c]);
   }
+  g_fof_soft_oversize = 0;
   g_cur_prov_kind = PROV_NONE;
   g_cur_prov_ix   = 0;
   // Non-Horn input: bounded clausal saturation on the original
@@ -6356,7 +6609,10 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     // several negative clauses: refutation needs ANY of them, but the
     // engine proves multiple negative units as a CONJUNCTION -- funnel
     // each into a false-concluding rule and use the single ground goal.
+    // Funnel rules are individually droppable when oversized: each is
+    // one refutation PATH, and the ground goal below stays.
     any_ifeq = 1;
+    g_fof_soft_oversize = 1;
     for (int k = 0; k < n_neg_cls; k++) {
       FolClause *cl = cls[neg_ix[k]];
       int nneg = 0;
@@ -6372,6 +6628,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
       g_cur_prov_ix   = neg_ix[k];
       fof_emit_horn(tp, cond_l, cond_r, nneg, 0, 0, 0, ccnj[neg_ix[k]]);
     }
+    g_fof_soft_oversize = 0;
     if (g_prov_on) {
       g_prov_funnel = (int *)malloc(sizeof(int) * (size_t)n_neg_cls);
       if (g_prov_funnel != NULL) {
@@ -6394,6 +6651,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   // rewrite form (unit propagation over or-chains).  Gated on the
   // lane having fired so Horn problems stay byte-identical.
   if (g_fof_or_used && !g_cli_fof_trivial && !g_cli_fof_satref) {
+    g_fof_soft_oversize = 1;   // redundant or-lane extras: droppable
     for (int k = 0; k < n_neg_cls; k++) {
       FolClause *cl = cls[neg_ix[k]];
       int nneg = 0;
@@ -6409,6 +6667,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
       g_cur_prov_ix   = neg_ix[k];
       fof_emit_neg_extra(tp, cond_l, cond_r, nneg, ccnj[neg_ix[k]]);
     }
+    g_fof_soft_oversize = 0;
     g_cur_prov_kind = PROV_NONE;
     g_cur_prov_ix   = 0;
   }
@@ -6471,10 +6730,14 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   if (g_fof_tseitin_recs > 0)
     snprintf(tsinfo, sizeof tsinfo, ", %d record(s) via Tseitin",
              g_fof_tseitin_recs);
+  char drinfo[64] = "";
+  if (g_fof_dropped_n > 0)
+    snprintf(drinfo, sizeof drinfo, ", %d oversized clause(s) dropped",
+             g_fof_dropped_n);
   fprintf(stderr, "FindProof: FOF/clausal front-end: %d clause(s) -> %d unit "
-          "equation(s)%s%s%s%s\n", ncl, tp->n_cls,
+          "equation(s)%s%s%s%s%s\n", ncl, tp->n_cls,
           any_ifeq ? " (ifeq encoding)" : "",
-          orinfo, tsinfo,
+          orinfo, tsinfo, drinfo,
           g_cli_fof_conjecture ? ", conjecture negated" : "");
 }
 
@@ -7095,7 +7358,7 @@ static const SchedSlice SCHEDULE[] = {
   // Timeout narrowing); COL004-1 is the exact reverse.  =2 makes the
   // slice exit immediately on ground-goal problems, so it only ever
   // spends a pool slot on the existential family.
-  {"equals",  "--equals-goal=2",                           0.0},
+  {"equals",  "--equals-goal=2 --fof-sat=0",               0.0},
   // (1b') CRITICAL-GOAL QUEUE narrowing: best-first goal-descendant
   // search (WM PM_Existenzziele / GKC query_preference=1 -- GKC's
   // winning COL011-1 strategy, 0.54s where every completion-side
@@ -7107,7 +7370,7 @@ static const SchedSlice SCHEDULE[] = {
   // keeps goal descendants in their own selection lane).  =2 exits
   // immediately on ground-goal problems, exactly like the equals
   // slice.
-  {"narrowq", "--narrow-queue=2",                          0.0},
+  {"narrowq", "--narrow-queue=2 --fof-sat=0",              0.0},
   // (1c) CONDENSED-DETACHMENT lane: the encoded-Horn chaining under
   // the classic CD prover discipline (Otter's max_weight + subsumption
   // on the LCL corpus) -- a formula-size cap with iterative deepening
@@ -7119,7 +7382,7 @@ static const SchedSlice SCHEDULE[] = {
   // times out on LCL195-10 too).  =2: exits immediately unless a
   // dispatcher + ground goal is detected, freeing the pool slot on
   // every non-CD problem exactly like the equals slice.
-  {"horn-cd", "--horn-cd=2",                               0.0},
+  {"horn-cd", "--horn-cd=2 --fof-sat=0",                   0.0},
   // (1d) BACKWARD goal-directed condensed detachment: regress the ground
   // goal to axiom instances by iterative-deepening DFS over the decoded
   // modus-ponens rule, so the ground goal anchors every subgoal instead
@@ -7128,13 +7391,54 @@ static const SchedSlice SCHEDULE[] = {
   // on the deep LCL family).  =2: exits immediately unless a dispatcher +
   // ground goal is detected, freeing the pool slot on every non-CD
   // problem exactly like the horn-cd slice.
-  {"horn-back", "--horn-back=2",                            0.0},
+  {"horn-back", "--horn-back=2 --fof-sat=0",                0.0},
+  // --- FOF PORTFOLIO (--fof-slice=2 exit-fast pack) --------------------
+  // On a fof( input every UEQ-tuned slice runs the IDENTICAL clausal
+  // front-end (clausify + Horn release + or-lane + the 60%-remaining-
+  // wall clausal pre-pass) and differs only in engine knobs the
+  // pre-pass never reads -- the measured FOF timeout class (26/56 of a
+  // stratified FEQ+FNE sample at 60s) was ONE strategy racing itself.
+  // These slices vary the levers that DO matter for the front-end:
+  //   fof-fifo / fof-best  pre-pass given-clause selection (age ratio
+  //                        1 = pure FIFO fairness / 0 = pure best-first
+  //                        vs the default 5-to-1 interleave);
+  //   fof-flat             pre-pass WITHOUT the conjecture-ancestry
+  //                        tier (flat weight order -- the goal cone no
+  //                        longer crowds out axiom-side saturation);
+  //   fof-nopre            no pre-pass at all: the Horn/or equational
+  //                        lanes get the whole wall instead of the 60%
+  //                        pre-pass gamble;
+  //   fof-or2              eq-reified or-lane encoding (predicate
+  //                        atoms wrapped as eq(p,true) too);
+  //   fof-full             pre-pass on the FULL clausified set where
+  //                        the default would SInE-cone it (>512
+  //                        clauses; below that it mirrors wm).
+  // Each exits immediately on non-fof input (raw-text probe
+  // tp_input_is_fof, the equals/horn-cd =2 discipline), so on the UEQ
+  // corpus the pack costs one fork + read per slice.  The UEQ-tuned
+  // slices below in turn carry --fof-sat=0: their pre-pass duplicated
+  // the wm slice's byte-for-byte (same clausified input, same
+  // selection) and burned up to 60% of the slice wall before the
+  // engine ever differed -- on FOF input the pre-pass now runs only in
+  // the lanes that vary it (wm keeps the default discipline).
+  //   fof-deep             default selection but a step budget the 60%
+  //                        wall guard, not the 20000-step cap, bounds
+  //                        (the SInE'd cone runs 20k steps in a third
+  //                        of the guard on CSR-class KBs -- the cap,
+  //                        not the wall, starves the saturation).
+  {"fof-fifo",  "--fof-slice=2 --fol-age-ratio=1",  0.0},
+  {"fof-best",  "--fof-slice=2 --fol-age-ratio=0",  0.0},
+  {"fof-flat",  "--fof-slice=2 --fol-goal-tier=0",  0.0},
+  {"fof-deep",  "--fof-slice=2 --fof-sat=1000000",  0.0},
+  {"fof-nopre", "--fof-slice=2 --fof-sat=0",        0.0},
+  {"fof-or2",   "--fof-slice=2 --fof-or=2 --fof-sat=0", 0.0},
+  {"fof-full",  "--fof-slice=2 --fof-sine=0",       0.0},
   // FULL AC-completion, exit-fast: =2 gives up immediately when no AC
   // operator is detected, so on non-AC problems (most of the corpus) the
   // slot frees instantly -- letting this sit in the FIRST wave protects
   // the RNG-family AC flips on narrow competition nodes (8-core StarExec)
   // where late-wave slices never run inside the hard wall.
-  {"full-ac", "--full-ac=2", 0.0},
+  {"full-ac", "--full-ac=2 --fof-sat=0", 0.0},
   // DEFINITION UNFOLDING (Vampire definition_unfolding port), exit-fast:
   // =2 gives up immediately when the problem has no pure function
   // definition f(X..)=t, so on most of the corpus the slot frees
@@ -7148,7 +7452,7 @@ static const SchedSlice SCHEDULE[] = {
   // setup of Vampire's 6-superposition oracle proof: its winning slice
   // is dis+10_10_tgt=ground) and the derivation surfaces in the first
   // few steps: 5 steps, 0.0s, under ANY presentation.
-  {"unfold",  "--def-unfold=2 --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.0},
+  {"unfold",  "--def-unfold=2 --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1 --fof-sat=0", 0.0},
   // DEF-UNFOLD x TGT composition (Vampire's KLE122-10 winner,
   // lrs+10_1:32 tgt=full sp=frequency under the default fde=all):
   // unfolding eliminates the defined symbols (KLE122-10: 9 defs --
@@ -7159,12 +7463,12 @@ static const SchedSlice SCHEDULE[] = {
   // Time Out at 60s; composed it proves in 6.4s, 7x under Vampire's
   // 44.4s -- sym-prec=frequency measured NOT load-bearing).  =2 exits
   // immediately when no definition unfolds, like the unfold slice.
-  {"unfold-tgt", "--def-unfold=2 --tgt=1 --preset=none --horn=0", 0.0},
+  {"unfold-tgt", "--def-unfold=2 --tgt=1 --preset=none --horn=0 --fof-sat=0", 0.0},
   // (2) Goal FLATTENING (Twee/Vampire naming port) + LAZY ground-join
   // (Twee selection-time redundancy) + backward-simplify + auto-max-weight.
   // Cracks deep-goal UEQ that completion stalls on (COL060-1, GRP167-4);
   // connectedness dropped (net cost under lazy-GJ; GRP167-4 26s->1.8s).
-  {"flatten",  "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.33},
+  {"flatten",  "--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1 --fof-sat=0", 0.33},
   // (2b) BARE flattening: the dressed flatten slice's extras (lazy-GJ,
   // backward-simplify, auto-max-weight) each independently push the
   // wall-edge flatten proofs past the limit (ALG212-10 proves in 27.5s
@@ -7172,7 +7476,7 @@ static const SchedSlice SCHEDULE[] = {
   // needs its own lane.  Horn-free: with (6) it keeps a released-unit-
   // free lane for problems whose baseline proof the Horn releases
   // perturb (BOO017-10).
-  {"flatten-bare", "--flatten-goal --horn=0", 0.0},
+  {"flatten-bare", "--flatten-goal --horn=0 --fof-sat=0", 0.0},
   // (3) Goal-directed MNF front + ground-join + a growing MaxWeight bound
   // -- complementary to both (goal-direction the WM preset lacks, pruning
   // the bare MNF front lacks).
@@ -7208,8 +7512,8 @@ static const SchedSlice SCHEDULE[] = {
   // GRP706-1 proves (102s dressed; 12.8s with the lean core
   // --cp-weight=8 --w2-modulo=0 --orphan-murder=0 --simpler-join),
   // a prior Timeout at every wall tried.
-  {"twee",   "--simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --orphan-murder=0 --cp-set-interreduce --cp-set-ir-budget=5", 0.0},
-  {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1", 0.33},
+  {"twee",   "--simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --orphan-murder=0 --cp-set-interreduce --cp-set-ir-budget=5 --fof-sat=0", 0.0},
+  {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1 --fof-sat=0", 0.33},
   // (4) ENCOMPASSMENT DEMODULATION (Twee reducesSkolem): the WM preset
   // with the skolem-ground unorient gate -- variable-permuted variants
   // canonicalize, keeping R lean on the AC/comm-heavy families where
@@ -7219,7 +7523,7 @@ static const SchedSlice SCHEDULE[] = {
   // GRP721-1 1.0s -- all Twee-oracle-confirmed), each unreachable by
   // every prior slice.  --max-steps raised: the canonical search runs
   // 30k+ steps/s and hits the 500k default mid-wall.
-  {"encompass", "--encompass-demod --max-steps=5000000", 0.0},
+  {"encompass", "--encompass-demod --max-steps=5000000 --fof-sat=0", 0.0},
 
   // (5) PURE bare completion (bare engine defaults, GT weight, NO WM preset
   // heuristics, NO ground-join/connectedness).  The WM preset's selection +
@@ -7228,7 +7532,7 @@ static const SchedSlice SCHEDULE[] = {
   // fail even @150s, but pure bare PROVES it in 6.0s; ground-join or
   // connectedness on top of bare break it again).  This slice is the
   // portfolio's bare-completion angle for the WM-preset-divergent set.
-  {"bare",   "--preset=none --horn=0", 0.0},   // horn-free (see flatten-bare)
+  {"bare",   "--preset=none --horn=0 --fof-sat=0", 0.0},   // horn-free (see flatten-bare)
   // (5b) IFEQ GUARD DISCIPLINE: bare completion + goal flattening with
   // the CP selection weight scaled by THVM_ATP_IFEQ_PENALTY per
   // undecided ifeq guard a CP's conclusion retains beyond the free
@@ -7245,7 +7549,7 @@ static const SchedSlice SCHEDULE[] = {
   // present, freeing the pool slot on every non-ifeq problem exactly
   // like the equals/horn-cd slices.  Horn-free: keeps the full wall
   // for the engine.
-  {"ifeq",   "--ifeq-guard=2 --flatten-goal --goal-subterm --preset=none --horn=0", 0.0},
+  {"ifeq",   "--ifeq-guard=2 --flatten-goal --goal-subterm --preset=none --horn=0 --fof-sat=0", 0.0},
   // (5c) VAMPIRE tgt (twee_goal_transformation, --tgt=1 'full'):
   // pr_tgt_transform names every compound subterm of the negated
   // conjecture bottom-up with a fresh minimal symbol (full mode also
@@ -7260,7 +7564,7 @@ static const SchedSlice SCHEDULE[] = {
   // whose conjecture has no compound subterms the transformation is
   // empty and the lane duplicates 'bare' -- kept below the proven
   // slices with the other leftover-pool lanes.
-  {"tgt",    "--tgt=1 --preset=none --horn=0", 0.0},
+  {"tgt",    "--tgt=1 --preset=none --horn=0 --fof-sat=0", 0.0},
   // FULL AC-COMPLETION: auto-detect AC operators (add/meet/join/mult from
   // their commutativity+associativity axioms) and run AC-matching +
   // Stickel AC-unification.  The WM preset only uses AC to FILTER CPs
@@ -7281,13 +7585,13 @@ static const SchedSlice SCHEDULE[] = {
   // flatten-bare lane]).  The union beats either choice: these variants
   // re-run the exact slices that carried the OFF-only solves with the
   // original presentation.
-  {"twee-raw", "--canon-input=0 --simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --orphan-murder=0 --cp-set-interreduce --cp-set-ir-budget=5", 0.0},
-  {"bare-raw", "--canon-input=0 --preset=none --horn=0", 0.0},
-  {"flatten-bare-raw", "--canon-input=0 --flatten-goal --horn=0", 0.0},
+  {"twee-raw", "--canon-input=0 --simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --orphan-murder=0 --cp-set-interreduce --cp-set-ir-budget=5 --fof-sat=0", 0.0},
+  {"bare-raw", "--canon-input=0 --preset=none --horn=0 --fof-sat=0", 0.0},
+  {"flatten-bare-raw", "--canon-input=0 --flatten-goal --horn=0 --fof-sat=0", 0.0},
   // Backups -- only launch if one of the first five exits early.
-  {"wm-gj",   "--ground-join --connectedness",             0.0},
-  {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness", 0.0},
-  {"bare-gj", "--preset=none --ground-join --connectedness", 0.0},
+  {"wm-gj",   "--ground-join --connectedness --fof-sat=0", 0.0},
+  {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness --fof-sat=0", 0.0},
+  {"bare-gj", "--preset=none --ground-join --connectedness --fof-sat=0", 0.0},
 };
 static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
 
@@ -7643,6 +7947,19 @@ int main(int argc, char **argv) {
     size_t rl = 0;
     char *raw = tp_read_file(file, &rl);
     if (raw == NULL) { fprintf(stderr, "FindProof: cannot open %s\n", file); return 2; }
+    // --fof-slice=2 (the schedule's FOF pack): exit immediately unless
+    // the input carries a fof() record, freeing the pool slot on the
+    // whole UEQ/CNF corpus (the equals/horn-cd =2 discipline).  Checked
+    // on the raw text BEFORE any front-end work, so a non-FOF slice
+    // costs one fork + one read.
+    {
+      const char *fs = getenv("THVM_ATP_FOF_SLICE");
+      if (fs != NULL && atoi(fs) >= 2 && !tp_input_is_fof(raw)) {
+        g_cli_szs_wanted = szs;
+        g_cli_probpath   = file;
+        tp_giveup("fof slice: input has no fof() record");
+      }
+    }
     if (strstr(raw, "cnf(") != NULL || strstr(raw, "fof(") != NULL) {
       g_cli_tptp_mode = 1;
       g_cli_szs_wanted = szs;

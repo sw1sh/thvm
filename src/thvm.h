@@ -4168,6 +4168,10 @@ typedef struct {
   u32         pick_count;
   u32         age_ratio;      // K: every K-th pick is FIFO (1 = pure FIFO,
                               // 0 = pure best-first); THVM_FOL_AGE_RATIO
+  u32         goal_tier;      // 1 (default): cpri adds the non-goal penalty
+                              // so the conjecture cone pops first; 0 makes
+                              // pick-best a flat weight order over ALL
+                              // clauses; THVM_FOL_GOAL_TIER
   // Active unit positive equalities (the demod rule list): ids append
   // when such a clause moves to active; slots NULLed by backward
   // subsumption are skipped lazily.

@@ -42,6 +42,7 @@
 #define CNF_AGE_RATIO_DEFAULT 5u
 // Heap-key penalty for clauses with no conjecture ancestry: goal
 // descendants form a small cone and always pop first.
+// THVM_FOL_GOAL_TIER=0 drops the penalty (flat weight order).
 #define CNF_NONGOAL_PENALTY (1u << 20)
 
 fn CnfState *cnf_init(u32 step_cap) {
@@ -90,6 +91,11 @@ fn CnfState *cnf_init(u32 step_cap) {
   {
     const char *e = getenv("THVM_FOL_AGE_RATIO");
     if (e != NULL) s->age_ratio = (u32)atoi(e);
+  }
+  s->goal_tier = 1u;
+  {
+    const char *e = getenv("THVM_FOL_GOAL_TIER");
+    if (e != NULL && e[0] == '0') s->goal_tier = 0u;
   }
   s->step_cap = (step_cap == 0u) ? 1u << 30 : step_cap;
   s->status = ATP_RUNNING;
@@ -274,7 +280,7 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
   u32 w = cnf_clause_weight(c);
   s->cgoal[id]   = goal;
   s->cweight[id] = w;
-  s->cpri[id]    = w + (goal ? 0u : CNF_NONGOAL_PENALTY);
+  s->cpri[id]    = w + ((goal || s->goal_tier == 0u) ? 0u : CNF_NONGOAL_PENALTY);
   s->cmask[id]   = cnf_clause_mask(c);
   s->cpicked[id] = 0u;
   s->celig_valid[id] = 0u;

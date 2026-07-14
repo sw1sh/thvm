@@ -93,6 +93,53 @@ The portfolio is the design: no single strategy proves the whole corpus, so
 diverse selection/ordering/redundancy regimes race, and each problem is won by
 whichever regime fits it.
 
+### 3.1 The FOF pack (`--fof-slice=2` slices)
+
+On a `fof(` input every UEQ slice runs the IDENTICAL clausal front-end
+(clausify + Horn release + or-lane + the 60%-of-remaining-wall clausal
+pre-pass, `fof_clausal_prepass`) and differs only in engine knobs the pre-pass
+never reads — measured on a 56-problem stratified FEQ+FNE sample at 60s, the
+dominant failure class (26/56 Timeout) was one strategy racing itself. The FOF
+pack varies the levers that DO matter for the front-end; each slice exits
+immediately on non-`fof(` input (raw-text probe `tp_input_is_fof`, the
+`equals`/`horn-cd` `=2` discipline), so on the UEQ corpus the pack costs one
+fork + read per slice.
+
+| slice | flags | front-end lever |
+|---|---|---|
+| `fof-fifo` | `--fol-age-ratio=1` | pre-pass given-clause selection: pure FIFO fairness |
+| `fof-best` | `--fol-age-ratio=0` | pure best-first (no age interleave) |
+| `fof-flat` | `--fol-goal-tier=0` | drop the conjecture-ancestry tier: flat weight order |
+| `fof-deep` | `--fof-sat=1000000` | wall-bounded pre-pass (the default 20k-step cap, not the wall, starves SInE'd cones) |
+| `fof-nopre` | `--fof-sat=0` | no pre-pass: the Horn/or equational lanes get the whole wall |
+| `fof-or2` | `--fof-or=2` | eq-reified or-lane encoding (predicate atoms as `eq(p,true)`) |
+| `fof-full` | `--fof-sine=0` | pre-pass on the FULL clausified set where the default SInE-cones it |
+
+Two mechanisms ride along:
+
+- **Pre-pass SInE** (`--fof-sine`, default ON above 512 clausified clauses):
+  `fof_sine_cone` replays `tp_sine_pass`'s trigger discipline (generality
+  threshold `gt=1`, rare-cap `rc=64`, tolerance ladder 1.5/1.2/1.0 at full
+  trigger depth) at the `FolClause` level, so the bounded saturation works the
+  goal-relevant cone instead of an 11k-clause knowledge base. Only the
+  pre-pass input shrinks — the equational lanes still see every clause, and a
+  subset refutation is still a refutation. When no tolerance fits the
+  threshold the LOOSEST cone stands (there is no capacity cap to fit, and
+  over-tightening provably loses refutations). A cone that SATURATES without
+  refuting is a proven miss for that subset, so the pre-pass retries once on
+  the full clause set under the remaining wall guard.
+- **Oversized-clause drop** (`fof_ser_emit`/`tp_fof_push` soft mode): an
+  axiom-side clause whose ifeq-encoded serialization blows the 2048-char
+  `.pr` side bound is DROPPED instead of killing the run — the Mizar SET007
+  families (ALG215+2, CAT034+2) carry a handful of giant definition clauses
+  and every slice died on the first one. Dropping only shrinks the set;
+  the goal-side pushes keep the hard give-up.
+- **Pre-pass dedup**: every UEQ-tuned slice except `wm` now carries
+  `--fof-sat=0`. Their pre-pass runs duplicated the `wm` slice's byte-for-byte
+  (same clausified input, same selection) and burned up to 60% of the slice
+  wall before the engine ever differed; on FOF input the pre-pass now runs
+  only in the lanes that vary it.
+
 ## 4. The saturation engine (what a slice actually does)
 
 Each slice runs the shared completion engine (`src/atp/_.c`, ~27k lines,
