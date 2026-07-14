@@ -4204,6 +4204,13 @@ typedef struct {
   // (FOL_NO_PARENT) is the no-parent sentinel.
   FolTrace *trace;
   u32       trace_cap;
+  // Proof-output mode (cnf_set_retain_dead): clauses removed by
+  // backward subsumption / backward demodulation move to corpse[]
+  // (keyed by id, parallel to clauses[]) instead of being freed, so
+  // a refutation DAG walk can still print every cited parent's
+  // literals.  Off by default -- zero overhead outside --proof runs.
+  u8          retain_dead;
+  FolClause **corpse;
 } CnfState;
 
 fn CnfState *cnf_init        (u32 step_cap);
@@ -4228,6 +4235,14 @@ fn void      cnf_set_wpo     (CnfState *s, const WpoConfig *wpo);
 // Attach a selection function (default NONE).  Affects which literal
 // of a clause is allowed to participate in resolution + paramodulation.
 fn void      cnf_set_select  (CnfState *s, CnfSelection sel);
+
+// Retain backward-subsumed / backward-demodulated clauses in a
+// corpse[] array (keyed by clause id) instead of freeing them, so a
+// proof emitter can print every parent a trace entry cites.  Call
+// once after cnf_init, before any clause is added.
+fn void      cnf_set_retain_dead(CnfState *s);
+// The clause for `id`, live or retained-dead; NULL when unavailable.
+fn const FolClause *cnf_clause_at(const CnfState *s, u32 id);
 
 // Walk the provenance DAG rooted at `root_id` (typically the empty
 // clause's id when status == ATP_PROVED) and write a text proof

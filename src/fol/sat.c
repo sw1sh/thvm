@@ -100,8 +100,10 @@ fn void cnf_free(CnfState *s) {
   if (s == NULL) return;
   for (u32 i = 0; i < s->n; i++) {
     if (s->clauses[i] != NULL) fol_clause_free(s->clauses[i]);
+    if (s->corpse != NULL && s->corpse[i] != NULL) fol_clause_free(s->corpse[i]);
     free(s->cfrozen[i]);
   }
+  free(s->corpse);
   // Drain any deferred frees still pending.
   for (u32 i = 0; i < s->n_deferred; i++) {
     if (s->deferred_free[i] != NULL) fol_clause_free(s->deferred_free[i]);
@@ -242,11 +244,18 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
     if (nf != NULL) s->cfrozen = (FolLit **)nf;
     void *nn = realloc(s->cnvars, (size_t)nc * sizeof(u32));
     if (nn != NULL) s->cnvars = (u32 *)nn;
+    void *nd = NULL;
+    if (s->corpse != NULL) {
+      nd = realloc(s->corpse, (size_t)nc * sizeof(FolClause *));
+      if (nd != NULL) s->corpse = (FolClause **)nd;
+    }
     if (na == NULL || nw == NULL || nq == NULL || nm == NULL || np == NULL ||
         ns == NULL || nx == NULL || nv == NULL || ng == NULL ||
-        nf == NULL || nn == NULL) return -1;
+        nf == NULL || nn == NULL || (s->corpse != NULL && nd == NULL)) return -1;
     s->cap = nc;
     for (u32 i = s->n; i < s->cap; i++) s->clauses[i] = NULL;
+    if (s->corpse != NULL)
+      for (u32 i = s->n; i < s->cap; i++) s->corpse[i] = NULL;
   }
   while (s->n >= s->trace_cap) {
     cnf_grow(&s->trace_cap, (u8 **)&s->trace, sizeof(FolTrace));
@@ -332,6 +341,18 @@ static u8 cnf_has_ordering(const CnfState *s) {
 // selection config; any config change invalidates it wholesale.
 static void cnf_elig_invalidate(CnfState *s) {
   if (s->celig_valid != NULL && s->n > 0u) memset(s->celig_valid, 0, s->n);
+}
+
+fn void cnf_set_retain_dead(CnfState *s) {
+  if (s == NULL || s->retain_dead) return;
+  s->corpse = (FolClause **)calloc(s->cap, sizeof(FolClause *));
+  if (s->corpse != NULL) s->retain_dead = 1u;
+}
+
+fn const FolClause *cnf_clause_at(const CnfState *s, u32 id) {
+  if (s == NULL || id >= s->n) return NULL;
+  if (s->clauses[id] != NULL) return s->clauses[id];
+  return (s->corpse != NULL) ? s->corpse[id] : NULL;
 }
 
 fn void cnf_set_kbo(CnfState *s, const KboConfig *kbo) { if (s) { s->cnf_kbo = kbo; cnf_elig_invalidate(s); } }
@@ -579,20 +600,25 @@ static void cnf_backward_demod(CnfState *s, u32 new_id) {
     if (d == NULL) { cnf_reclaim(mark, gc_snap); continue; }
     fol_clause_canon_vars(d);
 
-    // Clobber the old slot; defer free.
+    // Clobber the old slot; defer free (or retain as a corpse so a
+    // proof emitter can still print the cited parent).
     s->clauses[i] = NULL;
-    if (s->n_deferred >= s->cap_deferred) {
-      cnf_grow(&s->cap_deferred, (u8 **)&s->deferred_free, sizeof(FolClause *));
-    }
-    if (s->n_deferred < s->cap_deferred) {
-      s->deferred_free[s->n_deferred++] = old;
+    if (s->retain_dead) {
+      s->corpse[i] = old;
     } else {
-      // Couldn't grow the deferred queue -- last resort, leak and
-      // skip the demodulated derivative entirely.
-      s->clauses[i] = old;
-      fol_clause_free(d);
-      cnf_reclaim(mark, gc_snap);
-      continue;
+      if (s->n_deferred >= s->cap_deferred) {
+        cnf_grow(&s->cap_deferred, (u8 **)&s->deferred_free, sizeof(FolClause *));
+      }
+      if (s->n_deferred < s->cap_deferred) {
+        s->deferred_free[s->n_deferred++] = old;
+      } else {
+        // Couldn't grow the deferred queue -- last resort, leak and
+        // skip the demodulated derivative entirely.
+        s->clauses[i] = old;
+        fol_clause_free(d);
+        cnf_reclaim(mark, gc_snap);
+        continue;
+      }
     }
 
     // Push d through tautology + subsumption (forward-demod is
@@ -633,6 +659,10 @@ static void cnf_backward_subsume(CnfState *s, u32 new_id) {
                : fol_subsumes(new_c, old);
     if (sub) {
       s->clauses[i] = NULL;
+      if (s->retain_dead) {
+        s->corpse[i] = old;
+        continue;
+      }
       if (s->n_deferred >= s->cap_deferred) {
         cnf_grow(&s->cap_deferred, (u8 **)&s->deferred_free, sizeof(FolClause *));
       }
