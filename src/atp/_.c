@@ -8128,9 +8128,17 @@ static u64 atp_trace_eq_store(AtpState *s, Term lhs, Term rhs) {
       // (deferred from formation -- only survivors reach this store;
       // the joined third never pays the emit).  Byte-identical to the
       // formation-time emit: same operands, same still-armed subst.
-      pos = vcp_ft_treat_emit_raw(s);
-      if (pos == 0u) return 0u;   // emit anomaly: no-pair sentinel
-      g_vcp_treat.raw_len = pos;
+      // A stash with raw_len != 0 already carries its raw bytes at
+      // g_acp_scratch[0, raw_len) -- the Term-arm treat form's eager
+      // emit and the ifeq-strip emit hijack (no formation operands to
+      // defer to) -- so consume them instead of re-emitting from the
+      // then-unset lazy-emit operands.
+      pos = g_vcp_treat.raw_len;
+      if (pos == 0u) {
+        pos = vcp_ft_treat_emit_raw(s);
+        if (pos == 0u) return 0u;   // emit anomaly: no-pair sentinel
+        g_vcp_treat.raw_len = pos;
+      }
       stored = 1u;
     } else {
       // Fused push loop: the raw pair arrives un-renumbered; renumber
