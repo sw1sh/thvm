@@ -5420,6 +5420,17 @@ static const SchedSlice SCHEDULE[] = {
   // is dis+10_10_tgt=ground) and the derivation surfaces in the first
   // few steps: 5 steps, 0.0s, under ANY presentation.
   {"unfold",  "--def-unfold=2 --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1", 0.0},
+  // DEF-UNFOLD x TGT composition (Vampire's KLE122-10 winner,
+  // lrs+10_1:32 tgt=full sp=frequency under the default fde=all):
+  // unfolding eliminates the defined symbols (KLE122-10: 9 defs --
+  // diamonds, if_then_else, complement...) so the conjecture speaks
+  // pure domain-algebra, then tgt folds its compound subterms onto
+  // minimal constants and goal-directed CPs dominate selection.
+  // Neither ingredient alone gets there (unfold-dressed and tgt both
+  // Time Out at 60s; composed it proves in 6.4s, 7x under Vampire's
+  // 44.4s -- sym-prec=frequency measured NOT load-bearing).  =2 exits
+  // immediately when no definition unfolds, like the unfold slice.
+  {"unfold-tgt", "--def-unfold=2 --tgt=1 --preset=none --horn=0", 0.0},
   // (2) Goal FLATTENING (Twee/Vampire naming port) + LAZY ground-join
   // (Twee selection-time redundancy) + backward-simplify + auto-max-weight.
   // Cracks deep-goal UEQ that completion stalls on (COL060-1, GRP167-4);
