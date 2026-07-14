@@ -181,6 +181,7 @@ static u32 pc_varid(PcParse *p, const char *name) {
 }
 
 static Term pc_formula(PcParse *p);   // fwd
+static Term pc_unary(PcParse *p);     // fwd
 
 // term := VAR | ident [ '(' term (',' term)* ')' ]
 static Term pc_term(PcParse *p) {
@@ -251,7 +252,13 @@ static Term pc_quant(PcParse *p) {
   }
   pc_expect(p, K_RB);
   pc_expect(p, K_COLON);
-  Term body = pc_formula(p);
+  // TPTP: the quantified body is a UNITARY formula ('~f', a nested
+  // quantification, '(...)', or an atom).  Parsing a full formula here
+  // swallowed any '&'/'|' continuation into the body -- for
+  //   ! [X] : (p(X)) & ! [X] : (q(X))
+  // the second quantifier nested INSIDE the first, and the shadowed X
+  // then skolemized into a captured binder (KRS135+1's conjecture).
+  Term body = pc_unary(p);
   for (int i = nq - 1; i >= 0; i--)
     body = (q == K_ALL) ? fol_mk_all(term_new_fvr(ids[i]), body)
                         : fol_mk_ex (term_new_fvr(ids[i]), body);

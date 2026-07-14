@@ -207,6 +207,15 @@ static Term fol_var_subst(Term t, u32 var_id, Term repl) {
   switch (term_tag(t)) {
     case TAG_FVR: return (term_ext(t) == var_id) ? repl : t;
     case TAG_CTR: {
+      // An inner quantifier over the SAME variable shadows it: the
+      // substitution must not cross the binder (it would replace the
+      // binder's own var slot with a non-variable term, wedging the
+      // Skolemizer and leaving the quantifier in the "CNF").
+      u32 lab = term_ext(t);
+      if (lab == FOL_LAB_ALL || lab == FOL_LAB_EX) {
+        Term var = term_ctr_at(t, 0u);
+        if (term_tag(var) == TAG_FVR && term_ext(var) == var_id) return t;
+      }
       u32 n = term_ctr_n(t);
       if (n == 0u) return t;
       Term kids[REWRITE_MAX_ARITY];
