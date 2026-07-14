@@ -82,7 +82,10 @@ and what each is for:
 | `mnf-gj-amw` | `--mnf --ground-join --connectedness --auto-max-weight` | goal-directed MNF front + ground join |
 | `encompass` | `--encompass-demod` | AC/comm-heavy families that drown in variants (MVA003, LAT163) |
 | `full-ac` | `--full-ac` | ring/lattice AC-completion (RNG021 family) — see §5 |
+| `unfold` | `--def-unfold=2` + the flatten flags | pure function definitions `f(X..) = t` (Vampire definition_unfolding): the folded symbol is KBO-irreducible, so a folded goal is reachable only by presentation-dependent detours; unfolded, the goal's subterm cone flattens onto minimal constants and COL002-5's 6-superposition proof surfaces in 0.0s under any presentation — exits fast when no definition exists |
 | `bare` | `--preset=none` | WM-preset-divergent problems (BOO014 ifeq-encoded) |
+| `ifeq` | `--ifeq-guard=2 --flatten-goal --goal-subterm --preset=none` | guard-aware CP selection on the ifeq-encoded '-10' family; exits fast otherwise |
+| `tgt` | `--tgt=1 --preset=none` | Vampire tgt / Twee goal transformation: name conjecture subterms (SYN615-10) |
 | `twee-raw`, `bare-raw`, `flatten-bare-raw` | `--canon-input=0` variants | recover problems whose ORIGINAL presentation the canonical form loses |
 | `wm-gj`, `lazy-gj`, `bare-gj` | ground-join backups | launch only when an early slice exits |
 
