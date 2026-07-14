@@ -1483,6 +1483,7 @@ static int horn_size(int t) {
 // stays byte-identical.
 static int  g_horn_cd = 0;             // THVM_ATP_HORN_CD (2 = slice mode)
 static double g_cli_wall_sec = 120.0;  // engine wall, for the CD lane budget
+static double g_cli_main_t0  = 0.0;    // process start (main); wall-remaining anchor
 // Parsed negative units (the goals), for the subsumption rank check
 // and the CD resonators.
 static int g_hg_l[64], g_hg_r[64]; static int g_hg_n = 0;
@@ -4158,7 +4159,10 @@ static int g_fof_tseitin_recs = 0;   // records clausified definitionally
 // equational lane and the usual GaveUp discipline; a SATURATION here
 // is never reported (the step/wall bounds make it inconclusive).
 // THVM_ATP_FOF_SAT = step budget (default 20000, 0 disables).
-static int fof_clausal_prepass(FolClause **cls, int ncl) {
+// `ccnj` marks conjecture-descended records: those clauses (and their
+// inference descendants, tracked inside the engine) get the pick-best
+// goal bonus.
+static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
   u32 budget = 20000u;
   {
     const char *e = getenv("THVM_ATP_FOF_SAT");
@@ -4187,27 +4191,50 @@ static int fof_clausal_prepass(FolClause **cls, int ncl) {
     FolClause *c = fol_clause_new(cls[i]->n_lits);
     if (c == NULL) { cnf_free(s); return 0; }
     for (u32 j = 0; j < cls[i]->n_lits; j++) c->lits[j] = cls[i]->lits[j];
-    cnf_add_clause(s, c);   // takes ownership (a dropped clause only
-                            // shrinks the set: a subset refutation is
-                            // still a refutation)
+    cnf_add_clause_goal(s, c, ccnj[i]);   // takes ownership (a dropped
+                            // clause only shrinks the set: a subset
+                            // refutation is still a refutation)
   }
-  // cnf_run with a coarse wall guard (the engine has no clock of its
-  // own and the pre-pass must not eat the caller's --wall) and a heap
-  // guard: paramodulation storms can flood the term arena (PUZ001+1
-  // burned the whole 134M-cell heap inside the step budget).  The
+  // cnf_run with a wall guard and a heap guard: paramodulation storms
+  // can flood the term arena (PUZ001+1 burned the whole 134M-cell
+  // heap inside the step budget before ordered paramod landed).  The
   // bump pointer rolls back afterwards -- the pre-pass retains
   // nothing on the term heap (clause structs are malloc'd and freed).
+  //
+  // Wall: this pre-pass is the ONLY complete engine a non-Horn
+  // problem gets (the or-lane equational encoding after it covers
+  // just the unit-resulting fragment), and the call site gates on
+  // non-Horn -- so it may spend up to 60% of the REMAINING --wall
+  // rather than a token fixed slice.
   u64 heap_mark = HEAP_NEXT;
   u64 heap_cap  = gc_enabled() ? gc_from_end() : thvm_heap_cells();
   u64 heap_lim  = heap_cap - (heap_cap >> 2);   // keep 25% headroom
+  double wall_guard = 0.6 * (g_cli_wall_sec - (horn_now() - g_cli_main_t0));
+  if (wall_guard < 0.0) wall_guard = 0.0;
   double t0 = horn_now();
+  const char *tripped = NULL;
   while (s->status == ATP_RUNNING) {
     if (cnf_step(s) != ATP_RUNNING) break;
-    if (horn_now() - t0 > 10.0) break;
-    if (HEAP_NEXT > heap_lim) break;
+    if (horn_now() - t0 > wall_guard) { tripped = "wall"; break; }
+    if (HEAP_NEXT > heap_lim) { tripped = "heap"; break; }
   }
   AtpStatus st = s->status;
   u32 steps = s->step;
+  u32 nstore = s->n;
+  // THVM_ATP_FOF_SAT_DEBUG=1: dump the live clause set (diagnosis of
+  // spurious saturation -- a theorem must never reach QUEUE_EMPTY).
+  {
+    const char *dbg = getenv("THVM_ATP_FOF_SAT_DEBUG");
+    if (dbg != NULL && dbg[0] != '0') {
+      fprintf(stderr, "pre-pass clause store (n=%u):\n", s->n);
+      for (u32 i = 0; i < s->n; i++) {
+        if (s->clauses[i] == NULL) continue;
+        fprintf(stderr, "  [w=%u%s] ", s->cweight[i],
+                s->cpicked[i] ? " given" : "");
+        cnf_print_clause_line(s, i, stderr);
+      }
+    }
+  }
   cnf_free(s);
   free(kbo_w); free(kbo_p);
   HEAP_NEXT = heap_mark;
@@ -4216,8 +4243,12 @@ static int fof_clausal_prepass(FolClause **cls, int ncl) {
             "step(s), %.1fs\n", steps, horn_now() - t0);
     return 1;
   }
+  if (tripped == NULL)
+    tripped = (st == ATP_ABORTED) ? "steps" :
+              (st == ATP_QUEUE_EMPTY) ? "saturated" : "engine";
   fprintf(stderr, "FindProof: FOF clausal pre-pass: undecided "
-          "(%u step(s), %.1fs)\n", steps, horn_now() - t0);
+          "(%u step(s), %u clause(s), %.1fs, %s-bounded, guard %.1fs)\n",
+          steps, nstore, horn_now() - t0, tripped, wall_guard);
   return 0;
 }
 
@@ -4410,7 +4441,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   // encoding).  --proof runs skip it: a pre-pass win has no .pr-level
   // refutation to print, so they stay on the honest engine path.
   if (g_fof_or_ncl > 0 && !g_cli_fof_trivial && !g_cli_want_proof &&
-      fof_clausal_prepass(cls, ncl))
+      fof_clausal_prepass(cls, ccnj, ncl))
     g_cli_fof_satref = 1;
   if (g_cli_fof_trivial || g_cli_fof_satref) {
     // Trivially unsatisfiable: a joinable goal (plus one dummy axiom so
@@ -5453,6 +5484,7 @@ int main(int argc, char **argv) {
   const char *wall = "120";
   int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0;
   double main_t0 = horn_now();
+  g_cli_main_t0 = main_t0;
   // Bench-intake give-ups (e.g. --full-ac=2 with no AC operator) route
   // through tp_giveup so direct runs still print the SZS line.
   g_atp_bench_giveup_hook = tp_giveup;
@@ -5529,6 +5561,9 @@ int main(int argc, char **argv) {
     if (!hit) { fprintf(stderr, "FindProof: unknown option --%.*s\n", (int)nlen, name); usage(stderr); return 2; }
   }
   if (file == NULL) { usage(stderr); return 2; }
+  // Engine wall, set BEFORE any front-end work: the FOF clausal
+  // pre-pass budgets itself as a fraction of the remaining wall.
+  g_cli_wall_sec = (atof(wall) > 0.0) ? atof(wall) : 120.0;
 
   if (want_check) return proof_check_main(file, szs);
 
@@ -5597,7 +5632,6 @@ int main(int argc, char **argv) {
       // participate in axiom selection.  THVM_ATP_HORN=0 disables.
       {
         const char *he = getenv("THVM_ATP_HORN");
-        g_cli_wall_sec = (atof(wall) > 0.0) ? atof(wall) : 120.0;
         if (he == NULL || he[0] != '0') tp_horn_release(&tp);
       }
       // Goal reached by the chaining itself: some released unit (a
