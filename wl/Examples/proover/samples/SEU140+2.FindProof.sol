@@ -1,117 +1,29 @@
 % SZS status Theorem for SEU140+2.p
-% SZS output start CNFRefutation for SEU140+2.p
-cnf(t223, axiom, ifeq(subset(X1,X2),true,or(proper_subset(X1,X2),eq(X1,X2)),true) = true, file('SEU140+2.p')).
-cnf(t517, plain, ifeq(subset(X1,X2),true,or(proper_subset(X1,X2),eq(X1,X2)),true) = true, inference(orient, [status(thm)], [t223])).
-cnf(t225, axiom, ifeq(subset(X1,X2),true,subset(set_intersection2(X1,X3),set_intersection2(X2,X3)),true) = true, file('SEU140+2.p')).
-cnf(t537, plain, ifeq(subset(X1,X2),true,subset(set_intersection2(X1,X3),set_intersection2(X2,X3)),true) = true, inference(orient, [status(thm)], [t225])).
-cnf(t54, axiom, subset(sk10,sk11) = true, file('SEU140+2.p')).
-cnf(t286, plain, subset(sk10,sk11) = true, inference(orient, [status(thm)], [t54])).
-cnf(t541, plain, true = ifeq(true,true,subset(set_intersection2(sk10,X1),set_intersection2(sk11,X1)),true), inference(cp, [status(thm)], [t537, t286])).
-cnf(t76, axiom, ifeq(X1,X1,X2,X3) = X2, file('SEU140+2.p')).
-cnf(t288, plain, ifeq(X1,X1,X2,X3) = X2, inference(orient, [status(thm)], [t76])).
-cnf(t3577, plain, true = subset(set_intersection2(sk10,X1),set_intersection2(sk11,X1)), inference(step, [status(thm)], [t541, t288])).
-cnf(t2474, plain, subset(set_intersection2(sk10,X1),set_intersection2(sk11,X1)) = true, inference(orient, [status(thm)], [t3577])).
-cnf(t133, axiom, set_difference(X1,set_difference(X1,X2)) = set_intersection2(X1,X2), file('SEU140+2.p')).
-cnf(t324, plain, set_difference(X1,set_difference(X1,X2)) = set_intersection2(X1,X2), inference(orient, [status(thm)], [t133])).
-cnf(t134, axiom, set_difference(set_union2(X1,X2),X2) = set_difference(X1,X2), file('SEU140+2.p')).
-cnf(t329, plain, set_difference(set_union2(X1,X2),X2) = set_difference(X1,X2), inference(orient, [status(thm)], [t134])).
-cnf(t85, axiom, set_union2(X1,X2) = set_union2(X2,X1), file('SEU140+2.p')).
-cnf(t293, plain, set_union2(X1,X2) = set_union2(X2,X1), inference(orient, [status(thm)], [t85])).
-cnf(t331, plain, set_difference(X1,X2) = set_difference(set_union2(X2,X1),X2), inference(cp, [status(thm)], [t329, t293])).
-cnf(t1670, plain, set_difference(set_union2(X1,X2),X1) = set_difference(X2,X1), inference(orient, [status(thm)], [t331])).
-cnf(t137, axiom, set_union2(X1,set_difference(X2,X1)) = set_union2(X1,X2), file('SEU140+2.p')).
-cnf(t334, plain, set_union2(X1,set_difference(X2,X1)) = set_union2(X1,X2), inference(orient, [status(thm)], [t137])).
-cnf(t1671, plain, set_difference(set_difference(X1,X2),X2) = set_difference(set_union2(X2,X1),X2), inference(cp, [status(thm)], [t1670, t334])).
-cnf(t3522, plain, set_difference(set_difference(X1,X2),X2) = set_difference(X1,X2), inference(step, [status(thm)], [t1671, t1670])).
-cnf(t1831, plain, set_difference(set_difference(X1,X2),X2) = set_difference(X1,X2), inference(orient, [status(thm)], [t3522])).
-cnf(t1835, plain, set_intersection2(set_difference(X1,X2),X2) = set_difference(set_difference(X1,X2),set_difference(X1,X2)), inference(cp, [status(thm)], [t324, t1831])).
-cnf(t84, axiom, set_intersection2(X1,X2) = set_intersection2(X2,X1), file('SEU140+2.p')).
-cnf(t291, plain, set_intersection2(X1,X2) = set_intersection2(X2,X1), inference(orient, [status(thm)], [t84])).
-cnf(t3523, plain, set_intersection2(X1,set_difference(X2,X1)) = set_difference(set_difference(X2,X1),set_difference(X2,X1)), inference(step, [status(thm)], [t1835, t291])).
-cnf(t77, axiom, set_difference(X1,or(X1,false)) = empty_set, file('SEU140+2.p')).
-cnf(t18, axiom, or(X1,false) = X1, file('SEU140+2.p')).
-cnf(t270, plain, or(X1,false) = X1, inference(orient, [status(thm)], [t18])).
-cnf(t3410, plain, set_difference(X1,X1) = empty_set, inference(step, [status(thm)], [t77, t270])).
-cnf(t0, axiom, sk5 = empty_set, file('SEU140+2.p')).
-cnf(t256, plain, empty_set = sk5, inference(orient, [status(thm)], [t0])).
-cnf(t3411, plain, set_difference(X1,X1) = sk5, inference(step, [status(thm)], [t3410, t256])).
-cnf(t289, plain, set_difference(X1,X1) = sk5, inference(orient, [status(thm)], [t3411])).
-cnf(t3524, plain, set_intersection2(X1,set_difference(X2,X1)) = sk5, inference(step, [status(thm)], [t3523, t289])).
-cnf(t1843, plain, set_intersection2(X1,set_difference(X2,X1)) = sk5, inference(orient, [status(thm)], [t3524])).
-cnf(t2478, plain, true = subset(set_intersection2(sk10,set_difference(X1,sk11)),sk5), inference(cp, [status(thm)], [t2474, t1843])).
-cnf(t3263, plain, subset(set_intersection2(sk10,set_difference(X1,sk11)),sk5) = true, inference(orient, [status(thm)], [t2478])).
-cnf(t327, plain, set_intersection2(X1,set_difference(X1,X2)) = set_difference(X1,set_intersection2(X1,X2)), inference(cp, [status(thm)], [t324, t324])).
-cnf(t166, axiom, ifeq(subset(X1,X2),true,set_intersection2(X1,X2),X1) = X1, file('SEU140+2.p')).
-cnf(t405, plain, ifeq(subset(X1,X2),true,set_intersection2(X1,X2),X1) = X1, inference(orient, [status(thm)], [t166])).
-cnf(t118, axiom, subset(set_difference(X1,X2),X1) = true, file('SEU140+2.p')).
-cnf(t300, plain, subset(set_difference(X1,X2),X1) = true, inference(orient, [status(thm)], [t118])).
-cnf(t408, plain, set_difference(X1,X2) = ifeq(true,true,set_intersection2(set_difference(X1,X2),X1),set_difference(X1,X2)), inference(cp, [status(thm)], [t405, t300])).
-cnf(t3513, plain, set_difference(X1,X2) = set_intersection2(set_difference(X1,X2),X1), inference(step, [status(thm)], [t408, t288])).
-cnf(t3514, plain, set_difference(X1,X2) = set_intersection2(X1,set_difference(X1,X2)), inference(step, [status(thm)], [t3513, t291])).
-cnf(t1723, plain, set_intersection2(X1,set_difference(X1,X2)) = set_difference(X1,X2), inference(orient, [status(thm)], [t3514])).
-cnf(t3544, plain, set_difference(X1,X2) = set_difference(X1,set_intersection2(X1,X2)), inference(step, [status(thm)], [t327, t1723])).
-cnf(t2076, plain, set_difference(X1,set_intersection2(X1,X2)) = set_difference(X1,X2), inference(orient, [status(thm)], [t3544])).
-cnf(t157, axiom, ifeq(disjoint(X1,X2),true,set_intersection2(X1,X2),empty_set) = empty_set, file('SEU140+2.p')).
-cnf(t3427, plain, ifeq(disjoint(X1,X2),true,set_intersection2(X1,X2),sk5) = empty_set, inference(step, [status(thm)], [t157, t256])).
-cnf(t3428, plain, ifeq(disjoint(X1,X2),true,set_intersection2(X1,X2),sk5) = sk5, inference(step, [status(thm)], [t3427, t256])).
-cnf(t345, plain, ifeq(disjoint(X1,X2),true,set_intersection2(X1,X2),sk5) = sk5, inference(orient, [status(thm)], [t3428])).
-cnf(t13, axiom, disjoint(sk12,sk11) = true, file('SEU140+2.p')).
-cnf(t266, plain, disjoint(sk12,sk11) = true, inference(orient, [status(thm)], [t13])).
-cnf(t346, plain, sk5 = ifeq(true,true,set_intersection2(sk12,sk11),sk5), inference(cp, [status(thm)], [t345, t266])).
-cnf(t3452, plain, sk5 = set_intersection2(sk12,sk11), inference(step, [status(thm)], [t346, t288])).
-cnf(t896, plain, set_intersection2(sk12,sk11) = sk5, inference(orient, [status(thm)], [t3452])).
-cnf(t2078, plain, set_difference(sk12,sk11) = set_difference(sk12,sk5), inference(cp, [status(thm)], [t2076, t896])).
-cnf(t30, axiom, set_difference(X1,empty_set) = X1, file('SEU140+2.p')).
-cnf(t3399, plain, set_difference(X1,sk5) = X1, inference(step, [status(thm)], [t30, t256])).
-cnf(t275, plain, set_difference(X1,sk5) = X1, inference(orient, [status(thm)], [t3399])).
-cnf(t3545, plain, set_difference(sk12,sk11) = sk12, inference(step, [status(thm)], [t2078, t275])).
-cnf(t2095, plain, set_difference(sk12,sk11) = sk12, inference(orient, [status(thm)], [t3545])).
-cnf(t3264, plain, true = subset(set_intersection2(sk10,sk12),sk5), inference(cp, [status(thm)], [t3263, t2095])).
-cnf(t3603, plain, true = subset(set_intersection2(sk12,sk10),sk5), inference(step, [status(thm)], [t3264, t291])).
-cnf(t3283, plain, subset(set_intersection2(sk12,sk10),sk5) = true, inference(orient, [status(thm)], [t3603])).
-cnf(t3295, plain, true = ifeq(true,true,or(proper_subset(set_intersection2(sk12,sk10),sk5),eq(set_intersection2(sk12,sk10),sk5)),true), inference(cp, [status(thm)], [t517, t3283])).
-cnf(t3604, plain, true = or(proper_subset(set_intersection2(sk12,sk10),sk5),eq(set_intersection2(sk12,sk10),sk5)), inference(step, [status(thm)], [t3295, t288])).
-cnf(t122, axiom, ifeq(not(X1),true,X1,false) = false, file('SEU140+2.p')).
-cnf(t306, plain, ifeq(not(X1),true,X1,false) = false, inference(orient, [status(thm)], [t122])).
-cnf(t175, axiom, or(not(subset(X1,X2)),not(proper_subset(X2,X1))) = true, file('SEU140+2.p')).
-cnf(t431, plain, or(not(subset(X1,X2)),not(proper_subset(X2,X1))) = true, inference(orient, [status(thm)], [t175])).
-cnf(t51, axiom, subset(empty_set,X1) = true, file('SEU140+2.p')).
-cnf(t3407, plain, subset(sk5,X1) = true, inference(step, [status(thm)], [t51, t256])).
-cnf(t285, plain, subset(sk5,X1) = true, inference(orient, [status(thm)], [t3407])).
-cnf(t436, plain, true = or(not(true),not(proper_subset(X1,sk5))), inference(cp, [status(thm)], [t431, t285])).
-cnf(t5, axiom, not(true) = false, file('SEU140+2.p')).
-cnf(t260, plain, not(true) = false, inference(orient, [status(thm)], [t5])).
-cnf(t3462, plain, true = or(false,not(proper_subset(X1,sk5))), inference(step, [status(thm)], [t436, t260])).
-cnf(t21, axiom, or(false,X1) = X1, file('SEU140+2.p')).
-cnf(t272, plain, or(false,X1) = X1, inference(orient, [status(thm)], [t21])).
-cnf(t3463, plain, true = not(proper_subset(X1,sk5)), inference(step, [status(thm)], [t3462, t272])).
-cnf(t995, plain, not(proper_subset(X1,sk5)) = true, inference(orient, [status(thm)], [t3463])).
-cnf(t996, plain, false = ifeq(true,true,proper_subset(X1,sk5),false), inference(cp, [status(thm)], [t306, t995])).
-cnf(t3464, plain, false = proper_subset(X1,sk5), inference(step, [status(thm)], [t996, t288])).
-cnf(t997, plain, proper_subset(X1,sk5) = false, inference(orient, [status(thm)], [t3464])).
-cnf(t3605, plain, true = or(false,eq(set_intersection2(sk12,sk10),sk5)), inference(step, [status(thm)], [t3604, t997])).
-cnf(t3606, plain, true = eq(set_intersection2(sk12,sk10),sk5), inference(step, [status(thm)], [t3605, t272])).
-cnf(t171, axiom, or(not(eq(X1,empty_set)),not(in(X2,X1))) = true, file('SEU140+2.p')).
-cnf(t3433, plain, or(not(eq(X1,sk5)),not(in(X2,X1))) = true, inference(step, [status(thm)], [t171, t256])).
-cnf(t426, plain, or(not(eq(X1,sk5)),not(in(X2,X1))) = true, inference(orient, [status(thm)], [t3433])).
-cnf(t216, axiom, or(disjoint(X1,X2),in(sk9(X1,X2),set_intersection2(X1,X2))) = true, file('SEU140+2.p')).
-cnf(t478, plain, or(disjoint(X1,X2),in(sk9(X1,X2),set_intersection2(X1,X2))) = true, inference(orient, [status(thm)], [t216])).
-cnf(t10, axiom, disjoint(sk10,sk12) = false, file('SEU140+2.p')).
-cnf(t263, plain, disjoint(sk10,sk12) = false, inference(orient, [status(thm)], [t10])).
-cnf(t479, plain, true = or(false,in(sk9(sk10,sk12),set_intersection2(sk10,sk12))), inference(cp, [status(thm)], [t478, t263])).
-cnf(t3550, plain, true = in(sk9(sk10,sk12),set_intersection2(sk10,sk12)), inference(step, [status(thm)], [t479, t272])).
-cnf(t3551, plain, true = in(sk9(sk10,sk12),set_intersection2(sk12,sk10)), inference(step, [status(thm)], [t3550, t291])).
-cnf(t2215, plain, in(sk9(sk10,sk12),set_intersection2(sk12,sk10)) = true, inference(orient, [status(thm)], [t3551])).
-cnf(t2233, plain, true = or(not(eq(set_intersection2(sk12,sk10),sk5)),not(true)), inference(cp, [status(thm)], [t426, t2215])).
-cnf(t3560, plain, true = or(not(eq(set_intersection2(sk12,sk10),sk5)),false), inference(step, [status(thm)], [t2233, t260])).
-cnf(t3561, plain, true = not(eq(set_intersection2(sk12,sk10),sk5)), inference(step, [status(thm)], [t3560, t270])).
-cnf(t2338, plain, not(eq(set_intersection2(sk12,sk10),sk5)) = true, inference(orient, [status(thm)], [t3561])).
-cnf(t2339, plain, false = ifeq(true,true,eq(set_intersection2(sk12,sk10),sk5),false), inference(cp, [status(thm)], [t306, t2338])).
-cnf(t3562, plain, false = eq(set_intersection2(sk12,sk10),sk5), inference(step, [status(thm)], [t2339, t288])).
-cnf(t2340, plain, eq(set_intersection2(sk12,sk10),sk5) = false, inference(orient, [status(thm)], [t3562])).
-cnf(t3607, plain, true = false, inference(step, [status(thm)], [t3606, t2340])).
-cnf(t3302, plain, false = true, inference(orient, [status(thm)], [t3607])).
-cnf(goal_0, negated_conjecture, true != false, file('SEU140+2.p')).
-cnf(g0_0, plain, true != true, inference(rw, [status(thm)], [goal_0, t3302])).
-cnf(contradiction_0, plain, $false, inference(trivial_inequality_removal, [status(thm)], [g0_0])).
-% SZS output end CNFRefutation for SEU140+2.p
+% SZS output start Proof for SEU140+2.p
+fof(f10, axiom, ! [A,B] : ( disjoint(A,B) <=> set_intersection2(A,B) = empty_set ), file('SEU140+2.p', d7_xboole_0)).
+fof(f10_nnf, plain, ! [A,B] : (((~(disjoint(A,B)) | set_intersection2(A,B) = empty_set) & (disjoint(A,B) | set_intersection2(A,B) != empty_set))), inference(nnf_transformation, [status(thm)], [f10])).
+fof(f10_sk, plain, ! [A,B] : (((~(disjoint(A,B)) | set_intersection2(A,B) = empty_set) & (disjoint(A,B) | set_intersection2(A,B) != empty_set))), inference(skolemisation, [status(esa)], [f10_nnf])).
+cnf(c39, plain, ~disjoint(X0,X1) | set_intersection2(X0,X1) = empty_set, inference(cnf_transformation, [status(esa)], [f10_sk])).
+fof(f50, conjecture, ! [A,B,C] : ( ( subset(A,B) & disjoint(B,C) ) => disjoint(A,C) ), file('SEU140+2.p', t63_xboole_1)).
+fof(f50_neg, negated_conjecture, ~(! [A,B,C] : ( ( subset(A,B) & disjoint(B,C) ) => disjoint(A,C) )), inference(negated_conjecture, [status(cth)], [f50])).
+fof(f50_nnf, plain, ? [A,B,C] : (((subset(A,B) & disjoint(B,C)) & ~(disjoint(A,C)))), inference(nnf_transformation, [status(thm)], [f50_neg])).
+fof(f50_sk, plain, ((subset(sk10,sk11) & disjoint(sk11,sk12)) & ~(disjoint(sk10,sk12))), inference(skolemisation, [status(esa), new_symbols(skolem, [sk10,sk11,sk12])], [f50_nnf])).
+cnf(c91, plain, disjoint(sk11,sk12), inference(cnf_transformation, [status(esa)], [f50_sk])).
+cnf(p147, plain, set_intersection2(sk11,sk12) = empty_set, inference(resolution, [status(thm)], [c39, c91])).
+fof(f32, lemma, ! [A,B,C] : ( subset(A,B) => subset(set_intersection2(A,C),set_intersection2(B,C)) ), file('SEU140+2.p', t26_xboole_1)).
+fof(f32_nnf, plain, ! [A,B,C] : ((~(subset(A,B)) | subset(set_intersection2(A,C),set_intersection2(B,C)))), inference(nnf_transformation, [status(thm)], [f32])).
+fof(f32_sk, plain, ! [A,B,C] : ((~(subset(A,B)) | subset(set_intersection2(A,C),set_intersection2(B,C)))), inference(skolemisation, [status(esa)], [f32_nnf])).
+cnf(c65, plain, ~subset(X0,X1) | subset(set_intersection2(X0,X2),set_intersection2(X1,X2)), inference(cnf_transformation, [status(esa)], [f32_sk])).
+cnf(c90, plain, subset(sk10,sk11), inference(cnf_transformation, [status(esa)], [f50_sk])).
+cnf(p409, plain, subset(set_intersection2(sk10,X0),set_intersection2(sk11,X0)), inference(resolution, [status(thm)], [c65, c90])).
+cnf(p472, plain, subset(set_intersection2(sk10,sk12),empty_set), inference(superposition, [status(thm)], [p147, p409])).
+fof(f43, lemma, ! [A] : ( subset(A,empty_set) => A = empty_set ), file('SEU140+2.p', t3_xboole_1)).
+fof(f43_nnf, plain, ! [A] : ((~(subset(A,empty_set)) | A = empty_set)), inference(nnf_transformation, [status(thm)], [f43])).
+fof(f43_sk, plain, ! [A] : ((~(subset(A,empty_set)) | A = empty_set)), inference(skolemisation, [status(esa)], [f43_nnf])).
+cnf(c82, plain, ~subset(X0,empty_set) | X0 = empty_set, inference(cnf_transformation, [status(esa)], [f43_sk])).
+cnf(p482, plain, set_intersection2(sk10,sk12) = empty_set, inference(resolution, [status(thm)], [p472, c82])).
+cnf(c40, plain, disjoint(X0,X1) | set_intersection2(X0,X1) != empty_set, inference(cnf_transformation, [status(esa)], [f10_sk])).
+cnf(p483, plain, disjoint(sk10,sk12), inference(resolution, [status(thm)], [p482, c40])).
+cnf(c92, plain, ~disjoint(sk10,sk12), inference(cnf_transformation, [status(esa)], [f50_sk])).
+cnf(p495, plain, $false, inference(resolution, [status(thm)], [p483, c92])).
+% SZS output end Proof for SEU140+2.p

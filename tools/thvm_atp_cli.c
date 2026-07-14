@@ -210,6 +210,10 @@ static int g_cli_sine_applied     = 0;
 // competition-valid SZS line instead of crashing.
 static int g_cli_szs_wanted = 0;
 static const char *g_cli_probpath = "";
+// Defined with the provenance module / FOF front-end below; the Horn
+// release pass (earlier in the file) gates on them.
+static int g_prov_on;
+static int g_cli_fof_applied;
 
 static void tp_giveup(const char *why) {
   // Under a schedule slice the wrapper owns the single final status, so
@@ -231,6 +235,13 @@ typedef struct {
   int  neg;
   int  conj;   // TPTP role negated_conjecture (a positive '=' unit may
                // carry it: the refutation encoding's hypothesis parts)
+  // Conversion-lineage provenance for --proof output (CASC-J13
+  // solution compliance): which conversion produced this unit and the
+  // index into the matching provenance table.  0/0 (PROV_NONE, the
+  // calloc default) = parsed verbatim from the problem file -- the
+  // emitter's file() citation stays byte-identical for that case.
+  int  prov_kind;
+  int  prov_ix;
 } TpClause;
 
 typedef struct {
@@ -246,6 +257,26 @@ typedef struct {
   char     vars[TP_MAX_VARS][TP_NAME_LEN];
   int      n_vars;
 } TpProblem;
+
+// Provenance kinds (TpClause.prov_kind).  PROV_NONE keeps the legacy
+// file() citation; the rest key the --proof emitter's conversion-chain
+// records (see the "CASC-J13 solution-output provenance" section).
+enum {
+  PROV_NONE = 0,      // verbatim problem clause: file() leaf
+  PROV_CNF,           // equality-encoding of CNF clause g_prov_cnf[ix]
+  PROV_HELPER,        // encoding helper axiom: introduced(definition)
+  PROV_UNFOLD,        // def-unfold rewrite: g_prov_unf[ix]
+  PROV_EQGOAL,        // equals-goal reification: g_prov_eqg[ix]
+  PROV_FUNNEL_GOAL,   // false != true funnel goal: parents = every
+                      // negative clause's CNF record
+  PROV_TRIVIAL_GOAL,  // clausification derived $false: ix = CNF clause
+};
+// Capture entry points defined with the provenance module below; the
+// def-unfold / equals-goal transforms (earlier in the file) call them.
+static int  prov_def_new(const TpClause *cl);
+static int  prov_unf_new(const TpClause *cl);
+static void prov_unf_add_def(int unf, int def);
+static int  prov_eqg_new(const TpClause *cl);
 
 static char *tp_read_file(const char *path, size_t *len_out) {
   FILE *fp = fopen(path, "rb");
@@ -583,6 +614,8 @@ static void tp_parse(TpProblem *tp, const char *text) {
     memcpy(cl->rhs, lit + rs, rn); cl->rhs[rn] = '\0';
     cl->neg = neg;
     cl->conj = is_conj;
+    cl->prov_kind = PROV_NONE;
+    cl->prov_ix   = 0;
     if (neg) {
       // uppercase-initial token anywhere in the goal = goal variable
       for (const char *q = lit; *q != '\0' && q < lit + llen; q++) {
@@ -1030,11 +1063,25 @@ static void tp_def_unfold(TpProblem *tp) {
       continue;
     }
     // Commit: rewrite every clause, then drop the definition axiom.
+    // Under --proof, keep the eliminated definition and every
+    // clause's pre-unfold text so the emitter can cite
+    // inference(definition_unfolding, ..., [u<k>, d<j>..]).
+    int def_prov = g_prov_on ? prov_def_new(&tp->cls[def_ix]) : -1;
     for (int i = 0; i < tp->n_cls; i++) {
       if (i == def_ix) continue;
       char nl[TP_SIDE_LEN], nr[TP_SIDE_LEN];
       tp_du_expand_side(tp->cls[i].lhs, nl, fname, nargs, args, body);
       tp_du_expand_side(tp->cls[i].rhs, nr, fname, nargs, args, body);
+      if (def_prov >= 0 && (strcmp(nl, tp->cls[i].lhs) != 0 ||
+                            strcmp(nr, tp->cls[i].rhs) != 0)) {
+        TpClause *cl = &tp->cls[i];
+        if (cl->prov_kind != PROV_UNFOLD) {
+          int u = prov_unf_new(cl);
+          if (u >= 0) { cl->prov_kind = PROV_UNFOLD; cl->prov_ix = u; }
+        }
+        if (cl->prov_kind == PROV_UNFOLD)
+          prov_unf_add_def(cl->prov_ix, def_prov);
+      }
       strcpy(tp->cls[i].lhs, nl);
       strcpy(tp->cls[i].rhs, nr);
     }
@@ -1106,6 +1153,14 @@ static void tp_equals_goal(TpProblem *tp) {
       continue;
     char enc[TP_SIDE_LEN];
     snprintf(enc, sizeof enc, "%s(%s,%s)", eqn, cl->lhs, cl->rhs);
+    // --proof: the reified unit cites the ORIGINAL negative clause
+    // through an equality_encoding node.  A PROV_CNF clause keeps its
+    // provenance (the reification is still an encoding of that same
+    // CNF clause).
+    if (g_prov_on && cl->prov_kind != PROV_CNF) {
+      int e = prov_eqg_new(cl);
+      if (e >= 0) { cl->prov_kind = PROV_EQGOAL; cl->prov_ix = e; }
+    }
     memcpy(cl->lhs, enc, strlen(enc) + 1u);
     snprintf(cl->rhs, sizeof cl->rhs, "%s", fls);
     cl->neg  = 0;
@@ -1121,6 +1176,8 @@ static void tp_equals_goal(TpProblem *tp) {
   snprintf(rfl->rhs, sizeof rfl->rhs, "%s", tru);
   rfl->neg  = 0;
   rfl->conj = 1;
+  rfl->prov_kind = g_prov_on ? PROV_HELPER : PROV_NONE;
+  rfl->prov_ix   = 0;
   tp_scan_term(tp, rfl->lhs);
   tp_scan_term(tp, rfl->rhs);
   // The replacement goal:  true != false.
@@ -1129,6 +1186,8 @@ static void tp_equals_goal(TpProblem *tp) {
   snprintf(gl->rhs, sizeof gl->rhs, "%s", fls);
   gl->neg  = 1;
   gl->conj = 1;
+  gl->prov_kind = g_prov_on ? PROV_HELPER : PROV_NONE;
+  gl->prov_ix   = 0;
   tp_scan_term(tp, gl->lhs);
   tp_scan_term(tp, gl->rhs);
   g_cli_equals_applied = 1;
@@ -3624,6 +3683,7 @@ static void tp_horn_release(TpProblem *tp) {
         snprintf(cl->lhs, sizeof cl->lhs, "%s", lb);
         snprintf(cl->rhs, sizeof cl->rhs, "%s", rb);
         cl->neg = 0; cl->conj = 0;
+        cl->prov_kind = PROV_NONE; cl->prov_ix = 0;
         tp_scan_term(tp, cl->lhs);
         tp_scan_term(tp, cl->rhs);
       }
@@ -3900,6 +3960,13 @@ static void tp_horn_release(TpProblem *tp) {
       if (ke != NULL && atoi(ke) > 0 && atoi(ke) < room) room = atoi(ke);
       g_horn_rank_ground = (ge != NULL && ge[0] != '\0' && ge[0] != '0');
     }
+    // --proof + FOF front-end: released units are consequences whose
+    // hyper-resolution parents the chaining loop does not record, so
+    // a J13-compliant proof cannot cite them ("inference steps must
+    // list exactly those parents that are used") and must not
+    // misrepresent them as file() leaves either.  Keep them out of
+    // the .pr; the engine derives what the proof needs itself.
+    if (g_prov_on && g_cli_fof_applied) room = 0;
     if (g_hrel_n > room) {
       qsort(g_hrel, (size_t)g_hrel_n, sizeof(HRel), horn_rel_cmp);
       u32 *taken = (u32 *)calloc((size_t)TP_MAX_SYMS, sizeof(u32));
@@ -3916,6 +3983,7 @@ static void tp_horn_release(TpProblem *tp) {
       snprintf(cl->lhs, sizeof cl->lhs, "%s", g_hrel[i].l);
       snprintf(cl->rhs, sizeof cl->rhs, "%s", g_hrel[i].r);
       cl->neg = 0; cl->conj = 0;
+      cl->prov_kind = PROV_NONE; cl->prov_ix = 0;
       tp_scan_term(tp, cl->lhs);
       tp_scan_term(tp, cl->rhs);
       released_kept++;
@@ -4238,6 +4306,13 @@ static int fof_lit_classify(const FolLit *lit, Term *l, Term *r) {
 }
 
 // --- clause emission ---------------------------------------------------
+
+// Stamp applied by tp_fof_push to the clause it appends; call sites
+// set it immediately before each push.  Left at 0/0 outside --proof
+// FOF runs, so every other path stays byte-identical.
+static int g_cur_prov_kind = PROV_NONE;
+static int g_cur_prov_ix   = 0;
+
 static void tp_fof_push(TpProblem *tp, const char *lhs, const char *rhs,
                         int neg, int conj) {
   if (strlen(lhs) >= TP_SIDE_LEN || strlen(rhs) >= TP_SIDE_LEN)
@@ -4248,6 +4323,8 @@ static void tp_fof_push(TpProblem *tp, const char *lhs, const char *rhs,
   snprintf(cl->rhs, sizeof cl->rhs, "%s", rhs);
   cl->neg = neg;
   cl->conj = conj;
+  cl->prov_kind = g_cur_prov_kind;
+  cl->prov_ix   = g_cur_prov_ix;
 }
 
 // Serialize one Horn clause as a single unit equation.  `conds` are the
@@ -4389,6 +4466,761 @@ static void fof_emit_neg_extra(TpProblem *tp, Term *lit_l, Term *lit_r,
   tp_fof_push(tp, lbuf, g_fof_true_name, 0, conj);
 }
 
+// ===================================================================
+// CASC-J13 solution-output provenance
+// ===================================================================
+//
+// J13 evaluation requires the solution output to document the
+// derivation from the ORIGINAL formulae: "Proofs must have formulae
+// from the problem as leaves" and "inference steps must list exactly
+// those parents that are used in the inference".  The FOF front-end
+// (tp_fof_load) clausifies and equationalizes silently, so a bare
+// CNFRefutation whose leaves cite file() misrepresents encoded
+// clauses as problem formulae.  This section captures, per TPTP
+// record, the conversion lineage as it actually happened --
+//
+//   fof(f<i>, <role>, <original>, file('<path>', <name>)).
+//   fof(f<i>_neg, negated_conjecture, ~(<original>),
+//       inference(negated_conjecture, [status(cth)], [f<i>])).
+//   fof(f<i>_nnf, plain, <NNF>,
+//       inference(nnf_transformation, [status(thm)], [...])).
+//   fof(f<i>_sk, plain, <skolemized>,
+//       inference(skolemisation, [status(esa),
+//                 new_symbols(skolem, [sk..])], [f<i>_nnf])).
+//   cnf(c<k>, plain, <clause>,
+//       inference(cnf_transformation, [status(esa)], [f<i>_sk])).
+//
+// -- following Vampire's record shapes (the de-facto standard; see
+// its SEU140+2 output).  Engine-proof leaves that came from the
+// encoding then cite inference(equality_encoding, [status(esa)],
+// [c<k>]) instead of file(); encoding helper axioms (the ifeq
+// dispatcher, or/not/eq truth tables, equals-goal reflexivity) are
+// introduced(definition) -- they define fresh symbols, which is
+// exactly TPTP's definition introduction.  def-unfold emits
+// inference(definition_unfolding, [status(thm)], [u<k>, d<j>...])
+// like Vampire.  Everything is captured only under --proof
+// (g_prov_on); non-proof runs and non-FOF inputs are byte-identical.
+
+static int g_prov_on = 0;              // capture enabled (--proof)
+
+typedef struct {
+  char *name, *role, *text;   // record name / role / formula text
+  int   is_conj;              // role conjecture: negated for refutation
+  int   src_cnf;              // source record was cnf(...) (clause text)
+  int   tseitin;              // clausified definitionally
+  u32   sk0, skn;             // Skolem counter range introduced here
+  u32   ts0, tsn;             // Tseitin aux counter range
+  Term  t_nnf, t_sk;          // pass-A stage terms (dead after load)
+  char *vnames;               // packed scope names (nv * PC_NAME)
+  int   nv;
+  char *nnf, *sk;             // serialized stage formulas (pass B)
+  int   emitted;
+} ProvRec;
+
+typedef struct {
+  int   rec;                  // ProvRec index
+  char *text;                 // TPTP literal-disjunction text
+  int   emitted;
+} ProvCnf;
+
+typedef struct {              // def-unfold: pre-unfold clause
+  char *lhs, *rhs;
+  int   neg;
+  int   kind, ix;             // the clause's provenance BEFORE unfolding
+  int   defs[64];             // ProvDef indices applied (64 = round cap)
+  int   n_defs;
+  int   emitted;
+} ProvUnf;
+
+typedef struct {              // def-unfold: eliminated definition axiom
+  char *lhs, *rhs;
+  int   kind, ix;
+  int   emitted;
+} ProvDef;
+
+typedef struct {              // equals-goal: original negative unit
+  char *lhs, *rhs;
+  int   kind, ix;
+  int   emitted;
+} ProvEqg;
+
+static ProvRec *g_prov_rec = NULL; static int g_prov_nrec = 0, g_prov_rec_cap = 0;
+static ProvCnf *g_prov_cnf = NULL; static int g_prov_ncnf = 0;
+static ProvUnf *g_prov_unf = NULL; static int g_prov_nunf = 0, g_prov_unf_cap = 0;
+static ProvDef *g_prov_def = NULL; static int g_prov_ndef = 0, g_prov_def_cap = 0;
+static ProvEqg *g_prov_eqg = NULL; static int g_prov_neqg = 0, g_prov_eqg_cap = 0;
+static int *g_prov_funnel = NULL;  static int g_prov_nfunnel = 0;
+static int  g_prov_trivial_cnf = -1;   // CNF clause that clausified to $false
+
+// Whitespace-normalized copy: newlines/tabs collapse to single spaces
+// (TPTP formula texts wrap across source lines).
+static char *prov_strdup_norm(const char *s, size_t n) {
+  char *out = (char *)malloc(n + 1u);
+  if (out == NULL) return NULL;
+  size_t o = 0;
+  int sp = 1;   // swallow leading whitespace
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (isspace(c)) {
+      if (!sp && o > 0) out[o++] = ' ';
+      sp = 1;
+    } else {
+      out[o++] = (char)c;
+      sp = 0;
+    }
+  }
+  while (o > 0 && out[o - 1] == ' ') o--;
+  out[o] = '\0';
+  return out;
+}
+
+// --- stage-formula serializer (fol Term -> TPTP FOF text) -------------
+// Failure-tolerant: any unsupported shape or buffer overflow sets
+// g_prov_ser_fail and the caller stores NULL -- the affected leaves
+// then fall back to the legacy file() citation instead of aborting a
+// provable run.
+static int g_prov_ser_fail = 0;
+
+static void prov_emit_s(char *buf, size_t cap, size_t *o, const char *s) {
+  size_t l = strlen(s);
+  if (*o + l + 1 >= cap) { g_prov_ser_fail = 1; return; }
+  memcpy(buf + *o, s, l + 1);
+  *o += l;
+}
+
+static int prov_sym_name(u32 lab, char *nm, size_t cap) {
+  if (lab >= FOL_LAB_SKOLEM_BASE)
+    snprintf(nm, cap, "%s%u", g_fof_sk_prefix, lab - FOL_LAB_SKOLEM_BASE);
+  else if (fol_is_tseitin_aux(lab))
+    snprintf(nm, cap, "%s%u", g_fof_def_prefix, lab - FOL_LAB_TSEITIN_BASE);
+  else if (lab >= PC_LAB_BASE && lab < PC_LAB_BASE + (u32)pc_nsyms)
+    snprintf(nm, cap, "%s", pc_sym[lab - PC_LAB_BASE]);
+  else
+    return 0;
+  return 1;
+}
+
+static void prov_var_name(const ProvRec *pr, u32 id, char *nm, size_t cap) {
+  if (pr != NULL && pr->vnames != NULL && id < (u32)pr->nv &&
+      pr->vnames[(size_t)id * PC_NAME] != '\0')
+    snprintf(nm, cap, "%s", &pr->vnames[(size_t)id * PC_NAME]);
+  else
+    snprintf(nm, cap, "X%u", id);
+}
+
+static void prov_ser_term(Term t, const ProvRec *pr,
+                          char *buf, size_t cap, size_t *o) {
+  if (g_prov_ser_fail) return;
+  char nm[PC_NAME + 16];
+  if (term_tag(t) == TAG_FVR) {
+    prov_var_name(pr, term_ext(t), nm, sizeof nm);
+    prov_emit_s(buf, cap, o, nm);
+    return;
+  }
+  if (term_tag(t) != TAG_CTR) { g_prov_ser_fail = 1; return; }
+  u32 lab = term_ext(t);
+  if (lab == PC_LAB_TRUE)  { prov_emit_s(buf, cap, o, "$true");  return; }
+  if (lab == PC_LAB_FALSE) { prov_emit_s(buf, cap, o, "$false"); return; }
+  if (!prov_sym_name(lab, nm, sizeof nm)) { g_prov_ser_fail = 1; return; }
+  prov_emit_s(buf, cap, o, nm);
+  u32 n = term_ctr_n(t);
+  if (n == 0u) return;
+  prov_emit_s(buf, cap, o, "(");
+  for (u32 i = 0; i < n; i++) {
+    if (i > 0) prov_emit_s(buf, cap, o, ",");
+    prov_ser_term(term_ctr_at(t, i), pr, buf, cap, o);
+  }
+  prov_emit_s(buf, cap, o, ")");
+}
+
+static void prov_ser_formula(Term f, const ProvRec *pr,
+                             char *buf, size_t cap, size_t *o) {
+  if (g_prov_ser_fail) return;
+  char nm[PC_NAME + 16];
+  if (term_tag(f) == TAG_FVR) { prov_ser_term(f, pr, buf, cap, o); return; }
+  if (term_tag(f) != TAG_CTR) { g_prov_ser_fail = 1; return; }
+  u32 lab = term_ext(f);
+  u32 n = term_ctr_n(f);
+  switch (lab) {
+  case FOL_LAB_NOT: {
+    Term a = term_ctr_at(f, 0u);
+    if (term_tag(a) == TAG_CTR && term_ext(a) == PC_LAB_EQ &&
+        term_ctr_n(a) == 2u) {
+      prov_ser_term(term_ctr_at(a, 0u), pr, buf, cap, o);
+      prov_emit_s(buf, cap, o, " != ");
+      prov_ser_term(term_ctr_at(a, 1u), pr, buf, cap, o);
+    } else {
+      prov_emit_s(buf, cap, o, "~(");
+      prov_ser_formula(a, pr, buf, cap, o);
+      prov_emit_s(buf, cap, o, ")");
+    }
+    return;
+  }
+  case FOL_LAB_AND:
+  case FOL_LAB_OR: {
+    prov_emit_s(buf, cap, o, "(");
+    for (u32 i = 0; i < n; i++) {
+      if (i > 0) prov_emit_s(buf, cap, o, (lab == FOL_LAB_AND) ? " & " : " | ");
+      prov_ser_formula(term_ctr_at(f, i), pr, buf, cap, o);
+    }
+    prov_emit_s(buf, cap, o, ")");
+    return;
+  }
+  case FOL_LAB_IMP:
+  case FOL_LAB_IFF: {
+    prov_emit_s(buf, cap, o, "(");
+    prov_ser_formula(term_ctr_at(f, 0u), pr, buf, cap, o);
+    prov_emit_s(buf, cap, o, (lab == FOL_LAB_IMP) ? " => " : " <=> ");
+    prov_ser_formula(term_ctr_at(f, 1u), pr, buf, cap, o);
+    prov_emit_s(buf, cap, o, ")");
+    return;
+  }
+  case FOL_LAB_ALL:
+  case FOL_LAB_EX: {
+    prov_emit_s(buf, cap, o, (lab == FOL_LAB_ALL) ? "! [" : "? [");
+    Term cur = f;
+    int first = 1;
+    while (term_tag(cur) == TAG_CTR && term_ext(cur) == lab &&
+           term_ctr_n(cur) == 2u) {
+      Term v = term_ctr_at(cur, 0u);
+      if (term_tag(v) != TAG_FVR) { g_prov_ser_fail = 1; return; }
+      if (!first) prov_emit_s(buf, cap, o, ",");
+      prov_var_name(pr, term_ext(v), nm, sizeof nm);
+      prov_emit_s(buf, cap, o, nm);
+      first = 0;
+      cur = term_ctr_at(cur, 1u);
+    }
+    prov_emit_s(buf, cap, o, "] : (");
+    prov_ser_formula(cur, pr, buf, cap, o);
+    prov_emit_s(buf, cap, o, ")");
+    return;
+  }
+  default:   // atom
+    if (lab == PC_LAB_EQ && n == 2u) {
+      prov_ser_term(term_ctr_at(f, 0u), pr, buf, cap, o);
+      prov_emit_s(buf, cap, o, " = ");
+      prov_ser_term(term_ctr_at(f, 1u), pr, buf, cap, o);
+      return;
+    }
+    prov_ser_term(f, pr, buf, cap, o);
+    return;
+  }
+}
+
+// Collect free variables (a quantifier-free skolemized formula's
+// implicit universals) so the emitted fof record is closed.  Bound
+// occurrences (under a surviving quantifier) are excluded.
+static void prov_free_vars(Term f, u8 *bound, u8 *seen,
+                           u32 *order, u32 *n, u32 max) {
+  if (term_tag(f) == TAG_FVR) {
+    u32 id = term_ext(f);
+    if (id < PC_MAX_VARS && !bound[id] && !seen[id]) {
+      seen[id] = 1u;
+      if (*n < max) order[(*n)++] = id;
+    }
+    return;
+  }
+  if (term_tag(f) != TAG_CTR) return;
+  u32 lab = term_ext(f);
+  if ((lab == FOL_LAB_ALL || lab == FOL_LAB_EX) && term_ctr_n(f) == 2u &&
+      term_tag(term_ctr_at(f, 0u)) == TAG_FVR) {
+    u32 v = term_ext(term_ctr_at(f, 0u));
+    u8 saved = (v < PC_MAX_VARS) ? bound[v] : 0u;
+    if (v < PC_MAX_VARS) bound[v] = 1u;
+    prov_free_vars(term_ctr_at(f, 1u), bound, seen, order, n, max);
+    if (v < PC_MAX_VARS) bound[v] = saved;
+    return;
+  }
+  u32 k = term_ctr_n(f);
+  for (u32 i = 0; i < k; i++)
+    prov_free_vars(term_ctr_at(f, i), bound, seen, order, n, max);
+}
+
+// Serialize a formula, wrapping free variables in an outer `! [..] :`.
+static char *prov_formula_text(Term f, const ProvRec *pr) {
+  static char buf[1 << 18];
+  size_t o = 0;
+  g_prov_ser_fail = 0;
+  u8  bound[PC_MAX_VARS], seen[PC_MAX_VARS];
+  u32 order[PC_MAX_VARS];
+  u32 nfree = 0;
+  memset(bound, 0, sizeof bound);
+  memset(seen, 0, sizeof seen);
+  prov_free_vars(f, bound, seen, order, &nfree, PC_MAX_VARS);
+  if (nfree > 0) {
+    prov_emit_s(buf, sizeof buf, &o, "! [");
+    char nm[PC_NAME + 16];
+    for (u32 i = 0; i < nfree; i++) {
+      if (i > 0) prov_emit_s(buf, sizeof buf, &o, ",");
+      prov_var_name(pr, order[i], nm, sizeof nm);
+      prov_emit_s(buf, sizeof buf, &o, nm);
+    }
+    prov_emit_s(buf, sizeof buf, &o, "] : (");
+    prov_ser_formula(f, pr, buf, sizeof buf, &o);
+    prov_emit_s(buf, sizeof buf, &o, ")");
+  } else {
+    prov_ser_formula(f, pr, buf, sizeof buf, &o);
+  }
+  if (g_prov_ser_fail) return NULL;
+  return strdup(buf);
+}
+
+// Serialize one FolClause as a TPTP cnf literal disjunction (implicit
+// universal quantification; variables named X<id>).
+static char *prov_clause_text(const FolClause *c) {
+  static char buf[1 << 18];
+  size_t o = 0;
+  g_prov_ser_fail = 0;
+  if (c == NULL) return NULL;
+  if (c->n_lits == 0u) return strdup("$false");
+  for (u32 i = 0; i < c->n_lits; i++) {
+    if (i > 0) prov_emit_s(buf, sizeof buf, &o, " | ");
+    Term a = c->lits[i].atom;
+    if (term_tag(a) == TAG_CTR && term_ext(a) == PC_LAB_EQ &&
+        term_ctr_n(a) == 2u) {
+      prov_ser_term(term_ctr_at(a, 0u), NULL, buf, sizeof buf, &o);
+      prov_emit_s(buf, sizeof buf, &o, c->lits[i].sign ? " != " : " = ");
+      prov_ser_term(term_ctr_at(a, 1u), NULL, buf, sizeof buf, &o);
+    } else {
+      if (c->lits[i].sign) prov_emit_s(buf, sizeof buf, &o, "~");
+      if (term_tag(a) == TAG_CTR && term_ext(a) == PC_LAB_TRUE)
+        prov_emit_s(buf, sizeof buf, &o, "$true");
+      else if (term_tag(a) == TAG_CTR && term_ext(a) == PC_LAB_FALSE)
+        prov_emit_s(buf, sizeof buf, &o, "$false");
+      else
+        prov_ser_term(a, NULL, buf, sizeof buf, &o);
+    }
+  }
+  if (g_prov_ser_fail) return NULL;
+  return strdup(buf);
+}
+
+// --- capture (called from tp_fof_load) --------------------------------
+static int prov_rec_new(const char *name, size_t name_len,
+                        const char *role, const char *text, int src_cnf) {
+  if (g_prov_nrec >= g_prov_rec_cap) {
+    g_prov_rec_cap = (g_prov_rec_cap == 0) ? 256 : g_prov_rec_cap * 2;
+    g_prov_rec = (ProvRec *)realloc(g_prov_rec,
+                                    (size_t)g_prov_rec_cap * sizeof(ProvRec));
+    if (g_prov_rec == NULL) { g_prov_on = 0; return -1; }
+  }
+  ProvRec *r = &g_prov_rec[g_prov_nrec];
+  memset(r, 0, sizeof *r);
+  r->name = prov_strdup_norm(name, name_len);
+  r->role = strdup(role);
+  r->text = prov_strdup_norm(text, strlen(text));
+  r->src_cnf = src_cnf;
+  return g_prov_nrec++;
+}
+
+static void prov_rec_stage(int rec, int is_conj, Term nnf, Term sk,
+                           u32 sk0, u32 skn, u32 ts0, u32 tsn, int tseitin,
+                           const PcParse *scope) {
+  if (rec < 0 || rec >= g_prov_nrec) return;
+  ProvRec *r = &g_prov_rec[rec];
+  r->is_conj = is_conj;
+  r->t_nnf = nnf;
+  r->t_sk  = sk;
+  r->sk0 = sk0; r->skn = skn;
+  r->ts0 = ts0; r->tsn = tsn;
+  r->tseitin = tseitin;
+  r->nv = scope->nv;
+  if (scope->nv > 0) {
+    r->vnames = (char *)malloc((size_t)scope->nv * PC_NAME);
+    if (r->vnames != NULL)
+      memcpy(r->vnames, scope->vname, (size_t)scope->nv * PC_NAME);
+  }
+}
+
+// Pass-B serialization: fresh symbol names are final, stage terms
+// still live.  Fills the per-record formula texts and the per-clause
+// CNF texts (g_prov_cnf parallels the load-time cls[] array).
+static void prov_serialize_all(FolClause **cls, const int *cls_rec, int ncl) {
+  g_prov_cnf = (ProvCnf *)calloc((size_t)(ncl + 1), sizeof(ProvCnf));
+  if (g_prov_cnf == NULL) { g_prov_on = 0; return; }
+  g_prov_ncnf = ncl;
+  for (int c = 0; c < ncl; c++) {
+    g_prov_cnf[c].rec = (cls_rec != NULL) ? cls_rec[c] : -1;
+    g_prov_cnf[c].text = prov_clause_text(cls[c]);
+  }
+  for (int r = 0; r < g_prov_nrec; r++) {
+    ProvRec *pr = &g_prov_rec[r];
+    if (pr->t_nnf != 0) pr->nnf = prov_formula_text(pr->t_nnf, pr);
+    if (pr->t_sk != 0 && pr->t_sk != pr->t_nnf)
+      pr->sk = prov_formula_text(pr->t_sk, pr);
+    pr->t_nnf = pr->t_sk = 0;   // heap handles die with the load pass
+  }
+}
+
+// --- transform capture (def-unfold / equals-goal) ----------------------
+static int prov_def_new(const TpClause *cl) {
+  if (g_prov_ndef >= g_prov_def_cap) {
+    g_prov_def_cap = (g_prov_def_cap == 0) ? 16 : g_prov_def_cap * 2;
+    g_prov_def = (ProvDef *)realloc(g_prov_def,
+                                    (size_t)g_prov_def_cap * sizeof(ProvDef));
+    if (g_prov_def == NULL) { g_prov_on = 0; return -1; }
+  }
+  ProvDef *d = &g_prov_def[g_prov_ndef];
+  memset(d, 0, sizeof *d);
+  d->lhs = strdup(cl->lhs);
+  d->rhs = strdup(cl->rhs);
+  d->kind = cl->prov_kind;
+  d->ix   = cl->prov_ix;
+  return g_prov_ndef++;
+}
+
+static int prov_unf_new(const TpClause *cl) {
+  if (g_prov_nunf >= g_prov_unf_cap) {
+    g_prov_unf_cap = (g_prov_unf_cap == 0) ? 64 : g_prov_unf_cap * 2;
+    g_prov_unf = (ProvUnf *)realloc(g_prov_unf,
+                                    (size_t)g_prov_unf_cap * sizeof(ProvUnf));
+    if (g_prov_unf == NULL) { g_prov_on = 0; return -1; }
+  }
+  ProvUnf *u = &g_prov_unf[g_prov_nunf];
+  memset(u, 0, sizeof *u);
+  u->lhs = strdup(cl->lhs);
+  u->rhs = strdup(cl->rhs);
+  u->neg = cl->neg;
+  u->kind = cl->prov_kind;
+  u->ix   = cl->prov_ix;
+  return g_prov_nunf++;
+}
+
+static void prov_unf_add_def(int unf, int def) {
+  if (unf < 0 || unf >= g_prov_nunf || def < 0) return;
+  ProvUnf *u = &g_prov_unf[unf];
+  for (int i = 0; i < u->n_defs; i++) if (u->defs[i] == def) return;
+  if (u->n_defs < (int)(sizeof u->defs / sizeof u->defs[0]))
+    u->defs[u->n_defs++] = def;
+}
+
+static int prov_eqg_new(const TpClause *cl) {
+  if (g_prov_neqg >= g_prov_eqg_cap) {
+    g_prov_eqg_cap = (g_prov_eqg_cap == 0) ? 16 : g_prov_eqg_cap * 2;
+    g_prov_eqg = (ProvEqg *)realloc(g_prov_eqg,
+                                    (size_t)g_prov_eqg_cap * sizeof(ProvEqg));
+    if (g_prov_eqg == NULL) { g_prov_on = 0; return -1; }
+  }
+  ProvEqg *e = &g_prov_eqg[g_prov_neqg];
+  memset(e, 0, sizeof *e);
+  e->lhs = strdup(cl->lhs);
+  e->rhs = strdup(cl->rhs);
+  e->kind = cl->prov_kind;
+  e->ix   = cl->prov_ix;
+  return g_prov_neqg++;
+}
+
+// --- conversion-chain emission -----------------------------------------
+// prov_emit_rec prints the record's fof chain (once); prov_rec_last
+// names the chain's last node.  prov_emit_cnf adds the cnf record.
+// All return 0 when the capture is incomplete (serialization failed),
+// in which case the caller falls back to the legacy file() citation.
+
+static void prov_rec_last(const ProvRec *r, int rec, char *buf, size_t cap) {
+  if (r->sk != NULL)       snprintf(buf, cap, "f%d_sk", rec);
+  else if (r->nnf != NULL) snprintf(buf, cap, "f%d_nnf", rec);
+  else if (r->is_conj)     snprintf(buf, cap, "f%d_neg", rec);
+  else                     snprintf(buf, cap, "f%d", rec);
+}
+
+static int prov_emit_rec(FILE *fp, int rec) {
+  if (rec < 0 || rec >= g_prov_nrec) return 0;
+  ProvRec *r = &g_prov_rec[rec];
+  if (r->text == NULL || r->name == NULL || r->role == NULL) return 0;
+  if (!r->src_cnf && r->nnf == NULL) return 0;
+  if (r->emitted) return 1;
+  r->emitted = 1;
+  const char *form = r->src_cnf ? "cnf" : "fof";
+  fprintf(fp, "%s(f%d, %s, %s, file('%s', %s)).\n",
+          form, rec, r->role, r->text, g_cli_probpath,
+          (r->name[0] != '\0') ? r->name : "unknown");
+  char prev[32];
+  snprintf(prev, sizeof prev, "f%d", rec);
+  if (r->is_conj) {
+    fprintf(fp, "fof(f%d_neg, negated_conjecture, ~(%s), "
+                "inference(negated_conjecture, [status(cth)], [%s])).\n",
+            rec, r->text, prev);
+    snprintf(prev, sizeof prev, "f%d_neg", rec);
+  }
+  if (r->nnf != NULL) {
+    fprintf(fp, "fof(f%d_nnf, plain, %s, "
+                "inference(nnf_transformation, [status(thm)], [%s])).\n",
+            rec, r->nnf, prev);
+    snprintf(prev, sizeof prev, "f%d_nnf", rec);
+  }
+  if (r->sk != NULL) {
+    fprintf(fp, "fof(f%d_sk, plain, %s, "
+                "inference(skolemisation, [status(esa)",
+            rec, r->sk);
+    if (r->skn > r->sk0) {
+      fprintf(fp, ", new_symbols(skolem, [");
+      for (u32 s = r->sk0; s < r->skn; s++)
+        fprintf(fp, "%s%s%u", (s > r->sk0) ? "," : "", g_fof_sk_prefix, s);
+      fprintf(fp, "])");
+    }
+    fprintf(fp, "], [%s])).\n", prev);
+  }
+  return 1;
+}
+
+static int prov_emit_cnf(FILE *fp, int k) {
+  if (g_prov_cnf == NULL || k < 0 || k >= g_prov_ncnf) return 0;
+  ProvCnf *c = &g_prov_cnf[k];
+  if (c->text == NULL) return 0;
+  if (!prov_emit_rec(fp, c->rec)) return 0;
+  if (c->emitted) return 1;
+  c->emitted = 1;
+  ProvRec *r = &g_prov_rec[c->rec];
+  char last[32];
+  prov_rec_last(r, c->rec, last, sizeof last);
+  fprintf(fp, "cnf(c%d, plain, %s, inference(cnf_transformation, "
+              "[status(esa)", k, c->text);
+  if (r->tseitin && r->tsn > r->ts0) {
+    fprintf(fp, ", new_symbols(definition, [");
+    for (u32 s = r->ts0; s < r->tsn; s++)
+      fprintf(fp, "%s%s%u", (s > r->ts0) ? "," : "", g_fof_def_prefix, s);
+    fprintf(fp, "])");
+  }
+  fprintf(fp, "], [%s])).\n", last);
+  return 1;
+}
+
+// Emit the source citation for one provenance-carrying unit into
+// `src` (including the leading ", " and closing ")).\n"), printing
+// whatever chain records it cites to `fp` first.  `neg` picks the
+// disequation rendering for the emitted virtual leaves.  Returns 0
+// (caller falls back to file()) when the chain is unavailable.
+static int prov_src_citation(FILE *fp, int kind, int ix, char *src, size_t cap);
+
+static int prov_emit_unf(FILE *fp, int ix) {
+  if (g_prov_unf == NULL || ix < 0 || ix >= g_prov_nunf) return 0;
+  ProvUnf *u = &g_prov_unf[ix];
+  if (u->lhs == NULL || u->rhs == NULL) return 0;
+  char inner[512];
+  if (!u->emitted) {
+    // Emit the pre-unfold clause and every definition used, each with
+    // its OWN provenance source (file() for verbatim problem clauses).
+    if (!prov_src_citation(fp, u->kind, u->ix, inner, sizeof inner)) return 0;
+    fprintf(fp, "cnf(u%d, %s, %s %s %s%s", ix,
+            u->neg ? "negated_conjecture" : "axiom",
+            u->lhs, u->neg ? "!=" : "=", u->rhs, inner);
+    for (int i = 0; i < u->n_defs; i++) {
+      ProvDef *d = &g_prov_def[u->defs[i]];
+      if (d->emitted) continue;
+      if (d->lhs == NULL || d->rhs == NULL) return 0;
+      if (!prov_src_citation(fp, d->kind, d->ix, inner, sizeof inner)) return 0;
+      fprintf(fp, "cnf(d%d, axiom, %s = %s%s", u->defs[i], d->lhs, d->rhs, inner);
+      d->emitted = 1;
+    }
+    u->emitted = 1;
+  }
+  return 1;
+}
+
+static int prov_src_citation(FILE *fp, int kind, int ix, char *src, size_t cap) {
+  switch (kind) {
+  case PROV_NONE:
+    snprintf(src, cap, ", file('%s')).\n", g_cli_probpath);
+    return 1;
+  case PROV_HELPER:
+    snprintf(src, cap, ", introduced(definition)).\n");
+    return 1;
+  case PROV_CNF:
+    if (!prov_emit_cnf(fp, ix)) return 0;
+    snprintf(src, cap,
+             ", inference(equality_encoding, [status(esa)], [c%d])).\n", ix);
+    return 1;
+  case PROV_UNFOLD: {
+    if (!prov_emit_unf(fp, ix)) return 0;
+    ProvUnf *u = &g_prov_unf[ix];
+    size_t o = (size_t)snprintf(src, cap,
+        ", inference(definition_unfolding, [status(thm)], [u%d", ix);
+    for (int i = 0; i < u->n_defs && o + 16 < cap; i++)
+      o += (size_t)snprintf(src + o, cap - o, ", d%d", u->defs[i]);
+    if (o + 8 >= cap) return 0;
+    snprintf(src + o, cap - o, "])).\n");
+    return 1;
+  }
+  case PROV_EQGOAL: {
+    if (g_prov_eqg == NULL || ix < 0 || ix >= g_prov_neqg) return 0;
+    ProvEqg *e = &g_prov_eqg[ix];
+    if (e->lhs == NULL || e->rhs == NULL) return 0;
+    if (!e->emitted) {
+      char inner[512];
+      if (!prov_src_citation(fp, e->kind, e->ix, inner, sizeof inner)) return 0;
+      fprintf(fp, "cnf(eg%d, negated_conjecture, %s != %s%s",
+              ix, e->lhs, e->rhs, inner);
+      e->emitted = 1;
+    }
+    snprintf(src, cap,
+             ", inference(equality_encoding, [status(esa)], [eg%d])).\n", ix);
+    return 1;
+  }
+  case PROV_FUNNEL_GOAL: {
+    if (g_prov_funnel == NULL || g_prov_nfunnel == 0) return 0;
+    size_t o = (size_t)snprintf(src, cap,
+        ", inference(equality_encoding, [status(esa)], [");
+    for (int i = 0; i < g_prov_nfunnel; i++) {
+      if (!prov_emit_cnf(fp, g_prov_funnel[i])) return 0;
+      if (o + 16 >= cap) return 0;
+      o += (size_t)snprintf(src + o, cap - o, "%sc%d",
+                            (i > 0) ? ", " : "", g_prov_funnel[i]);
+    }
+    if (o + 8 >= cap) return 0;
+    snprintf(src + o, cap - o, "])).\n");
+    return 1;
+  }
+  case PROV_TRIVIAL_GOAL:
+    if (!prov_emit_cnf(fp, ix)) return 0;
+    snprintf(src, cap,
+             ", inference(equality_encoding, [status(esa)], [c%d])).\n", ix);
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+// --- final-unit leaf table ---------------------------------------------
+// Built from the TpProblem AFTER every content transform + canon,
+// i.e. the exact strings the .pr carries: an engine-trace axiom leaf
+// prints back to exactly one of these (either orientation).
+typedef struct { char *l, *r; int neg; int kind, ix; } ProvLeaf;
+static ProvLeaf *g_prov_leaf = NULL;
+static int g_prov_nleaf = 0;
+
+static void prov_build_leaf_table(const TpProblem *tp) {
+  int n = 0;
+  for (int i = 0; i < tp->n_cls; i++)
+    if (tp->cls[i].prov_kind != PROV_NONE) n++;
+  if (n == 0) return;
+  g_prov_leaf = (ProvLeaf *)calloc((size_t)n, sizeof(ProvLeaf));
+  if (g_prov_leaf == NULL) return;
+  for (int i = 0; i < tp->n_cls; i++) {
+    const TpClause *cl = &tp->cls[i];
+    if (cl->prov_kind == PROV_NONE) continue;
+    ProvLeaf *pl = &g_prov_leaf[g_prov_nleaf];
+    pl->l = strdup(cl->lhs);
+    pl->r = strdup(cl->rhs);
+    pl->neg = cl->neg;
+    pl->kind = cl->prov_kind;
+    pl->ix = cl->prov_ix;
+    if (pl->l != NULL && pl->r != NULL) g_prov_nleaf++;
+  }
+}
+
+static const ProvLeaf *prov_leaf_find(const char *l, const char *r, int neg) {
+  for (int i = 0; i < g_prov_nleaf; i++) {
+    const ProvLeaf *pl = &g_prov_leaf[i];
+    if (pl->neg != neg) continue;
+    if ((strcmp(pl->l, l) == 0 && strcmp(pl->r, r) == 0) ||
+        (strcmp(pl->l, r) == 0 && strcmp(pl->r, l) == 0))
+      return pl;
+  }
+  return NULL;
+}
+
+// A failed emission attempt may have printed chain records into a
+// discarded stream; clear the dedup flags so a later (real) emission
+// re-prints every record it cites.
+static void prov_reset_emitted(void) {
+  for (int i = 0; i < g_prov_nrec; i++) g_prov_rec[i].emitted = 0;
+  for (int i = 0; i < g_prov_ncnf; i++) g_prov_cnf[i].emitted = 0;
+  for (int i = 0; i < g_prov_nunf; i++) g_prov_unf[i].emitted = 0;
+  for (int i = 0; i < g_prov_ndef; i++) g_prov_def[i].emitted = 0;
+  for (int i = 0; i < g_prov_neqg; i++) g_prov_eqg[i].emitted = 0;
+}
+
+// --- clausal pre-pass refutation emission ------------------------------
+// When the FOF clausal pre-pass (bounded resolution saturation on the
+// ORIGINAL clauses) derives the empty clause under --proof, its
+// refutation is the honest solution output: conversion chains for the
+// input clauses used, then the recorded resolution steps, ending at
+// $false.  Stashed here (the pre-pass runs before stdout rerouting);
+// main prints it with the SZS status and skips the engine.
+static char *g_cli_prepass_proof = NULL;
+
+static const char *prepass_name(const CnfState *s, u32 id, const int *id2cnf,
+                                int ncl, char *buf, size_t cap) {
+  if (s->trace[id].rule == FOL_INF_INPUT && id2cnf != NULL &&
+      id < (u32)ncl && id2cnf[id] >= 0)
+    snprintf(buf, cap, "c%d", id2cnf[id]);
+  else
+    snprintf(buf, cap, "p%u", id);
+  return buf;
+}
+
+static int prepass_emit_c(FILE *out, CnfState *s, u32 id, u8 *done,
+                          const int *id2cnf, int ncl) {
+  if (id == FOL_NO_PARENT || id >= s->n || done[id]) return 1;
+  done[id] = 1;
+  const FolTrace *t = &s->trace[id];
+  const FolClause *c = cnf_clause_at(s, id);
+  if (t->rule == FOL_INF_INPUT) {
+    int k = (id2cnf != NULL && id < (u32)ncl) ? id2cnf[id] : -1;
+    if (k >= 0 && prov_emit_cnf(out, k)) return 1;
+    // Capture incomplete for this record: cite the file directly so
+    // the DAG stays closed (validator-visible degradation, never an
+    // aborted proof).
+    char *txt = prov_clause_text(c);
+    if (txt == NULL) return 0;
+    fprintf(out, "cnf(p%u, axiom, %s, file('%s')).\n",
+            id, txt, g_cli_probpath);
+    free(txt);
+    return 1;
+  }
+  if (!prepass_emit_c(out, s, t->parent_a, done, id2cnf, ncl)) return 0;
+  if (!prepass_emit_c(out, s, t->parent_b, done, id2cnf, ncl)) return 0;
+  char *txt = prov_clause_text(c);
+  if (txt == NULL) return 0;
+  static const char *rn[] = {
+    "input", "resolution", "factoring", "superposition",
+    "equality_resolution", "equality_factoring", "demodulation" };
+  const char *rule = ((u32)t->rule < sizeof rn / sizeof rn[0])
+                       ? rn[t->rule] : "unknown";
+  fprintf(out, "cnf(p%u, plain, %s, inference(%s, [status(thm)], [", id, txt, rule);
+  char na[32];
+  int first = 1;
+  if (t->parent_a != FOL_NO_PARENT && t->parent_a < s->n) {
+    fputs(prepass_name(s, t->parent_a, id2cnf, ncl, na, sizeof na), out);
+    first = 0;
+  }
+  if (t->parent_b != FOL_NO_PARENT && t->parent_b < s->n) {
+    if (!first) fputs(", ", out);
+    fputs(prepass_name(s, t->parent_b, id2cnf, ncl, na, sizeof na), out);
+  }
+  fputs("])).\n", out);
+  free(txt);
+  return 1;
+}
+
+static void prepass_emit_proof(CnfState *s, const int *id2cnf, int ncl) {
+  u32 root = ~0u;
+  for (u32 i = 0; i < s->n; i++) {
+    const FolClause *c = cnf_clause_at(s, i);
+    if (c != NULL && c->n_lits == 0u) { root = i; break; }
+  }
+  if (root == ~0u) return;
+  char *bufp = NULL;
+  size_t plen = 0;
+  FILE *ms = open_memstream(&bufp, &plen);
+  if (ms == NULL) return;
+  u8 *done = (u8 *)calloc(s->n, 1u);
+  int ok = (done != NULL);
+  if (ok) {
+    fprintf(ms, "%% SZS output start Proof for %s\n", g_cli_probpath);
+    ok = prepass_emit_c(ms, s, root, done, id2cnf, ncl);
+    fprintf(ms, "%% SZS output end Proof for %s\n", g_cli_probpath);
+  }
+  fclose(ms);
+  free(done);
+  if (ok && bufp != NULL) {
+    g_cli_prepass_proof = bufp;
+  } else {
+    free(bufp);
+    prov_reset_emitted();
+  }
+}
+
 // --- distribution blow-up guard ------------------------------------------
 // Estimate the naive-distribution clause count of an NNF+Skolemized
 // formula: a literal counts 1, AND sums, OR multiplies.  Saturates at
@@ -4441,6 +5273,16 @@ static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
   CnfState *s = cnf_init(budget);
   if (s == NULL) return 0;
   cnf_set_select(s, CNF_SELECT_NEGATIVE);
+  // --proof: keep backward-subsumed clauses printable and remember
+  // which CNF record each input clause id maps to, so a refutation
+  // here emits the full conversion-lineage proof.
+  int *id2cnf = NULL;
+  if (g_cli_want_proof) {
+    cnf_set_retain_dead(s);
+    id2cnf = (int *)malloc(sizeof(int) * (size_t)(ncl + 1));
+    if (id2cnf != NULL)
+      for (int i = 0; i <= ncl; i++) id2cnf[i] = -1;
+  }
   // Attach a KBO (all weights 1, precedence = label) so demodulation
   // is ordering-gated; without one the engine demodulates naively and
   // equality-heavy sets rewrite-storm the term heap.
@@ -4455,11 +5297,12 @@ static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
   }
   for (int i = 0; i < ncl; i++) {
     FolClause *c = fol_clause_new(cls[i]->n_lits);
-    if (c == NULL) { cnf_free(s); return 0; }
+    if (c == NULL) { cnf_free(s); free(id2cnf); return 0; }
     for (u32 j = 0; j < cls[i]->n_lits; j++) c->lits[j] = cls[i]->lits[j];
-    cnf_add_clause_goal(s, c, ccnj[i]);   // takes ownership (a dropped
-                            // clause only shrinks the set: a subset
-                            // refutation is still a refutation)
+    i32 cid = cnf_add_clause_goal(s, c, ccnj[i]);   // takes ownership (a
+                            // dropped clause only shrinks the set: a
+                            // subset refutation is still a refutation)
+    if (id2cnf != NULL && cid >= 0 && cid <= ncl) id2cnf[cid] = i;
   }
   // cnf_run with a wall guard and a heap guard: paramodulation storms
   // can flood the term arena (PUZ001+1 burned the whole 134M-cell
@@ -4487,6 +5330,11 @@ static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
   AtpStatus st = s->status;
   u32 steps = s->step;
   u32 nstore = s->n;
+  // Refutation under --proof: stash the full conversion-lineage +
+  // resolution proof BEFORE the state (and its term-heap slice) dies.
+  if ((st == ATP_PROVED || st == ATP_REFUTED) && g_cli_want_proof)
+    prepass_emit_proof(s, id2cnf, ncl);
+  free(id2cnf);
   // THVM_ATP_FOF_SAT_DEBUG=1: dump the live clause set (diagnosis of
   // spurious saturation -- a theorem must never reach QUEUE_EMPTY).
   {
@@ -4544,6 +5392,14 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   FolClause **cls = (FolClause **)malloc(sizeof(FolClause *) * TP_MAX_CLAUSES);
   u8 *ccnj = (u8 *)malloc(TP_MAX_CLAUSES);
   if (cls == NULL || ccnj == NULL) tp_giveup("OOM in FOF front-end");
+  // --proof: conversion-lineage capture (record chain + per-clause
+  // source-record map for the emitted cnf(c<k>, ...) layer).
+  g_prov_on = g_cli_want_proof;
+  int *cls_rec = NULL;
+  if (g_prov_on) {
+    cls_rec = (int *)malloc(sizeof(int) * TP_MAX_CLAUSES);
+    if (cls_rec == NULL) g_prov_on = 0;
+  }
   int ncl = 0;
   int n_conjectures = 0;
   const char *p = text;
@@ -4602,6 +5458,11 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     if (fbuf == NULL) tp_giveup("OOM in FOF front-end");
     memcpy(fbuf, form, form_len);
     fbuf[form_len] = '\0';
+    int rec_ix = -1;
+    if (g_prov_on) {
+      size_t nm_len = (role != NULL) ? (size_t)(role - 1 - body) : 0u;
+      rec_ix = prov_rec_new(body, nm_len, rolebuf, fbuf, rec == pcx);
+    }
     PcParse scope;
     Term f = pc_parse_formula(fbuf, &scope);
     free(fbuf);
@@ -4616,26 +5477,34 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     f = pc_close(f);                     // TPTP: free variables are universal
     if (is_conj) f = fol_mk_not(f);      // refutation: negate the conjecture
     // Clausify WITHOUT resetting the Skolem counter (fresh across records).
+    u32 sk0 = g_fol_skolem_next;
     Term nnf = fol_nnf(f);
     Term sk  = fol_skolemize(nnf);
+    u32 ts0 = g_fol_tseitin_next;
     u32 nc = 0;
     FolClause **recc;
     u32 bound = fof_distrib_bound();
+    int rec_tseitin = 0;
     if (fof_cnf_estimate(sk, bound) > bound) {
       // Naive distribution would blow past the bound: clausify this
       // record definitionally (Tseitin).  The aux counter runs across
       // records (reset once above) so labels never collide.
       recc = fol_tseitin_extract_clauses(sk, &nc);
       g_fof_tseitin_recs++;
+      rec_tseitin = 1;
     } else {
       Term cnf_ = fol_distribute(sk);
       recc = fol_extract_clauses(cnf_, &nc);
     }
     if (recc == NULL) tp_giveup("clausification failed");
+    if (rec_ix >= 0)
+      prov_rec_stage(rec_ix, is_conj, nnf, sk, sk0, g_fol_skolem_next,
+                     ts0, g_fol_tseitin_next, rec_tseitin, &scope);
     for (u32 i = 0; i < nc; i++) {
       if (ncl >= TP_MAX_CLAUSES) tp_giveup("problem exceeds clause bound");
       cls[ncl] = recc[i];
       ccnj[ncl] = (u8)conj_mark;
+      if (cls_rec != NULL) cls_rec[ncl] = rec_ix;
       ncl++;
     }
     free(recc);
@@ -4651,6 +5520,11 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   fof_fresh_const(g_fof_not_name, sizeof g_fof_not_name);
   fof_fresh_prefix(g_fof_sk_prefix, sizeof g_fof_sk_prefix);
   fof_fresh_prefix(g_fof_def_prefix, sizeof g_fof_def_prefix);
+
+  // Conversion-lineage serialization: fresh symbol-family prefixes are
+  // final and the stage terms are still live.
+  if (g_prov_on) prov_serialize_all(cls, cls_rec, ncl);
+  free(cls_rec);
 
   // Pass B: classify + emit.  Negative clauses are collected first so
   // the goal shape (direct vs funnel) is known before emission.
@@ -4680,6 +5554,8 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
       }
     }
     if (drop_clause) continue;
+    g_cur_prov_kind = PROV_CNF;
+    g_cur_prov_ix   = c;
     if (npos > 1) {
       if (fof_or_mode() == 0)
         tp_giveup("FOF equationalization covers the Horn fragment only "
@@ -4691,6 +5567,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     if (npos == 0 && nneg == 0) {
       // empty clause: the input is unsatisfiable outright
       g_cli_fof_trivial = 1;
+      if (g_prov_trivial_cnf < 0) g_prov_trivial_cnf = c;
       continue;
     }
     if (npos == 0) {
@@ -4702,19 +5579,50 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     if (nneg > 0) any_ifeq = 1;
     fof_emit_horn(tp, cond_l, cond_r, nneg, pos_l[0], pos_r[0], 0, ccnj[c]);
   }
+  g_cur_prov_kind = PROV_NONE;
+  g_cur_prov_ix   = 0;
   // Non-Horn input: bounded clausal saturation on the original
   // clauses first (case analysis lives there, not in any equational
-  // encoding).  --proof runs skip it: a pre-pass win has no .pr-level
-  // refutation to print, so they stay on the honest engine path.
-  if (g_fof_or_ncl > 0 && !g_cli_fof_trivial && !g_cli_want_proof &&
+  // encoding).  Under --proof a win emits the recorded resolution
+  // refutation with its conversion lineage (prepass_emit_proof);
+  // main prints the stash and skips the engine.
+  if (g_fof_or_ncl > 0 && !g_cli_fof_trivial &&
       fof_clausal_prepass(cls, ccnj, ncl))
     g_cli_fof_satref = 1;
+  if (g_cli_fof_trivial && g_cli_want_proof && g_prov_trivial_cnf >= 0 &&
+      g_cli_prepass_proof == NULL && g_prov_cnf != NULL) {
+    // Clausification itself derived $false: the whole proof is that
+    // record's conversion chain (plus an explicit terminal $false
+    // when the clause text is a $true/$false literal simplification).
+    char *bufp = NULL;
+    size_t plen = 0;
+    FILE *ms = open_memstream(&bufp, &plen);
+    if (ms != NULL) {
+      fprintf(ms, "%% SZS output start Proof for %s\n", g_cli_probpath);
+      int ok = prov_emit_cnf(ms, g_prov_trivial_cnf);
+      if (ok && g_prov_cnf[g_prov_trivial_cnf].text != NULL &&
+          strcmp(g_prov_cnf[g_prov_trivial_cnf].text, "$false") != 0)
+        fprintf(ms, "cnf(refute_0, plain, $false, "
+                    "inference(evaluation, [status(thm)], [c%d])).\n",
+                g_prov_trivial_cnf);
+      fprintf(ms, "%% SZS output end Proof for %s\n", g_cli_probpath);
+      fclose(ms);
+      if (ok) g_cli_prepass_proof = bufp;
+      else { free(bufp); prov_reset_emitted(); }
+    }
+  }
   if (g_cli_fof_trivial || g_cli_fof_satref) {
     // Trivially unsatisfiable: a joinable goal (plus one dummy axiom so
     // the positive/negative shape gates pass) proves instantly.
     char tt[TP_NAME_LEN + 4];
     snprintf(tt, sizeof tt, "%s", g_fof_true_name);
+    g_cur_prov_kind = g_prov_on ? PROV_HELPER : PROV_NONE;
     tp_fof_push(tp, tt, tt, 0, 0);
+    if (g_prov_on) {
+      g_cur_prov_kind = (g_prov_trivial_cnf >= 0) ? PROV_TRIVIAL_GOAL
+                                                  : PROV_HELPER;
+      g_cur_prov_ix = (g_prov_trivial_cnf >= 0) ? g_prov_trivial_cnf : 0;
+    }
     tp_fof_push(tp, tt, tt, 1, 1);
   } else if (n_neg_cls == 1 && neg_unit) {
     // exactly one negative clause and it is a unit: the goal is direct
@@ -4724,6 +5632,8 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     fof_ser_term(neg_unit_l, &sc, lbuf, sizeof lbuf, &lo);
     if (neg_unit_r == 0) fof_ser_emit(rbuf, sizeof rbuf, &ro, g_fof_true_name);
     else fof_ser_term(neg_unit_r, &sc, rbuf, sizeof rbuf, &ro);
+    g_cur_prov_kind = PROV_CNF;
+    g_cur_prov_ix   = neg_ix[0];
     tp_fof_push(tp, lbuf, rbuf, 1, 1);
   } else if (n_neg_cls >= 1) {
     // several negative clauses: refutation needs ANY of them, but the
@@ -4741,15 +5651,28 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
           cond_l[nneg] = l; cond_r[nneg] = r; nneg++;
         }
       }
+      g_cur_prov_kind = PROV_CNF;
+      g_cur_prov_ix   = neg_ix[k];
       fof_emit_horn(tp, cond_l, cond_r, nneg, 0, 0, 0, ccnj[neg_ix[k]]);
+    }
+    if (g_prov_on) {
+      g_prov_funnel = (int *)malloc(sizeof(int) * (size_t)n_neg_cls);
+      if (g_prov_funnel != NULL) {
+        for (int k = 0; k < n_neg_cls; k++) g_prov_funnel[k] = neg_ix[k];
+        g_prov_nfunnel = n_neg_cls;
+      }
     }
     char gl[TP_NAME_LEN], gr[TP_NAME_LEN];
     snprintf(gl, sizeof gl, "%s", g_fof_false_name);
     snprintf(gr, sizeof gr, "%s", g_fof_true_name);
+    g_cur_prov_kind = g_prov_on ? PROV_FUNNEL_GOAL : PROV_NONE;
+    g_cur_prov_ix   = 0;
     tp_fof_push(tp, gl, gr, 1, 1);
   } else {
     tp_giveup("no negative clause after clausification (nothing to refute)");
   }
+  g_cur_prov_kind = PROV_NONE;
+  g_cur_prov_ix   = 0;
   // Or-lane extras: every negative clause exports its content in
   // rewrite form (unit propagation over or-chains).  Gated on the
   // lane having fired so Horn problems stay byte-identical.
@@ -4765,9 +5688,14 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
           cond_l[nneg] = l; cond_r[nneg] = r; nneg++;
         }
       }
+      g_cur_prov_kind = PROV_CNF;
+      g_cur_prov_ix   = neg_ix[k];
       fof_emit_neg_extra(tp, cond_l, cond_r, nneg, ccnj[neg_ix[k]]);
     }
+    g_cur_prov_kind = PROV_NONE;
+    g_cur_prov_ix   = 0;
   }
+  if (g_prov_on) g_cur_prov_kind = PROV_HELPER;
   if (g_fof_or_used && !g_cli_fof_trivial && !g_cli_fof_satref) {
     char hl[TP_NAME_LEN * 4 + 16];
     snprintf(hl, sizeof hl, "%s(%s,X0)", g_fof_or_name, g_fof_true_name);
@@ -4805,6 +5733,8 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     snprintf(dl, sizeof dl, "%s(X0,X0,X1,X2)", g_fof_ifeq_name);
     tp_fof_push(tp, dl, "X1", 0, 0);
   }
+  g_cur_prov_kind = PROV_NONE;
+  g_cur_prov_ix   = 0;
   for (int c = 0; c < ncl; c++) fol_clause_free(cls[c]);
   free(cls); free(ccnj); free(neg_ix);
   thvm_heap_exhaust_jmp = NULL;
@@ -5031,6 +5961,66 @@ static void cli_print_term(FILE *fp, const PrProblem *pr, Term t) {
   fprintf(fp, "?t%u", tag);
 }
 
+// Buffer variant of cli_print_term: the provenance leaf-match key.
+// Overflow sets *fail (the key then matches nothing and the leaf
+// falls back to the legacy file() citation).
+static void cli_sprint_term(char *buf, size_t cap, size_t *o, int *fail,
+                            const PrProblem *pr, Term t) {
+  char nm[TP_NAME_LEN + 32];
+  if (*fail) return;
+  if (t == 0) { nm[0] = '_'; nm[1] = '\0'; }
+  else if (term_tag(t) == TAG_FVR) {
+    u32 v = term_ext(t);
+    if (pr != NULL && v < pr->n_vars) snprintf(nm, sizeof nm, "%s", pr->vars[v]);
+    else snprintf(nm, sizeof nm, "%s%u", cli_var_prefix(pr), v);
+  } else if (term_tag(t) == TAG_CTR) {
+    u32 lab = term_ext(t);
+    if (pr != NULL && lab >= PR_LABEL_BASE && lab - PR_LABEL_BASE < pr->n_syms)
+      snprintf(nm, sizeof nm, "%s", pr->syms[lab - PR_LABEL_BASE].name);
+    else snprintf(nm, sizeof nm, "f%u", lab);
+  } else {
+    *fail = 1;
+    return;
+  }
+  size_t l = strlen(nm);
+  if (*o + l + 2 >= cap) { *fail = 1; return; }
+  memcpy(buf + *o, nm, l);
+  *o += l;
+  if (t != 0 && term_tag(t) == TAG_CTR && term_ctr_n(t) > 0) {
+    u32 n = term_ctr_n(t);
+    buf[(*o)++] = '(';
+    for (u32 i = 0; i < n && !*fail; i++) {
+      if (i > 0) {
+        if (*o + 1 >= cap) { *fail = 1; return; }
+        buf[(*o)++] = ',';
+      }
+      cli_sprint_term(buf, cap, o, fail, pr, term_ctr_at(t, i));
+    }
+    if (*o + 1 >= cap) { *fail = 1; return; }
+    buf[(*o)++] = ')';
+  }
+  buf[*o] = '\0';
+}
+
+// Provenance lookup for one (lhs, rhs) unit: prints the conversion
+// chain to fp and fills src with the citation tail.  NULL when the
+// unit carries no provenance (legacy file() path).
+static const char *cli_prov_source(FILE *fp, const PrProblem *pr,
+                                   Term lhs, Term rhs, int neg,
+                                   char *src, size_t cap) {
+  if (g_prov_nleaf == 0) return NULL;
+  static char lb[4 * TP_SIDE_LEN], rb[4 * TP_SIDE_LEN];
+  size_t lo = 0, ro = 0;
+  int fail = 0;
+  cli_sprint_term(lb, sizeof lb, &lo, &fail, pr, lhs);
+  cli_sprint_term(rb, sizeof rb, &ro, &fail, pr, rhs);
+  if (fail) return NULL;
+  const ProvLeaf *pl = prov_leaf_find(lb, rb, neg);
+  if (pl == NULL) return NULL;
+  if (!prov_src_citation(fp, pl->kind, pl->ix, src, cap)) return NULL;
+  return src;
+}
+
 // --- derivation closure over the completion trace ------------------
 // Emit the trace entry `ti` (and, recursively, its parents) as cnf()
 // lines; printed[] de-duplicates.  Names: t<ti>.
@@ -5053,8 +6043,14 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
   }
   cli_emit_trace(fp, s, pr, pa, printed);
   cli_emit_trace(fp, s, pr, pb, printed);
+  // FOF-path axiom leaf: resolve the conversion lineage FIRST -- the
+  // chain records it cites must precede this record in the output.
+  const char *prov_src = NULL;
+  char srcbuf[1024];
+  if (reason == TRACE_AXIOM)
+    prov_src = cli_prov_source(fp, pr, lhs, rhs, 0, srcbuf, sizeof srcbuf);
   fprintf(fp, "cnf(t%u, %s, ", ti,
-          (reason == TRACE_AXIOM) ? "axiom" : "plain");
+          (reason == TRACE_AXIOM && prov_src == NULL) ? "axiom" : "plain");
   cli_print_term(fp, pr, lhs);
   fputs(" = ", fp);
   cli_print_term(fp, pr, rhs);
@@ -5063,8 +6059,11 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
     // match it and complete leaf verification; a goal-flattening
     // definition (fresh sFlat constant = subterm) is an introduced
     // definitional extension, not a problem clause, and is sourced as
-    // such.
-    if (cli_term_has_flat_sym(pr, lhs) || cli_term_has_flat_sym(pr, rhs))
+    // such.  An equationalized FOF clause cites its conversion chain
+    // (J13: leaves must be formulae from the problem).
+    if (prov_src != NULL)
+      fputs(prov_src, fp);
+    else if (cli_term_has_flat_sym(pr, lhs) || cli_term_has_flat_sym(pr, rhs))
       fputs(", introduced(definition)).\n", fp);
     else
       fprintf(fp, ", file('%s')).\n", g_cli_problem);
@@ -5239,11 +6238,20 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
     if (resolved2[k] != ATP_TRACE_NONE)
       cli_emit_trace(fp, s, pr, resolved2[k], printed);
   }
+  // FOF-path goal: cite the encoding lineage of the negative unit
+  // (direct goals cite their CNF record; the funnel goal cites every
+  // negative clause's record) -- chains print before the record.
+  const char *goal_src = NULL;
+  char gsrcbuf[1024];
+  goal_src = cli_prov_source(fp, pr, gl, gr, 1, gsrcbuf, sizeof gsrcbuf);
   fprintf(fp, "cnf(goal_%u, negated_conjecture, ", goal_id);
   cli_print_term(fp, pr, gl);
   fputs(" != ", fp);
   cli_print_term(fp, pr, gr);
-  fprintf(fp, ", file('%s')).\n", g_cli_problem);
+  if (goal_src != NULL)
+    fputs(goal_src, fp);
+  else
+    fprintf(fp, ", file('%s')).\n", g_cli_problem);
   Term cur_l = gl, cur_r = gr;
   char prev[32];
   snprintf(prev, sizeof prev, "goal_%u", goal_id);
@@ -5297,7 +6305,11 @@ static void cli_proof_hook(AtpState *s) {
             g_cli_problem);
     g_cli_szs_printed = 1;
   }
-  fprintf(out, "%% SZS output start CNFRefutation for %s\n", g_cli_problem);
+  // FOF-path derivations include fof() conversion records, so the
+  // output form is a Proof; pure-CNF input keeps CNFRefutation
+  // byte-identically.
+  const char *szs_form = g_cli_fof_applied ? "Proof" : "CNFRefutation";
+  fprintf(out, "%% SZS output start %s for %s\n", szs_form, g_cli_problem);
   // Source the goal terms from the ENGINE's GC-rooted slots, NOT the
   // bench PrProblem's parse-time handles.  The PrProblem is not a GC
   // root, so pr->goals_l[]/pr->goal_l dangle after any mid-search GC:
@@ -5333,7 +6345,7 @@ static void cli_proof_hook(AtpState *s) {
     }
     cli_emit_goal_chain(out, s, pr, gl, gr, g, steps, n, printed);
   }
-  fprintf(out, "%% SZS output end CNFRefutation for %s\n", g_cli_problem);
+  fprintf(out, "%% SZS output end %s for %s\n", szs_form, g_cli_problem);
   fflush(out);
   free(printed);
 }
@@ -5918,6 +6930,11 @@ int main(int argc, char **argv) {
       g_cli_tptp_mode = 1;
       g_cli_szs_wanted = szs;
       g_cli_probpath = file;
+      // Conversion-lineage capture rides every --proof run (the FOF
+      // front-end plus the def-unfold / equals-goal transforms); with
+      // no transform fired the leaf table stays empty and the emitted
+      // bytes are unchanged.
+      g_prov_on = g_cli_want_proof;
       char *pre = tp_preprocess(file, raw);
       pre = tp_unquote_names(pre);
       tp_shorten_names(pre);
@@ -5963,6 +6980,18 @@ int main(int argc, char **argv) {
           szs && !g_cli_want_proof) {
         printf("%% SZS status %s for %s\n",
                g_cli_fof_conjecture ? "Theorem" : "Unsatisfiable", file);
+        fflush(stdout);
+        return 0;
+      }
+      // --proof with a stashed front-end refutation (clausal pre-pass
+      // win or a $false at clausification): print the conversion-
+      // lineage proof and skip the engine -- the honest solution
+      // output for these routes.
+      if (g_cli_want_proof && g_cli_prepass_proof != NULL) {
+        if (szs)
+          printf("%% SZS status %s for %s\n",
+                 g_cli_fof_conjecture ? "Theorem" : "Unsatisfiable", file);
+        fputs(g_cli_prepass_proof, stdout);
         fflush(stdout);
         return 0;
       }
@@ -6104,6 +7133,10 @@ int main(int argc, char **argv) {
           free(buf);
         }
       }
+      // --proof: freeze the final unit -> conversion-lineage map from
+      // the exact strings the .pr will carry (post-transform, post-
+      // canon), so engine-trace axiom leaves resolve their source.
+      if (g_prov_on) prov_build_leaf_table(&tp);
       const char *base = strrchr(file, '/');
       base = (base != NULL) ? base + 1 : file;
       char pname[256];
