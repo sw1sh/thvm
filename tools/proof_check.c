@@ -895,6 +895,7 @@ typedef struct {
   char parents[PC_MAX_PARENTS][PC_NAME];
   int  n_parents;
   char new_sym[PC_NAME];      // declared Skolem symbol, or ""
+  int  is_conj;               // TPTP role was `conjecture`
 } PcStep;
 
 static PcStep pc_steps[PC_MAX_STEPS];
@@ -1339,6 +1340,8 @@ static int pc_parse_record(const char *rec) {
   memset(st, 0, sizeof *st);
   pc_trim(args[0]);
   snprintf(st->name, PC_NAME, "%s", args[0]);
+  pc_trim(args[1]);
+  st->is_conj = (strcmp(args[1], "conjecture") == 0);
 
   PcParse scope;
   Term f = pc_parse_formula(args[2], &scope);
@@ -1361,11 +1364,18 @@ static int pc_parse_record(const char *rec) {
 // per-rule step checks
 // ===================================================================
 
-// gather the cited parents' formulas; returns 0 if any is missing.
+// Gather the cited parents' formulas; returns 0 if any is missing.
+// Parents must resolve to STRICTLY EARLIER steps: a derivation is a
+// DAG rooted in the inputs, and accepting a forward or self reference
+// would admit circular justification (a formula "derived" from its own
+// descendants) -- a false VerifiedGood.
 static int pc_parent_formulas(const PcStep *st, Term *out, int *nout) {
+  int self = (int)(st - pc_steps);
   int n = 0;
   for (int i = 0; i < st->n_parents; i++) {
-    int idx = pc_find(st->parents[i]);
+    int idx = -1;
+    for (int j = 0; j < self; j++)
+      if (strcmp(pc_steps[j].name, st->parents[i]) == 0) { idx = j; break; }
     if (idx < 0) return 0;
     if (n < PC_MAX_PARENTS) out[n++] = pc_steps[idx].formula;
   }
@@ -1406,6 +1416,20 @@ static int pc_check_instantiate(const PcStep *st, const char **why) {
 static int pc_check_negconj(const PcStep *st, const char **why) {
   Term par[PC_MAX_PARENTS]; int np;
   if (!pc_parent_formulas(st, par, &np) || np < 1) { *why = "parent missing"; return PC_UNKNOWN; }
+  // The parent must BE the conjecture: negating any other formula (an
+  // axiom, say) yields a refutation of axioms-versus-their-own-negation
+  // that proves nothing about the conjecture, yet can pass the
+  // equivalence check below when the negations happen to align.
+  {
+    int self = (int)(st - pc_steps);
+    int cidx = -1;
+    for (int j = 0; j < self; j++)
+      if (strcmp(pc_steps[j].name, st->parents[0]) == 0) { cidx = j; break; }
+    if (cidx < 0 || !pc_steps[cidx].is_conj) {
+      *why = "negated_conjecture parent is not the conjecture";
+      return PC_INVALID;
+    }
+  }
   Term negp = fol_mk_not(par[0]);
   // fast path: syntactically the negation, up to NNF + renaming.
   if (pc_alpha_eq(fol_nnf(negp), fol_nnf(st->formula))) return PC_VALID;
@@ -1427,6 +1451,80 @@ static int pc_check_negconj(const PcStep *st, const char **why) {
   return PC_UNKNOWN;
 }
 
+// Collect the argument tuple of every L-headed subterm in `t`.  All
+// occurrences must carry the SAME tuple of plain variables (a proper
+// Skolem function is applied uniformly to its scope variables);
+// anything else returns -1.  Returns 0 if no occurrence, 1 otherwise.
+static int pc_sk_args(Term t, u32 L, u32 *av, u32 *na, int *have) {
+  if (term_tag(t) != TAG_CTR) return 0;
+  if (term_ext(t) == L) {
+    u32 n = term_ctr_n(t);
+    if (n > PC_MAX_VARS) return -1;
+    u32 cur[PC_MAX_VARS];
+    for (u32 i = 0; i < n; i++) {
+      Term a = term_ctr_at(t, i);
+      if (term_tag(a) != TAG_FVR) return -1;      // non-variable argument
+      cur[i] = term_ext(a);
+    }
+    if (!*have) { *have = 1; *na = n; for (u32 i = 0; i < n; i++) av[i] = cur[i]; }
+    else if (*na != n) return -1;
+    else for (u32 i = 0; i < n; i++) if (av[i] != cur[i]) return -1;
+    return 1;
+  }
+  int found = 0;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) {
+    int r = pc_sk_args(term_ctr_at(t, i), L, av, na, have);
+    if (r < 0) return -1;
+    found |= r;
+  }
+  return found;
+}
+
+// Replace every L-headed subterm by the variable V.
+static Term pc_sk_abstract(Term t, u32 L, u32 V) {
+  if (term_tag(t) != TAG_CTR) return t;
+  if (term_ext(t) == L) return term_new_fvr(V);
+  u32 n = term_ctr_n(t);
+  if (n == 0) return t;
+  Term kids[REWRITE_MAX_ARITY];
+  if (n > REWRITE_MAX_ARITY) return t;
+  int changed = 0;
+  for (u32 i = 0; i < n; i++) {
+    Term c = term_ctr_at(t, i);
+    kids[i] = pc_sk_abstract(c, L, V);
+    if (kids[i] != c) changed = 1;
+  }
+  return changed ? term_new_ctr(term_ext(t), kids, n) : t;
+}
+
+// Insert `exists V` into the quantifier prefix of `f` at the outermost
+// point where every Skolem argument variable is already universally
+// bound.  V must not fall under a universal that is NOT an argument
+// (the witness would gain a dependence the Skolem term does not have);
+// existentials may be passed freely (their witnesses are functions of
+// the outer universals already).  *ok = 0 when no sound placement
+// exists.
+static Term pc_sk_place(Term f, u32 V, const u32 *av, u32 na, u32 bound,
+                        int *ok) {
+  if (bound == na)
+    return fol_mk_ex(term_new_fvr(V), f);
+  if (term_tag(f) == TAG_CTR && term_ext(f) == PC_LAB_ALL) {
+    Term var = term_ctr_at(f, 0), body = term_ctr_at(f, 1);
+    u32 vid = term_ext(var);
+    int is_arg = 0;
+    for (u32 i = 0; i < na; i++) if (av[i] == vid) is_arg = 1;
+    if (!is_arg) { *ok = 0; return f; }
+    return fol_mk_all(var, pc_sk_place(body, V, av, na, bound + 1, ok));
+  }
+  if (term_tag(f) == TAG_CTR && term_ext(f) == PC_LAB_EX) {
+    Term var = term_ctr_at(f, 0), body = term_ctr_at(f, 1);
+    return fol_mk_ex(var, pc_sk_place(body, V, av, na, bound, ok));
+  }
+  *ok = 0;   // matrix reached with argument variables unbound
+  return f;
+}
+
 static int pc_check_skolemize(int idx, const char **why) {
   const PcStep *st = &pc_steps[idx];
   if (st->new_sym[0] == '\0') { *why = "no declared Skolem symbol"; return PC_UNKNOWN; }
@@ -1442,7 +1540,38 @@ static int pc_check_skolemize(int idx, const char **why) {
       *why = "Skolem symbol is not fresh (reused)";
       return PC_INVALID;
     }
-  return PC_VALID;
+  // The step must relate to its PARENT: freshness alone would let a
+  // "skolemize" step smuggle in an arbitrary claim wrapped around a
+  // fresh symbol.  Soundness condition: the parent entails the
+  // conclusion with the Skolem terms abstracted to an existential
+  // placed exactly where the Skolem's argument tuple binds -- then any
+  // model of the parent interprets the fresh symbol as the witness
+  // function, so the step is a conservative (esa) extension.
+  Term par[PC_MAX_PARENTS]; int np;
+  if (!pc_parent_formulas(st, par, &np) || np < 1) {
+    *why = "skolemize parent missing";
+    return PC_UNKNOWN;
+  }
+  u32 av[PC_MAX_VARS], na = 0;
+  int have = 0;
+  if (pc_sk_args(st->formula, L, av, &na, &have) < 0) {
+    *why = "Skolem symbol applied non-uniformly";
+    return PC_UNKNOWN;
+  }
+  u32 V = pc_max_var(st->formula) + 1u;
+  Term abstracted = pc_sk_abstract(st->formula, L, V);
+  int placed = 1;
+  Term target = pc_sk_place(abstracted, V, av, na, 0, &placed);
+  if (!placed) {
+    *why = "no sound placement for the Skolem witness";
+    return PC_UNKNOWN;
+  }
+  int v = pc_entails(par, np, target);
+  if (v == PC_VALID) return PC_VALID;
+  *why = (v == PC_INVALID)
+       ? "conclusion is not a Skolemization of the parent"
+       : "Skolemization could not be settled";
+  return v;
 }
 
 static int pc_check_entail(const PcStep *st, const char **why) {
@@ -1525,12 +1654,36 @@ static const char * volatile pc_bad_why;
 // unwinds here and the proof abstains -- Unknown -- rather than the
 // process dying with no verdict.  Because ProoVer runs one proof per
 // process, a whole-proof abstain on exhaustion is the sound response.
+static char g_pc_alarm_line[1300];
+static void pc_worker_alarm(int sig) {
+  (void)sig;
+  size_t n = 0;
+  while (g_pc_alarm_line[n] != '\0') n++;
+  if (n > 0) { ssize_t w = write(1, g_pc_alarm_line, n); (void)w; }
+  _exit(0);
+}
+
 static int proof_check_worker(const char *file, int szs) {
   thvm_init();
   const char *cap = getenv("THVM_PROOFCHECK_CAP");
   if (cap != NULL) { long v = atol(cap); if (v > 0) pc_cap = (u32)v; }
   const char *base = strrchr(file, '/');
   base = (base != NULL) ? base + 1 : file;
+  // Hard time bound INSIDE the worker: the forked wrapper's timeout
+  // covers the normal path, but when fork is unavailable the worker
+  // runs inline and a long entailment saturation would otherwise be
+  // unbounded.  On fire: abstain (Unknown) -- sound at zero points.
+  {
+    unsigned wsec = 25;
+    const char *w = getenv("THVM_PROOFCHECK_WALL");
+    if (w != NULL) { long v = atol(w); if (v > 0 && v < 100000) wsec = (unsigned)v; }
+    if (szs) snprintf(g_pc_alarm_line, sizeof g_pc_alarm_line,
+                      "%% SZS status Unknown for %s\n", base);
+    else     snprintf(g_pc_alarm_line, sizeof g_pc_alarm_line,
+                      "Unknown\t%s\n", base);
+    signal(SIGALRM, pc_worker_alarm);
+    alarm(wsec);
+  }
 
   char *text = pc_read(file, NULL);
   if (text == NULL) {
@@ -1661,6 +1814,7 @@ static int proof_check_worker(const char *file, int szs) {
     else                      verdict = "VerifiedGood";
   }
 
+  alarm(0);
   if (szs) printf("%% SZS status %s for %s\n", verdict, base);
   else     printf("%s\t%s\n", verdict, base);
   if (pc_bad >= 0) printf("%% bad step: %s (%s)\n", pc_steps[pc_bad].name, pc_bad_why);
