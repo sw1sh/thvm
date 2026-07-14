@@ -7,77 +7,83 @@ Wolfram Institute, USA</p>
 
 <h3>Architecture</h3>
 
-<p>FindProof [Sys1] is an equational theorem prover for unit-equality problems,
-based on unfailing (ordered) Knuth-Bendix completion [Lib1]. It continues the
-Waldmeister line of provers [Lib3], which won the CASC unit-equality division at
-every competition in which it was ranked between 1997 and 2014; the completion
-loop, critical-pair selection, queue management, and normalisation reproduce the
-Waldmeister design, and on classical algebraic problems the default configuration
-reproduces Waldmeister's critical-pair selection sequence exactly.</p>
+<p>FindProof [Sys1] is an equational theorem prover based on unfailing (ordered)
+Knuth-Bendix completion [Lib1]. It continues the Waldmeister line of provers
+[Lib3], which won the CASC unit-equality division at every competition in which
+it was ranked between 1997 and 2014; the completion loop, critical-pair
+selection, queue management, and normalisation reproduce the Waldmeister design,
+and on classical algebraic problems the default configuration reproduces
+Waldmeister's critical-pair selection sequence exactly.</p>
 
 <p>The axioms are saturated towards a convergent rewrite system while the goals
-are kept normalised, and a proof is reported when the two sides of every goal are
-joined; a conjecture given as several negative units is proved as a multi-goal
-conjunction against one saturation. Equations that cannot be oriented by the
-reduction ordering are used unfailingly, so that both faces are superposed, which
-preserves refutational completeness. The Knuth-Bendix ordering and the
-lexicographic path ordering are supported, with symbol precedences generated
-automatically. Redundant critical pairs are discarded by ground-joinability
-testing, the connectedness criterion, forward and backward subsumption and
-demodulation, and right-hand-side interreduction. Proofs are reconstructed from
-the recorded completion trace, the closing rewrite chain re-derived against the
-final rule set, and rendered as a TPTP CNFRefutation.</p>
+are kept normalised, and a proof is reported when the two sides of every goal
+are joined; a conjecture given as several negative units is proved as a
+multi-goal conjunction against one saturation. Equations that cannot be oriented
+by the reduction ordering are used unfailingly, so that both faces are
+superposed, which preserves refutational completeness. The Knuth-Bendix ordering
+and the lexicographic path ordering are supported, with symbol precedences
+generated automatically. Redundant critical pairs are discarded by
+ground-joinability testing, the connectedness criterion, forward and backward
+subsumption and demodulation, encompassment demodulation, and right-hand-side
+interreduction. Proofs are reconstructed from the recorded completion trace, the
+closing rewrite chain re-derived against the final rule set, and rendered as a
+TPTP CNFRefutation.</p>
 
-<p>The system is not restricted to unit equality. Full first-order input is
-handled by equationalization, in which propositions are Skolemized and encoded as
-equations over a Boolean-algebra axiomatisation, proved by the same completion
-core, and decoded back into a predicate-logic proof.</p>
+<p>Full first-order input is handled by a clausal front-end that reduces FOF to
+the same unit-equational core: formulae are clausified (negation normal form,
+Skolemization, conjunctive normal form), Horn clauses are encoded as unit
+equations over a conditional-application operator with a goal-directed
+unit-release discipline, and non-Horn clauses pass through a Boolean
+disjunction-and-equality lane with Tseitin naming of deep disjunctions. A
+propositional pre-pass decides the near-propositional fragment directly,
+goal-directed axiom selection cuts very large axiom sets to the relevant slice,
+and functors beyond the term bank's arity bound are curried. The entry competes
+in the UEQ and FOF divisions.</p>
 
 <h3>Strategies</h3>
 
 <p>The search is ordered by a weighted critical-pair selection heuristic over a
 priority queue, with a Waldmeister-style selection ratio that interleaves a
 first-in-first-out pick at a fixed cadence, so that fairness, and hence
-completeness, is retained. The default configuration is the Waldmeister strategy
-stack. The full strategy surface, some fifty-five switches covering the reduction
-ordering, critical-pair weighting, weight limits, redundancy criteria, goal
-treatment, and queue management, is exposed as command-line options, and named
-configurations modelled on the published defaults of Waldmeister, Twee, and
-Vampire are provided. In competition a fixed schedule of such configurations is
-run, each in its own child process under a slice of the wall-clock limit, stopping
-at the first proof. The schedule and its slice allocation are derived from
-coverage measurements on the problem sets of previous competitions; strategy
-selection is not tuned to individual problems.</p>
+completeness, is retained. The full strategy surface, some sixty switches
+covering the reduction ordering, critical-pair weighting, weight limits,
+redundancy criteria, goal treatment, and queue management, is exposed as
+command-line options. In competition a fixed portfolio of about twenty
+configurations races concurrently in a bounded process pool, each configuration
+holding the full wall-clock limit, and the first proof wins. The configurations
+are modelled on the published strategies of Waldmeister, Twee, and Vampire, and
+include goal flattening, ground-joinability with connectedness, a
+condensed-detachment discipline for the encoded Horn problems, an equational
+encoding of existential goals, encompassment demodulation, and
+associative-commutative completion; configurations whose trigger pattern is
+absent from the problem exit immediately and free their pool slot. The portfolio
+is derived from coverage measurements on the problem sets of previous
+competitions; strategy selection is not tuned to individual problems.</p>
 
 <h3>Implementation</h3>
 
-<p>FindProof is a single self-contained C program with no external dependencies.
-Terms are represented as flatterms over a term bank; rewriting and subsumption
-retrieval use perfect discrimination trees; the critical-pair queue is a binary
-heap over a compact twelve-byte critical-pair encoding; and the completion trace
-is kept off-heap in a packed store from which proof objects are reconstructed on
-demand. Problems in TPTP CNF syntax [Lib2] are read directly, with include
-directives resolved against the problem directory and the TPTP environment
-variable, and positive units taken as axioms and negative units as goals. Result
+<p>FindProof is a single self-contained, statically linked C program with no
+external dependencies. Terms are represented as flatterms over a term bank;
+rewriting and subsumption retrieval use perfect discrimination trees; the
+critical-pair queue is a binary heap over a compact twelve-byte critical-pair
+encoding; and the completion trace is kept off-heap in a packed store from which
+proof objects are reconstructed on demand. Problems in TPTP CNF and FOF syntax
+[Lib2] are read directly by a recursive-descent parser, with include directives
+resolved against the problem directory and the TPTP environment variable. Result
 lines follow the SZS ontology, with Satisfiable claimed only under a strategy
-with no completeness-breaking pruning and a ground goal. An optional Wolfram
-Language layer drives the same engine and adds proof objects verified by internal
-replay and the predicate-logic equationalization; it is a design feature, not a
-dependency, and the competition binary is the standalone C build. The system is
-available from the author.</p>
+with no completeness-breaking pruning and a ground goal; a hard wall-clock
+guard, independent of the search loop, guarantees exactly one status line within
+the time limit. The system is available from the author.</p>
 
 <h3>Expected Competition Performance</h3>
 
-<p>FindProof is entered in the UEQ and FOF divisions. In UEQ the Waldmeister
-default solves the standard equational classes, including Boolean and ternary
-Boolean algebra, group and ring theory, lattice theory, and combinatory logic,
-and the schedule adds coverage from ground-joinability and connectedness
-configurations on the associative-commutative classes where pure completion
-saturates slowly. The system is expected to trail the leading portfolio provers,
-whose unit-equality schedules have benefited from years of tuning, and a
-mid-field placement is anticipated. In FOF, where full first-order input is
-proved through the equationalization encoding, the entry is exploratory and
-modest performance is expected.</p>
+<p>FindProof is entered in the UEQ and FOF divisions. On the UEQ problem sets of
+the four most recent competitions, run at the competition time limit, FindProof
+solves within a few problems of the winning systems' official scores, and a
+placement close to the leaders is hoped for. In FOF, where full first-order
+input is proved through the clausal equational encoding, the entry is
+exploratory: the encoding pays a translation overhead against the native
+first-order systems, and modest performance is expected.</p>
 
 <h3>References</h3>
 

@@ -11,12 +11,19 @@ Wolfram Institute, USA</p>
 validated by replay: it is parsed into its sequence of annotated formulae, and
 each derived step is validated independently by dispatching on the inference
 rule that introduced it, so that one SZS status is reported for the whole proof
-[Sys2]. Each rule carries a distinct obligation. An instantiate step is required
-to be a substitution instance of a parent; a negated_conjecture step to be the
-negation of its parent, checked by entailment in both directions so that a wrong
-quantifier dual is detected; a skolemize step to introduce a fresh Skolem symbol
-that occurs in the result; and a consequence, horn, or deduction step to be
-entailed by its parents. Entailment is decided by refutation with superposition,
+[Sys2]. The derivation must be acyclic: a parent reference resolves only to a
+strictly earlier step, so circular justification is rejected by construction.
+Each rule then carries a distinct obligation. An instantiate step is required to
+be a substitution instance of a parent; a negated_conjecture step to be the
+negation of a parent that carries the conjecture role, checked by entailment in
+both directions so that a wrong quantifier dual is detected; a skolemize step to
+introduce a fresh Skolem symbol that occurs in the result and, further, its
+conclusion with the Skolem terms abstracted to an existential quantifier, placed
+exactly where the Skolem's argument tuple is bound, must be entailed by the
+parent, so that a step can neither smuggle in an unrelated claim behind a fresh
+symbol nor choose a witness of the wrong arity; and a consequence, horn, or
+deduction step is required to be entailed by its parents. Entailment is decided
+by refutation with superposition,
 resolution, and paramodulation [Lib1]: the parents and the negated conclusion
 are clausified and saturated, and a derived empty clause certifies the step. The
 refutation is required to close with the empty clause. Checking is conservative,
