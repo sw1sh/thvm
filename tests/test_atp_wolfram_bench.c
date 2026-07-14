@@ -218,6 +218,15 @@ static void atp_mem_census(const AtpState *s) {
 // include this translation unit (tools/thvm_atp_cli.c) and need the
 // machine-readable result alongside the printed report.
 int g_atp_bench_status = -1;
+// Unorientable equations in the FINAL rule store, exposed for the same
+// wrappers: without unfailing CP formation (use_unfailing_cp, armed by
+// the WM preset) an unorientable equation contributes NO ordered
+// overlaps, so a QUEUE_EMPTY that leaves one behind is NOT a
+// saturation certificate -- the CLI must answer GaveUp, never
+// Satisfiable (COL002-5's S-combinator axiom is inherently
+// KBO-unorientable and the bare tgt slice "saturated" in 8 steps on
+// the unsatisfiable problem).
+unsigned g_atp_bench_unorient = 0;
 // Pre-teardown hook + context for wrappers: called (when set) right
 // before thvm_atp_free with the final state, while rules/trace/heap
 // are still live -- proof extraction happens here.  g_atp_bench_pr
@@ -2965,6 +2974,11 @@ int main(int argc, char **argv) {
   double el = (double)(clock() - t0) / CLOCKS_PER_SEC;
 
   g_atp_bench_status = (int)st;
+  {
+    unsigned unor = 0;
+    for (u32 k = 0; k < s->n_rules; k++) if (!s->r_orient[k]) unor++;
+    g_atp_bench_unorient = unor;
+  }
   const char *sn =
       (st == ATP_PROVED)      ? "PROVED" :
       (st == ATP_REFUTED)     ? "REFUTED" :

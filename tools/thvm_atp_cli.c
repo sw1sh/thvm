@@ -4924,6 +4924,21 @@ static int cli_strategy_complete(void) {
   // CP drops are not exactly completeness-preserving either: GaveUp,
   // never Satisfiable.
   const char *sj = getenv("THVM_ATP_SIMPLER_JOIN");
+  // Without unfailing CP formation (use_unfailing_cp, armed by the WM
+  // preset; THVM_ATP_UNFAILING overrides either way) an unorientable
+  // equation contributes NO ordered overlaps, so a QUEUE_EMPTY that
+  // leaves one in the final rule store certifies nothing -- the missing
+  // overlaps could refute.  COL002-5's S-combinator axiom is inherently
+  // KBO-unorientable (the unfolding direction duplicates a variable,
+  // the folding direction loses the weight-tie lexicographic compare)
+  // and the bare tgt slice "saturated" in 8 steps / 0 CPs on the
+  // unsatisfiable problem, claiming Satisfiable.
+  const char *wmp = getenv("THVM_ATP_WALDMEISTER");
+  const char *uf  = getenv("THVM_ATP_UNFAILING");
+  u8 unfailing = (uf != NULL && uf[0] != '\0')
+                   ? (uf[0] != '0')
+                   : (wmp != NULL && wmp[0] != '\0' && wmp[0] != '0');
+  if (!unfailing && g_atp_bench_unorient > 0) return 0;
   return !g_cli_goal_existential && !g_cli_sine_applied && !g_cli_horn_applied
       && !g_cli_equals_applied && !g_cli_fof_applied
       && (mw == NULL || *mw == '0') && (am == NULL || *am == '0')
