@@ -166,6 +166,7 @@ static const AtpKnob KNOBS[] = {
   {"horn-keep",              "THVM_ATP_HORN_KEEP",       1, "(Horn kept-release cap)"},
   {"horn-wall",              "THVM_ATP_HORN_WALL",       1, "(Horn chaining wall, seconds)"},
   {"horn-max",               "THVM_ATP_HORN_MAX",        1, "(Horn release-pool cap)"},
+  {"horn-att",               "THVM_ATP_HORN_ATT",        1, "(Horn join-attempt budget)"},
   {"horn-ground",            "THVM_ATP_HORN_GROUND",     1, "(Horn rank: ground tier)"},
   {"horn-bwd",               "THVM_ATP_HORN_BWD",        1, "(Horn backward subgoal cone: 0 disables)"},
   {"horn-bwd-depth",         "THVM_ATP_HORN_BWD_DEPTH",  1, "(Horn backward cone depth cap)"},
@@ -644,14 +645,36 @@ static int tp_sym_cmp(const void *a, const void *b) {
 // drowns before touching the goal.  Select the goal-relevant slice:
 //   gen(s)   = number of clauses containing symbol s (generality);
 //   trigger  = clause C is triggered by symbol s in C iff
-//              gen(s) <= tol * min_gen(C)  (s is near-least-general in C);
+//              gen(s) <= gt  or  gen(s) <= tol * min_gen(C)
+//              (s is near-least-general in C), where min_gen(C) runs
+//              over the gt-GENERAL symbols of C only (gen > gt);
 //   reach    = start from the negative units' symbols; a triggered
 //              clause joins the selection and its symbols become
 //              reached; iterate to fixpoint (or `rounds` levels).
+// The generality threshold gt is Vampire's sine_generality_threshold
+// (Shell/SineUtils.cpp): a near-fresh symbol (gen <= gt) neither
+// defines the clause's min generality nor needs the tolerance test to
+// trigger.  Without it a single fresh constant drags min_gen(C) to 1
+// and no reachable symbol can ever trigger C: CSR058-10's one missing
+// axiom holds the answer-string constant s_terrorist... (gen=1), so
+// its best reached trigger (c_terroristgroup, gen=26) failed
+// 26 <= tol*1 at every tolerance and the cone saturated goal-free.
+// Raw Vampire semantics over-corrects, though: excluding the fresh
+// constant from `mtvisible(c_fresh_mt) = true` hands min_gen to the
+// HUB symbol mtvisible (gen 1746), which then self-triggers -- all
+// 1746 facts join and the cone explodes 66 -> 5141 on CSR058.  The
+// rare-cap rc keeps the exclusion exactly where it helps: the
+// threshold-filtered min stands only if it is still RARE (<= rc);
+// otherwise the plain min over all symbols governs, restoring the
+// old untriggerable state for fresh-defined hub facts.  Swept offline
+// against the dumped selection inputs: gt=1 rc=64 selects every
+// oracle-proof axiom of CSR058 at cone 109 (was: 1 missing at 66) and
+// of CSR036 at tol 1.5 (932), with the hub flood contained.
 // The encoding glue (ifeq4/true, generality in the thousands) never
 // triggers, exactly as SInE intends.  Negative units are always kept.
 // Returns the kept count; compacts tp->cls in place.
-static int tp_sine_pass(TpProblem *tp, double tol, int rounds) {
+static int tp_sine_pass(TpProblem *tp, double tol, int rounds, u32 gt,
+                        u32 rc) {
   int n = tp->n_cls;
   enum { SINE_CS = 48 };
   int (*csym)[SINE_CS] = malloc((size_t)n * sizeof *csym);
@@ -711,13 +734,18 @@ static int tp_sine_pass(TpProblem *tp, double tol, int rounds) {
     u8 grew = 0;
     for (int c = 0; c < n; c++) {
       if (keep[c]) continue;
-      u32 mingen = 0xffffffffu;
-      for (int k = 0; k < csym_n[c]; k++)
-        if (gen[csym[c][k]] < mingen) mingen = gen[csym[c][k]];
+      u32 min_all = 0xffffffffu, min_ex = 0xffffffffu;
+      for (int k = 0; k < csym_n[c]; k++) {
+        u32 g = gen[csym[c][k]];
+        if (g < min_all) min_all = g;
+        if (g > gt && g < min_ex) min_ex = g;
+      }
+      u32 mingen = (min_ex <= rc) ? min_ex : min_all;
       u8 hit = 0;
       for (int k = 0; k < csym_n[c] && !hit; k++) {
         int s = csym[c][k];
-        if (reach[s] && (double)gen[s] <= tol * (double)mingen) hit = 1;
+        if (!reach[s]) continue;
+        if (gen[s] <= gt || (double)gen[s] <= tol * (double)mingen) hit = 1;
       }
       if (hit) {
         keep[c] = 1;
@@ -737,10 +765,29 @@ static int tp_sine_pass(TpProblem *tp, double tol, int rounds) {
   return w;
 }
 
+// Debug: THVM_ATP_SINE_DUMP=path writes the final cone to `path` and
+// the selection's full input set to `path.in`, one clause per line.
+static void tp_sine_dump(const TpProblem *tp, const char *path, int n) {
+  FILE *df = fopen(path, "w");
+  if (df == NULL) return;
+  for (int i = 0; i < n; i++)
+    fprintf(df, "%s %s %s\n", tp->cls[i].lhs,
+            tp->cls[i].neg ? "!=" : (tp->cls[i].conj ? "=c" : "="),
+            tp->cls[i].rhs);
+  fclose(df);
+}
+
 // Driver: progressively tighten until the selection fits the engine
-// caps.  On success rebuilds the signature from the kept clauses (the
+// caps -- TOLERANCE first at full depth, rounds only as a last resort.
+// The CSR knowledge-base proofs ride 15+-trigger-deep chains (CSR036's
+// genls towers, CSR040's tptpcol_k subsumption tower: the Vampire-4.9
+// and E-3.1 oracle proofs use ~16 chain axioms each), so the old
+// rounds={64,3,2,1} ladder amputated exactly the axioms the goal
+// needs whenever the first pass overflowed the 256-equation cap.
+// On success rebuilds the signature from the kept clauses (the
 // dropped ones own most of the 10k-symbol table).  THVM_ATP_SINE=0
-// disables; THVM_ATP_SINE_TOL overrides the first tolerance.
+// disables; THVM_ATP_SINE_TOL overrides the first tolerance;
+// THVM_ATP_SINE_GT overrides the generality threshold.
 static void tp_sine_select(TpProblem *tp) {
   double tol0 = 1.5;
   {
@@ -748,12 +795,37 @@ static void tp_sine_select(TpProblem *tp) {
     if (e != NULL && e[0] != '\0') tol0 = atof(e);
     if (tol0 < 1.0) tol0 = 1.0;
   }
-  const double tols[4]  = { tol0, 1.5, 1.0, 1.0 };
-  const int    rnds[4]  = { 64,   3,   2,   1  };
+  u32 gt = 1;
+  {
+    const char *e = getenv("THVM_ATP_SINE_GT");
+    if (e != NULL && e[0] != '\0') {
+      long v = atol(e);
+      gt = (v < 0) ? 0u : (u32)v;
+    }
+  }
+  u32 rc = 64;
+  {
+    const char *e = getenv("THVM_ATP_SINE_RC");
+    if (e != NULL && e[0] != '\0') {
+      long v = atol(e);
+      rc = (v < 0) ? 0u : (u32)v;
+    }
+  }
+  const char *dump = getenv("THVM_ATP_SINE_DUMP");
+  if (dump != NULL && dump[0] != '\0') {
+    char inpath[1024];
+    snprintf(inpath, sizeof inpath, "%s.in", dump);
+    tp_sine_dump(tp, inpath, tp->n_cls);
+  }
+  const double tols[6]  = { tol0, 1.2, 1.0, 1.0, 1.0, 1.0 };
+  const int    rnds[6]  = { 64,   64,  64,  3,   2,   1  };
   int n0 = tp->n_cls;
-  for (int a = 0; a < 4; a++) {
+  for (int a = 0; a < 6; a++) {
     tp->n_cls = n0;   // each attempt filters the (previously kept) set
-    int kept = tp_sine_pass(tp, tols[a], rnds[a]);
+    int kept = tp_sine_pass(tp, tols[a], rnds[a], gt, rc);
+    fprintf(stderr,
+            "FindProof: SInE pass %d tol=%.2f rounds=%d gt=%u rc=%u "
+            "kept=%d/%d\n", a, tols[a], rnds[a], gt, rc, kept, n0);
     int n_neg = 0;
     for (int i = 0; i < kept; i++) n_neg += tp->cls[i].neg;
     if ((kept - n_neg) <= (int)PR_MAX_EQNS) {
@@ -765,6 +837,7 @@ static void tp_sine_select(TpProblem *tp) {
       }
       fprintf(stderr, "FindProof: SInE selected %d/%d clauses (tol=%.2f)\n",
               kept, n0, tols[a]);
+      if (dump != NULL && dump[0] != '\0') tp_sine_dump(tp, dump, kept);
       g_cli_sine_applied = 1;
       return;
     }
@@ -2156,7 +2229,7 @@ static void horn_fact_add(int l, int r, int nv) {
 typedef struct {
   int cl[HORN_MAX_COND], ct[HORN_MAX_COND];
   int nc, concl_l, concl_r, nv;
-  u8 rel, conj;
+  u8 rel, conj, ghrel;    // ghrel: admitted by the goalward head closure
 } HRule;
 static HRule *g_hr = NULL; static int g_hr_n = 0, g_hr_cap = 0;
 
@@ -2633,7 +2706,13 @@ static int    g_horn_input_nf = 0;   // facts below this index are input units
 // Recomputable: a WIDER tol yields a superset of relevant clauses, so
 // the fixpoint loop can relax the gate iteratively.  Facts that become
 // relevant after being parked as passive re-enter the agenda.
-static void horn_relevance_gate(double tol) {
+// admit_gh: also activate the goalward-head-closure rules (see below)
+// -- deferred to the SECOND phase of the chaining wall, because from
+// the start the ~19k admitted rules dilute a focused agenda into a
+// release flood (CSR036: goal reached at 24k releases under the 511
+// generality-gated rules, buried past 291k with the closure active).
+static void horn_relevance_gate(const TpProblem *tp, double tol,
+                                int admit_gh) {
   u32 *gen   = (u32 *)calloc((size_t)TP_MAX_SYMS, sizeof(u32));
   u32 *stamp = (u32 *)calloc((size_t)TP_MAX_SYMS, sizeof(u32));
   u8  *reach = (u8 *)calloc((size_t)TP_MAX_SYMS, 1);
@@ -2673,6 +2752,67 @@ static void horn_relevance_gate(double tol) {
       horn_syms_reach(g_hr[r].concl_l, reach);
       horn_syms_reach(g_hr[r].concl_r, reach);
     }
+  // Goalward head closure (magic-set shape, RULES only): admit every
+  // rule whose conclusion's root predicate can feed a goal-relevant
+  // predicate, walking conclusion -> condition heads backward to the
+  // fixpoint.  Generality triggering alone cannot see definition-
+  // shaped bridges: CSR040's proof crosses
+  //   firstordercollection (gen 244) -> fixedordercollection (gen 9),
+  // which needs tol >= gen(trigger)/min_gen = 27 -- a tolerance that
+  // floods everything else long before the relax ladder reaches it.
+  // Facts stay generality-gated (they ARE the agenda; admitting rules
+  // is join-time free: a rule only fires when an ACTIVE given matches
+  // one of its condition heads through the rule index).  Encoding
+  // scaffolding (dispatcher functors, true/false) never carries
+  // goal-relevance between rules: every conclusion is `p(...) = true`
+  // shaped, so a `true` head would relate ALL rules.
+  {
+    u8 *gh = (u8 *)calloc((size_t)TP_MAX_SYMS, 1);
+    if (gh == NULL) tp_giveup("OOM in Horn release");
+    #define HORN_GH_ADD(t) do {                                        \
+      int h_ = g_hn[(t)].head;                                         \
+      if (h_ >= 0 && !g_horn_disp[h_] &&                               \
+          strcmp(tp->syms[h_].name, "true") != 0 &&                    \
+          strcmp(tp->syms[h_].name, "false") != 0) gh[h_] = 1;         \
+    } while (0)
+    for (int g = 0; g < g_hg_n; g++) {
+      HORN_GH_ADD(g_hg_l[g]);
+      HORN_GH_ADD(g_hg_r[g]);
+    }
+    for (int f = 0; f < g_hf_n; f++)
+      if (g_hf[f].conj) { HORN_GH_ADD(g_hf[f].l); HORN_GH_ADD(g_hf[f].r); }
+    for (int r = 0; r < g_hr_n; r++)
+      if (g_hr[r].conj)
+        for (int j = 0; j < g_hr[r].nc; j++) {
+          HORN_GH_ADD(g_hr[r].cl[j]);
+          HORN_GH_ADD(g_hr[r].ct[j]);
+        }
+    for (;;) {
+      int grew = 0;
+      for (int r = 0; r < g_hr_n; r++) {
+        if (g_hr[r].ghrel) continue;
+        int hl = g_hn[g_hr[r].concl_l].head, hr = g_hn[g_hr[r].concl_r].head;
+        if (!((hl >= 0 && gh[hl]) || (hr >= 0 && gh[hr]))) continue;
+        g_hr[r].ghrel = 1;
+        grew = 1;
+        for (int j = 0; j < g_hr[r].nc; j++) {
+          HORN_GH_ADD(g_hr[r].cl[j]);
+          HORN_GH_ADD(g_hr[r].ct[j]);
+        }
+      }
+      if (!grew) break;
+    }
+    #undef HORN_GH_ADD
+    int nghr = 0;
+    for (int r = 0; r < g_hr_n; r++)
+      if (g_hr[r].ghrel) {
+        if (admit_gh) g_hr[r].rel = 1;
+        nghr++;
+      }
+    fprintf(stderr, "FindProof: Horn goalward head closure: %d rule(s)%s\n",
+            nghr, admit_gh ? " (active)" : " (phase 2)");
+    free(gh);
+  }
   for (int rd = 0; rd < 24; rd++) {
     int grew = 0;
     for (int f = 0; f < g_hf_n; f++) {
@@ -3579,6 +3719,7 @@ static void tp_horn_release(TpProblem *tp) {
       ru.nv = pnv[c];
       ru.rel = 1;
       ru.conj = tp->cls[c].conj;
+      ru.ghrel = 0;
       for (int i = 0; i < ru.nc; i++) {
         ru.cl[i] = horn_norm(ru.cl[i]);
         ru.ct[i] = horn_norm(ru.ct[i]);
@@ -3648,8 +3789,15 @@ static void tp_horn_release(TpProblem *tp) {
   {
     const char *we = getenv("THVM_ATP_HORN_WALL");
     const char *me = getenv("THVM_ATP_HORN_MAX");
+    const char *ae = getenv("THVM_ATP_HORN_ATT");
     if (we != NULL && atof(we) > 0.0) g_horn_wall = atof(we);
     if (me != NULL && atoi(me) > 0) g_horn_max_rel = atoi(me);
+    // An EXPLICIT wall governs the run: the 10M attempt cap otherwise
+    // stops a deep-KB chain (CSR036: 13k releases, 903 subgoal hits,
+    // goal unreached) long before the granted wall, and the
+    // relevance-gate relax ladder never engages.
+    if (ae != NULL && atol(ae) > 0) g_horn_max_attempts = atol(ae);
+    else if (we != NULL && atof(we) > 0.0) g_horn_max_attempts = (long)4e18;
   }
   g_hrix_head = (int *)malloc((size_t)TP_MAX_SYMS * sizeof(int));
   if (g_hrix_head == NULL) tp_giveup("OOM in Horn release");
@@ -3734,7 +3882,21 @@ static void tp_horn_release(TpProblem *tp) {
     if (te != NULL && atof(te) > 0.0) g_horn_gate_tol = atof(te);
     if (!(rl != NULL && rl[0] == '0') && tp->n_cls > 4000) {
       g_horn_gate_on = 1;
-      horn_relevance_gate(g_horn_gate_tol);
+      horn_relevance_gate(tp, g_horn_gate_tol, 0);
+      // Gated KBs: the relevance-cone chaining IS the credible proof
+      // lane (completion drowns in whatever SInE cone fits the engine
+      // caps), so it earns a real share of the run wall and the
+      // attempt cap steps aside, exactly like the CD lane.  The 2.5s
+      // garnish budget stopped CSR036 at 13k releases with the goal a
+      // few thousand releases out (goal reached at 24k), and CSR040's
+      // gate relax ladder never engaged at all.  Explicit --horn-wall
+      // / THVM_ATP_HORN_ATT still override.
+      if (getenv("THVM_ATP_HORN_WALL") == NULL && !g_horn_cd && !g_bk_on) {
+        double w = 0.4 * g_cli_wall_sec;
+        if (w > g_horn_wall) g_horn_wall = w;
+        if (getenv("THVM_ATP_HORN_ATT") == NULL)
+          g_horn_max_attempts = (long)4e18;
+      }
     }
   }
   // Backward subgoal cone (v2): bounded regression from the goals, a
@@ -3785,8 +3947,42 @@ static void tp_horn_release(TpProblem *tp) {
     if (ratio > 4) ratio = 4;
     int age_cursor = 0;
     long n_pops = 0;
+    int gh_admitted = 0;
     for (;;) {
       while (!g_horn_stop) {
+        // Phase 2 of the gated-KB wall: the generality-gated cone ran
+        // 70% of the budget without closing -- activate the goalward
+        // head-closure rules (the definition-shaped bridges generality
+        // can never trigger, e.g. CSR040's firstordercollection ->
+        // fixedordercollection) and replay every live fact as given so
+        // the new rules see the old units (dedup short-circuits the
+        // replayed joins, exactly like CD deepening).
+        if (g_horn_gate_on && !gh_admitted && !g_horn_goal_reached &&
+            (n_pops & 255) == 0 &&
+            horn_now() - g_horn_t0 > 0.4 * g_horn_wall) {
+          gh_admitted = 1;
+          int newr = 0;
+          for (int r = 0; r < g_hr_n; r++)
+            if (g_hr[r].ghrel && !g_hr[r].rel) { g_hr[r].rel = 1; newr++; }
+          if (newr > 0) {
+            // Replay INPUT facts only: phase-1 releases stay passive
+            // join partners.  A full replay re-pops the phase-1 flood
+            // (hundreds of thousands of small releases) ahead of the
+            // bridge-crossing input facts and the remaining wall never
+            // reaches them; the inputs alone re-fire the newly admitted
+            // rules (CSR040: firstordercollection(c) is an input), and
+            // each new conclusion enters the agenda as usual.
+            for (int f = 0; f < g_horn_input_nf; f++)
+              if (!g_hf[f].dead && g_hf[f].processed) {
+                g_hf[f].processed = 0;
+                g_hf[f].given = 0;
+                horn_heap_push(&g_hheap, f);
+              }
+            age_cursor = 0;
+            fprintf(stderr, "FindProof: Horn head-closure phase 2: "
+                    "%d rule(s) admitted, input agenda replayed\n", newr);
+          }
+        }
         int given = -1;
         // Goal-directed pops preempt the ratio scheme: a fact that
         // unifies with a backward subgoal is a candidate step of a
@@ -3856,7 +4052,18 @@ static void tp_horn_release(TpProblem *tp) {
       if (g_horn_stop || !g_horn_gate_on || g_horn_goal_reached) break;
       if (g_horn_gate_tol > 100.0) break;
       g_horn_gate_tol *= 3.0;
-      horn_relevance_gate(g_horn_gate_tol);
+      horn_relevance_gate(tp, g_horn_gate_tol, 1);
+      if (!gh_admitted) {
+        // The relax admitted the head-closure rules: replay the input
+        // givens so the new rules see the old units (see phase 2).
+        gh_admitted = 1;
+        for (int f = 0; f < g_horn_input_nf; f++)
+          if (!g_hf[f].dead && g_hf[f].processed) {
+            g_hf[f].processed = 0;
+            g_hf[f].given = 0;
+            horn_heap_push(&g_hheap, f);
+          }
+      }
       if (g_horn_steer && g_hg_n > 0 && g_hsg_n < g_hsg_max) {
         g_hsg_stop = 0;
         double cd = horn_now() + 0.25 * g_horn_wall;
