@@ -9156,6 +9156,253 @@ static u32 atp_ifeq_weight_scale_ft(const AtpState *s, const AtpFtCell *fl,
 }
 #endif
 
+// --- ifeq formation-time resolved-guard stripping ---------------------
+//
+// THVM_ATP_IFEQ_STRIP (+ CLI --ifeq-strip): under --lazy-normalize the
+// raw >= KPBehandeln-gate class is queued UNTREATED and scored on its
+// raw size, so a guard-DECIDING superposition -- whose conclusion
+// carries ifeq(t, t, A, B) subterms that one dispatcher rewrite
+// collapses to A -- is buried at guard-tower weight while its treated
+// (< gate) siblings score their normal forms.  When the dispatcher
+// detector armed (AtpState.ifeq_syms), strip every RESOLVED guard from
+// the raw class at CP formation: a single deterministic bottom-up
+// rewrite with the dispatcher axiom (sound -- the axiom is an input
+// equation; the dispatcher rule system is orthogonal, so the collapse
+// is confluent), done WITHOUT the full R-normalize the lazy gate
+// exists to skip.  The queued/scored content becomes the stripped
+// pair; the proof trace keeps the RAW overlap (exactly the treated
+// class's contract -- the pop-time record normalize re-derives from
+// the trace's raw pair, see the record_norm_steps block).  A CP whose
+// stripped size falls BELOW the gate is reclassified into the treated
+// class (full doR treatment + joined-drop), which is what WM would
+// have done had the CP formed at that size.  Off (default): byte-
+// identical engine.
+//
+// THVM_ATP_LAZY_SCORE_NF (+ CLI --lazy-score-nf): the scoring-only
+// companion -- estimate the raw CP's normal-form size with a step-
+// capped doR normalize on a THROWAWAY clone (value 1 = default cap of
+// 4 rewrite steps; N >= 2 = cap N) and feed the estimated per-side
+// counts to the CP priority in place of the raw counts.  The queued
+// bytes/spans stay the raw pair (the lazy pipeline is untouched);
+// selection just stops ranking guard towers by their tower size.
+
+static int atp_ifeq_strip_env(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_IFEQ_STRIP");
+    v = (e != NULL) ? atoi(e) : 0;
+    if (v < 0) v = 0;
+  }
+  return v;
+}
+static u8 atp_ifeq_strip_armed(const AtpState *s) {
+  return (s != NULL && s->use_lazy_normalize && s->n_ifeq_syms > 0u &&
+          atp_ifeq_strip_env() >= 1) ? 1u : 0u;
+}
+// 0 = off; 1 = the default 4-step cap; N >= 2 = cap N.
+static u32 atp_lazy_scorenf_cap(void) {
+  static int v = -2;
+  if (v == -2) {
+    const char *e = getenv("THVM_ATP_LAZY_SCORE_NF");
+    v = (e != NULL) ? atoi(e) : 0;
+    if (v < 0) v = 0;
+  }
+  return (v == 1) ? 4u : (u32)v;
+}
+
+u64 g_ifeq_strip_n_hit     = 0;  // raw CPs with >= 1 resolved guard stripped
+u64 g_ifeq_strip_n_reclass = 0;  // stripped below the gate -> treated class
+u64 g_scorenf_n            = 0;  // raw CPs scored via the capped-NF probe
+u64 g_scorenf_shrunk       = 0;  // probe size strictly below the raw size
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+static inline void atp_ft_mirror_ensure(AtpState *s);
+
+// Does the span contain a RESOLVED detected-dispatcher guard --
+// an ifeq cell whose arg-1/arg-2 spans are syntactically identical?
+// (The strip's trigger: with zero resolved guards no bottom-up
+// collapse can fire, including the cascade case, whose innermost
+// collapse is itself a directly-resolved guard.)
+static u8 atp_ifeq_span_has_resolved(const AtpState *s, const AtpFtCell *t) {
+  if (t == NULL) return 0u;
+  const AtpFtCell *stop = t->end;
+  for (const AtpFtCell *x = t; ; x = x->next) {
+    if (!ft_is_var(x) && (x->arity == 3u || x->arity == 4u) &&
+        atp_ifeq_sym_is(s, ft_ctr_sym(x))) {
+      const AtpFtCell *a0 = x->next;
+      const AtpFtCell *a1 = a0->end->next;
+      if (ft_eq(a0, a1)) return 1u;
+    }
+    if (x == stop) break;
+  }
+  return 0u;
+}
+
+// Preorder cell count of a span == the pair's symbol-count nodes (one
+// cell per constructor / variable; the NUM marker's 3 cells overcount
+// a Term-side 1, acceptable -- the count feeds selection weights and
+// the gate reclass, never an exactness contract).
+static u32 atp_ifeq_span_cells(const AtpFtCell *t) {
+  u32 n = 0u;
+  const AtpFtCell *stop = t->end;
+  for (const AtpFtCell *x = t; ; x = x->next) {
+    n++;
+    if (x == stop) break;
+  }
+  return n;
+}
+
+// Rebuild `c` with every resolved detected-dispatcher guard collapsed
+// to its then-branch.  Bottom-up (children stripped BEFORE the parent
+// guard equality test), so nested collapses cascade to the fixpoint in
+// one pass -- the leftmost-innermost normal form of the orthogonal
+// dispatcher rule system.  Returns a fresh Arena-A span (caller frees
+// the original); NULL on an arity/depth anomaly (caller keeps the
+// original raw pair -- the strip is best-effort selection repair).
+static AtpFtCell *atp_ifeq_strip_build(const AtpState *s, AtpFt *a,
+                                       const AtpFtCell *c, u32 depth) {
+  enum { IFEQ_STRIP_MAX_DEPTH = 200, IFEQ_STRIP_MAX_KIDS = 16 };
+  if (depth > (u32)IFEQ_STRIP_MAX_DEPTH) return NULL;
+  if (ft_is_var(c)) return ftnew_var(a, ft_var_id(c), 0);
+  if (ft_ctr_sym(c) == ATPFT_NUM_MARKER) return ft_clone_span(a, c, 0);
+  u32 n = (u32)c->arity;
+  if (n == 0u) return ftnew_const(a, ft_ctr_sym(c), 0);
+  if (n > (u32)IFEQ_STRIP_MAX_KIDS) return NULL;
+  AtpFtCell *kids[IFEQ_STRIP_MAX_KIDS];
+  const AtpFtCell *k = c->next;
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = atp_ifeq_strip_build(s, a, k, depth + 1u);
+    if (kids[i] == NULL) {
+      for (u32 j = 0; j < i; j++) ft_free_span(a, kids[j], kids[j]->end);
+      return NULL;
+    }
+    k = k->end->next;
+  }
+  if ((n == 3u || n == 4u) && atp_ifeq_sym_is(s, ft_ctr_sym(c)) &&
+      ft_eq(kids[0], kids[1])) {
+    AtpFtCell *keep = kids[2];
+    for (u32 i = 0; i < n; i++) {
+      if (i != 2u) ft_free_span(a, kids[i], kids[i]->end);
+    }
+    return keep;
+  }
+  return ftnew_ctr(a, ft_ctr_sym(c), (u16)n, kids, 0);
+}
+
+// Strip both sides of a stashed span pair in place (replace + free the
+// originals).  Returns the stripped pair's combined cell count, or 0
+// when nothing was stripped / an anomaly kept the originals.
+static u32 atp_ifeq_strip_spans(const AtpState *s, AtpFt *a,
+                                AtpFtCell **pfl, AtpFtCell **pfr) {
+  if (*pfl == NULL || *pfr == NULL) return 0u;
+  if (!atp_ifeq_span_has_resolved(s, *pfl) &&
+      !atp_ifeq_span_has_resolved(s, *pfr)) {
+    return 0u;
+  }
+  AtpFtCell *nl = atp_ifeq_strip_build(s, a, *pfl, 0u);
+  if (nl == NULL) return 0u;
+  AtpFtCell *nr = atp_ifeq_strip_build(s, a, *pfr, 0u);
+  if (nr == NULL) {
+    ft_free_span(a, nl, nl->end);
+    return 0u;
+  }
+  ft_free_span(a, *pfl, (*pfl)->end);
+  ft_free_span(a, *pfr, (*pfr)->end);
+  *pfl = nl;
+  *pfr = nr;
+  return atp_ifeq_span_cells(nl) + atp_ifeq_span_cells(nr);
+}
+
+// Term-route strip (the classic build's raw class: real cp_lhs/cp_rhs
+// Terms).  On a strip hit writes the stripped Terms back and returns
+// the new combined node count; 0 = untouched.
+static u32 atp_ifeq_strip_terms(AtpState *s, Term *lhs, Term *rhs) {
+  atp_ft_mirror_ensure(s);
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *fl = ft_from_term(a, *lhs, 0);
+  AtpFtCell *fr = ft_from_term(a, *rhs, 0);
+  u32 sz = atp_ifeq_strip_spans(s, a, &fl, &fr);
+  if (sz != 0u) {
+    *lhs = ft_to_term(fl);
+    *rhs = ft_to_term(fr);
+  }
+  ft_free_span(a, fl, fl->end);
+  ft_free_span(a, fr, fr->end);
+  return sz;
+}
+
+// Emit-route strip (the raw >= gate class serialized straight to bytes
+// by vcp_emit_fused / vcp_ft_emit_fused): decode the scratch bytes to
+// spans, and on a strip hit CONVERT the push to the treated-stash
+// route -- the stripped spans become the queue payload (ftp_pack_fused
+// at the heap push re-packs + re-weighs them) while the emitted raw
+// bytes stay in the scratch as the stash's eager raw-pair record
+// (raw_len), exactly what the trace store consumes.  The caller owns
+// the stash release after the push (the former's tail only disarms the
+// emit).  Returns the stripped size (hijacked) or 0 (emit untouched).
+static u32 atp_ifeq_strip_hijack_emit(AtpState *s) {
+  atp_ft_mirror_ensure(s);
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  const u8 *pp = g_acp_scratch;
+  AtpFtCell *fl = acp_unpack_term_ft(a, &pp, 0);
+  AtpFtCell *fr = acp_unpack_term_ft(a, &pp, 0);
+  u32 sz = atp_ifeq_strip_spans(s, a, &fl, &fr);
+  if (sz == 0u) {
+    ft_free_span(a, fl, fl->end);
+    ft_free_span(a, fr, fr->end);
+    return 0u;
+  }
+  g_vcp_treat.fl      = fl;
+  g_vcp_treat.fr      = fr;
+  g_vcp_treat.raw_len = g_vcp_emit.len;   // raw bytes already in scratch
+  g_vcp_treat.lo      = NULL;             // no deferred-emit operands
+  g_vcp_treat.sub     = NULL;
+  g_vcp_treat.rin     = NULL;
+  g_vcp_treat.ro      = NULL;
+  g_vcp_treat.subst   = NULL;
+  g_vcp_treat.armed   = 1u;
+  g_vcp_emit.armed    = 0u;
+  g_acp_fuse.valid    = 0u;   // the emit's weigh state died with it
+  return sz;
+}
+
+// Fix-2 probe: per-side normal-form size ESTIMATE for a raw-class CP
+// -- step-capped doR normalize on throwaway clones.  Returns 1 with
+// *nl/*nr set; 0 = no source (caller keeps the raw counts).
+static u8 atp_cp_lazy_scorenf_probe(AtpState *s, const u8 *packed,
+                                    Term lhs, Term rhs, u32 cap,
+                                    u32 *nl, u32 *nr) {
+  atp_ft_mirror_ensure(s);
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *fl = NULL, *fr = NULL;
+  if (g_vcp_treat.armed && g_vcp_treat.fl != NULL &&
+      g_vcp_treat.fr != NULL) {
+    fl = ft_clone_span(a, g_vcp_treat.fl, 0);
+    fr = ft_clone_span(a, g_vcp_treat.fr, 0);
+  } else if (packed != NULL) {
+    const u8 *pp = packed;
+    fl = acp_unpack_term_ft(a, &pp, 0);
+    fr = acp_unpack_term_ft(a, &pp, 0);
+  } else if (lhs != 0 && rhs != 0 && term_tag(lhs) != TAG_NUM &&
+             term_tag(rhs) != TAG_NUM) {
+    fl = ft_from_term(a, lhs, 0);
+    fr = ft_from_term(a, rhs, 0);
+  }
+  if (fl == NULL || fr == NULL) {
+    if (fl != NULL) ft_free_span(a, fl, fl->end);
+    if (fr != NULL) ft_free_span(a, fr, fr->end);
+    return 0u;
+  }
+  fl = atp_rules_only_normalize_ft(s, fl, cap);
+  fr = atp_rules_only_normalize_ft(s, fr, cap);
+  *nl = atp_ifeq_span_cells(fl);
+  *nr = atp_ifeq_span_cells(fr);
+  ft_free_span(a, fl, fl->end);
+  ft_free_span(a, fr, fr->end);
+  return 1u;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
 // --- tgt-sel: goal-targeted CP-selection weights ----------------------
 //
 // A SELECTION-side companion to the tgt preprocessing port (Vampire's
@@ -13157,8 +13404,31 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
       g_acp_pack_n_treated++;
     }
   }
-  atp_cp_heap_insert_packed(s, packed, cp_nodes, lhs, rhs, trace,
-                            is_ultimate, lhs_nodes, g_cp_push_kind);
+  // Normalized-size CP scoring under lazy-normalize (THVM_ATP_LAZY_
+  // SCORE_NF, doc block at atp_ifeq_strip_env): the raw class weighs
+  // on a step-capped-NF per-side size estimate instead of its raw
+  // tower size.  Score-only -- the queued bytes/spans and every
+  // weight-cap verdict above keep the true raw counts.  (The TWEE
+  // weight mode ignores the count base -- atp_cp_twee_fused_base --
+  // so the override is inert there.)
+  u32 score_nodes = cp_nodes, score_lhs = lhs_nodes;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (raw_untreated && s->use_lazy_normalize) {
+    u32 nf_cap = atp_lazy_scorenf_cap();
+    if (nf_cap > 0u) {
+      u32 nl = 0u, nr = 0u;
+      if (atp_cp_lazy_scorenf_probe(s, packed, lhs, rhs, nf_cap,
+                                    &nl, &nr)) {
+        g_scorenf_n++;
+        if (nl + nr < cp_nodes) g_scorenf_shrunk++;
+        score_nodes = nl + nr;
+        score_lhs   = nl;
+      }
+    }
+  }
+#endif
+  atp_cp_heap_insert_packed(s, packed, score_nodes, lhs, rhs, trace,
+                            is_ultimate, score_lhs, g_cp_push_kind);
   g_acp_fuse.valid = 0u;   // the fused weigh state is consume-once
   g_twee_dbg_ctx = 0u;
 }
@@ -26227,6 +26497,10 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // WM KPBehandelt >=50 raw class: queued untreated, weighed on the
     // raw pair, bypasses the auto-MaxWeight stash (see below).
     u8 raw_untreated = 0u;
+    // ifeq-strip emit hijack (see atp_ifeq_strip_hijack_emit): this CP's
+    // treat stash is OWNED HERE, not by the walk former -- released
+    // after the push (or at the joined drop) below.
+    u8 strip_hijack  = 0u;
     u64 _ph_push_t0 = atp_phase_now();
     g_atp_pushn_active = 1u;
     // MNF gate (kept even though lazy defaults to off now): when the WL
@@ -26311,6 +26585,49 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       } else {
         joinable = 0u;
         raw_untreated = 1u;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+        // Formation-time resolved-guard stripping (THVM_ATP_IFEQ_STRIP,
+        // doc block at atp_ifeq_strip_env).  Emit-routed raw CPs are
+        // hijacked onto the treated-stash route with stripped spans;
+        // classic-build raw CPs strip their Terms in place.  A strip
+        // below the KPBehandeln gate reclassifies the CP into the
+        // treated class (full doR treatment + joined-drop).
+        if (atp_ifeq_strip_armed(s) &&
+            !s->use_perm_subsume && !s->use_rule_subsume_drop &&
+            !s->use_queue_subsume) {
+          u32 ssz = 0u;
+          if (g_vcp_emit.armed) {
+            ssz = atp_ifeq_strip_hijack_emit(s);
+            if (ssz != 0u) strip_hijack = 1u;
+          } else if (!g_vcp_treat.armed && cp_lhs != 0 && cp_rhs != 0 &&
+                     term_tag(cp_lhs) != TAG_NUM &&
+                     term_tag(cp_rhs) != TAG_NUM) {
+            ssz = atp_ifeq_strip_terms(s, &cp_lhs, &cp_rhs);
+          }
+          if (ssz != 0u) {
+            g_ifeq_strip_n_hit++;
+            if (ssz < WM_BEHANDELN_GATE) {
+              g_ifeq_strip_n_reclass++;
+              raw_untreated = 0u;
+              s->n_cps_push_normalized++;
+              if (strip_hijack) {
+                i64 _jb = ftnet_now();
+                joinable = vcp_treat_joinable(s);
+                g_ftnet_join += ftnet_now() - _jb;
+                // Joined hijacked stash: consumed here -- the generic
+                // joined drop below reads nothing from it, and the
+                // former's tail only disarms the emit.
+                if (joinable) {
+                  vcp_treat_release(s);
+                  strip_hijack = 0u;
+                }
+              } else {
+                joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+              }
+            }
+          }
+        }
+#endif
       }
     } else {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
@@ -26673,6 +26990,12 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
 #endif
     }
     g_cp_push_fused = 0u;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // Hijack-owned stash (ifeq-strip): free un-adopted spans + disarm.
+    // A CPQ insert NULLed fl/fr on adopt; the packed-byte queue leaves
+    // them here.  The walk former's tail only disarms its emit.
+    if (strip_hijack) vcp_treat_release(s);
+#endif
     if (g_atp_phase_detail) g_atp_cpg_us_pack += atp_now_us() - _dpk_t0;
     g_cp_uid_a = g_cp_uid_b = 0u;
     if (g_cptr_active)

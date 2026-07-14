@@ -3100,6 +3100,18 @@ int main(int argc, char **argv) {
   printf("   lazy-normalize=%u  push-time full-R normalizes=%llu\n",
          s->use_lazy_normalize,
          (unsigned long long)s->n_cps_push_normalized);
+  {
+    extern u64 g_ifeq_strip_n_hit, g_ifeq_strip_n_reclass;
+    extern u64 g_scorenf_n, g_scorenf_shrunk;
+    if (g_ifeq_strip_n_hit != 0u || g_scorenf_n != 0u) {
+      printf("   ifeq-strip: stripped=%llu reclassified=%llu"
+             "  score-nf: probed=%llu shrunk=%llu\n",
+             (unsigned long long)g_ifeq_strip_n_hit,
+             (unsigned long long)g_ifeq_strip_n_reclass,
+             (unsigned long long)g_scorenf_n,
+             (unsigned long long)g_scorenf_shrunk);
+    }
+  }
   if (g_atp_phase_enabled) {
     double w = (el > 0.0) ? el : 1.0;
     u64 sumus = g_atp_phase_us_pop_normalize + g_atp_phase_us_cp_gen +
