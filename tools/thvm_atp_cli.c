@@ -273,6 +273,8 @@ enum {
   PROV_FUNNEL_GOAL,   // false != true funnel goal: parents = every
                       // negative clause's CNF record
   PROV_TRIVIAL_GOAL,  // clausification derived $false: ix = CNF clause
+  PROV_HORN,          // Horn-chaining released unit: g_hpr[ix] carries
+                      // the hyper-resolution derivation record
 };
 // Capture entry points defined with the provenance module below; the
 // def-unfold / equals-goal transforms (earlier in the file) call them.
@@ -1607,6 +1609,7 @@ static void tp_canon_input(TpProblem *tp) {
 // pass is a no-op unless a dispatcher axiom is detected.
 
 static int g_cli_horn_applied = 0;
+static int g_prov_on;   // --proof lineage capture (provenance module below)
 
 // Terms live in a growable node/arg arena.  head >= 0 is an index
 // into the TpProblem symbol table; head < 0 is variable -(v+1) with v
@@ -1854,8 +1857,12 @@ static int horn_dedup_add(const char *key) {   // 1 = new
 }
 
 // --- facts, rules, head index ------------------------------------------
+// src (--proof provenance): where this fact came from -- a release
+// index (>= 0), an input-clause snapshot (~g_hpc index, < 0), or
+// HORN_SRC_NONE when capture is off / unavailable.
+#define HORN_SRC_NONE (-(1 << 30))
 typedef struct {
-  int l, r, nv, size;
+  int l, r, nv, size, src;
   u8 processed, sghit, rel, conj, given, dead;
 } HFact;
 static HFact *g_hf = NULL; static int g_hf_n = 0, g_hf_cap = 0;
@@ -2213,6 +2220,7 @@ static void horn_fact_add(int l, int r, int nv) {
     dt_insert(r, g_hf_n, 1);
   }
   g_hf[g_hf_n].l = l; g_hf[g_hf_n].r = r; g_hf[g_hf_n].nv = nv;
+  g_hf[g_hf_n].src = HORN_SRC_NONE;
   g_hf[g_hf_n].size = horn_size(l) + horn_size(r);
   g_hf[g_hf_n].processed = 0;
   g_hf[g_hf_n].sghit = 0;
@@ -2229,6 +2237,7 @@ static void horn_fact_add(int l, int r, int nv) {
 typedef struct {
   int cl[HORN_MAX_COND], ct[HORN_MAX_COND];
   int nc, concl_l, concl_r, nv;
+  int hpc;                // --proof: g_hpc snapshot of the rule clause (-1 off)
   u8 rel, conj, ghrel;    // ghrel: admitted by the goalward head closure
 } HRule;
 static HRule *g_hr = NULL; static int g_hr_n = 0, g_hr_cap = 0;
@@ -2265,6 +2274,7 @@ typedef struct {
   int goal_hit, sg_hit, goal_syms, ground, n_weak, size, order;
   int grp, w;   // head-symbol group + within-group rank (diversity quota)
   int dead;     // back-subsumed (CD lane): never appended to the engine
+  int prov;     // --proof: g_hpr derivation record (-1 = none/failed)
 } HRel;
 static HRel *g_hrel = NULL; static int g_hrel_n = 0, g_hrel_cap = 0;
 
@@ -2279,7 +2289,102 @@ static u8 *g_horn_disp = NULL;   // per symbol id: 1 = dispatcher functor
 // interleave it with or/not through implies(X,Y) = or(not(X),Y).
 // Expansion preserves equational consequence, so releases stay sound.
 static int *g_hdef_l = NULL, *g_hdef_r = NULL;   // per symbol: node or -1
+static int *g_hdef_cls = NULL;                   // per symbol: defining clause
 static int g_hexp_fail = 0, g_hexp_limit = 0;
+
+// --- release provenance capture (PROV_HORN; --proof runs only) ---------
+// Each accepted release records the positive hyper-resolution step that
+// produced it: the rule clause, the fact bound at every condition (an
+// input clause or a prior release), and the definitional-expansion
+// axioms used to normalize those parents into the chaining alphabet.
+// The proof emitter materializes the cited cone as cnf(h<k>, ...,
+// inference(hyper_resolution, ...)) records, so a released unit the
+// engine refutation cites is a derived record with problem-formula
+// leaves instead of a fake file() leaf (CASC-J13).  Cap-bounded like
+// the release pool: past the caps a release carries a TRUNCATED record
+// and is excluded from --proof engine input (the pre-provenance
+// behavior for that unit) -- never misrepresented.
+#define HORN_PROV_DEFS     12         // def parents per clause / per step
+#define HORN_PROV_MAX_REL  (1 << 20)  // recorded releases
+#define HORN_PROV_MAX_POOL (1 << 23)  // parent-pool ints
+typedef struct {   // snapshot of an input clause the chaining used
+  char *l, *r;
+  int  conj, kind, ix;               // TpClause role + its own provenance
+  int  nd, defs[HORN_PROV_DEFS];     // g_hpc defs its normalization expanded
+  u8   trunc, emitted;
+} HProvCls;
+static HProvCls *g_hpc = NULL; static int g_hpc_n = 0, g_hpc_cap = 0;
+static int *g_hpc_of = NULL;    // per input-clause index (horn-pass lifetime)
+typedef struct {   // one release's hyper-resolution step
+  char *l, *r;                       // released unit (ownership taken
+                                     // from the HRel strings at cleanup)
+  int rule;                          // g_hpc index of the rule clause
+  int po;                            // offset into g_hpp
+  u16 nf, nd;                        // fact parents / def parents
+  u8  trunc, emitted;
+} HPr;
+static HPr *g_hpr = NULL; static int g_hpr_n = 0, g_hpr_cap = 0;
+// Pool layout per release: nf fact refs (>= 0 = release index, < 0 =
+// ~g_hpc index) then nd g_hpc def indices.
+static int *g_hpp = NULL; static int g_hpp_n = 0, g_hpp_cap = 0;
+
+// Defs touched by the current clause normalization (clause indices).
+static int g_hdt[HORN_PROV_DEFS];
+static int g_hdt_n = 0, g_hdt_over = 0;
+
+static void horn_prov_touch_reset(void) { g_hdt_n = 0; g_hdt_over = 0; }
+
+static void horn_prov_def_touch(int f) {
+  int c = (g_hdef_cls != NULL) ? g_hdef_cls[f] : -1;
+  if (c < 0) { g_hdt_over = 1; return; }
+  for (int i = 0; i < g_hdt_n; i++) if (g_hdt[i] == c) return;
+  if (g_hdt_n >= HORN_PROV_DEFS) { g_hdt_over = 1; return; }
+  g_hdt[g_hdt_n++] = c;
+}
+
+// Intern input clause c into the snapshot table; -1 on failure.  The
+// snapshot is taken NOW because SInE compacts tp->cls after the pass.
+static int horn_prov_cls(const TpProblem *tp, int c) {
+  if (!g_prov_on || g_hpc_of == NULL || c < 0 || c >= tp->n_cls) return -1;
+  if (g_hpc_of[c] >= 0) return g_hpc_of[c];
+  if (g_hpc_n >= g_hpc_cap) {
+    g_hpc_cap = (g_hpc_cap == 0) ? 256 : g_hpc_cap * 2;
+    g_hpc = (HProvCls *)realloc(g_hpc, (size_t)g_hpc_cap * sizeof(HProvCls));
+    if (g_hpc == NULL) tp_giveup("OOM in Horn release");
+  }
+  HProvCls *pc = &g_hpc[g_hpc_n];
+  memset(pc, 0, sizeof *pc);
+  pc->l = strdup(tp->cls[c].lhs);
+  pc->r = strdup(tp->cls[c].rhs);
+  pc->conj = tp->cls[c].conj;
+  pc->kind = tp->cls[c].prov_kind;
+  pc->ix   = tp->cls[c].prov_ix;
+  if (pc->l == NULL || pc->r == NULL) pc->trunc = 1;
+  g_hpc_of[c] = g_hpc_n;
+  return g_hpc_n++;
+}
+
+// Attach the currently-touched defs to snapshot j (the defs expanded
+// while normalizing that clause into the chaining alphabet).
+static void horn_prov_cls_defs(const TpProblem *tp, int j) {
+  if (j < 0 || j >= g_hpc_n) return;
+  HProvCls *pc = &g_hpc[j];
+  if (g_hdt_over) { pc->trunc = 1; return; }
+  for (int i = 0; i < g_hdt_n; i++) {
+    int dj = horn_prov_cls(tp, g_hdt[i]);
+    if (dj < 0 || g_hpc[dj].trunc) { pc->trunc = 1; return; }
+    int dup = 0;
+    for (int k = 0; k < pc->nd; k++) dup |= (pc->defs[k] == dj);
+    if (dup) continue;
+    if (pc->nd >= HORN_PROV_DEFS) { pc->trunc = 1; return; }
+    pc->defs[pc->nd++] = dj;
+  }
+}
+
+// Is release k's derivation record complete?
+static int horn_prov_ok(int k) {
+  return g_hpr != NULL && k >= 0 && k < g_hpr_n && !g_hpr[k].trunc;
+}
 
 static int horn_sym_occurs(int f, int t) {
   if (g_hn[t].head == f) return 1;
@@ -2295,7 +2400,7 @@ static int horn_vars_within(int t, const u8 *allowed) {
   return 1;
 }
 
-static void horn_def_note(int l, int r) {
+static void horn_def_note(int l, int r, int cls) {
   if (g_hn[l].head < 0 || g_hn[l].nargs < 1) return;
   int f = g_hn[l].head;
   if (g_horn_disp[f] || g_hdef_r[f] >= 0) return;
@@ -2311,6 +2416,7 @@ static void horn_def_note(int l, int r) {
   if (horn_sym_occurs(f, r)) return;
   if (!horn_vars_within(r, seen)) return;
   g_hdef_l[f] = l; g_hdef_r[f] = r;
+  if (g_hdef_cls != NULL) g_hdef_cls[f] = cls;
 }
 
 static int horn_subst_build(int t, const int *m, int depth) {
@@ -2334,6 +2440,7 @@ static int horn_expand(int t, int depth) {
   if (g_hexp_fail) return t;
   int f = g_hn[t].head;
   if (g_hdef_r != NULL && g_hdef_r[f] >= 0) {
+    if (g_prov_on) horn_prov_def_touch(f);
     int m[HORN_VSPACE];
     int L = g_hdef_l[f];
     for (int i = 0; i < g_hn[L].nargs; i++)
@@ -2892,6 +2999,79 @@ static int horn_goal_probe(int l, int r) {
   return 0;
 }
 
+// The fact bound at each rule condition of the join being emitted
+// (horn_given_try fills the given's slot, horn_fill the rest) -- the
+// hyper-resolution step's fact parents, read at release-record time.
+static int g_hpf[HORN_MAX_COND];
+static int g_horn_given_ix = -1;
+
+// Append one derivation record: `rule` = g_hpc index of the rule
+// clause, fps/nf = the fact parents (>= 0 = g_hpr index, < 0 = ~g_hpc
+// index), l/r = the derived unit (ownership passes to the record).
+// The record unions in the rule's and every input-fact parent's
+// definitional-expansion axioms.  Returns the g_hpr index, or -1 when
+// a piece is unavailable and no honest record exists (caps hit,
+// truncated ancestor) -- the unit is then PROV_TRUNCATED.
+static int horn_prov_new(int rule, const int *fps, int nf, char *l, char *r) {
+  if (!g_prov_on || l == NULL || r == NULL) return -1;
+  if (g_hpr_n >= HORN_PROV_MAX_REL) return -1;
+  if (rule < 0 || rule >= g_hpc_n || g_hpc[rule].trunc) return -1;
+  int defs[2 * HORN_PROV_DEFS], ndefs = 0;
+  for (int i = 0; i < g_hpc[rule].nd; i++)
+    defs[ndefs++] = g_hpc[rule].defs[i];
+  for (int ci = 0; ci < nf; ci++) {
+    int src = fps[ci];
+    if (src == HORN_SRC_NONE) return -1;
+    if (src >= 0) {                     // a prior derived unit
+      if (!horn_prov_ok(src)) return -1;
+    } else {                            // an input clause: union its defs
+      int j = ~src;
+      if (j >= g_hpc_n || g_hpc[j].trunc) return -1;
+      for (int i = 0; i < g_hpc[j].nd; i++) {
+        int dj = g_hpc[j].defs[i], dup = 0;
+        for (int k = 0; k < ndefs; k++) dup |= (defs[k] == dj);
+        if (dup) continue;
+        if (ndefs >= (int)(sizeof defs / sizeof defs[0])) return -1;
+        defs[ndefs++] = dj;
+      }
+    }
+  }
+  if (g_hpp_n + nf + ndefs > HORN_PROV_MAX_POOL) return -1;
+  if (g_hpr_n >= g_hpr_cap) {
+    g_hpr_cap = (g_hpr_cap == 0) ? (1 << 12) : g_hpr_cap * 2;
+    g_hpr = (HPr *)realloc(g_hpr, (size_t)g_hpr_cap * sizeof(HPr));
+    if (g_hpr == NULL) tp_giveup("OOM in Horn release");
+  }
+  if (g_hpp_n + nf + ndefs > g_hpp_cap) {
+    g_hpp_cap = (g_hpp_cap == 0) ? (1 << 14) : g_hpp_cap;
+    while (g_hpp_cap < g_hpp_n + nf + ndefs) g_hpp_cap *= 2;
+    g_hpp = (int *)realloc(g_hpp, (size_t)g_hpp_cap * sizeof(int));
+    if (g_hpp == NULL) tp_giveup("OOM in Horn release");
+  }
+  HPr *p = &g_hpr[g_hpr_n];
+  memset(p, 0, sizeof *p);
+  p->l = l; p->r = r;
+  p->rule = rule;
+  p->po = g_hpp_n;
+  p->nf = (u16)nf;
+  p->nd = (u16)ndefs;
+  for (int i = 0; i < nf; i++) g_hpp[g_hpp_n++] = fps[i];
+  for (int i = 0; i < ndefs; i++) g_hpp[g_hpp_n++] = defs[i];
+  return g_hpr_n++;
+}
+
+// Record a forward release's hyper-resolution step (rule + the fact
+// bound at every condition, from g_hpf).
+static int horn_prov_record(const HRule *ru, const HRel *re) {
+  if (!g_prov_on) return -1;
+  int fps[HORN_MAX_COND];
+  for (int ci = 0; ci < ru->nc; ci++) {
+    int f = g_hpf[ci];
+    fps[ci] = (f >= 0 && f < g_hf_n) ? g_hf[f].src : HORN_SRC_NONE;
+  }
+  return horn_prov_new(ru->hpc, fps, ru->nc, re->l, re->r);
+}
+
 static void horn_emit_release(TpProblem *tp, const HRule *ru) {
   // Rejected releases (dedup hits, guards) roll their applied terms
   // back out of the arena -- only accepted facts persist.
@@ -3036,6 +3216,8 @@ static void horn_emit_release(TpProblem *tp, const HRule *ru) {
   re->order = g_hrel_n;
   re->goal_hit = 0;   // filled at ranking time, once bindings are clean
   re->dead = 0;
+  re->prov = horn_prov_record(ru, re);
+  if (re->prov >= 0) g_hf[g_hf_n - 1].src = re->prov;   // the fact above
   g_hrel_n++;
   if (g_hrel_n >= g_horn_max_rel) g_horn_stop = 1;
   return;
@@ -3074,8 +3256,10 @@ static void horn_fill(TpProblem *tp, const HRule *ru, int ci, int skip_pos) {
           int mark = g_htrail_n;
           g_horn_attempts++;
           if (horn_unify(ru->cl[ci], 0, fl, off, 0) &&
-              horn_unify(ru->ct[ci], 0, fr, off, 0))
+              horn_unify(ru->ct[ci], 0, fr, off, 0)) {
+            g_hpf[ci] = f;
             horn_fill(tp, ru, ci + 1, skip_pos);
+          }
           horn_undo(mark);
         }
       }
@@ -3089,8 +3273,10 @@ static void horn_fill(TpProblem *tp, const HRule *ru, int ci, int skip_pos) {
       int mark = g_htrail_n;
       g_horn_attempts++;
       if (horn_unify(ru->cl[ci], 0, fl, off, 0) &&
-          horn_unify(ru->ct[ci], 0, fr, off, 0))
+          horn_unify(ru->ct[ci], 0, fr, off, 0)) {
+        g_hpf[ci] = f;
         horn_fill(tp, ru, ci + 1, skip_pos);
+      }
       horn_undo(mark);
     }
   }
@@ -3108,8 +3294,10 @@ static void horn_given_try(TpProblem *tp, const HRule *ru, int cpos,
       (g_horn_attempts > g_horn_max_attempts || horn_now() - g_horn_t0 > g_horn_wall ||
        g_hn_n > g_horn_max_nodes)) { g_horn_stop = 1; return; }
   if (horn_unify(ru->cl[cpos], 0, fl, off, 0) &&
-      horn_unify(ru->ct[cpos], 0, fr, off, 0))
+      horn_unify(ru->ct[cpos], 0, fr, off, 0)) {
+    g_hpf[cpos] = g_horn_given_ix;
     horn_fill(tp, ru, 0, cpos);
+  }
   horn_undo(mark);
 }
 
@@ -3117,6 +3305,7 @@ static void horn_given_try(TpProblem *tp, const HRule *ru, int cpos,
 // rules whose condition head matches (plus var-headed conditions, and
 // every entry when the fact side itself is a bare variable) join.
 static void horn_given_dispatch(TpProblem *tp, int given) {
+  g_horn_given_ix = given;
   for (int orient = 0; orient < 2 && !g_horn_stop; orient++) {
     int fl = orient ? g_hf[given].r : g_hf[given].l;
     int fr = orient ? g_hf[given].l : g_hf[given].r;
@@ -3198,11 +3387,12 @@ static int    g_bk_over = 0;               // terminal budget exhaustion
 static long   g_bk_nodes = 0, g_bk_node_cap = 0;
 static double g_bk_deadline = 0.0;
 static int    g_bk_size_cap = 0;
+static int    g_bk_goal_hpr[64];           // per goal: derivation record
 #define BK_MAXOPEN   256
 #define BK_KEYLEN    (2 * TP_SIDE_LEN + 2)
 #define BK_DEPTH_MAX 200
 
-typedef struct { int l, r, d; } BkGoal;
+typedef struct { int l, r, d, id; } BkGoal;   // id: derivation-log node
 
 static void bk_bind_ensure(int v) {
   if (v < g_bk_bind_cap) return;
@@ -3331,8 +3521,9 @@ static int bk_print(const TpProblem *tp, char *buf, size_t cap, size_t *o, int t
 #define BK_MEMO_SLOTS (1 << 20)
 // faildepth<0 (=-1): proved.  onpath: this ground goal is an open
 // ancestor on the current DFS branch (regularity: re-deriving it is a
-// loop -- prune).
-typedef struct { char *key; int faildepth; u8 onpath; } BkMemo;
+// loop -- prune).  hpr: the committed derivation record of a proved
+// key (--proof), -1 when none.
+typedef struct { char *key; int faildepth; int hpr; u8 onpath; } BkMemo;
 static BkMemo *g_bk_memo = NULL;
 static int     g_bk_memo_n = 0;
 
@@ -3346,6 +3537,7 @@ static BkMemo *bk_memo_find(const char *key, int create) {
       if ((u32)g_bk_memo_n >= BK_MEMO_SLOTS - (BK_MEMO_SLOTS >> 3)) return NULL;
       g_bk_memo[slot].key = strdup(key);
       g_bk_memo[slot].faildepth = -2;   // fresh, unset
+      g_bk_memo[slot].hpr = -1;
       g_bk_memo[slot].onpath = 0;
       g_bk_memo_n++;
       return &g_bk_memo[slot];
@@ -3366,6 +3558,120 @@ static int bk_key(const TpProblem *tp, int l, int r, char *key) {
   return 1;
 }
 
+// --- backward-proof derivation log (--proof) ---------------------------
+// Under g_prov_on the DFS logs every goal closure (id-keyed entries,
+// truncated with the trail on backtrack).  When a GROUND goal commits,
+// its self-contained log segment is serialized into g_hpr derivation
+// records (bk_pf_commit) and replaced by one committed-record entry,
+// so the released theorem(G) = true unit carries a full
+// hyper-resolution chain exactly like a forward release.
+typedef struct {
+  int id, gl, gr;              // goal node + its terms at closure
+  int kind, who;               // 0 fact / 1 rule / 2 committed record
+  int kids[HORN_MAX_COND];     // rule closures: the condition node ids
+  int nkids;
+} BkLog;
+static BkLog *g_bkl = NULL; static int g_bkl_n = 0, g_bkl_cap = 0;
+static int g_bk_id = 0;
+
+static void bk_log_push(int id, int gl, int gr, int kind, int who,
+                        const int *kids, int nkids) {
+  if (!g_prov_on) return;
+  if (g_bkl_n >= g_bkl_cap) {
+    g_bkl_cap = (g_bkl_cap == 0) ? (1 << 12) : g_bkl_cap * 2;
+    g_bkl = (BkLog *)realloc(g_bkl, (size_t)g_bkl_cap * sizeof(BkLog));
+    if (g_bkl == NULL) tp_giveup("OOM in Horn back");
+  }
+  BkLog *e = &g_bkl[g_bkl_n++];
+  e->id = id; e->gl = gl; e->gr = gr; e->kind = kind; e->who = who;
+  e->nkids = (nkids > HORN_MAX_COND) ? HORN_MAX_COND : nkids;
+  for (int i = 0; i < e->nkids; i++) e->kids[i] = kids[i];
+}
+
+// Print a term instance under the CURRENT bindings; leftover free
+// variables render canonically per record (V0, V1, ...).
+static int bk_print_inst(const TpProblem *tp, char *buf, size_t cap,
+                         size_t *o, int t, int *vids, int *nv) {
+  t = bk_deref(t);
+  if (g_hn[t].head < 0) {
+    int v = -g_hn[t].head - 1, slot = -1;
+    for (int i = 0; i < *nv; i++) if (vids[i] == v) slot = i;
+    if (slot < 0) {
+      if (*nv >= HORN_REL_VARS) return 0;
+      vids[*nv] = v; slot = (*nv)++;
+    }
+    if (*o + 12 >= cap) return 0;
+    *o += (size_t)snprintf(buf + *o, cap - *o, "V%d", slot);
+    return 1;
+  }
+  const char *name = tp->syms[g_hn[t].head].name;
+  size_t nl = strlen(name);
+  if (*o + nl + 2 >= cap) return 0;
+  memcpy(buf + *o, name, nl); *o += nl;
+  if (g_hn[t].nargs > 0) {
+    buf[(*o)++] = '(';
+    for (int i = 0; i < g_hn[t].nargs; i++) {
+      if (i > 0) { if (*o + 1 >= cap) return 0; buf[(*o)++] = ','; }
+      if (!bk_print_inst(tp, buf, cap, o, HARG(t, i), vids, nv)) return 0;
+    }
+    if (*o + 1 >= cap) return 0;
+    buf[(*o)++] = ')';
+  }
+  buf[*o] = '\0';
+  return 1;
+}
+
+// Serialize node `id` of the log segment [lo, g_bkl_n).  Returns a
+// parent ref (>= 0 g_hpr record, < 0 ~g_hpc input clause) or
+// HORN_SRC_NONE on failure.
+static int bk_pf_build(const TpProblem *tp, int id, int lo) {
+  const BkLog *e = NULL;
+  for (int i = g_bkl_n - 1; i >= lo; i--)
+    if (g_bkl[i].id == id) { e = &g_bkl[i]; break; }
+  if (e == NULL) return HORN_SRC_NONE;
+  if (e->kind == 2)
+    return (e->who >= 0) ? e->who : HORN_SRC_NONE;
+  if (e->kind == 0)
+    return (e->who >= 0 && e->who < g_hf_n) ? g_hf[e->who].src
+                                            : HORN_SRC_NONE;
+  const HRule *ru = (e->who >= 0 && e->who < g_hr_n) ? &g_hr[e->who] : NULL;
+  if (ru == NULL || e->nkids != ru->nc) return HORN_SRC_NONE;
+  int fps[HORN_MAX_COND];
+  for (int i = 0; i < e->nkids; i++) {
+    fps[i] = bk_pf_build(tp, e->kids[i], lo);
+    if (fps[i] == HORN_SRC_NONE) return HORN_SRC_NONE;
+  }
+  static char lb[TP_SIDE_LEN], rb[TP_SIDE_LEN];
+  size_t ob = 0, orr = 0;
+  int vids[HORN_REL_VARS], nv = 0;
+  if (!bk_print_inst(tp, lb, sizeof lb, &ob, e->gl, vids, &nv) ||
+      !bk_print_inst(tp, rb, sizeof rb, &orr, e->gr, vids, &nv))
+    return HORN_SRC_NONE;
+  char *sl = strdup(lb), *sr = strdup(rb);
+  int ix = horn_prov_new(ru->hpc, fps, e->nkids, sl, sr);
+  if (ix < 0) { free(sl); free(sr); return HORN_SRC_NONE; }
+  return ix;
+}
+
+// Commit the just-proved goal node (bindings still live): serialize
+// its subtree; a bare input-clause ref (the goal closed as one fact
+// instance) wraps in a record so the result is citable.  Returns the
+// g_hpr index or -1.
+static int bk_pf_commit(const TpProblem *tp, int id, int gl, int gr, int lo) {
+  int ref = bk_pf_build(tp, id, lo);
+  if (ref == HORN_SRC_NONE) return -1;
+  if (ref >= 0) return ref;
+  static char lb[TP_SIDE_LEN], rb[TP_SIDE_LEN];
+  size_t ob = 0, orr = 0;
+  int vids[HORN_REL_VARS], nv = 0;
+  if (!bk_print_inst(tp, lb, sizeof lb, &ob, gl, vids, &nv) ||
+      !bk_print_inst(tp, rb, sizeof rb, &orr, gr, vids, &nv)) return -1;
+  char *sl = strdup(lb), *sr = strdup(rb);
+  int ix = horn_prov_new(~ref, NULL, 0, sl, sr);
+  if (ix < 0) { free(sl); free(sr); return -1; }
+  return ix;
+}
+
 static int bk_budget_ok(void) {
   if (g_bk_over) return 0;
   if ((++g_bk_nodes & 0x3fff) == 0) {
@@ -3381,21 +3687,25 @@ static int bk_prove_seq(const TpProblem *tp, BkGoal *gs, int n);
 // Try every way to close goal (gl,gr) at remaining depth d, then prove
 // the pending tail: BASE = a unit fact (an axiom instance); STEP = a
 // rule conclusion (a modus-ponens regression), spawning the rule's
-// conditions ahead of the tail (major condition first).
-static int bk_prove_choices(const TpProblem *tp, int gl, int gr, int d,
-                            BkGoal *tail, int tn) {
+// conditions ahead of the tail (major condition first).  `id` is the
+// goal's derivation-log node.
+static int bk_prove_choices(const TpProblem *tp, int id, int gl, int gr,
+                            int d, BkGoal *tail, int tn) {
   // BASE: match a unit fact.  Input clauses arrive in either orientation
   // (true = atom OR atom = true), so try both pairings.
   for (int f = 0; f < g_hf_n && !g_bk_over; f++) {
     for (int orient = 0; orient < 2 && !g_bk_over; orient++) {
       int mark = g_bk_trail_n, an = g_hn_n, aa = g_ha_n, nvm = g_bk_nv;
+      int lmark = g_bkl_n;
       int map[HORN_VSPACE];
       for (int i = 0; i < HORN_VSPACE; i++) map[i] = -1;
       int fl = bk_rename(orient ? g_hf[f].r : g_hf[f].l, map);
       int fr = bk_rename(orient ? g_hf[f].l : g_hf[f].r, map);
       if (!g_bk_over && bk_unify(gl, fl, 0) && bk_unify(gr, fr, 0)) {
+        bk_log_push(id, gl, gr, 0, f, NULL, 0);
         if (bk_prove_seq(tp, tail, tn)) return 1;
       }
+      g_bkl_n = lmark;
       bk_undo(mark); g_hn_n = an; g_ha_n = aa; g_bk_nv = nvm;
       if (horn_eq(g_hf[f].l, g_hf[f].r)) break;  // symmetric: 2nd orient redundant
     }
@@ -3407,26 +3717,32 @@ static int bk_prove_choices(const TpProblem *tp, int gl, int gr, int d,
       const HRule *ru = &g_hr[r];
       for (int orient = 0; orient < 2 && !g_bk_over; orient++) {
         int mark = g_bk_trail_n, an = g_hn_n, aa = g_ha_n, nvm = g_bk_nv;
+        int lmark = g_bkl_n;
         int map[HORN_VSPACE];
         for (int i = 0; i < HORN_VSPACE; i++) map[i] = -1;
         int cl0 = bk_rename(orient ? ru->concl_r : ru->concl_l, map);
         int cr0 = bk_rename(orient ? ru->concl_l : ru->concl_r, map);
         if (!g_bk_over && bk_unify(gl, cl0, 0) && bk_unify(gr, cr0, 0)) {
           BkGoal ng[BK_MAXOPEN];
+          int kids[HORN_MAX_COND];
           int m = 0, ok = 1;
           for (int c = 0; c < ru->nc && ok; c++) {
             if (m >= BK_MAXOPEN - tn) { ok = 0; break; }
             ng[m].l = bk_rename(ru->cl[c], map);
             ng[m].r = bk_rename(ru->ct[c], map);
             ng[m].d = d - 1;
+            ng[m].id = g_prov_on ? g_bk_id++ : 0;
+            kids[c] = ng[m].id;
             m++;
           }
           for (int c = 0; c < tn && ok; c++) {
             if (m >= BK_MAXOPEN) { ok = 0; break; }
             ng[m++] = tail[c];
           }
+          if (ok) bk_log_push(id, gl, gr, 1, r, kids, ru->nc);
           if (ok && !g_bk_over && bk_prove_seq(tp, ng, m)) return 1;
         }
+        g_bkl_n = lmark;
         bk_undo(mark); g_hn_n = an; g_ha_n = aa; g_bk_nv = nvm;
         if (horn_eq(ru->concl_l, ru->concl_r)) break;  // symmetric
       }
@@ -3484,7 +3800,14 @@ static int bk_prove_seq(const TpProblem *tp, BkGoal *gs, int n) {
     if (have) {
       BkMemo *mm = bk_memo_find(key, 0);
       if (mm != NULL) {
-        if (mm->faildepth == -1) return bk_prove_seq(tp, tail, tn);
+        if (mm->faildepth == -1) {
+          // Reuse: reference the committed derivation record.
+          int lmark = g_bkl_n;
+          bk_log_push(g.id, gl, gr, 2, mm->hpr, NULL, 0);
+          if (bk_prove_seq(tp, tail, tn)) return 1;
+          g_bkl_n = lmark;
+          return 0;
+        }
         if (mm->onpath) return 0;             // regularity: ancestor loop
         if (mm->faildepth >= d) return 0;
       }
@@ -3492,18 +3815,29 @@ static int bk_prove_seq(const TpProblem *tp, BkGoal *gs, int n) {
     BkMemo *pm = have ? bk_memo_find(key, 1) : NULL;
     if (pm != NULL) pm->onpath = 1;
     int mark = g_bk_trail_n, an = g_hn_n, aa = g_ha_n, nvm = g_bk_nv;
-    int ok = bk_prove_choices(tp, gl, gr, d, NULL, 0);
+    int lmark = g_bkl_n;
+    int ok = bk_prove_choices(tp, g.id, gl, gr, d, NULL, 0);
+    // Commit the derivation BEFORE the bindings unwind (the record
+    // prints the closure instances), then drop the consumed segment.
+    int hpr = (ok && g_prov_on) ? bk_pf_commit(tp, g.id, gl, gr, lmark) : -1;
     bk_undo(mark); g_hn_n = an; g_ha_n = aa; g_bk_nv = nvm;
+    g_bkl_n = lmark;
     if (pm != NULL) pm->onpath = 0;
     if (!ok) {
       if (pm != NULL && !g_bk_over && pm->faildepth != -1 && d > pm->faildepth)
         pm->faildepth = d;
       return 0;
     }
-    if (pm != NULL) pm->faildepth = -1;       // proved: reusable at any depth
+    if (pm != NULL) {
+      pm->faildepth = -1;       // proved: reusable at any depth
+      pm->hpr = hpr;
+    }
+    // An enclosing rule closure still finds this node id via the
+    // committed-record entry.
+    bk_log_push(g.id, gl, gr, 2, hpr, NULL, 0);
     return bk_prove_seq(tp, tail, tn);
   }
-  return bk_prove_choices(tp, gl, gr, d, tail, tn);
+  return bk_prove_choices(tp, g.id, gl, gr, d, tail, tn);
 }
 
 // Identify the goal equation to derive: the negated unit true != theorem(G).
@@ -3551,6 +3885,7 @@ static int horn_backward_prove(const TpProblem *tp) {
   g_bk_memo = (BkMemo *)calloc(BK_MEMO_SLOTS, sizeof(BkMemo));
   if (g_bk_memo == NULL) tp_giveup("OOM in Horn back");
   g_bk_memo_n = 0;
+  for (int gi = 0; gi < 64; gi++) g_bk_goal_hpr[gi] = -1;
   double wall = 0.85 * g_horn_wall;
   g_bk_deadline = g_horn_t0 + wall;
   g_bk_node_cap = 0;   // wall-governed
@@ -3573,7 +3908,20 @@ static int horn_backward_prove(const TpProblem *tp) {
       root.l = bk_rename(tl, map);
       root.r = bk_rename(tr, map);
       root.d = D;
-      if (!g_bk_over && bk_prove_seq(tp, &root, 1)) proved = 1;
+      root.id = 0;
+      g_bkl_n = 0;
+      g_bk_id = 1;
+      if (!g_bk_over && bk_prove_seq(tp, &root, 1)) {
+        proved = 1;
+        // The root is ground: its commit landed in the memo -- stash
+        // the record for the release site (the memo table frees below).
+        if (g_prov_on && gi < 64) {
+          char key[BK_KEYLEN];
+          BkMemo *mm = bk_key(tp, root.l, root.r, key)
+                         ? bk_memo_find(key, 0) : NULL;
+          if (mm != NULL && mm->faildepth == -1) g_bk_goal_hpr[gi] = mm->hpr;
+        }
+      }
       bk_undo(mark); g_hn_n = an; g_ha_n = aa; g_bk_nv = nvm;
     }
     if (g_bk_over && horn_now() > g_bk_deadline) break;   // out of wall
@@ -3587,6 +3935,7 @@ static int horn_backward_prove(const TpProblem *tp) {
   }
   free(g_bk_bind); g_bk_bind = NULL; g_bk_bind_cap = 0;
   free(g_bk_trail); g_bk_trail = NULL; g_bk_trail_n = g_bk_trail_cap = 0;
+  free(g_bkl); g_bkl = NULL; g_bkl_n = g_bkl_cap = 0;
   g_bk_nv = 0;
   return proved;
 }
@@ -3695,16 +4044,26 @@ static void tp_horn_release(TpProblem *tp) {
   // every fact, rule and goal below normalizes into one alphabet.
   g_hdef_l = (int *)malloc((size_t)TP_MAX_SYMS * sizeof(int));
   g_hdef_r = (int *)malloc((size_t)TP_MAX_SYMS * sizeof(int));
-  if (g_hdef_l == NULL || g_hdef_r == NULL) tp_giveup("OOM in Horn release");
-  for (int i = 0; i < TP_MAX_SYMS; i++) { g_hdef_l[i] = g_hdef_r[i] = -1; }
+  g_hdef_cls = (int *)malloc((size_t)TP_MAX_SYMS * sizeof(int));
+  if (g_hdef_l == NULL || g_hdef_r == NULL || g_hdef_cls == NULL)
+    tp_giveup("OOM in Horn release");
+  for (int i = 0; i < TP_MAX_SYMS; i++) {
+    g_hdef_l[i] = g_hdef_r[i] = g_hdef_cls[i] = -1;
+  }
+  // --proof: the clause-index -> snapshot map for provenance capture.
+  if (g_prov_on && g_hpc_of == NULL) {
+    g_hpc_of = (int *)malloc((size_t)n * sizeof(int));
+    if (g_hpc_of == NULL) tp_giveup("OOM in Horn release");
+    for (int i = 0; i < n; i++) g_hpc_of[i] = -1;
+  }
   int n_defs = 0;
   for (int c = 0; c < n; c++) {
     if (pl[c] < 0 || is_disp[c] || tp->cls[c].neg) continue;
     HRule ru;
     if (horn_decode_side(pl[c], prr[c], &ru) ||
         horn_decode_side(prr[c], pl[c], &ru)) continue;
-    horn_def_note(pl[c], prr[c]);
-    horn_def_note(prr[c], pl[c]);
+    horn_def_note(pl[c], prr[c], c);
+    horn_def_note(prr[c], pl[c], c);
   }
   for (int i = 0; i < TP_MAX_SYMS; i++) n_defs += (g_hdef_r[i] >= 0);
   // Split parsed positives into rules and facts; seed the dedup set
@@ -3720,12 +4079,15 @@ static void tp_horn_release(TpProblem *tp) {
       ru.rel = 1;
       ru.conj = tp->cls[c].conj;
       ru.ghrel = 0;
+      horn_prov_touch_reset();
       for (int i = 0; i < ru.nc; i++) {
         ru.cl[i] = horn_norm(ru.cl[i]);
         ru.ct[i] = horn_norm(ru.ct[i]);
       }
       ru.concl_l = horn_norm(ru.concl_l);
       ru.concl_r = horn_norm(ru.concl_r);
+      ru.hpc = horn_prov_cls(tp, c);
+      horn_prov_cls_defs(tp, ru.hpc);
       if (g_hr_n >= g_hr_cap) {
         g_hr_cap = (g_hr_cap == 0) ? (1 << 10) : g_hr_cap * 2;
         g_hr = (HRule *)realloc(g_hr, (size_t)g_hr_cap * sizeof(HRule));
@@ -3734,10 +4096,16 @@ static void tp_horn_release(TpProblem *tp) {
       g_hr[g_hr_n++] = ru;
       n_rules++;
     } else {
+      horn_prov_touch_reset();
       int fl = horn_norm(pl[c]), fr = horn_norm(prr[c]);
       if (!horn_eq(fl, fr)) {          // definitions trivialize themselves
         horn_fact_add(fl, fr, pnv[c]);
         g_hf[g_hf_n - 1].conj = tp->cls[c].conj;
+        if (g_prov_on) {
+          int j = horn_prov_cls(tp, c);
+          horn_prov_cls_defs(tp, j);
+          if (j >= 0) g_hf[g_hf_n - 1].src = ~j;
+        }
       }
     }
     // dedup seed: canonical print of both orientations
@@ -3821,10 +4189,20 @@ static void tp_horn_release(TpProblem *tp) {
     g_cli_horn_applied = 1;
     // Emit the proved theorem unit so --proof / the engine reconstruct a
     // refutation (the direct SZS route skips the engine when no proof is
-    // requested; the unit is a real consequence either way).
+    // requested; the unit is a real consequence either way).  Under
+    // --proof the unit carries its committed backward-derivation record
+    // (PROV_HORN); a goal whose record failed to commit is withheld --
+    // a released theorem citing file() would misrepresent it as a
+    // problem formula (CASC-J13).
     for (int gi = 0; gi < g_hg_n && tp->n_cls < TP_MAX_CLAUSES; gi++) {
       int tl, tr;
       if (!bk_goal_pick(tp, gi, &tl, &tr)) continue;
+      int hpr = (gi < 64) ? g_bk_goal_hpr[gi] : -1;
+      if (g_prov_on && !horn_prov_ok(hpr)) {
+        fprintf(stderr, "FindProof: Horn backward CD: proved unit lacks a "
+                "complete derivation record -- not released under --proof\n");
+        continue;
+      }
       static char lb[TP_SIDE_LEN], rb[TP_SIDE_LEN];
       size_t lo = 0, ro = 0;
       if (bk_print(tp, lb, sizeof lb, &lo, tl) &&
@@ -3833,7 +4211,8 @@ static void tp_horn_release(TpProblem *tp) {
         snprintf(cl->lhs, sizeof cl->lhs, "%s", lb);
         snprintf(cl->rhs, sizeof cl->rhs, "%s", rb);
         cl->neg = 0; cl->conj = 0;
-        cl->prov_kind = PROV_NONE; cl->prov_ix = 0;
+        cl->prov_kind = g_prov_on ? PROV_HORN : PROV_NONE;
+        cl->prov_ix = g_prov_on ? hpr : 0;
         tp_scan_term(tp, cl->lhs);
         tp_scan_term(tp, cl->rhs);
       }
@@ -4169,13 +4548,12 @@ static void tp_horn_release(TpProblem *tp) {
       if (ke != NULL && atoi(ke) > 0 && atoi(ke) < room) room = atoi(ke);
       g_horn_rank_ground = (ge != NULL && ge[0] != '\0' && ge[0] != '0');
     }
-    // --proof + FOF front-end: released units are consequences whose
-    // hyper-resolution parents the chaining loop does not record, so
-    // a J13-compliant proof cannot cite them ("inference steps must
-    // list exactly those parents that are used") and must not
-    // misrepresent them as file() leaves either.  Keep them out of
-    // the .pr; the engine derives what the proof needs itself.
-    if (g_prov_on && g_cli_fof_applied) room = 0;
+    // --proof: released units carry their hyper-resolution derivation
+    // record (PROV_HORN) and emit it as the proof's cnf(h<k>, ...)
+    // chain, so keeping them is J13-compliant.  A release whose record
+    // is TRUNCATED (capture caps hit, or an unrecorded ancestor) is
+    // excluded instead -- an axiom leaf citing file() for a derived
+    // unit would misrepresent it as a problem formula.
     if (g_hrel_n > room) {
       qsort(g_hrel, (size_t)g_hrel_n, sizeof(HRel), horn_rel_cmp);
       u32 *taken = (u32 *)calloc((size_t)TP_MAX_SYMS, sizeof(u32));
@@ -4185,19 +4563,29 @@ static void tp_horn_release(TpProblem *tp) {
       free(taken);
       qsort(g_hrel, (size_t)g_hrel_n, sizeof(HRel), horn_rel_cmp_rr);
     }
+    int n_prov_trunc = 0;
     for (int i = 0, kept = 0; i < g_hrel_n && kept < room; i++) {
       if (g_hrel[i].dead) continue;   // back-subsumed (CD lane)
+      if (g_prov_on && !horn_prov_ok(g_hrel[i].prov)) {
+        n_prov_trunc++;
+        continue;
+      }
       if (tp->n_cls >= TP_MAX_CLAUSES) break;
       TpClause *cl = &tp->cls[tp->n_cls++];
       snprintf(cl->lhs, sizeof cl->lhs, "%s", g_hrel[i].l);
       snprintf(cl->rhs, sizeof cl->rhs, "%s", g_hrel[i].r);
       cl->neg = 0; cl->conj = 0;
-      cl->prov_kind = PROV_NONE; cl->prov_ix = 0;
+      cl->prov_kind = g_prov_on ? PROV_HORN : PROV_NONE;
+      cl->prov_ix = g_prov_on ? g_hrel[i].prov : 0;
       tp_scan_term(tp, cl->lhs);
       tp_scan_term(tp, cl->rhs);
       released_kept++;
       kept++;
     }
+    if (n_prov_trunc > 0)
+      fprintf(stderr, "FindProof: Horn release: %d kept release(s) lack a "
+              "complete derivation record -- excluded from --proof input\n",
+              n_prov_trunc);
   }
   if (released_kept > 0) g_cli_horn_applied = 1;
   {
@@ -4233,13 +4621,21 @@ done:
   free(g_hsg); g_hsg = NULL; g_hsg_n = g_hsg_cap = 0;
   free(g_hdef_l); g_hdef_l = NULL;
   free(g_hdef_r); g_hdef_r = NULL;
+  free(g_hdef_cls); g_hdef_cls = NULL;
+  free(g_hpc_of); g_hpc_of = NULL;
   free(g_hrix); g_hrix = NULL; g_hrix_n = g_hrix_cap = 0;
   free(g_hrix_head); g_hrix_head = NULL; g_hrix_varhead = -1;
   if (g_hdup != NULL) {
     for (u32 i = 0; i < g_hdup_slots; i++) free(g_hdup[i]);
     free(g_hdup); g_hdup = NULL; g_hdup_n = 0;
   }
-  for (int i = 0; i < g_hrel_n; i++) { free(g_hrel[i].l); free(g_hrel[i].r); }
+  // A recorded release's l/r strings are aliased by its g_hpr record,
+  // which the proof emitter reads after the pass -- ownership moves
+  // there; unrecorded releases free theirs here.
+  for (int i = 0; i < g_hrel_n; i++) {
+    if (g_hrel[i].prov >= 0) continue;
+    free(g_hrel[i].l); free(g_hrel[i].r);
+  }
   free(g_hrel); g_hrel = NULL; g_hrel_n = g_hrel_cap = 0;
 }
 
@@ -5226,6 +5622,106 @@ static int prov_emit_unf(FILE *fp, int ix) {
   return 1;
 }
 
+// --- Horn-release chain emission (PROV_HORN) ---------------------------
+// A released unit the refutation cites materializes its derivation
+// cone: every ancestor release as a cnf(h<k>, ...) hyper_resolution
+// record and every input clause used (rule / fact / definitional-
+// expansion axiom) as a cnf(hi<j>, ...) record with its own
+// conversion-chain source.  Truncated records never reach here (the
+// append pass excludes them from engine input), so a 0 return is a
+// hard capture bug, not a fallback path.
+
+static int prov_emit_hpc(FILE *fp, int j) {
+  if (g_hpc == NULL || j < 0 || j >= g_hpc_n) return 0;
+  HProvCls *pc = &g_hpc[j];
+  if (pc->trunc || pc->l == NULL || pc->r == NULL) return 0;
+  if (pc->emitted) return 1;
+  char inner[512];
+  if (!prov_src_citation(fp, pc->kind, pc->ix, inner, sizeof inner)) return 0;
+  fprintf(fp, "cnf(hi%d, %s, %s = %s%s", j,
+          pc->conj ? "negated_conjecture" : "axiom", pc->l, pc->r, inner);
+  pc->emitted = 1;
+  return 1;
+}
+
+// The parent list of release k: "hi<rule>, <facts...>, hi<defs...>".
+static int prov_horn_plist(int k, char *buf, size_t cap) {
+  const HPr *p = &g_hpr[k];
+  size_t o = (size_t)snprintf(buf, cap, "hi%d", p->rule);
+  for (int i = 0; i < p->nf + p->nd && o + 16 < cap; i++) {
+    int e = g_hpp[p->po + i];
+    if (i >= p->nf)   o += (size_t)snprintf(buf + o, cap - o, ", hi%d", e);
+    else if (e >= 0)  o += (size_t)snprintf(buf + o, cap - o, ", h%d", e);
+    else              o += (size_t)snprintf(buf + o, cap - o, ", hi%d", ~e);
+  }
+  return o + 16 < cap;
+}
+
+// Emit the input-clause records one release's derivation cites (its
+// rule, its input-fact parents, its defs).
+static int prov_emit_horn_hpcs(FILE *fp, const HPr *p) {
+  if (!prov_emit_hpc(fp, p->rule)) return 0;
+  for (int i = 0; i < p->nf + p->nd; i++) {
+    int e = g_hpp[p->po + i];
+    int hj = (i >= p->nf) ? e : (e >= 0 ? -1 : ~e);
+    if (hj >= 0 && !prov_emit_hpc(fp, hj)) return 0;
+  }
+  return 1;
+}
+
+// Push release e onto the emission worklist unless already emitted.
+// Returns 1 pushed, 0 already emitted, -1 invalid record.
+static int prov_horn_push(int e, int *sp, int **stk, int *cap) {
+  if (!horn_prov_ok(e)) return -1;
+  if (g_hpr[e].emitted) return 0;
+  if (*sp >= *cap) {
+    *cap = (*cap == 0) ? (1 << 12) : *cap * 2;
+    *stk = (int *)realloc(*stk, (size_t)*cap * sizeof(int));
+    if (*stk == NULL) return -1;
+  }
+  (*stk)[(*sp)++] = e;
+  return 1;
+}
+
+// Emit every record release k's derivation cites (its ancestors, NOT a
+// record for k itself -- the caller's record plays that role).
+// Iterative DFS: the release chains run thousands of steps deep.
+static int prov_emit_horn_cone(FILE *fp, int k) {
+  if (!horn_prov_ok(k)) return 0;
+  static int *stk = NULL; static int stk_cap = 0;
+  int sp = 0;
+  const HPr *pk = &g_hpr[k];
+  for (int i = 0; i < pk->nf; i++) {
+    int e = g_hpp[pk->po + i];
+    if (e >= 0 && prov_horn_push(e, &sp, &stk, &stk_cap) < 0) return 0;
+  }
+  while (sp > 0) {
+    int j = stk[sp - 1];
+    if (g_hpr[j].emitted) { sp--; continue; }
+    const HPr *p = &g_hpr[j];
+    int pending = 0;
+    for (int i = 0; i < p->nf; i++) {
+      int e = g_hpp[p->po + i];
+      if (e < 0) continue;
+      int st = prov_horn_push(e, &sp, &stk, &stk_cap);
+      if (st < 0) return 0;
+      pending += st;
+    }
+    if (pending) continue;
+    // Parents ready (no pushes happened, so j is still the stack top):
+    // input-clause records first, then this hyper-resolution record.
+    if (!prov_emit_horn_hpcs(fp, p)) return 0;
+    char plist[768];
+    if (!prov_horn_plist(j, plist, sizeof plist)) return 0;
+    if (p->l == NULL || p->r == NULL) return 0;
+    fprintf(fp, "cnf(h%d, plain, %s = %s, inference(hyper_resolution, "
+                "[status(thm)], [%s])).\n", j, p->l, p->r, plist);
+    g_hpr[j].emitted = 1;
+    sp--;
+  }
+  return prov_emit_horn_hpcs(fp, pk);
+}
+
 static int prov_src_citation(FILE *fp, int kind, int ix, char *src, size_t cap) {
   switch (kind) {
   case PROV_NONE:
@@ -5284,6 +5780,16 @@ static int prov_src_citation(FILE *fp, int kind, int ix, char *src, size_t cap) 
     snprintf(src, cap,
              ", inference(equality_encoding, [status(esa)], [c%d])).\n", ix);
     return 1;
+  case PROV_HORN: {
+    // Released unit: print its ancestor cone, then cite its own
+    // hyper-resolution step directly on the leaf record.
+    if (!prov_emit_horn_cone(fp, ix)) return 0;
+    char plist[768];
+    if (!prov_horn_plist(ix, plist, sizeof plist)) return 0;
+    size_t o = (size_t)snprintf(src, cap,
+        ", inference(hyper_resolution, [status(thm)], [%s])).\n", plist);
+    return o + 1 < cap;
+  }
   default:
     return 0;
   }
@@ -5337,6 +5843,8 @@ static void prov_reset_emitted(void) {
   for (int i = 0; i < g_prov_nunf; i++) g_prov_unf[i].emitted = 0;
   for (int i = 0; i < g_prov_ndef; i++) g_prov_def[i].emitted = 0;
   for (int i = 0; i < g_prov_neqg; i++) g_prov_eqg[i].emitted = 0;
+  for (int i = 0; i < g_hpc_n; i++) g_hpc[i].emitted = 0;
+  for (int i = 0; i < g_hpr_n; i++) g_hpr[i].emitted = 0;
 }
 
 // --- clausal pre-pass refutation emission ------------------------------
