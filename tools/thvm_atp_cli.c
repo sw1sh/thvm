@@ -5076,6 +5076,12 @@ static const SchedSlice SCHEDULE[] = {
   // ground goal is detected, freeing the pool slot on every non-CD
   // problem exactly like the horn-cd slice.
   {"horn-back", "--horn-back=2",                            0.0},
+  // FULL AC-completion, exit-fast: =2 gives up immediately when no AC
+  // operator is detected, so on non-AC problems (most of the corpus) the
+  // slot frees instantly -- letting this sit in the FIRST wave protects
+  // the RNG-family AC flips on narrow competition nodes (8-core StarExec)
+  // where late-wave slices never run inside the hard wall.
+  {"full-ac", "--full-ac=2", 0.0},
   // (2) Goal FLATTENING (Twee/Vampire naming port) + LAZY ground-join
   // (Twee selection-time redundancy) + backward-simplify + auto-max-weight.
   // Cracks deep-goal UEQ that completion stalls on (COL060-1, GRP167-4);
@@ -5189,7 +5195,6 @@ static const SchedSlice SCHEDULE[] = {
   // (src/atp/ac.c, built into the CLI) but was inert: nothing set the
   // engine ac_mask.  No-AC problems detect an empty mask and fall
   // straight through to plain completion, so this is a near-free lane.
-  {"full-ac", "--full-ac", 0.0},
   // RAW-PRESENTATION recovery lanes: canonical input (default ON) is
   // score-neutral in aggregate but systematically flips individual
   // problems BOTH ways (pod A/B, identical hardware: ON-only gains
@@ -5448,6 +5453,9 @@ int main(int argc, char **argv) {
   const char *wall = "120";
   int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0;
   double main_t0 = horn_now();
+  // Bench-intake give-ups (e.g. --full-ac=2 with no AC operator) route
+  // through tp_giveup so direct runs still print the SZS line.
+  g_atp_bench_giveup_hook = tp_giveup;
 
   // Invoked as CheckProof (the ProoVer entry binary), the checker is the
   // default mode; FindProof stays the prover.
@@ -5492,6 +5500,13 @@ int main(int argc, char **argv) {
       // in the schedule too: run_schedule re-execs each child with
       // --proof, so the child sets this before its engine init.
       setenv("THVM_ATP_TRACE_MAX", "16777216", 0);
+      // The packed trace corrupts emission-replay NORM_STEP chains in the
+      // goal-cone bracket (var=var pairs past REWRITE_MAX_VAR -- the
+      // span-sourced byte store/load in atp_trace_eq_store_ft; open bug).
+      // Proofs must be citable, so --proof runs use the unpacked trace:
+      // byte-correct emission at a bounded RSS cost during search.
+      // overwrite=0 keeps an explicit user THVM_ATP_NO_TRACE_PACK=0.
+      setenv("THVM_ATP_NO_TRACE_PACK", "1", 0);
       continue;
     }
     if (nlen == 7 && strncmp(name, "keep-pr", 7) == 0) { keep_pr = 1; continue; }

@@ -225,6 +225,16 @@ int g_atp_bench_status = -1;
 // when the run was pr-mode.
 struct PrProblem_;
 void (*g_atp_bench_pre_free_hook)(AtpState *s) = NULL;
+// Clean give-up from bench intake (the =2 exit-fast discipline).  The
+// CLI points this at its tp_giveup so direct runs print the SZS line;
+// standalone bench builds fall back to stderr + exit(1) (the schedule
+// treats exit 1 as searched-and-gave-up).
+void (*g_atp_bench_giveup_hook)(const char *why) = NULL;
+static void tp_bench_giveup(const char *why) {
+  if (g_atp_bench_giveup_hook != NULL) g_atp_bench_giveup_hook(why);
+  fprintf(stderr, "bench: %s\n", why);
+  exit(1);
+}
 void *g_atp_bench_pr = NULL;
 
 // nand is the single binary function symbol (CTR label 1).
@@ -2695,10 +2705,18 @@ int main(int argc, char **argv) {
       }
       // FULL AC-completion (THVM_ATP_FULL_AC=1): detect AC operators and
       // LEAVE the engine ac_mask set so completion runs AC-matching /
-      // AC-unification.  Used to reproduce + fix the AC segfault.
-      if (getenv("THVM_ATP_FULL_AC") != NULL
-          && getenv("THVM_ATP_FULL_AC")[0] != '0') {
-        thvm_atp_auto_ac(prp.eq_l, prp.eq_r, prp.n_eqns);   // mask stays set
+      // AC-unification.  =2: give up immediately when NO AC operator is
+      // detected, so the schedule slice frees its pool slot on non-AC
+      // problems instead of burning a full wall on plain completion (the
+      // exit-fast discipline of the equals/horn-cd/ifeq slices) -- this
+      // lets the slice sit in the FIRST wave on narrow competition nodes.
+      {
+        const char *fa = getenv("THVM_ATP_FULL_AC");
+        if (fa != NULL && fa[0] != '0') {
+          thvm_atp_auto_ac(prp.eq_l, prp.eq_r, prp.n_eqns);   // mask stays set
+          if (fa[0] == '2' && thvm_atp_get_ac_mask() == 0ull)
+            tp_bench_giveup("no AC operator detected (full-ac=2)");
+        }
       }
     }
   } else if (strcmp(goal, "mccune") == 0) {

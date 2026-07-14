@@ -1239,6 +1239,11 @@ static void pc_parse_source(const char *src, PcStep *st) {
   st->new_sym[0] = '\0';
   while (*src && isspace((unsigned char)*src)) src++;
   if (strncmp(src, "file", 4) == 0) { st->rule = R_INPUT; return; }
+  // introduced(definition): a conservative-extension leaf (goal-flatten /
+  // tgt subterm naming -- fresh symbol defined equal to a term).  Sound
+  // to accept as an input of the ENCODED problem, exactly like file();
+  // before the fresh-label-range emitter change these printed as file().
+  if (strncmp(src, "introduced", 10) == 0) { st->rule = R_INPUT; return; }
   const char *inf = strstr(src, "inference");
   if (inf == NULL) return;
   const char *p = strchr(inf, '(');

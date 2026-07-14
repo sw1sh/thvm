@@ -1,8 +1,15 @@
 #!/bin/sh
-# CASC / StarExec run script.  $1 = problem file (TPTP CNF UEQ).
-# The wall-clock limit is taken from the StarExec environment; the
-# system self-slices it across a portfolio of configurations, prints
-# an SZS status line, and (on success) an SZS CNFRefutation.
+# CASC / StarExec run script.  $1 = problem file (TPTP UEQ CNF, or FOF
+# via the equationalization front-end).  The wall-clock limit is taken
+# from the StarExec environment; the system runs a concurrent portfolio
+# of configurations, prints an SZS status line, and (on success) an SZS
+# CNFRefutation.
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 LIMIT=${STAREXEC_WALLCLOCK_LIMIT:-120}
+# Race as many slices as the node has cores in ONE wave: under a hard
+# wall, later waves never run, so the portfolio must fit the first wave.
+# Exit-fast slices (equals/horn/full-ac/ifeq =2 probes) free their slots
+# immediately on inapplicable problems, backfilling the rest.
+CORES=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)
+export THVM_ATP_SCHED_MAX_PAR="$CORES"
 exec "$HERE/bin/FindProof" --schedule --szs --proof --wall="$LIMIT" "$1"
