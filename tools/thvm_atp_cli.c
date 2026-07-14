@@ -4977,8 +4977,12 @@ static void cli_proof_hook(AtpState *s) {
   // SZS stream goes to the preserved real stdout (g_cli_out).
   FILE *out = (g_cli_out != NULL) ? g_cli_out : stdout;
   if (g_cli_want_szs && !g_cli_szs_printed) {
+    // FOF ontology when a conjecture was negated (Theorem); CNF
+    // ontology for clausal input (Unsatisfiable).
     fprintf(out, "%% SZS status %s for %s\n",
-            g_cli_tptp_mode ? "Unsatisfiable" : "Theorem", g_cli_problem);
+            g_cli_fof_conjecture ? "Theorem" :
+            g_cli_tptp_mode      ? "Unsatisfiable" : "Theorem",
+            g_cli_problem);
     g_cli_szs_printed = 1;
   }
   fprintf(out, "%% SZS output start CNFRefutation for %s\n", g_cli_problem);
