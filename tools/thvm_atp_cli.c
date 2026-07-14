@@ -33,6 +33,13 @@
 // decoded and a budgeted forward-chaining release loop adds the
 // modus-ponens consequences as extra unit equations before the engine
 // runs -- see tp_horn_release.  --horn=0 disables.
+//
+// FOF front-end: fof() records (and cnf() records that are not unit
+// equations) are clausified (src/fol NNF + Skolemization +
+// distribution) and the Horn fragment is equationalized with exactly
+// that ifeq scheme, so the UEQ engine proves FOF theorems -- see
+// tp_fof_load.  Success on a conjecture reports SZS Theorem; failure
+// is always GaveUp (never CounterSatisfiable).  --fof=0 disables.
 
 #define main atp_bench_main
 #include "../tests/test_atp_wolfram_bench.c"
@@ -145,6 +152,7 @@ static const AtpKnob KNOBS[] = {
   {"ord",                    "THVM_ATP_ORD",             1, "(reduction ordering: lpo selects LPO over the default KBO)"},
   {"equals-goal",            "THVM_ATP_EQUALS_GOAL",     1, "(existential-goal equals encoding; 2 = give up if inapplicable)"},
   {"curry",                  "THVM_ATP_CURRY",           1, "(wide-functor n-ary->binary ap2 decomposition; 0 disables)"},
+  {"fof",                    "THVM_ATP_FOF",             1, "(FOF/clausal front-end: clausify + Horn ifeq encoding; 0 disables)"},
   {"canon-input",            "THVM_ATP_CANON_INPUT",     1, "(canonical input presentation: greater side left + sorted clauses; 0 disables)"},
   {"horn",                   "THVM_ATP_HORN",            1, "(encoded-Horn release: 0 disables)"},
   {"horn-ratio",             "THVM_ATP_HORN_RATIO",      1, "(Horn pick-given size:age ratio, 0..4)"},
@@ -3686,6 +3694,477 @@ done:
   free(g_hrel); g_hrel = NULL; g_hrel_n = g_hrel_cap = 0;
 }
 
+// ===================================================================
+// FOF / clausal-CNF front-end: TPTP first-order input -> Horn ifeq UEQ
+// ===================================================================
+//
+// Parses fof() records (and cnf() records with non-unit / non-
+// equational clauses), clausifies through the src/fol pipeline
+// (NNF + Skolemization + distribution), and equationalizes the HORN
+// fragment with the ifeq encoding -- byte-for-byte the scheme of
+// TPTP's '-10' UEQ problem versions ([Sma18], the Claessen-Smallbone
+// CADE-2017 encoding).  Verified against LCL306-3 (CNF, non-unit)
+// vs the official LCL306-10:
+//   * predicate atom P(t...)      ->  the term P(t...), asserted = true
+//   * definite clause C | ~G1 | ... | ~Gk  (C, Gi as equations ci=cr,
+//     gil=gir after the predicate mapping)
+//       ->  ifeq(g1l,g1r, ifeq(g2l,g2r, ... ifeq(gkl,gkr, cl, cr)
+//           ..., cr), cr) = cr
+//   * one dispatcher axiom        ifeq(A,A,B,C) = B   (iff ifeq used)
+//   * a single unit negative clause ~(s=t) is the goal  s != t
+//   * otherwise every negative clause ~G1|...|~Gk becomes the rule
+//       ifeq(g1l,g1r, ... ifeq(gkl,gkr, false, true) ..., true) = true
+//     and the single goal is      false != true
+//     (complete for Horn: an unsatisfiable Horn set is refuted by ONE
+//     negative clause against the definite subset's least model).
+// A conjecture role is universally closed, negated, and clausified
+// with the rest; its clauses carry the conjecture mark for SInE / tgt.
+//
+// Soundness discipline: the encoding is conservative on the Horn
+// fragment, but a saturation of the encoded problem is never reported
+// Satisfiable/CounterSatisfiable -- g_cli_fof_applied joins
+// cli_strategy_complete, so failure is GaveUp (the horn/equals
+// pattern).  Non-Horn clauses (2+ positive literals after tautology
+// deletion) exit as a clean give-up: dropping a positive literal
+// would STRENGTHEN the axiom set and could fake a refutation.
+// TODO: a sound-but-incomplete non-Horn lane (or(A,B)=true with
+// or-absorption axioms) and a Tseitin fallback for distribution
+// blow-ups are natural extensions; neither is wired yet.
+
+static int g_cli_fof_applied     = 0;  // encoding ran: GaveUp, never Satisfiable
+static int g_cli_fof_conjecture  = 0;  // conjecture role seen: SZS FOF ontology (Theorem)
+static int g_cli_fof_trivial     = 0;  // clausification derived the empty clause
+
+// Does the (preprocessed) text need the clausal front-end?  Any fof()
+// record, or any cnf() record whose literal part is not a unit
+// (in)equation.  THVM_ATP_FOF=0 forces the old UEQ-only path.
+static int tp_needs_clausal(const char *text) {
+  {
+    const char *e = getenv("THVM_ATP_FOF");
+    if (e != NULL && e[0] == '0') return 0;
+  }
+  for (const char *p = text; (p = strstr(p, "fof(")) != NULL; p += 4)
+    if (p == text || !(isalnum((unsigned char)p[-1]) || p[-1] == '_')) return 1;
+  const char *p = text;
+  while ((p = strstr(p, "cnf(")) != NULL) {
+    if (p != text && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) { p += 4; continue; }
+    p += 4;
+    int depth = 1;
+    const char *body = p;
+    while (*p != '\0' && depth > 0) {
+      if (*p == '(') depth++;
+      else if (*p == ')') depth--;
+      p++;
+    }
+    size_t blen = (size_t)(p - body - 1);
+    // literal part = after the 2nd top-level comma
+    int d = 0, commas = 0;
+    const char *lit = NULL;
+    for (size_t i = 0; i < blen; i++) {
+      char c = body[i];
+      if (c == '(') d++;
+      else if (c == ')') d--;
+      else if (c == ',' && d == 0 && ++commas == 2) { lit = body + i + 1; break; }
+    }
+    if (lit == NULL) continue;
+    size_t llen = blen - (size_t)(lit - body);
+    int eq = 0;
+    for (size_t i = 0; i < llen; i++) {
+      char c = lit[i];
+      if (c == '|' || c == '~') return 1;           // disjunction / negation
+      else if (c == '=') eq = 1;                    // covers '!=' too
+    }
+    if (!eq) return 1;                              // bare predicate literal
+  }
+  return 0;
+}
+
+// --- fresh symbol names against the pc_intern table ------------------
+static char g_fof_true_name[TP_NAME_LEN]  = "true";
+static char g_fof_false_name[TP_NAME_LEN] = "false";
+static char g_fof_ifeq_name[TP_NAME_LEN]  = "ifeq";
+static char g_fof_sk_prefix[TP_NAME_LEN]  = "sk";
+
+static void fof_fresh_const(char *name, size_t cap) {
+  while (pc_lookup(name) != PC_NOT_FOUND) {
+    size_t l = strlen(name);
+    if (l + 2 >= cap) tp_giveup("cannot make a fresh symbol name");
+    name[l] = 'q'; name[l + 1] = '\0';
+  }
+}
+// Skolem prefix: no interned symbol may be <prefix><digits>.
+static void fof_fresh_sk_prefix(void) {
+  for (;;) {
+    size_t plen = strlen(g_fof_sk_prefix);
+    int clash = 0;
+    for (int i = 0; i < pc_nsyms && !clash; i++) {
+      const char *nm = pc_sym[i];
+      if (strncmp(nm, g_fof_sk_prefix, plen) != 0) continue;
+      const char *d = nm + plen;
+      if (*d == '\0') continue;
+      while (*d >= '0' && *d <= '9') d++;
+      if (*d == '\0') clash = 1;
+    }
+    if (!clash) return;
+    if (plen + 2 >= sizeof g_fof_sk_prefix)
+      tp_giveup("cannot make a fresh Skolem prefix");
+    g_fof_sk_prefix[plen] = 'q'; g_fof_sk_prefix[plen + 1] = '\0';
+  }
+}
+
+// --- clause-side serializer: fol Term -> .pr-ready text ---------------
+typedef struct {
+  u32 id[PC_MAX_VARS];   // clause-local variable ids, first-occurrence order
+  int n;
+} FofVarScope;
+
+static void fof_ser_emit(char *buf, size_t cap, size_t *o, const char *s) {
+  size_t l = strlen(s);
+  if (*o + l + 1 >= cap) tp_giveup("FOF-encoded clause exceeds side-length bound");
+  memcpy(buf + *o, s, l + 1);
+  *o += l;
+}
+
+static void fof_ser_term(Term t, FofVarScope *sc, char *buf, size_t cap, size_t *o) {
+  if (term_tag(t) == TAG_FVR) {
+    u32 vid = term_ext(t);
+    int ix = -1;
+    for (int i = 0; i < sc->n; i++) if (sc->id[i] == vid) { ix = i; break; }
+    if (ix < 0) {
+      if (sc->n >= (int)PC_MAX_VARS) tp_giveup("FOF clause exceeds variable bound");
+      ix = sc->n;
+      sc->id[sc->n++] = vid;
+    }
+    char nm[16];
+    snprintf(nm, sizeof nm, "X%d", ix);
+    fof_ser_emit(buf, cap, o, nm);
+    return;
+  }
+  if (term_tag(t) != TAG_CTR) tp_giveup("unsupported term in clausified formula");
+  u32 lab = term_ext(t);
+  char nm[TP_NAME_LEN + 16];
+  if (lab >= FOL_LAB_SKOLEM_BASE) {
+    snprintf(nm, sizeof nm, "%s%u", g_fof_sk_prefix, lab - FOL_LAB_SKOLEM_BASE);
+  } else if (lab >= PC_LAB_BASE && lab < PC_LAB_BASE + (u32)pc_nsyms) {
+    snprintf(nm, sizeof nm, "%s", pc_sym[lab - PC_LAB_BASE]);
+  } else {
+    tp_giveup("unsupported symbol in clausified formula");
+    return;
+  }
+  fof_ser_emit(buf, cap, o, nm);
+  u32 n = term_ctr_n(t);
+  if (n == 0u) return;
+  fof_ser_emit(buf, cap, o, "(");
+  for (u32 i = 0; i < n; i++) {
+    if (i > 0) fof_ser_emit(buf, cap, o, ",");
+    fof_ser_term(term_ctr_at(t, i), sc, buf, cap, o);
+  }
+  fof_ser_emit(buf, cap, o, ")");
+}
+
+// --- literal classification -------------------------------------------
+// A literal maps to an equation pair (l, r): an equality atom keeps its
+// sides; a predicate atom P(t...) pairs with the fresh `true` constant
+// (r == 0 marks it, serialized late so the fresh name is final).
+// Verdicts for $true/$false atoms: DROP the literal or the whole
+// clause (tautology).
+enum { FOF_LIT_PAIR, FOF_LIT_DROP_LIT, FOF_LIT_DROP_CLAUSE };
+
+static int fof_lit_classify(const FolLit *lit, Term *l, Term *r) {
+  Term a = lit->atom;
+  if (term_tag(a) == TAG_FVR)
+    tp_giveup("a bare variable is not a first-order atom");
+  if (term_tag(a) != TAG_CTR) tp_giveup("unsupported atom in clausified formula");
+  u32 lab = term_ext(a);
+  if (lab == PC_LAB_TRUE)
+    return lit->sign ? FOF_LIT_DROP_LIT : FOF_LIT_DROP_CLAUSE;
+  if (lab == PC_LAB_FALSE)
+    return lit->sign ? FOF_LIT_DROP_CLAUSE : FOF_LIT_DROP_LIT;
+  if (fol_is_connective(lab))
+    tp_giveup("clausification left a connective inside an atom");
+  if (lab == PC_LAB_EQ) {
+    *l = term_ctr_at(a, 0u);
+    *r = term_ctr_at(a, 1u);
+    return FOF_LIT_PAIR;
+  }
+  *l = a;
+  *r = 0;   // predicate atom: right side is the fresh `true` constant
+  return FOF_LIT_PAIR;
+}
+
+// --- clause emission ---------------------------------------------------
+static void tp_fof_push(TpProblem *tp, const char *lhs, const char *rhs,
+                        int neg, int conj) {
+  if (strlen(lhs) >= TP_SIDE_LEN || strlen(rhs) >= TP_SIDE_LEN)
+    tp_giveup("FOF-encoded clause exceeds side-length bound");
+  if (tp->n_cls >= TP_MAX_CLAUSES) tp_giveup("problem exceeds clause bound");
+  TpClause *cl = &tp->cls[tp->n_cls++];
+  snprintf(cl->lhs, sizeof cl->lhs, "%s", lhs);
+  snprintf(cl->rhs, sizeof cl->rhs, "%s", rhs);
+  cl->neg = neg;
+  cl->conj = conj;
+}
+
+// Serialize one Horn clause as a single unit equation.  `conds` are the
+// negative literals' pairs in clause order; the conclusion pair is
+// (cl, cr).  cr==0 / cond r==0 stand for the fresh `true` constant;
+// cl==0 (with cr==0) is the fresh `false` constant (the funnel rule).
+static void fof_emit_horn(TpProblem *tp, Term *cond_l, Term *cond_r, int nc,
+                          Term cl, Term cr, int neg, int conj) {
+  static char lbuf[TP_SIDE_LEN * 4];
+  static char rbuf[TP_SIDE_LEN * 4];
+  FofVarScope sc;
+  sc.n = 0;
+  size_t lo = 0, ro = 0;
+  for (int i = 0; i < nc; i++) {
+    fof_ser_emit(lbuf, sizeof lbuf, &lo, g_fof_ifeq_name);
+    fof_ser_emit(lbuf, sizeof lbuf, &lo, "(");
+    fof_ser_term(cond_l[i], &sc, lbuf, sizeof lbuf, &lo);
+    fof_ser_emit(lbuf, sizeof lbuf, &lo, ",");
+    if (cond_r[i] == 0) fof_ser_emit(lbuf, sizeof lbuf, &lo, g_fof_true_name);
+    else fof_ser_term(cond_r[i], &sc, lbuf, sizeof lbuf, &lo);
+    fof_ser_emit(lbuf, sizeof lbuf, &lo, ",");
+  }
+  // innermost then-branch: the conclusion's left side
+  if (cl == 0) fof_ser_emit(lbuf, sizeof lbuf, &lo, g_fof_false_name);
+  else fof_ser_term(cl, &sc, lbuf, sizeof lbuf, &lo);
+  // right side (and each level's else-branch): the conclusion's right side
+  if (cr == 0) fof_ser_emit(rbuf, sizeof rbuf, &ro, g_fof_true_name);
+  else fof_ser_term(cr, &sc, rbuf, sizeof rbuf, &ro);
+  for (int i = 0; i < nc; i++) {
+    fof_ser_emit(lbuf, sizeof lbuf, &lo, ",");
+    fof_ser_emit(lbuf, sizeof lbuf, &lo, rbuf);
+    fof_ser_emit(lbuf, sizeof lbuf, &lo, ")");
+  }
+  tp_fof_push(tp, lbuf, rbuf, neg, conj);
+}
+
+// --- the front-end ------------------------------------------------------
+#define FOF_MAX_RECORDS 65536
+
+static jmp_buf g_fof_oom_jb;
+
+static void tp_fof_load(TpProblem *tp, const char *text) {
+  thvm_init();
+  g_cli_fof_applied = 1;
+  pc_nsyms = 0;
+  fol_reset_skolem();
+  thvm_heap_exhausted = 0;
+  thvm_heap_exhaust_jmp = &g_fof_oom_jb;
+  if (setjmp(g_fof_oom_jb) != 0) {
+    thvm_heap_exhaust_jmp = NULL;
+    tp_giveup("FOF clausification exhausted the term heap "
+              "(raise --heap-cells)");
+  }
+
+  // Pass A: parse + clausify every record.  Terms persist (no engine
+  // session runs before serialization, so nothing moves the heap).
+  FolClause **cls = (FolClause **)malloc(sizeof(FolClause *) * TP_MAX_CLAUSES);
+  u8 *ccnj = (u8 *)malloc(TP_MAX_CLAUSES);
+  if (cls == NULL || ccnj == NULL) tp_giveup("OOM in FOF front-end");
+  int ncl = 0;
+  int n_conjectures = 0;
+  const char *p = text;
+  int nrec = 0;
+  for (;;) {
+    // next fof( / cnf( record at an identifier boundary
+    const char *pf = NULL;
+    for (const char *q = p; (q = strstr(q, "fof(")) != NULL; q += 4)
+      if (q == text || !(isalnum((unsigned char)q[-1]) || q[-1] == '_')) { pf = q; break; }
+    const char *pcx = NULL;
+    for (const char *q = p; (q = strstr(q, "cnf(")) != NULL; q += 4)
+      if (q == text || !(isalnum((unsigned char)q[-1]) || q[-1] == '_')) { pcx = q; break; }
+    const char *rec = (pf != NULL && (pcx == NULL || pf < pcx)) ? pf : pcx;
+    if (rec == NULL) break;
+    if (++nrec > FOF_MAX_RECORDS) tp_giveup("problem exceeds record bound");
+    p = rec + 4;
+    int depth = 1;
+    const char *body = p;
+    while (*p != '\0' && depth > 0) {
+      if (*p == '(') depth++;
+      else if (*p == ')') depth--;
+      p++;
+    }
+    if (depth != 0) tp_giveup("unbalanced parentheses in TPTP record");
+    size_t blen = (size_t)(p - body - 1);
+    // split off role (arg 2) and formula (arg 3) at top-level commas;
+    // trailing annotation args are legal and ignored.
+    int d = 0, commas = 0;
+    const char *role = NULL, *form = NULL;
+    size_t role_len = 0, form_len = 0;
+    for (size_t i = 0; i < blen; i++) {
+      char c = body[i];
+      if (c == '(' || c == '[') d++;
+      else if (c == ')' || c == ']') d--;
+      else if (c == ',' && d == 0) {
+        commas++;
+        if (commas == 1) role = body + i + 1;
+        else if (commas == 2) {
+          role_len = (size_t)(body + i - role);
+          form = body + i + 1;
+          form_len = blen - i - 1;
+        } else if (commas == 3) {
+          form_len = (size_t)(body + i - form);
+          break;
+        }
+      }
+    }
+    if (form == NULL) tp_giveup("malformed TPTP record (need name, role, formula)");
+    if (commas == 2) form_len = blen - (size_t)(form - body);
+    while (role_len > 0 && isspace((unsigned char)*role)) { role++; role_len--; }
+    while (role_len > 0 && isspace((unsigned char)role[role_len - 1])) role_len--;
+    char rolebuf[32];
+    snprintf(rolebuf, sizeof rolebuf, "%.*s",
+             (int)(role_len < 31 ? role_len : 31), role);
+    char *fbuf = (char *)malloc(form_len + 1);
+    if (fbuf == NULL) tp_giveup("OOM in FOF front-end");
+    memcpy(fbuf, form, form_len);
+    fbuf[form_len] = '\0';
+    PcParse scope;
+    Term f = pc_parse_formula(fbuf, &scope);
+    free(fbuf);
+    if (f == 0) tp_giveup("cannot parse a TPTP formula");
+    if (pc_nsyms >= PC_MAX_SYMS - 1) tp_giveup("problem exceeds symbol bound");
+    int is_conj = (strcmp(rolebuf, "conjecture") == 0);
+    int conj_mark = is_conj || (strcmp(rolebuf, "negated_conjecture") == 0);
+    if (is_conj) {
+      if (++n_conjectures > 1) tp_giveup("multiple conjecture records");
+      g_cli_fof_conjecture = 1;
+    }
+    f = pc_close(f);                     // TPTP: free variables are universal
+    if (is_conj) f = fol_mk_not(f);      // refutation: negate the conjecture
+    // Clausify WITHOUT resetting the Skolem counter (fresh across records).
+    Term nnf = fol_nnf(f);
+    Term sk  = fol_skolemize(nnf);
+    Term cnf_ = fol_distribute(sk);
+    u32 nc = 0;
+    FolClause **recc = fol_extract_clauses(cnf_, &nc);
+    if (recc == NULL) tp_giveup("clausification failed");
+    for (u32 i = 0; i < nc; i++) {
+      if (ncl >= TP_MAX_CLAUSES) tp_giveup("problem exceeds clause bound");
+      cls[ncl] = recc[i];
+      ccnj[ncl] = (u8)conj_mark;
+      ncl++;
+    }
+    free(recc);
+  }
+  if (ncl == 0) tp_giveup("no TPTP records parsed");
+
+  // Fresh names: the pc_intern table now holds every problem symbol.
+  fof_fresh_const(g_fof_true_name, sizeof g_fof_true_name);
+  fof_fresh_const(g_fof_false_name, sizeof g_fof_false_name);
+  fof_fresh_const(g_fof_ifeq_name, sizeof g_fof_ifeq_name);
+  fof_fresh_sk_prefix();
+
+  // Pass B: classify + emit.  Negative clauses are collected first so
+  // the goal shape (direct vs funnel) is known before emission.
+  Term  cond_l[FOL_MAX_LITS], cond_r[FOL_MAX_LITS];
+  int  *neg_ix = (int *)malloc(sizeof(int) * (size_t)(ncl + 1));
+  if (neg_ix == NULL) tp_giveup("OOM in FOF front-end");
+  int n_neg_cls = 0;
+  int any_ifeq = 0;
+  int neg_unit = 0;              // the (single) negative clause is a unit
+  Term neg_unit_l = 0, neg_unit_r = 0;
+  for (int c = 0; c < ncl; c++) {
+    FolClause *cl = cls[c];
+    if (fol_is_tautology(cl)) continue;
+    int npos = 0, nneg = 0, drop_clause = 0;
+    Term pl = 0, pr = 0;
+    for (u32 i = 0; i < cl->n_lits && !drop_clause; i++) {
+      Term l, r;
+      int v = fof_lit_classify(&cl->lits[i], &l, &r);
+      if (v == FOF_LIT_DROP_CLAUSE) drop_clause = 1;
+      else if (v == FOF_LIT_DROP_LIT) continue;
+      else if (cl->lits[i].sign) {
+        if (nneg >= (int)FOL_MAX_LITS) tp_giveup("FOF clause exceeds literal bound");
+        cond_l[nneg] = l; cond_r[nneg] = r; nneg++;
+      } else {
+        npos++;
+        pl = l; pr = r;
+      }
+    }
+    if (drop_clause) continue;
+    if (npos > 1)
+      tp_giveup("FOF equationalization covers the Horn fragment only "
+                "(a clause has 2+ positive literals)");
+    if (npos == 0 && nneg == 0) {
+      // empty clause: the input is unsatisfiable outright
+      g_cli_fof_trivial = 1;
+      continue;
+    }
+    if (npos == 0) {
+      neg_ix[n_neg_cls++] = c;
+      neg_unit = (nneg == 1);
+      if (neg_unit) { neg_unit_l = cond_l[0]; neg_unit_r = cond_r[0]; }
+      continue;
+    }
+    if (nneg > 0) any_ifeq = 1;
+    fof_emit_horn(tp, cond_l, cond_r, nneg, pl, pr, 0, ccnj[c]);
+  }
+  if (g_cli_fof_trivial) {
+    // Trivially unsatisfiable: a joinable goal (plus one dummy axiom so
+    // the positive/negative shape gates pass) proves instantly.
+    char tt[TP_NAME_LEN + 4];
+    snprintf(tt, sizeof tt, "%s", g_fof_true_name);
+    tp_fof_push(tp, tt, tt, 0, 0);
+    tp_fof_push(tp, tt, tt, 1, 1);
+  } else if (n_neg_cls == 1 && neg_unit) {
+    // exactly one negative clause and it is a unit: the goal is direct
+    static char lbuf[TP_SIDE_LEN * 4], rbuf[TP_SIDE_LEN * 4];
+    FofVarScope sc; sc.n = 0;
+    size_t lo = 0, ro = 0;
+    fof_ser_term(neg_unit_l, &sc, lbuf, sizeof lbuf, &lo);
+    if (neg_unit_r == 0) fof_ser_emit(rbuf, sizeof rbuf, &ro, g_fof_true_name);
+    else fof_ser_term(neg_unit_r, &sc, rbuf, sizeof rbuf, &ro);
+    tp_fof_push(tp, lbuf, rbuf, 1, 1);
+  } else if (n_neg_cls >= 1) {
+    // several negative clauses: refutation needs ANY of them, but the
+    // engine proves multiple negative units as a CONJUNCTION -- funnel
+    // each into a false-concluding rule and use the single ground goal.
+    any_ifeq = 1;
+    for (int k = 0; k < n_neg_cls; k++) {
+      FolClause *cl = cls[neg_ix[k]];
+      int nneg = 0;
+      for (u32 i = 0; i < cl->n_lits; i++) {
+        Term l, r;
+        int v = fof_lit_classify(&cl->lits[i], &l, &r);
+        if (v == FOF_LIT_PAIR) {
+          if (nneg >= (int)FOL_MAX_LITS) tp_giveup("FOF clause exceeds literal bound");
+          cond_l[nneg] = l; cond_r[nneg] = r; nneg++;
+        }
+      }
+      fof_emit_horn(tp, cond_l, cond_r, nneg, 0, 0, 0, ccnj[neg_ix[k]]);
+    }
+    char gl[TP_NAME_LEN], gr[TP_NAME_LEN];
+    snprintf(gl, sizeof gl, "%s", g_fof_false_name);
+    snprintf(gr, sizeof gr, "%s", g_fof_true_name);
+    tp_fof_push(tp, gl, gr, 1, 1);
+  } else {
+    tp_giveup("no negative clause after clausification (nothing to refute)");
+  }
+  if (any_ifeq) {
+    char dl[TP_NAME_LEN * 4 + 16];
+    snprintf(dl, sizeof dl, "%s(X0,X0,X1,X2)", g_fof_ifeq_name);
+    tp_fof_push(tp, dl, "X1", 0, 0);
+  }
+  for (int c = 0; c < ncl; c++) fol_clause_free(cls[c]);
+  free(cls); free(ccnj); free(neg_ix);
+  thvm_heap_exhaust_jmp = NULL;
+  // Signature + variable table + the existential-goal flag, exactly as
+  // tp_parse computes them.
+  for (int i = 0; i < tp->n_cls; i++) {
+    tp_scan_term(tp, tp->cls[i].lhs);
+    tp_scan_term(tp, tp->cls[i].rhs);
+    if (tp->cls[i].neg && !g_cli_goal_existential &&
+        (tp_side_has_var(tp->cls[i].lhs) || tp_side_has_var(tp->cls[i].rhs)))
+      g_cli_goal_existential = 1;
+  }
+  fprintf(stderr, "FindProof: FOF/clausal front-end: %d clause(s) -> %d unit "
+          "equation(s)%s%s\n", ncl, tp->n_cls,
+          any_ifeq ? " (ifeq encoding)" : "",
+          g_cli_fof_conjecture ? ", conjecture negated" : "");
+}
+
 // Emit the .pr text, following the WL wmGenerateProblem conventions:
 // KBO, every weight 1, precedence sorted by (arity ascending, name
 // ascending) with the FIRST symbol highest.
@@ -3781,7 +4260,7 @@ static int cli_strategy_complete(void) {
   // never Satisfiable.
   const char *sj = getenv("THVM_ATP_SIMPLER_JOIN");
   return !g_cli_goal_existential && !g_cli_sine_applied && !g_cli_horn_applied
-      && !g_cli_equals_applied
+      && !g_cli_equals_applied && !g_cli_fof_applied
       && (mw == NULL || *mw == '0') && (am == NULL || *am == '0')
       && (rr == NULL || *rr == '0') && (en == NULL || *en == '0')
       && (sj == NULL || *sj == '0');
@@ -4534,7 +5013,10 @@ static void usage(FILE *fp) {
     "  --keep-pr                   keep (and name) the .pr generated from TPTP input\n"
     "  --list-knobs                print the knob table and exit\n"
     "TPTP CNF UEQ input (.p) is converted to Waldmeister .pr form in-process;\n"
-    "include('Axioms/*.ax') resolves against the problem directory, $TPTP, CWD.\n");
+    "include('Axioms/*.ax') resolves against the problem directory, $TPTP, CWD.\n"
+    "TPTP FOF input (and non-unit CNF) is clausified and Horn-encoded into unit\n"
+    "equations (the '-10' ifeq scheme); success reports SZS Theorem for a\n"
+    "conjecture, failure always GaveUp (--fof=0 disables the front-end).\n");
 }
 
 int main(int argc, char **argv) {
@@ -4634,7 +5116,7 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  // TPTP input -> temp .pr (detected by content: a cnf( block).
+  // TPTP input -> temp .pr (detected by content: a cnf( / fof( block).
   g_cli_problem = file;
   const char *run_file = file;
   char tmp_pr[1024] = "";
@@ -4642,7 +5124,7 @@ int main(int argc, char **argv) {
     size_t rl = 0;
     char *raw = tp_read_file(file, &rl);
     if (raw == NULL) { fprintf(stderr, "FindProof: cannot open %s\n", file); return 2; }
-    if (strstr(raw, "cnf(") != NULL) {
+    if (strstr(raw, "cnf(") != NULL || strstr(raw, "fof(") != NULL) {
       g_cli_tptp_mode = 1;
       g_cli_szs_wanted = szs;
       g_cli_probpath = file;
@@ -4652,7 +5134,11 @@ int main(int argc, char **argv) {
       TpProblem *tpp = (TpProblem *)calloc(1, sizeof(TpProblem));
       if (tpp == NULL) { fprintf(stderr, "FindProof: OOM\n"); return 2; }
 #define tp (*tpp)
-      tp_parse(&tp, pre);
+      // FOF records (or non-unit / non-equational CNF) go through the
+      // clausal front-end; pure UEQ input keeps the byte-identical
+      // tp_parse path.
+      if (tp_needs_clausal(pre)) tp_fof_load(&tp, pre);
+      else tp_parse(&tp, pre);
       free(pre);
       int n_neg = 0;
       for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
@@ -4684,8 +5170,9 @@ int main(int argc, char **argv) {
       // engine run.  Decisive for problems the engine cannot even
       // load (PUZ039's state/12 exceeds the term reader's arity cap).
       // --proof runs stay on the engine path for the CNFRefutation.
-      if (g_horn_goal_reached && szs && !g_cli_want_proof) {
-        printf("%% SZS status Unsatisfiable for %s\n", file);
+      if ((g_horn_goal_reached || g_cli_fof_trivial) && szs && !g_cli_want_proof) {
+        printf("%% SZS status %s for %s\n",
+               g_cli_fof_conjecture ? "Theorem" : "Unsatisfiable", file);
         fflush(stdout);
         return 0;
       }
@@ -4890,7 +5377,10 @@ int main(int argc, char **argv) {
   if (szs) {
     const char *tag;
     if (g_cli_tptp_mode) {
-      tag = (g_atp_bench_status == (int)ATP_PROVED)      ? "Unsatisfiable" :
+      // FOF ontology: a refuted negated conjecture is a Theorem; the
+      // clause ontology's Unsatisfiable covers axioms-only input.
+      tag = (g_atp_bench_status == (int)ATP_PROVED)      ?
+                (g_cli_fof_conjecture ? "Theorem" : "Unsatisfiable") :
             (g_atp_bench_status == (int)ATP_QUEUE_EMPTY) ?
                 (cli_strategy_complete() ? "Satisfiable" : "GaveUp") :
             (g_atp_bench_status == (int)ATP_TIMEOUT)     ? "ResourceOut" :

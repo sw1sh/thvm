@@ -93,7 +93,7 @@ static u32 pc_lookup(const char *name) {
 enum {
   K_IDENT, K_VAR, K_LP, K_RP, K_LB, K_RB, K_COMMA, K_COLON,
   K_ALL, K_EX, K_NOT, K_AND, K_OR, K_IMP, K_IFF, K_EQ, K_NEQ,
-  K_STR, K_EOF
+  K_REVIMP, K_XOR, K_STR, K_EOF
 };
 typedef struct { int kind; char text[PC_NAME]; } PcTok;
 
@@ -126,7 +126,9 @@ static int pc_lex(const char *s, PcTok *out, int max) {
       else             { t->kind = K_EQ;  s += 1; }
     }
     else if (c == '<') {
-      if (s[1] == '=' && s[2] == '>') { t->kind = K_IFF; s += 3; }
+      if      (s[1] == '=' && s[2] == '>') { t->kind = K_IFF;    s += 3; }
+      else if (s[1] == '=')                { t->kind = K_REVIMP; s += 2; }
+      else if (s[1] == '~' && s[2] == '>') { t->kind = K_XOR;    s += 3; }
       else return -1;
     }
     else if (c == '\'') {                      // 'quoted atom'
@@ -277,11 +279,14 @@ static Term pc_or(PcParse *p) {
   while (pc_peek(p) == K_OR) { pc_adv(p); a = fol_mk_or(a, pc_and(p)); }
   return a;
 }
-// formula := or [ ('=>'|'<=>') formula ]   (=>, <=> right-associative)
+// formula := or [ ('=>'|'<=>'|'<='|'<~>') formula ]   (right-associative;
+// TPTP forbids unparenthesised mixing, so one binary tail suffices)
 static Term pc_formula(PcParse *p) {
   Term a = pc_or(p);
   if (pc_peek(p) == K_IMP) { pc_adv(p); return fol_mk_imp(a, pc_formula(p)); }
   if (pc_peek(p) == K_IFF) { pc_adv(p); return fol_mk_iff(a, pc_formula(p)); }
+  if (pc_peek(p) == K_REVIMP) { pc_adv(p); return fol_mk_imp(pc_formula(p), a); }
+  if (pc_peek(p) == K_XOR) { pc_adv(p); return fol_mk_not(fol_mk_iff(a, pc_formula(p))); }
   return a;
 }
 
