@@ -567,7 +567,9 @@ static FolLit fol_tseitin_rec(Term f, FolClause ***out, u32 *n, u32 *cap) {
 
 fn FolClause **fol_tseitin_extract_clauses(Term nnf_skolemized, u32 *n_out) {
   if (n_out == NULL) return NULL;
-  fol_reset_tseitin();
+  // Counter reset is the CALLER's job (the thvm.h contract): a
+  // multi-record problem resets once and lets the counter run across
+  // records so aux labels never collide between formulas.
   FolClause **out = NULL;
   u32 n = 0u, cap = 0u;
   FolLit root = fol_tseitin_rec(nnf_skolemized, &out, &n, &cap);
@@ -583,6 +585,7 @@ fn FolClause **fol_tseitin_extract_clauses(Term nnf_skolemized, u32 *n_out) {
 fn FolClause **fol_formula_to_clauses_tseitin(Term f, u32 *n_out) {
   if (n_out == NULL) return NULL;
   fol_reset_skolem();
+  fol_reset_tseitin();
   Term nnf = fol_nnf(f);
   Term sk  = fol_skolemize(nnf);
   return fol_tseitin_extract_clauses(sk, n_out);
