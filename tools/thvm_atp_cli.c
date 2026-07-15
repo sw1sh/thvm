@@ -216,6 +216,14 @@ static int g_cli_sine_applied     = 0;
 // Set in main before conversion so the over-bound handler can emit a
 // competition-valid SZS line instead of crashing.
 static int g_cli_szs_wanted = 0;
+// Diagnostic verbosity.  Default OFF: a CASC/competition run must emit
+// ONLY the SZS status line + solution block on stdout and nothing on
+// stderr.  The engine bench TU writes its per-run diagnostics (PRSYM,
+// the completion stats block, progress lines) to stderr; the schedule
+// slice children inherit fd 2, so silencing the parent narration is not
+// enough -- the children's stderr is sent to /dev/null too.  --verbose
+// or THVM_ATP_VERBOSE=1 restores everything for development.
+static int g_cli_verbose = 0;
 static const char *g_cli_probpath = "";
 // Defined with the provenance module / FOF front-end below; the Horn
 // release pass (earlier in the file) gates on them.
@@ -7721,8 +7729,9 @@ static int run_schedule(const char *self, const char *file, double wall,
       int i = next++;
       snprintf(outs[i], sizeof outs[i], "/tmp/thvm_sched_%d_%d.out",
                (int)getpid(), i);
-      fprintf(stderr, "%% FindProof schedule slice %s (%.0fs, concurrent)\n",
-              SCHEDULE[i].name, wall);
+      if (g_cli_verbose)
+        fprintf(stderr, "%% FindProof schedule slice %s (%.0fs, concurrent)\n",
+                SCHEDULE[i].name, wall);
       pid_t pid = fork();
       if (pid == 0) {
         // Child: own process group so the parent can kill the WHOLE
@@ -7734,6 +7743,15 @@ static int run_schedule(const char *self, const char *file, double wall,
         // Redirect stdout to the slice temp file, run the slice.
         int fd = open(outs[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd >= 0) { dup2(fd, 1); close(fd); }
+        // Silence the slice's diagnostics (bench PRSYM/stats/progress all
+        // go to stderr): the grandchild engine inherits this fd 2, so the
+        // whole portfolio stays quiet.  The winner's proof is on stdout
+        // (the temp file above), so nothing checkable is lost.  --verbose
+        // keeps the stream for debugging.
+        if (!g_cli_verbose) {
+          int dn = open("/dev/null", O_WRONLY);
+          if (dn >= 0) { dup2(dn, 2); close(dn); }
+        }
         char cmd[4096];
         snprintf(cmd, sizeof cmd, "FINDPROOF_SLICE=1 '%s' %s --wall=%.0f%s%s '%s'",
                  self, SCHEDULE[i].flags, wall,
@@ -7839,6 +7857,7 @@ int main(int argc, char **argv) {
   // Bench-intake give-ups (e.g. --full-ac=2 with no AC operator) route
   // through tp_giveup so direct runs still print the SZS line.
   g_atp_bench_giveup_hook = tp_giveup;
+  if (getenv("THVM_ATP_VERBOSE") != NULL) g_cli_verbose = 1;
 
   // Invoked as CheckProof (the ProoVer entry binary), the checker is the
   // default mode; FindProof stays the prover.
@@ -7868,6 +7887,7 @@ int main(int argc, char **argv) {
     if (nlen == 3 && strncmp(name, "szs", 3) == 0) { szs = 1; continue; }
     if (nlen == 8 && strncmp(name, "schedule", 8) == 0) { want_schedule = 1; continue; }
     if (nlen == 5 && strncmp(name, "check", 5) == 0) { want_check = 1; continue; }
+    if (nlen == 7 && strncmp(name, "verbose", 7) == 0) { g_cli_verbose = 1; continue; }
     if (nlen == 5 && strncmp(name, "proof", 5) == 0) {
       g_cli_want_proof = 1;
       // The proof extractor cites each goal-closing rule through its
