@@ -24,7 +24,6 @@ Save a trained model to a temporary file:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
 TAtpSaveGnnScorer[model, FileNameJoin[{$TemporaryDirectory, "gcn.safetensors"}]]
 ```

@@ -11,7 +11,7 @@ RelatedGuides: [THVMLink]
 
 ## Usage
 
-<code>[TAtpCpGraphEquation]()[*graph*]</code> reconstructs the original equation from a [TAtpCpGraph]() result, returning `Inactive[Equal][lhs, rhs]`.
+<code>[TAtpCpGraphEquation]()[*graph*]</code> reconstructs the original equation from a [TAtpCpGraph]() result, returning `lhs == rhs`.
 
 ## Details & Options
 
@@ -23,8 +23,7 @@ RelatedGuides: [THVMLink]
 Round-trip an equation through the encoder and back:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
-TAtpCpGraphEquation @ TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], ident]]
+TAtpCpGraphEquation @ TAtpCpGraph[CircleTimes[a == OverBar[a], ident]]
 ```
 <!-- => Inactive[Equal][a \[CircleTimes] OverBar[a], ident] -->
 

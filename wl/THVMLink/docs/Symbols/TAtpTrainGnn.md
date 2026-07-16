@@ -33,7 +33,6 @@ Train a GCN on a theory's notable theorems and read the loss curve endpoints:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 SeedRandom[1234];
 ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
 r = TAtpTrainGnn[ds, "Hidden" -> 16, "Rounds" -> 2, MaxTrainingRounds -> 120];
@@ -47,7 +46,6 @@ Read the training-set rank AUC:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 SeedRandom[1234];
 TAtpTrainGnn["GroupAxioms", TimeConstraint -> 10]["TrainAUC"]
 ```

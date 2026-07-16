@@ -4,14 +4,14 @@ Name: TFindEquationalProof
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TFindEquationalProof
-Keywords: [theorem proving, ATP, equational, deprecated, alias]
+Keywords: [theorem proving, ATP, equational, alias]
 SeeAlso: [TFindProof, FindEquationalProof, TFindEquationalPath]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
-<code>[TFindEquationalProof]()[*...*]</code> is a deprecated alias for [TFindProof](); every call forwards to [TFindProof]() unchanged. New code should call [TFindProof]().
+<code>[TFindEquationalProof]()[*...*]</code> is equivalent to [TFindProof](); every call forwards to [TFindProof]() unchanged.
 
 ## Details & Options
 
@@ -23,9 +23,8 @@ The alias forwards to [TFindProof]():
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TFindEquationalProof[
-    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x],
+    x \[CircleTimes] y == y \[CircleTimes] x,
     "AbelianGroupAxioms",
     TimeConstraint -> 10]
 ```

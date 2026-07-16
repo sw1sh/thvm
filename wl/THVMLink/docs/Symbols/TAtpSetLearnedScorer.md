@@ -27,7 +27,6 @@ Close the ENIGMA loop - dataset, train, push, re-prove:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 ds = TAtpCpDataset["AbelianGroupAxioms"];
 trained = TAtpTrainScorer[ds];
 TAtpSetLearnedScorer[trained["Model"]]
@@ -39,7 +38,6 @@ TAtpSetLearnedScorer[trained["Model"]]
 Drop the learned model and revert to the baked-in scorer:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TAtpSetLearnedScorer[Clear]
 ```
 <!-- => True -->

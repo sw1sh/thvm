@@ -27,7 +27,6 @@ Lift a parsed SZS derivation produced by a CLI wrapper:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 res = TVampireProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10];
 TSZSDerivationToProofObject[res["Inferences"]]
 ```

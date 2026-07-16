@@ -30,7 +30,6 @@ Lift a Vampire proof into a literal `ProofObject` (the default):
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TVampireProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
 ```
 <!-- => ProofObject[...] -->

@@ -24,7 +24,6 @@ RelatedGuides: [THVMLink]
 Convert a native proof object to the built-in `ProofObject`:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 p = TFindProof[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -38,7 +37,6 @@ Head @ TToProofObject[p]
 The converted object verifies through the built-in `ProofFunction`:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 p = TFindProof[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -53,7 +51,6 @@ po["ProofFunction"][po["Theorems"]]
 It is the inverse of the lift [TFindProof]() applies internally, so converting and reading back the proof dataset round-trips:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 p = TFindProof[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},

@@ -32,7 +32,6 @@ Run Twee on a canonical bench problem and read the status:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TTweeProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]["Status"]
 ```
 <!-- => "Proved" -->
@@ -43,7 +42,6 @@ Inspect the lemma list Twee produced:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TTweeProof["AbelianGroupAxioms", "InverseOfInverse"]["Lemmas"]
 ```
 <!-- => {<|"Name" -> "lemma1", "Statement" -> "..."|>, ...} -->

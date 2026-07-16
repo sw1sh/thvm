@@ -35,7 +35,6 @@ Train a scorer in one call from a theory's notable theorems:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 trained = TAtpTrainScorer["AbelianGroupAxioms", TimeConstraint -> 10];
 trained["TrainAUC"]
 ```
@@ -47,7 +46,6 @@ Train on a pre-built dataset:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 ds = TAtpCpDataset["AbelianGroupAxioms", TimeConstraint -> 10];
 TAtpTrainScorer[ds, "Hidden" -> 16]["Model"]
 ```

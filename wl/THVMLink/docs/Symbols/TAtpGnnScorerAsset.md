@@ -24,7 +24,6 @@ RelatedGuides: [THVMLink]
 Check that the asset is bundled:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 FileExistsQ @ TAtpGnnScorerAsset[]
 ```
 <!-- => True -->
@@ -35,7 +34,6 @@ Load and push the bundled scorer:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TAtpSetGnnScorer[TAtpGnnScorerAsset[]]
 ```
 <!-- => True -->

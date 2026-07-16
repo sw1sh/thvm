@@ -33,7 +33,6 @@ Build a labelled critical-pair dataset from a theory's notable theorems:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 ds = TAtpCpDataset["AbelianGroupAxioms", TimeConstraint -> 10];
 ds["NRows"]
 ```
@@ -45,7 +44,6 @@ Read the feature names:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TAtpCpDataset["AbelianGroupAxioms", TimeConstraint -> 10]["FeatureNames"]
 ```
 <!-- => {"size_sum", "max_depth", "n_distinct_vars", "n_var_occ", "weight_add", "weight_gt", "weight_mix2", "goal_weight", "age", "top_symbol_l", "top_symbol_r", "shares_goal_sub", "orientable", "unif_measure"} -->

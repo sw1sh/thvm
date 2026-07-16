@@ -45,12 +45,7 @@ RelatedGuides: [THVMLink]
 Prove commutativity from the abelian-group axioms:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
-TFindProof[
-    Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x],
-    "AbelianGroupAxioms",
-    TimeConstraint -> 10
-]
+TFindProof[x \[CircleTimes] y \[CircleTimes] z == z \[CircleTimes] y \[CircleTimes] x, "AbelianGroupAxioms"]
 ```
 <!-- => ProofObject[<|"Theorem" -> ..., "Status" -> "Proved", "Method" -> "Equational", ...|>] -->
 
@@ -83,7 +78,7 @@ Mix an explicit conjecture against a named theory plus a Method preset.  Sheffer
 ```wl
 #| eval: false
 TFindProof[
-    Inactive[Equal][nand[nand[a, b], nand[a, b]], nand[nand[a, a], nand[b, b]]],
+    nand[nand[a, b] == nand[a, b], nand[nand[a, a], nand[b, b]]],
     "ShefferAxioms",
     Method         -> "Waldmeister",
     TimeConstraint -> 60
@@ -97,7 +92,7 @@ Inspect the relevance filter's keep / drop partition before running the prover:
 
 ```wl
 TRelevantAxioms[
-    Inactive[Equal][x + y, y + x],
+    Inactive[Equal][x + y, y + x],  (* Plus is Orderless: a bare == would evaluate to True *)
     "AbelianGroupAxioms",
     Method -> {"AxiomRelevance" -> "Safe"}
 ]
@@ -109,7 +104,7 @@ TRelevantAxioms[
 Preview the schedule a `Method` will expand to under `Automatic`:
 
 ```wl
-TAtpSchedule[Automatic, Inactive[Equal][a \[CircleTimes] b, b \[CircleTimes] a], "AbelianGroupAxioms"]
+TAtpSchedule[Automatic, a \[CircleTimes] b == b \[CircleTimes] a, "AbelianGroupAxioms"]
 ```
 <!-- => {<config1>, <config2>, ...} - the structure-aware front + the fixed Portfolio tail -->
 
@@ -119,7 +114,7 @@ TAtpSchedule[Automatic, Inactive[Equal][a \[CircleTimes] b, b \[CircleTimes] a],
 
 ```wl
 p = TFindProof[
-    Inactive[Equal][x \[CircleTimes] OverTilde[1], x],
+    x \[CircleTimes] OverTilde[1] == x,
     "AbelianGroupAxioms",
     TimeConstraint -> 10
 ];
@@ -127,9 +122,6 @@ p["ProofGraph"]
 ```
 <!-- => Graph[...] - the equational rewrite DAG -->
 
----
-
-`TFindEquationalProof` is a deprecated alias that forwards to `TFindProof`; new code should use `TFindProof`.
 
 ## Possible Issues
 
@@ -137,8 +129,8 @@ A non-terminating axiom set never saturates.  Bound completion runs with `TimeCo
 
 ```wl
 TFindProof[
-    Inactive[Equal][a, b],
-    {Inactive[Equal][f[x_], f[f[x_]]]},
+    a == b,
+    {f[x_] == f[f[x_]]},
     TimeConstraint -> 2
 ]
 ```
@@ -150,7 +142,7 @@ TFindProof[
 
 ```wl
 TFindProof[
-    Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x],
+    x \[CircleTimes] y \[CircleTimes] z == z \[CircleTimes] y \[CircleTimes] x,
     "AbelianGroupAxioms",
     Method         -> {"Completion", "CriticalPairWeight" -> "Add", "Ordering" -> "LPO"},
     TimeConstraint -> 10
@@ -165,7 +157,7 @@ Run the full multi-config portfolio with a fair time slice and report every retu
 ```wl
 #| eval: false
 TFindProof[
-    Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x],
+    x \[CircleTimes] y \[CircleTimes] z == z \[CircleTimes] y \[CircleTimes] x,
     "AbelianGroupAxioms",
     All,
     Method         -> "VampirePortfolio",

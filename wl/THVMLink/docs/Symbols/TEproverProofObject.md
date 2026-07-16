@@ -30,7 +30,6 @@ Lift an E proof into a literal `ProofObject` (the default):
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TEproverProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
 ```
 <!-- => ProofObject[...] -->

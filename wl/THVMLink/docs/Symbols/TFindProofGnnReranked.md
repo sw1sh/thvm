@@ -27,7 +27,6 @@ Prove a group-theory goal with the bundled pretrained model guiding selection:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
 axioms = {
     ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]],

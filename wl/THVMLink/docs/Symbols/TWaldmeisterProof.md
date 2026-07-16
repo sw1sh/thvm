@@ -32,7 +32,6 @@ Run Waldmeister on a `.pr` problem file and read the status:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TWaldmeisterProof[
     FileNameJoin[{Directory[], "tools", "baselines", "wm_pr",
         "AbelianGroupAxioms__InverseOfInverse.pr"}],
@@ -46,7 +45,6 @@ Read the protocol step count straight off the result:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TWaldmeisterProof[
     FileNameJoin[{Directory[], "tools", "baselines", "wm_pr",
         "AbelianGroupAxioms__InverseOfInverse.pr"}]]["ProofLength"]

@@ -25,7 +25,6 @@ Score a dataset's graphs with a trained model:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
 model = TAtpTrainGnn[ds]["Model"];
 TAtpGnnScore[model, ds]

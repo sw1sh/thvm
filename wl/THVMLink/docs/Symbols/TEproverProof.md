@@ -32,7 +32,6 @@ Run E on a canonical bench problem and read the status:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TEproverProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]["Status"]
 ```
 <!-- => "Proved" -->
@@ -43,7 +42,6 @@ Read the proof length straight off the result:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TEproverProof["AbelianGroupAxioms", "InverseOfInverse"]["ProofLength"]
 ```
 <!-- => an integer SZS derivation step count -->

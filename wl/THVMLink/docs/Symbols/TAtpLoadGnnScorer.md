@@ -23,7 +23,6 @@ Load the bundled pretrained scorer and read its config:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
 {model["Rounds"], model["Hidden"]}
 ```

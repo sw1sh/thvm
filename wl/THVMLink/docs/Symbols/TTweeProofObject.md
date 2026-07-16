@@ -28,7 +28,6 @@ Lift a Twee proof and read its head:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 Head @ TTweeProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
 ```
 <!-- => Association (the thvm-shaped proof dataset) -->

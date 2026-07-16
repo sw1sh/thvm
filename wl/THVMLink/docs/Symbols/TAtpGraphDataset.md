@@ -34,7 +34,6 @@ Build a labelled graph dataset from a theory's notable theorems:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
 Length @ ds["Graphs"]
 ```
@@ -46,7 +45,6 @@ Read the positive / negative / proof counts:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
 {ds["NPos"], ds["NNeg"], ds["NProofs"]}
 ```

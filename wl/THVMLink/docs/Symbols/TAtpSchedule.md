@@ -37,7 +37,7 @@ An `Automatic` schedule against an AbelianGroup goal carries the structure-aware
 
 ```wl
 TAtpSchedule[Automatic,
-    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x], "AbelianGroupAxioms"]
+    x \[CircleTimes] y == y \[CircleTimes] x, "AbelianGroupAxioms"]
 ```
 <!-- => {{"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", ...}, ...} - the structure-aware front, then the fixed "Portfolio" tail -->
 

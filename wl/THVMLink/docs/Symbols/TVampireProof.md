@@ -35,7 +35,6 @@ Run Vampire on a canonical bench problem resolved from a (theory, theorem) pair:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TVampireProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
 ```
 <!-- => <|"Status" -> "Proved", "Strategy" -> "lrs+10_1:1_...", "Seconds" -> _, "ProofLength" -> _, "Inferences" -> {...}, "RawSZS" -> "..."|> -->
@@ -46,7 +45,6 @@ Read the proof length straight off the result:
 
 ```wl
 #| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TVampireProof["AbelianGroupAxioms", "InverseOfInverse"]["ProofLength"]
 ```
 <!-- => an integer SZS derivation step count -->

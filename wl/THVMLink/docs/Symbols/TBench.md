@@ -27,7 +27,6 @@ RelatedGuides: [THVMLink]
 Bench a one-line elementwise step.  `InitFn` runs once before timing starts and seeds the host-side `$x` / `$y` tensors; `StepFn` is the body whose wallclock + memory footprint are recorded:
 
 ```wl
-Needs["WolframInstitute`THVMLink`"];
 TBench[<|
     "Name"     -> "elementwise-add",
     "InitFn"   -> Function[Null,

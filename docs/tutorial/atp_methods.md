@@ -47,10 +47,6 @@ When to reach for `TFindProof` vs the built-in `FindEquationalProof`:
   ordered-rewriting / completion configurations, and is meaningfully
   faster on the harder Sheffer / cross-axiom Boolean / combinator goals.
 
-Legacy name: the symbol was originally `TFindEquationalProof`. It is
-kept as a deprecated alias and forwards every call to `TFindProof`, so
-existing notebooks and downstream code keep working unchanged.
-
 ## 2. Loading
 
 All ATP-related public symbols (`TFindProof`, `TATP`,
