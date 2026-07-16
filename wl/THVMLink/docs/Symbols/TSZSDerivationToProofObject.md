@@ -31,7 +31,7 @@ Needs["WolframInstitute`THVMLink`ATP`"];
 res = TVampireProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10];
 TSZSDerivationToProofObject[res["Inferences"]]
 ```
-<!-- => <|"Backend" -> "SZS", "Steps" -> {...}, ...|> (the thvm-shaped proof dataset) -->
+<!-- => <|"Backend" -> "SZS", "Status" -> "Proved", "Goal" -> _, "Axioms" -> {...}, "ProofDataset" -> <|...|>, "ProofLength" -> _, "RuleHistogram" -> <|...|>|> -->
 
 ## Properties & Relations
 

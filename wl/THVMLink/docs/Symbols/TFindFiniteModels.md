@@ -202,7 +202,7 @@ TFindFiniteModels[f[0, a] == 0, 4, MaxItems -> 2] // AbsoluteTiming
 TFindFiniteModels[f[0, a] == 0, 4, MaxItems -> 2, Method -> "BruteForce"] // AbsoluteTiming
 ```
 
-All six methods return the same models - here on the Wolfram axiom:
+All seven methods return the same models - here on the Wolfram axiom:
 
 ```wl
 SameQ @@ (TFindFiniteModels[AxiomaticTheory["WolframAxioms"], Method -> #]& /@

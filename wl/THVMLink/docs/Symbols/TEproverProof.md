@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TEproverProof]()[*file*]</code> runs the local E prover binary on the TPTP (Thousands of Problems for Theorem Provers) problem *file* (a path ending in `.p`) and returns a normalized result Association.
 
-<code>[TEproverProof]()[*theory*, *thm*]</code> resolves the canonical problem file under `tools/baselines/vampire_tptp/{theory}__{thm}.p` from the (*theory*, *thm*) pair and proves it.
+<code>[TEproverProof]()[*theory*, *thm*]</code> resolves the canonical problem file under `tools/baselines/vampire_tptp/{theory}__{thm}.p` from the (*theory*, *thm*) pair and proves it. The bank is generated, not checked in (`tools/vampire/export_all.wls` writes it; the directory is gitignored), so on a fresh checkout the two-argument form reports the missing file until the bank is exported.
 
 The result Association is keyed `"Status"` (`"Proved"`, `"TimedOut"`, or `"Failed"`), `"Strategy"` (always `"eprover-auto-schedule"`), `"Seconds"` (wall time), `"ProofLength"` (the SZS derivation step count), `"Inferences"` (the parsed SZS inference DAG), and `"RawSZS"` (the raw SZS output text).
 

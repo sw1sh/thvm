@@ -11,38 +11,39 @@ RelatedGuides: [THVMLink]
 
 ## Usage
 
-<code>[TATP]()[$axioms$, $conjecture$]</code> runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with `"Status"`, `"Steps"`, `"Rules"`, `"QueueSize"`.  Variables are written as patterns (`x_`); the engine treats them as universally-quantified meta-variables.
+<code>[TATP]()[$axioms$, $conjecture$]</code> runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with `"Status"`, `"Steps"`, `"Rules"`, `"QueueSize"`.  Variables are written as patterns (`x_`): universally quantified in an axiom, unification (witness) variables in the conjecture.
 
 <code>[TATP]()[File["$path$.pr"]]</code> parses a Waldmeister `.pr` spec file via the C-side `wald_parse_file` and runs the saturator directly.
 
 ## Details & Options
 
 - [TATP]() is the lower-level cousin of [TFindProof](): same C engine, simpler return shape.  Use it when you want the raw saturation statistics without the `ProofObject` reconstruction pass.
-- Method options accepted by [TFindProof]() are accepted here too (the dispatch goes through the same WL surface).
-- `Witness -> {$x_, ...$}` captures the existential bindings on a successful proof.  `AllWitnesses -> True` enumerates bounded existential proofs with `MaxDepth` / `MaxWitnesses` caps.
+- `"Status"` is the engine's raw terminal tag: `"PROVED"`, `"REFUTED"`, `"TIMEOUT"` (the `MaxSteps` budget ran out), or `"QUEUE_EMPTY"` (saturated without reaching the goal).
+- Options are `MaxSteps` (the selection budget, default 64), `Witness`, `AllWitnesses`, `MaxDepth`, and `MaxWitnesses`.  The [TFindProof]() options (`Method`, `TimeConstraint`, ...) are **not** accepted here - this is the raw fixed-strategy saturator.
+- Unlike [TFindProof]() (which Skolemizes goal variables into constants for the universally-quantified reading), the raw saturator treats the conjecture's pattern variables as unification variables: `Witness -> {$x_, ...$}` captures their bindings on a successful proof, and `AllWitnesses -> True` enumerates bounded existential proofs with `MaxDepth` / `MaxWitnesses` caps.
+- Write axioms over inert operators ([CircleTimes](), [CenterDot](), a plain head `f`).  An evaluating operator like [Times]() is `Flat` and `Orderless`, so the axioms mangle before the (held) encoding sees them.
 
 ## Basic Examples
 
-A small group-theory saturation, no goal (returns the derived rules):
+Prove that the inverse is an involution, from the right-unit / right-inverse / associativity axioms:
 
 ```wl
 TATP[
-    {x_*1 == x_,
-     x_*inv[x_] == 1,
-     x_*(y_*z_) == (x_*y_)*z_},
-    x_*y_ == y_*x_]
+    {x_ \[CircleTimes] 1 == x_,
+     x_ \[CircleTimes] inv[x_] == 1,
+     x_ \[CircleTimes] (y_ \[CircleTimes] z_) == (x_ \[CircleTimes] y_) \[CircleTimes] z_},
+    inv[inv[a]] == a]
 ```
-<!-- => <|"Status" -> "Proved", "Steps" -> _Integer, "Rules" -> _Integer, "QueueSize" -> _Integer|> -->
+<!-- => <|"Status" -> "PROVED", "Steps" -> 41, "Rules" -> 8, "QueueSize" -> 11|> -->
 
 A Waldmeister `.pr` benchmark file:
 
 ```wl
 TATP[File["tests/data/atp/wolfram_axiom_literal.pr"]]
 ```
-<!-- => <|"Status" -> "Proved", ...|> -->
+<!-- => <|"Status" -> "PROVED", "Steps" -> 6, "Rules" -> 1, "QueueSize" -> 4|> -->
 
 ## Properties & Relations
 
-- [TFindProof]() wraps the same engine with a verifier-shaped `ProofObject` reconstruction pass.  Reach for [TFindProof]() when you want a real Wolfram `ProofObject` (the [FindEquationalProof]() interface).
-- [TATP]() shares the [TRelevantAxioms]() filter and the `Method` / `TimeConstraint` / `MaxSteps` knobs with [TFindProof](); see [the AtpMethods tech note](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods) for the catalog.
+- [TFindProof]() wraps the same engine with a verifier-shaped `ProofObject` reconstruction pass, the `Method` strategy surface, `TimeConstraint`, and the relevance filter.  Reach for [TFindProof]() when you want a real Wolfram `ProofObject` (the [FindEquationalProof]() interface); see [the AtpMethods tech note](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods) for the strategy catalog.
 - The `.pr` file driver is the same `wald_parse_file` entry the C-side bench harness uses, so a Waldmeister benchmark file runs identically here and at the C bench.

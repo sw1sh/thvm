@@ -24,6 +24,8 @@ RelatedGuides: [THVMLink]
   - `"Rounds"` - the number of message-passing rounds.
   - `MaxTrainingRounds` - the Adam round cap.
   - `"LearningRate"` - the Adam step size.
+  - `"BatchSize"` - the minibatch size (default 128).
+  - `"NodeCap"` - graphs padded/capped to this node count per batch (default 64).
 
 ## Basic Examples
 

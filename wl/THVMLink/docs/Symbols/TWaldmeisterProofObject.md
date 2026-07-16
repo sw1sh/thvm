@@ -24,18 +24,17 @@ It is the `Method -> "WaldmeisterProcess"` dispatch target in [TFindProof]().
 - Options:
   - `TimeConstraint`, `"Binary"`, `"MathlinkPath"` - forwarded to [TWaldmeisterProof]().
   - `"ParseFormulas"` (default `False`) - when `True`, each step's `Statement` is parsed into a Wolfram expression.
-  - `"LiftToProofObject"` (default `False`) - when `True`, wraps the Association into a literal `ProofObject` head, so `p["ProofFunction"]`, `p["ProofGraph"]`, `p["ProofLength"]`, and `p["Theorems"]` work.
+  - `"LiftToProofObject"` (default `True`) - wraps the Association into a literal `ProofObject` head (implying `"ParseFormulas" -> True`), so `p["ProofFunction"]`, `p["ProofGraph"]`, `p["ProofLength"]`, and `p["Theorems"]` work.  Set it `False` for the raw construct-keyed Association.  The lifted proof renders and walks, but `p["ProofFunction"][p["Theorems"]]` does not verify: the protocol steps lack the rewrite metadata (Orientation / Rule / Side / Position) the verifier replays.
 - When the `wmcli` binary is not installed, the builder returns a `Failure["ExternalNoProof", ...]` rather than raising an error.
 
 ## Basic Examples
 
-Lift a Waldmeister proof into a literal `ProofObject`:
+Lift a Waldmeister proof into a literal `ProofObject` (the default):
 
 ```wl
 #| eval: false
 Needs["WolframInstitute`THVMLink`ATP`"];
-TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse",
-    "LiftToProofObject" -> True, TimeConstraint -> 10]
+TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
 ```
 <!-- => ProofObject[...] (the .pr is generated at runtime on a cache-miss; Failure["ExternalNoProof", ...] when wmcli is unavailable) -->
 

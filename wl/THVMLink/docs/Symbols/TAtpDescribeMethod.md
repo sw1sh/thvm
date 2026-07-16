@@ -15,10 +15,10 @@ RelatedGuides: [THVMLink]
 
 ## Details & Options
 
-- A named preset (`"Waldmeister"`, `"VampireUEQ"`, `"Twee"`, `"EProver"`, `"VampireRandom"`) returns the preset's full defaults Association: the suboptions the dispatcher merges with the user's overrides.
+- A named preset (`"Waldmeister"`, `"VampireUEQ"`, `"Twee"`, `"EProver"`, `"VampireRandom"`, `"ENIGMA"`) returns the preset's full defaults Association: the suboptions the dispatcher merges with the user's overrides.
 - A list spec like `{"Twee", "Ordering" -> "LPO"}` returns the preset's defaults merged with the user's overrides - the options that actually reach the C engine, so you see what wins on collision.
 - A non-preset config like `{"Completion", "Ordering" -> "LPO"}` returns the bare Association of suboptions, with no preset merge.
-- `Automatic` / `"Portfolio"` / `"VampirePortfolio"` / `"VampirePortfolioCompact"` return `<|"Schedule" -> {...}|>` describing the multi-entry rotation rather than a single config.
+- `Automatic` / `"Portfolio"` / `"VampirePortfolio"` / `"VampirePortfolioCompact"` / `"AllPresets"` return `<|"Schedule" -> {...}|>` describing the multi-entry rotation rather than a single config.
 
 ## Basic Examples
 
@@ -41,7 +41,7 @@ A portfolio returns a Schedule key:
 ```wl
 TAtpDescribeMethod["VampirePortfolio"]
 ```
-<!-- => <|"Schedule" -> {{"VampireUEQ"}, ...}|> -->
+<!-- => <|"Schedule" -> {"VampireUEQ", {"Completion", ...}, ...}|> -->
 
 ## Properties & Relations
 

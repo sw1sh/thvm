@@ -21,7 +21,7 @@ RelatedGuides: [THVMLink]
 - An axiom written `"BA" -> "AB"` is a [Rule]() and installs *pre-oriented*: one-directional string rewriting (a semi-Thue rule). An axiom written `{"BA", "AB"}`, `"BA" == "AB"`, or `"BA" <-> "AB"` is a two-way equation that the engine orients itself.
 - A theorem is a word pair in any of those shapes; its direction is meaningless (the goal is an equation). A `List` of theorems is a multi-goal conjunction returning ONE `ProofObject` with a hypothesis/conclusion row pair per conjunct.
 - Accepts the [TFindProof]() options `MaxSteps`, `TimeConstraint`, `Method`, `PortfolioFrontLoad`.
-- The returned `ProofObject` tags its theory `StringLogic` (rather than `EquationalLogic`); it otherwise supports the full property API.
+- The returned `ProofObject` is a standard `"EquationalLogic"` proof over the encoded terms and supports the full property API; [TStringPath]() decodes a proof's rewrite path back to plain words.
 
 ## Basic Examples
 
