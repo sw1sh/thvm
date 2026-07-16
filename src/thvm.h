@@ -4114,6 +4114,23 @@ typedef enum {
   CNF_SELECT_POSITIVE = 2,   // first positive literal, else all
 } CnfSelection;
 
+// Literal-index bucket: the (atom root label, sign) key's entry list.
+// Entries are packed u64s -- the resolution index stores
+// (clause_id << 8 | literal_idx); the subsumption indexes store bare
+// clause ids.  Buckets live in an open-addressing power-of-two hash
+// table (FolIdx); NULLed clause slots are skipped lazily at retrieval.
+typedef struct {
+  u64  key;    // 1 + ((label << 1) | sign); 0 = empty slot
+  u64 *ents;
+  u32  n, cap;
+} FolIdxBucket;
+
+typedef struct {
+  FolIdxBucket *slots;
+  u32           cap;      // power of two; 0 = not yet allocated
+  u32           n_used;
+} FolIdx;
+
 typedef struct {
   FolClause **clauses;
   u32         n;
@@ -4215,6 +4232,43 @@ typedef struct {
   // literals.  Off by default -- zero overhead outside --proof runs.
   u8          retain_dead;
   FolClause **corpse;
+  // --- literal indexing (per-(root label, sign) partner lists) ------
+  // Replaces the O(active) resolution cross-scan and the O(n)
+  // subsumption walks with bucket retrievals; candidate SETS and the
+  // visit ORDER are reproduced exactly, so the clause-store evolution
+  // is byte-identical to the full scans (see sat.c "literal index").
+  // THVM_FOL_INDEX=0 disables (the A/B lever); any index allocation
+  // failure also clears idx_on -- the full scans need no index.
+  u8          idx_on;
+  u8          mask_fine;     // cmask family: argument-fingerprint bits
+                             // (latched at init with idx_on; never
+                             // flips mid-run so stored masks stay one
+                             // family)
+  u8          idx_res_valid; // active-side index tracks the ordering/
+                             // selection config; cnf_set_* clears it
+                             // and cnf_step rebuilds lazily
+  FolIdx      idx_res;       // ACTIVE eligible literals: (label, sign)
+                             //   -> (clause_id << 8 | lit_idx)
+  FolIdx      idx_fsub;      // ALL stored: first-literal FINE key
+                             //   (label, sign, arg0 fingerprint) -> id
+                             //   (forward-subsumption candidates)
+  FolIdx      idx_bsub;      // ALL stored: every distinct coarse
+                             //   (label, sign) key -> id (backward-
+                             //   subsumption, VAR-arg0 patterns)
+  FolIdx      idx_bsub_f;    // ALL stored: every distinct FINE key
+                             //   -> id (backward, CTR-arg0 patterns)
+  u32        *idx_peq;       // ACTIVE paramod sources (eligible positive
+  u32         n_peq, cap_peq;//  equality, selection not negative)
+  u32        *idx_fb;        // ACTIVE unindexable clauses (an eligible
+  u32         n_fb, cap_fb;  //  non-CTR atom / lit_idx > 255): always
+                             //  visited, like the full scan would
+  u32        *idx_fsub_wc;   // ALL stored with non-CTR/absent first
+  u32         n_fsw, cap_fsw;//  literal (forward wildcard patterns)
+  u32        *cact;          // activation ordinal (position in active[])
+  u8         *cpeq;          // per-clause paramod-source flag (active)
+  u8         *cfbl;          // per-clause fallback flag (active)
+  u32        *cstamp;        // candidate stamp, epoch-keyed
+  u32         idx_epoch;
 } CnfState;
 
 fn CnfState *cnf_init        (u32 step_cap);

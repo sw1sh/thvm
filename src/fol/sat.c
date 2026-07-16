@@ -32,14 +32,53 @@
 // Indexing: a per-clause (root label, sign) bloom mask prefilters
 // subsumption candidates (a subsumes c only if mask[a] subset of
 // mask[c]); forward demodulation walks a dedicated list of active
-// unit positive equalities instead of the whole active set.  Full
-// discrimination-tree indexing can layer on later.
+// unit positive equalities instead of the whole active set.
+//
+// Literal index (THVM_FOL_INDEX=0 disables): three bucket families
+// keyed by (atom root label, sign) replace the two scans that
+// dominate 20k+-clause runs (measured on the AGT011+2 pre-pass) --
+//   * resolution retrieval: each ACTIVE clause's ELIGIBLE literals
+//     (the selected one when the policy picked, else every maximal
+//     one) are listed under their key; the given clause's partners
+//     come from the complementary buckets, visited in ACTIVATION
+//     order, so the candidate set and the generated-clause order are
+//     byte-identical to the full cross-scan (a pair with no
+//     complementary eligible root-label match generates nothing
+//     there: fol_resolve requires complementary signs, and two CTR
+//     atoms with different roots never unify).  Clauses with an
+//     eligible non-CTR atom (or a literal index past the 8-bit
+//     packing) go on an always-visited fallback list; a GIVEN clause
+//     with such a literal -- or with an eligible positive equality,
+//     whose paramodulation TARGETS are label-unconstrained -- falls
+//     back to the full scan for that step.  Active paramod sources
+//     live on their own list (idx_peq), so a given without equality
+//     literals skips the whole paramodulation sweep.
+//   * forward subsumption: every stored clause is listed once under
+//     its FIRST literal's key (non-CTR/absent -> wildcard list).  A
+//     subsumer maps each of its literals onto a same-key literal of
+//     the candidate (substitution preserves a CTR root and the
+//     sign), so scanning the buckets of the candidate's keys plus
+//     the wildcard list reaches every possible subsumer.  Verdict-
+//     identical: existence is scan-order independent.
+//   * backward subsumption: every stored clause is listed under each
+//     DISTINCT literal key it contains; a fresh clause retrieves the
+//     bucket of its own first literal's key.  Entries append in id
+//     order, so the visit order matches the full 0..n walk on a
+//     candidate superset -- the NULLed-slot set comes out identical.
+// The subsumption families are eligibility-independent; the
+// resolution family is rebuilt from the active list after any
+// cnf_set_* config change (lazily, at the next step).  Any index
+// allocation failure permanently clears idx_on: the full scans are
+// the ground truth and need no index state.
 //
 // Memory: the state OWNS every FolClause* it stores.  Free via
 // cnf_free.
 
 #define CNF_DEFAULT_CAP 64u
 #define CNF_AGE_RATIO_DEFAULT 5u
+
+static void cnf_idx_teardown(FolIdx *ix);
+static void cnf_idx_disable(CnfState *s);
 // Heap-key penalty for clauses with no conjecture ancestry: goal
 // descendants form a small cone and always pop first.
 // THVM_FOL_GOAL_TIER=0 drops the penalty (flat weight order).
@@ -97,6 +136,20 @@ fn CnfState *cnf_init(u32 step_cap) {
     const char *e = getenv("THVM_FOL_GOAL_TIER");
     if (e != NULL && e[0] == '0') s->goal_tier = 0u;
   }
+  s->idx_on = 1u;
+  {
+    const char *e = getenv("THVM_FOL_INDEX");
+    if (e != NULL && e[0] == '0') s->idx_on = 0u;
+  }
+  if (s->idx_on) {
+    s->cact   = (u32 *)calloc(s->cap, sizeof(u32));
+    s->cpeq   = (u8 *)calloc(s->cap, 1);
+    s->cfbl   = (u8 *)calloc(s->cap, 1);
+    s->cstamp = (u32 *)calloc(s->cap, sizeof(u32));
+    if (s->cact == NULL || s->cpeq == NULL || s->cfbl == NULL ||
+        s->cstamp == NULL) cnf_idx_disable(s);
+  }
+  s->mask_fine = s->idx_on;
   s->step_cap = (step_cap == 0u) ? 1u << 30 : step_cap;
   s->status = ATP_RUNNING;
   return s;
@@ -131,6 +184,17 @@ fn void cnf_free(CnfState *s) {
   free(s->ueq);
   free(s->deferred_free);
   free(s->trace);
+  cnf_idx_teardown(&s->idx_res);
+  cnf_idx_teardown(&s->idx_fsub);
+  cnf_idx_teardown(&s->idx_bsub);
+  cnf_idx_teardown(&s->idx_bsub_f);
+  free(s->idx_peq);
+  free(s->idx_fb);
+  free(s->idx_fsub_wc);
+  free(s->cact);
+  free(s->cpeq);
+  free(s->cfbl);
+  free(s->cstamp);
   free(s);
 }
 
@@ -174,6 +238,162 @@ static u64 cnf_clause_mask(const FolClause *c) {
     m |= 1ull << (h & 63u);
   }
   return m;
+}
+
+// Argument-fingerprint mask (the mask_fine family, latched with the
+// index at init): the syntactic matcher maps a pattern literal onto a
+// target literal root-for-root, argument position by position, so
+// every σ-stable pattern feature must be present verbatim in the
+// target --
+//   coarse   (label, sign)                  every literal
+//   fine     (label, sign, pos, arg root)   every CTR argument
+// A pattern's variable argument requires nothing (it binds anything)
+// and a frozen target variable satisfies nothing (a pattern CTR never
+// matches it), so ONE bit set works for both roles and the legacy
+// subset test stays: mask[a] & ~mask[c] != 0 refutes "a subsumes c".
+// The fine bits are what discriminate the AGT-class flood clauses,
+// which share their (label, sign) multiset and differ only in ground
+// constants.
+static u64 cnf_clause_mask_fine(const FolClause *c) {
+  u64 m = 0u;
+  for (u32 i = 0; i < c->n_lits; i++) {
+    Term a = c->lits[i].atom;
+    u32 lab = (term_tag(a) == TAG_CTR) ? term_ext(a) : 0xFFFFFFu;
+    u32 h = lab * 2654435761u + (u32)c->lits[i].sign * 97u;
+    m |= 1ull << (h & 63u);
+    if (term_tag(a) != TAG_CTR) continue;
+    u32 n = term_ctr_n(a);
+    for (u32 p = 0; p < n; p++) {
+      Term ap = term_ctr_at(a, p);
+      if (term_tag(ap) != TAG_CTR) continue;
+      u32 hf = (h ^ ((p + 1u) * 0x85EBCA6Bu)) + term_ext(ap) * 2246822519u;
+      m |= 1ull << (hf & 63u);
+    }
+  }
+  return m;
+}
+
+static u64 cnf_mask_for(const CnfState *s, const FolClause *c) {
+  return s->mask_fine ? cnf_clause_mask_fine(c) : cnf_clause_mask(c);
+}
+
+// --- literal index (see the header comment) --------------------------
+
+// Bucket key for a literal: atoms are CTR terms (callers route
+// non-CTR atoms to the wildcard/fallback paths before keying).
+static u64 cnf_idx_key(Term atom, u8 sign) {
+  return 1ull + (((u64)term_ext(atom) << 1) | (u64)sign);
+}
+
+// Fine subsumption key: (root label, sign, arg0 fingerprint).  The
+// fingerprint is the first argument's root label, or CNF_ARG_VAR for
+// a variable argument, or CNF_ARG_NONE for arity 0.  Substitution
+// preserves a CTR argument's root and can only instantiate VAR, so
+//   pattern arg0 = CTR(r)  ->  matched target arg0 = CTR(r)
+//   pattern arg0 = VAR     ->  matched target arg0 = anything
+// which the two retrieval sides below exploit (target vars are
+// frozen: a pattern CTR argument never matches them).
+#define CNF_ARG_VAR  0xFFFFFFFEull
+#define CNF_ARG_NONE 0xFFFFFFFDull
+
+static u64 cnf_idx_fine_key(Term atom, u8 sign, u64 arg0) {
+  u64 h = (((u64)term_ext(atom) << 1) | (u64)sign) + 0x9E37u;
+  h = h * 0x100000001B3ull ^ arg0;
+  return 1ull + (h << 8 >> 8);   // keep clear of the 0 = empty marker
+}
+
+// The literal's own arg0 fingerprint (insert side / pattern side).
+static u64 cnf_idx_arg0(Term atom) {
+  if (term_ctr_n(atom) == 0u) return CNF_ARG_NONE;
+  Term a0 = term_ctr_at(atom, 0u);
+  return (term_tag(a0) == TAG_CTR) ? (u64)term_ext(a0) : CNF_ARG_VAR;
+}
+
+static void cnf_idx_reset(FolIdx *ix) {
+  for (u32 i = 0; i < ix->cap; i++) ix->slots[i].n = 0u;
+}
+
+static void cnf_idx_teardown(FolIdx *ix) {
+  for (u32 i = 0; i < ix->cap; i++) free(ix->slots[i].ents);
+  free(ix->slots);
+  ix->slots = NULL;
+  ix->cap = ix->n_used = 0u;
+}
+
+// Find the bucket for `key`; when `create` is set, claim an empty
+// slot (growing the table past 75% load).  Returns NULL when absent
+// (create == 0) or on allocation failure (caller disables idx_on).
+static FolIdxBucket *cnf_idx_bucket(FolIdx *ix, u64 key, u8 create) {
+  if (ix->cap == 0u) {
+    if (!create) return NULL;
+    ix->cap = 256u;
+    ix->slots = (FolIdxBucket *)calloc(ix->cap, sizeof(FolIdxBucket));
+    if (ix->slots == NULL) { ix->cap = 0u; return NULL; }
+  }
+  for (;;) {
+    u32 mask = ix->cap - 1u;
+    u32 i = (u32)(key * 0x9E3779B97F4A7C15ull >> 32) & mask;
+    for (;;) {
+      FolIdxBucket *b = &ix->slots[i];
+      if (b->key == key) return b;
+      if (b->key == 0ull) {
+        if (!create) return NULL;
+        if (ix->n_used * 4u >= ix->cap * 3u) break;   // grow first
+        b->key = key;
+        ix->n_used++;
+        return b;
+      }
+      i = (i + 1u) & mask;
+    }
+    // Rehash into a doubled table (buckets move; entry arrays are
+    // carried over by pointer).
+    u32 ncap = ix->cap * 2u;
+    FolIdxBucket *ns = (FolIdxBucket *)calloc(ncap, sizeof(FolIdxBucket));
+    if (ns == NULL) return NULL;
+    for (u32 k = 0; k < ix->cap; k++) {
+      FolIdxBucket *ob = &ix->slots[k];
+      if (ob->key == 0ull) continue;
+      u32 j = (u32)(ob->key * 0x9E3779B97F4A7C15ull >> 32) & (ncap - 1u);
+      while (ns[j].key != 0ull) j = (j + 1u) & (ncap - 1u);
+      ns[j] = *ob;
+    }
+    free(ix->slots);
+    ix->slots = ns;
+    ix->cap = ncap;
+  }
+}
+
+// Append an entry; returns 0 on allocation failure.
+static u8 cnf_idx_push(FolIdx *ix, u64 key, u64 ent) {
+  FolIdxBucket *b = cnf_idx_bucket(ix, key, 1u);
+  if (b == NULL) return 0u;
+  if (b->n >= b->cap) {
+    u32 nc = (b->cap == 0u) ? 8u : b->cap * 2u;
+    void *ne = realloc(b->ents, (size_t)nc * sizeof(u64));
+    if (ne == NULL) return 0u;
+    b->ents = (u64 *)ne;
+    b->cap = nc;
+  }
+  b->ents[b->n++] = ent;
+  return 1u;
+}
+
+static u8 cnf_u32_push(u32 **arr, u32 *n, u32 *cap, u32 v) {
+  if (*n >= *cap) {
+    u32 nc = (*cap == 0u) ? 16u : *cap * 2u;
+    void *na = realloc(*arr, (size_t)nc * sizeof(u32));
+    if (na == NULL) return 0u;
+    *arr = (u32 *)na;
+    *cap = nc;
+  }
+  (*arr)[(*n)++] = v;
+  return 1u;
+}
+
+// Any failure to keep the index complete falls back to the full
+// scans for good -- a partial index would silently drop inferences.
+static void cnf_idx_disable(CnfState *s) {
+  s->idx_on = 0u;
 }
 
 // --- passive priority heap (min by (cweight, id)) -------------------
@@ -255,6 +475,23 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
       nd = realloc(s->corpse, (size_t)nc * sizeof(FolClause *));
       if (nd != NULL) s->corpse = (FolClause **)nd;
     }
+    if (s->idx_on) {
+      void *ia = realloc(s->cact,   (size_t)nc * sizeof(u32));
+      void *ip = realloc(s->cpeq,   (size_t)nc);
+      void *ib = realloc(s->cfbl,   (size_t)nc);
+      void *is = realloc(s->cstamp, (size_t)nc * sizeof(u32));
+      if (ia != NULL) s->cact   = (u32 *)ia;
+      if (ip != NULL) s->cpeq   = (u8 *)ip;
+      if (ib != NULL) s->cfbl   = (u8 *)ib;
+      if (is != NULL) s->cstamp = (u32 *)is;
+      if (ia == NULL || ip == NULL || ib == NULL || is == NULL)
+        cnf_idx_disable(s);
+      else {
+        memset(s->cpeq + s->n, 0, (size_t)(nc - s->n));
+        memset(s->cfbl + s->n, 0, (size_t)(nc - s->n));
+        for (u32 i = s->n; i < nc; i++) { s->cact[i] = 0u; s->cstamp[i] = 0u; }
+      }
+    }
     if (na == NULL || nw == NULL || nq == NULL || nm == NULL || np == NULL ||
         ns == NULL || nx == NULL || nv == NULL || ng == NULL ||
         nf == NULL || nn == NULL || (s->corpse != NULL && nd == NULL)) return -1;
@@ -281,7 +518,7 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
   s->cgoal[id]   = goal;
   s->cweight[id] = w;
   s->cpri[id]    = w + ((goal || s->goal_tier == 0u) ? 0u : CNF_NONGOAL_PENALTY);
-  s->cmask[id]   = cnf_clause_mask(c);
+  s->cmask[id]   = cnf_mask_for(s, c);
   s->cpicked[id] = 0u;
   s->celig_valid[id] = 0u;
   // Freeze once: the rename-apart target-literal copy every later
@@ -293,6 +530,43 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
   s->trace[id].parent_a = parent_a;
   s->trace[id].parent_b = parent_b;
   s->n++;
+  if (s->idx_on) {
+    s->cact[id] = 0u;
+    s->cpeq[id] = s->cfbl[id] = 0u;
+    s->cstamp[id] = 0u;
+    // Forward-subsumption index: one designated (first) literal,
+    // fine-keyed by the pattern's own arg0 fingerprint.
+    if (c->n_lits == 0u || term_tag(c->lits[0].atom) != TAG_CTR) {
+      if (!cnf_u32_push(&s->idx_fsub_wc, &s->n_fsw, &s->cap_fsw, id))
+        cnf_idx_disable(s);
+    } else if (!cnf_idx_push(&s->idx_fsub,
+                             cnf_idx_fine_key(c->lits[0].atom,
+                                              c->lits[0].sign,
+                                              cnf_idx_arg0(c->lits[0].atom)),
+                             (u64)id)) {
+      cnf_idx_disable(s);
+    }
+    // Backward-subsumption index, target side: every distinct coarse
+    // (label, sign) key plus every distinct fine (label, sign, arg0)
+    // key -- a CTR-arg0 pattern retrieves fine, a VAR-arg0 pattern
+    // falls back to coarse.
+    for (u32 i = 0; i < c->n_lits && s->idx_on; i++) {
+      if (term_tag(c->lits[i].atom) != TAG_CTR) continue;
+      u64 k  = cnf_idx_key(c->lits[i].atom, c->lits[i].sign);
+      u64 kf = cnf_idx_fine_key(c->lits[i].atom, c->lits[i].sign,
+                                cnf_idx_arg0(c->lits[i].atom));
+      u8 dup = 0u, dupf = 0u;
+      for (u32 j = 0; j < i && !(dup && dupf); j++) {
+        if (term_tag(c->lits[j].atom) != TAG_CTR) continue;
+        if (cnf_idx_key(c->lits[j].atom, c->lits[j].sign) == k) dup = 1u;
+        if (cnf_idx_fine_key(c->lits[j].atom, c->lits[j].sign,
+                             cnf_idx_arg0(c->lits[j].atom)) == kf) dupf = 1u;
+      }
+      if (!dup && !cnf_idx_push(&s->idx_bsub, k, (u64)id)) cnf_idx_disable(s);
+      if (s->idx_on && !dupf &&
+          !cnf_idx_push(&s->idx_bsub_f, kf, (u64)id)) cnf_idx_disable(s);
+    }
+  }
   if (s->n_passive >= s->cap_passive) {
     cnf_grow(&s->cap_passive, (u8 **)&s->passive, sizeof(u32));
     if (s->n_passive >= s->cap_passive) return -1;
@@ -344,9 +618,12 @@ static u8 cnf_has_ordering(const CnfState *s) {
 }
 
 // The per-clause eligibility cache derives from the ordering +
-// selection config; any config change invalidates it wholesale.
+// selection config; any config change invalidates it wholesale --
+// along with the active-side literal index built from it (rebuilt
+// lazily at the next cnf_step).
 static void cnf_elig_invalidate(CnfState *s) {
   if (s->celig_valid != NULL && s->n > 0u) memset(s->celig_valid, 0, s->n);
+  s->idx_res_valid = 0u;
 }
 
 fn void cnf_set_retain_dead(CnfState *s) {
@@ -557,22 +834,70 @@ static void cnf_forward_demod(CnfState *s, FolClause **pc) {
 // The bloom-mask + literal-count prefilters cut most candidates
 // before the exponential matcher (and before its per-call literal
 // renames hit the term heap).
+// One stored-subsumer test, shared by the scan and bucket paths.
+static u8 cnf_fsub_try(const CnfState *s, u32 i, const FolClause *c,
+                       u64 cm, u32 cw, const FolLit *frozen) {
+  const FolClause *a = s->clauses[i];
+  if (a == NULL) return 0u;
+  if (a->n_lits > c->n_lits) return 0u;
+  if (s->cweight[i] > cw) return 0u;   // substitution never shrinks
+  if ((s->cmask[i] & ~cm) != 0ull) return 0u;
+  return fol_subsumes_frozen_nv(a, frozen, c->n_lits, s->cnvars[i]);
+}
+
 static u8 cnf_is_subsumed(const CnfState *s, const FolClause *c) {
   if (c->n_lits > FOL_MAX_LITS) return 0u;
-  u64 cm = cnf_clause_mask(c);
+  u64 cm = cnf_mask_for(s, c);
   u32 cw = cnf_clause_weight(c);
   u64 mark = HEAP_NEXT, gc_snap = gc_count();
   // Freeze the candidate ONCE; every surviving pattern reuses it.
   FolLit frozen[FOL_MAX_LITS];
   fol_freeze_lits(c, frozen);
   u8 hit = 0u;
-  for (u32 i = 0; i < s->n; i++) {
-    const FolClause *a = s->clauses[i];
-    if (a == NULL) continue;
-    if (a->n_lits > c->n_lits) continue;
-    if (s->cweight[i] > cw) continue;   // substitution never shrinks
-    if ((s->cmask[i] & ~cm) != 0ull) continue;
-    if (fol_subsumes_frozen_nv(a, frozen, c->n_lits, s->cnvars[i])) { hit = 1u; break; }
+  if (s->idx_on) {
+    // Bucket retrieval: a subsumer's designated (first) literal maps
+    // onto one of c's literals, so its fine key is determined by that
+    // literal up to the pattern's arg0 being a variable -- scan, per
+    // literal of c, the exact-arg0 bucket plus the VAR-arg0 bucket,
+    // then the wildcard patterns.
+    for (u32 i = 0; i < c->n_lits && !hit; i++) {
+      if (term_tag(c->lits[i].atom) != TAG_CTR) continue;
+      Term atom = c->lits[i].atom;
+      u8 sign = c->lits[i].sign;
+      u64 a0 = cnf_idx_arg0(atom);
+      for (int pass = 0; pass < 2 && !hit; pass++) {
+        // pass 0: patterns with this exact arg0 fingerprint;
+        // pass 1: patterns whose arg0 is a variable (skip when the
+        //         target's own fingerprint IS the variable/none case:
+        //         pass 0 already covered that bucket).
+        u64 pa0 = (pass == 0) ? a0 : CNF_ARG_VAR;
+        if (pass == 1 && (a0 == CNF_ARG_VAR || a0 == CNF_ARG_NONE)) break;
+        u64 k = cnf_idx_fine_key(atom, sign, pa0);
+        // Skip buckets an earlier literal ALREADY scanned: literal j
+        // scanned fine(j, arg0_j), plus fine(j, VAR) unless its own
+        // fingerprint was the VAR/NONE case.
+        u8 dup = 0u;
+        for (u32 j = 0; j < i && !dup; j++) {
+          if (term_tag(c->lits[j].atom) != TAG_CTR) continue;
+          u64 ja0 = cnf_idx_arg0(c->lits[j].atom);
+          if (cnf_idx_fine_key(c->lits[j].atom, c->lits[j].sign, ja0) == k)
+            dup = 1u;
+          else if (ja0 != CNF_ARG_VAR && ja0 != CNF_ARG_NONE &&
+                   cnf_idx_fine_key(c->lits[j].atom, c->lits[j].sign,
+                                    CNF_ARG_VAR) == k) dup = 1u;
+        }
+        if (dup) continue;
+        const FolIdxBucket *b =
+            cnf_idx_bucket((FolIdx *)&s->idx_fsub, k, 0u);
+        for (u32 e = 0; b != NULL && e < b->n && !hit; e++)
+          hit = cnf_fsub_try(s, (u32)b->ents[e], c, cm, cw, frozen);
+      }
+    }
+    for (u32 e = 0; e < s->n_fsw && !hit; e++)
+      hit = cnf_fsub_try(s, s->idx_fsub_wc[e], c, cm, cw, frozen);
+  } else {
+    for (u32 i = 0; i < s->n && !hit; i++)
+      hit = cnf_fsub_try(s, i, c, cm, cw, frozen);
   }
   // The matcher retains nothing -- its renames are pure scratch.
   cnf_reclaim(mark, gc_snap);
@@ -647,40 +972,70 @@ static void cnf_backward_demod(CnfState *s, u32 new_id) {
 // pushing the FolClause* to a deferred-free queue.  Concurrent
 // inference loops that captured a clause pointer at entry stay
 // safe; the actual `free` happens at end-of-step.
+// One backward-subsumption target test + removal, shared by the scan
+// and bucket paths.
+static void cnf_bsub_try(CnfState *s, u32 new_id, const FolClause *new_c,
+                         u64 nm, u32 i) {
+  if (i == new_id) return;
+  FolClause *old = s->clauses[i];
+  if (old == NULL) return;
+  if (new_c->n_lits > old->n_lits) return;
+  if (s->cweight[new_id] > s->cweight[i]) return;
+  if ((nm & ~s->cmask[i]) != 0ull) return;
+  u8 sub = (s->cfrozen[i] != NULL)
+             ? fol_subsumes_frozen_nv(new_c, s->cfrozen[i], old->n_lits,
+                                      s->cnvars[new_id])
+             : fol_subsumes(new_c, old);
+  if (sub) {
+    s->clauses[i] = NULL;
+    if (s->retain_dead) {
+      s->corpse[i] = old;
+      return;
+    }
+    if (s->n_deferred >= s->cap_deferred) {
+      cnf_grow(&s->cap_deferred, (u8 **)&s->deferred_free, sizeof(FolClause *));
+    }
+    if (s->n_deferred < s->cap_deferred) {
+      s->deferred_free[s->n_deferred++] = old;
+    } else {
+      // Couldn't grow -- last resort, leak the clause (rather than
+      // free it and risk a dangling pointer).  cnf_free will sweep.
+      // Pin to clauses[] so it gets freed by cnf_free.
+      s->clauses[i] = old;
+    }
+  }
+}
+
 static void cnf_backward_subsume(CnfState *s, u32 new_id) {
   const FolClause *new_c = s->clauses[new_id];
   if (new_c == NULL) return;
   u64 nm = s->cmask[new_id];
   u64 mark = HEAP_NEXT, gc_snap = gc_count();
-  for (u32 i = 0; i < s->n; i++) {
-    if (i == new_id) continue;
-    FolClause *old = s->clauses[i];
-    if (old == NULL) continue;
-    if (new_c->n_lits > old->n_lits) continue;
-    if (s->cweight[new_id] > s->cweight[i]) continue;
-    if ((nm & ~s->cmask[i]) != 0ull) continue;
-    u8 sub = (s->cfrozen[i] != NULL)
-               ? fol_subsumes_frozen_nv(new_c, s->cfrozen[i], old->n_lits,
-                                        s->cnvars[new_id])
-               : fol_subsumes(new_c, old);
-    if (sub) {
-      s->clauses[i] = NULL;
-      if (s->retain_dead) {
-        s->corpse[i] = old;
-        continue;
-      }
-      if (s->n_deferred >= s->cap_deferred) {
-        cnf_grow(&s->cap_deferred, (u8 **)&s->deferred_free, sizeof(FolClause *));
-      }
-      if (s->n_deferred < s->cap_deferred) {
-        s->deferred_free[s->n_deferred++] = old;
-      } else {
-        // Couldn't grow -- last resort, leak the clause (rather than
-        // free it and risk a dangling pointer).  cnf_free will sweep.
-        // Pin to clauses[] so it gets freed by cnf_free.
-        s->clauses[i] = old;
-      }
+  // Bucket retrieval: any clause new_c subsumes contains a literal
+  // carrying new_c's first literal's key (substitution preserves a
+  // CTR root and the sign, and the target literal it maps onto is
+  // concrete -- frozen target variables never match a pattern CTR).
+  // A CTR arg0 on the pattern pins the target literal's fine key;
+  // a VAR arg0 falls back to the coarse (label, sign) family.
+  // Entries append in id order, so the removal walk matches the full
+  // 0..n scan on a candidate superset.  A non-CTR first literal can
+  // map anywhere -- full scan for those rare patterns (an empty
+  // clause never reaches here: PROVED first).
+  if (s->idx_on && new_c->n_lits > 0u &&
+      term_tag(new_c->lits[0].atom) == TAG_CTR) {
+    Term p0 = new_c->lits[0].atom;
+    u8 sgn = new_c->lits[0].sign;
+    u64 a0 = cnf_idx_arg0(p0);
+    const FolIdxBucket *b;
+    if (a0 == CNF_ARG_VAR) {
+      b = cnf_idx_bucket(&s->idx_bsub, cnf_idx_key(p0, sgn), 0u);
+    } else {
+      b = cnf_idx_bucket(&s->idx_bsub_f, cnf_idx_fine_key(p0, sgn, a0), 0u);
     }
+    for (u32 e = 0; b != NULL && e < b->n; e++)
+      cnf_bsub_try(s, new_id, new_c, nm, (u32)b->ents[e]);
+  } else {
+    for (u32 i = 0; i < s->n; i++) cnf_bsub_try(s, new_id, new_c, nm, i);
   }
   // Subsumption scratch (per-candidate renames) retains nothing.
   cnf_reclaim(mark, gc_snap);
@@ -942,6 +1297,122 @@ static void cnf_gen_eq_factoring(CnfState *s, u32 c_id) {
   }
 }
 
+// --- active-side literal index maintenance ---------------------------
+
+// Does the clause qualify as a paramodulation SOURCE under the
+// current config?  Mirrors cnf_gen_paramod's gates exactly: the
+// selection must not have picked a negative literal, and some
+// positive equality literal must be maximal (indexes past the
+// 64-bit eligibility mask count as maximal, like cnf_gen_paramod).
+static u8 cnf_clause_is_peq(const CnfState *s, u32 id) {
+  const FolClause *c = s->clauses[id];
+  if (c == NULL) return 0u;
+  u32 sel = s->csel[id];
+  if (sel != ~0u && c->lits[sel].sign == 1u) return 0u;
+  for (u32 i = 0; i < c->n_lits; i++) {
+    if (c->lits[i].sign != 0u) continue;
+    if (!fol_atom_is_eq(c->lits[i].atom)) continue;
+    if (i < 64u && ((s->cmaxlits[id] >> i) & 1ull) == 0ull) continue;
+    return 1u;
+  }
+  return 0u;
+}
+
+// Insert a freshly-activated clause: eligible CTR literals go to the
+// (label, sign) buckets; a clause with an eligible non-CTR atom (or
+// a literal index past the 8-bit packing) goes on the always-visited
+// fallback list instead; paramod sources additionally join idx_peq.
+static void cnf_idx_activate(CnfState *s, u32 id) {
+  const FolClause *c = s->clauses[id];
+  if (c == NULL || !s->idx_on) return;
+  cnf_elig_ensure(s, id);
+  u8 fb = 0u;
+  for (u32 i = 0; i < c->n_lits && !fb; i++) {
+    if (!cnf_elig(s, id, i)) continue;
+    if (term_tag(c->lits[i].atom) != TAG_CTR || i > 255u) fb = 1u;
+  }
+  s->cfbl[id] = fb;
+  if (fb) {
+    if (!cnf_u32_push(&s->idx_fb, &s->n_fb, &s->cap_fb, id))
+      cnf_idx_disable(s);
+  } else {
+    for (u32 i = 0; i < c->n_lits && s->idx_on; i++) {
+      if (!cnf_elig(s, id, i)) continue;
+      u64 k = cnf_idx_key(c->lits[i].atom, c->lits[i].sign);
+      if (!cnf_idx_push(&s->idx_res, k, ((u64)id << 8) | (u64)i))
+        cnf_idx_disable(s);
+    }
+  }
+  u8 peq = cnf_clause_is_peq(s, id);
+  s->cpeq[id] = peq;
+  if (peq && !cnf_u32_push(&s->idx_peq, &s->n_peq, &s->cap_peq, id))
+    cnf_idx_disable(s);
+}
+
+// Rebuild the active-side index from the active list (after a
+// cnf_set_* config change moved literal eligibility).  Also refreshes
+// the activation ordinals the candidate sort keys off.
+static void cnf_idx_rebuild(CnfState *s) {
+  cnf_idx_reset(&s->idx_res);
+  s->n_peq = s->n_fb = 0u;
+  for (u32 k = 0; k < s->n_active && s->idx_on; k++) {
+    u32 id = s->active[k];
+    s->cact[id] = k;
+    cnf_idx_activate(s, id);
+  }
+  s->idx_res_valid = 1u;
+}
+
+// Indexed cross-inference dispatch for the given clause.  Stamps the
+// partner candidates -- complementary-key bucket hits, the paramod
+// sources, the fallback list -- then walks the prior active list in
+// ACTIVATION order, visiting only stamped clauses with exactly the
+// calls the full scan would make (a skipped pair generates nothing
+// there; see the header comment).  The walk keeps the visit order
+// byte-identical to the full scan without a per-step sort; its
+// O(n_active) stamp probes are two loads each, three orders of
+// magnitude cheaper than the generation calls they replace.
+// Returns 0 when the index cannot narrow this given (an eligible
+// non-CTR literal, or the given is itself a paramod source: its
+// TARGETS are label-unconstrained) -- the caller then runs the full
+// scan.
+static u8 cnf_idx_partners(CnfState *s, u32 given_id, u32 active_snapshot) {
+  const FolClause *g = s->clauses[given_id];
+  if (g == NULL || !s->idx_on) return 0u;
+  if (s->cfbl[given_id] || s->cpeq[given_id]) return 0u;
+  if (++s->idx_epoch == 0u) {   // epoch wrap: clear the stamps once
+    memset(s->cstamp, 0, (size_t)s->cap * sizeof(u32));
+    s->idx_epoch = 1u;
+  }
+  for (u32 i = 0; i < g->n_lits; i++) {
+    if (!cnf_elig(s, given_id, i)) continue;
+    u64 k = cnf_idx_key(g->lits[i].atom, (u8)(1u - g->lits[i].sign));
+    const FolIdxBucket *b = cnf_idx_bucket(&s->idx_res, k, 0u);
+    for (u32 e = 0; b != NULL && e < b->n; e++)
+      s->cstamp[(u32)(b->ents[e] >> 8)] = s->idx_epoch;
+  }
+  for (u32 e = 0; e < s->n_peq; e++) s->cstamp[s->idx_peq[e]] = s->idx_epoch;
+  for (u32 e = 0; e < s->n_fb;  e++) s->cstamp[s->idx_fb[e]]  = s->idx_epoch;
+  for (u32 k = 0; k + 1u < active_snapshot; k++) {
+    u32 a_id = s->active[k];
+    if (a_id == given_id) continue;
+    if (s->cstamp[a_id] != s->idx_epoch) continue;
+    if (s->clauses[a_id] == NULL) continue;
+    cnf_gen_resolution(s, given_id, a_id);
+    if (s->status != ATP_RUNNING) return 1u;
+    cnf_gen_resolution(s, a_id, given_id);   // symmetric face
+    if (s->status != ATP_RUNNING) return 1u;
+    // given -> a paramodulation is a no-op here (the given carries no
+    // eligible positive equality: cpeq gate above); a -> given fires
+    // only for paramod sources, exactly as the full scan's calls do.
+    if (s->cpeq[a_id]) {
+      cnf_gen_paramod(s, a_id, given_id);
+      if (s->status != ATP_RUNNING) return 1u;
+    }
+  }
+  return 1u;
+}
+
 // Pop the next given clause.  Default lane: the pick-best heap
 // (smallest weight first).  Every age_ratio-th pick the FIFO lane
 // supplies the OLDEST surviving passive clause instead, so heavy
@@ -1005,6 +1476,11 @@ fn AtpStatus cnf_step(CnfState *s) {
     }
   }
   s->active[s->n_active++] = given_id;
+  if (s->idx_on) {
+    s->cact[given_id] = s->n_active - 1u;
+    if (!s->idx_res_valid) cnf_idx_rebuild(s);   // config changed (or first step)
+    else cnf_idx_activate(s, given_id);
+  }
 
   // Register unit positive equalities on the demod rule list.
   {
@@ -1044,21 +1520,24 @@ fn AtpStatus cnf_step(CnfState *s) {
     cnf_flush_deferred(s);
     return s->status;
   }
-  for (u32 k = 0; k + 1u < active_snapshot; k++) {
-    u32 a_id = s->active[k];
-    if (a_id == given_id) continue;
-    if (s->clauses[a_id] == NULL) continue;
-    cnf_gen_resolution(s, given_id, a_id);
-    if (s->status != ATP_RUNNING) return s->status;
-    cnf_gen_resolution(s, a_id, given_id);   // symmetric face
-    if (s->status != ATP_RUNNING) return s->status;
-    // Paramodulation BOTH directions: given's equalities -> active,
-    // active's equalities -> given.
-    cnf_gen_paramod(s, given_id, a_id);
-    if (s->status != ATP_RUNNING) return s->status;
-    cnf_gen_paramod(s, a_id, given_id);
-    if (s->status != ATP_RUNNING) return s->status;
+  if (!(s->idx_on && cnf_idx_partners(s, given_id, active_snapshot))) {
+    for (u32 k = 0; k + 1u < active_snapshot; k++) {
+      u32 a_id = s->active[k];
+      if (a_id == given_id) continue;
+      if (s->clauses[a_id] == NULL) continue;
+      cnf_gen_resolution(s, given_id, a_id);
+      if (s->status != ATP_RUNNING) return s->status;
+      cnf_gen_resolution(s, a_id, given_id);   // symmetric face
+      if (s->status != ATP_RUNNING) return s->status;
+      // Paramodulation BOTH directions: given's equalities -> active,
+      // active's equalities -> given.
+      cnf_gen_paramod(s, given_id, a_id);
+      if (s->status != ATP_RUNNING) return s->status;
+      cnf_gen_paramod(s, a_id, given_id);
+      if (s->status != ATP_RUNNING) return s->status;
+    }
   }
+  if (s->status != ATP_RUNNING) return s->status;
 
   s->step++;
   cnf_flush_deferred(s);
