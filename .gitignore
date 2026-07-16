@@ -54,3 +54,4 @@ tools/baselines/compare_methods_batch.tsv
 
 # flux generation image outputs (not source)
 flux_out_cuda/
+.pgo/

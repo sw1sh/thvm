@@ -70,12 +70,37 @@ frontmatterTemplate[srcFile_String] := Module[{ text, head, m },
     If[ m === {}, Missing["NoTemplate"], First[m] ]
 ]
 
-(* The ATP tutorials drive TFindProof saturations whose TimeConstrained abort
-   does NOT stop the underlying C engine (it keeps running past the budget),
-   which corrupts the shared build kernel / Front End and crashes a LATER doc
-   mid-build -- so they render no-eval (code visible, the `<!-- => -->` hints
-   document the expected output).  Other docs evaluate. *)
-noEvaluate = {"ATP.md", "AtpMethods.md"}
+(* Per-file no-eval pins (code visible, the `<!-- => -->` hints document
+   verified fresh-kernel outputs).  Three shared-kernel poisons have been
+   chased here; two are FIXED and ATP.md is un-pinned, one remains:
+   1. FIXED -- cross-session flatterm-arena corruption (ft_alloc free_span
+      underflow / SIGBUS after 2+ TFindProof runs in one kernel): the
+      sw_rename_ft park/cache keyed session identity on the arena ADDRESS,
+      which malloc reuse aliases.  Fixed by the AtpFt.session identity
+      (tests/test_atp_session_reuse.c is the regression); 30+ mixed
+      TFindProof runs in one kernel now stay clean.
+   2. FIXED -- TNetTrain-in-kernel wedged the ATP bridge: a long/cold
+      TAtpTrainScorer / TNetTrain transiently lifted the kernel's ambient
+      RSS past the ATP step-loop's ABSOLUTE 8 GB process-RSS abort cap,
+      so every later C-engine proof insta-aborted at its step-0 poll ->
+      silent "Failed" until the ambient decayed.  Fixed by making the
+      guard growth-relative (bounds the run's OWN RSS growth over a
+      run-start baseline; docs/plans/atp_heap_leak.md "Poison 2").
+      ATP.md -- pure proof cells, no train -- is verified clean by the
+      shared-kernel simulation (its 21 cells after a cold train + a
+      Waldmeister DoubleNegation probe after) and evaluates again.
+   3. OPEN (pre-existing; the pins had masked it) -- a SECOND
+      TAtpTrainScorer/TNetTrain in one kernel dies inside a JIT-compiled
+      CPU tensor kernel (EXC_BAD_ACCESS/SIGBUS; stack thvm_jit_*_O3 `k`
+      -> cpu_jit_dispatch -> ... -> thvm_wl_nf), reproduced on pre-fix
+      HEAD too -- the tensor-lane JIT/memory-plan class, see
+      docs/plans/atp_heap_leak.md "Poison 3".  Each page is clean ALONE;
+      the pair {TAtpTrainScorer.md, AtpMethods.md} crashes at
+      AtpMethods.md's ENIGMA train cell.  The build already evaluates
+      two train-bearing pages (TAtpCpDataset.md, Train.md), so the two
+      pages whose trains would stack on top of those stay pinned until
+      the tensor-lane crash closes. *)
+noEvaluate = {"AtpMethods.md", "TAtpTrainScorer.md"}
 
 (* Hard per-file time budget for example evaluation.  A cell that takes
    longer than this almost certainly indicates a hung saturator / kernel,

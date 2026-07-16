@@ -147,6 +147,90 @@ vaeDecoder[zPacked_, W_, wsub_, cfg_] := Module[{eps, epsBn, gridH, gridW, z, h}
     TClip[(h + 1) * 0.5, 0., 1.]
 ]
 
+(* === encoder ========================================================= *)
+
+(* The Flux2 AutoencoderKL ENCODER: the decoder's mirror, needed for
+   MrFlow-style staged low-to-high-resolution sampling
+   (github.com/Xingyu-Zheng/MrFlow, Apache-2.0: sample low-res -> decode ->
+   pixel upsample -> RE-ENCODE -> scheduler-consistent renoise -> brief
+   high-res refinement).  Standard 2-D SD-style encoder (no causal-3D
+   collapses -- weights are plain {Co,Ci,kh,kw}).
+
+   PRECISION: the encoder MUST run f32, even on a GPU where the decoder runs
+   bf16.  The encoder's pre-normalization activations are large (std ~19 at
+   the mid block on a natural image, vs the decoder's unit-scale normalized
+   latents), and bf16 collapses the mid/head there: per-stage validation vs
+   the diffusers reference read conv_in..down3 corr 0.99+, mid 0.957,
+   conv_out 0.92, quant 0.10 in bf16 -- but 0.9989+ at EVERY stage in f32
+   (period-2 RGB striping in the bf16 round-trip image was the visible
+   symptom).  With f32 weights + input, the Metal image round-trip reaches
+   corr 0.9993 (the VAE's own reconstruction ceiling).  The ~200 MB f32
+   weight cost is immaterial next to correctness. *)
+
+     img {3, H, W} in [0,1]
+       -> x = 2*img - 1
+       -> encoder.conv_in (3x3 pad1, 3->128)
+       -> down_blocks[0..3]: 2 ResBlocks each (channel raises at 1,2 via
+          conv_shortcut: 128 -> 256 -> 512 -> 512); blocks 0,1,2 end in a
+          stride-2 downsample (diffusers Downsample2D pad=0: F.pad (0,1,0,1)
+          then a 3x3 stride-2 conv)
+       -> mid: ResBlock(512) + self-attn + ResBlock(512)
+       -> conv_norm_out (GN32) -> SiLU -> conv_out (3x3, 512->64)
+       -> quant_conv (1x1, 64->64) -> mean = first 32 channels (the MODE)
+       -> patchify   ({32, 2 gridH, 2 gridW} -> {gridH*gridW, 128}; the
+          inverse of vaeUnpatchify)
+       -> BatchNorm norm  (z - mean)/sqrt(var + epsBn)  (the inverse of
+          vaeDenorm) -> the packed latent {S, 128} the transformer samples in. *)
+
+(* stride-2 3x3 downsample via the stride-1 lowering: asymmetric right/bottom
+   pad, full conv, then a movement-only every-2nd-pixel subsample (pad the
+   odd-sized output back to even, reshape {C,H/2,2,W/2,2}, take index 1 of the
+   stride axes -- the padded row/col lands on dropped indices). *)
+vaeDownsample[x_, W_] := Module[{y, c, hh, ww},
+    y = vaeConvLower[TUOpPad[x, {{0, 0}, {0, 1}, {0, 1}}], W["conv.weight"], W["conv.bias"]];
+    {c, hh, ww} = Dimensions[y];
+    y = TUOpPad[y, {{0, 0}, {0, 1}, {0, 1}}];
+    y = TUOpReshape[y, {c, (hh + 1)/2, 2, (ww + 1)/2, 2}];
+    TUOpReshape[y[[All, All, 1, All, 1]], {c, (hh + 1)/2, (ww + 1)/2}]
+]
+
+(* patchify: {32, 2 gridH, 2 gridW} -> {gridH*gridW, 128}, the exact inverse of
+   vaeUnpatchify (inverse permutations applied in reverse order). *)
+vaePatchify[x_, gridH_ : 16, gridW_ : 16] := TUOpReshape[
+    TUOpPermute[
+        TUOpReshape[TUOpPermute[TUOpReshape[x, {32, gridH, 2, gridW, 2}], {0, 2, 4, 1, 3}], {128, gridH, gridW}],
+        {1, 2, 0}
+    ],
+    {gridH gridW, 128}
+]
+
+(* BatchNorm norm: the inverse of vaeDenorm -- z = (z - mean)/sqrt(var+epsBn)
+   per feature over the token axis. *)
+vaeBnNorm[z_, mean_, var_, epsBn_] := With[{s = Dimensions[z], m = TUOpReshape[mean, {1, 128}], v = TUOpReshape[var, {1, 128}]},
+    TUOpMul[
+        TUOpAdd[z, TUOpMul[TUOpExpand[m, s], TUOpConst[-1.]]],
+        TUOpRecip @ TUOpExpand[TUOpSqrt[TUOpAdd[v, TUOpConst[N[epsBn]]]], s]
+    ]
+]
+
+vaeEncoder[img_, W_, wsub_, cfg_] := Module[{eps, epsBn, gridH, gridW, x, h, i},
+    eps = cfg["eps"];  epsBn = cfg["epsBn"];
+    gridH = Lookup[cfg, "gridH", 16];  gridW = Lookup[cfg, "gridW", 16];
+    (* [0,1] image -> [-1,1] (the diffusers image preprocessing). *)
+    x = TUOpAdd[TUOpMul[img, TUOpConst[2.]], TUOpConst[-1.]];
+    h = vaeConv[x, W["encoder.conv_in.weight"], W["encoder.conv_in.bias"], 1];
+    Do[ With[{db = "encoder.down_blocks." <> ToString[i] <> "."},
+            h = Fold[vaeResBlock[#1, #2, eps] &, h, Table[wsub[db <> "resnets." <> ToString[m] <> "."], {m, 0, 1}]];
+            If[ i < 3, h = vaeDownsample[h, wsub[db <> "downsamplers.0."]]];
+            h = TRealize[h]],
+        {i, 0, 3}];
+    h = vaeMidBlock[h, wsub["encoder.mid_block.resnets.0."], wsub["encoder.mid_block.attentions.0."], wsub["encoder.mid_block.resnets.1."], eps];
+    h = TSiLU @ TGroupNorm[h, W["encoder.conv_norm_out.weight"], W["encoder.conv_norm_out.bias"], 32, eps];
+    h = vaeConv[h, W["encoder.conv_out.weight"], W["encoder.conv_out.bias"], 1];  (* 512->64 *)
+    h = vaeConv[h, W["quant_conv.weight"], W["quant_conv.bias"], 0];              (* 1x1 64->64 *)
+    vaeBnNorm[vaePatchify[h[[1 ;; 32]], gridH, gridW], W["bn_running_mean"], W["bn_running_var"], epsBn]
+]
+
 End[];
 
 EndPackage[];

@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TTweeProof]()[*file*]</code> runs the local Twee 2.x binary (with `--tstp --quiet`) on the TPTP (Thousands of Problems for Theorem Provers) problem *file* (a path ending in `.p`) and returns a normalized result Association.
 
-<code>[TTweeProof]()[*theory*, *thm*]</code> resolves the canonical problem file under `tools/baselines/vampire_tptp/{theory}__{thm}.p` from the (*theory*, *thm*) pair and proves it.
+<code>[TTweeProof]()[*theory*, *thm*]</code> resolves the canonical problem file under `tools/baselines/vampire_tptp/{theory}__{thm}.p` from the (*theory*, *thm*) pair and proves it. The bank is generated, not checked in (`tools/vampire/export_all.wls` writes it; the directory is gitignored), so on a fresh checkout the two-argument form reports the missing file until the bank is exported.
 
 The result Association is keyed `"Status"` (`"Proved"`, `"TimedOut"`, or `"Failed"`), `"Strategy"` (always `"twee"`), `"Seconds"` (wall time), `"ProofLength"` (count of Axiom, Lemma, and Goal entries), `"Lemmas"` and `"Axioms"` (each a list of `<|"Name", "Statement"|>` entries), and `"RawProof"` (the proof text after the SZS marker).
 
@@ -28,25 +28,24 @@ The result Association is keyed `"Status"` (`"Proved"`, `"TimedOut"`, or `"Faile
 
 ## Basic Examples
 
-Run Twee on a canonical bench problem and read the status:
+Write a tiny TPTP problem (the double-inverse group theorem), run Twee on it, and read the status:
 
 ```wl
-#| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
-TTweeProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]["Status"]
+problem = Export[FileNameJoin[{$TemporaryDirectory, "group_inv_inv.p"}], "
+cnf(associativity, axiom, mult(mult(X, Y), Z) = mult(X, mult(Y, Z))).
+cnf(left_identity, axiom, mult(e, X) = X).
+cnf(left_inverse, axiom, mult(i(X), X) = e).
+cnf(goal, negated_conjecture, i(i(a)) != a).", "Text"];
+TTweeProof[problem, TimeConstraint -> 10]["Status"]
 ```
 <!-- => "Proved" -->
 
-## Scope
-
-Inspect the lemma list Twee produced:
+Inspect the lemma statements of Twee's equation chain:
 
 ```wl
-#| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
-TTweeProof["AbelianGroupAxioms", "InverseOfInverse"]["Lemmas"]
+TTweeProof[problem, TimeConstraint -> 10]["Lemmas"][[All, "Statement"]]
 ```
-<!-- => {<|"Name" -> "lemma1", "Statement" -> "..."|>, ...} -->
+<!-- => {"mult(i(X), mult(X, Y)) = Y."} -->
 
 ## Properties & Relations
 

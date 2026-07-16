@@ -1,0 +1,4 @@
+#!/bin/sh
+# StarExec build entry point.  Compiles bin/FindProof.
+set -e
+make bin/FindProof

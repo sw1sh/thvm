@@ -202,7 +202,7 @@ TFindFiniteModels[f[0, a] == 0, 4, MaxItems -> 2] // AbsoluteTiming
 TFindFiniteModels[f[0, a] == 0, 4, MaxItems -> 2, Method -> "BruteForce"] // AbsoluteTiming
 ```
 
-All six methods return the same models - here on the Wolfram axiom:
+All seven methods return the same models - here on the Wolfram axiom:
 
 ```wl
 SameQ @@ (TFindFiniteModels[AxiomaticTheory["WolframAxioms"], Method -> #]& /@
@@ -214,19 +214,17 @@ SameQ @@ (TFindFiniteModels[AxiomaticTheory["WolframAxioms"], Method -> #]& /@
 
 ### Parallelize
 
-Setting `"Parallelize" -> True` may speed up the search:
+Setting `"Parallelize" -> True` distributes the search over the launched subkernels - it may speed up a large search, and finds the identical model set:
 
 ```wl
-#| eval: false
-Length @ TFindFiniteModels[b \[SmallCircle] (a \[SmallCircle] a) == a, 8, "Parallelize" -> False] // AbsoluteTiming
+Length @ TFindFiniteModels[b \[SmallCircle] (a \[SmallCircle] a) == a, 8, "Parallelize" -> False]
 ```
-<!-- => {4.93, 764} -->
+<!-- => 764 -->
 
 ```wl
-#| eval: false
-Length @ TFindFiniteModels[b \[SmallCircle] (a \[SmallCircle] a) == a, 8, "Parallelize" -> True] // AbsoluteTiming
+Length @ TFindFiniteModels[b \[SmallCircle] (a \[SmallCircle] a) == a, 8, "Parallelize" -> True]
 ```
-<!-- => {1.89, 764} -->
+<!-- => 764 -->
 
 ### MaxItems
 
@@ -329,12 +327,7 @@ TFindFiniteModels[AxiomaticTheory["WolframAxioms"], 3]
 ```
 <!-- => <||> -->
 
-At four elements there are many (this enumeration is slow):
-
-```wl
-#| eval: false
-TFindFiniteModels[AxiomaticTheory["WolframAxioms"], 4, "Parallelize" -> True]
-```
+At four elements models reappear in quantity, but the full enumeration is out of interactive reach - even the first two witnesses, via <code>[TFindFiniteModels]()[[AxiomaticTheory]()["WolframAxioms"], 4, MaxItems -> 2]</code>, take about a minute.
 
 Rendering the two two-element tables as colored Cayley grids gives the NKS picture - NAND on the left, NOR on the right:
 

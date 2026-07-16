@@ -32,7 +32,7 @@ The default `"Safe"` mode on AbelianGroup commutativity:
 
 ```wl
 TRelevantAxioms[
-    Inactive[Equal][x*y, y*x],
+    x*y == y*x,
     "AbelianGroupAxioms",
     Method -> {"AxiomRelevance" -> "Safe"}]
 ```

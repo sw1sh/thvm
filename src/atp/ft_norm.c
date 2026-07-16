@@ -63,6 +63,18 @@ extern int  atp_ri_find_redex_ft_pub(AtpState *s, AtpFtCell *root,
 extern void atp_ri_ft_sync(AtpState *s);
 #endif
 
+// Cone-replay bracket: when set (with trace_pack on), the NORM_STEP
+// recorder packs each step pair straight from spans -- m->root plus
+// this unchanged other side -- instead of decoding a Term per step.
+// Set/cleared around the cone's slice_record calls only.
+static const AtpFtCell *g_rec_eq_other_ft = NULL;
+// Defined later in the same TU (_.c includes this file first).
+static u64 atp_trace_eq_store_ft(AtpState *s, const AtpFtCell *lhs,
+                                 const AtpFtCell *rhs);
+static u32 atp_trace_push_norm_step_off(AtpState *s, u32 p_a, u32 rule_idx,
+                                        u64 eq_off, u8 side, u8 fwd,
+                                        const u8 *pos, u8 pos_len);
+
 // --- Extension-variable grounding for unorientable equations --------
 //
 // Mirrors `atp_unorient_template` in src/atp/_.c (the Term-side WM
@@ -95,7 +107,17 @@ static int ft_subst_ground_extras(AtpState *s, const AtpFtCell *tmpl,
     if (subst->bind[id] != NULL) continue;
     if (s->wpo != NULL || s->rpo != NULL) return 0;  // not ground-total
     if (mc == NULL) {
-      mc = ft_from_term((AtpFt *)s->ft_arena_ptr, s->min_const, 0);
+      // Per-state cache: the grounding constant is a read-only
+      // single-cell span; re-encode only when the Term handle moved
+      // (GC forward) or the min const itself changed.
+      if (s->min_const_ft == NULL || s->min_const_ft_src != s->min_const) {
+        // min_const is a 0-ary constructor: build its single cell
+        // directly (exactly what ft_from_term would emit).
+        s->min_const_ft     = ftnew_const((AtpFt *)s->ft_arena_ptr,
+                                          term_ext(s->min_const), 0);
+        s->min_const_ft_src = s->min_const;
+      }
+      mc = s->min_const_ft;
       if (mc == NULL) return 0;
     }
     subst->bind[id] = mc;
@@ -128,6 +150,67 @@ extern KboCmp thvm_kbo_ft_subst_with_prepared(u32 na,
                                               const AtpFtCell *tmpl,
                                               const void      *subst,
                                               const KboConfig *cfg);
+// Skolem-ground variant (encompassment demodulation gate; ft_order.c).
+// Reuses the flat_b bytes of the immediately preceding
+// thvm_kbo_ft_subst_with_prepared call -- call ONLY in that adjacency.
+extern KboCmp thvm_kbo_ft_skolem_after_subst(u32 na, const KboConfig *cfg);
+// Skolem-only sibling of thvm_kbo_ft_subst_with_prepared (ft_order.c):
+// same (tmpl, subst) encode into flat_b, skolem-ground compare only --
+// the armed-session gate where open GT is subsumed by skolem GT.
+extern KboCmp thvm_kbo_ft_skolem_subst_with_prepared(u32 na,
+                                                     const AtpFtCell *tmpl,
+                                                     const void      *subst,
+                                                     const KboConfig *cfg);
+// Simpler-join equation compares (Twee simplerThan; ft_order.c).
+extern int thvm_ftsj_prepare_eq(const AtpFtCell *l, const AtpFtCell *r,
+                                const KboConfig *cfg);
+extern int thvm_ftsj_rule_simpler(const AtpFtCell *rl, const AtpFtCell *rr,
+                                  u8 oriented, const KboConfig *cfg);
+// Slot-cached variant + its invalidation drivers (ft_order.c): the
+// rule-side encode is content-pure, cached per slot under the
+// (owner, r_revision, n_rules) watermark synced once per join pass.
+extern int  thvm_ftsj_rule_simpler_cached(u32 slot, const AtpFtCell *rl,
+                                          const AtpFtCell *rr, u8 oriented,
+                                          const KboConfig *cfg);
+extern void thvm_ftsj_rulecache_sync(const void *owner, u32 r_revision,
+                                     u32 n_rules);
+
+// --- Simpler-join session (AtpState.use_simpler_join) ----------------
+//
+// Armed by atp_cp_sj_joinable_ft (defined after the normalize entry
+// points below) around a gated R+E re-normalize of a CP's two sides.
+// While armed, ft_cell_try_rules applies Twee's Join.hs allSteps
+// discipline: EVERY candidate rule/equation must be strictly simpler
+// than the CP equation (thvm_ftsj_rule_simpler_cached), and an
+// unorientable instance may additionally fire when strictly decreasing
+// under the skolem-ground KBO (Rule.hs:425 reducesSkolem) even though
+// the open-term instance compare is incomparable.  The per-rule
+// simplerThan verdict is instance-independent, so it is memoized for
+// the pass -- stamp-validated (g_ftsj_pass_id) instead of memset per
+// pass: a slot's cached verdict is live iff its stamp matches the
+// current pass id.
+static u8   g_ftsj_active     = 0u;
+static u32 *g_ftsj_memo_stamp = NULL;
+static u8  *g_ftsj_memo_val   = NULL;
+static u32  g_ftsj_memo_cap   = 0u;
+static u32  g_ftsj_pass_id    = 0u;
+
+static u8 ftsj_rule_ok(AtpState *s, u32 r) {
+  if (g_ftsj_memo_stamp != NULL && r < g_ftsj_memo_cap &&
+      g_ftsj_memo_stamp[r] == g_ftsj_pass_id) {
+    return g_ftsj_memo_val[r];
+  }
+  u8 ok = 0u;
+  if (s->lhs_ft[r] != NULL && s->rhs_ft[r] != NULL) {
+    ok = (u8)(thvm_ftsj_rule_simpler_cached(r, s->lhs_ft[r], s->rhs_ft[r],
+                                            s->r_orient[r], s->kbo) != 0);
+  }
+  if (g_ftsj_memo_stamp != NULL && r < g_ftsj_memo_cap) {
+    g_ftsj_memo_stamp[r] = g_ftsj_pass_id;
+    g_ftsj_memo_val[r]   = ok;
+  }
+  return ok;
+}
 
 // --- SUBST_FRESH entry-clear ----------------------------------------
 //
@@ -247,6 +330,10 @@ static inline int ft_match_maybe_ac(AtpFt *a,
 // Alpha-identical patterns return 0 both ways; the caller's tie-break
 // (newest slot wins) mirrors the leaf chain order (DSBaumOperationen
 // insert-at-head, newest first).
+// Non-static export for the MNF front (mnf_exp_visit orders each
+// position's matching faces in Regelbaum/Gleichungsbaum DFS order).
+int atp_ft_wm_pattern_before(const AtpFtCell *a, const AtpFtCell *b);
+
 static int ft_wm_pattern_before(const AtpFtCell *a, const AtpFtCell *b) {
   u16 map_a[ATPFT_MAX_VARS], map_b[ATPFT_MAX_VARS];
   memset(map_a, 0xff, sizeof(map_a));
@@ -284,6 +371,10 @@ static int ft_wm_pattern_before(const AtpFtCell *a, const AtpFtCell *b) {
     pb = pb->next;
   }
   return 0;
+}
+
+int atp_ft_wm_pattern_before(const AtpFtCell *a, const AtpFtCell *b) {
+  return ft_wm_pattern_before(a, b);
 }
 
 // --- Candidate-pruning fingerprint index over rule LHS flatterms -----
@@ -457,6 +548,7 @@ typedef struct {
   u64         q_candidates;   // candidates returned (summed over queries)
   u64         q_rules_seen;   // n_rules summed over queries (the no-index cost)
   u64         n_rebuilds;     // full index rebuilds (revision/count changes)
+  u64         n_extends;      // incremental pure-append extends
   u64         rebuild_work;   // rules processed across all rebuilds
   // Root-symbol CONCENTRATION at the last rebuild: largest bucket size /
   // indexed rule count.  When it's high the rule set is dominated by one
@@ -556,8 +648,9 @@ static void ftpi_stats_atexit(void) {
                            : 0.0,
           ix->q_candidates ? (double)ix->q_rules_seen / (double)ix->q_candidates
                            : 0.0);
-  fprintf(stderr, "[ftpi] rebuilds=%llu  rebuild_work=%llu rules\n",
+  fprintf(stderr, "[ftpi] rebuilds=%llu  extends=%llu  rebuild_work=%llu rules\n",
           (unsigned long long)ix->n_rebuilds,
+          (unsigned long long)ix->n_extends,
           (unsigned long long)ix->rebuild_work);
   ftdt_shape_dump();
 }
@@ -737,7 +830,12 @@ static int ftpi_try_extend(AtpState *s) {
     return 0;   // an existing rule was revised -> not a clean append
   }
   ix->rebuild_work += (s->n_rules - ix->built_n_rules);
-  ftnfm_bump_gen();           // appended rules can revive a memoized-normal subtree
+  ix->n_extends++;
+  // No ftnfm generation bump: an appended rule can revive a
+  // memoized-normal subtree, but each entry carries the rule watermark
+  // it was validated at and ftnfm_probe re-validates it against just
+  // the appended slots (ftnfm_delta_fires).  Only ftpi_rebuild -- where
+  // content changed arbitrarily -- kills the memo wholesale.
   for (u32 i = ix->built_n_rules; i < s->n_rules; i++) ftpi_insert_rule(ix, s, i);
   ftpi_finalize(ix, s);
   return 1;
@@ -786,9 +884,22 @@ static void ftpi_ensure(AtpState *s) {
 // max_bucket is a small fraction, so we keep the dense scan and pay zero
 // index overhead.  The threshold is a PERFORMANCE heuristic only --
 // soundness + order are guaranteed independently of which path runs.
+//
+// DOMINANT-OPERATOR extension: on a LARGE multi-operator rule set where one
+// operator still dominates in ABSOLUTE terms (group completions -- mult
+// dominates ld/rd/f/unit), the largest bucket is < half of R yet holds
+// hundreds of rules.  The subjects being normalised are mostly that same
+// dominant root, so ft_match's top-symbol fast-fail prunes nothing and the
+// dense scan issues O(max_bucket) ft_match calls per position -- the ~65x
+// slowdown that makes byte-parity WM emulation time out at 30s on GRP667-4
+// (proves at 90s).  Engage the deep discrimination tree there too: it
+// returns the byte-identical candidate SET in the same slot order, so the
+// winner below is unchanged -- purely a speed lever.
 static int ftpi_pruning_worthwhile(void) {
   FtPiIndex *ix = &g_ftpi;
-  return ix->max_bucket >= 48u && ix->max_bucket * 2u >= ix->n_indexed;
+  if (ix->max_bucket < 48u) return 0;
+  if (ix->max_bucket * 2u >= ix->n_indexed) return 1;         // dominant root
+  return ix->n_indexed >= 200u && ix->max_bucket >= 128u;     // large + big bucket
 }
 
 // Fill the scratch candidate buffer with the rule slots compatible with
@@ -941,6 +1052,9 @@ static u32 ftpi_candidates(AtpState *s, const AtpFtCell *p) {
 // Sentinel for "no such child edge".
 #define FTDT_NO_NODE 0xFFFFFFFFu
 
+// Inline edge-mirror width (FtDtNode.labels8/kids8/kmask8).
+#define FTDT_INLINE_EDGES 8u
+
 // One trie node.  Children are an unsorted small array of (label, child)
 // edges -- arity here is tiny (<=2 for the indexed operators) and the
 // branching factor is the live signature size, so a linear edge scan is
@@ -982,6 +1096,17 @@ typedef struct FtDtNode_s {
   u32  n_var_edge; // var/star edges at the front of labels/kids
   u32  leaf_n, leaf_un_n;
   u8   sub_mask;   // classes present in this subtree (1=orient, 2=unorient)
+  // Inline edge mirror (FTDT_INLINE_EDGES-wide; RNG/LAT rule sets put
+  // ~62% of branch visits at fanout 5-7, so the window covers
+  // essentially every visit): when n_inline != 0 the first n_edge
+  // entries of labels8/kids8/kmask8 duplicate the heap arrays, so the
+  // query walk never leaves the node's cache lines.  Refreshed at BOTH
+  // mutation sites (ftdt_edge_get insert, ftdt_edge_mask_or); heap
+  // arrays stay the source of truth.
+  u8   n_inline;
+  u8   kmask8[FTDT_INLINE_EDGES];
+  u32  labels8[FTDT_INLINE_EDGES];
+  u32  kids8[FTDT_INLINE_EDGES];
   u32  cap_edge, leaf_cap, leaf_un_cap;
   u32 *labels;     // edge labels (concrete sym, FTDT_VAR0+k, or FTDT_STAR)
   u32 *kids;       // child node indices, parallel to labels
@@ -1073,10 +1198,29 @@ static u32 ftdt_edge_find(const FtPiIndex *ix, u32 node, u32 label) {
 // OR `bit` into node's parent-side kid_mask mirror for the edge
 // labelled `label` (insert path only -- cold; the query loop reads the
 // mirror instead of the child's node struct).
+// Refresh a node's inline edge mirror from the heap arrays (or clear
+// it past the FTDT_INLINE_EDGES window).  Insert-path only -- cold.
+static void ftdt_node_pack(FtDtNode *nd) {
+  if (nd->n_edge > FTDT_INLINE_EDGES) {
+    nd->n_inline = 0u;
+    return;
+  }
+  for (u32 e = 0; e < nd->n_edge; e++) {
+    nd->labels8[e] = nd->labels[e];
+    nd->kids8[e]   = nd->kids[e];
+    nd->kmask8[e]  = nd->kid_mask[e];
+  }
+  nd->n_inline = 1u;
+}
+
 static void ftdt_edge_mask_or(FtPiIndex *ix, u32 node, u32 label, u8 bit) {
   FtDtNode *nd = &ix->dt_nodes[node];
   for (u32 e = 0; e < nd->n_edge; e++) {
-    if (nd->labels[e] == label) { nd->kid_mask[e] |= bit; return; }
+    if (nd->labels[e] == label) {
+      nd->kid_mask[e] |= bit;
+      ftdt_node_pack(nd);
+      return;
+    }
   }
 }
 
@@ -1124,6 +1268,7 @@ static u32 ftdt_edge_get(FtPiIndex *ix, u32 node, u32 label) {
   nd->n_edge++;
   nd->label0 = nd->labels[0];   // keep the header mirror current
   nd->kid0   = nd->kids[0];
+  ftdt_node_pack(nd);
   return child;
 }
 
@@ -1650,7 +1795,7 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
       if (label0 < FTDT_VAR0) {
         // Single concrete edge: lockstep hop (as descend2's chain).
         if ((sc->sym & WF_VAR_BIT) != 0u || label0 != sc->sym) goto out;
-        if ((nd->kid_mask[0] & want) == 0u) {
+        if (((nd->n_inline ? nd->kmask8[0] : nd->kid_mask[0]) & want) == 0u) {
           if (g_ftdt_pd) g_atp_pushn_dt_prune++;
           goto out;
         }
@@ -1661,9 +1806,17 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
         continue;
       }
       if (label0 != FTDT_STAR) {
-        // Single variable edge V_k: follow iteratively.
+        // Single variable edge V_k: follow iteratively.  Filter order:
+        // the one-byte child mask first, then the two O(1) cell
+        // fail-fasts (first + last cell of the spans -- equal spans
+        // end in equal cells), the full walk last.  Pure conjunction:
+        // same edges survive, same candidates in the same order.
         u32 k = label0 - FTDT_VAR0;
         const AtpFtCell *bk = bind[k];
+        if (((nd->n_inline ? nd->kmask8[0] : nd->kid_mask[0]) & want) == 0u) {
+          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          goto out;
+        }
         if (bk != NULL) {
           if (g_ftdt_pd) {
             g_atp_pushn_dt_fteq++;
@@ -1674,12 +1827,13 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
             if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
             goto out;
           }
+          if (bk->end != NULL && sc->end != NULL &&
+              bk->end->sym != sc->end->sym) {   // last-cell fail-fast
+            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
+            goto out;
+          }
           if (!ft_eq(bk, sc)) goto out;
           if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
-        }
-        if ((nd->kid_mask[0] & want) == 0u) {
-          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
-          goto out;
         }
         if (bk == NULL) {
           if (g_ftdt_pd) g_atp_pushn_dt_bind1++;
@@ -1701,6 +1855,9 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
     {
       const AtpFtCell *skip = (sc->end != NULL) ? sc->end->next : d->sc_end;
       u32 nv = nd->n_var_edge;
+      const u32 *lbl = nd->n_inline ? nd->labels8 : nd->labels;
+      const u32 *kds = nd->n_inline ? nd->kids8   : nd->kids;
+      const u8  *kmk = nd->n_inline ? nd->kmask8  : nd->kid_mask;
       if (g_ftdt_pd) {
         g_atp_pushn_dt_edge += nd->n_edge;
         g_atp_pushn_dt_branch++;
@@ -1712,18 +1869,22 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
         ftdt_visit_bump(ix, node);
       }
       for (u32 e = 0; e < nv; e++) {
-        u32 label = nd->labels[e];
+        u32 label = lbl[e];
         if (label == FTDT_STAR) {
-          if ((nd->kid_mask[e] & want) == 0u) {
+          if ((kmk[e] & want) == 0u) {
             if (g_ftdt_pd) g_atp_pushn_dt_prune++;
             continue;
           }
           if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
-          ftdt_descend3(d, nd->kids[e], skip, nbound, 0u);
+          ftdt_descend3(d, kds[e], skip, nbound, 0u);
           continue;
         }
         u32 k = label - FTDT_VAR0;
         const AtpFtCell *bk = bind[k];
+        if ((kmk[e] & want) == 0u) {
+          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          continue;
+        }
         if (bk != NULL) {
           if (g_ftdt_pd) {
             g_atp_pushn_dt_fteq++;
@@ -1733,35 +1894,36 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
             if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
             continue;
           }
+          if (bk->end != NULL && sc->end != NULL &&
+              bk->end->sym != sc->end->sym) {   // last-cell fail-fast
+            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
+            continue;
+          }
           if (!ft_eq(bk, sc)) continue;
           if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
-        }
-        if ((nd->kid_mask[e] & want) == 0u) {
-          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
-          continue;
         }
         if (bk == NULL) {
           if (g_ftdt_pd) { g_atp_pushn_dt_bind1++; g_ftdt_dp = dp + 1u; }
           bind[k] = sc;
-          ftdt_descend3(d, nd->kids[e], skip,
+          ftdt_descend3(d, kds[e], skip,
                         (k + 1u > nbound) ? k + 1u : nbound, pure);
           bind[k] = NULL;
         } else {
           if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
-          ftdt_descend3(d, nd->kids[e], skip, nbound, pure);
+          ftdt_descend3(d, kds[e], skip, nbound, pure);
         }
       }
       if ((sc->sym & WF_VAR_BIT) == 0u) {
         for (u32 e = nv; e < nd->n_edge; e++) {
-          u32 label = nd->labels[e];
+          u32 label = lbl[e];
           if (g_ftdt_pd) g_atp_pushn_dt_cprobe++;
           if (label < sc->sym) continue;
           if (label == sc->sym) {
-            if ((nd->kid_mask[e] & want) != 0u) {
+            if ((kmk[e] & want) != 0u) {
               // Last exploration step at this node: iterate instead of
               // recursing (descend2 recursed here and then fell out).
               if (g_ftdt_pd) dp++;
-              node = nd->kids[e];
+              node = kds[e];
               nd   = &ix->dt_nodes[node];
               sc   = sc->next;
               goto next_node;
@@ -1947,6 +2109,9 @@ void atp_ftdt_hot_dump(void) {
 // flip changes the "is this subtree normal" verdict function, so all
 // memo entries die with the generation).
 static u64 g_ftnfm_gen = 1u;
+// Public read for the incremental-NF caches outside this TU section
+// (the MNF member-NF cache keys its validity on it).
+static u64 atp_ftnfm_gen(void) { return g_ftnfm_gen; }
 
 static void ftnfm_bump_gen(void) { g_ftnfm_gen++; }
 
@@ -2306,6 +2471,11 @@ static int ft_cell_try_rules(AtpState   *s,
       AtpFtCell *lhs = s->lhs_ft[r];
       if (lhs == NULL || s->rhs_ft[r] == NULL) continue;
       if (have_unorient && !s->r_orient[r]) continue;
+      // Simpler-join gate (Twee Join.hs step1/step2, `unorient rule
+      // \`simplerThan\` (t :=: u)`): with the SJ session armed, a rule
+      // fires only when its equation is strictly simpler than the CP
+      // equation under the skolem-ground lex compare.
+      if (g_ftsj_active && !ftsj_rule_ok(s, r)) continue;
       // Forward rewrite, no order check needed (oriented).
       if (_pd) g_atp_pushn_tr_att++;
       const FtDtRec *rec = NULL;
@@ -2374,6 +2544,26 @@ static int ft_cell_try_rules(AtpState   *s,
   if (try_unorient && have_unorient) {
     u32 best_rule = (u32)-1;
     u8  best_dir  = 0u;
+    // Armed-session (encompass / simpler-join) skolem-only gate: the
+    // arm fires on (open GT) OR (skolem GT), and open-term KBO GT is
+    // stable under the skolem grounding (vars map to same-weight
+    // constants: weights are preserved and the balance conditions
+    // transfer), so open GT implies skolem GT and the fire condition
+    // collapses to the skolem compare alone -- Twee Join.hs step3
+    // gates on reducesSkolem only, for the same reason.  The open
+    // compare is skipped entirely; the (tmpl, subst) encode still runs
+    // (same flat_b bytes, same success marker).
+    // THVM_NO_FT_SKOLEM_ONLY=1 forces the historic two-compare chain
+    // for an ON-vs-OFF byte-identity sweep; the THVM_ATPFT_KBO_DIFF
+    // probe also forces it (its side-by-side Term compare reads the
+    // OPEN verdict).
+    static int skolem_only = -1;
+    if (skolem_only < 0) {
+      const char *e = getenv("THVM_NO_FT_SKOLEM_ONLY");
+      skolem_only = (e != NULL && e[0] != '0' && e[0] != '\0') ? 0 : 1;
+      if (getenv("THVM_ATPFT_KBO_DIFF") != NULL) skolem_only = 0;
+    }
+    u8 gate_armed = (u8)(s->use_encompass_demod || g_ftsj_active);
     // Lazy redex pre-encode: thvm_kbo_ft_subst encodes both sides on
     // every call; we attempt up to `slice_count` equations at this
     // cell, each running the unorient gate with the SAME redex `p`.
@@ -2388,6 +2578,8 @@ static int ft_cell_try_rules(AtpState   *s,
       AtpFtCell *rhs = s->rhs_ft[r];
       if (lhs == NULL || rhs == NULL) continue;
       if (s->r_orient[r]) continue;
+      // Simpler-join gate (Twee Join.hs step2/step3): see pass 1.
+      if (g_ftsj_active && !ftsj_rule_ok(s, r)) continue;
       // Unorientable equation: try forward (l -> r) then backward (r -> l).
       // Forward: lhs matches p; rhs vars NOT bound by the lhs match
       // (extension variables) are grounded to the minimal constant --
@@ -2419,7 +2611,28 @@ static int ft_cell_try_rules(AtpState   *s,
       if (fwd_matched) {
         if (ft_subst_ground_extras(s, rhs, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
-          KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
+          // Encompassment demodulation (opt-in, Twee reducesSkolem):
+          // an instance the open-term KBO calls incomparable still
+          // fires when strictly decreasing under the skolem-ground
+          // order (see thvm.h use_encompass_demod).  Redundancy caveat:
+          // this port does not check proper encompassment of the redex
+          // over the equation, so CP-drop completeness follows Twee's
+          // practical discipline rather than the strict AHL condition.
+          // The armed simpler-join session admits the same relaxation
+          // (Twee step3's reducesSkolem) -- there the simplerThan gate
+          // above supplies the redundancy discipline.  Armed + default:
+          // skolem-only (see the gate comment at pass-2 entry).
+          KboCmp ft_v;
+          if (gate_armed && skolem_only) {
+            ft_v = thvm_kbo_ft_skolem_subst_with_prepared(redex_na, rhs,
+                                                          subst_buf, s->kbo);
+          } else {
+            ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
+            if (ft_v != KBO_GT && gate_armed &&
+                thvm_kbo_ft_skolem_after_subst(redex_na, s->kbo) == KBO_GT) {
+              ft_v = KBO_GT;
+            }
+          }
           static int dbg_diff = -1;
           if (dbg_diff < 0) dbg_diff = getenv("THVM_ATPFT_KBO_DIFF") != NULL ? 1 : 0;
           if (dbg_diff) {
@@ -2467,7 +2680,18 @@ static int ft_cell_try_rules(AtpState   *s,
       if (bwd_matched) {
         if (ft_subst_ground_extras(s, lhs, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
-          KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
+          // Encompassment demodulation, backward face (see fwd branch).
+          KboCmp ft_v;
+          if (gate_armed && skolem_only) {
+            ft_v = thvm_kbo_ft_skolem_subst_with_prepared(redex_na, lhs,
+                                                          subst_buf, s->kbo);
+          } else {
+            ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
+            if (ft_v != KBO_GT && gate_armed &&
+                thvm_kbo_ft_skolem_after_subst(redex_na, s->kbo) == KBO_GT) {
+              ft_v = KBO_GT;
+            }
+          }
           if (ft_v == KBO_GT) {
             if (!s->use_mixmost_nf) {
               *rule_out = r;
@@ -2739,16 +2963,32 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
     (*m->pn)++;
   }
   if (m->record) {
-    Term step_term = ft_to_term(m->root);
     u8  fwd        = (dir == 0u) ? 1u : 0u;
     u32 rule_trace = (rule < m->s->n_rules) ? m->s->r_trace[rule]
                                             : ATP_TRACE_NONE;
-    Term step_lhs = (m->side == 0u) ? step_term : m->eq_other;
-    Term step_rhs = (m->side == 0u) ? m->eq_other : step_term;
     if (!have_pos) pos_len = 0u;
-    u32 ti = atp_trace_push_norm_step(m->s, *m->chain_tail, rule_trace,
-                                      step_lhs, step_rhs, m->side, fwd,
-                                      pos, pos_len);
+    u32 ti = ATP_TRACE_NONE;
+    if (g_rec_eq_other_ft != NULL && m->s->trace_pack) {
+      // Span-sourced record (the cone bracket): pack the step pair
+      // straight from the live span + the unchanged other side --
+      // no per-step Term decode.
+      u64 off = (m->side == 0u)
+          ? atp_trace_eq_store_ft(m->s, m->root, g_rec_eq_other_ft)
+          : atp_trace_eq_store_ft(m->s, g_rec_eq_other_ft, m->root);
+      if (off != 0u) {
+        ti = atp_trace_push_norm_step_off(m->s, *m->chain_tail,
+                                          rule_trace, off, m->side, fwd,
+                                          pos, pos_len);
+      }
+    }
+    if (ti == ATP_TRACE_NONE) {
+      Term step_term = ft_to_term(m->root);
+      Term step_lhs = (m->side == 0u) ? step_term : m->eq_other;
+      Term step_rhs = (m->side == 0u) ? m->eq_other : step_term;
+      ti = atp_trace_push_norm_step(m->s, *m->chain_tail, rule_trace,
+                                    step_lhs, step_rhs, m->side, fwd,
+                                    pos, pos_len);
+    }
     if (ti != ATP_TRACE_NONE) *m->chain_tail = ti;
   }
   return 1;
@@ -2788,7 +3028,8 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
 enum { FTNFM_MAX_SYMS = 32, FTNFM_BITS = 16 };
 typedef struct {
   u64 hash;
-  u64 gen;
+  u64 gen;         // ftpi REBUILD epoch (content changed arbitrarily)
+  u32 rule_wm;     // s->n_rules when last validated (pure-append chain)
   u32 syms[FTNFM_MAX_SYMS];
   u8  len;
   u8  want;
@@ -2820,10 +3061,77 @@ static FtNfmEnt *ftnfm_ent(u64 hash) {
   return &g_ftnfm[hash & (((u64)1u << FTNFM_BITS) - 1u)];
 }
 
+// Can any face of the delta rules [wm, s->n_rules) rewrite anywhere
+// inside subtree `c`?  Mirrors the THVM_ATPFT_DT_CHECK certifier's
+// per-rule test (ft_match on lhs_ft, plus rhs_ft for an unorientable
+// rule) at every preorder position -- a strict SUPERSET of the walk's
+// ft_cell_try_rules firing condition, so "no delta face matches"
+// proves a stored subtree-normal verdict still holds after the appends.
+// Under a live generation the index history since the entry's stamp is
+// pure appends (a drop / orient-flip / soft-delete forces ftpi_rebuild,
+// which bumps the generation and kills the entry), so slots
+// [wm, n_rules) are exactly the appended rules.
+static int ftnfm_delta_fires(AtpState *s, const AtpFtCell *c, u32 wm) {
+  const AtpFtCell *e = (c->end != NULL) ? c->end->next : NULL;
+  AtpFtSubst chk = {0};
+  for (u32 r = wm; r < s->n_rules; r++) {
+    if (s->r_dead != NULL && s->r_dead[r]) continue;
+    AtpFtCell *lhs = s->lhs_ft[r], *rhs = s->rhs_ft[r];
+    if (lhs == NULL || rhs == NULL) continue;
+    u8 unor = (u8)(s->n_unorient > 0u && !s->r_orient[r]);
+    for (const AtpFtCell *p = c; p != e; p = p->next) {
+      ft_subst_reset(&chk);
+      if (ft_match(lhs, p, &chk)) return 1;
+      if (unor) {
+        ft_subst_reset(&chk);
+        if (ft_match(rhs, p, &chk)) return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+// Slice-bounded sibling of ftnfm_delta_fires: can any face of the rule
+// slice [first, first+count) rewrite anywhere inside subtree `c`?
+// Read-only on `c` (ft_match writes only the scratch subst), so it is
+// safe to run on a rule's LIVE FT mirror -- the interreduce fast path
+// uses it to prove "this row is untouched by the new-rule slice"
+// without re-encoding the row via ft_from_term.  Same face coverage as
+// the slice normalizer's linear scan (lhs always; rhs when the rule is
+// unorientable), minus the order gates -- a strict SUPERSET of firing,
+// so a 0 verdict proves the slice normalize is the identity on `c`.
+static int atp_ft_slice_fires(AtpState *s, const AtpFtCell *c,
+                              u32 first, u32 count) {
+  const AtpFtCell *e = (c->end != NULL) ? c->end->next : NULL;
+  u32 last = first + count;
+  if (last > s->n_rules) last = s->n_rules;
+  AtpFtSubst chk = {0};
+  for (u32 r = first; r < last; r++) {
+    if (s->r_dead != NULL && s->r_dead[r]) continue;
+    AtpFtCell *lhs = s->lhs_ft[r], *rhs = s->rhs_ft[r];
+    if (lhs == NULL || rhs == NULL) continue;
+    u8 unor = (u8)(s->n_unorient > 0u && !s->r_orient[r]);
+    for (const AtpFtCell *p = c; p != e; p = p->next) {
+      ft_subst_reset(&chk);
+      if (ft_match(lhs, p, &chk)) return 1;
+      if (unor) {
+        ft_subst_reset(&chk);
+        if (ft_match(rhs, p, &chk)) return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+u64 g_atp_ftnfm_reval = 0, g_atp_ftnfm_reval_ok = 0;
+
 // 1 iff subtree `c` is memoized normal under want-config `wantk` at the
 // current generation.  A single var cell never probes (the walk's var
-// early-out is already cheaper than a probe).
-static int ftnfm_probe(const AtpFtCell *c, u8 wantk) {
+// early-out is already cheaper than a probe).  An entry stamped at an
+// older rule watermark is RE-VALIDATED against just the appended rules
+// (ftnfm_delta_fires) instead of dying with the generation -- the
+// incremental analogue of Waldmeister's always-current term indexes.
+static int ftnfm_probe(AtpState *s, const AtpFtCell *c, u8 wantk) {
   if ((c->sym & WF_VAR_BIT) != 0u) return 0;
   u32 syms[FTNFM_MAX_SYMS];
   u64 h;
@@ -2833,20 +3141,33 @@ static int ftnfm_probe(const AtpFtCell *c, u8 wantk) {
   FtNfmEnt *ent = ftnfm_ent(h);
   if (ent->gen == g_ftnfm_gen && ent->hash == h && ent->want == wantk &&
       ent->len == (u8)len && memcmp(ent->syms, syms, len * sizeof(u32)) == 0) {
+    if (ent->rule_wm != s->n_rules) {
+      g_atp_ftnfm_reval++;
+      if (ftnfm_delta_fires(s, c, ent->rule_wm)) return 0;
+      g_atp_ftnfm_reval_ok++;
+      ent->rule_wm = s->n_rules;
+    }
     g_atp_ftnfm_hit++;
     return 1;
   }
   return 0;
 }
 
-static void ftnfm_store(const AtpFtCell *c, u8 wantk) {
+static void ftnfm_store(AtpState *s, const AtpFtCell *c, u8 wantk) {
+  // Simpler-join sessions rewrite with a GATED rule subset: "no redex
+  // here" under the gates proves nothing for ungated probes of the
+  // same (content, want) key, so armed walks never store.  (Probing
+  // stays sound the other way: an ungated no-redex verdict holds a
+  // fortiori for the stricter gated scan.)
+  if (g_ftsj_active) return;
   if ((c->sym & WF_VAR_BIT) != 0u) return;
   u32 syms[FTNFM_MAX_SYMS];
   u64 h;
   u32 len = ftnfm_key(c, syms, &h);
   if (len == 0u) return;
   FtNfmEnt *ent = ftnfm_ent(h);
-  ent->gen  = g_ftnfm_gen;
+  ent->gen     = g_ftnfm_gen;
+  ent->rule_wm = s->n_rules;
   ent->hash = h;
   ent->want = wantk;
   ent->len  = (u8)len;
@@ -2907,7 +3228,7 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     m.nfm_on   = 1u;
     m.nfm_want = (u8)(FTDT_WANT_ORIENT |
                       ((doE && s->n_unorient > 0u) ? FTDT_WANT_UNORIENT : 0u));
-    if (ftnfm_probe(t, m.nfm_want)) {
+    if (ftnfm_probe(s, t, m.nfm_want)) {
       if (!nfm_check) return t;   // whole term memoized normal: identity
       nfm_root_hit = 1u;          // certifier: walk anyway, verify at exit
     }
@@ -2950,7 +3271,7 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
       // is a stale/unsound entry -- fatal.
       FtNfPathEnt *pe = &m.st[m.depth];
       if (m.nfm_on && m.rw_count == pe->rw0) {
-        if (!m.starved) ftnfm_store(pe->cell, m.nfm_want);
+        if (!m.starved) ftnfm_store(m.s, pe->cell, m.nfm_want);
       } else if (pe->nfm_hit) {
         thvm_fatal("ftnfm: memoized-normal subtree was rewritten (stale)");
       }
@@ -2976,7 +3297,7 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     // subtree (no push; e->ins already marks it visited).  Certifier
     // mode walks it anyway and verifies at pop.
     u8 child_hit = 0u;
-    if (m.nfm_on && ftnfm_probe(e->ins->next, m.nfm_want)) {
+    if (m.nfm_on && ftnfm_probe(m.s, e->ins->next, m.nfm_want)) {
       if (!nfm_check) continue;
       child_hit = 1u;
     }
@@ -3010,12 +3331,360 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
 done:
   // Whole-term store / root-hit certify (the depth-0 "pop").
   if (m.nfm_on && m.rw_count == 0u) {
-    if (!m.starved) ftnfm_store(m.root, m.nfm_want);
+    if (!m.starved) ftnfm_store(m.s, m.root, m.nfm_want);
   } else if (nfm_root_hit) {
     thvm_fatal("ftnfm: memoized-normal root was rewritten (stale)");
   }
   free(heap_st);
   return m.root;
+}
+
+// --- WM-FPA flat mirror for the doR-only push-normalize (opt-in) -----
+//
+// THVM_ATP_WMFPA=1 (s->use_wmfpa, default OFF) routes the treated-CP
+// push normalize -- atp_rules_only_normalize_ft's full-range doE=0
+// record=0 shape, WM KPBehandelt's `-kg "r"` strength -- through the
+// wmfpa flat substrate (src/wmfpa/wmfpa.h) running the ENGINE's exact
+// policies: the wf_normalize_mixmost walk (this file's
+// atp_normalize_mixmost_ft, offset-stack port) and the wf_descend_wm
+// Regelbaum-DFS winner (ft_wm_pattern_before + newest-slot alpha tie).
+// Byte-identical NFs by construction; every condition the flat path
+// cannot decide exactly falls back to the engine walk on the ORIGINAL
+// input (never a partial).  All other normalize shapes -- record/
+// proofsteps/slice/doE=1 -- stay on the engine path via the hook gate.
+//
+// The mirror is a WfTree over WfNode COPIES of s->lhs_ft/s->rhs_ft,
+// slot indices == engine rule slots (MANDATORY: the newest-slot alpha
+// tie makes slot order semantic).  Maintenance follows ftpi_ensure's
+// lazy watermark: current iff (owner, r_revision, n_rules) match;
+// pure-append witness (revision delta == count delta) extends by
+// encoding + inserting only the new slots; anything else rebuilds.
+// The ONE mutation r_revision does not cover -- the interreduction
+// RHS compose editing s->rhs_ft[i] in place (_.c RMRechtsInterred
+// sites) -- re-encodes the flat RHS via atp_wf_mm_note_rhs_edit
+// (the wf_eng_cache_update_rhs pattern), else marks the mirror dirty.
+// Slot eligibility mirrors the engine's pass-1 filter (ft_cell_try_
+// rules): r_dead / NULL-mirror slots and unorientable slots when
+// n_unorient > 0 are absent from the tree.  A pattern var id outside
+// the subst address space is EXACTLY absent (ft_match rejects it); a
+// side too long for the fixed per-rule stride makes the whole mirror
+// UNUSABLE (the rule could fire on the engine path) until a rebuild.
+
+#define WF_MM_RULE_NODES 1024u   // per-side flat cap (rule sides are small)
+#define WF_MM_SUBJ_CAP   8192u   // subject cap (treated CPs are < 50 syms)
+
+typedef struct {
+  const AtpState *owner;
+  u32     built_revision;
+  u32     built_n_rules;
+  u8      unusable;   // a live slot the flat store cannot represent
+  u8      dirty;      // an in-place RHS edit the mirror could not absorb
+  WfTree  tree;
+  WfNode *lhs_buf;    // cap_rules * WF_MM_RULE_NODES, fixed stride
+  WfNode *rhs_buf;
+  WfRule *rules;
+  u32     cap_rules;
+  // Instrumentation (THVM_ATP_WMFPA_STATS=1 prints at process exit).
+  u64     q_calls;      // hook entries
+  u64     q_decided;    // flat path returned an exact NF
+  u64     q_fired;      // decided calls with >= 1 splice
+  u64     q_caphit;     // decided calls that exhausted the step budget
+  u64     q_fallback;   // in-walk fallback (engine rerun)
+  u64     n_rebuilds, n_extends;
+} WfMmCache;
+
+static WfMmCache g_wfmm = {0};
+
+static void wf_mm_stats_atexit(void) {
+  if (g_wfmm.q_calls == 0u) return;
+  fprintf(stderr,
+          "[wfmm] calls=%llu decided=%llu (fired=%llu identity=%llu "
+          "caphit=%llu) fallback=%llu rebuilds=%llu extends=%llu\n",
+          (unsigned long long)g_wfmm.q_calls,
+          (unsigned long long)g_wfmm.q_decided,
+          (unsigned long long)g_wfmm.q_fired,
+          (unsigned long long)(g_wfmm.q_decided - g_wfmm.q_fired),
+          (unsigned long long)g_wfmm.q_caphit,
+          (unsigned long long)g_wfmm.q_fallback,
+          (unsigned long long)g_wfmm.n_rebuilds,
+          (unsigned long long)g_wfmm.n_extends);
+  const WfTree *ix = &g_wfmm.tree;
+  if (ix->q_queries == 0u) return;
+  fprintf(stderr,
+          "[wfmm] descents=%llu  nodevisits/descent=%.2f  "
+          "confirms/descent=%.2f\n",
+          (unsigned long long)ix->q_queries,
+          (double)ix->q_nodevisits / (double)ix->q_queries,
+          (double)ix->q_matchcalls / (double)ix->q_queries);
+}
+
+static void wf_mm_stats_arm(void) {
+  static int armed = -1;
+  if (armed >= 0) return;
+  const char *e = getenv("THVM_ATP_WMFPA_STATS");
+  armed = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  if (armed) atexit(wf_mm_stats_atexit);
+}
+
+// Encode an AtpFtCell chain into a flat WfNode preorder: one linear
+// `next` walk copying (sym, arity), then the wf_fixup back-patch for
+// subtree sizes (children sit at higher offsets, so the backward pass
+// sees them finished).  Returns the node count, 0 on overflow.  The
+// sym encoding is SHARED (WF_VAR_BIT | id on both representations),
+// so the copy is bit-faithful.
+static u32 wf_mm_encode_cells(const AtpFtCell *root, WfNode *out, u32 cap) {
+  const AtpFtCell *end_after = (root->end != NULL) ? root->end->next : NULL;
+  u32 len = 0u;
+  for (const AtpFtCell *p = root; p != NULL && p != end_after; p = p->next) {
+    if (len >= cap) return 0u;
+    out[len].sym   = p->sym;
+    out[len].size  = 1u;
+    out[len].arity = (u16)(((p->sym & WF_VAR_BIT) != 0u) ? 0u : p->arity);
+    out[len]._pad  = 0u;
+    len++;
+  }
+  if (len > 0u) wf_fixup(out, 0u, len);
+  return len;
+}
+
+// Encode rule slot `i` into the mirror (both sides), applying the
+// engine's pass-1 eligibility (ft_cell_try_rules:2320-2323).  An
+// ineligible / never-matching slot stays llen=0 (absent from the
+// tree); an eligible slot the store cannot hold sets `unusable`.
+static void wf_mm_encode_slot(AtpState *s, u32 i) {
+  WfNode *lb = g_wfmm.lhs_buf + (size_t)i * WF_MM_RULE_NODES;
+  WfNode *rb = g_wfmm.rhs_buf + (size_t)i * WF_MM_RULE_NODES;
+  g_wfmm.rules[i].lhs = lb; g_wfmm.rules[i].llen = 0u;
+  g_wfmm.rules[i].rhs = rb; g_wfmm.rules[i].rlen = 0u;
+  if (s->r_dead != NULL && s->r_dead[i]) return;
+  if (s->lhs_ft[i] == NULL || s->rhs_ft[i] == NULL) return;
+  if (s->n_unorient > 0u && !s->r_orient[i]) return;
+  u32 ll = wf_mm_encode_cells(s->lhs_ft[i], lb, WF_MM_RULE_NODES);
+  if (ll == 0u) { g_wfmm.unusable = 1u; return; }   // over-long: could match
+  for (u32 k = 0; k < ll; k++) {
+    // Pattern var id outside the subst address space: ft_match rejects
+    // the pattern outright (ft_match.c), so the slot is EXACTLY absent.
+    if (WF_IS_VAR(lb[k].sym) && WF_VAR_ID(lb[k].sym) >= WF_MAX_VARS) return;
+  }
+  u32 rl = wf_mm_encode_cells(s->rhs_ft[i], rb, WF_MM_RULE_NODES);
+  if (rl == 0u) { g_wfmm.unusable = 1u; return; }
+  for (u32 k = 0; k < rl; k++) {
+    if (WF_IS_VAR(rb[k].sym) && WF_VAR_ID(rb[k].sym) >= WF_MAX_VARS) {
+      g_wfmm.unusable = 1u;   // template var outside the bind space
+      return;
+    }
+  }
+  g_wfmm.rules[i].llen = ll;
+  g_wfmm.rules[i].rlen = rl;
+}
+
+static void wf_mm_cache_rebuild(AtpState *s) {
+  u32 nr = s->n_rules;
+  if (nr > g_wfmm.cap_rules) {
+    u32 nc = g_wfmm.cap_rules ? g_wfmm.cap_rules : 64u;
+    while (nc < nr) nc *= 2u;
+    WfRule *rr = (WfRule *)realloc(g_wfmm.rules, (size_t)nc * sizeof(WfRule));
+    WfNode *lb = (WfNode *)realloc(g_wfmm.lhs_buf,
+                                   (size_t)nc * WF_MM_RULE_NODES * sizeof(WfNode));
+    WfNode *rb = (WfNode *)realloc(g_wfmm.rhs_buf,
+                                   (size_t)nc * WF_MM_RULE_NODES * sizeof(WfNode));
+    if (rr == NULL || lb == NULL || rb == NULL) thvm_fatal("wfmm: rule store OOM");
+    g_wfmm.rules   = rr;
+    g_wfmm.lhs_buf = lb;
+    g_wfmm.rhs_buf = rb;
+    g_wfmm.cap_rules = nc;
+  }
+  g_wfmm.unusable = 0u;
+  g_wfmm.dirty    = 0u;
+  for (u32 i = 0; i < nr; i++) wf_mm_encode_slot(s, i);
+  // Retrieval counters are cumulative across rebuilds (wf_tree_init
+  // zeroes the whole struct); carry them over for the stats dump.
+  u64 qq = g_wfmm.tree.q_queries, qc = g_wfmm.tree.q_candidates;
+  u64 qn = g_wfmm.tree.q_nodevisits, qm = g_wfmm.tree.q_matchcalls;
+  wf_tree_free(&g_wfmm.tree);
+  wf_tree_init(&g_wfmm.tree);
+  wf_tree_build(&g_wfmm.tree, g_wfmm.rules, nr);
+  g_wfmm.tree.q_queries    = qq;
+  g_wfmm.tree.q_candidates = qc;
+  g_wfmm.tree.q_nodevisits = qn;
+  g_wfmm.tree.q_matchcalls = qm;
+  g_wfmm.owner          = s;
+  g_wfmm.built_revision = s->r_revision;
+  g_wfmm.built_n_rules  = nr;
+  g_wfmm.n_rebuilds++;
+}
+
+// Pure-append extend: encode + BO_ObjektEinfuegen only the new slots.
+// Returns 0 when the fixed-stride store would have to move (rebuild
+// re-points every WfRule).
+static int wf_mm_cache_extend(AtpState *s) {
+  u32 nr = s->n_rules;
+  if (nr > g_wfmm.cap_rules) return 0;
+  for (u32 r = g_wfmm.built_n_rules; r < nr; r++) {
+    wf_mm_encode_slot(s, r);
+    g_wfmm.tree.rules   = g_wfmm.rules;
+    g_wfmm.tree.n_rules = r + 1u;
+    wf_tree_insert(&g_wfmm.tree, r);   // llen==0 slots stay absent
+  }
+  g_wfmm.built_revision = s->r_revision;
+  g_wfmm.built_n_rules  = nr;
+  g_wfmm.n_extends++;
+  return 1;
+}
+
+// Bring the mirror in sync (ftpi_ensure discipline).  Returns 1 when
+// the mirror is usable for queries.
+static int wf_mm_cache_ensure(AtpState *s) {
+  if (g_wfmm.owner != s || g_wfmm.dirty ||
+      g_wfmm.built_n_rules > s->n_rules) {
+    wf_mm_cache_rebuild(s);
+  } else if (g_wfmm.built_n_rules == s->n_rules) {
+    if (g_wfmm.built_revision != s->r_revision) wf_mm_cache_rebuild(s);
+  } else if (s->r_revision - g_wfmm.built_revision !=
+             s->n_rules - g_wfmm.built_n_rules) {
+    wf_mm_cache_rebuild(s);   // an existing slot changed: not a clean append
+  } else if (!wf_mm_cache_extend(s)) {
+    wf_mm_cache_rebuild(s);
+  }
+  return !g_wfmm.unusable;
+}
+
+// Teardown hook (thvm_atp_free): forget a dying owner so a future
+// AtpState reallocated at the same address can never validate the
+// stale mirror.  Buffers stay allocated for reuse (the g_ftpi shape).
+static void atp_wf_mm_disown(const AtpState *s) {
+  if (g_wfmm.owner == s) g_wfmm.owner = NULL;
+}
+
+// In-place RHS compose (interreduction right-reduction) edited
+// s->rhs_ft[r] without an r_revision bump: the tree spine keys only on
+// the LHS, so re-encode the flat RHS in place; on any condition the
+// in-place update cannot absorb, mark dirty (rebuild precedes the next
+// query).  Called from the two RMRechtsInterred sites in _.c.
+static void atp_wf_mm_note_rhs_edit(AtpState *s, u32 r) {
+  if (g_wfmm.owner != s || r >= g_wfmm.built_n_rules) return;
+  if (g_wfmm.rules[r].llen == 0u) return;   // absent: template never read
+  WfNode *rb = g_wfmm.rhs_buf + (size_t)r * WF_MM_RULE_NODES;
+  u32 rl = wf_mm_encode_cells(s->rhs_ft[r], rb, WF_MM_RULE_NODES);
+  if (rl == 0u) { g_wfmm.dirty = 1u; return; }
+  for (u32 k = 0; k < rl; k++) {
+    if (WF_IS_VAR(rb[k].sym) && WF_VAR_ID(rb[k].sym) >= WF_MAX_VARS) {
+      g_wfmm.dirty = 1u;
+      return;
+    }
+  }
+  g_wfmm.rules[r].rlen = rl;
+}
+
+// Decode the flat NF back into a fresh Arena A cell chain, so every
+// downstream consumer (vcp stash, ft_eq verdict, pack/weigh,
+// ft_to_term) is untouched.  Sequential cells: next threads the
+// preorder, end = the subtree's last cell via the size field.
+static AtpFtCell *wf_mm_decode_cells(AtpState *s, const WfNode *a, u32 len) {
+  static AtpFtCell *cells[WF_MM_SUBJ_CAP];
+  AtpFt *arena = (AtpFt *)s->ft_arena_ptr;
+  for (u32 i = 0; i < len; i++) cells[i] = ft_alloc_persistent_raw(arena);
+  for (u32 i = 0; i < len; i++) {
+    AtpFtCell *c = cells[i];
+    c->next  = (i + 1u < len) ? cells[i + 1u] : NULL;
+    c->end   = cells[i + a[i].size - 1u];
+    c->sym   = a[i].sym;
+    c->arity = (u16)(WF_IS_VAR(a[i].sym) ? 0u : a[i].arity);
+    c->flags = 0u;
+    c->_pad  = 0u;
+  }
+  return cells[0];
+}
+
+// The gated flat-path entry.  Returns the NF cells (Arena A) when the
+// flat path decided the call exactly, NULL when the caller must run
+// the engine walk on the ORIGINAL input: mirror unusable, subject
+// over-cap, or any in-walk fallback (inexact descent, arena/scratch/
+// candidate overflow).  The input chain is mutated ONLY on the decided
+// fired>0 path (it is freed and replaced by the decoded NF); every
+// NULL return leaves it pristine.
+//
+// THVM_ATP_WMFPA_CHECK (s->wmfpa_check) live differential: after a
+// decided flat run, ALSO run the engine mixmost on the original cells
+// and require the two NF preorders byte-equal ((sym, arity) stream,
+// cap-hit partials included), aborting on the first divergence; the
+// engine result is returned so a CHECK run is engine-exact by
+// construction while certifying the flat path on every call.
+static AtpFtCell *atp_rules_only_normalize_wf(AtpState *s, AtpFtCell *t,
+                                              u32 step_cap) {
+  // THVM_ATP_NF_CAP counts Arena A live cells inside the engine walk;
+  // the flat path never allocates there mid-walk, so it cannot honor
+  // the cap -- stay on the engine path when it is armed (default off).
+  static int nf_cap_armed = -1;
+  if (nf_cap_armed < 0) {
+    const char *e = getenv("THVM_ATP_NF_CAP");
+    nf_cap_armed = (e != NULL && *e != '\0' && strtol(e, NULL, 10) > 0) ? 1 : 0;
+  }
+  if (nf_cap_armed) return NULL;
+#if defined(THVM_ATP_AC) && defined(THVM_ATPFT_MATCH)
+  if (thvm_atp_get_ac_mask() != 0ull) return NULL;   // AC matches modulo AC
+#endif
+  wf_mm_stats_arm();
+  g_wfmm.q_calls++;
+  if (!wf_mm_cache_ensure(s)) return NULL;
+  static WfNode  wf_subj[WF_MM_SUBJ_CAP];
+  static WfNode  wf_scr [WF_MM_SUBJ_CAP];
+  static WfMmEnt wf_st  [WF_MM_SUBJ_CAP + 1u];
+  u32 alen = wf_mm_encode_cells(t, wf_subj, WF_MM_SUBJ_CAP);
+  if (alen == 0u) return NULL;                       // over-cap subject
+  WfMm m = {
+    .ix = &g_wfmm.tree, .a = wf_subj, .alen = alen, .acap = WF_MM_SUBJ_CAP,
+    .scratch = wf_scr, .scratch_cap = WF_MM_SUBJ_CAP,
+    .st = wf_st, .depth = 0u, .budget = step_cap, .fired = 0u, .fallback = 0,
+  };
+  u32 nlen = wf_normalize_mixmost(&m);
+  if (m.fallback) { g_wfmm.q_fallback++; return NULL; }
+  g_wfmm.q_decided++;
+  if (m.fired > 0u) g_wfmm.q_fired++;
+  if (m.budget == 0u) g_wfmm.q_caphit++;   // cap-hit partial: parity-bearing
+  if (s->wmfpa_check) {
+    AtpFtSubst chk;
+    memset(&chk, 0, sizeof(chk));
+    AtpFtCell *eng = atp_normalize_mixmost_ft(s, t, 0u, s->n_rules,
+                                              step_cap, /*doE=*/0u,
+                                              /*record=*/0, /*eq_other=*/0,
+                                              0u, NULL, &chk,
+                                              NULL, NULL, 0u);
+    const AtpFtCell *ee = (eng->end != NULL) ? eng->end->next : NULL;
+    u32 i = 0u;
+    int ok = 1;
+    for (const AtpFtCell *p = eng; p != NULL && p != ee; p = p->next, i++) {
+      u32 pa = ((p->sym & WF_VAR_BIT) != 0u) ? 0u : (u32)p->arity;
+      if (i >= nlen || p->sym != wf_subj[i].sym ||
+          pa != (u32)wf_subj[i].arity) {
+        ok = 0;
+        break;
+      }
+    }
+    if (ok && i != nlen) ok = 0;
+    if (!ok) {
+      fprintf(stderr, "[wfmm CHECK] NF divergence (n_rules=%u fired=%u "
+              "budget_left=%u)\n[wfmm CHECK] flat:", s->n_rules, m.fired,
+              m.budget);
+      for (u32 k = 0; k < nlen && k < 128u; k++)
+        fprintf(stderr, " %x/%u", wf_subj[k].sym, (u32)wf_subj[k].arity);
+      fprintf(stderr, "\n[wfmm CHECK] engine:");
+      u32 k = 0u;
+      for (const AtpFtCell *p = eng; p != NULL && p != ee && k < 128u;
+           p = p->next, k++)
+        fprintf(stderr, " %x/%u", p->sym, (u32)p->arity);
+      fprintf(stderr, "\n");
+      thvm_fatal("wfmm: WM-policy flat NF diverges from engine mixmost");
+    }
+    return eng;
+  }
+  if (m.fired == 0u) return t;   // untouched input IS the NF (engine identity)
+  AtpFtCell *nf = wf_mm_decode_cells(s, wf_subj, nlen);
+  // The engine walk rewrites in place, returning displaced spans to the
+  // free list as it goes; the flat path abandons the whole input chain,
+  // so return it in one span to keep Arena A liveness bounded.
+  if (t->end != NULL) ft_free_span((AtpFt *)s->ft_arena_ptr, t, t->end);
+  return nf;
 }
 
 // --- Fixpoint --------------------------------------------------------
@@ -3178,6 +3847,83 @@ AtpFtCell *atp_rules_only_normalize_ft(AtpState *s, AtpFtCell *t,
                                        (Term){0}, 0u, NULL);
 }
 
+// --- Simpler-join joinability (AtpState.use_simpler_join) ------------
+//
+// Second-chance join verdict for a CP whose sides l/r survived the
+// engine's standard normalize with DISTINCT NFs.  Port of the
+// discipline behind Twee's joinCriticalPair (Join.hs:55, allSteps =
+// step1 >=> step2 >=> checkOrder >=> step3): re-normalize both sides
+// admitting oriented rules AND unorientable equations, where every
+// step is gated on the rewriting equation being strictly simpler than
+// the CP equation (Equation.hs:59 simplerThan over lessEqSkolem), and
+// an unorientable instance fires when strictly decreasing under the
+// skolem-ground KBO (Rule.hs:425 reducesSkolem) even where the
+// open-term compare is incomparable.  Divergences from Twee, accepted
+// under the opt-in + GaveUp-never-Satisfiable envelope (over-dropping
+// can lose completeness, never soundness -- proofs are built only from
+// recorded engine steps):
+//   * no step3 below-peak constraint (normaliseWith (`lessThan` top))
+//     and no checkOrder peak test -- the peak is not threaded here;
+//   * no variable canonicalisation inside simplerThan (ft_order.c);
+//   * VERDICT-ONLY: the caller's l/r keep the engine NFs, so a kept
+//     CP queues/records exactly what the default path queues -- the
+//     gated steps live and die inside this call.
+//
+// Termination: oriented steps decrease the open-KBO instance, hence
+// its skolem image; gated unorientable steps decrease the skolem image
+// directly; the skolem-ground order is total, well-founded and closed
+// under contexts, so the gated normalize terminates (64-step cap as
+// backstop).
+//
+// The pass can out-join the ungated doR/doE normalize that already
+// failed ONLY through the unorientable-equation leg, so it is skipped
+// when no unorientable equation is live.  Plain-KBO configs only (the
+// skolem compare reads s->kbo).
+u8 atp_cp_sj_joinable_ft(AtpState *s, AtpFtCell *l, AtpFtCell *r);
+u8 atp_cp_sj_joinable_ft(AtpState *s, AtpFtCell *l, AtpFtCell *r) {
+  if (l == NULL || r == NULL || s->n_rules == 0u) return 0u;
+  if (s->n_unorient == 0u) return 0u;
+  if (s->kbo == NULL || s->lpo != NULL || s->rpo != NULL || s->wpo != NULL) {
+    return 0u;
+  }
+  if (g_ftsj_active) return 0u;   // defensive: no reentry
+  if (!thvm_ftsj_prepare_eq(l, r, s->kbo)) return 0u;
+  // Sync the rule-encode cache watermark (ft_order.c) for this pass.
+  thvm_ftsj_rulecache_sync(s, s->r_revision, s->n_rules);
+  // Arm the per-rule simplerThan memo: bump the pass id -- a stale
+  // slot simply fails the stamp check, no per-pass memset.
+  if (g_ftsj_memo_cap < s->n_rules) {
+    u32 cap = s->n_rules + 256u;
+    u32 *st = (u32 *)realloc(g_ftsj_memo_stamp, (size_t)cap * sizeof(u32));
+    if (st == NULL) return 0u;
+    memset(st + g_ftsj_memo_cap, 0,
+           (size_t)(cap - g_ftsj_memo_cap) * sizeof(u32));
+    g_ftsj_memo_stamp = st;
+    u8 *vl = (u8 *)realloc(g_ftsj_memo_val, cap);
+    if (vl == NULL) return 0u;
+    g_ftsj_memo_val = vl;
+    g_ftsj_memo_cap = cap;
+  }
+  if (++g_ftsj_pass_id == 0u) {   // stamp wrap: retire every stale slot
+    memset(g_ftsj_memo_stamp, 0, (size_t)g_ftsj_memo_cap * sizeof(u32));
+    g_ftsj_pass_id = 1u;
+  }
+  // Normalize CLONES: the gated walk splices/frees spans in place, and
+  // the caller's l/r must stay the engine NFs (verdict-only contract).
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *lc = ft_clone_span(a, l, 0);
+  AtpFtCell *rc = ft_clone_span(a, r, 0);
+  if (lc == NULL || rc == NULL) return 0u;
+  g_ftsj_active = 1u;
+  lc = atp_rewrite_normalize_ft(s, lc, 64u);
+  rc = atp_rewrite_normalize_ft(s, rc, 64u);
+  g_ftsj_active = 0u;
+  u8 joined = (u8)ft_eq(lc, rc);
+  ft_free_span(a, lc, lc->end);
+  ft_free_span(a, rc, rc->end);
+  return joined;
+}
+
 // Record-mode entry.  Mirrors atp_rewrite_normalize_record's contract
 // on the term side: each FT splice emits one TRACE_NORM_STEP chained
 // off `*chain_tail`, advancing the tail.  `eq_other` is the unchanged
@@ -3198,6 +3944,23 @@ AtpFtCell *atp_rewrite_normalize_ft_record(AtpState *s, AtpFtCell *t,
   return atp_rewrite_normalize_ft_impl(s, t, /*slice_first=*/0u,
                                        /*slice_count=*/s->n_rules,
                                        step_cap, /*doE=*/1u, /*record=*/1,
+                                       eq_other, side, chain_tail);
+}
+
+// doR-only record sibling: the use_pop_rules_only pop arm's Twee base
+// discipline (oriented rules only; Rule.hs `simplify`) with the same
+// TRACE_NORM_STEP recording contract as the doE entry above.
+AtpFtCell *atp_rules_only_normalize_ft_record(AtpState *s, AtpFtCell *t,
+                                              u32 step_cap, Term eq_other,
+                                              u8 side, u32 *chain_tail);
+AtpFtCell *atp_rules_only_normalize_ft_record(AtpState *s, AtpFtCell *t,
+                                              u32 step_cap, Term eq_other,
+                                              u8 side, u32 *chain_tail) {
+  if (t == NULL) return NULL;
+  if (s->n_rules == 0u) return t;
+  return atp_rewrite_normalize_ft_impl(s, t, /*slice_first=*/0u,
+                                       /*slice_count=*/s->n_rules,
+                                       step_cap, /*doE=*/0u, /*record=*/1,
                                        eq_other, side, chain_tail);
 }
 
@@ -3327,6 +4090,16 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   if (s->use_mixmost_nf) {
     u32 mslice_end = slice_first + slice_count;
     if (mslice_end > s->n_rules) mslice_end = s->n_rules;
+    // Opt-in WM-FPA flat path (THVM_ATP_WMFPA=1): exactly the doR-only
+    // full-range non-record shape -- the treated-CP push normalize (WM
+    // KPBehandelt `-kg "r"`).  Record / proofsteps / slice / doE=1
+    // shapes never engage; a NULL return means "not decided here" and
+    // the engine walk below runs on the untouched input.
+    if (s->use_wmfpa && doE == 0u && !record &&
+        slice_first == 0u && slice_count == s->n_rules) {
+      AtpFtCell *wf_nf = atp_rules_only_normalize_wf(s, t, step_cap);
+      if (wf_nf != NULL) return wf_nf;
+    }
     return atp_normalize_mixmost_ft(s, t, slice_first, mslice_end,
                                     step_cap, doE, record, eq_other,
                                     side, chain_tail, &subst,
@@ -3346,6 +4119,10 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
     ri_env_cached = (env != NULL && env[0] != '0') ? 1 : 0;
   }
   int use_ri = ri_env_cached && use_full_range;
+  // Simpler-join sessions must not take the RI descent: it fires
+  // oriented rules without consulting the ftsj gates.  Fall through to
+  // find_redex_ft, whose ft_cell_try_rules applies them.
+  if (g_ftsj_active) use_ri = 0;
   if (use_ri) {
     // Ensure the Term-side rule index is current; rebuild on dirty.
     if (s->rule_index == NULL || s->rule_index_dirty ||

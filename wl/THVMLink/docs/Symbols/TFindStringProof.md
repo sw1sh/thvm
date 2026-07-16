@@ -21,14 +21,13 @@ RelatedGuides: [THVMLink]
 - An axiom written `"BA" -> "AB"` is a [Rule]() and installs *pre-oriented*: one-directional string rewriting (a semi-Thue rule). An axiom written `{"BA", "AB"}`, `"BA" == "AB"`, or `"BA" <-> "AB"` is a two-way equation that the engine orients itself.
 - A theorem is a word pair in any of those shapes; its direction is meaningless (the goal is an equation). A `List` of theorems is a multi-goal conjunction returning ONE `ProofObject` with a hypothesis/conclusion row pair per conjunct.
 - Accepts the [TFindProof]() options `MaxSteps`, `TimeConstraint`, `Method`, `PortfolioFrontLoad`.
-- The returned `ProofObject` tags its theory `StringLogic` (rather than `EquationalLogic`); it otherwise supports the full property API.
+- The returned `ProofObject` is a standard `"EquationalLogic"` proof over the encoded terms and supports the full property API; [TStringPath]() decodes a proof's rewrite path back to plain words.
 
 ## Basic Examples
 
 A single one-directional rule bubble-sorts a word; the proof is a real `ProofObject`:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}, TimeConstraint -> 30]
 ```
 <!-- => ProofObject[<|"Theorem" -> ..., "Status" -> "Proved", ...|>] -->
@@ -36,7 +35,6 @@ TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}, TimeConstraint -> 30]
 The `"Status"` spec returns the bare decision:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TFindStringProof["BBBAAA" -> "AAABBB", {"BA" -> "AB"}, "Status", TimeConstraint -> 30]
 ```
 <!-- => Proved -->
@@ -46,7 +44,6 @@ TFindStringProof["BBBAAA" -> "AAABBB", {"BA" -> "AB"}, "Status", TimeConstraint 
 A list of theorems is one conjunction proved off a single saturation; the dataset carries a hypothesis per conjunct:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 po = TFindStringProof[{"BA" -> "AB", "BBA" -> "ABB"}, {"BA" -> "AB"}, TimeConstraint -> 30];
 ContainsAll[Keys @ Normal @ po["ProofDataset"],
     {{"Hypothesis", 1}, {"Hypothesis", 2}, {"Conclusion", 1}, {"Conclusion", 2}}]
@@ -58,7 +55,6 @@ ContainsAll[Keys @ Normal @ po["ProofDataset"],
 The proof object verifies independently - pre-oriented rules carry a proper trace lineage through the engine, so the lift survives:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 po = TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}, TimeConstraint -> 30];
 po["ProofFunction"][]
 ```
@@ -69,7 +65,6 @@ po["ProofFunction"][]
 A pair axiom is a two-way equation, the Wolfram Function Repository `FindStringProof` behaviour; a `Rule` axiom restricts rewriting to one direction. Both prove `"BBAA" == "AABB"`, but only the directed system keeps the word strictly sorting:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TFindStringProof[{"BBAA", "AABB"}, {{"BA", "AB"}}, "Status", TimeConstraint -> 30]
 ```
 <!-- => Proved -->
@@ -79,7 +74,6 @@ TFindStringProof[{"BBAA", "AABB"}, {{"BA", "AB"}}, "Status", TimeConstraint -> 3
 Words must be nonempty strings of letters; anything else returns a `Failure` naming the offending word:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TFindStringProof["A1" -> "AB", {"A" -> "B"}, TimeConstraint -> 10]
 ```
 <!-- => Failure["TATPParseError", <|"Word" -> "A1", "Reason" -> "expected a nonempty word of letters"|>] -->

@@ -1,0 +1,4 @@
+#!/bin/sh
+# StarExec build entry point.  Compiles bin/CheckProof.
+set -e
+make bin/CheckProof

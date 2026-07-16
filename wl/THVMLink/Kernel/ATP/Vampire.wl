@@ -29,7 +29,7 @@ SetUsage[TVampireProof, "TVampireProof[file$] runs the local Vampire CLI on the 
 TVampireProof[theory$, thm$] resolves the TPTP file under tools/baselines/vampire_tptp from the (theory$, thm$) pair (the bench-harness convention) and proves it.
 Options: TimeConstraint, Mode, Binary; see the ATP documentation for the strategy decode and ProofObject mapping."];
 
-TVampireProof::novamp = "Vampire CLI not found on PATH.  Install via `brew install vampire`."
+TVampireProof::novamp = "Vampire CLI not found on PATH.  Install via: brew install vampire"
 
 TVampireProof::badfile = "TPTP problem file not found: `1`"
 

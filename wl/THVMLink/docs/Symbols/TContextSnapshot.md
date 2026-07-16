@@ -29,7 +29,6 @@ Snapshot a small lambda and restore it after a fresh init:
 
 ```wl
 #| eval: False
-Needs["WolframInstitute`THVMLink`"];
 TInit[];
 snap = TContextSnapshot @ TLam[x, TUOpAdd[x, x]];
 TFree[]; TInit[];

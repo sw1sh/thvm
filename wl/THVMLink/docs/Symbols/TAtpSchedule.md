@@ -31,15 +31,15 @@ A named portfolio expands to its rotation:
 ```wl
 TAtpSchedule["VampirePortfolio"]
 ```
-<!-- => {{"VampireUEQ"}, {"Completion", "CriticalPairWeight" -> "Twee", ...}, ...} -->
+<!-- => {"VampireUEQ", {"Completion", "CriticalPairWeight" -> "Twee", "GroundJoin" -> True, ...}, ...} -->
 
 An `Automatic` schedule against an AbelianGroup goal carries the structure-aware front:
 
 ```wl
 TAtpSchedule[Automatic,
-    Inactive[Equal][x*y, y*x], "AbelianGroupAxioms"]
+    x \[CircleTimes] y == y \[CircleTimes] x, "AbelianGroupAxioms"]
 ```
-<!-- => structure-aware front + the fixed "Portfolio" tail -->
+<!-- => {{"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", ...}, ...} - the structure-aware front, then the fixed "Portfolio" tail -->
 
 A single-config `Method` round-trips unchanged:
 

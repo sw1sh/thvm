@@ -207,13 +207,14 @@ static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {
     return ctx->count;
   }
 
-  // CP = (σ(l_i[p ← r_j]), σ(r_i)); the peak is σ(l_i) -- both CP
-  // sides are one-step reducts of it (rule j rewrites the lhs, rule i
-  // the rhs), so a join through terms strictly below the peak proves
-  // the CP redundant (Bachmair-Dershowitz connectedness).
+  // CP = (σ(r_i), σ(l_i[p ← r_j])) -- WM's side order (Unifikation1.c:
+  // 916-917, KPLinks = sigma(host.rhs) first); the peak is σ(l_i) --
+  // both CP sides are one-step reducts of it (rule j rewrites the lhs,
+  // rule i the rhs), so a join through terms strictly below the peak
+  // proves the CP redundant (Bachmair-Dershowitz connectedness).
   Term replaced = cp_replace_at(ctx->li, p, p_len, ctx->rj);
-  Term cp_lhs   = thvm_unify_apply(replaced, &subst);
-  Term cp_rhs   = thvm_unify_apply(ctx->ri,  &subst);
+  Term cp_rhs   = thvm_unify_apply(replaced, &subst);
+  Term cp_lhs   = thvm_unify_apply(ctx->ri,  &subst);
   Term cp_peak  = g_cp_need_peak ? thvm_unify_apply(ctx->li, &subst) : 0;
   thvm_unify_undo(&subst);
 

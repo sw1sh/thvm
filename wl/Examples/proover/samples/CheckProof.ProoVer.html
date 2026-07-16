@@ -1,0 +1,72 @@
+<hr>
+
+<h2>CheckProof 0.1</h2>
+
+<p>N. Murzin<br>
+Wolfram Institute, USA</p>
+
+<h3>Overview</h3>
+
+<p>CheckProof 0.1 [Sys1] is a checker for first-order TSTP proofs. A proof is
+validated by replay: it is parsed into its sequence of annotated formulae, and
+each derived step is validated independently by dispatching on the inference
+rule that introduced it, so that one SZS status is reported for the whole proof
+[Sys2]. The derivation must be acyclic: a parent reference resolves only to a
+strictly earlier step, so circular justification is rejected by construction.
+Each rule then carries a distinct obligation. An instantiate step is required to
+be a substitution instance of a parent; a negated_conjecture step to be the
+negation of a parent that carries the conjecture role, checked by entailment in
+both directions so that a wrong quantifier dual is detected; a skolemize step to
+introduce a fresh Skolem symbol that occurs in the result and, further, its
+conclusion with the Skolem terms abstracted to an existential quantifier, placed
+exactly where the Skolem's argument tuple is bound, must be entailed by the
+parent, so that a step can neither smuggle in an unrelated claim behind a fresh
+symbol nor choose a witness of the wrong arity; and a consequence, horn, or
+deduction step is required to be entailed by its parents. Entailment is decided
+by refutation with superposition,
+resolution, and paramodulation [Lib1]: the parents and the negated conclusion
+are clausified and saturated, and a derived empty clause certifies the step. The
+refutation is required to close with the empty clause. Checking is conservative,
+in keeping with the scoring, under which a wrong verdict is penalised more
+heavily than abstention: a step is reported unsound only when a saturation is
+completed that exhibits a counter-model, and a step whose inference rule is not
+implemented, or whose entailment is neither proved nor refuted within the
+resource bound, leaves the proof unverified rather than guessed.</p>
+
+<h3>Implementation</h3>
+
+<p>CheckProof is implemented as a single self-contained C program, with no
+external dependencies beyond the C standard library. Proofs in TSTP syntax are
+read directly by a recursive-descent parser into the first-order term
+representation of the reasoning core. The obligations are discharged by the
+clausal saturation engine of the FindProof equational prover [Sys1], the same
+code base from which CheckProof is built; no external prover is called, so
+equational atoms are reasoned about with superposition rather than treated as
+opaque. The checker is built from source by a single compiler invocation and is
+available from the author.</p>
+
+<h3>Expected Competition Performance</h3>
+
+<p>CheckProof is entered in ProoVer 2026. It is expected to be sound, accepting no
+invalid proof and rejecting no valid one, and to report a proof unverified when
+its steps use inference rules outside the implemented set or when an entailment
+cannot be settled within the time limit.</p>
+
+<h3>References</h3>
+
+<p><strong>Sys1</strong></p>
+
+<p>Murzin N. (2026), <strong>FindProof: Equational Theorem Proving in the Wolfram
+Language</strong>, <em>Wolfram Institute Technical Note</em>.</p>
+
+<p><strong>Sys2</strong></p>
+
+<p>Sutcliffe G. (2008), <strong>The SZS Ontologies for Automated Reasoning
+Software</strong>, Rudnicki P., Sutcliffe G. (eds), <em>Proceedings of the LPAR
+Workshops</em>, pp.38-49, CEUR Workshop Proceedings 418.</p>
+
+<p><strong>Lib1</strong></p>
+
+<p>Bachmair L., Ganzinger H. (1994), <strong>Rewrite-based Equational Theorem
+Proving with Selection and Simplification</strong>, <em>Journal of Logic and
+Computation</em> 4(3), pp.217-247, Oxford University Press.</p>

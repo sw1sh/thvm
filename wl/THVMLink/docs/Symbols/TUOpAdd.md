@@ -25,7 +25,6 @@ RelatedGuides: [THVMLink]
 Add two small tensors:
 
 ```wl
-Needs["WolframInstitute`THVMLink`"];
 TInit[];
 a = TTensorCreate[{1., 2., 3., 4.}];
 b = TTensorCreate[{10., 20., 30., 40.}];

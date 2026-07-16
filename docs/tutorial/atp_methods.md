@@ -1,8 +1,12 @@
 # `TFindProof` Methods and Options
 
 A practitioner's tour of thvm's automated theorem-proving (ATP) surface.
-Covers every `Method` head, every `Method` suboption, every top-level
-`Option`, and every return spec as of main `22ed7308`.
+Covers every `Method` head, the `Method` suboptions, every top-level
+`Option`, and every return spec as of main `2a3f0f50` (2026-07-16).
+The TPTP-file CLI over the same engine (`bin/FindProof`, the CASC
+entry) is documented separately in `docs/atp/casc_strategy.md`; its
+`--list-knobs` table maps every CLI flag to its env variable and,
+where one exists, the `Method` suboption name used here.
 
 Abbreviations used throughout (spelled out on first appearance):
 
@@ -42,10 +46,6 @@ When to reach for `TFindProof` vs the built-in `FindEquationalProof`:
   config per detected algebraic structure, supports a wider range of
   ordered-rewriting / completion configurations, and is meaningfully
   faster on the harder Sheffer / cross-axiom Boolean / combinator goals.
-
-Legacy name: the symbol was originally `TFindEquationalProof`. It is
-kept as a deprecated alias and forwards every call to `TFindProof`, so
-existing notebooks and downstream code keep working unchanged.
 
 ## 2. Loading
 
@@ -239,14 +239,13 @@ problems where Waldmeister's empirical default is well-tuned.
 
 ### 4.6 `"VampirePortfolio"`
 
-A 10-entry rotation modeled on the portfolio-cycling shape Vampire
+A 13-entry rotation modeled on the portfolio-cycling shape Vampire
 5.0.1 ships for UEQ: many short strategy slices rather than one tuned
-config. With `TimeConstraint -> T`, each entry runs at `T / 10` wall
-time and the first that proves wins (the engine already shares
-`TimeConstraint` fairly across schedule entries).
+config. With `TimeConstraint -> T`, the engine shares the budget
+fairly across the remaining entries and the first that proves wins.
 
-The 10 entries exercise the full knob surface (CP weight modes,
-orderings, redundancy criteria) shipped through iters 10-25:
+The 13 entries (`$VampirePortfolio` in `ATP.wl`) exercise the full
+knob surface -- CP weight modes, orderings, redundancy criteria:
 
 1. `"VampireUEQ"` (the flag-complete preset).
 2. Twee weight + GroundJoin + Connectedness + BackwardSubsume +
@@ -259,10 +258,19 @@ orderings, redundancy criteria) shipped through iters 10-25:
 8. LPO + AutoPrecedence + GoalInterleave 50.
 9. GoalDirected + SInE.
 10. Add weight + AutoMaxWeight.
+11. Mix2 + `SelectionRatio -> 2` (the aggressive age bias that cracks
+    the cross-system Sheffer Implies-X family; section 9.8).
+12. `"VampireRandom"` (LPO + arity precedence + LRS + random pick
+    ratio 32 with Vampire's seed + GroundJoin + BackwardDemod +
+    RHSInterreduce + UnfailingCP -- the McCune/EqualityOfInverses
+    entry; random selection samples paths the weight-greedy entries
+    miss).
+13. LPO + `"AutoPrecedence" -> "Occurrence"` (occurrence-frequency
+    symbol precedence, Vampire `sp=occurrence`) + SelectionRatio 10.
 
 When to use: experimental "throw everything at it" mode when the
 default `Automatic` walls on a hard goal. The cost is that each slice
-gets only ~10% of the wall budget; goals that need a long single
+gets only ~1/13 of the wall budget; goals that need a long single
 configuration won't benefit.
 
 ### 4.7 `"VampireUEQ"`
@@ -430,11 +438,14 @@ reductions) that KBO cannot orient.
 Default: `"KBO"`. When to set: LPO for combinator logic; combine with
 `"AutoPrecedence" -> True` for any LPO run.
 
-### 5.3 `"AutoPrecedence" -> True | False`
+### 5.3 `"AutoPrecedence" -> True | False | "Occurrence"`
 
 Use Waldmeister's structure-driven precedence (the PhilMarlow port). For
 groups this puts the inverse on top; for rings the distributor `*` above
 `+`; etc. Without it the precedence is the identity (label order).
+`"Occurrence"` instead ranks symbols by occurrence frequency (rarer
+symbols higher -- Vampire `sp=occurrence` / E `-G InvFreqRank`), a
+genuinely different trajectory on cross-system goals.
 
 Default: `False`. When to set: any time you select LPO; for KBO on
 groups / rings / lattices to orient unary inverses cleanly.
@@ -659,6 +670,32 @@ preferentially orient away from it.
 
 Default: identity (uniform 1, engine byte-identical).
 
+### 5.22 Engine-extension suboptions (the CASC-arc levers)
+
+The mechanisms ported for the CASC portfolio are WL-reachable as
+tri-state Method suboptions: unset means the engine default (which
+honors the matching `THVM_ATP_*` env), `True`/`False` (or an integer
+where noted) pins the field. Semantics and evidence live in
+`docs/atp/casc_strategy.md` and `docs/atp/engineering.md`; the
+env/CLI-flag mapping is `bin/FindProof --list-knobs`.
+
+| Suboption | What it switches |
+|-----------|------------------|
+| `"FlattenGoal" -> True` | goal flattening: name the goal's ground subterms with fresh minimal constants (Twee/Vampire naming) -- runs in the WL problem builder |
+| `"SimplerJoin" -> True` | Twee `simplerThan`-gated CP join (culls CPs plain joinability keeps) |
+| `"EncompassDemod" -> True` | encompassment demodulation (skolem-ground unorient gate; canonicalizes variable-permuted variants) |
+| `"GoalNarrow" -> True` | ground congruence-closure + goal-cone e-matching endgame |
+| `"CPSetIRBudget" -> n` | passive re-scoring on Twee's task discipline (percent budget) instead of the every-16-rules sweep |
+| `"PopRulesOnly" -> True` | Twee pop-join base: oriented rules only, no ungated unorientable-face joins |
+| `"GjDeleteRule" -> True` | ground-join rule deletion |
+| `"FullInterreduce" -> True` | full rule-set interreduction (delete a rule iff its sides join under the rest) |
+| `"LazyNormalize" -> True` | Waldmeister's small-CP treatment gate (push-time normalize only below the size threshold) |
+| `"OrphanMurder" -> False` | keep queued CPs whose parent rules retired (Twee's passive-set semantics; the WM default deletes them) |
+
+The finer caps (`--gn-*`, `--gj-budget`, `--gj-index`, ...) stay
+env-only; in-process WL callers can set them with `SetEnvironment`
+before the call since the engine reads them at init / use-site.
+
 ## 6. Per-class recommendations
 
 Empirical patterns from the recent benchmark sweep + parallel Vampire
@@ -676,35 +713,37 @@ table is useful when you pin `Method` explicitly.
 | AC (commutative+associative, no inverse) | `{"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50}` | Waldmeister `GtS` family. |
 | Lattice | `{"Completion", "CriticalPairWeight" -> "Gt", "GroundJoin" -> True, "GoalInterleave" -> 50}` then LPO fallback | Waldmeister `Verband` row uses `gj()` + an LPO pass. |
 
-### 6.1 Currently out of reach
+### 6.1 The formerly-hard five
 
-These 5 unit-equality goals are known to be cracked by Vampire 5.0.1 (UEQ
-portfolio) within 30 s in our parallel baseline, but neither the
-`Automatic` schedule nor any tried explicit `Method` -- including the
-faithful `"VampireUEQ"` preset (after iters 18-21 it bundles real
-`BackwardSubsume` + `BackwardDemod` + `RHSInterreduce`, every orderable
-flag from Vampire's winning block for Sheffer/AndAssociativity),
-`"CriticalPairWeight" -> "ConjSym"`, `"Diversity"`, `"Twee"`,
-`"ForwardSubsume" -> True`, and pairings with `"GroundJoin" -> True` or
-`"Connectedness" -> True` -- closes them within 30 s on the single-config
-form:
+Five unit-equality goals used to be documented here as "cracked by
+Vampire 5.0.1 within 30 s but out of thvm's reach": McCuneAxioms /
+EqualityOfInverses, RobbinsAxioms / DoubleNegation, ShefferAxioms /
+AndAssociativity, and the two ShefferAxioms / ImpliesWolfram*Axioms
+goals. The Waldmeister-faithfulness arc closed that framing: the
+engine's default (Waldmeister-preset) trajectory now reaches the
+Sheffer family directly -- re-verified 2026-07-16 against the pinned
+`.pr` baselines with `bin/FindProof` at engine defaults:
 
-- `McCuneAxioms / EqualityOfInverses`
-- `RobbinsAxioms / DoubleNegation`
-- `ShefferAxioms / AndAssociativity`
-- `ShefferAxioms / ImpliesWolframAxioms`
-- `ShefferAxioms / ImpliesWolframAlternateAxioms`
+- `ShefferAxioms / AndAssociativity` -- proves in 3.1 s
+  (`tools/baselines/wm_pr/ShefferAxioms__AndAssociativity.pr`).
+- `ShefferAxioms / ImpliesWolframAxioms` and
+  `ImpliesWolframAlternateAxioms` -- 0.08 s each.
+- `McCuneAxioms / EqualityOfInverses` is the `"VampireRandom"` preset's
+  validated target (entry 12 of the `"VampirePortfolio"` rotation).
+- `RobbinsAxioms / DoubleNegation` remains open at interactive budgets
+  (Robbins-algebra goals are deep saturations; give it minutes and the
+  portfolio, not seconds and a single config).
 
-Vampire's winning flag block on `Sheffer/AndAssociativity` is
+The WL-side per-class table above (`Automatic`'s front-loads) already
+reflects this. Vampire's winning flag block on
+`Sheffer/AndAssociativity`,
 
 ```
 dis+10_6_to=lpo:tgt=full:fde=none:sp=arity:nwc=1.2:bs=unit_only:
 bd=all:av=off:gtg=exists_sym
 ```
 
-The orderable subset is shipped as `Method -> "VampireUEQ"`. After iters
-18 (BackwardSubsume) and 20 (BackwardDemod) every orderable flag in
-Vampire's winning Sheffer/AndAssociativity block is now ported:
+remains the design source for `Method -> "VampireUEQ"`; the mapping:
 
 | Vampire flag | thvm equivalent |
 |-|-|
@@ -717,24 +756,10 @@ Vampire's winning Sheffer/AndAssociativity block is now ported:
 | `bd=all` | `BackwardDemod -> True` + `RHSInterreduce -> True` |
 | `fde=none` | (not exposed; thvm's forward demodulation is built into normalize and not toggleable) |
 | `av=off` | (n/a; thvm has no AVATAR splitting to begin with) |
-| `gtg=exists_sym` | (not ported; Vampire's GoalGuessing flags clauses with conjecture-symbol occurrences as goal-like for premise selection.  Less directly applicable to thvm: every problem here has an explicit `negated_conjecture` role.) |
+| `gtg=exists_sym` | (not ported as premise selection; the related goal-subterm naming is the CLI's `--tgt` transform) |
 
-That the faithful preset still does not close these 5 targets within
-30 s suggests the remaining gap is in the search-shape variables not
-visible at the flag layer -- Vampire's wider portfolio runs many
-100 ms strategies until one of them happens to surface the right
-critical pair early, which is a different lever than any single-config
-tuning can replicate.
-
-Iter 26 added `Method -> "VampirePortfolio"` as a 10-entry rotation
-that approximates Vampire's portfolio-cycling shape (see §3.6). Iter
-27 ran it at `TimeConstraint -> 60` (~6 s per slice) on
-`Sheffer/AndAssociativity` -- still does not close. Confirms the
-practical reading: cracking these 5 targets at single-machine clock
-times comparable to Vampire's UEQ-portfolio wall budget needs either
-many minutes of cycling (Vampire spends 30 s -- 5 minutes in
-practice) or a deeper search-space restructuring not in the flag /
-schedule layer.
+For the competition-scale standing (where the current hard residue
+actually lives) see `docs/atp/casc_strategy.md`.
 
 ## 7. Return specs
 
@@ -974,9 +999,16 @@ recognizes:
 ```wolfram
 WolframInstitute`THVMLink`ATP`Private`$AtpMethodPresets
 (* -> {"Waldmeister", "VampireUEQ", "Twee", "EProver",
+       "VampireRandom", "ENIGMA",
        "Portfolio", "VampirePortfolio", "VampirePortfolioCompact",
        "AllPresets"} *)
 ```
+
+(`"ENIGMA"` is the learned-CP-selection preset -- see
+`docs/atp/ml_guidance.md`; `"WaldmeisterLazy"` is additionally
+recognized as a Method name: the Waldmeister preset plus
+`"LazyNormalize"` with CP-set interreduction as its memory-safety
+pair.)
 
 ### 8.10 `PortfolioFrontLoad -> n`
 

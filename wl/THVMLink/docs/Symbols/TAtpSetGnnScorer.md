@@ -29,8 +29,6 @@ Returns `True` on success, `False` on a malformed model.
 Push the bundled pretrained scorer:
 
 ```wl
-#| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 TAtpSetGnnScorer[TAtpGnnScorerAsset[]]
 ```
 <!-- => True -->
@@ -40,7 +38,6 @@ TAtpSetGnnScorer[TAtpGnnScorerAsset[]]
 Drop the scorer and revert:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TAtpSetGnnScorer[Clear]
 ```
 <!-- => True -->

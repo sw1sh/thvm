@@ -21,20 +21,19 @@ It is the `Method -> "EproverProcess"` dispatch target in [TFindProof]().
 - Options:
   - `TimeConstraint`, `"Binary"` - forwarded to [TEproverProof]().
   - `"ParseFormulas"` (default `False`) - when `True`, each step's `Statement` is `TPTPImport`-parsed into a Wolfram expression (slow).
-  - `"LiftToProofObject"` (default `False`) - when `True`, wraps the Association into a literal `ProofObject` head (implying `"ParseFormulas" -> True`), so `p["ProofFunction"]`, `p["ProofGraph"]`, `p["ProofLength"]`, and `p["Theorems"]` work.
+  - `"LiftToProofObject"` (default `True`) - wraps the Association into a literal `ProofObject` head (implying `"ParseFormulas" -> True`), so `p["ProofFunction"]`, `p["ProofGraph"]`, `p["ProofLength"]`, and `p["Theorems"]` work.  Set it `False` for the raw construct-keyed Association.
 - When the E binary is not installed, the builder returns a `Failure["ExternalNoProof", ...]` rather than raising an error.
 
 ## Basic Examples
 
-Lift an E proof into a literal `ProofObject`:
+On a machine without the E binary the builder degrades to a typed `Failure` (the `TEproverProof::noeprover` message fires along the way):
 
 ```wl
-#| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
-TEproverProofObject["AbelianGroupAxioms", "InverseOfInverse",
-    "LiftToProofObject" -> True, TimeConstraint -> 10]
+Head @ TEproverProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
 ```
-<!-- => ProofObject[...] -->
+<!-- => Failure - Failure["ExternalNoProof", ...] when eprover is absent; ProofObject where it is installed -->
+
+With E installed (`brew install eprover`), the same call returns the lifted proof: <code>[TEproverProofObject]()["AbelianGroupAxioms", "InverseOfInverse"]</code> is a literal `ProofObject` supporting the standard property accessors, exactly like [TVampireProofObject]().
 
 ## Properties & Relations
 
@@ -44,4 +43,4 @@ TEproverProofObject["AbelianGroupAxioms", "InverseOfInverse",
 
 ## Possible Issues
 
-- Without `"LiftToProofObject" -> True` the result is a raw Association, not a `ProofObject` head; the property accessors only apply after the lift.
+- With `"LiftToProofObject" -> False` the result is a raw Association, not a `ProofObject` head; the property accessors only apply to the lifted form.

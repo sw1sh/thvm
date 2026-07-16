@@ -113,11 +113,9 @@ typedef struct {
   // wmo_sub_end reads it) was REJECTED by wall-clock A/B x5 alternating
   // pairs: 13.42s vs 13.56s mean on the OA C bench (~-0.15s, below the
   // 0.3s bar) -- the arity-chain scans are short and well-predicted.
-  // Do not re-try.  Side finding kept for the record: the rank-cache
-  // key memcmp (wmo_tops_rank) compares these 2 uninitialised padding
-  // bytes, causing ~600 false misses/run on OA (hit rate 24.8% vs 26.6%
-  // with deterministic padding) -- benign (a miss recomputes the
-  // identical list), just a known noise source in the hit counters.
+  // Do not re-try.  The 2 padding bytes stay uninitialised at every fill
+  // site, so NO cell-array compare may memcmp: use wmo_cells_eq (see its
+  // comment for the measured binary-layout landmine the padding caused).
 } WmoCell;
 
 struct WmoNode;
@@ -176,7 +174,6 @@ typedef struct {
 #define WMO_TOPS_ARR_CAP 16384u
 #define WMO_RC_N 64u
 #define WMO_LLR_N 4096u
-#define WMO_DRC_N 2048u
 typedef struct {
   u8        valid;
   u8        tree;               // 0 rules / 1 equations
@@ -231,17 +228,17 @@ typedef struct AtpWmOrder {
     u32 ll, ch;
     u8  tree, face, found, valid;
   } llr[WMO_LLR_N];
-  // wmo_trace_dist_rhs memo: trace -> dist_rhs verdict (present or the
-  // unregistered-default 0), validated per entry against tree_rev
-  // (bumped by every registry mutation -- register / remove --
-  // so a stale entry cannot survive one).  The linear registry scan sits
-  // on the walk's per-fact and per-rank-query hot paths.
-  // Shares no_rankcache as its disable switch.
-  struct WmoDrcEnt {
-    u64 rev;
-    u32 trace;
-    u8  dr, valid;
-  } drc[WMO_DRC_N];
+  // wmo_trace_dist_rhs exact map: drx[trace] = presence bit | dr << 1.
+  // Maintained incrementally -- wmo_register records the FIRST
+  // registration's dist_rhs (every same-trace face registered under one
+  // insert shares the value by construction), atp_wmo_remove_trace
+  // always evicts ALL entries of a trace and clears the byte back to
+  // absent.  So "present -> recorded dr, absent -> the unregistered
+  // default 0" is at all times exactly what the historical registry
+  // linear scan recomputed -- O(1) with no rev invalidation (the former
+  // rev-stamped memo missed wholesale after every registration, and the
+  // scan behind it was the single-walk sweeps' dominant self-time on
+  // LAT138-1: one full-registry walk per partner hit).
   // WM-faithful AltesBlattPolieren construction (use_wm_trie_faithful): when
   // set, every BlattAufgeteilt parallel jump splices immediately AFTER the
   // surviving model in the start node's outgoing list (DSBaumOperationen.c
@@ -250,6 +247,8 @@ typedef struct AtpWmOrder {
   // rank.  Set from AtpState.use_wm_trie_faithful at tree creation; default 0
   // keeps the historical head-insert special case (byte-identical OFF).
   u8       polier_after;
+  u8      *drx;               // trace -> (present | dist_rhs << 1), see above
+  u32      drx_cap;
 } AtpWmOrder;
 
 // ---------- cells ----------
@@ -313,6 +312,64 @@ static u32 wmo_face_cells(Term face, WmoCell *out, u32 cap) {
   return wmo_cells_from_term(face, out, cap, vmap, &nv);
 }
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Span siblings of the face flatteners: the mirror is lockstep with the
+// stored Term, and a span's preorder IS its linear cell order, so these
+// produce bit-identical WmoCells / depth / ground verdicts -- letting
+// the tree insert run without touching the rule-Term slots.
+static u32 wmo_cells_from_ft(const struct AtpFtCell *c, WmoCell *out,
+                             u32 cap, u32 *vmap, u32 *n_vars) {
+  if ((c->sym & WF_VAR_BIT) != 0u) {
+    u32 v = c->sym & ~WF_VAR_BIT;
+    u32 id = 0;
+    if (v < REWRITE_MAX_VAR && vmap[v] != 0u) {
+      id = vmap[v];
+    } else {
+      id = ++(*n_vars);
+      if (v < REWRITE_MAX_VAR) vmap[v] = id;
+    }
+    if (cap < 1u) return 0;
+    out[0].sym = id;
+    out[0].is_var = 1u;
+    out[0].arity = 0u;
+    return 1u;
+  }
+  u32 n = (u32)c->arity;
+  if (cap < 1u || n > 255u) return 0;
+  out[0].sym = c->sym;
+  out[0].is_var = 0u;
+  out[0].arity = (u8)n;
+  u32 len = 1u;
+  const struct AtpFtCell *kid = c->next;
+  for (u32 i = 0; i < n; i++) {
+    u32 cl = wmo_cells_from_ft(kid, out + len, cap - len, vmap, n_vars);
+    if (cl == 0u) return 0;
+    len += cl;
+    kid = kid->end->next;
+  }
+  return len;
+}
+
+static u32 wmo_face_cells_ft(const struct AtpFtCell *face, WmoCell *out,
+                             u32 cap) {
+  u32 vmap[REWRITE_MAX_VAR] = {0};
+  u32 nv = 0;
+  return wmo_cells_from_ft(face, out, cap, vmap, &nv);
+}
+
+static u32 wmo_term_depth_ft(const struct AtpFtCell *c) {
+  if ((c->sym & WF_VAR_BIT) != 0u || c->arity == 0u) return 1;
+  u32 d = 0;
+  const struct AtpFtCell *kid = c->next;
+  for (u32 i = 0; i < (u32)c->arity; i++) {
+    u32 cd = wmo_term_depth_ft(kid);
+    if (cd > d) d = cd;
+    kid = kid->end->next;
+  }
+  return d + 1;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
 static u8 wmo_cell_eq(const WmoCell *a, const WmoCell *b) {
   // Cell identity is the full discrimination-tree edge symbol.  WM keys every
   // edge by a symbol CODE whose arity is fixed (SO_Stelligkeit); its splits
@@ -324,6 +381,25 @@ static u8 wmo_cell_eq(const WmoCell *a, const WmoCell *b) {
   // cell past its key (hang == key_len), which segfaults on later removal.
   // For fixed-arity theories (sym => arity) this is a no-op: byte-identical.
   return a->sym == b->sym && a->is_var == b->is_var && a->arity == b->arity;
+}
+
+// Content equality over a cell RUN -- the total-order twin of wmo_cell_eq
+// for every duplicate-jump / cache-key compare.  NEVER memcmp WmoCell
+// arrays: the struct carries 2 padding bytes that every fill site leaves
+// uninitialised (stack garbage frozen into leaf->key / WmoEntry.sub by the
+// registration-time memcpys), so a byte compare's verdict depends on the
+// BINARY LAYOUT of unrelated code (whatever frames previously occupied the
+// stack under the fill buffer).  Measured: a semantically inert edit in
+// ft_norm.c flipped the wmo_dfs duplicate-jump shadow skip's memcmp on the
+// Sheffer AndAssociativity WM-preset run -- same trie (construction traces
+// byte-identical), permuted DFS leaf arrival order, INSERT_TRACE fork at
+// seq 2170 (898498 vs 897217 events) -- making cross-binary
+// byte-certification unsound until content-only compares replaced the
+// memcmps.
+static u8 wmo_cells_eq(const WmoCell *a, const WmoCell *b, u32 n) {
+  for (u32 k = 0; k < n; k++)
+    if (!wmo_cell_eq(&a[k], &b[k])) return 0u;
+  return 1u;
 }
 
 // ---------- node / leaf helpers ----------
@@ -600,15 +676,25 @@ static void wmo_sprung_reissue_multi_cb(WmoNode *n, void *raw) {
 // is neither its smallest nor its largest symbol (BO_ObjektEntfernen
 // :1043-1046, SprunglistenBereinigenEinfach with NachbarBlatt = the node's
 // smallest-symbol child), no path shrinks, but the surviving smallest-symbol
-// leaf `minc` (the most-recently-introduced variable child = a fresh hang
-// whose ancestor jumps were head-prepended) must restore the
-// AltesBlattPolieren parallel order against the OTHER surviving leaf siblings:
-// in WM that fresh leaf arose as a split of a sibling's Sprung-compressed
-// leaf, so each ancestor jump was spliced AFTER the sibling's own jump
-// (DSBaumOperationen.c :521-525, "hinter den Eintrag setzen").  At every node
-// a single jump to `minc` that precedes a later sibling-leaf jump from the
-// same enclosing subterm (sharing the leading function cell) moves to just
-// after the last such later sibling jump.
+// leaf `minc` -- WHEN it is the most-recently-born surviving leaf child (a
+// fresh hang whose ancestor jumps were head-prepended over the older
+// siblings') -- must restore the AltesBlattPolieren parallel order against
+// the OTHER surviving leaf siblings: in WM that fresh leaf arose as a split
+// of a sibling's Sprung-compressed leaf, so each ancestor jump was spliced
+// AFTER the sibling's own jump (DSBaumOperationen.c :521-525, "hinter den
+// Eintrag setzen").  At every node a single jump to `minc` that precedes a
+// later sibling-leaf jump from the same enclosing subterm (sharing the
+// leading function cell) moves to just after the last such later sibling
+// jump.  The caller gates on minc being the newest-born leaf kid (the same
+// chain[0].trace birth-order discipline as the collapse multi-model
+// re-issue): WM's SprunglistenBereinigenEinfach itself never reorders
+// surviving Sprungausgaenge, so an OLDER minc ahead of a newer sibling is
+// already in WM's construction order -- the sibling's jump was an
+// AltesBlattPolieren parallel spliced after minc's when the sibling split
+// minc's leaf -- and moving it would flip a WM-stable pair
+// (WolframCommutativeAxioms ImpliesShefferAxioms c3 @reg762: survivors
+// uid136 < uid137 keep [136,137]; the same-wave split of uid136 then
+// splices uid762's parallel after the survivor, giving WM's [136,762,137]).
 typedef struct {
   WmoLeaf  *minc;
   WmoLeaf **sibs;
@@ -715,7 +801,7 @@ static WmoEntry *wmo_jump_find(const WmoNode *start, const WmoCell *sub,
   for (WmoEntry *e = start->exits; e != NULL; e = e->next) {
     if (e->ziel == ziel && e->ziel_leaf == ziel_leaf &&
         e->sub_len == sub_len &&
-        memcmp(e->sub, sub, (size_t)sub_len * sizeof(WmoCell)) == 0)
+        wmo_cells_eq(e->sub, sub, sub_len))
       return e;
   }
   return NULL;
@@ -734,7 +820,7 @@ static void wmo_dup_note(const char *mech, WmoNode *start) {
     for (WmoEntry *b = start->exits; b != NULL; b = b->next) {
       if (b->ziel == a->ziel && b->ziel_leaf == a->ziel_leaf &&
           b->sub_len == a->sub_len &&
-          memcmp(b->sub, a->sub, (size_t)a->sub_len * sizeof(WmoCell)) == 0)
+          wmo_cells_eq(b->sub, a->sub, a->sub_len))
         nn++;
     }
     if (nn >= 2u) {
@@ -1386,7 +1472,17 @@ static void wmo_tree_remove(WmoTree *t, const WmoCell *key, u32 key_len,
     // largest surviving ids (neither min nor max symbol).  The surviving
     // smallest-symbol leaf `minc` (largest first-occurrence id = most
     // negative WM code) is the fresh-hang child whose head-prepended
-    // ancestor jumps must move AFTER its variable siblings' jumps.
+    // ancestor jumps must move AFTER its variable siblings' jumps -- but
+    // ONLY when minc really is that fresh hang, i.e. the newest-born
+    // surviving leaf kid (chain[0].trace above every sibling's, the same
+    // birth-order gate as the collapse multi-model re-issue below).  An
+    // OLDER minc preceding a newer sibling is WM's after-splice order
+    // (the sibling's jump was the AltesBlattPolieren parallel spliced
+    // after minc's own) and must stay put: WM's cleanup never reorders
+    // surviving Sprungausgaenge (MeredithAxioms And/OrAssoc @2010 fires
+    // the move, minc=68 newest over sib 31; WolframCommutativeAxioms
+    // ImpliesShefferAxioms c3 @reg762 must not, minc=136 oldest under
+    // sib 137).
     WmoLeaf *minc = NULL;
     u32      minc_sym = 0;      // largest surviving id (smallest WM symbol)
     u32      lo_sym   = 0;      // smallest surviving id (largest WM symbol)
@@ -1409,15 +1505,21 @@ static void wmo_tree_remove(WmoTree *t, const WmoCell *key, u32 key_len,
     }
     if (all_var && n_leaf_kids >= 2u && minc != NULL &&
         removed_sym > lo_sym && removed_sym < minc_sym) {
+      u32 minc_trace = minc->n_chain ? minc->chain[0].trace : 0u;
+      u8  minc_newest = 1u;     // minc born after every sibling leaf kid
       for (u32 k = 0; k < parent->n_kids; k++) {
         if (parent->kids[k].is_leaf &&
             parent->kids[k].child != (void *)minc &&
             n_sibs < WMO_MAX_VARS + 2u) {
-          sibs[n_sibs++] = (WmoLeaf *)parent->kids[k].child;
+          WmoLeaf *m = (WmoLeaf *)parent->kids[k].child;
+          sibs[n_sibs++] = m;
+          if (m->n_chain && m->chain[0].trace > minc_trace) minc_newest = 0u;
         }
       }
-      WmoMiddleCtx mc = { minc, sibs, n_sibs };
-      wmo_walk_entries(t->root, wmo_middle_reissue_cb, &mc);
+      if (minc_newest) {
+        WmoMiddleCtx mc = { minc, sibs, n_sibs };
+        wmo_walk_entries(t->root, wmo_middle_reissue_cb, &mc);
+      }
     }
   }
   wmo_leaf_free(leaf);
@@ -1591,6 +1693,21 @@ static int wmo_kid_cmp_vardesc(const void *pa, const void *pb) {
   // ascending symbol code = DESCENDING var index (vars are negative in WM)
   return (a->sym.sym < b->sym.sym) ? 1 : (a->sym.sym > b->sym.sym ? -1 : 0);
 }
+// Insertion-sort of the var-children by DESCENDING sym.sym -- byte-identical
+// to the qsort above (a node's var children have DISTINCT symbols, so there
+// are no ties and the ordering is unique), but with no function-pointer
+// indirection.  This is the wmo_dfs hot path: on deep ifeq queries the var-
+// child sort ran per visited node (rank phase ~30% of cp-gen; the qsort
+// comparator was a top sampled leaf, same pattern prior work replaced in
+// the flatterm discrimination tree).  nv <= 32 so insertion sort wins.
+static inline void wmo_sort_vkids_vardesc(WmoKid *v, u32 n) {
+  for (u32 i = 1u; i < n; i++) {
+    WmoKid key = v[i];
+    u32 j = i;
+    while (j > 0u && v[j - 1u].sym.sym < key.sym.sym) { v[j] = v[j - 1u]; j--; }
+    v[j] = key;
+  }
+}
 
 static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
                     const WmoUnif *u, u32 depth_guard) {
@@ -1620,7 +1737,7 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
     for (u32 k = 0; k < n->n_kids && nv < 32u; k++) {
       if (n->kids[k].sym.is_var) vkids[nv++] = n->kids[k];
     }
-    if (nv > 1u) qsort(vkids, nv, sizeof(WmoKid), wmo_kid_cmp_vardesc);
+    if (nv > 1u) wmo_sort_vkids_vardesc(vkids, nv);
     u32 qe = wmo_sub_end(d->q, qi);
     for (u32 k = 0; k < nv; k++) {
       WmoUnif u2;
@@ -1638,7 +1755,7 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
     for (u32 k = 0; k < n->n_kids && nv < 32u; k++) {
       if (n->kids[k].sym.is_var) vkids[nv++] = n->kids[k];
     }
-    if (nv > 1u) qsort(vkids, nv, sizeof(WmoKid), wmo_kid_cmp_vardesc);
+    if (nv > 1u) wmo_sort_vkids_vardesc(vkids, nv);
     for (u32 k = 0; k < nv; k++) {
       WmoUnif u2;
       wmo_unif_copy(&u2, u);
@@ -1665,8 +1782,7 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
         for (WmoEntry *e2 = e->next; e2 != NULL; e2 = e2->next) {
           if (e2->ziel == e->ziel && e2->ziel_leaf == e->ziel_leaf &&
               e2->sub_len == e->sub_len &&
-              memcmp(e2->sub, e->sub,
-                     (size_t)e->sub_len * sizeof(WmoCell)) == 0) {
+              wmo_cells_eq(e2->sub, e->sub, e->sub_len)) {
             shadowed = 1u;
             break;
           }
@@ -1801,6 +1917,7 @@ static void atp_wmo_free(AtpWmOrder *w) {
   for (u32 t = 0; t < 2u; t++) wmo_free_subtree(w->tree[t].root, 0u);
   for (u32 r = 0; r < w->n_reg; r++) free(w->reg[r].cells);
   free(w->reg);
+  free(w->drx);
   for (u32 e = 0; e < WMO_RC_N; e++) free(w->rc[e].out);
   free(w);
 }
@@ -1947,6 +2064,17 @@ static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
   r->tree = tree;
   r->face = face;
   r->dist_rhs = dist_rhs;
+  if (trace >= w->drx_cap) {
+    u32 nc = w->drx_cap ? w->drx_cap : 4096u;
+    while (nc <= trace) nc *= 2u;
+    w->drx = (u8 *)realloc(w->drx, nc);
+    if (w->drx == NULL) thvm_fatal("wmo_register: drx OOM");
+    memset(w->drx + w->drx_cap, 0, nc - w->drx_cap);
+    w->drx_cap = nc;
+  }
+  if ((w->drx[trace] & 1u) == 0u) {
+    w->drx[trace] = (u8)(1u | ((dist_rhs & 1u) << 1));
+  }
   r->cells = (WmoCell *)malloc(n_cells * sizeof(WmoCell));
   memcpy(r->cells, cells, n_cells * sizeof(WmoCell));
   r->n_cells = n_cells;
@@ -1966,26 +2094,14 @@ static void wmo_register(AtpWmOrder *w, u32 trace, u8 tree, u8 face,
 // (0 = distinguished, 1 = reverse).  Returns 0 for an unregistered trace (orientable rules
 // and intake equations keep distinguished = lhs).
 static u8 wmo_trace_dist_rhs(AtpWmOrder *w, u32 trace) {
-  // Memo probe (see AtpWmOrder.drc): the registry is frozen while
-  // tree_rev holds, so a valid same-rev entry returns exactly what the
-  // scan below would recompute (including the unregistered-default 0).
-  struct WmoDrcEnt *e = NULL;
-  if (!w->no_rankcache) {
-    e = &w->drc[(trace * 2654435761u) & (WMO_DRC_N - 1u)];
-    if (e->valid && e->rev == w->tree_rev && e->trace == trace)
-      return e->dr;
+  // Exact map probe (see AtpWmOrder.drx): present -> the recorded first
+  // registration's dist_rhs, absent -> the unregistered default 0 --
+  // byte-for-byte the verdict of the historical registry scan.
+  if (trace < w->drx_cap) {
+    u8 b = w->drx[trace];
+    if (b & 1u) return (u8)(b >> 1);
   }
-  u8 dr = 0u;
-  for (u32 r = 0; r < w->n_reg; r++) {
-    if (w->reg[r].trace == trace) { dr = w->reg[r].dist_rhs; break; }
-  }
-  if (e != NULL) {
-    e->valid = 1u;
-    e->rev   = w->tree_rev;
-    e->trace = trace;
-    e->dr    = dr;
-  }
-  return dr;
+  return 0u;
 }
 
 // uid -> WM-distinguished-face label for the engine's face-aware
@@ -2067,11 +2183,31 @@ static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
   g_wmo_polier_after = w->polier_after;
   u32 trace = s->r_uid[slot];   // stable identity (r_trace is NONE past the proof-trace cap)
   WmoCell cells[WMO_MAX_CELLS];
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Mirror-sourced faces: bit-identical cells/depth/ground verdicts by
+  // the lockstep invariant, no rule-Term content read.  NULL mirrors
+  // (test harnesses writing s->lhs[] directly) keep the Term walk.
+  const struct AtpFtCell *lft = s->lhs_ft[slot];
+  const struct AtpFtCell *rft = s->rhs_ft[slot];
+#else
+  const void *lft = NULL;
+  const void *rft = NULL;
+#endif
   if (s->r_orient[slot]) {
-    u32 n = wmo_face_cells(s->lhs[slot], cells, WMO_MAX_CELLS);
+    u32 n;
+    u32 dep;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (lft != NULL) {
+      n   = wmo_face_cells_ft(lft, cells, WMO_MAX_CELLS);
+      dep = wmo_term_depth_ft(lft);
+    } else
+#endif
+    {
+      n   = wmo_face_cells(s->lhs[slot], cells, WMO_MAX_CELLS);
+      dep = wmo_term_depth(s->lhs[slot]);
+    }
     if (n == 0u) return;
-    wmo_register(w, trace, 0u, 0u, cells, n, wmo_term_depth(s->lhs[slot]),
-                 0u);
+    wmo_register(w, trace, 0u, 0u, cells, n, dep, 0u);
     return;
   }
   u8 mono = atp_eq_is_mono(s, slot);
@@ -2079,8 +2215,19 @@ static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
   if (cp_derived && !mono) {
     // Ground-side override (see header): exactly one side ground -> WM's
     // distinguished face is the ground side.
-    u8 lhs_ground = wmo_term_is_ground(s->lhs[slot]);
-    u8 rhs_ground = wmo_term_is_ground(s->rhs[slot]);
+    u8 lhs_ground, rhs_ground;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (lft != NULL && rft != NULL) {
+      lhs_ground = (u8)((((const struct AtpFtCell *)lft)->flags &
+                         ATPFT_FLAG_GROUND) != 0u);
+      rhs_ground = (u8)((((const struct AtpFtCell *)rft)->flags &
+                         ATPFT_FLAG_GROUND) != 0u);
+    } else
+#endif
+    {
+      lhs_ground = wmo_term_is_ground(s->lhs[slot]);
+      rhs_ground = wmo_term_is_ground(s->rhs[slot]);
+    }
     if (lhs_ground != rhs_ground) {
       dist_rhs = rhs_ground ? 1u : 0u;
     }
@@ -2113,6 +2260,30 @@ static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
     // lookup keys on WM-face = thvm-dir XOR dist_rhs), so the rank is
     // byte-identical to the prior dist-first registration; only the physical
     // tree exit order moves to WM's.  See AtpState.use_wmo_insert_lr.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (lft != NULL && rft != NULL) {
+      // Mirror-sourced equation faces (verdicts and cells bit-identical
+      // to the Term walks by the lockstep invariant).
+      u8 lhs_is_l =
+          (atp_lr_sortieren_rec_ft(lft, rft) <= 0) ? 1u : 0u;
+      const struct AtpFtCell *first_ft  = lhs_is_l ? lft : rft;
+      const struct AtpFtCell *second_ft = lhs_is_l ? rft : lft;
+      u8 first_face  = lhs_is_l ? dist_rhs : (u8)(dist_rhs ^ 1u);
+      u8 second_face = (u8)(first_face ^ 1u);
+      u32 n = wmo_face_cells_ft(first_ft, cells, WMO_MAX_CELLS);
+      if (n == 0u) return;
+      wmo_register(w, trace, 1u, first_face, cells, n,
+                   wmo_term_depth_ft(first_ft), dist_rhs);
+      if (!mono) {
+        u32 n2 = wmo_face_cells_ft(second_ft, cells, WMO_MAX_CELLS);
+        if (n2 != 0u) {
+          wmo_register(w, trace, 1u, second_face, cells, n2,
+                       wmo_term_depth_ft(second_ft), dist_rhs);
+        }
+      }
+      return;
+    }
+#endif
     Term lhs_face = s->lhs[slot];
     Term rhs_face = s->rhs[slot];
     // atp_lr_sortieren_rec(a,b) > 0 means a is Groesser (should be the rhs);
@@ -2140,6 +2311,24 @@ static void atp_wmo_insert_fact_ex(AtpState *s, u32 slot, u8 cp_derived) {
     }
     return;
   }
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (lft != NULL && rft != NULL) {
+    const struct AtpFtCell *dist_ft = dist_rhs ? rft : lft;
+    const struct AtpFtCell *rev_ft  = dist_rhs ? lft : rft;
+    u32 nf = wmo_face_cells_ft(dist_ft, cells, WMO_MAX_CELLS);
+    if (nf == 0u) return;
+    wmo_register(w, trace, 1u, 0u, cells, nf, wmo_term_depth_ft(dist_ft),
+                 dist_rhs);
+    if (!mono) {
+      u32 nf2 = wmo_face_cells_ft(rev_ft, cells, WMO_MAX_CELLS);
+      if (nf2 != 0u) {
+        wmo_register(w, trace, 1u, 1u, cells, nf2,
+                     wmo_term_depth_ft(rev_ft), dist_rhs);
+      }
+    }
+    return;
+  }
+#endif
   Term dist = dist_rhs ? s->rhs[slot] : s->lhs[slot];
   Term rev  = dist_rhs ? s->lhs[slot] : s->rhs[slot];
   u32 n = wmo_face_cells(dist, cells, WMO_MAX_CELLS);
@@ -2336,6 +2525,14 @@ static void wmo_dump_tree(AtpWmOrder *w, u8 tree, const char *label) {
 }
 
 static void atp_wmo_remove_trace(AtpState *s, u32 trace) {
+  // Env-gated eviction trace (THVM_ATP_WMO_DEL_TRACE): one line per
+  // tree eviction with the victim uid and the live rule count, so a
+  // divergent parent-liveness timeline vs WM can be read directly.
+  {
+    static int dt = -1;
+    if (dt < 0) dt = (getenv("THVM_ATP_WMO_DEL_TRACE") != NULL) ? 1 : 0;
+    if (dt) fprintf(stderr, "WMODEL uid=%u n_rules=%u\n", trace, s->n_rules);
+  }
   AtpWmOrder *w = (AtpWmOrder *)s->wmo;
   if (w == NULL) return;
   static int wmo_dump = -1;
@@ -2378,6 +2575,9 @@ static void atp_wmo_remove_trace(AtpState *s, u32 trace) {
       r++;
     }
   }
+  // The loop above evicted EVERY entry of `trace` -- return the exact
+  // dist_rhs map to absent (the unregistered default 0).
+  if (trace < w->drx_cap) w->drx[trace] = 0u;
 }
 
 // ---------- order-mirror rank queries ----------
@@ -2472,9 +2672,23 @@ static u8 atp_wmo_eq_leaflist_rank(AtpState *s, u32 trace, u8 thvm_dir,
 // identically, and callers only read out[0..n_out).
 u64 g_atp_wmo_rc_hit  = 0;
 u64 g_atp_wmo_rc_miss = 0;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Span-query override: when set, the DFS fill takes its query cells
+// from this span instead of the Term (bit-identical cells, same rank
+// cache, same DFS) -- the sweep visitors use it so a lazy rule's
+// sentinel Term never has to materialize for partner retrieval.
+static const struct AtpFtCell *g_wmo_query_ft = NULL;
+#endif
 static u32 wmo_tops_dfs_fill(AtpWmOrder *w, u8 tree, Term query_sub,
                              WmoCell *q, WmoDfs *d) {
-  u32 qn = wmo_face_cells(query_sub, q, WMO_MAX_CELLS);
+  u32 qn;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (g_wmo_query_ft != NULL) {
+    qn = wmo_face_cells_ft(g_wmo_query_ft, q, WMO_MAX_CELLS);
+    g_wmo_query_ft = NULL;   // consume-once: other fills stay Term-keyed
+  } else
+#endif
+  qn = wmo_face_cells(query_sub, q, WMO_MAX_CELLS);
   if (qn == 0u) return 0u;
   u32 rc_hit = WMO_RC_N;
   if (!w->no_rankcache) {
@@ -2482,7 +2696,7 @@ static u32 wmo_tops_dfs_fill(AtpWmOrder *w, u8 tree, Term query_sub,
       WmoRankCacheEnt *re = &w->rc[e];
       if (re->valid && re->rev == w->tree_rev && re->tree == tree &&
           re->qn == qn &&
-          memcmp(re->q, q, (size_t)qn * sizeof(WmoCell)) == 0) {
+          wmo_cells_eq(re->q, q, qn)) {
         rc_hit = e;
         break;
       }

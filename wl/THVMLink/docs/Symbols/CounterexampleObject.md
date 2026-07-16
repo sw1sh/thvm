@@ -26,7 +26,6 @@ It renders as a summary box and supports a property interface `co[*prop*]`.
 Refute a non-theorem and read its falsification function:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 co = TFindProof[g[a] == a, {ForAll[{x}, g[g[x]] == x]}, "Counterexample"];
 co["FalsificationFunction"]
 ```
@@ -37,7 +36,6 @@ co["FalsificationFunction"]
 The refuting model in [FindFiniteModels]() form:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TFindProof[a == c, {a == b}, "Counterexample"]["Model"]
 ```
 <!-- => <|a -> 0, b -> 0, c -> 1, ...|> (operators to Cayley tables, constants to elements) -->

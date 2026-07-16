@@ -1,0 +1,9 @@
+#!/bin/sh
+# ProoVer / StarExec run script.  $1 = a first-order TSTP proof file.
+# CheckProof validates every derived step of the proof and prints one
+# SZS verdict (VerifiedGood / VerifiedBad / Unknown).  The per-proof
+# wall-clock limit is taken from the StarExec environment.
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+LIMIT=${STAREXEC_WALLCLOCK_LIMIT:-30}
+THVM_PROOFCHECK_WALL="$LIMIT"; export THVM_PROOFCHECK_WALL
+exec "$HERE/bin/CheckProof" --szs "$1"

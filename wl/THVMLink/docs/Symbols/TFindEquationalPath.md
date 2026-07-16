@@ -38,7 +38,6 @@ RelatedGuides: [THVMLink]
 A one-sided associativity rule and the path that fully right-associates a product:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TFindEquationalPath[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -51,7 +50,6 @@ TFindEquationalPath[
 The path can be recovered from a `ProofObject` you already hold; the single-argument form re-walks its proof dataset:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 p = TFindProof[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -65,7 +63,6 @@ TFindEquationalPath[p]
 `All` returns every property of the path as one Association - the path plus the full provenance of each step:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 Keys @ TFindEquationalPath[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -78,7 +75,6 @@ Keys @ TFindEquationalPath[
 `"Rewrites"` gives the concrete replacement applied at each step; applying them in sequence reconstructs the path:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TFindEquationalPath[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -91,7 +87,6 @@ TFindEquationalPath[
 `"Justification"` names the lemma, orientation, and position of each rewrite:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TFindEquationalPath[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -104,7 +99,6 @@ TFindEquationalPath[
 With one-sided axioms the path is a genuine forward replacement chain: every consecutive pair is a legal left-to-right application of the rule, which [ReplaceList]() confirms:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 path = TFindEquationalPath[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -118,7 +112,6 @@ And @@ (MemberQ[ReplaceList[#[[1]], (x_ \[CircleTimes] y_) \[CircleTimes] z_ :> 
 Equational provability is symmetric, so a goal stated against the reduction *does* still prove (the sides are joinable) - the path simply traverses the chain in reverse. For a forward replacement chain, state the goal *source* `->` *target* with *source* the term you start from. An unproved goal returns `$Failed`:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TFindEquationalPath[
     ForAll[{a, b}, a \[CircleTimes] b == b \[CircleTimes] a],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},

@@ -589,16 +589,26 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     useCriticalGoalInterreduce_, useCriticalGoalWeight_,
     useBackwardGoalArgue_, useCpWmSide_, useWmFlatSubsume_,
     useWmCommSubsume_, useWmFormationFifo_,
-    useWmEsetDistdir_, useTracePack_, useForceCombinatorOrient_] := Block[{
+    useWmEsetDistdir_, useTracePack_, useForceCombinatorOrient_,
+    useSimplerJoin_, useEncompassDemod_, useGoalNarrow_,
+    cpSetIrBudget_, usePopRulesOnly_, useGjDeleteRule_,
+    useFullInterreduce_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr,
+    flattenLabels,
     (* restore the caller's held originals during this build's decoding *)
     $atpSymObj = Lookup[enc["State"], "symObj", <||>],
     $atpVarObj = Lookup[enc["State"], "varObj", <||>]
 },
     precArray = atpPrecedenceArray[precedenceSpec, enc];
     symbolWeightsArr = atpSymbolWeightsArray[symbolWeightsSpec, enc];
+    (* "FlattenGoal" fresh-constant labels (inner-first) for the C
+       bridge's minimal precedence band (args[65]); the problem
+       transform (atpFlattenGoalTransform) stamps them on the enc.
+       Empty = inert. *)
+    flattenLabels = Replace[Lookup[enc, "FlattenFreshLabels", {}],
+        Except[{___Integer}] -> {}];
     {$atpSplitT, raw} = AbsoluteTiming @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
@@ -613,7 +623,10 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         useSueManagement, useCriticalGoalInterreduce,
         useCriticalGoalWeight, useBackwardGoalArgue, useCpWmSide,
         useWmFlatSubsume, useWmCommSubsume, useWmFormationFifo,
-        useWmEsetDistdir, useTracePack, useForceCombinatorOrient];
+        useWmEsetDistdir, useTracePack, useForceCombinatorOrient,
+        useSimplerJoin, useEncompassDemod, useGoalNarrow,
+        cpSetIrBudget, usePopRulesOnly, useGjDeleteRule,
+        useFullInterreduce, flattenLabels];
     If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
         Print["[split] C solve + trace-gen = ", $atpSplitT,
               " s  (WL reconstruction = total wall - this)"]];
@@ -1578,7 +1591,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            combination reproduces `cpEq` (e.g. a position truncated past
            CP_MAX_DEPTH), in which case the caller bridges with emitNorm. *)
         chooseCpGeometry[aInfo_, ruleAEq_, bInfo_, ruleBEq_, pos_, cpEq_] :=
-            Block[{cands, hit},
+            Block[{cands, hit = Missing[], hitRev = Missing[], stRev},
                 cands = Flatten[
                     Table[
                         {role[[1]], role[[2]], role[[3]], role[[4]], cFace, mFace},
@@ -1586,16 +1599,35 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         {cFace, {Identity, Reverse}},
                         {mFace, {Identity, Reverse}}],
                     2];
-                hit = SelectFirst[cands,
-                    cand |-> With[{r = cplReconCp[cand[[5]][cand[[2]]], cand[[6]][cand[[4]]], pos, varSyms]},
-                        ListQ[r] && cplEqSetQ[r, cpEq, varSyms]]];
+                (* The verifier replays the geometry into cplReconCp's
+                   ORDERED (construct-rhs, rewritten-peak) pair and
+                   compares === against the Statement, so an ordered
+                   match wins outright; a candidate reproducing only the
+                   SWAPPED order is kept as fallback -- the caller then
+                   emits the Statement in the reconstruction's order
+                   (StatementReversed), or the verifier would replay a
+                   side-swapped equation and reject the row.  (The
+                   definitional-constant CPs of "FlattenGoal" hit the
+                   swapped case: the engine's stored pair order follows
+                   which parent rewrote the peak.) *)
+                Do[ With[{r = cplReconCp[cand[[5]][cand[[2]]], cand[[6]][cand[[4]]], pos, varSyms]},
+                        If[ ListQ[r],
+                            Which[
+                                cplCanonVars[r, varSyms] === cplCanonVars[cpEq, varSyms],
+                                    hit = cand; Break[],
+                                MissingQ[hitRev] && cplCanonVars[r, varSyms] === cplCanonVars[Reverse[cpEq], varSyms],
+                                    hitRev = cand]]],
+                    {cand, cands}];
+                stRev = MissingQ[hit];
+                If[ stRev, hit = hitRev];
                 If[MissingQ[hit], Return[Missing[]]];
                 <|"Construct" -> hit[[1]]["Key"],
                   "ConstructInfo" -> hit[[1]],
                   "ConstructEq" -> hit[[5]][hit[[2]]],
                   "Matching" -> hit[[3]]["Key"],
                   "MatchingInfo" -> hit[[3]],
-                  "MatchingEq" -> hit[[6]][hit[[4]]]|>
+                  "MatchingEq" -> hit[[6]][hit[[4]]],
+                  "StatementReversed" -> stRev|>
             ];
 
         (* emit a CriticalPairLemma for the TRACE_CP at trace index
@@ -1740,6 +1772,13 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         resA]]]];
             cEq = geom["ConstructEq"];
             mEq = geom["MatchingEq"];
+            (* The chosen geometry replays into cplReconCp's ordered
+               pair; when only the SWAPPED order reproduces the stored
+               CP (StatementReversed), emit the Statement -- and this
+               entry's Eq, which drives descendant NORM_STEP side
+               mapping -- in the reconstruction's order, i.e. the C
+               engine's native (lhs, rhs); Swapped flips accordingly. *)
+            If[ TrueQ[geom["StatementReversed"]], cpEq = Reverse[cpEq]];
             cpN++;
             key = {"CriticalPairLemma", cpN};
             entryTi[key] = {ti, 0};
@@ -1760,7 +1799,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 |>
             |>];
             canonInfo[canonKeyOf[cpEq]] = <|"Key" -> key, "Eq" -> cpEq|>;
-            <|"Key" -> key, "Eq" -> cpEq, "Swapped" -> True|>
+            <|"Key" -> key, "Eq" -> cpEq,
+              "Swapped" -> ! TrueQ[geom["StatementReversed"]]|>
         ];
 
         (* resolve trace index ti to <|Key, Eq, Swapped|>, emitting

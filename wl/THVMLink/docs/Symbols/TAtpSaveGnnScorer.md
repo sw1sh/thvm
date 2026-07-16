@@ -23,12 +23,10 @@ RelatedGuides: [THVMLink]
 Save a trained model to a temporary file:
 
 ```wl
-#| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
 TAtpSaveGnnScorer[model, FileNameJoin[{$TemporaryDirectory, "gcn.safetensors"}]]
 ```
-<!-- => the saved file path -->
+<!-- => the path under $TemporaryDirectory, ending gcn.safetensors -->
 
 ## Properties & Relations
 

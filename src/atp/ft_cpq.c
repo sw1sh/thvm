@@ -15,8 +15,10 @@
 //   - atp_cp_ft_set                 -- write a fresh entry (allocates
 //                                      the two FT spans from Arena A)
 //   - atp_cp_ft_clear               -- free a slot's FT spans
-//   - atp_cp_ft_swap                -- pointer swap, matches the heap
-//                                      swap on the legacy arrays
+//   - atp_cp_ft_move                -- row backfill / densify move
+//                                      (heap sifts swap only the
+//                                      cp_heap/cp_pos position mirror
+//                                      in _.c, so entries never swap)
 //   - atp_cp_ft_transfer            -- ownership move (queue -> rule)
 //   - atp_cp_trivially_joinable_ft  -- ft_eq verdict on FT cells
 //                                      (NORM-fixpoint via existing
@@ -144,6 +146,33 @@ static u32 atp_cp_ft_set(AtpState *s, u32 i, Term lhs, Term rhs,
   return e->size;
 }
 
+// --- Slot adopt (transfer already-built FT spans) --------------------
+//
+// Sibling of atp_cp_ft_set that ADOPTS two ready FT spans instead of
+// rebuilding them from Terms via ft_from_term.  The generation-time
+// fuse (vcp treat) already normalized the CP's two sides to their NF
+// cells for the joinability verdict; on survival those very cells ARE
+// the queued CP (lhs/rhs passed to the classic path are ft_to_term of
+// them by construction).  Adopting them skips the ft_from_term rebuild
+// -- the push-side half of the byte-queue-retirement speedup.  The
+// caller must relinquish ownership (NULL its handles) so the spans are
+// not double-freed by the fuse cleanup.
+static u32 atp_cp_ft_adopt(AtpState *s, u32 i, AtpFtCell *fl, AtpFtCell *fr,
+                           u32 priority_hint, u32 origin_rule) {
+  (void)s;
+  u32 ln = ft_node_count(fl);
+  u32 rn = ft_node_count(fr);
+  AtpCpEntry *e = &((AtpCpEntry *)s->cp_packed_ft)[i];
+  e->lhs = fl;
+  e->rhs = fr;
+  e->size = ln + rn;
+  e->weight = e->size;
+  e->priority = (u16)(priority_hint > 0xffffu ? 0xffffu : priority_hint);
+  e->origin_rule = (u16)(origin_rule > 0xffffu ? 0xffffu : origin_rule);
+  e->_pad = 0u;
+  return e->size;
+}
+
 // --- Slot clear (free FT spans) -------------------------------------
 //
 // Returns both FT spans to Arena A's free list and zeros the entry so
@@ -163,17 +192,9 @@ static void atp_cp_ft_clear(AtpState *s, u32 i) {
   e->origin_rule = 0xffffu;
 }
 
-// --- Slot swap (heap sift) -------------------------------------------
-//
-// Pointer swap; the entry's FT spans do not move so any borrow into
-// them (none today, but Stages 8-9 will index off the cells) stays
-// valid.
-static void atp_cp_ft_swap(AtpState *s, u32 i, u32 j) {
-  AtpCpEntry *arr = (AtpCpEntry *)s->cp_packed_ft;
-  AtpCpEntry t = arr[i];
-  arr[i] = arr[j];
-  arr[j] = t;
-}
+// (No slot-swap helper: heap sifts swap only the cp_heap/cp_pos
+// position mirror in _.c, so FT entries stay on their stationary rows
+// and any borrow into their spans stays valid a fortiori.)
 
 // --- Slot transfer (queue -> rule) -----------------------------------
 //
@@ -241,6 +262,16 @@ static u8 atp_cp_trivially_joinable_ft(AtpState *s,
   PUSHN_TICK(g_atp_pushn_us_norm);
   u8 joined = (u8)ft_eq(l, r);
   PUSHN_TICK(g_atp_pushn_us_eq);
+  // Simpler-join second chance (opt-in --simpler-join): distinct doR
+  // NFs get the Twee-discipline gated R+E join pass
+  // (atp_cp_sj_joinable_ft, ft_norm.c).  Verdict-only: *lhs/*rhs keep
+  // the doR NFs, so a kept CP queues exactly what the default queues.
+  // Mode 2 (pop-only) skips this generation-time arm.
+  if (!joined && s->use_simpler_join == 1u) {
+    joined = atp_cp_sj_joinable_ft(s, l, r);
+    if (joined) s->n_cps_dropped_simpler_join++;
+    PUSHN_TICK(g_atp_pushn_us_norm);
+  }
   return joined;
 #undef PUSHN_TICK
 }
@@ -262,6 +293,21 @@ static void atp_cp_ft_move(AtpState *s, u32 dst, u32 src) {
   arr[src].priority = 0u;
   arr[src].origin_rule = 0xffffu;
   arr[src]._pad = 0u;
+}
+
+// --- Slot read (borrow FT spans) -------------------------------------
+//
+// Hand back the two Arena-A FT spans a populated packed slot owns.
+// The pointers BORROW the entry's spans -- valid until the slot is
+// cleared / popped / moved.  This is the sole read path for the
+// byte-queue-retirement re-key: atp_cp_slot_read converts them to
+// heap Terms (ft_to_term), and the pop-norm fast path can normalize
+// them FT-directly (no ft_from_term round-trip).
+static void atp_cp_ft_slot_get(const AtpState *s, u32 i,
+                               AtpFtCell **lhs, AtpFtCell **rhs) {
+  const AtpCpEntry *e = &((const AtpCpEntry *)s->cp_packed_ft)[i];
+  if (lhs) *lhs = e->lhs;
+  if (rhs) *rhs = e->rhs;
 }
 
 // --- API surface (cross-TU within _.c) -------------------------------

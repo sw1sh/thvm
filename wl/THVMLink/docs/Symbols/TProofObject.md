@@ -28,7 +28,6 @@ RelatedGuides: [THVMLink]
 Ask [TFindProof]() for a native proof object:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 TFindProof[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -41,7 +40,6 @@ TFindProof[
 The property accessors mirror the built-in `ProofObject`:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 p = TFindProof[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -55,7 +53,6 @@ p = TFindProof[
 The keyed proof DAG is available as the `"ProofAssociation"`:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 p = TFindProof[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -69,7 +66,6 @@ Keys @ p["ProofAssociation"]
 The proof verifies through the same `ProofFunction` interface a built-in `ProofObject` exposes:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 p = TFindProof[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -83,7 +79,6 @@ p["ProofFunction"][p["Theorems"]]
 [TToProofObject]() converts back to the built-in `ProofObject`:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 p = TFindProof[
     ForAll[{a, b, c, d}, ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d))],
     {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
@@ -97,7 +92,6 @@ Head @ TToProofObject[p]
 `"ProofForm"` defaults to `"ProofObject"`, so existing code is unaffected; you opt in to the native object explicitly:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
 Head @ TFindProof[
     ForAll[{a, b}, a \[CircleTimes] b == b \[CircleTimes] a],
     "AbelianGroupAxioms", TimeConstraint -> 10]

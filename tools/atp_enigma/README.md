@@ -2,12 +2,34 @@
 
 Tooling for the ATP machine-learned guidance roadmap
 ([docs/plans/atp_ml_roadmap.md](../../docs/plans/atp_ml_roadmap.md)): build a
-proof corpus, train the Tier-2 GNN proof-relevance scorer, and measure
-GNN-guided critical-pair reranking.
+proof corpus, train the Tier-2 GNN (Graph Neural Network) proof-relevance
+scorer, and measure GNN-guided critical-pair reranking.
 
-Everything runs through `wl -t SEC -f script` (the fast WL CLI, `-t` self-kills
-its kernel on timeout so a runaway leaves no orphan), one job at a time, so a
-diverging or memory-heavy proof cannot accumulate kernels and pressure the host.
+The WL scripts below run through `wl -t SEC -f script` (the fast WL CLI, `-t`
+self-kills its kernel on timeout so a runaway leaves no orphan), one job at a
+time, so a diverging or memory-heavy proof cannot accumulate kernels and
+pressure the host.
+
+## Dataset sources
+
+Three complementary sources feed the training corpus:
+
+1. **AxiomaticTheory / TPTP graph datasets** -- the WL scripts below
+   (`prove_theory.wls`, `tptp_build.sh`) emit labelled CP-graph `.wxf`
+   files under `$ATP_DATA`.
+2. **C-side labelled feature TSVs** -- `THVM_ATP_ENIGMA_EXPORT=<path.tsv>`
+   on any engine run (`bin/FindProof` or the bench binaries) records the
+   14 hand features of every processed critical pair and, when the run
+   PROVES, labels them by proof-DAG reachability (positives = CPs on the
+   proof) and appends one labelled row per CP to the TSV.  Verified
+   2026-07-16: a LAT171-1 run appends ~50k rows under a
+   `label + 14-feature` header.
+3. **The CASC proof corpus** -- `~/.cache/thvm/casc/enigma_dataset/`
+   holds the harvested competition sweeps (as of 2026-07-16): 824
+   winning proofs (`casc29_proofs/` 276, `casc30_proofs/` 276,
+   `cascJ12_proofs/` 272) plus per-problem CP-feature TSVs
+   (`*_features/`, one per solved problem, tagged with the winning
+   schedule slice) and the merged `ds_casc*.tgz` bundles.
 
 ## Environment
 
@@ -29,6 +51,8 @@ diverging or memory-heavy proof cannot accumulate kernels and pressure the host.
 | `loop_measure.wls <scorer> <period> <maxSteps> <out>` | A/B solved-within-budget, rerank on vs off |
 | `loop_timed.wls <period> <maxSteps>` | timed A/B (wall + solved) on a fixed theorem set |
 | `rss_probe.wls` | peak-RSS probe of the minibatched big-model train (issue #8) |
+| `eval_heldout.wls` | held-out scoring of a trained scorer |
+| `edge_typed_eval.wls` | edge-typed GNN variant evaluation |
 
 `period 1e9` in the measure scripts effectively disables reranking (baseline).
 

@@ -5,6 +5,16 @@
 fn void cuda_buf_free(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return;
   CudaBuf *b = &CUDA_BUFS[buf_id];
+  // A jit-pinned buffer reaching the hard-free path is an anomaly worth a
+  // trace: every sweep (pool rollback, fwd-reclaim, freelist push) skips
+  // pinned bufs, so the only route here is a refcount-driven decref -- which
+  // bypasses the pin and dangles whatever holds the buf resident (the JIT
+  // capture record, the weight-move cache).  Gated on THVM_WM_TRACE so
+  // steady-state runs stay silent; the trace names the free preceding a UAF.
+  if (b->jit_pinned && b->dptr != 0 && getenv("THVM_WM_TRACE") != NULL) {
+    fprintf(stderr, "cuda_buf_free: freeing JIT-PINNED buf %u (%llu bytes)\n",
+            buf_id, (unsigned long long)b->nbytes);
+  }
   // Snapshot parent BEFORE we zero the slot.  Arena views (non-owning
   // bufs pointing into a parent arena CudaBuf) must drop their parent
   // ref no matter which code path frees them -- pool_rollback's direct

@@ -1,0 +1,14 @@
+% ProoVer 2026 -- CheckProof sample solutions
+% Produced by:  CheckProof --szs <proof>.s
+% Run on the official sample set: proover-competition.github.io/assets/samples.tgz
+%------------------------------------------------------------------------------
+% Sample solution for COR000+1
+% SZS status VerifiedGood for COR000+1.s
+%------------------------------------------------------------------------------
+% Sample solution for TMO000+1
+% SZS status Unknown for TMO000+1.s
+%------------------------------------------------------------------------------
+% Sample solution for EVL000+1
+% SZS status VerifiedBad for EVL000+1.s
+% bad step: s1 (not the negation of the conjecture)
+%------------------------------------------------------------------------------

@@ -22,12 +22,10 @@ RelatedGuides: [THVMLink]
 Load the bundled pretrained scorer and read its config:
 
 ```wl
-#| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
 model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
 {model["Rounds"], model["Hidden"]}
 ```
-<!-- => {<rounds>, <hidden>} - the trained GCN's config -->
+<!-- => {2, 8} - the trained GCN's message-passing depth and width -->
 
 ## Properties & Relations
 

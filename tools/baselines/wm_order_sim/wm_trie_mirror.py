@@ -251,12 +251,17 @@ class WmTrie:
             # Middle-leaf removal (BO_ObjektEntfernen :1043-1046,
             # SprunglistenBereinigenEinfach against the parent's smallest-symbol
             # child).  No path-shrink, but the surviving smallest-symbol leaf
-            # `minc` (the most-recently-introduced variable child = a fresh hang
-            # whose ancestor jumps were head-prepended) must restore the
-            # AltesBlattPolieren parallel order against the OTHER surviving leaf
-            # siblings: in WM that fresh leaf arose as a split of a sibling's
-            # Sprung-compressed leaf, so each ancestor jump was spliced AFTER the
-            # sibling's own jump (:521-525, "hinter den Eintrag setzen").
+            # `minc` -- when it is the most-recently-born surviving leaf child
+            # (a fresh hang whose ancestor jumps were head-prepended over the
+            # older siblings') -- must restore the AltesBlattPolieren parallel
+            # order against the OTHER surviving leaf siblings: in WM that fresh
+            # leaf arose as a split of a sibling's Sprung-compressed leaf, so
+            # each ancestor jump was spliced AFTER the sibling's own jump
+            # (:521-525, "hinter den Eintrag setzen").  Gate on minc being the
+            # newest-born leaf kid (the same chain[0] birth-order discipline as
+            # the collapse multi-model re-issue below): WM's cleanup never
+            # reorders surviving Sprungausgaenge, so an OLDER minc ahead of a
+            # newer sibling is already WM's after-splice order and stays put.
             leaves = [(s, c) for s, c in parent.children.items()
                       if isinstance(c, TLeaf)]
             removed_sym = leaf.pedge
@@ -271,13 +276,15 @@ class WmTrie:
                 # NachbarBlatt = smallest WM symbol = largest mirror var id.
                 minc = max(leaves, key=lambda sc: sc[0][1])[1]
                 sib_leaves = [c for _, c in leaves if c is not minc]
+                minc_age = minc.chain[0][0]
+                minc_newest = all(c.chain[0][0] < minc_age for c in sib_leaves)
 
                 def _sp(a, b):
                     k = 0
                     while k < len(a) and k < len(b) and a[k] == b[k]:
                         k += 1
                     return k
-                for nn in self._all_nodes():
+                for nn in (self._all_nodes() if minc_newest else []):
                     minc_js = [e for e in nn.exits if e.ziel is minc]
                     if len(minc_js) != 1:
                         continue

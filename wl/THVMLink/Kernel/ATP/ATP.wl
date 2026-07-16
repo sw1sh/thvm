@@ -70,7 +70,7 @@ Argument order is conjecture-first (matching FindEquationalProof); TATP is the a
 An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\", \"TPTP\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved. \"TPTP\" renders the proof as an SZS-wrapped TPTP CNFRefutation string -- the CASC output format -- for File / TPTP-string input.
 \"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
 \"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
-Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"FormationFifo\", \"EsetDistdir\", \"TracePack\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
+Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"FormationFifo\", \"EsetDistdir\", \"TracePack\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\", \"SimplerJoin\", \"EncompassDemod\", \"GoalNarrow\", \"CPSetIRBudget\", \"PopRulesOnly\", \"GjDeleteRule\", \"FullInterreduce\", \"FlattenGoal\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
 
@@ -399,7 +399,39 @@ $atpRunProofFn := $atpRunProofFn = load[
         axioms + Y fixpoints, so non-combinator theorems are byte-identical.
         -1 = off (default), 0 = off, 1 = on.  ON in the "Waldmeister"*
         presets) *)
-          Integer},
+          Integer,
+     (* args[58..64] = CLI-parity engine knobs (the FindProof KNOBS[]
+        rows that were env-only).  Each is TRI-STATE: -1 = Automatic
+        (leave thvm_atp_init's default, which already honors the
+        matching THVM_ATP_* env), 0 = force off, positive = force on.
+        args[58] = Twee simplerThan-gated CP join (Method "SimplerJoin";
+        1 = generation + selection, 2 = selection-only) *)
+     Integer,
+     (* args[59] = Twee reducesSkolem encompassment demodulation
+        (Method "EncompassDemod") *)
+     Integer,
+     (* args[60] = ground-CC + goal-cone e-match endgame (Method
+        "GoalNarrow"; src/atp/goal_narrow.c) *)
+     Integer,
+     (* args[61] = Twee renormalise task budget %, swaps the CP-set IR
+        sweep's rule-count period for the time-budget discipline
+        (Method "CPSetIRBudget"; pair with "CPSetInterreduce" -> True) *)
+     Integer,
+     (* args[62] = Twee pop-join base discipline: pop-time normalize is
+        oriented-rules-only, no ungated doE (Method "PopRulesOnly") *)
+     Integer,
+     (* args[63] = Twee interreduce1 rule-delete port (Method
+        "GjDeleteRule") *)
+     Integer,
+     (* args[64] = Twee full-R interreduction port (Method
+        "FullInterreduce") *)
+     Integer,
+     (* args[65] = "FlattenGoal" fresh-constant labels (inner-first
+        collection order) for the minimal precedence band -- the WL
+        problem transform (atpFlattenGoalTransform) appends the
+        definitional axioms and cEngineProof resolves the fresh names
+        to labels here; empty = inert *)
+     {Integer, 1}},
     "NumericArray"
 ]
 
@@ -1002,6 +1034,10 @@ atpCpGraphDecode[raw_List] := Module[{
    attach the per-node "Symbols" list -- the un-anonymised identity that
    makes TAtpCpGraphEquation an exact inverse. *)
 atpCpGraphFromSides[{lhsHC_HoldComplete, rhsHC_HoldComplete}] := Module[{st = encodeAtpTermInit[], lr, rr, lt, rt, fin, symInv, varInv, g},
+    (* encodeAtpTerm writes heap terms through $termNewCtrFn, so the
+       runtime must be up -- TAtpCpGraph is reachable on a fresh kernel
+       (unlike the TFindProof path, which inits in atpEncodeProblem). *)
+    ensureInit[];
     lr = encodeAtpTerm[lhsHC[[1]], st];
     rr = encodeAtpTerm[rhsHC[[1]], lr[[2]]];
     lt = lr[[1]];
@@ -2726,6 +2762,71 @@ atpBwdSubsumeOpt[o_Association] :=
 atpBwdDemodOpt[o_Association] :=
     Switch[Lookup[o, "BackwardDemod", Automatic],
         True, 1, False | Automatic, 0, _, 0];
+
+(* === CLI-parity engine knobs ======================================
+   The FindProof CLI's KNOBS[] rows that were env-only until 2026-07:
+   each decodes TRI-STATE (-1 = Automatic = leave the engine default,
+   which already honors the matching THVM_ATP_* env var; 0 = force
+   off; positive = force on) so an unset suboption keeps the engine
+   byte-identical AND env-driven CLI-parity runs keep working through
+   the WL bridge.  args[58..64] of $atpRunProofFn. === *)
+
+(* "SimplerJoin" -> True | 2 | False: Twee's simplerThan-gated CP join
+   discipline (Twee Join.hs allSteps; CLI --simpler-join / env
+   THVM_ATP_SIMPLER_JOIN).  True = generation-time treatment AND
+   selection; 2 = selection-only (Twee's own placement -- consider
+   runs at dequeue), skipping the per-generated-CP push tax.  Every
+   unorientable-equation rewrite in the join verdict runs behind the
+   simplerThan gate, so proof-critical lemmas a comm-heavy ungated
+   doE join would delete stay live.  Compose with "PopRulesOnly" for
+   the full Twee verdict. *)
+atpSimplerJoinOpt[o_Association] := Switch[Lookup[o, "SimplerJoin", Automatic],
+    True | 1, 1, 2, 2, False, 0, _, -1];
+(* "EncompassDemod" -> True: Twee's reducesSkolem encompassment
+   demodulation -- an unorientable skolem-ground equation may rewrite
+   left-to-right at positions where the redex STRICTLY ENCOMPASSES the
+   LHS (CLI --encompass-demod / env THVM_ATP_ENCOMPASS; thvm.h
+   use_encompass_demod). *)
+atpEncompassDemodOpt[o_Association] := Switch[Lookup[o, "EncompassDemod", Automatic],
+    True, 1, False, 0, _, -1];
+(* "GoalNarrow" -> True: ground-congruence-closure + goal-cone
+   e-matching endgame (src/atp/goal_narrow.c; CLI --goal-narrow / env
+   THVM_ATP_GOAL_NARROW).  Periodically builds an E-graph of the goal
+   cone over the current R and e-matches rule instances into it -- the
+   closer for goals whose join needs an instantiation completion's
+   NF check never reaches.  The gn-* tuning caps (stride / iters /
+   node caps) stay env-only; their defaults are the tuned CLI values. *)
+atpGoalNarrowOpt[o_Association] := Switch[Lookup[o, "GoalNarrow", Automatic],
+    True, 1, False, 0, _, -1];
+(* "CPSetIRBudget" -> percent: Twee's renormalise task discipline for
+   the CP-set interreduction sweep (freq 10s + budget% + 20%-dead
+   sample trigger, Twee.hs:978 / Task.hs; Twee's default share is 5).
+   Non-zero swaps the sweep's rule-count period gate for the time
+   budget; inert unless "CPSetInterreduce" -> True arms the sweep.
+   CLI --cp-set-ir-budget / env THVM_ATP_CP_SET_IR_BUDGET. *)
+atpCPSetIRBudgetOpt[o_Association] := With[{n = Lookup[o, "CPSetIRBudget", 0]},
+    If[ IntegerQ[n] && n > 0, n, 0]];
+(* "PopRulesOnly" -> True: Twee pop-join base discipline -- the
+   pop-time BASE normalize is oriented-rules-only (Twee Rule.hs
+   simplify), never the ungated doR+doE join that deletes
+   proof-critical unorientable lemmas on comm-heavy theories (the
+   RNG021-6 L25 class); the unorientable tree participates only
+   through the gated simpler-join pass.  CLI --pop-rules-only / env
+   THVM_ATP_POP_RULES_ONLY. *)
+atpPopRulesOnlyOpt[o_Association] := Switch[Lookup[o, "PopRulesOnly", Automatic],
+    True, 1, False, 0, _, -1];
+(* "GjDeleteRule" -> True: Twee interreduce1 rule-delete port -- a
+   ground-joinable rule is DELETED rather than WM-sterilized (diverges
+   from WM).  CLI --gj-delete-rule / env THVM_ATP_GJ_DELETE_RULE; the
+   gj-budget / gj-index caps stay env-only. *)
+atpGjDeleteRuleOpt[o_Association] := Switch[Lookup[o, "GjDeleteRule", Automatic],
+    True, 1, False, 0, _, -1];
+(* "FullInterreduce" -> True: Twee full-R interreduction port -- every
+   rule re-reduced against the whole system after each addition
+   (diverges from WM's incremental discipline).  CLI
+   --full-interreduce / env THVM_ATP_FULL_INTERREDUCE. *)
+atpFullInterreduceOpt[o_Association] := Switch[Lookup[o, "FullInterreduce", Automatic],
+    True, 1, False, 0, _, -1];
 atpParseMethod[Automatic] := atpParseCompletionOpts[{}, 0];
 (* Accept the string form "Automatic" as a synonym for the symbol --
    users typing Method -> "Automatic" alongside the other string-named
@@ -3034,7 +3135,11 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpBackwardGoalArgueOpt[o], atpCpSideOpt[o],
          atpFlatSubsumeOpt[o], atpCommSubsumeOpt[o],
          atpFormationFifoOpt[o], atpEsetDistdirOpt[o],
-         atpTracePackOpt[o], atpForceCombinatorOrientOpt[o]}
+         atpTracePackOpt[o], atpForceCombinatorOrientOpt[o],
+         atpSimplerJoinOpt[o], atpEncompassDemodOpt[o],
+         atpGoalNarrowOpt[o], atpCPSetIRBudgetOpt[o],
+         atpPopRulesOnlyOpt[o], atpGjDeleteRuleOpt[o],
+         atpFullInterreduceOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -4614,6 +4719,85 @@ atpEnsureWmHeap[m_] := If[ atpWmPresetNameQ[m] &&
         MatchQ[Environment["THVM_HEAP_CELLS"], $Failed | None | ""],
     SetEnvironment["THVM_HEAP_CELLS" -> "536870912"]];
 
+(* === "FlattenGoal" problem transform ==============================
+   Twee --flatten-goal (default ON there) / Vampire function-definition
+   naming; the WL port of pr_flatten_goal in
+   tests/test_atp_wolfram_bench.c (the FindProof CLI's --flatten-goal /
+   env THVM_ATP_FLATTEN_GOAL).  Name every distinct COMPOUND subterm of
+   the (skolemized) goal sides with a fresh minimal constant, appending
+   `fresh == subterm` as a definitional axiom.  KBO orients each as
+   subterm -> fresh (the fresh constant keeps the uniform weight 1,
+   below any compound's weight), so the deep goal reduces to shallow
+   named pieces and the completion derives relations between the
+   SHALLOW definitions -- the technique that cracks deep-goal UEQ
+   problems (distributivity, the Sheffer entailments) plain completion
+   stalls on.  SOUND: each fresh constant is a new symbol, so the
+   extension is definitional (conservative); the goal holds in E iff it
+   holds in E + definitions.  The returned ProofObject cites the
+   definitional axioms explicitly -- the proof is over the extended
+   axiom list.  The C bridge opens a strictly-minimal precedence band
+   for the fresh constants (inner subterms lowest, mutually distinct;
+   see args[65] in thvmlink_atp.c), mirroring the CLI's band shift.
+   Default off; enable with Method -> {..., "FlattenGoal" -> True}. *)
+
+(* One Method suboption looked up across the Method spec shapes: a
+   {name, subopts...} list merges the user subopts over the preset
+   defaults (when the name is a preset); a bare preset name reads the
+   preset defaults; anything else (Automatic, schedule specs) yields
+   the default. *)
+atpMethodSubopt[{name_String, subopts___Rule}, key_, def_] :=
+    Lookup[Join[Lookup[$AtpPresetDefaults, name, <||>],
+        Association[{subopts}]], key, def]
+atpMethodSubopt[name_String, key_, def_] :=
+    Lookup[Lookup[$AtpPresetDefaults, name, <||>], key, def]
+atpMethodSubopt[_, key_, def_] := def
+
+(* Distinct compound subterms of t, INNER-FIRST (arguments before the
+   enclosing application, so an inner definition's fresh constant ranks
+   below its enclosers in the precedence band), deduplicated into acc.
+   Compound = a Symbol-headed application with >= 1 argument; atoms
+   (constants, skolemized goal variables) are not named.  Capped at 128
+   like the CLI's pr_flatten_collect. *)
+atpFlattenCollect[t_, acc_List] := Block[{a = acc},
+    If[ ! MatchQ[t, _Symbol[__]], Return[a]];
+    Do[ a = atpFlattenCollect[t[[i]], a], {i, Length[t]}];
+    If[ Length[a] < 128 && ! MemberQ[a, t], AppendTo[a, t]];
+    a
+]
+
+(* The transform: {axioms + definitional axioms, fresh names}.  A
+   Method without "FlattenGoal" -> True, a multi-goal List conjecture,
+   an Unequal, or an atomic-sided goal all pass through untransformed
+   ({axioms, {}}), matching the CLI (pr_flatten_goal names the single
+   goal pair).  The goal sides are collected over the SKOLEMIZED view
+   (Pattern wrappers stripped to bare constants, exactly what
+   atpEncodeHeld's skolemize pass does) so the definitional axioms cite
+   the same constants the goal encodes to. *)
+atpFlattenGoalTransform[axioms_List, conjecture_, method_] := Block[
+    {eq, l, r, subs, taken, base, fresh, defs},
+    If[ ! TrueQ @ atpMethodSubopt[method, "FlattenGoal", False],
+        Return[{axioms, {}}]];
+    eq = Replace[conjecture, ForAll[_, e_] :> e];
+    If[ ! MatchQ[eq, (Equal | Inactive[Equal])[_, _]],
+        Return[{axioms, {}}]];
+    {l, r} = {eq[[1]], eq[[2]]} /. Verbatim[Pattern][s_Symbol, _] :> s;
+    subs = atpFlattenCollect[r, atpFlattenCollect[l, {}]];
+    If[ subs === {}, Return[{axioms, {}}]];
+    (* Fresh constant names sFlat0.. (CLI parity), the whole family
+       bumped past any collision with a symbol already in the problem. *)
+    taken = Union[SymbolName /@ DeleteDuplicates @
+        Cases[{axioms, l, r}, s_Symbol, {0, Infinity}, Heads -> True]];
+    base = NestWhile[# <> "s" &, "sFlat",
+        b |-> AnyTrue[Range[0, Length[subs] - 1],
+            MemberQ[taken, b <> ToString[#]] &]];
+    fresh = Table[
+        With[{nm = "Global`" <> base <> ToString[i]},
+            ClearAll[nm]; Symbol[nm]],
+        {i, 0, Length[subs] - 1}];
+    defs = MapThread[Inactive[Equal][#1, #2] &, {fresh, subs}];
+    {Join[axioms, defs], SymbolName /@ fresh}
+]
+
 atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
     (* Raise $RecursionLimit for the whole bundle: a deep Sheffer/Wolfram
@@ -4679,7 +4863,14 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
         If[ AssociationQ[atpR],
             atpR = Append[atpR, "PortfolioTrace" -> atpTrace]];
         atpR],
-    (* Single config. *)
+    (* Single config.  atpFlattenGoalTransform first: under
+       "FlattenGoal" -> True it appends the goal-subterm definitional
+       axioms (fresh names in atpFg[[2]], inner-first); otherwise it is
+       the identity ({axioms, {}}).  Two-level With so atpAxFlat
+       substitutes the LITERAL axiom list into the HoldAll
+       atpEncodeProblem below. *)
+    With[{atpFg = atpFlattenGoalTransform[axioms, conjecture, OptionValue[Method]]},
+    With[{atpAxFlat = atpFg[[1]], atpFgFresh = atpFg[[2]]},
     Block[{
         enc, conjPair, nGoals, axiomKeys, ruleList, cRes, extSteps,
         chain, dataset, varNames, axEq, conjStmt, po, relAx, atpWallTime
@@ -4694,13 +4885,19 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
         Module[{$et},
             {$et, enc} = AbsoluteTiming @ Block[
                 {$atpWmIntakeApply = atpWmIntakeOrderQ[OptionValue[Method]]},
-                atpEncodeProblem[axioms, conjecture, True]];
+                atpEncodeProblem[atpAxFlat, conjecture, True]];
             If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
                 Print["[recon] encode-problem = ", $et, " s"]]];
+        (* "FlattenGoal": stamp the fresh constants' labels (inner-first)
+           on the enc so cEngineProof hands the C bridge the minimal
+           precedence band (args[65]). *)
+        If[ atpFgFresh =!= {},
+            enc["FlattenFreshLabels"] = DeleteCases[
+                Lookup[enc["State"]["sym"], atpFgFresh], _Missing]];
         conjPair = enc["ConjPair"];
         nGoals = Length[enc["ConjPairs"]];
         Module[{$et},
-            {$et, relAx} = AbsoluteTiming @ TRelevantAxioms[conjecture, axioms,
+            {$et, relAx} = AbsoluteTiming @ TRelevantAxioms[conjecture, atpAxFlat,
                 Method -> OptionValue[Method]];
             If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
                 Print["[recon] relevant-axioms = ", $et, " s"]]];
@@ -4884,7 +5081,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                 "WallTime" -> atpWallTime
             |>
         ]
-    ]]]]),
+    ]]]]]]),
     "TATPError"
 ]
 

@@ -2222,6 +2222,8 @@ fn void thvm_free_fp8_transients      (u32 result_tid);
 // UOP_COPY persistent device-upload cache (schedule/materialize.c).
 // Reset on GC compaction / thvm reset / free (its keys are heap locs).
 fn void copy_upload_cache_reset       (void);
+fn void weight_move_cache_reset       (void);
+fn u64  weight_move_trim_sources      (void);
 fn void kernel_input_upload_reset     (void);
 fn void materialized_loc_scope_enter  (void);
 fn void materialized_loc_scope_leave  (void);
@@ -3913,6 +3915,11 @@ typedef struct {
 
 fn FolClause *fol_clause_new (u32 n_lits);
 fn void       fol_clause_free(FolClause *c);
+// Renumber the clause's variables to a dense [0, k), all literals
+// sharing one numbering.  Alpha-renaming; keeps stored ids clear of
+// the REWRITE_MAX_VAR matcher cliff after repeated rename-apart
+// inferences.
+fn void       fol_clause_canon_vars(FolClause *c);
 fn u8         fol_clause_eq  (const FolClause *a, const FolClause *b);
 fn u8         fol_clause_is_empty(const FolClause *c);
 fn FolClause *fol_resolve    (const FolClause *c1, u32 i,
@@ -3959,6 +3966,17 @@ fn u8         fol_atom_is_eq(Term atom);
 // they can't be bound by the matcher.  Worst-case |c1|! backtracking
 // match; bounded by FOL_MAX_LITS = 64.
 fn u8         fol_subsumes(const FolClause *c1, const FolClause *c2);
+// Subsumption against pre-frozen target literals (vars already
+// renamed apart); freeze once via fol_freeze_lits and test many
+// patterns without re-renaming.
+fn u8         fol_subsumes_frozen(const FolClause *c1,
+                                  const FolLit *frozen, u32 n2);
+fn u8         fol_subsumes_frozen_nv(const FolClause *c1,
+                                     const FolLit *frozen, u32 n2, u32 nvars);
+fn void       fol_freeze_lits(const FolClause *c, FolLit *out);
+// Max variable id + 1 across the clause (== distinct-var count for
+// canon clauses); the snapshot width for subsumption backtracking.
+fn u32        fol_clause_nvars(const FolClause *c);
 
 // Tautology check: a clause is a tautology iff
 //   (a) it contains both ±A for some atom A, or
@@ -4124,6 +4142,23 @@ typedef enum {
   CNF_SELECT_POSITIVE = 2,   // first positive literal, else all
 } CnfSelection;
 
+// Literal-index bucket: the (atom root label, sign) key's entry list.
+// Entries are packed u64s -- the resolution index stores
+// (clause_id << 8 | literal_idx); the subsumption indexes store bare
+// clause ids.  Buckets live in an open-addressing power-of-two hash
+// table (FolIdx); NULLed clause slots are skipped lazily at retrieval.
+typedef struct {
+  u64  key;    // 1 + ((label << 1) | sign); 0 = empty slot
+  u64 *ents;
+  u32  n, cap;
+} FolIdxBucket;
+
+typedef struct {
+  FolIdxBucket *slots;
+  u32           cap;      // power of two; 0 = not yet allocated
+  u32           n_used;
+} FolIdx;
+
 typedef struct {
   FolClause **clauses;
   u32         n;
@@ -4134,7 +4169,60 @@ typedef struct {
   u32        *passive;
   u32         n_passive;
   u32         cap_passive;
-  u32         passive_head;   // FIFO dequeue index
+  u32         passive_head;   // FIFO (age-lane) dequeue index
+  // Pick-best given-clause selection: a binary min-heap of passive
+  // clause ids keyed by (symbol-count weight, id).  The append-only
+  // passive[] log doubles as the age lane -- every age_ratio-th pick
+  // takes the oldest surviving passive clause instead (fairness /
+  // completeness).  A clause picked from either lane is stamped in
+  // cpicked[] and skipped lazily by the other.
+  u32        *pheap;
+  u32         n_pheap;
+  u32         cap_pheap;
+  u32        *cweight;        // per-clause symbol-count weight (parallel to clauses)
+  u32        *cpri;           // pick-best heap key: weight, plus a large
+                              // penalty for clauses with NO conjecture
+                              // ancestry -- goal descendants always pop
+                              // first (their cone is small; the FIFO age
+                              // lane keeps everything else fair)
+  u64        *cmask;          // per-clause (root label, sign) bloom mask --
+                              // subsumption prefilter: a can subsume c only
+                              // if cmask[a] & ~cmask[c] == 0
+  u8         *cpicked;        // 1 once taken as the given clause
+  // Per-clause inference-eligibility cache (lazy; invalidated by the
+  // cnf_set_* config calls): selected literal index (or ~0u) and the
+  // bitmask of ordering-maximal literals.  Both are static per clause
+  // for a fixed ordering + selection config, so the O(lits^2) KBO
+  // scan runs once per clause instead of once per candidate pair.
+  u32        *csel;
+  u64        *cmaxlits;
+  u8         *celig_valid;
+  // Goal-direction: 1 when the clause descends from a conjecture
+  // (negated-conjecture inputs marked by the caller; inference
+  // conclusions inherit from either parent).  Goal-related clauses
+  // get a pick-best weight bonus -- the coarse analog of E's
+  // conjecture-symbol weighting.
+  u8         *cgoal;
+  // Frozen (rename-apart) literal copies, built once at store time --
+  // the reusable TARGET side of subsumption.  malloc'd FolLit arrays,
+  // freed by cnf_free.
+  FolLit    **cfrozen;
+  // Per-clause variable-slot count (fol_clause_nvars), the snapshot
+  // width for subsumption backtracking.
+  u32        *cnvars;
+  u32         pick_count;
+  u32         age_ratio;      // K: every K-th pick is FIFO (1 = pure FIFO,
+                              // 0 = pure best-first); THVM_FOL_AGE_RATIO
+  u32         goal_tier;      // 1 (default): cpri adds the non-goal penalty
+                              // so the conjecture cone pops first; 0 makes
+                              // pick-best a flat weight order over ALL
+                              // clauses; THVM_FOL_GOAL_TIER
+  // Active unit positive equalities (the demod rule list): ids append
+  // when such a clause moves to active; slots NULLed by backward
+  // subsumption are skipped lazily.
+  u32        *ueq;
+  u32         n_ueq;
+  u32         cap_ueq;
   // Deferred-free queue for backward subsumption: when a derived
   // clause subsumes an older one, the slot in clauses[] is NULLed
   // immediately but the FolClause* gets pushed here and freed at
@@ -4165,11 +4253,58 @@ typedef struct {
   // (FOL_NO_PARENT) is the no-parent sentinel.
   FolTrace *trace;
   u32       trace_cap;
+  // Proof-output mode (cnf_set_retain_dead): clauses removed by
+  // backward subsumption / backward demodulation move to corpse[]
+  // (keyed by id, parallel to clauses[]) instead of being freed, so
+  // a refutation DAG walk can still print every cited parent's
+  // literals.  Off by default -- zero overhead outside --proof runs.
+  u8          retain_dead;
+  FolClause **corpse;
+  // --- literal indexing (per-(root label, sign) partner lists) ------
+  // Replaces the O(active) resolution cross-scan and the O(n)
+  // subsumption walks with bucket retrievals; candidate SETS and the
+  // visit ORDER are reproduced exactly, so the clause-store evolution
+  // is byte-identical to the full scans (see sat.c "literal index").
+  // THVM_FOL_INDEX=0 disables (the A/B lever); any index allocation
+  // failure also clears idx_on -- the full scans need no index.
+  u8          idx_on;
+  u8          mask_fine;     // cmask family: argument-fingerprint bits
+                             // (latched at init with idx_on; never
+                             // flips mid-run so stored masks stay one
+                             // family)
+  u8          idx_res_valid; // active-side index tracks the ordering/
+                             // selection config; cnf_set_* clears it
+                             // and cnf_step rebuilds lazily
+  FolIdx      idx_res;       // ACTIVE eligible literals: (label, sign)
+                             //   -> (clause_id << 8 | lit_idx)
+  FolIdx      idx_fsub;      // ALL stored: first-literal FINE key
+                             //   (label, sign, arg0 fingerprint) -> id
+                             //   (forward-subsumption candidates)
+  FolIdx      idx_bsub;      // ALL stored: every distinct coarse
+                             //   (label, sign) key -> id (backward-
+                             //   subsumption, VAR-arg0 patterns)
+  FolIdx      idx_bsub_f;    // ALL stored: every distinct FINE key
+                             //   -> id (backward, CTR-arg0 patterns)
+  u32        *idx_peq;       // ACTIVE paramod sources (eligible positive
+  u32         n_peq, cap_peq;//  equality, selection not negative)
+  u32        *idx_fb;        // ACTIVE unindexable clauses (an eligible
+  u32         n_fb, cap_fb;  //  non-CTR atom / lit_idx > 255): always
+                             //  visited, like the full scan would
+  u32        *idx_fsub_wc;   // ALL stored with non-CTR/absent first
+  u32         n_fsw, cap_fsw;//  literal (forward wildcard patterns)
+  u32        *cact;          // activation ordinal (position in active[])
+  u8         *cpeq;          // per-clause paramod-source flag (active)
+  u8         *cfbl;          // per-clause fallback flag (active)
+  u32        *cstamp;        // candidate stamp, epoch-keyed
+  u32         idx_epoch;
 } CnfState;
 
 fn CnfState *cnf_init        (u32 step_cap);
 fn void      cnf_free        (CnfState *s);
 fn i32       cnf_add_clause  (CnfState *s, FolClause *c);  // takes ownership
+// As cnf_add_clause, additionally marking the input goal-related
+// (conjecture-descended) for the pick-best weight bonus.
+fn i32       cnf_add_clause_goal(CnfState *s, FolClause *c, u8 goal_related);
 fn AtpStatus cnf_step        (CnfState *s);
 fn AtpStatus cnf_run         (CnfState *s);
 
@@ -4186,6 +4321,14 @@ fn void      cnf_set_wpo     (CnfState *s, const WpoConfig *wpo);
 // Attach a selection function (default NONE).  Affects which literal
 // of a clause is allowed to participate in resolution + paramodulation.
 fn void      cnf_set_select  (CnfState *s, CnfSelection sel);
+
+// Retain backward-subsumed / backward-demodulated clauses in a
+// corpse[] array (keyed by clause id) instead of freeing them, so a
+// proof emitter can print every parent a trace entry cites.  Call
+// once after cnf_init, before any clause is added.
+fn void      cnf_set_retain_dead(CnfState *s);
+// The clause for `id`, live or retained-dead; NULL when unavailable.
+fn const FolClause *cnf_clause_at(const CnfState *s, u32 id);
 
 // Walk the provenance DAG rooted at `root_id` (typically the empty
 // clause's id when status == ATP_PROVED) and write a text proof
@@ -4573,6 +4716,32 @@ typedef struct {
 } AtpCpImplicit;
 _Static_assert(sizeof(AtpCpImplicit) == 20, "AtpCpImplicit must stay 20 bytes");
 
+// CP-heap node: one heap POSITION of the CP priority queue.  `row`
+// names the stationary payload row (the phase-1 indirection); pri/seq/
+// aux are CACHES of the sift-hot comparator keys so one compare touches
+// ONE cache line instead of taking a dependent random payload load per
+// key (cp_heap[pos] -> cp_pri[row] / cp_seq[row] / cp_ultimate[row]).
+//
+// Refresh invariant: at every point where a comparator (atp_cp_before /
+// atp_kdh_gt) can run,
+//   pri == cp_pri[row]
+//   seq == cp_seq[row]
+//   aux == (cp_ultimate == NULL ? 0 : cp_ultimate[row])
+// for every live position.  Every site that writes cp_pri / cp_seq /
+// cp_ultimate for a QUEUED row restamps the caches via atp_cp_heap_set
+// (see each mutation site); row moves (atp_cp_row_move callers) rewire
+// only `row` -- the move copies the keys verbatim, so the caches stay
+// exact.  The mode-gated extra comparator keys (cp_goal / cp_pri2 /
+// cp_packed rhs-node counts, all read only under non-default modes)
+// stay row loads -- they are NOT cached here; 16 bytes is the cap.
+typedef struct {
+  u32 pri;   // cache of cp_pri[row]
+  u32 seq;   // cache of cp_seq[row]
+  u32 row;   // stationary payload row at this heap position
+  u32 aux;   // cache of cp_ultimate[row] (0 while cp_ultimate == NULL)
+} AtpCpHeapNode;
+_Static_assert(sizeof(AtpCpHeapNode) == 16, "AtpCpHeapNode must stay 16 bytes");
+
 typedef struct {
   // Rule set R: growable parallel arrays sized for
   // thvm_rewrite_normalize / thvm_critical_pairs to consume
@@ -4622,6 +4791,18 @@ typedef struct {
   // push, freed on pop / drop.
   u8  **cp_packed;
   u32  *cp_trace;
+  // Per-CP origin class (TRACE_AXIOM / TRACE_CP / TRACE_SIMPLIFY),
+  // stamped at push and riding the slot through sifts/backfills exactly
+  // like cp_trace.  The proof-trace soft cap turns cp_trace into
+  // ATP_TRACE_NONE for late pushes, but the WM-order mirror still needs
+  // the popped equation's ORIGIN to place its distinguished face
+  // (atp_wmo_eq_dist_rhs): a superposition CP stores WM's (KPLinks,
+  // KPRechts) so the distinguished face is the stored LHS, while a
+  // SIMPLIFY re-derivation keeps it on the stored RHS.  One byte per CP
+  // keeps that decision exact past the cap (WolframAxioms
+  // OrAssociativity fact 318: the trace-less registration mis-walked
+  // the B/E sweep faces and flipped a weight tie at fact 533).
+  u8   *cp_kind;
   u32   n_cps;
   // 7c': the CP queue is a binary min-heap keyed on
   // (cp_pri, cp_seq) -- cp_pri is atp_cp_priority computed once at
@@ -4630,6 +4811,25 @@ typedef struct {
   // rebuild-an-INC-SUP-tree-every-step O(n) scan.
   u32  *cp_pri;
   u32  *cp_seq;
+  // CP FORMATION DEPTH (Twee getDepth): how many overlap generations deep
+  // this CP was derived -- max(parent rule depths) + 1.  Twee's CP score
+  // adds depthweight*depth (src/Twee/CP.hs), penalizing deeply-derived CPs
+  // so completion stays focused on shallow derivations.  Used only by the
+  // ATP_CP_WEIGHT_TWEE (mode 8) score in place of the syntactic term depth
+  // (which stays ~1-2 for flattened flat-names and gives NO derivation
+  // penalty -> thvm explores the deep-derivation space Twee prunes).  The
+  // parallel r_depth[] carries the same counter on active rules.
+  u32  *cp_depth;
+  // GOAL-DERIVED bit (Vampire spb=goal / nwc analog, derivation-level):
+  // 1 iff this CP descends from a conjecture-derived input equation --
+  // seeded by thvm_atp_mark_gd_next on the goal-cone tgt definitions
+  // (and conjecture-role units), then propagated max-parent-wise like
+  // cp_depth.  Consumed only when THVM_ATP_SPB_GOAL is armed: the CP
+  // priority of NON-goal-derived CPs is scaled by THVM_ATP_NWC
+  // (default 2.0), Vampire's nongoal_weight_coefficient applied at the
+  // derivation level.  The parallel r_gd[] carries the bit on active
+  // rules (a rule inherits its birth CP's bit).
+  u8   *cp_gd;
   // THVM_ATP_GJ_KEEP: ground-joinable CPs are KEPT (so they age the FIFO
   // dimension faithfully, as Waldmeister keeps them in its 168k unselected
   // set) but forced to never-weight-selectable priority (WM Act_never) --
@@ -4656,6 +4856,25 @@ typedef struct {
   u32   n_cps_w2_picks;  // diagnostic counter
   u32   cp_seq_next;
   u32   cp_cap;
+  // Heap-position indirection: the binary/KD heap orders POSITIONS
+  // [0, n_cps) while the ~14 payload arrays above are indexed by
+  // stationary ROWS.  cp_heap[pos] is a 16-byte AtpCpHeapNode: .row
+  // names the row at heap position pos and .pri/.seq/.aux cache that
+  // row's sift-hot comparator keys (see the AtpCpHeapNode refresh
+  // invariant); cp_pos[row] is the position (invariant:
+  // cp_pos[cp_heap[p].row] == p for every p < n_cps, and
+  // cp_heap[0..n_cps).row is a permutation of the live rows
+  // [0..n_cps)).  A sift swaps only whole nodes + the cp_pos mirror;
+  // payload rows move only on pop-backfill / sweep densification
+  // (keeping the live rows dense in [0, n_cps)).  Layout-neutral by
+  // construction: the cached keys are exact copies of the payload keys
+  // at every compare, so every comparator verdict -- hence every sift
+  // swap, hence the position-level heap evolution -- is byte-identical
+  // to the historical row-load heap.  cp_deprio deliberately stays
+  // POSITION-indexed (the historical swap and backfill never moved
+  // it); see atp_cp_rebuild_priorities.
+  AtpCpHeapNode *cp_heap;
+  u32  *cp_pos;
 
   // Deferred-CP (`implicit_pair`) arc: parallel array of compact
   // 20-byte trace-backed descriptors (parent trace ids + cached
@@ -4724,6 +4943,12 @@ typedef struct {
   // push, uid_dead is the kill bitmap.  All allocated only under
   // use_orphan_murder (NULL otherwise, slot-move sites NULL-guarded).
   u32  *r_uid;
+  // Per-rule FORMATION DEPTH (Twee getDepth): axioms = 0; a rule oriented
+  // from a selected CP inherits that CP's cp_depth.  See cp_depth above.
+  u32  *r_depth;
+  // Per-rule GOAL-DERIVED bit (see cp_gd above): a rule inherits its
+  // birth CP's bit; CP formation ORs the two parents' bits.
+  u8   *r_gd;
   u32  *cp_uid_a;
   u32  *cp_uid_b;
   u8   *uid_dead;
@@ -4797,6 +5022,34 @@ typedef struct {
   // -DATP_MNF) so callers can set it unconditionally; goal_check only
   // consults it inside the `#ifdef ATP_MNF` block.
   u8 use_mnf;
+
+  // GOAL-NARROW: the ground goal-narrowing endgame (opaque pointer +
+  // runtime gate).  A budgeted congruence closure over the ground
+  // slice of R -- extended by bounded two-way e-matching over the
+  // goal cone -- that closes goals whose joining chain needs
+  // EXPANDING (R->L) ground rewrites the ordered goal normalize can
+  // never take (the twee/vampire flatten-lane endgame the CASC GRP
+  // dissection isolated: GRP725-1/678-1/690-1).  Created lazily on
+  // the first gated goal_check; env THVM_ATP_GOAL_NARROW / CLI
+  // --goal-narrow / thvm_atp_set_use_goal_narrow.  Default OFF:
+  // byte-identical trajectories.  See src/atp/goal_narrow.c.
+  struct AtpGoalNarrow *gnarrow;
+  u8 use_goal_narrow;
+
+  // NARROW-QUEUE: critical-goal best-first existential narrowing (the
+  // WM PM_Existenzziele / GKC query_preference=1 lane; section at the
+  // end of src/atp/_.c).  A store of narrowed goal variants
+  // ("critical goals") selected lightest-first, each narrowed against
+  // every rule face (unorientable equations contribute BOTH faces),
+  // with new rules sweeping the already-processed set incrementally
+  // (WM RueckwartigeUeberlappung); a CG whose two sides UNIFY closes
+  // the conjecture.  Replaces the greedy destructive walk in
+  // goal_check's existential branch when armed.  Created lazily on
+  // the first gated existential goal_check; env THVM_ATP_NARROW_QUEUE
+  // / CLI --narrow-queue / thvm_atp_set_use_narrow_queue.  Default
+  // OFF: byte-identical trajectories.
+  struct AtpCgq *cgq;
+  u8 use_narrow_queue;
 
   // Waldmeister-faithful RHS interreduction (IR_InterreduktionRechts /
   // RMRechtsInterred, INF/Interreduktion.c:329-360) in the -irrp CLI
@@ -4878,29 +5131,35 @@ typedef struct {
   // = the existing pass runs byte-identical.  Faithful only when
   // keep_lhs_reducible==0 and use_eager_orphan_sweep==0 (the WM Method layout).
   u8                   use_wm_interred;
-  // Opt-in faithful Waldmeister-FPA normalize path (src/wmfpa/wmfpa.h:
-  // flatterm rep + DSBaum discrimination tree + NormalformInnermost).
-  // OFF by default (THVM_ATP_WMFPA=1 to enable); when set, the orientable
-  // normalize fixpoint encodes the subject to a flatterm once, retrieves
-  // redexes by descending a discrimination tree built from s->lhs[], and
-  // decodes back -- byte-identical normal form to the IC path (asserted
-  // by the bench differential and the in-engine self-check).
+  // Opt-in WM-FPA flat normalize path (src/wmfpa/wmfpa.h flatterm rep +
+  // DSBaum), OFF by default (THVM_ATP_WMFPA=1 to enable).  Arms the
+  // WM-POLICY FT hook (ft_norm.c atp_rules_only_normalize_wf): under the
+  // Waldmeister preset (use_mixmost_nf) the doR-only full-range treated-CP
+  // push normalize runs on the flat substrate with the engine's exact
+  // mixmost walk + Regelbaum-DFS winner -- byte-identical NFs, engine
+  // fallback on anything the flat path cannot decide.  The historic
+  // Term-side binding of this flag (atp_rewrite_normalize_wmfpa:
+  // leftmost-outermost, lowest-slot -- a DIFFERENT redex policy) is
+  // re-gated behind THVM_ATP_WMFPA_TERM so one flag never arms two
+  // policies.
   u8                   use_wmfpa;
-  // Cached WM-FPA discrimination tree (opaque; void* to keep wmfpa.h out
-  // of the public header) and the R size it reflects.  Rebuilt lazily
-  // when n_rules changes, like rule_index.  Only touched on the gated
-  // path (use_wmfpa); NULL otherwise.
+  // Cached WM-FPA discrimination tree of the TERM-side path (opaque;
+  // void* to keep wmfpa.h out of the public header) and the R size it
+  // reflects.  Rebuilt lazily when n_rules changes, like rule_index.
+  // Only touched on the THVM_ATP_WMFPA_TERM path; NULL otherwise.
   void                *wmfpa_tree;
   u32                  wmfpa_built;
-  // Private staleness bit for the WM-FPA tree, set at the same sites that
-  // set rule_index_dirty (an in-place rule edit that need not change
-  // n_rules).  A private bit avoids fighting the indexed path over the
-  // shared rule_index_dirty clear.
+  // Private staleness bit for the Term-side WM-FPA tree, set at the same
+  // sites that set rule_index_dirty (an in-place rule edit that need not
+  // change n_rules).  A private bit avoids fighting the indexed path over
+  // the shared rule_index_dirty clear.  (The WM-policy FT mirror keys on
+  // r_revision instead and hooks the RHS compose directly.)
   u8                   wmfpa_dirty;
-  // Gated correctness probe: when set (THVM_ATP_WMFPA_CHECK!=0) every
-  // gated normalize first asserts the incrementally-maintained tree returns
-  // the same lowest-index rule at every subject position as a tree freshly
-  // rebuilt from the current rule set, aborting on the first divergence.
+  // Live differential for the WM-policy FT hook: when set
+  // (THVM_ATP_WMFPA_CHECK!=0) every flat-decided push normalize ALSO runs
+  // the engine mixmost walk and aborts on the first NF-byte divergence
+  // (cap-hit partials included); the engine result is returned.  The
+  // Term-side path's historic probes moved to THVM_ATP_WMFPA_TERM_CHECK.
   u8                   wmfpa_check;
   // Incremental-resume watermark for the flatterm unorientable preorder
   // scan (atp_ft_unorient_step).  ON by default: the scan resumes past the
@@ -4932,6 +5191,32 @@ typedef struct {
   // pop so orient_and_add's TRACE_ORIENT entry can record the
   // source CP as its parent.
   u32  last_popped_trace;
+  // Origin class (cp_kind) of the popped CP -- valid alongside
+  // last_popped_trace and, unlike it, immune to the proof-trace soft
+  // cap.  Consumed by the WM-order mirror's distinguished-face rule
+  // (atp_wmo_eq_dist_rhs) when the trace id is ATP_TRACE_NONE.
+  u8   last_popped_kind;
+  // Formation depth (cp_depth) of the popped CP -- a rule oriented from it
+  // inherits this as its r_depth (Twee getDepth).  0 before the first pop,
+  // so initial axioms added via orient_and_add get depth 0.
+  u32  last_popped_depth;
+  // Goal-derived bit (cp_gd) of the popped CP -- a rule oriented from it
+  // inherits this as its r_gd (spb=goal derivation tracking).
+  u8   last_popped_gd;
+  // Folded-signature label band [fold_lo, fold_hi): the fresh
+  // definitional symbols (sF*/sFlat*/f_g*) the pr-layer transformations
+  // introduced, registered via thvm_atp_set_fold_band.  Consumed by the
+  // drc=off analog (THVM_ATP_DRC_OFF): a CP whose sides carry a folded
+  // symbol is NOT discarded when its sides join -- it is kept as a
+  // rule/equation (Vampire drc=off keeps demodulation-redundant clauses;
+  // the GRP loop-theory oracle proofs pass through such folded lemmas).
+  // fold_hi == 0 (default) disarms every check.
+  u32  fold_lo;
+  u32  fold_hi;
+  // drc=off keep counters (diagnostic): CPs kept at the push-time join
+  // gate / at the pop-time join gate that classic completion discards.
+  u32  n_cps_drc_kept_push;
+  u32  n_cps_drc_kept_pop;
 
   // FIFO live-scan floor: every queued CP with cp_seq < fifo_floor_seq
   // is PROVEN dead (its scan-time death test failed and death marks --
@@ -4987,6 +5272,16 @@ typedef struct {
   // heuristics never affect soundness, so steering by one goal at a
   // time is sound.
   Term *goals_lhs;
+#ifdef THVM_ATPFT_RULES
+  // Per-conjunct FT mirrors + NF decode caches (the multi-goal twin of
+  // goal_lhs_ft / goal_nf_ft_l): the conjunct loop's checks clone the
+  // mirror instead of re-encoding the pair per check, and reuse the
+  // previous NF Term when the span content is unchanged.
+  struct AtpFtCell **goals_lhs_ft;
+  struct AtpFtCell **goals_rhs_ft;
+  struct AtpFtCell **goals_nf_ft_l;
+  struct AtpFtCell **goals_nf_ft_r;
+#endif
   Term *goals_rhs;
   Term *goals_lhs_nf;
   Term *goals_rhs_nf;
@@ -5133,6 +5428,16 @@ typedef struct {
   // criterion only counts; 1 = drop ground-joinable CPs.  Set via
   // thvm_atp_set_use_ground_join (Method -> {... "GroundJoin" -> True}).
   u8   use_ground_join;
+  // Runtime gate for LAZY (selection-time) ground-joinability.  When set,
+  // the expensive ordered-set-partition GJ check runs on the SELECTED,
+  // R+E-normalized CP (~1 per pick) instead of on every generated CP at
+  // push time.  Twee's redundancy discipline: push-side GJ is O(generated
+  // CPs) and dominated GRP766 cp-gen at 8.6s/92%; lazy GJ pays it once at
+  // pop.  Sound (a ground-joinable CP is redundant; dropping before
+  // orientation preserves completeness).  Set via
+  // thvm_atp_set_use_lazy_ground_join; push-side use_ground_join should be
+  // off under this mode so GJ is paid once.
+  u8   use_lazy_ground_join;
 
   // Runtime gate for Bachmair-Dershowitz connectedness DELETION (Twee
   // section 6.2).  0 (default) = off; 1 = drop a CP whose two sides
@@ -5250,6 +5555,7 @@ typedef struct {
   u32 *cp_stash_trace;
   u32 *cp_stash_nodes;
   u8  *cp_stash_ultimate;  // parallel u8 flag: WM Act_ultimate carry-over
+  u8  *cp_stash_kind;      // parallel origin class (see cp_kind)
   u32  n_cp_stash;
   u32  cp_stash_cap;
 
@@ -5285,6 +5591,19 @@ typedef struct {
   // via thvm_atp_set_cp_set_interreduce.
   u8   cp_set_interreduce;
   u32  cp_set_ir_period;          // 0 -> default period at run time
+  // Twee task discipline for the CP-set sweep (Twee.hs:978 newTask +
+  // Task.hs taskDue + shouldSimplifyQueue).  When cp_set_ir_budget > 0
+  // it REPLACES the rule-count period gate above: the sweep runs at
+  // most once per ATP_CP_SET_IR_FREQ_US, only while the cumulative
+  // sweep time stays under budget% of the elapsed run (Twee
+  // cfg_renormalise_percent, default 5), and only when >= 20% of a
+  // 100-CP random sample of the queue is dead -- joinable under the
+  // current R or orphaned (Twee cfg_renormalise_threshold = 20 over
+  // cfg_cp_sample_size = 100).  0 = legacy every-period-rules sweep.
+  u32  cp_set_ir_budget;          // percent; 0 -> period discipline
+  u64  cp_set_ir_spent_us;        // cumulative sweep + sample-check time
+  u64  cp_set_ir_last_us;         // last discipline check (freq gate)
+  u64  cp_set_ir_start_us;        // discipline epoch (first check)
   u32  n_cp_set_ir_passes;        // diagnostics: passes run
   u32  n_cp_set_ir_deleted;       // diagnostics: CPs deleted (joinable)
   u32  n_cp_set_ir_reweighted;    // diagnostics: CPs reweighted
@@ -5527,8 +5846,78 @@ typedef struct {
   // Grundzusammenfuehrung.c:828-840) is not cached -- FAILED facts
   // are simply retested per new fact (pure perf, same verdicts).
   u8   use_bwd_ground_join;
+  // Twee interreduce1 port (Twee.hs:787 deleteActive): when a backward
+  // fact-test finds a rule ground-joinable, DELETE it from R (soft-delete,
+  // dead-sentinel recipe) instead of only sterilizing its CP formation.
+  // WM KEEPS ground-joinable facts as live rewriters (GZ_ZSFB_BEHALTEN,
+  // _.c:20456-20463), so this DIVERGES from WM -- strictly opt-in, default
+  // OFF, so the WM preset (test_atp byte-parity) is untouched.  Requires
+  // use_bwd_ground_join to run the walk that reaches the delete site.
+  u8   use_gj_delete_rule;
+  // Twee interreduce/interreduce1 port (Twee.hs:774): re-normalize EVERY
+  // live rule's LHS against the WHOLE current rule set (excluding itself)
+  // each periodic pass, and collapse (drop+requeue the reduced equation)
+  // any rule whose LHS is reducible by a COMBINATION of the others.  thvm's
+  // thvm_atp_interreduce is INCREMENTAL (reduces old rules only against the
+  // newest 1-2), so rules that become reducible by a later combination
+  // persist -- the dominant source of the CASC AC/loop rule-set bloat
+  // (MVA009/GRP721 keep 500-880 rules where twee keeps ~44).  Opt-in,
+  // default OFF (diverges from WM's incremental interreduce), so the WM
+  // preset (test_atp byte-parity) is untouched.
+  u8   use_full_interreduce;
+  // Encompassment demodulation (Twee reducesSkolem, Rule.hs:425; plan
+  // docs/plans/unified_automatic_engine.md Phase 3): permit an
+  // UNORIENTABLE equation to rewrite when its instance is strictly
+  // decreasing under the SKOLEM-GROUND KBO (variables read as fresh
+  // constants: weight var_weight, precedence below every function
+  // symbol, ordered by id) even though the open-term instance
+  // comparison is incomparable.  Canonicalizes variable-permuted
+  // variants (commutativity et al), which is what keeps Twee's rule
+  // set lean on the AC-heavy CASC families.  Each step strictly
+  // decreases the subject's skolem image in a total well-founded
+  // reduction order, so every normalize terminates.  Opt-in, default
+  // OFF (byte-identical): env THVM_ATP_ENCOMPASS / --encompass-demod.
+  u8   use_encompass_demod;
+  // Simpler-join CP discipline (Twee Join.hs:55 joinCriticalPair,
+  // allSteps = step1 >=> step2 >=> step3; plan
+  // docs/plans/unified_automatic_engine.md): when the standard join
+  // normalize leaves a CP's sides distinct, re-normalize both sides
+  // admitting oriented rules AND unorientable equations, with every
+  // step gated on the rewriting equation being strictly SIMPLER than
+  // the CP equation (Twee simplerThan over lessEqSkolem -- the
+  // skolem-ground lex compare in ft_order.c), and unorientable
+  // instances admitted when strictly decreasing under the skolem-ground
+  // KBO (Twee reducesSkolem) even where the open-term compare is
+  // incomparable.  Joins far more CPs than plain doR/doE joinability,
+  // keeping the queue and R lean on the AC/loop CASC families.
+  // VERDICT-ONLY: kept CPs queue their standard NFs, so trace/replay
+  // are untouched.  Value 1: runs at generation-time treatment
+  // (atp_cp_trivially_joinable[_ft], vcp_treat_joinable) AND at
+  // selection (the pop joined gate).  Value 2: selection only --
+  // Twee's own placement (consider runs at dequeue), skipping the
+  // per-generated-CP push tax.  Opt-in, default OFF (byte-identical):
+  // env THVM_ATP_SIMPLER_JOIN / --simpler-join[=2].
+  // Completeness caveat mirrors use_encompass_demod: the skolem steps
+  // carry no below-peak connectedness constraint, so a saturation
+  // under this mode reports GaveUp, never Satisfiable
+  // (cli_strategy_complete).
+  u8   use_simpler_join;
+  // Twee pop-join base discipline (THVM_ATP_POP_RULES_ONLY): the
+  // pop-time join verdict's base normalize runs ORIENTED RULES ONLY
+  // (Twee Rule.hs `simplify` / simplifyOverlap; no ungated doE) and the
+  // CP-set-ir sweep's per-CP re-normalize does the same (Twee
+  // simplifyPassive).  Unorientable equations still join CPs, but only
+  // through the simplerThan-gated pass (use_simpler_join).  Default
+  // OFF: WM's ungated doR+doE pop treatment, byte-identical.
+  u8   use_pop_rules_only;
+  // CPs dropped by the simpler-join pass (push treat + pop select).
+  u32  n_cps_dropped_simpler_join;
   // Count of facts sterilized by the backward walk (bench stats line).
   u32  n_facts_bwd_ground_joinable;
+  // Count of rules DELETED from R by the use_gj_delete_rule port.
+  u32  n_facts_gj_deleted;
+  // Count of rules collapsed by use_full_interreduce (drop+requeue).
+  u32  n_full_ir_collapsed;
   // Per-rule-slot WM gzfbStatus cache (general.h:94-95 GZ_statusT,
   // "Reihenfolge wichtig" -- order matters: backward skips
   // status <= GZ_aussichtslos = {joinable, valuable, hopeless}).
@@ -5782,6 +6171,19 @@ typedef struct {
   u32  goal_sym_mask[8];          // bit-set of goal symbols (CTR ext labels)
                                   // -- 8 * 32 = 256 distinct labels indexable;
                                   // cap with mod for larger.
+  // Structural goal-relevance CP selection (THVM_ATP_GOAL_SUBTERM,
+  // default OFF): a genuinely different metric from SOS (symbol-level,
+  // useless on a single-operator signature) and CPinGoal
+  // (whole-side match, slow) -- discount a CP's priority by the size of
+  // the LARGEST ground SUBTERM it shares with the goal's normal forms,
+  // surfacing CPs that operate on the goal's specific substructure.
+  // Cheap (a subterm-set scan, no unification).  Sound: only heap
+  // ordering changes, nothing dropped.
+  u8   use_goal_subterm;
+  u8   goal_sub_ready;            // goal-subterm set collected for this goal
+  u16  goal_sub_n;               // number of distinct ground goal subterms
+  u64  goal_sub_hash[128];        // structural hashes of the goal's ground subterms
+  u16  goal_sub_size[128];        // parallel: symbol count of each
 
   // Forward subsumption pruning (analog of Vampire's --forward_subsumption
   // flag, restricted to unit equations -- which all our equations are).
@@ -5994,6 +6396,17 @@ typedef struct {
   // CP-formation side order for most derived E-members; only intake
   // axioms run LRSortieren).  Opt-in only.  See atp_lr_sortieren_rec.
   u8    use_lr_sortieren;
+  // Waldmeister col3 combinator ordering (Ordnungen.c:101-117 +
+  // TermOperationen.c IstKombinatorTupel; Automodus strategy KombS =
+  // rose() for the Kombinatorlogik classes): s > t iff s is a
+  // combinator redex `C x1 .. xn` on the apply spine (C a constant,
+  // x1..xn pairwise-distinct variables) and t is built only from the
+  // apply operator plus symbols occurring in s, OR s is a bare
+  // constant and t is ground.  Orients the duplicating combinator
+  // definition axioms ((W x) y -> (x y) y) no simplification order
+  // can.  col3_apply = the applicative binary label (WM
+  // TO_ApplyOperator).  0 = off (default).
+  u32   col3_apply;
   // Waldmeister CP-formation side geometry (Unifikation1.c:916-917, env
   // THVM_ATP_CP_SIDE, default OFF): store each derived UNORIENTABLE
   // equation with WM's geometric side order -- KPLinks = sigma(r_i) (the
@@ -6014,6 +6427,17 @@ typedef struct {
   Term *irv_lhs;
   Term *irv_rhs;
   u32  *irv_parent;
+#ifdef THVM_ATPFT_RULES
+  // Victim FT spans (clones of the row's live mirrors, captured at
+  // push time) so the drain's doR treatment runs FT-native -- no
+  // ft_from_term re-encode, and a joined victim decodes nothing.
+  // NULL when the push site had no mirror; the drain then falls back
+  // to the Term route.  Cells live in Arena A (address-stable, freed
+  // wholesale at thvm_atp_free); slots are consumed or explicitly
+  // returned by the drain.
+  struct AtpFtCell **irv_lhs_ft;
+  struct AtpFtCell **irv_rhs_ft;
+#endif
   // WM drain-order key per victim (use_emission_order only), captured
   // at push time BEFORE the victim leaves the wmo tree: WM's
   // IR_PufferAuslesen drains GMInterred (equation victims) before
@@ -6063,6 +6487,19 @@ typedef struct {
   // the OS sends SIGKILL).
   u64  wall_deadline_us;
 
+  // Process-RSS baseline for the growth-relative memory guard, sampled
+  // at the run's FIRST RSS poll (step 0).  0 = not yet sampled (calloc).
+  // The guard aborts when the run's own RSS GROWTH -- live RSS minus
+  // this baseline -- exceeds THVM_ATP_RSS_ABORT_MB (default 8 GB).  An
+  // ABSOLUTE cap misattributed the host's ambient memory to the proof
+  // run: inside WolframKernel a cold-JIT TNetTrain transiently lifts
+  // ambient RSS past 8 GB, and every following TFindProof insta-aborted
+  // at its step-0 poll ("poison 2", the silent post-train $Failed wedge)
+  // until the ambient decayed.  Growth attribution keeps the original
+  // protection (a diverging saturation still grows multi-GB and trips)
+  // while an idle-but-large host process no longer counts against runs.
+  long long rss_guard_baseline;
+
   // === ENIGMA-style learned CP-selector training data ===============
   // When `record_cp_features` is set (via thvm_atp_set_record_cp_
   // features; DEFAULT 0), thvm_atp_select_cp appends one row per
@@ -6104,11 +6541,90 @@ typedef struct {
                                      // ft.h at the .c boundary).
   struct AtpFtCell **lhs_ft;
   struct AtpFtCell **rhs_ft;
+  // Subsumer SHAPE spans for the remove-and-re-derive locate: exact
+  // clones of the subsuming equation's mirrors at kill time (a lazy
+  // subsumer's Term slots are sentinels, so the span is the only
+  // faithful shape record; real subsumers store them too, keeping the
+  // locate on one compare path).
+  struct AtpFtCell **r_dead_subsumer_lhs_ft;
+  struct AtpFtCell **r_dead_subsumer_rhs_ft;
   struct AtpFtCell **r_dead_lhs_save_ft;
   struct AtpFtCell **r_dead_rhs_save_ft;
   struct AtpFtCell  *goal_lhs_ft;
   struct AtpFtCell  *goal_rhs_ft;
+  // Goal-NF decode cache: the flat NFs + their decoded Terms from the
+  // previous goal check.  The goal's normal form is content-stable
+  // across most checks (it changes only when a new rule reduces it),
+  // so when the fresh NF span ft_eq-matches the cached one the check
+  // reuses the cached Term instead of ft_to_term -- the last per-step
+  // interchange conversion class.  Arena-A cells are never freed once
+  // allocated (only fuse/CPQ/stash spans are explicitly returned), so
+  // the retained spans stay valid; the cache is invalidated wherever
+  // goal_lhs_ft/goal_rhs_ft are (re)assigned.  Terms goal_lhs_nf /
+  // goal_rhs_nf (above) are the paired decoded values.
+  struct AtpFtCell  *goal_nf_ft_l;
+  struct AtpFtCell  *goal_nf_ft_r;
+  // Cached FT image of s->min_const for the unfailing-instantiation
+  // grounding (ft_norm's ftn_ground_subst encoded it fresh per call).
+  // Keyed by the Term handle: a GC forward or a min-const change
+  // invalidates and re-encodes (rare, safe either way -- the cell is
+  // a read-only single-cell constant that substitution application
+  // copies).
+  struct AtpFtCell  *min_const_ft;
+  Term               min_const_ft_src;
 #endif
+
+  // ifeq-encoded clause guards (TPTP's '-10' machine-equationalized FOF
+  // class): dispatcher symbols detected at axiom intake -- a symbol f
+  // whose axiom is f(A,A,B[,C]) = B with A, B (, C) distinct variables.
+  // Encoded clauses look like ifeq(guard, true, then, true) = true;
+  // plain completion floods on them because superpositions INTO
+  // subterms buried under undecided guards dominate the CP queue while
+  // only guard-DECIDING inferences make progress (Vampire cracks the
+  // family through literal selection: it effectively only resolves the
+  // guard).  The equational analog lives in atp_cp_priority_sized_ex:
+  // when armed (use_ifeq_guard), a CP's selection weight is scaled by
+  // THVM_ATP_IFEQ_PENALTY (default 8) once per UNDECIDED guard its
+  // conclusion retains -- a pure function of the CP's terms, so every
+  // re-score path (push, interreduce commit, rebuild) recomputes it
+  // identically.  A guard-deciding CP drops one guard relative to its
+  // parent, surfacing a penalty-factor earlier than its stuck siblings;
+  // facts are unscaled.  Selection bias only: nothing is dropped,
+  // completeness is untouched.
+  // Arming: n_ifeq_syms > 0 (detector fired) AND THVM_ATP_IFEQ_GUARD
+  // >= 1.  THVM_ATP_IFEQ=0 kills the detector.  Off (the default) the
+  // engine is byte-identical.
+  u32  ifeq_syms[8];              // detected dispatcher CTR labels
+  u32  n_ifeq_syms;
+  u8   use_ifeq_guard;
+
+  // tgt: goal-targeted CP-SELECTION weights (the selection essence of
+  // Vampire's goal-targeted KBO weight scheme, tgt=full / tgt=ground).
+  // Symbols occurring in the conjecture weigh 1, every other symbol
+  // weighs THVM_ATP_TGT_NONGOAL (default 2); tgt=ground additionally
+  // raises variables to the non-goal weight.  Applied in
+  // atp_cp_priority_sized_ex as a multiplicative bias on the CP
+  // priority (base * weighted_count / plain_count), so it composes
+  // with every weight mode and with the ifeq guard scale.  The
+  // reduction-ordering KBO is untouched; selection bias only.
+  // Arming: THVM_ATP_TGT_SEL >= 1 and a goal is set.  Off (the
+  // default) the engine is byte-identical.  (THVM_ATP_TGT proper
+  // selects the tgt PREPROCESSING port, pr_tgt_transform -- a .pr
+  // intake transformation, no engine involvement.)
+  // tgt_sym_mask is a 4096-bucket
+  // bitset of the goal's CTR labels (union over conjuncts; larger
+  // labels alias mod 4096 -- a sound over-approximation, a goal
+  // symbol is never mis-penalized); collected lazily, invalidated by
+  // thvm_atp_set_goals.  tgt_ext_mask holds externally-declared
+  // goal-cone labels (thvm_atp_tgt_add_sym: the CLI feeds the TPTP
+  // negated-conjecture units' symbols -- Vampire derives tgt weights
+  // from the WHOLE negated conjecture, and on the '-10' encodings the
+  // final goal equation is a bare `a != b` while the conjecture's
+  // content lives in its sibling hypothesis units); the lazy
+  // collection ORs it into tgt_sym_mask.
+  u64  tgt_sym_mask[64];
+  u64  tgt_ext_mask[64];
+  u8   tgt_ready;
 
 #ifdef THVM_ATPFT_CPQ
   // Parallel native AtpFt CP queue; see docs/atp/engineering.md.
@@ -6128,6 +6644,7 @@ typedef struct {
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);
 fn void      thvm_atp_free        (AtpState *s);
 fn u8        thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs);
+fn u8        thvm_atp_col3_pair   (Term a, Term b, u32 apply);
 fn u8        thvm_atp_set_goal    (AtpState *s, Term lhs, Term rhs);
 // Multi-goal conjunction: set n conjecture pairs (lhs[g], rhs[g]) to
 // be proved off one saturation.  n == 0 clears the goal (completion
@@ -6160,6 +6677,8 @@ fn void      thvm_atp_set_wpo     (AtpState *s, const WpoConfig *wpo);
 // check runs alone.  Lets one dylib carry MNF without paying for it
 // on completion-only goals.
 fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
+fn void      thvm_atp_set_use_goal_narrow(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_narrow_queue(AtpState *s, u8 on);
 // Opt in to the flatterm fast-path for the mixed normalize loop (no
 // effect unless the dylib is built with ATP_RULE_INDEX).  Same normal
 // forms as the default tree mixed loop; a per-step speedup on rule sets
@@ -6174,6 +6693,7 @@ fn void      thvm_atp_set_use_cp_index(AtpState *s, u8 on);
 // is built with ATP_CP_GROUND_JOIN).  Sound: ground-joinable CPs are
 // redundant.  Off by default (the criterion only counts).
 fn void      thvm_atp_set_use_ground_join(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_lazy_ground_join(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_connectedness(AtpState *s, u8 on);
 // Waldmeister CPdimension fairness ratio: 1 FIFO (oldest) pick per
 // `modulo` CP selections.  0 = default (11).  Larger = more weight-
@@ -6434,6 +6954,16 @@ fn void      thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period);
 // ratio 0 disables coop (GNN overwrites the primary heap, GT-mode).
 fn void      thvm_atp_set_gnn_coop(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_goal_subterm(AtpState *s, u8 on);
+fn void      thvm_atp_tgt_add_sym(AtpState *s, u32 label);
+// spb=goal derivation seeding: the NEXT equation added via
+// thvm_atp_add_equation is conjecture-derived (goal-cone tgt definition
+// or conjecture-role unit).  Inert unless THVM_ATP_SPB_GOAL arms the
+// selection bias.  See AtpState.cp_gd.
+fn void      thvm_atp_mark_gd_next(AtpState *s);
+// Register the folded-signature fresh-symbol label band [lo, hi) for
+// the drc=off analog (THVM_ATP_DRC_OFF).  See AtpState.fold_lo.
+fn void      thvm_atp_set_fold_band(AtpState *s, u32 lo, u32 hi);
 fn void      thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_demod(AtpState *s, u8 on);

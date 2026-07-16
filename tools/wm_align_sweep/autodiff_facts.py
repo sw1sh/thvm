@@ -28,13 +28,23 @@ def parse_auto(s):
     s = s.strip()
     def p(i):
         m = re.match(r'[A-Za-z]\w*', s[i:]); name = m.group(0); i += m.end()
+        # WM IO_DruckeFlex compresses n iterated applications of a unary
+        # operator as `f^n(arg)` (e.g. not^3(x1) = not(not(not(x1)))).
+        rep = 1
+        rm = re.match(r'\^(\d+)', s[i:])
+        if rm:
+            rep = int(rm.group(1)); i += rm.end()
         if i < len(s) and s[i] == '(':
             i += 1; args = []
             while True:
                 a, i = p(i); args.append(a)
                 if s[i] == ',': i += 1
                 elif s[i] == ')': i += 1; break
-            return ('o', tuple(args)), i
+            node = ('o', name, tuple(args))
+            # unfold f^rep(arg) into rep nested single-arg applications
+            for _ in range(rep - 1):
+                node = ('o', name, (node,))
+            return node, i
         return (('v', name) if re.fullmatch(r'x\d+', name) else ('k', name)), i
     return p(0)[0]
 
@@ -44,10 +54,10 @@ def parse_thvm(s):
     toks = re.findall(r'\(|\)|[^\s()]+', s); pos = [0]
     def p():
         if toks[pos[0]] == '(':
-            pos[0] += 2
+            head = toks[pos[0] + 1]; pos[0] += 2
             args = []
             while toks[pos[0]] != ')': args.append(p())
-            pos[0] += 1; return ('o', tuple(args))
+            pos[0] += 1; return ('o', SYM.get(head, head), tuple(args))
         t = toks[pos[0]]; pos[0] += 1
         return ('v', t) if re.fullmatch(r'V\d+', t) else ('k', SYM.get(t, t))
     return p()
@@ -59,7 +69,7 @@ def rc(l, r):
             if n[1] not in m: m[n[1]] = '#' + str(len(m))
             return ('v', m[n[1]])
         if n[0] == 'k': return n
-        return ('o', tuple(go(a) for a in n[1]))
+        return ('o', n[1], tuple(go(a) for a in n[2]))
     return (go(l), go(r))
 
 def canon(A, B):

@@ -29,6 +29,223 @@
 #include "../src/thvm.c"
 #include <time.h>
 
+// === Memory census (THVM_ATP_MEM_CENSUS=1) ==========================
+//
+// Itemized byte accounting of every store a deep completion grows,
+// printed to stderr at end-of-run (which includes RSS-guard aborts:
+// the state is still live at the report).  Diagnosis-only -- reads
+// the state, mutates nothing, and is behind an env gate so the
+// default run's output is byte-identical.
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+static u64 census_alloc_size(const void *p) {
+  return (p != NULL) ? (u64)malloc_size(p) : 0u;
+}
+static u64 census_malloc_used(void) {
+  vm_address_t *zones = NULL;
+  unsigned cnt = 0;
+  u64 used = 0;
+  if (malloc_get_all_zones(mach_task_self(), NULL, &zones, &cnt)
+      == KERN_SUCCESS) {
+    for (unsigned zi = 0; zi < cnt; zi++) {
+      malloc_statistics_t st;
+      memset(&st, 0, sizeof st);
+      malloc_zone_statistics((malloc_zone_t *)zones[zi], &st);
+      used += (u64)st.size_in_use;
+    }
+  }
+  return used;
+}
+static u64 census_rss(void) {
+  struct mach_task_basic_info info;
+  mach_msg_type_number_t cnt = MACH_TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                (task_info_t)&info, &cnt) == KERN_SUCCESS) {
+    return (u64)info.resident_size;
+  }
+  return 0u;
+}
+#else
+#include <malloc.h>
+static u64 census_alloc_size(const void *p) {
+  return (p != NULL) ? (u64)malloc_usable_size((void *)p) : 0u;
+}
+static u64 census_malloc_used(void) { return 0u; }
+static u64 census_rss(void) {
+  FILE *fp = fopen("/proc/self/statm", "r");
+  u64 rss = 0;
+  if (fp != NULL) {
+    long pages_total = 0, pages_resident = 0;
+    if (fscanf(fp, "%ld %ld", &pages_total, &pages_resident) == 2) {
+      long pgsz = sysconf(_SC_PAGESIZE);
+      if (pgsz > 0) rss = (u64)pages_resident * (u64)pgsz;
+    }
+    fclose(fp);
+  }
+  return rss;
+}
+#endif
+
+#define CENSUS_MB(b) ((double)(b) / (1024.0 * 1024.0))
+
+static void atp_mem_census(const AtpState *s) {
+  const char *e = getenv("THVM_ATP_MEM_CENSUS");
+  if (e == NULL || e[0] == '0' || s == NULL) return;
+  u64 itemized = 0;
+  fprintf(stderr, "[mem-census] rss=%.0fMB malloc-zones-used=%.0fMB\n",
+          CENSUS_MB(census_rss()), CENSUS_MB(census_malloc_used()));
+  // GC heap (the Term semi-spaces; RSS cost = pages ever touched).
+  {
+    u64 lo   = gc_enabled() ? gc_from_start() : 0u;
+    u64 semi = gc_enabled() ? (gc_from_end() - lo) : thvm_heap_cells();
+    fprintf(stderr,
+            "[mem-census]   gc-heap: semi=%.0fMB x2  used-now=%.0fMB  "
+            "passes=%llu  gc=%s\n",
+            CENSUS_MB(semi * sizeof(Term)),
+            CENSUS_MB((HEAP_NEXT - lo) * sizeof(Term)),
+            (unsigned long long)gc_count(), gc_enabled() ? "on" : "off");
+  }
+  // Proof trace: spine array + off-heap packed-equation store.
+  {
+    u64 spine   = (u64)s->t_cap * sizeof(Term);
+    u64 off_arr = (s->trace_eq_off != NULL) ? (u64)s->t_cap * sizeof(u64) : 0u;
+    u64 eq_cap  = s->trace_eq_cap;
+    itemized += spine + off_arr + eq_cap;
+    fprintf(stderr,
+            "[mem-census]   trace: n=%u cap=%u max=%u  spine-arr=%.0fMB  "
+            "eq_off=%.0fMB  eq_buf=%.0fMB used (%.0fMB cap)\n",
+            s->n_trace, s->t_cap, s->t_max, CENSUS_MB(spine),
+            CENSUS_MB(off_arr), CENSUS_MB(s->trace_eq_len),
+            CENSUS_MB(eq_cap));
+  }
+  // CP queue: the ~12 always-on parallel arrays + optional ones +
+  // the per-CP malloc'd packed byte strings.
+  {
+    u64 fixed = (u64)s->cp_cap
+              * (sizeof(u8 *)            // cp_packed
+                 + 6u * sizeof(u32)      // cp_trace pri seq depth goal pri2
+                 + sizeof(u32)           // cp_last_norm_r_revision
+                 + 2u * sizeof(u8)       // cp_deprio cp_kind
+                 + sizeof(AtpCpHeapNode) // cp_heap
+                 + sizeof(u32));         // cp_pos
+    u64 opt = 0;
+    if (s->cp_ultimate != NULL)  opt += (u64)s->cp_cap;
+    if (s->cp_uid_a != NULL)     opt += (u64)s->cp_cap * sizeof(u32) * 2u;
+    if (s->cp_implicit != NULL)  opt += (u64)s->cp_cap * sizeof(AtpCpImplicit);
+    if (s->cp_is_implicit != NULL) opt += ((u64)s->cp_cap + 7u) / 8u;
+    u64 packed = 0, pmax = 0;
+    u32 n_packed = 0;
+    for (u32 k = 0; k < s->n_cps; k++) {
+      u64 b = census_alloc_size(s->cp_packed[k]);
+      if (b > 0) { packed += b; n_packed++; if (b > pmax) pmax = b; }
+    }
+    itemized += fixed + opt + packed;
+    fprintf(stderr,
+            "[mem-census]   cpq: n=%u cap=%u  arrays=%.0fMB (+opt %.0fMB)  "
+            "packed=%.0fMB over %u strs (mean=%.0fB max=%lluB)\n",
+            s->n_cps, s->cp_cap, CENSUS_MB(fixed), CENSUS_MB(opt),
+            CENSUS_MB(packed), n_packed,
+            (n_packed > 0) ? (double)packed / (double)n_packed : 0.0,
+            (unsigned long long)pmax);
+  }
+  // Auto-MaxWeight deferred stash.
+  if (s->cp_stash_cap > 0 || s->n_cp_stash > 0) {
+    u64 arrays = (u64)s->cp_stash_cap
+               * (sizeof(u8 *) + 2u * sizeof(u32) + 2u * sizeof(u8));
+    u64 packed = 0;
+    for (u32 k = 0; k < s->n_cp_stash; k++) {
+      packed += census_alloc_size(s->cp_stash_packed[k]);
+    }
+    itemized += arrays + packed;
+    fprintf(stderr,
+            "[mem-census]   amw-stash: n=%u cap=%u  arrays=%.0fMB  "
+            "packed=%.0fMB\n",
+            s->n_cp_stash, s->cp_stash_cap, CENSUS_MB(arrays),
+            CENSUS_MB(packed));
+  }
+#ifdef THVM_ATPFT_ALLOC
+  // FT arena: persistent slab blocks + scratch bump region.
+  if (s->ft_arena_ptr != NULL) {
+    const AtpFt *a = s->ft_arena_ptr;
+    u64 blk_bytes = 0;
+    u32 n_blk = 0;
+    for (const AtpFtBlock *b = a->blocks; b != NULL; b = b->next_block) {
+      blk_bytes += census_alloc_size(b);
+      n_blk++;
+    }
+    u64 scratch = census_alloc_size(a->scratch_base);
+    itemized += blk_bytes + scratch;
+    fprintf(stderr,
+            "[mem-census]   ft-arena: blocks=%u (%.0fMB)  alive=%llu cells "
+            "(%.0fMB)  freelist~%.0fMB  scratch=%.0fMB\n",
+            n_blk, CENSUS_MB(blk_bytes),
+            (unsigned long long)a->n_persistent_alive,
+            CENSUS_MB(a->n_persistent_alive * sizeof(AtpFtCell)),
+            CENSUS_MB(((u64)n_blk * ATPFT_CELLS_PER_BLOCK
+                       - a->n_persistent_alive) * sizeof(AtpFtCell)),
+            CENSUS_MB(scratch));
+    fprintf(stderr,
+            "[mem-census]   ft-net: step=%lld cells (%.0fMB)  "
+            "form+push=%lld cells (%.0fMB)  other=%lld cells\n",
+            (long long)g_ftnet_step,
+            CENSUS_MB((double)g_ftnet_step * (double)sizeof(AtpFtCell)),
+            (long long)g_ftnet_form,
+            CENSUS_MB((double)g_ftnet_form * (double)sizeof(AtpFtCell)),
+            (long long)(g_ftnet_step - g_ftnet_form));
+    fprintf(stderr,
+            "[mem-census]   ft-net form split: treatform=%lld  join=%lld  "
+            "heappush=%lld  release=%lld  rest=%lld cells\n",
+            (long long)g_ftnet_treatform, (long long)g_ftnet_join,
+            (long long)g_ftnet_push, (long long)g_ftnet_release,
+            (long long)(g_ftnet_form - g_ftnet_treatform - g_ftnet_join
+                        - g_ftnet_push - g_ftnet_release));
+  }
+#endif
+  // Rule arrays (small; printed for completeness).
+  {
+    u64 rules = (u64)s->r_cap
+              * (2u * sizeof(Term) + sizeof(u32) + sizeof(u8));
+    itemized += rules;
+    fprintf(stderr, "[mem-census]   rules: n=%u cap=%u arrays=%.1fMB\n",
+            s->n_rules, s->r_cap, CENSUS_MB(rules));
+  }
+  fprintf(stderr, "[mem-census]   itemized-total=%.0fMB "
+          "(vs malloc-zones %.0fMB; gap = indices/caches/parser/frag)\n",
+          CENSUS_MB(itemized), CENSUS_MB(census_malloc_used()));
+}
+
+// Final AtpStatus of the last run, exposed for thin wrappers that
+// include this translation unit (tools/thvm_atp_cli.c) and need the
+// machine-readable result alongside the printed report.
+int g_atp_bench_status = -1;
+// Unorientable equations in the FINAL rule store, exposed for the same
+// wrappers: without unfailing CP formation (use_unfailing_cp, armed by
+// the WM preset) an unorientable equation contributes NO ordered
+// overlaps, so a QUEUE_EMPTY that leaves one behind is NOT a
+// saturation certificate -- the CLI must answer GaveUp, never
+// Satisfiable (COL002-5's S-combinator axiom is inherently
+// KBO-unorientable and the bare tgt slice "saturated" in 8 steps on
+// the unsatisfiable problem).
+unsigned g_atp_bench_unorient = 0;
+// Pre-teardown hook + context for wrappers: called (when set) right
+// before thvm_atp_free with the final state, while rules/trace/heap
+// are still live -- proof extraction happens here.  g_atp_bench_pr
+// points at the parsed .pr (symbol/variable names for term printing)
+// when the run was pr-mode.
+struct PrProblem_;
+void (*g_atp_bench_pre_free_hook)(AtpState *s) = NULL;
+// Clean give-up from bench intake (the =2 exit-fast discipline).  The
+// CLI points this at its tp_giveup so direct runs print the SZS line;
+// standalone bench builds fall back to stderr + exit(1) (the schedule
+// treats exit 1 as searched-and-gave-up).
+void (*g_atp_bench_giveup_hook)(const char *why) = NULL;
+static void tp_bench_giveup(const char *why) {
+  if (g_atp_bench_giveup_hook != NULL) g_atp_bench_giveup_hook(why);
+  fprintf(stderr, "bench: %s\n", why);
+  exit(1);
+}
+void *g_atp_bench_pr = NULL;
+
 // nand is the single binary function symbol (CTR label 1).
 #define L_NAND 1u
 
@@ -50,6 +267,18 @@ static Term fv(u32 id) { return term_new_fvr(id); }
 #define L_AND 5u
 #define L_NOT 6u
 static Term konst(u32 label) { return term_new_ctr(label, NULL, 0); }
+// A goal is GROUND iff neither side contains a free variable.  WM's
+// -auto arms zb=mnf only for ground goals (PM_Existenzziele false); a
+// goal variable makes the conjecture existential and keeps rnf.
+static u8 atp_bench_term_ground(Term t) {
+  if (term_tag(t) == TAG_FVR) return 0u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++)
+      if (!atp_bench_term_ground(term_ctr_at(t, i))) return 0u;
+  }
+  return 1u;
+}
 static Term and_op(Term x, Term y) {
   Term c[2] = { x, y };
   return term_new_ctr(L_AND, c, 2);
@@ -356,9 +585,9 @@ static void goal_hn_leftid(Term *l, Term *r) {
 
 #include <ctype.h>
 
-#define PR_MAX_SYMS 32u
-#define PR_MAX_VARS 16u
-#define PR_MAX_EQNS 16u
+#define PR_MAX_SYMS 512u
+#define PR_MAX_VARS 128u
+#define PR_MAX_EQNS 256u
 #define PR_NAME_LEN 64u
 
 typedef struct {
@@ -382,6 +611,26 @@ typedef struct {
   u32   precedence[PR_MAX_SYMS + PR_LABEL_BASE];  // by label; higher = greater
   Term  eq_l[PR_MAX_EQNS], eq_r[PR_MAX_EQNS];
   u32   n_eqns;
+  // Goal-derived seed per equation (spb=goal derivation tracking):
+  // 1 on the tgt definitions naming CONJECTURE subterms and on the
+  // conjecture-role units themselves (THVM_ATP_TGT_EQNS indices).  The
+  // engine feed marks these via thvm_atp_mark_gd_next; zero-init (the
+  // struct is a static) keeps everything else unseeded.
+  u8    eq_gd[PR_MAX_EQNS];
+  // Fresh definitional symbols introduced by pr_flatten_goal /
+  // pr_tgt_transform: syms[fresh_sym_base .. fresh_sym_base +
+  // n_fresh_syms).  The proof emitter sources axioms mentioning them
+  // as introduced(definition) rather than file(...) -- a label-range
+  // test, immune to user symbols that happen to spell sF*/sFlat*.
+  u32   fresh_sym_base;
+  u32   n_fresh_syms;
+  // Multi-goal CONCLUSION block (Waldmeister's parser keeps a
+  // list_of_conclusions; -auto proves every goal in one run).
+  // goal_l/goal_r stay the FIRST goal so all single-goal code paths
+  // (signature walk, MNF gate, alignment tooling) read exactly what
+  // they always read.
+  Term  goals_l[64], goals_r[64];
+  u32   n_goals;
   Term  goal_l, goal_r;
 } PrProblem;
 
@@ -404,6 +653,282 @@ static void pr_mark_axiom_consts(Term t, u8 *is_ax_const, u32 cap) {
   }
   for (u32 i = 0; i < n; i++)
     pr_mark_axiom_consts(term_ctr_at(t, i), is_ax_const, cap);
+}
+
+// === WM -auto precedence derivation ==================================
+// `wmcli -auto` IGNORES the .pr ORDERING section and self-derives the
+// reduction precedence.  Two source stages compose:
+//
+//   1. WASIC/SpezNormierung.c renumbers the signature symbols by the
+//      lexicographic key SymbolVergleich (SpezNormierung.c:375):
+//        AnzVorkGleichungen  (occurrences in EQUATIONS)   -- fewer => later
+//        Stelligkeit         (arity)                      -- larger => later
+//        PositionenGleichungen / PositionenZiele          -- prime-power
+//        KombiKontext{Gleichungen,Ziele}{Einzeln,Gegenueber,-} contexts
+//        FinaleBewertung                                  -- final tally
+//      via a stable bubble sort (swap when the left is "Groesser"); the
+//      resulting position IS the internal symbol id.  Symbol positions
+//      are the prime-power weights of PositionsDatenAusTermSammeln
+//      (SpezNormierung.c:136): the j-th (1-based) argument at depth d
+//      multiplies the parent weight by Primzahlen[d]^j, uint32 wrapping.
+//   2. ANA/Praezedenzgenerator.c FuchsPraezedenz (line 292) ranks the
+//      EQUATION symbols by the arity ladder unary>binary>...>constants
+//      (the i%(N+1) trick), then the CONCLUSION-only symbols by ascending
+//      arity, each band ordered by the id above -- first = highest prec.
+//
+// This function reproduces both stages over the parsed .pr, writing the
+// derived total precedence into pr->precedence[] for the user labels.
+// Validated byte-identical to `wmcli -auto`'s emitted prec= string on
+// every KBO-ordered notable theorem (the combinator files use -ord col3
+// and never reach this path).  The two engine FVI constants (reserved
+// labels 1/2) stay precedence-minimal -- WM ranks its const1/const2 as
+// arity-0 equation symbols just above the goal skolems, but that band
+// sits below every operator and does not reorder any kept rule (verified
+// on the Boolean/Ring/HigmanNeumann corpora).
+static const double PR_PRIMES[15] =
+  {2,3,5,7,11,13,17,19,23,29,31,37,41,43,47};
+
+static void pr_occ_collect(Term t, u32 *field, u32 cap) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 e = term_ext(t);
+  if (e < cap) field[e]++;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) pr_occ_collect(term_ctr_at(t, i), field, cap);
+}
+
+static void pr_pos_collect(Term t, u32 *field, u32 cap, u32 position, u32 depth) {
+  if (depth >= 15u) return;
+  if (term_tag(t) != TAG_CTR) return;
+  u32 n = term_ctr_n(t);
+  for (u32 i = n; i > 0; i--) {
+    u32 w = (u32)((double)position * pow(PR_PRIMES[depth], (double)i));
+    pr_pos_collect(term_ctr_at(t, i - 1), field, cap, w, depth + 1);
+  }
+  u32 e = term_ext(t);
+  if (e < cap) field[e] += position;
+}
+
+// TermKontext (SpezNormierung.c:155): context threads through the term,
+// each function symbol adding its AnzVork*+Pos* tallies; `combi` selects
+// pass-2 (AnzVork+Pos) vs pass-3 (KombiKontext) inputs.
+typedef struct {
+  u32 anzG[PR_MAX_SYMS + PR_LABEL_BASE], anzZ[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 posG[PR_MAX_SYMS + PR_LABEL_BASE], posZ[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 kkGe[PR_MAX_SYMS + PR_LABEL_BASE], kkGeg[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 kkG[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 kkZe[PR_MAX_SYMS + PR_LABEL_BASE], kkZeg[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 kkZ[PR_MAX_SYMS + PR_LABEL_BASE];
+  u32 fin[PR_MAX_SYMS + PR_LABEL_BASE];
+} PrSymStats;
+
+static u32 pr_termkontext(Term t, u32 context, const PrSymStats *st, u32 cap) {
+  if (term_tag(t) != TAG_CTR) return context + 1u;
+  u32 e = term_ext(t);
+  if (e < cap) context += st->anzG[e] + st->anzZ[e] + st->posG[e] + st->posZ[e];
+  u32 n = term_ctr_n(t);
+  for (u32 i = n; i > 0; i--)
+    context += pr_termkontext(term_ctr_at(t, i - 1), context, st, cap);
+  return context;
+}
+
+static u32 pr_termkontext2(Term t, u32 context, const PrSymStats *st, u32 cap) {
+  if (term_tag(t) != TAG_CTR) return context + 1u;
+  u32 e = term_ext(t);
+  if (e < cap) context += st->kkG[e] + st->kkZ[e];
+  u32 n = term_ctr_n(t);
+  for (u32 i = n; i > 0; i--)
+    context += pr_termkontext2(term_ctr_at(t, i - 1), context, st, cap);
+  return context;
+}
+
+static void pr_finalesym(Term t, u32 vater, PrSymStats *st, u32 cap) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 e = term_ext(t);
+  if (e < cap) st->fin[e] += vater;
+  u32 v2 = pr_termkontext2(t, 0u, st, cap);
+  u32 n = term_ctr_n(t);
+  for (u32 i = n; i > 0; i--) pr_finalesym(term_ctr_at(t, i - 1), v2, st, cap);
+}
+
+// SymbolVergleich: +1 if label `a` is "Groesser" (sinks later in the sort
+// => higher id), -1 if "Kleiner", 0 if equal.  arity[] indexed by label.
+static int pr_sym_vergleich(u32 a, u32 b, const PrSymStats *st, const u32 *arity) {
+  if (st->anzG[a] != st->anzG[b]) return st->anzG[a] < st->anzG[b] ? 1 : -1; // Max
+  if (arity[a]  != arity[b])      return arity[a]  > arity[b]  ? 1 : -1;      // Min
+  const u32 *keys_a[9] = { st->posG, st->posZ, st->kkGe, st->kkGeg, st->kkG,
+                           st->kkZe, st->kkZeg, st->kkZ, st->fin };
+  for (u32 k = 0; k < 9; k++)
+    if (keys_a[k][a] != keys_a[k][b]) return keys_a[k][a] > keys_a[k][b] ? 1 : -1;
+  return 0;
+}
+
+static void pr_wm_derive_precedence(PrProblem *pr) {
+  u32 cap = pr->n_syms + PR_LABEL_BASE;
+  PrSymStats *st = calloc(1, sizeof *st);
+  u32 arity[PR_MAX_SYMS + PR_LABEL_BASE];
+  u8  in_eqns[PR_MAX_SYMS + PR_LABEL_BASE];
+  memset(arity, 0, sizeof arity);
+  memset(in_eqns, 0, sizeof in_eqns);
+  for (u32 i = 0; i < pr->n_syms; i++) arity[i + PR_LABEL_BASE] = pr->syms[i].arity;
+
+  u32 L[PR_MAX_SYMS + PR_LABEL_BASE], R[PR_MAX_SYMS + PR_LABEL_BASE];
+  // Pass 1: occurrence + prime-power position tallies (goals then eqns,
+  // matching SpezNormierung's conclusions-first loop order).
+  if (term_tag(pr->goal_l) == TAG_CTR || term_tag(pr->goal_r) == TAG_CTR) {
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_occ_collect(pr->goal_l, L, cap); pr_occ_collect(pr->goal_r, R, cap);
+    for (u32 l = 0; l < cap; l++) st->anzZ[l] += R[l] + L[l];
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_pos_collect(pr->goal_l, L, cap, 1u, 0u);
+    pr_pos_collect(pr->goal_r, R, cap, 1u, 0u);
+    for (u32 l = 0; l < cap; l++) st->posZ[l] += R[l] + L[l];
+  }
+  for (u32 e = 0; e < pr->n_eqns; e++) {
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_occ_collect(pr->eq_l[e], L, cap); pr_occ_collect(pr->eq_r[e], R, cap);
+    for (u32 l = 0; l < cap; l++) { st->anzG[l] += R[l] + L[l]; if (R[l] + L[l]) in_eqns[l] = 1u; }
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_pos_collect(pr->eq_l[e], L, cap, 1u, 0u);
+    pr_pos_collect(pr->eq_r[e], R, cap, 1u, 0u);
+    for (u32 l = 0; l < cap; l++) st->posG[l] += R[l] + L[l];
+  }
+  // Pass 2: KombiKontext (equations -> *G, conclusions -> *Z).
+  for (u32 e = 0; e < pr->n_eqns; e++) {
+    u32 gL = pr_termkontext(pr->eq_l[e], 0u, st, cap);
+    u32 gR = pr_termkontext(pr->eq_r[e], 0u, st, cap);
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_occ_collect(pr->eq_l[e], L, cap); pr_occ_collect(pr->eq_r[e], R, cap);
+    for (u32 l = 0; l < cap; l++) {
+      if (R[l] > 0) { st->kkG[l] += gR + gL; st->kkGe[l] += gR; }
+      if (L[l] > 0) { st->kkG[l] += gR + gL; st->kkGe[l] += gL; }
+      if (R[l] > 0 && L[l] == 0) st->kkGeg[l] += gL;
+      if (L[l] > 0 && R[l] == 0) st->kkGeg[l] += gR;
+    }
+  }
+  {
+    u32 gL = pr_termkontext(pr->goal_l, 0u, st, cap);
+    u32 gR = pr_termkontext(pr->goal_r, 0u, st, cap);
+    memset(L, 0, sizeof L); memset(R, 0, sizeof R);
+    pr_occ_collect(pr->goal_l, L, cap); pr_occ_collect(pr->goal_r, R, cap);
+    for (u32 l = 0; l < cap; l++) {
+      if (R[l] > 0) { st->kkZ[l] += gR + gL; st->kkZe[l] += gR; }
+      if (L[l] > 0) { st->kkZ[l] += gR + gL; st->kkZe[l] += gL; }
+      if (R[l] > 0 && L[l] == 0) st->kkZeg[l] += gL;
+      if (L[l] > 0 && R[l] == 0) st->kkZeg[l] += gR;
+    }
+  }
+  // Pass 3: FinaleBewertung.
+  for (u32 e = 0; e < pr->n_eqns; e++) {
+    pr_finalesym(pr->eq_l[e], 0u, st, cap);
+    pr_finalesym(pr->eq_r[e], 0u, st, cap);
+  }
+  pr_finalesym(pr->goal_l, 0u, st, cap);
+  pr_finalesym(pr->goal_r, 0u, st, cap);
+
+  // Bubble sort user labels (init = declaration order) by SymbolVergleich;
+  // final position = internal id.
+  u32 ord[PR_MAX_SYMS], nord = pr->n_syms;
+  for (u32 i = 0; i < nord; i++) ord[i] = i + PR_LABEL_BASE;
+  for (u32 i = 1; i < nord; i++)
+    for (u32 j = 0; j + i < nord; j++)
+      if (pr_sym_vergleich(ord[j], ord[j + 1], st, arity) == 1) {
+        u32 tmp = ord[j]; ord[j] = ord[j + 1]; ord[j + 1] = tmp;
+      }
+  u32 id_of[PR_MAX_SYMS + PR_LABEL_BASE];
+  memset(id_of, 0, sizeof id_of);
+  for (u32 k = 0; k < nord; k++) id_of[ord[k]] = k;
+
+  // FuchsPraezedenz: build the descending-precedence list.
+  u32 N = 0;
+  for (u32 l = PR_LABEL_BASE; l < cap; l++) if (arity[l] > N) N = arity[l];
+  u32 seq[PR_MAX_SYMS], nseq = 0;
+  // (2A) equation symbols by arity ladder 1..N then 0, within arity by id asc.
+  for (u32 ii = 1; ii <= N + 1u; ii++) {
+    u32 a = ii % (N + 1u);
+    for (u32 want_id = 0; want_id < nord; want_id++)
+      for (u32 l = PR_LABEL_BASE; l < cap; l++)
+        if (in_eqns[l] && arity[l] == a && id_of[l] == want_id) seq[nseq++] = l;
+  }
+  // (3A) conclusion-only symbols by ascending arity, within arity by id asc.
+  for (u32 a = 0; a <= N; a++)
+    for (u32 want_id = 0; want_id < nord; want_id++)
+      for (u32 l = PR_LABEL_BASE; l < cap; l++)
+        if (!in_eqns[l] && arity[l] == a && id_of[l] == want_id) seq[nseq++] = l;
+
+  // Assign ranks: first in seq = highest.  Reserved 1/2 stay at 1/2.
+  for (u32 l = 0; l < cap; l++) pr->precedence[l] = 0u;
+  pr->precedence[1] = 1u;
+  pr->precedence[2] = 2u;
+  for (u32 k = 0; k < nseq; k++) pr->precedence[seq[k]] = (nseq - k) + PR_LABEL_BASE - 1u;
+
+  if (getenv("THVM_ATP_DEBUG_PREC") != NULL) {
+    fprintf(stderr, "WM-DERIVED-PREC:");
+    for (u32 k = 0; k < nseq; k++)
+      fprintf(stderr, " %s", pr->syms[seq[k] - PR_LABEL_BASE].name);
+    fprintf(stderr, "\n");
+  }
+  free(st);
+}
+
+// === WM "Verband" (lattice) classification =============================
+// `wmcli -auto`'s PhilMarlow classifier detects the Verband structure
+// (Sinai.h:364 -- Zuordnung "OU" with premises Assoziativitaet(O),
+// Kommutativitaet(O), Assoziativitaet(U), Kommutativitaet(U)) and then
+// runs a DIFFERENT strategy than the StdS default: `kbo,cph(gt),gj()` =
+// gtweight CP selection (CH_GtWeight, not the default mixweight),
+// ground-joinability ON, and NO MNF / NO -pq interleave.  A problem
+// matches when its signature carries TWO distinct binary operators, each
+// with BOTH an associativity and a commutativity axiom.  This is what
+// distinguishes CommutativeRing (or+and both assoc+comm -> Verband) from
+// Boolean (comm only, no assoc axiom -> Orkus/StdS) and non-commutative
+// Ring (* has no commutativity -> Orkus).  Validated against every
+// notable theorem's actual `wmcli -auto` structure: fires on EXACTLY the
+// 3 CommutativeRing files and nothing else (Robbins classifies as the
+// separate RobbinsAlgebra structure, not handled here).
+static u8 pr_v_binop(Term t, u32 lab) {
+  return term_tag(t) == TAG_CTR && term_ext(t) == lab && term_ctr_n(t) == 2u;
+}
+// op(x,y) = op(y,x): both sides op-rooted over two distinct swapped vars.
+static u8 pr_eq_is_comm(Term l, Term r, u32 lab) {
+  if (!pr_v_binop(l, lab) || !pr_v_binop(r, lab)) return 0u;
+  Term l0 = term_ctr_at(l, 0), l1 = term_ctr_at(l, 1),
+       r0 = term_ctr_at(r, 0), r1 = term_ctr_at(r, 1);
+  if (term_tag(l0) != TAG_FVR || term_tag(l1) != TAG_FVR ||
+      term_tag(r0) != TAG_FVR || term_tag(r1) != TAG_FVR) return 0u;
+  u32 a = term_ext(l0), b = term_ext(l1);
+  return a != b && a == term_ext(r1) && b == term_ext(r0);
+}
+static u8 pr_v_assoc_left(Term t, u32 lab) {   // op(op(v,v),v)
+  if (!pr_v_binop(t, lab)) return 0u;
+  Term a = term_ctr_at(t, 0), b = term_ctr_at(t, 1);
+  return pr_v_binop(a, lab) && term_tag(term_ctr_at(a, 0)) == TAG_FVR &&
+         term_tag(term_ctr_at(a, 1)) == TAG_FVR && term_tag(b) == TAG_FVR;
+}
+static u8 pr_v_assoc_right(Term t, u32 lab) {  // op(v,op(v,v))
+  if (!pr_v_binop(t, lab)) return 0u;
+  Term a = term_ctr_at(t, 0), b = term_ctr_at(t, 1);
+  return term_tag(a) == TAG_FVR && pr_v_binop(b, lab) &&
+         term_tag(term_ctr_at(b, 0)) == TAG_FVR &&
+         term_tag(term_ctr_at(b, 1)) == TAG_FVR;
+}
+// op(op(x,y),z) = op(x,op(y,z))  (either orientation).
+static u8 pr_eq_is_assoc(Term l, Term r, u32 lab) {
+  return (pr_v_assoc_left(l, lab) && pr_v_assoc_right(r, lab)) ||
+         (pr_v_assoc_left(r, lab) && pr_v_assoc_right(l, lab));
+}
+static u8 pr_is_verband(const PrProblem *pr) {
+  u32 n_good = 0;
+  for (u32 i = 0; i < pr->n_syms; i++) {
+    if (pr->syms[i].arity != 2u) continue;
+    u32 lab = i + PR_LABEL_BASE;
+    u8 has_a = 0, has_c = 0;
+    for (u32 e = 0; e < pr->n_eqns; e++) {
+      if (!has_c && pr_eq_is_comm(pr->eq_l[e], pr->eq_r[e], lab)) has_c = 1;
+      if (!has_a && pr_eq_is_assoc(pr->eq_l[e], pr->eq_r[e], lab)) has_a = 1;
+    }
+    if (has_a && has_c) n_good++;
+  }
+  return n_good >= 2u;
 }
 
 // Label of `name[0..n)`, or 0 when unknown.
@@ -616,8 +1141,13 @@ static void pr_terms_line(PrProblem *pr, PrSec sec, const char *body) {
     pr_eq_line(pr, body, &pr->eq_l[pr->n_eqns], &pr->eq_r[pr->n_eqns]);
     pr->n_eqns++;
   } else if (sec == PR_SEC_CONCL) {
-    if (pr->goal_l != 0) pr_die(pr, "multiple CONCLUSION lines", body);
-    pr_eq_line(pr, body, &pr->goal_l, &pr->goal_r);
+    if (pr->n_goals >= 64u) pr_die(pr, "too many CONCLUSION lines", body);
+    pr_eq_line(pr, body, &pr->goals_l[pr->n_goals], &pr->goals_r[pr->n_goals]);
+    if (pr->n_goals == 0u) {
+      pr->goal_l = pr->goals_l[0];
+      pr->goal_r = pr->goals_r[0];
+    }
+    pr->n_goals++;
   }
 }
 
@@ -626,6 +1156,417 @@ static void pr_load_terms(PrProblem *pr) {
   pr_walk(pr, pr_terms_line);
   if (pr->n_eqns == 0u) pr_die(pr, "no EQUATIONS", NULL);
   if (pr->goal_l == 0)  pr_die(pr, "no CONCLUSION", NULL);
+}
+
+// --- Twee/Vampire-style GOAL FLATTENING (THVM_ATP_FLATTEN_GOAL) -------
+//
+// Name every distinct COMPOUND subterm of the goal sides with a fresh
+// MINIMAL constant, adding `fresh = subterm` as an axiom.  KBO orients
+// each as `subterm -> fresh` (fresh weight 1 < any compound's weight),
+// so the deep goal reduces to shallow named pieces and the completion
+// derives relations between the SHALLOW definitions.  This is the
+// technique BOTH Twee (--flatten-goal, default ON) and Vampire
+// (function_definition / naming) use to crack deep-goal UEQ problems
+// (distributivity, the Sheffer entailments) that plain completion
+// stalls on -- verified: twee proves ALG212-10 WITH flatten-goal, FAILS
+// with --no-flatten-goal.  SOUND: the fresh constants are new symbols,
+// so each definition is a conservative definitional extension; the goal
+// L=R holds in E iff it holds in E + {these definitions}.  Default OFF
+// so the byte-exact WM emulation is physically unchanged.
+static int pr_flat_term_eq(Term a, Term b) {
+  u8 ta = term_tag(a), tb = term_tag(b);
+  if (ta != tb) return 0;
+  if (ta == TAG_CTR) {
+    if (term_ext(a) != term_ext(b)) return 0;
+    u32 n = term_ctr_n(a);
+    if (n != term_ctr_n(b)) return 0;
+    for (u32 i = 0; i < n; i++)
+      if (!pr_flat_term_eq(term_ctr_at(a, i), term_ctr_at(b, i))) return 0;
+    return 1;
+  }
+  if (ta == TAG_FVR) return term_ext(a) == term_ext(b);
+  return term_val(a) == term_val(b);
+}
+static void pr_flatten_collect(Term t, Term *subs, u32 *nsub, u32 cap) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 n = term_ctr_n(t);
+  if (n == 0u) return;                       // constant: not compound
+  for (u32 i = 0; i < n; i++)
+    pr_flatten_collect(term_ctr_at(t, i), subs, nsub, cap);   // inner first
+  for (u32 i = 0; i < *nsub; i++)
+    if (pr_flat_term_eq(subs[i], t)) return; // already named
+  if (*nsub < cap) subs[(*nsub)++] = t;
+}
+static void pr_flatten_goal(PrProblem *pr) {
+  if (pr->goal_l == 0) return;
+  Term subs[128];
+  u32  nsub = 0;
+  pr_flatten_collect(pr->goal_l, subs, &nsub, 128u);
+  pr_flatten_collect(pr->goal_r, subs, &nsub, 128u);
+  if (nsub == 0u) return;
+  // Open a strictly-minimal precedence BAND for the fresh names.  twee
+  // ranks every symbol by a total occurrence-count key (SequentialMain
+  // funOccs) -- there are NO precedence ties.  Giving all fresh constants
+  // the same precedence (0) leaves every fresh<->fresh and fresh<->skolem
+  // equation KBO-incomparable, so the distributivity / median completions
+  // (ALG212-10 etc.) drown in unorientable pairs instead of orienting the
+  // named definitions.  Shift every existing symbol whose precedence is in
+  // the real band (>= PR_LABEL_BASE) up by nsub, then hand the fresh
+  // constants DISTINCT precedences PR_LABEL_BASE .. PR_LABEL_BASE+nsub-1
+  // (inner subterms, collected first, lowest) so they stay below every
+  // original function yet remain mutually comparable.
+  u32 ncap = PR_MAX_SYMS + PR_LABEL_BASE;
+  for (u32 l = PR_LABEL_BASE; l < ncap; l++)
+    if (pr->precedence[l] >= PR_LABEL_BASE) pr->precedence[l] += nsub;
+  pr->fresh_sym_base = pr->n_syms;
+  for (u32 i = 0; i < nsub; i++) {
+    if (pr->n_syms >= PR_MAX_SYMS) break;
+    if (pr->n_eqns >= PR_MAX_EQNS) break;
+    u32 lbl = PR_LABEL_BASE + pr->n_syms;
+    snprintf(pr->syms[pr->n_syms].name, PR_NAME_LEN, "sFlat%u", i);
+    pr->syms[pr->n_syms].arity = 0u;
+    pr->weights[lbl]    = 1u;                  // minimal weight -> subterm > fresh
+    pr->precedence[lbl] = PR_LABEL_BASE + i;   // distinct, minimal band
+    pr->n_syms++;
+    Term fresh = term_new_ctr(lbl, NULL, 0);
+    pr->eq_l[pr->n_eqns] = fresh;   // fresh = subterm  (orients subterm -> fresh)
+    pr->eq_r[pr->n_eqns] = subs[i];
+    pr->n_eqns++;
+  }
+  pr->n_fresh_syms = pr->n_syms - pr->fresh_sym_base;
+}
+
+// --- Vampire tgt (twee_goal_transformation) port ----------------------
+//
+// Vampire's `tgt=ground|full` (Shell/TweeGoalTransformation.cpp, used
+// by 191 of ~400 UEQ-schedule strategies) is Twee's goal-directed
+// preprocessing applied to EVERY goal-derived unit: name each compound
+// subterm of the negated conjecture bottom-up with a fresh minimal
+// symbol.  pr_flatten_goal above is the goal-equation-only, ground-only
+// special case; on the machine-equationalized '-10' class the final
+// goal equation is a bare `a != b` while the conjecture's content
+// lives in its sibling negated_conjecture units, so the goal-only
+// flatten is a no-op exactly where the transformation matters.
+//
+// pr_tgt_transform generalizes it:
+//   * scope: the CONCLUSION goal sides AND every conjecture-role
+//     EQUATION -- the FindProof CLI exports their emitted indices via
+//     THVM_ATP_TGT_EQNS (the .pr format has no role field).
+//   * full mode (ground_only=0): non-ground subterms are named too,
+//     with a fresh FUNCTION over the subterm's distinct variables --
+//     skipped when folding would not decrease constant-weight KBO
+//     (nodes <= nvars + 1: Vampire's linear-term guard, e.g. f(X,Y)),
+//     and when the fresh functor would exceed the term reader's
+//     arity-8 bound.
+//   * dedup modulo variable renaming (Vampire's Renaming::normalize):
+//     keys are first-occurrence renumbered clones, so alpha-equivalent
+//     subterms across clauses share one definition.
+// Definitions `fresh(vars) = subterm` are ADDED as axioms and nothing
+// is replaced in-place -- intake interreduction folds the conjecture
+// cone onto the fresh names (Vampire makes the same observation:
+// "Simplification will rewrite the first axiom to f(sF1,b) = sF0").
+// Soundness: conservative definitional extension, exactly
+// pr_flatten_goal's argument.  Default OFF (THVM_ATP_TGT unset).
+#define PR_TGT_MAX_SUBS 512u
+static Term pr_tgt_subs[PR_TGT_MAX_SUBS];    // normalized keys, inner-first
+static u32  pr_tgt_sub_nv[PR_TGT_MAX_SUBS];  // distinct vars per key
+static u8   pr_tgt_sub_goal[PR_TGT_MAX_SUBS];// key seen in the CONJECTURE cone
+static u32  pr_tgt_nsubs;
+
+// Renumber-clone: variables mapped to 0..k-1 by first occurrence;
+// counts nodes (symbols + variable occurrences, Vampire t->weight()).
+static Term pr_tgt_norm_rec(Term t, u32 *map, u32 *nv, u32 *nodes) {
+  (*nodes)++;
+  u8 tg = term_tag(t);
+  if (tg == TAG_FVR) {
+    u32 id = term_ext(t);
+    u32 j;
+    for (j = 0; j < *nv; j++) if (map[j] == id) break;
+    if (j == *nv) { map[*nv] = id; (*nv)++; }
+    return term_new_fvr(j);
+  }
+  if (tg != TAG_CTR) return t;
+  Term kids[8];
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++)
+    kids[i] = pr_tgt_norm_rec(term_ctr_at(t, i), map, nv, nodes);
+  return term_new_ctr(term_ext(t), (n > 0u) ? kids : NULL, n);
+}
+
+// goal_mark = 1 when collecting from the CONJECTURE cone (goal sides /
+// conjecture-role units): sets the key's goal flag -- on the dedup hit
+// too, so a subterm shared with an axiom still counts as goal-cone.
+static void pr_tgt_collect(Term t, int ground_only, int goal_mark) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 n = term_ctr_n(t);
+  if (n == 0u) return;                        // constant: not compound
+  for (u32 i = 0; i < n; i++)
+    pr_tgt_collect(term_ctr_at(t, i), ground_only, goal_mark); // inner first
+  u32 map[PR_MAX_VARS];
+  u32 nv = 0u, nodes = 0u;
+  Term key = pr_tgt_norm_rec(t, map, &nv, &nodes);
+  if (ground_only && nv > 0u) return;
+  if (nodes <= nv + 1u) return;   // linear guard (folding not decreasing)
+  if (nv > 8u) return;            // fresh functor beyond the arity-8 reader
+  for (u32 i = 0; i < pr_tgt_nsubs; i++)
+    if (pr_tgt_sub_nv[i] == nv && pr_flat_term_eq(pr_tgt_subs[i], key)) {
+      if (goal_mark) pr_tgt_sub_goal[i] = 1u;
+      return;                     // already named (modulo renaming)
+    }
+  if (pr_tgt_nsubs < PR_TGT_MAX_SUBS) {
+    pr_tgt_subs[pr_tgt_nsubs]     = key;
+    pr_tgt_sub_nv[pr_tgt_nsubs]   = nv;
+    pr_tgt_sub_goal[pr_tgt_nsubs] = (u8)(goal_mark != 0);
+    pr_tgt_nsubs++;
+  }
+}
+
+// Render a pr-layer term with signature names (X<k> for variables),
+// e.g. mult(X0,ld(X0,X1)) -- diagnostics only (the tgt debug dump).
+static void pr_print_term(FILE *fp, const PrProblem *pr, Term t) {
+  u8 tg = term_tag(t);
+  if (tg == TAG_FVR) { fprintf(fp, "X%u", term_ext(t)); return; }
+  if (tg != TAG_CTR) { fprintf(fp, "?%u/%u", tg, term_ext(t)); return; }
+  u32 lbl = term_ext(t);
+  if (lbl >= PR_LABEL_BASE && lbl < PR_LABEL_BASE + pr->n_syms)
+    fputs(pr->syms[lbl - PR_LABEL_BASE].name, fp);
+  else
+    fprintf(fp, "C%u", lbl);
+  u32 n = term_ctr_n(t);
+  if (n == 0u) return;
+  fputc('(', fp);
+  for (u32 i = 0; i < n; i++) {
+    if (i > 0u) fputc(',', fp);
+    pr_print_term(fp, pr, term_ctr_at(t, i));
+  }
+  fputc(')', fp);
+}
+
+static void pr_tgt_transform(PrProblem *pr, int ground_only, int all_eqns) {
+  if (pr->goal_l == 0) return;
+  pr_tgt_nsubs = 0u;
+  // Conjecture-role equations (emitted indices from the CLI), then the
+  // CONCLUSION goal sides.  Bottom-up + cached, so the numbering is
+  // inner-first like pr_flatten_goal's.
+  // all_eqns (Vampire gtg=all analog): EVERY input equation gets the
+  // goal role, so every axiom's compound subterms are named too -- the
+  // whole problem folds onto definitional layers (the shape of the
+  // tgt=full:gtg=all strategy that wins Vampire's GRP loop-theory
+  // family: its proofs introduce sF* definitions for AXIOM subterms
+  // like mult(X0,mult(X1,X2)), not just the conjecture cone).
+  if (all_eqns) {
+    for (u32 i = 0; i < pr->n_eqns; i++) {
+      pr_tgt_collect(pr->eq_l[i], ground_only, 0);
+      pr_tgt_collect(pr->eq_r[i], ground_only, 0);
+    }
+  }
+  // Conjecture-role units: collected with the goal mark (under all_eqns
+  // this pass only re-marks already-collected keys), and the units
+  // themselves are goal-derived seeds for the spb=goal derivation bit.
+  const char *el = getenv("THVM_ATP_TGT_EQNS");
+  if (el != NULL) {
+    const char *p = el;
+    while (*p != '\0') {
+      while (*p != '\0' && !isdigit((unsigned char)*p)) p++;
+      if (*p == '\0') break;
+      u32 idx = (u32)strtoul(p, (char **)&p, 10);
+      if (idx < pr->n_eqns) {
+        pr_tgt_collect(pr->eq_l[idx], ground_only, 1);
+        pr_tgt_collect(pr->eq_r[idx], ground_only, 1);
+        pr->eq_gd[idx] = 1u;
+      }
+    }
+  }
+  u32 ng = (pr->n_goals > 0u) ? pr->n_goals : 0u;
+  for (u32 g = 0; g < ng; g++) {
+    pr_tgt_collect(pr->goals_l[g], ground_only, 1);
+    pr_tgt_collect(pr->goals_r[g], ground_only, 1);
+  }
+  if (pr_tgt_nsubs == 0u) return;
+  // Minimal-band precedence for the fresh names -- same discipline as
+  // pr_flatten_goal (distinct precedences, below every original
+  // symbol, inner subterms lowest).
+  u32 nsub = pr_tgt_nsubs;
+  u32 ncap = PR_MAX_SYMS + PR_LABEL_BASE;
+  for (u32 l = PR_LABEL_BASE; l < ncap; l++)
+    if (pr->precedence[l] >= PR_LABEL_BASE) pr->precedence[l] += nsub;
+  pr->fresh_sym_base = pr->n_syms;
+  for (u32 i = 0; i < nsub; i++) {
+    if (pr->n_syms >= PR_MAX_SYMS) break;
+    if (pr->n_eqns >= PR_MAX_EQNS) break;
+    u32 lbl = PR_LABEL_BASE + pr->n_syms;
+    // Fresh name; skip over any user symbol that already spells sF<k>.
+    static u32 sfx = 0u;
+    for (;;) {
+      char nm[PR_NAME_LEN];
+      snprintf(nm, sizeof nm, "sF%u", sfx);
+      if (pr_sym_find(pr, nm, strlen(nm)) == 0u) break;
+      sfx++;
+    }
+    snprintf(pr->syms[pr->n_syms].name, PR_NAME_LEN, "sF%u", sfx);
+    sfx++;
+    u32 nv = pr_tgt_sub_nv[i];
+    pr->syms[pr->n_syms].arity = nv;
+    pr->weights[lbl]    = 1u;                  // minimal weight
+    pr->precedence[lbl] = PR_LABEL_BASE + i;   // distinct, minimal band
+    pr->n_syms++;
+    Term vars[8];
+    for (u32 v = 0; v < nv; v++) vars[v] = term_new_fvr(v);
+    Term fresh = term_new_ctr(lbl, (nv > 0u) ? vars : NULL, nv);
+    pr->eq_l[pr->n_eqns] = fresh;   // fresh(vars) = subterm
+    pr->eq_r[pr->n_eqns] = pr_tgt_subs[i];
+    // Goal-cone definitions seed the spb=goal derivation bit.
+    pr->eq_gd[pr->n_eqns] = pr_tgt_sub_goal[i];
+    pr->n_eqns++;
+  }
+  pr->n_fresh_syms = pr->n_syms - pr->fresh_sym_base;
+  if (getenv("THVM_ATP_TGT_DEBUG") != NULL) {
+    fprintf(stderr, "[tgt] %u definitions introduced (%s%s)\n",
+            nsub, ground_only ? "ground" : "full",
+            all_eqns ? ", all axioms" : "");
+    // One line per definition: name, label, arity, body (name(...) form)
+    // -- feeds the oracle-proof lemma aligner.
+    for (u32 i = 0; i < pr->n_fresh_syms; i++) {
+      u32 si = pr->fresh_sym_base + i;
+      fprintf(stderr, "[tgt] def %s/%u label=%u gd=%u body=",
+              pr->syms[si].name, pr->syms[si].arity, PR_LABEL_BASE + si,
+              pr->eq_gd[pr->n_eqns - pr->n_fresh_syms + i]);
+      pr_print_term(stderr, pr, pr->eq_r[pr->n_eqns - pr->n_fresh_syms + i]);
+      fputc('\n', stderr);
+    }
+  }
+}
+
+// --- Twee --distributivity-heuristic port ------------------------------
+//
+// Twee's flag (SequentialMain.hs:159-162) is an intake-time DEFINITIONAL
+// EXTENSION, not a CP-scoring adjustment: addDistributivityHeuristic
+// (SequentialMain.hs:688-728) scans every positive unit equation for the
+// two distributivity shapes (checkDistributivity, :705-721; either
+// orientation, variable leaves only, at most one hit per axiom)
+//
+//   A:  f(x, g(y,z)) = g(f(x,y), f(x,z))
+//   B:  f(g(x,y), z) = g(f(x,z), f(y,z))
+//
+// and for each hit adds ONE fresh 3-ary definition
+//
+//   f_g(X,Y,Z) = g(f(X,Y), Z)
+//
+// as a plain axiom (kind Definition, eliminated again from the presented
+// proof).  KBO orients it g(f(X,Y),Z) -> f_g(X,Y,Z) (the fresh symbol
+// weighs less than g+f over the same variable multiset), so every
+// derived equation containing a distributed pattern is COMPRESSED by
+// plain normalization -- that is the entire size-penalty relief; twee's
+// CP score function (Twee/CP.hs:239) is untouched by the flag.
+// Divergences from twee: the fresh symbol joins the pr layer's minimal
+// fresh precedence band (pr_flatten_goal discipline) instead of twee's
+// occurrence-count rank (orientation is weight-decided either way), and
+// name clashes freshen with a numeric suffix instead of newName's tick.
+// Duplicate (f,g) pairs across axioms each add their own definition,
+// exactly like twee's per-axiom newName.  Soundness: conservative
+// definitional extension (pr_flatten_goal's argument).  Default OFF
+// (THVM_ATP_DISTRIB unset) keeps intake byte-identical.
+static int pr_distrib_var(Term t, u32 *v) {
+  if (term_tag(t) != TAG_FVR) return 0;
+  *v = term_ext(t);
+  return 1;
+}
+static int pr_distrib_bin(Term t, u32 *f, Term *a0, Term *a1) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0;
+  *f = term_ext(t);
+  *a0 = term_ctr_at(t, 0);
+  *a1 = term_ctr_at(t, 1);
+  return 1;
+}
+// twee checkDistributivity, one orientation; writes the (f, g) pair.
+static int pr_distrib_check(Term t, Term u, u32 *f_out, u32 *g_out) {
+  u32 f1, g1, g2, f2, f3, p0v, p1v, q0v, q1v, tv, gav, gbv;
+  Term ta, tb, u0, u1, p0, p1, q0, q1, ga, gb;
+  if (!pr_distrib_bin(t, &f1, &ta, &tb)) return 0;
+  if (!pr_distrib_bin(u, &g2, &u0, &u1)) return 0;
+  if (!pr_distrib_bin(u0, &f2, &p0, &p1)) return 0;
+  if (!pr_distrib_bin(u1, &f3, &q0, &q1)) return 0;
+  if (f1 != f2 || f2 != f3) return 0;
+  if (!pr_distrib_var(p0, &p0v) || !pr_distrib_var(p1, &p1v)) return 0;
+  if (!pr_distrib_var(q0, &q0v) || !pr_distrib_var(q1, &q1v)) return 0;
+  // pattern A: t = f(x, g(y,z)), u = g(f(x,y), f(x,z))
+  if (pr_distrib_var(ta, &tv) && pr_distrib_bin(tb, &g1, &ga, &gb) &&
+      g1 == g2 && pr_distrib_var(ga, &gav) && pr_distrib_var(gb, &gbv) &&
+      tv == p0v && p0v == q0v && gav == p1v && gbv == q1v) {
+    *f_out = f1;
+    *g_out = g1;
+    return 1;
+  }
+  // pattern B: t = f(g(x,y), z), u = g(f(x,z), f(y,z))
+  if (pr_distrib_bin(ta, &g1, &ga, &gb) && pr_distrib_var(tb, &tv) &&
+      g1 == g2 && pr_distrib_var(ga, &gav) && pr_distrib_var(gb, &gbv) &&
+      gav == p0v && gbv == q0v && tv == p1v && p1v == q1v) {
+    *f_out = f1;
+    *g_out = g1;
+    return 1;
+  }
+  return 0;
+}
+#define PR_DISTRIB_MAX_DEFS 32u
+static void pr_distrib_transform(PrProblem *pr) {
+  u32 n_ax = pr->n_eqns;         // snapshot: added defs are not rescanned
+  u32 hit_f[PR_DISTRIB_MAX_DEFS], hit_g[PR_DISTRIB_MAX_DEFS];
+  u32 nhit = 0u;
+  for (u32 i = 0; i < n_ax && nhit < PR_DISTRIB_MAX_DEFS; i++) {
+    u32 f, g;
+    if (pr_distrib_check(pr->eq_l[i], pr->eq_r[i], &f, &g) ||
+        pr_distrib_check(pr->eq_r[i], pr->eq_l[i], &f, &g)) {
+      hit_f[nhit] = f;
+      hit_g[nhit] = g;
+      nhit++;
+    }
+  }
+  if (nhit == 0u) {
+    if (getenv("THVM_ATP_DISTRIB_DEBUG") != NULL)
+      fprintf(stderr, "[distrib] 0 definitions introduced\n");
+    return;
+  }
+  // Minimal-band precedence for the fresh names -- same discipline as
+  // pr_tgt_transform; when tgt/flatten already opened a fresh band the
+  // new labels extend it (labels stay contiguous from fresh_sym_base).
+  u32 ncap = PR_MAX_SYMS + PR_LABEL_BASE;
+  for (u32 l = PR_LABEL_BASE; l < ncap; l++)
+    if (pr->precedence[l] >= PR_LABEL_BASE) pr->precedence[l] += nhit;
+  if (pr->n_fresh_syms == 0u) pr->fresh_sym_base = pr->n_syms;
+  u32 added = 0u;
+  for (u32 i = 0; i < nhit; i++) {
+    if (pr->n_syms >= PR_MAX_SYMS) break;
+    if (pr->n_eqns >= PR_MAX_EQNS) break;
+    u32 lbl = PR_LABEL_BASE + pr->n_syms;
+    // twee names the definition `base f ++ "_" ++ base g` and lets
+    // newName freshen clashes; mirror with a numeric suffix.
+    char nm[PR_NAME_LEN];
+    const char *fname = pr->syms[hit_f[i] - PR_LABEL_BASE].name;
+    const char *gname = pr->syms[hit_g[i] - PR_LABEL_BASE].name;
+    snprintf(nm, sizeof nm, "%s_%s", fname, gname);
+    for (u32 sfx = 2u; pr_sym_find(pr, nm, strlen(nm)) != 0u; sfx++)
+      snprintf(nm, sizeof nm, "%s_%s%u", fname, gname, sfx);
+    snprintf(pr->syms[pr->n_syms].name, PR_NAME_LEN, "%s", nm);
+    pr->syms[pr->n_syms].arity = 3u;
+    pr->weights[lbl]    = 1u;                  // minimal weight
+    pr->precedence[lbl] = PR_LABEL_BASE + i;   // distinct, minimal band
+    pr->n_syms++;
+    Term x = term_new_fvr(0), y = term_new_fvr(1), z = term_new_fvr(2);
+    Term fxy_args[2] = {x, y};
+    Term fxy = term_new_ctr(hit_f[i], fxy_args, 2);
+    Term rhs_args[2] = {fxy, z};
+    Term dvars[3] = {x, y, z};
+    pr->eq_l[pr->n_eqns] = term_new_ctr(lbl, dvars, 3);
+    pr->eq_r[pr->n_eqns] = term_new_ctr(hit_g[i], rhs_args, 2);
+    pr->n_eqns++;
+    pr->n_fresh_syms++;
+    added++;
+    if (getenv("THVM_ATP_DISTRIB_DEBUG") != NULL)
+      fprintf(stderr, "[distrib] def %s(X,Y,Z) = %s(%s(X,Y),Z)\n",
+              nm, gname, fname);
+  }
+  if (getenv("THVM_ATP_DISTRIB_DEBUG") != NULL)
+    fprintf(stderr, "[distrib] %u definitions introduced\n", added);
 }
 
 int main(int argc, char **argv) {
@@ -638,12 +1579,38 @@ int main(int argc, char **argv) {
   // .pr file mode (see PrProblem above): parse the header now so the
   // KboConfig below carries the file's signature + ordering.
   static PrProblem prp;
+  g_atp_bench_pr = (void *)&prp;
   int pr_mode = (strstr(goal, ".pr") != NULL);
   if (pr_mode) pr_load_header(goal, &prp);
   // Load the equation/goal terms up front too (they only need thvm_init, done
   // above) so the -auto weight heuristic below can inspect the axioms before
   // the KBO config is finalised.  The later pr_load_terms call is guarded.
   if (pr_mode) pr_load_terms(&prp);
+  // Goal flattening (Twee/Vampire naming port): extend the signature +
+  // axioms with fresh minimal names for the goal's compound subterms
+  // BEFORE the KboConfig is finalised below (so it picks up the new
+  // labels/weights).  Opt-in; default OFF keeps the emulation byte-exact.
+  // THVM_ATP_TGT >= 1 selects the conjecture-wide generalization
+  // (Vampire tgt: 1 = full, 2 = ground; 3 = full over EVERY axiom,
+  // the gtg=all analog) which subsumes the goal-only flatten, so it
+  // takes precedence when both are set.
+  {
+    const char *tg = pr_mode ? getenv("THVM_ATP_TGT") : NULL;
+    int tgt_mode = (tg != NULL) ? atoi(tg) : 0;
+    if (tgt_mode >= 1) {
+      pr_tgt_transform(&prp, /*ground_only=*/tgt_mode == 2,
+                       /*all_eqns=*/tgt_mode >= 3);
+    } else if (pr_mode && getenv("THVM_ATP_FLATTEN_GOAL") != NULL
+               && getenv("THVM_ATP_FLATTEN_GOAL")[0] != '0') {
+      pr_flatten_goal(&prp);
+    }
+    // Twee --distributivity-heuristic (pr_distrib_transform above):
+    // runs AFTER tgt/flatten so the fresh label bands stack.  Opt-in,
+    // default OFF.
+    if (pr_mode && getenv("THVM_ATP_DISTRIB") != NULL
+        && getenv("THVM_ATP_DISTRIB")[0] != '0')
+      pr_distrib_transform(&prp);
+  }
 
   // Reduction ordering.  Default KBO (one binary symbol `nand`,
   // weight 1, var weight 1 -- KBO weight is plain symbol count, so a
@@ -715,10 +1682,75 @@ int main(int argc, char **argv) {
         pr_mark_axiom_consts(prp.eq_l[e], ax_const, cap);
         pr_mark_axiom_consts(prp.eq_r[e], ax_const, cap);
       }
+      // WM's Automodus classifies the ring-lattice files as "Verband" and
+      // runs gtweight+gj instead of the StdS mixweight+mnf default (see
+      // pr_is_verband / the Verband override below).  Under that strategy
+      // WM uses DEF=1 (every symbol weight 1), so the defined-operator
+      // heuristic must NOT inflate the ring zero constant -- else the CP
+      // weights shift off WM's stream.  Force weight 1 for Verband.
+      u8 verband = !atp_env_on("THVM_ATP_NO_VERBAND") && pr_is_verband(&prp);
       const char *wv = getenv("ATP_BENCH_AUTO_WT");
-      u32 aw = (wv != NULL) ? (u32)atoi(wv) : 2u;
+      u32 aw = verband ? 1u : ((wv != NULL) ? (u32)atoi(wv) : 2u);
       for (u32 lab = PR_LABEL_BASE; lab < cap; lab++)
         if (ax_const[lab]) prp.weights[lab] = aw;
+
+      // ...and self-derive the precedence exactly as `wmcli -auto` does
+      // (PhilMarlow/SpezNormierung), REPLACING the .pr ORDERING chain --
+      // the WL encoder's precedence is NOT what Automodus picks, and on
+      // multi-operator signatures (Boolean and/or, ring +/*) the two
+      // disagree, flipping the KBO orientation of a symmetric law and
+      // diverging the trajectory.  THVM_ATP_NO_AUTO_PREC=1 keeps the .pr
+      // chain (the pre-derivation behaviour).
+      if (!atp_env_on("THVM_ATP_NO_AUTO_PREC")) {
+        // Symbol-precedence scheme selector (Vampire-port slice).  Default
+        // = WM/Fuchs -auto (pr_wm_derive_precedence).  THVM_ATP_SYM_PREC
+        // selects a Vampire precedence port from src/atp/precedence.c:
+        //   reverse-frequency = Vampire `sp=reverse_frequency` (its most
+        //     common UEQ-winning precedence, 122 wins -- common symbols
+        //     outrank rare ones), frequency = Vampire `sp=frequency` /
+        //     E InvFreqRank.  Both are pure ORDERING ports over thvm's own
+        //     completion engine -- alternate schedule slices that orient a
+        //     symmetric law the way Vampire's winning strategies do, for
+        //     the problems the WM auto precedence mis-orients.
+        const char *symprec = getenv("THVM_ATP_SYM_PREC");
+        if (symprec != NULL && strcmp(symprec, "reverse-frequency") == 0)
+          atp_reverse_frequency_precedence(prp.eq_l, prp.eq_r, prp.n_eqns,
+                                           cap, prp.precedence);
+        else if (symprec != NULL && strcmp(symprec, "frequency") == 0)
+          atp_occurrence_precedence(prp.eq_l, prp.eq_r, prp.n_eqns,
+                                    cap, prp.precedence);
+        else
+          pr_wm_derive_precedence(&prp);
+      }
+
+      // Verband strategy: `wmcli -auto` runs `kbo,cph(gt),gj()` for the
+      // lattice files -- gtweight CP selection (ATP_CP_WEIGHT_GT, not the
+      // preset's mixweight), ground-joinability ON, NO MNF, NO -pq
+      // interleave.  Arm those knobs by seeding the env the preset/engine
+      // read below, with overwrite=0 so an explicit user override still
+      // wins.  Byte-identical to `wmcli -auto` on all 3 CommutativeRing.
+      if (verband) {
+        setenv("THVM_ATP_CP_WEIGHT", "3", 0);       // ATP_CP_WEIGHT_GT
+        setenv("THVM_ATP_GROUND_JOIN", "1", 0);     // -gj
+        setenv("THVM_ATP_MNF", "0", 0);             // no MNF goal front
+        setenv("THVM_ATP_FIFO_THRESHOLD", "0", 0);  // no -pq interleave
+      }
+    }
+    // LPO-ordering slice (Vampire-port).  Vampire's UEQ schedule is
+    // dominated by `to=lpo` (65+ of ~400 strategies) -- lexicographic
+    // path ordering orients some symmetric/permutative laws the way KBO
+    // cannot, cracking problems the completion drowns on under KBO.
+    // THVM_ATP_ORD=lpo reuses the frequency-derived precedence above
+    // (mirrors Vampire's dominant `to=lpo:sp=reverse_frequency` combo)
+    // instead of the hardcoded 7-label WM-demo precedence.  Opt-in
+    // schedule slice; the KBO default path is untouched.
+    {
+      const char *pr_ord = getenv("THVM_ATP_ORD");
+      if (pr_ord != NULL && strcmp(pr_ord, "lpo") == 0) {
+        lpo.precedence = prp.precedence;
+        lpo.n_labels   = prp.n_syms + PR_LABEL_BASE;
+        use_lpo = 1;
+      }
     }
   }
 
@@ -825,6 +1857,16 @@ int main(int argc, char **argv) {
       s->cp_set_ir_period = (u32)strtoul(pr, NULL, 10);
     }
   }
+  // THVM_ATP_CP_SET_IR_BUDGET: percent of the run the sweep may consume.
+  // Non-zero swaps the rule-count period gate for Twee's renormalise
+  // task discipline (freq 10s + budget% + 20%-dead sample trigger,
+  // Twee.hs:978 / Task.hs).  Twee's default share is 5.
+  {
+    const char *bd = getenv("THVM_ATP_CP_SET_IR_BUDGET");
+    if (bd != NULL && bd[0] != '\0') {
+      s->cp_set_ir_budget = (u32)strtoul(bd, NULL, 10);
+    }
+  }
   // THVM_ATP_PERM_SUB=1: port of WM `GZ_ACVerzichtbar`.  Drops a CP at
   // push time when its two sides are equal as multisets at the top
   // (commutativity-shaped, e.g. nand(x,y) = nand(y,x)).  On AndAssoc
@@ -885,9 +1927,10 @@ int main(int argc, char **argv) {
   // UnfailingCP) so a profiling run follows the same trajectory the
   // proof harness does.  AutoPrecedence on the single nand symbol is
   // the identity precedence already in `cfg`, so it needs no setter.
+  const char *wm = getenv("THVM_ATP_WALDMEISTER");
+  u8 wm_preset = (wm != NULL && wm[0] != '\0' && wm[0] != '0');
   {
-    const char *wm = getenv("THVM_ATP_WALDMEISTER");
-    if (wm != NULL && wm[0] != '\0' && wm[0] != '0') {
+    if (wm_preset) {
       // FIFO interleave = `wmcli -auto` itl(mi): `-pq interleave=1.50`
       // -> moduloCP 51, thresholdCP 1 (see atp_cp_fifo_dimension; the
       // threshold defaults to 1 under the preset, and
@@ -1058,13 +2101,18 @@ int main(int argc, char **argv) {
       // tools/baselines/wm_align_reports/soa.txt.
       thvm_atp_set_use_formation_fifo(
           s, (getenv("THVM_ATP_FORMATION_FIFO") != NULL) ? 1u : 0u);
-      // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
-      // overlaps an equation's FRESH re-derivation, not the stale exhausted
-      // original).  Verified to preserve all 73 byte-identical baselines and
-      // advance ShefferAxioms__OrAssociativity firstdiv 14->19.  ON in the
-      // faithful preset; THVM_ATP_NO_OVERLAP_EXHAUST env disables.
+      // Overlap-exhausted-equation gate: OFF.  A pre-single-walk-era
+      // heuristic (once advanced Sheffer OrAssoc firstdiv 14->19) that is
+      // fully superseded by the WM-faithful formation mechanisms -- the
+      // full golden battery is byte-identical without it, and ON it
+      // SUPPRESSES a real WM overlap: on HillmanAxioms ImpliesSheffer c3
+      // the derived commutativity (fact 39) must overlap equation fact 3
+      // at its activation (WM parents E6 x E2, kept CP pops at fact 441);
+      // the gate killed that formation and the equation arrived 14
+      // selections late with swapped sides (firstdiv 441 -> NONE with the
+      // gate off).  THVM_ATP_OVERLAP_EXHAUST=1 re-arms it for archaeology.
       s->use_overlap_exhaust =
-          (getenv("THVM_ATP_NO_OVERLAP_EXHAUST") == NULL) ? 1u : 0u;
+          (getenv("THVM_ATP_OVERLAP_EXHAUST") != NULL) ? 1u : 0u;
       // WM LRSortieren side-canonicalisation (SpezNormierung.c:517-534):
       // store each derived unorientable equation with WM's canonical side
       // order (variable < non-variable, preorder).  DEFAULT OFF: a
@@ -1110,6 +2158,39 @@ int main(int argc, char **argv) {
       s->use_cp_side =
           (getenv("THVM_ATP_CP_SIDE") != NULL
            && getenv("THVM_ATP_NO_CP_WM_SIDE") == NULL) ? 1u : 0u;
+      // WM Automodus Kombinatorlogik class (Sinai.h Tafel2: the
+      // KombinatorlogikQ/B/O/S rows run KombS = rose(), which emits
+      // `-ord col3`).  Detection mirror: an applicative signature
+      // (exactly one function symbol, binary -- the apply operator;
+      // everything else constants) with at least one axiom that is a
+      // strict combinator-definition equation (one side `C x1..xn`
+      // over pairwise-distinct variables, the other built ONLY from
+      // apply + those variables) -- the Sinai per-axiom detectors
+      // (SKombinator "_S" etc.).  A fixpoint axiom like Y (contractum
+      // carries Y itself) is NOT a definition and does not classify,
+      // matching WM keeping it as an E.  Under col3 the duplicating
+      // definitions ((W x) y -> (x y) y) orient as WM's rules do; KBO
+      // keeps them unorientable and the kept-E store order forks from
+      // WM (the 6 Combinator corpus rows, swaps at facts 6/7).
+      // THVM_ATP_NO_COL3=1 restores the KBO-only behavior.
+      if (pr_mode && getenv("ATP_BENCH_AUTO_WEIGHTS") != NULL
+          && getenv("THVM_ATP_NO_COL3") == NULL && prp.n_eqns > 0u) {
+        u32 apply = 0u, n_fn = 0u;
+        for (u32 k = 0; k < prp.n_syms; k++) {
+          if (prp.syms[k].arity > 0u) {
+            n_fn++;
+            if (prp.syms[k].arity == 2u) apply = PR_LABEL_BASE + k;
+          }
+        }
+        if (n_fn == 1u && apply != 0u) {
+          for (u32 e = 0; e < prp.n_eqns; e++) {
+            if (thvm_atp_col3_pair(prp.eq_l[e], prp.eq_r[e], apply)) {
+              s->col3_apply = apply;
+              break;
+            }
+          }
+        }
+      }
       // Push-time queue-vs-queue subsumption OFF: thvm-native filter
       // with no WM counterpart (recentCPinsert queues every treated
       // survivor; SS_TermpaarSubsummiertTermpaar's only set-level
@@ -1472,6 +2553,11 @@ int main(int argc, char **argv) {
     if (ss != NULL && ss[0] != '\0')
       thvm_atp_set_use_sos(s, (ss[0] != '0') ? 1u : 0u);
   }
+  {
+    const char *gs = getenv("THVM_ATP_GOAL_SUBTERM");
+    if (gs != NULL && gs[0] != '\0')
+      thvm_atp_set_use_goal_subterm(s, (gs[0] != '0') ? 1u : 0u);
+  }
   // THVM_ATP_UNFAILING=0/1: independent override of unfailing CP
   // generation (WM standard; in preset by default).
   {
@@ -1512,6 +2598,16 @@ int main(int argc, char **argv) {
     const char *cn = getenv("THVM_ATP_CONNECT");
     if (cn != NULL && cn[0] != '\0')
       thvm_atp_set_use_connectedness(s, (cn[0] != '0') ? 1u : 0u);
+    // THVM_ATP_LAZY_GJ=1: run ground-joinability at SELECTION (pop) time
+    // instead of per-generated-CP at push (Twee's lazy redundancy).  Turns
+    // the push-side gate OFF so GJ is paid once, at pop -- the caller need
+    // not also set THVM_ATP_GROUND_JOIN.
+    const char *lgj = getenv("THVM_ATP_LAZY_GJ");
+    if (lgj != NULL && lgj[0] != '\0') {
+      u8 on = (lgj[0] != '0') ? 1u : 0u;
+      thvm_atp_set_use_lazy_ground_join(s, on);
+      if (on) thvm_atp_set_use_ground_join(s, 0u);
+    }
   }
 
   // THVM_ATP_RECORD_NORM=1 turns on per-step normalize-trace recording
@@ -1521,6 +2617,15 @@ int main(int argc, char **argv) {
     const char *rn = getenv("THVM_ATP_RECORD_NORM");
     if (rn != NULL && rn[0] == '1') thvm_atp_set_record_norm_steps(s, 1u);
   }
+
+  // THVM_ATP_ENIGMA_EXPORT=<path.tsv> records the features of every
+  // processed CP so that, on PROVED, the run can label them by proof-DAG
+  // reachability and append a labelled row per CP to the dataset TSV --
+  // the ENIGMA training corpus (positives = CPs on the proof, negatives =
+  // processed-but-off-proof).  Recording only; the label+append happens
+  // post-run (below) while the engine trace is still live.
+  if (getenv("THVM_ATP_ENIGMA_EXPORT") != NULL)
+    thvm_atp_set_record_cp_features(s, 1u);
 
   // THVM_ATP_LRS=1 turns on the Vampire Limited Resource Strategy.  Also
   // wires the user-loop `wall_cap` into thvm_atp_set_wall_deadline so the
@@ -1551,7 +2656,19 @@ int main(int argc, char **argv) {
 
   if (pr_mode) {
     if (prp.n_eqns == 0u) pr_load_terms(&prp);
+    // Folded-signature band for the drc=off analog: the fresh
+    // definitional symbols (pr_flatten_goal / pr_tgt_transform /
+    // pr_distrib_transform) occupy the contiguous label range starting
+    // at fresh_sym_base.  Inert unless THVM_ATP_DRC_OFF arms the lane.
+    if (prp.n_fresh_syms > 0u) {
+      thvm_atp_set_fold_band(s, PR_LABEL_BASE + prp.fresh_sym_base,
+                             PR_LABEL_BASE + prp.fresh_sym_base +
+                                 prp.n_fresh_syms);
+    }
     for (u32 e = 0; e < prp.n_eqns; e++) {
+      // spb=goal derivation seed (goal-cone definitions + conjecture
+      // units); inert unless THVM_ATP_SPB_GOAL arms the bias.
+      if (prp.eq_gd[e]) thvm_atp_mark_gd_next(s);
       thvm_atp_add_equation(s, prp.eq_l[e], prp.eq_r[e]);
     }
     // WM ACSymboleSuchen (ANA/PhilMarlow.c:111): a symbol is AC iff the
@@ -1566,9 +2683,21 @@ int main(int argc, char **argv) {
     {
       const char *wm_ac = getenv("THVM_ATP_WALDMEISTER");
       const char *no_ac = getenv("THVM_ATP_PERM_SUB");   // "0" opts out
+      // THVM_ATP_AC_PERMSUB=1 arms the same GZ_ACVerzichtbar AC-equal CP
+      // filter in the NON-WM completion lanes (the Twee-style slice).
+      // Lattice / ACI problems (e.g. LAT138-1) flood the passive set with
+      // AC-permutation CPs that the full ordered-set-partition ground-join
+      // catches only at ~10 normalizes/CP; the flattened AC-equality test
+      // (atp_cp_ac_dispensable) discards the same class in O(term size),
+      // keeping the queue small AND the completion fast.  The engine
+      // ac_mask is RESET to 0 afterwards (plain KB completion, no
+      // AC-unification), exactly as the WM path -- only the perm-subsume
+      // filter mask is retained.  Default off => WM-parity path unchanged.
+      const char *ac_ps = getenv("THVM_ATP_AC_PERMSUB");
       u8 wm_on = (wm_ac != NULL && wm_ac[0] != '\0' && wm_ac[0] != '0');
+      u8 ac_ps_on = (ac_ps != NULL && ac_ps[0] != '\0' && ac_ps[0] != '0');
       u8 ps_off = (no_ac != NULL && no_ac[0] == '0');
-      if (wm_on && !ps_off) {
+      if ((wm_on || ac_ps_on) && !ps_off) {
         // auto_ac populates the engine AC mask; capture it for the
         // perm-subsume filter, then RESET the engine mask to 0.  WM
         // runs plain KB completion (no AC-unification/AC-matching) and
@@ -1581,6 +2710,21 @@ int main(int argc, char **argv) {
         if (acm != 0ull) {
           thvm_atp_set_perm_subsume_mask(acm);
           thvm_atp_set_use_perm_subsume(s, 1u);
+        }
+      }
+      // FULL AC-completion (THVM_ATP_FULL_AC=1): detect AC operators and
+      // LEAVE the engine ac_mask set so completion runs AC-matching /
+      // AC-unification.  =2: give up immediately when NO AC operator is
+      // detected, so the schedule slice frees its pool slot on non-AC
+      // problems instead of burning a full wall on plain completion (the
+      // exit-fast discipline of the equals/horn-cd/ifeq slices) -- this
+      // lets the slice sit in the FIRST wave on narrow competition nodes.
+      {
+        const char *fa = getenv("THVM_ATP_FULL_AC");
+        if (fa != NULL && fa[0] != '0') {
+          thvm_atp_auto_ac(prp.eq_l, prp.eq_r, prp.n_eqns);   // mask stays set
+          if (fa[0] == '2' && thvm_atp_get_ac_mask() == 0ull)
+            tp_bench_giveup("no AC operator detected (full-ac=2)");
         }
       }
     }
@@ -1649,16 +2793,73 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "mc_assoc") == 0) goal_mc_assoc(&gl, &gr);
   else if (strcmp(goal, "hn_leftid") == 0) goal_hn_leftid(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
-  if (!saturate) thvm_atp_set_goal(s, gl, gr);
+  if (!saturate) {
+    // A goal VARIABLE makes the conjecture existential (WM
+    // PM_Existenzziele).  The default path still sets it universally
+    // (joining then proves the STRONGER forall statement -- sound,
+    // and the historical behavior); with THVM_ATP_NARROW_QUEUE armed
+    // a single non-ground goal instead enters the engine's
+    // existential narrowing mode, where the critical-goal queue can
+    // close it by instantiation (COL011-1: no universal treatment
+    // can, `apply(combinator,Y) = Y` only holds for a CONSTRUCTED Y).
+    const char *nq = getenv("THVM_ATP_NARROW_QUEUE");
+    u8 nq_on = (u8)(nq != NULL && nq[0] != '\0' && nq[0] != '0');
+    if (pr_mode && prp.n_goals > 1u) {
+      thvm_atp_set_goals(s, prp.goals_l, prp.goals_r, prp.n_goals);
+    } else if (nq_on && gl != 0 &&
+               (!atp_bench_term_ground(gl) || !atp_bench_term_ground(gr))) {
+      thvm_atp_set_goal_existential(s, gl, gr);
+    } else {
+      thvm_atp_set_goal(s, gl, gr);
+    }
+  }
 
-  // THVM_ATP_MNF=1 activates the MNF goal-directed (two-coloured front)
-  // search -- the only path that closes a symmetric goal like wolfram
-  // commutativity.  Requires the binary be built with `make ATP_MNF=1`
-  // (otherwise the setter is a no-op).
+  // tgt goal-cone intake: THVM_ATP_TGT_SYMS lists signature symbol
+  // NAMES (whitespace-separated) occurring in the problem's
+  // conjecture-role clauses (set by the FindProof CLI -- Vampire's tgt
+  // derives weights from the whole negated conjecture, not just the
+  // final goal equation).  Map them through the .pr symbol table and
+  // hand the labels to the tgt weight scheme.  Inert unless
+  // THVM_ATP_TGT arms the scheme.
+  if (pr_mode && !saturate) {
+    const char *ts = getenv("THVM_ATP_TGT_SYMS");
+    if (ts != NULL) {
+      const char *p = ts;
+      while (*p != '\0') {
+        while (*p != '\0' && !(isalnum((unsigned char)*p) || *p == '_')) p++;
+        if (*p == '\0') break;
+        size_t n = 0;
+        while (isalnum((unsigned char)p[n]) || p[n] == '_') n++;
+        u32 lab = pr_sym_find(&prp, p, n);
+        if (lab != 0u) thvm_atp_tgt_add_sym(s, lab);
+        p += n;
+      }
+    }
+  }
+
+  // MNF goal-directed (two-coloured front) search.  Waldmeister's -auto
+  // arms zb=mnf goal treatment for GROUND goals (the Automodus structure
+  // strategies + rose() all select the mnf parametrisation when
+  // PM_Existenzziele is false, i.e. no goal variable; only Boolean/
+  // group/lattice/ring classes keep rnf, and their goals close by the
+  // single-NF check anyway).  A goal variable makes the conjecture
+  // existential (WM keeps rnf + paramodulation), so leave MNF off there.
+  // The WALDMEISTER preset mirrors this: arm MNF exactly when the goal
+  // is ground.  THVM_ATP_MNF=1/0 still overrides for measurement.  (The
+  // bench binary always compiles ATP_MNF in -- see the Makefile target.)
   {
+    u8 goal_ground = !saturate && gl != 0
+                   && atp_bench_term_ground(gl) && atp_bench_term_ground(gr);
+    if (pr_mode && prp.n_goals > 1u) {
+      for (u32 g = 0; g < prp.n_goals; g++) {
+        if (!atp_bench_term_ground(prp.goals_l[g])
+            || !atp_bench_term_ground(prp.goals_r[g])) { goal_ground = 0u; break; }
+      }
+    }
     const char *mnf = getenv("THVM_ATP_MNF");
     if (mnf != NULL && *mnf == '1') thvm_atp_set_use_mnf(s, 1u);
     else if (mnf != NULL && *mnf == '0') thvm_atp_set_use_mnf(s, 0u);
+    else if (wm_preset && goal_ground) thvm_atp_set_use_mnf(s, 1u);
   }
 
   // Optional automatic growing CP-weight bound (Waldmeister MaxWeight).
@@ -1666,6 +2867,16 @@ int main(int argc, char **argv) {
   // the rule set deepens so it never permanently discards a CP the
   // proof needs (completeness preserved).  0 / unset = unbounded (the
   // historical default).
+  {
+    // Hard lossy CP-queue cap (THVM_ATP_MAX_CP_QUEUE): bound memory by
+    // dropping OLD queued CPs when the queue is full, INSTEAD of capping
+    // by weight (auto-max-weight).  Lets heavy proof-rules form (Twee
+    // churns thousands) while keeping RSS bounded -- the deep-goal UEQ
+    // problems need heavy rules that auto-max-weight defers forever.
+    const char *mcq = getenv("THVM_ATP_MAX_CP_QUEUE");
+    if (mcq != NULL && *mcq != 0)
+      thvm_atp_set_max_cp_queue(s, (u32)strtoul(mcq, NULL, 10));
+  }
   {
     const char *amw = getenv("THVM_ATP_AUTO_MAXW");
     if (amw != NULL && *amw != 0) {
@@ -1775,17 +2986,43 @@ int main(int argc, char **argv) {
   }
   double el = (double)(clock() - t0) / CLOCKS_PER_SEC;
 
+  g_atp_bench_status = (int)st;
+  {
+    unsigned unor = 0;
+    for (u32 k = 0; k < s->n_rules; k++) if (!s->r_orient[k]) unor++;
+    g_atp_bench_unorient = unor;
+  }
   const char *sn =
       (st == ATP_PROVED)      ? "PROVED" :
       (st == ATP_REFUTED)     ? "REFUTED" :
       (st == ATP_QUEUE_EMPTY) ? "QUEUE_EMPTY (saturated, no proof)" :
       (st == ATP_TIMEOUT)     ? "TIMEOUT (step cap)" :
+      // The heap-frac / RSS guards in thvm_atp_step return ATP_ABORTED;
+      // labeling those pops "RUNNING (wall cap)" hid every memory-bound
+      // abort behind a fake wall report (a 240s-wall run "hitting the
+      // wall" at 55s -- the GRP661-706 dissection trap).
+      (st == ATP_ABORTED)     ? "ABORTED (memory guard / abort hook)" :
                                 "RUNNING (wall cap)";
   printf("=> %s\n", sn);
   printf("   goal=%s  steps=%u  rules=%u  cps=%u  max_cps=%u  %.1fs\n",
          goal, i, s->n_rules, s->n_cps, max_cps, el);
   printf("   trace: n_trace=%u  t_max=%u  record_norm=%u\n",
          s->n_trace, s->t_max, s->record_norm_steps);
+  // drc=off keep diagnostics (nonzero only when the lane is armed).
+  if (s->n_cps_drc_kept_push != 0u || s->n_cps_drc_kept_pop != 0u) {
+    printf("   drc-off: kept_push=%u  kept_pop=%u\n",
+           s->n_cps_drc_kept_push, s->n_cps_drc_kept_pop);
+  }
+  // spb=goal diagnostics: live goal-derived rule share.
+  {
+    const char *sg = getenv("THVM_ATP_SPB_GOAL");
+    if (sg != NULL && sg[0] != '\0' && sg[0] != '0' && s->r_gd != NULL) {
+      u32 ngd = 0u;
+      for (u32 k = 0; k < s->n_rules; k++)
+        if (s->r_gd[k]) ngd++;
+      printf("   spb-goal: gd_rules=%u/%u\n", ngd, s->n_rules);
+    }
+  }
   // Post-PROVED proof-cone re-derivation (same call the WL wrapper
   // makes in thvm_wl_atp_run_proof): splice NORM_STEP chains behind
   // goal-family ORIENT / SIMPLIFY bridges.  On a t_max-capped trace it
@@ -1796,10 +3033,18 @@ int main(int argc, char **argv) {
     printf("   cone: %.2fs  n_trace=%u\n",
            (double)(clock() - tc0) / CLOCKS_PER_SEC, s->n_trace);
   }
-  // Mirror the WL bridge (thvmlink_atp.c): cone on the packed trace,
-  // THEN materialize, so every later trace consumer (proof extraction,
-  // dump modes) sees live Term entries.  No-op unless trace_pack.
-  thvm_atp_materialize_trace(s);
+  // The WL bridge (thvmlink_atp.c) cones the packed trace then
+  // materializes it into live Terms for atp_extract_goal_chains.  The
+  // BENCH has no proof extraction and reads nothing off the live trace,
+  // so that population-wide rebuild (all ORIENT/FVI + every live-rule
+  // birth + closure -- far more than the goal-cone proof) is DEAD WORK
+  // here: it added ~6.3s to OA's wall (22s -> 16s) with zero effect on
+  // the PROVED verdict or the R+E parity stream (both produced during
+  // search).  Skip it by default so the bench wall is the fair
+  // search-only time for a thvm-vs-FEQ speed comparison; THVM_ATP_MATERIALIZE=1
+  // restores the mirror for any trace-reading dump mode.
+  if (atp_env_on("THVM_ATP_MATERIALIZE"))
+    thvm_atp_materialize_trace(s);
   printf("   dropped: joinable=%u queue-subsumed=%u "
          "rule-subsumed=%u pop-subsumed=%u perm-subsumed=%u eset-subsumed=%u "
          "connected=%u orphan=%u lrs=%u\n",
@@ -1815,9 +3060,22 @@ int main(int argc, char **argv) {
            s->lrs_warmup_selections, s->lrs_recompute_period);
   }
   printf("   dropped: ground-joinable=%u connected-below-peak=%u "
-         "facts-gj-sterilized=%u\n",
+         "facts-gj-sterilized=%u simpler-join=%u\n",
          s->n_cps_ground_joinable, s->n_cps_dropped_connected_below_peak,
-         s->n_facts_bwd_ground_joinable);
+         s->n_facts_bwd_ground_joinable, s->n_cps_dropped_simpler_join);
+  if (g_atp_gjp_top_q > 0) {
+    printf("   gj-lane: top-q=%llu cand=%llu match=%llu "
+           "(noop=%llu gate=%llu pass=%llu) models=%llu norms=%llu steps=%llu\n",
+           (unsigned long long)g_atp_gjp_top_q,
+           (unsigned long long)g_atp_gjp_cand,
+           (unsigned long long)g_atp_gjp_match,
+           (unsigned long long)g_atp_gjp_noop,
+           (unsigned long long)g_atp_gjp_gate,
+           (unsigned long long)g_atp_gjp_gate_pass,
+           (unsigned long long)g_atp_gjp_models,
+           (unsigned long long)g_atp_gjp_norms,
+           (unsigned long long)g_atp_gjp_norm_steps);
+  }
   {
     u64 cp_capped = 0, depth_capped = 0;
     thvm_cp_caps_get(&cp_capped, &depth_capped);
@@ -1842,6 +3100,18 @@ int main(int argc, char **argv) {
   printf("   lazy-normalize=%u  push-time full-R normalizes=%llu\n",
          s->use_lazy_normalize,
          (unsigned long long)s->n_cps_push_normalized);
+  {
+    extern u64 g_ifeq_strip_n_hit, g_ifeq_strip_n_reclass;
+    extern u64 g_scorenf_n, g_scorenf_shrunk;
+    if (g_ifeq_strip_n_hit != 0u || g_scorenf_n != 0u) {
+      printf("   ifeq-strip: stripped=%llu reclassified=%llu"
+             "  score-nf: probed=%llu shrunk=%llu\n",
+             (unsigned long long)g_ifeq_strip_n_hit,
+             (unsigned long long)g_ifeq_strip_n_reclass,
+             (unsigned long long)g_scorenf_n,
+             (unsigned long long)g_scorenf_shrunk);
+    }
+  }
   if (g_atp_phase_enabled) {
     double w = (el > 0.0) ? el : 1.0;
     u64 sumus = g_atp_phase_us_pop_normalize + g_atp_phase_us_cp_gen +
@@ -1970,6 +3240,17 @@ int main(int argc, char **argv) {
                  (unsigned long long)g_ft_to_nodes,
                  g_ft_to_calls ? (double)g_ft_to_nodes / (double)g_ft_to_calls : 0.0,
                  (unsigned long long)g_acp_unterm_nodes);
+          extern u64 g_ft_from_by_region[8], g_ft_to_by_region[8];
+          static const char *reg_name[7] =
+              { "other", "pop-norm", "interreduce", "cp-gen", "goal",
+                "orient", "drain" };
+          printf("   interchange by region:");
+          for (int rg = 0; rg < 7; rg++) {
+            printf(" %s=%llu/%llu", reg_name[rg],
+                   (unsigned long long)g_ft_from_by_region[rg],
+                   (unsigned long long)g_ft_to_by_region[rg]);
+          }
+          printf("  [from/to]\n");
         }
       }
       printf("   push-norm core shape: queries=%llu (var=%llu) cand=%llu "
@@ -2079,14 +3360,24 @@ int main(int argc, char **argv) {
         printf("\n");
         atp_ftdt_hot_dump();
       }
+      {
+        extern u64 g_vcp_lb_hit, g_vcp_lb_raw;
+        if (g_vcp_lb_raw > 0)
+          printf("   vcp raw-class lower-bound probe: lb-catches=%llu / raw=%llu [%.1f%%]\n",
+                 (unsigned long long)g_vcp_lb_hit,
+                 (unsigned long long)g_vcp_lb_raw,
+                 100.0 * (double)g_vcp_lb_hit / (double)g_vcp_lb_raw);
+      }
       if (g_atp_ftnfm_probe > 0) {
         printf("   ftnfm subtree-NF-memo: probe=%llu hit=%llu [%.1f%%] "
-               "store=%llu toolong=%llu\n",
+               "store=%llu toolong=%llu reval=%llu reval-ok=%llu\n",
                (unsigned long long)g_atp_ftnfm_probe,
                (unsigned long long)g_atp_ftnfm_hit,
                100.0 * (double)g_atp_ftnfm_hit / (double)g_atp_ftnfm_probe,
                (unsigned long long)g_atp_ftnfm_store,
-               (unsigned long long)g_atp_ftnfm_toolong);
+               (unsigned long long)g_atp_ftnfm_toolong,
+               (unsigned long long)g_atp_ftnfm_reval,
+               (unsigned long long)g_atp_ftnfm_reval_ok);
       }
       if (g_atp_swrn_hit + g_atp_swrn_miss > 0) {
         printf("   walk rename cache: hit=%llu miss=%llu [%.1f%%]\n",
@@ -2220,6 +3511,7 @@ int main(int argc, char **argv) {
     printf("   cp-size histogram (bucket=10 symbols):\n     ");
     for (u32 b = 0; b < 12u; b++) printf("[%u-%u)=%u ", b*10u, (b+1u)*10u, bins[b]);
     printf("\n"); }
+  atp_mem_census(s);
 
 #ifdef ATP_FV_INDEX
   // 7d: subsumption-index retrieval stats.  candidates / query is the
@@ -2286,6 +3578,22 @@ int main(int argc, char **argv) {
   }
 #endif
 
+  // ENIGMA dataset export: on PROVED, label the recorded processed-CP
+  // features by proof-DAG reachability and append them to the TSV.  Runs
+  // before the pre-free hook so the engine trace (used by the labeller)
+  // is still live.  Off-PROVED runs contribute nothing (no proof set to
+  // label against).
+  {
+    const char *ds = getenv("THVM_ATP_ENIGMA_EXPORT");
+    if (ds != NULL && ds[0] != '\0' && st == ATP_PROVED && s->record_cp_features) {
+      u32 n_pos = thvm_atp_cp_label(s);
+      u32 n_rows = thvm_atp_cp_dataset_append(s, ds, 1u);
+      fprintf(stderr, "%% ENIGMA export: %u rows (%u proof-relevant) -> %s\n",
+              n_rows, n_pos, ds);
+    }
+  }
+
+  if (g_atp_bench_pre_free_hook != NULL) g_atp_bench_pre_free_hook(s);
   thvm_atp_free(s);
   return (st == ATP_PROVED) ? 0 : 1;
 }

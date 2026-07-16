@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TEproverProof]()[*file*]</code> runs the local E prover binary on the TPTP (Thousands of Problems for Theorem Provers) problem *file* (a path ending in `.p`) and returns a normalized result Association.
 
-<code>[TEproverProof]()[*theory*, *thm*]</code> resolves the canonical problem file under `tools/baselines/vampire_tptp/{theory}__{thm}.p` from the (*theory*, *thm*) pair and proves it.
+<code>[TEproverProof]()[*theory*, *thm*]</code> resolves the canonical problem file under `tools/baselines/vampire_tptp/{theory}__{thm}.p` from the (*theory*, *thm*) pair and proves it. The bank is generated, not checked in (`tools/vampire/export_all.wls` writes it; the directory is gitignored), so on a fresh checkout the two-argument form reports the missing file until the bank is exported.
 
 The result Association is keyed `"Status"` (`"Proved"`, `"TimedOut"`, or `"Failed"`), `"Strategy"` (always `"eprover-auto-schedule"`), `"Seconds"` (wall time), `"ProofLength"` (the SZS derivation step count), `"Inferences"` (the parsed SZS inference DAG), and `"RawSZS"` (the raw SZS output text).
 
@@ -28,25 +28,14 @@ The result Association is keyed `"Status"` (`"Proved"`, `"TimedOut"`, or `"Faile
 
 ## Basic Examples
 
-Run E on a canonical bench problem and read the status:
+The binary is resolved before anything else, so on a machine without E the call degrades gracefully - the `TEproverProof::noeprover` message fires and the result is `$Failed`:
 
 ```wl
-#| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
-TEproverProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]["Status"]
+TEproverProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
 ```
-<!-- => "Proved" -->
+<!-- => $Failed (with the TEproverProof::noeprover message) on a machine without eprover; a "Proved" result Association where E is installed -->
 
-## Scope
-
-Read the proof length straight off the result:
-
-```wl
-#| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
-TEproverProof["AbelianGroupAxioms", "InverseOfInverse"]["ProofLength"]
-```
-<!-- => an integer SZS derivation step count -->
+With E installed (`brew install eprover`), the same call proves the bench problem: <code>[TEproverProof]()["AbelianGroupAxioms", "InverseOfInverse"]["Status"]</code> returns `"Proved"` and <code>[TEproverProof]()[...]["ProofLength"]</code> the SZS derivation step count, exactly like the [TVampireProof]() sibling.
 
 ## Properties & Relations
 

@@ -11,7 +11,7 @@ RelatedGuides: [THVMLink]
 
 ## Usage
 
-<code>[TAtpCpGraph]()[*lhs* == *rhs*]</code> encodes one equation or critical pair into the anonymized typed hypergraph the ENIGMA (Efficient learNing-based Inference Guiding MAchine) Tier-2 graph neural network message-passes over. Also accepts `Inactive[Equal][*lhs*, *rhs*]` and a `HoldForm` of either.
+<code>[TAtpCpGraph]()[*lhs* == *rhs*]</code> encodes one equation or critical pair into the anonymized typed hypergraph the ENIGMA (Efficient learNing-based Inference Guiding MAchine) Tier-2 graph neural network message-passes over. Also accepts `*lhs* == *rhs*` and a `HoldForm` of either.
 
 The result is an Association keyed `"NodeTypes"`, `"NodeFeatures"` (an `NNodes` by 6 matrix), `"Edges"` (a list of `{src, dst, type}`), `"NNodes"`, `"NEdges"`, `"NodeLabels"`, and `"Symbols"`.
 
@@ -26,8 +26,7 @@ The result is an Association keyed `"NodeTypes"`, `"NodeFeatures"` (an `NNodes` 
 Encode a group-theory equation into its anonymized graph:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
-Keys @ TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], ident]]
+Keys @ TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]
 ```
 <!-- => {NodeTypes, NodeFeatures, Edges, NodeLabels, NNodes, NEdges, Symbols} -->
 
@@ -36,14 +35,13 @@ Keys @ TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], ident]]
 The node-type vector marks each node's kind:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
-TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], ident]]["NodeTypes"]
+TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]["NodeTypes"]
 ```
 <!-- => {0, 1, 2, 1, 2, 1, 2, 1, 1, 2} -->
 
 ## Properties & Relations
 
-- [TAtpCpGraphEquation]() is the exact inverse: it rebuilds `Inactive[Equal][lhs, rhs]` from the stored `"Symbols"` and `"Edges"`.
+- [TAtpCpGraphEquation]() is the exact inverse: it rebuilds `lhs == rhs` from the stored `"Symbols"` and `"Edges"`.
 - [TAtpGraphDataset]() applies this encoder to every proof lemma to build a labelled dataset; [TAtpTrainGnn]() trains a graph convolutional network on the result.
 
 ## Possible Issues

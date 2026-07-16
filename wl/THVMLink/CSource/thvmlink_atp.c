@@ -33,6 +33,45 @@ static int atp_abort_cb(void) {
   return (g_atp_abort_libData != NULL) ? g_atp_abort_libData->AbortQ() : 0;
 }
 
+// THVM_ATP_RECYCLE_DEBUG companion: attribute every thvm_wl_atp_run_proof
+// exit (status + shape on success, a tag on each early-error return) so a
+// silently-$Failed WL call can be discriminated from stderr alone.
+static int atp_rp_dbg(void) {
+  static int v = -1;
+  if (v < 0) v = getenv("THVM_ATP_RECYCLE_DEBUG") ? 1 : 0;
+  return v;
+}
+#define ATP_RP_ERR(tag)                                                    \
+  do {                                                                     \
+    if (atp_rp_dbg()) {                                                    \
+      fprintf(stderr, "[atp-rp-err] %s\n", (tag));                         \
+      fflush(stderr);                                                      \
+    }                                                                      \
+  } while (0)
+
+// Structural FNV hash of an encoded problem term, for the
+// THVM_ATP_RECYCLE_DEBUG wire probe: two runs of the SAME WL problem
+// must show the SAME hashes -- a drifting hash means the WL-side encode
+// (not the engine) is what a poisoned session corrupts.
+static u64 atp_rp_hash_term(Term t, u32 depth) {
+  u64 h = 1469598103934665603ULL;
+  h ^= (u64)term_tag(t); h *= 1099511628211ULL;
+  if (term_tag(t) == TAG_CTR) {
+    h ^= (u64)term_ext(t); h *= 1099511628211ULL;
+    if (depth < 64u) {
+      u32 n = term_ctr_n(t);
+      h ^= (u64)n; h *= 1099511628211ULL;
+      for (u32 i = 0; i < n; i++) {
+        h ^= atp_rp_hash_term(term_ctr_at(t, i), depth + 1u);
+        h *= 1099511628211ULL;
+      }
+    }
+  } else {
+    h ^= (u64)term_val(t); h *= 1099511628211ULL;
+  }
+  return h;
+}
+
 // === 8.7c: CTR-builder helper for the WL-side ATP encoder ========
 //
 // Builds a TAG_CTR Term whose children come from a list of
@@ -588,10 +627,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     u64 fs = gc_enabled() ? gc_from_start() : 0;
     fprintf(stderr,
             "[atp-gcstate] enter run_proof: gc_enabled=%d gc_count=%llu "
-            "from_start=%llu HEAP_NEXT=%llu from_upper=%d\n",
+            "from_start=%llu HEAP_NEXT=%llu from_upper=%d abortq=%d "
+            "rss=%lldMB\n",
             gc_enabled(), (unsigned long long)gc_count(),
             (unsigned long long)fs, (unsigned long long)HEAP_NEXT,
-            (gc_enabled() && fs != 0) ? 1 : 0);
+            (gc_enabled() && fs != 0) ? 1 : 0, libData->AbortQ(),
+            thvm_atp_live_rss_bytes() >> 20);
     fflush(stderr);
   } }
   MNumericArray na = MArgument_getMNumericArray(args[0]);
@@ -623,16 +664,21 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   const struct st_WolframNumericArrayLibrary_Functions *naf
     = libData->numericarrayLibraryFunctions;
   if (naf->MNumericArray_getType(na) != MNumericArray_Type_Bit64) {
+    ATP_RP_ERR("wire-not-bit64");
     return LIBRARY_FUNCTION_ERROR;
   }
   mint flat_len = naf->MNumericArray_getFlattenedLength(na);
   const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
 
   AtpWire wire;
-  if (!atp_wire_parse(data, flat_len, &wire)) return LIBRARY_FUNCTION_ERROR;
+  if (!atp_wire_parse(data, flat_len, &wire)) {
+    ATP_RP_ERR("wire-parse");
+    return LIBRARY_FUNCTION_ERROR;
+  }
   u32 n_ax = wire.n_ax;
 
   if ((u32)max_label >= ATP_WL_CFG_MAX_LABELS) {
+    ATP_RP_ERR("max-label");
     return LIBRARY_FUNCTION_ERROR;
   }
   static u32 wl_weights_p[ATP_WL_CFG_MAX_LABELS];
@@ -693,6 +739,47 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
                                                          : (u32)max_label + 1;
         for (u32 i = 0; i < n_copy; i++) {
           wl_precedence_p[i] = (u32)prec_data[i];
+        }
+      }
+    }
+  }
+  // Method "FlattenGoal" fresh-constant precedence BAND (port of
+  // pr_flatten_goal in tests/test_atp_wolfram_bench.c, the CLI's
+  // --flatten-goal / Twee --flatten-goal / Vampire naming transform).
+  // The WL problem builder (atpFlattenGoalTransform in ATP.wl) appended
+  // `fresh == subterm` definitional axioms naming the goal's compound
+  // subterms; args[65] lists the fresh constants' labels in inner-first
+  // collection order.  Open a strictly-minimal precedence band for
+  // them: shift every OTHER label's precedence up by nsub, then hand
+  // the fresh constants DISTINCT ranks 1..nsub (inner subterms lowest)
+  // so they stay below every original symbol yet remain mutually
+  // comparable (twee's funOccs key has no precedence ties -- equal
+  // fresh precedences would leave fresh<->fresh equations KBO-
+  // incomparable and drown the completion in unorientable pairs).  KBO
+  // weight stays the uniform 1, so each definition orients
+  // subterm -> fresh by weight alone.  A 0-length list leaves the
+  // chosen precedence untouched (engine byte-identical).  Applied
+  // after identity / auto_prec / explicit "Precedence" so the band
+  // shifts whichever ordering is in effect, mirroring the CLI's shift
+  // of the .pr header precedence.
+  {
+    MTensor fl_t = MArgument_getMTensor(args[65]);
+    if (fl_t != NULL) {
+      mint fl_len = libData->MTensor_getFlattenedLength(fl_t);
+      if (fl_len > 0) {
+        const mint *fl = libData->MTensor_getIntegerData(fl_t);
+        static u8 fl_is_fresh[ATP_WL_CFG_MAX_LABELS];
+        memset(fl_is_fresh, 0, (size_t)max_label + 1);
+        for (mint j = 0; j < fl_len; j++) {
+          if (fl[j] >= 0 && fl[j] <= max_label) fl_is_fresh[fl[j]] = 1u;
+        }
+        for (u32 l = 0; l <= (u32)max_label; l++) {
+          if (!fl_is_fresh[l]) wl_precedence_p[l] += (u32)fl_len;
+        }
+        for (mint j = 0; j < fl_len; j++) {
+          if (fl[j] >= 0 && fl[j] <= max_label) {
+            wl_precedence_p[fl[j]] = 1u + (u32)j;
+          }
         }
       }
     }
@@ -770,7 +857,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   wl_kbo_p.var_weight = var_weight_in > 0 ? (u32)var_weight_in : 1u;
 
   AtpState *atp = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
-  if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
+  if (atp == NULL) { ATP_RP_ERR("atp-init"); return LIBRARY_FUNCTION_ERROR; }
   // LPO ordering: drives orientation purely by symbol precedence
   // (same precedence array as KBO).  Attached after init so it
   // overrides the KBO config in thvm_atp_orient_and_add / compare.
@@ -925,14 +1012,17 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       if (mc != 0u) thvm_atp_set_min_const_label(atp, mc);
     }
   }
-  // Overlap-exhausted-equation gate (WM: a newly-derived commutativity
-  // overlaps an equation's fresh re-derivation, not the stale exhausted
-  // original).  Verified faithful: preserves all 73 byte-identical
-  // baselines and advances ShefferAxioms__OrAssociativity firstdiv 14->19;
-  // no WL-path regression (TFindProof status identical with vs without).
-  // Keyed off EmissionOrder (ON in every Waldmeister* preset) as an
-  // interim until a dedicated "OverlapExhaust" arg slot is plumbed.
-  thvm_atp_set_use_overlap_exhaust(atp, (u8)(wm_emission != 0));
+  // Overlap-exhausted-equation gate: OFF.  The pre-single-walk heuristic
+  // (once advanced Sheffer OrAssoc firstdiv 14->19) is fully superseded by
+  // the WM-faithful formation mechanisms AND it SUPPRESSES a real WM
+  // overlap: on HillmanAxioms ImpliesSheffer c3 the derived commutativity
+  // must overlap equation fact 3 at its activation (WM parents E6 x E2,
+  // kept CP pops at fact 441); with the gate on, that CP never forms and
+  // the equation arrives 14 selections late with swapped sides.  The full
+  // golden battery is byte-identical without the gate (bench flip
+  // committed alongside; THVM_ATP_OVERLAP_EXHAUST=1 re-arms in the bench
+  // for archaeology).
+  thvm_atp_set_use_overlap_exhaust(atp, 0u);
   // Method -> {... "IntakeOrder" -> True}: Waldmeister loader-level
   // axiom canonicalization + intake semantics (src/atp/wm_intake.c):
   // the first step permutes the queued axiom set into WM's canonical
@@ -1189,6 +1279,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   }
 
   if (!atp_wire_install_axioms(atp, &wire)) {
+    ATP_RP_ERR("install-axioms");
     thvm_atp_free(atp);
     return LIBRARY_FUNCTION_ERROR;
   }
@@ -1247,6 +1338,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // ATP_RUNNING whenever no goal is set, so the run is bounded only by
   // MaxSteps / TimeConstraint.
   if (!atp_wire_install_goals(atp, &wire)) {
+    ATP_RP_ERR("install-goals");
     thvm_atp_free(atp);
     return LIBRARY_FUNCTION_ERROR;
   }
@@ -1268,12 +1360,37 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
                                               ? n_wire_live : 1u)
                                      * sizeof(Term));
   if (wire_live == NULL) {
+    ATP_RP_ERR("wire-live-alloc");
     thvm_atp_free(atp);
     return LIBRARY_FUNCTION_ERROR;
   }
   for (u32 i = 0; i < n_ax; i++) {
     wire_live[2u * i + 0u] = atp_wire_ax_lhs(&wire, i);
     wire_live[2u * i + 1u] = atp_wire_ax_rhs(&wire, i);
+  }
+  // Wire probe (THVM_ATP_RECYCLE_DEBUG): structural hashes of what the
+  // engine actually received.  ax_h folds every axiom side; gl/gr are the
+  // first goal's sides.  triv=1 flags a goal that arrived pre-joined.
+  if (atp_rp_dbg()) {
+    u64 ax_h = 1469598103934665603ULL;
+    for (u32 i = 0; i < n_ax; i++) {
+      ax_h ^= atp_rp_hash_term(atp_wire_ax_lhs(&wire, i), 0u);
+      ax_h *= 1099511628211ULL;
+      ax_h ^= atp_rp_hash_term(atp_wire_ax_rhs(&wire, i), 0u);
+      ax_h *= 1099511628211ULL;
+    }
+    u64 gl = 0, gr = 0;
+    if (wire.n_goals > 0u) {
+      gl = atp_rp_hash_term(atp_wire_goal_lhs(&wire, 0), 0u);
+      gr = atp_rp_hash_term(atp_wire_goal_rhs(&wire, 0), 0u);
+    }
+    fprintf(stderr,
+            "[atp-rp-goal] n_ax=%u n_goals=%u ax_h=%016llx gl=%016llx "
+            "gr=%016llx triv=%d\n",
+            n_ax, wire.n_goals, (unsigned long long)ax_h,
+            (unsigned long long)gl, (unsigned long long)gr,
+            (int)(wire.n_goals > 0u && gl == gr));
+    fflush(stderr);
   }
   for (u32 g = 0; g < wire.n_goals; g++) {
     wire_live[2u * n_ax + 2u * g + 0u] = atp_wire_goal_lhs(&wire, g);
@@ -1293,6 +1410,74 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   mint random_seed_in  = MArgument_getInteger(args[27]);
   thvm_atp_set_random_seed(atp, (u64)random_seed_in);
   thvm_atp_set_random_modulo(atp, random_ratio_in > 0 ? (u32)random_ratio_in : 0u);
+
+  // === CLI-parity engine knobs (the FindProof KNOBS[] rows that were
+  // env-only): each is TRI-STATE -- -1 = Automatic (leave
+  // thvm_atp_init's default, which already honors the matching
+  // THVM_ATP_* env), 0 = force off, positive = force on -- so an unset
+  // Method suboption keeps the engine byte-identical AND env-driven
+  // CLI parity runs keep working through the WL bridge. ===
+
+  // Method -> {... "SimplerJoin" -> True | 2}: Twee's simplerThan-gated
+  // CP join discipline (Join.hs allSteps; CLI --simpler-join / env
+  // THVM_ATP_SIMPLER_JOIN).  1 = generation-time treatment AND
+  // selection; 2 = selection-only (Twee's own placement -- consider
+  // runs at dequeue), skipping the per-generated-CP push tax.
+  // args[58].
+  mint simpler_join_in = MArgument_getInteger(args[58]);
+  if (simpler_join_in >= 0) {
+    atp->use_simpler_join =
+        (simpler_join_in == 2) ? 2u : (u8)(simpler_join_in != 0);
+  }
+  // Method -> {... "EncompassDemod" -> True}: Twee reducesSkolem
+  // encompassment demodulation -- an unorientable skolem-ground
+  // equation may rewrite left-to-right at positions where the redex
+  // STRICTLY ENCOMPASSES the LHS (CLI --encompass-demod / env
+  // THVM_ATP_ENCOMPASS; see thvm.h use_encompass_demod).  args[59].
+  mint encompass_in = MArgument_getInteger(args[59]);
+  if (encompass_in >= 0) atp->use_encompass_demod = (u8)(encompass_in != 0);
+  // Method -> {... "GoalNarrow" -> True}: ground-congruence-closure +
+  // goal-cone e-matching endgame (src/atp/goal_narrow.c; CLI
+  // --goal-narrow / env THVM_ATP_GOAL_NARROW).  The gn-* tuning caps
+  // (stride / iters / node caps) stay env-only -- their defaults are
+  // the tuned CLI values.  args[60].
+  mint goal_narrow_in = MArgument_getInteger(args[60]);
+  if (goal_narrow_in >= 0)
+    thvm_atp_set_use_goal_narrow(atp, (u8)(goal_narrow_in != 0));
+  // Method -> {... "CPSetIRBudget" -> percent}: Twee's renormalise task
+  // discipline for the CP-set interreduction sweep (freq 10s +
+  // budget% + 20%-dead sample trigger, Twee.hs:978 / Task.hs; Twee's
+  // default share is 5).  Non-zero swaps the rule-count period gate;
+  // pair with "CPSetInterreduce" -> True (the sweep master).  CLI
+  // --cp-set-ir-budget / env THVM_ATP_CP_SET_IR_BUDGET.  args[61];
+  // <= 0 leaves the period discipline.
+  mint cp_set_ir_budget_in = MArgument_getInteger(args[61]);
+  if (cp_set_ir_budget_in > 0) atp->cp_set_ir_budget = (u32)cp_set_ir_budget_in;
+  // Method -> {... "PopRulesOnly" -> True}: Twee pop-join base
+  // discipline -- the pop-time BASE normalize is oriented-rules-only
+  // (no ungated doE), so proof-critical unorientable lemmas are not
+  // joined away; the unorientable tree participates only through the
+  // gated simpler-join pass.  Compose with "SimplerJoin" for the full
+  // Twee verdict.  CLI --pop-rules-only / env THVM_ATP_POP_RULES_ONLY.
+  // args[62].
+  mint pop_rules_only_in = MArgument_getInteger(args[62]);
+  if (pop_rules_only_in >= 0)
+    atp->use_pop_rules_only = (u8)(pop_rules_only_in != 0);
+  // Method -> {... "GjDeleteRule" -> True}: Twee interreduce1
+  // rule-delete port (a ground-joinable rule is DELETED rather than
+  // sterilized; diverges from WM).  CLI --gj-delete-rule / env
+  // THVM_ATP_GJ_DELETE_RULE.  The gj-budget / gj-index caps stay
+  // env-only.  args[63].
+  mint gj_delete_rule_in = MArgument_getInteger(args[63]);
+  if (gj_delete_rule_in >= 0)
+    atp->use_gj_delete_rule = (u8)(gj_delete_rule_in != 0);
+  // Method -> {... "FullInterreduce" -> True}: Twee full-R
+  // interreduction port (every rule re-reduced against the whole
+  // system after each addition; diverges from WM's incremental
+  // discipline).  CLI --full-interreduce / env
+  // THVM_ATP_FULL_INTERREDUCE.  args[64].
+  mint full_ir_in = MArgument_getInteger(args[64]);
+  if (full_ir_in >= 0) atp->use_full_interreduce = (u8)(full_ir_in != 0);
 
   g_atp_abort_libData = libData;
   thvm_atp_abort_hook = atp_abort_cb;
@@ -1442,6 +1627,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   thvm_atp_abort_hook = NULL;
   g_atp_abort_libData = NULL;
   if (st == ATP_ABORTED) {
+    ATP_RP_ERR("aborted");
     atp->gc_extra_roots   = NULL;
     atp->n_gc_extra_roots = 0u;
     free(wire_live);
@@ -1685,6 +1871,19 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
 #undef ATP_PHASE_MARK
 
   if (ext != NULL) thvm_atp_free(ext);
+  // Exit probe (THVM_ATP_RECYCLE_DEBUG): the successful-return shape.
+  // Pairs with the [atp-gcstate] entry line so a WL-side $Failed can be
+  // discriminated from a C-side non-PROVED status on stderr alone.
+  if (atp_rp_dbg()) {
+    fprintf(stderr,
+            "[atp-rp-exit] status=%d step=%u n_rules=%u n_steps=%u "
+            "ext_n_rules=%u ext_n_steps=%u mnf_n_steps=%u n_cps=%u "
+            "HEAP_NEXT=%llu from_start=%llu\n",
+            (int)st, atp->step, n_rules, n_steps, ext_n_rules, ext_n_steps,
+            mnf_n_steps, atp->n_cps, (unsigned long long)HEAP_NEXT,
+            (unsigned long long)(gc_enabled() ? gc_from_start() : 0));
+    fflush(stderr);
+  }
   atp->gc_extra_roots   = NULL;
   atp->n_gc_extra_roots = 0u;
   free(wire_live);

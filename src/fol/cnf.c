@@ -207,6 +207,15 @@ static Term fol_var_subst(Term t, u32 var_id, Term repl) {
   switch (term_tag(t)) {
     case TAG_FVR: return (term_ext(t) == var_id) ? repl : t;
     case TAG_CTR: {
+      // An inner quantifier over the SAME variable shadows it: the
+      // substitution must not cross the binder (it would replace the
+      // binder's own var slot with a non-variable term, wedging the
+      // Skolemizer and leaving the quantifier in the "CNF").
+      u32 lab = term_ext(t);
+      if (lab == FOL_LAB_ALL || lab == FOL_LAB_EX) {
+        Term var = term_ctr_at(t, 0u);
+        if (term_tag(var) == TAG_FVR && term_ext(var) == var_id) return t;
+      }
       u32 n = term_ctr_n(t);
       if (n == 0u) return t;
       Term kids[REWRITE_MAX_ARITY];
@@ -558,7 +567,9 @@ static FolLit fol_tseitin_rec(Term f, FolClause ***out, u32 *n, u32 *cap) {
 
 fn FolClause **fol_tseitin_extract_clauses(Term nnf_skolemized, u32 *n_out) {
   if (n_out == NULL) return NULL;
-  fol_reset_tseitin();
+  // Counter reset is the CALLER's job (the thvm.h contract): a
+  // multi-record problem resets once and lets the counter run across
+  // records so aux labels never collide between formulas.
   FolClause **out = NULL;
   u32 n = 0u, cap = 0u;
   FolLit root = fol_tseitin_rec(nnf_skolemized, &out, &n, &cap);
@@ -574,6 +585,7 @@ fn FolClause **fol_tseitin_extract_clauses(Term nnf_skolemized, u32 *n_out) {
 fn FolClause **fol_formula_to_clauses_tseitin(Term f, u32 *n_out) {
   if (n_out == NULL) return NULL;
   fol_reset_skolem();
+  fol_reset_tseitin();
   Term nnf = fol_nnf(f);
   Term sk  = fol_skolemize(nnf);
   return fol_tseitin_extract_clauses(sk, n_out);

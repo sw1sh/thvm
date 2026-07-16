@@ -268,10 +268,219 @@ static AtpFtCell *ft_from_term_rec(AtpFt *a, Term t, int scratch) {
   return ftnew_const(a, 0x20000000u | (u32)tag, scratch);
 }
 
+// Preorder-streaming term builder (FT-representation P1): allocate the
+// PARENT cell BEFORE its children so the pre-order chain (parent->next
+// == child0, child->end->next == next sibling) threads through
+// PHYSICALLY-CONSECUTIVE cells on the bump/adjacency-preserving arena --
+// Waldmeister's SigmaRGanzNeu discipline (MatchOperationen.c:1397),
+// where a term is materialised straight down the free list so a
+// pre-order walk is a near-sequential memory scan.  ft_from_term_rec
+// (the default) builds BOTTOM-UP (children before parent), so a
+// pre-order walk hops backward in memory and every ->next is a
+// dependent random load; this walk removes that on freshly-built terms.
+//
+// Byte-identical RESULT to ft_from_term_rec: same sym/arity/flags/next/
+// end on every cell (the GROUND flag is OR-folded identically -- cleared
+// as soon as a non-ground child is seen).  Only the cell ADDRESSES
+// differ, and no normal form / hash / KBO verdict observes an address
+// (ftnfm is content-keyed over the pre-order SYMBOL sequence, not cell
+// pointers), so the emitted RULEADD/proof stream is bit-for-bit
+// unchanged.  Gated by THVM_ATP_FT_PREORDER (resolved once); default OFF
+// = the bottom-up path, physically unchanged.
+int g_ft_preorder = -1;
+static inline int ft_preorder_on(void) {
+  if (g_ft_preorder < 0) g_ft_preorder = getenv("THVM_ATP_FT_PREORDER") ? 1 : 0;
+  return g_ft_preorder;
+}
+static AtpFtCell *ft_from_term_pre(AtpFt *a, Term t, int scratch) {
+  extern unsigned char g_atp_phase_detail;
+  if (g_atp_phase_detail) { extern u64 g_ft_from_nodes; g_ft_from_nodes++; }
+  u8 tag = term_tag(t);
+  if (tag == TAG_FVR) {
+    AtpFtCell *c = ft_alloc_one(a, scratch);
+    c->next  = NULL;
+    c->end   = c;
+    c->sym   = WF_VAR_BIT | (term_ext(t) & ~WF_VAR_BIT);
+    c->arity = 0;
+    c->flags = 0;
+    ft_raw_check(c);
+    return c;
+  }
+  if (tag == TAG_CTR) {
+    u32 label = term_ext(t);
+    u32 n     = term_ctr_n(t);
+    AtpFtCell *c = ft_alloc_one(a, scratch);   // PARENT FIRST (pre-order)
+    c->sym   = label & ~WF_VAR_BIT;
+    c->arity = (u16)n;
+    c->flags = ATPFT_FLAG_GROUND;              // OR-folded below
+    if (n == 0u) { c->next = NULL; c->end = c; ft_raw_check(c); return c; }
+    AtpFtCell *prev_end = NULL;
+    for (u32 i = 0; i < n; i++) {
+      AtpFtCell *kid = ft_from_term_pre(a, term_ctr_at(t, i), scratch);
+      if (i == 0u) c->next = kid;              // kid is the physically next cell
+      else         prev_end->next = kid;
+      if ((kid->flags & ATPFT_FLAG_GROUND) == 0u) c->flags = 0;
+      prev_end = kid->end;
+    }
+    c->end         = prev_end;
+    c->end->next   = NULL;
+    ft_raw_check(c);
+    return c;
+  }
+  if (tag == TAG_NUM) {
+    // Marker parent, then the two field constants, pre-order.
+    u32 dtype = term_ext(t);
+    u32 raw   = (u32)term_val(t);
+    AtpFtCell *c = ft_alloc_one(a, scratch);
+    c->sym   = ATPFT_NUM_MARKER;
+    c->arity = 2u;
+    c->flags = ATPFT_FLAG_GROUND;
+    AtpFtCell *dt_cell = ft_alloc_one(a, scratch);
+    dt_cell->next = NULL; dt_cell->end = dt_cell;
+    dt_cell->sym = dtype & ~WF_VAR_BIT; dt_cell->arity = 0;
+    dt_cell->flags = ATPFT_FLAG_GROUND;
+    ft_raw_check(dt_cell);
+    AtpFtCell *raw_cell = ft_alloc_one(a, scratch);
+    raw_cell->next = NULL; raw_cell->end = raw_cell;
+    raw_cell->sym = raw & ~WF_VAR_BIT; raw_cell->arity = 0;
+    raw_cell->flags = ATPFT_FLAG_GROUND;
+    ft_raw_check(raw_cell);
+    c->next        = dt_cell;
+    dt_cell->next  = raw_cell;
+    c->end         = raw_cell;
+    raw_cell->next = NULL;
+    ft_raw_check(c);
+    return c;
+  }
+  AtpFtCell *c = ft_alloc_one(a, scratch);
+  c->next  = NULL;
+  c->end   = c;
+  c->sym   = 0x20000000u | (u32)tag;
+  c->arity = 0;
+  c->flags = ATPFT_FLAG_GROUND;
+  ft_raw_check(c);
+  return c;
+}
+
+__attribute__((noinline)) void ft_region2_to_hook(void) {
+  // lldb anchor: region-2 ft_to_term (interchange residue hunt).
+  __asm__ volatile("");
+}
+__attribute__((noinline)) void ft_region2_from_hook(void) {
+  // lldb anchor: region-2 ft_from_term (interchange residue hunt).
+  __asm__ volatile("");
+}
+__attribute__((noinline)) void ft_region0_from_hook(void) {
+  // lldb anchor: region-0 (untagged) ft_from_term.
+  __asm__ volatile("");
+}
+__attribute__((noinline)) void ft_region0_to_hook(void) {
+  // lldb anchor: region-0 (untagged) ft_to_term.
+  __asm__ volatile("");
+}
 AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
   extern unsigned char g_atp_phase_detail;
-  if (g_atp_phase_detail) { extern u64 g_ft_from_calls; g_ft_from_calls++; }
+  if (g_atp_phase_detail) {
+    extern u64 g_ft_from_calls; g_ft_from_calls++;
+    extern u8 g_ft_region; extern u64 g_ft_from_by_region[8];
+    g_ft_from_by_region[g_ft_region & 7u]++;
+    if (g_ft_region == 2u) ft_region2_from_hook();
+    if (g_ft_region == 0u) ft_region0_from_hook();
+    if (getenv("THVM_ATP_FT2DBG") != NULL) {
+      extern const char *g_thvm_phase;
+      fprintf(stderr, "FT%uFROM phase=%s tag=%u ext=%u n=%u\n",
+              (u32)g_ft_region, g_thvm_phase, (u32)term_tag(t),
+              (u32)term_ext(t),
+              term_tag(t) == TAG_CTR ? term_ctr_n(t) : 0u);
+    }
+  }
+  if (ft_preorder_on()) return ft_from_term_pre(a, t, scratch);
   return ft_from_term_rec(a, t, scratch);
+}
+
+// Structural clone of a cell span through the same ftnew_* constructors
+// ft_from_term_rec uses -- the output is bit-identical to
+// ft_from_term(a, ft_to_term(x), scratch) with both Term hops removed
+// (sym / arity / next / end threading and the GROUND fold all come from
+// ftnew_ctr, exactly as a fresh conversion would).  Runtime-only flag
+// bits the source may carry (SUBST_FRESH, LPO_RANK_VALID) are NOT
+// copied, matching what a fresh conversion produces.  Used to hand a
+// DESTRUCTIVE normalize a private copy of a live mirror span (rule or
+// goal) without re-encoding the Term side.
+AtpFtCell *ft_clone_span(AtpFt *a, const AtpFtCell *x, int scratch) {
+  if (ft_is_var(x)) {
+    return ftnew_var(a, ft_var_id(x), scratch);
+  }
+  u32 sym   = ft_ctr_sym(x);
+  u16 arity = x->arity;
+  if (arity == 0u) return ftnew_const(a, sym, scratch);
+  enum { KIDS_STACK = 16 };
+  AtpFtCell *kids_stack[KIDS_STACK];
+  AtpFtCell **kids      = kids_stack;
+  AtpFtCell **kids_heap = NULL;
+  if (arity > KIDS_STACK) {
+    kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
+    if (kids_heap == NULL) { fprintf(stderr, "ft_clone_span: kids OOM\n"); exit(1); }
+    kids = kids_heap;
+  }
+  const AtpFtCell *child = x->next;
+  for (u16 i = 0; i < arity; i++) {
+    kids[i] = ft_clone_span(a, child, scratch);
+    child = child->end->next;
+  }
+  AtpFtCell *c = ftnew_ctr(a, sym, arity, kids, scratch);
+  free(kids_heap);
+  return c;
+}
+
+// Subterm addressing on a span: the cell at child-index path
+// p[0..p_len) -- the FT sibling of cp_subterm_at.  Each step descends
+// to the first child (parent->next) and advances end->next per index.
+// Returns NULL on an out-of-range index (the Term walker's 0), and the
+// addressed cell is the subterm's span head (its own end delimits it).
+const AtpFtCell *ft_subterm_at(const AtpFtCell *c, const u32 *p,
+                               u32 p_len) {
+  for (u32 d = 0; d < p_len; d++) {
+    if (c == NULL || ft_is_var(c) || c->arity == 0u) return NULL;
+    u32 idx = p[d];
+    if (idx >= (u32)c->arity) return NULL;
+    const AtpFtCell *k = c->next;
+    for (u32 i = 0; i < idx; i++) k = k->end->next;
+    c = k;
+  }
+  return c;
+}
+
+// Rename-clone: a fresh span with every var id shifted by `offset` --
+// the FT sibling of thvm_rename_vars(t, offset).  Built through the
+// same ftnew_* constructors, so the output is bit-identical to
+// ft_from_term(a, thvm_rename_vars(ft_to_term(x), offset)) with the
+// Term hops removed.
+AtpFtCell *ft_rename_span(AtpFt *a, const AtpFtCell *x, u32 offset,
+                          int scratch) {
+  if (ft_is_var(x)) {
+    return ftnew_var(a, ft_var_id(x) + offset, scratch);
+  }
+  u32 sym   = ft_ctr_sym(x);
+  u16 arity = x->arity;
+  if (arity == 0u) return ftnew_const(a, sym, scratch);
+  enum { KIDS_STACK = 16 };
+  AtpFtCell *kids_stack[KIDS_STACK];
+  AtpFtCell **kids      = kids_stack;
+  AtpFtCell **kids_heap = NULL;
+  if (arity > KIDS_STACK) {
+    kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
+    if (kids_heap == NULL) { fprintf(stderr, "ft_rename_span: kids OOM\n"); exit(1); }
+    kids = kids_heap;
+  }
+  const AtpFtCell *child = x->next;
+  for (u16 i = 0; i < arity; i++) {
+    kids[i] = ft_rename_span(a, child, offset, scratch);
+    child = child->end->next;
+  }
+  AtpFtCell *c = ftnew_ctr(a, sym, arity, kids, scratch);
+  free(kids_heap);
+  return c;
 }
 
 // --- Boundary: AtpFt -> Term -----------------------------------------
@@ -324,8 +533,114 @@ static Term ft_to_term_rec(const AtpFtCell *x) {
 
 Term ft_to_term(const AtpFtCell *x) {
   extern unsigned char g_atp_phase_detail;
-  if (g_atp_phase_detail) { extern u64 g_ft_to_calls; g_ft_to_calls++; }
+  if (g_atp_phase_detail) {
+    extern u64 g_ft_to_calls; g_ft_to_calls++;
+    extern u8 g_ft_region; extern u64 g_ft_to_by_region[8];
+    g_ft_to_by_region[g_ft_region & 7u]++;
+    if (getenv("THVM_ATP_FT2DBG") != NULL) {
+      extern const char *g_thvm_phase;
+      fprintf(stderr, "FT%uTO phase=%s sym=%u arity=%u\n",
+              (u32)g_ft_region, g_thvm_phase, x->sym, (u32)x->arity);
+    }
+    if (g_ft_region == 2u) ft_region2_to_hook();
+    if (g_ft_region == 0u) ft_region0_to_hook();
+  }
   return ft_to_term_rec(x);
+}
+
+// Exact FT-vs-Term structural compare -- 1 iff `c` is the span
+// ft_from_term(a, t) would build (same encoding contract: FVR <-> var
+// cell by id, CTR <-> ctr cell by sym/arity/children, TAG_NUM <-> the
+// ATPFT_NUM_MARKER pair).  Read-only, allocation-free, early-exit; the
+// adoption gates use it to prove a candidate span IS a Term's image
+// before adopting it in place of a fresh conversion.
+int ft_eq_term(const AtpFtCell *c, Term t) {
+  u8 tag = term_tag(t);
+  if (tag == TAG_FVR) {
+    return ft_is_var(c) && ft_var_id(c) == (term_ext(t) & ~WF_VAR_BIT);
+  }
+  if (ft_is_var(c)) return 0;
+  if (tag == TAG_CTR) {
+    if (ft_ctr_sym(c) != (term_ext(t) & ~WF_VAR_BIT)) return 0;
+    u32 n = term_ctr_n(t);
+    if ((u32)c->arity != n) return 0;
+    const AtpFtCell *child = c->next;
+    for (u32 i = 0; i < n; i++) {
+      if (!ft_eq_term(child, term_ctr_at(t, i))) return 0;
+      child = child->end->next;
+    }
+    return 1;
+  }
+  if (tag == TAG_NUM) {
+    if (ft_ctr_sym(c) != ATPFT_NUM_MARKER || c->arity != 2u) return 0;
+    const AtpFtCell *dt_cell  = c->next;
+    const AtpFtCell *raw_cell = dt_cell->end->next;
+    return ft_ctr_sym(dt_cell)  == (term_ext(t) & ~WF_VAR_BIT)
+        && ft_ctr_sym(raw_cell) == (((u32)term_val(t)) & ~WF_VAR_BIT);
+  }
+  return 0;
+}
+
+// Span-pattern one-way match against a HEAP-TERM subject -- the exact
+// sibling of thvm_match with the pattern read off mirror cells:
+// pattern var binds the subject SUBTREE (repeated var re-checks with
+// kbo_eq), constructor cells compare label + arity + children, and a
+// TAG_NUM-marker pattern never matches (thvm_match's default arm).
+// Bindings land in the same RewriteSubst (Term-typed), so the caller's
+// substitution application is unchanged.
+int ft_match_term(const AtpFtCell *pat, Term term, RewriteSubst *subst) {
+  if (ft_is_var(pat)) {
+    u32 id = ft_var_id(pat);
+    if (id >= REWRITE_MAX_VAR) return 0;
+    if (subst->bindings[id] == 0) {
+      subst->bindings[id] = term;
+      return 1;
+    }
+    return kbo_eq(subst->bindings[id], term);
+  }
+  u32 sym = ft_ctr_sym(pat);
+  if (sym == ATPFT_NUM_MARKER) return 0;   // thvm_match default: no match
+  if (term_tag(term) != TAG_CTR) return 0;
+  if (sym != term_ext(term)) return 0;
+  u32 n = (u32)pat->arity;
+  if (term_ctr_n(term) != n) return 0;
+  const AtpFtCell *kid = pat->next;
+  for (u32 i = 0; i < n; i++) {
+    if (!ft_match_term(kid, term_ctr_at(term, i), subst)) return 0;
+    kid = kid->end->next;
+  }
+  return 1;
+}
+
+// Instantiate a span TEMPLATE under a Term-typed substitution,
+// producing a fresh heap Term -- the exact sibling of
+// thvm_subst_apply(template_term, subst) minus the hash-cons reuse of
+// unchanged subtrees (there is no original Term to reuse; downstream
+// reads are content-based).  Unbound vars pass through as fresh FVRs;
+// the TAG_NUM marker round-trips to its NUM.
+Term ft_subst_apply_term(const AtpFtCell *tmpl, const RewriteSubst *subst) {
+  if (ft_is_var(tmpl)) {
+    u32 id = ft_var_id(tmpl);
+    if (id < REWRITE_MAX_VAR && subst->bindings[id] != 0) {
+      return subst->bindings[id];
+    }
+    return term_new_fvr(id);
+  }
+  u32 sym = ft_ctr_sym(tmpl);
+  u32 n   = (u32)tmpl->arity;
+  if (sym == ATPFT_NUM_MARKER && n == 2u) {
+    const AtpFtCell *dt_cell  = tmpl->next;
+    const AtpFtCell *raw_cell = dt_cell->end->next;
+    return term_new(0, TAG_NUM, ft_ctr_sym(dt_cell), ft_ctr_sym(raw_cell));
+  }
+  if (n > REWRITE_MAX_ARITY) return 0;
+  Term children[REWRITE_MAX_ARITY];
+  const AtpFtCell *kid = tmpl->next;
+  for (u32 i = 0; i < n; i++) {
+    children[i] = ft_subst_apply_term(kid, subst);
+    kid = kid->end->next;
+  }
+  return term_new_ctr(sym, children, n);
 }
 
 // --- Structural equality ----------------------------------------------

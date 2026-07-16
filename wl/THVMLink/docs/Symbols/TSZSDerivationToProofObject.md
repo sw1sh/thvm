@@ -23,15 +23,18 @@ RelatedGuides: [THVMLink]
 
 ## Basic Examples
 
-Lift a parsed SZS derivation produced by a CLI wrapper:
+Lift the parsed SZS derivation of a Vampire run on an inline TPTP problem, and read the shape of the result:
 
 ```wl
-#| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
-res = TVampireProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10];
-TSZSDerivationToProofObject[res["Inferences"]]
+problem = Export[FileNameJoin[{$TemporaryDirectory, "group_inv_inv.p"}], "
+cnf(associativity, axiom, mult(mult(X, Y), Z) = mult(X, mult(Y, Z))).
+cnf(left_identity, axiom, mult(e, X) = X).
+cnf(left_inverse, axiom, mult(i(X), X) = e).
+cnf(goal, negated_conjecture, i(i(a)) != a).", "Text"];
+res = TVampireProof[problem, TimeConstraint -> 10];
+Keys @ TSZSDerivationToProofObject[res["Inferences"]]
 ```
-<!-- => <|"Backend" -> "SZS", "Steps" -> {...}, ...|> (the thvm-shaped proof dataset) -->
+<!-- => {Backend, Status, Goal, Axioms, ProofDataset, ProofLength, RuleHistogram} -->
 
 ## Properties & Relations
 

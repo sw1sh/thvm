@@ -24,14 +24,12 @@ It is the `Method -> "TweeProcess"` dispatch target in [TFindProof]().
 
 ## Basic Examples
 
-Lift a Twee proof and read its head:
+Lift a Twee proof and read the shape of the proof Association:
 
 ```wl
-#| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
-Head @ TTweeProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
+Keys @ TTweeProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
 ```
-<!-- => Association (the thvm-shaped proof dataset) -->
+<!-- => {Backend, Status, Goal, Axioms, ProofDataset, ProofLength, RuleHistogram} -->
 
 ## Properties & Relations
 
@@ -42,3 +40,4 @@ Head @ TTweeProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint
 ## Possible Issues
 
 - Because Twee carries no per-step inference DAG, the result lacks the `{"CriticalPairLemma", n}` / `{"SubstitutionLemma", n}` construct-class metadata the SZS-based lifts provide; for that, use [TVampireProofObject]() or [TEproverProofObject]().
+- The (*theory*, *thm*) form resolves the generated TPTP bank under `tools/baselines/vampire_tptp/` (see [TTweeProof]()); on a fresh checkout export the bank first (`tools/vampire/export_tptp.wls`).

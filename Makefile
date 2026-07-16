@@ -920,6 +920,26 @@ $(BIN)/test_atp_ft_cpq: tests/test_atp.c $(SRC) | $(BIN)
 	  -DTHVM_ATPFT_CPQ \
 	  -o $@ $< $(TEST_LDFLAGS)
 
+# CPQ wolfram bench: the WM-preset .pr arm under the Stage-7 FT queue
+# (the config the plain ft_cpq suite does NOT exercise -- its blind
+# spot hid the fuse-gate wrong-engine bug fixed in 1b7ac915).
+$(BIN)/test_atp_wolfram_bench_cpq: tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC -DATP_MNF -DTHVM_ATPFT_CPQ \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# Regression gate for the CPQ .pr arm: the WM preset on a real .pr must
+# PROVE with the byte-exact trajectory (QUEUE_EMPTY here = the fused
+# formation route is off or the slot mirror is fabricating content).
+.PHONY: test-cpq-pr
+test-cpq-pr: $(BIN)/test_atp_wolfram_bench_cpq
+	@THVM_ATP_RSS_ABORT_MB=6000 THVM_ATP_WALDMEISTER=1 \
+	  $(BIN)/test_atp_wolfram_bench_cpq \
+	  tools/baselines/wm_pr/McCuneAxioms__Associativity.pr 200000 30 \
+	  | grep -q "^=> PROVED" \
+	  && echo "test-cpq-pr: ok (PROVED)" \
+	  || { echo "test-cpq-pr: FAIL (expected PROVED)"; exit 1; }
+
 # LPO/KBO orientability cache (src/atp/lpo_cache.c).  Gated by
 # THVM_ATP_LPO_ORIENT_CACHE -- the default build is byte-identical,
 # but the test binary turns it on so the cache APIs are live.
@@ -969,10 +989,39 @@ $(BIN)/test_atp_ac_abelian_repro: tests/test_atp_ac_abelian_repro.c $(SRC) | $(B
 # (GZ_ACVerzichtbar) which needs the AC machinery (src/atp/ac.c).  The
 # mask is 0 unless thvm_atp_auto_ac detects an AC operator, so the
 # non-AC trajectory stays byte-identical.
+# -DATP_MNF: always compile the MNF goal-directed front in (like the
+# paclet dylib); it stays runtime-gated on AtpState.use_mnf, which the
+# WALDMEISTER preset arms for GROUND goals to match `wmcli -auto`'s
+# zb=mnf goal treatment.  Completion-only goals leave it inert.
 $(BIN)/test_atp_wolfram_bench: tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
-	  -DTHVM_ATP_AC \
+	  -DTHVM_ATP_AC -DATP_MNF \
 	  -o $@ $< $(TEST_LDFLAGS)
+
+# Multi-session regression gate: several WM-preset engine sessions in
+# ONE process (the WL-bridge lifecycle the one-problem-per-process CLI
+# never exercises).  Guards the cross-session flatterm-arena corruption
+# class: any file-scope cache keyed by arena address / span pointer /
+# r_revision aliases across thvm_atp_free+init when malloc reuses the
+# arena address (free_span underflow, SIGBUS).
+$(BIN)/test_atp_session_reuse: tests/test_atp_session_reuse.c \
+    tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC -DATP_MNF \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# FindProof: WL-independent ATP CLI (the CASC UEQ entry) with the
+# TFindProof-Method knob surface over the same engine + configuration
+# path as the bench (includes its TU, so a CLI run with equal knobs is
+# byte-identical to a bench run).  bin/thvm-atp is a compatibility
+# alias for existing harnesses.
+$(BIN)/FindProof: tools/thvm_atp_cli.c tools/proof_check.c tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC -DATP_MNF \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+$(BIN)/thvm-atp: $(BIN)/FindProof
+	cp $< $@
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
@@ -1131,3 +1180,41 @@ $(BIN)/bench_flatcore: tools/bench_flatcore.c $(SRC) | $(BIN)
 # |R| sizes.  Asserts identical normal form on every subject. Additive.
 $(BIN)/bench_wmfpa: tools/bench_wmfpa.c src/wmfpa/wmfpa.h $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
+
+# === ATP PGO build =================================================
+# Profile-guided WALDMEISTER-preset bench: instrument -> train on three
+# representative -auto theorems -> rebuild with the merged profile +
+# thin-LTO.  Measured 2026-07-08 (Apple M3 Max): WolframAxioms
+# OrAssociativity 17.4s (-O2) -> 14.1s (-19%), RULEADD stream
+# byte-identical (side_check 0 div / 0 swaps on the parity battery).
+# The profile is machine-local (.pgo/, untracked); re-run after any
+# engine change that shifts hot paths.
+ATP_PGO_FLAGS := -std=c11 -O3 -mcpu=apple-m1 -Wall -Wextra -Wpedantic \
+                 -Wno-unused-function
+ATP_PGO_TRAIN := WolframAxioms__OrAssociativity \
+                 ShefferAxioms__OrAssociativity \
+                 MeredithAxioms__AndAssociativity
+.PHONY: atp-pgo
+atp-pgo:
+	mkdir -p .pgo
+	CFLAGS="$(ATP_PGO_FLAGS) -fprofile-instr-generate" \
+	  $(MAKE) -B bin/test_atp_wolfram_bench
+	for T in $(ATP_PGO_TRAIN); do \
+	  LLVM_PROFILE_FILE=.pgo/$$T.profraw \
+	  THVM_ATP_RSS_ABORT_MB=5300 THVM_ATP_WALDMEISTER=1 \
+	  ATP_BENCH_AUTO_WEIGHTS=1 \
+	    timeout 400 bin/test_atp_wolfram_bench \
+	      tools/baselines/wm_pr/$$T.pr 2000000 300 >/dev/null 2>&1; \
+	done
+	xcrun llvm-profdata merge -output=.pgo/atp.profdata .pgo/*.profraw
+	CFLAGS="$(ATP_PGO_FLAGS) -flto=thin \
+	        -fprofile-instr-use=$(CURDIR)/.pgo/atp.profdata \
+	        -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date" \
+	  $(MAKE) -B bin/test_atp_wolfram_bench
+	# The profile is engine-wide (same TU/functions), so it applies to the
+	# shipped CASC entry too -- rebuild FindProof with it (measured ~15% on
+	# M1: WolframAxioms OrAssociativity 15.3s -> 13.0s, RULEADD byte-identical).
+	CFLAGS="$(ATP_PGO_FLAGS) -flto=thin \
+	        -fprofile-instr-use=$(CURDIR)/.pgo/atp.profdata \
+	        -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date" \
+	  $(MAKE) -B bin/FindProof

@@ -21,20 +21,20 @@ It is the `Method -> "VampireProcess"` dispatch target in [TFindProof](), so pro
 - Options:
   - `TimeConstraint`, `"Mode"`, `"Binary"` - forwarded to [TVampireProof]().
   - `"ParseFormulas"` (default `False`) - when `True`, each step's `Statement` is `TPTPImport`-parsed into a Wolfram expression so structural comparison against the internal engine's output works (slow, roughly 5 seconds per formula).
-  - `"LiftToProofObject"` (default `False`) - when `True`, wraps the Association into a literal `ProofObject` head (implying `"ParseFormulas" -> True`), so the standard property accessors `p["ProofFunction"]`, `p["ProofGraph"]`, `p["ProofLength"]`, and `p["Theorems"]` work.
+  - `"LiftToProofObject"` (default `True`) - wraps the Association into a literal `ProofObject` head (implying `"ParseFormulas" -> True`), so the standard property accessors `p["ProofFunction"]`, `p["ProofGraph"]`, `p["ProofLength"]`, and `p["Theorems"]` work.  Set it `False` for the raw construct-keyed Association.
 - When the Vampire binary is not installed, the builder returns a `Failure["ExternalNoProof", <|"Tool" -> _, "Status" -> _, "Seconds" -> _|>]` rather than raising an error, so a fresh-checkout build does not break.
 
 ## Basic Examples
 
-Lift a Vampire proof into a literal `ProofObject`:
+Build the raw construct-keyed proof Association from a Vampire run and read its shape:
 
 ```wl
-#| eval: false
-Needs["WolframInstitute`THVMLink`ATP`"];
-TVampireProofObject["AbelianGroupAxioms", "InverseOfInverse",
-    "LiftToProofObject" -> True, TimeConstraint -> 10]
+Keys @ TVampireProofObject["AbelianGroupAxioms", "InverseOfInverse",
+    TimeConstraint -> 10, "LiftToProofObject" -> False]
 ```
-<!-- => ProofObject[...] -->
+<!-- => {Backend, Status, Goal, Axioms, ProofDataset, ProofLength, RuleHistogram} -->
+
+The default <code>[TVampireProofObject]()["AbelianGroupAxioms", "InverseOfInverse"]</code> returns the same content lifted into a literal `ProofObject`; because the lift implies `"ParseFormulas" -> True` (roughly 5 seconds per formula), budget minutes rather than seconds for it on a portfolio-sized derivation.
 
 ## Properties & Relations
 
@@ -44,4 +44,5 @@ TVampireProofObject["AbelianGroupAxioms", "InverseOfInverse",
 
 ## Possible Issues
 
-- Without `"LiftToProofObject" -> True` the result is a raw Association keyed by `"Status"`, `"Backend"`, and the per-step construct keys, not a `ProofObject` head; the property accessors only apply after the lift.
+- With `"LiftToProofObject" -> False` the result is a raw Association keyed by `"Status"`, `"Backend"`, and the per-step construct keys, not a `ProofObject` head; the property accessors only apply to the lifted form.
+- The (*theory*, *thm*) form resolves the generated TPTP bank under `tools/baselines/vampire_tptp/` (see [TVampireProof]()); on a fresh checkout export the bank first (`tools/vampire/export_tptp.wls`).

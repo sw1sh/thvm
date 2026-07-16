@@ -1,0 +1,37 @@
+FindProof -- equational theorem prover (CASC UEQ entry, with a
+FOF/clausal front end).
+
+BUILD
+  make                 # produces bin/FindProof  (needs a C11 compiler + libm)
+  ./starexec_build     # equivalent, for StarExec
+
+The whole engine is one self-contained translation unit; no external
+dependencies beyond the C standard library and libm.
+
+STAREXEC CONFIGURATION
+  bin/starexec_run_default PROBLEM.p
+      CASC proving.  Reads the wall-clock limit from
+      $STAREXEC_WALLCLOCK_LIMIT (default 120s), pins
+      THVM_ATP_SCHED_MAX_PAR to the node's core count, and runs a
+      CONCURRENT portfolio of configuration slices, each with the full
+      wall; the first proof wins.  Writes an SZS status line plus, on
+      success, an SZS CNFRefutation (stdout is quiet otherwise;
+      --verbose restores engine chatter).
+
+RUN (manual)
+  bin/FindProof --schedule --szs --proof --wall=120 PROBLEM.p   # portfolio
+  bin/FindProof --szs PROBLEM.p                                 # single config
+  bin/FindProof --check --szs PROOF.p                           # verify a proof
+  bin/FindProof --list-knobs                                    # strategy surface
+
+INPUT   TPTP CNF unit-equality problems; FOF (and non-unit CNF) is
+        clausified and equationalized by the built-in front end.
+        include('Axioms/*.ax') directives resolve against the problem
+        directory and $TPTP.
+OUTPUT  SZS status (Unsatisfiable / Satisfiable / GaveUp / ResourceOut /
+        Timeout; Theorem for fof conjectures) and, with --proof, an SZS
+        refutation with full inference provenance.
+
+The companion ProoVer entry, CheckProof (a first-order TSTP proof
+checker built from the same sources), ships as its own tarball; see
+tools/proover/ in the source repository.
