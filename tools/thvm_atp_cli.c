@@ -162,8 +162,11 @@ static const AtpKnob KNOBS[] = {
   {"fof-sat",                "THVM_ATP_FOF_SAT",         1, "(non-Horn clausal-saturation pre-pass step budget; 0 disables)"},
   {"fof-sine",               "THVM_ATP_FOF_SINE",        1, "(clausal pre-pass SInE cone above N clausified clauses; 0 off, 1 = default threshold 512, N>1 = threshold N)"},
   {"fof-slice",              "THVM_ATP_FOF_SLICE",       1, "(FOF-portfolio slice gate: 2 = give up unless the input carries a fof() record)"},
+  {"fof-split",              "THVM_ATP_FOF_SPLIT",       1, "(k-bounded ground case splitting for near-Horn FOF; 2 = give up if inapplicable)"},
+  {"fof-split-k",            "THVM_ATP_FOF_SPLIT_K",     1, "(fof-split or-clause bound, default 4)"},
   {"fol-age-ratio",          "THVM_FOL_AGE_RATIO",       1, "(clausal pre-pass pick-given interleave: every Nth pick FIFO; 1 pure FIFO, 0 pure best-first, default 5)"},
   {"fol-goal-tier",          "THVM_FOL_GOAL_TIER",       1, "(clausal pre-pass goal tier: 0 drops the non-conjecture-ancestry pick-best penalty)"},
+  {"fol-index",              "THVM_FOL_INDEX",           1, "(clausal pre-pass literal indexing: partner lists + subsumption buckets; 0 disables)"},
   {"canon-input",            "THVM_ATP_CANON_INPUT",     1, "(canonical input presentation: greater side left + sorted clauses; 0 disables)"},
   {"horn",                   "THVM_ATP_HORN",            1, "(encoded-Horn release: 0 disables)"},
   {"horn-ratio",             "THVM_ATP_HORN_RATIO",      1, "(Horn pick-given size:age ratio, 0..4)"},
@@ -287,6 +290,8 @@ enum {
   PROV_TRIVIAL_GOAL,  // clausification derived $false: ix = CNF clause
   PROV_HORN,          // Horn-chaining released unit: g_hpr[ix] carries
                       // the hyper-resolution derivation record
+  PROV_SPLIT,         // fof-split branch clause: g_prov_split[ix] carries
+                      // the avatar-shaped case-assumption records
 };
 // Capture entry points defined with the provenance module below; the
 // def-unfold / equals-goal transforms (earlier in the file) call them.
@@ -5488,6 +5493,182 @@ static char *prov_clause_text(const FolClause *c) {
   return strdup(buf);
 }
 
+// ===================================================================
+// k-bounded ground case splitting (AVATAR-lite, --fof-split)
+// ===================================================================
+//
+// SOUNDNESS.  Let S = H u {D_1..D_m} be the clausified set with H
+// Horn and each D_j = N_j v P_j1 v ... v P_jw -- N_j the negative
+// literals, every P_ji positive and GROUND.  A branch b picks one
+// positive per or-clause: S_b = H u {N_j v P_jb(j) : all j}.  Each
+// branch clause keeps ONE positive, so S_b is Horn; and every branch
+// clause entails its or-clause (fewer disjuncts), so S_b |= S: a
+// branch is a STRENGTHENING, and one refuted branch alone proves
+// nothing.  Exhaustiveness is where groundness enters: take M |= S
+// and any j.  Either M |= P_ji for some i -- a truth value
+// independent of the clause's universally quantified variables,
+// exactly because P_ji is ground -- and then M |= all(N_j v P_ji);
+// or M falsifies every P_ji, forcing M |= all(N_j), and then M
+// satisfies EVERY branch clause of D_j.  Either way M satisfies some
+// branch clause of every D_j simultaneously, i.e. M |= S_b for some
+// b.  Contrapositive: all branches unsatisfiable => S unsatisfiable.
+// (For a NON-ground positive the first case breaks: M may satisfy
+// different disjuncts at different instances, satisfying D_j while
+// falsifying every universally quantified branch clause.  The AGT
+// trichotomy axiom less(X,Y) | less(Y,X) | X = Y is exactly such a
+// clause -- the gate detects it and the lane exits.)
+//
+// MECHANICS.  The parent detects the shape during pass B, skips the
+// clausal pre-pass, and (from main, after the Horn-release early
+// exits) runs one child process per branch SEQUENTIALLY, each with
+// remaining-wall / branches-left: the run_schedule re-exec pattern,
+// so every knob env inherits; THVM_ATP_FOF_BRANCH carries the picks.
+// A child re-clausifies identically, emits each or-clause as the
+// Horn clause (negatives + picked positive) -- the pure-Horn lanes
+// then get the whole problem -- and exits 0 only on refutation.  The
+// first open branch short-circuits the case analysis to GaveUp.
+//
+// PROVENANCE (--proof).  A child's branch-clause leaves cite an
+// avatar-shaped assumption chain (prov_src_citation PROV_SPLIT):
+//   fof(spl<j>_<i>, definition, (spl<j>_<i> <=> <P_ji>),
+//       introduced(definition, [new_symbols(naming, [spl<j>_<i>])],
+//                  [avatar_definition])).
+//   cnf(c<k>s<i>, plain, <branch clause>,
+//       inference(avatar_split_clause, [status(thm)],
+//                 [c<k>, spl<j>_<i>])).
+// and the parent stitches the child Proof blocks, renames each
+// branch's terminal record br<b>_*, then closes the DAG with the
+// split clauses over the spl names, one avatar_contradiction_clause
+// per branch, and a final avatar_sat_refutation $false -- the
+// Vampire record shapes, checkable by tools/casc/proof_dag_check.py.
+
+#define FOF_SPLIT_MAX_OR   8    // detection cap (--fof-split-k <= this)
+#define FOF_SPLIT_MAX_POS  8    // per-or-clause width cap
+#define FOF_SPLIT_MAX_BR   64   // branch-product cap
+
+typedef struct {
+  int   cnf_ix;                      // clausified-clause index (c<k>)
+  int   width;                       // positive-literal count
+  char *pi_text[FOF_SPLIT_MAX_POS];  // ground positive texts  (--proof)
+} FofSplitOr;
+static FofSplitOr g_fof_split_or[FOF_SPLIT_MAX_OR];
+static int g_fof_split_nor     = 0;  // or-clauses seen (or-ordinal)
+static int g_fof_split_unfit   = 0;  // a shape gate failed
+static int g_fof_split_pending = 0;  // parent: orchestrate after load
+static int g_fof_split_child   = 0;  // THVM_ATP_FOF_BRANCH present
+static int g_fof_split_choice[FOF_SPLIT_MAX_OR];
+static int g_fof_split_nchoice = 0;
+
+static int fof_split_mode(void) {
+  const char *e = getenv("THVM_ATP_FOF_SPLIT");
+  return (e == NULL || *e == '\0') ? 0 : atoi(e);
+}
+
+static int fof_split_k(void) {
+  const char *e = getenv("THVM_ATP_FOF_SPLIT_K");
+  int k = (e != NULL && *e != '\0') ? atoi(e) : 4;
+  if (k < 1) k = 1;
+  if (k > FOF_SPLIT_MAX_OR) k = FOF_SPLIT_MAX_OR;
+  return k;
+}
+
+static u8 fof_term_is_ground(Term t) {
+  if (term_tag(t) == TAG_FVR) return 0u;
+  if (term_tag(t) != TAG_CTR) return 1u;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++)
+    if (!fof_term_is_ground(term_ctr_at(t, i))) return 0u;
+  return 1u;
+}
+
+// Child init: parse THVM_ATP_FOF_BRANCH ("i0,i1,..." -- the picked
+// positive per or-clause, in pass-B scan order).
+static void fof_split_read_branch(void) {
+  const char *b = getenv("THVM_ATP_FOF_BRANCH");
+  g_fof_split_child = (b != NULL && *b != '\0');
+  g_fof_split_nchoice = 0;
+  if (!g_fof_split_child) return;
+  const char *p = b;
+  while (*p != '\0' && g_fof_split_nchoice < FOF_SPLIT_MAX_OR) {
+    g_fof_split_choice[g_fof_split_nchoice++] = atoi(p);
+    const char *cma = strchr(p, ',');
+    if (cma == NULL) break;
+    p = cma + 1;
+  }
+}
+
+// Branch-clause text: the or-clause's (classified) negative literals
+// plus the picked positive -- prov_clause_text on a synthetic clause.
+static char *fof_split_branch_text(FolClause *cl, int pos_lit) {
+  FolLit lits[FOL_MAX_LITS];
+  u32 n = 0;
+  for (u32 i = 0; i < cl->n_lits; i++) {
+    if (cl->lits[i].sign != 1u) continue;
+    Term l, r;
+    if (fof_lit_classify(&cl->lits[i], &l, &r) != FOF_LIT_PAIR) continue;
+    if (n < FOL_MAX_LITS) lits[n++] = cl->lits[i];
+  }
+  if (n < FOL_MAX_LITS) lits[n++] = cl->lits[pos_lit];
+  FolClause tmp = { lits, n };
+  return prov_clause_text(&tmp);
+}
+
+// Parent-side scan, called per or-clause during pass B: record the
+// stash and evaluate the shape gates (width cap, GROUND positives).
+// pos_src maps the classified positive index to the clause's literal.
+static void fof_split_scan_or(FolClause *cl, int cnf_ix,
+                              const int *pos_src, int npos) {
+  if (g_fof_split_nor >= FOF_SPLIT_MAX_OR || npos > FOF_SPLIT_MAX_POS) {
+    g_fof_split_unfit = 1;
+    return;
+  }
+  FofSplitOr *so = &g_fof_split_or[g_fof_split_nor];
+  memset(so, 0, sizeof *so);
+  so->cnf_ix = cnf_ix;
+  so->width = npos;
+  for (int i = 0; i < npos; i++) {
+    const FolLit *pl = &cl->lits[pos_src[i]];
+    if (!fof_term_is_ground(pl->atom)) { g_fof_split_unfit = 1; return; }
+    if (g_cli_want_proof) {
+      FolLit one = *pl;
+      FolClause tmp = { &one, 1u };
+      so->pi_text[i] = prov_clause_text(&tmp);
+    }
+  }
+  g_fof_split_nor++;
+}
+
+// --- avatar-shaped branch-assumption provenance (--proof) ------------
+typedef struct {
+  int   cnf_ix, orj, pick;
+  char *pi_text;   // the picked ground positive
+  char *br_text;   // the branch clause (negatives + picked positive)
+  int   emitted;
+} ProvSplit;
+static ProvSplit *g_prov_split = NULL;
+static int g_prov_nsplit = 0, g_prov_split_cap = 0;
+
+static int prov_split_new(FolClause *cl, int cnf_ix, int orj,
+                          int pick, int pos_lit) {
+  if (g_prov_nsplit >= g_prov_split_cap) {
+    g_prov_split_cap = (g_prov_split_cap == 0) ? 8 : g_prov_split_cap * 2;
+    g_prov_split = (ProvSplit *)realloc(
+        g_prov_split, (size_t)g_prov_split_cap * sizeof(ProvSplit));
+    if (g_prov_split == NULL) { g_prov_nsplit = 0; return -1; }
+  }
+  ProvSplit *sp = &g_prov_split[g_prov_nsplit];
+  memset(sp, 0, sizeof *sp);
+  sp->cnf_ix = cnf_ix;
+  sp->orj    = orj;
+  sp->pick   = pick;
+  FolLit one = cl->lits[pos_lit];
+  FolClause tmp = { &one, 1u };
+  sp->pi_text = prov_clause_text(&tmp);
+  sp->br_text = fof_split_branch_text(cl, pos_lit);
+  if (sp->pi_text == NULL || sp->br_text == NULL) return -1;
+  return g_prov_nsplit++;
+}
+
 // --- capture (called from tp_fof_load) --------------------------------
 static int prov_rec_new(const char *name, size_t name_len,
                         const char *role, const char *text, int src_cnf) {
@@ -5878,6 +6059,34 @@ static int prov_src_citation(FILE *fp, int kind, int ix, char *src, size_t cap) 
         ", inference(hyper_resolution, [status(thm)], [%s])).\n", plist);
     return o + 1 < cap;
   }
+  case PROV_SPLIT: {
+    // fof-split branch clause: the or-clause's conversion chain, the
+    // avatar definition naming the picked ground positive, and the
+    // branch clause as an avatar_split_clause -- the encoded unit
+    // then cites the ASSUMPTION record, never the or-clause directly
+    // (a branch clause is a strengthening, not a consequence).
+    if (g_prov_split == NULL || ix < 0 || ix >= g_prov_nsplit) return 0;
+    ProvSplit *sp = &g_prov_split[ix];
+    if (sp->pi_text == NULL || sp->br_text == NULL) return 0;
+    if (!prov_emit_cnf(fp, sp->cnf_ix)) return 0;
+    if (!sp->emitted) {
+      fprintf(fp, "fof(spl%d_%d, definition, (spl%d_%d <=> (%s)), "
+                  "introduced(definition, [new_symbols(naming, "
+                  "[spl%d_%d])], [avatar_definition])).\n",
+              sp->orj, sp->pick, sp->orj, sp->pick, sp->pi_text,
+              sp->orj, sp->pick);
+      fprintf(fp, "cnf(c%ds%d, plain, %s, "
+                  "inference(avatar_split_clause, [status(thm)], "
+                  "[c%d, spl%d_%d])).\n",
+              sp->cnf_ix, sp->pick, sp->br_text, sp->cnf_ix,
+              sp->orj, sp->pick);
+      sp->emitted = 1;
+    }
+    snprintf(src, cap,
+             ", inference(equality_encoding, [status(esa)], [c%ds%d])).\n",
+             sp->cnf_ix, sp->pick);
+    return 1;
+  }
   default:
     return 0;
   }
@@ -5933,6 +6142,7 @@ static void prov_reset_emitted(void) {
   for (int i = 0; i < g_prov_neqg; i++) g_prov_eqg[i].emitted = 0;
   for (int i = 0; i < g_hpc_n; i++) g_hpc[i].emitted = 0;
   for (int i = 0; i < g_hpr_n; i++) g_hpr[i].emitted = 0;
+  for (int i = 0; i < g_prov_nsplit; i++) g_prov_split[i].emitted = 0;
 }
 
 // --- clausal pre-pass refutation emission ------------------------------
@@ -6355,6 +6565,8 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   fol_reset_tseitin();   // aux labels run per-problem, across records
   g_fof_or_used = g_fof_eq_used = g_fof_not_used = 0;
   g_fof_or_ncl = g_fof_tseitin_recs = 0;
+  g_fof_split_nor = g_fof_split_unfit = g_fof_split_pending = 0;
+  fof_split_read_branch();
   thvm_heap_exhausted = 0;
   thvm_heap_exhaust_jmp = &g_fof_oom_jb;
   if (setjmp(g_fof_oom_jb) != 0) {
@@ -6506,6 +6718,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   // the goal shape (direct vs funnel) is known before emission.
   Term  cond_l[FOL_MAX_LITS], cond_r[FOL_MAX_LITS];
   Term  pos_l[FOL_MAX_LITS],  pos_r[FOL_MAX_LITS];
+  int   pos_src[FOL_MAX_LITS];   // positive's literal index (fof-split)
   int  *neg_ix = (int *)malloc(sizeof(int) * (size_t)(ncl + 1));
   if (neg_ix == NULL) tp_giveup("OOM in FOF front-end");
   int n_neg_cls = 0;
@@ -6527,7 +6740,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
         cond_l[nneg] = l; cond_r[nneg] = r; nneg++;
       } else {
         if (npos >= (int)FOL_MAX_LITS) tp_giveup("FOF clause exceeds literal bound");
-        pos_l[npos] = l; pos_r[npos] = r; npos++;
+        pos_l[npos] = l; pos_r[npos] = r; pos_src[npos] = (int)i; npos++;
       }
     }
     if (drop_clause) continue;
@@ -6537,6 +6750,29 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
       if (fof_or_mode() == 0)
         tp_giveup("FOF equationalization covers the Horn fragment only "
                   "(a clause has 2+ positive literals)");
+      // fof-split branch child: emit the or-clause as the branch's
+      // Horn clause (negatives + the picked positive; the other
+      // positives drop) -- the whole problem is then pure Horn.  The
+      // avatar-shaped assumption records carry the provenance (see
+      // the split module's soundness header).
+      if (g_fof_split_child) {
+        int j = g_fof_split_nor++;
+        if (j >= g_fof_split_nchoice)
+          tp_giveup("fof-split branch: or-clause count drifted");
+        int pick = g_fof_split_choice[j];
+        if (pick < 0 || pick >= npos)
+          tp_giveup("fof-split branch: pick out of range");
+        if (nneg > 0) any_ifeq = 1;
+        if (g_prov_on) {
+          int six = prov_split_new(cl, c, j, pick, pos_src[pick]);
+          g_cur_prov_kind = (six >= 0) ? PROV_SPLIT : PROV_NONE;
+          g_cur_prov_ix   = (six >= 0) ? six : 0;
+        }
+        fof_emit_horn(tp, cond_l, cond_r, nneg,
+                      pos_l[pick], pos_r[pick], 0, ccnj[c]);
+        continue;
+      }
+      if (fof_split_mode() > 0) fof_split_scan_or(cl, c, pos_src, npos);
       if (nneg > 0) any_ifeq = 1;
       fof_emit_or(tp, cond_l, cond_r, nneg, pos_l, pos_r, npos, ccnj[c]);
       continue;
@@ -6559,12 +6795,31 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   g_fof_soft_oversize = 0;
   g_cur_prov_kind = PROV_NONE;
   g_cur_prov_ix   = 0;
+  // fof-split fitness (parent): Horn except 1..k or-clauses, every
+  // positive ground, branch product bounded.  A fitting shape hands
+  // the whole wall to the branch orchestration in main -- including
+  // the pre-pass slice below.
+  if (!g_fof_split_child && fof_split_mode() > 0 && !g_cli_fof_trivial &&
+      !g_fof_split_unfit &&
+      g_fof_split_nor >= 1 && g_fof_split_nor <= fof_split_k()) {
+    long prod = 1;
+    for (int j = 0; j < g_fof_split_nor; j++) {
+      prod *= g_fof_split_or[j].width;
+      if (prod > FOF_SPLIT_MAX_BR) break;
+    }
+    if (prod >= 2 && prod <= FOF_SPLIT_MAX_BR) g_fof_split_pending = 1;
+  }
+  if (g_fof_split_child && g_fof_split_nor != g_fof_split_nchoice)
+    tp_giveup("fof-split branch: or-clause count drifted");
+  if (!g_fof_split_child && fof_split_mode() >= 2 && !g_fof_split_pending &&
+      !g_cli_fof_trivial)
+    tp_giveup("fof-split slice: no k-bounded ground or-split");
   // Non-Horn input: bounded clausal saturation on the original
   // clauses first (case analysis lives there, not in any equational
   // encoding).  Under --proof a win emits the recorded resolution
   // refutation with its conversion lineage (prepass_emit_proof);
   // main prints the stash and skips the engine.
-  if (g_fof_or_ncl > 0 && !g_cli_fof_trivial &&
+  if (g_fof_or_ncl > 0 && !g_cli_fof_trivial && !g_fof_split_pending &&
       fof_clausal_prepass(cls, ccnj, ncl))
     g_cli_fof_satref = 1;
   if (g_cli_fof_trivial && g_cli_want_proof && g_prov_trivial_cnf >= 0 &&
@@ -7441,6 +7696,15 @@ static const SchedSlice SCHEDULE[] = {
   {"fof-nopre", "--fof-slice=2 --fof-sat=0",        0.0},
   {"fof-or2",   "--fof-slice=2 --fof-or=2 --fof-sat=0", 0.0},
   {"fof-full",  "--fof-slice=2 --fof-sine=0",       0.0},
+  //   fof-split            k-bounded ground case splitting: near-Horn
+  //                        sets whose or-clauses carry only GROUND
+  //                        positives run one Horn branch child per
+  //                        choice (AVATAR-lite; every branch must
+  //                        refute).  =2 exits immediately on any
+  //                        other shape -- non-ground or-positives
+  //                        (the AGT trichotomy class), pure Horn, or
+  //                        too many/too-wide or-clauses.
+  {"fof-split", "--fof-slice=2 --fof-split=2 --fof-sat=0", 0.0},
   // FULL AC-completion, exit-fast: =2 gives up immediately when no AC
   // operator is detected, so on non-AC problems (most of the corpus) the
   // slot frees instantly -- letting this sit in the FIRST wave protects
@@ -7821,6 +8085,188 @@ static int run_schedule(const char *self, const char *file, double wall,
   return rc;
 }
 
+// --- fof-split orchestration (parent side) ---------------------------
+// See the split module's soundness header.  One child per branch,
+// SEQUENTIAL, each on remaining-wall / branches-left; every child
+// must refute (exit 0) or the case analysis is GaveUp.  The children
+// inherit every knob env through fork; THVM_ATP_FOF_BRANCH carries
+// the picks and FINDPROOF_SLICE keeps them silent on failure.
+
+// Print one child's Proof block with its terminal (last) record's
+// name prefixed br<b>_ -- the parent's avatar_contradiction_clause
+// cites it, and nothing inside the block does (it is the root).
+// Interior records keep their names: the shared conversion-lineage
+// records are byte-identical across branches.  Returns 0 when the
+// block or the root is missing.
+static int fof_split_emit_branch(FILE *out, int b, const char *path,
+                                 char *root, size_t root_cap) {
+  size_t len = 0;
+  char *txt = tp_read_file(path, &len);
+  if (txt == NULL) return 0;
+  char *start = strstr(txt, "% SZS output start");
+  char *bodynl = (start != NULL) ? strchr(start, '\n') : NULL;
+  char *end = (bodynl != NULL) ? strstr(bodynl, "% SZS output end") : NULL;
+  if (bodynl == NULL || end == NULL) { free(txt); return 0; }
+  char *body = bodynl + 1;
+  *end = '\0';
+  char *head = NULL;
+  for (char *p = body; *p != '\0'; p++) {
+    if ((p == body || p[-1] == '\n') &&
+        (strncmp(p, "cnf(", 4) == 0 || strncmp(p, "fof(", 4) == 0)) head = p;
+  }
+  if (head == NULL) { free(txt); return 0; }
+  char *nm = head + 4;
+  size_t o = 0;
+  while ((isalnum((unsigned char)nm[o]) || nm[o] == '_') && o + 1 < root_cap) {
+    root[o] = nm[o];
+    o++;
+  }
+  root[o] = '\0';
+  fwrite(body, 1, (size_t)(nm - body), out);
+  fprintf(out, "br%d_", b);
+  fputs(nm, out);
+  free(txt);
+  return o > 0;
+}
+
+static int fof_split_orchestrate(const char *self, const char *file,
+                                 const char *preset, const char *max_steps,
+                                 int szs, int want_proof) {
+  int nor = g_fof_split_nor;
+  int B = 1;
+  for (int j = 0; j < nor; j++) B *= g_fof_split_or[j].width;
+  int slice = getenv("FINDPROOF_SLICE") != NULL;
+  fprintf(stderr, "FindProof: fof-split: %d ground or-clause(s), "
+          "%d branch(es)\n", nor, B);
+  // Hard wall over the whole case analysis (grace covers a child's
+  // own grace window so its alarm normally fires first).
+  {
+    double left = g_cli_wall_sec - (horn_now() - g_cli_main_t0);
+    if (left < 1.0) left = 1.0;
+    char line[1100];
+    line[0] = '\0';
+    if (szs && !slice)
+      snprintf(line, sizeof line, "%% SZS status Timeout for %s\n", file);
+    cli_arm_wall_alarm(left, 60, 1, line[0] ? line : NULL);
+  }
+  static char outs[FOF_SPLIT_MAX_BR][128];
+  static char roots[FOF_SPLIT_MAX_BR][64];
+  static char picks[FOF_SPLIT_MAX_BR][FOF_SPLIT_MAX_OR * 8];
+  int all_ok = 1;
+  int b = 0;
+  for (b = 0; b < B; b++) {
+    // Decode branch b row-major over the or-clause widths.
+    int digit[FOF_SPLIT_MAX_OR];
+    int rem = b;
+    for (int j = nor - 1; j >= 0; j--) {
+      digit[j] = rem % g_fof_split_or[j].width;
+      rem /= g_fof_split_or[j].width;
+    }
+    size_t po = 0;
+    picks[b][0] = '\0';
+    for (int j = 0; j < nor; j++)
+      po += (size_t)snprintf(picks[b] + po, sizeof picks[b] - po, "%s%d",
+                             (j > 0) ? "," : "", digit[j]);
+    double left = g_cli_wall_sec - (horn_now() - g_cli_main_t0);
+    double wb = left / (double)(B - b);
+    if (wb < 1.0) wb = 1.0;
+    snprintf(outs[b], sizeof outs[b], "/tmp/thvm_split_%d_%d.out",
+             (int)getpid(), b);
+    char cmd[4096];
+    snprintf(cmd, sizeof cmd,
+             "FINDPROOF_SLICE=1 THVM_ATP_FOF_BRANCH='%s' '%s' --preset=%s "
+             "--max-steps=%s --wall=%.1f --szs%s '%s' > '%s'%s",
+             picks[b], self, preset, max_steps, wb,
+             want_proof ? " --proof" : "", file, outs[b],
+             g_cli_verbose ? "" : " 2>/dev/null");
+    int st = system(cmd);
+    int ok = (st != -1 && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    fprintf(stderr, "FindProof: fof-split branch %d/%d [%s]: %s "
+            "(cap %.1fs)\n", b + 1, B, picks[b],
+            ok ? "refuted" : "open", wb);
+    if (!ok) { all_ok = 0; break; }   // one open branch: case analysis dead
+  }
+  alarm(0);
+  int rc = 1;
+  if (all_ok) {
+    if (szs)
+      printf("%% SZS status %s for %s\n",
+             g_cli_fof_conjecture ? "Theorem" : "Unsatisfiable", file);
+    if (want_proof) {
+      // Stitch: every branch block (terminal renamed br<b>_*), then
+      // the parent's or-clause lineage + split records closing the
+      // case-analysis DAG at $false.
+      char *bufp = NULL;
+      size_t plen = 0;
+      FILE *ms = open_memstream(&bufp, &plen);
+      int ok = (ms != NULL);
+      for (int i = 0; i < B && ok; i++)
+        ok = fof_split_emit_branch(ms, i, outs[i], roots[i], sizeof roots[i]);
+      if (ok) {
+        prov_reset_emitted();
+        for (int j = 0; j < nor && ok; j++) {
+          FofSplitOr *so = &g_fof_split_or[j];
+          ok = prov_emit_cnf(ms, so->cnf_ix);
+          for (int i = 0; i < so->width && ok; i++) {
+            if (so->pi_text[i] == NULL) { ok = 0; break; }
+            fprintf(ms, "fof(spl%d_%d, definition, (spl%d_%d <=> (%s)), "
+                        "introduced(definition, [new_symbols(naming, "
+                        "[spl%d_%d])], [avatar_definition])).\n",
+                    j, i, j, i, so->pi_text[i], j, i);
+          }
+          if (!ok) break;
+          fprintf(ms, "fof(split_c%d, plain, (", j);
+          for (int i = 0; i < so->width; i++)
+            fprintf(ms, "%sspl%d_%d", (i > 0) ? " | " : "", j, i);
+          fprintf(ms, "), inference(avatar_split_clause, [status(thm)], "
+                      "[c%d", so->cnf_ix);
+          for (int i = 0; i < so->width; i++) fprintf(ms, ", spl%d_%d", j, i);
+          fputs("])).\n", ms);
+        }
+        for (int i = 0; i < B && ok; i++) {
+          int digit[FOF_SPLIT_MAX_OR];
+          int rem = i;
+          for (int j = nor - 1; j >= 0; j--) {
+            digit[j] = rem % g_fof_split_or[j].width;
+            rem /= g_fof_split_or[j].width;
+          }
+          fprintf(ms, "fof(branch_%d, plain, (", i);
+          for (int j = 0; j < nor; j++)
+            fprintf(ms, "%s~spl%d_%d", (j > 0) ? " | " : "", j, digit[j]);
+          fprintf(ms, "), inference(avatar_contradiction_clause, "
+                      "[status(thm)], [br%d_%s])).\n", i, roots[i]);
+        }
+        if (ok) {
+          fputs("fof(split_refutation, plain, $false, "
+                "inference(avatar_sat_refutation, [status(thm)], [", ms);
+          for (int j = 0; j < nor; j++) fprintf(ms, "%ssplit_c%d",
+                                                (j > 0) ? ", " : "", j);
+          for (int i = 0; i < B; i++) fprintf(ms, ", branch_%d", i);
+          fputs("])).\n", ms);
+        }
+      }
+      if (ms != NULL) fclose(ms);
+      if (ok && bufp != NULL) {
+        printf("%% SZS output start Proof for %s\n", file);
+        fwrite(bufp, 1, plen, stdout);
+        printf("%% SZS output end Proof for %s\n", file);
+      } else {
+        fprintf(stderr, "FindProof: fof-split: branch proof stitching "
+                "incomplete; omitting the solution block\n");
+      }
+      free(bufp);
+    }
+    fflush(stdout);
+    rc = 0;
+  } else if (szs && !slice) {
+    printf("%% SZS status GaveUp for %s\n", file);
+    fflush(stdout);
+  }
+  for (int i = 0; i < B; i++)
+    if (i <= b && outs[i][0] != '\0') unlink(outs[i]);
+  return rc;
+}
+
 static void usage(FILE *fp) {
   fprintf(fp,
     "usage: FindProof [options] problem.pr | problem.p\n"
@@ -8049,6 +8495,13 @@ int main(int argc, char **argv) {
         fflush(stdout);
         return 0;
       }
+      // fof-split case analysis (near-Horn over ground or-clauses):
+      // one branch child per positive-literal choice, sequential,
+      // every branch must refute.  The orchestrator owns the rest of
+      // the wall and the process exits with its verdict.
+      if (g_fof_split_pending)
+        return fof_split_orchestrate(argv[0], file, preset, max_steps,
+                                     szs, g_cli_want_proof);
       // Function-definition unfolding (Vampire definition_unfolding),
       // opt-in: BEFORE the equals/curry/SInE transforms and the
       // canonical presentation, so selection and canon see the
