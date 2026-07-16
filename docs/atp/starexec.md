@@ -9,7 +9,8 @@ can test before uploading. Two tarballs, one code base: FindProof.tgz (CASC prov
 
 Last verified 2026-07-08 on Ubuntu 22.04 / gcc 11.4; re-verified 2026-07-12 on
 macOS (tarball -> extract -> `starexec_build` -> `starexec_run_default` proves
-LCL192-10 and LAT159-1 at a 30 s wall).
+LCL192-10 and LAT159-1 at a 30 s wall). The direct-binary command paths below
+were re-verified 2026-07-16 (LAT171-1 proves + `--check` returns VerifiedGood).
 
 ---
 
@@ -98,9 +99,11 @@ sh tools/casc/mk_tarball.sh                       # writes ./FindProof.tgz
 sh tools/casc/mk_tarball.sh /path/to/FindProof.tgz  # or a chosen path
 ```
 
-The script copies the engine sources plus the CLI, the two run scripts, the
+The script copies the engine sources plus the CLI, the run script, the
 build script, the Makefile, and the README into a staging `FindProof/` tree and
 tars it. It does not compile anything; StarExec (or you) compiles from source.
+(`tools/casc/mk_bin_tarball.sh` is the variant that ships a prebuilt binary;
+`tools/proover/mk_tarball.sh` builds the CheckProof tarball the same way.)
 
 Keep the output off the repository tree (it is a generated artifact, not
 version-controlled). A durable choice is `~/.cache/thvm/casc/FindProof.tgz`.
@@ -153,9 +156,14 @@ STAREXEC_WALLCLOCK_LIMIT=120 STAREXEC_CPU_LIMIT=120 STAREXEC_MAX_MEM=... \
 ```
 
 Each run script resolves the solver root relative to its own location, reads the
-wall-clock limit, and executes `bin/FindProof` in the appropriate mode. Standard
-output is captured and the `% SZS status ...` line is parsed. Standard error is
-kept separately (FindProof routes progress chatter there, so stdout stays clean).
+wall-clock limit, pins `THVM_ATP_SCHED_MAX_PAR` to the node's core count (so the
+whole portfolio races in ONE wave -- under a hard wall, later waves never run;
+exit-fast slices free their slots immediately on inapplicable problems), and
+executes `bin/FindProof --schedule --szs --proof`. Standard output is captured
+and the `% SZS status ...` line is parsed. Output is quiet by default on the
+competition path -- stdout carries exactly the SZS line(s) + proof, and the
+engine's progress chatter is suppressed; `--verbose` (or `THVM_ATP_VERBOSE=1`)
+restores it for development.
 
 ---
 
@@ -198,8 +206,9 @@ python3 wl/Examples/proover/synth/score.py        # scores --check vs gold label
 
 The manual build and run were verified end to end on an Ubuntu 22.04 / gcc 11.4
 machine: `starexec_build` produces an ELF binary, `starexec_run_default` proves
-and emits a CNFRefutation, and `starexec_run_proover` verifies a valid proof and
-FailedVerifies a buggy one with the step localised.
+and emits a CNFRefutation, and the CheckProof tarball's own
+`starexec_run_default` verifies a valid proof and rejects a buggy one with the
+step localised.
 
 ---
 
@@ -211,15 +220,16 @@ the shape is stable:
 1. Sign in and open (or create) a SPACE for your work.
 2. Upload the SOLVER: choose the `FindProof.tgz` archive. Select the "source /
    run build script" option so `starexec_build` compiles it on a build node.
-   After the build finishes, the solver shows two configurations, `default` and
-   `proover`.
+   After the build finishes, each solver shows its single configuration
+   `default` (FindProof.tgz proves; CheckProof.tgz checks -- upload them as
+   two separate solvers).
 3. Upload the BENCHMARKS as a benchmark archive into the space:
    - for CASC: TPTP unit-equality problems (`.p`);
    - for ProoVer: first-order TSTP proofs (`.p`).
    Pick the benchmark processor that matches the format if prompted.
 4. Create a JOB. Pair the solver CONFIGURATION with the benchmark set:
-   - use configuration `default` for the CASC problems,
-   - use configuration `proover` for the ProoVer proofs.
+   - the FindProof solver's `default` for the CASC problems,
+   - the CheckProof solver's `default` for the ProoVer proofs.
    Set the wall-clock limit (CASC commonly 120s or the division's limit; ProoVer
    30s per proof) and the memory limit for the job.
 5. Run the job and inspect results. StarExec shows the parsed SZS status per
@@ -231,7 +241,7 @@ contains `bin/FindProof`.
 
 ---
 
-## 8. The two configurations in detail
+## 8. The two entries in detail
 
 ### default -- CASC unit-equality proving
 
@@ -239,21 +249,28 @@ contains `bin/FindProof`.
 bin/FindProof --schedule --szs --proof --wall=<limit> PROBLEM.p
 ```
 
-- INPUT: a TPTP CNF unit-equality problem. `include('Axioms/*.ax')` directives
-  resolve against the problem directory and the `TPTP` environment variable.
+- INPUT: a TPTP CNF unit-equality problem, or FOF / non-unit CNF via the
+  equationalization front end. `include('Axioms/*.ax')` directives resolve
+  against the problem directory and the `TPTP` environment variable.
 - `--schedule` runs a CONCURRENT portfolio: the configuration slices launch as
-  child processes in a bounded pool (5 at once, each with the FULL wall limit
-  and a per-child RSS cap), and the first proof wins -- the losers are killed
-  and reaped. The slice set (see `SCHEDULE[]` in `tools/thvm_atp_cli.c`): the
-  Waldmeister preset, the existential equals-goal encoding, the forward and
-  backward condensed-detachment lanes (`--horn-cd` / `--horn-back`, which exit
-  immediately on non-CD problems and free their pool slot), goal flattening
-  (dressed and bare), the Twee-scored completion lane (`--simpler-join` +
-  passive re-scoring), the MNF goal-directed front, encompassment demodulation,
-  bare completion, and three ground-join backups.
+  child processes in a bounded pool (`THVM_ATP_SCHED_MAX_PAR` at once --
+  default 5 for the bare binary, pinned to the core count by the run script --
+  each with the FULL wall limit and a per-child RSS cap), and the first proof
+  wins; the losers are killed and reaped. The slice set (29 slices, the
+  `SCHEDULE[]` table in `tools/thvm_atp_cli.c`) is documented in
+  `docs/atp/casc_strategy.md` section 3: the Waldmeister preset, the
+  existential-goal lanes (equals encoding + narrowing queue), the forward and
+  backward condensed-detachment lanes, the 7-slice FOF pack, AC completion,
+  definition unfolding (alone and composed with goal naming), goal flattening
+  (dressed and bare), the Twee-scored completion lane, the MNF goal-directed
+  front, encompassment demodulation, bare completion, the ifeq-guard and tgt
+  lanes, three raw-presentation recovery lanes, and three ground-join backups.
+  Exit-fast slices (`=2` gates) give up instantly on inapplicable problems,
+  freeing their pool slot.
 - OUTPUT: one `% SZS status` line using the CNF ontology
-  (`Unsatisfiable` / `Satisfiable` / `GaveUp` / `ResourceOut` / `Timeout`) and,
-  on success, an SZS `CNFRefutation` block.
+  (`Unsatisfiable` / `Satisfiable` / `GaveUp` / `ResourceOut` / `Timeout`;
+  `Theorem` for a `fof(` conjecture) and, on success, an SZS `CNFRefutation`
+  (or `Proof`) block.
 - Problem transforms widen what the engine represents: a functor of arity
   above eight is curried into nested binary `ap2` applications (`--curry`,
   default on), and a knowledge base of thousands of clauses is cut to the
@@ -262,11 +279,15 @@ bin/FindProof --schedule --szs --proof --wall=<limit> PROBLEM.p
   cannot be represented degrades to a clean `GaveUp` rather than crashing, so
   every problem gets a valid status line.
 
-### proover -- first-order proof checking
+### CheckProof (the ProoVer entry) -- first-order proof checking
 
 ```
-bin/FindProof --check --szs PROOF.p
+bin/CheckProof --szs PROOF.p        # the CheckProof tarball's binary
+bin/FindProof --check --szs PROOF.p # same checker inside FindProof
 ```
+
+(The CheckProof run script exports `THVM_PROOFCHECK_WALL` from the StarExec
+wall limit.)
 
 - INPUT: a first-order TSTP proof (`fof`/`cnf` records with `inference(...)`
   annotations), by refutation, closing with `$false`.
@@ -292,15 +313,17 @@ bin/FindProof --check --szs PROOF.p
 - Separate `-D` flags. Pass each engine feature define as its own argument (the
   Makefile already does). Collapsing them into one unquoted shell variable
   silently breaks the build.
-- Wall vs CPU. `--schedule` runs up to 5 slices CONCURRENTLY, each against the
-  full WALL-clock limit, so total CPU consumption can approach 5x the wall. If
-  the job's `STAREXEC_CPU_LIMIT` equals the wall limit, the CPU limit bites
-  first on a saturating problem -- give the job a CPU limit of at least 5x the
-  wall (CASC's standard config does).
+- Wall vs CPU. `--schedule` runs up to `THVM_ATP_SCHED_MAX_PAR` slices
+  CONCURRENTLY (the run script pins it to the core count), each against the
+  full WALL-clock limit, so total CPU consumption can approach MAX_PAR x the
+  wall. If the job's `STAREXEC_CPU_LIMIT` equals the wall limit, the CPU limit
+  bites first on a saturating problem -- give the job a CPU limit of at least
+  MAX_PAR x the wall (CASC's standard config does).
 - Memory. Each schedule child inherits a per-slice RSS abort cap
   (`SCHED_SLICE_RSS_MB`, 4500 MB) unless the caller exported a lower
-  `THVM_ATP_RSS_ABORT_MB`; measured practical peak is ~7 GB for 4 concurrent
-  slices. Proof checking bounds its own term store and abstains
+  `THVM_ATP_RSS_ABORT_MB`; measured practical peak was ~7 GB for 4 concurrent
+  slices, and scales with `THVM_ATP_SCHED_MAX_PAR` (exit-fast slices cost
+  nothing on inapplicable problems). Proof checking bounds its own term store and abstains
   (`Unknown`) rather than exhausting memory. Still set a sane
   `STAREXEC_MAX_MEM` on the job.
 - Regenerate the tarball after any source change. `mk_tarball.sh` copies the
