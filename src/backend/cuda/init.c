@@ -119,7 +119,15 @@ fn int cuda_init(void) {
     fprintf(stderr, "thvm: cuda_init -- %s\n", CUDA_LAST_ERROR);
     return -1;
   }
+  // CUDA 13 headers remap cuCtxCreate to the 4-argument _v4 entry (a
+  // leading CUctxCreateParams*, NULL = defaults); earlier toolkits keep
+  // the 3-argument signature.  Version-gate so the same source builds
+  // against both (the cu13 pip-wheel headers on the Prime pods).
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 13000
+  r = cuCtxCreate(&CUDA_CONTEXT, NULL, 0, CUDA_DEVICE);
+#else
   r = cuCtxCreate(&CUDA_CONTEXT, 0, CUDA_DEVICE);
+#endif
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuCtxCreate", r);
     fprintf(stderr, "thvm: cuda_init -- %s\n", CUDA_LAST_ERROR);

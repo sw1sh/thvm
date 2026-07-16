@@ -430,10 +430,12 @@ ifeq ($(shell uname -s),Linux)
     HAVE_CUDA      := 1
     CUDA_DEFINES   := -DTHVM_HAS_CUDA -I$(CUDA_HOME)/include
     CUDA_LDFLAGS   := -L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib64/stubs \
+                      -L$(CUDA_HOME)/lib -L$(CUDA_HOME)/lib/stubs \
                       -L/usr/lib/x86_64-linux-gnu -lcuda -lnvrtc
     TESTS          += $(BIN)/test_cuda_backend
     TESTS          += $(BIN)/test_cuda_ptx
     TESTS          += $(BIN)/test_cuda_mixed
+    TESTS          += $(BIN)/test_custom_kernel_cuda
   endif
 endif
 
@@ -756,6 +758,11 @@ $(BIN)/test_cuda_ptx: tests/test_cuda_ptx.c $(SRC) | $(BIN)
 # Mixed CPU+CUDA realize (device-in-graph per-op routing + cross-device
 # COPY transfer).  Linux+CUDA only, like the other CUDA tests.
 $(BIN)/test_cuda_mixed: tests/test_cuda_mixed.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
+
+# Raw custom-kernel injection on CUDA buffers (the CUDA counterpart of
+# test_custom_kernel).  Linux+CUDA only, like the other CUDA tests.
+$(BIN)/test_custom_kernel_cuda: tests/test_custom_kernel_cuda.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
 
 # Cross-backend dispatch microbench.  One binary; the backend is chosen
