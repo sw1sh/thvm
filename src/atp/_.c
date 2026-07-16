@@ -7375,6 +7375,34 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
     thvm_ftsj_rulecache_invalidate_all();
   }
 #endif
+  // Engine sessions share this TU's file-scope hand-off registers and
+  // handle-keyed rename caches.  A prior session's FT spans died with
+  // its arena (thvm_atp_free -> ft_destroy) and its Term handles may be
+  // recycled by this session, so retire everything that could smuggle a
+  // dead pointer across: bump the handle-cache epoch (the walk former's
+  // Term rename caches and the overlap witness key on it -- a bump is a
+  // cold cache, recomputed byte-identically) and DISARM the bracket
+  // registers (drop, never free: the owning arena already reclaimed the
+  // cells wholesale).  The walk former's span-keyed park/rename caches
+  // reset themselves on AtpFt.session change (sw_rename_ft).
+  g_atp_gc_epoch++;
+#ifdef THVM_ATPFT_RULES
+  g_pop_ft_l  = NULL;  g_pop_ft_r  = NULL;
+  g_rule_ft_l = NULL;  g_rule_ft_r = NULL;
+  g_lazy_rule.span_l = NULL; g_lazy_rule.span_r = NULL;
+  g_lazy_rule.sent_l = 0;    g_lazy_rule.sent_r = 0;
+  g_lazy_rule.armed  = 0u;
+  g_mnf_pend_ft_l = NULL; g_mnf_pend_ft_r = NULL;
+  g_enq_ft_l      = NULL; g_enq_ft_r      = NULL;
+  g_trace_eq_ft_l = NULL; g_trace_eq_ft_r = NULL;
+#endif
+#ifdef THVM_ATPFT_NORM
+  g_vcp_treat.fl = NULL; g_vcp_treat.fr = NULL;
+#endif
+  g_vcp_treat.armed     = 0u;
+  g_vcp_treat.raw_len   = 0u;
+  g_acp_fuse.valid      = 0u;
+  g_acp_fuse.twee_valid = 0u;
   // Cross-call hygiene: a prior thvm_atp_free released the previous
   // atp's rule_index / cp_index, but the globals g_atp_ri_ix /
   // g_atp_cp_ix still point at the freed memory.  Reading them before
@@ -27976,21 +28004,34 @@ static SwRnFtEnt g_sw_rn_ft[SW_RN_FT_SLOTS];
 // Abandoning the clones instead ("never freed") retained ~10 Arena-A
 // cells per QUEUED CP -- with the treated-span abandonment fixed, THE
 // remaining per-CP Arena share of the 6GB RSS aborts on deep GRP/RNG
-// twee-slice runs.  Parked pointers are valid only for the arena that
-// allocated them: on an arena change (fresh AtpState) the list RESETS
-// without freeing (ft_destroy already dropped the old slab pool).
-static AtpFtCell **g_sw_rn_park       = NULL;
-static u32         g_sw_rn_park_n     = 0;
-static u32         g_sw_rn_park_cap   = 0;
-static u64         g_sw_rn_park_rev   = ~0ull;
-static const void *g_sw_rn_park_arena = NULL;
+// twee-slice runs.  Parked pointers are valid only for the arena
+// INSTANCE that allocated them: on an arena change (fresh AtpState)
+// the list RESETS without freeing (ft_destroy already dropped the old
+// slab pool).  The instance test MUST be AtpFt.session, never the
+// AtpFt address: the struct is malloc'd per state and a later session
+// regularly lands on the freed address, so an address match would
+// carry the dead session's parked spans into the new arena and free
+// them there on the first r_revision bump -- the cross-run free_span
+// underflow / SIGBUS (WolframAxioms Commutativity -> DoubleNegation,
+// AbelianGroup -> Sheffer OrAssociativity in one WL kernel;
+// tests/test_atp_session_reuse.c is the in-process regression).
+static AtpFtCell **g_sw_rn_park         = NULL;
+static u32         g_sw_rn_park_n       = 0;
+static u32         g_sw_rn_park_cap     = 0;
+static u64         g_sw_rn_park_rev     = ~0ull;
+static u64         g_sw_rn_park_session = 0;   // no AtpFt.session is 0
 static AtpFtCell *sw_rename_ft(AtpState *s, const AtpFtCell *src) {
   AtpFt *a  = (AtpFt *)s->ft_arena_ptr;
   u64   rev = (u64)s->r_revision;
-  if ((const void *)a != g_sw_rn_park_arena) {
-    g_sw_rn_park_n     = 0;   // stale arena: pointers already released
-    g_sw_rn_park_arena = (const void *)a;
-    g_sw_rn_park_rev   = rev;
+  if (a->session != g_sw_rn_park_session) {
+    g_sw_rn_park_n       = 0;   // stale arena: pointers already released
+    g_sw_rn_park_session = a->session;
+    g_sw_rn_park_rev     = rev;
+    // The rename cache aliases across sessions too: mirror-span
+    // ADDRESSES repeat once the old slab pool is freed, and r_revision
+    // restarts, so a (src, rev)-matched survivor would hand out a
+    // clone span inside the DEAD arena.  New session -> cold cache.
+    memset(g_sw_rn_ft, 0, sizeof g_sw_rn_ft);
   } else if (rev != g_sw_rn_park_rev) {
     for (u32 k = 0; k < g_sw_rn_park_n; k++) {
       ft_free_span(a, g_sw_rn_park[k], g_sw_rn_park[k]->end);

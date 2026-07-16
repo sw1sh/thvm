@@ -997,6 +997,18 @@ $(BIN)/test_atp_wolfram_bench: tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
 	  -DTHVM_ATP_AC -DATP_MNF \
 	  -o $@ $< $(TEST_LDFLAGS)
 
+# Multi-session regression gate: several WM-preset engine sessions in
+# ONE process (the WL-bridge lifecycle the one-problem-per-process CLI
+# never exercises).  Guards the cross-session flatterm-arena corruption
+# class: any file-scope cache keyed by arena address / span pointer /
+# r_revision aliases across thvm_atp_free+init when malloc reuses the
+# arena address (free_span underflow, SIGBUS).
+$(BIN)/test_atp_session_reuse: tests/test_atp_session_reuse.c \
+    tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC -DATP_MNF \
+	  -o $@ $< $(TEST_LDFLAGS)
+
 # FindProof: WL-independent ATP CLI (the CASC UEQ entry) with the
 # TFindProof-Method knob surface over the same engine + configuration
 # path as the bench (includes its TU, so a CLI run with equal knobs is

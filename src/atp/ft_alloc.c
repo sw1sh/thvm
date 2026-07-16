@@ -152,6 +152,36 @@ static AtpFtCell *ft_block_threaded(AtpFtBlock *b, AtpFtCell *tail_link) {
 
 // --- Public API --------------------------------------------------------
 
+// Monotonic arena-instance counter (see AtpFt.session in ft.h).  Never
+// reset: two ft_init'd arenas in one process NEVER share a session id,
+// even when malloc hands the second the first's freed address.
+static u64 g_ft_session_next = 0;
+
+// THVM_FT_ALLOC_TRACE=1: stderr log of arena lifecycle (init/destroy
+// with session + address) and every ft_free_span whose span head lies
+// OUTSIDE the arena's own slab blocks -- the exact signature of a
+// stale cross-session span reaching the wrong allocator.  Diagnostic
+// only; the default build resolves the env once and stays silent.
+static int ft_trace_on(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("THVM_FT_ALLOC_TRACE");
+    on = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  }
+  return on;
+}
+
+// Does `c` point into one of `a`'s slab blocks?  O(n_blocks); trace /
+// abort paths only.
+static int ft_owns_cell(const AtpFt *a, const AtpFtCell *c) {
+  for (const AtpFtBlock *b = a->blocks; b != NULL; b = b->next_block) {
+    const char *c0 = (const char *)b->cells;
+    const char *cN = c0 + (size_t)ATPFT_CELLS_PER_BLOCK * ft_stride();
+    if ((const char *)c >= c0 && (const char *)c < cN) return 1;
+  }
+  return 0;
+}
+
 void ft_init(AtpFt *a) {
   if (g_ft_cell_stride == 0) ft_cell_stride_resolve();
   a->blocks             = NULL;
@@ -161,11 +191,21 @@ void ft_init(AtpFt *a) {
   a->scratch_end        = NULL;
   a->n_persistent_alive = 0;
   a->n_scratch_alive    = 0;
+  a->session            = ++g_ft_session_next;
   a->n_blocks           = 0;
   a->_pad               = 0;
+  if (ft_trace_on()) {
+    fprintf(stderr, "ft_alloc: init    arena=%p session=%llu\n",
+            (void *)a, (unsigned long long)a->session);
+  }
 }
 
 void ft_destroy(AtpFt *a) {
+  if (ft_trace_on()) {
+    fprintf(stderr, "ft_alloc: destroy arena=%p session=%llu alive=%llu\n",
+            (void *)a, (unsigned long long)a->session,
+            (unsigned long long)a->n_persistent_alive);
+  }
   AtpFtBlock *b = a->blocks;
   while (b != NULL) {
     AtpFtBlock *nx = b->next_block;
@@ -218,6 +258,18 @@ void ft_free_span(AtpFt *a, AtpFtCell *first, AtpFtCell *last) {
   // for ft_walk_persistent.  Stage 4 GC will replace this with a
   // batch-reset on a known root set.
   if (g_ft_normcore2 < 0) ft_normcore2_resolve();
+  // THVM_FT_ALLOC_TRACE: flag a span head the arena does not own BEFORE
+  // any dereference -- a foreign head means a caller parked the span
+  // across sessions and is freeing it into the wrong (or a dead)
+  // arena's free list.
+  if (ft_trace_on() && !ft_owns_cell(a, first)) {
+    fprintf(stderr,
+            "ft_alloc: FOREIGN free_span first=%p last=%p arena=%p "
+            "session=%llu alive=%llu\n",
+            (void *)first, (void *)last, (void *)a,
+            (unsigned long long)a->session,
+            (unsigned long long)a->n_persistent_alive);
+  }
   // NORMCORE2: O(1) chain-splice, no per-cell walk (native SV_NestedDealloc
   // discipline).  Engaged only when NF_CAP is not active, so the single
   // hot-path reader of n_persistent_alive stays correct; n_persistent_alive
@@ -234,9 +286,13 @@ void ft_free_span(AtpFt *a, AtpFtCell *first, AtpFtCell *last) {
         cp = cp->next; cn += 1;
       }
       if (cn > a->n_persistent_alive) {
-        fprintf(stderr, "ft_alloc: NORMCORE2 free_span underflow (%llu > %llu)\n",
+        fprintf(stderr,
+                "ft_alloc: NORMCORE2 free_span underflow (%llu > %llu) "
+                "first=%p arena=%p session=%llu owned=%d\n",
                 (unsigned long long)cn,
-                (unsigned long long)a->n_persistent_alive);
+                (unsigned long long)a->n_persistent_alive,
+                (void *)first, (void *)a,
+                (unsigned long long)a->session, ft_owns_cell(a, first));
         exit(1);
       }
       a->n_persistent_alive -= cn;
@@ -261,9 +317,13 @@ void ft_free_span(AtpFt *a, AtpFtCell *first, AtpFtCell *last) {
   a->free_head = first;
   g_ft_free_span_total += n;
   if (n > a->n_persistent_alive) {
-    fprintf(stderr, "ft_alloc: free_span underflow (%llu > %llu)\n",
+    fprintf(stderr,
+            "ft_alloc: free_span underflow (%llu > %llu) "
+            "first=%p arena=%p session=%llu owned=%d\n",
             (unsigned long long)n,
-            (unsigned long long)a->n_persistent_alive);
+            (unsigned long long)a->n_persistent_alive,
+            (void *)first, (void *)a,
+            (unsigned long long)a->session, ft_owns_cell(a, first));
     exit(1);
   }
   a->n_persistent_alive -= n;

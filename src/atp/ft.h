@@ -95,6 +95,15 @@ _Static_assert(_Alignof(AtpFtCell) == 8, "AtpFtCell must be 8-byte aligned");
 // `n_scratch_alive`   = high-water for the current scratch region (reset
 //                       to 0 on ft_scratch_reset).
 // `n_blocks`          = number of persistent slabs allocated.
+// `session`           = process-unique arena identity, assigned by
+//                       ft_init from a monotonic counter.  Arena
+//                       ADDRESSES repeat across engine sessions (the
+//                       struct is malloc'd per AtpState and malloc
+//                       reuses the freed address), so any cache that
+//                       parks AtpFtCell* across calls must key on the
+//                       session, never the AtpFt* -- a stale span freed
+//                       into a same-address successor arena corrupts
+//                       its free list (free_span underflow / SIGBUS).
 
 typedef struct AtpFtBlock AtpFtBlock;  // defined in ft_alloc.c
 
@@ -106,6 +115,7 @@ typedef struct AtpFt {
   AtpFtCell  *scratch_end;  // one past last cell in the region
   u64         n_persistent_alive;
   u64         n_scratch_alive;
+  u64         session;      // process-unique instance id (never 0)
   u32         n_blocks;
   u32         _pad;
 } AtpFt;
