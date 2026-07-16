@@ -41,6 +41,25 @@ wnf call, 8.2-9.4 GB entering the training-loop wnf; the jump happens
 between the two).  Transient and self-decaying, but worth its own
 attribution pass.
 
+## Poison 3 (pre-existing, OPEN): tensor-JIT crash under the 4-page docs kernel
+
+Un-pinning the docs pages after the poison-2 fix exposed a THIRD,
+pre-existing failure the pins had masked: evaluating
+Symbols/TAtpTrainScorer.md + Tutorials/ATP.md and then
+Tutorials/AtpMethods.md's cells in ONE kernel (the
+`docs_sim4` harness pattern: frontmatter Context, scratch-context
+ClearAll between files) kills the kernel inside a JIT-compiled CPU
+tensor kernel -- crash stack `thvm_jit_*_O3.dylib k -> cpu_jit_dispatch
+-> cpu_dispatch_kernel -> kernel_fire_by_id x3 -> redex_fire ->
+wnf_pool_drain_local -> thvm_wl_nf`, EXC_BAD_ACCESS/SIGBUS on a buffer
+read.  Reproduces IDENTICALLY on the pre-fix HEAD build (so not a
+regression of the RSS-guard change); AtpMethods.md alone in a fresh
+kernel is clean (17/17 cells + a Waldmeister DoubleNegation probe), so
+the trigger is prior-page tensor/JIT state (likely the
+second-TNetTrain-in-kernel against recycled CpuBuf/JIT-slot state --
+the known JIT/memory-plan violation class).  AtpMethods.md therefore
+stays pinned in build_docs.wls until this tensor-lane crash closes.
+
 ## FIX (2026-07-04): recycle via gc_collect, not an absolute-HEAP_NEXT pop
 
 CONFIRMED root cause (measured with a GC-state probe at `thvm_wl_atp_run_proof`
