@@ -6,6 +6,41 @@ recycle reclaim via a full Cheney collection instead of an absolute-HEAP_NEXT
 pop. Multi-method-per-kernel benchmarking is now safe (verified: every ordering
 proves; see the matrix below). Filed 2026-07-04.
 
+## Poison 2 (TNetTrain wedge): FIXED 2026-07-16 -- growth-relative RSS guard
+
+The second shared-kernel poison (docs build pin list; a long/cold
+`TAtpTrainScorer`/`TNetTrain` silently turns every later `TFindProof` into
+`$Failed`) was a DIFFERENT mechanism, discriminated by instrumentation
+(`THVM_ATP_RECYCLE_DEBUG` now also prints run_proof entry/exit status, wire
+hashes, abort-site tags, and RSS):
+
+- Every post-train engine run returned `ATP_ABORTED` at step 0 -- tag
+  `[atp-abort] rss-guard` -- while the encoded wire was byte-identical
+  (structural hashes match pre-train) and `AbortQ()` stayed 0.  The bridge
+  maps the ABORTED status to `LIBRARY_FUNCTION_ERROR` -> `$Failed`
+  ("Failed"), silently.
+- Cause: the step-loop's process-RSS guard (`_.c` thvm_atp_step_impl)
+  compared the ABSOLUTE live RSS against `THVM_ATP_RSS_ABORT_MB`
+  (default 8 GB).  A cold-JIT train transiently lifts WolframKernel's
+  ambient RSS to ~8-9.4 GB (measured; it decays over minutes), so every
+  proof's step-0 poll aborted until the ambient decayed -- which is why the
+  wedge was heap-churn/timing dependent (7.7 GB ambient = clean, 8.2 GB =
+  wedged) and cleared "on its own".
+- Fix: the guard now bounds the run's own RSS GROWTH over a baseline
+  sampled at its first poll (`AtpState.rss_guard_baseline`).  A genuinely
+  diverging saturation still trips the same 8 GB default over its life
+  (verified: GRP706-1 with `THVM_ATP_RSS_ABORT_MB=64` still ResourceOuts);
+  an idle-but-large host no longer counts against runs (verified: cold
+  train to 9.0 GB ambient, cap 2048 MB, 4 probe rounds + raw bundle all
+  prove).  INSERT_TRACE on Sheffer OrAssociativity is byte-identical to
+  the pre-fix engine (898498 lines).
+
+Residual (tensor-side, separate lane): WHY the cold train peaks ~8-9.4 GB
+RSS is unmeasured beyond the timeline (`[wnf-dbg]`: 465 MB after the first
+wnf call, 8.2-9.4 GB entering the training-loop wnf; the jump happens
+between the two).  Transient and self-decaying, but worth its own
+attribution pass.
+
 ## FIX (2026-07-04): recycle via gc_collect, not an absolute-HEAP_NEXT pop
 
 CONFIRMED root cause (measured with a GC-state probe at `thvm_wl_atp_run_proof`

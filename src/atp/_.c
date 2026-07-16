@@ -16082,6 +16082,45 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   return rv;
 }
 
+// THVM_ATP_RECYCLE_DEBUG diagnostics: attribute WHICH abort producer
+// fired (host abort hook vs heap-frac guard vs RSS guard) -- the three
+// sites collapse to one silent ATP_ABORTED otherwise.
+static void atp_dbg_abort_site(const char *site, const AtpState *s) {
+  static int v = -1;
+  if (v < 0) v = getenv("THVM_ATP_RECYCLE_DEBUG") ? 1 : 0;
+  if (v) {
+    fprintf(stderr, "[atp-abort] %s step=%u\n", site, s->step);
+    fflush(stderr);
+  }
+}
+
+// Live (current, NOT peak) process RSS in bytes; 0 when unmeasurable.
+// ru_maxrss is the high-water mark and would latch a guard forever once
+// any earlier work in the process touched the cap -- see the RSS guard
+// in thvm_atp_step_impl.
+fn long long thvm_atp_live_rss_bytes(void) {
+  long long rss = 0;
+#if defined(__APPLE__)
+  struct mach_task_basic_info info;
+  mach_msg_type_number_t cnt = MACH_TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                (task_info_t)&info, &cnt) == KERN_SUCCESS) {
+    rss = (long long)info.resident_size;
+  }
+#else
+  FILE *fp = fopen("/proc/self/statm", "r");
+  if (fp != NULL) {
+    long pages_total = 0, pages_resident = 0;
+    if (fscanf(fp, "%ld %ld", &pages_total, &pages_resident) == 2) {
+      long pgsz = sysconf(_SC_PAGESIZE);
+      if (pgsz > 0) rss = (long long)pages_resident * (long long)pgsz;
+    }
+    fclose(fp);
+  }
+#endif
+  return rss;
+}
+
 static AtpStatus thvm_atp_step_impl(AtpState *s) {
   if (s == NULL) return ATP_QUEUE_EMPTY;
 
@@ -16107,7 +16146,10 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     if (now != 0u && now >= s->wall_deadline_us) return ATP_TIMEOUT;
   }
   // Host abort (WL Abort[] / TimeConstrained[]): polled per outer step.
-  if (thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) return ATP_ABORTED;
+  if (thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) {
+    atp_dbg_abort_site("abort-hook", s);
+    return ATP_ABORTED;
+  }
 
   // 7a: in-loop GC.  When the dyn heap has crossed the half-full
   // mark, run a Cheney collection BEFORE allocating this step's
@@ -16157,24 +16199,29 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
       cap = thvm_heap_cells();
     }
     if (cap > 0 && (double)(HEAP_NEXT - lo) > frac * (double)cap) {
+      atp_dbg_abort_site("heap-frac", s);
       return ATP_ABORTED;
     }
   }
 
-  // Process-RSS memory guard.  The heap-frac guard above only sees the
-  // dyn heap; trace buffers, CP arena, FV/RI/discrim indices, the WL
-  // ProofObject reconstruction state, and the kernel/paclet overhead
-  // all live OUTSIDE it.  A run can exhaust system RAM with a perfectly
-  // happy semi-space.  Poll the *current* RSS every 1024 steps.
+  // Process-RSS memory guard, GROWTH-relative.  The heap-frac guard
+  // above only sees the dyn heap; trace buffers, CP arena, FV/RI/
+  // discrim indices, the WL ProofObject reconstruction state, and the
+  // kernel/paclet overhead all live OUTSIDE it.  A run can exhaust
+  // system RAM with a perfectly happy semi-space.  Poll the *current*
+  // RSS every 1024 steps (live, not ru_maxrss -- the high-water mark
+  // would latch forever once any earlier work touched the cap).
   //
-  // ru_maxrss is the HIGH-WATER MARK (peak ever) -- useless here; once
-  // any earlier test touched the cap, every subsequent run aborts.  We
-  // need the live RSS:
-  //   Darwin: task_info(TASK_BASIC_INFO).resident_size
-  //   Linux:  /proc/self/statm field 2 * page-size
-  // 0 disables; default 8 GB (lenient enough to never trip a normal
-  // run; THVM_ATP_RSS_ABORT_MB tightens it for memory-constrained
-  // benches or paclet builds).
+  // The bound applies to the RUN'S OWN GROWTH: live RSS minus the
+  // baseline sampled at this run's FIRST poll (step 0).  An absolute
+  // cap misattributed the HOST's ambient memory to the proof run --
+  // inside WolframKernel, a cold-JIT TNetTrain transiently lifts
+  // ambient RSS past 8 GB and every subsequent TFindProof insta-
+  // aborted at its step-0 poll until the ambient decayed (the silent
+  // post-train $Failed wedge; see AtpState.rss_guard_baseline).  A
+  // genuinely diverging saturation still allocates multi-GB across its
+  // own life and trips the same 8 GB default; THVM_ATP_RSS_ABORT_MB
+  // overrides (now bounding growth), 0 disables.
   if ((s->step & 0x3ffu) == 0u) {
     static long long rss_cap_bytes = -1;
     if (rss_cap_bytes < 0) {
@@ -16189,26 +16236,20 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
       }
     }
     if (rss_cap_bytes > 0) {
-      long long rss = 0;
-#if defined(__APPLE__)
-      struct mach_task_basic_info info;
-      mach_msg_type_number_t cnt = MACH_TASK_BASIC_INFO_COUNT;
-      if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
-                    (task_info_t)&info, &cnt) == KERN_SUCCESS) {
-        rss = (long long)info.resident_size;
+      long long rss = thvm_atp_live_rss_bytes();
+      if (rss > 0 && s->rss_guard_baseline == 0) {
+        s->rss_guard_baseline = rss;   // first successful poll: baseline
+      } else if (rss > 0 && rss - s->rss_guard_baseline > rss_cap_bytes) {
+        { static int v = -1;
+          if (v < 0) v = getenv("THVM_ATP_RECYCLE_DEBUG") ? 1 : 0;
+          if (v) {
+            fprintf(stderr,
+                    "[atp-abort] rss-guard step=%u rss=%lldMB base=%lldMB\n",
+                    s->step, rss >> 20, s->rss_guard_baseline >> 20);
+            fflush(stderr);
+          } }
+        return ATP_ABORTED;
       }
-#else
-      FILE *fp = fopen("/proc/self/statm", "r");
-      if (fp != NULL) {
-        long pages_total = 0, pages_resident = 0;
-        if (fscanf(fp, "%ld %ld", &pages_total, &pages_resident) == 2) {
-          long pgsz = sysconf(_SC_PAGESIZE);
-          if (pgsz > 0) rss = (long long)pages_resident * (long long)pgsz;
-        }
-        fclose(fp);
-      }
-#endif
-      if (rss > 0 && rss > rss_cap_bytes) return ATP_ABORTED;
     }
   }
 

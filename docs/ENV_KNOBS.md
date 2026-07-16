@@ -185,7 +185,7 @@ operational ones.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `THVM_ATP_RSS_ABORT_MB` | 8192 (schedule slices: 4500) | Per-process live-RSS abort cap (MB, `0` disables); the run degrades to a clean SZS `ResourceOut` instead of flooding the host. |
+| `THVM_ATP_RSS_ABORT_MB` | 8192 (schedule slices: 4500) | Live-RSS GROWTH abort cap (MB, `0` disables): bounds the run's own RSS growth over the baseline sampled at its first step-0 poll, and the run degrades to a clean SZS `ResourceOut` instead of flooding the host. Growth-relative (not absolute) so a large-ambient host process -- WolframKernel after a cold-JIT `TNetTrain` sits at 8-9 GB for a while -- does not insta-abort every following proof (the silent post-train `$Failed` wedge). |
 | `THVM_ATP_SCHED_MAX_PAR` | 5 | `--schedule` concurrency width (clamped to the slice count). The StarExec run script pins it to the core count. |
 | `THVM_ATP_VERBOSE` | off | Restore engine progress chatter on the quiet competition path (same as `--verbose`). |
 | `THVM_ATP_PROFILE` | off | Per-phase wall-time + counter breakdown at exit. |

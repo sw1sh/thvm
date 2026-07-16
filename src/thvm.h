@@ -6405,6 +6405,19 @@ typedef struct {
   // the OS sends SIGKILL).
   u64  wall_deadline_us;
 
+  // Process-RSS baseline for the growth-relative memory guard, sampled
+  // at the run's FIRST RSS poll (step 0).  0 = not yet sampled (calloc).
+  // The guard aborts when the run's own RSS GROWTH -- live RSS minus
+  // this baseline -- exceeds THVM_ATP_RSS_ABORT_MB (default 8 GB).  An
+  // ABSOLUTE cap misattributed the host's ambient memory to the proof
+  // run: inside WolframKernel a cold-JIT TNetTrain transiently lifts
+  // ambient RSS past 8 GB, and every following TFindProof insta-aborted
+  // at its step-0 poll ("poison 2", the silent post-train $Failed wedge)
+  // until the ambient decayed.  Growth attribution keeps the original
+  // protection (a diverging saturation still grows multi-GB and trips)
+  // while an idle-but-large host process no longer counts against runs.
+  long long rss_guard_baseline;
+
   // === ENIGMA-style learned CP-selector training data ===============
   // When `record_cp_features` is set (via thvm_atp_set_record_cp_
   // features; DEFAULT 0), thvm_atp_select_cp appends one row per
