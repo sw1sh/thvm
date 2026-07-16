@@ -92,6 +92,34 @@ VerificationTest[
     TestID -> "kernel-custom/tjit-chain-replay-fresh-inputs"
 ]
 
+$bumpSrc = "
+void bump(void *const *bufs, unsigned const *grid, unsigned const *block) {
+  (void)grid; (void)block;
+  ((int *)bufs[0])[0] += 1;
+}
+";
+
+VerificationTest[
+    (* NON-IDEMPOTENT kernel under capture: a capture call must execute each
+       recorded dispatch exactly ONCE.  Before the trace_capture_skipped gate
+       (jit/capture.c jit_capture_end_common) the finalize-time one-shot
+       replay -- armed unconditionally, though only Metal ever skips the eager
+       dispatch -- re-ran the whole recorded stream inside the capture call:
+       pure kernels just rewrote the same bytes, but this counter went +2 (the
+       DeepSeekV2 decode-step corruption: rope applied twice, device position
+       bumped twice per captured step). *)
+    counter = TTensorCreate[{0}, "i32"];
+    kBump = TKernel[<|"Program" -> $bumpSrc, "Name" -> "bump", "Grid" -> {1}, "Outs" -> {1}|>];
+    bumpJit = TJit[kBump[counter] &];
+    bumpJit[];
+    afterCapture = First @ Normal @ TTensorData @ counter;
+    bumpJit[];
+    bumpJit[];
+    {afterCapture, First @ Normal @ TTensorData @ counter},
+    {1, 3},
+    TestID -> "kernel-custom/capture-fires-exactly-once"
+]
+
 VerificationTest[
     TReset[];
     True,

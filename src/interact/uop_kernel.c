@@ -488,6 +488,10 @@ fn void kernel_fire_by_id(u32 kid) {
       // false anyway, so trace-capture is a no-op there (the eager CPU dispatch
       // runs as before).
       thvm_metal_kernel_route_classify(ke, in_buf_ids, out_buf_id);
+      // Arm the finalize-time one-shot replay: an eager dispatch was actually
+      // skipped, so the result buffers ARE unfilled (CPU/CUDA captures never
+      // reach here and must not end-replay -- see jit_capture_end_common).
+      jit_capture_note_trace_skip();
       ke->fire_assign_seq = ASSIGN_SEQ;
       ke->fire_pass       = ASSIGN_PASS_EPOCH;
       ITRS++;

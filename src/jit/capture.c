@@ -202,6 +202,16 @@ typedef struct {
   // FIRST result, collapsing the cold step from N eager submits to the ICB-replay
   // cost.  Default 0: the eager pass fills the buffers and no extra replay runs.
   u32               trace_capture_pending;
+  // Set by the per-fire skip site (jit_capture_note_trace_skip) when at least
+  // one recorded dispatch actually SKIPPED its eager submit.  The finalize-time
+  // one-shot replay is gated on THIS, not just trace_capture_pending: the skip
+  // is Metal-only, so a CPU/CUDA capture records with pending latched but skips
+  // nothing -- an unconditional end replay would run every recorded dispatch a
+  // SECOND time during the capture call.  Invisible for pure kernels (same
+  // bytes rewritten, 2x cold cost), corrupting for non-idempotent custom
+  // kernels (an in-place rope applied twice, a device counter bumped twice --
+  // the DeepSeekV2 decode-step capture bug).
+  u32               trace_capture_skipped;
   // === Two-phase capture (THVM_JIT_TWO_PHASE, latched at begin) ==============
   // tinygrad-faithful record-then-plan: the recording pass does NOT retain/pin
   // dispatch buffers (eager execution frees dead intermediates exactly as
@@ -1108,6 +1118,16 @@ fn int jit_capture_trace_pending(void) {
   return JIT_CAPTURES[JIT_ACTIVE_SLOT].trace_capture_pending != 0;
 }
 
+// Called by the per-fire skip site (kernel_fire_by_id's Metal trace-capture
+// branch) when an eager dispatch was actually SKIPPED: arms the finalize-time
+// one-shot replay.  Captures that skip nothing (CPU/CUDA recording) leave this
+// unset, so no end replay double-runs their recorded stream.
+fn void jit_capture_note_trace_skip(void) {
+  if (JIT_ACTIVE_SLOT != 0) {
+    JIT_CAPTURES[JIT_ACTIVE_SLOT].trace_capture_skipped = 1;
+  }
+}
+
 fn u32 jit_active_capture_slot(void) {
   return JIT_ACTIVE_SLOT;
 }
@@ -1167,6 +1187,7 @@ fn u32 jit_capture_begin(void) {
       // freed eagerly), so trace-capture is forced off on that path.
       JIT_CAPTURES[i].trace_capture_pending =
           (!JIT_CAPTURES[i].two_phase && jit_trace_capture_enabled()) ? 1u : 0u;
+      JIT_CAPTURES[i].trace_capture_skipped = 0;
       JIT_ACTIVE_SLOT          = i;
       JIT_PAUSE_DEPTH          = 0;
       jit_caprecycle_reset();
@@ -1260,11 +1281,19 @@ static void jit_capture_end_common(u32 done_slot, const Term *roots,
   // buffers, so a plain jit_replay reproduces what the eager pass would have
   // computed, bit-identically, but at the ICB-replay cost (the cold-start win).
   // Disarm after firing so the slot's warm replays don't re-trigger it.
+  // Gated on trace_capture_skipped: the per-fire skip is Metal-only, so a
+  // CPU/CUDA capture records with pending latched but every dispatch already
+  // ran eagerly -- an unconditional replay here would execute the whole
+  // recorded stream a SECOND time inside the capture call (harmless-looking
+  // for pure kernels, corrupting for non-idempotent custom kernels).
   if (done_slot != 0
       && JIT_CAPTURES[done_slot].in_use
       && JIT_CAPTURES[done_slot].trace_capture_pending) {
     JIT_CAPTURES[done_slot].trace_capture_pending = 0;
-    jit_replay(done_slot);
+    if (JIT_CAPTURES[done_slot].trace_capture_skipped) {
+      JIT_CAPTURES[done_slot].trace_capture_skipped = 0;
+      jit_replay(done_slot);
+    }
   }
 }
 
