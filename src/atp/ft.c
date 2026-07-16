@@ -223,7 +223,7 @@ static AtpFtCell *ft_from_term_rec(AtpFt *a, Term t, int scratch);
 
 static AtpFtCell *ft_from_term_rec(AtpFt *a, Term t, int scratch) {
   extern unsigned char g_atp_phase_detail;
-  if (g_atp_phase_detail) { extern unsigned long long g_ft_from_nodes; g_ft_from_nodes++; }
+  if (g_atp_phase_detail) { extern u64 g_ft_from_nodes; g_ft_from_nodes++; }
   u8 tag = term_tag(t);
   if (tag == TAG_FVR) {
     return ftnew_var(a, term_ext(t), scratch);
@@ -270,7 +270,7 @@ static AtpFtCell *ft_from_term_rec(AtpFt *a, Term t, int scratch) {
 
 AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
   extern unsigned char g_atp_phase_detail;
-  if (g_atp_phase_detail) { extern unsigned long long g_ft_from_calls; g_ft_from_calls++; }
+  if (g_atp_phase_detail) { extern u64 g_ft_from_calls; g_ft_from_calls++; }
   return ft_from_term_rec(a, t, scratch);
 }
 
@@ -286,7 +286,7 @@ static Term ft_to_term_rec(const AtpFtCell *x);
 
 static Term ft_to_term_rec(const AtpFtCell *x) {
   extern unsigned char g_atp_phase_detail;
-  if (g_atp_phase_detail) { extern unsigned long long g_ft_to_nodes; g_ft_to_nodes++; }
+  if (g_atp_phase_detail) { extern u64 g_ft_to_nodes; g_ft_to_nodes++; }
   if (ft_is_var(x)) {
     return term_new_fvr(ft_var_id(x));
   }
@@ -324,7 +324,7 @@ static Term ft_to_term_rec(const AtpFtCell *x) {
 
 Term ft_to_term(const AtpFtCell *x) {
   extern unsigned char g_atp_phase_detail;
-  if (g_atp_phase_detail) { extern unsigned long long g_ft_to_calls; g_ft_to_calls++; }
+  if (g_atp_phase_detail) { extern u64 g_ft_to_calls; g_ft_to_calls++; }
   return ft_to_term_rec(x);
 }
 
