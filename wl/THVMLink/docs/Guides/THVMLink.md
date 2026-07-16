@@ -173,12 +173,34 @@ the active <code>[TContext]()</code> selects.
 
 ### Theorem proving (`WolframInstitute`THVMLink`ATP``)
 
-- `TFindProof` runs the C-engine equational saturator and returns a Wolfram `ProofObject`
+- `TFindProof` runs the C-engine equational completion and returns a Wolfram `ProofObject`; predicate-logic input is equationalized automatically
 - `TFindEquationalProof` is a deprecated alias for `TFindProof`
+- `TProofObject` is the native thvm proof object (`TFindProof[..., "ProofForm" -> "TProofObject"]`)
+- `TToProofObject` converts a `TProofObject` to the built-in `ProofObject`
+- `TFindEquationalPath` returns the witnessing rewrite path from one term to another
+- `TFindStringProof` proves string-rewriting theorems; `TStringPath` decodes the word-level path
+- `CounterexampleObject` is the disproof artifact `TFindProof[..., "Counterexample"]` returns
+- `TFindFiniteModels` finds finite multiplication-table models of equational relations
+- `TSatEUF` and `TSmtDecide` decide ground problems by congruence closure
 - `TRelevantAxioms` reports the relevance filter's `Kept` / `Dropped` partition without running a proof
 - `TAtpSchedule` returns the per-config schedule a `Method` would expand to
 - `TAtpDescribeMethod` describes a `Method` preset's defaults
 - `TATP` is the lower-level entry point that consumes a Waldmeister `.pr` file or raw equational axioms
+
+### External provers
+
+- `TVampireProof`, `TTweeProof`, `TEproverProof` run the local Vampire / Twee / E binaries on a TPTP problem
+- `TWaldmeisterProof` runs the local `wmcli` binary on a Waldmeister `.pr` problem
+- `TVampireProofObject`, `TTweeProofObject`, `TEproverProofObject`, `TWaldmeisterProofObject` lift those results into thvm-shaped proofs (the `Method -> "*Process"` dispatch targets)
+- `TSZSDerivationToProofObject` is the shared SZS-derivation lift; `$SZSRuleToConstruct` maps SZS rule names to proof constructs
+
+### Learned guidance (ENIGMA)
+
+- `TAtpCpDataset` records labelled critical-pair feature rows; `TAtpTrainScorer` trains the Tier-1 scorer; `TAtpSetLearnedScorer` pushes it (`Method -> "ENIGMA"`)
+- `TAtpCpGraph` / `TAtpCpGraphEquation` encode and decode the anonymized equation hypergraph
+- `TAtpGraphDataset` builds a labelled graph dataset; `TAtpTrainGnn` trains the graph convolutional scorer
+- `TAtpGnnScore` scores graphs; `TAtpSetGnnScorer`, `TAtpSaveGnnScorer`, `TAtpLoadGnnScorer`, `TAtpGnnScorerAsset` manage the pushed / serialized model
+- `TFindProofReranked` re-ranks the live critical-pair queue from Wolfram; `TFindProofGnnReranked` runs the same loop entirely in C
 
 ### Tutorials
 
