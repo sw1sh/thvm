@@ -1,5 +1,7 @@
 # IC-native ATP -- design sketch
 
+*Historical snapshot (2026-05 from git log); knob names and numbers may predate the current CLI -- see docs/atp/README.md for the live map.*
+
 This memo redirects the equational ATP off the C-side completion
 loop in [src/atp/_.c](../../src/atp/_.c) and onto the existing
 IC reducer + AOT-Metal pipeline.  The C-side stays as a fallback

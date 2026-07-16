@@ -1,5 +1,7 @@
 # thvm/atp - Coverage Roadmap
 
+*Historical snapshot (2026-06 from git log); knob names and numbers may predate the current CLI -- see docs/atp/README.md for the live map.*
+
 What the engine covers today and the open arcs that would extend it
 further.  For the algorithms shipped, see [algorithms.md](algorithms.md);
 for the implementation, [engineering.md](engineering.md).

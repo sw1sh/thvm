@@ -1,5 +1,7 @@
 # ATP in-place architectural rewrite (Phase A: decision-grade plan)
 
+*Historical snapshot (2026-07 from git log); knob names and numbers may predate the current CLI -- see docs/atp/README.md for the live map.*
+
 Status: PHASE A DELIVERED 2026-07-04. This is the consolidated payoff model
 plus a dependency-ordered phased design for closing the residual ~1.1-1.25x
 engine-throughput gap vs native Waldmeister (FEQ / the Wolfram-bundled

@@ -1,5 +1,7 @@
 # thvm/atp - Where thvm Sits Among Theorem Provers
 
+*Historical snapshot (2026-06 from git log); knob names and numbers may predate the current CLI -- see docs/atp/README.md for the live map.*
+
 A positioning survey: what thvm's reasoning stack covers today, and
 how that compares to the established automated-reasoning tools -
 SMT solvers, first-order ATPs, and unit-equational provers.
