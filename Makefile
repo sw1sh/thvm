@@ -765,6 +765,14 @@ $(BIN)/test_cuda_mixed: tests/test_cuda_mixed.c $(SRC) | $(BIN)
 $(BIN)/test_custom_kernel_cuda: tests/test_custom_kernel_cuda.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
 
+# DeepSeek-V2-Lite BS=1 decode-step microbenchmark (Stage 1): synthetic bf16
+# weights, custom rope/MLA3/MoE/argmax kernels + native uop matmuls, captured
+# once and replayed.  DEV={cpu,cuda} at runtime; on a CUDA pod build with
+# CUDA_HOME pointing at the toolkit.  Not part of TESTS (it is a benchmark);
+# the WL twin is wl/THVMLink/Examples/deepseek_v2/decode_bench.wls.
+$(BIN)/dsv2_decode_bench: tools/dsv2_decode_bench.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
+
 # Cross-backend dispatch microbench.  One binary; the backend is chosen
 # at runtime via DEV={cpu,metal,cuda}.  On macOS it links the Metal
 # backend (so DEV=cpu and DEV=metal both work); on Linux+CUDA it links
