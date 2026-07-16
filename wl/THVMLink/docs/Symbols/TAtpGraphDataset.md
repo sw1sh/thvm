@@ -30,25 +30,24 @@ The result is `<|"Graphs", "Labels", "NPos", "NNeg", "NProofs"|>`.
 
 ## Basic Examples
 
-Build a labelled graph dataset from a theory's notable theorems:
+Build a labelled graph dataset from two of a theory's notable theorems:
 
 ```wl
-#| eval: false
-ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
+axioms = AxiomaticTheory["AbelianGroupAxioms"];
+thms = Catenate @ Lookup[
+    AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"],
+    {"InverseOfInverse", "InverseOfComposite"}];
+ds = TAtpGraphDataset[thms, axioms, TimeConstraint -> 5];
 Length @ ds["Graphs"]
 ```
-<!-- => an integer graph count (positives + negatives across proved runs) -->
+<!-- => 33 -->
 
-## Scope
-
-Read the positive / negative / proof counts:
+The positive / negative split and the number of contributing proofs ride along:
 
 ```wl
-#| eval: false
-ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
 {ds["NPos"], ds["NNeg"], ds["NProofs"]}
 ```
-<!-- => {<NPos>, <NNeg>, <NProofs>} integer counts -->
+<!-- => {17, 16, 2} -->
 
 ## Properties & Relations
 

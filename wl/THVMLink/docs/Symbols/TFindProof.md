@@ -42,12 +42,12 @@ RelatedGuides: [THVMLink]
 
 ## Basic Examples
 
-Prove commutativity from the abelian-group axioms:
+Prove the double-inverse identity from the abelian-group axioms:
 
 ```wl
-TFindProof[x \[CircleTimes] y \[CircleTimes] z == z \[CircleTimes] y \[CircleTimes] x, "AbelianGroupAxioms"]
+TFindProof[OverBar[OverBar[x]] == x, "AbelianGroupAxioms"]
 ```
-<!-- => ProofObject[<|"Theorem" -> ..., "Status" -> "Proved", "Method" -> "Equational", ...|>] -->
+<!-- => ProofObject[<|"Theorem" -> ..., "Status" -> "Proved", ...|>] - the standard summary box -->
 
 ## Scope
 
@@ -73,18 +73,17 @@ TFindProof[
 
 ---
 
-Mix an explicit conjecture against a named theory plus a Method preset.  Sheffer is hard enough that the portfolio's Waldmeister preset typically wins; run interactively to inspect the result:
+Name a theorem and pin a Method preset: the Waldmeister preset proves Sheffer-stroke commutativity directly, without the portfolio rotation:
 
 ```wl
-#| eval: false
 TFindProof[
-    nand[nand[a, b] == nand[a, b], nand[nand[a, a], nand[b, b]]],
+    "Commutativity",
     "ShefferAxioms",
     Method         -> "Waldmeister",
     TimeConstraint -> 60
 ]
 ```
-<!-- => ProofObject[...] -->
+<!-- => ProofObject[<|"Status" -> "Proved", ...|>] -->
 
 ## Applications
 
@@ -138,30 +137,30 @@ TFindProof[
 
 ---
 
-`Automatic` is the safer default; an explicit config can prove LESS than `"Portfolio"` because it discards the fallback rotation.  This goal cracks in about a second under the default portfolio (the Basic Example above), but a single mistuned config exhausts its budget:
+`Automatic` is the safer default; an explicit config can prove LESS than a portfolio because it discards the fallback rotation.  The full `Automatic` schedule proves this commutativity goal within a few seconds, but its own first entry, run alone, exhausts the entire budget:
 
 ```wl
 TFindProof[
-    x \[CircleTimes] y \[CircleTimes] z == z \[CircleTimes] y \[CircleTimes] x,
+    x \[CircleTimes] y == y \[CircleTimes] x,
     "AbelianGroupAxioms",
-    Method         -> {"Completion", "CriticalPairWeight" -> "Add", "Ordering" -> "LPO"},
+    Method         -> First @ TAtpSchedule[Automatic,
+        x \[CircleTimes] y == y \[CircleTimes] x, "AbelianGroupAxioms"],
     TimeConstraint -> 10
 ]
 ```
-<!-- => $Failed - the portfolio proves this same goal -->
+<!-- => $Failed - the same goal under Method -> Automatic proves once the rotation moves past this entry -->
 
 ## Neat Examples
 
-Run the full multi-config portfolio with a fair time slice and report every return spec side by side (the spec argument precedes the options):
+Run the full multi-config portfolio with a fair time slice and report every return spec side by side (the spec argument precedes the options; `All` returns a per-spec Association, projected here onto its keys):
 
 ```wl
-#| eval: false
-TFindProof[
-    x \[CircleTimes] y \[CircleTimes] z == z \[CircleTimes] y \[CircleTimes] x,
+Keys @ TFindProof[
+    x \[CircleTimes] y == y \[CircleTimes] x,
     "AbelianGroupAxioms",
     All,
     Method         -> "VampirePortfolio",
-    TimeConstraint -> 30
+    TimeConstraint -> 10
 ]
 ```
-<!-- => <|"ProofObject" -> ProofObject[...], "Lemmas" -> {...}, ..., "Status" -> "Proved", ..., "AppliedMethod" -> {...}, "WallTime" -> _, ..., "TPTP" -> "..."|> -->
+<!-- => {ProofObject, Lemmas, PreprocessedAxioms, RelevantAxioms, RawTrace, Statistics, Status, Path, AppliedMethod, WallTime, PortfolioTrace, Counterexample, TPTP} -->

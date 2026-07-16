@@ -29,24 +29,29 @@ The returned Association is keyed `"Features"` (an *n* by 14 matrix), `"Labels"`
 
 ## Basic Examples
 
-Build a labelled critical-pair dataset from a theory's notable theorems:
+Build a labelled critical-pair dataset from two of a theory's notable theorems:
 
 ```wl
-#| eval: false
-ds = TAtpCpDataset["AbelianGroupAxioms", TimeConstraint -> 10];
+axioms = AxiomaticTheory["AbelianGroupAxioms"];
+thms = Catenate @ Lookup[
+    AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"],
+    {"InverseOfInverse", "InverseOfComposite"}];
+ds = TAtpCpDataset[thms, axioms, TimeConstraint -> 5];
 ds["NRows"]
 ```
-<!-- => an integer row count (number of processed critical pairs across proved runs) -->
+<!-- => 36 -->
 
 ## Scope
 
 Read the feature names:
 
 ```wl
-#| eval: false
-TAtpCpDataset["AbelianGroupAxioms", TimeConstraint -> 10]["FeatureNames"]
+TAtpCpDataset[
+    AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"]["InverseOfComposite"],
+    AxiomaticTheory["AbelianGroupAxioms"],
+    TimeConstraint -> 5]["FeatureNames"]
 ```
-<!-- => {"size_sum", "max_depth", "n_distinct_vars", "n_var_occ", "weight_add", "weight_gt", "weight_mix2", "goal_weight", "age", "top_symbol_l", "top_symbol_r", "shares_goal_sub", "orientable", "unif_measure"} -->
+<!-- => {size_sum, max_depth, n_distinct_vars, n_var_occ, weight_add, weight_gt, weight_mix2, goal_weight, age, top_symbol_l, top_symbol_r, shares_goal_sub, orientable, unif_measure} -->
 
 ## Properties & Relations
 

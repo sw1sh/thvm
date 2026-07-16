@@ -31,25 +31,25 @@ The `"Model"` is exactly the Association [TAtpSetLearnedScorer]() consumes (the 
 
 ## Basic Examples
 
-Train a scorer in one call from a theory's notable theorems:
+Train an MLP scorer on a tiny synthetic dataset - any Association keyed `"Features"` / `"Labels"` works:
 
 ```wl
-#| eval: false
-trained = TAtpTrainScorer["AbelianGroupAxioms", TimeConstraint -> 10];
+SeedRandom[42];
+feats = RandomReal[{0, 1}, {20, 14}];
+labels = Boole /@ Thread[feats[[All, 1]] > 0.5];
+trained = TAtpTrainScorer[<|"Features" -> feats, "Labels" -> labels|>];
 trained["TrainAUC"]
 ```
-<!-- => a Real in [0, 1] (training-set rank AUC) -->
+<!-- => 0.969697 -->
 
-## Scope
-
-Train on a pre-built dataset:
+The trained `"Model"` is the standardization-folded weight Association [TAtpSetLearnedScorer]() consumes:
 
 ```wl
-#| eval: false
-ds = TAtpCpDataset["AbelianGroupAxioms", TimeConstraint -> 10];
-TAtpTrainScorer[ds, "Hidden" -> 16]["Model"]
+Keys @ trained["Model"]
 ```
-<!-- => <|"Kind" -> "MLP", "Mean" -> {...}, "InvStd" -> {...}, "W1" -> {...}, ...|> -->
+<!-- => {Kind, Mean, InvStd, W1, B1, W2, B2} -->
+
+For real proof data, fold the dataset build in: <code>[TAtpTrainScorer]()[*thms*, *axioms*, TimeConstraint -> 5]</code> proves the conjectures via [TAtpCpDataset]() and trains on the recorded rows in one call.
 
 ## Properties & Relations
 

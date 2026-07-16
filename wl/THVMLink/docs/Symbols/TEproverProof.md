@@ -28,23 +28,14 @@ The result Association is keyed `"Status"` (`"Proved"`, `"TimedOut"`, or `"Faile
 
 ## Basic Examples
 
-Run E on a canonical bench problem and read the status:
+The binary is resolved before anything else, so on a machine without E the call degrades gracefully - the `TEproverProof::noeprover` message fires and the result is `$Failed`:
 
 ```wl
-#| eval: false
-TEproverProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]["Status"]
+TEproverProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
 ```
-<!-- => "Proved" -->
+<!-- => $Failed (with the TEproverProof::noeprover message) on a machine without eprover; a "Proved" result Association where E is installed -->
 
-## Scope
-
-Read the proof length straight off the result:
-
-```wl
-#| eval: false
-TEproverProof["AbelianGroupAxioms", "InverseOfInverse"]["ProofLength"]
-```
-<!-- => an integer SZS derivation step count -->
+With E installed (`brew install eprover`), the same call proves the bench problem: <code>[TEproverProof]()["AbelianGroupAxioms", "InverseOfInverse"]["Status"]</code> returns `"Proved"` and <code>[TEproverProof]()[...]["ProofLength"]</code> the SZS derivation step count, exactly like the [TVampireProof]() sibling.
 
 ## Properties & Relations
 

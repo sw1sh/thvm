@@ -28,10 +28,9 @@ The result Association is keyed `"Status"` (`"Proved"`, `"TimedOut"`, or `"Faile
 
 ## Basic Examples
 
-Run Waldmeister on a `.pr` problem file and read the status:
+Run Waldmeister on a banked `.pr` problem file (checked in under `tools/baselines/wm_pr/`, resolved from the repository root) and read the status:
 
 ```wl
-#| eval: false
 TWaldmeisterProof[
     FileNameJoin[{Directory[], "tools", "baselines", "wm_pr",
         "AbelianGroupAxioms__InverseOfInverse.pr"}],
@@ -44,12 +43,11 @@ TWaldmeisterProof[
 Read the protocol step count straight off the result:
 
 ```wl
-#| eval: false
 TWaldmeisterProof[
     FileNameJoin[{Directory[], "tools", "baselines", "wm_pr",
         "AbelianGroupAxioms__InverseOfInverse.pr"}]]["ProofLength"]
 ```
-<!-- => an integer protocol step count -->
+<!-- => 19 -->
 
 ## Properties & Relations
 

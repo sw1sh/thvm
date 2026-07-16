@@ -31,21 +31,27 @@ The result Association is keyed `"Status"` (`"Proved"`, `"TimedOut"`, or `"Faile
 
 ## Basic Examples
 
-Run Vampire on a canonical bench problem resolved from a (theory, theorem) pair:
+Write a tiny TPTP problem (the double-inverse group theorem) and run Vampire on it; the result Association is projected onto its keys:
 
 ```wl
-#| eval: false
-TVampireProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
+problem = Export[FileNameJoin[{$TemporaryDirectory, "group_inv_inv.p"}], "
+cnf(associativity, axiom, mult(mult(X, Y), Z) = mult(X, mult(Y, Z))).
+cnf(left_identity, axiom, mult(e, X) = X).
+cnf(left_inverse, axiom, mult(i(X), X) = e).
+cnf(goal, negated_conjecture, i(i(a)) != a).", "Text"];
+Keys @ TVampireProof[problem, TimeConstraint -> 10]
 ```
-<!-- => <|"Status" -> "Proved", "Strategy" -> "lrs+10_1:1_...", "Seconds" -> _, "ProofLength" -> _, "Inferences" -> {...}, "RawSZS" -> "..."|> -->
+<!-- => {Status, Strategy, Seconds, ProofLength, Inferences, RawSZS} -->
 
-## Scope
-
-Read the proof length straight off the result:
+The status and the SZS derivation step count read straight off the result:
 
 ```wl
-#| eval: false
-TVampireProof["AbelianGroupAxioms", "InverseOfInverse"]["ProofLength"]
+TVampireProof[problem, TimeConstraint -> 10]["Status"]
+```
+<!-- => "Proved" -->
+
+```wl
+TVampireProof[problem, TimeConstraint -> 10]["ProofLength"]
 ```
 <!-- => an integer SZS derivation step count -->
 

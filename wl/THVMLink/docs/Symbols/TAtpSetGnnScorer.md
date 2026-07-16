@@ -29,7 +29,6 @@ Returns `True` on success, `False` on a malformed model.
 Push the bundled pretrained scorer:
 
 ```wl
-#| eval: false
 TAtpSetGnnScorer[TAtpGnnScorerAsset[]]
 ```
 <!-- => True -->

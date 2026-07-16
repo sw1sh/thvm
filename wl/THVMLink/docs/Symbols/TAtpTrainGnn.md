@@ -26,30 +26,23 @@ RelatedGuides: [THVMLink]
   - `"LearningRate"` - the Adam step size.
   - `"BatchSize"` - the minibatch size (default 128).
   - `"NodeCap"` - graphs padded/capped to this node count per batch (default 64).
+- Training JIT-compiles the whole batched forward + backward + Adam step chain through the CPU backend, so even a ten-graph dataset costs minutes of wall clock; a typical call is <code>[TAtpTrainGnn]()[[TAtpGraphDataset]()[*thms*, *axioms*], "Hidden" -> 8, "Rounds" -> 2]</code>, whose result reports `"LossStart"` above `"LossEnd"` as the network learns. Train once and persist the `"Model"` with [TAtpSaveGnnScorer]() rather than retraining per session.
 
 ## Basic Examples
 
-Train a GCN on a theory's notable theorems and read the loss curve endpoints:
+The bundled pretrained scorer ([TAtpGnnScorerAsset]()) is exactly the `"Model"` Association a `TAtpTrainGnn` run returns (saved with [TAtpSaveGnnScorer]()); its keys are the GCN weight surface plus the scalar config:
 
 ```wl
-#| eval: false
-SeedRandom[1234];
-ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
-r = TAtpTrainGnn[ds, "Hidden" -> 16, "Rounds" -> 2, MaxTrainingRounds -> 120];
-{r["LossStart"], r["LossEnd"]}
+Keys @ TAtpLoadGnnScorer[TAtpGnnScorerAsset[]]
 ```
-<!-- => {<lossStart>, <lossEnd>} - LossEnd below LossStart as the network learns -->
+<!-- => {Kind, W1, Ws, Bh, Wout, Bout, Rounds, Hidden, NMax} -->
 
-## Scope
-
-Read the training-set rank AUC:
+The config records the message-passing depth and width it was trained with:
 
 ```wl
-#| eval: false
-SeedRandom[1234];
-TAtpTrainGnn["GroupAxioms", TimeConstraint -> 10]["TrainAUC"]
+Lookup[TAtpLoadGnnScorer[TAtpGnnScorerAsset[]], {"Rounds", "Hidden"}]
 ```
-<!-- => a Real in [0, 1] (training-set rank AUC) -->
+<!-- => {2, 8} -->
 
 ## Properties & Relations
 

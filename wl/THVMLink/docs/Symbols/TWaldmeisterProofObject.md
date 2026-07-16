@@ -32,7 +32,6 @@ It is the `Method -> "WaldmeisterProcess"` dispatch target in [TFindProof]().
 Lift a Waldmeister proof into a literal `ProofObject` (the default):
 
 ```wl
-#| eval: false
 TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
 ```
 <!-- => ProofObject[...] (the .pr is generated at runtime on a cache-miss; Failure["ExternalNoProof", ...] when wmcli is unavailable) -->

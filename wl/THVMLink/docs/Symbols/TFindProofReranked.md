@@ -27,7 +27,6 @@ RelatedGuides: [THVMLink]
 Prove a group-theory goal, scoring the live queue from Wolfram between chunks:
 
 ```wl
-#| eval: false
 model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
 axioms = {
     ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]],

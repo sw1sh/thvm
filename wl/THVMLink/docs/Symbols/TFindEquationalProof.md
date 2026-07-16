@@ -22,13 +22,12 @@ RelatedGuides: [THVMLink]
 The alias forwards to [TFindProof]():
 
 ```wl
-#| eval: false
 TFindEquationalProof[
     x \[CircleTimes] y == y \[CircleTimes] x,
     "AbelianGroupAxioms",
     TimeConstraint -> 10]
 ```
-<!-- => ProofObject[...] (identical to the TFindProof call) -->
+<!-- => ProofObject[<|"Status" -> "Proved", ...|>] (identical to the TFindProof call) -->
 
 ## Properties & Relations
 

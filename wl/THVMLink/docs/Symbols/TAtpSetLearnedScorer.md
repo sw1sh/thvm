@@ -23,13 +23,15 @@ RelatedGuides: [THVMLink]
 
 ## Basic Examples
 
-Close the ENIGMA loop - dataset, train, push, re-prove:
+Push a linear model written out by hand (the same shape [TAtpTrainScorer]() returns as its `"Model"`) - the negative weight on the first feature, `size_sum`, ranks small critical pairs sooner:
 
 ```wl
-#| eval: false
-ds = TAtpCpDataset["AbelianGroupAxioms"];
-trained = TAtpTrainScorer[ds];
-TAtpSetLearnedScorer[trained["Model"]]
+TAtpSetLearnedScorer[<|
+    "Kind" -> "Linear",
+    "Mean" -> ConstantArray[0., 14],
+    "InvStd" -> ConstantArray[1., 14],
+    "W" -> N @ -UnitVector[14, 1],
+    "B" -> 0.|>]
 ```
 <!-- => True -->
 

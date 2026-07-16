@@ -33,7 +33,6 @@ FileExistsQ @ TAtpGnnScorerAsset[]
 Load and push the bundled scorer:
 
 ```wl
-#| eval: false
 TAtpSetGnnScorer[TAtpGnnScorerAsset[]]
 ```
 <!-- => True -->

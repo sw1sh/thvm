@@ -26,13 +26,14 @@ It is the `Method -> "EproverProcess"` dispatch target in [TFindProof]().
 
 ## Basic Examples
 
-Lift an E proof into a literal `ProofObject` (the default):
+On a machine without the E binary the builder degrades to a typed `Failure` (the `TEproverProof::noeprover` message fires along the way):
 
 ```wl
-#| eval: false
-TEproverProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
+Head @ TEproverProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
 ```
-<!-- => ProofObject[...] -->
+<!-- => Failure - Failure["ExternalNoProof", ...] when eprover is absent; ProofObject where it is installed -->
+
+With E installed (`brew install eprover`), the same call returns the lifted proof: <code>[TEproverProofObject]()["AbelianGroupAxioms", "InverseOfInverse"]</code> is a literal `ProofObject` supporting the standard property accessors, exactly like [TVampireProofObject]().
 
 ## Properties & Relations
 

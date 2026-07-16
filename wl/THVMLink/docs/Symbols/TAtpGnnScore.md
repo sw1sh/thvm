@@ -21,15 +21,15 @@ The score is the readout's `logit_pos` minus `logit_neg`.
 
 ## Basic Examples
 
-Score a dataset's graphs with a trained model:
+Score two equation graphs with the bundled pretrained model - the group inverse law outranks bare commutativity:
 
 ```wl
-#| eval: false
-ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
-model = TAtpTrainGnn[ds]["Model"];
-TAtpGnnScore[model, ds]
+model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
+TAtpGnnScore[model, <|"Graphs" -> {
+    TAtpCpGraph[CircleTimes[x, y] == CircleTimes[y, x]],
+    TAtpCpGraph[CircleTimes[x, OverBar[x]] == ident]}|>]
 ```
-<!-- => {<score1>, <score2>, ...} - one proof-relevance score per graph -->
+<!-- => {-3.88736, 9.42424} - one proof-relevance score per graph -->
 
 ## Properties & Relations
 

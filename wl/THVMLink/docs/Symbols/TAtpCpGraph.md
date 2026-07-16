@@ -26,7 +26,7 @@ The result is an Association keyed `"NodeTypes"`, `"NodeFeatures"` (an `NNodes` 
 Encode a group-theory equation into its anonymized graph:
 
 ```wl
-Keys @ TAtpCpGraph[CircleTimes[a == OverBar[a], ident]]
+Keys @ TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]
 ```
 <!-- => {NodeTypes, NodeFeatures, Edges, NodeLabels, NNodes, NEdges, Symbols} -->
 
@@ -35,7 +35,7 @@ Keys @ TAtpCpGraph[CircleTimes[a == OverBar[a], ident]]
 The node-type vector marks each node's kind:
 
 ```wl
-TAtpCpGraph[CircleTimes[a == OverBar[a], ident]]["NodeTypes"]
+TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]["NodeTypes"]
 ```
 <!-- => {0, 1, 2, 1, 2, 1, 2, 1, 1, 2} -->
 

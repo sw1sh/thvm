@@ -28,23 +28,24 @@ The result Association is keyed `"Status"` (`"Proved"`, `"TimedOut"`, or `"Faile
 
 ## Basic Examples
 
-Run Twee on a canonical bench problem and read the status:
+Write a tiny TPTP problem (the double-inverse group theorem), run Twee on it, and read the status:
 
 ```wl
-#| eval: false
-TTweeProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]["Status"]
+problem = Export[FileNameJoin[{$TemporaryDirectory, "group_inv_inv.p"}], "
+cnf(associativity, axiom, mult(mult(X, Y), Z) = mult(X, mult(Y, Z))).
+cnf(left_identity, axiom, mult(e, X) = X).
+cnf(left_inverse, axiom, mult(i(X), X) = e).
+cnf(goal, negated_conjecture, i(i(a)) != a).", "Text"];
+TTweeProof[problem, TimeConstraint -> 10]["Status"]
 ```
 <!-- => "Proved" -->
 
-## Scope
-
-Inspect the lemma list Twee produced:
+Inspect the lemma statements of Twee's equation chain:
 
 ```wl
-#| eval: false
-TTweeProof["AbelianGroupAxioms", "InverseOfInverse"]["Lemmas"]
+TTweeProof[problem, TimeConstraint -> 10]["Lemmas"][[All, "Statement"]]
 ```
-<!-- => {<|"Name" -> "lemma1", "Statement" -> "..."|>, ...} -->
+<!-- => {"mult(i(X), mult(X, Y)) = Y."} -->
 
 ## Properties & Relations
 
