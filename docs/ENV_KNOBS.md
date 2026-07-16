@@ -175,11 +175,32 @@ Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
 
 ## ATP (automated theorem proving)
 
+The ATP engine + `bin/FindProof` CLI read well over 200 `THVM_ATP*` /
+`THVM_FOL*` / `THVM_PROOFCHECK*` variables. Every STRATEGY knob is
+discoverable via `bin/FindProof --list-knobs` (a 127-row
+`--flag -> env -> Method-name` table -- each CLI flag is exactly an env
+setter); the engineering-level subset is documented in
+`docs/atp/engineering.md`. The rows below are the load-bearing
+operational ones.
+
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `THVM_ATP_FLATTERM` | (impl) | Flatterm normalization in the ATP engine. |
+| `THVM_ATP_RSS_ABORT_MB` | 8192 (schedule slices: 4500) | Per-process live-RSS abort cap (MB, `0` disables); the run degrades to a clean SZS `ResourceOut` instead of flooding the host. |
+| `THVM_ATP_SCHED_MAX_PAR` | 5 | `--schedule` concurrency width (clamped to the slice count). The StarExec run script pins it to the core count. |
+| `THVM_ATP_VERBOSE` | off | Restore engine progress chatter on the quiet competition path (same as `--verbose`). |
+| `THVM_ATP_PROFILE` | off | Per-phase wall-time + counter breakdown at exit. |
+| `THVM_ATP_DIAG` | off | Diagnostics level. |
 | `THVM_ATP_TRACE_MAX` | (impl) | ATP proof-trace capacity. |
+| `THVM_ATP_RULE_TRACE` | off | Print each rule as it is added (trajectory A/B debugging). |
+| `THVM_ATP_GC_MB` | (impl) | Lower the ATP heap-GC trigger (MB) to collect more often. |
+| `THVM_ATP_HEAP_ABORT_FRAC` | (impl) | Semi-space fraction past which the saturation aborts cleanly. |
+| `THVM_ATP_WALDMEISTER` | off | Bench shorthand for the Waldmeister-preset runtime knobs (SelectionRatio 51, RHSInterreduce, UnfailingCP, lazy normalize, ...). |
+| `THVM_ATP_SINE` / `_SINE_TOL` / `_SINE_GT` / `_SINE_RC` | on / (impl) | SInE axiom selection on oversized knowledge bases; `THVM_ATP_SINE=0` disables. |
+| `THVM_ATP_ENIGMA_EXPORT` | unset | Path to a TSV: record per-CP features and, on PROVED, append proof-DAG-labelled rows (the ENIGMA training corpus). |
 | `THVM_ATP_CP_DATASET` | unset | When set to a filename, capture the ENIGMA CP dataset (WL bridge). |
+| `THVM_FOL_AGE_RATIO` | 5 | FOF clausal pre-pass pick-given interleave (1 pure FIFO, 0 pure best-first). |
+| `THVM_FOL_GOAL_TIER` | on | FOF pre-pass conjecture-ancestry selection tier; `0` drops it. |
+| `THVM_PROOFCHECK_WALL` / `_CAP` / `_DEEP` | (impl) | Proof-checker (`--check` / CheckProof) wall, per-step budget cap, and 10x deep-validation mode. |
 
 ## Misc
 
