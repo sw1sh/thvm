@@ -70,11 +70,14 @@ frontmatterTemplate[srcFile_String] := Module[{ text, head, m },
     If[ m === {}, Missing["NoTemplate"], First[m] ]
 ]
 
-(* The ATP tutorials drive TFindProof saturations whose TimeConstrained abort
-   does NOT stop the underlying C engine (it keeps running past the budget),
-   which corrupts the shared build kernel / Front End and crashes a LATER doc
-   mid-build -- so they render no-eval (code visible, the `<!-- => -->` hints
-   document the expected output).  Other docs evaluate. *)
+(* The two densest ATP tutorials render no-eval (code visible, the
+   `<!-- => -->` hints document verified fresh-kernel outputs): every cell on
+   them is individually bounded and passes a one-kernel-per-page run, but the
+   C completion engine accumulates arena state across many runs in a single
+   kernel (ft_alloc free_span underflow / SIGBUS, or TFindProof degrading to
+   $Failed after ~30 runs), so evaluating them INSIDE the shared build kernel
+   still corrupts a later doc mid-build.  Per-page kernel isolation, or the
+   arena-accounting fix in src/atp/ft_alloc.c, unblocks evaluating them here. *)
 noEvaluate = {"ATP.md", "AtpMethods.md"}
 
 (* Hard per-file time budget for example evaluation.  A cell that takes

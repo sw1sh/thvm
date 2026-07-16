@@ -41,7 +41,7 @@ purely structural (node kind, arity, occurrence count, side), never the
 symbol name, so the network sees shape, not `nand` versus `CircleTimes`.
 
 ```wl
-Keys @ TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], ident]]
+Keys @ TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]
 ```
 <!-- => {NodeTypes, NodeFeatures, Edges, NodeLabels, NNodes, NEdges, Symbols} -->
 
@@ -49,50 +49,55 @@ The node-type vector marks each node as the super-node (`0`), a term (`1`),
 a symbol (`2`), or a variable (`3`):
 
 ```wl
-TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], ident]]["NodeTypes"]
+TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]["NodeTypes"]
 ```
 <!-- => {0, 1, 2, 1, 2, 1, 2, 1, 1, 2} -->
 
 The features are anonymized, but the graph *also* stores the concrete
 identity of each node in `"Symbols"` (and the raw label in `"NodeLabels"`),
 so the encoding is lossless: [TAtpCpGraphEquation]() is its exact inverse and
-rebuilds the original equation from the stored symbols plus the term
-structure.
+rebuilds the equation - in the engine's canonical `Inactive[Equal]` form -
+from the stored symbols plus the term structure.
 
 ```wl
-TAtpCpGraphEquation @ TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], ident]]
+TAtpCpGraphEquation @ TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]
 ```
 <!-- => Inactive[Equal][a \[CircleTimes] OverBar[a], ident] -->
 
 ## Building a dataset
 
-[TAtpGraphDataset]() turns proofs into supervision. Given a theory, it
-proves every `NotableTheorem` against the theory's axioms and labels the
-resulting equations: `1` for a lemma the proof actually used
-(proof-essential), `0` for a rule that saturation generated but the proof
-did not. Only proved goals contribute, and structurally identical rules are
-de-duplicated.
+[TAtpGraphDataset]() turns proofs into supervision. It proves each given
+conjecture against the axioms and labels the resulting equations: `1` for a
+lemma the proof actually used (proof-essential), `0` for a rule that
+saturation generated but the proof did not. Only proved goals contribute,
+and structurally identical rules are de-duplicated. Two named theorems over
+the abelian-group axioms make a small bounded dataset:
 
 ```wl
-ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
+thms = Catenate @ Lookup[
+    AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"],
+    {"InverseOfInverse", "InverseOfComposite"}];
+ds = TAtpGraphDataset[thms, AxiomaticTheory["AbelianGroupAxioms"], TimeConstraint -> 5];
 Length @ ds["Graphs"]
 ```
-<!-- => 103 -->
+<!-- => 33 -->
 
 ```wl
 {ds["NPos"], ds["NNeg"], ds["NProofs"]}
 ```
-<!-- => {66, 37, 5} -->
+<!-- => {17, 16, 2} -->
 
-The same builder takes an explicit conjecture set against shared axioms, or
-a list of `ProofObject`s straight from [TFindProof]() (positives only; pass
-the saturated `"Lemmas"` set as a second argument to add negatives):
+The same builder takes a bare theory name (it then proves every
+`NotableTheorem` of the theory), or a `ProofObject` straight from
+[TFindProof]() (positives only; pass the saturated `"Lemmas"` set as a
+second argument to add negatives):
 
 ```wl
-#| eval: false
-ds = TAtpGraphDataset[conjectures, axioms]
-ds = TAtpGraphDataset[proofObject, TFindProof[goal, axioms, "Lemmas"]]
+po = TFindProof["InverseOfInverse", "AbelianGroupAxioms"];
+ds2 = TAtpGraphDataset[po, TFindProof["InverseOfInverse", "AbelianGroupAxioms", "Lemmas"]];
+{ds2["NPos"], ds2["NNeg"]}
 ```
+<!-- => {5, 5} -->
 
 A raw TPTP (Thousands of Problems for Theorem Provers) file works too:
 <code>[TFindProof]()[[File]()["x.p"]]</code> parses and proves the unit-equality
@@ -108,32 +113,19 @@ stack: `"Rounds"` rounds of row-normalized-adjacency message passing
 (*H' = relu(A.H.W1 + H.Ws + b)*), masked-mean pooling to a graph embedding,
 and a two-class proof-relevance head trained with categorical
 cross-entropy and Adam. It returns a report whose `"Model"` is the trained
-network.
-
-```wl
-SeedRandom[1234];
-ds = TAtpGraphDataset["GroupAxioms", TimeConstraint -> 10];
-r = TAtpTrainGnn[ds, "Hidden" -> 16, "Rounds" -> 2, MaxTrainingRounds -> 120];
-r["LossStart"]
-```
-<!-- => 1.0197 -->
-
-```wl
-r["LossEnd"]
-```
-<!-- => 0.6245 -->
-
-The loss falls as the network learns proof relevance. With the default
-config (`"Hidden" -> 32`, `"Rounds" -> 3`, 300 Adam steps) and a by-problem
-held-out split on this theory, the proof-relevance score reaches a test
+network. The first training call in a kernel session also JIT-compiles the
+GCN's tensor kernels, and that compile dominates the wall (about two
+minutes cold, a few seconds once warm), so the call is quoted here rather
+than run: with `SeedRandom[1234]`, <code>[TAtpTrainGnn]()[*ds*, "Hidden" -> 16,
+"Rounds" -> 2, MaxTrainingRounds -> 120]</code> on the two-theorem dataset
+above reports `"LossStart" -> 0.874` falling to `"LossEnd" -> 0.723` - the
+loss falls as the network learns proof relevance. Scaled up - the default
+config (`"Hidden" -> 32`, `"Rounds" -> 3`, 300 Adam steps) trained on a
+whole theory with <code>[TAtpTrainGnn]()["GroupAxioms", TimeConstraint -> 10]</code>,
+a `NotableTheorems` sweep - the proof-relevance score reaches a test
 [area-under-the-ROC-curve](https://reference.wolfram.com/language/ref/ROCCurve.html)
-of about 0.89, generalizing to theorems it never trained on:
-
-```wl
-SeedRandom[1234];
-TAtpTrainGnn["GroupAxioms", TimeConstraint -> 10]["TrainAUC"]
-```
-<!-- => 0.7600 (train); ~0.89 held-out by-problem -->
+of about 0.89 on a by-problem held-out split, generalizing to theorems it
+never trained on.
 
 ## Saving and loading
 
@@ -190,7 +182,7 @@ axioms = {
 TFindProofGnnReranked[ForAll[{x}, CircleTimes[ident, x] == x], axioms, model,
     "RerankPeriod" -> 50, MaxSteps -> 8000]
 ```
-<!-- => PROVED -->
+<!-- => "PROVED" -->
 
 Whether learned guidance *speeds up* a proof depends on the scorer's quality
 and how aggressively it coops with the primary heuristic. The C benchmark

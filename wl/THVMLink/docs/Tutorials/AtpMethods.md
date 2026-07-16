@@ -22,13 +22,7 @@ Three shapes:
 
 [TAtpSchedule]() returns the schedule a Method spec expands to; [TAtpDescribeMethod]() returns the full options Association the C engine will receive once a list-form spec is merged with a preset's defaults.
 
-## Setting up
-
-```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
-```
-
-Equational axioms can be supplied directly as a list, or as a theory name resolved through [AxiomaticTheory]().  All examples below assume the load entry has run.
+Equational axioms can be supplied directly as a list, or as a theory name resolved through [AxiomaticTheory]().
 
 ## A few problem-shaped examples
 
@@ -39,6 +33,7 @@ The defaults handle the common cases; the four examples below cover the situatio
 ```wl
 TFindProof["InverseOfInverse", "AbelianGroupAxioms"]
 ```
+<!-- => ProofObject[<|"Status" -> "Proved", ...|>] -->
 
 The `Automatic` schedule detects the AbelianGroup structure (commutative + associative + has-inverse + has-unit) and front-loads `GT` weight with `AutoPrecedence`, so the inverse operator ranks above the binary operator.  The double-inverse rewrite orients cleanly and the proof falls out in a fraction of a second.
 
@@ -48,6 +43,7 @@ The `Automatic` schedule detects the AbelianGroup structure (commutative + assoc
 TFindProof["DoubleNegation", "BooleanAxioms",
     Method -> "GoalDirected", TimeConstraint -> 5]
 ```
+<!-- => ProofObject[...] - "Proved" in well under a second -->
 
 `DoubleNegation` is a symmetric goal whose two sides never share a normal form, so plain completion never closes it.  `"GoalDirected"` adds the MNF bidirectional front search alongside completion; the front collision then resolves into a critical-pair-lemma proof.  `Automatic` also closes this (its tail eventually tries `"GoalDirected"`), but pinning the Method skips the upstream attempts.
 
@@ -62,8 +58,9 @@ TFindProof["Commutativity", "WolframAxioms",
         "UnfailingCP"        -> True},
     TimeConstraint -> 15]
 ```
+<!-- => ProofObject[...] - "Proved" in ~2s -->
 
-The Sheffer / nand axiomatisations (`WolframAxioms`, `ShefferAxioms`) crack under a non-default config: the goal `nand(p,q) == nand(q,p)` is unorientable, so `"GoalDirected"` adds the bidirectional MNF front (pure completion never collides the two sides); LPO with `"SkolemHighest" -> True` ranks the goal Skolems above `nand`, which is Waldmeister's own cracking ordering on this signature; `"Add"` weight plus the oldest-first age tie-break gives a uniform age-biased CP queue that doesn't preferentially explore deep terms.  With this combination `Commutativity` proves in a few seconds.  The harder `AndAssociativity` over the same axioms uses the same recipe but takes ~25s on the paclet (~15s in the C bench, ~14s under real Waldmeister); the bundled `"Waldmeister"` preset is slower on AndAssoc because its Mix-weight CP selection picks a different saturation trajectory.
+The Sheffer / nand axiomatisations (`WolframAxioms`, `ShefferAxioms`) crack under a non-default config: the goal `nand(p,q) == nand(q,p)` is unorientable, so `"GoalDirected"` adds the bidirectional MNF front (pure completion never collides the two sides); LPO with `"SkolemHighest" -> True` ranks the goal Skolems above `nand`, which is Waldmeister's own cracking ordering on this signature; `"Add"` weight plus the oldest-first age tie-break gives a uniform age-biased CP queue that doesn't preferentially explore deep terms.  With this combination `Commutativity` proves in a couple of seconds.  The harder `AndAssociativity` over the same axioms uses the same recipe but takes ~25s on the paclet (~15s in the C bench, ~14s under real Waldmeister); the bundled `"Waldmeister"` preset is slower on AndAssoc because its Mix-weight CP selection picks a different saturation trajectory.
 
 ### A many-axiom theory (SInE premise selection)
 
@@ -71,6 +68,7 @@ The Sheffer / nand axiomatisations (`WolframAxioms`, `ShefferAxioms`) crack unde
 TFindProof["InverseOfInverse", "AbelianGroupAxioms",
     Method -> {"Completion", "AxiomRelevance" -> "SInE"}]
 ```
+<!-- => ProofObject[...] - same proof, filtered axiom set -->
 
 SInE pre-filters the axiom list to those reachable from the conjecture's symbols by a bounded breadth-first walk along the D-relation: a goal that only mentions the inverse function does not need every group axiom in scope, only the ones whose head symbols transitively reach `Inverse`.  Defaults `st = 3, sd = 2, sgt = 8` mirror Vampire's `--sine_tolerance / --sine_depth / --sine_generality_threshold`.  On a many-hundred-axiom cross-system theory (e.g. `"MeredithAxioms"` against a Wolfram-axiom goal) the filter is what keeps the CP queue tractable.
 
@@ -98,17 +96,25 @@ Each preset bundles the defaults of a real-world prover so a one-name call repro
 
 ### Learned critical-pair selection (ENIGMA)
 
-`Method -> "ENIGMA"` ranks the critical-pair queue with a learned proof-relevance model instead of a hand-tuned weight.  Close the loop in four steps - prove a corpus with per-CP feature recording on, label the processed CPs by proof-trace reachability, train a scorer on thvm's own deep-learning stack, then push it back into the engine:
+`Method -> "ENIGMA"` ranks the critical-pair queue with a learned proof-relevance model instead of a hand-tuned weight.  Close the loop in four steps - prove a couple of named theorems with per-CP feature recording on, label the processed CPs by proof-trace reachability, train a scorer on thvm's own deep-learning stack, then push it back into the engine:
 
 ```wl
-#| eval: false
-ds      = TAtpCpDataset["AbelianGroupAxioms"];
+thms = Catenate @ Lookup[
+    AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"],
+    {"InverseOfInverse", "InverseOfComposite"}];
+ds      = TAtpCpDataset[thms, AxiomaticTheory["AbelianGroupAxioms"], TimeConstraint -> 5];
 trained = TAtpTrainScorer[ds];
 TAtpSetLearnedScorer[trained["Model"]];
 TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "ENIGMA"]
 ```
+<!-- => ProofObject[...] - proved under the learned CP ranking -->
 
-`TAtpTrainScorer["AbelianGroupAxioms"]` collapses the dataset + train steps into one call.  A structural graph variant - `TAtpCpGraph` / `TAtpGraphDataset` - emits symbol/variable-anonymised hypergraphs for a graph neural network instead of the 14-feature vectors.  `TAtpSetLearnedScorer[Clear]` drops the model and reverts to the baked-in scorer.
+`TAtpCpDataset` also takes a bare theory name (it then proves every `NotableTheorem` of the theory - bound it with `TimeConstraint`), and `TAtpTrainScorer["AbelianGroupAxioms"]` collapses the dataset + train steps into one call.  A structural graph variant - `TAtpCpGraph` / `TAtpGraphDataset` - emits symbol/variable-anonymised hypergraphs for a graph neural network instead of the 14-feature vectors (see [GnnGuidance](paclet:WolframInstitute/THVMLink/tutorial/GnnGuidance)).  `TAtpSetLearnedScorer[Clear]` drops the model and reverts to the baked-in scorer:
+
+```wl
+TAtpSetLearnedScorer[Clear]
+```
+<!-- => True -->
 
 ## External CLI process methods
 
@@ -118,18 +124,25 @@ The presets above stay inside `thvm`'s own C engine.  Four more methods take the
 |-----------------------|--------------------------------------------------|------------------------------------------------|
 | `"VampireProcess"`    | `/opt/homebrew/bin/vampire` (`brew install vampire`)  | `--mode casc --proof tptp`                |
 | `"TweeProcess"`       | `~/.cabal/bin/twee` or `/opt/homebrew/bin/twee` (`cabal install twee`) | `--tstp --quiet`        |
-| `"WaldmeisterProcess"`| Path in `$WMCLI` (build from source)             | wmcli on a pre-generated `.pr` file            |
+| `"WaldmeisterProcess"`| `wmcli`, resolved through `$WMCLI` > `$PATH` > home dev-build locations | wmcli on a `.pr` file (generated at runtime on a cache-miss) |
 | `"EproverProcess"`    | `/opt/homebrew/bin/eprover` (`brew install eprover`)  | `--auto-schedule --proof-object --tstp-format` |
 
 All four route through a per-CLI builder (`TVampireProofObject` / `TTweeProofObject` / `TWaldmeisterProofObject` / `TEproverProofObject`) which calls the binary, parses its SZS / TSTP derivation into a normalised inference list, and threads the result through the shared `TSZSDerivationToProofObject` builder.  Each inference step lands under one of the same `ProofDataset` construct keys the internal engine uses (`{"Axiom", n}`, `{"Hypothesis", n}`, `{"CriticalPairLemma", n}`, `{"SubstitutionLemma", n}`, `{"Conclusion", 1}`).
 
-The four Process builders share the same option set on top of `TimeConstraint`:
+The builders share this option set on top of `TimeConstraint`:
 
 - `"Binary" -> Automatic` - absolute path override.  `Automatic` walks the per-CLI binary-discovery list above and uses the first hit.
-- `"ParseFormulas" -> False` - when `True`, the per-step `Statement` field is `TPTPImport`-parsed into a WL expression so structural comparison against the internal engine's output works.  Slow (~5 s per formula on a multi-step proof).
-- `"LiftToProofObject" -> False` - when `True`, wraps the Association into a literal `ProofObject["EquationalLogic", goal, axioms, data]` head (implies `"ParseFormulas" -> True`).  The standard property accessors then work: `pf["ProofFunction"]`, `pf["ProofGraph"]`, `pf["ProofLength"]`, `pf["Theorems"]`.
+- `"ParseFormulas" -> False` - when `True`, the per-step `Statement` field is `TPTPImport`-parsed into a WL expression so structural comparison against the internal engine's output works (adds parser time on long derivations).
+- `"LiftToProofObject" -> True` - the default for `"VampireProcess"` / `"WaldmeisterProcess"` / `"EproverProcess"`: wrap the Association into a literal `ProofObject["EquationalLogic", goal, axioms, data]` head (implies `"ParseFormulas" -> True`), so the standard property accessors work: `pf["ProofFunction"]`, `pf["ProofGraph"]`, `pf["ProofLength"]`, `pf["Theorems"]`.  Pass `False` for the raw derivation Association.  `"TweeProcess"` has no lift and always returns the raw Association.
 
-When the underlying CLI binary isn't installed, the builder returns `Failure["ExternalNoProof", <|"Tool" -> _, "Status" -> _, "Seconds" -> _|>]` rather than raising an error - so a fresh-checkout build does not break just because `eprover` hasn't been brew-installed.
+When the underlying CLI binary isn't installed, the builder returns `Failure["ExternalNoProof", <|"Tool" -> _, "Status" -> _, "Seconds" -> _|>]` rather than raising an error - so a fresh-checkout build does not break just because `eprover` hasn't been brew-installed:
+
+```wl
+TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+    Method -> "EproverProcess"]
+```
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Eprover", ...|>] where eprover is not
+        installed; ProofObject[...] where it is -->
 
 A quick parity check, internal `"Waldmeister"` preset vs the external `wmcli` Process route on the same conjecture:
 
@@ -137,17 +150,17 @@ A quick parity check, internal `"Waldmeister"` preset vs the external `wmcli` Pr
 {Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> "Waldmeister"],
  Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
-        Method -> "WaldmeisterProcess", "LiftToProofObject" -> True]}
+        Method -> "WaldmeisterProcess"]}
 ```
 <!-- => {ProofObject, ProofObject} - same shape, different prover -->
 
-Without the lift, the Process methods return the raw Association from `TSZSDerivationToProofObject`, with `"Backend" -> "SZS"` and the same per-step keys:
+With the lift turned off, the Process methods return the raw Association from `TSZSDerivationToProofObject`, with `"Backend" -> "SZS"` and the per-step derivation under `"ProofDataset"`:
 
 ```wl
-TFindProof["InverseOfInverse", "AbelianGroupAxioms",
-    Method -> "VampireProcess"]
+Keys @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+    Method -> "WaldmeisterProcess", "LiftToProofObject" -> False]
 ```
-<!-- => <|"Status" -> "Proved", "Backend" -> "SZS", "Steps" -> {...}, ...|> -->
+<!-- => {Backend, Status, Goal, Axioms, ProofDataset, ProofLength, RuleHistogram} -->
 
 ## Suboptions
 
@@ -157,7 +170,7 @@ The list-form spec accepts any of the following; defaults match the C engine's d
 |---------------------------------|--------------------------------------------------------|-----------------|
 | `"CriticalPairWeight"`          | `"Add" \| "Max" \| "Ord" \| "Gt" \| "Mix" \| "Mix2" \| "Unif" \| "Goal" \| "Twee" \| "ConjSym" \| "Diversity" \| "RelLevel" \| "Staggered" \| "Learned"` | Sorts the CP queue.  `Gt` is the engine default; `Mix2` is the strongest general baseline; `Twee` is Twee's asymmetric-bias scorer; `ConjSym` is E's conjecture-symbol bias; `Learned` ranks by the pushed ENIGMA model (`Method -> "ENIGMA"`). |
 | `"Ordering"`                    | `"KBO" \| "LPO"`                                       | The reduction ordering used for orientation.  KBO orients more rules; LPO supports variable-duplicating rules KBO refuses. |
-| `"AutoPrecedence"`              | `True \| False \| "Occurrence"`                        | `True` runs Waldmeister's structure-driven Praezedenzgenerator; `"Occurrence"` runs Vampire `sp=occurrence` / E `InvFreqRank` (rare symbols rank highest). |
+| `"AutoPrecedence"`              | `True \| False \| "Occurrence"`                        | `True` runs Waldmeister's structure-driven Praezedenzgenerator (precedence generator); `"Occurrence"` runs Vampire `sp=occurrence` / E `InvFreqRank` (rare symbols rank highest). |
 | `"Precedence"` / `"SkolemHighest"` | `{sym1, sym2, ...}` / `True`                        | An explicit per-symbol precedence chain; `SkolemHighest` ranks goal Skolem constants above every operator. |
 | `"AxiomRelevance"`              | `None \| "Safe" \| "Connected" \| "SInE" \| {"SInE", "SineTolerance" -> st, "SineDepth" -> sd, "SineGenerality" -> sgt}` | Pre-filters axioms.  Safe drops dead-weight; Connected is symbol-reachability; SInE is the Hoder-Voronkov premise selector. |
 | `"MaxWeight"`                   | non-negative integer                                   | Drops CPs whose combined symbol count exceeds the bound.  0 = unbounded. |
@@ -167,19 +180,19 @@ The list-form spec accepts any of the following; defaults match the C engine's d
 | `"GroundJoin"`                  | `True \| False`                                        | Delete ground-joinable CPs (Twee redundancy criterion). |
 | `"Connectedness"`               | `True \| False`                                        | Delete a CP whose two sides join through terms strictly below the peak (Bachmair-Dershowitz; Twee section 6.2). |
 | `"UnfailingCP"`                 | `True \| False`                                        | Superpose BOTH faces of an unorientable equation - the completeness requirement of unfailing completion. |
-| `"RHSInterreduce"`              | `True \| False`                                        | Waldmeister `IR_InterreduktionRechts`: normalise the RHS of every rule against each new rule. |
+| `"RHSInterreduce"`              | `True \| False`                                        | Waldmeister `IR_InterreduktionRechts` (right-hand-side interreduction): normalise the RHS of every rule against each new rule. |
 | `"CPSetInterreduce"`            | `True \| False`                                        | Periodic full-queue re-normalise against R; drops CPs that became joinable, reweights the rest (insertion ages are preserved, as in Waldmeister). |
 | `"BackwardSubsume"` / `"BackwardDemod"` | `True \| False`                                | After adding a new rule, soft-delete older rules subsumed by it / normalise older rules against the new ones. |
 | `"ForwardSubsume"`              | `True \| False`                                        | Skip a new CP that is already subsumed by a queued CP. |
 | `"LRS"`                         | `True \| False`                                        | Vampire's Limited Resource Strategy: predict whether each CP will be reached within the wall budget, prune the unreachable ones. |
-| `"SOS"`                         | `True \| False`                                        | Set of Support: restrict CP generation to overlaps that touch the conjecture's symbols.  |
+| `"SetOfSupport"`                | `True \| False`                                        | Set of Support: bias CP selection toward overlaps that touch the conjecture's symbols. |
 | `"RandomRatio"` / `"RandomSeed"` | integer ratio / `u64` seed                            | Vampire-style random CP selection.  Every n-th selection picks uniformly random from the queue via a seeded xorshift64. |
 | `"RecordNorm"`                  | `True \| False`                                        | Per-step normalisation trace for the `ProofObject` builder.  `False` routes search through the fast indexed normalize for long completions; the post-proof goal-cone re-derivation still supplies the chains, so this is the `"Waldmeister"`/`"WaldmeisterLazy"` preset default. |
 | `"SymbolWeights"` / `"VarWeight"` | per-label array / integer                            | Per-symbol KBO weight override; var weight (Waldmeister `-w VAR=N`). |
 
 ### CP-order knobs
 
-Critical-pair FORMATION ORDER needs no knobs: the engine's single-walk former emits each new fact's critical pairs natively in Waldmeister's `U1_KPsBildenZuFaktum` order (Vater/toplevel position-major sweep, Mutter/subterm sweep, self-overlaps interleaved by position), so `cp_seq` equals WM's `w2 = ++CPNr` FIFO age by construction whenever `"EmissionOrder"` is on.  The historical per-batch re-key corrections (`CommDefer` / `CommReage` / `CommDropDup` / `LeafTiebreak` / `RevfaceGroup` / `PosGroup` / `CubeArrival` / `MeredDmgu` / `CommDropDupClassGate` / `CorankOwnArr` / `LeafTiebreakFacegate`) approximated that order after the fact and were removed once the native walk was proven byte-identical to them.
+Critical-pair FORMATION ORDER needs no knobs: the engine's single-walk former emits each new fact's critical pairs natively in Waldmeister's `U1_KPsBildenZuFaktum` order (Vater/toplevel position-major sweep, Mutter/subterm sweep, self-overlaps interleaved by position; Vater/Mutter = the overlapped parent rule / the rule overlapping into a subterm), so `cp_seq` equals WM's `w2 = ++CPNr` FIFO age by construction whenever `"EmissionOrder"` is on.  The historical per-batch re-key corrections (`CommDefer` / `CommReage` / `CommDropDup` / `LeafTiebreak` / `RevfaceGroup` / `PosGroup` / `CubeArrival` / `MeredDmgu` / `CommDropDupClassGate` / `CorankOwnArr` / `LeafTiebreakFacegate`) approximated that order after the fact and were removed once the native walk was proven byte-identical to them.
 
 What remains is a small family of side-geometry / subsumption knobs plus the faithful-stack master knob.  These are **generic toggles**, calibrated against Waldmeister (validated by `tools/baselines/wm_align_reports/soa.txt`).  **All default OFF** on a bare `"Completion"` config - absent or `Automatic` leaves the flag off.
 
@@ -188,7 +201,7 @@ What remains is a small family of side-geometry / subsumption knobs plus the fai
 | `"CPSide"`       | `True \| False`| WM CP-formation side geometry swap (`Unifikation1.c:916-917`): store each derived unorientable equation with WM's `KPLinks = sigma(r_parent)` (the overlapped rule's right-hand side) as the stored left-hand side, parent-overlap-aware. |
 | `"FlatSubsume"`  | `True \| False`| WM flatterm-faithful E-set subsumption matcher (`MO_TermpaarSubsummiertZweites`): WM's binding-slot vs variable-symbol cross that removes axiom 2 on commutativity-add. |
 | `"CommSubsume"`  | `True \| False`| Commutativity-aware E-set subsumption widening.  **Diagnostic only, not a parity win:** ON it forks the soa selection prefix and explodes commutative-ring baselines via remove-and-rederive thrash.  Leave off outside diagnosis. |
-| `"FormationFifo"`| `True \| False`| The faithful-stack master knob.  CP formation already emits natively in WM's U1 order, so this arms only the shared WM order refinements OUTSIDE formation: the IR-victim drain-order keys (within-leaf chain order + GMInterred reducible-face order, not WL-exposed individually) and the distinguished-direction E-set subsumption (`"EsetDistdir"`, see below).  Re-classification preserves the FIFO age (`C_ReClassify`: "w2 wird nicht geaendert") and re-derivation re-stamps it (`KPV_IROpferBehandeln`), both ported. |
+| `"FormationFifo"`| `True \| False`| The faithful-stack master knob.  CP formation already emits natively in WM's U1 order, so this arms only the shared WM order refinements OUTSIDE formation: the IR-victim drain-order keys (within-leaf chain order + GMInterred reducible-face order, not WL-exposed individually) and the distinguished-direction E-set subsumption (`"EsetDistdir"`, see below).  Re-classification preserves the FIFO age (`C_ReClassify`: "w2 wird nicht geaendert" - the age is not changed) and re-derivation re-stamps it (`KPV_IROpferBehandeln`), both ported. |
 
 `Method -> "Waldmeister"` sets `"CPSide"`, `"FlatSubsume"`, `"FormationFifo"`, and `"EsetDistdir"` `True` by default (`$AtpPresetDefaults["Waldmeister"]`), so the native preset is WM-selection-faithful out of the box; `TAtpDescribeMethod["Waldmeister"]` returns the resolved config.
 
@@ -207,19 +220,20 @@ Before launching a portfolio, you may want to see what schedule it expands to an
 ```wl
 TAtpSchedule["VampirePortfolio"]
 ```
-<!-- => {{"VampireUEQ"}, {"Completion", "CriticalPairWeight" -> "Twee", ...}, ...} -->
+<!-- => {"VampireUEQ", {"Completion", "CriticalPairWeight" -> "Twee", "GroundJoin" -> True, ...},
+        ..., "GoalDirected"} - 13 entries -->
 
 ```wl
 TAtpSchedule[Automatic,
-    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x], "AbelianGroupAxioms"]
+    x \[CircleTimes] y == y \[CircleTimes] x, "AbelianGroupAxioms"]
 ```
 <!-- => the structure-aware front + the fixed Portfolio tail -->
 
 ```wl
 TAtpDescribeMethod["Waldmeister"]
 ```
-<!-- => <|"CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
-        "AutoPrecedence" -> True, "SelectionRatio" -> 51, ...|> -->
+<!-- => <|"CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True,
+        "SkolemHighest" -> True, "SelectionRatio" -> 51, ...|> -->
 
 For a list spec like `{"Twee", "Ordering" -> "LPO"}`, [TAtpDescribeMethod]() merges the preset defaults with the user's overrides so you see what actually wins.  For a portfolio spec it returns `<|"Schedule" -> {...}|>`.
 
@@ -229,12 +243,12 @@ Large theories carry axioms that no proof of the current goal needs.  [TRelevant
 
 ```wl
 TRelevantAxioms[
-    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x],
+    x \[CircleTimes] y == y \[CircleTimes] x,
     "AbelianGroupAxioms",
     Method -> {"AxiomRelevance" -> "Safe"}]
 ```
-<!-- => <|"Mode" -> "Safe", "Kept" -> {...},
-        "Dropped" -> {<|"Axiom" -> _, "Symbols" -> _, "Reason" -> _|>, ...}|> -->
+<!-- => <|"Kept" -> {...}, "Dropped" -> {<|"Axiom" -> _, "Symbols" -> _, "Reason" -> _|>, ...},
+        "Mode" -> "Safe"|> -->
 
 Modes:
 
@@ -259,12 +273,14 @@ The last positional argument selects what [TFindProof]() returns:
 - A list of Strings returns an Association keyed by the requested names.
 - `All` returns an Association of every spec.
 
-Available keys: `"ProofObject"` (default; the bare object), `"Lemmas"` (the completed rule set), `"PreprocessedAxioms"` (the normalised axioms fed to the engine), `"RelevantAxioms"` ([TRelevantAxioms]()'s keep / drop partition), `"RawTrace"` (the decoded completion trace), `"Statistics"` (a small run-stats Association), `"Status"` (`"Proved"` / `"Saturated"` / `"TimedOut"` / `"Failed"`).
+Available keys: `"ProofObject"` (default; the bare object), `"Lemmas"` (the completed rule set), `"PreprocessedAxioms"` (the normalised axioms fed to the engine), `"RelevantAxioms"` ([TRelevantAxioms]()'s keep / drop partition), `"RawTrace"` (the decoded completion trace), `"Statistics"` (a small run-stats Association), `"Status"` (`"Proved"` / `"Saturated"` / `"TimedOut"` / `"Failed"`), `"Path"`, `"AppliedMethod"`, `"WallTime"`, `"PortfolioTrace"`, `"Counterexample"`, `"TPTP"`.
 
 ```wl
-TFindProof[Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x], "AbelianGroupAxioms", All]
+Keys @ TFindProof[x \[CircleTimes] y == y \[CircleTimes] x, "AbelianGroupAxioms", All,
+    TimeConstraint -> 10]
 ```
-<!-- => <|"ProofObject" -> _, "Status" -> "Proved", "Lemmas" -> {...}, ...|> -->
+<!-- => {ProofObject, Lemmas, PreprocessedAxioms, RelevantAxioms, RawTrace, Statistics,
+        Status, Path, AppliedMethod, WallTime, PortfolioTrace, Counterexample, TPTP} -->
 
 ## Recipes
 
@@ -275,8 +291,7 @@ A few combinations that come up often beyond the four [problem-shaped examples](
 Stack the redundancy criteria so the queue stays small over long completions.  Trades CPU time per step against queue-size growth:
 
 ```wl
-#| eval: false
-TFindProof[conjecture, axioms,
+TFindProof["InverseOfComposite", "AbelianGroupAxioms",
     Method -> {"Completion",
         "GroundJoin" -> True,
         "Connectedness" -> True,
@@ -284,44 +299,37 @@ TFindProof[conjecture, axioms,
         "BackwardDemod" -> True,
         "AutoMaxWeight" -> 20}]
 ```
+<!-- => ProofObject[...] - same theorem, maximally pruned queue -->
 
 ### Variable-duplicating combinator goal (S, W, M)
 
-Combinator-logic axioms (`S x y z = x z (y z)` etc.) require an ordering that allows variable-duplicating RHS.  LPO does; KBO does not.
+Combinator-logic axioms (`S x y z = x z (y z)` etc.) require an ordering that allows a variable-duplicating right-hand side.  LPO does; KBO does not.  Deriving the identity behaviour of `S K K` from the S and K rules (application written as `CenterDot`):
 
 ```wl
-#| eval: false
-TFindProof[conjecture, axioms,
+TFindProof[
+    ForAll[x, ((s \[CenterDot] k) \[CenterDot] k) \[CenterDot] x == x],
+    {ForAll[{x, y, z}, ((s \[CenterDot] x) \[CenterDot] y) \[CenterDot] z == (x \[CenterDot] z) \[CenterDot] (y \[CenterDot] z)],
+     ForAll[{x, y}, (k \[CenterDot] x) \[CenterDot] y == x]},
     Method -> {"Completion",
         "Ordering" -> "LPO",
         "AutoPrecedence" -> True,
-        "CriticalPairWeight" -> "Add"}]
+        "CriticalPairWeight" -> "Add"},
+    TimeConstraint -> 10]
 ```
+<!-- => ProofObject[...] - S K K x rewrites to x under LPO -->
 
 ### Cross-system Sheffer "implies" goals (tight age bias)
 
-The cross-system `ShefferAxioms/ImpliesWolframAxioms` family responds to `Mix2` weight with `SelectionRatio -> 2` - one FIFO pick per two heuristic picks, an aggressive age bias.  The tight 1-FIFO-per-2 bias is a sharp sweet spot; `SelectionRatio -> 1` and `-> 5` both miss.
-
-```wl
-#| eval: false
-TFindProof["ImpliesWolframAxioms", "ShefferAxioms",
-    Method -> {"Completion",
-        "CriticalPairWeight" -> "Mix2",
-        "SelectionRatio" -> 2,
-        "AutoMaxWeight" -> 20},
-    TimeConstraint -> 60]
-```
-<!-- => ProofObject[...] - proves in ~4s (covered by atp.wlt) -->
-
-Pinned `eval: false` because the shared build kernel accumulates state across earlier cells and Sheffer Mix2 saturation can push it past the per-file memory budget; the same config runs cleanly in a fresh kernel and is exercised by `wl/THVMLink/Tests/atp.wlt`.
+The cross-system `ShefferAxioms/ImpliesWolframAxioms` family responds to `Mix2` weight with `SelectionRatio -> 2` - one FIFO pick per two heuristic picks, an aggressive age bias.  The tight 1-FIFO-per-2 bias is a sharp sweet spot; `SelectionRatio -> 1` and `-> 5` both miss.  The recipe is <code>[TFindProof]()["ImpliesWolframAxioms", "ShefferAxioms", Method -> {"Completion", "CriticalPairWeight" -> "Mix2", "SelectionRatio" -> 2, "AutoMaxWeight" -> 20}, TimeConstraint -> 60]</code>, proving in a few seconds; it stays prose here because a second single-operator Sheffer saturation is the heaviest thing a shared doc-build kernel could run, and it is already exercised by `wl/THVMLink/Tests/atp.wlt` (TestID `ATP/sheffer/ImpliesWolframAxioms-Mix2-SR2`).
 
 ### Vampire's seeded-random preset
 
-`"VampireRandom"` bundles `LPO` + `AutoPrecedence` + `SelectionRatio -> 10` + `UnfailingCP` + `GroundJoin` + `BackwardDemod` + `RHSInterreduce` + `RandomRatio -> 32` + `RandomSeed -> 3681690318` + `LRS` - the Vampire 5.0.1 portfolio entry `lrs+10_32:to=lpo:sp=arity:fgj=on:bd=all:random_seed=3681690318` that cracks `McCuneAxioms/EqualityOfInverses` in the cross-system baseline (which thvm currently misses; the recipe stays here as the cross-system reference).  Applied to a problem within reach it still closes cleanly:
+`"VampireRandom"` bundles `LPO` + `AutoPrecedence` + `SelectionRatio -> 10` + `UnfailingCP` + `GroundJoin` + `BackwardDemod` + `RHSInterreduce` + `RandomRatio -> 32` + `RandomSeed -> 3681690318` + `LRS` - the Vampire 5.0.1 portfolio entry `lrs+10_32:to=lpo:sp=arity:fgj=on:bd=all:random_seed=3681690318` that cracks `McCuneAxioms/EqualityOfInverses` in the cross-system baseline (a goal the plain `"Waldmeister"` preset also closes, via its lazy grounded-instance rewriting).  Applied to a problem within reach it closes cleanly:
 
 ```wl
 TFindProof["InverseOfInverse", "AbelianGroupAxioms",
     Method -> "VampireRandom", TimeConstraint -> 10]
 ```
+<!-- => ProofObject[...] - reproducible trajectory under the seeded xorshift64 -->
 
 The seeded xorshift64 inside the random pick makes the trajectory reproducible; pass `"RandomSeed" -> n` to switch seed.
