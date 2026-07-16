@@ -19,7 +19,7 @@ SetUsage[TEproverProof, "TEproverProof[file$, opts$] runs the local E prover bin
 TEproverProof[\"Theory\", \"thm\"] resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.
 Options: TimeConstraint, Binary; see the ATP documentation."];
 
-TEproverProof::noeprover = "E prover binary not found.  Install via `brew install eprover`."
+TEproverProof::noeprover = "E prover binary not found.  Install via: brew install eprover"
 
 TEproverProof::badfile = "TPTP problem file not found: `1`"
 

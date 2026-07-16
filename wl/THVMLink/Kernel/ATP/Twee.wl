@@ -29,7 +29,7 @@ SetUsage[TTweeProof, "TTweeProof[file$] runs the local Twee 2.x binary on a TPTP
 TTweeProof[\"Theory\", \"thm\"] resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.
 Options: TimeConstraint, Binary. Twee emits no per-step inference DAG; for that use TVampireProof."]
 
-TTweeProof::notwee = "Twee CLI not found.  Install via `cabal install twee`."
+TTweeProof::notwee = "Twee CLI not found.  Install via: cabal install twee"
 
 TTweeProof::badfile = "TPTP problem file not found: `1`"
 
