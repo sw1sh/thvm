@@ -3,8 +3,9 @@
 `TFindProof[thm, theory, Method -> "<X>Process"]` routes the proof
 through an external ATP CLI binary instead of thvm's internal C
 saturation engine, and lifts the resulting SZS / TSTP output into
-the same thvm-shaped Association (or `ProofObject` head, with
-`"LiftToProofObject" -> True`) that the internal presets produce.
+the same `ProofObject` head the internal presets produce (pass
+`"LiftToProofObject" -> False` for the intermediate thvm-shaped
+Association).
 
 This lets a comparator, ProofFunction verifier, or dataset reader
 see one shape across both paths.
@@ -36,7 +37,9 @@ All four route to a per-CLI `T<Name>ProofObject` builder in
 
 ## Shared options
 
-All four `T<Name>ProofObject` builders accept the same option set:
+The Vampire / Waldmeister / Eprover builders accept the same option
+set (the Twee builder takes only `TimeConstraint` and `"Binary"` --
+Twee's `--quiet` output carries lemmas, not a liftable inference DAG):
 
 * `TimeConstraint -> 30` -- wall-clock budget passed to the CLI.
 * `"Binary" -> Automatic` -- absolute path override; Automatic
@@ -44,13 +47,15 @@ All four `T<Name>ProofObject` builders accept the same option set:
 * `"ParseFormulas" -> False` -- when True, the per-step Statement
   field is `TPTPImport`-parsed into WL expression form (via
   `Wolfram\`Parser\`TPTPImport`).  Slow (~5s/formula on a
-  multi-step proof) but enables structural comparison.
-* `"LiftToProofObject" -> False` -- when True, wraps the
+  multi-step proof) but enables structural comparison.  Forced on
+  by the lift.
+* `"LiftToProofObject" -> True` (the DEFAULT) -- wraps the
   Association into a literal `ProofObject[...]` head (implies
   `ParseFormulas -> True`).  Property accessors work
   (`ProofFunction` / `ProofGraph` / `ProofLength` / `Theorems`);
   `pf[Theorems]` full verification still fails on some entries
-  per cli_lift_status.md.
+  per cli_lift_status.md.  Set `False` for the raw thvm-shaped
+  Association (`"Backend" -> "SZS"`).
 
 ## Skip-through behavior
 
@@ -75,19 +80,26 @@ p1 = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
     Method -> "Waldmeister"]
 Head[p1]            (* -> ProofObject *)
 
-(* Through wmcli, lift to ProofObject *)
+(* Through wmcli (lift is the default) *)
 p2 = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
-    Method -> "WaldmeisterProcess",
-    "LiftToProofObject" -> True]
+    Method -> "WaldmeisterProcess"]
 Head[p2]            (* -> ProofObject *)
 p2["ProofFunction"] (* -> Function *)
 
-(* Through Vampire CLI (no lift -- raw Association) *)
+(* Through Vampire CLI -- also a ProofObject by default *)
 p3 = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
     Method -> "VampireProcess"]
-Head[p3]            (* -> Association *)
-p3["Backend"]       (* -> "SZS" *)
+Head[p3]            (* -> ProofObject *)
+
+(* Raw thvm-shaped Association instead of the lift *)
+p3raw = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+    Method -> {"VampireProcess", "LiftToProofObject" -> False}]
+Head[p3raw]         (* -> Association *)
+p3raw["Backend"]    (* -> "SZS" *)
 ```
+
+(Dispatch verified 2026-07-16: `p1` and `p3` return `ProofObject`,
+`p3raw` returns the Association with `"Backend" -> "SZS"`.)
 
 ## Related docs
 
