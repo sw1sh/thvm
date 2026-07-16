@@ -1034,6 +1034,10 @@ atpCpGraphDecode[raw_List] := Module[{
    attach the per-node "Symbols" list -- the un-anonymised identity that
    makes TAtpCpGraphEquation an exact inverse. *)
 atpCpGraphFromSides[{lhsHC_HoldComplete, rhsHC_HoldComplete}] := Module[{st = encodeAtpTermInit[], lr, rr, lt, rt, fin, symInv, varInv, g},
+    (* encodeAtpTerm writes heap terms through $termNewCtrFn, so the
+       runtime must be up -- TAtpCpGraph is reachable on a fresh kernel
+       (unlike the TFindProof path, which inits in atpEncodeProblem). *)
+    ensureInit[];
     lr = encodeAtpTerm[lhsHC[[1]], st];
     rr = encodeAtpTerm[rhsHC[[1]], lr[[2]]];
     lt = lr[[1]];
