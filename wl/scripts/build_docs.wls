@@ -88,9 +88,13 @@ frontmatterTemplate[srcFile_String] := Module[{ text, head, m },
       then ANY TFindProof -> $Failed, persistent.  Fires when the train
       runs long (heap-churn dependent); the docs/plans/atp_heap_leak.md
       lane.  Until that lane closes (or per-page kernel isolation lands),
-      these two stay pinned -- AtpMethods.md because its own train cell is
-      the trigger, ATP.md as the densest downstream victim. *)
-noEvaluate = {"ATP.md", "AtpMethods.md"}
+      these stay pinned -- AtpMethods.md because its own train cell is
+      the trigger, ATP.md as the densest downstream victim, and
+      TAtpTrainScorer.md because its own TNetTrain cell (28s on a cold
+      JIT cache) is the same trigger and the page sorts BEFORE most ATP
+      reference pages in the stage-1 kernel, quietly wedging their
+      example outputs. *)
+noEvaluate = {"ATP.md", "AtpMethods.md", "TAtpTrainScorer.md"}
 
 (* Hard per-file time budget for example evaluation.  A cell that takes
    longer than this almost certainly indicates a hung saturator / kernel,
