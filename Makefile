@@ -276,6 +276,7 @@ TESTS := \
   $(BIN)/test_buf_pool \
   $(BIN)/test_consumer_count \
   $(BIN)/test_kernel_fire_gen \
+  $(BIN)/test_custom_kernel \
   $(BIN)/test_autotune_correctness_gate \
   $(BIN)/test_uop_content_hash \
   $(BIN)/test_view_shrink \

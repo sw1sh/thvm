@@ -247,6 +247,7 @@ static int jit_bufref_contains(JitCaptureBufRef const *refs, u32 n,
                                Backend *b, u32 buf_id);
 static Backend *jit_dispatch_output_backend(JitCaptureOp const *op);
 static Backend *jit_dispatch_input_backend(JitCaptureOp const *op, u32 i);
+static int jit_dispatch_op_custom(JitCaptureOp const *op);
 
 static void jit_capture_mark_buf(Backend *b, u32 buf_id) {
   if (b == NULL || buf_id == 0) {
@@ -1909,6 +1910,18 @@ fn void jit_capture_record(u32 kid, u32 const *in_buf_ids,
   for (u32 i = 0; i < n_inputs; i++) {
     lg[i] = tp_resolve_read(c, jit_dispatch_input_backend(op, i), ids[i]);
   }
+  // Raw injected program: every argument (reads and its outs-mask
+  // writes alike) is pinned in place -- the opaque kernel body reads /
+  // writes those physical ids, so the planner may neither pack them
+  // nor plan a slot over them.  The out write below still registers
+  // this op as the buffer's logical writer; tp_out_held forces the
+  // held classification.
+  int custom = jit_dispatch_op_custom(op);
+  if (custom) {
+    for (u32 i = 0; i < n_inputs; i++) {
+      tp_note_held_buf(c, jit_dispatch_input_backend(op, i), ids[i]);
+    }
+  }
   Backend *ob = jit_dispatch_output_backend(op);
   if (ob != NULL && out_buf_id != 0) {
     // In-place / held-alias detection: a write over a leaf or held buffer
@@ -1925,6 +1938,7 @@ fn void jit_capture_record(u32 kid, u32 const *in_buf_ids,
       if (ids[i] == out_buf_id
           && jit_dispatch_input_backend(op, i) == ob) held = 1;
     }
+    if (custom) held = 1;
     op->tp_out_held = held ? 1 : 0;
     if (held) jit_capture_retain_buf(c, ob, out_buf_id);
     tp_map_put(c, ob, out_buf_id, op_index);
@@ -2079,6 +2093,20 @@ static Backend *jit_dispatch_input_backend(JitCaptureOp const *op, u32 i) {
     return fallback;
   }
   return TENS[tid].backend;
+}
+
+// A recorded dispatch whose kid carries a raw injected program
+// (KernelEntry.custom_* -- kernel_emit_custom_program).  Opaque to
+// every liveness / packing / dedup heuristic: its explicit outs set
+// says which argument slots it WRITES (any of which may escape the
+// capture), so the planner must treat the op as always-live and every
+// argument buffer as held.  Mirrors tinygrad codegen/__init__.py
+// do_to_program: a raw PROGRAM's buffers are conservatively all
+// read+written, else graph replay recycles its scratch mid-step.
+static int jit_dispatch_op_custom(JitCaptureOp const *op) {
+  return op != NULL && op->kind == JIT_OP_DISPATCH
+      && op->kid != 0 && op->kid < KERNELS_NEXT
+      && kernel_is_custom(&KERNELS[op->kid]);
 }
 
 static void jit_capture_root_needed(Term root,
@@ -2966,6 +2994,11 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
         int output_needed = noskip || jit_bufref_contains(needed, n_needed,
                                                           out_backend,
                                                           op->out_buf_id);
+        // Raw injected program: out_buf_id names only the FIRST written
+        // slot; the remaining outs-mask writes live in in_buf_ids and
+        // any of them may escape (a multi-out scratch chain, a caller
+        // reading a written argument after replay).  Always replay.
+        if (jit_dispatch_op_custom(op)) output_needed = 1;
         if (!output_needed) {
           op->replay_skip = 1;
           break;
@@ -3052,6 +3085,24 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
         }
       }
     }
+    // Raw injected programs: hold EVERY argument buffer (the outs-mask
+    // writes AND the reads) so the packer neither recycles a
+    // custom-referenced scratch nor packs a custom output away.  The
+    // memory planner cannot see inside the opaque kernel body; this is
+    // thvm's version of tinygrad's conservative all-read+written
+    // treatment for raw PROGRAM ops (codegen/__init__.py do_to_program).
+    for (u32 oi = 0; oi < c->n_ops; oi++) {
+      JitCaptureOp *cop = &c->ops[oi];
+      if (!jit_dispatch_op_custom(cop) || cop->replay_skip) continue;
+      jit_bufref_add(held, &n_held, jit_dispatch_output_backend(cop),
+                     cop->out_buf_id);
+      u32 const *cids = cop->heap_in_buf_ids != NULL
+                      ? cop->heap_in_buf_ids : cop->in_buf_ids;
+      for (u32 j = 0; j < cop->n_inputs; j++) {
+        jit_bufref_add(held, &n_held, jit_dispatch_input_backend(cop, j),
+                       cids[j]);
+      }
+    }
   }
   jit_capture_pack_replay_temporaries(c, has_result, held, n_held);
   free(held);
@@ -3094,6 +3145,9 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
       JitCaptureOp *op = &c->ops[i];
       if (op->kind != JIT_OP_DISPATCH || op->replay_skip) continue;
       if (op->kid == 0 || op->kid >= KERNELS_NEXT) continue;
+      // Raw injected programs may be non-idempotent (an accumulate
+      // kernel); never dedup them.
+      if (jit_dispatch_op_custom(op)) continue;
       Backend *op_backend = jit_dispatch_output_backend(op);
       if (op_backend == NULL) continue;
       u32 const *op_ids = op->heap_in_buf_ids != NULL
@@ -3128,6 +3182,10 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
         for (u32 m = (u32)jj + 1; m < i; m++) {
           JitCaptureOp *mid = &c->ops[m];
           if (mid->replay_skip) continue;
+          // A raw injected program between the two candidates writes
+          // its whole outs-mask set, which out_buf_id under-reports;
+          // treat it as an unconditional conflict.
+          if (jit_dispatch_op_custom(mid)) { safe = 0; break; }
           // Writes happen via DISPATCH.out_buf_id or ASSIGN.dst_tid.buf_id.
           u32 mid_write_buf = 0;
           Backend *mid_write_backend = NULL;

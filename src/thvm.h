@@ -1109,7 +1109,34 @@ typedef struct KernelEntry {
   u8         n_kvar_runtime;
   u32        kvar_runtime_ids [KVAR_USED_CAP];
   u32        kvar_runtime_vals[KVAR_USED_CAP];
+
+  // === Raw custom-kernel program (injection bridge) ===================
+  // Non-NULL custom_program marks this entry as a hand-written kernel
+  // injected via kernel_emit_custom_program (the TKernel[<|"Program"->..|>]
+  // bridge), not a materialize-emitted one.  cached_lift stays zeroed so
+  // every lift-driven consumer (renderers, BLAS classifier, uop walker,
+  // autotune proposer) declines naturally; dispatch routes to the
+  // backend's custom path (cpu_custom_dispatch / cuda_custom_dispatch).
+  // Mirrors tinygrad's raw Ops.PROGRAM (uop/ops.py ProgramInfo): name +
+  // source + launch dims + an explicit outs set naming which argument
+  // slots the kernel WRITES (codegen/__init__.py do_to_program: a raw
+  // program without outs must be treated as writing every buffer, or
+  // graph replay races on recycled scratch).  All argument buffers,
+  // reads and writes alike, live in input_tids[0..n_inputs); output_tid
+  // mirrors the first out slot so backend/liveness plumbing keyed on
+  // "the output" stays valid.
+  char      *custom_program;      // heap-owned source (C / CUDA-C); freed by kernel_free_arrays
+  char      *custom_name;         // heap-owned entry-point symbol
+  u32        custom_grid [3];
+  u32        custom_block[3];
+  u32        custom_shared_bytes; // dynamic shared memory (CUDA); CPU ignores
+  u64        custom_outs_mask;    // bit i set = argument slot i is written
 } KernelEntry;
+
+// A KernelEntry carrying a raw injected program (see the custom_* block).
+static inline int kernel_is_custom(struct KernelEntry const *ke) {
+  return ke != NULL && ke->custom_program != NULL;
+}
 
 // KERNELS / KERNELS_NEXT now live in TContext (see below); the
 // macros at the bottom of this file resolve them through CURRENT_CTX.
@@ -3549,6 +3576,7 @@ typedef enum {
   // consumer of dispatch kinds.
   KDISPATCH_METAL_ALIAS = 13,  // Metal: metadata-only alias, no command encoding
   KDISPATCH_CUDA_JIT    = 14,  // CUDA: nvrtc-compiled kernel via cuLaunchKernel
+  KDISPATCH_CUSTOM      = 15,  // raw injected program (kernel_emit_custom_program)
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);

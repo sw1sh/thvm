@@ -9,10 +9,12 @@
 //     pre-materialise wrapper.
 
 
-// Forward decls: defined in backend/cpu/{blas,jit,uop_walk}.c (included
-// after this file in thvm.c, so declare here for the dispatcher).
+// Forward decls: defined in backend/cpu/{blas,jit,custom,uop_walk}.c
+// (included after this file in thvm.c, so declare here for the
+// dispatcher).
 fn int cpu_blas_dispatch       (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 fn int cpu_jit_dispatch        (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
+fn int cpu_custom_dispatch     (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 fn int cpu_uop_walk            (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 
 // === ShapeTracker-chained input pre-materialise (CPU side) ===
@@ -184,6 +186,13 @@ static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_b
 // input -- so the gather collapses it to a dense matmul operand.  The
 // gather is O(numel * nviews), done once per fire, freed right after.
 fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  // Raw injected kernel: skip the lift-driven ladder entirely (no
+  // cached_lift to classify) and bind the argument buffers directly.
+  // Arguments are contiguous leaves by the emit-time contract, so the
+  // chained-input pre-materialise below never applies.
+  if (kernel_is_custom(ke)) {
+    return cpu_custom_dispatch(ke, in_buf_ids, out_buf_id);
+  }
   CpuPrematSlot premat[ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) premat[i].swapped = 0;
   for (u32 i = 0; i < ke->n_inputs; i++)

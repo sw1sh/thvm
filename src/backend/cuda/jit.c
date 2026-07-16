@@ -901,6 +901,74 @@ fn int cuda_tc_tile_dispatch_shape(struct KernelEntry *ke, u32 *grid_x,
   return 1;
 }
 
+// === Raw injected kernel (KernelEntry.custom_program) ================
+// Compile the caller-supplied CUDA-C source through the EXISTING nvrtc
+// + module-cache path (cuda_jit_compile: source-hash cache, on-disk PTX
+// cache, cuModuleLoadData) and launch it with the caller's 3-D
+// grid/block dims and dynamic-shared bytes.  The kernel signature is
+// the natural per-argument pointer list
+//   extern "C" __global__ void <name>(T *arg0, T *arg1, ...);
+// so args[i] = &dptr(arg i), exactly the cuLaunchKernel kernelParams
+// convention.  Launches on CUDA_CUR_STREAM, so a JIT replay's cuGraph
+// stream capture records it like any rendered kernel.
+//
+// Defined in schedule/kernel_custom.c (later in this TU).
+fn u32 kernel_custom_primary_out_slot(KernelEntry const *ke);
+
+static int cuda_custom_dispatch(struct KernelEntry *ke,
+                                u32 *in_buf_ids, u32 out_buf_id) {
+  u64 t0  = cg_now_us();
+  u32 kid = (u32)(ke - KERNELS);
+  CUfunction func = cuda_jit_compile(ke->custom_program, ke->custom_name);
+  if (func == NULL) {
+    fprintf(stderr, "thvm: cuda_custom_dispatch: compile failed for '%s': "
+                    "%s\n", ke->custom_name, thvm_cuda_last_error());
+    return -1;
+  }
+  u32 n = ke->n_inputs;
+  CUdeviceptr dptrs[n ? n : 1];
+  void       *args [n ? n : 1];
+  for (u32 i = 0; i < n; i++) {
+    u32 ib = in_buf_ids[i];
+    if (ib == 0 || ib >= CUDA_BUFS_NEXT) return -1;
+    dptrs[i] = cuda_buf_dptr(ib);
+    if (dptrs[i] == 0) return -1;
+    args[i] = &dptrs[i];
+  }
+  // out_buf_id overrides the primary out slot's binding: authoritative
+  // at JIT replay, where rebinding / planner redirects rewrite the
+  // recorded out_buf_id but not the mirrored input slot.
+  u32 out_slot = kernel_custom_primary_out_slot(ke);
+  if (out_buf_id != 0 && out_slot < n) {
+    if (out_buf_id >= CUDA_BUFS_NEXT) return -1;
+    dptrs[out_slot] = cuda_buf_dptr(out_buf_id);
+    if (dptrs[out_slot] == 0) return -1;
+  }
+  u32 shared = ke->custom_shared_bytes;
+  if (shared > 48u * 1024u) {
+    // >48 KiB dynamic shared needs the explicit per-function opt-in
+    // (mirrors cuda_jit_launch's tiled-WMMA path).
+    CUresult ra = cuFuncSetAttribute(
+        func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, (int)shared);
+    if (ra != CUDA_SUCCESS) {
+      cuda_set_error("cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES)", ra);
+      return -1;
+    }
+  }
+  CUresult r = cuLaunchKernel(func,
+                              ke->custom_grid [0], ke->custom_grid [1],
+                              ke->custom_grid [2],
+                              ke->custom_block[0], ke->custom_block[1],
+                              ke->custom_block[2],
+                              shared, CUDA_CUR_STREAM, args, NULL);
+  if (r != CUDA_SUCCESS) {
+    cuda_set_error("cuLaunchKernel(custom)", r);
+    return -1;
+  }
+  cg_profile_record(kid, KDISPATCH_CUSTOM, cg_now_us() - t0);
+  return 0;
+}
+
 // Backend-vtable dispatch_kernel.  Mirrors cpu_jit_dispatch's
 // structural-lift path for the CUDA target:
 //
@@ -925,6 +993,10 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     return -1;
   }
   if (ke == NULL || out_buf_id == 0 || out_buf_id >= CUDA_BUFS_NEXT) return -1;
+  // Raw injected kernel: user-supplied CUDA-C source, no lifted DAG.
+  if (kernel_is_custom(ke)) {
+    return cuda_custom_dispatch(ke, in_buf_ids, out_buf_id);
+  }
   u64 t_dispatch_start = cg_now_us();
   // Only the structural-lift path is wired: the CUDA renderer entry
   // (cg_render_uop_kernel_cuda_root) consumes a lifted UOp DAG root.

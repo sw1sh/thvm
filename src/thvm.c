@@ -214,6 +214,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "backend/cpu/interpret.c"
 #include "backend/cpu/blas.c"
 #include "backend/cpu/jit.c"
+#include "backend/cpu/custom.c"
 #include "backend/cpu/uop_walk.c"
 #include "backend/cpu/_.c"
 
@@ -400,6 +401,11 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "interact/uop_grad.c"
 #include "interact/uop_kernel.c"
 #include "interact/uop_assign.c"
+// Raw custom-kernel injection (kernel_emit_custom_program +
+// kernel_custom_fire).  Down here because the fire path needs
+// kernel_fire_by_id / kernel_assign_write_record (uop_kernel.c) and
+// jit_capture_record (jit/capture.c).
+#include "schedule/kernel_custom.c"
 #include "interact/dsu_num.c"
 #include "interact/dsu_era.c"
 #include "interact/dsu_sup.c"
@@ -725,6 +731,7 @@ void thvm_init(void) {
   cpu_jit_cache_reset();     // close dlopen'd JIT variants from the
                              // previous session before new keys reuse
                              // the process-global cache table.
+  cpu_custom_cache_reset();  // same for injected custom-kernel dylibs.
   cg_profile_reset();        // per-kid FLOPS / dispatch counters; reset
                              // so each session starts at zero.
   kvar_reset();              // symbolic-axis (kvar) registry + runtime
@@ -799,6 +806,7 @@ void thvm_free(void) {
   extern_pin_handle_clear();
   jit_capture_reset_all();
   cpu_jit_cache_reset();
+  cpu_custom_cache_reset();
   cg_profile_reset();
   arena_unmap(HEAP, thvm_heap_cells() * sizeof(Term));            HEAP = NULL;
   free(WNF_STACK);       WNF_STACK       = NULL;
@@ -876,6 +884,7 @@ void thvm_reset(void) {
   extern_pin_handle_clear();   // outstanding pins / handles are invalid.
   jit_capture_reset_all();
   cpu_jit_cache_reset();
+  cpu_custom_cache_reset();
   cg_profile_reset();
   // Symbolic-axis (kvar) registry + per-realize runtime bindings.  Every
   // dynamic term -- and thus every tensor whose packed extent encodes a kvar

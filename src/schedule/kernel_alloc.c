@@ -57,6 +57,8 @@ fn void kernel_free_arrays(KernelEntry *ke) {
   free(ke->input_views);  ke->input_views  = NULL;
   free(ke->input_source_buffer_ids); ke->input_source_buffer_ids = NULL;
   free(ke->input_chain_composed);    ke->input_chain_composed    = NULL;
+  free(ke->custom_program); ke->custom_program = NULL;
+  free(ke->custom_name);    ke->custom_name    = NULL;
   ke->n_inputs   = 0;
   ke->inputs_cap = 0;
   // Invalidate the cached lift so a later re-fire of this stripped slot
