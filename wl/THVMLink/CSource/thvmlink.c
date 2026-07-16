@@ -577,11 +577,31 @@ EXTERN_C DLLEXPORT int thvm_wl_heap_set(WolframLibraryData libData, mint argc,
 }
 
 // === reduce / stats ===
+// THVM_ATP_RECYCLE_DEBUG probe: the kernel's LibraryLink abort flag,
+// sampled at the boundaries of the long tensor calls (TNetTrain drives
+// ONE thvm_wl_wnf for the whole training loop).  A 0 -> 1 flip across
+// the call windows exactly where the post-train ATP wedge arms.
+static int wl_wnf_dbg(void) {
+  static int v = -1;
+  if (v < 0) v = getenv("THVM_ATP_RECYCLE_DEBUG") ? 1 : 0;
+  return v;
+}
 EXTERN_C DLLEXPORT int thvm_wl_wnf(WolframLibraryData libData, mint argc,
                                    MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   Term t = (Term)MArgument_getInteger(args[0]);
+  int dbg = wl_wnf_dbg();
+  if (dbg) {
+    fprintf(stderr, "[wnf-dbg] enter abortq=%d rss=%lldMB\n",
+            libData->AbortQ(), thvm_atp_live_rss_bytes() >> 20);
+    fflush(stderr);
+  }
   Term r = wnf(t);
+  if (dbg) {
+    fprintf(stderr, "[wnf-dbg] exit abortq=%d rss=%lldMB\n",
+            libData->AbortQ(), thvm_atp_live_rss_bytes() >> 20);
+    fflush(stderr);
+  }
   MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
