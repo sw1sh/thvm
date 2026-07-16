@@ -698,6 +698,13 @@ $lamShapeCountFn := $lamShapeCountFn = load["thvm_wl_lam_shape_count", {}, Integ
 $termShapeInFn := $termShapeInFn = load["thvm_wl_term_shape_in", {Integer}, {Integer, 1}];
 $termDtypeInFn := $termDtypeInFn = load["thvm_wl_term_dtype_in", {Integer}, Integer];
 $kernelInfoFn := $kernelInfoFn = load["thvm_wl_kernel_info", {Integer}, {Integer, 1}];
+(* Raw custom-kernel injection: register a hand-written program as a
+   KernelEntry (name, source, grid, block, argument tids, 0-based out
+   slots, dynamic shared bytes) and fire it by kid.  Backs the
+   TKernel[<|"Program" -> $$|>][buffers$$] surface in Kernel.wl. *)
+$kernelEmitProgramFn := $kernelEmitProgramFn = load["thvm_wl_kernel_emit_program",
+    {"UTF8String", "UTF8String", {Integer, 1}, {Integer, 1}, {Integer, 1}, {Integer, 1}, Integer}, Integer];
+$kernelFireFn := $kernelFireFn = load["thvm_wl_kernel_fire", {Integer}, Integer];
 $tensCountFn := $tensCountFn = load["thvm_wl_tens_count", {}, Integer];
 $totalBufBytesFn := $totalBufBytesFn = load["thvm_wl_total_buf_bytes", {}, Integer];
 

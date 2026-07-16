@@ -2258,6 +2258,75 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_count(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// Register a raw custom-kernel program (kernel_emit_custom_program) and
+// return the fresh kid, 0 on validation failure.  Backs the WL
+// TKernel[<|"Program" -> ...|>][buffers...] surface.
+//   args[0] = entry-point name (UTF8String)
+//   args[1] = raw source (UTF8String; C for the CPU backend, CUDA-C
+//             for CUDA - the arguments' backend picks the compiler)
+//   args[2] = grid dims  (Integer MTensor, up to 3 entries)
+//   args[3] = block dims (Integer MTensor, up to 3 entries)
+//   args[4] = ordered argument tids (Integer MTensor of TenDesc ids)
+//   args[5] = written argument slots, 0-based (Integer MTensor)
+//   args[6] = dynamic shared-memory bytes (Integer; CUDA only)
+EXTERN_C DLLEXPORT int thvm_wl_kernel_emit_program(WolframLibraryData libData,
+                                                   mint argc, MArgument *args,
+                                                   MArgument res) {
+  (void)argc;
+  char   *name    = MArgument_getUTF8String(args[0]);
+  char   *source  = MArgument_getUTF8String(args[1]);
+  MTensor gridT   = MArgument_getMTensor(args[2]);
+  MTensor blockT  = MArgument_getMTensor(args[3]);
+  MTensor tidsT   = MArgument_getMTensor(args[4]);
+  MTensor outsT   = MArgument_getMTensor(args[5]);
+  mint    shared  = MArgument_getInteger(args[6]);
+
+  u32 grid[3]  = {1, 1, 1};
+  u32 block[3] = {1, 1, 1};
+  mint  ng = libData->MTensor_getFlattenedLength(gridT);
+  mint  nb = libData->MTensor_getFlattenedLength(blockT);
+  mint *gd = libData->MTensor_getIntegerData(gridT);
+  mint *bd = libData->MTensor_getIntegerData(blockT);
+  for (mint i = 0; i < ng && i < 3; i++) grid [i] = (u32)gd[i];
+  for (mint i = 0; i < nb && i < 3; i++) block[i] = (u32)bd[i];
+
+  mint  n_args_m = libData->MTensor_getFlattenedLength(tidsT);
+  mint  n_outs_m = libData->MTensor_getFlattenedLength(outsT);
+  mint *tids_m   = libData->MTensor_getIntegerData(tidsT);
+  mint *outs_m   = libData->MTensor_getIntegerData(outsT);
+  u32 kid = 0;
+  if (n_args_m >= 1 && n_args_m <= 64 && n_outs_m >= 1
+      && n_outs_m <= n_args_m) {
+    u32 arg_tids [64];
+    u32 out_slots[64];
+    for (mint i = 0; i < n_args_m; i++) arg_tids [i] = (u32)tids_m[i];
+    for (mint i = 0; i < n_outs_m; i++) out_slots[i] = (u32)outs_m[i];
+    kid = kernel_emit_custom_program(name, source, grid, block,
+                                     arg_tids, (u32)n_args_m,
+                                     out_slots, (u32)n_outs_m,
+                                     (u32)shared);
+  }
+  libData->UTF8String_disown(name);
+  libData->UTF8String_disown(source);
+  MArgument_setInteger(res, (mint)kid);
+  return LIBRARY_NO_ERROR;
+}
+
+// Fire an injected custom kernel once (kernel_custom_fire): dispatches
+// on the arguments' backend and records into an active TJit capture.
+// Returns 0 on success, -1 on failure.
+EXTERN_C DLLEXPORT int thvm_wl_kernel_fire(WolframLibraryData libData,
+                                           mint argc, MArgument *args,
+                                           MArgument res) {
+  (void)libData; (void)argc;
+  THVM_WL_RECOVER(kernel_fire);
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  int rc  = kernel_custom_fire(kid);
+  THVM_WL_DONE();
+  MArgument_setInteger(res, (mint)rc);
+  return LIBRARY_NO_ERROR;
+}
+
 // Render a kernel's program as C99 by lifting to the UOp DAG and
 // emitting via cg_render_uop_kernel_c (matches the path cpu_jit_build
 // itself takes after F6 step 15). Used by tests + diagnostics to

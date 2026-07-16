@@ -31,6 +31,7 @@ BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
 SetUsage[TKernel, "TKernel[t$] wraps a UOP_KERNEL TTerm t$ as a typed kernel object.
 TKernel[kid$] resolves a kernel id back to its pinned heap term and wraps that.
+TKernel[<|\"Program\" -> src$, \"Name\" -> name$, \"Grid\" -> dims$, \"Block\" -> dims$, \"Outs\" -> slots$|>][buffers$$] registers src$ as a raw custom kernel over the realized buffer arguments, fires it, and returns the written buffer(s); inside a TJit body the fire is captured and replayed.
 Query with Information[k$, \"Properties\"] for the property list, k$[\"Name\"] to fetch one, and k$[] to dispatch.
 A TKernel auto-coerces to its underlying TTerm inside any UOp constructor."];
 
@@ -69,7 +70,7 @@ Equivalent property surface: TKernel[kid$][\"Source\"] and TKernel[kid$][\"Sourc
 SetUsage[TKernelFlops, "TKernelFlops[kid$] gives the static flop estimate for one execution of kid$, equal to TKernel[kid$][\"Flops\"].
 Sums over the lifted UOp DAG (1 flop per elementwise op per element, 1 flop per reduce source element); 0 for movement and load."];
 SetUsage[TKernelDispatchKind, "TKernelDispatchKind[kid$] gives the route the last fire of kid$ took, equal to TKernel[kid$][\"DispatchKind\"].
-Possible routes: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", \"interpreter\", \"metal-jit\", \"metal-op\", \"tile\", \"metal-tile\", \"metal-gemm\", \"metal-conv\", \"metal-alias\"."];
+Possible routes: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", \"interpreter\", \"metal-jit\", \"metal-op\", \"tile\", \"metal-tile\", \"metal-gemm\", \"metal-conv\", \"metal-alias\", \"cuda-jit\", \"custom\"."];
 SetUsage[TKernelDispatchCount, "TKernelDispatchCount[kid$] gives the cumulative number of times kid$ has fired since thvm_init, equal to TKernel[kid$][\"DispatchCount\"]."];
 SetUsage[TKernelTotalUs, "TKernelTotalUs[kid$] gives the cumulative wallclock microseconds across every fire of kid$, equal to TKernel[kid$][\"TotalUs\"]."];
 SetUsage[TKernelJitDylibPath, "TKernelJitDylibPath[kid$] gives the on-disk path the JIT cache uses for kid$'s compiled .dylib, equal to TKernel[kid$][\"JitDylibPath\"].
@@ -235,16 +236,93 @@ TKernel[kid_Integer] := Module[{lo = THeapBase[], n = THeapPos[], hit},
     ]
 ]
 
-(* From a custom program description - planned, not yet wired.
-   Needs a thvm_wl_kernel_emit_program C bridge that allocates a
-   fresh KernelEntry, populates input_tids/program/output_*, and
-   pins a UOP_KERNEL cell.  Stub returns Failure with the API
-   shape so callers can scaffold against it. *)
-TKernel[spec_Association] /; KeyExistsQ[spec, "OutputShape"] && KeyExistsQ[spec, "Program"] :=
-    Failure["TKernel", <|
-        "MessageTemplate" -> "TKernel[<|...|>] custom-program construction needs the thvm_wl_kernel_emit_program C bridge (not yet implemented).  Spec keys: `1`",
-        "MessageParameters" -> {Keys[spec]}
-    |>]
+(* === raw custom-program construction ===
+   TKernel[<|"Program" -> src, $$|>] holds a program SPEC; applying it
+   to realized buffer TTerms registers the program as a KernelEntry
+   (thvm_wl_kernel_emit_program, once per distinct buffer binding) and
+   fires it (thvm_wl_kernel_fire), returning the written buffer(s).
+   The fire dispatches through the normal backend vtable, so a call
+   inside a TJit body records into the capture and replays.
+
+   Spec keys:
+     "Program"     raw source (required): C for the CPU backend with
+                   ABI void name(void *const *bufs, unsigned const *grid,
+                   unsigned const *block); CUDA-C (__global__) for CUDA
+     "Name"        entry-point symbol (default "k")
+     "Grid"        launch grid dims, up to 3 (default {1, 1, 1})
+     "Block"       launch block dims, up to 3 (default {1, 1, 1})
+     "Outs"        1-based positions of the WRITTEN buffer arguments,
+                   or All (default: All, every argument treated as
+                   written - the conservative tinygrad raw-PROGRAM rule)
+     "SharedBytes" dynamic shared-memory bytes (default 0; CUDA only) *)
+
+tKernelProgramSpecQ[spec_Association] := KeyExistsQ[spec, "Program"] && ! KeyExistsQ[spec, "Term"]
+tKernelProgramSpecQ[___] := False
+
+(* Emitted-kid cache keyed on (spec hash, bound tids): repeated eager
+   calls over the same buffers reuse one KernelEntry instead of leaking
+   a fresh kid per fire.  Tids are session-scoped (a TReset kills the
+   buffers along with the kids), so stale entries can never be REUSED,
+   only linger; the fire-failure re-emit below recovers the rest. *)
+$customKernelKids = <||>
+
+(* Pad a dims spec to the 3-wide launch shape the C bridge expects. *)
+customKernelDims[dims_List] /; Length[dims] <= 3 && VectorQ[dims, IntegerQ] :=
+    PadRight[dims, 3, 1]
+customKernelDims[___] := $Failed
+
+customKernelFailure[template_String, params_List] := Failure["TKernel", <|
+    "MessageTemplate" -> template,
+    "MessageParameters" -> params
+|>]
+
+customKernelApply[spec_Association, bufs_List] := Module[
+    {terms, tids, outs, grid, block, key, kid, rc},
+    ensureInit[];
+    terms = TRealize /@ bufs;
+    If[ ! AllTrue[terms, MatchQ[#, _TTerm] && TTermTag[#] === $TagTEN &],
+        Return @ customKernelFailure[
+            "TKernel program arguments must realize to tensor buffers; got `1`",
+            {terms}]
+    ];
+    tids = TTermVal /@ terms;
+    outs = Replace[Lookup[spec, "Outs", All], All -> Range[Length[bufs]]];
+    If[ ! (VectorQ[outs, IntegerQ] && outs =!= {} && Min[outs] >= 1 && Max[outs] <= Length[bufs]),
+        Return @ customKernelFailure[
+            "TKernel \"Outs\" must be All or 1-based argument positions <= `1`; got `2`",
+            {Length[bufs], outs}]
+    ];
+    grid = customKernelDims[Flatten[{Lookup[spec, "Grid", {1}]}]];
+    block = customKernelDims[Flatten[{Lookup[spec, "Block", {1}]}]];
+    If[ grid === $Failed || block === $Failed,
+        Return @ customKernelFailure[
+            "TKernel \"Grid\"/\"Block\" must be integer lists of length <= 3", {}]
+    ];
+    key = {Hash[KeySort[spec]], tids};
+    kid = Lookup[$customKernelKids, Key[key], 0];
+    rc = If[kid =!= 0, $kernelFireFn[kid], -1];
+    If[ rc =!= 0,
+        (* No cached kid, or the cached kid went stale (TReset, GC
+           strip): emit fresh and fire once. *)
+        kid = $kernelEmitProgramFn[Lookup[spec, "Name", "k"], spec["Program"],
+            grid, block, tids, outs - 1, Lookup[spec, "SharedBytes", 0]];
+        If[ kid === 0,
+            Return @ customKernelFailure[
+                "TKernel custom-program registration failed (see stderr); spec keys: `1`",
+                {Keys[spec]}]
+        ];
+        $customKernelKids[key] = kid;
+        rc = $kernelFireFn[kid];
+        If[ rc =!= 0,
+            Return @ customKernelFailure[
+                "TKernel custom-program dispatch failed for kernel `1` (see stderr)",
+                {Lookup[spec, "Name", "k"]}]
+        ]
+    ];
+    If[Length[outs] === 1, terms[[First[outs]]], terms[[outs]]]
+]
+
+TKernel[spec_Association /; tKernelProgramSpecQ[spec]][bufs___] := customKernelApply[spec, {bufs}]
 
 (* === auto-coerce: a TKernel is a TTerm anywhere a TTerm is expected ===
    ttermRaw + TTermVal/Tag/Ext are the four entry points that every
@@ -370,7 +448,9 @@ $dispatchKindNames = <|
     10 -> "metal-gemm",
     11 -> "metal-conv",
     12 -> "metal-gemv",
-    13 -> "metal-alias"
+    13 -> "metal-alias",
+    14 -> "cuda-jit",
+    15 -> "custom"
 |>
 decodeDispatchKind[k_Integer] := Lookup[$dispatchKindNames, k, "unknown"]
 
