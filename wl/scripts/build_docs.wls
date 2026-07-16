@@ -71,13 +71,25 @@ frontmatterTemplate[srcFile_String] := Module[{ text, head, m },
 ]
 
 (* The two densest ATP tutorials render no-eval (code visible, the
-   `<!-- => -->` hints document verified fresh-kernel outputs): every cell on
-   them is individually bounded and passes a one-kernel-per-page run, but the
-   C completion engine accumulates arena state across many runs in a single
-   kernel (ft_alloc free_span underflow / SIGBUS, or TFindProof degrading to
-   $Failed after ~30 runs), so evaluating them INSIDE the shared build kernel
-   still corrupts a later doc mid-build.  Per-page kernel isolation, or the
-   arena-accounting fix in src/atp/ft_alloc.c, unblocks evaluating them here. *)
+   `<!-- => -->` hints document verified fresh-kernel outputs).  Two distinct
+   shared-kernel poisons have been chased here:
+   1. FIXED -- cross-session flatterm-arena corruption (ft_alloc free_span
+      underflow / SIGBUS after 2+ TFindProof runs in one kernel): the
+      sw_rename_ft park/cache keyed session identity on the arena ADDRESS,
+      which malloc reuse aliases.  Fixed by the AtpFt.session identity
+      (tests/test_atp_session_reuse.c is the regression); 30+ mixed
+      TFindProof runs in one kernel now stay clean.
+   2. OPEN -- TNetTrain-in-kernel wedges the ATP bridge: after a
+      TAtpTrainScorer / TNetTrain run (AtpMethods.md's ENIGMA cell; also
+      Symbols/TAtpTrainScorer.md, which is NOT pinned and sorts before most
+      ATP reference pages), every later C-engine proof returns status
+      "Failed" silently -- scorer cleared or not.  Repro: TFindProof
+      (proves), TAtpTrainScorer[TAtpCpDataset[...]], TAtpSetLearnedScorer,
+      then ANY TFindProof -> $Failed, persistent.  Fires when the train
+      runs long (heap-churn dependent); the docs/plans/atp_heap_leak.md
+      lane.  Until that lane closes (or per-page kernel isolation lands),
+      these two stay pinned -- AtpMethods.md because its own train cell is
+      the trigger, ATP.md as the densest downstream victim. *)
 noEvaluate = {"ATP.md", "AtpMethods.md"}
 
 (* Hard per-file time budget for example evaluation.  A cell that takes
