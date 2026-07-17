@@ -320,65 +320,256 @@ static char *src_embed(void) {
     "}\n", C.dim, C.dim);
 }
 
-// rope_dev: io [NH, DR] roped in place at position L[0]-1 (S=1, OFFM1=1;
-// port of deepseek_v2.py:180-189)
-static char *src_rope(u32 nh) {
-  u32 dr = C.d_rope;
+// fused rms-norm: y = bf16/f32 of (bf2f(x)*inv)*w, inv = 1/sqrt(mean(x^2)+eps)
+// (replaces the native 3-kernel chain reduce[1] + normalize[1,K] + cast).
+// The CUDA sum of squares replicates the native scalar-reduce lowering
+// BIT-EXACTLY: 16 strided lane accumulators (lane j folds elements j, j+16,
+// ...) then an in-order fold of the 16 partials -- any other order drifts
+// the trajectory off the reference at near-tie tokens (seen at gen step 8).
+static char *src_rms(char const *nm, u32 K, int out_bf16) {
+  char const *ot  = out_bf16 ? "bf16t" : "float";
+  char const *ost = out_bf16 ? "f2bfd(v)" : "v";
   if (IS_CUDA) return mks(
-    "extern \"C\" __global__ void rope_dev(bf16t* io, const float* cs, const float* sn, const int* L) {\n"
-    "  int row = blockIdx.x; int j = threadIdx.x;\n"
-    "  if (row >= %u || j >= %u) return;\n"
-    "  long base = (long)row * %u; int p = L[0] - 1;\n"
-    "  float xe = bf2f(io[base + 2 * j]), xo = bf2f(io[base + 2 * j + 1]);\n"
-    "  float c = cs[(long)p * %u + j], sv = sn[(long)p * %u + j];\n"
-    "  __syncthreads();\n"
-    "  io[base + j]      = f2bfd(xe * c - xo * sv);\n"
-    "  io[base + %u + j] = f2bfd(xo * c + xe * sv);\n"
-    "}\n", nh, dr / 2, dr, dr, dr, dr / 2);
-  return mks(
-    "void rope_dev(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
-    "  (void)grid; (void)block;\n"
-    "  bf16t *io = (bf16t *)bufs[0]; const float *cs = (const float *)bufs[1];\n"
-    "  const float *sn = (const float *)bufs[2]; const int *L = (const int *)bufs[3];\n"
-    "  int p = L[0] - 1;\n"
-    "  for (int row = 0; row < %u; row++) {\n"
-    "    long base = (long)row * %u;\n"
-    "    float tmp[%u];\n"
-    "    for (int j = 0; j < %u; j++) {\n"
-    "      float xe = bf2f(io[base + 2 * j]), xo = bf2f(io[base + 2 * j + 1]);\n"
-    "      float c = cs[(long)p * %u + j], sv = sn[(long)p * %u + j];\n"
-    "      tmp[j] = xe * c - xo * sv; tmp[%u + j] = xo * c + xe * sv;\n"
-    "    }\n"
-    "    for (int j = 0; j < %u; j++) io[base + j] = f2bfd(tmp[j]);\n"
+    "extern \"C\" __global__ void %s(%s* y, const bf16t* x, const float* w) {\n"
+    "  int t = threadIdx.x; int nt = blockDim.x;\n"
+    "  __shared__ float acc[16]; __shared__ float invs;\n"
+    "  if (t < 16) {\n"
+    "    float a = 0.0f;\n"
+    "    for (int i = t; i < %u; i += 16) { float xv = bf2f(x[i]); a = a + xv * xv; }\n"
+    "    acc[t] = a;\n"
     "  }\n"
-    "}\n", nh, dr, dr, dr / 2, dr, dr, dr / 2, dr);
-}
-
-// cache_append at offset L[0]-1 (port of deepseek_v2.py:192-197)
-static char *src_append(void) {
-  u32 kv = C.kv_lora, dr = C.d_rope;
-  if (IS_CUDA) return mks(
-    "extern \"C\" __global__ void cache_append(bf16t* ckv, bf16t* kpe, const bf16t* ckv_new, const bf16t* kpe_new, const int* L) {\n"
-    "  int idx = blockIdx.x * blockDim.x + threadIdx.x; int off = L[0] - 1;\n"
-    "  if (idx < %u) ckv[(long)off * %u + idx] = ckv_new[idx];\n"
-    "  else if (idx < %u) kpe[(long)off * %u + (idx - %u)] = kpe_new[idx - %u];\n"
-    "}\n", kv, kv, kv + dr, dr, kv, kv);
+    "  __syncthreads();\n"
+    "  if (t == 0) {\n"
+    "    float s = 0.0f;\n"
+    "    for (int i = 0; i < 16; i++) s = s + acc[i];\n"
+    "    invs = 1.0f / sqrtf((s * %.10ef) + %.10ef);\n"
+    "  }\n"
+    "  __syncthreads();\n"
+    "  float inv = invs;\n"
+    "  for (int i = t; i < %u; i += nt) { float v = (bf2f(x[i]) * inv) * w[i]; y[i] = %s; }\n"
+    "}\n", nm, ot, K, 1.0 / (double)K, (double)C.eps, K, ost);
   return mks(
-    "void cache_append(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
+    "#include <math.h>\n"
+    "void %s(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
     "  (void)grid; (void)block;\n"
-    "  bf16t *ckv = (bf16t *)bufs[0]; bf16t *kpe = (bf16t *)bufs[1];\n"
-    "  const bf16t *ckv_new = (const bf16t *)bufs[2]; const bf16t *kpe_new = (const bf16t *)bufs[3];\n"
-    "  const int *L = (const int *)bufs[4];\n"
-    "  int off = L[0] - 1;\n"
-    "  for (int i = 0; i < %u; i++) ckv[(long)off * %u + i] = ckv_new[i];\n"
-    "  for (int i = 0; i < %u; i++) kpe[(long)off * %u + i] = kpe_new[i];\n"
-    "}\n", kv, kv, dr, dr);
+    "  %s *y = (%s *)bufs[0]; const bf16t *x = (const bf16t *)bufs[1]; const float *w = (const float *)bufs[2];\n"
+    "  float ss = 0.f;\n"
+    "  for (unsigned i = 0; i < %uu; i++) { float xv = bf2f(x[i]); ss += xv * xv; }\n"
+    "  float inv = 1.0f / sqrtf(ss * %.10ef + %.10ef);\n"
+    "  for (unsigned i = 0; i < %uu; i++) { float v = (bf2f(x[i]) * inv) * w[i]; y[i] = %s; }\n"
+    "}\n", nm, ot, ot, K, 1.0 / (double)K, (double)C.eps, K, ost);
 }
 
-// MLA3 chain (port of deepseek_v2.py:651-717; qc split into qn/qp, cur split
-// into ckvc/kpec, matching the WL example)
+// q fold + rope: folds the q GEMV partials into bf16 q [NH, DN+DR] and ropes
+// the pe slice in place at position L[0]-1 (round-to-bf16 BEFORE the rope,
+// matching the native mm -> bf16 -> rope_dev chain).  Thread space: NH*DN
+// nope folds then NH*DR/2 pe pairs.
+static char *src_gred_q_rope(u32 sk) {
+  u32 hn = C.n_heads, dn = C.d_nope, dr = C.d_rope;
+  u32 N = hn * (dn + dr), half = dr / 2;
+  if (IS_CUDA) return mks(
+    "extern \"C\" __global__ void gred_q(bf16t* q, const float* part, const float* cs, const float* sn, const int* L) {\n"
+    "  int t = blockIdx.x * blockDim.x + threadIdx.x;\n"
+    "  if (t < %u) {\n"
+    "    int h = t / %u, d = t %% %u; int col = h * %u + d;\n"
+    "    float s = 0.f;\n"
+    "    for (int i = 0; i < %u; i++) s += part[(long)i * %u + col];\n"
+    "    q[col] = f2bfd(s);\n"
+    "  } else if (t < %u) {\n"
+    "    int u = t - %u; int h = u / %u, j = u %% %u;\n"
+    "    int base = h * %u + %u;\n"
+    "    float xe = 0.f, xo = 0.f;\n"
+    "    for (int i = 0; i < %u; i++) { xe += part[(long)i * %u + base + 2 * j]; xo += part[(long)i * %u + base + 2 * j + 1]; }\n"
+    "    xe = bf2f(f2bfd(xe)); xo = bf2f(f2bfd(xo));\n"
+    "    int p = L[0] - 1;\n"
+    "    float c = cs[(long)p * %u + j], sv = sn[(long)p * %u + j];\n"
+    "    q[base + j]      = f2bfd(xe * c - xo * sv);\n"
+    "    q[base + %u + j] = f2bfd(xo * c + xe * sv);\n"
+    "  }\n"
+    "}\n", hn * dn, dn, dn, dn + dr, sk, N, hn * dn + hn * half, hn * dn,
+         half, half, dn + dr, dn, sk, N, N, dr, dr, half);
+  return mks(
+    "void gred_q(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
+    "  (void)grid; (void)block;\n"
+    "  bf16t *q = (bf16t *)bufs[0]; const float *part = (const float *)bufs[1];\n"
+    "  const float *cs = (const float *)bufs[2]; const float *sn = (const float *)bufs[3]; const int *L = (const int *)bufs[4];\n"
+    "  int p = L[0] - 1;\n"
+    "  for (int h = 0; h < %u; h++) {\n"
+    "    for (int d = 0; d < %u; d++) {\n"
+    "      int col = h * %u + d; float s = 0.f;\n"
+    "      for (unsigned i = 0; i < %uu; i++) s += part[(unsigned long)i * %uu + col];\n"
+    "      q[col] = f2bfd(s);\n"
+    "    }\n"
+    "    for (int j = 0; j < %u; j++) {\n"
+    "      int base = h * %u + %u;\n"
+    "      float xe = 0.f, xo = 0.f;\n"
+    "      for (unsigned i = 0; i < %uu; i++) { xe += part[(unsigned long)i * %uu + base + 2 * j]; xo += part[(unsigned long)i * %uu + base + 2 * j + 1]; }\n"
+    "      xe = bf2f(f2bfd(xe)); xo = bf2f(f2bfd(xo));\n"
+    "      float c = cs[(long)p * %u + j], sv = sn[(long)p * %u + j];\n"
+    "      q[base + j]      = f2bfd(xe * c - xo * sv);\n"
+    "      q[base + %u + j] = f2bfd(xo * c + xe * sv);\n"
+    "    }\n"
+    "  }\n"
+    "}\n", hn, dn, dn + dr, sk, N, half, dn + dr, dn, sk, N, N, dr, dr, half);
+}
+
+// kv prep: folds the kv GEMV partials, rms-norms the compressed-kv half
+// (round-to-bf16 first, matching the native kva bf16 boundary), ropes the
+// pe tail, and appends BOTH rows into the layer caches at L[0]-1.  One
+// block; threads < KV handle ckv columns, the next DR/2 handle pe pairs.
+static char *src_kv_prep(u32 sk) {
+  u32 kv = C.kv_lora, dr = C.d_rope, half = dr / 2, N = kv + dr;
+  if (IS_CUDA) return mks(
+    "extern \"C\" __global__ void kv_prep(bf16t* ckv, bf16t* kpe, const float* part, const float* wn,\n"
+    "    const float* cs, const float* sn, const int* L) {\n"
+    "  int t = threadIdx.x; int off = L[0] - 1;\n"
+    "  __shared__ float sh[%u]; __shared__ float acc[16]; __shared__ float invs;\n"
+    "  float v = 0.f;\n"
+    "  if (t < %u) {\n"
+    "    float s = 0.f;\n"
+    "    for (int i = 0; i < %u; i++) s += part[(long)i * %u + t];\n"
+    "    v = bf2f(f2bfd(s)); sh[t] = v;\n"
+    "  }\n"
+    "  __syncthreads();\n"
+    "  if (t < 16) {\n"
+    "    float a = 0.0f;\n"
+    "    for (int i = t; i < %u; i += 16) a = a + sh[i] * sh[i];\n"
+    "    acc[t] = a;\n"
+    "  }\n"
+    "  __syncthreads();\n"
+    "  if (t == 0) {\n"
+    "    float s = 0.0f;\n"
+    "    for (int i = 0; i < 16; i++) s = s + acc[i];\n"
+    "    invs = 1.0f / sqrtf((s * %.10ef) + %.10ef);\n"
+    "  }\n"
+    "  __syncthreads();\n"
+    "  float inv = invs;\n"
+    "  if (t < %u) {\n"
+    "    ckv[(long)off * %u + t] = f2bfd((v * inv) * wn[t]);\n"
+    "  } else if (t < %u) {\n"
+    "    int j = t - %u; int p = off;\n"
+    "    float xe = 0.f, xo = 0.f;\n"
+    "    for (int i = 0; i < %u; i++) { xe += part[(long)i * %u + %u + 2 * j]; xo += part[(long)i * %u + %u + 2 * j + 1]; }\n"
+    "    xe = bf2f(f2bfd(xe)); xo = bf2f(f2bfd(xo));\n"
+    "    float c = cs[(long)p * %u + j], sv = sn[(long)p * %u + j];\n"
+    "    kpe[(long)off * %u + j]      = f2bfd(xe * c - xo * sv);\n"
+    "    kpe[(long)off * %u + %u + j] = f2bfd(xo * c + xe * sv);\n"
+    "  }\n"
+    "}\n", kv, kv, sk, N, kv, 1.0 / (double)kv, (double)C.eps, kv, kv,
+         kv + half, kv, sk, N, kv, N, kv, dr, dr, dr, dr, half);
+  return mks(
+    "#include <math.h>\n"
+    "void kv_prep(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
+    "  (void)grid; (void)block;\n"
+    "  bf16t *ckv = (bf16t *)bufs[0]; bf16t *kpe = (bf16t *)bufs[1]; const float *part = (const float *)bufs[2];\n"
+    "  const float *wn = (const float *)bufs[3]; const float *cs = (const float *)bufs[4];\n"
+    "  const float *sn = (const float *)bufs[5]; const int *L = (const int *)bufs[6];\n"
+    "  int off = L[0] - 1;\n"
+    "  float v[%u]; float ss = 0.f;\n"
+    "  for (unsigned t = 0; t < %uu; t++) {\n"
+    "    float s = 0.f;\n"
+    "    for (unsigned i = 0; i < %uu; i++) s += part[(unsigned long)i * %uu + t];\n"
+    "    v[t] = bf2f(f2bfd(s)); ss += v[t] * v[t];\n"
+    "  }\n"
+    "  float inv = 1.0f / sqrtf(ss * %.10ef + %.10ef);\n"
+    "  for (unsigned t = 0; t < %uu; t++) ckv[(long)off * %uu + t] = f2bfd((v[t] * inv) * wn[t]);\n"
+    "  for (unsigned j = 0; j < %uu; j++) {\n"
+    "    float xe = 0.f, xo = 0.f;\n"
+    "    for (unsigned i = 0; i < %uu; i++) { xe += part[(unsigned long)i * %uu + %uu + 2 * j]; xo += part[(unsigned long)i * %uu + %uu + 2 * j + 1]; }\n"
+    "    xe = bf2f(f2bfd(xe)); xo = bf2f(f2bfd(xo));\n"
+    "    float c = cs[(long)off * %uu + j], sv = sn[(long)off * %uu + j];\n"
+    "    kpe[(long)off * %uu + j]      = f2bfd(xe * c - xo * sv);\n"
+    "    kpe[(long)off * %uu + %uu + j] = f2bfd(xo * c + xe * sv);\n"
+    "  }\n"
+    "}\n", kv, kv, sk, N, 1.0 / (double)kv, (double)C.eps, kv, kv, half,
+         sk, N, kv, N, kv, dr, dr, dr, dr, half);
+}
+
+// o fold + residual + post-attn rms: x1 = x + fold(o partials) (bf16-rounded
+// like the native mm out + add chain), then xn2 = rms(x1) emitted BOTH bf16
+// (MoE / dense input) and f32 (router gate input, the native mm read f32).
+static char *src_gred_o_rms(u32 sk) {
+  u32 d = C.dim;
+  if (IS_CUDA) return mks(
+    "extern \"C\" __global__ void gred_o_rms(bf16t* x1, bf16t* xn2b, float* xn2f,\n"
+    "    const float* part, const bf16t* x, const float* w) {\n"
+    "  int t = threadIdx.x; int nt = blockDim.x;\n"
+    "  __shared__ float sh[%u]; __shared__ float acc[16]; __shared__ float invs;\n"
+    "  for (int i = t; i < %u; i += nt) {\n"
+    "    float s = 0.f;\n"
+    "    for (int k = 0; k < %u; k++) s += part[(long)k * %u + i];\n"
+    "    float x1v = bf2f(f2bfd(bf2f(x[i]) + bf2f(f2bfd(s))));\n"
+    "    x1[i] = f2bfd(x1v); sh[i] = x1v;\n"
+    "  }\n"
+    "  __syncthreads();\n"
+    "  if (t < 16) {\n"
+    "    float a = 0.0f;\n"
+    "    for (int i = t; i < %u; i += 16) a = a + sh[i] * sh[i];\n"
+    "    acc[t] = a;\n"
+    "  }\n"
+    "  __syncthreads();\n"
+    "  if (t == 0) {\n"
+    "    float s = 0.0f;\n"
+    "    for (int i = 0; i < 16; i++) s = s + acc[i];\n"
+    "    invs = 1.0f / sqrtf((s * %.10ef) + %.10ef);\n"
+    "  }\n"
+    "  __syncthreads();\n"
+    "  float inv = invs;\n"
+    "  for (int i = t; i < %u; i += nt) {\n"
+    "    float v = (sh[i] * inv) * w[i];\n"
+    "    xn2f[i] = v; xn2b[i] = f2bfd(v);\n"
+    "  }\n"
+    "}\n", d, d, sk, d, d, 1.0 / (double)d, (double)C.eps, d);
+  return mks(
+    "#include <math.h>\n"
+    "void gred_o_rms(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
+    "  (void)grid; (void)block;\n"
+    "  bf16t *x1 = (bf16t *)bufs[0]; bf16t *xn2b = (bf16t *)bufs[1]; float *xn2f = (float *)bufs[2];\n"
+    "  const float *part = (const float *)bufs[3]; const bf16t *x = (const bf16t *)bufs[4]; const float *w = (const float *)bufs[5];\n"
+    "  float ss = 0.f;\n"
+    "  for (unsigned i = 0; i < %uu; i++) {\n"
+    "    float s = 0.f;\n"
+    "    for (unsigned k = 0; k < %uu; k++) s += part[(unsigned long)k * %uu + i];\n"
+    "    float x1v = bf2f(f2bfd(bf2f(x[i]) + bf2f(f2bfd(s))));\n"
+    "    x1[i] = f2bfd(x1v); ss += x1v * x1v;\n"
+    "  }\n"
+    "  float inv = 1.0f / sqrtf(ss * %.10ef + %.10ef);\n"
+    "  for (unsigned i = 0; i < %uu; i++) {\n"
+    "    float v = (bf2f(x1[i]) * inv) * w[i];\n"
+    "    xn2f[i] = v; xn2b[i] = f2bfd(v);\n"
+    "  }\n"
+    "}\n", d, sk, d, 1.0 / (double)d, (double)C.eps, d);
+}
+
+// down fold + residual (dense MLP tail): x = x1 + fold(down partials), both
+// bf16-rounded exactly like the native mm out + add chain.
+static char *src_gred_down_res(u32 sk) {
+  u32 d = C.dim;
+  if (IS_CUDA) return mks(
+    "extern \"C\" __global__ void gred_down(bf16t* xo, const float* part, const bf16t* x1) {\n"
+    "  int n = blockIdx.x * blockDim.x + threadIdx.x;\n"
+    "  if (n >= %u) return;\n"
+    "  float s = 0.f;\n"
+    "  for (int i = 0; i < %u; i++) s += part[(long)i * %u + n];\n"
+    "  xo[n] = f2bfd(bf2f(x1[n]) + bf2f(f2bfd(s)));\n"
+    "}\n", d, sk, d);
+  return mks(
+    "void gred_down(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
+    "  (void)grid; (void)block;\n"
+    "  bf16t *xo = (bf16t *)bufs[0]; const float *part = (const float *)bufs[1]; const bf16t *x1 = (const bf16t *)bufs[2];\n"
+    "  for (unsigned n = 0; n < %uu; n++) {\n"
+    "    float s = 0.f;\n"
+    "    for (unsigned i = 0; i < %uu; i++) s += part[(unsigned long)i * %uu + n];\n"
+    "    xo[n] = f2bfd(bf2f(x1[n]) + bf2f(f2bfd(s)));\n"
+    "  }\n"
+    "}\n", d, sk, d);
+}
+
+// MLA3 chain (port of deepseek_v2.py:651-717).  q is the packed [NH, DN+DR]
+// buffer gred_q writes: the nope slice sits at row stride DN+DR, the roped pe
+// slice at offset DN, so no shrink kernels are needed.
 static char *src_qlat(void) {
-  u32 h = C.n_heads, kv = C.kv_lora, dn = C.d_nope;
+  u32 h = C.n_heads, kv = C.kv_lora, dn = C.d_nope, qs = C.d_nope + C.d_rope;
   if (IS_CUDA) return mks(
     "extern \"C\" __global__ void mla_qlat(float* qlat, const bf16t* qn, const bf16t* wuk) {\n"
     "  int idx = blockIdx.x * blockDim.x + threadIdx.x;\n"
@@ -389,7 +580,7 @@ static char *src_qlat(void) {
     "  float acc = 0.f;\n"
     "  for (int d = 0; d < %u; d++) acc += bf2f(q[d]) * bf2f(w[(long)d * %u + k]);\n"
     "  qlat[(long)h * %u + k] = acc;\n"
-    "}\n", h * kv, kv, kv, dn, dn * kv, dn, kv, kv);
+    "}\n", h * kv, kv, kv, qs, dn * kv, dn, kv, kv);
   return mks(
     "void mla_qlat(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
     "  (void)grid; (void)block;\n"
@@ -400,22 +591,22 @@ static char *src_qlat(void) {
     "      for (int d = 0; d < %u; d++) acc += bf2f(qn[(long)h * %u + d]) * bf2f(wuk[((long)h * %u + d) * %u + k]);\n"
     "      qlat[(long)h * %u + k] = acc;\n"
     "    }\n"
-    "}\n", h, kv, dn, dn, dn, kv, kv);
+    "}\n", h, kv, dn, qs, dn, kv, kv);
 }
 
 static char *src_score(void) {
-  u32 kv = C.kv_lora, dr = C.d_rope, ml = C.max_seq;
+  u32 kv = C.kv_lora, dr = C.d_rope, ml = C.max_seq, qs = C.d_nope + C.d_rope;
   if (IS_CUDA) return mks(
     "extern \"C\" __global__ void mla_score(float* sm, const float* qlat, const bf16t* qp,\n"
-    "    const bf16t* Cn, const bf16t* Pn, const bf16t* ckvc, const bf16t* kpec, const int* Lp) {\n"
-    "  int h = blockIdx.x; int t = threadIdx.x; int nt = blockDim.x; int L = Lp[0]; int Lh = L - 1;\n"
-    "  const bf16t* q_pe = qp + (long)h * %u;\n"
+    "    const bf16t* Cn, const bf16t* Pn, const int* Lp) {\n"
+    "  int h = blockIdx.x; int t = threadIdx.x; int nt = blockDim.x; int L = Lp[0];\n"
+    "  const bf16t* q_pe = qp + (long)h * %u + %u;\n"
     "  const float* ql = qlat + (long)h * %u;\n"
     "  __shared__ float sc[%u]; __shared__ float red[32];\n"
     "  int lane = t & 31, w = t >> 5, nw = nt >> 5;\n"
     "  for (int j = w; j < L; j += nw) {\n"
-    "    const bf16t* cj = (j < Lh) ? (Cn + (long)j * %u) : ckvc;\n"
-    "    const bf16t* pj = (j < Lh) ? (Pn + (long)j * %u) : kpec;\n"
+    "    const bf16t* cj = Cn + (long)j * %u;\n"
+    "    const bf16t* pj = Pn + (long)j * %u;\n"
     "    float s = 0.f;\n"
     "    for (int k = lane; k < %u; k += 32) s += ql[k] * bf2f(cj[k]);\n"
     "    for (int k = lane; k < %u; k += 32) s += bf2f(q_pe[k]) * bf2f(pj[k]);\n"
@@ -438,24 +629,23 @@ static char *src_score(void) {
     "  if (t == 0) { float ss = 0.f; for (int i = 0; i < (nt + 31) / 32; i++) ss += red[i]; red[0] = ss; }\n"
     "  __syncthreads(); float gsum = red[0]; __syncthreads();\n"
     "  for (int j = t; j < L; j += nt) sm[(long)h * %u + j] = sc[j] / gsum;\n"
-    "}\n", dr, kv, ml, kv, dr, kv, dr, C.scale, ml);
+    "}\n", qs, C.d_nope, kv, ml, kv, dr, kv, dr, C.scale, ml);
   return mks(
     "#include <math.h>\n"
     "void mla_score(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
     "  (void)grid; (void)block;\n"
     "  float *sm = (float *)bufs[0]; const float *qlat = (const float *)bufs[1]; const bf16t *qp = (const bf16t *)bufs[2];\n"
     "  const bf16t *Cn = (const bf16t *)bufs[3]; const bf16t *Pn = (const bf16t *)bufs[4];\n"
-    "  const bf16t *ckvc = (const bf16t *)bufs[5]; const bf16t *kpec = (const bf16t *)bufs[6];\n"
-    "  const int *Lp = (const int *)bufs[7];\n"
-    "  int L = Lp[0], Lh = L - 1;\n"
+    "  const int *Lp = (const int *)bufs[5];\n"
+    "  int L = Lp[0];\n"
     "  for (int h = 0; h < %u; h++) {\n"
     "    float sc[%u]; float gmax = -1e30f;\n"
     "    for (int j = 0; j < L; j++) {\n"
-    "      const bf16t *cj = (j < Lh) ? (Cn + (long)j * %u) : ckvc;\n"
-    "      const bf16t *pj = (j < Lh) ? (Pn + (long)j * %u) : kpec;\n"
+    "      const bf16t *cj = Cn + (long)j * %u;\n"
+    "      const bf16t *pj = Pn + (long)j * %u;\n"
     "      float s = 0.f;\n"
     "      for (int k = 0; k < %u; k++) s += qlat[(long)h * %u + k] * bf2f(cj[k]);\n"
-    "      for (int k = 0; k < %u; k++) s += bf2f(qp[(long)h * %u + k]) * bf2f(pj[k]);\n"
+    "      for (int k = 0; k < %u; k++) s += bf2f(qp[(long)h * %u + %u + k]) * bf2f(pj[k]);\n"
     "      sc[j] = s * %.10ff;\n"
     "      if (sc[j] > gmax) gmax = sc[j];\n"
     "    }\n"
@@ -463,37 +653,35 @@ static char *src_score(void) {
     "    for (int j = 0; j < L; j++) { sc[j] = expf(sc[j] - gmax); gsum += sc[j]; }\n"
     "    for (int j = 0; j < L; j++) sm[(long)h * %u + j] = sc[j] / gsum;\n"
     "  }\n"
-    "}\n", C.n_heads, ml, kv, dr, kv, kv, dr, dr, C.scale, ml);
+    "}\n", C.n_heads, ml, kv, dr, kv, kv, dr, qs, C.d_nope, C.scale, ml);
 }
 
 static char *src_mix(void) {
   u32 h = C.n_heads, kv = C.kv_lora, ml = C.max_seq;
   if (IS_CUDA) return mks(
-    "extern \"C\" __global__ void mla_mix(float* olat, const float* sm, const bf16t* Cn, const bf16t* ckvc, const int* Lp) {\n"
+    "extern \"C\" __global__ void mla_mix(float* olat, const float* sm, const bf16t* Cn, const int* Lp) {\n"
     "  int idx = blockIdx.x * blockDim.x + threadIdx.x;\n"
     "  if (idx >= %u) return;\n"
-    "  int h = idx / %u, k = idx %% %u; int L = Lp[0], Lh = L - 1;\n"
+    "  int h = idx / %u, k = idx %% %u; int L = Lp[0];\n"
     "  const float* smh = sm + (long)h * %u;\n"
     "  float a = 0.f;\n"
-    "  for (int j = 0; j < Lh; j++) a += smh[j] * bf2f(Cn[(long)j * %u + k]);\n"
-    "  a += smh[Lh] * bf2f(ckvc[k]);\n"
+    "  for (int j = 0; j < L; j++) a += smh[j] * bf2f(Cn[(long)j * %u + k]);\n"
     "  olat[(long)h * %u + k] = a;\n"
     "}\n", h * kv, kv, kv, ml, kv, kv);
   return mks(
     "void mla_mix(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
     "  (void)grid; (void)block;\n"
     "  float *olat = (float *)bufs[0]; const float *sm = (const float *)bufs[1];\n"
-    "  const bf16t *Cn = (const bf16t *)bufs[2]; const bf16t *ckvc = (const bf16t *)bufs[3];\n"
-    "  const int *Lp = (const int *)bufs[4];\n"
-    "  int L = Lp[0], Lh = L - 1;\n"
+    "  const bf16t *Cn = (const bf16t *)bufs[2];\n"
+    "  const int *Lp = (const int *)bufs[3];\n"
+    "  int L = Lp[0];\n"
     "  for (int h = 0; h < %u; h++)\n"
     "    for (int k = 0; k < %u; k++) {\n"
     "      float a = 0.f;\n"
-    "      for (int j = 0; j < Lh; j++) a += sm[(long)h * %u + j] * bf2f(Cn[(long)j * %u + k]);\n"
-    "      a += sm[(long)h * %u + Lh] * bf2f(ckvc[k]);\n"
+    "      for (int j = 0; j < L; j++) a += sm[(long)h * %u + j] * bf2f(Cn[(long)j * %u + k]);\n"
     "      olat[(long)h * %u + k] = a;\n"
     "    }\n"
-    "}\n", h, kv, ml, kv, ml, kv);
+    "}\n", h, kv, ml, kv, kv);
 }
 
 static char *src_mla_o(void) {
@@ -523,13 +711,22 @@ static char *src_mla_o(void) {
     "}\n", h, dv, kv, kv, dv, kv, dv);
 }
 
-// route: greedy top-K of the E gate logits + full-softmax probs, no renorm
+// route: folds the gate GEMV partials into the E logits (same serial fold
+// order as gred), then greedy top-K + full-softmax probs, no renorm
 // (replaces deepseek_v2.py:1141-1143 on-device topk); ties -> lowest id
-static char *src_route(void) {
+static char *src_route(u32 sk) {
   u32 e = C.n_exp, k = C.top_k;
   if (IS_CUDA) return mks(
-    "extern \"C\" __global__ void route(int* sel, float* probs, const float* g) {\n"
-    "  if (threadIdx.x != 0 || blockIdx.x != 0) return;\n"
+    "extern \"C\" __global__ void route(int* sel, float* probs, const float* part) {\n"
+    "  int t = threadIdx.x;\n"
+    "  __shared__ float g[%u];\n"
+    "  if (t < %u) {\n"
+    "    float s = 0.f;\n"
+    "    for (int i = 0; i < %u; i++) s += part[(long)i * %u + t];\n"
+    "    g[t] = s;\n"
+    "  }\n"
+    "  __syncthreads();\n"
+    "  if (t != 0) return;\n"
     "  float mx = g[0];\n"
     "  for (int e = 1; e < %u; e++) mx = fmaxf(mx, g[e]);\n"
     "  float sum = 0.f;\n"
@@ -545,12 +742,18 @@ static char *src_route(void) {
     "    taken[kk] = best; sel[kk] = best;\n"
     "    probs[kk] = __expf(g[best] - mx) / sum;\n"
     "  }\n"
-    "}\n", e, e, k, k, e);
+    "}\n", e, e, sk, e, e, e, k, k, e);
   return mks(
     "#include <math.h>\n"
     "void route(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
     "  (void)grid; (void)block;\n"
-    "  int *sel = (int *)bufs[0]; float *probs = (float *)bufs[1]; const float *g = (const float *)bufs[2];\n"
+    "  int *sel = (int *)bufs[0]; float *probs = (float *)bufs[1]; const float *part = (const float *)bufs[2];\n"
+    "  float g[%u];\n"
+    "  for (unsigned t = 0; t < %uu; t++) {\n"
+    "    float s = 0.f;\n"
+    "    for (unsigned i = 0; i < %uu; i++) s += part[(unsigned long)i * %uu + t];\n"
+    "    g[t] = s;\n"
+    "  }\n"
     "  float mx = g[0];\n"
     "  for (int e = 1; e < %u; e++) if (g[e] > mx) mx = g[e];\n"
     "  float sum = 0.f;\n"
@@ -566,7 +769,7 @@ static char *src_route(void) {
     "    taken[kk] = best; sel[kk] = best;\n"
     "    probs[kk] = expf(g[best] - mx) / sum;\n"
     "  }\n"
-    "}\n", e, e, k, k, e);
+    "}\n", e, e, sk, e, e, e, k, k, e);
 }
 
 // fully-fused MoE: routed top-K + shared experts in two kernels (verbatim
@@ -615,11 +818,14 @@ static char *src_moe_h(void) {
     "}\n", k * mi + si, k * mi, mi, mi, mi, d, mi, d, k * mi, d, d, d);
 }
 
+// moe_full_out + residual epilogue: out = x1 + moe (the moe accumulator is
+// bf16-rounded first, then added in f32 and rounded, exactly the native
+// mm-out + add chain this replaces).
 static char *src_moe_out(void) {
   u32 d = C.dim, mi = C.moe_inter, k = C.top_k, si = C.moe_inter * C.n_shared;
   if (IS_CUDA) return mks(
     "extern \"C\" __global__ void moe_full_out(bf16t* out, const float* h, const int* sel,\n"
-    "    const float* probs, const bf16t* wd, const bf16t* swd) {\n"
+    "    const float* probs, const bf16t* wd, const bf16t* swd, const bf16t* x1) {\n"
     "  int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5; int lane = threadIdx.x & 31;\n"
     "  if (warp >= %u) return;\n"
     "  int d = warp; float acc = 0.f;\n"
@@ -640,13 +846,14 @@ static char *src_moe_out(void) {
     "    for (int o = 16; o > 0; o >>= 1) s += __shfl_down_sync(0xffffffffu, s, o);\n"
     "    if (lane == 0) acc += s;\n"
     "  }\n"
-    "  if (lane == 0) out[d] = f2bfd(acc);\n"
+    "  if (lane == 0) out[d] = f2bfd(bf2f(x1[d]) + bf2f(f2bfd(acc)));\n"
     "}\n", d, k, d, mi, mi, mi, si, k * mi, si);
   return mks(
     "void moe_full_out(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
     "  (void)grid; (void)block;\n"
     "  bf16t *out = (bf16t *)bufs[0]; const float *h = (const float *)bufs[1]; const int *sel = (const int *)bufs[2];\n"
     "  const float *probs = (const float *)bufs[3]; const bf16t *wd = (const bf16t *)bufs[4]; const bf16t *swd = (const bf16t *)bufs[5];\n"
+    "  const bf16t *x1 = (const bf16t *)bufs[6];\n"
     "  for (int d = 0; d < %u; d++) {\n"
     "    float acc = 0.f;\n"
     "    for (int e = 0; e < %u; e++) {\n"
@@ -660,7 +867,7 @@ static char *src_moe_out(void) {
     "      for (int i = 0; i < %u; i++) s += h[%u + i] * bf2f(swd[(long)d * %u + i]);\n"
     "      acc += s;\n"
     "    }\n"
-    "    out[d] = f2bfd(acc);\n"
+    "    out[d] = f2bfd(bf2f(x1[d]) + bf2f(f2bfd(acc)));\n"
     "  }\n"
     "}\n", d, k, mi, mi, d, mi, si, k * mi, si);
 }
@@ -838,23 +1045,8 @@ static void gemv2(char const *nm_sk, char const *s_sk, char const *nm_red,
   krun2(nm_red, s_red, gx, 1, bx, a2, 2, o2, 1);
 }
 
-// === native uop pieces (mirror the WL example) ==============================
-// RMS norm over {1,K} f32 with a realize boundary on the reduce scalar
-// (the dsvRmsNorm structure; tinygrad materializes at every sublayer,
-// deepseek_v2.py:1211-1216).  Returns a REALIZED {1,K} f32 tensor id.
-static u32 rms_norm(Term x, u32 K, u32 w_tid, float eps) {
-  u32 one1[1] = {1}, d11[2] = {1, 1}, d1k[2] = {1, K};
-  Term xx = uop_binary(UOP_MUL, x, x);
-  Term red = uop_reduce(REDUCE_SUM, 1, xx);   // {1}
-  Term ms = uop_binary(UOP_MUL, red, uop_expand(uop_const(DT_FP32, fbits(1.0f / (float)K)), 1, one1));
-  Term inv = uop_unary(UOP_RECIP, uop_unary(UOP_SQRT,
-      uop_binary(UOP_ADD, ms, uop_expand(uop_const(DT_FP32, fbits(eps)), 1, one1))));
-  u32 inv_tid = rz(inv);
-  Term invB = uop_expand(uop_reshape(tt(inv_tid), 2, d11), 2, d1k);
-  Term wB = uop_expand(uop_reshape(tt(w_tid), 2, d1k), 2, d1k);
-  return rz(uop_binary(UOP_MUL, uop_binary(UOP_MUL, x, invB), wB));
-}
-
+// === native uop pieces (the dense-MLP silu*u elementwise is the one
+// remaining scheduler kernel; everything else is injected custom) ===========
 // silu(x) = x / (1 + exp(-x)) via EXP2 (the TSiLU lowering); x bf16 {1,K}
 static Term silu(Term x, u32 K) {
   u32 d1k[2] = {1, K};
@@ -874,15 +1066,14 @@ static u32 W_wg1[MAX_LAYERS], W_wu1[MAX_LAYERS], W_wd1[MAX_LAYERS];
 static u32 W_gate[MAX_LAYERS], W_wg[MAX_LAYERS], W_wu[MAX_LAYERS], W_wd[MAX_LAYERS];
 static u32 W_swg[MAX_LAYERS], W_swu[MAX_LAYERS], W_swd[MAX_LAYERS];
 static u32 L_ckv[MAX_LAYERS], L_kpe[MAX_LAYERS];
-static u32 T_x, T_tok, T_len, T_ql, T_sm, T_ol, T_ob, T_sel, T_probs, T_h, T_moe, T_pv, T_pi;
+static u32 T_tok, T_len, T_ql, T_sm, T_ol, T_ob, T_sel, T_probs, T_h, T_pv, T_pi;
 static u32 LOGITS_TID = 0;
 
-// Per-layer GEMV output buffers.  A shared buffer would make the layers'
-// downstream native uop DAGs structurally identical -> the Term dedup would
-// memo the realize and layers 1..N-1 would record NO kernel.  Per-layer tids
-// keep every native consumer unique (~11 KB/layer, negligible).
-static u32 T_q[MAX_LAYERS], T_kva[MAX_LAYERS], T_attn[MAX_LAYERS];
-static u32 T_gateo, T_g1o, T_u1o, T_mlpo;
+// Activation buffers, all written/read by custom kernels only (no native
+// consumers -> no Term-dedup hazard -> one shared set for every layer).
+// T_xr is the residual stream: embed writes it, rms1 reads it, gred_o_rms
+// pairs it with the attention out, moe_full_out / gred_down write it back.
+static u32 T_xr, T_xnb, T_x1, T_xn2b, T_xn2f, T_q, T_xnf, T_g1o, T_u1o;
 
 // One GEMV instance per distinct (K, N, dtypes): source + split factor.
 typedef struct { char *sk_src, *red_src; char sk_nm[16], red_nm[16]; u32 N, sk; } Gemv;
@@ -903,8 +1094,17 @@ static void gemv_run(Gemv const *g, u32 x_tid, u32 w_tid, u32 out_tid) {
         x_tid, w_tid, out_tid);
 }
 
-static char *S_EMBED, *S_ROPEQ, *S_ROPEK, *S_APPEND, *S_QLAT, *S_SCORE, *S_MIX, *S_O;
+// Phase 1 only: the partials are folded by a fused consumer (gred_q /
+// kv_prep / gred_o_rms / route / gred_down) instead of a plain gred.
+static void gemv_sk_run(Gemv const *g, u32 x_tid, u32 w_tid) {
+  u32 bx = gemv_block(g->N), gx = cdiv(g->N, bx);
+  u32 a1[3] = {T_part, x_tid, w_tid}, o1[1] = {0};
+  krun2(g->sk_nm, g->sk_src, gx, g->sk, bx, a1, 3, o1, 1);
+}
+
+static char *S_EMBED, *S_QLAT, *S_SCORE, *S_MIX, *S_O;
 static char *S_ROUTE, *S_MOEH, *S_MOEOUT, *S_APART, *S_AFIN, *S_BUMP;
+static char *S_RMS1, *S_RMSF, *S_GREDQ, *S_KVPREP, *S_OREDRMS, *S_DOWNRES;
 
 static void model_init(void) {
   u32 d = C.dim, hn = C.n_heads, dn = C.d_nope, dr = C.d_rope, kv = C.kv_lora, dv = C.d_v;
@@ -967,9 +1167,6 @@ static void model_init(void) {
     }
     L_ckv[l] = mk_bf16_zero(C.max_seq, kv);
     L_kpe[l] = mk_bf16_zero(C.max_seq, dr);
-    T_q[l]    = mk_bf16_zero(1, hn * (dn + dr));
-    T_kva[l]  = mk_bf16_zero(1, kv + dr);
-    T_attn[l] = mk_bf16_zero(1, d);
   }
   gemv_make(&G_q,    "q",    d, hn * (dn + dr), 0, 0, 1);
   gemv_make(&G_kv,   "kv",   d, kv + dr,        0, 0, 1);
@@ -987,11 +1184,15 @@ static void model_init(void) {
     }
     T_part = mk_f32_fill((u32)pmax, 0, 0.0f);
   }
-  T_gateo = mk_f32_fill(1, C.n_exp, 0.0f);
   T_g1o   = mk_bf16_zero(1, C.dense_inter);
   T_u1o   = mk_bf16_zero(1, C.dense_inter);
-  T_mlpo  = mk_bf16_zero(1, d);
-  T_x     = mk_bf16_zero(d, 0);
+  T_xr    = mk_bf16_zero(d, 0);
+  T_xnb   = mk_bf16_zero(d, 0);
+  T_x1    = mk_bf16_zero(d, 0);
+  T_xn2b  = mk_bf16_zero(d, 0);
+  T_xn2f  = mk_f32_fill(d, 0, 0.0f);
+  T_xnf   = mk_f32_fill(d, 0, 0.0f);
+  T_q     = mk_bf16_zero(hn * (dn + dr), 0);
   T_tok   = mk_i32(1, 1);
   T_len   = mk_i32(1, 1);
   T_ql    = mk_f32_fill(hn * kv, 0, 0.0f);
@@ -1001,102 +1202,96 @@ static void model_init(void) {
   T_sel   = mk_i32(C.top_k, 0);
   T_probs = mk_f32_fill(C.top_k, 0, 0.0f);
   T_h     = mk_f32_fill(C.top_k * C.moe_inter + si, 0, 0.0f);
-  T_moe   = mk_bf16_zero(d, 0);
   T_pv    = mk_f32_fill(C.nb, 0, 0.0f);
   T_pi    = mk_i32(C.nb, 0);
   LOGITS_TID = mk_f32_fill(1, C.vocab, 0.0f);
-  S_EMBED = src_embed(); S_ROPEQ = src_rope(hn); S_ROPEK = src_rope(1);
-  S_APPEND = src_append(); S_QLAT = src_qlat(); S_SCORE = src_score();
+  S_EMBED = src_embed(); S_QLAT = src_qlat(); S_SCORE = src_score();
   S_MIX = src_mix(); S_O = src_mla_o();
-  S_ROUTE = src_route(); S_MOEH = src_moe_h(); S_MOEOUT = src_moe_out();
+  S_ROUTE = src_route(G_gate.sk); S_MOEH = src_moe_h(); S_MOEOUT = src_moe_out();
   S_APART = src_apart(); S_AFIN = src_afin(); S_BUMP = src_bump();
+  S_RMS1 = src_rms("rms1", d, 1);
+  S_RMSF = src_rms("rms_f", d, 0);
+  S_GREDQ = src_gred_q_rope(G_q.sk);
+  S_KVPREP = src_kv_prep(G_kv.sk);
+  S_OREDRMS = src_gred_o_rms(G_o.sk);
+  S_DOWNRES = src_gred_down_res(G_down.sk);
 }
 
 // === the decode step (built + fired once, under capture) ===================
 static void step_build(void) {
   u32 d = C.dim, hn = C.n_heads, dn = C.d_nope, dr = C.d_rope, kv = C.kv_lora, dv = C.d_v;
   u32 si = C.moe_inter * C.n_shared;
-  u32 d1d[2] = {1, d};
   {
-    u32 a[3] = {T_x, W_embed, T_tok}, o[1] = {0};
+    u32 a[3] = {T_xr, W_embed, T_tok}, o[1] = {0};
     krun("embed_row", S_EMBED, cdiv(d, 256), 256, a, 3, o, 1);
   }
-  Term x = uop_reshape(tt(T_x), 2, d1d);
   for (u32 l = 0; l < C.n_layers; l++) {
-    u32 xn_tid = rms_norm(uop_cast(x, DT_FP32), d, W_win[l], C.eps);
-    u32 xnb_tid = rz(uop_cast(tt(xn_tid), DT_BF16));
-    gemv_run(&G_q, xnb_tid, W_wq[l], T_q[l]);
-    u32 hdd[2] = {hn, dn + dr};
-    Term qm = uop_reshape(tt(T_q[l]), 2, hdd);
-    u32 sn_[4] = {0, hn, 0, dn}, sp_[4] = {0, hn, dn, dn + dr};
-    u32 qn_tid = rz(uop_shrink(qm, 2, sn_));
-    u32 qp_tid = rz(uop_shrink(qm, 2, sp_));
     {
-      u32 a[4] = {qp_tid, T_cos, T_sin, T_len}, o[1] = {0};
-      krun("rope_dev", S_ROPEQ, hn, dr / 2, a, 4, o, 1);
+      u32 a[3] = {T_xnb, T_xr, W_win[l]}, o[1] = {0};
+      krun("rms1", S_RMS1, 1, 256, a, 3, o, 1);
     }
-    gemv_run(&G_kv, xnb_tid, W_wkv[l], T_kva[l]);
-    u32 sc_[4] = {0, 1, 0, kv}, sk_[4] = {0, 1, kv, kv + dr};
-    Term kvam = tt(T_kva[l]);
-    u32 ckvn_tid = rms_norm(uop_cast(uop_shrink(kvam, 2, sc_), DT_FP32), kv, W_wkvn[l], C.eps);
-    u32 ckv_tid = rz(uop_cast(tt(ckvn_tid), DT_BF16));
-    u32 kp_tid = rz(uop_shrink(kvam, 2, sk_));
+    gemv_sk_run(&G_q, T_xnb, W_wq[l]);
     {
-      u32 a[4] = {kp_tid, T_cos, T_sin, T_len}, o[1] = {0};
-      krun("rope_dev", S_ROPEK, 1, dr / 2, a, 4, o, 1);
+      u32 a[5] = {T_q, T_part, T_cos, T_sin, T_len}, o[1] = {0};
+      krun("gred_q", S_GREDQ, cdiv(hn * dn + hn * dr / 2, 256), 256, a, 5, o, 1);
+    }
+    gemv_sk_run(&G_kv, T_xnb, W_wkv[l]);
+    {
+      u32 a[7] = {L_ckv[l], L_kpe[l], T_part, W_wkvn[l], T_cos, T_sin, T_len}, o[2] = {0, 1};
+      krun("kv_prep", S_KVPREP, 1, (kv + dr / 2 + 31) / 32 * 32, a, 7, o, 2);
     }
     {
-      u32 a[5] = {L_ckv[l], L_kpe[l], ckv_tid, kp_tid, T_len}, o[2] = {0, 1};
-      krun("cache_append", S_APPEND, cdiv(kv + dr, 256), 256, a, 5, o, 2);
-    }
-    {
-      u32 a[3] = {T_ql, qn_tid, W_wuk[l]}, o[1] = {0};
+      u32 a[3] = {T_ql, T_q, W_wuk[l]}, o[1] = {0};
       krun("mla_qlat", S_QLAT, cdiv(hn * kv, 256), 256, a, 3, o, 1);
     }
     {
-      u32 a[8] = {T_sm, T_ql, qp_tid, L_ckv[l], L_kpe[l], ckv_tid, kp_tid, T_len}, o[1] = {0};
-      krun("mla_score", S_SCORE, hn, 256, a, 8, o, 1);
+      u32 a[6] = {T_sm, T_ql, T_q, L_ckv[l], L_kpe[l], T_len}, o[1] = {0};
+      krun("mla_score", S_SCORE, hn, 256, a, 6, o, 1);
     }
     {
-      u32 a[5] = {T_ol, T_sm, L_ckv[l], ckv_tid, T_len}, o[1] = {0};
-      krun("mla_mix", S_MIX, cdiv(hn * kv, 256), 256, a, 5, o, 1);
+      u32 a[4] = {T_ol, T_sm, L_ckv[l], T_len}, o[1] = {0};
+      krun("mla_mix", S_MIX, cdiv(hn * kv, 256), 256, a, 4, o, 1);
     }
     {
       u32 a[3] = {T_ob, T_ol, W_wuv[l]}, o[1] = {0};
       krun("mla_o", S_O, cdiv(hn * dv * 32, 256), 256, a, 3, o, 1);
     }
-    gemv_run(&G_o, T_ob, W_wo[l], T_attn[l]);
-    u32 x1_tid = rz(uop_binary(UOP_ADD, x, tt(T_attn[l])));
-    Term x1 = tt(x1_tid);
-    u32 xn2_tid = rms_norm(uop_cast(x1, DT_FP32), d, W_wpost[l], C.eps);
+    gemv_sk_run(&G_o, T_ob, W_wo[l]);
+    {
+      u32 a[6] = {T_x1, T_xn2b, T_xn2f, T_part, T_xr, W_wpost[l]}, o[3] = {0, 1, 2};
+      krun("gred_o_rms", S_OREDRMS, 1, 256, a, 6, o, 3);
+    }
     if (l < C.first_dense) {
-      u32 xb_tid = rz(uop_cast(tt(xn2_tid), DT_BF16));
-      gemv_run(&G_ffw, xb_tid, W_wg1[l], T_g1o);
-      gemv_run(&G_ffw, xb_tid, W_wu1[l], T_u1o);
+      gemv_run(&G_ffw, T_xn2b, W_wg1[l], T_g1o);
+      gemv_run(&G_ffw, T_xn2b, W_wu1[l], T_u1o);
       Term h = uop_binary(UOP_MUL, silu(tt(T_g1o), C.dense_inter), tt(T_u1o));
       u32 h_tid = rz(h);
-      gemv_run(&G_down, h_tid, W_wd1[l], T_mlpo);
-      x = tt(rz(uop_binary(UOP_ADD, x1, tt(T_mlpo))));
-    } else {
-      gemv_run(&G_gate, xn2_tid, W_gate[l], T_gateo);
+      gemv_sk_run(&G_down, h_tid, W_wd1[l]);
       {
-        u32 a[3] = {T_sel, T_probs, T_gateo}, o[2] = {0, 1};
-        krun("route", S_ROUTE, 1, 32, a, 3, o, 2);
+        u32 a[3] = {T_xr, T_part, T_x1}, o[1] = {0};
+        krun("gred_down", S_DOWNRES, cdiv(d, 256), 256, a, 3, o, 1);
       }
-      u32 moein_tid = rz(uop_cast(tt(xn2_tid), DT_BF16));
+    } else {
+      gemv_sk_run(&G_gate, T_xn2f, W_gate[l]);
       {
-        u32 a[7] = {T_h, moein_tid, T_sel, W_wg[l], W_wu[l], W_swg[l], W_swu[l]}, o[1] = {0};
+        u32 a[3] = {T_sel, T_probs, T_part}, o[2] = {0, 1};
+        krun("route", S_ROUTE, 1, (C.n_exp + 31) / 32 * 32, a, 3, o, 2);
+      }
+      {
+        u32 a[7] = {T_h, T_xn2b, T_sel, W_wg[l], W_wu[l], W_swg[l], W_swu[l]}, o[1] = {0};
         krun("moe_full_h", S_MOEH, cdiv((C.top_k * C.moe_inter + si) * 32, 256), 256, a, 7, o, 1);
       }
       {
-        u32 a[6] = {T_moe, T_h, T_sel, T_probs, W_wd[l], W_swd[l]}, o[1] = {0};
-        krun("moe_full_out", S_MOEOUT, cdiv(d * 32, 256), 256, a, 6, o, 1);
+        u32 a[7] = {T_xr, T_h, T_sel, T_probs, W_wd[l], W_swd[l], T_x1}, o[1] = {0};
+        krun("moe_full_out", S_MOEOUT, cdiv(d * 32, 256), 256, a, 7, o, 1);
       }
-      x = tt(rz(uop_binary(UOP_ADD, x1, uop_reshape(tt(T_moe), 2, d1d))));
     }
   }
-  u32 xnf_tid = rms_norm(uop_cast(x, DT_FP32), d, W_norm, C.eps);
-  gemv_run(&G_lm, xnf_tid, W_lm, LOGITS_TID);
+  {
+    u32 a[3] = {T_xnf, T_xr, W_norm}, o[1] = {0};
+    krun("rms_f", S_RMSF, 1, 256, a, 3, o, 1);
+  }
+  gemv_run(&G_lm, T_xnf, W_lm, LOGITS_TID);
   {
     u32 a[3] = {T_pv, T_pi, LOGITS_TID}, o[2] = {0, 1};
     krun("argmax_part", S_APART, C.nb, 256, a, 3, o, 2);
@@ -1115,6 +1310,47 @@ static int read_i32(u32 tid) {
   int v = 0;
   TENS[tid].backend->buf_read(TENS[tid].buf_id, &v, 4);
   return v;
+}
+
+// DSV2_DUMP=1: byte-exact fingerprints after the captured step -- per-layer
+// cache row 0 (u16-bit sums) + the logits bit-sum.  Diffing two builds'
+// dumps localizes the first layer where a numerics change enters.
+
+static void dump_tid(char const *nm, u32 tid, u64 nbytes) {
+  static u8 dbuf[1 << 22];
+  u64 s = 0;
+  TENS[tid].backend->buf_read(TENS[tid].buf_id, dbuf, nbytes);
+  for (u64 i = 0; i < nbytes; i++) s += dbuf[i] * (u64)(1 + (i & 7));
+  printf("  [dump] %s bytesum=%llu\n", nm, (unsigned long long)s);
+}
+
+static void dump_fingerprints(void) {
+  static u8 buf[1 << 20];
+  dump_tid("T_ql", T_ql, (u64)C.n_heads * C.kv_lora * 4);
+  dump_tid("T_sm", T_sm, (u64)C.n_heads * C.max_seq * 4);
+  dump_tid("T_ol", T_ol, (u64)C.n_heads * C.kv_lora * 4);
+  dump_tid("T_ob", T_ob, (u64)C.n_heads * C.d_v * 2);
+  dump_tid("T_g1o", T_g1o, (u64)C.dense_inter * 2);
+  dump_tid("T_u1o", T_u1o, (u64)C.dense_inter * 2);
+  printf("  [dump] per-layer cache row 0 fingerprints:\n");
+  for (u32 l = 0; l < C.n_layers; l++) {
+    u64 sc = 0, sp = 0;
+    TENS[L_ckv[l]].backend->buf_read(TENS[L_ckv[l]].buf_id, buf, (u64)C.kv_lora * 2);
+    for (u32 i = 0; i < C.kv_lora; i++) sc += ((u16 *)buf)[i];
+    TENS[L_kpe[l]].backend->buf_read(TENS[L_kpe[l]].buf_id, buf, (u64)C.d_rope * 2);
+    for (u32 i = 0; i < C.d_rope; i++) sp += ((u16 *)buf)[i];
+    printf("  [dump] l%02u ckv=%llu kpe=%llu\n", l,
+           (unsigned long long)sc, (unsigned long long)sp);
+  }
+  {
+    u64 s = 0;
+    float first2[2];
+    TENS[LOGITS_TID].backend->buf_read(TENS[LOGITS_TID].buf_id, buf, (u64)C.vocab * 4);
+    for (u32 i = 0; i < C.vocab; i++) s += ((u32 *)buf)[i];
+    memcpy(first2, buf, 8);
+    printf("  [dump] logits bitsum=%llu first2=%.9g %.9g\n",
+           (unsigned long long)s, first2[0], first2[1]);
+  }
 }
 
 static void write_i32(u32 tid, int v) {
@@ -1240,6 +1476,7 @@ int main(void) {
   jit_capture_end();
   printf("  capture (step 1): %.2f s   ops=%u   tok=%d len=%d\n",
          (now_ms() - t0) / 1e3, jit_capture_op_count(slot), read_i32(T_tok), read_i32(T_len));
+  if (envu("DSV2_DUMP", 0) != 0) dump_fingerprints();
 
   if (np > 0) return run_prompt(slot, prompt, np, count, envu("DSV2_TOP2", 0) != 0);
 
