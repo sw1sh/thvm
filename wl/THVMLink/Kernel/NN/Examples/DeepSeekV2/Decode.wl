@@ -1102,8 +1102,17 @@ dsvHfLayer[cfg_, sd_, l_] := Block[{
 
 dsvFlat[t_] := ArrayReshape[t, {Times @@ TTensorShape[t]}]
 
-dsvExpertStack[w_, proj_, e_] :=
-    Join @@ Table[dsvFlat @ w["mlp.experts." <> ToString[i - 1] <> "." <> proj], {i, e}]
+(* Flat expert stack {e*inter*dim}, expert-major.  A checkpoint may store the
+   experts pre-stacked as one {e, inter, dim} tensor (mlp.experts.<proj>) -- then
+   a single reshape suffices; the per-expert form is concatenated instead.
+   thvm has no native CAT (tCatAxis emulates it by pad-and-sum, O(n^2) in the
+   input count), so the pre-stacked path is the one that scales to 64 experts. *)
+dsvExpertStack[w_, proj_, e_] := With[{stacked = w["mlp.experts." <> proj]},
+    If[ MatchQ[stacked, _TTerm],
+        dsvFlat @ stacked,
+        Join @@ Table[dsvFlat @ w["mlp.experts." <> ToString[i - 1] <> "." <> proj], {i, e}]
+    ]
+]
 
 dsvHfWeights[cfg_Association, sd_Association] := <|
     "Embed" -> dsvUp[sd["model.embed_tokens.weight"], cfg["Device"]],
