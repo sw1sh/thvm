@@ -8973,6 +8973,32 @@ static u32 atp_ifeq_penalty(void) {
   return (u32)v;
 }
 
+// THVM_ATP_IFEQ_DECIDE: float multiplier applied to a guard-DECIDING
+// CP's priority (see the AtpState.use_ifeq_decide doc block, thvm.h).
+// Unset or an explicit "0" leaves the mechanism DISARMED (base
+// unchanged -- the default, byte-identical engine).  The bare-flag
+// CLI default ("1", from `--ifeq-decide` with no `=value`) maps to
+// the recommended 0.25 (4x cheaper); any other value is used directly
+// as the multiplier, clamped to (0,1].  Cached fixed-point x1000 once
+// so the hot CP-scoring path does no floating point.
+static u32 atp_ifeq_decide_x1000(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_IFEQ_DECIDE");
+    double d;
+    if (e == NULL || e[0] == '\0') d = 0.0;
+    else if (strcmp(e, "1") == 0)  d = 0.25;
+    else                           d = strtod(e, NULL);
+    if (d < 0.0) d = 0.0;
+    if (d > 1.0) d = 1.0;
+    v = (int)(d * 1000.0 + 0.5);
+  }
+  return (u32)v;
+}
+static u8 atp_ifeq_decide_armed(void) {
+  return atp_ifeq_decide_x1000() > 0u;
+}
+
 // Dispatcher axiom shape: l = f(A,A,B[,C]) with every argument a
 // variable, args 1,2 the SAME variable, B (and C) distinct from it,
 // and r the bare variable B.
@@ -9008,6 +9034,7 @@ static void atp_ifeq_detect(AtpState *s, Term lhs, Term rhs) {
   if (s->n_ifeq_syms >= cap) return;
   s->ifeq_syms[s->n_ifeq_syms++] = sym;
   if (atp_ifeq_guard_env() >= 1) s->use_ifeq_guard = 1u;
+  if (atp_ifeq_decide_armed()) s->use_ifeq_decide = 1u;
   if (getenv("THVM_ATP_IFEQ_DEBUG") != NULL) {
     fprintf(stderr, "[ifeq] dispatcher sym=%u detected (n=%u armed=%u)\n",
             sym, s->n_ifeq_syms, (u32)s->use_ifeq_guard);
@@ -9181,6 +9208,200 @@ static u32 atp_ifeq_weight_scale_ft(const AtpState *s, const AtpFtCell *fl,
   u32 cap = atp_ifeq_varcap();
   if (nv > cap) g += nv - cap;
   return atp_ifeq_scale_pri(base, g);
+}
+#endif
+
+// --- ifeq guard-DECIDING CP boost --------------------------------------
+//
+// The guard-count PENALTY above deprioritizes CPs that RETAIN
+// undecided guards.  This is the complementary discipline: PRIORITIZE
+// CPs that DECIDE one -- a CP of shape `g = true` where `g` matches a
+// condition subterm some ACTIVE rule (or the goal) uses as an ifeq
+// guard.  Deciding such a `g` lets the dispatcher axiom collapse that
+// guard site on its very next normalize -- exactly the inference
+// Vampire's literal selection performs when it resolves a guard
+// literal instead of chasing the whole clause.
+//
+// Registry: guard condition subterms (arg0 of a detected-ifeq
+// application whose arg0 != arg1 syntactically -- an UNDECIDED guard
+// at registration time) are collected into a 4096-bucket fingerprint
+// membership set (AtpState.ifeq_guard_mask) as they're seen in
+// freshly added rules (atp_push_rule) and goal conjuncts
+// (thvm_atp_set_goals).  The fingerprint is an ALPHA-INVARIANT
+// structural hash (first-occurrence variable numbering, like
+// thvm_normalize_vars but scoped to the single extracted subterm)
+// folding in the root label and the full shape via the same FNV
+// recurrence ft_hash/atp_term_struct_hash use (ft.c:672-718), so two
+// occurrences of "the same" guard schema under different rules' local
+// variable numbering -- e.g. sum(Y,X,V1) in one distributivity axiom
+// and sum(A,B,C) in another -- fingerprint identically, while an
+// unrelated term collides only by genuine hash accident.  A collision
+// is harmless (a mis-boosted CP is simply selected a little early --
+// nothing is dropped, completeness untouched); a stale entry left by
+// a dead rule costs the same nothing-worse-than-early-pick, so
+// removal on rule death is skipped.  The bucket count IS the cap
+// (4096, the mission's ~4k budget) -- past it the false-positive rate
+// rises smoothly, no hard ceiling to enforce.
+//
+// The "true" comparison constant is derived the same way: the first
+// ATOMIC (0-ary) arg1 seen at any detected-ifeq site is cached on
+// AtpState.ifeq_true_term and reused for an O(1) exact compare (no
+// need to fingerprint the decided side, only the guard side).
+
+// Bounded first-occurrence variable remap: canonicalizes a subterm's
+// variable ids to 0,1,2,... in left-to-right preorder -- scoped to a
+// single extracted guard subterm so two independent occurrences of
+// the same schema (different rules, different raw var ids)
+// canonicalize identically.  Overflow (never hit in practice: guards
+// are small predicate atoms) shares one bucket via the sentinel id.
+typedef struct { u32 raw[REWRITE_MAX_VAR]; u32 n; } AtpIfeqVarMap;
+static u32 atp_ifeq_canon_var(AtpIfeqVarMap *vm, u32 raw_id) {
+  for (u32 i = 0; i < vm->n; i++) if (vm->raw[i] == raw_id) return i;
+  if (vm->n < REWRITE_MAX_VAR) { vm->raw[vm->n] = raw_id; return vm->n++; }
+  return 0xFFFFu;
+}
+// FNV-style recurrence, same constants as ft_hash/atp_term_struct_hash;
+// the only deviation is the canonical (not raw) variable id, which is
+// what makes this hash alpha-invariant instead of alpha-exact.
+static u64 atp_ifeq_guard_hash_rec(Term t, AtpIfeqVarMap *vm, u32 depth) {
+  if (depth > 48u) return 0x9e3779b97f4a7c15ull;
+  u8 tg = term_tag(t);
+  if (tg == TAG_FVR) {
+    u32 cid = atp_ifeq_canon_var(vm, term_ext(t));
+    return 0xfacefacefaceull ^ ((u64)cid * 0x100000001b3ull);
+  }
+  if (tg != TAG_CTR) return 0xdeadbeefcafebabeull ^ ((u64)t * 0x100000001b3ull);
+  u32 n = term_ctr_n(t);
+  if (n > REWRITE_MAX_ARITY) n = 0u;
+  u64 h = 0xcbf29ce484222325ull ^ ((u64)term_ext(t) * 0x100000001b3ull);
+  for (u32 i = 0; i < n; i++) {
+    h ^= atp_ifeq_guard_hash_rec(term_ctr_at(t, i), vm, depth + 1u);
+    h *= 0x100000001b3ull;
+  }
+  return h ^ ((u64)n * 0x9e3779b97f4a7c15ull);
+}
+static u32 atp_ifeq_guard_bucket(Term t) {
+  AtpIfeqVarMap vm; vm.n = 0u;
+  u64 h = atp_ifeq_guard_hash_rec(t, &vm, 0u);
+  return (u32)(h & 4095ull);
+}
+static void atp_ifeq_guard_mark(AtpState *s, Term g) {
+  u32 b = atp_ifeq_guard_bucket(g);
+  s->ifeq_guard_mask[(b >> 6) & 63u] |= 1ull << (b & 63u);
+}
+static u8 atp_ifeq_guard_hit(const AtpState *s, Term g) {
+  u32 b = atp_ifeq_guard_bucket(g);
+  return (u8)((s->ifeq_guard_mask[(b >> 6) & 63u] >> (b & 63u)) & 1ull);
+}
+
+// Telemetry (env-gated print in the bench stats block): how many CP
+// scoring events actually applied the boost, and how many boosted CPs
+// were subsequently popped by thvm_atp_select_cp -- see
+// atp_ifeq_decide_scale / atp_ifeq_decide_hit below.  Zero for the
+// entire run whenever the mechanism is disarmed (the default).
+u64 g_ifeq_decide_n_hit    = 0;  // scoring events that applied the boost
+u64 g_ifeq_decide_n_popped = 0;  // popped CPs that were guard-deciding
+
+// Walk a freshly-added rule (or goal conjunct) for detected-ifeq
+// applications with an UNDECIDED guard (arg0 != arg1); register arg0
+// as a live guard fingerprint and, on the first atomic arg1 seen,
+// cache it as the encoding's boolean-true constant.  Depth/arity
+// bounded like every other recursive term walk in this file.
+static void atp_ifeq_guard_register_rec(AtpState *s, Term t, u32 depth) {
+  if (depth > 48u || term_tag(t) != TAG_CTR) return;
+  u32 n = term_ctr_n(t);
+  if (n > REWRITE_MAX_ARITY) return;
+  if ((n == 3u || n == 4u) && atp_ifeq_sym_is(s, term_ext(t))) {
+    Term a0 = term_ctr_at(t, 0), a1 = term_ctr_at(t, 1);
+    if (!atp_ifeq_term_eq(a0, a1)) {
+      atp_ifeq_guard_mark(s, a0);
+      if (s->ifeq_true_term == 0 && term_tag(a1) == TAG_CTR &&
+          term_ctr_n(a1) == 0u) {
+        s->ifeq_true_term = a1;
+      }
+    }
+  }
+  for (u32 i = 0; i < n; i++)
+    atp_ifeq_guard_register_rec(s, term_ctr_at(t, i), depth + 1u);
+}
+static void atp_ifeq_guard_register(AtpState *s, Term lhs, Term rhs) {
+  if (s == NULL || !s->use_ifeq_decide) return;
+  atp_ifeq_guard_register_rec(s, lhs, 0u);
+  atp_ifeq_guard_register_rec(s, rhs, 0u);
+}
+
+// True iff {lhs,rhs} is exactly {a registered guard, the true
+// constant}, order-independent (equations are unoriented at CP
+// formation).  Shared by the Term-route scale below and the
+// thvm_atp_select_cp pop-time telemetry.
+static u8 atp_ifeq_decide_hit(const AtpState *s, Term lhs, Term rhs) {
+  if (s->ifeq_true_term == 0) return 0u;
+  if (atp_ifeq_term_eq(rhs, s->ifeq_true_term) &&
+      atp_ifeq_guard_hit(s, lhs)) return 1u;
+  if (atp_ifeq_term_eq(lhs, s->ifeq_true_term) &&
+      atp_ifeq_guard_hit(s, rhs)) return 1u;
+  return 0u;
+}
+// Priority scale: a single-shot multiplier (not a per-guard
+// exponential like the penalty -- one guard decided is one guard
+// decided) by THVM_ATP_IFEQ_DECIDE when atp_ifeq_decide_hit fires.
+// Floors at 1 so a boosted CP never collapses to the always-first
+// sentinel 0; never touches an already-NEVER priority.
+static u32 atp_ifeq_decide_scale(const AtpState *s, Term lhs, Term rhs,
+                                 u32 base) {
+  if (base == 0u || base >= ATP_CP_PRI_NEVER) return base;
+  if (!atp_ifeq_decide_hit(s, lhs, rhs)) return base;
+  g_ifeq_decide_n_hit++;
+  u64 b = (u64)base * atp_ifeq_decide_x1000() / 1000ull;
+  return (u32)(b == 0ull ? 1ull : b);
+}
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// FT-span twin of atp_ifeq_guard_hash_rec/atp_ifeq_guard_bucket, for
+// matching a routed-push CP's NF spans against the SAME registry the
+// Term-route populates (ft_ctr_sym/term_ext share one label space
+// engine-wide -- see the ft_hash / atp_term_struct_hash mirror this
+// walk copies the recurrence shape from -- so the two hashes agree on
+// shared content by construction).
+static u64 atp_ifeq_guard_hash_ft_rec(const AtpFtCell *t, AtpIfeqVarMap *vm) {
+  if (ft_is_var(t)) {
+    u32 cid = atp_ifeq_canon_var(vm, ft_var_id(t));
+    return 0xfacefacefaceull ^ ((u64)cid * 0x100000001b3ull);
+  }
+  u32 n = t->arity;
+  u64 h = 0xcbf29ce484222325ull ^ ((u64)ft_ctr_sym(t) * 0x100000001b3ull);
+  const AtpFtCell *k = t->next;
+  for (u32 i = 0; i < n; i++) {
+    h ^= atp_ifeq_guard_hash_ft_rec(k, vm);
+    h *= 0x100000001b3ull;
+    k = k->end->next;
+  }
+  return h ^ ((u64)n * 0x9e3779b97f4a7c15ull);
+}
+static u32 atp_ifeq_guard_bucket_ft(const AtpFtCell *t) {
+  AtpIfeqVarMap vm; vm.n = 0u;
+  u64 h = atp_ifeq_guard_hash_ft_rec(t, &vm);
+  return (u32)(h & 4095ull);
+}
+static u8 atp_ifeq_guard_hit_ft(const AtpState *s, const AtpFtCell *t) {
+  u32 b = atp_ifeq_guard_bucket_ft(t);
+  return (u8)((s->ifeq_guard_mask[(b >> 6) & 63u] >> (b & 63u)) & 1ull);
+}
+// FT-span twin of atp_ifeq_decide_scale, for the routed pushes whose
+// Term args are sentinels (see atp_ifeq_weight_scale_ft above).
+static u32 atp_ifeq_decide_scale_ft(const AtpState *s, const AtpFtCell *fl,
+                                    const AtpFtCell *fr, u32 base) {
+  if (s->ifeq_true_term == 0 || base == 0u || base >= ATP_CP_PRI_NEVER)
+    return base;
+  u8 hit = 0u;
+  if (ft_eq_term(fr, s->ifeq_true_term) &&
+      atp_ifeq_guard_hit_ft(s, fl)) hit = 1u;
+  else if (ft_eq_term(fl, s->ifeq_true_term) &&
+           atp_ifeq_guard_hit_ft(s, fr)) hit = 1u;
+  if (!hit) return base;
+  g_ifeq_decide_n_hit++;
+  u64 b = (u64)base * atp_ifeq_decide_x1000() / 1000ull;
+  return (u32)(b == 0ull ? 1ull : b);
 }
 #endif
 
@@ -10010,6 +10231,13 @@ fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
     s->goals_rhs[g] = rhs[g];
   }
   s->n_goals = n;
+  // ifeq guard-DECIDING registry (see atp_ifeq_guard_register): a
+  // conjecture conjunct can carry ifeq-guarded content on the FOF
+  // front-end's own encodings even when a pre-encoded '-10' file's
+  // final goal is a bare `a != b` (see the tgt-sel goal-cone doc
+  // above).  No-op unless use_ifeq_decide is armed.
+  for (u32 g = 0; g < n; g++)
+    atp_ifeq_guard_register(s, lhs[g], rhs[g]);
   // goal_lhs/goal_rhs alias the first (unjoined) goal -- the storage
   // every single-goal consumer and goal-directed heuristic reads.
   s->goal_lhs = lhs[0];
@@ -11793,19 +12021,26 @@ static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
   // penalty^(undecided guards) when armed.  tgt goal-targeted scale
   // (see atp_tgt_weight_scale): multiplicative goal-symbol bias when
   // armed, applied BEFORE the ifeq scale (both multiplicative, so the
-  // order only matters at the saturation ceiling).  Applied on every
-  // path out of this function via the wrapper below; sentinel/zero
-  // Term args (the FT-routed pushes) count 0 guards / 0 symbols here
-  // and get their exact FT-span counts in atp_cp_heap_insert_packed
-  // instead.
-  u8 ifeq_arm = (s != NULL && s->use_ifeq_guard) ? 1u : 0u;
-  u8 tgt_arm  = atp_tgt_armed(s);
+  // order only matters at the saturation ceiling).  ifeq guard-
+  // DECIDING boost (see atp_ifeq_decide_scale) applied LAST, same
+  // reasoning -- a guard-deciding CP with zero undecided guards of its
+  // own (the common case: `g = true` has no ifeq subterm to penalize)
+  // reaches the boost at its tgt/penalty-scaled base unchanged, so the
+  // three disciplines compose without fighting in practice.  Applied
+  // on every path out of this function via the wrapper below;
+  // sentinel/zero Term args (the FT-routed pushes) count 0 guards / 0
+  // symbols / no registry hit here and get their exact FT-span
+  // treatment in atp_cp_heap_insert_packed instead.
+  u8 ifeq_arm   = (s != NULL && s->use_ifeq_guard) ? 1u : 0u;
+  u8 decide_arm = (s != NULL && s->use_ifeq_decide) ? 1u : 0u;
+  u8 tgt_arm    = atp_tgt_armed(s);
 #define ATP_IFEQ_RET(w)                                                   \
     do {                                                                  \
       u32 w_ret_ = (w);                                                   \
       if (tgt_arm) w_ret_ = atp_tgt_weight_scale(s, lhs, rhs, w_ret_);    \
-      return ifeq_arm ? atp_ifeq_weight_scale(s, lhs, rhs, w_ret_)        \
-                      : w_ret_;                                           \
+      if (ifeq_arm) w_ret_ = atp_ifeq_weight_scale(s, lhs, rhs, w_ret_);  \
+      if (decide_arm) w_ret_ = atp_ifeq_decide_scale(s, lhs, rhs, w_ret_);\
+      return w_ret_;                                                     \
     } while (0)
   // Goal-directed mode (Waldmeister CPinGoal): weight by structural
   // match to the goal.  Opt-in via cp_weight_mode so completion-mode
@@ -12973,11 +13208,11 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   // the treated route's Term args are zero sentinels, so the
   // in-priority Term counts above saw 0 guards / 0 symbols -- count on
   // the treatment's NF spans instead (the exact content this slot
-  // stores).  tgt first, then ifeq, matching the Term-route order in
-  // atp_cp_priority_sized_ex.  The raw >= 50 emit route (lazy mode
-  // only) has no live spans here and stays unscaled: its giant raw
-  // weight already buries it, and the mechanisms are selection bias,
-  // not gates.
+  // stores).  tgt first, then ifeq penalty, then ifeq guard-DECIDING
+  // boost, matching the Term-route order in atp_cp_priority_sized_ex.
+  // The raw >= 50 emit route (lazy mode only) has no live spans here
+  // and stays unscaled: its giant raw weight already buries it, and
+  // the mechanisms are selection bias, not gates.
   if (s->cp_pri[i] < ATP_CP_PRI_NEVER &&
       g_vcp_treat.armed && g_vcp_treat.fl != NULL &&
       g_vcp_treat.fr != NULL &&
@@ -12989,6 +13224,10 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
     }
     if (s->use_ifeq_guard) {
       s->cp_pri[i] = atp_ifeq_weight_scale_ft(s, g_vcp_treat.fl,
+                                              g_vcp_treat.fr, s->cp_pri[i]);
+    }
+    if (s->use_ifeq_decide) {
+      s->cp_pri[i] = atp_ifeq_decide_scale_ft(s, g_vcp_treat.fl,
                                               g_vcp_treat.fr, s->cp_pri[i]);
     }
   }
@@ -14128,6 +14367,13 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     *rhs_out = 0;
   } else {
     atp_cp_slot_read(s, v, lhs_out, rhs_out);
+    // ifeq guard-DECIDING telemetry: did the CP the main loop actually
+    // picked decide a live guard (see atp_ifeq_decide_hit)?  Counts
+    // distinct SELECTIONS, complementing g_ifeq_decide_n_hit's scoring-
+    // event count -- see the bench stats print.
+    if (s->use_ifeq_decide && atp_ifeq_decide_hit(s, *lhs_out, *rhs_out)) {
+      g_ifeq_decide_n_popped++;
+    }
 #ifdef THVM_ATPFT_RULES
     // Byte->FT pop stash: decode the selected packed CP's byte string
     // straight into FT spans for the mixmost pop treatment (which
@@ -15052,6 +15298,12 @@ lazy_skip_varnorm: ;
     mnf_notify_fact(s->mnf, lhs, rhs, s->r_orient[s->n_rules]);
   }
 #endif
+  // ifeq guard-DECIDING registry (see atp_ifeq_guard_register): the
+  // slot's Term mirrors are guaranteed real (materialize-at-birth
+  // above converted any TAG_NUM sentinel) regardless of build config,
+  // so this always walks real content.  No-op unless use_ifeq_decide
+  // is armed.
+  atp_ifeq_guard_register(s, s->lhs[s->n_rules], s->rhs[s->n_rules]);
   s->n_rules++;
   // Env-gated live-rule-set dump (THVM_ATP_DUMP_RULES_AT=N): when the rule
   // count first reaches N, print every live rule so the live set can be diffed

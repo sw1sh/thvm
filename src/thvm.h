@@ -6751,6 +6751,33 @@ typedef struct {
   u32  n_ifeq_syms;
   u8   use_ifeq_guard;
 
+  // Guard-DECIDING CP boost (the complementary half of the guard
+  // penalty above): a CP whose conclusion has the shape `g = true`,
+  // where `g` fingerprint-matches a condition subterm registered as a
+  // live guard (arg0 of some detected-ifeq application whose arg0 !=
+  // arg1 syntactically, seen inside an active rule or the goal), gets
+  // its priority scaled DOWN by THVM_ATP_IFEQ_DECIDE -- surfacing
+  // exactly the dispatcher-collapsing steps Vampire's literal
+  // selection performs for free.  ifeq_true_term is the derived
+  // "true" constant (the term compared against at those same guard
+  // sites); 0 = not yet derived / no armed dispatcher.
+  // ifeq_guard_mask is a 4096-bucket fingerprint membership set (an
+  // alpha-invariant structural hash of the guard subterm -- root
+  // label + full shape, first-occurrence variable numbering so two
+  // occurrences of "the same" guard schema under different rules'
+  // local variable numbering fingerprint identically): a sound
+  // over-approximation exactly like tgt_sym_mask below, so a
+  // collision only ever causes a harmless extra boost, never a missed
+  // one.  Populated at rule-add time (atp_push_rule) and goal-set
+  // time (thvm_atp_set_goals); never swept on rule death (a stale
+  // entry costs a mis-boost at worst -- see atp_ifeq_guard_register).
+  // Arming: n_ifeq_syms > 0 (detector fired) AND THVM_ATP_IFEQ_DECIDE
+  // armed (see atp_ifeq_decide_armed).  Off (the default) the engine
+  // is byte-identical.
+  u8   use_ifeq_decide;
+  Term ifeq_true_term;
+  u64  ifeq_guard_mask[64];
+
   // tgt: goal-targeted CP-SELECTION weights (the selection essence of
   // Vampire's goal-targeted KBO weight scheme, tgt=full / tgt=ground).
   // Symbols occurring in the conjecture weigh 1, every other symbol

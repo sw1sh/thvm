@@ -3112,6 +3112,20 @@ int main(int argc, char **argv) {
              (unsigned long long)g_scorenf_shrunk);
     }
   }
+  {
+    // ifeq guard-DECIDING boost engagement (see atp_ifeq_decide_scale /
+    // atp_ifeq_decide_hit, src/atp/_.c): scored = scoring events that
+    // applied the boost (a CP may be re-scored several times over its
+    // lifetime); popped = distinct main-loop selections whose picked
+    // CP was itself guard-deciding.  Both zero whenever the mechanism
+    // is disarmed (the default).
+    extern u64 g_ifeq_decide_n_hit, g_ifeq_decide_n_popped;
+    if (g_ifeq_decide_n_hit != 0u || g_ifeq_decide_n_popped != 0u) {
+      printf("   ifeq-decide: boost-scored=%llu  boost-popped=%llu\n",
+             (unsigned long long)g_ifeq_decide_n_hit,
+             (unsigned long long)g_ifeq_decide_n_popped);
+    }
+  }
   if (g_atp_phase_enabled) {
     double w = (el > 0.0) ? el : 1.0;
     u64 sumus = g_atp_phase_us_pop_normalize + g_atp_phase_us_cp_gen +
