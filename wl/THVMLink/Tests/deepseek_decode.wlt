@@ -76,6 +76,89 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* dsvHfWeights mapping: in-memory HF-LAYOUT bf16 weights (nn.Linear
+       {out,in} matrices, un-split kv_b_proj, per-expert matrices) map into the
+       decode layouts by movement + exact casts only -- every spot-checked
+       tensor must equal the host-side transform of the same bf16 values
+       EXACTLY, and the mapped state must decode against the host reference
+       like the synthetic one *)
+    TReset[];
+    bf = a |-> TRealize @ TUOpCast[TTensorCreate @ NumericArray[a, "Real32"], "bf16"];
+    SeedRandom[23];
+    rnd = dims |-> RandomReal[{-0.05, 0.05}, dims];
+    hf = Block[{d, hn, dn, dr, dv, kv, e, mi, si, sd},
+        {d, hn, dn, dr, dv, kv, e, mi, si} = $cfg /@
+            {"Dim", "NHeads", "DNope", "DRope", "DV", "KvLora", "NExperts", "MoeInter", "SharedInter"};
+        sd = <|
+            "model.embed_tokens.weight" -> rnd[{$cfg["Vocab"], d}],
+            "model.norm.weight" -> RandomReal[{0.9, 1.1}, d],
+            "lm_head.weight" -> rnd[{$cfg["Vocab"], d}]
+        |>;
+        Do[
+            With[{p = "model.layers." <> ToString[l - 1] <> "."},
+                sd[p <> "input_layernorm.weight"] = RandomReal[{0.9, 1.1}, d];
+                sd[p <> "self_attn.q_proj.weight"] = rnd[{hn (dn + dr), d}];
+                sd[p <> "self_attn.kv_a_proj_with_mqa.weight"] = rnd[{kv + dr, d}];
+                sd[p <> "self_attn.kv_a_layernorm.weight"] = RandomReal[{0.9, 1.1}, kv];
+                sd[p <> "self_attn.kv_b_proj.weight"] = rnd[{hn (dn + dv), kv}];
+                sd[p <> "self_attn.o_proj.weight"] = rnd[{d, hn dv}];
+                sd[p <> "post_attention_layernorm.weight"] = RandomReal[{0.9, 1.1}, d];
+                If[ l <= $cfg["FirstDense"],
+                    sd[p <> "mlp.gate_proj.weight"] = rnd[{$cfg["DenseInter"], d}];
+                    sd[p <> "mlp.up_proj.weight"] = rnd[{$cfg["DenseInter"], d}];
+                    sd[p <> "mlp.down_proj.weight"] = rnd[{d, $cfg["DenseInter"]}]
+                    ,
+                    sd[p <> "mlp.gate.weight"] = rnd[{e, d}];
+                    Do[
+                        sd[p <> "mlp.experts." <> ToString[i - 1] <> ".gate_proj.weight"] = rnd[{mi, d}];
+                        sd[p <> "mlp.experts." <> ToString[i - 1] <> ".up_proj.weight"] = rnd[{mi, d}];
+                        sd[p <> "mlp.experts." <> ToString[i - 1] <> ".down_proj.weight"] = rnd[{d, mi}],
+                        {i, e}
+                    ];
+                    sd[p <> "mlp.shared_experts.gate_proj.weight"] = rnd[{si, d}];
+                    sd[p <> "mlp.shared_experts.up_proj.weight"] = rnd[{si, d}];
+                    sd[p <> "mlp.shared_experts.down_proj.weight"] = rnd[{d, si}]
+                ]
+            ],
+            {l, $cfg["NLayers"]}
+        ];
+        sd
+    ];
+    hfT = bf /@ hf;                       (* bf16 TTerms in checkpoint layout *)
+    hfQ = Normal /@ hfT;                  (* their exact bf16-quantized values *)
+    stateHf = dsvHfInit[$cfg, hfT];
+    lw2 = stateHf["Weights"]["Layers"][[2]];
+    Block[{dn = $cfg["DNope"], dv = $cfg["DV"], hn = $cfg["NHeads"], kv = $cfg["KvLora"], kvb, checks},
+        kvb = ArrayReshape[hfQ["model.layers.1.self_attn.kv_b_proj.weight"], {hn, dn + dv, kv}];
+        checks = {
+            Normal[stateHf["Weights"]["LmHead"]] === Transpose[hfQ["lm_head.weight"]],
+            Normal[lw2["Wq"]] === Transpose[hfQ["model.layers.1.self_attn.q_proj.weight"]],
+            Normal[lw2["Wuk"]] === Flatten[kvb[[All, 1 ;; dn, All]]],
+            Normal[lw2["Wuv"]] === Flatten[kvb[[All, dn + 1 ;;, All]]],
+            Normal[lw2["WGate"]] === Transpose[hfQ["model.layers.1.mlp.gate.weight"]],
+            Normal[lw2["Wg"]] === Flatten[Table[hfQ["model.layers.1.mlp.experts." <> ToString[i - 1] <> ".gate_proj.weight"], {i, $cfg["NExperts"]}]],
+            Normal[lw2["Swd"]] === Flatten[hfQ["model.layers.1.mlp.shared_experts.down_proj.weight"]],
+            Normal[lw2["WIn"]] === hfQ["model.layers.1.input_layernorm.weight"]
+        };
+        refHf = dsvRefInit[stateHf];
+        jitHf = dsvDecodeJit[stateHf];
+        diffsHf = Table[
+            Block[{tokIn, refOut, logits},
+                tokIn = dsvToken[stateHf];
+                refOut = dsvRefStep[refHf, tokIn];
+                refHf = refOut["State"];
+                logits = First @ Normal @ Last @ jitHf[];
+                Max @ Abs[logits - refOut["Logits"]] / Max @ Abs[refOut["Logits"]]
+            ],
+            {3}
+        ];
+        Append[checks, Max[diffsHf] < 2.*^-2]
+    ],
+    ConstantArray[True, 9],
+    TestID -> "deepseek-decode/hf-weight-mapping"
+]
+
+VerificationTest[
     TReset[];
     True,
     True,

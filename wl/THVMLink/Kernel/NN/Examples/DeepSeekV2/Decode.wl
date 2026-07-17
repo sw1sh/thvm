@@ -41,6 +41,8 @@ BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`
 
 dsvConfig::usage = "dsvConfig[opts] returns the DeepSeek-V2-Lite decode config association (defaults = the real model constants, tinygrad examples/deepseek_v2.py:26-29); override any key as an option, e.g. dsvConfig[\"NLayers\" -> 2, \"Dim\" -> 64].";
 dsvSynthInit::usage = "dsvSynthInit[cfg] allocates synthetic bf16 weights, per-layer latent caches, persistent scratch, and the device token/length state for cfg, returning the decode state association (prefill-free: caches empty, position 0, token id 1).";
+dsvHfWeights::usage = "dsvHfWeights[cfg, sd] maps a HuggingFace DeepSeek-V2-Lite checkpoint association sd (name -> TTerm, e.g. from TSafeTensorLoad of the sharded snapshot's index.json) into the decode weight layouts: nn.Linear {out,in} matrices transposed to the {in,out} the matmuls consume, kv_b_proj absorb-split into flat w_uk/w_uv (tinygrad deepseek_v2.py:993-997), per-layer experts stacked into flat w_gate/w_up/w_down (deepseek_v2.py:1266-1271), and norm/gate weights widened to f32.";
+dsvHfInit::usage = "dsvHfInit[cfg, sd] returns the decode state association over the real checkpoint weights dsvHfWeights[cfg, sd] (caches empty, position 0, token id 1); the pod-scale twin is the C bench's DSV2_WEIGHTS pack loader (tools/dsv2_pack_weights.py + tools/dsv2_decode_bench.c).";
 dsvDecodeStep::usage = "dsvDecodeStep[state] builds and runs one BS=1 decode step over state's device buffers and returns {token, logits} TTerms; the greedy next token is written on-device into state[\"Tok\"] and the device length advances by 1.";
 dsvDecodeJit::usage = "dsvDecodeJit[state] returns a zero-argument TJit closure over dsvDecodeStep[state]: the first call captures the step, later calls replay it (each replay = one decode step, no host values in the loop).";
 dsvKernels::usage = "dsvKernels[cfg] returns the association of TKernel custom-kernel objects for cfg (CUDA sources on \"cuda\", plain-C twins on \"cpu\").";
@@ -731,17 +733,22 @@ dsvLayerWeights[cfg_, l_] := Block[{d, hn, dn, dr, kv, dv, e, mi, si, dev, dense
     |>
 ]
 
-dsvSynthInit[cfg_Association] := Block[{dev, d, hn, kv, dr, dv, maxSeq, nb, cos, sin, weights},
+dsvSynthInit[cfg_Association] := (
+    SeedRandom[cfg["Seed"]];
+    dsvState[cfg, <|
+        "Embed" -> dsvBf[dsvRnd[cfg, {cfg["Vocab"], cfg["Dim"]}], cfg["Device"]],
+        "Layers" -> Table[dsvLayerWeights[cfg, l], {l, cfg["NLayers"]}],
+        "Norm" -> dsvF32[ConstantArray[1., cfg["Dim"]], cfg["Device"]],
+        "LmHead" -> dsvBf[dsvRnd[cfg, {cfg["Dim"], cfg["Vocab"]}], cfg["Device"]]
+    |>]
+)
+
+(* Caches, scratch, rope tables, and device token/length state around a weight
+   association (shared by the synthetic and checkpoint inits). *)
+dsvState[cfg_Association, weights_Association] := Block[{dev, d, hn, kv, dr, dv, maxSeq, nb, cos, sin},
     dev = cfg["Device"];
     {d, hn, kv, dr, dv, maxSeq, nb} = cfg /@ {"Dim", "NHeads", "KvLora", "DRope", "DV", "MaxSeq", "ArgmaxBlocks"};
-    SeedRandom[cfg["Seed"]];
     {cos, sin} = dsvRopeTables[cfg];
-    weights = <|
-        "Embed" -> dsvBf[dsvRnd[cfg, {cfg["Vocab"], d}], dev],
-        "Layers" -> Table[dsvLayerWeights[cfg, l], {l, cfg["NLayers"]}],
-        "Norm" -> dsvF32[ConstantArray[1., d], dev],
-        "LmHead" -> dsvBf[dsvRnd[cfg, {d, cfg["Vocab"]}], dev]
-    |>;
     <|
         "Config" -> cfg,
         "Weights" -> weights,
@@ -772,6 +779,75 @@ dsvSynthInit[cfg_Association] := Block[{dev, d, hn, kv, dr, dv, maxSeq, nb, cos,
         "PartI" -> dsvI32[ConstantArray[0, nb], dev]
     |>
 ]
+
+(* === real (HF checkpoint) weights ================================ *)
+
+(* Map a HuggingFace checkpoint association (name -> TTerm; bf16 mmap views
+   from TSafeTensorLoad or in-memory tensors) into the decode weight layouts.
+   Movement + exact-widening casts only, so the mapped values are bit-identical
+   to the checkpoint:
+     * nn.Linear weights are {out, in}; the step's matmuls consume {in, out}
+       -> Transpose (wq/wkv/wo/dense MLP/lm_head; gate also widens to f32,
+       tinygrad keeps it bf16 and upcasts in-op, deepseek_v2.py:1141).
+     * kv_b_proj {H (dn+dv), kv} absorb-splits into flat w_uk {H dn kv} /
+       w_uv {H dv kv} (deepseek_v2.py:993-997), the layouts mla_qlat / mla_o
+       index directly.
+     * routed experts stack flat, expert-major (deepseek_v2.py:1266-1271);
+       shared-expert matrices flatten as-is (moe_full_h/out index row-major
+       {out, in}).
+     * norm gains widen bf16 -> f32 (exact).
+   The C twin is tools/dsv2_pack_weights.py (same mapping, pre-applied into a
+   flat pack for the no-Wolfram pod bench). *)
+dsvHfLayer[cfg_, sd_, l_] := Block[{
+    d = cfg["Dim"], hn = cfg["NHeads"], dn = cfg["DNope"], dr = cfg["DRope"],
+    kv = cfg["KvLora"], dv = cfg["DV"], e = cfg["NExperts"], mi = cfg["MoeInter"],
+    dev = cfg["Device"], p, w, kvb
+},
+    p = "model.layers." <> ToString[l - 1] <> ".";
+    w = name |-> sd[p <> name <> ".weight"];
+    kvb = ArrayReshape[w["self_attn.kv_b_proj"], {hn, dn + dv, kv}];
+    <|
+        "WIn" -> dsvUp[TUOpCast[w["input_layernorm"], "f32"], dev],
+        "Wq" -> dsvUp[Transpose @ w["self_attn.q_proj"], dev],
+        "Wkv" -> dsvUp[Transpose @ w["self_attn.kv_a_proj_with_mqa"], dev],
+        "WkvNorm" -> dsvUp[TUOpCast[w["self_attn.kv_a_layernorm"], "f32"], dev],
+        "Wuk" -> dsvUp[ArrayReshape[kvb[[All, 1 ;; dn, All]], {hn * dn * kv}], dev],
+        "Wuv" -> dsvUp[ArrayReshape[kvb[[All, dn + 1 ;;, All]], {hn * dv * kv}], dev],
+        "Wo" -> dsvUp[Transpose @ w["self_attn.o_proj"], dev],
+        "WPost" -> dsvUp[TUOpCast[w["post_attention_layernorm"], "f32"], dev],
+        If[ l <= cfg["FirstDense"],
+            <|
+                "Wg1" -> dsvUp[Transpose @ w["mlp.gate_proj"], dev],
+                "Wu1" -> dsvUp[Transpose @ w["mlp.up_proj"], dev],
+                "Wd1" -> dsvUp[Transpose @ w["mlp.down_proj"], dev]
+            |>
+            ,
+            <|
+                "WGate" -> dsvUp[Transpose @ TUOpCast[w["mlp.gate"], "f32"], dev],
+                "Wg" -> dsvUp[dsvExpertStack[w, "gate_proj", e], dev],
+                "Wu" -> dsvUp[dsvExpertStack[w, "up_proj", e], dev],
+                "Wd" -> dsvUp[dsvExpertStack[w, "down_proj", e], dev],
+                "Swg" -> dsvUp[dsvFlat @ w["mlp.shared_experts.gate_proj"], dev],
+                "Swu" -> dsvUp[dsvFlat @ w["mlp.shared_experts.up_proj"], dev],
+                "Swd" -> dsvUp[dsvFlat @ w["mlp.shared_experts.down_proj"], dev]
+            |>
+        ]
+    |>
+]
+
+dsvFlat[t_] := ArrayReshape[t, {Times @@ TTensorShape[t]}]
+
+dsvExpertStack[w_, proj_, e_] :=
+    Join @@ Table[dsvFlat @ w["mlp.experts." <> ToString[i - 1] <> "." <> proj], {i, e}]
+
+dsvHfWeights[cfg_Association, sd_Association] := <|
+    "Embed" -> dsvUp[sd["model.embed_tokens.weight"], cfg["Device"]],
+    "Layers" -> Table[dsvHfLayer[cfg, sd, l], {l, cfg["NLayers"]}],
+    "Norm" -> dsvUp[TUOpCast[sd["model.norm.weight"], "f32"], cfg["Device"]],
+    "LmHead" -> dsvUp[Transpose @ sd["lm_head.weight"], cfg["Device"]]
+|>
+
+dsvHfInit[cfg_Association, sd_Association] := dsvState[cfg, dsvHfWeights[cfg, sd]]
 
 (* === the decode step ============================================= *)
 

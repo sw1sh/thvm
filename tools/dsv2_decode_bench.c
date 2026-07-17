@@ -22,8 +22,21 @@
 // device int32 buffer, so a replay is one full decode step with zero host
 // values.
 //
+// REAL WEIGHTS (Stage 2): DSV2_WEIGHTS=<pack> loads a flat weight pack written
+// by tools/dsv2_pack_weights.py (the tinygrad load_weights mapping,
+// deepseek_v2.py:1257-1272 + the kv_b absorb split :993-997, pre-applied so
+// every payload is already in the exact layout the step consumes).
+// DSV2_PROMPT_IDS=comma-list prefills token-by-token through the same decode
+// step (each prompt id is force-written into the device token buffer, the
+// step's own argmax prediction is discarded until the last prompt token), then
+// generates DSV2_COUNT (24) greedy tokens and prints them for comparison with
+// the tinygrad reference trajectory ("MY gen ids").  DSV2_TOP2=1 additionally
+// dumps the top-2 logits per generated token (near-tie divergence forensics).
+//
 //   build:  make bin/dsv2_decode_bench            (Linux+CUDA adds the CUDA backend)
 //   run:    DEV=cuda ./bin/dsv2_decode_bench      (full model shape, ~31 GB device)
+//           DEV=cuda DSV2_WEIGHTS=dsv2.pack DSV2_PROMPT_IDS=100000,504,... \
+//             DSV2_COUNT=24 ./bin/dsv2_decode_bench   (real-weight greedy decode)
 //           DEV=cpu DSV2_DIM=128 DSV2_LAYERS=4 DSV2_HEADS=8 DSV2_KVLORA=64 \
 //             DSV2_DNOPE=32 DSV2_DROPE=16 DSV2_DV=32 DSV2_EXPERTS=8 DSV2_TOPK=3 \
 //             DSV2_MOEINTER=64 DSV2_DENSEINTER=256 DSV2_VOCAB=1024 DSV2_MAXSEQ=128 \
@@ -31,6 +44,9 @@
 //   knobs:  WARM (20) STEPS (40) + every DSV2_* shape knob.
 #include "../src/thvm.c"
 #include <time.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 // === config (deepseek-ai/DeepSeek-V2-Lite, deepseek_v2.py:26-29) ============
 typedef struct {
@@ -167,6 +183,58 @@ static u32 mk_i32(u32 n, int v0) {
   for (u32 i = 0; i < n; i++) p[i] = v0;
   BK->buf_write(TENS[tid].buf_id, p, (u64)n * 4);
   return tid;
+}
+
+// === weight pack (tools/dsv2_pack_weights.py) ===============================
+// "DSV2PK01" magic, u64 count, count x {char name[48]; u32 dtype (0=bf16,
+// 1=f32); u32 pad; u64 offset; u64 nbytes}, then 64-byte-aligned payloads
+// already in the exact layouts the kernels index (transposed {in,out}
+// projections, absorbed w_uk/w_uv, stacked experts, f32 norm/gate weights).
+typedef struct { char name[48]; u32 dtype; u32 pad; u64 off; u64 nbytes; } PackEnt;
+static u8 const *PACK = NULL;
+static u64 PACK_N = 0;
+static PackEnt const *PACK_TAB = NULL;
+
+static void pack_open(char const *path) {
+  int fd = open(path, O_RDONLY);
+  struct stat st;
+  if (fd < 0 || fstat(fd, &st) != 0) { fprintf(stderr, "FATAL: DSV2_WEIGHTS open %s\n", path); exit(1); }
+  PACK = (u8 const *)mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  close(fd);
+  if (PACK == MAP_FAILED || memcmp(PACK, "DSV2PK01", 8) != 0) {
+    fprintf(stderr, "FATAL: bad pack %s\n", path);
+    exit(1);
+  }
+  memcpy(&PACK_N, PACK + 8, 8);
+  PACK_TAB = (PackEnt const *)(PACK + 16);
+  printf("  weight pack: %s (%llu tensors, %.2f GB)\n", path,
+         (unsigned long long)PACK_N, (double)st.st_size / 1e9);
+}
+
+// Find + upload one pack tensor; the byte count double-checks the layout
+// contract between the packer and this step's shapes.
+static u32 pack_ld(char const *name, u32 a, u32 b, u32 dtype) {
+  u64 want = (u64)a * (b ? b : 1) * (dtype == DT_BF16 ? 2 : 4);
+  for (u64 i = 0; i < PACK_N; i++) {
+    if (strncmp(PACK_TAB[i].name, name, 48) != 0) continue;
+    if (PACK_TAB[i].dtype != (dtype == DT_BF16 ? 0u : 1u) || PACK_TAB[i].nbytes != want) {
+      fprintf(stderr, "FATAL: pack tensor %s: dtype %u nbytes %llu, want %u/%llu\n",
+              name, PACK_TAB[i].dtype, (unsigned long long)PACK_TAB[i].nbytes,
+              dtype == DT_BF16 ? 0u : 1u, (unsigned long long)want);
+      exit(1);
+    }
+    u32 tid = alloc2(a, b, dtype);
+    BK->buf_write(TENS[tid].buf_id, PACK + PACK_TAB[i].off, want);
+    return tid;
+  }
+  fprintf(stderr, "FATAL: pack tensor %s missing\n", name);
+  exit(1);
+}
+
+static u32 pack_lw(u32 l, char const *suffix, u32 a, u32 b, u32 dtype) {
+  char nm[48];
+  snprintf(nm, sizeof nm, "l%u.%s", l, suffix);
+  return pack_ld(nm, a, b, dtype);
 }
 
 // YaRN rope tables {max_seq, d_rope} f32, halves duplicated
@@ -731,31 +799,61 @@ static char *S_ROUTE, *S_MOEH, *S_MOEOUT, *S_APART, *S_AFIN, *S_BUMP;
 static void model_init(void) {
   u32 d = C.dim, hn = C.n_heads, dn = C.d_nope, dr = C.d_rope, kv = C.kv_lora, dv = C.d_v;
   u32 si = C.moe_inter * C.n_shared;
-  W_embed = mk_bf16_rand(C.vocab, d);
-  W_norm  = mk_f32_fill(d, 0, 1.0f);
-  W_lm    = mk_bf16_rand(d, C.vocab);
+  if (PACK != NULL) {
+    W_embed = pack_ld("embed", C.vocab, d, DT_BF16);
+    W_norm  = pack_ld("norm", d, 0, DT_FP32);
+    W_lm    = pack_ld("lm_head", d, C.vocab, DT_BF16);
+  } else {
+    W_embed = mk_bf16_rand(C.vocab, d);
+    W_norm  = mk_f32_fill(d, 0, 1.0f);
+    W_lm    = mk_bf16_rand(d, C.vocab);
+  }
   rope_tables(&T_cos, &T_sin);
   for (u32 l = 0; l < C.n_layers; l++) {
-    W_win[l]   = mk_f32_fill(d, 0, 1.0f);
-    W_wq[l]    = mk_bf16_rand(d, hn * (dn + dr));
-    W_wkv[l]   = mk_bf16_rand(d, kv + dr);
-    W_wkvn[l]  = mk_f32_fill(kv, 0, 1.0f);
-    W_wuk[l]   = mk_bf16_rand(hn * dn * kv, 0);
-    W_wuv[l]   = mk_bf16_rand(hn * dv * kv, 0);
-    W_wo[l]    = mk_bf16_rand(hn * dv, d);
-    W_wpost[l] = mk_f32_fill(d, 0, 1.0f);
-    if (l < C.first_dense) {
-      W_wg1[l] = mk_bf16_rand(d, C.dense_inter);
-      W_wu1[l] = mk_bf16_rand(d, C.dense_inter);
-      W_wd1[l] = mk_bf16_rand(C.dense_inter, d);
+    if (PACK != NULL) {
+      W_win[l]   = pack_lw(l, "win", d, 0, DT_FP32);
+      W_wq[l]    = pack_lw(l, "wq", d, hn * (dn + dr), DT_BF16);
+      W_wkv[l]   = pack_lw(l, "wkv", d, kv + dr, DT_BF16);
+      W_wkvn[l]  = pack_lw(l, "wkvn", kv, 0, DT_FP32);
+      W_wuk[l]   = pack_lw(l, "wuk", hn * dn * kv, 0, DT_BF16);
+      W_wuv[l]   = pack_lw(l, "wuv", hn * dv * kv, 0, DT_BF16);
+      W_wo[l]    = pack_lw(l, "wo", hn * dv, d, DT_BF16);
+      W_wpost[l] = pack_lw(l, "wpost", d, 0, DT_FP32);
+      if (l < C.first_dense) {
+        W_wg1[l] = pack_lw(l, "wg1", d, C.dense_inter, DT_BF16);
+        W_wu1[l] = pack_lw(l, "wu1", d, C.dense_inter, DT_BF16);
+        W_wd1[l] = pack_lw(l, "wd1", C.dense_inter, d, DT_BF16);
+      } else {
+        W_gate[l] = pack_lw(l, "gate", d, C.n_exp, DT_FP32);
+        W_wg[l]   = pack_lw(l, "wg", C.n_exp * C.moe_inter, d, DT_BF16);
+        W_wu[l]   = pack_lw(l, "wu", C.n_exp * C.moe_inter, d, DT_BF16);
+        W_wd[l]   = pack_lw(l, "wd", C.n_exp * d, C.moe_inter, DT_BF16);
+        W_swg[l]  = pack_lw(l, "swg", si, d, DT_BF16);
+        W_swu[l]  = pack_lw(l, "swu", si, d, DT_BF16);
+        W_swd[l]  = pack_lw(l, "swd", d, si, DT_BF16);
+      }
     } else {
-      W_gate[l] = mk_f32_rand(d, C.n_exp, 0.05f);
-      W_wg[l]   = mk_bf16_rand(C.n_exp * C.moe_inter, d);
-      W_wu[l]   = mk_bf16_rand(C.n_exp * C.moe_inter, d);
-      W_wd[l]   = mk_bf16_rand(C.n_exp * d, C.moe_inter);
-      W_swg[l]  = mk_bf16_rand(si, d);
-      W_swu[l]  = mk_bf16_rand(si, d);
-      W_swd[l]  = mk_bf16_rand(d, si);
+      W_win[l]   = mk_f32_fill(d, 0, 1.0f);
+      W_wq[l]    = mk_bf16_rand(d, hn * (dn + dr));
+      W_wkv[l]   = mk_bf16_rand(d, kv + dr);
+      W_wkvn[l]  = mk_f32_fill(kv, 0, 1.0f);
+      W_wuk[l]   = mk_bf16_rand(hn * dn * kv, 0);
+      W_wuv[l]   = mk_bf16_rand(hn * dv * kv, 0);
+      W_wo[l]    = mk_bf16_rand(hn * dv, d);
+      W_wpost[l] = mk_f32_fill(d, 0, 1.0f);
+      if (l < C.first_dense) {
+        W_wg1[l] = mk_bf16_rand(d, C.dense_inter);
+        W_wu1[l] = mk_bf16_rand(d, C.dense_inter);
+        W_wd1[l] = mk_bf16_rand(C.dense_inter, d);
+      } else {
+        W_gate[l] = mk_f32_rand(d, C.n_exp, 0.05f);
+        W_wg[l]   = mk_bf16_rand(C.n_exp * C.moe_inter, d);
+        W_wu[l]   = mk_bf16_rand(C.n_exp * C.moe_inter, d);
+        W_wd[l]   = mk_bf16_rand(C.n_exp * d, C.moe_inter);
+        W_swg[l]  = mk_bf16_rand(si, d);
+        W_swu[l]  = mk_bf16_rand(si, d);
+        W_swd[l]  = mk_bf16_rand(d, si);
+      }
     }
     L_ckv[l] = mk_bf16_zero(C.max_seq, kv);
     L_kpe[l] = mk_bf16_zero(C.max_seq, dr);
@@ -885,6 +983,69 @@ static int read_i32(u32 tid) {
   return v;
 }
 
+static void write_i32(u32 tid, int v) {
+  BK->buf_write(TENS[tid].buf_id, &v, 4);
+}
+
+// Top-2 logits readback (ties -> lowest index, matching argmax_part): the
+// near-tie forensic for a trajectory divergence -- a tiny margin proves the
+// flip is bf16 rounding, not a wrong weight.
+static void top2(int *i1, float *v1, int *i2, float *v2) {
+  static float *host = NULL;
+  if (host == NULL) host = (float *)malloc((u64)C.vocab * 4);
+  TENS[LOGITS_TID].backend->buf_read(TENS[LOGITS_TID].buf_id, host, (u64)C.vocab * 4);
+  *i1 = 0; *v1 = host[0]; *i2 = -1; *v2 = -3.4e38f;
+  for (u32 i = 1; i < C.vocab; i++) {
+    if (host[i] > *v1) { *i2 = *i1; *v2 = *v1; *i1 = (int)i; *v1 = host[i]; }
+    else if (host[i] > *v2) { *i2 = (int)i; *v2 = host[i]; }
+  }
+}
+
+// Real-weight greedy decode: token-by-token prefill of the prompt ids through
+// the captured step (the device argmax is overwritten by the next prompt id,
+// mirroring the tinygrad prefill semantics one position at a time), then
+// `count` generated tokens.  read_i32 after each replay is the sync point
+// (cuda buf_read drains the capture stream); the following buf_write of the
+// next prompt id is therefore ordered after the step that consumed the
+// previous one.
+static int run_prompt(u32 slot, int const *prompt, u32 np, u32 count, int dump2) {
+  for (u32 i = 1; i < np; i++) {
+    (void)read_i32(T_tok);
+    write_i32(T_tok, prompt[i]);
+    jit_replay(slot);
+  }
+  int *gen = (int *)malloc((u64)count * 4);
+  double mn = 1e30, total = 0;
+  gen[0] = read_i32(T_tok);   // prediction after the full prompt
+  for (u32 i = 1; i < count; i++) {
+    double s0 = now_ms();
+    jit_replay(slot);
+    gen[i] = read_i32(T_tok);
+    double dt = now_ms() - s0;
+    total += dt;
+    if (dt < mn) mn = dt;
+    if (dump2) {
+      int i1, i2; float v1, v2;
+      top2(&i1, &v1, &i2, &v2);
+      printf("  top2 step %u: tok=%d  %d:%.6f  %d:%.6f  margin=%.6g\n",
+             i, gen[i], i1, v1, i2, v2, (double)(v1 - v2));
+    }
+  }
+  if (count > 1)
+    printf("  gen timing: %u steps  min %.2f ms/step  mean %.2f ms/step  %.1f tok/s (min)  %.1f tok/s (mean)\n",
+           count - 1, mn, total / (double)(count - 1), 1e3 / mn, 1e3 * (double)(count - 1) / total);
+  printf("thvm gen ids: [");
+  for (u32 i = 0; i < count; i++) printf(i ? ", %d" : "%d", gen[i]);
+  printf("]\n");
+  int len = read_i32(T_len), want_len = (int)(np + count);
+  int ok = (len == want_len);
+  for (u32 i = 0; i < count; i++) ok = ok && gen[i] >= 0 && (u32)gen[i] < C.vocab;
+  printf("  final len=%d (want %d)\n", len, want_len);
+  printf("%s\n", ok ? "OK" : "FAIL(state)");
+  free(gen);
+  return ok ? 0 : 1;
+}
+
 int main(void) {
   char const *dev = getenv("DEV");
   IS_CUDA = (dev != NULL && strcmp(dev, "cuda") == 0);
@@ -906,16 +1067,36 @@ int main(void) {
   }
   cfg_init();
   u32 warm = envu("WARM", 20), steps = envu("STEPS", 40);
-  if (1 + warm + steps + 1 > C.max_seq) {
-    fprintf(stderr, "FATAL: 1+WARM+STEPS+1=%u exceeds DSV2_MAXSEQ=%u\n", 1 + warm + steps + 1, C.max_seq);
+  // prompt mode: DSV2_PROMPT_IDS=comma-list (token-by-token prefill + greedy generation)
+  int prompt[512];
+  u32 np = 0, count = envu("DSV2_COUNT", 24);
+  {
+    char const *pids = getenv("DSV2_PROMPT_IDS");
+    if (pids != NULL && pids[0] != '\0') {
+      char const *p = pids;
+      while (np < 512) {
+        prompt[np++] = (int)strtol(p, (char **)&p, 10);
+        if (*p != ',') break;
+        p++;
+      }
+    }
+  }
+  if (np > 0 ? (np + count > C.max_seq)
+             : (1 + warm + steps + 1 > C.max_seq)) {
+    fprintf(stderr, "FATAL: token budget exceeds DSV2_MAXSEQ=%u\n", C.max_seq);
     return 1;
   }
   printf("dsv2 decode bench: dev=%s dim=%u layers=%u heads=%u kv=%u experts=%u topk=%u vocab=%u maxseq=%u\n",
          IS_CUDA ? "cuda" : "cpu", C.dim, C.n_layers, C.n_heads, C.kv_lora, C.n_exp, C.top_k, C.vocab, C.max_seq);
 
+  {
+    char const *wpath = getenv("DSV2_WEIGHTS");
+    if (wpath != NULL && wpath[0] != '\0') pack_open(wpath);
+  }
   double t0 = now_ms();
   model_init();
-  printf("  synth init: %.2f s\n", (now_ms() - t0) / 1e3);
+  printf("  %s init: %.2f s\n", PACK != NULL ? "weight" : "synth", (now_ms() - t0) / 1e3);
+  if (np > 0) write_i32(T_tok, prompt[0]);
 
   // capture: build + fire the whole step once (each recorded buffer pinned)
   t0 = now_ms();
@@ -925,6 +1106,8 @@ int main(void) {
   jit_capture_end();
   printf("  capture (step 1): %.2f s   ops=%u   tok=%d len=%d\n",
          (now_ms() - t0) / 1e3, jit_capture_op_count(slot), read_i32(T_tok), read_i32(T_len));
+
+  if (np > 0) return run_prompt(slot, prompt, np, count, envu("DSV2_TOP2", 0) != 0);
 
   for (u32 i = 0; i < warm; i++) jit_replay(slot);
   printf("  warm: %u replays done, tok=%d len=%d\n", warm, read_i32(T_tok), read_i32(T_len));
