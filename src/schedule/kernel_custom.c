@@ -191,6 +191,30 @@ fn int kernel_custom_fire(u32 kid) {
   if (jit_is_capturing()) {
     jit_capture_record(kid, in_buf_ids, ke->n_inputs, out_buf_id);
   }
+#ifdef THVM_HAS_METAL
+  // Metal trace-capture double-run guard -- the Metal-side analog of the
+  // CPU/CUDA fix 0b09b8e1, mirroring interact/uop_kernel.c.  Under
+  // THVM_JIT_TRACE_CAPTURE the recording pass records the op stream and SKIPS
+  // the eager submit; jit_capture_end_common then runs ONE finalize replay
+  // (metal_custom_dispatch per recorded custom kid) to fill the buffers.  A
+  // custom kernel carries no lifted DAG to route-classify, but it IS
+  // re-dispatched by that replay, so skipping the eager submit here makes an
+  // in-place custom kernel (rope_dev / len_bump / cache_append) run ONCE per
+  // captured step, not twice -- twice corrupts the DeepSeekV2 decode (rope
+  // rotated twice, device position bumped by two).  The write-record still
+  // fires so downstream kernels re-record; only the GPU submit is deferred.
+  if (b == &METAL_BACKEND && jit_capture_trace_pending()) {
+    jit_capture_note_trace_skip();
+    for (u32 i = 0; i < ke->n_inputs; i++) {
+      if (ke->custom_outs_mask & (1ull << i)) {
+        kernel_assign_write_record(b, in_buf_ids[i]);
+      }
+    }
+    ITRS++;
+    multi_emit(RULE_UOP_KERNEL, MULTI_TERM, (u64)kid, 0, 0);
+    return 0;
+  }
+#endif
   int rc = b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
   if (rc != 0) return -1;
 
