@@ -233,6 +233,35 @@ static u32 pack_ld(char const *name, u32 a, u32 b, u32 dtype) {
   exit(1);
 }
 
+// Find one pack payload pointer (bf16), validating the byte count.
+static u8 const *pack_find(char const *name, u64 want) {
+  for (u64 i = 0; i < PACK_N; i++) {
+    if (strncmp(PACK_TAB[i].name, name, 48) != 0) continue;
+    if (PACK_TAB[i].dtype != 0u || PACK_TAB[i].nbytes != want) {
+      fprintf(stderr, "FATAL: pack tensor %s: nbytes %llu, want %llu\n",
+              name, (unsigned long long)PACK_TAB[i].nbytes, (unsigned long long)want);
+      exit(1);
+    }
+    return PACK + PACK_TAB[i].off;
+  }
+  fprintf(stderr, "FATAL: pack tensor %s missing\n", name);
+  exit(1);
+}
+
+// Row-concat two bf16 [K, na] / [K, nb] host payloads into one [K, na+nb]
+// device tensor (the merged q|kv projection weight).
+static u32 concat_rows_bf16(u16 const *a, u32 na, u16 const *b, u32 nb, u32 K) {
+  u32 n = na + nb;
+  u32 tid = alloc2(K, n, DT_BF16);
+  u16 *pbuf = (u16 *)stage((u64)K * n * 2);
+  for (u32 k = 0; k < K; k++) {
+    memcpy(pbuf + (u64)k * n,      a + (u64)k * na, (u64)na * 2);
+    memcpy(pbuf + (u64)k * n + na, b + (u64)k * nb, (u64)nb * 2);
+  }
+  BK->buf_write(TENS[tid].buf_id, pbuf, (u64)K * n * 2);
+  return tid;
+}
+
 static u32 pack_lw(u32 l, char const *suffix, u32 a, u32 b, u32 dtype) {
   char nm[48];
   snprintf(nm, sizeof nm, "l%u.%s", l, suffix);
@@ -364,9 +393,8 @@ static char *src_rms(char const *nm, u32 K, int out_bf16) {
 // the pe slice in place at position L[0]-1 (round-to-bf16 BEFORE the rope,
 // matching the native mm -> bf16 -> rope_dev chain).  Thread space: NH*DN
 // nope folds then NH*DR/2 pe pairs.
-static char *src_gred_q_rope(u32 sk) {
-  u32 hn = C.n_heads, dn = C.d_nope, dr = C.d_rope;
-  u32 N = hn * (dn + dr), half = dr / 2;
+static char *src_gred_q_rope(u32 sk, u32 ns) {
+  u32 hn = C.n_heads, dn = C.d_nope, dr = C.d_rope, half = dr / 2;
   if (IS_CUDA) return mks(
     "extern \"C\" __global__ void gred_q(bf16t* q, const float* part, const float* cs, const float* sn, const int* L) {\n"
     "  int t = blockIdx.x * blockDim.x + threadIdx.x;\n"
@@ -386,8 +414,8 @@ static char *src_gred_q_rope(u32 sk) {
     "    q[base + j]      = f2bfd(xe * c - xo * sv);\n"
     "    q[base + %u + j] = f2bfd(xo * c + xe * sv);\n"
     "  }\n"
-    "}\n", hn * dn, dn, dn, dn + dr, sk, N, hn * dn + hn * half, hn * dn,
-         half, half, dn + dr, dn, sk, N, N, dr, dr, half);
+    "}\n", hn * dn, dn, dn, dn + dr, sk, ns, hn * dn + hn * half, hn * dn,
+         half, half, dn + dr, dn, sk, ns, ns, dr, dr, half);
   return mks(
     "void gred_q(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
     "  (void)grid; (void)block;\n"
@@ -410,15 +438,15 @@ static char *src_gred_q_rope(u32 sk) {
     "      q[base + %u + j] = f2bfd(xo * c + xe * sv);\n"
     "    }\n"
     "  }\n"
-    "}\n", hn, dn, dn + dr, sk, N, half, dn + dr, dn, sk, N, N, dr, dr, half);
+    "}\n", hn, dn, dn + dr, sk, ns, half, dn + dr, dn, sk, ns, ns, dr, dr, half);
 }
 
 // kv prep: folds the kv GEMV partials, rms-norms the compressed-kv half
 // (round-to-bf16 first, matching the native kva bf16 boundary), ropes the
 // pe tail, and appends BOTH rows into the layer caches at L[0]-1.  One
 // block; threads < KV handle ckv columns, the next DR/2 handle pe pairs.
-static char *src_kv_prep(u32 sk) {
-  u32 kv = C.kv_lora, dr = C.d_rope, half = dr / 2, N = kv + dr;
+static char *src_kv_prep(u32 sk, u32 ns, u32 qoff) {
+  u32 kv = C.kv_lora, dr = C.d_rope, half = dr / 2;
   if (IS_CUDA) return mks(
     "extern \"C\" __global__ void kv_prep(bf16t* ckv, bf16t* kpe, const float* part, const float* wn,\n"
     "    const float* cs, const float* sn, const int* L) {\n"
@@ -427,7 +455,7 @@ static char *src_kv_prep(u32 sk) {
     "  float v = 0.f;\n"
     "  if (t < %u) {\n"
     "    float s = 0.f;\n"
-    "    for (int i = 0; i < %u; i++) s += part[(long)i * %u + t];\n"
+    "    for (int i = 0; i < %u; i++) s += part[(long)i * %u + %u + t];\n"
     "    v = bf2f(f2bfd(s)); sh[t] = v;\n"
     "  }\n"
     "  __syncthreads();\n"
@@ -455,8 +483,8 @@ static char *src_kv_prep(u32 sk) {
     "    kpe[(long)off * %u + j]      = f2bfd(xe * c - xo * sv);\n"
     "    kpe[(long)off * %u + %u + j] = f2bfd(xo * c + xe * sv);\n"
     "  }\n"
-    "}\n", kv, kv, sk, N, kv, 1.0 / (double)kv, (double)C.eps, kv, kv,
-         kv + half, kv, sk, N, kv, N, kv, dr, dr, dr, dr, half);
+    "}\n", kv, kv, sk, ns, qoff, kv, 1.0 / (double)kv, (double)C.eps, kv, kv,
+         kv + half, kv, sk, ns, qoff + kv, ns, qoff + kv, dr, dr, dr, dr, half);
   return mks(
     "#include <math.h>\n"
     "void kv_prep(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
@@ -468,7 +496,7 @@ static char *src_kv_prep(u32 sk) {
     "  float v[%u]; float ss = 0.f;\n"
     "  for (unsigned t = 0; t < %uu; t++) {\n"
     "    float s = 0.f;\n"
-    "    for (unsigned i = 0; i < %uu; i++) s += part[(unsigned long)i * %uu + t];\n"
+    "    for (unsigned i = 0; i < %uu; i++) s += part[(unsigned long)i * %uu + %uu + t];\n"
     "    v[t] = bf2f(f2bfd(s)); ss += v[t] * v[t];\n"
     "  }\n"
     "  float inv = 1.0f / sqrtf(ss * %.10ef + %.10ef);\n"
@@ -481,8 +509,8 @@ static char *src_kv_prep(u32 sk) {
     "    kpe[(long)off * %uu + j]      = f2bfd(xe * c - xo * sv);\n"
     "    kpe[(long)off * %uu + %uu + j] = f2bfd(xo * c + xe * sv);\n"
     "  }\n"
-    "}\n", kv, kv, sk, N, 1.0 / (double)kv, (double)C.eps, kv, kv, half,
-         sk, N, kv, N, kv, dr, dr, dr, dr, half);
+    "}\n", kv, kv, sk, ns, qoff, 1.0 / (double)kv, (double)C.eps, kv, kv, half,
+         sk, ns, qoff + kv, ns, qoff + kv, dr, dr, dr, dr, half);
 }
 
 // o fold + residual + post-attn rms: x1 = x + fold(o partials) (bf16-rounded
@@ -694,7 +722,8 @@ static char *src_mla_o(void) {
     "  const float* ol = olat + (long)h * %u;\n"
     "  const bf16t* wm = wuv + ((long)h * %u + mm) * %u;\n"
     "  float acc = 0.f;\n"
-    "  for (int k = lane; k < %u; k += 32) acc += ol[k] * bf2f(wm[k]);\n"
+    "#pragma unroll 8\n"
+"  for (int k = lane; k < %u; k += 32) acc += ol[k] * bf2f(wm[k]);\n"
     "  for (int oo = 16; oo > 0; oo >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, oo);\n"
     "  if (lane == 0) o[(long)h * %u + mm] = f2bfd(acc);\n"
     "}\n", h * dv, dv, dv, kv, dv, kv, kv, dv);
@@ -790,6 +819,7 @@ static char *src_moe_h(void) {
     "    wgi = swg + (long)i * %u; wui = swu + (long)i * %u;\n"
     "  }\n"
     "  float g = 0.f, u = 0.f;\n"
+    "#pragma unroll 8\n"
     "  for (int k = lane; k < %u; k += 32) { float xk = bf2f(x[k]); g += xk * bf2f(wgi[k]); u += xk * bf2f(wui[k]); }\n"
     "  for (int o = 16; o > 0; o >>= 1) { g += __shfl_down_sync(0xffffffffu, g, o); u += __shfl_down_sync(0xffffffffu, u, o); }\n"
     "  if (lane == 0) { float gs = g / (1.f + __expf(-g)); h[warp] = gs * u; }\n"
@@ -834,6 +864,7 @@ static char *src_moe_out(void) {
     "    const bf16t* wde = wd + ((long)se * %u + d) * %u;\n"
     "    const float* he = h + e * %u;\n"
     "    float s = 0.f;\n"
+    "#pragma unroll 8\n"
     "    for (int i = lane; i < %u; i += 32) s += he[i] * bf2f(wde[i]);\n"
     "    for (int o = 16; o > 0; o >>= 1) s += __shfl_down_sync(0xffffffffu, s, o);\n"
     "    if (lane == 0) acc += probs[e] * s;\n"
@@ -842,6 +873,7 @@ static char *src_moe_out(void) {
     "    const bf16t* wde = swd + (long)d * %u;\n"
     "    const float* hs = h + %u;\n"
     "    float s = 0.f;\n"
+    "#pragma unroll 8\n"
     "    for (int i = lane; i < %u; i += 32) s += hs[i] * bf2f(wde[i]);\n"
     "    for (int o = 16; o > 0; o >>= 1) s += __shfl_down_sync(0xffffffffu, s, o);\n"
     "    if (lane == 0) acc += s;\n"
@@ -1060,7 +1092,7 @@ static Term silu(Term x, u32 K) {
 // === model state ============================================================
 #define MAX_LAYERS 64
 static u32 W_embed, W_norm, W_lm, T_cos, T_sin;
-static u32 W_win[MAX_LAYERS], W_wq[MAX_LAYERS], W_wkv[MAX_LAYERS], W_wkvn[MAX_LAYERS];
+static u32 W_win[MAX_LAYERS], W_wqkv[MAX_LAYERS], W_wkvn[MAX_LAYERS];
 static u32 W_wuk[MAX_LAYERS], W_wuv[MAX_LAYERS], W_wo[MAX_LAYERS], W_wpost[MAX_LAYERS];
 static u32 W_wg1[MAX_LAYERS], W_wu1[MAX_LAYERS], W_wd1[MAX_LAYERS];
 static u32 W_gate[MAX_LAYERS], W_wg[MAX_LAYERS], W_wu[MAX_LAYERS], W_wd[MAX_LAYERS];
@@ -1077,14 +1109,14 @@ static u32 T_xr, T_xnb, T_x1, T_xn2b, T_xn2f, T_q, T_xnf, T_g1o, T_u1o;
 
 // One GEMV instance per distinct (K, N, dtypes): source + split factor.
 typedef struct { char *sk_src, *red_src; char sk_nm[16], red_nm[16]; u32 N, sk; } Gemv;
-static Gemv G_q, G_kv, G_o, G_gate, G_ffw, G_down, G_lm;
+static Gemv G_qkv, G_o, G_gate, G_ffw, G_down, G_lm;
 
 static void gemv_make(Gemv *g, char const *tag, u32 K, u32 N,
                       int x_f32, int w_f32, int out_bf16) {
   snprintf(g->sk_nm, sizeof g->sk_nm, "gemv_%s", tag);
   snprintf(g->red_nm, sizeof g->red_nm, "gred_%s", tag);
   g->N       = N;
-  g->sk      = gemv_pick_sk(K, N);
+  g->sk      = g->sk != 0 ? g->sk : gemv_pick_sk(K, N);
   g->sk_src  = src_gemv(g->sk_nm, K, N, g->sk, x_f32, w_f32);
   g->red_src = src_gred(g->red_nm, N, g->sk, out_bf16);
 }
@@ -1122,8 +1154,15 @@ static void model_init(void) {
   for (u32 l = 0; l < C.n_layers; l++) {
     if (PACK != NULL) {
       W_win[l]   = pack_lw(l, "win", d, 0, DT_FP32);
-      W_wq[l]    = pack_lw(l, "wq", d, hn * (dn + dr), DT_BF16);
-      W_wkv[l]   = pack_lw(l, "wkv", d, kv + dr, DT_BF16);
+      {
+        char nq_nm[48], nkv_nm[48];
+        u32 nq = hn * (dn + dr), nkv = kv + dr;
+        snprintf(nq_nm, sizeof nq_nm, "l%u.wq", l);
+        snprintf(nkv_nm, sizeof nkv_nm, "l%u.wkv", l);
+        W_wqkv[l] = concat_rows_bf16(
+            (u16 const *)pack_find(nq_nm, (u64)d * nq * 2), nq,
+            (u16 const *)pack_find(nkv_nm, (u64)d * nkv * 2), nkv, d);
+      }
       W_wkvn[l]  = pack_lw(l, "wkvn", kv, 0, DT_FP32);
       W_wuk[l]   = pack_lw(l, "wuk", hn * dn * kv, 0, DT_BF16);
       W_wuv[l]   = pack_lw(l, "wuv", hn * dv * kv, 0, DT_BF16);
@@ -1144,8 +1183,15 @@ static void model_init(void) {
       }
     } else {
       W_win[l]   = mk_f32_fill(d, 0, 1.0f);
-      W_wq[l]    = mk_bf16_rand(d, hn * (dn + dr));
-      W_wkv[l]   = mk_bf16_rand(d, kv + dr);
+      {
+        u32 nq = hn * (dn + dr), nkv = kv + dr;
+        u16 *wq  = (u16 *)malloc((u64)d * nq * 2);
+        u16 *wkv = (u16 *)malloc((u64)d * nkv * 2);
+        for (u64 i = 0; i < (u64)d * nq; i++)  wq[i]  = rbf16();
+        for (u64 i = 0; i < (u64)d * nkv; i++) wkv[i] = rbf16();
+        W_wqkv[l] = concat_rows_bf16(wq, nq, wkv, nkv, d);
+        free(wq); free(wkv);
+      }
       W_wkvn[l]  = mk_f32_fill(kv, 0, 1.0f);
       W_wuk[l]   = mk_bf16_rand(hn * dn * kv, 0);
       W_wuv[l]   = mk_bf16_rand(hn * dv * kv, 0);
@@ -1168,17 +1214,17 @@ static void model_init(void) {
     L_ckv[l] = mk_bf16_zero(C.max_seq, kv);
     L_kpe[l] = mk_bf16_zero(C.max_seq, dr);
   }
-  gemv_make(&G_q,    "q",    d, hn * (dn + dr), 0, 0, 1);
-  gemv_make(&G_kv,   "kv",   d, kv + dr,        0, 0, 1);
+  G_qkv.sk = gemv_pick_sk(d, hn * (dn + dr));
+  gemv_make(&G_qkv,  "qkv",  d, hn * (dn + dr) + kv + dr, 0, 0, 1);
   gemv_make(&G_o,    "o",    hn * dv, d,        0, 0, 1);
   gemv_make(&G_gate, "gate", d, C.n_exp,        1, 1, 0);
   gemv_make(&G_ffw,  "ffw",  d, C.dense_inter,  0, 0, 1);
   gemv_make(&G_down, "down", C.dense_inter, d,  0, 0, 1);
   gemv_make(&G_lm,   "lm",   d, C.vocab,        1, 0, 0);
   {
-    Gemv const *gs[7] = {&G_q, &G_kv, &G_o, &G_gate, &G_ffw, &G_down, &G_lm};
+    Gemv const *gs[6] = {&G_qkv, &G_o, &G_gate, &G_ffw, &G_down, &G_lm};
     u64 pmax = 0;
-    for (u32 i = 0; i < 7; i++) {
+    for (u32 i = 0; i < 6; i++) {
       u64 n = (u64)gs[i]->sk * gs[i]->N;
       if (n > pmax) pmax = n;
     }
@@ -1211,8 +1257,8 @@ static void model_init(void) {
   S_APART = src_apart(); S_AFIN = src_afin(); S_BUMP = src_bump();
   S_RMS1 = src_rms("rms1", d, 1);
   S_RMSF = src_rms("rms_f", d, 0);
-  S_GREDQ = src_gred_q_rope(G_q.sk);
-  S_KVPREP = src_kv_prep(G_kv.sk);
+  S_GREDQ = src_gred_q_rope(G_qkv.sk, G_qkv.N);
+  S_KVPREP = src_kv_prep(G_qkv.sk, G_qkv.N, hn * (dn + dr));
   S_OREDRMS = src_gred_o_rms(G_o.sk);
   S_DOWNRES = src_gred_down_res(G_down.sk);
 }
@@ -1230,19 +1276,18 @@ static void step_build(void) {
       u32 a[3] = {T_xnb, T_xr, W_win[l]}, o[1] = {0};
       krun("rms1", S_RMS1, 1, 256, a, 3, o, 1);
     }
-    gemv_sk_run(&G_q, T_xnb, W_wq[l]);
+    gemv_sk_run(&G_qkv, T_xnb, W_wqkv[l]);
     {
       u32 a[5] = {T_q, T_part, T_cos, T_sin, T_len}, o[1] = {0};
       krun("gred_q", S_GREDQ, cdiv(hn * dn + hn * dr / 2, 256), 256, a, 5, o, 1);
     }
-    gemv_sk_run(&G_kv, T_xnb, W_wkv[l]);
     {
       u32 a[7] = {L_ckv[l], L_kpe[l], T_part, W_wkvn[l], T_cos, T_sin, T_len}, o[2] = {0, 1};
       krun("kv_prep", S_KVPREP, 1, (kv + dr / 2 + 31) / 32 * 32, a, 7, o, 2);
     }
     {
       u32 a[3] = {T_ql, T_q, W_wuk[l]}, o[1] = {0};
-      krun("mla_qlat", S_QLAT, cdiv(hn * kv, 256), 256, a, 3, o, 1);
+      krun("mla_qlat", S_QLAT, cdiv(hn * kv, 64), 64, a, 3, o, 1);
     }
     {
       u32 a[6] = {T_sm, T_ql, T_q, L_ckv[l], L_kpe[l], T_len}, o[1] = {0};
@@ -1250,7 +1295,7 @@ static void step_build(void) {
     }
     {
       u32 a[4] = {T_ol, T_sm, L_ckv[l], T_len}, o[1] = {0};
-      krun("mla_mix", S_MIX, cdiv(hn * kv, 256), 256, a, 4, o, 1);
+      krun("mla_mix", S_MIX, cdiv(hn * kv, 64), 64, a, 4, o, 1);
     }
     {
       u32 a[3] = {T_ob, T_ol, W_wuv[l]}, o[1] = {0};
