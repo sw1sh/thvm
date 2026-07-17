@@ -6542,13 +6542,17 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   CnfState *s = cnf_init(budget);
   if (s == NULL) return 0;
   cnf_set_select(s, CNF_SELECT_NEGATIVE);
-  // AVATAR-lite component splitting: ON by default for the pre-pass
-  // (THVM_FOL_AVATAR=0 restores the exact unsplit behavior -- the A/B
-  // lever; =1 splits every stored clause, =2 scopes the guard spend to
-  // input + conjecture-descended clauses; see sat.c "AVATAR-lite").
+  // AVATAR-lite component splitting: OFF by default -- the 240s pod
+  // A/B showed default-ON costs net solves (-8/+3 vs the unsplit
+  // prepass; splitting reshapes search on problems the plain prepass
+  // already wins).  It runs as its own portfolio slice (fof-avatar)
+  // instead, the same discipline as every other lane: new mechanisms
+  // join the schedule, they do not move a winning default.
+  // THVM_FOL_AVATAR=1 splits every stored clause, =2 scopes the guard
+  // spend to input + conjecture-descended clauses (see sat.c).
   {
     const char *e = getenv("THVM_FOL_AVATAR");
-    cnf_set_avatar(s, (u8)((e == NULL || e[0] == '\0') ? 1u
+    cnf_set_avatar(s, (u8)((e == NULL || e[0] == '\0') ? 0u
                                                        : (u8)atoi(e)));
   }
   // --proof: keep backward-subsumed clauses printable and remember
@@ -7891,6 +7895,12 @@ static const SchedSlice SCHEDULE[] = {
   //                        (the AGT trichotomy class), pure Horn, or
   //                        too many/too-wide or-clauses.
   {"fof-split", "--fof-slice=2 --fof-split=2 --fof-sat=0", 0.0},
+  // AVATAR-lite lanes: component splitting reshapes the prepass search --
+  // it wins problems the plain prepass loses (COM149+1, MGT061+1,
+  // SWV055+1 at 240s) and loses ones it wins, so it races as its own
+  // slices instead of moving the default (the -8/+3 pod A/B).
+  {"fof-avatar",  "--fof-slice=2 --fol-avatar=1", 0.0},
+  {"fof-avatar2", "--fof-slice=2 --fol-avatar=2", 0.0},
   // FULL AC-completion, exit-fast: =2 gives up immediately when no AC
   // operator is detected, so on non-AC problems (most of the corpus) the
   // slot frees instantly -- letting this sit in the FIRST wave protects
