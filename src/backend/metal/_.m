@@ -1640,6 +1640,10 @@ static id<MTLComputePipelineState> METAL_PIPELINES_CACHE[UOP_COUNT][32];
 // away.
 static void metal_jit_cache_reset_impl(void);
 static void metal_graph_cache_reset_impl(void);
+// Raw custom-kernel (KernelEntry.custom_program) PSO cache reset; the
+// cache + dispatch live near metal_dispatch_kernel.  Cleared here so a
+// fresh session rebuilds pipelines lazily from the live device.
+static void metal_custom_cache_reset(void);
 
 static void metal_shutdown(void) {
   metal_dispatch_flush();
@@ -1724,6 +1728,7 @@ static void metal_shutdown(void) {
       METAL_PIPELINES_CACHE[op][dt] = nil;
   metal_jit_cache_reset_impl();
   metal_graph_cache_reset_impl();
+  metal_custom_cache_reset();
   // Drop the MPS converted-weight cache: it keys on source MTLBuffer
   // identity, which becomes stale once the pool frees + recycles those
   // addresses, so a reset prevents a false cache hit on a re-used slot.
@@ -4236,8 +4241,183 @@ static int metal_try_mps_gemm(KernelEntry *ke, u32 *in_buf_ids,
   return 1;
 }
 
+// === raw custom-kernel (KernelEntry.custom_program) dispatch ==========
+//
+// Metal analogue of cuda_custom_dispatch (backend/cuda/jit.c): compile the
+// caller-supplied MSL source through the SAME metal_lib_for_src disk cache
+// the tile-jit path uses, build an MTLComputePipelineState, cache it by
+// (source hash ^ entry name) so JIT replays / repeat fires don't recompile,
+// then encode ONE dispatchThreadgroups on the batch's command buffer --
+// reusing the metal_command_buffer / metal_submit_if_standalone lifecycle
+// exactly as metal_gather_strided and the tile path do.
+//
+// Buffer-binding convention mirrors the raw CUDA signature: index i binds
+// argument slot i (matching the MSL `[[buffer(i)]]` param order); the primary
+// out slot is overridden with out_buf_id (authoritative at JIT replay, where
+// rebinding / planner redirects rewrite the recorded out_buf_id but not the
+// mirrored input slot).  Every bind applies the slot's byte_offset (arena
+// VIEW window / borrowed disk-mmap wrap), same as metal_tile_jit_encode.
+//
+// The primary out slot (bit position of the lowest set custom_outs_mask bit)
+// is recomputed inline rather than via schedule/kernel_custom.c's
+// kernel_custom_primary_out_slot: that helper is `fn` (static inline, internal
+// to the umbrella thvm.c TU), so this separately-compiled backend .o cannot
+// link it.  The logic is identical (0 for an empty mask, else ctz).
+static u32 metal_custom_primary_out_slot(KernelEntry const *ke) {
+  u64 m = ke->custom_outs_mask;
+  u32 slot = 0;
+  while (m != 0 && (m & 1) == 0) { m >>= 1; slot++; }
+  return slot;
+}
+
+#define METAL_CUSTOM_CACHE_CAP 64
+static u64                         METAL_CUSTOM_CACHE_KEYS[METAL_CUSTOM_CACHE_CAP];
+static id<MTLComputePipelineState> METAL_CUSTOM_PSOS      [METAL_CUSTOM_CACHE_CAP];
+
+static void metal_custom_cache_reset(void) {
+  for (u32 i = 0; i < METAL_CUSTOM_CACHE_CAP; i++) {
+    METAL_CUSTOM_CACHE_KEYS[i] = 0;
+    METAL_CUSTOM_PSOS[i]       = nil;
+  }
+}
+
+// Content key: MSL source hash (metal_src_hash) mixed with the entry name so
+// two programs sharing a source body but exporting different entry points
+// resolve distinct pipelines.  High bit set marks a non-empty slot.
+static u64 metal_custom_key(KernelEntry const *ke) {
+  u64 h = metal_src_hash(ke->custom_program);
+  for (char const *p = ke->custom_name; *p; p++) {
+    h ^= (u64)(unsigned char)*p;
+    h *= 0x100000001b3ULL;
+  }
+  return h | (1ULL << 63);
+}
+
+// Open-addressing probe (matches metal_jit_lookup_idx): the slot the key
+// lives in, or the first empty slot it could install into.  (u32)-1 only on
+// table-full (treated as cache-bypass -- rebuild every dispatch, still sound).
+static u32 metal_custom_lookup_idx(u64 key) {
+  u32 h = (u32)(key ^ (key >> 32));
+  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+  for (u32 probe = 0; probe < METAL_CUSTOM_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (METAL_CUSTOM_CACHE_CAP - 1);
+    if (METAL_CUSTOM_CACHE_KEYS[i] == key) return i;
+    if (METAL_CUSTOM_CACHE_KEYS[i] == 0)   return i;
+  }
+  return (u32)-1;
+}
+
+// Compile (or reuse the cached) pipeline for a custom kernel.  nil on any
+// failure, with a message on stderr naming the reason.
+static id<MTLComputePipelineState> metal_custom_pipeline(KernelEntry const *ke,
+                                                         u64 key) {
+  u32 idx = metal_custom_lookup_idx(key);
+  if (idx != (u32)-1 && METAL_CUSTOM_CACHE_KEYS[idx] == key
+      && METAL_CUSTOM_PSOS[idx] != nil) {
+    return METAL_CUSTOM_PSOS[idx];
+  }
+  NSError *err = nil;
+  int via_data = 0;
+  id<MTLLibrary> lib = metal_lib_for_src(ke->custom_program, &err, &via_data);
+  if (lib == nil) {
+    fprintf(stderr, "thvm: metal_custom_dispatch: library compile failed for "
+                    "'%s': %s\n", ke->custom_name,
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  id<MTLFunction> mtlFn =
+      [lib newFunctionWithName:[NSString stringWithUTF8String:ke->custom_name]];
+  if (mtlFn == nil) {
+    fprintf(stderr, "thvm: metal_custom_dispatch: entry point '%s' not found "
+                    "in compiled library\n", ke->custom_name);
+    return nil;
+  }
+  err = nil;
+  id<MTLComputePipelineState> pso =
+      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+  if (pso == nil) {
+    fprintf(stderr, "thvm: metal_custom_dispatch: pipeline-state failed for "
+                    "'%s': %s\n", ke->custom_name,
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  if (idx != (u32)-1) {
+    METAL_CUSTOM_CACHE_KEYS[idx] = key;
+    METAL_CUSTOM_PSOS[idx]       = pso;
+  }
+  return pso;
+}
+
+static int metal_custom_dispatch(struct KernelEntry *ke,
+                                 u32 *in_buf_ids, u32 out_buf_id) {
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
+  u64 t0  = cg_now_us();
+  u32 kid = (u32)(ke - KERNELS);
+  if (metal_perop_enabled()) METAL_PEROP_CUR_KID = kid;
+  id<MTLComputePipelineState> pso = metal_custom_pipeline(ke, metal_custom_key(ke));
+  if (pso == nil) return -1;
+
+  u32 n = ke->n_inputs;
+  __unsafe_unretained id<MTLBuffer> bufs[n ? n : 1];
+  u64 offs[n ? n : 1];
+  for (u32 i = 0; i < n; i++) {
+    u32 ib = in_buf_ids[i];
+    if (ib == 0 || ib >= METAL_BUFS_NEXT || METAL_BUFS[ib].buf == nil) {
+      fprintf(stderr, "thvm: metal_custom_dispatch: kid=%u arg %u buf %u has "
+                      "no storage\n", kid, i, ib);
+      return -1;
+    }
+    bufs[i] = METAL_BUFS[ib].buf;
+    offs[i] = METAL_BUFS[ib].byte_offset;
+  }
+  u32 out_slot = metal_custom_primary_out_slot(ke);
+  if (out_buf_id != 0 && out_slot < n) {
+    if (out_buf_id >= METAL_BUFS_NEXT || METAL_BUFS[out_buf_id].buf == nil) {
+      fprintf(stderr, "thvm: metal_custom_dispatch: kid=%u out buf %u has no "
+                      "storage\n", kid, out_buf_id);
+      return -1;
+    }
+    bufs[out_slot] = METAL_BUFS[out_buf_id].buf;
+    offs[out_slot] = METAL_BUFS[out_buf_id].byte_offset;
+  }
+
+  id<MTLCommandBuffer> cmd = metal_command_buffer();
+  if (cmd == nil) return -1;
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  for (u32 i = 0; i < n; i++) {
+    [enc setBuffer:bufs[i] offset:(NSUInteger)offs[i] atIndex:i];
+  }
+  // The DSV2 kernels declare only static (compile-time-sized) threadgroup
+  // arrays, so custom_shared_bytes is 0 and no dynamic binding is needed.
+  // Honour a non-zero request at threadgroup slot 0 for completeness.
+  if (ke->custom_shared_bytes != 0) {
+    [enc setThreadgroupMemoryLength:(NSUInteger)ke->custom_shared_bytes
+                            atIndex:0];
+  }
+  [enc dispatchThreadgroups:MTLSizeMake(ke->custom_grid[0],
+                                        ke->custom_grid[1],
+                                        ke->custom_grid[2])
+      threadsPerThreadgroup:MTLSizeMake(ke->custom_block[0],
+                                        ke->custom_block[1],
+                                        ke->custom_block[2])];
+  [enc endEncoding];
+  // Batched: encoded into the current batch command buffer (Metal preserves
+  // submission order within a buffer), so a downstream kernel sees the
+  // written bytes.  Standalone (no active batch): submit + wait here, exactly
+  // as metal_gather_strided / the tile path do.
+  metal_submit_if_standalone(cmd);
+  cg_profile_record(kid, KDISPATCH_CUSTOM, cg_now_us() - t0);
+  return 0;
+}
+
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
+  // Raw injected kernel: user-supplied MSL source, no lifted DAG.  Mirror of
+  // cuda_dispatch_kernel's kernel_is_custom pre-check.
+  if (kernel_is_custom(ke)) {
+    return metal_custom_dispatch(ke, in_buf_ids, out_buf_id);
+  }
   // Per-op GPU profiling: clear the current-kid attribution before any
   // pre-dispatch flush (defer-backlog drain below) so leftover work
   // from the prior dispatch isn't double-counted; set it again once we

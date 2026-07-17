@@ -149,6 +149,24 @@ static inline bf16t f2bf(float f) {
 }
 "
 
+(* Metal Shading Language preamble: same bit-exact bf16<->f32 converters as the
+   CUDA/CPU pres (bf16 = high 16 f32 bits; f32->bf16 is round-to-nearest-even
+   with quiet-NaN preservation), using MSL's as_type<> for the reinterpret
+   casts.  The metal3.1 `bfloat` type is deliberately NOT used: the manual bit
+   ops keep the rounding byte-identical to the other two dialects. *)
+$dsvMetalPre = "
+#include <metal_stdlib>
+using namespace metal;
+typedef ushort bf16t;
+static inline float bf2f(bf16t h) { return as_type<float>(((uint)h) << 16); }
+static inline bf16t f2bf(float f) {
+  uint b = as_type<uint>(f);
+  if ((b & 0x7f800000u) == 0x7f800000u && (b & 0x7fffffu) != 0u)
+    return (bf16t)(((b & 0x80000000u) | 0x7f800000u | 0x400000u) >> 16);
+  return (bf16t)((b + 0x7fffu + ((b >> 16) & 1u)) >> 16);
+}
+"
+
 (* Template parameter strings for a config.  `MI` = MoeInter (avoids the WL
    symbol I), `NB`/`CHUNK` size the 2-pass argmax. *)
 dsvTemplateParams[cfg_] := <|
@@ -649,11 +667,255 @@ void len_bump(void *const *bufs, unsigned const *grid, unsigned const *block) {
 }
 "
 
+(* === Metal Shading Language ports ================================ *)
+
+(* Faithful line-by-line ports of the $dsv*Cuda kernels to MSL.  Translation:
+   extern \"C\" __global__ -> kernel; T* param -> device T* [[buffer(i)]] in the
+   SAME order as the CUDA pointer params (slot i = i-th pointer); blockIdx/
+   threadIdx/blockDim -> tgid/tid3/ntg (the [[threadgroup_position_in_grid]] /
+   [[thread_position_in_threadgroup]] / [[threads_per_threadgroup]] builtins);
+   __shared__ T s[N] -> threadgroup T s[N]; __syncthreads() ->
+   threadgroup_barrier (mem_threadgroup for the shared-memory reductions;
+   rope_dev's in-place io swap orders DEVICE memory, so mem_device);
+   __shfl_down_sync(0xffffffffu, v, o) -> simd_shuffle_down(v, o) (Apple simd
+   width 32 = the warp assumption); __expf/expf -> exp; fmaxf -> fmax;
+   __uint_as_float/__float_as_uint -> as_type (in $dsvMetalPre).  A local
+   pointer into a device buffer must carry the `device` address space. *)
+
+$dsvEmbedMetal = "
+kernel void embed_row(device bf16t* x [[buffer(0)]], device const bf16t* emb [[buffer(1)]], device const int* tok [[buffer(2)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
+  int i = tgid.x * ntg.x + tid3.x;
+  if (i < `D`) x[i] = emb[(long)tok[0] * `D` + i];
+}
+"
+
+$dsvRopeMetal = "
+kernel void rope_dev(device bf16t* io [[buffer(0)]], device const float* cs [[buffer(1)]], device const float* sn [[buffer(2)]], device const int* L [[buffer(3)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]]) {
+  int row = tgid.x; int j = tid3.x;
+  if (row >= `NHS` || j >= `DR` / 2) return;
+  long base = (long)row * `DR`; int p = L[0] - 1;
+  float xe = bf2f(io[base + 2 * j]), xo = bf2f(io[base + 2 * j + 1]);
+  float c = cs[(long)p * `DR` + j], sv = sn[(long)p * `DR` + j];
+  threadgroup_barrier(mem_flags::mem_device);
+  io[base + j]            = f2bf(xe * c - xo * sv);
+  io[base + `DR` / 2 + j] = f2bf(xo * c + xe * sv);
+}
+"
+
+$dsvAppendMetal = "
+kernel void cache_append(device bf16t* ckv [[buffer(0)]], device bf16t* kpe [[buffer(1)]], device const bf16t* ckv_new [[buffer(2)]], device const bf16t* kpe_new [[buffer(3)]], device const int* L [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
+  int idx = tgid.x * ntg.x + tid3.x; int off = L[0] - 1;
+  if (idx < `KV`) ckv[(long)off * `KV` + idx] = ckv_new[idx];
+  else if (idx < `KV` + `DR`) kpe[(long)off * `DR` + (idx - `KV`)] = kpe_new[idx - `KV`];
+}
+"
+
+$dsvQlatMetal = "
+kernel void mla_qlat(device float* qlat [[buffer(0)]], device const bf16t* qn [[buffer(1)]], device const bf16t* wuk [[buffer(2)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
+  int idx = tgid.x * ntg.x + tid3.x;
+  if (idx >= `H` * `KV`) return;
+  int h = idx / `KV`, k = idx % `KV`;
+  device const bf16t* q = qn + (long)h * `DN`;
+  device const bf16t* w = wuk + (long)h * `DN` * `KV`;
+  float acc = 0.f;
+  for (int d = 0; d < `DN`; d++) acc += bf2f(q[d]) * bf2f(w[(long)d * `KV` + k]);
+  qlat[(long)h * `KV` + k] = acc;
+}
+"
+
+$dsvScoreMetal = "
+kernel void mla_score(device float* sm [[buffer(0)]], device const float* qlat [[buffer(1)]], device const bf16t* qp [[buffer(2)]],
+    device const bf16t* Cn [[buffer(3)]], device const bf16t* Pn [[buffer(4)]], device const bf16t* ckvc [[buffer(5)]], device const bf16t* kpec [[buffer(6)]], device const int* Lp [[buffer(7)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
+  int h = tgid.x; int t = tid3.x; int nt = ntg.x; int L = Lp[0]; int Lh = L - 1;
+  device const bf16t* q_pe = qp + (long)h * `DR`;
+  device const float* ql = qlat + (long)h * `KV`;
+  threadgroup float sc[`MAXL`]; threadgroup float red[32];
+  int lane = t & 31, w = t >> 5, nw = nt >> 5;
+  for (int j = w; j < L; j += nw) {
+    device const bf16t* cj = (j < Lh) ? (Cn + (long)j * `KV`) : ckvc;
+    device const bf16t* pj = (j < Lh) ? (Pn + (long)j * `DR`) : kpec;
+    float s = 0.f;
+    for (int k = lane; k < `KV`; k += 32) s += ql[k] * bf2f(cj[k]);
+    for (int k = lane; k < `DR`; k += 32) s += bf2f(q_pe[k]) * bf2f(pj[k]);
+    for (int o = 16; o > 0; o >>= 1) s += simd_shuffle_down(s, o);
+    if (lane == 0) sc[j] = s * `SCALE`f;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float m = -1e30f;
+  for (int j = t; j < L; j += nt) m = fmax(m, sc[j]);
+  for (int o = 16; o > 0; o >>= 1) m = fmax(m, simd_shuffle_down(m, o));
+  if (lane == 0) red[w] = m;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t == 0) { float mm = -1e30f; for (int i = 0; i < (nt + 31) / 32; i++) mm = fmax(mm, red[i]); red[0] = mm; }
+  threadgroup_barrier(mem_flags::mem_threadgroup); float gmax = red[0]; threadgroup_barrier(mem_flags::mem_threadgroup);
+  float sum = 0.f;
+  for (int j = t; j < L; j += nt) { float e = exp(sc[j] - gmax); sc[j] = e; sum += e; }
+  for (int o = 16; o > 0; o >>= 1) sum += simd_shuffle_down(sum, o);
+  if (lane == 0) red[w] = sum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t == 0) { float ss = 0.f; for (int i = 0; i < (nt + 31) / 32; i++) ss += red[i]; red[0] = ss; }
+  threadgroup_barrier(mem_flags::mem_threadgroup); float gsum = red[0]; threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (int j = t; j < L; j += nt) sm[(long)h * `MAXL` + j] = sc[j] / gsum;
+}
+"
+
+$dsvMixMetal = "
+kernel void mla_mix(device float* olat [[buffer(0)]], device const float* sm [[buffer(1)]], device const bf16t* Cn [[buffer(2)]], device const bf16t* ckvc [[buffer(3)]], device const int* Lp [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
+  int idx = tgid.x * ntg.x + tid3.x;
+  if (idx >= `H` * `KV`) return;
+  int h = idx / `KV`, k = idx % `KV`; int L = Lp[0], Lh = L - 1;
+  device const float* smh = sm + (long)h * `MAXL`;
+  float a = 0.f;
+  for (int j = 0; j < Lh; j++) a += smh[j] * bf2f(Cn[(long)j * `KV` + k]);
+  a += smh[Lh] * bf2f(ckvc[k]);
+  olat[(long)h * `KV` + k] = a;
+}
+"
+
+$dsvOMetal = "
+kernel void mla_o(device bf16t* o [[buffer(0)]], device const float* olat [[buffer(1)]], device const bf16t* wuv [[buffer(2)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
+  int warp = (tgid.x * ntg.x + tid3.x) >> 5; int lane = tid3.x & 31;
+  if (warp >= `H` * `DV`) return;
+  int h = warp / `DV`, mm = warp % `DV`;
+  device const float* ol = olat + (long)h * `KV`;
+  device const bf16t* wm = wuv + ((long)h * `DV` + mm) * `KV`;
+  float acc = 0.f;
+  for (int k = lane; k < `KV`; k += 32) acc += ol[k] * bf2f(wm[k]);
+  for (int oo = 16; oo > 0; oo >>= 1) acc += simd_shuffle_down(acc, oo);
+  if (lane == 0) o[(long)h * `DV` + mm] = f2bf(acc);
+}
+"
+
+$dsvRouteMetal = "
+kernel void route(device int* sel [[buffer(0)]], device float* probs [[buffer(1)]], device const float* g [[buffer(2)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]]) {
+  if (tid3.x != 0 || tgid.x != 0) return;
+  float mx = g[0];
+  for (int e = 1; e < `E`; e++) mx = fmax(mx, g[e]);
+  float sum = 0.f;
+  for (int e = 0; e < `E`; e++) sum += exp(g[e] - mx);
+  int taken[`K`];
+  for (int kk = 0; kk < `K`; kk++) {
+    int best = -1; float bv = -3.4e38f;
+    for (int e = 0; e < `E`; e++) {
+      int used = 0;
+      for (int j = 0; j < kk; j++) if (taken[j] == e) used = 1;
+      if (!used && g[e] > bv) { bv = g[e]; best = e; }
+    }
+    taken[kk] = best;
+    sel[kk] = best;
+    probs[kk] = exp(g[best] - mx) / sum;
+  }
+}
+"
+
+$dsvMoeHMetal = "
+kernel void moe_full_h(device float* h [[buffer(0)]], device const bf16t* x [[buffer(1)]], device const int* sel [[buffer(2)]],
+    device const bf16t* wg [[buffer(3)]], device const bf16t* wu [[buffer(4)]], device const bf16t* swg [[buffer(5)]], device const bf16t* swu [[buffer(6)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
+  int warp = (tgid.x * ntg.x + tid3.x) >> 5; int lane = tid3.x & 31;
+  if (warp >= `K` * `MI` + `SI`) return;
+  device const bf16t *wgi, *wui;
+  if (warp < `K` * `MI`) {
+    int e = warp / `MI`, i = warp % `MI`; int se = sel[e];
+    wgi = wg + ((long)se * `MI` + i) * `D`; wui = wu + ((long)se * `MI` + i) * `D`;
+  } else {
+    int i = warp - `K` * `MI`;
+    wgi = swg + (long)i * `D`; wui = swu + (long)i * `D`;
+  }
+  float g = 0.f, u = 0.f;
+  for (int k = lane; k < `D`; k += 32) { float xk = bf2f(x[k]); g += xk * bf2f(wgi[k]); u += xk * bf2f(wui[k]); }
+  for (int o = 16; o > 0; o >>= 1) { g += simd_shuffle_down(g, o); u += simd_shuffle_down(u, o); }
+  if (lane == 0) { float gs = g / (1.f + exp(-g)); h[warp] = gs * u; }
+}
+"
+
+$dsvMoeOutMetal = "
+kernel void moe_full_out(device bf16t* out [[buffer(0)]], device const float* h [[buffer(1)]], device const int* sel [[buffer(2)]],
+    device const float* probs [[buffer(3)]], device const bf16t* wd [[buffer(4)]], device const bf16t* swd [[buffer(5)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
+  int warp = (tgid.x * ntg.x + tid3.x) >> 5; int lane = tid3.x & 31;
+  if (warp >= `D`) return;
+  int d = warp; float acc = 0.f;
+  for (int e = 0; e < `K`; e++) {
+    int se = sel[e];
+    device const bf16t* wde = wd + ((long)se * `D` + d) * `MI`;
+    device const float* he = h + e * `MI`;
+    float s = 0.f;
+    for (int i = lane; i < `MI`; i += 32) s += he[i] * bf2f(wde[i]);
+    for (int o = 16; o > 0; o >>= 1) s += simd_shuffle_down(s, o);
+    if (lane == 0) acc += probs[e] * s;
+  }
+  {
+    device const bf16t* wde = swd + (long)d * `SI`;
+    device const float* hs = h + `K` * `MI`;
+    float s = 0.f;
+    for (int i = lane; i < `SI`; i += 32) s += hs[i] * bf2f(wde[i]);
+    for (int o = 16; o > 0; o >>= 1) s += simd_shuffle_down(s, o);
+    if (lane == 0) acc += s;
+  }
+  if (lane == 0) out[d] = f2bf(acc);
+}
+"
+
+$dsvArgPartMetal = "
+kernel void argmax_part(device float* pv [[buffer(0)]], device int* pi [[buffer(1)]], device const float* lg [[buffer(2)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
+  threadgroup float sv[256]; threadgroup int si[256];
+  int b = tgid.x; int t = tid3.x;
+  long lo = (long)b * `CHUNK`; long hi = lo + `CHUNK`; if (hi > `V`) hi = `V`;
+  float bv = -3.4e38f; int bi = 2147483647;
+  for (long i = lo + t; i < hi; i += ntg.x) {
+    float v = lg[i];
+    if (v > bv || (v == bv && (int)i < bi)) { bv = v; bi = (int)i; }
+  }
+  sv[t] = bv; si[t] = bi;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (int s = ntg.x / 2; s > 0; s >>= 1) {
+    if (t < s && (sv[t + s] > sv[t] || (sv[t + s] == sv[t] && si[t + s] < si[t]))) {
+      sv[t] = sv[t + s]; si[t] = si[t + s];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  if (t == 0) { pv[b] = sv[0]; pi[b] = si[0]; }
+}
+"
+
+$dsvArgFinMetal = "
+kernel void argmax_fin(device int* tok [[buffer(0)]], device const float* pv [[buffer(1)]], device const int* pi [[buffer(2)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]]) {
+  if (tid3.x != 0 || tgid.x != 0) return;
+  float bv = pv[0]; int bi = pi[0];
+  for (int b = 1; b < `NB`; b++)
+    if (pv[b] > bv || (pv[b] == bv && pi[b] < bi)) { bv = pv[b]; bi = pi[b]; }
+  tok[0] = bi;
+}
+"
+
+$dsvBumpMetal = "
+kernel void len_bump(device int* L [[buffer(0)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]]) {
+  if (tid3.x == 0 && tgid.x == 0) L[0] = L[0] + 1;
+}
+"
+
 (* Instantiate one kernel: pick the backend dialect, apply the template
    params, and wrap in the TKernel program spec. *)
-dsvMakeKernel[cfg_, name_, cudaSrc_, cpuSrc_, grid_, blockDims_, outs_, extra_ : <||>] := TKernel[<|
-    "Program" -> StringTemplate[If[cfg["Device"] === "cpu", $dsvCpuPre <> cpuSrc, $dsvCudaPre <> cudaSrc]][
-        Join[dsvTemplateParams[cfg], extra]],
+dsvMakeKernel[cfg_, name_, cudaSrc_, cpuSrc_, metalSrc_, grid_, blockDims_, outs_, extra_ : <||>] := TKernel[<|
+    "Program" -> StringTemplate[
+        Replace[cfg["Device"], {
+            "metal" :> $dsvMetalPre <> metalSrc,
+            "cpu" :> $dsvCpuPre <> cpuSrc,
+            _ :> $dsvCudaPre <> cudaSrc
+        }]
+    ][Join[dsvTemplateParams[cfg], extra]],
     "Name" -> name,
     "Grid" -> grid,
     "Block" -> blockDims,
@@ -668,20 +930,20 @@ dsvKernels[cfg_] := dsvKernels[cfg] = Block[{d, h, dn, dr, kv, dv, e, k, mi, si,
         {"Dim", "NHeads", "DNope", "DRope", "KvLora", "DV", "NExperts", "TopK", "MoeInter", "SharedInter", "Vocab", "ArgmaxBlocks"};
     cdiv = Ceiling[#1 / #2] &;
     <|
-        "EmbedRow" -> dsvMakeKernel[cfg, "embed_row", $dsvEmbedCuda, $dsvEmbedCpu, {cdiv[d, 256]}, {256}, {1}],
-        "RopeQ" -> dsvMakeKernel[cfg, "rope_dev", $dsvRopeCuda, $dsvRopeCpu, {h}, {dr/2}, {1}, <|"NHS" -> ToString[h]|>],
-        "RopeK" -> dsvMakeKernel[cfg, "rope_dev", $dsvRopeCuda, $dsvRopeCpu, {1}, {dr/2}, {1}, <|"NHS" -> "1"|>],
-        "CacheAppend" -> dsvMakeKernel[cfg, "cache_append", $dsvAppendCuda, $dsvAppendCpu, {cdiv[kv + dr, 256]}, {256}, {1, 2}],
-        "Qlat" -> dsvMakeKernel[cfg, "mla_qlat", $dsvQlatCuda, $dsvQlatCpu, {cdiv[h * kv, 256]}, {256}, {1}],
-        "Score" -> dsvMakeKernel[cfg, "mla_score", $dsvScoreCuda, $dsvScoreCpu, {h}, {256}, {1}],
-        "Mix" -> dsvMakeKernel[cfg, "mla_mix", $dsvMixCuda, $dsvMixCpu, {cdiv[h * kv, 256]}, {256}, {1}],
-        "MlaO" -> dsvMakeKernel[cfg, "mla_o", $dsvOCuda, $dsvOCpu, {cdiv[h * dv * 32, 256]}, {256}, {1}],
-        "Route" -> dsvMakeKernel[cfg, "route", $dsvRouteCuda, $dsvRouteCpu, {1}, {32}, {1, 2}],
-        "MoeH" -> dsvMakeKernel[cfg, "moe_full_h", $dsvMoeHCuda, $dsvMoeHCpu, {cdiv[(k * mi + si) * 32, 256]}, {256}, {1}],
-        "MoeOut" -> dsvMakeKernel[cfg, "moe_full_out", $dsvMoeOutCuda, $dsvMoeOutCpu, {cdiv[d * 32, 256]}, {256}, {1}],
-        "ArgmaxPart" -> dsvMakeKernel[cfg, "argmax_part", $dsvArgPartCuda, $dsvArgPartCpu, {nb}, {256}, {1, 2}],
-        "ArgmaxFin" -> dsvMakeKernel[cfg, "argmax_fin", $dsvArgFinCuda, $dsvArgFinCpu, {1}, {32}, {1}],
-        "LenBump" -> dsvMakeKernel[cfg, "len_bump", $dsvBumpCuda, $dsvBumpCpu, {1}, {1}, {1}]
+        "EmbedRow" -> dsvMakeKernel[cfg, "embed_row", $dsvEmbedCuda, $dsvEmbedCpu, $dsvEmbedMetal, {cdiv[d, 256]}, {256}, {1}],
+        "RopeQ" -> dsvMakeKernel[cfg, "rope_dev", $dsvRopeCuda, $dsvRopeCpu, $dsvRopeMetal, {h}, {dr/2}, {1}, <|"NHS" -> ToString[h]|>],
+        "RopeK" -> dsvMakeKernel[cfg, "rope_dev", $dsvRopeCuda, $dsvRopeCpu, $dsvRopeMetal, {1}, {dr/2}, {1}, <|"NHS" -> "1"|>],
+        "CacheAppend" -> dsvMakeKernel[cfg, "cache_append", $dsvAppendCuda, $dsvAppendCpu, $dsvAppendMetal, {cdiv[kv + dr, 256]}, {256}, {1, 2}],
+        "Qlat" -> dsvMakeKernel[cfg, "mla_qlat", $dsvQlatCuda, $dsvQlatCpu, $dsvQlatMetal, {cdiv[h * kv, 256]}, {256}, {1}],
+        "Score" -> dsvMakeKernel[cfg, "mla_score", $dsvScoreCuda, $dsvScoreCpu, $dsvScoreMetal, {h}, {256}, {1}],
+        "Mix" -> dsvMakeKernel[cfg, "mla_mix", $dsvMixCuda, $dsvMixCpu, $dsvMixMetal, {cdiv[h * kv, 256]}, {256}, {1}],
+        "MlaO" -> dsvMakeKernel[cfg, "mla_o", $dsvOCuda, $dsvOCpu, $dsvOMetal, {cdiv[h * dv * 32, 256]}, {256}, {1}],
+        "Route" -> dsvMakeKernel[cfg, "route", $dsvRouteCuda, $dsvRouteCpu, $dsvRouteMetal, {1}, {32}, {1, 2}],
+        "MoeH" -> dsvMakeKernel[cfg, "moe_full_h", $dsvMoeHCuda, $dsvMoeHCpu, $dsvMoeHMetal, {cdiv[(k * mi + si) * 32, 256]}, {256}, {1}],
+        "MoeOut" -> dsvMakeKernel[cfg, "moe_full_out", $dsvMoeOutCuda, $dsvMoeOutCpu, $dsvMoeOutMetal, {cdiv[d * 32, 256]}, {256}, {1}],
+        "ArgmaxPart" -> dsvMakeKernel[cfg, "argmax_part", $dsvArgPartCuda, $dsvArgPartCpu, $dsvArgPartMetal, {nb}, {256}, {1, 2}],
+        "ArgmaxFin" -> dsvMakeKernel[cfg, "argmax_fin", $dsvArgFinCuda, $dsvArgFinCpu, $dsvArgFinMetal, {1}, {32}, {1}],
+        "LenBump" -> dsvMakeKernel[cfg, "len_bump", $dsvBumpCuda, $dsvBumpCpu, $dsvBumpMetal, {1}, {1}, {1}]
     |>
 ]
 
