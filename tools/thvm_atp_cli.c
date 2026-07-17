@@ -159,7 +159,7 @@ static const AtpKnob KNOBS[] = {
   {"fof",                    "THVM_ATP_FOF",             1, "(FOF/clausal front-end: clausify + Horn ifeq encoding; 0 disables)"},
   {"fof-or",                 "THVM_ATP_FOF_OR",          1, "(non-Horn or/eq lane: 0 restores the Horn-only give-up, 2 eq-reifies predicate atoms too)"},
   {"fof-distrib",            "THVM_ATP_FOF_DISTRIB",     1, "(per-record CNF distribution bound; past it the record clausifies via Tseitin)"},
-  {"fof-sat",                "THVM_ATP_FOF_SAT",         1, "(non-Horn clausal-saturation pre-pass step budget; 0 disables)"},
+  {"fof-sat",                "THVM_ATP_FOF_SAT",         1, "(non-Horn clausal-saturation pre-pass step cap; default wall-governed, 0 disables)"},
   {"fof-sine",               "THVM_ATP_FOF_SINE",        1, "(clausal pre-pass SInE cone above N clausified clauses; 0 off, 1 = default threshold 512, N>1 = threshold N)"},
   {"fof-slice",              "THVM_ATP_FOF_SLICE",       1, "(FOF-portfolio slice gate: 2 = give up unless the input carries a fof() record)"},
   {"fof-split",              "THVM_ATP_FOF_SPLIT",       1, "(k-bounded ground case splitting for near-Horn FOF; 2 = give up if inapplicable)"},
@@ -6531,7 +6531,7 @@ static u8 *fof_sine_cone(FolClause **cls, const u8 *ccnj, int ncl, int thr) {
 // other outcome (saturation, cap, wall) falls through to the
 // equational lane and the usual GaveUp discipline; a SATURATION here
 // is never reported (the step/wall bounds make it inconclusive).
-// THVM_ATP_FOF_SAT = step budget (default 20000, 0 disables).
+// THVM_ATP_FOF_SAT = step budget (default wall-governed, 0 disables).
 // `ccnj` marks conjecture-descended records: those clauses (and their
 // inference descendants, tracked inside the engine) get the pick-best
 // goal bonus.
@@ -6660,7 +6660,12 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
 }
 
 static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
-  u32 budget = 20000u;
+  // Step budget: wall-governed by default (cnf_init(0) = 1<<30 steps;
+  // the 60%-of-remaining-wall guard + the heap guard in _once are the
+  // real bounds -- a fixed step cap predates the indexing speedups and
+  // bound SYN938+1 at 0.5s of a 36s guard).  THVM_ATP_FOF_SAT: N > 0
+  // caps the steps exactly, 0 (or negative) disables the pre-pass.
+  u32 budget = 0u;
   {
     const char *e = getenv("THVM_ATP_FOF_SAT");
     if (e != NULL) {
