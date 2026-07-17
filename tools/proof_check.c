@@ -425,6 +425,10 @@ static AtpStatus pc_refute(Term *fs, int n) {
   FolClause **cl = fol_formula_to_clauses(conj, &nc);
   if (cl == NULL) return ATP_ABORTED;
   CnfState *s = cnf_init(pc_cap);
+  // Step replay must not depend on the AVATAR splitting env: the
+  // checker's per-step refutations are tiny and want the plain
+  // deterministic calculus.
+  cnf_set_avatar(s, 0u);
   for (u32 j = 0; j < nc; j++) cnf_add_clause(s, cl[j]);
   free(cl);
   AtpStatus st = cnf_run(s);

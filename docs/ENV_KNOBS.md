@@ -200,6 +200,8 @@ operational ones.
 | `THVM_ATP_CP_DATASET` | unset | When set to a filename, capture the ENIGMA CP dataset (WL bridge). |
 | `THVM_FOL_AGE_RATIO` | 5 | FOF clausal pre-pass pick-given interleave (1 pure FIFO, 0 pure best-first). |
 | `THVM_FOL_GOAL_TIER` | on | FOF pre-pass conjecture-ancestry selection tier; `0` drops it. |
+| `THVM_FOL_INDEX` | on | FOF pre-pass literal indexing (partner lists + subsumption buckets); `0` restores the full scans (byte-identical trajectory). |
+| `THVM_FOL_AVATAR` | pre-pass on | AVATAR-lite variable-disjoint component splitting in the FOF clausal pre-pass; `0` restores the unsplit calculus exactly, `2` scopes guard spend to input + conjecture-descended clauses. Engine-level states created outside the pre-pass default off. |
 | `THVM_PROOFCHECK_WALL` / `_CAP` / `_DEEP` | (impl) | Proof-checker (`--check` / CheckProof) wall, per-step budget cap, and 10x deep-validation mode. |
 
 ## Misc

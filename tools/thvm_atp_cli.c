@@ -167,6 +167,8 @@ static const AtpKnob KNOBS[] = {
   {"fol-age-ratio",          "THVM_FOL_AGE_RATIO",       1, "(clausal pre-pass pick-given interleave: every Nth pick FIFO; 1 pure FIFO, 0 pure best-first, default 5)"},
   {"fol-goal-tier",          "THVM_FOL_GOAL_TIER",       1, "(clausal pre-pass goal tier: 0 drops the non-conjecture-ancestry pick-best penalty)"},
   {"fol-index",              "THVM_FOL_INDEX",           1, "(clausal pre-pass literal indexing: partner lists + subsumption buckets; 0 disables)"},
+  {"fol-avatar",             "THVM_FOL_AVATAR",          1, "(clausal pre-pass AVATAR-lite variable-disjoint component splitting; 0 disables)"},
+  {"fof-stats",              "THVM_ATP_FOF_STATS",       0, "(front-end probe: clausify, print component-split stats, exit -- no engine)"},
   {"canon-input",            "THVM_ATP_CANON_INPUT",     1, "(canonical input presentation: greater side left + sorted clauses; 0 disables)"},
   {"horn",                   "THVM_ATP_HORN",            1, "(encoded-Horn release: 0 disables)"},
   {"horn-ratio",             "THVM_ATP_HORN_RATIO",      1, "(Horn pick-given size:age ratio, 0..4)"},
@@ -6155,23 +6157,48 @@ static void prov_reset_emitted(void) {
 static char *g_cli_prepass_proof = NULL;
 
 static const char *prepass_name(const CnfState *s, u32 id, const int *id2cnf,
-                                int ncl, char *buf, size_t cap) {
+                                int map_cap, char *buf, size_t cap) {
   if (s->trace[id].rule == FOL_INF_INPUT && id2cnf != NULL &&
-      id < (u32)ncl && id2cnf[id] >= 0)
+      id < (u32)map_cap && id2cnf[id] >= 0)
     snprintf(buf, cap, "c%d", id2cnf[id]);
   else
     snprintf(buf, cap, "p%u", id);
   return buf;
 }
 
+// Assumption tail: the ~spl<g> disjuncts a conditional clause carries
+// (the Vampire presentation of an AVATAR-conditional clause).
+static void prepass_emit_tail(FILE *out, u64 asum) {
+  for (u32 g = 0; g < 64u; g++) {
+    if ((asum >> g) & 1ull) fprintf(out, " | ~spl%u", g);
+  }
+}
+
+// The avatar_definition leaf for guard g (once, def_done-deduped):
+//   fof(sdef<g>, definition, (spl<g> <=> (<component>)), introduced(...)).
+static int prepass_emit_def(FILE *out, CnfState *s, u32 g, u8 *def_done) {
+  if (def_done[g]) return 1;
+  const FolClause *comp = cnf_clause_at(s, s->guard_comp[g]);
+  if (comp == NULL) return 1;   // unretrievable component: the def stays
+                                // un-emitted and citations skip it
+  char *txt = prov_clause_text(comp);
+  if (txt == NULL) return 0;
+  fprintf(out, "fof(sdef%u, definition, (spl%u <=> (%s)), "
+               "introduced(definition, [new_symbols(naming, [spl%u])], "
+               "[avatar_definition])).\n", g, g, txt, g);
+  free(txt);
+  def_done[g] = 1;
+  return 1;
+}
+
 static int prepass_emit_c(FILE *out, CnfState *s, u32 id, u8 *done,
-                          const int *id2cnf, int ncl) {
+                          const int *id2cnf, int map_cap, u8 *def_done) {
   if (id == FOL_NO_PARENT || id >= s->n || done[id]) return 1;
   done[id] = 1;
   const FolTrace *t = &s->trace[id];
   const FolClause *c = cnf_clause_at(s, id);
   if (t->rule == FOL_INF_INPUT) {
-    int k = (id2cnf != NULL && id < (u32)ncl) ? id2cnf[id] : -1;
+    int k = (id2cnf != NULL && id < (u32)map_cap) ? id2cnf[id] : -1;
     if (k >= 0 && prov_emit_cnf(out, k)) return 1;
     // Capture incomplete for this record: cite the file directly so
     // the DAG stays closed (validator-visible degradation, never an
@@ -6183,8 +6210,23 @@ static int prepass_emit_c(FILE *out, CnfState *s, u32 id, u8 *done,
     free(txt);
     return 1;
   }
-  if (!prepass_emit_c(out, s, t->parent_a, done, id2cnf, ncl)) return 0;
-  if (!prepass_emit_c(out, s, t->parent_b, done, id2cnf, ncl)) return 0;
+  if (t->rule == FOL_INF_SPLIT) {
+    // AVATAR component intro: guarded by spl<g>, justified by the
+    // guard's definition alone (a_g -> component); the case analysis
+    // over the original clause lives in the avatar_split_clause
+    // records the closing block emits.
+    u32 g = (u32)s->cguard[id] - 1u;
+    if (!prepass_emit_def(out, s, g, def_done)) return 0;
+    char *txt = prov_clause_text(c);
+    if (txt == NULL) return 0;
+    fprintf(out, "cnf(p%u, plain, (%s | ~spl%u), "
+                 "inference(avatar_component_clause, [status(thm)], "
+                 "[sdef%u])).\n", id, txt, g, g);
+    free(txt);
+    return 1;
+  }
+  if (!prepass_emit_c(out, s, t->parent_a, done, id2cnf, map_cap, def_done)) return 0;
+  if (!prepass_emit_c(out, s, t->parent_b, done, id2cnf, map_cap, def_done)) return 0;
   char *txt = prov_clause_text(c);
   if (txt == NULL) return 0;
   static const char *rn[] = {
@@ -6192,38 +6234,122 @@ static int prepass_emit_c(FILE *out, CnfState *s, u32 id, u8 *done,
     "equality_resolution", "equality_factoring", "demodulation" };
   const char *rule = ((u32)t->rule < sizeof rn / sizeof rn[0])
                        ? rn[t->rule] : "unknown";
-  fprintf(out, "cnf(p%u, plain, %s, inference(%s, [status(thm)], [", id, txt, rule);
+  u64 asum = (s->cassume != NULL) ? s->cassume[id] : 0ull;
+  fprintf(out, "cnf(p%u, plain, ", id);
+  if (asum != 0ull) {
+    fprintf(out, "(%s", txt);
+    prepass_emit_tail(out, asum);
+    fputs(")", out);
+  } else {
+    fputs(txt, out);
+  }
+  fprintf(out, ", inference(%s, [status(thm)], [", rule);
   char na[32];
   int first = 1;
   if (t->parent_a != FOL_NO_PARENT && t->parent_a < s->n) {
-    fputs(prepass_name(s, t->parent_a, id2cnf, ncl, na, sizeof na), out);
+    fputs(prepass_name(s, t->parent_a, id2cnf, map_cap, na, sizeof na), out);
     first = 0;
   }
   if (t->parent_b != FOL_NO_PARENT && t->parent_b < s->n) {
     if (!first) fputs(", ", out);
-    fputs(prepass_name(s, t->parent_b, id2cnf, ncl, na, sizeof na), out);
+    fputs(prepass_name(s, t->parent_b, id2cnf, map_cap, na, sizeof na), out);
   }
   fputs("])).\n", out);
   free(txt);
   return 1;
 }
 
-static void prepass_emit_proof(CnfState *s, const int *id2cnf, int ncl) {
+// The AVATAR closing block: every branch refutation as an
+// avatar_contradiction_clause, every split event as an
+// avatar_split_clause (citing the split original + the guard
+// definitions), and the terminal avatar_sat_refutation $false citing
+// them all -- the family the engine's DPLL verified unsatisfiable.
+static int prepass_emit_avatar(FILE *out, CnfState *s, u8 *done,
+                               const int *id2cnf, int map_cap, u8 *def_done) {
+  char na[32];
+  for (u32 r = 0; r < s->n_refut; r++) {
+    if (!prepass_emit_c(out, s, s->refut_id[r], done, id2cnf, map_cap, def_done))
+      return 0;
+    fprintf(out, "cnf(sct%u, plain, (", r);
+    int first = 1;
+    for (u32 g = 0; g < 64u; g++) {
+      if (((s->refut_mask[r] >> g) & 1ull) == 0ull) continue;
+      fprintf(out, "%s~spl%u", first ? "" : " | ", g);
+      first = 0;
+    }
+    fprintf(out, "), inference(avatar_contradiction_clause, [status(thm)], "
+                 "[p%u])).\n", s->refut_id[r]);
+  }
+  for (u32 e = 0; e < s->n_split; e++) {
+    if (!prepass_emit_c(out, s, s->split_orig[e], done, id2cnf, map_cap, def_done))
+      return 0;
+    for (u32 g = 0; g < 64u; g++) {
+      if (((s->split_pos[e] >> g) & 1ull) == 0ull) continue;
+      if (s->guard_comp[g] < s->n &&
+          !prepass_emit_def(out, s, g, def_done)) return 0;
+    }
+    fprintf(out, "cnf(ssp%u, plain, (", e);
+    int first = 1;
+    for (u32 g = 0; g < 64u; g++) {
+      if (((s->split_neg[e] >> g) & 1ull) == 0ull) continue;
+      fprintf(out, "%s~spl%u", first ? "" : " | ", g);
+      first = 0;
+    }
+    for (u32 g = 0; g < 64u; g++) {
+      if (((s->split_pos[e] >> g) & 1ull) == 0ull) continue;
+      fprintf(out, "%sspl%u", first ? "" : " | ", g);
+      first = 0;
+    }
+    fprintf(out, "), inference(avatar_split_clause, [status(thm)], [%s",
+            prepass_name(s, s->split_orig[e], id2cnf, map_cap, na, sizeof na));
+    for (u32 g = 0; g < 64u; g++) {
+      if (((s->split_pos[e] >> g) & 1ull) == 0ull) continue;
+      if (def_done[g]) fprintf(out, ", sdef%u", g);
+    }
+    fputs("])).\n", out);
+  }
+  fputs("cnf(sat_ref, plain, $false, "
+        "inference(avatar_sat_refutation, [status(thm)], [", out);
+  int first = 1;
+  for (u32 e = 0; e < s->n_split; e++) {
+    fprintf(out, "%sssp%u", first ? "" : ", ", e);
+    first = 0;
+  }
+  for (u32 r = 0; r < s->n_refut; r++) {
+    fprintf(out, "%ssct%u", first ? "" : ", ", r);
+    first = 0;
+  }
+  fputs("])).\n", out);
+  return 1;
+}
+
+static void prepass_emit_proof(CnfState *s, const int *id2cnf, int map_cap) {
+  // The outright root: an empty clause with EMPTY assumptions.  When
+  // only conditional empties exist, the refutation is the AVATAR SAT
+  // closure over the recorded guard theory.
   u32 root = ~0u;
   for (u32 i = 0; i < s->n; i++) {
     const FolClause *c = cnf_clause_at(s, i);
-    if (c != NULL && c->n_lits == 0u) { root = i; break; }
+    if (c != NULL && c->n_lits == 0u &&
+        (s->cassume == NULL || s->cassume[i] == 0ull)) { root = i; break; }
   }
-  if (root == ~0u) return;
+  // The avatar block claims the recorded guard theory is UNSAT --
+  // only the engine's own DPLL closure (ATP_PROVED) justifies that.
+  u8 avatar = (root == ~0u && s->n_refut > 0u &&
+               s->status == ATP_PROVED) ? 1u : 0u;
+  if (root == ~0u && !avatar) return;
   char *bufp = NULL;
   size_t plen = 0;
   FILE *ms = open_memstream(&bufp, &plen);
   if (ms == NULL) return;
   u8 *done = (u8 *)calloc(s->n, 1u);
+  u8 def_done[64] = {0};
   int ok = (done != NULL);
   if (ok) {
     fprintf(ms, "%% SZS output start Proof for %s\n", g_cli_probpath);
-    ok = prepass_emit_c(ms, s, root, done, id2cnf, ncl);
+    ok = avatar
+           ? prepass_emit_avatar(ms, s, done, id2cnf, map_cap, def_done)
+           : prepass_emit_c(ms, s, root, done, id2cnf, map_cap, def_done);
     fprintf(ms, "%% SZS output end Proof for %s\n", g_cli_probpath);
   }
   fclose(ms);
@@ -6415,15 +6541,28 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   CnfState *s = cnf_init(budget);
   if (s == NULL) return 0;
   cnf_set_select(s, CNF_SELECT_NEGATIVE);
+  // AVATAR-lite component splitting: ON by default for the pre-pass
+  // (THVM_FOL_AVATAR=0 restores the exact unsplit behavior -- the A/B
+  // lever; =1 splits every stored clause, =2 scopes the guard spend to
+  // input + conjecture-descended clauses; see sat.c "AVATAR-lite").
+  {
+    const char *e = getenv("THVM_FOL_AVATAR");
+    cnf_set_avatar(s, (u8)((e == NULL || e[0] == '\0') ? 1u
+                                                       : (u8)atoi(e)));
+  }
   // --proof: keep backward-subsumed clauses printable and remember
   // which CNF record each input clause id maps to, so a refutation
-  // here emits the full conversion-lineage proof.
+  // here emits the full conversion-lineage proof.  The engine id
+  // space outgrows ncl under AVATAR splitting (each split original
+  // and each fresh component takes an id): size the map for the worst
+  // case -- one original per input plus the 64-guard component cap.
+  int id2cap = 2 * ncl + 64 + 1;
   int *id2cnf = NULL;
   if (g_cli_want_proof) {
     cnf_set_retain_dead(s);
-    id2cnf = (int *)malloc(sizeof(int) * (size_t)(ncl + 1));
+    id2cnf = (int *)malloc(sizeof(int) * (size_t)id2cap);
     if (id2cnf != NULL)
-      for (int i = 0; i <= ncl; i++) id2cnf[i] = -1;
+      for (int i = 0; i < id2cap; i++) id2cnf[i] = -1;
   }
   // Attach a KBO (all weights 1, precedence = label) so demodulation
   // is ordering-gated; without one the engine demodulates naively and
@@ -6445,7 +6584,7 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
     i32 cid = cnf_add_clause_goal(s, c, ccnj[i]);   // takes ownership (a
                             // dropped clause only shrinks the set: a
                             // subset refutation is still a refutation)
-    if (id2cnf != NULL && cid >= 0 && cid <= ncl) id2cnf[cid] = i;
+    if (id2cnf != NULL && cid >= 0 && cid < id2cap) id2cnf[cid] = i;
   }
   // cnf_run with a wall guard and a heap guard: paramodulation storms
   // can flood the term arena (PUZ001+1 burned the whole 134M-cell
@@ -6473,10 +6612,12 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   AtpStatus st = s->status;
   u32 steps = s->step;
   u32 nstore = s->n;
+  u32 nguard = s->n_guards;
+  u32 nrefut = s->n_refut;
   // Refutation under --proof: stash the full conversion-lineage +
   // resolution proof BEFORE the state (and its term-heap slice) dies.
   if ((st == ATP_PROVED || st == ATP_REFUTED) && g_cli_want_proof)
-    prepass_emit_proof(s, id2cnf, ncl);
+    prepass_emit_proof(s, id2cnf, id2cap);
   free(id2cnf);
   // THVM_ATP_FOF_SAT_DEBUG=1: dump the live clause set (diagnosis of
   // spurious saturation -- a theorem must never reach QUEUE_EMPTY).
@@ -6498,15 +6639,23 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   if (st_out != NULL) *st_out = st;
   if (st == ATP_PROVED || st == ATP_REFUTED) {
     fprintf(stderr, "FindProof: FOF clausal pre-pass: refuted in %u "
-            "step(s), %.1fs\n", steps, horn_now() - t0);
+            "step(s), %.1fs", steps, horn_now() - t0);
+    if (nrefut > 0u)
+      fprintf(stderr, " (avatar: %u guard(s), %u branch refutation(s))",
+              nguard, nrefut);
+    fprintf(stderr, "\n");
     return 1;
   }
   if (tripped == NULL)
     tripped = (st == ATP_ABORTED) ? "steps" :
               (st == ATP_QUEUE_EMPTY) ? "saturated" : "engine";
   fprintf(stderr, "FindProof: FOF clausal pre-pass: undecided "
-          "(%u step(s), %u clause(s), %.1fs, %s-bounded, guard %.1fs)\n",
+          "(%u step(s), %u clause(s), %.1fs, %s-bounded, guard %.1fs",
           steps, nstore, horn_now() - t0, tripped, wall_guard);
+  if (nguard > 0u)
+    fprintf(stderr, "; avatar %u guard(s), %u branch refutation(s)",
+            nguard, nrefut);
+  fprintf(stderr, ")\n");
   return 0;
 }
 
@@ -6698,6 +6847,35 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     free(recc);
   }
   if (ncl == 0) tp_giveup("no TPTP records parsed");
+
+  // --fof-stats: front-end-only probe.  Report, per clausified set,
+  // how many clauses have >= 2 variable-disjoint literal components
+  // (the AVATAR-lite split shapes) and exit -- no engine, no encoding.
+  if (getenv("THVM_ATP_FOF_STATS") != NULL) {
+    int wide = 0, nonhorn = 0, split = 0, split_nonhorn = 0;
+    int split_input_guards = 0;
+    u32 max_comp = 1u;
+    for (int c = 0; c < ncl; c++) {
+      if (cls[c]->n_lits < 2u) continue;
+      wide++;
+      int npos = 0;
+      for (u32 i = 0; i < cls[c]->n_lits; i++)
+        if (!cls[c]->lits[i].sign) npos++;
+      if (npos >= 2) nonhorn++;
+      u32 m = fol_components(cls[c], NULL);
+      if (m < 2u) continue;
+      split++;
+      split_input_guards += (int)m;
+      if (npos >= 2) split_nonhorn++;
+      if (m > max_comp) max_comp = m;
+    }
+    printf("FOFSTATS file=%s ncl=%d wide=%d nonhorn=%d split=%d "
+           "split_nonhorn=%d input_guards=%d max_comp=%u\n",
+           g_cli_probpath, ncl, wide, nonhorn, split,
+           split_nonhorn, split_input_guards, max_comp);
+    fflush(stdout);
+    exit(0);
+  }
 
   // Fresh names: the pc_intern table now holds every problem symbol.
   fof_fresh_const(g_fof_true_name, sizeof g_fof_true_name);
