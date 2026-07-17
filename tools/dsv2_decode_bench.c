@@ -76,6 +76,11 @@
 //             DSV2_MOEINTER=64 DSV2_DENSEINTER=256 DSV2_VOCAB=1024 DSV2_MAXSEQ=128 \
 //             ./bin/dsv2_decode_bench             (local CPU smoke, no GPU)
 //   knobs:  WARM (20) STEPS (40) DSV2_SPEC (0) DSV2_FORCE_IDS + every DSV2_* shape knob.
+//
+// SERVE (DSV2_SERVE=1): stdin request loop for the tools/thvm_llm_service
+// front-end -- weights + captured step(s) stay resident, "ready" then one
+// "ids: ..." response line per prompt-ids request line; see serve_loop below.
+// Knobs: DSV2_MAXNEW (256, per-request default cap), DSV2_EOS (100001).
 #include "../src/thvm.c"
 #include <time.h>
 #include <fcntl.h>
@@ -2741,6 +2746,155 @@ static int run_spec(u32 slotA, int const *prompt, u32 np, u32 count,
   }
 }
 
+// === serve mode (DSV2_SERVE=1) ==============================================
+// Weights + the captured step(s) stay resident; the process answers prompt
+// requests on stdin.  Protocol: "ready" is printed (stdout, flushed) once the
+// capture is live; each request line is comma-separated prompt token ids,
+// optionally "ids|max_new" for a per-request generation cap (default
+// DSV2_MAXNEW, 256); the response is ONE line "ids: <comma-separated
+// generated ids>", flushed; EOF exits cleanly.  Per request the device state
+// is re-prefilled from position 0 over the same buffers (T_len=1 +
+// T_tok=prompt[0], one replay per prompt token): cache rows are overwritten
+// in place and the score kernels only read rows < len, so nothing stale
+// survives.  Generation stops at DSV2_EOS (100001, the DeepSeek-V2 eos id;
+// the eos token is NOT emitted).  DSV2_SPEC=S serves the blind-speculative
+// path: the spec step is captured on the first request (its verify row 0 is
+// memcmp-gated against the base logits exactly like run_spec) and replayed
+// with a fresh T_len/T_ids seed for every later one.  Timing (prefill ms,
+// gen ms/tok) goes to stderr, keeping the stdout protocol clean.
+static u32 SLOT_SPEC = 0;
+static double SERVE_MS_PRE = 0, SERVE_MS_GEN = 0;
+
+static void serve_prefill(u32 slot, int const *prompt, u32 np) {
+  (void)read_i32(T_tok);          // drain the previous request's stream
+  write_i32(T_len, 1);
+  write_i32(T_tok, prompt[0]);
+  jit_replay(slot);               // consumes prompt[0] at position 0
+  for (u32 i = 1; i < np; i++) {
+    (void)read_i32(T_tok);
+    write_i32(T_tok, prompt[i]);
+    jit_replay(slot);
+  }
+}
+
+static u32 serve_gen_base(u32 slot, int const *prompt, u32 np, u32 max_new,
+                          int eos, int *out) {
+  double t0 = now_ms();
+  serve_prefill(slot, prompt, np);
+  u32 n = 0;
+  int tok = read_i32(T_tok);      // prediction after the full prompt
+  SERVE_MS_PRE = now_ms() - t0;
+  t0 = now_ms();
+  while (n < max_new && tok != eos) {
+    out[n++] = tok;
+    if (n == max_new) break;
+    jit_replay(slot);
+    tok = read_i32(T_tok);
+  }
+  SERVE_MS_GEN = now_ms() - t0;
+  return n;
+}
+
+static u32 serve_gen_spec(u32 slot, int const *prompt, u32 np, u32 max_new,
+                          int eos, int *out) {
+  u32 S = SPEC;
+  double t0 = now_ms();
+  serve_prefill(slot, prompt, np);
+  (void)read_i32(T_tok);          // sync; the spec step re-verifies prompt[np-1]
+  write_i32(T_len, (int)np);
+  static int *ih = NULL;
+  if (ih == NULL) ih = (int *)malloc((u64)C.max_seq * 4);
+  for (u32 i = 0; i < C.max_seq; i++) ih[i] = i < np ? prompt[i] : -1;
+  BK->buf_write(TENS[T_ids].buf_id, ih, (u64)C.max_seq * 4);
+  SERVE_MS_PRE = now_ms() - t0;
+  t0 = now_ms();
+  if (SLOT_SPEC == 0) {
+    // first request: capture the spec step (the fire is spec step 1) + gate
+    float *lg_base = (float *)malloc((u64)C.vocab * 4);
+    TENS[LOGITS_TID].backend->buf_read(TENS[LOGITS_TID].buf_id, lg_base, (u64)C.vocab * 4);
+    SLOT_SPEC = jit_capture_begin();
+    if (SLOT_SPEC == 0) { fprintf(stderr, "FATAL: no spec capture slot\n"); exit(1); }
+    step_build_spec();
+    jit_capture_end();
+    float *lg_s0 = (float *)malloc((u64)C.vocab * 4);
+    TENS[LOGITS_S].backend->buf_read(TENS[LOGITS_S].buf_id, lg_s0, (u64)C.vocab * 4);
+    if (memcmp(lg_base, lg_s0, (u64)C.vocab * 4) != 0) {
+      fprintf(stderr, "FATAL: spec s0 logits memcmp vs base FAIL\n");
+      exit(1);
+    }
+    fprintf(stderr, "[serve] spec captured: S=%u ops=%u gate OK\n",
+            S, jit_capture_op_count(SLOT_SPEC));
+    free(lg_base);
+    free(lg_s0);
+  } else {
+    jit_replay(SLOT_SPEC);
+  }
+  int Ln;
+  long produced;
+  for (;;) {
+    Ln = read_i32(T_len) - 1;     // committed count == pending index
+    produced = (long)Ln + 1 - (long)np;
+    TENS[T_ids].backend->buf_read(TENS[T_ids].buf_id, ih, (u64)C.max_seq * 4);
+    int hit_eos = 0;
+    for (long i = 0; i < produced && !hit_eos; i++) hit_eos = ih[np + i] == eos;
+    if (hit_eos || produced >= (long)max_new) break;
+    u32 room = (C.max_seq - 1 - (u32)Ln) / S;   // steps that surely fit
+    u32 burst = room < 8 ? room : 8;
+    if (burst == 0) break;
+    for (u32 b = 0; b < burst; b++) jit_replay(SLOT_SPEC);
+  }
+  u32 n = 0;
+  for (long i = 0; i < produced && n < max_new && ih[np + i] != eos; i++)
+    out[n++] = ih[np + i];
+  SERVE_MS_GEN = now_ms() - t0;
+  return n;
+}
+
+static int serve_loop(u32 slot) {
+  int eos = (int)envu("DSV2_EOS", 100001);
+  u32 defmax = envu("DSV2_MAXNEW", 256);
+  int *prompt = (int *)malloc((u64)C.max_seq * 4);
+  int *out = (int *)malloc((u64)C.max_seq * 4);
+  char *line = NULL;
+  size_t lcap = 0;
+  printf("ready\n");
+  fflush(stdout);
+  for (;;) {
+    ssize_t r = getline(&line, &lcap, stdin);
+    if (r < 0) break;             // EOF: clean exit
+    u32 np = 0, max_new = defmax;
+    {
+      char *bar = strchr(line, '|');
+      if (bar != NULL) { max_new = (u32)strtoul(bar + 1, NULL, 10); *bar = '\0'; }
+      char const *p = line;
+      while (np < C.max_seq && (*p == '-' || (*p >= '0' && *p <= '9'))) {
+        prompt[np++] = (int)strtol(p, (char **)&p, 10);
+        if (*p != ',') break;
+        p++;
+      }
+    }
+    long cap = (long)C.max_seq - (long)np - (SPEC > 0 ? (long)SPEC + 1 : 0) - 1;
+    if (cap < (long)max_new) max_new = cap < 0 ? 0 : (u32)cap;
+    u32 n = 0;
+    SERVE_MS_PRE = SERVE_MS_GEN = 0;
+    if (np > 0 && max_new > 0)
+      n = (SPEC > 0 && np >= 2) ? serve_gen_spec(slot, prompt, np, max_new, eos, out)
+                                : serve_gen_base(slot, prompt, np, max_new, eos, out);
+    printf("ids: ");
+    for (u32 i = 0; i < n; i++) printf(i ? ",%d" : "%d", out[i]);
+    printf("\n");
+    fflush(stdout);
+    fprintf(stderr, "[serve] np=%u gen=%u  prefill %.1f ms (%.2f ms/tok)  gen %.1f ms (%.2f ms/tok, %.1f tok/s)\n",
+            np, n, SERVE_MS_PRE, np > 0 ? SERVE_MS_PRE / np : 0.0, SERVE_MS_GEN,
+            n > 0 ? SERVE_MS_GEN / n : 0.0, SERVE_MS_GEN > 0 ? n * 1e3 / SERVE_MS_GEN : 0.0);
+    fflush(stderr);
+  }
+  free(prompt);
+  free(out);
+  free(line);
+  return 0;
+}
+
 int main(void) {
   char const *dev = getenv("DEV");
   IS_CUDA = (dev != NULL && strcmp(dev, "cuda") == 0);
@@ -2788,12 +2942,13 @@ int main(void) {
       }
     }
   }
-  if (SPEC > 0 && (np < 2 || SPEC < 2)) {
+  u32 serve = envu("DSV2_SERVE", 0);
+  if (SPEC > 0 && (serve != 0 ? SPEC < 2 : (np < 2 || SPEC < 2))) {
     fprintf(stderr, "FATAL: DSV2_SPEC needs S >= 2 and DSV2_PROMPT_IDS with >= 2 tokens\n");
     return 1;
   }
-  if (np > 0 ? (np + count + (SPEC > 0 ? SPEC + 1 : 0) > C.max_seq)
-             : (1 + warm + steps + 1 > C.max_seq)) {
+  if (serve == 0 && (np > 0 ? (np + count + (SPEC > 0 ? SPEC + 1 : 0) > C.max_seq)
+                            : (1 + warm + steps + 1 > C.max_seq))) {
     fprintf(stderr, "FATAL: token budget exceeds DSV2_MAXSEQ=%u\n", C.max_seq);
     return 1;
   }
@@ -2821,6 +2976,7 @@ int main(void) {
          (now_ms() - t0) / 1e3, jit_capture_op_count(slot), read_i32(T_tok), read_i32(T_len));
   if (envu("DSV2_DUMP", 0) != 0) dump_fingerprints();
 
+  if (serve != 0) return serve_loop(slot);
   if (np > 0 && SPEC > 0) return run_spec(slot, prompt, np, count, force, nf);
   if (np > 0) return run_prompt(slot, prompt, np, count, envu("DSV2_TOP2", 0) != 0);
 
