@@ -6581,10 +6581,34 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
     for (u32 i = 0; i < n_labels; i++) { kbo_w[i] = 1u; kbo_p[i] = i; }
     cnf_set_kbo(s, &kbo);
   }
+  // Persist the KBO per-term weight/hash memo across the whole pre-pass
+  // instead of the "safe default" of invalidating it on every single
+  // thvm_kbo() call.  cnf_rewrite_once re-walks every literal against
+  // every active unit rule to fixpoint (forward + backward demod), so
+  // the same subterms recur across thousands of comparisons per step on
+  // a wide clause set.  Safe here: the pre-pass term heap is a pure bump
+  // arena for its own duration (see the "bump pointer rolls back
+  // afterwards" comment below), terms are immutable once built, and
+  // cnf_reclaim (sat.c) already bumps the epoch at every point a
+  // discarded allocation's cell range could be reused (gated on
+  // g_cnf_kbo_calls having moved since the mark -- see cnf_reclaim's
+  // header comment), so a Term ID is never silently reinterpreted while
+  // an epoch is still live.  Turned back off before returning so no
+  // other caller (proof_check.c, tests) inherits persistence it doesn't
+  // manage invalidation for.  Force a fresh epoch on entry: `&kbo` is a
+  // stack address that a SInE-cone retry's second _once call could
+  // coincidentally share with the first, and thvm_kbo()'s cfg-pointer-
+  // change check alone must not be the only thing standing between this
+  // call and a stale table.
+  thvm_kbo_set_persist(1u);
+  thvm_kbo_invalidate();
   for (int i = 0; i < ncl; i++) {
     if (sine_keep != NULL && !sine_keep[i]) continue;   // outside the cone
     FolClause *c = fol_clause_new(cls[i]->n_lits);
-    if (c == NULL) { cnf_free(s); free(id2cnf); return 0; }
+    if (c == NULL) {
+      thvm_kbo_set_persist(0u);   // restore the safe per-call default
+      cnf_free(s); free(id2cnf); return 0;
+    }
     for (u32 j = 0; j < cls[i]->n_lits; j++) c->lits[j] = cls[i]->lits[j];
     i32 cid = cnf_add_clause_goal(s, c, ccnj[i]);   // takes ownership (a
                             // dropped clause only shrinks the set: a
@@ -6614,6 +6638,7 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
     if (horn_now() - t0 > wall_guard) { tripped = "wall"; break; }
     if (HEAP_NEXT > heap_lim) { tripped = "heap"; break; }
   }
+  thvm_kbo_set_persist(0u);   // restore the safe per-call default
   AtpStatus st = s->status;
   u32 steps = s->step;
   u32 nstore = s->n;

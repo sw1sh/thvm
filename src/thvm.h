@@ -4283,6 +4283,49 @@ typedef struct {
   u32        *ueq;
   u32         n_ueq;
   u32         cap_ueq;
+  // ueq_lhs[k]/ueq_rhs[k] cache ueq[k]'s equation renamed apart by
+  // FOL_RENAME_OFFSET, filled ONCE when ueq[k] is appended (sat.c
+  // cnf_step's "register on the demod rule list") -- every later
+  // forward-demod match attempt against this rule reuses the cached
+  // pair instead of re-running thvm_rename_vars (a whole-tree
+  // walk + allocation) on every attempt.  Index-parallel to ueq[],
+  // grown in lockstep.
+  Term       *ueq_lhs;
+  Term       *ueq_rhs;
+  // Root-label index over ueq_lhs[]: (LHS root label) -> ueq-slot
+  // index, so cnf_forward_demod's rewrite walk retrieves ONLY the
+  // candidate rules whose LHS root could possibly match a given
+  // subterm position instead of scanning all of ueq[] there.  A rule
+  // whose LHS is a bare variable (matches any subterm shape
+  // unconditionally -- see sat.c cnf_demod_index_insert) has no root
+  // label to key on; it lives on ueq_wc[] instead, always scanned.
+  // Both populated at the same append point as ueq[] itself; neither
+  // needs a rebuild-on-config-change path (unlike idx_res), since a
+  // rule's LHS root label is a structural fact of the clause, not a
+  // function of the ordering/selection config.  A bucket-insert
+  // failure degrades to the wildcard list rather than disabling
+  // anything wholesale: demodulation is a redundancy simplifier, not
+  // an inference generator, so a missed index entry costs efficiency,
+  // never soundness or refutational completeness.
+  FolIdx      idx_demod;
+  u32        *ueq_wc;
+  u32         n_ueq_wc, cap_ueq_wc;
+  // ueq_lhs_mask[k]: a 64-bit bloom mask of every label appearing
+  // ANYWHERE in ueq_lhs[k] (all levels, not just the root), cached
+  // once at the same append point.  The root-label bucket above is a
+  // one-level filter -- on a clause set dominated by a few shallow
+  // wrapper labels (e.g. an ifeq/eq encoding, where nearly every
+  // literal and nearly every rule shares the SAME outermost symbol),
+  // a bucket can still hold most of ueq[].  The full-depth mask is a
+  // NECESSARY, cheap (one AND + compare) refinement WITHIN a bucket:
+  // substitution only ever fills in variable positions, so every
+  // concrete symbol the pattern demands must already be present
+  // somewhere in the subject, at any depth -- see sat.c
+  // cnf_demod_find_at's bottom-up subtree mask.  False positives
+  // (hash collisions) just fall through to the real thvm_match; there
+  // are no false negatives, so this never changes which rule wins,
+  // only how many provably-impossible attempts get skipped before it.
+  u64        *ueq_lhs_mask;
   // Deferred-free queue for backward subsumption: when a derived
   // clause subsumes an older one, the slot in clauses[] is NULLed
   // immediately but the FolClause* gets pushed here and freed at

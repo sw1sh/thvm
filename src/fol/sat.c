@@ -190,6 +190,9 @@ fn CnfState *cnf_init(u32 step_cap) {
   s->pheap = (u32 *)calloc(s->cap_pheap, sizeof(u32));
   s->cap_ueq = CNF_DEFAULT_CAP;
   s->ueq = (u32 *)calloc(s->cap_ueq, sizeof(u32));
+  s->ueq_lhs = (Term *)calloc(s->cap_ueq, sizeof(Term));
+  s->ueq_rhs = (Term *)calloc(s->cap_ueq, sizeof(Term));
+  s->ueq_lhs_mask = (u64 *)calloc(s->cap_ueq, sizeof(u64));
   s->trace_cap = CNF_DEFAULT_CAP;
   s->trace = (FolTrace *)calloc(s->trace_cap, sizeof(FolTrace));
   s->cap_deferred = CNF_DEFAULT_CAP;
@@ -201,13 +204,16 @@ fn CnfState *cnf_init(u32 step_cap) {
       s->cnvars == NULL || s->cassume == NULL || s->cguard == NULL ||
       s->parked == NULL || s->cstale == NULL ||
       s->active == NULL || s->passive == NULL ||
-      s->pheap == NULL || s->ueq == NULL || s->trace == NULL ||
+      s->pheap == NULL || s->ueq == NULL ||
+      s->ueq_lhs == NULL || s->ueq_rhs == NULL || s->ueq_lhs_mask == NULL ||
+      s->trace == NULL ||
       s->deferred_free == NULL) {
     free(s->clauses); free(s->cweight); free(s->cpri); free(s->cmask); free(s->cpicked);
     free(s->csel); free(s->cmaxlits); free(s->celig_valid); free(s->cgoal);
     free(s->cfrozen); free(s->cnvars); free(s->cassume); free(s->cguard);
     free(s->parked); free(s->cstale);
     free(s->active); free(s->passive); free(s->pheap); free(s->ueq);
+    free(s->ueq_lhs); free(s->ueq_rhs); free(s->ueq_lhs_mask);
     free(s->trace); free(s->deferred_free); free(s);
     return NULL;
   }
@@ -284,12 +290,17 @@ fn void cnf_free(CnfState *s) {
   free(s->passive);
   free(s->pheap);
   free(s->ueq);
+  free(s->ueq_lhs);
+  free(s->ueq_rhs);
+  free(s->ueq_lhs_mask);
+  free(s->ueq_wc);
   free(s->deferred_free);
   free(s->trace);
   cnf_idx_teardown(&s->idx_res);
   cnf_idx_teardown(&s->idx_fsub);
   cnf_idx_teardown(&s->idx_bsub);
   cnf_idx_teardown(&s->idx_bsub_f);
+  cnf_idx_teardown(&s->idx_demod);
   free(s->idx_peq);
   free(s->idx_fb);
   free(s->idx_fsub_wc);
@@ -1132,12 +1143,20 @@ fn i32 cnf_add_clause_goal(CnfState *s, FolClause *c, u8 goal_related) {
 // the Stage 11 forward + Stage 12 backward demod relied on).
 //
 // Dispatch priority for multiple set orderings: WPO > RPO > LPO > KBO.
+//
+// g_cnf_kbo_calls ticks once per thvm_kbo() dispatch here -- the ONLY
+// call site in this file.  cnf_reclaim snapshots it alongside
+// HEAP_NEXT/gc_count() so a candidate-generation window that never
+// once compared through KBO can skip the memo-wide epoch bump on
+// rollback (see cnf_reclaim below).
+static u64 g_cnf_kbo_calls = 0;
+static inline u64 cnf_kbo_call_count(void) { return g_cnf_kbo_calls; }
 static KboCmp cnf_compare(const CnfState *s, Term lhs, Term rhs) {
   if (s == NULL) return KBO_UN;
   if (s->cnf_wpo != NULL) return (KboCmp)thvm_wpo(lhs, rhs, s->cnf_wpo);
   if (s->cnf_rpo != NULL) return (KboCmp)thvm_rpo(lhs, rhs, s->cnf_rpo);
   if (s->cnf_lpo != NULL) return (KboCmp)thvm_lpo(lhs, rhs, s->cnf_lpo);
-  if (s->cnf_kbo != NULL) return thvm_kbo(lhs, rhs, s->cnf_kbo);
+  if (s->cnf_kbo != NULL) { g_cnf_kbo_calls++; return thvm_kbo(lhs, rhs, s->cnf_kbo); }
   return KBO_UN;
 }
 
@@ -1185,18 +1204,48 @@ fn void cnf_set_select(CnfState *s, CnfSelection sel) { if (s) { s->cnf_select =
 // and re-anchors HEAP_NEXT below the mark.  The KBO per-term memo
 // keys off cell locs, so bump its epoch: a reused loc must not serve
 // a stale weight/hash entry.
-static void cnf_reclaim(u64 mark, u64 gc_snap) {
-  if (gc_count() == gc_snap && HEAP_NEXT > mark) {
-    HEAP_NEXT = mark;
+//
+// The rollback branch's epoch bump is gated on `kbo_snap` (a
+// cnf_kbo_call_count() reading taken alongside `mark`): a memo entry
+// can only reference a cell in [mark, HEAP_NEXT) if some thvm_kbo()
+// call built it during THIS window, so when the counter hasn't moved
+// there is nothing in the memo for the rolled-back range and the
+// epoch bump is pure overhead.  Demodulation tries a candidate rule's
+// renamed lhs/rhs against a target and rolls back on every miss
+// (cnf_forward_demod/cnf_backward_demod) -- most rule/target pairs
+// never reach a successful thvm_match, so cnf_compare (the only
+// thvm_kbo call site) never fires and the surrounding window's
+// scratch never touches the memo at all.
+//
+// The GC branch stays unconditional: a compacting collector can
+// relocate or reuse cells for memo entries built in an EARLIER
+// window, not just this one, so "no thvm_kbo call in this window"
+// says nothing about whether the collection itself invalidated
+// something live.
+static void cnf_reclaim(u64 mark, u64 gc_snap, u64 kbo_snap) {
+  if (gc_count() != gc_snap) {
+    // A GC compacted the arena since `mark` was taken -- HEAP_NEXT is
+    // already re-anchored by the collector, so there's nothing to roll
+    // back, but cell locs may have been relocated/reused exactly like
+    // the manual-rollback case below.  The FOL clausal pre-pass runs
+    // the KBO per-term memo in persistent mode (fof_clausal_prepass_once
+    // sets thvm_kbo_set_persist(1)) so a reused loc must not silently
+    // serve a stale weight/hash entry from before the collection.
     thvm_kbo_invalidate();
+    return;
+  }
+  if (HEAP_NEXT > mark) {
+    HEAP_NEXT = mark;
+    if (cnf_kbo_call_count() != kbo_snap) thvm_kbo_invalidate();
   }
 }
 
 // Reclaim after a consider: only when the candidate was NOT stored
 // (s->n unchanged) and the loop is still running.
 static void cnf_reclaim_consider(CnfState *s, u32 n_before,
-                                 u64 mark, u64 gc_snap) {
-  if (s->n == n_before && s->status == ATP_RUNNING) cnf_reclaim(mark, gc_snap);
+                                 u64 mark, u64 gc_snap, u64 kbo_snap) {
+  if (s->n == n_before && s->status == ATP_RUNNING)
+    cnf_reclaim(mark, gc_snap, kbo_snap);
 }
 
 // Pick a selected literal of `c` under the state's selection
@@ -1255,12 +1304,20 @@ static u8 cnf_elig(CnfState *s, u32 id, u32 i) {
   return (i < 64u) ? (u8)((s->cmaxlits[id] >> i) & 1ull) : 1u;
 }
 
-// Rewrite-once with optional ordering gate.  When the state has any
-// ordering attached, only fires if σ(s) > σ(t) at the match site
-// (σ(s) is the matched subterm `term` itself -- thvm_match is
-// one-way, so σ applied to the pattern reproduces the subject).
-static Term cnf_rewrite_once(const CnfState *s, Term term, Term lhs, Term rhs) {
-  // Root match attempt.
+// Try lhs -> rhs (renamed apart from any target clause) at exactly
+// this node, no recursion.  Returns the rewritten term on a
+// successful ordering-gated match; otherwise `term` unchanged BY
+// POINTER (callers compare the result against the original for
+// change detection -- pointer identity, not structural equality, is
+// the contract).  Factored out of cnf_rewrite_once so the demod
+// index's existence scan (cnf_demod_find_at below) can probe a single
+// position without also paying for the recursive descent.
+//
+// When the state has any ordering attached, only fires if σ(s) >
+// σ(t) at the match site (σ(s) is the matched subterm `term` itself
+// -- thvm_match is one-way, so σ applied to the pattern reproduces
+// the subject).
+static Term cnf_rewrite_try_at(const CnfState *s, Term term, Term lhs, Term rhs) {
   RewriteSubst subst = {{0}};
   if (thvm_match(lhs, term, &subst)) {
     Term sub_rhs = thvm_subst_apply(rhs, &subst);
@@ -1271,6 +1328,15 @@ static Term cnf_rewrite_once(const CnfState *s, Term term, Term lhs, Term rhs) {
     }
     if (ok) return sub_rhs;
   }
+  return term;
+}
+
+// Rewrite-once with optional ordering gate: root match first (see
+// cnf_rewrite_try_at); on a miss, recurse into every child and
+// rebuild if any changed.
+static Term cnf_rewrite_once(const CnfState *s, Term term, Term lhs, Term rhs) {
+  Term hit = cnf_rewrite_try_at(s, term, lhs, rhs);
+  if (hit != term) return hit;
   if (term_tag(term) != TAG_CTR) return term;
   u32 n = term_ctr_n(term);
   if (n == 0u) return term;
@@ -1286,22 +1352,21 @@ static Term cnf_rewrite_once(const CnfState *s, Term term, Term lhs, Term rhs) {
   return term_new_ctr(term_ext(term), kids, n);
 }
 
-// Apply eq_clause's positive equality to every literal of target,
-// gated by the state's ordering when set.  Returns a fresh clause
-// if anything changed; NULL otherwise.  Caller owns the result.
-static FolClause *cnf_demodulate_ordered(const CnfState *s,
-                                         const FolClause *eq_clause,
-                                         const FolClause *target) {
-  if (eq_clause == NULL || target == NULL) return NULL;
-  if (eq_clause->n_lits != 1u) return NULL;
-  if (eq_clause->lits[0].sign != 0u) return NULL;
-  Term eq_atom = eq_clause->lits[0].atom;
-  if (!fol_atom_is_eq(eq_atom)) return NULL;
-  Term s_raw = term_ctr_at(eq_atom, 0u);
-  Term t_raw = term_ctr_at(eq_atom, 1u);
-  Term lhs = thvm_rename_vars(s_raw, FOL_RENAME_OFFSET);
-  Term rhs = thvm_rename_vars(t_raw, FOL_RENAME_OFFSET);
-
+// Apply an ALREADY-RENAMED lhs/rhs pair to every literal of target,
+// gated by the state's ordering when set.  Returns a fresh clause if
+// anything changed; NULL otherwise.  Caller owns the result.
+//
+// The lhs/rhs rename (thvm_rename_vars, FOL_RENAME_OFFSET) happens
+// ONCE per rule instead of once per (rule, target) attempt: for
+// cnf_forward_demod that's at ueq[] registration time (cnf_step's
+// "register on the demod rule list" fills ueq_lhs[]/ueq_rhs[] --
+// see thvm.h); for cnf_backward_demod, once per call, before its loop
+// over every stored target (its rule is a brand-new clause not yet in
+// ueq[], so there's no registration-time hook to cache into -- the
+// per-call hoist is the natural scope there).  Neither call site
+// re-derives the renamed pair per attempt.
+static FolClause *cnf_demodulate_pre(const CnfState *s, Term lhs, Term rhs,
+                                     const FolClause *target) {
   u32 n = target->n_lits;
   Term *cache = (Term *)calloc(n, sizeof(Term));
   if (cache == NULL) return NULL;
@@ -1323,6 +1388,194 @@ static FolClause *cnf_demodulate_ordered(const CnfState *s,
   return r;
 }
 
+// --- demodulation rule index (LHS root label -> ueq-slot) ------------
+// The naive scan retries EVERY active unit equation against EVERY
+// subterm position of a considered clause (to a CNF_DEMOD_BUDGET-
+// bounded fixpoint, per considered clause) -- the dominant cost on
+// wide clause sets carrying many active unit equations.  The index
+// below turns "which of the n_ueq rules can rewrite THIS subterm"
+// into a direct bucket lookup: thvm_match's CTR case requires the
+// pattern's root label to equal the subject's, so a rule's LHS root
+// label is a NECESSARY condition for it to match there -- an exact
+// (not approximate) filter, never a source of missed rewrites.  A
+// rule whose LHS is a bare variable matches any subject
+// unconditionally (no root to key on); it lives on the always-
+// scanned ueq_wc[] wildcard list instead.  Neither list needs a
+// rebuild-on-config-change path (unlike idx_res): a rule's LHS root
+// label is a structural fact of the clause, not a function of the
+// ordering/selection config, and both lists are append-only at the
+// same point ueq[] itself is (ueq[] has no removal path either --
+// slots simply go stale via clauses[id] == NULL and are skipped, the
+// same way cnf_demod_candidate_ok skips them below).
+
+// Bucket key for a demod rule's LHS root label -- no sign/arg0
+// component (unlike the subsumption families): thvm_match's root
+// check is the only necessary condition demodulation indexes on.
+static u64 cnf_demod_key(u32 label) { return 1ull + (u64)label; }
+
+// Bloom-mask bit for one label -- the same multiplicative-hash spread
+// cnf_clause_mask uses, so a rule's LHS mask and a target subtree's
+// mask are comparable via a single AND against the SAME bit space.
+static u64 cnf_demod_label_bit(u32 label) {
+  u32 h = label * 2654435761u;
+  return 1ull << (h & 63u);
+}
+
+// Every label appearing anywhere in `t` (all levels), OR'd into one
+// 64-bit mask.  Unbounded recursion: called ONCE per rule at
+// registration time over a rule's own (small, axiom/derived-clause
+// sized) LHS, not over an arbitrary target -- unlike cnf_demod_find_at
+// below, which walks a considered clause's structure on every
+// forward-demod attempt and does bound recursion at REWRITE_MAX_ARITY.
+static u64 cnf_demod_term_mask(Term t) {
+  if (term_tag(t) != TAG_CTR) return 0ull;
+  u64 m = cnf_demod_label_bit(term_ext(t));
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) m |= cnf_demod_term_mask(term_ctr_at(t, i));
+  return m;
+}
+
+// Register ueq[slot] (ueq_lhs[slot]/ueq_rhs[slot] already written) into
+// the demod index.  A bucket-push failure (OOM) degrades to the
+// wildcard list rather than disabling anything: demodulation is a
+// redundancy simplifier, not an inference generator, so a missed
+// index entry costs efficiency, never soundness or completeness --
+// unlike idx_on's resolution/subsumption families, where a partial
+// index would silently drop a needed inference.
+static void cnf_demod_index_insert(CnfState *s, u32 slot) {
+  Term lhs = s->ueq_lhs[slot];
+  u8 is_var = (term_tag(lhs) != TAG_CTR) ? 1u : 0u;
+  // Full-depth mask, even for a wildcard (variable) entry -- harmless
+  // (cnf_demod_term_mask(FVR) is 0, and the wildcard list never
+  // consults ueq_lhs_mask anyway), but keeps this a single
+  // unconditional assignment rather than a branch.
+  s->ueq_lhs_mask[slot] = cnf_demod_term_mask(lhs);
+  // A bare-variable LHS registers under an attached ordering too, NOT
+  // just the unordered path: LCL895+1's own sos_06 axiom is
+  // `! [A] : A = '==>'('0',A)`, a raw INPUT unit equation with LHS =
+  // A -- cnf_step's registration check has no orientability
+  // precondition, so it lands on ueq[] like any other unit positive
+  // equality the moment it's picked as given (confirmed by a hard
+  // crash the first time this assumed the opposite -- see the removed
+  // assert this comment replaces).  It's still permanently INERT
+  // there: no reduction ordering can orient "X = t" (the KBO/LPO/RPO/
+  // WPO variable-occurrence condition requires every variable of t to
+  // occur in X, which only holds when t IS X, already excluded as a
+  // tautology before it reaches the store) -- cnf_rewrite_try_at's
+  // ordering gate rejects it at every site, every time.  The
+  // wildcard-list fallback below is therefore load-bearing, not just
+  // defensive: it is what keeps such a rule from being silently
+  // unreachable (it still has to be TRIED, and correctly rejected, at
+  // every position) under BOTH the ordered and unordered paths alike.
+  if (!is_var && cnf_idx_push(&s->idx_demod, cnf_demod_key(term_ext(lhs)),
+                              (u64)slot))
+    return;
+  cnf_u32_push(&s->ueq_wc, &s->n_ueq_wc, &s->cap_ueq_wc, slot);
+}
+
+// Candidate confirmation at one subterm position: the assumption gate
+// + self-rewrite guard the old naive scan checked per rule, plus the
+// actual (structural + ordering) match test.  `term` is a position
+// inside `c`'s own literal tree, still on the ORIGINAL (pre-rewrite)
+// structure -- see cnf_demod_find_at.
+static u8 cnf_demod_candidate_ok(const CnfState *s, u32 slot,
+                                 const FolClause *c, const CnfGmask *asum,
+                                 Term term) {
+  u32 cid = s->ueq[slot];
+  const FolClause *rule = s->clauses[cid];
+  if (rule == NULL || rule == c) return 0u;   // stale slot, or no self-rewrite
+  if (!cnf_gm_subset(&s->cassume[cid], asum)) return 0u;
+  return cnf_rewrite_try_at(s, term, s->ueq_lhs[slot], s->ueq_rhs[slot]) != term;
+}
+
+// Position-major existence scan: the smallest ueq-slot index whose
+// rule rewrites SOME subterm of `term` (structurally + the ordering
+// gate), among indices strictly below `bound` -- ~0u (or `bound`
+// unchanged) when none improves on it.  `bound` is a branch-and-bound
+// threshold: the caller passes in the best index already confirmed
+// achievable by an ANCESTOR, an earlier SIBLING subtree, or an
+// earlier LITERAL of the same clause (cnf_forward_demod threads its
+// per-literal loop the same way) -- a candidate at index >= bound can
+// never improve the answer, so it is skipped before even the cheap
+// mask check, let alone thvm_match.  This is sound: tightening the
+// starting bound only ever EXCLUDES indices that are already proven
+// not to be the minimum, so the returned value is always the true
+// min_{p, k < original bound} k over every position in `term`'s
+// subtree, i.e. still exactly the min-min-swap value the header
+// comment below derives -- branch-and-bound never changes an
+// algorithm's ANSWER, only how much of the search it has to visit to
+// reach it.
+//
+// `*mask_out` (when non-NULL) receives the bloom mask of every label
+// in term's own subtree -- see ueq_lhs_mask's header comment; the
+// caller (a recursive invocation one level up, or cnf_forward_demod
+// at the literal root) folds it into ITS OWN mask before checking ITS
+// bucket candidates, so the mask always covers the FULL subtree
+// rooted at the position being tested, not just that position's
+// immediate label.
+//
+// Visits exactly the positions cnf_rewrite_once's recursive descent
+// would (root first, then every child up to REWRITE_MAX_ARITY) so it
+// can't report a "hit" at a position the materializing walk would
+// never reach.
+//
+// Equivalence with the old rule-major scan follows from the min-min
+// swap:  min_p min_{k matches at p} k  ==  min_k [exists p: k matches
+// at p].  The right side is exactly what the old "for i in 0..n_ueq,
+// does ueq[i] change anything in c" loop picked (the first i whose
+// cnf_demodulate_ordered call returned non-NULL); this returns the
+// same index via bucket + mask + bound retrieval at each position
+// instead of a linear candidate scan.  Neither the mask filter (a
+// NECESSARY, never sufficient, condition -- see ueq_lhs_mask) nor the
+// bound ever changes that value, so cnf_forward_demod materializing
+// with the returned winning rule (cnf_demodulate_pre) reproduces the
+// EXACT old fixpoint trajectory -- only the per-round search for
+// "which rule wins" gets cheaper.
+static u32 cnf_demod_find_at(const CnfState *s, Term term,
+                             const FolClause *c, const CnfGmask *asum,
+                             u32 bound, u64 *mask_out) {
+  u32 best = bound;
+  u64 mask = 0ull;
+  if (term_tag(term) == TAG_CTR) {
+    mask = cnf_demod_label_bit(term_ext(term));
+    u32 n = term_ctr_n(term);
+    if (n <= REWRITE_MAX_ARITY) {
+      for (u32 i = 0; i < n; i++) {
+        u64 child_mask = 0ull;
+        best = cnf_demod_find_at(s, term_ctr_at(term, i), c, asum,
+                                 best, &child_mask);
+        mask |= child_mask;
+      }
+    }
+    // `mask` now covers term's whole subtree (its own root label plus
+    // every visited descendant, mirroring exactly the set of nodes
+    // the recursion above just walked).  A bucket candidate's full
+    // LHS mask must be a subset of it: cnf_demod_key already pinned
+    // the ROOT label match, this additionally rules out candidates
+    // needing some OTHER concrete symbol nowhere in this subtree --
+    // the refinement a root-label-only bucket misses on a clause set
+    // where a few wrapper labels (e.g. an ifeq/eq encoding) dominate
+    // every literal's outermost symbol.
+    const FolIdxBucket *b =
+        cnf_idx_bucket((FolIdx *)&s->idx_demod,
+                       cnf_demod_key(term_ext(term)), 0u);
+    for (u32 e = 0; b != NULL && e < b->n; e++) {
+      u32 k = (u32)b->ents[e];
+      if (k >= best) continue;
+      if ((s->ueq_lhs_mask[k] & ~mask) != 0ull) continue;
+      if (cnf_demod_candidate_ok(s, k, c, asum, term)) best = k;
+    }
+  }
+  // Wildcard (variable-LHS) candidates have no required symbols to
+  // mask-check -- they match unconditionally, at every position.
+  for (u32 e = 0; e < s->n_ueq_wc; e++) {
+    u32 k = s->ueq_wc[e];
+    if (k < best && cnf_demod_candidate_ok(s, k, c, asum, term)) best = k;
+  }
+  if (mask_out != NULL) *mask_out = mask;
+  return best;
+}
+
 // Forward demodulation: normalize `*pc` against every unit positive
 // equality currently in the active set.  Iterates to a fixpoint
 // bounded by CNF_DEMOD_BUDGET steps -- without a reduction-ordering
@@ -1335,30 +1588,33 @@ static void cnf_forward_demod(CnfState *s, FolClause **pc,
   if (pc == NULL || *pc == NULL) return;
   FolClause *c = *pc;
   for (u32 iter = 0; iter < CNF_DEMOD_BUDGET; iter++) {
-    u8 changed = 0u;
-    // Only active unit positive equalities can demodulate; walk the
-    // dedicated rule list instead of the whole active set.
-    for (u32 i = 0; i < s->n_ueq; i++) {
-      FolClause *rule = s->clauses[s->ueq[i]];
-      if (rule == NULL) continue;
-      // Skip when target IS the rule (no self-rewrite).
-      if (rule == c) continue;
-      // Assumption gate (AVATAR): a rule under assumptions B may
-      // rewrite a target under assumptions A only when B is a subset
-      // of A (the result keeps A).  All-zero when avatar is off.
-      if (!cnf_gm_subset(&s->cassume[s->ueq[i]], asum)) continue;
-      u64 mark = HEAP_NEXT, gc_snap = gc_count();
-      FolClause *d = cnf_demodulate_ordered(s, rule, c);
-      if (d == NULL) { cnf_reclaim(mark, gc_snap); continue; }
-      fol_clause_free(c);
-      c = d;
-      // An unorientable rule's RHS can inject renamed-range
-      // variable ids; keep the working clause canonical.
-      fol_clause_canon_vars(c);
-      changed = 1u;
-      break;
+    u64 mark = HEAP_NEXT, gc_snap = gc_count(), kbo_snap = cnf_kbo_call_count();
+    // Thread `best` across literals too (as the branch-and-bound
+    // `bound` argument), not just within one literal's own subtree:
+    // a match found in literal 0 tightens what literal 1 onward even
+    // bothers attempting.  Each literal is its own top-level position;
+    // no parent needs its subtree mask, so mask_out is unused here.
+    u32 best = ~0u;
+    for (u32 li = 0; li < c->n_lits; li++) {
+      best = cnf_demod_find_at(s, c->lits[li].atom, c, asum, best, NULL);
     }
-    if (!changed) break;
+    // Phase-A's own matches are scratch (a yes/no existence probe,
+    // not a kept term -- cnf_demodulate_pre below re-derives the
+    // actual substitution independently), so roll back
+    // unconditionally before materializing: a pure bump arena makes
+    // "one rollback after the whole scan" and "a rollback after every
+    // rejected candidate" (the old per-rule loop's discipline)
+    // equivalent -- HEAP_NEXT only ever needs to return to where it
+    // was before this round's search began.
+    cnf_reclaim(mark, gc_snap, kbo_snap);
+    if (best == ~0u) break;
+    FolClause *d = cnf_demodulate_pre(s, s->ueq_lhs[best], s->ueq_rhs[best], c);
+    if (d == NULL) break;   // unreachable: Phase A already confirmed a hit
+    fol_clause_free(c);
+    c = d;
+    // An unorientable rule's RHS can inject renamed-range variable
+    // ids; keep the working clause canonical.
+    fol_clause_canon_vars(c);
   }
   *pc = c;
 }
@@ -1391,7 +1647,7 @@ static u8 cnf_is_subsumed(const CnfState *s, const FolClause *c,
   if (c->n_lits > FOL_MAX_LITS) return 0u;
   u64 cm = cnf_mask_for(s, c);
   u32 cw = cnf_clause_weight(c);
-  u64 mark = HEAP_NEXT, gc_snap = gc_count();
+  u64 mark = HEAP_NEXT, gc_snap = gc_count(), kbo_snap = cnf_kbo_call_count();
   // Freeze the candidate ONCE; every surviving pattern reuses it.
   FolLit frozen[FOL_MAX_LITS];
   fol_freeze_lits(c, frozen);
@@ -1442,7 +1698,7 @@ static u8 cnf_is_subsumed(const CnfState *s, const FolClause *c,
       hit = cnf_fsub_try(s, i, c, cm, cw, frozen, ca);
   }
   // The matcher retains nothing -- its renames are pure scratch.
-  cnf_reclaim(mark, gc_snap);
+  cnf_reclaim(mark, gc_snap, kbo_snap);
   return hit;
 }
 
@@ -1462,6 +1718,14 @@ static void cnf_backward_demod(CnfState *s, u32 new_id) {
   if (rule == NULL) return;
   if (rule->n_lits != 1u || rule->lits[0].sign != 0u) return;
   if (!fol_atom_is_eq(rule->lits[0].atom)) return;
+  // `rule` isn't a ueq[] entry yet (registration only happens if/when
+  // this clause is later popped as given -- see cnf_step), so there's
+  // no cached ueq_lhs/ueq_rhs to reuse here.  It IS the same rule for
+  // every target this call considers, though, so rename its lhs/rhs
+  // ONCE up front instead of once per (rule, target) attempt.
+  Term eq_atom = rule->lits[0].atom;
+  Term lhs = thvm_rename_vars(term_ctr_at(eq_atom, 0u), FOL_RENAME_OFFSET);
+  Term rhs = thvm_rename_vars(term_ctr_at(eq_atom, 1u), FOL_RENAME_OFFSET);
   u32 n_snap = s->n;
   for (u32 i = 0; i < n_snap; i++) {
     if (i == new_id) continue;
@@ -1472,9 +1736,9 @@ static void cnf_backward_demod(CnfState *s, u32 new_id) {
     // traced add reproduces as the parents' union).
     if (!cnf_gm_subset(&s->cassume[new_id], &s->cassume[i])) continue;
     u32 n_before = s->n;
-    u64 mark = HEAP_NEXT, gc_snap = gc_count();
-    FolClause *d = cnf_demodulate_ordered(s, rule, old);
-    if (d == NULL) { cnf_reclaim(mark, gc_snap); continue; }
+    u64 mark = HEAP_NEXT, gc_snap = gc_count(), kbo_snap = cnf_kbo_call_count();
+    FolClause *d = cnf_demodulate_pre(s, lhs, rhs, old);
+    if (d == NULL) { cnf_reclaim(mark, gc_snap, kbo_snap); continue; }
     fol_clause_canon_vars(d);
 
     // Clobber the old slot; defer free (or retain as a corpse so a
@@ -1493,7 +1757,7 @@ static void cnf_backward_demod(CnfState *s, u32 new_id) {
         // skip the demodulated derivative entirely.
         s->clauses[i] = old;
         fol_clause_free(d);
-        cnf_reclaim(mark, gc_snap);
+        cnf_reclaim(mark, gc_snap, kbo_snap);
         continue;
       }
     }
@@ -1503,19 +1767,23 @@ static void cnf_backward_demod(CnfState *s, u32 new_id) {
     if (fol_clause_is_empty(d)) {
       cnf_empty_derived(s, d, FOL_INF_DEMOD, new_id, i);
       if (s->status != ATP_RUNNING) return;
-      cnf_reclaim_consider(s, n_before, mark, gc_snap);
+      cnf_reclaim_consider(s, n_before, mark, gc_snap, kbo_snap);
       continue;
     }
-    if (fol_is_tautology(d)) { fol_clause_free(d); cnf_reclaim(mark, gc_snap); continue; }
+    if (fol_is_tautology(d)) {
+      fol_clause_free(d);
+      cnf_reclaim(mark, gc_snap, kbo_snap);
+      continue;
+    }
     CnfGmask du = s->cassume[new_id];
     cnf_gm_or(&du, &s->cassume[i]);
     if (cnf_is_subsumed(s, d, &du)) {
       fol_clause_free(d);
-      cnf_reclaim(mark, gc_snap);
+      cnf_reclaim(mark, gc_snap, kbo_snap);
       continue;
     }
     cnf_add_clause_traced(s, d, FOL_INF_DEMOD, new_id, i);
-    cnf_reclaim_consider(s, n_before, mark, gc_snap);   // add may have failed
+    cnf_reclaim_consider(s, n_before, mark, gc_snap, kbo_snap);   // add may have failed
   }
 }
 
@@ -1566,7 +1834,7 @@ static void cnf_backward_subsume(CnfState *s, u32 new_id) {
   const FolClause *new_c = s->clauses[new_id];
   if (new_c == NULL) return;
   u64 nm = s->cmask[new_id];
-  u64 mark = HEAP_NEXT, gc_snap = gc_count();
+  u64 mark = HEAP_NEXT, gc_snap = gc_count(), kbo_snap = cnf_kbo_call_count();
   // Bucket retrieval: any clause new_c subsumes contains a literal
   // carrying new_c's first literal's key (substitution preserves a
   // CTR root and the sign, and the target literal it maps onto is
@@ -1594,7 +1862,7 @@ static void cnf_backward_subsume(CnfState *s, u32 new_id) {
     for (u32 i = 0; i < s->n; i++) cnf_bsub_try(s, new_id, new_c, nm, i);
   }
   // Subsumption scratch (per-candidate renames) retains nothing.
-  cnf_reclaim(mark, gc_snap);
+  cnf_reclaim(mark, gc_snap, kbo_snap);
 }
 
 // Process the deferred-free queue.  Call at the END of cnf_step,
@@ -1731,10 +1999,10 @@ static void cnf_gen_resolution(CnfState *s, u32 a_id, u32 b_id) {
           term_ext(a->lits[i].atom) != term_ext(b->lits[j].atom)) continue;
       if (!cnf_elig(s, b_id, j)) continue;
       u32 n0 = s->n;
-      u64 mark = HEAP_NEXT, gc_snap = gc_count();
+      u64 mark = HEAP_NEXT, gc_snap = gc_count(), kbo_snap = cnf_kbo_call_count();
       FolClause *r = fol_resolve(a, i, b, j);
       cnf_consider(s, r, FOL_INF_RESOLVE, a_id, b_id);
-      cnf_reclaim_consider(s, n0, mark, gc_snap);
+      cnf_reclaim_consider(s, n0, mark, gc_snap, kbo_snap);
       if (s->status != ATP_RUNNING) return;
     }
   }
@@ -1747,10 +2015,10 @@ static void cnf_gen_factoring(CnfState *s, u32 c_id) {
   for (u32 i = 0; i < c->n_lits; i++) {
     for (u32 j = i + 1u; j < c->n_lits; j++) {
       u32 n0 = s->n;
-      u64 mark = HEAP_NEXT, gc_snap = gc_count();
+      u64 mark = HEAP_NEXT, gc_snap = gc_count(), kbo_snap = cnf_kbo_call_count();
       FolClause *r = fol_factor(c, i, j);
       cnf_consider(s, r, FOL_INF_FACTOR, c_id, FOL_NO_PARENT);
-      cnf_reclaim_consider(s, n0, mark, gc_snap);
+      cnf_reclaim_consider(s, n0, mark, gc_snap, kbo_snap);
       if (s->status != ATP_RUNNING) return;
     }
   }
@@ -1764,10 +2032,10 @@ static void cnf_gen_reflex(CnfState *s, u32 c_id) {
     if (c->lits[i].sign != 1u) continue;
     if (!fol_atom_is_eq(c->lits[i].atom)) continue;
     u32 n0 = s->n;
-    u64 mark = HEAP_NEXT, gc_snap = gc_count();
+    u64 mark = HEAP_NEXT, gc_snap = gc_count(), kbo_snap = cnf_kbo_call_count();
     FolClause *r = fol_reflex_resolve(c, i);
     cnf_consider(s, r, FOL_INF_REFLEX, c_id, FOL_NO_PARENT);
-    cnf_reclaim_consider(s, n0, mark, gc_snap);
+    cnf_reclaim_consider(s, n0, mark, gc_snap, kbo_snap);
     if (s->status != ATP_RUNNING) return;
   }
 }
@@ -1827,20 +2095,20 @@ static void cnf_paramod_at_pos(const u32 *p, u32 p_len, Term sub, void *raw) {
   // paramodulation; the reverse instance can never be maximal).
   if (ctx->allow_fwd && cnf_paramod_root_ok(ctx->es, sub)) {
     u32 n0 = ctx->s->n;
-    u64 mark = HEAP_NEXT, gc_snap = gc_count();
+    u64 mark = HEAP_NEXT, gc_snap = gc_count(), kbo_snap = cnf_kbo_call_count();
     FolClause *r0 = fol_paramodulate(ctx->eq_clause, ctx->eq_idx, /*swap*/ 0,
                                      ctx->target, ctx->target_idx, p, p_len);
     cnf_consider(ctx->s, r0, FOL_INF_PARAMOD, ctx->eq_id, ctx->target_id);
-    cnf_reclaim_consider(ctx->s, n0, mark, gc_snap);
+    cnf_reclaim_consider(ctx->s, n0, mark, gc_snap, kbo_snap);
     if (ctx->s->status != ATP_RUNNING) return;
   }
   if (ctx->allow_rev && cnf_paramod_root_ok(ctx->et, sub)) {
     u32 n0 = ctx->s->n;
-    u64 mark = HEAP_NEXT, gc_snap = gc_count();
+    u64 mark = HEAP_NEXT, gc_snap = gc_count(), kbo_snap = cnf_kbo_call_count();
     FolClause *r1 = fol_paramodulate(ctx->eq_clause, ctx->eq_idx, /*swap*/ 1,
                                      ctx->target, ctx->target_idx, p, p_len);
     cnf_consider(ctx->s, r1, FOL_INF_PARAMOD, ctx->eq_id, ctx->target_id);
-    cnf_reclaim_consider(ctx->s, n0, mark, gc_snap);
+    cnf_reclaim_consider(ctx->s, n0, mark, gc_snap, kbo_snap);
   }
 }
 
@@ -1908,10 +2176,10 @@ static void cnf_gen_eq_factoring(CnfState *s, u32 c_id) {
       if (c->lits[j].sign != 0u) continue;
       if (!fol_atom_is_eq(c->lits[j].atom)) continue;
       u32 n0 = s->n;
-      u64 mark = HEAP_NEXT, gc_snap = gc_count();
+      u64 mark = HEAP_NEXT, gc_snap = gc_count(), kbo_snap = cnf_kbo_call_count();
       FolClause *r = fol_eq_factor(c, i, j);
       cnf_consider(s, r, FOL_INF_EQ_FACTOR, c_id, FOL_NO_PARENT);
-      cnf_reclaim_consider(s, n0, mark, gc_snap);
+      cnf_reclaim_consider(s, n0, mark, gc_snap, kbo_snap);
       if (s->status != ATP_RUNNING) return;
     }
   }
@@ -2115,14 +2383,45 @@ fn AtpStatus cnf_step(CnfState *s) {
   }
 
   // Register unit positive equalities on the demod rule list.
+  // ueq_lhs[]/ueq_rhs[] cache the rule renamed apart by
+  // FOL_RENAME_OFFSET ONCE here (see cnf_demodulate_pre); the root-
+  // label index (cnf_demod_index_insert) lets cnf_forward_demod
+  // retrieve only same-rooted candidates per subterm position instead
+  // of scanning every active unit equation there.
   {
     const FolClause *g = s->clauses[given_id];
     if (g != NULL && g->n_lits == 1u && g->lits[0].sign == 0u &&
         fol_atom_is_eq(g->lits[0].atom)) {
       if (s->n_ueq >= s->cap_ueq) {
-        cnf_grow(&s->cap_ueq, (u8 **)&s->ueq, sizeof(u32));
+        // ueq[]/ueq_lhs[]/ueq_rhs[]/ueq_lhs_mask[] are index-parallel:
+        // grow all four to the SAME new capacity in one step.  Calling
+        // cnf_grow separately per array would double cap_ueq on the
+        // first call, so a later array's own "n_ueq >= cap_ueq" guard
+        // would already read false and silently skip its own growth.
+        u32 new_cap = s->cap_ueq * 2u;
+        u32  *nu = (u32  *)realloc(s->ueq,     (size_t)new_cap * sizeof(u32));
+        Term *nl = (Term *)realloc(s->ueq_lhs, (size_t)new_cap * sizeof(Term));
+        Term *nr = (Term *)realloc(s->ueq_rhs, (size_t)new_cap * sizeof(Term));
+        u64  *nm = (u64  *)realloc(s->ueq_lhs_mask,
+                                   (size_t)new_cap * sizeof(u64));
+        if (nu != NULL) s->ueq = nu;
+        if (nl != NULL) s->ueq_lhs = nl;
+        if (nr != NULL) s->ueq_rhs = nr;
+        if (nm != NULL) s->ueq_lhs_mask = nm;
+        if (nu != NULL && nl != NULL && nr != NULL && nm != NULL)
+          s->cap_ueq = new_cap;
       }
-      if (s->n_ueq < s->cap_ueq) s->ueq[s->n_ueq++] = given_id;
+      if (s->n_ueq < s->cap_ueq) {
+        u32 slot = s->n_ueq;
+        Term eq_atom = g->lits[0].atom;
+        s->ueq[slot]     = given_id;
+        s->ueq_lhs[slot] = thvm_rename_vars(term_ctr_at(eq_atom, 0u),
+                                            FOL_RENAME_OFFSET);
+        s->ueq_rhs[slot] = thvm_rename_vars(term_ctr_at(eq_atom, 1u),
+                                            FOL_RENAME_OFFSET);
+        cnf_demod_index_insert(s, slot);
+        s->n_ueq++;
+      }
     }
   }
 
