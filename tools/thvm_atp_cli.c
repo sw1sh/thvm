@@ -202,6 +202,7 @@ static const AtpKnob KNOBS[] = {
   {"spb-goal",               "THVM_ATP_SPB_GOAL",        0, "(Vampire spb=goal analog: conjecture-DESCENDED CPs keep their weight, everything else scales by nwc)"},
   {"nwc",                    "THVM_ATP_NWC",             1, "(Vampire nwc analog: non-goal-derived CP weight multiplier, float, default 2.0)"},
   {"drc-off",                "THVM_ATP_DRC_OFF",         0, "(Vampire drc=off analog: keep join-redundant CPs whose sides carry a folded sF* symbol -- they become rules)"},
+  {"drc-needle",             "THVM_ATP_DRC_NEEDLE",      0, "(narrows drc-off's keep set to CPs whose sF-unfolding is an original-axiom instance or trivial x=x)"},
   {"heap-cells",             "THVM_HEAP_CELLS",          1, "(heap size, cells)"},
   {"profile",                "THVM_ATP_PROFILE",         1, "(profiling level)"},
   {"diag",                   "THVM_ATP_DIAG",            1, "(diagnostics)"},

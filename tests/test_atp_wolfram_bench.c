@@ -624,6 +624,13 @@ typedef struct {
   // test, immune to user symbols that happen to spell sF*/sFlat*.
   u32   fresh_sym_base;
   u32   n_fresh_syms;
+  // needle (THVM_ATP_DRC_NEEDLE): eq_l/eq_r[0 .. n_orig_eqns) is the
+  // pre-transform EQUATIONS block -- snapshotted in main() right after
+  // pr_load_terms, before pr_tgt_transform / pr_flatten_goal /
+  // pr_distrib_transform append any definitional equations.  Threaded
+  // into the engine via thvm_atp_set_orig_axioms as the needle's
+  // post-unfold instance-match targets.
+  u32   n_orig_eqns;
   // Multi-goal CONCLUSION block (Waldmeister's parser keeps a
   // list_of_conclusions; -auto proves every goal in one run).
   // goal_l/goal_r stay the FIRST goal so all single-goal code paths
@@ -1586,6 +1593,12 @@ int main(int argc, char **argv) {
   // above) so the -auto weight heuristic below can inspect the axioms before
   // the KBO config is finalised.  The later pr_load_terms call is guarded.
   if (pr_mode) pr_load_terms(&prp);
+  // needle (THVM_ATP_DRC_NEEDLE): snapshot the pre-transform axiom
+  // count -- the raw EQUATIONS block -- before pr_tgt_transform /
+  // pr_flatten_goal / pr_distrib_transform below append any fresh
+  // definitional equations.  eq_l/eq_r[0, n_orig_eqns) is threaded to
+  // the engine as the needle's post-unfold instance-match targets.
+  prp.n_orig_eqns = prp.n_eqns;
   // Goal flattening (Twee/Vampire naming port): extend the signature +
   // axioms with fresh minimal names for the goal's compound subterms
   // BEFORE the KboConfig is finalised below (so it picks up the new
@@ -2664,6 +2677,42 @@ int main(int argc, char **argv) {
       thvm_atp_set_fold_band(s, PR_LABEL_BASE + prp.fresh_sym_base,
                              PR_LABEL_BASE + prp.fresh_sym_base +
                                  prp.n_fresh_syms);
+      // needle (THVM_ATP_DRC_NEEDLE): for each fresh symbol, locate its
+      // defining equation (LHS == lbl(FVR0..FVR_{arity-1}), the exact
+      // shape pr_tgt_transform / pr_flatten_goal / pr_distrib_transform
+      // all emit) and record (arity, RHS body) so the engine can unfold
+      // a folded CP back to the original signature.  A scan rather than
+      // a positional lookup, so it stays correct regardless of which
+      // transform(s) ran or in what order.
+      {
+        static u8   needle_arity[PR_MAX_SYMS];
+        static Term needle_body[PR_MAX_SYMS];
+        u32 nd = prp.n_fresh_syms;
+        for (u32 i = 0; i < nd; i++) {
+          u32  lbl  = PR_LABEL_BASE + prp.fresh_sym_base + i;
+          u32  ar   = prp.syms[prp.fresh_sym_base + i].arity;
+          Term body = 0;
+          for (u32 e = 0; e < prp.n_eqns; e++) {
+            Term L = prp.eq_l[e];
+            if (term_tag(L) != TAG_CTR || term_ext(L) != lbl ||
+                term_ctr_n(L) != ar) {
+              continue;
+            }
+            u8 ok = 1u;
+            for (u32 v = 0; v < ar; v++) {
+              Term c = term_ctr_at(L, v);
+              if (term_tag(c) != TAG_FVR || term_ext(c) != v) { ok = 0u; break; }
+            }
+            if (ok) { body = prp.eq_r[e]; break; }
+          }
+          needle_arity[i] = (u8)ar;
+          needle_body[i]  = body;
+        }
+        thvm_atp_set_fold_defs(s, needle_arity, needle_body, nd);
+      }
+      // needle: thread the pre-transform axiom list (see n_orig_eqns
+      // above) through as the post-unfold instance-match targets.
+      thvm_atp_set_orig_axioms(s, prp.eq_l, prp.eq_r, prp.n_orig_eqns);
     }
     for (u32 e = 0; e < prp.n_eqns; e++) {
       // spb=goal derivation seed (goal-cone definitions + conjecture
@@ -3012,6 +3061,15 @@ int main(int argc, char **argv) {
   if (s->n_cps_drc_kept_push != 0u || s->n_cps_drc_kept_pop != 0u) {
     printf("   drc-off: kept_push=%u  kept_pop=%u\n",
            s->n_cps_drc_kept_push, s->n_cps_drc_kept_pop);
+  }
+  // needle diagnostics (THVM_ATP_DRC_NEEDLE): how much of the drc-off
+  // keep set above survived the instance/x=x filter, vs. dropped back
+  // out, vs. bailed on the unfold size cap.
+  if (s->n_cps_drc_needle_kept != 0u || s->n_cps_drc_needle_dropped != 0u ||
+      s->n_cps_drc_needle_overcap != 0u) {
+    printf("   drc-needle: kept=%u  dropped=%u  overcap=%u  (orig_axioms=%u)\n",
+           s->n_cps_drc_needle_kept, s->n_cps_drc_needle_dropped,
+           s->n_cps_drc_needle_overcap, s->n_needle_ax);
   }
   // spb=goal diagnostics: live goal-derived rule share.
   {

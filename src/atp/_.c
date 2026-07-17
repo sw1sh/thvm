@@ -7902,6 +7902,15 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   if (s == NULL || !gc_enabled()) return 0;
   u64 gc_t0 = atp_now_us();
 
+  // needle (THVM_ATP_DRC_NEEDLE): fold_def_body[0..fold_width) and
+  // needle_ax_l/r[0..n_needle_ax) are long-lived Term arrays (set once
+  // at problem intake, read by every DRC keep decision thereafter), so
+  // every GC must relocate them exactly like the rule set.  fold_width
+  // is clamped defensively even though thvm_atp_set_fold_band /
+  // thvm_atp_set_fold_defs never exceed ATP_NEEDLE_MAX_DEFS together.
+  u32 needle_fold_width = (s->fold_hi > s->fold_lo)
+                           ? (s->fold_hi - s->fold_lo) : 0u;
+  if (needle_fold_width > ATP_NEEDLE_MAX_DEFS) needle_fold_width = ATP_NEEDLE_MAX_DEFS;
   // Count the root slots so we can size the array exactly.
   // 2 per rule for lhs/rhs, plus 2 per rule for dead-save (originals
   // are kept live so proof reconstruction can read them when the slot
@@ -7915,6 +7924,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
               + s->n_trace + REWRITE_MAX_VAR
               + 1u /* min_const */
               + 2u * s->n_irv /* buffered IR victims (use_wm_demote) */
+              + needle_fold_width + 2u * s->n_needle_ax /* needle */
               + (s->gc_extra_roots != NULL ? s->n_gc_extra_roots : 0u);
 #ifdef ATP_MNF
   // Milestone 10: every MNF coloured node holds a reached Term.  Root
@@ -7975,6 +7985,16 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   for (u32 i = 0; i < s->n_irv; i++) {
     roots[w++] = s->irv_lhs[i];
     roots[w++] = s->irv_rhs[i];
+  }
+  // needle (THVM_ATP_DRC_NEEDLE): fold-band definition bodies + the
+  // pre-tgt axiom list (see needle_fold_width above).  0 entries when
+  // needle was never armed for this problem -- null roots, same as
+  // every other unset-slot loop here.
+  u32 needle_root = w;
+  for (u32 i = 0; i < needle_fold_width; i++) roots[w++] = s->fold_def_body[i];
+  for (u32 i = 0; i < s->n_needle_ax; i++) {
+    roots[w++] = s->needle_ax_l[i];
+    roots[w++] = s->needle_ax_r[i];
   }
   // Caller-owned extra roots (see the thvm.h field comment): evacuated
   // like every other root and written back in place below, so the
@@ -8059,6 +8079,12 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   for (u32 i = 0; i < s->n_irv; i++) {
     s->irv_lhs[i] = roots[w++];
     s->irv_rhs[i] = roots[w++];
+  }
+  (void)needle_root;
+  for (u32 i = 0; i < needle_fold_width; i++) s->fold_def_body[i] = roots[w++];
+  for (u32 i = 0; i < s->n_needle_ax; i++) {
+    s->needle_ax_l[i] = roots[w++];
+    s->needle_ax_r[i] = roots[w++];
   }
   if (s->gc_extra_roots != NULL) {
     for (u32 i = 0; i < s->n_gc_extra_roots; i++) {
@@ -10028,6 +10054,170 @@ fn void thvm_atp_set_fold_band(AtpState *s, u32 lo, u32 hi) {
   s->fold_hi = hi;
   // Fresh problem intake: reset the drc keep-lane dedup table.
   memset(g_drc_seen, 0, sizeof g_drc_seen);
+}
+
+fn void thvm_atp_set_fold_defs(AtpState *s, const u8 *arity,
+                               const Term *body, u32 n) {
+  if (s == NULL) return;
+  if (n > ATP_NEEDLE_MAX_DEFS) n = ATP_NEEDLE_MAX_DEFS;
+  for (u32 i = 0; i < n; i++) {
+    s->fold_def_arity[i] = arity[i];
+    s->fold_def_body[i]  = body[i];
+  }
+}
+
+fn void thvm_atp_set_orig_axioms(AtpState *s, const Term *lhs,
+                                 const Term *rhs, u32 n) {
+  if (s == NULL) return;
+  if (n > ATP_NEEDLE_MAX_AXIOMS) n = ATP_NEEDLE_MAX_AXIOMS;
+  for (u32 i = 0; i < n; i++) {
+    s->needle_ax_l[i] = lhs[i];
+    s->needle_ax_r[i] = rhs[i];
+  }
+  s->n_needle_ax = n;
+}
+
+// --- needle: narrow the drc=off keep set to instance/x=x shapes ------
+//
+// Vampire's GRP678-1 proof passes THROUGH ~80 folded-redundant lemmas
+// (demodulation_redundancy_check keeps them); wholesale drc=off (above)
+// keeps every folded-and-joins CP -- a haystack (GRP678: 1.1M distinct
+// keeps/60s even deduped).  Empirically those ~80 lemmas' sF-UNFOLDING
+// (substitute every fold-band symbol back to the raw pre-tgt subterm
+// it names, recursively) is always one of two shapes: an alpha-instance
+// of one of the ORIGINAL axioms, or a trivial (syntactically-equal
+// after canonical renumbering) x=x.  The needle keeps ONLY those.
+//
+// THVM_ATP_DRC_NEEDLE: 0 off (default), 1 armed.  Only takes effect
+// where THVM_ATP_DRC_OFF is already armed (needle strictly NARROWS
+// that keep set); off is byte-identical to plain drc=off.
+static u8 atp_drc_needle_on(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_DRC_NEEDLE");
+    v = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  return (u8)v;
+}
+// THVM_ATP_DRC_NEEDLE_CAP (default 256, 0 = uncapped): node-count
+// budget on the FULLY UNFOLDED pair (both sides combined).  Over-cap
+// is a fail-closed drop (not kept) -- the oracle's pass-through lemmas
+// are tiny folded identities, so a giant unfold is never the needle's
+// target class, and bounding it keeps the per-candidate cost flat.
+static u32 atp_drc_needle_cap(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_ATP_DRC_NEEDLE_CAP");
+    v = (e != NULL && e[0] != '\0') ? atoi(e) : 256;
+    if (v < 0) v = 0;
+  }
+  return (u32)v;
+}
+
+// Recursive unfold of a folded Term back to the original signature:
+// bottom-up, substitute every fold-band root label with its registered
+// definition body (the occurrence's own children bind the body's FVR
+// 0..arity-1 placeholders via thvm_subst_apply).  Definition bodies are
+// fold-free BY CONSTRUCTION (pr_tgt_transform's pr_tgt_subs[] are raw
+// pre-transform subterms, never rewritten to mention fresher labels),
+// so one substitution per occurrence fully resolves it; atp_term_has_fold
+// on the result is a cheap defensive check, not a second unfold pass
+// (a hit means a corrupt/mismatched def table, not a legitimate nested
+// fold -- fails closed rather than looping).  *budget is a combined
+// node-count ceiling shared across both CP sides (see
+// atp_drc_needle_cap); each substitution's OWN result size is charged
+// against it via atp_symbol_count_upto, so a substitution that blows up
+// the term is caught even though thvm_subst_apply itself doesn't meter.
+// Returns 0 on over-cap / a missing or arity-mismatched definition
+// (the caller drops the candidate, same as if needle were never
+// consulted); 1 with *out filled otherwise.
+static u8 atp_drc_needle_unfold(const AtpState *s, Term t, u32 *budget,
+                                Term *out) {
+  if (*budget == 0u) return 0u;
+  (*budget)--;
+  if (term_tag(t) != TAG_CTR) { *out = t; return 1u; }
+  u32 lbl = term_ext(t);
+  u32 n   = term_ctr_n(t);
+  if (n > REWRITE_MAX_ARITY) return 0u;
+  Term kids[REWRITE_MAX_ARITY];
+  u8 changed = 0u;
+  for (u32 i = 0; i < n; i++) {
+    Term ci = term_ctr_at(t, i);
+    Term ko;
+    if (!atp_drc_needle_unfold(s, ci, budget, &ko)) return 0u;
+    if (ko != ci) changed = 1u;
+    kids[i] = ko;
+  }
+  if (lbl >= s->fold_lo && lbl < s->fold_hi) {
+    u32 di = lbl - s->fold_lo;
+    Term def = (di < ATP_NEEDLE_MAX_DEFS) ? s->fold_def_body[di] : 0;
+    if (def == 0 || s->fold_def_arity[di] != n) return 0u;
+    RewriteSubst sub;
+    memset(&sub, 0, sizeof sub);
+    for (u32 i = 0; i < n; i++) sub.bindings[i] = kids[i];
+    Term r = thvm_subst_apply(def, &sub);
+    if (atp_term_has_fold(s, r)) return 0u;   // defensive; see above
+    u32 rn = 0u;
+    atp_symbol_count_upto(r, *budget + 1u, &rn);
+    if (rn > *budget) return 0u;
+    *budget -= rn;
+    *out = r;
+    return 1u;
+  }
+  *out = changed ? term_new_ctr(lbl, kids, n) : t;
+  return 1u;
+}
+
+// (a) alpha-instance test: does the unfolded pair (ul, ur) match one of
+// the registered pre-tgt axioms under a single one-way substitution,
+// in either orientation ("axiom lhs->ul, axiom rhs->ur" or "axiom
+// lhs->ur, axiom rhs->ul", the SAME subst across both sides of a try)?
+static u8 atp_drc_needle_ax_match(const AtpState *s, Term ul, Term ur) {
+  for (u32 i = 0; i < s->n_needle_ax; i++) {
+    RewriteSubst sub;
+    memset(&sub, 0, sizeof sub);
+    if (thvm_match(s->needle_ax_l[i], ul, &sub) &&
+        thvm_match(s->needle_ax_r[i], ur, &sub)) {
+      return 1u;
+    }
+    memset(&sub, 0, sizeof sub);
+    if (thvm_match(s->needle_ax_l[i], ur, &sub) &&
+        thvm_match(s->needle_ax_r[i], ul, &sub)) {
+      return 1u;
+    }
+  }
+  return 0u;
+}
+
+// The needle gate: unfold both sides (shared budget), then keep iff
+// (b) the unfolded pair is trivial (syntactically equal once
+// canonically renumbered -- the general "x=x" shape) or (a) an
+// axiom instance.  Telemetry counters record the verdict; over-cap
+// unfolds count separately from a clean instance/x=x miss.
+static u8 atp_drc_needle_ok(AtpState *s, Term l, Term r) {
+  u32 cap = atp_drc_needle_cap();
+  u32 budget = (cap == 0u) ? 0xFFFFFFFFu : cap;
+  Term ul, ur;
+  if (!atp_drc_needle_unfold(s, l, &budget, &ul) ||
+      !atp_drc_needle_unfold(s, r, &budget, &ur)) {
+    s->n_cps_drc_needle_overcap++;
+    return 0u;
+  }
+  thvm_normalize_vars(&ul, &ur);
+  if (kbo_eq(ul, ur) || atp_drc_needle_ax_match(s, ul, ur)) {
+    s->n_cps_drc_needle_kept++;
+    return 1u;
+  }
+  s->n_cps_drc_needle_dropped++;
+  return 0u;
+}
+
+// Thin gate wrapper: needle off (the default) is a pure pass-through,
+// so every drc=off call site composes it with one `&&` and pays
+// nothing extra when THVM_ATP_DRC_NEEDLE is unset.
+static u8 atp_drc_needle_gate(AtpState *s, Term l, Term r) {
+  if (!atp_drc_needle_on()) return 1u;
+  return atp_drc_needle_ok(s, l, r);
 }
 
 fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
@@ -17002,7 +17192,8 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
       term_tag(drc_pop_l) != TAG_NUM && term_tag(drc_pop_r) != TAG_NUM &&
       !kbo_eq(drc_pop_l, drc_pop_r) &&
       atp_drc_size_ok_term(drc_pop_l, drc_pop_r) &&
-      (atp_term_has_fold(s, drc_pop_l) || atp_term_has_fold(s, drc_pop_r))) {
+      (atp_term_has_fold(s, drc_pop_l) || atp_term_has_fold(s, drc_pop_r)) &&
+      atp_drc_needle_gate(s, drc_pop_l, drc_pop_r)) {
     if (s->record_norm_steps) s->n_trace = trace_mark;
     l = drc_pop_l;
     r = drc_pop_r;
@@ -26976,7 +27167,9 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       if (g_vcp_treat.armed) {
         if (g_drc_raw_l != NULL &&
             !atp_drc_seen_probe(atp_drc_pair_hash_ft(g_drc_raw_l,
-                                                     g_drc_raw_r))) {
+                                                     g_drc_raw_r)) &&
+            atp_drc_needle_gate(s, ft_to_term(g_drc_raw_l),
+                                    ft_to_term(g_drc_raw_r))) {
           // Swap the raw clones back into the stash (the treatment
           // normalized fl/fr to the -- now equal -- NF cells in place).
           AtpFt *da = (AtpFt *)s->ft_arena_ptr;
@@ -27000,7 +27193,8 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
         // collide); the kept content is the renumbered pair too.
         Term hl = raw_lhs, hr = raw_rhs;
         thvm_normalize_vars(&hl, &hr);
-        if (!atp_drc_seen_probe(atp_drc_pair_hash_term(hl, hr))) {
+        if (!atp_drc_seen_probe(atp_drc_pair_hash_term(hl, hr)) &&
+            atp_drc_needle_gate(s, hl, hr)) {
           cp_lhs = hl;
           cp_rhs = hr;
           joinable = 0u;

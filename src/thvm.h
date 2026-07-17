@@ -5370,6 +5370,32 @@ typedef struct {
   // gate / at the pop-time join gate that classic completion discards.
   u32  n_cps_drc_kept_push;
   u32  n_cps_drc_kept_pop;
+  // needle (THVM_ATP_DRC_NEEDLE / --drc-needle): narrows the drc=off
+  // keep set above to the GRP678/692-shaped folded lemmas whose
+  // sF-UNFOLDING (substituting the tgt=3 definitions back to the
+  // original signature) is either an alpha-instance of one of the
+  // ORIGINAL (pre-tgt) axioms or trivially x=x -- the two shapes
+  // Vampire's GRP loop-theory proofs actually route through, vs. the
+  // much larger haystack wholesale drc=off keeps.  fold_def_body is
+  // indexed by (label - fold_lo); body == 0 means "no definition
+  // registered" (unfold fails closed -- the candidate is dropped, same
+  // as pre-needle).  needle_ax_l/r hold the pre-transform EQUATIONS
+  // block (n_needle_ax == 0 disarms the instance test but not x=x).
+  // Populated once at problem intake via thvm_atp_set_fold_defs /
+  // thvm_atp_set_orig_axioms (tests/test_atp_wolfram_bench.c); both
+  // Term arrays are GC roots (thvm_atp_gc_collect).  See
+  // atp_drc_needle_ok in src/atp/_.c.  Inert (0 cost) unless
+  // THVM_ATP_DRC_NEEDLE is armed -- byte-identical otherwise.
+#define ATP_NEEDLE_MAX_DEFS    512u
+#define ATP_NEEDLE_MAX_AXIOMS  64u
+  u8   fold_def_arity[ATP_NEEDLE_MAX_DEFS];
+  Term fold_def_body[ATP_NEEDLE_MAX_DEFS];
+  Term needle_ax_l[ATP_NEEDLE_MAX_AXIOMS];
+  Term needle_ax_r[ATP_NEEDLE_MAX_AXIOMS];
+  u32  n_needle_ax;
+  u32  n_cps_drc_needle_kept;
+  u32  n_cps_drc_needle_dropped;
+  u32  n_cps_drc_needle_overcap;
 
   // FIFO live-scan floor: every queued CP with cp_seq < fifo_floor_seq
   // is PROVEN dead (its scan-time death test failed and death marks --
@@ -7144,6 +7170,18 @@ fn void      thvm_atp_mark_gd_next(AtpState *s);
 // Register the folded-signature fresh-symbol label band [lo, hi) for
 // the drc=off analog (THVM_ATP_DRC_OFF).  See AtpState.fold_lo.
 fn void      thvm_atp_set_fold_band(AtpState *s, u32 lo, u32 hi);
+// needle (THVM_ATP_DRC_NEEDLE): register each fold-band label's
+// definition (arity + body, body's FVR 0..arity-1 are the params) --
+// arity[i]/body[i] describe label (fold_lo + i), n <= (fold_hi -
+// fold_lo).  And register the pre-transform axiom list (the .pr
+// EQUATIONS block, before tgt=3 appended its sF* definitions) for the
+// post-unfold instance test.  Both are inert until THVM_ATP_DRC_NEEDLE
+// arms the extra filter on top of THVM_ATP_DRC_OFF.  See AtpState
+// fold_def_body / needle_ax_l comments.
+fn void      thvm_atp_set_fold_defs(AtpState *s, const u8 *arity,
+                                    const Term *body, u32 n);
+fn void      thvm_atp_set_orig_axioms(AtpState *s, const Term *lhs,
+                                      const Term *rhs, u32 n);
 fn void      thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_demod(AtpState *s, u8 on);
