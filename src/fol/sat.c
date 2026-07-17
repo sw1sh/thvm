@@ -84,7 +84,8 @@
 //     (A = C's own assumption set).  C itself stays in the store as a
 //     provenance-only record (cpicked, never given).  Components are
 //     memoized by content: a re-derived component reuses its guard
-//     (Vampire's component index), so the guard supply (64) is spent
+//     (Vampire's component index), so the guard supply
+//     (CNF_AVATAR_MAX_GUARDS) is spent
 //     on distinct components only; a clause needing fresh guards past
 //     the cap stores unsplit.
 //   * ASSUMPTION TRACKING.  Every inference conclusion carries the
@@ -97,13 +98,42 @@
 //     outright (unchanged).  An empty clause under assumptions A
 //     records the SAT refutation clause ~(/\A) -- and, being an empty
 //     clause that subsumes under the B-subset gate, sweeps every
-//     stored clause of that refuted branch out of the store (the
-//     deactivation analog).  After each new refutation clause a
-//     node-budgeted DPLL (unit propagation + branch on a shortest
-//     open clause) decides the guard theory {split clauses} u
-//     {refutation clauses}; UNSAT => the case analysis is exhausted
-//     => ATP_PROVED.  Only UNSAT is acted on, so a budget trip erring
-//     "satisfiable" merely keeps saturating.
+//     stored clause of that refuted branch out of the store.  After
+//     each new refutation clause a node-budgeted DPLL (unit
+//     propagation + branch on a shortest open clause) decides the
+//     guard theory {split clauses} u {refutation clauses}; UNSAT =>
+//     the case analysis is exhausted => ATP_PROVED.
+//   * MODEL-GUIDED ACTIVATION (full AVATAR's focusing discipline).
+//     When the DPLL run is satisfiable it returns a MODEL (TRUE-guard
+//     bitset; unassigned guards default TRUE, so guards allocated
+//     after the run enter TRUE).  A clause is ACTIVE iff every guard
+//     of its assumption set is TRUE under the current model -- the
+//     saturation works one branch combination at a time.  Inactive
+//     clauses are skipped as given (parked, NOT consumed) and as
+//     inference partners; they re-enter both pick lanes when a model
+//     change flips their guards.  Conclusions inherit their parents'
+//     assumptions, so clauses are always active at birth; parking
+//     only begins once a branch refutation moves the model.  The
+//     model is refreshed whenever the theory strengthens against it:
+//     after every refutation clause (the refuted branch is a subset
+//     of the current model, so the model always moves or the theory
+//     closes) and after a recorded split event the model happens to
+//     falsify (memoized-component splits; fresh-guard splits are
+//     satisfied by the TRUE default).  A DPLL node-budget trip or
+//     OOM falls back to the all-TRUE keep-all model: every clause
+//     stays active, which is the pre-activation behavior.
+//   * TERMINATION / COMPLETENESS.  Soundness never depends on the
+//     model (activation only steers the search; every inference
+//     stays assumption-tracked).  The SAT theory only strengthens:
+//     refutation masks form a growing antichain and each new one
+//     excludes the current model permanently, so a model, once
+//     abandoned for a refutation, never returns -- over finitely many
+//     guards
+//     the branch case analysis is finite and either some branch
+//     combination saturates (a genuine finite model of the input:
+//     ATP_QUEUE_EMPTY, reported as saturation exactly as before) or
+//     the theory closes (ATP_PROVED).  Within one model the loop is
+//     the ordinary fair given-clause saturation.
 //   * SOUNDNESS.  Each stored clause with assumption set A stands for
 //     /\A -> C, where a_g stands for the (closed) formula ALL(C_g).
 //     Splitting is sound because variable-disjointness makes
@@ -114,13 +144,6 @@
 //     a consequence of the input set: their propositional
 //     unsatisfiability over the a_g witnesses the input's
 //     unsatisfiability.
-//   * DIVERGENCE from full AVATAR (documented, deliberate): there is
-//     no SAT-model-guided clause (de)activation -- ALL component
-//     clauses stay active simultaneously (complete, just less
-//     pruning); the win over no-splitting is that components (short,
-//     variable-disjoint) resolve far more productively than the wide
-//     originals, and refuted branches still retire wholesale through
-//     the empty-clause subsumption sweep.
 //
 // Memory: the state OWNS every FolClause* it stores.  Free via
 // cnf_free.
@@ -153,8 +176,12 @@ fn CnfState *cnf_init(u32 step_cap) {
   s->cgoal       = (u8 *)calloc(s->cap, 1);
   s->cfrozen     = (FolLit **)calloc(s->cap, sizeof(FolLit *));
   s->cnvars      = (u32 *)calloc(s->cap, sizeof(u32));
-  s->cassume     = (u64 *)calloc(s->cap, sizeof(u64));
-  s->cguard      = (u8 *)calloc(s->cap, 1);
+  s->cassume     = (CnfGmask *)calloc(s->cap, sizeof(CnfGmask));
+  s->cguard      = (u32 *)calloc(s->cap, sizeof(u32));
+  cnf_gm_fill(&s->model);   // all guards TRUE: everything active
+  s->cap_parked  = CNF_DEFAULT_CAP;
+  s->parked      = (u32 *)calloc(s->cap_parked, sizeof(u32));
+  s->cstale      = (u8 *)calloc(s->cap, 1);
   s->cap_active = CNF_DEFAULT_CAP;
   s->active = (u32 *)calloc(s->cap_active, sizeof(u32));
   s->cap_passive = CNF_DEFAULT_CAP;
@@ -172,12 +199,14 @@ fn CnfState *cnf_init(u32 step_cap) {
       s->cpicked == NULL || s->csel == NULL || s->cmaxlits == NULL ||
       s->celig_valid == NULL || s->cgoal == NULL || s->cfrozen == NULL ||
       s->cnvars == NULL || s->cassume == NULL || s->cguard == NULL ||
+      s->parked == NULL || s->cstale == NULL ||
       s->active == NULL || s->passive == NULL ||
       s->pheap == NULL || s->ueq == NULL || s->trace == NULL ||
       s->deferred_free == NULL) {
     free(s->clauses); free(s->cweight); free(s->cpri); free(s->cmask); free(s->cpicked);
     free(s->csel); free(s->cmaxlits); free(s->celig_valid); free(s->cgoal);
     free(s->cfrozen); free(s->cnvars); free(s->cassume); free(s->cguard);
+    free(s->parked); free(s->cstale);
     free(s->active); free(s->passive); free(s->pheap); free(s->ueq);
     free(s->trace); free(s->deferred_free); free(s);
     return NULL;
@@ -249,6 +278,8 @@ fn void cnf_free(CnfState *s) {
   free(s->split_orig);
   free(s->refut_mask);
   free(s->refut_id);
+  free(s->parked);
+  free(s->cstale);
   free(s->active);
   free(s->passive);
   free(s->pheap);
@@ -541,10 +572,12 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
     if (nf != NULL) s->cfrozen = (FolLit **)nf;
     void *nn = realloc(s->cnvars, (size_t)nc * sizeof(u32));
     if (nn != NULL) s->cnvars = (u32 *)nn;
-    void *nu = realloc(s->cassume, (size_t)nc * sizeof(u64));
-    if (nu != NULL) s->cassume = (u64 *)nu;
-    void *nb = realloc(s->cguard, (size_t)nc);
-    if (nb != NULL) s->cguard = (u8 *)nb;
+    void *nu = realloc(s->cassume, (size_t)nc * sizeof(CnfGmask));
+    if (nu != NULL) s->cassume = (CnfGmask *)nu;
+    void *nb = realloc(s->cguard, (size_t)nc * sizeof(u32));
+    if (nb != NULL) s->cguard = (u32 *)nb;
+    void *nl = realloc(s->cstale, (size_t)nc);
+    if (nl != NULL) s->cstale = (u8 *)nl;
     void *nd = NULL;
     if (s->corpse != NULL) {
       nd = realloc(s->corpse, (size_t)nc * sizeof(FolClause *));
@@ -569,7 +602,7 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
     }
     if (na == NULL || nw == NULL || nq == NULL || nm == NULL || np == NULL ||
         ns == NULL || nx == NULL || nv == NULL || ng == NULL ||
-        nf == NULL || nn == NULL || nu == NULL || nb == NULL ||
+        nf == NULL || nn == NULL || nu == NULL || nb == NULL || nl == NULL ||
         (s->corpse != NULL && nd == NULL)) return -1;
     s->cap = nc;
     for (u32 i = s->n; i < s->cap; i++) s->clauses[i] = NULL;
@@ -592,9 +625,10 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
   if (parent_b != FOL_NO_PARENT && s->cgoal[parent_b]) goal = 1u;
   // Assumption set: the parents' union (AVATAR-lite).  Component
   // clauses get their {guard} singleton patched in by the splitter.
-  u64 asum = 0ull;
-  if (parent_a != FOL_NO_PARENT) asum |= s->cassume[parent_a];
-  if (parent_b != FOL_NO_PARENT) asum |= s->cassume[parent_b];
+  CnfGmask asum;
+  cnf_gm_zero(&asum);
+  if (parent_a != FOL_NO_PARENT) cnf_gm_or(&asum, &s->cassume[parent_a]);
+  if (parent_b != FOL_NO_PARENT) cnf_gm_or(&asum, &s->cassume[parent_b]);
   s->cassume[id] = asum;
   s->cguard[id]  = 0u;
   u32 w = cnf_clause_weight(c);
@@ -603,6 +637,7 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
   s->cpri[id]    = w + ((goal || s->goal_tier == 0u) ? 0u : CNF_NONGOAL_PENALTY);
   s->cmask[id]   = cnf_mask_for(s, c);
   s->cpicked[id] = 0u;
+  s->cstale[id]  = 0u;
   s->celig_valid[id] = 0u;
   // Freeze once: the rename-apart target-literal copy every later
   // subsumption test against this clause reuses.
@@ -663,7 +698,7 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
 // See the header comment ("AVATAR-lite component splitting") for the
 // semantics + soundness argument.
 
-#define CNF_AVATAR_MAX_GUARDS 64u
+// CNF_AVATAR_MAX_GUARDS (thvm.h): the guard supply -- CnfGmask width.
 
 // on: 0 = off, 1 = split every stored clause, 2 = scoped (input +
 // conjecture-descended only; the guard-economy mode).
@@ -728,11 +763,11 @@ fn u32 fol_components(const FolClause *c, u8 *comp_of) {
 static u8 cnf_split_reserve(CnfState *s) {
   if (s->n_split < s->cap_split) return 1u;
   u32 nc = (s->cap_split == 0u) ? 8u : s->cap_split * 2u;
-  void *p = realloc(s->split_pos,  (size_t)nc * sizeof(u64));
-  void *q = realloc(s->split_neg,  (size_t)nc * sizeof(u64));
+  void *p = realloc(s->split_pos,  (size_t)nc * sizeof(CnfGmask));
+  void *q = realloc(s->split_neg,  (size_t)nc * sizeof(CnfGmask));
   void *r = realloc(s->split_orig, (size_t)nc * sizeof(u32));
-  if (p != NULL) s->split_pos  = (u64 *)p;
-  if (q != NULL) s->split_neg  = (u64 *)q;
+  if (p != NULL) s->split_pos  = (CnfGmask *)p;
+  if (q != NULL) s->split_neg  = (CnfGmask *)q;
   if (r != NULL) s->split_orig = (u32 *)r;
   if (p == NULL || q == NULL || r == NULL) return 0u;
   s->cap_split = nc;
@@ -742,9 +777,9 @@ static u8 cnf_split_reserve(CnfState *s) {
 static u8 cnf_refut_reserve(CnfState *s) {
   if (s->n_refut < s->cap_refut) return 1u;
   u32 nc = (s->cap_refut == 0u) ? 8u : s->cap_refut * 2u;
-  void *p = realloc(s->refut_mask, (size_t)nc * sizeof(u64));
+  void *p = realloc(s->refut_mask, (size_t)nc * sizeof(CnfGmask));
   void *q = realloc(s->refut_id,   (size_t)nc * sizeof(u32));
-  if (p != NULL) s->refut_mask = (u64 *)p;
+  if (p != NULL) s->refut_mask = (CnfGmask *)p;
   if (q != NULL) s->refut_id   = (u32 *)q;
   if (p == NULL || q == NULL) return 0u;
   s->cap_refut = nc;
@@ -768,15 +803,20 @@ static u32 cnf_guard_find(const CnfState *s, const FolClause *comp) {
 // SAT clause (pos, neg) = \/_{g in pos} a_g  v  \/_{g in neg} ~a_g.
 // One split clause per split event (~A -> \/ a_g), one refutation
 // clause per conditional empty clause (~(/\A)).  Deciding the family
-// is a <= 64-variable DPLL: unit propagation, then branch on a
-// variable of a shortest open clause, node-budgeted.  Only an UNSAT
-// verdict is acted on (PROVED), so a budget trip erring "satisfiable"
-// is sound -- the loop just keeps saturating.
-typedef struct { u64 pos, neg; } CnfSatClause;
+// is a <= CNF_AVATAR_MAX_GUARDS-variable DPLL: unit propagation, then
+// branch on a variable of a shortest open clause, node-budgeted.
+// Only an UNSAT verdict is acted on (PROVED), so a budget trip erring
+// "satisfiable" is sound -- the loop just keeps saturating (under the
+// keep-all fallback model).
+typedef struct { CnfGmask pos, neg; } CnfSatClause;
 
-// 1 = satisfiable (or budget exhausted), 0 = unsatisfiable.
+// 1 = satisfiable (or budget exhausted), 0 = unsatisfiable.  On
+// genuine satisfaction *model_out = the TRUE-guard set, unassigned
+// guards defaulting TRUE; a budget trip leaves *model_out untouched
+// (the caller's fallback stands).
 static u8 cnf_dpll(const CnfSatClause *cl, u32 n,
-                   u64 asg, u64 val, u32 *budget) {
+                   CnfGmask asg, CnfGmask val, u32 *budget,
+                   CnfGmask *model_out) {
   for (;;) {
     if (*budget == 0u) return 1u;
     (*budget)--;
@@ -784,54 +824,142 @@ static u8 cnf_dpll(const CnfSatClause *cl, u32 n,
     u32 unit_g = ~0u;
     u8 unit_pos = 0u;
     u32 best_free = ~0u;
-    u64 best_mask = 0ull, best_pos = 0ull;
+    CnfGmask best_mask;
+    cnf_gm_zero(&best_mask);
+    const CnfGmask *best_pos = NULL;
     for (u32 i = 0; i < n; i++) {
-      if ((cl[i].pos & asg & val) != 0ull) continue;      // a true positive
-      if ((cl[i].neg & asg & ~val) != 0ull) continue;     // a false negated
-      u64 fr = (cl[i].pos | cl[i].neg) & ~asg;
-      if (fr == 0ull) return 0u;                          // falsified clause
+      u8 satisfied = 0u;
+      CnfGmask fr;
+      u64 fr_any = 0ull;
+      for (u32 w = 0; w < CNF_GMASK_WORDS; w++) {
+        u64 p = cl[i].pos.w[w], q = cl[i].neg.w[w];
+        u64 a = asg.w[w],       v = val.w[w];
+        if (((p & a & v) | (q & a & ~v)) != 0ull) {   // a true positive /
+          satisfied = 1u;                             // a false negated
+          break;
+        }
+        fr.w[w] = (p | q) & ~a;
+        fr_any |= fr.w[w];
+      }
+      if (satisfied) continue;
+      if (fr_any == 0ull) return 0u;                  // falsified clause
       open = 1u;
-      u32 k = (u32)__builtin_popcountll(fr);
+      u32 k = cnf_gm_pop(&fr);
       if (k == 1u) {
-        unit_g   = (u32)__builtin_ctzll(fr);
-        unit_pos = ((cl[i].pos >> unit_g) & 1ull) ? 1u : 0u;
+        unit_g   = cnf_gm_first(&fr);
+        unit_pos = cnf_gm_test(&cl[i].pos, unit_g);
         break;
       }
-      if (k < best_free) { best_free = k; best_mask = fr; best_pos = cl[i].pos; }
+      if (k < best_free) { best_free = k; best_mask = fr; best_pos = &cl[i].pos; }
     }
-    if (!open) return 1u;                                 // all satisfied
+    if (!open) {                                      // all satisfied
+      if (model_out != NULL)
+        for (u32 w = 0; w < CNF_GMASK_WORDS; w++)
+          model_out->w[w] = val.w[w] | ~asg.w[w];
+      return 1u;
+    }
     if (unit_g != ~0u) {
-      asg |= 1ull << unit_g;
-      if (unit_pos) val |= 1ull << unit_g;
+      cnf_gm_set(&asg, unit_g);
+      if (unit_pos) cnf_gm_set(&val, unit_g);
       continue;
     }
-    u32 g = (u32)__builtin_ctzll(best_mask);
-    u64 bit = 1ull << g;
-    u8 sat_first = ((best_pos >> g) & 1ull) ? 1u : 0u;    // satisfy it first
-    if (cnf_dpll(cl, n, asg | bit, sat_first ? (val | bit) : val, budget))
+    u32 g = cnf_gm_first(&best_mask);
+    u8 sat_first = cnf_gm_test(best_pos, g);          // satisfy it first
+    CnfGmask asg2 = asg, val_t = val, val_f = val;
+    cnf_gm_set(&asg2, g);
+    cnf_gm_set(&val_t, g);
+    if (cnf_dpll(cl, n, asg2, sat_first ? val_t : val_f,
+                 budget, model_out))
       return 1u;
-    return cnf_dpll(cl, n, asg | bit, sat_first ? val : (val | bit), budget);
+    return cnf_dpll(cl, n, asg2, sat_first ? val_f : val_t,
+                    budget, model_out);
   }
 }
 
-// Is the accumulated guard theory propositionally unsatisfiable?
-static u8 cnf_avatar_closed(const CnfState *s) {
-  if (s->n_refut == 0u) return 0u;
+// ACTIVE = every guard of the clause's assumption set is TRUE under
+// the current model (trivially so with avatar off: cassume all-zero).
+static u8 cnf_is_active(const CnfState *s, u32 id) {
+  return cnf_gm_subset(&s->cassume[id], &s->model);
+}
+
+// Park an inactive clause for later reactivation (a passive pop, or
+// an active clause hit as a skipped inference partner).  cstale
+// dedups: one parked entry per deactivation cycle.  0 on OOM -- the
+// caller then just keeps the clause active (sound; activation only
+// steers the search).
+static u8 cnf_park(CnfState *s, u32 id) {
+  if (s->cstale[id]) return 1u;   // already parked
+  if (s->n_parked >= s->cap_parked) {
+    cnf_grow(&s->cap_parked, (u8 **)&s->parked, sizeof(u32));
+    if (s->n_parked >= s->cap_parked) return 0u;
+  }
+  s->parked[s->n_parked++] = id;
+  s->cstale[id] = 1u;
+  return 1u;
+}
+
+// Adopt a model.  On change, every parked clause whose guards are now
+// all-TRUE re-enters both pick lanes (matching add-time queueing);
+// still-FALSE ids stay parked.  A previously GIVEN clause re-enters
+// with cpicked cleared, so it redoes its given-step against the full
+// active set -- regenerating the partner pairs skipped while its
+// branch was off (the re-given discipline; its duplicate active[]
+// entry is benign: conclusions dedup via forward subsumption and the
+// self-pair is skipped by id).  An id that fails BOTH queue appends
+// (OOM) stays parked rather than being silently dropped.
+static void cnf_model_set(CnfState *s, const CnfGmask *m) {
+  if (cnf_gm_eq(m, &s->model)) return;
+  s->model = *m;
+  s->n_models++;
+  u32 keep = 0u;
+  for (u32 i = 0; i < s->n_parked; i++) {
+    u32 id = s->parked[i];
+    if (s->clauses[id] == NULL) { s->cstale[id] = 0u; continue; }
+    if (!cnf_gm_subset(&s->cassume[id], m)) { s->parked[keep++] = id; continue; }
+    u32 heap0 = s->n_pheap;
+    cnf_pq_push(s, id);
+    u8 queued = (s->n_pheap > heap0) ? 1u : 0u;
+    if (s->n_passive >= s->cap_passive)
+      cnf_grow(&s->cap_passive, (u8 **)&s->passive, sizeof(u32));
+    if (s->n_passive < s->cap_passive) {
+      s->passive[s->n_passive++] = id;   // age (FIFO) lane
+      queued = 1u;
+    }
+    if (!queued) { s->parked[keep++] = id; continue; }
+    s->cpicked[id] = 0u;
+    s->cstale[id]  = 0u;
+  }
+  s->n_parked = keep;
+}
+
+// Decide the guard theory {split clauses} u {refutation clauses} and
+// refresh the model.  0 iff propositionally UNSAT -- the case
+// analysis is exhausted; the caller closes the run.  On SAT the
+// adopted model is genuine; a DPLL budget trip or OOM falls back to
+// the all-TRUE keep-all model (everything active -- the
+// pre-activation behavior).
+static u8 cnf_avatar_solve(CnfState *s) {
+  CnfGmask allon;
+  cnf_gm_fill(&allon);
+  if (s->n_refut == 0u) { cnf_model_set(s, &allon); return 1u; }
   u32 n = s->n_split + s->n_refut;
   CnfSatClause *cl = (CnfSatClause *)malloc((size_t)n * sizeof(CnfSatClause));
-  if (cl == NULL) return 0u;
+  if (cl == NULL) { cnf_model_set(s, &allon); return 1u; }
   for (u32 i = 0; i < s->n_split; i++) {
     cl[i].pos = s->split_pos[i];
     cl[i].neg = s->split_neg[i];
   }
   for (u32 i = 0; i < s->n_refut; i++) {
-    cl[s->n_split + i].pos = 0ull;
+    cnf_gm_zero(&cl[s->n_split + i].pos);
     cl[s->n_split + i].neg = s->refut_mask[i];
   }
   u32 budget = 1u << 20;
-  u8 sat = cnf_dpll(cl, n, 0ull, 0ull, &budget);
+  CnfGmask model = allon, zero;
+  cnf_gm_zero(&zero);
+  u8 sat = cnf_dpll(cl, n, zero, zero, &budget, &model);
   free(cl);
-  return sat ? 0u : 1u;
+  if (sat) cnf_model_set(s, &model);
+  return sat;
 }
 
 // Attempt the component split of `c` (provenance rule/parents; the
@@ -847,7 +975,7 @@ static i32 cnf_try_split(CnfState *s, FolClause *c, FolInference rule,
                          u32 parent_a, u32 parent_b, u8 goal_force) {
   if (!s->avatar_on || c->n_lits < 2u) return -2;
   // Scoped splitting (avatar_on == 2): spend guards on INPUT clauses
-  // and conjecture-descended conclusions only.  The 64-guard supply is
+  // and conjecture-descended conclusions only.  The guard supply is
   // the scarce resource; unscoped runs on flood-class problems burn it
   // on axiom-side junk before the case analysis near the goal starts.
   // Splitting scope is a strategy choice, never a soundness one.
@@ -860,9 +988,10 @@ static i32 cnf_try_split(CnfState *s, FolClause *c, FolInference rule,
   u8 comp_of[FOL_MAX_LITS];
   u32 m = fol_components(c, comp_of);
   if (m < 2u) return -2;
-  u64 asum = 0ull;
-  if (parent_a != FOL_NO_PARENT) asum |= s->cassume[parent_a];
-  if (parent_b != FOL_NO_PARENT) asum |= s->cassume[parent_b];
+  CnfGmask asum;
+  cnf_gm_zero(&asum);
+  if (parent_a != FOL_NO_PARENT) cnf_gm_or(&asum, &s->cassume[parent_a]);
+  if (parent_b != FOL_NO_PARENT) cnf_gm_or(&asum, &s->cassume[parent_b]);
   // Build the component clauses first: guard demand is only known
   // after the memo lookups.
   FolClause *comp[FOL_MAX_LITS];
@@ -896,10 +1025,12 @@ static i32 cnf_try_split(CnfState *s, FolClause *c, FolInference rule,
   }
   if (n_fresh == 0u) {
     // Every component memoized: dedupe the split event.
-    u64 pos = 0ull;
-    for (u32 k = 0; k < m; k++) pos |= 1ull << comp_guard[k];
+    CnfGmask pos;
+    cnf_gm_zero(&pos);
+    for (u32 k = 0; k < m; k++) cnf_gm_set(&pos, comp_guard[k]);
     for (u32 e = 0; e < s->n_split; e++) {
-      if (s->split_pos[e] == pos && s->split_neg[e] == asum) {
+      if (cnf_gm_eq(&s->split_pos[e], &pos) &&
+          cnf_gm_eq(&s->split_neg[e], &asum)) {
         for (u32 k = 0; k < m; k++) fol_clause_free(comp[k]);
         fol_clause_free(c);
         return (i32)s->split_orig[e];
@@ -916,11 +1047,12 @@ static i32 cnf_try_split(CnfState *s, FolClause *c, FolInference rule,
   }
   s->cpicked[(u32)orig] = 1u;
   if (goal_force) s->cgoal[(u32)orig] = 1u;   // components inherit below
-  u64 pos = 0ull;
+  CnfGmask pos;
+  cnf_gm_zero(&pos);
   for (u32 k = 0; k < m; k++) {
     if (comp_guard[k] != ~0u) {
       // Memoized: the guard's component clause already stands.
-      pos |= 1ull << comp_guard[k];
+      cnf_gm_set(&pos, comp_guard[k]);
       fol_clause_free(comp[k]);
       continue;
     }
@@ -934,18 +1066,28 @@ static i32 cnf_try_split(CnfState *s, FolClause *c, FolInference rule,
       fol_clause_free(comp[k]);
       s->guard_comp[g] = ~0u;   // no clause: memo lookups miss it
     } else {
-      s->cassume[(u32)idc] = 1ull << g;
-      s->cguard[(u32)idc]  = (u8)(g + 1u);
+      cnf_gm_zero(&s->cassume[(u32)idc]);
+      cnf_gm_set(&s->cassume[(u32)idc], g);
+      s->cguard[(u32)idc]  = g + 1u;
       s->guard_comp[g] = (u32)idc;
     }
     s->n_guards++;
     comp_guard[k] = g;
-    pos |= 1ull << g;
+    cnf_gm_set(&pos, g);
   }
   s->split_pos[s->n_split]  = pos;
   s->split_neg[s->n_split]  = asum;
   s->split_orig[s->n_split] = (u32)orig;
   s->n_split++;
+  // Model maintenance: fresh guards enter TRUE, so an event that
+  // allocated any is satisfied as recorded.  A memo-only event can be
+  // falsified (every component branch FALSE while the parent
+  // assumptions hold): re-solve -- UNSAT here means every branch
+  // combination is already refuted.
+  if (!cnf_gm_intersects(&pos, &s->model) &&
+      cnf_gm_subset(&asum, &s->model) &&
+      !cnf_avatar_solve(s))
+    s->status = ATP_PROVED;
   return orig;
 }
 
@@ -1188,7 +1330,8 @@ static FolClause *cnf_demodulate_ordered(const CnfState *s,
 // with one set, well-foundedness makes the budget cap untouched.
 #define CNF_DEMOD_BUDGET 16u
 
-static void cnf_forward_demod(CnfState *s, FolClause **pc, u64 asum) {
+static void cnf_forward_demod(CnfState *s, FolClause **pc,
+                              const CnfGmask *asum) {
   if (pc == NULL || *pc == NULL) return;
   FolClause *c = *pc;
   for (u32 iter = 0; iter < CNF_DEMOD_BUDGET; iter++) {
@@ -1203,7 +1346,7 @@ static void cnf_forward_demod(CnfState *s, FolClause **pc, u64 asum) {
       // Assumption gate (AVATAR): a rule under assumptions B may
       // rewrite a target under assumptions A only when B is a subset
       // of A (the result keeps A).  All-zero when avatar is off.
-      if ((s->cassume[s->ueq[i]] & ~asum) != 0ull) continue;
+      if (!cnf_gm_subset(&s->cassume[s->ueq[i]], asum)) continue;
       u64 mark = HEAP_NEXT, gc_snap = gc_count();
       FolClause *d = cnf_demodulate_ordered(s, rule, c);
       if (d == NULL) { cnf_reclaim(mark, gc_snap); continue; }
@@ -1232,17 +1375,19 @@ static void cnf_forward_demod(CnfState *s, FolClause **pc, u64 asum) {
 // all-zero, i.e. always-true, when avatar is off).  A stored
 // conditional EMPTY clause thus sweeps exactly its refuted branch.
 static u8 cnf_fsub_try(const CnfState *s, u32 i, const FolClause *c,
-                       u64 cm, u32 cw, const FolLit *frozen, u64 ca) {
+                       u64 cm, u32 cw, const FolLit *frozen,
+                       const CnfGmask *ca) {
   const FolClause *a = s->clauses[i];
   if (a == NULL) return 0u;
   if (a->n_lits > c->n_lits) return 0u;
   if (s->cweight[i] > cw) return 0u;   // substitution never shrinks
   if ((s->cmask[i] & ~cm) != 0ull) return 0u;
-  if ((s->cassume[i] & ~ca) != 0ull) return 0u;
+  if (!cnf_gm_subset(&s->cassume[i], ca)) return 0u;
   return fol_subsumes_frozen_nv(a, frozen, c->n_lits, s->cnvars[i]);
 }
 
-static u8 cnf_is_subsumed(const CnfState *s, const FolClause *c, u64 ca) {
+static u8 cnf_is_subsumed(const CnfState *s, const FolClause *c,
+                          const CnfGmask *ca) {
   if (c->n_lits > FOL_MAX_LITS) return 0u;
   u64 cm = cnf_mask_for(s, c);
   u32 cw = cnf_clause_weight(c);
@@ -1325,7 +1470,7 @@ static void cnf_backward_demod(CnfState *s, u32 new_id) {
     // AVATAR gate: rewrite only targets whose assumption set contains
     // the rule's (the derivative keeps the target's set, which the
     // traced add reproduces as the parents' union).
-    if ((s->cassume[new_id] & ~s->cassume[i]) != 0ull) continue;
+    if (!cnf_gm_subset(&s->cassume[new_id], &s->cassume[i])) continue;
     u32 n_before = s->n;
     u64 mark = HEAP_NEXT, gc_snap = gc_count();
     FolClause *d = cnf_demodulate_ordered(s, rule, old);
@@ -1362,7 +1507,9 @@ static void cnf_backward_demod(CnfState *s, u32 new_id) {
       continue;
     }
     if (fol_is_tautology(d)) { fol_clause_free(d); cnf_reclaim(mark, gc_snap); continue; }
-    if (cnf_is_subsumed(s, d, s->cassume[new_id] | s->cassume[i])) {
+    CnfGmask du = s->cassume[new_id];
+    cnf_gm_or(&du, &s->cassume[i]);
+    if (cnf_is_subsumed(s, d, &du)) {
       fol_clause_free(d);
       cnf_reclaim(mark, gc_snap);
       continue;
@@ -1390,7 +1537,7 @@ static void cnf_bsub_try(CnfState *s, u32 new_id, const FolClause *new_c,
   if ((nm & ~s->cmask[i]) != 0ull) return;
   // AVATAR gate: the subsumer's assumptions must be a subset of the
   // removed clause's (all-zero when avatar is off).
-  if ((s->cassume[new_id] & ~s->cassume[i]) != 0ull) return;
+  if (!cnf_gm_subset(&s->cassume[new_id], &s->cassume[i])) return;
   u8 sub = (s->cfrozen[i] != NULL)
              ? fol_subsumes_frozen_nv(new_c, s->cfrozen[i], old->n_lits,
                                       s->cnvars[new_id])
@@ -1468,10 +1615,11 @@ static void cnf_flush_deferred(CnfState *s) {
 // propositionally UNSAT.
 static void cnf_empty_derived(CnfState *s, FolClause *c, FolInference rule,
                               u32 parent_a, u32 parent_b) {
-  u64 asum = 0ull;
-  if (parent_a != FOL_NO_PARENT) asum |= s->cassume[parent_a];
-  if (parent_b != FOL_NO_PARENT) asum |= s->cassume[parent_b];
-  if (!s->avatar_on || asum == 0ull) {
+  CnfGmask asum;
+  cnf_gm_zero(&asum);
+  if (parent_a != FOL_NO_PARENT) cnf_gm_or(&asum, &s->cassume[parent_a]);
+  if (parent_b != FOL_NO_PARENT) cnf_gm_or(&asum, &s->cassume[parent_b]);
+  if (!s->avatar_on || cnf_gm_is_zero(&asum)) {
     cnf_add_clause_traced(s, c, rule, parent_a, parent_b);
     s->status = ATP_PROVED;
     return;
@@ -1484,12 +1632,12 @@ static void cnf_empty_derived(CnfState *s, FolClause *c, FolInference rule,
   // Deep flood runs otherwise accumulate tens of thousands of wide
   // masks, each paying a store + sweep + DPLL.
   for (u32 r = 0; r < s->n_refut; r++) {
-    if ((s->refut_mask[r] & ~asum) == 0ull) { fol_clause_free(c); return; }
+    if (cnf_gm_subset(&s->refut_mask[r], &asum)) { fol_clause_free(c); return; }
   }
   {
     u32 w = 0u;
     for (u32 r = 0; r < s->n_refut; r++) {
-      if ((asum & ~s->refut_mask[r]) == 0ull) continue;   // superset: retire
+      if (cnf_gm_subset(&asum, &s->refut_mask[r])) continue;  // superset: retire
       s->refut_mask[w] = s->refut_mask[r];
       s->refut_id[w]   = s->refut_id[r];
       w++;
@@ -1504,7 +1652,10 @@ static void cnf_empty_derived(CnfState *s, FolClause *c, FolInference rule,
   s->refut_id[s->n_refut]   = (u32)id;
   s->n_refut++;
   cnf_backward_subsume(s, (u32)id);   // sweep the refuted branch
-  if (cnf_avatar_closed(s)) s->status = ATP_PROVED;
+  // The refuted branch lay inside the current model (active parents),
+  // so the re-solve either closes the theory or moves the model on --
+  // deactivating this branch combination and activating another.
+  if (!cnf_avatar_solve(s)) s->status = ATP_PROVED;
 }
 
 // Push a derived clause through the redundancy filters; consume on
@@ -1528,21 +1679,22 @@ static void cnf_consider(CnfState *s, FolClause *c,
   if (s->status != ATP_RUNNING) { fol_clause_free(c); return; }
   // The conclusion's assumption set (the parents' union) gates the
   // simplifiers below; all-zero when avatar is off.
-  u64 asum = 0ull;
-  if (parent_a != FOL_NO_PARENT) asum |= s->cassume[parent_a];
-  if (parent_b != FOL_NO_PARENT) asum |= s->cassume[parent_b];
+  CnfGmask asum;
+  cnf_gm_zero(&asum);
+  if (parent_a != FOL_NO_PARENT) cnf_gm_or(&asum, &s->cassume[parent_a]);
+  if (parent_b != FOL_NO_PARENT) cnf_gm_or(&asum, &s->cassume[parent_b]);
   // Canonize FIRST: binary inferences leave second-premise variables
   // in the renamed range; every downstream consumer (demod, the
   // filters, later inferences on the stored clause) needs dense ids.
   fol_clause_canon_vars(c);
-  cnf_forward_demod(s, &c, asum);
+  cnf_forward_demod(s, &c, &asum);
   if (c == NULL) return;
   if (fol_clause_is_empty(c)) {
     cnf_empty_derived(s, c, rule, parent_a, parent_b);
     return;
   }
   if (fol_is_tautology(c)) { fol_clause_free(c); return; }
-  if (cnf_is_subsumed(s, c, asum)) { fol_clause_free(c); return; }
+  if (cnf_is_subsumed(s, c, &asum)) { fol_clause_free(c); return; }
   // Store (splitting into guarded components when avatar applies);
   // run the backward passes for every fresh QUEUED clause -- the one
   // stored clause on the plain path, the components on a split (the
@@ -1862,10 +2014,18 @@ static u8 cnf_idx_partners(CnfState *s, u32 given_id, u32 active_snapshot) {
   for (u32 e = 0; e < s->n_peq; e++) s->cstamp[s->idx_peq[e]] = s->idx_epoch;
   for (u32 e = 0; e < s->n_fb;  e++) s->cstamp[s->idx_fb[e]]  = s->idx_epoch;
   for (u32 k = 0; k + 1u < active_snapshot; k++) {
+    // A mid-step model flip can deactivate the GIVEN itself (an empty
+    // clause derived from its conclusions): stop expanding the dead
+    // branch; the parked given redoes the whole step on reactivation.
+    if (!cnf_is_active(s, given_id) && cnf_park(s, given_id)) return 1u;
     u32 a_id = s->active[k];
     if (a_id == given_id) continue;
     if (s->cstamp[a_id] != s->idx_epoch) continue;
     if (s->clauses[a_id] == NULL) continue;
+    // Model-guided activation: a partner on a FALSE branch is parked
+    // for a re-given pass if its branch reactivates (park failure =
+    // OOM: keep the partner -- sound, just unfocused).
+    if (!cnf_is_active(s, a_id) && cnf_park(s, a_id)) continue;
     cnf_gen_resolution(s, given_id, a_id);
     if (s->status != ATP_RUNNING) return 1u;
     cnf_gen_resolution(s, a_id, given_id);   // symmetric face
@@ -1886,7 +2046,11 @@ static u8 cnf_idx_partners(CnfState *s, u32 given_id, u32 active_snapshot) {
 // supplies the OLDEST surviving passive clause instead, so heavy
 // clauses can't starve (fairness).  Entries consumed by the other
 // lane (cpicked) or clobbered by backward subsumption (NULL slot)
-// are skipped lazily.  Returns ~0u when both lanes are empty.
+// are skipped lazily; INACTIVE entries (a FALSE guard in the current
+// model) are parked, not consumed -- they re-queue on a model change.
+// Returns ~0u when both lanes are empty (with parked clauses pending
+// that is the current branch combination's saturation -- a genuine
+// model of the input, see the header's TERMINATION note).
 static u32 cnf_pop_passive(CnfState *s) {
   s->pick_count++;
   u8 age_turn = (s->age_ratio != 0u &&
@@ -1895,27 +2059,27 @@ static u32 cnf_pop_passive(CnfState *s) {
     for (;;) {
       u32 id = cnf_pq_pop(s);
       if (id == ~0u) break;
-      if (s->clauses[id] != NULL && !s->cpicked[id]) {
-        s->cpicked[id] = 1u;
-        return id;
-      }
+      if (s->clauses[id] == NULL || s->cpicked[id]) continue;
+      if (!cnf_is_active(s, id) && cnf_park(s, id)) continue;
+      s->cpicked[id] = 1u;
+      return id;
     }
   }
   while (s->passive_head < s->n_passive) {
     u32 id = s->passive[s->passive_head++];
-    if (s->clauses[id] != NULL && !s->cpicked[id]) {
-      s->cpicked[id] = 1u;
-      return id;
-    }
+    if (s->clauses[id] == NULL || s->cpicked[id]) continue;
+    if (!cnf_is_active(s, id) && cnf_park(s, id)) continue;
+    s->cpicked[id] = 1u;
+    return id;
   }
   // Age turn with a drained FIFO: fall back to the heap.
   for (;;) {
     u32 id = cnf_pq_pop(s);
     if (id == ~0u) break;
-    if (s->clauses[id] != NULL && !s->cpicked[id]) {
-      s->cpicked[id] = 1u;
-      return id;
-    }
+    if (s->clauses[id] == NULL || s->cpicked[id]) continue;
+    if (!cnf_is_active(s, id) && cnf_park(s, id)) continue;
+    s->cpicked[id] = 1u;
+    return id;
   }
   return ~0u;
 }
@@ -1990,9 +2154,14 @@ fn AtpStatus cnf_step(CnfState *s) {
   }
   if (!(s->idx_on && cnf_idx_partners(s, given_id, active_snapshot))) {
     for (u32 k = 0; k + 1u < active_snapshot; k++) {
+      // Mid-step model flip: see cnf_idx_partners.
+      if (!cnf_is_active(s, given_id) && cnf_park(s, given_id)) break;
       u32 a_id = s->active[k];
       if (a_id == given_id) continue;
       if (s->clauses[a_id] == NULL) continue;
+      // Model-guided activation: park FALSE-branch partners (see
+      // cnf_idx_partners).
+      if (!cnf_is_active(s, a_id) && cnf_park(s, a_id)) continue;
       cnf_gen_resolution(s, given_id, a_id);
       if (s->status != ATP_RUNNING) return s->status;
       cnf_gen_resolution(s, a_id, given_id);   // symmetric face
@@ -2093,10 +2262,10 @@ static void cnf_print_clause_line(const CnfState *s, u32 id, FILE *out) {
     }
   }
   // AVATAR: show the assumption guards a conditional clause depends on.
-  if (s->cassume != NULL && s->cassume[id] != 0ull) {
+  if (s->cassume != NULL && !cnf_gm_is_zero(&s->cassume[id])) {
     fprintf(out, "   <-");
     for (u32 g = 0; g < 64u; g++) {
-      if ((s->cassume[id] >> g) & 1ull) fprintf(out, " a%u", g);
+      if (cnf_gm_test(&s->cassume[id], g)) fprintf(out, " a%u", g);
     }
   }
   fprintf(out, "\n");

@@ -4163,6 +4163,62 @@ typedef struct {
   u32           n_used;
 } FolIdx;
 
+// AVATAR guard-set bitset: one bit per propositional guard.  A fixed
+// POD struct (assigned/copied by value) so per-clause assumption sets
+// stay inline in the parallel arrays; all set algebra goes through
+// the gm_* helpers.
+#define CNF_AVATAR_MAX_GUARDS 256u
+#define CNF_GMASK_WORDS (CNF_AVATAR_MAX_GUARDS / 64u)
+typedef struct { u64 w[CNF_GMASK_WORDS]; } CnfGmask;
+
+fn void cnf_gm_zero(CnfGmask *m) {
+  for (u32 i = 0; i < CNF_GMASK_WORDS; i++) m->w[i] = 0ull;
+}
+fn void cnf_gm_fill(CnfGmask *m) {
+  for (u32 i = 0; i < CNF_GMASK_WORDS; i++) m->w[i] = ~0ull;
+}
+fn u8 cnf_gm_is_zero(const CnfGmask *m) {
+  u64 acc = 0ull;
+  for (u32 i = 0; i < CNF_GMASK_WORDS; i++) acc |= m->w[i];
+  return (acc == 0ull) ? 1u : 0u;
+}
+fn u8 cnf_gm_eq(const CnfGmask *a, const CnfGmask *b) {
+  for (u32 i = 0; i < CNF_GMASK_WORDS; i++)
+    if (a->w[i] != b->w[i]) return 0u;
+  return 1u;
+}
+fn void cnf_gm_or(CnfGmask *a, const CnfGmask *b) {   // a |= b
+  for (u32 i = 0; i < CNF_GMASK_WORDS; i++) a->w[i] |= b->w[i];
+}
+fn void cnf_gm_set(CnfGmask *m, u32 g) {
+  m->w[g >> 6] |= 1ull << (g & 63u);
+}
+fn u8 cnf_gm_test(const CnfGmask *m, u32 g) {
+  return (u8)((m->w[g >> 6] >> (g & 63u)) & 1ull);
+}
+fn u8 cnf_gm_subset(const CnfGmask *a, const CnfGmask *b) {  // a is a subset of b
+  u64 acc = 0ull;
+  for (u32 i = 0; i < CNF_GMASK_WORDS; i++) acc |= a->w[i] & ~b->w[i];
+  return (acc == 0ull) ? 1u : 0u;
+}
+fn u8 cnf_gm_intersects(const CnfGmask *a, const CnfGmask *b) {
+  u64 acc = 0ull;
+  for (u32 i = 0; i < CNF_GMASK_WORDS; i++) acc |= a->w[i] & b->w[i];
+  return (acc != 0ull) ? 1u : 0u;
+}
+fn u32 cnf_gm_pop(const CnfGmask *m) {
+  u32 n = 0u;
+  for (u32 i = 0; i < CNF_GMASK_WORDS; i++)
+    n += (u32)__builtin_popcountll(m->w[i]);
+  return n;
+}
+fn u32 cnf_gm_first(const CnfGmask *m) {   // lowest set bit; ~0u when empty
+  for (u32 i = 0; i < CNF_GMASK_WORDS; i++)
+    if (m->w[i] != 0ull)
+      return (i << 6) + (u32)__builtin_ctzll(m->w[i]);
+  return ~0u;
+}
+
 typedef struct {
   FolClause **clauses;
   u32         n;
@@ -4311,18 +4367,34 @@ typedef struct {
   // propositionally unsatisfiable.  See sat.c "AVATAR-lite" for the
   // semantics, soundness argument, and divergence from full AVATAR.
   u8          avatar_on;
-  u64        *cassume;       // per-clause assumption-guard bitset (the
+  CnfGmask   *cassume;       // per-clause assumption-guard bitset (the
                              //   parents' union; {g} for a component)
-  u8         *cguard;        // component clauses: guard index + 1 (else 0)
-  u32         n_guards;      // guards allocated (<= 64)
-  u32         guard_comp[64];// guard -> its component clause id
-  u64        *split_pos;     // SAT split clauses ~A -> \/ a_g:
-  u64        *split_neg;     //   pos = component guards, neg = parent A
+  u32        *cguard;        // component clauses: guard index + 1 (else 0)
+  u32         n_guards;      // guards allocated (<= CNF_AVATAR_MAX_GUARDS)
+  u32         guard_comp[CNF_AVATAR_MAX_GUARDS];  // guard -> component id
+  CnfGmask   *split_pos;     // SAT split clauses ~A -> \/ a_g:
+  CnfGmask   *split_neg;     //   pos = component guards, neg = parent A
   u32        *split_orig;    //   the split clause's id (proof citation)
   u32         n_split, cap_split;
-  u64        *refut_mask;    // SAT refutation clauses ~(/\A) -- one per
+  CnfGmask   *refut_mask;    // SAT refutation clauses ~(/\A) -- one per
   u32        *refut_id;      //   conditional empty clause (its id)
   u32         n_refut, cap_refut;
+  // SAT-model-guided activation (full AVATAR's focusing discipline):
+  // model = the DPLL model's TRUE-guard bitset (unassigned and fresh
+  // guards TRUE; all-ones = the keep-all fallback).  A clause is
+  // ACTIVE iff its assumption set is all-TRUE under the model.
+  // Inactive clauses are parked (skipped as given without being
+  // consumed, skipped as inference partners) and re-enter the pick
+  // lanes when a model change flips their guards -- a previously
+  // GIVEN clause re-enters passive and redoes its given-step, so the
+  // partner pairs skipped while its branch was off are regenerated
+  // (the re-given discipline; completeness).  cstale[id] = 1 while id
+  // sits in parked[] (the once-per-deactivation dedup bit).
+  CnfGmask    model;
+  u32        *parked;
+  u32         n_parked, cap_parked;
+  u8         *cstale;
+  u32         n_models;      // model moves (diagnostic)
 } CnfState;
 
 fn CnfState *cnf_init        (u32 step_cap);

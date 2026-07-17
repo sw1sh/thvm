@@ -6168,9 +6168,9 @@ static const char *prepass_name(const CnfState *s, u32 id, const int *id2cnf,
 
 // Assumption tail: the ~spl<g> disjuncts a conditional clause carries
 // (the Vampire presentation of an AVATAR-conditional clause).
-static void prepass_emit_tail(FILE *out, u64 asum) {
-  for (u32 g = 0; g < 64u; g++) {
-    if ((asum >> g) & 1ull) fprintf(out, " | ~spl%u", g);
+static void prepass_emit_tail(FILE *out, const CnfGmask *asum) {
+  for (u32 g = 0; g < CNF_AVATAR_MAX_GUARDS; g++) {
+    if (cnf_gm_test(asum, g)) fprintf(out, " | ~spl%u", g);
   }
 }
 
@@ -6234,9 +6234,9 @@ static int prepass_emit_c(FILE *out, CnfState *s, u32 id, u8 *done,
     "equality_resolution", "equality_factoring", "demodulation" };
   const char *rule = ((u32)t->rule < sizeof rn / sizeof rn[0])
                        ? rn[t->rule] : "unknown";
-  u64 asum = (s->cassume != NULL) ? s->cassume[id] : 0ull;
+  const CnfGmask *asum = (s->cassume != NULL) ? &s->cassume[id] : NULL;
   fprintf(out, "cnf(p%u, plain, ", id);
-  if (asum != 0ull) {
+  if (asum != NULL && !cnf_gm_is_zero(asum)) {
     fprintf(out, "(%s", txt);
     prepass_emit_tail(out, asum);
     fputs(")", out);
@@ -6272,8 +6272,8 @@ static int prepass_emit_avatar(FILE *out, CnfState *s, u8 *done,
       return 0;
     fprintf(out, "cnf(sct%u, plain, (", r);
     int first = 1;
-    for (u32 g = 0; g < 64u; g++) {
-      if (((s->refut_mask[r] >> g) & 1ull) == 0ull) continue;
+    for (u32 g = 0; g < CNF_AVATAR_MAX_GUARDS; g++) {
+      if (!cnf_gm_test(&s->refut_mask[r], g)) continue;
       fprintf(out, "%s~spl%u", first ? "" : " | ", g);
       first = 0;
     }
@@ -6283,27 +6283,27 @@ static int prepass_emit_avatar(FILE *out, CnfState *s, u8 *done,
   for (u32 e = 0; e < s->n_split; e++) {
     if (!prepass_emit_c(out, s, s->split_orig[e], done, id2cnf, map_cap, def_done))
       return 0;
-    for (u32 g = 0; g < 64u; g++) {
-      if (((s->split_pos[e] >> g) & 1ull) == 0ull) continue;
+    for (u32 g = 0; g < CNF_AVATAR_MAX_GUARDS; g++) {
+      if (!cnf_gm_test(&s->split_pos[e], g)) continue;
       if (s->guard_comp[g] < s->n &&
           !prepass_emit_def(out, s, g, def_done)) return 0;
     }
     fprintf(out, "cnf(ssp%u, plain, (", e);
     int first = 1;
-    for (u32 g = 0; g < 64u; g++) {
-      if (((s->split_neg[e] >> g) & 1ull) == 0ull) continue;
+    for (u32 g = 0; g < CNF_AVATAR_MAX_GUARDS; g++) {
+      if (!cnf_gm_test(&s->split_neg[e], g)) continue;
       fprintf(out, "%s~spl%u", first ? "" : " | ", g);
       first = 0;
     }
-    for (u32 g = 0; g < 64u; g++) {
-      if (((s->split_pos[e] >> g) & 1ull) == 0ull) continue;
+    for (u32 g = 0; g < CNF_AVATAR_MAX_GUARDS; g++) {
+      if (!cnf_gm_test(&s->split_pos[e], g)) continue;
       fprintf(out, "%sspl%u", first ? "" : " | ", g);
       first = 0;
     }
     fprintf(out, "), inference(avatar_split_clause, [status(thm)], [%s",
             prepass_name(s, s->split_orig[e], id2cnf, map_cap, na, sizeof na));
-    for (u32 g = 0; g < 64u; g++) {
-      if (((s->split_pos[e] >> g) & 1ull) == 0ull) continue;
+    for (u32 g = 0; g < CNF_AVATAR_MAX_GUARDS; g++) {
+      if (!cnf_gm_test(&s->split_pos[e], g)) continue;
       if (def_done[g]) fprintf(out, ", sdef%u", g);
     }
     fputs("])).\n", out);
@@ -6331,7 +6331,8 @@ static void prepass_emit_proof(CnfState *s, const int *id2cnf, int map_cap) {
   for (u32 i = 0; i < s->n; i++) {
     const FolClause *c = cnf_clause_at(s, i);
     if (c != NULL && c->n_lits == 0u &&
-        (s->cassume == NULL || s->cassume[i] == 0ull)) { root = i; break; }
+        (s->cassume == NULL ||
+         cnf_gm_is_zero(&s->cassume[i]))) { root = i; break; }
   }
   // The avatar block claims the recorded guard theory is UNSAT --
   // only the engine's own DPLL closure (ATP_PROVED) justifies that.
@@ -6343,7 +6344,7 @@ static void prepass_emit_proof(CnfState *s, const int *id2cnf, int map_cap) {
   FILE *ms = open_memstream(&bufp, &plen);
   if (ms == NULL) return;
   u8 *done = (u8 *)calloc(s->n, 1u);
-  u8 def_done[64] = {0};
+  u8 def_done[CNF_AVATAR_MAX_GUARDS] = {0};
   int ok = (done != NULL);
   if (ok) {
     fprintf(ms, "%% SZS output start Proof for %s\n", g_cli_probpath);
@@ -6555,8 +6556,8 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   // here emits the full conversion-lineage proof.  The engine id
   // space outgrows ncl under AVATAR splitting (each split original
   // and each fresh component takes an id): size the map for the worst
-  // case -- one original per input plus the 64-guard component cap.
-  int id2cap = 2 * ncl + 64 + 1;
+  // case -- one original per input plus the guard-supply component cap.
+  int id2cap = 2 * ncl + (int)CNF_AVATAR_MAX_GUARDS + 1;
   int *id2cnf = NULL;
   if (g_cli_want_proof) {
     cnf_set_retain_dead(s);
@@ -6614,6 +6615,8 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   u32 nstore = s->n;
   u32 nguard = s->n_guards;
   u32 nrefut = s->n_refut;
+  u32 nmodel = s->n_models;
+  u32 nparked = s->n_parked;
   // Refutation under --proof: stash the full conversion-lineage +
   // resolution proof BEFORE the state (and its term-heap slice) dies.
   if ((st == ATP_PROVED || st == ATP_REFUTED) && g_cli_want_proof)
@@ -6641,8 +6644,8 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
     fprintf(stderr, "FindProof: FOF clausal pre-pass: refuted in %u "
             "step(s), %.1fs", steps, horn_now() - t0);
     if (nrefut > 0u)
-      fprintf(stderr, " (avatar: %u guard(s), %u branch refutation(s))",
-              nguard, nrefut);
+      fprintf(stderr, " (avatar: %u guard(s), %u branch refutation(s), "
+              "%u model move(s))", nguard, nrefut, nmodel);
     fprintf(stderr, "\n");
     return 1;
   }
@@ -6653,8 +6656,8 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
           "(%u step(s), %u clause(s), %.1fs, %s-bounded, guard %.1fs",
           steps, nstore, horn_now() - t0, tripped, wall_guard);
   if (nguard > 0u)
-    fprintf(stderr, "; avatar %u guard(s), %u branch refutation(s)",
-            nguard, nrefut);
+    fprintf(stderr, "; avatar %u guard(s), %u branch refutation(s), "
+            "%u model move(s), %u parked", nguard, nrefut, nmodel, nparked);
   fprintf(stderr, ")\n");
   return 0;
 }
