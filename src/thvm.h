@@ -3894,6 +3894,10 @@ typedef enum {
   FOL_INF_REFLEX    = 4,
   FOL_INF_EQ_FACTOR = 5,
   FOL_INF_DEMOD     = 6,
+  // AVATAR-lite component intro: the clause is one variable-disjoint
+  // component of parent_a, guarded by the assumption whose index is
+  // cguard[id]-1 (see the sat.c splitting section).
+  FOL_INF_SPLIT     = 7,
 } FolInference;
 
 #define FOL_NO_PARENT 0xFFFFFFFFu
@@ -4297,6 +4301,28 @@ typedef struct {
   u8         *cfbl;          // per-clause fallback flag (active)
   u32        *cstamp;        // candidate stamp, epoch-keyed
   u32         idx_epoch;
+  // --- AVATAR-lite component splitting (cnf_set_avatar / THVM_FOL_AVATAR)
+  // A stored clause whose literals partition into >= 2 variable-
+  // disjoint components is replaced by one clause per component, each
+  // guarded by a fresh propositional assumption; inference conclusions
+  // union their parents' assumption sets, an empty clause under
+  // assumptions A records the SAT clause ~(/\A), and the run closes
+  // (PROVED) when the split clauses + refutation clauses are
+  // propositionally unsatisfiable.  See sat.c "AVATAR-lite" for the
+  // semantics, soundness argument, and divergence from full AVATAR.
+  u8          avatar_on;
+  u64        *cassume;       // per-clause assumption-guard bitset (the
+                             //   parents' union; {g} for a component)
+  u8         *cguard;        // component clauses: guard index + 1 (else 0)
+  u32         n_guards;      // guards allocated (<= 64)
+  u32         guard_comp[64];// guard -> its component clause id
+  u64        *split_pos;     // SAT split clauses ~A -> \/ a_g:
+  u64        *split_neg;     //   pos = component guards, neg = parent A
+  u32        *split_orig;    //   the split clause's id (proof citation)
+  u32         n_split, cap_split;
+  u64        *refut_mask;    // SAT refutation clauses ~(/\A) -- one per
+  u32        *refut_id;      //   conditional empty clause (its id)
+  u32         n_refut, cap_refut;
 } CnfState;
 
 fn CnfState *cnf_init        (u32 step_cap);
@@ -4321,6 +4347,18 @@ fn void      cnf_set_wpo     (CnfState *s, const WpoConfig *wpo);
 // Attach a selection function (default NONE).  Affects which literal
 // of a clause is allowed to participate in resolution + paramodulation.
 fn void      cnf_set_select  (CnfState *s, CnfSelection sel);
+
+// AVATAR-lite component splitting on/off (overrides the THVM_FOL_AVATAR
+// default read at cnf_init).  Call before any clause is added.
+fn void      cnf_set_avatar  (CnfState *s, u8 on);
+
+// Partition a clause's literals into variable-disjoint components (two
+// literals connect iff they share a variable; ground literals are
+// singleton components).  Fills comp_of[i] (when non-NULL, size
+// n_lits) with dense component labels in first-occurrence order and
+// returns the component count.  Unsplittable shapes (>= 64 distinct
+// variables) report 1.
+fn u32       fol_components  (const FolClause *c, u8 *comp_of);
 
 // Retain backward-subsumed / backward-demodulated clauses in a
 // corpse[] array (keyed by clause id) instead of freeing them, so a
