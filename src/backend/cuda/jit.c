@@ -955,6 +955,22 @@ static int cuda_custom_dispatch(struct KernelEntry *ke,
       return -1;
     }
   }
+  // THVM_CUDA_GPU_TIME=1: true per-fire GPU time via events (costs a sync
+  // per launch; profiling only).  Mirrors the rendered cache-hit path so a
+  // profile run shows custom kernels' REAL device time, not the CPU
+  // enqueue wall (which is dominated by launch-queue full-waits).
+  static int   c_gpu_time_init = 0, c_gpu_time_on = 0;
+  static CUevent c_gpu_ev_a = NULL, c_gpu_ev_b = NULL;
+  if (!c_gpu_time_init) {
+    char const *e = getenv("THVM_CUDA_GPU_TIME");
+    c_gpu_time_on = (e != NULL && e[0] != '0');
+    if (c_gpu_time_on) {
+      cuEventCreate(&c_gpu_ev_a, 0);
+      cuEventCreate(&c_gpu_ev_b, 0);
+    }
+    c_gpu_time_init = 1;
+  }
+  if (c_gpu_time_on) cuEventRecord(c_gpu_ev_a, CUDA_CUR_STREAM);
   CUresult r = cuLaunchKernel(func,
                               ke->custom_grid [0], ke->custom_grid [1],
                               ke->custom_grid [2],
@@ -964,6 +980,13 @@ static int cuda_custom_dispatch(struct KernelEntry *ke,
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuLaunchKernel(custom)", r);
     return -1;
+  }
+  if (c_gpu_time_on) {
+    cuEventRecord(c_gpu_ev_b, CUDA_CUR_STREAM);
+    cuEventSynchronize(c_gpu_ev_b);
+    float ms = 0.0f;
+    cuEventElapsedTime(&ms, c_gpu_ev_a, c_gpu_ev_b);
+    cg_profile_record_gpu(kid, (u64)(ms * 1000.0f));
   }
   cg_profile_record(kid, KDISPATCH_CUSTOM, cg_now_us() - t0);
   return 0;

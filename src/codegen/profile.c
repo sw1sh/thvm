@@ -284,6 +284,7 @@ static char const *kdispatch_tag(KDispatchKind k) {
     case KDISPATCH_METAL_OP:   return "metal_op";
     case KDISPATCH_METAL_MPS:  return "metal_mps";
     case KDISPATCH_CUDA_JIT:   return "cuda_jit";
+    case KDISPATCH_CUSTOM:     return "custom";
     default:                   return "none";
   }
 }

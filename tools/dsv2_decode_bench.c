@@ -94,6 +94,8 @@ static void cfg_init(void) {
 // === helpers ================================================================
 static u32 fbits(float f) { u32 u; memcpy(&u, &f, 4); return u; }
 
+static u32 cdiv(u32 a, u32 b) { return (a + b - 1) / b; }
+
 static double now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -733,10 +735,84 @@ static char *src_bump(void) {
     "}\n");
 }
 
+// === split-K GEMV (replaces the native TMatMul lowering for M=1) ============
+// The flat one-thread-per-output uop kernel launches only ceil(N/256) blocks
+// (2-12 for the 576-3072-wide projections), measured 17-90 GB/s on H100 --
+// 2-5% of HBM.  Phase 1 splits K over blockIdx.y (part[s*N+n] = the s-th
+// K-chunk's dot), phase 2 folds the SK partials per column and applies the
+// output rounding the native mm had (bf16 round once, after a full f32
+// accumulate).  Column indexing keeps the coalesced W[k*N+n] pattern.
+static u32 gemv_pick_sk(u32 K, u32 N) {
+  u32 gx = cdiv(N, 256);
+  u32 sk = 1;
+  while (gx * sk < 232u && sk * 64u < K) sk *= 2;
+  return sk;
+}
+
+static u32 gemv_block(u32 N) {
+  return N < 256 ? ((N + 31) / 32 * 32) : 256;
+}
+
+static char *src_gemv(char const *nm, u32 K, u32 N, u32 sk, int x_f32, int w_f32) {
+  u32 chunk = cdiv(K, sk);
+  char xl[32], wl[64];
+  snprintf(xl, sizeof xl, x_f32 ? "x[k]" : "bf2f(x[k])");
+  snprintf(wl, sizeof wl, w_f32 ? "w[(long)k * %uu + n]" : "bf2f(w[(long)k * %uu + n])", N);
+  char const *xt = x_f32 ? "float" : "bf16t";
+  char const *wt = w_f32 ? "float" : "bf16t";
+  if (IS_CUDA) return mks(
+    "extern \"C\" __global__ void %s(float* part, const %s* x, const %s* w) {\n"
+    "  int n = blockIdx.x * blockDim.x + threadIdx.x;\n"
+    "  if (n >= %u) return;\n"
+    "  int k0 = blockIdx.y * %u, k1 = k0 + %u;\n"
+    "  if (k1 > %u) k1 = %u;\n"
+    "  float acc = 0.f;\n"
+    "#pragma unroll 4\n"
+    "  for (int k = k0; k < k1; k++) acc += %s * %s;\n"
+    "  part[(long)blockIdx.y * %u + n] = acc;\n"
+    "}\n", nm, xt, wt, N, chunk, chunk, K, K, xl, wl, N);
+  return mks(
+    "void %s(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
+    "  (void)grid; (void)block;\n"
+    "  float *part = (float *)bufs[0]; const %s *x = (const %s *)bufs[1]; const %s *w = (const %s *)bufs[2];\n"
+    "  for (unsigned s = 0; s < %uu; s++) {\n"
+    "    unsigned k0 = s * %uu, k1 = k0 + %uu > %uu ? %uu : k0 + %uu;\n"
+    "    for (unsigned n = 0; n < %uu; n++) {\n"
+    "      float acc = 0.f;\n"
+    "      for (unsigned k = k0; k < k1; k++) acc += %s * %s;\n"
+    "      part[(unsigned long)s * %uu + n] = acc;\n"
+    "    }\n"
+    "  }\n"
+    "}\n", nm, xt, xt, wt, wt, sk, chunk, chunk, K, K, chunk, N, xl, wl, N);
+}
+
+static char *src_gred(char const *nm, u32 N, u32 sk, int out_bf16) {
+  char const *ot  = out_bf16 ? "bf16t" : "float";
+  char const *ost = out_bf16 ? "f2bfd(s)" : "s";
+  if (IS_CUDA) return mks(
+    "extern \"C\" __global__ void %s(%s* y, const float* part) {\n"
+    "  int n = blockIdx.x * blockDim.x + threadIdx.x;\n"
+    "  if (n >= %u) return;\n"
+    "  float s = 0.f;\n"
+    "  for (int i = 0; i < %u; i++) s += part[(long)i * %uu + n];\n"
+    "  y[n] = %s;\n"
+    "}\n", nm, ot, N, sk, N, ost);
+  return mks(
+    "void %s(void *const *bufs, unsigned const *grid, unsigned const *block) {\n"
+    "  (void)grid; (void)block;\n"
+    "  %s *y = (%s *)bufs[0]; const float *part = (const float *)bufs[1];\n"
+    "  for (unsigned n = 0; n < %uu; n++) {\n"
+    "    float s = 0.f;\n"
+    "    for (unsigned i = 0; i < %uu; i++) s += part[(unsigned long)i * %uu + n];\n"
+    "    y[n] = %s;\n"
+    "  }\n"
+    "}\n", nm, ot, ot, N, sk, N, ost);
+}
+
 // === custom fire ============================================================
-static void krun(char const *name, char const *src, u32 gx, u32 bx,
-                 u32 const *args, u32 nargs, u32 const *outs, u32 nouts) {
-  u32 grid[3] = {gx, 1, 1}, block[3] = {bx, 1, 1};
+static void krun2(char const *name, char const *src, u32 gx, u32 gy, u32 bx,
+                  u32 const *args, u32 nargs, u32 const *outs, u32 nouts) {
+  u32 grid[3] = {gx, gy, 1}, block[3] = {bx, 1, 1};
   u32 kid = kernel_emit_custom_program(name, src, grid, block, args, nargs, outs, nouts, 0);
   if (kid == 0 || kernel_custom_fire(kid) != 0) {
     fprintf(stderr, "FATAL: custom kernel %s failed\n", name);
@@ -744,17 +820,25 @@ static void krun(char const *name, char const *src, u32 gx, u32 bx,
   }
 }
 
-// === native uop pieces (mirror the WL example) ==============================
-static u32 cdiv(u32 a, u32 b) { return (a + b - 1) / b; }
-
-// x{1,K} @ W{K,N} -> {1,N}: the TMatMul lowering (NN/Linear.wl:49-58)
-static Term mm(Term x, u32 K, u32 w_tid, u32 N) {
-  u32 a3[3] = {1, K, 1}, b3[3] = {1, K, N}, e3[3] = {1, K, N};
-  Term ab = uop_expand(uop_reshape(x, 3, a3), 3, e3);
-  Term bb = uop_expand(uop_reshape(tt(w_tid), 3, b3), 3, e3);
-  return uop_reduce(REDUCE_SUM, 1, uop_binary(UOP_MUL, ab, bb));
+static void krun(char const *name, char const *src, u32 gx, u32 bx,
+                 u32 const *args, u32 nargs, u32 const *outs, u32 nouts) {
+  krun2(name, src, gx, 1, bx, args, nargs, outs, nouts);
 }
 
+// Fire one split-K GEMV pair: phase 1 into the shared partials buffer,
+// phase 2 folds into out_tid.
+static u32 T_part = 0;
+static void gemv2(char const *nm_sk, char const *s_sk, char const *nm_red,
+                  char const *s_red, u32 N, u32 sk, u32 x_tid, u32 w_tid,
+                  u32 out_tid) {
+  u32 bx = gemv_block(N), gx = cdiv(N, bx);
+  u32 a1[3] = {T_part, x_tid, w_tid}, o1[1] = {0};
+  krun2(nm_sk, s_sk, gx, sk, bx, a1, 3, o1, 1);
+  u32 a2[2] = {out_tid, T_part}, o2[1] = {0};
+  krun2(nm_red, s_red, gx, 1, bx, a2, 2, o2, 1);
+}
+
+// === native uop pieces (mirror the WL example) ==============================
 // RMS norm over {1,K} f32 with a realize boundary on the reduce scalar
 // (the dsvRmsNorm structure; tinygrad materializes at every sublayer,
 // deepseek_v2.py:1211-1216).  Returns a REALIZED {1,K} f32 tensor id.
@@ -792,6 +876,32 @@ static u32 W_swg[MAX_LAYERS], W_swu[MAX_LAYERS], W_swd[MAX_LAYERS];
 static u32 L_ckv[MAX_LAYERS], L_kpe[MAX_LAYERS];
 static u32 T_x, T_tok, T_len, T_ql, T_sm, T_ol, T_ob, T_sel, T_probs, T_h, T_moe, T_pv, T_pi;
 static u32 LOGITS_TID = 0;
+
+// Per-layer GEMV output buffers.  A shared buffer would make the layers'
+// downstream native uop DAGs structurally identical -> the Term dedup would
+// memo the realize and layers 1..N-1 would record NO kernel.  Per-layer tids
+// keep every native consumer unique (~11 KB/layer, negligible).
+static u32 T_q[MAX_LAYERS], T_kva[MAX_LAYERS], T_attn[MAX_LAYERS];
+static u32 T_gateo, T_g1o, T_u1o, T_mlpo;
+
+// One GEMV instance per distinct (K, N, dtypes): source + split factor.
+typedef struct { char *sk_src, *red_src; char sk_nm[16], red_nm[16]; u32 N, sk; } Gemv;
+static Gemv G_q, G_kv, G_o, G_gate, G_ffw, G_down, G_lm;
+
+static void gemv_make(Gemv *g, char const *tag, u32 K, u32 N,
+                      int x_f32, int w_f32, int out_bf16) {
+  snprintf(g->sk_nm, sizeof g->sk_nm, "gemv_%s", tag);
+  snprintf(g->red_nm, sizeof g->red_nm, "gred_%s", tag);
+  g->N       = N;
+  g->sk      = gemv_pick_sk(K, N);
+  g->sk_src  = src_gemv(g->sk_nm, K, N, g->sk, x_f32, w_f32);
+  g->red_src = src_gred(g->red_nm, N, g->sk, out_bf16);
+}
+
+static void gemv_run(Gemv const *g, u32 x_tid, u32 w_tid, u32 out_tid) {
+  gemv2(g->sk_nm, g->sk_src, g->red_nm, g->red_src, g->N, g->sk,
+        x_tid, w_tid, out_tid);
+}
 
 static char *S_EMBED, *S_ROPEQ, *S_ROPEK, *S_APPEND, *S_QLAT, *S_SCORE, *S_MIX, *S_O;
 static char *S_ROUTE, *S_MOEH, *S_MOEOUT, *S_APART, *S_AFIN, *S_BUMP;
@@ -857,7 +967,30 @@ static void model_init(void) {
     }
     L_ckv[l] = mk_bf16_zero(C.max_seq, kv);
     L_kpe[l] = mk_bf16_zero(C.max_seq, dr);
+    T_q[l]    = mk_bf16_zero(1, hn * (dn + dr));
+    T_kva[l]  = mk_bf16_zero(1, kv + dr);
+    T_attn[l] = mk_bf16_zero(1, d);
   }
+  gemv_make(&G_q,    "q",    d, hn * (dn + dr), 0, 0, 1);
+  gemv_make(&G_kv,   "kv",   d, kv + dr,        0, 0, 1);
+  gemv_make(&G_o,    "o",    hn * dv, d,        0, 0, 1);
+  gemv_make(&G_gate, "gate", d, C.n_exp,        1, 1, 0);
+  gemv_make(&G_ffw,  "ffw",  d, C.dense_inter,  0, 0, 1);
+  gemv_make(&G_down, "down", C.dense_inter, d,  0, 0, 1);
+  gemv_make(&G_lm,   "lm",   d, C.vocab,        1, 0, 0);
+  {
+    Gemv const *gs[7] = {&G_q, &G_kv, &G_o, &G_gate, &G_ffw, &G_down, &G_lm};
+    u64 pmax = 0;
+    for (u32 i = 0; i < 7; i++) {
+      u64 n = (u64)gs[i]->sk * gs[i]->N;
+      if (n > pmax) pmax = n;
+    }
+    T_part = mk_f32_fill((u32)pmax, 0, 0.0f);
+  }
+  T_gateo = mk_f32_fill(1, C.n_exp, 0.0f);
+  T_g1o   = mk_bf16_zero(1, C.dense_inter);
+  T_u1o   = mk_bf16_zero(1, C.dense_inter);
+  T_mlpo  = mk_bf16_zero(1, d);
   T_x     = mk_bf16_zero(d, 0);
   T_tok   = mk_i32(1, 1);
   T_len   = mk_i32(1, 1);
@@ -871,6 +1004,7 @@ static void model_init(void) {
   T_moe   = mk_bf16_zero(d, 0);
   T_pv    = mk_f32_fill(C.nb, 0, 0.0f);
   T_pi    = mk_i32(C.nb, 0);
+  LOGITS_TID = mk_f32_fill(1, C.vocab, 0.0f);
   S_EMBED = src_embed(); S_ROPEQ = src_rope(hn); S_ROPEK = src_rope(1);
   S_APPEND = src_append(); S_QLAT = src_qlat(); S_SCORE = src_score();
   S_MIX = src_mix(); S_O = src_mla_o();
@@ -890,10 +1024,10 @@ static void step_build(void) {
   Term x = uop_reshape(tt(T_x), 2, d1d);
   for (u32 l = 0; l < C.n_layers; l++) {
     u32 xn_tid = rms_norm(uop_cast(x, DT_FP32), d, W_win[l], C.eps);
-    Term xn = tt(rz(uop_cast(tt(xn_tid), DT_BF16)));
-    u32 q_tid = rz(mm(xn, d, W_wq[l], hn * (dn + dr)));
+    u32 xnb_tid = rz(uop_cast(tt(xn_tid), DT_BF16));
+    gemv_run(&G_q, xnb_tid, W_wq[l], T_q[l]);
     u32 hdd[2] = {hn, dn + dr};
-    Term qm = uop_reshape(tt(q_tid), 2, hdd);
+    Term qm = uop_reshape(tt(T_q[l]), 2, hdd);
     u32 sn_[4] = {0, hn, 0, dn}, sp_[4] = {0, hn, dn, dn + dr};
     u32 qn_tid = rz(uop_shrink(qm, 2, sn_));
     u32 qp_tid = rz(uop_shrink(qm, 2, sp_));
@@ -901,9 +1035,9 @@ static void step_build(void) {
       u32 a[4] = {qp_tid, T_cos, T_sin, T_len}, o[1] = {0};
       krun("rope_dev", S_ROPEQ, hn, dr / 2, a, 4, o, 1);
     }
-    u32 kva_tid = rz(mm(xn, d, W_wkv[l], kv + dr));
+    gemv_run(&G_kv, xnb_tid, W_wkv[l], T_kva[l]);
     u32 sc_[4] = {0, 1, 0, kv}, sk_[4] = {0, 1, kv, kv + dr};
-    Term kvam = tt(kva_tid);
+    Term kvam = tt(T_kva[l]);
     u32 ckvn_tid = rms_norm(uop_cast(uop_shrink(kvam, 2, sc_), DT_FP32), kv, W_wkvn[l], C.eps);
     u32 ckv_tid = rz(uop_cast(tt(ckvn_tid), DT_BF16));
     u32 kp_tid = rz(uop_shrink(kvam, 2, sk_));
@@ -931,22 +1065,22 @@ static void step_build(void) {
       u32 a[3] = {T_ob, T_ol, W_wuv[l]}, o[1] = {0};
       krun("mla_o", S_O, cdiv(hn * dv * 32, 256), 256, a, 3, o, 1);
     }
-    u32 dhv[2] = {1, hn * dv};
-    u32 attn_tid = rz(mm(uop_reshape(tt(T_ob), 2, dhv), hn * dv, W_wo[l], d));
-    u32 x1_tid = rz(uop_binary(UOP_ADD, x, tt(attn_tid)));
+    gemv_run(&G_o, T_ob, W_wo[l], T_attn[l]);
+    u32 x1_tid = rz(uop_binary(UOP_ADD, x, tt(T_attn[l])));
     Term x1 = tt(x1_tid);
     u32 xn2_tid = rms_norm(uop_cast(x1, DT_FP32), d, W_wpost[l], C.eps);
     if (l < C.first_dense) {
-      Term xb = tt(rz(uop_cast(tt(xn2_tid), DT_BF16)));
-      u32 g1 = rz(mm(xb, d, W_wg1[l], C.dense_inter));
-      u32 u1 = rz(mm(xb, d, W_wu1[l], C.dense_inter));
-      Term h = uop_binary(UOP_MUL, silu(tt(g1), C.dense_inter), tt(u1));
-      u32 mlp_tid = rz(mm(h, C.dense_inter, W_wd1[l], d));
-      x = tt(rz(uop_binary(UOP_ADD, x1, tt(mlp_tid))));
+      u32 xb_tid = rz(uop_cast(tt(xn2_tid), DT_BF16));
+      gemv_run(&G_ffw, xb_tid, W_wg1[l], T_g1o);
+      gemv_run(&G_ffw, xb_tid, W_wu1[l], T_u1o);
+      Term h = uop_binary(UOP_MUL, silu(tt(T_g1o), C.dense_inter), tt(T_u1o));
+      u32 h_tid = rz(h);
+      gemv_run(&G_down, h_tid, W_wd1[l], T_mlpo);
+      x = tt(rz(uop_binary(UOP_ADD, x1, tt(T_mlpo))));
     } else {
-      u32 g_tid = rz(mm(tt(xn2_tid), d, W_gate[l], C.n_exp));
+      gemv_run(&G_gate, xn2_tid, W_gate[l], T_gateo);
       {
-        u32 a[3] = {T_sel, T_probs, g_tid}, o[2] = {0, 1};
+        u32 a[3] = {T_sel, T_probs, T_gateo}, o[2] = {0, 1};
         krun("route", S_ROUTE, 1, 32, a, 3, o, 2);
       }
       u32 moein_tid = rz(uop_cast(tt(xn2_tid), DT_BF16));
@@ -962,7 +1096,7 @@ static void step_build(void) {
     }
   }
   u32 xnf_tid = rms_norm(uop_cast(x, DT_FP32), d, W_norm, C.eps);
-  LOGITS_TID = rz(mm(tt(xnf_tid), d, W_lm, C.vocab));
+  gemv_run(&G_lm, xnf_tid, W_lm, LOGITS_TID);
   {
     u32 a[3] = {T_pv, T_pi, LOGITS_TID}, o[2] = {0, 1};
     krun("argmax_part", S_APART, C.nb, 256, a, 3, o, 2);
