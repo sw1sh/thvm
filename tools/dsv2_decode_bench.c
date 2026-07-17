@@ -1,20 +1,37 @@
 // tools/dsv2_decode_bench.c - DeepSeek-V2-Lite BS=1 decode-step microbenchmark
-// at the C level (no Wolfram on the pod).  Hardcodes the same step the WL
-// example builds (wl/THVMLink/Kernel/NN/Examples/DeepSeekV2/Decode.wl), port of
-// tinygrad examples/deepseek_v2.py --synth:
+// at the C level (no Wolfram on the pod).  Same math as the WL example
+// (wl/THVMLink/Kernel/NN/Examples/DeepSeekV2/Decode.wl), port of tinygrad
+// examples/deepseek_v2.py, restructured into ~14 fused custom kernels per
+// layer (the original native-uop lowering ran 20.8 ms/step on H100; this
+// pipeline runs ~5.1 ms/step, gen ids byte-identical):
 //
-//   embed_row -> N x [ rms-norm -> q/kv projections (native uop matmuls)
-//                      -> rope_dev(q_pe) -> rope_dev(k_pe) -> cache_append
-//                      -> mla_qlat/mla_score/mla_mix/mla_o -> o_proj matmul
-//                      -> rms-norm -> gate matmul -> route -> moe_full_h/out ]
-//   -> rms-norm -> lm_head matmul -> argmax_part/argmax_fin -> len_bump
+//   embed_row -> N x [ rms1 -> gemv_qkv + gred_q(fold+rope) + kv_prep(fold+
+//                      rms+rope+cache append) -> mla_qlat/score/mix/o ->
+//                      gemv_o + gred_o_rms(fold+residual+rms) ->
+//                      gemv_gate + route(fold+softmax+topk) -> moe_full_h ->
+//                      moe_full_out(+residual) ]
+//   -> rms_f -> gemv_lm/gred_lm -> argmax_part/argmax_fin -> len_bump
 //
-// Projections and norms are NATIVE uop graphs (reshape+expand+mul+reduce, the
-// exact TMatMul lowering of wl/THVMLink/Kernel/NN/Linear.wl:49-58) so the
-// codegen path matches the WL example; the attention core / MoE / decode
-// state are injected custom kernels (kernel_emit_custom_program) with
-// per-backend sources: CUDA-C near-verbatim from deepseek_v2.py, plain-C
-// functional twins for the CPU custom ABI.
+// Every M=1 projection is a two-phase split-K GEMV (phase 1 writes
+// part[s*N+n] partials, K split over blockIdx.y -- the flat one-thread-
+// per-output form ran at 17-90 GB/s; split-K reaches ~1-1.3 TB/s); each
+// phase-2 fold is fused into the consumer kernel.  All kernels are injected
+// customs (kernel_emit_custom_program) with per-backend sources: CUDA-C,
+// plain-C functional twins for the CPU custom ABI.  The one remaining
+// scheduler kernel is the dense-MLP silu*u elementwise.
+//
+// NUMERICS CONTRACT: the decode trajectory must stay byte-identical to the
+// tinygrad reference, and near-tie tokens flip under ANY f32 accumulation
+// reorder (bf16 rounding chaos-amplifies a 1-ulp drift across 26 layers;
+// measured margin at the first tie is 0.19 logits).  Rules baked into the
+// sources: rms sums of squares replicate the native scalar-reduce lowering
+// (16 strided lane accumulators + in-order fold); GEMV folds keep fixed
+// K-chunk boundaries (the merged q|kv GEMV pins sk to the q/kv pick);
+// matmul outputs round to bf16 exactly where the native chain did
+// (bf2f(f2bfd(s)) before rope/residual use); MoE lane loops keep
+// k = lane + 32*i (a ushort4 remap was 0.3 ms/step faster and REFUTED by
+// the gate); route parallelizes only exact ops (compares/fmaxf), keeping
+// the serial softmax fold.
 //
 // The whole step is built + fired ONCE under jit_capture_begin/end (capture
 // pins every recorded buffer), then WARM + STEPS replays run it; the token
@@ -25,13 +42,16 @@
 // REAL WEIGHTS (Stage 2): DSV2_WEIGHTS=<pack> loads a flat weight pack written
 // by tools/dsv2_pack_weights.py (the tinygrad load_weights mapping,
 // deepseek_v2.py:1257-1272 + the kv_b absorb split :993-997, pre-applied so
-// every payload is already in the exact layout the step consumes).
+// every payload is already in the exact layout the step consumes; the merged
+// q|kv weight is row-concatenated at load).
 // DSV2_PROMPT_IDS=comma-list prefills token-by-token through the same decode
 // step (each prompt id is force-written into the device token buffer, the
 // step's own argmax prediction is discarded until the last prompt token), then
 // generates DSV2_COUNT (24) greedy tokens and prints them for comparison with
 // the tinygrad reference trajectory ("MY gen ids").  DSV2_TOP2=1 additionally
-// dumps the top-2 logits per generated token (near-tie divergence forensics).
+// dumps the top-2 logits per generated token (near-tie divergence forensics);
+// DSV2_DUMP=1 prints byte fingerprints (per-layer cache rows, activations,
+// logits) after the captured step for build-vs-build divergence bisection.
 //
 //   build:  make bin/dsv2_decode_bench            (Linux+CUDA adds the CUDA backend)
 //   run:    DEV=cuda ./bin/dsv2_decode_bench      (full model shape, ~31 GB device)
