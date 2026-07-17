@@ -33,22 +33,16 @@ Begin["`Private`"];
 
 (* === byte-level table (GPT-2 bytes_to_unicode) =================== *)
 
-(* bs = the printable byte values that map to themselves; every other byte
-   maps to a fresh code point starting at 256, so no token char is an actual
-   control byte or space.  Returns {byte -> char, char -> byte}. *)
-dsvByteMaps[] := dsvByteMaps[] = Block[{bs, cs, n = 0, chars},
-    bs = Join[Range[33, 126], Range[161, 172], Range[174, 255]];
-    cs = bs;
-    Do[
-        If[ ! MemberQ[bs, b],
-            AppendTo[bs, b];
-            AppendTo[cs, 256 + n];
-            n++
-        ],
-        {b, 0, 255}
-    ];
-    chars = FromCharacterCode /@ cs;
-    {AssociationThread[bs -> chars], AssociationThread[chars -> bs]}
+(* keep = the printable byte values that map to themselves; every other byte
+   (extra, in ascending order) maps to a fresh code point starting at 256, so no
+   token char is an actual control byte or space.  Returns {byte -> char,
+   char -> byte}. *)
+dsvByteMaps[] := dsvByteMaps[] = Block[{keep, extra, allBytes, chars},
+    keep = Join[Range[33, 126], Range[161, 172], Range[174, 255]];
+    extra = Complement[Range[0, 255], keep];
+    allBytes = Join[keep, extra];
+    chars = FromCharacterCode /@ Join[keep, 256 + Range[0, Length[extra] - 1]];
+    {AssociationThread[allBytes -> chars], AssociationThread[chars -> allBytes]}
 ]
 
 (* === tokenizer load ============================================== *)
@@ -98,32 +92,27 @@ dsvApplyStage[pieces_, stage_] := Flatten @ Map[p |-> dsvSplitPiece[p, stage], p
 (* === BPE ========================================================= *)
 
 (* One merge pass: replace every non-overlapping adjacent (first, second) with
-   the joined symbol, left to right (the GPT-2 reference bpe() inner pass). *)
-dsvBpeMerge[word_, first_, second_] := Block[{out = {}, i = 1, n = Length[word]},
-    While[i <= n,
-        If[ i < n && word[[i]] === first && word[[i + 1]] === second,
-            AppendTo[out, first <> second];
-            i += 2,
-            AppendTo[out, word[[i]]];
-            i++
-        ]
-    ];
-    out
-]
+   the joined symbol, left to right (the GPT-2 reference bpe() inner pass;
+   SequenceReplace is left-to-right non-overlapping). *)
+dsvBpeMerge[word_, first_, second_] := SequenceReplace[word, {first, second} -> first <> second]
 
-(* Repeatedly merge the lowest-rank adjacent pair until none is in the merge
-   table (min by rank, ties to the leftmost pair, matching the reference). *)
-dsvBpeWord[symbols_, rank_] := Block[{word = symbols, pairs, ranks, mn, pos},
-    While[Length[word] >= 2,
-        pairs = Partition[word, 2, 1];
+(* One BPE step: merge every occurrence of the lowest-rank adjacent pair (min by
+   rank, ties to the leftmost), or return the word unchanged when no pair is in
+   the merge table.  The fixed point is the fully merged word. *)
+dsvBpeStep[word_, rank_] := If[ Length[word] < 2,
+    word,
+    Block[{pairs = Partition[word, 2, 1], ranks, mn, pos},
         ranks = Lookup[rank, (#[[1]] <> " " <> #[[2]]) & /@ pairs, Infinity];
         mn = Min[ranks];
-        If[ mn === Infinity, Break[]];
-        pos = FirstPosition[ranks, mn][[1]];
-        word = dsvBpeMerge[word, pairs[[pos, 1]], pairs[[pos, 2]]]
-    ];
-    word
+        If[ mn === Infinity,
+            word,
+            pos = First @ FirstPosition[ranks, mn];
+            dsvBpeMerge[word, pairs[[pos, 1]], pairs[[pos, 2]]]
+        ]
+    ]
 ]
+
+dsvBpeWord[symbols_, rank_] := FixedPoint[dsvBpeStep[#, rank] &, symbols]
 
 (* A single pre-token piece -> ids: UTF-8 bytes -> byte-level chars -> BPE
    -> vocab.  Byte-level guarantees every single-char symbol is in vocab. *)
@@ -148,19 +137,18 @@ dsvEncode[tok_Association, text_String] := Block[{specials = tok["SpecialToId"],
     ]
 ]
 
-(* Flush a pending run of regular-token bytes to a UTF-8 string. *)
-dsvFlushBytes[bytes_] := If[bytes === {}, "", FromCharacterCode[bytes, "UTF-8"]]
-
-dsvDecode[tok_Association, ids_List] := Block[{idToSpecial = tok["IdToSpecial"], idToTok = tok["IdToTok"], buf = {}, res = ""},
-    Do[
-        If[ KeyExistsQ[idToSpecial, id],
-            res = res <> dsvFlushBytes[buf] <> idToSpecial[id];
-            buf = {},
-            buf = Join[buf, Lookup[tok["CharToByte"], Characters[idToTok[id]]]]
+(* Split the ids into maximal runs of one kind (special vs regular), then join:
+   a special run renders as its literal contents, a regular run byte-level
+   decodes (token chars -> bytes -> UTF-8, the whole run as one string so a
+   multibyte code point split across tokens still decodes). *)
+dsvDecode[tok_Association, ids_List] := Block[{idToSpecial = tok["IdToSpecial"], idToTok = tok["IdToTok"], charToByte = tok["CharToByte"]},
+    StringJoin @ Map[
+        run |-> If[ KeyExistsQ[idToSpecial, First[run]],
+            StringJoin[idToSpecial /@ run],
+            FromCharacterCode[Lookup[charToByte, Characters @ StringJoin[idToTok /@ run]], "UTF-8"]
         ],
-        {id, ids}
-    ];
-    res <> dsvFlushBytes[buf]
+        Split[ids, KeyExistsQ[idToSpecial, #1] === KeyExistsQ[idToSpecial, #2] &]
+    ]
 ]
 
 End[];

@@ -84,11 +84,9 @@ oracle = Import[outPath, "RawJSON"];
 
 (* --- compare -------------------------------------------------------- *)
 
-encPass = 0;
-decPass = 0;
 n = Length[tests];
 
-Do[
+oks = Table[
     Module[{s = tests[[i]], hfIds, hfDec, wlIds, wlDec, eOk, dOk},
         hfIds = oracle[[i]]["ids"];
         hfDec = oracle[[i]]["decode"];
@@ -96,12 +94,7 @@ Do[
         wlDec = dsvDecode[tok, hfIds];
         eOk = wlIds === hfIds;
         dOk = wlDec === hfDec;
-        If[eOk, encPass++];
-        If[dOk, decPass++];
-        Print[
-            If[eOk && dOk, "PASS", "FAIL"], "  ",
-            ToString[s, InputForm]
-        ];
+        Print[If[eOk && dOk, "PASS", "FAIL"], "  ", ToString[s, InputForm]];
         If[ ! eOk,
             Print["   encode WL: ", wlIds];
             Print["   encode HF: ", hfIds]
@@ -109,17 +102,22 @@ Do[
         If[ ! dOk,
             Print["   decode WL: ", ToString[wlDec, InputForm]];
             Print["   decode HF: ", ToString[hfDec, InputForm]]
-        ]
+        ];
+        {eOk, dOk}
     ],
     {i, n}
 ];
+
+encPass = Count[oks, {True, _}];
+decPass = Count[oks, {_, True}];
 
 Print[""];
 Print["encode  PASS ", encPass, "/", n];
 Print["decode  PASS ", decPass, "/", n];
 If[ encPass === n && decPass === n,
     Print["PASS ", n, "/", n];
-    Exit[0],
+    Exit[0]
+    ,
     Print["FAIL ", Min[encPass, decPass], "/", n];
     Exit[1]
 ]

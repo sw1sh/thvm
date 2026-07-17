@@ -43,16 +43,19 @@ $thvmTok = dsvTokenizer[FileNameJoin[{$snapshot, "tokenizer.json"}]];
 (* --- the model: config -> decode state, resident in this kernel ----------- *)
 $real = Environment["THVM_WEIGHTS"] === "real";
 
-$thvmState = If[ $real,
+$thvmState = If[ $real
+    ,
     (* the true DeepSeek-V2-Lite checkpoint (set Device -> cuda on a GPU box) *)
     dsvHfInit[dsvConfig["Device" -> (Environment["DEV"] /. $Failed -> "cpu")],
-        TSafeTensorLoad[FileNameJoin[{$snapshot, "model.safetensors.index.json"}]]],
+        TSafeTensorLoad[FileNameJoin[{$snapshot, "model.safetensors.index.json"}]]]
+    ,
     (* a small synthetic config that runs anywhere and proves the full path *)
     dsvSynthInit[dsvConfig[
         "Dim" -> 64, "NLayers" -> 2, "NHeads" -> 4, "KvLora" -> 32,
         "DNope" -> 16, "DRope" -> 8, "DV" -> 16, "NExperts" -> 8, "NShared" -> 2,
         "TopK" -> 3, "MoeInter" -> 48, "DenseInter" -> 96,
-        "Vocab" -> If[ $real, 102400, 256], "MaxSeq" -> 256]]];
+        "Vocab" -> If[$real, 102400, 256], "MaxSeq" -> 256]]
+];
 
 (* --- the request function: messages -> chat prompt -> ids -> decode -> text  *)
 $vocab = $thvmState["Config"]["Vocab"];
@@ -68,7 +71,7 @@ thvmLocalRequest[so_, requestName_, params_] := Module[{msgs, prompt, ids, gen, 
     prompt = dsvChatPrompt[msgs];
     ids = dsvEncode[$thvmTok, prompt];
     (* synthetic vocab is tiny; clip ids so the smoke test never indexes past it *)
-    ids = If[ $real, ids, Mod[ids, $vocab]];
+    ids = If[$real, ids, Mod[ids, $vocab]];
     maxTok = Replace[Lookup[params, "MaxTokens", 128], Except[_Integer] -> 128];
     gen = dsvGenerate[$thvmState, ids, "MaxTokens" -> maxTok, "EosId" -> If[$real, 100001, -1]];
     content = dsvDecode[$thvmTok, gen];

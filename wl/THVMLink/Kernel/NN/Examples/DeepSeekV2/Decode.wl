@@ -964,7 +964,7 @@ dsvReset[state_Association] := (
     state
 )
 
-Options[dsvGenerate] = {"MaxTokens" -> 256, "EosId" -> 100001};
+Options[dsvGenerate] = {"MaxTokens" -> 256, "EosId" -> 100001}
 
 (* Prefill + greedy decode over the captured step.  Each prompt token is set
    into the device token buffer before a replay (TSetData, in place), so the
@@ -981,24 +981,24 @@ dsvGenerate[state_Association, promptIds_List, opts : OptionsPattern[]] := Block
        decoding at the horizon rather than overrun the buffers (SIGABRT). *)
     pids = Take[promptIds, UpTo[maxSeq]];
     Do[TSetData[state["Tok"], {pids[[i]]}]; jit[], {i, Length[pids]}];
-    gen = {};
-    Do[
-        If[dsvPosition[state] > maxSeq, Break[]];
-        t = dsvToken[state];
-        If[t === eos, Break[]];
-        AppendTo[gen, t];
-        jit[],
-        {maxNew}
-    ];
-    gen
+    Flatten @ Reap[
+        Do[
+            If[dsvPosition[state] > maxSeq, Break[]];
+            t = dsvToken[state];
+            If[t === eos, Break[]];
+            Sow[t];
+            jit[],
+            {maxNew}
+        ]
+    ][[2]]
 ]
 
 (* DeepSeek-V2-Chat prompt template (tokenizer_config chat_template): bos, then
    per-turn "User:"/"Assistant:"/system lines, ending with the generation cue.
    The bos/eos markers are literal special-token strings the tokenizer maps to
    ids 100000/100001. *)
-$dsvBos = "<\:ff5cbegin\:2581of\:2581sentence\:ff5c>";
-$dsvEos = "<\:ff5cend\:2581of\:2581sentence\:ff5c>";
+$dsvBos = "<\:ff5cbegin\:2581of\:2581sentence\:ff5c>"
+$dsvEos = "<\:ff5cend\:2581of\:2581sentence\:ff5c>"
 
 dsvChatPrompt[text_String] := dsvChatPrompt[{<|"Role" -> "user", "Content" -> text|>}]
 
