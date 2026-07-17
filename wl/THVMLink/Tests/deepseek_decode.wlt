@@ -76,6 +76,59 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* dsvGenerate: prefill a 3-token prompt then greedy-decode 5 tokens; the
+       device output must equal the independent host reference fed the same
+       prompt and then self-fed its own argmax (so the TSetData prompt
+       injection + the greedy loop are exact, not just close) *)
+    Block[{st, prompt, dev, r, hostGen},
+        st = dsvSynthInit[$cfg];
+        prompt = {5, 9, 13};
+        dev = dsvGenerate[st, prompt, "MaxTokens" -> 5, "EosId" -> -1];
+        r = dsvRefStep[dsvRefInit[st], First[prompt]];
+        Do[r = dsvRefStep[r["State"], prompt[[i]]], {i, 2, Length[prompt]}];
+        hostGen = Reap[Module[{g = r["Token"]},
+            Do[Sow[g]; r = dsvRefStep[r["State"], g]; g = r["Token"], {5}]]][[2, 1]];
+        dev === hostGen
+    ],
+    True,
+    TestID -> "deepseek-decode/generate-vs-host-reference"
+]
+
+VerificationTest[
+    (* EosId stops decoding: forcing the eos to the first predicted token yields
+       an empty completion, and the MaxSeq horizon guard never overruns the
+       caches (MaxTokens far past MaxSeq still returns, no SIGABRT) *)
+    Block[{st = dsvSynthInit[$cfg], first},
+        first = First @ dsvGenerate[st, {5, 9, 13}, "MaxTokens" -> 3, "EosId" -> -1];
+        {dsvGenerate[st, {5, 9, 13}, "MaxTokens" -> 3, "EosId" -> first],
+         Length @ dsvGenerate[st, {5}, "MaxTokens" -> 10000, "EosId" -> -1] <= $cfg["MaxSeq"]}
+    ],
+    {{}, True},
+    TestID -> "deepseek-decode/generate-eos-and-horizon"
+]
+
+VerificationTest[
+    (* dsvReset rewinds the device state to a fresh conversation in place *)
+    Block[{st = dsvSynthInit[$cfg], j},
+        j = dsvDecodeJit[st]; j[]; j[];
+        dsvReset[st];
+        {dsvPosition[st], dsvToken[st]}
+    ],
+    {1, 1},
+    TestID -> "deepseek-decode/reset"
+]
+
+VerificationTest[
+    (* dsvChatPrompt renders the DeepSeek-V2-Chat template: bos marker, the turn
+       lines, and the trailing generation cue *)
+    Block[{p = dsvChatPrompt[{<|"Role" -> "user", "Content" -> "Hi"|>}]},
+        {StringContainsQ[p, "begin\:2581of\:2581sentence"], StringEndsQ[p, "User: Hi\n\nAssistant:"]}
+    ],
+    {True, True},
+    TestID -> "deepseek-decode/chat-prompt"
+]
+
+VerificationTest[
     (* dsvHfWeights mapping: in-memory HF-LAYOUT bf16 weights (nn.Linear
        {out,in} matrices, un-split kv_b_proj, per-expert matrices) map into the
        decode layouts by movement + exact casts only -- every spot-checked

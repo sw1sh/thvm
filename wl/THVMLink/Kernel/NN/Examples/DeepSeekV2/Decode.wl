@@ -45,6 +45,9 @@ dsvHfWeights::usage = "dsvHfWeights[cfg, sd] maps a HuggingFace DeepSeek-V2-Lite
 dsvHfInit::usage = "dsvHfInit[cfg, sd] returns the decode state association over the real checkpoint weights dsvHfWeights[cfg, sd] (caches empty, position 0, token id 1); the pod-scale twin is the C bench's DSV2_WEIGHTS pack loader (tools/dsv2_pack_weights.py + tools/dsv2_decode_bench.c).";
 dsvDecodeStep::usage = "dsvDecodeStep[state] builds and runs one BS=1 decode step over state's device buffers and returns {token, logits} TTerms; the greedy next token is written on-device into state[\"Tok\"] and the device length advances by 1.";
 dsvDecodeJit::usage = "dsvDecodeJit[state] returns a zero-argument TJit closure over dsvDecodeStep[state]: the first call captures the step, later calls replay it (each replay = one decode step, no host values in the loop).";
+dsvReset::usage = "dsvReset[state] rewinds the device decode state to a fresh conversation (length 1, token id 1) in place, so the captured step and its buffers are reused across requests; stale cache rows beyond the length are never read.";
+dsvGenerate::usage = "dsvGenerate[state, promptIds] or dsvGenerate[state, promptIds, opts] rewinds state, prefills the 0-indexed token id list promptIds through the captured decode step, then greedily decodes further tokens, returning the generated ids (prompt excluded). Options: \"MaxTokens\" (default 256) caps new tokens; \"EosId\" (default the DeepSeek-V2 end-of-sentence id 100001) stops decoding when produced.";
+dsvChatPrompt::usage = "dsvChatPrompt[messages] renders a chat message list into the DeepSeek-V2-Chat prompt string (the model's tokenizer_config chat template): a begin-of-sentence marker, then each message as \"User: ...\", \"Assistant: ...\" (closed by the end-of-sentence marker), or a bare system line, ending with the \"Assistant:\" generation cue. Each message is an association with \"Role\" (\"user\"/\"assistant\"/\"system\") and \"Content\"; a bare string is taken as a single user turn.";
 dsvKernels::usage = "dsvKernels[cfg] returns the association of TKernel custom-kernel objects for cfg (CUDA sources on \"cuda\", plain-C twins on \"cpu\").";
 dsvRefInit::usage = "dsvRefInit[state] returns the host-side (machine-precision) reference decode state over the SAME synthetic weights: an independent implementation of the step math used to validate the fused pipeline.";
 dsvRefStep::usage = "dsvRefStep[ref, tokenId] runs one reference decode step for input tokenId and returns <|\"State\" -> ref', \"Logits\" -> logits, \"Token\" -> argmax|>.";
@@ -951,6 +954,62 @@ dsvDecodeJit[state_Association] := TJit[dsvDecodeStep[state] &]
 dsvToken[state_Association] := First @ Normal @ TTensorData @ state["Tok"]
 
 dsvPosition[state_Association] := First @ Normal @ TTensorData @ state["Len"]
+
+(* Rewind to a fresh conversation: length back to 1, token to the seed.  The
+   caches keep their bytes (rows >= the length are never read), so nothing is
+   reallocated and the captured step reuses the same device buffers. *)
+dsvReset[state_Association] := (
+    TSetData[state["Len"], {1}];
+    TSetData[state["Tok"], {1}];
+    state
+)
+
+Options[dsvGenerate] = {"MaxTokens" -> 256, "EosId" -> 100001};
+
+(* Prefill + greedy decode over the captured step.  Each prompt token is set
+   into the device token buffer before a replay (TSetData, in place), so the
+   argmax the step writes back is overridden until the last prompt token; from
+   there the model's own argmax feeds the next step -- the standard S=1 decode
+   loop.  Returns the generated ids only (prompt excluded). *)
+dsvGenerate[state_Association, promptIds_List, opts : OptionsPattern[]] := Block[{
+    jit = dsvDecodeJit[state], maxNew = OptionValue["MaxTokens"], eos = OptionValue["EosId"],
+    maxSeq = state["Config"]["MaxSeq"], pids, gen, t
+},
+    dsvReset[state];
+    (* the caches hold MaxSeq rows; a step writes cache row Len-1 and reads
+       rows 0..Len-1, so Len must stay <= MaxSeq -- clamp the prompt and stop
+       decoding at the horizon rather than overrun the buffers (SIGABRT). *)
+    pids = Take[promptIds, UpTo[maxSeq]];
+    Do[TSetData[state["Tok"], {pids[[i]]}]; jit[], {i, Length[pids]}];
+    gen = {};
+    Do[
+        If[dsvPosition[state] > maxSeq, Break[]];
+        t = dsvToken[state];
+        If[t === eos, Break[]];
+        AppendTo[gen, t];
+        jit[],
+        {maxNew}
+    ];
+    gen
+]
+
+(* DeepSeek-V2-Chat prompt template (tokenizer_config chat_template): bos, then
+   per-turn "User:"/"Assistant:"/system lines, ending with the generation cue.
+   The bos/eos markers are literal special-token strings the tokenizer maps to
+   ids 100000/100001. *)
+$dsvBos = "<\:ff5cbegin\:2581of\:2581sentence\:ff5c>";
+$dsvEos = "<\:ff5cend\:2581of\:2581sentence\:ff5c>";
+
+dsvChatPrompt[text_String] := dsvChatPrompt[{<|"Role" -> "user", "Content" -> text|>}]
+
+dsvChatPrompt[messages_List] := $dsvBos <> StringJoin[
+    (Switch[ToLowerCase @ Lookup[#, "Role", "user"],
+        "user", "User: " <> #Content <> "\n\n",
+        "assistant", "Assistant: " <> #Content <> $dsvEos,
+        "system", #Content <> "\n\n",
+        _, ""
+    ] &) /@ messages
+] <> "Assistant:"
 
 (* === host reference (validation) ================================= *)
 
