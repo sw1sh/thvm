@@ -4151,9 +4151,11 @@ typedef enum {
 // finds no matching literal (preserves completeness in the trivial
 // sense for Horn-like clauses without the target polarity).
 typedef enum {
-  CNF_SELECT_NONE     = 0,   // try every literal (default behavior)
-  CNF_SELECT_NEGATIVE = 1,   // first negative literal, else all
-  CNF_SELECT_POSITIVE = 2,   // first positive literal, else all
+  CNF_SELECT_NONE        = 0,   // try every literal (default behavior)
+  CNF_SELECT_NEGATIVE    = 1,   // first negative literal, else all
+  CNF_SELECT_POSITIVE    = 2,   // first positive literal, else all
+  CNF_SELECT_NEG_LARGEST = 3,   // largest negative literal (symbol
+                                // count; ties keep the first), else all
 } CnfSelection;
 
 // Literal-index bucket: the (atom root label, sign) key's entry list.
@@ -4360,6 +4362,17 @@ typedef struct {
   // Selection function: opt-in literal-pick policy.  Default
   // CNF_SELECT_NONE = current "try every literal" behavior.
   CnfSelection cnf_select;
+  // Limited-resource strategy (cnf_set_lrs / THVM_FOL_LRS): passive
+  // clauses heavier than lrs_wcap are discarded lazily at pop -- they
+  // are unreachable before the wall at the observed pick rate
+  // (cnf_lrs_tick recomputes the watermark from the caller's
+  // remaining-pick estimate).  Discarding only LOSES refutations,
+  // never invents one, so soundness is untouched; but a drained queue
+  // after any drop is a resource artifact, not a saturation --
+  // cnf_step reports ATP_ABORTED instead of ATP_QUEUE_EMPTY then.
+  u8  lrs_on;
+  u32 lrs_wcap;        // ~0u = no cap yet
+  u32 lrs_dropped;
   // Per-clause inference trace, parallel to `clauses[]`.  Each
   // entry records the inference rule that produced the clause and
   // up to two parent ids.  INPUT marks user-added clauses; ~0u
@@ -4472,6 +4485,8 @@ fn void      cnf_set_wpo     (CnfState *s, const WpoConfig *wpo);
 // Attach a selection function (default NONE).  Affects which literal
 // of a clause is allowed to participate in resolution + paramodulation.
 fn void      cnf_set_select  (CnfState *s, CnfSelection sel);
+fn void      cnf_set_lrs     (CnfState *s, u8 on);
+fn void      cnf_lrs_tick    (CnfState *s, u32 remaining_picks);
 
 // AVATAR-lite component splitting on/off (overrides the THVM_FOL_AVATAR
 // default read at cnf_init).  Call before any clause is added.

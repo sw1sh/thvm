@@ -240,6 +240,9 @@ fn CnfState *cnf_init(u32 step_cap) {
     const char *e = getenv("THVM_FOL_AVATAR");
     s->avatar_on = (e == NULL) ? 0u : (u8)atoi(e);
   }
+  // Limited-resource strategy: engine default OFF; the FOF clausal
+  // pre-pass turns it on via cnf_set_lrs (THVM_FOL_LRS).
+  s->lrs_on = 0u; s->lrs_wcap = ~0u; s->lrs_dropped = 0u;
   if (s->idx_on) {
     s->cact   = (u32 *)calloc(s->cap, sizeof(u32));
     s->cpeq   = (u8 *)calloc(s->cap, 1);
@@ -1192,6 +1195,48 @@ fn void cnf_set_lpo(CnfState *s, const LpoConfig *lpo) { if (s) { s->cnf_lpo = l
 fn void cnf_set_rpo(CnfState *s, const RpoConfig *rpo) { if (s) { s->cnf_rpo = rpo; cnf_elig_invalidate(s); } }
 fn void cnf_set_wpo(CnfState *s, const WpoConfig *wpo) { if (s) { s->cnf_wpo = wpo; cnf_elig_invalidate(s); } }
 fn void cnf_set_select(CnfState *s, CnfSelection sel) { if (s) { s->cnf_select = sel; cnf_elig_invalidate(s); } }
+fn void cnf_set_lrs(CnfState *s, u8 on) { if (s) { s->lrs_on = on; s->lrs_wcap = ~0u; } }
+
+// Limited-resource watermark: keep roughly the `remaining_picks`
+// lightest passive clauses reachable; anything heavier is discarded
+// lazily at pop (cnf_pop_passive).  One O(passive) histogram walk over
+// the pick-best heap array; goal-cone clauses (cgoal) are exempt at
+// the discard site, so the conjecture cone never starves.  remaining_
+// picks == ~0u (or every live clause fitting) clears the cap.
+fn void cnf_lrs_tick(CnfState *s, u32 remaining_picks) {
+  if (s == NULL || !s->lrs_on) return;
+  if (remaining_picks == ~0u) { s->lrs_wcap = ~0u; return; }
+  enum { CNF_LRS_HIST = 1024 };
+  u32 hist[CNF_LRS_HIST];
+  memset(hist, 0, sizeof hist);
+  u32 live = 0u;
+  for (u32 k = 0; k < s->n_pheap; k++) {
+    u32 id = s->pheap[k];
+    if (id >= s->n || s->clauses[id] == NULL || s->cpicked[id]) continue;
+    u32 w = s->cweight[id];
+    if (w >= CNF_LRS_HIST) w = CNF_LRS_HIST - 1u;
+    hist[w]++;
+    live++;
+  }
+  if (live <= remaining_picks) { s->lrs_wcap = ~0u; return; }
+  u32 cum = 0u;
+  for (u32 w = 0; w < CNF_LRS_HIST; w++) {
+    cum += hist[w];
+    if (cum >= remaining_picks) { s->lrs_wcap = w; return; }
+  }
+  s->lrs_wcap = ~0u;
+}
+
+// Discard gate for the pop lanes: a passive clause past the LRS
+// watermark is consumed unpicked (cpicked marks it spent; the slot
+// stays for subsumption duty).  Goal-cone clauses are exempt.
+static u8 cnf_lrs_discard(CnfState *s, u32 id) {
+  if (!s->lrs_on || s->lrs_wcap == ~0u) return 0u;
+  if (s->cgoal[id] || s->cweight[id] <= s->lrs_wcap) return 0u;
+  s->cpicked[id] = 1u;
+  s->lrs_dropped++;
+  return 1u;
+}
 
 // --- term-arena junk reclamation ------------------------------------
 // Candidate inference generation allocates renamed copies, failed
@@ -1255,6 +1300,20 @@ static void cnf_reclaim_consider(CnfState *s, u32 n_before,
 // completeness for Horn-like clauses).
 static u32 cnf_select_lit(const CnfState *s, const FolClause *c) {
   if (s == NULL || c == NULL || s->cnf_select == CNF_SELECT_NONE) return ~0u;
+  if (s->cnf_select == CNF_SELECT_NEG_LARGEST) {
+    // Largest negative literal by symbol count (the shape of E's
+    // SelectLargestNegLit): concentrate inference on the hardest
+    // subgoal literal instead of the textually first one.  Ties keep
+    // the first hit, so single-negative clauses match CNF_SELECT_
+    // NEGATIVE exactly.
+    u32 best = ~0u, best_w = 0u;
+    for (u32 i = 0; i < c->n_lits; i++) {
+      if (c->lits[i].sign != 1u) continue;
+      u32 w = cnf_term_symcount(c->lits[i].atom);
+      if (best == ~0u || w > best_w) { best = i; best_w = w; }
+    }
+    return best;  // ~0u when no negative literal: all-literals fallback
+  }
   u8 want_sign = (s->cnf_select == CNF_SELECT_NEGATIVE) ? 1u : 0u;
   for (u32 i = 0; i < c->n_lits; i++) {
     if (c->lits[i].sign == want_sign) return i;
@@ -2328,6 +2387,7 @@ static u32 cnf_pop_passive(CnfState *s) {
       u32 id = cnf_pq_pop(s);
       if (id == ~0u) break;
       if (s->clauses[id] == NULL || s->cpicked[id]) continue;
+      if (cnf_lrs_discard(s, id)) continue;
       if (!cnf_is_active(s, id) && cnf_park(s, id)) continue;
       s->cpicked[id] = 1u;
       return id;
@@ -2336,6 +2396,7 @@ static u32 cnf_pop_passive(CnfState *s) {
   while (s->passive_head < s->n_passive) {
     u32 id = s->passive[s->passive_head++];
     if (s->clauses[id] == NULL || s->cpicked[id]) continue;
+    if (cnf_lrs_discard(s, id)) continue;
     if (!cnf_is_active(s, id) && cnf_park(s, id)) continue;
     s->cpicked[id] = 1u;
     return id;
@@ -2345,6 +2406,7 @@ static u32 cnf_pop_passive(CnfState *s) {
     u32 id = cnf_pq_pop(s);
     if (id == ~0u) break;
     if (s->clauses[id] == NULL || s->cpicked[id]) continue;
+    if (cnf_lrs_discard(s, id)) continue;
     if (!cnf_is_active(s, id) && cnf_park(s, id)) continue;
     s->cpicked[id] = 1u;
     return id;
@@ -2363,7 +2425,12 @@ fn AtpStatus cnf_step(CnfState *s) {
 
   u32 given_id = cnf_pop_passive(s);
   if (given_id == ~0u) {
-    s->status = ATP_QUEUE_EMPTY;
+    // LRS discarded passive clauses: a drained queue is then a
+    // resource artifact, NOT a saturation of the input -- report the
+    // bounded-abort status so no caller (the FOF pre-pass SInE
+    // saturated-cone retry, any Satisfiable claim) misreads it.
+    s->status = (s->lrs_on && s->lrs_dropped > 0u) ? ATP_ABORTED
+                                                   : ATP_QUEUE_EMPTY;
     return s->status;
   }
 

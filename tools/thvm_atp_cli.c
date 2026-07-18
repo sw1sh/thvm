@@ -169,6 +169,9 @@ static const AtpKnob KNOBS[] = {
   {"fol-goal-tier",          "THVM_FOL_GOAL_TIER",       1, "(clausal pre-pass goal tier: 0 drops the non-conjecture-ancestry pick-best penalty)"},
   {"fol-index",              "THVM_FOL_INDEX",           1, "(clausal pre-pass literal indexing: partner lists + subsumption buckets; 0 disables)"},
   {"fol-avatar",             "THVM_FOL_AVATAR",          1, "(clausal pre-pass AVATAR-lite variable-disjoint component splitting; 0 disables)"},
+  {"fol-select",             "THVM_FOL_SELECT",          1, "(clausal pre-pass literal selection: 0 none = ordered-maximal, 1 first-negative (default), 2 first-positive, 3 largest-negative)"},
+  {"fol-lrs",                "THVM_FOL_LRS",             1, "(clausal pre-pass limited-resource strategy: lazily discard passive clauses unreachable at the observed pick rate; 0 off)"},
+  {"fof-sat-wall",           "THVM_ATP_FOF_SAT_WALL",    1, "(clausal pre-pass share of the REMAINING wall, percent; default 60, 95+ = the whole slice wall)"},
   {"fof-stats",              "THVM_ATP_FOF_STATS",       0, "(front-end probe: clausify, print component-split stats, exit -- no engine)"},
   {"canon-input",            "THVM_ATP_CANON_INPUT",     1, "(canonical input presentation: greater side left + sorted clauses; 0 disables)"},
   {"horn",                   "THVM_ATP_HORN",            1, "(encoded-Horn release: 0 disables)"},
@@ -6544,7 +6547,16 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
                                     AtpStatus *st_out) {
   CnfState *s = cnf_init(budget);
   if (s == NULL) return 0;
-  cnf_set_select(s, CNF_SELECT_NEGATIVE);
+  // Literal selection (THVM_FOL_SELECT): default first-negative, the
+  // historical hardwired policy.  0 = none (pure ordered-maximal),
+  // 2 = first-positive, 3 = largest-negative -- the selection-
+  // diversity lever the fof-sel* slices race.
+  {
+    const char *e = getenv("THVM_FOL_SELECT");
+    cnf_set_select(s, (e == NULL || e[0] == '\0')
+                          ? CNF_SELECT_NEGATIVE
+                          : (CnfSelection)atoi(e));
+  }
   // AVATAR-lite component splitting: OFF by default -- the 240s pod
   // A/B showed default-ON costs net solves (-8/+3 vs the unsplit
   // prepass; splitting reshapes search on problems the plain prepass
@@ -6557,6 +6569,15 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
     const char *e = getenv("THVM_FOL_AVATAR");
     cnf_set_avatar(s, (u8)((e == NULL || e[0] == '\0') ? 0u
                                                        : (u8)atoi(e)));
+  }
+  // Limited-resource strategy (THVM_FOL_LRS): discard passive clauses
+  // the observed pick rate says cannot be reached before the wall
+  // guard (Vampire's lrs saturation shape).  Off by default; the
+  // fof-lrs slice turns it on.  The run loop below feeds the estimate
+  // via cnf_lrs_tick.
+  {
+    const char *e = getenv("THVM_FOL_LRS");
+    if (e != NULL && atoi(e) != 0) cnf_set_lrs(s, 1u);
   }
   // --proof: keep backward-subsumed clauses printable and remember
   // which CNF record each input clause id maps to, so a refutation
@@ -6632,14 +6653,39 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   u64 heap_mark = HEAP_NEXT;
   u64 heap_cap  = gc_enabled() ? gc_from_end() : thvm_heap_cells();
   u64 heap_lim  = heap_cap - (heap_cap >> 2);   // keep 25% headroom
-  double wall_guard = 0.6 * (g_cli_wall_sec - (horn_now() - g_cli_main_t0));
+  // THVM_ATP_FOF_SAT_WALL: the pre-pass share of the REMAINING wall,
+  // percent (default 60 -- the historical guard).  95+ hands the whole
+  // slice wall to the clausal saturation: the pure-saturation lanes,
+  // where the equational hand-off after the guard would only re-cover
+  // the unit-resulting fragment anyway.
+  double wall_frac = 0.6;
+  {
+    const char *e = getenv("THVM_ATP_FOF_SAT_WALL");
+    if (e != NULL && e[0] != '\0') {
+      long p = atol(e);
+      if (p > 0 && p <= 100) wall_frac = (double)p / 100.0;
+    }
+  }
+  double wall_guard = wall_frac * (g_cli_wall_sec - (horn_now() - g_cli_main_t0));
   if (wall_guard < 0.0) wall_guard = 0.0;
   double t0 = horn_now();
   const char *tripped = NULL;
+  u32 lrs_next = 256u;
   while (s->status == ATP_RUNNING) {
     if (cnf_step(s) != ATP_RUNNING) break;
     if (horn_now() - t0 > wall_guard) { tripped = "wall"; break; }
     if (HEAP_NEXT > heap_lim) { tripped = "heap"; break; }
+    // LRS estimate: picks left = observed pick rate x remaining guard.
+    // Re-tick every 256 steps once a second of signal exists; the
+    // watermark walk is O(passive), so the cadence keeps it noise.
+    if (s->lrs_on && s->step >= lrs_next) {
+      lrs_next = s->step + 256u;
+      double el = horn_now() - t0;
+      if (el > 1.0 && el < wall_guard) {
+        double rem = ((double)s->step / el) * (wall_guard - el);
+        cnf_lrs_tick(s, (rem >= 4294967295.0) ? ~0u : (u32)rem);
+      }
+    }
   }
   thvm_kbo_set_persist(0u);   // restore the safe per-call default
   AtpStatus st = s->status;
@@ -6649,6 +6695,7 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   u32 nrefut = s->n_refut;
   u32 nmodel = s->n_models;
   u32 nparked = s->n_parked;
+  u32 ndropped = s->lrs_dropped;
   // Refutation under --proof: stash the full conversion-lineage +
   // resolution proof BEFORE the state (and its term-heap slice) dies.
   if ((st == ATP_PROVED || st == ATP_REFUTED) && g_cli_want_proof)
@@ -6690,6 +6737,8 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   if (nguard > 0u)
     fprintf(stderr, "; avatar %u guard(s), %u branch refutation(s), "
             "%u model move(s), %u parked", nguard, nrefut, nmodel, nparked);
+  if (ndropped > 0u)
+    fprintf(stderr, "; lrs %u discarded", ndropped);
   fprintf(stderr, ")\n");
   return 0;
 }
