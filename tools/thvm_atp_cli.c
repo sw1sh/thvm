@@ -7928,12 +7928,16 @@ static const SchedSlice SCHEDULE[] = {
   // slices instead of moving the default (the -8/+3 pod A/B).
   {"fof-avatar",  "--fof-slice=2 --fol-avatar=1", 0.0},
   {"fof-avatar2", "--fof-slice=2 --fol-avatar=2", 0.0},
-  // FULL AC-completion, exit-fast: =2 gives up immediately when no AC
-  // operator is detected, so on non-AC problems (most of the corpus) the
-  // slot frees instantly -- letting this sit in the FIRST wave protects
-  // the RNG-family AC flips on narrow competition nodes (8-core StarExec)
-  // where late-wave slices never run inside the hard wall.
-  {"full-ac", "--full-ac=2 --fof-sat=0", 0.0},
+  // FULL AC-completion is DISABLED in the competition schedule: its
+  // AC-unification/matching path is UNSOUND -- it refutes Satisfiable
+  // problems (LAT016-1, RNG030-6, both correctly AC-detected on join/meet
+  // resp. add).  A single unsound answer disqualifies the whole run, so
+  // the ~8 RNG021-family flips it earned (all genuine theorems, but by an
+  // unsound method) are not worth the risk.  The --full-ac knob stays for
+  // development; re-add the slice only once the AC calculus is verified
+  // sound (the spurious INV=1 detection on non-inverse operators is the
+  // first suspect).  See docs/plans / the soundness regression test.
+  // {"full-ac", "--full-ac=2 --fof-sat=0", 0.0},   // UNSOUND -- do not enable
   // DEFINITION UNFOLDING (Vampire definition_unfolding port), exit-fast:
   // =2 gives up immediately when the problem has no pure function
   // definition f(X..)=t, so on most of the corpus the slot frees
@@ -8649,7 +8653,15 @@ int main(int argc, char **argv) {
         tp_giveup("fof slice: input has no fof() record");
       }
     }
-    if (strstr(raw, "cnf(") != NULL || strstr(raw, "fof(") != NULL) {
+    // TPTP input is recognized by a cnf(/fof( record OR an include()
+    // directive -- a problem whose clauses all live in an included axiom
+    // file (e.g. RNG042-2 = just `include('Axioms/RNG002-0.ax')`) has no
+    // cnf( in the top-level text, and must NOT fall through to the bench,
+    // which would run its built-in default problem and emit a spurious
+    // proof.  Preprocessing splices the include, so the parse below sees
+    // the real clauses.
+    if (strstr(raw, "cnf(") != NULL || strstr(raw, "fof(") != NULL
+        || strstr(raw, "include(") != NULL) {
       g_cli_tptp_mode = 1;
       g_cli_szs_wanted = szs;
       g_cli_probpath = file;
@@ -8673,8 +8685,14 @@ int main(int argc, char **argv) {
       int n_neg = 0;
       for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
       if (n_neg == 0 || tp.n_cls == n_neg) {
-        fprintf(stderr, "FindProof: need at least one positive and one negative unit\n");
-        return 2;
+        // No goal to refute (an axiom-only satisfiability problem like
+        // RNG042-2) or no axioms: a completion prover cannot decide
+        // satisfiability, so the ONLY sound answer is GaveUp -- never a
+        // refutation.  tp_giveup prints SZS GaveUp (exit 1) on a direct
+        // run and stays silent under a schedule slice.
+        g_cli_szs_wanted = szs;
+        g_cli_probpath   = file;
+        tp_giveup("no negated conjecture (satisfiability problem; not refutable)");
       }
       // --ifeq-guard=2 (the schedule's ifeq slice): exit cleanly when
       // the problem carries no ifeq dispatcher axiom, freeing the pool

@@ -1194,12 +1194,29 @@ static int pr_flat_term_eq(Term a, Term b) {
   if (ta == TAG_FVR) return term_ext(a) == term_ext(b);
   return term_val(a) == term_val(b);
 }
+// A named subterm must be GROUND: the fresh name is a 0-ary constant, so
+// naming a variable-bearing subterm t(X) would assert sFlat = t(X) for
+// EVERY X -- collapsing all instances to one value, an unsound axiom.
+// (Caught live: COL069-1, a Satisfiable problem with the non-ground goal
+// apply(Y,f(Y)) != ..., was "refuted" through sFlat0 = f(X1).)  The tgt
+// transform handles non-ground naming soundly with a functor over the
+// variables; goal flattening is ground-only by construction.
+static u8 pr_flat_term_ground(Term t) {
+  if (term_tag(t) == TAG_FVR) return 0u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++)
+      if (!pr_flat_term_ground(term_ctr_at(t, i))) return 0u;
+  }
+  return 1u;
+}
 static void pr_flatten_collect(Term t, Term *subs, u32 *nsub, u32 cap) {
   if (term_tag(t) != TAG_CTR) return;
   u32 n = term_ctr_n(t);
   if (n == 0u) return;                       // constant: not compound
   for (u32 i = 0; i < n; i++)
     pr_flatten_collect(term_ctr_at(t, i), subs, nsub, cap);   // inner first
+  if (!pr_flat_term_ground(t)) return;       // ground-only (soundness)
   for (u32 i = 0; i < *nsub; i++)
     if (pr_flat_term_eq(subs[i], t)) return; // already named
   if (*nsub < cap) subs[(*nsub)++] = t;
