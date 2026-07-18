@@ -8045,16 +8045,19 @@ static const SchedSlice SCHEDULE[] = {
   {"fof-wall",  "--fof-slice=2 --fof-sat-wall=95 --fol-lrs=1", 0.0},
   {"fof-selL",  "--fof-slice=2 --fol-select=3 --fol-sp=1 --fof-sat-wall=95", 0.0},
   {"fof-spb",   "--fof-slice=2 --fol-spb=1 --fol-nwc=5", 0.0},
-  // FULL AC-completion is DISABLED in the competition schedule: its
-  // AC-unification/matching path is UNSOUND -- it refutes Satisfiable
-  // problems (LAT016-1, RNG030-6, both correctly AC-detected on join/meet
-  // resp. add).  A single unsound answer disqualifies the whole run, so
-  // the ~8 RNG021-family flips it earned (all genuine theorems, but by an
-  // unsound method) are not worth the risk.  The --full-ac knob stays for
-  // development; re-add the slice only once the AC calculus is verified
-  // sound (the spurious INV=1 detection on non-inverse operators is the
-  // first suspect).  See docs/plans / the soundness regression test.
-  // {"full-ac", "--full-ac=2 --fof-sat=0", 0.0},   // UNSOUND -- do not enable
+  // FULL AC-completion stays OUT of the competition schedule -- for
+  // VALUE now, not soundness.  Both AC-match soundness bugs are fixed
+  // (bare-variable multiplicity drop, then the deferred-count re-scan
+  // double-charge; the CASC-J13-reported false refutations LAT016-1 /
+  // RNG030-6/031-6/032-6 all stay non-refuting under forced
+  // --full-ac=2, held to a 120s wall; tests/soundness covers them).
+  // But the SOUND matcher no longer over-matches, so it also no longer
+  // finds the short RNG-family proofs the unsound one did (RNG021-6:
+  // 3s unsound -> Timeout sound) -- the slice's former ~8-problem gain
+  // was an artifact of the unsoundness plus schedule variance, and a
+  // sound full-ac lane measured ZERO recoveries on that set.  Re-add
+  // only if AC-completion ever earns real coverage.
+  // {"full-ac", "--full-ac=2 --fof-sat=0", 0.0},   // sound but earns nothing
   // DEFINITION UNFOLDING (Vampire definition_unfolding port), exit-fast:
   // =2 gives up immediately when the problem has no pure function
   // definition f(X..)=t, so on most of the corpus the slot frees
