@@ -16,10 +16,12 @@
        synth (default) -- a small throwaway-weight config, runs on any CPU;
                           exercises the full path (tokenize -> prefill ->
                           greedy decode -> detokenize) but says nonsense.
-       real            -- the true checkpoint; set "Device" -> "cuda" and run
-                          this kernel on a GPU box for real-time chat.  Point
-                          THVM_SNAPSHOT at the HF snapshot dir (the one holding
-                          model.safetensors.index.json + tokenizer.json).
+       real            -- the true model, imported NATIVELY from the ollama
+                          GGUF (dsvGgufInit, no conversion / no intermediate
+                          file); the blob is auto-located from the ollama
+                          manifest, or set THVM_GGUF.  Set "Device" -> "cuda" and
+                          run this kernel on a GPU box for real-time chat.  The
+                          tokenizer.json still comes from THVM_SNAPSHOT.
 
    The service is SESSION-SCOPED: the model is resident in this kernel, so it
    answers here; a fresh kernel must run this file again to serve. *)
@@ -41,13 +43,24 @@ $snapshot = Environment["THVM_SNAPSHOT"] /. $Failed :> DirectoryName @ FirstCase
 $thvmTok = dsvTokenizer[FileNameJoin[{$snapshot, "tokenizer.json"}]];
 
 (* --- the model: config -> decode state, resident in this kernel ----------- *)
+(* the ollama GGUF blob for a model tag: read the ollama manifest for the model
+   layer's digest, then the content-addressed blob path. *)
+ollamaGguf[tag_String] := Module[{tp = StringSplit[tag, ":"], layers, dig},
+    layers = Import[FileNameJoin[{$HomeDirectory, ".ollama", "models", "manifests",
+        "registry.ollama.ai", "library", tp[[1]], tp[[2]]}], "RawJSON"]["layers"];
+    dig = SelectFirst[layers, StringContainsQ[#["mediaType"], ".model"] &]["digest"];
+    FileNameJoin[{$HomeDirectory, ".ollama", "models", "blobs", StringReplace[dig, ":" -> "-"]}]
+]
+
 $real = Environment["THVM_WEIGHTS"] === "real";
 
 $thvmState = If[ $real
     ,
-    (* the true DeepSeek-V2-Lite checkpoint (set Device -> cuda on a GPU box) *)
-    dsvHfInit[dsvConfig["Device" -> (Environment["DEV"] /. $Failed -> "cpu")],
-        TSafeTensorLoad[FileNameJoin[{$snapshot, "model.safetensors.index.json"}]]]
+    (* the real ollama DeepSeek-V2-Lite via NATIVE GGUF import: no conversion, no
+       intermediate file.  THVM_GGUF overrides the auto-located ollama blob;
+       DEV -> cuda runs it on a GPU box. *)
+    dsvGgufInit[dsvConfig["Device" -> (Environment["DEV"] /. $Failed -> "cpu")],
+        Environment["THVM_GGUF"] /. $Failed :> ollamaGguf["deepseek-v2:16b-lite-chat-q8_0"]]
     ,
     (* a small synthetic config that runs anywhere and proves the full path *)
     dsvSynthInit[dsvConfig[
