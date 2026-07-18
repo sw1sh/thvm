@@ -2309,6 +2309,97 @@ static int metal_gather_strided(u32 dst_buf_id, u32 src_buf_id,
   return 0;
 }
 
+// Encode the same strided gather onto a CALLER-OWNED encoder (the serial
+// replay path).  Same eligibility gates and params as metal_gather_strided;
+// returns -1 to decline (caller falls back to per-op replay).
+static int metal_gather_encode_on(id<MTLComputeCommandEncoder> enc,
+                                  u32 dst_buf_id, u32 src_buf_id,
+                                  TenDesc const *d) {
+  if (d == NULL) return -1;
+  u32 elem_bytes = dtype_storage_bytes(d->dtype, 1);
+  if (elem_bytes != 1 && elem_bytes != 2 && elem_bytes != 4) return -1;
+  if (d->nviews > (u32)GATHER_MAX_VIEWS) return -1;
+  if (dst_buf_id == 0 || dst_buf_id >= METAL_BUFS_NEXT) return -1;
+  if (src_buf_id == 0 || src_buf_id >= METAL_BUFS_NEXT) return -1;
+  if (METAL_BUFS[dst_buf_id].buf == nil) return -1;
+  if (METAL_BUFS[src_buf_id].buf == nil) return -1;
+  if (METAL_BUFS[dst_buf_id].refcount == 0) return -1;
+  if (METAL_BUFS[src_buf_id].refcount == 0) return -1;
+  u32 numel = d->view.numel;
+  if (numel == 0) return -1;
+  View const *chain[GATHER_MAX_VIEWS + 1];
+  u32 nchain = 0;
+  chain[nchain++] = &d->view;
+  for (i32 i = (i32)d->nviews - 1; i >= 0; i--) chain[nchain++] = &d->prior_views[i];
+  for (u32 ci = 0; ci < nchain; ci++) {
+    View const *cv = chain[ci];
+    if (cv->shape.ndim < 1 || cv->shape.ndim > (u32)MAX_DIM) return -1;
+    if (cv->offset < 0) return -1;
+    for (u32 a = 0; a < cv->shape.ndim; a++)
+      if (cv->strides[a] < 0) return -1;
+  }
+  id<MTLComputePipelineState> pso = metal_gather_pso(elem_bytes);
+  if (pso == nil) return -1;
+  int params[1 + (GATHER_MAX_VIEWS + 1) * (2 + 2 * MAX_DIM)];
+  int pn = 0;
+  params[pn++] = (int)nchain;
+  for (u32 ci = 0; ci < nchain; ci++) {
+    View const *cv = chain[ci];
+    params[pn++] = (int)cv->shape.ndim;
+    params[pn++] = (int)cv->offset;
+    for (u32 a = 0; a < cv->shape.ndim; a++) {
+      params[pn++] = (int)kvar_extent_static(cv->shape.dims[a]);
+      params[pn++] = (int)cv->strides[a];
+    }
+  }
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:METAL_BUFS[dst_buf_id].buf offset:0 atIndex:0];
+  [enc setBuffer:METAL_BUFS[src_buf_id].buf offset:0 atIndex:1];
+  [enc setBytes:params length:(size_t)pn * sizeof(int) atIndex:2];
+  NSUInteger tg = MIN((NSUInteger)numel, [pso maxTotalThreadsPerThreadgroup]);
+  [enc dispatchThreads:MTLSizeMake(numel, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  return 0;
+}
+
+// Compute-shader zero fill for the serial replay: zeroes a recycled slot's
+// [byte_offset, nbytes) window on the SAME serial encoder (a blit fill would
+// force an encoder switch per zero -- the DSV2 capture zeroes ~half its
+// outputs).  PSO compiled once via the shared source cache.
+static id<MTLComputePipelineState> METAL_FILL0_PSO = nil;
+
+static int metal_zero_encode_on(id<MTLComputeCommandEncoder> enc, u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
+  id<MTLBuffer> buf = METAL_BUFS[buf_id].buf;
+  if (buf == nil) return -1;
+  u64 off = METAL_BUFS[buf_id].byte_offset;
+  u64 cap = METAL_BUFS[buf_id].nbytes;
+  if (off >= cap) return 0;
+  if (METAL_FILL0_PSO == nil) {
+    NSError *err = nil;
+    int via_data = 0;
+    id<MTLLibrary> lib = metal_lib_for_src(
+        "#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void thvm_fill0(device uchar* p [[buffer(0)]], constant uint& n [[buffer(1)]],\n"
+        "    uint gid [[thread_position_in_grid]]) { if (gid < n) p[gid] = 0; }\n",
+        &err, &via_data);
+    if (lib == nil) return -1;
+    id<MTLFunction> fill_fn = [lib newFunctionWithName:@"thvm_fill0"];
+    if (fill_fn == nil) return -1;
+    METAL_FILL0_PSO = [METAL_DEVICE newComputePipelineStateWithFunction:fill_fn
+                                                                  error:&err];
+    if (METAL_FILL0_PSO == nil) return -1;
+  }
+  u32 n = (u32)(cap - off);
+  [enc setComputePipelineState:METAL_FILL0_PSO];
+  [enc setBuffer:buf offset:(NSUInteger)off atIndex:0];
+  [enc setBytes:&n length:sizeof(n) atIndex:1];
+  NSUInteger tg = MIN((NSUInteger)n, [METAL_FILL0_PSO maxTotalThreadsPerThreadgroup]);
+  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  return 0;
+}
+
 static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   u64 h = 0xcbf29ce484222325ULL ^ 0x4D54494C45554F50ULL;
   // kvar wedge: if any UOP_RANGE in the kernel is variable-bound, the
@@ -2730,22 +2821,24 @@ static void metal_conv_cfg_fill(TileConv2DInfo const *conv,
   cfg[18] = conv->x_stride2;
 }
 
-static int metal_tile_jit_encode(KernelEntry *ke,
-                                 __unsafe_unretained id<MTLBuffer> *src_bufs,
-                                 u64 const *src_offsets,
-                                 id<MTLBuffer> outBuf,
-                                 u64 out_offset,
-                                 id<MTLCommandBuffer> cmd,
-                                 u32 groups_x,
-                                 u32 threads_x) {
+// Encode one tile kernel onto a CALLER-OWNED encoder (no encoder lifecycle
+// here): the per-op path wraps this in its own encoder; the serial-replay path
+// (thvm_metal_serial_run) encodes a whole captured step onto ONE serial
+// encoder.  Same binds/dispatch as always.
+static int metal_tile_jit_encode_on(id<MTLComputeCommandEncoder> enc,
+                                    KernelEntry *ke,
+                                    __unsafe_unretained id<MTLBuffer> *src_bufs,
+                                    u64 const *src_offsets,
+                                    id<MTLBuffer> outBuf,
+                                    u64 out_offset,
+                                    u32 groups_x,
+                                    u32 threads_x) {
   if (groups_x == 0 || threads_x == 0) return 0;
   id<MTLComputePipelineState> pso = metal_tile_jit_pipeline(ke);
   if (pso == nil) return 0;
   if ((NSUInteger)threads_x > [pso maxTotalThreadsPerThreadgroup]) {
     return 0;
   }
-
-  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
   [enc setComputePipelineState:pso];
   // Bind the output at its byte_offset (arena VIEW -> a window of the shared
   // arena MTLBuffer; 0 for an ordinary output).  tinygrad ops_metal.py:140.
@@ -2793,8 +2886,22 @@ static int metal_tile_jit_encode(KernelEntry *ke,
     [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)groups_x, 1, 1)
         threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads_x, 1, 1)];
   }
-  [enc endEncoding];
   return 1;
+}
+
+static int metal_tile_jit_encode(KernelEntry *ke,
+                                 __unsafe_unretained id<MTLBuffer> *src_bufs,
+                                 u64 const *src_offsets,
+                                 id<MTLBuffer> outBuf,
+                                 u64 out_offset,
+                                 id<MTLCommandBuffer> cmd,
+                                 u32 groups_x,
+                                 u32 threads_x) {
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  int ok = metal_tile_jit_encode_on(enc, ke, src_bufs, src_offsets,
+                                    outBuf, out_offset, groups_x, threads_x);
+  [enc endEncoding];
+  return ok;
 }
 
 static id<MTLComputePipelineState> metal_tile_jit_pipeline(KernelEntry *ke) {
@@ -4279,6 +4386,7 @@ static void metal_custom_cache_reset(void) {
     METAL_CUSTOM_CACHE_KEYS[i] = 0;
     METAL_CUSTOM_PSOS[i]       = nil;
   }
+  METAL_FILL0_PSO = nil;
 }
 
 // Content key: MSL source hash (metal_src_hash) mixed with the entry name so
@@ -4348,12 +4456,16 @@ static id<MTLComputePipelineState> metal_custom_pipeline(KernelEntry const *ke,
   return pso;
 }
 
-static int metal_custom_dispatch(struct KernelEntry *ke,
-                                 u32 *in_buf_ids, u32 out_buf_id) {
-  if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
-  u64 t0  = cg_now_us();
+// Encode one raw custom kernel onto a CALLER-OWNED encoder: PSO (compiled /
+// cached on first use), buffer binds with per-slot byte offsets, primary-out
+// override, dispatch.  No encoder lifecycle, no submit -- the per-op
+// dispatcher wraps this in its own encoder; the serial-replay path
+// (thvm_metal_serial_run) encodes a whole captured step onto ONE serial
+// encoder.  Returns 0 on success, -1 on any decline.
+static int metal_custom_encode_on(id<MTLComputeCommandEncoder> enc,
+                                  struct KernelEntry *ke,
+                                  u32 const *in_buf_ids, u32 out_buf_id) {
   u32 kid = (u32)(ke - KERNELS);
-  if (metal_perop_enabled()) METAL_PEROP_CUR_KID = kid;
   id<MTLComputePipelineState> pso = metal_custom_pipeline(ke, metal_custom_key(ke));
   if (pso == nil) return -1;
 
@@ -4363,7 +4475,7 @@ static int metal_custom_dispatch(struct KernelEntry *ke,
   for (u32 i = 0; i < n; i++) {
     u32 ib = in_buf_ids[i];
     if (ib == 0 || ib >= METAL_BUFS_NEXT || METAL_BUFS[ib].buf == nil) {
-      fprintf(stderr, "thvm: metal_custom_dispatch: kid=%u arg %u buf %u has "
+      fprintf(stderr, "thvm: metal_custom_encode: kid=%u arg %u buf %u has "
                       "no storage\n", kid, i, ib);
       return -1;
     }
@@ -4373,7 +4485,7 @@ static int metal_custom_dispatch(struct KernelEntry *ke,
   u32 out_slot = metal_custom_primary_out_slot(ke);
   if (out_buf_id != 0 && out_slot < n) {
     if (out_buf_id >= METAL_BUFS_NEXT || METAL_BUFS[out_buf_id].buf == nil) {
-      fprintf(stderr, "thvm: metal_custom_dispatch: kid=%u out buf %u has no "
+      fprintf(stderr, "thvm: metal_custom_encode: kid=%u out buf %u has no "
                       "storage\n", kid, out_buf_id);
       return -1;
     }
@@ -4381,9 +4493,6 @@ static int metal_custom_dispatch(struct KernelEntry *ke,
     offs[out_slot] = METAL_BUFS[out_buf_id].byte_offset;
   }
 
-  id<MTLCommandBuffer> cmd = metal_command_buffer();
-  if (cmd == nil) return -1;
-  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
   [enc setComputePipelineState:pso];
   for (u32 i = 0; i < n; i++) {
     [enc setBuffer:bufs[i] offset:(NSUInteger)offs[i] atIndex:i];
@@ -4401,13 +4510,113 @@ static int metal_custom_dispatch(struct KernelEntry *ke,
       threadsPerThreadgroup:MTLSizeMake(ke->custom_block[0],
                                         ke->custom_block[1],
                                         ke->custom_block[2])];
+  return 0;
+}
+
+static int metal_custom_dispatch(struct KernelEntry *ke,
+                                 u32 *in_buf_ids, u32 out_buf_id) {
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
+  u64 t0  = cg_now_us();
+  u32 kid = (u32)(ke - KERNELS);
+  if (metal_perop_enabled()) METAL_PEROP_CUR_KID = kid;
+
+  id<MTLCommandBuffer> cmd = metal_command_buffer();
+  if (cmd == nil) return -1;
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  int rc = metal_custom_encode_on(enc, ke, in_buf_ids, out_buf_id);
   [enc endEncoding];
+  if (rc != 0) return -1;
   // Batched: encoded into the current batch command buffer (Metal preserves
   // submission order within a buffer), so a downstream kernel sees the
   // written bytes.  Standalone (no active batch): submit + wait here, exactly
   // as metal_gather_strided / the tile path do.
   metal_submit_if_standalone(cmd);
   cg_profile_record(kid, KDISPATCH_CUSTOM, cg_now_us() - t0);
+  return 0;
+}
+
+// === serial-encoder replay ==============================================
+//
+// Encode a run of captured dispatches (tile + custom, resolved buffer ids)
+// onto ONE MTLDispatchTypeSerial compute encoder and submit them as ONE
+// command buffer.  Serial dispatch type executes the commands in encode
+// order with implicit barriers, so the captured step's data chain (including
+// the WAW scratch recycling that declines the ICB on M3 -- setBarrier there
+// is unreliable, see jit_metal_graph_force_icb) is ordered BY CONSTRUCTION.
+// This removes the per-op path's dominant replay costs: one encoder + one
+// commit instead of an encoder create/end + hazard boundary per kernel
+// (~50us/dispatch -> ~4us/dispatch on the DSV2 decode).
+//
+// recs[i] carries the captured (kid, in_buf_ids, out_buf_id).  kinds[i]:
+// 0 = tile dispatch (groups_x/threads_x = launch shape), 1 = custom dispatch
+// (shape from custom_grid/block), 2 = strided gather (out_buf_id = dst,
+// in_buf_ids[0] = src, gshells[i] = the view shell).  zero_first[i] != 0
+// zeroes the out slot (compute fill on the same encoder) before the dispatch
+// -- the replay mirror of the pop-time gpu_zero for packer-recycled slots.
+// Returns 0 with all n commands committed + completed, -1 to decline (nothing
+// committed -- the caller falls back to per-op replay for the whole run).
+int thvm_metal_serial_run(JitReplayDispatch const *recs, u32 n,
+                          u8 const *kinds, u8 const *zero_first,
+                          u32 const *groups_x, u32 const *threads_x,
+                          TenDesc const *gshells) {
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil || n == 0) return -1;
+  // Order with any open per-op batch: commit it (non-blocking) so its work
+  // precedes this run in queue order.  Skip when nothing is batched -- the
+  // flush would otherwise drain the pending buffer (the PREVIOUS serial run)
+  // and serialize back-to-back runs.
+  if (METAL_BATCH_CMD != nil) metal_dispatch_flush();
+  id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+  if (cmd == nil) return -1;
+  id<MTLComputeCommandEncoder> enc =
+      [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
+  if (enc == nil) return -1;
+  for (u32 i = 0; i < n; i++) {
+    JitReplayDispatch const *r = &recs[i];
+    int ok = 0;
+    if (zero_first[i] && kinds[i] != 2) {
+      if (metal_zero_encode_on(enc, r->out_buf_id) != 0) { [enc endEncoding]; return -1; }
+    }
+    if (kinds[i] == 2) {
+      ok = metal_gather_encode_on(enc, r->out_buf_id, r->in_buf_ids[0],
+                                  &gshells[i]) == 0;
+    } else if (r->kid == 0 || r->kid >= KERNELS_NEXT) {
+      ok = 0;
+    } else if (kinds[i] == 1) {
+      ok = metal_custom_encode_on(enc, &KERNELS[r->kid], r->in_buf_ids,
+                                  r->out_buf_id) == 0;
+    } else {
+      KernelEntry *ke = &KERNELS[r->kid];
+      __unsafe_unretained id<MTLBuffer> bufs[JIT_REPLAY_MAX_INPUTS];
+      u64 offs[JIT_REPLAY_MAX_INPUTS];
+      int missing = 0;
+      for (u32 j = 0; j < r->n_inputs; j++) {
+        u32 ib = r->in_buf_ids[j];
+        if (ib == 0 || ib >= METAL_BUFS_NEXT || METAL_BUFS[ib].buf == nil) { missing = 1; break; }
+        bufs[j] = METAL_BUFS[ib].buf;
+        offs[j] = METAL_BUFS[ib].byte_offset;
+      }
+      ok = !missing && r->out_buf_id != 0 && r->out_buf_id < METAL_BUFS_NEXT
+           && METAL_BUFS[r->out_buf_id].buf != nil
+           && metal_tile_jit_encode_on(enc, ke, bufs, offs,
+                                       METAL_BUFS[r->out_buf_id].buf,
+                                       METAL_BUFS[r->out_buf_id].byte_offset,
+                                       groups_x[i], threads_x[i]);
+    }
+    if (!ok) {
+      // Decline the WHOLE run: the command buffer is never committed, so the
+      // 0..i-1 encodes are dropped and the caller re-runs everything per-op.
+      [enc endEncoding];
+      return -1;
+    }
+  }
+  [enc endEncoding];
+  [cmd commit];
+  // Pipeline: wait the PREVIOUS pending buffer only (it had this run's whole
+  // encode time to finish, so the wait is ~zero warm), then hand THIS buffer
+  // to the pending slot -- host reads and flushes wait on it through the
+  // existing metal_drain_pending, exactly like a batch flush.
+  metal_drain_pending();
+  METAL_PENDING_CMD = cmd;
   return 0;
 }
 

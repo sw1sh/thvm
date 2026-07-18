@@ -3624,6 +3624,16 @@ extern Backend CUDA_BACKEND;
 int thvm_metal_jit_replay_dispatch_ready(JitReplayDispatch const *op);
 int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
                               JitReplayDispatch const *ops, u32 n_ops);
+// Serial-encoder replay: encode a run of captured ops onto ONE
+// MTLDispatchTypeSerial compute encoder, one commit + wait.  kinds[i]:
+// 0 = tile dispatch, 1 = custom dispatch, 2 = strided gather (out_buf_id =
+// dst, in_buf_ids[0] = src, gshells[i] = view shell).  zero_first[i] zeroes
+// the out slot on the same encoder before the dispatch.  0 on success (all n
+// executed), -1 to decline with nothing committed.
+int thvm_metal_serial_run(JitReplayDispatch const *recs, u32 n,
+                          u8 const *kinds, u8 const *zero_first,
+                          u32 const *groups_x, u32 const *threads_x,
+                          TenDesc const *gshells);
 // Trace-capture route stamp: classify the dispatch route `ke` would take and
 // cg_profile_record it, WITHOUT GPU work.  Lets jit_capture_finalize read the
 // correct dispatch kind for ICB eligibility when THVM_JIT_TRACE_CAPTURE skipped

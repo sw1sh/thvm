@@ -3594,6 +3594,126 @@ static void jit_capture_autotune_finalized(u32 slot) {
 }
 
 #ifdef THVM_HAS_METAL
+// THVM_METAL_SERIAL_REPLAY (default ON; =0 disables) -- replay a captured
+// dispatch run through ONE serial compute encoder (thvm_metal_serial_run)
+// instead of per-op dispatch.  Serial dispatch order makes the WAW/RAW chain
+// correct by construction, so unlike the ICB this path needs neither the
+// metal_graph_recycle nor the strided-view (metal_graph_unsafe) declines:
+// tile kernels bake views in-kernel and custom kernels read raw buffers.
+// Ops the serial encoder cannot carry break the run and fall to per-op:
+// MPS / DAG-route kernels (pre-materialise or self-encode) and
+// replay_packed/replay_zero ops (their blit zero-fill needs its own encoder).
+static int jit_metal_serial_replay_enabled(void) {
+  static int known = 0;
+  static int v = 1;
+  if (!known) {
+    char const *e = getenv("THVM_METAL_SERIAL_REPLAY");
+    v = (e == NULL || e[0] != '0');
+    known = 1;
+  }
+  return v;
+}
+
+#define JIT_SERIAL_RUN_CAP 2048
+static u32 jit_replay_try_metal_serial_run(JitCapture *c, u32 start) {
+  if (!jit_metal_serial_replay_enabled()) return 0;
+  if (start >= c->n_ops || c->ops[start].kind != JIT_OP_DISPATCH) return 0;
+  static JitReplayDispatch recs[JIT_SERIAL_RUN_CAP];
+  static u8  kinds[JIT_SERIAL_RUN_CAP];
+  static u8  zf[JIT_SERIAL_RUN_CAP];
+  static u32 gx[JIT_SERIAL_RUN_CAP];
+  static u32 tx[JIT_SERIAL_RUN_CAP];
+  static TenDesc gsh[JIT_SERIAL_RUN_CAP];
+  u32 n = 0;
+  u32 consumed = 0;
+  u32 n_dispatch = 0;
+  int why = 0;   /* collector exit reason for THVM_SERIAL_TRACE */
+  for (u32 i = start; i < c->n_ops && n < JIT_SERIAL_RUN_CAP; i++) {
+    JitCaptureOp *op = &c->ops[i];
+    if (op->replay_skip) {
+      consumed++;
+      continue;
+    }
+    if (op->kind == JIT_OP_GATHER) {
+      // Absorb the strided gather as a compute dispatch on the same serial
+      // encoder (metal_gather_encode_on; same gates as the eager GPU gather).
+      Backend *gb = (Backend *)op->gather_backend;
+      if (gb == NULL || gb->id != METAL_BACKEND.id) { why = 9; break; }
+      u32 esz = dtype_itemsize(op->gather_dtype);
+      if (esz != 1 && esz != 2 && esz != 4) { why = 10; break; }
+      JitReplayDispatch *r = &recs[n];
+      r->kid = 0;
+      r->n_inputs = 1;
+      r->out_buf_id = op->gather_dst_buf;
+      r->in_buf_ids[0] = op->gather_src_buf;
+      TenDesc *sh = &gsh[n];
+      memset(sh, 0, sizeof(*sh));
+      sh->dtype = op->gather_dtype;
+      sh->view = op->gather_view;
+      sh->nviews = op->gather_nviews;
+      sh->prior_views = op->gather_prior;
+      kinds[n] = 2;
+      zf[n] = 0;
+      gx[n] = 0;
+      tx[n] = 0;
+      n++;
+      consumed++;
+      continue;
+    }
+    if (op->kind != JIT_OP_DISPATCH) { why = 1; break; }
+    if (op->kid == 0 || op->kid >= KERNELS_NEXT) { why = 2; break; }
+    if (op->n_inputs > JIT_REPLAY_MAX_INPUTS) { why = 4; break; }
+    KernelEntry *ke = &KERNELS[op->kid];
+    if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) { why = 5; break; }
+    Backend *b = TENS[ke->output_tid].backend;
+    if (b == NULL || b->id != METAL_BACKEND.id) { why = 6; break; }
+    u32 groups = 0;
+    u32 threads = 0;
+    u8 fc;
+    if (kernel_is_custom(ke)) {
+      fc = 1;
+    } else if (cg_kernel_dispatch_kind(op->kid) == KDISPATCH_METAL_TILE) {
+      if (!cg_tile_metal_dispatch_shape(ke, &groups, &threads)) { why = 7; break; }
+      fc = 0;
+    } else {
+      why = 100 + cg_kernel_dispatch_kind(op->kid);   /* MPS / DAG / unstamped */
+      break;
+    }
+    JitReplayDispatch *r = &recs[n];
+    r->kid = op->kid;
+    r->n_inputs = op->n_inputs;
+    r->out_buf_id = op->out_buf_id;
+    u32 const *ids = op->heap_in_buf_ids != NULL
+                   ? op->heap_in_buf_ids
+                   : op->in_buf_ids;
+    for (u32 j = 0; j < op->n_inputs; j++) {
+      r->in_buf_ids[j] = ids[j];
+    }
+    if (fc == 0 && !thvm_metal_jit_replay_dispatch_ready(r)) { why = 8; break; }
+    kinds[n] = fc;
+    // Packer/capture-recycled slot: zero it on the encoder before the
+    // dispatch (the per-op path's b->buf_zero mirror).
+    zf[n] = (op->replay_packed || op->replay_zero) ? 1 : 0;
+    gx[n] = groups;
+    tx[n] = threads;
+    n++;
+    n_dispatch++;
+    consumed++;
+  }
+  if (getenv("THVM_SERIAL_TRACE") != NULL) {
+    fprintf(stderr, "[serial] start=%u n=%u consumed=%u why=%d\n", start, n, consumed, why);
+  }
+  // Below a few encodes the flush + commit + wait overhead beats per-op.
+  if (n < 4) return 0;
+  if (thvm_metal_serial_run(recs, n, kinds, zf, gx, tx, gsh) != 0) return 0;
+  for (u32 k = 0; k < n_dispatch; k++) {
+    HOT_KERNEL_FIRES++;
+    HOT_JIT_REPLAY_DISPATCHES++;
+    ITRS++;
+  }
+  return consumed;
+}
+
 static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   // THVM_JIT_GRAPH_DIAG: report once per slot (at its first op) whether the
   // capture is ICB-batch-eligible and, if not, why -- the VAE-batching probe.
@@ -4021,6 +4141,11 @@ fn u32 jit_replay(u32 slot) {
 
   for (u32 i = 0; i < c->n_ops;) {
 #ifdef THVM_HAS_METAL
+    u32 serial_run = jit_replay_try_metal_serial_run(c, i);
+    if (serial_run != 0) {
+      i += serial_run;
+      continue;
+    }
     u32 metal_run = jit_replay_try_metal_graph_run(slot, c, i);
     if (metal_run != 0) {
       i += metal_run;
@@ -4153,6 +4278,17 @@ fn u32 jit_replay(u32 slot) {
         sh.view        = op->gather_view;
         sh.nviews      = op->gather_nviews;
         sh.prior_views = op->gather_prior;
+        // GPU-side gather first (the eager pre-materialize hook, e.g.
+        // metal_gather_strided): encodes into the open batch with NO host
+        // sync.  The host loop below buf_read-DRAINS the whole GPU queue on
+        // every gather -- the DSV2 metal decode replays 4 gathers/layer, and
+        // those drains dominated its warm step.  The hook declines (flips,
+        // 8-byte dtypes, long chains) into the host fallback.
+        if (b->gather_strided != NULL
+            && b->gather_strided(op->gather_dst_buf, op->gather_src_buf, &sh) == 0) {
+          ITRS++;
+          break;
+        }
         u32 numel = sh.view.numel;
         // Source byte ceiling = max reachable index + 1 (matches the
         // capture-time sizing in materialize_root_alias).
