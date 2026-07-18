@@ -8904,6 +8904,20 @@ int main(int argc, char **argv) {
 #undef tp
       free(tpp);
       run_file = tmp_pr;
+    } else {
+      // Not TPTP (no cnf( / fof( / include( record).  The input must then
+      // be a genuine Waldmeister .pr file; if it is not (an empty file, a
+      // comment-only file, a tff(/thf( problem, junk), it must NOT reach
+      // the bench -- the bench would run its BUILT-IN DEFAULT problem and
+      // emit a spurious proof (the general form of the include-only
+      // soundness bug).  Give up cleanly instead.
+      if (strstr(raw, "ORDERING") == NULL && strstr(raw, "SIGNATURE") == NULL
+          && strstr(raw, "CONCLUSION") == NULL && strstr(raw, "AXIOMS") == NULL) {
+        g_cli_szs_wanted = szs;
+        g_cli_probpath   = file;
+        free(raw);
+        tp_giveup("input is neither TPTP (cnf/fof/include) nor a Waldmeister .pr");
+      }
     }
     free(raw);
   }
