@@ -126,6 +126,7 @@ static const AtpKnob KNOBS[] = {
   {"gn-subjects",            "THVM_ATP_GN_SUBJECTS",     1, "(goal-narrow e-match subjects per pass)"},
   {"gn-subj-size",           "THVM_ATP_GN_SUBJ_SIZE",    1, "(goal-narrow max subject symbols)"},
   {"gn-inst-size",           "THVM_ATP_GN_INST_SIZE",    1, "(goal-narrow max instance symbols)"},
+  {"forward-subsume",        "THVM_ATP_FWD_SUB",         0, "ForwardSubsume"},
   {"backward-subsume",       "THVM_ATP_BWD_SUB",         0, "BackwardSubsume"},
   {"backward-demod",         "THVM_ATP_BWD_DEMOD",       0, "BackwardDemod"},
   {"backward-ground-join",   "THVM_ATP_BWD_GROUND_JOIN", 0, "BackwardGroundJoin"},

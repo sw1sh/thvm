@@ -3074,6 +3074,10 @@ int main(int argc, char **argv) {
          goal, i, s->n_rules, s->n_cps, max_cps, el);
   printf("   trace: n_trace=%u  t_max=%u  record_norm=%u\n",
          s->n_trace, s->t_max, s->record_norm_steps);
+  if (getenv("THVM_ATP_REDUN_STATS") != NULL)
+    printf("   REDUN: fwd_sub=%u bwd_sub=%u bwd_demod=%u\n",
+           s->n_rules_fwd_subsumed, s->n_rules_bwd_subsumed,
+           s->n_rules_bwd_demodulated);
   // drc=off keep diagnostics (nonzero only when the lane is armed).
   if (s->n_cps_drc_kept_push != 0u || s->n_cps_drc_kept_pop != 0u) {
     printf("   drc-off: kept_push=%u  kept_pop=%u\n",
