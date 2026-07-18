@@ -1091,16 +1091,46 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
     METAL_ZC_FAULT_US   += tTouch - t0;
   }
 
-  // Wrap the host pages in place FIRST (id<MTLBuffer> -- `id` here is the
-  // Objective-C generic-object keyword, so the slot index below is named
-  // `slot`, not `id`, to avoid shadowing it).  deallocator:nil keeps these
-  // mmap pages owned by the CPU-side DiskMap; ARC only owns the wrapper.
+  // KILL-SAFE DEFAULT: copy the weight into a DRIVER-OWNED MTLBuffer instead
+  // of zero-copy wrapping the process's mmap pages.  A SIGKILL of the process
+  // mid-GPU-work tears down its address space -- including these mmap pages --
+  // while committed command buffers still read them; the firmware then spins
+  // on faulting reads forever (Device Utilization pinned at 100%, no owning
+  // process, no watchdog recovery; only a sleep/wake cycle or reboot clears
+  // it -- the 2026-07-18 incident).  A driver-owned copy survives client death:
+  // the kernel driver retires the dead client's work against still-valid
+  // memory and the GPU goes idle.  Cost: one memcpy at load; RSS is a wash
+  // (the wrap path faulted the same pages resident anyway, and the source
+  // pages are MADV_DONTNEED'd right after the copy).  THVM_METAL_MMAP_WRAP=1
+  // (process env) restores the zero-copy wrap for workflows that stream
+  // weights through TDiskDropWeight re-wraps.
   u64 tWrap0 = cg_now_us();
-  id<MTLBuffer> wrapped =
-      [METAL_DEVICE newBufferWithBytesNoCopy:page_base
-                                      length:wrap_len
-                                     options:MTLResourceStorageModeShared
-                                 deallocator:nil];
+  id<MTLBuffer> wrapped = nil;
+  static int wrap_known = 0, wrap_optin = 0;
+  if (!wrap_known) {
+    char const *e = getenv("THVM_METAL_MMAP_WRAP");
+    wrap_optin = (e != NULL && e[0] == '1');
+    wrap_known = 1;
+  }
+  if (wrap_optin) {
+    // Zero-copy wrap (id<MTLBuffer> -- `id` here is the Objective-C
+    // generic-object keyword, so the slot index below is named `slot`, not
+    // `id`).  deallocator:nil keeps these mmap pages owned by the CPU-side
+    // DiskMap; ARC only owns the wrapper.
+    wrapped = [METAL_DEVICE newBufferWithBytesNoCopy:page_base
+                                              length:wrap_len
+                                             options:MTLResourceStorageModeShared
+                                         deallocator:nil];
+  } else {
+    wrapped = [METAL_DEVICE newBufferWithLength:(NSUInteger)maplen
+                                        options:MTLResourceStorageModeShared];
+    if (wrapped != nil) {
+      memcpy([wrapped contents], page_base, (size_t)maplen);
+      // The mmap pages only served the copy; return them to the OS now.  The
+      // map stays valid (file-backed), so a later re-wrap re-faults cleanly.
+      madvise(page_base, (size_t)maplen, MADV_DONTNEED);
+    }
+  }
   METAL_ZC_WRAP_US += cg_now_us() - tWrap0;
   if (wrapped == nil) {
     fprintf(stderr,
