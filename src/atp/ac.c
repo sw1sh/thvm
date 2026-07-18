@@ -351,6 +351,15 @@ static u8 atp_match_ac_flat(u32 label,
   // Identify each distinct unbound var + its multiplicity.
   u32 ub_vid [ATPFT_AC_MAX_UNBOUND];
   u32 ub_mult[ATPFT_AC_MAX_UNBOUND];
+  // ub_defer[k]: how many of ub_vid[k]'s bare occurrences pass 1 below
+  // actually finds STILL UNBOUND at its own index (i.e. genuinely
+  // deferred, "continue"d) -- as opposed to occurrences pass 1 already
+  // self-consumes via its "already bound, kbo_eq" branch because an
+  // EARLIER pattern leaf (a CTR child, or another bare occurrence) bound
+  // the var first.  The re-scan below must consume leaves ONLY for the
+  // deferred count, not the raw pre-pass total ub_mult[k] -- see the
+  // RNG030-6 comment below for why conflating the two double-counts.
+  u32 ub_defer[ATPFT_AC_MAX_UNBOUND] = {0};
   u32 n_ub = 0u;
   for (u32 i = 0; i < np; i++) {
     Term p = P[i];
@@ -378,7 +387,15 @@ static u8 atp_match_ac_flat(u32 label,
     Term p = P[i];
     if (term_tag(p) == TAG_FVR) {
       u32 vid = term_ext(p);
-      if (subst->bindings[vid] == 0) continue;   // unbound, deferred
+      if (subst->bindings[vid] == 0) {
+        // Genuinely deferred: still unbound at THIS index.  Record it
+        // against ub_defer so the re-scan knows this occurrence has NOT
+        // yet consumed a subject leaf.
+        for (u32 k = 0; k < n_ub; k++) {
+          if (ub_vid[k] == vid) { ub_defer[k] += 1u; break; }
+        }
+        continue;
+      }
       // Bound var: kbo_eq against binding.
       Term bound = subst->bindings[vid];
       u8 matched = 0u;
@@ -432,7 +449,7 @@ static u8 atp_match_ac_flat(u32 label,
   // In that pattern z is unbound after pass 1, so pass 2 should
   // still absorb the leftover into z.
   //
-  // UNSOUNDNESS (LAT016-1/RNG030-6, CASC J13 soundness report): a
+  // UNSOUNDNESS #1 (LAT016-1, CASC J13 soundness report, FIXED): a
   // var can ALSO have its OWN bare-leaf occurrence elsewhere in P
   // (counted into ub_vid/ub_mult by the pre-pass) that pass 1 skips
   // ("continue", deferred) because it is scanned BEFORE the later
@@ -448,9 +465,33 @@ static u8 atp_match_ac_flat(u32 label,
   // AC-matched a 4-leaf ortholattice term as if it had 5 leaves,
   // deriving the E1 collapse that falsely refutes a Satisfiable
   // problem.  Fix: when a var is found already bound here, CONSUME
-  // `ub_mult[k]` more unused subject leaves equal to the binding (the
+  // `ub_defer[k]` more unused subject leaves equal to the binding (the
   // same check the "already bound" branch of pass 1 runs) before
   // dropping it from ub_vid; fail the whole match if not enough exist.
+  //
+  // UNSOUNDNESS #2 (RNG030-6/031-6/032-6, found via engine trace on
+  // rule uid=335 `multiply(add(add(inv(x0),inv(x0)),x0), x1) ->
+  // multiply(inv(x0), x1)`): the FIRST fix's re-scan originally consumed
+  // `ub_mult[k]` (the pre-pass's RAW TOTAL bare-occurrence count) here,
+  // silently assuming EVERY bare occurrence of a bound var was deferred.
+  // That's only true when ALL of the var's bare leaves precede every CTR
+  // leaf that binds it.  When a bare occurrence comes AFTER a CTR leaf
+  // that binds the same var (the common case -- e.g. pattern
+  // `add(add(inv(V0),inv(V0)),V0)` flattens to [inv(V0), inv(V0), V0]:
+  // the two CTR leaves bind V0 BEFORE the bare V0 leaf is reached), pass
+  // 1's OWN "already bound" branch (above) already consumes a matching
+  // leaf for that occurrence IN PLACE -- ub_mult[k] then OVER-counts by
+  // double-charging the re-scan for leaves pass 1 already claimed.  On
+  // RNG030-6 this let a 3-leaf pattern wrongly consume all 4 leaves of a
+  // true-zero subterm `add(add(x0,x0),add(inv(x0),inv(x0)))`, silently
+  // dropping one leaf and deriving the false rule
+  // `multiply(additive_inverse(x0),x1) -> additive_identity`.  Fix: track
+  // the ACTUAL deferred count per var (`ub_defer[k]`, incremented only
+  // at pass 1's "still unbound, continue" site above) and consume
+  // exactly that many more leaves here, not the raw ub_mult[k] total.
+  // For a var that pass 1 NEVER binds (flows into pass 2 below),
+  // ub_defer[k] == ub_mult[k] by construction (no occurrence could have
+  // been self-consumed), so pass 2's existing ub_mult[] use is untouched.
   u32 still_unbound = 0u;
   u32 nv_ub_vid[ATPFT_AC_MAX_UNBOUND];
   u32 nv_ub_mult[ATPFT_AC_MAX_UNBOUND];
@@ -462,7 +503,7 @@ static u8 atp_match_ac_flat(u32 label,
       still_unbound++;
       continue;
     }
-    u32 need = ub_mult[k];
+    u32 need = ub_defer[k];
     for (u32 j = 0; j < ns && need > 0u; j++) {
       if (used[j]) continue;
       if (kbo_eq(S[j], bound)) { used[j] = 1u; need--; }
