@@ -84,7 +84,8 @@ Options[dsvConfig] = {
     "YarnMscale" -> 0.707,
     "Device" -> "cpu",
     "Seed" -> 7,
-    "WeightScale" -> 0.05
+    "WeightScale" -> 0.05,
+    "ExpertsQ8" -> False
 }
 
 (* Derived: SharedInter, the yarn-corrected attention scale (deepseek_v2.py:549-550,
@@ -865,6 +866,226 @@ kernel void moe_full_out(device bf16t* out [[buffer(0)]], device const float* h 
 }
 "
 
+(* === Q8_0 MoE variants (cfg "ExpertsQ8") ========================= *)
+
+(* The routed-expert stacks stay in the GGUF Q8_0 block format (34-byte blocks:
+   one f16 scale then 32 int8), read directly by the MoE kernels -- the experts
+   are ~90% of the model, so skipping their dequant more than halves resident
+   memory AND matches llama.cpp/ollama numerics more closely (scale*q in f32,
+   no bf16 rounding of the dequantized weight).  Row lengths D and MI are
+   multiples of 32, so every row starts block-aligned; a lane striding 32 stays
+   inside one block per iteration (block = k>>5, within = k&31).  Shared experts
+   and everything else remain bf16.  Each dialect carries its own f16->f32
+   converter (byte loads, so no cuda_fp16.h / alignment concerns). *)
+
+$dsvQ8Pre = "
+static __device__ __forceinline__ float h2f(unsigned short h) {
+  unsigned int s = (unsigned int)(h & 0x8000u) << 16;
+  unsigned int e = (h >> 10) & 0x1fu, m = h & 0x3ffu, o;
+  if (e == 0u) { if (m == 0u) o = s; else { e = 113u; while (!(m & 0x400u)) { m <<= 1; e--; } m &= 0x3ffu; o = s | (e << 23) | (m << 13); } }
+  else if (e == 0x1fu) o = s | 0x7f800000u | (m << 13);
+  else o = s | ((e + 112u) << 23) | (m << 13);
+  return __uint_as_float(o);
+}
+"
+
+$dsvQ8PreCpu = "
+static inline float h2f(unsigned short h) {
+  unsigned int s = (unsigned int)(h & 0x8000u) << 16;
+  unsigned int e = (h >> 10) & 0x1fu, m = h & 0x3ffu, o;
+  if (e == 0u) { if (m == 0u) o = s; else { e = 113u; while (!(m & 0x400u)) { m <<= 1; e--; } m &= 0x3ffu; o = s | (e << 23) | (m << 13); } }
+  else if (e == 0x1fu) o = s | 0x7f800000u | (m << 13);
+  else o = s | ((e + 112u) << 23) | (m << 13);
+  union { unsigned int u; float f; } v; v.u = o; return v.f;
+}
+"
+
+$dsvMoeHQ8Cuda = $dsvQ8Pre <> "
+extern \"C\" __global__ void moe_full_h(float* h, const bf16t* x, const int* sel,
+    const unsigned char* wg, const unsigned char* wu, const bf16t* swg, const bf16t* swu) {
+  int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5; int lane = threadIdx.x & 31;
+  if (warp >= `K` * `MI` + `SI`) return;
+  float g = 0.f, u = 0.f;
+  if (warp < `K` * `MI`) {
+    int e = warp / `MI`, i = warp % `MI`; int se = sel[e];
+    long row = ((long)se * `MI` + i) * (`D` / 32) * 34;
+    const unsigned char* gr = wg + row;
+    const unsigned char* ur = wu + row;
+    for (int k = lane; k < `D`; k += 32) {
+      const unsigned char* gb = gr + (long)(k >> 5) * 34;
+      const unsigned char* ub = ur + (long)(k >> 5) * 34;
+      float xk = bf2f(x[k]);
+      g += xk * h2f((unsigned short)(gb[0] | (gb[1] << 8))) * (float)(signed char)gb[2 + (k & 31)];
+      u += xk * h2f((unsigned short)(ub[0] | (ub[1] << 8))) * (float)(signed char)ub[2 + (k & 31)];
+    }
+  } else {
+    int i = warp - `K` * `MI`;
+    const bf16t* wgi = swg + (long)i * `D`;
+    const bf16t* wui = swu + (long)i * `D`;
+    for (int k = lane; k < `D`; k += 32) { float xk = bf2f(x[k]); g += xk * bf2f(wgi[k]); u += xk * bf2f(wui[k]); }
+  }
+  for (int o = 16; o > 0; o >>= 1) { g += __shfl_down_sync(0xffffffffu, g, o); u += __shfl_down_sync(0xffffffffu, u, o); }
+  if (lane == 0) { float gs = g / (1.f + __expf(-g)); h[warp] = gs * u; }
+}
+"
+
+$dsvMoeHQ8Cpu = $dsvQ8PreCpu <> "
+#include <math.h>
+void moe_full_h(void *const *bufs, unsigned const *grid, unsigned const *block) {
+  (void)grid; (void)block;
+  float *h = (float *)bufs[0];
+  const bf16t *x = (const bf16t *)bufs[1];
+  const int *sel = (const int *)bufs[2];
+  const unsigned char *wg = (const unsigned char *)bufs[3];
+  const unsigned char *wu = (const unsigned char *)bufs[4];
+  const bf16t *swg = (const bf16t *)bufs[5];
+  const bf16t *swu = (const bf16t *)bufs[6];
+  for (int warp = 0; warp < `K` * `MI` + `SI`; warp++) {
+    float g = 0.f, u = 0.f;
+    if (warp < `K` * `MI`) {
+      int e = warp / `MI`, i = warp % `MI`; int se = sel[e];
+      long row = ((long)se * `MI` + i) * (`D` / 32) * 34;
+      const unsigned char *gr = wg + row;
+      const unsigned char *ur = wu + row;
+      for (int k = 0; k < `D`; k++) {
+        const unsigned char *gb = gr + (long)(k >> 5) * 34;
+        const unsigned char *ub = ur + (long)(k >> 5) * 34;
+        float xk = bf2f(x[k]);
+        g += xk * h2f((unsigned short)(gb[0] | (gb[1] << 8))) * (float)(signed char)gb[2 + (k & 31)];
+        u += xk * h2f((unsigned short)(ub[0] | (ub[1] << 8))) * (float)(signed char)ub[2 + (k & 31)];
+      }
+    } else {
+      int i = warp - `K` * `MI`;
+      for (int k = 0; k < `D`; k++) { float xk = bf2f(x[k]); g += xk * bf2f(swg[(long)i * `D` + k]); u += xk * bf2f(swu[(long)i * `D` + k]); }
+    }
+    float gs = g / (1.f + expf(-g));
+    h[warp] = gs * u;
+  }
+}
+"
+
+$dsvMoeHQ8Metal = "
+kernel void moe_full_h(device float* h [[buffer(0)]], device const bf16t* x [[buffer(1)]], device const int* sel [[buffer(2)]],
+    device const uchar* wg [[buffer(3)]], device const uchar* wu [[buffer(4)]], device const bf16t* swg [[buffer(5)]], device const bf16t* swu [[buffer(6)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
+  int warp = (tgid.x * ntg.x + tid3.x) >> 5; int lane = tid3.x & 31;
+  if (warp >= `K` * `MI` + `SI`) return;
+  float g = 0.f, u = 0.f;
+  if (warp < `K` * `MI`) {
+    int e = warp / `MI`, i = warp % `MI`; int se = sel[e];
+    long row = ((long)se * `MI` + i) * (`D` / 32) * 34;
+    device const uchar* gr = wg + row;
+    device const uchar* ur = wu + row;
+    for (int k = lane; k < `D`; k += 32) {
+      device const uchar* gb = gr + (long)(k >> 5) * 34;
+      device const uchar* ub = ur + (long)(k >> 5) * 34;
+      float xk = bf2f(x[k]);
+      g += xk * (float)as_type<half>((ushort)(gb[0] | (gb[1] << 8))) * (float)(char)gb[2 + (k & 31)];
+      u += xk * (float)as_type<half>((ushort)(ub[0] | (ub[1] << 8))) * (float)(char)ub[2 + (k & 31)];
+    }
+  } else {
+    int i = warp - `K` * `MI`;
+    device const bf16t* wgi = swg + (long)i * `D`;
+    device const bf16t* wui = swu + (long)i * `D`;
+    for (int k = lane; k < `D`; k += 32) { float xk = bf2f(x[k]); g += xk * bf2f(wgi[k]); u += xk * bf2f(wui[k]); }
+  }
+  for (int o = 16; o > 0; o >>= 1) { g += simd_shuffle_down(g, o); u += simd_shuffle_down(u, o); }
+  if (lane == 0) { float gs = g / (1.f + exp(-g)); h[warp] = gs * u; }
+}
+"
+
+$dsvMoeOutQ8Cuda = $dsvQ8Pre <> "
+extern \"C\" __global__ void moe_full_out(bf16t* out, const float* h, const int* sel,
+    const float* probs, const unsigned char* wd, const bf16t* swd) {
+  int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5; int lane = threadIdx.x & 31;
+  if (warp >= `D`) return;
+  int d = warp; float acc = 0.f;
+  for (int e = 0; e < `K`; e++) {
+    int se = sel[e];
+    const unsigned char* dr = wd + ((long)se * `D` + d) * (`MI` / 32) * 34;
+    const float* he = h + e * `MI`;
+    float s = 0.f;
+    for (int i = lane; i < `MI`; i += 32) {
+      const unsigned char* db = dr + (long)(i >> 5) * 34;
+      s += he[i] * h2f((unsigned short)(db[0] | (db[1] << 8))) * (float)(signed char)db[2 + (i & 31)];
+    }
+    for (int o = 16; o > 0; o >>= 1) s += __shfl_down_sync(0xffffffffu, s, o);
+    if (lane == 0) acc += probs[e] * s;
+  }
+  {
+    const bf16t* wde = swd + (long)d * `SI`;
+    const float* hs = h + `K` * `MI`;
+    float s = 0.f;
+    for (int i = lane; i < `SI`; i += 32) s += hs[i] * bf2f(wde[i]);
+    for (int o = 16; o > 0; o >>= 1) s += __shfl_down_sync(0xffffffffu, s, o);
+    if (lane == 0) acc += s;
+  }
+  if (lane == 0) out[d] = f2bf(acc);
+}
+"
+
+$dsvMoeOutQ8Cpu = $dsvQ8PreCpu <> "
+void moe_full_out(void *const *bufs, unsigned const *grid, unsigned const *block) {
+  (void)grid; (void)block;
+  bf16t *out = (bf16t *)bufs[0];
+  const float *h = (const float *)bufs[1];
+  const int *sel = (const int *)bufs[2];
+  const float *probs = (const float *)bufs[3];
+  const unsigned char *wd = (const unsigned char *)bufs[4];
+  const bf16t *swd = (const bf16t *)bufs[5];
+  for (int d = 0; d < `D`; d++) {
+    float acc = 0.f;
+    for (int e = 0; e < `K`; e++) {
+      int se = sel[e];
+      const unsigned char *dr = wd + ((long)se * `D` + d) * (`MI` / 32) * 34;
+      float s = 0.f;
+      for (int i = 0; i < `MI`; i++) {
+        const unsigned char *db = dr + (long)(i >> 5) * 34;
+        s += h[e * `MI` + i] * h2f((unsigned short)(db[0] | (db[1] << 8))) * (float)(signed char)db[2 + (i & 31)];
+      }
+      acc += probs[e] * s;
+    }
+    {
+      float s = 0.f;
+      for (int i = 0; i < `SI`; i++) s += h[`K` * `MI` + i] * bf2f(swd[(long)d * `SI` + i]);
+      acc += s;
+    }
+    out[d] = f2bf(acc);
+  }
+}
+"
+
+$dsvMoeOutQ8Metal = "
+kernel void moe_full_out(device bf16t* out [[buffer(0)]], device const float* h [[buffer(1)]], device const int* sel [[buffer(2)]],
+    device const float* probs [[buffer(3)]], device const uchar* wd [[buffer(4)]], device const bf16t* swd [[buffer(5)]],
+    uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
+  int warp = (tgid.x * ntg.x + tid3.x) >> 5; int lane = tid3.x & 31;
+  if (warp >= `D`) return;
+  int d = warp; float acc = 0.f;
+  for (int e = 0; e < `K`; e++) {
+    int se = sel[e];
+    device const uchar* dr = wd + ((long)se * `D` + d) * (`MI` / 32) * 34;
+    device const float* he = h + e * `MI`;
+    float s = 0.f;
+    for (int i = lane; i < `MI`; i += 32) {
+      device const uchar* db = dr + (long)(i >> 5) * 34;
+      s += he[i] * (float)as_type<half>((ushort)(db[0] | (db[1] << 8))) * (float)(char)db[2 + (i & 31)];
+    }
+    for (int o = 16; o > 0; o >>= 1) s += simd_shuffle_down(s, o);
+    if (lane == 0) acc += probs[e] * s;
+  }
+  {
+    device const bf16t* wde = swd + (long)d * `SI`;
+    device const float* hs = h + `K` * `MI`;
+    float s = 0.f;
+    for (int i = lane; i < `SI`; i += 32) s += hs[i] * bf2f(wde[i]);
+    for (int o = 16; o > 0; o >>= 1) s += simd_shuffle_down(s, o);
+    if (lane == 0) acc += s;
+  }
+  if (lane == 0) out[d] = f2bf(acc);
+}
+"
+
 $dsvArgPartMetal = "
 kernel void argmax_part(device float* pv [[buffer(0)]], device int* pi [[buffer(1)]], device const float* lg [[buffer(2)]],
     uint3 tgid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]], uint3 ntg [[threads_per_threadgroup]]) {
@@ -939,8 +1160,14 @@ dsvKernels[cfg_] := dsvKernels[cfg] = Block[{d, h, dn, dr, kv, dv, e, k, mi, si,
         "Mix" -> dsvMakeKernel[cfg, "mla_mix", $dsvMixCuda, $dsvMixCpu, $dsvMixMetal, {cdiv[h * kv, 256]}, {256}, {1}],
         "MlaO" -> dsvMakeKernel[cfg, "mla_o", $dsvOCuda, $dsvOCpu, $dsvOMetal, {cdiv[h * dv * 32, 256]}, {256}, {1}],
         "Route" -> dsvMakeKernel[cfg, "route", $dsvRouteCuda, $dsvRouteCpu, $dsvRouteMetal, {1}, {32}, {1, 2}],
-        "MoeH" -> dsvMakeKernel[cfg, "moe_full_h", $dsvMoeHCuda, $dsvMoeHCpu, $dsvMoeHMetal, {cdiv[(k * mi + si) * 32, 256]}, {256}, {1}],
-        "MoeOut" -> dsvMakeKernel[cfg, "moe_full_out", $dsvMoeOutCuda, $dsvMoeOutCpu, $dsvMoeOutMetal, {cdiv[d * 32, 256]}, {256}, {1}],
+        (* ExpertsQ8: same entry points and launch shapes; the sources read the
+           routed-expert stacks as raw Q8_0 blocks instead of bf16 *)
+        "MoeH" -> If[ TrueQ[cfg["ExpertsQ8"]],
+            dsvMakeKernel[cfg, "moe_full_h", $dsvMoeHQ8Cuda, $dsvMoeHQ8Cpu, $dsvMoeHQ8Metal, {cdiv[(k * mi + si) * 32, 256]}, {256}, {1}],
+            dsvMakeKernel[cfg, "moe_full_h", $dsvMoeHCuda, $dsvMoeHCpu, $dsvMoeHMetal, {cdiv[(k * mi + si) * 32, 256]}, {256}, {1}]],
+        "MoeOut" -> If[ TrueQ[cfg["ExpertsQ8"]],
+            dsvMakeKernel[cfg, "moe_full_out", $dsvMoeOutQ8Cuda, $dsvMoeOutQ8Cpu, $dsvMoeOutQ8Metal, {cdiv[d * 32, 256]}, {256}, {1}],
+            dsvMakeKernel[cfg, "moe_full_out", $dsvMoeOutCuda, $dsvMoeOutCpu, $dsvMoeOutMetal, {cdiv[d * 32, 256]}, {256}, {1}]],
         "ArgmaxPart" -> dsvMakeKernel[cfg, "argmax_part", $dsvArgPartCuda, $dsvArgPartCpu, $dsvArgPartMetal, {nb}, {256}, {1, 2}],
         "ArgmaxFin" -> dsvMakeKernel[cfg, "argmax_fin", $dsvArgFinCuda, $dsvArgFinCpu, $dsvArgFinMetal, {1}, {32}, {1}],
         "LenBump" -> dsvMakeKernel[cfg, "len_bump", $dsvBumpCuda, $dsvBumpCpu, $dsvBumpMetal, {1}, {1}, {1}]

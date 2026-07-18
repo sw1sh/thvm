@@ -119,6 +119,43 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* Q8_0 MoE kernels (cfg "ExpertsQ8"): on crafted Q8_0 data whose dequant is
+       exact in bf16 (scale 1.0, small-int quants), the q8 kernels must match
+       the bf16 kernels BITWISE -- same accumulation order, no rounding slack *)
+    Block[{d = 64, e = 8, mi = 64, kTop = 3, si = 128, mk, bf, f32c, i32c, q8stream, mkq8, runMoe,
+        wgQ, wuQ, wdQ, x, swg, swu, swd, sel, probs, hBf, oBf, hQ8, oQ8},
+        TReset[];
+        SeedRandom[42];
+        mk = keys |-> dsvConfig["Dim" -> d, "NLayers" -> 2, "NHeads" -> 4, "KvLora" -> 32,
+            "DNope" -> 16, "DRope" -> 8, "DV" -> 16, "NExperts" -> e, "NShared" -> 2,
+            "TopK" -> kTop, "MoeInter" -> mi, "DenseInter" -> 96, "Vocab" -> 256, "MaxSeq" -> 32, keys];
+        bf = vals |-> TRealize @ TUOpCast[TTensorCreate @ NumericArray[N @ vals, "Real32"], "bf16"];
+        f32c = vals |-> TRealize @ TTensorCreate @ NumericArray[N @ vals, "Real32"];
+        i32c = vals |-> TRealize @ TTensorCreate[vals, "i32"];
+        q8stream = quants |-> Join @@ Map[Join[{0, 60}, Mod[#, 256]] &, Partition[quants, 32]];
+        mkq8 = Function[{quants, tag}, Module[{f = FileNameJoin[{$TemporaryDirectory, "q8t_" <> tag <> ".bin"}], bytes = q8stream[quants]},
+            BinaryWrite[f, bytes, "UnsignedInteger8"]; Close[f];
+            TRealize @ TTensorMMap[f, 0, Length[bytes], "u8", {Length[bytes]}]]];
+        wgQ = RandomInteger[{-8, 8}, e * mi * d]; wuQ = RandomInteger[{-8, 8}, e * mi * d]; wdQ = RandomInteger[{-8, 8}, e * d * mi];
+        x = bf[RandomInteger[{-4, 4}, d] / 4.];
+        swg = bf[RandomInteger[{-4, 4}, si * d] / 4.]; swu = bf[RandomInteger[{-4, 4}, si * d] / 4.];
+        swd = bf[RandomInteger[{-4, 4}, d * si] / 4.];
+        sel = i32c @ {0, 3, 5}; probs = f32c @ {0.5, 0.3, 0.2};
+        runMoe = Function[{cfg, wgT, wuT, wdT}, Module[{k = dsvKernels[cfg], h, out},
+            h = TRealize @ TTensor[{kTop * mi + si}, "f32"];
+            out = TRealize @ TTensor[{d}, "bf16"];
+            k["MoeH"][h, x, sel, wgT, wuT, swg, swu];
+            k["MoeOut"][out, h, sel, probs, wdT, swd];
+            {Normal @ TTensorData @ h, Normal @ TUOpCast[out, "f32"]}]];
+        {hBf, oBf} = runMoe[mk[{}], bf @ wgQ, bf @ wuQ, bf @ wdQ];
+        {hQ8, oQ8} = runMoe[mk["ExpertsQ8" -> True], mkq8[wgQ, "wg"], mkq8[wuQ, "wu"], mkq8[wdQ, "wd"]];
+        {hBf === hQ8, oBf === oQ8}
+    ],
+    {True, True},
+    TestID -> "deepseek-decode/moe-q8-bitwise"
+]
+
+VerificationTest[
     (* dsvChatPrompt renders the DeepSeek-V2-Chat template: bos marker, the turn
        lines, and the trailing generation cue *)
     Block[{p = dsvChatPrompt[{<|"Role" -> "user", "Content" -> "Hi"|>}]},

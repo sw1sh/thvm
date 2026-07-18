@@ -10,8 +10,8 @@
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
 dsvGgufHeader::usage = "dsvGgufHeader[path] parses a GGUF file header and returns <|\"DataStart\" -> byte offset of the tensor data section, \"Align\" -> alignment, \"Tensors\" -> <|name -> <|\"Dims\" -> ne list, \"Quant\" -> ggml type code, \"Offset\" -> data-relative byte offset|>|>|>.  Only the tensor table is retained; metadata values are parsed only to advance the stream.";
-dsvGgufWeights::usage = "dsvGgufWeights[cfg, path] mmaps a DeepSeek-V2 GGUF and returns the decode weight association (name -> TTerm in HF layout), dequantizing Q8_0 tensors to bf16 on cfg's device.  Feeds dsvHfWeights' HF layout, so dsvGgufInit reuses the safetensors decode path.";
-dsvGgufInit::usage = "dsvGgufInit[cfg, path] returns the decode state association over the GGUF checkpoint at path (native import; the GGUF analog of dsvHfInit).";
+dsvGgufWeights::usage = "dsvGgufWeights[cfg, path] mmaps a DeepSeek-V2 GGUF and returns the decode weight association, dequantizing Q8_0 tensors to bf16 on cfg's device layer by layer (one layer's dequant resident at a time).  With cfg \"ExpertsQ8\" -> True the routed-expert stacks stay in the raw Q8_0 block format and the MoE kernels read them in place, roughly halving resident memory.";
+dsvGgufInit::usage = "dsvGgufInit[cfg, path] returns the decode state association over the GGUF checkpoint at path (native import; the GGUF analog of dsvHfInit).  Set cfg \"ExpertsQ8\" -> True to keep the routed experts quantized (~half the memory of the bf16 import).";
 
 Begin["`Private`"];
 
@@ -161,7 +161,14 @@ dsvGgufTensor[path_, ds_, spec_, dev_] := Block[{n, shape, raw, out},
     shape = Reverse[spec["Dims"]];
     Which[
         spec["Quant"] === $ggmlF32,
-            dsvUp[TUOpReshape[TTensorMMap[path, ds + spec["Offset"], n * 4, "f32", {n}], shape], dev],
+            (* materialize host-side into a FRESH device tensor: the F32 tensors
+               are tiny (norms + gates, ~14MB total), and a movement realize of
+               a borrowed mmap WRAP on Metal reads garbage (open core bug,
+               Tests/pending_metal_mmap_movement.wlt) -- the transposed WGate
+               was NaN on metal.  Custom kernels reading wraps linearly are fine
+               (the q8 expert path); only movement-realized wraps are hit. *)
+            dsvUp[TTensorCreate @ NumericArray[
+                ArrayReshape[Normal @ TTensorMMap[path, ds + spec["Offset"], n * 4, "f32", {n}], shape], "Real32"], dev],
         spec["Quant"] === $ggmlQ8,
             raw = TTensorMMap[path, ds + spec["Offset"], ggufQ8Bytes[n], "u8", {ggufQ8Bytes[n]}];
             out = TRealize @ If[dev === "cpu", TTensor[{n}, "bf16"], TToDevice[TTensor[{n}, "bf16"], dev]];
@@ -173,6 +180,13 @@ dsvGgufTensor[path_, ds_, spec_, dev_] := Block[{n, shape, raw, out},
 ]
 
 dsvGgufWeights::quant = "Unsupported GGUF quant type `1` (only F32 and Q8_0).";
+
+(* Raw Q8_0 passthrough (cfg "ExpertsQ8"): the block stream mmaps to the device
+   untouched; the q8 MoE kernels read scale+int8 in place.  Skipping the expert
+   dequant is the memory win -- the experts are ~90% of the model. *)
+dsvGgufRaw[path_, ds_, spec_, dev_] := Block[{nb = ggufQ8Bytes[ggufNumel[spec]]},
+    dsvUp[TTensorMMap[path, ds + spec["Offset"], nb, "u8", {nb}], dev]
+]
 
 (* GGUF per-layer role -> HF weight name (the layout dsvHfLayer consumes).
    Experts stay pre-stacked (dsvExpertStack flattens them). *)
@@ -216,8 +230,16 @@ dsvGgufLayerRoles[cfg_, l_] := Join[
    safetensors path. *)
 dsvGgufWeights[cfg_Association, path_String] := Block[{hdr = dsvGgufHeader[path], dev = cfg["Device"], gt, layerSd},
     gt[gname_] := dsvGgufTensor[path, hdr["DataStart"], hdr["Tensors"][gname], dev];
+    (* routed-expert stacks (the _exps roles) stay raw Q8_0 under ExpertsQ8 *)
     layerSd[l_] := With[{n = ToString[l - 1]},
-        Association[("model.layers." <> n <> "." <> $dsvGgufRole[#] -> gt["blk." <> n <> "." <> #]) & /@ dsvGgufLayerRoles[cfg, l]]
+        Association[Map[
+            role |-> "model.layers." <> n <> "." <> $dsvGgufRole[role] -> If[
+                TrueQ[cfg["ExpertsQ8"]] && StringContainsQ[role, "_exps."],
+                dsvGgufRaw[path, hdr["DataStart"], hdr["Tensors"]["blk." <> n <> "." <> role], dev],
+                gt["blk." <> n <> "." <> role]
+            ],
+            dsvGgufLayerRoles[cfg, l]
+        ]]
     ];
     <|
         "Embed" -> gt["token_embd.weight"],

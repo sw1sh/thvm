@@ -57,9 +57,10 @@ $real = Environment["THVM_WEIGHTS"] === "real";
 $thvmState = If[ $real
     ,
     (* the real ollama DeepSeek-V2-Lite via NATIVE GGUF import: no conversion, no
-       intermediate file.  THVM_GGUF overrides the auto-located ollama blob;
-       DEV -> cuda runs it on a GPU box. *)
-    dsvGgufInit[dsvConfig["Device" -> (Environment["DEV"] /. $Failed -> "cpu")],
+       intermediate file, and the routed experts stay Q8_0 in place (~16GB
+       resident instead of ~32GB bf16).  THVM_GGUF overrides the auto-located
+       ollama blob; DEV -> metal/cuda runs it on the GPU. *)
+    dsvGgufInit[dsvConfig["Device" -> (Environment["DEV"] /. $Failed -> "cpu"), "ExpertsQ8" -> True],
         Environment["THVM_GGUF"] /. $Failed :> ollamaGguf["deepseek-v2:16b-lite-chat-q8_0"]]
     ,
     (* a small synthetic config that runs anywhere and proves the full path *)
