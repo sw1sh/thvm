@@ -167,6 +167,7 @@ vaeDecoder[zPacked_, W_, wsub_, cfg_] := Module[{eps, epsBn, gridH, gridW, z, h}
    corr 0.9993 (the VAE's own reconstruction ceiling).  The ~200 MB f32
    weight cost is immaterial next to correctness. *)
 
+(* Encoder / latent path (diffusers AutoencoderKL):
      img {3, H, W} in [0,1]
        -> x = 2*img - 1
        -> encoder.conv_in (3x3 pad1, 3->128)
