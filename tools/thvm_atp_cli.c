@@ -171,6 +171,10 @@ static const AtpKnob KNOBS[] = {
   {"fol-avatar",             "THVM_FOL_AVATAR",          1, "(clausal pre-pass AVATAR-lite variable-disjoint component splitting; 0 disables)"},
   {"fol-select",             "THVM_FOL_SELECT",          1, "(clausal pre-pass literal selection: 0 none = ordered-maximal, 1 first-negative (default), 2 first-positive, 3 largest-negative)"},
   {"fol-lrs",                "THVM_FOL_LRS",             1, "(clausal pre-pass limited-resource strategy: lazily discard passive clauses unreachable at the observed pick rate; 0 off)"},
+  {"fol-sp",                 "THVM_FOL_SP",              1, "(clausal pre-pass KBO symbol precedence: 0 label order (default), 1 frequency (rare symbols greater, Vampire sp=frequency), 2 reverse frequency)"},
+  {"fol-spb",                "THVM_FOL_SPB",             1, "(clausal pre-pass precedence bias: 1 lifts conjecture-cone symbols above all others, Vampire spb=goal)"},
+  {"fol-nwc",                "THVM_FOL_NWC",             1, "(clausal pre-pass non-goal weight coefficient, multiplicative, e.g. 2.5; 0 keeps the additive tier penalty)"},
+  {"fol-sos",                "THVM_FOL_SOS",             1, "(clausal pre-pass set of support: generating inferences need a conjecture-descended parent; 0 off)"},
   {"fof-sat-wall",           "THVM_ATP_FOF_SAT_WALL",    1, "(clausal pre-pass share of the REMAINING wall, percent; default 60, 95+ = the whole slice wall)"},
   {"fof-stats",              "THVM_ATP_FOF_STATS",       0, "(front-end probe: clausify, print component-split stats, exit -- no engine)"},
   {"canon-input",            "THVM_ATP_CANON_INPUT",     1, "(canonical input presentation: greater side left + sorted clauses; 0 disables)"},
@@ -6523,6 +6527,25 @@ static u8 *fof_sine_cone(FolClause **cls, const u8 *ccnj, int ncl, int thr) {
   return keep;
 }
 
+// --- symbol precedence census (Vampire sp= / spb=goal ports) --------------
+// Occurrence counts over the pre-pass input clause set; goal_sym marks
+// labels appearing in conjecture-descended clauses.  Feeds the KBO
+// precedence fill below (THVM_FOL_SP / THVM_FOL_SPB).
+static void fof_census_term(Term t, u32 *freq, u8 *goal_sym, u8 is_goal,
+                            u32 n_labels) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 lab = term_ext(t);
+  if (lab < n_labels) { freq[lab]++; if (is_goal) goal_sym[lab] = 1u; }
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++)
+    fof_census_term(term_ctr_at(t, i), freq, goal_sym, is_goal, n_labels);
+}
+
+static int fof_u64_cmp(const void *a, const void *b) {
+  u64 x = *(const u64 *)a, y = *(const u64 *)b;
+  return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
 // --- clausal-saturation pre-pass ------------------------------------------
 // Non-Horn refutations regularly need case analysis (paramodulation
 // from equality literals inside multi-literal clauses; PUZ001+1's
@@ -6603,6 +6626,40 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
                     .n_labels = n_labels, .var_weight = 1u };
   if (kbo_w != NULL && kbo_p != NULL) {
     for (u32 i = 0; i < n_labels; i++) { kbo_w[i] = 1u; kbo_p[i] = i; }
+    // Symbol precedence (THVM_FOL_SP): 1 = frequency (rarer symbols
+    // rank GREATER -- Vampire's sp=frequency, its most-used
+    // precedence, 2396 of 5307 CASC schedule strategies), 2 = reverse
+    // frequency.  THVM_FOL_SPB != 0 additionally lifts every
+    // conjecture-cone symbol above all the rest (spb=goal).  Unset
+    // keeps the label-order default, byte-identical to before.
+    long sp = 0, spb = 0;
+    { const char *e = getenv("THVM_FOL_SP");  if (e != NULL && e[0] != '\0') sp  = atol(e); }
+    { const char *e = getenv("THVM_FOL_SPB"); if (e != NULL && e[0] != '\0') spb = atol(e); }
+    if ((sp == 1 || sp == 2 || spb != 0) && n_labels > 0u &&
+        n_labels < (1u << 24)) {
+      u32 *freq     = (u32 *)calloc(n_labels, sizeof(u32));
+      u8  *goal_sym = (u8 *)calloc(n_labels, 1);
+      u64 *keys     = (u64 *)malloc(sizeof(u64) * (size_t)n_labels);
+      if (freq != NULL && goal_sym != NULL && keys != NULL) {
+        for (int ci = 0; ci < ncl; ci++)
+          for (u32 j = 0; j < cls[ci]->n_lits; j++)
+            fof_census_term(cls[ci]->lits[j].atom, freq, goal_sym,
+                            ccnj[ci], n_labels);
+        for (u32 i = 0; i < n_labels; i++) {
+          u64 f = (sp == 2) ? (u64)(0xFFFFFFFFu - freq[i])
+                : (sp == 1) ? (u64)freq[i]
+                            : (u64)i;        // spb-only: keep label order
+          keys[i] = (f << 24) | (u64)i;      // n_labels < 2^24 guarded
+        }
+        qsort(keys, n_labels, sizeof(u64), fof_u64_cmp);
+        for (u32 r = 0; r < n_labels; r++)
+          kbo_p[(u32)(keys[r] & 0xFFFFFFu)] = r;
+        if (spb != 0)
+          for (u32 i = 0; i < n_labels; i++)
+            if (goal_sym[i]) kbo_p[i] += n_labels;   // goal cone on top
+      }
+      free(freq); free(goal_sym); free(keys);
+    }
     cnf_set_kbo(s, &kbo);
   }
   // Persist the KBO per-term weight/hash memo across the whole pre-pass
@@ -7978,6 +8035,16 @@ static const SchedSlice SCHEDULE[] = {
   // slices instead of moving the default (the -8/+3 pod A/B).
   {"fof-avatar",  "--fof-slice=2 --fol-avatar=1", 0.0},
   {"fof-avatar2", "--fof-slice=2 --fol-avatar=2", 0.0},
+  // Vampire-strategy-dimension lanes (frequency-ranked from the CASC
+  // schedule source: sp 2396 / nwc 2356 / sos 1722 / lrs 2664 of 5307
+  // strategies).  Each varies pre-pass dimensions the pack above never
+  // moves: symbol precedence, multiplicative goal weighting, set of
+  // support, literal selection, and the saturation wall share.
+  {"fof-freq",  "--fof-slice=2 --fol-sp=1 --fol-nwc=2.5", 0.0},
+  {"fof-sos",   "--fof-slice=2 --fol-sos=1 --fol-sp=1", 0.0},
+  {"fof-wall",  "--fof-slice=2 --fof-sat-wall=95 --fol-lrs=1", 0.0},
+  {"fof-selL",  "--fof-slice=2 --fol-select=3 --fol-sp=1 --fof-sat-wall=95", 0.0},
+  {"fof-spb",   "--fof-slice=2 --fol-spb=1 --fol-nwc=5", 0.0},
   // FULL AC-completion is DISABLED in the competition schedule: its
   // AC-unification/matching path is UNSOUND -- it refutes Satisfiable
   // problems (LAT016-1, RNG030-6, both correctly AC-detected on join/meet

@@ -4373,6 +4373,16 @@ typedef struct {
   u8  lrs_on;
   u32 lrs_wcap;        // ~0u = no cap yet
   u32 lrs_dropped;
+  // Set of support (THVM_FOL_SOS): generating inferences require at
+  // least one conjecture-descended (cgoal) parent; self-inferences a
+  // cgoal clause.  The Vampire sos=on restriction -- axiom-axiom
+  // saturation is skipped entirely.
+  u8  sos_on;
+  // Non-goal weight coefficient (THVM_FOL_NWC, fixed-point x10):
+  // when nonzero the pick-best key for a non-goal clause is
+  // w * nwc10 / 10 (Vampire's multiplicative nwc) instead of the
+  // legacy additive CNF_NONGOAL_PENALTY tier.
+  u32 nwc10;
   // Per-clause inference trace, parallel to `clauses[]`.  Each
   // entry records the inference rule that produced the clause and
   // up to two parent ids.  INPUT marks user-added clauses; ~0u

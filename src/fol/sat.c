@@ -243,6 +243,22 @@ fn CnfState *cnf_init(u32 step_cap) {
   // Limited-resource strategy: engine default OFF; the FOF clausal
   // pre-pass turns it on via cnf_set_lrs (THVM_FOL_LRS).
   s->lrs_on = 0u; s->lrs_wcap = ~0u; s->lrs_dropped = 0u;
+  // Set of support (THVM_FOL_SOS=1): inferences need a conjecture-
+  // descended parent.  OFF by default (unrestricted saturation).
+  {
+    const char *e = getenv("THVM_FOL_SOS");
+    s->sos_on = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1u : 0u;
+  }
+  // Non-goal weight coefficient (THVM_FOL_NWC, e.g. "2.5"): stored
+  // fixed-point x10; 0 keeps the legacy additive tier penalty.
+  s->nwc10 = 0u;
+  {
+    const char *e = getenv("THVM_FOL_NWC");
+    if (e != NULL && e[0] != '\0') {
+      double v = atof(e);
+      if (v > 0.0 && v < 400.0) s->nwc10 = (u32)(v * 10.0 + 0.5);
+    }
+  }
   if (s->idx_on) {
     s->cact   = (u32 *)calloc(s->cap, sizeof(u32));
     s->cpeq   = (u8 *)calloc(s->cap, 1);
@@ -648,7 +664,11 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
   u32 w = cnf_clause_weight(c);
   s->cgoal[id]   = goal;
   s->cweight[id] = w;
-  s->cpri[id]    = w + ((goal || s->goal_tier == 0u) ? 0u : CNF_NONGOAL_PENALTY);
+  // Non-goal deprioritization: multiplicative Vampire-style nwc when
+  // set (key = w * nwc), else the legacy additive tier penalty.
+  s->cpri[id]    = (goal || s->goal_tier == 0u) ? w
+                   : (s->nwc10 != 0u) ? (w * s->nwc10) / 10u
+                                      : w + CNF_NONGOAL_PENALTY;
   s->cmask[id]   = cnf_mask_for(s, c);
   s->cpicked[id] = 0u;
   s->cstale[id]  = 0u;
@@ -2043,6 +2063,9 @@ static void cnf_consider(CnfState *s, FolClause *c,
 // fallback tightens to MAXIMAL literals -- ordered resolution with
 // selection.
 static void cnf_gen_resolution(CnfState *s, u32 a_id, u32 b_id) {
+  // Set of support: a generating inference needs a conjecture-
+  // descended parent -- axiom-axiom pairs are skipped wholesale.
+  if (s->sos_on && !s->cgoal[a_id] && !s->cgoal[b_id]) return;
   const FolClause *a = s->clauses[a_id];
   const FolClause *b = s->clauses[b_id];
   if (a == NULL || b == NULL) return;
@@ -2069,6 +2092,7 @@ static void cnf_gen_resolution(CnfState *s, u32 a_id, u32 b_id) {
 
 // All same-polarity factor pairs within a single clause.
 static void cnf_gen_factoring(CnfState *s, u32 c_id) {
+  if (s->sos_on && !s->cgoal[c_id]) return;   // set of support
   const FolClause *c = s->clauses[c_id];
   if (c == NULL) return;
   for (u32 i = 0; i < c->n_lits; i++) {
@@ -2085,6 +2109,7 @@ static void cnf_gen_factoring(CnfState *s, u32 c_id) {
 
 // Reflex-resolve on every negative-equality literal.
 static void cnf_gen_reflex(CnfState *s, u32 c_id) {
+  if (s->sos_on && !s->cgoal[c_id]) return;   // set of support
   const FolClause *c = s->clauses[c_id];
   if (c == NULL) return;
   for (u32 i = 0; i < c->n_lits; i++) {
@@ -2182,6 +2207,8 @@ static void cnf_paramod_at_pos(const u32 *p, u32 p_len, Term sub, void *raw) {
 // on it (the superposition positive-premise discipline) -- and the
 // equality literal itself must be maximal.
 static void cnf_gen_paramod(CnfState *s, u32 eq_id, u32 target_id) {
+  // Set of support: see cnf_gen_resolution.
+  if (s->sos_on && !s->cgoal[eq_id] && !s->cgoal[target_id]) return;
   const FolClause *eqc = s->clauses[eq_id];
   const FolClause *tgt = s->clauses[target_id];
   if (eqc == NULL || tgt == NULL) return;
@@ -2225,6 +2252,7 @@ static void cnf_gen_paramod(CnfState *s, u32 eq_id, u32 target_id) {
 
 // Eq-factor every pair of positive-equality literals.
 static void cnf_gen_eq_factoring(CnfState *s, u32 c_id) {
+  if (s->sos_on && !s->cgoal[c_id]) return;   // set of support
   const FolClause *c = s->clauses[c_id];
   if (c == NULL) return;
   for (u32 i = 0; i < c->n_lits; i++) {
