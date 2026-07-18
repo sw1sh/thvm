@@ -2910,10 +2910,20 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   int have_pos = 0;
   static int dbg_goal_nf = -1;
   if (dbg_goal_nf < 0) dbg_goal_nf = getenv("THVM_ATP_GOAL_NF_DEBUG") != NULL;
-  if (m->record || m->psteps != NULL || dbg_goal_nf) {
+  // THVM_ATP_MIXSTEP_ALL=1: unscoped sibling of dbg_goal_nf's [mixstep] --
+  // fires for EVERY splice this call makes (interreduction / CP push-
+  // normalize included, not just the goal-check / proof-extract calls
+  // g_goalnf_active and psteps scope [mixstep]/[mixstep-term] to).  Used
+  // to trace AC-match soundness bugs through the rule-maintenance paths
+  // (collapse/re-orient) that never set either scope flag -- see the
+  // RNG030-6 residual-unsound-inference note in
+  // docs/plans/atp_ac_soundness.md.
+  static int dbg_all = -1;
+  if (dbg_all < 0) dbg_all = getenv("THVM_ATP_MIXSTEP_ALL") != NULL;
+  if (m->record || m->psteps != NULL || dbg_goal_nf || dbg_all) {
     have_pos = ft_find_position(m->root, e->cell, pos, &pos_len);
   }
-  if (dbg_goal_nf && g_goalnf_active) {
+  if (dbg_goal_nf && (g_goalnf_active || m->psteps != NULL || dbg_all)) {
     fprintf(stderr, "[mixstep] side=%d depth=%u rule_slot=%u "
             "rule_uid=%u orient=%u dir=%u pos=L",
             g_goalnf_active, m->depth, rule,
@@ -2923,8 +2933,9 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
     for (u8 d = 0; d < pos_len; d++) fprintf(stderr, ".%u", pos[d] + 1u);
     fputc('\n', stderr);
   }
-  // AtpProofStep needs the term BEFORE the splice; capture it now.
-  Term before_term = (m->psteps != NULL) ? ft_to_term(m->root) : (Term)0;
+  // AtpProofStep needs the term BEFORE the splice; capture it now (also
+  // needed for the unscoped [mixstep-all] dump below).
+  Term before_term = (m->psteps != NULL || dbg_all) ? ft_to_term(m->root) : (Term)0;
   AtpFtCell *parent   = (m->depth == 0u) ? NULL : m->st[m->depth - 1u].ins;
   AtpFtCell *rhs_tmpl = (dir == 0u) ? m->s->rhs_ft[rule]
                                     : m->s->lhs_ft[rule];
@@ -2951,6 +2962,16 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   e->cell = (m->depth == 0u) ? m->root : parent->next;
   e->left = ft_cell_arity(e->cell);
   e->ins  = NULL;
+  if (dbg_all) {
+    fprintf(stderr, "[mixstep-all] side=%d depth=%u rule_slot=%u rule_uid=%u dir=%u before=",
+            m->side, m->depth, rule,
+            (m->s->r_uid != NULL && rule < m->s->n_rules) ? m->s->r_uid[rule] : 0u,
+            dir);
+    atp_dbg_print_term(stderr, before_term);
+    fprintf(stderr, "\n[mixstep-all] after =");
+    atp_dbg_print_term(stderr, ft_to_term(m->root));
+    fputc('\n', stderr);
+  }
   if (m->psteps != NULL && *m->pn < m->pcap) {
     AtpProofStep *st = &m->psteps[*m->pn];
     st->side    = m->side;
@@ -2960,6 +2981,13 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
     for (u8 k = 0; k < st->pos_len; k++) st->pos[k] = pos[k];
     st->before  = before_term;
     st->after   = ft_to_term(m->root);
+    if (dbg_goal_nf) {
+      fprintf(stderr, "[mixstep-term] before=");
+      atp_dbg_print_term(stderr, st->before);
+      fprintf(stderr, "\n[mixstep-term] after =");
+      atp_dbg_print_term(stderr, st->after);
+      fputc('\n', stderr);
+    }
     (*m->pn)++;
   }
   if (m->record) {

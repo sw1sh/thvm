@@ -253,36 +253,59 @@ static u8 ft_match_ac_flat(AtpFt *a, u32 label,
     }
   }
 
+  // Re-scan ub_vid for vars that pass 1 might have bound via a CTR
+  // sub-match (e.g. `f(g(x), z)` pattern -- the g(x) recursion binds
+  // x, so x is no longer "unbound" by the time pass 2 runs).
+  //
+  // UNSOUNDNESS (LAT016-1/RNG030-6, CASC J13 soundness report; see
+  // ac.c:atp_match_ac_flat for the full derivation): a var can ALSO
+  // have its own BARE-leaf occurrence elsewhere in P (counted into
+  // ub_vid/ub_mult by the pre-pass) that pass 1 deferred because it
+  // was scanned BEFORE the later CTR leaf that bound it -- e.g.
+  // `f(x0, f(x1, g(x1)))` flattens to leaves {x0, x1, g(x1)}; x1's
+  // bare leaf is deferred at its index, then g(x1)'s recursion binds
+  // x1 two leaves later.  Simply dropping such a var from ub_vid (the
+  // historic fix) erases its bare leaf's multiset requirement instead
+  // of enforcing it: no subject leaf is ever consumed on its behalf,
+  // so a LATER var's pass-2 leftover-chain silently absorbs leaves
+  // that were never matched against it, fabricating an equality the
+  // subject doesn't contain.  Fix: when a var is found already bound
+  // here, CONSUME `ub_mult[k]` more unused subject leaves equal to the
+  // binding (the same check the "already bound" branch of pass 1
+  // runs) before dropping it from ub_vid; fail the whole match if not
+  // enough exist.
+  u32 still = 0u;
+  u32 nv_vid [ATPFT_AC_MAX_UNBOUND_VARS];
+  u32 nv_mult[ATPFT_AC_MAX_UNBOUND_VARS];
+  for (u32 k = 0; k < n_ub; k++) {
+    const AtpFtCell *bound = subst->bind[ub_vid[k]];
+    if (bound == NULL) {
+      nv_vid [still] = ub_vid[k];
+      nv_mult[still] = ub_mult[k];
+      still++;
+      continue;
+    }
+    u32 need = ub_mult[k];
+    for (u32 j = 0; j < ns && need > 0u; j++) {
+      if (used[j]) continue;
+      if (ft_eq(S[j], bound)) { used[j] = 1u; need--; }
+    }
+    if (need > 0u) { ft_subst_rewind(subst, wm_save); return 0; }
+  }
+  n_ub = still;
+  for (u32 k = 0; k < still; k++) {
+    ub_vid[k]  = nv_vid[k];
+    ub_mult[k] = nv_mult[k];
+  }
+
   // Pass 2: leftover subject leaves distributed over unbound vars.
-  // First collect the leftover sequence.
+  // Collected AFTER the bare-occurrence consumption above so
+  // `leftover` never includes a leaf a bound var's own bare leaf
+  // already claimed.
   const AtpFtCell *left_buf[ATPFT_AC_FLATTEN_CAP];
   u32 leftover = 0u;
   for (u32 j = 0; j < ns; j++) {
     if (!used[j]) left_buf[leftover++] = S[j];
-  }
-
-  // Re-scan ub_vid for vars that pass 1 might have bound via a CTR
-  // sub-match (e.g. `f(g(x), z)` pattern -- the g(x) recursion binds
-  // x, so x is no longer "unbound" by the time pass 2 runs).  Skip
-  // those to avoid double-binding via the leftover-absorption clause
-  // below (which would silently overwrite the pass-1 binding and
-  // produce an unsound match).  Mirrors ac.c:452-468.
-  {
-    u32 still = 0u;
-    u32 nv_vid [ATPFT_AC_MAX_UNBOUND_VARS];
-    u32 nv_mult[ATPFT_AC_MAX_UNBOUND_VARS];
-    for (u32 k = 0; k < n_ub; k++) {
-      if (subst->bind[ub_vid[k]] == NULL) {
-        nv_vid [still] = ub_vid[k];
-        nv_mult[still] = ub_mult[k];
-        still++;
-      }
-    }
-    n_ub = still;
-    for (u32 k = 0; k < still; k++) {
-      ub_vid[k]  = nv_vid[k];
-      ub_mult[k] = nv_mult[k];
-    }
   }
 
   // Helper: install a binding for `vid` and trail it on the watermark

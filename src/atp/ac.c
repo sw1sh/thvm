@@ -416,55 +416,72 @@ static u8 atp_match_ac_flat(u32 label,
     }
   }
 
-  // Pass 2: leftover subj distribution over unbound vars.
+  // Re-scan ub_vid for vars that pass 1 has already BOUND.  A CTR
+  // pattern leaf like OverBar[x] recursively atp_match_ac's its
+  // child, which binds x; if pass 2 then independently absorbs
+  // leftover into x via atp_ac_chain_from (lines below), the result
+  // is two inconsistent bindings -- the second wins, producing an
+  // unsound rewrite (tests/probe_pairs: just the inverse axiom alone
+  // under AC produced `f(OverTilde[1], x) -> OverTilde[1]`).
+  //
+  // The legitimate use of pass-2 absorption on a fresh var is STILL
+  // needed for the bench's abelian-group-inv (and the WL paclet's
+  // compound-identity flows): the engine's existing Bachmair-Plaisted
+  // CP extension at atp_overlap_ij synthesises an extended rule
+  // l_ext = f(l, z) -> f(r, z) whose fresh z absorbs the leftover.
+  // In that pattern z is unbound after pass 1, so pass 2 should
+  // still absorb the leftover into z.
+  //
+  // UNSOUNDNESS (LAT016-1/RNG030-6, CASC J13 soundness report): a
+  // var can ALSO have its OWN bare-leaf occurrence elsewhere in P
+  // (counted into ub_vid/ub_mult by the pre-pass) that pass 1 skips
+  // ("continue", deferred) because it is scanned BEFORE the later
+  // CTR leaf that binds it -- e.g. `f(x0, f(x1, g(x1)))` flattens to
+  // leaves {x0, x1, g(x1)}; x1's BARE leaf is deferred at its index,
+  // then g(x1)'s recursion binds x1 two leaves later.  Simply
+  // dropping such a var from ub_vid (the original fix below) erases
+  // its bare leaf's multiset requirement instead of enforcing it: no
+  // subject leaf is ever consumed on its behalf, so a LATER var's
+  // pass-2 leftover-chain silently absorbs leaves that were never
+  // matched against it, fabricating an equality the subject doesn't
+  // contain.  Concretely, `join(x0, join(x1, complement(x1)))`
+  // AC-matched a 4-leaf ortholattice term as if it had 5 leaves,
+  // deriving the E1 collapse that falsely refutes a Satisfiable
+  // problem.  Fix: when a var is found already bound here, CONSUME
+  // `ub_mult[k]` more unused subject leaves equal to the binding (the
+  // same check the "already bound" branch of pass 1 runs) before
+  // dropping it from ub_vid; fail the whole match if not enough exist.
+  u32 still_unbound = 0u;
+  u32 nv_ub_vid[ATPFT_AC_MAX_UNBOUND];
+  u32 nv_ub_mult[ATPFT_AC_MAX_UNBOUND];
+  for (u32 k = 0; k < n_ub; k++) {
+    Term bound = subst->bindings[ub_vid[k]];
+    if (bound == 0) {
+      nv_ub_vid[still_unbound]  = ub_vid[k];
+      nv_ub_mult[still_unbound] = ub_mult[k];
+      still_unbound++;
+      continue;
+    }
+    u32 need = ub_mult[k];
+    for (u32 j = 0; j < ns && need > 0u; j++) {
+      if (used[j]) continue;
+      if (kbo_eq(S[j], bound)) { used[j] = 1u; need--; }
+    }
+    if (need > 0u) return 0;   // bare occurrence has no matching leaf left
+  }
+  n_ub = still_unbound;
+  for (u32 k = 0; k < still_unbound; k++) {
+    ub_vid[k]  = nv_ub_vid[k];
+    ub_mult[k] = nv_ub_mult[k];
+  }
+
+  // Pass 2: leftover subj distribution over unbound vars.  Computed
+  // AFTER the bare-occurrence consumption above so `leftover` never
+  // includes a leaf a bound var's own bare leaf already claimed.
   Term left_buf[ATP_AC_FLATTEN_CAP];
   u32 leftover = 0u;
   for (u32 j = 0; j < ns; j++) {
     if (!used[j]) left_buf[leftover++] = S[j];
-  }
-
-  // Re-scan ub_vid for vars that pass 1 has already BOUND.  A CTR
-  // pattern leaf like OverBar[x] recursively atp_match_ac's its
-  // child, which binds x; if pass 2 then independently absorbs
-  // leftover into x via atp_ac_chain_from (lines 433-438 below),
-  // the result is two inconsistent bindings -- the second wins,
-  // producing an unsound rewrite (tests/probe_pairs: just the
-  // inverse axiom alone under AC produced
-  // `f(OverTilde[1], x) -> OverTilde[1]`).
-  //
-  // The legitimate use of pass-2 absorption on a fresh var is
-  // STILL needed for the bench's abelian-group-inv (and the WL
-  // paclet's compound-identity flows): the engine's existing
-  // Bachmair-Plaisted CP extension at atp_overlap_ij synthesises
-  // an extended rule l_ext = f(l, z) -> f(r, z) whose fresh z
-  // absorbs the leftover.  In that pattern z is unbound after
-  // pass 1, so pass 2 should still absorb the leftover into z.
-  //
-  // Fix: remove vars that pass 1 has ALREADY bound from ub_vid so
-  // pass 2 only absorbs into vars that are GENUINELY fresh.  Vars
-  // that pass 1 bound implicitly consumed their structural-eq
-  // subject leaves (lines 379-393 bound-var branch); a non-zero
-  // residual leftover after that consumption means the matcher
-  // doesn't yet support sub-multiset absorption into a bound
-  // pattern var, and we fall through to a "no match" verdict
-  // (sound -- the BP-extended rule produced at CP-gen time will
-  // pick up the slack via its own fresh z).
-  {
-    u32 still_unbound = 0u;
-    u32 nv_ub_vid[ATPFT_AC_MAX_UNBOUND];
-    u32 nv_ub_mult[ATPFT_AC_MAX_UNBOUND];
-    for (u32 k = 0; k < n_ub; k++) {
-      if (subst->bindings[ub_vid[k]] == 0) {
-        nv_ub_vid[still_unbound]  = ub_vid[k];
-        nv_ub_mult[still_unbound] = ub_mult[k];
-        still_unbound++;
-      }
-    }
-    n_ub = still_unbound;
-    for (u32 k = 0; k < still_unbound; k++) {
-      ub_vid[k]  = nv_ub_vid[k];
-      ub_mult[k] = nv_ub_mult[k];
-    }
   }
 
   if (n_ub == 0u) {
