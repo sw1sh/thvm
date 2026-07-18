@@ -166,6 +166,7 @@ dsvGgufTensor[path_, ds_, spec_, dev_] := Block[{n, shape, raw, out},
             raw = TTensorMMap[path, ds + spec["Offset"], ggufQ8Bytes[n], "u8", {ggufQ8Bytes[n]}];
             out = TRealize @ If[dev === "cpu", TTensor[{n}, "bf16"], TToDevice[TTensor[{n}, "bf16"], dev]];
             dsvDeqKernel[dev, n][out, If[dev === "cpu", raw, TToDevice[raw, dev]]];
+            TDiskDropWeight[raw];   (* the raw block stream is transient; release its mmap pages *)
             TRealize @ TUOpReshape[out, shape],
         True, Message[dsvGgufWeights::quant, spec["Quant"]]; $Failed
     ]
@@ -173,13 +174,8 @@ dsvGgufTensor[path_, ds_, spec_, dev_] := Block[{n, shape, raw, out},
 
 dsvGgufWeights::quant = "Unsupported GGUF quant type `1` (only F32 and Q8_0).";
 
-(* GGUF tensor name -> HF name (the layout dsvHfWeights consumes).  Experts stay
-   pre-stacked (dsvExpertStack flattens them). *)
-$dsvGgufGlobal = <|
-    "token_embd.weight" -> "model.embed_tokens.weight",
-    "output.weight" -> "lm_head.weight",
-    "output_norm.weight" -> "model.norm.weight"
-|>;
+(* GGUF per-layer role -> HF weight name (the layout dsvHfLayer consumes).
+   Experts stay pre-stacked (dsvExpertStack flattens them). *)
 $dsvGgufRole = <|
     "attn_norm.weight" -> "input_layernorm.weight",
     "attn_q.weight" -> "self_attn.q_proj.weight",
@@ -200,23 +196,35 @@ $dsvGgufRole = <|
     "ffn_down_shexp.weight" -> "mlp.shared_experts.down_proj.weight"
 |>;
 
-dsvGgufHfName[gname_] := If[ KeyExistsQ[$dsvGgufGlobal, gname],
-    $dsvGgufGlobal[gname],
-    Module[{n, role},
-        {n, role} = StringSplit[gname, ".", 3][[{2, 3}]];
-        "model.layers." <> n <> "." <> $dsvGgufRole[role]
+(* GGUF roles present in one layer (dense-MLP first block vs the MoE blocks). *)
+dsvGgufLayerRoles[cfg_, l_] := Join[
+    {"attn_norm.weight", "attn_q.weight", "attn_kv_a_mqa.weight", "attn_kv_a_norm.weight",
+     "attn_kv_b.weight", "attn_output.weight", "ffn_norm.weight"},
+    If[ l <= cfg["FirstDense"],
+        {"ffn_gate.weight", "ffn_up.weight", "ffn_down.weight"},
+        {"ffn_gate_inp.weight", "ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight",
+         "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight"}
     ]
 ]
 
-(* Build the HF-layout weight association (name -> TTerm) from the GGUF, then
-   hand it to dsvHfWeights -- the mapping (transpose, kv_b split, expert flatten)
-   is identical to the safetensors route. *)
-dsvGgufWeights[cfg_Association, path_String] := Block[{hdr = dsvGgufHeader[path], dev = cfg["Device"], sd},
-    sd = Association @ KeyValueMap[
-        Function[{gname, spec}, dsvGgufHfName[gname] -> dsvGgufTensor[path, hdr["DataStart"], spec, dev]],
-        hdr["Tensors"]
+(* Build the decode weights layer-by-layer.  Each layer's GGUF tensors are
+   dequantized into a small HF-named sd, transformed by dsvHfLayer, and then the
+   intermediates drop -- so only ONE layer's dequant is resident at a time.  The
+   earlier version realized the WHOLE dequantized model into an sd and then let
+   dsvHfWeights transpose it into a second copy (~2x the model in RAM, the OOM);
+   this interleaves so peak RAM is one model + one layer, matching the lazy-mmap
+   safetensors path. *)
+dsvGgufWeights[cfg_Association, path_String] := Block[{hdr = dsvGgufHeader[path], dev = cfg["Device"], gt, layerSd},
+    gt[gname_] := dsvGgufTensor[path, hdr["DataStart"], hdr["Tensors"][gname], dev];
+    layerSd[l_] := With[{n = ToString[l - 1]},
+        Association[("model.layers." <> n <> "." <> $dsvGgufRole[#] -> gt["blk." <> n <> "." <> #]) & /@ dsvGgufLayerRoles[cfg, l]]
     ];
-    dsvHfWeights[cfg, sd]
+    <|
+        "Embed" -> gt["token_embd.weight"],
+        "Layers" -> Table[dsvHfLayer[cfg, layerSd[l], l], {l, cfg["NLayers"]}],
+        "Norm" -> gt["output_norm.weight"],
+        "LmHead" -> dsvUp[Transpose @ gt["output.weight"], dev]
+    |>
 ]
 
 dsvGgufInit[cfg_Association, path_String] := dsvState[cfg, dsvGgufWeights[cfg, path]]
