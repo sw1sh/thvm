@@ -2589,6 +2589,19 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_lazy_normalize(s, (ln[0] != '0') ? 1u : 0u);
   }
 
+  // THVM_ATP_DISCOUNT=1 (--discount): DISCOUNT given-clause discipline.
+  // Every CP queues RAW (no formation-time treatment) and is R+E normalized
+  // + joined only at activation -- the Vampire/E discount saturation shape.
+  // Rides the lazy-push raw class (implies lazy-normalize) with the WM
+  // KPBehandeln gate forced to 0.  Pair with --awr for the age-weight
+  // fairness that lets old shallow CPs surface.  Applied after LAZY_NORM so
+  // discount always wins the lazy-push gate.
+  {
+    const char *dc = getenv("THVM_ATP_DISCOUNT");
+    if (dc != NULL && dc[0] != '\0' && dc[0] != '0')
+      thvm_atp_set_discount(s, 1u);
+  }
+
   // THVM_ATP_UNORIDX=0/1: toggle the indexed unorientable-rewrite pass
   // independently of the WM preset (A/B vs the linear KBO-gated scan).
   {
@@ -2726,6 +2739,18 @@ int main(int argc, char **argv) {
     if (sr != NULL && sr[0] != '\0') {
       u32 r = (u32)atoi(sr);
       if (r > 0) thvm_atp_set_selection_ratio(s, r);
+    }
+  }
+  // THVM_ATP_AWR=<N> (--awr): Vampire age_weight_ratio 1:N -- one FIFO
+  // (oldest, by age/cp_seq) pick per N weight picks.  Maps onto the FIFO
+  // dimension: selection_ratio (fifo_modulo) = N+1 gives 1 age pick per N+1
+  // selections = age:weight 1:N.  awr=50 == Vampire dis+..._50 (1:50),
+  // awr=10 == 1:10, awr=4 == 1:4.  Applied after SEL_RATIO so --awr wins.
+  {
+    const char *awr = getenv("THVM_ATP_AWR");
+    if (awr != NULL && awr[0] != '\0') {
+      u32 n = (u32)atoi(awr);
+      if (n > 0) thvm_atp_set_selection_ratio(s, n + 1u);
     }
   }
   // THVM_ATP_GOAL_INTERLEAVE=<N>: enable goal-direction interleaving --

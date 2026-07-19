@@ -6384,6 +6384,16 @@ typedef struct {
   // the bench WM preset + Method "LazyNormalize" -> True via
   // thvm_atp_set_use_lazy_normalize.
   u8   use_lazy_normalize;
+  // DISCOUNT given-clause discipline (opt-in, THVM_ATP_DISCOUNT / --discount).
+  // Rides the lazy-push path (implies use_lazy_normalize) but forces the WM
+  // KPBehandeln size gate to 0, so EVERY critical pair queues RAW (no
+  // formation-time doR normalize, no push-time joined-drop) -- passive
+  // clauses stay in their formation-time form and are only R+E normalized /
+  // joined at activation (pop), the Vampire/E DISCOUNT saturation shape.
+  // Completeness-preserving: raw CPs are never dropped at push (joinable is
+  // decided at pop), and the FIFO age dimension keeps the queue fair.
+  // Default OFF (engine byte-identical). See thvm_atp_set_discount.
+  u8   use_discount;
   u64  n_cps_push_normalized;     // diagnostics: full-R normalizes at push
 
   // -auto combinator-definition force-orientation.  WM -auto orients a
@@ -7207,6 +7217,7 @@ fn void      thvm_atp_set_use_backward_goal_argue(AtpState *s, u8 on);
 fn void      thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
+fn void      thvm_atp_set_discount(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_force_def_orient(AtpState *s, u8 on);
 // Waldmeister `RechtsUnfreiErzeugen` FVI rule emission
 // (RUndEVerwaltung.c:366-397).  Default OFF; ON makes

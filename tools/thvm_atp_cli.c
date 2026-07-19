@@ -159,6 +159,8 @@ static const AtpKnob KNOBS[] = {
   {"lr-sortieren",           "THVM_ATP_LR_SORTIEREN",    0, "(WM LR sort)"},
   {"w2-mode",                "THVM_ATP_W2_MODE",         1, "(FIFO w2 mode)"},
   {"w2-modulo",              "THVM_ATP_W2_MODULO",       1, "(FIFO w2 modulo)"},
+  {"discount",               "THVM_ATP_DISCOUNT",        1, "(DISCOUNT given-clause discipline: passive CPs queue RAW, R+E normalized + joined only at activation; pair with --awr)"},
+  {"awr",                    "THVM_ATP_AWR",             1, "(Vampire age_weight_ratio 1:N -- one oldest-by-age pick per N weight picks; awr=50 == dis+_50)"},
   {"perm-subsume",           "THVM_ATP_PERM_SUB",        0, "(permutative subsume)"},
   {"random-ratio",           "THVM_ATP_RANDOM_RATIO",    1, "(random CP ratio)"},
   {"random-seed",            "THVM_ATP_RANDOM_SEED",     1, "(random seed)"},

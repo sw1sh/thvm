@@ -2639,6 +2639,18 @@ static u8 g_cp_push_fused = 0u;
 // > REWRITE_MAX_VAR distinct vars, depth cap) bail to the classic
 // Term build, mirroring the fused-pack fallback discipline.
 enum { ATP_WM_BEHANDELN_GATE = 50 };     // WM KPVerwaltung.c:437
+// KPBehandeln treat-vs-raw SIZE GATE (used at every treat/raw DECISION site:
+// the two FT formers + the classic push branch).  Default = 50: a CP with
+// combined raw size < gate is treated (doR normalize + joined-drop) at push;
+// bigger CPs queue RAW.  The DISCOUNT lane (use_discount) forces it to 0, so
+// EVERY CP queues raw (passive rawness).  ALL decision sites MUST read this
+// one value: if a former arms the treated FT stash (size < gate) while the
+// push branch expects raw (its gate says >= gate), the stashed cells strand
+// on the raw arm.  Count-cap uses of ATP_WM_BEHANDELN_GATE stay 50 (they only
+// bound a walk; the decision reads atp_behandeln_gate).
+static inline u32 atp_behandeln_gate(const AtpState *s) {
+  return (s != NULL && s->use_discount) ? 0u : (u32)ATP_WM_BEHANDELN_GATE;
+}
 #define VCP_SPD_NONE      0xffffffffu
 #define VCP_COUNT_ANOMALY 0xffffffffu
 
@@ -15777,6 +15789,24 @@ fn void thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on) {
   s->use_lazy_normalize = on ? 1u : 0u;
 }
 
+// DISCOUNT given-clause discipline (Vampire Saturation/Discount.cpp, E's
+// DISCOUNT loop).  Passive critical pairs are NOT inter-simplified: each CP
+// queues in its formation-time (raw) form and is R+E normalized / joined
+// only when it is selected as the given clause (pop-time treatment, already
+// the engine default).  This is the completion analog of Vampire's discount
+// slice: only the given/active clauses drive simplification; the age-weight
+// pick ratio (--awr / selection_ratio) then keeps old shallow CPs surfacing
+// by fairness instead of the best-first weight queue burying them.
+// Implemented by riding the lazy-push raw class (use_lazy_normalize) with
+// the WM KPBehandeln gate forced to 0, so no CP is treated at push.
+// Completeness-preserving (no push-time CP drop; the FIFO dimension keeps
+// selection fair), so cli_strategy_complete needs no discount marker.
+fn void thvm_atp_set_discount(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_discount = on ? 1u : 0u;
+  if (on) s->use_lazy_normalize = 1u;
+}
+
 fn void thvm_atp_set_use_force_def_orient(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_force_def_orient = on ? 1u : 0u;
@@ -27510,7 +27540,11 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       // keeps the queue bounded: small CPs are cheap to normalize AND
       // have a high joinable-rate, so joining them at push drops them
       // before the queue/index/subsumption work fires.
-      const u32 WM_BEHANDELN_GATE = (u32)ATP_WM_BEHANDELN_GATE;   // KPVerwaltung.c:437
+      // DISCOUNT lane forces the gate to 0 (atp_behandeln_gate): every CP is
+      // at/over the gate, so nothing is treated at push -- all queue RAW
+      // (passive rawness).  Plain lazy keeps WM's <50 treatment.  MUST match
+      // the FT formers' gate (they arm the treated stash below the gate).
+      const u32 WM_BEHANDELN_GATE = atp_behandeln_gate(s);   // KPVerwaltung.c:437
       u64 _dg_t0 = g_atp_phase_detail ? atp_now_us() : 0;
       // Capped count: the gate consumes only the (< 50) verdict, so
       // the walk stops the moment the running total reaches the gate
@@ -27529,7 +27563,10 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
         szhint_check = (c != NULL && c[0] != '0' && c[0] != '\0') ? 1 : 0;
       }
       u32 raw_sz = 0u;
-      if (rawsz_hint != 0u && !szhint_off && !szhint_check) {
+      if (s->use_discount) {
+        // Gate 0: skip the size walk, force the RAW arm (raw_sz >= gate 0).
+        raw_sz = 0u;
+      } else if (rawsz_hint != 0u && !szhint_off && !szhint_check) {
         raw_sz = (rawsz_hint < WM_BEHANDELN_GATE) ? rawsz_hint
                                                   : WM_BEHANDELN_GATE;
       } else {
@@ -29116,7 +29153,7 @@ static u8 sw_form_push_ft_try(AtpState *s, Term lo, Term ro, Term sub_pre,
     }
   }
   u8 ft_route = 0u, ft_treat = 0u;
-  if (s->use_lazy_normalize && vtot >= (u32)ATP_WM_BEHANDELN_GATE) {
+  if (s->use_lazy_normalize && vtot >= atp_behandeln_gate(s)) {
     // Twee-score mode: the raw >= 50 class's classic Term image carries
     // subst-shared subterms whose Term-identity discounts the score
     // (atp_twee_term_score dedup) -- an FT emit has no cells to replay
@@ -29403,7 +29440,7 @@ static u32 sw_form_push_impl(AtpState *s, Term lo, Term ro, Term sub_pre,
                    s->use_lazy_normalize &&
                    vtot >= (u32)ATP_WM_BEHANDELN_GATE) ? 1u : 0u;
     if (gate_ok && !twee_raw && s->use_lazy_normalize &&
-        vtot >= (u32)ATP_WM_BEHANDELN_GATE) {
+        vtot >= atp_behandeln_gate(s)) {
       if (vcp_emit_fused(s->kbo, lo, p, p_len, rin, ro, &subst)) {
         ft_route = 1u;
         g_vcp_emit_n_ok++;
