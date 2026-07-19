@@ -5732,6 +5732,18 @@ typedef struct {
   // goal-directed selector is not starved by runaway pairs.
   u32  max_cp_weight;
 
+  // Twee --max-term-size (per-side CP node cap; 0 = unbounded): discard a
+  // critical pair when EITHER side's node count exceeds this, i.e. bound
+  // max(|lhs|,|rhs|) <= cap.  Twee applies cfg_accept_term to BOTH overlap
+  // sides in dequeue (Twee.hs:423-424), checkSize n t = KBO.size t <= n
+  // (SequentialMain.hs:194); with default weights KBO.size is the raw node
+  // count.  This is NOT max_cp_weight, which bounds the SUM |lhs|+|rhs|: a
+  // monster CP with one huge side + one small side clears any generous sum
+  // bound yet is dropped per-side, the mechanism that lets Twee's bounded
+  // completion terminate on LAT138-1 where the sum cap floods.  Opt-in,
+  // completeness-breaking (see cli_strategy_complete).
+  u32  max_cp_side;
+
   // Hard CP-queue-SIZE cap (0 = unbounded): when the live CP count reaches
   // this, new critical pairs are dropped at push (n_cps_dropped_qcap ticks)
   // so the queue arrays + packed byte strings stay bounded -- a MEMORY leash
@@ -6974,6 +6986,9 @@ fn void      thvm_atp_set_random_seed  (AtpState *s, u64 seed);
 // `ClasHeuristics` module.
 fn void      thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode);
 fn void      thvm_atp_set_max_cp_weight(AtpState *s, u32 w);
+// Twee --max-term-size: per-side CP node cap.  Drop a critical pair when
+// EITHER side exceeds `w` (0 = unbounded).  See `max_cp_side`.
+fn void      thvm_atp_set_max_cp_side(AtpState *s, u32 w);
 // Hard CP-queue-size cap (memory leash): drop new CPs once the live queue
 // reaches `n` (0 = unbounded).  Lossy; bounds C memory on runaway saturations.
 fn void      thvm_atp_set_max_cp_queue(AtpState *s, u32 n);

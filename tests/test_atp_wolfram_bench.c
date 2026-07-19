@@ -2967,6 +2967,17 @@ int main(int argc, char **argv) {
       thvm_atp_set_max_cp_weight(s, (u32)strtoul(mw, NULL, 10));
     }
   }
+  // Twee --max-term-size (THVM_ATP_MAX_TERM_SIZE=<cap>): per-side CP node
+  // cap.  Drops a CP when EITHER side exceeds the cap (max(|lhs|,|rhs|)),
+  // unlike THVM_ATP_MAXW which bounds the SUM.  The per-side semantics is
+  // what lets a bounded Twee-style completion terminate on the AC-lattice
+  // floods (LAT138-1) -- see the field comment in thvm.h.  Lossy / opt-in.
+  {
+    const char *mts = getenv("THVM_ATP_MAX_TERM_SIZE");
+    if (mts != NULL && *mts != 0) {
+      thvm_atp_set_max_cp_side(s, (u32)strtoul(mts, NULL, 10));
+    }
+  }
 
   printf("=== Wolfram-axiom completion : goal=%s ===\n", goal);
   printf("ordering=%s  step_cap=%u  wall_cap=%.0fs  cp_weight_mode=%u\n",

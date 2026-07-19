@@ -82,6 +82,7 @@ static const AtpKnob KNOBS[] = {
   {"cp-rhs-weight",          "THVM_ATP_TWEE_RHS_W",      1, "(Twee rhsWeight: coefficient on the SMALLER CP side, default 1)"},
   {"cp-depth-weight",        "THVM_ATP_TWEE_DEPTH_W",    1, "(Twee depthWeight: coefficient on CP formation depth, default 2; 60 = depth-dominant shallow selection)"},
   {"max-weight",             "THVM_ATP_MAXW",            1, "MaxWeight"},
+  {"max-term-size",          "THVM_ATP_MAX_TERM_SIZE",   1, "(Twee --max-term-size: per-side CP node cap; drop CP if max(|lhs|,|rhs|) > N; 0 = off)"},
   {"auto-max-weight",        "THVM_ATP_AUTO_MAXW",       1, "AutoMaxWeight"},
   {"max-cp-queue",           "THVM_ATP_MAX_CP_QUEUE",    1, "MaxCpQueue"},
   {"max-weight-slope",       "THVM_ATP_MAXW_SLOPE",      1, "AutoMaxWeight slope"},
@@ -7420,6 +7421,10 @@ static const char *g_cli_problem = NULL;
 // nothing.
 static int cli_strategy_complete(void) {
   const char *mw = getenv("THVM_ATP_MAXW");
+  // Twee --max-term-size: a per-side hard CP drop, lossy exactly like the
+  // -mw sum cap, so a saturation under it certifies nothing (GaveUp, never
+  // Satisfiable) -- the dropped CPs could have refuted.
+  const char *mts = getenv("THVM_ATP_MAX_TERM_SIZE");
   const char *am = getenv("THVM_ATP_AUTO_MAXW");
   const char *rr = getenv("THVM_ATP_RANDOM_RATIO");
   // Encompassment demodulation drops CPs joined via skolem-ground steps
@@ -7450,6 +7455,7 @@ static int cli_strategy_complete(void) {
   return !g_cli_goal_existential && !g_cli_sine_applied && !g_cli_horn_applied
       && !g_cli_equals_applied && !g_cli_fof_applied
       && (mw == NULL || *mw == '0') && (am == NULL || *am == '0')
+      && (mts == NULL || *mts == '0')
       && (rr == NULL || *rr == '0') && (en == NULL || *en == '0')
       && (sj == NULL || *sj == '0');
 }

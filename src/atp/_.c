@@ -10640,6 +10640,10 @@ fn void thvm_atp_set_max_cp_weight(AtpState *s, u32 w) {
   if (s != NULL) s->max_cp_weight = w;
 }
 
+fn void thvm_atp_set_max_cp_side(AtpState *s, u32 w) {
+  if (s != NULL) s->max_cp_side = w;
+}
+
 fn void thvm_atp_set_max_cp_queue(AtpState *s, u32 n) {
   if (s != NULL) s->max_cp_queue = n;
 }
@@ -13850,6 +13854,21 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
       g_acp_fuse.valid = 0u;
       return;
     }
+    // Twee --max-term-size (per-side cap): drop the CP when EITHER side
+    // exceeds the bound, i.e. max(|lhs|,|rhs|) > cap.  Twee's dequeue
+    // applies cfg_accept_term (checkSize n t = KBO.size t <= n) to BOTH
+    // overlap sides (Twee.hs:423-424) -- with default weights the raw node
+    // count.  Unlike the sum cap above this separates a one-huge-side
+    // monster (the assoc-lifted H7xAC rules) from the both-sides-moderate
+    // CPs the proof needs; the sum cap floods on LAT138-1 because no total
+    // threshold cleanly splits 30+8 from 20+20.  Same lossy drop.
+    if (s->max_cp_side > 0u &&
+        (lhs_nodes > s->max_cp_side ||
+         (cp_nodes - lhs_nodes) > s->max_cp_side)) {
+      free(packed);
+      g_acp_fuse.valid = 0u;
+      return;
+    }
     // Auto-MaxWeight (completeness-preserving): defer an over-bound CP to
     // the overflow stash rather than dropping it.  Disabled when base==0.
     // The WM raw>=50 class never defers (see the header comment) -- but that
@@ -13961,7 +13980,9 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
                                u32 cp_trace_id, u8 is_ultimate) {
   // Same structural weight acp_pack counts (one tick per preorder node)
   // -- computed without the pack walk or its malloc.
-  u32 cp_nodes = atp_symbol_count(lhs) + atp_symbol_count(rhs);
+  u32 cp_lhs_nodes = atp_symbol_count(lhs);
+  u32 cp_rhs_nodes = atp_symbol_count(rhs);
+  u32 cp_nodes = cp_lhs_nodes + cp_rhs_nodes;
   // Hard queue-size cap (memory leash): same lossy drop as atp_cp_heap_push.
   if (s->max_cp_queue > 0u && s->n_cps >= s->max_cp_queue) {
     s->n_cps_dropped_qcap++;
@@ -13969,6 +13990,11 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   }
   // Waldmeister MaxWeight hard cap: same lossy drop as atp_cp_heap_push.
   if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) return 1u;
+  // Twee --max-term-size per-side cap (see atp_cp_heap_push): drop when
+  // EITHER side's node count exceeds the bound.  Same lossy consumed verdict.
+  if (s->max_cp_side > 0u &&
+      (cp_lhs_nodes > s->max_cp_side || cp_rhs_nodes > s->max_cp_side))
+    return 1u;
   // Auto-MaxWeight: the overflow stash stores packed byte strings, so an
   // over-bound CP falls back to the eager path (which re-tests the bound
   // and stashes).  Not in the WM preset; deferred-by-construction.
