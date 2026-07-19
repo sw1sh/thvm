@@ -3142,6 +3142,20 @@ int main(int argc, char **argv) {
          "facts-gj-sterilized=%u simpler-join=%u\n",
          s->n_cps_ground_joinable, s->n_cps_dropped_connected_below_peak,
          s->n_facts_bwd_ground_joinable, s->n_cps_dropped_simpler_join);
+  if (s->use_pop_gj)
+    printf("   pop-gj: dropped=%u case-models=%u\n",
+           s->n_cps_dropped_pop_gj, s->n_pop_gj_ticks);
+  if (s->use_pop_gj && getenv("THVM_ATP_POP_GJ_DIAG") != NULL)
+    printf("   pop-gj keep-reason: atoms=%llu malloc=%llu limit=%llu "
+           "cycle=%llu counterex=%llu branchof=%llu instance=%llu depth=%llu\n",
+           (unsigned long long)g_pgj_keep_reason[0],
+           (unsigned long long)g_pgj_keep_reason[1],
+           (unsigned long long)g_pgj_keep_reason[2],
+           (unsigned long long)g_pgj_keep_reason[3],
+           (unsigned long long)g_pgj_keep_reason[4],
+           (unsigned long long)g_pgj_keep_reason[5],
+           (unsigned long long)g_pgj_keep_reason[6],
+           (unsigned long long)g_pgj_keep_reason[7]);
   if (g_atp_gjp_top_q > 0) {
     printf("   gj-lane: top-q=%llu cand=%llu match=%llu "
            "(noop=%llu gate=%llu pass=%llu) models=%llu norms=%llu steps=%llu\n",

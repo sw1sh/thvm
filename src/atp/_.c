@@ -7536,6 +7536,18 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
       s->use_simpler_join = (e[0] == '2') ? 2u : 1u;
     }
   }
+  // Twee pop-time ground-joinability case-split (Join.hs groundJoin;
+  // see thvm.h).  THVM_ATP_POP_GJ=1 / --pop-gj for CLI runs; the limit
+  // mirrors Twee --ground-joining-limit (0 = unlimited, Twee default).
+  s->use_pop_gj = (u8)atp_env_on("THVM_ATP_POP_GJ");
+  {
+    const char *e = getenv("THVM_ATP_POP_GJ_LIMIT");
+    s->pop_gj_limit = 0u;
+    if (e != NULL && e[0] != '\0') {
+      long v = strtol(e, NULL, 10);
+      s->pop_gj_limit = (v > 0) ? (u32)v : 0u;
+    }
+  }
   // Goal-narrow endgame (ground CC + goal-cone e-matching; opt-in,
   // see src/atp/goal_narrow.c).  THVM_ATP_GOAL_NARROW=1 for CLI runs;
   // WL callers use thvm_atp_set_use_goal_narrow.
@@ -11159,6 +11171,10 @@ static inline void atp_ft_mirror_ensure(AtpState *s);
 // ground-joinability drop in thvm_atp_step can call it before its
 // definition (the push-side caller sits after it).
 static int atp_cp_ground_joinable(AtpState *s, Term lhs, Term rhs);
+// Forward decl: the Twee Join.hs pop-time ground-joinability case-split
+// (defined far below with the gj machinery).  The pop-time keep/drop
+// gate in thvm_atp_step calls it before its definition.
+static u8 atp_pop_gj_joinable(AtpState *s, Term l, Term r);
 static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
                                           const Term *lhs, const Term *rhs,
                                           u32 n_rules, u32 step_cap) {
@@ -17294,6 +17310,44 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     thvm_atp_heap_reset(hcp_norm);
     s->step++;
     return ATP_RUNNING;
+  }
+
+  // Twee Join.hs pop-time ground-joinability CASE-SPLIT (opt-in
+  // --pop-gj / THVM_ATP_POP_GJ): after the pop R+E normalize and the
+  // cheaper joined / simpler-join / subsume drops, a popped CP whose
+  // sides are PROVABLY ground-joinable under the branch-model case-split
+  // (atp_pop_gj_joinable -> the faithful groundJoin/groundJoinFrom loop)
+  // is redundant (Bachmair-Dershowitz / Martin-Nipkow / Twee) and
+  // dropped before it becomes a rule.  Runs on the R+E normal forms --
+  // exactly atp_pop_gj_level's depth-0 input contract.  Under
+  // lazy_commit the FT-direct pop left l/r as TAG_NUM sentinels and
+  // stashed the survivor NFs as FT spans in g_lazy_rule; decode them to
+  // Terms (the ATP_POPV readout idiom) so the case-split sees the same
+  // normal forms the non-lazy branch would.  The decoded Terms are
+  // pop-heap scratch reclaimed by the drop's heap reset (or the next
+  // one on a keep); the FT spans themselves are reclaimed wholesale
+  // like every joined/subsume pop drop, which never per-frees lf/rf.
+  // Same dead-CP cleanup as the joined / subsume branches.  Default OFF
+  // (byte-identical engine); a wrong KEEP costs speed only, a DROP is
+  // certified by the case-split.
+  if (s->use_pop_gj) {
+    Term gj_l = l, gj_r = r;
+#ifdef THVM_ATPFT_RULES
+    if (lazy_commit) {
+      gj_l = ft_to_term(g_lazy_rule.span_l);
+      gj_r = ft_to_term(g_lazy_rule.span_r);
+    }
+#endif
+    if (atp_pop_gj_joinable(s, gj_l, gj_r)) {
+      ATP_POPV("POPGJ");
+      s->n_cps_dropped_pop_gj++;
+      if (s->record_norm_steps) {
+        s->n_trace = trace_mark;
+      }
+      thvm_atp_heap_reset(hcp_norm);
+      s->step++;
+      return ATP_RUNNING;
+    }
   }
 
 #ifdef THVM_ATPFT_RULES
@@ -26497,6 +26551,374 @@ static int atp_cp_ground_joinable(AtpState *s, Term lhs, Term rhs) {
     return gj_join_dd(s, lhs, rhs, &m0, pend, n_pend, &budget, 0) ? 1 : 0;
   }
   return gj_cover(s, lhs, rhs, var_ids, n_vars, &budget) ? 1 : 0;
+}
+
+// ── Pop-time ground-joinability CASE-SPLIT (Twee Join.hs port) ──────
+// Faithful port of Twee's groundJoin / groundJoinFrom loop
+// (src/Twee/Join.hs:173-256 at commit d425378 "CASC", the CASC-30
+// build) with the branch machinery of src/Twee/Constraints.hs
+// (Branch / addLess / addEquals / branches: 101-187, solve: 278-294,
+// weakenModel: 220-234).  Where the legacy gj_cover / gj_join_dd
+// drivers enumerate atom placements up front (a branch tree that
+// exhausts any budget on the 6-plus-variable assoc-lifted CPs -- and
+// gj_cover's ATP_GJ_MAX_VARS=6 collect cap refuses them outright),
+// Twee's loop works model-by-model:
+//   1. extract ONE total-order model per round from the branch
+//      context (solve = topological completion of the accumulated
+//      order constraints over the CP's atoms),
+//   2. join the CP under that model with model-parameterised
+//      rewriting (gj_normalize; a failure is a COUNTEREXAMPLE
+//      ordering -> KEEP immediately, Join.hs:194),
+//   3. weaken the successful model to the weakest chain that still
+//      joins (optimise weakenModel, Join.hs:197-200; delete-only
+//      here -- Twee's glue weakening needs the major/minor nonstrict
+//      model form its lessIn carries and our size-rank GjModel does
+//      not, so we cover fewer orderings per round, never wrong ones),
+//   4. conjoin the NEGATION of the weakened chain's literal diagram
+//      onto every branch (diag / formAnd, Join.hs:204-208): link
+//      c_{j-1} < c_j fails as either c_j < c_{j-1} or c_j = c_{j-1}
+//      (negateFormula + branches, Constraints.hs:69-73/:147-150), so
+//      the round count is the number of case ORDERINGS examined --
+//      Twee's --ground-joining-limit -- not a leaf-placement count,
+//   5. an `=` link merges the two atoms; a branch that has merges
+//      when the context runs out of models yields an INSTANCE
+//      (solve's Right sub, Constraints.hs:283-287): the CP with the
+//      tied atoms unified.  Twee re-`consider`s instances through the
+//      full pipeline and discards the parent regardless (Twee.hs:
+//      539-544; a non-joining instance becomes its own smaller rule);
+//      we instead REQUIRE every instance to pop-gj-join recursively
+//      and keep the parent when one fails -- a strictly weaker
+//      discard (the kept parent subsumes its instances, so no new
+//      derivation is created and proof extraction is untouched).
+// No simplerThan gate on the model-normalize steps (Twee Join.hs:225
+// restricts rewrites to rules simpler than the CP): every gj step is
+// descending under the branch model, so each ground instance's join
+// stays below its own peak -- the AHL/Martin-Nipkow redundancy
+// argument the legacy gj drivers already rely on.
+// Soundness: a discard claims every ground instance of the CP joins.
+// Every branch model is join-tested with gj_normalize's descending
+// model-gated steps (P2: gj_less_in never over-approximates >=_C),
+// instance cases are join-tested recursively, and any atom-collect
+// overflow / branch-store overflow / cycle / limit hit returns 0 =
+// KEEP.  A wrong KEEP costs speed only; a DISCARD is always certified.
+
+#define ATP_PGJ_MAX_BRANCH 4096u
+#define ATP_PGJ_MAX_DEPTH  20u
+
+// Diagnostic (THVM_ATP_POP_GJ_DIAG): why a pop-gj case-split returned
+// KEEP.  Indices: 0=atom overflow / n>MAX, 1=malloc, 2=limit, 3=cycle,
+// 4=counterexample ordering (join under a model failed), 5=branch
+// overflow, 6=instance non-join, 7=depth cap.  Behaviour-neutral.
+static u64 g_pgj_keep_reason[8] = {0};
+
+typedef struct {
+  u8  rep[ATP_GJ_MAX_ATOMS];   // union-collapsed representative index
+  u32 less[ATP_GJ_MAX_ATOMS];  // bit j of row i: atom i < atom j
+} PgjBranch;
+
+// Twee Atom Ord (Constraints.hs:21 deriving Ord): Constant < Variable,
+// then by id.  Decides the representative of an `=` merge (the lesser
+// atom, Constraints.hs:172), so var = const substitutes the CONSTANT
+// into the instance.
+static u8 pgj_atom_before(GjAtom a, GjAtom b) {
+  if (a.is_const != b.is_const) return a.is_const ? 1u : 0u;
+  return (a.id < b.id) ? 1u : 0u;
+}
+
+// Kahn topological order of the branch's less-DAG over all n atoms.
+// Returns 0 on a cycle (contradictory branch, Constraints.hs:121-129).
+// Tie-break: lowest atom index first -- deterministic where Twee
+// shuffles the edge list with a fixed seed (Constraints.hs:290); any
+// linear extension is a valid model.  Merged-away atoms are isolated
+// vertices here; only merge-free branches use the chain as a model.
+static u8 pgj_topo(const PgjBranch *b, u32 n, u8 *chain) {
+  u32 indeg[ATP_GJ_MAX_ATOMS] = {0};
+  for (u32 i = 0; i < n; i++)
+    for (u32 j = 0; j < n; j++)
+      if (b->less[i] & (1u << j)) indeg[j]++;
+  u32 done = 0, placed = 0;
+  while (placed < n) {
+    u32 pick = n;
+    for (u32 i = 0; i < n; i++)
+      if (!(done & (1u << i)) && indeg[i] == 0u) { pick = i; break; }
+    if (pick == n) return 0;   // cycle
+    chain[placed++] = (u8)pick;
+    done |= 1u << pick;
+    for (u32 j = 0; j < n; j++)
+      if (b->less[pick] & (1u << j)) indeg[j]--;
+  }
+  return 1;
+}
+
+// addLess (Constraints.hs:152-160): assert atom i < atom j.  Indices
+// are normalised through rep[] first.  Returns 0 iff contradictory.
+static u8 pgj_add_less(PgjBranch *b, u32 n, u32 i, u32 j) {
+  i = b->rep[i];
+  j = b->rep[j];
+  if (i == j) return 0;              // x < x
+  b->less[i] |= (1u << j);
+  u8 chain[ATP_GJ_MAX_ATOMS];
+  return pgj_topo(b, n, chain);      // acyclic = satisfiable order part
+}
+
+// addEquals (Constraints.hs:162-176): merge atoms i and j; the lesser
+// atom (pgj_atom_before) becomes the representative, existing edges
+// are rewritten through the merge, and the branch is re-checked for
+// contradiction (two distinct constants equal, Constraints.hs:124, or
+// a less-cycle surfaced by the rewrite).  Returns 0 iff contradictory.
+static u8 pgj_add_eq(PgjBranch *b, u32 n, const GjAtom *at, u32 i, u32 j) {
+  i = b->rep[i];
+  j = b->rep[j];
+  if (i == j) return 1;
+  if (at[i].is_const && at[j].is_const) return 0;
+  u32 keep = pgj_atom_before(at[i], at[j]) ? i : j;
+  u32 drop = (keep == i) ? j : i;
+  for (u32 k = 0; k < n; k++)
+    if (b->rep[k] == drop) b->rep[k] = (u8)keep;
+  b->less[keep] |= b->less[drop];
+  b->less[drop] = 0;
+  for (u32 k = 0; k < n; k++)
+    if (b->less[k] & (1u << drop)) {
+      b->less[k] &= ~(1u << drop);
+      b->less[k] |= (1u << keep);
+    }
+  if (b->less[keep] & (1u << keep)) return 0;   // x < x through the merge
+  u8 chain[ATP_GJ_MAX_ATOMS];
+  return pgj_topo(b, n, chain);
+}
+
+// Dedup insert into the branch store (Twee's usort over Ord Branch).
+// Returns 1 on store overflow (caller must KEEP the CP), 0 otherwise.
+static u8 pgj_push_branch(PgjBranch *arr, u32 *n_arr, const PgjBranch *b,
+                          u32 n) {
+  for (u32 i = 0; i < *n_arr; i++)
+    if (memcmp(arr[i].rep, b->rep, n) == 0 &&
+        memcmp(arr[i].less, b->less, n * sizeof(u32)) == 0)
+      return 0;
+  if (*n_arr >= ATP_PGJ_MAX_BRANCH) return 1;
+  arr[(*n_arr)++] = *b;
+  return 0;
+}
+
+static void pgj_model_from_chain(GjModel *m, const GjAtom *at,
+                                 const u8 *chain, u32 len) {
+  m->n = len;
+  for (u32 i = 0; i < len; i++) {
+    m->atom[i]  = at[chain[i]];
+    m->major[i] = i;
+  }
+}
+
+// Join both sides under model `m` (the per-model half of Twee's
+// groundJoinFrom check, Join.hs:194/:216-220): model-gated normalize
+// with globally-oriented rules firing unconditionally (KBO stability
+// under substitution -- the gj_join_dd precedent) and verdict by
+// syntactic equality of the normal forms.
+static u8 pgj_join_under(AtpState *s, const GjModel *m, Term l, Term r,
+                         const u32 *cp_vars, u32 n_cp_vars) {
+  g_gj_orient_free = 1;
+  Term nl = gj_normalize(s, m, l, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP, 0);
+  Term nr = gj_normalize(s, m, r, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP, 0);
+  g_gj_orient_free = 0;
+  return kbo_eq(nl, nr);
+}
+
+static u8 atp_pop_gj_level(AtpState *s, Term l, Term r, u32 depth);
+
+// One equality-branch instance (solve's Right sub, Constraints.hs:
+// 283-287): substitute each merged variable by its representative atom
+// and recurse the whole case-split on the instance.
+static u8 atp_pop_gj_instance(AtpState *s, const PgjBranch *b,
+                              const GjAtom *at, u32 n, Term l, Term r,
+                              u32 depth) {
+  RewriteSubst sub = {{0}};
+  for (u32 k = 0; k < n; k++) {
+    if (b->rep[k] == k) continue;
+    if (at[k].is_const) return 0;         // reps are minimal: cannot happen
+    if (at[k].id >= REWRITE_MAX_VAR) return 0;
+    u32 rk = b->rep[k];
+    sub.bindings[at[k].id] = at[rk].is_const
+                                 ? term_new_ctr(at[rk].id, NULL, 0)
+                                 : term_new_fvr(at[rk].id);
+  }
+  Term sl = thvm_subst_apply(l, &sub);
+  Term sr = thvm_subst_apply(r, &sub);
+  return atp_pop_gj_level(s, sl, sr, depth + 1);
+}
+
+// One case-split level: the full groundJoin loop for one (sub-)pair.
+// Depth 0 receives the pop R+E normal forms; instance levels
+// re-normalise with the model-free oriented pre-pass first.
+static u8 atp_pop_gj_level(AtpState *s, Term l, Term r, u32 depth) {
+  if (depth > ATP_PGJ_MAX_DEPTH) { g_pgj_keep_reason[7]++; return 0; }
+  if (depth > 0) {
+    l = gj_prenorm(s, l);
+    r = gj_prenorm(s, r);
+  }
+  if (kbo_eq(l, r)) return 1;
+
+  // Atom table: constants first, then variables, each ascending by id
+  // (Twee usort over Atom Ord, Join.hs:181 `usort (atoms t ++ atoms u)`).
+  u32 var_ids[ATP_GJ_MAX_ATOMS];
+  u32 n_vars = 0;
+  if (!atp_gj_collect_vars(l, var_ids, &n_vars, ATP_GJ_MAX_ATOMS)) { g_pgj_keep_reason[0]++; return 0; }
+  if (!atp_gj_collect_vars(r, var_ids, &n_vars, ATP_GJ_MAX_ATOMS)) { g_pgj_keep_reason[0]++; return 0; }
+  u32 clabs[ATP_GJ_MAX_ATOMS];
+  u32 n_consts = 0;
+  if (!gj_collect_consts(l, clabs, &n_consts, ATP_GJ_MAX_ATOMS)) { g_pgj_keep_reason[0]++; return 0; }
+  if (!gj_collect_consts(r, clabs, &n_consts, ATP_GJ_MAX_ATOMS)) { g_pgj_keep_reason[0]++; return 0; }
+  u32 n = n_consts + n_vars;
+  if (n > ATP_GJ_MAX_ATOMS) { g_pgj_keep_reason[0]++; return 0; }
+  for (u32 a = 1; a < n_consts; a++) {          // insertion sort, ascending
+    u32 v = clabs[a];
+    u32 b = a;
+    while (b > 0 && clabs[b - 1] > v) { clabs[b] = clabs[b - 1]; b--; }
+    clabs[b] = v;
+  }
+  for (u32 a = 1; a < n_vars; a++) {
+    u32 v = var_ids[a];
+    u32 b = a;
+    while (b > 0 && var_ids[b - 1] > v) { var_ids[b] = var_ids[b - 1]; b--; }
+    var_ids[b] = v;
+  }
+  GjAtom at[ATP_GJ_MAX_ATOMS];
+  for (u32 k = 0; k < n_consts; k++) { at[k].is_const = 1; at[k].id = clabs[k]; }
+  for (u32 k = 0; k < n_vars; k++) {
+    at[n_consts + k].is_const = 0;
+    at[n_consts + k].id = var_ids[k];
+  }
+
+  PgjBranch *cur = (PgjBranch *)malloc(sizeof(PgjBranch) * ATP_PGJ_MAX_BRANCH);
+  PgjBranch *nxt = (PgjBranch *)malloc(sizeof(PgjBranch) * ATP_PGJ_MAX_BRANCH);
+  if (cur == NULL || nxt == NULL) {
+    free(cur);
+    free(nxt);
+    g_pgj_keep_reason[1]++;
+    return 0;
+  }
+  // Initial context = one true branch (Join.hs:65 `branches (And [])`)
+  // carrying the constants' FIXED relative order as less-edges (Twee
+  // addTerm's f << g edges, Constraints.hs:178-187; our constant order
+  // is the ground KBO verdict).
+  memset(&cur[0], 0, sizeof cur[0]);
+  for (u32 k = 0; k < n; k++) cur[0].rep[k] = (u8)k;
+  for (u32 i = 0; i < n_consts; i++)
+    for (u32 j = i + 1; j < n_consts; j++) {
+      KboCmp c = atp_compare(s, term_new_ctr(at[i].id, NULL, 0),
+                             term_new_ctr(at[j].id, NULL, 0));
+      if (c == KBO_LT)      cur[0].less[i] |= (1u << j);
+      else if (c == KBO_GT) cur[0].less[j] |= (1u << i);
+    }
+  u32 n_cur = 1;
+
+  u32 ticks = 0;
+  u8 verdict = 0;
+  for (;;) {
+    if (n_cur == 0) { verdict = 1; break; }   // every ordering covered
+    // solve each branch (Constraints.hs:278-294); the round's model is
+    // the first merge-free branch's chain (Join.hs:185 takes the first
+    // Left of partitionEithers).
+    u32 mb = n_cur;
+    for (u32 b = 0; b < n_cur; b++) {
+      u8 merged = 0;
+      for (u32 k = 0; k < n; k++)
+        if (cur[b].rep[k] != k) { merged = 1; break; }
+      if (!merged) { mb = b; break; }
+    }
+    if (mb == n_cur) {
+      // No branch yields a model: the strict-order space is covered and
+      // only equality cases remain (Join.hs:181-184).  Each distinct
+      // substitution is an instance that must itself join.
+      verdict = 1;
+      for (u32 b = 0; b < n_cur && verdict; b++) {
+        u8 dup = 0;
+        for (u32 p = 0; p < b; p++)
+          if (memcmp(cur[p].rep, cur[b].rep, n) == 0) { dup = 1; break; }
+        if (dup) continue;
+        if (!atp_pop_gj_instance(s, &cur[b], at, n, l, r, depth)) {
+          g_pgj_keep_reason[6]++;
+          verdict = 0;
+        }
+      }
+      break;
+    }
+    ticks++;
+    s->n_pop_gj_ticks++;
+    if (s->pop_gj_limit != 0u && ticks > s->pop_gj_limit) {
+      g_pgj_keep_reason[2]++;
+      verdict = 0;                            // Join.hs:193 limit -> Left
+      break;
+    }
+    u8 chain[ATP_GJ_MAX_ATOMS];
+    if (!pgj_topo(&cur[mb], n, chain)) { g_pgj_keep_reason[3]++; verdict = 0; break; }  // defensive
+    u32 clen = n;
+    GjModel m;
+    pgj_model_from_chain(&m, at, chain, clen);
+    if (!pgj_join_under(s, &m, l, r, var_ids, n_vars)) {
+      g_pgj_keep_reason[4]++;
+      verdict = 0;                            // counterexample ordering
+      break;
+    }
+    // optimise weakenModel (Join.hs:197-200 + 264-268, delete-only):
+    // greedily drop chain atoms while the pair still joins under the
+    // reduced chain -- the weaker the surviving model, the larger the
+    // region its diagram's negation removes below.
+    for (u32 k = 0; k < clen && clen > 1; ) {
+      u8 tryc[ATP_GJ_MAX_ATOMS];
+      u32 y = 0;
+      for (u32 x = 0; x < clen; x++)
+        if (x != k) tryc[y++] = chain[x];
+      GjModel mw;
+      pgj_model_from_chain(&mw, at, tryc, clen - 1);
+      if (pgj_join_under(s, &mw, l, r, var_ids, n_vars)) {
+        memcpy(chain, tryc, clen - 1);
+        clen--;                               // retry the same position
+      } else {
+        k++;
+      }
+    }
+    // diag + formAnd (Join.hs:204-208, Constraints.hs:131-150): every
+    // surviving branch is split into the cases that violate the
+    // weakened chain at their first failing link, all earlier links
+    // enforced strictly; the fully-satisfied region was certified by
+    // the join above and is dropped.
+    u32 n_nxt = 0;
+    u8 overflow = 0;
+    for (u32 b = 0; b < n_cur && !overflow; b++) {
+      PgjBranch acc = cur[b];
+      u8 alive = 1;
+      for (u32 j = 1; j < clen && alive && !overflow; j++) {
+        PgjBranch c1 = acc;                   // c_j < c_{j-1}
+        if (pgj_add_less(&c1, n, chain[j], chain[j - 1]))
+          overflow |= pgj_push_branch(nxt, &n_nxt, &c1, n);
+        if (!overflow) {
+          PgjBranch c2 = acc;                 // c_j = c_{j-1}
+          if (pgj_add_eq(&c2, n, at, chain[j], chain[j - 1]))
+            overflow |= pgj_push_branch(nxt, &n_nxt, &c2, n);
+        }
+        alive = pgj_add_less(&acc, n, chain[j - 1], chain[j]);
+      }
+    }
+    if (overflow) { g_pgj_keep_reason[5]++; verdict = 0; break; }
+    memcpy(cur, nxt, sizeof(PgjBranch) * n_nxt);
+    n_cur = n_nxt;
+  }
+  free(cur);
+  free(nxt);
+  return verdict;
+}
+
+// Top-level pop-time entry: 1 = the popped CP's normal-form pair is
+// PROVABLY ground-joinable under the case-split (drop it), 0 = keep.
+static u8 atp_pop_gj_joinable(AtpState *s, Term l, Term r) {
+  if (s == NULL || s->kbo == NULL) return 0;
+  // gj_less_in is implemented for plain KBO only (the
+  // atp_cp_ground_joinable precedent).
+  if (s->lpo != NULL || s->rpo != NULL || s->wpo != NULL) return 0;
+  if (s->gj_protect_l != 0 || s->gj_protect_r != 0 ||
+      s->gj_exclude != ATP_GJ_NO_EXCLUDE)
+    return 0;
+  return atp_pop_gj_level(s, l, r, 0u);
 }
 
 // ── Fact-level -gj: WM RueckwaertsGrundzusammenfuehrbarkeit ─────────

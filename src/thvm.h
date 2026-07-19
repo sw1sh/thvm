@@ -6124,6 +6124,27 @@ typedef struct {
   // through the simplerThan-gated pass (use_simpler_join).  Default
   // OFF: WM's ungated doR+doE pop treatment, byte-identical.
   u8   use_pop_rules_only;
+  // Twee Join.hs ground-joinability CASE-SPLIT at pop (opt-in,
+  // THVM_ATP_POP_GJ / --pop-gj): a popped CP whose R+E normal forms
+  // stay distinct is tested by the faithful port of Twee's
+  // groundJoin/groundJoinFrom loop (Join.hs:173-256, commit d425378):
+  // extract a total-order model from the branch context, join under it
+  // with model-parameterised rewriting, weaken the model to the
+  // weakest still-joining chain, and case-split on the negation of its
+  // literal diagram (<, = per link); `=` links unify the tied atoms
+  // and recurse on the substituted instance.  Default OFF:
+  // byte-identical engine.
+  u8   use_pop_gj;
+  // Case-ordering cap for use_pop_gj: max models examined per CP
+  // (Twee --ground-joining-limit, cfg_ground_join_limit Join.hs:26).
+  // 0 = unlimited (Twee's default).  NOT the same thing as
+  // THVM_ATP_GJ_BUDGET (that one counts enumeration branches of the
+  // legacy gj_cover driver and WEAKENS its exhaustive default).
+  u32  pop_gj_limit;
+  // CPs discarded by the pop case-split (bench stats line).
+  u32  n_cps_dropped_pop_gj;
+  // Total case-ordering models examined by the pop case-split.
+  u32  n_pop_gj_ticks;
   // CPs dropped by the simpler-join pass (push treat + pop select).
   u32  n_cps_dropped_simpler_join;
   // Count of facts sterilized by the backward walk (bench stats line).

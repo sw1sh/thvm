@@ -89,6 +89,8 @@ static const AtpKnob KNOBS[] = {
   {"goal-interleave",        "THVM_ATP_GOAL_INTERLEAVE", 1, "GoalInterleave"},
   {"ground-join",            "THVM_ATP_GROUND_JOIN",     0, "GroundJoin"},
   {"lazy-ground-join",       "THVM_ATP_LAZY_GJ",         0, "LazyGroundJoin"},
+  {"pop-gj",                 "THVM_ATP_POP_GJ",          1, "(Twee Join.hs pop-time ground-joinability case-split; 0 off)"},
+  {"pop-gj-limit",           "THVM_ATP_POP_GJ_LIMIT",    1, "(Twee --ground-joining-limit: max case-ordering models examined per CP; 0 = unlimited)"},
   {"connectedness",          "THVM_ATP_CONNECT",         0, "Connectedness"},
   {"rhs-interreduce",        "THVM_ATP_RHS_IR",          0, "RHSInterreduce"},
   {"unfailing-cp",           "THVM_ATP_UNFAILING",       0, "UnfailingCP"},
