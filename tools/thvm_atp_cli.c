@@ -8201,6 +8201,16 @@ static const SchedSlice SCHEDULE[] = {
   // empty and the lane duplicates 'bare' -- kept below the proven
   // slices with the other leftover-pool lanes.
   {"tgt",    "--tgt=1 --preset=none --horn=0 --fof-sat=0", 0.0},
+  // (5c') tgt with Vampire-faithful BORN-INTER-REDUCED definitions
+  // (--tgt-fold: each definition body folds its children onto their
+  // fresh symbols and the goal collapses in place, the semantics of
+  // TweeGoalTransformation.cpp "born already inter-reduced").  Where
+  // the goal cone genuinely folds this stops the definition churn
+  // outright: SYN615-10 proves in 0.1s / 1266 CPs vs 9.9s / 64445
+  // CPs on the plain tgt lane (99x).  Races ALONGSIDE the plain lane
+  // (not replacing it): on problems where the deep definitions win by
+  // chance the old lane still carries them.
+  {"tgt-fold", "--tgt=1 --tgt-fold=1 --preset=none --horn=0 --fof-sat=0", 0.0},
   // FULL AC-COMPLETION: auto-detect AC operators (add/meet/join/mult from
   // their commutativity+associativity axioms) and run AC-matching +
   // Stickel AC-unification.  The WM preset only uses AC to FILTER CPs
