@@ -26713,14 +26713,34 @@ static void pgj_model_from_chain(GjModel *m, const GjAtom *at,
 // groundJoinFrom check, Join.hs:194/:216-220): model-gated normalize
 // with globally-oriented rules firing unconditionally (KBO stability
 // under substitution -- the gj_join_dd precedent) and verdict by
-// syntactic equality of the normal forms.
+// equality of the normal forms up to AC (see below).
 static u8 pgj_join_under(AtpState *s, const GjModel *m, Term l, Term r,
                          const u32 *cp_vars, u32 n_cp_vars) {
   g_gj_orient_free = 1;
   Term nl = gj_normalize(s, m, l, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP, 0);
   Term nr = gj_normalize(s, m, r, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP, 0);
   g_gj_orient_free = 0;
-  return kbo_eq(nl, nr);
+  if (kbo_eq(nl, nr)) return 1;
+#ifdef THVM_ATP_AC
+  // AC-equality completion of the model join test (the same redundancy
+  // the push-side NF check applies, see the atp_ac_eq gate ~23670).
+  // The model-gated gj_normalize applies commutativity/associativity as
+  // oriented-by-the-model steps, but oriented AC is NOT confluent on
+  // ground terms (meet(c,meet(a,b)) and meet(a,meet(b,c)) are AC-equal
+  // yet distinct oriented normal forms), so two genuinely joinable sides
+  // can settle at AC-equal-but-distinct NFs -- a FALSE counterexample
+  // that keeps assoc-lifted CPs.  When the AC mask is registered
+  // (thvm_atp_auto_ac detected the AC operators) AC-equal NFs ARE
+  // joinable: the AC axioms are rules in R, so under this model both
+  // sides descend to the shared AC-canonical form.  Sound (a join via
+  // descending AC steps); recovers the assoc-lifted joins Twee's
+  // AC-aware normalisation reaches.
+  if (thvm_atp_get_ac_mask() != 0ull) {
+    AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
+    if (atp_ac_eq(nl, nr, &ac)) return 1;
+  }
+#endif
+  return 0;
 }
 
 static u8 atp_pop_gj_level(AtpState *s, Term l, Term r, u32 depth);
