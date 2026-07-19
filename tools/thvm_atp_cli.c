@@ -162,7 +162,7 @@ static const AtpKnob KNOBS[] = {
   {"perm-subsume",           "THVM_ATP_PERM_SUB",        0, "(permutative subsume)"},
   {"random-ratio",           "THVM_ATP_RANDOM_RATIO",    1, "(random CP ratio)"},
   {"random-seed",            "THVM_ATP_RANDOM_SEED",     1, "(random seed)"},
-  {"sym-prec",               "THVM_ATP_SYM_PREC",        1, "(Vampire symbol precedence: reverse-frequency|frequency)"},
+  {"sym-prec",               "THVM_ATP_SYM_PREC",        1, "(Vampire symbol precedence: frequency|reverse-frequency|weighted-frequency)"},
   {"ord",                    "THVM_ATP_ORD",             1, "(reduction ordering: lpo selects LPO over the default KBO)"},
   {"equals-goal",            "THVM_ATP_EQUALS_GOAL",     1, "(existential-goal equals encoding; 2 = give up if inapplicable)"},
   {"narrow-queue",           "THVM_ATP_NARROW_QUEUE",    1, "(existential-goal critical-goal queue narrowing; 2 = give up if the goal is ground)"},

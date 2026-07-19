@@ -1774,6 +1774,50 @@ int main(int argc, char **argv) {
     cfg.var_weight = 1u;
     use_lpo  = 0;
     use_kbo0 = 0;
+    // Vampire symbol-precedence knob on the REAL completion path
+    // (THVM_ATP_SYM_PREC), opt-in.  RESURRECTS what only ever ran under
+    // the never-CLI-set ATP_BENCH_AUTO_WEIGHTS gate below: recompute the
+    // KBO ordering from an occurrence census of the loaded problem
+    // (axioms + goal, post tgt/tgt-fold), REPLACING the .pr's declared
+    // ORDERING chain.  On unit equalities the simplification ordering is
+    // what decides which superpositions fire (Vampire's `sp=` lever), so
+    // this is the discrimination the .pr's uniform weight-1 + arity-ladder
+    // precedence cannot express.  Unset = byte-identical .pr ordering, so
+    // the wm/twee competition lanes never move.  Gated off when the -auto
+    // matrix path owns SYM_PREC (ATP_BENCH_AUTO_WEIGHTS) so the two never
+    // interact.
+    //   frequency          = Vampire `sp=frequency`  (rarest sym highest)
+    //   reverse-frequency  = Vampire `sp=reverse_frequency` (common highest)
+    //   weighted-frequency = sp=frequency precedence + the KBO FREQUENCY
+    //                        weight scheme (weight = occurrence count,
+    //                        Kernel/KBO.cpp), so orientation follows symbol
+    //                        frequency, not just the precedence tie-break.
+    {
+      const char *symprec = getenv("THVM_ATP_SYM_PREC");
+      if (symprec != NULL && symprec[0] != '\0'
+          && getenv("ATP_BENCH_AUTO_WEIGHTS") == NULL) {
+        u32 cap = prp.n_syms + PR_LABEL_BASE;
+        if (strcmp(symprec, "reverse-frequency") == 0) {
+          atp_frequency_precedence_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.precedence, /*common_high=*/1);
+        } else if (strcmp(symprec, "weighted-frequency") == 0) {
+          atp_frequency_precedence_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.precedence, /*common_high=*/0);
+          atp_frequency_weights_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.weights);
+        } else if (strcmp(symprec, "frequency") == 0) {
+          atp_frequency_precedence_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.precedence, /*common_high=*/0);
+        }
+        if (getenv("THVM_ATP_DEBUG_SYMPREC") != NULL) {
+          fprintf(stderr, "SYM-PREC[%s] label: prec / weight\n", symprec);
+          for (u32 l = PR_LABEL_BASE; l < cap; l++)
+            fprintf(stderr, "  %-22s %u / %u\n",
+                    prp.syms[l - PR_LABEL_BASE].name,
+                    prp.precedence[l], prp.weights[l]);
+        }
+      }
+    }
     // -auto weight heuristic (ATP_BENCH_AUTO_WEIGHTS=1): mirror WM's Automodus,
     // which self-selects the reduction order (PhilMarlow) and IGNORES the .pr's
     // declared ORDERING -- so the .pr's uniform weight-1 is NOT what `wmcli

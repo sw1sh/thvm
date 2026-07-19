@@ -7390,6 +7390,19 @@ fn u32  atp_auto_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
 fn u32  atp_reverse_frequency_precedence(const Term *lhs, const Term *rhs,
                                          u32 n_eqns, u32 n_labels, u32 *prec);
 
+// Goal-inclusive frequency ports for the TPTP completion path (fold the
+// goal equation into the census; uncapped label range).  common_high=0 =
+// Vampire `sp=frequency` (rarest symbol highest), common_high=1 =
+// `sp=reverse_frequency` (most frequent highest).  atp_frequency_weights_g
+// is the KBO FREQUENCY weight-generation scheme (weight = max(freq,1)).
+// See src/atp/precedence.c.
+fn u32  atp_frequency_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                                   Term goal_l, Term goal_r, u32 n_labels,
+                                   u32 *prec, int common_high);
+fn void atp_frequency_weights_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                                Term goal_l, Term goal_r, u32 n_labels,
+                                u32 *weights);
+
 // 8.10b: top-K peek into the CP queue.  Reuses the existing
 // INC-priority + collapse_ordered pipeline from
 // `thvm_atp_select_cp` but does NOT pop -- the queue is left

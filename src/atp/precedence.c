@@ -506,3 +506,124 @@ fn u32 atp_reverse_frequency_precedence(const Term *lhs, const Term *rhs,
   }
   return n_seen;
 }
+
+// === goal-inclusive frequency census (Vampire sp= / KBO weight port) ==
+//
+// The TPTP CLI path resurrects Vampire's `sp=` symbol precedence (and,
+// for weighted-frequency, its KBO symbol weights) on thvm's own
+// completion engine.  Unlike the axiom-only atp_occurrence_precedence /
+// atp_reverse_frequency_precedence above, the census here folds in the
+// goal equation too: Vampire computes a symbol's usageCnt over the WHOLE
+// input -- axioms AND the (negated) conjecture -- before building the
+// ordering (Kernel/Signature usageCnt, consumed in Kernel/Ordering.cpp
+// PrecedenceOrdering::functionPrecedences).  Not capped at
+// WALD_MAX_SYMBOLS: these run once at problem intake over the full .pr
+// label range (post tgt/tgt-fold), so the scratch tallies are malloc'd.
+
+// Walk one term, tallying CTR-label occurrences into `count`.
+static void prec_occ_walk(Term seed, u32 *count, u32 n_labels) {
+  Term stack[256];
+  u32 sp = 0;
+  stack[sp++] = seed;
+  while (sp > 0) {
+    Term t = stack[--sp];
+    if (term_tag(t) == TAG_CTR) {
+      u32 lab = term_ext(t);
+      if (lab < n_labels) count[lab]++;
+      u32 n = term_ctr_n(t);
+      for (u32 c = 0; c < n && sp < 256; c++) stack[sp++] = term_ctr_at(t, c);
+    }
+  }
+}
+
+// Occurrence census over every axiom side plus the goal sides (the goal
+// is folded in only when at least one side is a real term, mirroring
+// pr_wm_derive_precedence's guard).  Returns 0 on OOM, 1 otherwise.
+static int prec_occ_census_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                             Term goal_l, Term goal_r,
+                             u32 *count, u32 n_labels) {
+  for (u32 i = 0; i < n_labels; i++) count[i] = 0;
+  for (u32 e = 0; e < n_eqns; e++) {
+    prec_occ_walk(lhs[e], count, n_labels);
+    prec_occ_walk(rhs[e], count, n_labels);
+  }
+  if (term_tag(goal_l) == TAG_CTR || term_tag(goal_r) == TAG_CTR) {
+    prec_occ_walk(goal_l, count, n_labels);
+    prec_occ_walk(goal_r, count, n_labels);
+  }
+  return 1;
+}
+
+// Vampire `sp=frequency` (common_high=0) / `sp=reverse_frequency`
+// (common_high=1), goal-inclusive.  Direction is the ONLY difference
+// from atp_occurrence_precedence / atp_reverse_frequency_precedence
+// besides the goal fold-in and the uncapped label range.
+//
+// Vampire (Kernel/Ordering.cpp): FreqComparator forward sorts higher
+// usageCnt earlier, then functionPrecedences[aux[i]] = i, so the most
+// frequent symbol gets precedence 0 (LOWEST) and the rarest the highest
+// -- that is `sp=frequency`.  `sp=reverse_frequency` (FreqComparator
+// revert) flips it: most frequent gets the highest precedence.
+//
+// prec[label] = rank (1..n_seen; higher = greater symbol), 0 = unseen.
+// Returns n_seen, or 0 on OOM (prec left untouched on OOM).
+fn u32 atp_frequency_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                                  Term goal_l, Term goal_r, u32 n_labels,
+                                  u32 *prec, int common_high) {
+  if (n_labels == 0u) return 0u;
+  u32 *count = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
+  u64 *score = (u64 *)malloc(sizeof(u64) * (size_t)n_labels);
+  u32 *order = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
+  if (count == NULL || score == NULL || order == NULL) {
+    free(count); free(score); free(order); return 0u;
+  }
+  prec_occ_census_g(lhs, rhs, n_eqns, goal_l, goal_r, count, n_labels);
+  for (u32 i = 0; i < n_labels; i++) prec[i] = 0u;
+  u32 n_seen = 0;
+  for (u32 l = 0; l < n_labels; l++) {
+    if (count[l] == 0u) continue;
+    score[n_seen] = ((u64)count[l] << 32) | (u64)l;   // count high, label low
+    order[n_seen] = l;
+    n_seen++;
+  }
+  // Insertion sort `order` by ASCENDING score (count, then label id).
+  for (u32 i = 1; i < n_seen; i++) {
+    u64 sk = score[i];
+    u32 ok = order[i];
+    u32 j = i;
+    while (j > 0 && score[j - 1] > sk) {
+      score[j] = score[j - 1];
+      order[j] = order[j - 1];
+      j--;
+    }
+    score[j] = sk;
+    order[j] = ok;
+  }
+  // Ascending order = rarest first.  common_high: rank 1..N (rare low,
+  // common high) = reverse_frequency.  else: rank N..1 (rare high,
+  // common low) = frequency.
+  for (u32 i = 0; i < n_seen; i++)
+    prec[order[i]] = common_high ? (i + 1u) : (n_seen - i);
+  free(count); free(score); free(order);
+  return n_seen;
+}
+
+// Vampire KBO FREQUENCY weight-generation scheme (Kernel/KBO.cpp
+// weightsFromOpts, KboWeightGenerationScheme::FREQUENCY:
+// `weight = frequency > 0 ? frequency : 1`).  Goal-inclusive census.
+// weights[label] = max(occurrences, 1); every label in [0, n_labels)
+// is written (unseen -> 1, matching the .pr default), so a symbol that
+// occurs more often weighs more and KBO rewrites toward the rarer
+// (lighter) side.  All weights are >= 1 so the ordering stays KBO-
+// admissible against a variable weight of 1.
+fn void atp_frequency_weights_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                                Term goal_l, Term goal_r, u32 n_labels,
+                                u32 *weights) {
+  if (n_labels == 0u) return;
+  u32 *count = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
+  if (count == NULL) return;
+  prec_occ_census_g(lhs, rhs, n_eqns, goal_l, goal_r, count, n_labels);
+  for (u32 l = 0; l < n_labels; l++)
+    weights[l] = (count[l] > 0u) ? count[l] : 1u;
+  free(count);
+}
