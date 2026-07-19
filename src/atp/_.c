@@ -49,6 +49,9 @@ static void atp_cp_ft_move      (AtpState *s, u32 dst, u32 src);
 struct AtpCgq;
 static AtpStatus atp_cgq_check(AtpState *s);
 static void      atp_cgq_free(struct AtpCgq *q);
+struct AtpGoalDrive;
+static AtpStatus atp_goal_drive_check(AtpState *s);
+static void      atp_goal_drive_free(struct AtpGoalDrive *g);
 // GC rooting: every stored critical goal holds two live Terms; the
 // dedup hash is structural (content-keyed), so relocation needs no
 // fixup beyond the write-back -- same discipline as the MNF nodes.
@@ -7570,6 +7573,11 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // CLI runs; WL callers use thvm_atp_set_use_narrow_queue.
   s->use_narrow_queue = (u8)atp_env_on("THVM_ATP_NARROW_QUEUE");
   s->cgq = NULL;
+  // Refutational goal driver (Phase 2; opt-in, see atp_goal_drive_*
+  // at the end of this file).  THVM_ATP_GOAL_DRIVE for CLI runs; WL
+  // callers use thvm_atp_set_use_goal_drive.
+  s->use_goal_drive = (u8)atp_env_on("THVM_ATP_GOAL_DRIVE");
+  s->gdrive = NULL;
   // Twee pop-join base discipline (opt-in; diverges from WM).  Twee has
   // NO ungated R+E join anywhere on the CP path: dequeue simplification
   // is oriented-rules-only (Rule.hs `simplify` via simplifyOverlap) and
@@ -7857,6 +7865,7 @@ fn void thvm_atp_free(AtpState *s) {
   gn_free(s->gnarrow);
 #endif
   atp_cgq_free(s->cgq);
+  atp_goal_drive_free(s->gdrive);
   free(s);
 }
 
@@ -20686,6 +20695,17 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     }
     return ATP_PROVED;
   }
+  // Refutational goal driver (opt-in): a backward condensed-detachment
+  // regression over the raw ifeq-guarded equations, interleaved with
+  // completion so the live R both bridges connective forms (via the
+  // goal-side NF) and discharges the ifeq guards (against derived
+  // theorem facts).  Closes goals the single-NF check structurally
+  // cannot -- the closing chain needs modus-ponens regression, not
+  // just rewriting.  Runs at most once per rule-set revision.
+  if (s->use_goal_drive && atp_goal_drive_check(s) == ATP_PROVED) {
+    if (s->n_goals == 1u) s->goals_joined_mask = 1ull;
+    return ATP_PROVED;
+  }
 #ifdef ATP_ORDERED_REWRITE
   // Goal-narrow endgame (opt-in): a join here is one the reductive
   // single-NF check above structurally cannot see -- the closing
@@ -31844,4 +31864,541 @@ static void cgq_gc_writeback(struct AtpCgq *q, const Term *roots,
 fn void thvm_atp_set_use_narrow_queue(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_narrow_queue = on ? 1u : 0u;
+}
+
+// ===================================================================
+// Refutational goal driver (unified-engine Phase 2)   --goal-drive
+// ===================================================================
+// The '-10' condensed-detachment (CD) family encodes modus ponens as a
+// dispatcher equation
+//   ifeq(theorem(implies(Y,X)),true, ifeq(theorem(Y),true,theorem(X),
+//        true), true) = true               (rule_2)
+// plus rule_1 ifeq(axiom(X),true,theorem(X),true)=true, the reducer
+// ifeq(A,A,B,C)=B, ground axiom-schema facts, and a GROUND goal
+// theorem(G).  Forward completion floods (it releases ever more general
+// theorem SCHEMAS while the goal is one specific formula), and the
+// engine's goal is only a PASSIVE normal-form check: oriented rules
+// rewrite it, but nothing performs inference INTO it, so record_norm
+// stays 0.  Vampire proves these by keeping the negated goal an ACTIVE
+// clause that unorientable/conditional equations SUPERPOSE into.
+//
+// This driver is the equational-form complement.  It regresses the
+// ground goal backward through the raw ifeq-guarded equations,
+// interleaved with completion in goal_check so the LIVE rule set R
+// serves two jobs at once: (1) its definitional rewrites bridge the
+// goal's connective forms in the goal-side normal form (BASE-1), and
+// (2) its completion-derived theorem(P)=true facts discharge the ifeq
+// guards without regressing them all the way to axioms (BASE-2 /
+// bidirectional meet-in-the-middle).  Every closure is a genuine
+// ground instance of R union the dispatcher equations, so a closed
+// goal is a sound refutation.
+//
+// Design: functional SLD over immutable hash-consed Terms (no binding
+// trail -- the unifier sigma is applied to the continuation goals
+// before recursing, and backtracking just tries the next equation
+// against the ORIGINAL, un-substituted continuation).  Iterative
+// deepening + a ground-goal memo (proved lemmas, regularity/onpath
+// loop prune, per-depth fail cutoff) bound the search.
+//
+// Env: THVM_ATP_GOAL_DRIVE arms it; THVM_ATP_GOAL_DRIVE_{STRIDE,NODES,
+// DEPTH} tune the interleave cadence / per-run node cap / depth cap.
+
+#define GD_VBASE       32u          // rule/fact vars renamed to [32,64)
+#define GD_MAX_GUARDS   6u
+#define GD_MAX_OPEN    48u
+#define GD_MEMO_SLOTS  (1u << 18)
+#define GD_NF_CAP      4096u        // goal-side NF step ceiling per side
+
+typedef struct { Term a, b; } GdG;
+
+typedef struct {                    // a decomposed ifeq-guarded rule:
+  Term concl, w;                    //   concl = w  <=  AND_i (gl_i = gr_i)
+  Term gl[GD_MAX_GUARDS], gr[GD_MAX_GUARDS];
+  u32  ng;
+} GdRule;
+
+typedef struct {
+  u64 h; Term a, b; u32 gen; i32 faildepth; u8 onpath, proved;
+} GdMemo;
+
+struct AtpGoalDrive {
+  u32     built_rev;                // r_revision the rule cache was built at
+  GdRule *rules; u32 n_rules, rules_cap;
+  GdMemo *memo;
+  u32     gen;                      // memo generation (bumped per run)
+  u32     last_run_rules;           // throttle cursor
+  long    nodes, node_cap;
+  u64     heap_start, cell_cap;     // per-run bump-heap window / budget
+  u64     deadline_us;              // wall deadline mirrored per run
+  u32     size_cap;                 // reject subgoal sides bigger than this
+  int     over;                     // budget exhausted this run
+};
+
+// Diagnostic counters (extern-printed by the bench stats block).
+u64 g_goal_drive_calls    = 0;      // driver invocations that searched
+u64 g_goal_drive_variants = 0;      // goal variants (subgoal nodes) explored
+u64 g_goal_drive_closes   = 0;      // BASE closures (NF or fact-unify)
+u64 g_goal_drive_discharg = 0;      // successful ifeq-guard STEP regressions
+u64 g_goal_drive_proved   = 0;      // top goals proved
+
+static u8 gd_ground(Term t) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return 0u;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++)
+        if (!gd_ground(term_ctr_at(t, i))) return 0u;
+      return 1u;
+    }
+    default: return 1u;
+  }
+}
+
+static u64 gd_hash(Term t, u32 d) {
+  if (d > 64u) return 1469598103934665603ULL;
+  u8 tg = term_tag(t);
+  u64 h = 1099511628211ULL * (u64)((u32)tg + 1u);
+  if (tg == TAG_FVR)
+    return h ^ (0x9e3779b97f4a7c15ULL * (u64)(term_ext(t) + 1u));
+  if (tg == TAG_CTR) {
+    h ^= 0x100000001b3ULL * (u64)(term_ext(t) + 1u);
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      u64 c = gd_hash(term_ctr_at(t, i), d + 1u);
+      h = ((h << 7) | (h >> 57)) ^ c;
+    }
+    return h;
+  }
+  return h ^ (u64)t;
+}
+
+static u32 gd_size(Term t, u32 d) {
+  if (d > 64u) return 1u;
+  if (term_tag(t) != TAG_CTR) return 1u;
+  u32 n = term_ctr_n(t), s = 1u;
+  for (u32 i = 0; i < n; i++) s += gd_size(term_ctr_at(t, i), d + 1u);
+  return s;
+}
+
+static u32 gd_maxvar(Term t, u32 acc) {
+  switch (term_tag(t)) {
+    case TAG_FVR: { u32 v = term_ext(t) + 1u; return v > acc ? v : acc; }
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) acc = gd_maxvar(term_ctr_at(t, i), acc);
+      return acc;
+    }
+    default: return acc;
+  }
+}
+
+static int gd_rigid(Term t, int *vars) {
+  switch (term_tag(t)) {
+    case TAG_FVR: (*vars)++; return 0;
+    case TAG_CTR: {
+      int n = 1; u32 k = term_ctr_n(t);
+      for (u32 i = 0; i < k; i++) n += gd_rigid(term_ctr_at(t, i), vars);
+      return n;
+    }
+    default: return 1;
+  }
+}
+// Selection score: ground goals first (memoizable, no shared vars);
+// otherwise the most rigidly-constrained (binds the free premise
+// variable Y against a constrained fact before "prove SOME theorem").
+static long gd_score(Term t) {
+  int vars = 0;
+  int rigid = gd_rigid(t, &vars);
+  if (vars == 0) return 1L << 30;
+  return (long)rigid * 8 - vars;
+}
+
+static Term gd_canon_walk(Term t, i32 *map, u32 *next) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      if (id >= 64u) return t;
+      if (map[id] < 0) map[id] = (i32)((*next)++);
+      return term_new_fvr((u32)map[id]);
+    }
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      if (n == 0u || n > REWRITE_MAX_ARITY) return t;
+      Term ch[REWRITE_MAX_ARITY]; u8 changed = 0u;
+      for (u32 i = 0; i < n; i++) {
+        Term orig = term_ctr_at(t, i);
+        ch[i] = gd_canon_walk(orig, map, next);
+        if (ch[i] != orig) changed = 1u;
+      }
+      if (!changed) return t;
+      return term_new_ctr(term_ext(t), ch, n);
+    }
+    default: return t;
+  }
+}
+// Renumber every FVR across the goal list to a shared dense [0,next)
+// range so the next rule instantiation (renamed by GD_VBASE) never
+// collides.  Returns 0 if the list needs >= GD_VBASE distinct vars
+// (bail the branch -- never happens on the CD family).
+static u8 gd_canon(GdG *gs, u32 n) {
+  i32 map[64]; for (u32 i = 0; i < 64u; i++) map[i] = -1;
+  u32 next = 0u;
+  for (u32 i = 0; i < n; i++) {
+    gs[i].a = gd_canon_walk(gs[i].a, map, &next);
+    gs[i].b = gd_canon_walk(gs[i].b, map, &next);
+  }
+  return next < GD_VBASE;
+}
+
+// An ifeq-guarded node: a detected dispatcher functor, arity 3/4, whose
+// first two args DIFFER (a real guard, not the reducer ifeq(A,A,B,C)).
+static u8 gd_ifeq_guarded(const AtpState *s, Term t) {
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 n = term_ctr_n(t);
+  if (n != 3u && n != 4u) return 0u;
+  if (!atp_ifeq_sym_is(s, term_ext(t))) return 0u;
+  return (u8)!atp_ifeq_term_eq(term_ctr_at(t, 0), term_ctr_at(t, 1));
+}
+
+// Unwind an ifeq nest `ifeq(g1,c1, ifeq(g2,c2, ..., CONCL, e), e) = w`
+// into (CONCL, w, guards [(g_i,c_i)]).  Descends the 'then' branch
+// (arg 2) at each level.  0 if not actually guarded / too deep.
+static u8 gd_decompose(const AtpState *s, Term nest, Term w, GdRule *r) {
+  Term cur = nest; u32 guard = 0u;
+  while (gd_ifeq_guarded(s, cur)) {
+    if (guard >= GD_MAX_GUARDS) return 0u;
+    r->gl[guard] = term_ctr_at(cur, 0);
+    r->gr[guard] = term_ctr_at(cur, 1);
+    guard++;
+    cur = term_ctr_at(cur, 2);
+  }
+  if (guard == 0u) return 0u;
+  r->concl = cur; r->w = w; r->ng = guard;
+  // Reject any rule carrying a var id that would overflow the [32,64)
+  // rename window (never true for parser-numbered CD rules).
+  u32 mv = gd_maxvar(cur, 0u);
+  for (u32 i = 0; i < guard; i++) {
+    mv = gd_maxvar(r->gl[i], mv);
+    mv = gd_maxvar(r->gr[i], mv);
+  }
+  mv = gd_maxvar(w, mv);
+  return (u8)(mv < GD_VBASE);
+}
+
+static void gd_build(AtpState *s, struct AtpGoalDrive *g) {
+  if (g->built_rev == s->r_revision && g->rules != NULL) return;
+  g->n_rules = 0u;
+  for (u32 i = 0; i < s->n_rules; i++) {
+    if (s->r_dead != NULL && s->r_dead[i]) continue;
+    Term l = s->lhs[i], rr = s->rhs[i];
+    GdRule rule; u8 ok = 0u;
+    if (gd_ifeq_guarded(s, l))       ok = gd_decompose(s, l, rr, &rule);
+    else if (gd_ifeq_guarded(s, rr)) ok = gd_decompose(s, rr, l, &rule);
+    if (!ok) continue;
+    if (g->n_rules >= g->rules_cap) {
+      u32 nc = g->rules_cap ? g->rules_cap * 2u : 16u;
+      GdRule *nr = (GdRule *)realloc(g->rules, (size_t)nc * sizeof(GdRule));
+      if (nr == NULL) break;
+      g->rules = nr; g->rules_cap = nc;
+    }
+    g->rules[g->n_rules++] = rule;
+  }
+  g->built_rev = s->r_revision;
+}
+
+static GdMemo *gd_memo_find(struct AtpGoalDrive *g, Term a, Term b,
+                            u64 h, u8 create) {
+  if (g->memo == NULL) return NULL;
+  u32 slot = (u32)(h & (u64)(GD_MEMO_SLOTS - 1u));
+  for (u32 probe = 0; probe < 64u; probe++) {
+    GdMemo *m = &g->memo[slot];
+    if (m->gen != g->gen) {
+      if (!create) return NULL;
+      m->gen = g->gen; m->h = h; m->a = a; m->b = b;
+      m->faildepth = -1; m->onpath = 0u; m->proved = 0u;
+      return m;
+    }
+    if (m->h == h && kbo_eq(m->a, a) && kbo_eq(m->b, b)) return m;
+    slot = (slot + 1u) & (GD_MEMO_SLOTS - 1u);
+  }
+  return NULL;
+}
+
+static int gd_budget(struct AtpGoalDrive *g) {
+  if (g->over) return 0;
+  if (++g->nodes > g->node_cap) { g->over = 1; return 0; }
+  // Guard the bump heap: stop the run well before from-space is
+  // exhausted (the transient search terms are reclaimed wholesale by
+  // the heap_reset at run end, but a single run must stay bounded).
+  if ((g->nodes & 0x3f) == 0) {
+    if ((HEAP_NEXT - g->heap_start) > g->cell_cap) { g->over = 1; return 0; }
+    if (g->deadline_us != 0u && atp_now_us() > g->deadline_us) {
+      g->over = 1; return 0;
+    }
+  }
+  return 1;
+}
+
+static int gd_prove_seq(AtpState *s, struct AtpGoalDrive *g,
+                        GdG *gs, u32 n, int depth);
+
+// Close subgoal (a,b) at remaining `depth`, then prove `tail`.
+static int gd_solve_tail(AtpState *s, struct AtpGoalDrive *g,
+                         Term a, Term b, int depth, GdG *tail, u32 tn) {
+  g_goal_drive_variants++;
+  // BASE-1: goal-side normal form.  Applies every oriented AND
+  // unorientable rule in R (KBO-gated), so the definitional rewrites
+  // bridge the goal's connective forms and derived theorem(P)=true /
+  // axiom-schema rules collapse an established atom to `true`.
+  Term na = atp_rewrite_normalize(s, a, s->lhs, s->rhs, s->n_rules, GD_NF_CAP);
+  Term nb = atp_rewrite_normalize(s, b, s->lhs, s->rhs, s->n_rules, GD_NF_CAP);
+  if (kbo_eq(na, nb)) {
+    g_goal_drive_closes++;
+    return gd_prove_seq(s, g, tail, tn, depth);
+  }
+  a = na; b = nb;
+  // Size cap: reject subgoals grown far past the goal.  Backward MP
+  // regression otherwise diverges into problem-INDEPENDENT nested
+  // implications theorem(implies(Y,implies(Y',...))) that never close
+  // (horn-back's g_bk_size_cap guards the same way); this keeps the
+  // frontier near the derived-theorem sizes the meet must reach.
+  if (g->size_cap != 0u &&
+      gd_size(a, 0u) + gd_size(b, 0u) > g->size_cap) return 0;
+  u8 gnd = (u8)(gd_ground(a) && gd_ground(b));
+  u32 ha = (term_tag(a) == TAG_CTR) ? term_ext(a) : 0xffffffffu;
+  u32 hb = (term_tag(b) == TAG_CTR) ? term_ext(b) : 0xffffffffu;
+  // BASE-2: unify against a stored equation (both faces).  BINDS the
+  // free premise variable against a derived theorem / axiom-schema
+  // fact.  Oriented facts on a ground subgoal are already covered by
+  // BASE-1, so scan only unorientable ones there.
+  for (u32 i = 0; i < s->n_rules && !g->over; i++) {
+    if (s->r_dead != NULL && s->r_dead[i]) continue;
+    Term u = s->lhs[i], v = s->rhs[i];
+    if (gd_ifeq_guarded(s, u) || gd_ifeq_guarded(s, v)) continue;
+    if (gnd && s->r_orient != NULL && s->r_orient[i]) continue;
+    if (gd_maxvar(u, 0u) >= GD_VBASE || gd_maxvar(v, 0u) >= GD_VBASE) continue;
+    u32 hu = (term_tag(u) == TAG_CTR) ? term_ext(u) : 0xfffffffeu;
+    u32 hv = (term_tag(v) == TAG_CTR) ? term_ext(v) : 0xfffffffeu;
+    u8 av = (u8)(term_tag(a) == TAG_FVR), bv = (u8)(term_tag(b) == TAG_FVR);
+    u8 uv = (u8)(term_tag(u) == TAG_FVR), vv = (u8)(term_tag(v) == TAG_FVR);
+    u8 or0 = (u8)((av || uv || hu == ha) && (bv || vv || hv == hb));
+    u8 or1 = (u8)((av || vv || hv == ha) && (bv || uv || hu == hb));
+    if (!or0 && !or1) continue;
+    Term ru = thvm_rename_vars(u, GD_VBASE), rv = thvm_rename_vars(v, GD_VBASE);
+    for (int orient = 0; orient < 2; orient++) {
+      if ((orient == 0 && !or0) || (orient == 1 && !or1)) {
+        if (kbo_eq(ru, rv)) break;
+        continue;
+      }
+      Term U = orient ? rv : ru, V = orient ? ru : rv;
+      RewriteSubst sub; memset(&sub, 0, sizeof sub);
+      if (thvm_unify(a, U, &sub) && thvm_unify(b, V, &sub)) {
+        if (!gd_budget(g)) return 0;
+        GdG nt[GD_MAX_OPEN]; u32 m = 0u; u8 okc = 1u;
+        for (u32 k = 0; k < tn; k++) {
+          if (m >= GD_MAX_OPEN) { okc = 0u; break; }
+          nt[m].a = thvm_unify_apply(tail[k].a, &sub);
+          nt[m].b = thvm_unify_apply(tail[k].b, &sub);
+          m++;
+        }
+        if (okc && gd_canon(nt, m)) {
+          g_goal_drive_closes++;
+          if (gd_prove_seq(s, g, nt, m, depth)) return 1;
+        }
+      }
+      if (kbo_eq(ru, rv)) break;
+    }
+  }
+  // STEP: regress through an ifeq-guarded rule conclusion (both faces);
+  // spawn its guards as new subgoals ahead of the tail.
+  if (depth > 0) {
+    for (u32 ri = 0; ri < g->n_rules && !g->over; ri++) {
+      GdRule *r = &g->rules[ri];
+      Term rc = thvm_rename_vars(r->concl, GD_VBASE);
+      Term rw = thvm_rename_vars(r->w, GD_VBASE);
+      for (int orient = 0; orient < 2; orient++) {
+        Term C = orient ? rw : rc, W = orient ? rc : rw;
+        RewriteSubst sub; memset(&sub, 0, sizeof sub);
+        if (thvm_unify(a, C, &sub) && thvm_unify(b, W, &sub)) {
+          if (!gd_budget(g)) return 0;
+          g_goal_drive_discharg++;   // a guarded-rule regression attempt
+          GdG ng[GD_MAX_OPEN]; u32 m = 0u; u8 okc = 1u;
+          for (u32 gi = 0; gi < r->ng && okc; gi++) {
+            if (m >= GD_MAX_OPEN) { okc = 0u; break; }
+            Term rgl = thvm_rename_vars(r->gl[gi], GD_VBASE);
+            Term rgr = thvm_rename_vars(r->gr[gi], GD_VBASE);
+            ng[m].a = thvm_unify_apply(rgl, &sub);
+            ng[m].b = thvm_unify_apply(rgr, &sub);
+            m++;
+          }
+          for (u32 k = 0; k < tn && okc; k++) {
+            if (m >= GD_MAX_OPEN) { okc = 0u; break; }
+            ng[m].a = thvm_unify_apply(tail[k].a, &sub);
+            ng[m].b = thvm_unify_apply(tail[k].b, &sub);
+            m++;
+          }
+          if (okc && gd_canon(ng, m)) {
+            if (gd_prove_seq(s, g, ng, m, depth - 1)) return 1;
+          }
+        }
+        if (kbo_eq(rc, rw)) break;
+      }
+    }
+  }
+  return 0;
+}
+
+// Prove the conjunction gs[0..n): select the most-constrained subgoal,
+// solve it, then the rest.  A ground subgoal is solved in isolation
+// (its proof binds nothing shared) and memoized; a non-ground one
+// carries the tail so its solution's bindings propagate.
+static int gd_prove_seq(AtpState *s, struct AtpGoalDrive *g,
+                        GdG *gs, u32 n, int depth) {
+  if (n == 0u) return 1;
+  if (!gd_budget(g)) return 0;
+  u32 best = 0u; long bestsc = -(1L << 40);
+  for (u32 i = 0; i < n; i++) {
+    long sc = gd_score(gs[i].a);
+    if (sc > bestsc) { bestsc = sc; best = i; }
+  }
+  GdG gcur = gs[best];
+  GdG tail[GD_MAX_OPEN]; u32 tn = 0u;
+  for (u32 i = 0; i < n; i++) if (i != best) tail[tn++] = gs[i];
+  if (gd_ground(gcur.a) && gd_ground(gcur.b)) {
+    u64 h = gd_hash(gcur.a, 0u) * 1000003ULL ^ gd_hash(gcur.b, 0u);
+    GdMemo *m = gd_memo_find(g, gcur.a, gcur.b, h, 0u);
+    if (m != NULL) {
+      if (m->proved)  return gd_prove_seq(s, g, tail, tn, depth);
+      if (m->onpath)  return 0;
+      if (m->faildepth >= depth) return 0;
+    }
+    GdMemo *pm = gd_memo_find(g, gcur.a, gcur.b, h, 1u);
+    if (pm != NULL) pm->onpath = 1u;
+    int ok = gd_solve_tail(s, g, gcur.a, gcur.b, depth, NULL, 0u);
+    if (pm != NULL) pm->onpath = 0u;
+    if (ok) {
+      if (pm != NULL) pm->proved = 1u;
+      return gd_prove_seq(s, g, tail, tn, depth);
+    }
+    if (pm != NULL && !g->over && depth > pm->faildepth) pm->faildepth = depth;
+    return 0;
+  }
+  return gd_solve_tail(s, g, gcur.a, gcur.b, depth, tail, tn);
+}
+
+static AtpStatus atp_goal_drive_check(AtpState *s) {
+  if (s == NULL || s->goal_lhs == 0) return ATP_RUNNING;
+  if (s->n_goals > 1u || s->goal_existential) return ATP_RUNNING;
+  struct AtpGoalDrive *g = s->gdrive;
+  if (g == NULL) {
+    g = (struct AtpGoalDrive *)calloc(1, sizeof *g);
+    if (g == NULL) return ATP_RUNNING;
+    g->memo = (GdMemo *)calloc(GD_MEMO_SLOTS, sizeof(GdMemo));
+    if (g->memo == NULL) { free(g); return ATP_RUNNING; }
+    g->built_rev = 0xffffffffu;
+    s->gdrive = g;
+  }
+  u32 stride = 100u; long node_cap = 15000; int depth_cap = 12;
+  { const char *e = getenv("THVM_ATP_GOAL_DRIVE_STRIDE");
+    if (e != NULL && atoi(e) > 0) stride = (u32)atoi(e);
+    e = getenv("THVM_ATP_GOAL_DRIVE_NODES");
+    if (e != NULL && atoi(e) > 0) node_cap = atol(e);
+    e = getenv("THVM_ATP_GOAL_DRIVE_DEPTH");
+    if (e != NULL && atoi(e) > 0) depth_cap = atoi(e); }
+  // Interleave cadence: run once, then only after R has grown by
+  // `stride` rules (completion enriches the fact base between runs --
+  // the bidirectional meet-in-the-middle needs fresh derived theorems).
+  if (g->last_run_rules != 0u && s->n_rules < g->last_run_rules + stride)
+    return ATP_RUNNING;
+  gd_build(s, g);
+  if (g->n_rules == 0u) return ATP_RUNNING;   // no dispatcher rule (don't
+                                              // latch: retry once detected)
+  g->last_run_rules = s->n_rules ? s->n_rules : 1u;
+  if (getenv("THVM_ATP_GOAL_DRIVE_DEBUG") != NULL) {
+    // Ground unconditional facts (compound = nullary-const) -- the
+    // forward-derived theorem/axiom leaves the backward search meets.
+    u32 gfacts = 0u;
+    for (u32 fi = 0; fi < s->n_rules; fi++) {
+      if (s->r_dead != NULL && s->r_dead[fi]) continue;
+      Term l = s->lhs[fi], rr = s->rhs[fi];
+      u8 lc = (u8)(term_tag(l) == TAG_CTR && term_ctr_n(l) > 0u && gd_ground(l));
+      u8 rc = (u8)(term_tag(rr) == TAG_CTR && term_ctr_n(rr) == 0u);
+      u8 lc2 = (u8)(term_tag(rr) == TAG_CTR && term_ctr_n(rr) > 0u && gd_ground(rr));
+      u8 rc2 = (u8)(term_tag(l) == TAG_CTR && term_ctr_n(l) == 0u);
+      if ((lc && rc) || (lc2 && rc2)) gfacts++;
+    }
+    fprintf(stderr, "[goal-drive] run=%llu n_rules=%u dispatchers=%u "
+            "gfacts=%u\n", (unsigned long long)g_goal_drive_calls,
+            s->n_rules, g->n_rules, gfacts);
+  }
+  if (getenv("THVM_ATP_GOAL_DRIVE_DEBUG") != NULL && g_goal_drive_calls < 1u) {
+    fprintf(stderr, "[goal-drive] seed lhs="); atp_dbg_print_term(stderr, s->goal_lhs);
+    fprintf(stderr, "  rhs="); atp_dbg_print_term(stderr, s->goal_rhs);
+    fprintf(stderr, "  n_rules=%u dispatchers=%u ifeq_syms=%u\n",
+            s->n_rules, g->n_rules, s->n_ifeq_syms);
+    for (u32 di = 0; di < g->n_rules && di < 6u; di++) {
+      fprintf(stderr, "[goal-drive]  rule%u ng=%u concl=", di, g->rules[di].ng);
+      atp_dbg_print_term(stderr, g->rules[di].concl);
+      fprintf(stderr, " w="); atp_dbg_print_term(stderr, g->rules[di].w);
+      for (u32 gi = 0; gi < g->rules[di].ng; gi++) {
+        fprintf(stderr, " g%u=", gi); atp_dbg_print_term(stderr, g->rules[di].gl[gi]);
+        fprintf(stderr, "=="); atp_dbg_print_term(stderr, g->rules[di].gr[gi]);
+      }
+      fprintf(stderr, "\n");
+    }
+  }
+  g->gen++;
+  g->nodes = 0; g->node_cap = node_cap; g->over = 0;
+  g->deadline_us = s->wall_deadline_us;
+  // Size ceiling for subgoals: the goal's own size times a generous
+  // factor (proof intermediates exceed the goal, but not without
+  // bound).  Env THVM_ATP_GOAL_DRIVE_SIZE overrides absolutely.
+  { u32 gsz = gd_size(s->goal_lhs, 0u) + gd_size(s->goal_rhs, 0u);
+    g->size_cap = gsz * 6u + 64u;
+    const char *e = getenv("THVM_ATP_GOAL_DRIVE_SIZE");
+    if (e != NULL && atoi(e) > 0) g->size_cap = (u32)atoi(e); }
+  // Cell budget: the driver is the sole allocator during its
+  // synchronous run and pops the heap afterward, so it may safely use
+  // most of the remaining from-space (75%, leaving slack for the
+  // reset epoch).  Env THVM_ATP_GOAL_DRIVE_CELLS overrides absolutely.
+  { u64 fend = gc_from_end();
+    u64 remaining = (fend > HEAP_NEXT) ? (fend - HEAP_NEXT) : 0u;
+    g->cell_cap = remaining - (remaining >> 2);
+    const char *e = getenv("THVM_ATP_GOAL_DRIVE_CELLS");
+    if (e != NULL && atoll(e) > 0) g->cell_cap = (u64)atoll(e); }
+  g_goal_drive_calls++;
+  // The regression allocates a large volume of transient Terms (NF
+  // scratch, renamed rule instances, unifier images) into the bump
+  // heap; none survive the run (a proof is a boolean verdict, not a
+  // term kept in R).  Checkpoint the heap now and pop it back at the
+  // end -- reclaiming EVERY search allocation in O(1), without a GC
+  // pass that would relocate the driver's unrooted live set.  The
+  // matching cell budget (below) bounds a single run under the live
+  // heap's headroom so it can never exhaust from-space mid-search.
+  g->heap_start = thvm_atp_heap_checkpoint();
+  AtpStatus verdict = ATP_RUNNING;
+  GdG seed; seed.a = s->goal_lhs; seed.b = s->goal_rhs;
+  for (int d = 1; d <= depth_cap && !g->over; d++) {
+    GdG lst[GD_MAX_OPEN]; lst[0] = seed;
+    if (!gd_canon(lst, 1u)) break;
+    if (gd_prove_seq(s, g, lst, 1u, d)) {
+      g_goal_drive_proved++;
+      verdict = ATP_PROVED;
+      break;
+    }
+  }
+  thvm_atp_heap_reset(g->heap_start);
+  return verdict;
+}
+
+static void atp_goal_drive_free(struct AtpGoalDrive *g) {
+  if (g == NULL) return;
+  free(g->rules);
+  free(g->memo);
+  free(g);
+}
+
+fn void thvm_atp_set_use_goal_drive(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_goal_drive = on ? 1u : 0u;
 }

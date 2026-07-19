@@ -285,3 +285,51 @@ pruning volume alone flips nothing -- the win appears only combined
 with Twee-native SELECTION (cp-weight=8 best-first), consistent with
 the terminal diagnostic above.  Composed by adding --simpler-join to
 the schedule's twee slice.
+
+## Phase 2 goal driver: BUILT (--goal-drive), sound, uncracked (2026-07-19)
+
+Built the refutational goal driver as an opt-in knob (--goal-drive /
+THVM_ATP_GOAL_DRIVE / thvm_atp_set_use_goal_drive), interleaved with
+completion inside thvm_atp_goal_check (src/atp/_.c).  It makes the
+ground negated goal a first-class ACTIVE participant: a backward
+condensed-detachment regression over the RAW ifeq-guarded equations
+(no decode -- unlike --horn-back), reading the LIVE rule set R so
+completion's oriented definitions bridge the goal's connective forms
+(BASE-1 goal-side NF) and completion's derived theorem(P)=true facts
+discharge the ifeq guards (BASE-2 unify / the bidirectional meet).
+Design: functional SLD over immutable hash-consed Terms (the unifier
+sigma is applied to the continuation, no binding trail); iterative
+deepening + a ground-goal memo (proved lemmas, regularity/onpath loop
+prune, per-depth fail cutoff); per-run bump-heap checkpoint+reset
+(reclaims the transient search Terms wholesale), a wall deadline, a
+node/cell budget, and a subgoal size cap (horn-back's g_bk_size_cap
+twin -- without it the backward MP regression diverges into
+problem-INDEPENDENT nested implications theorem(implies(Y,implies(Y',
+...))), the tell being byte-identical variant counts across distinct
+problems).
+
+Soundness: every closure is a genuine ground instance of R union the
+dispatcher equations (the reducer ifeq(A,A,B,C)=B, whose presence
+atp_ifeq_sym_is confirms by detection).  VERIFIED: proves a hand-built
+2-step CD chain in 8 variants (mechanism correct); NEVER closes a
+non-theorem (5.9M-variant search on an unprovable goal, 0 closes); all
+CASC-J13 Satisfiable canaries + RNG030/031/032 stay GaveUp WITH the
+driver armed; test_atp 136264/136264 and soundness.sh unchanged
+(default-off, byte-identical default path).
+
+Result on the '-10' gate family: does NOT crack LCL306-10 / LCL348-10 /
+LCL339-10 / LCL890-10 within a 60-240s budget under any tested
+composition (bare, tgt, tgt-fold; strides 1-150; depths 12-60; nodes
+15k-100M).  Diagnosis, corroborated by the banked Vampire proof
+(winning strategy dis+10_50:sp=weighted_frequency:tgt=full,
+definition_folding of the goal into sF constants; 92 superpositions +
+22 forward_demodulations): the proof is a forward chain that SUPERPOSES
+rule_2 with derived theorem units under GOOD SELECTION.  Backward
+regression must guess the modus-ponens major premise at every step --
+the exact DUAL of the forward selection gap this doc's terminal
+diagnostic already isolated.  The driver's crude rigid-first selection
+explores ~400k goal variants without following the ~92-step chain.
+The mechanism (goal as active backward participant) is now in place and
+sound; closing the family still needs the goal-directed SELECTION
+heuristic (the research-grade lever), now applicable to EITHER the
+forward CP queue or this backward frontier.

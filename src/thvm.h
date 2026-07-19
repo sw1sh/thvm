@@ -5239,6 +5239,22 @@ typedef struct {
   struct AtpCgq *cgq;
   u8 use_narrow_queue;
 
+  // Refutational goal driver (unified-engine Phase 2; opt-in, see the
+  // atp_goal_drive_* lane at the end of src/atp/_.c).  Admits the
+  // ground negated goal as an ACTIVE participant: a backward
+  // condensed-detachment regression over the RAW ifeq-guarded
+  // equations, run interleaved with completion (from goal_check) so
+  // the live rule set R both bridges connective forms (definitional
+  // rewriting, in the goal-side normal form) and discharges the ifeq
+  // guards (against completion-derived theorem facts).  The
+  // ground-goal complement to the narrow queue: no goal variables to
+  // instantiate, only subterm regression through the dispatcher rules.
+  // THVM_ATP_GOAL_DRIVE for CLI runs; WL callers use
+  // thvm_atp_set_use_goal_drive.  Default OFF: byte-identical
+  // trajectories (one branch test in goal_check when unarmed).
+  struct AtpGoalDrive *gdrive;
+  u8 use_goal_drive;
+
   // Waldmeister-faithful RHS interreduction (IR_InterreduktionRechts /
   // RMRechtsInterred, INF/Interreduktion.c:329-360) in the -irrp CLI
   // default mode FALSE = "modify rule" (RUN/Parameter.c:334-343).  When
@@ -6963,6 +6979,7 @@ fn void      thvm_atp_set_wpo     (AtpState *s, const WpoConfig *wpo);
 fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
 fn void      thvm_atp_set_use_goal_narrow(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_narrow_queue(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_goal_drive(AtpState *s, u8 on);
 // Opt in to the flatterm fast-path for the mixed normalize loop (no
 // effect unless the dylib is built with ATP_RULE_INDEX).  Same normal
 // forms as the default tree mixed loop; a per-step speedup on rule sets

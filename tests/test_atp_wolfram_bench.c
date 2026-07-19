@@ -3378,6 +3378,20 @@ int main(int argc, char **argv) {
              (unsigned long long)g_ifeq_decide_n_hit,
              (unsigned long long)g_ifeq_decide_n_popped);
     }
+    // Refutational goal driver (--goal-drive) diagnostics.  All zero
+    // whenever the driver is disarmed (the default).
+    extern u64 g_goal_drive_calls, g_goal_drive_variants,
+               g_goal_drive_closes, g_goal_drive_discharg,
+               g_goal_drive_proved;
+    if (g_goal_drive_calls != 0u) {
+      printf("   goal-drive: runs=%llu  variants=%llu  closes=%llu  "
+             "discharges=%llu  proved=%llu\n",
+             (unsigned long long)g_goal_drive_calls,
+             (unsigned long long)g_goal_drive_variants,
+             (unsigned long long)g_goal_drive_closes,
+             (unsigned long long)g_goal_drive_discharg,
+             (unsigned long long)g_goal_drive_proved);
+    }
   }
   if (g_atp_phase_enabled) {
     double w = (el > 0.0) ? el : 1.0;
