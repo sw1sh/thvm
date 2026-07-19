@@ -215,6 +215,7 @@ static const AtpKnob KNOBS[] = {
   {"ifeq-strip",             "THVM_ATP_IFEQ_STRIP",      0, "(formation-time resolved ifeq-guard stripping for the LazyNormalize raw class)"},
   {"lazy-score-nf",          "THVM_ATP_LAZY_SCORE_NF",   1, "(LazyNormalize raw-class CP scoring from a step-capped-NF size estimate; 1 = cap 4, N = cap N)"},
   {"tgt",                    "THVM_ATP_TGT",             1, "(Vampire tgt / twee goal transformation: name conjecture subterms; 1 full, 2 ground, 3 all axioms = gtg=all)"},
+  {"tgt-fold",               "THVM_ATP_TGT_FOLD",        0, "(tgt fidelity: definitions born inter-reduced + goal folded in place, Vampire-faithful; stops the deep-definition CP flood)"},
   {"distrib",                "THVM_ATP_DISTRIB",         0, "(Twee distributivity heuristic: fresh f_g(X,Y,Z)=g(f(X,Y),Z) definition per distributivity-shaped axiom)"},
   {"tgt-sel",                "THVM_ATP_TGT_SEL",         1, "(goal-targeted CP-selection weight scale: 1 full, 2 ground)"},
   {"tgt-nongoal",            "THVM_ATP_TGT_NONGOAL",     1, "(tgt-sel non-goal symbol weight factor, default 2)"},

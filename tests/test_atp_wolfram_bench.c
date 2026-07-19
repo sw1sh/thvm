@@ -1366,7 +1366,46 @@ static void pr_print_term(FILE *fp, const PrProblem *pr, Term t) {
   fputc(')', fp);
 }
 
-static void pr_tgt_transform(PrProblem *pr, int ground_only, int all_eqns) {
+// Fold-mode (Vampire "born already inter-reduced", TweeGoalTransformation
+// .cpp:23-28 + the bottom-up transformSubterm returning `res` at :218):
+// rewrite each maximal proper compound subterm of `t` that matches a
+// named key (index < limit, modulo variable renaming) to fresh_j applied
+// to the subterm's actual variables in key order.  only_proper=1 leaves
+// the top node unfolded -- used for a definition BODY, whose own fresh
+// symbol it defines; only_proper=0 may fold the whole term (goal-derived
+// units, folded in place like apply()'s `u = nc` at :250).  Because
+// pr_tgt_collect is inner-first, every proper subterm of key i has index
+// < i, so limit=i during a body fold matches only already-materialized
+// definitions.  Without this the definitions carry the full deep nesting
+// (multiply(x,multiply(x,y))=sF1) and (a) their deep LHS superposes into
+// the general ring axioms and (b) the goal cannot fold -- rewriting an
+// inner subterm first (multiply(x,y)->sF0) breaks the deep rule's match,
+// stalling the fold and flooding CP formation.
+static Term pr_tgt_fold_term(const PrProblem *pr, Term t, int only_proper,
+                             u32 limit) {
+  if (term_tag(t) != TAG_CTR) return t;
+  u32 n = term_ctr_n(t);
+  if (n == 0u) return t;                        // constant / nullary
+  if (!only_proper) {
+    u32 map[PR_MAX_VARS];
+    u32 nv = 0u, nodes = 0u;
+    Term key = pr_tgt_norm_rec(t, map, &nv, &nodes);
+    for (u32 i = 0; i < limit && i < pr_tgt_nsubs; i++)
+      if (pr_tgt_sub_nv[i] == nv && pr_flat_term_eq(pr_tgt_subs[i], key)) {
+        u32 lbl = PR_LABEL_BASE + pr->fresh_sym_base + i;
+        Term args[8];
+        for (u32 v = 0; v < nv; v++) args[v] = term_new_fvr(map[v]);
+        return term_new_ctr(lbl, (nv > 0u) ? args : NULL, nv);
+      }
+  }
+  Term kids[8];
+  for (u32 i = 0; i < n; i++)
+    kids[i] = pr_tgt_fold_term(pr, term_ctr_at(t, i), 0, limit);
+  return term_new_ctr(term_ext(t), (n > 0u) ? kids : NULL, n);
+}
+
+static void pr_tgt_transform(PrProblem *pr, int ground_only, int all_eqns,
+                             int fold) {
   if (pr->goal_l == 0) return;
   pr_tgt_nsubs = 0u;
   // Conjecture-role equations (emitted indices from the CLI), then the
@@ -1415,6 +1454,7 @@ static void pr_tgt_transform(PrProblem *pr, int ground_only, int all_eqns) {
   for (u32 l = PR_LABEL_BASE; l < ncap; l++)
     if (pr->precedence[l] >= PR_LABEL_BASE) pr->precedence[l] += nsub;
   pr->fresh_sym_base = pr->n_syms;
+  u32 def_base = pr->n_eqns;         // definitions occupy [def_base, n_eqns)
   for (u32 i = 0; i < nsub; i++) {
     if (pr->n_syms >= PR_MAX_SYMS) break;
     if (pr->n_eqns >= PR_MAX_EQNS) break;
@@ -1438,16 +1478,51 @@ static void pr_tgt_transform(PrProblem *pr, int ground_only, int all_eqns) {
     for (u32 v = 0; v < nv; v++) vars[v] = term_new_fvr(v);
     Term fresh = term_new_ctr(lbl, (nv > 0u) ? vars : NULL, nv);
     pr->eq_l[pr->n_eqns] = fresh;   // fresh(vars) = subterm
-    pr->eq_r[pr->n_eqns] = pr_tgt_subs[i];
+    // fold: born inter-reduced (fresh(vars) = folded body, inner named
+    // subterms replaced by their own fresh symbols); else the raw deep
+    // subterm (existing --tgt=1/2/3 byte-identical).
+    pr->eq_r[pr->n_eqns] =
+        fold ? pr_tgt_fold_term(pr, pr_tgt_subs[i], 1, i) : pr_tgt_subs[i];
     // Goal-cone definitions seed the spb=goal derivation bit.
     pr->eq_gd[pr->n_eqns] = pr_tgt_sub_goal[i];
     pr->n_eqns++;
   }
   pr->n_fresh_syms = pr->n_syms - pr->fresh_sym_base;
+  if (fold) {
+    // Fold the goal-derived units in place (Vampire apply() `u = nc`,
+    // .cpp:250): the deep goal collapses onto the top-level fresh names
+    // (e.g. sF6 != sF11) instead of waiting on intake interreduction --
+    // which stalls, since a partially-folded goal no longer matches the
+    // deep definition rules.  Conjecture-role equations (marked in the
+    // collect pass, below the definition block) fold too.
+    u32 lim = pr->n_fresh_syms;
+    u32 ngf = (pr->n_goals > 0u) ? pr->n_goals : 0u;
+    for (u32 g = 0; g < ngf; g++) {
+      pr->goals_l[g] = pr_tgt_fold_term(pr, pr->goals_l[g], 0, lim);
+      pr->goals_r[g] = pr_tgt_fold_term(pr, pr->goals_r[g], 0, lim);
+    }
+    if (pr->n_goals > 0u) {
+      pr->goal_l = pr->goals_l[0];
+      pr->goal_r = pr->goals_r[0];
+    } else {
+      pr->goal_l = pr_tgt_fold_term(pr, pr->goal_l, 0, lim);
+      pr->goal_r = pr_tgt_fold_term(pr, pr->goal_r, 0, lim);
+    }
+    for (u32 e = 0; e < def_base; e++)
+      if (pr->eq_gd[e]) {
+        pr->eq_l[e] = pr_tgt_fold_term(pr, pr->eq_l[e], 0, lim);
+        pr->eq_r[e] = pr_tgt_fold_term(pr, pr->eq_r[e], 0, lim);
+      }
+  }
   if (getenv("THVM_ATP_TGT_DEBUG") != NULL) {
-    fprintf(stderr, "[tgt] %u definitions introduced (%s%s)\n",
+    fprintf(stderr, "[tgt] %u definitions introduced (%s%s%s)\n",
             nsub, ground_only ? "ground" : "full",
-            all_eqns ? ", all axioms" : "");
+            all_eqns ? ", all axioms" : "", fold ? ", folded" : "");
+    fprintf(stderr, "[tgt] goal after transform: ");
+    pr_print_term(stderr, pr, pr->goal_l);
+    fprintf(stderr, " = ");
+    pr_print_term(stderr, pr, pr->goal_r);
+    fputc('\n', stderr);
     // One line per definition: name, label, arity, body (name(...) form)
     // -- feeds the oracle-proof lemma aligner.
     for (u32 i = 0; i < pr->n_fresh_syms; i++) {
@@ -1627,9 +1702,14 @@ int main(int argc, char **argv) {
   {
     const char *tg = pr_mode ? getenv("THVM_ATP_TGT") : NULL;
     int tgt_mode = (tg != NULL) ? atoi(tg) : 0;
+    // THVM_ATP_TGT_FOLD: born-inter-reduced definitions + in-place goal
+    // fold (Vampire fidelity).  Orthogonal modifier so --tgt=1/2/3 stay
+    // byte-identical when it is unset.
+    const char *tf = pr_mode ? getenv("THVM_ATP_TGT_FOLD") : NULL;
+    int tgt_fold = (tf != NULL && tf[0] != '\0' && tf[0] != '0');
     if (tgt_mode >= 1) {
       pr_tgt_transform(&prp, /*ground_only=*/tgt_mode == 2,
-                       /*all_eqns=*/tgt_mode >= 3);
+                       /*all_eqns=*/tgt_mode >= 3, /*fold=*/tgt_fold);
     } else if (pr_mode && getenv("THVM_ATP_FLATTEN_GOAL") != NULL
                && getenv("THVM_ATP_FLATTEN_GOAL")[0] != '0') {
       pr_flatten_goal(&prp);
