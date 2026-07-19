@@ -7556,6 +7556,12 @@ static int cli_strategy_complete(void) {
   // CP drops are not exactly completeness-preserving either: GaveUp,
   // never Satisfiable.
   const char *sj = getenv("THVM_ATP_SIMPLER_JOIN");
+  // Pop-time ground-joinability case-split: the discard is a redundancy
+  // claim (ground-joinable CPs are redundant), completeness-preserving
+  // in theory -- but the implementation is young, and an over-discard
+  // would make a saturation certify nothing.  Conservative: GaveUp,
+  // never Satisfiable, until the mechanism has corpus history.
+  const char *pgj = getenv("THVM_ATP_POP_GJ");
   // Without unfailing CP formation (use_unfailing_cp, armed by the WM
   // preset; THVM_ATP_UNFAILING overrides either way) an unorientable
   // equation contributes NO ordered overlaps, so a QUEUE_EMPTY that
@@ -7576,7 +7582,7 @@ static int cli_strategy_complete(void) {
       && (mw == NULL || *mw == '0') && (am == NULL || *am == '0')
       && (mts == NULL || *mts == '0')
       && (rr == NULL || *rr == '0') && (en == NULL || *en == '0')
-      && (sj == NULL || *sj == '0');
+      && (sj == NULL || *sj == '0') && (pgj == NULL || *pgj == '0');
 }
 
 // --- term printing (names from the parsed .pr) ---------------------
