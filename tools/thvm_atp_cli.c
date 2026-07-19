@@ -4884,6 +4884,31 @@ static int tp_input_is_fof(const char *text) {
   return 0;
 }
 
+// Comment-aware marker sniff: does `raw` contain `marker` OUTSIDE any
+// %-comment?  TPTP comments run % to end-of-line; problem headers are
+// wall-to-wall comment text and regularly contain words like AXIOMS or
+// record-keyword substrings (SEV326^5: "GVB-MB-AXIOMS" in a comment
+// matched the Waldmeister .pr marker AXIOMS and routed a higher-order
+// file to the bench default -- the CASC-J13 bench-default bug class,
+// resurrected through a comment).  Every input-format decision below
+// must use this, never a bare strstr on raw.
+static int tp_raw_marker(const char *raw, const char *marker) {
+  size_t mlen = strlen(marker);
+  const char *line = raw;
+  while (*line != '\0') {
+    const char *eol = strchr(line, '\n');
+    const char *end = (eol != NULL) ? eol : line + strlen(line);
+    const char *pct = memchr(line, '%', (size_t)(end - line));
+    const char *stop = (pct != NULL) ? pct : end;
+    for (const char *p = line; p + mlen <= stop; p++) {
+      if (memcmp(p, marker, mlen) == 0) return 1;
+    }
+    if (eol == NULL) break;
+    line = eol + 1;
+  }
+  return 0;
+}
+
 // --- fresh symbol names against the pc_intern table ------------------
 static char g_fof_true_name[TP_NAME_LEN]  = "true";
 static char g_fof_false_name[TP_NAME_LEN] = "false";
@@ -6815,6 +6840,90 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   return 0;
 }
 
+// --- one-element-model satisfiability gate --------------------------------
+// A clause set satisfiable in the ONE-ELEMENT interpretation is
+// satisfiable, full stop -- no lane may claim a refutation.  In that
+// interpretation every equality atom is TRUE (both sides denote the
+// single element): a positive equality literal satisfies its clause
+// outright, a negative one is false and drops; what remains is boolean
+// satisfiability over the PREDICATE symbols (each collapses to one
+// truth value).  This is exactly the model the eq/true/false
+// equational encoding cannot see -- the encoding is faithful only
+// where true != false, so a collapse-satisfiable input (CAT015-3:
+// `X = Y | there_exists(X) | there_exists(Y)` against
+// `~there_exists(Z)`) lets the or-tables derive a spurious refutation
+// (caught by the 2026-07-19 full-library soundness sweep).  Deciding
+// here, BEFORE any lane runs, is sound for every lane at once, and
+// costs a tiny DPLL: the sets are minute after equality filtering.
+// Node-budgeted; budget exhaustion returns "not shown satisfiable"
+// (lanes proceed) -- the collapse instances seen in practice are
+// small, and the guard must never block real proving on a timeout.
+static int fof_one_elt_rec(const int *cl_off, const int *cl_len,
+                           const int *lv, const int *lp,
+                           int ncl, signed char *asg, long *budget) {
+  if (--(*budget) < 0) return -1;              // unknown: budget spent
+  int pick = -1;
+  for (int c = 0; c < ncl; c++) {
+    int sat = 0, undec = -1;
+    for (int k = 0; k < cl_len[c]; k++) {
+      int v = lv[cl_off[c] + k], p = lp[cl_off[c] + k];
+      if (asg[v] < 0) { if (undec < 0) undec = v; }
+      else if (asg[v] == p) { sat = 1; break; }
+    }
+    if (sat) continue;
+    if (undec < 0) return 0;                   // clause falsified
+    if (pick < 0) pick = undec;
+  }
+  if (pick < 0) return 1;                      // every clause satisfied
+  for (int val = 0; val <= 1; val++) {
+    asg[pick] = (signed char)val;
+    int r = fof_one_elt_rec(cl_off, cl_len, lv, lp, ncl, asg, budget);
+    if (r != 0) { asg[pick] = -1; return r; }  // sat or unknown
+  }
+  asg[pick] = -1;
+  return 0;
+}
+
+static int fof_one_elt_sat(FolClause **cls, int ncl) {
+  enum { OE_MAX_LITS = 65536, OE_MAX_VARS = 4096, OE_MAX_CLS = 65536 };
+  static int cl_off[OE_MAX_CLS], cl_len[OE_MAX_CLS];
+  static int lv[OE_MAX_LITS], lp[OE_MAX_LITS];
+  static u64 keys[OE_MAX_VARS];
+  int nvar = 0, nlit = 0, nout = 0;
+  for (int i = 0; i < ncl && nout < OE_MAX_CLS; i++) {
+    const FolClause *c = cls[i];
+    if (c == NULL) continue;
+    int off = nlit, len = 0, sat = 0;
+    for (u32 j = 0; j < c->n_lits; j++) {
+      Term a = c->lits[j].atom;
+      if (fol_atom_is_eq(a)) {
+        if (c->lits[j].sign == 0u) { sat = 1; break; }  // positive eq: true
+        continue;                                        // negative eq: drops
+      }
+      // Predicate label (or the raw term as key for exotic atoms).
+      u64 key = (term_tag(a) == TAG_CTR) ? (u64)term_ext(a)
+                                         : ((u64)a | (1ull << 63));
+      int v = -1;
+      for (int k = 0; k < nvar; k++) if (keys[k] == key) { v = k; break; }
+      if (v < 0) {
+        if (nvar >= OE_MAX_VARS || nlit >= OE_MAX_LITS) return 0;
+        keys[nvar] = key; v = nvar++;
+      }
+      if (nlit >= OE_MAX_LITS) return 0;
+      lv[nlit] = v; lp[nlit] = (c->lits[j].sign == 0u) ? 1 : 0;
+      nlit++; len++;
+    }
+    if (sat) { nlit = off; continue; }
+    if (len == 0) return 0;   // clause false in the one-element model
+    cl_off[nout] = off; cl_len[nout] = len; nout++;
+  }
+  if (nout == 0) return 1;
+  signed char asg[OE_MAX_VARS];
+  memset(asg, -1, sizeof asg);
+  long budget = 1000000;
+  return fof_one_elt_rec(cl_off, cl_len, lv, lp, nout, asg, &budget) == 1;
+}
+
 static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
   // Step budget: wall-governed by default (cnf_init(0) = 1<<30 steps;
   // the 60%-of-remaining-wall guard + the heap guard in _once are the
@@ -7134,6 +7243,12 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   g_fof_soft_oversize = 0;
   g_cur_prov_kind = PROV_NONE;
   g_cur_prov_ix   = 0;
+  // One-element-model gate: a set satisfiable in the one-element
+  // interpretation is satisfiable -- give up before ANY lane can run
+  // an encoding that would spuriously refute it (see fof_one_elt_sat).
+  // Split children inherit the parent's verdict path; skip there.
+  if (!g_fof_split_child && fof_one_elt_sat(cls, ncl))
+    tp_giveup("satisfiable in the one-element interpretation");
   // fof-split fitness (parent): Horn except 1..k or-clauses, every
   // positive ground, branch product bounded.  A fitting shape hands
   // the whole wall to the branch orchestration in main -- including
@@ -8810,8 +8925,21 @@ int main(int argc, char **argv) {
     // which would run its built-in default problem and emit a spurious
     // proof.  Preprocessing splices the include, so the parse below sees
     // the real clauses.
-    if (strstr(raw, "cnf(") != NULL || strstr(raw, "fof(") != NULL
-        || strstr(raw, "include(") != NULL) {
+    // Typed formats (thf(/tff() are NOT supported: reject BEFORE the
+    // cnf/fof/include detection, so a typed file carrying include()
+    // directives (most do) cannot ride the FOF front-end, and one with
+    // neither cannot fall through to the .pr branch.  A mixed file
+    // with genuine cnf(/fof( records still takes the TPTP path (the
+    // parser ignores the typed records, as before).
+    if ((tp_raw_marker(raw, "thf(") || tp_raw_marker(raw, "tff("))
+        && !tp_raw_marker(raw, "cnf(") && !tp_raw_marker(raw, "fof(")) {
+      g_cli_szs_wanted = szs;
+      g_cli_probpath   = file;
+      free(raw);
+      tp_giveup("typed (thf/tff) input is not supported");
+    }
+    if (tp_raw_marker(raw, "cnf(") || tp_raw_marker(raw, "fof(")
+        || tp_raw_marker(raw, "include(")) {
       g_cli_tptp_mode = 1;
       g_cli_szs_wanted = szs;
       g_cli_probpath = file;
@@ -9061,8 +9189,11 @@ int main(int argc, char **argv) {
       // the bench -- the bench would run its BUILT-IN DEFAULT problem and
       // emit a spurious proof (the general form of the include-only
       // soundness bug).  Give up cleanly instead.
-      if (strstr(raw, "ORDERING") == NULL && strstr(raw, "SIGNATURE") == NULL
-          && strstr(raw, "CONCLUSION") == NULL && strstr(raw, "AXIOMS") == NULL) {
+      // Comment-aware (tp_raw_marker): a header comment containing the
+      // word AXIOMS (SEV326^5's "GVB-MB-AXIOMS") must not pass as a
+      // .pr section marker.
+      if (!tp_raw_marker(raw, "ORDERING") && !tp_raw_marker(raw, "SIGNATURE")
+          && !tp_raw_marker(raw, "CONCLUSION") && !tp_raw_marker(raw, "AXIOMS")) {
         g_cli_szs_wanted = szs;
         g_cli_probpath   = file;
         free(raw);

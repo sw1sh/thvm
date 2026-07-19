@@ -212,6 +212,22 @@ fn FolClause *fol_paramodulate(const FolClause *eq_clause, u32 eq_idx,
   Term s = term_ctr_at(eq_atom, swap ? 1u : 0u);
   Term t = term_ctr_at(eq_atom, swap ? 0u : 1u);
 
+  // SOUNDNESS (CAT015-3 false refutation, 2026-07-19): two ill-formed
+  // inference shapes must be rejected here, at the choke point every
+  // caller (saturation, proof checker, tests) shares.
+  //   * path_len == 0 addresses the WHOLE ATOM: "rewriting" a
+  //     predicate atom to a term manufactures a variable-as-literal
+  //     clause (~X0), which then resolves with anything.  Atoms are
+  //     not terms; paramodulation positions must be proper subterms.
+  //   * a bare-variable from-side unifies with ANY subterm (including
+  //     whole atoms via the path guard above) and replaces it with an
+  //     unconstrained fresh variable.  Standard superposition forbids
+  //     paramodulation from a variable side outright (an ordering can
+  //     never orient var > term); unrestricted mode inherits the ban
+  //     for well-formedness.
+  if (path_len == 0u) return NULL;
+  if (term_tag(s) == TAG_FVR) return NULL;
+
   Term target_atom = target->lits[target_idx].atom;
   Term target_atom_renamed = thvm_rename_vars(target_atom, FOL_RENAME_OFFSET);
   Term u = cp_subterm_at(target_atom_renamed, path, path_len);
