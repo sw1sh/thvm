@@ -11506,8 +11506,10 @@ static u32 atp_twee_term_score(Term t) {
 // per-problem weight configs (LAT138-1 solves under `--lhs-weight 1
 // --depth-weight 60`, a much steeper depth penalty that keeps the KB
 // derivation shallow and reaches the goal before the ACI CP explosion);
-// the env knobs expose the same tuning.  Defaults reproduce the prior
-// hardcoded formula byte-for-byte, so the WM-parity path is unchanged.
+// the env knobs (CLI --cp-lhs-weight / --cp-rhs-weight /
+// --cp-depth-weight) expose the same tuning.  Defaults reproduce the
+// prior hardcoded formula byte-for-byte, so the WM-parity path is
+// unchanged.
 static u32 atp_twee_score_combine(u32 large, u32 small, u32 depth) {
   static int lhs_w = -1, rhs_w = -1, depth_w = -1;
   if (lhs_w < 0) {

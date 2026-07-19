@@ -73,6 +73,14 @@ typedef struct {
 
 static const AtpKnob KNOBS[] = {
   {"cp-weight",              "THVM_ATP_CP_WEIGHT",       1, "CriticalPairWeight"},
+  // Twee CP-score coefficients (--cp-weight=8 only; Twee.CP.score,
+  // src/Twee/CP.hs: score = lhsweight*max(m,n) + rhsweight*min(m,n)
+  // + depthweight*depth).  Twee CLI flags --lhs-weight/--rhs-weight/
+  // --depth-weight; defaults 4/1/2 = Twee CP.defaultConfig, which the
+  // engine reproduces byte-identically when the knobs are unset.
+  {"cp-lhs-weight",          "THVM_ATP_TWEE_LHS_W",      1, "(Twee lhsWeight: coefficient on the LARGER CP side, default 4)"},
+  {"cp-rhs-weight",          "THVM_ATP_TWEE_RHS_W",      1, "(Twee rhsWeight: coefficient on the SMALLER CP side, default 1)"},
+  {"cp-depth-weight",        "THVM_ATP_TWEE_DEPTH_W",    1, "(Twee depthWeight: coefficient on CP formation depth, default 2; 60 = depth-dominant shallow selection)"},
   {"max-weight",             "THVM_ATP_MAXW",            1, "MaxWeight"},
   {"auto-max-weight",        "THVM_ATP_AUTO_MAXW",       1, "AutoMaxWeight"},
   {"max-cp-queue",           "THVM_ATP_MAX_CP_QUEUE",    1, "MaxCpQueue"},
