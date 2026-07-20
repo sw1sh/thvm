@@ -1976,6 +1976,33 @@ static void cnf_bsub_try(CnfState *s, u32 new_id, const FolClause *new_c,
   }
 }
 
+// --- single-step wall self-abort ---------------------------------------
+// A single cnf_step can spend seconds inside ONE clause's backward-
+// subsumption sweep (NP-hard multiset matching over a large active set)
+// or across the many conclusions one given generates -- so the FOF pre-
+// pass caller's between-steps wall poll (thvm_atp_cli.c) is not enough:
+// one monster step overruns the slice wall with no SZS line (the 240s
+// FOF NoOutput class; GEO340 burned 45s+ in one step's subsumption
+// loop).  Mirror the engine's g_atp_lpo_wall_deadline_us -- a file-local
+// absolute deadline the hot loops poll -- and trip s->status = ATP_ABORTED
+// when it fires so cnf_step returns promptly.  Zero (default) = disarmed,
+// so cnf_run and every non-pre-pass caller are byte-for-byte unaffected.
+static u64 g_cnf_wall_deadline_us = 0u;
+static u32 g_cnf_wall_tick = 0u;
+
+fn void cnf_set_wall_deadline(double seconds_from_now) {
+  if (seconds_from_now <= 0.0) { g_cnf_wall_deadline_us = 0u; return; }
+  u64 now = atp_now_us();
+  if (now == 0u) return;   // clock unavailable: leave the deadline off
+  g_cnf_wall_deadline_us = now + (u64)(seconds_from_now * 1e6);
+}
+
+static inline int cnf_wall_fired(void) {
+  if (g_cnf_wall_deadline_us == 0u) return 0;
+  u64 now = atp_now_us();
+  return now != 0u && now >= g_cnf_wall_deadline_us;
+}
+
 static void cnf_backward_subsume(CnfState *s, u32 new_id) {
   const FolClause *new_c = s->clauses[new_id];
   if (new_c == NULL) return;
@@ -2002,10 +2029,15 @@ static void cnf_backward_subsume(CnfState *s, u32 new_id) {
     } else {
       b = cnf_idx_bucket(&s->idx_bsub_f, cnf_idx_fine_key(p0, sgn, a0), 0u);
     }
-    for (u32 e = 0; b != NULL && e < b->n; e++)
+    for (u32 e = 0; b != NULL && e < b->n; e++) {
+      if ((e & 0x7f) == 0 && cnf_wall_fired()) { s->status = ATP_ABORTED; return; }
       cnf_bsub_try(s, new_id, new_c, nm, (u32)b->ents[e]);
+    }
   } else {
-    for (u32 i = 0; i < s->n; i++) cnf_bsub_try(s, new_id, new_c, nm, i);
+    for (u32 i = 0; i < s->n; i++) {
+      if ((i & 0x7f) == 0 && cnf_wall_fired()) { s->status = ATP_ABORTED; return; }
+      cnf_bsub_try(s, new_id, new_c, nm, i);
+    }
   }
   // Subsumption scratch (per-candidate renames) retains nothing.
   cnf_reclaim(mark, gc_snap, kbo_snap);
@@ -2091,6 +2123,12 @@ static void cnf_consider(CnfState *s, FolClause *c,
                          u32 parent_a, u32 parent_b) {
   if (c == NULL) return;
   if (s->status != ATP_RUNNING) { fol_clause_free(c); return; }
+  // One given can generate thousands of conclusions; poll the wall here
+  // too so a step that floods cnf_consider (rather than one long
+  // subsumption sweep) also self-aborts inside the step.
+  if ((++g_cnf_wall_tick & 0xff) == 0 && cnf_wall_fired()) {
+    s->status = ATP_ABORTED; fol_clause_free(c); return;
+  }
   // The conclusion's assumption set (the parents' union) gates the
   // simplifiers below; all-zero when avatar is off.
   CnfGmask asum;

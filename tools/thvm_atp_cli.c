@@ -6867,6 +6867,11 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   double wall_guard = wall_frac * (g_cli_wall_sec - (horn_now() - g_cli_main_t0));
   if (wall_guard < 0.0) wall_guard = 0.0;
   double t0 = horn_now();
+  // Arm the single-step self-abort so ONE long cnf_step (a giant backward-
+  // subsumption sweep, a conclusion flood) trips ATP_ABORTED at the guard
+  // instead of overrunning this between-steps poll (GEO340 burned 45s+ in
+  // one step).  Disarmed after the loop so no later cnf caller inherits it.
+  cnf_set_wall_deadline(wall_guard);
   const char *tripped = NULL;
   u32 lrs_next = 256u;
   while (s->status == ATP_RUNNING) {
@@ -6885,6 +6890,11 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
       }
     }
   }
+  cnf_set_wall_deadline(0.0);   // disarm: no other cnf caller inherits it
+  // A single-step self-abort breaks the loop with ATP_ABORTED and no
+  // tripped tag; label it as the wall bound it is (guard already passed).
+  if (tripped == NULL && s->status == ATP_ABORTED &&
+      horn_now() - t0 > wall_guard) tripped = "wall";
   thvm_kbo_set_persist(0u);   // restore the safe per-call default
   AtpStatus st = s->status;
   u32 steps = s->step;

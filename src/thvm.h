@@ -4512,6 +4512,12 @@ fn void      cnf_set_lpo     (CnfState *s, const LpoConfig *lpo);
 fn void      cnf_set_rpo     (CnfState *s, const RpoConfig *rpo);
 fn void      cnf_set_wpo     (CnfState *s, const WpoConfig *wpo);
 
+// Arm (seconds>0) or disarm (<=0) a single-step wall self-abort: the hot
+// loops inside cnf_step (backward subsumption, the per-given conclusion
+// flood) poll it so one long step trips ATP_ABORTED instead of overrunning
+// the caller's between-steps wall poll.  File-global; disarmed by default.
+fn void      cnf_set_wall_deadline(double seconds_from_now);
+
 // Attach a selection function (default NONE).  Affects which literal
 // of a clause is allowed to participate in resolution + paramodulation.
 fn void      cnf_set_select  (CnfState *s, CnfSelection sel);
