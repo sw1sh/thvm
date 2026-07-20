@@ -4282,6 +4282,19 @@ typedef struct {
   // get a pick-best weight bonus -- the coarse analog of E's
   // conjecture-symbol weighting.
   u8         *cgoal;
+  // s2a (Vampire sine_to_age): per-clause SInE level (max over the
+  // clause's symbols of s2a_sym_slvl; a goal-unreachable symbol
+  // contributes ATP_S2A_REMOTE_LVL).  Stamped at add when s2a_coeff > 0;
+  // cnf_pop_passive's age lane then orders live passive clauses by
+  // effective age = insertion index + s2a_coeff*csine, postponing goal-
+  // distant clauses.  NULL/0 (off) is the byte-identical default.
+  u16        *csine;
+  // s2a per-symbol level table (label-indexed), copied by
+  // cnf_set_sine_levels from the CLI's D-relation over the input clauses.
+  // NULL when s2a is off.  Freed by cnf_free.
+  u8         *s2a_sym_slvl;
+  u32         s2a_n_labels;
+  u32         s2a_coeff;
   // Frozen (rename-apart) literal copies, built once at store time --
   // the reusable TARGET side of subsumption.  malloc'd FolLit arrays,
   // freed by cnf_free.

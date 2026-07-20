@@ -6570,6 +6570,87 @@ static u8 *fof_sine_cone(FolClause **cls, const u8 *ccnj, int ncl, int thr) {
   return keep;
 }
 
+// s2a (Vampire sine_to_age): per-SYMBOL SInE level over the clausified
+// set, seeded from the conjecture (explicit ccnj or all-negative)
+// clauses.  Level 0 = a conjecture symbol; k = k D-relation steps away;
+// ATP_REL_LEVEL_REMOTE = goal-unreachable.  Same generality-triggered
+// trigger as fof_sine_cone, but records the round each symbol is first
+// reached instead of a keep set.  Returns a malloc'd label-indexed table
+// (caller frees) with *out_n entries; NULL on OOM or when nothing is
+// goal-shaped to seed from.  Feeds cnf_set_sine_levels for the age lane.
+static u8 *fof_sine_sym_levels(FolClause **cls, const u8 *ccnj, int ncl,
+                               u32 *out_n) {
+  u32 n_labels = FOL_LAB_SKOLEM_BASE + g_fol_skolem_next + 1u;
+  u32 (*csym)[FSINE_CS] = malloc((size_t)ncl * sizeof *csym);
+  int *csym_n = calloc((size_t)ncl, sizeof(int));
+  u32 *gen    = calloc((size_t)n_labels, sizeof(u32));
+  u8  *reach  = calloc((size_t)n_labels, 1u);
+  u8  *lvl    = malloc((size_t)n_labels);
+  if (csym == NULL || csym_n == NULL || gen == NULL || reach == NULL ||
+      lvl == NULL) {
+    free(csym); free(csym_n); free(gen); free(reach); free(lvl);
+    return NULL;
+  }
+  for (u32 i = 0; i < n_labels; i++) lvl[i] = ATP_REL_LEVEL_REMOTE;
+  for (int c = 0; c < ncl; c++) {
+    for (u32 i = 0; i < cls[c]->n_lits; i++)
+      fof_sine_clause_syms(cls[c]->lits[i].atom, csym[c], &csym_n[c]);
+    for (int k = 0; k < csym_n[c]; k++) gen[csym[c][k]]++;
+  }
+  int n_seed = 0;
+  for (int c = 0; c < ncl; c++) {
+    u8 sd = ccnj[c];
+    if (!sd && cls[c]->n_lits > 0u) {
+      sd = 1u;
+      for (u32 i = 0; i < cls[c]->n_lits && sd; i++)
+        if (!cls[c]->lits[i].sign) sd = 0u;
+    }
+    if (!sd) continue;
+    n_seed++;
+    for (int k = 0; k < csym_n[c]; k++) {
+      if (lvl[csym[c][k]] == ATP_REL_LEVEL_REMOTE) lvl[csym[c][k]] = 0u;
+      reach[csym[c][k]] = 1u;
+    }
+  }
+  if (n_seed == 0) {
+    free(csym); free(csym_n); free(gen); free(reach); free(lvl);
+    return NULL;
+  }
+  const u32 gt = 1u, rc = 64u;
+  const double tol = 1.5;
+  for (int rd = 0; rd < 64; rd++) {
+    u8 grew = 0;
+    for (int c = 0; c < ncl; c++) {
+      u32 min_all = 0xffffffffu, min_ex = 0xffffffffu;
+      for (int k = 0; k < csym_n[c]; k++) {
+        u32 g = gen[csym[c][k]];
+        if (g < min_all) min_all = g;
+        if (g > gt && g < min_ex) min_ex = g;
+      }
+      u32 mingen = (min_ex <= rc) ? min_ex : min_all;
+      u8 hit = 0;
+      for (int k = 0; k < csym_n[c] && !hit; k++) {
+        u32 sy = csym[c][k];
+        if (!reach[sy]) continue;
+        if (gen[sy] <= gt || (double)gen[sy] <= tol * (double)mingen) hit = 1;
+      }
+      if (!hit) continue;
+      for (int k = 0; k < csym_n[c]; k++) {
+        u32 sy = csym[c][k];
+        if (lvl[sy] == ATP_REL_LEVEL_REMOTE) {
+          lvl[sy] = (u8)(rd + 1);
+          reach[sy] = 1u;
+          grew = 1u;
+        }
+      }
+    }
+    if (!grew) break;
+  }
+  free(csym); free(csym_n); free(gen); free(reach);
+  *out_n = n_labels;
+  return lvl;
+}
+
 // --- symbol precedence census (Vampire sp= / spb=goal ports) --------------
 // Occurrence counts over the pre-pass input clause set; goal_sym marks
 // labels appearing in conjecture-descended clauses.  Feeds the KBO
@@ -6726,6 +6807,23 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   // call and a stale table.
   thvm_kbo_set_persist(1u);
   thvm_kbo_invalidate();
+  // s2a (Vampire sine_to_age): compute the per-symbol SInE level table
+  // over the input clauses and arm the cnf age lane so goal-distant
+  // clauses are postponed.  THVM_ATP_S2A=<coeff> (0/unset = off).
+  {
+    const char *e = getenv("THVM_ATP_S2A");
+    if (e != NULL && e[0] != '\0') {
+      long coeff = atol(e);
+      if (coeff > 0) {
+        u32 nlab = 0;
+        u8 *lvl = fof_sine_sym_levels(cls, ccnj, ncl, &nlab);
+        if (lvl != NULL) {
+          cnf_set_sine_levels(s, lvl, nlab, (u32)coeff);
+          free(lvl);
+        }
+      }
+    }
+  }
   for (int i = 0; i < ncl; i++) {
     if (sine_keep != NULL && !sine_keep[i]) continue;   // outside the cone
     FolClause *c = fol_clause_new(cls[i]->n_lits);

@@ -174,6 +174,7 @@ fn CnfState *cnf_init(u32 step_cap) {
   s->cmaxlits    = (u64 *)calloc(s->cap, sizeof(u64));
   s->celig_valid = (u8 *)calloc(s->cap, 1);
   s->cgoal       = (u8 *)calloc(s->cap, 1);
+  s->csine       = (u16 *)calloc(s->cap, sizeof(u16));
   s->cfrozen     = (FolLit **)calloc(s->cap, sizeof(FolLit *));
   s->cnvars      = (u32 *)calloc(s->cap, sizeof(u32));
   s->cassume     = (CnfGmask *)calloc(s->cap, sizeof(CnfGmask));
@@ -210,6 +211,7 @@ fn CnfState *cnf_init(u32 step_cap) {
       s->deferred_free == NULL) {
     free(s->clauses); free(s->cweight); free(s->cpri); free(s->cmask); free(s->cpicked);
     free(s->csel); free(s->cmaxlits); free(s->celig_valid); free(s->cgoal);
+    free(s->csine); free(s->s2a_sym_slvl);
     free(s->cfrozen); free(s->cnvars); free(s->cassume); free(s->cguard);
     free(s->parked); free(s->cstale);
     free(s->active); free(s->passive); free(s->pheap); free(s->ueq);
@@ -294,6 +296,8 @@ fn void cnf_free(CnfState *s) {
   free(s->cmaxlits);
   free(s->celig_valid);
   free(s->cgoal);
+  free(s->csine);
+  free(s->s2a_sym_slvl);
   free(s->cfrozen);
   free(s->cnvars);
   free(s->cassume);
@@ -569,6 +573,66 @@ static u32 cnf_pq_pop(CnfState *s) {
   return top;
 }
 
+// s2a (Vampire sine_to_age): max SInE level over a term's TAG_CTR
+// symbols; a goal-unreachable symbol (or one past the table) contributes
+// ATP_S2A_REMOTE_LVL.  Variables contribute 0.
+static u16 cnf_term_sine_level(const CnfState *s, Term t) {
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 lab = term_ext(t);
+  u16 best = (lab < s->s2a_n_labels &&
+              s->s2a_sym_slvl[lab] != ATP_REL_LEVEL_REMOTE)
+               ? (u16)s->s2a_sym_slvl[lab] : (u16)ATP_S2A_REMOTE_LVL;
+  if (best > (u16)ATP_S2A_REMOTE_LVL) best = (u16)ATP_S2A_REMOTE_LVL;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) {
+    u16 c = cnf_term_sine_level(s, term_ctr_at(t, i));
+    if (c > best) best = c;
+  }
+  return best;
+}
+
+// s2a: per-clause SInE level = max over its literals' atoms.  0 when off
+// (byte-identical default: no table, no coefficient).
+static u16 cnf_clause_sine_level(const CnfState *s, const FolClause *c) {
+  if (s->s2a_coeff == 0u || s->s2a_sym_slvl == NULL) return 0u;
+  u16 best = 0u;
+  for (u32 i = 0; i < c->n_lits; i++) {
+    u16 c2 = cnf_term_sine_level(s, c->lits[i].atom);
+    if (c2 > best) best = c2;
+  }
+  return best;
+}
+
+// s2a: install the per-symbol SInE level table (label-indexed, computed
+// by the CLI D-relation over the input clauses) and arm the age-lane
+// postponement with coefficient `coeff`.  Copies the table.  A NULL
+// table, zero length, or coeff 0 leaves s2a off (engine byte-identical).
+fn void cnf_set_sine_levels(CnfState *s, const u8 *levels, u32 n_labels,
+                            u32 coeff) {
+  if (s == NULL) return;
+  free(s->s2a_sym_slvl);
+  s->s2a_sym_slvl = NULL;
+  s->s2a_n_labels = 0u;
+  s->s2a_coeff    = 0u;
+  if (levels == NULL || n_labels == 0u || coeff == 0u) return;
+  s->s2a_sym_slvl = (u8 *)malloc((size_t)n_labels);
+  if (s->s2a_sym_slvl == NULL) return;
+  memcpy(s->s2a_sym_slvl, levels, (size_t)n_labels);
+  s->s2a_n_labels = n_labels;
+  s->s2a_coeff    = coeff;
+  if (getenv("THVM_ATP_S2A_DUMP") != NULL) {
+    u32 h0 = 0u, h1 = 0u, hk = 0u;
+    for (u32 i = 0; i < n_labels; i++) {
+      u8 lv = levels[i];
+      if (lv == 0u) h0++;
+      else if (lv == 1u) h1++;
+      else if (lv != ATP_REL_LEVEL_REMOTE) hk++;
+    }
+    fprintf(stderr, "S2A(fof) armed coeff=%u: reached L0=%u L1=%u L2+=%u "
+            "(unreached symbols -> REMOTE penalty)\n", coeff, h0, h1, hk);
+  }
+}
+
 // Internal: append clause + record trace metadata.  Used by every
 // inference path so the provenance DAG stays consistent.
 static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
@@ -598,6 +662,8 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
     if (nv != NULL) s->celig_valid = (u8 *)nv;
     void *ng = realloc(s->cgoal, (size_t)nc);
     if (ng != NULL) s->cgoal = (u8 *)ng;
+    void *nsi = realloc(s->csine, (size_t)nc * sizeof(u16));
+    if (nsi != NULL) s->csine = (u16 *)nsi;
     void *nf = realloc(s->cfrozen, (size_t)nc * sizeof(FolLit *));
     if (nf != NULL) s->cfrozen = (FolLit **)nf;
     void *nn = realloc(s->cnvars, (size_t)nc * sizeof(u32));
@@ -663,6 +729,7 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
   s->cguard[id]  = 0u;
   u32 w = cnf_clause_weight(c);
   s->cgoal[id]   = goal;
+  s->csine[id]   = cnf_clause_sine_level(s, c);   // s2a: 0 when off
   s->cweight[id] = w;
   // Non-goal deprioritization: multiplicative Vampire-style nwc when
   // set (key = w * nwc), else the legacy additive tier penalty.
@@ -2421,6 +2488,32 @@ static u32 cnf_pop_passive(CnfState *s) {
       return id;
     }
   }
+  if (s->s2a_coeff > 0u) {
+    // s2a age lane: pick the live passive clause with the smallest
+    // effective age = insertion index + s2a_coeff*csine, so a goal-near
+    // clause wins over a goal-distant one (Vampire sine_to_age).  Skip
+    // the dead prefix first to bound the scan, then O(live-passive).
+    while (s->passive_head < s->n_passive) {
+      u32 id = s->passive[s->passive_head];
+      if (s->clauses[id] != NULL && !s->cpicked[id]) break;
+      s->passive_head++;
+    }
+    u64 best_eff = UINT64_MAX;
+    u32 best_k = ~0u;
+    for (u32 k = s->passive_head; k < s->n_passive; k++) {
+      u32 id = s->passive[k];
+      if (s->clauses[id] == NULL || s->cpicked[id]) continue;
+      if (cnf_lrs_discard(s, id)) continue;
+      if (!cnf_is_active(s, id)) { cnf_park(s, id); continue; }
+      u64 eff = (u64)k + (u64)s->s2a_coeff * (u64)s->csine[id];
+      if (eff < best_eff) { best_eff = eff; best_k = k; }
+    }
+    if (best_k != ~0u) {
+      u32 id = s->passive[best_k];
+      s->cpicked[id] = 1u;
+      return id;
+    }
+  } else {
   while (s->passive_head < s->n_passive) {
     u32 id = s->passive[s->passive_head++];
     if (s->clauses[id] == NULL || s->cpicked[id]) continue;
@@ -2428,6 +2521,7 @@ static u32 cnf_pop_passive(CnfState *s) {
     if (!cnf_is_active(s, id) && cnf_park(s, id)) continue;
     s->cpicked[id] = 1u;
     return id;
+  }
   }
   // Age turn with a drained FIFO: fall back to the heap.
   for (;;) {
