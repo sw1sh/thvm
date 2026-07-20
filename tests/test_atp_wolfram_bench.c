@@ -1818,6 +1818,78 @@ int main(int argc, char **argv) {
         }
       }
     }
+    // KBO per-symbol WEIGHT generation scheme (Vampire kbo_weight_scheme
+    // / -kws), opt-in and orthogonal to --sym-prec above: sym-prec fills
+    // prp.precedence, kws fills prp.weights.  Both feed the SAME KboConfig
+    // the completion comparator reads (src/atp/ft_order.c:196,305), so the
+    // two compose -- kws=precedence even reads the precedence sym-prec just
+    // set.  Unset OR `const` = every symbol weight 1 = byte-identical to
+    // the .pr default (the emitted UEQ .pr carries uniform weight 1).
+    // Vampire Kernel/KBO.cpp weightsFromOpts; every scheme yields weights
+    // >= 1 so KBO stays admissible against var_weight 1.  Gated off under
+    // the -auto matrix path (ATP_BENCH_AUTO_WEIGHTS), like sym-prec, so the
+    // wm/twee competition lanes never move.
+    //   const | precedence | inv-precedence | arity | inv-arity |
+    //   arity-sq | inv-arity-sq | frequency | inv-frequency
+    {
+      const char *kws = getenv("THVM_ATP_KWS");
+      if (kws != NULL && kws[0] != '\0'
+          && getenv("ATP_BENCH_AUTO_WEIGHTS") == NULL) {
+        u32 cap = prp.n_syms + PR_LABEL_BASE;
+        if (strcmp(kws, "const") == 0) {
+          for (u32 l = PR_LABEL_BASE; l < cap; l++) prp.weights[l] = 1u;
+        } else if (strcmp(kws, "precedence") == 0) {
+          atp_precedence_weights_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.precedence, prp.weights, 0);
+        } else if (strcmp(kws, "inv-precedence") == 0) {
+          atp_precedence_weights_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.precedence, prp.weights, 1);
+        } else if (strcmp(kws, "arity") == 0) {
+          atp_arity_weights_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.weights, 0);
+        } else if (strcmp(kws, "inv-arity") == 0) {
+          atp_arity_weights_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.weights, 1);
+        } else if (strcmp(kws, "arity-sq") == 0) {
+          atp_arity_weights_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.weights, 2);
+        } else if (strcmp(kws, "inv-arity-sq") == 0) {
+          atp_arity_weights_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.weights, 3);
+        } else if (strcmp(kws, "frequency") == 0) {
+          atp_frequency_weights_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.weights);
+        } else if (strcmp(kws, "inv-frequency") == 0) {
+          atp_inv_frequency_weights_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+              prp.goal_l, prp.goal_r, cap, prp.weights);
+        }
+        // kbo_max_zero (-kmz): zero the single maximal-by-precedence
+        // symbol's weight.  KBO admits a weight-0 symbol ONLY when it is
+        // UNARY and precedence-maximal -- the classic Schulz/Twee unary-
+        // zero trick.  A weight-0 CONSTANT would be lighter than $var
+        // (var_weight 1), breaking substitution stability (x > c but
+        // x{x:=c} = c collapses the strict order); a weight-0 arity>=2
+        // symbol is likewise inadmissible.  Both are SKIPPED (arity == 1
+        // guard) so the ordering stays a sound reduction order.  This is
+        // strictly tighter than Vampire's `arity != 0` guard, which
+        // relies on Vampire's own admissibility handling for arity>=2.
+        if (atp_env_on("THVM_ATP_KMZ") && cap > PR_LABEL_BASE) {
+          u32 max_l = PR_LABEL_BASE;
+          for (u32 l = PR_LABEL_BASE + 1u; l < cap; l++)
+            if (prp.precedence[l] > prp.precedence[max_l]) max_l = l;
+          if (prp.syms[max_l - PR_LABEL_BASE].arity == 1u)
+            prp.weights[max_l] = 0u;
+        }
+        if (getenv("THVM_ATP_DEBUG_SYMPREC") != NULL) {
+          fprintf(stderr, "KWS[%s%s] label: prec / weight\n", kws,
+                  atp_env_on("THVM_ATP_KMZ") ? "+kmz" : "");
+          for (u32 l = PR_LABEL_BASE; l < cap; l++)
+            fprintf(stderr, "  %-22s %u / %u\n",
+                    prp.syms[l - PR_LABEL_BASE].name,
+                    prp.precedence[l], prp.weights[l]);
+        }
+      }
+    }
     // -auto weight heuristic (ATP_BENCH_AUTO_WEIGHTS=1): mirror WM's Automodus,
     // which self-selects the reduction order (PhilMarlow) and IGNORES the .pr's
     // declared ORDERING -- so the .pr's uniform weight-1 is NOT what `wmcli

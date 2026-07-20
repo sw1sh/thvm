@@ -165,6 +165,8 @@ static const AtpKnob KNOBS[] = {
   {"random-ratio",           "THVM_ATP_RANDOM_RATIO",    1, "(random CP ratio)"},
   {"random-seed",            "THVM_ATP_RANDOM_SEED",     1, "(random seed)"},
   {"sym-prec",               "THVM_ATP_SYM_PREC",        1, "(Vampire symbol precedence: frequency|reverse-frequency|weighted-frequency)"},
+  {"kws",                    "THVM_ATP_KWS",             1, "(KBO symbol weight scheme: const|precedence|inv-precedence|arity|inv-arity|arity-sq|inv-arity-sq|frequency|inv-frequency)"},
+  {"kmz",                    "THVM_ATP_KMZ",             0, "(kbo-max-zero: max-precedence UNARY symbol gets weight 0)"},
   {"ord",                    "THVM_ATP_ORD",             1, "(reduction ordering: lpo selects LPO over the default KBO)"},
   {"equals-goal",            "THVM_ATP_EQUALS_GOAL",     1, "(existential-goal equals encoding; 2 = give up if inapplicable)"},
   {"narrow-queue",           "THVM_ATP_NARROW_QUEUE",    1, "(existential-goal critical-goal queue narrowing; 2 = give up if the goal is ground)"},
