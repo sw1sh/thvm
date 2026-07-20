@@ -2612,6 +2612,12 @@ static int horn_decode_side(int s, int other, HRule *ru) {
 static int g_horn_stop = 0;
 static double g_horn_t0 = 0.0;
 static double g_horn_wall = HORN_WALL_SEC;      // THVM_ATP_HORN_WALL
+// Absolute wall-clock stop deadline (process-start + slice wall), set in
+// tp_horn_release.  Independent of g_horn_wall (which is release-start-
+// relative and shapes the search): the STOP polls trip on EITHER, so a
+// late-starting release self-terminates at the slice wall without the
+// gate-relax/phase-2 timing (fractions of g_horn_wall) shifting.  0 = off.
+static double g_horn_abs_deadline = 0.0;
 static int g_horn_max_rel = HORN_MAX_RELEASES;  // THVM_ATP_HORN_MAX
 // Attempt budget: the CD lane runs wall-governed (its subsumed space
 // stays small), every other flavor keeps the fixed v1 cap.  Same for
@@ -2622,6 +2628,17 @@ static int  g_horn_max_nodes = (1 << 22);
 static double horn_now(void) {
   struct timeval tv; gettimeofday(&tv, NULL);
   return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
+}
+// STOP-condition wall test: the release-relative budget (search-shaping)
+// OR the absolute slice deadline (overrun guard), whichever comes first.
+// Used only where the loop would set g_horn_stop; the search-shaping
+// deadlines (phase-2 trigger, gate-relax cones) keep the bare g_horn_wall
+// form so a release that finishes before the wall stays byte-identical.
+static inline int horn_wall_over(void) {
+  double tn = horn_now();
+  if (tn - g_horn_t0 > g_horn_wall) return 1;
+  if (g_horn_abs_deadline > 0.0 && tn > g_horn_abs_deadline) return 1;
+  return 0;
 }
 
 // --- goal-directed backward subgoal cone (v2) ---------------------------
@@ -3199,7 +3216,7 @@ static void horn_emit_release(TpProblem *tp, const HRule *ru) {
     int cd_size = 0, cd_reso = 0;
     if (g_horn_cd) {
       static int cd_emits = 0;
-      if ((++cd_emits & 0xff) == 0 && horn_now() - g_horn_t0 > g_horn_wall) {
+      if ((++cd_emits & 0xff) == 0 && horn_wall_over()) {
         g_horn_stop = 1;
         goto reject;
       }
@@ -3322,7 +3339,7 @@ static void horn_fill(TpProblem *tp, const HRule *ru, int ci, int skip_pos) {
   while (ci == skip_pos) ci++;
   if (ci >= ru->nc) { horn_emit_release(tp, ru); return; }
   if ((g_horn_attempts & 0xfff) == 0 &&
-      (g_horn_attempts > g_horn_max_attempts || horn_now() - g_horn_t0 > g_horn_wall ||
+      (g_horn_attempts > g_horn_max_attempts || horn_wall_over() ||
        g_hn_n > g_horn_max_nodes)) { g_horn_stop = 1; return; }
   int c = ru->cl[ci], coff = 0;
   horn_deref(&c, &coff);
@@ -3341,7 +3358,16 @@ static void horn_fill(TpProblem *tp, const HRule *ru, int ci, int skip_pos) {
           int fr = orient ? g_hf[f].l : g_hf[f].r;
           int mark = g_htrail_n;
           g_horn_attempts++;
-          if (horn_unify(ru->cl[ci], 0, fl, off, 0) &&
+          // Wall-only inner poll: the attempt/node caps stay ENTRY-gated
+          // (as before this fix) so a fast release that trips the node
+          // ceiling mid-loop stops at the exact same point and its proof
+          // stays byte-identical; only the wall overrun needed catching
+          // inside the loop (one horn_fill can sweep a long candidate
+          // chain without re-entry).
+          if ((g_horn_attempts & 0xfff) == 0 && horn_wall_over())
+            g_horn_stop = 1;
+          if (!g_horn_stop &&
+              horn_unify(ru->cl[ci], 0, fl, off, 0) &&
               horn_unify(ru->ct[ci], 0, fr, off, 0)) {
             g_hpf[ci] = f;
             horn_fill(tp, ru, ci + 1, skip_pos);
@@ -3358,7 +3384,10 @@ static void horn_fill(TpProblem *tp, const HRule *ru, int ci, int skip_pos) {
       int fr = g_hix[e].orient ? g_hf[f].l : g_hf[f].r;
       int mark = g_htrail_n;
       g_horn_attempts++;
-      if (horn_unify(ru->cl[ci], 0, fl, off, 0) &&
+      if ((g_horn_attempts & 0xfff) == 0 && horn_wall_over())
+        g_horn_stop = 1;
+      if (!g_horn_stop &&
+          horn_unify(ru->cl[ci], 0, fl, off, 0) &&
           horn_unify(ru->ct[ci], 0, fr, off, 0)) {
         g_hpf[ci] = f;
         horn_fill(tp, ru, ci + 1, skip_pos);
@@ -3377,7 +3406,7 @@ static void horn_given_try(TpProblem *tp, const HRule *ru, int cpos,
   int mark = g_htrail_n;
   g_horn_attempts++;
   if ((g_horn_attempts & 0xfff) == 0 &&
-      (g_horn_attempts > g_horn_max_attempts || horn_now() - g_horn_t0 > g_horn_wall ||
+      (g_horn_attempts > g_horn_max_attempts || horn_wall_over() ||
        g_hn_n > g_horn_max_nodes)) { g_horn_stop = 1; return; }
   if (horn_unify(ru->cl[cpos], 0, fl, off, 0) &&
       horn_unify(ru->ct[cpos], 0, fr, off, 0)) {
@@ -4364,6 +4393,22 @@ static void tp_horn_release(TpProblem *tp) {
       }
     }
   }
+  // Absolute stop deadline for the release: the slice's whole wall,
+  // measured from process start.  g_horn_wall (0.4..0.8 of the wall,
+  // from g_horn_t0) still shapes the search -- the gate-relax ladder and
+  // the phase-2 head-closure trigger are fractions of it, so leaving it
+  // untouched keeps a fast release byte-identical.  But g_horn_wall is
+  // anchored at the release START, which comes AFTER the clausal pre-pass
+  // (up to 0.6 of the wall): g_horn_t0 + 0.4..0.8*wall runs PAST the slice
+  // deadline and gets hard-killed with no SZS line (the 240s FOF NoOutput
+  // class).  The STOP polls honor this absolute cap too, so the release
+  // self-terminates at the slice wall without reshaping the search that
+  // finishes before it.  An explicit --horn-wall keeps the old unbounded
+  // behavior (a manual single-lane override).
+  if (getenv("THVM_ATP_HORN_WALL") == NULL)
+    g_horn_abs_deadline = g_cli_main_t0 + g_cli_wall_sec;
+  else
+    g_horn_abs_deadline = 0.0;
   // Backward subgoal cone (v2): bounded regression from the goals, a
   // wall slice ahead of the forward loop.  Auto-gated (see
   // g_horn_steer); THVM_ATP_HORN_BWD: 0 disables, 2 forces.
