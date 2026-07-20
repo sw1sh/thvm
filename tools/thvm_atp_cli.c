@@ -9410,12 +9410,18 @@ int main(int argc, char **argv) {
     dup2(2, 1);
   }
 
-  // The CD lane spends most of the wall chaining before the engine
-  // even starts; hand the engine only what remains so the process
-  // respects its overall budget.  Other flavors keep the full wall
-  // (the 2.5s v1 chaining slice was always inside their slack).
+  // The whole FOF front-end -- clausify, the clausal pre-pass (up to
+  // 0.6 of the wall) and the Horn release (up to 0.4) -- runs BEFORE the
+  // engine even starts, and the CD lane chains on top of that.  The
+  // engine measures its own wall_cap from ITS start, so handing it the
+  // full slice wall lets it run to engine_start + wall, PAST the slice
+  // deadline (the 240s FOF NoOutput class: GEO288 engine-started at 15s
+  // of a 20s wall, ran the full 20s more, hard-killed with no SZS line).
+  // Hand it only what remains.  The UEQ path (no FOF front-end) keeps the
+  // full wall: its clausify is instant, so the value is unchanged and its
+  // proofs stay byte-identical.
   char wall_left[32];
-  if (g_horn_cd) {
+  if (g_horn_cd || g_cli_fof_applied) {
     double left = atof(wall) - (horn_now() - main_t0);
     if (left < 1.0) left = 1.0;
     snprintf(wall_left, sizeof wall_left, "%.1f", left);
