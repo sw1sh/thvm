@@ -384,7 +384,16 @@ static KboFlatNode g_lpo_flat_b[KBO_FLAT_CAP];
 // a much smaller key space than (Term, Term) and stays stable for the
 // duration of one thvm_lpo call.
 
-#define LPO_FLAT_MEMO_BITS 14
+// Position-keyed (pa, pb, side) memo for lpo_flat_rec.  Raised 14 -> 20
+// (16K -> 1M entries, ~16 MB) together with KBO_FLAT_CAP 4096 -> 65536:
+// once ~32k-node peaks stay on the flat path, one comparison touches a
+// position space of up to |s|*|t| ~ 10^9, so a 16K direct-mapped memo
+// thrashed (evicting entries the recursion re-reaches) and collapsed the
+// verdict back toward the un-memoized exponential.  1M entries keep the
+// reached-pair working set resident, holding the comparison at its
+// O(|s|*|t|) polynomial bound.  Pure speed: a collision recomputes, never
+// returns a stale verdict (epoch + (pa,pb,side) are re-checked on hit).
+#define LPO_FLAT_MEMO_BITS 20
 #define LPO_FLAT_MEMO_SIZE (1u << LPO_FLAT_MEMO_BITS)
 #define LPO_FLAT_MEMO_MASK (LPO_FLAT_MEMO_SIZE - 1u)
 

@@ -3284,6 +3284,16 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
   }
   for (;;) {
     if (m.budget == 0u) break;
+    // Wall-clock / host-abort poll.  A single normalize can descend a
+    // pathologically large term (CP overlaps blow up to ~90k nodes, see
+    // nf_cap below), and neither this loop nor its inner KBO-orient encode
+    // otherwise checks the wall -- so once the LPO comparison hotspot is
+    // fast enough to reach that regime, a normalize inside one saturation
+    // step can run for tens of seconds past --wall.  Throttled (every 256
+    // calls) and inert unless a deadline is armed (s->wall_deadline_us) or
+    // a host Abort[] is pending; the partial NF is marked starved so the
+    // caller does not trust it (we are past the wall, ending the run).
+    if (atp_norm_deadline_fired(s)) { m.starved = 1u; break; }
     if (nf_cap > 0 &&
         nf_arena->n_persistent_alive - nf_start > (u64)nf_cap) {
       m.starved = 1u;   // capped: completion below proves nothing

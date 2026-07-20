@@ -1076,7 +1076,19 @@ typedef struct KboFlatNode {
   u32 sz;    // subtree span in nodes (this node + all descendants)
 } KboFlatNode;
 
-#define KBO_FLAT_CAP 4096
+// Flatterm encode cap for the KBO/LPO cache-dense comparators.  A term
+// over this many nodes cannot be encoded and the comparator falls back
+// to the Term-tree recursion (thvm_kbo / lpo_rec), which pays a heap_read
+// per child step.  Raised 4096 -> 65536: under --ord=lpo on hard UEQ
+// (GRP690-1) the completion produces CP peaks up to ~32k nodes, and every
+// LPO comparison on them was overflowing the 4096 cap and dropping to the
+// O(|s|*|t|) heap-indirected Term-tree lpo_rec -- ~100% of the late-game
+// wall.  At 65536 (4 static buffers * 65536 * 12 B ~= 3 MB) those peaks
+// stay on the array-indexed flat path (lpo_flat_rec), which steps
+// children by cur += node[cur].sz with no heap read.  The verdict is
+// identical (same Dershowitz LPO / Loechner KBO body); only the constant
+// per node drops.
+#define KBO_FLAT_CAP 65536
 
 static KboFlatNode g_kbo_flat_a[KBO_FLAT_CAP];
 static KboFlatNode g_kbo_flat_b[KBO_FLAT_CAP];

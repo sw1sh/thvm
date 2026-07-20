@@ -2878,18 +2878,24 @@ int main(int argc, char **argv) {
   if (getenv("THVM_ATP_ENIGMA_EXPORT") != NULL)
     thvm_atp_set_record_cp_features(s, 1u);
 
-  // Arm the LPO comparator's mid-comparison wall self-abort.  The
-  // completion loop below polls the wall only BETWEEN steps; under
-  // --ord=lpo a single huge-term comparison inside one step can run for
-  // tens of seconds, overrunning --wall (RC=124 instead of a clean
-  // GaveUp).  This bounds that within-step overrun without touching the
-  // engine's own deadline (KBO runs are unaffected -- KBO never trips it).
-  if (wall_cap > 0.0) thvm_atp_arm_lpo_wall(wall_cap);
+  // Arm the wall deadline under --ord=lpo for BOTH the engine (its per-step
+  // and per-normalize deadline polls) and the LPO comparator (its mid-
+  // comparison self-abort).  Both are required: within a single saturation
+  // step a huge-term LPO comparison OR a huge-term normalize (CP overlaps
+  // blow up to ~90k nodes) can each run tens of seconds, and the completion
+  // loop below polls the wall only BETWEEN steps -- so without these a slow
+  // LPO run overruns --wall (RC=124).  Gated on use_lpo: the KBO path's
+  // steps finish in ms and already self-terminate via the between-steps
+  // check, so it is left byte-unchanged (no engine deadline, no norm poll).
+  if (wall_cap > 0.0 && use_lpo) {
+    thvm_atp_set_wall_deadline(s, wall_cap);
+    thvm_atp_arm_lpo_wall(wall_cap);
+  }
   // THVM_ATP_LRS=1 turns on the Vampire Limited Resource Strategy.  Also
   // wires the user-loop `wall_cap` into thvm_atp_set_wall_deadline so the
-  // LRS horizon has a budget to plan against -- the engine's saturation
-  // is still bounded by the same wall_cap, so the timing is comparable
-  // to LRS=0.
+  // LRS horizon has a budget to plan against (covers the KBO+LRS case not
+  // armed above); the engine's saturation stays bounded by the same
+  // wall_cap, so the timing is comparable to LRS=0.
   {
     const char *lrs = getenv("THVM_ATP_LRS");
     if (lrs != NULL && lrs[0] != '\0' && lrs[0] != '0') {
