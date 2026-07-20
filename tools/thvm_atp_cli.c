@@ -8485,15 +8485,30 @@ static int run_schedule(const char *self, const char *file, double wall,
       if (v >= 1 && v <= N_SCHED) max_par = v;
     }
   }
+  // Global wall deadline: the schedule shares ONE wall budget across all
+  // waves.  Each slice launches with the REMAINING wall, never a fresh
+  // full wall -- otherwise a wave-2 slice (position > max_par, common on
+  // FOF input where far more than max_par lanes apply) runs its own full
+  // wall stacked on wave-1's, the parent rides to its wall+60 alarm, and
+  // the competition's hard wall/CPU kill truncates the run to NoOutput
+  // instead of a clean GaveUp.  A small margin leaves the parent time to
+  // print its status line inside the hard limit.  This is the "one wall
+  // budget, every strategy racing" condition the concurrency comment
+  // above describes -- now actually enforced.
+  double sched_t0 = horn_now();
+  double budget = (wall > 6.0) ? wall - 3.0 : wall;
   // Launch up to max_par, then refill as children exit.
   while (winner < 0 && (next < N_SCHED || launched > 0)) {
     while (winner < 0 && launched < max_par && next < N_SCHED) {
+      double rem = budget - (horn_now() - sched_t0);
+      if (rem < 2.0) break;   // no wall budget left: stop launching slices
       int i = next++;
+      double slice_wall = rem;
       snprintf(outs[i], sizeof outs[i], "/tmp/thvm_sched_%d_%d.out",
                (int)getpid(), i);
       if (g_cli_verbose)
-        fprintf(stderr, "%% FindProof schedule slice %s (%.0fs, concurrent)\n",
-                SCHEDULE[i].name, wall);
+        fprintf(stderr, "%% FindProof schedule slice %s (%.0fs, remaining wall)\n",
+                SCHEDULE[i].name, slice_wall);
       pid_t pid = fork();
       if (pid == 0) {
         // Child: own process group so the parent can kill the WHOLE
@@ -8516,7 +8531,7 @@ static int run_schedule(const char *self, const char *file, double wall,
         }
         char cmd[4096];
         snprintf(cmd, sizeof cmd, "FINDPROOF_SLICE=1 '%s' %s --wall=%.0f%s%s '%s'",
-                 self, SCHEDULE[i].flags, wall,
+                 self, SCHEDULE[i].flags, slice_wall,
                  szs ? " --szs" : "", want_proof ? " --proof" : "", file);
         // Forward the slice's real exit code: 2 (input/environment error,
         // e.g. an unresolvable include) must stay distinguishable from 1
