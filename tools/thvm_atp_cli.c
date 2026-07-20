@@ -232,6 +232,13 @@ static const AtpKnob KNOBS[] = {
   {"heap-cells",             "THVM_HEAP_CELLS",          1, "(heap size, cells)"},
   {"profile",                "THVM_ATP_PROFILE",         1, "(profiling level)"},
   {"diag",                   "THVM_ATP_DIAG",            1, "(diagnostics)"},
+  // ENIGMA Tier-1 learned CP selection.  --enigma routes CP-queue
+  // priority through the trained logistic/MLP scorer (cp_weight_mode =
+  // ATP_CP_WEIGHT_LEARNED); --enigma-weights=<path> loads CASC-trained
+  // weights (else the baked-in defaults score).  Both default OFF, so an
+  // unset run is byte-identical to the classical selection.
+  {"enigma",                 "THVM_ATP_ENIGMA",          0, "(route CP selection through the learned ENIGMA scorer)"},
+  {"enigma-weights",         "THVM_ATP_ENIGMA_WEIGHTS",  1, "(path to a trained learned-scorer weights file)"},
 };
 static const int N_KNOBS = (int)(sizeof(KNOBS) / sizeof(KNOBS[0]));
 

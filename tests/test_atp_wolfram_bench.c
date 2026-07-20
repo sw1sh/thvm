@@ -2051,6 +2051,40 @@ int main(int argc, char **argv) {
              loaded ? "LOADED" : "FAILED-TO-LOAD", ga, s->gnn_rerank_period, coop);
     }
   }
+  // ENIGMA Tier 1: THVM_ATP_ENIGMA_WEIGHTS=<path> loads a trained
+  // logistic / MLP CP scorer from a whitespace-separated f64 text file
+  // (thvm_atp_set_learned_scorer's blob layout: kind, hidden, mean[14],
+  // inv_std[14], then LINEAR w_lin[14],b or MLP W1/b1/w2/b2) and pushes
+  // it as the runtime learned scorer, so --enigma
+  // (ATP_CP_WEIGHT_LEARNED) ranks CPs with CASC-trained weights instead
+  // of the baked-in ATP_LEARNED_W default.  Process-global + guarded so a
+  // multi-problem bench loads once; unset => untouched (baked-in scorer),
+  // so a run without the env is byte-identical.
+  {
+    static int enigma_w_tried = 0;
+    const char *ew = getenv("THVM_ATP_ENIGMA_WEIGHTS");
+    if (!enigma_w_tried && ew != NULL && ew[0] != '\0') {
+      enigma_w_tried = 1;
+      FILE *wf = fopen(ew, "r");
+      if (wf == NULL) {
+        fprintf(stderr, "%% ENIGMA weights: cannot open %s\n", ew);
+      } else {
+        static double wb[2u + 2u * ATP_CP_FEATURE_DIM
+                         + ATP_LEARNED_MAX_HIDDEN * ATP_CP_FEATURE_DIM
+                         + 2u * ATP_LEARNED_MAX_HIDDEN + 1u];
+        u32 wn = 0u;
+        double wv;
+        while (wn < (u32)(sizeof wb / sizeof wb[0])
+               && fscanf(wf, "%lf", &wv) == 1) {
+          wb[wn++] = wv;
+        }
+        fclose(wf);
+        int ok = thvm_atp_set_learned_scorer(wb, wn);
+        fprintf(stderr, "%% ENIGMA weights: %s (%u params) <- %s\n",
+                ok ? "loaded" : "REJECTED malformed blob", wn, ew);
+      }
+    }
+  }
   // CP-weight mode: when `THVM_ATP_CP_WEIGHT` (an `AtpCpWeightMode`
   // integer) is exported, override the mode for the experiment;
   // otherwise leave the engine default (ATP_CP_WEIGHT_GT) in place
@@ -2606,6 +2640,17 @@ int main(int argc, char **argv) {
   // the preset's CH_MaxWeight default.
   if (env_cp_weight != NULL && *env_cp_weight != 0) {
     thvm_atp_set_cp_weight_mode(s, (u32)strtoul(env_cp_weight, NULL, 10));
+  }
+  // --enigma / THVM_ATP_ENIGMA=1: route CP selection through the learned
+  // ENIGMA scorer (ATP_CP_WEIGHT_LEARNED).  Applied after the explicit
+  // THVM_ATP_CP_WEIGHT so the alias composes with a runtime weights file
+  // (THVM_ATP_ENIGMA_WEIGHTS above).  Unset => untouched, so a run
+  // without --enigma keeps its preset/CP-weight selection exactly.
+  {
+    const char *en = getenv("THVM_ATP_ENIGMA");
+    if (en != NULL && en[0] != '\0' && en[0] != '0') {
+      thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_LEARNED);
+    }
   }
   // THVM_ATP_RHS_IR=0/1: independent override of the WM RHS-
   // interreduction mode (RMRechtsInterred "modify rule": full R+E
