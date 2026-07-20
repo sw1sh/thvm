@@ -7431,6 +7431,23 @@ fn void atp_frequency_weights_g(const Term *lhs, const Term *rhs, u32 n_eqns,
                                 Term goal_l, Term goal_r, u32 n_labels,
                                 u32 *weights);
 
+// KBO weight-generation schemes (Vampire kbo_weight_scheme / -kws,
+// Kernel/KBO.cpp weightsFromOpts), goal-inclusive.  atp_arity_weights_g
+// mode: 0 arity, 1 inv_arity, 2 arity_squared, 3 inv_arity_squared;
+// atp_precedence_weights_g inverse: 0 precedence, 1 inv_precedence
+// (reads the live precedence).  All yield weights >= 1 so KBO stays
+// admissible against var_weight 1.  See src/atp/precedence.c.
+fn void atp_arity_weights_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                            Term goal_l, Term goal_r, u32 n_labels,
+                            u32 *weights, int mode);
+fn void atp_inv_frequency_weights_g(const Term *lhs, const Term *rhs,
+                                    u32 n_eqns, Term goal_l, Term goal_r,
+                                    u32 n_labels, u32 *weights);
+fn void atp_precedence_weights_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                                 Term goal_l, Term goal_r, u32 n_labels,
+                                 const u32 *precedence, u32 *weights,
+                                 int inverse);
+
 // 8.10b: top-K peek into the CP queue.  Reuses the existing
 // INC-priority + collapse_ordered pipeline from
 // `thvm_atp_select_cp` but does NOT pop -- the queue is left

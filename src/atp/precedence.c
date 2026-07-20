@@ -627,3 +627,120 @@ fn void atp_frequency_weights_g(const Term *lhs, const Term *rhs, u32 n_eqns,
     weights[l] = (count[l] > 0u) ? count[l] : 1u;
   free(count);
 }
+
+// === KBO weight-generation schemes (Vampire kbo_weight_scheme -kws) ===
+//
+// The remaining E-inspired schemes from Vampire Kernel/KBO.cpp
+// weightsFromOpts, as goal-inclusive ports mirroring
+// atp_frequency_weights_g above.  Every scheme yields a weight >= 1 for
+// every symbol (variables stay at var_weight 1), so the KBO stays a
+// valid, admissible reduction ordering: a weight-generation scheme can
+// reshape which superpositions fire but never make an unsound one.
+// Symbols that never occur in axioms + goal get weight 1 (they cannot
+// appear in any compared term, so ft_order never reads them).
+
+// Walk one term, recording each CTR-label's arity (every occurrence of a
+// well-formed symbol shares one arity, so last-writer-wins is exact) and
+// tallying occurrences.  count[] / arity[] are indexed by label.
+static void prec_arity_walk(Term seed, u32 *count, u32 *arity, u32 n_labels) {
+  Term stack[256];
+  u32 sp = 0;
+  stack[sp++] = seed;
+  while (sp > 0) {
+    Term t = stack[--sp];
+    if (term_tag(t) == TAG_CTR) {
+      u32 lab = term_ext(t);
+      u32 n = term_ctr_n(t);
+      if (lab < n_labels) { count[lab]++; arity[lab] = n; }
+      for (u32 c = 0; c < n && sp < 256; c++) stack[sp++] = term_ctr_at(t, c);
+    }
+  }
+}
+
+static void prec_arity_census_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                                Term goal_l, Term goal_r,
+                                u32 *count, u32 *arity, u32 n_labels) {
+  for (u32 i = 0; i < n_labels; i++) { count[i] = 0u; arity[i] = 0u; }
+  for (u32 e = 0; e < n_eqns; e++) {
+    prec_arity_walk(lhs[e], count, arity, n_labels);
+    prec_arity_walk(rhs[e], count, arity, n_labels);
+  }
+  if (term_tag(goal_l) == TAG_CTR || term_tag(goal_r) == TAG_CTR) {
+    prec_arity_walk(goal_l, count, arity, n_labels);
+    prec_arity_walk(goal_r, count, arity, n_labels);
+  }
+}
+
+// Arity family (Vampire ARITY / INV_ARITY / ARITY_SQUARED /
+// INV_ARITY_SQUARED).  mode 0 = arity + 1, 1 = maxArity - arity + 1,
+// 2 = arity*arity + 1, 3 = maxArity*maxArity - arity*arity + 1, where
+// maxArity is the greatest arity among occurring symbols.  Each formula
+// is >= 1 for every arity in [0, maxArity].
+fn void atp_arity_weights_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                            Term goal_l, Term goal_r, u32 n_labels,
+                            u32 *weights, int mode) {
+  if (n_labels == 0u) return;
+  u32 *count = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
+  u32 *arity = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
+  if (count == NULL || arity == NULL) { free(count); free(arity); return; }
+  prec_arity_census_g(lhs, rhs, n_eqns, goal_l, goal_r, count, arity,
+                      n_labels);
+  u32 max_ar = 0u;
+  for (u32 l = 0; l < n_labels; l++)
+    if (count[l] > 0u && arity[l] > max_ar) max_ar = arity[l];
+  for (u32 l = 0; l < n_labels; l++) {
+    if (count[l] == 0u) { weights[l] = 1u; continue; }
+    u32 a = arity[l];
+    switch (mode) {
+      case 1:  weights[l] = max_ar - a + 1u; break;
+      case 2:  weights[l] = a * a + 1u; break;
+      case 3:  weights[l] = max_ar * max_ar - a * a + 1u; break;
+      default: weights[l] = a + 1u; break;
+    }
+  }
+  free(count); free(arity);
+}
+
+// INV_FREQUENCY (Vampire: max > 0 ? max - freq + 1 : 1).  The RAREST
+// symbol weighs the most; the mirror of atp_frequency_weights_g.
+fn void atp_inv_frequency_weights_g(const Term *lhs, const Term *rhs,
+                                    u32 n_eqns, Term goal_l, Term goal_r,
+                                    u32 n_labels, u32 *weights) {
+  if (n_labels == 0u) return;
+  u32 *count = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
+  if (count == NULL) return;
+  prec_occ_census_g(lhs, rhs, n_eqns, goal_l, goal_r, count, n_labels);
+  u32 max_f = 0u;
+  for (u32 l = 0; l < n_labels; l++) if (count[l] > max_f) max_f = count[l];
+  for (u32 l = 0; l < n_labels; l++)
+    weights[l] = (count[l] > 0u && max_f > 0u) ? (max_f - count[l] + 1u) : 1u;
+  free(count);
+}
+
+// PRECEDENCE / INV_PRECEDENCE (Vampire: prec + 1 / maxPrec - prec + 1,
+// its rawPrecedence being a 0-based rank).  We read the LIVE precedence
+// array (prp.precedence, post --sym-prec) and normalize against the
+// minimum occurring precedence, so the lightest-precedence symbol gets
+// weight 1 (precedence) or the heaviest gets weight 1 (inv_precedence);
+// both stay >= 1.  inverse = 0 -> precedence, 1 -> inv_precedence.
+fn void atp_precedence_weights_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                                 Term goal_l, Term goal_r, u32 n_labels,
+                                 const u32 *precedence, u32 *weights,
+                                 int inverse) {
+  if (n_labels == 0u) return;
+  u32 *count = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
+  if (count == NULL) return;
+  prec_occ_census_g(lhs, rhs, n_eqns, goal_l, goal_r, count, n_labels);
+  u32 min_p = 0xFFFFFFFFu, max_p = 0u;
+  for (u32 l = 0; l < n_labels; l++) {
+    if (count[l] == 0u) continue;
+    if (precedence[l] < min_p) min_p = precedence[l];
+    if (precedence[l] > max_p) max_p = precedence[l];
+  }
+  for (u32 l = 0; l < n_labels; l++) {
+    if (count[l] == 0u) { weights[l] = 1u; continue; }
+    weights[l] = inverse ? (max_p - precedence[l] + 1u)
+                         : (precedence[l] - min_p + 1u);
+  }
+  free(count);
+}
