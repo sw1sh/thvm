@@ -4008,6 +4008,13 @@ fn void   thvm_lpo_invalidate(void);
 // The caller then MUST invalidate on cell movement (the ATP does, on GC).
 fn void   thvm_lpo_set_persist(u8 on);
 
+// Install a zero-arg wall-deadline hook polled inside the LPO recursion,
+// so a single huge-term comparison self-aborts once the wall has passed
+// (returns LPO_UN and unwinds) instead of overrunning --wall.  NULL
+// disarms.  Only perturbs verdicts AFTER the deadline, so a pre-wall
+// comparison is unchanged.  The ATP engine installs its wall poll here.
+fn void   thvm_lpo_set_deadline_hook(int (*hook)(void));
+
 // Diagnostic counters for lpo_flat_rec / compute / memo (the AndAssoc
 // faithful-port profile shows lpo_flat_rec_compute is 41% of CPU).
 fn void thvm_lpo_flat_stats(u64 *rec_calls, u64 *memo_hits,
@@ -7306,6 +7313,13 @@ fn u32       thvm_atp_trace_cap(void);
 // against recursively-defined axioms (Y combinator) that generate
 // unbounded CP fan-out and would otherwise run forever.
 fn void      thvm_atp_set_wall_deadline(AtpState *s, double seconds_from_now);
+
+// Arm (seconds>0) / disarm (<=0) the LPO comparator's mid-comparison wall
+// self-abort.  Independent of thvm_atp_set_wall_deadline: it bounds only
+// the LPO recursion (which can spend tens of seconds in ONE huge-term
+// comparison), not the engine's per-step polls.  Under --ord=lpo the
+// completion driver arms this so a slow comparison cannot overrun --wall.
+fn void      thvm_atp_arm_lpo_wall(double seconds_from_now);
 
 // Host abort hook.  When set, the saturation loop polls it and returns
 // ATP_ABORTED as soon as it returns nonzero -- letting a host like the

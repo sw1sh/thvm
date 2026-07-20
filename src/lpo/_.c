@@ -185,6 +185,43 @@ static const LpoConfig *g_lpo_last_cfg = NULL;
 // GC.  A non-ATP caller never flips it, so it stays sound for them.
 static u8 g_lpo_persist = 0;
 
+// === wall-deadline self-abort (Waldmeister has no analog; parity gap) =====
+// A single LPO comparison on huge terms is expensive: terms over
+// KBO_FLAT_CAP fall to the Term-tree lpo_rec below, whose cost is
+// O(|s|*|t|) with a heap_read per child step, so one comparison of two
+// ~30k-node terms runs for tens of seconds.  The ATP completion loop only
+// polls its wall BETWEEN steps, so such a comparison overruns --wall by
+// its full duration (the run must be externally killed, RC=124, instead
+// of reporting a clean GaveUp).  The engine installs a zero-arg deadline
+// hook here; lpo_rec / lpo_flat_rec poll it every 8192 recursion entries
+// and, once it fires, unwind immediately returning LPO_UN.  A verdict is
+// perturbed ONLY after the wall has already passed -- by which point the
+// run reports GaveUp regardless -- so every comparison that COMPLETES
+// before the wall is bit-identical to the un-hooked build.  A non-ATP
+// caller never installs a hook, so the poll compiles to a single
+// null-pointer test and the default path is unchanged.
+static int (*g_lpo_deadline_hook)(void) = NULL;
+static int g_lpo_past_deadline = 0;
+static u64 g_lpo_poll_ctr      = 0;
+
+fn void thvm_lpo_set_deadline_hook(int (*hook)(void)) {
+  g_lpo_deadline_hook = hook;
+  g_lpo_past_deadline = 0;
+  g_lpo_poll_ctr      = 0;
+}
+
+// 1 once the installed wall deadline has passed.  Sticky: the first hook
+// hit latches g_lpo_past_deadline so the rest of the in-flight comparison
+// unwinds without re-polling.  The clock is sampled at most once per 8192
+// calls; between samples this is a predicted-not-taken branch.
+static inline int lpo_deadline_fired(void) {
+  if (g_lpo_deadline_hook == NULL) return 0;
+  if (g_lpo_past_deadline) return 1;
+  if ((++g_lpo_poll_ctr & 8191u) != 0u) return 0;
+  if (g_lpo_deadline_hook()) { g_lpo_past_deadline = 1; return 1; }
+  return 0;
+}
+
 static inline u32 lpo_memo_hash(Term s, Term t) {
   u64 h = (s * 0x9E3779B97F4A7C15ull) ^ (t * 0xBF58476D1CE4E5B9ull);
   h ^= h >> 29;
@@ -193,6 +230,7 @@ static inline u32 lpo_memo_hash(Term s, Term t) {
 
 static LpoCmp lpo_rec(Term s, Term t, const LpoConfig *cfg) {
   if (s == t) return LPO_EQ;            // pointer-identical, no memo
+  if (lpo_deadline_fired()) return LPO_UN;   // wall passed: unwind fast
   u32 idx = lpo_memo_hash(s, t);
   LpoMemoEnt *e = &g_lpo_memo[idx];
   if (e->epoch == g_lpo_epoch && e->s == s && e->t == t)
@@ -593,6 +631,7 @@ static LpoCmp lpo_flat_rec(const KboFlatNode *a, u32 pa,
                            const LpoConfig *cfg) {
   g_lpo_flat_rec_calls++;
   if (a == b && pa == pb) return LPO_EQ;
+  if (lpo_deadline_fired()) return LPO_UN;   // wall passed: unwind fast
   u8 side = (a == g_lpo_flat_a) ? 0u : 1u;
   u32 idx = lpo_flat_hash(pa, pb, side);
   LpoFlatMemoEnt *e = &g_lpo_flat_memo[idx];

@@ -16351,12 +16351,54 @@ static int atp_norm_deadline_fired(AtpState *s) {
   return 0;
 }
 
+// Absolute wall deadline (us) exposed to the LPO comparator via the
+// zero-arg hook below.  The comparator has no AtpState handle, so the
+// deadline lives here as a file-global that thvm_atp_arm_lpo_wall sets;
+// it is independent of s->wall_deadline_us (the engine's own deadline).
+static u64 g_atp_lpo_wall_deadline_us = 0u;
+
+// Zero-arg deadline hook installed into src/lpo/_.c (thvm_lpo_set_deadline
+// _hook).  lpo_rec / lpo_flat_rec poll it every 8192 recursion entries so
+// a single huge-term LPO comparison self-aborts once the wall has passed
+// -- the completion loop's between-steps wall check alone lets one such
+// comparison overrun --wall by tens of seconds.  Mirrors
+// atp_norm_deadline_fired's deadline + host-abort test.
+static int atp_lpo_wall_hook(void) {
+  if (g_atp_lpo_wall_deadline_us != 0u) {
+    u64 now = atp_now_us();
+    if (now != 0u && now >= g_atp_lpo_wall_deadline_us) return 1;
+  }
+  if (thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) return 1;
+  return 0;
+}
+
 fn void thvm_atp_set_wall_deadline(AtpState *s, double seconds_from_now) {
   if (s == NULL) return;
   if (seconds_from_now <= 0.0) { s->wall_deadline_us = 0u; return; }
   u64 now = atp_now_us();
   if (now == 0u) return;  // clock_gettime failed; leave deadline off
   s->wall_deadline_us = now + (u64)(seconds_from_now * 1e6);
+}
+
+// Arm (seconds>0) or disarm (seconds<=0) the LPO comparator's mid-
+// comparison wall self-abort, WITHOUT touching s->wall_deadline_us -- the
+// engine's per-step and per-normalize deadline polls stay exactly as they
+// were, and only the LPO recursion gains the bound.  The completion driver
+// arms this unconditionally: an --ord=lpo run can spend tens of seconds in
+// ONE huge-term comparison inside a single step, and the driver polls the
+// wall only BETWEEN steps, so without this a slow comparison overruns
+// --wall (RC=124).  KBO comparisons are O(|s|+|t|) and never trip it, so a
+// default (KBO) run is unaffected.
+fn void thvm_atp_arm_lpo_wall(double seconds_from_now) {
+  if (seconds_from_now <= 0.0) {
+    g_atp_lpo_wall_deadline_us = 0u;
+    thvm_lpo_set_deadline_hook(NULL);   // disarm: no stale deadline leaks
+    return;
+  }
+  u64 now = atp_now_us();
+  if (now == 0u) return;  // clock_gettime failed; leave the hook off
+  g_atp_lpo_wall_deadline_us = now + (u64)(seconds_from_now * 1e6);
+  thvm_lpo_set_deadline_hook(&atp_lpo_wall_hook);
 }
 
 // Forward decl: defined after the proof-extract machinery further

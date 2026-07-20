@@ -2878,6 +2878,13 @@ int main(int argc, char **argv) {
   if (getenv("THVM_ATP_ENIGMA_EXPORT") != NULL)
     thvm_atp_set_record_cp_features(s, 1u);
 
+  // Arm the LPO comparator's mid-comparison wall self-abort.  The
+  // completion loop below polls the wall only BETWEEN steps; under
+  // --ord=lpo a single huge-term comparison inside one step can run for
+  // tens of seconds, overrunning --wall (RC=124 instead of a clean
+  // GaveUp).  This bounds that within-step overrun without touching the
+  // engine's own deadline (KBO runs are unaffected -- KBO never trips it).
+  if (wall_cap > 0.0) thvm_atp_arm_lpo_wall(wall_cap);
   // THVM_ATP_LRS=1 turns on the Vampire Limited Resource Strategy.  Also
   // wires the user-loop `wall_cap` into thvm_atp_set_wall_deadline so the
   // LRS horizon has a budget to plan against -- the engine's saturation
