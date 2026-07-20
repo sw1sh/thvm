@@ -2918,6 +2918,17 @@ int main(int argc, char **argv) {
     }
   }
 
+  // s2a (Vampire sine_to_age): arm goal-distance age postponement BEFORE
+  // any axiom is enqueued, so atp_enqueue_equation snapshots the axiom
+  // symbol masks the SInE-level D-relation needs.  set_goals then computes
+  // the levels.  THVM_ATP_S2A=<coeff> (0 or unset = off, byte-identical).
+  {
+    const char *s2a = getenv("THVM_ATP_S2A");
+    if (s2a != NULL && s2a[0] != '\0') {
+      long v = atol(s2a);
+      thvm_atp_set_s2a(s, (v <= 0) ? 0u : (u32)v);
+    }
+  }
   if (pr_mode) {
     if (prp.n_eqns == 0u) pr_load_terms(&prp);
     // Folded-signature band for the drc=off analog: the fresh

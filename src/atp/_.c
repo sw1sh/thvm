@@ -1417,6 +1417,7 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   u32  *ncd = (u32 *)realloc(s->cp_depth, cap * sizeof(u32));
   u8   *ngd = (u8  *)realloc(s->cp_gd,    cap * sizeof(u8));
   u32  *ng = (u32  *)realloc(s->cp_goal,  cap * sizeof(u32));
+  u32  *nsn = (u32 *)realloc(s->cp_sine,  cap * sizeof(u32));
   u32  *np2 = (u32 *)realloc(s->cp_pri2,  cap * sizeof(u32));
   u32  *nlnr = (u32 *)realloc(s->cp_last_norm_r_revision,
                               cap * sizeof(u32));
@@ -1430,13 +1431,15 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
                                                cap * sizeof(AtpCpHeapNode));
   u32  *npo = (u32 *)realloc(s->cp_pos,    cap * sizeof(u32));
   if (nc == NULL || nt == NULL || np == NULL || nq == NULL || ng == NULL
-      || np2 == NULL || nlnr == NULL || ndp == NULL || nk == NULL
-      || nh == NULL || npo == NULL || ncd == NULL || ngd == NULL) {
+      || nsn == NULL || np2 == NULL || nlnr == NULL || ndp == NULL
+      || nk == NULL || nh == NULL || npo == NULL || ncd == NULL
+      || ngd == NULL) {
     fprintf(stderr, "atp_ensure_cp_cap: realloc to %u CPs failed\n", cap);
     exit(1);
   }
   s->cp_packed = nc; s->cp_trace = nt;
-  s->cp_pri = np; s->cp_seq = nq; s->cp_goal = ng; s->cp_pri2 = np2;
+  s->cp_pri = np; s->cp_seq = nq; s->cp_goal = ng; s->cp_sine = nsn;
+  s->cp_pri2 = np2;
   s->cp_depth = ncd;
   s->cp_gd = ngd;
   memset(s->cp_gd + old_cap, 0, (size_t)(cap - old_cap) * sizeof(u8));
@@ -7789,6 +7792,8 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_kind);
   free(s->cp_pri);
   free(s->cp_goal);
+  free(s->cp_sine);
+  free(s->s2a_ax_mask);
   free(s->cp_seq);
   free(s->cp_depth);
   free(s->cp_gd);
@@ -8778,6 +8783,10 @@ static u8 atp_cp_perm_subsumed(Term lhs, Term rhs);
 // atp_wm_demote_drain; cleared on every enqueue.
 static u8 g_enq_raw_untreated = 0u;
 
+// s2a: forward-declared so the enqueue can snapshot axiom symbol masks
+// (definition is next to thvm_atp_set_goals, far below).
+static void atp_collect_symbols(Term t, u64 *mask);
+
 static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
                                u32 reason, u32 parent_a) {
   // Consume the raw-untreated hint at ENTRY (the drop gates below early-
@@ -8844,6 +8853,21 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   // derived one, carries a dense [0, k) variable set.
   thvm_normalize_vars(&lhs, &rhs);
 #endif
+  // s2a: snapshot the input axiom's symbol mask for the SInE D-relation.
+  // Axioms only (parent_a == ATP_TRACE_NONE) -- derived/requeued
+  // equations are not part of the intake signature.  Gated on s2a_coeff,
+  // so the default engine never touches this array.
+  if (s->s2a_coeff > 0u && parent_a == ATP_TRACE_NONE) {
+    u64 m = 0;
+    atp_collect_symbols(lhs, &m);
+    atp_collect_symbols(rhs, &m);
+    if (s->n_s2a_ax >= s->cap_s2a_ax) {
+      u32 nc = s->cap_s2a_ax ? s->cap_s2a_ax * 2u : 64u;
+      u64 *nm = (u64 *)realloc(s->s2a_ax_mask, (size_t)nc * sizeof(u64));
+      if (nm != NULL) { s->s2a_ax_mask = nm; s->cap_s2a_ax = nc; }
+    }
+    if (s->n_s2a_ax < s->cap_s2a_ax) s->s2a_ax_mask[s->n_s2a_ax++] = m;
+  }
   // Permutation-subsumption (WM GZ_ACVerzichtbar): same filter as the
   // overlap-CP push.  Catches commutativity-shaped equations re-queued
   // by interreduce / RHS-composition (atp_add_equation_simplified)
@@ -10381,6 +10405,129 @@ static void atp_goals_release(AtpState *s) {
 // Set the conjecture (single equation goal_lhs == goal_rhs).
 // Calling with goal_lhs == 0 clears the goal (completion mode).
 // Returns 1 on success, 0 if 8.4d's sort-check rejected the goal.
+// s2a (Vampire sine_to_age): per-symbol SInE level via the Hoder-
+// Voronkov D-relation, seeded from the conjecture symbols.  gen(s) =
+// number of (live) rules containing s (the conjecture counts once, as in
+// tp_sine_pass); a rule C is triggered by a REACHED symbol s iff
+// gen(s) <= gt or gen(s) <= tol*min_gen(C), where min_gen(C) is the least
+// generality over C's gt-general symbols when that least is still rare
+// (<= rc), else the plain least over all of C's symbols -- exactly the
+// tp_sine_pass CLI trigger.  A symbol first reached at round k gets level
+// k+1 (goal symbols are level 0); symbols never reached stay REMOTE.  The
+// BFS grows `reach` per round (proper shortest-path distance, order-
+// independent), so a common hub symbol like `mult` does NOT drag every
+// axiom to level 1 -- the division/inverse axioms whose only rare symbol
+// stays unreachable end up REMOTE, exactly the slice SInE selection would
+// drop.  Called from thvm_atp_set_goals only when s2a_coeff > 0, so the
+// whole pass never runs for the byte-identical default engine.
+static void atp_compute_sine_levels(AtpState *s) {
+  for (u32 i = 0; i < WALD_MAX_SYMBOLS; i++)
+    s->sym_slvl[i] = ATP_REL_LEVEL_REMOTE;
+  if (s->goal_lhs == 0) return;
+  u32 gt = 1u; double tol = 1.5; u32 rc = 64u;
+  { const char *e = getenv("THVM_ATP_S2A_GT");
+    if (e != NULL && e[0] != '\0') { long v = atol(e); gt = (v < 0) ? 0u : (u32)v; } }
+  { const char *e = getenv("THVM_ATP_S2A_TOL");
+    if (e != NULL && e[0] != '\0') { tol = atof(e); if (tol < 1.0) tol = 1.0; } }
+  { const char *e = getenv("THVM_ATP_S2A_RC");
+    if (e != NULL && e[0] != '\0') { long v = atol(e); rc = (v < 0) ? 0u : (u32)v; } }
+  // Axiom source: the enqueue-time symbol-mask snapshot (the rule set is
+  // still empty here -- input equations enter as queued CPs).
+  const u64 *ax = s->s2a_ax_mask;
+  u32 nax = s->n_s2a_ax;
+  // Generality gen[s] = #(axioms + conjecture) containing s.
+  u32 gen[WALD_MAX_SYMBOLS];
+  for (u32 i = 0; i < WALD_MAX_SYMBOLS; i++) gen[i] = 0u;
+  for (u32 lab = 0; lab < WALD_MAX_SYMBOLS; lab++)
+    if (s->conj_sym_mask & ((u64)1 << lab)) gen[lab]++;
+  for (u32 i = 0; i < nax; i++)
+    for (u32 lab = 0; lab < WALD_MAX_SYMBOLS; lab++)
+      if (ax[i] & ((u64)1 << lab)) gen[lab]++;
+  // Seed: conjecture symbols at level 0.
+  for (u32 lab = 0; lab < WALD_MAX_SYMBOLS; lab++)
+    if (s->conj_sym_mask & ((u64)1 << lab)) s->sym_slvl[lab] = 0u;
+  u64 reach = s->conj_sym_mask;
+  for (u32 round = 0; round < WALD_MAX_SYMBOLS; round++) {
+    u64 next = 0;
+    for (u32 i = 0; i < nax; i++) {
+      u64 m = ax[i];
+      if (!(m & reach)) continue;              // no reached symbol: no trigger
+      u32 min_all = 0xffffffffu, min_ex = 0xffffffffu;
+      for (u32 lab = 0; lab < WALD_MAX_SYMBOLS; lab++) {
+        if (!(m & ((u64)1 << lab))) continue;
+        u32 g = gen[lab];
+        if (g < min_all) min_all = g;
+        if (g > gt && g < min_ex) min_ex = g;
+      }
+      u32 mingen = (min_ex <= rc) ? min_ex : min_all;
+      u8 hit = 0;
+      for (u32 lab = 0; lab < WALD_MAX_SYMBOLS && !hit; lab++) {
+        if (!(m & ((u64)1 << lab))) continue;
+        if (!(reach & ((u64)1 << lab))) continue;
+        if (gen[lab] <= gt || (double)gen[lab] <= tol * (double)mingen) hit = 1;
+      }
+      if (!hit) continue;
+      for (u32 lab = 0; lab < WALD_MAX_SYMBOLS; lab++) {
+        if (!(m & ((u64)1 << lab))) continue;
+        if (s->sym_slvl[lab] == ATP_REL_LEVEL_REMOTE) {
+          s->sym_slvl[lab] = (u8)(round + 1u);
+          next |= ((u64)1 << lab);
+        }
+      }
+    }
+    if (!next) break;
+    reach |= next;
+  }
+  {
+    const char *dmp = getenv("THVM_ATP_S2A_DUMP");
+    if (dmp != NULL && dmp[0] != '\0') {
+      u32 hist[ATP_S2A_REMOTE_LVL + 2];
+      for (u32 i = 0; i < ATP_S2A_REMOTE_LVL + 2; i++) hist[i] = 0u;
+      for (u32 lab = 0; lab < WALD_MAX_SYMBOLS; lab++) {
+        if (gen[lab] == 0u) continue;
+        u32 lv = (s->sym_slvl[lab] == ATP_REL_LEVEL_REMOTE)
+                   ? (ATP_S2A_REMOTE_LVL + 1u) : s->sym_slvl[lab];
+        if (lv > ATP_S2A_REMOTE_LVL + 1u) lv = ATP_S2A_REMOTE_LVL + 1u;
+        hist[lv]++;
+        fprintf(stderr, "S2A sym lab=%u gen=%u level=%u\n",
+                lab, gen[lab], s->sym_slvl[lab]);
+      }
+      fprintf(stderr, "S2A level histogram (coeff=%u):", s->s2a_coeff);
+      for (u32 i = 0; i <= ATP_S2A_REMOTE_LVL + 1u; i++)
+        if (hist[i]) fprintf(stderr, " L%u=%u%s", i, hist[i],
+                             (i == ATP_S2A_REMOTE_LVL + 1u) ? "(REMOTE)" : "");
+      fprintf(stderr, "\n");
+    }
+  }
+}
+
+// s2a: per-CP SInE level = max over the CP's TAG_CTR symbols of their
+// sym_slvl, a REMOTE (goal-unreachable) symbol contributing
+// ATP_S2A_REMOTE_LVL.  0 when s2a is off or no goal.  The FIFO/age
+// selection adds s2a_coeff*this to the CP's cp_seq (goal-distant -> later).
+static u32 atp_cp_sine_level(const AtpState *s, Term lhs, Term rhs) {
+  if (s->s2a_coeff == 0u || s->goal_lhs == 0) return 0u;
+  Term stack[256];
+  u32 sp = 0;
+  if (sp < 256) stack[sp++] = lhs;
+  if (sp < 256) stack[sp++] = rhs;
+  u32 best = 0u;
+  while (sp > 0) {
+    Term cur = stack[--sp];
+    if (term_tag(cur) == TAG_CTR) {
+      u32 lab = term_ext(cur);
+      u32 lvl = (lab < WALD_MAX_SYMBOLS &&
+                 s->sym_slvl[lab] != ATP_REL_LEVEL_REMOTE)
+                  ? (u32)s->sym_slvl[lab] : ATP_S2A_REMOTE_LVL;
+      if (lvl > ATP_S2A_REMOTE_LVL) lvl = ATP_S2A_REMOTE_LVL;
+      if (lvl > best) best = lvl;
+      u32 n = term_ctr_n(cur);
+      for (u32 i = 0; i < n && sp < 256; i++) stack[sp++] = term_ctr_at(cur, i);
+    }
+  }
+  return best;
+}
+
 fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
   if (s != NULL && lhs == 0) return thvm_atp_set_goals(s, NULL, NULL, 0);
   return thvm_atp_set_goals(s, &lhs, &rhs, 1);
@@ -10519,6 +10666,9 @@ fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
     }
     frontier = next_frontier;
   }
+  // s2a (Vampire sine_to_age): the generality-aware SInE level per symbol.
+  // Only when armed -- byte-identical default engine otherwise.
+  if (s->s2a_coeff > 0u) atp_compute_sine_levels(s);
   return 1;
 }
 
@@ -10682,6 +10832,16 @@ fn void thvm_atp_set_auto_max_cp_weight(AtpState *s, u32 base) {
 
 fn void thvm_atp_set_goal_interleave(AtpState *s, u32 ratio) {
   if (s != NULL) s->use_goal_interleave = ratio;
+}
+
+// s2a (Vampire sine_to_age): arm the goal-distance age postponement with
+// coefficient `coeff` (0 disables, engine byte-identical).  Recomputes the
+// per-symbol SInE levels now when a goal is already attached; set_goals
+// recomputes them too when the goal is (re)set afterwards.
+fn void thvm_atp_set_s2a(AtpState *s, u32 coeff) {
+  if (s == NULL) return;
+  s->s2a_coeff = coeff;
+  if (coeff > 0u && s->goal_lhs != 0) atp_compute_sine_levels(s);
 }
 
 // 8.5c: order-aware compare.  Picks LPO (if attached) or KBO,
@@ -13239,6 +13399,7 @@ static inline void atp_cp_row_move(AtpState *s, u32 dst, u32 src) {
   if (s->cp_depth != NULL) s->cp_depth[dst] = s->cp_depth[src];
   if (s->cp_gd != NULL) s->cp_gd[dst] = s->cp_gd[src];
   s->cp_goal[dst]   = s->cp_goal[src];
+  s->cp_sine[dst]   = s->cp_sine[src];
   s->cp_pri2[dst]   = s->cp_pri2[src];
   s->cp_last_norm_r_revision[dst] = s->cp_last_norm_r_revision[src];
   if (s->cp_ultimate != NULL) s->cp_ultimate[dst] = s->cp_ultimate[src];
@@ -13478,6 +13639,7 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   }
   s->cp_goal[i]  = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                      ? atp_goal_weight(s, lhs, rhs) : 0u;
+  s->cp_sine[i]  = atp_cp_sine_level(s, lhs, rhs);
 #ifdef THVM_ATPFT_CPQ
   // Mirror the CP into Arena-A FT cells.  When the generation-time fuse
   // is armed, its NF spans ARE this CP (lhs/rhs are ft_to_term of them),
@@ -14046,6 +14208,7 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   }
   s->cp_goal[i]   = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                       ? atp_goal_weight(s, lhs, rhs) : 0u;
+  s->cp_sine[i]   = atp_cp_sine_level(s, lhs, rhs);
   s->cp_pri2[i]   = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
                   : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, lhs, rhs,
                                                               s->w2_mode)
@@ -14530,6 +14693,29 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     // death test here is permanent (set-only death marks), so every
     // entry below the floor was proven dead by an earlier scan or has
     // been extracted.
+    if (s->s2a_coeff > 0u) {
+      // s2a (Vampire sine_to_age): the age dimension orders by effective
+      // age = cp_seq + s2a_coeff*cp_sine, so a goal-distant CP (high SInE
+      // level) is made younger and the goal-NEAR oldest wins.  The dead-
+      // prefix floor is bypassed: effective age is not monotone in the
+      // scan order, so no prefix is provably dead.  O(n_cps) like the raw
+      // scan below (the floor only ever let it skip a prefix).
+      u64 best_eff = UINT64_MAX;
+      u32 best = 0xffffffffu;
+      for (u32 i = 0; i < s->n_cps; i++) {
+        u32 vv = s->cp_heap[i].row;
+        u64 eff = (u64)s->cp_heap[i].seq
+                + (u64)s->s2a_coeff * (u64)s->cp_sine[vv];
+        if (best != 0xffffffffu && eff >= best_eff) continue;
+        if (s->use_orphan_murder) {
+          if (atp_cp_is_orphan(s, s->cp_trace[vv])) continue;
+          if (atp_cp_uid_orphan(s, vv)) continue;
+        }
+        best = i;
+        best_eff = eff;
+      }
+      j = (best != 0xffffffffu) ? best : 0u;
+    } else {
     const u32 floor_seq = s->fifo_floor_seq;
     u32 best = 0xffffffffu;
     u32 best_sq = 0xffffffffu;
@@ -14554,6 +14740,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     // stamp monotonically growing seqs -- so everything at or below its
     // seq is dead or gone from here on.
     if (best != 0xffffffffu) s->fifo_floor_seq = best_sq + 1u;
+    }
   }
 
   // The chosen CP: j is its heap POSITION, v its stationary payload
@@ -14878,6 +15065,7 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
       s->cp_pri[vv] = atp_spb_scale(s->cp_pri[vv], s->cp_gd[vv]);
     s->cp_goal[vv] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                       ? atp_goal_weight(s, l, r) : 0u;
+    s->cp_sine[vv] = atp_cp_sine_level(s, l, r);
     s->cp_pri2[vv] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
                   : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, l, r, s->w2_mode)
                   :                        0u;
@@ -14942,6 +15130,7 @@ static inline void atp_cp_commit_priorities(AtpState *s, u32 w, u32 slot,
     s->cp_pri[slot] = atp_spb_scale(s->cp_pri[slot], s->cp_gd[slot]);
   s->cp_goal[slot] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                     ? atp_goal_weight(s, l, r) : 0u;
+  s->cp_sine[slot] = atp_cp_sine_level(s, l, r);
   s->cp_pri2[slot] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
                 : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, l, r, s->w2_mode)
                 :                        0u;

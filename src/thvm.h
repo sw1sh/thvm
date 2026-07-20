@@ -5037,6 +5037,13 @@ typedef struct {
   // selection then takes a goal-min pick every use_goal_interleave-th
   // step (E-style ratio: size-based system-building + goal steering).
   u32  *cp_goal;
+  // s2a (Vampire sine_to_age): per-CP SInE level (max over the CP's
+  // symbols of sym_slvl[]; a goal-unreachable symbol contributes
+  // ATP_S2A_REMOTE_LVL).  Filled at push only when s2a_coeff > 0.  The
+  // FIFO/age selection then orders by effective age = cp_seq +
+  // s2a_coeff*cp_sine, so goal-distant CPs are made younger (postponed)
+  // and lose to goal-near ones.  Byte-identical when s2a_coeff == 0.
+  u32  *cp_sine;
   // K-D Heap secondary dimension (port of WM `CPdimension` in
   // KPVerwaltung.c).  cp_pri2 is a SECOND priority computed at push
   // time using w2_mode (a different ATP_CP_WEIGHT_* mode than cp_pri's
@@ -5547,6 +5554,25 @@ typedef struct {
   // WALD_MAX_SYMBOLS == 64 (inlined; the macro is defined later in
   // this header so use the literal here for the AtpState declaration).
   u8 sym_level[64];
+  // s2a (Vampire sine_to_age): per-symbol SInE level via the Hoder-
+  // Voronkov D-relation (generality-triggered), seeded from the
+  // conjecture symbols.  0 = in the goal; k = k SInE-defines-steps away;
+  // 255 (ATP_REL_LEVEL_REMOTE) = goal-unreachable.  Distinct from
+  // sym_level[] (a plain co-occurrence BFS): the D-relation triggers only
+  // through a clause's near-least-general symbols, so a common hub symbol
+  // does NOT drag every axiom to level 1.  Recomputed by
+  // atp_compute_sine_levels (called from thvm_atp_set_goals) only when
+  // s2a_coeff > 0.  Read by atp_cp_sine_level.  Sized WALD_MAX_SYMBOLS.
+  u8 sym_slvl[64];
+  // s2a axiom snapshot: per-input-axiom symbol mask, captured at enqueue
+  // (atp_enqueue_equation) when s2a_coeff > 0.  Input equations are
+  // enqueued as CPs long before any becomes a rule, so
+  // atp_compute_sine_levels sources the D-relation generalities from this
+  // snapshot rather than the (still-empty) rule set.  Growable; freed at
+  // thvm_atp_free.  NULL/0 for the byte-identical default engine.
+  u64 *s2a_ax_mask;
+  u32  n_s2a_ax;
+  u32  cap_s2a_ax;
 
   // Reduction ordering (caller-owned).  When `lpo` is non-NULL,
   // it takes precedence over `kbo` per Choice C of
@@ -5733,6 +5759,14 @@ typedef struct {
   // 0 = off; N>0 = every N-th CP selection is a goal-directed (min
   // cp_goal) pick instead of the weight pick.  Pairs with max_cp_weight.
   u32  use_goal_interleave;
+  // s2a (Vampire sine_to_age) coefficient.  0 = off (engine byte-
+  // identical: no sine-level pass, no cp_sine writes read, the FIFO/age
+  // lane keeps its raw-cp_seq selection).  N>0 arms it: the FIFO/age
+  // dimension orders live CPs by effective age = cp_seq + N*cp_sine so a
+  // goal-distant CP (high SInE level) is postponed.  Large N approaches
+  // Vampire's lexicographic (sine_level, age).  Set via thvm_atp_set_s2a
+  // / env THVM_ATP_S2A.
+  u32  s2a_coeff;
   // Waldmeister CPdimension fairness ratio (YFiles `Schrittweiten`):
   // 1 FIFO (oldest-CP) pick per `fifo_modulo` selections, the rest by
   // weight.  Prevents the smallest-weight heap from starving an older
@@ -7901,6 +7935,10 @@ fn u32       thvm_atp_gnn_rerank(AtpState *s);
 #define WALD_MAX_SYMBOLS 64
 #define ATP_REL_LEVEL_MAX 8u
 #define ATP_REL_LEVEL_REMOTE 255u
+// s2a (Vampire sine_to_age): the per-CP sine level a REMOTE (goal-
+// unreachable) symbol contributes.  Real SInE levels sit below this, so a
+// CP touching any goal-unreachable symbol is the most postponed.
+#define ATP_S2A_REMOTE_LVL 32u
 #define WALD_MAX_VARS    32
 #define WALD_MAX_EQNS    64
 #define WALD_NAME_LEN    32

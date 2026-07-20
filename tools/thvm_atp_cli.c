@@ -178,6 +178,7 @@ static const AtpKnob KNOBS[] = {
   {"fof-distrib",            "THVM_ATP_FOF_DISTRIB",     1, "(per-record CNF distribution bound; past it the record clausifies via Tseitin)"},
   {"fof-sat",                "THVM_ATP_FOF_SAT",         1, "(non-Horn clausal-saturation pre-pass step cap; default wall-governed, 0 disables)"},
   {"fof-sine",               "THVM_ATP_FOF_SINE",        1, "(clausal pre-pass SInE cone above N clausified clauses; 0 off, 1 = default threshold 512, N>1 = threshold N)"},
+  {"s2a",                    "THVM_ATP_S2A",             0, "(Vampire sine_to_age: postpone goal-distant CPs in the age dimension by effective age = cp_seq + N*sine_level; unset/0 off, N = coeff)"},
   {"fof-slice",              "THVM_ATP_FOF_SLICE",       1, "(FOF-portfolio slice gate: 2 = give up unless the input carries a fof() record)"},
   {"fof-split",              "THVM_ATP_FOF_SPLIT",       1, "(k-bounded ground case splitting for near-Horn FOF; 2 = give up if inapplicable)"},
   {"fof-split-k",            "THVM_ATP_FOF_SPLIT_K",     1, "(fof-split or-clause bound, default 4)"},
