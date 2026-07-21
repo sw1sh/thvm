@@ -15,6 +15,13 @@ bin/FindProof: tools/thvm_atp_cli.c tools/proof_check.c
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $(DEFS) -o $@ tools/thvm_atp_cli.c $(LDFLAGS)
 
+# ENIGMA Tier-2 offline parity harness: score exported JSONL graphs with
+# the exact in-engine GCN forward (thvm_atp_gnn_score_graphs) so the
+# Python trainer can assert forward parity against the C engine.
+bin/gnn_score_dump: tools/atp_enigma/gnn_score_dump.c
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $(DEFS) -o $@ tools/atp_enigma/gnn_score_dump.c $(LDFLAGS)
+
 clean:
-	rm -f bin/FindProof
+	rm -f bin/FindProof bin/gnn_score_dump
 .PHONY: clean

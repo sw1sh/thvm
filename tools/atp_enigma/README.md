@@ -106,6 +106,58 @@ symbol-level signal E's CSI_Enigma keys on.  Kept as opt-in infrastructure
 (the prove -> label -> train -> reload loop now closes without a
 recompile); NOT enabled by default and NOT added to SCHEDULE[].
 
+## Tier-2 GNN scorer: symbol-independent graph convolutional network
+
+The Tier-2 lane scores a critical pair from its anonymised term
+*structure* (a graph convolutional network, GCN), so it transfers across
+signatures the way the 14 hand features cannot. The in-engine forward
+runs on thvm's own tensor runtime in C (`atp_gnn_forward`, `src/atp/_.c`);
+it is loaded at run time from a `.safetensors` file and drives the
+critical-pair queue via a periodic re-rank hook. See
+[docs/plans/atp_tier2_gnn.md](../../docs/plans/atp_tier2_gnn.md).
+
+Pipeline (CPU-only; no WL, no GPU):
+
+```
+# 1. Export labelled CP GRAPHS from proving runs (one JSONL line per
+#    processed CP: {"y",<0|1>,"x":[[6 anon feats]..],"e":[[src,dst]..]}).
+#    SERIAL, one problem per process, small wall.
+TPTP=~/.cache/thvm/casc bash tools/atp_enigma/gen_tier2_data.sh
+#    (or directly, per problem:)
+THVM_ATP_ENIGMA_GRAPH_EXPORT=train.jsonl \
+  bin/FindProof problem.p --preset=waldmeister-lazy --wall=6
+
+# 2. Train the GCN (numpy, CPU).  casc29+casc30 train, cascJ12 held out.
+python3 tools/atp_enigma/train_tier2_gnn.py train \
+  ~/.cache/thvm/enigma_tier2/train_c29.jsonl,~/.cache/thvm/enigma_tier2/train_c30.jsonl \
+  ~/.cache/thvm/enigma_tier2/held_j12.jsonl \
+  gcn_round0.safetensors                       # [H R steps lr neg_cap seed]
+
+# 3. Parity: the Python forward must match the C engine forward bit-close.
+make -f tools/casc/Makefile bin/gnn_score_dump
+python3 tools/atp_enigma/train_tier2_gnn.py parity \
+  train.jsonl bin/gnn_score_dump 64            # asserts max|diff| < 1e-3
+
+# 4. Deploy: load the trained GCN + arm the re-rank hook (coop with the
+#    Waldmeister primary heap every 2nd pick).
+THVM_ATP_GNN_ASSET=gcn_round0.safetensors \
+  THVM_ATP_GNN_RERANK_PERIOD=200 THVM_ATP_GNN_COOP_RATIO=2 \
+  bin/FindProof problem.p --preset=waldmeister-lazy --ord=lpo --wall=60
+```
+
+The GCN forward is R rounds of `relu(A.h.W1 + h.Ws + b)` (row-normalised
+adjacency with self-loops), masked-mean pool, two-class readout; the score
+is `logit_pos - logit_neg`. `train_tier2_gnn.py`'s numpy forward is
+op-for-op identical to the C forward (`parity` pins it to ~1e-9), so a
+model trained here scores identically in the engine.
+
+Knobs: `THVM_ATP_GNN_ASSET=<path>` loads a GCN, `THVM_ATP_GNN_RERANK_PERIOD`
+sets the re-rank cadence (selections between re-ranks; 0 = off, the
+byte-identical default), `THVM_ATP_GNN_COOP_RATIO=N` routes the GNN to the
+secondary coop dimension (every N-th pick) instead of overwriting the
+primary heap. Completeness holds regardless: the re-rank only permutes the
+queue, and the FIFO/AutoMaxWeight fairness still fires.
+
 ## Typical flow
 
 ```
