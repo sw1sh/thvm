@@ -2453,7 +2453,9 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_cp_graph(WolframLibraryData libData,
   AtpCpGraph *g = (AtpCpGraph *)malloc(sizeof(AtpCpGraph));
   if (g == NULL) return LIBRARY_FUNCTION_ERROR;
 
-  int ok = thvm_atp_cp_graph(lhs, rhs, g);
+  // No engine state at this WL seam: build the purely structural /
+  // anonymised graph (the goal-relevance columns stay 0).
+  int ok = thvm_atp_cp_graph(NULL, lhs, rhs, g);
 
   // On overflow / failure ship just the 4-int header so WL falls back.
   u32 n_nodes = ok ? g->n_nodes : 0u;

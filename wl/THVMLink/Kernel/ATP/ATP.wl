@@ -92,7 +92,7 @@ SetUsage[TAtpSetLearnedScorer, "TAtpSetLearnedScorer[model$] pushes a trained cr
 TAtpSetLearnedScorer[Clear] (or None) drops the model and reverts to the baked-in scorer.
 model$ is an Association keyed \"Kind\" (\"Linear\" or \"MLP\"), \"Mean\", \"InvStd\", and the weights (\"W\"/\"B\" for linear, \"W1\"/\"B1\"/\"W2\"/\"B2\" for a one-hidden-layer ReLU network, hidden width at most 64). Features are standardized by Mean and InvStd before the forward pass (default identity); the model outputs a raw logit, higher = selected sooner."];
 
-SetUsage[TAtpCpGraph, "TAtpCpGraph[lhs$ == rhs$] encodes one equation or critical pair (also accepts Inactive[Equal][lhs$, rhs$] and a HoldForm of either) into the anonymised typed hypergraph the ENIGMA Tier 2 graph neural network message-passes over. Returns an Association keyed \"NodeTypes\", \"NodeFeatures\" (an NNodes by 6 matrix), \"Edges\" (a list of {src$, dst$, type$}), \"NNodes\", \"NEdges\", \"NodeLabels\", \"Symbols\".
+SetUsage[TAtpCpGraph, "TAtpCpGraph[lhs$ == rhs$] encodes one equation or critical pair (also accepts Inactive[Equal][lhs$, rhs$] and a HoldForm of either) into the anonymised typed hypergraph the ENIGMA Tier 2 graph neural network message-passes over. Returns an Association keyed \"NodeTypes\", \"NodeFeatures\" (an NNodes by ATP_CPG_FEAT_DIM matrix, 12 columns in the phase-2 schema), \"Edges\" (a list of {src$, dst$, type$}), \"NNodes\", \"NEdges\", \"NodeLabels\", \"Symbols\".
 Node 0 is the critical-pair super-node; the rest are term occurrences (preorder walk of lhs then rhs), symbol nodes (one per distinct operator/constant), and var nodes (one per distinct variable). Node types code 0 CPSuper, 1 Term, 2 Symbol, 3 Var; edge types code the term-to-symbol, term-to-child, and cp-to-side-root links.
 The six node-feature columns are purely structural (is_term, is_symbol, is_var, arity, occurrence_count, is_cpsuper) and never encode the concrete label/id/value, so equations equal up to a consistent symbol/variable renaming produce bit-identical graphs. \"NodeLabels\" and \"Symbols\" keep the concrete per-node identity so TAtpCpGraphEquation reconstructs the original equation. lhs and rhs share one encoder state (a shared symbol or variable is a single deduped node).
 This is the per-equation encoder TAtpGraphDataset emits; pair it with a GNN trained on the dataset."];
@@ -546,8 +546,8 @@ TAtpSetLearnedScorer[model_] := $atpSetLearnedScorerFn[
 (* Flatten a trained GCN model (the "Model" from TAtpTrainGnn) into the C
    parameter blob (thvm_atp_set_gnn_scorer layout): {R, H}, then per round
    r the row-major W1[r] ({in_r, H}), Ws[r] ({in_r, H}), Bh[r] ({H}), then
-   Wout ({H, 2}) and Bout ({2}).  in_r is the GCN feature dim (6) on round
-   0 and H thereafter -- TAtpTrainGnn builds W1/Ws as {in_r, H} TGlorot
+   Wout ({H, 2}) and Bout ({2}).  in_r is the GCN feature dim
+   (ATP_CPG_FEAT_DIM, 12 in the phase-2 schema) on round 0 and H thereafter -- TAtpTrainGnn builds W1/Ws as {in_r, H} TGlorot
    matrices, so Flatten gives the row-major order the C side reads.  Clear
    / None / {} -> {} (clears the model). *)
 serializeGnnModel[Clear | None | {}] := {}
@@ -1300,10 +1300,13 @@ atpGnnTensors[dataset_Association] := atpGnnTensors[dataset, Infinity]
    memory stays O(B * nCap^2). *)
 atpGnnTensors[dataset_Association, nCap_] := Module[{
     graphs = dataset["Graphs"], labels = dataset["Labels"],
-    b, n, f = 6, eff, xArr, aArr, maskArr, nNodesArr, yArr
+    b, n, f, eff, xArr, aArr, maskArr, nNodesArr, yArr
 },
     b = Length[graphs];
     If[ b === 0, Return[$Failed]];
+    (* Feature width from the data (the cp-super node is always present) so
+       the zero-pad row tracks the C ATP_CPG_FEAT_DIM with no magic number. *)
+    f   = Length @ First @ graphs[[1]]["NodeFeatures"];
     n   = Min[nCap, Max[#["NNodes"] & /@ graphs]];
     eff = (Min[#["NNodes"], n] &) /@ graphs;
     xArr = Table[

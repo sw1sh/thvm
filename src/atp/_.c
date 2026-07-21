@@ -8858,9 +8858,12 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
 #endif
   // s2a: snapshot the input axiom's symbol mask for the SInE D-relation.
   // Axioms only (parent_a == ATP_TRACE_NONE) -- derived/requeued
-  // equations are not part of the intake signature.  Gated on s2a_coeff,
-  // so the default engine never touches this array.
-  if (s->s2a_coeff > 0u && parent_a == ATP_TRACE_NONE) {
+  // equations are not part of the intake signature.  Gathered when s2a
+  // drives selection OR when the goal_closeness node feature needs the
+  // level table (graph export / GNN re-rank); the default engine leaves
+  // this array untouched, so its step path stays byte-identical.
+  if ((s->s2a_coeff > 0u || s->record_cp_graphs || s->gnn_rerank_period > 0u)
+      && parent_a == ATP_TRACE_NONE) {
     u64 m = 0;
     atp_collect_symbols(lhs, &m);
     atp_collect_symbols(rhs, &m);
@@ -10670,8 +10673,15 @@ fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
     frontier = next_frontier;
   }
   // s2a (Vampire sine_to_age): the generality-aware SInE level per symbol.
-  // Only when armed -- byte-identical default engine otherwise.
-  if (s->s2a_coeff > 0u) atp_compute_sine_levels(s);
+  // Computed when s2a drives selection OR when the GNN re-rank / graph
+  // export needs the goal_closeness node feature -- decoupled from
+  // selection (it only fills sym_slvl; atp_cp_sine_level still gates the
+  // age bias on s2a_coeff).  Byte-identical default engine otherwise.
+  s->goal_levels_ready = 0u;
+  if (s->s2a_coeff > 0u || s->record_cp_graphs || s->gnn_rerank_period > 0u) {
+    atp_compute_sine_levels(s);
+    s->goal_levels_ready = 1u;
+  }
   return 1;
 }
 
@@ -12761,6 +12771,17 @@ fn int thvm_atp_load_gnn_safetensors(const char *path) {
   { const char *p = strstr(json, "\"Rounds\":\""); if (p) R = (u32)strtoul(p + 10, NULL, 10); }
   { const char *p = strstr(json, "\"Hidden\":\""); if (p) H = (u32)strtoul(p + 10, NULL, 10); }
   if (R == 0u || H == 0u) { free(json); fclose(f); return 0; }
+  // Feature-dim version guard: the forward is compiled for exactly
+  // ATP_CPG_FEAT_DIM inputs, so a model saved at a different schema (e.g. a
+  // legacy F=6 blob against the F=12 engine) cannot be fed the current
+  // graphs.  Reject it cleanly rather than mis-reshaping W1_0.  Absent
+  // "Feat" (pre-versioning files) falls through to the per-tensor element
+  // count check below, which also catches the mismatch.
+  { const char *p = strstr(json, "\"Feat\":\"");
+    if (p) {
+      u32 feat = (u32)strtoul(p + 8, NULL, 10);
+      if (feat != ATP_CPG_FEAT_DIM) { free(json); fclose(f); return 0; }
+    } }
 
   u32 want = 2u + atp_gnn_param_count(R, H);
   double *blob = (double *)malloc((size_t)want * sizeof(double));
@@ -13151,7 +13172,11 @@ fn int thvm_atp_gnn_score_batch(const Term *lhs, const Term *rhs,
   AtpCpGraph *gs = (AtpCpGraph *)malloc((size_t)n * sizeof(AtpCpGraph));
   if (gs == NULL) return 0;
   for (u32 i = 0u; i < n; i++) {
-    if (!thvm_atp_cp_graph(lhs[i], rhs[i], &gs[i])) { free(gs); return 0; }
+    // No goal context here (the M2 anchor scores bare Term pairs); the
+    // goal-relevance columns stay 0, matching the offline parity harness.
+    if (!thvm_atp_cp_graph(NULL, lhs[i], rhs[i], &gs[i])) {
+      free(gs); return 0;
+    }
   }
 
   // Switch to the sandbox context; reclaim prior scratch when near the
@@ -13207,31 +13232,42 @@ fn int thvm_atp_gnn_score_graphs(const AtpCpGraph *gs, u32 n,
   return ok;
 }
 
-// M3: re-rank the live CP queue with the loaded GNN.  Pull -> score ->
-// map to priority -> push back.  Only permutes order (completeness safe).
+// M3: re-rank the live CP queue with the loaded GNN.  Build each queued
+// CP's goal-aware graph, score them, map to priority, push back.  Only
+// permutes order (completeness safe).  thvm_atp_cp_graph reads the goal
+// cone via `s`, so the online graphs carry the same goal-relevance columns
+// the training corpus does.
 fn u32 thvm_atp_gnn_rerank(AtpState *s) {
   if (s == NULL || !g_atp_gnn_active) return 0u;
   u32 nq = thvm_atp_queued_cp_count(s);
   if (nq == 0u) return 0u;
 
-  Term *lhs  = (Term *)malloc((size_t)nq * sizeof(Term));
-  Term *rhs  = (Term *)malloc((size_t)nq * sizeof(Term));
-  u32  *seq  = (u32 *)malloc((size_t)nq * sizeof(u32));
-  float *sc  = (float *)malloc((size_t)nq * sizeof(float));
-  u32  *pri  = (u32 *)malloc((size_t)nq * sizeof(u32));
-  if (lhs == NULL || rhs == NULL || seq == NULL || sc == NULL || pri == NULL) {
-    free(lhs); free(rhs); free(seq); free(sc); free(pri);
+  AtpCpGraph *gs  = (AtpCpGraph *)malloc((size_t)nq * sizeof(AtpCpGraph));
+  u32        *seq = (u32 *)malloc((size_t)nq * sizeof(u32));
+  float      *sc  = (float *)malloc((size_t)nq * sizeof(float));
+  u32        *pri = (u32 *)malloc((size_t)nq * sizeof(u32));
+  if (gs == NULL || seq == NULL || sc == NULL || pri == NULL) {
+    free(gs); free(seq); free(sc); free(pri);
     return 0u;
   }
-  u32 got = thvm_atp_queued_cps(s, lhs, rhs, seq, nq);
-  if (got == 0u || !thvm_atp_gnn_score_batch(lhs, rhs, got, sc)) {
-    free(lhs); free(rhs); free(seq); free(sc); free(pri);
+
+  // Build each queued CP's goal-aware graph in heap-position order (engine
+  // context); skip any that overflow the node cap, compacting into gs/seq.
+  u32 k = 0u;
+  for (u32 i = 0u; i < nq; i++) {
+    u32 vv = s->cp_heap[i].row;
+    Term l = 0, r = 0;
+    atp_cp_slot_read(s, vv, &l, &r);
+    if (thvm_atp_cp_graph(s, l, r, &gs[k])) { seq[k] = s->cp_seq[vv]; k++; }
+  }
+  if (k == 0u || !thvm_atp_gnn_score_graphs(gs, k, sc)) {
+    free(gs); free(seq); free(sc); free(pri);
     return 0u;
   }
-  // Higher score -> lower priority, clamped to a safe u32 band - the
-  // same map atp_cp_learned_priority + atpRerankPriority use.  Neutral
-  // (score 0) maps to 1.0e6, the cp_pri2 push-time default in coop mode.
-  for (u32 i = 0u; i < got; i++) {
+  // Higher score -> lower priority, clamped to a safe u32 band - the same
+  // map atp_cp_learned_priority + atpRerankPriority use.  Neutral (score
+  // 0) maps to 1.0e6, the cp_pri2 push-time default in coop mode.
+  for (u32 i = 0u; i < k; i++) {
     float pr = 1.0e6f - 1.0e4f * sc[i];
     if (pr < 0.0f) pr = 0.0f;
     if (pr > 2.0e9f) pr = 2.0e9f;
@@ -13241,14 +13277,14 @@ fn u32 thvm_atp_gnn_rerank(AtpState *s) {
   // the w2 coop pick while the primary heap stays the hand heuristic
   // (e.g. Waldmeister).  Otherwise overwrite the primary heap (GT-mode).
   if (s->gnn_coop) {
-    thvm_atp_set_cp_pri2_by_seq(s, seq, pri, got);
+    thvm_atp_set_cp_pri2_by_seq(s, seq, pri, k);
   } else {
-    thvm_atp_set_cp_pri_by_seq(s, seq, pri, got);
+    thvm_atp_set_cp_pri_by_seq(s, seq, pri, k);
   }
   s->n_gnn_reranks++;
 
-  free(lhs); free(rhs); free(seq); free(sc); free(pri);
-  return got;
+  free(gs); free(seq); free(sc); free(pri);
+  return k;
 }
 
 fn void thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period) {
@@ -18523,13 +18559,31 @@ typedef struct {
   u64        key;         // the concrete identity (label / value / var id)
   u32        node_idx;    // the SYMBOL/VAR graph node for this key
   u32        occ;         // occurrence count across both CP sides
+  u8         side_mask;   // bit0 = seen on lhs, bit1 = seen on rhs
 } AtpCpgKeyEnt;
 
 typedef struct {
-  AtpCpGraph   *g;
-  AtpCpgKeyEnt  keys[ATP_CPG_MAX_NODES];   // one entry per distinct sym/var
-  u32           n_keys;
+  AtpCpGraph      *g;
+  const AtpState  *s;      // goal cone for cols 8-9; NULL = anonymised only
+  AtpCpgKeyEnt     keys[ATP_CPG_MAX_NODES];   // one entry per distinct sym/var
+  u32              n_keys;
 } AtpCpgBuild;
+
+// Goal-relevance columns for a SYMBOL node with concrete CTR label
+// `label`: col 8 goal_closeness = 1/(1+sine_level) from the reused s2a
+// table (only when it has been filled for this goal), col 9 is_goal_symbol
+// = conjecture-cone membership.  Both are 0 without a goal / state, so the
+// default anonymised graph is unchanged.  A consistent relabel of the
+// whole problem preserves both, keeping the graph rename-invariant.
+static void atp_cpg_symbol_goal_cols(const AtpState *s, u32 label,
+                                     float *f) {
+  if (s == NULL || s->goal_lhs == 0 || label >= WALD_MAX_SYMBOLS) return;
+  if (s->conj_sym_mask & ((u64)1 << label)) f[9] = 1.0f;
+  if (s->goal_levels_ready) {
+    u8 lvl = s->sym_slvl[label];
+    if (lvl != ATP_REL_LEVEL_REMOTE) f[8] = 1.0f / (1.0f + (float)lvl);
+  }
+}
 
 // Append a node of the given type; returns its index, or U32_MAX on cap
 // overflow (b->g->overflow is set).  node_feat is cleared here; the
@@ -18561,10 +18615,12 @@ static void atp_cpg_add_edge(AtpCpgBuild *b, u32 src, u32 dst, u8 type) {
 // `arity` is the CTR arity for a symbol (0 otherwise) and is written
 // only when the node is first created.
 static u32 atp_cpg_intern(AtpCpgBuild *b, u8 kind, u64 key,
-                          u8 node_type, u32 arity) {
+                          u8 node_type, u32 arity, u8 side) {
+  u8 side_bit = (u8)(1u << side);
   for (u32 i = 0; i < b->n_keys; i++) {
     if (b->keys[i].kind == kind && b->keys[i].key == key) {
       b->keys[i].occ++;
+      b->keys[i].side_mask |= side_bit;
       return b->keys[i].node_idx;
     }
   }
@@ -18573,14 +18629,19 @@ static u32 atp_cpg_intern(AtpCpgBuild *b, u8 kind, u64 key,
   // Record the concrete symbol identity (CTR label / FVR id / NUM value)
   // for exact reconstruction; the feature columns below stay anonymised.
   b->g->node_label[idx] = key;
-  // Set the structural type columns now; occurrence_count is patched in
-  // after the whole walk so repeat occurrences are all counted.
+  // Set the structural type columns now; occurrence_count, occurs_lhs/rhs
+  // are patched in after the whole walk so repeat occurrences are counted.
   float *f = b->g->node_feat + (size_t)idx * ATP_CPG_FEAT_DIM;
-  if (node_type == ATP_CPG_SYMBOL) { f[1] = 1.0f; f[3] = (float)arity; }
-  else /* ATP_CPG_VAR */           { f[2] = 1.0f; }
+  if (node_type == ATP_CPG_SYMBOL) {
+    f[1] = 1.0f; f[3] = (float)arity;
+    // Goal-relevance columns key on the CTR label only; a NUM-atom symbol
+    // (kind KEY_NUM) has no conjecture label, so it stays goal-neutral.
+    if (kind == ATP_CPG_KEY_CTR) atp_cpg_symbol_goal_cols(b->s, (u32)key, f);
+  } else /* ATP_CPG_VAR */ { f[2] = 1.0f; }
   if (b->n_keys < ATP_CPG_MAX_NODES) {
     AtpCpgKeyEnt *ke = &b->keys[b->n_keys++];
     ke->kind = kind; ke->key = key; ke->node_idx = idx; ke->occ = 1u;
+    ke->side_mask = side_bit;
   }
   return idx;
 }
@@ -18589,41 +18650,46 @@ static u32 atp_cpg_intern(AtpCpgBuild *b, u8 kind, u64 key,
 // symbol/var node (E_TERM_SYM), recurse into children wiring
 // E_TERM_CHILD edges.  Returns the TERM node index for `t`, or U32_MAX
 // on overflow (which short-circuits the rest of the walk).
-static u32 atp_cpg_walk(AtpCpgBuild *b, Term t) {
+static u32 atp_cpg_walk(AtpCpgBuild *b, Term t, u32 depth, u32 arg_index,
+                        u8 side) {
   u32 tn = atp_cpg_add_node(b, ATP_CPG_TERM);
   if (tn == 0xffffffffu) return tn;
-  // A TERM node is a single occurrence; mark is_term + occ 1.
+  // A TERM node is a single occurrence; mark is_term + occ 1, plus its
+  // structural position (depth, argument index) and CP side.
   float *f = b->g->node_feat + (size_t)tn * ATP_CPG_FEAT_DIM;
   f[0] = 1.0f; f[4] = 1.0f;
+  f[6] = (float)depth; f[7] = (float)arg_index;
+  f[10 + side] = 1.0f;             // occurs_lhs (side 0) / occurs_rhs (side 1)
 
   u8  tag = term_tag(t);
   u32 root;
   if (tag == TAG_CTR) {
     u32 n = term_ctr_n(t);
     root = atp_cpg_intern(b, ATP_CPG_KEY_CTR, (u64)term_ext(t),
-                          ATP_CPG_SYMBOL, n);
+                          ATP_CPG_SYMBOL, n, side);
     if (root == 0xffffffffu) return root;
     atp_cpg_add_edge(b, tn, root, ATP_CPG_E_TERM_SYM);
     for (u32 i = 0; i < n; i++) {
-      u32 cn = atp_cpg_walk(b, term_ctr_at(t, i));
+      u32 cn = atp_cpg_walk(b, term_ctr_at(t, i), depth + 1u, i, side);
       if (cn == 0xffffffffu) return cn;
       atp_cpg_add_edge(b, tn, cn, ATP_CPG_E_TERM_CHILD);
     }
   } else if (tag == TAG_FVR) {
     root = atp_cpg_intern(b, ATP_CPG_KEY_VAR, (u64)term_ext(t),
-                          ATP_CPG_VAR, 0u);
+                          ATP_CPG_VAR, 0u, side);
     if (root == 0xffffffffu) return root;
     atp_cpg_add_edge(b, tn, root, ATP_CPG_E_TERM_SYM);
   } else { /* TAG_NUM and any other atom: a nullary constant-like symbol */
     root = atp_cpg_intern(b, ATP_CPG_KEY_NUM, (u64)term_val(t),
-                          ATP_CPG_SYMBOL, 0u);
+                          ATP_CPG_SYMBOL, 0u, side);
     if (root == 0xffffffffu) return root;
     atp_cpg_add_edge(b, tn, root, ATP_CPG_E_TERM_SYM);
   }
   return tn;
 }
 
-fn int thvm_atp_cp_graph(Term lhs, Term rhs, AtpCpGraph *out) {
+fn int thvm_atp_cp_graph(const AtpState *s, Term lhs, Term rhs,
+                         AtpCpGraph *out) {
   if (out == NULL) return 0;
   out->n_nodes  = 0u;
   out->n_edges  = 0u;
@@ -18631,31 +18697,37 @@ fn int thvm_atp_cp_graph(Term lhs, Term rhs, AtpCpGraph *out) {
 
   AtpCpgBuild b;
   b.g = out;
+  b.s = s;
   b.n_keys = 0u;
 
-  // Node 0 is always the CP super-node.
+  // Node 0 is always the CP super-node.  It spans both sides of the CP.
   u32 super = atp_cpg_add_node(&b, ATP_CPG_CPSUPER);
   if (super == 0xffffffffu) return 0;     // cap of 0 -- defensive
   {
     float *f = out->node_feat + (size_t)super * ATP_CPG_FEAT_DIM;
     f[5] = 1.0f; f[4] = 1.0f;             // is_cpsuper + single occurrence
+    f[10] = 1.0f; f[11] = 1.0f;           // occurs on both sides
   }
 
-  // Walk lhs then rhs in preorder.
-  u32 lroot = atp_cpg_walk(&b, lhs);
+  // Walk lhs (side 0) then rhs (side 1) in preorder; each side root is at
+  // depth 0 / argument index 0.
+  u32 lroot = atp_cpg_walk(&b, lhs, 0u, 0u, 0u);
   if (lroot == 0xffffffffu) return 0;
-  u32 rroot = atp_cpg_walk(&b, rhs);
+  u32 rroot = atp_cpg_walk(&b, rhs, 0u, 0u, 1u);
   if (rroot == 0xffffffffu) return 0;
 
   atp_cpg_add_edge(&b, super, lroot, ATP_CPG_E_CP_LHS);
   atp_cpg_add_edge(&b, super, rroot, ATP_CPG_E_CP_RHS);
   if (out->overflow) return 0;
 
-  // Patch each SYMBOL/VAR node's occurrence_count from the dedup table.
+  // Patch each SYMBOL/VAR node's occurrence_count + occurs_lhs/rhs from the
+  // dedup table (a symbol can appear on both sides / many times).
   for (u32 i = 0; i < b.n_keys; i++) {
     float *f = out->node_feat
              + (size_t)b.keys[i].node_idx * ATP_CPG_FEAT_DIM;
-    f[4] = (float)b.keys[i].occ;
+    f[4]  = (float)b.keys[i].occ;
+    f[10] = (b.keys[i].side_mask & 1u) ? 1.0f : 0.0f;
+    f[11] = (b.keys[i].side_mask & 2u) ? 1.0f : 0.0f;
   }
   return 1;
 }
@@ -18727,7 +18799,9 @@ static void atp_cp_graph_record(AtpState *s, u32 idx, Term lhs, Term rhs) {
     if (s->cp_graph_scratch == NULL) return;
   }
   AtpCpGraph *g = (AtpCpGraph *)s->cp_graph_scratch;
-  if (!thvm_atp_cp_graph(lhs, rhs, g)) return;   // overflow -> skip
+  // Pass `s` so the exported training graph carries the goal-relevance
+  // columns (conjecture membership + s2a goal distance) for this problem.
+  if (!thvm_atp_cp_graph(s, lhs, rhs, g)) return;   // overflow -> skip
   u32 nn = g->n_nodes, ne = g->n_edges;
   size_t rec = 8u + (size_t)nn * ATP_CPG_FEAT_DIM * sizeof(float)
              + (size_t)ne * 2u * sizeof(u32);

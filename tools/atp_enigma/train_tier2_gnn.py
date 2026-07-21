@@ -9,7 +9,8 @@
 # THVM_ATP_GNN_ASSET / TAtpSetGnnScorer and scores identically online.  The
 # `parity` subcommand asserts this against bin/gnn_score_dump.
 #
-# Architecture (R rounds, hidden H, node-feature dim F = 6):
+# Architecture (R rounds, hidden H, node-feature dim F = ATP_CPG_FEAT_DIM,
+# 12 in the phase-2 schema; the forward is feature-dim agnostic):
 #   h = X
 #   for r in 0..R:  h = relu(A.h.W1[r] + h.Ws[r] + Bh[r])
 #   pooled = masked_mean(h)                         # over real nodes
@@ -31,7 +32,7 @@
 import sys, os, json, struct, subprocess, tempfile
 import numpy as np
 
-F = 6                      # ATP_CPG_FEAT_DIM
+F = 12                     # ATP_CPG_FEAT_DIM (phase-2 schema; was 6)
 NODE_CAP = 64              # ATP_GNN_N_CAP / WL NodeCap
 
 # ---------------------------------------------------------------- dataset
@@ -70,9 +71,12 @@ def load_graphs(paths, neg_cap=200000, seed=0):
 def densify(batch, N=NODE_CAP):
     """Densify a list of (x, edges, y) into padded (X, A, mask, nn) exactly
     as the C build_host / WL atpGnnTensors: truncate to N nodes, symmetrise
-    edges, add self-loops, row-normalise; mask + node count for the pool."""
+    edges, add self-loops, row-normalise; mask + node count for the pool.
+    The feature width is read from the data (not hard-coded), so a dataset
+    exported at any ATP_CPG_FEAT_DIM densifies correctly."""
     B = len(batch)
-    X = np.zeros((B, N, F), np.float32)
+    f = next((b[0].shape[1] for b in batch if b[0].shape[0] > 0), F)
+    X = np.zeros((B, N, f), np.float32)
     A = np.zeros((B, N, N), np.float32)
     mask = np.zeros((B, 1, N), np.float32)
     nn = np.ones((B, 1, 1), np.float32)
@@ -102,14 +106,14 @@ def glorot(shape, rng):
     return rng.uniform(-lim, lim, size=shape).astype(np.float32)
 
 
-def init_model(H, R, seed=0):
+def init_model(H, R, seed=0, feat=F):
     rng = np.random.default_rng(seed)
-    W1 = [glorot((F if r == 0 else H, H), rng) for r in range(R)]
-    Ws = [glorot((F if r == 0 else H, H), rng) for r in range(R)]
+    W1 = [glorot((feat if r == 0 else H, H), rng) for r in range(R)]
+    Ws = [glorot((feat if r == 0 else H, H), rng) for r in range(R)]
     Bh = [np.zeros(H, np.float32) for _ in range(R)]
     Wout = glorot((H, 2), rng)
     Bout = np.zeros(2, np.float32)
-    return dict(W1=W1, Ws=Ws, Bh=Bh, Wout=Wout, Bout=Bout, H=H, R=R)
+    return dict(W1=W1, Ws=Ws, Bh=Bh, Wout=Wout, Bout=Bout, H=H, R=R, F=feat)
 
 
 def forward(m, X, A, mask, nn):
@@ -218,8 +222,9 @@ def save_safetensors(path, m):
                         "data_offsets": [off, off + len(b)]}
         blob += b
         off += len(b)
+    feat = m["W1"][0].shape[0]
     header["__metadata__"] = {"Rounds": str(m["R"]), "Hidden": str(m["H"]),
-                              "NMax": str(NODE_CAP)}
+                              "NMax": str(NODE_CAP), "Feat": str(feat)}
     hj = json.dumps(header, separators=(",", ":")).encode("utf-8")
     hj += b" " * ((8 - len(hj) % 8) % 8)             # tinygrad pads with spaces
     with open(path, "wb") as f:
@@ -236,16 +241,20 @@ def load_safetensors(path):
         data = f.read()
     meta = header["__metadata__"]
     R, H = int(meta["Rounds"]), int(meta["Hidden"])
+    # Feature dim is versioned in the header (Feat) and is also the first
+    # axis of W1_0; read it there so a model saved at any schema loads
+    # (old F=6 blobs included) without a code change.
+    feat = int(meta.get("Feat", header["W1_0"]["shape"][0]))
 
     def get(name, shape):
         b, e = header[name]["data_offsets"]
         return np.frombuffer(data[b:e], dtype="<f4").reshape(shape).astype(np.float32)
 
-    W1 = [get(f"W1_{r}", (F if r == 0 else H, H)) for r in range(R)]
-    Ws = [get(f"Ws_{r}", (F if r == 0 else H, H)) for r in range(R)]
+    W1 = [get(f"W1_{r}", (feat if r == 0 else H, H)) for r in range(R)]
+    Ws = [get(f"Ws_{r}", (feat if r == 0 else H, H)) for r in range(R)]
     Bh = [get(f"Bh_{r}", (H,)) for r in range(R)]
     return dict(W1=W1, Ws=Ws, Bh=Bh, Wout=get("Wout", (H, 2)),
-                Bout=get("Bout", (2,)), H=H, R=R)
+                Bout=get("Bout", (2,)), H=H, R=R, F=feat)
 
 # ---------------------------------------------------------------- train
 
@@ -319,7 +328,9 @@ def cmd_train(argv):
     print(f"heldout: rows={len(test)} pos={sum(yte)} "
           f"({100*np.mean(yte):.3f}%)")
 
-    m = init_model(H, R, seed=seed)
+    feat = next((g[0].shape[1] for g in pos + neg if g[0].shape[0] > 0), F)
+    print(f"feature dim F={feat}")
+    m = init_model(H, R, seed=seed, feat=feat)
     l0, lN = train(m, pos, neg, steps=steps, lr=lr, seed=seed)
 
     # train ranking AUC on a balanced sample the model actually saw.
@@ -364,7 +375,8 @@ def cmd_parity(argv):
     if not graphs:
         print("parity: no graphs"); sys.exit(1)
 
-    m = init_model(H, R, seed=seed)
+    feat = next((g[0].shape[1] for g in graphs if g[0].shape[0] > 0), F)
+    m = init_model(H, R, seed=seed, feat=feat)
     with tempfile.TemporaryDirectory() as td:
         mp = os.path.join(td, "m.safetensors")
         gp = os.path.join(td, "g.jsonl")

@@ -33,6 +33,14 @@ static Term ctr0(u32 l)                 { return term_new_ctr(l, NULL, 0); }
 static Term ctr1(u32 l, Term a)         { Term cs[1] = {a};    return term_new_ctr(l, cs, 1); }
 static Term ctr2(u32 l, Term a, Term b) { Term cs[2] = {a, b}; return term_new_ctr(l, cs, 2); }
 
+// A trivial KBO config covering every label the tests use, for the one
+// case that needs an engine state (the goal-relevance feature columns).
+static u32 cpg_w[14] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+static u32 cpg_p[14] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+static const KboConfig CPG_CFG = {
+  .weights = cpg_w, .precedence = cpg_p, .n_labels = 14, .var_weight = 1,
+};
+
 // Count nodes / edges of a given type.
 static u32 count_nodes(const AtpCpGraph *g, u8 type) {
   u32 c = 0u;
@@ -59,7 +67,7 @@ int main(void) {
     Term lhs = ctr2(LAB_f, mk_v(VAR_x), ctr1(LAB_i, mk_v(VAR_x)));
     Term rhs = ctr0(LAB_e);
     AtpCpGraph g;
-    CHECK_EQ(thvm_atp_cp_graph(lhs, rhs, &g), 1);
+    CHECK_EQ(thvm_atp_cp_graph(NULL, lhs, rhs, &g), 1);
     CHECK_EQ(g.overflow, 0u);
 
     // Node 0 is the CP super-node.
@@ -147,7 +155,7 @@ int main(void) {
     Term lhs = ctr2(LAB_f, mk_v(VAR_x), ctr1(LAB_i, mk_v(VAR_x)));
     Term rhs = ctr0(LAB_e);
     AtpCpGraph g;
-    CHECK_EQ(thvm_atp_cp_graph(lhs, rhs, &g), 1);
+    CHECK_EQ(thvm_atp_cp_graph(NULL, lhs, rhs, &g), 1);
     u32 sym_seen = 0u;
     for (u32 i = 0; i < g.n_nodes; i++) {
       switch (g.node_type[i]) {
@@ -181,8 +189,8 @@ int main(void) {
     Term r2 = ctr0(LAB_d);
 
     AtpCpGraph a, b;
-    CHECK_EQ(thvm_atp_cp_graph(l1, r1, &a), 1);
-    CHECK_EQ(thvm_atp_cp_graph(l2, r2, &b), 1);
+    CHECK_EQ(thvm_atp_cp_graph(NULL, l1, r1, &a), 1);
+    CHECK_EQ(thvm_atp_cp_graph(NULL, l2, r2, &b), 1);
 
     CHECK_EQ(a.n_nodes, b.n_nodes);
     CHECK_EQ(a.n_edges, b.n_edges);
@@ -224,8 +232,8 @@ int main(void) {
     Term r2 = build_num(9u);
 
     AtpCpGraph a, b;
-    CHECK_EQ(thvm_atp_cp_graph(l1, r1, &a), 1);
-    CHECK_EQ(thvm_atp_cp_graph(l2, r2, &b), 1);
+    CHECK_EQ(thvm_atp_cp_graph(NULL, l1, r1, &a), 1);
+    CHECK_EQ(thvm_atp_cp_graph(NULL, l2, r2, &b), 1);
 
     // 1 NUM atom (deduped) -> 1 SYMBOL node for the constant + 1 SYMBOL
     // for f; occurrence_count of the NUM symbol is 3 (two in lhs, one in
@@ -244,6 +252,92 @@ int main(void) {
     CHECK_EQ(found_num, 1);
   }
 
+  // === Structural position features: depth, arg_index, occurs_lhs/rhs =
+  // The Tier-2 phase-2 columns.  For f(x, i(x)) = e the TERM depths are
+  // lhs {f:0, x:1, i:1, x:2} + rhs {e:0}; the only argument-index-1 node
+  // is `i` (the second child of f); four TERM nodes sit on the lhs, one on
+  // the rhs.  All structural / rename-invariant, so no state is needed.
+  TEST_BEGIN("atp/cp_graph/structural-position-features");
+  {
+    Term lhs = ctr2(LAB_f, mk_v(VAR_x), ctr1(LAB_i, mk_v(VAR_x)));
+    Term rhs = ctr0(LAB_e);
+    AtpCpGraph g;
+    CHECK_EQ(thvm_atp_cp_graph(NULL, lhs, rhs, &g), 1);
+
+    u32 dmax = 0u, d1 = 0u, argi1 = 0u, term_lhs = 0u, term_rhs = 0u;
+    for (u32 i = 0; i < g.n_nodes; i++) {
+      if (g.node_type[i] != ATP_CPG_TERM) continue;
+      u32 d = (u32)feat_at(&g, i, 6);        // depth
+      if (d > dmax) dmax = d;
+      if (d == 1u) d1++;
+      if ((u32)feat_at(&g, i, 7) == 1u) argi1++;   // arg_index == 1
+      term_lhs += (u32)feat_at(&g, i, 10);   // occurs_lhs
+      term_rhs += (u32)feat_at(&g, i, 11);   // occurs_rhs
+    }
+    CHECK_EQ(dmax, 2u);
+    CHECK_EQ(d1, 2u);
+    CHECK_EQ(argi1, 1u);
+    CHECK_EQ(term_lhs, 4u);
+    CHECK_EQ(term_rhs, 1u);
+
+    // Deduped nodes: x is lhs-only, e is rhs-only; the CP super spans both.
+    for (u32 i = 0; i < g.n_nodes; i++) {
+      if (g.node_type[i] == ATP_CPG_VAR) {
+        CHECK_EQ((u32)feat_at(&g, i, 10), 1u);
+        CHECK_EQ((u32)feat_at(&g, i, 11), 0u);
+      }
+      if (g.node_type[i] == ATP_CPG_SYMBOL && g.node_label[i] == LAB_e) {
+        CHECK_EQ((u32)feat_at(&g, i, 10), 0u);
+        CHECK_EQ((u32)feat_at(&g, i, 11), 1u);
+      }
+    }
+    CHECK_EQ((u32)feat_at(&g, 0, 10), 1u);   // cp-super occurs_lhs
+    CHECK_EQ((u32)feat_at(&g, 0, 11), 1u);   // cp-super occurs_rhs
+
+    // Without a goal context the goal-relevance columns are all 0.
+    for (u32 i = 0; i < g.n_nodes; i++) {
+      CHECK_EQ(feat_at(&g, i, 8), 0.0f);
+      CHECK_EQ(feat_at(&g, i, 9), 0.0f);
+    }
+  }
+
+  // === Goal-relevance columns: is_goal_symbol + goal_closeness ========
+  // With an engine state whose goal mentions {f, e}, a graph built through
+  // that state marks f, e as goal symbols (col 9 = 1, col 8 = 1.0 -- the
+  // conjecture symbols sit at sine level 0) while i (not in the goal) is
+  // goal-neutral (col 9 = 0).  The relabelled build (NULL state) keeps
+  // both columns 0, so the anonymised property is preserved.
+  TEST_BEGIN("atp/cp_graph/goal-relevance-columns");
+  {
+    AtpState *s = thvm_atp_init(&CPG_CFG, 64);
+    // Arm graph recording so set_goal fills the s2a level table (the
+    // goal_closeness source), decoupled from selection.
+    thvm_atp_set_record_cp_graphs(s, 1u);
+    thvm_atp_set_goal(s, ctr2(LAB_f, ctr0(LAB_e), ctr0(LAB_e)), ctr0(LAB_e));
+
+    AtpCpGraph g;
+    Term lhs = ctr2(LAB_f, mk_v(VAR_x), ctr1(LAB_i, mk_v(VAR_x)));
+    CHECK_EQ(thvm_atp_cp_graph(s, lhs, ctr0(LAB_e), &g), 1);
+    int saw_f = 0, saw_e = 0, saw_i = 0;
+    for (u32 i = 0; i < g.n_nodes; i++) {
+      if (g.node_type[i] != ATP_CPG_SYMBOL) continue;
+      if (g.node_label[i] == LAB_f || g.node_label[i] == LAB_e) {
+        CHECK_EQ((u32)feat_at(&g, i, 9), 1u);        // is_goal_symbol
+        CHECK(feat_at(&g, i, 8) > 0.0f);             // goal_closeness > 0
+        if (g.node_label[i] == LAB_f) saw_f = 1;
+        if (g.node_label[i] == LAB_e) saw_e = 1;
+      }
+      if (g.node_label[i] == LAB_i) {
+        CHECK_EQ((u32)feat_at(&g, i, 9), 0u);        // i is not in the goal
+        saw_i = 1;
+      }
+    }
+    CHECK_EQ(saw_f, 1);
+    CHECK_EQ(saw_e, 1);
+    CHECK_EQ(saw_i, 1);
+    thvm_atp_free(s);
+  }
+
   // === NON-isomorphic CPs differ (invariance is not vacuous) =========
   // f(x, x) = e  vs  f(x, y) = e: the first has ONE var (occ 2), the
   // second has TWO vars (occ 1 each) -> different node count + different
@@ -255,8 +349,8 @@ int main(void) {
     Term r      = ctr0(LAB_e);
 
     AtpCpGraph a, b;
-    CHECK_EQ(thvm_atp_cp_graph(l_same, r, &a), 1);
-    CHECK_EQ(thvm_atp_cp_graph(l_diff, r, &b), 1);
+    CHECK_EQ(thvm_atp_cp_graph(NULL, l_same, r, &a), 1);
+    CHECK_EQ(thvm_atp_cp_graph(NULL, l_diff, r, &b), 1);
 
     // One VAR node vs two -> different node count.
     CHECK_EQ(count_nodes(&a, ATP_CPG_VAR), 1u);
@@ -277,7 +371,7 @@ int main(void) {
   // contract holds on a NULL out (returns 0, no crash).
   TEST_BEGIN("atp/cp_graph/null-out-rejected");
   {
-    CHECK_EQ(thvm_atp_cp_graph(ctr0(LAB_e), ctr0(LAB_e), NULL), 0);
+    CHECK_EQ(thvm_atp_cp_graph(NULL, ctr0(LAB_e), ctr0(LAB_e), NULL), 0);
   }
 
   thvm_free();

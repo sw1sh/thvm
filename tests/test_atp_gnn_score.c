@@ -72,13 +72,13 @@ static void write_gcn_safetensors(const char *path, const double *blob) {
   fclose(f);
 }
 
-// A tiny known model: R = 2 rounds, H = 3 hidden, in_0 = 6 (ATP_CPG_FEAT_DIM),
+// A tiny known model: R = 2 rounds, H = 3 hidden, in_0 = ATP_CPG_FEAT_DIM,
 // in_1 = 3.  Weights are arbitrary fixed values (deterministic, spread
 // positive + negative so ReLU actually clips).  Built as the on-wire f64
 // blob the engine parses.
 #define R 2u
 #define H 3u
-#define F ATP_CPG_FEAT_DIM   // 6
+#define F ATP_CPG_FEAT_DIM
 
 // Deterministic pseudo-weight: a smooth function of a running index, in
 // [-0.5, 0.5], so every parameter is distinct and the forward is
@@ -246,7 +246,7 @@ int main(void) {
   AtpCpGraph gs[3];
   u32 N = 1u;
   for (u32 i = 0; i < B; i++) {
-    CHECK_EQ(thvm_atp_cp_graph(lhs[i], rhs[i], &gs[i]), 1);
+    CHECK_EQ(thvm_atp_cp_graph(NULL, lhs[i], rhs[i], &gs[i]), 1);
     if (gs[i].n_nodes > N) N = gs[i].n_nodes;
   }
   float ref[3];

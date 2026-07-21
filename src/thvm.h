@@ -5583,6 +5583,12 @@ typedef struct {
   // atp_compute_sine_levels (called from thvm_atp_set_goals) only when
   // s2a_coeff > 0.  Read by atp_cp_sine_level.  Sized WALD_MAX_SYMBOLS.
   u8 sym_slvl[64];
+  // 1 once atp_compute_sine_levels has filled sym_slvl for the current
+  // goal (it is also run, decoupled from selection, when the GNN re-rank
+  // or the graph-dataset export needs the goal_closeness node feature).
+  // Guards the calloc-zeroed default: an unfilled sym_slvl is all-0, which
+  // would otherwise read as "every symbol is a level-0 goal symbol".
+  u8 goal_levels_ready;
   // s2a axiom snapshot: per-input-axiom symbol mask, captured at enqueue
   // (atp_enqueue_equation) when s2a_coeff > 0.  Input equations are
   // enqueued as CPs long before any becomes a rule, so
@@ -7878,8 +7884,11 @@ fn void      thvm_atp_clear_learned_scorer(void);
 //   E_CP_LHS     the CPSUPER  -> the root TERM of lhs.
 //   E_CP_RHS     the CPSUPER  -> the root TERM of rhs.
 //
-// Feature columns (ATP_CPG_FEAT_DIM, all f32, all integer-valued and
-// strictly structural):
+// Feature columns (ATP_CPG_FEAT_DIM, all f32).  Columns 0-9 are strictly
+// structural / rename-invariant; columns 8-9 are goal-relevance signals
+// that depend on the goal cone (populated only when a build passes a
+// non-NULL AtpState AND the run is recording graphs / running the GNN
+// re-rank / running s2a -- otherwise 0, so the anonymised default holds).
 //   0 is_term           1 for a TERM node, else 0
 //   1 is_symbol         1 for a SYMBOL node, else 0
 //   2 is_var            1 for a VAR node, else 0
@@ -7888,7 +7897,24 @@ fn void      thvm_atp_clear_learned_scorer(void);
 //   4 occurrence_count  how many times this symbol/var occurs across the
 //                       two terms (1 for TERM/CPSUPER -- a single occ)
 //   5 is_cpsuper        1 for the CP super-node, else 0
-#define ATP_CPG_FEAT_DIM  6u
+//   6 depth             TERM node's preorder depth within its CP side
+//                       (side root = 0, each child +1); 0 for non-TERM
+//   7 arg_index         TERM node's argument position within its parent
+//                       (side root = 0); the positional signal the doc's
+//                       child-edge embedding calls for, carried on the
+//                       node so the untyped-adjacency forward sees it.
+//                       0 for non-TERM.
+//   8 goal_closeness    SYMBOL node: 1/(1+goal_level) from the reused s2a
+//                       sine-level table (goal symbol -> 1.0, farther ->
+//                       smaller, goal-unreachable / no table -> 0).  0 for
+//                       non-SYMBOL.  Rename-invariant (a consistent
+//                       relabel of the whole problem preserves levels).
+//   9 is_goal_symbol    SYMBOL node: 1 if the symbol's label is in the
+//                       conjecture cone (conj_sym_mask), else 0.  The
+//                       exact, always-fresh goal membership SInE lacks.
+//  10 occurs_lhs        1 if the node occurs on the CP's lhs side, else 0
+//  11 occurs_rhs        1 if the node occurs on the CP's rhs side, else 0
+#define ATP_CPG_FEAT_DIM  12u
 #define ATP_CPG_MAX_NODES 1024u
 #define ATP_CPG_MAX_EDGES 4096u
 
@@ -7924,12 +7950,17 @@ typedef struct {
 } AtpCpGraph;
 
 // Build the anonymised hypergraph for the CP (lhs, rhs) into `out`.  A
-// pure read of the two Terms -- no AtpState, no engine config, no
-// mutation.  Returns 1 on success; on overflow (more than
-// ATP_CPG_MAX_NODES / ATP_CPG_MAX_EDGES) it sets out->overflow = 1,
-// leaves the partially-built graph in place, and returns 0 so the caller
-// can fall back to the Tier-1 vector.
-fn int       thvm_atp_cp_graph(Term lhs, Term rhs, AtpCpGraph *out);
+// pure read of the two Terms plus, when `s` is non-NULL, the goal cone
+// (conj_sym_mask + the s2a sine-level table) for the two goal-relevance
+// feature columns -- no mutation of `s`.  Pass s = NULL for a purely
+// structural / anonymised graph (columns 8-9 stay 0), which is what the
+// rename-invariance property and the offline parity harness assert.
+// Returns 1 on success; on overflow (more than ATP_CPG_MAX_NODES /
+// ATP_CPG_MAX_EDGES) it sets out->overflow = 1, leaves the partially-
+// built graph in place, and returns 0 so the caller can fall back to the
+// Tier-1 vector.
+fn int       thvm_atp_cp_graph(const AtpState *s, Term lhs, Term rhs,
+                               AtpCpGraph *out);
 
 // === ENIGMA Tier 2: in-engine GCN critical-pair scorer ==============
 // The Tier-2 GCN runs its forward on thvm's OWN tensor runtime (a UOP
@@ -7981,14 +8012,14 @@ fn int       thvm_atp_gnn_score_batch(const Term *lhs, const Term *rhs,
 fn int       thvm_atp_gnn_score_graphs(const AtpCpGraph *gs, u32 n,
                                        float *out_scores);
 
-// M3 (integration): re-rank the live CP queue with the loaded GNN.
-// Pulls the queued CPs (thvm_atp_queued_cps), scores them with
-// thvm_atp_gnn_score_batch, maps each score to a queue priority (higher
+// M3 (integration): re-rank the live CP queue with the loaded GNN.  Builds
+// each queued CP's goal-aware graph, scores them with
+// thvm_atp_gnn_score_graphs, maps each score to a queue priority (higher
 // score -> lower priority, the same 1e6 - 1e4*score band the Tier-1
-// scorer uses), and pushes them back via thvm_atp_set_cp_pri_by_seq.
-// Only PERMUTES selection order, so completeness is preserved.  A no-op
-// when no model is loaded or the queue is empty.  Returns the number of
-// CPs re-ranked.
+// scorer uses), and pushes them back via thvm_atp_set_cp_pri_by_seq (or
+// cp_pri2 in coop mode).  Only PERMUTES selection order, so completeness
+// is preserved.  A no-op when no model is loaded or the queue is empty.
+// Returns the number of CPs re-ranked.
 fn u32       thvm_atp_gnn_rerank(AtpState *s);
 
 // === wald/ ===
