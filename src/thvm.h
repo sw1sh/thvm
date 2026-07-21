@@ -6426,6 +6426,13 @@ typedef struct {
   // init or by thvm_atp_set_gnn_rerank_period.
   u32  gnn_rerank_period;         // selections between GNN re-ranks (0 = off)
   u32  n_gnn_reranks;             // diagnostics: GNN re-rank invocations
+  // Parental pre-filter: cap the number of CPs the GNN forward scores per
+  // re-rank to the top gnn_topk by the CHEAP score (the Tier-1 logit if
+  // loaded, else the classical cp_pri, read without unpacking terms), so a
+  // re-rank costs O(gnn_topk) forwards no matter how large the live queue
+  // grows (queues reach millions).  0 = score the whole queue (the phase-1
+  // behavior).  THVM_ATP_GNN_TOPK sets it; default 512 once a GNN is armed.
+  u32  gnn_topk;
   // ENIGMA coop: when set, the GNN re-rank writes the SECONDARY priority
   // (cp_pri2) instead of the primary heap (cp_pri), so the GNN drives the
   // w2 coop dimension -- every w2_modulo-th selection picks the GNN's top
@@ -7337,6 +7344,9 @@ fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
 // Selections between GNN re-ranks (0 = off, the default).  Only takes
 // effect while a GNN model is loaded (thvm_atp_set_gnn_scorer).
 fn void      thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period);
+// Parental pre-filter cap: each re-rank GNN-scores only the top `topk` CPs
+// by the cheap score (0 = whole queue).  THVM_ATP_GNN_TOPK sets it too.
+fn void      thvm_atp_set_gnn_topk(AtpState *s, u32 topk);
 // ENIGMA coop: route the GNN re-rank to the secondary (cp_pri2) dimension
 // and pick from it every `ratio`-th selection (sets gnn_coop + w2_modulo).
 // ratio 0 disables coop (GNN overwrites the primary heap, GT-mode).
@@ -8012,8 +8022,9 @@ fn int       thvm_atp_gnn_score_batch(const Term *lhs, const Term *rhs,
 fn int       thvm_atp_gnn_score_graphs(const AtpCpGraph *gs, u32 n,
                                        float *out_scores);
 
-// M3 (integration): re-rank the live CP queue with the loaded GNN.  Builds
-// each queued CP's goal-aware graph, scores them with
+// M3 (integration): re-rank the live CP queue with the loaded GNN.  The
+// parental pre-filter (gnn_topk) keeps only the top-K CPs by the cheap
+// score, builds their goal-aware graphs, scores them with
 // thvm_atp_gnn_score_graphs, maps each score to a queue priority (higher
 // score -> lower priority, the same 1e6 - 1e4*score band the Tier-1
 // scorer uses), and pushes them back via thvm_atp_set_cp_pri_by_seq (or

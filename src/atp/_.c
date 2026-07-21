@@ -7707,6 +7707,12 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
       u32 ratio = (u32)strtoul(c, NULL, 10);
       if (ratio > 0u) thvm_atp_set_gnn_coop(s, ratio);
     }
+    // THVM_ATP_GNN_TOPK caps how many CPs each re-rank GNN-scores (the
+    // parental pre-filter); default 512, 0 = whole queue.  Only consulted
+    // when a re-rank fires, so it never touches the default engine.
+    const char *tk = getenv("THVM_ATP_GNN_TOPK");
+    s->gnn_topk = (tk != NULL && tk[0] != '\0') ? (u32)strtoul(tk, NULL, 10)
+                                                : 512u;
   }
   return s;
 }
@@ -13232,36 +13238,108 @@ fn int thvm_atp_gnn_score_graphs(const AtpCpGraph *gs, u32 n,
   return ok;
 }
 
-// M3: re-rank the live CP queue with the loaded GNN.  Build each queued
-// CP's goal-aware graph, score them, map to priority, push back.  Only
-// permutes order (completeness safe).  thvm_atp_cp_graph reads the goal
-// cone via `s`, so the online graphs carry the same goal-relevance columns
-// the training corpus does.
+// Parental pre-filter: pick the heap positions of the CPs to GNN-score
+// this re-rank.  When gnn_topk > 0 and the queue is larger, keep only the
+// top gnn_topk by the CHEAP score -- the Tier-1 logit if that model is
+// loaded, else the classical cp_pri read straight off the slot with NO
+// term unpack -- via a bounded top-k min-heap (root = worst kept).  This
+// bounds the GNN forward to O(gnn_topk) graphs no matter how large the
+// live queue grows.  Fills pos[0..return) with heap positions; returns the
+// count.  topk == 0 or nq <= topk keeps the whole queue in heap order.
+static u32 atp_gnn_rerank_select(AtpState *s, u32 nq, u32 topk, u32 *pos) {
+  if (topk == 0u || nq <= topk) {
+    for (u32 i = 0u; i < nq; i++) pos[i] = i;
+    return nq;
+  }
+  int tier1 = g_atp_learned_active;
+  float *hg = (float *)malloc((size_t)topk * sizeof(float));  // goodness
+  u32   *hp = (u32 *)malloc((size_t)topk * sizeof(u32));       // position
+  if (hg == NULL || hp == NULL) {              // OOM: whole queue in order
+    free(hg); free(hp);
+    for (u32 i = 0u; i < nq; i++) pos[i] = i;
+    return nq;
+  }
+  u32 hn = 0u;
+  for (u32 i = 0u; i < nq; i++) {
+    u32 vv = s->cp_heap[i].row;
+    // Higher goodness = more worth GNN-scoring.  cp_pri is "lower is
+    // better", so negate it; the Tier-1 logit is already "higher better".
+    float good;
+    if (tier1) {
+      Term l = 0, r = 0;
+      atp_cp_slot_read(s, vv, &l, &r);
+      float feat[ATP_CP_FEATURE_DIM];
+      thvm_atp_cp_features(s, l, r, s->cp_seq[vv], feat);
+      good = atp_learned_forward(&g_atp_learned, feat);
+    } else {
+      good = -(float)s->cp_pri[vv];
+    }
+    if (hn < topk) {                           // grow, sift up
+      u32 c = hn++;
+      hg[c] = good; hp[c] = i;
+      while (c > 0u) {
+        u32 p = (c - 1u) / 2u;
+        if (hg[p] <= hg[c]) break;
+        float tg = hg[p]; hg[p] = hg[c]; hg[c] = tg;
+        u32   tp = hp[p]; hp[p] = hp[c]; hp[c] = tp;
+        c = p;
+      }
+    } else if (good > hg[0]) {                  // evict worst, sift down
+      hg[0] = good; hp[0] = i;
+      u32 c = 0u;
+      for (;;) {
+        u32 l2 = 2u * c + 1u, r2 = 2u * c + 2u, mn = c;
+        if (l2 < topk && hg[l2] < hg[mn]) mn = l2;
+        if (r2 < topk && hg[r2] < hg[mn]) mn = r2;
+        if (mn == c) break;
+        float tg = hg[mn]; hg[mn] = hg[c]; hg[c] = tg;
+        u32   tp = hp[mn]; hp[mn] = hp[c]; hp[c] = tp;
+        c = mn;
+      }
+    }
+  }
+  for (u32 i = 0u; i < hn; i++) pos[i] = hp[i];
+  free(hg); free(hp);
+  return hn;
+}
+
+// M3: re-rank the live CP queue with the loaded GNN.  Select -> build ->
+// score -> map to priority -> push back.  Only permutes order
+// (completeness safe).  The parental pre-filter (atp_gnn_rerank_select)
+// caps the GNN forward at gnn_topk graphs regardless of queue size, and
+// thvm_atp_cp_graph reads the goal cone via `s` so the online graphs carry
+// the same goal-relevance columns the training corpus does.
 fn u32 thvm_atp_gnn_rerank(AtpState *s) {
   if (s == NULL || !g_atp_gnn_active) return 0u;
   u32 nq = thvm_atp_queued_cp_count(s);
   if (nq == 0u) return 0u;
 
-  AtpCpGraph *gs  = (AtpCpGraph *)malloc((size_t)nq * sizeof(AtpCpGraph));
-  u32        *seq = (u32 *)malloc((size_t)nq * sizeof(u32));
-  float      *sc  = (float *)malloc((size_t)nq * sizeof(float));
-  u32        *pri = (u32 *)malloc((size_t)nq * sizeof(u32));
-  if (gs == NULL || seq == NULL || sc == NULL || pri == NULL) {
-    free(gs); free(seq); free(sc); free(pri);
+  u32 topk = s->gnn_topk;
+  u32 m = (topk > 0u && nq > topk) ? topk : nq;   // CPs actually GNN-scored
+
+  u32        *pos = (u32 *)malloc((size_t)nq * sizeof(u32));    // selection
+  AtpCpGraph *gs  = (AtpCpGraph *)malloc((size_t)m * sizeof(AtpCpGraph));
+  u32        *seq = (u32 *)malloc((size_t)m * sizeof(u32));
+  float      *sc  = (float *)malloc((size_t)m * sizeof(float));
+  u32        *pri = (u32 *)malloc((size_t)m * sizeof(u32));
+  if (pos == NULL || gs == NULL || seq == NULL || sc == NULL || pri == NULL) {
+    free(pos); free(gs); free(seq); free(sc); free(pri);
     return 0u;
   }
 
-  // Build each queued CP's goal-aware graph in heap-position order (engine
-  // context); skip any that overflow the node cap, compacting into gs/seq.
+  u32 nsel = atp_gnn_rerank_select(s, nq, topk, pos);
+  // Unpack the selected CPs and build their goal-aware graphs in the
+  // engine context; skip any that overflow the node cap, compacting into
+  // gs / seq.
   u32 k = 0u;
-  for (u32 i = 0u; i < nq; i++) {
-    u32 vv = s->cp_heap[i].row;
+  for (u32 i = 0u; i < nsel; i++) {
+    u32 vv = s->cp_heap[pos[i]].row;
     Term l = 0, r = 0;
     atp_cp_slot_read(s, vv, &l, &r);
     if (thvm_atp_cp_graph(s, l, r, &gs[k])) { seq[k] = s->cp_seq[vv]; k++; }
   }
   if (k == 0u || !thvm_atp_gnn_score_graphs(gs, k, sc)) {
-    free(gs); free(seq); free(sc); free(pri);
+    free(pos); free(gs); free(seq); free(sc); free(pri);
     return 0u;
   }
   // Higher score -> lower priority, clamped to a safe u32 band - the same
@@ -13283,13 +13361,18 @@ fn u32 thvm_atp_gnn_rerank(AtpState *s) {
   }
   s->n_gnn_reranks++;
 
-  free(gs); free(seq); free(sc); free(pri);
+  free(pos); free(gs); free(seq); free(sc); free(pri);
   return k;
 }
 
 fn void thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period) {
   if (s == NULL) return;
   s->gnn_rerank_period = period;
+}
+
+fn void thvm_atp_set_gnn_topk(AtpState *s, u32 topk) {
+  if (s == NULL) return;
+  s->gnn_topk = topk;
 }
 
 // Enable GNN coop: the re-rank writes the secondary dimension (cp_pri2)
