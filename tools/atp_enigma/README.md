@@ -225,6 +225,81 @@ model: H = 64, R = 3, 3000 Adam steps, same recipe, F = 12.
   with the rerank armed) reports no refutation.  Deploy: coop, period 2000,
   topk 512.
 
+### Phase 2b: DAgger self-play retraining (2026-07-21)
+
+DAgger (Dataset Aggregation) closes the train/deploy shift by retraining
+on the critical pairs the LEARNER-guided search actually visits.  Round k
+-> k+1: roll out FindProof with round-k ARMED (coop, period 200, topk 512)
+AND the graph export ON over the training corpora, aggregate the guided
+graphs with all prior rounds, retrain.  Driver: `dagger_round.sh` (dedup
+384-unique casc29+casc30, RESUMABLE, keeps every PROVED problem's rows,
+logs per-problem kbo/npos), `dagger_eval.sh` (easy + hard online),
+`dagger_missscan.sh` (the 35 CASC-30 UEQ misses).
+
+Rollout mechanic: arming (`THVM_ATP_GNN_ASSET` + rerank) and export
+(`THVM_ATP_ENIGMA_GRAPH_EXPORT`) are independent env-gated paths that share
+the sine-level table, so they compose with no code change -- the export
+captures exactly the guided processed-CP stream, labelled on PROVED by the
+proof-DAG.
+
+Labeller caveat (measured, not a regression): `thvm_atp_proof_extract` is
+a single-normal-form extractor; when the goal closes only by the MNF
+(multi-normal-form) search its two sides do not join under the final rule
+set (`kbo_eq=0`) and it returns 0, so every proof-relevant CP of that
+proof is mislabelled negative.  Arming changes the kept rule set, so it
+raises this rate (e.g. BOO014-10 labels 18 -> 0 armed).  The guided
+NEGATIVES are the DAgger signal, so every PROVED problem's rows are kept
+(the false-negative fraction is ~= the 1% positive rate, small); the
+`.stats` file records `kbo=0` per round for honest accounting.
+
+Per-round stats (wall 6, serial, 384-unique corpus):
+
+| round | armed solved | vs baseline 136 | graphs | positives | extract-fail |
+|---|---|---|---|---|---|
+| baseline (unarmed) | 136 | -- | -- | -- | -- |
+| round-1 armed | 73 | LOST 67, GAINED 4 | 25466 | 1003 | 18 |
+| round-2 armed | 75 | LOST 68, GAINED 7 | 28164 |  938 | 18 |
+
+Held-out cascJ12 AUC / P@k (FIXED baseline-distribution held-out, so the
+numbers are comparable across rounds):
+
+| model | train data | AUC | P@100 | P@500 | P@1000 |
+|---|---|---|---|---|---|
+| round-1 | baseline | 0.904 | 36x | 36x | 34x |
+| round-2 | baseline + roll-r1 | 0.902 | 50.5x | 41.7x | 37.0x |
+| round-3 | baseline + roll-r1 + roll-r2 | 0.905 | 56.1x | 38.8x | 34.0x |
+
+Online eval (round-2 / round-3, coop topk 512): easy provers kept
+(LAT171-1 0.2s, BOO034-1 0.06s, COL002-5 9.3-9.8s); the hard targets
+GRP690-1 / GRP692-1 (--ord=lpo) / RNG027-9 / LCL306-10 all still time out
+at wall 60.  Miss-scan (round-3 armed, 35 CASC-30 UEQ misses, wall 60):
+0 flips.
+
+VERDICT (honest, negative-but-measured): DAgger monotonically SHARPENS the
+offline ranker (P@100 36x -> 50.5x -> 56.1x, AUC flat ~0.90) but does NOT
+convert to online solves.  Guidance stays net-negative vs the unarmed
+baseline (armed 73-75 vs 136 solved at wall 6) and cracks no hard target
+or miss.  Three bottlenecks, none of them model capacity (AUC plateaus at
+~0.90 for H=64, so a deeper net is not the lever):
+
+1. **Pre-filter starvation.** The topk=512 cap scores only the top 512 CPs
+   by the cheap score; a hard problem's queue is ~45k CPs (GRP690-1), so a
+   proof-relevant CP outside that window is never scored.  The GNN cannot
+   find a needle the cheap prefilter already discarded.
+2. **Failures are unlabelled.** The 67 problems guidance LOSES prove
+   nothing, so they yield no rows -- DAgger never sees corrective data for
+   the exact problems where guidance fails.  This is the structural limit
+   of DAgger-for-ATP on hard targets.
+3. **Rerank cost > ranking gain at short walls.** Coop steering plus the
+   rerank overhead slows the solve enough to lose ~half the baseline set
+   at wall 6; the offline ranking edge does not pay for its online cost.
+
+Next levers: a per-CP cost/latency signal (the rerank must justify itself),
+a cheaper full-queue scoring so huge-queue proof CPs are visible (drop the
+topk cap), or a value/lookahead model rather than a pointwise CP ranker.
+`gcn_tier2_casc_round2.safetensors` / `round3` are committed as the DAgger
+artifacts; the lane stays opt-in and is NOT added to `SCHEDULE[]`.
+
 ## Typical flow
 
 ```
