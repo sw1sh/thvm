@@ -120,7 +120,7 @@ Pipeline (CPU-only; no WL, no GPU):
 
 ```
 # 1. Export labelled CP GRAPHS from proving runs (one JSONL line per
-#    processed CP: {"y",<0|1>,"x":[[6 anon feats]..],"e":[[src,dst]..]}).
+#    processed CP: {"y",<0|1>,"x":[[12 feats]..],"e":[[src,dst]..]}).
 #    SERIAL, one problem per process, small wall.
 TPTP=~/.cache/thvm/casc bash tools/atp_enigma/gen_tier2_data.sh
 #    (or directly, per problem:)
@@ -155,8 +155,12 @@ Knobs: `THVM_ATP_GNN_ASSET=<path>` loads a GCN, `THVM_ATP_GNN_RERANK_PERIOD`
 sets the re-rank cadence (selections between re-ranks; 0 = off, the
 byte-identical default), `THVM_ATP_GNN_COOP_RATIO=N` routes the GNN to the
 secondary coop dimension (every N-th pick) instead of overwriting the
-primary heap. Completeness holds regardless: the re-rank only permutes the
-queue, and the FIFO/AutoMaxWeight fairness still fires.
+primary heap, `THVM_ATP_GNN_TOPK=K` is the parental pre-filter (each
+re-rank GNN-scores only the top K CPs by the cheap score -- the Tier-1
+logit if loaded, else cp_pri -- so a re-rank costs O(K) forwards no matter
+how large the queue; default 512, 0 = whole queue). Completeness holds
+regardless: the re-rank only permutes the queue, and the FIFO/AutoMaxWeight
+fairness still fires.
 
 ### Round-0 result (behavior cloning; 2026-07-21)
 
@@ -185,6 +189,41 @@ cascJ12.
   parental pre-filter is the phase-2 fix. The hard targets GRP690-1
   (--ord=lpo) and RNG027-9 still time out at 60s (round-0 cracks neither,
   as expected). Deploy recommendation: coop, period >= 2000.
+
+### Round-1 result (phase 2a: richer features + pre-filter; 2026-07-21)
+
+Phase 2a fixed the two round-0 blockers.  (a) The **parental pre-filter**
+(`THVM_ATP_GNN_TOPK`, default 512) caps each re-rank at K GNN forwards, so
+an aggressive period no longer walls on a large queue.  (b) The node-
+feature schema grew 6 -> 12: the positional signal (depth, argument index)
+and the goal-relevance signal SInE lacks (`is_goal_symbol` from the
+conjecture cone, `goal_closeness` from the reused s2a sine-level table),
+plus `occurs_lhs/rhs`.  `gcn_tier2_casc_round1.safetensors` is the round-1
+model: H = 64, R = 3, 3000 Adam steps, same recipe, F = 12.
+
+- **Dataset** (F=12 regen, waldmeister-lazy wall 6, serial): train 471,248
+  processed CPs / 4,866 proof-relevant (1.03%); held-out cascJ12 282,936
+  CPs / 2,522 positive (0.89%).
+- **Offline (held-out cascJ12)**: the goal + positional features BROKE the
+  0.84 ceiling.  AUC 0.842 (round-0) -> 0.897 (H=32) -> **0.904 (H=64)**,
+  approaching Tier-1's 0.918 while keeping symbol-independence.  P@100/500/
+  1000 = 36x / 36x / 34x (H=64) -- ~2x Tier-1's ~17x and far more balanced
+  across k than round-0 (46x@100 falling to 24x@1000).  Round-0 plateaued
+  at ~0.84 for BOTH H=32 and H=64 (feature-limited); now H=64 > H=32, so
+  capacity helps again -- confirming the plateau was feature poverty.
+- **Pre-filter (latency wall)**: on GRP690-1 (queue ~45k CPs, coop period
+  200) topk 512 does 832 saturation steps / 27.5 steps-sec in a 30s wall vs
+  the whole-queue 649 / 21.7 (+27% throughput).  LAT171-1 at period 200 +
+  topk 512 proves in 0.2s -- no wall (round-0 walled at period 200).
+- **Online (round-1 armed, coop, topk 512)**: easy provers all still prove
+  -- LAT171-1 14.2s -> 0.2s (period 200) / 0.9s (period 2000), BOO034-1
+  0.0s, COL002-5 2.5s -> 26s (slower, not lost).  Held-out ANA034-10 2.5s
+  -> 2.7s.  Hard targets GRP690-1/692-1/RNG027-9/LCL306-10 still time out
+  (60s and 240s) -- offline ranking gain does not yet convert to online
+  cracking (the distribution-shift gap), which is what phase 2b's DAgger
+  self-play retraining targets.  Soundness canary (satisfiable problems
+  with the rerank armed) reports no refutation.  Deploy: coop, period 2000,
+  topk 512.
 
 ## Typical flow
 
