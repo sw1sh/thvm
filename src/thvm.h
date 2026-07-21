@@ -6851,6 +6851,23 @@ typedef struct {
   u32    n_cp_feat;        // number of recorded rows
   u32    cp_feat_cap;      // capacity of the three parallel arrays
 
+  // ENIGMA Tier 2 graph export (record_cp_graphs; DEFAULT 0).  Set
+  // alongside record_cp_features: each PROCESSED critical pair also
+  // serialises its anonymised hypergraph (thvm_atp_cp_graph) into the
+  // growable byte arena below, one self-describing record per recorded
+  // feature row (so the i-th record pairs with cp_feat_label[i]).  On a
+  // SUCCESSFUL proof thvm_atp_cp_graph_dataset_append walks the arena and
+  // writes label + graph per CP as one JSONL line.  OFF (the default) the
+  // arena stays NULL and select_cp does no extra work -- byte-identical.
+  u8      record_cp_graphs;
+  u8     *cp_graph_arena;   // packed variable-length graph records
+  size_t  cp_graph_len;     // bytes used in the arena
+  size_t  cp_graph_cap;     // arena capacity in bytes
+  size_t *cp_graph_off;     // arena offset of the i-th feature row's graph
+                            // (SIZE_MAX = skipped: overflow/OOM), parallel
+                            // to the cp_feat_* arrays and grown with them
+  void   *cp_graph_scratch; // reusable AtpCpGraph build scratch (lazy)
+
 #ifdef THVM_ATPFT_RULES
   // Parallel AtpFt rule storage; see docs/atp/engineering.md.
   // Eagerly mirror every Term written into lhs[]/rhs[]/r_dead_*_save[]/
@@ -7767,6 +7784,26 @@ fn u32       thvm_atp_cp_label(AtpState *s);
 fn u32       thvm_atp_cp_dataset_append(const AtpState *s,
                                         const char *path, u8 header);
 
+// === ENIGMA Tier 2 graph-dataset export ============================
+// Enable per-CP anonymised-hypergraph recording (needs record_cp_features
+// too, for the trace ids the labeller fills).  OFF by default; when off
+// the record path is inert and the run is byte-identical.
+fn void      thvm_atp_set_record_cp_graphs(AtpState *s, u8 on);
+
+// On a SUCCESSFUL proof (after thvm_atp_cp_label filled the labels),
+// append one JSONL line per recorded CP to `path` (created if absent,
+// appended otherwise -- no header, so a SERIAL one-problem-per-process
+// run accumulates a single dataset).  Each line is the anonymised graph
+// the in-engine GCN scores plus its proof-relevance label:
+//   {"y":<0|1>,"x":[[f0..f5],...],"e":[[src,dst],...]}
+// x is the n_nodes list of 6 anonymised node features (is_term,
+// is_symbol, is_var, arity, occurrence_count, is_cpsuper); e is the
+// directed edge list (the trainer symmetrises + self-loops + row-
+// normalises, matching the C forward's build_host).  Overflow graphs
+// (n_nodes 0) are skipped.  Returns the number of lines written.
+fn u32       thvm_atp_cp_graph_dataset_append(const AtpState *s,
+                                              const char *path);
+
 // === Runtime-loadable learned CP scorer (ENIGMA Tier 1) =============
 // The baked-in ATP_LEARNED_W/B logistic regression is the default
 // fallback for ATP_CP_WEIGHT_LEARNED.  This block lets a model trained
@@ -7935,6 +7972,14 @@ fn int       thvm_atp_gnn_loaded(void);
 // no AtpState needed.
 fn int       thvm_atp_gnn_score_batch(const Term *lhs, const Term *rhs,
                                       u32 n, float *out_scores);
+
+// Score a batch of PRE-BUILT graphs (the same math as
+// thvm_atp_gnn_score_batch, but from AtpCpGraph structs instead of
+// Terms).  Used by the offline parity harness (exported graphs scored by
+// the exact in-engine forward, cross-checked against the Python trainer).
+// Returns 1 on success, 0 if no model is loaded or n == 0.
+fn int       thvm_atp_gnn_score_graphs(const AtpCpGraph *gs, u32 n,
+                                       float *out_scores);
 
 // M3 (integration): re-rank the live CP queue with the loaded GNN.
 // Pulls the queued CPs (thvm_atp_queued_cps), scores them with

@@ -2923,6 +2923,16 @@ int main(int argc, char **argv) {
   if (getenv("THVM_ATP_ENIGMA_EXPORT") != NULL)
     thvm_atp_set_record_cp_features(s, 1u);
 
+  // THVM_ATP_ENIGMA_GRAPH_EXPORT=<path.jsonl> records, alongside the
+  // features, each processed CP's anonymised hypergraph, and (on PROVED)
+  // appends one labelled JSONL graph line per CP -- the ENIGMA Tier-2 GCN
+  // training corpus.  Needs the feature recording on too (for the trace
+  // ids the labeller fills), so arm both here.
+  if (getenv("THVM_ATP_ENIGMA_GRAPH_EXPORT") != NULL) {
+    thvm_atp_set_record_cp_features(s, 1u);
+    thvm_atp_set_record_cp_graphs(s, 1u);
+  }
+
   // Arm the wall deadline under --ord=lpo for BOTH the engine (its per-step
   // and per-normalize deadline polls) and the LPO comparator (its mid-
   // comparison self-abort).  Both are required: within a single saturation
@@ -4007,11 +4017,23 @@ int main(int argc, char **argv) {
   // label against).
   {
     const char *ds = getenv("THVM_ATP_ENIGMA_EXPORT");
-    if (ds != NULL && ds[0] != '\0' && st == ATP_PROVED && s->record_cp_features) {
-      u32 n_pos = thvm_atp_cp_label(s);
-      u32 n_rows = thvm_atp_cp_dataset_append(s, ds, 1u);
-      fprintf(stderr, "%% ENIGMA export: %u rows (%u proof-relevant) -> %s\n",
-              n_rows, n_pos, ds);
+    const char *gds = getenv("THVM_ATP_ENIGMA_GRAPH_EXPORT");
+    int want_tsv   = ds  != NULL && ds[0]  != '\0';
+    int want_graph = gds != NULL && gds[0] != '\0';
+    if ((want_tsv || want_graph) && st == ATP_PROVED
+        && s->record_cp_features) {
+      u32 n_pos = thvm_atp_cp_label(s);   // proof-DAG labels, computed once
+      if (want_tsv) {
+        u32 n_rows = thvm_atp_cp_dataset_append(s, ds, 1u);
+        fprintf(stderr, "%% ENIGMA export: %u rows (%u proof-relevant) -> %s\n",
+                n_rows, n_pos, ds);
+      }
+      if (want_graph && s->record_cp_graphs) {
+        u32 n_g = thvm_atp_cp_graph_dataset_append(s, gds);
+        fprintf(stderr,
+                "%% ENIGMA graph export: %u graphs (%u proof-relevant) -> %s\n",
+                n_g, n_pos, gds);
+      }
     }
   }
 

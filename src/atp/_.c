@@ -7839,6 +7839,9 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_feat_rows);
   free(s->cp_feat_trace);
   free(s->cp_feat_label);
+  free(s->cp_graph_arena);
+  free(s->cp_graph_off);
+  free(s->cp_graph_scratch);
 #ifdef ATP_FV_INDEX
   atp_fv_index_free(s->fv_index);
 #endif
@@ -13173,6 +13176,34 @@ fn int thvm_atp_gnn_score_batch(const Term *lhs, const Term *rhs,
 
   thvm_context_select(prev);
   free(gs);
+  return ok;
+}
+
+// Score a batch of PRE-BUILT graphs with the loaded GNN -- the same
+// sandbox-context + chunked forward as thvm_atp_gnn_score_batch, minus
+// the per-CP thvm_atp_cp_graph extraction (the caller supplies gs[]).
+// The offline parity harness uses this to score exported graphs by the
+// exact in-engine forward.
+fn int thvm_atp_gnn_score_graphs(const AtpCpGraph *gs, u32 n,
+                                 float *out_scores) {
+  if (!g_atp_gnn_active || n == 0u || gs == NULL || out_scores == NULL) {
+    return 0;
+  }
+  const AtpGnnScorer *m = &g_atp_gnn;
+  u32 prev = thvm_context_current();
+  if (g_atp_gnn_ctx == 0u) g_atp_gnn_ctx = thvm_context_create("cpu");
+  if (g_atp_gnn_ctx == 0u) return 0;
+  thvm_context_select(g_atp_gnn_ctx);
+  if (TENS_NEXT > TENS_CAP / 2u || KERNELS_NEXT > KERNELS_CAP / 2u) {
+    atp_gnn_capture_cache_clear();
+    thvm_reset();
+  }
+  int ok = 1;
+  for (u32 off = 0u; ok && off < n; off += ATP_GNN_B_CAP) {
+    u32 nc = (n - off < ATP_GNN_B_CAP) ? (n - off) : ATP_GNN_B_CAP;
+    ok = atp_gnn_score_chunk(m, gs + off, nc, out_scores + off);
+  }
+  thvm_context_select(prev);
   return ok;
 }
 
@@ -18666,6 +18697,59 @@ fn void thvm_atp_set_record_cp_features(AtpState *s, u8 on) {
   s->record_cp_features = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_record_cp_graphs(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->record_cp_graphs = on ? 1u : 0u;
+}
+
+// Grow the CP-graph byte arena to hold at least `need` total bytes.
+static void atp_cp_graph_arena_ensure(AtpState *s, size_t need) {
+  if (need <= s->cp_graph_cap) return;
+  size_t cap = s->cp_graph_cap ? s->cp_graph_cap * 2u : 65536u;
+  while (cap < need) cap *= 2u;
+  u8 *na = (u8 *)realloc(s->cp_graph_arena, cap);
+  if (na == NULL) return;   // OOM: leave arena as-is; record is dropped
+  s->cp_graph_arena = na;
+  s->cp_graph_cap   = cap;
+}
+
+// Serialise the anonymised hypergraph for the feature row at index `idx`
+// into the byte arena, one self-describing record:
+//   [u32 n_nodes][u32 n_edges][n_nodes*6 f32 node_feat][n_edges*2 u32 edges]
+// cp_graph_off[idx] records the record's arena offset so the exporter
+// pairs it with cp_feat_label[idx] exactly; on builder overflow or arena
+// OOM the offset is SIZE_MAX and the exporter skips that row.  Only ever
+// called under s->record_cp_graphs, so the default run is untouched.
+static void atp_cp_graph_record(AtpState *s, u32 idx, Term lhs, Term rhs) {
+  s->cp_graph_off[idx] = (size_t)-1;   // default: skipped
+  if (s->cp_graph_scratch == NULL) {
+    s->cp_graph_scratch = malloc(sizeof(AtpCpGraph));
+    if (s->cp_graph_scratch == NULL) return;
+  }
+  AtpCpGraph *g = (AtpCpGraph *)s->cp_graph_scratch;
+  if (!thvm_atp_cp_graph(lhs, rhs, g)) return;   // overflow -> skip
+  u32 nn = g->n_nodes, ne = g->n_edges;
+  size_t rec = 8u + (size_t)nn * ATP_CPG_FEAT_DIM * sizeof(float)
+             + (size_t)ne * 2u * sizeof(u32);
+  atp_cp_graph_arena_ensure(s, s->cp_graph_len + rec);
+  if (s->cp_graph_arena == NULL || s->cp_graph_len + rec > s->cp_graph_cap) {
+    return;   // arena OOM -> skip
+  }
+  s->cp_graph_off[idx] = s->cp_graph_len;
+  u8 *p = s->cp_graph_arena + s->cp_graph_len;
+  memcpy(p, &nn, 4u); p += 4u;
+  memcpy(p, &ne, 4u); p += 4u;
+  if (nn) {
+    size_t fb = (size_t)nn * ATP_CPG_FEAT_DIM * sizeof(float);
+    memcpy(p, g->node_feat, fb); p += fb;   // nodes 0..nn-1 are contiguous
+  }
+  for (u32 e = 0u; e < ne; e++) {
+    u32 sd[2] = { g->edge_src[e], g->edge_dst[e] };
+    memcpy(p, sd, 8u); p += 8u;
+  }
+  s->cp_graph_len = (size_t)(p - s->cp_graph_arena);
+}
+
 // Grow the recording arrays to hold at least `need` rows.
 static void atp_cp_feat_ensure(AtpState *s, u32 need) {
   if (need <= s->cp_feat_cap) return;
@@ -18676,6 +18760,10 @@ static void atp_cp_feat_ensure(AtpState *s, u32 need) {
                                         * sizeof(float));
   s->cp_feat_trace = (u32 *)realloc(s->cp_feat_trace, cap * sizeof(u32));
   s->cp_feat_label = (u8 *)realloc(s->cp_feat_label, cap * sizeof(u8));
+  if (s->record_cp_graphs) {
+    s->cp_graph_off = (size_t *)realloc(s->cp_graph_off,
+                                        (size_t)cap * sizeof(size_t));
+  }
   s->cp_feat_cap   = cap;
 }
 
@@ -18688,6 +18776,9 @@ static void atp_cp_feat_record(AtpState *s, Term lhs, Term rhs,
   thvm_atp_cp_features(s, lhs, rhs, s->n_cp_feat, row);
   s->cp_feat_trace[s->n_cp_feat] = trace_id;
   s->cp_feat_label[s->n_cp_feat] = 0u;
+  if (s->record_cp_graphs && s->cp_graph_off != NULL) {
+    atp_cp_graph_record(s, s->n_cp_feat, lhs, rhs);
+  }
   s->n_cp_feat++;
 }
 
@@ -18793,6 +18884,53 @@ fn u32 thvm_atp_cp_dataset_append(const AtpState *s, const char *path,
   }
   fclose(f);
   return s->n_cp_feat;
+}
+
+// Append the labelled CP graphs as JSONL (one line per recorded CP with a
+// non-skipped graph).  Each line: {"y":<0|1>,"x":[[6 feats],...],
+// "e":[[src,dst],...]}.  Pairs the i-th feature row's arena record with
+// cp_feat_label[i] via cp_graph_off[i].  Reads are memcpy'd out of the
+// arena (no aliasing/alignment assumption).  Returns the lines written.
+fn u32 thvm_atp_cp_graph_dataset_append(const AtpState *s, const char *path) {
+  if (s == NULL || path == NULL || s->n_cp_feat == 0u
+      || s->cp_graph_arena == NULL || s->cp_graph_off == NULL) {
+    return 0u;
+  }
+  FILE *f = fopen(path, "a");
+  if (f == NULL) return 0u;
+  u32 written = 0u;
+  for (u32 i = 0u; i < s->n_cp_feat; i++) {
+    size_t off = s->cp_graph_off[i];
+    if (off == (size_t)-1) continue;             // overflow/OOM: skipped
+    const u8 *p = s->cp_graph_arena + off;
+    u32 nn = 0u, ne = 0u;
+    memcpy(&nn, p, 4u); memcpy(&ne, p + 4u, 4u);
+    if (nn == 0u) continue;
+    const u8 *fp = p + 8u;
+    const u8 *ep = fp + (size_t)nn * ATP_CPG_FEAT_DIM * sizeof(float);
+    fprintf(f, "{\"y\":%u,\"x\":[", (unsigned)s->cp_feat_label[i]);
+    for (u32 nix = 0u; nix < nn; nix++) {
+      if (nix) fputc(',', f);
+      fputc('[', f);
+      for (u32 fj = 0u; fj < ATP_CPG_FEAT_DIM; fj++) {
+        float v;
+        memcpy(&v, fp + ((size_t)nix * ATP_CPG_FEAT_DIM + fj) * sizeof(float),
+               sizeof(float));
+        fprintf(f, "%s%g", fj ? "," : "", (double)v);
+      }
+      fputc(']', f);
+    }
+    fprintf(f, "],\"e\":[");
+    for (u32 e = 0u; e < ne; e++) {
+      u32 sd[2];
+      memcpy(sd, ep + (size_t)e * 2u * sizeof(u32), 2u * sizeof(u32));
+      fprintf(f, "%s[%u,%u]", e ? "," : "", sd[0], sd[1]);
+    }
+    fprintf(f, "]}\n");
+    written++;
+  }
+  fclose(f);
+  return written;
 }
 
 // Drive thvm_atp_step until it returns a non-RUNNING status.
