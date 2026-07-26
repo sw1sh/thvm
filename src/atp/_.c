@@ -1590,6 +1590,39 @@ static inline void atp_cp_implicit_move(AtpState *s, u32 dst, u32 src) {
 // cp_heap/cp_pos position mirror, so a slot's descriptor + tag bit stay
 // put with its stationary payload row.)
 
+// === Raw-descriptor lane (use_raw_desc / use_raw_desc_cert) =========
+//
+// The WM preset's raw >= 50 KPBehandelt class is pushed through the
+// walk former's FT-direct emit (sw_form_push_ft_try -> vcp_ft_emit_
+// fused): the packed byte string is serialized straight from the two
+// parent face spans + the unifier, no heap Terms.  This lane stores,
+// for exactly that class, a 20-byte descriptor (two interned face-pair
+// refs + the overlap subterm's preorder index) instead of the malloc'd
+// byte string, and re-runs the identical rename/unify/emit pipeline at
+// pop to recover byte-exact packed bytes.  Soundness of the pointer
+// capture: rule-face mirror spans are content-frozen for the state's
+// lifetime -- a drop moves them to the r_dead_*_save_ft slots, an RHS
+// compose abandons the old span in Arena A ("freed wholesale at
+// ft_destroy time"), and nothing else writes a live face's cells -- so
+// the refs re-derive the BIRTH-time pair even after parent mutation.
+#define ATP_RDESC_NONE 0xFFFFFFFFu
+typedef struct {
+  u8  armed;      // consume-once: armed by sw_form_push_ft_try beside g_vcp_emit
+  u32 out_face;   // interned (lo, ro) of the outer parent, as consumed
+  u32 in_face;    // interned (lin, rin) of the inner parent, pre-rename
+  u32 sub_pre;    // preorder cell index of the overlap subterm in lo
+  u32 len;        // packed byte length of the emit (cert-mode memcmp bound)
+} AtpRdescPush;
+static AtpRdescPush g_rdesc_push;   // armed at formation (walk former)
+static AtpRdescPush g_rdesc_store;  // handed to atp_cp_heap_insert_packed
+static u32 atp_rdesc_intern(AtpState *s, const struct AtpFtCell *lo,
+                            const struct AtpFtCell *ro);
+static u8 *atp_rdesc_materialize(AtpState *s, const AtpCpImplicit *d,
+                                 u32 *len_out, u32 *nodes_out,
+                                 u32 *lhs_nodes_out);
+static void atp_cp_rdesc_pop_fix(AtpState *s, u32 v);
+static void atp_cp_implicit_arrays_ensure(AtpState *s);
+
 // 7c': push one CP onto the binary min-heap CP queue.  Defined
 // below (after atp_cp_priority); forward-declared here so the
 // earlier add_equation push site can call it.  `is_ultimate`=1
@@ -4156,8 +4189,12 @@ fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
   }
   free(s->cp_packed[row]);               // free(NULL) is a no-op
   // The slot now holds packed bytes -- drop any deferred-CP tag so the
-  // `cp_is_implicit[i] <=> cp_packed[i] == NULL` invariant holds.
+  // `cp_is_implicit[i] <=> cp_packed[i] == NULL` invariant holds, and
+  // retire any raw-desc descriptor (the bytes are being replaced).
   atp_cp_implicit_clear(s, row);
+  if (s->cp_implicit != NULL) {
+    s->cp_implicit[row].out_face = ATP_RDESC_NONE;
+  }
   s->cp_packed[row] = acp_pack(lhs, rhs, NULL, NULL);
   // Insertion age, stamped once here (mirroring the heap-push path) and
   // preserved across every later sweep / reheapify -- WM keeps the w2
@@ -7821,6 +7858,10 @@ fn void thvm_atp_free(AtpState *s) {
   // no-op -- handles the flag-OFF case where both pointers stay NULL.
   free(s->cp_implicit);
   free(s->cp_is_implicit);
+  // Raw-desc face-pair intern table (entries alias arena spans -- no
+  // per-entry resource).
+  free(s->rdesc_faces);
+  free(s->rdesc_hash);
   // Auto-MaxWeight overflow stash: each packed byte string is owned
   // here too (free(NULL) is a no-op for slots already drained).
   if (s->cp_stash_packed != NULL) {
@@ -13709,6 +13750,215 @@ static void atp_kdh_build(AtpState *s) {
   }
 }
 
+// --- Raw-descriptor lane bodies (see the block comment at the top
+// helpers).  atp_rdesc_intern: dedupe one (lo, ro) face-pair into
+// s->rdesc_faces, returning its u32 ref.  Open addressing over pointer
+// pairs; the table only ever grows (face pairs are never retired --
+// their spans are immortal within the state).
+static void atp_rdesc_hash_grow(AtpState *s) {
+  u32 ncap = s->rdesc_hash_cap ? s->rdesc_hash_cap * 2u : 4096u;
+  u32 *nh = (u32 *)malloc((size_t)ncap * sizeof(u32));
+  if (nh == NULL) thvm_fatal("atp_rdesc_hash_grow: OOM");
+  for (u32 i = 0; i < ncap; i++) nh[i] = ATP_RDESC_NONE;
+  for (u32 r = 0; r < s->rdesc_n; r++) {
+    u64 h = ((u64)(uintptr_t)s->rdesc_faces[r].lo
+             ^ ((u64)(uintptr_t)s->rdesc_faces[r].ro << 17))
+            * 0x9e3779b97f4a7c15ull;
+    u32 j = (u32)(h >> 32) & (ncap - 1u);
+    while (nh[j] != ATP_RDESC_NONE) j = (j + 1u) & (ncap - 1u);
+    nh[j] = r;
+  }
+  free(s->rdesc_hash);
+  s->rdesc_hash     = nh;
+  s->rdesc_hash_cap = ncap;
+}
+
+static u32 atp_rdesc_intern(AtpState *s, const struct AtpFtCell *lo,
+                            const struct AtpFtCell *ro) {
+  if (s->rdesc_hash == NULL ||
+      s->rdesc_n * 4u >= s->rdesc_hash_cap * 3u) {
+    atp_rdesc_hash_grow(s);
+  }
+  u64 h = ((u64)(uintptr_t)lo ^ ((u64)(uintptr_t)ro << 17))
+          * 0x9e3779b97f4a7c15ull;
+  u32 j = (u32)(h >> 32) & (s->rdesc_hash_cap - 1u);
+  while (s->rdesc_hash[j] != ATP_RDESC_NONE) {
+    u32 r = s->rdesc_hash[j];
+    if (s->rdesc_faces[r].lo == lo && s->rdesc_faces[r].ro == ro) return r;
+    j = (j + 1u) & (s->rdesc_hash_cap - 1u);
+  }
+  if (s->rdesc_n == s->rdesc_cap) {
+    u32 ncap = s->rdesc_cap ? s->rdesc_cap * 2u : 1024u;
+    AtpRdescFace *nf = (AtpRdescFace *)realloc(
+        s->rdesc_faces, (size_t)ncap * sizeof(AtpRdescFace));
+    if (nf == NULL) thvm_fatal("atp_rdesc_intern: OOM");
+    s->rdesc_faces = nf;
+    s->rdesc_cap   = ncap;
+  }
+  u32 r = s->rdesc_n++;
+  s->rdesc_faces[r].lo = lo;
+  s->rdesc_faces[r].ro = ro;
+  s->rdesc_hash[j] = r;
+  return r;
+}
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Re-derive a raw-desc slot's packed byte string from its parents:
+// the exact push-time pipeline -- rename the inner face by
+// CP_RENAME_OFFSET (== sw_rename_ft's clone content), re-address the
+// overlap subterm by preorder index (spans are ->next preorder
+// chains), ft_unify, then vcp_ft_emit_fused into g_acp_scratch.  Every
+// step is a pure function of the frozen face spans, so the bytes are
+// identical to the push-time emit (certified by use_raw_desc_cert).
+// Returns a malloc'd copy of the bytes; clears the transient fused
+// weigh / emit state it armed.  thvm_fatal on any failure: the push
+// side only stored a descriptor when this exact pipeline SUCCEEDED on
+// these exact inputs, so a failure here is a broken invariant.
+static u8 *atp_rdesc_materialize(AtpState *s, const AtpCpImplicit *d,
+                                 u32 *len_out, u32 *nodes_out,
+                                 u32 *lhs_nodes_out) {
+  if (d->out_face >= s->rdesc_n || d->in_face >= s->rdesc_n) {
+    thvm_fatal("atp_rdesc_materialize: face ref out of range");
+  }
+  const AtpRdescFace *fo = &s->rdesc_faces[d->out_face];
+  const AtpRdescFace *fi = &s->rdesc_faces[d->in_face];
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *lin_ft = ft_rename_span(a, fi->lo, CP_RENAME_OFFSET, 0);
+  AtpFtCell *rin_ft = ft_rename_span(a, fi->ro, CP_RENAME_OFFSET, 0);
+  const AtpFtCell *sub = fo->lo;
+  for (u32 k = 0; k < d->sub_pre; k++) {
+    if (sub == NULL) thvm_fatal("atp_rdesc_materialize: sub_pre walked "
+                                "off the outer face span");
+    sub = sub->next;
+  }
+  static AtpFtSubst rsubst;
+  ft_subst_reset(&rsubst);
+  if (!ft_unify(sub, lin_ft, &rsubst)) {
+    fprintf(stderr,
+            "rdesc materialize: ft_unify FAILED out_face=%u in_face=%u "
+            "sub_pre=%u weight=%u\n",
+            d->out_face, d->in_face, d->sub_pre, d->weight);
+    thvm_fatal("atp_rdesc_materialize: re-unification failed");
+  }
+  if (!vcp_ft_emit_fused(s->kbo, fo->lo, sub, rin_ft, fo->ro, &rsubst)) {
+    fprintf(stderr,
+            "rdesc materialize: emit ANOMALY out_face=%u in_face=%u "
+            "sub_pre=%u weight=%u\n",
+            d->out_face, d->in_face, d->sub_pre, d->weight);
+    thvm_fatal("atp_rdesc_materialize: re-emit anomaly");
+  }
+  u32 flen = g_vcp_emit.len;
+  u8 *bytes = (u8 *)malloc(flen ? flen : 1u);
+  if (bytes == NULL) thvm_fatal("atp_rdesc_materialize: OOM");
+  memcpy(bytes, g_acp_scratch, flen);
+  *len_out       = flen;
+  *nodes_out     = g_vcp_emit.nodes;
+  *lhs_nodes_out = g_vcp_emit.lhs_nodes;
+  // The emit armed the consume-once fused weigh state; nothing at pop
+  // consumes it, so disarm both (a stale valid=1 would feed this CP's
+  // balances into the NEXT push's weigh compare).
+  g_acp_fuse.valid = 0u;
+  g_vcp_emit.armed = 0u;
+  ft_free_span(a, lin_ft, lin_ft->end);
+  ft_free_span(a, rin_ft, rin_ft->end);
+  s->n_rawdesc_mat++;
+  return bytes;
+}
+#else
+static u8 *atp_rdesc_materialize(AtpState *s, const AtpCpImplicit *d,
+                                 u32 *len_out, u32 *nodes_out,
+                                 u32 *lhs_nodes_out) {
+  (void)s; (void)d; (void)len_out; (void)nodes_out; (void)lhs_nodes_out;
+  thvm_fatal("atp_rdesc_materialize: raw-desc lane requires the "
+             "THVM_ATPFT_NORM build (descriptors can never be pushed "
+             "without it)");
+  return NULL;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+
+// Cert-mode verify of one eager slot that carries a descriptor:
+// re-derive and memcmp against the stored bytes; thvm_fatal with a
+// full dump on any mismatch.  Shared by the pop-time check and the
+// whole-queue sweep (thvm_atp_rawdesc_cert_sweep).
+static void atp_rdesc_cert_verify(AtpState *s, u32 v) {
+  const AtpCpImplicit *d = &s->cp_implicit[v];
+  u32 len = 0u, nodes = 0u, lhs_nodes = 0u;
+  u8 *bytes = atp_rdesc_materialize(s, d, &len, &nodes, &lhs_nodes);
+  u32 elen = d->weight;   // cert mode: push-time byte length
+  if (len != elen || memcmp(bytes, s->cp_packed[v], len) != 0) {
+    u32 firstdiff = 0u;
+    u32 lim = len < elen ? len : elen;
+    while (firstdiff < lim &&
+           bytes[firstdiff] == s->cp_packed[v][firstdiff]) {
+      firstdiff++;
+    }
+    fprintf(stderr,
+            "RAW_DESC CERT MISMATCH seq=%u len=%u/%u firstdiff=%u "
+            "out_face=%u(lo=%p ro=%p) in_face=%u(lo=%p ro=%p) "
+            "sub_pre=%u pri=%u\n",
+            s->cp_seq[v], len, elen, firstdiff,
+            d->out_face, (const void *)s->rdesc_faces[d->out_face].lo,
+            (const void *)s->rdesc_faces[d->out_face].ro,
+            d->in_face, (const void *)s->rdesc_faces[d->in_face].lo,
+            (const void *)s->rdesc_faces[d->in_face].ro,
+            d->sub_pre, d->priority);
+    for (u32 k = 0; k < lim && k < 512u; k++) {
+      if (k % 32u == 0u) fprintf(stderr, "\n  eager/desc[%4u]:", k);
+      fprintf(stderr, " %02x/%02x", s->cp_packed[v][k], bytes[k]);
+    }
+    fputc('\n', stderr);
+    thvm_fatal("RAW_DESC certifier: materialized pair differs from "
+               "the eager packed bytes");
+  }
+  free(bytes);
+}
+
+// Whole-queue certifier sweep (cert mode only): verify EVERY live
+// queued slot that carries a descriptor, not just the popped ones --
+// pop coverage is thin exactly because the raw class floods the queue
+// rather than the selections.  Returns the number of slots verified;
+// fatal on the first mismatch.  Payload rows are dense in [0, n_cps).
+fn u64 thvm_atp_rawdesc_cert_sweep(AtpState *s) {
+  if (s == NULL || s->cp_implicit == NULL || s->use_raw_desc_cert == 0u) {
+    return 0ull;
+  }
+  u64 n = 0ull;
+  for (u32 v = 0; v < s->n_cps; v++) {
+    if (atp_cp_slot_implicit(s, v)) continue;
+    if (s->cp_implicit[v].out_face == ATP_RDESC_NONE) continue;
+    if (s->cp_packed[v] == NULL) continue;
+    atp_rdesc_cert_verify(s, v);
+    n++;
+  }
+  return n;
+}
+
+// Pop-time slot fix for the raw-desc lane, called on the selected
+// (non-orphan) slot BEFORE the unpack:
+// - desc mode: materialize the packed bytes into cp_packed[v] and
+//   clear the tag bit -- the slot becomes a plain eager slot and every
+//   downstream consumer (unpack, mixmost byte->FT pop stash, the
+//   free-on-pop) runs the eager code path bit-for-bit.
+// - cert mode: the slot IS eager (bytes stored at push); re-derive
+//   from the descriptor and memcmp -- thvm_fatal with a full dump on
+//   any mismatch.  desc.weight carries the push-time byte length, so
+//   the compare is exact-length, never an over-read.
+// No-op when the lane is off (cp_implicit NULL or no descriptor).
+static void atp_cp_rdesc_pop_fix(AtpState *s, u32 v) {
+  if (s->cp_implicit == NULL) return;
+  if (s->use_raw_desc != 0u && atp_cp_slot_implicit(s, v)) {
+    u32 len = 0u, nodes = 0u, lhs_nodes = 0u;
+    u8 *bytes = atp_rdesc_materialize(s, &s->cp_implicit[v],
+                                      &len, &nodes, &lhs_nodes);
+    s->cp_packed[v] = bytes;
+    atp_cp_implicit_clear(s, v);
+  } else if (s->use_raw_desc_cert != 0u && !atp_cp_slot_implicit(s, v)
+             && s->cp_implicit[v].out_face != ATP_RDESC_NONE
+             && s->cp_packed[v] != NULL) {
+    atp_rdesc_cert_verify(s, v);
+  }
+}
+
 // Insert an already-packed CP byte string onto the heap.  Takes
 // ownership of `packed` (the queue frees it on pop/drop).  `lhs`/`rhs`
 // are the live Terms (for the FV index + goal weight); `cp_nodes` is
@@ -13830,6 +14080,29 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   u32 seq        = s->cp_seq_next++;
   s->cp_seq[i]   = seq;
   if (s->cp_uid_a != NULL) { s->cp_uid_a[i] = g_cp_uid_a; s->cp_uid_b[i] = g_cp_uid_b; }
+  // Raw-descriptor lane: stamp the descriptor for the FT-direct raw
+  // emit class (g_rdesc_store armed by atp_cp_heap_push), or the
+  // "no descriptor" sentinel for every other insert -- the pop-time
+  // certifier / converter keys on out_face.  desc mode (packed == NULL)
+  // sets the tag bit so the slot reads as deferred; cert mode keeps the
+  // eager bytes + a clear bit and records the byte length in .weight
+  // for the exact-length memcmp.  Both flags off: zero-cost skip.
+  if ((s->use_raw_desc | s->use_raw_desc_cert) != 0u) {
+    atp_cp_implicit_arrays_ensure(s);
+    if (g_rdesc_store.armed != 0u) {
+      s->cp_implicit[i].out_face = g_rdesc_store.out_face;
+      s->cp_implicit[i].in_face  = g_rdesc_store.in_face;
+      s->cp_implicit[i].sub_pre  = g_rdesc_store.sub_pre;
+      s->cp_implicit[i].weight   = (packed == NULL) ? cp_nodes
+                                                    : g_rdesc_store.len;
+      s->cp_implicit[i].priority = s->cp_pri[i];
+      if (packed == NULL) atp_cp_implicit_set(s, i);
+      s->n_cps_rawdesc++;
+      g_rdesc_store.armed = 0u;
+    } else {
+      s->cp_implicit[i].out_face = ATP_RDESC_NONE;
+    }
+  }
   // Fuse-neutral insert stream (THVM_ATP_INSERT_TRACE): one line per
   // engine insert with the comparator keys.  Both formation arms funnel
   // through this function, and the env is NOT in atp_cp_push_fuse_ok's
@@ -14046,6 +14319,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
   u32  cp_nodes  = 0u;
   u32  lhs_nodes = 0u;
   u8  *packed    = NULL;
+  u8   rdesc     = 0u;   // raw-desc slot: no bytes stored, descriptor instead
   if (g_cp_push_fused && g_vcp_emit.armed) {
     // FT-direct push: consume the virtual emit --
     // bytes from the scratch, counts from the stash, the fused weigh
@@ -14053,9 +14327,25 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     // below has no Terms to rebuild from here; the FT route's own
     // per-CP certifier is THVM_ATP_FT_EMIT_CHECK (sw_form_push).
     u32 flen = g_vcp_emit.len;
-    packed = (u8 *)malloc(flen ? flen : 1u);
-    if (packed == NULL) thvm_fatal("atp_cp_heap_push: OOM");
-    memcpy(packed, g_acp_scratch, flen);
+    if (g_rdesc_push.armed != 0u && s->use_raw_desc != 0u) {
+      // Raw-desc store: the emit's gates/counts/weigh state are
+      // consumed exactly as the eager arm consumes them; only the
+      // byte string is NOT copied out -- the descriptor re-derives it
+      // at pop.  (Certifier mode takes the eager arm below and stamps
+      // the descriptor alongside the bytes.)
+      rdesc = 1u;
+    } else {
+      packed = (u8 *)malloc(flen ? flen : 1u);
+      if (packed == NULL) thvm_fatal("atp_cp_heap_push: OOM");
+      memcpy(packed, g_acp_scratch, flen);
+    }
+    if (g_rdesc_push.armed != 0u &&
+        (s->use_raw_desc | s->use_raw_desc_cert) != 0u) {
+      g_rdesc_store       = g_rdesc_push;
+      g_rdesc_store.len   = flen;
+      g_rdesc_store.armed = 1u;
+    }
+    g_rdesc_push.armed = 0u;   // consume-once, mirroring g_vcp_emit
     cp_nodes  = g_vcp_emit.nodes;
     lhs_nodes = g_vcp_emit.lhs_nodes;
     g_acp_fuse_n_ok++;
@@ -14146,7 +14436,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
       }
     }
   }
-  if (packed == NULL) {
+  if (packed == NULL && !rdesc) {
     u8 skip_pack = 0u;
 #ifdef THVM_ATPFT_CPQ
 #if !defined(THVM_ATP_COLLAPSE_DEFER) && !defined(THVM_ATP_TIE_RHS)
@@ -14185,6 +14475,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) {
       free(packed);
       g_acp_fuse.valid = 0u;
+      g_rdesc_store.armed = 0u;
       return;
     }
     // Twee --max-term-size (per-side cap): drop the CP when EITHER side
@@ -14200,6 +14491,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
          (cp_nodes - lhs_nodes) > s->max_cp_side)) {
       free(packed);
       g_acp_fuse.valid = 0u;
+      g_rdesc_store.armed = 0u;
       return;
     }
     // Auto-MaxWeight (completeness-preserving): defer an over-bound CP to
@@ -14215,9 +14507,18 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     if (s->auto_max_cp_weight_base > 0u && (!raw_untreated || stash_raw)) {
       u32 bound = atp_auto_maxw_bound(s);
       if (bound > 0u && cp_nodes > bound) {
+        if (rdesc) {
+          // The overflow stash stores packed bytes only -- reify the
+          // deferred emit from the still-live scratch (identical bytes
+          // to the eager arm's copy) so the stash verdict matches.
+          packed = (u8 *)malloc(g_rdesc_store.len ? g_rdesc_store.len : 1u);
+          if (packed == NULL) thvm_fatal("atp_cp_heap_push: OOM");
+          memcpy(packed, g_acp_scratch, g_rdesc_store.len);
+        }
         atp_cp_stash_push(s, packed, cp_nodes, trace, is_ultimate,
                           g_cp_push_kind);
         g_acp_fuse.valid = 0u;
+        g_rdesc_store.armed = 0u;
         return;
       }
     }
@@ -14244,7 +14545,10 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     u32 nf_cap = atp_lazy_scorenf_cap();
     if (nf_cap > 0u) {
       u32 nl = 0u, nr = 0u;
-      if (atp_cp_lazy_scorenf_probe(s, packed, lhs, rhs, nf_cap,
+      // Raw-desc slot: no malloc'd bytes, but the emit's bytes are
+      // still live in the scratch -- probe those (identical content).
+      if (atp_cp_lazy_scorenf_probe(s, rdesc ? g_acp_scratch : packed,
+                                    lhs, rhs, nf_cap,
                                     &nl, &nr)) {
         g_scorenf_n++;
         if (nl + nr < cp_nodes) g_scorenf_shrunk++;
@@ -14678,7 +14982,20 @@ static int atp_cp_implicit_materialize(const AtpState *s, u32 slot_idx,
 static void atp_cp_slot_read(const AtpState *s, u32 i,
                              Term *lhs, Term *rhs) {
   if (atp_cp_slot_implicit(s, i)) {
-    atp_cp_implicit_materialize(s, i, lhs, rhs);
+    if (s->use_raw_desc != 0u) {
+      // Raw-desc slot outside the pop path (peeks / dumps / sweeps):
+      // materialize transiently, unpack the identical Terms an eager
+      // slot would yield, release the bytes.  (The pop path converts
+      // the slot in place instead -- atp_cp_rdesc_pop_fix -- so the
+      // downstream free/mixmost consumers run the eager code.)
+      u32 len = 0u, nodes = 0u, lhs_nodes = 0u;
+      u8 *bytes = atp_rdesc_materialize((AtpState *)s, &s->cp_implicit[i],
+                                        &len, &nodes, &lhs_nodes);
+      acp_unpack(bytes, lhs, rhs);
+      free(bytes);
+    } else {
+      atp_cp_implicit_materialize(s, i, lhs, rhs);
+    }
   } else {
 #ifdef THVM_ATPFT_CPQ
     // Byte-queue retirement: a packed slot sources its term pair from
@@ -14958,6 +15275,12 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     *lhs_out = 0;
     *rhs_out = 0;
   } else {
+    // Raw-desc lane: convert a descriptor slot to a plain packed slot
+    // (or run the cert-mode memcmp) BEFORE the unpack, so the whole
+    // downstream pop path -- unpack, mixmost byte->FT stash, the
+    // free-on-pop -- is the eager code path bit-for-bit.  Orphan pops
+    // never materialize (the whole point of the descriptor).
+    atp_cp_rdesc_pop_fix(s, v);
     atp_cp_slot_read(s, v, lhs_out, rhs_out);
     // ifeq guard-DECIDING telemetry: did the CP the main loop actually
     // picked decide a live guard (see atp_ifeq_decide_hit)?  Counts
@@ -16053,6 +16376,28 @@ fn void thvm_atp_set_use_eager_orphan_sweep(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_implicit_cp(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_implicit_cp = on ? 1u : 0u;
+  if (on) { s->use_raw_desc = 0u; s->use_raw_desc_cert = 0u; }
+}
+
+// Raw-descriptor lane (see AtpState.use_raw_desc): the WM raw >= 50
+// FT-direct emit class queues as 20-byte re-derivation descriptors,
+// materialized byte-exactly from the parent face spans at pop.
+// Mutually exclusive with the trace-backed implicit lane -- the two
+// interpret cp_implicit[] differently.
+fn void thvm_atp_set_use_raw_desc(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_raw_desc = on ? 1u : 0u;
+  if (on) { s->use_implicit_cp = 0u; s->use_raw_desc_cert = 0u; }
+}
+
+// Certifier mode (see AtpState.use_raw_desc_cert): store both the
+// eager bytes and the descriptor; memcmp at every pop, fatal on any
+// divergence.  The slot behaves fully eager, so the trajectory is the
+// eager one by construction.
+fn void thvm_atp_set_use_raw_desc_cert(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_raw_desc_cert = on ? 1u : 0u;
+  if (on) { s->use_implicit_cp = 0u; s->use_raw_desc = 0u; }
 }
 
 fn void thvm_atp_set_use_perm_subsume(AtpState *s, u8 on) {
@@ -21807,6 +22152,12 @@ static void atp_cp_set_interreduce(AtpState *s) {
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = acp_pack(l, r, NULL, NULL);
       atp_cp_implicit_clear(s, vv);
+      // Raw-desc lane: the slot's bytes were REWRITTEN in place, so any
+      // descriptor no longer derives them -- retire it (cert mode would
+      // otherwise memcmp the stale birth pair against the reduced one).
+      if (s->cp_implicit != NULL) {
+        s->cp_implicit[vv].out_face = ATP_RDESC_NONE;
+      }
 #ifdef THVM_ATPFT_CPQ
       // Reduced pair re-images into the FT queue too: the slot becomes an
       // ordinary packed CP, so cp_packed_ft[vv] must hold (l, r) as well.
@@ -29750,11 +30101,36 @@ static u8 sw_form_push_ft_try(AtpState *s, Term lo, Term ro, Term sub_pre,
   }
   g_cp_rawsz_hint = vtot;
   if (ft_route) g_vcp_emit.armed = 1u;
+  if (ft_route && (s->use_raw_desc | s->use_raw_desc_cert) != 0u &&
+      atp_lazy_scorenf_cap() == 0u) {
+    // Raw-desc lane: capture the re-derivation coordinates while the
+    // operands are in hand.  The refs alias the rule faces' immortal
+    // mirror spans (lin_src/rin_src are the PRE-rename sources; the
+    // materializer re-renames by the same fixed offset).  sub_ft is an
+    // interior cell of lo_ft's preorder ->next chain, so its index is
+    // an exact re-address.  (scorenf runs score-time byte probes the
+    // deferred slot cannot serve identically -- that env combination
+    // keeps the eager arm.)
+    u32 si = 0u;
+    u8  si_ok = 1u;
+    for (const AtpFtCell *pc = lo_ft; pc != sub_ft; pc = pc->next) {
+      if (pc == lo_ft->end || pc->next == NULL) { si_ok = 0u; break; }
+      si++;
+    }
+    if (si_ok) {
+      g_rdesc_push.out_face = atp_rdesc_intern(s, lo_ft, ro_ft);
+      g_rdesc_push.in_face  = atp_rdesc_intern(s, lin_src, rin_src);
+      g_rdesc_push.sub_pre  = si;
+      g_rdesc_push.len      = 0u;
+      g_rdesc_push.armed    = 1u;
+    }
+  }
   if (ft_treat) g_vcp_treat.armed = 1u;
   *rv = atp_push_cps_traced(s, &cp, 1u, t_out, t_in, i_out, i_in);
   if (ft_route) {
     g_vcp_emit.armed = 0u;
     g_acp_fuse.valid = 0u;
+    g_rdesc_push.armed = 0u;
   }
   if (ft_treat) {
     // Return the treated spans to Arena A's free list.  On a CPQ build

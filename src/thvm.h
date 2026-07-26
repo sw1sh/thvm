@@ -4922,13 +4922,39 @@ typedef enum {
 // `use_implicit_cp` is on; stays NULL when the flag is off so
 // `atp_ensure_cp_cap`'s realloc loop is byte-identical.
 typedef struct {
-  u32 parent_a_trace_id;   // index into s->trace[] of parent rule A's TRACE_ORIENT/TRACE_FVI entry (dead-parent check without a trace walk)
-  u32 parent_b_trace_id;   // index into s->trace[] of parent rule B; both are real rules (axiom/initial CPs stay on the eager packed path)
-  i32 overlap_position;    // reserved for a WM-style re-unification variant; 0 under the trace-backed scheme (the overlap path lives in the TRACE_CP entry)
-  u32 weight;              // structural weight, computed once at push (so atp_cp_priority_sized doesn't re-walk)
-  u32 priority;            // same shape as s->cp_pri[i]
+  union {
+    struct {               // trace-backed lane (use_implicit_cp)
+      u32 parent_a_trace_id;   // index into s->trace[] of parent rule A's TRACE_ORIENT/TRACE_FVI entry (dead-parent check without a trace walk)
+      u32 parent_b_trace_id;   // index into s->trace[] of parent rule B; both are real rules (axiom/initial CPs stay on the eager packed path)
+      i32 overlap_position;    // reserved; 0 under the trace-backed scheme (the overlap path lives in the TRACE_CP entry)
+    };
+    struct {               // raw-descriptor lane (use_raw_desc / use_raw_desc_cert):
+                           // WM-style re-derivation of the raw >= 50 KPBehandelt
+                           // class from its parents at pop.  The face refs index
+                           // s->rdesc_faces, whose span pointers are content-frozen
+                           // for the state's lifetime (rule drops move mirrors to
+                           // the dead-save slots; RHS composes abandon the old span
+                           // in Arena A -- nothing ever recycles a mirror cell), so
+                           // the descriptor survives every parent mutation.
+      u32 out_face;            // rdesc face ref: outer (lo, ro) as passed to the walk former
+      u32 in_face;             // rdesc face ref: inner source (lin, rin), pre-rename
+      u32 sub_pre;             // preorder cell index of the overlap subterm within lo
+    };
+  };
+  u32 weight;              // desc lane: cp_nodes at push; CERT mode: the eager packed byte length (memcmp bound)
+  u32 priority;            // same shape as s->cp_pri[i] (read back by the priority rebuild for implicit slots)
 } AtpCpImplicit;
 _Static_assert(sizeof(AtpCpImplicit) == 20, "AtpCpImplicit must stay 20 bytes");
+
+// Raw-descriptor face-pair table entry: one (lo, ro) span-pointer pair
+// as the walk former consumed it (outer face possibly side-swapped for
+// an unorientable rule's reverse-face overlap; inner face pre-rename).
+// Interned once per distinct pair; entries are never freed -- the spans
+// they alias outlive every descriptor (see AtpCpImplicit).
+typedef struct AtpRdescFace {
+  const struct AtpFtCell *lo;
+  const struct AtpFtCell *ro;
+} AtpRdescFace;
 
 // CP-heap node: one heap POSITION of the CP priority queue.  `row`
 // names the stationary payload row (the phase-1 indirection); pri/seq/
@@ -5110,6 +5136,20 @@ typedef struct {
   AtpCpImplicit *cp_implicit;     // sized cp_cap, only when allocated
   u8            *cp_is_implicit;  // bitset, (cp_cap + 7) / 8 bytes
   u32            n_cps_implicit;  // diagnostics: CPs pushed as descriptors
+
+  // Raw-descriptor lane (`use_raw_desc`) face-pair intern table: the
+  // walk former's (lo, ro) span pairs, deduplicated so a descriptor
+  // carries two u32 refs instead of four pointers.  `rdesc_hash` is an
+  // open-addressing map of (lo, ro) -> table index (capacity a power
+  // of two, 0xFFFFFFFF = empty).  Lazily allocated on the first
+  // descriptor push; NULL while the lane is off.
+  AtpRdescFace  *rdesc_faces;
+  u32            rdesc_n;
+  u32            rdesc_cap;
+  u32           *rdesc_hash;
+  u32            rdesc_hash_cap;
+  u64            n_cps_rawdesc;      // diagnostics: raw CPs stored as descriptors
+  u64            n_rawdesc_mat;      // diagnostics: pop-time materializations
 
   // Per-CP "last successful normalize" cookie for atp_cp_set_interreduce.
   // Holds the `r_revision` value at which slot i was most recently
@@ -5970,6 +6010,24 @@ typedef struct {
   // flag-ON gate is proof validity, not byte parity.  Default 0
   // (OFF): engine byte-identical.
   u8   use_implicit_cp;
+
+  // Raw-descriptor lane (THVM_ATP_RAW_DESC): store the WM preset's
+  // raw >= 50 KPBehandelt class -- the walk former's FT-direct byte
+  // emits, ~84% of all packed CPs -- as 20-byte parent+position
+  // descriptors instead of malloc'd packed byte strings, and re-derive
+  // the identical bytes from the parent face spans at pop (rename +
+  // ft_unify + vcp_ft_emit_fused, the exact push-time pipeline).  Every
+  // push-side gate, weight, seq and uid stamp runs unchanged -- only
+  // the STORAGE differs, so the trajectory is byte-identical to eager.
+  // The < 50 treated class, anomaly fallbacks and every non-FT-routed
+  // push stay eager.  Default 0 (OFF): engine byte-identical.
+  u8   use_raw_desc;
+  // Certifier mode (THVM_ATP_RAW_DESC_CERT): store BOTH the eager
+  // packed bytes (slot behaves fully eager, tag bit clear) and the
+  // descriptor; every pop re-derives from the descriptor and memcmps
+  // against the stored bytes, thvm_fatal on any mismatch.  The proof
+  // of byte-exactness for use_raw_desc.  Default 0.
+  u8   use_raw_desc_cert;
 
   // Permutation-subsumption (port of WM `GZ_ACVerzichtbar` in
   // INF/Grundzusammenfuehrung.c:137):  drop a CP whose two sides are
@@ -7161,6 +7219,14 @@ fn void      thvm_atp_set_use_incr_ir(AtpState *s, u8 on);
 // trace-backed descriptors; selection materializes the raw pair off
 // the TRACE_CP entry.  Default OFF keeps the engine byte-identical.
 fn void      thvm_atp_set_use_implicit_cp(AtpState *s, u8 on);
+// Raw-descriptor lane (see AtpState.use_raw_desc / use_raw_desc_cert).
+// Mutually exclusive with use_implicit_cp: enabling either raw-desc
+// mode clears the trace-backed lane and vice versa.
+fn void      thvm_atp_set_use_raw_desc(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_raw_desc_cert(AtpState *s, u8 on);
+// Cert-mode whole-queue verify: re-derive + memcmp every live queued
+// slot carrying a descriptor (fatal on mismatch); returns the count.
+fn u64       thvm_atp_rawdesc_cert_sweep(AtpState *s);
 
 // === Phase 0: ground congruence closure (QF_UF), src/cc/_.c ===
 //

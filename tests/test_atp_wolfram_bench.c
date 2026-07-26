@@ -2758,6 +2758,23 @@ int main(int argc, char **argv) {
     }
   }
 
+  // THVM_ATP_RAW_DESC=1: raw-descriptor lane -- the WM raw >= 50
+  // FT-direct emit class queues as 20-byte parent+position descriptors
+  // and re-derives the byte-exact packed pair at pop.  Trajectory is
+  // byte-identical to eager (only the storage differs).
+  // THVM_ATP_RAW_DESC_CERT=1: certifier -- store BOTH, memcmp at every
+  // pop, fatal on divergence.  Mutually exclusive; cert wins if both set.
+  {
+    const char *rd = getenv("THVM_ATP_RAW_DESC");
+    if (rd != NULL && rd[0] != '\0' && rd[0] != '0') {
+      thvm_atp_set_use_raw_desc(s, 1u);
+    }
+    const char *rc = getenv("THVM_ATP_RAW_DESC_CERT");
+    if (rc != NULL && rc[0] != '\0' && rc[0] != '0') {
+      thvm_atp_set_use_raw_desc_cert(s, 1u);
+    }
+  }
+
   // Independent A/B toggles for Vampire-style subsumption /
   // demodulation.  All three are OFF by default (no WM analog; the
   // WALDMEISTER preset does not set them) -- opt in for differential
@@ -3932,6 +3949,24 @@ int main(int argc, char **argv) {
   printf("   steps/sec=%.1f  cps/step=%.1f\n",
          (el > 0.0) ? (double)i / el : 0.0,
          (i > 0) ? (double)max_cps / (double)i : 0.0);
+  // Raw-desc lane coverage evidence, STDERR only (the stdout stream must
+  // stay byte-identical to the eager reference for the trajectory gates;
+  // eager runs leave stderr empty here since neither flag arms the lane).
+  if (s->use_raw_desc != 0u || s->use_raw_desc_cert != 0u) {
+    fprintf(stderr,
+            "rawdesc: mode=%s pushed=%llu materialized=%llu faces=%u\n",
+            s->use_raw_desc_cert ? "cert" : "desc",
+            (unsigned long long)s->n_cps_rawdesc,
+            (unsigned long long)s->n_rawdesc_mat,
+            s->rdesc_n);
+    if (s->use_raw_desc_cert != 0u) {
+      // Whole-queue coverage: verify every LIVE queued descriptor, not
+      // just the popped ones (fatal on the first divergence).
+      unsigned long long swept =
+          (unsigned long long)thvm_atp_rawdesc_cert_sweep(s);
+      fprintf(stderr, "rawdesc: cert queue sweep verified=%llu\n", swept);
+    }
+  }
   printf("   gc: passes=%llu  live-after-last=%llu cells\n",
          (unsigned long long)gc_count(),
          (unsigned long long)(HEAP_NEXT - gc_from_start()));
