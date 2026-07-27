@@ -1770,6 +1770,10 @@ static int pc_check_leaf(int idx, const char **why) {
     *why = "problem file unavailable";
     return PC_UNKNOWN;
   }
+  if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
+    fprintf(stderr, "PCDBG leaf name=%s cites=%s@%s nprob=%d unparsed=%d\n",
+            st->name, st->src_name, st->src_file, pc_nprob, pc_prob_unparsed);
+  }
   // Candidate problem formulas this leaf may legitimately import.  The
   // named entry when it resolves; otherwise every ROLE-COMPATIBLE entry
   // -- the official EVL002 sample cites file(...,a1) for an axiom the
@@ -2571,6 +2575,22 @@ static void pc_parse_all(char *text) {
     if (!isspace((unsigned char)*q)) { pc_nskipped++; break; }
 }
 
+// Strict profile: load the problem table BEFORE the checking loop.  A
+// lazy load inside the first leaf check sat ABOVE that step's heap
+// watermark: the per-step rollback reclaimed the table's Terms, later
+// sessions overwrote the memory, and subsequent leaf checks then
+// "demonstrated" differences against recycled heap -- a false
+// VerifiedBad on ANA034-10's own harvested proof.
+static void pc_preload_problem(void) {
+  if (!pc_strict()) return;
+  for (int i = 0; i < pc_nstep; i++) {
+    if (pc_steps[i].rule == R_INPUT && pc_steps[i].src_file[0] != '\0') {
+      pc_load_problem(pc_steps[i].src_file);
+      return;
+    }
+  }
+}
+
 // A collection ran OUTSIDE any rooted engine session (the strict leaf
 // checks' refutations allocate on the shared heap): every parsed Term
 // dangles, but the comment-stripped proof text is still live -- re-parse
@@ -2583,12 +2603,14 @@ static int pc_reparse(char *text) {
   pc_parse_all(text);
   int ok = (pc_nstep == nstep0);
   pc_nskipped = nskip0;
-  // The problem table dangles too; drop it and let the next leaf check
-  // lazily reload the file.
+  // The problem table dangles too: rebuild it NOW (the caller skips the
+  // current step's watermark rollback after a collection, so these
+  // allocations survive; a lazy reload inside a later step would not).
   pc_nprob = 0;
   pc_prob_state = 0;
   pc_prob_unparsed = 0;
   pc_prob_directive[0] = '\0';
+  pc_preload_problem();
   return ok;
 }
 
@@ -2684,9 +2706,10 @@ static int proof_check_worker(const char *file, int szs) {
     // at Unknown (the 2026 entry dropped such records silently and
     // verified the remainder -- a confirmed false-accept hole).
     pc_parse_all(text);
+    pc_preload_problem();
     if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
-      fprintf(stderr, "PCDBG loaded steps=%d skipped=%d\n",
-              pc_nstep, pc_nskipped);
+      fprintf(stderr, "PCDBG loaded steps=%d skipped=%d nprob=%d\n",
+              pc_nstep, pc_nskipped, pc_nprob);
     }
 
     // Structural verification first: unique names and an acyclic
@@ -2704,6 +2727,7 @@ static int proof_check_worker(const char *file, int szs) {
 
     // Validate every step (inputs included: the strict profile verifies
     // leaves against the problem file); report one verdict.
+    int pc_retry_idx = -1;   // step already redone after a relocation
     for (int i = 0; i < pc_nstep && pc_bad < 0; i++) {
       const char *why = "";
       // Per-step arena discipline: pc_entails replays a whole engine
@@ -2765,16 +2789,34 @@ static int proof_check_worker(const char *file, int szs) {
           // and drop the address-keyed order memos; the remaining steps
           // then check on a clean heap instead of OOM-abstaining one by
           // one.
-          u32 nr = (u32)(pc_nstep < PC_MAX_STEPS ? pc_nstep : PC_MAX_STEPS);
+          // The root slots hold the STEP formulas and then the strict-
+          // profile PROBLEM formulas (pc_fill_roots' layout): collect
+          // BOTH regions -- rooting the steps alone left the problem
+          // table dangling, and later leaf checks then "demonstrated"
+          // differences against relocated garbage (a false VerifiedBad
+          // on ANA034-10's own harvested proof).
+          u32 nr = (u32)(pc_nstep < PC_MAX_STEPS ? pc_nstep : PC_MAX_STEPS)
+                 + (u32)(pc_nprob < PC_MAX_STEPS ? pc_nprob : PC_MAX_STEPS);
           gc_collect(g_pc_roots, nr);
           thvm_lpo_invalidate();
           thvm_kbo_invalidate();
           pc_refresh_formulas(g_pc_roots);
         } else if (pc_reparse(text)) {
           // Unrooted collection (a strict leaf check's refutation, the
-          // negconj FO route): everything re-parsed onto the live heap;
-          // keep checking from the next step.
-          ;
+          // negconj FO route): everything re-parsed onto the live heap.
+          // The verdict computed DURING the collection may have read
+          // relocated Terms -- discard it in BOTH directions (a garbage
+          // comparison can fabricate a countermodel OR a match).  Redo
+          // the step ONCE on the fresh state; a second relocation in
+          // the same step abstains on it.
+          g_pc_roots_armed = 0;
+          if (pc_retry_idx != i) {
+            pc_retry_idx = i;
+            i--;
+            continue;
+          }
+          v = PC_UNKNOWN;
+          why = "heap relocated mid-check";
         } else {
           pc_any_unknown = 1;
           pc_bad = -1;
