@@ -180,14 +180,26 @@ def m_flip_polarity(recs, h):
     return recs
 
 def m_var_capture(recs, h):
-    idx = [i for i, r in enumerate(recs)
-           if is_derived(r[4]) and len(variables(r[3])) >= 2]
+    # GENERALIZE, never instantiate: replacing every X2 by X1 yields a
+    # substitution INSTANCE of the original conclusion, which is still
+    # entailed by the same parents -- the mutated proof can remain
+    # genuinely VALID (KLE044-10.var_capture was confirmed VerifiedGood
+    # by a correct checker; the gold label was the bug).  Breaking ONE
+    # occurrence of a multiply-occurring variable to a fresh name claims
+    # strictly more than the parents support.
+    idx = []
+    for i, r in enumerate(recs):
+        if not is_derived(r[4]):
+            continue
+        for v in variables(r[3]):
+            if len(re.findall(r"\b%s\b" % v, r[3])) >= 2:
+                idx.append((i, v))
+                break
     if not idx:
         return None
-    i = idx[h % len(idx)]
+    i, v = idx[h % len(idx)]
     k, n, ro, f, s = recs[i]
-    vs = variables(f)
-    nf = re.sub(r"\b%s\b" % vs[1], vs[0], f)
+    nf = re.sub(r"\b%s\b" % v, "Vufresh", f, count=1)
     recs = list(recs)
     recs[i] = (k, n, ro, nf, s)
     return recs
